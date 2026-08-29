@@ -21,7 +21,110 @@ newborn restarts**. R31 and R32 are research rounds, not promoted successors.
 > repository keeps both the encouraging results and the failures because the
 > failures define the research frontier.
 
-## Why this project exists
+## This is a research archive, not an AI product page
+
+TNN is trying to build a continuing learner rather than a static answer engine.
+The intended system learns from sensory streams, episodes, consequences, teachers,
+and siblings; controls its own memory under resource pressure; forms its own
+reusable chunks; preserves raw evidence when compression is unsafe; and can
+request or perform a discriminating observation.
+
+The project follows a deliberately demanding rule: a pleasing curve is not a
+capability claim. A result must survive evaluator-leak checks, counterexamples,
+changed contexts, delayed retention, teacher withdrawal, state continuity, and
+eventually native Zag execution. Scores marked **reference-only** are useful
+diagnostics, not proof that the native TNN did the work.
+
+### Contents
+
+- [What TNN is trying to build](#what-tnn-is-trying-to-build)
+- [What makes it different](#what-makes-it-different)
+- [The architecture](#the-architecture)
+- [Research history and major findings](#research-history-and-major-findings)
+- [Benchmarks and current native frontier](#benchmarks-and-current-native-frontier)
+- [How to read and reproduce this archive](#how-to-read-and-reproduce-this-archive)
+- [The nerdy part: action values, not confidence scores](#the-nerdy-part-action-values-not-confidence-scores)
+
+## What TNN is trying to build
+
+At full scope, TNN is meant to be one continuous developmental system with:
+
+- raw visual, acoustic, temporal, episodic, and action-consequence evidence;
+- persistent entity and world-state hypotheses rather than one disposable guess;
+- learned evidence provenance and dependence discounting;
+- a memory hierarchy selected by the learner, not by a human age schedule;
+- reversible self-created chunks for compression, indexing, and construction;
+- literal/raw retrieval when a compressed chunk loses needed detail;
+- prediction of consequences that can be checked by action;
+- learned investigation, termination, commit, and UNKNOWN choices in comparable
+  utility/regret units;
+- a Master teacher that can teach without becoming the learner’s hidden answer
+  table; and
+- independent sibling learners that exchange sourced, provisional evidence.
+
+The goal is not “make a model produce the next plausible symbol.” It is closer to
+building machinery that can maintain: *here is my current hypothesis, here is
+the evidence for it, here is what contradicts it, here are the alternatives,
+here is what each predicts, and here is the action that could decide between
+them.*
+
+## What makes it different
+
+### Raw evidence remains first-class
+
+TNN does not assume that compression is understanding. It keeps an exact/high
+fidelity episodic route alongside learned chunks. Chunks are allowed to be useful
+abstractions—compression, retrieval keys, reusable constructions, and memory
+organization—but they do not get authority to destroy raw experience.
+
+### The learner owns representation and memory
+
+The system may recruit, specialize, split, merge, archive, and revise non-core
+representations from delayed utility and regret. A generic heuristic can provide
+a birth/default policy, and LRU may serve as an eviction primitive, but neither is
+allowed to decide what the system is cognitively permitted to represent.
+
+### Inquiry is an action
+
+When evidence is insufficient, the desired response is not “probability below a
+threshold.” The learner should retain a best current hypothesis and alternatives,
+identify a predicted difference, weigh the cost of checking it, and decide
+whether continued investigation is worthwhile. UNKNOWN is rational when no
+commit has positive grounded value, or when additional observation is not worth
+its cost.
+
+### Evaluation stays outside cognition
+
+Ground truth, benchmark category labels, mode identifiers, hidden-set membership,
+and answer keys belong to the evaluator. Teachers may choose lessons using their
+own knowledge, but their knowledge is not credited to the learner and must be
+withdrawn before qualification. This separation is fundamental to every result
+in this repository.
+
+## The architecture
+
+TNN’s architecture is a set of interacting generic mechanisms, not a bag of
+named domain skills:
+
+| Layer | Role | What must not happen |
+|---|---|---|
+| Protected core | Immutable verifier, provenance/trace roots, generic sensory substrate | The learner cannot rewrite the root verifier. |
+| Raw episodic route | Keeps high-fidelity observations and action consequences | Compression must not erase the only evidence needed later. |
+| Self-created chunks | Reversible learned spans/patterns for reuse and indexing | Human word/phoneme/VAD boundaries must not define the units. |
+| Hypothesis population | Competing world/entity interpretations with support and contradiction | A single confidence scalar must not replace alternatives. |
+| Consequence model | Learns what hypotheses imply and what actions may reveal | Predictions need causal traces, not only ungrounded probabilities. |
+| Memory policy | Selects exact, compressed, working, long-term, procedural, or archive storage | LRU or a fixed developmental schedule cannot be representation authority. |
+| Active policy | Selects commit, UNKNOWN, or a discriminating observation | No evaluator label, fixed probe count, or fixed confidence cutoff. |
+| Foundry | Lets TNN construct and shadow-test non-core PAMs (modular perceptual/action machinery) | Researchers cannot hand-implement each candidate proposed by the learner. |
+| Social learning | Master and sibling evidence with source lineage | Independent learners cannot be replaced by weight merging or oracle messages. |
+
+Each consequential mutable decision is expected to have a parent-linked causal
+trace: evidence enters a sensory route, a hypothesis is revised, memory is
+retrieved or changed, a prediction/action is chosen, the outcome is observed,
+and delayed regret can revise the mechanism. See
+[`Research/TNN_R27_TRACEABILITY.md`](Research/TNN_R27_TRACEABILITY.md).
+
+## The cognitive loop
 
 Many systems can produce a plausible answer. The harder question is whether the
 system can say *why* it believes that answer, retain live alternatives, identify
@@ -63,7 +166,63 @@ The chunk route is valuable, but it is not allowed to erase raw evidence. A
 compressed description can be useful and still be wrong in exactly the way that
 matters.
 
-## Results at a glance
+## Research history and major findings
+
+TNN has accumulated several research rounds. Their status matters more than a
+revision number:
+
+| Round | Role in the project | Current interpretation |
+|---|---|---|
+| R27 | Accepted developmental checkpoint | Canonical parent at step 60,423; verifier rerun passed 33/33. |
+| R27 integrated architecture work | Perception, memory, Foundry, Master/sibling, and traceability investigations | Mixed source/static and external reference evidence; no native integrated qualification pass. |
+| R28–R30 | Associative/episodic and continuous-media pivot | Graph cognition was retired; no fixed token/boundary route was adopted. |
+| R31 | Endogenous chunking with raw bypass and active evidence | Strong reference evidence for the dual-route architecture; not promotable by itself. |
+| R32 | Persistent epistemic hypotheses and native terminal-value experiments | Native E45–E50 negatives narrowed the remaining decision-value problem. |
+
+### R27: the wider integrated-system program
+
+R27 is not a claim that every subsystem is solved. It is the protected
+developmental checkpoint from which later candidates must derive. The parent
+verifier passed **33/33** in the retained rerun. The broader R27 program asked
+whether one system could learn persistent identity, memory, active observation,
+language/speech grounding, social teaching, and self-revision without silently
+borrowing evaluator answers.
+
+Several project-wide findings are worth carrying forward:
+
+| Area | Result | What it means—and what it does not mean |
+|---|---:|---|
+| View-invariant visual signatures | relational candidates reached 0.992–1.000 on permutation-style tests | Generic relational evidence can repair a representation collapse; it did **not** solve occlusion. |
+| Temporal entity continuity | 88.12% overall; 75.80% occlusion/compound; 56.82% true-switch in the first reference | Identity through occlusion and real replacement remains an open architecture problem. |
+| Memory under pressure | 2.54 storage units/episode, 82.1% relevant recall, 36.7% exact-detail recall | Learned storage can beat exact-all on defined utility when exact storage is costly. |
+| Autonomous Foundry | hidden mean 252.02 vs random 196.09; +55.93; 99.33% hidden win rate | Whole-structure search outperformed the tested random baseline; this is shadow/reference design evidence, not blanket autonomous architecture proof. |
+| Connected speech without supplied VAD | 99.10% noisy reference, but 71.24% on harder duration/noise/blending | Near-perfect nominal tests failed the robustness bar; no broad speech claim is made. |
+| Adaptive Master teaching | 68.57% vs 63.87% at dose 8; 86.54% vs 82.85% at dose 64 | Targeted teaching helps early, but diversification/withdrawal matters later. |
+| Sibling reference | 96.45% passive description; 98.08% with one discriminating question | Social evidence can help, but remains external reference evidence. |
+
+One important correction is preserved rather than hidden: an earlier reported
+0% changed-view identity result was invalid because its test used entities that
+had never appeared in training. The project treats auditing a bad benchmark as a
+result, not an inconvenience to omit.
+
+### R28–R30: what was retired
+
+The project explicitly retired graph cognition as the forward runtime substrate.
+It also rejected fixed token/word/phoneme boundary assumptions as the center of
+continuous-media cognition. The surviving direction is associative/episodic,
+temporal, provenance-aware, and active: raw evidence plus endogenous reversible
+chunks, not a graph database or a token predictor.
+
+### Evidence tiers
+
+| Tier | What it can establish | What it cannot establish |
+|---|---|---|
+| Canonical inherited evidence | Continuity and verifier state of the accepted R27 parent | Performance of a new candidate. |
+| Native Zag execution | A specific mechanism ran in the stated native harness with its preserved ledger | A broader capability beyond the exact task and gates. |
+| Static/source-contract evidence | A source has required structural entry points and declared separation rules | Runtime behavior or capability. |
+| External/reference execution | A diagnostic mechanism or numerical result is worth investigating | Promotable native TNN cognition. |
+
+Every number below is labeled in this spirit.
 
 ### R31: why the dual route survived
 
@@ -100,6 +259,8 @@ The best retained sequential policy reached this eight-seed
 That final number is the open wound. TNN became much better at correcting
 misleading evidence than at recognizing that a unique answer does not yet exist.
 The project therefore rejects “just add a confidence threshold” as a solution.
+
+## Benchmarks and current native frontier
 
 ### R32: native Zag terminal-controller frontier
 
@@ -164,6 +325,29 @@ The treatment failed because the 60 fewer abstentions were exactly 60 additional
 wrong commitments in the no-unique condition. Its outcome is therefore
 `NO_TESTED_GROUNDED_PROVENANCE_TEMPORAL_CONTENTION_RESCUE`.
 
+## Where the project goes next
+
+The next steps are deliberately narrow enough to fail cleanly:
+
+1. **Sequential action value.** Test whether a learner-initiated investigation
+   should continue or terminate based on delayed grounded utility/regret. This is
+   not permission to introduce a fixed minimum number of observations or a
+   positive UNKNOWN bias.
+2. **Native dual-route reproduction.** Reproduce raw-only, chunk-only, and dual
+   raw+chunk comparisons natively before promoting the R31 architecture result.
+3. **Persistent world and entity state.** Improve continuity through real
+   replacement, reversal, occlusion, and changed regimes without converting
+   identities into a fixed graph database.
+4. **Continuous natural media.** Keep high-fidelity temporal audio/video routes
+   primary; use endogenous chunks as a reversible side channel rather than a
+   boundary gate that discards information.
+5. **Long integrated life.** When component curves justify it, run a continuous
+   native life with recurring regimes, delayed consequences, teacher withdrawal,
+   sibling disagreement, resource pressure, save/reload, and regression checks.
+
+The research plan includes long lives of at least 250,000 events, but that is a
+planned qualification scale, **not** a completed capability claim.
+
 ## What TNN explicitly does not do
 
 - No transformer or attention-based LLM as cognition.
@@ -178,10 +362,18 @@ wrong commitments in the no-unique condition. Its outcome is therefore
 These are methodological constraints, not marketing language. The source and
 experiment contracts are designed to make violations inspectable.
 
-## Repository guide
+## How to read and reproduce this archive
 
 This is an evidence-bearing research archive, not a polished package with a
-one-command demo. Start here:
+one-command demo. The code, sources, ledgers, build products, manifests, and
+negative results live together because a research claim without its audit trail
+is not useful here.
+
+There is currently no supported `pip install`, API, trained public model, or
+one-command end-user demo. Do not interpret the presence of a source file as an
+integrated capability claim. Start with the status documents, then read the
+specific experiment’s preregistration, source, evidence JSON, raw output, and
+checksum manifest.
 
 | Location | What it contains |
 |---|---|
@@ -192,6 +384,41 @@ one-command demo. Start here:
 | [`Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md`](Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md) | Why the next experiment targets continuation value, not a positive UNKNOWN bias. |
 | [`Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag`](Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag) | Latest native E50 experimental source. |
 | [`Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/`](Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/) | E50 source, binaries, raw ledger, seeds, canonical records, evidence JSON, and SHA-256 manifest. |
+
+### A practical reading order
+
+1. Read [`Research/TNN_USER_RESEARCH_PREFERENCES.md`](Research/TNN_USER_RESEARCH_PREFERENCES.md)
+   for the non-negotiable methodological constraints.
+2. Read [`Research/R31_FINAL_REPORT.md`](Research/R31_FINAL_REPORT.md) for the
+   dual-route/chunking decision and its reference-only limits.
+3. Read [`Research/R32_CURRENT_STATE.json`](Research/R32_CURRENT_STATE.json) for
+   the current canonical status and exact native frontier.
+4. Read the E45–E50 report and inspect the individual evidence bundle before
+   repeating or extending a terminal-controller experiment.
+5. Treat any result without native runtime evidence as a design lead, not as a
+   promoted cognitive result.
+
+### Minimal verification mindset
+
+For a sealed native result, check the supplied `SHA256SUMS.txt`, compare the two
+binary hashes, inspect the raw ledger’s integrity and outcome rows, and verify
+that confirmation was not run prematurely. E50 is intentionally a failed gate:
+its process exit is nonzero because the qualification condition failed, while its
+preserved ledger and integrity gates show that the experiment itself executed
+correctly.
+
+### Small glossary
+
+| Term | Meaning in this project |
+|---|---|
+| Canonical | The accepted developmental checkpoint; currently R27, not the newest source file. |
+| PAM | TNN’s modular perceptual/action machinery. Non-core PAMs are supposed to be learner-created through the Foundry. |
+| Raw route | High-fidelity episodic evidence retained without relying on a compressed abstraction. |
+| Chunk | A mutable, learner-discovered reversible construction for compression, indexing, or reuse—not a supplied token. |
+| Provenance | The source lineage of evidence, used to avoid treating repeated dependent evidence as independent confirmation. |
+| UNKNOWN | A grounded no-commit action, not a third class, confidence threshold, or evaluator-provided ambiguity label. |
+| Shadow / reference-only | Useful experiment or design evidence that cannot promote native TNN cognition. |
+| Confirmation | A pre-allocated sealed evaluation stream that is not touched until a candidate earns it. |
 
 ## Reproducibility and claim boundaries
 
@@ -206,6 +433,11 @@ TNN treats reproducibility as part of the result:
    gate. The raw ledger and gate marker are the authority, not the exit code alone.
 5. Reference-only Python results may inform the next mechanism, but never
    promote the canonical cognitive system.
+
+The official Linux x86-64 compiler has now been recovered and used for E45–E50.
+That does **not** retroactively qualify the broader R27/R31 integrated system:
+the integrated architecture still needs a compatible native run, deterministic
+checks, and a successful qualification battery of its own.
 
 For E50 specifically, source SHA-256 is
 `3eca4702569f71cff2db6c9ce40e8629f06fffdbf2a071789a1cff39ab8b9ba1`; the
