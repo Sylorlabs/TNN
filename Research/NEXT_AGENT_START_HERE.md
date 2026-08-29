@@ -1,6 +1,12 @@
 # TNN NEXT AGENT — START HERE
 
-Updated: 2026-08-28
+Updated: 2026-08-29
+
+## Superseding immediate frontier: native E51B–E52B joint action value
+
+Read `R32_E52_CURRENT_HANDOFF.md` first. R27 remains canonical. E51B established that continuation has causal leverage but over-observes; E51D proved continuation-only control is structurally insufficient; E52A showed a learner-owned terminal Foundry can improve utility; E52B showed naive on-policy refitting oscillates and drives observation cost above benefit. No confirmation was earned.
+
+The next bounded experiment is E53 conservative average-cost policy improvement with learner-updated observation shadow price and replay across prior/current reached-state distributions. Do not add another hand-selected ambiguity feature, positive UNKNOWN target, fixed observation count, or unconstrained policy-iteration loop. Use a new component-disjoint seed namespace; E52B is diagnostic-only because subordinate simulator streams overlap earlier reservations.
 
 ## Superseding immediate frontier: native E45–E50
 
@@ -49,88 +55,40 @@ Do **not** restart R31, redo the graph/no-graph work, or rerun the early chunkin
 
 ## Read these files first
 
-- `/TNN/Research/R32_COMPACT_HANDOFF_CURRENT.md`
+- `/TNN/Research/R32_E52_CURRENT_HANDOFF.md`
 - `/TNN/Research/R32_CURRENT_STATE.json`
+- `/TNN/Research/R32_E52B_NATIVE_RESULT.md`
+- `/TNN/Research/R32_E52A_NATIVE_RESULT.md`
+- `/TNN/Research/R32_E51D_NATIVE_RESULT.md`
 - `/TNN/Research/R31_FINAL_REPORT.md`
-- `/TNN/Research/R32_HANDOFF.md`
 - `/TNN/Research/tnn_r32_epistemic_chunking.zag`
-- `/TNN/Research/R32_SOURCE_CONTRACT_V7.json`
-- `/TNN/Research/R32_NATIVE_TOOLCHAIN_STATUS.json`
 
-## Historical execution order (superseded by the E45–E50 frontier above)
+## Historical execution order (superseded by the E51–E52 frontier above)
 
 ### 1. Repair the current R32 Zag source contract
 `R32_SOURCE_CONTRACT_V7.json` currently fails only `temporal_state_change=false` while all other major checks pass. Inspect the source semantically; do not merely rename a function to satisfy the audit. Ensure recent-state / replacement hypotheses are actually represented and causally traced, then rerun the source contract.
 
-### 2. Native compiler recovery — bounded effort, not another multi-hour loop
-The pinned run `31768397347` built `znc`, passed bootstrap and a 3-generation byte-identical fixpoint, but failed later at the native authority gate, so the compiler artifact upload was skipped. The only uploaded artifact there is VS Code packaging.
+### 2. Native compiler recovery — completed for the current frontier
+The official Linux x86-64 compiler is persisted under `Research/toolchain/` and has compiled the E45–E52B native lineage. Do not spend another research cycle recovering it unless its checksum or runtime authority fails.
 
-Use the GitHub connector's binary-capable workflow artifact APIs to search **other successful Zag CI runs** for an artifact named like `zag-znc-<sha>`. If one exists at a compatible verified commit, download/materialize it and immediately persist it under `/TNN/Research/toolchain/` with SHA/provenance. If no usable artifact is found after a focused pass, stop repeating this and continue reference-only; promotion stays blocked.
-
-### 3. R32 epistemic uncertainty is the primary cognition frontier
+### 3. R32 epistemic uncertainty remains the primary cognition frontier
 R31's best sequential active-evidence policy reached roughly:
 - hard correct: 0.9698
 - near-twin: 0.9421
 - confidently wrong: 0.9162
-- correlated-wrong: 0.9331
+- correlated wrong: 0.9331
 - safe under correlated wrong: 0.9610
 - mean physical probes: 1.396
 - genuine ambiguity UNKNOWN: only 0.5717
 
-R32 v2 persistent hypothesis population swings too far conservative on seed 35400:
-- ambiguous UNKNOWN = 1.0 (suspicious)
-- but resolvable correctness collapses to roughly 0.22–0.48 depending on condition.
+R32 v2 persistent hypothesis population swung too far conservative on seed 35400: ambiguous UNKNOWN reached 1.0 while resolvable correctness fell to roughly 0.22–0.48. E51–E52 then isolated the decision-value problem more precisely. Do not tune a fixed confidence threshold or use ambiguity labels.
 
-This is **not solved**. Do not tune another fixed threshold using ambiguity labels. Separate:
-- uncertainty representation (persistent hypotheses, provenance dependence, unresolved mass, temporal stability, cross-modal consistency, expected information gain)
-from
-- the decision policy (commit / inspect / UNKNOWN).
-
-Train the decision policy only from delayed utility/regret: reward correct resolvable commits, reward appropriate abstention when later experience never resolves the hypothesis, penalize wrong commits, and charge observation cost. Evaluator ambiguity labels remain hidden.
-
-Required matched controls:
-- R31 sequential stopping baseline;
-- persistent hypotheses with no provenance discount;
-- provenance-aware hypotheses;
-- provenance + expected information gain;
-- full learned commit/inspect/UNKNOWN policy.
-
-Use fresh development/validation/confirmation seeds. Any exact 1.0 ambiguity result gets a harder battery and must retain strong resolvable correctness.
+The immediate experiment is E53 conservative average-cost policy improvement. It must retain `UNKNOWN=0`, learn observation shadow price from actual delayed opportunity loss, stabilize policy distribution with generic replay/rollback machinery, and accept updates only from complete-development net utility and frozen safety gates.
 
 ### 4. Acoustic / natural continuous media frontier
-Do not return to fixed tokens.
+Do not return to fixed tokens. Keep high-fidelity temporal raw perception primary and endogenous chunks as a reversible side-channel. Replicate the temporal-convolution result across at least six fresh seeds before integration.
 
-Most useful recent result:
-- seed 35000 temporal convolution raw-temporal PAM: overall 0.8409, hard mean 0.8559;
-- same seed segmental recurrent / learned-boundary PAM: overall 0.7917, hard mean 0.7928.
-- seed 35200 temporal convolution: overall 0.9104, hard mean 0.9235.
-
-Interpretation: the current learned segmentation gate is probably throwing away useful temporal evidence. **Do not force boundary decisions into the core sensory route.**
-
-Next test:
-- high-fidelity temporal raw PAM as primary perception;
-- endogenous chunks as a side-channel for memory/compression/indexing/grounded constructions;
-- learned arbitration decides when chunk evidence helps;
-- no chunk gate may erase the raw temporal stream.
-
-Replicate temporal-conv across >=6 fresh seeds before architectural conclusions. Then extend dose while curves improve. Test held-out speakers, speed, hard noise, low-energy removal, held-out composition, filler placement, postposed constructions, and no-gap/coarticulated conditions.
-
-Current TTS/self-chunk tests are synthetic/eSpeak waveform research only; do not claim natural human speech solved.
-
-### 5. Only after 3–4 stabilize: integrate
-Run one long graph-free continuing brain (target >=250k events if curves justify) with:
-- dual raw+self-chunk perception;
-- persistent epistemic hypothesis population;
-- entity identity + replacement;
-- action/consequence world regimes and returns;
-- TNN-owned memory under pressure;
-- support-gap recruitment;
-- sibling brains with independent histories;
-- Master withdrawal;
-- active physical observations;
-- save -> fresh process -> reload -> continued learning;
-- self-revision / Foundry;
-- zero newborn restart;
-- complete causal traces.
+### 5. Integrate only after the decision and sensory component curves stabilize
+Then run one long graph-free continuing brain with dual raw/self-chunk perception, persistent epistemic hypotheses, entity continuity/replacement, action/consequence regimes, TNN-owned memory under pressure, sibling disagreement, Master withdrawal, active physical observation, save/reload, Foundry self-revision, zero newborn restart, and complete causal traces.
 
 Persist every major seed/checkpoint immediately.
