@@ -384,6 +384,12 @@ checksum manifest.
 | [`Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md`](Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md) | Why the next experiment targets continuation value, not a positive UNKNOWN bias. |
 | [`Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag`](Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag) | Latest native E50 experimental source. |
 | [`Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/`](Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/) | E50 source, binaries, raw ledger, seeds, canonical records, evidence JSON, and SHA-256 manifest. |
+| [`Research/TNN_NATIVE_MIGRATION_STATUS.md`](Research/TNN_NATIVE_MIGRATION_STATUS.md) | Native-only migration boundary: Zag cognition versus Python reference/evaluator archive. |
+
+The maintained checkout is native-only: TNN cognition and qualification are
+implemented in Zag v2. Historical Python experiments are deliberately kept in
+Git history for reproducibility and auditability, rather than presented as a
+supported runtime.
 
 ### A practical reading order
 
