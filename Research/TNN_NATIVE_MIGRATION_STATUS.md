@@ -34,10 +34,13 @@ results.
 4. R27 remains canonical; native E45–E50 are valid negatives, not promoted
    successors.
 
-## Option 2 boundary
+## Option 2 result
 
-Option 2 is now a repository-hygiene operation: remove the non-native Python
-files from the checked-out tree while retaining their exact bytes and full
-provenance in Git history. It must not be described as a successful semantic
-port of NumPy/SciPy/PyTorch experiments. Before that removal, the current commit
-is the recovery point for every historical script.
+All 148 Python files have been removed from the checked-out tree. The exact
+bytes and full provenance remain recoverable from the preceding Git commits;
+the recovery point for every historical script is the commit immediately before
+the removal commit. The `*.py` ignore rule prevents accidental reintroduction.
+
+This is repository hygiene, not a claim that NumPy/SciPy/PyTorch experiments
+were semantically ported to Zag. Those experiments were external evaluation and
+research utilities, while the maintained TNN cognition path is native Zag v2.
