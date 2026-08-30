@@ -93,9 +93,11 @@ What E53A **does not** establish:
 
 The scientifically correct status is therefore **partial learner ownership of meta-control selection**, not full ownership of learning itself.
 
-## Next ownership boundary
+## Preregistration boundary and next ownership work
 
-The immediate E53 integration should consume learner-selected meta-control rather than a fixed caller schedule while preserving the frozen E53 evaluator boundary. After the full E53 stabilization gate, the highest-value ownership tests remain:
+The full E53 treatment was preregistered before E53A executed. E53A therefore must **not** be inserted retroactively into frozen E53 and then described as part of the original E53 treatment. Frozen E53 should execute exactly as frozen. If E53A-style learner-selected meta-control is integrated into the full sequential controller, that integration requires a distinct preregistered successor/extension with fresh evaluation data.
+
+The highest-value remaining ownership tests are:
 
 1. learner-created hypothesis split/merge/retirement;
 2. learner-selected discriminating observation/action, not only continue/terminate;
