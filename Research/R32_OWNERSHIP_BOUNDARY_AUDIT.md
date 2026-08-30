@@ -28,9 +28,9 @@ That does **not** imply that TNN should own evaluator truth, provenance integrit
 | consequence associations | OWNED/PARTIAL | learned values inside fixed hypothesis/action vocabulary | expand to learner-created entities/actions/consequences |
 | temporal hazard state | PARTIAL | values learn, horizon vocabulary and update law are fixed | learner-select temporal abstractions and forecasting structure |
 | terminal action values | PARTIAL | learned weights; E52A learner selected eight pair interactions | TNN should own representation growth and replacement more generally |
-| continuation value | PARTIAL | learned but E52B unstable; E53 changes update substrate | stabilize in full E53 with learner-owned meta-control |
+| continuation value | PARTIAL | learned but E52B unstable; E53 changes update substrate | stabilize in frozen E53, then test richer learner meta-control in a separate preregistered successor |
 | average reward / resource shadow price | PARTIAL | E53 has mutable learner state, but full discriminator is not yet executed | integrate into continuing cognition |
-| replay mixture | PARTIAL | E53A natively learned which of six rate/replay/clip geometries to use from learner-visible state; candidate vocabulary is still supplied | let TNN create and continuously parameterize replay policies, then integrate into full E53 |
+| replay mixture | PARTIAL | E53A natively learned which of six rate/replay/clip geometries to use from learner-visible state; candidate vocabulary is still supplied | let TNN create and continuously parameterize replay policies in a separately preregistered successor |
 | update rate / trust region | PARTIAL | E53A transferred bounded selection to learner-valued state; the six candidate geometries and context representation remain supplied | learner invents/adapts update geometry rather than selecting only from a supplied menu |
 | feature / representation coordinates | EXTERNAL/PARTIAL | most current 32 coordinates are authored; Foundry can add bounded pair products | TNN creates, composes, retires, and replaces useful coordinates |
 | Foundry search grammar | PARTIAL | learner chooses within researcher-defined bounded pair-product grammar | learner expands its own non-core mechanism grammar under verification |
@@ -54,6 +54,8 @@ Native E53A transferred one narrow layer from caller schedule to learner state. 
 
 This changes `replay mixture` and `update rate / trust region` from effectively external caller parameters to **PARTIAL learner ownership**. It does not make the candidate vocabulary, context representation, or learning-rule invention learner-owned.
 
+E53A was executed after the full E53 preregistration was frozen. Its successful selector must therefore **not** be inserted retroactively into frozen E53 and described as the preregistered E53 treatment. Frozen E53 should execute as frozen; E53A-style integration requires its own preregistered successor/extension.
+
 ## Protected shell — intentionally not TNN-owned
 
 The following remain externally authoritative even in a mature TNN:
@@ -71,7 +73,7 @@ TNN may model these boundaries and reason about them, but it must not silently r
 
 ## Highest-priority ownership transfers
 
-1. **Integrate bounded meta-control into full E53** — the sequential learner, not the caller, should select rate/replay/trust-region behavior while facing real reached-state distribution shift.
+1. **Preserve and execute frozen E53 cleanly** — E53A remains a separate diagnostic; any integration of learner-selected meta-control must be preregistered as a successor before execution.
 2. **Hypothesis creation** — move beyond fixed A/B state toward learner-created competing world hypotheses with split/merge/retirement.
 3. **Investigation selection** — own *what to inspect/do next*, not only CONTINUE versus terminate.
 4. **Connection/influence introspection** — expose every non-core causal influence through a self-describing learner-readable/writeable registry.
