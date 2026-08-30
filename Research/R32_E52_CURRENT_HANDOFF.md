@@ -22,7 +22,53 @@ The E53 preregistration is `Research/R32_E53_CONSERVATIVE_AVERAGE_COST_POLICY_PR
 
 `Research/tnn_r32_e53_conservative_policy_core.zag` was compiled twice with the persisted official Linux Zag compiler and executed natively in Actions run `33328995880`. The two builds were byte-identical and the executable passed every core gate. Evidence artifact digest: `sha256:9a69338960a0d4aff737cdaa5eac41ea14e24849d93fdb762107f00f95f847ba`.
 
-This is a **core-mechanism pass only**, not a behavioral E53 qualification. The next implementation step is the full reproducible A/B/C/D discriminator using matched worlds, persisted generated source, raw ledgers, manifests, and checksums.
+This is a **core-mechanism pass only**, not a behavioral E53 qualification. The next implementation step for frozen E53 is the full reproducible A/B/C/D discriminator using matched worlds, persisted generated source, raw ledgers, manifests, and checksums.
+
+## E53A cognitive-ownership diagnostic
+
+The ownership audit identified that E53's generic primitives could consume update rate, replay mass, and trust-region values without yet proving TNN selected those values itself. E53A therefore preregistered a separate bounded native diagnostic before execution.
+
+E53A passed natively in Actions run `33330396775`:
+
+- source SHA-256 `0e6c886f6a221f543056f0d8a7c012b23c3a19f90c3c6c360fea00063b6ee1d8`;
+- byte-identical native binary SHA-256 `d81fefb7d0aa4e9b7f21cd97334d79a11403da6d90a2d82be0b9b0e0524f4196`;
+- three different meta-actions selected across learner-visible discrepancy contexts;
+- 8 validation-time meta-action switches;
+- adaptive validation objective `545,356`;
+- best of all six fixed controls `208,320`;
+- evaluator family absent from selector inputs;
+- `UNKNOWN=0` preserved;
+- graph substrate not required;
+- artifact digest `sha256:bd46b7a7b2702455ac8891be16ef081a5f2765d9b0ead254ca783346e42cfd07`.
+
+Result: **bounded learner ownership of meta-control selection is demonstrated**. The six candidate update geometries and the discrepancy representation remain researcher supplied, so learning-rule ownership is still partial.
+
+### Preregistration integrity
+
+E53A does **not** retroactively modify frozen E53. Do not insert the E53A selector into E53 and then describe the resulting run as the preregistered E53 treatment. Either:
+
+1. execute frozen E53 exactly as preregistered; or
+2. preregister a distinct successor/extension before integrating E53A-style learner-selected meta-control into the full sequential controller.
+
+E53A validation must not be reused to tune frozen E53.
+
+## Cognitive ownership boundary
+
+The audit is `Research/R32_OWNERSHIP_BOUNDARY_AUDIT.md`.
+
+The current central distinction is that TNN increasingly owns **values and selections inside supplied cognitive vocabularies**, but still does not own enough of the vocabularies themselves. Major remaining ownership gaps include:
+
+- hypothesis creation/split/merge/retirement;
+- action/option/probe invention;
+- selection of *what* to investigate, not only continue/terminate;
+- a complete self-description/write surface for every non-core causal influence/connection;
+- representation and Foundry grammar invention beyond bounded supplied products;
+- native integrated memory policy;
+- compute/cognitive scheduling;
+- sensory PAM construction/selection;
+- broader self-modification of non-core mechanisms.
+
+Verifier truth, immutable provenance/evidence roots, runtime/hardware hard limits, and external safety/promotion authority remain intentionally protected rather than learner-owned.
 
 ## Connectivity architecture boundary
 
@@ -41,11 +87,13 @@ Historical graph-like behavior creates an explicit gate: stronger focus/selectiv
 - naive unconstrained repeated on-policy refitting;
 - graph topology treated as the presumed answer;
 - focus/selectivity reported without switching/adaptation cost;
+- claiming caller-accepted parameters are learner-owned without a learner selection/update path;
+- post-preregistration insertion of E53A into frozen E53;
 - E52B confirmation (not earned);
 - claims based on E52B as fully independent validation, because subordinate simulator substreams overlap earlier reservations;
 - generated experimental source that is not persisted with its evidence.
 
-## Full E53 matched arms
+## Full frozen-E53 matched arms
 
 1. **A** — frozen terminal-only baseline.
 2. **B** — E52B naive on-policy continuation.
