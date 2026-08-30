@@ -39,11 +39,12 @@ For arms A/B/C, measure episode reachability on both:
 - the development worlds used for fitting;
 - the untouched validation worlds.
 
-For scalar calibrators B/C also measure state-level sign agreement with the grounded utility of the learner-selected top commit:
+For scalar calibrators B/C also measure state-level **decision-side sign agreement** with the grounded utility of the learner-selected top commit. Because terminal tie-breaking keeps a commit when the calibrated top-commit score is exactly zero, the frozen audit convention is:
 
-- target positive and predicted scalar > 0;
-- target negative and predicted scalar < 0;
-- score 0 is counted as commit-side because terminal tie-breaking keeps a commit at zero.
+- positive target is correct when predicted scalar is **>= 0** (commit side);
+- negative target is correct only when predicted scalar is **< 0** (UNKNOWN side).
+
+This convention is frozen before E51K validation execution. It is not a learned threshold; it exactly matches the existing neutral UNKNOWN score and terminal tie-breaking semantics.
 
 Report separate positive-target and negative-target accuracy on development and validation. Evaluator mode/resource breakdowns may be reported as audit-only diagnostics but are never learner inputs.
 
