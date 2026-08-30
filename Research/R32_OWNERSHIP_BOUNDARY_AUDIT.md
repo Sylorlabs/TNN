@@ -1,7 +1,7 @@
 # R32 — Cognitive Ownership Boundary Audit
 
 Date: 2026-08-30  
-Status: `ACTIVE ARCHITECTURE AUDIT — NOT A PROMOTION CLAIM`  
+Status: `ACTIVE ARCHITECTURE AUDIT — E53A BOUNDED META-CONTROL PASS — NOT A PROMOTION CLAIM`  
 Canonical: R27 step 60,423
 
 ## Ownership principle
@@ -28,10 +28,10 @@ That does **not** imply that TNN should own evaluator truth, provenance integrit
 | consequence associations | OWNED/PARTIAL | learned values inside fixed hypothesis/action vocabulary | expand to learner-created entities/actions/consequences |
 | temporal hazard state | PARTIAL | values learn, horizon vocabulary and update law are fixed | learner-select temporal abstractions and forecasting structure |
 | terminal action values | PARTIAL | learned weights; E52A learner selected eight pair interactions | TNN should own representation growth and replacement more generally |
-| continuation value | PARTIAL | learned but E52B unstable; E53 changes update substrate | stabilize and then make meta-control learner-owned |
+| continuation value | PARTIAL | learned but E52B unstable; E53 changes update substrate | stabilize in full E53 with learner-owned meta-control |
 | average reward / resource shadow price | PARTIAL | E53 has mutable learner state, but full discriminator is not yet executed | integrate into continuing cognition |
-| replay mixture | EXTERNAL/PARTIAL | E53 core accepts current/replay masses supplied by caller | TNN chooses retention/replay mixture from delayed utility |
-| update rate / trust region | EXTERNAL/PARTIAL | rate, residual clip, value clip are caller inputs | TNN selects/adapts its own safe update geometry |
+| replay mixture | PARTIAL | E53A natively learned which of six rate/replay/clip geometries to use from learner-visible state; candidate vocabulary is still supplied | let TNN create and continuously parameterize replay policies, then integrate into full E53 |
+| update rate / trust region | PARTIAL | E53A transferred bounded selection to learner-valued state; the six candidate geometries and context representation remain supplied | learner invents/adapts update geometry rather than selecting only from a supplied menu |
 | feature / representation coordinates | EXTERNAL/PARTIAL | most current 32 coordinates are authored; Foundry can add bounded pair products | TNN creates, composes, retires, and replaces useful coordinates |
 | Foundry search grammar | PARTIAL | learner chooses within researcher-defined bounded pair-product grammar | learner expands its own non-core mechanism grammar under verification |
 | hypothesis ontology and cardinality | EXTERNAL/PARTIAL | current native discriminator is principally A/B/UNKNOWN | TNN creates, splits, merges, and retires arbitrary grounded hypotheses |
@@ -46,7 +46,13 @@ That does **not** imply that TNN should own evaluator truth, provenance integrit
 | curriculum / experience selection | EXTERNAL/PARTIAL | researcher supplies experimental worlds; active observation is bounded | learner increasingly chooses useful experiences while world truth stays external |
 | social inquiry protocol | PARTIAL | Master/sibling framework is designed externally | TNN owns when/who/what/how to ask, verify, teach, and discount; teacher remains external |
 | goal/subgoal hierarchy | EXTERNAL/PARTIAL | root grounded utility geometry is supplied | retain protected root constraints; let TNN create instrumental goals and priorities |
-| full online self-modification | PARTIAL | E53 has conservative update/rollback primitives | extend to every non-core cognitive mechanism with causal trace and rollback |
+| full online self-modification | PARTIAL | E53 conservative update/rollback exists and E53A demonstrates bounded learner meta-control selection | extend to every non-core cognitive mechanism with causal trace, shadow test, and rollback |
+
+## E53A ownership transfer
+
+Native E53A transferred one narrow layer from caller schedule to learner state. The learner valued six generic update geometries from delayed objective, selected three different geometries across its own visible discrepancy states, switched actions eight times during untouched validation, and scored 545,356 cumulative objective versus 208,320 for the best fixed candidate. The two native builds were byte-identical.
+
+This changes `replay mixture` and `update rate / trust region` from effectively external caller parameters to **PARTIAL learner ownership**. It does not make the candidate vocabulary, context representation, or learning-rule invention learner-owned.
 
 ## Protected shell — intentionally not TNN-owned
 
@@ -65,11 +71,11 @@ TNN may model these boundaries and reason about them, but it must not silently r
 
 ## Highest-priority ownership transfers
 
-1. **Meta-learning control** — TNN selects replay mixture, update rate, and trust-region magnitude from delayed grounded utility instead of receiving a caller schedule.
+1. **Integrate bounded meta-control into full E53** — the sequential learner, not the caller, should select rate/replay/trust-region behavior while facing real reached-state distribution shift.
 2. **Hypothesis creation** — move beyond fixed A/B state toward learner-created competing world hypotheses with split/merge/retirement.
 3. **Investigation selection** — own *what to inspect/do next*, not only CONTINUE versus terminate.
 4. **Connection/influence introspection** — expose every non-core causal influence through a self-describing learner-readable/writeable registry.
 5. **Representation/PAM invention** — expand beyond researcher-authored coordinates and bounded pair products.
 6. **Memory/compute scheduling** — learner controls storage, retrieval, consolidation, rehearsal, parallelism, and compute allocation.
 
-The next native pressure test targets item 1 because E52B's oscillation makes it immediately causal to the current frontier. It does not claim the other ownership gaps are solved.
+The most important remaining distinction is: TNN can increasingly **select values inside a supplied cognitive language**, but it still does not own enough of the **language itself** — the hypothesis vocabulary, action vocabulary, representation grammar, connection registry, and mechanism grammar.
