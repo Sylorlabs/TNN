@@ -25,14 +25,14 @@ part03 = ''.join((TRANSPORT / names[3]).read_text().split())
 part030 = ''.join((TRANSPORT / 'E51AE_FRAGMENT.zag.gz.b64.part-030').read_text().split())
 assert part03 == part030, 'part-03/part-030 recovery duplicate mismatch'
 
-chunks = []
+compressed_parts = []
 for name in names:
     path = TRANSPORT / name
     assert path.exists(), name
-    chunks.append(''.join(path.read_text().split()))
+    encoded = ''.join(path.read_text().split())
+    compressed_parts.append(base64.b64decode(encoded, validate=True))
 
-encoded = ''.join(chunks)
-compressed = base64.b64decode(encoded, validate=True)
+compressed = b''.join(compressed_parts)
 fragment = gzip.decompress(compressed)
 sha = hashlib.sha256(fragment).hexdigest()
 assert sha == EXPECTED_FRAGMENT_SHA256, (sha, EXPECTED_FRAGMENT_SHA256)
