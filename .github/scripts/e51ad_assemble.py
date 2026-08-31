@@ -6,8 +6,12 @@ src = src_path.read_text()
 helper = ''.join(Path(p).read_text() for p in (
     'Research/R32_E51AB_NATIVE/01_direct_candidate_actions.zagfrag',
     'Research/R32_E51AC_NATIVE/01_hybrid_direct_candidate.zagfrag',
-    'Research/R32_E51AD_NATIVE/01_trajectory_router.zagfrag',
-    'Research/R32_E51AD_NATIVE/02_run_and_gates.zagfrag',
+    'Research/R32_E51AD_NATIVE/01a_contract_support.zagfrag',
+    'Research/R32_E51AD_NATIVE/01b_critical_fit.zagfrag',
+    'Research/R32_E51AD_NATIVE/01c_policy_eval.zagfrag',
+    'Research/R32_E51AD_NATIVE/02a_direct_reconstruction.zagfrag',
+    'Research/R32_E51AD_NATIVE/02b_router_training.zagfrag',
+    'Research/R32_E51AD_NATIVE/02c_validation_outcome.zagfrag',
 ))
 injection = Path('Research/R32_E51AD_NATIVE/03_main_injection.zagfrag').read_text()
 marker = 'fn e51y_run(\n'
