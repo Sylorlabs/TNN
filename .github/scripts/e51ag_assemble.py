@@ -47,11 +47,18 @@ parent_paths = (
     "Research/R32_E51AE_NATIVE/02b_run_development.zagfrag",
     "Research/R32_E51AE_NATIVE/02c_run_local.zagfrag",
 )
-parent = "".join(Path(p).read_text() for p in parent_paths)
-parent = transform_parent(parent)
+parent = transform_parent("".join(Path(p).read_text() for p in parent_paths))
 contract = Path("Research/R32_E51AG_NATIVE/01d_replication_contract.zagfrag").read_text()
 tail = Path("Research/R32_E51AG_NATIVE/02d_run_replication.zagfrag").read_text()
-frag = parent + contract + tail
+
+# The replication helper is a top-level function and must be inserted before
+# the transformed E51AG run function. The treatment body itself remains the
+# unchanged transformed parent run followed by the preregistered audit tail.
+run_marker = "fn e51ag_run(\n"
+if parent.count(run_marker) != 1:
+    raise SystemExit(f"E51AG run marker count {parent.count(run_marker)}")
+parent = parent.replace(run_marker, contract + "\n\n" + run_marker, 1)
+frag = parent + tail
 
 if "E51AE_STAGE_VALIDATION" in frag or "e51ae_" in frag:
     raise SystemExit("E51AG namespace transformation incomplete")
@@ -61,6 +68,10 @@ if frag.count("const E51AG_STAGE_VALIDATION:i32=104;") != 1:
     raise SystemExit("E51AG stage-104 anchor failure")
 if frag.count("const E51AG_STAGE_CONFIRM:i32=107;") != 1:
     raise SystemExit("E51AG stage-107 anchor failure")
+if frag.count("fn e51ag_replication_world_gate()i32 {") != 1:
+    raise SystemExit("E51AG replication helper count failure")
+if frag.find("fn e51ag_replication_world_gate()i32 {") > frag.find(run_marker):
+    raise SystemExit("E51AG replication helper is not top-level-before-run")
 
 old_injection = Path("Research/R32_E51AD_NATIVE/03_main_injection.zagfrag").read_text()
 new_injection = Path("Research/R32_E51AG_NATIVE/03_main_injection.zagfrag").read_text()
