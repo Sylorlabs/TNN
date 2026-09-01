@@ -1,116 +1,93 @@
 # R32 E51AF — Frozen Global Residual Partition Replication Result
 
-**Status:** Invalidated before execution by the frozen replication/integrity gate.
+**Status:** Invalidated before execution by the frozen prerequisite/integrity gate.
 
 **Execution:** `0`
 
+**Evidence correction:** This document supersedes stale independent-E51AE identity/runtime values in the earlier result text. The correction uses the preserved artifact from E51AE run `33452596868`, job `99685597571`. It does not change the E51AF verdict: the preregistered historical prerequisite still fails decisively.
+
 ## Executive verdict
 
-E51AF must not execute or be interpreted as a partition-sensitivity experiment. Its preregistration required an independent GitHub-native reproduction of the earlier E51AE source identities and development ledger before E51AF validation could become interpretable. The independently executed native E51AE reimplementation disagrees with both the historical source/build identities and the historical development ledger.
+E51AF must not execute or be interpreted as a partition-sensitivity experiment. Its preregistration required an independent GitHub-native reproduction of the earlier historical/local E51AE source identities and development ledger before E51AF validation could become interpretable. The successfully executed current E51AE lineage disagrees with those frozen historical prerequisites.
 
-The frozen E51AF rule is explicit: **any source or ledger disagreement invalidates E51AF before interpretation.** That condition is met. Therefore the scientifically valid E51AF result is a prerequisite-integrity failure with zero E51AF treatment execution, not a negative or positive partition-replication result.
+The E51AF rule was explicit: **any source or ledger disagreement invalidates E51AF before interpretation.** Therefore the valid terminal state is a prerequisite-integrity failure with zero E51AF treatment execution.
 
-## Frozen prerequisite
+## Frozen historical prerequisite
 
-The historical/local E51AE evidence embedded in the E51AF preregistration fixed the following prerequisite target:
-
-| Preregistered historical E51AE prerequisite | Frozen value |
+| Historical E51AE prerequisite | Frozen value |
 | --- | --- |
 | fragment/source identity | `311b8583…` |
 | assembled source identity | `d3b00387…` |
 | native binary identity | `8438b724…` |
-| global residual validation total | `5395/5400` |
+| global residual validation | `5395/5400` |
 | global residual known | `4195/4200` |
 | global residual no-unique | `1200/1200` |
 | critical records | `639` |
 | direct-required | `272` |
 | union-neither | `234` |
 | no-unique | `133` |
-| critical hash | `1498336702` |
-| global model hash | `133555290` |
+| historical critical hash | `1498336702` |
+| historical global model hash | `133555290` |
 
-The preregistration does not permit these values to be replaced after observing an independent reproduction.
+These frozen values cannot be replaced after observing a different reproduction.
 
-## Independent GitHub-native E51AE reproduction
+## Independent current E51AE execution
 
-The frozen independent native E51AE reimplementation executed successfully in GitHub Actions:
-
-- frozen commit: `0b7dab35a256541be3e854ab64a2eddcc759ef3b`
+- implementation commit: `0b7dab35a256541be3e854ab64a2eddcc759ef3b`
 - Actions run: `33452596868`
 - job: `99685597571`
-- workflow conclusion: `success`
-- runtime: `891` seconds
+- conclusion: `success`
+- runtime: `905` seconds
+- artifact: `9780663363`
 
-Its source/build identities are:
+Executed identities:
 
-| Identity | Independent native value | Agreement with frozen E51AF prerequisite |
+| Identity | Current E51AE value | Historical prerequisite agreement |
 | --- | --- | --- |
-| fragment SHA-256 | `311e0992cd9691747b2a217c3b8bedbdf95666897040d93e1751e5083068c3ab` | **no** |
-| assembled source SHA-256 | `a39ed1c07844f50516080f7a296357a5012e3d388ca2fcf86aa818e4fd94fafb` | **no** |
-| native binary SHA-256 | `fcab5b168012f024b62f97dbdb42ba1c9be3ac8acf9eca9d509a24de9913eb2f` | **no** |
+| assembled fragment SHA-256 | `9d4ecc675e0c57e50c07deef22a2e86f57810110c588a8833a24a4192cf291c8` | **no** |
+| assembled source SHA-256 | `dea2368cc3795b8e547a454f8d10f5f7db9613107753fb443e57f7e70484ecf1` | **no** |
+| native binary SHA-256 | `4a562e967341f8b14fd3f5ef8e1b76b8517856dd08f3f81bca4a79ffbf026b94` | **no** |
 
-Its development-stage ledger is:
+Development-ledger comparison:
 
-| Ledger field | Frozen E51AF prerequisite | Independent native E51AE | Agreement |
+| Field | Historical prerequisite | Current native E51AE | Agreement |
 | --- | ---: | ---: | --- |
-| critical records | 639 | 605 | **no** |
-| direct-required | 272 | 289 | **no** |
-| union-neither | 234 | 315 | **no** |
-| no-unique | 133 | 1 | **no** |
-| critical hash | 1498336702 | 354012291 | **no** |
+| critical records | `639` | `605` | **no** |
+| direct-required | `272` | `289` | **no** |
+| union-neither-known | part of historical `234` union-neither | `315` | **no** |
+| no-unique | `133` | `1` | **no** |
+| current selection trace | n/a | `354012291` | n/a |
+| critical record/target hash | `1498336702` historical value | `841951745` current | **no** |
 
-The independent native learned residual arms also scored `5132/5400`, not the historical local global-residual value `5395/5400`.
+The current learned residual arms reached `5132/5400` on stage 98, not the historical `5395/5400`. Their actual stage-98 decomposition was `4160/4200` known and `972/1200` no-unique. The current frozen union control reached `5260/5400`.
 
-These are substantive source/provenance and ledger disagreements, not harmless byte-level packaging differences.
+These are substantive source, support-population, and behavior disagreements.
 
 ## Historical Actions run does not satisfy the prerequisite
 
-The historical E51AE GitHub Actions run cannot be used to claim that the historical local result was independently reproduced:
+Historical E51AE run `33419267570` at head `50ef5e59e1121036a0e2abc8838b5607073b845a` concluded `failure` during historical E51AE source assembly because `.github/scripts/e51ae_assemble.py` was missing. It failed before native historical E51AE execution.
 
-- run: `33419267570`
-- head: `50ef5e59e1121036a0e2abc8838b5607073b845a`
-- conclusion: `failure`
-- failure step: `Assemble historical E51AE native source`
-- error: `.github/scripts/e51ae_assemble.py` was missing
-
-The historical job failed before source assembly and before native E51AE execution. Its evidence artifact preserved transport/preregistration material but did not contain a successfully executed historical native result.
-
-Accordingly, the earlier local `5395/5400` residual ledger remains unreproduced by the frozen GitHub-native pathway required by E51AF.
+Therefore the historical local `5395/5400` ledger remains unreproduced by the frozen GitHub-native pathway E51AF required.
 
 ## Frozen gate resolution
 
-Because the source/build identities and development ledger disagree:
+- source-agreement gate: **fail**
+- development-ledger agreement gate: **fail**
+- E51AF execution permitted: `0`
+- E51AF validation interpretation permitted: `0`
+- E51AF confirmation permitted: `0`
+- partition-sensitivity conclusion: **not defined**
 
-- prerequisite source-agreement gate: **fail**
-- prerequisite ledger-agreement gate: **fail**
-- E51AF execution permitted: **0**
-- E51AF sealed validation interpretation permitted: **0**
-- E51AF confirmation permitted: **0**
-- partition-sensitivity conclusion: **not defined / not interpretable**
+No E51AF treatment may be executed after this failed prerequisite. Weakening the prerequisite after observing current E51AE evidence would be post-hoc redesign.
 
-No E51AF treatment is executed after this failed prerequisite. Doing so would violate the preregistered causal ordering and convert a fail-closed replication audit into a post-hoc experiment.
+## Consequence
 
-## Interpretation
-
-This result does **not** show that the proposed E51AF partition scheme succeeds or fails. It shows that the historical E51AE premise on which E51AF was conditioned is not independently reproduced under the required source/provenance constraints.
-
-The large development-ledger disagreement is scientifically material. The independent native implementation identifies `605` trajectory-critical records with a `289/315/1` class split, whereas the historical prerequisite fixed `639` records with a `272/234/133` split. In particular, the no-unique class changes from `133` to `1`. That changes the population E51AF was supposed to repartition, so proceeding would no longer test the preregistered question.
-
-## Consequence for the research frontier
-
-The frozen E51AF instance is permanently closed by its own integrity rule. It must not be repaired by weakening the gate after observing E51AE evidence.
-
-A future experiment can proceed only as a new, separately preregistered lineage, for example by:
-
-1. recovering and hash-verifying the exact historical E51AE source/assembler/provenance and independently reproducing its ledger before proposing a new partition replication; or
-2. accepting the successful current E51AE reimplementation as the new experimental parent and preregistering a new causal experiment from its `605`-record ledger without borrowing the historical `639`-record claims.
-
-The existing E51AE sealed validation results must not be used to tune such a future treatment.
+The frozen E51AF instance is permanently closed. A valid follow-up must be a new preregistered lineage either recovering the exact historical source or accepting the successfully executed current E51AE lineage as a new parent. E51AG takes the second route without borrowing historical `639`-record claims or reusing stage-98 validation for tuning.
 
 ## Claim boundary
 
-R27 remains canonical and R32 remains experimental. This integrity failure neither establishes nor refutes AGI. TNN remains a research pathway under evaluation, not demonstrated AGI, proto-AGI, consciousness, or an inevitable route to AGI.
+R27 remains canonical and R32 experimental. This integrity failure neither establishes nor refutes AGI. It only closes one preregistered replication instance.
 
 ## Authoritative conclusion
 
-E51AF is **invalidated before execution**. The frozen prerequisite replication gate fails because the independent GitHub-native E51AE source/build identities and development ledger disagree with the historical values preregistered by E51AF, while the historical Actions run failed before native execution. The correct terminal state is `execution=0` with no E51AF partition-sensitivity interpretation.
+`INVALID_E51AF_INTEGRITY_FAILURE`, `execution=0`. The historical prerequisite was not independently reproduced, so E51AF is not a valid partition-replication experiment and was correctly not run.

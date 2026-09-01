@@ -1,123 +1,131 @@
 # R32 E51AE — Trajectory-Critical Candidate Residual Result
 
-**Status:** Authoritative native result for the frozen E51AE reimplementation at commit `0b7dab35a256541be3e854ab64a2eddcc759ef3b`.
+**Status:** Corrected authoritative native result for frozen implementation commit `0b7dab35a256541be3e854ab64a2eddcc759ef3b`.
 
-**Claim boundary:** This is a fresh preregistered native reimplementation of E51AE. It is **not** a byte-identical reconstruction of the earlier local/historical E51AE source.
+**Correction note:** This file supersedes the stale result text committed at `b0a0f2d06861685569fb7fb064b5378ac05d80ed`. That text was assembled from stale handoff numbers and did not match the preserved Actions artifact. The evidence below is taken directly from GitHub Actions run `33452596868`, job `99685597571`, and artifact `9780663363`.
 
 ## Executive verdict
 
-E51AE is a negative learned-treatment result. The frozen E51AB direct-candidate baseline scored `5260/5400`. Each preregistered learned residual treatment scored `5132/5400`, so all three learned treatments regressed by 128 cases relative to the frozen baseline. The oracle candidate control scored `5400/5400`, showing that candidate expressivity remains sufficient when the correct candidate is supplied.
+E51AE is a valid negative learned-treatment result. The frozen union control reached `5260/5400`; each learned residual arm reached `5132/5400`; the evaluator direct-action oracle reached `5400/5400`.
 
-No learned treatment passed the frozen validation gates. The frozen winner is `-1`; confirmation was not required and was not executed; `final_commit=0`; `outcome_code=3`; `final_native_result=0`.
+More importantly, all three learned treatments already failed the frozen development-preservation gate before validation: each preserved `12135` of `12644` frozen-union development episodes while rescuing `230`, so each development gate was `0`. Sealed stage-98 validation was still executed for reporting under the preregistered implementation, but no learned arm was eligible to win. Confirmation remained sealed.
 
-This experiment therefore does **not** support the hypothesis that the preregistered local/global trajectory-critical residual support geometry provides a generalizing rescue on the sealed validation set.
+Outcome: `TRAJECTORY_CANDIDATE_RESIDUAL_NO_RESCUE`.
 
-## Frozen lineage and execution
+## Execution identity
 
-- Frozen E51AE implementation commit: `0b7dab35a256541be3e854ab64a2eddcc759ef3b`
-- GitHub Actions run: `33452596868`
-- GitHub Actions job: `99685597571`
-- Workflow conclusion: `success`
-- Native runtime: `891` seconds
-- Exit code: `0`
-- Assembly: success
-- Deterministic double compilation: success
-- Native execution: success
-- Evidence preservation: success
+- implementation commit: `0b7dab35a256541be3e854ab64a2eddcc759ef3b`
+- Actions run: `33452596868`
+- job: `99685597571`
+- workflow conclusion: `success`
+- native runtime: `905` seconds
+- exit code: `0`
+- deterministic double-build byte identity: `1`
+- artifact ID: `9780663363`
+- artifact name: `r32-e51ae-native-0b7dab35a256541be3e854ab64a2eddcc759ef3b`
 
-The treatment was frozen before native validation execution. No post-validation treatment edits were made.
-
-## Native implementation and evidence identities
+## Evidence hashes
 
 | Evidence object | SHA-256 |
 | --- | --- |
-| E51AE fragment | `311e0992cd9691747b2a217c3b8bedbdf95666897040d93e1751e5083068c3ab` |
-| Assembled Zag source | `a39ed1c07844f50516080f7a296357a5012e3d388ca2fcf86aa818e4fd94fafb` |
-| Native binary | `fcab5b168012f024b62f97dbdb42ba1c9be3ac8acf9eca9d509a24de9913eb2f` |
-| `RAW.log` | `74c5b15381bdaf6e2ecc1cbad86364a61e3bed3efdfe6fb2c5347448ed9c4fc5` |
-| `SUMMARY.log` | `c9886300308b20840dffcd094388a56cd494464c75da0c6b6a42bff251b92d68` |
-| Preserved evidence ZIP | `307f365453c4d70c35a139624720c5e582fbee0b4eb34654812d52b69010954b` |
+| E51AE assembled fragment | `9d4ecc675e0c57e50c07deef22a2e86f57810110c588a8833a24a4192cf291c8` |
+| assembled native Zag source | `dea2368cc3795b8e547a454f8d10f5f7db9613107753fb443e57f7e70484ecf1` |
+| native binary build 1/2 | `4a562e967341f8b14fd3f5ef8e1b76b8517856dd08f3f81bca4a79ffbf026b94` |
+| `RAW.log` | `ae1b5fe4b5cf3f8b610fe6da1c095a5cd2a9da51757978334836dedb21c87389` |
+| `SUMMARY.log` | `0a8c8fd16f8ce30b88a6357641a285c0666f2bd5a10d44512b7a90a3eb308b0e` |
+| preserved artifact ZIP | `307f79e7013630cbef0560e0e47bf55a4f47e0073d73be97b2f4cf2f31718e97` |
 
-GitHub Actions artifact: `r32-e51ae-native-evidence`, artifact ID `9780663363`.
+The workflow also recorded the source-file SHA-256 values before compilation, including `01a=d176e733…`, `01b=d7873c9a…`, `01c=d8c708a4…`, `02a=340281d1…`, `02b=71562055…`, `02c=34c767b6…`, `02d=e1c05da1…`, and main injection `7ae7f792…`.
 
-## Frozen parent/integrity hashes
+## Integrity and frozen-model gates
 
-The native run reported the following frozen lineage and integrity values before interpretation:
+- E50 seed preflight: `1`
+- E50 batch statistics: `1`
+- E50 forward/reverse identity: `1`
+- E50 convergence: `1`
+- E50 auxiliary frozen: `1`
+- E51Y parent integrity: `1`
+- E51Y terminal reproduction: `4200,4200,1200,1200,1`
+- E51AE world partition gate: `1`
+- E51AE domain gate: `1`
+- direct reconstruction episodes: `12960`
+- direct global identity: `1`
+- direct local identity: `1`
+- direct target support: `1`
+- direct integrity: `1`
+- direct hash before training: `1790306570`
+- terminal hash before training: `238967492`
+- terminal hash after training: `238967492`
+- direct hash after training: `1790306570`
+- frozen training gate: `1`
+- pre-validation integrity gate: `1`
+- frozen validation gate: `1`
+- validation integrity gate: `1`
+- frozen final gate: `1`
+- final integrity gate: `1`
 
-- `E50B=11527908921913446389`
-- `E51W=1360523492`
-- `E51W_CTRL=1062603631`
-- `E51AB=1045718324`
-- `E51AC=350784385`
-- `validation_pre=426392224`
-- `pre_validation_integrity=917467028`
+## Stage-97 development ledger
 
-These gates passed in the successful native run.
+- episodes: `12960`
+- states: `220320`
+- slot-covered: `12355`
+- direct-required: `289`
+- union-neither-known: `315`
+- union-neither-no-unique: `1`
+- frozen-union development: `12644`
+- neither replication factor: `1`
+- expected critical count: `605`
+- support gate: `1`
 
-## Development-stage trajectory-critical ledger
+Critical set:
 
-The independently executed native reimplementation fixed the following development-stage partition before sealed validation interpretation:
+- count: `605`
+- selection trace: `354012291`
+- critical record/target hash: `841951745`
+- isolation gate: `1`
+- candidate-0 support: `297 positive / 308 negative / 0 neutral`
+- candidate-1 support: `302 positive / 303 negative / 0 neutral`
 
-- critical records: `605`
-- direct-required records: `289`
-- union-neither-dominance records: `315`
-- no-unique diagnostic records: `1`
-- critical ledger hash: `354012291`
-- global fit 1 hash: `547504260`
-- global fit 2 hash: `444148704`
-- ledger hash: `15562201`
+Global residual fits:
 
-## Sealed validation result
+- candidate 0: `32,2,547504260,254939881,identity=1`
+- candidate 1: `32,2,444148704,274963742,identity=1`
+- global identity gate: `1`
 
-| Arm | Frozen policy | Total | Known | No-unique | Gate |
+Development treatment outcomes:
+
+| Arm | Treatment | Preserved frozen union | Rescued neither | Margin loss | Development gate |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 0 | E51AB direct-candidate baseline | **5260/5400** | **4064/4200** | **1196/1200** | control |
-| 1 | local residual-1 candidate support | 5132/5400 | 3936/4200 | 1196/1200 | 0 |
-| 2 | local residual-2 candidate support | 5132/5400 | 3936/4200 | 1196/1200 | 0 |
-| 3 | global residual-2 candidate support | 5132/5400 | 3936/4200 | 1196/1200 | 0 |
-| 4 | oracle candidate control | **5400/5400** | **4200/4200** | **1200/1200** | 1 |
+| 1 | global residual | `12135/12644` | `230` | `6272814` | `0` |
+| 2 | local-96 residual | `12135/12644` | `230` | `6272814` | `0` |
+| 3 | local-384 residual | `12135/12644` | `230` | `6272814` | `0` |
 
-Frozen terminal ledger:
+The local forward/reverse identity gate was `1`. The local fits made no accepted rescue-improving round and converged to the same deployed behavior as the global residual treatment.
 
-- `winner=-1`
-- local residual modes enabled: `0`
-- global residual-2 enabled: `0`
-- `confirmation_required=0`
-- `confirmation_executed=0`
-- `final_commit=0`
-- `outcome_code=3`
-- `final_native_result=0`
+## Sealed stage-98 validation
+
+| Arm | Frozen policy | Reachable | Known reachable | No-unique reachable |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | frozen slot+direct union control | **5260/5400** | `4061/4200` | `1199/1200` |
+| 1 | global residual | `5132/5400` | `4160/4200` | `972/1200` |
+| 2 | local-96 residual | `5132/5400` | `4160/4200` | `972/1200` |
+| 3 | local-384 residual | `5132/5400` | `4160/4200` | `972/1200` |
+| 4 | evaluator direct-action oracle | **5400/5400** | **4200/4200** | **1200/1200** |
+
+Thus the learned residual treatment shifts errors rather than monotonically repairing them: it improves known reachability relative to arm 0 (`4160` vs `4061`) but loses much more no-unique reachability (`972` vs `1199`), producing a net regression of `128` total episodes.
+
+Validation gates for arms 1–3 were all `0`; winner was `-1`. Stage-99 confirmation allocation was declared but execution was `0` and confirmation exact gate was `0`.
 
 ## Interpretation
 
-The oracle candidate arm closes an important alternative explanation: the remaining errors are not caused by an inability of the candidate action set to represent the correct answer. Correct candidate selection can reach `5400/5400` on the sealed validation set.
+The oracle result shows that the candidate action interface can express a perfect solution on this partition. The failure is therefore not candidate-action expressivity. The residual learner's evaluator-blind features and fitted value correction fail to preserve the mature union behavior, especially on no-unique cases, while improving some known cases.
 
-However, the preregistered learned residual mechanisms do not recover that candidate selection. All three learned residual arms collapse to the same `5132/5400` result, below the frozen E51AB baseline. The evidence therefore points away from this specific residual-support geometry as a generalizing repair and toward a harder candidate-selection/provenance problem.
+This is evidence against this specific trajectory-critical additive residual geometry as a promotable repair. It does not justify choosing the oracle, using stage-98 labels to retune the residuals, or changing the frozen development rule after seeing validation.
 
-The result must not be converted into a positive claim by selecting the oracle arm. Arm 4 is diagnostic only and is not a learnable treatment.
+## Claim boundary
 
-## Historical E51AE reconciliation
-
-The earlier historical E51AE workflow is not an independent native result:
-
-- historical run: `33419267570`
-- historical head: `50ef5e59e1121036a0e2abc8838b5607073b845a`
-- conclusion: `failure`
-- failure point: `Assemble historical E51AE native source`
-- error: missing `.github/scripts/e51ae_assemble.py`
-
-That run failed before historical E51AE source assembly and before native E51AE execution. Its preserved artifact therefore cannot establish an independent Actions reproduction of the earlier local result.
-
-The historical preregistered identities also differ from this reimplementation. Historical expected identities begin with fragment `311b8583…`, assembled source `d3b00387…`, and binary `8438b724…`; this native reimplementation produced `311e0992…`, `a39ed1c0…`, and `fcab5b16…`, respectively. Accordingly, this result is authoritative for the new frozen reimplementation lineage only.
-
-## Retained invariants
-
-This result does not alter the project claim boundary. R27 remains canonical; R32 remains experimental. E51AE does not demonstrate AGI, proto-AGI, consciousness, or inevitability of an AGI path.
-
-## Next causal question
-
-The frozen E51AF experiment already preregistered a prerequisite source-and-ledger replication gate. The independent native E51AE result above disagrees with that historical prerequisite, so E51AF must be resolved by its fail-closed rule rather than executed as though replication succeeded. Any future attempt to recover the historical residual result must be a separately preregistered provenance/source reconstruction or a clearly new experimental lineage; the sealed E51AE validation result must not be used to tune the frozen treatment.
+R27 remains canonical and R32 remains experimental. E51AE does not demonstrate AGI, proto-AGI, consciousness, or inevitability. It is one falsifying discriminator inside the broader architecture search.
 
 ## Authoritative conclusion
 
-E51AE executed successfully and produced a valid negative learned-treatment result. The oracle control establishes available candidate expressivity, while all preregistered learned residual treatments regress relative to the frozen E51AB baseline. There is no validation winner and no confirmation execution.
+E51AE executed validly and failed as a learned treatment. The correct causal follow-up is a no-parameter-change replication/generalization audit on fresh partitions or a separately preregistered escalation—not post-hoc tuning on stage 98.
