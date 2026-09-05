@@ -1,5 +1,35 @@
 # R32 Handoff — Epistemic World-State Uncertainty + Native Self-Chunking
 
+## Current operative frontier — 2026-09-01
+
+This section supersedes every conflicting execution instruction below it.
+
+- R27 remains canonical; R32/E51 remains experimental.
+- Experimental native execution authority is established for the current
+  E45-E51AG harness lineage. The persisted Linux x86-64 compiler is
+  `Research/toolchain/znc_linux_x86_64_abed8aa1`, SHA-256
+  `498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef`.
+  Do not restart compiler recovery for this lineage.
+- E51AG is the latest authoritative result:
+  `CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE`. The frozen residual gained
+  known trajectories but consistently destroyed substantially more no-unique
+  preservation across three fresh partitions.
+- Inspection of the E51AE/E51AG development support found that the residual
+  critical set contained no slot-covered preservation examples. Before adding
+  context, memory, representation, or topology, E51AH tests the cheaper causal
+  explanation that ordinary preservation credit was missing from training.
+- E51AH is frozen but not yet run. Its development/validation/confirmation
+  stages are 108/109/110. Validation remains sealed unless a replay arm preserves
+  every frozen-union development trajectory and rescues at least one union miss;
+  confirmation remains sealed unless validation is exact.
+- The authoritative control files are `R32_E51_BASELINE_V1.json`,
+  `R32_E51_MASTER_LEDGER.json`, `R32_E51_CAUSAL_MAP.md`, and
+  `R32_E51_GENERALITY_SCORECARD.md`.
+
+The remaining handoff text is retained as historical context. Where it directs
+compiler recovery, the E50 frontier, or a different immediate experiment, it is
+non-operative.
+
 ## Superseding native-terminal update — 2026-08-28
 
 E50 is a further valid native negative. It compared the E49 matched joint batch

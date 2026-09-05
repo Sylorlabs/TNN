@@ -1,5 +1,34 @@
 # R32 Compact Handoff — Current Frontier
 
+## 2026-09-01 authoritative supersession
+
+R27 remains canonical. Experimental native authority is established for the
+current E45-E51AG harness lineage with the persisted official Linux x86-64 Zag
+compiler. E51AG is the latest authoritative result and closed the current
+trajectory-critical additive residual as
+`CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE` across three fresh partitions.
+
+The immediate frozen experiment is E51AH, not compiler recovery and not direct
+escalation to context or topology. Source inspection showed that the E51AE/E51AG
+critical residual support omitted slot-covered preservation experiences. E51AH
+therefore tests one grounded ordinary-outcome replay record per development
+trajectory, with count-matched critical-only and frozen-union controls. It is
+`FROZEN_NOT_RUN`; no stage-109 or stage-110 output has been exposed.
+
+Read in this order:
+
+1. `R32_E51_BASELINE_V1.json`
+2. `R32_E51_MASTER_LEDGER.json`
+3. `R32_E51_CAUSAL_MAP.md`
+4. `R32_E51_GENERALITY_SCORECARD.md`
+5. `R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md`
+6. `R32_E51AH_IMPLEMENTATION_CONTRACT.md`
+
+Everything below this supersession block is historical context only where it
+conflicts with the E51AG -> E51AH frontier. In particular, statements denying
+verified native execution, describing `znc` as unavailable, or naming E50-era
+protocols as the exact next step are non-operative.
+
 ## 2026-08-28 superseding E45–E50 native update
 
 R27 remains canonical. The official persisted x86 Linux Zag compiler is available

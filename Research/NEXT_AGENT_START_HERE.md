@@ -1,6 +1,32 @@
 # TNN NEXT AGENT — START HERE
 
-Updated: 2026-08-28
+Updated: 2026-09-01
+
+## Current binding start point: E51AG -> E51AH
+
+Do not restart R31, compiler recovery, E45-E50, or the earlier chunking campaign.
+The persisted official Linux x86-64 compiler is available and the current native
+harness lineage has executed through E51AG.
+
+E51AG is the latest authoritative result:
+`CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE`. The active experiment is E51AH,
+which is frozen but not yet run. It tests whether the residual failure came from
+omitting ordinary preservation experiences before escalating to context, memory,
+representation, or topology. No E51AH validation or confirmation output has been
+exposed.
+
+Start with:
+
+- `Research/R32_E51_BASELINE_V1.json`
+- `Research/R32_E51_MASTER_LEDGER.json`
+- `Research/R32_E51_CAUSAL_MAP.md`
+- `Research/R32_E51_GENERALITY_SCORECARD.md`
+- `Research/R32_E51_EXECUTION_JOURNAL.md`
+- `Research/R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md`
+- `Research/R32_E51AH_IMPLEMENTATION_CONTRACT.md`
+
+The older sections below remain useful history, but any conflicting next-step or
+toolchain instruction is superseded by this block.
 
 ## Superseding immediate frontier: native E45–E50
 
