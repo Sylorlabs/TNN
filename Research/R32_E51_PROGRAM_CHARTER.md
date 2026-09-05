@@ -15,11 +15,17 @@ Neither lane permits post-exposure tuning under the same experiment identifier.
 The first implementation is E51AI, a four-arm, 32-block native longitudinal
 context/replay pilot at source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`,
 run `33949274757`. Its cohorts are same-generator populations, not four novel
-tasks. It is not yet a result. Longer cycles, distinct tasks, distributional
+tasks. It completed with independently verified native evidence: real history
+improved final known/total reachability but failed preservation; replay reduced
+final anchor losses from 22 to 9 and shared-anchor losses from 21 to 5, with
+known/no-unique tradeoffs. All 32 blocks changed parameters. Read
+`R32_E51AI_RESULT.md`, `R32_E51AI_EVIDENCE.json`, and its full analysis tables.
+This is a completed exploratory measurement, not qualification or completion
+of the broader E51 program. Longer cycles, distinct tasks, distributional
 changes, withdrawal, and structural candidates remain proposals in
 `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`, not claimed completed experiments.
 
-## Frontier amendment — 2026-09-04
+## Historical E51AH frontier amendment — 2026-09-04
 
 E51AG's stable negative initially
 pointed toward context or representation, but a lower-layer support defect was
@@ -28,7 +34,7 @@ experiences. Under the charter's escalation ladder and the master program's
 credit-assignment track, E51AH tested that ordinary-outcome preservation credit
 before memory, representation, routing, or topology was expanded.
 
-E51AH is now the latest authoritative result:
+At this preceding frontier, E51AH became the authoritative result:
 `PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`, independently verified from run
 `33944536498`, artifact `9963143498`, at source
 `c8f62bac285e72653bd6e9412498575ea8036b77`. Global replay lost 236 union successes

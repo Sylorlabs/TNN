@@ -1,14 +1,11 @@
 # R32 E51 — Generality Scorecard
 
-Established: 2026-09-04. Latest completed frontier result: E51AH.
-E51AH outcome: `PRESERVATION_REPLAY_DEVELOPMENT_FAILURE` in Actions run
-`33944536498`, artifact `9963143498`, independently verified. R27 remains canonical.
-
-Active next diagnostic: E51AI, run `33949274757`. It prospectively observes
-32 continuing learning blocks, pointwise retention, and recovery with current,
-true-history, destroyed-history, and replay controls. It has no verified result
-yet and does not upgrade any capability row below. The longer proposed track
-is `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`.
+Established: 2026-09-04. Latest completed frontier result: E51AI.
+Outcome: `LONGITUDINAL_CONTEXT_DIAGNOSTIC_COMPLETE` in Actions run
+`33949274757`, artifact `9964554609`, independently verified. The frozen
+history-preserving signal is absent. This adds bounded longitudinal evidence,
+not qualification or a generality score. R27 remains canonical. The longer
+proposed track is `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`.
 
 This is a capability-specific evidence inventory, not an aggregate intelligence
 score. A blank/unestablished capability is not a measured failure. Native build
@@ -17,13 +14,13 @@ identity establishes reproducibility, not cognitive success.
 | Dimension | Current identified evidence | Boundary / next required evidence |
 | --- | --- | --- |
 | Acquisition | E51X attained exact full-tape terminal reachability on its validation and confirmation. | Does not establish resource-feasible stopping or general acquisition. |
-| Preservation | E51AE failed development preservation; E51AG replicated lower total reachability on all three fresh partitions. E51AH's integrity-valid replay treatments also failed the opening gate: local replay rescued 159 but lost 121 of 12,622 union successes. | Closes this replay treatment, not preservation learning generally. E51AH validation/confirmation were not executed; current-state insufficiency and memory necessity remain unestablished. |
-| Abstention | E51AG union had 1,200/1,200 no-unique reachability per replica; residual arms had 983, 987, 983. | These are feasible-state reachability counts, not safe online decision rates. |
+| Preservation | E51AH local replay rescued 159 but lost 121 of 12,622 union successes. E51AI history failed its frozen signal; replay ended with 9 versus 22 arm-specific anchor losses, and 5 versus 21 on 2,063 shared anchor successes. | Bounded retention tradeoff, not exact preservation or memory necessity. E51AH qualification stages remain sealed. |
+| Abstention | E51AI final no-unique reachability is 455/452/465/463 out of 480 for arms 0/1/2/3, versus hybrid 468. Final t=0 wrong commitments are 279/225/138/137, versus hybrid 103. | Successful feasible-state existence and an aggregate t=0 gain do not establish safe online decisions. |
 | Transfer | E51AG tested unchanged learners on three fresh seed/world partitions and replicated a negative. | Same-generator replication is not distributional, structural, or cross-task transfer. |
 | Composition | E51AC found complementary slot/direct support but its deployable hybrid lost no-unique cases. | Safe composition is not established by the evaluator-only union ceiling. |
-| Continual learning | Mature controller hashes stayed frozen while residual learning was tested. | Frozen-parameter preservation is not demonstrated lifelong retention or sequential task acquisition. |
+| Continual learning | E51AI preserved four parameter lineages over 32 blocks; each changed coefficients every block. Ever-lost anchors are 52/46/33/33 and final losses 23/22/13/9. Full checkpoint and cohort matrices are saved. | Same-generator, one-sequence diagnostic. No distinct-task transfer, acquired-competence threshold, sustained recovery or lifelong claim. |
 | Robustness | Negative residual behavior was stable across E51AG partitions and reported mode/resource decompositions. | No claim of robustness to unseen noise, shifts, tasks, or adversarial changes. |
-| Efficiency | E51AG native runtime was 1,362 seconds. E51AH native runtime was 1,013 seconds with 12,960 replay records and a 384-sweep local fit. | Different workloads, skipped held-out stages, and hardware prevent a controlled efficiency comparison. |
+| Efficiency | E51AI native runtime was 1,091 seconds with 34,560 scheduled record presentations per arm, 293,760 probe rows and 17,160 coefficients. E51AH runtime was 1,013 seconds; E51AG 1,362. | Different workloads and hardware prevent controlled efficiency comparison. Record counts do not equal optimizer work or compute. |
 | Autonomy | Uses learner-grown routing from the frozen lineage and learned value parameters. | The experiment designer still supplies features, objectives, sampler, arm structure, and gates. No learner-created mechanism claim. |
 | Generality | The current frontier provides bounded mechanism evidence within the diagnostic task family. | Cross-domain grounding, transfer, composition, planning, and integrated autonomous learning remain unestablished here. |
 
@@ -31,12 +28,14 @@ identity establishes reproducibility, not cognitive success.
 
 Sources: `R32_E51X_RESULT.md`, `R32_E51AC_RESULT.md`,
 `R32_E51AE_RESULT.md`, `R32_E51AG_RESULT.md`, `R32_E51AH_RESULT.md`,
-`R32_E51AH_EVIDENCE.json`, and the E51AH preregistration. Arc synthesis:
+`R32_E51AH_EVIDENCE.json`, `R32_E51AI_RESULT.md`, `R32_E51AI_EVIDENCE.json`,
+their preregistrations and `R32_E51AI_ANALYSIS/README.md`. Earlier arc synthesis:
 `R32_E51AC_AH_ARC_REPORT.md`.
 Evidence identities are indexed in `R32_E51_MASTER_LEDGER.json` and the immutable
 baseline. Update this scorecard only from identified result artifacts, keeping
 negative findings, non-executed partitions, and integrity failures explicit.
 
-The valid E51AH development negative narrows one replay/support hypothesis.
-Its net development gain does not satisfy the preservation gate, establish a
-held-out improvement, mark other dimensions complete, or authorize R32 promotion.
+The E51AI tradeoff narrows the tested context/replay/dose combination. Neither
+its completed curve nor its net gains satisfy the failed preservation signal,
+establish held-out replication, mark other dimensions complete, or authorize
+R32 promotion. Diagnostic probes 115–118 must not become fresh validation.

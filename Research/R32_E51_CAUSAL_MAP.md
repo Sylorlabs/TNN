@@ -4,21 +4,31 @@ Established: 2026-09-04. Baseline: `R32_E51_BASELINE_V1.json`.
 Current evidence index: `R32_E51_MASTER_LEDGER.json`.
 R27 remains canonical; R32/E51 is experimental.
 
-## Active longitudinal branch — E51AI
+## Completed longitudinal branch — E51AI
 
-The next discriminator is now preregistered and executing: E51AI, run
+The longitudinal discriminator completed with verified evidence: E51AI, run
 `33949274757`, source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`.
 It compares current-state nonlinear, real one-step history, zeroed-history,
 and matched-count history-plus-replay arms across eight A/B/C/D cycles.
 All 32 learning blocks retain parameters and retest all four never-trained
 development-probe cohorts. Early weaknesses do not stop the fixed diagnostic
-curve. Integrity failures do. No scientific result is yet established.
+curve. Integrity failures do. All 32 blocks completed with integrity passing;
+the frozen history-preserving signal is false. Final reachability is
+2,073 / 2,085 / 2,073 / 2,084 for arms 0 / 1 / 2 / 3. History's known-case gains
+coexist with lower no-unique preservation and 38 union losses. Replay reduces
+final first-encounter losses from 22 to 9 (21 to 5 on shared anchors), while
+trading 12 known successes for 11 no-unique successes relative to no replay.
+This is a bounded tradeoff, not a qualified rescue. Read `R32_E51AI_RESULT.md`,
+`R32_E51AI_EVIDENCE.json`, and `R32_E51AI_ANALYSIS/README.md`.
 
 This diagnostic lane measures longevity without relaxing E51AH's qualification
 gate. Current state already contains history summaries; the question is
 incremental lag information, not memory versus an entirely memoryless model.
 Read `R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md` and
 `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`. E51AH stages 109/110 remain sealed.
+Probes 115–118 are consumed development evidence. The next proposal should
+replicate the replay contrast and distinguish continuing dose, ordering and
+objective/support effects using fresh controls; no next run is dispatched.
 
 ## Observed lineage
 
@@ -38,11 +48,13 @@ E51AB / E51AC: direct candidate actions and additive hybrid
               -> inspection: critical residual support omits slot-covered cases
               -> E51AH: grounded preservation replay
                    [PRESERVATION_REPLAY_DEVELOPMENT_FAILURE]
+                   -> E51AI: persistent context/replay over 32 learning blocks
+                        [COMPLETE; history signal absent; replay retention tradeoff]
 ```
 
 Each arrow denotes experimental motivation, not proof of a unique cause. See
 the corresponding `R32_E51*_RESULT.md` for source/run/artifact identities. The
-master ledger currently indexes the E51X–E51AH frontier; older E51 experiments
+master ledger currently indexes the E51X–E51AI frontier; older E51 experiments
 remain in their individual result/preregistration files and are not re-run here.
 
 ## E51AH competing explanations
@@ -86,7 +98,7 @@ necessary. It rejects only this specified treatment on its tested population.
 | Validation tradeoff | Preservation remains unresolved; advance only under a new preregistration. |
 | Valid no gain | No demonstrated repair. Preserve all metrics and preregister the next diagnostic rather than tuning the consumed partition. |
 
-## Protected boundaries
+## E51AH-specific protected boundaries
 
 Arm 0 is an evaluator union ceiling, not a deployable combined policy. Arm 5 is
 an evaluator-only diagnostic, never training evidence or a policy input. An

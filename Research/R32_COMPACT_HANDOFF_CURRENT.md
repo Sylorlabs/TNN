@@ -1,17 +1,30 @@
 # R32 Compact Handoff — Current Frontier
 
-## Active E51AI execution — latest operative start point
+## Completed E51AI — latest operative start point
 
-Existing run `33949274757`, job `101260866273`, source
-`c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`. Do not restart or tune it.
-This is a four-arm, 32-block persistent context/replay diagnostic, not a
-qualification run. Read `R32_E51AI_EXECUTION_STATUS.json`,
-`R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md`, and the longitudinal research plan.
-No scientific outcome has yet been verified. Preserve and independently check
-the terminal artifact before recording results. The older statement that no
-new experiment is preregistered is superseded. E51AH is closed and R27 canonical.
+Run `33949274757`, job `101260866273`, artifact `9964554609`, source
+`c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22` completed and was independently
+verified. All 32 continuing blocks, 293,760 probe rows and 17,160 coefficients
+are checked. Native runtime: 1,091 seconds. Outcome:
+`LONGITUDINAL_CONTEXT_DIAGNOSTIC_COMPLETE`; frozen history-preserving signal false.
 
-## 2026-09-04 authoritative supersession
+Final reachability, arms 0/1/2/3: 2,073 / 2,085 / 2,073 / 2,084. Real history
+gains known cases but loses no-unique preservation. Replay reduces final
+arm-specific anchor losses from 22 to 9; on the same 2,063 shared anchor
+successes, losses are 21 without replay and 5 with replay. This is a bounded
+tradeoff, not qualification or safe online stopping.
+
+Read `R32_E51AI_RESULT.md`, `R32_E51AI_EVIDENCE.json`,
+`R32_E51AI_ANALYSIS/README.md`, the current authority/ledger and scorecard.
+Full archive: `.scratch/e51ai/actions-33949274757-k1tM4Q/`. Do not dispatch a
+duplicate or retune consumed probes 115–118 as fresh validation. No next
+experiment is running or dispatched. Next proposals need fresh paired
+replication and dose/order/objective controls. E51AH remains closed, stages
+109/110 sealed, Baseline V1 immutable, and R27 canonical.
+
+Everything below records earlier frontiers; it does not supersede this closure.
+
+## Historical E51AH authoritative supersession — 2026-09-04
 
 R27 remains canonical. Experimental native authority is established for the
 current E45-E51AH harness lineage with the persisted official Linux x86-64 Zag

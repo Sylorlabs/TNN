@@ -1,5 +1,61 @@
 # R32 E51 Execution Journal
 
+## 2026-09-04 Pacific — E51AI verified longitudinal closure
+
+- Continued the existing run `33949274757` through terminal success; no second
+  scientific run was dispatched. Job `101260866273` completed at
+  `2026-09-05T06:34:35Z`. Native execution was 1,091 seconds, exit zero, within
+  the frozen 3,600-second cap. The 20m1s job includes assembly, builds and tests.
+- Downloaded exact artifact `9964554609`, 4,823,283 bytes, into
+  `.scratch/e51ai/actions-33949274757-k1tM4Q/`, with original run/job/artifact API
+  metadata. ZIP SHA-256
+  `80c049ff197d7d466b694baf1a2611f1e3535de78a0ee5faa66ebdf3de121c6e` matches GitHub.
+  Checked all 83 archive files, paths/CRC/digest, and 53 source inputs against
+  frozen source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22` and Git blob IDs.
+- The two native binaries are byte-identical at
+  `6c14c131829b47e1b9ff35bd9bc43fe908b784d96699c5f0ac41a5e73b43f584`.
+  Raw-log SHA-256 is
+  `4fde4c4372adb1fdb0855f59845d2b6ba7e37893508c5fcbaf003146d1be5fbc`.
+  Official compiler, assembled source and preregistration pins match; Baseline
+  V1 remains identical to its immutable authority commit.
+- The locally rerun frozen verifier equals the archived scientific report:
+  `LONGITUDINAL_CONTEXT_DIAGNOSTIC_COMPLETE`, all required integrity checks pass,
+  32 blocks, 293,760 probe-episode rows and 17,160 checkpoint coefficients.
+  Validation and confirmation each execute zero. AH stages 109/110 stay sealed;
+  AI probes 115–118 are consumed development diagnostics.
+- Final total reachability is 2,073 / 2,085 / 2,073 / 2,084 for arms 0/1/2/3.
+  History improves known/total counts against both controls but lowers no-unique
+  preservation and loses 38 union successes, so the frozen signal is false.
+- Full retention analysis records final anchor losses 23 / 22 / 13 / 9 and
+  ever-lost anchors 52 / 46 / 33 / 33. Replay's advantage persists on 2,063
+  shared anchor successes: 5 final losses versus 21 without replay. This
+  supplemental descriptive comparison does not alter the frozen primary test.
+  Replay also trades 12 known successes for 11 no-unique successes versus arm 1.
+- Every arm changes actual coefficients in every block; accepted coordinate
+  updates total 12,033 / 12,134 / 6,189 / 10,943. Each arm receives 34,560
+  scheduled presentations. Replay's A/B/C/D totals are
+  9,630 / 8,550 / 8,280 / 8,100, including 16,740 prior-cohort presentations.
+- Added reproducible postprocessing, exact coefficient changes, exposure tables,
+  all checkpoints and cohort retention, common-anchor comparisons, archive
+  verification, independent set-based arithmetic and machine-readable evidence.
+  Sixteen analysis/archive tests and nine frozen verifier tests pass. These
+  synthetic tests are not scientific observations. No cognitive binary ran
+  locally during closure; analysis reads the completed native evidence.
+- Main task audited continuity, probe isolation, frozen snapshots, replay and
+  interpretation. The separately launched ChatGPT Web reviewer has no retrieved
+  verdict in this continuation; no approval or Sol substitution is claimed.
+- Wrote `R32_E51AI_RESULT.md`, `R32_E51AI_EVIDENCE.json` and the analysis package;
+  updated live execution state, ledger, authority, scorecard, causal map, charter
+  and handoff entry points. The running-state notes below are historical.
+  E51AI is complete; E51 as a research program remains open and R27 canonical.
+  No next experiment is dispatched or assigned new stages by this closure.
+- The final read-only delivery check regenerated the evidence and every analysis
+  table, reconciled five numeric result tables and current JSON authority,
+  checked local document links, and confirmed 57 protected scientific,
+  compiler, contract and baseline files are unchanged. All 25 synthetic tests
+  passed again. The check is saved as
+  `Research/R32_E51AI_ANALYSIS/validate_delivery.py`.
+
 ## 2026-09-04 — Longitudinal expansion and E51AI dispatch
 
 - User requested more experimental breadth and longevity, and execution of the
