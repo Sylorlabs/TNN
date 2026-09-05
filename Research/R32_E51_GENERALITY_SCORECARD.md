@@ -1,5 +1,10 @@
 # R32 E51 — Generality Scorecard
 
+Active diagnostic: E51AJ, run `33952427608`, source `9ea141b050599854783258d82cfa3ee02efb1fad`.
+It adds shared-anchor, matched-example, mixture, dose and static controls across
+three fresh populations. No result is yet verified, so no capability row is
+upgraded from this dispatch. See its preregistration and execution status.
+
 Established: 2026-09-04. Latest completed frontier result: E51AI.
 Outcome: `LONGITUDINAL_CONTEXT_DIAGNOSTIC_COMPLETE` in Actions run
 `33949274757`, artifact `9964554609`, independently verified. The frozen

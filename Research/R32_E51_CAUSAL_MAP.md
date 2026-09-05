@@ -4,6 +4,18 @@ Established: 2026-09-04. Baseline: `R32_E51_BASELINE_V1.json`.
 Current evidence index: `R32_E51_MASTER_LEDGER.json`.
 R27 remains canonical; R32/E51 is experimental.
 
+## Active shared-start discriminator — E51AJ
+
+Run `33952427608`, source `9ea141b050599854783258d82cfa3ee02efb1fad`, is active.
+E51AJ tests the E51AI replay lead across three fresh paired populations with a
+common learned fork, exact full-cycle example-multiset matching, sequential,
+replay, balanced-mixture, continued-A and static arms. The primary question is
+retention direction in every replica; mixing and dose contrasts constrain its
+interpretation. This is a scheduling/support package, not isolated memory
+causation or new-task transfer. See the E51AJ preregistration and execution
+status. No E51AJ outcome is established yet; E51AI remains the latest verified
+result. Older statements that no next run is dispatched are superseded here.
+
 ## Completed longitudinal branch — E51AI
 
 The longitudinal discriminator completed with verified evidence: E51AI, run

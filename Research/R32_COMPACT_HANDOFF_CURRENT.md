@@ -1,5 +1,27 @@
 # R32 Compact Handoff — Current Frontier
 
+## Active E51AJ — latest operative start point
+
+Continue existing run `33952427608`, job `101269590181`, source
+`9ea141b050599854783258d82cfa3ee02efb1fad`. Do not dispatch another run.
+Read `R32_E51AJ_EXECUTION_STATUS.json` and its replay/order/dose preregistration.
+Three fresh populations each receive one common four-block preparation, then
+five identical forks (four trained, one static) and 32 continuing blocks.
+Arms 0–2 match the exact example multiset at every full-cycle endpoint. This
+changes the E51AI design prospectively; it is not an exact E51AI rerun.
+
+No E51AJ result is verified yet. Preserve the terminal archive and independently
+check all 1,101,600 probe rows, 67,860 coefficients, schedules and frozen controls.
+The three-replica primary rule cannot discard a reversal or substitute a
+favorable checkpoint. Stop only under the frozen integrity/budget rules; retain
+partial evidence and never rerun automatically. Read
+`R32_E51AJ_ANALYSIS/PREEXECUTION_REVIEW.md` for the completed ChatGPT Web design
+review and main-task synthetic checks. R27, Baseline V1, E51AH sealed stages
+109/110 and historical E51AI results remain unchanged.
+
+The completed E51AI section below is historical motivation, not an instruction
+that no experiment is active.
+
 ## Completed E51AI — latest operative start point
 
 Run `33949274757`, job `101260866273`, artifact `9964554609`, source

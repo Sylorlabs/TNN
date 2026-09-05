@@ -1,5 +1,20 @@
 # R32 Handoff — Epistemic World-State Uncertainty + Native Self-Chunking
 
+## Active E51AJ — supersedes older next-step statements
+
+Existing workflow run `33952427608`, job `101269590181`, source
+`9ea141b050599854783258d82cfa3ee02efb1fad`. Continue this one frozen run; do not
+dispatch a duplicate or change its inputs, objective, schedules, dose or gates.
+The shared-start replay/order/dose diagnostic has three fresh paired populations
+and 32 continuing blocks after common preparation. All five arms begin from
+identical learned coefficients and the same retention anchor. There is no
+verified E51AJ scientific outcome yet. Verify the terminal archive using
+`R32_E51AJ_ANALYSIS/verify_archive.py`, then independently analyze every replica
+and update current authority. Read `R32_E51AJ_EXECUTION_STATUS.json`,
+`R32_E51AJ_REPLAY_ORDER_DOSE_PREREG.md` and the pre-exposure review. R27 remains
+canonical; sealed AH stages and historical AI evidence remain unchanged.
+The completed E51AI material below does not supersede this active-run pointer.
+
 ## Completed E51AI — supersedes older next-step statements
 
 Run `33949274757`, job `101260866273`, artifact `9964554609`, source

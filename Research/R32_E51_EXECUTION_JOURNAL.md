@@ -1,5 +1,47 @@
 # R32 E51 Execution Journal
 
+## 2026-09-05 — E51AJ controlled extension frozen and dispatched
+
+- User asked to continue with the best next step. Chose the replay-retention
+  lead from E51AI, while removing arm-specific anchors and unequal complete-cycle
+  exposure. E51AJ uses one shared learned fork, sequential/replay/mixture/A-only/
+  static arms, three fresh paired stage ranges 119–126, 127–134 and 135–142,
+  and eight fixed continuing cycles. This is not an exact E51AI replication.
+- Froze source at `9ea141b050599854783258d82cfa3ee02efb1fad`, tree
+  `12056bc69c7b186cce063b0f69bd71a27900cd66`. Assembled SHA-256
+  `6988152bd8779e7bc2c29253d840363a610de2287cab61b34139874348b45182`;
+  preregistration SHA-256
+  `d29cfd9186b5099b37acef028b04300ead7bb2545549a2d2be7f77e747ae09cf`.
+  Sixty-five input files are manifested; all 53 inherited E51AI inputs remain
+  byte-identical to their frozen source. Baseline V1 remains unchanged.
+- Eleven synthetic verifier tests passed, including a full-shape 1,101,600-row
+  artificial ledger and duplicate rejection. Six ZIP boundary tests passed.
+  Native synthetic tests passed on the official persisted macOS ARM64 compiler
+  using its required explicit target flag. A first wrong-target ELF invocation
+  was rejected before execution; logs and correction are documented in the
+  pre-execution review. No scientific data was exposed by these checks.
+- Reused the completed `chatgpt web E51AJ experimental-design reviewer`
+  (`01a07027-7ea7-7b62-a0d1-b2c8bdcf211e`). It returned no blocking design flaw
+  and explicit scheduling/recency, compute, aggregate-flag and claim limits.
+  The earlier Noether E51AI reviewer had failed with browser concurrency limits;
+  no verdict is attributed to it. No Sol substitution occurred.
+- Ruby YAML and embedded bash syntax checks passed. The staged-path trigger
+  audit matched only the new E51AJ workflow; no historical experiment trigger
+  was matched. The CLI source push was rejected for missing OAuth workflow
+  scope. After independently verifying the transferred exact Git commit/tree
+  and unchanged remote parent, the connected GitHub action advanced the branch
+  non-forcibly to the exact source commit. No permissions were changed.
+- Exactly one source run was observed: `33952427608`, workflow `350761479`,
+  attempt 1, job `101269590181`, created `2026-09-05T07:23:42Z`. Checkout,
+  assembly, official double build and native synthetic preflight passed; the
+  fixed three-replica longitudinal schedule is running. No scientific outcome,
+  completed exposure or artifact is yet certified.
+- Live continuation is `R32_E51AJ_EXECUTION_STATUS.json`. Do not dispatch a
+  duplicate. Execution cap is 5,400 seconds; archive partial evidence on
+  interruption. Complete all replicas before applying the fixed primary rule.
+  Historical E51AI evidence, E51AH sealed stages 109/110 and R27 canonical status
+  remain unchanged.
+
 ## 2026-09-04 Pacific — E51AI verified longitudinal closure
 
 - Continued the existing run `33949274757` through terminal success; no second

@@ -4,6 +4,17 @@ Date established: 2026-08-31
 
 Status: active research program; R27 remains canonical
 
+## Shared-start control amendment — 2026-09-05
+
+Following the verified E51AI replay-retention tradeoff, E51AJ is now frozen and
+active at source `9ea141b050599854783258d82cfa3ee02efb1fad`, run `33952427608`.
+Three fresh same-generator populations compare sequential, replay, balanced
+mixing, continued-A dose and frozen arms after identical preparation. The
+retention anchor is shared, and arms 0–2 match exact examples at cycle endpoints.
+This prospectively controlled extension does not retune E51AI or establish an
+outcome before artifact verification. Wider uncertainty/objective, context,
+curriculum and structural branches remain open. No promotion rule is relaxed.
+
 ## Exploratory longevity amendment — 2026-09-04
 
 The user requested broader experiments and longer observation of continuing
