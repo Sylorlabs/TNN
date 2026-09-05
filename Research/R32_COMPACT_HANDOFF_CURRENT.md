@@ -1,5 +1,16 @@
 # R32 Compact Handoff — Current Frontier
 
+## Active E51AI execution — latest operative start point
+
+Existing run `33949274757`, job `101260866273`, source
+`c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`. Do not restart or tune it.
+This is a four-arm, 32-block persistent context/replay diagnostic, not a
+qualification run. Read `R32_E51AI_EXECUTION_STATUS.json`,
+`R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md`, and the longitudinal research plan.
+No scientific outcome has yet been verified. Preserve and independently check
+the terminal artifact before recording results. The older statement that no
+new experiment is preregistered is superseded. E51AH is closed and R27 canonical.
+
 ## 2026-09-04 authoritative supersession
 
 R27 remains canonical. Experimental native authority is established for the

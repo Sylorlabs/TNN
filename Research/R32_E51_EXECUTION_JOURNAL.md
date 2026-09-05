@@ -1,5 +1,58 @@
 # R32 E51 Execution Journal
 
+## 2026-09-04 — Longitudinal expansion and E51AI dispatch
+
+- User requested more experimental breadth and longevity, and execution of the
+  proposed context/control plan. Introduced an explicitly exploratory lane:
+  finish a prospectively fixed weak-model curve without relaxing historical
+  qualification gates. E51AH remains closed; R27 remains canonical.
+- Finished the outstanding AH documentation commit and ordinary push:
+  `483f791885abd24067fcbf8fd678a863a30abee1` (15 files). Its consistency checks
+  passed. Baseline V1 and historical scientific sources were unchanged.
+- Implemented and preregistered E51AI at
+  `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`, tree
+  `03cf947e05765875ec63131e802d444f1490f2c4`. Four 130-parameter residual arms
+  compare current nonlinear, real one-step lag, zero lag, and real lag with
+  matched-count replay. Eight A/B/C/D cycles preserve parameters across all
+  32 learning blocks. Four disjoint development-probe cohorts are retested
+  after each block; cycle-one frozen snapshots provide an evaluation drift check.
+- Stages 111..114 contain 2160 unique training trajectories; stages 115..118
+  contain 2160 never-trained diagnostic probes. Every arm has 34,560 scheduled
+  training-record presentations plus fixed optimizer sweeps. All probes are
+  consumed development diagnostics, not reusable qualification holdouts.
+- Native synthetic tests passed on the persisted macOS ARM64 compiler, including
+  warm-start retention, exact loss, reverse identity, empty-batch protection,
+  projected feature extraction, t=0 reset, and no future-cohort replay.
+  Nine Python verifier unit tests passed. Ruby's standard YAML parser and
+  embedded bash syntax checks passed; Python YAML was unavailable and actionlint
+  was not installed. Do not claim actionlint execution.
+- Before any scientific execution, changed old-cohort replay from a contiguous
+  prefix to a fixed coprime-stride/rotating-offset schedule. This avoids repeatedly
+  drawing a mode-ordered prefix. Constants are prospective and scheduler-only.
+- Source SHA-256:
+  `20916b1836b15fa591d204766f3eadf8f62a2e23ab4203e717ff279fb078bb61`.
+  Preregistration SHA-256:
+  `cf3ab1ae1fef2acbac855a462c6379f7fb7efb682ec14934ac7f3be91bd8d469`.
+  The package preserves 53 source input files and all run/checkpoint evidence.
+- The ordinary source push was rejected for missing OAuth workflow scope.
+  Verified the already-transferred exact commit/tree and remote parent using
+  the connected GitHub reader, then performed an authorized non-forced ref
+  advance. No account permissions were changed and no duplicate source was made.
+- Existing native run is `33949274757`, attempt 1, workflow `350732604`, job
+  `101260866273`, created `2026-09-05T06:14:32Z`. One run existed for the source
+  at dispatch verification. No E51AI scientific outcome or completed exposure
+  is yet certified; final native artifact verification is required.
+- Two ChatGPT Web Pro agents completed disjoint work: `chatgpt web TNN
+  longitudinal research track` (`01a07027-7ea7-7b62-a0d1-b2c8bdcf211e`) wrote the
+  proposed larger track; `chatgpt web temporal information validity reviewer`
+  (`01a07027-b9a1-7122-adaf-80a06d3f5513`) verified the projected input boundary.
+  No Sol substitution was made. Their review is not a scientific result.
+- The temporal audit confirms that current state already summarizes history;
+  32/33 feed the inherited feature projection, while 34..37 are target-only.
+  Real lag uses only the same trajectory's previous observed state. This pilot
+  does not establish memory necessity, multi-task retention, or safe stopping.
+
+
 ## 2026-09-04 — E51AH verified native closure and arc synthesis
 
 - The existing run `33944536498`, job `101248131899`, completed successfully

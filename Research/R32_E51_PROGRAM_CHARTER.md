@@ -4,6 +4,21 @@ Date established: 2026-08-31
 
 Status: active research program; R27 remains canonical
 
+## Exploratory longevity amendment — 2026-09-04
+
+The user requested broader experiments and longer observation of continuing
+learning. Maintain two prospective lanes: diagnostic curves may follow weak
+models through a fixed horizon to measure learning, forgetting, and recovery;
+qualification retains its separately frozen preservation and sealed-test gates.
+Neither lane permits post-exposure tuning under the same experiment identifier.
+
+The first implementation is E51AI, a four-arm, 32-block native longitudinal
+context/replay pilot at source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`,
+run `33949274757`. Its cohorts are same-generator populations, not four novel
+tasks. It is not yet a result. Longer cycles, distinct tasks, distributional
+changes, withdrawal, and structural candidates remain proposals in
+`R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`, not claimed completed experiments.
+
 ## Frontier amendment — 2026-09-04
 
 E51AG's stable negative initially

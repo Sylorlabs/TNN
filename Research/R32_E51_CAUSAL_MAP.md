@@ -4,6 +4,22 @@ Established: 2026-09-04. Baseline: `R32_E51_BASELINE_V1.json`.
 Current evidence index: `R32_E51_MASTER_LEDGER.json`.
 R27 remains canonical; R32/E51 is experimental.
 
+## Active longitudinal branch — E51AI
+
+The next discriminator is now preregistered and executing: E51AI, run
+`33949274757`, source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`.
+It compares current-state nonlinear, real one-step history, zeroed-history,
+and matched-count history-plus-replay arms across eight A/B/C/D cycles.
+All 32 learning blocks retain parameters and retest all four never-trained
+development-probe cohorts. Early weaknesses do not stop the fixed diagnostic
+curve. Integrity failures do. No scientific result is yet established.
+
+This diagnostic lane measures longevity without relaxing E51AH's qualification
+gate. Current state already contains history summaries; the question is
+incremental lag information, not memory versus an entirely memoryless model.
+Read `R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md` and
+`R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`. E51AH stages 109/110 remain sealed.
+
 ## Observed lineage
 
 ```text

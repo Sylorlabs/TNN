@@ -2,6 +2,20 @@
 
 Updated: 2026-09-04
 
+## Active start point: E51AI already dispatched
+
+Do not start another experiment before closing existing E51AI run `33949274757`,
+job `101260866273`, source `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`.
+Read `Research/R32_E51AI_EXECUTION_STATUS.json` and
+`Research/R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md`. Its four arms are current
+nonlinear, real lag, zero lag, and real lag plus past-training replay. It follows
+eight A/B/C/D cycles without resetting weights. Full scheduled diagnostics
+continue through weak scores, but integrity failures stop. No result is yet
+verified. Check the finished artifact using the frozen verifier, preserve the
+ZIP and source/run identities, and then update the result/ledger/handoffs.
+Do not reopen AH stages 109/110, revise Baseline V1, or infer promotion.
+This block supersedes any older no-next-experiment or compiler-recovery direction.
+
 ## Current binding start point: verified E51AH closure
 
 Do not restart R31, compiler recovery, E45-E50, or the earlier chunking campaign.

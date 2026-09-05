@@ -4,6 +4,12 @@ Established: 2026-09-04. Latest completed frontier result: E51AH.
 E51AH outcome: `PRESERVATION_REPLAY_DEVELOPMENT_FAILURE` in Actions run
 `33944536498`, artifact `9963143498`, independently verified. R27 remains canonical.
 
+Active next diagnostic: E51AI, run `33949274757`. It prospectively observes
+32 continuing learning blocks, pointwise retention, and recovery with current,
+true-history, destroyed-history, and replay controls. It has no verified result
+yet and does not upgrade any capability row below. The longer proposed track
+is `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`.
+
 This is a capability-specific evidence inventory, not an aggregate intelligence
 score. A blank/unestablished capability is not a measured failure. Native build
 identity establishes reproducibility, not cognitive success.

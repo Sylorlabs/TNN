@@ -1,5 +1,18 @@
 # R32 Handoff — Epistemic World-State Uncertainty + Native Self-Chunking
 
+## Active E51AI execution — supersedes older next-step statements
+
+Continue existing run `33949274757`, job `101260866273`, source
+`c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22`; do not dispatch a duplicate.
+Read `R32_E51AI_EXECUTION_STATUS.json` and its longitudinal-context preregistration.
+Four arms run eight A/B/C/D cycles with persistent weights and fixed probe
+evaluation after all 32 blocks. No E51AI scientific outcome is verified yet.
+Download the terminal artifact, verify source/run/digest and the complete
+pointwise matrices with the frozen verifier, then write the result and update
+authority. Do not tune inputs, sampler, optimizer, dose, gates, or checkpoint
+selection after dispatch. E51AH remains closed; stages 109/110 and Baseline V1
+remain untouched. The E51AH closure section below is valid historical context.
+
 ## Current operative frontier — 2026-09-04
 
 This section supersedes every conflicting execution instruction below it.
