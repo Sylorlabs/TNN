@@ -4,18 +4,26 @@ Date established: 2026-08-31
 
 Status: active research program; R27 remains canonical
 
-## Frontier amendment — 2026-09-01
+## Frontier amendment — 2026-09-04
 
-E51AG remains the latest authoritative result. Its stable negative initially
+E51AG's stable negative initially
 pointed toward context or representation, but a lower-layer support defect was
 then identified: the residual training set omitted slot-covered preservation
 experiences. Under the charter's escalation ladder and the master program's
-credit-assignment track, E51AH must test that ordinary-outcome preservation
-credit before memory, representation, routing, or topology is expanded.
+credit-assignment track, E51AH tested that ordinary-outcome preservation credit
+before memory, representation, routing, or topology was expanded.
 
-E51AH is frozen at stages 108/109/110 and has not exposed validation or
-confirmation. Its result will decide whether the next branch stays in
-curriculum/credit/replay or advances to short-context memory and representation.
+E51AH is now the latest authoritative result:
+`PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`, independently verified from run
+`33944536498`, artifact `9963143498`, at source
+`c8f62bac285e72653bd6e9412498575ea8036b77`. Global replay lost 236 union successes
+and rescued six; local replay lost 121 and rescued 159. Both failed the frozen
+zero-loss development gate. Stages 109/110 remained sealed with zero execution.
+Do not restart or retune E51AH. The next separately preregistered diagnostic
+should test context/representation against remaining sampling, objective,
+optimization, and routing-geometry explanations. Failure of this replay
+treatment alone cannot establish memory necessity. The current arc synthesis is
+`R32_E51AC_AH_ARC_REPORT.md`; Baseline V1 remains immutable.
 
 ## Purpose
 

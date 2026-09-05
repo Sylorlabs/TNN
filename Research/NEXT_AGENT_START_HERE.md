@@ -1,22 +1,33 @@
 # TNN NEXT AGENT — START HERE
 
-Updated: 2026-09-01
+Updated: 2026-09-04
 
-## Current binding start point: E51AG -> E51AH
+## Current binding start point: verified E51AH closure
 
 Do not restart R31, compiler recovery, E45-E50, or the earlier chunking campaign.
 The persisted official Linux x86-64 compiler is available and the current native
-harness lineage has executed through E51AG.
+harness lineage has executed through E51AH.
 
-E51AG is the latest authoritative result:
-`CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE`. The active experiment is E51AH,
-which is frozen but not yet run. It tests whether the residual failure came from
-omitting ordinary preservation experiences before escalating to context, memory,
-representation, or topology. No E51AH validation or confirmation output has been
-exposed.
+E51AH is the latest authoritative result:
+`PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`, run `33944536498`, job `101248131899`,
+artifact `9963143498`, source `c8f62bac285e72653bd6e9412498575ea8036b77`.
+The archive and independent scientific verifier passed. Local replay rescued
+159 but lost 121 of 12,622 frozen-union development successes; neither replay
+arm met the zero-loss opening gate. Stages 109/110 executed zero episodes and
+remain sealed. Native runtime was 1,013 seconds, exit code zero.
+
+Do not restart or retune E51AH, and do not reuse its sealed stages casually.
+No next experiment is yet preregistered. Read the arc synthesis before designing
+a new bounded discriminator for context/current-state information versus
+sampling, objective, optimization, and routing-geometry limitations. The
+development negative does not establish memory necessity. R27 remains canonical.
 
 Start with:
 
+- `Research/R32_E51AH_RESULT.md`
+- `Research/R32_E51AH_EVIDENCE.json`
+- `Research/R32_E51AC_AH_ARC_REPORT.md`
+- `Research/R32_E51AH_EXECUTION_STATUS.json`
 - `Research/R32_E51_BASELINE_V1.json`
 - `Research/R32_E51_MASTER_LEDGER.json`
 - `Research/R32_E51_CAUSAL_MAP.md`

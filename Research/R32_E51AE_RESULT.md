@@ -2,6 +2,19 @@
 
 **Status:** Corrected authoritative native result for frozen implementation commit `0b7dab35a256541be3e854ab64a2eddcc759ef3b`.
 
+## 2026-09-04 diagnostic qualification
+
+The historical evaluator-only oracle branch assigned `success=1` rather than
+scoring its selected action through the grounded evaluator. Its recorded
+`5400/5400` counter remains a faithful report of the preserved native artifact,
+but it is not independent evidence that the candidate action interface can
+express a perfect solution. This qualification supersedes the oracle-based
+expressivity inferences below. The measured learned-arm/control comparisons,
+development-preservation failure, and frozen negative outcome remain unchanged.
+Historical sources and artifacts have not been modified or rerun. E51AH's own
+diagnostic oracle was corrected before its first execution; an unexecuted
+diagnostic branch supplies no expressivity evidence.
+
 **Correction note:** This file supersedes the stale result text committed at `b0a0f2d06861685569fb7fb064b5378ac05d80ed`. That text was assembled from stale handoff numbers and did not match the preserved Actions artifact. The evidence below is taken directly from GitHub Actions run `33452596868`, job `99685597571`, and artifact `9780663363`.
 
 ## Executive verdict

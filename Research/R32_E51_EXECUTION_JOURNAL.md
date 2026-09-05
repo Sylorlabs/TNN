@@ -1,5 +1,94 @@
 # R32 E51 Execution Journal
 
+## 2026-09-04 — E51AH verified native closure and arc synthesis
+
+- The existing run `33944536498`, job `101248131899`, completed successfully
+  at `2026-09-05T04:44:32Z`; no duplicate was dispatched. Native execution was
+  1,013 seconds, process exit zero, at frozen source
+  `c8f62bac285e72653bd6e9412498575ea8036b77`.
+- Downloaded and retained exact artifact ZIP `9963143498`, 3,582,842 bytes, in
+  `.scratch/e51ah/actions-33944536498-yhVo1A/`. SHA-256
+  `00f98e3077fdd2f48d593303405e2da1b721c90caffef405742ce4307381990e`
+  matches GitHub's digest. The directory also contains terminal run/job/artifact
+  metadata, the extracted evidence, and the local identity audit.
+- Verified 95 extracted archive files, 25 root tracked files against the source
+  commit, 39 transitive inputs against the frozen parent, and source/authority/
+  compiler/binary manifests. The Linux builds are byte-identical at SHA-256
+  `7bbce4de66275e3178b762ff7801bcc65e4188f46fd08ed9ef3dc684128a4c5f`.
+  Frozen source, preregistration, contract, hardcoding ledger, and compiler pins
+  match. The immutable baseline remains identical to its authority commit.
+- Independently reran the committed evidence verifier against the downloaded
+  raw ledger. It returned `verified=true`, no errors, and
+  `PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`. Rechecking archive identity after
+  verifier execution confirmed the regenerated report still equals the original
+  archive bytes. No experimental binary was executed locally in this continuation.
+- Development union: 12,622/12,960. Global replay preserved 12,386 and rescued
+  six; local-384 replay preserved 12,501 and rescued 159. The local arm lost
+  121 prior successes despite net development gain 38. Neither replay arm was
+  eligible; selected arm `-1`, opening gate zero, integrity one.
+- Stage-109 validation and stage-110 confirmation each executed zero episodes.
+  These remain sealed. The grounded validation oracle did not execute; it
+  contributes no new expressivity evidence. The source's completion-gate value
+  zero denotes no exact confirmed rescue, not a failed process or missing
+  execution-complete marker.
+- Wrote `R32_E51AH_RESULT.md`, `R32_E51AH_EVIDENCE.json`, and the six-identifier
+  `R32_E51AC_AH_ARC_REPORT.md`; updated live ledger, scorecard, causal map,
+  charter, authority, execution status, and current handoff entry points.
+  The former running-state checkpoint below is historical and superseded.
+- The completed `chatgpt-web/pro` review concerned pinned closure wording and
+  claim boundaries, not experiment evidence. No Sol substitute was used.
+  The main task performed the independent artifact and raw-ledger verification.
+- This result closes the specified replay treatment, not preservation learning
+  generally or all instantaneous representations. No new experiment is yet
+  preregistered. R27 remains canonical; the next proposal requires fresh causal
+  controls distinguishing context from sampling/objective/optimization/geometry.
+- Final read-only consistency checks matched documented development arithmetic,
+  runtime, process exit, sealed exposure, model hashes, log/binary/source hashes,
+  archive identity, and current authority/ledger state against the saved native
+  evidence. JSON parsing and whitespace checks passed. The scientific source,
+  preregistration, contract, hardcoding ledger, compiler/toolchain, workflows,
+  and immutable baseline remain unchanged from the frozen scientific commit.
+
+## 2026-09-04 — Active native run continuation; evidence still pending
+
+- Independently read GitHub Actions run `33944536498` and job `101248131899`.
+  The run is attempt `1`, triggered by the existing push, at frozen source
+  `c8f62bac285e72653bd6e9412498575ea8036b77` and tree
+  `bef9b1172617efb2e77e6772eb18069a5c9fa8a8`.
+- At this observation, checkout, frozen-lineage assembly, both native builds,
+  and synthetic preflight passed. The native discriminator was still running;
+  evidence preservation was pending. No duplicate run was dispatched.
+- No E51AH scientific outcome or validation/confirmation exposure is certified
+  by this checkpoint. A successful workflow alone will not establish a result;
+  the archived bytes and frozen decision rules still require verification.
+- Two initial local command calls were blocked during this continuation.
+  Subsequent native file edits, read-back, and repository inspection succeeded.
+  No artifact download, checksum verification, or commit is claimed by this entry.
+- A bounded, read-only documentation review was launched with the explicit
+  model override `chatgpt-web/pro` and task label
+  `chatgpt web E51AH closure reviewer`; agent
+  `01a06fd7-aaad-73c2-ba1e-1a045af64a57` (display nickname `Ptolemy`).
+  Its scope excluded experimental changes and local command execution. It
+  completed the pinned-document review without assessing an E51AH outcome:
+  incomplete execution is not a scientific negative, unavailable confirmation
+  is not observed non-exact confirmation, and replay failure alone cannot
+  establish memory necessity. These reporting boundaries are incorporated.
+- Updated the live status, ledger, authority, and handoff entry points to refer
+  to this existing run, with partition exposure explicitly unobserved. JSON
+  parsing and whitespace checks passed. The immutable baseline, preregistration,
+  treatment, compiler, and frozen scripts were verified unchanged.
+- Added a separate archive-identity auditor under
+  `.scratch/e51ah/actions-33944536498-yhVo1A/verify_identity.py`; its syntax and
+  safe-path checks passed, followed by six synthetic rejection tests for wrong
+  run identity, incomplete execution, altered download, traversal, duplicate
+  members, and symlinks. It checks downloaded bytes and provenance only and
+  cannot execute experimental binaries. No artifact verdict is yet claimed.
+- Added the previously established historical-oracle qualification to the still
+  unqualified E51AE result report. Historical measurements and outcome are
+  unchanged; the source and archived experiment were not modified or rerun.
+- R27 remains canonical. R32/E51 remains experimental. Baseline V1, the frozen
+  treatment, selection rules, thresholds, and sealed partitions are unchanged.
+
 ## 2026-08-31 — Program activation
 
 - User-authorized objective: execute the supplied E51 master program, persist
@@ -207,3 +296,17 @@ were created before stage-109 exposure.
   integrity, unauthorized validation exposure, wrong winner, and wrong outcome.
 - Workflow YAML and embedded shell syntax, JSON parsing, and whitespace checks
   passed. No E51AH scientific outcome exists at this freeze.
+
+### Native dispatch
+
+- Authority snapshot commit: `09c5fcf63f295b52b6c82299d01ac340d554dd4e`.
+- Frozen E51AH source commit: `c8f62bac285e72653bd6e9412498575ea8036b77`.
+- The command-line OAuth login rejected the initial push because it lacked
+  workflow-file permission. The separately connected GitHub route could resolve
+  the exact commit/tree and accepted a non-forced fast-forward of the same branch
+  to that commit. No credential scopes or account settings were changed.
+- Push-triggered native run `33944536498`, job `101248131899`, was created at
+  `2026-09-05T04:26:00Z`. Source assembly passed. A scientific result will be
+  recorded only after completion and independent artifact verification.
+- Live continuation pointer: `R32_E51AH_EXECUTION_STATUS.json`. The committed
+  baseline remains immutable and describes the pre-execution snapshot.

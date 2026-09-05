@@ -1,27 +1,37 @@
 # R32 Handoff — Epistemic World-State Uncertainty + Native Self-Chunking
 
-## Current operative frontier — 2026-09-01
+## Current operative frontier — 2026-09-04
 
 This section supersedes every conflicting execution instruction below it.
 
 - R27 remains canonical; R32/E51 remains experimental.
 - Experimental native execution authority is established for the current
-  E45-E51AG harness lineage. The persisted Linux x86-64 compiler is
+  E45-E51AH harness lineage. The persisted Linux x86-64 compiler is
   `Research/toolchain/znc_linux_x86_64_abed8aa1`, SHA-256
   `498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef`.
   Do not restart compiler recovery for this lineage.
-- E51AG is the latest authoritative result:
+- E51AG's preceding authoritative result was
   `CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE`. The frozen residual gained
   known trajectories but consistently destroyed substantially more no-unique
   preservation across three fresh partitions.
 - Inspection of the E51AE/E51AG development support found that the residual
   critical set contained no slot-covered preservation examples. Before adding
-  context, memory, representation, or topology, E51AH tests the cheaper causal
+  context, memory, representation, or topology, E51AH tested the cheaper causal
   explanation that ordinary preservation credit was missing from training.
-- E51AH is frozen but not yet run. Its development/validation/confirmation
-  stages are 108/109/110. Validation remains sealed unless a replay arm preserves
-  every frozen-union development trajectory and rescues at least one union miss;
-  confirmation remains sealed unless validation is exact.
+- E51AH is now the latest authoritative result:
+  `PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`, run `33944536498`, job
+  `101248131899`, artifact `9963143498`, at source
+  `c8f62bac285e72653bd6e9412498575ea8036b77`. Archive identity and the independently
+  rerun scientific verifier passed. Native runtime was 1,013 seconds, exit zero.
+  Local replay preserved 12,501/12,622 union successes and rescued 159, losing
+  121; global replay preserved 12,386 and rescued six. Neither qualified.
+  Stages 109/110 executed zero episodes and remain sealed. Do not restart E51AH.
+- Read `R32_E51AH_RESULT.md`, `R32_E51AH_EVIDENCE.json`,
+  `R32_E51AH_EXECUTION_STATUS.json`, and `R32_E51AC_AH_ARC_REPORT.md`.
+  No new experiment is yet preregistered. The next bounded discriminator must
+  distinguish context/current-state information from remaining sampling,
+  objective, optimization, and routing-geometry explanations under fresh frozen
+  controls. This replay negative does not establish memory necessity.
 - The authoritative control files are `R32_E51_BASELINE_V1.json`,
   `R32_E51_MASTER_LEDGER.json`, `R32_E51_CAUSAL_MAP.md`, and
   `R32_E51_GENERALITY_SCORECARD.md`.

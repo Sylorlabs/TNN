@@ -1,31 +1,36 @@
 # R32 Compact Handoff — Current Frontier
 
-## 2026-09-01 authoritative supersession
+## 2026-09-04 authoritative supersession
 
 R27 remains canonical. Experimental native authority is established for the
-current E45-E51AG harness lineage with the persisted official Linux x86-64 Zag
-compiler. E51AG is the latest authoritative result and closed the current
+current E45-E51AH harness lineage with the persisted official Linux x86-64 Zag
+compiler. E51AG's preceding result closed the current
 trajectory-critical additive residual as
 `CURRENT_RESIDUAL_REPLICATION_STABLE_NEGATIVE` across three fresh partitions.
 
-The immediate frozen experiment is E51AH, not compiler recovery and not direct
-escalation to context or topology. Source inspection showed that the E51AE/E51AG
-critical residual support omitted slot-covered preservation experiences. E51AH
-therefore tests one grounded ordinary-outcome replay record per development
-trajectory, with count-matched critical-only and frozen-union controls. It is
-`FROZEN_NOT_RUN`; no stage-109 or stage-110 output has been exposed.
+E51AH is now the latest authoritative result:
+`PRESERVATION_REPLAY_DEVELOPMENT_FAILURE`, independently verified from run
+`33944536498`, job `101248131899`, artifact `9963143498`, source
+`c8f62bac285e72653bd6e9412498575ea8036b77`. Local replay rescued 159 but lost
+121 of 12,622 frozen-union development successes. Global replay lost 236 and
+rescued six. Both failed the opening gate. Native runtime was 1,013 seconds;
+all required integrity gates passed. Stages 109/110 executed zero episodes.
+
+Do not restart or retune E51AH. No new experiment is yet preregistered. The next
+diagnostic should discriminate context/current-state information from remaining
+sampling, objective, optimization, and routing-geometry limitations; this
+negative alone does not establish memory necessity. Baseline V1 is immutable.
 
 Read in this order:
 
-1. `R32_E51_BASELINE_V1.json`
-2. `R32_E51_MASTER_LEDGER.json`
-3. `R32_E51_CAUSAL_MAP.md`
-4. `R32_E51_GENERALITY_SCORECARD.md`
-5. `R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md`
-6. `R32_E51AH_IMPLEMENTATION_CONTRACT.md`
+1. `R32_E51AH_RESULT.md` and `R32_E51AH_EVIDENCE.json`
+2. `R32_E51AC_AH_ARC_REPORT.md`
+3. `R32_E51_MASTER_LEDGER.json` and `R32_E51_CAUSAL_MAP.md`
+4. `R32_E51_GENERALITY_SCORECARD.md` and immutable `R32_E51_BASELINE_V1.json`
+5. `R32_E51AH_EXECUTION_STATUS.json` and its frozen preregistration/contract
 
 Everything below this supersession block is historical context only where it
-conflicts with the E51AG -> E51AH frontier. In particular, statements denying
+conflicts with the verified E51AH closure. In particular, statements denying
 verified native execution, describing `znc` as unavailable, or naming E50-era
 protocols as the exact next step are non-operative.
 

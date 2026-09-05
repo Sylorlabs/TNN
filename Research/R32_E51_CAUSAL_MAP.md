@@ -20,7 +20,8 @@ E51AB / E51AC: direct candidate actions and additive hybrid
         +-> E51AF: historical prerequisites mismatch -> INVALID, never run
         +-> E51AG: current learner, three fresh partitions -> stable negative
               -> inspection: critical residual support omits slot-covered cases
-              -> E51AH: grounded preservation replay [FROZEN_NOT_RUN]
+              -> E51AH: grounded preservation replay
+                   [PRESERVATION_REPLAY_DEVELOPMENT_FAILURE]
 ```
 
 Each arrow denotes experimental motivation, not proof of a unique cause. See
@@ -30,8 +31,23 @@ remain in their individual result/preregistration files and are not re-run here.
 
 ## E51AH competing explanations
 
+E51AH completed integrity-valid stage-108 development evaluation in run
+`33944536498`, artifact `9963143498`. Neither replay arm qualified: global replay
+preserved 12,386/12,622 and rescued six; local replay preserved 12,501/12,622 and
+rescued 159. The latter lost 121 prior successes despite a net development gain
+of 38. Stages 109/110 executed zero episodes and remain sealed. See
+`R32_E51AH_RESULT.md`, `R32_E51AH_EVIDENCE.json`, and
+`R32_E51AC_AH_ARC_REPORT.md`.
+
+This closes the specified grounded replay treatment on this development
+population within its frozen sampling, objective, optimization dose, and
+32-feature global/local residual family. It does not establish current-state
+information insufficiency or the necessity of context/memory. A separately
+preregistered diagnostic must distinguish those possibilities from the remaining
+sampling, objective, optimization, and routing-geometry explanations.
+
 **Missing preservation support.** The critical-only residual training population
-omitted slot-covered trajectories. E51AH adds one ordinary-outcome record per
+omitted slot-covered trajectories. E51AH added one ordinary-outcome record per
 development trajectory without changing the candidate interface or features.
 
 **Discrimination, geometry, or objective limitation.** Added support may still
@@ -45,10 +61,11 @@ necessary. It rejects only this specified treatment on its tested population.
 
 | Observed E51AH condition | Interpretation and next branch |
 | --- | --- |
+| Infrastructure interruption or incomplete evidence | No scientific outcome established. Record the interruption and observed exposure status; do not infer development failure or claim unobserved partitions stayed sealed. |
 | Integrity failure | No performance inference. Diagnose the failed gate; never relax scientific gates after exposure. |
 | Valid development failure | Keep stages 109/110 sealed. Close this replay treatment; preregister a bounded discriminator for context/representation versus remaining objective/geometry explanations. |
 | Exact validation and confirmation | Narrow confirmed replay result; seek fresh replication and transfer before any integration or promotion. |
-| Exact validation, confirmation not confirmed | No confirmed rescue. Preserve the failed confirmation and its integrity status. |
+| Exact validation, completed non-exact confirmation with valid integrity | No confirmed rescue. Preserve the observed failed confirmation; unavailable or interrupted confirmation alone does not satisfy this outcome. |
 | Paired-loss-free validation Pareto improvement | Support for this replay intervention; fresh-partition replication required. |
 | Validation tradeoff | Preservation remains unresolved; advance only under a new preregistration. |
 | Valid no gain | No demonstrated repair. Preserve all metrics and preregister the next diagnostic rather than tuning the consumed partition. |
