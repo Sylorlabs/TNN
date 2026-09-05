@@ -1,28 +1,33 @@
 # R32 Compact Handoff — Current Frontier
 
-## Active E51AJ — latest operative start point
+## Completed E51AJ — latest operative start point
 
-Continue existing run `33952427608`, job `101269590181`, source
-`9ea141b050599854783258d82cfa3ee02efb1fad`. Do not dispatch another run.
-Read `R32_E51AJ_EXECUTION_STATUS.json` and its replay/order/dose preregistration.
-Three fresh populations each receive one common four-block preparation, then
-five identical forks (four trained, one static) and 32 continuing blocks.
-Arms 0–2 match the exact example multiset at every full-cycle endpoint. This
-changes the E51AI design prospectively; it is not an exact E51AI rerun.
+Run `33952427608`, job `101269590181`, artifact `9965575939`, source
+`9ea141b050599854783258d82cfa3ee02efb1fad` is complete and independently verified.
+All three shared-start 32-block continuations, 1,101,600 probe rows and 67,860
+coefficients passed archive/frozen-parser/independent-mask checks. Native runtime:
+1,212.888 seconds; no timeout or rerun. Outcome:
+`REPLAY_ORDER_DOSE_DIAGNOSTIC_COMPLETE`; retention result:
+`MIXED_OR_UNREPLICATED_RETENTION_DIRECTION`; aggregate no-final-tradeoff false.
 
-No E51AJ result is verified yet. Preserve the terminal archive and independently
-check all 1,101,600 probe rows, 67,860 coefficients, schedules and frozen controls.
-The three-replica primary rule cannot discard a reversal or substitute a
-favorable checkpoint. Stop only under the frozen integrity/budget rules; retain
-partial evidence and never rerun automatically. Read
-`R32_E51AJ_ANALYSIS/PREEXECUTION_REVIEW.md` for the completed ChatGPT Web design
-review and main-task synthetic checks. R27, Baseline V1, E51AH sealed stages
-109/110 and historical E51AI results remain unchanged.
+Sequential/replay final anchor losses are 1/14, 9/11 and 17/6. Replay lowers
+ever-lost/worst-loss counts in every replica but improves final retention in
+only one. Initial wrong commitments improve against sequential, while known
+reachability decreases in every replica. A-only loses anchors even in its own
+cohort. More repeated fitting alone is not an established remedy.
 
-The completed E51AI section below is historical motivation, not an instruction
-that no experiment is active.
+Read `R32_E51AJ_RESULT.md`, `R32_E51AJ_EVIDENCE.json`,
+`R32_E51AJ_ANALYSIS/README.md` and the closed execution status. Exact archive:
+`.scratch/e51aj/actions-33952427608-5H2tNi/`. Keep all frozen scientific sources.
+AJ probes 123–126, 131–134 and 139–142 are consumed. No experiment is active.
+Next: a separately preregistered, fresh shared-start objective/update-constraint
+discriminator with fixed support, pointwise losses and initial-decision metrics.
+This is a proposal, not a launched run. E51AH stages 109/110, historical AI/AH
+results and Baseline V1 remain unchanged. R27 remains canonical.
 
-## Completed E51AI — latest operative start point
+The sections below are historical motivation and do not supersede this closure.
+
+## Historical completed E51AI — motivation for E51AJ
 
 Run `33949274757`, job `101260866273`, artifact `9964554609`, source
 `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22` completed and was independently

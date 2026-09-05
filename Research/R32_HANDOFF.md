@@ -1,21 +1,31 @@
 # R32 Handoff — Epistemic World-State Uncertainty + Native Self-Chunking
 
-## Active E51AJ — supersedes older next-step statements
+## Completed E51AJ — current authoritative start point
 
-Existing workflow run `33952427608`, job `101269590181`, source
-`9ea141b050599854783258d82cfa3ee02efb1fad`. Continue this one frozen run; do not
-dispatch a duplicate or change its inputs, objective, schedules, dose or gates.
-The shared-start replay/order/dose diagnostic has three fresh paired populations
-and 32 continuing blocks after common preparation. All five arms begin from
-identical learned coefficients and the same retention anchor. There is no
-verified E51AJ scientific outcome yet. Verify the terminal archive using
-`R32_E51AJ_ANALYSIS/verify_archive.py`, then independently analyze every replica
-and update current authority. Read `R32_E51AJ_EXECUTION_STATUS.json`,
-`R32_E51AJ_REPLAY_ORDER_DOSE_PREREG.md` and the pre-exposure review. R27 remains
-canonical; sealed AH stages and historical AI evidence remain unchanged.
-The completed E51AI material below does not supersede this active-run pointer.
+Run `33952427608`, job `101269590181`, artifact `9965575939`, source
+`9ea141b050599854783258d82cfa3ee02efb1fad` completed and passed local archive,
+frozen-parser and independent episode-mask verification. All three 32-block
+continuations, 1,101,600 probe rows and 67,860 coefficients are checked.
+Outcome: `REPLAY_ORDER_DOSE_DIAGNOSTIC_COMPLETE`; retention result:
+`MIXED_OR_UNREPLICATED_RETENTION_DIRECTION`; no-final-tradeoff flag false.
 
-## Completed E51AI — supersedes older next-step statements
+Final shared-anchor losses sequential/replay: 1/14, 9/11, 17/6. Replay has
+lower ever-lost and worst-simultaneous loss in all three replicas but worse
+final loss in two. Initial wrong commitments are lower than sequential, yet
+known reachability falls in every replica. A-only loses 19/19/11 anchors,
+including 7/3/3 in its own A cohort. No universal replay or dose benefit follows.
+
+Read `R32_E51AJ_RESULT.md`, `R32_E51AJ_EVIDENCE.json`,
+`R32_E51AJ_ANALYSIS/README.md`, and `R32_E51AJ_EXECUTION_STATUS.json`.
+Exact archive: `.scratch/e51aj/actions-33952427608-5H2tNi/`.
+No experiment is active; do not rerun or retune consumed AJ probes 123–126,
+131–134 and 139–142. The next unexecuted proposal should separate ordinary
+fitting from training-only preservation/objective constraints under fresh,
+fixed-support shared-start controls. No new stages or run are assigned here.
+AH stages 109/110, historical AI/AH results and Baseline V1 remain unchanged;
+R27 is canonical. Older frontier/next-step statements below are historical.
+
+## Historical completed E51AI — motivation for E51AJ
 
 Run `33949274757`, job `101260866273`, artifact `9964554609`, source
 `c46fbbf67e1b7d5a19dee7ca1164fc4c5b0eec22` is complete and independently

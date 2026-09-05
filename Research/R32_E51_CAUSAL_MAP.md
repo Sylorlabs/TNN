@@ -4,17 +4,29 @@ Established: 2026-09-04. Baseline: `R32_E51_BASELINE_V1.json`.
 Current evidence index: `R32_E51_MASTER_LEDGER.json`.
 R27 remains canonical; R32/E51 is experimental.
 
-## Active shared-start discriminator — E51AJ
+## Completed shared-start discriminator — E51AJ
 
-Run `33952427608`, source `9ea141b050599854783258d82cfa3ee02efb1fad`, is active.
-E51AJ tests the E51AI replay lead across three fresh paired populations with a
-common learned fork, exact full-cycle example-multiset matching, sequential,
-replay, balanced-mixture, continued-A and static arms. The primary question is
-retention direction in every replica; mixing and dose contrasts constrain its
-interpretation. This is a scheduling/support package, not isolated memory
-causation or new-task transfer. See the E51AJ preregistration and execution
-status. No E51AJ outcome is established yet; E51AI remains the latest verified
-result. Older statements that no next run is dispatched are superseded here.
+Run `33952427608`, source `9ea141b050599854783258d82cfa3ee02efb1fad`, artifact
+`9965575939` completed with independently verified evidence. Outcome:
+`REPLAY_ORDER_DOSE_DIAGNOSTIC_COMPLETE`; retention result:
+`MIXED_OR_UNREPLICATED_RETENTION_DIRECTION`. E51AJ is the latest result;
+no experiment is active. The separate no-final-tradeoff flag is false.
+
+With shared learned starts and exactly matched full-cycle example multisets,
+replay ends with 14/11/6 missing anchors against sequential 1/9/17. Ever-lost
+and worst-simultaneous losses favor replay in every replica, but final recovery
+does not. Balanced mixture shows a similar endpoint reversal. Initial wrong
+commitments improve versus sequential while known reachability falls in all
+three replicas. These distinguish cumulative disruption from final recovery,
+not isolated memory causation or new-task transfer.
+
+A-only loses 19/19/11 shared anchors, including 7/3/3 on A itself. Continued
+fitting can therefore damage probe successes without post-fork cohort switching.
+Support/generalization, objective and optimizer trajectory remain confounded.
+Next proposed branch: fresh shared-start, fixed-support comparison of ordinary
+fitting against training-only preservation/objective constraints, retaining
+pointwise and initial-decision outcomes. No stages or new run are assigned.
+Read `R32_E51AJ_RESULT.md`, `R32_E51AJ_EVIDENCE.json`, and its analysis directory.
 
 ## Completed longitudinal branch — E51AI
 
@@ -38,9 +50,9 @@ gate. Current state already contains history summaries; the question is
 incremental lag information, not memory versus an entirely memoryless model.
 Read `R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md` and
 `R32_E51_LONGITUDINAL_RESEARCH_PLAN.md`. E51AH stages 109/110 remain sealed.
-Probes 115–118 are consumed development evidence. The next proposal should
-replicate the replay contrast and distinguish continuing dose, ordering and
-objective/support effects using fresh controls; no next run is dispatched.
+Probes 115–118 are consumed development evidence. This historical branch
+motivated E51AJ's shared-anchor/matched-exposure controls above; it is not an
+instruction to repeat that now-completed diagnostic.
 
 ## Observed lineage
 
@@ -62,11 +74,14 @@ E51AB / E51AC: direct candidate actions and additive hybrid
                    [PRESERVATION_REPLAY_DEVELOPMENT_FAILURE]
                    -> E51AI: persistent context/replay over 32 learning blocks
                         [COMPLETE; history signal absent; replay retention tradeoff]
+                        -> E51AJ: shared fork + exact cycle multisets + dose/static controls
+                             [COMPLETE; mixed final retention; less cumulative disruption]
+                             -> proposed fresh objective/update-constraint discriminator
 ```
 
 Each arrow denotes experimental motivation, not proof of a unique cause. See
 the corresponding `R32_E51*_RESULT.md` for source/run/artifact identities. The
-master ledger currently indexes the E51X–E51AI frontier; older E51 experiments
+master ledger currently indexes the E51X–E51AJ frontier; older E51 experiments
 remain in their individual result/preregistration files and are not re-run here.
 
 ## E51AH competing explanations

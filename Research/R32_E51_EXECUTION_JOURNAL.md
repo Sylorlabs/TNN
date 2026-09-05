@@ -1,5 +1,50 @@
 # R32 E51 Execution Journal
 
+## 2026-09-05 — E51AJ verified three-replica closure
+
+- Continued existing watch through terminal success, without a new scientific
+  invocation. Run `33952427608`, attempt 1, job `101269590181` completed at
+  `2026-09-05T07:46:13Z`. Native execution: 1,212.8876720490002 seconds, exit
+  zero, no timeout; whole job 22m27s. Peak resident memory 487,296 KiB, within
+  the frozen 2-GiB address-space, 1-GiB file and 5,400-second runtime limits.
+- Preserved exact artifact `9965575939` and run/job/artifact API metadata in
+  `.scratch/e51aj/actions-33952427608-5H2tNi/`. ZIP: 8,098,800 bytes, 95 files,
+  SHA-256 `a64d9060e695a73a31a2d5c134a5000da0c7e79d40903a72958c0ba022f3c735`.
+  All 65 frozen scientific inputs, source/run/attempt/tree identities, compiler,
+  byte-identical native builds and Baseline V1 passed independent checks.
+- Frozen parser reproduced the archived report exactly. Independent bit-mask
+  arithmetic checked 1,101,600 episode rows, every pooled/cohort panel, retention
+  and both primary flags. Complete evidence includes 67,860 coefficient rows,
+  792 head fits and 396 exposure/parameter-change rows. All 21 analysis/archive/
+  rendering tests and 11 frozen verifier tests passed. Latest analysis code was
+  syntax-checked; no experimental binary was rerun during analysis.
+- Outcome: `REPLAY_ORDER_DOSE_DIAGNOSTIC_COMPLETE` with
+  `MIXED_OR_UNREPLICATED_RETENTION_DIRECTION`. Final shared-anchor losses
+  sequential/replay: 1/14, 9/11, 17/6. Replay lowers ever-lost and worst loss
+  in every replica but fails final-loss direction in two. The separate aggregate
+  no-final-behavioral-tradeoff rule fails in every replica. Initial wrong
+  commitments improve versus sequential, yet known reachability falls in all
+  three and the original hybrid is a distinct, stronger reference on wrong
+  commitments. No favorable checkpoint or pooled reversal is substituted.
+- Balanced mixture also separates reduced cumulative disruption from mixed
+  endpoint recovery. A-only loses 19/19/11 anchor successes, including 7/3/3
+  in A itself; net reachability -10/-8/+21 against static does not erase losses.
+  A-only coefficient changes cease after blocks 27/14 in the first two replicas;
+  the third still changes through 32. All scheduled fits execute.
+- Wrote result, deterministic full tables, evidence and reproduction/validation
+  materials; closed status, authority, ledger, handoffs, causal map, scorecard
+  and charter. The running-state entry below is historical. E51AJ is complete,
+  not the wider E51 program. No new run or stages are assigned. Next proposed
+  question separates objective/update constraints from fixed support and dose.
+  Consumed AJ/AI probes, sealed AH 109/110, historical results and R27 canonical
+  status retain their explicit boundaries.
+- The old design reviewer was not found on reuse. A new explicitly selected
+  `chatgpt-web/pro` reviewer, `chatgpt web E51AJ interpretation reviewer`, completed
+  a read-only audit and confirmed the failed conditions and interpretation limits.
+  Its proposed bias counterfactual remains unexecuted. Review identity, exact
+  observed pointwise swaps and scope are saved in the analysis review record;
+  no archive/compiler verification is attributed to that agent.
+
 ## 2026-09-05 — E51AJ controlled extension frozen and dispatched
 
 - User asked to continue with the best next step. Chose the replay-retention

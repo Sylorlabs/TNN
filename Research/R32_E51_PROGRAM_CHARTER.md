@@ -6,14 +6,21 @@ Status: active research program; R27 remains canonical
 
 ## Shared-start control amendment — 2026-09-05
 
-Following the verified E51AI replay-retention tradeoff, E51AJ is now frozen and
-active at source `9ea141b050599854783258d82cfa3ee02efb1fad`, run `33952427608`.
-Three fresh same-generator populations compare sequential, replay, balanced
-mixing, continued-A dose and frozen arms after identical preparation. The
-retention anchor is shared, and arms 0–2 match exact examples at cycle endpoints.
-This prospectively controlled extension does not retune E51AI or establish an
-outcome before artifact verification. Wider uncertainty/objective, context,
-curriculum and structural branches remain open. No promotion rule is relaxed.
+Following the verified E51AI replay-retention tradeoff, E51AJ completed at source
+`9ea141b050599854783258d82cfa3ee02efb1fad`, run `33952427608`, artifact `9965575939`.
+All three shared-start populations and 32-block continuations are independently
+verified. Sequential/replay final anchor losses are 1/14, 9/11 and 17/6: the
+three-replica retention rule fails, despite lower ever-lost and worst loss in
+every replay replica. The separate aggregate behavioral rule also fails.
+Continued A-only fitting loses anchors in all three populations, including A.
+
+This controlled extension preserves exact full-cycle examples in arms 0–2,
+but does not isolate objective mismatch, generalization or optimization as a
+unique cause. Read `R32_E51AJ_RESULT.md` and its evidence/analysis. Next proposed
+work is a fresh fixed-support objective/update-constraint discriminator, not
+automatic longer repetition on consumed probes. No new experiment is active.
+Wider uncertainty, context, curriculum and structural branches remain open.
+This closes E51AJ, not the program; no promotion rule is relaxed.
 
 ## Exploratory longevity amendment — 2026-09-04
 
