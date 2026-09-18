@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+"""TNN pre-v1 R6 bounded self-architecture revision tournament.
+
+The cognitive candidates receive raw multimodal episodes and raw UTF-8 bytes.
+No word boundaries, English grammar categories, question enums, or external
+language model are available to the candidate mechanisms.  Evaluation strings
+and human-readable category names live only in this tournament.
+
+This is a bounded SAR/CAR experiment: the revision controller can select among
+and tune a finite generic mutation library.  It is not open-ended recursive
+self-improvement and cannot promote a human-superiority claim.
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import csv
+import hashlib
+import importlib.util
+import json
+import math
+import pickle
+import statistics
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+T = load_module("r6_goldilocks", ROOT / "src/run_goldilocks_tournament.py")
+G = load_module("r6_boundary", ROOT / "src/run_teenager_boundary_gate.py")
+S = load_module("r6_schema", ROOT / "src/r6_grounded_schema.py")
+
+
+def mean(xs: Iterable[float]) -> float:
+    vals = list(xs)
+    return statistics.fmean(vals) if vals else 0.0
+
+
+def episode_with_text(ep, text: str, state: Sequence[int] | None = None, source: int | None = None):
+    return T.Episode(
+        tuple(state if state is not None else ep.state),
+        ep.video,
+        ep.audio,
+        ep.action,
+        text,
+        int(ep.source if source is None else source),
+        True,
+    )
+
+
+@dataclass
+class BroadEvidence:
+    fast: float = 0.0
+    slow: float = 0.0
+    sources: int = 0
+
+    @property
+    def support(self) -> float:
+        return self.fast + 2.0 * self.slow
+
+
+class BroadNoveltyMemory:
+    """Intentionally over-broad raw-byte novelty learner used as rollback control.
+
+    It stores every short raw-byte span from a grounded exposure for every
+    active factor.  The mechanism can look excellent on immediate same-episode
+    recall but should interfere when constructions and labels overlap.
+    """
+
+    def __init__(self, min_n: int = 2, max_n: int = 12, maximum: int = 1200):
+        self.min_n = min_n
+        self.max_n = max_n
+        self.maximum = maximum
+        self.bank: List[List[Dict[bytes, BroadEvidence]]] = [
+            [dict() for _ in range(T.VALUES)] for _ in range(T.SLOTS)
+        ]
+        self.operations = 0
+        self.bindings = 0
+
+    def observe(self, text: str, state: Sequence[int], source: int, gain: float = 1.0) -> None:
+        b = text.encode("utf-8")
+        spans = set()
+        for n in range(self.min_n, min(self.max_n, len(b)) + 1):
+            for i in range(len(b) - n + 1):
+                spans.add(b[i : i + n])
+        self.operations += len(spans)
+        for slot, value in enumerate(state):
+            target = self.bank[slot][int(value)]
+            for span in spans:
+                if len(target) >= self.maximum // (T.SLOTS * T.VALUES):
+                    break
+                ev = target.get(span)
+                if ev is None:
+                    ev = BroadEvidence()
+                    target[span] = ev
+                    self.bindings += 1
+                bit = 1 << (source % 8)
+                independent = 1.0 if not (ev.sources & bit) else 0.12
+                ev.fast += gain * independent
+                ev.sources |= bit
+
+    def consolidate(self, verified: bool = True) -> None:
+        for row in self.bank:
+            for values in row:
+                for ev in values.values():
+                    if verified or ev.sources.bit_count() >= 2:
+                        ev.slow += 0.30 * ev.fast
+                    ev.fast *= 0.68
+
+    def predict(self, text: str):
+        b = text.encode("utf-8")
+        values: List[int] = []
+        margins: List[float] = []
+        confidences: List[float] = []
+        for slot in range(T.SLOTS):
+            scores = []
+            for value in range(T.VALUES):
+                score = 0.0
+                for span, ev in self.bank[slot][value].items():
+                    self.operations += max(1, len(b) - len(span) + 1)
+                    if span in b:
+                        score += ev.support * (0.25 + 0.025 * len(span))
+                scores.append(score)
+            order = np.argsort(scores)
+            best, runner = int(order[-1]), int(order[-2])
+            values.append(best)
+            margins.append(float(scores[best] - scores[runner]))
+            confidences.append(float(scores[best]))
+        return tuple(values), np.asarray(margins, np.float32), np.asarray(confidences, np.float32)
+
+    def memory_bytes(self) -> int:
+        return sum(len(span) + 32 for row in self.bank for values in row for span in values)
+
+
+class SchemaPolicyBrain(S.Brain):
+    def __init__(self, *args, confidence_threshold: float = 0.35, margin_threshold: float = 0.08, protected_novel: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.confidence_threshold = float(confidence_threshold)
+        self.margin_threshold = float(margin_threshold)
+        self.protected_novel = bool(protected_novel)
+
+    def _merge(self, text, base, margin):
+        if not self.schema_enabled:
+            return base, margin
+        sv, sm, sc = self.schema.predict(text)
+        values, out = list(base), list(margin)
+        for r in range(T.SLOTS):
+            if float(sc[r]) > self.confidence_threshold and float(sm[r]) > self.margin_threshold:
+                values[r] = int(sv[r])
+                out[r] = float(sm[r])
+        return tuple(values), np.asarray(out, np.float32)
+
+    def explicit_text_evidence(self, text):
+        p, m, c = T.SharedBrain.explicit_text_evidence(self, text)
+        if not self.schema_enabled:
+            return p, m, c
+        sv, sm, sc = self.schema.predict(text)
+        p, m, c = list(p), list(m), list(c)
+        for r in range(T.SLOTS):
+            if float(sc[r]) > self.confidence_threshold and float(sm[r]) > self.margin_threshold:
+                p[r], m[r], c[r] = int(sv[r]), float(sm[r]), float(sc[r])
+        return tuple(p), np.asarray(m, np.float32), np.asarray(c, np.float32)
+
+
+class BroadPolicyBrain(SchemaPolicyBrain):
+    def enable_broad(self) -> None:
+        self.broad = BroadNoveltyMemory()
+        self.broad_enabled = True
+
+    def observe(self, ep, modalities, *args, **kwargs):
+        if getattr(self, "broad_enabled", False) and "text" in modalities and not kwargs.get("contradiction", False):
+            self.broad.observe(ep.text, ep.state, ep.source, kwargs.get("reliability", 1.0))
+        return T.SharedBrain.observe(self, ep, modalities, *args, **kwargs)
+
+    def consolidate(self, verified, rounds=1):
+        T.SharedBrain.consolidate(self, verified, rounds)
+        if getattr(self, "broad_enabled", False):
+            for _ in range(rounds):
+                self.broad.consolidate(verified)
+
+    def _merge(self, text, base, margin):
+        values, out = list(base), list(margin)
+        bv, bm, bc = self.broad.predict(text)
+        for r in range(T.SLOTS):
+            if float(bc[r]) > 0.20 and float(bm[r]) > 0.02:
+                values[r], out[r] = int(bv[r]), float(bm[r])
+        return tuple(values), np.asarray(out, np.float32)
+
+    def explicit_text_evidence(self, text):
+        p, m, c = T.SharedBrain.explicit_text_evidence(self, text)
+        bv, bm, bc = self.broad.predict(text)
+        p, m, c = list(p), list(m), list(c)
+        for r in range(T.SLOTS):
+            if float(bc[r]) > 0.20 and float(bm[r]) > 0.02:
+                p[r], m[r], c[r] = int(bv[r]), float(bm[r]), float(bc[r])
+        return tuple(p), np.asarray(m, np.float32), np.asarray(c, np.float32)
+
+    def memory_bytes(self):
+        return T.SharedBrain.memory_bytes(self) + self.broad.memory_bytes()
+
+    def operations(self):
+        return T.SharedBrain.operations(self) + self.broad.operations
+
+
+@dataclass(frozen=True)
+class NovelTask:
+    slot: int
+    value: int
+    label: str
+    teach_ep: object
+    test_ep: object
+
+
+def find_episode_with_value(episodes: Sequence[object], slot: int, value: int, offset: int = 0):
+    matches = [ep for ep in episodes if int(ep.state[slot]) == int(value)]
+    if not matches:
+        raise RuntimeError("missing value coverage")
+    return matches[offset % len(matches)]
+
+
+def replace_surface(text: str, slot: int, value: int, label: str) -> str:
+    vocab = (T.AGENTS, T.EVENTS, T.OBJECTS, T.STATES)[slot]
+    return text.replace(vocab[value], label)
+
+
+def grounded_teach(brain, task: NovelTask, reliability: float = 1.0) -> Tuple[int, ...]:
+    available = [m for m in ("video", "audio", "action") if m in brain.maps]
+    grounded, _ = brain.predict_fused(available, task.teach_ep)
+    ep = episode_with_text(task.teach_ep, task.teach_ep.text, grounded, task.teach_ep.source)
+    # Protected fast-path candidates write only the unsupported motif into their
+    # shadow memory. The already competent sensory and established text maps are
+    # not rewritten merely because a new surface label appeared.
+    if getattr(brain, "schema_enabled", False) and getattr(brain, "protected_novel", False):
+        brain.schema.observe(ep.text, ep.state, ep.source, reliability)
+        brain.schema.consolidate(True)
+        brain.evidence.append(("protected_text_novelty", tuple(ep.state), ep.source, False))
+    elif getattr(brain, "broad_enabled", False):
+        brain.broad.observe(ep.text, ep.state, ep.source, reliability)
+        brain.broad.consolidate(True)
+        brain.evidence.append(("broad_text_novelty", tuple(ep.state), ep.source, False))
+    else:
+        brain.observe(ep, tuple(available) + ("text",), reliability=reliability, contradiction=False, duplicate=1)
+        brain.consolidate(True, 1)
+    return tuple(int(x) for x in grounded)
+
+
+def make_cross_frame_tasks(test, seed: int) -> List[NovelTask]:
+    roots = ("naru", "velkin", "torvane", "selora")
+    tasks: List[NovelTask] = []
+    for slot in range(T.SLOTS):
+        for j in range(4):
+            ep = test[(slot * 7 + j) % len(test)]
+            value = int(ep.state[slot])
+            label = f"{roots[slot]}{seed}_{j}"
+            teach_text = replace_surface(T.emit_text(ep.state, (j + slot) % len(T.TEMPLATES)), slot, value, label)
+            test_text = replace_surface(T.emit_heldout_text(ep.state, j), slot, value, label)
+            tasks.append(NovelTask(slot, value, label, episode_with_text(ep, teach_text), episode_with_text(ep, test_text)))
+    return tasks
+
+
+def make_fragment_tasks(test, seed: int) -> List[NovelTask]:
+    roots = ("kalora", "meriva", "torali", "seneva")
+    tasks: List[NovelTask] = []
+    for slot in range(T.SLOTS):
+        for value in range(T.VALUES):
+            ep = find_episode_with_value(test, slot, value, seed + value)
+            # Deliberately share most bytes; only a short internal suffix separates values.
+            label = f"{roots[slot]}{value}{seed % 3}x"
+            teach_text = replace_surface(T.emit_text(ep.state, (value + slot) % len(T.TEMPLATES)), slot, value, label)
+            test_text = replace_surface(T.emit_heldout_text(ep.state, value), slot, value, label)
+            tasks.append(NovelTask(slot, value, label, episode_with_text(ep, teach_text), episode_with_text(ep, test_text)))
+    return tasks
+
+
+def evaluate_tasks(brain, tasks: Sequence[NovelTask], teach: bool = True):
+    target, exacts, grounded = [], [], []
+    for task in tasks:
+        if teach:
+            g = grounded_teach(brain, task)
+            grounded.append(float(g == tuple(task.teach_ep.state)))
+        p, _ = brain.predict_modality("text", task.test_ep)
+        target.append(float(int(p[task.slot]) == task.value))
+        exacts.append(T.exact(p, task.test_ep.state))
+    return {
+        "target_role_accuracy": mean(target),
+        "whole_meaning_exact": mean(exacts),
+        "grounded_state_exact": mean(grounded) if grounded else None,
+        "trials": len(tasks),
+    }
+
+
+def delayed_retest(brain, train, tasks: Sequence[NovelTask], seed: int):
+    rng = T.rng_for(seed, "r6-delayed-interference")
+    for i in range(64):
+        ep = train[int(rng.integers(len(train)))]
+        brain.observe(ep, ("video", "audio", "action", "text"), reliability=1.0, contradiction=False)
+        if (i + 1) % 8 == 0:
+            brain.consolidate(True, 1)
+    return evaluate_tasks(brain, tasks, teach=False)
+
+
+def contradiction_retest(brain, task: NovelTask):
+    grounded_teach(brain, task)
+    wrong = list(task.teach_ep.state)
+    wrong[task.slot] = (wrong[task.slot] + 1) % T.VALUES
+    for i in range(8):
+        false_ep = episode_with_text(task.teach_ep, task.teach_ep.text, wrong, source=3)
+        brain.observe(false_ep, ("text",), reliability=0.35, contradiction=True, duplicate=8)
+        if (i + 1) % 4 == 0:
+            brain.consolidate(False, 1)
+    p, _ = brain.predict_modality("text", task.test_ep)
+    return {
+        "target_role_accuracy": float(int(p[task.slot]) == task.value),
+        "whole_meaning_exact": T.exact(p, task.test_ep.state),
+    }
+
+
+def established_metrics(brain, test):
+    controlled = G.controlled_heldout(brain, test)
+    paraphrase = G.custom_paraphrases(brain, test)
+    reference = G.multi_sentence_reference(brain, test)
+    return {
+        "controlled_exact": float(controlled["exact_accuracy"]),
+        "paraphrase_exact": float(paraphrase["exact_accuracy"]),
+        "reference_exact": float(reference["exact_accuracy"]),
+        "mean_exact": mean([
+            controlled["exact_accuracy"], paraphrase["exact_accuracy"], reference["exact_accuracy"]
+        ]),
+    }
+
+
+def sensory_metrics(brain, test):
+    exacts = []
+    stress = {"video_noise": 0.12, "occlusion": 0.18, "audio_noise": 0.10, "overlap": 0.20}
+    stress_exact = []
+    for ep in test[:24]:
+        available = [m for m in ("video", "audio", "action") if m in brain.maps]
+        p, _ = brain.predict_fused(available, ep)
+        ps, _ = brain.predict_fused(available, ep, stress)
+        exacts.append(T.exact(p, ep.state))
+        stress_exact.append(T.exact(ps, ep.state))
+    return {"clean_exact": mean(exacts), "stress_exact": mean(stress_exact)}
+
+
+def snapshot_roundtrip(brain, test):
+    before = [brain.predict_modality("text", ep)[0] for ep in test[:8]]
+    payload = pickle.dumps(brain, protocol=5)
+    restored = pickle.loads(payload)
+    after = [restored.predict_modality("text", ep)[0] for ep in test[:8]]
+    return {
+        "pass": before == after,
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def configure_candidates(base):
+    candidates = {}
+    candidates["r5_unchanged"] = copy.deepcopy(base)
+
+    compact = copy.deepcopy(base)
+    compact.schema = S.GroundedSchemaMemory(max_n=12)
+    compact.build_schema()
+    compact.confidence_threshold = 0.35
+    compact.margin_threshold = 0.08
+    compact.protected_novel = True
+    candidates["grounded_schema_compact"] = compact
+
+    full = copy.deepcopy(base)
+    full.schema = S.GroundedSchemaMemory(max_n=20)
+    full.build_schema()
+    full.confidence_threshold = 0.35
+    full.margin_threshold = 0.08
+    full.protected_novel = True
+    candidates["grounded_schema_balanced"] = full
+
+    unprotected = copy.deepcopy(full)
+    unprotected.protected_novel = False
+    candidates["grounded_schema_unprotected_control"] = unprotected
+
+    loose = copy.deepcopy(full)
+    loose.confidence_threshold = 0.05
+    loose.margin_threshold = 0.0
+    candidates["grounded_schema_loose"] = loose
+
+    strict = copy.deepcopy(full)
+    strict.confidence_threshold = 1.50
+    strict.margin_threshold = 0.50
+    candidates["grounded_schema_strict"] = strict
+
+    broad = copy.deepcopy(base)
+    broad.__class__ = BroadPolicyBrain
+    broad.enable_broad()
+    candidates["broad_novelty_control"] = broad
+    return candidates
+
+
+def evaluate_candidate(name: str, brain, train, test, seed: int):
+    pre_est = established_metrics(brain, test)
+    pre_sens = sensory_metrics(brain, test)
+    start_ops = int(brain.operations())
+    start_mem = int(brain.memory_bytes())
+
+    cross_tasks = make_cross_frame_tasks(test, seed)
+    cross = evaluate_tasks(brain, cross_tasks, teach=True)
+    fragment_tasks = make_fragment_tasks(test, seed)
+    fragments = evaluate_tasks(brain, fragment_tasks, teach=True)
+    delayed = delayed_retest(brain, train, cross_tasks + fragment_tasks, seed)
+    contradiction = contradiction_retest(brain, cross_tasks[0])
+
+    post_est = established_metrics(brain, test)
+    post_sens = sensory_metrics(brain, test)
+    snapshot = snapshot_roundtrip(brain, test)
+    end_ops = int(brain.operations())
+    end_mem = int(brain.memory_bytes())
+
+    return {
+        "candidate": name,
+        "seed": seed,
+        "pre_established": pre_est,
+        "post_established": post_est,
+        "pre_sensory": pre_sens,
+        "post_sensory": post_sens,
+        "cross_frame": cross,
+        "shared_fragment": fragments,
+        "delayed": delayed,
+        "contradiction": contradiction,
+        "memory_bytes_before": start_mem,
+        "memory_bytes_after": end_mem,
+        "operations_delta": end_ops - start_ops,
+        "snapshot": snapshot,
+        "schema_count": len(getattr(getattr(brain, "schema", None), "schemas", [])),
+        "schema_bindings": int(getattr(getattr(brain, "schema", None), "bindings", 0)),
+        "broad_bindings": int(getattr(getattr(brain, "broad", None), "bindings", 0)),
+    }
+
+
+def run_seed(seed: int, budget: int, n_train: int, n_test: int):
+    train, test = T.generate_dataset(seed, n_train, n_test)
+    base = SchemaPolicyBrain("recurrent_pam", seed)
+    T.train_history(base, "noisy_then_clean", train, budget, seed)
+    results = []
+    for name, candidate in configure_candidates(base).items():
+        results.append(evaluate_candidate(name, candidate, train, test, seed))
+    return {"seed": seed, "candidates": results}
+
+
+def aggregate(rows: Sequence[Mapping[str, object]]):
+    if not rows:
+        return []
+    names = sorted({str(r["candidate"]) for r in rows})
+    out = []
+    for name in names:
+        rs = [r for r in rows if r["candidate"] == name]
+        record = {
+            "candidate": name,
+            "seeds": len(rs),
+            "cross_frame_target": mean(r["cross_frame"]["target_role_accuracy"] for r in rs),
+            "cross_frame_exact": mean(r["cross_frame"]["whole_meaning_exact"] for r in rs),
+            "fragment_target": mean(r["shared_fragment"]["target_role_accuracy"] for r in rs),
+            "fragment_exact": mean(r["shared_fragment"]["whole_meaning_exact"] for r in rs),
+            "delayed_target": mean(r["delayed"]["target_role_accuracy"] for r in rs),
+            "contradiction_target": mean(r["contradiction"]["target_role_accuracy"] for r in rs),
+            "established_pre": mean(r["pre_established"]["mean_exact"] for r in rs),
+            "established_post": mean(r["post_established"]["mean_exact"] for r in rs),
+            "sensory_pre": mean((r["pre_sensory"]["clean_exact"] + r["pre_sensory"]["stress_exact"]) / 2 for r in rs),
+            "sensory_post": mean((r["post_sensory"]["clean_exact"] + r["post_sensory"]["stress_exact"]) / 2 for r in rs),
+            "memory_bytes": mean(r["memory_bytes_after"] for r in rs),
+            "operations_delta": mean(r["operations_delta"] for r in rs),
+            "snapshot_pass_rate": mean(float(r["snapshot"]["pass"]) for r in rs),
+            "minimum_cross_frame_target": min(r["cross_frame"]["target_role_accuracy"] for r in rs),
+        }
+        record["established_regression"] = record["established_pre"] - record["established_post"]
+        record["sensory_regression"] = record["sensory_pre"] - record["sensory_post"]
+        out.append(record)
+
+    # Multi-objective score uses only relative resource penalties within the set.
+    max_mem = max(x["memory_bytes"] for x in out) or 1.0
+    max_ops = max(x["operations_delta"] for x in out) or 1.0
+    for x in out:
+        resource = 1.0 - 0.5 * (x["memory_bytes"] / max_mem) - 0.5 * (x["operations_delta"] / max_ops)
+        x["resource_score"] = resource
+        x["revision_score"] = (
+            0.28 * x["cross_frame_target"]
+            + 0.18 * x["fragment_target"]
+            + 0.14 * x["delayed_target"]
+            + 0.08 * x["contradiction_target"]
+            + 0.16 * x["established_post"]
+            + 0.11 * x["sensory_post"]
+            + 0.05 * resource
+        )
+        x["promotion_eligible"] = bool(
+            x["established_regression"] <= 0.02
+            and x["sensory_regression"] <= 0.02
+            and x["snapshot_pass_rate"] == 1.0
+        )
+    out.sort(key=lambda x: x["revision_score"], reverse=True)
+    return out
+
+
+def choose_rounds(calibration, hidden):
+    family = {
+        "r5_unchanged": "baseline",
+        "broad_novelty_control": "broad_novelty",
+        "grounded_schema_compact": "grounded_schema",
+        "grounded_schema_balanced": "grounded_schema",
+        "grounded_schema_loose": "grounded_schema",
+        "grounded_schema_strict": "grounded_schema",
+        "grounded_schema_unprotected_control": "grounded_schema_unprotected",
+    }
+    family_best = {}
+    for row in calibration:
+        fam = family[row["candidate"]]
+        if not row["promotion_eligible"]:
+            continue
+        if fam not in family_best or row["revision_score"] > family_best[fam]["revision_score"]:
+            family_best[fam] = row
+    round1 = max(family_best.values(), key=lambda x: x["revision_score"]) if family_best else max(calibration, key=lambda x: x["revision_score"])
+    promoted_family = family[round1["candidate"]]
+    if promoted_family == "grounded_schema":
+        policies = [x for x in calibration if family[x["candidate"]] == "grounded_schema" and x["promotion_eligible"]]
+        round2 = max(policies, key=lambda x: x["revision_score"]) if policies else round1
+    else:
+        round2 = round1
+    hidden_row = next(x for x in hidden if x["candidate"] == round2["candidate"])
+    baseline_hidden = next(x for x in hidden if x["candidate"] == "r5_unchanged")
+    hidden_gain = hidden_row["revision_score"] - baseline_hidden["revision_score"]
+    hidden_pass = bool(
+        hidden_row["promotion_eligible"]
+        and hidden_gain > 0.02
+        and hidden_row["cross_frame_target"] > baseline_hidden["cross_frame_target"] + 0.20
+    )
+    return {
+        "round1_family_selection": round1,
+        "round2_policy_selection": round2,
+        "hidden_selected": hidden_row,
+        "hidden_baseline": baseline_hidden,
+        "hidden_revision_score_gain": hidden_gain,
+        "hidden_promotion_pass": hidden_pass,
+        "bounded_sar": "PASS" if hidden_pass else "NOT_PROMOTED",
+        "open_ended_recursive_self_improvement": "NOT_MET",
+    }
+
+
+def write_csv(path: Path, rows: Sequence[Mapping[str, object]]):
+    if not rows:
+        return
+    fields = list(rows[0].keys())
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for row in rows:
+            w.writerow(row)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--seeds", default="1,2,3,4,5,6,7,8")
+    ap.add_argument("--calibration", default="1,2,3,4")
+    ap.add_argument("--budget", type=int, default=512)
+    ap.add_argument("--train", type=int, default=180)
+    ap.add_argument("--test", type=int, default=48)
+    ap.add_argument("--workers", type=int, default=4)
+    args = ap.parse_args()
+
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
+    calibration_seeds = {int(x) for x in args.calibration.split(",") if x.strip()}
+    per_seed = []
+    with ProcessPoolExecutor(max_workers=max(1, args.workers), max_tasks_per_child=1) as pool:
+        futures = {pool.submit(run_seed, seed, args.budget, args.train, args.test): seed for seed in seeds}
+        for fut in as_completed(futures):
+            result = fut.result()
+            per_seed.append(result)
+            print(f"completed seed={result['seed']}", flush=True)
+    per_seed.sort(key=lambda x: x["seed"])
+
+    flat = [candidate for seed_record in per_seed for candidate in seed_record["candidates"]]
+    calibration_rows = [r for r in flat if int(r["seed"]) in calibration_seeds]
+    hidden_rows = [r for r in flat if int(r["seed"]) not in calibration_seeds]
+    cal_agg = aggregate(calibration_rows)
+    hidden_agg = aggregate(hidden_rows)
+    decision = choose_rounds(cal_agg, hidden_agg)
+
+    (out / "per_seed.json").write_text(json.dumps(per_seed, indent=2, sort_keys=True))
+    (out / "calibration_summary.json").write_text(json.dumps(cal_agg, indent=2, sort_keys=True))
+    (out / "hidden_summary.json").write_text(json.dumps(hidden_agg, indent=2, sort_keys=True))
+    (out / "revision_decision.json").write_text(json.dumps(decision, indent=2, sort_keys=True))
+    write_csv(out / "calibration_summary.csv", cal_agg)
+    write_csv(out / "hidden_summary.csv", hidden_agg)
+
+    status = {
+        "status": "PASS" if decision["hidden_promotion_pass"] else "NOT_PROMOTED",
+        "seeds": seeds,
+        "calibration_seeds": sorted(calibration_seeds),
+        "hidden_seeds": sorted(set(seeds) - calibration_seeds),
+        "selected_candidate": decision["round2_policy_selection"]["candidate"],
+        "bounded_sar": decision["bounded_sar"],
+        "open_ended_recursive_self_improvement": "NOT_MET",
+        "human_superiority": "NOT_EVALUATED",
+        "teenager_english": "NOT_MET",
+        "adult_english": "NOT_MET",
+    }
+    (out / "status.json").write_text(json.dumps(status, indent=2, sort_keys=True))
+    print(json.dumps(status, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

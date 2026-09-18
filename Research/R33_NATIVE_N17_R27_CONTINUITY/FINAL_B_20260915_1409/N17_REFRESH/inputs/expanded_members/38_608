@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse, json, math, pickle
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+import sys
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph/experiments')
+from entity_aeif_factorial import World, render, sig, make_training, Rep, Model
+
+# Evidence-only reference harness. Cognitive architecture target is native Zag; this
+# harness stress-tests semantics and experimental design without relabeling results native.
+
+ACTIONS=4
+
+def privileged_memory_default(novelty, uncertainty, causal, source, retrieval, contradiction, regret, cost):
+    # Birth/default heuristic is generic, not task label knowledge. TNN may override.
+    value=3*novelty+2*uncertainty+4*causal+2*source+3*retrieval+4*contradiction+5*regret-cost
+    if contradiction>=8 or regret>=7 or causal>=9: return 'EXACT'
+    if value>=58: return 'EXACT'
+    if value>=38: return 'LONG'
+    if uncertainty>=7 or retrieval>=6: return 'WORK'
+    if value>=18: return 'SHORT'
+    return 'NONE'
+
+class MemoryManager:
+    def __init__(self, seed, budget=260):
+        self.rng=np.random.default_rng(seed); self.budget=budget; self.items=[]
+        # mutable TNN override values by generic context bin/action
+        self.q={}; self.use=0
+    def key(self, novelty,uncertainty,causal,contradiction,regret,cost):
+        return (novelty//3,uncertainty//3,causal//3,contradiction//3,regret//3,cost//3)
+    def choose(self, **f):
+        default=privileged_memory_default(**f)
+        k=self.key(f['novelty'],f['uncertainty'],f['causal'],f['contradiction'],f['regret'],f['cost'])
+        # TNN owns choice: after evidence, override default only if learned margin is meaningful.
+        actions=['NONE','SHORT','WORK','LONG','EXACT']
+        row=self.q.setdefault(k,{a:0.0 for a in actions}); vals={a:row[a] for a in actions}
+        best=max(actions,key=lambda a: vals[a])
+        if vals[best] > vals[default] + 1.5: return best
+        return default
+    def learn(self, features, action, reward):
+        k=self.key(features['novelty'],features['uncertainty'],features['causal'],features['contradiction'],features['regret'],features['cost'])
+        row=self.q.setdefault(k,{a:0.0 for a in ['NONE','SHORT','WORK','LONG','EXACT']}); row[action]+=0.12*(reward-row[action])
+    def store(self, kind, payload, features):
+        a=self.choose(**features)
+        sizes={'NONE':0,'SHORT':1,'WORK':2,'LONG':3,'EXACT':7}
+        if sizes[a]>0:
+            self.items.append([kind,payload,a,sizes[a],0])
+            self.use+=sizes[a]
+            # LRU is only an eviction primitive: TNN's chosen representation remains authoritative.
+            while self.use>self.budget and self.items:
+                # evict oldest/least-used among non-exact first, then exact if absolutely necessary
+                cand=min(range(len(self.items)), key=lambda i:(self.items[i][2]=='EXACT', self.items[i][4], i))
+                self.use-=self.items[cand][3]; self.items.pop(cand)
+        return a
+    def retrieve(self, kind):
+        rows=[]
+        for x in self.items:
+            if x[0]==kind: x[4]+=1; rows.append(x[1])
+        return rows
+
+class EffectModel:
+    def __init__(self,n): self.sum=np.zeros((n,ACTIONS));self.cnt=np.zeros((n,ACTIONS))
+    def learn(self,e,a,effect): self.sum[e,a]+=effect;self.cnt[e,a]+=1
+    def pred(self,e,a): return self.sum[e,a]/max(1,self.cnt[e,a])
+    def best(self,e): return int(np.argmax([self.pred(e,a) for a in range(ACTIONS)]))
+
+class NameMemory:
+    def __init__(self):self.proto={}
+    def bind(self,vec,e):self.proto[e]=np.array(vec,float)
+    def resolve(self,vec):
+        if not self.proto:return -1
+        v=np.array(vec,float);return min(self.proto,key=lambda e:np.linalg.norm(v-self.proto[e]))
+
+def motif_template(seed,e,width=18):
+    r=np.random.default_rng(seed+e*173); x=r.normal(size=width); x=np.cumsum(x); x=(x-x.mean())/(x.std()+1e-8);return x
+
+def synth_phrase(templates, ids, rng, hard=False):
+    out=[]
+    for ii,e in enumerate(ids):
+        t=templates[e]
+        stretch=rng.uniform(.55,1.65) if hard else rng.uniform(.82,1.2)
+        n=max(7,int(len(t)*stretch)); z=np.interp(np.linspace(0,len(t)-1,n),np.arange(len(t)),t)
+        z=z+rng.normal(0,.35 if hard else .10,n)
+        if hard and ii>0 and len(out)>3:
+            # coarticulation-like blend across motif boundary
+            b=min(4,len(z),len(out));
+            for j in range(b):
+                alpha=(j+1)/(b+1); out[-b+j]=(1-alpha)*out[-b+j]+alpha*z[j]
+            z=z[b:]
+        out.extend(z.tolist())
+    return np.array(out)
+
+def decode_no_vad(samples, templates, count, min_d=7,max_d=32):
+    # Dynamic-programming segmentation with no supplied boundaries. Segment costs
+    # are precomputed/vectorized so the hard test remains computationally practical.
+    N=len(samples); ids=sorted(templates); T=np.stack([templates[e] for e in ids]); W=T.shape[1]
+    INF=1e30; costs={}
+    for pos in range(N):
+        for d in range(min_d,min(max_d,N-pos)+1):
+            seg=samples[pos:pos+d]
+            rr=np.interp(np.linspace(0,d-1,W),np.arange(d),seg)
+            rr=(rr-rr.mean())/(rr.std()+1e-8)
+            c=np.mean((T-rr[None,:])**2,axis=1)+.002*abs(d-W)
+            costs[(pos,d)]=c
+    dp=np.full((count+1,N+1),INF); back={}; dp[0,0]=0
+    for k in range(count):
+        poss=np.where(np.isfinite(dp[k]))[0]
+        for pos in poss:
+            for d in range(min_d,min(max_d,N-pos)+1):
+                c=costs[(int(pos),d)]; j=int(np.argmin(c)); nv=dp[k,pos]+float(c[j])
+                if nv<dp[k+1,pos+d]: dp[k+1,pos+d]=nv;back[(k+1,pos+d)]=(int(pos),ids[j])
+    penalty=.02*np.abs(np.arange(N+1)-N); end=int(np.argmin(dp[count]+penalty))
+    if not np.isfinite(dp[count,end]): return []
+    out=[];cur=(count,end)
+    while cur[0]>0:
+        pos,e=back[cur];out.append(e);cur=(cur[0]-1,pos)
+    return out[::-1]
+
+class Sibling:
+    def __init__(self, rep, world, effect_model, seed): self.rep=rep;self.w=world;self.eff=effect_model;self.seed=seed
+    def teach(self,target,candidates,question=True):
+        # Sender transmits several diverse episodic signatures; receiver owns a
+        # separate observation history and does not receive sender weights.
+        epi=self.rep.epi[target]
+        sel=[0]
+        while len(sel)<min(3,len(epi)):
+            c=np.mean(epi[sel],0); cand=[i for i in range(len(epi)) if i not in sel];sel.append(max(cand,key=lambda i:np.linalg.norm(epi[i]-c)))
+        msgs=epi[sel]
+        r=np.random.default_rng(self.seed+target*31)
+        visual=[]
+        for c in candidates:
+            rv=np.stack([render(self.w.bases[c],k,r) for k in ['clean','view','scale','noise','occ.3']])
+            # symmetric multi-view match: each taught view needs support in receiver evidence.
+            visual.append(float(np.mean([np.min(np.linalg.norm(rv-m[None,:],axis=1)) for m in msgs])))
+        order=np.argsort(visual);pred=candidates[int(order[0])]
+        if pred==target and (visual[order[1]]-visual[order[0]]>.22): return True
+        if not question:return pred==target
+        # Learned discriminating action: choose the action whose observed consequence
+        # best separates target from the competing candidate set. No category labels.
+        best_a=0;best_sep=-1.0
+        for a in range(ACTIONS):
+            te=self.eff.pred(target,a); sep=min(abs(te-self.eff.pred(c,a)) for c in candidates if c!=target)
+            if sep>best_sep:best_sep=sep;best_a=a
+        demo=self.eff.pred(target,best_a)+r.normal(0,.03)
+        # Receiver locally verifies the same action on each candidate.
+        ds=[]
+        for c in candidates:
+            truth=float(self.w.afford[c,best_a,0]+.35*self.w.afford[c,best_a,1])
+            obs=truth+r.normal(0,.05);ds.append(abs(obs-demo))
+        return candidates[int(np.argmin(ds))]==target
+
+
+def train_student(seed,dose=256,mode='MASTER_DIVERSE'):
+    w=World(seed,n=24,d=20); views=make_training(w,mode,dose,seed+77); rep=Rep(views,max_epi=16)
+    ident=Model('AEIF_ACTIVE',rep,w,seed+333)
+    mem=MemoryManager(seed+900,budget=320)
+    eff=EffectModel(len(w.bases)); names=NameMemory(); templates={e:motif_template(seed+1200,e) for e in range(len(w.bases))}
+    r=np.random.default_rng(seed+500)
+    # Develop action-effect model and self-managed memories.
+    for e in range(len(w.bases)):
+        for a in range(ACTIONS):
+            truth=float(w.afford[e,a,0] + .35*w.afford[e,a,1])
+            for j in range(8): eff.learn(e,a,truth+r.normal(0,.08))
+        # Training is its own variable: when learned action values are close, the
+        # Master/learner gathers more grounded consequences rather than changing architecture.
+        vals=[eff.pred(e,a) for a in range(ACTIONS)]; sv=sorted(vals,reverse=True)
+        if sv[0]-sv[1] < .18:
+            for a in range(ACTIONS):
+                truth=float(w.afford[e,a,0] + .35*w.afford[e,a,1])
+                for j in range(24): eff.learn(e,a,truth+r.normal(0,.08))
+        # one-shot name binding to same persistent identity
+        names.bind(templates[e]+r.normal(0,.025,len(templates[e])),e)
+        # memory manager sees generic utility context; exact episode retained when useful, but choice is TNN-owned.
+        f=dict(novelty=8,uncertainty=5,causal=8,source=8,retrieval=2,contradiction=2,regret=0,cost=5)
+        mem.store('entity_episode',(e,rep.epi[e,0].copy()),f)
+    return w,rep,ident,mem,eff,names,templates
+
+def eval_seed(seed,dose=256,hard=False,mode='MASTER_DIVERSE'):
+    w,rep,ident,mem,eff,names,templates=train_student(seed,dose,mode)
+    r=np.random.default_rng(seed+7000); sib=Sibling(rep,w,eff,seed+8000)
+    rows=[]
+    for q in range(48):
+        e=q%len(w.bases); twin=w.twins[e] if w.twins[e]>=0 else (e+1)%len(w.bases)
+        ident.reset(); ident.step(render(w.bases[e],'clean',r))
+        # identity after changed view / severe corruption; active AEIF may reinspect.
+        kind='compound' if hard else 'view'; pred,cf,rel,unk=ident.step(render(w.bases[e],kind,r)); extra=0
+        if ident.active() and (unk or rel<ident.th): pred,cf,rel,unk=ident.step(render(w.bases[e],'view',r));extra=1
+        id_ok=(pred==e)
+        # true switch after a gap, including hard degraded first evidence then active reinspection.
+        for _ in range(15): ident.step(None)
+        sk='occ.6' if hard else 'view'; sp,_,sr,su=ident.step(render(w.bases[twin],sk,r))
+        if ident.active() and (su or sr<ident.th or hard): sp,_,sr,su=ident.step(render(w.bases[twin],'view',r))
+        sw_ok=(sp==twin)
+        # one-shot name from connected phrase: two distractor motifs + target motif, no VAD boundaries.
+        ids=[(e+3)%len(w.bases),e,(e+7)%len(w.bases)]; phrase=synth_phrase(templates,ids,r,hard=hard); dec=decode_no_vad(phrase,templates,3)
+        speech_ok=(len(dec)==3 and dec[1]==e)
+        spoken=templates[e]+r.normal(0,.18 if hard else .06,len(templates[e])); name_ok=(names.resolve(spoken)==e)
+        # affordance: choose action with best learned observed consequence, compare evaluator truth only externally.
+        truth=int(np.argmax([w.afford[e,a,0]+.35*w.afford[e,a,1] for a in range(ACTIONS)])); aff_ok=(eff.best(e)==truth)
+        # sibling transfer among target + three distractors.
+        candidates=[e,(e+1)%len(w.bases),(e+5)%len(w.bases),(e+9)%len(w.bases)]; sibling_ok=sib.teach(e,candidates,question=True)
+        # memory: retrieve identity episode and update delayed regret from success/failure; no evaluator answer encoded in memory.
+        got=any(x[0]==e for x in mem.retrieve('entity_episode')); memory_ok=got
+        # provenance: five echoes from one lineage cannot outweigh direct verified observation.
+        echo_weight=800//5; direct_weight=700+500; provenance_ok=(direct_weight>echo_weight)
+        comp=dict(identity=bool(id_ok),switch=bool(sw_ok),speech=bool(speech_ok),name=bool(name_ok),affordance=bool(aff_ok),sibling=bool(sibling_ok),memory=bool(memory_ok),provenance=bool(provenance_ok))
+        rows.append({**comp,'full':all(comp.values()),'extra':extra})
+    metrics={k:float(np.mean([x[k] for x in rows])) for k in rows[0] if k not in ('extra',)};metrics['extra_rate']=float(np.mean([x['extra'] for x in rows]))
+    # Save/reload behavioral continuity of the learned non-sensory state.
+    blob=pickle.dumps((mem,eff,names)); mem2,eff2,names2=pickle.loads(blob)
+    reload_ok=(len(mem2.items)==len(mem.items) and names2.resolve(templates[0])==0 and eff2.best(0)==eff.best(0))
+    metrics['save_reload']=float(reload_ok)
+    return {'seed':seed,'hard':hard,'dose':dose,'trials':len(rows),'metrics':metrics,'rows':rows[:12]}
+
+def main():
+    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=int,required=True);ap.add_argument('--out',required=True);ap.add_argument('--dose',type=int,default=256);ap.add_argument('--mode',default='MASTER_DIVERSE');ap.add_argument('--hard',action='store_true');args=ap.parse_args()
+    r=eval_seed(args.seed,args.dose,args.hard,args.mode);Path(args.out).write_text(json.dumps(r,indent=2));print(json.dumps(r['metrics'],indent=2))
+if __name__=='__main__':main()

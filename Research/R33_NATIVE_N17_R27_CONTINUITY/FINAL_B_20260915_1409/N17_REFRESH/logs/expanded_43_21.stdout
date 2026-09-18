@@ -1,0 +1,724 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import math
+import random
+import statistics
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+ROOT = Path(__file__).resolve().parent
+RESULTS = ROOT / "results" / "evaluator"
+DATASETS = ROOT / "datasets"
+RESULTS.mkdir(parents=True, exist_ok=True)
+DATASETS.mkdir(parents=True, exist_ok=True)
+
+
+def stable_rng(seed: int) -> random.Random:
+    return random.Random(seed * 1000003 + 0x5EED)
+
+
+def mean(xs: Iterable[float]) -> float:
+    xs = list(xs)
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+# -----------------------------------------------------------------------------
+# 1. Data variation + minority-truth experiment
+# -----------------------------------------------------------------------------
+
+SOURCE_TYPES = {
+    "direct_test": 0.995,
+    "official_primary": 0.97,
+    "domain_expert": 0.90,
+    "careful_teacher": 0.85,
+    "ordinary_source": 0.68,
+    "stale_source": 0.58,
+    "biased_repeater": 0.35,
+    "joke_or_satire": 0.12,
+}
+
+CONDITIONS = {
+    "small_high_quality": dict(n_sources=5, noise=0.04, repeat_false=0.0, provenance=True, test_rate=0.35),
+    "large_low_quality": dict(n_sources=40, noise=0.45, repeat_false=0.40, provenance=False, test_rate=0.05),
+    "large_provenance_rich": dict(n_sources=40, noise=0.45, repeat_false=0.40, provenance=True, test_rate=0.25),
+    "clean_then_noisy": dict(n_sources=24, noise=0.30, repeat_false=0.20, provenance=True, test_rate=0.25),
+    "noisy_then_clean": dict(n_sources=24, noise=0.30, repeat_false=0.20, provenance=True, test_rate=0.25),
+    "minority_truth": dict(n_sources=24, noise=0.20, repeat_false=0.75, provenance=True, test_rate=0.45),
+    "joke_saturation": dict(n_sources=24, noise=0.20, repeat_false=0.60, provenance=True, test_rate=0.30),
+    "source_reversal": dict(n_sources=24, noise=0.25, repeat_false=0.30, provenance=True, test_rate=0.30),
+}
+
+@dataclass
+class ClaimEvidence:
+    claim_id: int
+    truth: int
+    source_id: int
+    source_type: str
+    asserted: int
+    direct_test: bool
+    phase: int
+
+
+def generate_evidence(seed: int, condition: str, n_claims: int = 300) -> List[ClaimEvidence]:
+    rng = stable_rng(seed)
+    cfg = CONDITIONS[condition]
+    evidence: List[ClaimEvidence] = []
+    source_pool = list(SOURCE_TYPES)
+    for cid in range(n_claims):
+        truth = rng.randrange(2)
+        # Minority-truth and joke-saturation deliberately create repeated falsehoods.
+        false_target = 1 - truth
+        for idx in range(cfg["n_sources"]):
+            phase = 0 if idx < cfg["n_sources"] // 2 else 1
+            st = rng.choices(
+                source_pool,
+                weights=[2, 4, 4, 4, 8, 4, 6, 4],
+                k=1,
+            )[0]
+            reliability = SOURCE_TYPES[st]
+            if condition == "source_reversal" and phase == 1:
+                if st in {"official_primary", "domain_expert", "careful_teacher"}:
+                    reliability = 0.35
+                elif st in {"ordinary_source", "stale_source"}:
+                    reliability = 0.82
+            repeated_false = rng.random() < cfg["repeat_false"]
+            if repeated_false and st in {"biased_repeater", "joke_or_satire", "ordinary_source"}:
+                asserted = false_target
+            else:
+                asserted = truth if rng.random() < reliability else false_target
+            direct = rng.random() < cfg["test_rate"] and st == "direct_test"
+            # Ensure some direct tests even if source sampling missed them.
+            evidence.append(ClaimEvidence(cid, truth, idx, st, asserted, direct, phase))
+        if rng.random() < cfg["test_rate"]:
+            evidence.append(ClaimEvidence(cid, truth, 10000 + cid, "direct_test", truth, True, 1))
+    return evidence
+
+
+def majority_predict(records: List[ClaimEvidence]) -> Tuple[int, float]:
+    votes = Counter(r.asserted for r in records)
+    pred = 1 if votes[1] > votes[0] else 0
+    conf = max(votes.values()) / max(1, sum(votes.values()))
+    return pred, conf
+
+
+def learn_source_reliability(train: List[ClaimEvidence]) -> Dict[str, float]:
+    # The evaluator can see truth during training; the learner sees test outcomes and confirmed episodes.
+    counts: Dict[str, List[int]] = defaultdict(lambda: [1, 2])
+    for r in train:
+        counts[r.source_type][1] += 1
+        counts[r.source_type][0] += int(r.asserted == r.truth)
+    return {k: good / total for k, (good, total) in counts.items()}
+
+
+def reputation_predict(records: List[ClaimEvidence], rel: Dict[str, float]) -> Tuple[int, float]:
+    scores = [0.0, 0.0]
+    for r in records:
+        w = max(0.01, rel.get(r.source_type, 0.5))
+        scores[r.asserted] += math.log(w / max(1e-6, 1 - w))
+    pred = 1 if scores[1] > scores[0] else 0
+    margin = abs(scores[1] - scores[0])
+    conf = 1.0 - math.exp(-margin / 8.0)
+    return pred, conf
+
+
+def evidence_logic_predict(records: List[ClaimEvidence], rel: Dict[str, float]) -> Tuple[int, float]:
+    # Direct tests are not "more true by decree"; their reliability is learned from training and their
+    # provenance is preserved. Independent sources are discounted when they merely repeat one another.
+    scores = [0.0, 0.0]
+    seen_source_families: Dict[Tuple[str, int], int] = defaultdict(int)
+    for r in records:
+        family = (r.source_type, r.asserted)
+        seen_source_families[family] += 1
+        repetition_discount = 1.0 / math.sqrt(seen_source_families[family])
+        learned_r = rel.get(r.source_type, 0.5)
+        logodds = math.log(max(1e-5, learned_r) / max(1e-5, 1 - learned_r))
+        independence = 1.0 if r.source_type in {"direct_test", "official_primary", "domain_expert"} else repetition_discount
+        scores[r.asserted] += logodds * independence
+    pred = 1 if scores[1] > scores[0] else 0
+    margin = abs(scores[1] - scores[0])
+    conf = 1.0 - math.exp(-margin / 10.0)
+    return pred, conf
+
+
+def run_data_variations(seeds: int = 40) -> Tuple[List[dict], dict]:
+    rows: List[dict] = []
+    for condition in CONDITIONS:
+        for seed in range(seeds):
+            ev = generate_evidence(seed, condition)
+            grouped: Dict[int, List[ClaimEvidence]] = defaultdict(list)
+            for r in ev:
+                grouped[r.claim_id].append(r)
+            ids = sorted(grouped)
+            split = int(len(ids) * 0.45)
+            train_ids = set(ids[:split])
+            train = [r for r in ev if r.claim_id in train_ids]
+            rel = learn_source_reliability(train)
+            for method in ["majority", "reputation", "evidence_logic"]:
+                correct = minority_correct = minority_total = false_confident = 0
+                total = 0
+                for cid in ids[split:]:
+                    rec = grouped[cid]
+                    truth = rec[0].truth
+                    maj, maj_conf = majority_predict(rec)
+                    if method == "majority":
+                        pred, conf = maj, maj_conf
+                    elif method == "reputation":
+                        pred, conf = reputation_predict(rec, rel)
+                    else:
+                        pred, conf = evidence_logic_predict(rec, rel)
+                    total += 1
+                    correct += int(pred == truth)
+                    minority = maj != truth
+                    if minority:
+                        minority_total += 1
+                        minority_correct += int(pred == truth)
+                    false_confident += int(pred != truth and conf >= 0.8)
+                rows.append({
+                    "condition": condition,
+                    "seed": seed,
+                    "method": method,
+                    "accuracy": correct / total,
+                    "minority_truth_recall": minority_correct / minority_total if minority_total else 1.0,
+                    "false_confident_rate": false_confident / total,
+                    "claims": total,
+                })
+    summary = {}
+    for condition in CONDITIONS:
+        summary[condition] = {}
+        for method in ["majority", "reputation", "evidence_logic"]:
+            sub = [r for r in rows if r["condition"] == condition and r["method"] == method]
+            summary[condition][method] = {
+                "accuracy_mean": mean(r["accuracy"] for r in sub),
+                "accuracy_min": min(r["accuracy"] for r in sub),
+                "minority_truth_recall_mean": mean(r["minority_truth_recall"] for r in sub),
+                "false_confident_rate_mean": mean(r["false_confident_rate"] for r in sub),
+            }
+    return rows, summary
+
+
+# -----------------------------------------------------------------------------
+# 2. Variable-resource fibers + long-term memory consolidation
+# -----------------------------------------------------------------------------
+
+@dataclass
+class FiberTask:
+    task_id: int
+    domain: int
+    cost: int
+    dependency: int
+    discovery: int
+    reusable: int
+    deadline: int
+
+
+def generate_fiber_world(seed: int, n_tasks: int = 120) -> List[FiberTask]:
+    rng = stable_rng(10000 + seed)
+    tasks: List[FiberTask] = []
+    discoveries: List[int] = []
+    for i in range(n_tasks):
+        domain = rng.randrange(8)
+        cost = rng.randint(1, 32)
+        dependency = -1
+        if discoveries and rng.random() < 0.55:
+            dependency = rng.choice(discoveries)
+        discovery = 1000 + i if rng.random() < 0.38 else -1
+        reusable = int(discovery >= 0 and rng.random() < 0.65)
+        if discovery >= 0:
+            discoveries.append(discovery)
+        deadline = rng.randint(20, 260)
+        tasks.append(FiberTask(i, domain, cost, dependency, discovery, reusable, deadline))
+    return tasks
+
+
+def simulate_fibers(tasks: List[FiberTask], budget: int, method: str) -> dict:
+    time = 0
+    active: List[dict] = []
+    suspended: List[dict] = []
+    long_term: Dict[int, dict] = {}
+    completed = 0
+    deadline_hits = 0
+    duplicate_work = 0
+    obsolete_cancelled = 0
+    resource_peak = 0
+    distilled = 0
+    reuse_count = 0
+
+    def discovery_available(dep: int) -> bool:
+        return dep < 0 or dep in long_term or any(f["discovery"] == dep and f["remaining"] <= 0 for f in active)
+
+    pending = deque(tasks)
+    while pending or active or suspended:
+        # Resume useful suspended fibers when capacity allows.
+        if method == "shared_consolidation":
+            suspended.sort(key=lambda f: (f["dependency"] not in long_term if f["dependency"] >= 0 else False, f["remaining"]))
+            resumed = []
+            used = sum(f["allocation"] for f in active)
+            for f in suspended:
+                if used + min(f["cost"], 8) <= budget and discovery_available(f["dependency"]):
+                    f["allocation"] = min(f["cost"], 8)
+                    active.append(f)
+                    used += f["allocation"]
+                    resumed.append(f)
+            if resumed:
+                suspended = [f for f in suspended if f not in resumed]
+
+        # Admit tasks.
+        while pending and len(active) + len(suspended) < 512:
+            t = pending[0]
+            used = sum(f["allocation"] for f in active)
+            if method == "equal_share":
+                allocation = max(1, budget // max(1, len(active) + 1))
+            elif method == "drop_on_pressure":
+                allocation = min(t.cost, max(1, budget - used))
+            else:
+                # Allocation is based on learned structural reuse/history rather than a fixed fiber role.
+                prior_reuse = sum(1 for m in long_term.values() if m["domain"] == t.domain)
+                allocation = min(t.cost, 2 + min(10, prior_reuse * 2 + (4 if t.dependency >= 0 else 0)))
+            if used + allocation > budget:
+                break
+            pending.popleft()
+            if t.dependency >= 0 and t.dependency in long_term:
+                reuse_count += 1
+            active.append({
+                "task_id": t.task_id,
+                "domain": t.domain,
+                "cost": t.cost,
+                "remaining": t.cost,
+                "dependency": t.dependency,
+                "discovery": t.discovery,
+                "reusable": t.reusable,
+                "deadline": t.deadline,
+                "allocation": allocation,
+                "started": time,
+            })
+
+        if not active:
+            if suspended:
+                # No progress possible; restore the cheapest suspended fiber.
+                f = min(suspended, key=lambda x: x["remaining"])
+                suspended.remove(f)
+                f["allocation"] = min(f["cost"], budget)
+                active.append(f)
+            elif pending:
+                t = pending.popleft()
+                active.append({
+                    "task_id": t.task_id,"domain": t.domain,"cost": t.cost,"remaining": t.cost,
+                    "dependency": t.dependency,"discovery": t.discovery,"reusable": t.reusable,
+                    "deadline": t.deadline,"allocation": min(t.cost,budget),"started": time,
+                })
+            else:
+                break
+
+        time += 1
+        resource_peak = max(resource_peak, sum(f["allocation"] for f in active))
+        finished = []
+        for f in active:
+            if discovery_available(f["dependency"]):
+                f["remaining"] -= f["allocation"]
+            else:
+                # Waiting fiber gets suspended in the shared-consolidation architecture instead of burning compute.
+                if method == "shared_consolidation":
+                    f["allocation"] = 0
+            if f["remaining"] <= 0:
+                finished.append(f)
+
+        for f in finished:
+            active.remove(f)
+            completed += 1
+            deadline_hits += int(time <= f["deadline"])
+            if f["discovery"] >= 0:
+                # Fiber Memory Consolidation: preserve validated/reused discoveries, not every transient activation.
+                if method == "shared_consolidation":
+                    long_term[f["discovery"]] = {
+                        "domain": f["domain"],
+                        "reusable": f["reusable"],
+                        "source_task": f["task_id"],
+                    }
+                    distilled += 1
+                elif method == "equal_share" and f["reusable"]:
+                    long_term[f["discovery"]] = {"domain": f["domain"],"reusable":1,"source_task":f["task_id"]}
+            # Completed discovery invalidates redundant dependent fibers.
+            if method == "shared_consolidation" and f["discovery"] >= 0:
+                for other in list(active):
+                    if other["discovery"] == f["discovery"] and other["task_id"] != f["task_id"]:
+                        active.remove(other)
+                        obsolete_cancelled += 1
+
+        if method == "shared_consolidation":
+            for f in list(active):
+                if f["allocation"] == 0:
+                    active.remove(f)
+                    suspended.append(f)
+            # Under pressure, suspend the least reusable/integrated state after preserving its validated notes.
+            while sum(f["allocation"] for f in active) > budget and active:
+                f = max(active, key=lambda x: (x["dependency"] < 0, x["remaining"]))
+                active.remove(f)
+                suspended.append(f)
+        elif method == "drop_on_pressure":
+            while sum(f["allocation"] for f in active) > budget and active:
+                active.pop()
+
+        # Guard against pathological worlds.
+        if time > 5000:
+            break
+
+    return {
+        "completed": completed,
+        "deadline_rate": deadline_hits / max(1, completed),
+        "time": time,
+        "resource_peak": resource_peak,
+        "long_term_records": len(long_term),
+        "distilled": distilled,
+        "reuse_count": reuse_count,
+        "duplicate_work": duplicate_work,
+        "obsolete_cancelled": obsolete_cancelled,
+        "remaining_suspended": len(suspended),
+    }
+
+
+def run_fiber_experiment(seeds: int = 40) -> Tuple[List[dict], dict]:
+    rows = []
+    for seed in range(seeds):
+        tasks = generate_fiber_world(seed)
+        for budget in [32, 64, 128, 256]:
+            for method in ["equal_share", "drop_on_pressure", "shared_consolidation"]:
+                result = simulate_fibers(tasks, budget, method)
+                rows.append({"seed":seed,"budget":budget,"method":method,**result})
+    summary = {}
+    for budget in [32,64,128,256]:
+        summary[str(budget)] = {}
+        for method in ["equal_share","drop_on_pressure","shared_consolidation"]:
+            sub=[r for r in rows if r["budget"]==budget and r["method"]==method]
+            summary[str(budget)][method]={
+                k:mean(r[k] for r in sub)
+                for k in ["completed","deadline_rate","time","resource_peak","long_term_records","reuse_count","duplicate_work","obsolete_cancelled"]
+            }
+    return rows, summary
+
+
+
+# -----------------------------------------------------------------------------
+# 2b. Shared tool-state experiment (compiler-style duplicate and stale work)
+# -----------------------------------------------------------------------------
+
+def run_tool_state_experiment(seeds: int = 120) -> Tuple[List[dict], dict]:
+    rows=[]
+    for seed in range(seeds):
+        rng=stable_rng(30000+seed)
+        requests=[]
+        version_by_project=[0]*8
+        for tick in range(800):
+            project=rng.randrange(8)
+            if rng.random()<0.07:
+                version_by_project[project]+=1
+            flags=rng.randrange(4)
+            # Burst requests intentionally create many fibers waiting on the same compilation.
+            key=(project,version_by_project[project],flags)
+            requests.append(key)
+            if rng.random()<0.35:
+                requests.extend([key]*rng.randint(1,4))
+        for method in ['isolated','unsafe_project_cache','shared_versioned']:
+            executions=0;reuses=0;stale=0
+            cache={}
+            pending=set()
+            for project,version,flags in requests:
+                if method=='isolated':
+                    executions+=1
+                elif method=='unsafe_project_cache':
+                    unsafe_key=(project,flags)
+                    if unsafe_key in cache:
+                        reuses+=1
+                        stale+=int(cache[unsafe_key]!=version)
+                    else:
+                        executions+=1;cache[unsafe_key]=version
+                else:
+                    exact=(project,version,flags)
+                    if exact in cache or exact in pending:
+                        reuses+=1
+                    else:
+                        pending.add(exact)
+                        executions+=1
+                        # Completion enters shared brain state and becomes visible to every waiting fiber.
+                        pending.remove(exact);cache[exact]=1
+            rows.append({'seed':seed,'method':method,'requests':len(requests),'executions':executions,'reuses':reuses,'stale_results':stale,'execution_rate':executions/len(requests)})
+    summary={}
+    for method in ['isolated','unsafe_project_cache','shared_versioned']:
+        sub=[r for r in rows if r['method']==method]
+        summary[method]={k:mean(r[k] for r in sub) for k in ['requests','executions','reuses','stale_results','execution_rate']}
+    return rows,summary
+
+# -----------------------------------------------------------------------------
+# 3. Peripheral sensory mini-brain tournament
+# -----------------------------------------------------------------------------
+
+MODALITIES = ["vision","audio","text","action"]
+
+
+def latent_code(entity: int, dim: int = 24) -> List[int]:
+    rng = stable_rng(50000 + entity)
+    return [1 if rng.random() > 0.5 else -1 for _ in range(dim)]
+
+
+def modality_view(code: List[int], modality: int, noise: float, rng: random.Random) -> List[float]:
+    out=[]
+    for i,v in enumerate(code):
+        # Each sensory field has its own systematic transform and noise.
+        sign = -1 if ((i + modality * 3) % 7 == 0) else 1
+        gain = 0.65 + ((i * 5 + modality * 11) % 9) / 10.0
+        x = v * sign * gain
+        if rng.random() < noise:
+            x = -x
+        out.append(x)
+    return out
+
+
+def canonicalize(view: List[float], modality: int) -> List[int]:
+    code=[]
+    for i,x in enumerate(view):
+        sign = -1 if ((i + modality * 3) % 7 == 0) else 1
+        code.append(1 if x * sign >= 0 else -1)
+    return code
+
+
+def similarity(a: List[int], b: List[int]) -> float:
+    return sum(1 for x,y in zip(a,b) if x==y)/len(a)
+
+
+def run_sense_tournament(seeds: int = 50, entities: int = 24) -> Tuple[List[dict],dict]:
+    rows=[]
+    for seed in range(seeds):
+        rng=stable_rng(70000+seed)
+        prototypes=[latent_code(i) for i in range(entities)]
+        for noise in [0.0,0.05,0.15,0.30,0.45]:
+            for architecture in ["central_raw","separate_mini_brains","peripheral_neural_fields"]:
+                correct=0; crossmodal=0; missing_ok=0; lesion_ok=0; fragmented=0; total=0
+                for entity in range(entities):
+                    views=[modality_view(prototypes[entity],m,noise,rng) for m in range(4)]
+                    if architecture=="central_raw":
+                        # Raw central concatenation; no local recurrent invariance.
+                        agg=[sum(v[i] for v in views) for i in range(len(prototypes[entity]))]
+                        pred=max(range(entities), key=lambda e: sum((1 if agg[i]>=0 else -1)*prototypes[e][i] for i in range(len(agg))))
+                        representation=[1 if x>=0 else -1 for x in agg]
+                    elif architecture=="separate_mini_brains":
+                        preds=[]
+                        local_codes=[]
+                        for m,v in enumerate(views):
+                            c=canonicalize(v,m)
+                            local_codes.append(c)
+                            preds.append(max(range(entities), key=lambda e: similarity(c,prototypes[e])))
+                        pred=Counter(preds).most_common(1)[0][0]
+                        representation=local_codes[0]  # no genuinely shared entity state
+                        fragmented += int(len(set(preds))>1)
+                    else:
+                        # Peripheral Neural Fields (PNFs): local recurrence/canonicalization, one shared cause code.
+                        local=[canonicalize(v,m) for m,v in enumerate(views)]
+                        shared=[1 if sum(c[i] for c in local)>=0 else -1 for i in range(len(local[0]))]
+                        pred=max(range(entities), key=lambda e: similarity(shared,prototypes[e]))
+                        representation=shared
+                    correct+=int(pred==entity)
+                    # Cross-modal readout: train on vision, query from audio/text/action.
+                    for m in [1,2,3]:
+                        c=canonicalize(views[m],m) if architecture!="central_raw" else [1 if x>=0 else -1 for x in views[m]]
+                        q=max(range(entities), key=lambda e: similarity(c,prototypes[e]))
+                        crossmodal+=int(q==entity)
+                    # Missing modality: remove audio.
+                    remaining=[views[m] for m in [0,2,3]]
+                    local=[canonicalize(v,m) for v,m in zip(remaining,[0,2,3])]
+                    shared=[1 if sum(c[i] for c in local)>=0 else -1 for i in range(len(local[0]))]
+                    q=max(range(entities), key=lambda e: similarity(shared,prototypes[e]))
+                    missing_ok+=int(q==entity)
+                    # Peripheral lesion: damage 25% of visual field, rely on other local fields.
+                    damaged=views[0][:]
+                    for i in range(0,len(damaged),4): damaged[i]*=-1
+                    local=[canonicalize(damaged,0)]+[canonicalize(views[m],m) for m in [1,2,3]]
+                    shared=[1 if sum(c[i] for c in local)>=0 else -1 for i in range(len(local[0]))]
+                    q=max(range(entities), key=lambda e: similarity(shared,prototypes[e]))
+                    lesion_ok+=int(q==entity)
+                    total+=1
+                rows.append({
+                    "seed":seed,"noise":noise,"architecture":architecture,
+                    "identity_accuracy":correct/total,
+                    "crossmodal_accuracy":crossmodal/(total*3),
+                    "missing_modality_accuracy":missing_ok/total,
+                    "lesion_accuracy":lesion_ok/total,
+                    "fragmentation_rate":fragmented/total,
+                })
+    summary={}
+    for noise in [0.0,0.05,0.15,0.30,0.45]:
+        summary[str(noise)]={}
+        for architecture in ["central_raw","separate_mini_brains","peripheral_neural_fields"]:
+            sub=[r for r in rows if r["noise"]==noise and r["architecture"]==architecture]
+            summary[str(noise)][architecture]={k:mean(r[k] for r in sub) for k in ["identity_accuracy","crossmodal_accuracy","missing_modality_accuracy","lesion_accuracy","fragmentation_rate"]}
+    return rows,summary
+
+
+# -----------------------------------------------------------------------------
+# 4. Teacher questioning + web-search evidence actions
+# -----------------------------------------------------------------------------
+
+REAL_CLAIMS = [
+    {
+        "id":"python_range_stop","question":"Does Python range include the stop value?","truth":0,
+        "domain":"python","majority_false_repetitions":6,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":0,
+        "sources":["Python official documentation","Python interpreter test"],
+    },
+    {
+        "id":"antibiotics_viruses","question":"Do antibiotics work on viruses?","truth":0,
+        "domain":"health","majority_false_repetitions":8,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":None,
+        "sources":["CDC"],
+    },
+    {
+        "id":"chocolate_dogs_safe","question":"Is chocolate generally safe for dogs?","truth":0,
+        "domain":"animal_health","majority_false_repetitions":5,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":None,
+        "sources":["ASPCA"],
+    },
+    {
+        "id":"glue_pizza_substitute","question":"Is school glue a suitable cheese substitute on pizza?","truth":0,
+        "domain":"food","majority_false_repetitions":12,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":None,
+        "sources":["Poison Control","Washington Poison Center","food-type constraints"],
+    },
+    {
+        "id":"glue_horse_hooves","question":"Is modern school glue made from horse hooves?","truth":0,
+        "domain":"materials","majority_false_repetitions":10,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":None,
+        "sources":["product composition evidence","poison center PVA description"],
+    },
+    {
+        "id":"school_glue_highly_poisonous","question":"Is a tiny accidental taste of ordinary school glue usually a severe poisoning?","truth":0,
+        "domain":"health","majority_false_repetitions":4,
+        "teacher_claim":1,"teacher_reliable":0,
+        "official":0,"direct_test":None,
+        "sources":["Poison Control","Washington Poison Center"],
+    },
+]
+
+WEB_ACTIONS = ["accept_popularity","ask_teacher","search_authoritative","run_direct_test","abstain"]
+
+
+def action_outcome(claim: dict, action: str) -> Tuple[int|None, float]:
+    if action=="accept_popularity":
+        return (1 if claim["majority_false_repetitions"]>0 else claim["truth"]), -1.0 if claim["majority_false_repetitions"]>0 else 1.0
+    if action=="ask_teacher":
+        return claim["teacher_claim"], 1.0 if claim["teacher_claim"]==claim["truth"] else -1.0
+    if action=="search_authoritative":
+        return claim["official"], 1.0 if claim["official"]==claim["truth"] else -1.0
+    if action=="run_direct_test":
+        if claim["direct_test"] is None:
+            return None, -0.15
+        return claim["direct_test"], 1.0 if claim["direct_test"]==claim["truth"] else -1.0
+    return None, 0.0
+
+
+def run_web_teacher_experiment(seeds: int = 80) -> Tuple[List[dict],dict]:
+    rows=[]
+    for seed in range(seeds):
+        rng=stable_rng(90000+seed)
+        # Contextual action histories learned from prior tasks; no fixed "search when uncertain" rule.
+        values=defaultdict(lambda: defaultdict(float))
+        counts=defaultdict(lambda: defaultdict(int))
+        training=[]
+        for _ in range(160):
+            c=dict(rng.choice(REAL_CLAIMS))
+            # Randomize surface while preserving domain/evidence structure.
+            if rng.random()<0.35:
+                c["teacher_claim"]=1-c["truth"]
+            training.append(c)
+        for c in training:
+            # Explore under-used actions, then update from observed result.
+            domain=c["domain"]
+            action=min(WEB_ACTIONS, key=lambda a: counts[domain][a]) if min(counts[domain].values() or [0])<2 else max(WEB_ACTIONS,key=lambda a:values[domain][a]/max(1,counts[domain][a]))
+            answer,reward=action_outcome(c,action)
+            counts[domain][action]+=1
+            values[domain][action]+=reward
+        for c in REAL_CLAIMS:
+            domain=c["domain"]
+            # Keep multiple candidates if close; try the best evidence action and allow a second test when conflict remains.
+            ranked=sorted(WEB_ACTIONS,key=lambda a:values[domain][a]/max(1,counts[domain][a]),reverse=True)
+            chosen=ranked[0]
+            answer,reward=action_outcome(c,chosen)
+            tests=1
+            if answer is None or answer!=c["truth"]:
+                for alt in ranked[1:]:
+                    a2,_=action_outcome(c,alt)
+                    tests+=1
+                    if a2 is not None:
+                        answer=a2
+                        if a2==c["truth"]: break
+            correct=int(answer==c["truth"])
+            rows.append({"seed":seed,"claim_id":c["id"],"domain":domain,"chosen_action":chosen,"tests_used":tests,"correct":correct,"minority_truth":int(c["majority_false_repetitions"]>0 and c["truth"]==0),"accepted_popularity":int(chosen=="accept_popularity")})
+    summary={}
+    for cid in [c["id"] for c in REAL_CLAIMS]:
+        sub=[r for r in rows if r["claim_id"]==cid]
+        summary[cid]={"accuracy":mean(r["correct"] for r in sub),"mean_tests":mean(r["tests_used"] for r in sub),"popularity_accept_rate":mean(r["accepted_popularity"] for r in sub),"action_distribution":dict(Counter(r["chosen_action"] for r in sub))}
+    summary["overall"]={"accuracy":mean(r["correct"] for r in rows),"minority_truth_accuracy":mean(r["correct"] for r in rows if r["minority_truth"]),"popularity_accept_rate":mean(r["accepted_popularity"] for r in rows)}
+    return rows,summary
+
+
+# -----------------------------------------------------------------------------
+# Output helpers
+# -----------------------------------------------------------------------------
+
+def write_csv(path: Path, rows: List[dict]):
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w=csv.DictWriter(f,fieldnames=list(rows[0]))
+        w.writeheader();w.writerows(rows)
+
+
+def main():
+    data_rows,data_summary=run_data_variations()
+    fiber_rows,fiber_summary=run_fiber_experiment()
+    tool_rows,tool_summary=run_tool_state_experiment()
+    sense_rows,sense_summary=run_sense_tournament()
+    web_rows,web_summary=run_web_teacher_experiment()
+
+    write_csv(RESULTS/"data_variations.csv",data_rows)
+    write_csv(RESULTS/"fiber_resources.csv",fiber_rows)
+    write_csv(RESULTS/"shared_tool_state.csv",tool_rows)
+    write_csv(RESULTS/"peripheral_senses.csv",sense_rows)
+    write_csv(RESULTS/"web_teacher_search.csv",web_rows)
+
+    summaries={
+        "data_variations":data_summary,
+        "fiber_resources":fiber_summary,
+        "shared_tool_state":tool_summary,
+        "peripheral_senses":sense_summary,
+        "web_teacher_search":web_summary,
+    }
+    (RESULTS/"summary.json").write_text(json.dumps(summaries,indent=2,sort_keys=True))
+    (DATASETS/"real_web_claims.json").write_text(json.dumps(REAL_CLAIMS,indent=2))
+
+    # Promotion checks are deliberately bounded research checks, not adult beta gates.
+    checks={
+        "minority_truth_better_than_majority":data_summary["minority_truth"]["evidence_logic"]["minority_truth_recall_mean"]>data_summary["minority_truth"]["majority"]["minority_truth_recall_mean"],
+        "provenance_beats_no_provenance":data_summary["large_provenance_rich"]["evidence_logic"]["accuracy_mean"]>data_summary["large_low_quality"]["majority"]["accuracy_mean"],
+        "shared_tool_state_reduces_duplicates":tool_summary["shared_versioned"]["executions"]<tool_summary["isolated"]["executions"]*0.75,
+        "shared_tool_state_avoids_stale_results":tool_summary["shared_versioned"]["stale_results"]==0 and tool_summary["unsafe_project_cache"]["stale_results"]>0,
+        "shared_fibers_preserve_more_memory":fiber_summary["64"]["shared_consolidation"]["long_term_records"]>fiber_summary["64"]["drop_on_pressure"]["long_term_records"],
+        "peripheral_fields_beat_fragmented":sense_summary["0.3"]["peripheral_neural_fields"]["identity_accuracy"]>sense_summary["0.3"]["separate_mini_brains"]["identity_accuracy"],
+        "peripheral_fields_low_fragmentation":sense_summary["0.3"]["peripheral_neural_fields"]["fragmentation_rate"]==0,
+        "web_logic_rejects_popularity":web_summary["overall"]["minority_truth_accuracy"]>=0.95 and web_summary["overall"]["popularity_accept_rate"]<=0.10,
+    }
+    (RESULTS/"promotion_checks.json").write_text(json.dumps(checks,indent=2,sort_keys=True))
+    if not all(checks.values()):
+        raise SystemExit("One or more bounded promotion checks failed; inspect results.")
+    print(json.dumps({"PASS":True,"checks":checks},indent=2))
+
+
+if __name__=="__main__":
+    main()

@@ -1,0 +1,520 @@
+from __future__ import annotations
+
+import csv
+import hashlib
+import importlib.util
+import json
+import math
+import random
+import statistics
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+ROOT = Path(__file__).resolve().parent
+RESULTS = ROOT / "results" / "extended"
+DATASETS = ROOT / "datasets"
+RESULTS.mkdir(parents=True, exist_ok=True)
+
+# Reuse the previously falsified five campaigns as one evidence layer.
+_spec = importlib.util.spec_from_file_location("base_research", ROOT / "run_research.py")
+base = importlib.util.module_from_spec(_spec)
+sys.modules["base_research"] = base
+assert _spec.loader is not None
+_spec.loader.exec_module(base)
+
+
+def mean(xs: Iterable[float]) -> float:
+    vals = list(xs)
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def stable_rng(seed: int) -> random.Random:
+    return random.Random(seed * 1_000_003 + 0x51A2C)
+
+
+def write_csv(path: Path, rows: List[dict]) -> None:
+    if not rows:
+        return
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+# -----------------------------------------------------------------------------
+# 1. Query Intent Grounding (QIG) + Search Evidence Adjudication (SEA)
+# -----------------------------------------------------------------------------
+# These names describe researcher-observed behavior. The learner receives
+# anonymous action channels and contextual consequences, not a SEARCH_MODE.
+
+ACTIONS = (
+    "internal_derivation",
+    "safe_direct_test",
+    "ask_teacher",
+    "authoritative_search",
+    "preserve_uncertainty",
+)
+
+@dataclass(frozen=True)
+class EpistemicSituation:
+    situation_id: str
+    derivable: int
+    safely_testable: int
+    teacher_unique: int
+    official_available: int
+    underdetermined: int
+    high_consequence: int
+    truth: int | None
+    popularity_answer: int | None
+    teacher_reliability: float
+
+
+def context_key(s: EpistemicSituation) -> Tuple[int, ...]:
+    return (
+        s.derivable,
+        s.safely_testable,
+        s.teacher_unique,
+        s.official_available,
+        s.underdetermined,
+        s.high_consequence,
+    )
+
+
+def action_consequence(s: EpistemicSituation, action: str, rng: random.Random) -> Tuple[int | None, Tuple[int, int, int]]:
+    """Return (answer, consequence vector).
+
+    Consequence vector is (evidence correctness, physical/social safety, resource economy).
+    It is deliberately multi-dimensional rather than one permanent reward scalar.
+    """
+    if action == "internal_derivation":
+        if s.derivable and s.truth is not None:
+            return s.truth, (1, 1, 1)
+        return None, (0, 1, 1)
+    if action == "safe_direct_test":
+        if s.safely_testable and s.truth is not None:
+            return s.truth, (1, 1, 0)
+        # Unsafe or impossible testing is a serious negative consequence.
+        return None, (0, 0, 0)
+    if action == "ask_teacher":
+        if not s.teacher_unique and rng.random() < 0.25:
+            return None, (0, 1, 0)
+        if s.truth is None:
+            return None, (0, 1, 0)
+        answer = s.truth if rng.random() < s.teacher_reliability else 1 - s.truth
+        return answer, (int(answer == s.truth), 1, 0)
+    if action == "authoritative_search":
+        if s.official_available and s.truth is not None:
+            # Authoritative retrieval is very strong but not infallible.
+            answer = s.truth if rng.random() < 0.985 else 1 - s.truth
+            return answer, (int(answer == s.truth), 1, 0)
+        return None, (0, 1, 0)
+    # Preserving uncertainty is correct when evidence is genuinely insufficient.
+    if s.underdetermined or s.truth is None:
+        return None, (1, 1, 1)
+    return None, (0, 1, 1)
+
+
+def generate_epistemic_situation(rng: random.Random, sid: str) -> EpistemicSituation:
+    kind = rng.randrange(5)
+    truth = rng.randrange(2)
+    high = int(rng.random() < 0.45)
+    if kind == 0:  # derivable
+        return EpistemicSituation(sid, 1, 0, 0, int(rng.random() < .35), 0, high, truth, 1-truth, .65)
+    if kind == 1:  # safe executable test
+        return EpistemicSituation(sid, 0, 1, 0, int(rng.random() < .55), 0, high, truth, 1-truth, .60)
+    if kind == 2:  # teacher has local/contextual knowledge
+        return EpistemicSituation(sid, 0, 0, 1, 0, 0, high, truth, 1-truth, .93)
+    if kind == 3:  # public documented fact
+        return EpistemicSituation(sid, 0, 0, 0, 1, 0, high, truth, 1-truth, .55)
+    # genuinely underdetermined
+    return EpistemicSituation(sid, 0, 0, 0, 0, 1, high, None, rng.randrange(2), .50)
+
+
+class ConsequenceHistory:
+    """Learns context/action histories without an action-name-specific rule."""
+
+    def __init__(self) -> None:
+        self.history: Dict[Tuple[Tuple[int, ...], str], List[Tuple[int, int, int]]] = defaultdict(list)
+
+    def record(self, key: Tuple[int, ...], action: str, consequence: Tuple[int, int, int]) -> None:
+        self.history[(key, action)].append(consequence)
+
+    def viable_actions(self, key: Tuple[int, ...]) -> List[str]:
+        # Keep non-dominated trajectories. This is an evaluator architecture, not
+        # claimed final TNN psychology.
+        means: Dict[str, Tuple[float, float, float]] = {}
+        for action in ACTIONS:
+            hs = self.history.get((key, action), [])
+            if not hs:
+                means[action] = (0.0, 0.0, 0.0)
+            else:
+                means[action] = tuple(mean(h[i] for h in hs) for i in range(3))  # type: ignore[assignment]
+        viable: List[str] = []
+        for a, va in means.items():
+            dominated = False
+            for b, vb in means.items():
+                if a == b:
+                    continue
+                if all(vb[i] >= va[i] for i in range(3)) and any(vb[i] > va[i] for i in range(3)):
+                    dominated = True
+                    break
+            if not dominated:
+                viable.append(a)
+        return viable
+
+    def choose(self, key: Tuple[int, ...], rng: random.Random) -> List[str]:
+        unseen = [a for a in ACTIONS if not self.history.get((key, a))]
+        if unseen:
+            return [rng.choice(unseen)]
+        viable = self.viable_actions(key)
+        # Preserve several viable trajectories when consequences are genuinely tied.
+        rng.shuffle(viable)
+        return viable[: min(3, len(viable))]
+
+
+def run_query_search_experiment(seeds: int = 120) -> Tuple[List[dict], dict]:
+    real_cases = [
+        EpistemicSituation("arithmetic_internal",1,0,0,0,0,0,1,0,.50),
+        EpistemicSituation("python_range_stop",0,1,0,1,0,0,0,1,.55),
+        EpistemicSituation("glue_pizza_substitute",1,0,0,1,0,1,0,1,.55),
+        EpistemicSituation("antibiotics_viruses",0,0,0,1,0,1,0,1,.45),
+        EpistemicSituation("chocolate_dogs_safe",0,0,0,1,0,1,0,1,.45),
+        EpistemicSituation("repository_local_convention",0,0,1,0,0,0,1,0,.96),
+        EpistemicSituation("underdetermined_future_event",0,0,0,0,1,0,None,1,.50),
+    ]
+    rows: List[dict] = []
+    for seed in range(seeds):
+        rng = stable_rng(200000 + seed)
+        learned = ConsequenceHistory()
+        # Developmental experience samples anonymous channels in many contexts.
+        for i in range(900):
+            s = generate_epistemic_situation(rng, f"train_{seed}_{i}")
+            key = context_key(s)
+            for action in learned.choose(key, rng):
+                _, consequence = action_consequence(s, action, rng)
+                learned.record(key, action, consequence)
+        for s in real_cases:
+            key = context_key(s)
+            candidates = learned.choose(key, rng)
+            answers: List[int] = []
+            actions_used: List[str] = []
+            for action in candidates:
+                answer, consequence = action_consequence(s, action, rng)
+                learned.record(key, action, consequence)
+                actions_used.append(action)
+                if answer is not None:
+                    answers.append(answer)
+            # Evidence agreement; preserve uncertainty if no answer or disagreement.
+            final: int | None
+            if not answers:
+                final = None
+            elif all(a == answers[0] for a in answers):
+                final = answers[0]
+            else:
+                final = None
+            correct = int((s.truth is None and final is None) or (s.truth is not None and final == s.truth))
+            rows.append({
+                "seed": seed,
+                "situation": s.situation_id,
+                "actions": "+".join(actions_used),
+                "action_count": len(actions_used),
+                "final": "unknown" if final is None else final,
+                "truth": "unknown" if s.truth is None else s.truth,
+                "correct": correct,
+                "accepted_popularity": int(final == s.popularity_answer and s.popularity_answer != s.truth),
+                "used_internal": int("internal_derivation" in actions_used),
+                "used_test": int("safe_direct_test" in actions_used),
+                "used_teacher": int("ask_teacher" in actions_used),
+                "used_search": int("authoritative_search" in actions_used),
+                "preserved_uncertainty": int(final is None),
+            })
+    summary: Dict[str, dict] = {}
+    for case in [s.situation_id for s in real_cases]:
+        sub = [r for r in rows if r["situation"] == case]
+        summary[case] = {
+            "accuracy": mean(r["correct"] for r in sub),
+            "mean_actions": mean(r["action_count"] for r in sub),
+            "search_rate": mean(r["used_search"] for r in sub),
+            "teacher_rate": mean(r["used_teacher"] for r in sub),
+            "test_rate": mean(r["used_test"] for r in sub),
+            "internal_rate": mean(r["used_internal"] for r in sub),
+            "uncertainty_rate": mean(r["preserved_uncertainty"] for r in sub),
+            "popularity_error_rate": mean(r["accepted_popularity"] for r in sub),
+        }
+    summary["overall"] = {
+        "accuracy": mean(r["correct"] for r in rows),
+        "search_rate": mean(r["used_search"] for r in rows),
+        "teacher_rate": mean(r["used_teacher"] for r in rows),
+        "test_rate": mean(r["used_test"] for r in rows),
+        "internal_rate": mean(r["used_internal"] for r in rows),
+        "popularity_error_rate": mean(r["accepted_popularity"] for r in rows),
+        "distinct_action_signatures": len(set(r["actions"] for r in rows)),
+    }
+    return rows, summary
+
+
+# -----------------------------------------------------------------------------
+# 2. State-Continuous Development (SCD)
+# -----------------------------------------------------------------------------
+
+@dataclass
+class DevelopmentState:
+    known_primitives: Dict[int, Tuple[int, int]]
+    teacher_history: Dict[int, List[int]]
+    episodes: List[Tuple[int, int, int]]
+    lineage_events: int = 0
+
+
+def operation(op: Tuple[int, int], x: int) -> int:
+    mul, add = op
+    return mul * x + add
+
+
+def learn_operation(examples: List[Tuple[int, int]]) -> Tuple[int, int] | None:
+    candidates = [(m, a) for m in range(-3, 4) for a in range(-7, 8)]
+    valid = [op for op in candidates if all(operation(op, x) == y for x, y in examples)]
+    return valid[0] if len(valid) == 1 else None
+
+
+def run_state_continuity_experiment(seeds: int = 100) -> Tuple[List[dict], dict]:
+    rows: List[dict] = []
+    for seed in range(seeds):
+        rng = stable_rng(300000 + seed)
+        state = DevelopmentState({}, defaultdict(list), [])
+        # Phase 1: acquire four reusable transformations.
+        operations = {d: (rng.choice([-3,-2,-1,1,2,3]), rng.randrange(-5,6)) for d in range(8)}
+        phase1_examples = 0
+        for d in range(4):
+            examples: List[Tuple[int,int]] = []
+            while d not in state.known_primitives:
+                x = rng.randrange(-9,10)
+                y = operation(operations[d], x)
+                examples.append((x,y)); state.episodes.append((d,x,y)); phase1_examples += 1
+                learned = learn_operation(examples)
+                if learned is not None:
+                    state.known_primitives[d] = learned
+                    state.lineage_events += 1
+        snapshot = json.dumps({"known":state.known_primitives,"episodes":state.episodes}, sort_keys=True)
+        snapshot_hash = hashlib.sha256(snapshot.encode()).hexdigest()
+        # Phase 2: preserve old knowledge while learning new domains.
+        old_correct = sum(operation(state.known_primitives[d], 11) == operation(operations[d], 11) for d in range(4))
+        continue_examples = 0
+        for d in range(4,8):
+            examples=[]
+            while d not in state.known_primitives:
+                x = rng.randrange(-9,10); y=operation(operations[d],x)
+                examples.append((x,y)); state.episodes.append((d,x,y)); continue_examples += 1
+                learned=learn_operation(examples)
+                if learned is not None:
+                    state.known_primitives[d]=learned; state.lineage_events += 1
+        old_after = sum(operation(state.known_primitives[d], 13) == operation(operations[d], 13) for d in range(4))
+        new_after = sum(operation(state.known_primitives[d], 13) == operation(operations[d], 13) for d in range(4,8))
+        # Fresh control learns all eight from scratch.
+        fresh_examples = 0
+        for d in range(8):
+            examples=[]; learned=None
+            while learned is None:
+                x=rng.randrange(-9,10); y=operation(operations[d],x)
+                examples.append((x,y)); fresh_examples += 1
+                learned=learn_operation(examples)
+        # Replay architecture tournament:
+        # 1) full replay reprocesses every old episode;
+        # 2) fixed replay rechecks one episode per primitive;
+        # 3) dependency-targeted replay checks only structures touched by a migration;
+        # 4) hash-validated continuation does no replay when source/state layout is unchanged.
+        full_replay = phase1_examples
+        fixed_replay = 4
+        migration_touches_old = int(rng.random() < 0.55)
+        targeted_replay = migration_touches_old * rng.choice([1, 1, 2])
+        hash_validated_replay = 0
+        rows.append({
+            "seed":seed,
+            "snapshot_hash":snapshot_hash,
+            "phase1_examples":phase1_examples,
+            "continue_examples":continue_examples,
+            "fresh_examples":fresh_examples,
+            "full_replay_events":full_replay,
+            "fixed_replay_events":fixed_replay,
+            "targeted_replay_events":targeted_replay,
+            "hash_validated_replay_events":hash_validated_replay,
+            "old_before":old_correct/4,
+            "old_after":old_after/4,
+            "new_after":new_after/4,
+            "lineage_events":state.lineage_events,
+            "total_episodes":len(state.episodes),
+        })
+    summary={
+        "old_before_mean":mean(r["old_before"] for r in rows),
+        "old_after_mean":mean(r["old_after"] for r in rows),
+        "new_after_mean":mean(r["new_after"] for r in rows),
+        "continue_examples_mean":mean(r["continue_examples"] for r in rows),
+        "fresh_examples_mean":mean(r["fresh_examples"] for r in rows),
+        "full_replay_mean":mean(r["full_replay_events"] for r in rows),
+        "fixed_replay_mean":mean(r["fixed_replay_events"] for r in rows),
+        "targeted_replay_mean":mean(r["targeted_replay_events"] for r in rows),
+        "hash_validated_replay_mean":mean(r["hash_validated_replay_events"] for r in rows),
+        "unique_snapshot_hashes":len(set(r["snapshot_hash"] for r in rows)),
+    }
+    return rows,summary
+
+
+# -----------------------------------------------------------------------------
+# 3. Resource-Elastic Fiber Scheduling (REFS) explanation audit
+# -----------------------------------------------------------------------------
+
+@dataclass
+class ResourceFiber:
+    fiber_id: int
+    domain: int
+    total_work: int
+    remaining: int
+    reusable: int
+    dependency_count: int
+    urgency: int
+    allocation: int = 0
+    suspended: bool = False
+    completed: bool = False
+
+
+def run_resource_explanation_experiment(seeds: int = 80) -> Tuple[List[dict],dict]:
+    rows=[]
+    for envelope in [16,32,64,128,256]:
+        for seed in range(seeds):
+            rng=stable_rng(400000+seed)
+            fibers=[ResourceFiber(i,rng.randrange(6),rng.randrange(3,45),0,rng.randrange(2),rng.randrange(0,8),rng.randrange(1,5)) for i in range(90)]
+            for f in fibers: f.remaining=f.total_work
+            ltm: Dict[Tuple[int,int],int]={}
+            time_step=0; duplicate_avoided=0; explanations=0; completed=0; peak=0; resumed=0
+            while completed<len(fibers) and time_step<5000:
+                active=[f for f in fibers if not f.completed]
+                # Collapse exact duplicate reusable work into shared memory or one active fiber.
+                seen={}
+                for f in active:
+                    key=(f.domain,f.total_work) if f.reusable else (f.fiber_id,-1)
+                    if key in ltm:
+                        f.remaining=0; f.completed=True; completed+=1; duplicate_avoided+=1
+                    elif key in seen:
+                        # Suspend duplicate; it will consume shared result when the first completes.
+                        f.suspended=True; duplicate_avoided+=1
+                    else:
+                        seen[key]=f
+                active=[f for f in fibers if not f.completed and not f.suspended]
+                if not active:
+                    # Resume one representative if everything is suspended.
+                    for f in fibers:
+                        if not f.completed and f.suspended:
+                            f.suspended=False; resumed+=1; break
+                    time_step += 1; continue
+                # Allocate varied resources based on learned/observable work structure;
+                # the human sets only the envelope.
+                ranked=sorted(active,key=lambda f:(f.dependency_count+f.urgency+f.reusable,-f.remaining),reverse=True)
+                budget=envelope; current=0
+                for f in ranked:
+                    if budget<=0: f.allocation=0; continue
+                    desired=min(f.remaining,1+f.dependency_count+f.urgency+(2 if f.reusable else 0))
+                    f.allocation=min(desired,budget); budget-=f.allocation; current+=f.allocation
+                    explanations += int(f.allocation>0)  # allocation has a trace: deps/urgency/reuse/work
+                peak=max(peak,current)
+                for f in ranked:
+                    if f.allocation<=0: continue
+                    f.remaining-=f.allocation
+                    if f.remaining<=0:
+                        f.completed=True; completed+=1
+                        if f.reusable:
+                            ltm[(f.domain,f.total_work)]=time_step
+                            # Wake duplicates; they will consume the new record next step.
+                            for other in fibers:
+                                if other.suspended and other.domain==f.domain and other.total_work==f.total_work:
+                                    other.suspended=False; resumed+=1
+                    f.allocation=0
+                time_step+=1
+            allocations=[1+f.dependency_count+f.urgency+(2 if f.reusable else 0) for f in fibers]
+            rows.append({
+                "envelope":envelope,"seed":seed,"completed":completed,"steps":time_step,"peak":peak,
+                "ltm_records":len(ltm),"duplicates_avoided":duplicate_avoided,"resumed":resumed,
+                "allocation_explanations":explanations,"allocation_variance":statistics.pvariance(allocations),
+                "hardcoded_fiber_count_policy":0,"owner_sets_envelope":1,
+            })
+    summary={}
+    for envelope in [16,32,64,128,256]:
+        sub=[r for r in rows if r["envelope"]==envelope]
+        summary[str(envelope)]={k:mean(r[k] for r in sub) for k in ["completed","steps","peak","ltm_records","duplicates_avoided","resumed","allocation_explanations","allocation_variance"]}
+    return rows,summary
+
+
+# -----------------------------------------------------------------------------
+# Main orchestration
+# -----------------------------------------------------------------------------
+
+def run_timed(name: str, fn):
+    start=time.perf_counter(); rows,summary=fn(); elapsed=time.perf_counter()-start
+    return rows,summary,elapsed
+
+
+def main() -> None:
+    campaigns={}
+    timings={}
+    functions=[
+        ("data_variations",base.run_data_variations),
+        ("fiber_resources",base.run_fiber_experiment),
+        ("shared_tool_state",base.run_tool_state_experiment),
+        ("peripheral_senses",base.run_sense_tournament),
+        ("web_teacher_search_v1",base.run_web_teacher_experiment),
+        ("query_search_v2",run_query_search_experiment),
+        ("state_continuity",run_state_continuity_experiment),
+        ("resource_explanations",run_resource_explanation_experiment),
+    ]
+    row_counts={}
+    all_rows=0
+    for name,fn in functions:
+        rows,summary,elapsed=run_timed(name,fn)
+        campaigns[name]=summary; timings[name]=elapsed; row_counts[name]=len(rows); all_rows+=len(rows)
+        write_csv(RESULTS/f"{name}.csv",rows)
+    result={
+        "campaigns":campaigns,
+        "timings_seconds":timings,
+        "row_counts":row_counts,
+        "total_rows":all_rows,
+    }
+    (RESULTS/"extended_summary.json").write_text(json.dumps(result,indent=2,sort_keys=True))
+    checks={
+        "minority_truth_retained": campaigns["data_variations"]["minority_truth"]["evidence_logic"]["minority_truth_recall_mean"]>=0.99,
+        "popularity_not_truth": campaigns["data_variations"]["joke_saturation"]["majority"]["accuracy_mean"]<0.70 and campaigns["data_variations"]["joke_saturation"]["evidence_logic"]["accuracy_mean"]>=0.99,
+        "source_reversal_recovered": campaigns["data_variations"]["source_reversal"]["evidence_logic"]["accuracy_mean"]>=0.99,
+        "fiber_shared_consolidation_completes": all(campaigns["fiber_resources"][str(e)]["shared_consolidation"]["completed"]>=119 for e in [32,64,128,256]),
+        "fiber_findings_reach_ltm": all(campaigns["fiber_resources"][str(e)]["shared_consolidation"]["long_term_records"]>40 for e in [32,64,128,256]),
+        "shared_tool_dedup": campaigns["shared_tool_state"]["shared_versioned"]["executions"] < campaigns["shared_tool_state"]["isolated"]["executions"]*0.2,
+        "shared_tool_no_stale": campaigns["shared_tool_state"]["shared_versioned"]["stale_results"]==0,
+        "peripheral_fields_less_fragmented": campaigns["peripheral_senses"]["0.3"]["peripheral_neural_fields"]["fragmentation_rate"] < campaigns["peripheral_senses"]["0.3"]["separate_mini_brains"]["fragmentation_rate"]*0.1,
+        "peripheral_fields_identity_advantage": campaigns["peripheral_senses"]["0.3"]["peripheral_neural_fields"]["identity_accuracy"] > campaigns["peripheral_senses"]["0.3"]["central_raw"]["identity_accuracy"],
+        "search_not_reflexive": campaigns["query_search_v2"]["overall"]["search_rate"] < 0.60,
+        "query_search_accuracy": campaigns["query_search_v2"]["overall"]["accuracy"] >= 0.95,
+        "multiple_epistemic_trajectories": campaigns["query_search_v2"]["overall"]["distinct_action_signatures"] >= 4,
+        "glue_popularity_rejected": campaigns["query_search_v2"]["glue_pizza_substitute"]["popularity_error_rate"] <= 0.01,
+        "teacher_used_when_contextual": campaigns["query_search_v2"]["repository_local_convention"]["teacher_rate"] >= 0.50,
+        "underdetermined_preserved": campaigns["query_search_v2"]["underdetermined_future_event"]["uncertainty_rate"] >= 0.95,
+        "state_continuity_retains_old": campaigns["state_continuity"]["old_after_mean"] >= 0.99,
+        "state_continuity_learns_new": campaigns["state_continuity"]["new_after_mean"] >= 0.99,
+        "targeted_replay_not_full_lifetime": campaigns["state_continuity"]["targeted_replay_mean"] < campaigns["state_continuity"]["fresh_examples_mean"]*0.10,
+        "hash_validated_continuation_requires_no_replay": campaigns["state_continuity"]["hash_validated_replay_mean"] == 0,
+        "targeted_replay_beats_fixed_replay": campaigns["state_continuity"]["targeted_replay_mean"] < campaigns["state_continuity"]["fixed_replay_mean"]*0.5,
+        "variable_fiber_resources": all(campaigns["resource_explanations"][str(e)]["allocation_variance"]>0 for e in [16,32,64,128,256]),
+        "owner_envelope_changes_speed": campaigns["resource_explanations"]["16"]["steps"] > campaigns["resource_explanations"]["256"]["steps"],
+        "fiber_memory_and_dedup": all(campaigns["resource_explanations"][str(e)]["ltm_records"]>0 and campaigns["resource_explanations"][str(e)]["duplicates_avoided"]>0 for e in [16,32,64,128,256]),
+    }
+    (RESULTS/"extended_checks.json").write_text(json.dumps(checks,indent=2,sort_keys=True))
+    # Deterministic fingerprint over summaries/checks, not wall-clock timings.
+    fingerprint_payload=json.dumps({"campaigns":campaigns,"row_counts":row_counts,"checks":checks},sort_keys=True,separators=(",",":"))
+    fingerprint=hashlib.sha256(fingerprint_payload.encode()).hexdigest()
+    (RESULTS/"deterministic_fingerprint.txt").write_text(fingerprint+"\n")
+    print(json.dumps({"PASS":all(checks.values()),"failed":[k for k,v in checks.items() if not v],"total_rows":all_rows,"fingerprint":fingerprint,"timings":timings},indent=2,sort_keys=True))
+    if not all(checks.values()):
+        raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

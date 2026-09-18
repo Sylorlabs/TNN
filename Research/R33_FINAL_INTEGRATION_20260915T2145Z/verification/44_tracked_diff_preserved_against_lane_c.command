@@ -1,0 +1,1 @@
+cwd=/Users/Shared/micah/Documents/TNN/TNN command=cmp /Users/Shared/micah/Documents/TNN/TNN/Research/R33_FINAL_INTEGRATION_20260915T2145Z/verification/43_tracked_diff_capture.stdout /Users/Shared/micah/Documents/TNN/TNN/Research/R33_NATIVE_N19_RUNTIME_BOUNDARY/RECOVERY_20260915_C/INDEPENDENT_NATIVE_LANE_C_2/git.before.diff

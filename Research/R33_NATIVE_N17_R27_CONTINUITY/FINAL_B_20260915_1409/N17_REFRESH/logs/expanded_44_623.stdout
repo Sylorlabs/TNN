@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+import argparse,json,random
+from pathlib import Path
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import sys
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph/experiments')
+import speech_ctc_r28 as base
+
+torch.set_num_threads(2)
+
+def presence_loss(logits, rows, lengths):
+    # Utterance-level supervision only: which anonymous motifs occurred.
+    # No frame boundaries or VAD information is supplied.
+    losses=[]
+    for i,((_, y),L) in enumerate(zip(rows,lengths.tolist())):
+        # max/logsumexp evidence that each class occurs somewhere in the utterance
+        z=logits[i,:L,1:]  # exclude blank, classes 1..12
+        pooled=torch.logsumexp(z,dim=0)-np.log(max(1,L))
+        target=torch.zeros(12,device=logits.device)
+        target[(torch.as_tensor(y,device=logits.device)-1).long()]=1.0
+        losses.append(F.binary_cross_entropy_with_logits(pooled,target))
+    return torch.stack(losses).mean()
+
+def batch_iter(rows,bs,rng):
+    idx=np.arange(len(rows));rng.shuffle(idx)
+    for st in range(0,len(rows),bs):
+        ids=idx[st:st+bs];rr=[rows[int(i)] for i in ids]
+        L=max(len(a) for a,_ in rr);x=np.zeros((len(rr),L),np.float32);lens=[];ys=[]
+        for j,(a,y) in enumerate(rr):x[j,:len(a)]=a;lens.append(len(a));ys.extend(y.tolist())
+        yield rr,torch.from_numpy(x),torch.tensor(lens,dtype=torch.long),torch.tensor(ys,dtype=torch.long),torch.full((len(rr),),4,dtype=torch.long)
+
+def decode_stats(model,rows,bs=32):
+    acc,exact,lens_out,blank_rates=[],[],[],[]
+    for st in range(0,len(rows),bs):
+        rr=rows[st:st+bs];L=max(len(a) for a,_ in rr);x=np.zeros((len(rr),L),np.float32);lens=[]
+        for j,(a,y) in enumerate(rr):x[j,:len(a)]=a;lens.append(len(a))
+        with torch.no_grad():
+            logits,ol=model(torch.from_numpy(x),torch.tensor(lens));decs=base.greedy(logits,ol);probs=logits.softmax(-1)
+        for j,(dec,(_,y)) in enumerate(zip(decs,rr)):
+            truth=(y-1).tolist(); v=sum(int(i==k) for i,k in zip(dec,truth))/4 if len(dec)==4 else 0.
+            acc.append(v);exact.append(v==1);lens_out.append(len(dec));blank_rates.append(float(probs[j,:int(ol[j]),0].mean()))
+    return {'accuracy':float(np.mean(acc)),'exact':float(np.mean(exact)),'decoded_len_mean':float(np.mean(lens_out)),'blank_prob_mean':float(np.mean(blank_rates))}
+
+def run(seed,variant,train_n=500,epochs=10):
+    torch.manual_seed(seed%100000);np.random.seed(seed%2**32);random.seed(seed)
+    train=base.make_dataset(seed,train_n,True,sample_seed=seed+777)
+    val=base.make_dataset(seed,120,True,sample_seed=seed+100000)
+    test=base.make_dataset(seed,180,True,sample_seed=seed+200000)
+    model=base.AcousticPAM()
+    cfg={
+      'BASE':(0.0,0.0,0.0),
+      'BIAS2':(-2.0,0.0,0.0),
+      'BIAS3_BLANK':(-3.0,0.12,0.0),
+      'BIAS2_PRES':(-2.0,0.0,0.25),
+      'BIAS2_PRES_BLANK':(-2.0,0.08,0.35),
+    }[variant]
+    blank_bias,blank_w,pres_w=cfg
+    with torch.no_grad(): model.out.bias[0]=blank_bias
+    opt=torch.optim.AdamW(model.parameters(),lr=2e-3,weight_decay=1e-4);ctc=nn.CTCLoss(blank=0,zero_infinity=True)
+    rng=np.random.default_rng(seed+9);hist=[];best=None;bestscore=-1
+    for ep in range(epochs):
+        model.train();losses=[];bl=[];pl=[]
+        for rr,x,lens,y,yl in batch_iter(train,32,rng):
+            opt.zero_grad();logits,ol=model(x,lens)
+            lc=ctc(F.log_softmax(logits,2).transpose(0,1),y,ol,yl)
+            pb=logits.softmax(-1)[:,:,0].mean()
+            lp=presence_loss(logits,rr,ol) if pres_w else torch.tensor(0.0)
+            loss=lc + blank_w*pb + pres_w*lp
+            loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),2.);opt.step()
+            losses.append(float(loss));bl.append(float(pb));pl.append(float(lp))
+        va=decode_stats(model,val);score=va['accuracy']+0.25*va['exact']
+        hist.append({'epoch':ep+1,'loss':float(np.mean(losses)),'train_blank':float(np.mean(bl)),'presence':float(np.mean(pl)),'val':va})
+        if score>bestscore:bestscore=score;best={k:v.detach().clone() for k,v in model.state_dict().items()}
+    model.load_state_dict(best);te=decode_stats(model,test)
+    return {'seed':seed,'variant':variant,'train_n':train_n,'epochs':epochs,'config':{'blank_bias':blank_bias,'blank_penalty':blank_w,'presence_weight':pres_w},'best_val_score':bestscore,'test':te,'history':hist}
+
+if __name__=='__main__':
+    ap=argparse.ArgumentParser();ap.add_argument('--seed',type=int,required=True);ap.add_argument('--variant',required=True);ap.add_argument('--out',required=True);ap.add_argument('--train-n',type=int,default=500);ap.add_argument('--epochs',type=int,default=10);a=ap.parse_args();o=run(a.seed,a.variant,a.train_n,a.epochs);Path(a.out).write_text(json.dumps(o,indent=2));print(json.dumps({k:v for k,v in o.items() if k!='history'},indent=2))

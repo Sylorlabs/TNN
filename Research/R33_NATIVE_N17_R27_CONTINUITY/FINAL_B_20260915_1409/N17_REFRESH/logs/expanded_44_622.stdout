@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,math
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+
+ACTIONS=['HOT_EXACT','COLD_EXACT','STRUCTURED','DISCARD'];COST=np.array([4.,2.5,1.,0.])
+POLICIES=['EXACT_ALL','STRUCTURED_ALL','LRU','RANDOM','FIXED_HEURISTIC','LEARNED_LINEAR','LEARNED_QUADRATIC','CONTEXT_BANDIT','RECURRENT_FUTURE_USE','FOUNDRY_EVOLVED']
+
+def features(r):return np.array([1,r['novelty'],r['causal'],r['contradiction'],r['source'],r['recurrence'],r['retrieval'],r['uncertainty']],float)
+def make_episode(rng,i):
+ v={k:float(rng.beta(2,2)) for k in ['novelty','causal','contradiction','source','recurrence','retrieval','uncertainty']}
+ log=np.array([1.8*v['novelty']+1.6*v['contradiction']+.9*v['source']-.8*v['recurrence']-1.4,1.4*v['causal']+1.1*v['recurrence']+.7*v['uncertainty']-.7,1.4*v['source']+1.4*v['contradiction']-.8,1.5*v['causal']+v['retrieval']-.9])
+ p=np.exp(log-log.max());p/=p.sum();q=int(rng.choice(4,p=p));delay=int(rng.integers(20,320));imp=float(.5+1.8*v['causal']+1.5*v['contradiction']+1.2*v['novelty']+.5*v['source'])
+ return {**v,'q':q,'delay':delay,'importance':imp,'id':i}
+def sufficient(a,q):return a in (0,1) if q==0 else a in (0,1,2)
+
+class Predictor:
+ def __init__(self,kind,X,y,imp):
+  self.kind=kind
+  XX=self.expand(X);Y=np.eye(4)[y]
+  lam=.35 if kind=='linear' else .8
+  self.W=np.linalg.solve(XX.T@XX+lam*np.eye(XX.shape[1]),XX.T@Y)
+  self.I=np.linalg.solve(XX.T@XX+lam*np.eye(XX.shape[1]),XX.T@imp)
+  self.lam=.1;self.hot=.05
+ def expand(self,X):
+  X=np.asarray(X)
+  if X.ndim==1:X=X[None,:]
+  if self.kind=='linear':return X
+  # compact quadratic basis: originals + squared non-bias features + selected pair interactions.
+  base=X;parts=[base,base[:,1:]**2]
+  pairs=[]
+  for i in range(1,8):
+   for j in range(i+1,8):pairs.append((X[:,i]*X[:,j])[:,None])
+  return np.concatenate(parts+pairs,axis=1)
+ def p(self,f):
+  q=self.expand(f)[0]@self.W;q=np.clip(q,1e-5,None);return q/q.sum()
+ def importance(self,f):return float(self.expand(f)[0]@self.I)
+ def value(self,r,pressure,context=None):
+  f=features(r);p=self.p(f);imp=max(.2,self.importance(f))
+  if context is not None:p=.8*p+.2*np.asarray(context)
+  succ=np.array([1.,1.,1-p[0],0.]);bonus=np.array([self.hot*r['retrieval'],.015*r['retrieval'],0,0]);price=(self.lam*(.35+1.3*pressure))*COST
+  return imp*succ+bonus-price
+ def choose(self,r,pressure,context=None):return int(np.argmax(self.value(r,pressure,context)))
+
+def build_development(seeds=5,n=1000):
+ rows=[]
+ for s in range(seeds):
+  rng=np.random.default_rng(290000+s)
+  for i in range(n):rows.append(make_episode(rng,s*n+i))
+ X=np.stack([features(r) for r in rows]);y=np.array([r['q'] for r in rows]);imp=np.array([r['importance'] for r in rows])
+ return rows,X,y,imp
+
+def fixed_action(name,r,step,rng):
+ if name=='EXACT_ALL':return 0
+ if name=='STRUCTURED_ALL':return 2
+ if name=='LRU':return 0 if step%5==0 else 2
+ if name=='RANDOM':return int(rng.choice(4,p=[.18,.27,.4,.15]))
+ sc=1.5*r['novelty']+2*r['causal']+2.3*r['contradiction']+1.2*r['source']+.8*r['uncertainty']-.7*r['recurrence']
+ return 0 if sc>4.8 else 1 if sc>3.3 else 2 if sc>1.2 else 3
+
+def tune_predictor(pred,episodes,budget=450):
+ # tune only generic storage tradeoff parameters on held-out developmental episodes
+ best=(-1,None)
+ for lam in [.04,.1,.2]:
+  for hot in [.03,.08]:
+   pred.lam=lam;pred.hot=hot;m=simulate('MODEL',291234,pred,episodes=episodes[:600],budget=budget,return_rows=False)
+   score=m['utility']
+   if score>best[0]:best=(score,(lam,hot))
+ pred.lam,pred.hot=best[1];return pred
+
+class Bandit:
+ def __init__(self,episodes):
+  self.W=np.zeros((4,8));self.lam=.08
+  # delayed-feedback apprenticeship: action rewards are computed only when future use is revealed.
+  for ep in episodes:
+   f=features(ep);p0=1/(1+np.exp(-(self.W@f))); # exploratory synthetic outcome estimates
+   for a in range(4):
+    ok=sufficient(a,ep['q']);reward=ep['importance']*(1 if ok else -1)-self.lam*COST[a]
+    pr=float(self.W[a]@f);self.W[a]+=.035*(reward-pr)*f/(1+f@f)
+ def value(self,r,pressure,context=None):return self.W@features(r)-(.05+.22*pressure)*COST
+ def choose(self,r,pressure,context=None):return int(np.argmax(self.value(r,pressure,context)))
+
+class Evolved:
+ def __init__(self,episodes,seed=7):
+  rng=np.random.default_rng(seed);pop=rng.normal(0,.5,(16,4,8));
+  def score(W):
+   good=0.;cost=0.
+   for ep in episodes[:500]:
+    f=features(ep);a=int(np.argmax(W@f-.09*COST));good+=ep['importance']*(1 if sufficient(a,ep['q']) else 0);cost+=COST[a]
+   return good/500-.08*cost/500
+  for _ in range(8):
+   sc=np.array([score(w) for w in pop]);elite=pop[np.argsort(sc)[-4:]];new=[x.copy() for x in elite]
+   while len(new)<len(pop):
+    p=elite[rng.integers(len(elite))].copy();p+=rng.normal(0,.12,p.shape);new.append(p)
+   pop=np.stack(new)
+  sc=np.array([score(w) for w in pop]);self.W=pop[int(np.argmax(sc))]
+ def value(self,r,pressure,context=None):return self.W@features(r)-(.05+.25*pressure)*COST
+ def choose(self,r,pressure,context=None):return int(np.argmax(self.value(r,pressure,context)))
+
+def simulate(name,seed,model=None,episodes=None,n=600,budget=450,return_rows=True):
+ rng=np.random.default_rng(seed);eps=episodes if episodes is not None else [make_episode(rng,i) for i in range(n)];entries={};queries=defaultdict(list);used=0.;by=defaultdict(list);storage=[];ev=0;context=np.ones(4)/4;ctx_counts=np.ones(4)
+ for i,r in enumerate(eps):
+  pressure=min(1,used/budget)
+  if name in ('EXACT_ALL','STRUCTURED_ALL','LRU','RANDOM','FIXED_HEURISTIC'):a=fixed_action(name,r,i,rng)
+  else:a=model.choose(r,pressure,context if name=='RECURRENT_FUTURE_USE' else None)
+  if name in ('LEARNED_LINEAR','LEARNED_QUADRATIC','CONTEXT_BANDIT','RECURRENT_FUTURE_USE','FOUNDRY_EVOLVED'):
+   vv=model.value(r,pressure,context if name=='RECURRENT_FUTURE_USE' else None);retain=float(vv[a]/(COST[a]+.15)) if COST[a]>0 else -1e9
+  else:retain=0.0
+  entries[i]={'a':a,'r':r,'last':i,'retain':retain};used+=COST[a];queries[i+r['delay']].append(i)
+  while used>budget:
+   cand=[(j,e) for j,e in entries.items() if COST[e['a']]>0]
+   if not cand:break
+   if name in ('LEARNED_LINEAR','LEARNED_QUADRATIC','CONTEXT_BANDIT','RECURRENT_FUTURE_USE','FOUNDRY_EVOLVED'):
+    j,e=min(cand,key=lambda z:z[1]['retain'])
+   else:j,e=min(cand,key=lambda z:z[1]['last'])
+   used-=COST[e['a']];del entries[j];ev+=1
+  for j in queries.get(i,[]):
+   rr=eps[j];e=entries.get(j);ok=e is not None and sufficient(e['a'],rr['q']);by[rr['q']].append(ok);ctx_counts[rr['q']]+=1;context=ctx_counts/ctx_counts.sum()
+   if e:
+    e['last']=i
+    if name in ('LEARNED_LINEAR','LEARNED_QUADRATIC','CONTEXT_BANDIT','RECURRENT_FUTURE_USE','FOUNDRY_EVOLVED'):
+     vv=model.value(e['r'],min(1,used/budget),context if name=='RECURRENT_FUTURE_USE' else None);e['retain']=float(vv[e['a']]/(COST[e['a']]+.15))
+  storage.append(used)
+ for t in range(len(eps),len(eps)+340):
+  for j in queries.get(t,[]):
+   rr=eps[j];e=entries.get(j);ok=e is not None and sufficient(e['a'],rr['q']);by[rr['q']].append(ok);ctx_counts[rr['q']]+=1;context=ctx_counts/ctx_counts.sum()
+ allv=[x for q in by.values() for x in q];res={'policy':name,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(storage)),'evictions':ev}
+ res['balanced_floor']=min(res['exact'],res['semantic'],res['source'],res['procedure']);res['utility']=.45*res['exact']+.18*res['semantic']+.17*res['source']+.20*res['procedure']-.00010*res['mean_storage'];return res
+
+def main(out):
+ dev,X,y,imp=build_development();lin=tune_predictor(Predictor('linear',X,y,imp),dev[-1200:]);quad=tune_predictor(Predictor('quadratic',X,y,imp),dev[-1200:]);band=Bandit(dev);evo=Evolved(dev)
+ models={'LEARNED_LINEAR':lin,'LEARNED_QUADRATIC':quad,'CONTEXT_BANDIT':band,'RECURRENT_FUTURE_USE':quad,'FOUNDRY_EVOLVED':evo}
+ rows=[]
+ for s in range(6):
+  for p in POLICIES:rows.append({'seed':292000+s,**simulate(p,292000+s+sum(map(ord,p)),models.get(p))})
+ g=defaultdict(list)
+ for r in rows:g[r['policy']].append(r)
+ sm=[]
+ for p,rs in g.items():
+  z={'policy':p,'n':len(rs)}
+  for k in ['overall','exact','semantic','source','procedure','balanced_floor','mean_storage','evictions','utility']:
+   a=[x[k] for x in rs];z[k]=float(np.mean(a));z[k+'_sd']=float(np.std(a))
+  sm.append(z)
+ sm.sort(key=lambda z:(z['balanced_floor'],z['utility']),reverse=True);payload={'evidence':'REFERENCE_ONLY_NOT_NATIVE_ZAG','development_episodes':len(dev),'linear_params':{'lambda':lin.lam,'hot':lin.hot},'quadratic_params':{'lambda':quad.lam,'hot':quad.hot},'rows':rows,'summary':sm};Path(out).write_text(json.dumps(payload,indent=2));print(json.dumps(sm,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--out',required=True);a=ap.parse_args();main(a.out)

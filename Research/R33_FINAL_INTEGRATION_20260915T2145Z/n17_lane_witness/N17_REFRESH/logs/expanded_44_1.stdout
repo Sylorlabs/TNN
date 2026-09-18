@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
+from experiments_memory_v3 import feat,sufficient,COST,fixed_choose
+
+POLICIES=['PRIVILEGED_HEURISTIC_CONTROL','EXACT_ALL','STRUCTURED_ALL','LRU','RANDOM','LEARNED_COUNTERFACTUAL_VALUE','LEARNED_DUAL_VALUE']
+
+def make_life(rng,i,horizon=380):
+ v={k:float(rng.beta(2,2)) for k in ['novelty','causal','contradiction','source','recurrence','retrieval','uncertainty']}
+ logits=np.array([1.8*v['novelty']+1.6*v['contradiction']+.9*v['source']-.8*v['recurrence']-1.4,1.4*v['causal']+1.1*v['recurrence']+.7*v['uncertainty']-.7,1.4*v['source']+1.4*v['contradiction']-.8,1.5*v['causal']+1*v['retrieval']-.9]);p=np.exp(logits-logits.max());p/=p.sum()
+ lam=.25+1.8*v['retrieval']+1.0*v['recurrence'];nq=max(1,int(rng.poisson(lam)))
+ qs=[]
+ for _ in range(min(nq,5)):qs.append((int(rng.integers(20,horizon)),int(rng.choice(4,p=p))))
+ qs.sort();importance=float(.4+1.9*v['causal']+1.5*v['contradiction']+1.3*v['novelty']+.5*v['source'])
+ return {**v,'queries':qs,'importance':importance,'id':i}
+
+def action_return(r,a,lam_cost):
+ # Retrospective value becomes available only after delayed query history unfolds; memory semantics make counterfactual sufficiency knowable.
+ gain=0.
+ for _,q in r['queries']:gain+=r['importance']*(1.0 if sufficient(a,q) else -1.0)
+ if a==0:gain+=.08*r['retrieval']*len(r['queries'])
+ return gain-lam_cost*COST[a]
+
+class ValueLearner:
+ def __init__(self,dev,dual=False,seed=0):
+  self.dual=dual;self.models=[];X=np.stack([feat(r) for r in dev])
+  # Learn resource shadow price from development only. Binary search price that drives mean chosen cost toward a pressure-compatible target.
+  target=1.25 if dual else 1.65
+  lo,hi=.0,4.0
+  for _ in range(24):
+   mid=(lo+hi)/2;vals=np.stack([[action_return(r,a,mid) for a in range(4)] for r in dev]);cost=float(np.mean(COST[np.argmax(vals,1)]));
+   if cost>target:lo=mid
+   else:hi=mid
+  self.lam=(lo+hi)/2
+  for a in range(4):
+   y=np.array([action_return(r,a,self.lam) for r in dev]);self.models.append(HistGradientBoostingRegressor(max_iter=75,max_leaf_nodes=15,l2_regularization=.4,random_state=seed+a).fit(X,y))
+ def values(self,r,pressure):
+  x=feat(r).reshape(1,-1);q=np.array([m.predict(x)[0] for m in self.models]);
+  if self.dual:q=q-pressure*COST*.55
+  return q
+
+def fixed(name,r,i,rng):
+ if name=='EXACT_ALL':return 0
+ if name=='STRUCTURED_ALL':return 2
+ if name=='LRU':return 0 if i%5==0 else 2
+ if name=='RANDOM':return int(rng.choice(4,p=[.18,.25,.46,.11]))
+ # privileged control on generic features only, kept non-promotable.
+ s=1.7*r['novelty']+2*r['causal']+2.4*r['contradiction']+1.4*r['source']+.9*r['uncertainty']-.8*r['recurrence']
+ return 0 if s>4.7 else 1 if s>3.3 else 2 if s>1.25 else 3
+
+def simulate(name,seed,dev,n=1500,budget=520):
+ rng=np.random.default_rng(seed);pol=ValueLearner(dev,name=='LEARNED_DUAL_VALUE',seed) if name.startswith('LEARNED_') else None
+ entries={};used=0.;events=defaultdict(list);eps=[];by=defaultdict(list);store=[];ev=0
+ for i in range(n):
+  r=make_life(rng,i);eps.append(r);pressure=min(1.,used/budget)
+  if pol:q=pol.values(r,pressure);a=int(np.argmax(q));val=float(q[a])
+  else:a=fixed(name,r,i,rng);val=0
+  den=val/(COST[a]+.15) if pol and COST[a]>0 else None;entries[i]={'a':a,'r':r,'last':i,'den':den};used+=COST[a]
+  for delay,qtype in r['queries']:events[i+delay].append((i,qtype))
+  while used>budget:
+   cand=[(eid,e) for eid,e in entries.items() if COST[e['a']]>0]
+   if not cand:break
+   eid,e=min(cand,key=(lambda z:z[1]['den']) if pol else (lambda z:z[1]['last']));used-=COST[e['a']];del entries[eid];ev+=1
+  for eid,qtype in events.get(i,[]):
+   e=entries.get(eid);ok=e is not None and sufficient(e['a'],qtype);by[qtype].append(bool(ok));
+   if e:e['last']=i
+  store.append(used)
+ for t in range(n,n+400):
+  for eid,qtype in events.get(t,[]):e=entries.get(eid);by[qtype].append(bool(e is not None and sufficient(e['a'],qtype)))
+ allv=[x for v in by.values() for x in v]
+ return {'policy':name,'seed':seed,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(store)),'evictions':ev,'lambda':float(pol.lam) if pol else None}
+
+def run(out,seeds=5,dev_n=5000,offset=0):
+ rows=[]
+ for local in range(seeds):
+  si=offset+local;rng=np.random.default_rng(287000+si);dev=[make_life(rng,i) for i in range(dev_n)]
+  for p in POLICIES:rows.append(simulate(p,288000+si+abs(hash(p))%6000,dev))
+  print('seed',si,'done',flush=True)
+ g=defaultdict(list)
+ for r in rows:g[r['policy']].append(r)
+ s=[]
+ for p,rs in g.items():
+  z={'policy':p,'n':len(rs)}
+  for k in ['overall','exact','semantic','source','procedure','mean_storage','evictions']:
+   a=np.array([r[k] for r in rs]);z[k]=float(a.mean());z[k+'_sd']=float(a.std())
+  z['utility']=.40*z['exact']+.18*z['semantic']+.18*z['source']+.24*z['procedure']-.00012*z['mean_storage'];s.append(z)
+ s=sorted(s,key=lambda x:x['utility'],reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','development_delayed_lives':dev_n,'rows':rows,'summary':s},indent=2));print(json.dumps(s,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--out',required=True);ap.add_argument('--seeds',type=int,default=5);ap.add_argument('--dev-n',type=int,default=5000);ap.add_argument('--offset',type=int,default=0);a=ap.parse_args();run(a.out,a.seeds,a.dev_n,a.offset)

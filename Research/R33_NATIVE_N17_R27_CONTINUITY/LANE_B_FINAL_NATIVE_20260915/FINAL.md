@@ -1,0 +1,9 @@
+Fresh native Lane B supplement: 50 direct static predicates and four previously reviewed native equivalents pass (28/33 R27, 26/47 R26 in engineering scope). Five R27 and 21 R26 source rows remain blocked; V91 is 0/16 generated, 16/16 oracle custody. Full continuity FAIL_CLOSED.
+
+The chained variant passes freshly computed R26 bytes directly into R27 preimage and reproduces both digests. Short dependency outputs and nonfinal mode refuse98 without changing all66 canary bytes. Nine R27 policy predicates are hash-admitted and checked natively; changed/missing policy inputs refuse. Corrected reviewed R25 mechanics rebuilt; actual correct-length wrong-hash bundle remains READY0.
+
+Deep search: 947360 returned paths, 889854 hashed files,157 archive inventories, all1610 Git blobs (744029506 bytes) hashed. No missing exact source/state/manifest input admitted. The exact508-byte R25 historical receipt was recovered from ZIP and TAR under an R28 alternate member and hash checked natively. It provides witness custody only; R26-46 needs native lineage implementation and exact execution/source/selector inputs. Denied paths, six invalid archives, arbitrary renamed/embedded archives and unextracted TAR members are excluded.
+
+V91 remains unimplementable faithfully from available bytes: original dataset, special tokens, forward/input construction, arithmetic and seeded sampler definitions are absent. No hardcoded output lookup or guessed generator is credited. Native custody/components and negative gate qualification pass.
+
+Exact commands/exits/output hashes: commands*.jsonl and v91/RECORD.json. Per-row blockers: ROWS.json and V91_ROWS.json. Source transformations mechanically reversible, new adapters not independently reviewed. Historical and failed harness receipts preserved. Canonical R27 step60423/restarts0, compiler unchanged; no learn, authority, exposure, promotion, forbidden runtime or git mutation.

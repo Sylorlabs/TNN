@@ -1,0 +1,1 @@
+/Users/Shared/micah/Documents/TNN/TNN/Research/R33_REMEDIATION_20260915T2152Z/n19/bin/lane_c_corners independent-corners /Users/Shared/micah/Documents/TNN/TNN/Research/R33_REMEDIATION_20260915T2152Z/n19/roots/corners_a 

@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,sys,math
+from pathlib import Path
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph/experiments')
+from entity_aeif_factorial import World,render,sig,make_training,Rep
+CONDS=['viewpoint','occlusion80','true_switch','switch_occluded','long_gap_replacement','ambiguous_mix','high_conf_corruption','compound']
+# genome: epi_w,pred_w,cent_w,persist,gate_bias,active,unknown,graph_authority,reinspect_cost_sense
+DIM=9
+
+def clamp(g):
+ g=np.asarray(g,float).copy();g[:5]=np.clip(g[:5],0,1);g[5]=1. if g[5]>.5 else 0.;g[6]=np.clip(g[6],0,.45);g[7]=1. if g[7]>.5 else 0.;g[8]=np.clip(g[8],0,1);return g
+
+def random_g(r):return clamp(r.random(DIM))
+def mutate(g,r,scale=.13):
+ z=np.asarray(g)+r.normal(0,scale,DIM)
+ if r.random()<.18:z[5]=1-z[5]
+ if r.random()<.18:z[7]=1-z[7]
+ return clamp(z)
+
+class CModel:
+ def __init__(self,g,rep):self.g=clamp(g);self.R=rep;self.n=rep.n;self.reset()
+ def reset(self):self.cur=-1;self.post=np.ones(self.n)/self.n;self.extra=0
+ def routes(self,x):
+  dc,de,dp=self.R.distances(x)
+  def sm(d):
+   t=max(np.median(d)*.3,.06);z=-d/t;z-=z.max();e=np.exp(np.clip(z,-50,50));return e/(e.sum()+1e-12)
+  return sm(de),sm(dp),sm(dc)
+ def evidence(self,x):
+  pe,pp,pc=self.routes(x);w=np.maximum(self.g[:3],1e-4);w/=w.sum();p=w[0]*pe+w[1]*pp+w[2]*pc;p/=p.sum()+1e-12
+  s=np.sort(p);margin=s[-1]-s[-2];quality=float(x[-5]);agree=(int(np.argmax(pe)==np.argmax(pp))+int(np.argmax(pe)==np.argmax(pc))+int(np.argmax(pp)==np.argmax(pc)))/3
+  # generic reliability estimate from internal statistics; coefficients are fixed substrate physics, bias is evolvable.
+  rel=1/(1+math.exp(-np.clip(5.5*margin+1.8*quality+1.4*agree-2.1-2*self.g[4],-20,20)))
+  return p,rel,agree
+ def step(self,x):
+  if x is None:return self.cur,0.,True
+  p,rel,agree=self.evidence(x);fresh=int(np.argmax(p));unknown=False
+  if self.cur<0:pred=fresh
+  else:
+   persist=self.g[3]
+   # graph authority makes continuity structurally privileged even when fresh evidence is decent.
+   if self.g[7]>.5:persist=min(.98,persist+.18)
+   if fresh==self.cur:pred=self.cur
+   elif rel>(.42+.38*self.g[4]):pred=fresh
+   else:
+    prior=np.ones(self.n)*(1-persist)/max(self.n-1,1);prior[self.cur]=persist;po=p*prior;po/=po.sum()+1e-12;pred=int(np.argmax(po));unknown=(max(po)<max(.18,self.g[6])) or (pred==self.cur and rel<.48)
+  self.cur=pred;return (-1 if unknown else pred),rel,unknown
+ def active(self):return self.g[5]>.5
+
+def obs(w,e,k,r):return render(w.bases[e],k,r)
+def trial(m,w,e,c,seed):
+ r=np.random.default_rng(seed);m.reset();m.step(obs(w,e,'clean',r));t=w.twins[e] if w.twins[e]>=0 else (e+1)%len(w.bases);target=e
+ def one(ent,k):return m.step(obs(w,ent,k,r))
+ if c=='viewpoint':z=one(e,'view')
+ elif c=='occlusion80':z=one(e,'occ.8')
+ elif c=='true_switch':target=t;z=one(t,'view')
+ elif c=='switch_occluded':target=t;z=one(t,'occ.6')
+ elif c=='long_gap_replacement':
+  for _ in range(16):m.step(None)
+  target=t;z=one(t,'view')
+ elif c=='ambiguous_mix':
+  x=.5*w.bases[e]+.5*w.bases[t]+r.normal(0,.08,len(w.bases[e]));z=m.step(sig(x[r.permutation(len(x))]));pred,rel,unk=z
+  if m.active() and (unk or rel<.65):m.extra+=1;pred,rel,unk=one(e,'view');return int(pred==e)
+  return int(pred==-1)
+ elif c=='high_conf_corruption':
+  x=.84*w.bases[t]+.16*w.bases[e]+r.normal(0,.03,len(w.bases[e]));z=m.step(sig(x[r.permutation(len(x))]));
+ else:z=one(e,'compound')
+ pred,rel,unk=z
+ if m.active() and (unk or rel<(.58+.18*m.g[8]) or c in ('switch_occluded','high_conf_corruption')):
+  m.extra+=1;pred,rel,unk=one(target,'view')
+ return int(pred==target)
+
+def score_genome(g,worlds,reps,n=1):
+ vals=[];flo=[];extra=[]
+ for wi,(w,rep) in enumerate(zip(worlds,reps)):
+  m=CModel(g,rep);by={c:[] for c in CONDS}
+  for ci,c in enumerate(CONDS):
+   for j in range(n):
+    e=(wi*7+ci*5+j*11)%len(w.bases);by[c].append(trial(m,w,e,c,700000+wi*10000+ci*100+j));m.reset()
+  d={c:np.mean(v) for c,v in by.items()};vals.append(np.mean(list(d.values())));flo.append(min(d.values()));extra.append(m.extra/(len(CONDS)*n))
+ return float(np.mean(vals)+.55*np.mean(flo)-.025*np.mean(extra)),float(np.mean(vals)),float(np.mean(flo)),float(np.mean(extra))
+
+def prepare(seed_base,ns=2,dose=64):
+ worlds=[];reps=[]
+ for i in range(ns):
+  w=World(seed_base+i);views=make_training(w,'MIXED',dose,seed_base+i+77);worlds.append(w);reps.append(Rep(views,max_epi=12))
+ return worlds,reps
+
+def search(method,seed,budget=72):
+ r=np.random.default_rng(seed);dw,dr=prepare(288000+seed%1000,2,64);history=[]
+ def ev(g):
+  g=clamp(g);s,o,f,e=score_genome(g,dw,dr,1);history.append({'g':g.tolist(),'score':s,'overall':o,'floor':f,'extra':e});return s
+ if method=='RANDOM':
+  for _ in range(budget):ev(random_g(r))
+ elif method=='EVOLUTION':
+  pop=[random_g(r) for _ in range(12)];used=0
+  while used<budget:
+   vals=[]
+   for g in pop:
+    if used>=budget:break
+    vals.append((ev(g),g));used+=1
+   elite=[g for _,g in sorted(vals,key=lambda x:x[0],reverse=True)[:4]];pop=elite+[mutate(elite[int(r.integers(len(elite)))],r) for _ in range(8)]
+ elif method in ('SURROGATE','HYBRID','LEARNED_MUTATION'):
+  gs=[];ys=[]
+  for _ in range(min(18,budget)):
+   g=random_g(r);ys.append(ev(g));gs.append(g)
+  while len(gs)<budget:
+   rf=RandomForestRegressor(n_estimators=80,max_depth=8,min_samples_leaf=2,random_state=seed+len(gs),n_jobs=1).fit(np.stack(gs),np.array(ys))
+   top=np.argsort(ys)[-max(3,min(8,len(ys))):];cand=[]
+   for _ in range(220):
+    if method=='SURROGATE':g=random_g(r)
+    elif method=='LEARNED_MUTATION':g=mutate(gs[int(r.choice(top))],r,.09)
+    else:
+     g=mutate(gs[int(r.choice(top))],r,.12) if r.random()<.75 else random_g(r)
+    cand.append(g)
+   pred=rf.predict(np.stack(cand));g=cand[int(np.argmax(pred))];y=ev(g);gs.append(g);ys.append(y)
+ else:raise ValueError(method)
+ best=max(history,key=lambda x:x['score']);g=np.array(best['g']);hw,hr=prepare(289500+seed%1000,6,64);hs,ho,hf,he=score_genome(g,hw,hr,3)
+ return {'method':method,'seed':seed,'budget':budget,'dev_best':best,'hidden_score':hs,'hidden_overall':ho,'hidden_floor':hf,'hidden_extra':he,'graph_authority':bool(g[7]>.5),'active':bool(g[5]>.5),'genome':g.tolist()}
+
+def run_seed(si,out,budget=72):
+ rows=[]
+ for m in ['RANDOM','EVOLUTION','SURROGATE','LEARNED_MUTATION','HYBRID']:
+  rows.append(search(m,290000+si*113,m and budget));print(m,'done',flush=True)
+ Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','seed_index':si,'rows':rows},indent=2))
+def combine(files,out):
+ rows=[]
+ for f in files:rows+=json.loads(Path(f).read_text())['rows']
+ summary=[]
+ for m in sorted(set(r['method'] for r in rows)):
+  rr=[x for x in rows if x['method']==m];summary.append({'method':m,'n':len(rr),'hidden_score':float(np.mean([x['hidden_score'] for x in rr])),'hidden_overall':float(np.mean([x['hidden_overall'] for x in rr])),'hidden_floor':float(np.mean([x['hidden_floor'] for x in rr])),'graph_authority_rate':float(np.mean([x['graph_authority'] for x in rr])),'active_rate':float(np.mean([x['active'] for x in rr]))})
+ summary.sort(key=lambda x:(x['hidden_floor'],x['hidden_score']),reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','rows':rows,'summary':summary},indent=2));print(json.dumps(summary,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='cmd',required=True);a=sp.add_parser('seed');a.add_argument('--index',type=int,required=True);a.add_argument('--out',required=True);a.add_argument('--budget',type=int,default=72);b=sp.add_parser('combine');b.add_argument('--out',required=True);b.add_argument('files',nargs='+');x=ap.parse_args();run_seed(x.index,x.out,x.budget) if x.cmd=='seed' else combine(x.files,x.out)

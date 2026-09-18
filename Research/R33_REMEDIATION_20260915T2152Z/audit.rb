@@ -1,0 +1,10 @@
+require 'json';require 'digest';require 'open3';require 'fileutils'
+d=File.realpath(__dir__);r='/Users/Shared/micah/Documents/TNN/TNN';e=r+'/Research/R33_FINAL_INTEGRATION_20260915T2145Z';errors=[]
+m=JSON.parse(File.read(e+'/N17_ROWS.json'));src=JSON.parse(File.read(r+'/Research/R33_NATIVE_N17_R27_CONTINUITY/VERIFIER_CHECK_MATRIX_V3.json'))['rows']+JSON.parse(File.read(r+'/Research/R33_NATIVE_N17_R27_CONTINUITY/R26_VERIFIER_CHECK_MATRIX_V1.json'))['rows'];errors<<'row identities/conditions differ' unless m['rows'].map{|x|[x['id'],x['condition']]}.sort==src.map{|x|[x['id'],x['condition']]}.sort
+reviews=m['rows'].map do |v|
+ log=v.dig('evidence','log');fresh=case File.basename(log.to_s);when 'rows.stdout' then d+'/n17_rows.stdout';when 'structure.stdout' then d+'/n17_structure.stdout';when 'identity.stdout' then d+'/n17_identity.stdout';when 'r26_digest.stdout' then d+'/n17_r26_digest.stdout';when 'r27_digest.stdout' then d+'/n17_r27_digest.stdout';when 'policy.stdout' then d+'/policy.stdout';end
+ pass=v['disposition'].start_with?('PASS');ok=pass&&fresh&&File.file?(fresh)&&Digest::SHA256.file(fresh).hexdigest==v.dig('evidence','stdout_sha256');errors<<v['id'] if pass&&!ok
+ v.merge('remediation_disposition'=>pass ? 'PASS_FRESH_BOUNDED_ENGINEERING_ONLY' : 'FAIL_CLOSED','fresh_log'=>fresh,'fresh_stdout_sha256'=>fresh&&File.file?(fresh) ? Digest::SHA256.file(fresh).hexdigest : nil,'fresh_output_hash_matches'=>ok)
+end
+x=reviews.find{|v|v['id']=='R26-46'};x['blocker']='Exact 508-byte historical 68/68 receipt is recovered (e845db176e845244cb8127d6e96d424e04a30942f86b9d8061bf03b1851551a1), witness only. Selected-release identity/source/retained-object bindings, exact execution input bundle and complete fresh native 68-check lineage remain unqualified. No global absence claim.'
+File.write(d+'/N17_ROWS.json',JSON.pretty_generate(m.merge('rows'=>reviews)));File.write(d+'/ROW_AUDIT.json',JSON.pretty_generate({rows:reviews.size,passes:reviews.count{|v|v['fresh_output_hash_matches']},blocked:reviews.count{|v|v['remediation_disposition']=='FAIL_CLOSED'},errors:errors}));puts File.read(d+'/ROW_AUDIT.json');exit(errors.empty? ? 0 : 1)

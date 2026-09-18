@@ -1,0 +1,337 @@
+// R33 native direct-child process supervisor V3.
+// Engineering host adapter only: no learner, training, scientific evaluator or grant.
+// Frozen IO_V1 supplies generic Darwin file/syscall helpers. V2 remains frozen history.
+// Deadline enforcement uses a Darwin EVFILT_TIMER kernel event, never a userspace clock.
+// Containment is the direct child PID only. Descendant/process-group containment is NOT claimed.
+@import("R33_NATIVE_IO_V1.zag")
+
+const NRV3_OK:i64=0;
+const NRV3_INVALID:i64=-7601;
+const NRV3_OUTPUT_CREATE:i64=-7602;
+const NRV3_OUTPUT_TYPE:i64=-7603;
+const NRV3_ALLOC:i64=-7604;
+const NRV3_NONREGULAR:i64=-7605;
+const NRV3_FORK:i64=-7606;
+const NRV3_WAIT:i64=-7607;
+const NRV3_TIMEOUT:i64=-7608;
+const NRV3_OUTPUT_LIMIT:i64=-7609;
+const NRV3_KQUEUE_CREATE:i64=-7610;
+const NRV3_KQUEUE_REGISTER:i64=-7611;
+const NRV3_REAP:i64=-7612;
+const NRV3_OUTPUT_INSPECT:i64=-7613;
+const NRV3_KQUEUE_WAIT:i64=-7614;
+const NRV3_ROOT_OPEN:i64=-7615;
+
+const NRV3_ARTIFACT_NONE:i32=0;
+const NRV3_ARTIFACT_PARTIAL:i32=1;
+const NRV3_ARTIFACT_COMPLETE:i32=2;
+
+// Darwin sys/event.h on the reviewed macOS SDK:
+// struct kevent is 32 bytes on arm64 with pack(4), EVFILT_TIMER=-7,
+// EV_ADD=1, EV_ONESHOT=16, and timer data defaults to milliseconds.
+const NRV3_KEVENT_BYTES:i32=32;
+const NRV3_TIMER_FILTER_U16:i32=65529; // two's-complement representation of int16 -7
+const NRV3_TIMER_FLAGS_U16:i32=17;     // EV_ADD | EV_ONESHOT
+const NRV3_EV_ERROR_U16:i32=16384;
+
+struct NativeAdmissionV3 {
+    status:i64,
+    root:i64,
+    created:i32,
+    partial:i32,
+}
+
+struct NativeRunV3 {
+    status:i64,
+    detail:i64,
+    artifact_status:i32,
+    started:i32,
+    timed_out:i32,
+    timer_registered:i32,
+    timer_fired:i32,
+    reaped:i32,
+    exit_code:i32,
+    signal:i32,
+    cpu_us:i64,
+    peak_rss:i64,
+    wall_us_nonmonotonic:i64,
+    wall_measurement_valid:i32,
+    stdout_bytes:i64,
+    stderr_bytes:i64,
+    output_over_limit:i32,
+}
+
+fn nrv3_label_valid(label:[]u8)i32 {
+    // 57 + len(".stdout") == 64, the frozen IO_V1 child-name limit.
+    if(label.len<1 || label.len>57){return 0;}
+    return nio_name_valid(label);
+}
+
+fn nrv3_admit_root(path:[]u8)NativeAdmissionV3 {
+    let r:NativeAdmissionV3=NativeAdmissionV3{.status=NRV3_INVALID,.root=-1,.created=0,.partial=0};
+    if(path.len<1 || path.len>4095){return r;}
+    let made:i64=nio_mkdir(path);
+    if(made!=0){r.status=made;return r;}
+    r.created=1;
+    let root:i64=nio_open_root(path);
+    if(root<0){r.status=NRV3_ROOT_OPEN;r.partial=1;return r;}
+    r.root=root;r.status=NRV3_OK;return r;
+}
+
+fn nrv3_open_regular_child(root:i64,name:[]u8,create:i32)i64 {
+    let fd:i64=nio_open_child(root,name,create);
+    if(fd<0){return fd;}
+    if(nio_regular(fd)!=1){nio_close(fd);return NRV3_NONREGULAR;}
+    return fd;
+}
+
+fn nrv3_result()NativeRunV3 {
+    return NativeRunV3{
+        .status=NRV3_INVALID,.detail=0,.artifact_status=NRV3_ARTIFACT_NONE,
+        .started=0,.timed_out=0,.timer_registered=0,.timer_fired=0,.reaped=0,
+        .exit_code=-1,.signal=0,.cpu_us=0,.peak_rss=0,.wall_us_nonmonotonic=-1,
+        .wall_measurement_valid=0,.stdout_bytes=-1,.stderr_bytes=-1,.output_over_limit=0,
+    };
+}
+
+fn nrv3_put16(bytes:[]u8,at:i32,value:i32)i32 {
+    if(at<0 || at>bytes.len-2 || value<0 || value>65535){return -1;}
+    bytes[at]=(value & 255) as u8;bytes[at+1]=((value>>8)&255) as u8;return 0;
+}
+
+fn nrv3_put32(bytes:[]u8,at:i32,value:i64)i32 {
+    if(at<0 || at>bytes.len-4 || value<0 || value>4294967295){return -1;}
+    let v:i64=value;let i:i32=0;
+    while(i<4){bytes[at+i]=(v&255) as u8;v=v>>8;i=i+1;}return 0;
+}
+
+fn nrv3_put64(bytes:[]u8,at:i32,value:i64)i32 {
+    if(at<0 || at>bytes.len-8 || value<0){return -1;}
+    let v:i64=value;let i:i32=0;
+    while(i<8){bytes[at+i]=(v&255) as u8;v=v>>8;i=i+1;}return 0;
+}
+
+fn nrv3_get16(bytes:[]u8,at:i32)i32 {
+    if(at<0 || at>bytes.len-2){return -1;}
+    return (bytes[at] as i32)+(bytes[at+1] as i32)*256;
+}
+
+fn nrv3_get64_nonnegative(bytes:[]u8,at:i32)i64 {
+    if(at<0 || at>bytes.len-8 || bytes[at+7]>=128){return -1;}
+    let x:i64=0;let i:i32=7;
+    while(i>=0){x=x*256+(bytes[at+i] as i64);i=i-1;}return x;
+}
+
+fn nrv3_timer_change(change:[]u8,deadline_ms:i64)i32 {
+    if(change.len!=NRV3_KEVENT_BYTES || deadline_ms<1 || deadline_ms>60000){return -1;}
+    if(nrv3_put64(change,0,1)!=0 ||
+       nrv3_put16(change,8,NRV3_TIMER_FILTER_U16)!=0 ||
+       nrv3_put16(change,10,NRV3_TIMER_FLAGS_U16)!=0 ||
+       nrv3_put32(change,12,0)!=0 ||
+       nrv3_put64(change,16,deadline_ms)!=0 ||
+       nrv3_put64(change,24,0)!=0){return -1;}
+    return 0;
+}
+
+fn nrv3_event_is_timer(event:[]u8)i32 {
+    if(event.len!=NRV3_KEVENT_BYTES){return 0;}
+    if(nrv3_get64_nonnegative(event,0)!=1){return 0;}
+    if(nrv3_get16(event,8)!=NRV3_TIMER_FILTER_U16){return 0;}
+    return 1;
+}
+
+fn nrv3_wall_us(tv:*i64)i64 {
+    tv[0]=0;tv[1]=0;
+    if(_zag_darwin_syscall(116,tv as i64,0,0,0,0,0)!=0){return -1;}
+    if(tv[0]<0 || tv[1]<0 || tv[1]>=1000000){return -1;}
+    return tv[0]*1000000+tv[1];
+}
+
+fn nrv3_decode_wait(result:*NativeRunV3,status:*i32,usage:*i64)void {
+    result.*.reaped=1;
+    result.*.signal=status[0] & 127;
+    if(result.*.signal==0){result.*.exit_code=(status[0]>>8)&255;}
+    result.*.cpu_us=usage[0]*1000000+usage[1]+usage[2]*1000000+usage[3];
+    result.*.peak_rss=usage[4];
+}
+
+fn nrv3_final_reap(pid:i64,status:*i32,usage:*i64)i64 {
+    let waited:i64=_zag_darwin_syscall(7,pid,status as i64,0,usage as i64,0,0);
+    let retries:i32=0;
+    while(waited==-4 && retries<64){
+        waited=_zag_darwin_syscall(7,pid,status as i64,0,usage as i64,0,0);
+        retries=retries+1;
+    }
+    return waited;
+}
+
+fn nrv3_kill_and_reap(result:*NativeRunV3,pid:i64,status:*i32,usage:*i64)i32 {
+    result.*.detail=_zag_darwin_syscall(37,pid,9,0,0,0,0);
+    let waited:i64=nrv3_final_reap(pid,status,usage);
+    if(waited!=pid){result.*.status=NRV3_REAP;result.*.detail=waited;return -1;}
+    nrv3_decode_wait(result,status,usage);return 0;
+}
+
+fn nrv3_free_preflight(b:[]u8,m:[]u8,oname:[]u8,ename:[]u8,change:[]u8,event:[]u8,
+    argv:*i64,env:*i64,status:*i32,usage:*i64,poll:*i64,tv:*i64)void {
+    nio_free(b);nio_free(m);nio_free(oname);nio_free(ename);nio_free(change);nio_free(event);
+    if(argv!=null as *i64){_zag_free(argv as *i8);}
+    if(env!=null as *i64){_zag_free(env as *i8);}
+    if(status!=null as *i32){_zag_free(status as *i8);}
+    if(usage!=null as *i64){_zag_free(usage as *i8);}
+    if(poll!=null as *i64){_zag_free(poll as *i8);}
+    if(tv!=null as *i64){_zag_free(tv as *i8);}
+}
+
+// Parent-owned direct-child supervision. A relative one-shot EVFILT_TIMER is registered
+// before fork. wait4(WNOHANG) observes early exit; kevent supplies the kernel deadline.
+// On timer firing, the parent SIGKILLs the direct child and performs a final blocking reap.
+// gettimeofday is optional post-hoc duration measurement only; it never controls enforcement.
+fn nrv3_run(root:i64,binary:[]u8,mode:[]u8,label:[]u8,
+    deadline_ms:i64,output_limit:i64)NativeRunV3 {
+    let result:NativeRunV3=nrv3_result();
+    if(root<0 || nrv3_label_valid(label)!=1 || binary.len<1 || binary.len>4095 ||
+       mode.len<1 || mode.len>4095 || deadline_ms<1 || deadline_ms>60000 ||
+       output_limit<1 || output_limit>1048576){return result;}
+
+    // All memory allocation and generated-name validation precede filesystem outputs.
+    let b:[]u8=nio_cstr(binary);let m:[]u8=nio_cstr(mode);
+    let oname:[]u8=_zag_str_concat(label,".stdout");let ename:[]u8=_zag_str_concat(label,".stderr");
+    let change:[]u8=nio_alloc(NRV3_KEVENT_BYTES);let event:[]u8=nio_alloc(NRV3_KEVENT_BYTES);
+    let argv:*i64=_zag_malloc(24) as *i64;let env:*i64=_zag_malloc(8) as *i64;
+    let status:*i32=_zag_malloc(8) as *i32;let usage:*i64=_zag_malloc(256) as *i64;
+    let poll:*i64=_zag_malloc(16) as *i64;let tv:*i64=_zag_malloc(16) as *i64;
+    if(b.len==0 || m.len==0 || oname.len==0 || ename.len==0 ||
+       nio_name_valid(oname)!=1 || nio_name_valid(ename)!=1 ||
+       change.len!=NRV3_KEVENT_BYTES || event.len!=NRV3_KEVENT_BYTES ||
+       argv==null as *i64 || env==null as *i64 || status==null as *i32 ||
+       usage==null as *i64 || poll==null as *i64 || tv==null as *i64){
+        result.status=NRV3_ALLOC;
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;
+    }
+    if(nrv3_timer_change(change,deadline_ms)!=0){
+        result.status=NRV3_INVALID;
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;
+    }
+    argv[0]=_zag_slice_ptr(b) as i64;argv[1]=_zag_slice_ptr(m) as i64;argv[2]=0;env[0]=0;
+    status[0]=0;let i:i32=0;while(i<32){usage[i]=0;i=i+1;}
+    poll[0]=0;poll[1]=5000000; // five millisecond relative wait; not the enforcement clock.
+
+    // Fail before output artifacts if kqueue itself is unavailable.
+    let kq:i64=_zag_darwin_syscall(362,0,0,0,0,0,0);
+    if(kq<0){result.status=NRV3_KQUEUE_CREATE;result.detail=kq;
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;}
+
+    let out:i64=nio_open_child(root,oname,1);
+    if(out<0){result.status=NRV3_OUTPUT_CREATE;result.detail=out;nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;}
+    result.artifact_status=NRV3_ARTIFACT_PARTIAL;
+    if(nio_regular(out)!=1 || nio_seek(out,0,2)!=0){
+        result.status=NRV3_OUTPUT_TYPE;nio_close(out);nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;
+    }
+    let err:i64=nio_open_child(root,ename,1);
+    if(err<0){result.status=NRV3_OUTPUT_CREATE;result.detail=err;nio_close(out);nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;}
+    if(nio_regular(err)!=1 || nio_seek(err,0,2)!=0){
+        result.status=NRV3_OUTPUT_TYPE;nio_close(out);nio_close(err);nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;
+    }
+    result.artifact_status=NRV3_ARTIFACT_COMPLETE;
+
+    // Register the relative kernel timer before fork. Default EVFILT_TIMER data is ms.
+    let registered:i64=_zag_darwin_syscall(363,kq,_zag_slice_ptr(change) as i64,1,0,0,0);
+    if(registered!=0){result.status=NRV3_KQUEUE_REGISTER;result.detail=registered;
+        nio_close(out);nio_close(err);nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;}
+    result.timer_registered=1;
+    let wall_start:i64=nrv3_wall_us(tv);
+
+    let pid:i64=_zag_darwin_fork();
+    if(pid==0){
+        // Child can only lower the inherited 1 MiB N01B file ceiling.
+        poll[0]=output_limit;poll[1]=output_limit;
+        if(_zag_darwin_syscall(195,1,poll as i64,0,0,0,0)!=0){_zag_exit(125);}
+        if(_zag_darwin_syscall(90,out,1,0,0,0,0)<0 ||
+           _zag_darwin_syscall(90,err,2,0,0,0,0)<0){_zag_exit(126);}
+        nio_close(kq);nio_close(out);nio_close(err);
+        _zag_darwin_syscall(59,_zag_slice_ptr(b) as i64,argv as i64,env as i64,0,0,0);
+        _zag_exit(127);
+    }
+    if(pid<0){result.status=NRV3_FORK;result.detail=pid;
+        nio_close(out);nio_close(err);nio_close(kq);
+        nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);return result;}
+
+    result.started=1;result.status=NRV3_OK;
+    let done:i32=0;
+    while(done==0){
+        let waited:i64=_zag_darwin_syscall(7,pid,status as i64,1,usage as i64,0,0);
+        if(waited==pid){nrv3_decode_wait(&result,status,usage);done=1;}
+        else if(waited<0 && waited!=-4){
+            result.status=NRV3_WAIT;result.detail=waited;nrv3_kill_and_reap(&result,pid,status,usage);done=1;
+        }else{
+            poll[0]=0;poll[1]=5000000;
+            let got:i64=_zag_darwin_syscall(363,kq,0,0,_zag_slice_ptr(event) as i64,1,poll as i64);
+            if(got==1){
+                let flags:i32=nrv3_get16(event,10);
+                if(flags>=0 && (flags & NRV3_EV_ERROR_U16)!=0){
+                    result.status=NRV3_KQUEUE_WAIT;result.detail=nrv3_get64_nonnegative(event,16);
+                    nrv3_kill_and_reap(&result,pid,status,usage);done=1;
+                }else if(nrv3_event_is_timer(event)==1){
+                    // Close the WNOHANG/timer delivery race before killing. If the
+                    // direct child became reapable since the prior poll, preserve its
+                    // actual exit instead of converting it to a timeout kill.
+                    result.timer_fired=1;
+                    let deadline_wait:i64=_zag_darwin_syscall(7,pid,status as i64,1,usage as i64,0,0);
+                    if(deadline_wait==pid){nrv3_decode_wait(&result,status,usage);}
+                    else if(deadline_wait<0 && deadline_wait!=-4){
+                        result.status=NRV3_WAIT;result.detail=deadline_wait;
+                        nrv3_kill_and_reap(&result,pid,status,usage);
+                    }else{
+                        result.timed_out=1;result.status=NRV3_TIMEOUT;
+                        nrv3_kill_and_reap(&result,pid,status,usage);
+                    }
+                    done=1;
+                }else{
+                    result.status=NRV3_KQUEUE_WAIT;result.detail=-1;
+                    nrv3_kill_and_reap(&result,pid,status,usage);done=1;
+                }
+            }else if(got==0 || got==-4){
+                // Poll timeout or EINTR: WNOHANG will be checked again.
+            }else{
+                result.status=NRV3_KQUEUE_WAIT;result.detail=got;
+                nrv3_kill_and_reap(&result,pid,status,usage);done=1;
+            }
+        }
+    }
+
+    let wall_end:i64=nrv3_wall_us(tv);
+    if(wall_start>=0 && wall_end>=wall_start){
+        result.wall_us_nonmonotonic=wall_end-wall_start;result.wall_measurement_valid=1;
+    }
+    result.stdout_bytes=nio_seek(out,0,2);result.stderr_bytes=nio_seek(err,0,2);
+    if(result.stdout_bytes<0 || result.stderr_bytes<0){
+        if(result.status==NRV3_OK){result.status=NRV3_OUTPUT_INSPECT;}
+    }else if(result.stdout_bytes>output_limit || result.stderr_bytes>output_limit || result.signal==25){
+        result.output_over_limit=1;if(result.status==NRV3_OK){result.status=NRV3_OUTPUT_LIMIT;}
+    }
+    nio_close(out);nio_close(err);nio_close(kq);
+    nrv3_free_preflight(b,m,oname,ename,change,event,argv,env,status,usage,poll,tv);
+
+    _zag_print("PROCESSV3,");_zag_print(label);_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.status));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.started as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.timed_out as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.timer_registered as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.timer_fired as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.reaped as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.exit_code as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.signal as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.stdout_bytes));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.stderr_bytes));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.wall_us_nonmonotonic));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.wall_measurement_valid as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.cpu_us));_zag_print(",");
+    _zag_println(_zag_i64_to_str(result.peak_rss));
+    return result;
+}

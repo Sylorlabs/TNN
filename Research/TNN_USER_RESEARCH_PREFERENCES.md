@@ -483,3 +483,115 @@ After an explicit user preference message:
 |---|---|---|---|
 | 2026-08-23 | CONFIRMED | UNKNOWN is a logically structured state that may favor one hypothesis while retaining alternatives and their warrants; it is not an ambiguity class or confidence threshold. | Direct continuation brief |
 | 2026-08-23 | CONFIRMED | Repair V44 through a learned temporally extended investigation option with no fixed duration/count and native matched causal qualification. | Direct continuation brief |
+
+## 2026-09-05 update — milestone-gated autonomy, trainer authority, white-box TNN, consciousness, efficiency, and fair architecture comparisons
+
+### 34. Self-modification authority must be milestone-gated
+
+**Preference:** TNN must not be allowed to destroy accepted competence while learning to self-modify. Access to increasingly powerful parts of its mutable brain should be unlocked only after explicit capability/safety milestones pass.
+
+**Operational consequence:**
+
+- The learner cannot self-grant a higher authority level.
+- Protected root verification, provenance, rollback, trainer policy, resource ceilings, and capability gates remain outside ordinary learner mutation.
+- New non-core structures begin in shadow/copy-on-write state and require regression checks before live promotion.
+- Large-scale connectivity and learning-rule modification come only after lower-level parameter, memory, module, and routing milestones demonstrate preservation and rollback.
+- A trainer may keep a TNN instance at a lower authority level even if the architecture generally qualifies the higher level.
+
+### 35. Trainer owns goals, curriculum, values, and permissions; TNN owns the learned implementation
+
+**Preference:** What a TNN is trained to know, remember as important, do, avoid, and practice is determined by its trainer/owner, not by the architecture team. Different trainers should be able to develop different TNNs without changing protected architecture code.
+
+**Operational consequence:**
+
+- Trainer config defines desired competencies, values/policies, curriculum, feedback, important knowledge classes, environmental/action permissions, and resource budget.
+- Trainer can reinforce/test what should remain remembered, but does not manually write ordinary memory addresses/weights and then count that as learning.
+- TNN retains authority over *how* important information is represented/stored/rehearsed within trainer constraints.
+- Architecture team defines generic substrate, protected safety/verification, trainer interfaces, and experimental methodology—not domain answers or a single trainer's worldview.
+
+### 36. TNN must remain a white-box architecture
+
+**Preference:** TNN is explicitly not intended to become an LLM-style black box. The user should be able to inspect the internal mechanisms, mutable state, causal reasons, training changes, memory changes, architecture lineage, and source of information.
+
+**Operational consequence:**
+
+- Promotion requires complete causal trace coverage for declared consequential decisions and mutations.
+- No promotion-eligible mutable store may be absent from serialization, provenance, integrity hashing, and inspection.
+- Build human-facing brain-map, decision-microscope, training-diff, failure-explorer, trainer-ledger, architecture-lineage, and resource views.
+- Natural-language explanation is only a presentation layer over recorded causal state; it cannot substitute for provenance.
+
+### 37. Architecture comparisons require equal fighting chances and efficiency curves
+
+**Preference:** Do not claim TNN beats another architecture by comparing against an arbitrarily old/weak implementation. Compare architecture families across matched size, data, compute, memory, and active-compute budgets and report where each family wins or plateaus.
+
+**Operational consequence:**
+
+- Use scaling curves and Pareto fronts, not one cherry-picked model-versus-model score.
+- Report capability per persistent byte, active operation, unique training experience, memory byte, observation cost, and trainer intervention where feasible.
+- Include retention, adaptation, transparency, and continual learning so static benchmark accuracy does not dominate the conclusion.
+- Separate a model-generation advantage from an architecture-family advantage.
+
+### 38. Consciousness is a project goal/research lane, not a current capability claim
+
+**Preference:** The user wants TNN to pursue consciousness and greater independence. It is acceptable that TNN is not currently conscious; the project should study the mechanisms that would let it understand its own state, goals, uncertainty, limits, values/constraints, and need for action or learning.
+
+**Operational consequence:**
+
+- Do not claim phenomenal consciousness from behavior alone.
+- Build falsifiable milestones for introspective state access, self-model prediction, autobiographical continuity, metacognitive control, value/constraint conflict detection, self-directed learning, and self-revision with continuity.
+- Ground self-report in actual causal trace/internal state rather than language imitation.
+- Treat trainer-defined values/policies and observed consequences as the engineering basis for `right/wrong`; do not assume autonomous cognition discovers objective morality.
+
+### 39. Efficiency improvements must preserve TNN's advantages
+
+**Preference:** Seek major compute/memory efficiency gains analogous in spirit to mixture-of-experts conditional computation, but do not accept hidden capability, retention, transparency, or robustness regressions merely to reduce cost.
+
+**Operational consequence:**
+
+- Test sparse conditional PAM/expert activation, event-driven computation, local/block-sparse connections, generated motifs, memory tiering, lazy materialization, and learned resource allocation.
+- Measure stored capacity separately from active computation.
+- Pruning/suspension requires before/after regression evidence and rollback.
+- An efficiency win should be Pareto-superior or a trainer-approved explicit tradeoff.
+
+### 40. Documentation is a scientific requirement
+
+**Preference:** Every significant experiment, failure, architecture decision, consumed dataset, infrastructure attempt, and next-step rationale must be persisted so future agents do not repeat completed or invalid work.
+
+**Operational consequence:**
+
+- Maintain preregistration, authority/hardcoding/trainer ledgers, execution journal, evidence identities, full negative results, analysis/reproduction, consumed-data registry, architecture diffs, resource reports, and current handoffs.
+- Failed infrastructure attempts must be clearly separated from scientific exposure.
+- Future agents must inspect experiment/current-authority registries before creating a new experiment or reusing data.
+
+| Date | Status | Preference/change | Source |
+|---|---|---|---|
+| 2026-09-05 | CONFIRMED | Unlock self-modification/brain access by milestones; TNN cannot self-grant protected authority. | Direct user message |
+| 2026-09-05 | CONFIRMED | Trainer determines training goals, important memory/skills, values, curriculum, and permissions; architecture team supplies generic substrate. | Direct user message |
+| 2026-09-05 | CONFIRMED | TNN must remain inspectable/white-box rather than an LLM-style black box. | Direct user message |
+| 2026-09-05 | CONFIRMED | Compare architectures with equal fighting chances and capability/resource scaling rather than model-age cherry-picks. | Direct user message |
+| 2026-09-05 | CONFIRMED | Pursue consciousness/independence as a research goal while separating measurable self-model capability from unsupported consciousness claims. | Direct user message |
+| 2026-09-05 | CONFIRMED | Pursue conditional/sparse efficiency without hiding capability regressions. | Direct user message |
+| 2026-09-05 | CONFIRMED | Persist all experiments, failures, architecture decisions, and handoffs to prevent repeated work. | Direct user message |
+
+## 2026-09-05 — completion and continuation correction
+
+The human explicitly requires continued execution, not stopping after planning,
+foundations, or a convenient intermediate milestone to request another follow-up.
+Before yielding, check the requested outcomes and tests against the full active
+scope. Continue safe, authorized, relevant work while such work remains. A failed
+gate requires diagnosis and documented next action, not relabeling it passed.
+Never mark all R33 research complete from document or infrastructure checks.
+Report a genuine authority/environment blocker precisely without claiming
+background work or weakening sensory, evidence, continuity or promotion gates.
+
+## 2026-09-05 — native Zag only, including supervision and evaluation
+
+The human explicitly corrected the use of Python after C03: stop using Python;
+the implementation is to be in the user's native Zag programming language.
+This supersedes earlier permissions for Python external glue. New cognition,
+learning, telemetry, recovery, supervision and evaluation code must be Zag.
+Do not execute the old Python tools or substitute another programming language.
+Preserve historical files/results unchanged with accurate language attribution.
+Use native replacements with new versioned registration and bounded tests.
+See [native-only execution contract](R33_NATIVE_ONLY_EXECUTION_CONTRACT.md).
+The same message reiterated completing the full goal without premature stops.

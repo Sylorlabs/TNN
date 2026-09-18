@@ -1,9 +1,74 @@
-# TNN — Grounded, Active, Non-Token Cognition Research
+# TNN — True Neural Network Research
+
+## Current entry point — R33 research generation
+
+**September 12 implementation update:** the native continuing-life workstream
+now has a shared observation, action/consequence, checkpoint, storage, and
+simulated-world boundary. Its first five-child engineering run passed with
+fresh-process recovery and measured resource accounting. Read the
+[current continuing-life entry point](Research/R33_CONTINUING_LIFE_V1/CURRENT_ENTRY_POINT.md)
+and [architecture assessment](Research/R33_CONTINUING_LIFE_V1/ARCHITECTURE_ASSESSMENT.md)
+for the exact scope. This is infrastructure evidence; it does not establish
+integrated learning or R27 behavioral continuity.
+
+**September 6 status:** [N13A fingerprint-memory corrective regression](Research/R33_NATIVE_N13A_RESULT.md)
+is closed as bounded engineering evidence; the R33 program is not. N13A completed
+6/6 children, 24,601 child checks and 62 parent checks, exact fresh-process replay,
+and independent evidence-only postrun confirmation under the unchanged384MiB gate.
+There are 26 recorded diagnostic batches and zero R33 training runs. Original
+parent source/behavior continuity remains blocked; read the
+[earlier program-wide summary](Research/R33_PROGRESS_SUMMARY_20260906.md) and
+[eighteen-stage status map](Research/R33_PROGRAM_STATUS_20260906.json).
+Original parent behavior/source recovery, full runtime/sensory qualification
+and the later scientific program remain open. Historical first-deliverable
+completion and compile-only passages below are not current launch instructions.
+
+Continue from the [R33 handoff](Research/R33_HANDOFF.md),
+[current state](Research/R33_CURRENT_STATE.json), and
+[master plan](Research/R33_MASTER_PLAN.md). R27 remains the accepted brain at
+step 60,423 with zero newborn restarts. R32/E51AJ is the completed inherited
+experimental frontier; creating R33 does not promote a successor.
+
+R33's first deliverable supplies the audited research hierarchy, telemetry and
+authority specifications, independent reviews, and a frozen nontraining boundary
+audit. Native compilation is not fixture execution or sensory qualification.
+B000 has subsequently executed once and [confirmed all five scoped boundary
+defects](Research/R33_B000_RESULT.md). Corrective implementation and qualification
+are in progress; the master plan is not complete.
+See the [completion record](Research/R33_FIRST_DELIVERABLE.md) and
+[batch status](Research/R33_B000_EXECUTION_STATUS.json) for the exact boundary.
+
+Trainer means a **human/person/group**. A Master or automated teacher is an
+attributed teaching aid, not the trainer and not learner competence. Active TNN
+and future Foundry remain graph-free. Historical compiler-recovery, active-R32
+and older trainer descriptions below do not supersede this R33 entry point.
+
+# Meaning of TNN
+
+**TNN means True Neural Network.** That is the canonical project name. The
+expanded phrase "Grounded, Active, Non-Token Cognition" is a description of the
+research direction, not the name or acronym expansion.
 
 TNN is an ongoing research program exploring a different starting point for
 machine cognition: retain grounded experience, keep competing world hypotheses
 alive, reason over support and contradiction, and choose actions that can settle
 important questions.
+
+The autonomy position is documented in
+[`Research/TNN_AUTONOMY_POSITION.md`](Research/TNN_AUTONOMY_POSITION.md): TNN
+should increasingly own how it learns—replay, inquiry, memory, representation
+and reversible structural proposals—while the trainer and protected supervisor
+retain goals, values, permissions, provenance, rollback and safety authority.
+
+**Architectural shorthand:** TNN is a **white-box, grounded, active,
+continual-learning cognitive architecture** with persistent episodic/hypothesis
+state, learner-owned memory/representation, and a planned milestone-gated path to
+learner-owned structural plasticity. It is not one flat neural network, and the
+current research implementation is much smaller and more constrained than that
+long-term target. See
+[`Research/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md`](Research/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md)
+and the
+[`TNN Mega Plan`](Research/TNN_MEGA_PLAN_WHITE_BOX_DEVELOPMENTAL_ARCHITECTURE.md).
 
 The project is deliberately **not** a transformer, LLM, BPE/tokenizer pipeline,
 next-token objective, fixed knowledge graph, or confidence-threshold classifier.
@@ -123,6 +188,22 @@ trace: evidence enters a sensory route, a hypothesis is revised, memory is
 retrieved or changed, a prediction/action is chosen, the outcome is observed,
 and delayed regret can revise the mechanism. See
 [`Research/TNN_R27_TRACEABILITY.md`](Research/TNN_R27_TRACEABILITY.md).
+
+### White-box and staged autonomy contract
+
+TNN is not intended to become an opaque model whose only explanation is a
+generated narrative. Promotion-eligible mutable state must be serializable,
+provenance-linked, integrity-checked, and inspectable. The trainer supplies
+goals, values/policies, curriculum, important competencies and permissions; the
+architecture team supplies protected generic substrate, rollback, traceability
+and capability gates; TNN learns the internal representation, memory, reasoning,
+action and eventually non-core structures that satisfy those constraints.
+
+Powerful self-modification is milestone-gated. TNN may eventually instantiate
+very large sparse/recurrent/associative non-core structures, but it does not
+self-grant permission to rewrite protected verification, provenance, rollback,
+trainer policy or authority gates. New structures begin shadowed and reversible,
+and accepted capability floors are explicit regression constraints.
 
 ## The cognitive loop
 

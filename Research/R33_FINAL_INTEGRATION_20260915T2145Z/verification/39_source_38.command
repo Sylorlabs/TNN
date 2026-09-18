@@ -1,0 +1,1 @@
+cwd=/Users/Shared/micah/Documents/TNN/TNN command=cmp /Users/Shared/micah/Documents/TNN/TNN/Research/R33_NATIVE_N17_R27_CONTINUITY/r27_native_state_semantics_v4.zag /Users/Shared/micah/Documents/TNN/TNN/Research/R33_FINAL_INTEGRATION_20260915T2145Z/sources/Research/R33_NATIVE_N17_R27_CONTINUITY/r27_native_state_semantics_v4.zag

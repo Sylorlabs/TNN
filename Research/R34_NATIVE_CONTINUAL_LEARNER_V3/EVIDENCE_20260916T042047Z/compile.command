@@ -1,0 +1,1 @@
+/Users/Shared/micah/Documents/zag/znc /Users/Shared/micah/Documents/TNN/TNN/Research/R34_NATIVE_CONTINUAL_LEARNER_V3/r34_continuing_harness_v3.zag --target macos-arm64 --no-zagd --no-analyze --no-foreground-cache -o /Users/Shared/micah/Documents/TNN/TNN/Research/R34_NATIVE_CONTINUAL_LEARNER_V3/EVIDENCE_20260916T042047Z/r34_v3

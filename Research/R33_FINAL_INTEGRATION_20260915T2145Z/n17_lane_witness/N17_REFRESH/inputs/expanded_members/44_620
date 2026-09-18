@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,sys
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.linear_model import LogisticRegression,Ridge
+from sklearn.ensemble import RandomForestClassifier,ExtraTreesRegressor
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph')
+from experiments_memory_v3 import make_episode,feat,sufficient,COST,fixed_choose
+POLICIES=['PRIVILEGED_HEURISTIC_CONTROL','LRU','RANDOM','EXACT_ALL','STRUCTURED_ALL','LEARNED_HIER_LINEAR','LEARNED_HIER_RF']
+FIX={p:i*1223+29 for i,p in enumerate(POLICIES)}
+class HierLearner:
+ def __init__(self,name,dev,seed):
+  X=np.stack([feat(r) for r in dev]);exact=np.array([int(r['q']==0) for r in dev]);imp=np.array([r['importance'] for r in dev])
+  if name=='LEARNED_HIER_LINEAR':
+   self.ex=LogisticRegression(max_iter=400,C=.8,class_weight='balanced').fit(X,exact);self.imp=Ridge(alpha=1.2).fit(X,imp)
+  else:
+   self.ex=RandomForestClassifier(n_estimators=64,max_depth=11,min_samples_leaf=5,max_features=.85,random_state=seed,n_jobs=1,class_weight='balanced').fit(X,exact)
+   self.imp=ExtraTreesRegressor(n_estimators=64,max_depth=12,min_samples_leaf=4,max_features=.9,random_state=seed,n_jobs=1).fit(X,imp)
+ def values(self,r):
+  x=feat(r).reshape(1,-1);pe=float(self.ex.predict_proba(x)[0,1]);imp=max(.05,float(self.imp.predict(x)[0]));
+  # Nested marginal values learned from delayed future use. Action semantics (structured suffices for non-exact;
+  # exact upgrade preserves exact queries; hot upgrade only improves rapid access) are core storage semantics.
+  base=imp*(1-pe) + .10*imp*pe  # even exact-oriented episodes may have secondary structured value
+  exact=imp*pe
+  hot=.11*r['retrieval']*(.35+.65*pe)
+  return base,exact,hot,pe,imp
+
+def downgrade_options(entries,learner):
+ # Return (loss per freed cost, eid, new_action). Current actions: 0 hot exact,1 cold exact,2 structured.
+ out=[]
+ for eid,e in entries.items():
+  a=e['a'];base,ex,hot,pe,imp=e['vals']
+  if a==0:out.append((hot/1.5,eid,1))
+  elif a==1:out.append((ex/1.5,eid,2))
+  elif a==2:out.append((base/1.0,eid,3))
+ return out
+
+def simulate(name,seed,dev,n=1500,budget=760):
+ rng=np.random.default_rng(seed);learner=HierLearner(name,dev,seed) if name.startswith('LEARNED_HIER') else None
+ entries={};used=0.;queries=defaultdict(list);episodes=[];by=defaultdict(list);storage=[];evict=0;actions=np.zeros(4,int);downgrades=0
+ for i in range(n):
+  r=make_episode(rng,i);episodes.append(r)
+  if learner:
+   vals=learner.values(r);a=0;entries[i]={'a':a,'r':r,'last':i,'vals':vals};used+=COST[a]
+   # Global learned marginal-value allocation: downgrade the least future-valuable chunk anywhere in memory.
+   while used>budget:
+    opts=downgrade_options(entries,learner)
+    if not opts:break
+    _,eid,na=min(opts,key=lambda x:x[0]);old=entries[eid]['a'];used-=COST[old]-COST[na];entries[eid]['a']=na;downgrades+=1
+    if na==3:del entries[eid];evict+=1
+  else:
+   a=fixed_choose(name,r,i,rng);entries[i]={'a':a,'r':r,'last':i};used+=COST[a]
+   while used>budget:
+    cand=[(eid,e) for eid,e in entries.items() if COST[e['a']]>0]
+    if not cand:break
+    eid,e=min(cand,key=lambda z:z[1]['last']);used-=COST[e['a']];del entries[eid];evict+=1
+  queries[i+r['delay']].append(i)
+  for eid in queries.get(i,[]):
+   rr=episodes[eid];e=entries.get(eid);ok=e is not None and sufficient(e['a'],rr['q']);by[rr['q']].append(bool(ok));
+   if e:e['last']=i
+  storage.append(used)
+ for t in range(n,n+340):
+  for eid in queries.get(t,[]):
+   rr=episodes[eid];e=entries.get(eid);by[rr['q']].append(bool(e is not None and sufficient(e['a'],rr['q'])))
+ # final action composition among retained memory plus discarded inferred from total n
+ final=np.zeros(4,int)
+ for e in entries.values():final[e['a']]+=1
+ final[3]=n-final[:3].sum()
+ allv=[x for v in by.values() for x in v]
+ return {'policy':name,'seed':seed,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(storage)),'evictions':evict,'downgrades':downgrades,'final_action_fraction':(final/final.sum()).tolist()}
+
+def run_seed(si,out,dev_n=5000):
+ dr=np.random.default_rng(286000+si);dev=[make_episode(dr,i) for i in range(dev_n)];rows=[]
+ for p in POLICIES:rows.append(simulate(p,287000+si+FIX[p],dev));print(p,'done',flush=True)
+ Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','seed_index':si,'dev_history':dev_n,'rows':rows},indent=2))
+def combine(files,out):
+ rows=[]
+ for f in files:rows+=json.loads(Path(f).read_text())['rows']
+ g=defaultdict(list)
+ for r in rows:g[r['policy']].append(r)
+ s=[]
+ for p,rs in g.items():
+  z={'policy':p,'n':len(rs)}
+  for k in ['overall','exact','semantic','source','procedure','mean_storage','evictions','downgrades']:
+   v=np.array([r.get(k,0) for r in rs],float);z[k]=float(v.mean());z[k+'_sd']=float(v.std())
+  z['utility']=.38*z['exact']+.19*z['semantic']+.19*z['source']+.24*z['procedure']-.0001*z['mean_storage'];z['final_action_fraction']=np.mean(np.array([r['final_action_fraction'] for r in rs]),axis=0).tolist();s.append(z)
+ s.sort(key=lambda x:x['utility'],reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','rows':rows,'summary':s},indent=2));print(json.dumps(s,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='cmd',required=True);a=sp.add_parser('seed');a.add_argument('--index',type=int,required=True);a.add_argument('--out',required=True);a.add_argument('--dev-n',type=int,default=5000);b=sp.add_parser('combine');b.add_argument('--out',required=True);b.add_argument('files',nargs='+');x=ap.parse_args();run_seed(x.index,x.out,x.dev_n) if x.cmd=='seed' else combine(x.files,x.out)
