@@ -1,0 +1,31 @@
+# LH-1 — Horizon ×10 (≈480 updates): RESULT
+
+**Variant dir:** `variants/LH-1/` · **Evidence:** `EVIDENCE_20260919T221511Z/` · **Date:** 2026-09-19
+**Seeds (fresh, documented):** learner `11001`, world/runtime `1101`, drift off (`LH_DRIFT_SEED=0`)
+**Learner core:** `r34_learner_core.zag` byte-identical to canonical (`learner_core_unmodified=true`, `learner_core_isolation=true`). Harness-only changes in `r34_lh_harness.zag`.
+
+## Hypothesis verdict: SUPPORTED
+
+The delayed-credit rule is stable at 10× horizon. All prereg success criteria met:
+
+| Check | Result |
+|---|---|
+| `train_updates == 480` | 480 == 480 ✓ (48/block × 10, one lineage, no restarts) |
+| Per-block eval positives | **ea=16/16, eb=16/16 on all 10 blocks** |
+| Determinism (two same-seed runs) | identical state fingerprint `fp=818888`, `lh_determinism=1`, world bytes equal |
+| Return-A gate | `ra=15/16`, zero weight updates during return, `active=0` |
+| Clamp pathology | none — max \|score\| = 18900 (s00), well under ±30000 |
+| Controls (matched, fresh states) | disabled-update B: 12/24, updates=0; scrambled-reward A: 0/16 — both match the 48-update baseline exactly |
+| Campaign failures | `LH_FAILURES=0`, runner `failures=0` |
+
+Switch behavior is perfectly regular: 1 switch in block 0 (context 0→1 on first B-train), then exactly 2/block (1→0 at each A-train start, 0→1 at each B-train start), ending at `sw=19`. Scores grow near-linearly: s00 1900→18900, s11 1500→18400; wrong-cells sink: s01 −500→−4800, s10 −900→−5300.
+
+## Method note (harness artifact found and fixed)
+
+The first LH-1 run failed all `ea` probes (0/16) while `eb=16/16`: eval-A was run *after* B-training while `active=1`, so the probe read the B-context, not a learning failure. The harness was corrected so each eval immediately follows its regime's train (baseline acquire-gate semantics: train_A→eval_A→train_B→eval_B). Eval probes are context-relative — a fact Agent F should keep in mind for any probe design.
+
+## What Agent F should know
+
+- 10× horizon is a clean stability baseline: no drift, no saturation effects, deterministic to the fingerprint.
+- The context-switch rule fires exactly when needed (2/block steady state) and never spuriously.
+- Cost: ~2.3M cpu_us, 1.9MB RSS — trivial; longer horizons are cheap on this VM.
