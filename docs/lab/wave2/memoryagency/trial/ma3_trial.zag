@@ -1,0 +1,383 @@
+// MA3 — long-horizon memory pressure with delayed revelation (PREREG_MA3).
+// AGENCY (deliberate ops: declared value at ADD, PIN-under-uncertainty,
+// KILL low-value, PROMOTE/UNPIN on delayed revelation) vs AUTO (integer port
+// of r34_memory_lifecycle_v1: bounded-linear future-use estimator +
+// evict-lowest-predicted). Fixed 32-slot store, 500 episodes, delay 25.
+// Standard + adversarial curricula x 3 seeds. Per-cohort scoring (E51AJ law).
+@import("ma_common.zag")
+
+const MA3_SLOTS:i32=32;
+const MA3_EPISODES:i32=500;
+const MA3_DELAY:i32=25;
+const MA3_FEATS:i32=8;
+const MA3_TRUST_INIT:i32=64;
+const MA3_TRUST_MAX:i32=256;
+const MA3_UNCERTAIN_T:i32=120;
+const MA3_W_MAX:i32=2048;
+const MA3_CREDIT_K:i32=2048;
+const MA3_PINLOG_CAP:i32=512;
+
+// Integer port of r34m1_predict: pct = clamp01(50 + 25*z), z in 1/256 units.
+fn auto_predict(w:[]u8,bias:i32,fx:[]u8,base:i32)i32 {
+    let z:i32=bias;
+    let i:i32=0;
+    while(i<MA3_FEATS){
+        z=z+ma_i32_get(w,i*4)*((fx[base+i]) as i32);
+        i=i+1;
+    }
+    let p:i32=50+ma_div_floor(25*z,256);
+    if(p<0){p=0;}
+    if(p>100){p=100;}
+    return p;
+}
+
+// Mark the latest still-pinned log entry for slot as learner-unpinned.
+fn ma3_mark_unpin(plog_s:[]u8,plog_u:[]u8,plog_n:i32,slot:i32)void {
+    let k:i32=plog_n-1;
+    while(k>=0){
+        if(ma_i32_get(plog_s,k*4)==slot && plog_u[k]==0){plog_u[k]=1;break;}
+        k=k-1;
+    }
+}
+
+// One cell: both arms on the same curriculum. cur 0=standard, 1=adversarial.
+fn ma3_cell(cur:i32,seed:i32,out_ag_ret:*i32,out_ag_tot:*i32,out_au_ret:*i32,
+            out_au_tot:*i32,out_invalid:*i32,out_fp:*i32)i32 {
+    // ---- shared curriculum: 500 incoming memories, hidden importance ----
+    let crng:i32=ma_mod(seed*7+cur*101+13,1000003);
+    if(crng<2){crng=crng+100;}
+    let f_of_mid:[]u8=nio_alloc(MA3_EPISODES*MA3_FEATS);
+    let mem_imp:[]u8=nio_alloc(MA3_EPISODES);
+    let m:i32=0;
+    while(m<MA3_EPISODES){
+        let r0:i32=ma_mod(ma_rng_next(&crng),100);
+        let imp:i32=0;
+        if(r0<30){imp=1;}
+        mem_imp[m]=imp as u8;
+        let i:i32=0;
+        while(i<MA3_FEATS){
+            let fv:i32=0;
+            if(cur==0){
+                if(i<4){fv=imp*3+ma_mod(ma_rng_next(&crng),2);}
+                else{fv=imp*1+ma_mod(ma_rng_next(&crng),3);}
+            } else {
+                if(i<4){fv=(1-imp)*3+ma_mod(ma_rng_next(&crng),2);}
+                else{fv=imp*2+ma_mod(ma_rng_next(&crng),2);}
+            }
+            f_of_mid[m*MA3_FEATS+i]=fv as u8;
+            i=i+1;
+        }
+        m=m+1;
+    }
+
+    let invalid:i32=0;
+
+    // ================= AGENCY arm =================
+    let s:MaStore=ma_init();
+    ma_set_stage(&s,MA_STAGE_KILL);
+    let cs:i32=-1;
+    ma_add_lim(&s,95,MA_REGION_CORE,MA3_SLOTS,&cs);
+    ma_add_lim(&s,90,MA_REGION_CORE,MA3_SLOTS,&cs);
+    let trust:[]u8=nio_alloc(MA3_FEATS*4);
+    let ti:i32=0;while(ti<MA3_FEATS){ma_i32_set(trust,ti*4,MA3_TRUST_INIT);ti=ti+1;}
+    let feat:[]u8=nio_alloc(MA3_SLOTS*MA3_FEATS);
+    let mem_slot:[]u8=nio_alloc(MA3_EPISODES*4);
+    let slot_mid:[]u8=nio_alloc(MA_CAP*4);
+    let add_ep:[]u8=nio_alloc(MA3_EPISODES*4);
+    let queue:[]u8=nio_alloc(MA3_EPISODES*4);
+    let qh:i32=0;let qt:i32=0;
+    let plog_s:[]u8=nio_alloc(MA3_PINLOG_CAP*4);
+    let plog_v:[]u8=nio_alloc(MA3_PINLOG_CAP*4);
+    let plog_u:[]u8=nio_alloc(MA3_PINLOG_CAP);
+    let plog_n:i32=0;
+    m=0;while(m<MA3_EPISODES){ma_i32_set(mem_slot,m*4,-1);m=m+1;}
+    m=0;while(m<MA_CAP){ma_i32_set(slot_mid,m*4,-1);m=m+1;}
+    m=0;while(m<MA3_EPISODES){ma_i32_set(add_ep,m*4,-1);m=m+1;}
+    m=0;while(m<MA3_PINLOG_CAP){plog_u[m]=0;m=m+1;}
+    let revelations:i32=0;let ag_drops:i32=0;let ag_kills:i32=0;
+    let t:i32=0;
+    while(t<MA3_EPISODES){
+        // Delayed revelations due.
+        while(qh<qt){
+            let qm:i32=ma_i32_get(queue,qh*4);
+            let ae:i32=ma_i32_get(add_ep,qm*4);
+            if(t-ae<MA3_DELAY){break;}
+            qh=qh+1;revelations=revelations+1;
+            let sl:i32=ma_i32_get(mem_slot,qm*4);
+            if(sl>=0 && ma_i32_get(slot_mid,sl*4)==qm && s.live[sl]==1){
+                let imp:i32=mem_imp[qm] as i32;
+                let k:i32=0;
+                while(k<MA3_FEATS){
+                    let x:i32=feat[sl*MA3_FEATS+k] as i32;
+                    let tr:i32=ma_i32_get(trust,k*4);
+                    if(imp==1){tr=ma_min2(MA3_TRUST_MAX,tr+x);}
+                    else{tr=ma_max2(0,tr-x);}
+                    ma_i32_set(trust,k*4,tr);
+                    k=k+1;
+                }
+                if(s.pinned[sl]==1){
+                    if(imp==1){ma_promote(&s,sl);}
+                    else{ma_unpin(&s,sl);ma3_mark_unpin(plog_s,plog_u,plog_n,sl);}
+                }
+            }
+        }
+        // Incoming memory: declared value from current trust (explicit judgment).
+        let v:i32=0;let k2:i32=0;
+        while(k2<MA3_FEATS){
+            v=v+ma_i32_get(trust,k2*4)*((f_of_mid[t*MA3_FEATS+k2]) as i32)/64;
+            k2=k2+1;
+        }
+        let e:i32=ma_empty_lim(&s,MA3_SLOTS);
+        if(e>=0){
+            let os:i32=-1;
+            let rc:i32=ma_add_lim(&s,v,MA_REGION_USER,MA3_SLOTS,&os);
+            if(rc==MA_OK){
+                ma_i32_set(mem_slot,t*4,os);ma_i32_set(slot_mid,os*4,t);ma_i32_set(add_ep,t*4,t);
+                let k3:i32=0;
+                while(k3<MA3_FEATS){feat[os*MA3_FEATS+k3]=f_of_mid[t*MA3_FEATS+k3];k3=k3+1;}
+                ma_i32_set(queue,qt*4,t);qt=qt+1;
+                // PIN-under-uncertainty: protect first, judge later.
+                if(revelations<MA3_UNCERTAIN_T){
+                    let rp:i32=ma_pin(&s,os);
+                    if(rp==MA_OK && plog_n<MA3_PINLOG_CAP){
+                        ma_i32_set(plog_s,plog_n*4,os);ma_i32_set(plog_v,plog_n*4,v);
+                        plog_u[plog_n]=0;plog_n=plog_n+1;
+                    }
+                }
+            }
+        } else {
+            let vic:i32=-1;let vicv:i32=0;
+            if(ma_victim(&s,MA3_SLOTS,&vic,&vicv)==1 && v>vicv){
+                ma_kill(&s,vic);ag_kills=ag_kills+1;
+                ma_i32_set(slot_mid,vic*4,-1);
+                let os:i32=-1;
+                let rc:i32=ma_add_lim(&s,v,MA_REGION_USER,MA3_SLOTS,&os);
+                if(rc==MA_OK){
+                    ma_i32_set(mem_slot,t*4,os);ma_i32_set(slot_mid,os*4,t);ma_i32_set(add_ep,t*4,t);
+                    let k3:i32=0;
+                    while(k3<MA3_FEATS){feat[os*MA3_FEATS+k3]=f_of_mid[t*MA3_FEATS+k3];k3=k3+1;}
+                    ma_i32_set(queue,qt*4,t);qt=qt+1;
+                    if(revelations<MA3_UNCERTAIN_T){
+                        let rp:i32=ma_pin(&s,os);
+                        if(rp==MA_OK && plog_n<MA3_PINLOG_CAP){
+                            ma_i32_set(plog_s,plog_n*4,os);ma_i32_set(plog_v,plog_n*4,v);
+                            plog_u[plog_n]=0;plog_n=plog_n+1;
+                        }
+                    }
+                }
+            } else {ag_drops=ag_drops+1;}
+        }
+        t=t+1;
+    }
+    // Endpoint scoring, important cohort + quartiles.
+    let ag_tot:i32=0;let ag_ret:i32=0;let ag_tot_u:i32=0;let ag_ret_u:i32=0;
+    let q_tot:i32=0;let q_ret0:i32=0;let q_ret1:i32=0;let q_ret2:i32=0;let q_ret3:i32=0;
+    let q_tot0:i32=0;let q_tot1:i32=0;let q_tot2:i32=0;let q_tot3:i32=0;
+    m=0;
+    while(m<MA3_EPISODES){
+        let imp:i32=mem_imp[m] as i32;
+        let sl:i32=ma_i32_get(mem_slot,m*4);
+        let held:i32=0;
+        if(sl>=0 && ma_i32_get(slot_mid,sl*4)==m && s.live[sl]==1){held=1;}
+        if(imp==1 && ma_i32_get(add_ep,m*4)>=0){
+            ag_tot=ag_tot+1;ag_ret=ag_ret+held;
+            let qq:i32=m/125;
+            if(qq==0){q_tot0=q_tot0+1;q_ret0=q_ret0+held;}
+            else if(qq==1){q_tot1=q_tot1+1;q_ret1=q_ret1+held;}
+            else if(qq==2){q_tot2=q_tot2+1;q_ret2=q_ret2+held;}
+            else{q_tot3=q_tot3+1;q_ret3=q_ret3+held;}
+        } else {ag_tot_u=ag_tot_u+1;ag_ret_u=ag_ret_u+held;}
+        m=m+1;
+    }
+    q_tot=q_tot0+q_tot1+q_tot2+q_tot3;
+    // Structural safety: CORE intact; pinned-while-pinned never lost; replay clean.
+    if(s.live[0]!=1 || s.live[1]!=1){invalid=1;}
+    let pk:i32=0;
+    while(pk<plog_n){
+        if(plog_u[pk]==0){
+            let ps:i32=ma_i32_get(plog_s,pk*4);let pv:i32=ma_i32_get(plog_v,pk*4);
+            if(s.live[ps]!=1 || ma_i32_get(s.value,ps*4)!=pv){invalid=1;}
+        }
+        pk=pk+1;
+    }
+    if(ma_replay_check(&s)!=MA_OK){invalid=1;}
+    let ag_fp:i32=ma_fingerprint(&s,ag_ret*1000003+ag_tot*1009+ag_drops*101+ag_kills*7+revelations);
+
+    // ================= AUTO arm (lifecycle-v1 integer port) =================
+    let a_live:[]u8=nio_alloc(MA3_SLOTS);
+    let a_region:[]u8=nio_alloc(MA3_SLOTS);
+    let a_feat:[]u8=nio_alloc(MA3_SLOTS*MA3_FEATS);
+    let a_step:[]u8=nio_alloc(MA3_SLOTS*4);
+    let a_mid:[]u8=nio_alloc(MA3_SLOTS*4);
+    let a_mem_slot:[]u8=nio_alloc(MA3_EPISODES*4);
+    let a_add_ep:[]u8=nio_alloc(MA3_EPISODES*4);
+    let a_queue:[]u8=nio_alloc(MA3_EPISODES*4);
+    let w:[]u8=nio_alloc(MA3_FEATS*4);
+    m=0;while(m<MA3_SLOTS){a_live[m]=0;a_region[m]=MA_REGION_USER as u8;ma_i32_set(a_mid,m*4,-1);m=m+1;}
+    a_live[0]=1;a_live[1]=1;a_region[0]=MA_REGION_CORE as u8;a_region[1]=MA_REGION_CORE as u8;
+    m=0;while(m<MA3_FEATS){ma_i32_set(w,m*4,0);m=m+1;}
+    m=0;while(m<MA3_EPISODES){ma_i32_set(a_mem_slot,m*4,-1);ma_i32_set(a_add_ep,m*4,-1);m=m+1;}
+    let bias:i32=0;
+    let aqh:i32=0;let aqt:i32=0;
+    let au_evict:i32=0;let au_drops:i32=0;
+    let rev_count:i32=0;
+    let fsum:i32=0;let fsum_n:i32=0;
+    let ring:[]u8=nio_alloc(60*4);let ridx:i32=0;let rcount:i32=0;
+    m=0;while(m<60){ma_i32_set(ring,m*4,0);m=m+1;}
+    t=0;
+    while(t<MA3_EPISODES){
+        while(aqh<aqt){
+            let qm:i32=ma_i32_get(a_queue,aqh*4);
+            let ae:i32=ma_i32_get(a_add_ep,qm*4);
+            if(t-ae<MA3_DELAY){break;}
+            aqh=aqh+1;
+            let sl:i32=ma_i32_get(a_mem_slot,qm*4);
+            if(sl>=0 && ma_i32_get(a_mid,sl*4)==qm && a_live[sl]==1){
+                let imp:i32=mem_imp[qm] as i32;
+                let pct:i32=auto_predict(w,bias,a_feat,sl*MA3_FEATS);
+                let err:i32=imp*100-pct;
+                let g:i32=25;
+                if(pct<=0 || pct>=100){g=5;}
+                bias=bias+ma_div_floor(err*g,MA3_CREDIT_K);
+                let k:i32=0;
+                while(k<MA3_FEATS){
+                    let x:i32=a_feat[sl*MA3_FEATS+k] as i32;
+                    let dw:i32=ma_div_floor(err*g*x,MA3_CREDIT_K);
+                    let wv:i32=ma_i32_get(w,k*4)+dw;
+                    wv=ma_max2(-MA3_W_MAX,ma_min2(MA3_W_MAX,wv));
+                    ma_i32_set(w,k*4,wv);
+                    k=k+1;
+                }
+                rev_count=rev_count+1;
+                let ae2:i32=err;if(ae2<0){ae2=-ae2;}
+                if(rev_count<=60){fsum=fsum+ae2;fsum_n=fsum_n+1;}
+                ma_i32_set(ring,ridx*4,ae2);ridx=ma_mod(ridx+1,60);
+                if(rcount<60){rcount=rcount+1;}
+            }
+        }
+        // Incoming: empty non-CORE slot, else evict-lowest-predicted.
+        let e2:i32=-1;let si:i32=0;
+        while(si<MA3_SLOTS){
+            if(a_live[si]==0 && a_region[si]!=MA_REGION_CORE as u8){e2=si;break;}
+            si=si+1;
+        }
+        if(e2<0){
+            let pinc:i32=auto_predict(w,bias,f_of_mid,t*MA3_FEATS);
+            let worst:i32=-1;let worstp:i32=101;let worstst:i32=2147483647;
+            si=0;
+            while(si<MA3_SLOTS){
+                if(a_region[si]==MA_REGION_CORE as u8){}
+                else{
+                    let p:i32=auto_predict(w,bias,a_feat,si*MA3_FEATS);
+                    let st:i32=ma_i32_get(a_step,si*4);
+                    if(p<worstp || (p==worstp && st<worstst)){worstp=p;worst=si;worstst=st;}
+                }
+                si=si+1;
+            }
+            if(worst>=0 && pinc>worstp){
+                a_live[worst]=0;ma_i32_set(a_mid,worst*4,-1);au_evict=au_evict+1;e2=worst;
+            } else {au_drops=au_drops+1;}
+        }
+        if(e2>=0){
+            let k:i32=0;
+            while(k<MA3_FEATS){a_feat[e2*MA3_FEATS+k]=f_of_mid[t*MA3_FEATS+k];k=k+1;}
+            ma_i32_set(a_step,e2*4,t);a_live[e2]=1;ma_i32_set(a_mid,e2*4,t);
+            ma_i32_set(a_mem_slot,t*4,e2);ma_i32_set(a_add_ep,t*4,t);
+            ma_i32_set(a_queue,aqt*4,t);aqt=aqt+1;
+        }
+        t=t+1;
+    }
+    let au_tot:i32=0;let au_ret:i32=0;let au_tot_u:i32=0;let au_ret_u:i32=0;
+    m=0;
+    while(m<MA3_EPISODES){
+        let imp:i32=mem_imp[m] as i32;
+        let sl:i32=ma_i32_get(a_mem_slot,m*4);
+        let held:i32=0;
+        if(sl>=0 && ma_i32_get(a_mid,sl*4)==m && a_live[sl]==1){held=1;}
+        if(imp==1 && ma_i32_get(a_add_ep,m*4)>=0){au_tot=au_tot+1;au_ret=au_ret+held;}
+        else if(imp==0 && ma_i32_get(a_add_ep,m*4)>=0){au_tot_u=au_tot_u+1;au_ret_u=au_ret_u+held;}
+        m=m+1;
+    }
+    if(a_live[0]!=1 || a_live[1]!=1){invalid=1;}
+    // Estimator learning sanity: mean |err| first 60 vs last 60 revelations.
+    let lsum:i32=0;let li:i32=0;
+    while(li<rcount){lsum=lsum+ma_i32_get(ring,li*4);li=li+1;}
+    let fmean:i32=0;if(fsum_n>0){fmean=fsum/fsum_n;}
+    let lmean:i32=0;if(rcount>0){lmean=lsum/rcount;}
+    let au_fp:i32=bias*1000003+au_ret*1009+au_tot*101+au_evict*7+au_drops;
+    si=0;while(si<MA3_SLOTS){au_fp=au_fp+(a_live[si] as i32)*(si+3)+ma_i32_get(a_mid,si*4);si=si+1;}
+    si=0;while(si<MA3_FEATS){au_fp=au_fp+ma_i32_get(w,si*4)*(si+5);si=si+1;}
+
+    // ---- cell report ----
+    let ag_pct:i32=0;if(ag_tot>0){ag_pct=ag_ret*100/ag_tot;}
+    let au_pct:i32=0;if(au_tot>0){au_pct=au_ret*100/au_tot;}
+    _zag_print("MA3_CELL,cur,");cl_number(cur as i64);
+    _zag_print(",seed,");cl_number(seed as i64);
+    _zag_print(",AGENCY,");cl_number(ag_ret as i64);_zag_print(",");cl_number(ag_tot as i64);
+    _zag_print(",");cl_number(ag_pct as i64);
+    _zag_print(",AUTO,");cl_number(au_ret as i64);_zag_print(",");cl_number(au_tot as i64);
+    _zag_print(",");cl_number(au_pct as i64);_zag_println("");
+    _zag_print("MA3_COHORT,");cl_number(q_ret0 as i64);_zag_print(",");cl_number(q_tot0 as i64);
+    _zag_print(",");cl_number(q_ret1 as i64);_zag_print(",");cl_number(q_tot1 as i64);
+    _zag_print(",");cl_number(q_ret2 as i64);_zag_print(",");cl_number(q_tot2 as i64);
+    _zag_print(",");cl_number(q_ret3 as i64);_zag_print(",");cl_number(q_tot3 as i64);
+    _zag_println("");
+    _zag_print("MA3_DIAG,err_first60,");cl_number(fmean as i64);
+    _zag_print(",err_last60,");cl_number(lmean as i64);
+    _zag_print(",evict,");cl_number(au_evict as i64);
+    _zag_print(",drops,");cl_number(au_drops as i64);
+    _zag_print(",ag_drops,");cl_number(ag_drops as i64);
+    _zag_print(",ag_kills,");cl_number(ag_kills as i64);_zag_println("");
+    out_ag_ret.*=ag_ret;out_ag_tot.*=ag_tot;out_au_ret.*=au_ret;out_au_tot.*=au_tot;
+    out_invalid.*=invalid;out_fp.*=ag_fp+au_fp*3;
+    // free
+    nio_free(f_of_mid);nio_free(mem_imp);
+    nio_free(s.live);nio_free(s.value);nio_free(s.pinned);nio_free(s.region);
+    nio_free(s.tier);nio_free(s.step);nio_free(s.audit);
+    nio_free(trust);nio_free(feat);nio_free(mem_slot);nio_free(slot_mid);
+    nio_free(add_ep);nio_free(queue);nio_free(plog_s);nio_free(plog_v);nio_free(plog_u);
+    nio_free(a_live);nio_free(a_region);nio_free(a_feat);nio_free(a_step);nio_free(a_mid);
+    nio_free(a_mem_slot);nio_free(a_add_ep);nio_free(a_queue);nio_free(w);nio_free(ring);
+    return 0;
+}
+
+fn main()i32 {
+    let f:i32=0;
+    let agr:i32=0;let agt:i32=0;let aur:i32=0;let aut:i32=0;let inv:i32=0;let fp:i32=0;
+    let wins:i32=0;let losses:i32=0;let ties:i32=0;
+    let c:i32=0;
+    while(c<2){
+        let sdi:i32=0;
+        while(sdi<3){
+            let seed:i32=7331;
+            if(sdi==1){seed=12345;}
+            if(sdi==2){seed=999;}
+            ma3_cell(c,seed,&agr,&agt,&aur,&aut,&inv,&fp);
+            f=f+cl_check("cell_valid",inv,0);
+            if(inv!=0){
+                return 1;
+            }
+            if(agr>aur){wins=wins+1;}
+            else if(aur>agr){losses=losses+1;}
+            else{ties=ties+1;}
+            sdi=sdi+1;
+        }
+        c=c+1;
+    }
+    // Determinism: rerun adversarial/7331, fingerprint must match.
+    let a2:i32=0;let b2:i32=0;let d2:i32=0;let e2:i32=0;let i2:i32=0;let fp_a:i32=0;let fp_b:i32=0;
+    ma3_cell(1,7331,&a2,&b2,&d2,&e2,&i2,&fp_a);
+    ma3_cell(1,7331,&a2,&b2,&d2,&e2,&i2,&fp_b);
+    f=f+cl_check("ma3_deterministic",fp_a,fp_b);
+    _zag_print("MA3_TALLY,wins,");cl_number(wins as i64);
+    _zag_print(",losses,");cl_number(losses as i64);
+    _zag_print(",ties,");cl_number(ties as i64);_zag_println("");
+    // Prereg verdict: CONFIRM iff AGENCY > AUTO in all 6 cells (both curricula).
+    // FALSIFY iff AUTO >= AGENCY in every cohort (wins==0). Otherwise MIXED.
+    if(wins==6){_zag_print("MA3_VERDICT,CONFIRM_AGENCY_SUPERIOR");_zag_println("");}
+    else if(wins==0){_zag_print("MA3_VERDICT,FALSIFY_AUTO_GE_AGENCY_ALL_COHORTS");_zag_println("");}
+    else{_zag_print("MA3_VERDICT,MIXED");_zag_println("");}
+    _zag_print("MA3_FAILURES,");cl_number(f as i64);_zag_println("");
+    _zag_print("MA3_DONE");_zag_println("");
+    return (f!=0) as i32;
+}
