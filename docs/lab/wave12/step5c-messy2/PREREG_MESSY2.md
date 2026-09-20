@@ -352,3 +352,19 @@ the viols presentation, so there is nothing to wait for.
   shift_test clears synchronously, no hold entered)."
 
 No rule, schedule, metric, or kill bar is otherwise touched.
+
+## Amendment A3 (2026-09-20, pre-results — supersedes A2)
+
+A2 is withdrawn: it was based on a misreading. The frozen §4.1 (line 243)
+demands `pin_esc == 2` with the parenthetical "(one per st2=3 run)" — two
+st2=3 runs (runs 3, 7), one escalation each, zero in st2=0 runs. The
+original §2.1 defeated sets were correct all along:
+
+- st2=0: {0,1,3,4,5} (dmask 59). The pinned idx 2 is NOT defeated → the
+  arm retains it (justify), no escalation. Correct.
+- st2=3: {0,1,2,3,4} (dmask 31). The pinned idx 2 IS defeated → the arm
+  escalates (never touches). Correct.
+- st2=1: {0,1,3,4,5} (dmask 59, noisy, arm ignores dmask). st2=2: {}.
+
+A2's dmask change (st2=0: 59→63) is reverted. No demand is touched; rev_dem
+18 / ret_dem 44 / pin_esc 2 stand as frozen.
