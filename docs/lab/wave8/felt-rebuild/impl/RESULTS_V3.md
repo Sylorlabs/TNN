@@ -196,6 +196,11 @@ no further feeling trials without Micah's explicit re-approval.
   `8aec83cb…`/`9824f6db…`/`e6379ddb…` ✓. Trial constants == record
   (α=12, β=15, γ=20; θ_invest=48, θ_sacrifice=36; checker S3/A5).
 - Checker re-run by the finisher independently: byte-identical report.
+- Night watchman 2026-09-20 ~07:00 PDT: all 6 a/b pairs re-verified
+  byte-identical (sha256), patched checker re-executed from scratch —
+  report byte-identical (1146/1158, CHECK_FAIL, same 12 fail lines);
+  K3′ replay re-executed independently (naive ER=0.0608, R=0.0000,
+  F=0.9392, all v) — verdicts unchanged.
 - K3′ replay is checker-implemented and deterministic (re-executed by
   the finisher with identical numbers).
 - No binaries, `.zagd` state, or `.zag-cache/` committed (finisher
