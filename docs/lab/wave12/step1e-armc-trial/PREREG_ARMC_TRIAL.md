@@ -1,9 +1,10 @@
 # PREREG — Step 1e: Arm C full trial (state-dependent deterministic variation)
 
-> **DRAFT — NOT FROZEN — pending coordinator review.**
-> Nothing in this document governs a build until it is marked FROZEN,
-> committed frozen to `docs/lab/wave12/step1e-armc-trial/`, and the freeze
-> is recorded below with a date and the reviewer's name.
+> **FROZEN — 2026-09-20 — reviewed and frozen by the Wave 12 phase-2 build
+> coordinator under the parent agent's build order.**
+> The eight judgment calls in §12 were reviewed and approved as written.
+> This document now governs the Step 1e build. Any change requires a dated
+> amendment flagged for Micah's retroactive review.
 
 **Parent specs:** `wave11/t1-state-variation/findings/25-arm-c-trial-killbars.md`
 (slice 25, kill bars K1–K9); `wave11/AMENDMENT_2026-09-20_RNG_ARM_B.md`
@@ -417,4 +418,4 @@ marked for review; none is frozen until the coordinator signs off.
 
 ---
 
-*Draft prepared 2026-09-20 by the Step 1e prereg drafter. Freeze pending.*
+*Draft prepared 2026-09-20 by the Step 1e prereg drafter. Frozen 2026-09-20 by the build coordinator (§12 judgment calls approved as written).*
