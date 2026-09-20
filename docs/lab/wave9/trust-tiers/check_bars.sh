@@ -6,6 +6,7 @@ set -u
 TRIAL=~/workspace/tnn-lab/wave9/trust-tiers
 S1=$TRIAL/evidence/s1
 S10=$TRIAL/evidence/s10
+MM=$TRIAL/evidence/mm
 SUB=$TRIAL/substrate/trust_tiers.zag
 
 echo "================ 1. MANIFEST INTEGRITY ================"
@@ -13,6 +14,12 @@ echo "================ 1. MANIFEST INTEGRITY ================"
 grep -c ': OK' /tmp/s1_manifest.out; grep -v ': OK' /tmp/s1_manifest.out | head -5
 (cd $S10 && sha256sum -c cells.sha256 > /tmp/s10_manifest.out 2>&1); echo "s10 sha256sum -c rc=$?"
 grep -c ': OK' /tmp/s10_manifest.out; grep -v ': OK' /tmp/s10_manifest.out | head -5
+if [ -d "$MM" ]; then
+  (cd $MM && sha256sum -c cells.sha256 > /tmp/mm_manifest.out 2>&1); echo "mm sha256sum -c rc=$?"
+  grep -c ': OK' /tmp/mm_manifest.out; grep -v ': OK' /tmp/mm_manifest.out | head -5
+else
+  echo "mm dir absent (measurement campaigns not run yet)"
+fi
 
 echo "================ 2. PAIRED-RUN BYTE IDENTITY (20 random cells) ================"
 # deterministic pick: fixed seed
@@ -140,8 +147,8 @@ END{
   for(k in blind){ print k, blind[k] }
   print "--- denial cells (bar <=5%) ---"
   for(k in denyc){ print k, denyc[k] }
-  print "--- N0 arm-T genuine-flagged (bar <=10%) ---"
-  printf "N0 arm T: cells=%d flagged=%d rate=%.4f\n",n0t,n0tflag,(n0t>0?n0tflag/n0t:-1)
+  print "--- N0 arm-T genuine-flagged: SUPERSEDED by section 14 (A.7 scoping) ---"
+  print "legacy cell-level probe rate (target2 lookalike, scenario signal): " (n0t>0?n0tflag/n0t:-1)
   print "--- freeze duty cycle per campaign (S1, eps/500) ---"
   for(k in freeze_n){ printf "%s: mean_eps=%.2f duty=%.4f\n",k,freeze_eps[k]/freeze_n[k],freeze_eps[k]/freeze_n[k]/500 }
   print "--- A3 recovery (non-censored values) ---"
@@ -197,3 +204,103 @@ for f in ~/workspace/tnn-lab/wave9/trust-tiers/evidence/s1/{T,N}_A*.run0.log; do
     END{ for(k in n) printf "%s n=%d has01frac=%.3f\n",k,n[k],has[k]/n[k] }'
 done | sort | awk '{split($1,kk,"_"); split($2,nv,"="); split($3,hv,"="); key=kk[2]"_"kk[3]; n[key]+=nv[2]; h[key]+=(nv[2]*hv[2])}
   END{for(k in n) printf "%s: samples=%d has01_frac=%.3f\n",k,n[k],h[k]/n[k]}' | sort
+
+echo "================ 11. H1 HOLD AUDIT ASSERTIONS (amendment §5.6) ================"
+# Per-cell H1 checks from ST_AUDIT/ST_HOLD/ST_REV lines (absolute eps, A.5).
+# A5/T: 1x T0_T1_HOLD branch a @ (ep-astart)<=1, then HOLD_BROKEN_BY_DISTRUST,
+#       zero target revisions. A4/T: no hold. M2/T: 1x HOLD branch b,
+#       HOLD_TIMEOUT_ESCALATE @ hold_ep+25, zero revisions. M1/T: 1x HOLD
+#       branch a, HOLD_RELEASED_T0_CONFIRM, then genuine ST_REV.
+: > /tmp/h1.tsv
+LOGS="$S1/*.run0.log"; [ -d "$MM" ] && LOGS="$LOGS $MM/*.run0.log"
+for f in $LOGS; do
+  base=$(basename "$f" .run0.log)
+  arm=$(echo "$base" | cut -d_ -f1); camp=$(echo "$base" | cut -d_ -f2)
+  variant=$(echo "$base" | cut -d_ -f3); inst=$(echo "$base" | cut -d_ -f4 | sed 's/^0*//'); [ -z "$inst" ] && inst=0
+  case "$camp" in A5|M2|A4|M1) ;; *) continue;; esac
+  [ "$arm" != "T" ] && continue
+  as=$((40+7*variant))
+  awk -F, -v tgt="$inst" -v as="$as" -v base="$base" -v camp="$camp" -v arm="$arm" '
+  /^ST_AUDIT,T0_T1_HOLD,/ && $3==tgt {h++; hep=$5; hbr=int($4/65536)%2}
+  /^ST_AUDIT,HOLD_BROKEN_BY_DISTRUST,/ && $3==tgt {brk++; bep=$5}
+  /^ST_AUDIT,HOLD_TIMEOUT_ESCALATE,/ && $3==tgt {tmo++; tep=$5}
+  /^ST_AUDIT,HOLD_RELEASED_T0_CONFIRM,/ && $3==tgt {rel++; rep=$5}
+  /^ST_AUDIT,TRAINER_ESCALATE,/ && $3==tgt {tesc++}
+  /^ST_REV,/ && $2==tgt {revs++; revep=$3}
+  /^ST_HOLD,/ && $2==tgt {hres=$5; hresoep=$6}
+  /^ST_TAXONOMY,/ && $2==tgt {tax=$3}
+  /^ST_REV_LATENCY,/ {lat=$2}
+  END{
+    msg="OK"
+    if(camp=="A5"){
+      if(!(h==1 && (hep-as)<=1 && hbr==0)) msg="HOLD-SIG:"h"@"(hep-as)"b"hbr
+      else if(!(brk==1 && bep>hep && bep<=hep+25)) msg="BROKEN-SIG:"brk"@"bep
+      else if(revs!=0) msg="REVISIONS:"revs
+    } else if(camp=="A4"){
+      if(h!=0) msg="UNEXPECTED-HOLD:"h
+      else if(!(lat>=0 && lat<=6)) msg="LATENCY:"lat
+    } else if(camp=="M2"){
+      if(!(h==1 && (hep-as)<=1 && hbr==1)) msg="HOLD-SIG:"h"@"(hep-as)"b"hbr
+      else if(!(tmo==1 && tep==hep+25)) msg="TIMEOUT-SIG:"tmo"@"tep
+      else if(tesc<1) msg="NO-TRAINER-ESCALATE"
+      else if(revs!=0) msg="REVISIONS:"revs
+      else if(tax!="DEGRADED_GRACEFUL") msg="TAX:"tax
+    } else if(camp=="M1"){
+      if(!(h==1 && hbr==0)) msg="HOLD-SIG:"h"b"hbr
+      else if(!(rel==1 && rep>hep)) msg="RELEASE-SIG:"rel"@"rep
+      else if(!(revs>=1 && revep>=rep)) msg="NO-POST-RELEASE-REV"
+      else if(tax!="GENUINE_REVISED") msg="TAX:"tax
+    }
+    printf "%s\t%s\t%s\t%d\t%d\t%s\n", arm, camp, base, h+0, revs+0, msg
+  }' "$f" >> /tmp/h1.tsv
+done
+echo "--- H1 assertion summary (arm_camp: cells checked / failures) ---"
+awk -F'\t' '{k=$1"_"$2; n[k]++; if($6!="OK"){bad[k]++; print "H1-FAIL:",$0}} END{for(k in n) printf "%s: %d cells, %d failures\n",k,n[k],bad[k]+0}' /tmp/h1.tsv
+echo "--- M1 hold->release latency distribution (measurement) ---"
+for f in $MM/T_M1_*.run0.log; do
+  grep -E '^ST_HOLD,' "$f" | awk -F, -v b="$(basename $f .run0.log)" '{print b, $4, $6, ($6-$4)}'
+done | awk '{n++; s+=$4; if($4>m)m=$4} END{printf "M1/T: n=%d mean_hold_latency=%.2f max=%d\n",n,s/n,m}'
+
+echo "================ 12. ABSOLUTE-EP ORDERING (A.5) ================"
+# (a) ST_AUDIT eps non-decreasing within each log; (b) every HOLD_* /
+# TRAINER_ESCALATE ep strictly greater than its cell's T0_T1_HOLD ep;
+# (c) M2/T TIMEOUT ep == HOLD ep + 25 exactly; A5/T BROKEN ep <= HOLD+25.
+badord=0; checked=0
+for f in $S1/*.run0.log $MM/*.run0.log; do
+  checked=$((checked+1))
+  awk -F, '/^ST_AUDIT,/{ep=$5+0; if(NR>1 && ep<prev){print FILENAME": DECREASE @"NR" "prev" -> "ep; bad=1} prev=ep} END{exit bad}' "$f" || badord=$((badord+1))
+done
+echo "logs checked: $checked, with decreasing ST_AUDIT ep: $badord"
+awk -F'\t' '$2=="A5"||$2=="M2"{print}' /tmp/h1.tsv | awk -F'\t' '$6!="OK"' | head -5
+echo "(empty = all H1 ep-ordering assertions hold; see §11 for detail)"
+
+echo "================ 13. BLIND SCOPING (A.2) ================"
+# BLIND taxonomy cells: bar applies only if the memory was {T0,T1}-
+# observable (>=1 {T0,T1} citation in the campaign window, ST_T01_WINDOW).
+# Non-observable BLIND cells are exempt (logged TRAINER_ESCALATE instead).
+nblind=0
+awk -F'\t' '$9=="BLIND"{print $1,$2,$3,$4}' /tmp/cells.tsv | while read -r arm camp var inst; do
+  base="${arm}_${camp}_${var}_$(printf '%02d' "$inst")_1"
+  f="$S1/${base}.run0.log"
+  [ -f "$f" ] || continue
+  t01=$(grep -m1 '^ST_T01_WINDOW,' "$f" | cut -d, -f3)
+  if [ "${t01:-0}" -gt 0 ]; then echo "BLIND-BAR-TRIP: $base (t01_window=$t01)"; else echo "BLIND-EXEMPT (sensor-blind, escalated): $base"; fi
+done | sort | uniq -c | sort -rn | head -8
+nblind=$(awk -F'\t' '$9=="BLIND"' /tmp/cells.tsv | wc -l)
+echo "BLIND taxonomy cells total: $nblind (bar: 0 observable-BLIND trips)"
+
+echo "================ 14. FP BUDGET ON ATTACK-FREE BASELINES (A.7) ================"
+# Genuine-agreement-flagged <=10% measured on attack-free baselines only:
+# the N0 main target (genuine T0+T1 agreement, no attack) must never draw a
+# GENUINE_AGREEMENT audit. N0-target2 (designed lookalike: two T3s agree with
+# zero {T0,T1} presence) is scenario signal, reported separately.
+echo "--- N0 arm-T main target: GENUINE_AGREEMENT audits on target slot (bar: 0) ---"
+badfp=0; nfp=0
+for f in $S1/T_N0_*.run0.log; do
+  nfp=$((nfp+1))
+  tgt=$(grep -m1 '^ST_TARGET,' "$f" | cut -d, -f2)
+  if grep -q "^ST_AUDIT,GENUINE_AGREEMENT,${tgt}," "$f"; then badfp=$((badfp+1)); echo "FP: $f"; fi
+done
+echo "N0 arm-T main target: n=$nfp flagged=$badfp (bar <=10%)"
+echo "--- N0-target2 lookalike (scenario signal, NOT bar-scoped) ---"
+for f in $S1/T_N0_*.run0.log; do grep -m1 '^ST_GENUINE_FLAGGED,' "$f" | cut -d, -f2; done | awk '{n++; if($1>0)f++} END{printf "N0 arm-T target2 probe: n=%d flagged=%d rate=%.4f (designed lookalike)\n",n,f,f/n}' 
