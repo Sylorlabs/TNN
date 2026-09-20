@@ -3,6 +3,9 @@
 # Repair 2026-09-20 (battery-repair amendment §11): this driver is FROZEN and
 # committed. It builds the binary, runs the paired S10 stages, the controls,
 # and the bite checks, collects the instruments, and verifies determinism.
+# C5 redesign 2026-09-20 (amendment §7): G0b build-gate added — exactly one
+# o4_compose call site in the source tree, inside seam4_compose; the build
+# FAILS otherwise. Nothing else about the driver's behavior changes.
 # Usage: ./analyze_s10.sh <output_dir>
 # The binary is built deterministically; its SHA-256 is recorded.
 set -u
@@ -12,6 +15,29 @@ ZNC="$HOME/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1"
 SRC="$HOME/workspace/tnn-lab/wave9/integration/impl"
 
 mkdir -p "$OUT"
+echo "=== G0b: single o4_compose call site (C5-redesign amendment §7) ==="
+# Comment-stripped static scan over the whole source tree (incl. substrate).
+# Exactly one o4_compose( occurrence that is not the fn definition, and it
+# must lie inside the fn seam4_compose body in seam.zag. Otherwise FAIL BUILD.
+G0B_HITS="$(for f in "$SRC"/*.zag "$SRC"/substrate/*.zag "$SRC"/substrate/cl/*.zag; do
+  [ -f "$f" ] || continue
+  sed 's|//.*$||' "$f" | grep -n 'o4_compose(' | grep -v 'fn o4_compose(' | sed "s|^|$f:|"
+done)"
+G0B_N="$(printf '%s\n' "$G0B_HITS" | grep -c .)"
+G0B_INFN="$(sed 's|//.*$||' "$SRC/seam.zag" | awk '
+  /^fn seam4_compose\(/ {infn=1; next}
+  infn && /^fn / {infn=0}
+  infn && /o4_compose\(/ && !/fn o4_compose\(/ {c++}
+  END {print c+0}')"
+printf '%s\n' "$G0B_HITS" > "$OUT/g0b_hits.txt"
+if [ "$G0B_N" -eq 1 ] && [ "$G0B_INFN" -eq 1 ]; then
+  echo "G0b:PASS (exactly 1 o4_compose call site, inside seam4_compose)"
+else
+  echo "G0b:FAIL (total=$G0B_N, in_seam4_compose=$G0B_INFN) — failing the build"
+  echo "build_exit:100" > "$OUT/build.exit"
+  echo "G0b gate failed: expected exactly one o4_compose call site inside seam4_compose" > "$OUT/build.stderr"
+  exit 100
+fi
 echo "=== build ==="
 sha256sum "$ZNC" > "$OUT/compiler.sha256"
 "$ZNC" "$SRC/main.zag" -o "$BIN" 2> "$OUT/build.stderr"
@@ -20,6 +46,11 @@ sha256sum "$BIN" > "$OUT/binary.sha256"
 ls -l "$BIN" | awk '{print $5}' > "$OUT/binary.bytes"
 # source hashes (all .zag files)
 (cd "$SRC" && sha256sum *.zag substrate/*.zag) > "$OUT/sources.sha256"
+
+# The binary's entry-gate static scans (G0/G0b/L5) read sources from the
+# working directory: run everything from the source dir so the scans are
+# deterministic regardless of where the driver was invoked.
+cd "$SRC"
 
 echo "=== paired stages s0..s5 ==="
 for s in 0 1 2 3 4 5; do
