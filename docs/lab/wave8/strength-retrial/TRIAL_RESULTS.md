@@ -1,5 +1,7 @@
 # Wave-8 Strength Re-Trial: Results
 
+> **Dated note (2026-09-20):** the line "**None advance to S10**" below misread the prereg's advancement rule (killed arms do not advance; survivors do — PREREG_STRENGTH_V2.md §15, wave-4 PREREG §6). Arm B survived S1 and **did** run S10/S100. See `TRIAL_RESULTS_SCALE_LEGS.md` for the correction and the scale-leg results. The S1 numbers below are unchanged.
+
 **Prereg:** `PREREG_STRENGTH_V2.md` | **Scale:** S1 only (32 slots, 500 episodes) | **Date:** 2026-09-20
 
 ## Verdict by Arm
