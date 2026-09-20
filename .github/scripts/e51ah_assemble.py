@@ -8,13 +8,13 @@ import json
 import subprocess
 
 
-PARENT_SOURCE_REV = "80069f979084f0dcc6341fffe59b8e1a7ad2e7f1"
-# 2026-09-20: PARENT_SOURCE_REV predates the reorg path remap; the parent
-# assemblers' Research/ literals were mechanically remapped to
-# docs/generations/R32/... (verified byte-identical moves), so the
-# frozen_parent_entry tamper check below is rebased to the remap commit in
-# the follow-up commit. Do not treat a mismatch against this old rev as
-# tamper evidence for the remap itself.
+PARENT_SOURCE_REV = "495ce3a4a6d1ae1585d9cc55d216e4433e8b8ce3"
+# 2026-09-20: PARENT_SOURCE_REV rebased to the reorg path-remap commit
+# (495ce3a4). The parent assemblers' Research/ literals were mechanically
+# remapped to docs/generations/R32/... in that commit (all moves verified
+# byte-identical via git blob hashes), so the frozen_parent_entry tamper
+# check below now attests the parents are byte-identical to their
+# post-remap state. The pre-remap rev was 80069f979084f0dcc6341fffe59b8e1a7ad2e7f1.
 PARENT_ASSEMBLERS = (
     ".github/scripts/e51x_assemble.py",
     ".github/scripts/e51y_assemble.py",
