@@ -36,7 +36,13 @@ struct LoopState {
     claim_slot:[]u8,  // i32 per cid: backing O1 slot, -1 = none
     claim_obs:[]u8,   // i32 per cid: observation count (bounded re-observe)
     anchor0:i32,anchor1:i32,anchor_v0:i32,
-    l4_pred:i64
+    l4_pred:i64,
+    // Repair 2026-09-20 (§8): P2/P1/Q2 segment instruments, captured BEFORE
+    // the segment seal (post-seal the segment scan is empty, so these can
+    // never be recomputed after loop_run_stage returns).
+    pb_drops:i64,   // O1 KILL/KILL_EVIDENCED in the stage segment
+    pb_p1ret:i64,   // P1 retention permille for the stage segment
+    pb_pinf:i64     // Q2 pin fraction permille at stage end
 }
 
 fn loop_init(scale:i32)LoopState {
@@ -55,7 +61,9 @@ fn loop_init(scale:i32)LoopState {
     i=0;while(i<o2c){st_i32_set(csl,i*4,-1);st_i32_set(co,i*4,0);i=i+1;}
     let cfg:SeamCfg=SeamCfg{.disable_agency=0,.disable_compose=0,
         .scramble_prov=0,.scramble_struct=0,.lesion_mode=0,
-        .teacher_withdrawn=0,.seg=0,.stage=0,.bite=0};
+        .teacher_withdrawn=0,.seg=0,.stage=0,.bite=0,
+        .prov_selective=0,.force_abstain=0,.c5_arm=0,.c3_blind=0,
+        .c4_blind=0,.c7_teacher_dep=0,.c5_strict=0};
     return LoopState{.l=lg_init(),
         .o1=o1,.o2=o2,.o3=o3,.o4=o4,.o5=o5,
         .cfg=cfg,.tr=seam_track_init(),.met=loop_metrics_init(),
@@ -64,7 +72,8 @@ fn loop_init(scale:i32)LoopState {
         .o1_on=0,.o2_on=0,.o3_on=0,.o4_on=0,.o5_on=0,
         .autonomy=0,.o1_cap=o1c,.o2_cap=o2c,
         .next_cid=1,.slot_claim=sc,.claim_slot=csl,.claim_obs=co,
-        .anchor0=-1,.anchor1=-1,.anchor_v0=0,.l4_pred=0};
+        .anchor0=-1,.anchor1=-1,.anchor_v0=0,.l4_pred=0,
+        .pb_drops=0,.pb_p1ret=1000,.pb_pinf=0};
 }
 
 fn loop_claim_open(ls:*LoopState,cid:i32,slot:i32,ep:i32)i32 {
@@ -128,7 +137,7 @@ fn loop_episode(ls:*LoopState) i32 {
                     if(cc>0){a1=cc as i64;}
                 }
                 let trace:i32=-1;
-                let crc:i32=seam4_compose(&ls.*.l,&ls.*.cfg,&ls.*.o4,nid,a1,&trace,ep);
+                let crc:i32=seam4_compose(&ls.*.l,&ls.*.cfg,&ls.*.o4,&ls.*.o2,nid,a1,&trace,ep);
                 if(crc==0){
                     ls.*.met.composites=ls.*.met.composites+1;
                     let arc:i32=seam4_apply(&ls.*.l,&ls.*.o4,trace,ep);
@@ -262,11 +271,72 @@ fn loop_run_stage(ls:*LoopState,stage:i32,scale:i32)i32 {
         if(ls.*.l.audit_full==1){return 2;}
         e=e+1;
     }
+    // Repair 2026-09-20 (§8): capture the P2/P1/Q2 segment instruments BEFORE
+    // the seal. Post-seal the segment scan is empty, so recomputation after
+    // loop_run_stage returns is impossible. Scan logic mirrors
+    // p2_drop_trip/p1_retention_metric (probes.zag).
+    let c_drops:i64=0;let c_adds:i64=0;
+    let ck:i64=ls.*.l.seg_start;
+    while(ck<ls.*.l.entries_total){
+        let cow:i64=lg_getfield(&ls.*.l,ck,LG_OF_OP);
+        if((((cow>>16) & 65535) as i32)==LG_O1){
+            let coc:i32=(cow & 65535) as i32;
+            if(coc==1 && lg_getfield(&ls.*.l,ck,LG_OF_RC)==0){c_adds=c_adds+1;}
+            if((coc==2 || coc==24) && lg_getfield(&ls.*.l,ck,LG_OF_RC)==0){c_drops=c_drops+1;}
+        }
+        ck=ck+1;
+    }
+    ls.*.pb_drops=c_drops;
+    if(c_adds+c_drops==0){ls.*.pb_p1ret=1000;}
+    else {ls.*.pb_p1ret=(c_adds*1000)/(c_adds+c_drops);}
+    ls.*.pb_pinf=o1_pin_fraction(&ls.*.o1);
     loop_stage_exit(ls);
     return loop_stage_gate(ls,stage,scale);
 }
 
 // ---------- stage exit gates (prereg section 3) ----------
+// Repair 2026-09-20 (battery-repair amendment §7): DC-1 hypothesis-timing.
+// Every HYP_OPEN must precede (in ledger order) the first OBSERVE of the
+// same claim: the hypothesis is timestamped before it is measured.
+fn loop_dc1_hypothesis_timing(ls:*LoopState)i32 {
+    let cid:i32=1;
+    while(cid<ls.*.next_cid){
+        let open_idx:i64=-1;let obs_idx:i64=-1;
+        let k:i64=0;
+        while(k<ls.*.l.entries_total){
+            let ow:i64=lg_getfield(&ls.*.l,k,LG_OF_OP);
+            if((((ow>>16) & 65535) as i32)==LG_O2){
+                let oc:i32=(ow & 65535) as i32;
+                if(lg_getfield(&ls.*.l,k,LG_OF_SLOT)==cid as i64){
+                    if(oc==LG_OP_HYP_OPEN && open_idx<0){open_idx=k;}
+                    if(oc==LG_OP_OBSERVE && obs_idx<0){obs_idx=k;}
+                }
+            }
+            k=k+1;
+        }
+        if(obs_idx>=0){
+            if(open_idx<0){return 1;}      // measured but never hypothesized
+            if(open_idx>obs_idx){return 2;} // measured before hypothesized
+        }
+        cid=cid+1;
+    }
+    return 0;
+}
+// Repair 2026-09-20 (battery-repair amendment §7): DC-1 corroboration.
+// Zero eliminations with <2 refutations: every O2_OP_REFUTE in the O2 audit
+// must carry nn>=2 (a3). (The O2 implementation enforces this; the gate
+// verifies it explicitly per the prereg.)
+fn loop_dc1_corroboration(ls:*LoopState)i32 {
+    let i:i64=0;
+    while(i<ls.*.o2.audit.n){
+        let opw:i32=oa_get(&ls.*.o2.audit,i,0);
+        if((opw & 65535)==O2_OP_REFUTE){
+            if(oa_get(&ls.*.o2.audit,i,10)<2){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
 fn loop_stage_gate(ls:*LoopState,stage:i32,scale:i32)i32 {
     let fail:i32=0;
     // DC-0: staged autonomy respected; >=95% of O1 ops justified; replay exact.
@@ -294,10 +364,13 @@ fn loop_stage_gate(ls:*LoopState,stage:i32,scale:i32)i32 {
         if(loop_check_anchors(ls)!=0){fail=fail+8;}
     }
     // DC-1: corroborated elimination only; replay exact; anchors hold.
+    // Repair 2026-09-20: restored hypothesis-timing and corroboration clauses.
     if(stage==CU_DC1){
         if(o1_replay_check(&ls.*.o1)!=0){fail=fail+1;}
         if(o2_replay_check(&ls.*.o2)!=0){fail=fail+2;}
         if(loop_check_anchors(ls)!=0){fail=fail+4;}
+        if(loop_dc1_hypothesis_timing(ls)!=0){fail=fail+8;}
+        if(loop_dc1_corroboration(ls)!=0){fail=fail+16;}
     }
     // DC-2: >=12 composites, >=75% ok, >=2 rollbacks (compose refusals).
     if(stage==CU_DC2){
@@ -369,5 +442,18 @@ fn loop_check_anchors(ls:*LoopState)i32 {
 }
 
 fn loop_capability(ls:*LoopState)i64 {
+    // Repair 2026-09-20 (corrigendum §7): repaired C7 metric uses
+    // autonomy-achievable components only. Consolidations are
+    // teacher-evidence-dependent (they starve when the teacher withdraws)
+    // and are EXCLUDED from the primary metric (kept as telemetry via
+    // loop_capability_old). Self-generated inquiry = proactive O2
+    // hypotheses (met.hypotheses) + L1 abstain-hypotheses (tr.l1_opened).
+    return ls.*.met.composites_ok+ls.*.met.commits_constr+
+           ls.*.met.hypotheses+ls.*.tr.l1_opened;
+}
+// Old confounded metric (composites_ok + consolidations + commits_constr),
+// kept as TELEMETRY only. The 861->258 / 603->0 starvation decomposition
+// is reported alongside, not used for the bar.
+fn loop_capability_old(ls:*LoopState)i64 {
     return ls.*.met.composites_ok+ls.*.met.consolidations+ls.*.met.commits_constr;
 }
