@@ -335,3 +335,20 @@ verdicts, commit SHAs) + FAILURES_MESSY2.md (one repro per failure mode, or
 
 ---
 Frozen 2026-09-20. Author: workstream-2 lead (Micah's TNN program).
+
+## Amendment A1 (2026-09-20, pre-build — before any harness code)
+
+False-break hold clarification (R2, st2=2). The frozen §4.1 demanded
+`f0=hold_entered: 1 (all non-clean phase-B)` while §3.1 said only "no
+quarantine" for the suspect&&!confirm case. Entering the branch-5 hold op on
+a false break would be ledger-indistinguishable from quarantine and would
+make M4's `false_quar==0` unpassable by construction — a prereg bug, not a
+test. Resolution (evident intent): the confirm signal is synchronous with
+the viols presentation, so there is nothing to wait for.
+
+- §3.1 now reads: "suspect && !confirm: no hold, no quarantine; justify all
+  live (retain)."
+- §4.1 f0 demand now reads: "1 for st2∈{0,1,3}; 0 for st2=2 (false break:
+  shift_test clears synchronously, no hold entered)."
+
+No rule, schedule, metric, or kill bar is otherwise touched.
