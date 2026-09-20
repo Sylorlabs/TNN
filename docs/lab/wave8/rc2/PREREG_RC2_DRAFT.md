@@ -1,6 +1,38 @@
+## Amendment 2026-09-20 — APPROVED FOR RUN (RC2 council + Micah's testing authorization)
+
+**Status:** APPROVED FOR RUN — dated 2026-09-20. Authorized by the RC2
+council verdict (`COUNCIL_VERDICT.md`, this dir) plus Micah's 2026-09-20
+"test the next best things" testing authorization. This amendment supersedes
+the DRAFT header below: the file is now frozen law for the RC2 10× leg.
+Runner amends nothing after this without a new dated amendment.
+
+Frozen rulings (recorded verbatim as law for this leg):
+
+(a) RC2 IS the 10× scale leg. Elimination-strictness gets its own future
+prereg under its own name; nothing about it enters this trial.
+
+(b) Defect sets from §3a approved. Implementation note (council Q2): the
+defect rule must be parameterized as (offset, modulus) per scale leg in
+code — no inlined 3/4 literals in the trial source.
+
+(c) `RC_SMAX`=1500 approved as a PER-LEG PARAMETER = RC1 value (150) ×
+scale factor (10), never a new constant; S100 must not inherit it as a
+constant. No ledger-window cap for this leg; the §3b pre-registered
+4096-bump rule past 1,800 estimated entries stands.
+
+(d) Capped-window mechanism deferred to its own prereg with its own bars;
+it is a new mechanism, not a scale parameter, and touches program law.
+
+§5 open questions closed: Q1–Q4 all APPROVED per (a)–(d) above.
+
+---
+
 # PREREG AMENDMENT (DRAFT) — RC2: Reasoning Control at 10× Scale
 
-**Status:** DRAFT — written 2026-09-20. **Do not run until Micah approves.**
+**Status:** ~~DRAFT — written 2026-09-20. **Do not run until Micah approves.**~~
+**APPROVED FOR RUN** — 2026-09-20, per the amendment at the top of this
+file (RC2 council verdict + Micah's testing authorization). The DRAFT
+designation is superseded.
 This draft freezes the 10× scale leg; the runner amends nothing after approval
 without a new dated amendment.
 
@@ -118,3 +150,32 @@ size, `RC_SMAX`, expected-check constants, probe-1 prediction (120).
 Zero RNG. Two consecutive binary runs, sha256-compared. Independent
 checker script re-verifies all 40 checks from run stdout. Commit results
 under `docs/lab/wave8/rc2/`; filter binaries, `.zagd`, `.zag-cache/`.
+
+## Amendment 2026-09-20 (2) — IL_CAP per-leg parameter — APPROVED BY MICAH
+
+**Finding:** the trial build panicked at startup (`slice index out of bounds`,
+zero stdout): the imported integrity-ledger checker (`il_core.zag`) carries a
+hard `IL_CAP=128`, while RC2's phase A alone needs 240 entries. §3b's capacity
+estimate covered only the trial's own audit ledger, never the integrity
+ledger's cap. This is a prereg-scale feasibility defect, not a trial-logic
+defect. Proposed by the RC2 test swarm, approved by Micah 2026-09-20.
+
+**Ruling (law for this leg):**
+- `IL_CAP` 128 → 1024, recorded as a **per-leg parameter** (capacity only,
+  verdict-neutral — the cap is never supposed to bind in a correct run; RC1
+  never hit 128). NOT a constant change. S100 re-estimates and re-bumps per
+  leg. The canonical `wave4/integrity-ledger/il_core.zag` is NOT modified;
+  RC2 builds against a leg-local verbatim copy `il_core_rc2.zag` (identical
+  except `IL_CAP`), so other trials are untouched.
+- **Equivalence proof required before the run:** a reduced-episode variant
+  (12/12/4, IL budget ≈ 80 ≤ 128) compiled against the 128-cap checker and
+  the 1024-cap checker must produce byte-identical check verdicts — the only
+  behavioral difference between the caps is unreachable in a valid run. If
+  not identical, the trial does not proceed.
+- **Falsification guard:** if the ledger ever reports `IL_AUDIT_FULL`
+  during the RC2 run, the run is VOID (capacity mis-estimate, not a pass)
+  and the capacity estimate is redone. A FULL-firing can never be counted
+  as evidence of integrity.
+- Rejected alternative: per-phase ledger resets — phase A alone needs 240 >
+  128, so resets cannot fit a single phase, and they would break the
+  checker's append-only continuity contract.
