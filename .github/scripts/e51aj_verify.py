@@ -1,3 +1,6 @@
+# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
+# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
+# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 """Verify native E51AJ evidence and derive all preregistered contrasts; never fit."""
 from __future__ import annotations
 
@@ -109,7 +112,7 @@ def verify(root: Path):
         content = (root / "inputs" / p).read_bytes()
         require(hashlib.sha256(content).hexdigest() == entry["sha256"], f"source input: {p}")
         require(hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest() == entry["git_blob"], f"source blob: {p}")
-    pin = json.loads((root / "inputs/Research/R32_E51AJ_SOURCE_PIN.json").read_text())
+    pin = json.loads((root / "inputs/docs/generations/R32/R32_E51AJ_SOURCE_PIN.json").read_text())
     require(pin["source_sha256"] == manifest["source_sha256"], "source pin")
     runtime = json.loads((root / "RUN_EXECUTION.json").read_text())
     require(runtime["exit_code"] == 0 and runtime["timed_out"] is False and runtime["wall_seconds"] <= 5400, "execution budget")

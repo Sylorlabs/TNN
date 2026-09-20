@@ -1,3 +1,6 @@
+# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
+# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
+# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 from pathlib import Path
 
 scratch = Path('.scratch/e51x')
@@ -5,10 +8,10 @@ scratch.mkdir(parents=True, exist_ok=True)
 
 # Preserve exactly the dependency compatibility repairs used by E51W.
 e51e = ''.join(Path(p).read_text() for p in [
-    'Research/R32_E51E_NATIVE/00_compat.zagfrag',
-    'Research/R32_E51E_NATIVE/01_joint_action_value.zagfrag',
-    'Research/R32_E51E_NATIVE/02_validation.zagfrag',
-    'Research/R32_E51E_NATIVE/03_run_and_gates.zagfrag',
+    'docs/generations/R32/runs/R32_E51E_NATIVE/00_compat.zagfrag',
+    'docs/generations/R32/runs/R32_E51E_NATIVE/01_joint_action_value.zagfrag',
+    'docs/generations/R32/runs/R32_E51E_NATIVE/02_validation.zagfrag',
+    'docs/generations/R32/runs/R32_E51E_NATIVE/03_run_and_gates.zagfrag',
 ])
 assert e51e.count('fn e51e_build_training_episode(') == 1
 e51e = e51e.replace(
@@ -18,7 +21,7 @@ e51e = e51e.replace(
 )
 (scratch / 'E51E_PATCHED.zag').write_text(e51e)
 
-e51m = Path('Research/R32_E51M_NATIVE/01_calibration_curve.zagfrag').read_text()
+e51m = Path('docs/generations/R32/runs/R32_E51M_NATIVE/01_calibration_curve.zagfrag').read_text()
 assert e51m.count('fn e51m_allocate_seeds(') == 1
 e51m = e51m.replace(
     'fn e51m_allocate_seeds(',
@@ -27,7 +30,7 @@ e51m = e51m.replace(
 )
 (scratch / 'E51M_PATCHED.zag').write_text(e51m)
 
-e51n = Path('Research/R32_E51N_NATIVE/01_domain_rng.zagfrag').read_text()
+e51n = Path('docs/generations/R32/runs/R32_E51N_NATIVE/01_domain_rng.zagfrag').read_text()
 assert e51n.count('fn e51n_make_truth(') == 1
 e51n = e51n.replace(
     'fn e51n_make_truth(',
@@ -36,7 +39,7 @@ e51n = e51n.replace(
 )
 (scratch / 'E51N_PATCHED.zag').write_text(e51n)
 
-local = Path('Research/R32_E51O_NATIVE/01_local_memory.zagfrag').read_text()
+local = Path('docs/generations/R32/runs/R32_E51O_NATIVE/01_local_memory.zagfrag').read_text()
 for old, new in [
     ('let minv:i32=e50_batch_column(records,feature+1,0);',
      'let minv:i32=e50_batch_column(records,0,feature+1,0);'),
@@ -68,7 +71,7 @@ assert local.count(strict) == 1
 local = local.replace(strict, '')
 (scratch / 'E51O_LOCAL_PATCHED.zag').write_text(local)
 
-vrun = Path('Research/R32_E51V_NATIVE/02_run.zagfrag').read_text()
+vrun = Path('docs/generations/R32/runs/R32_E51V_NATIVE/02_run.zagfrag').read_text()
 old = 'mode_success:[]i32\n)void {'
 new = 'mode_success:[]i32,\n    mode_start:i32\n)void {'
 assert vrun.count(old) == 1
@@ -95,7 +98,7 @@ vrun = vrun.replace(old, new, 1)
 
 # Mechanical E51W -> E51X native source transformation. The only scientific
 # changes are fresh world stages and optimization ceilings/arm count.
-one = Path('Research/R32_E51W_NATIVE/01_trajectory_dose.zagfrag').read_text()
+one = Path('docs/generations/R32/runs/R32_E51W_NATIVE/01_trajectory_dose.zagfrag').read_text()
 one = one.replace('E51W', 'E51X').replace('e51w', 'e51x')
 for old, new in {
     'const E51X_STAGE_DEV:i32=78;': 'const E51X_STAGE_DEV:i32=81;',
@@ -118,7 +121,7 @@ for old, new in {
     one = one.replace(old, new, 1)
 (scratch / 'E51X_01.zag').write_text(one)
 
-two = Path('Research/R32_E51W_NATIVE/02_run.zagfrag').read_text()
+two = Path('docs/generations/R32/runs/R32_E51W_NATIVE/02_run.zagfrag').read_text()
 two = two.replace('E51W', 'E51X').replace('e51w', 'e51x')
 two = two.replace('dose12_delegates_e51p_optimizer=1', 'lowest_dose_192=1')
 two = two.replace(
@@ -135,23 +138,23 @@ for old, new in {
     two = two.replace(old, new)
 (scratch / 'E51X_02.zag').write_text(two)
 
-inj = Path('Research/R32_E51W_NATIVE/03_main_injection.zagfrag').read_text()
+inj = Path('docs/generations/R32/runs/R32_E51W_NATIVE/03_main_injection.zagfrag').read_text()
 inj = inj.replace('E51W', 'E51X').replace('e51w', 'e51x')
 (scratch / 'E51X_INJECTION.zag').write_text(inj)
 
 parts = [
-    'Research/R32_E51B_NATIVE/01_core_and_seed.zagfrag',
-    'Research/R32_E51B_NATIVE/02_targets_and_metrics.zagfrag',
-    'Research/R32_E51B_NATIVE/03_validation_and_fit_setup.zagfrag',
-    'Research/R32_E51B_NATIVE/04_fit_validation_gates.zagfrag',
+    'docs/generations/R32/runs/R32_E51B_NATIVE/01_core_and_seed.zagfrag',
+    'docs/generations/R32/runs/R32_E51B_NATIVE/02_targets_and_metrics.zagfrag',
+    'docs/generations/R32/runs/R32_E51B_NATIVE/03_validation_and_fit_setup.zagfrag',
+    'docs/generations/R32/runs/R32_E51B_NATIVE/04_fit_validation_gates.zagfrag',
     str(scratch / 'E51E_PATCHED.zag'),
     str(scratch / 'E51M_PATCHED.zag'),
     str(scratch / 'E51N_PATCHED.zag'),
-    'Research/R32_E51N_NATIVE/02_truth_fix.zagfrag',
+    'docs/generations/R32/runs/R32_E51N_NATIVE/02_truth_fix.zagfrag',
     str(scratch / 'E51O_LOCAL_PATCHED.zag'),
-    'Research/R32_E51P_NATIVE/01_local_experts.zagfrag',
-    'Research/R32_E51S_NATIVE/01_extended_optimization.zagfrag',
-    'Research/R32_E51V_NATIVE/01_trajectory_objective.zagfrag',
+    'docs/generations/R32/runs/R32_E51P_NATIVE/01_local_experts.zagfrag',
+    'docs/generations/R32/runs/R32_E51S_NATIVE/01_extended_optimization.zagfrag',
+    'docs/generations/R32/runs/R32_E51V_NATIVE/01_trajectory_objective.zagfrag',
     str(scratch / 'E51V_RUN_PATCHED.zag'),
     str(scratch / 'E51X_01.zag'),
     str(scratch / 'E51X_02.zag'),
@@ -159,7 +162,7 @@ parts = [
 fragment = ''.join(Path(p).read_text() for p in parts)
 (scratch / 'E51X_FRAGMENT.zag').write_text(fragment)
 
-src = Path('Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag').read_text()
+src = Path('docs/generations/R32/tnn_r32_e50_provenance_temporal_contention_discriminator.zag').read_text()
 assert src.count('fn main()i32 {') == 1
 src = src.replace('fn main()i32 {', fragment + '\n\nfn main()i32 {', 1)
 anchor = 'let aux_frozen_gate:i32=0; if(aux_frozen_hash==frozen_aux_hash){ aux_frozen_gate=1; } e45_print_pair("e50_aux_frozen_gate",aux_frozen_gate);'

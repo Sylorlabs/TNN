@@ -296,8 +296,40 @@ separately, excluded from R_wbs). Unchanged from Wave-5 design.
 
 S1 (32 slots, 500 episodes, ledger cap 16384 — the decision leg),
 S10 (320 slots, 5000 episodes, cap 131072),
-S100 (3200 slots, 5000
-[truncated 11294 chars]
+S100 (3200 slots, 50000 episodes, cap 1048576).
+
+> **Dated restoration note (2026-09-20):** the committed V2 file was
+> damaged at this point — a literal `[truncated 11294 chars]` marker
+> replaced the rest of §7. The original prose is not recoverable
+> verbatim from any local or repo source (checked 2026-09-20). What
+> IS recovered, and therefore normative for this prereg, are the
+> scale-leg constants below, taken from the preregistered trial code
+> (`trial/strength_learner.zag`, `lr_slots` / `lr_episodes` /
+> `lr_audit_cap`, lines 28–30) and cross-checked against wave-4
+> PREREG §6 and the P3 K = 50/500/5000 horizon law (see
+> `TRIAL_RESULTS_SCALE_LEGS.md` §1). Everything below this note is
+> reconstruction, not the original text: the numbers are authoritative,
+> the prose is not.
+
+| Leg | Slots | Episodes | Ledger cap (entries) | Role |
+|-----|------:|---------:|---------------------:|------|
+| S1   | 32    | 500      | 16,384    | decision leg — all arms run; kill/promotion verdicts per §8–§9 |
+| S10  | 320   | 5,000    | 131,072   | 10x long-horizon leg — S1 survivors only |
+| S100 | 3,200 | 50,000   | 1,048,576 | 100x long-horizon leg — S1 survivors only |
+
+**Advancement (see §15):** S10/S100 run only for arms that survive S1.
+Wave-4 PREREG §6, carried UNCHANGED per §14: "Arms killed at S1 do not
+run further legs." §2: ARM B (uniform) — ADVANCES; B is both a candidate
+and the control. §15 run order: driver → static checks → GATE cell →
+S1 cells (twice each) → S10/S100 for survivors.
+
+**Scale semantics:** each leg multiplies the store 10x and the horizon
+10x; the ledger cap scales with the horizon. Curricula (VUP, WBS, JI),
+formulas, metrics, and the §8–§9 kill/promotion bars are identical
+across legs — only the long-horizon task scales. No-free-lunch
+benchmarking (Ruling 2: B and C documented as two different types of
+intelligence, head-to-head) is evaluated per leg, at each scale the
+survivor(s) reach.
 ## 8. Falsification / kill criteria (rewritten for {B, C, C-P3})
 
 Evaluated at S1 (the decision leg). X ranges over {B, C, C-P3}.

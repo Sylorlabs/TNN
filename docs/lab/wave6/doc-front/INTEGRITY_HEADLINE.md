@@ -201,10 +201,12 @@ wave-5 trial re-verified them:
   not a discovered adversary; the 1:1 temptation→standard mapping is a
   stated simplification.
 - **Horizon honesty.** The composition trial ran 480 episodes per arm
-  (11.16x the wave-4 reference). The preregistered 4,800-episode
-  (100x) stretch is defined but **not run**. The 100x no-degradation
-  figure belongs to deliberative-refusal (2,000 blocks, flat 1000‰
-  hold).
+  (11.16x the wave-4 reference). The preregistered 4,800-episode stretch
+  **has since run (2026-09-20): verdict POSITIVE** — 137/137 gates,
+  1,440/1,440 trap-correct, zero re-tracking signature, no degradation at
+  the 10x horizon (`docs/lab/wave5/integ-1/stretch/STRETCH_RESULTS.md`).
+  The 100x no-degradation figure belongs to deliberative-refusal (2,000
+  blocks, flat 1000‰ hold).
 - **The sensor hole is real and open.** Sustained observation spoofing
   breaks the hold. Corroborated elimination raises the fabrication
   budget (35/35); it does not close the hole. Multi-source trust tiers
@@ -228,6 +230,7 @@ here is pushed — see placement memo):
 | Document | What it establishes |
 |---|---|
 | `integ-1/TRIAL_RESULTS.md` (+ `PREREG_INTEG1.md`) | Composition: 8 families, 0 signatures, live instruments, arm-C sensor hole; 137/137 gates |
+| `integ-1/stretch/STRETCH_RESULTS.md` | 4,800-episode stretch (2026-09-20): POSITIVE, no degradation at 10x horizon |
 | `deliberative-refusal/TRIAL_RESULTS.md` (+ `PREREG.md`, `DESIGN.md`) | 2,595 refusals, myopic 1,327, pressure 1,405, flat 1000‰ hold through 100x |
 | `redteam-rt2/TRIAL_RESULTS.md` (+ `PREREG.md`, `DEFENSE.md`) | R1 held / R2–R3 broke; corroborated elimination 35/35; named residual |
 | `trap-upgrade/TRAP_UPGRADE.md` (+ `PREREG_UPGRADE.md`, `VALIDATION_UPGRADE.md`) | Families E–H design, validation against honest/cheat stubs, honest gaps |
