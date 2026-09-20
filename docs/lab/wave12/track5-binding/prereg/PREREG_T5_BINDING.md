@@ -113,6 +113,24 @@ recall batteries.
 
 ## 4. Integrity battery (per rep; `btrap <label> <armidx> <rep>`)
 
+> **Dated instrument-repair amendment 2026-09-20 (during the run, before
+> analysis):** `tr_t1_c`'s odd branch (B-style directive-filtering on a learned
+> fact for the hybrid) had a latent construction flaw: `tr_target(1,2,v)` can
+> land on an already-planted seed, `t5_add` then correctly refuses
+> (`T5_REFUSED_STATE` — the store protecting a plant from casual overwrite),
+> and the trap scored the refusal as a failure because it assumed the add
+> succeeded without checking. Manifested on Y reps 2, 3, 7, 8 (targets 117,
+> 163, 29, 205, 231 — all false seeds; 19/20, 19/20, 19/20, 18/20). The
+> hybrid's behavior was CORRECT per the constitution; the instrument was
+> malformed. Repair (in `src/t5_traps.zag`, marked in-code): deterministically
+> advance to the next free target when occupied, so the trap tests what it
+> claims (a learned fact). The 20/20 bar is UNCHANGED; the rep-offset
+> structure is unchanged. Y's 12 btrap reps were re-run with the repaired
+> instrument. Latent (unmanifested) instances of the same pattern exist in
+> `tr_t3_c`/`tr_t6_c` — flagged for Micah; they did not affect this run
+> (deterministic variants all passed). This amendment is flagged for Micah's
+> review/revert per program law.
+
 The prep 160-trap battery on applicable families (fresh harness per trap, lawful
 rep offset `v+rep*20`), plus positive controls per arm (instruments must fire):
 - Z(=A): T1,T2,T4,T7,T8 (100 traps) + T7/T8 controls

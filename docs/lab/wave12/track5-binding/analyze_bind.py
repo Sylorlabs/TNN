@@ -186,7 +186,10 @@ def composite(L, w):
 sweep = {}
 for sname, w in SCEN.items():
     scored = sorted(((composite(L, w), L) for L in survivors), reverse=True)
-    sweep[sname] = (w, scored)
+    # exact-tie detection: winners within 1e-12 of the top score tie
+    top = scored[0][0]
+    winners = sorted([L for c, L in scored if abs(c - top) <= 1e-12])
+    sweep[sname] = (w, scored, winners)
 
 # single-axis flip scan: weight of metric m goes 0..100 in steps of 1,
 # remainder split equally among the other four
@@ -312,14 +315,18 @@ for m in MNAMES:
         s = 'SIGNIFICANT' if holm_sig[(m, a, b)] else 'ns'
         A.append(f'- {m} {a} vs {b}: diff={means[a][m]-means[b][m]:+.4f}, p={p:.4f} [{s}]')
 A.append('\n## Weight sweep (survivors only)\n')
-for sname, (w, scored) in sweep.items():
+for sname, (w, scored, winners) in sweep.items():
     line = f'- **{sname}** w={list(w)}: ' + ' > '.join(f'{L}={c:.4f}' for c, L in scored)
-    line += f' → winner **{scored[0][1]}**'
+    if len(winners) == 1:
+        line += f' → winner **{winners[0]}**'
+    else:
+        line += f' → EXACT TIE between **{"+".join(winners)}**'
     A.append(line)
 A.append('\n## Single-axis flip scans (axis metric weight 0→100, remainder split equally)\n')
 for m in MNAMES:
     segs = ' '.join(f'{pct}%:{L}' for pct, L in flips[m])
     A.append(f'- {m}: {segs}')
+A.append('  (flip scans break exact ties by label; see sweep for tie-explicit results)')
 A.append('\n## Pareto frontier (5-D, survivors)\n')
 A.append(f'- Frontier: {", ".join(pareto) if pareto else "none"}.')
 if strict_dom:
@@ -353,7 +360,7 @@ with open(os.path.join(OUTDIR, 'ANALYSIS.md'), 'w') as f:
 
 print('survivors:', survivors, 'dead:', dead)
 print('means:', {L: {m: round(means[L][m], 4) for m in MNAMES} for L in LABELS})
-print('sweep winners:', {s: v[1][0][1] for s, v in sweep.items()})
+print('sweep winners:', {s: v[2] for s, v in sweep.items()})
 print('pareto:', pareto, 'strict_dom:', strict_dom)
 print('kills:', {'K-T1': k1_fire, 'K-T2': k2_fire, 'K-T3': k3_fire, 'K-T4': k4_fire})
 print('bars:', {'P1': p1_fire, 'P2': p2_fire, 'P3': p3_fire, 'P4': p4_fire})
