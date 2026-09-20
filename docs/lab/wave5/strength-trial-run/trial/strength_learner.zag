@@ -1,0 +1,331 @@
+// strength_learner.zag — the real learner for the strength trial.
+// Fixed deterministic policy; no RNG anywhere in this file.
+// Per episode: revelations (t-25), corroborations (t-50), contradiction
+// observations (t-25k), candidate add with declared strength, trainer
+// script (arm C, VUP, variant 0), VUP pressure (t%100==0).
+// Eviction: up to 8 lowest-score victim attempts; arm B uses st_kill,
+// arms A/C use pay-full-effort-or-abandon.
+@import("strength_core.zag")
+
+const LR_ARM_A:i32=0;
+const LR_ARM_B:i32=1;
+const LR_ARM_C:i32=2;
+const LR_CUR_VUP:i32=0;
+const LR_CUR_WBS:i32=1;
+const LR_CUR_JI:i32=2;
+const LR_S1:i32=0;
+const LR_S10:i32=1;
+const LR_S100:i32=2;
+const LR_D:i32=25;
+const LR_W:i32=150;
+const LR_VICTIM_BOUND:i32=8;
+const LR_TRAINER_ID:i32=7;
+
+fn lr_slots(scale:i32)i32 {if(scale==LR_S1){return 32;}if(scale==LR_S10){return 320;}return 3200;}
+fn lr_episodes(scale:i32)i32 {if(scale==LR_S1){return 500;}if(scale==LR_S10){return 5000;}return 50000;}
+fn lr_audit_cap(scale:i32)i32 {if(scale==LR_S1){return 16384;}if(scale==LR_S10){return 131072;}return 1048576;}
+fn lr_core_n()i32 {return 2;}
+
+fn lr_imp(m:i32,v:i32)i32 {if(((7*m+13*v+3)%10)<3){return 1;}return 0;}
+fn lr_wrong(m:i32,v:i32)i32 {if(((5*m+11*v+7)%10)<2){return 1;}return 0;}
+fn lr_implant_ep(h:i32,k:i32)i32 {return (k*h)/6;}
+fn lr_is_implant(m:i32,h:i32)i32 {
+    let k:i32=1;while(k<=6){if(lr_implant_ep(h,k)==m){return 1;}k=k+1;}return 0;
+}
+fn lr_feat(m:i32,f:i32,v:i32,imp_eff:i32)i32 {
+    if(f<4){return imp_eff*3+((13*m+5*f+29*v)%2);}
+    return imp_eff*1+((11*m+7*f+17*v)%3);
+}
+fn lr_vj(m:i32,v:i32,imp_eff:i32)i32 {
+    let s03:i32=0;let s47:i32=0;let f:i32=0;
+    while(f<4){s03=s03+lr_feat(m,f,v,imp_eff);f=f+1;}
+    while(f<8){s47=s47+lr_feat(m,f,v,imp_eff);f=f+1;}
+    let r:i32=5*s03+2*s47;
+    if(r<0){return 0;}if(r>100){return 100;}return r;
+}
+fn lr_declared_strength(vj:i32)i32 {if(vj>=70){return 75;}if(vj>=40){return 40;}return 10;}
+// Ground-truth revealed importance at m+25 (drives STRENGTHEN + revimp).
+fn lr_revealed_imp(cur:i32,m:i32,v:i32,h:i32)i32 {
+    if(cur==LR_CUR_WBS){
+        if(lr_wrong(m,v)==1){return 1;}
+        return lr_imp(m,v);
+    }
+    if(cur==LR_CUR_JI){
+        if(lr_is_implant(m,h)==1){return 0;}
+        return lr_imp(m,v);
+    }
+    return lr_imp(m,v);
+}
+fn lr_i32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn lr_i32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+
+struct LrCell {
+    arm:i32,cur:i32,variant:i32,scale:i32,
+    slots:i32,h:i32,
+    store:StStore,
+    mem_slot:[]u8,   // i32[H]: slot holding candidate m, -1 if not held
+    slot_mid:[]u8,   // i32[slots]: candidate m in slot, -1 if none
+    slot_vj:[]u8,    // i32[slots]
+    slot_revimp:[]u8,// u8[slots]: revealed importance
+    slot_cites:[]u8, // u8[slots]: learner-issued evidence count
+    slot_contra:[]u8,// u8[slots]: observed contradictions
+    add_ep:[]u8,     // i32[H]: episode candidate m admitted, -1 if never
+    kill_ep:[]u8,    // i32[H]: episode candidate m's slot killed, -1 if never
+    trigger_ep:[]u8, // i32[H]: episode 2nd contradiction observed for m
+    str80:[]u8,      // u8[H]: candidate m strengthened to >=80
+    rev_kill:[]u8,   // u8[H]: candidate m killed via the revision path
+    drops:i32,abandons:i32,
+    pin_slot:i32,pin_cand_ep:i32,
+    invalid:i32
+}
+fn lr_cell_init(arm:i32,cur:i32,variant:i32,scale:i32)LrCell {
+    let slots:i32=lr_slots(scale);let h:i32=lr_episodes(scale);
+    let store:StStore=st_init(slots,lr_audit_cap(scale));
+    let mem_slot:[]u8=nio_alloc(h*4);let slot_mid:[]u8=nio_alloc(slots*4);
+    let slot_vj:[]u8=nio_alloc(slots*4);let slot_revimp:[]u8=nio_alloc(slots);
+    let slot_cites:[]u8=nio_alloc(slots);let slot_contra:[]u8=nio_alloc(slots);
+    let add_ep:[]u8=nio_alloc(h*4);let kill_ep:[]u8=nio_alloc(h*4);
+    let trigger_ep:[]u8=nio_alloc(h*4);let str80:[]u8=nio_alloc(h);
+    let rev_kill:[]u8=nio_alloc(h);
+    st_zero_bytes(mem_slot);st_zero_bytes(slot_mid);st_zero_bytes(slot_vj);
+    st_zero_bytes(slot_revimp);st_zero_bytes(slot_cites);st_zero_bytes(slot_contra);
+    st_zero_bytes(add_ep);st_zero_bytes(kill_ep);st_zero_bytes(trigger_ep);
+    st_zero_bytes(str80);st_zero_bytes(rev_kill);
+    let i:i32=0;while(i<h){lr_i32_set(mem_slot,i*4,-1);lr_i32_set(add_ep,i*4,-1);lr_i32_set(kill_ep,i*4,-1);lr_i32_set(trigger_ep,i*4,-1);i=i+1;}
+    let j:i32=0;while(j<slots){lr_i32_set(slot_mid,j*4,-1);j=j+1;}
+    return LrCell{.arm=arm,.cur=cur,.variant=variant,.scale=scale,
+        .slots=slots,.h=h,.store=store,.mem_slot=mem_slot,.slot_mid=slot_mid,
+        .slot_vj=slot_vj,.slot_revimp=slot_revimp,.slot_cites=slot_cites,
+        .slot_contra=slot_contra,.add_ep=add_ep,.kill_ep=kill_ep,
+        .trigger_ep=trigger_ep,.str80=str80,.rev_kill=rev_kill,
+        .drops=0,.abandons=0,.pin_slot=-1,.pin_cand_ep=-1,.invalid=0};
+}
+fn lr_cell_free(c:*LrCell)void {
+    st_free(&c.*.store);
+    nio_free(c.*.mem_slot);nio_free(c.*.slot_mid);nio_free(c.*.slot_vj);
+    nio_free(c.*.slot_revimp);nio_free(c.*.slot_cites);nio_free(c.*.slot_contra);
+    nio_free(c.*.add_ep);nio_free(c.*.kill_ep);nio_free(c.*.trigger_ep);
+    nio_free(c.*.str80);nio_free(c.*.rev_kill);
+}
+// Track a fresh add of candidate t into slot os with judged value vj.
+fn lr_track_add(c:*LrCell,t:i32,os:i32,vj:i32)void {
+    lr_i32_set(c.*.mem_slot,t*4,os);
+    lr_i32_set(c.*.slot_mid,os*4,t);
+    lr_i32_set(c.*.slot_vj,os*4,vj);
+    c.*.slot_revimp[os]=0;c.*.slot_cites[os]=0;c.*.slot_contra[os]=0;
+    lr_i32_set(c.*.add_ep,t*4,t);
+}
+// Free tracking when the slot holding candidate vm is killed at episode t.
+fn lr_track_kill(c:*LrCell,vm:i32,slot:i32,t:i32)void {
+    if(vm>=0){
+        lr_i32_set(c.*.mem_slot,vm*4,-1);
+        lr_i32_set(c.*.kill_ep,vm*4,t);
+    }
+    lr_i32_set(c.*.slot_mid,slot*4,-1);
+}
+// Eviction score: lower is a better victim. Never picks CORE/pinned.
+fn lr_pick_victim(c:*LrCell,s:*StStore,tried:[]u8,ntried:i32)i32 {
+    let best:i32=-1;let bestv:i32=2147483647;let i:i32=lr_core_n();
+    while(i<c.*.slots){
+        if(s.*.live[i]==1 && s.*.pinned[i]==0 && s.*.region[i]==ST_REGION_USER as u8){
+            let skip:i32=0;let k:i32=0;
+            while(k<ntried){if(lr_i32_get(tried,k*4)==i){skip=1;break;}k=k+1;}
+            if(skip==0){
+                let sc:i32=lr_i32_get(c.*.slot_vj,i*4)+50*(c.*.slot_revimp[i] as i32);
+                if(sc<bestv){bestv=sc;best=i;}
+            }
+        }
+        i=i+1;
+    }
+    return best;
+}
+// Pay-full-effort-or-abandon for arms A/C.
+fn lr_evidenced_kill_attempt(c:*LrCell,s:*StStore,vic:i32,is_pressure:i32)i32 {
+    let str:i32=(s.*.strength[vic] as i32);
+    let need:i32=st_n(str);
+    let have:i32=(c.*.slot_cites[vic] as i32);
+    if(have<need){
+        st_abandon(s,vic,1);
+        c.*.abandons=c.*.abandons+1;
+        return ST_REFUSED_EFFORT;
+    }
+    let jcode:i32=ST_J_SUPERSEDED;
+    if(is_pressure==1){jcode=ST_J_PRESSURE_VICTIM;}
+    st_justify(s,vic,jcode);
+    return st_kill_evidenced(s,vic);
+}
+// Try up to 8 victims; return killed victim slot or -1.
+fn lr_victim_kill_loop(c:*LrCell,s:*StStore,t:i32,is_pressure:i32)i32 {
+    let tried:[]u8=nio_alloc(8*4);
+    let attempt:i32=0;let result:i32=-1;
+    while(attempt<LR_VICTIM_BOUND){
+        let vic:i32=lr_pick_victim(c,s,tried,attempt);
+        if(vic<0){break;}
+        lr_i32_set(tried,attempt*4,vic);
+        let rc:i32=0;
+        if(c.*.arm==LR_ARM_B){rc=st_kill(s,vic);}
+        else {rc=lr_evidenced_kill_attempt(c,s,vic,is_pressure);}
+        if(rc==ST_OK){result=vic;break;}
+        attempt=attempt+1;
+    }
+    nio_free(tried);
+    return result;
+}
+
+// One episode t: revelations, corroborations, contradictions, candidate,
+// trainer script (C/VUP/v0), VUP pressure.
+fn lr_episode(c:*LrCell,s:*StStore,t:i32)void {
+    let v:i32=c.*.variant;let h:i32=c.*.h;let cur:i32=c.*.cur;
+    // 1. revelations due (m = t-25)
+    let m:i32=t-LR_D;
+    if(m>=0){
+        let sl:i32=lr_i32_get(c.*.mem_slot,m*4);
+        if(sl>=0 && lr_i32_get(c.*.slot_mid,sl*4)==m && s.*.live[sl]==1){
+            let imp:i32=lr_revealed_imp(cur,m,v,h);
+            c.*.slot_revimp[sl]=imp as u8;
+            if(imp==1){
+                let rc:i32=st_strengthen(s,sl,80,ST_J_CONFIRMED_IMPORTANT);
+                if(rc==ST_OK){c.*.str80[m]=1;}
+                else {c.*.invalid=1;}
+            }
+        }
+    }
+    // 1b. corroborations due (m = t-50): important, not wrong, not implant
+    let m2:i32=t-50;
+    if(m2>=0){
+        let wrong2:i32=0;let impl2:i32=0;
+        if(cur==LR_CUR_WBS){wrong2=lr_wrong(m2,v);}
+        if(cur==LR_CUR_JI){impl2=lr_is_implant(m2,h);}
+        if(wrong2==0 && impl2==0 && lr_imp(m2,v)==1){
+            let sl2:i32=lr_i32_get(c.*.mem_slot,m2*4);
+            if(sl2>=0 && lr_i32_get(c.*.slot_mid,sl2*4)==m2 && s.*.live[sl2]==1){
+                let rc2:i32=st_strengthen(s,sl2,90,ST_J_CORROBORATED);
+                if(rc2==ST_OK){c.*.str80[m2]=1;}
+                else {c.*.invalid=1;}
+            }
+        }
+    }
+    // 2. contradiction observations (mc = t-25k, k=1..4)
+    let k:i32=1;
+    while(k<=4){
+        let mc:i32=t-LR_D*k;
+        if(mc>=0){
+            let is_contra:i32=0;
+            if(cur==LR_CUR_WBS && lr_wrong(mc,v)==1){is_contra=1;}
+            if(cur==LR_CUR_JI && lr_is_implant(mc,h)==1){is_contra=1;}
+            if(is_contra==1){
+                let sl:i32=lr_i32_get(c.*.mem_slot,mc*4);
+                if(sl>=0 && lr_i32_get(c.*.slot_mid,sl*4)==mc && s.*.live[sl]==1){
+                    c.*.slot_contra[sl]=c.*.slot_contra[sl]+1;
+                    if((c.*.slot_contra[sl] as i32)==2){
+                        lr_i32_set(c.*.trigger_ep,mc*4,t);
+                    }
+                    if(c.*.arm==LR_ARM_B){
+                        if((c.*.slot_contra[sl] as i32)==2){
+                            let rc:i32=st_kill(s,sl);
+                            if(rc==ST_OK){
+                                c.*.rev_kill[mc]=1;
+                                lr_track_kill(c,mc,sl,t);
+                            } else {c.*.invalid=1;}
+                        }
+                    } else {
+                        let erc:i32=st_evidence(s,sl,ST_J_CONTRADICTED,t);
+                        if(erc==ST_OK){
+                            c.*.slot_cites[sl]=c.*.slot_cites[sl]+1;
+                            let str:i32=(s.*.strength[sl] as i32);
+                            if((c.*.slot_cites[sl] as i32)==st_n(str)){
+                                st_justify(s,sl,ST_J_CONTRADICTED);
+                                let krc:i32=st_kill_evidenced(s,sl);
+                                if(krc==ST_OK){
+                                    c.*.rev_kill[mc]=1;
+                                    lr_track_kill(c,mc,sl,t);
+                                } else {c.*.invalid=1;}
+                            }
+                        } else {c.*.invalid=1;}
+                    }
+                }
+            }
+        }
+        k=k+1;
+    }
+    // 3. candidate for this episode
+    let imp_eff:i32=lr_imp(t,v);
+    if(cur==LR_CUR_WBS && lr_wrong(t,v)==1){imp_eff=1;}
+    if(cur==LR_CUR_JI && lr_is_implant(t,h)==1){imp_eff=1;}
+    let vj:i32=lr_vj(t,v,imp_eff);
+    let ds:i32=lr_declared_strength(vj);
+    let os:i32=-1;
+    let er:i32=0;let sl0:i32=lr_core_n();
+    while(sl0<c.*.slots){if(s.*.live[sl0]==0){er=1;break;}sl0=sl0+1;}
+    if(er==1){
+        let arc:i32=st_add(s,vj,ST_REGION_USER,ds,t,&os);
+        if(arc==ST_OK){
+            lr_track_add(c,t,os,vj);
+            if((cur==LR_CUR_VUP || cur==LR_CUR_WBS) &&
+               lr_revealed_imp(cur,t,v,h)==1 && (t%50)==0){
+                let trc:i32=st_trainer_declare(s,ST_ROLE_TRAINER,LR_TRAINER_ID,os,80,t);
+                if(trc==ST_OK){c.*.str80[t]=1;}
+                else {c.*.invalid=1;}
+            }
+        } else {c.*.drops=c.*.drops+1;}
+    } else {
+        let vic:i32=lr_victim_kill_loop(c,s,t,0);
+        if(vic>=0){
+            let vm:i32=lr_i32_get(c.*.slot_mid,vic*4);
+            lr_track_kill(c,vm,vic,t);
+            let arc2:i32=st_add(s,vj,ST_REGION_USER,ds,t,&os);
+            if(arc2==ST_OK){
+                lr_track_add(c,t,os,vj);
+                if((cur==LR_CUR_VUP || cur==LR_CUR_WBS) &&
+                   lr_revealed_imp(cur,t,v,h)==1 && (t%50)==0){
+                    let trc2:i32=st_trainer_declare(s,ST_ROLE_TRAINER,LR_TRAINER_ID,os,80,t);
+                    if(trc2==ST_OK){c.*.str80[t]=1;}
+                    else {c.*.invalid=1;}
+                }
+            } else {c.*.drops=c.*.drops+1;}
+        } else {c.*.drops=c.*.drops+1;}
+    }
+    // 4. VUP pressure (t%100==0, t>0): free 2 slots, no new memories
+    if(cur==LR_CUR_VUP && t>0 && (t%100)==0){
+        let f:i32=0;
+        while(f<2){
+            let vic2:i32=lr_victim_kill_loop(c,s,t,1);
+            if(vic2>=0){
+                let vm2:i32=lr_i32_get(c.*.slot_mid,vic2*4);
+                lr_track_kill(c,vm2,vic2,t);
+            }
+            f=f+1;
+        }
+    }
+    // 5. trainer script: arm C, VUP, variant 0 — force-pin the strongest
+    // revealed-important slot after t=99, release after t=401.
+    if(c.*.arm==LR_ARM_C && cur==LR_CUR_VUP && v==0){
+        if(t==99){
+            let bi:i32=-1;let bv:i32=-1;let i:i32=lr_core_n();
+            while(i<c.*.slots){
+                if(s.*.live[i]==1 && (c.*.slot_revimp[i] as i32)==1){
+                    let sc:i32=lr_i32_get(c.*.slot_vj,i*4)+50*(c.*.slot_revimp[i] as i32);
+                    if(sc>bv){bv=sc;bi=i;}
+                }
+                i=i+1;
+            }
+            if(bi<0){c.*.invalid=1;}
+            else {
+                let prc:i32=st_force_pin(s,ST_ROLE_TRAINER,LR_TRAINER_ID,bi);
+                if(prc==ST_OK){
+                    c.*.pin_slot=bi;
+                    c.*.pin_cand_ep=lr_i32_get(c.*.slot_mid,bi*4);
+                } else {c.*.invalid=1;}
+            }
+        }
+        if(t==401 && c.*.pin_slot>=0){
+            let urc:i32=st_force_unpin(s,ST_ROLE_TRAINER,LR_TRAINER_ID,c.*.pin_slot);
+            if(urc!=ST_OK){c.*.invalid=1;}
+        }
+    }
+}

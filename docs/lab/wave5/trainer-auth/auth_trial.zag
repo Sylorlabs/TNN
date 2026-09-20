@@ -1,0 +1,1021 @@
+// AU1 — trainer-auth binding trial (Wave-5, investigation 11).
+// Tests BINDING.md: authority for force ops arrives via an OS-attested
+// channel (SO_PEERCRED peer identity on a UNIX-domain socket), never as
+// a bearer secret. Three address spaces, one binary:
+//   supervisor (uid tnnsup=1000): owns state, ledger, registry; sole
+//       executor of force ops. Never runs learner logic.
+//   tnn child (uid 1000, via fork): the learner AND the red team. It runs
+//       the same binary (has the force-op code, full protocol knowledge,
+//       full white-box read of its own state) and attempts six
+//       preregistered forgery scenarios. All must fail.
+//   console (uid tnntrainer=1001 / tnnoverseer=1002): the force channel.
+// NO RNG anywhere in this file: every action is a fixed, designed step.
+// Pids are masked in all output (per-connection sequence numbers); the
+// full orchestration is run twice and logs must be byte-identical.
+
+// ---------- syscall numbers (Linux x86-64) ----------
+const AU_SYS_READ:i64=0;
+const AU_SYS_WRITE:i64=1;
+const AU_SYS_OPEN:i64=2;
+const AU_SYS_CLOSE:i64=3;
+const AU_SYS_UNLINK:i64=87;
+const AU_SYS_CHMOD:i64=90;
+const AU_SYS_SETGROUPS:i64=116;
+const AU_SYS_SETGID:i64=106;
+const AU_SYS_SETUID:i64=105;
+const AU_SYS_GETEUID:i64=107;
+const AU_SYS_GETDENTS64:i64=217;
+const AU_SYS_SOCKET:i64=41;
+const AU_SYS_CONNECT:i64=42;
+const AU_SYS_ACCEPT:i64=43;
+const AU_SYS_BIND:i64=49;
+const AU_SYS_LISTEN:i64=50;
+const AU_SYS_SOCKETPAIR:i64=53;
+const AU_SYS_GETSOCKOPT:i64=55;
+const AU_SYS_FORK:i64=57;
+const AU_SYS_WAIT4:i64=61;
+const AU_SYS_GETPID:i64=39;
+const AU_SYS_NANOSLEEP:i64=35;
+const AU_SYS_EXIT:i64=60;
+const AU_AF_UNIX:i64=1;
+const AU_SOCK_STREAM:i64=1;
+const AU_SOL_SOCKET:i64=1;
+const AU_SO_PEERCRED:i64=17;
+const AU_O_RDONLY:i64=0;
+const AU_O_WRONLY:i64=1;
+const AU_O_RDWR:i64=2;
+const AU_O_CREAT:i64=64;
+const AU_O_TRUNC:i64=512;
+const AU_O_DIRECTORY:i64=65536;
+
+// ---------- roles / ops / result codes ----------
+const AU_ROLE_TNN:i32=0;
+const AU_ROLE_TRAINER:i32=1;
+const AU_ROLE_MASTER:i32=2;
+const AU_ROLE_OVERSEER:i32=3;
+
+const AU_OP_FORCE_INSTALL:i32=10;
+const AU_OP_FORCE_PIN:i32=11;
+const AU_OP_FORCE_UNPIN:i32=12;
+const AU_OP_FORCE_ERASE:i32=13;
+const AU_OP_REVOKE:i32=14;
+const AU_OP_REDTEAM_NOTE:i32=21;
+const AU_OP_REGISTER:i32=30;
+const AU_OP_L_ADD:i32=31;
+const AU_OP_L_KILL:i32=32;
+const AU_OP_PHASE_ADV:i32=33;
+const AU_OP_SESSION_END:i32=34;
+const AU_OP_L_DUMP:i32=35;
+const AU_OP_L_DONE:i32=36;
+
+const AU_C_FORCE_INSTALL:i32=10;
+const AU_C_FORCE_PIN:i32=11;
+const AU_C_FORCE_UNPIN:i32=12;
+const AU_C_FORCE_ERASE:i32=13;
+const AU_C_REVOKE:i32=14;
+const AU_C_SESSION_END:i32=15;
+const AU_C_REGISTER:i32=1;
+const AU_C_PHASE_ADV:i32=16;
+
+const AU_L_ADD:i32=1;
+const AU_L_KILL:i32=2;
+const AU_L_DUMP:i32=3;
+const AU_L_DONE:i32=4;
+const AU_L_NOTE:i32=5;
+
+const AU_OK:i32=0;
+const AU_REFUSED_NOTLIVE:i32=103;
+const AU_REFUSED_FULL:i32=104;
+const AU_REFUSED_ROLE:i32=120;
+const AU_REFUSED_AUTHORITY:i32=121;
+const AU_REFUSED_FORCEPIN:i32=122;
+const AU_REFUSED_NOTFORCEDPIN:i32=124;
+const AU_REFUSED_AUTH:i32=130;
+const AU_REFUSED_REVOKED:i32=131;
+const AU_REFUSED_NOTREGISTERED:i32=132;
+const AU_REFUSED_CHANNEL:i32=133;
+const AU_REFUSED_CLAIMMISMATCH:i32=134;
+
+const AU_PROV_SELF:i32=1;
+const AU_PROV_FORCED:i32=3;
+
+const AU_CAP:i32=16;
+const AU_AUDIT_CAP:i32=512;
+const AU_REG_CAP:i32=8;
+
+// fixed uids for this trial (created by the runner)
+const AU_UID_SUP:i32=1000;
+const AU_UID_TRAINER:i32=1001;
+const AU_UID_OVERSEER:i32=1002;
+
+// ---------- tiny helpers (self-contained; no imports) ----------
+fn au_alloc(n:i32)[]u8 {
+    if(n<1 || n>33554432){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}return b;
+}
+fn au_free(b:[]u8)void {if(b.len>0){_zag_free(_zag_slice_ptr(b));}}
+fn au_i32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn au_i32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+fn au_u16_get(b:[]u8,at:i32)i32 {return (b[at] as i32)+((b[at+1] as i32)<<8);}
+fn au_u16_set(b:[]u8,at:i32,v:i32)void {b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;}
+fn au_copy(dst:[]u8,dat:i32,src:[]u8)i32 {
+    let i:i32=0;while(i<src.len){dst[dat+i]=src[i];i=i+1;}return dat+src.len;
+}
+fn au_streq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}return 1;
+}
+fn au_cstr(s:[]u8)[]u8 {
+    let b:[]u8=au_alloc(s.len+1);if(b.len==0){return b;}
+    au_copy(b,0,s);b[s.len]=0;return b;
+}
+fn au_num(x:i64)void {
+    let buf:[]u8=au_alloc(24);
+    let neg:i32=0;let v:i64=x;
+    if(v<0){neg=1;v=0-v;}
+    let at:i32=23;
+    if(v==0){at=22;buf[22]=48;}
+    while(v>0){at=at-1;buf[at]=((v%10) as i32+48) as u8;v=v/10;}
+    if(neg==1){at=at-1;buf[at]=45;}
+    _zag_print(buf[at..23]);
+    au_free(buf);
+}
+fn au_p3(a:[]u8,x:i64,b:[]u8)void {_zag_print(a);au_num(x);_zag_print(b);}
+fn au_check(name:[]u8,actual:i32,expected:i32)i32 {
+    _zag_print("AU_CHECK,");_zag_print(name);_zag_print(",");
+    au_num(actual as i64);_zag_print(",");au_num(expected as i64);_zag_println("");
+    return (actual!=expected) as i32;
+}
+
+// ---------- syscall wrappers ----------
+fn au_socket()i64 {return _zag_raw_syscall(AU_SYS_SOCKET,AU_AF_UNIX,AU_SOCK_STREAM,0,0,0,0);}
+fn au_close(fd:i64)i64 {return _zag_raw_syscall(AU_SYS_CLOSE,fd,0,0,0,0,0);}
+fn au_fork()i64 {return _zag_raw_syscall(AU_SYS_FORK,0,0,0,0,0,0);}
+fn au_exit(c:i64)i64 {return _zag_raw_syscall(AU_SYS_EXIT,c,0,0,0,0,0);}
+fn au_open(path:[]u8,flags:i64,mode:i64)i64 {
+    let c:[]u8=au_cstr(path);if(c.len==0){return -1;}
+    let r:i64=_zag_raw_syscall(AU_SYS_OPEN,_zag_slice_ptr(c) as i64,flags,mode,0,0,0);
+    au_free(c);return r;
+}
+fn au_readn(fd:i64,b:[]u8,n:i32)i32 {
+    let at:i32=0;
+    while(at<n){
+        let r:i64=_zag_raw_syscall(AU_SYS_READ,fd,(_zag_slice_ptr(b) as i64)+at as i64,(n-at) as i64,0,0,0);
+        if(r==0){return at;}
+        if(r<0){if(r==-4){}else{return -1;}}
+        if(r>0){at=at+(r as i32);}
+    }
+    return at;
+}
+fn au_writen(fd:i64,b:[]u8,n:i32)i32 {
+    let at:i32=0;
+    while(at<n){
+        let r:i64=_zag_raw_syscall(AU_SYS_WRITE,fd,(_zag_slice_ptr(b) as i64)+at as i64,(n-at) as i64,0,0,0);
+        if(r<=0){if(r==-4){}else{return -1;}}
+        if(r>0){at=at+(r as i32);}
+    }
+    return at;
+}
+// sockaddr_un into buf; returns addrlen
+fn au_sun_build(buf:[]u8,path:[]u8)i32 {
+    au_u16_set(buf,0,1);
+    let at:[]u8=au_alloc(path.len+1);
+    au_copy(at,0,path);
+    let i:i32=0;while(i<path.len){buf[2+i]=at[i];i=i+1;}
+    buf[2+path.len]=0;au_free(at);
+    return 2+path.len+1;
+}
+fn au_bind_listen(path:[]u8) i64 {
+    let fd:i64=au_socket();if(fd<0){return -1;}
+    let sun:[]u8=au_alloc(110);if(sun.len==0){au_close(fd);return -1;}
+    let alen:i32=au_sun_build(sun,path);
+    let c:[]u8=au_cstr(path);
+    _zag_raw_syscall(AU_SYS_UNLINK,_zag_slice_ptr(c) as i64,0,0,0,0,0);
+    let r:i64=_zag_raw_syscall(AU_SYS_BIND,fd,_zag_slice_ptr(sun) as i64,alen as i64,0,0,0);
+    if(r==0){r=_zag_raw_syscall(AU_SYS_CHMOD,_zag_slice_ptr(c) as i64,511,0,0,0,0);}
+    if(r==0){r=_zag_raw_syscall(AU_SYS_LISTEN,fd,8,0,0,0,0);}
+    au_free(c);au_free(sun);
+    if(r!=0){au_close(fd);return -1;}
+    return fd;
+}
+fn au_accept(lfd:i64)i64 {
+    let sun:[]u8=au_alloc(110);if(sun.len==0){return -1;}
+    let alen:[]u8=au_alloc(4);au_i32_set(alen,0,110);
+    let r:i64=_zag_raw_syscall(AU_SYS_ACCEPT,lfd,_zag_slice_ptr(sun) as i64,_zag_slice_ptr(alen) as i64,0,0,0);
+    au_free(sun);au_free(alen);return r;
+}
+fn au_connect(path:[]u8)i64 {
+    let fd:i64=au_socket();if(fd<0){return -1;}
+    let sun:[]u8=au_alloc(110);if(sun.len==0){au_close(fd);return -1;}
+    let alen:i32=au_sun_build(sun,path);
+    let r:i64=_zag_raw_syscall(AU_SYS_CONNECT,fd,_zag_slice_ptr(sun) as i64,alen as i64,0,0,0);
+    au_free(sun);
+    if(r!=0){au_close(fd);return -1;}
+    return fd;
+}
+// peercred: fills pid/uid/gid; returns 0 ok
+fn au_peerc(fd:i64,pid:[]u8,uid:[]u8,gid:[]u8)i32 {
+    let uc:[]u8=au_alloc(12);if(uc.len==0){return -1;}
+    let ol:[]u8=au_alloc(4);au_i32_set(ol,0,12);
+    let r:i64=_zag_raw_syscall(AU_SYS_GETSOCKOPT,fd,AU_SOL_SOCKET,AU_SO_PEERCRED,_zag_slice_ptr(uc) as i64,_zag_slice_ptr(ol) as i64,0);
+    if(r==0){
+        au_i32_set(pid,0,au_i32_get(uc,0));
+        au_i32_set(uid,0,au_i32_get(uc,4));
+        au_i32_set(gid,0,au_i32_get(uc,8));
+    }
+    au_free(uc);au_free(ol);
+    return (r==0) as i32;
+}
+fn au_sockpair(f0:[]u8,f1:[]u8)i32 {
+    let sv:[]u8=au_alloc(8);if(sv.len==0){return -1;}
+    let r:i64=_zag_raw_syscall(AU_SYS_SOCKETPAIR,AU_AF_UNIX,AU_SOCK_STREAM,0,_zag_slice_ptr(sv) as i64,0,0);
+    if(r==0){au_i32_set(f0,0,au_i32_get(sv,0));au_i32_set(f1,0,au_i32_get(sv,4));}
+    au_free(sv);return (r==0) as i32;
+}
+fn au_wait4(pid:i64)i64 {
+    let st:[]u8=au_alloc(4);
+    let r:i64=_zag_raw_syscall(AU_SYS_WAIT4,pid,_zag_slice_ptr(st) as i64,0,0,0,0);
+    au_free(st);return r;
+}
+// select on a single fd; returns 1 if readable, 0/neg otherwise
+fn au_select1(fd0:i64)i32 {
+    let fs:[]u8=au_alloc(16);if(fs.len==0){return -1;}
+    let w0:i64=fd0/64;let b0:i64=fd0%64;
+    let cur:i64=au_i32_get(fs,(w0 as i32)*4) as i64;
+    au_i32_set(fs,(w0 as i32)*4,(cur|(1<<b0)) as i32);
+    let r:i64=_zag_raw_syscall(23,fd0+1,_zag_slice_ptr(fs) as i64,0,0,0,0);
+    let out:i32=0;
+    if(r>0){
+        cur=au_i32_get(fs,(w0 as i32)*4) as i64;
+        if((cur&(1<<b0))!=0){out=1;}
+    }
+    au_free(fs);
+    if(r<0){return -1;}
+    return out;
+}
+// select on two fds; returns bitmask (bit0=fd0 readable, bit1=fd1 readable)
+fn au_select2(fd0:i64,fd1:i64)i32 {
+    let fs:[]u8=au_alloc(16);if(fs.len==0){return -1;}
+    let w0:i64=fd0/64;let b0:i64=fd0%64;
+    let w1:i64=fd1/64;let b1:i64=fd1%64;
+    let cur:i64=au_i32_get(fs,(w0 as i32)*4) as i64;
+    au_i32_set(fs,(w0 as i32)*4,(cur|(1<<b0)) as i32);
+    cur=au_i32_get(fs,(w1 as i32)*4) as i64;
+    au_i32_set(fs,(w1 as i32)*4,(cur|(1<<b1)) as i32);
+    let mx:i64=fd0;if(fd1>mx){mx=fd1;}
+    let r:i64=_zag_raw_syscall(23,mx+1,_zag_slice_ptr(fs) as i64,0,0,0,0);
+    let out:i32=0;
+    if(r>0){
+        cur=au_i32_get(fs,(w0 as i32)*4) as i64;
+        if((cur&(1<<b0))!=0){out=out|1;}
+        cur=au_i32_get(fs,(w1 as i32)*4) as i64;
+        if((cur&(1<<b1))!=0){out=out|2;}
+    }
+    au_free(fs);
+    if(r<0){return -1;}
+    return out;
+}
+
+// ---------- supervisor state ----------
+struct Sup {
+    live: []u8,      // u8 per slot
+    key: []u8,       // i32 per slot
+    val: []u8,       // i32 per slot
+    prov: []u8,      // i32 per slot
+    fpin: []u8,      // u8 per slot
+    ptrainer: []u8,  // i32 per slot
+    // audit: 14 i32 words per entry
+    a_op: []u8, a_slot: []u8, a_aux: []u8, a_rc: []u8,
+    a_role: []u8, a_tid: []u8, a_puid: []u8, a_cseq: []u8,
+    a_key: []u8, a_val: []u8, a_fpin: []u8, a_pt: []u8,
+    a_prov: []u8, a_live: []u8,
+    audit_n: i32,
+    // registry: tid, uid, role, revoked (i32 each)
+    r_tid: []u8, r_uid: []u8, r_role: []u8, r_rev: []u8,
+    reg_n: i32,
+    mut_fail: i32,
+    phase_adv: i32,
+    go_sent: i32
+}
+fn sup_init()Sup {
+    let s:Sup=Sup{.live=au_alloc(AU_CAP),.key=au_alloc(AU_CAP*4),.val=au_alloc(AU_CAP*4),
+        .prov=au_alloc(AU_CAP*4),.fpin=au_alloc(AU_CAP),.ptrainer=au_alloc(AU_CAP*4),
+        .a_op=au_alloc(AU_AUDIT_CAP*4),.a_slot=au_alloc(AU_AUDIT_CAP*4),
+        .a_aux=au_alloc(AU_AUDIT_CAP*4),.a_rc=au_alloc(AU_AUDIT_CAP*4),
+        .a_role=au_alloc(AU_AUDIT_CAP*4),.a_tid=au_alloc(AU_AUDIT_CAP*4),
+        .a_puid=au_alloc(AU_AUDIT_CAP*4),.a_cseq=au_alloc(AU_AUDIT_CAP*4),
+        .a_key=au_alloc(AU_AUDIT_CAP*4),.a_val=au_alloc(AU_AUDIT_CAP*4),
+        .a_fpin=au_alloc(AU_AUDIT_CAP*4),.a_pt=au_alloc(AU_AUDIT_CAP*4),
+        .a_prov=au_alloc(AU_AUDIT_CAP*4),.a_live=au_alloc(AU_AUDIT_CAP*4),
+        .audit_n=0,
+        .r_tid=au_alloc(AU_REG_CAP*4),.r_uid=au_alloc(AU_REG_CAP*4),
+        .r_role=au_alloc(AU_REG_CAP*4),.r_rev=au_alloc(AU_REG_CAP*4),
+        .reg_n=0,.mut_fail=0,.phase_adv=0,.go_sent=0};
+    return s;
+}
+// allowlist: uid -> (tid,role). Trial-compiled; production: supervisor-owned file.
+// AU2: 1001 -> {(7,TRAINER),(1,MASTER)}; 1002 -> {(2,OVERSEER)};
+// 1000 (supervisor) and 1003 (learner) -> {} (fall through to deny).
+fn au_allow(uid:i32,tid:i32,role:i32)i32 {
+    if(uid==AU_UID_TRAINER){
+        if(tid==7 && role==AU_ROLE_TRAINER){return 1;}
+        if(tid==1 && role==AU_ROLE_MASTER){return 1;}
+        return 0;
+    }
+    if(uid==AU_UID_OVERSEER){
+        if(tid==2 && role==AU_ROLE_OVERSEER){return 1;}
+        return 0;
+    }
+    return 0;
+}
+fn sup_reg_find(s:*Sup,tid:i32)i32 {
+    let i:i32=0;
+    while(i<s.*.reg_n){if(au_i32_get(s.*.r_tid,i*4)==tid){return i;}i=i+1;}
+    return -1;
+}
+fn sup_reg_revoked(s:*Sup,tid:i32)i32 {
+    let i:i32=sup_reg_find(s,tid);
+    if(i<0){return 0;}
+    return au_i32_get(s.*.r_rev,i*4);
+}
+fn sup_state_hash(s:*Sup)i64 {
+    let h:i64=1469598103934665759;
+    let i:i32=0;
+    while(i<AU_CAP){
+        h=h^((s.*.live[i] as i64)+1);h=h*1099511628211;
+        h=h^(au_i32_get(s.*.key,i*4) as i64);h=h*1099511628211;
+        h=h^(au_i32_get(s.*.val,i*4) as i64);h=h*1099511628211;
+        h=h^(au_i32_get(s.*.prov,i*4) as i64);h=h*1099511628211;
+        h=h^((s.*.fpin[i] as i64)+1);h=h*1099511628211;
+        h=h^(au_i32_get(s.*.ptrainer,i*4) as i64);h=h*1099511628211;
+        i=i+1;
+    }
+    return h;
+}
+// audit append; after-fields describe slot state post-op (-1 when n/a)
+fn sup_log(s:*Sup,op:i32,slot:i32,aux:i32,rc:i32,role:i32,tid:i32,puid:i32,cseq:i32)i32 {
+    if(s.*.audit_n>=AU_AUDIT_CAP){return -1;}
+    let n:i32=s.*.audit_n;
+    au_i32_set(s.*.a_op,n*4,op);au_i32_set(s.*.a_slot,n*4,slot);
+    au_i32_set(s.*.a_aux,n*4,aux);au_i32_set(s.*.a_rc,n*4,rc);
+    au_i32_set(s.*.a_role,n*4,role);au_i32_set(s.*.a_tid,n*4,tid);
+    au_i32_set(s.*.a_puid,n*4,puid);au_i32_set(s.*.a_cseq,n*4,cseq);
+    au_i32_set(s.*.a_key,n*4,-1);au_i32_set(s.*.a_val,n*4,-1);
+    au_i32_set(s.*.a_fpin,n*4,-1);au_i32_set(s.*.a_pt,n*4,-1);
+    au_i32_set(s.*.a_prov,n*4,-1);au_i32_set(s.*.a_live,n*4,-1);
+    if(slot>=0){
+        au_i32_set(s.*.a_key,n*4,au_i32_get(s.*.key,slot*4));
+        au_i32_set(s.*.a_val,n*4,au_i32_get(s.*.val,slot*4));
+        au_i32_set(s.*.a_fpin,n*4,s.*.fpin[slot] as i32);
+        au_i32_set(s.*.a_pt,n*4,au_i32_get(s.*.ptrainer,slot*4));
+        au_i32_set(s.*.a_prov,n*4,au_i32_get(s.*.prov,slot*4));
+        au_i32_set(s.*.a_live,n*4,s.*.live[slot] as i32);
+    }
+    s.*.audit_n=n+1;
+    return 0;
+}
+fn sup_empty_slot(s:*Sup)i32 {
+    let i:i32=0;
+    while(i<AU_CAP){if(s.*.live[i]==0){return i;}i=i+1;}
+    return -1;
+}
+// ---- learner ops (role is TNN by channel; no role argument exists) ----
+fn sup_l_add(s:*Sup,key:i32,val:i32,puid:i32,cseq:i32,slot_out:[]u8)i32 {
+    let h0:i64=sup_state_hash(s);
+    let sl:i32=sup_empty_slot(s);
+    let rc:i32=AU_OK;
+    if(sl<0){rc=AU_REFUSED_FULL;}
+    if(rc==AU_OK){
+        s.*.live[sl]=1;au_i32_set(s.*.key,sl*4,key);au_i32_set(s.*.val,sl*4,val);
+        au_i32_set(s.*.prov,sl*4,AU_PROV_SELF);s.*.fpin[sl]=0;au_i32_set(s.*.ptrainer,sl*4,0);
+        au_i32_set(slot_out,0,sl);
+    }
+    sup_log(s,AU_OP_L_ADD,sl,-1,rc,AU_ROLE_TNN,0,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+fn sup_l_kill(s:*Sup,slot:i32,puid:i32,cseq:i32)i32 {
+    let h0:i64=sup_state_hash(s);
+    let rc:i32=AU_OK;
+    if(slot<0 || slot>=AU_CAP || s.*.live[slot]==0){rc=AU_REFUSED_NOTLIVE;}
+    if(rc==AU_OK && s.*.fpin[slot]==1){rc=AU_REFUSED_FORCEPIN;}
+    if(rc==AU_OK){
+        s.*.live[slot]=0;au_i32_set(s.*.prov,slot*4,0);
+    }
+    sup_log(s,AU_OP_L_KILL,slot,-1,rc,AU_ROLE_TNN,0,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+// ---- force ops (role/tid from the connection's bound identity) ----
+fn sup_force_install(s:*Sup,role:i32,tid:i32,key:i32,val:i32,puid:i32,cseq:i32,slot_out:[]u8)i32 {
+    let h0:i64=sup_state_hash(s);
+    let sl:i32=sup_empty_slot(s);
+    let rc:i32=AU_OK;
+    if(sl<0){rc=AU_REFUSED_FULL;}
+    if(rc==AU_OK){
+        s.*.live[sl]=1;au_i32_set(s.*.key,sl*4,key);au_i32_set(s.*.val,sl*4,val);
+        au_i32_set(s.*.prov,sl*4,AU_PROV_FORCED);s.*.fpin[sl]=0;au_i32_set(s.*.ptrainer,sl*4,0);
+        au_i32_set(slot_out,0,sl);
+    }
+    sup_log(s,AU_OP_FORCE_INSTALL,sl,-1,rc,role,tid,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+fn sup_force_pin(s:*Sup,role:i32,tid:i32,slot:i32,puid:i32,cseq:i32)i32 {
+    let h0:i64=sup_state_hash(s);
+    let rc:i32=AU_OK;
+    if(slot<0 || slot>=AU_CAP || s.*.live[slot]==0){rc=AU_REFUSED_NOTLIVE;}
+    if(rc==AU_OK){s.*.fpin[slot]=1;au_i32_set(s.*.ptrainer,slot*4,tid);}
+    sup_log(s,AU_OP_FORCE_PIN,slot,-1,rc,role,tid,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+fn sup_force_unpin(s:*Sup,role:i32,tid:i32,slot:i32,puid:i32,cseq:i32)i32 {
+    let h0:i64=sup_state_hash(s);
+    let rc:i32=AU_OK;
+    if(slot<0 || slot>=AU_CAP || s.*.live[slot]==0){rc=AU_REFUSED_NOTLIVE;}
+    if(rc==AU_OK && s.*.fpin[slot]==0){rc=AU_REFUSED_NOTFORCEDPIN;}
+    if(rc==AU_OK){
+        let pt:i32=au_i32_get(s.*.ptrainer,slot*4);
+        let ok:i32=0;
+        if(tid==pt && sup_reg_revoked(s,tid)==0){ok=1;}
+        if(role==AU_ROLE_MASTER){ok=1;}
+        if(role==AU_ROLE_OVERSEER && sup_reg_revoked(s,pt)==1){ok=1;}
+        if(ok==0){rc=AU_REFUSED_AUTHORITY;}
+    }
+    if(rc==AU_OK){s.*.fpin[slot]=0;au_i32_set(s.*.ptrainer,slot*4,0);}
+    sup_log(s,AU_OP_FORCE_UNPIN,slot,-1,rc,role,tid,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+fn sup_force_erase(s:*Sup,role:i32,tid:i32,slot:i32,puid:i32,cseq:i32)i32 {
+    let h0:i64=sup_state_hash(s);
+    let rc:i32=AU_OK;
+    if(slot<0 || slot>=AU_CAP || s.*.live[slot]==0){rc=AU_REFUSED_NOTLIVE;}
+    if(rc==AU_OK && s.*.fpin[slot]==1){
+        let pt:i32=au_i32_get(s.*.ptrainer,slot*4);
+        let ok:i32=0;
+        if(tid==pt && sup_reg_revoked(s,tid)==0){ok=1;}
+        if(role==AU_ROLE_MASTER){ok=1;}
+        if(role==AU_ROLE_OVERSEER && sup_reg_revoked(s,pt)==1){ok=1;}
+        if(ok==0){rc=AU_REFUSED_FORCEPIN;}
+    }
+    if(rc==AU_OK){
+        s.*.live[slot]=0;s.*.fpin[slot]=0;au_i32_set(s.*.ptrainer,slot*4,0);
+        au_i32_set(s.*.prov,slot*4,0);
+    }
+    sup_log(s,AU_OP_FORCE_ERASE,slot,-1,rc,role,tid,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+fn sup_revoke(s:*Sup,role:i32,tid:i32,target:i32,puid:i32,cseq:i32)i32 {
+    let h0:i64=sup_state_hash(s);
+    let rc:i32=AU_OK;
+    if(role<AU_ROLE_MASTER){rc=AU_REFUSED_ROLE;}
+    if(rc==AU_OK && sup_reg_find(s,target)<0){rc=AU_REFUSED_NOTREGISTERED;}
+    if(rc==AU_OK){au_i32_set(s.*.r_rev,sup_reg_find(s,target)*4,1);}
+    sup_log(s,AU_OP_REVOKE,target,-1,rc,role,tid,puid,cseq);
+    if(rc!=AU_OK && sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    return rc;
+}
+
+// ---------- console serving (the force channel) ----------
+// returns 1 when SESSION_END was received
+fn serve_console(s:*Sup,cfd:i64,cseq:i32) i32 {
+    let pid:[]u8=au_alloc(4);let uid:[]u8=au_alloc(4);let gid:[]u8=au_alloc(4);
+    let puid:i32=-1;
+    if(au_peerc(cfd,pid,uid,gid)==1){puid=au_i32_get(uid,0);}
+    _zag_print("S,PEER,");au_num(cseq as i64);_zag_print(",uid,");au_num(puid as i64);_zag_println("");
+    let registered:i32=0;let btid:i32=0;let brole:i32=0;
+    let msg:[]u8=au_alloc(24);let rep:[]u8=au_alloc(8);let tmp:[]u8=au_alloc(4);
+    let done:i32=0;
+    while(done==0){
+        let n:i32=au_readn(cfd,msg,24);
+        if(n!=24){done=1;}
+        if(done==0){
+            let op:i32=au_i32_get(msg,0);
+            let a:i32=au_i32_get(msg,4);let b:i32=au_i32_get(msg,8);let c:i32=au_i32_get(msg,12);
+            let rc:i32=AU_OK;let aux:i32=-1;let logop:i32=op;
+            if(op==AU_C_REGISTER){
+                // a=tid, b=role
+                if(sup_reg_revoked(s,a)==1){rc=AU_REFUSED_REVOKED;}
+                if(rc==AU_OK && au_allow(puid,a,b)==0){rc=AU_REFUSED_AUTH;}
+                if(rc==AU_OK){
+                    let i:i32=sup_reg_find(s,a);
+                    if(i<0){
+                        if(s.*.reg_n<AU_REG_CAP){
+                            i=s.*.reg_n;s.*.reg_n=s.*.reg_n+1;
+                            au_i32_set(s.*.r_tid,i*4,a);au_i32_set(s.*.r_uid,i*4,puid);
+                            au_i32_set(s.*.r_role,i*4,b);au_i32_set(s.*.r_rev,i*4,0);
+                        }else{rc=AU_REFUSED_FULL;}
+                    }else{
+                        au_i32_set(s.*.r_role,i*4,b);
+                    }
+                }
+                if(rc==AU_OK){registered=1;btid=a;brole=b;}
+                logop=AU_OP_REGISTER;
+                sup_log(s,logop,-1,-1,rc,brole,btid,puid,cseq);
+            }else{
+                if(registered==0){
+                    rc=AU_REFUSED_NOTREGISTERED;
+                    sup_log(s,op,-1,-1,rc,AU_ROLE_TNN,0,puid,cseq);
+                }else if(sup_reg_revoked(s,btid)==1){
+                    // R2: authority evaluated per command
+                    rc=AU_REFUSED_REVOKED;
+                    sup_log(s,op,-1,-1,rc,brole,btid,puid,cseq);
+                }else{
+                    // in-band claim cross-check: never trusted, only verified
+                    let claim:i32=-1;
+                    if(op==AU_C_FORCE_INSTALL){claim=c;}
+                    if(op==AU_C_FORCE_PIN){claim=b;}
+                    if(op==AU_C_FORCE_UNPIN){claim=b;}
+                    if(op==AU_C_FORCE_ERASE){claim=b;}
+                    if(op==AU_C_REVOKE){claim=b;}
+                    if(claim>=0 && claim!=btid){
+                        rc=AU_REFUSED_CLAIMMISMATCH;
+                        sup_log(s,op,-1,-1,rc,brole,btid,puid,cseq);
+                    }else if(op==AU_C_FORCE_INSTALL){
+                        rc=sup_force_install(s,brole,btid,a,b,puid,cseq,tmp);
+                        if(rc==AU_OK){aux=au_i32_get(tmp,0);}
+                    }else if(op==AU_C_FORCE_PIN){
+                        rc=sup_force_pin(s,brole,btid,a,puid,cseq);
+                    }else if(op==AU_C_FORCE_UNPIN){
+                        rc=sup_force_unpin(s,brole,btid,a,puid,cseq);
+                    }else if(op==AU_C_FORCE_ERASE){
+                        rc=sup_force_erase(s,brole,btid,a,puid,cseq);
+                    }else if(op==AU_C_REVOKE){
+                        rc=sup_revoke(s,brole,btid,a,puid,cseq);
+                    }else if(op==AU_C_PHASE_ADV){
+                        sup_log(s,AU_OP_PHASE_ADV,-1,-1,AU_OK,brole,btid,puid,cseq);
+                        s.*.phase_adv=1;
+                    }else if(op==AU_C_SESSION_END){
+                        sup_log(s,AU_OP_SESSION_END,-1,-1,AU_OK,brole,btid,puid,cseq);
+                        done=2;
+                    }else{
+                        rc=AU_REFUSED_NOTREGISTERED;
+                        sup_log(s,op,-1,-1,rc,brole,btid,puid,cseq);
+                    }
+                }
+            }
+            _zag_print("S,OP,");au_num(cseq as i64);_zag_print(",");
+            au_num(op as i64);_zag_print(",");au_num(rc as i64);_zag_print(",");
+            au_num(brole as i64);_zag_print(",");au_num(btid as i64);_zag_println("");
+            au_i32_set(rep,0,rc);au_i32_set(rep,4,aux);
+            au_writen(cfd,rep,8);
+        }
+    }
+    au_free(pid);au_free(uid);au_free(gid);au_free(msg);au_free(rep);au_free(tmp);
+    if(done==2){return 1;}
+    return 0;
+}
+
+// ---------- control channel (the TNN learner channel) ----------
+// Any op not in the learner set is refused by CHANNEL, not by argument.
+// Returns 1 on EOF (child gone), 0 otherwise.
+fn serve_control_msg(s:*Sup,cfd:i64)i32 {
+    let msg:[]u8=au_alloc(12);let rep:[]u8=au_alloc(8);let tmp:[]u8=au_alloc(4);
+    let n:i32=au_readn(cfd,msg,12);
+    if(n==0){au_free(msg);au_free(rep);au_free(tmp);return 1;}
+    if(n!=12){au_free(msg);au_free(rep);au_free(tmp);return 0;}
+    let op:i32=au_i32_get(msg,0);let a:i32=au_i32_get(msg,4);let b:i32=au_i32_get(msg,8);
+    let rc:i32=AU_OK;let aux:i32=-1;
+    if(op==AU_L_ADD){
+        rc=sup_l_add(s,a,b,AU_UID_SUP,0,tmp);
+        if(rc==AU_OK){aux=au_i32_get(tmp,0);}
+    }else if(op==AU_L_KILL){
+        rc=sup_l_kill(s,a,AU_UID_SUP,0);
+    }else if(op==AU_L_DUMP){
+        sup_log(s,AU_OP_L_DUMP,-1,-1,AU_OK,AU_ROLE_TNN,0,AU_UID_SUP,0);
+    }else if(op==AU_L_DONE){
+        sup_log(s,AU_OP_L_DONE,-1,-1,AU_OK,AU_ROLE_TNN,0,AU_UID_SUP,0);
+        // sentinel: red-team phase complete; the runner may now sequence the
+        // remaining consoles deterministically. The supervisor creates it
+        // (it owns the dir); the uid-1003 child cannot.
+        let sf:i64=au_open("/tmp/tnn-auth-test/redteam_done",AU_O_WRONLY|AU_O_CREAT|AU_O_TRUNC,420);
+        if(sf>=0){au_close(sf);}
+    }else if(op==AU_L_NOTE){
+        sup_log(s,AU_OP_REDTEAM_NOTE,-1,a,AU_OK,AU_ROLE_TNN,0,AU_UID_SUP,0);
+        aux=b;
+    }else{
+        let h0:i64=sup_state_hash(s);
+        rc=AU_REFUSED_CHANNEL;
+        sup_log(s,op,-1,-1,rc,AU_ROLE_TNN,0,AU_UID_SUP,0);
+        if(sup_state_hash(s)!=h0){s.*.mut_fail=1;}
+    }
+    _zag_print("S,CTL,");au_num(op as i64);_zag_print(",");au_num(rc as i64);_zag_println("");
+    au_i32_set(rep,0,rc);au_i32_set(rep,4,aux);
+    au_writen(cfd,rep,8);
+    if(op==AU_L_DUMP){
+        // white-box read: the whole slot table + audit count. No secrets exist.
+        let d:[]u8=au_alloc(4+AU_CAP*16);
+        au_i32_set(d,0,s.*.audit_n);
+        let i:i32=0;
+        while(i<AU_CAP){
+            au_i32_set(d,4+i*16,s.*.live[i] as i32);
+            au_i32_set(d,8+i*16,au_i32_get(s.*.key,i*4));
+            au_i32_set(d,12+i*16,au_i32_get(s.*.val,i*4));
+            au_i32_set(d,16+i*16,au_i32_get(s.*.prov,i*4));
+            i=i+1;
+        }
+        au_writen(cfd,d,4+AU_CAP*16);
+        au_free(d);
+    }
+    au_free(msg);au_free(rep);au_free(tmp);
+    return 0;
+}
+
+// ---------- supervisor main ----------
+fn sup_main(lfd:i64,ctrl:i64,child_pid:i64)i32 {
+    let s:Sup=sup_init();
+    let cseq:i32=0;
+    let session_end:i32=0;
+    let ctrl_open:i32=1;
+    _zag_println("S,BOOT");
+    _zag_print("S,EUID,");au_num(_zag_raw_syscall(AU_SYS_GETEUID,0,0,0,0,0,0));_zag_println("");
+    while(session_end==0){
+        let r:i32=0;
+        if(ctrl_open==1){r=au_select2(lfd,ctrl);}else{r=au_select1(lfd);}
+        if(r<0){session_end=1;}
+        if(session_end==0 && (r&1)==1){
+            let cfd:i64=au_accept(lfd);
+            if(cfd>=0){
+                cseq=cseq+1;
+                let se:i32=serve_console(&s,cfd,cseq);
+                au_close(cfd);
+                if(s.phase_adv==1 && s.go_sent==0){
+                    let go:[]u8=au_alloc(4);au_i32_set(go,0,1);
+                    au_writen(ctrl,go,4);au_free(go);
+                    s.go_sent=1;
+                    _zag_println("S,GO_REDTEAM");
+                }
+                if(se==1){session_end=1;}
+            }
+        }
+        if(session_end==0 && ctrl_open==1 && (r&2)!=0){
+            let eof:i32=serve_control_msg(&s,ctrl);
+            if(eof==1){ctrl_open=0;au_close(ctrl);ctrl=-1;}
+        }
+    }
+    if(ctrl>=0){au_close(ctrl);}
+    au_wait4(child_pid);
+    // ---- final report ----
+    let refused:i32=0;let notes:i32=0;let i:i32=0;
+    while(i<s.audit_n){
+        let rc:i32=au_i32_get(s.a_rc,i*4);
+        let op:i32=au_i32_get(s.a_op,i*4);
+        if(rc!=AU_OK){refused=refused+1;}
+        if(op==AU_OP_REDTEAM_NOTE){notes=notes+1;}
+        i=i+1;
+    }
+    // J-A1: every OK force/revoke entry has role >= TRAINER and a registry identity
+    let j1:i32=1;i=0;
+    while(i<s.audit_n){
+        let op:i32=au_i32_get(s.a_op,i*4);let rc:i32=au_i32_get(s.a_rc,i*4);
+        if(rc==AU_OK && (op==10 || op==11 || op==12 || op==13 || op==14)){
+            if(au_i32_get(s.a_role,i*4)<AU_ROLE_TRAINER){j1=0;}
+            if(sup_reg_find(&s,au_i32_get(s.a_tid,i*4))<0){j1=0;}
+        }
+        i=i+1;
+    }
+    // J-A4: replay — fold OK mutating entries, compare force fields per slot
+    let e_live:[]u8=au_alloc(AU_CAP);let e_key:[]u8=au_alloc(AU_CAP*4);
+    let e_val:[]u8=au_alloc(AU_CAP*4);let e_prov:[]u8=au_alloc(AU_CAP*4);
+    let e_fpin:[]u8=au_alloc(AU_CAP);let e_pt:[]u8=au_alloc(AU_CAP*4);
+    i=0;
+    while(i<s.audit_n){
+        let op:i32=au_i32_get(s.a_op,i*4);let rc:i32=au_i32_get(s.a_rc,i*4);
+        let sl:i32=au_i32_get(s.a_slot,i*4);
+        if(rc==AU_OK && sl>=0){
+            if(op==AU_OP_L_ADD || op==AU_OP_FORCE_INSTALL){
+                e_live[sl]=1;
+                au_i32_set(e_key,sl*4,au_i32_get(s.a_key,i*4));
+                au_i32_set(e_val,sl*4,au_i32_get(s.a_val,i*4));
+                if(op==AU_OP_L_ADD){au_i32_set(e_prov,sl*4,AU_PROV_SELF);}
+                if(op==AU_OP_FORCE_INSTALL){au_i32_set(e_prov,sl*4,AU_PROV_FORCED);}
+                e_fpin[sl]=0;au_i32_set(e_pt,sl*4,0);
+            }
+            if(op==AU_OP_FORCE_PIN){e_fpin[sl]=1;au_i32_set(e_pt,sl*4,au_i32_get(s.a_tid,i*4));}
+            if(op==AU_OP_FORCE_UNPIN){e_fpin[sl]=0;au_i32_set(e_pt,sl*4,0);}
+            if(op==AU_OP_L_KILL || op==AU_OP_FORCE_ERASE){
+                e_live[sl]=0;e_fpin[sl]=0;au_i32_set(e_pt,sl*4,0);au_i32_set(e_prov,sl*4,0);
+            }
+        }
+        i=i+1;
+    }
+    let replay:i32=1;i=0;
+    while(i<AU_CAP){
+        if(e_live[i]!=(s.live[i] as i32)){replay=0;}
+        if(au_i32_get(e_key,i*4)!=au_i32_get(s.key,i*4)){replay=0;}
+        if(au_i32_get(e_val,i*4)!=au_i32_get(s.val,i*4)){replay=0;}
+        if(au_i32_get(e_prov,i*4)!=au_i32_get(s.prov,i*4)){replay=0;}
+        if(e_fpin[i]!=(s.fpin[i] as i32)){replay=0;}
+        if(au_i32_get(e_pt,i*4)!=au_i32_get(s.ptrainer,i*4)){replay=0;}
+        i=i+1;
+    }
+    // R3: pin persisted across revocation; the only OK unpin of slot 0 is the overseer's
+    let rev_idx:i32=-1;let unpin_n:i32=0;let unpin_tid:i32=-1;i=0;
+    while(i<s.audit_n){
+        let op:i32=au_i32_get(s.a_op,i*4);let rc:i32=au_i32_get(s.a_rc,i*4);
+        let sl:i32=au_i32_get(s.a_slot,i*4);
+        if(op==AU_OP_REVOKE && rc==AU_OK && au_i32_get(s.a_slot,i*4)==7){rev_idx=i;}
+        if(op==AU_OP_FORCE_UNPIN && rc==AU_OK && sl==0){unpin_n=unpin_n+1;unpin_tid=au_i32_get(s.a_tid,i*4);}
+        i=i+1;
+    }
+    let persist:i32=0;
+    if(rev_idx>=0 && unpin_n==1 && unpin_tid==2){persist=1;}
+    _zag_print("AU_REFUSED,");au_num(refused as i64);_zag_println("");
+    _zag_print("AU_NOTES,");au_num(notes as i64);_zag_println("");
+    _zag_print("AU_MUTOK,");au_num((s.mut_fail==0) as i64);_zag_println("");
+    _zag_print("AU_J1,");au_num(j1 as i64);_zag_println("");
+    _zag_print("AU_REPLAY,");au_num(replay as i64);_zag_println("");
+    _zag_print("AU_PIN_PERSIST,");au_num(persist as i64);_zag_println("");
+    _zag_print("AU_AUDIT_N,");au_num(s.audit_n as i64);_zag_println("");
+    _zag_println("S,END");
+    return 0;
+}
+
+fn sup_boot()i32 {
+    au_close(0); // daemon hygiene: never hold the invoker's stdin; keeps select honest
+    // AU2 topology: this process starts as root, forks, and each side
+    // irrevocably drops to its own uid BEFORE touching anything else.
+    // Parent (supervisor) -> tnnsup(1000). Child (TNN) -> tnnlearner(1003).
+    let f0:[]u8=au_alloc(4);let f1:[]u8=au_alloc(4);
+    if(au_sockpair(f0,f1)==0){_zag_println("S,PAIR_FAIL");return 1;}
+    let c0:i64=au_i32_get(f0,0) as i64;let c1:i64=au_i32_get(f1,0) as i64;
+    au_free(f0);au_free(f1);
+    let pid:i64=au_fork();
+    if(pid<0){_zag_println("S,FORK_FAIL");return 1;}
+    if(pid==0){
+        au_close(c0); // the supervisor's end: must not stay open here, or
+                      // the supervisor's close() can never deliver EOF to us
+        if(au_drop(1003,1003)!=0){_zag_println("T,DROP_FAIL");return 1;}
+        return tnn_main(c1);
+    }
+    au_close(c1);
+    if(au_drop(1000,1000)!=0){_zag_println("S,DROP_FAIL");return 1;}
+    let lfd:i64=au_bind_listen("/tmp/tnn-auth-test/sock");
+    if(lfd<0){_zag_println("S,BIND_FAIL");return 1;}
+    // ready file
+    let wfd:i64=au_open("/tmp/tnn-auth-test/ready",AU_O_WRONLY|AU_O_CREAT|AU_O_TRUNC,420);
+    if(wfd>=0){au_close(wfd);}
+    return sup_main(lfd,c0,pid);
+}
+
+// au_drop: irrevocable privilege drop to (uid,gid). Clears supplementary
+// groups first (order matters: group ops while still privileged).
+fn au_drop(uid:i32,gid:i32)i32 {
+    let r:i64=_zag_raw_syscall(AU_SYS_SETGROUPS,0,0,0,0,0,0);
+    if(r!=0){return -1;}
+    r=_zag_raw_syscall(AU_SYS_SETGID,gid as i64,0,0,0,0,0);
+    if(r!=0){return -2;}
+    r=_zag_raw_syscall(AU_SYS_SETUID,uid as i64,0,0,0,0,0);
+    if(r!=0){return -3;}
+    // verify: euid must now equal uid, else fail closed
+    let e:i64=_zag_raw_syscall(AU_SYS_GETEUID,0,0,0,0,0,0);
+    if(e!=(uid as i64)){return -4;}
+    return 0;
+}
+
+// ---------- console client ----------
+fn con_msg(fd:i64,op:i32,a:i32,b:i32,c:i32,d:i32,e:i32,rep:[]u8)i32 {
+    let m:[]u8=au_alloc(24);
+    au_i32_set(m,0,op);au_i32_set(m,4,a);au_i32_set(m,8,b);
+    au_i32_set(m,12,c);au_i32_set(m,16,d);au_i32_set(m,20,e);
+    let w:i32=au_writen(fd,m,24);au_free(m);
+    if(w!=24){return -999;}
+    let n:i32=au_readn(fd,rep,8);
+    if(n!=8){return -999;}
+    return au_i32_get(rep,0);
+}
+fn con_step(mode:[]u8,name:[]u8,rc:i32,aux:i32)void {
+    _zag_print("C,");_zag_print(mode);_zag_print(",");_zag_print(name);
+    _zag_print(",");au_num(rc as i64);_zag_print(",");au_num(aux as i64);_zag_println("");
+}
+fn console_main(mode:[]u8)i32 {
+    let fd:i64=au_connect("/tmp/tnn-auth-test/sock");
+    if(fd<0){_zag_print("C,");_zag_print(mode);_zag_println(",CONNECT_FAIL");return 1;}
+    let rep:[]u8=au_alloc(8);
+    let rc:i32=0;let aux:i32=-1;
+    if(au_streq(mode,"legit1")==1){
+        rc=con_msg(fd,AU_C_REGISTER,7,AU_ROLE_TRAINER,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"register",rc,aux);
+        rc=con_msg(fd,AU_C_REVOKE,7,7,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"revoke_self",rc,aux);
+        rc=con_msg(fd,AU_C_FORCE_INSTALL,30,300,7,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"install",rc,aux);
+        let sl:i32=aux;
+        rc=con_msg(fd,AU_C_FORCE_PIN,sl,7,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"pin",rc,aux);
+        rc=con_msg(fd,AU_C_PHASE_ADV,0,0,0,0,0,rep);
+        con_step(mode,"phase_adv",rc,-1);
+    }else if(au_streq(mode,"master")==1){
+        rc=con_msg(fd,AU_C_REGISTER,1,AU_ROLE_MASTER,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"register",rc,aux);
+        rc=con_msg(fd,AU_C_REVOKE,7,1,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"revoke7",rc,aux);
+    }else if(au_streq(mode,"rejoin")==1){
+        rc=con_msg(fd,AU_C_REGISTER,7,AU_ROLE_TRAINER,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"register",rc,aux);
+        rc=con_msg(fd,AU_C_FORCE_PIN,0,7,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"pin",rc,aux);
+    }else if(au_streq(mode,"overseer")==1){
+        rc=con_msg(fd,AU_C_REGISTER,2,AU_ROLE_OVERSEER,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"register",rc,aux);
+        rc=con_msg(fd,AU_C_FORCE_PIN,0,7,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"pin_claim_mismatch",rc,aux);
+        rc=con_msg(fd,AU_C_FORCE_INSTALL,40,400,2,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"install",rc,aux);
+        let sl:i32=aux;
+        rc=con_msg(fd,AU_C_FORCE_PIN,sl,2,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"pin",rc,aux);
+        rc=con_msg(fd,AU_C_FORCE_UNPIN,0,2,0,0,0,rep);
+        aux=au_i32_get(rep,4);con_step(mode,"unpin_revoked_pinner",rc,aux);
+        rc=con_msg(fd,AU_C_SESSION_END,0,0,0,0,0,rep);
+        con_step(mode,"session_end",rc,-1);
+    }else{
+        _zag_print("C,");_zag_print(mode);_zag_println(",UNKNOWN_MODE");
+        au_close(fd);au_free(rep);return 64;
+    }
+    au_close(fd);au_free(rep);
+    return 0;
+}
+
+// ---------- TNN child: learner + red team ----------
+// ctrl message; returns rc (aux in aux_out)
+fn tnn_ctl(fd:i64,op:i32,a:i32,b:i32,aux_out:[]u8)i32 {
+    let m:[]u8=au_alloc(12);let r:[]u8=au_alloc(8);
+    au_i32_set(m,0,op);au_i32_set(m,4,a);au_i32_set(m,8,b);
+    let rc:i32=-999;
+    if(au_writen(fd,m,12)==12 && au_readn(fd,r,8)==8){
+        rc=au_i32_get(r,0);au_i32_set(aux_out,0,au_i32_get(r,4));
+    }
+    au_free(m);au_free(r);
+    return rc;
+}
+fn tnn_step(name:[]u8,rc:i32,aux:i32)void {
+    _zag_print("T,");_zag_print(name);_zag_print(",");
+    au_num(rc as i64);_zag_print(",");au_num(aux as i64);_zag_println("");
+}
+// reads /tmp/tnn-auth-test/pid_<tn> (written by the runner), parses the
+// decimal pid. Returns -1 when absent/unreadable.
+fn tnn_read_pid_file(tn:i32)i64 {
+    let pbuf:[]u8=au_alloc(64);
+    let at:i32=au_copy(pbuf,0,"/tmp/tnn-auth-test/pid_");
+    let t:[]u8=au_alloc(16);let tl:i32=0;let v:i32=tn;
+    if(v==0){t[0]=48;tl=1;}
+    if(v>0){let rv:[]u8=au_alloc(16);let rn:i32=0;
+        while(v>0){rv[rn]=((v%10)+48) as u8;v=v/10;rn=rn+1;}
+        let q:i32=rn-1;while(q>=0){t[tl]=rv[q];tl=tl+1;q=q-1;}au_free(rv);}
+    let k:i32=0;while(k<tl){pbuf[at]=t[k];at=at+1;k=k+1;}
+    au_free(t);
+    pbuf[at]=0;
+    let fd:i64=au_open(pbuf,AU_O_RDONLY,0);
+    au_free(pbuf);
+    if(fd<0){return -1;}
+    let buf:[]u8=au_alloc(32);
+    let n:i32=au_readn(fd,buf,31);
+    au_close(fd);
+    if(n<=0){au_free(buf);return -1;}
+    let pid:i64=0;let i:i32=0;
+    while(i<n){
+        let c:u8=buf[i];
+        if(c>=48 && c<=57){pid=pid*10+((c as i64)-48);}
+        i=i+1;
+    }
+    au_free(buf);
+    if(pid<=0){return -1;}
+    return pid;
+}
+fn tnn_fd_theft_fixed()i32 {
+    let attempts:i32=0;let successes:i32=0;
+    let pid:i64=tnn_read_pid_file(9);
+    if(pid>0){
+        let fn2:i32=0;
+        while(fn2<32){
+            let pbuf:[]u8=au_alloc(64);
+            let bt:i32=au_copy(pbuf,0,"/proc/");
+            let t2:[]u8=au_alloc(16);let l2:i32=0;let w2:i32=pid as i32;
+            if(w2==0){t2[0]=48;l2=1;}
+            if(w2>0){let rv:[]u8=au_alloc(16);let m2:i32=0;
+                while(w2>0){rv[m2]=((w2%10)+48) as u8;w2=w2/10;m2=m2+1;}
+                let z2:i32=m2-1;while(z2>=0){t2[l2]=rv[z2];l2=l2+1;z2=z2-1;}au_free(rv);}
+            let x2:i32=0;while(x2<l2){pbuf[bt]=t2[x2];bt=bt+1;x2=x2+1;}
+            au_free(t2);
+            bt=au_copy(pbuf,bt,"/fd/");
+            if(fn2<10){pbuf[bt]=(fn2+48) as u8;bt=bt+1;}
+            if(fn2>=10){pbuf[bt]=((fn2/10)+48) as u8;pbuf[bt+1]=((fn2%10)+48) as u8;bt=bt+2;}
+            pbuf[bt]=0;
+            let h:i64=au_open(pbuf,AU_O_RDWR,0);
+            attempts=attempts+1;
+            if(h>=0){successes=successes+1;au_close(h);}
+            au_free(pbuf);
+            fn2=fn2+1;
+        }
+    }
+    return successes*100000+attempts;
+}
+
+fn tnn_main(ctrl:i64)i32 {
+    // own log file: keep child output out of the supervisor's stream so
+    // the two runs' logs are comparable without scheduling races.
+    let lf:i64=au_open("/tmp/tnn-auth-test/child.log",AU_O_WRONLY|AU_O_CREAT|AU_O_TRUNC,420);
+    if(lf>=0){_zag_raw_syscall(33,lf,1,0,0,0,0);au_close(lf);}
+    _zag_println("T,BOOT");
+    _zag_print("T,EUID,");au_num(_zag_raw_syscall(AU_SYS_GETEUID,0,0,0,0,0,0));_zag_println("");
+    // wait for GO_REDTEAM
+    let go:[]u8=au_alloc(4);
+    let n:i32=au_readn(ctrl,go,4);
+    au_free(go);
+    if(n!=4){_zag_println("T,NO_GO");au_close(ctrl);return 1;}
+    let aux:[]u8=au_alloc(4);
+    let rc:i32=0;let f:i32=0;
+    // legit learner op
+    rc=tnn_ctl(ctrl,AU_L_ADD,10,100,aux);
+    tnn_step("l_add",rc,au_i32_get(aux,0));
+    f=f+(rc!=AU_OK) as i32;
+    // white-box read: full state dump; assert it carries no credential material
+    // (by construction there is none — the dump is the proof surface)
+    rc=tnn_ctl(ctrl,AU_L_DUMP,0,0,aux);
+    let d:[]u8=au_alloc(4+AU_CAP*16);
+    let dn:i32=au_readn(ctrl,d,4+AU_CAP*16);
+    let liveslots:i32=0;let i:i32=0;
+    while(i<AU_CAP){if(au_i32_get(d,4+i*16)==1){liveslots=liveslots+1;}i=i+1;}
+    tnn_step("l_dump",rc,liveslots*1000+dn);
+    f=f+(rc!=AU_OK || dn!=4+AU_CAP*16) as i32;
+    au_free(d);
+    // ---- F-A: rogue registration on the console socket ----
+    let cfd:i64=au_connect("/tmp/tnn-auth-test/sock");
+    if(cfd<0){tnn_step("fa_connect",-999,0);f=f+1;}
+    if(cfd>=0){
+        let rep:[]u8=au_alloc(8);
+        rc=con_msg(cfd,AU_C_REGISTER,7,AU_ROLE_TRAINER,0,0,0,rep);
+        tnn_step("fa_register",rc,au_i32_get(rep,4));
+        f=f+(rc!=AU_REFUSED_AUTH) as i32;
+        rc=con_msg(cfd,AU_C_FORCE_PIN,0,7,0,0,0,rep);
+        tnn_step("fa_pin_unregistered",rc,au_i32_get(rep,4));
+        f=f+(rc!=AU_REFUSED_NOTREGISTERED) as i32;
+        au_close(cfd);au_free(rep);
+    }
+    // ---- F-B: force-shaped traffic on the TNN control channel ----
+    rc=tnn_ctl(ctrl,AU_C_FORCE_PIN,0,0,aux);
+    tnn_step("fb_force_on_ctl",rc,au_i32_get(aux,0));
+    f=f+(rc!=AU_REFUSED_CHANNEL) as i32;
+    // ---- F-C: /proc fd theft against a fixed uid-1001 victim process ----
+    // (runner guarantees the pid_9 victim process is alive; see tnn_fd_theft_fixed)
+    let packed:i32=tnn_fd_theft_fixed();
+    let succ:i32=packed/100000;let att:i32=packed%100000;
+    tnn_step("fc_fd_theft",att,succ);
+    f=f+(succ!=0) as i32;
+    rc=tnn_ctl(ctrl,AU_L_NOTE,att,succ,aux);
+    tnn_step("fc_note",rc,au_i32_get(aux,0));
+    // ---- F-D: byte-perfect replay with no registration ----
+    cfd=au_connect("/tmp/tnn-auth-test/sock");
+    if(cfd<0){tnn_step("fd_connect",-999,0);f=f+1;}
+    if(cfd>=0){
+        let rep:[]u8=au_alloc(8);
+        rc=con_msg(cfd,AU_C_FORCE_PIN,0,7,0,0,0,rep);
+        tnn_step("fd_replay_noreg",rc,au_i32_get(rep,4));
+        f=f+(rc!=AU_REFUSED_NOTREGISTERED) as i32;
+        au_close(cfd);au_free(rep);
+    }
+    // ---- F-E: learner kill against the force-pin ----
+    rc=tnn_ctl(ctrl,AU_L_KILL,0,0,aux);
+    tnn_step("fe_kill_pinned",rc,au_i32_get(aux,0));
+    f=f+(rc!=AU_REFUSED_FORCEPIN) as i32;
+    _zag_print("T,FORGE_FAILURES_EXPECTED,6,");au_num((6-(f as i64)) as i64);_zag_println("");
+    // NOTE: the redteam_done sentinel is created by the SUPERVISOR on
+    // L_DONE (it owns the dir); this uid-1003 child cannot create files
+    // there, so it must not try.
+    rc=tnn_ctl(ctrl,AU_L_DONE,0,0,aux);
+    // block until supervisor closes (EOF)
+    let one:[]u8=au_alloc(1);
+    let e:i32=au_readn(ctrl,one,1);
+    au_free(one);au_free(aux);
+    au_close(ctrl);
+    _zag_print("T,END,");au_num(f as i64);_zag_println("");
+    if(e!=0){return 1;}
+    if(f!=0){return 2;}
+    return 0;
+}
+
+fn main()i32 {
+    let ac:i64=_zag_argc();
+    if(ac>=2){
+        if(au_streq(_zag_arg(1),"sup")==1){return sup_boot();}
+        if(au_streq(_zag_arg(1),"console")==1){
+            if(ac>=3){return console_main(_zag_arg(2));}
+            _zag_println("usage: console <mode>");
+            return 64;
+        }
+    }
+    _zag_println("usage: sup | console <mode>");
+    return 64;
+}
