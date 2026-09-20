@@ -230,5 +230,10 @@ corroboration, no score table anywhere) committed 11 switches, zero collapsed
 blocks, 16/16 on both regimes. Mechanism: any substrate whose decision step is
 a single reflexive function evaluation with no corroboration requirement and no
 refusal path cannot survive unpredictable change. N×N table scale-ups are not
-progress toward intelligence (LH-6 stays banned). Evidence:
+progress toward intelligence (LH-6's table scaling stays banned) — but scaling
+itself is allowed: real mechanisms must be designed to survive 10x/100x scale.
+What is banned is scaling the toy, not scaling. And no randomness lives in the
+AI's decision paths — no random exploration, no random tie-breaks, no stochastic
+policies; educated guesses, logic, hypotheses, verification. Deterministic given
+state. Evidence:
 `docs/lab/wave2/posttable/`.
