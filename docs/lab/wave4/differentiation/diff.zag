@@ -1,0 +1,503 @@
+// diff.zag — speaker differentiation: deliberate evidence-based identity
+// judgment wired to per-person memory partitions.
+//
+// Design: DESIGN.md. Preregistration: PREREG.md (F1-F8).
+//
+// A known person is a hypothesis with defining evidence claims:
+//   must1 = evidence bits that MUST read 1, must0 = bits that MUST read 0.
+// An evidence event (bit, value) refutes every active person whose
+// defining claim it contradicts. Bits claimed by neither mask are
+// consistent (ignored) — never confirming, never refuting. No scores,
+// no thresholds, no RNG anywhere.
+//
+// Commit rule (logic): exactly one surviving person -> COMMIT to that
+// speaker; any other survivor count (0 or >=2) -> audited HOLD with
+// committed = UNKNOWN (-1). Memory ops require committed != UNKNOWN and
+// stamp owner = committed; owner is immutable; reads are partition-scoped.
+//
+// DESIGN LAW (enforced by the runner's static checks, not just comments):
+//   - spk_commit references no evidence masks and no confirmation
+//     counters: the commit decision sees only active/eliminated flags.
+//   - The confirmation counters (pcons) are audit-only, causally inert.
+//   - Refutation is by direct contradiction of a defining claim only.
+//
+// Audit entry: 8 words (32 bytes) = step, op, p1, p2, rc, x1, x2, x3.
+// Fail-closed: on overflow nothing is appended and the op is not applied.
+// REFUTE entries are deterministic consequences of OBSERVE entries;
+// replay skips them (they are re-derived).
+
+const DIFF_OK:i32=0;
+const DIFF_COMMITTED:i32=1;
+const DIFF_HOLD_RC:i32=2;
+const DIFF_BAD:i32=-1;
+
+const DIFF_REFUSED_UNKNOWN:i32=201;
+const DIFF_REFUSED_STATE:i32=202;
+const DIFF_REFUSED_FULL:i32=203;
+const DIFF_REFUSED_BADSLOT:i32=204;
+const DIFF_REFUSED_NOTLIVE:i32=205;
+const DIFF_REFUSED_SCOPE:i32=206;
+const DIFF_REFUSED_CORE:i32=207;
+const DIFF_AUDIT_FULL:i32=208;
+
+const DIFF_OP_REGISTER:i32=1;
+const DIFF_OP_OBSERVE:i32=2;
+const DIFF_OP_REFUTE:i32=3;
+const DIFF_OP_COMMIT:i32=4;
+const DIFF_OP_HOLD:i32=5;
+const DIFF_OP_RESET:i32=6;
+const DIFF_OP_ADD:i32=7;
+const DIFF_OP_KILL:i32=8;
+
+const DIFF_UNKNOWN:i32=-1;
+const DIFF_NOTFOUND:i32=-999999;
+
+const DIFF_REGION_CORE:i32=0;
+const DIFF_REGION_USER:i32=1;
+
+const DIFF_ALICE:i32=1;
+const DIFF_BOB:i32=2;
+const DIFF_CAROL:i32=3;
+
+const DIFF_AUDIT_WORDS:i32=8;
+
+struct DiffState {
+    pids:[]u8,
+    pm1:[]u8,
+    pm0:[]u8,
+    pact:[]u8,
+    pelim:[]u8,
+    pcons:[]u8,
+    slive:[]u8,
+    sval:[]u8,
+    skey:[]u8,
+    sown:[]u8,
+    sreg:[]u8,
+    sstep:[]u8,
+}
+
+fn diff_alloc(n:i32)[]u8 {
+    if(n<1){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+
+fn diff_free(b:[]u8)void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+}
+
+fn diff_u32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+
+fn diff_u32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+
+fn diff_new(pcap:i32,scap:i32)DiffState {
+    return DiffState{
+        .pids=diff_alloc(pcap*4),.pm1=diff_alloc(pcap*4),.pm0=diff_alloc(pcap*4),
+        .pact=diff_alloc(pcap),.pelim=diff_alloc(pcap),.pcons=diff_alloc(pcap*4),
+        .slive=diff_alloc(scap),.sval=diff_alloc(scap*4),.skey=diff_alloc(scap*4),
+        .sown=diff_alloc(scap*4),.sreg=diff_alloc(scap),.sstep=diff_alloc(scap*4)};
+}
+
+fn diff_drop(st:DiffState)void {
+    diff_free(st.pids);diff_free(st.pm1);diff_free(st.pm0);
+    diff_free(st.pact);diff_free(st.pelim);diff_free(st.pcons);
+    diff_free(st.slive);diff_free(st.sval);diff_free(st.skey);
+    diff_free(st.sown);diff_free(st.sreg);diff_free(st.sstep);
+}
+
+// Genesis: one system-seeded CORE slot (owner 0, region CORE).
+// Identical in the original run and in replay: it IS genesis.
+fn diff_genesis_core(st:DiffState)void {
+    st.slive[0]=1;
+    diff_u32_set(st.sval,0,42);
+    diff_u32_set(st.skey,0,200);
+    diff_u32_set(st.sown,0,0);
+    st.sreg[0]=DIFF_REGION_CORE as u8;
+    diff_u32_set(st.sstep,0,0);
+}
+
+// Audit append. Fail-closed: full ledger -> DIFF_AUDIT_FULL, no mutation.
+fn diff_audit(abuf:[]u8,acount:*i32,acap:i32,step:i32,op:i32,p1:i32,p2:i32,rc:i32,x1:i32,x2:i32,x3:i32)i32 {
+    if(acount==null as *i32){return DIFF_BAD;}
+    let n:i32=acount.*;
+    if(n<0 || n>=acap){return DIFF_AUDIT_FULL;}
+    if(abuf.len<(n+1)*32){return DIFF_BAD;}
+    let base:i32=n*32;
+    diff_u32_set(abuf,base,step);
+    diff_u32_set(abuf,base+4,op);
+    diff_u32_set(abuf,base+8,p1);
+    diff_u32_set(abuf,base+12,p2);
+    diff_u32_set(abuf,base+16,rc);
+    diff_u32_set(abuf,base+20,x1);
+    diff_u32_set(abuf,base+24,x2);
+    diff_u32_set(abuf,base+28,x3);
+    acount.*=n+1;
+    return DIFF_OK;
+}
+
+fn diff_audit_op(abuf:[]u8,at:i32)i32 { return diff_u32_get(abuf,at*32+4); }
+fn diff_audit_p1(abuf:[]u8,at:i32)i32 { return diff_u32_get(abuf,at*32+8); }
+fn diff_audit_p2(abuf:[]u8,at:i32)i32 { return diff_u32_get(abuf,at*32+12); }
+fn diff_audit_x1(abuf:[]u8,at:i32)i32 { return diff_u32_get(abuf,at*32+20); }
+fn diff_audit_step(abuf:[]u8,at:i32)i32 { return diff_u32_get(abuf,at*32); }
+
+fn diff_audit_count_op(abuf:[]u8,n:i32,op:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){if(diff_audit_op(abuf,i)==op){c=c+1;}i=i+1;}
+    return c;
+}
+
+// Find person slot index by id (-1 if absent).
+fn diff_find_person(st:DiffState,pcap:i32,id:i32)i32 {
+    let i:i32=0;
+    while(i<pcap){if(diff_u32_get(st.pids,i*4)==id){return i;}i=i+1;}
+    return -1;
+}
+
+// Register a known person as an identity hypothesis. active=1, elim=0.
+fn spk_register(st:DiffState,pcap:i32,id:i32,m1:i32,m0:i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    if(id<1 || m1<0 || m0<0){return DIFF_BAD;}
+    if(diff_find_person(st,pcap,id)>=0){
+        clock.*=clock.*+1;
+        return diff_audit(abuf,acount,acap,clock.*,DIFF_OP_REGISTER,id,m1,DIFF_REFUSED_STATE,m0,0,0);
+    }
+    let i:i32=0;
+    while(i<pcap){if(diff_u32_get(st.pids,i*4)==0){break;}i=i+1;}
+    if(i>=pcap){
+        clock.*=clock.*+1;
+        return diff_audit(abuf,acount,acap,clock.*,DIFF_OP_REGISTER,id,m1,DIFF_REFUSED_FULL,m0,0,0);
+    }
+    clock.*=clock.*+1;
+    let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_REGISTER,id,m1,DIFF_OK,m0,0,0);
+    if(rc!=DIFF_OK){return rc;}
+    diff_u32_set(st.pids,i*4,id);
+    diff_u32_set(st.pm1,i*4,m1);
+    diff_u32_set(st.pm0,i*4,m0);
+    st.pact[i]=1;st.pelim[i]=0;
+    diff_u32_set(st.pcons,i*4,0);
+    return DIFF_OK;
+}
+
+// Evidence event (bit, value). Refutes every active person whose defining
+// claim it contradicts. Returns number of persons refuted by this event,
+// or a negative code on caller bug / audit-full (no mutation then).
+fn spk_observe(st:DiffState,pcap:i32,bit:i32,val:i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    if(bit<0 || bit>30 || (val!=0 && val!=1)){return DIFF_BAD;}
+    // Fail-closed pre-check: 1 OBSERVE + worst-case one REFUTE per person.
+    if(acount.*+1+pcap>acap){return DIFF_AUDIT_FULL;}
+    clock.*=clock.*+1;
+    let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_OBSERVE,bit,val,DIFF_OK,0,0,0);
+    if(rc!=DIFF_OK){return rc;}
+    let nref:i32=0;
+    let i:i32=0;
+    while(i<pcap){
+        if(diff_u32_get(st.pids,i*4)!=0 && st.pact[i]!=0 && st.pelim[i]==0){
+            let m1:i32=diff_u32_get(st.pm1,i*4);
+            let m0:i32=diff_u32_get(st.pm0,i*4);
+            let expect:i32=-1;
+            if(((m1>>bit)&1)!=0){expect=1;}
+            else{if(((m0>>bit)&1)!=0){expect=0;}}
+            if(expect!=-1 && val!=expect){
+                // Direct contradiction of a defining claim -> refute.
+                let r2:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_REFUTE,diff_u32_get(st.pids,i*4),bit,DIFF_OK,val,0,0);
+                if(r2!=DIFF_OK){return r2;}
+                st.pelim[i]=1;
+                nref=nref+1;
+            }else{
+                // Consistent: confirmation counter, audit-only, causally inert.
+                diff_u32_set(st.pcons,i*4,diff_u32_get(st.pcons,i*4)+1);
+            }
+        }
+        i=i+1;
+    }
+    return nref;
+}
+
+fn spk_survivors(st:DiffState,pcap:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<pcap){
+        if(diff_u32_get(st.pids,i*4)!=0 && st.pact[i]!=0 && st.pelim[i]==0){n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+
+// COMMIT-REGION-BEGIN
+// The commit decision sees ONLY active/eliminated flags and ids.
+// It never references must1/must0 masks or the pcons confirmation
+// counters (runner statically checks this region for those tokens).
+fn spk_commit(st:DiffState,pcap:i32,committed:*i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    if(committed==null as *i32){return DIFF_BAD;}
+    clock.*=clock.*+1;
+    if(committed.*!=DIFF_UNKNOWN){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_COMMIT,0,0,DIFF_REFUSED_STATE,0,0,0);
+        return DIFF_REFUSED_STATE;
+    }
+    let n:i32=spk_survivors(st,pcap);
+    if(n==1){
+        let i:i32=0;
+        while(i<pcap){
+            if(diff_u32_get(st.pids,i*4)!=0 && st.pact[i]!=0 && st.pelim[i]==0){break;}
+            i=i+1;
+        }
+        let id:i32=diff_u32_get(st.pids,i*4);
+        let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_COMMIT,id,0,DIFF_OK,1,0,0);
+        if(rc!=DIFF_OK){return rc;}
+        committed.*=id;
+        return DIFF_COMMITTED;
+    }
+    let aux:i32=n;
+    if(n==0){aux=-1;}
+    let rc2:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_HOLD,0,0,DIFF_OK,aux,0,0);
+    if(rc2!=DIFF_OK){return rc2;}
+    committed.*=DIFF_UNKNOWN;
+    return DIFF_HOLD_RC;
+}
+// COMMIT-REGION-END
+
+// New speaker session: re-activate all persons, clear eliminations,
+// committed = UNKNOWN. Knowledge slots are untouched (switching the
+// speaker never destroys knowledge; only deliberate KILL destroys).
+fn spk_session_reset(st:DiffState,pcap:i32,committed:*i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    if(committed==null as *i32){return DIFF_BAD;}
+    clock.*=clock.*+1;
+    let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_RESET,0,0,DIFF_OK,0,0,0);
+    if(rc!=DIFF_OK){return rc;}
+    let i:i32=0;
+    while(i<pcap){
+        if(diff_u32_get(st.pids,i*4)!=0){st.pact[i]=1;st.pelim[i]=0;diff_u32_set(st.pcons,i*4,0);}
+        i=i+1;
+    }
+    committed.*=DIFF_UNKNOWN;
+    return DIFF_OK;
+}
+
+// MEM_ADD: requires a committed (non-UNKNOWN) speaker; owner = committed.
+// region is forced USER; there is no learner path to write CORE.
+fn mem_add(st:DiffState,scap:i32,committed:i32,key:i32,val:i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    clock.*=clock.*+1;
+    if(committed==DIFF_UNKNOWN){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_ADD,key,val,DIFF_REFUSED_UNKNOWN,0,0,0);
+        return DIFF_REFUSED_UNKNOWN;
+    }
+    let i:i32=0;
+    while(i<scap){if(st.slive[i]==0){break;}i=i+1;}
+    if(i>=scap){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_ADD,key,val,DIFF_REFUSED_FULL,committed,0,0);
+        return DIFF_REFUSED_FULL;
+    }
+    let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_ADD,i,key,DIFF_OK,val,committed,0);
+    if(rc!=DIFF_OK){return rc;}
+    st.slive[i]=1;
+    diff_u32_set(st.sval,i*4,val);
+    diff_u32_set(st.skey,i*4,key);
+    diff_u32_set(st.sown,i*4,committed);
+    st.sreg[i]=DIFF_REGION_USER as u8;
+    diff_u32_set(st.sstep,i*4,clock.*);
+    return i;
+}
+
+// MEM_KILL: own-partition deliberate forget. Cross-partition -> SCOPE.
+// CORE -> REFUSED_CORE always (even the contributing speaker).
+fn mem_kill(st:DiffState,scap:i32,committed:i32,slot:i32,clock:*i32,abuf:[]u8,acount:*i32,acap:i32)i32 {
+    clock.*=clock.*+1;
+    if(slot<0 || slot>=scap){
+        return DIFF_BAD;
+    }
+    if(st.slive[slot]==0){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_KILL,slot,0,DIFF_REFUSED_NOTLIVE,0,0,0);
+        return DIFF_REFUSED_NOTLIVE;
+    }
+    if(st.sreg[slot]==DIFF_REGION_CORE as u8){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_KILL,slot,0,DIFF_REFUSED_CORE,0,0,0);
+        return DIFF_REFUSED_CORE;
+    }
+    if(committed==DIFF_UNKNOWN){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_KILL,slot,0,DIFF_REFUSED_UNKNOWN,0,0,0);
+        return DIFF_REFUSED_UNKNOWN;
+    }
+    if(diff_u32_get(st.sown,slot*4)!=committed){
+        diff_audit(abuf,acount,acap,clock.*,DIFF_OP_KILL,slot,0,DIFF_REFUSED_SCOPE,0,0,0);
+        return DIFF_REFUSED_SCOPE;
+    }
+    let rc:i32=diff_audit(abuf,acount,acap,clock.*,DIFF_OP_KILL,slot,0,DIFF_OK,0,0,0);
+    if(rc!=DIFF_OK){return rc;}
+    st.slive[slot]=0;
+    return DIFF_OK;
+}
+
+// MEM_KNOWS: read-only query scoped to ONE speaker's partition.
+// Returns 1 and sets *val if found, 0 if not. Never sees another
+// speaker's partition. CORE (owner 0) is readable by any speaker.
+fn mem_knows(st:DiffState,scap:i32,speaker:i32,key:i32,val:*i32)i32 {
+    if(val==null as *i32){return DIFF_BAD;}
+    // Own USER partition first (read precedence), then CORE.
+    let i:i32=0;
+    while(i<scap){
+        if(st.slive[i]!=0 && diff_u32_get(st.skey,i*4)==key && diff_u32_get(st.sown,i*4)==speaker && st.sreg[i]==DIFF_REGION_USER as u8){
+            val.*=diff_u32_get(st.sval,i*4);
+            return 1;
+        }
+        i=i+1;
+    }
+    i=0;
+    while(i<scap){
+        if(st.slive[i]!=0 && diff_u32_get(st.skey,i*4)==key && st.sreg[i]==DIFF_REGION_CORE as u8){
+            val.*=diff_u32_get(st.sval,i*4);
+            return 1;
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+fn diff_live_slot_count(st:DiffState,scap:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<scap){if(st.slive[i]!=0){n=n+1;}i=i+1;}
+    return n;
+}
+
+// The judgment, derived by scanning the audit — never by reading hidden
+// state directly. Cites the REFUTE entry (step, bit, value) for every
+// rival eliminated in this session, and the survivor's consistent-
+// observation count from the audit-only counters.
+fn diff_print_i32(v:i32)void {
+    let s:[]u8=_zag_i64_to_str(v as i64);
+    _zag_print(s);
+    diff_free(s);
+}
+
+fn diff_judgment(abuf:[]u8,n:i32,st:DiffState,pcap:i32)void {
+    // Session start: last RESET entry (or entry 0).
+    let sstart:i32=0;
+    let i:i32=n-1;
+    while(i>=0){if(diff_audit_op(abuf,i)==DIFF_OP_RESET){sstart=i+1;break;}i=i-1;}
+    // Last COMMIT at/after session start.
+    let ci:i32=-1;
+    i=n-1;
+    while(i>=sstart){
+        if(diff_audit_op(abuf,i)==DIFF_OP_COMMIT){ci=i;break;}
+        i=i-1;
+    }
+    if(ci<0){_zag_println("DIFF_JUDGMENT_NONE");return;}
+    let id:i32=diff_audit_p1(abuf,ci);
+    let surv:i32=diff_audit_x1(abuf,ci);
+    _zag_println("DIFF_JUDGMENT_BEGIN");
+    _zag_print("DIFF_JUDGMENT,person=");diff_print_i32(id);
+    _zag_print(",survivors=");diff_print_i32(surv);_zag_println("");
+    i=sstart;
+    while(i<n){
+        if(diff_audit_op(abuf,i)==DIFF_OP_REFUTE && diff_audit_p1(abuf,i)!=id){
+            _zag_print("DIFF_JUDGMENT_REFUTED,person=");diff_print_i32(diff_audit_p1(abuf,i));
+            _zag_print(",by_entry=");diff_print_i32(diff_audit_step(abuf,i));
+            _zag_print(",obs_bit=");diff_print_i32(diff_audit_p2(abuf,i));
+            _zag_print(",obs_val=");diff_print_i32(diff_audit_x1(abuf,i));
+            _zag_println("");
+        }
+        i=i+1;
+    }
+    let pi:i32=diff_find_person(st,pcap,id);
+    let cons:i32=0;
+    if(pi>=0){cons=diff_u32_get(st.pcons,pi*4);}
+    _zag_print("DIFF_JUDGMENT_CONSISTENT,person=");diff_print_i32(id);
+    _zag_print(",observes=");diff_print_i32(cons);_zag_println("");
+    _zag_println("DIFF_JUDGMENT_END");
+}
+
+fn diff_unknown(abuf:[]u8,n:i32)void {
+    let i:i32=n-1;
+    while(i>=0){
+        if(diff_audit_op(abuf,i)==DIFF_OP_HOLD){
+            _zag_print("DIFF_UNKNOWN,survivors=");diff_print_i32(diff_audit_x1(abuf,i));_zag_println("");
+            return;
+        }
+        i=i-1;
+    }
+    _zag_println("DIFF_UNKNOWN,none");
+}
+
+// Ledger replay: re-execute every entry from genesis into a fresh store.
+// REFUTE entries are skipped (deterministic consequences of OBSERVE,
+// re-derived). Returns 0 iff the replayed state is exactly equal:
+// committed, clock, person fields, slot fields, entry count.
+fn diff_replay(abuf:[]u8,n:i32,pcap:i32,scap:i32,acap2:i32,committed:i32,clock:i32,st:DiffState,acount:i32)i32 {
+    let r:DiffState=diff_new(pcap,scap);
+    diff_genesis_core(r);
+    let rab:[]u8=diff_alloc(acap2*32);
+    let rcount:i32=0;let rcommitted:i32=DIFF_UNKNOWN;let rclock:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let op:i32=diff_audit_op(abuf,i);
+        let p1:i32=diff_audit_p1(abuf,i);
+        let p2:i32=diff_audit_p2(abuf,i);
+        let x1:i32=diff_audit_x1(abuf,i);
+        if(op==DIFF_OP_REGISTER){
+            spk_register(r,pcap,p1,p2,x1,&rclock,rab,&rcount,acap2);
+        }else{if(op==DIFF_OP_OBSERVE){
+            spk_observe(r,pcap,p1,p2,&rclock,rab,&rcount,acap2);
+        }else{if(op==DIFF_OP_COMMIT || op==DIFF_OP_HOLD){
+            // HOLD is the second legitimate outcome of the commit op;
+            // re-executing spk_commit re-derives it deterministically.
+            spk_commit(r,pcap,&rcommitted,&rclock,rab,&rcount,acap2);
+        }else{if(op==DIFF_OP_RESET){
+            spk_session_reset(r,pcap,&rcommitted,&rclock,rab,&rcount,acap2);
+        }else{if(op==DIFF_OP_ADD){
+            // ADD entry layout depends on outcome: OK entries carry
+            // p1=slot, p2=key, x1=value; refused entries carry p1=key,
+            // p2=value. The rc field selects the layout; the re-executed
+            // op re-derives the outcome (and hence the shape) itself.
+            let rc0:i32=diff_u32_get(abuf,i*32+16);
+            if(rc0==DIFF_OK){
+                mem_add(r,scap,rcommitted,p2,x1,&rclock,rab,&rcount,acap2);
+            }else{
+                mem_add(r,scap,rcommitted,p1,p2,&rclock,rab,&rcount,acap2);
+            }
+        }else{if(op==DIFF_OP_KILL){
+            mem_kill(r,scap,rcommitted,p1,&rclock,rab,&rcount,acap2);
+        }else{
+            // DIFF_OP_REFUTE: deterministic consequence of OBSERVE,
+            // re-derived by the re-executed spk_observe above. Skip.
+        }}}}}}
+        i=i+1;
+    }
+    let ok:i32=1;
+    if(rcommitted!=committed){ok=0;}
+    if(rclock!=clock){ok=0;}
+    if(rcount!=acount){ok=0;}
+    let j:i32=0;
+    while(j<pcap*4){
+        if(diff_u32_get(r.pids,j)!=diff_u32_get(st.pids,j)){ok=0;}
+        if(diff_u32_get(r.pm1,j)!=diff_u32_get(st.pm1,j)){ok=0;}
+        if(diff_u32_get(r.pm0,j)!=diff_u32_get(st.pm0,j)){ok=0;}
+        if(diff_u32_get(r.pcons,j)!=diff_u32_get(st.pcons,j)){ok=0;}
+        j=j+4;
+    }
+    j=0;
+    while(j<pcap){if(r.pact[j]!=st.pact[j]){ok=0;}if(r.pelim[j]!=st.pelim[j]){ok=0;}j=j+1;}
+    j=0;
+    while(j<scap){
+        if(r.slive[j]!=st.slive[j]){ok=0;}
+        if(r.sreg[j]!=st.sreg[j]){ok=0;}
+        j=j+1;
+    }
+    j=0;
+    while(j<scap*4){
+        if(diff_u32_get(r.sval,j)!=diff_u32_get(st.sval,j)){ok=0;}
+        if(diff_u32_get(r.skey,j)!=diff_u32_get(st.skey,j)){ok=0;}
+        if(diff_u32_get(r.sown,j)!=diff_u32_get(st.sown,j)){ok=0;}
+        if(diff_u32_get(r.sstep,j)!=diff_u32_get(st.sstep,j)){ok=0;}
+        j=j+4;
+    }
+    diff_drop(r);
+    diff_free(rab);
+    if(ok!=0){return 0;}
+    return 1;
+}
