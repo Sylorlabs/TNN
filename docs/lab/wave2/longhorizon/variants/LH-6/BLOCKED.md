@@ -20,3 +20,13 @@ gate exists to catch.
 learning at horizon; then LH-6 may proceed with the new named learner
 core and the same isolation check. Full rationale in
 `variants/LH-5/RESULT.md`.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the LH-5 fragility finding (2×2 delayed-credit learner fragile at 10% reward corruption) used as block rationale, and the LH-1/LH-2 stability gate — all tainted runs.
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

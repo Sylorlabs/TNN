@@ -126,3 +126,18 @@ stability evidence; additionally, the LH-5 fragility finding above
 (spurious-switch instability already at 10% corruption in the 2×2 learner)
 is the kind of instability the gate exists to catch, and should be weighed
 before any scale-up is approved.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+**Status: QUARANTINED.** The results in this document come from a training run
+with `explore_enabled=1`, which engaged the hidden seeded LCG (`r34v3_rng`,
+`(rng*997+7919) mod 1000003`) inside `r34_learner_core.zag`, driving 1-in-5
+pseudo-random explore flips in `r34v3_choose` — hidden randomness in the AI's
+decision path, violating the no-randomness law. This leg: LH-5, 480-update runs under the LH-1 protocol, so training ran explore=1; the reward-sign flips were seeded harness-side.
+Verified by the r34 RNG probe (workstream 2/8), investigation commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE.
+The run is reproducible engineering evidence (byte-identical reruns hold) but
+**not law-compliant evidence**. The stability verdict below stands recorded
+but may not be cited as canonical — including the noisy-reward fragility verdict (stable at 0% corruption, knee between 0% and 10%, regime switches exploding 19→181) — until clean
+reruns (deliberate or state-varying exploration, no LCG) reproduce it.
+The original text above is left intact for the record.

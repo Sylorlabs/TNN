@@ -105,3 +105,18 @@ decisions were needed; nothing debatable arose.
 4. Longer B phases (200+) to test whether *any* variant exhibits genuine
    forgetting — current horizons show none, so retention claims are vacuous
    here.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+**Status: QUARANTINED.** The baseline arm in these head-to-heads is the R34
+rule trained with `explore_enabled=1`, which engaged the hidden seeded LCG
+(`r34v3_rng`) driving 1-in-5 explore flips in `r34v3_choose` — a violation of
+the no-randomness law (r34 RNG probe, workstream 2/8, commits `072f25aa` /
+`4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE). The P2 arm
+"explores identically to baseline by construction: fixed 1/5 rate, same rng
+consumption," so P2's exploratory episodes come from the same tainted stream.
+The P3 arm uses its own seeded adaptive-exploration rule (a preregistered
+mechanism under test). All baseline/P2 comparisons — and the P3-vs-baseline
+margins — stand recorded but may not be cited as canonical until re-run
+against a clean R34 baseline (deliberate or state-varying exploration, no LCG).
+The original text above is left intact for the record.

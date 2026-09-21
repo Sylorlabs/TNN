@@ -96,3 +96,17 @@ stated scaling argument (~linear in episodes × cap); then DC-2
 (trace composition) pilot design, reusing this pilot's harness shape
 (designed curricula, ledger-clock episode mapping, preregistered
 novelty sets).
+
+## ⚠️ Contamination note — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document references the "LH-5 signature" (switch-storm / fragility
+pattern). The quantitative LH-5 claims (0%→10% corruption knee, regime
+switches 19→181) are **QUARANTINED** — LH-5 trained with
+`explore_enabled=1`, engaging the hidden seeded LCG in `r34v3_choose`
+(r34 RNG probe, workstream 2/8, commits `072f25aa` / `4976cbf5` on branch
+`tnn-native-lab`; Micah's ruling: REMEDIATE). The *phenomenon* referenced here
+was independently reproduced under explore-disabled conditions (the HT1/HT2
+toy arms showed the same 357-switch storm, collapsed blocks, and 0/16 regime
+destruction with exploration off), so the pattern-level reference remains
+descriptively valid; only the tainted quantitative claims are suspended.
+The original text above is left intact for the record.

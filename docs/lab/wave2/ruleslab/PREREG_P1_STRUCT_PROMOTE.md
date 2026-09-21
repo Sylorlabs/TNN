@@ -50,3 +50,13 @@ damage is quarantined in the candidate until measured.
 Same world, same seeds, same A/B/return protocol as the P2/P3 trials.
 Baseline = R34 rule (already run). Report per-arm endpoint success, promotion
 count, rollback count, episodes-to-criterion per regime.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the R34 baseline comparison numbers (in-place additive updates, 15/16 return-A) that P1 is measured against.
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

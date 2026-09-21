@@ -102,3 +102,13 @@ seeded corruption flips: trainer sets gates explicitly, TNN learns the quorum
 protocol, and verdict error is measured against ground-truth sufficiency per
 stage — one binary, byte-identical reruns, zero randomness in the learner,
 all corruption from logged seeded flips only.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the LH-5 fragility claims cited twice (reward-sign corruption breaking the delayed-credit rule between 0% and 10%, regime switches 19→181).
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

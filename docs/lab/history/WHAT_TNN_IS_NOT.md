@@ -100,3 +100,13 @@ teacher is acceptable only as an *attributed teaching aid* — its knowledge
 must never be copied into the learner as answer tables, and teacher
 dependence must be measured after withdrawal (specified, not yet run).
 → `docs/hypotheses/H-09-training-first.md`.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the R34 native continual learner exemplar (48 learner updates over A+B regimes) — the campaign trained with explore=1.
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

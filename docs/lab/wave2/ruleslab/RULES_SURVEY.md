@@ -128,3 +128,13 @@ Source: `.../R34_NATIVE_QUALIFICATION_STAGE_20260916/r34_self_model_v1.zag`.
   (built + trialed 2026-09-19 — see TRIAL_RESULTS.md).
 - Nonzero-UNKNOWN abstention geometry (E45–E50 candidate mechanism) — needs
   world/harness support; deferred to a world-extension prereg.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the R34 v3 campaign results (regime A 24 train → eval 16/16 → regime B 24 → eval 16/16, return A 15/16 with zero updates, exactly 48 updates) — already marked "(quarantined)" inline; this note dates and grounds the quarantine.
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

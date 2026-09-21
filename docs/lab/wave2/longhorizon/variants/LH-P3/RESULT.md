@@ -168,3 +168,18 @@ a `*T` parameter is expected compiles but operates on a temporary — the
 caller's struct is never updated. In `lh_p1_trial.zag`/`lh_p1_baseline.zag`
 the stream init/accept calls had to be `&stream`. Worth a toolchain-level
 warning someday.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+**Status: QUARANTINED (comparisons).** LH-P3's own P3 core
+(`r34_p3_learner_core.zag`) uses a seeded adaptive-exploration rule that is
+preregistered as the mechanism under test (deliberate design, not hidden).
+However, every head-to-head comparison in this document is against the R34 v3
+baseline, whose training ran with `explore_enabled=1` — engaging the hidden
+seeded LCG (`r34v3_rng`) in `r34v3_choose`, a violation of the no-randomness
+law (r34 RNG probe, workstream 2/8, commits `072f25aa` / `4976cbf5` on branch
+`tnn-native-lab`; Micah's ruling: REMEDIATE). The P3-vs-R34 comparisons —
+including the recommendation to "adopt P3 as the default" — may not be cited
+as canonical until the baseline is re-run clean (deliberate or state-varying
+exploration, no LCG).
+The original text above is left intact for the record.

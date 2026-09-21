@@ -59,3 +59,18 @@ Correct cells pinned +30000 at **block 16** (s01, s10 — same ≈300-accept pin
 ## Per-decile eval positives (endpoint retention, E51 law)
 
 Every block: modes 0/1 → A 16/16, B 16/16; mode 2 → A 15/16, B 16/16. No block below 15/16 in either regime across 100 blocks. No collapse, no oscillation — classification: **stable**.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+**Status: QUARANTINED.** The results in this document come from a training run
+with `explore_enabled=1`, which engaged the hidden seeded LCG (`r34v3_rng`,
+`(rng*997+7919) mod 1000003`) inside `r34_learner_core.zag`, driving 1-in-5
+pseudo-random explore flips in `r34v3_choose` — hidden randomness in the AI's
+decision path, violating the no-randomness law. This leg: LH-3, ≈4800 updates (100× horizon) with seeded regime drift, learner seed `33003`; training ran explore=1 (same LH-1 harness).
+Verified by the r34 RNG probe (workstream 2/8), investigation commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE.
+The run is reproducible engineering evidence (byte-identical reruns hold) but
+**not law-compliant evidence**. The stability verdict below stands recorded
+but may not be cited as canonical — including the "delayed-credit rule is stable at 100× horizon" verdict (4800 updates, 16/16) — until clean
+reruns (deliberate or state-varying exploration, no LCG) reproduce it.
+The original text above is left intact for the record.

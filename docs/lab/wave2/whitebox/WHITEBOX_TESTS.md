@@ -120,3 +120,15 @@ READER-BLOCKED.
   stale semantics is worse than a failing one.
 - `nio_alloc` is **not** zeroed — every buffer the tests rely on is
   explicitly initialized (see the `restarts` zeroing in group 3).
+
+## ⚠️ Contamination note — 2026-09-20 (R34 hidden-randomness remediation)
+
+The whitebox tests documented here are **not tainted**: per the r34 RNG probe
+(workstream 2/8, commits `072f25aa` / `4976cbf5` on branch `tnn-native-lab`),
+`wb_whitebox_tests.zag` uses `r34v3_rng` only as a benign fixture
+(seed-sensitivity / serialization checks), and drives `r34v3_accept` directly
+with exploration uninvolved. However, the "R34 campaign's own checks (already
+proven by `run_native_linux.sh`)" referenced here as prior evidence **are
+QUARANTINED** — the campaign trained with `explore_enabled=1`, engaging the
+hidden LCG in the decision path (Micah's ruling: REMEDIATE).
+The original text above is left intact for the record.

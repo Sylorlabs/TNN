@@ -255,3 +255,13 @@ next step is a 10x scale run once a real learner is graded.
 - `trial/run_traps.sh` — runner (static no-RNG check, compile, 2 runs,
   byte-identical determinism check, CL_CHECK verification).
 - `VALIDATION.md` — validation results (written after the run).
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: the LH-5 claims in the Family C prior-art line (delayed-credit rule "stable at 100x horizon" but collapsing between 0% and 10% reward corruption, regime switches 19→181). Note: LH-5 was 480 updates (≈10×), not 100× — the "100x horizon" phrasing in that line appears to mislabel the leg.
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

@@ -39,3 +39,13 @@ stable runs push it toward 20 (seed 999: 0 explores in 40 trainA episodes,
 Caveat: in richer worlds exploration has information value beyond this
 bandit's; re-examine if a future world rewards inquiry (see deferred
 nonzero-UNKNOWN / curiosity wiring).
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+This document cites results that are **QUARANTINED**: R34's fixed 1/5 exploration (the hidden LCG stream that P3's init period reproduces).
+The cited runs trained with `explore_enabled=1`, engaging a hidden seeded LCG
+(`r34v3_rng` in `r34_learner_core.zag`) in the learner's action-choice path —
+a violation of the no-randomness law (r34 RNG probe, workstream 2/8, commits
+`072f25aa` / `4976cbf5` on branch `tnn-native-lab`; Micah's ruling: REMEDIATE).
+Treat the cited numbers as recorded-but-uncertified until clean reruns exist.
+The original text above is left intact for the record.

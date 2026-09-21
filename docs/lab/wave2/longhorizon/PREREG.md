@@ -130,3 +130,16 @@ Short runs can show *something*; only long runs show whether learning compounds.
   law, revision ledger). Preregistered at `../ruleslab/PREREG_P1_STRUCT_PROMOTE.md`;
   needs 200+ episode horizons, i.e. long-horizon scope. Next in queue after
   P3 adoption is verified at horizon.
+
+## ⚠️ Contamination notice — 2026-09-20 (R34 hidden-randomness remediation)
+
+**Status: QUARANTINED.** The trials preregistered here (LH-1 through LH-7) were
+executed with training phases running `explore_enabled=1`, engaging the hidden
+seeded LCG (`r34v3_rng`) in `r34v3_choose` — a violation of the no-randomness
+law (r34 RNG probe, workstream 2/8, commits `072f25aa` / `4976cbf5` on branch
+`tnn-native-lab`; Micah's ruling: REMEDIATE). The hypotheses below remain on
+record, but their verdicts (in the variant RESULT.md files) may not be cited as
+canonical — including "delayed-credit stability at 10×/40×/100× horizons
+(480/1920/4800 updates, 16/16)" and the noisy-reward fragility knee — until
+clean reruns exist (deliberate or state-varying exploration, no LCG).
+The original text above is left intact for the record.
