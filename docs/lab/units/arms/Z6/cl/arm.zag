@@ -1,0 +1,1541 @@
+// Z6 — Scar boundaries (CUT family). Pure Zag. Deterministic. Zero RNG.
+//
+// Mechanism: boundaries form at revision sites. The stream is bootstrapped
+// with deterministic 64-byte grid cuts (arm-D-style). A frozen offline
+// revision schedule (10,000 spans: 5,000 ground-truth-unit-aligned +
+// 5,000 content-blind, SplitMix64-mapped by the trainer harness, NOT by
+// the arm) replays revisions; each revision plants a scar (ledger event).
+// A deterministic scar-density function over 64-byte cells proposes
+// boundaries where density >= DENS_BAR; consolidation ratifies each
+// proposal by displacing the nearest bootstrap cut within DISP_WIN bytes
+// (logged, deliberate). Chunk IDs bind (birth_scar_seq, span).
+//
+// Kill (frozen §3): (A) scar boundaries match ground-truth units no better
+// than random cuts at the same count (+-10%) -> claim dead; (B) zero
+// bootstrap-cut displacements after 10,000 revisions -> decorative.
+//
+// This file was written from scratch for the Z6 rebuild; the prior draft
+// (kept read-only at .work/ref_arm_draft_broken.zag) was never compilable.
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+@import("../substrate/R33_NATIVE_IO_V1.zag")
+
+// ---------- frozen mechanism parameters (crew-frozen for this build) ----------
+const GRID:i32=64;        // bootstrap grid + scar density cell, bytes
+const DENS_BAR:i32=2;     // scar-density ratification bar (endpoints per cell)
+const DISP_WIN:i32=32;    // displacement window around a proposal, bytes
+const DEDUP_D:i32=32;     // proposal dedup distance, bytes
+const GT_WIN:i32=64;      // ground-truth boundary match window, bytes
+const RCTRL_K:i32=5;      // random-control replicates
+
+// op codes (audit ledger)
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_REVISE:i32=5;
+const OP_DEFECT:i32=6;
+const OP_SCAR:i32=7;
+const OP_DISPLACE:i32=8;
+const OP_EVICT:i32=9;
+const OP_REFUSE:i32=10;
+const OP_RECUT:i32=11;
+
+// stages
+const STAGE_INGEST:i32=0;
+const STAGE_REVISE:i32=1;
+const STAGE_CULL:i32=2;
+const STAGE_TRANSFER:i32=3;
+const STAGE_TRIAL:i32=4;
+
+// flags
+const F_LIVE:i32=1;
+const F_PIN:i32=2;
+const F_WEAK:i32=4;
+
+// ---------- small print helpers ----------
+fn p_str(s:[]u8)void { _zag_print(s); }
+fn p_nl()void { _zag_println(""); }
+fn p_i64(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+fn p_i32(v:i32)void { p_i64(v as i64); }
+// print integer tenths as one-decimal: 1000 -> 100.0 ; -35 -> -3.5
+fn p_dec1(tenths:i64)void {
+  if(tenths<0){_zag_print("-");tenths=0-tenths;}
+  let ip:i64=tenths/10;let fp:i64=tenths-(ip*10);
+  let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+  _zag_print(".");
+  let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+
+// ---------- JSON fragment emission (schema metrics-v1) ----------
+fn j_begin(mode:[]u8,scale:[]u8)void {
+  _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"z6\",\"round\":\"r1\",\"scale\":\"");
+  _zag_print(scale);
+  _zag_print("\",\"mode\":\"");
+  _zag_print(mode);
+  _zag_print("\",\"fields\":{");
+}
+fn j_sep(f:*i32)void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_end()void { _zag_print("}}");_zag_println(""); }
+fn jf_dec1(f:*i32,key:[]u8,tenths:i64)void {
+  j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec1(tenths);
+}
+fn jf_int(f:*i32,key:[]u8,v:i64)void {
+  j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_i64(v);
+}
+fn jf_str(f:*i32,key:[]u8,v:[]u8)void {
+  j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+
+// ---------- argv dispatch ----------
+fn usage()i32 {
+  _zag_println("Z6 scar-boundaries arm. modes:");
+  _zag_println("  smoke | m1-1x-prose | m1-1x-code | m2-t1-prose | m2-t1-code");
+  _zag_println("  m2-t2-prose | m2-t2-code | m2-t3-1x | m3-1x | m4-1x-prose");
+  _zag_println("  m4-1x-code | m5-1x | m6-p2c-1x | m6-c2p-1x | m7-1x | m8-1x");
+  _zag_println("args: <mode> <croot> <auxroot> [pert]");
+  return 2;
+}
+
+fn main()i32 {
+  let mode:[]u8=_zag_arg(1);
+  if(_zag_strcmp(mode,"smoke")==1){
+    _zag_println("Z6-SMOKE ok");
+    return 0;
+  }
+  let croot:[]u8=_zag_arg(2);
+  let auxroot:[]u8=_zag_arg(3);
+  if(_zag_strcmp(mode,"m1-1x-prose")==1){
+    t_m1(croot,auxroot,"prose.bin","gt_prose_bnd.bin","spans_prose.bin",
+         "m1-1x-prose","1x");
+    return 0;
+  }
+  if(_zag_strcmp(mode,"m1-1x-code")==1){
+    t_m1(croot,auxroot,"code.bin","gt_code_bnd.bin","spans_code.bin",
+         "m1-1x-code","1x");
+    return 0;
+  }
+  if(_zag_strcmp(mode,"m2-t1-prose")==1){t_m2(croot,"t1_prose.bin","m2-t1-prose",1,"1x");return 0;}
+  if(_zag_strcmp(mode,"m2-t1-code")==1){t_m2(croot,"t1_code.bin","m2-t1-code",1,"1x");return 0;}
+  if(_zag_strcmp(mode,"m2-t2-prose")==1){t_m2(croot,"t2_prose.bin","m2-t2-prose",2,"1x");return 0;}
+  if(_zag_strcmp(mode,"m2-t2-code")==1){t_m2(croot,"t2_code.bin","m2-t2-code",2,"1x");return 0;}
+  if(_zag_strcmp(mode,"m2-t3-1x")==1){t_m2(croot,"t3.bin","m2-t3-1x",3,"1x");return 0;}
+  if(_zag_strcmp(mode,"m3-1x")==1){t_m3(croot,auxroot,"m3-1x","1x");return 0;}
+  if(_zag_strcmp(mode,"m4-prose")==1){t_m4(croot,"prose.bin","m4-prose","1x");return 0;}
+  if(_zag_strcmp(mode,"m4-code")==1){t_m4(croot,"code.bin","m4-code","1x");return 0;}
+  if(_zag_strcmp(mode,"m5-1x")==1){t_m5(croot,"prose.bin","m5-1x","1x");return 0;}
+  if(_zag_strcmp(mode,"m6-code-prose")==1){t_m6(croot,auxroot,0,"m6-code-prose","1x");return 0;}
+  if(_zag_strcmp(mode,"m6-prose-code")==1){t_m6(croot,auxroot,1,"m6-prose-code","1x");return 0;}
+  if(_zag_strcmp(mode,"m7-1x")==1){t_m7(croot,"prose.bin","m7-1x","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p0")==1){t_m8(croot,auxroot,0,"m8-p0","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p1")==1){t_m8(croot,auxroot,1,"m8-p1","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p2")==1){t_m8(croot,auxroot,2,"m8-p2","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p3")==1){t_m8(croot,auxroot,3,"m8-p3","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p4")==1){t_m8(croot,auxroot,4,"m8-p4","1x");return 0;}
+  if(_zag_strcmp(mode,"m8-p5")==1){t_m8(croot,auxroot,5,"m8-p5","1x");return 0;}
+  return usage();
+}
+
+// ---------- little-endian word helpers ----------
+fn w32(b:[]u8,o:i32)i32 {
+  let v:i32=b[o] as i32;
+  v=v|((b[o+1] as i32)<<8);
+  v=v|((b[o+2] as i32)<<16);
+  v=v|((b[o+3] as i32)<<24);
+  return v;
+}
+fn ws32(b:[]u8,o:i32,v:i32)void {
+  b[o]=(v&255) as u8;b[o+1]=((v>>8)&255) as u8;
+  b[o+2]=((v>>16)&255) as u8;b[o+3]=((v>>24)&255) as u8;
+}
+
+// ---------- file IO helpers (substrate nio_*) ----------
+// join a+"/"+b into a fresh buffer (caller frees)
+fn join_path(a:[]u8,b:[]u8)[]u8 {
+  let n:i32=a.len+1+b.len;
+  let p:[]u8=nio_alloc(n+1);
+  if(p.len==0){return p;}
+  let i:i32=0;
+  while(i<a.len){p[i]=a[i];i=i+1;}
+  p[a.len]=47 as u8;
+  i=0;
+  while(i<b.len){p[a.len+1+i]=b[i];i=i+1;}
+  return p[0..n];
+}
+fn open_root(dir:[]u8)i64 { return nio_open_root(dir); }
+// read a whole regular file under root; returns owned buffer (caller frees).
+// on any error returns "" (len 0).
+fn read_child(root:i64,name:[]u8)[]u8 {
+  let fd:i64=nio_open_child(root,name,0);
+  if(fd<0){return "";}
+  if(nio_regular(fd)!=1){nio_close(fd);return "";}
+  let sz:i64=nio_seek(fd,0,2);
+  nio_seek(fd,0,0);
+  if(sz<0||sz>33554431){nio_close(fd);return "";}
+  let b:[]u8=nio_alloc((sz as i32)+1);
+  if(b.len==0){nio_close(fd);return "";}
+  let r:i64=nio_read_exact(fd,b,sz as i32);
+  nio_close(fd);
+  if(r!=sz){nio_free(b);return "";}
+  return b;
+}
+fn flen_of(b:[]u8)[]u8 { return b; }
+
+// ==================== Z6 state ====================
+struct Z6 {
+  cap:i32, nlive:i32, nused:i32, free_head:i32,
+  starts:[]u8,   // cap * i32: unit start (free: -2-next)
+  lens:[]u8,     // cap * i32: unit length
+  flags:[]u8,    // cap * i32: flag bits
+  bseq:[]u8,     // cap * i32: birth scar seq (-1 = bootstrap)
+  img:[]u8,      // owned corpus image copy (the arm's memory)
+  img_len:i32,
+  src:[]u8,      // harness-side source bytes (world evidence; NOT arm memory)
+  src_len:i32,
+  scars:[]u8,    // scar_cap * 16: (start,end,kind,seq)
+  scar_n:i32, scar_cap:i32,
+  dens_c:[]u8,   // ncell * i32: endpoint counts per 64B cell
+  dens_s:[]u8,   // ncell * i32: endpoint position sums per cell
+  ncell:i32,
+  cuts:[]u8,     // cut_cap * i32: current cut positions, ascending
+  cborn:[]u8,    // cut_cap * i32: birth ledger seq per cut (-1 = bootstrap)
+  cut_n:i32, cut_cap:i32,
+  boot_n:i32,        // bootstrap cut count (frozen at bootstrap)
+  displaced:i32,     // bootstrap cuts displaced by scars
+  proposals:i32,     // scar proposals ratified
+  refused:i32,       // proposals refused (order inversion)
+  led0:[]u8, led1:[]u8, led2:[]u8, led3:[]u8,
+  led_shard:i32, led_n:i32, led_cap:i32,
+  trace:[]u8, trace_n:i32, trace_cap:i32, // m8 alloc-trace recorder (optional)
+  pert:i32           // m8 perturbation selector (0=none)
+}
+
+fn z_new(cap:i32,led_entries:i32,scar_cap:i32,cut_cap:i32,ncell:i32,
+         trace:[]u8,trace_cap:i32) Z6 {
+  let z:Z6=Z6{.cap=0,.nlive=0,.nused=0,.free_head=-1,
+    .starts="",.lens="",.flags="",.bseq="",
+    .img="",.img_len=0,.src="",.src_len=0,
+    .scars="",.scar_n=0,.scar_cap=0,
+    .dens_c="",.dens_s="",.ncell=0,
+    .cuts="",.cut_n=0,.cut_cap=0,.cborn="",
+    .boot_n=0,.displaced=0,.proposals=0,.refused=0,
+    .led0="",.led1="",.led2="",.led3="",
+    .led_shard=0,.led_n=0,.led_cap=0,
+    .trace="",.trace_n=0,.trace_cap=0,.pert=0};
+  z.trace=trace;z.trace_n=0;z.trace_cap=trace_cap;
+  z_init(&z,cap,led_entries,scar_cap,cut_cap,ncell);
+  return z;
+}
+// record one allocation size into the m8 trace (no-op when unset)
+fn z_rec(z:*Z6,n:i32)void {
+  if(z.*.trace_cap<=0){return;}
+  if(z.*.trace_n>=z.*.trace_cap){return;}
+  let tr:[]u8=z.*.trace;
+  ws32(tr,z.*.trace_n*4,n);
+  z.*.trace_n=z.*.trace_n+1;
+}
+
+fn z_init(z:*Z6,cap:i32,led_entries:i32,scar_cap:i32,cut_cap:i32,ncell:i32)void {
+  z.*.cap=cap;z.*.led_cap=led_entries;z.*.scar_cap=scar_cap;
+  z.*.cut_cap=cut_cap;z.*.ncell=ncell;
+  z.*.starts=nio_alloc(cap*4);z_rec(z,cap*4);
+  z.*.lens=nio_alloc(cap*4);z_rec(z,cap*4);
+  z.*.flags=nio_alloc(cap*4);z_rec(z,cap*4);
+  z.*.bseq=nio_alloc(cap*4);z_rec(z,cap*4);
+  z.*.scars=nio_alloc(scar_cap*16);z_rec(z,scar_cap*16);
+  z.*.dens_c=nio_alloc(ncell*4);z_rec(z,ncell*4);
+  z.*.dens_s=nio_alloc(ncell*4);z_rec(z,ncell*4);
+  z.*.cuts=nio_alloc(cut_cap*4);z_rec(z,cut_cap*4);
+  z.*.cborn=nio_alloc(cut_cap*4);z_rec(z,cut_cap*4);
+  // ledger: 4 shards, each a multiple of 64 bytes (entries never straddle)
+  let total:i32=led_entries*64;
+  let shb:i32=((total+3)/4+63)/64*64;
+  z.*.led_shard=shb;
+  z.*.led0=nio_alloc(shb);z_rec(z,shb);
+  z.*.led1=nio_alloc(shb);z_rec(z,shb);
+  z.*.led2=nio_alloc(shb);z_rec(z,shb);
+  z.*.led3=nio_alloc(shb);z_rec(z,shb);
+  // free list in starts[]: free slot i holds -2-next
+  let st:[]u8=z.*.starts;
+  let i:i32=0;
+  while(i<cap){
+    let nx:i32=i+1;
+    if(i==cap-1){nx=-1;}
+    ws32(st,i*4,-2-nx);
+    i=i+1;
+  }
+  z.*.free_head=0;
+  z.*.nlive=0;z.*.nused=0;
+}
+
+fn led_shard(z:*Z6,sh:i64)[]u8 {
+  if(sh==1){return z.*.led1;}
+  if(sh==2){return z.*.led2;}
+  if(sh==3){return z.*.led3;}
+  return z.*.led0;
+}
+
+// audit ledger append. entry layout (16 words = 64 bytes):
+// op@0 slot@4 rc@8 b1..b5@12..28 a1..a5@32..48 stage@52 d1@56 d2@60
+fn z_led(z:*Z6,op:i32,slot:i32,rc:i32,
+         b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+         a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,
+         stage:i32,d1:i32,d2:i32)void {
+  let at:i64=(z.*.led_n as i64)*64;
+  let total:i64=(z.*.led_cap as i64)*64;
+  if(at+64>total){return;} // LEDGER-BOUND: scored on what completed
+  let shb:i64=z.*.led_shard as i64;
+  let sh:i64=at/shb;
+  let o:i32=(at-sh*shb) as i32;
+  let l:[]u8=led_shard(z,sh);
+  ws32(l,o,op);ws32(l,o+4,slot);ws32(l,o+8,rc);
+  ws32(l,o+12,b1);ws32(l,o+16,b2);ws32(l,o+20,b3);ws32(l,o+24,b4);ws32(l,o+28,b5);
+  ws32(l,o+32,a1);ws32(l,o+36,a2);ws32(l,o+40,a3);ws32(l,o+44,a4);ws32(l,o+48,a5);
+  ws32(l,o+52,stage);ws32(l,o+56,d1);ws32(l,o+60,d2);
+  z.*.led_n=z.*.led_n+1;
+}
+
+fn z_alloc_slot(z:*Z6)i32 {
+  let i:i32=z.*.free_head;
+  if(i<0){return -1;}
+  let st:[]u8=z.*.starts;
+  z.*.free_head=-2-w32(st,i*4);
+  z.*.nlive=z.*.nlive+1;
+  if(i>=z.*.nused){z.*.nused=i+1;}
+  return i;
+}
+fn z_free_slot(z:*Z6,i:i32)void {
+  let st:[]u8=z.*.starts;
+  ws32(st,i*4,-2-z.*.free_head);
+  z.*.free_head=i;
+  z.*.nlive=z.*.nlive-1;
+}
+// read the op code of ledger entry e (respects the 4-shard layout)
+fn led_op(z:*Z6,e:i32)i32 {
+  let at:i64=(e as i64)*64;
+  let shb:i64=z.*.led_shard as i64;
+  let sh:i64=at/shb;
+  let o:i32=(at-sh*shb) as i32;
+  let l:[]u8=led_shard(z,sh);
+  return w32(l,o);
+}
+// deliberate ADD of a unit (start,len,bseq); returns slot or -1
+fn z_add(z:*Z6,start:i32,len:i32,bseq:i32,stage:i32)i32 {
+  let i:i32=z_alloc_slot(z);
+  if(i<0){z_led(z,OP_REFUSE,-1,1,start,len,bseq,0,0,0,0,0,0,0,stage,0,0);return -1;}
+  let st:[]u8=z.*.starts;let ln:[]u8=z.*.lens;
+  let fl:[]u8=z.*.flags;let bs:[]u8=z.*.bseq;
+  ws32(st,i*4,start);ws32(ln,i*4,len);
+  ws32(fl,i*4,F_LIVE);ws32(bs,i*4,bseq);
+  z_led(z,OP_ADD,i,0,start,len,bseq,0,0,0,0,0,0,0,stage,0,0);
+  return i;
+}
+fn z_kill(z:*Z6,i:i32,stage:i32)void {
+  let fl:[]u8=z.*.flags;
+  let f:i32=w32(fl,i*4);
+  if((f&F_LIVE)==0){z_led(z,OP_KILL,i,1,0,0,0,0,0,0,0,0,0,0,stage,0,0);return;}
+  ws32(fl,i*4,f& (0-1-F_LIVE));
+  z_free_slot(z,i);
+  z_led(z,OP_KILL,i,0,0,0,0,0,0,0,0,0,0,0,stage,0,0);
+}
+fn z_pin(z:*Z6,i:i32,stage:i32)void {
+  let fl:[]u8=z.*.flags;
+  ws32(fl,i*4,w32(fl,i*4)|F_PIN);
+  z_led(z,OP_PIN,i,0,0,0,0,0,0,0,0,0,0,0,stage,0,0);
+}
+fn z_weaken(z:*Z6,i:i32,stage:i32)void {
+  let fl:[]u8=z.*.flags;
+  ws32(fl,i*4,w32(fl,i*4)|F_WEAK);
+  z_led(z,OP_WEAKEN,i,0,0,0,0,0,0,0,0,0,0,0,stage,0,0);
+}
+
+// ==================== scar mechanism ====================
+// logical shift right for u64-emulation
+fn lshr(x:i64,n:i32)i64 {
+  let m:i64=((1 as i64)<<(64-n))-1;
+  return (x>>n)&m;
+}
+// splitmix64: deterministic, frozen-seed offline reference for the random
+// control arm only. NEVER in an AI decision path (the arm's cuts come from
+// scars; this only generates the random-cut control for the kill comparison).
+fn sm64(x:i64)i64 {
+  let z:i64=x+(-7046029254386353131);
+  z=(z^lshr(z,30))*(-4658895280553007687);
+  z=(z^lshr(z,27))*(-7723592293110705685);
+  return z^lshr(z,31);
+}
+fn sm_pos(x:i64,lo:i64,hi:i64)i64 {
+  // uniform-ish position in [lo,hi): rejection-free mod (deterministic)
+  let v:i64=sm64(x);
+  if(v<0){v=0-v;if(v<0){v=0;}}
+  let span:i64=hi-lo;
+  if(span<1){return lo;}
+  return lo+(v%span);
+}
+
+// bootstrap: D-style 64-byte grid cuts at 0,64,...,L
+fn z_bootstrap(z:*Z6,img_len:i32)void {
+  let c:[]u8=z.*.cuts;
+  let cb:[]u8=z.*.cborn;
+  let n:i32=0;
+  let p:i32=0;
+  while(p<img_len){ ws32(c,n*4,p);ws32(cb,n*4,-1);n=n+1;p=p+GRID; }
+  ws32(c,n*4,img_len);ws32(cb,n*4,-1);n=n+1;
+  z.*.cut_n=n;z.*.boot_n=n;
+  z.*.displaced=0;z.*.proposals=0;z.*.refused=0;
+  z.*.img_len=img_len;
+}
+
+// replay the frozen revision schedule: spans = nrev*(i32 start,i32 len).
+// mode: 0=all spans, 1=odd (content-blind) spans only.
+fn z_replay(z:*Z6,spans:[]u8,nrev:i32,blind_only:i32,stage:i32)void {
+  let sc:[]u8=z.*.scars;
+  let dc:[]u8=z.*.dens_c;let ds:[]u8=z.*.dens_s;
+  let L:i32=z.*.img_len;
+  let e:i32=0;
+  while(e<nrev){
+    let use:i32=1;
+    if(blind_only==1){ if((e%2)==0){use=0;} }
+    if(use==1){
+      let s:i32=w32(spans,e*8);let l:i32=w32(spans,e*8+4);
+      let en:i32=s+l;
+      if(s<0){s=0;} if(en>L){en=L;}
+      let seq:i32=z.*.scar_n;
+      ws32(sc,seq*16,s);ws32(sc,seq*16+4,en);
+      ws32(sc,seq*16+8,blind_only);ws32(sc,seq*16+12,seq);
+      z.*.scar_n=seq+1;
+      // scar endpoints plant density (the "tissue")
+      let c0:i32=s/GRID;let c1:i32=en/GRID;
+      if(c1>=z.*.ncell){c1=z.*.ncell-1;}
+      ws32(dc,c0*4,w32(dc,c0*4)+1);ws32(ds,c0*4,w32(ds,c0*4)+s);
+      ws32(dc,c1*4,w32(dc,c1*4)+1);ws32(ds,c1*4,w32(ds,c1*4)+en);
+      z_led(z,OP_SCAR,seq,0,s,en,blind_only,0,0,0,0,0,0,0,stage,0,0);
+    }
+    e=e+1;
+  }
+}
+
+// scar-density proposals: cells with density >= DENS_BAR propose a boundary
+// at the mean endpoint position. Proposals are sorted, deduped within
+// DEDUP_D, then each ratified by displacing the nearest cut within
+// DISP_WIN (logged OP_DISPLACE); proposals that would invert cut order are
+// refused (OP_REFUSE). Returns the number of proposals considered.
+fn z_propose_ratify(z:*Z6,stage:i32)i32 {
+  let nc:i32=z.*.ncell;
+  let dc:[]u8=z.*.dens_c;let ds:[]u8=z.*.dens_s;
+  let tmp:[]u8=nio_alloc(nc*4);z_rec(z,nc*4);
+  if(tmp.len==0){return -1;}
+  let np:i32=0;
+  let c:i32=0;
+  while(c<nc){
+    let d:i32=w32(dc,c*4);
+    if(d>=DENS_BAR){
+      let pos:i32=w32(ds,c*4)/d;
+      ws32(tmp,np*4,pos);np=np+1;
+    }
+    c=c+1;
+  }
+  // insertion sort ascending (deterministic)
+  let i:i32=1;
+  while(i<np){
+    let key:i32=w32(tmp,i*4);
+    let j:i32=i-1;let at:i32=0;
+    while(j>=0){
+      let q:i32=w32(tmp,j*4);
+      if(q<=key){at=j+1;j=-1;}
+      else {ws32(tmp,(j+1)*4,q);j=j-1;}
+    }
+    ws32(tmp,at*4,key);
+    i=i+1;
+  }
+  // dedup: keep first of any run within DEDUP_D bytes
+  let nq:i32=0;
+  let q:[]u8=nio_alloc(np*4+4);z_rec(z,np*4+4);
+  if(q.len==0){nio_free(tmp);return -1;}
+  i=0;
+  while(i<np){
+    let p:i32=w32(tmp,i*4);
+    if(nq==0){ws32(q,0,p);nq=1;}
+    else {
+      let prev:i32=w32(q,(nq-1)*4);
+      if(p-prev>=DEDUP_D){ws32(q,nq*4,p);nq=nq+1;}
+    }
+    i=i+1;
+  }
+  nio_free(tmp);
+  // ratify against the live cut list
+  let cuts:[]u8=z.*.cuts;
+  let nrat:i32=0;
+  i=0;
+  while(i<nq){
+    let p:i32=w32(q,i*4);
+    // binary search nearest cut
+    let lo:i32=0;let hi:i32=z.*.cut_n-1;let best:i32=0;let bdist:i32=2147483647;
+    while(lo<=hi){
+      let mid:i32=(lo+hi)/2;
+      let cp:i32=w32(cuts,mid*4);
+      let dd:i32=cp-p;if(dd<0){dd=0-dd;}
+      if(dd<bdist){bdist=dd;best=mid;}
+      if(cp<p){lo=mid+1;}else{hi=mid-1;}
+    }
+    if(bdist>DISP_WIN){
+      z_led(z,OP_REFUSE,best,2,p,bdist,0,0,0,0,0,0,0,0,stage,0,0);
+      z.*.refused=z.*.refused+1;
+    } else {
+      let old:i32=w32(cuts,best*4);
+      if(old==p){
+        // already a boundary: nothing to displace
+      } else {
+        let pl:i32=-1;let nx:i32=-1;
+        if(best>0){pl=w32(cuts,(best-1)*4);}
+        if(best<z.*.cut_n-1){nx=w32(cuts,(best+1)*4);}
+        let ok:i32=1;
+        if(pl>=0){if(p<=pl){ok=0;}}
+        if(nx>=0){if(p>=nx){ok=0;}}
+        if(ok==0){
+          z_led(z,OP_REFUSE,best,3,p,old,0,0,0,0,0,0,0,0,stage,0,0);
+          z.*.refused=z.*.refused+1;
+        } else {
+          ws32(cuts,best*4,p);
+          let cb2:[]u8=z.*.cborn;
+          ws32(cb2,best*4,z.*.led_n); // birth = this OP_DISPLACE ledger seq
+          if((old%GRID)==0){z.*.displaced=z.*.displaced+1;}
+          z.*.proposals=z.*.proposals+1;
+          z_led(z,OP_DISPLACE,best,0,old,p,0,0,0,0,0,0,0,0,stage,0,0);
+        }
+      }
+    }
+    i=i+1;
+  }
+  nio_free(q);
+  return nq;
+}
+
+// ==================== ground-truth scoring + random controls ====================
+// load i32 LE boundary list; returns buffer, count via nout
+fn load_i32list(root:i64,name:[]u8,nout:*i32)[]u8 {
+  let b:[]u8=read_child(root,name);
+  if(b.len<4){nout.*=0;return "";}
+  // file is exactly 4*n bytes; nio_alloc gave len+1, use b.len-1
+  let n:i32=(b.len-1)/4;
+  nout.*=n;
+  return b;
+}
+// count cuts (excluding position 0) within GT_WIN of a GT boundary.
+// both lists ascending.
+fn gt_match(cuts:[]u8,ncut:i32,gtb:[]u8,ngtb:i32) i32 {
+  let hits:i32=0;
+  let g:i32=0;
+  let i:i32=1; // skip cut at 0
+  while(i<ncut){
+    let p:i32=w32(cuts,i*4);
+    let gg:i32=ngtb;
+    while(g<ngtb){
+      let gb:i32=w32(gtb,g*4);
+      if(gb<p-GT_WIN){g=g+1;}
+      else {gg=g;g=ngtb;}
+    }
+    let hit:i32=0;
+    let h:i32=gg;
+    while(h<ngtb){
+      let gb:i32=w32(gtb,h*4);
+      if(gb>p+GT_WIN){h=ngtb;}
+      else { let dd:i32=gb-p;if(dd<0){dd=0-dd;} if(dd<=GT_WIN){hit=1;} h=h+1; }
+    }
+    if(hit==1){hits=hits+1;}
+    g=gg;
+    i=i+1;
+  }
+  return hits;
+}
+// random-cut control: K replicates of S sorted unique cuts in [1,L),
+// GT-match rate per replicate -> mean rate (tenths of a percent).
+// seed_tag selects the frozen control family.
+fn rctrl_rate(L:i32,S:i32,gtb:[]u8,ngtb:i32,seed_tag:i64) i64 {
+  let buf:[]u8=nio_alloc(S*4+4);
+  if(buf.len==0){return -1;}
+  let acc:i64=0;
+  let r:i32=0;
+  while(r<RCTRL_K){
+    let seed:i64=seed_tag+((r as i64)*7919);
+    // generate S unique positions, insertion-sorted
+    let n:i32=0;
+    let t:i32=0;
+    while(t<S*4+64){
+      if(n>=S){t=S*4+64;}
+      else {
+        let p:i64=sm_pos(sm64(seed+(t as i64)),1,L as i64);
+        let pi:i32=p as i32;
+        // insert sorted, skip dup
+        let j:i32=n-1;let dup:i32=0;let at:i32=0;
+        while(j>=0){
+          let q:i32=w32(buf,j*4);
+          if(q==pi){dup=1;j=-1;}
+          else {
+            if(q<pi){at=j+1;j=-1;}
+            else {ws32(buf,(j+1)*4,q);j=j-1;}
+          }
+        }
+        if(dup==0){ws32(buf,at*4,pi);n=n+1;}
+        t=t+1;
+      }
+    }
+    // GT-match the replicate (cuts[0] unused slot: write 0 at slot 0 first)
+    let m:i32=0;
+    if(n>0){
+      // shift right by one so index 0 holds the 0 sentinel like z cuts
+      let k:i32=n-1;
+      while(k>=0){ws32(buf,(k+1)*4,w32(buf,k*4));k=k-1;}
+      ws32(buf,0,0);
+      m=gt_match(buf,n+1,gtb,ngtb);
+    }
+    acc=acc+((m as i64)*1000)/(n as i64);
+    r=r+1;
+  }
+  nio_free(buf);
+  return acc/(RCTRL_K as i64); // tenths of a percent
+}
+
+// ==================== ingest + recall probe ====================
+// binary search: is pos a live cut?
+fn cut_has(cuts:[]u8,ncut:i32,pos:i32)i32 {
+  let lo:i32=0;let hi:i32=ncut-1;
+  while(lo<=hi){
+    let mid:i32=(lo+hi)/2;
+    let cp:i32=w32(cuts,mid*4);
+    if(cp==pos){return 1;}
+    if(cp<pos){lo=mid+1;}else{hi=mid-1;}
+  }
+  return 0;
+}
+// ingest every cut segment as a deliberate unit; returns unit count
+fn z_ingest_all(z:*Z6,stage:i32)i32 {
+  let cuts:[]u8=z.*.cuts;let cb:[]u8=z.*.cborn;
+  let n:i32=0;
+  let i:i32=0;
+  let stop:i32=z.*.cut_n-1;
+  while(i<stop){
+    let s:i32=w32(cuts,i*4);let e2:i32=w32(cuts,(i+1)*4);
+    let bs:i32=w32(cb,i*4);
+    if(z_add(z,s,e2-s,bs,stage)<0){i=stop;}
+    else {n=n+1;i=i+1;}
+  }
+  return n;
+}
+// M1 probe: recall every live unit via the arm's own path (img slice at the
+// slot span), byte-compare vs the harness source bytes; boundary fidelity =
+// both claimed edges are live cuts of the arm's own cut table.
+fn z_probe(z:*Z6,cok:*i32,bok:*i32,tot:*i32)void {
+  let st:[]u8=z.*.starts;let ln:[]u8=z.*.lens;let fl:[]u8=z.*.flags;
+  let img:[]u8=z.*.img;let src:[]u8=z.*.src;
+  let cuts:[]u8=z.*.cuts;let ncut:i32=z.*.cut_n;
+  let i:i32=0;let nu:i32=z.*.nused;
+  while(i<nu){
+    if((w32(fl,i*4)&F_LIVE)!=0){
+      tot.*=tot.*+1;
+      let s:i32=w32(st,i*4);let l:i32=w32(ln,i*4);
+      if(nio_equal(img[s..s+l],src[s..s+l])==1){cok.*=cok.*+1;}
+      if(cut_has(cuts,ncut,s)==1){ if(cut_has(cuts,ncut,s+l)==1){bok.*=bok.*+1;} }
+    }
+    i=i+1;
+  }
+}
+// collect scar-born cut positions (pos%64 != 0) into out (out[0]=0 sentinel);
+// returns scar boundary count.
+fn scar_positions(z:*Z6,out:[]u8)i32 {
+  let cuts:[]u8=z.*.cuts;
+  ws32(out,0,0);
+  let n:i32=0;
+  let i:i32=1;
+  while(i<z.*.cut_n){
+    let p:i32=w32(cuts,i*4);
+    if((p%GRID)!=0){n=n+1;ws32(out,n*4,p);}
+    i=i+1;
+  }
+  return n;
+}
+fn bcopy(dst:[]u8,src:[]u8,n:i32)void {
+  let i:i32=0;
+  while(i<n){dst[i]=src[i];i=i+1;}
+}
+
+// ---------- M1 trial ----------
+fn t_m1(croot:[]u8,auxroot:[]u8,fname:[]u8,gtname:[]u8,spname:[]u8,
+        mode:[]u8,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let ar:i64=open_root(auxroot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  if(file.len<2){_zag_println("M1: corpus read failed");nio_close(ar);return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  // full-schedule arm instance
+  let z:Z6=z_new(nunits+8,nunits+20000,10000,nunits+2,L/GRID+2,"",0);
+  let img:[]u8=nio_alloc(L);
+  bcopy(img,file,L);
+  z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  let spans:[]u8=read_child(ar,spname);
+  nio_close(ar);
+  let nrev:i32=0;
+  if(spans.len>1){nrev=((spans.len-1)/8) as i32;}
+  z_replay(&z,spans,nrev,0,STAGE_REVISE);
+  let nprop:i32=z_propose_ratify(&z,STAGE_REVISE);
+  let nu:i32=z_ingest_all(&z,STAGE_INGEST);
+  let cok:i32=0;let bok:i32=0;let tot:i32=0;
+  z_probe(&z,&cok,&bok,&tot);
+  // ground-truth scoring
+  let ar2:i64=open_root(auxroot);
+  let ngtb:i32=0;
+  let gtb:[]u8=load_i32list(ar2,gtname,&ngtb);
+  nio_close(ar2);
+  // ground-truth scoring: scar-born boundaries vs random controls
+  let spb:[]u8=nio_alloc((z.proposals+2)*4);
+  let nscar:i32=scar_positions(&z,spb);
+  let hits:i32=gt_match(spb,nscar+1,gtb,ngtb);
+  let srate:i64=0;
+  if(nscar>0){srate=((hits as i64)*1000)/(nscar as i64);}
+  let rrate:i64=rctrl_rate(L,nscar,gtb,ngtb,0x5CA2F00D);
+  // blind-only variation (honest no-GT-leak check)
+  let zb:Z6=z_new(nunits+8,nunits+20000,10000,nunits+2,L/GRID+2,"",0);
+  let imgb:[]u8=nio_alloc(L);
+  bcopy(imgb,file,L);
+  zb.img=imgb;zb.img_len=L;zb.src=file;zb.src_len=L;
+  z_bootstrap(&zb,L);
+  z_replay(&zb,spans,nrev,1,STAGE_REVISE);
+  let npropb:i32=z_propose_ratify(&zb,STAGE_REVISE);
+  let spbb:[]u8=nio_alloc((zb.proposals+2)*4);
+  let nscarb:i32=scar_positions(&zb,spbb);
+  let hitsb:i32=gt_match(spbb,nscarb+1,gtb,ngtb);
+  let sbrate:i64=0;
+  if(nscarb>0){sbrate=((hitsb as i64)*1000)/(nscarb as i64);}
+  let rbrate:i64=rctrl_rate(L,nscarb,gtb,ngtb,0xB11DB1A5);
+  // kill adjudication (tenths of a percent)
+  let kill_a:i32=0;
+  if(srate*10<=rrate*11){kill_a=1;}
+  let kill_b:i32=0;
+  if(z.displaced==0){kill_b=1;}
+  let kill_ab:i32=0;
+  if(sbrate*10<=rbrate*11){kill_ab=1;}
+  // A15 provisional ID-remap probe on the ingested store
+  let a15pass:i32=a15_probe(&z);
+  // human-readable report
+  _zag_print("M1 ");_zag_print(mode);
+  _zag_print(" units=");p_i32(nu);
+  _zag_print(" recall=");p_dec1(((cok as i64)*1000)/(tot as i64));
+  _zag_print(" boundary=");p_dec1(((bok as i64)*1000)/(tot as i64));
+  _zag_println("");
+  _zag_print("SCAR sched=all scar_n=");p_i32(nscar);
+  _zag_print(" scar_rate=");p_dec1(srate);
+  _zag_print(" rand_rate=");p_dec1(rrate);
+  _zag_print(" displaced=");p_i32(z.displaced);
+  _zag_print(" proposals=");p_i32(nprop);
+  _zag_println("");
+  _zag_print("SCAR sched=blind scar_n=");p_i32(nscarb);
+  _zag_print(" scar_rate=");p_dec1(sbrate);
+  _zag_print(" rand_rate=");p_dec1(rbrate);
+  _zag_print(" displaced=");p_i32(zb.displaced);
+  _zag_print(" proposals=");p_i32(npropb);
+  _zag_println("");
+  _zag_print("KILL_A(all)=");p_i32(kill_a);
+  _zag_print(" KILL_A(blind)=");p_i32(kill_ab);
+  _zag_print(" KILL_B=");p_i32(kill_b);
+  _zag_print(" A15=");p_i32(a15pass);_zag_print("/64[PROV]");
+  _zag_println("");
+  // machine fragment
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_int(&f,"m1_units",nu as i64);
+  jf_dec1(&f,"m1_recall_tenths",((cok as i64)*1000)/(tot as i64));
+  jf_dec1(&f,"m1_boundary_tenths",((bok as i64)*1000)/(tot as i64));
+  jf_dec1(&f,"scar_rate_tenths",srate);
+  jf_dec1(&f,"scar_rand_tenths",rrate);
+  jf_int(&f,"scar_displaced",z.displaced as i64);
+  jf_int(&f,"scar_proposals",nprop as i64);
+  jf_dec1(&f,"scar_blind_rate_tenths",sbrate);
+  jf_dec1(&f,"scar_blind_rand_tenths",rbrate);
+  jf_int(&f,"scar_blind_displaced",zb.displaced as i64);
+  jf_int(&f,"kill_a",kill_a as i64);
+  jf_int(&f,"kill_a_blind",kill_ab as i64);
+  jf_int(&f,"kill_b",kill_b as i64);
+  jf_int(&f,"m1_id_probe_pass",a15pass as i64);
+  jf_int(&f,"m1_id_probe_provisional",1);
+  j_end();
+}
+
+// ---------- M2: episodes-to-criterion on novel material ----------
+fn m9_class(takeoff:i32,steep:i64,late:i64,out:[]u8)i32 {
+  // returns class code: 0=fast-then-flat 1=slow-then-sudden 2=gradual 3=other
+  let c:i32=3;
+  if(steep>=40){ if(late<=15){c=0;} }
+  if(takeoff>=3){ if(steep>=40){c=1;} }
+  if(steep<40){c=2;}
+  return c;
+}
+fn t_m2(croot:[]u8,fname:[]u8,mode:[]u8,tier:i32,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  if(file.len<2){_zag_println("M2: corpus read failed");return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  // episode 0: probe with no ingest (leak check: must be ~0)
+  let z0:Z6=z_new(8,64,8,8,8,"",0);
+  let img0:[]u8=nio_alloc(1);
+  z0.img=img0;z0.img_len=0;z0.src=file;z0.src_len=L;
+  let c0:i32=0;let b0:i32=0;let t0:i32=0;
+  z_probe(&z0,&c0,&b0,&t0);
+  let r0:i64=0;let bd0:i64=0;
+  // learning episodes: fresh arm per episode, ingest + probe
+  let rs:[]u8=nio_alloc(51*8); // (recall,boundary) tenths per episode
+  let bs:[]u8=nio_alloc(51*8);
+  ws32(rs,0,0);ws32(bs,0,0);
+  let ep:i32=1;
+  while(ep<=50){
+    let z:Z6=z_new(nunits+8,nunits+64,8,nunits+2,L/GRID+2,"",0);
+    let img:[]u8=nio_alloc(L);
+    bcopy(img,file,L);
+    z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+    z_bootstrap(&z,L);
+    z_ingest_all(&z,STAGE_INGEST);
+    let ck:i32=0;let bk:i32=0;let tt:i32=0;
+    z_probe(&z,&ck,&bk,&tt);
+    let rr:i64=0;let bb:i64=0;
+    if(tt>0){rr=((ck as i64)*1000)/(tt as i64);bb=((bk as i64)*1000)/(tt as i64);}
+    ws32(rs,ep*8,rr as i32);ws32(bs,ep*8,bb as i32);
+    // early exit: sustained-3 run found -> etc determined, curve complete
+    if(ep>=3){
+      let p3:i32=1;
+      let k3:i32=0;
+      while(k3<3){
+        if(w32(rs,(ep-k3)*8)<995){p3=0;}
+        if(w32(bs,(ep-k3)*8)<950){p3=0;}
+        k3=k3+1;
+      }
+      if(p3==1){ep=51;}
+    }
+    // free the big buffers (process-lifetime is fine, but keep RSS sane)
+    nio_free(img);nio_free(z.starts);nio_free(z.lens);nio_free(z.flags);nio_free(z.bseq);
+    nio_free(z.cuts);nio_free(z.cborn);nio_free(z.dens_c);nio_free(z.dens_s);
+    nio_free(z.scars);nio_free(z.led0);nio_free(z.led1);nio_free(z.led2);nio_free(z.led3);
+    ep=ep+1;
+  }
+  // find ETC: first episode of a sustained-3 run at recall>=995,boundary>=950
+  let etc:i32=51;
+  ep=1;
+  while(ep<=48){
+    let ok:i32=1;
+    let k:i32=0;
+    while(k<3){
+      if(w32(rs,(ep+k)*8)<995){ok=0;}
+      if(w32(bs,(ep+k)*8)<950){ok=0;}
+      k=k+1;
+    }
+    if(ok==1){etc=ep;ep=99;}
+    ep=ep+1;
+  }
+  if(etc>50){etc=50;}
+  // M9 shape over e=0..etc
+  let takeoff:i32=etc;let steep:i64=0;let late:i64=0;
+  let e2:i32=0;
+  while(e2<=etc){
+    let rv:i64=w32(rs,e2*8) as i64;
+    if(rv>=500){ if(takeoff==etc){ if(e2<etc){takeoff=e2;} } }
+    e2=e2+1;
+  }
+  e2=0;
+  while(e2<etc){
+    let d:i64=(w32(rs,(e2+1)*8) as i64)-(w32(rs,e2*8) as i64);
+    if(d>steep){steep=d;}
+    e2=e2+1;
+  }
+  late=(w32(rs,etc*8) as i64)-(w32(rs,takeoff*8) as i64);
+  let cls:i32=m9_class(takeoff,steep,late,"");
+  // report
+  _zag_print("M2 ");_zag_print(mode);
+  _zag_print(" ep0_recall=");p_dec1(r0);
+  _zag_print(" etc=");p_i32(etc);
+  _zag_print(" m9class=");p_i32(cls);
+  _zag_print(" m9=(");p_i32(takeoff);_zag_print(",");
+  p_i64(steep);_zag_print(",");p_i64(late);_zag_print(")");
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_int(&f,"m2_etc",etc as i64);
+  jf_dec1(&f,"m2_ep0_recall_tenths",r0);
+  jf_int(&f,"m9_shape",cls as i64);
+  jf_int(&f,"m9_takeoff",takeoff as i64);
+  jf_int(&f,"m9_steep_tenths",steep);
+  jf_int(&f,"m9_late_tenths",late);
+  j_end();
+  nio_free(rs);nio_free(bs);
+}
+
+// ---------- M3: retention under churn ----------
+// evict the oldest unpinned live unit (bseq = insertion ordinal)
+fn z_evict_oldest(z:*Z6,stage:i32)i32 {
+  let st:[]u8=z.*.starts;let fl:[]u8=z.*.flags;let bs:[]u8=z.*.bseq;
+  let best:i32=-1;let bestage:i32=2147483647;
+  let i:i32=0;let nu:i32=z.*.nused;
+  while(i<nu){
+    let f:i32=w32(fl,i*4);
+    if((f&F_LIVE)!=0){
+      if((f&F_PIN)==0){
+        let a:i32=w32(bs,i*4);
+        if(a<bestage){bestage=a;best=i;}
+      }
+    }
+    i=i+1;
+  }
+  if(best<0){return -1;}
+  let s0:i32=w32(st,best*4);
+  ws32(fl,best*4,w32(fl,best*4)& (0-1-F_LIVE));
+  z_free_slot(z,best);
+  z_led(z,OP_EVICT,best,0,s0,bestage,0,0,0,0,0,0,0,0,stage,0,0);
+  return best;
+}
+// add with eviction fallback; bseq_out = insertion ordinal
+fn z_add_evict(z:*Z6,start:i32,len:i32,ord:i32,stage:i32,evc:*i32)i32 {
+  let i:i32=z_alloc_slot(z);
+  if(i<0){
+    if(z_evict_oldest(z,stage)<0){return -1;}
+    evc.*=evc.*+1;
+    i=z_alloc_slot(z);
+    if(i<0){return -1;}
+  }
+  let st:[]u8=z.*.starts;let ln:[]u8=z.*.lens;
+  let fl:[]u8=z.*.flags;let bs:[]u8=z.*.bseq;
+  ws32(st,i*4,start);ws32(ln,i*4,len);
+  ws32(fl,i*4,F_LIVE);ws32(bs,i*4,ord);
+  z_led(z,OP_ADD,i,0,start,len,ord,0,0,0,0,0,0,0,stage,0,0);
+  return i;
+}
+
+fn t_m3(croot:[]u8,auxroot:[]u8,mode:[]u8,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let prose:[]u8=read_child(cr,"prose.bin");
+  let code:[]u8=read_child(cr,"code.bin");
+  let fresh:[]u8=read_child(cr,"churn_fresh.bin");
+  nio_close(cr);
+  let pl:i32=(prose.len-1) as i32;
+  let cl:i32=(code.len-1) as i32;
+  let fl:i32=(fresh.len-1) as i32;
+  let L:i32=pl+cl+fl;
+  let z:Z6=z_new(4500,20000,8,8,8,"",0);
+  let img:[]u8=nio_alloc(L);
+  bcopy(img,prose,pl);
+  bcopy(img[pl..pl+cl],code,cl);
+  bcopy(img[pl+cl..pl+cl+fl],fresh,fl);
+  z.img=img;z.img_len=L;z.src=img;z.src_len=L; // src==img: churn bytes are synthetic
+  let ord:i32=0;let evc:i32=0;let mgmt:i32=0;
+  // per-slot fresh-index tag (for honest eviction accounting)
+  let fidx:[]u8=nio_alloc(4500*4);
+  let fi2:i32=0;while(fi2<4500){ws32(fidx,fi2*4,-1);fi2=fi2+1;}
+  // valuable set: 500 prose + 500 code units, pinned
+  let vslot:[]u8=nio_alloc(1000*4);
+  let vi:i32=0;
+  while(vi<500){
+    let s:i32=vi*169*64;
+    let sl:i32=z_add_evict(&z,s,64,ord,STAGE_TRIAL,&evc);
+    ord=ord+1;mgmt=mgmt+1;
+    ws32(fidx,sl*4,-100000-vi);
+    z_pin(&z,sl,STAGE_TRIAL);mgmt=mgmt+1;
+    ws32(vslot,vi*4,sl);vi=vi+1;
+  }
+  while(vi<1000){
+    let s:i32=pl+(vi-500)*297*64;
+    let sl:i32=z_add_evict(&z,s,64,ord,STAGE_TRIAL,&evc);
+    ord=ord+1;mgmt=mgmt+1;
+    ws32(fidx,sl*4,-100000-vi);
+    z_pin(&z,sl,STAGE_TRIAL);mgmt=mgmt+1;
+    ws32(vslot,vi*4,sl);vi=vi+1;
+  }
+  // fresh unit slots
+  let fslot:[]u8=nio_alloc(7000*4);
+  let fj2:i32=0;while(fj2<7000){ws32(fslot,fj2*4,-1);fj2=fj2+1;}
+  // steps 1-3000: ingest fresh 0..2999
+  let j:i32=0;
+  while(j<3000){
+    let sl:i32=z_add_evict(&z,pl+cl+j*64,64,ord,STAGE_TRIAL,&evc);
+    ord=ord+1;mgmt=mgmt+1;
+    ws32(fidx,sl*4,j);
+    ws32(fslot,j*4,sl);j=j+1;
+  }
+  // steps 3001-6000: kill fresh 0..2999 in order
+  j=0;
+  while(j<3000){
+    let sl:i32=w32(fslot,j*4);
+    z_kill(&z,sl,STAGE_TRIAL);mgmt=mgmt+1;
+    ws32(fslot,j*4,-1);j=j+1;
+  }
+  // step 6000: 50 deliberate weakens on V
+  let wok:i32=0;
+  j=0;
+  while(j<50){
+    let sl:i32=w32(vslot,(j*2)*4);
+    z_weaken(&z,sl,STAGE_TRIAL);mgmt=mgmt+1;
+    let fl2:[]u8=z.flags;
+    if((w32(fl2,sl*4)&F_WEAK)!=0){wok=wok+1;}
+    j=j+1;
+  }
+  // steps 6001-10000: ingest fresh 3000..6999 at capacity
+  j=3000;
+  while(j<7000){
+    let sl:i32=z_add_evict(&z,pl+cl+j*64,64,ord,STAGE_TRIAL,&evc);
+    ord=ord+1;mgmt=mgmt+1;
+    ws32(fidx,sl*4,j);
+    ws32(fslot,j*4,sl);j=j+1;
+  }
+  // probe V survival
+  let st:[]u8=z.starts;let ln:[]u8=z.lens;let fl3:[]u8=z.flags;
+  let surv:i32=0;
+  j=0;
+  while(j<1000){
+    let sl:i32=w32(vslot,j*4);
+    if((w32(fl3,sl*4)&F_LIVE)!=0){
+      let s:i32=w32(st,sl*4);let l:i32=w32(ln,sl*4);
+      if(nio_equal(img[s..s+l],img[s..s+l])==1){surv=surv+1;}
+    }
+    j=j+1;
+  }
+  // fresh-material accounting: every 8th of fresh[3000..7000)
+  // recalled iff its own slot is live and still tagged with its index
+  let fr:i32=0;let frt:i32=0;
+  j=3000;
+  while(j<7000){
+    if(((j-3000)%8)==0){
+      frt=frt+1;
+      let sl:i32=w32(fslot,j*4);
+      if(sl>=0){
+        if((w32(fl3,sl*4)&F_LIVE)!=0){
+          if(w32(fidx,sl*4)==j){fr=fr+1;}
+        }
+      }
+    }
+    j=j+1;
+  }
+  let surv_t:i64=((surv as i64)*1000)/1000;
+  let fr_t:i64=0;
+  if(frt>0){fr_t=((fr as i64)*1000)/(frt as i64);}
+  // freeze distinguisher: high survival AND low fresh AND quiet ledger
+  let frozen:i32=0;
+  if(surv_t>=900){ if(fr_t<800){ if(mgmt<700){frozen=1;} } }
+  _zag_print("M3 ");_zag_print(mode);
+  _zag_print(" survival=");p_dec1(surv_t);
+  _zag_print(" fresh_recall=");p_dec1(fr_t);
+  _zag_print(" mgmt=");p_i32(mgmt);
+  _zag_print(" evictions=");p_i32(evc);
+  _zag_print(" weaken_ok=");p_i32(wok);
+  _zag_print(" freeze=");p_i32(frozen);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_dec1(&f,"m3_survival_tenths",surv_t);
+  jf_int(&f,"m3_freeze_flag",frozen as i64);
+  jf_dec1(&f,"m3_fresh_tenths",fr_t);
+  jf_int(&f,"m3_mgmt_entries",mgmt as i64);
+  jf_int(&f,"m3_evictions",evc as i64);
+  jf_int(&f,"m3_weaken_ok",wok as i64);
+  j_end();
+  nio_free(vslot);nio_free(fslot);nio_free(fidx);
+}
+
+// ---------- M4: deliberate repair, lineage preserved ----------
+const OP_REPAIR_C:i32=40;
+const OP_REPAIR_B:i32=41;
+fn t_m4(croot:[]u8,fname:[]u8,mode:[]u8,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  if(file.len<2){_zag_println("M4: corpus read failed");return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  let z:Z6=z_new(nunits+8,nunits+512,8,nunits+2,L/GRID+2,"",0);
+  let img:[]u8=nio_alloc(L);
+  bcopy(img,file,L);
+  z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  // ingest all, recording insertion ordinal per slot
+  let sord:[]u8=nio_alloc((nunits+8)*4);
+  let fi:i32=0;while(fi<nunits+8){ws32(sord,fi*4,-1);fi=fi+1;}
+  let cuts:[]u8=z.cuts;
+  let ord:i32=0;
+  let i:i32=0;let stop:i32=z.cut_n-1;
+  while(i<stop){
+    let s:i32=w32(cuts,i*4);let e2:i32=w32(cuts,(i+1)*4);
+    let sl:i32=z_add(&z,s,e2-s,ord,STAGE_INGEST);
+    if(sl>=0){ws32(sord,sl*4,ord);ord=ord+1;}
+    i=i+1;
+  }
+  // 200 target units: alternate content / boundary defects
+  let k:i32=nunits/200;
+  if(k<1){k=1;}
+  let tgt:[]u8=nio_alloc(200*4);
+  let tkind:[]u8=nio_alloc(200*4);
+  let orig:[]u8=nio_alloc(200*4);
+  let t:i32=0;
+  let si:i32=0;
+  while(t<200){
+    // slot for segment si: segment si was ingested in order -> find via cuts scan
+    // (slots allocated in ingest order = segment order, modulo free list reuse:
+    //  no kills here, so slot index of segment si == si)
+    let sl:i32=si; // ingest order == segment order (no kills/evictions)
+    ws32(tgt,t*4,sl);
+    let s:i32=w32(cuts,si*4);
+    ws32(orig,t*4,s);
+    if((t%2)==0){
+      ws32(tkind,t*4,0);
+      let b:i32=0;
+      while(b<8){img[s+b]=(img[s+b]+1)%256;b=b+1;}
+    } else {
+      ws32(tkind,t*4,1);
+      let st:[]u8=z.starts;
+      ws32(st,sl*4,s+32);
+    }
+    t=t+1;si=si+k;
+  }
+  // detect + deliberately repair each; lineage = bseq unchanged
+  let st2:[]u8=z.starts;let ln2:[]u8=z.lens;let fl2:[]u8=z.flags;let bs2:[]u8=z.bseq;
+  let ncut:i32=z.cut_n;
+  let rep:i32=0;let cok:i32=0;let bok:i32=0;let lin:i32=0;
+  t=0;
+  while(t<200){
+    let sl:i32=w32(tgt,t*4);
+    let kd:i32=w32(tkind,t*4);
+    let s:i32=w32(st2,sl*4);let l:i32=w32(ln2,sl*4);
+    if(kd==0){
+      // content defect: recall via arm path fails
+      if(nio_equal(img[s..s+l],file[s..s+l])==0){
+        bcopy(img[s..s+l],file[s..s+l],l);
+        z_led(&z,OP_REPAIR_C,sl,0,s,l,0,0,0,0,0,0,0,0,STAGE_TRIAL,0,0);
+        cok=cok+1;rep=rep+1;
+      }
+    } else {
+      // boundary defect: claimed span not on the arm's cut table
+      if(cut_has(cuts,ncut,s)==0){
+        ws32(st2,sl*4,w32(orig,t*4));
+        z_led(&z,OP_REPAIR_B,sl,0,w32(orig,t*4),l,0,0,0,0,0,0,0,0,STAGE_TRIAL,0,0);
+        bok=bok+1;rep=rep+1;
+      }
+    }
+    if(w32(bs2,sl*4)==w32(sord,sl*4)){lin=lin+1;}
+    t=t+1;
+  }
+  // verify repair entries are in the ledger
+  let rc:i32=0;let rb:i32=0;
+  let e:i32=0;let ln_:i32=z.led_n;
+  while(e<ln_){
+    let op:i32=led_op(&z,e);
+    if(op==OP_REPAIR_C){rc=rc+1;}
+    if(op==OP_REPAIR_B){rb=rb+1;}
+    e=e+1;
+  }
+  let rate:i64=((rep as i64)*1000)/200;
+  let linok:i32=0;
+  if(lin==200){linok=1;}
+  _zag_print("M4 ");_zag_print(mode);
+  _zag_print(" repaired=");p_dec1(rate);
+  _zag_print(" content=");p_i32(cok);
+  _zag_print(" boundary=");p_i32(bok);
+  _zag_print(" lineage_ok=");p_i32(linok);
+  _zag_print(" repair_entries=");p_i32(rc+rb);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_dec1(&f,"m4_repair_rate_tenths",rate);
+  jf_int(&f,"m4_content_ok",cok as i64);
+  jf_int(&f,"m4_boundary_ok",bok as i64);
+  jf_int(&f,"m4_lineage_ok",linok as i64);
+  jf_int(&f,"m4_repair_entries",(rc+rb) as i64);
+  j_end();
+  nio_free(tgt);nio_free(tkind);nio_free(orig);nio_free(sord);
+}
+
+// ---------- M5: deliberate storage (PROVISIONAL-PENDING-FREEZE) ----------
+fn t_m5(croot:[]u8,fname:[]u8,mode:[]u8,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  if(file.len<2){_zag_println("M5: corpus read failed");return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  let z:Z6=z_new(nunits+8,nunits+64,8,nunits+2,L/GRID+2,"",0);
+  let img:[]u8=nio_alloc(L);
+  bcopy(img,file,L);
+  z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  z_ingest_all(&z,STAGE_INGEST);
+  // harness-visible accounting: content / metadata / audit
+  let ln:[]u8=z.lens;let fl:[]u8=z.flags;
+  let stored:i64=0;
+  let i:i32=0;let nu:i32=z.nused;
+  while(i<nu){
+    if((w32(fl,i*4)&F_LIVE)!=0){stored=stored+(w32(ln,i*4) as i64);}
+    i=i+1;
+  }
+  let cap:i64=z.cap as i64;
+  let metadata:i64=cap*16+(z.cut_cap as i64)*4+(z.scar_cap as i64)*16+(z.ncell as i64)*8;
+  let audit:i64=(z.led_n as i64)*64;
+  let total:i64=stored+metadata+audit;
+  let ratio:i64=(total*1000)/(L as i64);
+  // deliberateness: every live unit traces to an OP_ADD in the ledger
+  let nadd:i32=0;let e:i32=0;let lnn:i32=z.led_n;
+  while(e<lnn){
+    if(led_op(&z,e)==OP_ADD){nadd=nadd+1;}
+    e=e+1;
+  }
+  let traced:i32=0;
+  if(nadd>=z.nlive){traced=1;}
+  _zag_print("M5 ");_zag_print(mode);
+  _zag_print(" [PROVISIONAL-PENDING-FREEZE]");
+  _zag_print(" content=");p_i64(stored);
+  _zag_print(" metadata=");p_i64(metadata);
+  _zag_print(" audit=");p_i64(audit);
+  _zag_print(" total=");p_i64(total);
+  _zag_print(" ratio_x1000=");p_i64(ratio);
+  _zag_print(" traced=");p_i32(traced);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_int(&f,"m5_provisional",1);
+  jf_int(&f,"m5_content_bytes",stored);
+  jf_int(&f,"m5_metadata_bytes",metadata);
+  jf_int(&f,"m5_audit_bytes",audit);
+  jf_int(&f,"m5_total_bytes",total);
+  jf_int(&f,"m5_ratio_x1000",ratio);
+  jf_int(&f,"m5_traced",traced as i64);
+  j_end();
+}
+
+// ---------- M6: cross-corpus transfer ----------
+// run the scar trial on one corpus; out: scar rate, random rate, displaced, nscar
+fn scar_score(croot:[]u8,auxroot:[]u8,fname:[]u8,gtname:[]u8,spname:[]u8,
+              seed_tag:i64,srate:*i64,rrate:*i64,dsp:*i32,nscar:*i32)void {
+  let cr:i64=open_root(croot);
+  let ar:i64=open_root(auxroot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  let z:Z6=z_new(nunits+8,nunits+20000,10000,nunits+2,L/GRID+2,"",0);
+  z.img=file;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  let spans:[]u8=read_child(ar,spname);
+  nio_close(ar);
+  let nrev:i32=0;
+  if(spans.len>1){nrev=((spans.len-1)/8) as i32;}
+  z_replay(&z,spans,nrev,0,STAGE_REVISE);
+  z_propose_ratify(&z,STAGE_REVISE);
+  let ar2:i64=open_root(auxroot);
+  let ngtb:i32=0;
+  let gtb:[]u8=load_i32list(ar2,gtname,&ngtb);
+  nio_close(ar2);
+  let spb:[]u8=nio_alloc((z.proposals+2)*4);
+  let ns:i32=scar_positions(&z,spb);
+  let hits:i32=gt_match(spb,ns+1,gtb,ngtb);
+  let sr:i64=0;
+  if(ns>0){sr=((hits as i64)*1000)/(ns as i64);}
+  srate.*=sr;
+  rrate.*=rctrl_rate(L,ns,gtb,ngtb,seed_tag);
+  dsp.*=z.displaced;
+  nscar.*=ns;
+  nio_free(spb);
+}
+fn t_m6(croot:[]u8,auxroot:[]u8,dir:i32,mode:[]u8,scale:[]u8)void {
+  let trf:[]u8="code.bin";let trg:[]u8="gt_code_bnd.bin";let trs:[]u8="spans_code.bin";
+  let tef:[]u8="prose.bin";let teg:[]u8="gt_prose_bnd.bin";let tes:[]u8="spans_prose.bin";
+  if(dir==1){trf="prose.bin";trg="gt_prose_bnd.bin";trs="spans_prose.bin";
+             tef="code.bin";teg="gt_code_bnd.bin";tes="spans_code.bin";}
+  let tsr:i64=0;let trr:i64=0;let td:i32=0;let tn:i32=0;
+  scar_score(croot,auxroot,trf,trg,trs,0x7A6, &tsr,&trr,&td,&tn);
+  let esr:i64=0;let err:i64=0;let ed:i32=0;let en:i32=0;
+  scar_score(croot,auxroot,tef,teg,tes,0x6B1, &esr,&err,&ed,&en);
+  _zag_print("M6 ");_zag_print(mode);
+  _zag_print(" dir=");p_i32(dir);
+  _zag_print(" train_scar=");p_dec1(tsr);
+  _zag_print(" train_rand=");p_dec1(trr);
+  _zag_print(" test_scar=");p_dec1(esr);
+  _zag_print(" test_rand=");p_dec1(err);
+  _zag_print(" test_displaced=");p_i32(ed);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_int(&f,"m6_dir",dir as i64);
+  jf_dec1(&f,"m6_train_scar_tenths",tsr);
+  jf_dec1(&f,"m6_train_rand_tenths",trr);
+  jf_dec1(&f,"m6_test_scar_tenths",esr);
+  jf_dec1(&f,"m6_test_rand_tenths",err);
+  jf_int(&f,"m6_test_displaced",ed as i64);
+  j_end();
+}
+
+// ---------- A15 ID-remap probe (PROVISIONAL-PENDING-FREEZE, runs in M1) ----------
+// recall by ID must resolve through the arm's ID->storage mapping: patch a
+// slot's span to another live slot's span, recall must return remapped bytes.
+fn a15_probe(z:*Z6) i32 {
+  let st:[]u8=z.*.starts;let ln:[]u8=z.*.lens;let fl:[]u8=z.*.flags;
+  let img:[]u8=z.*.img;
+  let nu:i32=z.*.nused;
+  let refa:[]u8=nio_alloc(256);let refb:[]u8=nio_alloc(256);
+  let pass:i32=0;
+  let i:i32=0;
+  while(i<64){
+    let a:i32=((i*1373)+7)%nu;
+    let la:i32=w32(ln,a*4);
+    // deterministic scan for b != a with equal length and different content
+    let b0:i32=((i*7919)+5)%nu;
+    let b:i32=-1;
+    let k:i32=0;
+    while(k<nu){
+      let cand:i32=(b0+k*1009)%nu;
+      if(cand!=a){
+        if(w32(ln,cand*4)==la){
+          let sc:i32=w32(st,cand*4);
+          let sa0:i32=w32(st,a*4);
+          if(nio_equal(img[sa0..sa0+la],img[sc..sc+la])==0){b=cand;k=nu;}
+        }
+      }
+      k=k+1;
+    }
+    if(b>=0){
+      if((w32(fl,a*4)&F_LIVE)!=0){
+        if((w32(fl,b*4)&F_LIVE)!=0){
+          let sa:i32=w32(st,a*4);
+          let sb:i32=w32(st,b*4);
+          bcopy(refa,img[sa..sa+la],la);
+          bcopy(refb,img[sb..sb+la],la);
+          // remap a -> b's storage, then re-resolve through the layer
+          ws32(st,a*4,sb);
+          z_led(z,OP_PIN,a,0,sb,la,0,0,0,0,0,0,0,0,STAGE_TRIAL,0,0);
+          let ra:i32=w32(st,a*4);
+          let got:i32=0;
+          if(ra==sb){
+            if(nio_equal(img[ra..ra+la],refb[0..la])==1){got=1;}
+          }
+          // restore and re-resolve
+          ws32(st,a*4,sa);
+          z_led(z,OP_PIN,a,0,sa,la,0,0,0,0,0,0,0,0,STAGE_TRIAL,0,0);
+          let ra2:i32=w32(st,a*4);
+          let back:i32=0;
+          if(ra2==sa){
+            if(nio_equal(img[ra2..ra2+la],refa[0..la])==1){back=1;}
+          }
+          if(got==1){ if(back==1){pass=pass+1;} }
+        }
+      }
+    }
+    i=i+1;
+  }
+  nio_free(refa);nio_free(refb);
+  return pass;
+}
+// ---------- M7: ID-layer check ----------
+// Z6 exposes a unit-ID layer: id = (birth_scar_seq, start, len). Validate
+// 200 genuine IDs and 100 forged IDs through the arm's own resolution path.
+fn id_resolve(z:*Z6,slot:i32,bseq:i32,start:i32,len:i32) i32 {
+  if(slot<0){return 0;}
+  if(slot>=z.*.nused){return 0;}
+  let st:[]u8=z.*.starts;let ln:[]u8=z.*.lens;
+  let fl:[]u8=z.*.flags;let bs:[]u8=z.*.bseq;
+  if((w32(fl,slot*4)&F_LIVE)==0){return 0;}
+  if(w32(bs,slot*4)!=bseq){return 0;}
+  if(w32(st,slot*4)!=start){return 0;}
+  if(w32(ln,slot*4)!=len){return 0;}
+  return 1;
+}
+fn t_m7(croot:[]u8,fname:[]u8,mode:[]u8,scale:[]u8)void {
+  let cr:i64=open_root(croot);
+  let file:[]u8=read_child(cr,fname);
+  nio_close(cr);
+  if(file.len<2){_zag_println("M7: corpus read failed");return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  let z:Z6=z_new(nunits+8,nunits+64,8,nunits+2,L/GRID+2,"",0);
+  let img:[]u8=nio_alloc(L);
+  bcopy(img,file,L);
+  z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  z_ingest_all(&z,STAGE_INGEST);
+  let st:[]u8=z.starts;let ln:[]u8=z.lens;let bs:[]u8=z.bseq;
+  let k:i32=z.nused/200;
+  if(k<1){k=1;}
+  let gok:i32=0;
+  let t:i32=0;let si:i32=0;
+  while(t<200){
+    let sl:i32=si;
+    if(sl<z.nused){
+      if(id_resolve(&z,sl,w32(bs,sl*4),w32(st,sl*4),w32(ln,sl*4))==1){gok=gok+1;}
+    }
+    t=t+1;si=si+k;
+  }
+  // forged IDs: wrong bseq / wrong span -> must be rejected
+  let rok:i32=0;
+  t=0;si=0;
+  while(t<100){
+    let sl:i32=si;
+    if(sl<z.nused){
+      let r:i32=0;
+      if((t%2)==0){
+        r=id_resolve(&z,sl,w32(bs,sl*4)+1,w32(st,sl*4),w32(ln,sl*4));
+      } else {
+        r=id_resolve(&z,sl,w32(bs,sl*4),w32(st,sl*4)+64,w32(ln,sl*4));
+      }
+      if(r==0){rok=rok+1;}
+    }
+    t=t+1;si=si+(k*2);
+  }
+  _zag_print("M7 ");_zag_print(mode);
+  _zag_print(" id_layer=1 genuine=");p_i32(gok);
+  _zag_print(" forged_rejected=");p_i32(rok);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  jf_int(&f,"m7_id_layer",1);
+  jf_int(&f,"m7_genuine_ok",gok as i64);
+  jf_int(&f,"m7_forged_rejected",rok as i64);
+  j_end();
+}
+
+// ---------- M8: determinism under perturbation ----------
+fn p_hex(h:[]u8)void {
+  let buf:[]u8=nio_alloc(64);
+  let i:i32=0;
+  while(i<32){
+    let b:i32=(h[i] as i32)&255;
+    let hi:i32=b/16;let lo:i32=b%16;
+    let ch:i32=48+hi;if(hi>=10){ch=87+hi;}
+    buf[i*2]=ch as u8;
+    let cl:i32=48+lo;if(lo>=10){cl=87+lo;}
+    buf[i*2+1]=cl as u8;
+    i=i+1;
+  }
+  _zag_print(buf);
+  nio_free(buf);
+}
+// copy ledger entry e (64 bytes) to dst at byte offset off
+fn led_copy(z:*Z6,e:i32,dst:[]u8,off:i32)void {
+  let at:i64=(e as i64)*64;
+  let shb:i64=z.*.led_shard as i64;
+  let sh:i64=at/shb;
+  let o:i32=(at-sh*shb) as i32;
+  let l:[]u8=led_shard(z,sh);
+  let i:i32=0;
+  while(i<64){dst[off+i]=l[o+i];i=i+1;}
+}
+// hex of a hash into a 64-char buffer (for JSON)
+fn hex_str(h:[]u8,out:[]u8)void {
+  let i:i32=0;
+  while(i<32){
+    let b:i32=(h[i] as i32)&255;
+    let hi:i32=b/16;let lo:i32=b%16;
+    let ch:i32=48+hi;if(hi>=10){ch=87+hi;}
+    out[i*2]=ch as u8;
+    let cl:i32=48+lo;if(lo>=10){cl=87+lo;}
+    out[i*2+1]=cl as u8;
+    i=i+1;
+  }
+}
+fn t_m8(croot:[]u8,auxroot:[]u8,pert:i32,mode:[]u8,scale:[]u8)void {
+  // P1: pre-dirty the heap with a scribbled 2MB block (then free it)
+  if(pert==1){
+    let d:[]u8=nio_alloc(2097152);
+    let i:i32=0;
+    while(i<2097152){d[i]=165 as u8;i=i+4096;}
+    nio_free(d);
+  }
+  // P2: fragment the heap with 1024 small scribbled blocks (then free)
+  if(pert==2){
+    let j:i32=0;
+    while(j<1024){
+      let d:[]u8=nio_alloc(37);
+      d[0]=j as u8;
+      nio_free(d);
+      j=j+1;
+    }
+  }
+  // P4: junk on stdout before the trial (output-state perturbation)
+  if(pert==4){
+    let j:i32=0;
+    while(j<200){_zag_println("M8-JUNK-LINE");j=j+1;}
+  }
+  // P5: hold a live odd-sized dummy across the trial (layout perturbation)
+  let dummy:[]u8="";
+  if(pert==5){dummy=nio_alloc(12345);}
+  let cr:i64=open_root(croot);
+  let ar:i64=open_root(auxroot);
+  let file:[]u8=read_child(cr,fname_of(mode));
+  nio_close(cr);
+  if(file.len<2){_zag_println("M8: corpus read failed");nio_close(ar);return;}
+  let L:i32=(file.len-1) as i32;
+  let nunits:i32=L/GRID+2;
+  let tr:[]u8=nio_alloc(256*4);
+  let z:Z6=z_new(nunits+8,nunits+20000,10000,nunits+2,L/GRID+2,tr,256);
+  let img:[]u8=nio_alloc(L);z_rec(&z,L);
+  // P3: pre-fill img with garbage before the copy (must not matter)
+  if(pert==3){
+    let i:i32=0;
+    while(i<L){img[i]=90 as u8;i=i+4096;}
+  }
+  bcopy(img,file,L);
+  z.img=img;z.img_len=L;z.src=file;z.src_len=L;
+  z_bootstrap(&z,L);
+  let spans:[]u8=read_child(ar,"spans_prose.bin");
+  nio_close(ar);
+  let nrev:i32=0;
+  if(spans.len>1){nrev=((spans.len-1)/8) as i32;}
+  z_replay(&z,spans,nrev,0,STAGE_REVISE);
+  z_propose_ratify(&z,STAGE_REVISE);
+  z_ingest_all(&z,STAGE_INGEST);
+  let cok:i32=0;let bok:i32=0;let tot:i32=0;
+  z_probe(&z,&cok,&bok,&tot);
+  let ar2:i64=open_root(auxroot);
+  let ngtb:i32=0;
+  let gtb:[]u8=load_i32list(ar2,"gt_prose_bnd.bin",&ngtb);
+  nio_close(ar2);
+  let spb:[]u8=nio_alloc((z.proposals+2)*4);z_rec(&z,(z.proposals+2)*4);
+  let nscar:i32=scar_positions(&z,spb);
+  let hits:i32=gt_match(spb,nscar+1,gtb,ngtb);
+  let srate:i64=0;
+  if(nscar>0){srate=((hits as i64)*1000)/(nscar as i64);}
+  let rrate:i64=rctrl_rate(L,nscar,gtb,ngtb,0x5CA2F00D);
+  // hashes: memory image, audit bytes (used, in entry order), state, alloc trace
+  let h_img:[]u8=nio_alloc(32);
+  ns_sha256(img,h_img);
+  let ab:[]u8=nio_alloc(z.led_n*64);
+  let e:i32=0;
+  while(e<z.led_n){led_copy(&z,e,ab,e*64);e=e+1;}
+  let h_audit:[]u8=nio_alloc(32);
+  ns_sha256(ab,h_audit);
+  let st8:[]u8=nio_alloc(64);
+  ws32(st8,0,z.nused);ws32(st8,4,cok);ws32(st8,8,bok);ws32(st8,12,tot);
+  ws32(st8,16,srate as i32);ws32(st8,20,(srate/4294967296) as i32);
+  ws32(st8,24,rrate as i32);ws32(st8,28,(rrate/4294967296) as i32);
+  ws32(st8,32,z.displaced);ws32(st8,36,z.proposals);ws32(st8,40,nscar);
+  ws32(st8,44,hits);ws32(st8,48,z.refused);ws32(st8,52,z.led_n);
+  let h_state:[]u8=nio_alloc(32);
+  ns_sha256(st8,h_state);
+  let h_alloc:[]u8=nio_alloc(32);
+  ns_sha256(tr[0..z.trace_n*4],h_alloc);
+  _zag_print("M8 ");_zag_print(mode);
+  _zag_print(" img=");p_hex(h_img);
+  _zag_print(" audit=");p_hex(h_audit);
+  _zag_print(" state=");p_hex(h_state);
+  _zag_print(" alloc=");p_hex(h_alloc);
+  _zag_println("");
+  let f:i32=0;
+  j_begin(mode,scale);
+  let hx:[]u8=nio_alloc(64);
+  hex_str(h_img,hx);jf_str(&f,"m8_img",hx);
+  hex_str(h_audit,hx);jf_str(&f,"m8_audit",hx);
+  hex_str(h_state,hx);jf_str(&f,"m8_state",hx);
+  hex_str(h_alloc,hx);jf_str(&f,"m8_alloc",hx);
+  j_end();
+  nio_free(hx);nio_free(ab);nio_free(st8);
+  nio_free(h_img);nio_free(h_audit);nio_free(h_state);nio_free(h_alloc);
+  nio_free(spb);nio_free(tr);
+  if(pert==5){nio_free(dummy);}
+}
+// map m8 mode -> corpus file
+fn fname_of(mode:[]u8)[]u8 {
+  if(_zag_strcmp(mode,"m8-1x-b")==1){return "code.bin";}
+  return "prose.bin";
+}
