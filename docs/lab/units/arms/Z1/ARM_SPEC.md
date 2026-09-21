@@ -127,7 +127,8 @@ outcome, including failures.
 
 The prereg kills the **binding** (not the window) if "challenge-set revision
 invalidates >10% of live witnesses". **STATUS: IMPLEMENTED 2026-09-21**
-(`z1_challenges_v2` + live-witness scan in `t_m4`).
+(`z1_challenges_v2` + live-witness scan in `t_m4`); the narrowing-direction
+probe `z1_challenges_v2n` was added the same day (see below).
 
 Procedure (as implemented):
 1. After the revision curriculum, every live unit's left-boundary challenge
@@ -154,12 +155,52 @@ v2 — the prereg's intuition ("some boundaries would be regretted") was
 mistaken, and the disjunct is un-triggerable as specified. Recorded here
 honestly rather than redesigned.
 
+### Challenge-set-revision probe, narrowing direction (second reading, 2026-09-21)
+
+The frozen text does not specify whether "challenge-set revision" widens or
+narrows the window. Per the program's standing rule (when in doubt, test
+both), a second crew implemented the **narrowing** hypothetical challenge set
+v2n (`z1_challenges_v2n` in `t_m4`, observational only — no stored witness
+mutated, v1 admission untouched):
+
+- **C1 unchanged** (word-split test identical to v1).
+- **C2 narrowed:** no-whitespace radius 8→4 (fires iff no ASCII whitespace
+  within ±4 bytes of `p`).
+- **C3 narrowed:** uniform-neighborhood 16→8 (fires iff the 8 bytes around
+  `p`, `buf[p-4 .. p+4]` clamped to the buffer, are identical).
+
+v2n is a strict *weakening* of v1 (more permissive): a v1-admitted boundary
+(v1 bits 0) CAN be invalidated under v2n — e.g. whitespace only at distance
+5..8 from `p` (C2 fires under v2n but not v1), or 8 identical bytes around `p`
+inside a non-uniform 16-byte window (C3 fires under v2n but not v1). Unlike
+the widened v2, the narrowed probe is not vacuous: it is a live test of the
+disjunct.
+
+Measurement (same procedure and cell definitions as the widened probe: every
+live unit's left-boundary bits recomputed under v2n after the M4 revision
+curriculum; `invalidated` = v2n bits differ from stored v1 bits; offset 0
+unchallenged under both). Two cells are reported: all live witnesses
+(mirrors the widened probe's cell exactly) and the v1-admitted subset
+(stored v1 bits == 0). Double runs per leg, byte-identical stdout:
+
+| leg | live witnesses | invalidated, all live | invalidated, v1-admitted subset |
+|-----|---------------|------------------------|----------------------------------|
+| prose | 39,870 | 531 = **1.3%** | 531/39,870 = **1.3%** (all live witnesses are v1-admitted) |
+| code | 68,491 | 5,633 = **8.2%** | 5,633/68,491 = **8.2%** (all live witnesses are v1-admitted) |
+
+**Combined verdict:** widening 0.0% (vacuous by construction); narrowing
+1.3% prose / 8.2% code — both ≤10% under both cell definitions. **Kill
+disjunct 2 is NOT TRIGGERED under either reading.** The task explicitly
+forbade redesigning the arm even had the disjunct fired; no redesign was
+needed. Zero RNG in the probe path (fixed iteration over live rows;
+deterministic predicates).
+
 ## 7. Kill criteria and arm-D dependency
 
 | # | Criterion | Status |
 |---|-----------|--------|
 | 1 | Regretted-cut rate not ≥50% lower than arm D on the revision curriculum → the window buys nothing | **BLOCKED-ON-D** — arm D has no committed regretted-cut baseline (searched 2026-09-21: D/ contains no evidence JSON and no regret metrics; no number is invented). Z1 side measured: prose regret rate **57.0%** (48,327 regretted / 84,730 proposed), code leg likewise measured — reported in `z1_regret_rate_tenths` for future comparison. |
-| 2 | Challenge-set revision invalidates >10% of live witnesses → binding too brittle (kill the binding, keep the window) | **NOT TRIGGERED** — v2 probe implemented and measured 2026-09-21: 0/36,404 invalidated (0.0%) on prose, 0.0% on code. The widened-v2 probe is mathematically vacuous (see §6); the 0.0% is the faithful measurement. |
+| 2 | Challenge-set revision invalidates >10% of live witnesses → binding too brittle (kill the binding, keep the window) | **NOT TRIGGERED** — widened-v2 probe measured 0/36,404 (0.0%) on prose and 0.0% on code (vacuous by construction, §6). Narrowing-direction probe (v2n: C2 radius 8→4, C3 neighborhood 16→8) measured 2026-09-21: prose 531/39,870 = **1.3%**, code 5,633/68,491 = **8.2%** — both ≤10% under both cell definitions (all-live and v1-admitted-only). The disjunct does not fire under either reading. |
 
 ## 8. Frozen ambiguities (logged, implemented literally)
 

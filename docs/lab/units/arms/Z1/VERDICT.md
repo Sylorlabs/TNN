@@ -37,14 +37,21 @@ inaccurate ECON paraphrase was superseded by the second correction.
    metrics) — the ≥50%-lower comparison cannot be evaluated, and no number
    is invented. `z1_arm_d_status: "BLOCKED-ON-D"` is emitted in the JSON.
 
-2. **Challenge-set revision >10%: NOT TRIGGERED.** The hypothetical-v2 probe
-   is now implemented (`z1_challenges_v2`, observational; C1 unchanged, C2
-   radius 8→12, C3 neighborhood 16→24) and measured on the revision
-   curriculum: **0/36,404 invalidated (0.0%)** on prose, 0.0% on code.
-   The widened-v2 probe is mathematically vacuous — a strictly stricter
+2. **Challenge-set revision >10%: NOT TRIGGERED (both readings).** The
+   hypothetical-v2 probe is implemented (`z1_challenges_v2`, observational;
+   C1 unchanged, C2 radius 8→12, C3 neighborhood 16→24) and measured on the
+   revision curriculum: **0/36,404 invalidated (0.0%)** on prose, 0.0% on
+   code. The widened-v2 probe is mathematically vacuous — a strictly stricter
    challenge set cannot invalidate v1-admitted boundaries (proof in
    ARM_SPEC.md §6) — so the disjunct is un-triggerable as specified. The
-   0.0% is the faithful measurement, recorded honestly.
+   0.0% is the faithful measurement, recorded honestly. The narrowing
+   direction (frozen text unspecified; tested per standing rule) is
+   implemented as `z1_challenges_v2n` (C1 unchanged, C2 radius 8→4, C3
+   neighborhood 16→8) and measured 2026-09-21, double runs, byte-identical
+   stdout: prose **531/39,870 = 1.3%**, code **5,633/68,491 = 8.2%**
+   invalidated — identical under the all-live and v1-admitted-only cell
+   definitions (all live witnesses are v1-admitted after the revision
+   curriculum). Both readings are ≤10%: the disjunct does not fire.
 
 The mechanism itself (challenge window with regretted cuts) is implemented
 and functional: M1 shows ~57% of proposed grid cuts regretted on prose
@@ -87,7 +94,9 @@ and functional: M1 shows ~57% of proposed grid cuts regretted on prose
 **1x battery: COMPLETE.** All 16 modes pass (15/15 byte-identical double
 runs; M8 10/10 via the gate). The binding kill criteria: cell 1
 BLOCKED-ON-D (Z1 side 57.0% measured; no D baseline), cell 2 NOT TRIGGERED
-(0.0% invalidated; probe vacuous as specified). No 10x run attempted.
+under both readings (widening 0.0% — vacuous as specified; narrowing 1.3%
+prose / 8.2% code — both ≤10%). No 10x run attempted. The binding survives;
+no redesign.
 
 **M8 note (corrected):** The "hang" was a misdiagnosis. M8 ingests 104,895
 distinct spans into a 65,536-slot dedup table; once full, open-addressing
