@@ -93,7 +93,13 @@ Re-run in progress. No disqualification.
 
 ## Commit hashes
 
-[To be filled after commit.]
+- `4617842c5b71` — current source (`cl/arm.zag`, with m8_perturb fix)
+- `7d29e5fe725e` — docs at correct paths (ARM_SPEC, BUILD_LOG, VERDICT,
+  scorecard, evidence)
+- `baa855e6e25c` — superseded: source (pre-fix) + docs at wrong
+  `docs/lab/docs/lab/` path (orphans remain; cleanup pending)
+
+Branch: `tnn-native-lab`, repo `sylorlabs/TNN`.
 
 ## Ambiguities (carried)
 
