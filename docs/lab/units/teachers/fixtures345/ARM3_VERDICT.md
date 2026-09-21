@@ -5,7 +5,9 @@
 **Frozen §4 hash:** `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584a31779a91a64deeef879` (unchanged)
 **Evidence commit A:** `12a8c5c24278007be1eda927926ebc11baf869d7` on `tnn-native-lab`
 (parent `599d98e34ba2`) — `arm3.zag`, `OPERATIONALIZATION.md`, `verify3/` evidence
-**This verdict sheet:** committed as commit B on `tnn-native-lab` (SHA below)
+**This verdict sheet:** `ARM3_VERDICT.md`, commit
+`5e9516cb8a5b759741cd46adadf18b230c731e51` on `tnn-native-lab`
+(parent `12a8c5c24278`)
 
 ## Verdict: FAIL — one arm-3 bar unmet (adaptive judgment not demonstrated)
 
