@@ -97,5 +97,10 @@ a 10x attempt requires a shard-count bump and re-validation.
 
 ## 7. Commits
 
-(appended after `commit_to_branch.py` runs; sources + docs + evidence only —
-no corpora, binaries, `.zagd`, or transient battery work)
+- `9e4a0aff4f1768e29bf38c8fd8dd251f5dab89e2` on `tnn-native-lab`
+  (parent `a1e5173653be`): 11 files — `cl/arm.zag`, both substrate files,
+  `ARM_SPEC.md`, `BUILD_LOG.md`, `AMBIGUITIES-B16.md`, `VERDICT.md`,
+  `scorecard_r1_1x.json`, `logs/` (console log, M8 GATE.txt, artifact hashes).
+  Sources/docs/evidence only — no corpora, binaries, `.zagd`, or transient
+  battery work. (The commit-message file `commit_msg.txt` at the arm root is
+  local scaffolding, not committed.)
