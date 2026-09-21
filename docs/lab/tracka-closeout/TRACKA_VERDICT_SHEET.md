@@ -5,9 +5,9 @@
 
 ## HEADLINE
 
-**PROVISIONAL BLOWOUT: Y5 — Cross-stream span sets.** Y5 is champion in 7 of the 8 scored metric columns under §7's tie-break rules (transfer-tax, then lower cost), passes M8, has no weak flank, and clears the N/A discipline. It is PROVISIONAL — not confirmed — solely because no arm has a completed 10x leg with a passing verdict (§7 rule 5: "a 1x-only blowout is PROVISIONAL BLOWOUT").
+**NO BLOWOUT — championship undecided (recomputed 2026-09-21, crew S7-RECOMPUTE).** Y5's 7/8 PROVISIONAL BLOWOUT ends: U's binding PASS (commit `9c6d9384ef9973fcc96e4e857145c74d72c27769`) ties Y5 at the ceiling on M1-content, M2, M3, and M6-transfer-tax, and the cost tie-break between them is methodologically blocked (see §3). Decided columns: Y5 3/8 (M1-boundary, M4, M7), L1 1/8 (M5). Per §7, the expected verdict is now Pareto + scenario-fit — the rule does not manufacture a winner.
 
-**The tokenizer replacement (provisional):** a unit of knowledge is **one ID over a non-contiguous span set** — a LINK naming an ordered set of 2–8 fixed spans, recalled by replaying the spans in order; kills cascade atomically via LINK with eliminative justification (a LINK survives only while every member span verifies against the corpus).
+**The tokenizer replacement (provisional):** Y5's model still leads every column it holds — a unit of knowledge is **one ID over a non-contiguous span set** — a LINK naming an ordered set of 2–8 fixed spans, recalled by replaying the spans in order; kills cascade atomically via LINK with eliminative justification (a LINK survives only while every member span verifies against the corpus). (Stands on the 3 decided Y5 columns + 4 provisional Y5↔U ties; L1 holds the cost column.)
 
 ## 1. The 53-vs-55 discrepancy — RESOLVED
 
@@ -75,50 +75,43 @@
 Counts: KILLED 17 · PASS 21 · PROVISIONAL 11 · UNADJUDICATED 3. (U adjudicated PROVISIONAL→PASS 2026-09-21, MARATHON CREW U11; see `units/arms/U/ADJUDICATION.md`.)
 Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3) — 6 CONFIRMED, 1 secondary-claim correction (M-dedup, see §6). B-family verdict produced (B-8 retired, B-16/B-64 survive, family not killed as contender). R2 re-evaluated post-R-death: KILLED, disjunct (a).
 
-## 3. §7 blowout computation
+## 3. §7 blowout computation (recomputed 2026-09-21 — crew S7-RECOMPUTE)
 
 **Scored columns (8):** M1-content, M1-boundary, M2, M3, M4, M5, M6-transfer-tax, M7. (M1's two sub-scores count separately per §5 "recorded separately, never folded"; this is also the only reading under which §7 rule 4's "M7 N/A needs ≥ 6 of 7" is coherent. Interpretation adopted; counting-rule changes need Micah's re-approval.)
 
-**Eligibility:** non-killed arms with M8 PASS and complete 1x scorecards (20 arms).
+**Eligibility:** non-killed arms with M8 PASS and complete 1x scorecards (21 arms — U added 2026-09-21 per binding PASS, `units/arms/U/ADJUDICATION.md`, commit `9c6d9384ef9973fcc96e4e857145c74d72c27769`).
 
 **Per-column champions** (best scorecard value; ties broken by transfer-tax, then lower cost; then co-champions):
 
-| Column | Champion | Value | Margin to runner-up |
+| Column | Champion | Value | Status |
 |---|---|---|---|
-| M1-content | Y5 | 100.0 | tie at ceiling; wins tie-break (tax 0.0, cost 1.498 lowest among tax-0 group) |
-| M1-boundary | Y5 | 100.0 | same tie-break |
-| M2 | Y5 | ETC 1 | tie at 1; same tie-break |
-| M3 | Y5 | 100.0 / CLEAR | tie at ceiling; same tie-break |
-| M4 | Y5 | 100.0/100.0 | tie at ceiling; same tie-break |
-| M5 | L1 | 0.839 B/B | outright; runner-up Y5 1.498 |
-| M6 tax | Y5 | 0.0 | tie at 0.0; wins on cost tie-break |
-| M7 | Y5 | 100.0 hit | tie at ceiling (8 ID arms with data); wins tie-break |
+| M1-content | Y5 ↔ U tie | both 100.0 | PROVISIONAL — tax tie (0.0/0.0); cost tie-break blocked (M5 methodology mismatch, see below) |
+| M1-boundary | Y5 | 100.0 > U 99.9 | DECIDED — outright |
+| M2 | Y5 ↔ U tie | both ETC 1 all tiers | PROVISIONAL — same cost-tie-break blocker |
+| M3 | Y5 ↔ U tie | both 100.0 / CLEAR | PROVISIONAL — same cost-tie-break blocker |
+| M4 | Y5 | 100.0/100.0 > U 93.0/100.0 | DECIDED — outright |
+| M5 | L1 | 0.839 B/B | DECIDED — outright (beats Y5 1.498 and U under either M5 reading) |
+| M6 tax | Y5 ↔ U tie | both 0.0 | PROVISIONAL — same cost-tie-break blocker |
+| M7 | Y5 | 100.0 hit (U N/A — non-ID arm) | DECIDED — outright |
 
-**Championship count:** Y5 7/8 · L1 1/8.
+**Championship count (decided):** Y5 3/8 · L1 1/8 · 4/8 provisional (Y5↔U).
 
-**Blowout rules applied to Y5:**
-1. M8 PASS ✓ (`M8GATE PASS`, 6 perturbations byte-identical)
-2. Champion in ≥ 6 of 8 scored columns ✓ (7/8)
-3. No weak flank ✓ (worst column M5: 2nd of 13 with data — above 50th percentile)
-4. N/A discipline ✓ (all 8 columns applicable; needs ≥ 6)
-5. Scale confirmation 1x → 10x ✗ — Y5's 10x leg is blocked by the znc 2^25-byte slice limit (same toolchain wall that stopped N's 10x). No arm has a completed passing 10x leg.
+**M5 methodology blocker (recorded, not a ruling — decides the provisional columns):** U's crew reported "0 corpus-buffer bytes" as the M5 figure, and the ≈1.22 B/B number in the U11 report uses (slot_table 6,563,843 + ledger 64,064) / source 5,422,721 — a formula the frozen §5 does not define (it folds ledger bytes into the memory term and omits the harness-measured RSS delta the frozen definition requires). Applied mechanically, the frozen §5 formula — memory bytes = harness-measured RSS delta + slot table, per source byte — gives U = ((17,256−8,304)×1024 + 6,563,843) / 5,422,721 = **2.90**; Y5's recorded 1.498 is verified against the same formula: (19,562,496 + 2,814,120) / 14,938,062 = 1.4980 exactly. Under the pure mechanical reading Y5 would win every ceiling cost tie-break. **But the two ratios are not apples-to-apples:** U's M5 leg ingested prose only (5,422,721 B — the §5 metric text says "Full prose ingest") while Y5's ingested prose+code (14,938,062 B), a 2.75× source-size gap over which fixed overheads do not normalize away, and granularity differs (U: 84,731 units / 5.4MB vs Y5: 50,797 / 14.9MB). The cost tie-break between Y5 and U cannot be decided by the frozen rule + consistent methodology on the evidence as it stands. **Required:** a harmonized re-measurement (both arms on the same corpus coverage, frozen §5 formula) before M1-content, M2, M3, and M6-tax leave PROVISIONAL. The M5 champion itself (L1 0.839) is unaffected — L1 beats Y5 (1.498) and U under both readings (0.839 < 1.22 < 2.90), so that column is decided outright.
 
-**Verdict: PROVISIONAL BLOWOUT for Y5.** §7: "A 1x-only blowout is PROVISIONAL BLOWOUT." The rule does not manufacture a winner — and here it doesn't need to: Y5 earns 7/8 columns on the tie-breaks as written.
+**Blowout rules applied:** no arm reaches 6 of 8 scored columns on decided values — Y5 3/8, L1 1/8 (best provisional case: Y5 7/8, but 4 of those are methodologically provisional). **Y5's r1 PROVISIONAL BLOWOUT ENDS 2026-09-21.** Rule 5 (scale confirmation) is additionally unmet: no arm has a completed passing 10x leg (Y5's 10x leg T2 still running — all columns depending on 10x numbers get recomputed again when it lands). §7's expected verdict now governs: **no overall winner — Pareto frontier + scenario-fit map (§4).** The rule does not manufacture a winner.
 
-**Robustness of the computation:** every scored arm that could threaten Y5's tie-break was checked — S (m5 1.718), Z6 (2.437), C-P (~14.3), C-W (16.481), A (13.01) all cost more than Y5's 1.498 at equal ceiling metrics and zero transfer tax. N has no metrics scorecard (verdict-only PASS). Gap-fill is complete: Z2/Z7 PASS (both already in the computation — m5 1.974/1.811, no threat); T, K1, F-S, K3, D-R PROVISIONAL and V, W, Z8 UNADJUDICATED — none scored, so none can take a column from Y5. If any of them later produces ceiling metrics + transfer tax 0.0 + cost < 1.498, the championship must be recomputed.
-
-**FLAG 2026-09-21 (MARATHON CREW U11):** U has been adjudicated PASS (binding) and now meets that trigger condition on its face — M1-content 100.0, M2 ETC 1, M3 100.0/CLEAR, M6 tax 0.0, M8 PASS, and M5 ≈ 1.22 B/B ((slot_table 6,563,843 + ledger 64,064) / source 5,422,721; methodology-dependent — U's crew reported "0 corpus-buffer bytes", not a B/B ratio, so the §7 M5 formula must be applied consistently before comparing to Y5's 1.498). **The §7 championship recomputation is therefore DUE but NOT YET DONE** — the per-column table above does not include U. A mechanical recomputation may move M1-content, M2, M3, and M6-tax from Y5 to U on the cost tie-break (U: tax 0.0, cost ~1.22 < 1.498), which would end Y5's 7/8 championship. This needs a dedicated §7 recomputation pass, not a unilateral edit.
+**RECOMPUTATION RECORD 2026-09-21 (CREW S7-RECOMPUTE):** this section supersedes the 2026-09-21 U11 flag (recomputation was due, now done). Trigger: U adjudicated PASS (binding), commit `9c6d9384ef9973fcc96e4e857145c74d72c27769`. Per-column before→after: M1-content Y5→Y5↔U (provisional); M1-boundary Y5→Y5 (decided outright, 100.0 > 99.9); M2 Y5→Y5↔U (provisional); M3 Y5→Y5↔U (provisional); M4 Y5→Y5 (decided outright); M5 L1→L1 (decided); M6-tax Y5→Y5↔U (provisional); M7 Y5→Y5 (decided, U N/A). Championship: Y5 7/8→3/8 decided (+4 provisional), L1 1/8→1/8. No other arm's verdict or scorecard was altered; no other arm threatens any column (r1 robustness check stands; U is the only new scored arm). Full working record appended to `~/workspace/NIGHT_RUN_2026-09-21.md`.
 
 ## 4. Scenario-fit map (the §7 expected verdict)
 
 | Dimension | Champion | Margin / note |
 |---|---|---|
-| (1) Corpus type — best M1+M6-tax pair, P→C and C→P | Y5 both directions | tie at ceiling; cost tie-break |
-| (2) Scale — best M1-at-scale + M5 at highest completed leg | Y5 (1x) | 10x: UNTESTED for all surviving arms (toolchain wall) |
-| (3) Pressure regime — M3 survival, freeze CLEAR (high-churn); M5 (archival) | high-churn: Y5 (100.0/CLEAR, cheapest of the M3-clear group); archival: L1 (0.839 B/B) | — |
-| (4) Teaching availability — M2 ETC + M9 on T2/T3 (autonomous) | Y5 (ETC 1 all tiers) | — |
-| (5) Integrity criticality — M1 ID-probe PASS + M8 PASS + M4 (any FAIL excluded) | Y5 (ID probe PASS/PASS, M8 PASS, M4 100/100); also qualify: H1, L1, L2, Y3, Y4, Y6, Z1 | Z4/Z5 excluded (M8 FAIL—panic) |
-| (6) Budget constraint — M5 per-byte cost among M1-clearers | L1 0.839 · Y5 1.498 · S 1.718 · Z7 1.811 · Y4 1.823 · Z2 1.974 · X 2.002 · Y3 2.07 · H1 2.412 · Z6 2.437 · Y6 3.136 · B-16 3.626 · L2 4.307 · A 13.01 · C-P ~14.3 · C-W 16.481 | margins ≥ 2 pts except L1→Y5 (0.659 = 44% relative — not tied) |
+| (1) Corpus type — best M1+M6-tax pair, P→C and C→P | Y5+U both directions | tie at ceiling, tax 0.0 both directions (margin 0.0 < 2 pts → TIED); cost tie-break blocked pending M5 harmonization (see §3) |
+| (2) Scale — best M1-at-scale + M5 at highest completed leg | Y5 (1x) | 10x: UNTESTED for all surviving arms (toolchain wall); Y5's 10x leg (T2) still running — columns depending on 10x numbers get recomputed when it lands |
+| (3) Pressure regime — M3 survival, freeze CLEAR (high-churn); M5 (archival) | high-churn: Y5+U (both 100.0/CLEAR; cheapest-of-group blocked pending M5 harmonization); archival: L1 (0.839 B/B) | — |
+| (4) Teaching availability — M2 ETC + M9 on T2/T3 (autonomous) | Y5+U | tie — ETC 1 all tiers (margin 0 < 2 pts → TIED) |
+| (5) Integrity criticality — M1 ID-probe PASS + M8 PASS + M4 (any FAIL excluded) | Y5 (ID probe PASS/PASS, M8 PASS, M4 100/100); also qualify: H1, L1, L2, Y3, Y4, Y6, Z1 | Z4/Z5 excluded (M8 FAIL—panic); U excluded (non-ID arm, no ID probe applicable) |
+| (6) Budget constraint — M5 per-byte cost among M1-clearers | L1 0.839 · Y5 1.498 · S 1.718 · Z7 1.811 · Y4 1.823 · Z2 1.974 · X 2.002 · Y3 2.07 · H1 2.412 · Z6 2.437 · U 2.90* · Y6 3.136 · B-16 3.626 · L2 4.307 · A 13.01 · C-P ~14.3 · C-W 16.481 | *U 2.90 = frozen-formula value from harness data (prose-only leg); methodology-flagged, see §3 |
 
 ## 5. What died and what it means
 
@@ -133,12 +126,14 @@ Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3)
 1. **M-dedup:** the verdict's M-dedup death (dedup_barred 0.00) is SUPERSEDED — the 0.00 was measured with the dedup path compiled out (invalid); the corrected run gives 50.01 ≥ 0.4 → survives. Headline scoped kill unaffected.
 2. **§7 "8 scored metrics"** = {M1-content, M1-boundary, M2–M7}. Adopted as interpretation; needs Micah's sign-off as a counting-rule change.
 3. **Y2 excluded** from the battery (unfrozen proposal; the "53 arms ratified" footer is an arithmetic error).
-4. **D family (D/D-T/D-R)** remains PROVISIONAL — the flagship has a draft verdict, no scorecard, M8 not run. If D dies, the program thesis dies with it (frozen §3). This is the battery's largest open item and is NOT resolved by Y5's provisional blowout.
+4. **D family (D/D-T/D-R)** remains PROVISIONAL — the flagship has a draft verdict, no scorecard, M8 not run. If D dies, the program thesis dies with it (frozen §3). This is the battery's largest open item and is NOT resolved by any §7 championship computation.
+5. **§7 M5 methodology blocker (S7-RECOMPUTE 2026-09-21, decide-and-document):** the Y5↔U cost tie-break is PROVISIONAL pending a harmonized M5 re-measurement (both arms, same corpus coverage, frozen §5 formula: harness-measured RSS delta + slot table, per source byte). U's ≈1.22 B/B figure is not a compliant reading (slot_table+ledger, no RSS delta); the mechanical frozen-formula value is 2.90 on a prose-only leg vs Y5's 1.498 on prose+code. This determination decides no arm's verdict and changes no methodology — it records that the comparison is currently non-decidable.
 
 ## 7. Pending — needs Micah's word or further work
 
 - **Gap-fill verdicts:** complete (commit `4902dc51dc56f63773cf784367755e19921faefc`). Z2, Z7 PASS; T, K1, F-S, K3, D-R PROVISIONAL (blockers stated); V, W, Z8 UNADJUDICATED (evidence insufficient). KILLED 0 this round.
-- **10x scale leg:** blocked by the znc 2^25-byte slice limit for Y5, N, and others. Y5's blowout cannot confirm until this wall is crossed or the leg is re-scoped by amendment.
+- **M5 harmonization (unblocks 4 provisional §7 columns):** re-measure U and Y5 M5 on the same corpus coverage under the frozen §5 formula (harness-measured RSS delta + slot table, per source byte); then M1-content, M2, M3, M6-tax leave PROVISIONAL per the cost tie-break. No verdict changes.
+- **10x scale leg:** blocked by the znc 2^25-byte slice limit for N and others; Y5's 10x leg (T2) is still running — when it lands, every column depending on 10x numbers gets recomputed again (per the sheet's 1x/10x convention; the 1x recomputation above stands on its own).
 - **Sign-offs:** §7 metric-count interpretation (§6.2); B-family ≥2x-on-M3 kill-bar wording; whether M5 cost becomes binding via amendment.
 - **D-family completion:** D's draft verdict + missing M8/scorecard is the critical path for the program thesis.
 
@@ -150,3 +145,4 @@ Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3)
 - B-family verdict: `docs/lab/units/arms/B-8/VERDICT.md` (commit `59fb89777f3f`)
 - R2 verdict: `units/arms/R2/VERDICT.md` + `docs/lab/units/arms/R2/` (commits `0631928b4413`, `e6d92e47a304`, `8b6e11d28d2f`)
 - Championship computation: `/tmp/tracka_rows2.json` (working); method documented in §3 above.
+- §7 recomputation 2026-09-21 (crew S7-RECOMPUTE): working record in `~/workspace/NIGHT_RUN_2026-09-21.md` ("§7 recomputation" entry); U M5 source artifacts `units/arms/U/work/adjud/scorecard/m5-1x/` + Y5 `units/arms/Y5/evidence/scorecard_y5_1x.json`.
