@@ -97,4 +97,5 @@ and are unaffected by this round.
 ## Commits (tnn-native-lab)
 
 - `393ee6082511` — DATA: frozen corpus (240 facts)
-- (evidence commit follows)
+- `0331d932f3fa` — verdict + producer prompts + tnn sources
+- `ef3abe995acf` — evidence run logs (legA/legB/legC)
