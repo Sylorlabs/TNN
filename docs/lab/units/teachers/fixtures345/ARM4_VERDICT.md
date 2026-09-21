@@ -44,7 +44,7 @@ Evidence committed to `tnn-native-lab` branch of `sylorlabs/TNN` via `~/workspac
 - `docs/lab/units/teachers/fixtures345/ARM4_VERDICT.md` (this sheet)
 - `docs/lab/units/teachers/fixtures345/verify4/` (verifier script + logs)
 
-Commit SHA(s): <filled after commit>
+Commit SHA(s): `657d014731c0` (arm4.zag + ARM4_VERDICT.md + verify4/ evidence), `acf43ac7e568` (tape_hints.tape binary artifact)
 
 Binaries (`*_bin`), `.zag-cache/`, `.zagd.semantic-ready` were NOT committed per standing law.
 
