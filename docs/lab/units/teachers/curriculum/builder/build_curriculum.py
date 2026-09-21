@@ -182,29 +182,34 @@ def build_inventory(slice_id: str, buf: bytes, corpus: str):
 
 
 # ------------------------------------------------------- FLAW-V1 slot map
-def flaw_uid(slice_id: str) -> bytes:
-    # Flaw slots are a pure function of the slice id ONLY (B.7: "12 planted
-    # flaws per curriculum slice"). All sessions on a slice — 1x or 10x —
-    # plant the same 12 slots, so Crew 4 (arm-1 sessions) and every other
-    # crew derive the identical map from the slice id alone. (A 10x leg is 10
-    # repetitions of the same session content per the 1x->10x rule, not 10
-    # different flaw sets.)
-    return slice_id.encode("ascii")
+def variant_key(slice_id: str, leg_tag: str) -> str:
+    # FLAW_PLACEMENT.md §1: the flaw-slot preimage is keyed by session
+    # variant, so 1x and each 10x rep get distinct deterministic layouts.
+    return slice_id + ":" + leg_tag
+
+
+def leg_tags():
+    yield "1x", "1X"
+    for r in range(10):
+        yield "10x-R%d" % r, "10X:R%d" % r
 
 
 def u64be(b: bytes) -> int:
     return struct.unpack(">Q", b)[0]
 
 
-def build_slots(slice_id: str, buf: bytes, corpus: str, entries,
+def build_slots(vkey: str, buf: bytes, corpus: str, entries,
                 canon_counts: dict):
-    """FLAW-V1. Pure function of (slice_id, slice bytes). Returns 12 slots."""
+    """FLAW-V1. Pure function of (session-variant key, slice bytes).
+
+    vkey = "<slice_id>:<leg_tag>" per FLAW_PLACEMENT.md §1/§2, e.g.
+    "SHK-256K-0003:1X" or "SQL-1M-0007:10X:R4". Returns 12 slots."""
     n_units = len(entries)
     assert n_units >= FLAWS_PER_SLICE, \
-        "slice %s has %d units < 12 flaws" % (slice_id, n_units)
+        "slice %s has %d units < 12 flaws" % (vkey, n_units)
     unit_bytes = [e["u"].encode("ascii") for e in entries]
     firsts = [e["first"] for e in entries]
-    uid = flaw_uid(slice_id)
+    uid = vkey.encode("ascii")
     slots = []
     for j in range(FLAWS_PER_SLICE):
         ftype = TYPE_ORDER[j]
@@ -318,12 +323,16 @@ def main():
                     json.dump(inv_doc, f, sort_keys=True,
                               separators=(",", ":"), ensure_ascii=True)
                     f.write("\n")
-                # slot maps: the same 12 FLAW-V1 slots for every session
-                # on this slice (1x and all 10x reps)
+                # slot maps: 11 session variants per slice (1x + 10x-R0..R9),
+                # each with 12 leg-tagged FLAW-V1 slots (FLAW_PLACEMENT.md)
+                variants = {}
+                for vname, ltag in leg_tags():
+                    variants[vname] = build_slots(
+                        variant_key(slice_id, ltag), sbuf, corpus,
+                        entries, canon_counts)
                 slot_doc = {"slice_id": slice_id,
                             "flaw_procedure": "FLAW-V1",
-                            "slots": build_slots(slice_id, sbuf, corpus,
-                                                 entries, canon_counts)}
+                            "session_variants": variants}
                 with open(os.path.join(a.out, "sealed", "slot_maps",
                                        slice_id + ".json"), "w") as f:
                     json.dump(slot_doc, f, sort_keys=True,
@@ -353,9 +362,8 @@ def main():
         "min_len": MIN_LEN,
         "k1x_cap": K1X_CAP,
         "held_out_rule": "slices from [0, floor(0.9*len)); last 10%% reserved M2 T1",
-        "scale_rule": "10x = 10 reps per 1x slice (R0..R9), same bytes, same "
-                      "inventory, same 12 flaw slots (FLAW-V1 is a pure function "
-                      "of slice_id); never bigger slices",
+        "scale_rule": "10x = 10 reps per 1x slice (R0..R9), same bytes+inventory, "
+                      "leg-tagged flaw slots; never bigger slices",
         "corpora": {
             "shakespeare": {"file": SHK_NAME, "bytes": SHK_LEN,
                             "sha256": SHK_SHA256, "license": "public domain"},

@@ -12,6 +12,11 @@ All 44 inventories + 44 slot maps + manifest byte-identical across runs.
 (No RNG, no clock, no network, no locale in the builder — determinism is
 structural, this is the receipt.)
 
+Re-verified after the FLAW-V1 variant-key restoration (see commit
+"restore leg-tagged session variants"): two fresh full builds with the
+fixed builder are byte-identical to each other and to the build1
+artifacts above (manifest `d16dc554…f002`).
+
 ## V2 — Manifest
 
 - `manifests/slices_manifest.json` SHA-256:
