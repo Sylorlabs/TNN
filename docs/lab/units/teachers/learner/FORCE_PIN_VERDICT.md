@@ -61,3 +61,40 @@ One test-debug note (honest): the first wired run targeted the RETRACT at a stal
 
 Evidence committed to `tnn-native-lab` via `~/workspace/commit_to_branch.py` (all files <96KB; no binaries, no `.zagd` caches committed):
 - SHA: `<recorded at push time>`
+
+## 7. SCOPE-S EXECUTION NOTE (2026-09-21, marathon crew P1)
+
+Parked item 1 (above) is EXECUTED, not parked. Per Micah's 2026-09-21 standing
+instruction ("tests determine outcomes, not preferences; anything the evidence +
+preregistered bars decide gets DECIDED and DOCUMENTED, not escalated"), the
+RDTDT D2-A verdict — Scope-S surgical deprecation — landed as a single change:
+
+- `store.zag`: the 9-line `pins_add` writer (ex store.zag:149-157) DELETED.
+  Kept: `struct Pins`, `pins_init`, `pins_check` (read-only), the `dlb_digest`
+  pins fold, the always-0 `EV_PINRES` emission. The retained ELIMINATE read
+  path (`delib.zag:700`) is provably dead with no writer (`pins_check` -> 0
+  on all spans). The compiler is the fence: any future caller fails with
+  `call to unknown function 'pins_add'` (proven with a temporary bogus
+  caller, then removed).
+- `tests/test_pins.zag` REWRITTEN (the old suite was vacuous — T1-VACUITY —
+  and its only pin primitive no longer exists): HTD Test 3 §4 probe pattern
+  (fresh DLB, `fp_pin(FP_CALLER_TRAINER)` on a never-proposed span before any
+  proposal; exact AND overlap spans refuse `verdict=3 reason=2`; clear span
+  adopts; `EV_PINRES(101)` in the tape), plus the P3 orphan-resolution ports
+  (fp-pinned retract refused 3/2 with op=34/rc=102 audited; learner unpin
+  refused 101; trainer unpin clears; op=27 pin entry; forged learner attempt
+  refused 101 and audited; fp_gate_kill=102 contrast; round-trip leaves the
+  old registry at 0). PASSes on the tree (rc=0, 5/5 byte-identical,
+  MALLOC_PERTURB_ clean) and FAILS under an `fp_check`->0 mutation (rc=1,
+  no panic) — the vacuity is closed.
+- Orphans retired with note per `forcepin/PINS_ORPHAN_RESOLUTIONS.md` (P3):
+  `tests/test4_audit.zag`, `tests/test5_compliance.zag`,
+  `tests/test_selflock_probe.zag` removed from the live suite (their
+  retirement notes, stale-label corrections, and preserved observations are
+  recorded there and in the Scope-S addendum).
+- Verification on the real tree: all remaining learner suites PASS with
+  stdout byte-identical to the pre-change baseline; `dlb_digest` probe logs
+  sha-identical to baseline (`3ca6295e…`, N=3); B.4 replay of the recorded
+  964-byte tape bit-for-bit PASS; zero `pins_add` definitions or call sites
+  in buildable code (static audit).
+- Full evidence trail: `forcepin/PINS_SCOPES_DEPRECATION_ADDENDUM.md`.
