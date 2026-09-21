@@ -1023,3 +1023,20 @@ bar fired (the kill is the prereg working as intended — it is reported, not re
 *End of prereg draft. Status: PROPOSED. 140 sign-off items. No build until Micah signs.
 Drafted 2026-09-21 by the prereg coordinator from the nine catalog files + two dated
 amendments. All numeric bars, thresholds, N values, and frozen parameters are PROPOSED.*
+
+## §14 — SIGNATURE (FROZEN)
+
+**FROZEN 2026-09-21.** Signed by Micah: "go ahead and execute full plan and test everything"
+(chat, 2026-09-21). All 140 sign-off items (§0 A-1…A-58, M-1…M-57, T-1…T-16, R-1…R-9) are
+approved as proposed, including the defaults: test-both on the Q tie-break and the R2/Z1
+merge (53 arms stand), grounded-consequence defined per R-1 as proposed, taught words
+judgment-held per the installed-vs-learned ruling (trainer decides arrival status, default
+learned, learner reverses everything except a visible audited force-install).
+
+Micah's further instruction on scope: "seems like you're being too centered, be more wide" —
+execution runs maximally parallel and wide: all tracks concurrently, plus a non-binding
+exploratory track (extra corpora, extra adversarial probes, R23 ancestry, cache-layer design)
+whose findings may propose future amendments but cannot change frozen bars.
+
+Any change from this point follows the §13 amendment procedure — no silent changes to frozen
+rules, bars, metrics, or kill criteria.
