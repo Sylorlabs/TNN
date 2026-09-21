@@ -128,3 +128,31 @@ VERDICT.md; no R numbers invented.
 **Committing:** source + evidence only (no binaries, no .zagd/.zag-cache, no
 corpora) to `sylorlabs/TNN` branch `tnn-native-lab` under
 `docs/lab/units/arms/R2/`.
+
+## 2026-09-21 — R2 re-evaluation crew (R now dead, re-run of the blocked leg)
+
+**Context:** Arm R was KILLED (binding OR-kill, committed
+`sylorlabs/TNN@76849610b8`): R beat the 64B baseline on boundary F1 (+23.1
+prose / +16.9 code) but held-out M1 recall tied 100%-vs-100% on both corpora,
+so disjunct 2 fired. R2's kill disjunct (a) — "verified-boundary recall (M1)
+on held-out probes does not beat arm R by ≥3 points" — was PROVISIONAL-
+PENDING-R; it is now adjudicated against R's committed numbers.
+
+**Re-run:** m1-1x-prose and m1-1x-code re-run twice each via
+`units/arms/harness/run_metric.sh` against `corpora/r1` with the frozen
+`work/r2_bin`: rc=0×2, stdout IDENTICAL, fatal=0. recall 100.0 / boundary
+100.0 both corpora; swap 63/63; ID probe PASS. Fragments in
+`work/r2_rerun/m1-1x-{prose,code}/`.
+
+**Corpus note:** `corpora/r1/prose.bin` (5,638,480 B, mtime 05:45) differs
+from the file at the original battery run (units 11,871 → 13,970 now).
+Kill-relevant metrics (recall/boundary 100.0) unchanged; both reruns
+internally byte-identical.
+
+**Adjudication:** R2 M1 recall 100.0/100.0 vs R's committed 100.0/100.0 →
+margin 0.0 < 3 points → disjunct (a) TRUE → **R2 KILLED (binding)**.
+Disjunct (b) FALSE (proposals-per-accepted-cut falls on both corpora:
+prose 12.577→5.350, code 3.869→2.338 — core claim holds). Ceiling-effect
+tie, not a loss; mirrors R's own death on the same ceiling. R2/Z1 merge
+A-37 does not proceed. Final VERDICT.md written; docs/lab/units/arms/R2/
+populated (ARM_SPEC, BUILD_LOG, VERDICT, scorecard_r1_1x.json, evidence/).
