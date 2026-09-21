@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Analyze TOGETHER pipeline logs: class-2 composites, class-1 composites,
-per-slice §B.7 tables, and the 9-source conflict matrix.
+per-slice §B.7 tables, and the 6-source conflict matrix.
 
 Usage: analyze.py <logfile> [logfile ...]
 
@@ -13,14 +13,13 @@ TEACHER_REP / TEACHER / CLASS1 / B7C2 lines and prints:
 import sys
 from collections import defaultdict
 
-SRC_NAMES = ["sol", "grok-4.6", "glm-5.3-flash", "glm-5.3-flash-search",
-             "glm-5.3-flash-think-search", "hy3", "step-3.7-flash",
+SRC_NAMES = ["sol", "grok-4.6", "hy3", "step-3.7-flash",
              "swe-1-6-slow", "muse-native"]
 
 results = defaultdict(dict)   # (label,rep,scale) -> {metric:(num,den)}
 traps = defaultdict(dict)     # (label,rep) -> {fam:(c,20)}
 slices = defaultdict(list)     # label -> [(cs,hits,nears,miss,score,pass,adopt,mast,tw,leak)]
-ccm = defaultdict(dict)       # rep -> {id:(status, [18 vals])}
+ccm = defaultdict(dict)       # rep -> {id:(status, [12 vals])}
 shas = {}
 digests = []
 teacher_rep = None
@@ -45,7 +44,7 @@ for path in sys.argv[1:]:
             slices[label].append(tuple([int(x) for x in p[2:12]]))
         elif p[0] == "CCM" and len(p) >= 4:
             rep, fid, status = int(p[1]), int(p[2]), int(p[3])
-            vals = [int(x) for x in p[4:22]]
+            vals = [int(x) for x in p[4:16]]
             ccm[rep][fid] = (status, vals)
         elif p[0] == "CORPUS_SHA256" and len(p) >= 3:
             shas[p[1]] = p[2]
@@ -138,18 +137,18 @@ for label in ("C1", "C2"):
         print(f"    slice {cs}: hits={hits}/12 score={score/10:.1f} {bar} "
               f"adopt={adopt} mastery={mast}/24 tw={tw} leak={leak}")
 
-print("\n-- conflict matrix (9 sources x 240 ids) --")
+print("\n-- conflict matrix (6 sources x 240 ids) --")
 for rep in sorted(ccm):
     m = ccm[rep]
     taught = sum(1 for st, _ in m.values() if st == 0)
     withheld = sum(1 for st, _ in m.values() if st == 1)
     # per-source split involvement
-    src_split = [0] * 9
+    src_split = [0] * 6
     split_ids = []
     for fid, (st, vals) in sorted(m.items()):
         if st == 1:
             split_ids.append(fid)
-            for s in range(9):
+            for s in range(6):
                 o, pr = vals[2 * s], vals[2 * s + 1]
                 if o != vals[0] or pr != vals[1]:
                     src_split[s] += 1
@@ -158,13 +157,13 @@ for rep in sorted(ccm):
     print(f"    coverage cost: {withheld}/228 curriculum ids withheld "
           f"({100.0*withheld/228:.1f}%)")
     print(f"    per-source split involvement: " +
-          ", ".join(f"{SRC_NAMES[s]}={src_split[s]}" for s in range(9)))
+          ", ".join(f"{SRC_NAMES[s]}={src_split[s]}" for s in range(6)))
     if split_ids:
         print(f"    split ids ({len(split_ids)}): {split_ids[:40]}"
               + ("..." if len(split_ids) > 40 else ""))
         for fid in split_ids[:12]:
             st, vals = m[fid]
-            legs = " ".join(f"{SRC_NAMES[s]}=({vals[2*s]},{vals[2*s+1]})" for s in range(9))
+            legs = " ".join(f"{SRC_NAMES[s]}=({vals[2*s]},{vals[2*s+1]})" for s in range(6))
             print(f"      id {fid}: {legs} -> WITHHELD+AUDITED")
 
 print("\n-- teacher / class-1 / b7c2 --")
