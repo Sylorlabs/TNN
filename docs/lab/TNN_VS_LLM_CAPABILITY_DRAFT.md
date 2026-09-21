@@ -32,6 +32,43 @@ Every TNN result above was produced on a single Linux VM, CPU-only, zero GPUs,
 fully deterministic. Wherever an LLM equivalent exists at all, it requires datacenter
 scale — and still doesn't replicate the capability, only approximates it.
 
+## The catch — no free lunch still stands
+
+TNN running 100% on 8GB of RAM is real, but nothing is free. The prices TNN pays:
+
+1. **Deliberation costs per thought.** Every memory act goes through inspect / propose /
+   commit / refuse, plus ledger writes. An LLM forward pass is cheap matrix math; TNN pays
+   deliberation overhead on everything it learns. We already measured O(n²) free-slot
+   scanning at 10x scale — deliberate systems have per-operation costs that thoughtless
+   systems don't.
+2. **Breadth is the bill.** TNN learns deeply, but each item costs a deliberation. LLMs
+   amortize one giant run across the whole internet, shallowly. For TNN to reach that
+   breadth it must perform billions of deliberate learning acts. Whether that's tractable
+   is the program's central open bet — the scale legs exist to test exactly this.
+3. **Design cost upfront.** Every TNN capability was deliberately built. LLMs get
+   capabilities as free (if unreliable) side effects of scale. TNN pays engineering for
+   everything.
+4. **Determinism isn't free.** Byte-identical replay means logging complete internal
+   state; ledgers grow (16MB × 10 runs in the M8 battery). LLMs pay no such storage tax.
+5. **Some machinery may be ornamental.** The felt-intensity trial failed honestly —
+   15,000+ valid readings changed nothing. No-free-lunch means some organs might not earn
+   their keep, and the kill bars exist to find out.
+
+One line: **TNN trades compute-per-thought for thought-per-compute.** Whether
+deep-and-expensive beats shallow-and-cheap at world scale is unproven — that's what the
+scale legs are for.
+
+## Learning, head to head
+
+| To... | LLM | TNN |
+|---|---|---|
+| Learn one new thing reliably | Fine-tuning run: curated data, multiple epochs, hyperparameter tuning, regression evals; collateral changes | One deliberate act: inspect → hypothesize → commit, ledgered |
+| Fix one wrong belief | Machine unlearning is an unsolved problem; patches shift other behavior unpredictably | Deliberate revision, first-class: 180/180 false claims revised, 0 true ones touched |
+| Learn from a single example | Few-shot is prompting, not learning — nothing is retained past the context window | Single evidence confrontation → committed memory |
+| Know what changed after learning | Nobody can enumerate what a fine-tune changed | The ledger lists every commit with its evidence and episode |
+| Learn without forgetting | Catastrophic forgetting — the reason continual learning is a whole field | Strength-gated deliberate retention; revision is explicit, never silent erosion (our churn-freeze finding is the honest version of this problem, under test) |
+| Learn from few exposures | Data-hungry by construction: patterns need thousands to millions of exposures across epochs | Adapts at the frozen threshold from few exposures |
+
 ## The honest reverse
 
 A comparison that only runs one way is advertising, not evidence. What LLMs do that
