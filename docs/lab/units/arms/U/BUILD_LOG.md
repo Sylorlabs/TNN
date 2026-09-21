@@ -27,6 +27,19 @@ until the blocks are resolved.
 - M8 gate via `m8_gate.sh`: PASS (5 perturbations × 2 reruns, byte-identical).
 
 ## Known issues
-- Duel heisenbug at E=200+ (see AMBIGUITIES.md A8). E=0..100 clean.
+- Duel heisenbug at E=150+: ROOT-CAUSED 2026-09-21 — silent i32 overflow in
+  `duel_edits` edit-position computation `(e*total)/E` (wraps negative at
+  r1 corpus sizes for E>=150; mirror write `prose[off]=255` panics). Fixed
+  with i64 arithmetic; same latent overflow in `t_m9` fixed. Full duel
+  E=0..1000 completes cleanly; both reruns byte-identical stdout, rc=0.
 - The custom runner is not the official complete battery (missing memorizer
   controls). Results are provisional.
+
+## Rebuild (2026-09-21, heisenbug fix)
+- Fixed `duel_edits` and `t_m9` in `cl/arm.zag` (i64 edit-position
+  arithmetic; two-line change + comments).
+- New binary: `/home/hatch/workspace/u_test` (rebuilt; 236,105 bytes main).
+- Full duel re-run: E=0..1000, both reruns byte-identical, rc=0.
+- M9 re-run: e0=175944, e10=175944, e50=203976, e100=727756, e200=727848,
+  e500=727204, e1000=727204, rekey=0, hits=0; byte-identical across reruns.
+- No commit of binaries, .zagd, .zag-cache/ (workspace build artifacts only).

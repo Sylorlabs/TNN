@@ -41,11 +41,29 @@ materials available; the raw numbers are reported as-is.
 The M9 text lines interleaved with METRIC_JSON, breaking the parser. Fixed
 by removing text lines; JSON fields carry the data.
 
-## A8. Duel heisenbug — NOTED
-The duel (E=200+) intermittently panics with "slice index out of bounds".
-The bug is layout-sensitive (heisenbug). E=0..100 complete cleanly and show
-U beating D on total cost at every point. The partial duel data is reported
-as-is; the panic is under investigation.
+## A8. Duel heisenbug — ROOT-CAUSED AND FIXED (2026-09-21)
+Was: "slice index out of bounds" panic at E>=150 (bisected: E=100 clean,
+E=150 panics). Initial suspicion (uninitialized sentinel / heap layout) was
+WRONG. Root cause: **silent i32 overflow in the edit-position computation**
+`gp = (e*total)/E` in `duel_edits` (`cl/arm.zag`). At r1 corpus sizes
+(total = 14,938,062 bytes), `(E-1)*total` exceeds i32 range for E>=150
+(E=150: max 2,225,771,238 > 2,147,483,647; E=100: max 1,478,868,138, in
+range — matches the observed boundary exactly). The product wraps to a
+negative value (observed: e=144, E=150 -> gp=-14,292,575); the guarded
+`u_edit`/`d_edit` call returns -1 harmlessly, but the expected-bytes mirror
+write `prose[off]=255` indexes the slice directly -> deterministic panic.
+"Layout-sensitive" was a misdiagnosis: the bug is a pure function of corpus
+byte sizes, deterministic given the corpus.
+Fix: compute the edit position in i64 —
+`gp = (((e as i64)*(total as i64))/(E as i64)) as i32` (gp < 2^31, fits).
+The identical latent overflow in `t_m9` (`gp=(e*total)/1000`, wraps for
+e>=144) was fixed the same way; M9's e200/e500/e1000 levels previously ran
+with wrapped (wrong) edit positions but did not panic. M9 re-run with the
+fix: plateau holds (e200=727848, e500/e1000=727204, rekey=0, hits=0),
+byte-identical across reruns.
+Full duel E=0..1000 now completes (both reruns byte-identical, rc=0);
+E=0..100 rows unchanged vs pre-fix (confirming the fix is behavior-neutral
+where no overflow occurred). See VERDICT.md for the completed sweep.
 
 ## A9. r10 corpus provenance — BLOCKED
 CORPORA.md says r10 should be deterministically built by committed
