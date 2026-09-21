@@ -31,7 +31,7 @@
 - **REBUILT:** nothing.
 
 ## Commits (evidence-bearing, branch `tnn-native-lab`)
-- <commit SHA to be filled after commit_to_branch.py run>
+- `bdffce301a5a7800f17f8a24ff63443b476d34e0` (parent `2965a9966fbf`) — both files below
 - Files: `docs/lab/units/teachers/arm1/ARM1_VERDICT.md`, `docs/lab/units/teachers/arm1/verify/AUDIT_LOG.md`
 
 ## PARKED FOR MICAH (needs his decision — do not treat as approved)
