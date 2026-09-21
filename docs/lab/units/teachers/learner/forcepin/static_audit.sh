@@ -74,21 +74,33 @@ for name in ('fp_pin','fp_unpin'):
 EOF
 [ $? -ne 0 ] && { echo "STATIC FAIL: guard dominance"; FAIL=1; }
 
-# ---- claim B: live learner tree has no fp_ reachability ----
+# ---- claim B: live learner tree has no fp_ MUTATOR reachability ----
+# (Post-wiring update 2026-09-21: the wiring patch is now LIVE in delib.zag,
+# so read-side fp_ symbols are expected. Claim B now proves the stronger
+# invariant that matters: no live learner path can SET or CLEAR a pin —
+# zero calls to the fp_pin/fp_unpin mutators anywhere in the live tree.)
 say "B.live_tree"
-if grep -rn 'fp_pin(\|fp_unpin(\|fp_check(\|fp_gate(\|FPStore\|fp_init(' \
+if grep -rn 'fp_pin(\|fp_unpin(' \
      "$LEARNER"delib.zag "$LEARNER"store.zag "$LEARNER"driver.zag \
      "$LEARNER"pcodec.zag "$LEARNER"tests/ 2>/dev/null; then
-  echo "STATIC FAIL: live learner tree references fp_ symbols"; FAIL=1
-else say "B.live_tree.no_fp_symbols.ok"; fi
+  echo "STATIC FAIL: live learner tree calls a pin mutator"; FAIL=1
+else say "B.live_tree.no_mutator_calls.ok"; fi
+# read-side symbols expected post-wiring; enumerate for the record
+for sym in 'fp_init(' 'fp_check(' 'fp_gate(' 'fp_gate_kill(' 'FPStore'; do
+  n=$(grep -rc "$sym" "$LEARNER"delib.zag 2>/dev/null)
+  say "B.live_tree.$sym.count=$n"
+done
 
-# ---- claim C: scratch wiring touches only read-side symbols ----
+# ---- claim C: live wiring touches only read-side symbols ----
+# (Post-wiring update 2026-09-21: checks the LIVE delib.zag, not the scratch
+# copy. The scratch copy is kept as the pre-wiring validation record.)
 say "C.wiring"
-if grep -n 'fp_pin(\|fp_unpin(' "$SCRATCH"; then
-  echo "STATIC FAIL: wiring patch calls a pin mutator"; FAIL=1
+LIVE=$LEARNER/delib.zag
+if grep -n 'fp_pin(\|fp_unpin(' "$LIVE"; then
+  echo "STATIC FAIL: live wiring calls a pin mutator"; FAIL=1
 else say "C.wiring.no_mutator_calls.ok"; fi
 for sym in 'fp_init(' 'fp_check(' 'fp_gate(' 'fp_gate_kill('; do
-  n=$(grep -c "$sym" "$SCRATCH")
+  n=$(grep -c "$sym" "$LIVE")
   say "C.wiring.$sym.count=$n"
 done
 # fp_gate appends audit only: confirm its body has no pin-table stores

@@ -4,6 +4,7 @@
 // schematic choice is provisional and recorded in OPERATIONALIZATION.md.
 // Zero RNG, zero wallclock: fixed tables, index tie-breaks, FNV digests.
 @import("store.zag")
+@import("forcepin/forcepin.zag")
 
 // Verdicts (match harness §T-4).
 const V_ADOPT:i64 = 1
@@ -80,11 +81,12 @@ const ST_POOL:i64 = 2048
 
 struct DLB {
     stim:[]u8, stim_len:i64,
-    hs:*HypStore, pins:*Pins, led:*Ledger,
+    hs:*HypStore, pins:*Pins, led:*Ledger, fpins:*FPStore,
     cfg_prov:i64, cfg_promote:i64, cfg_budget:i64, cfg_ownbar:i64, cfg_domin:i64,
     turn:i64, budget_left:i64, halted:i64,
     n_decide:i64, n_adopt:i64, n_revise:i64, n_reject:i64, n_defer:i64,
     tw_span:[]i64, tw_acc:[]i64, tw_conf:[]i64,
+    tw_sstart:[]i64, tw_dec:[]i64,
     tw_head:i64, tw_count:i64, tw_sum_span:i64, tw_sum_acc:i64,
     defq:[]u8, defq_off:[]i64, defq_len:[]i64, defq_hyp:[]i64, defq_n:i64,
     pending_appeal:i64,
@@ -104,6 +106,7 @@ fn dlb_new(stim:[]u8, stim_len:i64, cfg_prov:i64, cfg_promote:i64,
     d[0].stim_len = stim_len
     d[0].hs = hs_init()
     d[0].pins = pins_init()
+    d[0].fpins = fp_init(FP_CAP_DEF, FP_AUDIT_CAP_DEF)
     d[0].led = led_init()
     d[0].cfg_prov = cfg_prov
     d[0].cfg_promote = cfg_promote
@@ -121,6 +124,14 @@ fn dlb_new(stim:[]u8, stim_len:i64, cfg_prov:i64, cfg_promote:i64,
     d[0].tw_span = nio_alloc((TW_CAP*8) as i32) as []i64
     d[0].tw_acc = nio_alloc((TW_CAP*8) as i32) as []i64
     d[0].tw_conf = nio_alloc((TW_CAP*8) as i32) as []i64
+    d[0].tw_sstart = nio_alloc((TW_CAP*8) as i32) as []i64
+    d[0].tw_dec = nio_alloc((TW_CAP*8) as i32) as []i64
+    // Explicit zero: nio_alloc does not promise zeroed heap, and the frozen
+    // B.8 window reads all 200 ring slots once 200 proposals are noted.
+    let tss:[]i64 = d[0].tw_sstart
+    let tdc:[]i64 = d[0].tw_dec
+    let tzw:i64 = 0
+    while (tzw < TW_CAP) { tss[tzw] = 0; tdc[tzw] = 0; tzw = tzw + 1 }
     d[0].tw_head = 0
     d[0].tw_count = 0
     d[0].tw_sum_span = 0
@@ -139,7 +150,7 @@ fn dlb_new(stim:[]u8, stim_len:i64, cfg_prov:i64, cfg_promote:i64,
     d[0].st_ev = nio_alloc((ST_POOL*8) as i32) as []i64
     d[0].st_n = 0
     d[0].st_pool = 0
-    d[0].scratch = nio_alloc(16384)
+    d[0].scratch = nio_alloc(24576)
     d[0].dec_verdict = 0
     d[0].dec_reason = 0
     d[0].dec_rs = 0
@@ -207,6 +218,19 @@ fn dlb_digest(d:*DLB) i64 {
         p_set64(buf, o, ps[j]); o = o + 8
         p_set64(buf, o, pe[j]); o = o + 8
         j = j + 1
+    }
+    // B.6 patch: force-pins are part of the deliberation state.
+    let fpn:*FPStore = d[0].fpins
+    let fps:[]i64 = fpn[0].ss
+    let fpe:[]i64 = fpn[0].se
+    let fpt:[]i64 = fpn[0].ptrn
+    p_set64(buf, o, fpn[0].n); o = o + 8
+    let fj:i64 = 0
+    while (fj < fpn[0].n) {
+        p_set64(buf, o, fps[fj]); o = o + 8
+        p_set64(buf, o, fpe[fj]); o = o + 8
+        p_set64(buf, o, fpt[fj]); o = o + 8
+        fj = fj + 1
     }
     p_set64(buf, o, d[0].led[0].chain); o = o + 8
     p_set64(buf, o, d[0].turn); o = o + 8
@@ -409,12 +433,20 @@ fn shift_search(d:*DLB, p:*Prop, occ0:i64, fbs:*i64, fbe:*i64, fbsc:*i64, fsub:*
     }
 }
 
-// tw_note: tripwire update. Returns 1 on fire. Immediate rule: confidence 255
-// covering >5% of the stimulus. Rolling rule (200 proposals): coverage ≥0.95
-// AND accept ≥0.95 AND max-confidence ≥0.90 — all three together.
-fn tw_note(d:*DLB, span_len:i64, accepted:i64, conf:i64) i64 {
+// tw_note: frozen B.8 tripwire. Returns 1 on fire. Pure; zero RNG, zero
+// wallclock; logical proposal order only.
+// Immediate rule: conf==255 covering >5% of the stimulus fires at once.
+// Rolling rule: evaluated only once 200 consecutive proposals have been
+// noted; over the last 200 — union coverage of stimulus bytes ≥ 0.95 AND
+// ADOPT/decided ≥ 0.95 (REVISE counts as non-accept; DEFER is suspended
+// judgment, not a decision, and is excluded from the denominator) AND
+// fraction of proposals with conf==255 ≥ 0.90 — all three together.
+// Integer-exact (cross-multiplied), matching the harness reference.
+fn tw_note(d:*DLB, span_start:i64, span_len:i64, decided:i64, accepted:i64, conf:i64) i64 {
     if (conf == 255 && span_len * 20 > d[0].stim_len) { return 1 }
+    let ss:[]i64 = d[0].tw_sstart
     let sp:[]i64 = d[0].tw_span
+    let dc:[]i64 = d[0].tw_dec
     let ac:[]i64 = d[0].tw_acc
     let cf:[]i64 = d[0].tw_conf
     let idx:i64 = d[0].tw_head % TW_CAP
@@ -424,25 +456,54 @@ fn tw_note(d:*DLB, span_len:i64, accepted:i64, conf:i64) i64 {
     } else {
         d[0].tw_count = d[0].tw_count + 1
     }
+    ss[idx] = span_start
     sp[idx] = span_len
+    dc[idx] = decided
     ac[idx] = accepted
     cf[idx] = conf
+    // tw_sum_span/tw_sum_acc are retained for dlb_digest continuity only;
+    // the fire rule below is the frozen B.8 window computation.
     d[0].tw_sum_span = d[0].tw_sum_span + span_len
     d[0].tw_sum_acc = d[0].tw_sum_acc + accepted
     d[0].tw_head = d[0].tw_head + 1
-    let maxc:i64 = 0
+    if (d[0].tw_head < TW_CAP) { return 0 }
+    // Union coverage over the last TW_CAP proposals: a byte counts once no
+    // matter how many proposals cover it (overlapping spans do NOT inflate).
+    let sl:i64 = d[0].stim_len
+    if (sl <= 0) { return 0 }
+    let bits:[]u8 = nio_alloc(sl as i32)
+    if (bits.len == 0) { return 0 }
+    let z:i64 = 0
+    while (z < sl) { bits[z] = 0; z = z + 1 }
     let i:i64 = 0
-    while (i < d[0].tw_count) {
-        if (cf[i] > maxc) { maxc = cf[i] }
+    while (i < TW_CAP) {
+        let a:i64 = ss[i]
+        let b:i64 = a + sp[i]
+        if (a < 0) { a = 0 }
+        if (b > sl) { b = sl }
+        let k:i64 = a
+        while (k < b) { bits[k] = 1; k = k + 1 }
         i = i + 1
     }
-    let n:i64 = d[0].tw_count
-    if (n >= 20) {
-        if (d[0].tw_sum_span * 100 >= 95 * n * d[0].stim_len &&
-            d[0].tw_sum_acc * 100 >= 95 * n &&
-            maxc * 100 >= 90 * 255) {
-            return 1
-        }
+    let covered:i64 = 0
+    let j:i64 = 0
+    while (j < sl) { if (bits[j] != 0) { covered = covered + 1 } j = j + 1 }
+    nio_free(bits)
+    let ndec:i64 = 0
+    let nad:i64 = 0
+    let nmc:i64 = 0
+    let m:i64 = 0
+    while (m < TW_CAP) {
+        if (dc[m] == 1) { ndec = ndec + 1 }
+        if (ac[m] == 1) { nad = nad + 1 }
+        if (cf[m] == 255) { nmc = nmc + 1 }
+        m = m + 1
+    }
+    if (ndec > 0 &&
+        covered * 100 >= 95 * sl &&
+        nad * 100 >= 95 * ndec &&
+        nmc * 100 >= 90 * TW_CAP) {
+        return 1
     }
     return 0
 }
@@ -473,14 +534,29 @@ fn dlb_retract(d:*DLB, p:*Prop) i64 {
     let reason:i64
     let lidx:i64
     if (tgt >= 0) {
-        st[tgt] = HS_KILLED
-        verdict = V_ADOPT
-        reason = R_RETRACT_OK
-        lidx = led_add(led, AUD_RETRACT, tgt, 7, p[0].seq, t, 0, 0, 0,
-                       hs_s[tgt], hs_e[tgt], 0, 0, 0, d[0].turn,
-                       dlb_digest(d), dlb_digest(d))
-        dlb_step_ev(d, s2, ev(EV_ELIM, 7))
-        d[0].n_adopt = d[0].n_adopt + 1
+        // B.6 patch: the learner cannot reverse a force-pin — not even via
+        // teacher RETRACT. Refuse with frozen §L R2 (CONFLICTS_PINNED); the
+        // attempt is audited in the force-pin ledger as the learner's action.
+        let prs:i64 = hs_s[tgt]
+        let pre2:i64 = hs_e[tgt]
+        if (fp_gate_kill(d[0].fpins, prs, pre2) != FP_OK) {
+            verdict = V_REJECT
+            reason = R_R2
+            lidx = led_add(led, AUD_RETRACT, tgt, 2, p[0].seq, t, 0, 0, 0,
+                           hs_s[tgt], hs_e[tgt], 0, 0, 0, d[0].turn,
+                           dlb_digest(d), dlb_digest(d))
+            dlb_step_ev(d, s2, ev(EV_ELIM, 200))
+            d[0].n_reject = d[0].n_reject + 1
+        } else {
+            st[tgt] = HS_KILLED
+            verdict = V_ADOPT
+            reason = R_RETRACT_OK
+            lidx = led_add(led, AUD_RETRACT, tgt, 7, p[0].seq, t, 0, 0, 0,
+                           hs_s[tgt], hs_e[tgt], 0, 0, 0, d[0].turn,
+                           dlb_digest(d), dlb_digest(d))
+            dlb_step_ev(d, s2, ev(EV_ELIM, 7))
+            d[0].n_adopt = d[0].n_adopt + 1
+        }
     } else {
         verdict = V_REJECT
         reason = R_RETRACT_REFUSED
@@ -623,9 +699,19 @@ fn dlb_consider(d:*DLB, p:*Prop, wire:[]u8, is_appeal:i64, reduced:i64) i64 {
     let s2:i64 = dlb_step_begin(d, hyp, STEP_ELIMINATE)
     let pinres:i64 = pins_check(pins, ss, se)
     dlb_step_ev(d, s2, ev(EV_PINRES, pinres))
+    // B.6 patch: trainer force-pin on the span refuses the proposal with
+    // frozen §L R2 (CONFLICTS_PINNED); the refusal is audited in the
+    // force-pin ledger (op=34) as the learner's attempt.
+    let fpin:i64 = fp_check(d[0].fpins, ss, se)
+    dlb_step_ev(d, s2, ev(EV_PINRES, fpin + 100))
     let elim:i64 = 0
     let bnd:i64 = boundary_ok(d, ss, se, kind)
     if (pinres > 0) { elim = R_R2 }
+    if (fpin > 0) {
+        elim = R_R2
+        let fgrc:i64 = fp_gate(d[0].fpins, ss, se)
+        dlb_step_ev(d, s2, ev(EV_PINRES, fgrc + 200))
+    }
     if (elim == 0 && occ == 0) { elim = R_R1 }
     if (elim == 0 && valid == 0) { elim = R_R3 }
     if (elim == 0 && contra > 0) { elim = R_R4 }
@@ -788,11 +874,15 @@ fn dlb_apply(d:*DLB, p:*Prop, hyp:i64, verdict:i64, reason:i64,
                               0, 0, 0, 0, 0, d[0].turn, pre, post)
         if (li2 < 0) { d[0].halted = 2; return -2 }
     }
-    // Tripwire (non-retract proposals only).
+    // Tripwire (non-retract proposals only). Frozen B.8: DEFER is suspended
+    // judgment, not a decision — excluded from the accept-rate denominator.
     if (kind != P_K_RETRACT && hyp >= 0) {
         let acc:i64 = 0
-        if (verdict == V_ADOPT) { acc = 1 }
-        if (tw_note(d, p[0].span_end - p[0].span_start, acc, conf) == 1) {
+        let dec:i64 = 0
+        if (verdict == V_ADOPT) { acc = 1; dec = 1 }
+        if (verdict == V_REVISE) { dec = 1 }
+        if (verdict == V_REJECT) { dec = 1 }
+        if (tw_note(d, p[0].span_start, p[0].span_end - p[0].span_start, dec, acc, conf) == 1) {
             let lt:i64 = led_add(led, AUD_TRIPWIRE, hyp, 99, seq, 0, 0, 0, 0,
                                  0, 0, 0, 0, 0, d[0].turn, pre, post)
             if (lt < 0) { d[0].halted = 2; return -2 }
