@@ -155,9 +155,12 @@ Patch buffers (64 B) and the 64-byte recall scratch are therefore exact.
 - `m6-p2c-1x` / `m6-c2p-1x`: train on the t1 tier to the M2 criterion;
   **freeze the dictionary derived from the train tier** (R's learned
   segmentation policy); apply the frozen dictionary to the transfer
-  corpus via the exact SA-interval narrowing walk
-  (`maxlen_frozen[i]` = max `l ≤ L` with ≥2 train occurrences — proven
-  exact in §6); ingest allowed, policy frozen; M1 recall + boundary and
+  corpus via a suffix automaton over the reversed train substrings
+  (`maxlen_frozen[i]` = max `l ≤ L` with ≥1 train occurrence — the
+  dictionary semantics; the earlier ≥2 SA-narrowing was a bug, corrected
+  2026-09-21 (maxlen arrays matched on fixtures; complete cut-array
+  equivalence not yet proven);
+  ingest allowed, policy frozen; M1 recall + boundary and
   100-defect revision on the transfer corpus; tax per §10. **S3 evidence:**
   boundary-F1 transfer gap (frozen-dictionary F1 vs fresh-dictionary F1
   on the transfer corpus) — the domain-generality measure. (Design-doc

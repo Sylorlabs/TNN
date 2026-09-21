@@ -68,3 +68,53 @@
 - Held-out M1 recall protocol underdetermined; strict "beat" problematic if both reach 100%.
 - A15 swap schedule: PROVISIONAL-PENDING-FREEZE.
 - M7 reuse formula, C′ edit, M6 frozen-dictionary interpretation, A17 M8 interpretation: provisional.
+
+## 2026-09-21: Optimization port to production (cl/arm.zag)
+
+### Head-to-head results (mid-size 1 MiB fixture)
+- Candidate C (truncated prefix doubling + inlined access): 55.1s wall, 4.2s CPU.
+- Candidate D (end-aware 64-pass LSD radix): 161.0s wall, 10.3s CPU.
+- Candidate F (self-repeat suffix automaton): >245s (killed), not competitive.
+- Winner: Candidate C.
+
+### Ported to cl/arm.zag (exact, proven by x-segcheck on all fixtures)
+1. `seg_build_sa`: truncated prefix doubling (stops at L=64), inlined little-endian paired-array access.
+2. `seg_maxlen`: capped from-scratch adjacent LCP fold (replaces Kasai).
+3. `seg_dp`: windowed DP (128-entry ring) with split literal/repeat loops.
+4. `seg_frozen_maxlen`: suffix-automaton over reversed train (replaces SA narrowing; corrects >=2 to >=1 occurrence).
+
+### Fixture verification (port_test_bin x-segcheck)
+- tiny (240B): 4 chunks, MATCH.
+- fx-rand (64KB): 1610 chunks, MATCH.
+- fx-repeat (64KB): 1024 chunks, MATCH.
+- fx-nul (32KB): 513 chunks, MATCH.
+- fx-edge (16B): 6 chunks, MATCH.
+
+### Full prose timing (5.6MB)
+- Before split-loop DP: 17m08s wall, 74.0s CPU.
+- After: 14m18s wall, 68.1s CPU (same 547,545 chunks).
+
+### Interface fixes
+- main() rewritten: official mode names (m1-1x-prose, m2-t1-prose, ..., m8-1x).
+- t_m3: official M3 fields (survival, fresh_recall, mgmt_entries, weaken_handled, freeze, valuable).
+- t_m4: official M4 fields (units, attempts, repairs, recall_post_repair, salvage, unrepaired_ids).
+- t_m5: official M5 (learned units, ledger.bin to CWD).
+- t_m5_baseline: same-sized empty store + ledger.
+- t_m6: official M6 (rec/bnd/rev/tax tenths).
+- t_m8: official M8 (5 artifacts, 5 perturbations).
+- j_begin now takes scale param.
+
+## 2026-09-21: 2^25 slice limit bug fix (code corpus)
+
+**Bug:** m1-1x-code (9.5MB) panicked with "slice index out of bounds". Root cause:
+cut-boundary arrays (b0/b1) were allocated as `(n+1)*4` bytes. For n=9,515,341,
+this is 38MB > 33,554,432 (2^25), the znc maximum indexable slice size.
+
+**Fix:** Changed all cut-array allocations from `bse=n+1` to `bse=(n+2)/2`
+(split point), with b0/b1 each `bse*4` bytes. The existing `cget`/`cset`
+already handle split arrays. For n=9.5M: bse=4,757,671, each half 19MB < 33.5MB.
+
+**Verification:**
+- x-segcheck on 9.5MB code: `X-SEGCHECK,545132,1` (exact match)
+- m1-1x-code: 545,132 chunks, 100% recall, 64/64 tamper caught
+- All 18 cut-array allocation sites updated in cl/arm.zag
