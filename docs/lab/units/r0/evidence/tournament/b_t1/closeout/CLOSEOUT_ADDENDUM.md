@@ -109,12 +109,12 @@ on "AB" (p=p18=82595524, cut at 1; ids 565918/236231) matches the binary.
 
 ## 7. Commits
 
-- Commit 1 (implementation + evidence): `<hash1>` — `docs/lab/units/r0/impl/arms/arms.zag`,
+- Commit 1 (implementation + evidence): `0489675d58e436b6a432e241d0336d3a34ed43d7` — `docs/lab/units/r0/impl/arms/arms.zag`,
   `docs/lab/units/r0/evidence/tournament/b_t1/` (manifest, scripts, rank table,
   corpora hashes, M8 log, scorecards, readback logs, grounded bug report,
   this addendum).
 - Commit 2 (closeout pointer): `<hash2>` — VERDICT_SHEET.md commit field filled
-  with `<hash1>`.
+  with `0489675d58e436b6a432e241d0336d3a34ed43d7`.
 
 ## 8. Constraints compliance
 
