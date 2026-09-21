@@ -148,4 +148,5 @@ Caveats (documented, not hidden):
 - `delta_q1_{types,proposal,world,learner}.zag.diff` — the only 4 modified
   files vs Q1B (5 files byte-identical by `cmp`; `q1b_teacher.zag` unmodified)
 
-**Commit:** (to be filled on commit to `tnn-native-lab`)
+**Commit:** `107f6ca108fbe9a6bf30a8c22dd168b798a8f791` on `tnn-native-lab`
+(parent `3edd590ce40b`)
