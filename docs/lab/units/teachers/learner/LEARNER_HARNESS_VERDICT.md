@@ -1,6 +1,7 @@
 # W5 LEARNER+HARNESS VERDICT — B.4/B.5/B.6
 
-**Worker:** W5 (Track B) | **Date:** 2026-09-21 | **Frozen §4 hash:** `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584584a31779a91a64deeef879`
+**Worker:** W5 (Track B) | **Date:** 2026-09-21 | **Frozen §4 hash:** `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584a31779a91a64deeef879`
+**Commit:** `4a6d898c1e6653ae6e4c6266a4aac8efc7b39d76` on `tnn-native-lab` (evidence: pcodec repair, test fix, verdict sheet, verify files, tape345.zag seed fix; harness files deliberately NOT committed — concurrent editor)
 
 ## VERDICT
 
