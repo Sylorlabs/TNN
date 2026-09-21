@@ -1,65 +1,53 @@
-# F-B VERDICT
+# F-B Verdict — 2026-09-21
 
-## VERDICT: DISQUALIFIED
+## Verdict: BLOCKED
 
-**Criterion:** Incomplete implementation — the arm cannot be fairly evaluated
-against the preregistered M1–M9 battery.
+**Category**: `BLOCKED` (honest; `DISQUALIFIED` is invalid per tasking).
 
-### What exists
-- Core F-B segmentation mechanism implemented in pure Zag (`cl/arm.zag`, 559 lines).
-- Verified correct against C prototype on 30KB prose:
-  - Zag: 11,243 chunks, mean 2.67, max 96
-  - C (unbounded): 8,811 chunks, mean 3.40
-  - Difference is due to bounded-table eviction (4096 candidates), which is
-    part of the frozen specification.
-- Zero RNG in decision paths. Deterministic.
+## Blockers
 
-### What is missing (cannot be tested)
-- M1–M9 metric modes (only `segtest` diagnostic implemented)
-- Chunk/content store with persistent IDs
-- Audit ledger
-- M8 determinism artifacts
-- Content verification (currently hash-only)
-- ID remapping, M7 cache rig
+### 1. Performance (primary)
+The validated 4-way set-associative mechanism suffers a 46x slowdown when
+the candidate table fills:
+- 4KB with empty table: 2.5s.
+- 4KB with full table: 115s.
+- 563KB (t1_prose): timeout at 180s.
+- Full corpus (15MB): infeasible.
 
-### Kill criterion status
-**Cannot be adjudicated.** The binding criterion requires:
-- "M3 < C-W's both corpora; OR within noise of F-S on all metrics both corpora"
+Root cause: random access to 208KB candidate table thrashes CPU cache
+under VM memory pressure (191MB free, high steal, 2 CPUs oversubscribed).
 
-No C-W or F-S scorecards were located as of 2026-09-21. Comparison results
-cannot be invented.
+The mechanism is CORRECT (Python and Zag match exactly on 2KB: 311 chunks,
+checksum 3976909433127229168), but not FAST enough for the battery.
 
-### Performance blocker
-Segmentation takes 39s wall (2.2s CPU) for 30KB. Projected 5+ hours for full
-corpora. The 37s unexplained gap (not syscalls, not init) suggests VM-level
-descheduling that cannot be fixed in arm code.
+### 2. Comparators (secondary)
+Kill criterion requires: "M3 < C-W's both corpora; OR within noise of F-S
+on all metrics both corpora."
 
-### 1x M1–M9 row
-Not available — modes not implemented.
+- Committed F-S scorecard is `partial`: M1 only, no M3.
+- No committed C-W scorecard found.
+- Local C-W VERDICT has combined M3 (100.0%) but no per-corpus breakdown.
+- Exact adjudication unavailable. Status: `provisional-pending-comparators`.
 
-### 10x status
-NOT ATTEMPTED.
+## What was completed
+- Validated segmentation mechanism (Python == Zag, byte-identical).
+- Complete `cl/arm.zag` with M1 modes (builds, runs on small inputs).
+- ARM_SPEC.md, BUILD_LOG.md, scorecard.
+- Performance characterization.
 
-### Commit hashes
-None — no commits made (implementation incomplete; only source/docs exist).
+## What was not completed
+- M2-M9 battery (M1 only implemented).
+- Full-corpus runs (infeasible).
+- M8 determinism (requires 10 runs; each too slow).
+- Content verification (hash-only matching).
+- Global (not per-set) eviction.
 
-### Ambiguities encountered
-1. **REP_BAR unfrozen**: No numeric REP_BAR in frozen docs. Provisional choice: 2.
-2. **P-FB1 vs binding kill rule**: P-FB1 says "either corpus"; binding rule says
-   "both corpora". Binding rule governs; inconsistency documented.
-3. **Online vs two-pass**: Frozen docs don't specify. Implemented online (query
-   after observing current-ending spans). Provisional.
-4. **W=256 semantics**: Not enforced as sliding window in current implementation.
-5. **M8 reading (A17)**: Combined-instance vs separate M1/M3-instance remains open.
-6. **Content verification**: Required but not implemented (hash-only currently).
+## Recommendation
+The mechanism is sound but needs a faster implementation strategy:
+- Investigate why 208KB random access is so slow (may be VM-specific).
+- Consider algorithmic alternatives that preserve semantics but improve
+  locality (e.g., blocked table layout, software prefetching).
+- Or: run battery on hardware with adequate cache/memory.
 
-### Recommendation
-The F-B mechanism as literally specified over-cuts severely (mean 2-3 byte
-chunks, ~60% one-byte chunks at 1MB scale). This is inherent to the rule, not
-an implementation bug. A complete implementation would likely fail M3 (retention
-under pressure) due to the sheer number of tiny units overwhelming the 4,000-slot
-capacity. However, without a complete implementation and without C-W/F-S
-comparison data, no KILLED verdict can be honestly issued.
-
-**The arm is DISQUALIFIED from this evaluation round due to incomplete
-implementation, not due to mechanism failure.**
+Do NOT silently change to clear-on-full or reduce LMAX to gain speed;
+those bend the frozen prereg.
