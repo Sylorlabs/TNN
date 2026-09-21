@@ -1,8 +1,9 @@
 # PREREG FREEZE — TNN Representation Program ("what is a unit of knowledge, if not an LLM token?")
 
 **Date drafted:** 2026-09-21
-**Status: PROPOSED — NOT FROZEN. Nothing in this document is approved. No build may start
-until Micah signs.**
+**Status: FROZEN — signed by Micah 2026-09-21 ("go ahead and execute full plan and test
+everything"). See §14 for the signature record. All 140 sign-off items approved as proposed;
+changes follow the §13 amendment procedure.**
 **Parent sources (all PROPOSED, all on `tnn-native-lab`, `docs/lab/units/`):**
 `INDEX.md` (glossary + 53-arm ratification), `ALPHABET_A-F.md`, `ALPHABET_G-L.md`,
 `ALPHABET_M-R.md`, `ALPHABET_S-X.md`, `ALPHABET_Y-Z.md`, `TEACHERS.md` (+ 2026-09-21
