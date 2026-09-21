@@ -64,12 +64,14 @@ if [[ -x "$BIN" ]]; then
   for leg in lh1 lh2 lh3 lh5; do
     run "${leg}_run1" "$BIN" "$leg"
     run "${leg}_run2" "$BIN" "$leg"
-    if cmp -s "$E/${leg}_run1.stdout" "$E/${leg}_run2.stdout"; then
-      printf 'deterministic_runs_equal=true\n' > "$E/${leg}.determinism"
+    # Determinism covers scientific state only: LH_RESOURCE carries raw
+    # wall-clock cpu_us telemetry, excluded from the byte-diff.
+    if diff -u <(grep -v '^LH_RESOURCE,' "$E/${leg}_run1.stdout") \
+                <(grep -v '^LH_RESOURCE,' "$E/${leg}_run2.stdout") \
+                > "$E/${leg}.determinism"; then
+      printf 'deterministic_runs_equal=true\n' >> "$E/${leg}.determinism"
     else
-      printf 'deterministic_runs_equal=false\n' > "$E/${leg}.determinism"
-      diff -u "$E/${leg}_run1.stdout" "$E/${leg}_run2.stdout" \
-        >> "$E/${leg}.determinism" 2>&1
+      printf 'deterministic_runs_equal=false\n' >> "$E/${leg}.determinism"
       fail=$((fail+1))
     fi
   done
