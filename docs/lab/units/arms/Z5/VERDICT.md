@@ -48,7 +48,8 @@ applicable ordinary 1x bar passes.
 
 ## Commit Hashes
 
-(To be filled after commit via commit_to_branch.py)
+- `eb9e14b0247af778109c3f1d795edce4217eb0aa` (tnn-native-lab)
+- 19 files: ARM_SPEC.md, BUILD_LOG.md, VERDICT.md, cl/arm.zag, work/scorecard.json, 14 raw log files
 
 ## Kill Evidence
 
