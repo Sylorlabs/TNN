@@ -130,4 +130,11 @@ the coordinator routes each to its owning crew with this sheet attached.
 - `units/teachers/battery/verify_tripwire/tw_verify.out` (+ `.sha256`, `_twv.csv`) — canonical evidence
 - `units/teachers/battery/tb_tripwire.zag` — one-line-class fix (last-decision-wins) + doc comment
 - `units/teachers/battery/TRIPWIRE_VERDICT.md` — this sheet
-- Commit SHA(s): _to be filled after `commit_to_branch.py` runs_
+- Commit SHA(s): `940a518f02ea` on `tnn-native-lab` (evidence files:
+  `docs/lab/units/teachers/battery/TRIPWIRE_VERDICT.md`,
+  `docs/lab/units/teachers/battery/tb_tripwire.zag`,
+  `docs/lab/units/teachers/battery/verify_tripwire/{tw_verify.zag,run_verify.sh,tw_verify.out,tw_verify.out.sha256,tw_verify_twv.csv}`).
+  Note: the hot branch caused the commit loop to land 5 identical-content
+  snapshots (`540da244eba0`, `c36dcf4f029a`, `68ede1fadbb9`, `24172e885f90`,
+  `940a518f02ea`); the last is the reference. This sheet's SHA fill is a
+  follow-up commit per repo convention.
