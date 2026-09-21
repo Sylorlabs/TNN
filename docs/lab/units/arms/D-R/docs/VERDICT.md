@@ -1,61 +1,76 @@
 # D-R Verdict
 
-## Verdict: ATTEMPTED — FAILED (1x battery, performance)
+## Verdict: BLOCKED
 
-### What was built
-D-R (Reuse-gated commit) implements the frozen mechanism: D's proposals, but
-commit requires reuse ≥ REUSE_BAR=2. A second memory entry must reference the
-span before the ID is minted. No ID until the span proves worth caching.
-
-The implementation:
-- Single-pass proposal scan (pass1) finds 2nd occurrences via a lossy
-  first-seen table, verifies with memcmp, commits immediately.
-- Greedy longest-match tiling (walk) uses the committed chunks.
-- Raw unmatched runs stay JUST_RAW (never committed).
-- REUSE_BAR=2 is enforced literally.
+### Summary
+D-R implements a genuinely sub-quadratic proposal structure with corrected
+reuse-gate semantics. The core mechanism is proven correct on 100KB synthetic
+and real samples (proposal events byte-identical to a validated Python
+reference). However, the 1x battery cannot be completed due to a scale
+limitation: the implementation panics on inputs ≥3MB. The D comparison is
+also blocked (D has published no verdict). Per the frozen kill criterion,
+which requires 10x evidence, no kill evaluation is possible.
 
 ### What was proven
-- **Correctness**: On 100KB (synthetic and real), M2 achieves 100% recall
-  with etc=1 (criterion met in 1 episode). The reuse gate works: chunks are
-  committed on 2nd occurrence, IDs are minted, tiling uses committed chunks.
-- **Determinism**: Not yet verified (requires byte-identical reruns; not
-  attempted due to performance).
+1. **Corrected semantics**: The v2 implementation fixes a critical bug where
+   proposals never promoted (NCOMMITTED was always 0). Now:
+   - Pass 1 creates `JUST_SELF` proposals at second occurrence.
+   - Walk references proposals; `d_add_occ` promotes at refs>=2.
+   - Raw unmatched runs stay proposed forever (never commit).
+   - Tiling is exact greedy longest-match (all lengths 64..3).
 
-### What failed
-- **1x battery**: ATTEMPTED — FAILED. The implementation is too slow for the
-  full 1x battery (multi-MB corpora). `m5-1x` (5.2MB) timed out at 120s.
-  `m1-1x-prose` (5.2MB, 20 episodes) was not attempted (estimated >6 hours).
-- **Root cause**: O(n × LMAX) complexity (n=5.2M, LMAX=64 → 333M iterations
-  for pass1 alone) with high constant factors in Zag (bounds checking on
-  every array access, function call overhead). The frozen compiler does not
-  optimize these away.
-- **No scorecard**: M1–M9 scorecard not assembled (1x did not complete).
-- **No 10x**: Not attempted (requires 1x pass).
-- **Kill criterion**: NOT EVALUATED. The kill rule (">50% of final vocabulary
-  still uncommitted at end of 10x while D commits and wins on M3") requires
-  10x evidence from both D-R and D. No 10x was run.
+2. **Sub-quadratic structure**: Suffix-array-inspired approach:
+   - Group by 3-byte prefix (radix sort, O(n)).
+   - Sort each group by 64B suffix (radix sort, O(n) total).
+   - LCP via byte compare; maximal intervals via monotonic stack.
+   - 2nd smallest via segment tree (G>=128) or scan (G<128).
+   - All identity decisions are memcmp-verified; sort only organizes candidates.
 
-### Ambiguities (explicit)
-1. **D's proposal algorithm**: The frozen docs did not specify D's exact
-   proposal mechanism. D-R uses a single-pass 2nd-occurrence commit, which
-   satisfies the frozen wording ("second memory entry must reference the span
-   before the ID is minted") but may differ from D's actual algorithm.
-2. **First-seen table lossiness**: The table overwrites on collision (no
-   probing) for speed. This may miss some repeats. A probing table would be
-   more accurate but slower.
-3. **match_at lens**: Checks only 11 lens (not all 62) for speed. Finds a good
-   match, not necessarily the longest. This affects tiling quality.
-4. **REP_BAR=3**: Removed during optimization. The frozen REUSE_BAR=2 is
-   enforced; the arm-chosen REP_BAR=3 (3 repetitions to propose) was dropped
-   as redundant.
+3. **Equivalence on 100KB** (binding requirement):
+   - Synthetic (102,400B): 744 events, byte-identical to Python v5.
+   - Real (102,400B): 99,471 events, byte-identical to Python v5.
+   - Determinism: two runs byte-identical.
+   - Mechanism: NCOMMITTED=3 (syn) / 3481 (real); NOCC=1600 / 18016.
 
-### Recommendation
-The mechanism is sound and the implementation is correct at small scale.
-To run the full battery, the implementation needs:
-- A faster proposal algorithm (e.g., suffix array, or sampling, not O(n×LMAX)).
-- Or: a faster language/runtime (Zag's overhead is the bottleneck).
-- Or: run on smaller corpora (but this violates the frozen protocol).
+4. **Determinism**: Zero RNG in AI paths. Two runs produce byte-identical stdout.
 
-**No verdict on the kill criterion.** The arm was not killed; it was not
-evaluated. The performance failure is an implementation limitation, not a
-mechanism failure.
+### What is blocked
+1. **1x battery**: BLOCKED. Implementation panics on 3MB+ inputs due to
+   per-group allocation leaks (hfree is trace-only; 19K groups × per-group
+   buffers exhaust memory). The 5.4MB prose and 9.5MB code corpora cannot be
+   processed. This is a resource bug, not a correctness bug—the algorithm is
+   sound, but the implementation needs buffer reuse or real freeing.
+
+2. **10x**: NOT ATTEMPTED (requires 1x pass).
+
+3. **D comparison**: BLOCKED. As of 2026-09-21, D has published no verdict,
+   scorecard, or M3 evidence (`docs/lab/units/arms/D/` contains only
+   BUILD_LOG.md and cl/). Both the binding comparison and the additional
+   cost/recall comparison cannot be performed honestly.
+
+4. **Kill criterion**: NOT EVALUATED. Requires 10x evidence from D-R and D.
+   The frozen criterion (">50% uncommitted at 10x while D commits and wins
+   on M3") cannot be assessed.
+
+### Honest assessment
+The v2 implementation is a genuine advance: it fixes the zero-commit bug,
+achieves sub-quadratic proposal discovery, and proves equivalence on 100KB.
+However, it does not meet the scale bar. The 1x battery is a hard requirement,
+and the current implementation cannot complete it.
+
+**This is not a PASS.** It is a BLOCKED with proven 100KB correctness.
+
+### What would unblock
+1. Fix per-group allocation leaks: reuse buffers sized for max G (73K observed),
+   or implement real nio_free in hfree.
+2. Re-run 100KB equivalence to confirm no regression.
+3. Run 1x battery on 5.4MB/9.5MB inputs.
+4. If 1x passes, attempt 10x (requires streaming for 54MB/95MB inputs, as
+   read_file caps at 33.5MB).
+5. Re-check D for verdict before final comparison.
+
+### Files
+- Source: `cl/arm.zag` (v2, ~80KB)
+- Spec: `docs/ARM_SPEC.md`
+- Build log: `docs/BUILD_LOG.md`
+- This verdict: `docs/VERDICT.md`

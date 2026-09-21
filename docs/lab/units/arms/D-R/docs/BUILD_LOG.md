@@ -1,6 +1,78 @@
 # D-R Build Log
 
-## 2026-09-21: Initial implementation and debugging
+## 2026-09-21: v2 implementation (sub-quadratic, corrected semantics)
+
+### Problem identified
+The original D-R implementation had a critical semantic bug:
+- `chunk_new(s,buf,bo,len,just)` always creates `ST_PROPOSED`; final arg is justification.
+- Numeric collision: `ST_COMMITTED=1`, `JUST_RAW=1`.
+- Old `pass1` called `chunk_new(..., ST_COMMITTED)`, which actually created a
+  raw proposal (not a committed chunk).
+- Result: repeated proposals never promoted; dumps showed `NCOMMITTED 0`.
+
+### Corrected interpretation
+1. Pass 1 discovers exact repeated spans at second occurrence → `JUST_SELF` proposal.
+2. Walk references proposals through occurrences.
+3. `d_add_occ` promotes only when `refs >= DR_REUSE_BAR` (2).
+4. Unmatched walk chunks are `JUST_RAW`, remain proposed forever.
+5. Tiling checks every length 64..3 (exact greedy).
+
+### Algorithm: sub-quadratic proposal discovery
+**Validated direction** (Python v5, 75/75 random trials):
+- Group starts by exact 3-byte prefix.
+- Sort each group lexicographically by suffix (capped 64B).
+- Compute adjacent LCP (capped 64).
+- Enumerate maximal LCP intervals via monotonic stack.
+- For each interval, find two smallest source offsets; second is proposal position.
+- Emit lengths `max(3,lcp[l]+1,lcp[r+1]+1)` .. `min(64,m)`.
+- Order by (position, length).
+
+**Boundary-LCP rule** fixes false positive where `(232,4)` was emitted for
+`b' b '` with occurrences `[40,57,232]` (correct: only lengths where both
+boundaries agree).
+
+### Implementation (Zag)
+- **Sorting**: Two 16-bit radix passes for 3-byte prefix; 61 MSB-first 8-bit
+  passes for 61-byte suffix keys (bytes 3..63).
+- **LCP**: Direct byte comparison, capped at 64.
+- **Intervals**: Monotonic stack (O(G) per group).
+- **2nd smallest**: Segment tree (G>=128) or linear scan (G<128).
+- **Events**: Sharded arrays (4×4M = 16M capacity); 64-bit radix sort by
+  (position, length).
+- **Memory**: `[]u8` arenas with explicit LE accessors (avoids ZNC-007
+  miscompile). No slice >33.5MB indexed (ZNC limit).
+
+### Equivalence proof (100KB)
+**Fixtures**:
+- `syn100k.bin`: 102,400 bytes, SHA256 `f461fbd7d83dfd0407d943fe70756c720d962526d061bc7fa04f2659f452ccd8`
+- `real100k.bin`: 102,400 bytes (r1 prose.bin head), SHA256 `c604ddca5a56905ff5e6eedc8468c0f5bbf69352e0705d239fb1e8bf1ab591cd`
+
+**Results**:
+- Synthetic: Zag 744 events, Python v5 744 events; full lists byte-identical.
+- Real: Zag 99,471 events, Python v5 99,471 events; full lists byte-identical.
+- Two Zag runs: byte-identical stdout (determinism verified).
+- Mechanism: Synthetic NCOMMITTED=3, NOCC=1600; Real NCOMMITTED=3481, NOCC=18016.
+  (Old buggy version: NCOMMITTED=0.)
+
+### Scale testing
+- 100KB: ~15-80s (synthetic vs real).
+- 1MB: ~233s, 1,192,272 events. Works.
+- 3MB: Panics (fast, <18s). Root cause: per-group allocation leaks (hfree is
+  trace-only) + memory exhaustion. Not a correctness bug; a resource bug.
+- 5.4MB (r1 prose): Cannot process. 1x battery BLOCKED.
+
+### 1x battery status
+**BLOCKED**. The implementation cannot process the 5.4MB prose or 9.5MB code
+corpora required for the 1x battery. The core mechanism is proven correct on
+100KB, but the scale limitation prevents full battery execution.
+
+### D comparison
+**BLOCKED**. As of 2026-09-21, `docs/lab/units/arms/D/` contains only
+`BUILD_LOG.md` and `cl/`; no verdict, scorecard, or M3 evidence. Both the
+binding D comparison and the additional cost/recall comparison cannot be
+performed.
+
+## 2026-09-21: Initial implementation and debugging (historical)
 
 ### Panic fix
 - **Issue**: `panic: slice index out of bounds` in `trace_put` during init.
@@ -8,47 +80,9 @@
   produces `len=0` in the frozen compiler. The trace buffer had len=0, causing
   OOB on first `trace_put`.
 - **Fix**: Use `nio_alloc` (pointer-to-slice construction) for all allocations.
-- **Result**: `m5-baseline` runs successfully.
 
-### Performance optimization (iterative)
-1. **Candidate table**: Increased from 4K to 64K slots, changed eviction from
-   O(n) scan to O(1) overwrite. Added `maybe_propose` early-exit if chunk exists.
-2. **First-seen table**: Increased from 256K to 1M slots (16MB) to reduce
-   lossiness. Fixed field overlap bug (len was at+4, colliding with key).
-3. **Simplified pass1**: Removed candidate table / contdiv / REP_BAR=3.
-   Now commits directly on 2nd occurrence with memcmp verification.
-   (Justification: REUSE_BAR=2 is frozen; the candidate mechanism was an
-   arm-chosen addition that hurt performance without clear benefit.)
-4. **match_at**: Inlined the cidx probe, changed from ascending (all 64 lens)
-   to descending (11 lens: 64,48,32,24,16,12,8,6,5,4,3), bounded probe at 32
-   slots (was 512). Uses reusable `s.*.mhs` buffer (no per-call alloc).
-5. **Walk**: Added fast path: if `nchunk==0`, skip the raw-run scan (entire
-   input is raw).
-
-### Correctness verification
-- **100KB synthetic** ("hello world " × 500): `m2-t3-1x` → etc=1, final
-  100.0%, 100.0%. PASS.
-- **100KB real** (t3.bin subset): `m2-t3-1x` → etc=1, final 100.0%, 100.0%.
-  PASS. (Required the 1M-slot first-seen table; 256K was too lossy.)
-- **m5-baseline**: Emits METRIC_JSON correctly. PASS.
-
-### Performance results
-- 100KB, 4 episodes (m2-t3-1x): 30s (after all optimizations).
-- 5.2MB prose (m5-1x): Timeout at 120s (no output). Estimated 27 min for
-  pass1 alone (345M iterations).
-- **Conclusion**: The implementation is correct but too slow for the full 1x
-  battery. The O(n × LMAX) complexity with Zag's overhead (bounds checking,
-  function calls) makes multi-MB corpora infeasible.
-
-### 1x battery attempt
-- **m5-baseline**: PASS (fast, no corpus walk).
-- **m2-t3-1x** (100KB subset): PASS (30s, 100% recall).
-- **m5-1x** (5.2MB): TIMEOUT (120s, no output). ATTEMPTED — FAILED.
-- **m1-1x-prose** (5.2MB, 20 episodes): Not attempted (estimated >6 hours).
-- **Other modes**: Not attempted (performance).
-- **Overall**: 1x battery ATTEMPTED — FAILED (performance).
-
-## Files
-- Source: `cl/arm.zag` (~1,850 lines).
-- Binary: `work/dr` (build artifact, not committed).
-- Docs: `docs/ARM_SPEC.md` (this file: `docs/BUILD_LOG.md`).
+## Compiler notes
+- Frozen toolchain: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`
+- ZNC-007: Avoid `nio_alloc(...) as []i32/[]u32/[]u16`; use `[]u8` arenas.
+- ZNC limit: No slice >33,554,432 bytes indexed.
+- Build time: ~60-90s for 80KB source.

@@ -10,56 +10,95 @@
 - Kill criterion: ">50% of final vocabulary still uncommitted at end of 10x
   while D commits and wins on M3 — gating is pure delay."
 
-## Design (as built)
-- **Proposal**: Single-pass scan (pass1) over the corpus. For each position p
-  and length len in [3, 64], compute rolling hash. Use a lossy first-seen
-  table (1M slots, no probing on collision — overwrite). On 2nd occurrence
-  with verified content match (memcmp), COMMIT the chunk immediately.
-- **Commit**: `chunk_new` allocates from an 8MB blob, copies bytes (cached),
-  assigns a stable chunk ID, inserts into the content index (65K slots,
-  bounded probe at 32). State = ST_COMMITTED.
-- **Walk** (pass 2): Greedy longest-match tiling against the content index.
-  `match_at` checks lens [64,48,32,24,16,12,8,6,5,4,3] descending (not all
-  64), inlined probe, returns on first hit. Unmatched maximal runs become
-  raw chunks (JUST_RAW, content-indexed, never committed).
-- **Reuse gate**: Enforced in `d_add_occ`. When an occurrence references a
-  chunk, if the chunk is not yet committed and this is the 2nd distinct
-  occurrence, the chunk transitions to ST_COMMITTED (ID minted, bytes cached).
-  Raw chunks (JUST_RAW) never commit.
-- **Occurrences**: Tiling entries (chunk_id, off) in `tile`/`offs` arrays.
-  `d_recall` resolves occurrence → chunk.
+## Design v2 (as built, 2026-09-21)
+
+### Corrected semantics
+The original implementation had a critical bug: `chunk_new(..., ST_COMMITTED)`
+actually created a `ST_PROPOSED` chunk with `JUST_RAW` justification (numeric
+collision: `ST_COMMITTED=1`, `JUST_RAW=1`), so proposals never promoted and
+`NCOMMITTED` was always 0.
+
+The v2 implementation corrects this:
+1. **Pass 1** discovers exact repeated spans at their second occurrence and
+   creates `JUST_SELF` proposals (not raw).
+2. **Walk** references proposals through occurrences.
+3. **`d_add_occ`** promotes only when `refs >= DR_REUSE_BAR` (REUSE_BAR=2).
+4. Unmatched walk-created chunks are `JUST_RAW` and remain proposed forever.
+5. **Tiling** checks every length 64 down to 3 (exact greedy longest-match).
+
+### Sub-quadratic proposal structure
+Pass 1 uses a suffix-array-inspired approach to achieve sub-quadratic time:
+
+1. **Group by 3-byte prefix**: Sort all positions (0..n-3) by their first 3
+   bytes using two 16-bit radix passes (O(n)).
+2. **Sort each group by suffix**: For each 3-gram group, sort positions
+   lexicographically by the up-to-64-byte suffix using 61 MSB-first radix
+   passes (O(G) per group, total O(n)).
+3. **Compute LCP**: Adjacent LCP (longest common prefix) capped at 64 bytes
+   via direct byte comparison (O(G) per group).
+4. **Enumerate maximal LCP intervals**: Monotonic stack finds all maximal
+   intervals where LCP >= threshold (O(G) per group).
+5. **Find 2nd smallest position**: For each interval [l,r] with LCP m, use a
+   segment tree (for G>=128) or linear scan (for G<128) to find the two
+   smallest source offsets. The second is the proposal position.
+6. **Emit events**: For interval [l,r] with LCP m, emit lengths
+   `max(3, lcp[l]+1, lcp[r+1]+1)` through `min(64, m)` at position p2.
+7. **Sort events**: 64-bit radix sort by (position, length) to get
+   deterministic order.
+8. **Create proposals**: In event order, create `JUST_SELF` chunks (capped at
+   131,072 chunks).
+
+All identity decisions use byte-loop/memcmp verification. Sort/hash structures
+only organize candidates; they never decide equality.
+
+**Boundary-LCP rule**: For interval [l,r], the minimum length is
+`max(3, lcp[l]+1, lcp[r+1]+1)`, not just 3. This prevents false positives where
+a span is claimed to repeat at length L but the boundary LCPs show it doesn't.
+(Validated against Python v5 reference on 75 random trials.)
+
+### Commit (reuse gate)
+- Proposals start as `ST_PROPOSED` with `JUST_SELF`.
+- During walk, when a proposal is referenced by a tiling occurrence,
+  `d_add_occ` increments its ref count.
+- When `refs >= 2` (REUSE_BAR), the chunk transitions to `ST_COMMITTED`:
+  ID is minted, bytes are cached in the blob.
+- Raw chunks (`JUST_RAW`, from unmatched walk runs) never commit.
+
+### Walk (tiling)
+- Greedy longest-match: at each position, check lengths 64 down to 3
+  (all 62 lengths, not a subset).
+- Uses `larr` (best exact-match length per position, from pass1) to skip
+  lengths that cannot match.
+- Content index lookup via FNV-1a hash + memcmp verification.
+- Unmatched maximal runs become `JUST_RAW` chunks (proposed, never committed).
 
 ## Arm-chosen parameters (unfrozen, documented here)
-- `DR_MIN_LEN=3` (minimum proposal length).
-- `DR_LMAX=64` (maximum proposal length).
-- `DR_FS_SLOTS=1048576` (first-seen table, 1M slots, 16MB transient).
-- `DR_CIDX_SLOTS=65536` (content index, 64K slots).
-- First-seen table is LOSSY (overwrite on collision, no probing). This is an
-  arm-chosen performance tradeoff; it may miss some repeats.
-- `match_at` checks only 11 lens (not all 62), for speed. This finds a good
-  match, not necessarily the longest.
+- `DR_MIN_LEN=3`, `DR_LMAX=64` (frozen range).
+- `DR_CHUNK_CAP=131072` (max chunks; events beyond this are dropped).
+- `DR_CIDX_SLOTS=65536` (content index).
+- `DR_REUSE_BAR=2` (frozen).
+- Event buffer: 4 shards × 4M events (16M total capacity).
+- Per-group segment tree for G>=128; linear scan for G<128.
 
-## Deviations from frozen D
-- D's exact proposal algorithm was not available in the frozen docs; D-R uses
-  a single-pass 2nd-occurrence commit (which satisfies "second memory entry
-  must reference the span before the ID is minted").
-- The candidate table / context-diversity / REP_BAR=3 mechanism was removed
-  during performance optimization. The current design commits on 2nd
-  occurrence directly, which is a literal implementation of REUSE_BAR=2.
+## Equivalence proof (100KB)
+- **Synthetic** (102,400 bytes, SHA256 `f461fbd7...`): Zag v2 and Python v5
+  reference both produce 744 proposal events; full event lists byte-identical.
+- **Real** (102,400 bytes from r1 prose.bin, SHA256 `c604ddca...`): Both
+  produce 99,471 events; full lists byte-identical.
+- Two Zag runs: byte-identical stdout (determinism).
+- Mechanism check: Synthetic yields NCOMMITTED=3, NOCC=1600; Real yields
+  NCOMMITTED=3481, NOCC=18016. (Old buggy version had NCOMMITTED=0.)
 
-## Performance
-- **Correctness**: Verified on 100KB synthetic (repetitive) and 100KB real
-  corpus (t3.bin subset): 100% recall, etc=1 (criterion met in 1 episode).
-- **Speed**: ~30s per 100KB per walk episode (after optimizations). For 1MB,
-  ~5 min per episode. For 5.2MB prose (M1, 20 episodes), estimated >6 hours
-  for a single mode. The full 1x battery (16 modes) is infeasible in
-  reasonable time.
-- **Bottleneck**: O(n × LMAX) with high constant factors in Zag (bounds
-  checking, function calls). The `match_at` does up to 11 hash-table probes
-  per position; each probe is bounds-checked.
+## Limitations
+- **Scale**: Proven on 100KB and 1MB. Panics on 3MB+ inputs due to
+  per-group allocation leaks (hfree is trace-only) and/or memory exhaustion.
+  The 1x battery (5.4MB prose, 9.5MB code) cannot be completed with the
+  current implementation.
+- **Speed**: 100KB takes ~15-80s (synthetic vs real). 1MB takes ~233s.
+  Estimated 5.4MB would take >30 minutes per mode if it didn't panic.
 
 ## Status
-- 1x battery: ATTEMPTED — FAILED (performance; see BUILD_LOG.md).
-- No M1–M9 scorecard (1x did not complete).
-- No 10x (requires 1x pass).
-- Kill criterion: NOT EVALUATED (requires 10x evidence from D-R and D).
+- 1x battery: BLOCKED (size limitation; cannot process 5.4MB+ inputs).
+- 10x: NOT ATTEMPTED (requires 1x pass).
+- D comparison: BLOCKED (D has no verdict/scorecard as of 2026-09-21).
+- Kill criterion: NOT EVALUATED (requires 10x evidence).
