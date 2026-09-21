@@ -1,0 +1,1592 @@
+// y4 — Arm Y4: Question-driven (lazy) cuts.
+// Mechanism (frozen §3 row): Boundary candidates at ingest; segmentation
+// committed at query time, conditioned on the question.
+//   ingest_span(corpus,off,len): runs the preregistered detector set
+//     (D1 sentence terminators .!? / D2 blank lines / D3 braces []{} /
+//      D4 indent shifts; 16-byte min separation, first wins) and emits one
+//     CANDIDATE_CUT (0x20) ledger entry per cut + one SCAN_COMMIT per call.
+//     No chunks are formed at ingest.
+//   y_question(corpus,qtype,off,len): logs QUESTION_ASKED (0x21), selects the
+//     minimal covering chunk set (FULL = all chunks; SPAN = chunks overlapping
+//     [off,off+len)), materializes each as a first-class chunk (ADD_UNIT,
+//     stable ID = (corpus<<24)|chunk_index). Pure function of (question,
+//     candidates): same logged question -> same cuts -> byte-identical replay.
+//   Materialized chunks support kill/pin/promote/weaken/revise. Slot placement
+//     is a pure function of the chunk ID (multiplicative hash).
+// Pure Zag, zero RNG in any decision path, byte-identical reruns.
+// Trial layout: Y4/cl/arm.zag + Y4/substrate/{R33_NATIVE_SHA256_V2.zag,
+//   R33_NATIVE_IO_V1.zag}. Build: znc cl/arm.zag -o work/y4_bin.
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+
+const Y4_C_PROSE:i32=1;
+const Y4_C_CODE:i32=2;
+const Y4_C_T1P:i32=3;
+const Y4_C_T1C:i32=4;
+const Y4_C_T2P:i32=5;
+const Y4_C_T2C:i32=6;
+const Y4_C_T3:i32=7;
+const Y4_C_FRESH:i32=8;
+const Y4_M3_V:i32=1000;
+const Y4_M3_FRESH1:i32=3000;
+const Y4_M3_KILL:i32=3000;
+const Y4_M3_FRESH2:i32=4000;
+const Y4_M4_N:i32=200;
+const Y4_M7_LOOKUPS:i32=5000;
+const Y4_MIN_GAP:i32=16;
+const Y4_PATCHB:i32=32768;   // max defect-patch bytes per chunk (max chunk 21378)
+
+// flags bits
+const F_OCC:i32=1;
+const F_LIVE:i32=2;
+const F_PIN:i32=4;
+const F_WEAK:i32=8;
+const F_SHIFT:i32=16;
+const F_PATCH:i32=32;
+
+// ledger opcodes: frozen namespace 0x01..0x13 + Y4 arm-defined 0x20/0x21
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_PROMOTE:i32=5;
+const OP_REVISE:i32=6;
+const OP_SCAN:i32=7;
+const OP_REFUSE:i32=8;
+const OP_EVICT:i32=9;
+const OP_TDB:i32=16;
+const OP_TDC:i32=17;
+const OP_TMV:i32=18;
+const OP_CAND:i32=32;      // CANDIDATE_CUT: b1=off_lo b2=off_hi b3=0 b4=corpus b5=cand_idx d1=detector d2=0
+const OP_QUESTION:i32=33;  // QUESTION_ASKED: b1=qoff_lo b2=qoff_hi b3=qlen b4=corpus b5=qseq d1=qtype d2=new_materializations
+
+// preregistered detector ids
+const DET_SENT:i32=1;
+const DET_BLANK:i32=2;
+const DET_BRACE:i32=3;
+const DET_INDENT:i32=4;
+// question types
+const Q_FULL:i32=0;
+const Q_SPAN:i32=1;
+
+// ---- little-endian u32/i32 packing on []u8 ----
+fn uget(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn uput(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v & 255) as u8;b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;b[at+3]=((v>>24) & 255) as u8;
+}
+fn iget(b:[]u8,at:i32)i32 { return uget(b,at) as i32; }
+fn iput(b:[]u8,at:i32,v:i32)void { uput(b,at,v as i64); }
+
+struct Y4 {
+    cap:i32,
+    ids:[]u8,      // cap * u32: chunk id
+    offs:[]u8,     // cap * u32: byte offset
+    lens:[]u8,     // cap * u32: length
+    corps:[]u8,    // cap * u32: corpus id
+    flags:[]u8,    // cap * u32: flags bits
+    shifts:[]u8,   // cap * i32: recorded boundary shift
+    pidx:[]u8,     // cap * i32: patch index or -1
+    rcc:[]u8,      // cap * u32: per-chunk recall count (laziness stat)
+    patches:[]u8,  // patch_cap * Y4_PATCHB bytes
+    patch_n:i32,
+    patch_cap:i32,
+    led:[]u8,      // ledger bytes (single slice, sized < 2^25 per mode)
+    led_n:i32,
+    led_cap:i32,
+    ins:[]u8,      // insertion-order queue of slots (ins_cap * i32)
+    ins_cap:i32,
+    ins_n:i32,
+    ins_head:i32,
+    trace:[]u8,
+    trace_n:i32,
+    trace_cap:i32,
+    nlive:i32,
+    nmat:i32,      // total materializations this trial
+    nq:i32,        // question sequence number
+    cand:[]u8,     // 8 * cand_cap * u32: candidate cut offsets per corpus
+    cand_cap:i32,
+    cand_n:[]u8,   // 8 * u32: cut counts per corpus
+    ingested:[]u8, // 8 * u32: 1 once ingest_span touched the corpus
+    clens:[]u8,    // 8 * u32: corpus total lengths seen
+    killed:[]u8,   // 8 * kcap bytes: killed bitmap over chunk indices
+    kcap:i32,
+}
+
+fn z_memzero(b:[]u8)void {
+    let i:i32=0;while(i<b.len){b[i]=0;i=i+1;}
+}
+fn z_memset_i32m1(b:[]u8)void {
+    // fill with 0xFF (i32 -1 per 4-byte word)
+    let i:i32=0;while(i<b.len){b[i]=255;i=i+1;}
+}
+
+fn halloc(s:*Y4,n:i32)[]u8 {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(n as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=65;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    return nio_alloc(n);
+}
+fn hfree(s:*Y4,b:[]u8)void {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(b.len as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=70;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    nio_free(b);
+}
+
+fn y4_init(s:*Y4,cap:i32,led_entries:i32,ins_max:i32,cand_cap:i32,patch_cap:i32)void {
+    s.*.cap=cap;s.*.nlive=0;s.*.nmat=0;s.*.nq=0;
+    s.*.trace_cap=65536;s.*.trace=nio_alloc(65536);s.*.trace_n=0;
+    s.*.ids=halloc(s,cap*4);z_memset_i32m1(s.*.ids); // EMPTY=-1 sentinel: NEVER skip
+    s.*.offs=halloc(s,cap*4);s.*.lens=halloc(s,cap*4);
+    s.*.corps=halloc(s,cap*4);
+    s.*.flags=halloc(s,cap*4);z_memzero(s.*.flags);
+    s.*.shifts=halloc(s,cap*4);z_memzero(s.*.shifts);
+    s.*.pidx=halloc(s,cap*4);z_memset_i32m1(s.*.pidx);
+    s.*.rcc=halloc(s,cap*4);z_memzero(s.*.rcc);
+    s.*.patch_cap=patch_cap;s.*.patches=halloc(s,patch_cap*Y4_PATCHB);s.*.patch_n=0;
+    s.*.led_cap=led_entries*64;s.*.led=halloc(s,s.*.led_cap);s.*.led_n=0;
+    s.*.ins=halloc(s,ins_max*4);s.*.ins_cap=ins_max;s.*.ins_n=0;s.*.ins_head=0;
+    s.*.cand_cap=cand_cap;
+    s.*.cand=halloc(s,8*cand_cap*4);
+    s.*.cand_n=halloc(s,32);z_memzero(s.*.cand_n);
+    s.*.ingested=halloc(s,32);z_memzero(s.*.ingested);
+    s.*.clens=halloc(s,32);z_memzero(s.*.clens);
+    s.*.kcap=(cand_cap+7)/8;
+    s.*.killed=halloc(s,8*s.*.kcap);z_memzero(s.*.killed);
+}
+fn y4_new(cap:i32,led_entries:i32,ins_max:i32,cand_cap:i32,patch_cap:i32) Y4 {
+    let s:Y4=Y4{.cap=0,.ids="",.offs="",.lens="",.corps="",.flags="",
+        .shifts="",.pidx="",.rcc="",.patches="",.patch_n=0,.patch_cap=0,.led="",
+        .led_n=0,.led_cap=0,.ins="",.ins_cap=0,.ins_n=0,.ins_head=0,.trace="",
+        .trace_n=0,.trace_cap=0,.nlive=0,.nmat=0,.nq=0,.cand="",.cand_cap=0,
+        .cand_n="",.ingested="",.clens="",.killed="",.kcap=0};
+    y4_init(&s,cap,led_entries,ins_max,cand_cap,patch_cap);
+    return s;
+}
+
+// ---- ledger ----
+fn y_led(s:*Y4,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+         a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)void {
+    let at:i32=s.*.led_n*64;
+    if(at+64>s.*.led_cap){return;} // LEDGER-BOUND: scored on what completed
+    let l:[]u8=s.*.led;
+    iput(l,at,op);iput(l,at+4,slot);iput(l,at+8,rc);
+    iput(l,at+12,b1);iput(l,at+16,b2);iput(l,at+20,b3);iput(l,at+24,b4);iput(l,at+28,b5);
+    iput(l,at+32,a1);iput(l,at+36,a2);iput(l,at+40,a3);iput(l,at+44,a4);iput(l,at+48,a5);
+    iput(l,at+52,1);iput(l,at+56,d1);iput(l,at+60,d2);
+    s.*.led_n=s.*.led_n+1;
+}
+
+// ---- slot placement: pure function of chunk ID (order-independent) ----
+fn slot_hash(id:i32,cap:i32) i32 {
+    let x:i64=(id as i64)*2654435761;
+    x=x ^ (x>>16);
+    x=x*2246822519;
+    x=x ^ (x>>13);
+    let h:i64=x % (cap as i64);
+    if(h<0){h=h+(cap as i64);}
+    return h as i32;
+}
+fn slot_find(s:*Y4,id:i32) i32 {
+    let cap:i32=s.*.cap;
+    let ids:[]u8=s.*.ids;let flags:[]u8=s.*.flags;
+    let h:i32=slot_hash(id,cap);
+    let t:i32=0;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){return -1;}
+        if(iget(ids,h*4)==id){return h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    return -1;
+}
+fn slot_insert(s:*Y4,id:i32,off:i32,len:i32,corpus:i32) i32 {
+    let cap:i32=s.*.cap;
+    let ids:[]u8=s.*.ids;let offs:[]u8=s.*.offs;let lens:[]u8=s.*.lens;
+    let corps:[]u8=s.*.corps;let flags:[]u8=s.*.flags;let shifts:[]u8=s.*.shifts;
+    let pidx:[]u8=s.*.pidx;let rcc:[]u8=s.*.rcc;
+    let h:i32=slot_hash(id,cap);
+    let t:i32=0;let first_dead:i32=-1;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){
+            let sl:i32=h;
+            if(first_dead>=0){sl=first_dead;}
+            iput(ids,sl*4,id);iput(offs,sl*4,off);iput(lens,sl*4,len);
+            iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+            iput(shifts,sl*4,0);iput(pidx,sl*4,-1);iput(rcc,sl*4,0);
+            let ins:[]u8=s.*.ins;
+            if(s.*.ins_n<s.*.ins_cap){iput(ins,s.*.ins_n*4,sl);s.*.ins_n=s.*.ins_n+1;}
+            s.*.nlive=s.*.nlive+1;
+            return sl;
+        }
+        if(iget(ids,h*4)==id){return h;} // already present (live or tombstoned)
+        if(((f & F_LIVE)==0) && first_dead<0){first_dead=h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    if(first_dead>=0){
+        let sl:i32=first_dead;
+        iput(ids,sl*4,id);iput(offs,sl*4,off);iput(lens,sl*4,len);
+        iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+        iput(shifts,sl*4,0);iput(pidx,sl*4,-1);iput(rcc,sl*4,0);
+        let ins:[]u8=s.*.ins;
+        if(s.*.ins_n<s.*.ins_cap){iput(ins,s.*.ins_n*4,sl);s.*.ins_n=s.*.ins_n+1;}
+        s.*.nlive=s.*.nlive+1;
+        return sl;
+    }
+    return -1;
+}
+
+// ---- candidate cut emission ----
+fn cand_emit(s:*Y4,corpus:i32,c:i32,det:i32,last:*i32,cnp:*i32,newc:*i32)void {
+    if(c-last.*<Y4_MIN_GAP){return;}       // 16-byte min separation, first wins
+    if(cnp.*>=s.*.cand_cap){return;}       // candidate array full: drop (sized generously)
+    let cb:i32=(corpus-1)*s.*.cand_cap*4;
+    iput(s.*.cand,cb+(cnp.*)*4,c);
+    y_led(s,OP_CAND,-1,0,c,0,0,corpus,cnp.*,0,0,0,0,0,det,0);
+    cnp.*=cnp.*+1;newc.*=newc.*+1;last.*=c;
+}
+
+// ---- ingest: candidate marking only (no chunks formed) ----
+// Deterministic scan of buf[base..base+len). Cut offsets are corpus-global.
+// A span start is treated as a stream start (documented).
+fn y_ingest_span(s:*Y4,buf:[]u8,corpus:i32,base:i32,len:i32) i32 {
+    let cn:i32=iget(s.*.cand_n,(corpus-1)*4);
+    let first_new:i32=cn;
+    let newc:i32=0;
+    let last:i32=-1000000;
+    if(cn>0){last=iget(s.*.cand,(corpus-1)*s.*.cand_cap*4+(cn-1)*4);}
+    let i:i32=0;
+    let indent:i32=-1;
+    let cur_ws:i32=0;
+    let line_start:i32=0;
+    let in_indent:i32=1;
+    let line_blank:i32=1;
+    while(i<len){
+        let b:u8=buf[base+i];
+        if(in_indent==1 && (b==32 || b==9)){
+            cur_ws=cur_ws+1;
+        }else{
+            if(in_indent==1){
+                in_indent=0;
+                if(b!=10){
+                    if(indent>=0 && cur_ws!=indent){
+                        cand_emit(s,corpus,base+line_start,DET_INDENT,&last,&cn,&newc);
+                    }
+                    indent=cur_ws;
+                }
+                line_blank=1;
+            }
+            if(b==10){
+                if(line_blank==1){
+                    cand_emit(s,corpus,base+i+1,DET_BLANK,&last,&cn,&newc);
+                }
+                line_start=i+1;cur_ws=0;in_indent=1;line_blank=1;
+            }else{
+                line_blank=0;
+                if(b==46 || b==33 || b==63){
+                    cand_emit(s,corpus,base+i+1,DET_SENT,&last,&cn,&newc);
+                }else{
+                    if(b==123 || b==125 || b==91 || b==93){
+                        cand_emit(s,corpus,base+i+1,DET_BRACE,&last,&cn,&newc);
+                    }
+                }
+            }
+        }
+        i=i+1;
+    }
+    iput(s.*.cand_n,(corpus-1)*4,cn);
+    iput(s.*.ingested,(corpus-1)*4,1);
+    let tot:i32=base+len;
+    if(tot>iget(s.*.clens,(corpus-1)*4)){iput(s.*.clens,(corpus-1)*4,tot);}
+    y_led(s,OP_SCAN,-1,0,base,0,len,corpus,first_new,0,0,0,0,0,first_new,newc);
+    return newc;
+}
+
+// ---- chunk grid over the candidate set ----
+fn y_nchunks(s:*Y4,corpus:i32) i32 {
+    if(iget(s.*.ingested,(corpus-1)*4)==0){return 0;}
+    return iget(s.*.cand_n,(corpus-1)*4)+1;
+}
+fn y_chunk_off(s:*Y4,corpus:i32,ci:i32) i32 {
+    if(ci<=0){return 0;}
+    return iget(s.*.cand,(corpus-1)*s.*.cand_cap*4+(ci-1)*4);
+}
+fn y_chunk_end(s:*Y4,corpus:i32,ci:i32) i32 {
+    let n:i32=y_nchunks(s,corpus);
+    if(ci>=n-1){return iget(s.*.clens,(corpus-1)*4);}
+    return iget(s.*.cand,(corpus-1)*s.*.cand_cap*4+ci*4);
+}
+fn y_chunk_id(corpus:i32,ci:i32) i32 { return (corpus<<24)|ci; }
+fn y_id_corpus(id:i32) i32 { return ((id as i64)>>24) as i32; }
+fn y_id_ci(id:i32) i32 { return id & 16777215; }
+
+fn y_killed_get(s:*Y4,corpus:i32,ci:i32) i32 {
+    let kb:[]u8=s.*.killed;
+    let v:i32=kb[(corpus-1)*s.*.kcap+ci/8] as i32;
+    let bit:i32=1<<(ci-((ci/8)*8));
+    if((v & bit)!=0){return 1;}
+    return 0;
+}
+fn y_killed_set(s:*Y4,corpus:i32,ci:i32)void {
+    let kb:[]u8=s.*.killed;
+    let at:i32=(corpus-1)*s.*.kcap+ci/8;
+    let v:i32=kb[at] as i32;
+    let bit:i32=1<<(ci-((ci/8)*8));
+    kb[at]=(v | bit) as u8;
+}
+
+// ---- materialize one chunk as a first-class unit ----
+fn y_materialize(s:*Y4,corpus:i32,ci:i32) i32 {
+    let id:i32=y_chunk_id(corpus,ci);
+    if(y_killed_get(s,corpus,ci)==1){
+        y_led(s,OP_REFUSE,-1,1,0,0,0,corpus,id,0,0,0,0,0,104,0);
+        return -1;
+    }
+    let sl:i32=slot_find(s,id);
+    if(sl>=0){
+        let f:i32=iget(s.*.flags,sl*4);
+        if((f & F_LIVE)!=0){return sl;}       // already materialized
+        y_led(s,OP_REFUSE,-1,1,0,0,0,corpus,id,0,0,0,0,0,105,0); // tombstoned: stays dead
+        return -1;
+    }
+    let off:i32=y_chunk_off(s,corpus,ci);
+    let len:i32=y_chunk_end(s,corpus,ci)-off;
+    sl=slot_insert(s,id,off,len,corpus);
+    if(sl<0){
+        y_led(s,OP_REFUSE,-1,1,off,0,len,corpus,id,0,0,0,0,0,101,0);
+        return -1;
+    }
+    y_led(s,OP_ADD,sl,0,off,0,len,corpus,id,0,0,0,0,0,ci,0);
+    s.*.nmat=s.*.nmat+1;
+    return sl;
+}
+
+// ---- the question: segmentation committed at query time ----
+// Pure function of (question, candidates). Logs QUESTION_ASKED BEFORE any
+// materialization, so the ledger always shows question -> ADDs.
+fn y_question(s:*Y4,corpus:i32,qtype:i32,qoff:i32,qlen:i32) i32 {
+    let n:i32=y_nchunks(s,corpus);
+    let first:i32=0;let last:i32=n-1;
+    if(qtype==Q_SPAN){
+        first=n;last=-1;
+        let ci:i32=0;
+        while(ci<n){
+            let co:i32=y_chunk_off(s,corpus,ci);
+            let ce:i32=y_chunk_end(s,corpus,ci);
+            if(ce>qoff && co<qoff+qlen){if(ci<first){first=ci;}last=ci;}
+            ci=ci+1;
+        }
+    }
+    // pre-scan: how many selected chunks are already materialized+live
+    let already:i32=0;
+    if(last>=first){
+        let ci2:i32=first;
+        while(ci2<=last){
+            let sl:i32=slot_find(s,y_chunk_id(corpus,ci2));
+            if(sl>=0 && (iget(s.*.flags,sl*4) & F_LIVE)!=0){already=already+1;}
+            ci2=ci2+1;
+        }
+    }
+    let sel:i32=0;
+    if(last>=first){sel=last-first+1;}
+    y_led(s,OP_QUESTION,-1,0,qoff,0,qlen,corpus,s.*.nq,0,0,0,0,0,qtype,sel-already);
+    s.*.nq=s.*.nq+1;
+    let mats0:i32=s.*.nmat;
+    if(last>=first){
+        let ci3:i32=first;
+        while(ci3<=last){y_materialize(s,corpus,ci3);ci3=ci3+1;}
+    }
+    if(last<first){return 0;}
+    return s.*.nmat-mats0;
+}
+
+// ---- core ops ----
+fn y_recall(s:*Y4,buf:[]u8,corpus:i32,ci:i32,out:[]u8) i32 {
+    let id:i32=y_chunk_id(corpus,ci);
+    let sl:i32=slot_find(s,id);
+    if(sl<0 || (iget(s.*.flags,sl*4) & F_LIVE)==0){
+        // demand path: materialize the chunk's span as a SPAN question
+        if(y_killed_get(s,corpus,ci)==1){return -1;}
+        let off:i32=y_chunk_off(s,corpus,ci);
+        let ln:i32=y_chunk_end(s,corpus,ci)-off;
+        y_question(s,corpus,Q_SPAN,off,ln);
+        sl=slot_find(s,id);
+        if(sl<0 || (iget(s.*.flags,sl*4) & F_LIVE)==0){return -1;}
+    }
+    let flags:[]u8=s.*.flags;
+    let f:i32=iget(flags,sl*4);
+    let len:i32=iget(s.*.lens,sl*4);
+    if((f & F_PATCH)!=0){
+        let pi:i32=iget(s.*.pidx,sl*4);
+        let pb:[]u8=s.*.patches;
+        let i:i32=0;while(i<len){out[i]=pb[pi*Y4_PATCHB+i];i=i+1;}
+        let rc:[]u8=s.*.rcc;iput(rc,sl*4,iget(rc,sl*4)+1);
+        return len;
+    }
+    let off:i32=iget(s.*.offs,sl*4);
+    if((f & F_SHIFT)!=0){off=off+iget(s.*.shifts,sl*4);}
+    if(off<0){off=0;}
+    let blen:i32=buf.len;
+    if(off+len>blen){len=blen-off;}
+    if(len<=0){return -1;}
+    let i2:i32=0;while(i2<len){out[i2]=buf[off+i2];i2=i2+1;}
+    let rc2:[]u8=s.*.rcc;iput(rc2,sl*4,iget(rc2,sl*4)+1);
+    return len;
+}
+fn y_kill(s:*Y4,id:i32,reason:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl>=0){
+        let flags:[]u8=s.*.flags;
+        let f:i32=iget(flags,sl*4);
+        if((f & F_LIVE)==0){
+            y_led(s,OP_REFUSE,-1,1,0,0,0,0,id,0,0,0,0,0,105,0);
+            return -1;
+        }
+        iput(flags,sl*4,f & (0-1-F_LIVE));
+        s.*.nlive=s.*.nlive-1;
+        y_led(s,OP_KILL,sl,0,0,0,0,0,id,0,0,0,0,0,reason,0);
+        return 0;
+    }
+    // lazy kill: the chunk was never materialized — tombstone the candidate
+    // span so no future question can materialize it. Audited, loud.
+    let corpus:i32=y_id_corpus(id);let ci:i32=y_id_ci(id);
+    if(corpus>=1 && corpus<=8 && ci>=0 && ci<y_nchunks(s,corpus)){
+        y_killed_set(s,corpus,ci);
+        y_led(s,OP_KILL,-1,0,0,0,0,corpus,id,1,0,0,0,0,reason,0);
+        return 0;
+    }
+    y_led(s,OP_REFUSE,-1,1,0,0,0,0,id,0,0,0,0,0,106,0);
+    return -1;
+}
+fn y_pin(s:*Y4,id:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PIN);
+    y_led(s,OP_PIN,sl,0,0,0,0,0,id,0,0,0,0,0,1,0);
+    return 0;
+}
+fn y_weaken(s:*Y4,id:i32,seq:i32) i32 {
+    // documented policy: weaken is a management annotation (flag), audited;
+    // never changes stored bytes.
+    let sl:i32=slot_find(s,id);
+    if(sl<0){
+        y_led(s,OP_REFUSE,-1,1,0,0,0,0,id,0,0,0,0,0,102,0);
+        return -1;
+    }
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_WEAK);
+    y_led(s,OP_WEAKEN,sl,0,0,0,0,0,id,0,0,0,0,0,seq,0);
+    return 0;
+}
+fn y_defect_boundary(s:*Y4,id:i32,delta:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let shifts:[]u8=s.*.shifts;let flags:[]u8=s.*.flags;
+    iput(shifts,sl*4,delta);iput(flags,sl*4,iget(flags,sl*4) | F_SHIFT);
+    y_led(s,OP_TDB,sl,0,0,0,0,0,id,0,0,0,0,0,delta,0);
+    return 0;
+}
+fn y_defect_content(s:*Y4,id:i32,patch:[]u8,plen:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    if(s.*.patch_n>=s.*.patch_cap){return -1;}
+    if(plen>Y4_PATCHB){return -1;}
+    let pi:i32=s.*.patch_n;
+    let pb:[]u8=s.*.patches;
+    let i:i32=0;while(i<plen){pb[pi*Y4_PATCHB+i]=patch[i];i=i+1;}
+    s.*.patch_n=pi+1;
+    iput(s.*.pidx,sl*4,pi);
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PATCH);
+    y_led(s,OP_TDC,sl,0,0,0,0,0,id,0,0,0,0,0,plen,0);
+    return 0;
+}
+fn y_revise(s:*Y4,id:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    let f:i32=iget(flags,sl*4);
+    if((f & F_LIVE)==0){return -1;}
+    if((f & (F_SHIFT | F_PATCH))==0){return 0;}
+    let old_off:i32=iget(s.*.offs,sl*4)+iget(s.*.shifts,sl*4);
+    iput(s.*.shifts,sl*4,0);
+    iput(s.*.pidx,sl*4,-1);
+    iput(flags,sl*4,f & (0-1-F_SHIFT-F_PATCH));
+    let new_off:i32=iget(s.*.offs,sl*4);
+    y_led(s,OP_REVISE,sl,0,iget(s.*.offs,sl*4),0,iget(s.*.lens,sl*4),
+          iget(s.*.corps,sl*4),id,0,0,0,0,0,old_off,new_off);
+    return 1;
+}
+fn y_evict_oldest_unpinned(s:*Y4) i32 {
+    let ins:[]u8=s.*.ins;let flags:[]u8=s.*.flags;
+    while(s.*.ins_head<s.*.ins_n){
+        let sl:i32=iget(ins,s.*.ins_head*4);
+        s.*.ins_head=s.*.ins_head+1;
+        let f:i32=iget(flags,sl*4);
+        if((f & F_LIVE)!=0 && (f & F_PIN)==0){
+            let id:i32=iget(s.*.ids,sl*4);
+            iput(flags,sl*4,f & (0-1-F_LIVE));
+            s.*.nlive=s.*.nlive-1;
+            y_led(s,OP_EVICT,sl,0,0,0,0,0,id,0,0,0,0,0,1,0);
+            return id;
+        }
+    }
+    return -1;
+}
+fn y_mark_valuable(s:*Y4,id:i32) i32 {
+    y_led(s,OP_TMV,-1,0,0,0,0,0,id,0,0,0,0,0,1,0);
+    return y_pin(s,id); // Y4's marking mechanism: pin the materialized chunk
+}
+
+// ---- file IO ----
+fn read_file(dir:[]u8,name:[]u8) []u8 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let sz:i64=nio_seek(fd,0,2);
+    if(sz<=0 || sz>33554432){nio_close(fd);return "";}
+    let buf:[]u8=nio_alloc(sz as i32);
+    if(buf.len!=(sz as i32)){nio_close(fd);return "";}
+    let nr:i64=nio_read_exact(fd,buf,sz as i32);
+    nio_close(fd);
+    if(nr!=sz){nio_free(buf);return "";}
+    return buf;
+}
+fn file_size(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);
+    nio_close(fd);
+    return sz;
+}
+fn write_file(dir:[]u8,name:[]u8,data:[]u8) i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let at:i32=0;
+    while(at<data.len){
+        let n:i32=data.len-at;
+        if(n>1048576){n=1048576;}
+        let w:i64=nio_write_all(fd,data[at..at+n]);
+        if(w!=(n as i64)){nio_close(fd);return -1;}
+        at=at+n;
+    }
+    nio_close(fd);
+    return 0;
+}
+// ---- JSON emission (schema metrics-v1) ----
+fn j_begin(mode:[]u8)void {
+    _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"y4\",\"round\":\"r1\",\"scale\":\"1x\",\"mode\":\"");
+    _zag_print(mode);
+    _zag_print("\",\"fields\":{");
+}
+fn j_sep(f:*i32)void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_end()void { _zag_print("}}");_zag_println(""); }
+fn p_dec1(tenths:i64)void {
+    if(tenths<0){_zag_print("-");tenths=0-tenths;}
+    let ip:i64=tenths/10;let fp:i64=tenths-(ip*10);
+    let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+    _zag_print(".");
+    let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+fn jf_dec1(f:*i32,key:[]u8,tenths:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec1(tenths);
+}
+fn jf_int(f:*i32,key:[]u8,v:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s);
+}
+fn jf_str(f:*i32,key:[]u8,v:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+fn jf_bool(f:*i32,key:[]u8,v:i32)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    if(v==1){_zag_print("true");}else{_zag_print("false");}
+}
+fn jf_null(f:*i32,key:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":null");
+}
+fn j_cat2(a:[]u8,b:[]u8) []u8 {
+    let o:[]u8=nio_alloc(a.len+b.len);
+    let i:i32=0;while(i<a.len){o[i]=a[i];i=i+1;}
+    let k:i32=0;while(k<b.len){o[a.len+k]=b[k];k=k+1;}
+    return o;
+}
+fn j_keyed_null(f:*i32,pre:[]u8,suf:[]u8)void {
+    let k:[]u8=j_cat2(pre,suf);
+    jf_null(f,k);
+    nio_free(k);
+}
+fn p_i64(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+
+// ---- shared trial helpers ----
+// capacity estimate: chunks average ~70B; size 1.25x of len/64 + margin
+fn cap_for(buflen:i32) i32 { return buflen/64+buflen/256+4096; }
+// full probe: ask the FULL question, then recall every materialized chunk
+fn probe_full(s:*Y4,buf:[]u8,corpus:i32,bout:[]u8,cok:*i32,bok:*i32) void {
+    y_question(s,corpus,Q_FULL,0,0);
+    let n:i32=y_nchunks(s,corpus);
+    let ok:i32=0;let bo:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let off:i32=y_chunk_off(s,corpus,i);
+        let len:i32=y_chunk_end(s,corpus,i)-off;
+        let rl:i32=y_recall(s,buf,corpus,i,bout);
+        if(rl==len){
+            let good:i32=1;
+            let j:i32=0;while(j<len){if(bout[j]!=buf[off+j]){good=0;break;}j=j+1;}
+            if(good==1){ok=ok+1;}
+        }
+        let sl:i32=slot_find(s,y_chunk_id(corpus,i));
+        if(sl>=0){
+            let f:i32=iget(s.*.flags,sl*4);
+            if((f & F_LIVE)!=0 && iget(s.*.offs,sl*4)==off && iget(s.*.lens,sl*4)==len
+               && (f & F_SHIFT)==0){bo=bo+1;}
+        }
+        i=i+1;
+    }
+    if(n>0){cok.*=ok*1000/n;bok.*=bo*1000/n;}else{cok.*=0;bok.*=0;}
+}
+fn chunk_verified(s:*Y4,buf:[]u8,corpus:i32,ci:i32,bout:[]u8) i32 {
+    let id:i32=y_chunk_id(corpus,ci);
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return 0;}
+    let f:i32=iget(s.*.flags,sl*4);
+    if((f & F_LIVE)==0){return 0;}
+    if((f & (F_SHIFT | F_PATCH))!=0){return 0;}
+    let off:i32=y_chunk_off(s,corpus,ci);
+    let len:i32=y_chunk_end(s,corpus,ci)-off;
+    let rl:i32=y_recall(s,buf,corpus,ci,bout);
+    if(rl!=len){return 0;}
+    let i:i32=0;while(i<len){if(bout[i]!=buf[off+i]){return 0;}i=i+1;}
+    return 1;
+}
+// count ledger entries with one of the management opcodes in [lo,hi)
+fn mgmt_count(s:*Y4,lo:i32,hi:i32) i32 {
+    let c:i32=0;let e:i32=lo;
+    let led:[]u8=s.*.led;
+    while(e<hi){
+        let op:i32=iget(led,e*64);
+        if(op==OP_ADD || op==OP_KILL || op==OP_PIN || op==OP_WEAKEN ||
+           op==OP_PROMOTE || op==OP_EVICT || op==OP_REFUSE ||
+           op==OP_SCAN || op==OP_CAND){c=c+1;}
+        e=e+1;
+    }
+    return c;
+}
+// laziness stat: % (tenths) of materialized chunks with recall count < 2
+fn never_twice_tenths(s:*Y4) i64 {
+    let nm:i32=0;let nt:i32=0;
+    let cap:i32=s.*.cap;
+    let flags:[]u8=s.*.flags;let rcc:[]u8=s.*.rcc;
+    let h:i32=0;
+    while(h<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)!=0){
+            nm=nm+1;
+            if(iget(rcc,h*4)<2){nt=nt+1;}
+        }
+        h=h+1;
+    }
+    if(nm==0){return 0;}
+    return (nt as i64)*1000/(nm as i64);
+}
+
+// ---- M1: single-corpus recall ----
+fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M1,FATAL,empty-corpus");return;}
+    let s:Y4=y4_new(cap_for(buf.len),buf.len/64*2+1024,cap_for(buf.len),150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    let nc0:i32=y_ingest_span(&s,buf,corpus,0,buf.len);
+    let nq0:i32=s.nq;
+    let cok:i32=0;let bok:i32=0;
+    probe_full(&s,buf,corpus,bout,&cok,&bok);
+    let nch:i32=y_nchunks(&s,corpus);
+    _zag_print("M1,");
+    _zag_print(fname);_zag_print(",");
+    p_dec1(cok as i64);_zag_print(",");p_dec1(bok as i64);
+    _zag_print(",");p_i64(nch as i64);
+    _zag_print(",cand=");p_i64(nc0 as i64);
+    _zag_print(",mat=");p_i64(s.nmat as i64);
+    _zag_print(",led=");p_i64(s.led_n as i64);_zag_println("");
+    let f:i32=0;
+    j_begin(jmode);
+    jf_dec1(&f,"m1_recall_tenths",cok as i64);
+    jf_dec1(&f,"m1_boundary_tenths",bok as i64);
+    jf_int(&f,"m1_units",nch as i64);
+    jf_str(&f,"m1_corpus",keyp);
+    jf_int(&f,"m1_candidates",nc0 as i64);
+    jf_int(&f,"m1_materializations",s.nmat as i64);
+    jf_int(&f,"m1_ledger_entries",s.led_n as i64);
+    jf_int(&f,"m1_questions",s.nq as i64);
+    j_end();
+    hfree(&s,bout);
+}
+
+// ---- M2: tiered curriculum (each episode: ingest pass + FULL-question probe) ----
+fn t_m2(cdir:[]u8,fname:[]u8,corpus:i32,tier:[]u8,do_m9:i32) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M2,FATAL,empty-corpus");return;}
+    let s:Y4=y4_new(cap_for(buf.len),buf.len/64*2+2048,cap_for(buf.len),150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    // episode 0 probe on the un-ingested store: no candidates -> 0 chunks
+    let cok:i32=0;let bok:i32=0;
+    probe_full(&s,buf,corpus,bout,&cok,&bok);
+    let r0:i64=cok as i64;
+    let rs:[]u8=halloc(&s,51*4);
+    iput(rs,0,cok);
+    let e:i32=1;let consec:i32=0;let etc:i32=50;let nep:i32=1;
+    let rc:i32=cok;let bc:i32=bok;
+    while(e<=50){
+        y_ingest_span(&s,buf,corpus,0,buf.len); // idempotent after episode 1
+        probe_full(&s,buf,corpus,bout,&cok,&bok);
+        iput(rs,e*4,cok);
+        nep=e+1;
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;rc=cok;bc=bok;break;}
+        rc=cok;bc=bok;
+        e=e+1;
+    }
+    let censored:i32=0;
+    if(etc>=50){censored=1;}
+    let ntw:i64=never_twice_tenths(&s);
+    _zag_print("M2,");_zag_print(tier);_zag_print(",");
+    p_i64(etc as i64);_zag_print(",");
+    p_i64(censored as i64);_zag_print(",");
+    p_dec1(r0);_zag_print(",nevertwice=");
+    p_dec1(ntw);_zag_println("");
+    let f:i32=0;
+    j_begin(tier);
+    jf_int(&f,"m2_episodes",etc as i64);
+    jf_bool(&f,"m2_censored",censored);
+    jf_dec1(&f,"m2_ep0_recall_tenths",r0);
+    jf_dec1(&f,"m2_final_recall_tenths",rc as i64);
+    jf_dec1(&f,"m2_final_boundary_tenths",bc as i64);
+    jf_dec1(&f,"m2_never_twice_tenths",ntw);
+    jf_int(&f,"m2_ledger_entries",s.led_n as i64);
+    if(do_m9==1){
+        let npts:i32=nep;
+        let takeoff:i32=npts;
+        let e2:i32=0;
+        while(e2<npts){
+            if(iget(rs,e2*4)>=500){takeoff=e2;break;}
+            e2=e2+1;
+        }
+        let steep:i64=0;
+        e2=1;
+        while(e2<npts){
+            let jmp:i64=(iget(rs,e2*4)-iget(rs,(e2-1)*4)) as i64;
+            if(jmp>steep){steep=jmp;}
+            e2=e2+1;
+        }
+        let etc_idx:i32=etc;
+        if(etc_idx>=npts){etc_idx=npts-1;}
+        let to_idx:i32=takeoff;
+        if(to_idx>=npts){to_idx=npts-1;}
+        let late:i64=(iget(rs,etc_idx*4)-iget(rs,to_idx*4)) as i64;
+        let shape:[]u8="other";
+        if(steep>=400 && late<=150){shape="fast-then-flat";}
+        else{
+            if(takeoff>=3 && steep>=400){shape="slow-then-sudden";}
+            else{
+                if(steep<400){shape="gradual";}
+            }
+        }
+        jf_str(&f,"m9_shape",shape);
+        jf_int(&f,"m9_takeoff_ep",takeoff as i64);
+        jf_dec1(&f,"m9_steepness_tenths",steep);
+        jf_dec1(&f,"m9_late_gain_tenths",late);
+        j_end();
+        _zag_print("M9,");_zag_print(tier);_zag_print(",");
+        _zag_print(shape);_zag_println("");
+    }
+    if(do_m9==0){
+        j_end();
+    }
+    hfree(&s,bout);hfree(&s,rs);
+}
+
+// ---- M3 helpers ----
+fn m3_kill_fresh(s:*Y4,f:i32)void {
+    // translate fresh 64B unit f -> overlapping chunks -> lazy kill each
+    let qoff:i32=f*64;
+    let n:i32=y_nchunks(s,Y4_C_FRESH);
+    let ci:i32=0;
+    while(ci<n){
+        let co:i32=y_chunk_off(s,Y4_C_FRESH,ci);
+        let ce:i32=y_chunk_end(s,Y4_C_FRESH,ci);
+        if(ce>qoff && co<qoff+64){y_kill(s,y_chunk_id(Y4_C_FRESH,ci),1);}
+        ci=ci+1;
+    }
+}
+fn m3_fresh_recall(s:*Y4,fresh:[]u8,f:i32,bout:[]u8,piece:[]u8) i32 {
+    // SPAN question over the fresh 64B unit; assemble bytes; 1 if exact
+    let qoff:i32=f*64;
+    y_question(s,Y4_C_FRESH,Q_SPAN,qoff,64);
+    let n:i32=y_nchunks(s,Y4_C_FRESH);
+    let ci:i32=0;
+    while(ci<n){
+        let co:i32=y_chunk_off(s,Y4_C_FRESH,ci);
+        let ce:i32=y_chunk_end(s,Y4_C_FRESH,ci);
+        if(ce>qoff && co<qoff+64){
+            let rl:i32=y_recall(s,fresh,Y4_C_FRESH,ci,bout);
+            if(rl>0){
+                let lo:i32=co;if(lo<qoff){lo=qoff;}
+                let hi:i32=ce;if(hi>qoff+64){hi=qoff+64;}
+                let j:i32=lo;
+                while(j<hi){piece[j-qoff]=bout[j-co];j=j+1;}
+            }
+        }
+        ci=ci+1;
+    }
+    let k:i32=0;
+    while(k<64){if(piece[k]!=fresh[qoff+k]){return 0;}k=k+1;}
+    return 1;
+}
+
+// ---- M3: strength trial ----
+fn t_m3(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let code:[]u8=read_file(cdir,"code.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let s:Y4=y4_new(16384,300000,16384,150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    let piece:[]u8=halloc(&s,64);
+    y_ingest_span(&s,prose,Y4_C_PROSE,0,prose.len);
+    y_ingest_span(&s,code,Y4_C_CODE,0,code.len);
+    let np:i32=y_nchunks(&s,Y4_C_PROSE);
+    let nc:i32=y_nchunks(&s,Y4_C_CODE);
+    let total:i32=np+nc;
+    let k:i32=total/Y4_M3_V;
+    if(k<1){k=1;}
+    let v_corpus:[]u8=halloc(&s,Y4_M3_V*4);
+    let v_ci:[]u8=halloc(&s,Y4_M3_V*4);
+    let v:i32=0;
+    while(v<Y4_M3_V){
+        let g:i32=v*k;
+        let cid:i32=Y4_C_PROSE;let ci:i32=g;
+        if(g>=np){cid=Y4_C_CODE;ci=g-np;}
+        let off:i32=y_chunk_off(&s,cid,ci);
+        let ln:i32=y_chunk_end(&s,cid,ci)-off;
+        y_question(&s,cid,Q_SPAN,off,ln);   // materialize exactly this chunk
+        y_mark_valuable(&s,y_chunk_id(cid,ci));
+        iput(v_corpus,v*4,cid);iput(v_ci,v*4,ci);
+        v=v+1;
+    }
+    let n_p1:i32=s.led_n;
+    // phase 1: 3000 fresh candidate-ingests (no chunks formed)
+    let f:i32=0;
+    while(f<Y4_M3_FRESH1){y_ingest_span(&s,fresh,Y4_C_FRESH,f*64,64);f=f+1;}
+    // phase 2: kill fresh units 0..2999 (lazy kill of candidate spans)
+    f=0;
+    while(f<Y4_M3_KILL){m3_kill_fresh(&s,f);f=f+1;}
+    // weaken probe: 50 weaken ops on every 20th valuable
+    let w:i32=0;let w_ok:i32=0;
+    while(w<50){
+        let vj:i32=w*20;
+        let id:i32=y_chunk_id(iget(v_corpus,vj*4),iget(v_ci,vj*4));
+        if(y_weaken(&s,id,w+1)==0){w_ok=w_ok+1;}
+        w=w+1;
+    }
+    let n_p2:i32=s.led_n;
+    // phase 3: 4000 fresh candidate-ingests at capacity
+    f=Y4_M3_FRESH1;
+    while(f<Y4_M3_FRESH1+Y4_M3_FRESH2){y_ingest_span(&s,fresh,Y4_C_FRESH,f*64,64);f=f+1;}
+    let n_p3:i32=s.led_n;
+    // V survival
+    let surv_ok:i32=0;
+    v=0;
+    while(v<Y4_M3_V){
+        let cid:i32=iget(v_corpus,v*4);let ci:i32=iget(v_ci,v*4);
+        let buf:[]u8=prose;if(cid==Y4_C_CODE){buf=code;}
+        let off:i32=y_chunk_off(&s,cid,ci);
+        let len:i32=y_chunk_end(&s,cid,ci)-off;
+        let rl:i32=y_recall(&s,buf,cid,ci,bout);
+        if(rl==len){
+            let good:i32=1;let q:i32=0;
+            while(q<len){if(bout[q]!=buf[off+q]){good=0;break;}q=q+1;}
+            if(good==1){surv_ok=surv_ok+1;}
+        }
+        v=v+1;
+    }
+    let surv:i64=(surv_ok as i64)*1000/(Y4_M3_V as i64);
+    // fresh sample: last 500 ingested fresh units
+    let fs_ok:i32=0;
+    f=Y4_M3_FRESH1+Y4_M3_FRESH2-500;
+    while(f<Y4_M3_FRESH1+Y4_M3_FRESH2){
+        fs_ok=fs_ok+m3_fresh_recall(&s,fresh,f,bout,piece);
+        f=f+1;
+    }
+    let fresht:i64=(fs_ok as i64)*1000/500;
+    let mgmt:i32=mgmt_count(&s,n_p1,n_p3);
+    let freeze:i32=0;
+    if(surv>=900 && fresht<800){freeze=1;}
+    if(mgmt<700){freeze=1;}
+    if(w_ok<50){freeze=1;}
+    let fz:[]u8="CLEAR";
+    if(freeze==1){fz="FROZEN-UNDER-PRESSURE";}
+    _zag_print("M3,");
+    p_dec1(surv);_zag_print(",");p_dec1(fresht);_zag_print(",");
+    p_i64(mgmt as i64);_zag_print(",");p_i64(w_ok as i64);_zag_print(",");
+    _zag_println(fz);
+    let ff:i32=0;
+    j_begin("m3-1x");
+    jf_dec1(&ff,"m3_survival_tenths",surv);
+    jf_dec1(&ff,"m3_fresh_recall_tenths",fresht);
+    jf_int(&ff,"m3_mgmt_entries",mgmt as i64);
+    jf_int(&ff,"m3_weaken_handled",w_ok as i64);
+    jf_str(&ff,"m3_freeze",fz);
+    jf_int(&ff,"m3_valuable",Y4_M3_V as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,piece);hfree(&s,v_corpus);hfree(&s,v_ci);
+}
+
+// ---- defect patch builders ----
+fn patch_prose_xor(buf:[]u8,off:i32,len:i32,out:[]u8) void {
+    let i:i32=0;
+    while(i<len){
+        let b:u8=buf[off+i];
+        if(i%7==0){b=(b as i32 ^ 255) as u8;}
+        out[i]=b;i=i+1;
+    }
+}
+fn code_rename(buf:[]u8,off:i32,len:i32,out:[]u8) void {
+    let i:i32=0;while(i<len){out[i]=buf[off+i];i=i+1;}
+    let p0:[]u8="sqlite3";let r0:[]u8="sqlite4";
+    let p1:[]u8="SQLITE";let r1:[]u8="SQLITF";
+    let p2:[]u8="Vdbe";let r2:[]u8="Vdbf";
+    let p3:[]u8="Mem";let r3:[]u8="Mfm";
+    let p4:[]u8="pBt";let r4:[]u8="pBu";
+    let k:i32=0;
+    while(k<5){
+        let pat:[]u8=p0;let rep:[]u8=r0;
+        if(k==1){pat=p1;rep=r1;}
+        if(k==2){pat=p2;rep=r2;}
+        if(k==3){pat=p3;rep=r3;}
+        if(k==4){pat=p4;rep=r4;}
+        let pl:i32=pat.len;
+        let pos:i32=0;
+        while(pos+pl<=len){
+            let m:i32=1;let q:i32=0;
+            while(q<pl){if(out[pos+q]!=pat[q]){m=0;break;}q=q+1;}
+            if(m==1){q=0;while(q<pl){out[pos+q]=rep[q];q=q+1;}pos=pos+pl;}
+            else{pos=pos+1;}
+        }
+        k=k+1;
+    }
+}
+
+// ---- M4: defect revision ----
+fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M4,FATAL,empty-corpus");return;}
+    let s:Y4=y4_new(cap_for(buf.len),buf.len/64*2+8192,cap_for(buf.len),150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    let patch:[]u8=halloc(&s,Y4_PATCHB);
+    y_ingest_span(&s,buf,corpus,0,buf.len);
+    y_question(&s,corpus,Q_FULL,0,0);
+    let n:i32=y_nchunks(&s,corpus);
+    let d_ci:[]u8=halloc(&s,Y4_M4_N*4);
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    let j:i32=0;
+    while(j<Y4_M4_N){
+        let ci:i32=j*n/Y4_M4_N;
+        iput(d_ci,j*4,ci);
+        let id:i32=y_chunk_id(corpus,ci);
+        if(j<100){
+            y_defect_boundary(&s,id,iget(cyc,(j%12)*4));
+        }else{
+            let off:i32=y_chunk_off(&s,corpus,ci);
+            let len:i32=y_chunk_end(&s,corpus,ci)-off;
+            if(is_code==1){code_rename(buf,off,len,patch);}
+            else{patch_prose_xor(buf,off,len,patch);}
+            y_defect_content(&s,id,patch,len);
+        }
+        j=j+1;
+    }
+    let rep_b:i32=0;let rep_c:i32=0;
+    let ep:i32=1;
+    while(ep<=20){
+        j=0;
+        while(j<Y4_M4_N){
+            y_revise(&s,y_chunk_id(corpus,iget(d_ci,j*4)));
+            j=j+1;
+        }
+        rep_b=0;rep_c=0;
+        j=0;
+        while(j<100){
+            rep_b=rep_b+chunk_verified(&s,buf,corpus,iget(d_ci,j*4),bout);
+            j=j+1;
+        }
+        j=100;
+        while(j<Y4_M4_N){
+            rep_c=rep_c+chunk_verified(&s,buf,corpus,iget(d_ci,j*4),bout);
+            j=j+1;
+        }
+        if(rep_b+rep_c>=Y4_M4_N){break;}
+        ep=ep+1;
+    }
+    let killed:i32=0;
+    j=0;
+    while(j<Y4_M4_N){
+        let sl:i32=slot_find(&s,y_chunk_id(corpus,iget(d_ci,j*4)));
+        if(sl>=0){
+            let f:i32=iget(s.flags,sl*4);
+            if((f & F_LIVE)==0){killed=killed+1;}
+        }else{killed=killed+1;}
+        j=j+1;
+    }
+    let rev_bt:i64=(rep_b as i64)*1000/100;
+    let rev_ct:i64=(rep_c as i64)*1000/100;
+    let kill_t:i64=(killed as i64)*1000/(Y4_M4_N as i64);
+    let ksub:i32=0;
+    if(kill_t>500 && (rev_bt<800 || rev_ct<800)){ksub=1;}
+    _zag_print("M4,");_zag_print(keyp);_zag_print(",");
+    p_dec1(rev_bt);_zag_print(",");p_dec1(rev_ct);_zag_print(",");
+    p_dec1(kill_t);_zag_print(",");p_i64(ksub as i64);_zag_println("");
+    let f:i32=0;
+    j_begin(keyp);
+    jf_dec1(&f,"m4_rev_boundary_tenths",rev_bt);
+    jf_dec1(&f,"m4_rev_content_tenths",rev_ct);
+    jf_dec1(&f,"m4_kill_rate_tenths",kill_t);
+    jf_bool(&f,"m4_killsub",ksub);
+    jf_int(&f,"m4_episodes",ep as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,patch);hfree(&s,cyc);hfree(&s,d_ci);
+}
+
+// ---- M5: resource pressure ----
+fn t_m5(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let cap:i32=cap_for(prose.len);
+    let s:Y4=y4_new(cap,prose.len/64*2+4096,cap,150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    y_ingest_span(&s,prose,Y4_C_PROSE,0,prose.len);
+    // mini-pressure: 500 fresh candidate-ingests + 500 lazy kills
+    let f:i32=0;
+    while(f<500){y_ingest_span(&s,fresh,Y4_C_FRESH,f*64,64);f=f+1;}
+    f=0;
+    while(f<500){m3_kill_fresh(&s,f);f=f+1;}
+    // the question: full recall -> materialize everything, then verify
+    y_question(&s,Y4_C_PROSE,Q_FULL,0,0);
+    let l:i32=0;let src:i64=0;
+    let n:i32=y_nchunks(&s,Y4_C_PROSE);
+    let i2:i32=0;
+    while(i2<n){
+        let off:i32=y_chunk_off(&s,Y4_C_PROSE,i2);
+        let len:i32=y_chunk_end(&s,Y4_C_PROSE,i2)-off;
+        let rl:i32=y_recall(&s,prose,Y4_C_PROSE,i2,bout);
+        if(rl==len){
+            let good:i32=1;let q:i32=0;
+            while(q<len){if(bout[q]!=prose[off+q]){good=0;break;}q=q+1;}
+            if(good==1){l=l+1;src=src+(len as i64);}
+        }
+        i2=i2+1;
+    }
+    let slot_bytes:i64=(s.cap as i64)*32+(s.ins_cap as i64)*4;
+    let ledger_bytes:i64=(s.led_n as i64)*64;
+    let wf:i32=write_file(".","ledger.bin",s.led[0..s.led_n*64]);
+    _zag_print("M5,");p_i64(l as i64);_zag_print(",");
+    p_i64(src);_zag_print(",");p_i64(slot_bytes);_zag_print(",");
+    p_i64(ledger_bytes);_zag_print(",");p_i64(wf as i64);_zag_println("");
+    let ff:i32=0;
+    j_begin("m5-1x");
+    jf_int(&ff,"m5_units_learned",l as i64);
+    jf_int(&ff,"m5_source_bytes_learned",src);
+    jf_int(&ff,"m5_slot_table_bytes",slot_bytes);
+    jf_int(&ff,"m5_ledger_bytes",ledger_bytes);
+    jf_int(&ff,"m5_ledger_entries",s.led_n as i64);
+    jf_int(&ff,"m5_corpus_buffer_bytes",prose.len as i64);
+    j_end();
+    hfree(&s,bout);
+}
+
+// ---- M6: transfer tax ----
+fn t_m6(cdir:[]u8,dir:i32) void {
+    let tname:[]u8="t1_prose.bin";let tcid:i32=Y4_C_T1P;
+    let yname:[]u8="code.bin";let ycid:i32=Y4_C_CODE;
+    let dkey:[]u8="m6-p2c-1x";let dtag:[]u8="p2c";
+    if(dir==1){
+        tname="t1_code.bin";tcid=Y4_C_T1C;yname="prose.bin";ycid=Y4_C_PROSE;
+        dkey="m6-c2p-1x";dtag="c2p";
+    }
+    let tbuf:[]u8=read_file(cdir,tname);
+    let ybuf:[]u8=read_file(cdir,yname);
+    if(tbuf.len==0 || ybuf.len==0){_zag_println("M6,FATAL,empty-corpus");return;}
+    let cap:i32=cap_for(tbuf.len)+cap_for(ybuf.len);
+    let s:Y4=y4_new(cap,(tbuf.len+ybuf.len)/64*2+8192,cap,150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    // train on the tier to the M2 criterion (policy = code-frozen detectors)
+    let cok:i32=0;let bok:i32=0;
+    let e:i32=1;let consec:i32=0;let etc:i32=50;
+    while(e<=50){
+        y_ingest_span(&s,tbuf,tcid,0,tbuf.len);
+        probe_full(&s,tbuf,tcid,bout,&cok,&bok);
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;break;}
+        e=e+1;
+    }
+    let rec_d:i64=cok as i64;let bnd_d:i64=bok as i64;
+    let nt:i32=y_nchunks(&s,tcid);
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    let j:i32=0;
+    while(j<100){
+        y_defect_boundary(&s,y_chunk_id(tcid,j*nt/100),iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){y_revise(&s,y_chunk_id(tcid,j*nt/100));j=j+1;}
+    let rev_d:i32=0;
+    j=0;
+    while(j<100){rev_d=rev_d+chunk_verified(&s,tbuf,tcid,j*nt/100,bout);j=j+1;}
+    let rev_dt:i64=(rev_d as i64)*10;
+    // transfer: face the new domain (ingest allowed, policy frozen)
+    y_ingest_span(&s,ybuf,ycid,0,ybuf.len);
+    let rec_t:i32=0;let bnd_t:i32=0;
+    probe_full(&s,ybuf,ycid,bout,&rec_t,&bnd_t);
+    let ny:i32=y_nchunks(&s,ycid);
+    j=0;
+    while(j<100){
+        y_defect_boundary(&s,y_chunk_id(ycid,j*ny/100),iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){y_revise(&s,y_chunk_id(ycid,j*ny/100));j=j+1;}
+    let rev_t:i32=0;
+    j=0;
+    while(j<100){rev_t=rev_t+chunk_verified(&s,ybuf,ycid,j*ny/100,bout);j=j+1;}
+    let rev_tt:i64=(rev_t as i64)*10;
+    let tax:i64=((rec_d-(rec_t as i64))+((bnd_d-(bnd_t as i64)))+(rev_dt-rev_tt))/3;
+    _zag_print("M6,");_zag_print(dtag);_zag_print(",");
+    p_dec1(rec_t as i64);_zag_print(",");p_dec1(bnd_t as i64);_zag_print(",");
+    p_dec1(rev_tt);_zag_print(",");p_dec1(tax);_zag_println("");
+    let f:i32=0;
+    j_begin(dkey);
+    jf_dec1(&f,"rec_tenths",rec_t as i64);
+    jf_dec1(&f,"bnd_tenths",bnd_t as i64);
+    jf_dec1(&f,"rev_tenths",rev_tt);
+    jf_dec1(&f,"tax_tenths",tax);
+    j_end();
+    hfree(&s,bout);hfree(&s,cyc);
+}
+
+// ---- M7: ID-arm cache rig (PROVISIONAL pending Micah's A7/A8 freeze) ----
+// Y4 operationalization: the C' round is applied as byte-level edits against
+// the committed candidate grid (M4-style content patches on every 100th chunk
+// ID) — re-cutting on a 1-byte edit would violate committed-segmentation
+// semantics. Rounds 0/1 follow the literal procedure.
+fn t_m7(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    if(prose.len==0){_zag_println("M7,FATAL,empty-corpus");return;}
+    let cap:i32=cap_for(prose.len);
+    let s:Y4=y4_new(cap,prose.len/64*2+4096,cap,150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    let ep:[]u8=halloc(&s,Y4_PATCHB);
+    // round 0: ingest C, FULL question, lookups
+    y_ingest_span(&s,prose,Y4_C_PROSE,0,prose.len);
+    y_question(&s,Y4_C_PROSE,Q_FULL,0,0);
+    let n:i32=y_nchunks(&s,Y4_C_PROSE);
+    let hits:i64=0;let l:i32=0;
+    while(l<1666){
+        let ci:i32=(l*37)%n;
+        if(y_recall(&s,prose,Y4_C_PROSE,ci,bout)>0){hits=hits+1;}
+        l=l+1;
+    }
+    // round 1: ingest C again (0 new candidates), reuse, lookups
+    y_ingest_span(&s,prose,Y4_C_PROSE,0,prose.len);
+    y_question(&s,Y4_C_PROSE,Q_FULL,0,0);
+    while(l<3333){
+        let ci:i32=(l*37)%n;
+        if(y_recall(&s,prose,Y4_C_PROSE,ci,bout)>0){hits=hits+1;}
+        l=l+1;
+    }
+    // round 2: C' = every-100th-chunk first-byte XOR 0xFF, as content patches
+    // on the committed grid (declared, audited via OP_TDC entries)
+    let q:i32=0;
+    while(q<n){
+        if(q%100==0){
+            let off:i32=y_chunk_off(&s,Y4_C_PROSE,q);
+            let len:i32=y_chunk_end(&s,Y4_C_PROSE,q)-off;
+            let a:i32=0;while(a<len){ep[a]=prose[off+a];a=a+1;}
+            ep[0]=(ep[0] as i32 ^ 255) as u8;
+            y_defect_content(&s,y_chunk_id(Y4_C_PROSE,q),ep,len);
+        }
+        q=q+1;
+    }
+    while(l<Y4_M7_LOOKUPS){
+        let ci:i32=(l*37)%n;
+        if(y_recall(&s,prose,Y4_C_PROSE,ci,bout)>0){hits=hits+1;}
+        l=l+1;
+    }
+    // distinct live IDs touched by the 5000-lookup schedule
+    let seen:[]u8=halloc(&s,n);
+    let z:i32=0;while(z<n){seen[z]=0;z=z+1;}
+    let distinct:i32=0;
+    l=0;
+    while(l<Y4_M7_LOOKUPS){
+        let ci2:i32=(l*37)%n;
+        if(seen[ci2]==0){seen[ci2]=1;distinct=distinct+1;}
+        l=l+1;
+    }
+    hfree(&s,seen);
+    let hit_t:i64=hits*1000/(Y4_M7_LOOKUPS as i64);
+    // reuse = ID references / distinct live IDs, in hundredths
+    let reuse_h:i64=(Y4_M7_LOOKUPS as i64)*100/(distinct as i64);
+    // dedup over rounds 1-2: distinct stored n / total ingested 2n
+    let dedup_h:i64=50; // 1 - n/(2n) = 0.50
+    _zag_print("M7,id-arm,hit=");p_dec1(hit_t);
+    _zag_print(",reuse_h=");p_i64(reuse_h);
+    _zag_print(",dedup_h=");p_i64(dedup_h);
+    _zag_println(",PROVISIONAL-A7A8");
+    let f:i32=0;
+    j_begin("m7-1x");
+    jf_dec1(&f,"m7_hit_rate_tenths",hit_t);
+    jf_int(&f,"m7_reuse_hundredths",reuse_h);
+    jf_int(&f,"m7_dedup_hundredths",dedup_h);
+    jf_str(&f,"m7_na_reason","ID arm: persistent ID->chunk mapping; C' round provisional pending A7/A8 freeze");
+    jf_int(&f,"m7_reread_bytes",0);
+    j_end();
+    hfree(&s,bout);hfree(&s,ep);
+}
+
+fn t_m5_baseline(cdir:[]u8) void {
+    // empty-store RSS baseline: same empty structures m5-1x allocates, touched,
+    // then spin so the harness RSS sampler observes the peak.
+    let psz:i64=file_size(cdir,"prose.bin");
+    if(psz<=0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let cap:i32=cap_for(psz as i32);
+    let bs:Y4=y4_new(cap,(psz as i32)/64*2+4096,cap,150000,128);
+    z_memzero(bs.ids);z_memzero(bs.offs);z_memzero(bs.lens);z_memzero(bs.corps);
+    z_memzero(bs.ins);z_memzero(bs.cand);
+    _zag_println("M5_BASELINE,ok");
+    let f:i32=0;
+    j_begin("m5-baseline");
+    jf_bool(&f,"m5_baseline",1);
+    j_end();
+    let spin:i64=0;while(spin<300000000){spin=spin+1;}
+}
+
+// ---- M8: determinism gate (M1 prose+code + M3 op sequence, one instance) ----
+fn img_append(dst:[]u8,at:i32,src:[]u8,n:i32) i32 {
+    let i:i32=0;while(i<n){dst[at+i]=src[i];i=i+1;}
+    return at+n;
+}
+fn write_hex_line(dir:[]u8,fname:[]u8,tag:[]u8,hash:[]u8) i32 {
+    let hx:[]u8=ns_hex(hash);
+    let line:[]u8=nio_alloc(tag.len+1+hx.len+1);
+    let i:i32=0;while(i<tag.len){line[i]=tag[i];i=i+1;}
+    line[tag.len]=32;
+    let k:i32=0;while(k<hx.len){line[tag.len+1+k]=hx[k];k=k+1;}
+    line[tag.len+1+hx.len]=10;
+    let r:i32=write_file(dir,fname,line);
+    nio_free(hx);nio_free(line);
+    return r;
+}
+fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8) void {
+    if(_zag_strcmp(pert,"frag")==1){
+        let i:i32=0;
+        while(i<256){
+            let sz:i32=(i*37)%4096+16;
+            let b:[]u8=nio_alloc(sz);
+            if(i%3==0){nio_free(b);}
+            i=i+1;
+        }
+    }
+    let aslr_pad:[]u8="";
+    if(_zag_strcmp(pert,"aslr")==1){
+        aslr_pad=nio_alloc(1234567);
+    }
+    // freelist-rev / starve: accepted, documented no-ops for Y4
+    // (placement is a pure function of chunk ID; no clock/entropy use)
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let code:[]u8=read_file(cdir,"code.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let cap:i32=cap_for(prose.len)+cap_for(code.len)+8192;
+    let s:Y4=y4_new(cap,500000,cap,150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    let piece:[]u8=halloc(&s,64);
+    // M1 prose
+    y_ingest_span(&s,prose,Y4_C_PROSE,0,prose.len);
+    let cok:i32=0;let bok:i32=0;
+    probe_full(&s,prose,Y4_C_PROSE,bout,&cok,&bok);
+    let m1p:i32=cok;
+    // M1 code
+    y_ingest_span(&s,code,Y4_C_CODE,0,code.len);
+    probe_full(&s,code,Y4_C_CODE,bout,&cok,&bok);
+    let m1c:i32=cok;
+    // M3 sequence: V marking via exact-span questions + pins
+    let np:i32=y_nchunks(&s,Y4_C_PROSE);
+    let nc:i32=y_nchunks(&s,Y4_C_CODE);
+    let total:i32=np+nc;
+    let k:i32=total/Y4_M3_V;if(k<1){k=1;}
+    let v:i32=0;
+    while(v<Y4_M3_V){
+        let g:i32=v*k;
+        let cid:i32=Y4_C_PROSE;let ci:i32=g;
+        if(g>=np){cid=Y4_C_CODE;ci=g-np;}
+        let off:i32=y_chunk_off(&s,cid,ci);
+        let ln:i32=y_chunk_end(&s,cid,ci)-off;
+        y_question(&s,cid,Q_SPAN,off,ln);
+        y_mark_valuable(&s,y_chunk_id(cid,ci));
+        v=v+1;
+    }
+    let f:i32=0;
+    while(f<Y4_M3_FRESH1){y_ingest_span(&s,fresh,Y4_C_FRESH,f*64,64);f=f+1;}
+    f=0;
+    while(f<Y4_M3_KILL){m3_kill_fresh(&s,f);f=f+1;}
+    let w:i32=0;
+    while(w<50){
+        let g2:i32=(w*20)*k;
+        let cid2:i32=Y4_C_PROSE;let ci2:i32=g2;
+        if(g2>=np){cid2=Y4_C_CODE;ci2=g2-np;}
+        y_weaken(&s,y_chunk_id(cid2,ci2),w+1);
+        w=w+1;
+    }
+    f=Y4_M3_FRESH1;
+    while(f<Y4_M3_FRESH1+Y4_M3_FRESH2){y_ingest_span(&s,fresh,Y4_C_FRESH,f*64,64);f=f+1;}
+    // fresh-sample recall (500 SPAN questions)
+    f=Y4_M3_FRESH1+Y4_M3_FRESH2-500;
+    while(f<Y4_M3_FRESH1+Y4_M3_FRESH2){m3_fresh_recall(&s,fresh,f,bout,piece);f=f+1;}
+    // artifacts: store image = every persistent slot/candidate array
+    let img:[]u8=halloc(&s,cap*32+s.ins_cap*4+8*s.cand_cap*4+32+32+8*s.kcap);
+    let at:i32=0;
+    at=img_append(img,at,s.ids,cap*4);
+    at=img_append(img,at,s.offs,cap*4);
+    at=img_append(img,at,s.lens,cap*4);
+    at=img_append(img,at,s.corps,cap*4);
+    at=img_append(img,at,s.flags,cap*4);
+    at=img_append(img,at,s.shifts,cap*4);
+    at=img_append(img,at,s.pidx,cap*4);
+    at=img_append(img,at,s.rcc,cap*4);
+    at=img_append(img,at,s.ins,s.ins_cap*4);
+    at=img_append(img,at,s.cand,8*s.cand_cap*4);
+    at=img_append(img,at,s.cand_n,32);
+    at=img_append(img,at,s.clens,32);
+    at=img_append(img,at,s.killed,8*s.kcap);
+    let nch:i32=(img.len+1048575)/1048576;
+    let chain_in:[]u8=halloc(&s,nch*32);
+    let ci:i32=0;
+    while(ci<nch){
+        let cs:i32=ci*1048576;let cn:i32=img.len-cs;
+        if(cn>1048576){cn=1048576;}
+        ns_sha256(img[cs..cs+cn],chain_in[ci*32..ci*32+32]);
+        ci=ci+1;
+    }
+    let chl:[]u8=halloc(&s,nch*80);
+    let cho:i32=0;
+    ci=0;
+    while(ci<nch){
+        let cs2:i32=ci*32;
+        let hx:[]u8=ns_hex(chain_in[cs2..cs2+32]);
+        let tag:[]u8=_zag_i64_to_str(ci as i64);
+        chl[cho]=99;chl[cho+1]=104;chl[cho+2]=117;chl[cho+3]=110;chl[cho+4]=107;cho=cho+5;
+        let a2:i32=0;while(a2<tag.len){chl[cho]=tag[a2];cho=cho+1;a2=a2+1;}
+        chl[cho]=32;cho=cho+1;
+        let b2:i32=0;while(b2<hx.len){chl[cho]=hx[b2];cho=cho+1;b2=b2+1;}
+        chl[cho]=10;cho=cho+1;
+        nio_free(hx);nio_free(tag);
+        ci=ci+1;
+    }
+    write_file(outdir,"store_hashes.txt",chl[0..cho]);
+    let chain:[]u8=halloc(&s,32);
+    ns_sha256(chain_in,chain);
+    write_hex_line(outdir,"store_chain.txt","chain",chain);
+    write_file(outdir,"ledger.bin",s.led[0..s.led_n*64]);
+    let lhash:[]u8=halloc(&s,32);
+    ns_sha256(s.led[0..s.led_n*64],lhash);
+    write_hex_line(outdir,"ledger_chain.txt","chain",lhash);
+    write_file(outdir,"alloc_trace.txt",s.trace[0..s.trace_n]);
+    _zag_print("M8,");
+    p_dec1(m1p as i64);_zag_print(",");p_dec1(m1c as i64);_zag_print(",");
+    p_i64(s.led_n as i64);_zag_println("");
+    hfree(&s,bout);hfree(&s,piece);hfree(&s,img);hfree(&s,chain_in);hfree(&s,chl);
+    if(aslr_pad.len>0){nio_free(aslr_pad);}
+}
+
+// ---- Y4-LAZY: the laziness kill-bar leg ----
+// Preregistered question stream on the novel t1_prose tier:
+//   Q1 FULL / Q2 SPAN[10%,30%) / Q3 SPAN[10%,30%) / Q4 SPAN[55%,75%) / Q5 FULL
+// Kill bar: >30% of materialized chunks never recalled twice -> KILLED.
+fn t_y4_lazy(cdir:[]u8) void {
+    let buf:[]u8=read_file(cdir,"t1_prose.bin");
+    if(buf.len==0){_zag_println("Y4LAZY,FATAL,empty-corpus");return;}
+    let s:Y4=y4_new(cap_for(buf.len),32768,cap_for(buf.len),150000,128);
+    let bout:[]u8=halloc(&s,Y4_PATCHB);
+    y_ingest_span(&s,buf,Y4_C_T1P,0,buf.len);
+    let n:i32=y_nchunks(&s,Y4_C_T1P);
+    // Q1: full recall
+    y_question(&s,Y4_C_T1P,Q_FULL,0,0);
+    let i:i32=0;
+    while(i<n){y_recall(&s,buf,Y4_C_T1P,i,bout);i=i+1;}
+    let mat_q1:i32=s.nmat;
+    // Q2, Q3: repeated span question [10%,30%)
+    let q2off:i32=buf.len/10;let q2len:i32=buf.len*2/10;
+    y_question(&s,Y4_C_T1P,Q_SPAN,q2off,q2len);
+    i=0;
+    while(i<n){
+        let co:i32=y_chunk_off(&s,Y4_C_T1P,i);
+        let ce:i32=y_chunk_end(&s,Y4_C_T1P,i);
+        if(ce>q2off && co<q2off+q2len){y_recall(&s,buf,Y4_C_T1P,i,bout);}
+        i=i+1;
+    }
+    y_question(&s,Y4_C_T1P,Q_SPAN,q2off,q2len);
+    i=0;
+    while(i<n){
+        let co:i32=y_chunk_off(&s,Y4_C_T1P,i);
+        let ce:i32=y_chunk_end(&s,Y4_C_T1P,i);
+        if(ce>q2off && co<q2off+q2len){y_recall(&s,buf,Y4_C_T1P,i,bout);}
+        i=i+1;
+    }
+    // Q4: span question [55%,75%)
+    let q4off:i32=buf.len*55/100;let q4len:i32=buf.len*20/100;
+    y_question(&s,Y4_C_T1P,Q_SPAN,q4off,q4len);
+    i=0;
+    while(i<n){
+        let co:i32=y_chunk_off(&s,Y4_C_T1P,i);
+        let ce:i32=y_chunk_end(&s,Y4_C_T1P,i);
+        if(ce>q4off && co<q4off+q4len){y_recall(&s,buf,Y4_C_T1P,i,bout);}
+        i=i+1;
+    }
+    // Q5: full recall
+    y_question(&s,Y4_C_T1P,Q_FULL,0,0);
+    i=0;
+    while(i<n){y_recall(&s,buf,Y4_C_T1P,i,bout);i=i+1;}
+    let remats:i32=s.nmat-mat_q1;
+    let ntw:i64=never_twice_tenths(&s);
+    let verdict:[]u8="PASS";
+    if(ntw>300){verdict="KILLED";}
+    _zag_print("Y4LAZY,mat=");p_i64(s.nmat as i64);
+    _zag_print(",remats=");p_i64(remats as i64);
+    _zag_print(",never_twice=");p_dec1(ntw);
+    _zag_print(",");_zag_println(verdict);
+    let f:i32=0;
+    j_begin("y4-lazy-1x");
+    jf_int(&f,"y4_lazy_materialized",s.nmat as i64);
+    jf_int(&f,"y4_lazy_rematerializations",remats as i64);
+    jf_dec1(&f,"y4_lazy_never_twice_tenths",ntw);
+    jf_int(&f,"y4_lazy_questions",s.nq as i64);
+    jf_str(&f,"y4_lazy_verdict",verdict);
+    j_end();
+    hfree(&s,bout);
+}
+
+// ---- Y4-CMP: the arm-D comparison leg ----
+// Emits Y4's M1 recall + total ledger cost (candidates + materializations)
+// per corpus. Arm D's fields are null until D reports; the frozen decision
+// procedure is printed and documented in ARM_SPEC.md.
+fn t_y4_cmp(cdir:[]u8)void {
+    // Y4 side of the arm-D comparison (frozen kill bar, first disjunct):
+    // recall + total ledger cost (candidates + materializations) per corpus.
+    // D's fields are null until D reports; the slotting procedure is mechanical.
+    let r_p:i64=0;let c_p:i64=0;let m_p:i64=0;let cost_p:i64=0;
+    let r_c:i64=0;let c_c:i64=0;let m_c:i64=0;let cost_c:i64=0;
+    let ci2:i32=0;
+    while(ci2<2){
+        let fname:[]u8="prose.bin";let corpus:i32=Y4_C_PROSE;let key:[]u8="prose";
+        if(ci2==1){fname="code.bin";corpus=Y4_C_CODE;key="code";}
+        let buf:[]u8=read_file(cdir,fname);
+        if(buf.len==0){_zag_println("Y4CMP,FATAL,empty-corpus");return;}
+        let s:Y4=y4_new(cap_for(buf.len),500000,cap_for(buf.len),150000,128);
+        let bout:[]u8=halloc(&s,Y4_PATCHB);
+        let nc0:i32=y_ingest_span(&s,buf,corpus,0,buf.len);
+        let cok:i32=0;let bok:i32=0;
+        probe_full(&s,buf,corpus,bout,&cok,&bok);
+        // total ledger cost = candidates + materializations (frozen kill-bar cost)
+        let cost:i64=(nc0 as i64)+(s.nmat as i64);
+        _zag_print("Y4CMP,");_zag_print(key);_zag_print(",recall=");
+        p_dec1(cok as i64);_zag_print(",cost=");p_i64(cost);
+        _zag_println(",D=PENDING");
+        if(ci2==0){r_p=cok as i64;c_p=nc0 as i64;m_p=s.nmat as i64;cost_p=cost;}
+        else{r_c=cok as i64;c_c=nc0 as i64;m_c=s.nmat as i64;cost_c=cost;}
+        hfree(&s,bout);
+        ci2=ci2+1;
+    }
+    _zag_println("Y4CMP,procedure: KILL iff cost_y4<=cost_d AND recall_y4 < recall_d-5.0");
+    let f:i32=0;
+    j_begin("y4-cmp-1x");
+    jf_dec1(&f,"y4_cmp_recall_tenths_prose",r_p);
+    jf_int(&f,"y4_cmp_candidates_prose",c_p);
+    jf_int(&f,"y4_cmp_materializations_prose",m_p);
+    jf_int(&f,"y4_cmp_ledger_cost_prose",cost_p);
+    jf_dec1(&f,"y4_cmp_recall_tenths_code",r_c);
+    jf_int(&f,"y4_cmp_candidates_code",c_c);
+    jf_int(&f,"y4_cmp_materializations_code",m_c);
+    jf_int(&f,"y4_cmp_ledger_cost_code",cost_c);
+    jf_null(&f,"d_cmp_recall_tenths_prose");
+    jf_null(&f,"d_cmp_ledger_cost_prose");
+    jf_null(&f,"d_cmp_recall_tenths_code");
+    jf_null(&f,"d_cmp_ledger_cost_code");
+    jf_str(&f,"d_cmp_status","PENDING: arm D has not reported; slotting procedure in ARM_SPEC.md");
+    j_end();
+}
+
+// ---- main dispatch ----
+fn main() i32 {
+    let mode:[]u8=_zag_arg(1);
+    if(mode.len==0){_zag_println("usage: y4 <mode> [corpus-root] [outdir] [perturbation]");return 2;}
+    let croot:[]u8=_zag_arg(2);
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){t_m1(croot,"prose.bin",Y4_C_PROSE,"prose","m1-1x-prose");}
+    else if(_zag_strcmp(mode,"m1-1x-code")==1){t_m1(croot,"code.bin",Y4_C_CODE,"code","m1-1x-code");}
+    else if(_zag_strcmp(mode,"m2-t1-prose")==1){t_m2(croot,"t1_prose.bin",Y4_C_T1P,"m2-t1-prose",1);}
+    else if(_zag_strcmp(mode,"m2-t1-code")==1){t_m2(croot,"t1_code.bin",Y4_C_T1C,"m2-t1-code",1);}
+    else if(_zag_strcmp(mode,"m2-t2-prose")==1){t_m2(croot,"t2_prose.bin",Y4_C_T2P,"m2-t2-prose",0);}
+    else if(_zag_strcmp(mode,"m2-t2-code")==1){t_m2(croot,"t2_code.bin",Y4_C_T2C,"m2-t2-code",0);}
+    else if(_zag_strcmp(mode,"m2-t3-1x")==1){t_m2(croot,"t3.bin",Y4_C_T3,"m2-t3-1x",0);}
+    else if(_zag_strcmp(mode,"m3-1x")==1){t_m3(croot);}
+    else if(_zag_strcmp(mode,"m4-1x-prose")==1){t_m4(croot,"prose.bin",Y4_C_PROSE,0,"m4-1x-prose");}
+    else if(_zag_strcmp(mode,"m4-1x-code")==1){t_m4(croot,"code.bin",Y4_C_CODE,1,"m4-1x-code");}
+    else if(_zag_strcmp(mode,"m5-1x")==1){t_m5(croot);}
+    else if(_zag_strcmp(mode,"m5-baseline")==1){t_m5_baseline(croot);}
+    else if(_zag_strcmp(mode,"m6-p2c-1x")==1){t_m6(croot,0);}
+    else if(_zag_strcmp(mode,"m6-c2p-1x")==1){t_m6(croot,1);}
+    else if(_zag_strcmp(mode,"m7-1x")==1){t_m7(croot);}
+    else if(_zag_strcmp(mode,"y4-lazy-1x")==1){t_y4_lazy(croot);}
+    else if(_zag_strcmp(mode,"y4-cmp-1x")==1){t_y4_cmp(croot);}
+    else if(_zag_strcmp(mode,"m8-1x")==1){
+        let outdir:[]u8=_zag_arg(3);
+        let pert:[]u8=_zag_arg(4);
+        if(outdir.len==0 || pert.len==0){
+            _zag_println("usage: y4 m8-1x <corpus-root> <outdir> <perturbation>");
+            return 2;
+        }
+        t_m8(croot,outdir,pert);
+    }
+    else{_zag_print("unknown mode: ");_zag_println(mode);return 2;}
+    return 0;
+}
