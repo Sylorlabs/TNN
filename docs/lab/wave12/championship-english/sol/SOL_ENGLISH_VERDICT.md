@@ -152,5 +152,6 @@ frontier; the learning substrate itself is unaffected.
   Binaries and `.zagd` excluded.
 
 **Commit:** branch `tnn-native-lab` of sylorlabs/TNN, path
-`docs/lab/wave12/championship/english/sol/`, commit hash `TBD_COMMIT_HASH`
+`docs/lab/wave12/championship/english/sol/`, commit
+`75b518735fec15efd119f0130d50185c831a8936`
 (recorded in `~/workspace/NIGHT_RUN_2026-09-21.md`).
