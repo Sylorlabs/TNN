@@ -39,7 +39,7 @@
 | I2 | KILLED | yes (55.9% arbitration error) | NOT STATED | 1x |
 | J1 | KILLED | yes | NOT RUN | 1x |
 | J2 | KILLED | yes | NOT RUN | 1x |
-| K1 | PROVISIONAL (kill ii unevaluable: k1-chain FATALs) | pending | — | M1 only |
+| K1 | KILLED (kill ii: mean chain 20.00>8, latency 9.99x>2x) | yes (kill ii) | PARTIAL (M1 PASS; M8 gap documented) | 1x (20-batch diagnostic; 100-batch blocked by infra) |
 | K2 | PASS | no | PASS | 1x |
 | K3 | PROVISIONAL | unresolved | NOT ATTEMPTED | incomplete 1x |
 | L1 | PASS | no | PASS | 1x |
