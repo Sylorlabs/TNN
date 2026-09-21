@@ -148,3 +148,29 @@ reported binary hash). Current output: **155/155 MEETS-PROPOSED-BAR**.
    and fixed sources committed, but no committed run logs yet; the 155-count
    uses the verifier's independent reproduction (which reproduces their
    reported binary hash exactly).
+
+## Addendum 2026-09-20 — vendoring commit + full re-verification
+
+- The vendored files missing from the remote harness tree (`VENDORING.md`,
+  `se_ingress.zag`, `se_memif.zag`, `substrate/`) were committed as
+  `694b1058868b37939ff95dbc6fe061053efb916d` (parent `e6e83706738b`).
+  Remote tree verified complete: all 14 files/dirs present, no binaries,
+  caches, or stores.
+- Prereg `448e1e21` and amendment `fa01e4b9` verified as ancestors of the
+  branch tip.
+- Audio re-verified from committed sources: binary hash
+  `7e6ca60f447ebf16164d5dae082da565a2224a565b9906d1a63c6c080302ec76`
+  matches the reported hash; two clean runs rc=0, byte-identical replay,
+  79/79 CL_CHECK actual==expected, 71/71 counted names present and passing,
+  static scans clean.
+- Vision re-verified from committed sources: binary hash
+  `90b49b4b4ac2449a01e45efbf5e49128b14582a1182a7ebd91e8673f1ebc2610`
+  matches the reported hash; two clean runs rc=0, byte-identical replay,
+  output byte-identical to the worker's committed logs, 107/107
+  actual==expected, 71/71 counted names present and passing, static scans
+  clean. Vision memif is byte-identical to canonical phase 1 (`3bd7e2cd…`).
+- Full harness runner re-executed from the complete tree: rc=0,
+  **155/155 MEETS-PROPOSED-BAR**. Runner artifacts (binaries, store,
+  caches) removed afterwards.
+- Audio **ENDORSED**. Vision **ENDORSED**. Bar remains proposed/unsigned;
+  nothing above is a qualification claim.
