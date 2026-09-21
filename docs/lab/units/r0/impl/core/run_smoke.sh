@@ -2,15 +2,29 @@
 # run_smoke.sh — M8 smoke gate for the R0 core.
 # Builds r0_smoke once, runs 5 adversarial perturbation modes per leg (N=5),
 # and requires byte-identical stdout within each leg. Any diff = FAIL.
+# STORESEQ gate (ZNC-2026-09-19-001): the readback probe (r0_probe.zag) drives
+# every 3+ sequential []i32 store site with known values and checks them
+# against EXPECTED values — byte-identical reruns alone cannot catch a
+# deterministic miscompile. The probe runs standalone AND inside every smoke
+# run (R0_PROBE lines are perturb-invariant); any fails>0 = hard FAIL.
 set -u
 CORE_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZNC="${ZNC:-$HOME/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1}"
 BIN=/tmp/r0_smoke_m8
+PROBE=/tmp/r0_probe_m8
 OUTD=/tmp/r0_m8_out
 rm -rf "$OUTD"; mkdir -p "$OUTD"
 
 echo "== build =="
+"$ZNC" "$CORE_DIR/r0_probe_main.zag" --no-zagd --no-analyze --no-foreground-cache -o "$PROBE" || exit 1
 "$ZNC" "$CORE_DIR/r0_smoke.zag" --no-zagd --no-analyze --no-foreground-cache -o "$BIN" || exit 1
+
+echo "== STORESEQ probe (standalone) =="
+"$PROBE" > "$OUTD/probe.txt" 2>"$OUTD/probe.err"
+pec=$?
+cat "$OUTD/probe.txt"
+if [ $pec -ne 0 ]; then echo "STORESEQ PROBE FAIL exit=$pec"; exit 1; fi
+if [ -s "$OUTD/probe.err" ]; then echo "PROBE STDERR:"; cat "$OUTD/probe.err"; exit 1; fi
 
 fail=0
 for leg in 0 1; do
@@ -21,6 +35,9 @@ for leg in 0 1; do
     sed 's/,perturb=[0-9]/,perturb=N/' "$OUTD/leg${leg}_p${p}.txt" > "$OUTD/leg${leg}_p${p}.norm"
     if [ $ec -ne 0 ]; then echo "RUN FAIL leg=$leg perturb=$p exit=$ec"; fail=1; fi
     if [ -s "$OUTD/leg${leg}_p${p}.err" ]; then echo "STDERR leg=$leg perturb=$p:"; cat "$OUTD/leg${leg}_p${p}.err"; fail=1; fi
+    if ! grep -q "R0_PROBE,total_fails=0" "$OUTD/leg${leg}_p${p}.txt"; then
+      echo "STORESEQ GATE FAIL leg=$leg perturb=$p (probe fails>0 inside smoke)"; fail=1;
+    fi
   done
   base="$OUTD/leg${leg}_p0.norm"
   for p in 1 2 3 4; do
