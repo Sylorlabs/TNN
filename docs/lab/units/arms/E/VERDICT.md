@@ -82,3 +82,10 @@ works. What died is the thesis that transient segmentation plus owned copies
 can compete with persistent references on cost. Any future STORE-family arm
 must either deduplicate (becoming D-like, forbidden for E) or show the copy
 cost buys something references cannot.
+
+## Commits
+
+- Evidence commit: `4ce17ac3d3a576df5a5cd7e95eefa1326eeb5d52` (tnn-native-lab;
+  superseded path layout, kept for history)
+- Path-fix commit: `33dcc60b12a8d34189039cbe3ab74e3374a4d583` (tnn-native-lab;
+  canonical layout under `docs/lab/units/arms/E/`)
