@@ -16,7 +16,7 @@ only). Deterministic and byte-identical: N=5 reruns verified
 | `pcodec.zag` | §P wire codec: encode/decode/validate, FNV-1a-64 checksum (isolated for later integration swap), grounding signature. |
 | `store.zag` | Hypothesis store (HypStore), force-pin registry (Pins), 16-word chained audit ledger (Ledger). |
 | `delib.zag` | §L deliberation core: GENERATE → ELIMINATE → WEIGH → DECIDE, appeals, retract, DEFER queue, tripwire, promotion scan. |
-| `driver.zag` | Harness-compatible driver: §P wire → dlb_consider → DELIB (4) + DECISION (5) tape records. Library (no main). |
+| `driver.zag` | Harness-compatible driver: §P wire → dlb_consider → DELIB (5) + DECISION (6) tape records (harness EV codes, unified 2026-09-21). Library (no main). |
 | `R33_NATIVE_IO_V1.zag`, `R33_NATIVE_SHA256_V2.zag` | Linux substrate copies (lab convention). |
 | `tests/test_driver.zag` | Driver + tape framing smoke test (ADOPT/REJECT, DELIB/DECISION byte layout). |
 | `tests/test_determinism.zag` | N=5 byte-identical rerun test. |
