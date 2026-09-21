@@ -113,6 +113,18 @@ Battery status: complete. Every mode run twice; stdout byte-identical
   correctly not committed). The hashes corroborate the scorecard's
   "all byte-identical to clean" note.
 - **M8: VERIFIED PASS.**
+- **Independent reproduction (U4, 2026-09-21 ~12:05 PDT):** rebuilt
+  `cl/arm.zag` from current source with the lab znc toolchain
+  (`znc_linux_x86_64_abed8aa1`, `--no-zagd --no-analyze
+  --no-foreground-cache`) and ran `m8-1x` clean (r3) in
+  `~/workspace/scratch_u4/`. Stdout **byte-identical** to the prior
+  crew's `m8_clean_r1.txt`; `ledger.bin` sha256
+  `92cb91bad66cc633d3d5561745124865bddf518cad2c8a6cc633f5f071568941`
+  **exactly matches** the recorded clean-r1 hash in
+  `m8_artifact_hashes.txt`. Current source reproduces the frozen evidence
+  bit-for-bit. (Note: `_zag_argc()`/`_zag_arg(n)` behaved correctly in
+  this fresh build — ZNC-007 did not bite this code path.)
+- **M8: VERIFIED PASS (now N=3 on clean, byte-identical).**
 
 ## Ambiguities / provisional items (carried, unchanged)
 
