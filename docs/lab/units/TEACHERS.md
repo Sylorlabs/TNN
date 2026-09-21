@@ -184,3 +184,49 @@ The decisive argument: a word the learner cannot revise or reject was not taught
 installed. Force-pinning taught words would make "teaching" indistinguishable from writing
 directly to memory, which collaps
 ...[truncated 13090 chars]
+## Amendment 2026-09-21 — hand-wired white-box peer teacher (Micah's correction)
+
+**Change:** the peer-teacher arm is NOT a learned TNN and NOT a staged-maturity proxy. It is a
+**hand-wired white-box mature TNN**: Muse does the wiring deliberately — memory entries, chunk
+vocabulary, signed judgments, chunk IDs — instead of the teacher wiring itself through
+learning. Micah: "its a white box instead of connections being formed by learning like I want
+its formed by you doing the wiring for it instead of it wiring itself as an experiment."
+
+**Teacher ID remap (§P):** `1` = peer-handwired (was peer-proxy); `2` = RESERVED (peer-full is
+superseded — a grown teacher is no longer needed for this arm); `3` = muse; `4` = sym-hints;
+`5` = sym-yesno. Four arms total, as Micah specified.
+
+**Why this is stronger than a learned teacher:**
+1. **Zero training variance.** The same wiring spec produces the identical teacher every run;
+   byte-identical reruns are structural, not hoped for.
+2. **Calibrated flaws as an instrument.** A perfect teacher cannot test learner autonomy. The
+   wiring spec therefore includes a *flaw manifest*: deliberately planted defects (wrong spans,
+   false high-confidence judgments, missing grounding, one plausible-but-false "word"), each
+   with an expected learner behavior (REVISE with reason code, or REJECT with ground). The
+   learner is scored on flaw detection — this is the adopt/revise/reject machinery under fire.
+3. **Separates possession from learning.** The teacher's knowledge is installed (it is a
+   fixture, not the subject). The learner must still genuinely learn through the protocol —
+   scored by the disconnect test (taught-vs-emergent decided by what survives
+   SIGNAL_DISCONNECT) and by revision behavior.
+4. **First TNN-to-TNN transfer test.** Peer teaching through the native §P protocol is the
+   primitive for every multi-instance future (user-trained instances, CORE/USER sharing). This
+   arm proves or kills the primitive.
+
+**Constraints the hand-wired teacher still obeys:** §P iron rules (spans only, no commands,
+monotonic seq) and the §C tokenizer-smuggling tripwire apply to it exactly like any other
+teacher. The wiring spec must show selective proposals and expressed uncertainty — a
+hand-wired teacher that tiles the stimulus at confidence 255 halts the session like any
+smuggled tokenizer. The flaw manifest and the full wiring spec are committed alongside the
+prereg so any auditor can verify the teacher contains no hidden learning machinery and no
+RNG.
+
+**Note on §F:** the committed §F text was truncated mid-sentence ("which collaps"). The
+recommendation stands as written — JUDGMENT-HELD, provisional strength, never force-pinned —
+and now applies with extra force: the teacher itself is installed knowledge, so the learner's
+side must be the opposite of installed. A taught word the learner cannot revise would make
+both sides of the experiment "installed," and the experiment would prove nothing.
+
+**Open for prereg:** the flaw manifest's size and composition (proposed: 12 planted flaws per
+curriculum slice: 4 wrong-span, 4 false-confidence, 2 missing-grounding, 2 plausible-false),
+and whether the learner sees the manifest (no — it is sealed until scoring, else detection is
+uninformative).
