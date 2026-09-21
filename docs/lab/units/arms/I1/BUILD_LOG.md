@@ -60,6 +60,23 @@ cl/arm.zag          # Assembled single file (2,691 lines)
   └── Dispatcher: argv[1] mode selection
 ```
 
+## 2026-09-21 — Final evidence build (`arm_final`, 372,295 B)
+
+- Source: `cl/arm.zag` (M8 1x rewritten, kill-i/kill-ii probes, streaming
+  1MB-staged ledger dump for M5, `write_file_chunked` for slices >1MB,
+  allocation tracing via `halloc`/`hfree`).
+- **Bug fix — `read_span`:** old implementation used whole-file
+  `nio_read_exact`, so every 64-byte source read from a multi-MB corpus
+  failed silently (M4/M6-revision could never score above 0). Replaced with
+  true span reads via raw `read(2)` after seek. M4 100/100 and M6 revision
+  100/100 are post-fix, byte-verified vs corpus.
+- Kill-i: SURVIVE (100.0% L2+ share). Kill-ii: KILL (22.1% on prose).
+- M8 gate: PASS (10/10 byte-identical, 7 artifacts).
+- M3: FROZEN-UNDER-PRESSURE → 0 (slot table append-only; no slot reclamation).
+- In-binary `rss_kb` broken on /proc (size 0); M5 RSS measured externally
+  (harness peak-RSS): delta 16,832 KB = 3.18 B/source-byte.
+- Verdict: **KILLED** by binding kill (ii).
+
 ## Reproducibility
 
 - Deterministic: Zero randomness, byte-identical reruns verified.

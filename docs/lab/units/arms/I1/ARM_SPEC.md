@@ -40,13 +40,15 @@ The `probe-formation` mode confirms:
 ## 4. Binding Kill Criteria
 
 ### (i) L2+ superchunk recall <5% vs flat comparator → KILL
-- **Status:** NOT-IMPLEMENTED
-- Requires genuine flat comparator with equal measured store cost.
+- **Status:** SURVIVE (measured 100.0% L2+ share on prose, 1x)
+- Method: `kill-i` mode — hierarchical ingest (28 formation episodes) vs flat comparator with identical ingest and equal allocated store cost; every L0 recalled through `recall_hier` with byte verification.
+- Live superchunks: L1=10,592, L2=1,324, L3=166, L4=21. Hierarchical recall 84,731/84,731; flat 84,731/84,731.
 
 ### (ii) Maintenance + stale rebuild >20% of audit ops (per corpus) → KILL
-- **Status:** SURVIVE (measured 12.4% on corpus 9)
+- **Status:** **KILL (measured 22.1% on corpus 1 / prose, 1x, final binary)**
 - Maintenance = form + dissolve/demote + stale-mark
-- Measured via per-corpus `mc` counters.
+- Measured via per-corpus `mc` counters across formation, revision sweeps, and churn.
+- The earlier 12.4% was measured on a 512-unit synthetic probe that could not form L2+; superseded (see `raw_logs/superseded-2026-09-21/`).
 
 ### (iii) L1 boundary agreement <50% with natural breaks → KILL
 - **Status:** BLOCKED (natural breaks undefined)

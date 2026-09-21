@@ -35,7 +35,7 @@
 | G2 | KILLED | yes | PASS | 1x |
 | H1 | PASS | no | PASS | 1x |
 | H2 | KILLED | yes (99.9% fallback vs 40% ceiling) | NOT STATED | 1x |
-| I1 | PROVISIONAL | unresolved | INCOMPLETE | partial 1x |
+| I1 | KILLED | yes (kill ii: 22.1% prose audit ops > 20% bar) | PASS (10/10 byte-identical) | full 1x |
 | I2 | KILLED | yes (55.9% arbitration error) | NOT STATED | 1x |
 | J1 | KILLED | yes | NOT RUN | 1x |
 | J2 | KILLED | yes | NOT RUN | 1x |
