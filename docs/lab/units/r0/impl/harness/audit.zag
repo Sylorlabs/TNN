@@ -1,0 +1,181 @@
+// audit.zag — R0 harness audit ledger helpers.
+// 16-word entries, PACKED 64-byte layout (byte offsets, i32 words, LE):
+//   op@0, slot@4, rc@8, b1..b5@12..28, a1..a5@32..48, stage@52, d1@56, d2@60
+// Storage is []u8 chunks (1024 entries * 64 B = 64 KiB/chunk) with explicit
+// little-endian i32 cells — no []i32/[]i64 multi-store sequences anywhere
+// (toolchain bugs ZNC-2026-09-19-001 / ZNC-2026-09-21-004).
+// Logical readback (audit_get) exposes 16 i32 values at indices 0..15:
+//   0=op, 1=slot, 2=rc, 3..7=b1..b5, 8..12=a1..a5, 13=stage, 14=d1, 15=d2.
+// Episode mapping: audit_episode_begin() records audit_n at episode start into
+// a bounds array; audit_episode_of(n) maps any audit entry's clock -> episode.
+// Chunks (64 KiB) are far under the 2^25 znc index wall.
+@import("harness_common.zag")
+
+const AUDIT_WORDS:i32=16;
+const AUDIT_ENTRY_BYTES:i32=64;
+const AUDIT_CHUNK_ENTRIES:i32=1024;
+const AUDIT_CHUNK_BYTES:i32=65536;
+const AUDIT_MAX_CHUNKS:i32=64;
+const AUDIT_MAX_EPISODES:i32=8192;
+
+// field byte offsets (i32 words)
+const AF_OP:i32=0; const AF_SLOT:i32=4; const AF_RC:i32=8;
+const AF_B0:i32=12; const AF_A0:i32=32;
+const AF_STAGE:i32=52; const AF_D1:i32=56; const AF_D2:i32=60;
+
+struct AuditLedger {
+    count:i64,
+    nchunks:i32,
+    ep_count:i32
+}
+
+// chunk address table + episode bounds live beside the struct (owned by caller)
+struct AuditStore {
+    lg:AuditLedger,
+    chunk_addrs:[]i64,
+    ep_bounds:[]i64
+}
+
+fn audit_store_new()AuditStore {
+    let addrs:[]i64=hc_alloc_i64(AUDIT_MAX_CHUNKS);
+    let eps:[]i64=hc_alloc_i64(AUDIT_MAX_EPISODES);
+    let i:i32=0;while(i<AUDIT_MAX_CHUNKS){addrs[i]=0;i=i+1;}
+    i=0;while(i<AUDIT_MAX_EPISODES){eps[i]=-1;i=i+1;}
+    return AuditStore{.lg=AuditLedger{.count=0,.nchunks=0,.ep_count=0},
+                      .chunk_addrs=addrs,.ep_bounds=eps};
+}
+
+// Returns the chunk's []u8 slice (64 KiB), allocating + zeroing on first use.
+// Returns an empty slice on allocation failure.
+fn audit_chunk(s:*AuditStore,ci:i32)[]u8 {
+    let addrs:[]i64=s.*.chunk_addrs;
+    let addr:i64=addrs[ci];
+    if(addr==0){
+        let p:*u8=_zag_malloc(AUDIT_CHUNK_BYTES as i64) as *u8;
+        if(p==null as *u8){return (null as *u8)[0..0];}
+        let b:[]u8=p[0..AUDIT_CHUNK_BYTES];
+        let i:i32=0;while(i<AUDIT_CHUNK_BYTES){b[i]=0;i=i+1;}
+        addrs[ci]=p as i64;
+        return b;
+    }
+    let bp:*u8=addr as *u8;
+    return bp[0..AUDIT_CHUNK_BYTES];
+}
+
+// Append one 16-word entry. b and a are exactly 5 i32 words each, as
+// []u8-backed LE i32 cells (no []i32 arrays anywhere in the audit path).
+// Returns the audit clock n of the appended entry (0-based), or -1 on error.
+fn audit_append(s:*AuditStore,op:i32,slot:i32,rc:i32,
+                b:[]u8,a:[]u8,stage:i32,d1:i32,d2:i32)i64 {
+    let n:i64=s.*.lg.count;
+    let ci:i32=(n/1024) as i32;
+    let ci64:i64=ci as i64;
+    let ei:i32=(n-ci64*1024) as i32;
+    if(ci>=AUDIT_MAX_CHUNKS){return -1;}
+    if(ci>=s.*.lg.nchunks){s.*.lg.nchunks=ci+1;}
+    let ch:[]u8=audit_chunk(s,ci);
+    if(ch.len!=AUDIT_CHUNK_BYTES){return -1;}
+    let base:i32=ei*64;
+    hc_le32_set(ch,base+AF_OP,op);
+    hc_le32_set(ch,base+AF_SLOT,slot);
+    hc_le32_set(ch,base+AF_RC,rc);
+    let i:i32=0;
+    while(i<5){hc_le32_set(ch,base+AF_B0+i*4,hc_le32_get(b,i*4));i=i+1;}
+    i=0;
+    while(i<5){hc_le32_set(ch,base+AF_A0+i*4,hc_le32_get(a,i*4));i=i+1;}
+    hc_le32_set(ch,base+AF_STAGE,stage);
+    hc_le32_set(ch,base+AF_D1,d1);
+    hc_le32_set(ch,base+AF_D2,d2);
+    s.*.lg.count=n+1;
+    return n;
+}
+
+fn audit_count(s:*AuditStore)i64 { return s.*.lg.count; }
+
+// Logical readback: out must hold >= 16 i32 values as []u8-backed LE cells
+// (indices 0..15 -> bytes 0..63). Cell writes only — a 16-iteration []i32
+// store loop here is exactly the ZNC-2026-09-19-001 corruption pattern.
+// Returns 0 ok, -1 bad index.
+fn audit_get(s:*AuditStore,n:i64,out:[]u8)i32 {
+    if(n<0 || n>=s.*.lg.count || out.len<64){return -1;}
+    let ci:i32=(n/1024) as i32;
+    let ci64:i64=ci as i64;
+    let ei:i32=(n-ci64*1024) as i32;
+    let addrs:[]i64=s.*.chunk_addrs;
+    let bp:*u8=addrs[ci] as *u8;
+    let ch:[]u8=bp[0..AUDIT_CHUNK_BYTES];
+    let base:i32=ei*64;
+    let i:i32=0;while(i<16){hc_le32_set(out,i*4,hc_le32_get(ch,base+i*4));i=i+1;}
+    return 0;
+}
+
+// Record audit_n at episode start. Returns the episode index.
+fn audit_episode_begin(s:*AuditStore)i64 {
+    let e:i32=s.*.lg.ep_count;
+    if(e>=AUDIT_MAX_EPISODES){return -1;}
+    let eps:[]i64=s.*.ep_bounds;
+    eps[e]=s.*.lg.count;
+    s.*.lg.ep_count=e+1;
+    return e as i64;
+}
+
+// Map an audit clock n -> episode index, or -1 if n precedes episode 0.
+fn audit_episode_of(s:*AuditStore,n:i64)i64 {
+    let eps:[]i64=s.*.ep_bounds;
+    let lo:i32=0;let hi:i32=s.*.lg.ep_count-1;let ans:i64=-1;
+    while(lo<=hi){
+        let mid:i32=(lo+hi)/2;
+        if(eps[mid]<=n){ans=mid as i64;lo=mid+1;}else{hi=mid-1;}
+    }
+    return ans;
+}
+
+// Rolling SHA-256 over the ledger's packed bytes: each chunk's used prefix
+// (<= 64 KiB, far under the 2^25 wall) is hashed in one call, then combined
+// into the accumulator. Returns 64-char hex (owned; nio_free it).
+fn audit_ledger_hash(s:*AuditStore)[]u8 {
+    let nch:i32=s.*.lg.nchunks;
+    let acc:[]u8=nio_alloc(32);if(acc.len!=32){return "";}
+    hc_fill(acc,0);
+    let addrs:[]i64=s.*.chunk_addrs;
+    let ci:i32=0;
+    while(ci<nch){
+        let bp:*u8=addrs[ci] as *u8;
+        let ch:[]u8=bp[0..AUDIT_CHUNK_BYTES];
+        let ci64:i64=ci as i64;
+        let last:i32=(s.*.lg.count-ci64*1024) as i32;
+        if(last>1024){last=1024;}
+        let used:[]u8=ch[0..(last*64)];
+        let h:[]u8=nio_alloc(32);
+        if(h.len==32 && ns_sha256(used,h)==0){
+            let mix:[]u8=nio_alloc(64);
+            if(mix.len==64){
+                let i:i32=0;while(i<32){mix[i]=acc[i];i=i+1;}
+                i=0;while(i<32){mix[32+i]=h[i];i=i+1;}
+                ns_sha256(mix,acc);
+                nio_free(mix);
+            }
+        }
+        nio_free(h);
+        ci=ci+1;
+    }
+    let hex:[]u8=nio_alloc(64);
+    if(hex.len!=64){nio_free(acc);return "";}
+    let dig:[]u8="0123456789abcdef";
+    let i:i32=0;
+    while(i<32){hex[i*2]=dig[(acc[i]>>4)&15];hex[i*2+1]=dig[acc[i]&15];i=i+1;}
+    nio_free(acc);
+    return hex;
+}
+
+fn audit_store_free(s:*AuditStore)void {
+    let addrs:[]i64=s.*.chunk_addrs;
+    let i:i32=0;
+    while(i<s.*.lg.nchunks){
+        if(addrs[i]!=0){_zag_free(addrs[i] as *i8);}
+        i=i+1;
+    }
+    hc_free_i64(addrs);
+    hc_free_i64(s.*.ep_bounds);
+    s.*.lg.count=0;s.*.lg.nchunks=0;s.*.lg.ep_count=0;
+}

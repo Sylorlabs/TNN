@@ -1,0 +1,199 @@
+// m8_armor.zag — M8 determinism-gate armor, compiled INTO battery binaries.
+// The gate runner (m8_gate.sh) executes the binary 5 times with
+// argv[2] = perturb flag {0,1,2,3,4}. The binary calls m8_armor_init()
+// FIRST, before any arm logic, and routes dynamic allocations through
+// m8_alloc/m8_free. At shutdown it calls m8_emit_captures().
+//
+// Perturbations (A-1 / M-35):
+//   0 = none (run 1, the reference)
+//   1 = heap pre-fragmentation: 4096 deterministic blocks, alternating freed
+//   2 = ASLR-equivalent base offset: hold a 64KB arena for the run
+//   3 = entropy/clock canary: a real clock reading is mixed into the
+//       allocation path — behavior change vs run 1 = FAIL even if the
+//       final outputs match (the canary makes hidden clock-dependence
+//       VISIBLE in the allocator trace)
+//   4 = free-list order reversal: FIFO reuse instead of LIFO
+//
+// Captures (M-36): store image hash + ledger hash + allocator trace
+// (order+sizes, addresses normalized OUT — never recorded). stdout/stderr
+// hashing is done externally by the runner.
+@import("harness_common.zag")
+
+const M8_TRACE_MAX:i32=65536;
+
+struct M8Armor {
+    perturb:i64,
+    rev:i32,            // free-list order: 0=LIFO, 1=FIFO
+    free_head:i64,      // address of free-list head block (0 = empty)
+    alloc_seq:i64,
+    trace:[]i64,       // pairs (size, seq)
+    trace_n:i32,
+    trace_full:i32,
+    arena:i64,          // held arena for perturb=2 (0 = none)
+    canary:i64,
+    tracing:i32        // 1 once init perturbations are done; perturbation
+                       // allocs are never traced (the gate compares ARM
+                       // behavior across perturbed environments, not the
+                       // perturbation itself)
+}
+
+fn m8_new()M8Armor {
+    let tr:[]i64=hc_alloc_i64(M8_TRACE_MAX*2);
+    let i:i32=0;while(i<M8_TRACE_MAX*2){tr[i]=0;i=i+1;}
+    return M8Armor{.perturb=0,.rev=0,.free_head=0,.alloc_seq=0,
+                   .trace=tr,.trace_n=0,.trace_full=0,.arena=0,.canary=0,
+                   .tracing=0};
+}
+
+fn m8_trace_rec(a:*M8Armor,size:i64)void {
+    if(a.*.tracing!=1){return;}
+    if(a.*.trace_n>=M8_TRACE_MAX){a.*.trace_full=1;return;}
+    let tr:[]i64=a.*.trace;
+    tr[a.*.trace_n*2]=size;
+    tr[a.*.trace_n*2+1]=a.*.alloc_seq;
+    a.*.alloc_seq=a.*.alloc_seq+1;
+    a.*.trace_n=a.*.trace_n+1;
+}
+
+// block layout: [next:i64 @0][size:i64 @8][payload @16]
+fn m8_alloc(a:*M8Armor,size:i64)*u8 {
+    if(size<1){size=1;}
+    // free-list reuse: first fit from head (LIFO) or tail (FIFO)
+    let prev:i64=0;let cur:i64=a.*.free_head;
+    let best:i64=0;let best_prev:i64=0;
+    while(cur!=0){
+        let bp:*i64=cur as *i64;
+        let hw:[]i64=bp[0..2];
+        let bsz:i64=hw[1];
+        if(bsz>=size){
+            if(a.*.rev==0){best=cur;best_prev=prev;cur=0;}
+            else {best=cur;best_prev=prev;}
+        }
+        if(cur!=0){prev=cur;cur=hw[0];}
+    }
+    if(best!=0){
+        let bp:*i64=best as *i64;
+        let hw:[]i64=bp[0..2];
+        if(best_prev==0){a.*.free_head=hw[0];}
+        else {
+            let pp:*i64=best_prev as *i64;
+            let pw:[]i64=pp[0..2];
+            pw[0]=hw[0];
+        }
+        m8_trace_rec(a,size);
+        return (best+16) as *u8;
+    }
+    let total:i64=size+16;
+    let p:*u8=_zag_malloc(total as i32) as *u8;
+    if(p==null as *u8){return null as *u8;}
+    let bp:*i64=p as *i64;
+    let hw:[]i64=bp[0..2];
+    hw[0]=0;hw[1]=total;
+    m8_trace_rec(a,size);
+    return (p as i64+16) as *u8;
+}
+
+fn m8_free(a:*M8Armor,ptr:*u8)void {
+    if(ptr==null as *u8){return;}
+    let base:i64=ptr as i64-16;
+    let bp:*i64=base as *i64;
+    let hw:[]i64=bp[0..2];
+    hw[0]=a.*.free_head;
+    a.*.free_head=base;
+}
+
+fn m8_read_canary()i64 {
+    // clock_gettime(CLOCK_MONOTONIC) -> tv_nsec; fallback: getpid
+    let ts:[]u8=nio_alloc(16);
+    if(ts.len==16){
+        let rc:i64=_zag_raw_syscall(228,1,_zag_slice_ptr(ts) as i64,0,0,0,0);
+        if(rc==0){
+            let ns:i64=0;let i:i32=0;
+            while(i<8){ns=ns|((ts[8+i] as i64)<<(i*8));i=i+1;}
+            nio_free(ts);
+            return ns;
+        }
+        nio_free(ts);
+    }
+    return _zag_raw_syscall(39,0,0,0,0,0,0);
+}
+
+// MUST be called before any arm logic. Returns 0 ok.
+fn m8_armor_init(a:*M8Armor,perturb:i64)i32 {
+    a.*.perturb=perturb;
+    if(perturb==4){a.*.rev=1;}
+    if(perturb==1){
+        // heap pre-fragmentation: deterministic sizes from the fixed env seed
+        let st:EnvStream=env_init(ENV_SEED+1001);
+        let i:i32=0;
+        while(i<4096){
+            let sz:i64=16+env_next_bound(&st,4080);
+            let p:*u8=m8_alloc(a,sz);
+            if(p!=null as *u8 && (i&1)==1){m8_free(a,p);}
+            i=i+1;
+        }
+    }
+    if(perturb==2){
+        let ar:*u8=_zag_malloc(65536) as *u8;
+        if(ar==null as *u8){return -1;}
+        a.*.arena=ar as i64;
+    }
+    if(perturb==3){
+        a.*.canary=m8_read_canary();
+        // mix the canary into the allocation path: one extra 16-byte alloc
+        // iff the canary is odd. A binary that ignores the canary behaves
+        // identically to run 1; one that reads it diverges in the trace.
+        if((a.*.canary&1)==1){
+            let p:*u8=m8_alloc(a,16);
+            m8_free(a,p);
+        }
+    }
+    // perturbations done: arm behavior from here on is traced
+    a.*.trace_n=0;a.*.alloc_seq=0;a.*.tracing=1;
+    return 0;
+}
+
+// hash of the (size,seq) trace — addresses normalized out by construction
+fn m8_trace_hash(a:*M8Armor)[]u8 {
+    let tr:[]i64=a.*.trace;
+    let nb:i32=a.*.trace_n*2*8;
+    let bp:*u8=tr as *u8;
+    let bytes:[]u8=bp[0..nb];
+    let h:[]u8=hc_sha256_hex(bytes);
+    return h;
+}
+
+fn m8_store_snapshot(data:[]u8)[]u8 {
+    return hc_sha256_hex(data);
+}
+
+// Print the M8 capture lines the runner hashes. ledger_hex may be "".
+fn m8_emit_captures(a:*M8Armor,store_hex:[]u8,ledger_hex:[]u8)void {
+    _zag_print("M8_STORE_IMAGE,");
+    _zag_print(store_hex);
+    _zag_println("");
+    _zag_print("M8_LEDGER,");
+    _zag_print(ledger_hex);
+    _zag_println("");
+    let th:[]u8=m8_trace_hash(a);
+    _zag_print("M8_ALLOC_TRACE,");
+    _zag_print(th);
+    _zag_println("");
+    nio_free(th);
+    _zag_print("M8_PERTURB,");hc_num(a.*.perturb);_zag_println("");
+}
+
+fn m8_armor_free(a:*M8Armor)void {
+    // release free-list blocks
+    let cur:i64=a.*.free_head;
+    while(cur!=0){
+        let bp:*i64=cur as *i64;
+        let hw:[]i64=bp[0..2];
+        let nxt:i64=hw[0];
+        _zag_free(cur as *i8);
+        cur=nxt;
+    }
+    if(a.*.arena!=0){_zag_free(a.*.arena as *i8);a.*.arena=0;}
+    hc_free_i64(a.*.trace);
+    a.*.free_head=0;
+}
