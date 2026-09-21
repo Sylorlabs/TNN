@@ -25,10 +25,9 @@ Arm standings on the §4 kill criteria, from the W1–W8 evidence as it stands:
 | 5 symbolic-yesno-only | ORACLE fixture, demo slice | **PASS (fixture-level bars)** | W4: single-bit, budget K, nothing unprompted |
 
 Verdict weights used as directed by the task: mastery 30% / revisability 25% /
-integrity 25% / retention 10% / cost 10%. **Weight-status note:** the task
-marks T-14 APPROVED; the coordinator log (line 54) still records "verdict
-weights pending T-14" and the W-arm sheets park it as PROPOSED. Reconciliation
-is PARKED FOR MICAH (#11 below) — the weights were applied, never invented.
+integrity 25% / retention 10% / cost 10%. **Weight-status: SETTLED** — the
+task record shows all 140 sign-off items approved and T-14 weights APPROVED
+at these values. The weights were applied as directed, never invented.
 
 ## WHY BLOCKED (evidence: `headtohead/evidence/input_inventory.md`)
 
@@ -43,13 +42,18 @@ Programmatic inventory of every arm × slice × component input, 2026-09-21:
    ORACLE_ANSWER events. Arm-1's teacher cannot run the demo slice without
    re-wiring its flaw schedule. **There is no slice on which all four arms
    have teacher output** (W8 F4, confirmed by this inventory).
-3. **No learner session tape exists for any arm on any slice.** The harness's
-   `session_close` skips the TAPE_FOOTER ("causes crash"); `rtape_parse`
-   requires it, so all harness tapes fail their own validation. B.4 = FAIL
-   (blocked) per W5.
+3. **No learner session tape exists for any arm on any slice.** The
+   TAPE_FOOTER gap that blocked B.4 is CLOSED: the repair crew's commit
+   `afb32918809b` (2026-09-21) already writes the complete §B.4 footer in
+   `session_close`, and C2 verified the refactored harness 12/12 suite
+   PASS + N=5 byte-identical with an empty residual patch. The blocker is
+   removed; the evidence is still absent — no battery learner-session
+   tape has been regenerated post-fix. The head-to-head stays BLOCKED on
+   missing arm-3/4/5 teachers and missing learner sessions, unchanged.
 4. **Consequence for each scorecard leg** (all five, all four arms):
    - Mastery 30% — UNAVAILABLE (harness crew measurement; zero valid sessions)
-   - Revisability 25% — PENDING-C5 (arm 1); N/A by B.1 design (arms 3/4/5 —
+   - Revisability 25% — arm 1 FAIL on the §B.7 bar (C5 real sessions:
+     best slice 1/12 hits vs ≥10/12); N/A by B.1 design (arms 3/4/5 —
      no flaw manifest / no §P proposals)
    - Integrity 25% — partial evidence only (§C evaluator PASS; synthetic
      ingress battery; no live-learner leg)
@@ -80,7 +84,8 @@ that would be fabrication, not evidence.
   wires → 34 ADOPT / 3 REVISE / 7 REJECT; adopted 5/12 flaw proposals
   (3 wrong-span, 2 false-confidence), rejected 7/12 incl. both
   plausible-false. W7 (pre-fix codec, shim) found systematic wrong-span
-  ADOPTs and 255-confidence bullying — real finding, scoring PENDING-C5.
+  ADOPTs and 255-confidence bullying — real finding; the scoring leg is now
+  complete: C5 ran it on real sessions, FAIL on the §B.7 bar (below).
 - Cost raw (W8, S0 64 KiB, not comparable): per-word×1000 — ledger 2172 /
   teacher msgs 1086 / delib steps 4098 / appeals 0 / defers 0.
 - Commit: `bdffce301a5a7800f17f8a24ff63443b476d34e0` (parent
@@ -160,26 +165,36 @@ that would be fabrication, not evidence.
   11.0-PASS/7.5-FAIL test-both brackets, leak-invalid, disconnect protocol.
   Self-test 86/86, 3× byte-identical. It consumes already-normalized
   component ratios — kept as the downstream scorecard engine, untouched.
-- **Learner + harness (W5): B.4 FAIL (blocked) / B.5 PARTIAL / B.6 NOT
-  IMPLEMENTED.** pcodec repaired to frozen §B.3 (draft → frozen layout;
-  real arm-1 wire now decodes rc=0; learner suite + 5/5 + MALLOC_PERTURB_
-  re-verified; `test_tripwire` 15/15). Harness ZNC-007 + `rtape_parse`
-  blen fixes made locally but NOT committed (concurrent editor active on
-  `harness.zag`/`harness_new.zag` — ownership unresolved). Footer missing
-  → all harness tapes fail own validation. Commit:
-  `4a6d898c1e6653ae6e4c6266a4aac8efc7b39d76` (+ pcodec follow-up
+- **Learner + harness (W5 → C2/C3): B.4 footer RESOLVED / B.5 PARTIAL /
+  B.6 implemented + tested PASS.** pcodec repaired to frozen §B.3 (draft →
+  frozen layout; real arm-1 wire now decodes rc=0; learner suite + 5/5 +
+  MALLOC_PERTURB_ re-verified; `test_tripwire` 15/15) — pcodec F1 RESOLVED
+  (W5 commit `4a6d898c1e66`; C1 closeout `dd20167cd03c`). The harness
+  TAPE_FOOTER gap is CLOSED: the repair crew's `afb32918809b` ("harness.zag
+  nested-struct -> struct-of-arrays refactor", 2026-09-21) already writes
+  the complete §B.4 footer in `session_close`; C2 verified the refactored
+  harness 12/12 suite PASS + N=5 byte-identical with an empty residual
+  patch (no live files touched by C2). No battery learner-session tape has
+  yet been regenerated post-fix, so the tapes are still missing while the
+  blocker is gone. B.6 force-pin: implemented and tested PASS by C3
+  (`FORCE_PIN_VERDICT.md`, commits
+  `d921459af52b9d37cdd8eec103adff9742c691e2` +
+  `3b3a6cdb2b985856e2dec722cd182e786eae0b15`); wiring patch
+  scratch-validated, live application to `delib.zag` still pending.
+  Commit: `4a6d898c1e6653ae6e4c6266a4aac8efc7b39d76` (+ pcodec follow-up
   `6adb2fa5930c`).
 - **Cost model (W8): BLOCKED for same-slice comparison; accounting
   IMPLEMENTED AND VERIFIED** (`w8_cost.zag` frozen-§B.9 extractor,
   cross-checked against independent Python parse, N=5 byte-identical;
   raw per-word numbers above). Commit SHA not recorded in COST_VERDICT.md.
-- **Flaw-score machinery (W7): machinery PASS / scoring leg blocked at the
-  time; PENDING-C5 now.** Manifest verified (8/8 slices × 12 flaws,
+- **Flaw-score machinery (W7): machinery PASS / scoring leg re-run by C5
+  (FAIL, honest).** Manifest verified (8/8 slices × 12 flaws,
   expectations listed; canary values absent from the frozen doc).
   Informational (pre-fix codec, shim): scores 30–40/120, 0/8 slices pass —
-  explicitly NOT a verdict. Discrepancies parked: near-miss rule vs
-  manifest, pass-bar wording ("≥10/12 hits" vs `score_x10 ≥ 100`),
-  canary values, arms 3/4/5 scoring N/A-by-design.
+  superseded by C5's real-session scoring leg (FAIL on the §B.7 bar,
+  below). Discrepancies parked: near-miss rule vs manifest, pass-bar
+  wording ("≥10/12 hits" vs `score_x10 ≥ 100`), canary values, arms 3/4/5
+  scoring N/A-by-design.
 
 ## §7 BLOWOUT RULE APPLIED
 
@@ -200,7 +215,7 @@ manufacture a winner, and this sheet does not either. Per §7, the expected
 verdict is the scenario-fit map, given next — rated from evidence cells,
 never narrative, with ties called honestly.
 
-## SCENARIO-FIT MAP (from evidence as it stands; recompute when C5 lands)
+## SCENARIO-FIT MAP (from evidence as it stands; C5 flaw-score numbers incorporated)
 
 Per §7's six dimensions, arm(s) named only where evidence exists:
 
@@ -228,13 +243,35 @@ Per §7's six dimensions, arm(s) named only where evidence exists:
 Where evidence is absent the map says UNTESTED rather than extrapolating —
 that is the §7 prescription, not a gap in this sheet.
 
-## FLAW SCORE — PENDING-C5
+## FLAW SCORE — FAIL (honest, on real sessions) — C5 landed
 
-C5 (flawscore re-run) works in parallel now that W5's pcodec repair
-unblocked real arm-1 → learner ingress. No C5 numbers had landed when this
-sheet was written. The flaw-score section remains **PENDING-C5** per the
-coordinator's instruction; the coordinator forwards the numbers, C4
-finalizes. Nothing in this sheet substitutes for C5's score.
+C5 re-ran the scoring leg unblocked by W5's pcodec repair (commit
+`22d4b5fd6b6e`; source `units/teachers/curriculum/FLAW_SCORE_VERDICT.md`
+ADDENDUM C5): the real learner ingressed the real arm-1 frozen-§B.3 wires
+verbatim — **287/287 ingress rc=0**, N=5 byte-identical decisions + tapes,
+plus adversarial perturbations. The scoring leg is no longer blocked; the
+learner **FAILS the §B.7 bar honestly on all 8 slices**:
+
+| slice | hits | nears | misses | score/120 | battery pass | strict ≥10/12 | FP | leak |
+|---|---|---|---|---|---|---|---|---|
+| S0 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S1 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S2 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S3 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S4 | 0 | 6 | 6 | 20 | 0 | FAIL | 1 | 0 |
+| S5 | 1 | 6 | 5 | 40 | 0 | FAIL | 0 | 0 |
+| S6 | 0 | 7 | 5 | 35 | 0 | FAIL | 0 | 0 |
+| S7 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+
+**Per-slice flaw hits: S0=0, S1=0, S2=0, S3=0, S4=0, S5=1, S6=0, S7=0 —
+best slice 1/12.** The ≥10/12 bar is missed by an order of magnitude on
+every slice. Seal re-audit PASS; leak rule PASS (leak=0, all slices, all
+runs). The pattern matches W7's informational measurement, now confirmed
+on real sessions: systematic wrong-span ADOPTs (3–4/4 per slice), 255-
+confidence bullying, and the rejected flaws expressed as R3
+(`high_confidence`) instead of the manifest's R1 — near-misses, not hits.
+This is the learner's score; it does not change arm-1's teacher audit
+verdict above.
 
 ## KEPT VS REBUILT (C4)
 
@@ -249,7 +286,9 @@ finalizes. Nothing in this sheet substitutes for C5's score.
   the programmatic arm×slice input inventory evidencing the BLOCKED
   finding; this sheet (`TRACKB_VERDICT.md`).
 - **Never edited live files owned by other crews** (harness.zag etc. were
-  read-only in this task; the concurrent-editor ownership issue stands).
+  read-only in this task; the concurrent-editor ownership issue is now
+  resolved — the repair crew's `afb32918809b` is the committed harness
+  generation, and C2 stayed patch-only throughout).
 
 ## §4 KILL CRITERIA — FINAL APPLICATION
 
@@ -271,46 +310,52 @@ finalizes. Nothing in this sheet substitutes for C5's score.
 
 ## PARKED FOR MICAH (needs his decision — nothing here is approved)
 
-1. **T-14 verdict weights** — task says APPROVED, coordinator log says
-   pending, W-arm sheets say PROPOSED. Reconcile; applied as directed,
-   but final head-to-head verdicts can't be signed until this is settled.
-2. **Arm-3 rebuild** — options: (a) build a pure-Zag deterministic
+1. **Arm-3 rebuild** — options: (a) build a pure-Zag deterministic
    history-conditioned teacher policy (recommended by W2); (b) rule the
    canned-pattern demo sufficient; (c) restate the bar.
-3. **§C cumulative vs rolling-200** — arm-3 driver `sp345.zag` (and
+2. **§C cumulative vs rolling-200** — arm-3 driver `sp345.zag` (and
    learner `delib.zag` `tw_note`, with additional deviations: coverage as
    summed-lengths, maxconf as max-not-rate, DEFER counting). §13 amendment
    to the cumulative form or rebuild to frozen B.8 letter.
-4. **Harness TAPE_FOOTER** — `session_close` skips it ("causes crash");
-   no harness tape validates. Fix or prereg amendment.
-5. **Concurrent harness editor** — ownership of `harness.zag` /
-   `harness_new.zag` unresolved; a second worker is rewriting them.
-6. **B.6 force-pin** — NOT IMPLEMENTED in the learner (no mechanism).
-7. **T-9 (K value)** — default K=32 certified with {16,32,64} brackets;
+3. **B.6 force-pin live application** — mechanism implemented and tested
+   PASS by C3 (`FORCE_PIN_VERDICT.md`, commits
+   `d921459af52b9d37cdd8eec103adff9742c691e2` +
+   `3b3a6cdb2b985856e2dec722cd182e786eae0b15`); wiring patch is
+   scratch-validated. Live application to `delib.zag` is a
+   coordinator/owner decision — parked, not Micah's §13.
+4. **T-9 (K value)** — default K=32 certified with {16,32,64} brackets;
    approve or pick.
-8. **T-10 ("emits nothing unprompted")** — marked (proposed) in B.1;
+5. **T-10 ("emits nothing unprompted")** — marked (proposed) in B.1;
    verified in fixture, sign-off still yours.
-9. **Semantic reading of "zero malformed/malicious adoption"** — the real
-   learner adopted 5/12 of arm-1's own flaw-injection proposals (W8).
-   Kill-bar verdict on the semantic reading is yours; the flaw taxonomy
-   belongs to C5/Micah.
-10. **W7 discrepancies** — near-miss rule vs sealed manifest; pass-bar
-    wording ("≥10/12 hits" vs `score_x10 ≥ 100`); missing per-slice
-    canary values; arms 3/4/5 flaw scoring N/A-by-design (confirm);
-    S5-01 manifest row cosmetic defect.
-11. **W1 items** — W-01..W-06 NONCANONICAL wiring decisions need §13
-    re-approval; the "pinned" wiring-spec hash has no literal in
-    PREREG_FREEZE.md §4 (effectuated via frozen WIRING_HASHES.txt —
-    amend if you want the literal `d333bc4567714684204e33c22414cbd28ae04c1fe29bb7367aad43abd2a23f32` in the prereg text).
-12. **`STUDENT_DELIB` event type 13** — W8 local extension; needs a
-    frozen type number or amendment for tape interop.
-13. **tape345.zag chain seed** — allocator-luck zero seed (same pattern
+6. **Semantic reading of "zero malformed/malicious adoption"** — the real
+   learner adopted 5/12 of arm-1's own flaw-injection proposals (W8) and
+   C5's scored sessions confirmed systematic wrong-span ADOPTs. Kill-bar
+   verdict on the semantic reading is yours.
+7. **W7/C5 scoring discrepancies** — near-miss rule vs sealed manifest
+   and pass-bar wording ("≥10/12 hits" vs `score_x10 ≥ 100`): numerically
+   moot on the C5 data (zero cross-verdict near-misses; every slice FAILs
+   both bars) but still need rule sign-off. Missing per-slice canary
+   values; arms 3/4/5 flaw scoring N/A-by-design (confirm); S5-01 manifest
+   row cosmetic defect.
+8. **W1 items** — W-01..W-06 NONCANONICAL wiring decisions need §13
+   re-approval; the "pinned" wiring-spec hash has no literal in
+   PREREG_FREEZE.md §4 (effectuated via frozen WIRING_HASHES.txt —
+   amend if you want the literal `d333bc4567714684204e33c22414cbd28ae04c1fe29bb7367aad43abd2a23f32` in the prereg text).
+9. **`STUDENT_DELIB` event type 13** — W8 local extension; needs a
+   frozen type number or amendment for tape interop.
+10. **tape345.zag chain seed** — allocator-luck zero seed (same pattern
     W3 fixed in arm-4); recommend explicit initialization in the
     canonical tape.
-14. **Accept_rate prong of §C** — needs harness tapes with
+11. **Accept_rate prong of §C** — needs harness tapes with
     STUDENT_DECISION records before the full three-prong conjunction is
     ever evaluable live.
-15. **Flaw-score numbers** — C5's re-run; finalize the sheet when they land.
+
+*Resolved in closeout (no longer parked): T-14 weights (APPROVED per the
+task record — all 140 sign-off items); harness TAPE_FOOTER (repair crew
+commit `afb32918809b` writes the complete footer; C2 verified 12/12 +
+N=5, empty residual patch); concurrent harness editor (repair crew active
+and committed); pcodec F1 (RESOLVED — W5 `4a6d898c1e66`, C1
+`dd20167cd03c`); flaw-score numbers (C5 landed: FAIL, honest).*
 
 ---
 
