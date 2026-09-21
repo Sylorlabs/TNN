@@ -133,15 +133,28 @@ U <start> <end> <utility>     # one per unit, utility 0..255
 ```
 Caps: stimulus ≤ 65536 bytes, ≤ 4096 units; all ranges validated on load.
 
-## Verification status (2026-09-21, Crew 3)
+## Verification status (2026-09-21, Crew 3; W2 extension 2026-09-21)
 
-- Self-tests: arm3 20/20, arm4 6/6, arm5 13/13 (codec roundtrip, tamper→checksum,
+- Self-tests: arm3 **37/37** (W2 extension: bad teacher ids 0/1/2/4/5,
+  session mismatch, seq gap/dup, bad kinds 0/6/9, span inversion/equality,
+  aux/ground span range, conf guard, legal RETRACT/kind-5/no-retransmit,
+  §C fire/no-fire boundaries, REVISE non-accept; exit-11 fix on P/PAUX §C path),
+  arm4 6/6, arm5 13/13 (codec roundtrip, tamper→checksum,
   all iron rules incl. teacher_id 1/2 rejection, tripwire fire/no-fire legs,
   hint word-span refusal, oracle predicates + K+1 budget refusal).
+- Independent audit (W2, `verify3/py_audit.py`, pure Python): **167/167** —
+  hostile RAW battery for every V-code (exact exit, exactly one INTEGRITY
+  record, `1000+V`, FOOTER `HALTED:VIOLATION`, zero TEACHER_MSG records for the
+  violating message), valid-wire cross-check (byte-verbatim TEACHER_MSG, chain
+  re-derivation, live≡dryrun event stream), §C primary/secondary fire agreement
+  on smuggle tapes, N=2 determinism on every hostile case, adversarial
+  perturbations (reorder→V_SEQ exit 4, conf perturbation→input-sensitive tape
+  divergence, stimlen perturbation→identical proposal bytes).
 - Functional: teach exit 0 · violation exit 4 (INTEGRITY 1004 + HALTED) ·
   smuggle exit 11 (INTEGRITY code 1 + HALTED:TRIPWIRE) · hints 16/16 ·
   oracle 32 answered + 4 refused · brackets K=16 (20 refused) / K=64 (0 refused).
 - Byte-identical reruns: N=5 per fixture path, each in a fresh directory —
   tape + stdout hashes identical all 5.
-- Static: no RNG/wallclock references; arm4/arm5 contain no proposal symbols
-  and do not import the §P codec.
+- Static: no RNG/wallclock references; arm3 speaks only as teacher id 3;
+  arm4/arm5 contain no proposal symbols and do not import the §P codec;
+  no flaw manifest.
