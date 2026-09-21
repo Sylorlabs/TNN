@@ -63,7 +63,7 @@
 | Y4 | PROVISIONAL (conditional on D) | unresolved | PASS | 1x |
 | Y5 | **PASS — PROVISIONAL BLOWOUT** | no | PASS | 1x (10x blocked, toolchain) |
 | Y6 | PASS | no | PASS | 1x |
-| Z1 | PROVISIONAL (blocked on D) | unresolved | PASS | 1x |
+| Z1 | PROVISIONAL (blocked on D; adjudicated U13 2026-09-21 — kill disjunct 2 verified NOT triggered, disjunct 1 gated on T3) | unresolved | PASS | 1x |
 | Z2 | PASS | no | PASS | 1x |
 | Z3 | PASS (survives) | no | PASS | 1x |
 | Z4 | KILLED | yes (panic) | FAIL | 1x |
@@ -144,5 +144,6 @@ Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3)
 - Section spot-check: `docs/lab/units/closeout/SECTION_SPOTCHECK.md` (commit `025e2172bb002aef40dc35b9d21faf0d01c20065`)
 - B-family verdict: `docs/lab/units/arms/B-8/VERDICT.md` (commit `59fb89777f3f`)
 - R2 verdict: `units/arms/R2/VERDICT.md` + `docs/lab/units/arms/R2/` (commits `0631928b4413`, `e6d92e47a304`, `8b6e11d28d2f`)
+- Z1 adjudication: `docs/lab/units/arms/Z1/ADJUDICATION.md` (MARATHON CREW U13 re-dispatch, 2026-09-21) — independent rebuild + ×2 byte-identical re-runs of m1/m4 legs; kill disjunct 2 NOT triggered (1.3% prose / 8.2% code narrowing, 0.0% widened); prose corpus-staleness corrected (39,870 units / 54.7% regret on frozen r1 corpus); M8 re-run 10/10 byte-identical on frozen corpus. Disjunct 1 (vs arm D) gated on crew T3's committed D-family verdict — not yet landed.
 - Championship computation: `/tmp/tracka_rows2.json` (working); method documented in §3 above.
 - §7 recomputation 2026-09-21 (crew S7-RECOMPUTE): working record in `~/workspace/NIGHT_RUN_2026-09-21.md` ("§7 recomputation" entry); U M5 source artifacts `units/arms/U/work/adjud/scorecard/m5-1x/` + Y5 `units/arms/Y5/evidence/scorecard_y5_1x.json`.

@@ -105,3 +105,31 @@ probes went quadratic (billions of probes — a slowdown, not a deadlock).
 stale-entry correctness bug. Fixed by sizing the table to the load
 (dd_cap=262,144) plus tombstone eviction of reused rows' old keys. M8 clean
 now completes in ~2 min with byte-identical stdout across all 10 gate runs.
+
+---
+
+## Adjudication (MARATHON CREW U13, re-dispatch, 2026-09-21)
+
+Full adjudication record: `ADJUDICATION.md` (same directory).
+
+- Frozen spec re-extracted programmatically from `units/PREREG_FREEZE.md`
+  §3 line 492; matches the definition quoted above.
+- Independent rebuild from `cl/arm.zag` (frozen toolchain): exit 0, no
+  errors; m1-1x-prose/code and m4-1x-prose/code re-run ×2, all
+  byte-identical; kill disjunct 2 reproduced exactly (narrowing probe
+  prose 531/39,870 = 1.3%, code 5,633/68,491 = 8.2%; widened 0.0% both).
+- **Corpus-staleness correction:** the prose M1/regret numbers above
+  (36,404 units, 84,730 proposed, 57.0%) were measured on a pre-freeze
+  prose corpus; on the frozen r1 corpus (prose.bin 5,638,480 bytes) the
+  measured values are 39,870 units, 88,101 proposed, 48,232 regretted,
+  **54.7%** regret (code: 68,491 units, 53.9%). Scorecard prose leg
+  superseded accordingly.
+- M8 gate re-run to completion on the frozen corpus: **10/10
+  byte-identical** (5 perturbations × 2), 100.0%/100.0% recall, 237,050
+  ledger entries — M8 PASS stands.
+- Kill disjunct 1 (regret-rate vs arm D): **UNEVALUABLE — GATE PENDING.**
+  Crew T3's committed D-family verdict has not landed
+  (`docs/lab/units/arms/D/VERDICT.md` is an IN-PROGRESS draft, verdict TBD).
+
+**Binding verdict: PROVISIONAL (blocked on D).** No kill fired; disjunct 1
+awaits T3's D verdict. Nothing else remains.
