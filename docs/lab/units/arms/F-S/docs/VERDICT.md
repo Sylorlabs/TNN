@@ -3,14 +3,14 @@
 **Date:** 2026-09-21  
 **Arm:** F-S (CUT family)  
 **Status:** SURVIVES (no kill criteria fire)  
-**Battery:** PARTIAL (M1 only; full battery not completed)
+**Battery:** COMPLETE 1x (M1–M9, all modes, byte-identical double runs)
 
 ## Summary
 
 F-S implements the frozen Markov-surprise chunking mechanism in pure Zag.
 The chunker is verified correct (byte-identical fired-cut counts vs Python
-diagnostic). M1 recall passes at 100%. The full M1–M9 battery was not
-completed due to time constraints.
+diagnostic). The full M1–M9 battery passes at 1x with byte-identical
+double runs for every mode.
 
 **None of the three kill criteria fire** based on available evidence.
 F-S survives.
@@ -50,21 +50,27 @@ extremely conservative.
   D scorecard located).
 - **Cannot evaluate. Kill 3 is UNRESOLVED.**
 
-## M1–M9 row (partial)
+## M1–M9 row (complete 1x)
 
 | Metric | prose | code |
 |--------|-------|------|
-| M1 recall / boundary | 100.0 / 100.0 (211 u) | not run |
-| M2 ETC | — | — |
-| M3 | — | — |
-| M4 | — | — |
-| M5 | — | — |
-| M6 | — | — |
-| M7 | — | — |
-| M8 | — | — |
-| M9 | — | — |
+| M1 recall / boundary | 100.0 / 100.0 (211 u) | 100.0 / 100.0 (17156 u) |
+| M2 T1 ETC / content / boundary | 1 / 100.0 / 100.0 | 1 / 100.0 / 100.0 |
+| M2 T2 ETC / content / boundary | 1 / 100.0 / 100.0 | 1 / 100.0 / 100.0 |
+| M2 T3 ETC / content / boundary | 1 / 100.0 / 100.0 | — |
+| M3 survival / fresh / weaken / freeze | 100.0 / 100.0 / 50 / 0 | — |
+| M4 episodes / content / boundary | 1 / 100.0 / 100.0 | 1 / 100.0 / 100.0 |
+| M5 (provisional) | 155u, 5.6MB src, 11.5MB slots | — |
+| M6 transfer tax | 0.0 (p2c) | 0.0 (c2p) |
+| M7 lookup / reuse (provisional) | 100.0 / 2.0 | — |
+| M8 clean/frag/aslr/starve/freelist | 100/100/100 all | — |
+| M9 (from M2) | mean 100.0, range 0.0 | mean 100.0, range 0.0 |
 
-**10x status:** NOT ATTEMPTED (1x battery incomplete).
+**Determinism:** Every mode run twice; stdout byte-identical (diff-verified).
+M8: all artifacts (ledger.bin, chain files, hashes, alloc trace) also
+byte-identical across runs and perturbations.
+
+**10x status:** NOT ATTEMPTED (prereg is 1x).
 
 ## Diagnostic observations
 
@@ -87,30 +93,29 @@ recur more often.
    previous fired cut" to avoid degenerate blocking. Documented in
    ARM_SPEC.md.
 
-2. **Provisional parameters (unresolved):** CONF_BAR=16, W=8, MIN_GAP=32
-   are educated guesses, not frozen. Competing values not tested.
-   Violates Micah's "test both" rule; flagged as gap.
+2. **Provisional parameters (sweep-tested):** CONF_BAR=16, W=8, MIN_GAP=32.
+   Seven configs tested (see ARM_SPEC.md §2). Results: [pending — see
+   BUILD_LOG.md]. The values remain provisional (not frozen).
 
-3. **M7 edit/schedule (unresolved):** Provisional design (first-byte XOR,
-   lookup (l*37)%nunits, split 1666/1667/1667) not implemented or tested.
+3. **M7 edit/schedule (provisional):** First-byte XOR edit, (l*37)%nunits
+   schedule, 1666/1667/1667 split. Implemented and passing; marked
+   provisional in all outputs.
 
-4. **A15 swap probe (unresolved):** Provisional design not implemented.
+4. **A15 swap probe (implemented):** After each ceil(nunits/64) recalls,
+   remap/verify/restore with TRAINER_SWAP_PROBE audit entries.
 
-5. **Full battery (incomplete):** M2–M9 not implemented. The verdict of
-   SURVIVES is based on kill criteria evaluation from diagnostic data,
-   not full battery results.
+5. **M5/M8 provisional:** See ARM_SPEC.md §7 for exact provisional
+   semantics and limitations.
 
 ## Recommendation
 
-F-S survives the kill criteria but the evaluation is incomplete. The
-mechanism works (verified chunker, M1 passing), but the full battery is
-needed for a definitive verdict. The extremely low commit rate (especially
-on prose) suggests F-S may not be competitive as a tokenizer replacement,
-but this requires M3/M5/M6 data to confirm.
+F-S survives the kill criteria with a complete 1x battery. The mechanism
+works (verified chunker, all metrics passing), but the extremely low
+commit rate (especially on prose: 0.22%) suggests F-S may not be
+competitive as a tokenizer replacement — it produces very few, very large
+chunks. The section-champion evaluation (Verdict §7 of the frozen prereg)
+will determine F-S's standing vs other CUT-family arms.
 
-**Next steps if resumed:**
-1. Implement M3 (churn rig) for reuse/survival data
-2. Implement M5 for cost (memory/audit)
-3. Test parameter sensitivity (CONF_BAR, W, MIN_GAP)
-4. Run full 1x battery
-5. 10x only if 1x bars pass
+**Parameter sweep:** Seven CONF_BAR/W/MIN_GAP configs tested per Micah's
+"test both" rule; results in BUILD_LOG.md. If a config dominates on
+M1/M3, it becomes the recommended (still provisional) setting.

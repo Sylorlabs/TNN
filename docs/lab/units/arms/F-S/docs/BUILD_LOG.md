@@ -77,3 +77,51 @@ Per Micah's "test both" rule, this is a gap.
 
 ### Compiler
 `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`
+
+## 2026-09-21 (continuation): Full battery implementation
+
+### New modes implemented
+All M2–M9 implemented in `cl/arm.zag` (~2,076 lines):
+
+- **M2** (`m2-t1-prose`, `m2-t1-code`, `m2-t2-prose`, `m2-t2-code`, `m2-t3-1x`):
+  Tiered curriculum (50 units per episode), ETC metric, per-episode content/
+  boundary recall. M9 reported from M2 episodes (mean/range of per-episode
+  content recall). All tiers: ETC=1, 100/100.
+- **M3** (`m3-1x`): Churn protocol — ingest prose+code (M1), mark 1000
+  valuable (pinned), ingest 3000 fresh, kill 3000 non-valuable, weaken 50,
+  ingest 4000 fresh. Survival 100%, fresh recall 100%, weaken 50/50,
+  freeze 0. Management entries: 9050.
+- **M4** (`m4-1x-prose`, `m4-1x-code`): Defect planting (3 content +
+  3 boundary shifts + 3 offset errors) then repair; 1 episode, 100/100.
+- **M5** (`m5-1x`, `m5-baseline`): PROVISIONAL. Structural byte accounting
+  (slot table, ledger, corpus buffer) vs fixed-work baseline spin
+  (300M iterations). Prose: 155 units, 5.6MB source, 11.5MB slots,
+  11.4MB ledger (177,585 entries incl. chunking diagnostics).
+- **M6** (`m6-p2c-1x`, `m6-c2p-1x`): Source predictor trained on source
+  domain, frozen, applied to target. Transfer tax 0.0 both directions
+  (100/100/100 in-domain and transfer).
+- **M7** (`m7-1x`): PROVISIONAL A7/A8. Edit = first-byte XOR;
+  schedule = deterministic (l*37)%nunits; 5000 lookups over 3 regimes.
+  Lookup 100%, reuse 2.0 (prose lookups / code units), dedup 50%.
+- **M8** (`m8-1x`): Five perturbations (clean/frag/aslr/starve/freelist)
+  × two runs. Each: M1-prose + M1-code + M3 with artifacts (alloc trace,
+  ledger.bin, chain files, store hashes). All perturbations: 100/100/100,
+  byte-identical stdout and artifacts across runs.
+- **Sweep** (`sweep`): 7 configs (CONF_BAR × W × MIN_GAP) on M1-prose + M3.
+
+### Bugs fixed during continuation
+1. **M3 insertion-queue overflow:** `fs_new(4000,20000,9000)` — 9000-slot
+   insertion queue overflowed with ~27k insertions → heap corruption →
+   `panic: slice index out of bounds`. Fixed: capacities (4000,30000,30000)
+   + bounds check on insertion-queue write.
+2. **M3 recall buffer overflow:** Final probe used 64-byte `bout` for
+   V-chunks up to 400KB → panic. Fixed: properly-sized `vb` buffer
+   (max(chp.maxlen, chc.maxlen)).
+3. **M3 weaken check:** `b_weaken(...)==0` tested wrong success value
+   (returns slot ≥0 on success). Fixed: `>=0`.
+4. **M7 reuse:** Was computing bytes-based; corrected to prose lookups /
+   code units = 2.0.
+
+### Determinism
+All modes: two runs, byte-identical stdout verified via diff. M8: also
+byte-identical artifacts (ledger.bin, chain files, hashes, alloc trace).

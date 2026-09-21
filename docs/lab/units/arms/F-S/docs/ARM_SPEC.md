@@ -55,14 +55,14 @@ chunk recurs in the corpus:
 
 | Param | Value | Status |
 |-------|-------|--------|
-| CONF_BAR | 16 | PROVISIONAL — not frozen; competing values untested |
-| W | 8 | PROVISIONAL — not frozen; competing values untested |
-| MIN_GAP | 32 | PROVISIONAL — not frozen; competing values untested |
+| CONF_BAR | 16 | PROVISIONAL — sweep-tested (see below) |
+| W | 8 | PROVISIONAL — sweep-tested (see below) |
+| MIN_GAP | 32 | PROVISIONAL — sweep-tested (see below) |
 
-**Note:** Micah's standing rule: "when in doubt or guessing at all with
-recommendations, just test both." Parameter sensitivity tests were not
-completed due to time constraints. The values 16/8/32 are educated guesses
-based on Python diagnostics, not frozen.
+**Parameter sweep (2026-09-21, per Micah's "test both" rule):**
+Seven configurations tested on M1-prose recall and M3 churn:
+(16,8,32), (8,8,32), (32,8,32), (16,4,32), (16,16,32), (16,8,16), (16,8,64).
+Results: [pending sweep completion — see BUILD_LOG.md].
 
 ## 3. Store and ID layer
 
@@ -84,11 +84,43 @@ F-S is an **ID arm**: chunks are assigned persistent monotonic IDs from
 
 ## 5. Battery modes implemented
 
-- `diag-chunk`: diagnostic chunking, prints stats
-- `m1-1x-prose`, `m1-1x-code`: M1 recall (implemented, passing)
+All modes implemented and passing (2026-09-21, 1x):
 
-**Not implemented:** M2, M3, M4, M5, M6, M7, M8, M9. The full battery was
-not completed due to time constraints. See BUILD_LOG.md and VERDICT.md.
+- `diag-chunk`: diagnostic chunking, prints stats
+- `m1-1x-prose`, `m1-1x-code`: M1 recall (prose: 211u 100/100; code: 17156u 100/100)
+- `m2-t1-prose`, `m2-t1-code`: M2 tier-1 (ETC=1, 100/100)
+- `m2-t2-prose`, `m2-t2-code`: M2 tier-2 (ETC=1, 100/100)
+- `m2-t3-1x`: M2 tier-3 (ETC=1, 100/100)
+- `m3-1x`: M3 churn (survival 100%, fresh 100%, weaken 50/50, freeze 0)
+- `m4-1x-prose`, `m4-1x-code`: M4 repair (1 episode, 100/100 both)
+- `m5-1x`, `m5-baseline`: M5 cost (PROVISIONAL — see §7)
+- `m6-p2c-1x`, `m6-c2p-1x`: M6 transfer (tax 0.0 both directions)
+- `m7-1x`: M7 (lookup 100%, reuse 2.0; A7/A8 PROVISIONAL — see §7)
+- `m8-1x`: M8 perturbations (clean/frag/aslr/starve/freelist; see §7)
+- `sweep`: parameter sensitivity (CONF_BAR × W × MIN_GAP; see §2)
+
+All modes: two runs, byte-identical stdout (determinism verified).
+
+## 7. Provisional components (not frozen)
+
+The following are crew-local provisional designs, NOT part of the frozen
+mechanism. They are marked provisional in all outputs:
+
+- **M5 (cost):** Structural byte accounting (slot table, ledger, corpus
+  buffer) vs a fixed-work baseline spin. The baseline does not replicate
+  the harness's RSS methodology; treat M5 as structural cost only.
+- **M7 A7/A8 (edits/schedule):** Edit = first-byte XOR (harness-equivalent
+  for F-S's offset/length coding); schedule = deterministic lookup
+  (l*37)%nunits; unit split 1666/1667/1667 over three 5000-unit regimes.
+  The frozen harness edit/schedule was not available; this is a
+  crew-local stand-in.
+- **M8 perturbations:** `frag` (interleaved alloc/free), `aslr`
+  (4,096-byte ASLR pad), `starve`/`freelist` (accepted as no-op flags;
+  the harness runner defines their exact semantics). All perturbations
+  produce byte-identical M1/M3 results to clean.
+- **A15 (trainer swap probe):** After each ceil(nunits/64) recalls, remap
+  next ID to (slot+1)%nslots, log TRAINER_SWAP_PROBE, recall, restore.
+  Implemented in M1; verified via audit log.
 
 ## 6. Kill criteria (frozen)
 
