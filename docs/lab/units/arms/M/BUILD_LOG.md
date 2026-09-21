@@ -6,7 +6,43 @@
 - Build: `znc cl/arm.zag -o .work/m_bin_final3`
 - Final binary: `.work/m_bin_final3` (not committed; rebuild from source).
 
-## Corrections applied (2026-09-21)
+## Correction 2026-09-21 — M-dedup re-enabled (claim SURVIVES)
+
+The 372252de02 verdict killed the M-dedup claim on an M7 dedup ratio of
+0.00 measured with the dedup path compiled out (`if(false && dedup==1)`).
+That evaluation was invalid: 0.00 from disabled code does not falsify the
+claim (honest status was BLOCKED).
+
+Re-investigation found the "znc multi-parameter corruption" diagnosis was
+wrong. The hash table was keyed by buffer OFFSET (`(bo+off) % HT_SIZE`),
+not by content: byte-identical chunks at different offsets probed different
+chains and never met, so only same-offset re-ingests (round 2) deduped.
+Table mechanics were proven sound in isolation (84,731 inserts + lookups,
+all found, no panic), and plain i32 `&` was verified correct on this znc
+build including negative hashes (matches Python two's-complement).
+
+Fix (in `m_ingest`, inlined lookup + inlined insert, plus the standalone
+`ht_lookup`/`ht_insert` for consistency): probe chain selected by the
+chunk's CONTENT hash, `idx = h & ht_mask`. Exact byte-equality still
+decides; minimum id still wins (== ID-ascending first match of the
+specified linear scan).
+
+Validation:
+- 2,000-unit synthetic corpus with hand-computed expectations
+  (period-256 repeats + planted duplicates): produced exactly the predicted
+  ratios (barred 93.60, round-3 95.40) — mechanism implements the spec.
+- Full M7 protocol, dedup enabled, double run, byte-identical stdout:
+  `M7,counter-id,hit,100.0,reuse,3.02,dedup_barred,50.01,dedup_r3,66.34`
+  (RC=0 both). Corpus: `units/arms/harness/corpora/r1/prose.bin`
+  (84,731 units). Binary rebuilt from the fixed source
+  (`.work/m_bin_dedupfix`); evidence logs: `logs/m7-1x.stdout`,
+  `raw/m7-1x.log`.
+- Mechanical evaluation: 0.5001 ≥ 0.4 → M-dedup claim SURVIVES.
+  (Theoretical max of the barred rounds-1–2 metric is 0.5; +0.0001 from
+  17 within-round-1 duplicate chunks.) M7 reuse 1.01 → 3.02 (bar ≥1.5 PASS).
+- Zero RNG anywhere in the decision path (FNV-1a content hash only).
+
+## Corrections applied (2026-09-21, earlier)
 
 1. **M3 capacity**: corrected to model 4,000 live slots with a larger
    monotonic-ID space (was conflating live slots with ID space).
@@ -26,6 +62,11 @@
    and 32-bit hashing did not resolve it. Dedup path is disabled for 1x;
    M7 reports dedup 0.00, honestly failing the ≥0.4 bar and triggering
    the frozen "revert to pure issuance" rule for the M-dedup claim.
+   **SUPERSEDED 2026-09-21:** the "compiler bug" diagnosis was wrong — the
+   hash table was keyed by buffer offset, not content (see "Correction
+   2026-09-21 — M-dedup re-enabled" above). The 0.00 did not test the dedup
+   mechanism; the corrected evaluation gives dedup_barred 50.01 and the
+   claim survives.
 
 ## 1x evidence run (2026-09-21)
 
@@ -47,7 +88,7 @@ Binary: `.work/m_bin_final3`. All modes RC=0.
 | m5-1x | M5,84731,5422721,2389540,5486784,-1 |
 | m6-1x-p2c | M6,p2c,100.0,100.0,100.0,0.0 |
 | m6-1x-c2p | M6,c2p,100.0,100.0,100.0,0.0 |
-| m7-1x | M7,counter-id,hit,100.0,reuse,1.01,dedup_barred,0.00,dedup_r3,0.00 |
+| m7-1x | M7,counter-id,hit,100.0,reuse,1.01,dedup_barred,0.00,dedup_r3,0.00 (dedup DISABLED — superseded; corrected: reuse,3.02,dedup_barred,50.01,dedup_r3,66.34) |
 | m8-clean | M8,100.0,100.0,6759488,d23b425c… |
 | m8-frag | M8,100.0,100.0,6759488,d23b425c… (identical) |
 | m8-aslr | M8,100.0,100.0,6759488,d23b425c… (identical) |
@@ -63,8 +104,9 @@ Merge: remap 39.14% > 10% → scoped kill fires (see VERDICT.md).
 ## 10x status
 
 NOT RUN. The 1x gate does not permit 10x: the merge scoped kill fires at 1x
-(counter IDs die as cross-store/global identity), and the M-dedup claim
-dies at 1x (dedup 0.00 < 0.4). Per the frozen rules, 10x is not attempted.
+(counter IDs die as cross-store/global identity). Per the frozen rules,
+10x is not attempted. (The M-dedup claim survives the corrected 1x
+evaluation; the scoped kill alone gates 10x.)
 
 ## Raw logs
 

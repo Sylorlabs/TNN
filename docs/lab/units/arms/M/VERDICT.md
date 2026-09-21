@@ -1,6 +1,6 @@
 # ARM M — Counter IDs — VERDICT
 
-## VERDICT: KILLED (scoped)
+## VERDICT: KILLED (scoped); M-dedup claim SURVIVES (corrected 2026-09-21)
 
 **Quoting the fired criteria:**
 
@@ -17,7 +17,40 @@
    > "Separately: the M-dedup claim dies (revert to pure issuance) if M7
    > dedup ratio < 0.4 on the repetition protocol."
 
-   **Fired:** M7 dedup_barred = 0.00 (< 0.4 bar).
+   **Does NOT fire (corrected evaluation 2026-09-21):** M7 dedup_barred =
+   50.01 (ratio 0.5001 ≥ 0.4 bar) with the dedup mechanism actually running.
+   The prior 0.00 was measured with the dedup path compiled out
+   (`if(false && ...)`), which cannot falsify the claim — that evaluation
+   was INVALID, not a kill. See "M-dedup correction" below.
+
+## M-dedup correction (2026-09-21)
+
+The 372252de02 verdict reported M7 dedup 0.00 and killed the M-dedup claim.
+That measurement was taken with the dedup mechanism disabled in source
+(`if(false && dedup==1)`), so the 0.00 tested pure issuance, not dedup.
+A 0.00 from disabled code does not falsify the claim; the honest status
+was BLOCKED.
+
+Root cause found on re-investigation: the "znc multi-parameter corruption"
+diagnosis was wrong. The hash table was keyed by buffer OFFSET
+(`(bo+off) % HT_SIZE`), not by content — byte-identical chunks at different
+offsets probed different chains and never met, so only same-offset
+re-ingests (round 2) deduped. No compiler bug: the table mechanics were
+proven sound in isolation (84,731 inserts + lookups, no panic), and the
+plain i32 `&` operator was verified correct on this znc build (including
+negative hashes). The fix keys the probe chain by the chunk's CONTENT hash
+(`h & ht_mask`); exact byte-equality still decides, minimum id still wins
+(== ID-ascending first match of the specified linear scan).
+
+Validation: a 2,000-unit synthetic corpus with hand-computed expectations
+(period-256 repeats + planted duplicates) produced exactly the predicted
+ratios (barred 93.60, round-3 95.40), proving the mechanism implements the
+specified scan. Full-protocol double run, byte-identical stdout:
+`M7,counter-id,hit,100.0,reuse,3.02,dedup_barred,50.01,dedup_r3,66.34`.
+
+Mechanical evaluation: 0.5001 ≥ 0.4 → the M-dedup claim SURVIVES. (The
+barred metric's theoretical maximum over rounds 1–2 is 0.5; the extra
+0.0001 is 17 within-round-1 duplicate 64-byte chunks in the prose corpus.)
 
 ## What survives
 
@@ -25,8 +58,11 @@
   Counter IDs work perfectly as a within-store identity mechanism:
   M1 100.0/100.0 recall/boundary, 64/64 swaps detected, M3 CLEAR,
   M4 100.0 revision, M6 100.0 transfer, M8 byte-identical across perturbations.
-- **Pure issuance:** the M-dedup claim dies, but the arm reverts to pure
-  issuance (which is what the 1x evidence actually ran).
+- **M-dedup claim:** survives per the corrected M7 evaluation (dedup_barred
+  50.01 ≥ 0.4 with the mechanism running). The hash-accelerated exact
+  byte-equality scan over the last-W episodes works as specified: round 2
+  fully deduped (84,714 ids for 84,731 units), round 3 minted only for the
+  847/848 edited chunks. M7 reuse rose 1.01 → 3.02 (bar ≥1.5 now PASS).
 
 ## What died
 
@@ -34,10 +70,6 @@
   identity across independently-issued stores. The remap table (148,678
   entries for store B) dominates merge compute at 39.14%. Any cross-store
   use requires explicit remapping with O(n) table cost.
-- **M-dedup claim:** the repetition-protocol dedup ratio was 0.00, failing
-  the 0.4 bar. The hash-accelerated dedup scan is blocked by a znc compiler
-  bug; the linear-scan fallback is too slow for the full corpus. The claim
-  "M-dedup provides ≥0.4 dedup ratio" is dead. Pure issuance stands.
 
 ## 1x Scorecard (M1–M9)
 
@@ -58,9 +90,9 @@
 | M6 transfer | 100.0 | 100.0 | — | PASS |
 | M6 tax | 0.0 | 0.0 | — | PASS |
 | M7 hit rate | 100.0 | — | ≥90% | PASS |
-| M7 reuse | 1.01 | — | ≥1.5 | FAIL |
-| M7 dedup (barred) | 0.00 | — | ≥0.4 | **FAIL → claim dies** |
-| M7 dedup (round 3) | 0.00 | — | — | informational |
+| M7 reuse | 3.02 | — | ≥1.5 | PASS |
+| M7 dedup (barred) | 50.01 | — | ≥0.4 | **PASS → claim survives** |
+| M7 dedup (round 3) | 66.34 | — | — | informational |
 | M8 recall/boundary | 100.0/100.0 | — | — | PASS |
 | M8 image sha256 | d23b425c… | — | identical | PASS (5/5) |
 | Merge dangling | 0 | — | 0 | PASS |
@@ -71,9 +103,10 @@ Full JSON: `scorecard-1x.json`.
 
 ## 10x Status
 
-**NOT ATTEMPTED.** The valid 1x gate does not permit 10x: the merge scoped
-kill fires at 1x and the M-dedup claim dies at 1x. Per the task instructions,
-10x runs only if the 1x gate permits.
+**NOT ATTEMPTED.** The merge scoped kill fires at 1x (counter IDs die as
+cross-store/global identity), so per the frozen rules 10x is not attempted.
+(The M-dedup correction does not change this: the scoped kill is
+independent of dedup.)
 
 ## Commit hashes
 
@@ -84,8 +117,10 @@ kill fires at 1x and the M-dedup claim dies at 1x. Per the task instructions,
 - Merge 1x stdout: `raw/merge-1x.stdout`
   - `MERGE,nA,84731,nB,148678,links,1487,dangling,0,misdirected,0,remap_frac_x10000,3914,kill,1`
   - `MERGE_VERDICT,SCOPED-KILL FIRES`
-- M7 1x stdout: `raw/m7-1x.stdout`
-  - `M7,counter-id,hit,100.0,reuse,1.01,dedup_barred,0.00,dedup_r3,0.00`
+- M7 1x stdout (dedup ENABLED, corrected 2026-09-21): `raw/m7-1x.log`
+  - `M7,counter-id,hit,100.0,reuse,3.02,dedup_barred,50.01,dedup_r3,66.34`
+  - Double run, byte-identical stdout. Supersedes the 372252de02 M7 log,
+    which was measured with the dedup path compiled out (`if(false && ...)`).
 
 ## Ambiguities
 

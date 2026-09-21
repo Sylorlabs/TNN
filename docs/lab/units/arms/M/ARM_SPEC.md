@@ -126,25 +126,28 @@ Micah freezes the procedure. Final 1x: 64/64 detected on both prose and code.
   → **SCOPED KILL FIRES**. Counter IDs die as cross-store/global identity;
   survive unconditionally as store-local handle.
 
-## 6. M7 dedup — honest failure
+## 6. M7 dedup — corrected evaluation (2026-09-21)
 
 The M7 dedup scan (exact byte-equality over last-W episodes, ID-ascending)
-was implemented with an FNV-1a hash accelerator as a candidate filter
-(exact equality remains authoritative). The accelerator triggered a znc
-compiler bug (multi-parameter corruption, ZNC-2026-09-21-007 extended):
-with a computed table index the binary panics "slice index out of bounds"
-in round 2; with a constant index it runs (slowly). Inlining, struct-field
-aliasing (per AGENTS.md), and 32-bit hashing did not resolve it.
+is implemented with an FNV-1a hash accelerator as a candidate filter
+(exact equality remains authoritative; minimum id wins == ID-ascending
+first match of the specified linear scan).
 
-For the 1x evidence run, the dedup path is disabled (`if(false && ...)`),
-so M7 runs with pure issuance: dedup_barred = 0.00, dedup_r3 = 0.00.
-The frozen bar (dedup ≥ 0.4) FAILS, triggering the separate M-dedup death:
-**revert to pure issuance**. The arm itself is not killed by this; the
-M-dedup claim is.
+The 372252de02 verdict reported dedup 0.00 with the dedup path compiled out
+(`if(false && ...)`), attributing the blockage to a znc "multi-parameter
+corruption" compiler bug. Re-investigation showed that diagnosis was wrong:
+the hash table was keyed by buffer OFFSET (`(bo+off) % HT_SIZE`), not by
+content, so byte-identical chunks at different offsets probed different
+chains and never met. The table mechanics were proven sound in isolation
+and the plain i32 `&` operator verified correct on this znc build; the fix
+keys the probe chain by the chunk's CONTENT hash (`h & ht_mask`).
 
-The linear-scan fallback (provably identical semantics) is too slow for the
-full 84,731-unit corpus (timed out after 180s in testing). The mechanism
-is correct; the performance optimization is blocked by the compiler.
+Corrected M7 (dedup enabled, double run, byte-identical):
+`M7,counter-id,hit,100.0,reuse,3.02,dedup_barred,50.01,dedup_r3,66.34`.
+The frozen bar (dedup ≥ 0.4) PASSES: the M-dedup claim SURVIVES.
+The linear-scan fallback was too slow for the full corpus (timed out in
+testing), but the hash-accelerated scan is provably == the linear scan's
+first match (validated byte-exact on a hand-computed synthetic corpus).
 
 ## 7. Known honest limits
 
