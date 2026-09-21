@@ -172,10 +172,10 @@ addresses or uninitialized memory, so all modes must be byte-identical):
 3. Entropy/clock canary: reads wall-clock time and stack address into
    locals that are never used (pins the optimizer against eliding
    nondeterminism sources; values never enter any decision or output).
-4. Free-list order reversal: allocate-then-free in reverse order to invert
-   the allocator's free-list order.
-5. (mode 4) Mid-run churn: allocate/free storm between training and
-   probing (mode index 4 = churn; modes 0..3 are pre-run).
+4. Free-list order reversal + mid-run churn: allocate-then-free in reverse
+   order to invert the allocator's free-list order (pre-run), then an
+   allocate/free storm between training and probing (mode index 4 = churn;
+   modes 0..3 are pre-run only).
 
 Runner: each config/leg runs perturbations 0..4 plus a repeated
 perturbation-0 run; stdout/stderr compared byte-identical across all six
