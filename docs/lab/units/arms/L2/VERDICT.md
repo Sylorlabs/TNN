@@ -96,4 +96,4 @@ Neither bar fired. The arm is not killed.
 
 Sources, docs, and compact text evidence committed directly to
 `tnn-native-lab` under `docs/lab/units/arms/L2/`
-via `commit_to_branch.py`. (hash recorded on commit)
+(commit `532c823437cb1cdb82774b764a26435f81a9bcc2`).
