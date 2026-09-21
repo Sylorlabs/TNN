@@ -39,7 +39,7 @@ Pristine Q1B `q1b_driver.zag` rebuilt from the current tree and run N=5:
   200–227, the teacher's extra tape). The 17 taught ones all faced the
   contradiction in pass 2.
 
-### Deltas vs Q1B (all in-file documented; full diffs in `evidence/delta_*.diff`)
+### Deltas vs Q1B (all in-file documented; full diffs in `evidence/delta_*.txt`)
 1. `q1_types.zag`: `TB_TID_CONFLICTED=8`.
 2. `q1_proposal.zag`: `TbSess.last8` + ingress accept for tid 8 (per-teacher
    seq tracking preserved).
@@ -145,7 +145,7 @@ Caveats (documented, not hidden):
 - `per_slice.csv` — §B.7 per-slice scores
 - `conflict_outcomes.csv` — per-fact pass-2 verdicts (17 rows)
 - `summary.txt` — machine-readable aggregates + 102/102 check count
-- `delta_q1_{types,proposal,world,learner}.zag.diff` — the only 4 modified
+- `delta_q1_{types,proposal,world,learner}.zag.txt` — the only 4 modified
   files vs Q1B (5 files byte-identical by `cmp`; `q1b_teacher.zag` unmodified)
 
 **Commit:** `107f6ca108fbe9a6bf30a8c22dd168b798a8f791` on `tnn-native-lab`
