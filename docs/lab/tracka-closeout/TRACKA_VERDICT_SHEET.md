@@ -29,7 +29,7 @@
 | D-T | PROVISIONAL | pending | NOT RUN | partial 1x |
 | D-R | PROVISIONAL | not evaluated | NOT RUN | sub-1x |
 | E | KILLED | yes (2.764× ≥ 2× at 10x) | PASS | 1x+10x |
-| F-S | PROVISIONAL (kill iii blocked on D's M3) | pending | PASS | 1x (status) |
+| F-S | PROVISIONAL — kills (i),(ii) verified NOT FIRED (F1 max 0.000218; 17,155 cuts vs 12.2M threshold); kill (iii) blocked on D's M3 (rule: fires iff F-S M3 100.0 < D's both corpora) | pending | PASS | 1x (status) |
 | F-B | PROVISIONAL | unresolved | NOT RUN | partial (M1) |
 | G1 | KILLED | yes | NOT STATED | 1x |
 | G2 | KILLED | yes | PASS | 1x |
@@ -54,7 +54,7 @@
 | R2 | KILLED | yes (disjunct a: margin 0.0 < 3) | PASS | 1x |
 | S | PASS | no | PASS | 1x |
 | T | KILLED | yes (i: B2 ratio 1.00 ≤ 2 both corpora; ii: 100% sub-episode queries; iv: floor, beats X on 0/4) | PASS | 1x |
-| U | PROVISIONAL | no | PASS | 1x provisional |
+| U | PASS | no | PASS | 1x |
 | V | UNADJUDICATED (never built: no arm.zag) | n/a | — | — |
 | W | UNADJUDICATED (truncated M1 only; no composite def) | n/a | — | — |
 | X | PASS | no | PASS | 1x |
@@ -70,9 +70,9 @@
 | Z5 | KILLED | yes (panic) | FAIL | 1x |
 | Z6 | PASS | no | PASS | 1x |
 | Z7 | PASS | no | PASS | 1x |
-| Z8 | UNADJUDICATED (battery never run; no binary) | n/a | — | — |
+| Z8 | PASS (commit `0587e778fcb2`; clause 1: 50.0% boundary-error reduction ≥ 40% bar; clause 2: mean fuzz → 0.0, tighten dominates) | n/a | — | — |
 
-Counts: KILLED 17 · PASS 20 · PROVISIONAL 12 · UNADJUDICATED 3.
+Counts: KILLED 17 · PASS 21 · PROVISIONAL 11 · UNADJUDICATED 3. (U adjudicated PROVISIONAL→PASS 2026-09-21, MARATHON CREW U11; see `units/arms/U/ADJUDICATION.md`.)
 Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3) — 6 CONFIRMED, 1 secondary-claim correction (M-dedup, see §6). B-family verdict produced (B-8 retired, B-16/B-64 survive, family not killed as contender). R2 re-evaluated post-R-death: KILLED, disjunct (a).
 
 ## 3. §7 blowout computation
@@ -106,6 +106,8 @@ Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3)
 **Verdict: PROVISIONAL BLOWOUT for Y5.** §7: "A 1x-only blowout is PROVISIONAL BLOWOUT." The rule does not manufacture a winner — and here it doesn't need to: Y5 earns 7/8 columns on the tie-breaks as written.
 
 **Robustness of the computation:** every scored arm that could threaten Y5's tie-break was checked — S (m5 1.718), Z6 (2.437), C-P (~14.3), C-W (16.481), A (13.01) all cost more than Y5's 1.498 at equal ceiling metrics and zero transfer tax. N has no metrics scorecard (verdict-only PASS). Gap-fill is complete: Z2/Z7 PASS (both already in the computation — m5 1.974/1.811, no threat); T, K1, F-S, K3, D-R PROVISIONAL and V, W, Z8 UNADJUDICATED — none scored, so none can take a column from Y5. If any of them later produces ceiling metrics + transfer tax 0.0 + cost < 1.498, the championship must be recomputed.
+
+**FLAG 2026-09-21 (MARATHON CREW U11):** U has been adjudicated PASS (binding) and now meets that trigger condition on its face — M1-content 100.0, M2 ETC 1, M3 100.0/CLEAR, M6 tax 0.0, M8 PASS, and M5 ≈ 1.22 B/B ((slot_table 6,563,843 + ledger 64,064) / source 5,422,721; methodology-dependent — U's crew reported "0 corpus-buffer bytes", not a B/B ratio, so the §7 M5 formula must be applied consistently before comparing to Y5's 1.498). **The §7 championship recomputation is therefore DUE but NOT YET DONE** — the per-column table above does not include U. A mechanical recomputation may move M1-content, M2, M3, and M6-tax from Y5 to U on the cost tie-break (U: tax 0.0, cost ~1.22 < 1.498), which would end Y5's 7/8 championship. This needs a dedicated §7 recomputation pass, not a unilateral edit.
 
 ## 4. Scenario-fit map (the §7 expected verdict)
 

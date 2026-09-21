@@ -43,3 +43,40 @@ until the blocks are resolved.
 - M9 re-run: e0=175944, e10=175944, e50=203976, e100=727756, e200=727848,
   e500=727204, e1000=727204, rekey=0, hits=0; byte-identical across reruns.
 - No commit of binaries, .zagd, .zag-cache/ (workspace build artifacts only).
+
+## Adjudication (2026-09-21, MARATHON CREW U11) — binding verdict: PASS
+Full record: `units/arms/U/ADJUDICATION.md`.
+- Frozen §3 extracted programmatically (extract/ + extract/kills.txt +
+  extract/terms.txt); VERDICT.md/AMBIGUITIES.md A1–A4 blocks resolved or
+  proven non-load-bearing (A1: radius-sensitivity sweep U_R ∈
+  {32,64,128,256} full duel E=0..1000 each, double-run byte-identical,
+  rc=0, no kill at any radius; R=512 E=0 data point + mechanism-backed
+  bounding argument for R≥512; A2: MA1/RC1 rate governs only the
+  D-falsification interpretation, not U's kills; A3: U/DReg share the
+  identical u_derive code path, duel translation-invariant; A4: DReg is the
+  faithful kill-(ii) comparator — Track-A arm D uses a different rule).
+- Fresh source build → `work/adjud/build/u_fresh` (236,105 bytes main,
+  77 analyzer warnings); m1-1x-prose stdout+stderr byte-identical to
+  `/home/hatch/workspace/u_test`. Source search: no rand/LCG/getrandom/
+  clock/seed; no `as []i32`/`as []u32`/`as []u16`, no large-struct casts,
+  no nested structs, no slice equality (byte arenas + two flat structs).
+- M8 gate re-run on fresh binary: 5 perturbations × 2 runs, all rc=0,
+  byte-identical — M8GATE PASS (`work/adjud/m8_gate.log`).
+- Missing memorizer controls now run under official double-run rule:
+  memctrl-p2c-1x, memctrl-c2p-1x (rc=0, stdout IDENTICAL;
+  `work/adjud/memctrl/`).
+- Kill evaluation (duel E=0..1000, byte-identical reruns): (i) cpu_u
+  14,182,612 vs cpu_d 279,875,710 → 0.051×, not >10× — NOT fired;
+  (ii) E=100: total_u 1,727,480,888 < total_d 2,219,096,277, U wins 22.1%
+  — NOT fired; (iii) determinism gate PASS — NOT fired. U wins every
+  E ∈ {0,10,50,100,200,500,1000}; crossover none; zero byte mismatches.
+- M4 corrected: arm's all-or-nothing 0.0 is a scoring artifact; instrumented
+  probe (`work/adjud/probe/`, print-only, not arm source) localized all 28
+  failures to claimed-span stage on code content-defect units; per-unit M4
+  = content 372/400 = 93.0%, boundary 100/100 = 100.0% (both ≥ 80%/class).
+- M9 corrected: pre-fix fragment superseded; post-fix byte-identical runs:
+  e0=175944, e10=175944, e50=203976, e100=727756, e200=727848, e500=727204,
+  e1000=727204, rekey=0, hits=0 — plateau holds.
+- No commit of binaries, .zagd, .zag-cache/ (workspace build artifacts
+  only). VERDICT.md → PASS (BINDING); AMBIGUITIES.md updated; verdict
+  sheet U line → PASS (counts: PASS 21, PROVISIONAL 11).

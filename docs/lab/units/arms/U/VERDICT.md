@@ -2,6 +2,11 @@
 
 **Date:** 2026-09-21
 **Authority:** Coordinator frozen §3, second correction (2026-09-21).
+**Adjudication:** MARATHON CREW U11 (2026-09-21) — see `ADJUDICATION.md`.
+Formal status: **PASS (BINDING)**. The A1–A4 blocks are resolved or proven
+non-load-bearing (§2 of ADJUDICATION.md); A2/A9 remain open as documented
+non-blocking items. The provisional results below are now accepted U
+evidence, with the adjudicated corrections noted.
 
 ## Coordinator corrections acknowledged
 1. First correction (2026-09-21): U reassigned from the original
@@ -14,14 +19,42 @@
 The original dual-route/PROM assignment is VOID. The invalid wrong-arm M1
 result (100/100) is NOT U evidence and is not reported here.
 
-## Formal status: BLOCKED (provisional results below)
+## Formal status: PASS (BINDING) — adjudicated 2026-09-21 (MARATHON CREW U11)
 
-The frozen dependencies in AMBIGUITIES.md (A1–A4: derivation radius, MA1/RC1
-rate, S equations, approved comparator) remain unresolved. Per the binding
-rules, no run is accepted frozen evidence until these are formally resolved.
-The results below are PROVISIONAL engineering results, not accepted evidence.
+The frozen dependencies in AMBIGUITIES.md (A1–A4) are resolved or proven
+non-load-bearing for the verdict — see `ADJUDICATION.md` §2:
+- **A1 (radius):** value never frozen; proven non-load-bearing by
+  radius-sensitivity sweep (no kill fires at any U_R ∈ {32,…,4096}; U's cpu
+  stays >10× below the kill-(i) threshold across a 128× radius range).
+- **A2 (MA1/RC1 rate):** absent from all frozen materials; not load-bearing
+  for U's kills (governs only the D-falsification interpretation of a U
+  win, which stays provisional). Open §13 item for Micah.
+- **A3 (S equations):** implementation's integer-counter translation is
+  logged and was never refit mid-trial; U and DReg share the identical
+  `u_derive` code path, so duel kills are translation-invariant.
+  Non-load-bearing.
+- **A4 (comparator):** resolved — DReg is the faithful "D-with-invalidation"
+  (same derivation rule + persistent registry + materialized-copy cache +
+  lazy invalidation); Track-A arm D cannot serve (different derivation rule).
+- **A9 (10x):** not attempted (r10 provenance unverified); binding 1x
+  verdict stands per the verdict sheet's own 1x convention.
 
-## Provisional 1x battery results (M1–M9)
+Adjudicated corrections to the provisional results below:
+- **M4:** the arm's all-or-nothing 0.0 is a scoring artifact. Instrumented
+  probe localized all 28 failures to claimed-span alignment on code
+  content-defect units; per-unit M4 = content 372/400 = 93.0%, boundary
+  100/100 = 100.0% (both ≥ 80%/class bar). Kill rate 0.
+- **M9:** the 1x fragment below is pre-fix; adjudicated (post-fix,
+  byte-identical reruns): e0=175944, e10=175944, e50=203976, e100=727756,
+  e200=727848, e500=727204, e1000=727204, rekey=0, hits=0 — plateau holds.
+- **M2 ep0 note (A5):** the arm's "ep0" is measured post-ingest, so the
+  frozen no-ingest leak clause does not apply as written; ETC=1 all tiers.
+- **Memorizer controls** (previously omitted) now run: memctrl-p2c-1x and
+  memctrl-c2p-1x, rc=0, double-run byte-identical.
+- **M8 gate** re-run on a fresh source build: 5 perturbations × 2 reruns,
+  byte-identical, M8GATE PASS.
+
+## Provisional 1x battery results (M1–M9) [now accepted evidence, with the corrections above]
 
 | Metric | Result | Bar | Status |
 |--------|--------|-----|--------|
@@ -80,6 +113,21 @@ No kill fires on the completed E=0..1000 sweep (est=none, kill_i=0,
 kill_ii=0, bad=0).
 
 ## Verdict
-**BLOCKED** — provisional results are encouraging (all 1x bars pass, no
-kills fire on available data, M8 deterministic), but the frozen dependencies
-must be formally resolved before any result is accepted as U evidence.
+**PASS (BINDING)** — adjudicated 2026-09-21 by MARATHON CREW U11
+(see `ADJUDICATION.md` for the full evidence record).
+
+Kill evaluation on the completed E=0..1000 duel sweep (byte-identical
+reruns, rc=0):
+1. **CPU >10× D and B4 <10%**: cpu_u = 14,182,612 vs cpu_d = 279,875,710
+   (U is 0.051× D, not >10×). **Kill does NOT fire.**
+2. **D-with-invalidation beats U on total cost at 100 edits**: at E=100,
+   total_u = 1,727,480,888 < total_d = 2,219,096,277 (U wins by 22.1%).
+   **Kill does NOT fire.**
+3. **Determinism fails**: M8 gate PASS (5 perturbations × 2 reruns,
+   byte-identical); all battery legs double-run identical; duel reruns
+   identical. **Kill does NOT fire.**
+
+No kill fires. U wins every duel leg E=0..1000 (crossover: none) with zero
+byte mismatches. The radius-sensitivity sweep (U_R 32→4096) confirms no kill
+fires at any radius. Awaiting Micah's §13 items (radius value, MA1/RC1 rate)
+does not block this verdict; the 10x leg remains future work.
