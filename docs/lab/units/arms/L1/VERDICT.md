@@ -85,4 +85,7 @@ pass; 10x is pending coordinator scheduling.
 - M8 gate: `~/workspace/tnn-lab/work/l1/battery1x_v2/m8/GATE.txt`
 
 ## Commit Hashes
-- (to be filled after commit)
+- `ac6c1442b39f522ef27bb6b7d26b0edd72594953` (tnn-native-lab, parent fdeb1b907839)
+  — final 1x battery PASS, all source/docs/evidence. 8 files:
+  cl/arm.zag, substrate/*.zag (2), ARM_SPEC.md, BUILD_LOG.md, VERDICT.md,
+  scorecard_r1_1x.json, scorecard_l1.py.
