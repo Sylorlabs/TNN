@@ -45,7 +45,11 @@ as full regimes with byte-identical comparison.
 | freelist-rev | 0 | byte-identical | byte-identical (all 6 files) |
 
 **M8-GATE: PASS.** All five regimes byte-identical on stdout, store hashes,
-store chain, ledger bytes, ledger chain, and allocator trace.
+store chain, ledger bytes, ledger chain, and allocator trace. (The frag/aslr
+perturbation code paths genuinely execute: `_zag_argc()` returns the real
+argc in this znc build — re-verified 2026-09-21 — so the dispatcher's
+guarded `_zag_arg(3)`/`_zag_arg(4)` reads deliver the right outdir and
+perturbation name. See BUILD_NOTES.md.)
 
 ## Bugs found during M8 (fixed, documented)
 

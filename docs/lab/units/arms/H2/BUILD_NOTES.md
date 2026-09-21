@@ -48,10 +48,15 @@ runs.
   `dcap*4` appends for both ID maps (semantically correct: id→slot maps
   are i32→i32). The pre-fix M8 code never produced any artifact, so no
   baseline is invalidated.
-- `t_m8` dispatcher (found earlier same day): `_zag_argc()` is always 0 in
-  this znc build (ZNC-2026-09-21-007), so the `m8-1x` outdir/perturbation
-  args were silently ignored. Fixed to read `_zag_arg(3)`/`_zag_arg(4)`
-  unconditionally, treating empty as absent.
+- `t_m8` dispatcher (found earlier same day): the pre-existing guarded reads
+  `if(_zag_argc()>=4){od=_zag_arg(3);}` / `if(_zag_argc()>=5){pt=_zag_arg(4);}`
+  were suspected dead because of ZNC-2026-09-21-007 (argc always 0).
+  Empirically re-tested 2026-09-21 ~10:45 UTC on the frozen toolchain:
+  `_zag_argc()` returns the REAL count (5 for 4 user args) and
+  `_zag_arg(3)` returns the correct value. The guarded reads work fine;
+  no unconditional-read change was needed. The five M8 regimes genuinely
+  received their outdir/perturbation args (artifacts landed in the right
+  dirs; frag/aslr perturbation code paths execute).
 - `work/run_m8.sh`: invoked nonexistent `m8-<pert>` modes (binary only
   dispatches `m8-1x`); corrected to `h2 m8-1x CORPUS OUTDIR PERT`.
   Comparison file list corrected to t_m8's actual artifacts
