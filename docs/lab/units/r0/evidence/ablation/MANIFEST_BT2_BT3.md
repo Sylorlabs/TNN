@@ -4,6 +4,19 @@ Track R0, prereg FROZEN (Micah signed 2026-09-21), §2 R0.1 batteries 2 and 3.
 This manifest is frozen and committed BEFORE any evidence run.
 Battery sources: `units/r0/impl/ablation/` (`bt_common.zag`, `b_t2.zag`, `b_t3.zag`).
 
+## Amendment 2026-09-21 (pre-evidence): leg-1 promotion scope
+
+§2's assertion "all 24 vocabulary spans are live chunks afterwards
+(`vocab_check=24/24`)" applies to **leg 0** (recovered parameters:
+seen ≥ 5, purity ≥ 0.34). **Leg 1** (re-derived parameters: seen ≥ 6,
+purity ≥ 0.40, inventory 1024) uses a strictly tighter promotion gate;
+it promotes fewer vocabulary spans (observed 12/24 in development) and
+does NOT assert 24/24 — it reports the promoted count. The B-T2
+structural bar (chunk < raw, chunk < dual) is evaluated on whatever
+promotes in each leg; the bar does not require 24/24. Rationale: leg 1
+exists to test whether the ablation conclusion survives independently
+re-derived parameters, not to reproduce leg 0's inventory.
+
 ## 0. Hard laws
 
 - Pure Zag. ZERO randomness in any AI decision path.
