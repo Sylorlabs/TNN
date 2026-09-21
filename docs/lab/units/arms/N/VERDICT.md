@@ -4,17 +4,23 @@
 **Round:** r1, scale 1x
 **Date:** 2026-09-21
 
-## Correction acknowledged
+## Corrections acknowledged
 
-The original "No-ID memory" dispatch was erroneous and is VOID (coordinator
-correction, 2026-09-21). The true frozen arm, verified from
-`~/workspace/tnn-lab/units/arms/briefs/N.json` and `PREREG_FREEZE.md:532`, is
-**N — Judgment-annotated chunks** (family ANN): chunks carry deliberate signed
-annotations (MA4 generalized from memories to units); signed i64 fixed-point;
-saturating overflow; ablation records judgments but ignores them during recall.
+**First correction (2026-09-21):** The original "No-ID memory" dispatch was
+erroneous and is VOID (coordinator correction). The true frozen arm, verified
+from `~/workspace/tnn-lab/units/arms/briefs/N.json` and `PREREG_FREEZE.md:532`,
+is **N — Judgment-annotated chunks** (family ANN). All work, evidence, and this
+verdict pertain to the corrected arm. No-ID results are excluded.
 
-All work, evidence, and this verdict pertain to the corrected arm. No-ID
-results are excluded.
+**Second correction (2026-09-21):** The coordinator's earlier message(s) quoted
+the frozen §3 row as paraphrase from memory — that paraphrase is superseded and
+was NOT built or scored against. The verbatim frozen §3 row (byte-verified by
+the coordinator against frozen commit `b0b9140c0eda` via the GitHub API) is
+authoritative. On 2026-09-21 I programmatically byte-compared
+`briefs/N.json` (authority #1) against the verbatim row (authority #2):
+name, family, mechanism, and kill fields are **byte-identical** — no
+disagreement, no block. The implementation, battery, and scoring below were
+built per the brief text, which is exactly the verbatim frozen row.
 
 ## Binding kill criteria — none fired
 

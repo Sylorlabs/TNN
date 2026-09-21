@@ -2,9 +2,16 @@
 
 ## 2026-09-21: Correction and rebuild
 
-### Coordinator correction (binding)
-- Original dispatch ("No-ID memory", family ID) declared VOID by coordinator
-  correction received 2026-09-21.
+### Coordinator corrections (binding)
+- **First correction:** Original dispatch ("No-ID memory", family ID) declared
+  VOID by coordinator correction received 2026-09-21.
+- **Second correction:** The coordinator's earlier message(s) quoted frozen §3
+  as paraphrase from memory — superseded, NOT built or scored against. The
+  verbatim frozen §3 row (byte-verified against frozen commit `b0b9140c0eda`
+  via the GitHub API) is authoritative. Programmatic byte-comparison of
+  `briefs/N.json` vs the verbatim row (2026-09-21): name, family, mechanism,
+  kill all byte-identical — no disagreement, no block. Built and tested per
+  the brief.
 - Correct frozen row verified from `~/workspace/tnn-lab/units/arms/briefs/N.json`
   and `units/PREREG_FREEZE.md:532`: **N — Judgment-annotated chunks, family ANN**.
 - Mechanism: chunks carry deliberate signed annotations; MA4 generalized from
