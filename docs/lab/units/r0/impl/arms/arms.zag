@@ -1,0 +1,786 @@
+// =============================================================================
+// R0 ARMS — tournament cut-signal arms for the R31 native redo (track R0).
+// Track R0, prereg PREREG_FREEZE.md §2 (R-1..R-9). Pure Zag. ZERO randomness in
+// any AI decision path. Byte-identical reruns are a hard gate (M8).
+//
+// One binary, argv[1] selects the arm (driver pattern):
+//   arms predictive_surprise      — boundaries at 82nd-percentile transition
+//                                   surprise (learner's own sensory prediction
+//                                   error), 256-entry inventory. THE thesis arm.
+//   arms fixed_window_4|8|16|64   — aligned fixed windows (reference used w=4).
+//   arms adaptive_mdl             — deterministic MDL chunker (recovered:
+//                                   spans 2..12, min_count 4, savings>0,
+//                                   top-256 motifs, longest-match segmentation).
+//   arms grounded_adaptive_mdl    — adaptive_mdl + grounding term. Reference
+//                                   used class-label concentration; native
+//                                   adaptation (no labels on a byte stream):
+//                                   g = next-byte concentration above chance
+//                                   (downstream discrimination consistency,
+//                                   cf. prereg R-1 operational definition).
+//   arms hierarchical_mdl         — adaptive_mdl base + 96 most-gaining
+//                                   adjacent pair merges.
+//   arms raw_micro                — NO chunking control. One chunk per byte.
+//                                   B-T1 requires it DEAD LAST; built straight,
+//                                   no sabotage, no rescue.
+//   arms random_chunks            — DETERMINISTIC-ANALOG ONLY (informational,
+//                                   NOT part of binding B-T1 ordering).
+//                                   Fixed hash-of-position tiling:
+//                                     h = (sum_{j=0..4}(j+3)*b[i+j] + 17*i) % 7
+//                                     L = 2 + h
+//                                   (bytes past end contribute 0). This is the
+//                                   recovered reference rule, which was itself
+//                                   deterministic ("pseudo-random lengths from
+//                                   local content to avoid state leakage").
+//                                   No RNG anywhere; the name is historical.
+//
+// Probe interface (fallback; harness crew's interface not yet defined —
+// r0/impl/core/API.md absent as of 2026-09-20; arms adapt when it lands):
+//   stdin:  raw byte stream (cap 16 MiB; longer input -> deterministic error).
+//   stdout: header  "ARMS v=1 arm=<selector> n=<input bytes>"
+//           rows   "SEG <start> <len> <id> <kind>"
+//           trailer "END chunks=<k>"
+//           kind: s=surprise-inventory m=mdl-motif h=hierarchical-merge
+//                 f=fixed-window r=raw/literal-byte l=surprise-literal
+//                 x=random-analog
+//   All output is a pure function of (selector, stdin bytes). No timestamps,
+//   no addresses, no RNG, no clock/entropy reads.
+//
+// ID rules (all deterministic):
+//   s: inventory rank 0..255 ordered by (count desc, bytes asc).
+//   l/x/f: fnv1a64(span bytes) mod 1000003.
+//   m: motif rank 0..255 ordered by (score desc, len desc, count desc, bytes asc).
+//   h: merge rank 0..95 ordered by (gain desc, count desc, key asc).
+//   r: the byte value 0..255.
+//
+// Recovered-parameter notes (R-8 baseline; REFERENCE_ONLY orderings, never targets):
+//   surprise: q=0.82 on transition surprise; inventory 256 entries, min count 3.
+//     Native integer-faithful form: surprise=-log(p) is monotone decreasing in
+//     p, so the 82nd-percentile surprise cut == p <= 18th-percentile of p.
+//     Threshold = lower-method 18th percentile over DISTINCT observed
+//     transitions, ordered by (p asc, a asc, b asc); p in fixed point
+//     pfx = ((4c+1)<<32)/(4*prev[a]+256). Unseen transitions always cut
+//     (reference: p=1e-5 -> surprise ~= 11.5 >= threshold).
+//   MDL: max_len 12 (tournament reference; the R31 core doc's "2..8" describes
+//     the core promotion enumeration — flagged as ambiguity R-2), min_count 4,
+//     savings = (len-1)*count-(len+3) > 0, 256 motifs, longest-match, literals
+//     for unmatched. Reference diversity filter is a no-op over unique spans
+//     (noted, not reimplemented as behavior). Reference tuple-descending
+//     tie-break on raw bytes replaced by canonical bytes-ascending; flagged.
+//   hierarchical: 96 pair merges, pair kept iff count>=4, gain=count-3.
+//
+// gotchas obeyed: _zag_arg non-owned (never freed); slice == unused; large
+// struct array fields aliased to locals (n/a — flat arrays used); no slice
+// over 2^25 bytes indexed (cap 16 MiB); one binary + argv[1] selector.
+// =============================================================================
+
+// ---------------- tiny runtime (self-contained; no imports) ----------------
+
+fn zfree8(p:*u8)void { _zag_free(p as *i8); }
+fn zfree64(p:*i64)void { _zag_free(p as *i8); }
+
+// zeroed byte buffer of n bytes; null on failure
+fn zalloc8(n:i32)*u8 {
+    if(n<1){ return null as *u8; }
+    let p:*u8 = _zag_malloc(n) as *u8;
+    if(p == null as *u8){ return null as *u8; }
+    let i:i32=0; while(i<n){ p[i]=0 as u8; i=i+1; }
+    return p;
+}
+
+// zeroed i64 buffer of n entries; null on failure
+fn zalloc64(n:i32)*i64 {
+    if(n<1){ return null as *i64; }
+    let bytes:i64 = (n as i64)*8 as i64;
+    let p:*i64 = _zag_malloc(bytes as i32) as *i64;
+    if(p == null as *i64){ return null as *i64; }
+    let i:i32=0; while(i<n){ p[i]=0 as i64; i=i+1; }
+    return p;
+}
+
+fn u8eq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){ return 0; }
+    let i:i32=0; while(i<a.len){ if(a[i]!=b[i]){ return 0; } i=i+1; }
+    return 1;
+}
+
+// print i64 decimal; frees the transient string (owned by us per _zag_i64_to_str)
+fn pnum(v:i64)void {
+    let s:[]u8 = _zag_i64_to_str(v);
+    _zag_print(s);
+    if(s.len>0){ _zag_free(_zag_slice_ptr(s)); }
+}
+
+fn emit_seg(start:i64,len:i64,id:i64,kind:[]u8)void {
+    _zag_print("SEG "); pnum(start); _zag_print(" "); pnum(len);
+    _zag_print(" "); pnum(id); _zag_print(" "); _zag_print(kind); _zag_println("");
+}
+
+// FNV-1a 64 over buf[s..s+l)
+fn fnv1a(buf:[]u8,s:i32,l:i32)i64 {
+    let h:i64 = 1469598103934665603 as i64;
+    let j:i32=0;
+    while(j<l){ h = (h ^ (buf[s+j] as i64))*1099511628211 as i64; j=j+1; }
+    return h;
+}
+
+fn umod1000003(h:i64)i64 {
+    let r:i64 = h % 1000003 as i64;
+    if(r<0 as i64){ r = r + 1000003 as i64; }
+    return r;
+}
+
+// lexicographic bytes ascending: 1 iff buf[p1..p1+l1) < buf[p2..p2+l2)
+fn bytes_less(buf:[]u8,p1:i32,l1:i32,p2:i32,l2:i32)i32 {
+    let m:i32=l1; if(l2<m){ m=l2; }
+    let j:i32=0;
+    while(j<m){
+        let a:i32=buf[p1+j] as i32; let b:i32=buf[p2+j] as i32;
+        if(a!=b){ if(a<b){ return 1; } return 0; }
+        j=j+1;
+    }
+    if(l1<l2){ return 1; } return 0;
+}
+
+fn bytes_equal(buf:[]u8,p1:i32,p2:i32,l:i32)i32 {
+    let j:i32=0;
+    while(j<l){ if(buf[p1+j]!=buf[p2+j]){ return 0; } j=j+1; }
+    return 1;
+}
+
+// ---------------- stdin ----------------
+// max input: 16 MiB (under the 2^25 slice-index wall)
+const IN_CAP:i32 = 16777216;
+
+fn read_all(buf:[]u8, cap:i32, n_out:*i32)i32 {
+    let at:i32=0;
+    while(at<cap){
+        let want:i32=cap-at; if(want>65536){ want=65536; }
+        let r:i64 = _zag_raw_syscall(0, 0, (_zag_slice_ptr(buf) as i64)+(at as i64), want as i64, 0, 0, 0);
+        if(r == 0-4 as i64){ continue; }
+        if(r == 0 as i64){ break; }
+        if(r < 0 as i64){ return 0-1; }
+        at = at + (r as i32);
+    }
+    // detect over-cap input: try one more byte
+    let probe:*u8 = zalloc8(1);
+    if(probe == null as *u8){ return 0-2; }
+    let pspec:[]u8 = probe[0..1];
+    let r2:i64 = _zag_raw_syscall(0, 0, _zag_slice_ptr(pspec) as i64, 1 as i64, 0, 0, 0);
+    zfree8(probe);
+    if(r2>0 as i64){ return 0-3; }
+    n_out.* = at;
+    return 0;
+}
+
+// ---------------- deterministic heap perturbation (M8 smoke; NOT an AI path) --
+fn perturb_heap(mode:i32)void {
+    let i:i32=0;
+    if(mode==1){
+        // ascending sizes, freed in order
+        while(i<3000){ let p:*u8=_zag_malloc(64+i*16) as *u8; if(p!=null as *u8){ p[0]=1 as u8; _zag_free(p as *i8); } i=i+1; }
+    } else if(mode==2){
+        // fixed-pattern sizes, freed in reverse (kept addresses on a side list)
+        let keep:*i64 = zalloc64(3000);
+        if(keep!=null as *i64){
+            while(i<3000){ let sz:i32=64+(((i*2654435761)%8192+8192)%8192) as i32; let p:*u8=_zag_malloc(sz) as *u8; if(p!=null as *u8){ p[0]=2 as u8; } keep[i]=p as i64; i=i+1; }
+            i=2999; while(i>=0){ let p:*u8=keep[i] as *u8; if(p!=null as *u8){ _zag_free(p as *i8); } i=i-1; }
+            zfree64(keep);
+        }
+    } else {
+        // interleave alloc/free, mixed sizes
+        while(i<4000){
+            let p:*u8=_zag_malloc(128+((i*97)%2048)) as *u8;
+            let q:*u8=_zag_malloc(64+((i*131)%1024)) as *u8;
+            if(p!=null as *u8){ _zag_free(p as *i8); }
+            if(q!=null as *u8){ if((i%2)==0){ _zag_free(q as *i8); } }
+            i=i+1;
+        }
+    }
+}
+
+// ---------------- bottom-up mergesorts (stable, deterministic) --------------
+// Each sorts idx[0..m) by its case's key. Stability: on ties the left run wins.
+
+// transitions: (pfx asc, a asc, b asc)
+fn msort_trans(idx:*i64,tmp:*i64,m:i32,pfx:*i64,ta:*i64,tb:*i64)void {
+    let w:i32=1;
+    while(w<m){
+        let lo:i32=0;
+        while(lo<m){
+            let mid:i32=lo+w; if(mid>m){ mid=m; }
+            let hi:i32=lo+w+w; if(hi>m){ hi=m; }
+            let a:i32=lo; let b:i32=mid; let t:i32=lo;
+            while(a<mid && b<hi){
+                let x:i64=idx[a]; let y:i64=idx[b];
+                let take_b:i32=0;
+                if(pfx[y]<pfx[x]){ take_b=1; }
+                else if(pfx[y]==pfx[x] && ta[y]<ta[x]){ take_b=1; }
+                else if(pfx[y]==pfx[x] && ta[y]==ta[x] && tb[y]<tb[x]){ take_b=1; }
+                if(take_b==1){ tmp[t]=y; b=b+1; } else { tmp[t]=x; a=a+1; }
+                t=t+1;
+            }
+            while(a<mid){ tmp[t]=idx[a]; a=a+1; t=t+1; }
+            while(b<hi){ tmp[t]=idx[b]; b=b+1; t=t+1; }
+            let k:i32=lo; while(k<hi){ idx[k]=tmp[k]; k=k+1; }
+            lo=lo+w+w;
+        }
+        w=w+w;
+    }
+}
+
+// inventory entries: (count desc, bytes asc)
+fn msort_inv(idx:*i64,tmp:*i64,m:i32,ec:*i64,ef:*i64,el:*i64,buf:[]u8)void {
+    let w:i32=1;
+    while(w<m){
+        let lo:i32=0;
+        while(lo<m){
+            let mid:i32=lo+w; if(mid>m){ mid=m; }
+            let hi:i32=lo+w+w; if(hi>m){ hi=m; }
+            let a:i32=lo; let b:i32=mid; let t:i32=lo;
+            while(a<mid && b<hi){
+                let x:i64=idx[a]; let y:i64=idx[b];
+                let take_b:i32=0;
+                if(ec[y]>ec[x]){ take_b=1; }
+                else if(ec[y]==ec[x] && bytes_less(buf,ef[y] as i32,el[y] as i32,ef[x] as i32,el[x] as i32)==1){ take_b=1; }
+                if(take_b==1){ tmp[t]=y; b=b+1; } else { tmp[t]=x; a=a+1; }
+                t=t+1;
+            }
+            while(a<mid){ tmp[t]=idx[a]; a=a+1; t=t+1; }
+            while(b<hi){ tmp[t]=idx[b]; b=b+1; t=t+1; }
+            let k:i32=lo; while(k<hi){ idx[k]=tmp[k]; k=k+1; }
+            lo=lo+w+w;
+        }
+        w=w+w;
+    }
+}
+
+// MDL candidates: (score desc, len desc, count desc, bytes asc)
+fn msort_cand(idx:*i64,tmp:*i64,m:i32,cs:*i64,cl:*i64,cc:*i64,cf:*i64,buf:[]u8)void {
+    let w:i32=1;
+    while(w<m){
+        let lo:i32=0;
+        while(lo<m){
+            let mid:i32=lo+w; if(mid>m){ mid=m; }
+            let hi:i32=lo+w+w; if(hi>m){ hi=m; }
+            let a:i32=lo; let b:i32=mid; let t:i32=lo;
+            while(a<mid && b<hi){
+                let x:i64=idx[a]; let y:i64=idx[b];
+                let take_b:i32=0;
+                if(cs[y]>cs[x]){ take_b=1; }
+                else if(cs[y]==cs[x] && cl[y]>cl[x]){ take_b=1; }
+                else if(cs[y]==cs[x] && cl[y]==cl[x] && cc[y]>cc[x]){ take_b=1; }
+                else if(cs[y]==cs[x] && cl[y]==cl[x] && cc[y]==cc[x] && bytes_less(buf,cf[y] as i32,cl[y] as i32,cf[x] as i32,cl[x] as i32)==1){ take_b=1; }
+                if(take_b==1){ tmp[t]=y; b=b+1; } else { tmp[t]=x; a=a+1; }
+                t=t+1;
+            }
+            while(a<mid){ tmp[t]=idx[a]; a=a+1; t=t+1; }
+            while(b<hi){ tmp[t]=idx[b]; b=b+1; t=t+1; }
+            let k:i32=lo; while(k<hi){ idx[k]=tmp[k]; k=k+1; }
+            lo=lo+w+w;
+        }
+        w=w+w;
+    }
+}
+
+// pair merges: (gain desc, count desc, key asc)
+fn msort_pair(idx:*i64,tmp:*i64,m:i32,pg:*i64,pc:*i64,pk:*i64)void {
+    let w:i32=1;
+    while(w<m){
+        let lo:i32=0;
+        while(lo<m){
+            let mid:i32=lo+w; if(mid>m){ mid=m; }
+            let hi:i32=lo+w+w; if(hi>m){ hi=m; }
+            let a:i32=lo; let b:i32=mid; let t:i32=lo;
+            while(a<mid && b<hi){
+                let x:i64=idx[a]; let y:i64=idx[b];
+                let take_b:i32=0;
+                if(pg[y]>pg[x]){ take_b=1; }
+                else if(pg[y]==pg[x] && pc[y]>pc[x]){ take_b=1; }
+                else if(pg[y]==pg[x] && pc[y]==pc[x] && pk[y]<pk[x]){ take_b=1; }
+                if(take_b==1){ tmp[t]=y; b=b+1; } else { tmp[t]=x; a=a+1; }
+                t=t+1;
+            }
+            while(a<mid){ tmp[t]=idx[a]; a=a+1; t=t+1; }
+            while(b<hi){ tmp[t]=idx[b]; b=b+1; t=t+1; }
+            let k:i32=lo; while(k<hi){ idx[k]=tmp[k]; k=k+1; }
+            lo=lo+w+w;
+        }
+        w=w+w;
+    }
+}
+
+// ---------------- arm: predictive_surprise ----------------------------------
+// Boundaries where transition surprise >= 82nd percentile of the learner's own
+// sensory prediction error. 256-entry inventory (min count 3).
+fn arm_predictive_surprise(buf:[]u8,n:i32)void {
+    let trans:*i64 = zalloc64(65536);
+    let prev:*i64 = zalloc64(256);
+    if(trans==null as *i64 || prev==null as *i64){ _zag_println("ERROR oom-trans"); return; }
+    let i:i32=1;
+    while(i<n){
+        let a:i32=buf[i-1] as i32; let b:i32=buf[i] as i32;
+        trans[a*256+b]=trans[a*256+b]+1; prev[a]=prev[a]+1; i=i+1;
+    }
+    // distinct transitions + fixed-point p
+    let ta:*i64=zalloc64(65536); let tb:*i64=zalloc64(65536);
+    let tp:*i64=zalloc64(65536);
+    let idx:*i64=zalloc64(65536); let tmp:*i64=zalloc64(65536);
+    if(ta==null as *i64 || tp==null as *i64 || idx==null as *i64){ _zag_println("ERROR oom-dist"); return; }
+    let m:i32=0; let a:i32=0;
+    while(a<256){
+        let b:i32=0;
+        while(b<256){
+            let c:i64=trans[a*256+b];
+            if(c>0 as i64){
+                ta[m]=a as i64; tb[m]=b as i64;
+                tp[m]=(((4 as i64)*c+1 as i64)*4294967296 as i64)/((4 as i64)*prev[a]+256 as i64);
+                m=m+1;
+            }
+            b=b+1;
+        }
+        a=a+1;
+    }
+    let p18:i64=0 as i64; let have_th:i32=0;
+    if(m>0){
+        let k:i32=0; while(k<m){ idx[k]=k as i64; k=k+1; }
+        msort_trans(idx,tmp,m,tp,ta,tb);
+        let r:i32=(18*(m-1))/100;
+        p18=tp[idx[r]]; have_th=1;
+    }
+    // segment-count table: (hash,len,count,first,rank)
+    let TS:i32=262144; let TM:i32=262143;
+    let sh:*i64=zalloc64(TS); let sl:*i64=zalloc64(TS);
+    let sc:*i64=zalloc64(TS); let sf:*i64=zalloc64(TS); let sr:*i64=zalloc64(TS);
+    if(sh==null as *i64 || sf==null as *i64){ _zag_println("ERROR oom-segtable"); return; }
+    let s:i32=0; while(s<TS){ sf[s]=0-1 as i64; sr[s]=0-1 as i64; s=s+1; }
+    // pass 1: cut + count segments
+    let start:i32=0; i=1;
+    while(i<n){
+        let cut:i32=0;
+        let aa:i32=buf[i-1] as i32; let bb:i32=buf[i] as i32;
+        let c:i64=trans[aa*256+bb];
+        if(have_th==0){ cut=0; }
+        else if(c==0 as i64){ cut=1; }
+        else {
+            let p:i64=(((4 as i64)*c+1 as i64)*4294967296 as i64)/((4 as i64)*prev[aa]+256 as i64);
+            if(p<=p18){ cut=1; }
+        }
+        if(cut==1){
+            let L:i32=i-start;
+            if(L>0){
+                let h:i64=fnv1a(buf,start,L);
+                let slot:i32=(h & TM as i64) as i32;
+                while(1==1){
+                    if(sf[slot]<0 as i64){ sh[slot]=h; sl[slot]=L as i64; sc[slot]=1 as i64; sf[slot]=start as i64; break; }
+                    if(sh[slot]==h && sl[slot]==L as i64 && bytes_equal(buf,sf[slot] as i32,start,L)==1){ sc[slot]=sc[slot]+1; break; }
+                    slot=(slot+1)&TM;
+                }
+            }
+            start=i;
+        }
+        i=i+1;
+    }
+    // tail segment
+    let L0:i32=n-start;
+    if(L0>0){
+        let h:i64=fnv1a(buf,start,L0);
+        let slot:i32=(h & TM as i64) as i32;
+        while(1==1){
+            if(sf[slot]<0 as i64){ sh[slot]=h; sl[slot]=L0 as i64; sc[slot]=1 as i64; sf[slot]=start as i64; break; }
+            if(sh[slot]==h && sl[slot]==L0 as i64 && bytes_equal(buf,sf[slot] as i32,start,L0)==1){ sc[slot]=sc[slot]+1; break; }
+            slot=(slot+1)&TM;
+        }
+    }
+    // collect entries with count>=3
+    let k:i32=0; s=0;
+    while(s<TS){ if(sf[s]>=0 as i64 && sc[s]>=3 as i64){ k=k+1; } s=s+1; }
+    let ec:*i64=zalloc64(k); let ef:*i64=zalloc64(k); let el:*i64=zalloc64(k);
+    let esl:*i64=zalloc64(k); let eix:*i64=zalloc64(k); let etp:*i64=zalloc64(k);
+    if(k>0 && (ec==null as *i64 || eix==null as *i64)){ _zag_println("ERROR oom-inv"); return; }
+    let e:i32=0; s=0;
+    while(s<TS){
+        if(sf[s]>=0 as i64 && sc[s]>=3 as i64){ ec[e]=sc[s]; ef[e]=sf[s]; el[e]=sl[s]; esl[e]=s as i64; e=e+1; }
+        s=s+1;
+    }
+    if(k>0){
+        e=0; while(e<k){ eix[e]=e as i64; e=e+1; }
+        msort_inv(eix,etp,k,ec,ef,el,buf);
+        let take:i32=k; if(take>256){ take=256; }
+        let r2:i32=0; while(r2<take){ sr[esl[eix[r2]]]=r2 as i64; r2=r2+1; }
+    }
+    // pass 2: re-cut and emit
+    let nchunks:i64=0 as i64;
+    start=0; i=1;
+    while(i<n){
+        let cut:i32=0;
+        let aa:i32=buf[i-1] as i32; let bb:i32=buf[i] as i32;
+        let c:i64=trans[aa*256+bb];
+        if(have_th==0){ cut=0; }
+        else if(c==0 as i64){ cut=1; }
+        else {
+            let p:i64=(((4 as i64)*c+1 as i64)*4294967296 as i64)/((4 as i64)*prev[aa]+256 as i64);
+            if(p<=p18){ cut=1; }
+        }
+        if(cut==1){
+            let L:i32=i-start;
+            if(L>0){ emit_surprise_seg(buf,start,L,sh,sl,sf,sr,TS,TM); nchunks=nchunks+1; }
+            start=i;
+        }
+        i=i+1;
+    }
+    L0=n-start;
+    if(L0>0){ emit_surprise_seg(buf,start,L0,sh,sl,sf,sr,TS,TM); nchunks=nchunks+1; }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+    zfree64(trans); zfree64(prev); zfree64(ta); zfree64(tb); zfree64(tp);
+    zfree64(idx); zfree64(tmp);
+    zfree64(sh); zfree64(sl); zfree64(sc); zfree64(sf); zfree64(sr);
+    zfree64(ec); zfree64(ef); zfree64(el); zfree64(esl); zfree64(eix); zfree64(etp);
+}
+
+fn emit_surprise_seg(buf:[]u8,start:i32,L:i32,sh:*i64,sl:*i64,sf:*i64,sr:*i64,TS:i32,TM:i32)void {
+    let h:i64=fnv1a(buf,start,L);
+    let slot:i32=(h & TM as i64) as i32;
+    let rank:i64=0-1 as i64;
+    while(1==1){
+        if(sf[slot]<0 as i64){ break; }
+        if(sh[slot]==h && sl[slot]==L as i64 && bytes_equal(buf,sf[slot] as i32,start,L)==1){ rank=sr[slot]; break; }
+        slot=(slot+1)&TM;
+    }
+    if(rank>=0 as i64){ emit_seg(start as i64, L as i64, rank, "s"); }
+    else { emit_seg(start as i64, L as i64, umod1000003(h), "l"); }
+}
+
+// ---------------- arm: fixed_window_w ---------------------------------------
+fn arm_fixed_window(buf:[]u8,n:i32,w:i32)void {
+    let nchunks:i64=0 as i64;
+    let i:i32=0;
+    while(i<n){
+        let L:i32=w; if(i+L>n){ L=n-i; }
+        emit_seg(i as i64, L as i64, umod1000003(fnv1a(buf,i,L)), "f");
+        nchunks=nchunks+1; i=i+w;
+    }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+}
+
+// ---------------- arm: raw_micro (no chunking control) ----------------------
+// One chunk per byte. B-T1 requires it DEAD LAST. Built straight.
+fn arm_raw_micro(buf:[]u8,n:i32)void {
+    let nchunks:i64=0 as i64;
+    let i:i32=0;
+    while(i<n){
+        emit_seg(i as i64, 1 as i64, buf[i] as i64, "r");
+        nchunks=nchunks+1; i=i+1;
+    }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+}
+
+// ---------------- arm: random_chunks — DETERMINISTIC ANALOG -----------------
+// INFORMATIONAL ONLY. Not part of the binding B-T1 ordering.
+// Fixed hash-of-position tiling (recovered reference rule, itself deterministic):
+//   h = (sum_{j=0..4}(j+3)*b[i+j] + 17*i) % 7 ; L = 2 + h
+// (bytes past end of stream contribute 0). ZERO RNG.
+fn arm_random_chunks(buf:[]u8,n:i32)void {
+    _zag_println("META deterministic-analog hash-rule=v1 no-rng-in-decision-path informational-only");
+    let nchunks:i64=0 as i64;
+    let i:i32=0;
+    while(i<n){
+        let s:i64=0 as i64;
+        let j:i32=0;
+        while(j<5){
+            if(i+j<n){ s=s+((j+3) as i64)*(buf[i+j] as i64); }
+            j=j+1;
+        }
+        let h:i64=(s+17 as i64*(i as i64))%7 as i64;
+        if(h<0 as i64){ h=h+7 as i64; }
+        let L:i32=(2 as i64+h) as i32;
+        if(i+L>n){ L=n-i; }
+        emit_seg(i as i64, L as i64, umod1000003(fnv1a(buf,i,L)), "x");
+        nchunks=nchunks+1; i=i+L;
+    }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+}
+
+// ---------------- MDL shared machinery --------------------------------------
+// Recovered tournament params: spans 2..12, min_count 4, savings>0,
+// 256 motifs, greedy longest-match, literal fallback.
+// NOTE (flagged R-2 ambiguity): the R31 core doc says spans 2..8 for the core
+// promotion enumeration; the tournament Python used max_len=12. The tournament
+// is the battery being redone, so 12 is used here; flagged in verdict sheet.
+
+// mdl_fit: fills mlen[256], mfirst[256], nmot, head[256], nxt[256].
+// grounded=1 adds the grounding term (native adaptation: next-byte
+// concentration above chance, i.e. downstream discrimination consistency).
+// Returns 0 on success.
+fn mdl_fit(buf:[]u8,n:i32,grounded:i32,mlen:*i64,mfirst:*i64,nmot:*i32,head:*i64,nxt:*i64)i32 {
+    let MS:i32=1048576; let MM:i32=1048575;
+    let mh:*i64=zalloc64(MS); let ml:*i64=zalloc64(MS);
+    let mc:*i64=zalloc64(MS); let mf:*i64=zalloc64(MS); let mx:*i64=zalloc64(MS);
+    if(mh==null as *i64 || mf==null as *i64){ return 1; }
+    let s:i32=0; while(s<MS){ mf[s]=0-1 as i64; mx[s]=0-1 as i64; s=s+1; }
+    let nentries:i32=0; let full:i32=0;
+    // enumerate spans 2..12 at every position
+    let i:i32=0;
+    while(i<n){
+        let h:i64=1469598103934665603 as i64;
+        let L:i32=1;
+        while(L<=12){
+            if(i+L>n){ break; }
+            h=(h ^ (buf[i+L-1] as i64))*1099511628211 as i64;
+            if(L>=2 && full==0){
+                let slot:i32=(h & MM as i64) as i32;
+                while(1==1){
+                    if(mf[slot]<0 as i64){
+                        mh[slot]=h; ml[slot]=L as i64; mc[slot]=1 as i64; mf[slot]=i as i64;
+                        nentries=nentries+1; if(nentries>=MS){ full=1; }
+                        break;
+                    }
+                    if(mh[slot]==h && ml[slot]==L as i64 && bytes_equal(buf,mf[slot] as i32,i,L)==1){ mc[slot]=mc[slot]+1; break; }
+                    slot=(slot+1)&MM;
+                }
+            }
+            L=L+1;
+        }
+        i=i+1;
+    }
+    // collect candidates: count>=4, savings>0
+    let C:i32=0; s=0;
+    while(s<MS){
+        if(mf[s]>=0 as i64 && mc[s]>=4 as i64){
+            let sav:i64=(ml[s]-1 as i64)*mc[s]-(ml[s]+3 as i64);
+            if(sav>0 as i64){ C=C+1; }
+        }
+        s=s+1;
+    }
+    let cs:*i64=zalloc64(C); let cl:*i64=zalloc64(C);
+    let cc:*i64=zalloc64(C); let cf:*i64=zalloc64(C); let cg:*i64=zalloc64(C);
+    let cix:*i64=zalloc64(C); let ctx:*i64=zalloc64(C);
+    if(C>0 && (cs==null as *i64 || cix==null as *i64)){ return 2; }
+    let e:i32=0; s=0;
+    while(s<MS){
+        if(mf[s]>=0 as i64 && mc[s]>=4 as i64){
+            let sav:i64=(ml[s]-1 as i64)*mc[s]-(ml[s]+3 as i64);
+            if(sav>0 as i64){ cs[e]=sav; cl[e]=ml[s]; cc[e]=mc[s]; cf[e]=mf[s]; cg[e]=s as i64; e=e+1; }
+        }
+        s=s+1;
+    }
+    if(grounded==1 && C>0){
+        // pre-rank by savings; grounding computed for top GCAP (documented cap)
+        e=0; while(e<C){ cix[e]=e as i64; e=e+1; }
+        msort_cand(cix,ctx,C,cs,cl,cc,cf,buf);
+        let G:i32=C; if(G>8192){ G=8192; }
+        let g2:i32=0; while(g2<G){ mx[cg[cix[g2]]]=cix[g2]; g2=g2+1; }
+        let gtot:*i64=zalloc64(G);
+        let gnx:*i64=zalloc64(G*256);
+        if(gtot!=null as *i64 && gnx!=null as *i64){
+            // re-scan: next-byte histograms for grounded candidates
+            i=0;
+            while(i<n){
+                let h:i64=1469598103934665603 as i64;
+                let L:i32=1;
+                while(L<=12){
+                    if(i+L>n){ break; }
+                    h=(h ^ (buf[i+L-1] as i64))*1099511628211 as i64;
+                    if(L>=2){
+                        let slot:i32=(h & MM as i64) as i32;
+                        let pr:i32=0;
+                        while(pr<=MS){
+                            if(mf[slot]<0 as i64){ break; }
+                            if(mh[slot]==h && ml[slot]==L as i64 && bytes_equal(buf,mf[slot] as i32,i,L)==1){
+                                let ge:i64=mx[slot];
+                                if(ge>=0 as i64 && i+L<n){
+                                    gtot[ge]=gtot[ge]+1;
+                                    gnx[ge*256 as i64+(buf[i+L] as i64)]=gnx[ge*256 as i64+(buf[i+L] as i64)]+1;
+                                }
+                                break;
+                            }
+                            slot=(slot+1)&MM; pr=pr+1;
+                        }
+                    }
+                    L=L+1;
+                }
+                i=i+1;
+            }
+            g2=0;
+            while(g2<G){
+                let ge:i64=cix[g2];
+                if(gtot[ge]>0 as i64){
+                    let mxn:i64=0 as i64; let b2:i32=0;
+                    while(b2<256){ if(gnx[ge*256 as i64+(b2 as i64)]>mxn){ mxn=gnx[ge*256 as i64+(b2 as i64)]; } b2=b2+1; }
+                    let gfp:i64=(mxn*256 as i64)/gtot[ge]-1 as i64;
+                    if(gfp<0 as i64){ gfp=0 as i64; }
+                    cs[ge]=cs[ge]+(gfp*cc[ge]*cl[ge])/256 as i64;
+                }
+                g2=g2+1;
+            }
+        }
+        zfree64(gtot); zfree64(gnx);
+    }
+    // final rank: (score desc, len desc, count desc, bytes asc)
+    if(C>0){
+        e=0; while(e<C){ cix[e]=e as i64; e=e+1; }
+        msort_cand(cix,ctx,C,cs,cl,cc,cf,buf);
+    }
+    let nm:i32=C; if(nm>256){ nm=256; }
+    nmot.*=nm;
+    e=0; while(e<nm){ mlen[e]=cl[cix[e]]; mfirst[e]=cf[cix[e]]; e=e+1; }
+    let b0:i32=0; while(b0<256){ head[b0]=0-1 as i64; b0=b0+1; }
+    e=0;
+    while(e<nm){
+        let fb:i32=buf[mfirst[e] as i32] as i32;
+        nxt[e]=head[fb]; head[fb]=e as i64; e=e+1;
+    }
+    zfree64(mh); zfree64(ml); zfree64(mc); zfree64(mf); zfree64(mx);
+    zfree64(cs); zfree64(cl); zfree64(cc); zfree64(cf); zfree64(cg);
+    zfree64(cix); zfree64(ctx);
+    return 0;
+}
+
+// greedy longest-match at pos. kind: 0=motif, 1=literal.
+fn mdl_next(buf:[]u8,n:i32,pos:i32,mlen:*i64,mfirst:*i64,nmot:i32,head:*i64,nxt:*i64,kind_out:*i32,id_out:*i32,len_out:*i32)void {
+    let kind:i32=1; let id:i32=buf[pos] as i32; let ln:i32=1;
+    let e:i64=head[buf[pos] as i32];
+    let best:i64=0-1 as i64; let bestlen:i32=0;
+    while(e>=0 as i64){
+        let L:i32=mlen[e] as i32;
+        if(L>bestlen && pos+L<=n && bytes_equal(buf,mfirst[e] as i32,pos,L)==1){ best=e; bestlen=L; }
+        e=nxt[e];
+    }
+    if(best>=0 as i64){ kind=0; id=best as i32; ln=bestlen; }
+    kind_out.*=kind; id_out.*=id; len_out.*=ln;
+}
+
+fn arm_adaptive_mdl(buf:[]u8,n:i32,grounded:i32)void {
+    let mlen:*i64=zalloc64(256); let mfirst:*i64=zalloc64(256);
+    let head:*i64=zalloc64(256); let nxt:*i64=zalloc64(256);
+    let nmot:i32=0;
+    if(mlen==null as *i64){ _zag_println("ERROR oom-mdl"); return; }
+    let rc:i32=mdl_fit(buf,n,grounded,mlen,mfirst,&nmot,head,nxt);
+    if(rc!=0){ _zag_print("ERROR mdl-fit="); pnum(rc as i64); _zag_println(""); return; }
+    let nchunks:i64=0 as i64;
+    let pos:i32=0;
+    while(pos<n){
+        let k:i32=0; let d:i32=0; let l:i32=0;
+        mdl_next(buf,n,pos,mlen,mfirst,nmot,head,nxt,&k,&d,&l);
+        if(k==0){ emit_seg(pos as i64, l as i64, d as i64, "m"); }
+        else { emit_seg(pos as i64, l as i64, d as i64, "r"); }
+        nchunks=nchunks+1; pos=pos+l;
+    }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+    zfree64(mlen); zfree64(mfirst); zfree64(head); zfree64(nxt);
+}
+
+// ---------------- arm: hierarchical_mdl -------------------------------------
+// adaptive_mdl base + 96 adjacent pair merges (count>=4, gain=count-3).
+fn arm_hierarchical_mdl(buf:[]u8,n:i32)void {
+    let mlen:*i64=zalloc64(256); let mfirst:*i64=zalloc64(256);
+    let head:*i64=zalloc64(256); let nxt:*i64=zalloc64(256);
+    let nmot:i32=0;
+    if(mlen==null as *i64){ _zag_println("ERROR oom-hmdl"); return; }
+    let rc:i32=mdl_fit(buf,n,0,mlen,mfirst,&nmot,head,nxt);
+    if(rc!=0){ _zag_print("ERROR hmdl-fit="); pnum(rc as i64); _zag_println(""); return; }
+    // pair counting over streamed base chunks
+    let PS:i32=262144; let PM:i32=262143;
+    let pkey:*i64=zalloc64(PS); let pcnt:*i64=zalloc64(PS);
+    if(pkey==null as *i64){ _zag_println("ERROR oom-pairs"); return; }
+    let pos:i32=0; let pk1:i64=0-1 as i64;
+    while(pos<n){
+        let k:i32=0; let d:i32=0; let l:i32=0;
+        mdl_next(buf,n,pos,mlen,mfirst,nmot,head,nxt,&k,&d,&l);
+        let pk:i64=(k as i64)*1024 as i64+(d as i64);
+        pos=pos+l;
+        if(pk1>=0 as i64){
+            let key:i64=pk1*2048 as i64+pk;
+            let slot:i32=(key & PM as i64) as i32;
+            while(1==1){
+                if(pcnt[slot]==0 as i64){ pkey[slot]=key; pcnt[slot]=1 as i64; break; }
+                if(pkey[slot]==key){ pcnt[slot]=pcnt[slot]+1; break; }
+                slot=(slot+1)&PM;
+            }
+        }
+        pk1=pk;
+    }
+    // collect pairs count>=4
+    let P:i32=0; let s:i32=0;
+    while(s<PS){ if(pcnt[s]>=4 as i64){ P=P+1; } s=s+1; }
+    let pg:*i64=zalloc64(P); let pc:*i64=zalloc64(P); let pkk:*i64=zalloc64(P);
+    let pix:*i64=zalloc64(P); let ptx:*i64=zalloc64(P);
+    if(P>0 && pg==null as *i64){ _zag_println("ERROR oom-pcollect"); return; }
+    let e:i32=0; s=0;
+    while(s<PS){ if(pcnt[s]>=4 as i64){ pg[e]=pcnt[s]-3 as i64; pc[e]=pcnt[s]; pkk[e]=pkey[s]; e=e+1; } s=s+1; }
+    if(P>0){ e=0; while(e<P){ pix[e]=e as i64; e=e+1; } msort_pair(pix,ptx,P,pg,pc,pkk); }
+    let nmg:i32=P; if(nmg>96){ nmg=96; }
+    let mkeys:*i64=zalloc64(96);
+    e=0; while(e<nmg){ mkeys[e]=pkk[pix[e]]; e=e+1; }
+    // segment with 1-chunk lookahead
+    let nchunks:i64=0 as i64;
+    pos=0;
+    if(n>0){
+        let k1:i32=0; let d1:i32=0; let l1:i32=0;
+        mdl_next(buf,n,pos,mlen,mfirst,nmot,head,nxt,&k1,&d1,&l1);
+        let s1:i32=pos; pos=pos+l1;
+        while(1==1){
+            if(pos>=n){
+                if(k1==0){ emit_seg(s1 as i64,l1 as i64,d1 as i64,"m"); } else { emit_seg(s1 as i64,l1 as i64,d1 as i64,"r"); }
+                nchunks=nchunks+1; break;
+            }
+            let k2:i32=0; let d2:i32=0; let l2:i32=0;
+            mdl_next(buf,n,pos,mlen,mfirst,nmot,head,nxt,&k2,&d2,&l2);
+            let s2:i32=pos;
+            let key:i64=(((k1 as i64)*1024 as i64+(d1 as i64))*2048 as i64)+((k2 as i64)*1024 as i64+(d2 as i64));
+            let mi:i32=0-1; let q:i32=0;
+            while(q<nmg){ if(mkeys[q]==key){ mi=q; break; } q=q+1; }
+            if(mi>=0){
+                emit_seg(s1 as i64,(l1+l2) as i64,mi as i64,"h");
+                nchunks=nchunks+1; pos=s2+l2;
+                if(pos>=n){ break; }
+                mdl_next(buf,n,pos,mlen,mfirst,nmot,head,nxt,&k1,&d1,&l1);
+                s1=pos; pos=pos+l1;
+            } else {
+                if(k1==0){ emit_seg(s1 as i64,l1 as i64,d1 as i64,"m"); } else { emit_seg(s1 as i64,l1 as i64,d1 as i64,"r"); }
+                nchunks=nchunks+1;
+                k1=k2; d1=d2; l1=l2; s1=s2; pos=s2+l2;
+            }
+        }
+    }
+    _zag_print("END chunks="); pnum(nchunks); _zag_println("");
+    zfree64(mlen); zfree64(mfirst); zfree64(head); zfree64(nxt);
+    zfree64(pkey); zfree64(pcnt);
+    zfree64(pg); zfree64(pc); zfree64(pkk); zfree64(pix); zfree64(ptx); zfree64(mkeys);
+}
+
+// ---------------- main: argv[1] selects the arm -----------------------------
+fn main()i32 {
+    if(_zag_argc()<2){
+        _zag_println("usage: arms <arm> [perturb1|perturb2|perturb3] < bytes");
+        _zag_println("arms: predictive_surprise fixed_window_4 fixed_window_8 fixed_window_16 fixed_window_64 adaptive_mdl grounded_adaptive_mdl hierarchical_mdl raw_micro random_chunks");
+        return 2;
+    }
+    let sel:[]u8=_zag_arg(1);
+    // optional deterministic heap perturbation (M8 smoke; never an AI path)
+    if(_zag_argc()>=3){
+        let pm:[]u8=_zag_arg(2);
+        if(u8eq(pm,"perturb1")==1){ perturb_heap(1); }
+        else if(u8eq(pm,"perturb2")==1){ perturb_heap(2); }
+        else if(u8eq(pm,"perturb3")==1){ perturb_heap(3); }
+    }
+    let praw:*u8=zalloc8(IN_CAP);
+    if(praw==null as *u8){ _zag_println("ERROR oom-input"); return 1; }
+    let buf:[]u8=praw[0..IN_CAP];
+    let n:i32=0;
+    let rc:i32=read_all(buf,IN_CAP,&n);
+    if(rc!=0){ _zag_print("ERROR read="); pnum(rc as i64); _zag_println(""); return 1; }
+    _zag_print("ARMS v=1 arm="); _zag_print(sel); _zag_print(" n="); pnum(n as i64); _zag_println("");
+    if(u8eq(sel,"predictive_surprise")==1){ arm_predictive_surprise(buf,n); }
+    else if(u8eq(sel,"fixed_window_4")==1){ arm_fixed_window(buf,n,4); }
+    else if(u8eq(sel,"fixed_window_8")==1){ arm_fixed_window(buf,n,8); }
+    else if(u8eq(sel,"fixed_window_16")==1){ arm_fixed_window(buf,n,16); }
+    else if(u8eq(sel,"fixed_window_64")==1){ arm_fixed_window(buf,n,64); }
+    else if(u8eq(sel,"adaptive_mdl")==1){ arm_adaptive_mdl(buf,n,0); }
+    else if(u8eq(sel,"grounded_adaptive_mdl")==1){ arm_adaptive_mdl(buf,n,1); }
+    else if(u8eq(sel,"hierarchical_mdl")==1){ arm_hierarchical_mdl(buf,n); }
+    else if(u8eq(sel,"raw_micro")==1){ arm_raw_micro(buf,n); }
+    else if(u8eq(sel,"random_chunks")==1){ arm_random_chunks(buf,n); }
+    else { _zag_print("ERROR unknown-arm "); _zag_println(sel); zfree8(praw); return 2; }
+    zfree8(praw);
+    return 0;
+}
