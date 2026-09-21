@@ -1,0 +1,1354 @@
+// x — Arm X: whole-stream-as-one-chunk degenerate control (family CTRL).
+// The honest null arm: no chunking. Each ingested corpus is ONE unit covering
+// the whole stream. Ingestion appends/extends one buffer per corpus;
+// recall(span) = slice the buffer at the offset. One ADD audit entry per
+// ingestion batch. Pure Zag, zero RNG in any decision path, byte-identical
+// reruns.
+//
+// Design decisions (see docs/lab/units/arms/X/ARM_SPEC.md):
+// - Non-ID arm (ARM_INTERFACE.md §9 confirmed): unit id = (corpus<<24)|0,
+//   pure arithmetic; recall resolves by corpus id + offset arithmetic. No
+//   persistent ID->storage mapping. M1 swap probe: N/A. M7: N/A.
+// - M-3 (prereg): whole-file-blob arms pass content, fail boundary by design.
+//   X reports m1_boundary = 0.0 always (documented, not computed).
+// - Sub-span kill is impossible -> loud audited REFUSE (reason 104).
+// - Eviction policy: whole-stream units are never evicted; C_M3 slot capacity
+//   never binds (<=3 live units vs 4000 slots). Declared, audited.
+// - Streams are retained in RAM as BigBufs (<=3 chunks of <=2^25 bytes each)
+//   so M5 measures the true retention cost (cf. AMBIGUITIES.md A5).
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+
+const X_BIG:i32=33554432;       // 2^25: max indexable slice (toolchain limit)
+const X_WIN:i32=1048576;        // 1MB probe/patch window
+const X_CAP:i32=64;             // slot capacity (X never needs more)
+const X_C_PROSE:i32=1;
+const X_C_CODE:i32=2;
+const X_C_T1P:i32=3;
+const X_C_T1C:i32=4;
+const X_C_T2P:i32=5;
+const X_C_T2C:i32=6;
+const X_C_T3:i32=7;
+const X_C_FRESH:i32=8;
+const X_M3_V:i32=1000;          // valuable-set target (degenerate: see A18)
+const X_M3_FRESH1:i32=3000;
+const X_M3_KILL:i32=3000;
+const X_M3_FRESH2:i32=4000;
+const X_M4_N:i32=200;
+const X_M7_LOOKUPS:i32=5000;
+
+// patch kinds (recorded content-defect transforms)
+const PK_XOR7:i32=1;            // M4 prose: every 7th byte XOR 0xFF
+const PK_RENAME:i32=2;          // M4 code: fixed identifier rename map
+const PK_FIRSTXOR:i32=3;        // M7 C' edit: first byte XOR 0xFF
+
+// flags bits (same vocabulary as the b64 validator)
+const F_OCC:i32=1;
+const F_LIVE:i32=2;
+const F_PIN:i32=4;
+const F_WEAK:i32=8;
+const F_SHIFT:i32=16;
+const F_PATCH:i32=32;
+
+// ledger opcodes (frozen namespace, ARM_INTERFACE.md §6)
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_PROMOTE:i32=5;
+const OP_REVISE:i32=6;
+const OP_REFUSE:i32=8;
+const OP_EVICT:i32=9;
+const OP_TDB:i32=16;
+const OP_TDC:i32=17;
+const OP_TMV:i32=18;
+
+// ---- little-endian u32/i32 packing on []u8 ----
+fn uget(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn uput(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v & 255) as u8;b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;b[at+3]=((v>>24) & 255) as u8;
+}
+fn iget(b:[]u8,at:i32)i32 { return uget(b,at) as i32; }
+fn iput(b:[]u8,at:i32,v:i32)void { uput(b,at,v as i64); }
+
+// ---- BigBuf: a byte string of up to 3 chunks, each <= 2^25 bytes.
+// The 10x code stream (95MB) needs 3 chunks; 1x streams need 1.
+struct BigBuf { nch:i32, total:i64, c0:[]u8, c1:[]u8, c2:[]u8 }
+
+struct X {
+    cap:i32,
+    ids:[]u8,      // cap * u32: unit id
+    offs:[]u8,     // cap * u32: byte offset (always 0 for X)
+    lens:[]u8,     // cap * u32: stream length
+    corps:[]u8,    // cap * u32: corpus id
+    flags:[]u8,    // cap * u32: flags bits
+    shifts:[]u8,   // cap * i32: recorded boundary shift
+    led:[]u8,      // ledger bytes
+    led_n:i32,
+    led_cap:i32,
+    ins:[]u8,      // insertion-order queue (ins_cap * i32)
+    ins_cap:i32,
+    ins_n:i32,
+    ins_head:i32,
+    trace:[]u8,
+    trace_n:i32,
+    trace_cap:i32,
+    nlive:i32,
+    // recorded content-defect patch: one live patch max (all trial defects
+    // target a single unit per phase; superseded patches are rebuilt).
+    pslot:i32,     // slot the patch belongs to, -1 none
+    pkind:i32,     // patch kind
+    p0:[]u8, p1:[]u8, p2:[]u8,  // patch chunks (<=3, mirror stream shape)
+    pnch:i32,
+}
+
+// ---- allocator wrappers with trace (addresses never logged) ----
+fn halloc(s:*X,n:i32)[]u8 {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(n as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=65;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    return nio_alloc(n);
+}
+fn hfree(s:*X,b:[]u8)void {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(b.len as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=70;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    nio_free(b);
+}
+
+fn x_init(s:*X,cap:i32,led_entries:i32,ins_max:i32)void {
+    s.*.cap=cap;s.*.nlive=0;
+    s.*.trace_cap=65536;s.*.trace=nio_alloc(65536);s.*.trace_n=0;
+    s.*.ids=halloc(s,cap*4);s.*.offs=halloc(s,cap*4);s.*.lens=halloc(s,cap*4);
+    s.*.corps=halloc(s,cap*4);s.*.flags=halloc(s,cap*4);s.*.shifts=halloc(s,cap*4);
+    // zero the slot region explicitly: the M8 store image hashes it, and it
+    // must not depend on allocator zeroing behaviour.
+    let i:i32=0;
+    while(i<cap*4){s.*.ids[i]=0;s.*.offs[i]=0;s.*.lens[i]=0;s.*.corps[i]=0;s.*.flags[i]=0;s.*.shifts[i]=0;i=i+1;}
+    s.*.led_cap=led_entries*64;s.*.led=halloc(s,s.*.led_cap);s.*.led_n=0;
+    s.*.ins=halloc(s,ins_max*4);s.*.ins_cap=ins_max;s.*.ins_n=0;s.*.ins_head=0;
+    i=0;while(i<ins_max*4){s.*.ins[i]=0;i=i+1;}
+    s.*.pslot=-1;s.*.pkind=0;s.*.p0="";s.*.p1="";s.*.p2="";s.*.pnch=0;
+}
+fn x_new(cap:i32,led_entries:i32,ins_max:i32) X {
+    let s:X=X{.cap=0,.ids="",.offs="",.lens="",.corps="",.flags="",
+        .shifts="",.led="",.led_n=0,.led_cap=0,.ins="",.ins_cap=0,.ins_n=0,
+        .ins_head=0,.trace="",.trace_n=0,.trace_cap=0,.nlive=0,
+        .pslot=-1,.pkind=0,.p0="",.p1="",.p2="",.pnch=0};
+    x_init(&s,cap,led_entries,ins_max);
+    return s;
+}
+
+// ---- ledger: 16-word entries, 64 bytes, LE u32. No pointers, no clocks. ----
+fn x_led(s:*X,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+         a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)void {
+    let at:i32=s.*.led_n*64;
+    if(at+64>s.*.led_cap){return;} // LEDGER-BOUND: scored on what completed
+    let l:[]u8=s.*.led;
+    iput(l,at,op);iput(l,at+4,slot);iput(l,at+8,rc);
+    iput(l,at+12,b1);iput(l,at+16,b2);iput(l,at+20,b3);iput(l,at+24,b4);iput(l,at+28,b5);
+    iput(l,at+32,a1);iput(l,at+36,a2);iput(l,at+40,a3);iput(l,at+44,a4);iput(l,at+48,a5);
+    iput(l,at+52,1);iput(l,at+56,d1);iput(l,at+60,d2);
+    s.*.led_n=s.*.led_n+1;
+}
+
+// ---- slot placement: id-derived (order-independent), linear probe ----
+fn slot_hash(id:i32,cap:i32) i32 {
+    let x:i64=(id as i64)*2654435761;
+    x=x ^ (x>>16);
+    x=x*2246822519;
+    x=x ^ (x>>13);
+    let h:i64=x % (cap as i64);
+    if(h<0){h=h+(cap as i64);}
+    return h as i32;
+}
+fn slot_find(s:*X,id:i32) i32 {
+    let cap:i32=s.*.cap;
+    let ids:[]u8=s.*.ids;let flags:[]u8=s.*.flags;
+    let h:i32=slot_hash(id,cap);
+    let t:i32=0;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){return -1;}
+        if(iget(ids,h*4)==id){return h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    return -1;
+}
+fn slot_insert(s:*X,id:i32,off:i32,len:i32,corpus:i32) i32 {
+    let cap:i32=s.*.cap;
+    let ids:[]u8=s.*.ids;let offs:[]u8=s.*.offs;let lens:[]u8=s.*.lens;
+    let corps:[]u8=s.*.corps;let flags:[]u8=s.*.flags;let shifts:[]u8=s.*.shifts;
+    let h:i32=slot_hash(id,cap);
+    let t:i32=0;let first_dead:i32=-1;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){
+            let sl:i32=h;
+            if(first_dead>=0){sl=first_dead;}
+            iput(ids,sl*4,id);iput(offs,sl*4,off);iput(lens,sl*4,len);
+            iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+            iput(shifts,sl*4,0);
+            let ins:[]u8=s.*.ins;iput(ins,s.*.ins_n*4,sl);s.*.ins_n=s.*.ins_n+1;
+            s.*.nlive=s.*.nlive+1;
+            return sl;
+        }
+        if(iget(ids,h*4)==id){
+            iput(offs,h*4,off);iput(lens,h*4,len);iput(corps,h*4,corpus);
+            let f2:i32=iget(flags,h*4);
+            if((f2 & F_LIVE)==0){s.*.nlive=s.*.nlive+1;}
+            iput(flags,h*4,(f2 | F_OCC) | F_LIVE);
+            return h;
+        }
+        if(((f & F_LIVE)==0) && first_dead<0){first_dead=h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    if(first_dead>=0){
+        let sl:i32=first_dead;
+        iput(ids,sl*4,id);iput(offs,sl*4,off);iput(lens,sl*4,len);
+        iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+        iput(shifts,sl*4,0);
+        let ins:[]u8=s.*.ins;iput(ins,s.*.ins_n*4,sl);s.*.ins_n=s.*.ins_n+1;
+        s.*.nlive=s.*.nlive+1;
+        return sl;
+    }
+    return -1;
+}
+
+// ---- BigBuf helpers ----
+fn bb_cget(bb:*BigBuf,i:i32) []u8 {
+    if(i==0){return bb.*.c0;}
+    if(i==1){return bb.*.c1;}
+    return bb.*.c2;
+}
+fn bb_init(bb:*BigBuf,s:*X,total:i64) void {
+    bb.*.total=total;bb.*.nch=0;bb.*.c0="";bb.*.c1="";bb.*.c2="";
+    if(total<=0){return;}
+    let nch:i32=((total+(X_BIG as i64)-1)/(X_BIG as i64)) as i32;
+    if(nch>3){return;} // caller treats nch!=expected as failure
+    let rem:i64=total;let i:i32=0;
+    while(i<nch){
+        let cl:i32=X_BIG;
+        if(rem<(X_BIG as i64)){cl=rem as i32;}
+        let c:[]u8=halloc(s,cl);
+        if(i==0){bb.*.c0=c;}else{if(i==1){bb.*.c1=c;}else{bb.*.c2=c;}}
+        rem=rem-(cl as i64);i=i+1;
+    }
+    bb.*.nch=nch;
+}
+fn bb_free(s:*X,bb:*BigBuf) void {
+    let n:i32=bb.*.nch;let i:i32=0;
+    while(i<n){hfree(s,bb_cget(bb,i));i=i+1;}
+    bb.*.nch=0;bb.*.c0="";bb.*.c1="";bb.*.c2="";bb.*.total=0;
+}
+// copy bb[pos..pos+len) -> dst[0..len)
+fn bb_copy_to(bb:*BigBuf,pos:i64,dst:[]u8,len:i32) void {
+    let rem:i32=len;let p:i64=pos;let doff:i32=0;
+    while(rem>0){
+        let ch:i32=(p/(X_BIG as i64)) as i32;
+        let coff:i32=(p-(ch as i64)*(X_BIG as i64)) as i32;
+        let cb:[]u8=bb_cget(bb,ch);
+        let avail:i32=cb.len-coff;
+        let n:i32=avail;if(n>rem){n=rem;}
+        let i:i32=0;while(i<n){dst[doff+i]=cb[coff+i];i=i+1;}
+        rem=rem-n;p=p+(n as i64);doff=doff+n;
+    }
+}
+// copy src[0..len) -> bb[pos..pos+len)
+fn bb_copy_from(src:[]u8,bb:*BigBuf,pos:i64,len:i32) void {
+    let rem:i32=len;let p:i64=pos;let soff:i32=0;
+    while(rem>0){
+        let ch:i32=(p/(X_BIG as i64)) as i32;
+        let coff:i32=(p-(ch as i64)*(X_BIG as i64)) as i32;
+        let cb:[]u8=bb_cget(bb,ch);
+        let avail:i32=cb.len-coff;
+        let n:i32=avail;if(n>rem){n=rem;}
+        let i:i32=0;while(i<n){cb[coff+i]=src[soff+i];i=i+1;}
+        rem=rem-n;p=p+(n as i64);soff=soff+n;
+    }
+}
+fn bb_get(bb:*BigBuf,pos:i64) u8 {
+    let ch:i32=(pos/(X_BIG as i64)) as i32;
+    let coff:i32=(pos-(ch as i64)*(X_BIG as i64)) as i32;
+    let cb:[]u8=bb_cget(bb,ch);
+    return cb[coff];
+}
+fn bb_set(bb:*BigBuf,pos:i64,v:u8) void {
+    let ch:i32=(pos/(X_BIG as i64)) as i32;
+    let coff:i32=(pos-(ch as i64)*(X_BIG as i64)) as i32;
+    let cb:[]u8=bb_cget(bb,ch);
+    cb[coff]=v;
+}
+
+// ---- read a whole corpus file into a BigBuf (striped at 2^25) ----
+fn read_big(s:*X,dir:[]u8,name:[]u8,bb:*BigBuf) i32 {
+    let root:i64=nio_open_root(dir);if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);if(sz<=0){nio_close(fd);return -1;}
+    bb_init(bb,s,sz);
+    if(bb.*.nch==0){nio_close(fd);return -1;}
+    let i:i32=0;
+    while(i<bb.*.nch){
+        let cb:[]u8=bb_cget(bb,i);
+        let pos:i64=(i as i64)*(X_BIG as i64);
+        nio_seek(fd,pos,0);
+        let nr:i64=nio_read_exact(fd,cb,cb.len);
+        if(nr!=(cb.len as i64)){nio_close(fd);return -1;}
+        i=i+1;
+    }
+    nio_close(fd);
+    return 0;
+}
+fn file_size(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);nio_close(fd);
+    return sz;
+}
+
+// ---- patch region: copy from the X patch chunks ----
+fn x_pcopy(s:*X,pos:i64,dst:[]u8,len:i32) void {
+    let rem:i32=len;let p:i64=pos;let doff:i32=0;
+    while(rem>0){
+        let ch:i32=(p/(X_BIG as i64)) as i32;
+        let coff:i32=(p-(ch as i64)*(X_BIG as i64)) as i32;
+        let cb:[]u8="";
+        if(ch==0){cb=s.*.p0;}else{if(ch==1){cb=s.*.p1;}else{cb=s.*.p2;}}
+        let avail:i32=cb.len-coff;
+        let n:i32=avail;if(n>rem){n=rem;}
+        let i:i32=0;while(i<n){dst[doff+i]=cb[coff+i];i=i+1;}
+        rem=rem-n;p=p+(n as i64);doff=doff+n;
+    }
+}
+fn x_pset(s:*X,pos:i64,v:u8) void {
+    let ch:i32=(pos/(X_BIG as i64)) as i32;
+    let coff:i32=(pos-(ch as i64)*(X_BIG as i64)) as i32;
+    if(ch==0){s.*.p0[coff]=v;}else{if(ch==1){s.*.p1[coff]=v;}else{s.*.p2[coff]=v;}}
+}
+fn x_pget(s:*X,pos:i64) u8 {
+    let ch:i32=(pos/(X_BIG as i64)) as i32;
+    let coff:i32=(pos-(ch as i64)*(X_BIG as i64)) as i32;
+    if(ch==0){return s.*.p0[coff];}
+    if(ch==1){return s.*.p1[coff];}
+    return s.*.p2[coff];
+}
+
+// ---- recorded content-defect patch construction ----
+// A patch is a full stream-length transform. Three kinds:
+//   PK_XOR7     every 7th byte XOR 0xFF
+//   PK_RENAME   5-pass fixed identifier rename map (same-length replacements)
+//   PK_FIRSTXOR first byte XOR 0xFF
+// Rebuilds happen at most once per (slot,kind): x_defect_content skips the
+// rebuild when the identical patch is already live (purely an implementation
+// optimization; the patch bytes are a deterministic function of the stream,
+// so the observable state is identical).
+
+// One rename pass over a stream, streaming in 1MB windows with 6-byte
+// lookahead/lookbehind. Correctness argument (single-pass equivalence):
+//   Window k covers global [S-6, S+L+6) where S=k*L. It decides matches
+//   starting in [S, S+L). Validity of a match needs consumed-status of the 6
+//   bytes before it: carried forward from window k-1 (cons_before), plus
+//   "already emitted" flags for [S, S+6) (cons_after) because a match
+//   starting in [S-6, S) may extend past S and its replacement was already
+//   emitted by window k-1. All replacements are same-length, so the output is
+//   position-aligned with the input; window k commits out[6..6+L). Matches
+//   starting in [S+L, S+L+6) are decided by window k+1. A match can only be
+//   consumed by a match starting earlier, and every earlier start in
+//   [S-6, S+L) is decided within this window's left-to-right scan. Hence the
+//   committed stream equals the single-pass result byte-for-byte.
+fn x_rename_pass(s:*X,src:*BigBuf,dst:*BigBuf,pat:[]u8,rep:[]u8) void {
+    let total:i64=src.*.total;
+    let win:[]u8=halloc(s,X_WIN+12);
+    let out:[]u8=halloc(s,X_WIN+12);
+    let cons:[]u8=halloc(s,X_WIN+12);
+    let cbin:[]u8=halloc(s,6);
+    let cbef:[]u8=halloc(s,6);
+    let caft:[]u8=halloc(s,6);
+    let carry_n:i32=0; // 0 on first window, 6 after
+    let plen:i32=pat.len;
+    let wpos:i64=0;
+    while(wpos<total){
+        let wlen:i32=(total-wpos) as i32;if(wlen>X_WIN){wlen=X_WIN;}
+        let look:i32=((total-wpos)-(wlen as i64)) as i32;if(look>6){look=6;}
+        // assemble window: carry + stripe + lookahead
+        let i:i32=0;
+        while(i<carry_n){win[i]=cbin[i];cons[i]=cbef[i];i=i+1;}
+        bb_copy_to(src,wpos,win[carry_n..carry_n+wlen+look],wlen+look);
+        i=carry_n;
+        while(i<carry_n+wlen+look){cons[i]=0;i=i+1;}
+        // cons_after covers the first 6 stripe bytes (already-emitted guard)
+        let ca:i32=0;
+        while(ca<6){if(carry_n+ca<carry_n+wlen){cons[carry_n+ca]=caft[ca];}ca=ca+1;}
+        let inlen:i32=carry_n+wlen+look;
+        // scan the decision region [carry_n, carry_n+wlen)
+        let g:i32=carry_n;
+        while(g<carry_n+wlen){
+            if(cons[g]==1){g=g+1;}
+            else{
+                let m:i32=0;
+                if(g+plen<=inlen){
+                    m=1;
+                    let q:i32=0;
+                    while(q<plen){if(win[g+q]!=pat[q]){m=0;}q=q+1;}
+                }
+                if(m==1){
+                    let q:i32=0;
+                    while(q<plen){out[g+q]=rep[q];cons[g+q]=1;q=q+1;}
+                    g=g+plen;
+                }else{
+                    out[g]=win[g];g=g+1;
+                }
+            }
+        }
+        // commit the stripe's output
+        bb_copy_from(out[carry_n..carry_n+wlen],dst,wpos,wlen);
+        // new carry: last 6 input bytes + their cons flags, and cons flags
+        // for the next 6 (already-emitted guard for window k+1)
+        carry_n=6;if(inlen<6){carry_n=inlen;}
+        i=0;
+        while(i<carry_n){cbin[i]=win[inlen-carry_n+i];cbef[i]=cons[inlen-carry_n+i];i=i+1;}
+        i=0;
+        while(i<6){
+            let gi:i32=carry_n+wlen+i;
+            if(gi<inlen){caft[i]=cons[gi];}else{caft[i]=0;}
+            i=i+1;
+        }
+        wpos=wpos+(wlen as i64);
+    }
+    hfree(s,win);hfree(s,out);hfree(s,cons);
+    hfree(s,cbin);hfree(s,cbef);hfree(s,caft);
+}
+
+fn x_patch_shape(s:*X,total:i64) void {
+    // (re)allocate patch chunks to mirror the stream shape
+    let nch:i32=((total+(X_BIG as i64)-1)/(X_BIG as i64)) as i32;
+    let cur:i64=0;
+    if(s.*.pnch>0){
+        if(s.*.p0.len>0){cur=cur+(s.*.p0.len as i64);}
+        if(s.*.p1.len>0){cur=cur+(s.*.p1.len as i64);}
+        if(s.*.p2.len>0){cur=cur+(s.*.p2.len as i64);}
+    }
+    if(s.*.pnch!=nch || cur!=total){
+        if(s.*.p0.len>0){hfree(s,s.*.p0);s.*.p0="";}
+        if(s.*.p1.len>0){hfree(s,s.*.p1);s.*.p1="";}
+        if(s.*.p2.len>0){hfree(s,s.*.p2);s.*.p2="";}
+        s.*.pnch=0;
+        let rem:i64=total;let i:i32=0;
+        while(i<nch){
+            let cl:i32=X_BIG;
+            if(rem<(X_BIG as i64)){cl=rem as i32;}
+            let c:[]u8=halloc(s,cl);
+            if(i==0){s.*.p0=c;}else{if(i==1){s.*.p1=c;}else{s.*.p2=c;}}
+            rem=rem-(cl as i64);i=i+1;
+        }
+        s.*.pnch=nch;
+    }
+}
+
+fn x_patch_build(s:*X,kind:i32,src:*BigBuf) void {
+    let total:i64=src.*.total;
+    x_patch_shape(s,total);
+    if(kind==PK_XOR7){
+        let pv:BigBuf=x_patch_view(s,total);
+        let win:[]u8=halloc(s,X_WIN);
+        let wpos:i64=0;
+        while(wpos<total){
+            let wlen:i32=(total-wpos) as i32;if(wlen>X_WIN){wlen=X_WIN;}
+            bb_copy_to(src,wpos,win,wlen);
+            let i:i32=0;
+            while(i<wlen){
+                if(((wpos+(i as i64)) % 7)==0){win[i]=win[i] ^ 255;}
+                i=i+1;
+            }
+            bb_copy_from(win,&pv,wpos,wlen);
+            wpos=wpos+(wlen as i64);
+        }
+        hfree(s,win);
+    }
+    if(kind==PK_FIRSTXOR){
+        let pv:BigBuf=x_patch_view(s,total);
+        let win:[]u8=halloc(s,X_WIN);
+        let wpos:i64=0;
+        while(wpos<total){
+            let wlen:i32=(total-wpos) as i32;if(wlen>X_WIN){wlen=X_WIN;}
+            bb_copy_to(src,wpos,win,wlen);
+            bb_copy_from(win,&pv,wpos,wlen);
+            wpos=wpos+(wlen as i64);
+        }
+        hfree(s,win);
+        let b:u8=x_pget(s,0);
+        x_pset(s,0,b ^ 255);
+    }
+    if(kind==PK_RENAME){
+        // ping-pong: pass0 src->patch, then alternate patch<->tmp
+        let tmp:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+        bb_init(&tmp,s,total);
+        let dstp:BigBuf=x_patch_view(s,total);
+        let p0:[]u8="sqlite3";let r0:[]u8="sqlite4";
+        let p1:[]u8="SQLITE";let r1:[]u8="SQLITF";
+        let p2:[]u8="Vdbe";let r2:[]u8="Vdbf";
+        let p3:[]u8="Mem";let r3:[]u8="Mfm";
+        let p4:[]u8="pBt";let r4:[]u8="pBu";
+        x_rename_pass(s,src,&dstp,p0,r0);
+        x_rename_pass(s,&dstp,&tmp,p1,r1);
+        x_rename_pass(s,&tmp,&dstp,p2,r2);
+        x_rename_pass(s,&dstp,&tmp,p3,r3);
+        x_rename_pass(s,&tmp,&dstp,p4,r4);
+        bb_free(s,&tmp);
+    }
+}
+
+// copy src[0..len) -> patch chunks at pos
+fn x_pcopy_from(src:[]u8,s:*X,pos:i64,len:i32) void {
+    let rem:i32=len;let p:i64=pos;let soff:i32=0;
+    while(rem>0){
+        let ch:i32=(p/(X_BIG as i64)) as i32;
+        let coff:i32=(p-(ch as i64)*(X_BIG as i64)) as i32;
+        let cb:[]u8="";
+        if(ch==0){cb=s.*.p0;}else{if(ch==1){cb=s.*.p1;}else{cb=s.*.p2;}}
+        let avail:i32=cb.len-coff;
+        let n:i32=avail;if(n>rem){n=rem;}
+        let i:i32=0;while(i<n){cb[coff+i]=src[soff+i];i=i+1;}
+        rem=rem-n;p=p+(n as i64);soff=soff+n;
+    }
+}
+// a BigBuf VIEW over the patch chunks (slice headers copied; the underlying
+// memory is aliased, so writes through the view land in the patch chunks)
+fn x_patch_view(s:*X,total:i64) BigBuf {
+    let v:BigBuf=BigBuf{.nch=s.*.pnch,.total=total,.c0=s.*.p0,.c1=s.*.p1,.c2=s.*.p2};
+    return v;
+}
+
+// ---- memory operations ----
+// X's granularity is all-or-nothing over the monolith: sub-span operations
+// are impossible and are loudly refused; whole-unit ops always succeed.
+fn x_ingest(s:*X,id:i32,off:i32,len:i32,corpus:i32) i32 {
+    let sl:i32=slot_insert(s,id,off,len,corpus);
+    if(sl<0){
+        x_led(s,OP_REFUSE,-1,101,0,0,0,corpus,id,0,0,0,0,0,id,0);
+        return -1;
+    }
+    x_led(s,OP_ADD,sl,0,off,0,len,corpus,id,0,0,0,0,0,id,0);
+    return sl;
+}
+// recall a byte range of a unit through the arm's retrieval path.
+// Returns bytes copied, or -1 if the unit is dead/missing.
+fn x_recall(s:*X,stm:*BigBuf,id:i32,start:i64,len:i32,out:[]u8) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let f:i32=iget(s.*.flags,sl*4);
+    if((f & F_LIVE)==0){return -1;}
+    let st:i64=start;
+    // a recorded content patch takes precedence over a boundary shift
+    if((f & F_SHIFT)!=0 && (f & F_PATCH)==0){
+        st=st+(iget(s.*.shifts,sl*4) as i64);
+    }
+    if(st<0){st=0;}
+    let total:i64=iget(s.*.lens,sl*4) as i64;
+    if(st>=total){return -1;}
+    let avail:i64=total-st;
+    let n:i32=len;
+    if((n as i64)>avail){n=avail as i32;}
+    if((f & F_PATCH)!=0){
+        if(s.*.pslot!=sl){return -1;} // superseded patch: unit unrecallable
+        x_pcopy(s,st,out,n);
+    }else{
+        bb_copy_to(stm,st,out,n);
+    }
+    return n;
+}
+fn x_kill(s:*X,id:i32,reason:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;let f:i32=iget(flags,sl*4);
+    if((f & F_LIVE)==0){return 0;}
+    iput(flags,sl*4,f-(f & F_LIVE));
+    if(s.*.pslot==sl){s.*.pslot=-1;}
+    s.*.nlive=s.*.nlive-1;
+    x_led(s,OP_KILL,sl,0,0,0,reason,0,id,0,0,0,0,0,id,0);
+    return 0;
+}
+// batch kill of sub-units: impossible for a whole-stream arm. Loud refusal.
+fn x_kill_batch(s:*X,corpus:i32,unit_n:i32,batch:i32) i32 {
+    x_led(s,OP_REFUSE,-1,104,0,0,unit_n,corpus,batch,0,0,0,0,0,batch,0);
+    return -1;
+}
+fn x_pin(s:*X,id:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PIN);
+    x_led(s,OP_PIN,sl,0,0,0,0,0,id,0,0,0,0,0,id,0);
+    return 0;
+}
+fn x_weaken(s:*X,id:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){
+        x_led(s,OP_REFUSE,-1,102,0,0,0,0,id,0,0,0,0,0,id,0);
+        return -1;
+    }
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_WEAK);
+    x_led(s,OP_WEAKEN,sl,0,0,0,0,0,id,0,0,0,0,0,id,0);
+    return 0;
+}
+fn x_mark_valuable(s:*X,id:i32) i32 {
+    x_led(s,OP_TMV,-1,0,0,0,0,0,id,0,0,0,0,0,id,0);
+    return x_pin(s,id);
+}
+fn x_defect_boundary(s:*X,id:i32,delta:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    iput(s.*.shifts,sl*4,delta);
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_SHIFT);
+    x_led(s,OP_TDB,sl,0,0,0,delta,0,0,0,0,0,0,0,id,0);
+    return 0;
+}
+fn x_defect_content(s:*X,stm:*BigBuf,id:i32,kind:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let total:i64=iget(s.*.lens,sl*4) as i64;
+    if(total<=0){return -1;}
+    // supersede: a live patch for another slot is dropped with its flag
+    if(s.*.pslot>=0 && s.*.pslot!=sl){
+        let of:i32=iget(s.*.flags,s.*.pslot*4);
+        iput(s.*.flags,s.*.pslot*4,of-(of & F_PATCH));
+        s.*.pslot=-1;
+    }
+    // rebuild only if the identical patch is not already live: the patch is
+    // a deterministic function of the stream, so skipping the rebuild is
+    // observably identical (and keeps the 100-defect M4 leg fast).
+    if(s.*.pslot!=sl || s.*.pkind!=kind || (iget(s.*.flags,sl*4) & F_PATCH)==0){
+        x_patch_build(s,kind,stm);
+        s.*.pslot=sl;s.*.pkind=kind;
+    }
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PATCH);
+    x_led(s,OP_TDC,sl,0,0,0,total as i32,0,kind,0,0,0,0,0,id,0);
+    return 0;
+}
+fn x_revise(s:*X,id:i32) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;let f:i32=iget(flags,sl*4);
+    let cleared:i32=0;
+    if((f & (F_SHIFT | F_PATCH))!=0){cleared=1;}
+    let nf:i32=f-(f & F_SHIFT);
+    nf=nf-(nf & F_PATCH);
+    iput(flags,sl*4,nf);
+    iput(s.*.shifts,sl*4,0);
+    if(s.*.pslot==sl){s.*.pslot=-1;}
+    if(cleared==1){
+        x_led(s,OP_REVISE,sl,0,0,0,0,0,0,0,0,0,0,0,id,0);
+    }
+    return cleared;
+}
+// verify a whole unit through the recall path against its stream
+fn x_verify_unit(s:*X,stm:*BigBuf,id:i32,r1:[]u8,r2:[]u8) i32 {
+    let sl:i32=slot_find(s,id);
+    if(sl<0){return 0;}
+    let f:i32=iget(s.*.flags,sl*4);
+    if((f & F_LIVE)==0){return 0;}
+    if((f & (F_SHIFT | F_PATCH))!=0){return 0;}
+    let total:i64=iget(s.*.lens,sl*4) as i64;
+    if(total<=0){return 0;}
+    let pos:i64=0;
+    while(pos<total){
+        let n:i32=(total-pos) as i32;
+        if(n>X_WIN){n=X_WIN;}
+        let rn:i32=x_recall(s,stm,id,pos,n,r1);
+        if(rn!=n){return 0;}
+        bb_copy_to(stm,pos,r2,n);
+        let i:i32=0;
+        while(i<n){if(r1[i]!=r2[i]){return 0;}i=i+1;}
+        pos=pos+(n as i64);
+    }
+    return 1;
+}
+// verify a byte range of a unit against an expected stream
+fn x_range_cmp(s:*X,stm:*BigBuf,exp:*BigBuf,id:i32,start:i64,len:i32,r1:[]u8,r2:[]u8) i32 {
+    let pos:i64=start;let rem:i32=len;
+    while(rem>0){
+        let n:i32=rem;
+        if(n>X_WIN){n=X_WIN;}
+        let rn:i32=x_recall(s,stm,id,pos,n,r1);
+        if(rn!=n){return 0;}
+        bb_copy_to(exp,pos,r2,n);
+        let i:i32=0;
+        while(i<n){if(r1[i]!=r2[i]){return 0;}i=i+1;}
+        pos=pos+(n as i64);rem=rem-n;
+    }
+    return 1;
+}
+
+// ---- JSON helpers (fragment line 1; runner appends rss line) ----
+// envelope: METRIC_JSON {"schema":"metrics-v1","arm":"x","round":"r1",
+//           "scale":"<s>","mode":"<m>","fields":{...}}
+fn j_begin(mode:[]u8,scale:[]u8,f:*i32) void {
+    _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"x\",\"round\":\"r1\",\"scale\":\"");
+    _zag_print(scale);
+    _zag_print("\",\"mode\":\"");
+    _zag_print(mode);
+    _zag_print("\",\"fields\":{");
+    f.*=0;
+}
+fn j_sep(f:*i32) void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_int(f:*i32,k:[]u8,v:i64) void {
+    j_sep(f);
+    _zag_print("\"");_zag_print(k);_zag_print("\":");_zag_print(_zag_i64_to_str(v));
+}
+fn j_dec1(f:*i32,k:[]u8,tenths:i64) void {
+    j_sep(f);
+    let neg:i32=0;let t:i64=tenths;
+    if(t<0){neg=1;t=0-t;}
+    let w:i64=t/10;let d:i64=t%10;
+    _zag_print("\"");_zag_print(k);_zag_print("\":");
+    if(neg==1){_zag_print("-");}
+    _zag_print(_zag_i64_to_str(w));_zag_print(".");_zag_print(_zag_i64_to_str(d));
+}
+fn j_str(f:*i32,k:[]u8,v:[]u8) void {
+    j_sep(f);
+    _zag_print("\"");_zag_print(k);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+fn j_bool(f:*i32,k:[]u8,v:i32) void {
+    j_sep(f);
+    _zag_print("\"");_zag_print(k);_zag_print("\":");
+    if(v==1){_zag_print("true");}else{_zag_print("false");}
+}
+fn j_null(f:*i32,k:[]u8) void {
+    j_sep(f);
+    _zag_print("\"");_zag_print(k);_zag_print("\":null");
+}
+fn j_end() void { _zag_print("}}");_zag_println(""); }
+
+// ================= M1: whole-stream fidelity =================
+fn t_m1(croot:[]u8,cfile:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8,scale:[]u8) void {
+    let sz:i64=file_size(croot,cfile);
+    if(sz<=0){_zag_println("M1,FATAL,empty-corpus");return;}
+    let s:X=x_new(X_CAP,8,64);
+    let stm:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,cfile,&stm)!=0){_zag_println("M1,FATAL,empty-corpus");return;}
+    let id:i32=(corpus<<24)|0;
+    x_ingest(&s,id,0,sz as i32,corpus);
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let ok:i32=x_verify_unit(&s,&stm,id,r1,r2);
+    let ct:i64=0;if(ok==1){ct=1000;}
+    // boundary: whole-file blob -> fail by design (frozen M-3)
+    let bt:i64=0;
+    _zag_print("M1,");_zag_print(cfile);_zag_print(",");
+    p_dec1(ct);_zag_print(",");p_dec1(bt);_zag_print(",");
+    _zag_print(_zag_i64_to_str(1));_zag_println("");
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_dec1(&jf,"m1_recall_tenths",ct);
+    j_dec1(&jf,"m1_boundary_tenths",bt);
+    j_int(&jf,"m1_units",1);
+    j_str(&jf,"m1_corpus",keyp);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);
+    bb_free(&s,&stm);
+}
+
+// ================= M2: learning curve over 50 episodes =================
+fn t_m2(croot:[]u8,cfile:[]u8,corpus:i32,tier:[]u8,jmode:[]u8,scale:[]u8) void {
+    let sz:i64=file_size(croot,cfile);
+    if(sz<=0){_zag_println("M2,FATAL,empty-corpus");return;}
+    let s:X=x_new(X_CAP,256,64);
+    let stm:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,cfile,&stm)!=0){_zag_println("M2,FATAL,empty-corpus");return;}
+    let id:i32=(corpus<<24)|0;
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    // ep0: probe BEFORE ingestion (untrained baseline)
+    let ep0:i64=0;
+    if(x_verify_unit(&s,&stm,id,r1,r2)==1){ep0=1000;}
+    x_ingest(&s,id,0,sz as i32,corpus);
+    let nep:i32=51;
+    let rs:[]u8=halloc(&s,nep*4);
+    iput(rs,0,ep0 as i32);
+    let e:i32=1;
+    while(e<=50){
+        x_ingest(&s,id,0,sz as i32,corpus);
+        let v:i32=0;
+        if(x_verify_unit(&s,&stm,id,r1,r2)==1){v=1000;}
+        iput(rs,e*4,v);
+        e=e+1;
+    }
+    let final:i64=iget(rs,50*4) as i64;
+    // boundary: whole-stream unit; boundary fidelity 0 by design (M-3)
+    let fb:i64=0;
+    // M9 curve taxonomy inputs
+    let takeoff:i32=-1;let e2:i32=0;
+    while(e2<nep){if(iget(rs,e2*4)>=500){takeoff=e2;break;}e2=e2+1;}
+    let steep:i64=0;e2=1;
+    while(e2<nep){let d:i64=(iget(rs,e2*4)-iget(rs,(e2-1)*4)) as i64;if(d>steep){steep=d;}e2=e2+1;}
+    let etc:i32=50;if(nep-1<etc){etc=nep-1;}
+    let late:i64=(iget(rs,etc*4)-iget(rs,takeoff*4)) as i64;
+    let shape:[]u8="other";
+    if(steep>=400 && late<=150){shape="fast-then-flat";}
+    else{
+        if(takeoff>=3 && steep>=400){shape="slow-then-sudden";}
+        else{if(steep<400){shape="gradual";}}
+    }
+    _zag_print("M2,");_zag_print(tier);_zag_print(",");
+    _zag_print(_zag_i64_to_str(50));_zag_print(",1,");
+    p_dec1(ep0);_zag_println("");
+    _zag_print("M9,");_zag_print(tier);_zag_print(",");
+    _zag_print(shape);_zag_println("");
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_int(&jf,"m2_episodes",50);
+    j_bool(&jf,"m2_censored",1);
+    j_dec1(&jf,"m2_ep0_recall_tenths",ep0);
+    j_dec1(&jf,"m2_final_recall_tenths",final);
+    j_dec1(&jf,"m2_final_boundary_tenths",fb);
+    j_str(&jf,"m9_shape",shape);
+    j_int(&jf,"m9_takeoff_ep",takeoff as i64);
+    j_dec1(&jf,"m9_steepness_tenths",steep);
+    j_dec1(&jf,"m9_late_gain_tenths",late);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);hfree(&s,rs);
+    bb_free(&s,&stm);
+}
+
+// ================= M3: 10k-unit triage =================
+// A18 literal adaptation: the valuable set is ALL whole-stream units (2);
+// the fresh stream is one whole-stream unit grown by 64B appends. Eviction:
+// whole-stream units are never evicted (declared policy); the 4000-slot
+// capacity never binds (3 live units).
+fn t_m3(croot:[]u8,jmode:[]u8,scale:[]u8) void {
+    let s:X=x_new(X_CAP,24000,64);
+    let stm_p:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_c:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_f:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,"prose.bin",&stm_p)!=0){_zag_println("M3,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,"code.bin",&stm_c)!=0){_zag_println("M3,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,"churn_fresh.bin",&stm_f)!=0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let id_p:i32=(X_C_PROSE<<24)|0;
+    let id_c:i32=(X_C_CODE<<24)|0;
+    let id_f:i32=(X_C_FRESH<<24)|0;
+    x_ingest(&s,id_p,0,stm_p.total as i32,X_C_PROSE);
+    x_mark_valuable(&s,id_p);
+    x_ingest(&s,id_c,0,stm_c.total as i32,X_C_CODE);
+    x_mark_valuable(&s,id_c);
+    // phase 1: 3000 fresh appends (one ADD each; the unit grows)
+    let f:i32=0;
+    while(f<X_M3_FRESH1){
+        x_ingest(&s,id_f,0,(f+1)*64,X_C_FRESH);
+        f=f+1;
+    }
+    let n_p1:i32=s.led_n;
+    // phase 2: kill storm -> all refused (no sub-units); weaken the 2 valuable
+    let k:i32=0;
+    while(k<X_M3_KILL){
+        x_kill_batch(&s,X_C_FRESH,7000,1000+k);
+        k=k+1;
+    }
+    let vids:[]u8=halloc(&s,8);
+    iput(vids,0,id_p);iput(vids,4,id_c);
+    let w:i32=0;let w_ok:i32=0;
+    while(w<50){
+        if(x_weaken(&s,iget(vids,(w%2)*4))==0){w_ok=w_ok+1;}
+        w=w+1;
+    }
+    // phase 3: 4000 more fresh appends
+    f=X_M3_FRESH1;
+    while(f<X_M3_FRESH1+X_M3_FRESH2){
+        x_ingest(&s,id_f,0,(f+1)*64,X_C_FRESH);
+        f=f+1;
+    }
+    let n_p3:i32=s.led_n;
+    // liveness
+    let surv:i32=0;
+    if(x_verify_unit(&s,&stm_p,id_p,r1,r2)==1){surv=surv+1;}
+    if(x_verify_unit(&s,&stm_c,id_c,r1,r2)==1){surv=surv+1;}
+    let st:i64=(surv as i64)*500;
+    let fs:i32=0;let fs_n:i32=0;
+    f=6500;
+    while(f<7000){
+        if(x_range_cmp(&s,&stm_f,&stm_f,id_f,(f as i64)*64,64,r1,r2)==1){fs=fs+1;}
+        fs_n=fs_n+1;f=f+1;
+    }
+    let fresht:i64=(fs as i64)*1000/(fs_n as i64);
+    let mgmt:i64=(n_p3-n_p1) as i64;
+    let freeze:[]u8="CLEAR";
+    if(st>=900 && fresht<800){freeze="FROZEN";}
+    if(mgmt<700){freeze="STARVED";}
+    if((w_ok as i64)<50){freeze="STARVED";}
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_dec1(&jf,"m3_survival_tenths",st);
+    j_dec1(&jf,"m3_fresh_recall_tenths",fresht);
+    j_int(&jf,"m3_mgmt_entries",mgmt);
+    j_int(&jf,"m3_weaken_handled",w_ok as i64);
+    j_str(&jf,"m3_freeze",freeze);
+    j_int(&jf,"m3_valuable",2);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);hfree(&s,vids);
+    bb_free(&s,&stm_p);bb_free(&s,&stm_c);bb_free(&s,&stm_f);
+}
+
+// ================= M4: trainer defects =================
+fn t_m4(croot:[]u8,cfile:[]u8,corpus:i32,pkind:i32,jmode:[]u8,scale:[]u8) void {
+    let sz:i64=file_size(croot,cfile);
+    if(sz<=0){_zag_println("M4,FATAL,empty-corpus");return;}
+    let s:X=x_new(X_CAP,2048,64);
+    let stm:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,cfile,&stm)!=0){_zag_println("M4,FATAL,empty-corpus");return;}
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let id:i32=(corpus<<24)|0;
+    x_ingest(&s,id,0,sz as i32,corpus);
+    // plant: 100 boundary defects then 100 content defects, all on the unit
+    let j:i32=0;
+    while(j<100){
+        x_defect_boundary(&s,id,(j%5)*16-32);
+        j=j+1;
+    }
+    j=100;
+    while(j<200){
+        x_defect_content(&s,&stm,id,pkind);
+        j=j+1;
+    }
+    // revise until all verified (max 12 episodes)
+    let cyc:[]u8=halloc(&s,48);
+    let rep_b:i32=0;let rep_c:i32=0;let ep_count:i32=0;
+    let e2:i32=1;
+    while(e2<=12){
+        let c0:i32=s.led_n;
+        j=0;
+        while(j<200){
+            x_revise(&s,id);
+            if(j<100){rep_b=rep_b+x_verify_unit(&s,&stm,id,r1,r2);}
+            else{rep_c=rep_c+x_verify_unit(&s,&stm,id,r1,r2);}
+            j=j+1;
+        }
+        iput(cyc,(e2-1)*4,s.led_n-c0);
+        if(rep_b>=100 && rep_c>=100){ep_count=e2;break;}
+        e2=e2+1;
+    }
+    // classify kills: defect-targeted units that ended up dead
+    let killed:i32=0;
+    let slk:i32=slot_find(&s,id);
+    if(slk<0){killed=200;}
+    else{if((iget(s.flags,slk*4) & F_LIVE)==0){killed=200;}}
+    let rev_bt:i64=(rep_b as i64)*1000/100;
+    let rev_ct:i64=(rep_c as i64)*1000/100;
+    let kill_t:i64=(killed as i64)*1000/200;
+    let ksub:i32=0;
+    if(kill_t>500 && (rev_bt<800 || rev_ct<800)){ksub=1;}
+    _zag_print("M4,");_zag_print(cfile);_zag_print(",");
+    p_dec1(rev_bt);_zag_print(",");p_dec1(rev_ct);_zag_print(",");
+    p_dec1(kill_t);_zag_print(",");_zag_print(_zag_i64_to_str(ksub as i64));_zag_println("");
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_dec1(&jf,"m4_rev_boundary_tenths",rev_bt);
+    j_dec1(&jf,"m4_rev_content_tenths",rev_ct);
+    j_dec1(&jf,"m4_kill_rate_tenths",kill_t);
+    j_bool(&jf,"m4_killsub",ksub);
+    j_int(&jf,"m4_episodes",ep_count as i64);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);hfree(&s,cyc);
+    bb_free(&s,&stm);
+}
+// ================= M5: memory cost =================
+fn t_m5(croot:[]u8,jmode:[]u8,scale:[]u8) void {
+    let s:X=x_new(X_CAP,2048,64);
+    let stm_p:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_f:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,"prose.bin",&stm_p)!=0){_zag_println("M5,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,"churn_fresh.bin",&stm_f)!=0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let id_p:i32=(X_C_PROSE<<24)|0;
+    let id_f:i32=(X_C_FRESH<<24)|0;
+    x_ingest(&s,id_p,0,stm_p.total as i32,X_C_PROSE);
+    // 500 single-unit appends + 500 batch kills (refused, audited)
+    let f:i32=0;
+    while(f<500){
+        x_ingest(&s,id_f,0,(f+1)*64,X_C_FRESH);
+        f=f+1;
+    }
+    let k:i32=0;
+    while(k<500){
+        x_kill_batch(&s,X_C_FRESH,5500,2000+k);
+        k=k+1;
+    }
+    // liveness: both whole-stream units verify byte-identical
+    let l:i32=0;
+    if(x_verify_unit(&s,&stm_p,id_p,r1,r2)==1){l=l+1;}
+    if(x_verify_unit(&s,&stm_f,id_f,r1,r2)==1){l=l+1;}
+    let src:i64=stm_p.total+(500 as i64)*64;
+    let ledn:i32=s.led_n;
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_int(&jf,"m5_units_learned",2);
+    j_int(&jf,"m5_source_bytes_learned",src);
+    j_int(&jf,"m5_slot_table_bytes",1800);
+    j_int(&jf,"m5_ledger_bytes",(ledn as i64)*64);
+    j_int(&jf,"m5_ledger_entries",ledn as i64);
+    j_int(&jf,"m5_corpus_buffer_bytes",stm_p.total);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);
+    bb_free(&s,&stm_p);bb_free(&s,&stm_f);
+}
+fn t_m5_baseline(croot:[]u8,scale:[]u8) void {
+    // same empty store + same-sized ledger as m5, fully touched; spin ~0.3s
+    let sz:i64=file_size(croot,"prose.bin");
+    if(sz<=0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let s:X=x_new(X_CAP,2048,64);
+    let i:i32=0;
+    let ids:[]u8=s.ids;let offs:[]u8=s.offs;let lens:[]u8=s.lens;
+    let corps:[]u8=s.corps;let flags:[]u8=s.flags;let shifts:[]u8=s.shifts;
+    while(i<X_CAP*4){
+        let x:u8=ids[i];ids[i]=x;offs[i]=x;lens[i]=x;corps[i]=x;flags[i]=x;shifts[i]=x;
+        i=i+1;
+    }
+    i=0;
+    let ins:[]u8=s.ins;
+    while(i<64*4){let x:u8=ins[i];ins[i]=x;i=i+1;}
+    let spin:i64=0;
+    while(spin<300000000){spin=spin+1;}
+    _zag_println("M5_BASELINE,ok");
+    let jf:i32=0;
+    j_begin("m5-baseline",scale,&jf);
+    j_bool(&jf,"m5_baseline",1);
+    j_end();
+}
+
+// ================= M6: transfer =================
+fn t_m6(croot:[]u8,jmode:[]u8,scale:[]u8,p2c:i32) void {
+    let s:X=x_new(X_CAP,2048,64);
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let tf:[]u8="t1_prose.bin";let tc:i32=X_C_T1P;
+    let sf:[]u8="t1_code.bin";let sc:i32=X_C_T1C;
+    if(p2c==0){tf="t1_code.bin";tc=X_C_T1C;sf="t1_prose.bin";sc=X_C_T1P;}
+    let stm_t:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_s:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,tf,&stm_t)!=0){_zag_println("M6,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,sf,&stm_s)!=0){_zag_println("M6,FATAL,empty-corpus");return;}
+    let id_t:i32=(tc<<24)|0;
+    let id_s:i32=(sc<<24)|0;
+    // train to criterion on the train stream: 50 episodes
+    x_ingest(&s,id_t,0,stm_t.total as i32,tc);
+    let e:i32=1;let te:i64=0;
+    while(e<=50){
+        x_ingest(&s,id_t,0,stm_t.total as i32,tc);
+        if(x_verify_unit(&s,&stm_t,id_t,r1,r2)==1){te=1000;}
+        e=e+1;
+    }
+    // 100 boundary defects on the train unit, then revise all
+    let d:i32=0;
+    while(d<100){
+        x_defect_boundary(&s,id_t,(d%5)*16-32);
+        d=d+1;
+    }
+    let rev_sum:i32=0;d=0;
+    while(d<100){
+        x_revise(&s,id_t);
+        rev_sum=rev_sum+x_verify_unit(&s,&stm_t,id_t,r1,r2);
+        d=d+1;
+    }
+    let rev_dt:i64=(rev_sum as i64)*10;
+    // transfer stream to criterion
+    x_ingest(&s,id_s,0,stm_s.total as i32,sc);
+    e=1;let fe:i64=0;
+    while(e<=50){
+        x_ingest(&s,id_s,0,stm_s.total as i32,sc);
+        if(x_verify_unit(&s,&stm_s,id_s,r1,r2)==1){fe=1000;}
+        e=e+1;
+    }
+    d=0;
+    while(d<100){
+        x_defect_boundary(&s,id_s,(d%5)*16-32);
+        d=d+1;
+    }
+    rev_sum=0;d=0;
+    while(d<100){
+        x_revise(&s,id_s);
+        rev_sum=rev_sum+x_verify_unit(&s,&stm_s,id_s,r1,r2);
+        d=d+1;
+    }
+    let rev_ds:i64=(rev_sum as i64)*10;
+    let tax:i64=((te-fe)+(rev_dt-rev_ds))/3;
+    let dtag:[]u8="p2c";
+    if(p2c==0){dtag="c2p";}
+    _zag_print("M6,");_zag_print(dtag);_zag_print(",");
+    p_dec1(fe);_zag_print(",");p_dec1(0);_zag_print(",");
+    p_dec1(rev_ds);_zag_print(",");p_dec1(tax);_zag_println("");
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_dec1(&jf,"rec_tenths",fe);
+    j_dec1(&jf,"bnd_tenths",0);
+    j_dec1(&jf,"rev_tenths",rev_ds);
+    j_dec1(&jf,"tax_tenths",tax);
+    j_end();
+    hfree(&s,r1);hfree(&s,r2);
+    bb_free(&s,&stm_t);bb_free(&s,&stm_s);
+}
+
+// ================= M7: no ID layer (N/A) =================
+// X is a non-ID arm: no persistent ID->storage mapping exists, so the
+// swap probe is N/A. Informational: count whole-stream reread bytes.
+fn t_m7(croot:[]u8,jmode:[]u8,scale:[]u8) void {
+    let s:X=x_new(X_CAP,64,64);
+    let stm:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,"prose.bin",&stm)!=0){_zag_println("M7,FATAL,empty-corpus");return;}
+    let id:i32=(X_C_PROSE<<24)|0;
+    x_ingest(&s,id,0,stm.total as i32,X_C_PROSE);
+    let rl:i64=stm.total;
+    // C' edit on the single unit (A24 degenerate: every-100th-unit -> q=0)
+    x_defect_content(&s,&stm,id,PK_FIRSTXOR);
+    let scratch:[]u8=halloc(&s,X_WIN);
+    let reread:i64=0;
+    let l:i32=0;
+    // X_M7_LOOKUPS is 5000 for protocol parity, but each X "lookup" is a
+    // full-stream scan (5.4MB, no index); 500 lookups = 2.7GB demonstrates
+    // the degenerate cost without a 45-minute run. M7 is N/A for X regardless.
+    let nl:i32=500;
+    while(l<nl){
+        let pos:i64=0;
+        while(pos<rl){
+            let n:i32=(rl-pos) as i32;
+            if(n>X_WIN){n=X_WIN;}
+            let rn:i32=x_recall(&s,&stm,id,pos,n,scratch);
+            if(rn<0){break;}
+            reread=reread+(rn as i64);
+            pos=pos+(n as i64);
+        }
+        l=l+1;
+    }
+    _zag_print("M7,non-id,");
+    _zag_print(_zag_i64_to_str(reread));
+    _zag_println("");
+    let jf:i32=0;
+    j_begin(jmode,scale,&jf);
+    j_null(&jf,"m7_hit_rate_tenths");
+    j_null(&jf,"m7_reuse_rate_tenths");
+    j_null(&jf,"m7_dedup_savings_bytes");
+    j_str(&jf,"m7_na_reason","non-ID-arm:no-persistent-ID-to-storage-mapping:reread-counted-informationally");
+    j_int(&jf,"m7_reread_bytes",reread);
+    j_end();
+    hfree(&s,scratch);
+    bb_free(&s,&stm);
+}
+
+// ================= M8: determinism under perturbation =================
+fn x_store_image(s:*X,img:[]u8) void {
+    // store image: raw LE bytes of the slot arrays, concatenated
+    // (ids, offs, lens, corps, flags, shifts: X_CAP*4 each; ins: 64*4;
+    //  pslot, pkind: 4 each). Total = 1800 bytes. Deterministic: no pointers.
+    let at:i32=0;
+    let i:i32=0;
+    while(i<X_CAP*4){img[at]=s.*.ids[i];at=at+1;i=i+1;}
+    i=0;while(i<X_CAP*4){img[at]=s.*.offs[i];at=at+1;i=i+1;}
+    i=0;while(i<X_CAP*4){img[at]=s.*.lens[i];at=at+1;i=i+1;}
+    i=0;while(i<X_CAP*4){img[at]=s.*.corps[i];at=at+1;i=i+1;}
+    i=0;while(i<X_CAP*4){img[at]=s.*.flags[i];at=at+1;i=i+1;}
+    i=0;while(i<X_CAP*4){img[at]=s.*.shifts[i];at=at+1;i=i+1;}
+    i=0;while(i<64*4){img[at]=s.*.ins[i];at=at+1;i=i+1;}
+    uput(img,at,s.*.pslot as i64);at=at+4;
+    uput(img,at,s.*.pkind as i64);at=at+4;
+}
+fn write_hex_line(dir:[]u8,fname:[]u8,tag:[]u8,hash:[]u8) void {
+    // "<tag> <hex>\n"
+    let fd:i64=w_open(dir,fname);
+    nio_write_all(fd,tag);
+    nio_write_all(fd," ");
+    let hx:[]u8=ns_hex(hash);
+    nio_write_all(fd,hx);
+    nio_write_all(fd,"\n");
+    nio_close(fd);
+    nio_free(hx);
+}
+fn w_open(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    return fd;
+}
+fn w_chunked(fd:i64,data:[]u8,n:i32) i32 {
+    // nio_write_all caps at 1MB per call: chunk the write
+    let at:i32=0;
+    while(at<n){
+        let m:i32=n-at;
+        if(m>X_WIN){m=X_WIN;}
+        if(nio_write_all(fd,data[at..at+m])!=(m as i64)){return -1;}
+        at=at+m;
+    }
+    return 0;
+}
+fn t_m8(croot:[]u8,outdir:[]u8,pert:[]u8,jmode:[]u8,scale:[]u8) void {
+    // 1. pre-init perturbations (accepted, documented no-ops where inert)
+    if(_zag_strcmp(pert,"frag")==1){
+        let i:i32=0;
+        while(i<256){
+            let b:[]u8=nio_alloc(1024+(i*64));
+            if(b.len>0){b[0]=1;}
+            nio_free(b);
+            i=i+1;
+        }
+    }
+    let pad:[]u8="";
+    if(_zag_strcmp(pert,"aslr")==1){pad=nio_alloc(1048576);}
+    // 2. init AFTER perturbations
+    let s:X=x_new(X_CAP,24000,64);
+    let r1:[]u8=halloc(&s,X_WIN);
+    let r2:[]u8=halloc(&s,X_WIN);
+    let stm_p:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_c:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    let stm_f:BigBuf=BigBuf{.nch=0,.total=0,.c0="",.c1="",.c2=""};
+    if(read_big(&s,croot,"prose.bin",&stm_p)!=0){_zag_println("M8,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,"code.bin",&stm_c)!=0){_zag_println("M8,FATAL,empty-corpus");return;}
+    if(read_big(&s,croot,"churn_fresh.bin",&stm_f)!=0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let id_p:i32=(X_C_PROSE<<24)|0;
+    let id_c:i32=(X_C_CODE<<24)|0;
+    let id_f:i32=(X_C_FRESH<<24)|0;
+    // 3. phase M1: whole-stream recall probes
+    x_ingest(&s,id_p,0,stm_p.total as i32,X_C_PROSE);
+    x_ingest(&s,id_c,0,stm_c.total as i32,X_C_CODE);
+    let m1p:i32=0;let m1c:i32=0;
+    if(x_verify_unit(&s,&stm_p,id_p,r1,r2)==1){m1p=1000;}
+    if(x_verify_unit(&s,&stm_c,id_c,r1,r2)==1){m1c=1000;}
+    // 4. phase M3 sequence
+    x_mark_valuable(&s,id_p);
+    x_mark_valuable(&s,id_c);
+    let f:i32=0;
+    while(f<3000){x_ingest(&s,id_f,0,(f+1)*64,X_C_FRESH);f=f+1;}
+    let k:i32=0;
+    while(k<3000){x_kill_batch(&s,X_C_FRESH,7000,1000+k);k=k+1;}
+    let w:i32=0;
+    while(w<50){
+        if((w%2)==0){x_weaken(&s,id_p);}else{x_weaken(&s,id_c);}
+        w=w+1;
+    }
+    f=3000;
+    while(f<7000){x_ingest(&s,id_f,0,(f+1)*64,X_C_FRESH);f=f+1;}
+    let ledn:i32=s.led_n;
+    // 5. artifacts (gate-compliant set: store_hashes.txt, store_chain.txt,
+    //    ledger.bin, ledger_chain.txt, alloc_trace.txt; all deterministic,
+    //    perturbation-agnostic). Extra files (manifest) are informational.
+    let img:[]u8=halloc(&s,1800);
+    x_store_image(&s,img);
+    // per-2^20-chunk sha256 of the store image (1800 bytes -> 1 chunk)
+    let ch:[]u8=halloc(&s,32);
+    ns_sha256(img,ch);
+    let fd:i64=w_open(outdir,"store_hashes.txt");
+    nio_write_all(fd,"chunk0 ");
+    let hx:[]u8=ns_hex(ch);
+    nio_write_all(fd,hx);
+    nio_write_all(fd,"\n");
+    nio_close(fd);
+    nio_free(hx);
+    let chain:[]u8=halloc(&s,32);
+    ns_sha256(ch,chain);
+    write_hex_line(outdir,"store_chain.txt","chain",chain);
+    fd=w_open(outdir,"ledger.bin");
+    w_chunked(fd,s.led,ledn*64);
+    nio_close(fd);
+    let lhash:[]u8=halloc(&s,32);
+    ns_sha256(s.led[0..ledn*64],lhash);
+    write_hex_line(outdir,"ledger_chain.txt","chain",lhash);
+    fd=w_open(outdir,"manifest.json");
+    nio_write_all(fd,"{\"arm\":\"x\",\"m8_scale\":\"");
+    nio_write_all(fd,scale);
+    nio_write_all(fd,"\",\"m8_ledger_entries\":");
+    nio_write_all(fd,_zag_i64_to_str(ledn as i64));
+    nio_write_all(fd,"}");
+    nio_close(fd);
+    // stdout stays perturbation-agnostic (the gate requires byte-identical
+    // stdout across perturbations; the runner's directory records which ran).
+    _zag_print("M8,");
+    p_dec1(m1p as i64);_zag_print(",");
+    p_dec1(m1c as i64);_zag_print(",");
+    _zag_print(_zag_i64_to_str(ledn as i64));
+    _zag_println("");
+    // fixed-order teardown (frees are trace-logged)
+    bb_free(&s,&stm_p);bb_free(&s,&stm_c);bb_free(&s,&stm_f);
+    hfree(&s,r1);hfree(&s,r2);
+    hfree(&s,img);hfree(&s,ch);hfree(&s,chain);hfree(&s,lhash);
+    // alloc trace written last: captures the full alloc/free sequence
+    // (except the trace buffer itself, which bypasses the trace by design)
+    fd=w_open(outdir,"alloc_trace.txt");
+    w_chunked(fd,s.trace,s.trace_n);
+    nio_close(fd);
+    if(pad.len>0){nio_free(pad);}
+}
+fn p_dec1(t:i64) void {
+    let w:i64=t/10;let d:i64=t%10;
+    _zag_print(_zag_i64_to_str(w));_zag_print(".");_zag_print(_zag_i64_to_str(d));
+}
+
+// ================= main: one binary, argv[1] selects the mode =================
+fn main() i32 {
+    let mode:[]u8=_zag_arg(1);
+    let croot:[]u8=_zag_arg(2);
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){t_m1(croot,"prose.bin",X_C_PROSE,"prose",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m1-1x-code")==1){t_m1(croot,"code.bin",X_C_CODE,"code",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m1-10x-prose")==1){t_m1(croot,"prose.bin",X_C_PROSE,"prose",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m1-10x-code")==1){t_m1(croot,"code.bin",X_C_CODE,"code",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m2-t1-prose")==1){t_m2(croot,"t1_prose.bin",X_C_T1P,"t1",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m2-t1-code")==1){t_m2(croot,"t1_code.bin",X_C_T1C,"t1",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m2-t2-prose")==1){t_m2(croot,"t2_prose.bin",X_C_T2P,"t2",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m2-t2-code")==1){t_m2(croot,"t2_code.bin",X_C_T2C,"t2",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m2-t3-1x")==1){t_m2(croot,"t3.bin",X_C_T3,"t3",mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m2-t1-10x-prose")==1){t_m2(croot,"t1_prose.bin",X_C_T1P,"t1",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m2-t1-10x-code")==1){t_m2(croot,"t1_code.bin",X_C_T1C,"t1",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m2-t2-10x-prose")==1){t_m2(croot,"t2_prose.bin",X_C_T2P,"t2",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m2-t2-10x-code")==1){t_m2(croot,"t2_code.bin",X_C_T2C,"t2",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m2-t3-10x")==1){t_m2(croot,"t3.bin",X_C_T3,"t3",mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m3-1x")==1){t_m3(croot,mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m3-10x")==1){t_m3(croot,mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m4-1x-prose")==1){t_m4(croot,"prose.bin",X_C_PROSE,PK_XOR7,mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m4-1x-code")==1){t_m4(croot,"code.bin",X_C_CODE,PK_RENAME,mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m4-10x-prose")==1){t_m4(croot,"prose.bin",X_C_PROSE,PK_XOR7,mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m4-10x-code")==1){t_m4(croot,"code.bin",X_C_CODE,PK_RENAME,mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m5-1x")==1){t_m5(croot,mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m5-10x")==1){t_m5(croot,mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m5-baseline")==1){t_m5_baseline(croot,"1x");return 0;}
+    if(_zag_strcmp(mode,"m6-p2c-1x")==1){t_m6(croot,mode,"1x",1);return 0;}
+    if(_zag_strcmp(mode,"m6-c2p-1x")==1){t_m6(croot,mode,"1x",0);return 0;}
+    if(_zag_strcmp(mode,"m6-p2c-10x")==1){t_m6(croot,mode,"10x",1);return 0;}
+    if(_zag_strcmp(mode,"m6-c2p-10x")==1){t_m6(croot,mode,"10x",0);return 0;}
+    if(_zag_strcmp(mode,"m7-1x")==1){t_m7(croot,mode,"1x");return 0;}
+    if(_zag_strcmp(mode,"m7-10x")==1){t_m7(croot,mode,"10x");return 0;}
+    if(_zag_strcmp(mode,"m8-1x")==1){
+        let outdir:[]u8=_zag_arg(3);
+        let pert:[]u8=_zag_arg(4);
+        t_m8(croot,outdir,pert,mode,"1x");
+        return 0;
+    }
+    if(_zag_strcmp(mode,"m8-10x")==1){
+        let outdir:[]u8=_zag_arg(3);
+        let pert:[]u8=_zag_arg(4);
+        t_m8(croot,outdir,pert,mode,"10x");
+        return 0;
+    }
+    _zag_print("unknown mode: ");
+    _zag_println(mode);
+    return 2;
+}
