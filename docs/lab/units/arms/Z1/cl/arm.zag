@@ -107,7 +107,9 @@ struct Z1 {
     ins_cap:i32,
     ins_n:i32,
     ins_head:i32,
-    dedup:[]u8,    // dedup map: dd_cap * 8 bytes (key u32, id i32); id<0 = empty
+    dedup:[]u8,    // dedup map: dd_cap * 8 bytes (key u32, id i32);
+                   // id==-1 empty (find stops), id==-2 tombstone (evicted key:
+                   // find skips, insert reuses)
     dd_cap:i32,
     trace:[]u8,    // alloc trace text
     trace_n:i32,
@@ -224,6 +226,31 @@ fn z1_challenges(buf:[]u8,p:i32,n:i32) i32 {
     }
     return bits;
 }
+// Hypothetical challenge set v2 (OBSERVATIONAL ONLY): C1 unchanged, C2 radius
+// 8->12, C3 neighborhood 16->24. Used by the challenge-set-revision probe
+// (kill disjunct 2): every live unit's left-boundary bits are recomputed under
+// v2 and compared to the stored v1 bits. v2 never touches a stored witness and
+// never alters the v1 admission mechanism.
+fn z1_challenges_v2(buf:[]u8,p:i32,n:i32) i32 {
+    let bits:i32=0;
+    // C1 unchanged: this boundary splits a recall unit
+    if(p>0 && p<n){
+        if(z1_is_word(buf[p-1])==1 && z1_is_word(buf[p])==1){bits=bits|1;}
+    }
+    // C2 widened: no whitespace within ±12
+    let lo:i32=p-12;if(lo<0){lo=0;}
+    let hi:i32=p+12;if(hi>n){hi=n;}
+    let seen:i32=0;let q:i32=lo;
+    while(q<hi){if(z1_is_ws(buf[q])==1){seen=1;break;}q=q+1;}
+    if(seen==0){bits=bits|2;}
+    // C3 widened: 24 identical bytes around p
+    if(p-12>=0 && p+12<=n){
+        let same:i32=1;let r:i32=p-12+1;
+        while(r<p+12){if(buf[r]!=buf[p-12]){same=0;break;}r=r+1;}
+        if(same==1){bits=bits|4;}
+    }
+    return bits;
+}
 // Witness: SHA-256 over the challenge transcript
 // (version || corpus || offset || length || challenge-bits || stream-start-flag).
 // The unit ID binds (span, challenge_transcript_hash) through the row: the row
@@ -265,8 +292,10 @@ fn z1_dedup_find(s:*Z1,key:i32,cid:i32,off:i32,len:i32,wit:[]u8) i32 {
     while(t<cap){
         let at:i32=h*8;
         let k:i32=iget(dd,at);let id:i32=iget(dd,at+4);
-        if(id<0){return -1;}
-        if(k==key && id>=0 && id<s.*.next_id){
+        if(id==-1){return -1;}
+        // id==-2 is a tombstone (evicted key): skip it, keep probing so
+        // entries placed past it stay reachable.
+        if(id!=-2 && k==key && id<s.*.next_id){
             let flags:[]u8=s.*.flags;
             if((iget(flags,id*4) & F_LIVE)!=0 &&
                iget(s.*.corps,id*4)==cid &&
@@ -277,6 +306,23 @@ fn z1_dedup_find(s:*Z1,key:i32,cid:i32,off:i32,len:i32,wit:[]u8) i32 {
         h=h+1;if(h>=cap){h=0;}t=t+1;
     }
     return -1;
+}
+// Evict the (key,id) entry by tombstoning it (id=-2). Both key and id must
+// match: a freelist-reused id carries a new key, and the old key's slot must
+// not strand a live mapping. Find skips tombstones; insert reuses them.
+fn z1_dedup_remove(s:*Z1,key:i32,id:i32) void {
+    let cap:i32=s.*.dd_cap;
+    if(cap<=0){return;}
+    let dd:[]u8=s.*.dedup;
+    let h:i32=key%cap;if(h<0){h=h+cap;}
+    let t:i32=0;
+    while(t<cap){
+        let at:i32=h*8;
+        let k:i32=iget(dd,at);let eid:i32=iget(dd,at+4);
+        if(eid==-1){return;}
+        if(eid!=-2 && k==key && eid==id){iput(dd,at+4,-2);return;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
 }
 fn z1_dedup_insert(s:*Z1,key:i32,id:i32) void {
     let cap:i32=s.*.dd_cap;
@@ -318,6 +364,16 @@ fn z1_insert(s:*Z1,buf:[]u8,cid:i32,off:i32,len:i32,is_new:*i32) i32 {
         id=s.*.free_head;
         let fn_:[]u8=s.*.free_next;
         s.*.free_head=iget(fn_,id*4);
+        // ID reuse: evict the row's stale dedup key (its old content) before
+        // the row is overwritten below. The key is recomputed from the row's
+        // current fields, which z1_kill / z1_evict_oldest_unpinned left
+        // intact (only F_LIVE was cleared). z1_dedup_find already verifies
+        // content identity, so this is hygiene against stale-entry
+        // accumulation, not a correctness patch.
+        let wold:[]u8=s.*.wit;
+        let oldkey:i32=z1_dkey(iget(s.*.corps,id*4),iget(s.*.offs,id*4),
+                               iget(s.*.lens,id*4),wold[id*32..id*32+8]);
+        z1_dedup_remove(s,oldkey,id);
     }else if(s.*.next_id<s.*.cap){
         id=s.*.next_id;
         s.*.next_id=id+1;
@@ -722,6 +778,18 @@ fn z1_probe(s:*Z1,cbufs:[]u8,coffs:[]u8,clens:[]u8,buf:[]u8,
     if(n>0){cok.*=ok*1000/n;bok.*=bo*1000/n;}else{cok.*=0;bok.*=0;}
 }
 
+// Count ledger entries carrying a given opcode (for regretted-cut accounting:
+// OP_REFUSE = challenged-and-failed cuts regretted on the record;
+// OP_ADD = chunk admissions).
+fn z1_count_op(s:*Z1,op:i32) i32 {
+    let c:i32=0;let e:i32=0;
+    while(e<s.*.led_n){
+        if(iget(s.*.led,e*64)==op){c=c+1;}
+        e=e+1;
+    }
+    return c;
+}
+
 // ---- M1: single-corpus perfect-recall + ID-arm swap probe (A15 provisional) ----
 fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
     let buf:[]u8=read_file(cdir,fname);
@@ -737,6 +805,16 @@ fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
     let maxlen:i32=0;
     z1_seg_spans(buf,soffs,slens,&maxlen);
     let n:i32=z1_seg_ingest(&s,buf,corpus,ids);
+    // regretted-cut accounting (frozen mechanism): proposed = regretted +
+    // survived, where regretted = OP_REFUSE (challenged-and-failed cuts,
+    // regretted on the record) and survived = chunk admissions that closed a
+    // proposed cut (OP_ADD - 1; the final chunk closes at n, not from a cut).
+    let n_ref:i32=z1_count_op(&s,OP_REFUSE);
+    let n_add:i32=z1_count_op(&s,OP_ADD);
+    let z1_surv:i32=n_add-1;
+    let z1_prop:i32=n_ref+z1_surv;
+    let z1_regret_t:i64=0;
+    if(z1_prop>0){z1_regret_t=(n_ref as i64)*1000/(z1_prop as i64);}
     let bout:[]u8=halloc(&s,maxlen);
     let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
     reg_set(coffs,clens,corpus,0,buf.len);
@@ -790,6 +868,13 @@ fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
     jf_str(&f,"m1_id_probe",idprobe);
     jf_int(&f,"m1_id_probe_n",probe_n as i64);
     jf_int(&f,"m1_id_probe_ok",probe_ok as i64);
+    jf_int(&f,"z1_proposed_cuts",z1_prop as i64);
+    jf_int(&f,"z1_regretted",n_ref as i64);
+    jf_int(&f,"z1_survived",z1_surv as i64);
+    jf_dec1(&f,"z1_regret_rate_tenths",z1_regret_t);
+    // kill disjunct 1 (Z1 side measured; arm D baseline absent from the
+    // committed record, so the comparison itself is BLOCKED-ON-D).
+    jf_str(&f,"z1_arm_d_status","BLOCKED-ON-D");
     j_end();
     hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);
     hfree(&s,soffs);hfree(&s,slens);hfree(&s,ids);
@@ -1052,6 +1137,15 @@ fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8) void {
     let maxlen:i32=0;
     z1_seg_spans(buf,soffs,slens,&maxlen);
     let n:i32=z1_seg_ingest(&s,buf,corpus,ids);
+    // regretted-cut accounting (frozen mechanism): proposed = regretted +
+    // survived. regretted = OP_REFUSE (challenged-and-failed cuts, regretted
+    // on the record); survived = OP_ADD - 1 (the final chunk closes at n).
+    let n_ref:i32=z1_count_op(&s,OP_REFUSE);
+    let n_add:i32=z1_count_op(&s,OP_ADD);
+    let z1_surv:i32=n_add-1;
+    let z1_prop:i32=n_ref+z1_surv;
+    let z1_regret_t:i64=0;
+    if(z1_prop>0){z1_regret_t=(n_ref as i64)*1000/(z1_prop as i64);}
     let bout:[]u8=halloc(&s,maxlen);
     let patch:[]u8=halloc(&s,maxlen);
     let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
@@ -1101,6 +1195,30 @@ fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8) void {
         if(rep_b+rep_c>=Z1_M4_N){break;}
         ep=ep+1;
     }
+    // Challenge-set-revision probe (kill disjunct 2, OBSERVATIONAL): recompute
+    // every live unit's left-boundary challenge bits under hypothetical v2
+    // (C1 unchanged, C2 radius 8->12, C3 neighborhood 16->24) and compare to
+    // the stored v1 bits. invalidated = v2 bits differ from stored v1 bits
+    // (a boundary admitted under v1 would be regretted under v2). No stored
+    // witness is mutated; the v1 admission mechanism is untouched. Binding:
+    // invalidated/live > 10% kills the arm.
+    let v2_inv:i32=0;let v2_live:i32=0;
+    let vi:i32=0;
+    while(vi<n){
+        let vid:i32=iget(ids,vi*4);
+        if(vid>=0 && vid<s.next_id && (iget(s.flags,vid*4) & F_LIVE)!=0){
+            v2_live=v2_live+1;
+            let voff:i32=iget(s.offs,vid*4);
+            let v2b:i32=0;
+            // offset 0 is the stream start (never a proposed cut), exactly as
+            // v1 treats it: unchallenged under both.
+            if(voff!=0){v2b=z1_challenges_v2(buf,voff,buf.len);}
+            if(v2b!=iget(s.witc,vid*4)){v2_inv=v2_inv+1;}
+        }
+        vi=vi+1;
+    }
+    let v2_inv_t:i64=0;
+    if(v2_live>0){v2_inv_t=(v2_inv as i64)*1000/(v2_live as i64);}
     // classify kills
     let killed:i32=0;
     j=0;
@@ -1128,6 +1246,15 @@ fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8) void {
     jf_dec1(&f,"m4_kill_rate_tenths",kill_t);
     jf_bool(&f,"m4_killsub",ksub);
     jf_int(&f,"m4_episodes",ep as i64);
+    jf_int(&f,"z1_proposed_cuts",z1_prop as i64);
+    jf_int(&f,"z1_regretted",n_ref as i64);
+    jf_int(&f,"z1_survived",z1_surv as i64);
+    jf_dec1(&f,"z1_regret_rate_tenths",z1_regret_t);
+    jf_int(&f,"z1_live_witnesses",v2_live as i64);
+    jf_dec1(&f,"z1_challenge_rev_invalidated_tenths",v2_inv_t);
+    // kill disjunct 1 (Z1 side measured; arm D baseline absent from the
+    // committed record, so the comparison itself is BLOCKED-ON-D).
+    jf_str(&f,"z1_arm_d_status","BLOCKED-ON-D");
     j_end();
     hfree(&s,bout);hfree(&s,patch);hfree(&s,coffs);hfree(&s,clens);
     hfree(&s,cyc);hfree(&s,d_idx);
@@ -1213,7 +1340,10 @@ fn t_m6(cdir:[]u8,dir:i32) void {
     if(tbuf.len==0 || ybuf.len==0){_zag_println("M6,FATAL,empty-corpus");return;}
     let tcap:i32=tbuf.len/Z1_GRID+2048;
     let ycap:i32=ybuf.len/Z1_GRID+2048;
-    let s:Z1=z1_new(tcap+ycap,tled+yled,tcap+ycap+4096,65536,65536);
+    // dd_cap=131072: M6 p2c ingests ~72k distinct spans (t1_prose + code);
+    // 65,536 slots would fill and force full-table probes on the tail
+    // (the same quadratic trap behind the 2026-09-21 M8 slowdown).
+    let s:Z1=z1_new(tcap+ycap,tled+yled,tcap+ycap+4096,131072,65536);
     let tspancap:i32=tbuf.len/Z1_GRID+2;
     let yspancap:i32=ybuf.len/Z1_GRID+2;
     let toffs:[]u8=halloc(&s,tspancap*4);let tlens:[]u8=halloc(&s,tspancap*4);
@@ -1444,7 +1574,11 @@ fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8) void {
     let cap:i32=260000;
     // 500k ledger entries = 32.0MB < 2^25 (znc slice limit). z_led drops
     // beyond cap (LEDGER-BOUND); m8_ledger_entries in stdout shows the count.
-    let s:Z1=z1_new(cap,500000,cap+2048,65536,65536);
+    // dd_cap=262144: M8 ingests ~105k distinct spans (36k prose + 68k code);
+    // 65,536 slots filled up and open-addressing probes went quadratic, which
+    // was the 2026-09-21 M8 "hang" (it was a slowdown, not a deadlock).
+    // Capacity only; admission behavior is unchanged.
+    let s:Z1=z1_new(cap,500000,cap+2048,262144,65536);
     let spancap_p:i32=prose.len/Z1_GRID+2;
     let spancap_c:i32=code.len/Z1_GRID+2;
     let poffs:[]u8=halloc(&s,spancap_p*4);let plens:[]u8=halloc(&s,spancap_p*4);
@@ -1511,7 +1645,7 @@ fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8) void {
     // ---- artifacts ----
     // store image: row arrays + witness + dedup + insertion queue
     // rows are 68 B: 7x u32 + 32B witness + 2x u32 (witv, witc)
-    let imgcap:i32=cap*68+65536*8+(cap+2048)*4;
+    let imgcap:i32=cap*68+s.dd_cap*8+(cap+2048)*4;
     let img:[]u8=halloc(&s,imgcap);
     let at:i32=0;
     at=img_copy(img,at,s.offs);at=img_copy(img,at,s.lens);
@@ -1597,7 +1731,7 @@ fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8) void {
     tb_s(mb,&mn,",\"ledger_entries\":");tb_i(mb,&mn,s.led_n as i64);
     tb_s(mb,&mn,",\"revisions\":1000,\"revision_success\":");tb_i(mb,&mn,rev_success as i64);
     tb_s(mb,&mn,",\"region_bytes\":{\"rows\":");tb_i(mb,&mn,(cap as i64)*64);
-    tb_s(mb,&mn,",\"dedup\":");tb_i(mb,&mn,65536*8 as i64);
+    tb_s(mb,&mn,",\"dedup\":");tb_i(mb,&mn,(s.dd_cap as i64)*8);
     tb_s(mb,&mn,",\"ledger\":");tb_i(mb,&mn,600000*64 as i64);
     tb_s(mb,&mn,",\"queue\":");tb_i(mb,&mn,((cap+2048)*4) as i64);
     tb_s(mb,&mn,"},\"challenge\":{\"grid\":64,\"ck\":8,\"version\":1}}\n");

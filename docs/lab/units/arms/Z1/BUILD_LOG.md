@@ -64,11 +64,44 @@ All other ledgers audited: max is M8 at 32.0MB < 33,554,432.
    as implemented but was absent from the source. Document corrected 2026-09-21;
    probe remains unimplemented (kill cell 2 BLOCKED).
 
-## 2026-09-21 — Full 1x battery
+## 2026-09-21 — Continuation: dedup fixes, v2 probe, regret counters (Z1 crew 2)
 
-Launched `run_battery.sh` in `~/workspace/z1_battery/` covering all 16 modes
-plus M8 ×10 (5 perturbations × 2 runs). (Results appended below as they
-complete.)
+3. **M8 "hang" root-caused (not a deadlock):** M8 ingests 104,895 distinct
+   spans (36,404 prose + 68,491 code) into a 65,536-slot dedup table. Once
+   full, every insert/find scanned the entire table (open addressing,
+   billions of probes) — a quadratic slowdown, not a hang. Fixed by
+   `dd_cap=262144` for M8 (load ≈ 0.4). M6 p2c had the same trap mildly
+   (~72k spans into 65,536 slots); bumped to 131,072. M8 `imgcap` and the
+   store manifest now use `s.dd_cap` instead of the hardcoded 65536.
+   M8 clean now completes in ~2 min (was: no output after 10+ min).
+4. **Dedup stale-entry hygiene:** `z1_dedup_find` already verifies content
+   identity (live flag, corpus, offset, length, full witness), so stale
+   entries were never a correctness bug — but killed/evicted rows left their
+   keys stranded, accumulating dead probes. Now `z1_insert` evicts the reused
+   row's old key on freelist pop (`z1_dedup_remove`, tombstone id=-2);
+   `z1_dedup_find` skips tombstones but keeps probing past them (probe-chain
+   integrity); `z1_dedup_insert` reuses tombstone slots. Observable behavior
+   unchanged (double-run byte-identical stdout confirms).
+5. **v2 challenge-revision probe implemented** (`z1_challenges_v2`: C1
+   unchanged, C2 radius 8→12, C3 neighborhood 16→24; observational only).
+   Measured in `t_m4`: 0/36,404 invalidated (0.0%) prose, 0.0% code. Kill
+   cell 2 does not trigger. **Finding:** the widened-v2 probe is mathematically
+   vacuous — a strictly stricter challenge set cannot invalidate v1-admitted
+   boundaries (proof in ARM_SPEC.md §6). The 0.0% is faithful, not a bug.
+6. **Regretted-cut counters wired:** `z1_count_op` tallies OP_REFUSE /
+   OP_ADD from the ledger; `t_m1`/`t_m4` emit `z1_proposed_cuts`,
+   `z1_regretted`, `z1_survived`, `z1_regret_rate_tenths`. Prose: 48,327
+   regretted / 84,730 proposed = **57.0%**. Kill disjunct 1 is BLOCKED-ON-D
+   (no arm-D baseline in the committed record; `z1_arm_d_status` emitted).
+7. **Toolchain note:** `znc --emit-c --out` is broken in this build
+   ("cannot read <out>", E0018 on valid source); the working form is
+   `znc <src> -o <out>`. Binary: 255KB. 69 analyzer warnings, no errors.
+
+## 2026-09-21 — Full 1x battery (fixed binary)
+
+`~/workspace/z1_battery.sh`: 15 modes × 2 runs, byte-identical stdout —
+15/15 PASS. `m8_gate.sh`: 10 runs (5 perturbations × 2), sequential —
+gate verdict recorded below. Evidence JSON (`z1_*` fields) in run stdouts.
 
 ## znc warnings
 

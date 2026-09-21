@@ -126,29 +126,40 @@ outcome, including failures.
 ### Challenge-set-revision probe (frozen kill criterion 2)
 
 The prereg kills the **binding** (not the window) if "challenge-set revision
-invalidates >10% of live witnesses". **STATUS: NOT IMPLEMENTED.**
+invalidates >10% of live witnesses". **STATUS: IMPLEMENTED 2026-09-21**
+(`z1_challenges_v2` + live-witness scan in `t_m4`).
 
-The probe was described in an earlier draft as implemented in `t_m4`, but
-inspection of the source on 2026-09-21 confirms it is absent. The intended
-procedure (for future implementation):
-
-1. After the revision curriculum, every live unit's witness is recomputed
-   under a **hypothetical challenge set v2** (C2 radius widened 8→12,
-   C3 neighborhood 16→24; C1 unchanged). v2 is observational only — no stored
-   witness is mutated and the frozen v1 mechanism is untouched.
-2. `invalidated` = units whose v2 challenge bitmask differs from the stored
-   v1 bitmask (a boundary admitted under v1 would be regretted under v2).
+Procedure (as implemented):
+1. After the revision curriculum, every live unit's left-boundary challenge
+   bits are recomputed under **hypothetical challenge set v2** (C1 unchanged,
+   C2 radius 8→12, C3 neighborhood 16→24). v2 is observational only — no
+   stored witness is mutated and the frozen v1 mechanism is untouched.
+   Offset 0 (stream start, never a proposed cut) is unchallenged under both.
+2. `invalidated` = units whose v2 bitmask differs from the stored v1 bitmask.
 3. Kill cell = `invalidated / live_units > 0.10`.
 
-Until implemented, kill cell 2 is BLOCKED. The document is corrected here;
-no v2 probe output exists in the arm.
+**Measured 2026-09-21:** `invalidated/live = 0/36404 = 0.0%` (prose);
+code leg likewise 0.0%. Kill cell 2 does **not** trigger.
+
+**Finding (mathematical, not a bug):** the v2-widened probe is vacuous by
+construction. v2 is a *strict strengthening* of v1 (identical C1, wider C2
+radius, wider C3 neighborhood). For any boundary admitted under v1 (v1 bits
+= 0): C1 gives the same result; C2 cannot fire under v2 (whitespace within
+±8 implies whitespace within ±12); C3 cannot fire under v2 (24 identical
+bytes imply 16 identical). Hence v2 bits = 0 for every v1-admitted boundary,
+and `invalidated` is identically 0. A challenge-set revision that *narrows*
+the window (more permissive) could invalidate v1 witnesses; a widening
+cannot. The 0.0% is the correct, faithful measurement of the preregistered
+v2 — the prereg's intuition ("some boundaries would be regretted") was
+mistaken, and the disjunct is un-triggerable as specified. Recorded here
+honestly rather than redesigned.
 
 ## 7. Kill criteria and arm-D dependency
 
 | # | Criterion | Status |
 |---|-----------|--------|
-| 1 | Regretted-cut rate not ≥50% lower than arm D on the revision curriculum → the window buys nothing | **BLOCKED** — arm D evidence unavailable to Z1; no D baseline was supplied and none is invented. The Z1-side rate is reported (`m4_regretted_cut_rate`) for future comparison. |
-| 2 | Challenge-set revision invalidates >10% of live witnesses → binding too brittle (kill the binding, keep the window) | **BLOCKED** — v2 probe not implemented (see §6 correction 2026-09-21). |
+| 1 | Regretted-cut rate not ≥50% lower than arm D on the revision curriculum → the window buys nothing | **BLOCKED-ON-D** — arm D has no committed regretted-cut baseline (searched 2026-09-21: D/ contains no evidence JSON and no regret metrics; no number is invented). Z1 side measured: prose regret rate **57.0%** (48,327 regretted / 84,730 proposed), code leg likewise measured — reported in `z1_regret_rate_tenths` for future comparison. |
+| 2 | Challenge-set revision invalidates >10% of live witnesses → binding too brittle (kill the binding, keep the window) | **NOT TRIGGERED** — v2 probe implemented and measured 2026-09-21: 0/36,404 invalidated (0.0%) on prose, 0.0% on code. The widened-v2 probe is mathematically vacuous (see §6); the 0.0% is the faithful measurement. |
 
 ## 8. Frozen ambiguities (logged, implemented literally)
 

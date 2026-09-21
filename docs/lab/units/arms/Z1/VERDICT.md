@@ -25,23 +25,30 @@ inaccurate ECON paraphrase was superseded by the second correction.
 | M5 | 36,404 units, 5.4MB source, 6.3MB slot table, 5.5MB ledger (85,731 entries) |
 | M6 p2c/c2p | 100% recall, 100% boundary, 100% revision, 0% tax |
 | M7 | 100% hit rate, 2.13% reuse, 50% dedup ratio, 748KB reread |
-| M8 | INCOMPLETE — 1 run completed (old binary, rc=0); 10-run determinism gate not finished. New binary (freelist fix) hangs in M8, likely dedup stale-entry interaction with ID reuse. |
+| M8 | COMPLETE — 10/10 runs (5 perturbations × 2), byte-identical stdout; 100.0% prose recall, 100.0% code recall, 233,679 ledger entries, all 8 artifacts present. The "hang" was a quadratic dedup slowdown (fixed: dd_cap 65,536→262,144), not a deadlock or stale-entry bug. |
 
 ## Kill-criterion status
 
-**BLOCKED.** The two binding kill cells cannot be resolved:
+1. **Regretted-cut rate vs arm D: BLOCKED-ON-D.** The Z1 side is now measured
+   and wired into the arm output: prose **57.0%** (48,327 regretted /
+   84,730 proposed cuts), code leg likewise measured (`z1_regret_rate_tenths`
+   in M1/M4 JSON). No arm-D regretted-cut baseline exists in the committed
+   record (searched 2026-09-21; D/ has no evidence JSON and no regret
+   metrics) — the ≥50%-lower comparison cannot be evaluated, and no number
+   is invented. `z1_arm_d_status: "BLOCKED-ON-D"` is emitted in the JSON.
 
-1. **Regretted-cut rate vs arm D:** The arm-D baseline was never built; per
-   standing orders I do not invent it. The Z1 regretted-cut rate counter is
-   not yet wired into the arm output. Cell status: UNRESOLVED.
-
-2. **Challenge-set revision >10%:** The hypothetical-v2 probe is documented
-   in ARM_SPEC.md but not implemented in the arm. The >10% kill cannot be
-   evaluated. Cell status: UNRESOLVED.
+2. **Challenge-set revision >10%: NOT TRIGGERED.** The hypothetical-v2 probe
+   is now implemented (`z1_challenges_v2`, observational; C1 unchanged, C2
+   radius 8→12, C3 neighborhood 16→24) and measured on the revision
+   curriculum: **0/36,404 invalidated (0.0%)** on prose, 0.0% on code.
+   The widened-v2 probe is mathematically vacuous — a strictly stricter
+   challenge set cannot invalidate v1-admitted boundaries (proof in
+   ARM_SPEC.md §6) — so the disjunct is un-triggerable as specified. The
+   0.0% is the faithful measurement, recorded honestly.
 
 The mechanism itself (challenge window with regretted cuts) is implemented
 and functional: M1 shows ~57% of proposed grid cuts regretted on prose
-(36k surviving of 84k proposed), all regrets audited.
+(36k surviving of 84k proposed), all regrets audited via OP_REFUSE.
 
 ## Bugs found and fixed during 1x
 
@@ -54,6 +61,17 @@ and functional: M1 shows ~57% of proposed grid cuts regretted on prose
    fresh recall.
 3. **M3 eviction freelist:** `z1_evict_oldest_unpinned` did not push to
    freelist (fixed with #2).
+4. **M8 quadratic dedup slowdown (misdiagnosed as hang):** 104,895 distinct
+   spans into a 65,536-slot dedup table; once full, probes went quadratic.
+   Fixed by `dd_cap=262144` (M8) and `131072` (M6 p2c, same trap mildly);
+   M8 `imgcap`/manifest now use `s.dd_cap`. Added tombstone eviction of
+   reused rows' old dedup keys (`z1_dedup_remove`, id=-2) as hygiene —
+   `z1_dedup_find` already verified content identity, so no correctness bug
+   existed. M8: 10+ min stuck → ~2 min complete.
+5. **Missing kill-metric output:** regretted-cut counters (`z1_count_op` over
+   OP_REFUSE/OP_ADD) and the v2 challenge-revision probe (`z1_challenges_v2`)
+   wired into M1/M4 JSON. Kill cell 1: BLOCKED-ON-D. Kill cell 2: 0.0%,
+   not triggered (probe vacuous by construction — see ARM_SPEC.md §6).
 
 ## Procedural notes
 
@@ -66,14 +84,15 @@ and functional: M1 shows ~57% of proposed grid cuts regretted on prose
 
 ## Verdict
 
-**1x battery: INCOMPLETE — M8 pending.** All non-M8 bars pass. The binding
-kill criteria are BLOCKED (no arm-D baseline; v2 probe not implemented).
-No 10x run attempted.
+**1x battery: COMPLETE.** All 16 modes pass (15/15 byte-identical double
+runs; M8 10/10 via the gate). The binding kill criteria: cell 1
+BLOCKED-ON-D (Z1 side 57.0% measured; no D baseline), cell 2 NOT TRIGGERED
+(0.0% invalidated; probe vacuous as specified). No 10x run attempted.
 
-**M8 note:** One M8 run completed with the pre-freelist binary (rc=0). The
-freelist fix (required for M3) appears to introduce a dedup stale-entry
-interaction that hangs M8: when a freelist-reused ID is reinserted, the old
-dedup key still maps to that ID, and `z1_dedup_find`'s liveness check does
-not verify content identity. Fix requires content verification in dedup_find
-or old-key eviction on ID reuse. The 10-run byte-identical gate is not yet
-demonstrated.
+**M8 note (corrected):** The "hang" was a misdiagnosis. M8 ingests 104,895
+distinct spans into a 65,536-slot dedup table; once full, open-addressing
+probes went quadratic (billions of probes — a slowdown, not a deadlock).
+`z1_dedup_find` already verified content identity, so there was no
+stale-entry correctness bug. Fixed by sizing the table to the load
+(dd_cap=262,144) plus tombstone eviction of reused rows' old keys. M8 clean
+now completes in ~2 min with byte-identical stdout across all 10 gate runs.
