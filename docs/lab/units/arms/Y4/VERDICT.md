@@ -3,7 +3,7 @@
 **Arm:** Y4 — Question-driven (lazy) cuts
 **Date:** 2026-09-21
 **Verdict: PASS (CONDITIONAL — see §1)**
-**Commit:** (filled at commit time)
+**Commit:** 7998f9d568a02fbffc7886ceb50c4071e7a48b0a (tnn-native-lab)
 **Evidence:** `scorecard_r1_1x.json`, `evidence/STATUS.txt`, `evidence/m8_GATE.txt`,
 `audit_ledger.py` (clean on the M5 ledger, 160,233 entries, 0 issues)
 
