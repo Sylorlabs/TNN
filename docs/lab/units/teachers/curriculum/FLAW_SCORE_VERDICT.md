@@ -4,6 +4,14 @@
 `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584a31779a91a64deeef879`
 **Status: MACHINERY PASS / SCORING LEG FAIL (BLOCKED, with evidence) — PARKED FOR MICAH**
 
+> **C5 ADDENDUM (2026-09-21, appended at end of file):** the scoring leg was
+> re-run unblocked by the W5 pcodec rebuild (frozen §B.3) — real learner over
+> real arm-1 wires, 287/287 ingress rc=0, N=5 byte-identical + adversarial
+> perturbations. §6's BLOCKED status is superseded for the scoring leg; the
+> learner FAILS the §B.7 bar honestly (best slice 1/12 hits). Per-slice hit
+> counts for W9: S0=0 S1=0 S2=0 S3=0 S4=0 S5=1 S6=0 S7=0. W7 sections below are
+> unchanged history.
+
 This sheet reports the §4 kill criteria as they are, not as a PASS would need
 them to be. An honest FAIL with evidence beats a PASS with bent rules.
 
@@ -231,3 +239,172 @@ Behavioral pattern (per-flaw lines in `verify_flawscore/logs/verdict_S*.txt`):
    access through a `&local`-derived pointer fails the typed-declaration
    check; identical access through a `*T` parameter compiles. Workaround in
    `~/AGENTS.md`. Relevant to anyone extending the battery or harness.
+
+---
+
+# ADDENDUM C5 — 2026-09-21: flaw-scoring leg RE-RUN, unblocked by the pcodec fix
+
+**Worker:** C5 (Track B closeout) · **Date:** 2026-09-21 · **Task frozen:** `TASK_C5.md`
+SHA-256 `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584a31779a91a64deeef879`
+**Status: SCORING LEG UNBLOCKED AND RUN END-TO-END — LEARNER FAILS THE §B.7 BAR (honest FAIL, with evidence)**
+
+This addendum supersedes §6's BLOCKED status for the scoring leg only. All W7
+sections above remain the record of the W7 run; nothing above this line was
+edited.
+
+## C5.1 Verdict
+
+| Leg | Verdict | Basis |
+|---|---|---|
+| Real learner ingresses real arm-1 frozen-§P wires (rc=0, 287/287) | **PASS** | C5.2 |
+| No-shim decisions == W7 shim decisions (codec swap behavior-preserving) | **PASS** | C5.3 |
+| N=5 byte-identical decisions + tapes; adversarial perturbations | **PASS** | C5.3 |
+| Seal: manifest stayed sealed from the learner path (re-audit) | **PASS** | C5.4 |
+| Leak rule | **PASS** | C5.5 (leak=0, all slices, all runs) |
+| **Score ≥10/12 hits per slice (§B.7 kill bar)** | **FAIL** | C5.5: best slice 1/12 hits |
+
+## C5.2 Ingress proof (the unblock)
+
+W5 rebuilt `learner/pcodec.zag` to frozen §B.3 (commit 4a6d898c1e66). C5 ran the
+REAL `p_decode` on the REAL arm-1 teacher wires verbatim — no shim:
+
+- **287/287 wires decode rc=0** across all 8 slices (S0 44, S1 45, S2 44,
+  S3 46, S4 24, S5 27, S6 32, S7 25), every run, `ingress_ok` == wire count,
+  `fails=0` on all 40 baseline runs (`logs/c5/c5_run.log`).
+- Hostile-path matrix via `probe_decode.zag` (direct `p_decode` calls on
+  single-wire buffers, twice each): clean→0, magic-zeroed→1 (`P_V_BAD_MAGIC`),
+  teacher_id=0→3 (`P_V_BAD_TEACHER`), checksum-flipped→7 (`P_V_CHECKSUM`).
+  Matches the §P V_* check order.
+
+## C5.3 Determinism + codec-swap fidelity
+
+- **N=5:** all 8 slices byte-identical decisions AND byte-identical tapes
+  across 5 runs (`DET`/`TDET` lines in `c5_run.log`).
+- **SHIMCHECK:** all 8 slices' no-shim decisions byte-identical to W7's
+  shim-path decisions — W7's `fr_translate` was faithful, and the codec swap
+  preserved deliberation behavior exactly.
+- **Adversarial perturbations** (`run_c5_pert.sh`, `c5_pert.log`):
+  - P-a (session_id+1 on every wire, checksum recomputed): 44/44 decisions
+    byte-identical to baseline — session_id does not leak into deliberation.
+  - P-b (seq 3 teacher_id=0): rc=3 for that seq only → `(-1,-1)` record at
+    seq 3, all other 43 records identical; DET ×2.
+  - P-c (seq 5 checksum flipped): rc=7 for that seq only → `(-1,-1)` at
+    seq 5, rest identical; DET ×2.
+  - P-d (seq 7 magic zeroed): rejected at the runner's framing gate —
+    INTEGRITY event code 2002 in the tape, session halts after the 7 good
+    wires, exit rc=2; DET ×2. (The codec's own rc=1 magic path is proven by
+    `probe_decode`; the framing gate fires first on the file path.)
+
+## C5.4 Seal re-audit (PASS)
+
+- `grep -rni sealed|manifest|canary` over `learner/*.zag`, `learner/tests`,
+  `learner/verify`: only hit is the znc `.zag-cache` semantic-record format
+  string (`format=zag-semantic-manifest-v1`) — compiler cache metadata, not
+  flaw data; `.zag-cache/` is never committed.
+- `flawrun_frozen.zag` imports only `learner/delib.zag` + the SHA-256
+  substrate; zero sealed-directory imports. `strings` scan of the built
+  binary: zero sealed-path bytes.
+- The scorer binary (`flawscore_bin`) legitimately carries the sealed path as
+  its leak-check needle (scorer side only).
+- Sealed manifest file hash unchanged: `c4de1a26…35520629` (frozen).
+
+## C5.5 Scoring (frozen battery, unmodified — rebuilt bit-identical: hash
+`fff63ed5…5305dbc45`, matching W7's `logs/binary_hashes.txt`)
+
+Score in tenths; strict task bar = ≥10/12 **hits**; battery pass = score_x10 ≥ 100.
+Manifest-rule overlay (`overlay.py`) applies the sealed manifest's listed
+near-miss rule (T-5/W-05); on this data it coincides with the battery rule
+exactly — the learner produced **zero** cross-verdict near-misses, so W7
+discrepancy #1 moves no number (still parked as a rule question).
+
+| slice | hits | nears | misses | score/120 | battery pass | strict ≥10/12 | FP | leak |
+|---|---|---|---|---|---|---|---|---|
+| S0 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S1 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S2 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S3 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+| S4 | 0 | 6 | 6 | 20 | 0 | FAIL | 1 | 0 |
+| S5 | 1 | 6 | 5 | 40 | 0 | FAIL | 0 | 0 |
+| S6 | 0 | 7 | 5 | 35 | 0 | FAIL | 0 | 0 |
+| S7 | 0 | 6 | 6 | 30 | 0 | FAIL | 0 | 0 |
+
+**Per-slice hit counts for the W9 verdict sheet: S0=0, S1=0, S2=0, S3=0, S4=0,
+S5=1, S6=0, S7=0.** Best slice S5 reaches 1/12 hits; the ≥10/12 bar is missed
+by an order of magnitude on every slice. Per-flaw lines in
+`logs/c5/verdict_S0.txt` … `verdict_S7.txt`; overlay table in
+`logs/c5/overlay_table.csv`.
+
+Behavioral pattern (unchanged from W7's measurement, now on real sessions):
+- wrong-span: 3–4/4 ADOPTed per slice (span inconsistency not checked against
+  grounds); occasional REJECT/R5 (contradictory grounds seen, wrong code) or
+  DEFER; exactly one exact REVISE/SPAN_SHIFT hit in the whole battery (S5-00).
+- false-confidence: ~2/4 REJECTed per slice but with R3 (`high_confidence`)
+  instead of the manifest's R1 — near-miss; ~2/4 ADOPTed despite zero
+  grounding (255-confidence bullying).
+- missing-grounding / plausible-false: all REJECTed, again R3 not R1 — near.
+- S4: 1 false positive (honest seq 19 → REJECT/R3), −1.0 at FP weight 1.0.
+
+## C5.6 Session framing (W8 driver pattern, stated explicitly)
+
+The full session harness is still blocked (session_close skips TAPE_FOOTER,
+B.4 replay honest-FAIL; `harness.zag`/`harness_new.zag` owned by another crew
+and untouched by C5 — last edit 2026-09-21 10:50 UTC). C5 sessions are
+**fixture-framed TST-1 tapes per the W8 driver pattern**: `[u8 type][u32 LE
+len][payload]` with sha256 event chain; TAPE_HEADER / STIMULUS_REF /
+TURN_BOUNDARY / TEACHER_MSG (verbatim frozen §P bytes) / STUDENT_DELIB (13)
++ STUDENT_DECISION (12) per proposal / TAPE_FOOTER with OK. One tape per
+slice per run in `logs/c5/tape_S{k}.bin` (canonical: run 1; runs 2–5
+byte-identical). These are NOT full-harness §B.4 sessions and are not claimed
+as such; no appeals occur (arm-1 frozen schedule has none), single
+consideration per wire (first decision per seq = what the manifest scores).
+
+## C5.7 Kept vs rebuilt
+
+- **Kept (verified, unmodified):** sealed flaw manifest, arm-1 teacher + wires
+  (re-verified byte-identical to `arm1/wired/expected/S*.bin`), battery scorer
+  sources, naive learner (delib/store/pcodec as rebuilt by W5), W7 tooling and
+  logs.
+- **Built (new C5 tooling):** `flawrun_frozen.zag` (no-shim learner runner +
+  TST-1 tape framing; replaces W7's shimmed `flawrun.zag` for the scoring leg),
+  `probe_decode.zag` (codec hostile-path matrix), `run_c5.sh` (N=5 baseline
+  driver), `run_c5_pert.sh` + `gen_pert.py` (adversarial perturbations),
+  `overlay.py` (manifest-rule overlay), `logs/c5/` (evidence).
+- **Rebuilt:** nothing frozen. The W7 `fr_translate` shim is retired by the
+  codec fix, not patched.
+
+## C5.8 Evidence
+
+`units/teachers/curriculum/verify_flawscore/logs/c5/`:
+- `c5_run.log` — full baseline transcript (DET/TDET/SHIMCHECK/W7_STAT per slice)
+- `c5_pert.log` — perturbation transcript
+- `overlay_table.csv` — battery-rule vs manifest-rule per-slice table
+- `decisions_S{k}.bin` — canonical decision records (40 B: seq, verdict,
+  reason, rs, re); `dec_S{k}_n{1..5}.bin` — the 5 determinism runs
+- `tape_S{k}.bin` — fixture-framed TST-1 session tapes; `tape_S{k}_n{1..5}.bin`
+- `dec_P{a,b,c,d}_n{1,2}.bin`, `tape_P{a,b,c,d}_n{1,2}.bin`,
+  `wires_S0_P{a,b,c,d}.bin` — perturbation evidence
+- `wires_S{k}.bin`, `slice_S{k}.bin` — exact staged inputs
+- `verdict_S{k}.txt` — per-flaw lines + W7_STAT
+- `c5_binary_hashes.txt` — removed-binary hashes
+- Binaries were built, hashed, then removed per the no-binaries rule.
+
+## C5.9 PARKED FOR MICAH (updates W7 §11)
+
+1. **(W7 #1, unchanged)** Learner↔teacher wire interop is now FIXED (W5);
+   C5 proves it on 287/287 wires. Crew 2 owns the codec going forward.
+2. **(W7 #2, numerically moot)** Near-miss rule vs manifest: the overlay
+   proves the two rules coincide on this data (zero cross-verdict
+   near-misses). Still needs T-5 sign-off as a rule.
+3. **(W7 #3, numerically moot)** Pass-bar wording "≥10/12 hits" vs
+   `score_x10 ≥ 100`: both FAIL every slice here. Still needs wording sign-off.
+4. **(W7 #4, unchanged)** Missing per-slice canary values in the sealed manifest.
+5. **(W7 #5, unchanged)** Arms 3/4/5 flaw scoring — confirm N/A-by-design.
+6. **(W7 #6, unchanged)** S5-01 manifest row cosmetic defect (embedded newline).
+7. **(W7 #7, CONFIRMED ON REAL SESSIONS)** Systematic wrong-span ADOPTs and
+   255-confidence bullying — the learner catches ~7/12 flaws per slice but
+   expresses them in non-manifest codes (R3 instead of R1), and misses ~5/12
+   outright. The §B.7 bar (≥10/12) is missed by an order of magnitude.
+8. **(new)** C5 perturbation-generator bug (caught by the run's own checks):
+   the first P-a build wrote session_id+1 at offset 18 (the seq field) instead
+   of offset 10; fixed in `gen_pert.py`, bad files deleted, re-run clean.
+   Noted for audit completeness.
