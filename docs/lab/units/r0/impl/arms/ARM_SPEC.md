@@ -39,7 +39,7 @@ same stream, so all windows are known — documented adaptation.)
 
 ## 3. adaptive_mdl
 
-Recovered params: enumerate spans 2..12 at every position (see §6 on the 8/12
+Recovered params: enumerate spans 2..12 at every position (see §8 on the 8/12
 question); count in a 2^20-slot table; keep spans with `count ≥ 4` and
 `savings = (len−1)·count − (len+3) > 0`; rank by (score desc, len desc,
 count desc, bytes asc); top 256 motifs; segment by greedy longest-match over a
@@ -94,6 +94,25 @@ L = 2 + h
 `id = fnv1a64(span) mod 1000003`, kind `x`. Emits a `META deterministic-analog
 …` header line and is labeled DETERMINISTIC-ANALOG in all docs and logs.
 Zero RNG in any decision path — the name is historical.
+
+## 8. The L_max 8/12 question (R-2/R-7 test-both leg)
+
+R-2 proposes capping MDL span enumeration at L_max ≤ 8; the recovered
+historical tournament used max_len=12. The prereg freezes this as an ambiguity
+resolved by test-both (Micah's standing rule), not by fiat. The native
+implementation parameterizes `mdl_fit(buf, grounded, maxlen)`; two selectors
+expose the two legs with byte-identical code paths:
+
+- `adaptive_mdl` — maxlen 12 (historical setting; default, unchanged behavior).
+- `adaptive_mdl_8` — maxlen 8 (prereg R-2 proposal).
+
+The grounded re-scan (§4) still enumerates spans 2..12 internally; it is only
+ever invoked with maxlen=12 (`grounded_adaptive_mdl`), so behavior is
+unchanged. `hierarchical_mdl` builds on the maxlen=12 base for the same reason.
+An independent Python reimplementation of the ungrounded MDL fit+segmenter
+matches the binary SEG-row-for-row for BOTH maxlen values on six inputs
+(empty, single-byte repeat, all-256-bytes, prose-like, smoke t0/t2) — the new
+code path is read back, not trusted.
 
 ## Shared determinism machinery
 

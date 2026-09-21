@@ -56,7 +56,7 @@ All 1x bars pass. No binding kill criterion fired. No disqualification criterion
 ## Commits
 
 - Source, docs, and scorecard committed via `commit_to_branch.py` to `tnn-native-lab`.
-- (Commit hash to be filled after commit.)
+- Commit: `d57ef6f0ae6da9fc97a2779ee8031f23f3bfb448` (parent `d257a504cd1c`)
 
 ## Evidence
 

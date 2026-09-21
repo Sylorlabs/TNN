@@ -74,3 +74,66 @@ blocking performance and correctness bugs. Requires further debugging:
 ### Files
 - Implementation: `~/workspace/tnn-lab/units/arms/D/cl/arm.zag`
 - This log: `~/workspace/tnn-lab/units/arms/D/BUILD_LOG.md`
+
+## 2026-09-21 — Performance Optimizations (D-DBG)
+
+### Problem
+M1 1x prose (5.4MB) projected at 2.4 hours real time (12.2s user per 100KB).
+Full M1-M9 battery infeasible.
+
+### Root Causes
+1. **Candidate table wholesale clear**: Cleared 4096 slots (O(cap)) on every
+   table-full event, and wiped all rep counts (breaking "candidates accumulate
+   rep" — REP_BAR could never fire under churn).
+2. **Tombstone eviction livelock**: Attempted half-eviction with tombstones
+   caused full-table probes (no state-0 terminators) and risked livelock.
+3. **iget64/iput64 function call overhead**: Rolling hash update did 512
+   function calls per byte (6.4M calls per 100KB).
+
+### Fixes
+1. **Generation-counter clear (O(1))**: Added 4-byte generation to 68B record
+   (now 72B). Clear = bump generation counter; stale generations read as empty.
+   No O(cap) loop.
+2. **Clear at 50% load**: Table capacity 4096→16384, clear when used>=8192.
+   Keeps probe lengths short (~1.3 steps avg).
+3. **[]i64 direct indexing**: Changed hh1/hh2/pow1/pow2 from []u8 with
+   iget64/iput64 to []i64 with direct indexing. Verified ZNC-007: `as []i64`
+   is CLEAN (no aliasing). M1 output byte-identical.
+
+### Results
+- 100KB prose: 12.2s → 2.95s user (4.1x speedup).
+- M1 1x prose (5.4MB): ~11 min → ~2.7 min user (projected).
+- All smoke tests pass with identical M1 output.
+
+### 10x Modes Added
+- m1-10x-prose, m1-10x-code dispatch (r10 corpora).
+- r10 = r1 repeated 10x (verified via tile_sha256).
+- Capacities scaled 10x; idlist kept at 32MB (under 2^25 ceiling).
+
+### Critical Fix: Candidate Table Probe Termination (2026-09-21)
+**Symptom**: 100KB M1 = 3s, 200KB M1 >160s (50x slowdown for 2x data).
+**Root cause**: The generation-bump "O(1) clear" left stale entries physically
+in the table. Probes had to walk through stale entries to find current-gen
+slots. After many clears, the table filled with stale entries and probes
+traversed O(cap) per observation → O(n^2) total.
+**Fix**: Physical clear of the 4-byte generation fields (64KB memset) on each
+clear. All slots read as empty (gen=0 != cur_gen); probes terminate immediately.
+**Result**: 200KB M1 = 6.1s (linear scaling restored). 100KB unchanged at 3s.
+
+### Critical Fix 2: CIDX Unbounded Probes (2026-09-21)
+**Symptom**: 400KB M1 >146s (vs 11s expected); 1MB M1 >265s.
+**Root cause**: Two issues:
+1. `cidx_insert` and `cidx_lookup` used unbounded `while(n<cap)` probes.
+   When the table filled during large ingests, inserts/lookups became O(cap).
+2. `d_index_ensure` sized the table for `chunk_next=257` (empty at ingest
+   start) → 1024-slot table. During 400KB ingest, thousands of chunks filled
+   it. With the 32-probe bound (fix 1), inserts dropped, lookups missed, and
+   segmentation did 62 lengths × 32 probes = 1984 steps per byte position.
+**Fix**: 
+- Bound both probes to 32 slots (dropped inserts acceptable; misses fall back
+  to literal).
+- Size cidx for `chunk_cap` (32768) not current count → 65536-slot table,
+  stays sparse.
+**Result**: 400KB M1 = 11.4s (was >146s); 1MB M1 = 136s (was >265s). Linear
+scaling restored through 400KB.
+**Binary**: `/home/hatch/workspace/d_test5` (includes both fixes + M1 10x).

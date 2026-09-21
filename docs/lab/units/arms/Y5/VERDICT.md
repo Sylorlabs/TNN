@@ -77,5 +77,7 @@ Per the coordinator's second (superseding) correction issued 2026-09-21:
 
 ## Commits
 
-- Source/docs/evidence: [to be filled after commit]
+- Source/docs/evidence: `0f07518d0937` on `tnn-native-lab`
+  (7 files: `cl/arm.zag`, `ARM_SPEC.md`, `BUILD_LOG.md`, `VERDICT.md`,
+  `evidence/scorecard_y5_1x.json`, `evidence/battery_1x.log`, `evidence/m8_GATE.txt`)
 - Binary (`.work/y5_arm`) NOT committed per instructions.

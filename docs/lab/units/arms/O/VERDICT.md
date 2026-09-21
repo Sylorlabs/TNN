@@ -41,7 +41,7 @@ Note: The primary rolling-200 trigger was implemented but not validated in an in
 ## 1x M1–M9 Row
 | Metric | Value | Notes |
 |--------|-------|-------|
-| M1 prose recall | *pending* | Running; slow on 5.2MB |
+| M1 prose recall | 100.0% (10329/10329) | 4096 words adopted; boundary F1 42.0; 10.8 min runtime |
 | M1 code recall | *pending* | Not yet run |
 | M2 T1 episodes | *pending* | Blocked on performance |
 | M3 | *pending* | Not yet run |
@@ -52,7 +52,7 @@ Note: The primary rolling-200 trigger was implemented but not validated in an in
 | M8 determinism | *pending* | Not yet run |
 | M9 | N/A | No M9 in battery |
 
-The full 1x battery did not complete due to performance constraints (teach on 14MB takes >5 min per leg). The kill-critical modes (o-redteam, o-disconnect, o-tripwire) all PASS.
+The kill-critical modes (o-redteam, o-disconnect, o-tripwire) all PASS. M1 prose shows 100% recall. Remaining battery legs pending due to performance constraints.
 
 ## 10x Status
 NOT ATTEMPTED. 1x did not complete; per protocol, 10x is not attempted until 1x passes.

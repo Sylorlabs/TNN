@@ -18,7 +18,8 @@ Selectors (11):
 |---|---|
 | `predictive_surprise` | thesis arm: 82nd-percentile transition-surprise cuts, 256-entry inventory |
 | `fixed_window_4` / `_8` / `_16` / `_64` | aligned fixed windows |
-| `adaptive_mdl` | deterministic MDL chunker |
+| `adaptive_mdl` | deterministic MDL chunker (max span 12, historical setting) |
+| `adaptive_mdl_8` | R-2/R-7 test-both leg: identical MDL rule, max span 8 (prereg proposal) |
 | `grounded_adaptive_mdl` | MDL + grounding term (native adaptation, see ARM_SPEC.md) |
 | `hierarchical_mdl` | MDL base + 96 pair merges |
 | `raw_micro` | no-chunking control (one chunk per byte) |
