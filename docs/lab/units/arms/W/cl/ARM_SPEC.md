@@ -74,11 +74,16 @@ Per query, exactly one granularity is chosen:
 ## 3. ID layer
 
 Persistent ID→storage mapping (w_id_add/del/loc). IDs are deterministic
-from span; tombstoned IDs never reused. The M1 swap probe (A15) is labeled
+from span; tombstoned IDs never reused. Every atom is dual-registered
+(L0 raw store + L1 base unit); the persistent map resolves each atom id to
+its L1 copy (w1_ingest_atom's w_id_add overwrites w0_ingest's entry for the
+same id). The M1 swap probe (A15) is labeled
 **PROVISIONAL-PENDING-FREEZE**: the prereg mandates the probe but not the
-remap schedule/function; the N=64 deterministic remap procedure is proposed
-and awaits Micah's freeze. Current implementation verifies mapping integrity
-for a deterministic 64-sample; full remap-and-verify is pending freeze.
+remap schedule/function, so a true remap-and-verify probe cannot be built
+without inventing the rule. Current implementation resolves each sampled id
+live through the ID map and verifies the resolved (level,slot) is live and
+its registered span matches the queried atom (r1.1: corrected — the old
+check demanded the L0 slot and false-alarmed on the genuine L1 resolution).
 
 ## 4. Trial modes
 
@@ -100,6 +105,12 @@ shared harness convention; the old layout was self-contradictory.)
   V=1000 pinned units; 3000 fresh ingest; 3000 kills; 50 weakens (refused
   on pinned, audited); 4000 fresh ingest with eviction. Reports survival,
   fresh_recall, mgmt_entries (audit-liveness), weaken_handled, freeze flag.
+  r1.1 fix: w0/w1/w2_ord_remove now guard against unlinking a slot that is
+  not in the order list. Previously wX_ord_append's remove-then-append
+  collapsed the list to length 1 on every ingest (head/tail zeroed for fresh
+  slots), so eviction took the newest unit instead of the oldest; M3 fresh
+  recall collapsed to ~0% and the freeze flag fired spuriously. Fixed
+  2026-09-21; M3 now survival 100%, fresh 100%, freeze CLEAR.
 - `m4-1x-prose`, `m4-1x-code`: 200 units, 100 boundary + 100 content defects,
   revision episodes (max 20). Reports rev_boundary, rev_content, kill_rate,
   killsub, episodes.

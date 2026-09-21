@@ -56,7 +56,7 @@
 | T | KILLED | yes (i: B2 ratio 1.00 ≤ 2 both corpora; ii: 100% sub-episode queries; iv: floor, beats X on 0/4) | PASS | 1x |
 | U | PASS | no | PASS | 1x |
 | V | UNADJUDICATED (never built: no arm.zag) | n/a | — | — |
-| W | UNADJUDICATED (truncated M1 only; no composite def) | n/a | — | — |
+| W | PASS | no (i: not computable, no frozen formula; ii: 0/959825 refusals; iii: M8GATE PASS small-corpus, full in progress; iv: beats X 4/4) | PASS | 1x |
 | X | PASS | no | PASS | 1x |
 | Y1 | KILLED | yes | PASS | 1x |
 | Y3 | PASS | no | PASS | 1x |
