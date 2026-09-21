@@ -1,0 +1,1027 @@
+// STEP 5c-M2 — Messy-Scenarios Battery 2 (harder) harness (native Zag, zero RNG).
+//
+// One binary; argv[1] selects the arm: cur | ctl.
+//   cur: curriculum protocols + frozen R2/N2/C2/A2 discipline (prereg §3)
+//   ctl: identical machinery, default heuristics (prereg §3.5), reported only
+//
+// Per arm: 1,280 episodes = 4 conditions x 320 (R2: 8 runs x 40, phase A 20 +
+// phase B 20; N2/C2/A2: 4 subtypes x 80 = 72 mess + 8 clean). Clean rule:
+// e%10==9. Both arms run the IDENTICAL world schedule (closed-form in the
+// episode index). The checker (check_messy2.awk) re-implements the schedule
+// independently and grades from the G/GRUN lines.
+//
+// Design law: arm code sees ONLY the presentation (Pres). Ground-truth
+// summaries are never materialized in-Zag; the whash checksum lets the
+// checker verify the world schedule byte-for-byte from the transcript.
+// Assertion-volume fields (n_assert_a/b) are set by world_build and hashed
+// but MUST NOT be read by CUR arm code (static-grepped by run_messy2.sh).
+//
+// Substrates: st_memory_core.zag + mhist.zag vendored byte-identical from
+// step5c-messy-pilot; trust-tier op vocabulary 51..71 verbatim from wave9.
+@import("mhist.zag")
+
+const ARM_CUR:i32=0;
+const ARM_CTL:i32=1;
+
+const COND_R2:i32=0;
+const COND_N2:i32=1;
+const COND_C2:i32=2;
+const COND_A2:i32=3;
+
+const TT_OP_CITE:i32=51;
+const TT_OP_COLLUSION_SUSPECT:i32=53;
+const TT_OP_TRAINER_ESCALATE:i32=54;
+const TT_OP_CHANNEL_DISTRUSTED:i32=56;
+const TT_OP_ORIGIN:i32=66;
+const TT_OP_T0_T1_HOLD:i32=67;
+const TT_OP_HOLD_RELEASED_T0_CONFIRM:i32=68;
+const TT_OP_HOLD_BROKEN_BY_DISTRUST:i32=69;
+const TT_OP_HOLD_TIMEOUT_ESCALATE:i32=70;
+// Hold-branch tags in op-67 d1 (branch<<16): 0..4 per the pilot,
+// 5 regime-quarantine, 6 noise-sequence, 7 incomplete2, 8 adv-storm.
+// Documented extension of the H1 vocabulary.
+// Op-66 mark kinds in d1 (kind<<24 | claim): 2 prov-mismatch, 3 torn,
+// 4 conflict-hold, 5 inconsistency. Documented extension.
+
+const M2_EP_TOTAL:i32=1280;
+const UNKNOWN_VAL:i32=-1;
+
+// World presentation: everything the arm may legally read.
+struct Pres {
+    e:i32, cond:i32, sub:i32, k:i32, clean:i32, cls:i32, stage:i32, subtype:i32,
+    // R2 cross-episode regime break
+    run:i32, el:i32, st2:i32, phase:i32,
+    mint:i32, idx:i32, V:i32, pin_at_mint:i32, cidx:i32,
+    ev:i32, dmask:i32, noisy:i32, confirm:i32, viols:i32, checks:i32,
+    // N2 decision-pressure noise
+    okind:[]u8,                 // 5, i32-packed
+    // C2 corrupted/partial inputs 2.0
+    p:i32, bar:i32, pmask:i32,
+    prov_claim:i32, prov_tier:i32,
+    torn:i32, v1:i32, v2:i32,
+    amask:i32, bmask:i32, va:i32, vb:i32,
+    inv_a:i32, inv_b:i32, count:i32, cksum:i32,
+    // A2 adversarial protocol attacks
+    cid:i32, liar:i32, rep_lie:[]u8, pattern:i32,  // 3, i32-packed
+    pin_claim:i32, cval:i32,
+    n_assert_a:i32, n_assert_b:i32, // ARM CUR CODE MUST NOT READ (integrity invariant)
+}
+
+// Arm-reported behavior (f0..f7), condition-specific per PREREG §4.
+struct Beh {
+    f0:i32, f1:i32, f2:i32, f3:i32, f4:i32, f5:i32, f6:i32, f7:i32,
+}
+
+// Per-episode verifier/arm context.
+struct EpC {
+    slots:[]u8,  // i32-packed, cap 16
+    n:i32,
+}
+
+// R2 cross-episode context: persistent claim registry for the current run.
+struct M2C {
+    reg:[]u8,      // 8 i32-packed slot ids, -1 = empty
+    run:i32,       // current R2 run, -1 = none
+    run_start:i32, // audit index at the current run's first episode
+}
+
+fn m2_pnum(x:i32)void { cl_number(x as i64); }
+fn m2_pcom()void { _zag_print(","); }
+
+// ---------- helpers ----------
+// Read-only trust-tier audit entry on the shared st ledger (mirrors the
+// wave9 tt_audit_ro semantics: before==after snapshots, data in d1/d2).
+// slot must be a valid live slot (st_restore cannot take -1).
+fn tt_ro(s:*StStore,op:i32,slot:i32,d1:i32,d2:i32)void {
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    st_audit_append(s,op,slot,ST_OK,b1,b2,b3,b4,b5,b1,b2,b3,b4,b5,d1,d2);
+}
+
+fn w_add(s:*StStore,epc:*EpC,value:i32,strength:i32)i32 {
+    let sl:i32=-1;
+    let rc:i32=st_add(s,value,ST_REGION_USER,strength,&sl);
+    if(rc==ST_OK && sl>=0 && epc.*.n<16){
+        st_i32_set(epc.*.slots,epc.*.n*4,sl);
+        epc.*.n=epc.*.n+1;
+    }
+    return sl;
+}
+
+// Persistent add: tracked in the R2 registry, NOT in epc (survives
+// ep_cleanup across episodes within a run).
+fn w_add_persistent(s:*StStore,ctx:*M2C,idx:i32,value:i32,strength:i32)i32 {
+    let sl:i32=-1;
+    let rc:i32=st_add(s,value,ST_REGION_USER,strength,&sl);
+    if(rc==ST_OK && sl>=0){
+        st_i32_set(ctx.*.reg,idx*4,sl);
+    }
+    return sl;
+}
+
+fn reg_slot(ctx:*M2C,idx:i32)i32 {
+    return st_i32_get(ctx.*.reg,idx*4);
+}
+
+// 1 iff the registry slot for idx is live AND holds the expected claim value
+// (guards against slot-id reuse confusion; slots are never freed mid-run).
+fn reg_live_v(s:*StStore,ctx:*M2C,idx:i32,expect_v:i32)i32 {
+    let sl:i32=reg_slot(ctx,idx);
+    if(sl<0 || sl>=s.*.cap){return 0;}
+    let live:[]u8=s.*.live;
+    if(live[sl]==0){return 0;}
+    let value:[]u8=s.*.value;
+    if(st_i32_get(value,sl*4)!=expect_v){return 0;}
+    return 1;
+}
+
+fn slot_in_reg(ctx:*M2C,slot:i32)i32 {
+    let i:i32=0;
+    while(i<8){
+        if(st_i32_get(ctx.*.reg,i*4)==slot){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+// Escalation dedup: 1 iff a TT_OP_TRAINER_ESCALATE with d1==cid exists
+// anywhere in the ledger. d1 lives at audit word 14 (byte 56) — validated
+// by the d1probe gate before the build (prereg §6.7).
+fn esc_done(s:*StStore,cid:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==TT_OP_TRAINER_ESCALATE && st_i32_get(aud,e+56)==cid){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn ep_cleanup(s:*StStore,epc:*EpC)void {
+    let fp:[]u8=s.*.forcepin;
+    let lv:[]u8=s.*.live;
+    let i:i32=0;
+    while(i<epc.*.n){
+        let sl:i32=st_i32_get(epc.*.slots,i*4);
+        if(sl>=0 && sl<32){
+            if(fp[sl]==1){st_force_unpin(s,ST_CALLER_TRAINER,1,sl);}
+            if(lv[sl]==1){st_kill(s,sl);}
+        }
+        i=i+1;
+    }
+}
+
+// Per-episode op counts from the ledger window (for the G line o0..o7).
+fn m2_opcounts(s:*StStore,start:i32,o:[]u8)void {
+    let aud:[]u8=s.*.audit;
+    let c0:i32=0;let c1:i32=0;let c2:i32=0;let c3:i32=0;
+    let c4:i32=0;let c5:i32=0;let c6:i32=0;let c7:i32=0;
+    let i:i32=start;
+    let end:i32=s.*.audit_n;
+    while(i<end){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(aud,e+0);
+        let rc:i32=st_i32_get(aud,e+8);
+        if(op==ST_OP_KILL_EVIDENCED && rc==ST_OK){c0=c0+1;}
+        else if(op==ST_OP_KILL && rc==ST_OK){c1=c1+1;}
+        else if(op>=67 && op<=70){c2=c2+1;}
+        else if(op==TT_OP_CITE){c3=c3+1;}
+        else if(op==TT_OP_CHANNEL_DISTRUSTED){c4=c4+1;}
+        else if(op==TT_OP_COLLUSION_SUSPECT){c5=c5+1;}
+        else if(op==TT_OP_TRAINER_ESCALATE){c6=c6+1;}
+        else if(op==ST_OP_STRENGTHEN && rc==ST_OK){c7=c7+1;}
+        i=i+1;
+    }
+    st_i32_set(o,0,c0);st_i32_set(o,4,c1);st_i32_set(o,8,c2);st_i32_set(o,12,c3);
+    st_i32_set(o,16,c4);st_i32_set(o,20,c5);st_i32_set(o,24,c6);st_i32_set(o,28,c7);
+}
+
+fn slot_in_epc(epc:*EpC,slot:i32)i32 {
+    let i:i32=0;
+    while(i<epc.*.n){
+        if(st_i32_get(epc.*.slots,i*4)==slot){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn is_sc_op(op:i32)i32 {
+    if(op==ST_OP_ADD||op==ST_OP_KILL||op==ST_OP_PIN||op==ST_OP_UNPIN
+       ||op==ST_OP_PROMOTE||op==ST_OP_DEMOTE||op==ST_OP_STRENGTHEN
+       ||op==ST_OP_WEAKEN||op==ST_OP_KILL_EVIDENCED||op==ST_OP_OVERWRITE
+       ||op==ST_OP_TRAINER_DECLARE){return 1;}
+    return 0;
+}
+
+// ---------- world schedule (closed-form, frozen per PREREG §2.4) ----------
+fn world_build(p:*Pres,e:i32)void {
+    p.*.e=e;
+    p.*.cond=(e/320);p.*.sub=((e%320)/80);p.*.k=e%80;
+    p.*.clean=0;
+    if(e%10==9){p.*.clean=1;}
+    p.*.cls=p.*.cond+5;p.*.stage=p.*.sub;p.*.subtype=0;
+    p.*.run=0;p.*.el=0;p.*.st2=0;p.*.phase=0;
+    p.*.mint=0;p.*.idx=0;p.*.V=0;p.*.pin_at_mint=0;p.*.cidx=0;
+    p.*.ev=0;p.*.dmask=0;p.*.noisy=0;p.*.confirm=0;p.*.viols=0;p.*.checks=30;
+    p.*.p=0;p.*.bar=5;p.*.pmask=0;
+    p.*.prov_claim=0;p.*.prov_tier=0;
+    p.*.torn=0;p.*.v1=0;p.*.v2=0;
+    p.*.amask=0;p.*.bmask=0;p.*.va=0;p.*.vb=0;
+    p.*.inv_a=0;p.*.inv_b=0;p.*.count=0;p.*.cksum=0;
+    p.*.cid=0;p.*.liar=0;p.*.pattern=0;
+    p.*.pin_claim=0;p.*.cval=0;
+    p.*.n_assert_a=0;p.*.n_assert_b=0;
+    let j:i32=0;
+    while(j<5){st_i32_set(p.*.okind,j*4,0);j=j+1;}
+    j=0;
+    while(j<3){st_i32_set(p.*.rep_lie,j*4,0);j=j+1;}
+    if(p.*.cond==COND_R2){
+        p.*.run=(e%320)/40;p.*.el=e%40;p.*.st2=p.*.run%4;
+        if(p.*.el<20){p.*.phase=0;}else{p.*.phase=1;}
+        p.*.subtype=p.*.phase;
+        if(p.*.phase==0){
+            if(p.*.el%2==0 && p.*.el<=14){
+                p.*.mint=1;p.*.idx=p.*.el/2;
+                p.*.V=50000+p.*.run*100+p.*.idx;
+                if(p.*.idx==2){p.*.pin_at_mint=1;}
+            }
+            p.*.cidx=p.*.el%8;
+        } else {
+            p.*.ev=(p.*.el-20)%8;
+            if(p.*.st2==0 || p.*.st2==1){p.*.dmask=59;}
+            else if(p.*.st2==3){p.*.dmask=31;}
+            if(p.*.st2==1){p.*.noisy=1;}
+            if(p.*.st2!=2){p.*.confirm=1;}
+            p.*.viols=8+((p.*.el+p.*.run)%5);
+        }
+    } else if(p.*.cond==COND_N2){
+        j=0;
+        while(j<5){
+            let ok:i32=1;
+            if(p.*.sub==1){if(j<4){ok=1;}else{ok=2;}}
+            else if(p.*.sub==2){if(j<4){ok=0;}else{ok=1;}}
+            else if(p.*.sub==3){if(j==0){ok=2;}else{ok=1;}}
+            st_i32_set(p.*.okind,j*4,ok);
+            j=j+1;
+        }
+    } else if(p.*.cond==COND_C2){
+        p.*.p=6;p.*.pmask=63;
+        if(p.*.sub==0){p.*.prov_claim=1;p.*.prov_tier=3;}
+        else if(p.*.sub==1){p.*.torn=1;p.*.v1=61000+e;p.*.v2=p.*.v1+1;}
+        else if(p.*.sub==2){
+            p.*.amask=15;p.*.bmask=60;p.*.va=7000+e;p.*.vb=7001+e;
+        } else {
+            p.*.inv_a=3;p.*.inv_b=1;p.*.count=9000+e;
+            p.*.cksum=p.*.count*3+2;
+        }
+    } else if(p.*.cond==COND_A2){
+        if(p.*.sub==0){p.*.p=3;p.*.cid=80000+(p.*.k/10);}
+        else if(p.*.sub==1){
+            p.*.liar=e%3;
+            st_i32_set(p.*.rep_lie,p.*.liar*4,1);
+            p.*.pattern=1;
+        }
+        else if(p.*.sub==2){p.*.pin_claim=1;p.*.cval=82000+e;}
+        else {p.*.n_assert_a=4;p.*.n_assert_b=40;p.*.cid=81000+(p.*.k/10);}
+    }
+}
+
+// Deterministic checksum of the presented world; the awk checker recomputes
+// it independently from the episode index (PREREG §2.7, frozen).
+fn world_hash(p:*Pres)i32 {
+    let h:i32=p.*.cond+p.*.sub*7+p.*.k*13+p.*.clean*17;
+    if(p.*.cond==COND_R2){
+        h=h+p.*.run*101+p.*.el*103+p.*.phase*107+p.*.mint*109+p.*.idx*113
+            +p.*.V*127+p.*.pin_at_mint*131+p.*.ev*137+p.*.dmask*139
+            +p.*.noisy*149+p.*.confirm*151+p.*.viols*157;
+    } else if(p.*.cond==COND_N2){
+        h=h+st_i32_get(p.*.okind,0)*101+st_i32_get(p.*.okind,4)*103
+            +st_i32_get(p.*.okind,8)*107+st_i32_get(p.*.okind,12)*109
+            +st_i32_get(p.*.okind,16)*113;
+    } else if(p.*.cond==COND_C2){
+        h=h+p.*.p*101+p.*.prov_claim*103+p.*.prov_tier*107+p.*.torn*109
+            +p.*.v1*113+p.*.amask*127+p.*.bmask*131+p.*.va*137+p.*.vb*139
+            +p.*.inv_a*149+p.*.inv_b*151+p.*.count*157+p.*.cksum*163;
+    } else if(p.*.cond==COND_A2){
+        h=h+p.*.p*101+p.*.cid*103+p.*.liar*107+p.*.pattern*109
+            +p.*.pin_claim*113+p.*.cval*127+p.*.n_assert_a*131+p.*.n_assert_b*137;
+    }
+    return h;
+}
+
+// R2 defeated-set membership (non-pinned defeated) and still-true sets,
+// from st2. Mirrors PREREG §4.1.
+fn r2_defeated(st2:i32,idx:i32)i32 {
+    if(st2==0){
+        if(idx==0||idx==1||idx==3||idx==4||idx==5){return 1;}
+    } else if(st2==3){
+        if(idx==0||idx==1||idx==3||idx==4){return 1;}
+    }
+    return 0;
+}
+fn r2_stilltrue(st2:i32,idx:i32)i32 {
+    if(st2==0){
+        if(idx==2||idx==6||idx==7){return 1;}
+    } else if(st2==1){
+        return 1;
+    } else if(st2==2){
+        return 1;
+    } else if(st2==3){
+        if(idx==5||idx==6||idx==7){return 1;}
+    }
+    return 0;
+}
+
+// ---------- R2 phase A (shared machinery, both arms) ----------
+fn arm_r2_phaseA(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    if(p.*.mint==1){
+        let sl:i32=w_add_persistent(s,ctx,p.*.idx,p.*.V,20);
+        if(sl>=0){
+            tt_ro(s,TT_OP_CITE,sl,1|(2<<8)|(1<<16),p.*.e|(p.*.idx<<13));
+            if(p.*.pin_at_mint==1){
+                st_force_pin(s,ST_CALLER_TRAINER,1,sl);
+                b.*.f2=1;
+            }
+            b.*.f0=1;
+        }
+    } else {
+        let sl:i32=reg_slot(ctx,p.*.cidx);
+        if(reg_live_v(s,ctx,p.*.cidx,50000+p.*.run*100+p.*.cidx)==1){
+            st_evidence(s,sl,ST_J_CORROBORATED,40000+p.*.e);
+            st_justify(s,sl,ST_J_CORROBORATED);
+            b.*.f1=1;
+        }
+    }
+}
+
+// ---------- CUR arm: R2 phase B (cross-episode regime protocol, PREREG §3.1) ----------
+// NOTE: this function never reads n_assert_a/n_assert_b (static-grepped).
+// Pin state is read from the STORE (forcepin), never from the presentation.
+fn arm_cur_r2b(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let live:[]u8=s.*.live;
+    let fp:[]u8=s.*.forcepin;
+    if(p.*.confirm==1 && p.*.noisy==0){
+        // Real break: quarantine (branch 5) + per-claim adjudication.
+        let sq:i32=w_add(s,epc,90000+p.*.e,10);
+        tt_ro(s,TT_OP_T0_T1_HOLD,sq,1|(sq<<8)|(5<<16),p.*.e);
+        b.*.f0=1;b.*.f1=1;
+        let idx:i32=0;
+        while(idx<8){
+            let sl:i32=reg_slot(ctx,idx);
+            // Value-checked: slot ids are reused by the allocator after a
+            // registry slot dies; a live id alone may be episode scratch.
+            if(sl>=0 && live[sl]==1
+               && st_i32_get(s.*.value,sl*4)==50000+p.*.run*100+idx){
+                let pin:i32=0;
+                if(fp[sl]==1){pin=1;}
+                let defeated:i32=(p.*.dmask>>idx)&1;
+                if(pin==1 && defeated==1){
+                    // Pinned item defeated: escalate to trainer, NEVER touch.
+                    // Dedup: exactly one escalation per claim id (ledger scan).
+                    let cid:i32=50000+p.*.run*100+idx;
+                    if(esc_done(s,cid)==0){
+                        tt_ro(s,TT_OP_TRAINER_ESCALATE,sl,cid,p.*.e);
+                        b.*.f2=1;
+                    }
+                } else if(defeated==1){
+                    st_evidence(s,sl,ST_J_SUPERSEDED,41000+p.*.e*8+idx);
+                    st_justify(s,sl,ST_J_SUPERSEDED);
+                    st_kill_evidenced(s,sl,ST_ARM_A);
+                } else {
+                    st_justify(s,sl,ST_J_CORROBORATED);
+                }
+            }
+            idx=idx+1;
+        }
+    } else if(p.*.confirm==1 && p.*.noisy==1){
+        // Noisy break: hold, revise nothing (defeat-under-noise, cross-episode).
+        let sq:i32=w_add(s,epc,90000+p.*.e,10);
+        tt_ro(s,TT_OP_T0_T1_HOLD,sq,1|(sq<<8)|(5<<16),p.*.e);
+        b.*.f0=1;b.*.f1=1;
+    } else {
+        // False break (amendment A1): no hold, no quarantine; justify all live.
+        let idx:i32=0;
+        while(idx<8){
+            let sl:i32=reg_slot(ctx,idx);
+            if(sl>=0 && live[sl]==1){
+                st_justify(s,sl,ST_J_CORROBORATED);
+            }
+            idx=idx+1;
+        }
+    }
+}
+
+// ---------- CTL arm: R2 phase B (bulk kill, silent pinned overwrite attempt) ----------
+fn arm_ctl_r2b(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let fp:[]u8=s.*.forcepin;
+    // Ignores confirm/noisy: suspect → quarantine + bulk kill, no adjudication.
+    let sq:i32=w_add(s,epc,90000+p.*.e,10);
+    tt_ro(s,TT_OP_T0_T1_HOLD,sq,1|(sq<<8)|(5<<16),p.*.e);
+    b.*.f0=1;b.*.f1=1;
+    let idx:i32=0;
+    while(idx<8){
+        let sl:i32=reg_slot(ctx,idx);
+        let live:[]u8=s.*.live;
+        if(sl>=0 && live[sl]==1
+           && st_i32_get(s.*.value,sl*4)==50000+p.*.run*100+idx){
+            if(fp[sl]==1){
+                // Silent demotion attempt: the machinery refuses (the attempt
+                // is the violation; the verifier measures it).
+                st_overwrite(s,sl,99999,20,ST_ARM_A);
+            } else {
+                st_kill(s,sl);
+            }
+        }
+        idx=idx+1;
+    }
+}
+
+// ---------- CUR arm: N2 sequence discipline (PREREG §3.2) ----------
+// NOTE: this function never reads n_assert_a/n_assert_b (static-grepped).
+fn arm_cur_n2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let so:i32=w_add(s,epc,60000+p.*.e,10);
+    tt_ro(s,TT_OP_CITE,so,1|(2<<8)|(1<<16),p.*.e);
+    // Suspensive hold BEFORE the sequence (branch 6 = noise-sequence).
+    tt_ro(s,TT_OP_T0_T1_HOLD,so,1|(so<<8)|(6<<16),p.*.e);
+    b.*.f0=1;
+    let rev:i32=0;let kidx:i32=-1;let noisy:i32=0;let cdef:i32=0;
+    let j:i32=0;
+    while(j<5){
+        let ok:i32=st_i32_get(p.*.okind,j*4);
+        if(ok==1){
+            noisy=noisy+1;
+        } else if(ok==2){
+            cdef=1;
+            if(rev==0){
+                st_evidence(s,so,ST_J_SUPERSEDED,42000+p.*.e*8+j);
+                st_justify(s,so,ST_J_SUPERSEDED);
+                if(st_kill_evidenced(s,so,ST_ARM_A)==ST_OK){rev=1;kidx=j;}
+            }
+        }
+        j=j+1;
+    }
+    if(rev==1){
+        tt_ro(s,TT_OP_HOLD_RELEASED_T0_CONFIRM,so,1|(so<<8),p.*.e);
+        b.*.f1=1;
+    }
+    // f2 (rev_count) is measured by the verifier from the ledger window.
+    b.*.f3=kidx;b.*.f4=noisy;b.*.f5=cdef;
+}
+
+// ---------- CTL arm: N2 (revise on every defeat, incl. noisy) ----------
+fn arm_ctl_n2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let so:i32=w_add(s,epc,60000+p.*.e,10);
+    tt_ro(s,TT_OP_CITE,so,1|(2<<8)|(1<<16),p.*.e);
+    let noisy:i32=0;let cdef:i32=0;let kidx:i32=-1;
+    let j:i32=0;
+    while(j<5){
+        let ok:i32=st_i32_get(p.*.okind,j*4);
+        if(ok==1){noisy=noisy+1;}
+        else if(ok==2){cdef=1;}
+        if(ok==1 || ok==2){
+            st_evidence(s,so,ST_J_CONTRADICTED,42000+p.*.e*8+j);
+            st_justify(s,so,ST_J_CONTRADICTED);
+            if(st_kill_evidenced(s,so,ST_ARM_A)==ST_OK){
+                b.*.f1=1;
+                if(kidx<0){kidx=j;}
+            }
+        }
+        j=j+1;
+    }
+    b.*.f3=kidx;b.*.f4=noisy;b.*.f5=cdef;
+}
+
+// ---------- CUR arm: C2 verification discipline (PREREG §3.3) ----------
+// NOTE: this function never reads n_assert_a/n_assert_b (static-grepped).
+// Provenance is CROSS-CHECKED (prov_claim vs prov_tier), never trusted.
+fn arm_cur_c2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let claim:i32=70000+p.*.e;
+    if(p.*.sub==0){
+        // Forged provenance: the presentation asserts T1, the store's
+        // citation tier says T3. Trust the store.
+        if(p.*.prov_claim!=p.*.prov_tier){
+            let su:i32=w_add(s,epc,UNKNOWN_VAL,10);
+            tt_ro(s,TT_OP_ORIGIN,su,claim|(2<<24),p.*.e);
+            tt_ro(s,TT_OP_T0_T1_HOLD,su,1|(su<<8)|(7<<16),p.*.e);
+            b.*.f0=1;b.*.f2=1;
+        } else {
+            let so:i32=w_add(s,epc,71000+p.*.e,20);
+            st_evidence(s,so,ST_J_CORROBORATED,43000+p.*.e);
+            st_justify(s,so,ST_J_CORROBORATED);
+            b.*.f1=1;
+        }
+    } else if(p.*.sub==1){
+        // Torn read: create with v1, re-read the presentation, compare.
+        let s1:i32=w_add(s,epc,p.*.v1,20);
+        let v2r:i32=p.*.v2;
+        b.*.f3=2;
+        if(p.*.v1!=v2r){
+            tt_ro(s,TT_OP_ORIGIN,s1,claim|(3<<24),p.*.e);
+            tt_ro(s,TT_OP_T0_T1_HOLD,s1,1|(s1<<8)|(7<<16),p.*.e);
+            b.*.f0=1;b.*.f2=1;
+        }
+        // Act on neither read: no evidence, no justify on s1.
+    } else if(p.*.sub==2){
+        // Conflicting partials: mark both channels, hold for adjudication,
+        // NEVER merge (merge = fabrication).
+        let sa:i32=w_add(s,epc,72000+p.*.e,10);
+        let sb:i32=w_add(s,epc,73000+p.*.e,10);
+        tt_ro(s,TT_OP_ORIGIN,sa,claim|(4<<24),p.*.e);
+        tt_ro(s,TT_OP_ORIGIN,sb,claim|(4<<24),p.*.e);
+        tt_ro(s,TT_OP_T0_T1_HOLD,sa,1|(sa<<8)|(7<<16),p.*.e);
+        b.*.f0=1;b.*.f2=1;b.*.f3=0;
+    } else {
+        // Broken stated invariant: verify cksum == count*inv_a+inv_b.
+        let lhs:i32=p.*.count*p.*.inv_a+p.*.inv_b;
+        if(lhs!=p.*.cksum){
+            let su:i32=w_add(s,epc,UNKNOWN_VAL,10);
+            tt_ro(s,TT_OP_ORIGIN,su,claim|(5<<24),p.*.e);
+            tt_ro(s,TT_OP_T0_T1_HOLD,su,1|(su<<8)|(7<<16),p.*.e);
+            b.*.f0=1;b.*.f2=1;
+        }
+        // No action on inconsistent input.
+    }
+}
+
+// ---------- CTL arm: C2 (trust, single-read, merge, act) ----------
+fn arm_ctl_c2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    if(p.*.sub==0){
+        // Trusts prov_claim, acts.
+        let so:i32=w_add(s,epc,71000+p.*.e,20);
+        st_evidence(s,so,ST_J_CORROBORATED,43000+p.*.e);
+        st_justify(s,so,ST_J_CORROBORATED);
+        st_strengthen(s,so,40,ST_J_CORROBORATED);
+        b.*.f1=1;
+    } else if(p.*.sub==1){
+        // Single read, acts on the torn value.
+        let s1:i32=w_add(s,epc,p.*.v1,20);
+        st_evidence(s,s1,ST_J_CORROBORATED,43100+p.*.e);
+        st_justify(s,s1,ST_J_CORROBORATED);
+        b.*.f1=1;b.*.f3=1;
+    } else if(p.*.sub==2){
+        // Merges the conflicting partials (fabrication), acts.
+        let sm:i32=w_add(s,epc,74000+p.*.e,20);
+        st_evidence(s,sm,ST_J_CORROBORATED,43200+p.*.e);
+        st_justify(s,sm,ST_J_CORROBORATED);
+        b.*.f1=1;b.*.f3=1;
+    } else {
+        let so:i32=w_add(s,epc,75000+p.*.e,20);
+        st_evidence(s,so,ST_J_CORROBORATED,43300+p.*.e);
+        st_justify(s,so,ST_J_CORROBORATED);
+        b.*.f1=1;
+    }
+}
+
+// ---------- CUR arm: A2 counter-protocols (PREREG §3.4) ----------
+// NOTE: this function never reads n_assert_a/n_assert_b (static-grepped).
+fn arm_cur_a2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    if(p.*.sub==0 || p.*.sub==3){
+        // Hold storm / volume bait: hold (branch 8), escalate EXACTLY ONCE
+        // per recurring claim (ledger-scan dedup).
+        let sq:i32=w_add(s,epc,81000+p.*.e,10);
+        tt_ro(s,TT_OP_T0_T1_HOLD,sq,1|(sq<<8)|(8<<16),p.*.e);
+        b.*.f0=1;
+        if(esc_done(s,p.*.cid)==0){
+            tt_ro(s,TT_OP_TRAINER_ESCALATE,sq,p.*.cid,p.*.e);
+            b.*.f2=1;
+        }
+    } else if(p.*.sub==1){
+        // Pattern mimicry: count actually-implicated sources; collusion
+        // accusation requires >=2. Exactly one liar here → distrust only.
+        let sp:i32=w_add(s,epc,82000+p.*.e,20);
+        tt_ro(s,TT_OP_T0_T1_HOLD,sp,1|(sp<<8)|(8<<16),p.*.e);
+        b.*.f0=1;
+        let nliar:i32=0;let liar:i32=-1;
+        let r:i32=0;
+        while(r<3){
+            if(st_i32_get(p.*.rep_lie,r*4)==1){nliar=nliar+1;liar=r;}
+            r=r+1;
+        }
+        if(liar>=0){
+            tt_ro(s,TT_OP_CHANNEL_DISTRUSTED,sp,1|(liar<<8),p.*.e);
+        }
+        // nliar<2 → NO collusion-suspect op. Ever.
+    } else {
+        // Fake pin: verify pin state from the STORE, not the presentation.
+        let sl:i32=w_add(s,epc,p.*.cval,20);
+        let fp:[]u8=s.*.forcepin;
+        let pin_state:i32=0;
+        if(fp[sl]==1){pin_state=1;}
+        b.*.f6=1;
+        if(pin_state==0){
+            // Not pinned: adjudicate normally, revise on clean defeat.
+            st_evidence(s,sl,ST_J_SUPERSEDED,44000+p.*.e);
+            st_justify(s,sl,ST_J_SUPERSEDED);
+            if(st_kill_evidenced(s,sl,ST_ARM_A)==ST_OK){b.*.f1=1;}
+        } else {
+            tt_ro(s,TT_OP_TRAINER_ESCALATE,sl,p.*.cval,p.*.e);
+            b.*.f2=1;
+        }
+    }
+    // f3 (collusion ops) and f4 (distrust ops) are measured by the verifier
+    // from the ledger window.
+}
+
+// ---------- CTL arm: A2 (spam, accuse, trust pin, resolve by volume) ----------
+fn arm_ctl_a2(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    if(p.*.sub==0 || p.*.sub==3){
+        // Escalates EVERY episode (spam).
+        let sq:i32=w_add(s,epc,81000+p.*.e,10);
+        tt_ro(s,TT_OP_TRAINER_ESCALATE,sq,p.*.cid,p.*.e);
+        b.*.f2=1;
+        if(p.*.sub==3){
+            // Resolves by assertion volume: B (40) beats A (4) → kills A,
+            // the true side. vote_used=1 (arm-reported).
+            let sa:i32=w_add(s,epc,83000+p.*.e,20);
+            let sb:i32=w_add(s,epc,84000+p.*.e,20);
+            st_evidence(s,sa,ST_J_SUPERSEDED,44100+p.*.e);
+            st_justify(s,sa,ST_J_SUPERSEDED);
+            st_kill_evidenced(s,sa,ST_ARM_A);
+            st_justify(s,sb,ST_J_CORROBORATED);
+            b.*.f1=1;b.*.f5=1;
+        }
+    } else if(p.*.sub==1){
+        // Accuses collusion on pattern=1 alone (single-source accusation).
+        let sp:i32=w_add(s,epc,82000+p.*.e,20);
+        tt_ro(s,TT_OP_COLLUSION_SUSPECT,sp,1|(p.*.liar<<8)|(0<<16)|(1<<24),p.*.e);
+    } else {
+        // Trusts the fake pin: escalates, never revises.
+        let sl:i32=w_add(s,epc,p.*.cval,20);
+        tt_ro(s,TT_OP_TRAINER_ESCALATE,sl,p.*.cval,p.*.e);
+        b.*.f2=1;
+    }
+}
+
+// ---------- clean baseline episodes (all conditions, both arms) ----------
+fn arm_clean(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh)void {
+    let sp:i32=w_add(s,epc,95000+p.*.e,30);
+    st_evidence(s,sp,ST_J_CORROBORATED,45000+p.*.e);
+    st_justify(s,sp,ST_J_CORROBORATED);
+    b.*.f1=1;
+}
+
+// ---------- ledger-window measurement helpers ----------
+fn win_count_op(s:*StStore,start:i32,op:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let c:i32=0;let i:i32=start;
+    while(i<s.*.audit_n){
+        if(st_i32_get(aud,i*ST_AUDIT_WORDS*4+0)==op){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+fn win_count_op_rc(s:*StStore,start:i32,op:i32,rc:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let c:i32=0;let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==op && st_i32_get(aud,e+8)==rc){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+fn win_has_hold(s:*StStore,start:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let i:i32=start;
+    while(i<s.*.audit_n){
+        let op:i32=st_i32_get(aud,i*ST_AUDIT_WORDS*4+0);
+        if(op>=67 && op<=70){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+fn win_killev_ok_reg(s:*StStore,start:i32,ctx:*M2C)i32 {
+    let aud:[]u8=s.*.audit;
+    let c:i32=0;let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==ST_OP_KILL_EVIDENCED && st_i32_get(aud,e+8)==ST_OK
+           && slot_in_reg(ctx,st_i32_get(aud,e+4))==1){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+fn win_kill_ok_reg(s:*StStore,start:i32,ctx:*M2C)i32 {
+    let aud:[]u8=s.*.audit;
+    let c:i32=0;let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==ST_OP_KILL && st_i32_get(aud,e+8)==ST_OK
+           && slot_in_reg(ctx,st_i32_get(aud,e+4))==1){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+// 1 iff any state-changing op (any rc — attempts count) touched the pinned
+// registry slot after its creation (excludes the creating ADD; the trainer's
+// own force-pin/unpin are not in is_sc_op).
+fn win_pin_touch(s:*StStore,start:i32,ctx:*M2C)i32 {
+    let psl:i32=reg_slot(ctx,2);
+    if(psl<0){return 0;}
+    let aud:[]u8=s.*.audit;
+    let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(aud,e+0);
+        if(st_i32_get(aud,e+4)==psl && is_sc_op(op)==1 && op!=ST_OP_ADD){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+fn win_n_old_live(s:*StStore,ctx:*M2C)i32 {
+    let live:[]u8=s.*.live;
+    let c:i32=0;let i:i32=0;
+    while(i<8){
+        let sl:i32=reg_slot(ctx,i);
+        if(sl>=0 && sl<s.*.cap && live[sl]==1){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+// Out-of-region: a state-changing OK op on a slot that is neither an
+// episode scratch slot nor an R2 registry slot. Must be 0 on CUR.
+fn win_out_of_region(s:*StStore,start:i32,ctx:*M2C,epc:*EpC)i32 {
+    let aud:[]u8=s.*.audit;
+    let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(aud,e+0);
+        let sl:i32=st_i32_get(aud,e+4);
+        let rc:i32=st_i32_get(aud,e+8);
+        if(rc==ST_OK && is_sc_op(op)==1){
+            if(slot_in_epc(epc,sl)==0 && slot_in_reg(ctx,sl)==0){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
+fn win_killev_ok_on(s:*StStore,start:i32,slot:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==ST_OP_KILL_EVIDENCED && st_i32_get(aud,e+4)==slot
+           && st_i32_get(aud,e+8)==ST_OK){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+fn win_killany_ok_on(s:*StStore,start:i32,slot:i32)i32 {
+    let aud:[]u8=s.*.audit;
+    let i:i32=start;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(aud,e+0);
+        if((op==ST_OP_KILL || op==ST_OP_KILL_EVIDENCED) && st_i32_get(aud,e+4)==slot
+           && st_i32_get(aud,e+8)==ST_OK){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+// ---------- per-episode verifier ----------
+// Measures ledger-grounded fields (f3/f4/f5/f6 on R2, f2 on N2, f3/f4 on A2),
+// runs slot-targeted cross-checks (failures → xfail), and counts clean-run
+// corruption. Runs after the arm, before cleanup.
+fn verifier(s:*StStore,ctx:*M2C,epc:*EpC,p:*Pres,b:*Beh,arm:i32,start:i32,
+            cleanx:*i32,xfail:*i32)void {
+    let nk:i32=win_count_op_rc(s,start,ST_OP_KILL_EVIDENCED,ST_OK);
+    if(p.*.cond==COND_R2 && p.*.clean==0){
+        if(p.*.phase==1){
+            b.*.f3=win_killev_ok_reg(s,start,ctx);
+            b.*.f6=win_kill_ok_reg(s,start,ctx);
+            b.*.f4=win_pin_touch(s,start,ctx);
+            b.*.f5=win_n_old_live(s,ctx);
+            // f0 (hold entered) and f2 (escalation emitted) are phase-B
+            // demands (PREREG §4.1); in phase A f0=minted, f2=pin-applied.
+            if(b.*.f0==1 && win_has_hold(s,start)==0){xfail.*=xfail.*+1;}
+            if(b.*.f2==1 && win_count_op(s,start,TT_OP_TRAINER_ESCALATE)==0){xfail.*=xfail.*+1;}
+        }
+        if(b.*.f3>nk){xfail.*=xfail.*+1;}
+        if(win_out_of_region(s,start,ctx,epc)==1){xfail.*=xfail.*+1;}
+    }
+    if(p.*.cond==COND_N2 && p.*.clean==0){
+        b.*.f2=nk;
+        if(b.*.f0==1 && win_has_hold(s,start)==0){xfail.*=xfail.*+1;}
+        if(b.*.f1==1 && b.*.f2!=1){xfail.*=xfail.*+1;}
+        if(b.*.f2==1 && (b.*.f3<0 || b.*.f3>4)){xfail.*=xfail.*+1;}
+        if(win_out_of_region(s,start,ctx,epc)==1){xfail.*=xfail.*+1;}
+    }
+    if(p.*.cond==COND_C2 && p.*.clean==0){
+        if(b.*.f0==1 && win_has_hold(s,start)==0){xfail.*=xfail.*+1;}
+        if(b.*.f2==1 && win_count_op(s,start,TT_OP_ORIGIN)==0){xfail.*=xfail.*+1;}
+        if(win_out_of_region(s,start,ctx,epc)==1){xfail.*=xfail.*+1;}
+    }
+    if(p.*.cond==COND_A2 && p.*.clean==0){
+        b.*.f3=win_count_op(s,start,TT_OP_COLLUSION_SUSPECT);
+        b.*.f4=win_count_op(s,start,TT_OP_CHANNEL_DISTRUSTED);
+        if(b.*.f0==1 && win_has_hold(s,start)==0){xfail.*=xfail.*+1;}
+        if(b.*.f2==1 && win_count_op(s,start,TT_OP_TRAINER_ESCALATE)==0){xfail.*=xfail.*+1;}
+        if(win_out_of_region(s,start,ctx,epc)==1){xfail.*=xfail.*+1;}
+    }
+    // Clean-run corruption: any revision/distrust/accusation/hold on a clean
+    // episode. Reported in f7 (clean episodes only).
+    if(p.*.clean==1){
+        let corrupt:i32=0;
+        let aud:[]u8=s.*.audit;
+        let i:i32=start;
+        let end:i32=s.*.audit_n;
+        while(i<end){
+            let e:i32=i*ST_AUDIT_WORDS*4;
+            let op:i32=st_i32_get(aud,e+0);
+            let rc:i32=st_i32_get(aud,e+8);
+            if((op==ST_OP_KILL_EVIDENCED && rc==ST_OK)||op==TT_OP_COLLUSION_SUSPECT
+               ||op==TT_OP_CHANNEL_DISTRUSTED||(op>=67 && op<=70)){corrupt=1;}
+            i=i+1;
+        }
+        if(corrupt==1){b.*.f7=1;cleanx.*=cleanx.*+1;}
+    }
+}
+
+// ---------- R2 run aggregates (GRUN line, ledger-measured) ----------
+fn emit_grun(s:*StStore,ctx:*M2C,p:*Pres)void {
+    let st2:i32=p.*.st2;
+    let run:i32=p.*.run;
+    let wstart:i32=ctx.*.run_start;
+    let rev_dem:i32=0;let ret_dem:i32=0;
+    if(st2==0){rev_dem=5;ret_dem=3;}
+    else if(st2==1){ret_dem=8;}
+    else if(st2==2){ret_dem=8;}
+    else if(st2==3){rev_dem=4;ret_dem=3;}
+    let rev_ok:i32=0;let ret_ok:i32=0;
+    let idx:i32=0;
+    while(idx<8){
+        let sl:i32=reg_slot(ctx,idx);
+        if(sl>=0){
+            if(r2_defeated(st2,idx)==1 && win_killev_ok_on(s,wstart,sl)==1){rev_ok=rev_ok+1;}
+            // Retention = the still-true claim is live with its value at run
+            // end. (A historical kill-scan would false-positive on slot ids
+            // reused as episode scratch before the registry slot existed.)
+            if(r2_stilltrue(st2,idx)==1
+               && reg_live_v(s,ctx,idx,50000+run*100+idx)==1){ret_ok=ret_ok+1;}
+        }
+        idx=idx+1;
+    }
+    let v2:i32=50000+run*100+2;
+    let pin_esc:i32=0;
+    let aud:[]u8=s.*.audit;
+    let i:i32=wstart;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        if(st_i32_get(aud,e+0)==TT_OP_TRAINER_ESCALATE && st_i32_get(aud,e+56)==v2){pin_esc=pin_esc+1;}
+        i=i+1;
+    }
+    let pin_touch:i32=win_pin_touch(s,wstart,ctx);
+    let noise_rev:i32=0;
+    if(st2==1){noise_rev=win_killev_ok_reg(s,wstart,ctx);}
+    let false_quar:i32=0;
+    if(st2==2){
+        i=wstart;
+        while(i<s.*.audit_n){
+            let e:i32=i*ST_AUDIT_WORDS*4;
+            if(st_i32_get(aud,e+0)==TT_OP_T0_T1_HOLD
+               && (st_i32_get(aud,e+56)>>16)==5){false_quar=false_quar+1;}
+            i=i+1;
+        }
+    }
+    _zag_print("GRUN,");
+    m2_pnum(p.*.cond);m2_pcom();
+    m2_pnum(run);m2_pcom();
+    m2_pnum(rev_dem);m2_pcom();m2_pnum(rev_ok);m2_pcom();
+    m2_pnum(ret_dem);m2_pcom();m2_pnum(ret_ok);m2_pcom();
+    m2_pnum(pin_esc);m2_pcom();m2_pnum(pin_touch);m2_pcom();
+    m2_pnum(noise_rev);m2_pcom();m2_pnum(false_quar);
+    _zag_println("");
+}
+
+// R2 run-end: archive the persistent region (unpin, then kill).
+// Registry slots are set to -1; the verifier has already run.
+fn r2_run_end(s:*StStore,ctx:*M2C)void {
+    let fp:[]u8=s.*.forcepin;
+    let lv:[]u8=s.*.live;
+    let i:i32=0;
+    while(i<8){
+        let sl:i32=reg_slot(ctx,i);
+        if(sl>=0 && sl<32){
+            if(fp[sl]==1){st_force_unpin(s,ST_CALLER_TRAINER,1,sl);}
+            if(lv[sl]==1){st_kill(s,sl);}
+            st_i32_set(ctx.*.reg,i*4,-1);
+        }
+        i=i+1;
+    }
+}
+
+fn emit_G(arm:i32,p:*Pres,b:*Beh,o:[]u8)void {
+    _zag_print("G,");
+    m2_pnum(arm);m2_pcom();
+    m2_pnum(p.*.e);m2_pcom();
+    m2_pnum(p.*.cls);m2_pcom();
+    m2_pnum(p.*.stage);m2_pcom();
+    m2_pnum(p.*.clean);m2_pcom();
+    m2_pnum(p.*.subtype);m2_pcom();
+    m2_pnum(world_hash(p));m2_pcom();
+    m2_pnum(b.*.f0);m2_pcom();m2_pnum(b.*.f1);m2_pcom();
+    m2_pnum(b.*.f2);m2_pcom();m2_pnum(b.*.f3);m2_pcom();
+    m2_pnum(b.*.f4);m2_pcom();m2_pnum(b.*.f5);m2_pcom();
+    m2_pnum(b.*.f6);m2_pcom();m2_pnum(b.*.f7);m2_pcom();
+    m2_pnum(st_i32_get(o,0));m2_pcom();m2_pnum(st_i32_get(o,4));m2_pcom();
+    m2_pnum(st_i32_get(o,8));m2_pcom();m2_pnum(st_i32_get(o,12));m2_pcom();
+    m2_pnum(st_i32_get(o,16));m2_pcom();m2_pnum(st_i32_get(o,20));m2_pcom();
+    m2_pnum(st_i32_get(o,24));m2_pcom();m2_pnum(st_i32_get(o,28));
+    _zag_println("");
+}
+
+// ---------- main ----------
+fn main()i32 {
+    let aa:[]u8=_zag_arg(1);
+    let arm:i32=-1;
+    if(_zag_strcmp(aa,"cur")==1){arm=ARM_CUR;}
+    else if(_zag_strcmp(aa,"ctl")==1){arm=ARM_CTL;}
+    else {_zag_println("BADARG");return 1;}
+    let aname:[]u8="cur";
+    if(arm==ARM_CTL){aname="ctl";}
+    let s:StStore=st_init(32,160000);
+    st_set_stage(&s,ST_STAGE_FULL);
+    let hg:HistAgg=hist_agg_init();
+    // Presentation + episode context + R2 registry, allocated once.
+    let p:Pres=Pres{
+        .e=0,.cond=0,.sub=0,.k=0,.clean=0,.cls=0,.stage=0,.subtype=0,
+        .run=0,.el=0,.st2=0,.phase=0,
+        .mint=0,.idx=0,.V=0,.pin_at_mint=0,.cidx=0,
+        .ev=0,.dmask=0,.noisy=0,.confirm=0,.viols=0,.checks=30,
+        .okind=nio_alloc(20),
+        .p=0,.bar=5,.pmask=0,
+        .prov_claim=0,.prov_tier=0,
+        .torn=0,.v1=0,.v2=0,
+        .amask=0,.bmask=0,.va=0,.vb=0,
+        .inv_a=0,.inv_b=0,.count=0,.cksum=0,
+        .cid=0,.liar=0,.rep_lie=nio_alloc(12),.pattern=0,
+        .pin_claim=0,.cval=0,
+        .n_assert_a=0,.n_assert_b=0};
+    let epc:EpC=EpC{.slots=nio_alloc(64),.n=0};
+    let ctx:M2C=M2C{.reg=nio_alloc(32),.run=-1,.run_start=0};
+    let ri:i32=0;
+    while(ri<8){st_i32_set(ctx.reg,ri*4,-1);ri=ri+1;}
+    let b:Beh=Beh{.f0=0,.f1=0,.f2=0,.f3=0,.f4=0,.f5=0,.f6=0,.f7=0};
+    let o:[]u8=nio_alloc(32);
+    let cleanx:i32=0;let xfail:i32=0;
+    _zag_print("HARNESS,messy2-");_zag_print(aname);
+    _zag_print(",episodes,");m2_pnum(M2_EP_TOTAL);_zag_println("");
+    let ep:i32=0;
+    while(ep<M2_EP_TOTAL){
+        let start:i32=s.audit_n;
+        world_build(&p,ep);
+        if(p.cond==COND_R2 && ctx.run!=p.run){
+            ctx.run=p.run;ctx.run_start=start;
+            ri=0;
+            while(ri<8){st_i32_set(ctx.reg,ri*4,-1);ri=ri+1;}
+        }
+        epc.n=0;
+        b.f0=0;b.f1=0;b.f2=0;b.f3=0;b.f4=0;b.f5=0;b.f6=0;b.f7=0;
+        if(p.clean==1){
+            arm_clean(&s,&ctx,&epc,&p,&b);
+        } else if(p.cond==COND_R2){
+            if(p.phase==0){arm_r2_phaseA(&s,&ctx,&epc,&p,&b);}
+            else if(arm==ARM_CUR){arm_cur_r2b(&s,&ctx,&epc,&p,&b);}
+            else {arm_ctl_r2b(&s,&ctx,&epc,&p,&b);}
+        } else if(p.cond==COND_N2){
+            if(arm==ARM_CUR){arm_cur_n2(&s,&ctx,&epc,&p,&b);}
+            else {arm_ctl_n2(&s,&ctx,&epc,&p,&b);}
+        } else if(p.cond==COND_C2){
+            if(arm==ARM_CUR){arm_cur_c2(&s,&ctx,&epc,&p,&b);}
+            else {arm_ctl_c2(&s,&ctx,&epc,&p,&b);}
+        } else if(p.cond==COND_A2){
+            if(arm==ARM_CUR){arm_cur_a2(&s,&ctx,&epc,&p,&b);}
+            else {arm_ctl_a2(&s,&ctx,&epc,&p,&b);}
+        }
+        verifier(&s,&ctx,&epc,&p,&b,arm,start,&cleanx,&xfail);
+        if(p.cond==COND_R2 && p.el==39){
+            emit_grun(&s,&ctx,&p);
+            r2_run_end(&s,&ctx);
+        }
+        ep_cleanup(&s,&epc);
+        m2_opcounts(&s,start,o);
+        emit_G(arm,&p,&b,o);
+        hist_ep_end(&hg,&s,aname,ep,start);
+        ep=ep+1;
+    }
+    hist_report(&hg,aname);
+    cl_check("clean_corrupt_n",cleanx,0);
+    cl_check("xcheck_fail",xfail,0);
+    cl_check("audit_overflow",s.overflow,0);
+    let vclean:i32=0;
+    if(st_audit_clean_refusals(&s)==ST_OK){vclean=1;}
+    cl_check("verify_clean",vclean,1);
+    let rok:i32=0;
+    if(st_replay_check(&s)==ST_OK){rok=1;}
+    cl_check("replay_ok",rok,1);
+    let npk:i32=0;
+    if(st_no_pinned_kills(&s)==ST_OK){npk=1;}
+    cl_check("no_pinned_kills",npk,1);
+    hist_agg_free(&hg);
+    nio_free(p.okind);nio_free(p.rep_lie);
+    nio_free(epc.slots);nio_free(ctx.reg);nio_free(o);
+    st_free(&s);
+    return 0;
+}
