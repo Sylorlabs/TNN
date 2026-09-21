@@ -46,3 +46,19 @@ Built with: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`
   (leaf + composed recall with verify). Kill if >10%.
 - Note: r10 corpus (54MB) exceeds the 2^25 single-slice limit; 10x ID scale
   achieved via 10x ingest (byte content reused; K2 is byte-independent).
+
+## 10x measurement (finalization, 2026-09-21)
+- Official 10x: `m2_bin m2-k2-10x <corpora/r1>` — r1 prose ingested 10x
+  (847,310 leaves, 635,470 compositions), double runs A/B, serial.
+- Binary sha256 `44601bc5dc51c37f49d89fe0f0fe40a55feb27cef411afc3917dc2bc676e5273`
+  (built 08:31, after last source edit 08:29 — no rebuild needed).
+- Run A: leaf 5.98s, composed 1239.60s, T_recall 1245.57s,
+  id_recompute 359.73s, ratio 28.8% — KILLED.
+- Run B: leaf 6.21s, composed 904.86s, T_recall 911.07s,
+  id_recompute 244.80s, ratio 26.8% — KILLED.
+- stdout `M2K2,prose.bin,KILLED` byte-identical across both runs.
+- Logs: `~/workspace/tnn-lab/units/arms/M2/k2_10x/` (summary.txt, run_A/B).
+- Run script: `~/workspace/tnn-lab/units/arms/M2/k2_10x_run.sh`.
+- Ratio robust to wall-clock variance: both legs CPU-bound in one process;
+  composed_recall differed 1239.60s vs 904.86s (overnight VM load) while the
+  ratio held at 28.8% vs 26.8% — both >2.5x the 10% bar.

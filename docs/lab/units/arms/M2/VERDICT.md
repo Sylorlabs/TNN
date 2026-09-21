@@ -32,21 +32,37 @@
 - Code: PASS
 - Verdict: **PASS**
 
-## Binding K2
+## Binding K2 (official 10x run, double runs)
 - 1x (r1 prose, 84,731 leaves, 63,547 compositions):
   - leaf_recall: 0.95s
   - composed_recall: 123.1s (includes verify with SHA-256)
   - id_recompute: 32.1s
-  - ratio: 25.8% — **KILLED** (>10%)
-- 10x (official): IN PROGRESS
+  - T_recall: 124.1s; ratio: 25.8% — **KILLED** (>10%)
+- 10x official (`m2-k2-10x`, r1 prose ingested 10x = 847,310 leaves,
+  635,470 compositions), run A:
+  - leaf_recall: 5.98s
+  - composed_recall: 1239.60s
+  - id_recompute: 359.73s
+  - T_recall: 1245.57s; ratio: 28.8% — **KILLED**
+- 10x official, run B:
+  - leaf_recall: 6.21s
+  - composed_recall: 904.86s
+  - id_recompute: 244.80s
+  - T_recall: 911.07s; ratio: 26.8% — **KILLED**
+- stdout: `M2K2,prose.bin,KILLED` — identical across both runs.
+- Method note: 10x ID scale via 10x ingest of the r1 corpus (byte content
+  reused; K2 measures ID recomputation, which is byte-independent).
+  Wall-clock via clock_gettime; verdict line to stdout, timings to stderr.
+  Ratio = id_recompute*1000/T_recall (tenths of a percent); kill if >100.
 
 ## Verdict
-**KILLED** by K2 (ID recomputation >10% of recall latency).
+**KILLED** by K2 (ID recomputation >10% of recall latency on the
+official 10x run).
 
 The compositional ID scheme's verification cost (SHA-256 recomputation on
-every recall) dominates latency. At 1x, 25.8% of recall time is spent on
-ID recomputation. The 10x run will confirm, but the mechanism is already
-disqualified by the binding kill criterion.
+every recall) dominates latency. At 10x, 26.8–28.8% of recall time
+is spent on ID recomputation — the binding kill criterion fires on the
+specified measurement, not just the 1x signal.
 
 ## Death certificate
 See `DEATH_CERTIFICATE.md`.
