@@ -125,3 +125,18 @@ consequence" operationally defined for text/code, and the giant-span compression
 explicitly barred. Awaiting Micah's sign-off alongside the catalog's open items (numeric bars,
 judgment-held vs force-pinned for taught words, V fairness checklist, frozen judgment
 parameters).
+
+## Amendment 2026-09-21 — full native redo (Micah's decision)
+
+Micah's ruling: the R31 chunking line is to be **redone in full, natively in Zag, with all
+tests re-run** — not merely referenced, and not reduced to the two resurrected arms. The
+tournament, the causal ablation, the dose curve, the split/merge dynamics, and the support-gap
+recruitment battery are all reimplemented against the native substrate and re-run at 1x/10x.
+The old Python numbers remain REFERENCE_ONLY; the native redo is what counts as evidence.
+
+This redo is its own workstream inside the representation program: it both validates the
+resurrection claim and supplies the native implementation that arms D (self-cut span +
+stable ID) and the predictive-surprise arm are built on. Per the 2026-09-21 standing rule —
+*when in doubt or guessing at all with recommendations, just test both* — anywhere the redo
+faces a judgment call between the old R31 behavior and a new-program adaptation, both are
+implemented and tested head-to-head rather than decided by argument.

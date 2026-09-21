@@ -230,3 +230,27 @@ both sides of the experiment "installed," and the experiment would prove nothing
 curriculum slice: 4 wrong-span, 4 false-confidence, 2 missing-grounding, 2 plausible-false),
 and whether the learner sees the manifest (no — it is sealed until scoring, else detection is
 uninformative).
+
+## Amendment 2026-09-21 — installed vs learned: who decides (Micah's ruling)
+
+**The trainer determines whether a word is installed or not.** Installed-ness is a property of
+*arrival*, set by the trainer's explicit forcing action — never inferred, never a default.
+
+**Default: learned.** Unless the person training it forces installation, a word is learned, not
+installed — including taught words the learner adopted through its own judgment. Teaching
+proposes; the learner disposes; what the learner holds through that process is learned.
+
+**The learner can reverse words.** Revise/reject is available for everything learned and
+everything judgment-held — always, by the learner's own deliberation, audited.
+
+**Forcing installation = a force-pin.** The trainer's override is visible, audited, external.
+Per standing law, the learner cannot reverse a force-pin — that is the one and only exception,
+and it is always visible in the audit trail as the trainer's action, not the learner's belief.
+
+In one line: **the trainer decides the status (installed vs learned); the learner decides what
+it believes (adopt/revise/reject) within that status.** If the learner holds a word it can
+revise, the word was learned — no matter who proposed it. If it cannot be revised, someone
+forced it, and the ledger says who.
+
+This supersedes any reading of §F under which "taught" could blur into "installed": taught is
+a *route* to learned, never a quiet form of installed.
