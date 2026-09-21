@@ -101,4 +101,10 @@ See ARM_SPEC.md §7. Key items:
 
 ## Commit Hashes
 
-PENDING
+- **Commit:** `4f89788a2aa40c08ad29d0ee4b2b4e11b2121881`
+- **Branch:** `tnn-native-lab`
+- **Parent:** `dc79dd0ba02c`
+- **Date:** 2026-09-21
+
+14 files committed: source, substrate, specs, verdict, death certificate,
+runner scripts, M1 evidence (stdout logs and fragments).
