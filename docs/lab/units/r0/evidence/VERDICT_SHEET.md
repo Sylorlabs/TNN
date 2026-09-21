@@ -76,8 +76,8 @@ probe observations** — nothing more than the frozen text defines:
 
 ## Commits (branch `tnn-native-lab`)
 
-- Corpus hash commitment: TBD
-- Harness implementation + evidence: TBD
+- Corpus hash commitment: `53367a730ef73f1e30ed6b7ea2b43d5f5ebae019`
+- Harness implementation + evidence: `337b629bf33f2f10bd830314a25385af9a3757df`
 
 ## Files
 
