@@ -2,7 +2,7 @@
 
 **Worker:** C3 (Track B closeout) | **Date:** 2026-09-21 | **Frozen §4 hash:** `c7a9d57e3ac4d8ff48f4396c47eec9fedbfacb894584a31779a91a64deeef879`
 **Spec:** PREREG_FREEZE.md §4 B.6 — "Forcing installation = a force-pin: visible, audited, external. Per standing law the learner cannot reverse a force-pin — the one and only exception, always visible in the audit trail as the trainer's action, not the learner's belief."
-**Commit:** (evidence commit SHA recorded below after push)
+**Commit:** `d921459af52b9d37cdd8eec103adff9742c691e2` on `tnn-native-lab` (parent `afb32918809b`; fast-forward, no race)
 
 ## VERDICT: PASS — B.6 implemented to the frozen spec text
 
