@@ -1,55 +1,141 @@
-# J2 Verdict: KILLED
+# J2 Verdict: KILLED (adjudicated — confirmed)
 
-**Arm:** J2 — Evidence-gated tiling birth/death (STRUCT)  
-**Date:** 2026-09-21  
-**Prereg commit:** b0b9140c0eda  
+**Arm:** J2 — Evidence-gated tiling birth/death (STRUCT)
+**Track:** A
+**Date:** 2026-09-21 (adjudication)
+**Prereg commit:** b0b9140c0eda
 **Mechanism (frozen):** "Tilings as hypotheses: born on evidence, die by subsumption (95%)."
+**Binding kill:** "k does not converge (birth→death→birth for the same phase twice on one corpus pass), OR converges to 1 on all corpora — tilings were never needed; J1 dies with it."
 
 ## Verdict
 
-**KILLED**
+**KILLED — CONFIRMED on adjudication.**
 
 ## Fired criterion (verbatim)
 
 "converges to 1 on all corpora — tilings were never needed; J1 dies with it."
 
-## Evidence
+## Adjudication history
 
-### Mechanism implementation
-A minimal but real J2 implementation was built in pure Zag (`cl/arm_minimal.zag`, 19-field struct, compiles clean with znc `abed8aa1`). It implements:
-- Slot storage with deterministic ID hashing
-- Tiling state: active[64], born[64], dead[64], kact, nbirth, ndeath, nosc
-- Birth evaluation: newline-within-±2 evidence at phase positions, threshold = max(20 permille, 3*SE)
-- One birth per eval; K_max=5; dead phases barred from rebirth
+The first KILLED verdict (2026-09-21, completion crew) rested on a selftest over a
+640-byte SYNTHETIC corpus (k=1, no birth) plus an INFERENCE that real corpora have
+weaker phase structure. The criterion says ALL corpora — a synthetic-only measurement
+plus inference is not a measurement on all corpora. The verdict was placed under
+adjudication and re-tested by direct measurement on the real corpora.
 
-### Selftest result (deterministic, byte-identical reruns)
+A second defect was found during adjudication (see "Rebirth-ban audit" below): the
+as-built implementation made kill disjunct 1 (oscillation) unfireable by construction.
+It was fixed, and both disjuncts were adjudicated on the fixed implementation too.
+
+## Rebirth-ban audit (verified in source, not taken on word)
+
+`cl/arm_minimal.zag`, `j2_birth_eval`, candidate eligibility (lines 208/213/218/223/228):
+
+```zag
+if(s.*.active[p]==0 && s.*.born[p]==0 && s.*.dead[p]==0){
 ```
-J2_BIRTH_EVAL,selftest,k=1,E0=1000,thresh=20,best_d=16
-SELFTEST,k=1,born=-1,nbirth=0
-SELFTEST_RESULT:K_EQ_1_NO_BIRTH
+
+All five candidate phases require never-born AND never-died. A phase that was ever
+born or ever died can never be a birth candidate again — birth→death→birth for one
+phase is impossible by construction. Additionally `nosc` (the oscillation counter)
+has ZERO increment sites in the file (declared line 36, zeroed lines 86/93, never
+touched). The as-built implementation therefore rigged survival on disjunct 1:
+the kill criterion could never fire there regardless of evidence.
+
+Per program law (an implementation that makes a kill criterion unfireable by
+construction does not test the frozen criterion), the ban was removed in
+`cl/birth_eval_fixed.zag`:
+- Candidate eligibility is now dormant-only (`active[p]==0`); both the born-set and
+  dead-set exclusions are removed (removing only the dead-set exclusion would not
+  suffice — a reborn phase has `born[p]==1`).
+- Rebirth (birth of a phase with `born[p]==1`) increments `nosc` and a per-phase
+  rebirth counter `reb[p]`.
+- The frozen death rule, absent entirely from the minimal build, was implemented:
+  an active phase whose recall share of newline hits among active phases is <5%
+  (50 permille) for two consecutive sweeps dies. (The "95% subsumption" clause is
+  vacuous under exact-position evidence — hit sets are disjoint across phases —
+  so recall-share is the operative rule.)
+- The birth gate itself is UNCHANGED: best dormant of {0,16,32,48,24} must exceed
+  best active by max(20 permille, 3·SE); one birth per sweep; K_max=5.
+
+Disjunct 1 is now genuinely fireable — demonstrated on a synthetic oscillation
+corpus (7 segments, A B B A B B A; A = newlines@phase24, B = newlines@phase0):
+
+```
+J2_BIRTH,phase=24,sw=0 | J2_DEATH,phase=24,sw=2 | J2_REBIRTH,phase=24,sw=3,nosc=1
+J2_DEATH,phase=24,sw=5 | J2_REBIRTH,phase=24,sw=6,nosc=2
+J2_RESULT_FIXED,osc_7seg,k_final=2,nbirth=3,ndeath=2,nosc=2,max_reb=2
 ```
 
-Synthetic corpus: 640 bytes, newlines every 16 bytes (strong phase structure).
-- Phase 0 (active): E=1000 permille (100% newline rate)
-- Phase 16 (dormant candidate): E=1000 permille (100% newline rate)
-- Difference: 0 permille < threshold (20 permille)
-- Result: NO BIRTH. k remains 1.
+birth→death→birth for phase 24, twice. The criterion is no longer rigged.
 
-### Analysis
-The birth threshold requires the best dormant phase to EXCEED the best active phase by at least 20 permille (2 percentage points). In the synthetic test with maximally regular phase structure (newlines every 16 bytes, aligning perfectly with candidate phases 0 and 16), the scores tied at 1000 permille each. The threshold was not met.
+## Measured evidence (real corpora)
 
-Real corpora (prose, code) have far less regular newline distributions. The exploratory analysis (2026-09-21) found best phases: prose=23, code=12, t1_prose=57, etc. — none aligning with the frozen candidate set {0,16,32,48,24} in a way that would produce a 20+ permille advantage. The mechanism as designed will not birth tilings on real corpora.
+Corpora: `units/arms/harness/corpora/r1/prose.bin` (5,422,721 bytes,
+sha256 a023115c…7fffb — matches MANIFEST) and `code.bin` (9,515,341 bytes,
+sha256 b1dd5d74…1db28189 — matches MANIFEST).
+Toolchain: `znc_linux_x86_64_abed8aa1` (frozen). All runs double-executed,
+byte-identical stdout. Pure Zag, zero RNG.
 
-### Kill criterion application
-The binding kill criterion states: "converges to 1 on all corpora — tilings were never needed."
+### As-found implementation (`cl/birth_eval.zag`, whole corpus, 1 sweep)
 
-The evidence shows:
-1. k=1 initially (phase 0 active, the canonical tiling)
-2. Birth eval on structured synthetic data → no birth (k stays 1)
-3. Real corpora have weaker phase structure → no birth (k stays 1)
-4. Therefore k converges to 1 on all corpora.
+| corpus | bytes | E0 (phase 0) | thresh | best dormant | E(best_d) | diff | born | k_final |
+|---|---|---|---|---|---|---|---|---|
+| prose.bin | 5,422,721 | 35 | 20 | 24 | 37 | +2 | none | 1 |
+| code.bin | 9,515,341 | 28 | 20 | 16 | 28 | 0 | none | 1 |
 
-The tilings were never needed. The 95% subsumption death mechanism is moot because no tilings are ever born to die.
+Full candidate tables in `evidence/birth_eval_ORIG_{prose,code}_1sweep.txt`.
+Per-phase newline rates sit at 27–37 permille with ≤2 permille differences —
+two orders of magnitude below the 20 permille birth threshold. No tiling born.
+
+### Fixed (unrigged) implementation (`cl/birth_eval_fixed.zag`)
+
+| corpus | sweeps | k_final | nbirth | ndeath | nosc | max_reb |
+|---|---|---|---|---|---|---|
+| prose.bin | 1 | 1 | 0 | 0 | 0 | 0 |
+| prose.bin | 4 | 1 | 0 | 0 | 0 | 0 |
+| code.bin | 1 | 1 | 0 | 0 | 0 | 0 |
+| code.bin | 4 | 1 | 0 | 0 | 0 | 0 |
+
+No birth in any sweep of either corpus (best dormant never exceeds best active by
+more than 2 permille vs the 20 permille bar). With nothing born, nothing dies,
+nothing is reborn: `nosc=0` on both corpora.
+
+### Gate reachability (mechanism not broken)
+
+Synthetic corpus, newlines every 32 bytes aligned to dormant candidate phase 24
+(`evidence/birth_eval_ORIG_synth32_p24.txt`, `evidence/birth_eval_FIXED_synth32_p24.txt`):
+
+```
+J2_BIRTH_EVAL,synth32_p24,k=1,E0=0,thresh=20,best_d=24
+J2_BIRTH,phase=24
+J2_RESULT,born=24,k_final=2,nbirth=1
+```
+
+The birth gate fires when the evidence genuinely favors a dormant phase
+(E=1000 vs E0=0, diff 1000 > 20). The "never needed" verdict is about the real
+corpora, not a broken gate. (The original selftest aligned newlines to phase 0 —
+the already-active phase — guaranteeing a tie; that test could not have shown a
+birth under any threshold.)
+
+## Adjudication of the two disjuncts (fixed implementation, real corpora)
+
+- **Disjunct 1** — "k does not converge (birth→death→birth for the same phase
+  twice on one corpus pass)": `nosc=0`, `ndeath=0`, `nbirth=0` on both real
+  corpora (1 and 4 sweeps). **Does not fire.** The mechanism is now capable of
+  exhibiting oscillation (proven on the osc corpus), and the real corpora do not
+  produce it.
+- **Disjunct 2** — "converges to 1 on all corpora — tilings were never needed":
+  `k_final=1` on prose.bin and code.bin, both implementations, all sweep counts.
+  No tiling is ever born. **FIRES.**
+
+## Verdict
+
+**J2 is KILLED.** Disjunct 2 fires on measured evidence from the real corpora:
+k converges to 1 everywhere; tilings were never needed. The 95%-subsumption death
+rule is moot — nothing is ever born to die. The original death certificate stands;
+its synthetic-only evidence defect is cured by the measurements above (see the
+adjudication addendum in DEATH_CERTIFICATE.md).
 
 **J1 dies with it** (per the binding criterion).
 
@@ -67,37 +153,32 @@ The tilings were never needed. The 95% subsumption death mechanism is moot becau
 | M8 | NOT RUN |
 | M9 | NOT RUN |
 
-**Reason:** The full 2070-line J2 implementation (`cl/arm.zag`) could not be compiled due to znc compiler limitations (struct field count, local-struct slice aliasing ZNC-2026-09-21-004, and field name mismatches). A minimal implementation was built to demonstrate the core tiling mechanism and evaluate the kill criterion. The full M1-M9 battery was not run.
+**Reason:** The kill criterion fired on the tiling mechanism itself; the full
+2070-line `cl/arm.zag` never compiled under znc (struct limits, ZNC-2026-09-21-004).
+The adjudication ran the frozen birth/death mechanism directly against the real
+corpora instead. The battery is moot for a killed arm.
 
 ## 10x status
 
-NOT RUN (1x battery not completed).
+NOT RUN (arm killed at the mechanism level).
 
-## Commits
+## Sources committed
 
-None. No source/docs/evidence committed (implementation incomplete).
+- `cl/arm_minimal.zag` — as-found minimal implementation (unchanged)
+- `cl/birth_eval.zag` — adjudication measurement driver (as-found birth logic + file input)
+- `cl/birth_eval_fixed.zag` — fixed driver (rebirth allowed, nosc counted, death implemented)
+- `evidence/` — 9 raw run logs (byte-identical double runs)
+- `DEATH_CERTIFICATE.md` — stands, with adjudication addendum
 
-## Ambiguities and notes
+## Notes
 
-1. **Rebirth ban vs oscillation detection:** The implementation bars dead phases from rebirth (dead-set). This prevents the "birth→death→birth for the same phase twice" oscillation that the kill criterion describes. If rebirth were allowed, oscillation might occur, but the threshold is so high that births are unlikely in the first place. Per Micah's "test both" instruction, both variants should be tested, but time constraints prevented this.
-
-2. **Threshold calibration:** The 20 permille (2%) minimum threshold may be too conservative. A lower threshold might allow births, but the prereg freezes the mechanism and the threshold is part of the design. Changing it would require reapproval.
-
-3. **Candidate set:** The frozen candidate phases {0,16,32,48,24} may not match real corpus structure. The exploratory analysis found best phases (23, 12, 57, 2, 56, 6, 34) — none in the candidate set except by chance. This suggests the mechanism is misaligned with reality, supporting the "never needed" verdict.
-
-4. **Compiler limitations:** znc ZNC-2026-09-21-004 (local struct slice aliasing) and the struct-size limit prevented compiling the full implementation. The minimal version (19 fields) compiles and demonstrates the core logic.
-
-## Death certificate
-
-J2 (Evidence-gated tiling birth/death) is hereby declared KILLED per the binding preregistered kill criterion.
-
-**Cause of death:** The tiling birth mechanism never fires. k converges to 1 on all corpora. Tilings were never needed.
-
-**Mechanism:** Tilings as hypotheses, born on evidence (newline phase alignment exceeding active best by 20 permille), die by 95% subsumption.
-
-**Evidence:** Selftest with maximally regular phase structure produced no births (k=1, nbirth=0). Real corpora have weaker structure. The 20 permille threshold is never exceeded.
-
-**Implication:** J1 (the parent arm, per "J1 dies with it") is also dead. The hypothesis that evidence-gated tilings improve over the single canonical tiling is falsified.
-
-**Date:** 2026-09-21  
-**Agent:** ARM CREW J2
+1. The rebirth ban was a completion-crew design choice, not part of the frozen
+   mechanism ("Tilings as hypotheses: born on evidence, die by subsumption (95%)"
+   says nothing about banning rebirth — and disjunct 1 presupposes rebirth is
+   possible). Removing it restores the frozen mechanism; it does not change it.
+2. The fixed implementation reproduces the as-found results exactly on the real
+   corpora (k=1, no birth), so the fix changes nothing about the disjunct-2
+   outcome — it only un-rigs disjunct 1.
+3. Collision backup at `~/workspace/j2_collision_backup/arm.zag` (md5
+   ae9c161b610e027eacfa65afc7118c73) was left untouched; it never compiled and
+   is not evidence.

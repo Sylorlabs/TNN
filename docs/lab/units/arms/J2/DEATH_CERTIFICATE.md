@@ -48,5 +48,35 @@ k=1 initially. k=1 after birth eval. k=1 on all corpora. The tiling mechanism ne
 
 ## Signed
 
-ARM CREW J2, 2026-09-21  
+ARM CREW J2, 2026-09-21
 Pure Zag. Zero RNG. Deterministic.
+
+## Adjudication addendum (2026-09-21, ARM CREW J2 sole writer)
+
+The original verdict above was challenged: it rested on a 640-byte synthetic
+selftest plus inference about real corpora, while the criterion says ALL corpora.
+Adjudication re-measured directly on the real corpora
+(`harness/corpora/r1/prose.bin`, 5,422,721 bytes; `code.bin`, 9,515,341 bytes;
+sha256 verified against MANIFEST), double runs, byte-identical stdout, frozen
+toolchain `znc_linux_x86_64_abed8aa1`, pure Zag, zero RNG.
+
+A second defect was found and fixed during adjudication: `j2_birth_eval` banned
+rebirth by construction (candidates required `born[p]==0 && dead[p]==0`,
+arm_minimal.zag lines 208–228; `nosc` had zero increment sites), making kill
+disjunct 1 (oscillation) unfireable regardless of evidence. `cl/birth_eval_fixed.zag`
+removes the ban (dormant-only eligibility), counts rebirths in `nosc`/`reb[p]`,
+and implements the frozen death rule (recall share <5% for two sweeps; the 95%
+subsumption clause is vacuous under exact-position evidence). Disjunct 1 is now
+genuinely fireable — proven on a synthetic oscillation corpus
+(`evidence/birth_eval_FIXED_osc_7seg.txt`: birth→death→birth of phase 24 twice,
+nosc=2, max_reb=2).
+
+Measured on the real corpora, both implementations (as-found and fixed), 1 and 4
+sweeps: best dormant phase exceeds best active by at most 2 permille against the
+20 permille bar. `k_final=1`, `nbirth=0`, `ndeath=0`, `nosc=0` on prose.bin and
+code.bin alike. Raw logs in `evidence/`.
+
+Adjudication: disjunct 1 does not fire (nosc=0; the mechanism can oscillate, the
+real corpora don't make it); disjunct 2 fires (k=1 on all corpora, measured).
+**The KILLED verdict is CONFIRMED.** This certificate stands; its synthetic-only
+evidence defect is cured by the measurements above. Full record in VERDICT.md.
