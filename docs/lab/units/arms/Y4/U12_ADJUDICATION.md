@@ -37,13 +37,14 @@ involved): per corpus, KILL iff `cost_y4 ≤ cost_d` **AND**
 `recall_y4 < recall_d − 5.0`. No D numbers were invented or estimated —
 `COMPARISON_D.json` records `d: null` with status PENDING.
 
-## 3. T3 / D-family status check (re-checked 2026-09-21 ~11:15 PDT)
+## 3. T3 / D-family status check (re-checked 2026-09-21 ~11:20 PDT)
 
-- Branch `tnn-native-lab` head: `6d109ef5f7bb56b3159adf15cf12b39431989865`
-  (Q1B teacher bake-off commit — unchanged since the check).
-- Recursive tree walk at head: `docs/lab/units/arms/D/VERDICT.md` **does not
-  exist** on the branch. Committed D files are only `BUILD_LOG.md` and
-  `cl/arm.zag` (implementation, no verdict).
+- Branch `tnn-native-lab` head: `1f0c057b9dd8bdbb4af1fba87a7ba7e9ebe7d2b0`
+  (U4 adjudication commit; head moved twice during this adjudication —
+  Q1B `6d109ef` → U4 `1f0c057b` — D verdict absent at every check).
+- Single-file check on the branch: `docs/lab/units/arms/D/VERDICT.md` → HTTP 404.
+  Committed D files are only `BUILD_LOG.md` and `cl/arm.zag` (implementation,
+  no verdict).
 - Local `units/arms/D/VERDICT.md` is a DRAFT: "IN PROGRESS", M1 1x prose and
   code both `[PENDING]`, M2–M9 `[PENDING]`, verdict TBD.
 - T3 has one partial working output: `units/arms/D/work/m1r1/m1_prose_r1.txt`
