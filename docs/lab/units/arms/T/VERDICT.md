@@ -2,63 +2,79 @@
 
 **Date:** 2026-09-21
 **Arm:** T — Episode-aligned chunks (STRUCT family)
-**Adjudicated by:** verdict gap-fill crew (Track A closeout)
-**Verdict: PROVISIONAL** — blocked on B-battery / X evidence (blockers below)
+**Adjudicated by:** marathon crew U10 (B-battery adjudication)
+
+## BINDING VERDICT: **KILLED**
+
+Kill criteria **(i), (ii), and (iv) each fire independently on both corpora**.
+Per RULE-7 (per-arm kill criteria are BINDING — a fired bar kills, no appeals),
+arm T is dead as a candidate.
 
 ## Frozen kill criterion (verbatim, §3 of `units/PREREG_FREEZE.md`, extracted programmatically)
 
 > Any one: (i) B2 within 2× of X's on either corpus; (ii) >80% of battery recall queries address sub-episode spans (the "unit of experience" claim falsified); (iii) determinism gate fails; (iv) floor rule fires.
 
-## Kill-criterion evaluation
+## B-battery evidence (2026-09-21, `work/bbattery/`)
 
-### Criterion (iii) — determinism gate fails
+Crew-4 shared prereg battery (`units/ALPHABET_S-X.md`) run natively in pure Zag
+(`batt.zag`, struct-free; driver `run_battery.sh`) for T and X on both corpora
+(prose `pg100.txt` 5,638,480 B; code `sqlite3.c` 9,515,341 B), N=5 reruns per
+(arm, corpus) — all 20 runs byte-identical (B7 PASS). Zero RNG in any decision
+path; span schedules are fixed deterministic arithmetic (crew decisions D1–D7
+in `work/bbattery/BATTERY_EVIDENCE.md`).
 
-M8: M1+M3 sequence byte-identical across 10 runs
-(`work/m8_run1.txt` … `work/m8_10x_10.txt`,
-`METRICS_JSON {"m8_deterministic":1,…}`). **Does NOT fire.**
+| corpus | B2_T/B2_X | B4 T vs X | B5 T vs X | B9 T vs X | sub-episode queries (T) |
+|---|---|---|---|---|---|
+| prose | **1.000000** (2747.02 = 2747.02) | 1.0 = 1.0 | 5,638,480 = 5,638,480 | 2751.82 = 2751.82 | 13000/13000 = **100%** |
+| code  | **1.000000** (4635.79 = 4635.79) | 1.0 = 1.0 | 9,515,341 = 9,515,341 | 4643.89 = 4643.89 | 13000/13000 = **100%** |
 
-### Criteria (i), (ii), (iv) — UNRESOLVED
+### Criterion (i) — B2 within 2× of X's: **FIRES** (both corpora)
 
-- (i) needs B2 (partial-recall) for T vs X on either corpus — the M-modes
-  do not establish B2; no B-battery was ever run for T.
-- (ii) needs the battery query-span distribution — refers to the
-  B-battery; T's M2 uses sub-episode spans by design (recall via
-  `(episode_id, start, len)`), which does not settle the claim either way.
-- (iv) needs the universal floor rule evaluated against X (B2/B4/B5/B9)
-  — no X B-battery evidence exists for comparison.
+B2_T/B2_X = 1.000000 ≤ 2. T's episode ≡ X's stream under single-file ingestion:
+every partial recall materializes the whole 5.6/9.5 MB unit. This is the
+frozen prereg's predicted weakness W1 ("code-corpus collapse"), measured.
 
-The arm's own `ARM_SPEC.md` records all three as UNRESOLVED and is explicit
-that "M modes do not establish B2".
+### Criterion (ii) — >80% sub-episode queries: **FIRES**
 
-## What was proven (M-harness, per `ARM_SPEC.md`)
+100% of the 13,000 battery recall queries address spans (8–4096 B) strictly
+smaller than the episode. The episode ID does ~0% of addressing work on
+knowledge-sized queries — the "unit of experience" claim is falsified; T is
+X-with-offsets.
 
-- Builds (pure Zag; `cl/arm_final.zag`, binary `work/t3h1`).
-- M1: 1 episode, 0 boundaries by design (prose 5,638,480 B; code 9,515,341 B).
-- M2: 1,000 recalls via `(episode_id=1,start,len)`, 1,000 hits.
-- M3: 4,000 episodes (fresh intents), IDs 1..4000, all verified.
-- M4: defect injected (byte flip), detected, repaired, re-verified.
-- M5: table 48,000 B + data 6,086,480 B.
-- M6: episode 1 tombstoned, episode 2 alive, ID 1 never reused.
-- M7: re-ingest creates 2 episodes, distinct IDs, same content length.
-- M8: determinism — byte-identical across 10 runs.
+### Criterion (iii) — determinism gate fails: **does NOT fire**
 
-## Blockers (why PROVISIONAL, not PASS)
+M8: M1+M3 byte-identical across 10 runs (prior). B-battery B7: 20/20 runs
+byte-identical (sha256 digests in `BATTERY_EVIDENCE.md`).
 
-1. **B-battery never run for T.** Criteria (i) and (ii) are B-battery
-   criteria (partial-recall B2 vs X; query-span distribution). Without
-   them, 2 of the 4 binding criteria cannot be evaluated.
-2. **X has no B-battery evidence.** Criterion (iv) (floor rule vs X) and
-   the X side of criterion (i) need X's B2/B4/B5/B9 numbers; none exist.
+### Criterion (iv) — floor rule fires: **FIRES** (both corpora)
 
-Note: the arm's `ARM_SPEC.md` self-declares "PASS". That declaration is
-premature — three of four binding criteria are unevaluated — and is
-superseded by this verdict.
+Universal floor rule (ALPHABET_S-X.md, frozen at sign-off per A-44): an arm that
+fails to beat X on *any* of B2/B4/B5/B9 is dead on arrival (ties permitted only
+on B1/B7). T ties X on all four — beats X on 0 of 4.
 
-## What would unblock
+## The finding (as the frozen prereg predicted)
 
-Run the Crew-4 B-battery for T and X (partial-recall probes → B2; query
-workload with span distribution → (ii); floor-rule metrics B2/B4/B5/B9
-for X → (iv)); then re-adjudicate (i), (ii), (iv) mechanically.
+On single-file ingestion T degenerates *exactly* to X (B2 ratio 1.000000, not
+approximately — the mechanisms coincide), and the episode ID carries no
+addressing work for knowledge-sized queries. Episode granularity is hostage to
+ingestion batching, which is about I/O rather than knowledge. This is itself
+the publishable finding the prereg anticipated.
 
-**Result: T PROVISIONAL — (iii) holds, (i)/(ii)/(iv) blocked on
-B-battery/X evidence.**
+## Prior record (superseded provisional verdict, retained for audit)
+
+- M-harness: builds pure Zag (`cl/arm_final.zag`); M1 1 episode / 0 boundaries
+  by design; M2 1000/1000 recalls; M3 4000 episodes verified; M4 defect
+  detected/repaired; M5 table 48,000 B + data 6,086,480 B; M6 tombstone holds;
+  M7 re-ingest distinct IDs; M8 10/10 byte-identical.
+- 2026-09-21 closeout verdict was PROVISIONAL (B-battery + X evidence missing).
+  That evidence now exists; the provisional status is CLOSED by this verdict.
+- X's B-battery evidence (previously nonexistent) is in
+  `work/bbattery/BATTERY_EVIDENCE.md` + `ev_x_*.txt`.
+
+## Files
+
+- `work/bbattery/batt.zag` — battery source (pure Zag)
+- `work/bbattery/run_battery.sh` — driver (build, N=5, sha256 gate, ratios)
+- `work/bbattery/BATTERY_EVIDENCE.md` — full evidence + crew decisions
+- `work/bbattery/VERDICT_NUMBERS.txt` — computed ratios
+- `work/bbattery/ev_{t,x}_{prose,code}_r{1..5}.txt` — 20 raw run outputs

@@ -53,7 +53,7 @@
 | R | KILLED | yes (OR-kill: 100.0 vs 100.0 tie) | PASS | 1x |
 | R2 | KILLED | yes (disjunct a: margin 0.0 < 3) | PASS | 1x |
 | S | PASS | no | PASS | 1x |
-| T | PROVISIONAL (needs B-battery + X evidence) | pending | PASS | 1x |
+| T | KILLED | yes (i: B2 ratio 1.00 ≤ 2 both corpora; ii: 100% sub-episode queries; iv: floor, beats X on 0/4) | PASS | 1x |
 | U | PROVISIONAL | no | PASS | 1x provisional |
 | V | UNADJUDICATED (never built: no arm.zag) | n/a | — | — |
 | W | UNADJUDICATED (truncated M1 only; no composite def) | n/a | — | — |
@@ -72,7 +72,7 @@
 | Z7 | PASS | no | PASS | 1x |
 | Z8 | UNADJUDICATED (battery never run; no binary) | n/a | — | — |
 
-Counts: KILLED 16 · PASS 20 · PROVISIONAL 13 · UNADJUDICATED 3.
+Counts: KILLED 17 · PASS 20 · PROVISIONAL 12 · UNADJUDICATED 3.
 Verification: 7 section verdicts spot-checked (E, I2, K2, M-headline, M2, P, Z3) — 6 CONFIRMED, 1 secondary-claim correction (M-dedup, see §6). B-family verdict produced (B-8 retired, B-16/B-64 survive, family not killed as contender). R2 re-evaluated post-R-death: KILLED, disjunct (a).
 
 ## 3. §7 blowout computation
