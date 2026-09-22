@@ -1,3 +1,5 @@
+> Superseded by PREREG_FROZEN_SUSPECT_GATE.md, frozen 2026-09-22 under Micah's signature.
+>
 # PREREG DRAFT — SUSPECT-gated install mechanism (KB4 repair)
 
 **Status: DRAFT — NOT FROZEN, NOT RUN, NOT APPROVED.**
