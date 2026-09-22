@@ -312,3 +312,80 @@ Render time (1024², lab VM): alien ~6 s, arch ~4–5 s.
   x86-64); all texture noise remains integer-hash based.
 - `disc` binary, `.zagd`/`.zag-cache` files, and debug renders are build
   artifacts and are excluded from the commit.
+
+---
+
+# Round 4 — composed digital-painter scene (2026-09-22)
+
+New distinct source: `r4_alien.zag` (round-3 files untouched).
+
+## Hypothesis
+
+A composed digital-painter scene — one authored composition with a fixed
+foreground/midground/background focal logic, worn-in erosion textures, and a
+single coherent sun — beats the round-3 generated field on the Round-3
+diagnosis: "geometry too perfect, textures applied ON surfaces not worn INTO
+them, reads as procedural render."
+
+## Design (built to answer the diagnosis)
+
+| Round-3 diagnosis | Round-4 structural answer |
+|---|---|
+| Perfect geometry / concentric targets | No analytic circles/ellipses/rings anywhere. Gas giant's bands are domain-warped zonal flow (`lat + warp*5`), terminator is a true spherical day/night solve; the single storm is a spiral inflow with a dark moat that bends the surrounding bands, not a ring stack. |
+| Textures ON surfaces | Texture is subtractive wear: dendritic gully channels carved into the ranges (darkened cores + sunlit lips), warped strata bands that cut across slope lighting, scree/talus aprons dissolving the hill feet into the plain, per-boulder cracks and mottling. |
+| Procedural field, no composition | Real composition: 7 individually seeded foreground boulders with contact darkening and long cast shadows (focal cluster at lower-left/center), mid eroded badlands, one dominant asymmetric far peak at 38% width, gas giant upper-right balancing it, small moon upper-left, dusk sky. |
+| Sticker objects | Every rock: dome lighting from the shared sun direction, cracks, speckle, contact occlusion, and a cast shadow along the sun azimuth. Planet: limb darkening + extinction gradient at the horizon + cloud shadows over the sky behind it. |
+| No atmosphere coherence | One sun (low, unseen, left). Coherent extinction: far range drowned in blue haze, mid hills less, plain warm; mist streaks catch the dusk light on the plain; mountain bases dissolve into the plain. |
+
+## What had to be fixed during the build (honest record)
+
+1. **Mid-hill "palisade" stripes (worst defect):** slope shading used a ±3px
+   gradient of the skyline heightfield, so the high-frequency crag term made
+   adjacent columns alternate fully lit/shadowed → organ-pipe fence. Fixed by
+   lighting from a *smoothed* profile (`r4_hf_mid_s`, no crag term, ±6px
+   baseline); the crag term now only roughens the silhouette.
+2. **Fence-like gullies:** first gully pass was full-height evenly spaced
+   channels — read as palisade walls. Fixed: wider spacing (64px mid / 48px
+   far), ±8-cell meander, strong fade in/out via a persistence noise, cores
+   that widen downslope.
+3. **Peak shadow read as a stain:** with the sun this low the peak's shadow
+   races off-frame right; the visible fragment was a disconnected dark
+   wedge. Removed — the boulders' long shadows carry the sun story instead.
+4. **Hard hill/plain cut:** the plain's top edge varied only ±15px → a wall.
+   Fixed: plain top undulates ±55px total and a talus apron (speckled,
+   hill-tinted) dissolves the feet into the plain.
+
+## Mechanical verification (final artifact `r4_alien_1024.bmp`)
+
+| Bar | Result |
+|---|---|
+| D-RES | 1024×1024, 24-bit — PASS |
+| D-SHARP | grad(O)=3.947, grad(B)=1.660, ratio=**2.378** ≥ 1.20 — PASS |
+| D-COMP | grep audit of scene builders: zero axis-aligned filled-primitive tokens; no geometric scene primitives — PASS |
+| D-DET | 4 clean-process runs (test5 + 3 final), all `1f89523045c632e03acb34ef4bf628180e81c58414794042dff6bc04f49e55bd` — byte-identical — PASS |
+| znc slice limit | single buffer `w*h*3` = 3.15 MB ≪ 2^25 — PASS |
+
+### Round-4 artifact SHA-256
+
+| File | SHA-256 |
+|---|---|
+| `r4_alien.zag` | `a96f74d170c860c66c65d182594db9849ecac1d5b61b377c74f9935a6f8558e4` |
+| `r4_alien_1024.bmp` | `1f89523045c632e03acb34ef4bf628180e81c58414794042dff6bc04f49e55bd` |
+| `r4_alien_1024.png` | `11ddcce5b9b8ba760af43f8e600d0719b7bdc4fb6bd86cacc2b8ade28dd7934c` |
+
+Pinned toolchain: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`;
+build flags `--no-zagd --no-analyze`; render ~3.3 s at 1024².
+
+## Round-4 honest limitations
+
+- D-BLIND (fresh blind judging) is explicitly out of scope — only the
+  structural answers above are claimed; a separate blind crew must confirm.
+- The planet's storm is still a 2D spiral inflow, not a 3D vortex; the
+  terminator is a spherical solve but the cloud deck has no true height.
+- Mid-hill gullies are carved in screen space, not routed by a real
+  heightfield hydrology pass; on the 117px-tall hills they read as erosion
+  but a geologist would find no watersheds.
+- Rock crack patterns are per-boulder ridge noise, not stress-fracture
+  geometry.
+- 2048² untested (buffer ≈ 12.6 MB < 32 MiB limit; pipeline supports it).
+- No binaries, `.zagd`, `.zag-cache`, or debug renders are committed.
