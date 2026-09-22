@@ -78,7 +78,7 @@ says — but the signatures aren't distinctive enough to be safe.
 - 2 adversarial shape fixtures produce no graph at all (camouflaged shape
   under the 480-brightness threshold) — honest errors, ledger-chained,
   counted as non-installs.
-- Amendment 2 (t2 ±1-bin tolerance, t3 brightness threshold, t6 block
-  matching) was pre-enrollment and pre-results; the attack parameters were
-  post-freeze concretization, not a frozen amendment (documented in
-  PREREG_G3.md §0 and src/corrupt.py).
+- The t2/t3/t6 extractor concretizations (±1-bin tolerance, brightness
+  threshold, block matching) were post-freeze implementation deviations,
+  documented in DEVIATIONS_G3.md — not frozen amendments. The attack
+  parameters were post-freeze concretization (documented in src/corrupt.py).
