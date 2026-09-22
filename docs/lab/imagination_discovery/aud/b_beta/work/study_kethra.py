@@ -144,7 +144,9 @@ for i in idx:
         if len(taken) == 6: break
 print('ocean air:', len(taken))
 
-with open('catalog_kethra.bin', 'wb') as f:
+_cat_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       '..', 'catalog_kethra.bin'))
+with open(_cat_path, 'wb') as f:
     for (s, e, src, v, pk, ce, dm, fl) in recs:
         f.write(struct.pack('<IIHHHHHH', s, e, src, v, pk, ce, dm, fl))
-print('total records:', len(recs))
+print('total records:', len(recs), '->', _cat_path)
