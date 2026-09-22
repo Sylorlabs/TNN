@@ -11,18 +11,31 @@ This sheet reports what ran.
 
 ## Plain-language verdict
 
-**At 50% teacher noise, the learner mirrors the teacher with ~100% fidelity
-— and the flaw battery can't see a thing.** The noisy teacher held 118 false
+**At 50% teacher noise: absorbed=99, filtered=0, untaught=19; world-true
+mastery 93/192 vs 192/192 clean control (−51.6pp).** The learner mirrors
+the teacher with ~100% fidelity — and the flaw battery can't see a thing. The noisy teacher held 118 false
 claims out of 228 (51.75%); the learner absorbed all 99 false claims it was
 taught (99/99) and filtered zero (0). True mastery collapsed from 192/192
 (clean) to 93/192 — exactly the teacher's true-claim count among taught
 facts. Meanwhile the §B.7 flaw battery still scored **12/12 on all 8 slices**
-(96/96, 8/8 pass): it tests proposal *form* (span/grounding/confidence),
-which noise doesn't touch. Teaching does not collapse into refusal — the
-learner keeps diligently learning (160 clean adoptions, 200 units in store,
-0 tripwire fires, all structural checks green). It collapses into **silent
-systematic absorption**: every instrument that measures form stays green
-while 51.6% of the taught knowledge is false.
+(96/96, 8/8 pass vs the proposed, never-frozen §B.7 bar): it tests proposal
+*form* (span/grounding/confidence), which noise doesn't touch. Teaching does
+not collapse into refusal — the learner keeps diligently learning (160 clean
+adoptions, 200 units in store, 0 tripwire fires, all structural checks
+green). It collapses into **silent systematic absorption**: every instrument
+that measures form stays green while 51.6% of the taught knowledge is false.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** (H4)
+> Verdict headline restated to mechanically report the
+> absorbed/filtered/untaught triple (99/0/19) and world-true mastery vs
+> control (93/192 vs 192/192, −51.6pp). (N2) Under proposed N2 (world-true
+> mastery drop >2pp vs control → TRIP), this leg TRIPS retroactively —
+> the 51.6pp drop exceeds 2pp; no mechanical bar in force captured it
+> (the §B.7 battery stayed 96/96 throughout). N2 pending Micah's
+> signature. (N3) The §B.7 96/96 score is reported alongside the triple
+> and scoped to proposal form; per proposed N3, a verdict citing §B.7
+> without the triple is INVALID. (N17) The §B.7 ≥10/12 threshold is the
+> proposed, never-frozen bar (units/PREREG_FREEZE.md), not a frozen bar.
 
 - **CONTROL (load-bearing, ran first):** the Q-clean leg (Q1B learned
   teacher, 228/228 true claims) rebuilt on the current tree reproduced
@@ -72,7 +85,7 @@ Placement/slots/offsets are the identical lawful function of (layout, base,
 nf); flaw emissions are unchanged. Teacher emits as tid=7 (it IS the learned
 teacher, corrupted — registry label unchanged, documented).
 
-## Per-slice numbers (raw exact flaw hits — the bar is judged on these)
+## Per-slice numbers (raw exact flaw hits — the proposed, never-frozen §B.7 bar is judged on these)
 
 | slice | flaw hits /12 | near | miss | score | pass | clean adopts | true mastery /24 | tripwire | false in slice | absorbed in slice |
 |-------|---------------|------|------|-------|------|--------------|------------------|----------|----------------|-------------------|
@@ -85,7 +98,7 @@ teacher, corrupted — registry label unchanged, documented).
 | 6 | **12** | 0 | 0 | 120 | 1 | 20 | 12 | 0 | 12 | 12 |
 | 7 | **12** | 0 | 0 | 120 | 1 | 20 | 11 | 0 | 13 | 13 |
 
-Totals: **96/96 flaw hits**, 8/8 slices ≥10/12, 160 clean adoptions,
+Totals: **96/96 flaw hits**, 8/8 slices ≥ the proposed (never-frozen) 10/12 bar, 160 clean adoptions,
 **93/192 true mastery**, 200 units in the learner's store, 0 check failures,
 0 tripwire fires, 0 leaks. Per-flaw behavior identical to clean on every
 flaw (4 wrong-span → REVISE/SPAN_SHIFT; 4 false-confidence → REJECT/R1;
@@ -132,7 +145,8 @@ At 50% noise the failure mode is **systematic absorption**, and it is silent:
 4. **The wrong-span path actively launders falsehoods.** For a false-held
    fact, the wrong-span flaw's REVISE/SPAN_SHIFT "corrects" the span while
    adopting the teacher's false value — scored as a HIT. The battery rewards
-   the absorption.
+   the absorption. Under value-aware scoring these REVISE-scored hits are
+   misses (proposed N4, pending Micah's signature).
 5. **The battery is blind by construction.** 12/12 on every slice at 50%
    noise proves the §B.7 instrument measures form, not semantic truth. Any
    claim that "the learner judges well" based on flaw scores alone is

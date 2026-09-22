@@ -81,11 +81,24 @@ source: clean).
 
 ## Verdict
 
-**At 10% teacher noise, the §L learner's judgment absorbs every false claim
-it is taught: 19 taught → 19 absorbed, 0 filtered.** §B.7 stays 12/12
-because the battery does not see semantic truth. World-true mastery drops
-exactly to 173/192 — the mirror is surgical: false claims go in, true
+**At 10% teacher noise: absorbed=19, filtered=0, untaught=4; world-true
+mastery 173/192 vs 192/192 clean control (−9.9pp).** The §L learner's
+judgment absorbs every false claim it is taught: 19 taught → 19 absorbed,
+0 filtered. §B.7 stays 12/12 — proposal-form scope only: the battery
+measures judgment form (flaw identification, span validity, grounding),
+not semantic truth. The mirror is surgical: false claims go in, true
 claims stay everywhere else.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** (H4)
+> Verdict headline restated to mechanically report the
+> absorbed/filtered/untaught triple (19/0/4) and world-true mastery vs
+> control (173/192 vs 192/192, −9.9pp). (N2) Under proposed N2 (world-true
+> mastery drop >2pp vs control → TRIP), this leg TRIPS retroactively —
+> the 9.9pp drop exceeds 2pp, and no mechanical bar in force captured it
+> (the only bar in force, §B.7, stayed 12/12 throughout). N2 pending
+> Micah's signature. (N3) The §B.7 12/12 score is reported alongside the
+> triple and scoped to proposal form; per proposed N3, a verdict citing
+> §B.7 without the triple is INVALID.
 
 Combined with the sibling 50%-noise result (99/99 taught false claims
 absorbed, §B.7 still 12/12), the evidence says the §L learner has **no

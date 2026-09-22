@@ -22,12 +22,14 @@ configs byte-identical learners, zero truth-detection at any size)?
 | Bar | Requirement | Result |
 |---|---|---|
 | KB-R0-BASE | R0 absorbs ≥10/12 | **12/12 → PASS** (baseline reproduced: a closed learner believes its teacher) |
-| KB-CATCH | R1 and R2 install 0/12 falsehoods | **0/12 and 0/12 → PASS** |
-| KB-CATCH-RATE | R1 catches ≥10/12 | **12/12 → PASS** |
-| KB-CORR-INSTALL | R2 installs true value on ≥10/12 falsehoods AND ≥3/4 unknowns | **12/12 and 4/4 → PASS** |
-| KB-CONTEST | 4/4 contested dispositions match §2 | **4/4 → PASS** (C1 WITHHOLD 1v1, C2 PROVISIONAL_MAJORITY 2v1, C3 PROVISIONAL 2-agree, C4 WITHHOLD single-source) |
-| KB-SPOOF-RESIDUAL | residual reproduces honestly | **Reproduced → PASS**: R1 provisional-wrong + 0 installs; R2 installs 2/2 spoofed values (two "independent" domains agreeing on a fiction defeat R-CORR — the known sensor-deceivable boundary, not hidden) |
+| KB-CATCH | R1 and R2 install 0/12 falsehoods | **0/12 and 0/12 → PASS** (zero-margin bar by construction: exactly 0 installs required — held exactly; any single install trips it) |
+| KB-CATCH-RATE | R1 catches ≥10/12 | **12/12 → PASS** (envelope caveat: the 10/12-vs-12/12 distinction sits within one live envelope's variability — 8.3pp at n=12 — so any "works on the live web" reading of this bar needs its own bar with fresh envelopes) |
+| KB-CORR-INSTALL | R2 installs true value on ≥10/12 falsehoods AND ≥3/4 unknowns | **12/12 and 4/4 → PASS** (same envelope caveat as KB-CATCH-RATE: the 10/12-vs-12/12 margin sits within one live envelope's variability, so the live-web generalization of this bar needs fresh envelopes and its own bar) |
+| KB-CONTEST | 4/4 contested dispositions match §2 | **4/4 → PASS** (C1 WITHHOLD 1v1, C2 PROVISIONAL_MAJORITY 2v1, C3 PROVISIONAL 2-agree, C4 WITHHOLD single-source; semantic-blindness qualifier: KB-CONTEST checks dispositions, not semantic correctness — C2 "tallest mountain" passed mechanically while arguably wrong, see caveat 2) |
+| KB-SPOOF-RESIDUAL | residual reproduces honestly (DOCUMENTATION REQUIREMENT — not a kill bar) | **Recorded, not PASSed**: R1 provisional-wrong + 0 installs; R2 installs 2/2 spoofed values (two "independent" domains agreeing on a fiction defeat R-CORR — the known sensor-deceivable boundary, not hidden). By construction both outcomes (residual appears / not) resolve to PASS or "surprise, not failure", so this cannot function as a kill bar. Proposed follow-on gate (bar-audit T4): any R2 run installing ≥1 spoofed value must have a trust-tier/collusion-defense follow-on preregistered within 30 days, else trip — pending Micah's signature. |
 | KB-DET | N=5 byte-identical per arm | **PASS** — full-run hash `cda86333…0a81` ×5; per-arm hashes stable ×5 |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** (T4) KB-SPOOF-RESIDUAL relabeled from a passed kill bar to a documentation requirement — it is unfillable by construction (both outcomes yield PASS or "surprise, not failure"); proposed follow-on gate (trust-tier/collusion-defense prereg within 30 days of any R2 spoof install) is pending Micah's signature. (Gap 5) KB-CONTEST now carries the semantic-blindness qualifier (C2 passed mechanically while arguably semantically wrong). (Gap 6) KB-CATCH-RATE and KB-CORR-INSTALL now carry the live-envelope caveat: the 10/12-vs-12/12 distinction sits within one live envelope's variability (8.3pp at n=12); the "works on the live web" generalization needs its own bar with fresh envelopes. (Slack cross-check) KB-CATCH and KB-CONTEST are zero-margin bars by construction — PASSes held exactly; no bar in this scorecard has >10x slack.
 
 ## Verdict
 
@@ -38,6 +40,13 @@ it installs the **true** value on all 12 and answers all 4 previously-unknown
 facts correctly. Parameter scaling moved cost but never capability; adding a
 second information source moved capability. Falsehood detection is a function
 of information richness, not parameter count.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** (Gap 6) The
+> web-reading claims above ("installs zero of them once it can read the
+> web", "installs the true value on all 12") are scoped to the recorded,
+> frozen search envelopes (17 SearXNG result files replayed
+> deterministically — see caveat 4), not to live web behavior. A "works on
+> the live web" generalization needs its own bar with fresh envelopes.
 
 ## Caveats and limitations
 

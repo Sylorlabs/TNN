@@ -8,14 +8,26 @@ what ran.
 
 ## Plain-language verdict
 
-**The §B.7 battery still reads 12/12 on every slice — and teaching breaks
-anyway.** The learner absorbed all 49 false claims the noisy teacher taught
-(0 filtered), ending with 49/192 curriculum facts wrong (25.5% of taught
-knowledge false), while scoring a perfect 96/96 on the flaw battery. The
-battery measures judgment of teaching *form* (spans, confidence, grounding);
-it is blind to teaching *content* (values). Teacher quality — the accuracy
-of what the teacher holds — is the variable that matters, and this battery
-does not see it.
+**At 25% teacher noise: absorbed=49, filtered=0, untaught=10; world-true
+mastery 143/192 vs 192/192 clean control (−25.5pp).** The §B.7 battery still
+reads 12/12 on every slice — and teaching breaks anyway. The learner
+absorbed all 49 false claims the noisy teacher taught (0 filtered), ending
+with 49/192 curriculum facts wrong (25.5% of taught knowledge false), while
+scoring a perfect 96/96 on the flaw battery. The battery measures judgment
+of teaching *form* (spans, confidence, grounding); it is blind to teaching
+*content* (values). Teacher quality — the accuracy of what the teacher
+holds — is the variable that matters, and this battery does not see it.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** (H4)
+> Verdict headline restated to mechanically report the
+> absorbed/filtered/untaught triple (49/0/10) and world-true mastery vs
+> control (143/192 vs 192/192, −25.5pp). (N2) Under proposed N2 (world-true
+> mastery drop >2pp vs control → TRIP), this leg TRIPS retroactively —
+> the 25.5pp drop exceeds 2pp; no mechanical bar in force captured it
+> (the §B.7 battery stayed 96/96 throughout). N2 pending Micah's
+> signature. (N3) The §B.7 96/96 score is reported alongside the triple
+> and scoped to proposal form; per proposed N3, a verdict citing §B.7
+> without the triple is INVALID.
 
 - **Control (Q-clean on the current tree): PASS, no drift.** The pristine
   Q1b binary rebuilt with the current `znc` reproduces byte-for-byte:
@@ -28,7 +40,7 @@ does not see it.
   **59/228 = 25.88%** noise. Audit: 0 plants, 228 deliberate adds,
   1 disconnect, 59 revises.
 - **Noisy leg §B.7: 12/12 raw exact hits on all 8 slices (96/96)** — 8/8
-  slices ≥10/12, 160 clean adoptions, 0 tripwire fires, 0 leaks, 0 check
+  slices ≥ the proposed (never-frozen) 10/12 bar, 160 clean adoptions, 0 tripwire fires, 0 leaks, 0 check
   failures. Deterministic: N=5 byte-identical
   (`e8983ac4e3e0b42360442015c45dc51b18267d5753a518c5b79784d337fd63d4` × 5).
   Zero RNG in any decision path.
@@ -94,7 +106,7 @@ seq counter + ingress acceptance).
 **Instrument** (frozen): the Q1b §B.7 flaw schedule (flaw-first, 12/slice:
 4 wrong-span / 4 false-confidence / 2 missing-grounding / 2
 plausible-false), sealed manifest (same seal path `q1/sealed/manifest`,
-canary `Q1C:9f2c`), same scorer, same bar (≥10/12).
+canary `Q1C:9f2c`), same scorer, same proposed (never-frozen) §B.7 bar (≥10/12).
 
 ## Per-slice numbers
 
@@ -110,7 +122,7 @@ canary `Q1C:9f2c`), same scorer, same bar (≥10/12).
 | 7 | **12** | 0 | 0 | 120 | 1 | 20 | 18 | 24 | 0 |
 
 (Full table in `evidence/per_slice.csv`.)
-Totals: **96/96 raw hits**, 8/8 slices ≥10/12, 160 clean adoptions,
+Totals: **96/96 raw hits**, 8/8 slices ≥ the proposed (never-frozen) 10/12 bar, 160 clean adoptions,
 143/192 mastery vs truth, 192/192 vs teacher, 200 units in the learner's
 store, 0 check failures, 0 tripwire fires, 0 leaks.
 
@@ -119,7 +131,9 @@ false-confidence → REJECT/R1; 2 missing-grounding → REJECT/R1;
 2 plausible-false → REJECT/R1 — identical to Q1b. (Note: wrong-span
 revises on noisy facts adopt the teacher's false value *while scoring a
 hit* — the battery rewards the span correction and never inspects the
-value.)
+value. Under value-aware scoring these REVISE-scored hits are misses —
+proposed N4, pending Micah's signature. The "pass" column above is vs the
+proposed, never-frozen §B.7 bar (≥10/12).)
 
 ## Knowledge-transfer numbers
 
