@@ -73,6 +73,12 @@ for name, m in rows:
     print(" ", name, {s: "%d/%d" % m["per"][s] for s in SLICES},
           "wrong_n=%d" % m["wrong_n"])
 print()
-print(json.dumps({n: {k: (round(v, 4) if isinstance(v, float) else v)
-                      for k, v in m.items() if k != "per"}}
-                 for n, m in rows), flush=True)
+summary = {}
+for name, m in rows:
+    sm = {}
+    for k, v in m.items():
+        if k == "per":
+            continue
+        sm[k] = round(v, 4) if isinstance(v, float) else v
+    summary[name] = sm
+print(json.dumps(summary), flush=True)
