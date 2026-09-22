@@ -155,4 +155,7 @@ degradation.
 - Build: `build/run_all.sh` (compiles, then 13 commands × 5 runs, `cmp`
   byte-compare; any mismatch fails the battery).
 - Analysis: `build/analyze.py` → `evidence/analysis/`.
-- Commit: _TBD hash_ on `tnn-native-lab`.
+- Commit: `85434dd2b81fb4f2591a4c98ce89152fef2daecb` on `tnn-native-lab`
+  (94 files: prereg + verdict + 19 sources + 3 build scripts + DATA manifest +
+  65 run logs + battery/build logs + analysis + 1,140-row conflict matrix).
+  Branch path: `docs/lab/wave12/championship-english/together/`.
