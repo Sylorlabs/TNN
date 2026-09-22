@@ -3,12 +3,29 @@
 > current program. The active program is the **TNN native lab** under
 > [`docs/lab/`](docs/lab) (waves 1–9: deliberate memory, reasoning control,
 > integrity, felt intensity, strength, trust tiers, five-organ integration).
-> The current headline result is the wave-5 integrity finding,
+> The current headline results are the wave-5 integrity finding,
 > [`docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md`](docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md)
-> (PROVISIONAL — wording pending sign-off). R27 at step 60,423 remains the
+> (PROVISIONAL — wording pending sign-off), and the epistemic-wave
+> speech-act learning result,
+> [`docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md`](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md)
+> (PROVISIONAL). R27 at step 60,423 remains the
 > canonical accepted checkpoint.
 
 # TNN — True Neural Network Research
+
+## Headline result — you can't understand it until you've learned more of it
+
+**Epistemic wave (2026-09-22):** two identical TNN deliberators faced 70
+weird-English utterances — sarcasm, jokes, hypotheticals, analogies,
+counterfactuals, poetry, implicature. The one that had first learned what
+those speech acts *are* (as ordinary learned knowledge, nothing hardcoded)
+withheld the non-factual ones **50.0%** of the time vs **7.1%** for the one
+that only knew facts (+42.9pp), while both held 12/12 on planted falsehoods.
+Honest boundary, trialed: one lesson per concept is not enough — neither
+arm passes the 8/10 bar, and a volume experiment is running to find where
+more learning stops helping.
+
+Read the [full speech-act learning result](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md).
 
 ## Current entry point — R33 research generation
 
