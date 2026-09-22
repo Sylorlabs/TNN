@@ -55,6 +55,61 @@ judge_A = synth control, judge_B = real playground, judge_C = B-γ method
 
 **Outcome:** ⏳
 
+## v2 — natural-ending re-render (kids, 2026-09-22)
+
+Micah's ear verdict on v1 (`render/b_gamma_kids.wav`): "meh, same issue as
+2nd" + shared defect "cut off weirdly" at the end. Fix dispatched: natural
+ending only; no recomposition of the cutouts (see cutout diagnosis below).
+
+**What changed** (one compositional edit in `score_kids`, `gamma.zag`): the
+wash-ambience scatter bound moved 30.0 → 26.0 s (`wash_end` variable).
+Scatter's t-sequence is t1-independent (deterministic h32), so every
+placement before 26.0 s is unchanged; only the final wash grain (was: placed
+28.702 s, 3.0 s long → hard-clipped by the 30.0 s file boundary, since
+`place()` stops at `nsamp` with no fade — the measured cause of the weird
+cutoff) is gone. The last wash grain is now at 25.70 s and its FULL natural
+3.0 s decay completes at 28.70 s. No synthetic fades added; the only
+envelopes are the grammar's own 88-sample edge glue (unchanged) and the
+renderer's standard mastering (unchanged). Grain vocabulary, T1–T8, and all
+content before ~28 s identical by construction. v1 file kept intact.
+
+**Verification:**
+
+| Check | Result |
+|---|---|
+| 3/3 byte-identical renders | ✅ `1842356072a9f19bbdd830517ab9d6c5df140cf6596cbc7f60d03db2e788d71f` |
+| A-NATIVE (same gates as v1) | ✅ PASS — peak 0.673, DC 0.000073, ZCR 0.0593, natural fall (20.8/6.9/1.7 dB), hiss 0.000 CLEAN, clicks 0.34 < 1.20 |
+| 30.00 s mono 44.1 kHz PCM16 | ✅ |
+| no-copy audit (audit.py, bar 0.80) | ✅ CLEAR — 57 windows, 0 trips, worst 0.361 |
+
+**Tail-envelope evidence** (max |sample| per 100 ms, last 2 s):
+- v1: `[…,1479,1870,1745,1766,1348,906,647,432,141,62]` — compressed
+  1479→62 taper in the last 600 ms: the clipped grain choking at the boundary.
+- v2: `[…,2855,1688,335,335,335,335,335,320,282,229,167,106,52,14]` —
+  genuine decay: last grain energy ends 28.7027 s; 28.7–29.2 s is the file's
+  natural floor (flat digital 335 = the mastering's DC-removal residue,
+  inaudible DC); 29.2–30.0 s is the renderer's standard 0.8 s end-fade
+  resolving it to 0. Final 100 ms max = 14 (≤ 1000) ✅. Last nonzero sample
+  at 29.975 s; file ends at 30.0 s from the quiet floor.
+
+**Pre-28 s unchanged (honest accounting):** the integer mix is bit-identical
+to v1 for the first 28.70 s (deterministic placements + integer adds; the
+reverted source reproduces v1's SHA `655978ec…` exactly, proving pipeline
+determinism). The final WAV differs from v1 by ±1 LSB on ~2% of pre-28.7 s
+samples: `write_wav` does full-file DC removal + peak normalization, so
+removing the clipped tail grain shifts the file-wide DC by ~0.02 LSB and
+~2% of samples round differently at truncation. Inherent to the mastering
+chain, inaudible, A-NATIVE unaffected. Peak unchanged (22040 @ 6.422 s both).
+
+**Cutout diagnosis (independent 10/50 ms envelope pass, my own):** AGREE
+with the dispatched diagnosis. 0 flanked digital dropouts at both
+resolutions; 0 hard onsets; 0 gate-like slams to zero. Three soft-shouldered
+dips flagged (0.77 s, 9.35 s, 18.75 s) are 150–300 ms wide with minima
+~1000–1900 and soft edges — phrase boundaries of the event-grain grammar
+(e.g. 9.35 s: laugh trains decayed, next chase not yet started), i.e.
+compositional content, not a digital artifact. Per the fix-only-artifacts
+rule, the grammar was not changed.
+
 ## K2 — anti-v2 rebuild (paradigm escape / TEST 2)
 
 **Question:** does B-γ escape the v2 paradigm (oscillator/resonator/noise-bed

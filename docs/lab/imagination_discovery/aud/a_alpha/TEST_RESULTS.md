@@ -132,3 +132,28 @@ The objection stands.
 
 **Key finding:** The suction valve is the ONLY source that oscillates, but it
 is fragile, harsh, and uncontrollable. All other physical models failed.
+
+## KILL VERDICT — kids benchmark (2026-09-22, Micah's ears, binding)
+
+Micah listened to `kids_a_alpha.wav` (4th of 5, brief: 30 seconds of children
+playing and laughing, clean native field-recording quality; no hiss, static,
+or synth). His verdict, verbatim:
+
+> "not close at all, sounds like an alien call"
+
+**A-α is DEAD on the kids benchmark.** His ears confirm the machine-blind
+Test-1 FAIL (all 3 judges ranked the render below the labeled synth control;
+loop/paste signature s3=0.503, 723 clipped samples, 10,414 digital clicks —
+defects found in no other clip).
+
+Honest record:
+- The builder's own pre-verdict flagged MEDIUM-HIGH synth risk (f0=1050Hz too
+  high for a child's laugh, ac=0.96 very periodic, static formants). The
+  oracle's verdict is worse than the feared one: not "synth-like" but
+  categorically wrong — an alien call, not children playing.
+- The K1 bar ("Micah says sounds like a synth") is superseded by the plain
+  fact: the clip fails the brief at the category level. No re-render under
+  this claim; the artifact is kept for the record.
+- Physical-scene simulation as a paradigm relocates synthesis rather than
+  removing it (the fork's own monster objection); this verdict closes the
+  kids-benchmark line for A-α.

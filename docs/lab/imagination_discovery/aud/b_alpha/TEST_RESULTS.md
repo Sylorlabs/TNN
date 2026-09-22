@@ -30,6 +30,52 @@ will adjudicate.
 
 ---
 
+## Battery 1b: Kids / playground — v2 natural ending (2026-09-22)
+
+**Artifact:** `clips/b_alpha_kids_v2.wav` — re-render of the flagship kids clip
+addressing Micah's ear verdict: v1 was the most realistic of all five clips,
+but all five "cut off weirdly" (v1's last-2s envelope stayed loud to the
+final sample, then exact zeros — a hard digital cut mid-sound at ~-10 dB).
+
+**What changed in the score** (`src/render.zag`, `score_kids`, same seed 6101,
+same `catalog.bin`):
+- Grammar-fill loop bound `29.5` → `26.0` (both the `while` and the placement
+  guard).
+- The explicit 27.0 s and 28.6 s events and the 4th footstep (~27.1 s) are
+  REMOVED — last placed event now starts at ~26.42 s, so its natural decay
+  completes by ~28.4 s and the last ~1.5 s is quiet room tone resolving to
+  the bed's natural floor. No synthetic fade added anywhere (compositional
+  fix only; the common writer's 30 ms de-click edge fade applies as in v1).
+- New `reserve()` helper replicates `ev()`'s atom selection (hash pick,
+  3 s lastuse guard, `usedcl` marking) without placing audio, so the
+  hash-walk state (`stm`, `lastuse`) entering the grammar fill is
+  byte-identical to v1 for every event before the cutoff. All other content
+  (seed, catalog, grammar, bed) unchanged.
+
+| Check | Result |
+|---|---|
+| Format/duration | 30.00 s mono 44.1 kHz PCM16 ✓ |
+| Voice clusters used | 0, 1, 2 (unchanged) |
+| A-NATIVE | PASS — dc=-0.000001, peak=0.679 (3.4 dB headroom), maxjump=0.2425 (field-range), zcr=0.0516, no hiss (quietest-100ms HF frac=0.001) |
+| Determinism | 3/3 byte-identical: `c6be7e1fb9b135f10236f2b86b1afa2b0b22e8f12724d669a3468af0a48caf89` |
+| Tail envelope (last 2 s, per-100 ms max) | v1: [3910…14647…8971] loud to the last sample → v2: [46,53,84,1327,1478,1265,1177,1409,1013,926,1484,2231,1279,616,265,336,650,471,2000,452] — genuine decay to the floor |
+| Final 100 ms max | 452 (≤1000 bar) ✓ |
+| v2 last-1 s rms | 218 (-43.5 dBFS) vs v1's 2622 (-21.9 dBFS) |
+
+**Rest-of-piece unchanged (diff summary vs v1):** the writer's global
+DC-subtract + peak-normalize means raw byte-identity isn't achievable, but
+the global peak is at the identical sample in both files (22259 @ 5.764 s →
+normalization unchanged) and the sample-wise difference `v1−v2` is a 0.15 LSB
+DC-shift floor (rms 0.36 LSB, max 6.1 LSB — inaudible) over the entire first
+27.0 s. First sample exceeding that floor is at exactly 27.000 s — the
+removed explicit event. In other words: v1 had no fill events in
+[26.0, 27.0), and everything before 27.0 s is the same audio in both files;
+the only content difference is the removed late events (their energy accounts
+for essentially all of v1's tail: rms 2610 of the 2622).
+
+**Micah ear oracle:** AWAITING (v1 verdict was binding-most-realistic; v2
+keeps v1's content with the cut fixed).
+
 ## Test 2: Kethra's planet voice (rebuild from scratch)
 
 **Artifact:** `clips/b_alpha_planet_v1.wav`

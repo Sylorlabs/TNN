@@ -135,3 +135,28 @@ integrates and adds. The ear (K1) remains the final judge.
 - **What would change my mind:** a single "synth" from Micah on any clip
   kills that clip's claim per the debate's rules. The position accepts
   this in advance.
+
+## 10. K1 VERDICT — CLAIM KILLED (2026-09-22, Micah's ears, binding)
+
+Micah listened to `d_alpha_kids.wav` (5th of 5, brief: 30 seconds of children
+playing and laughing, clean native field-recording quality; no hiss, static,
+or synth). His verdict, verbatim:
+
+> "sounds like a synth with synth drums — I told you no synths allowed"
+
+**K1 gate: TRIPPED.** Per the fork's own preregistered kill bar ("one 'sounds
+like a synth' from Micah kills the claim"), **D-α's claim is DEAD.** No
+euphemism: the direct-waveform-dreaming fork does not produce audio that
+passes as native imagination to the binding oracle.
+
+Honest record:
+- All mechanical gates passed (A-NATIVE, uniqueness, resonance movement,
+  non-repetition, determinism 3/3, expansion audit). The machine-blind
+  Test-1 returned "PASS, but hollow" — the judges labeled 0/3 clips "synth"
+  but inverted the real↔synth-control pair, so the pass meant less than it said.
+- The ear verdict overrules all of it. Micah's ears are the final oracle;
+  the fork's position accepted this in advance (§9).
+- Artifacts (`d_alpha_kids.wav`, controls, dream.zag, audits) are KEPT for
+  the record, not deleted. Nothing is re-rendered under this claim.
+- The K2 forced-choice vs the synth control is moot — a killed claim does
+  not proceed to further gates.

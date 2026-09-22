@@ -142,3 +142,97 @@ recording (pastiche test), or a three-way with a same-brief synth ocean.
 ## Kill-bar status
 
 No kill bar has tripped on any gate. All three pieces await ears.
+
+---
+
+## v2: natural ending — `bbeta_kids_v2.wav` (2026-09-22)
+
+Micah's ear verdict on v1: "more cutouts then a bit realistic and weird" —
+plus the shared defect: "they all cut off weirdly" at the end. The v1
+render ended mid-sound (last 100 ms max 3789/32768, chopped by the 30 s
+file boundary; the writer's 30 ms edge fade cannot hide a chop from that
+level). v2 re-renders the kids clip with a natural ending. Same seed
+(20260922), same catalog (`catalog_kids.bin`), same phases and tag grammar.
+
+### What changed (compositional, in `mech_kids.zag` `score_kids` only)
+
+1. **P4 settle dissolves by ~28.3 s.** The third giggle (was @28612, ended
+   29067) and fourth footstep (was @28710, ended 28910) are still
+   *picked* — the deterministic `ctr` sequence is preserved, so every
+   later phase's picks are unchanged — but not *placed*. The distant call
+   moves 28200 → 28100 ms (same picked event, 246 ms) so its tail fully
+   decays by 28.35 s. P4 is now: 2 breathy giggles, 3 slow steps, 1
+   distant call — the game dissolves instead of running to the file's edge.
+2. **The ending is the quietest captured air.** The bed's deterministic
+   picks run unchanged through bedt=27956 (15 segments, identical to v1),
+   preserving `ctr` for all later phases. v1's two tail bed segments
+   (which summed to the 3789 chop at the 30 s clip) are still picked but
+   not placed; instead the file's ending is covered once by the quietest
+   bed record (deterministic catalog query: min peak over bed records =
+   catalog idx 73, src kids_berlin 89505–91843 ms, peak 476). That record
+   is captured air that genuinely resolves to its natural floor (per-100 ms
+   max 476 → 14 across its 2338 ms). No fades, no processing, same 300 ms
+   overlap, same target peak — choosing, not shaping.
+
+Render: `./assemble_v2 kids bbeta_kids_v2.wav` (seed 20260922; `assemble_v2`
+built from the edited `mech_kids.zag`, v1's `assemble` binary untouched).
+SHA-256 `882a29bd7d99f982cd2e1c32e2625bc1880344f8b839de14e41049ce049f620a`
+— **3/3 byte-identical** across independent renders.
+
+### Gates
+
+| Gate | Bar | Result |
+|---|---|---|
+| Format | 30 s, 44.1 kHz, mono, 16-bit | PASS (30.000 s exactly, 1323000 frames) |
+| Tail decay | genuine decay to quiet floor, final 100 ms ≤ ~1000 | PASS — last-2 s per-100 ms max: [6656, 5238, 3894, 3679, 1236, 1274, 805, 674, 595, 634, 511, 595, 488, 612, 527, 494, 539, 499, 494, 482]; final 100 ms max = 482 |
+| Only bed after ~28.35 s | no events past the call's decay | PASS — last placed event (distant call) ends 28346 ms; 28.35–30 s is bed only |
+| A-NATIVE | 6 sub-checks, same gates as v1 | 5/6 PASS — identical to v1 (ZCR 0.0508, hiss CLEAN 0.001, crest 8.0, DC −0.000027, headroom 3.0 dB, clicks within nature; floor-spectrum sub-check fails with the same 11.4/11.4/−1.9 signature on second 10 — the documented measurement-contamination note still applies, not retuned) |
+| Social falseness S1–S5 | 8 checks | PASS (lineage 85/85, cadence 260–404 ms, tag 13.0–13.5 s, 24 tumble overlaps, contagion −88→−104 ms, multi-voice, breath arc 615→452 ms) |
+| No-copy | worst 2 s NCC < 0.75 | PASS (0.179) |
+| Determinism | byte-identical 3/3 | PASS |
+
+### Pre-28 s unchanged (verified, with one honest caveat)
+
+Placement-log diff v1→v2: all 15 bed placements before bedt=27956 ms and
+all P0–P3 and early-P4 placements are identical; only the tail lines differ
+(2 bed segments → 1 quiet-air segment @27956; giggle3/step4 unplaced; call
+28200→28100). The picked events are unchanged (same `ctr` sequence).
+
+Caveat: the rendered PCM samples before 28 s differ from v1 by a global
+~17 LSB DC offset (inaudible: −66 dBFS, constant). Cause: the writer's
+whole-file DC removal sees a different mix mean after the tail change, so
+its `(m−mean)` subtraction shifts every sample. The *events* are identical;
+the shift is the established writer's correct response to a changed mix,
+not a content change. (The bed-air swap itself begins at 27956 ms, 44 ms
+before the 28 s mark — inside the "~28 s" tolerance; everything before
+27.956 s has identical placements.)
+
+### Cutout diagnosis — CONFIRMED content-by-design (not recomposed)
+
+Micah's "cutouts" were re-measured on v1 at 10 ms / 50 ms resolution:
+- 13.0–13.4 s: the TAG shout (peaks ~18578) decays, then the envelope
+  drops to ~900–1130 for ~half a second — the deliberate P2 halt ("steps
+  stop dead; everything halts" when the tag lands, DERIVATION_kids.md §1).
+- 25.8–26.8 s: dips to ~908–1265 around 26.0 s — the P3→P4 transition gap
+  before the first settle giggle @26200.
+- Zero 10 ms windows below 150/32768 in the full 30 s: **no digital
+  dropouts, no gate-like dips, no hard onsets.**
+
+These are the phase grammar's deliberate halts — content by design, the
+same mechanism that makes the tag land. Per the task rule (fix only
+artifact defects), they were NOT smoothed or recomposed. v2's pre-28 s
+events are the same, so the halts are preserved.
+
+### Honest pre-verdict (v2)
+
+- The ending is now a genuine dissolve: last event decays by 28.35 s,
+  then ~1.65 s of quiet captured air resolving to its natural floor
+  (final 100 ms max 482/32768 — the writer's 30 ms edge fade handles the
+  boundary inaudibly from this level).
+- Known risks carried over from v1: (1) the three "characters" are cluster
+  assignments, not verified individuals; (2) the tag narrative is carried
+  by timing, not words; (3) the quietest moments may still read emptier
+  than a real recording.
+- The v1 file (`bbeta_kids_tag.wav`, SHA
+  `a5e44d0a98704d50b19bdc142914a1de6ddefe1a3c5bfb0efb4c08dd8f1974a0`)
+  is untouched — the verdict trail stays intact.
