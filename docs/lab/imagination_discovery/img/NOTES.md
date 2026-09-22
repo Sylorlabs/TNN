@@ -194,3 +194,121 @@ Render time (1024², lab VM): alien ~10–11 s, arch ~6 s.
   bounding box directly and left a faint rectangular boundary in the sky;
   caught on inspection and fixed with a radial falloff — the final images
   carry no box edges.
+
+---
+
+## Round 3 rebuild (2026-09-22) — second blind-gate tell pass
+
+The round-2 images passed all mechanical bars but failed the fresh blind
+gate again. A separate blind crew listed 8 tells (4 alien, 4 architecture).
+This round rebuilds both scene renderers in `disc.zag` (source SHA
+`a5cabe01931cba8bd95dcb1672e5decc311294b760d5458610a0524cf26fb120`)
+to close each tell structurally. Aesthetics were NOT self-judged — a
+separate blind crew re-judges (D-BLIND remains their gate, unclaimed here).
+
+### D-IMG-1 (alien) — tell-by-tell
+
+1. **REPEATED FRACTAL-SWIRL / SAME GRAIN NEAR+FAR** — the single terrain
+   generator is replaced by three structurally different materials, one
+   per depth plane, each with its own seed, scale, palette, lighting, and
+   detail character: FAR = domain-warped terraced massifs (quantized
+   benches, strata risers, aerial wash, clouds drifting between peaks);
+   MID = domain-warped faulted crags (discontinuous fault steps, contour
+   strata, concavity shading, downhill scree); NEAR = cellular
+   boulder/talus mounds plus a separate ridged detail field with lava
+   accumulating in the lows. A valley-fog function joins mid/near into
+   continuous depth instead of stacked bands.
+2. **PASTED DISC + ELLIPSE-LAYER PLANET** — the planet renderer is
+   rebuilt: analytic tilted annulus with soft coverage edges; front/back
+   ring ordering from ring-plane depth; planet shadow on the ring solved
+   in 3D (ray impact parameter); ring shadow on the disc via
+   ray-plane intersection; planet texture follows latitude relative to
+   the ring plane (bands parallel to the rings) with two explicit storm
+   cells; terminator, limb darkening, and limb haze all keyed to the same
+   scene sun; asymmetric forward-scatter halo; cirrus drifting in front
+   of the lower limb. **Bug caught and fixed during this round:** the
+   planet dispatch bound (`d_a_sky_px`) was `1.6*rp` while the rings
+   extend to `2.3*rp`, clipping the annulus at the dispatch square and
+   leaving a faint rectangular boundary in the sky (edge gradient ~106
+   LSB at the square border). Fixed to `2.4*rp` before final renders;
+   post-fix edge gradient at the old boundary is at the noise floor
+   (~3.5 LSB).
+3. **STACKED TEMPLATE BANDS** — replaced by the valley-fog depth
+   function plus per-plane aerial perspective; far peaks pass through
+   the cloud banks.
+4. **PLANET LIGHTING vs SCENE SUN** — one sun vector
+   (approximately (-450,-750,490)) drives terrain shading, the planet
+   terminator/limb, the ring lighting, and the halo asymmetry.
+
+### D-IMG-2 (architecture) — tell-by-tell
+
+1. **APEX MITER OVERHANG/LIP** — true closed miter geometry at every
+   vertex: the three beam quads meet edge-to-edge along each miter
+   bisector (computed from the beam direction pair, `ml = hw/sin(θ/2)`).
+   No inner-edge extension, no overhang lip. The cyclic impossible
+   over/under (b2 over b0 at V0, b0 over b1 at V1, b1 over b2 at V2) is
+   carried by seam shading alone: a highlight lip on the winner's side
+   of the miter line, a dark seam plus soft contact shadow on the
+   loser's side, plus pocket AO at each inner corner.
+2. **BEAM TEXTURE NOT ALIGNED / NO GEOMETRY WEAR / INCONSISTENT
+   LIGHTING** — all beam texture is now sampled in beam-local
+   (along, across) coordinates: grain elongated along the beam axis,
+   scratches and cracks running with the beam, edge-wear chips derived
+   from the across-coordinate, joint wear derived from distance to the
+   vertices. One common sun and light color across all three beams (warm
+   lit side / cool shaded side); no per-beam warm/cool tints.
+3. **STARFIELD HARD CUTOFF** — star density/brightness now fades
+   continuously into the wall over a 130px band (smoothstep on
+   distance-to-walltop); no horizontal branch boundary.
+4. **BOTTOM GRAY STRIP** — replaced with a perspective ground plane:
+   flagstone/rock slabs in two-point perspective with staggered courses,
+   per-slab tone hash, a light pool under the frame, and a real horizon
+   with distance haze. The frame casts its contact-hardened shadow onto
+   it.
+
+### Round-3 measurements (final, 2026-09-22)
+
+| Subject | File | Size | grad(O) | grad(B) | Ratio | D-RES | D-SHARP | D-COMP | D-DET |
+|---|---|---|---|---|---|---|---|---|---|
+| D-IMG-1 alien | `d-img-1_alien_1024.bmp` | 1024×1024 24-bit | 8.323 | 3.744 | 2.223 | PASS | PASS | PASS | PASS |
+| D-IMG-2 arch  | `d-img-2_arch_1024.bmp`  | 1024×1024 24-bit | 2.290 | 0.963 | 2.377 | PASS | PASS | PASS | PASS |
+
+Sharpness bar: `grad(output) ≥ 1.20 × grad(downscale-by-2 then box-upscale-by-2)`.
+Both exceed it at ~2.2–2.4×.
+
+Determinism (two separate clean processes, final binary, 2026-09-22):
+- alien BMP: `176dad31…a2bf0e7` both runs — byte-identical.
+- arch BMP: `a48d9b40…0ebaea54` both runs — byte-identical.
+
+Render time (1024², lab VM): alien ~6 s, arch ~4–5 s.
+
+### Round-3 artifact SHA-256
+
+| File | SHA-256 |
+|---|---|
+| `d-img-1_alien_1024.bmp` | `176dad3132560caeb4e1d9e5ce69ae51615fed7fe5d05c63cd689c300a2bf0e7` |
+| `d-img-1_alien_1024.png` | `3ec97ff4031ebea4f6fb6bb4a1979ae1fe4aa3a3920d068aecbe647bbb6d341e` |
+| `d-img-2_arch_1024.bmp`  | `a48d9b4048a1d42ef54a59b8bbe929f7ce5026d1e7c562264a1275950ebaea54` |
+| `d-img-2_arch_1024.png`  | `76f119a052c8823b6efbf424bdd62f238efdb9af81e9ada052c94c35e729a7d3` |
+| `disc.zag` | `a5cabe01931cba8bd95dcb1672e5decc311294b760d5458610a0524cf26fb120` |
+| `verify_bars.py` | `a413f6b8537aa46335b5bb829d26326f6c4c91001c488ebd70840de49d11c18f` |
+
+(`verify_bars.py` unchanged since round 2; SHA matches the round-2 record.)
+
+### Round-3 honest limitations
+
+- D-BLIND (fresh blind judging) is explicitly out of scope for this crew
+  and is not claimed — only the 8 listed tells were addressed
+  structurally, and only a separate blind crew can confirm they read as
+  closed.
+- The ring system is an analytic tilted annulus (2D ellipse
+  approximation), not a full 3D ring-plane solve; it reads as a ring
+  system but a judge may still see "ellipse layers."
+- The planet's bands are concentric latitude rings; the lava field in
+  the near plane is a cellular speckle rather than flowing channels.
+- 2048² remains untested (prereg minimum is 1024²; buffer ≈ 12.6 MB
+  < 32 MiB limit, pipeline supports it).
+- The architecture scene uses `f64` for beam geometry (deterministic on
+  x86-64); all texture noise remains integer-hash based.
+- `disc` binary, `.zagd`/`.zag-cache` files, and debug renders are build
+  artifacts and are excluded from the commit.
