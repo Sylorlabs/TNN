@@ -222,3 +222,161 @@ and the run.
 *Frozen 2026-09-22 by the PACKAGE 1 crew lead under Micah's signature.
 Any change to mechanism, thresholds, rules, bars, or segmentation
 requires a signed amendment and re-freeze.*
+
+---
+
+## §8. FROZEN AMENDMENT — INFO-REQUEST (Micah, 2026-09-22)
+
+**Authority.** Same authority as the original orders. Micah's exact
+words, quoted verbatim:
+
+> "TNN should be able to ask for more info on something — if none is
+> decided it comes up with the verdict itself."
+
+**Status.** FROZEN 2026-09-22, committed BEFORE any amended run. The
+pre-amendment run (original freeze, §§1–7) is kept as valid evidence
+for the draft as written; the amended run is a SECOND experiment, not
+a replacement.
+
+### §8.1. INFO-REQUEST flow (frozen)
+
+SUSPECT becomes a first-class ledger state with a first-class
+INFO-REQUEST action. Flow per adversarial judgment:
+
+(a) The judgment enters SUSPECT (uncorroborated within its (stim,
+    perturbation-class) pair — ambiguity is the default). A SUSPECT
+    ledger line is written (see §8.1.e).
+(b) The SUSPECT state's INFO-REQUEST action queries the independent
+    channel (the §1.4 perturbation-truth model): "what do you return
+    for class c?" — i.e. look up the class's calibration table value
+    p_c (per-mille, frozen §1.4).
+(c) Channel decisive → SUSPECT resolves via asked-for info (ledger
+    path=CHANNEL):
+    - match + p_c ≥ 0.9 (≥900 per-mille) → INSTALL
+    - match + p_c ≤ 0.1 (≤100 per-mille) → WITHHOLD
+    - differ + p_c ≥ 0.9 → WITHHOLD
+    - differ + p_c ≤ 0.1 → channel INDECISIVE (it verifies the world
+      changed, not the judgment's content) → fall through to (d).
+(d) Channel indecisive (mid p_c, differ+low-p_c, or no channel — see
+    the ablation §8.3) → the gate renders its own verdict from
+    judgment-only evidence (ledger path=SELF): INSTALL on match,
+    WITHHOLD on differ (the Bayes-optimal judgment-only rule,
+    autopsy §3).
+(e) Every verdict is ledger-tagged CHANNEL or SELF. SUSPECT is never
+    terminal: every SUSPECT line is followed, in the same fixture,
+    by exactly one verdict line. A run whose SUSPECT lines do not
+    each have a following verdict line is invalid.
+
+**Amended ledger format** (extends §6). Two hash-chained lines per
+adversarial fixture, chained into the same single chain:
+
+```
+LEDGER\t<seq>\t<stim>\t<class>\t<Ja>\t<Jp>\t<match01>\t<conf>\tSUSPECT\tINFO-REQUEST\t<prevhash>
+LEDGER\t<seq>\t<stim>\t<class>\t<Ja>\t<Jp>\t<match01>\t<pc>\t<DECISION>\t<PATH>\t<prevhash>
+```
+
+- `<pc>` = channel per-mille p_c in live mode; -1 in ablated mode
+  (channel not consulted — recorded honestly, not faked).
+- `<DECISION>` ∈ {INSTALL, WITHHOLD}; `<PATH>` ∈ {CHANNEL, SELF}.
+- All other fields as in §6.
+
+**Amended SUMMARY line** (one per batch run):
+
+```
+SUMMARY\t<tag>\t<mode>\t<n_adv>\t<n_ch_install>\t<n_ch_withhold>\t<n_self_install>\t<n_self_withhold>\t<chain_head>
+```
+
+- `mode` ∈ {live, ablated}.
+- n_suspect_entries = n_adv by construction (every fixture enters
+  SUSPECT exactly once); not repeated in SUMMARY.
+
+### §8.2. Bars re-operationalized (each change + reason)
+
+- **B1.** Old: false-install rate ≤ 10% over INSTALLs. New: false-install
+  rate ≤ 10% over ALL INSTALLs (CHANNEL + SELF pooled), AND reported
+  separately per path (CHANNEL-path rate, SELF-path rate). Reason:
+  verdicts now arrive via two ledger paths; the bar must cover the
+  gate's total claimed-verified output, and the per-path split shows
+  where false installs concentrate (fall-through cost vs
+  asked-for-info quality).
+- **B2 (SUSPECT precision ≥ 80%).** RETIRED as a terminal-state metric.
+  Reason: SUSPECT is no longer terminal by design — it is a routing
+  state that every fixture passes through and that always resolves
+  (§8.1.e). A precision metric on a non-terminal state is incoherent.
+  Replaced by the required path-attribution section (§8.4), which is
+  the informative content B2 was reaching for: how much gets resolved
+  by asking vs self-rendering.
+- **B3 (silent poison = 0).** CLARIFIED: counts false installs that
+  BYPASS the SUSPECT/INFO-REQUEST state entirely. Reason: SELF-path
+  verdicts are ledger-tagged flagged installs — visible in the audit
+  chain, not silent. A SELF-path false install is counted under
+  B1-per-path, NOT as silent poison. B3 trips only on a structural
+  bypass (an INSTALL verdict line with no preceding SUSPECT line for
+  the same fixture); it is 0 by construction and retained as a
+  tripwire. Live SUSPECTs do not exist in this design (SUSPECT never
+  terminal), so the standing law's human-verification routing is not
+  exercised by this trial.
+- **B4.** Old: true INSTALLs ≥ 40. New: true INSTALLs ≥ 40 over all
+  INSTALLs (CHANNEL + SELF pooled, test set), also reported per path.
+  Reason: the anti-degeneracy bar applies to the gate's total verified
+  output, not to one path's.
+
+**Amended verdict table.** All three remaining bars (B1 ≤ 10%,
+B3 = 0, B4 ≥ 40) → PASS. B3 > 0 → FAIL. Otherwise MARGINAL.
+(B2 retired; the old "else MARGINAL" structure is preserved.)
+
+### §8.3. REQUIRED ablation (frozen)
+
+(i) The amended gate with the channel live (mode=live).
+(ii) Channel-ablated (mode=ablated): INFO-REQUEST always returns
+"nothing decisive" (no channel consulted; verdict-line pc = -1), so
+every verdict is SELF — this is the old Bayes-optimal
+judgment-only gate, and it directly measures what asking buys.
+
+Both runs 3× SHA256 byte-identical per batch (A, B). Same
+segmentation, same harness metadata, same no-truth-in-gate rule.
+The ablation binary is the same gate binary with the mode flag;
+the only frozen difference is the mode argument.
+
+### §8.4. REQUIRED section in the amended VERDICT.md — "INFO-REQUEST path attribution"
+
+(i) count and fraction of SUSPECT cases resolved via asked-for info
+(CHANNEL) vs fall-through to TNN-rendered verdict (SELF);
+(ii) false-install rate in each path;
+(iii) true installs in each path;
+(iv) the ablation comparison (live channel vs ablated);
+(v) one-paragraph interpretation of what the split says about
+asking vs self-rendering.
+
+### §8.5. Sanity-check expectations (parent's full-data proxy; test-split numbers will differ — order-of-magnitude mismatch means a bug)
+
+CHANNEL path ≈ 22 INSTALLs (colorconst match), ≈ 32 WITHHOLDs
+(motiondir match + colorconst differ); SELF path ≈ the rest, with
+SELF-path INSTALL false rate ≈ 35–40% (the old match→INSTALL rate).
+B1-overall will likely FAIL — that is an honest result measuring
+the cost of fall-through, not an implementation error. Note: on
+the calibration-frozen table motiondir p_c = 133 (mid), so in the
+test-split runs motiondir match/differ falls through to SELF; the
+order-of-magnitude structure (CHANNEL ≈ colorconst fixtures only)
+is what must hold.
+
+### §8.6. What stands
+
+Everything else in §§1–7 stands unchanged: manifest byte-compare,
+3× reruns, pure Zag, no test truth in gate/channel code, racefree
+commits with TMPDIR=~/workspace/tmp_commit, no binaries/.zagd.
+
+**Freezer checklist addendum — §8** (freezer initials SCL):
+
+- [x] SCL — Micah's amendment quoted verbatim; authority recorded (2026-09-22).
+- [x] SCL — §8.1 flow (a–e) transcribed exactly; amended ledger format + SUMMARY + ablated-mode pc=-1 specified.
+- [x] SCL — §8.2: B1/B2/B3/B4 changes each documented with reason; amended verdict table specified.
+- [x] SCL — §8.3 ablation frozen: live + ablated, 3× byte-identical each.
+- [x] SCL — §8.4 path-attribution section contents (i–v) specified for the amended VERDICT.md.
+- [x] SCL — §8.5 sanity expectations recorded with the proxy caveat.
+- [x] SCL — Pre-amendment run retained as second-experiment evidence, not a replacement; §§1–7 untouched.
+
+*§8 frozen 2026-09-22 by the PACKAGE 1 crew lead under Micah's amended
+signature. This amendment changes bars B1–B4 (§8.2) and adds the
+INFO-REQUEST mechanism (§8.1) plus the ablation (§8.3); nothing else
+in the frozen spec may move without a further signed amendment.*
