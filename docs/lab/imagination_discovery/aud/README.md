@@ -1,6 +1,6 @@
-# Imagination Discovery — Audio Crew (D-AUD-1, D-AUD-2)
+# Imagination Discovery — Audio Crew (D-AUD-1, D-AUD-2, D-AUD-3)
 
-Pure-Zag audio synthesis. No samples, no forced instruments, no RNG. Two
+Pure-Zag audio synthesis. No samples, no forced instruments, no RNG. Three
 discoveries rendered as 21-second, 44.1 kHz, mono, 16-bit WAVs.
 
 ## The discoveries
@@ -32,6 +32,22 @@ per-discovery, never from an instrument preset:
 - Wandering wind (swept resonator 300→1100 Hz), HF shimmer bed,
   broadband white-noise bed
 
+### D-AUD-3 — PLANETVOICE (`d_aud3_planetvoice.wav`)
+
+**"The planet's voice": what the alien planet of the D-IMG series sounds
+like.** Full world doc in `PLANETVOICE.md` (the world is named Kethra; the
+mic stands on a basalt plain at the foot of the lavender range at dusk).
+Every element is derived from the world, not from a preset:
+
+- Argon-atmosphere standing waves (beating 33.0/33.45 Hz pair + 66.2 Hz)
+- Moon-breath pressure swells (LP noise, 0.055 Hz LFO — Ilyra's tidal pull)
+- Ridge wind (swept resonator 280→950 Hz) + spire whistle (1500→2350 Hz)
+- Four broad gusts, three deep rift vents, three seismic groans
+- Eighteen ice-fracture cracks (cryo deposits at dusk)
+- **Nine magnetosphere/ring-particle chorus tones** — rising chirps, the
+  planet's voice proper. Events, not notes: no melody, no rhythm, no
+  instrument anywhere in the piece
+
 ## Architecture (`synth.zag`)
 
 100% pure Zag in the deliverable path. Python/numpy (`bars.py`) verifies only.
@@ -44,6 +60,9 @@ per-discovery, never from an instrument preset:
   little-endian accessors; peak-normalize + odd-function soft clip + fades.
 - Moving 2-pole resonators, one-pole LP/HP filtered noise beds, white-noise
   bed, struck/swell partial clouds, noise bursts, pings.
+- `render_chorus`: magnetospheric rising chirps (D-AUD-3). `render_geyser`
+  takes an explicit resonance parameter (D-AUD-3 gusts use broader R=0.97;
+  aud2 passes the original 0.986 and re-renders byte-identical).
 - WAV writer via Linux `open(2)` with `O_WRONLY|O_CREAT|O_TRUNC`.
 
 No `f3_tone` sine-stack/ADSR anywhere. No 12TET. No presets.
@@ -56,25 +75,27 @@ cd ~/workspace/tnn-lab/imagination_discovery/aud
   synth.zag --no-zagd --no-analyze --no-foreground-cache -o synth
 ./synth aud1 d_aud1_vespera.wav   # D-AUD-1
 ./synth aud2 d_aud2_cryovolcano.wav  # D-AUD-2
-python3 bars.py d_aud1_vespera.wav d_aud2_cryovolcano.wav
+./synth aud3 d_aud3_planetvoice.wav  # D-AUD-3
+python3 bars.py d_aud1_vespera.wav d_aud2_cryovolcano.wav d_aud3_planetvoice.wav
 ```
 
-`argv[1]` selects the subject (`aud1`/`aud2`); `argv[2]` overrides the output
-path (default `d_aud1.wav` / `d_aud2.wav`).
+`argv[1]` selects the subject (`aud1`/`aud2`/`aud3`); `argv[2]` overrides the
+output path (default `d_aud1.wav` / `d_aud2.wav` / `d_aud3.wav`).
 
 ## Measured bars (2026-09-22, `bars.py`)
 
-| Bar | Threshold | D-AUD-1 (VESPERA) | D-AUD-2 (CRYOVOLCANO) |
-|---|---|---|---|
-| A-DUR | ≥20 s, 44.1 kHz, mono, 16-bit | 21.000 s — PASS | 21.000 s — PASS |
-| A-EVOLVE | centroid std ≥400 Hz | 2040.2 Hz — PASS | 1717.1 Hz — PASS |
-| A-SPEC | ≥2% energy above 8 kHz | 23.89% — PASS | 22.71% — PASS |
-| A-NOHARM | ≥30% frames flatness >0.30 | 57.14% — PASS | 33.33% — PASS |
-| A-DET | two clean reruns byte-identical | PASS | PASS |
+| Bar | Threshold | D-AUD-1 (VESPERA) | D-AUD-2 (CRYOVOLCANO) | D-AUD-3 (PLANETVOICE) |
+|---|---|---|---|---|
+| A-DUR | ≥20 s, 44.1 kHz, mono, 16-bit | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS |
+| A-EVOLVE | centroid std ≥400 Hz | 2040.2 Hz — PASS | 1717.1 Hz — PASS | 2755.6 Hz — PASS |
+| A-SPEC | ≥2% energy above 8 kHz | 23.89% — PASS | 22.71% — PASS | 10.79% — PASS |
+| A-NOHARM | ≥30% frames flatness >0.30 | 57.14% — PASS | 33.33% — PASS | 33.33% — PASS |
+| A-DET | two clean reruns byte-identical | PASS | PASS | PASS |
 
 SHA-256:
 - `d_aud1_vespera.wav`: `0a07a35d4c6b319ae0b7b3a62ecac92e083fa317e2c9dde2ca0327a065ffbbd6`
 - `d_aud2_cryovolcano.wav`: `29126caeebe26dc7553ccbe9cba03d4a7518d28b5514c8d835ab199853628a3e`
+- `d_aud3_planetvoice.wav`: `7728fbee2d00ec0d1f791c379dd0430b37aae86fa86e00bba25f90fe42d0612c`
 
 ## Honest limitations
 
@@ -91,5 +112,6 @@ SHA-256:
 
 - `synth.zag` — the synthesizer (pure Zag)
 - `bars.py` — verification-only analyzer (numpy; never generates audio)
-- `d_aud1_vespera.wav`, `d_aud2_cryovolcano.wav` — deliverables
+- `d_aud1_vespera.wav`, `d_aud2_cryovolcano.wav`, `d_aud3_planetvoice.wav` — deliverables
 - `README.md` — this file
+- `PLANETVOICE.md` — the imagined world behind D-AUD-3
