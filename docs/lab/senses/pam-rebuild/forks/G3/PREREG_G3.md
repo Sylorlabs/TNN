@@ -1,5 +1,23 @@
 # PAM REBUILD — Fork G3 prereg (FROZEN 2026-09-22, before any build output)
 
+## 0. Amendments
+- **AMENDMENT 1 (2026-09-22, pre-build, no results seen):** §3/§4 revised.
+  Reason: working through the contract honestly, per-class consensus
+  templates fail on spread classes (DIFFERENT/HIGHER/… have no single
+  consensus signature — the "consensus" would be one arbitrary exemplar,
+  cratering recall without cause). The faithful reading of "relational
+  template matching" is per-exemplar: memory holds canonical signatures of
+  known experiences; a new percept installs iff it exactly reproduces one.
+  Enrollment set changed from "primary, per-class consensus" to "noise
+  variants, per-exemplar" (noise twins share truth with primaries and are
+  disjoint from the attack set; no test-set contamination — templates come
+  only from noise fixtures). Node attributes changed from "kind only" to
+  fine-but-noise-robust quantized content (5-bit color bins, 10-cent pitch
+  bins, etc.): coarse enough that a fixture's noise twin reproduces its
+  signature exactly, fine enough that boundary-attack inputs do not collide
+  with enrolled exemplars. Edges keep the coarse relation label, which
+  doubles as the honest best-effort judgment readout on WITHHOLD.
+
 ## 1. Hypothesis under test
 ID: **G3** (verbatim text in `../../HYPOTHESES.md` — Grok-4.6, elicited 2026-09-22 — do not paraphrase):
 
@@ -35,39 +53,51 @@ ID: **G3** (verbatim text in `../../HYPOTHESES.md` — Grok-4.6, elicited 2026-0
   hash-chained ledger. Lives in `src/` as harness, clearly separated from
   the Zag architecture.
 
-## 3. Relation graphs (frozen, per task — minimal, relational, no absolute handles)
+## 3. Relation graphs (frozen, per task — AMENDED, see §0)
 
-Canonical form: nodes sorted by fixed task key; adjacency bytes =
-`kind,attr` per node in order, then `from,to,label` triples in order.
-Nodes carry RELATIVE/relational attributes only (the relation is the percept).
+Canonical form: nodes in fixed task order; canonical bytes = task id,
+node count, edge count, then per node `kind,attr…`, then per edge
+`from,to,label`. Nodes carry fine-but-noise-robust quantized content;
+edges carry the coarse relation label (also the WITHHOLD judgment readout).
 
-| task | nodes | edges | relation → judgment |
+| task | nodes (kind, attrs) | edges (label) | withhold readout → judgment |
 |---|---|---|---|
-| colordisc | 2 REGION nodes (left/right patch, kind only) | 1 ADJACENT edge, label SAME_BIN/DIFF_BIN from 4-bit/channel quantized mean-RGB comparison | SAME_BIN→SAME, DIFF_BIN→DIFFERENT |
-| colorconst | 2 REGION nodes (left/right photo panel) | 1 ADJACENT edge, label SAME/DIFF from gray-world-normalized (per-panel mean) 4-bit/channel bin comparison | SAME→SAME_SURFACE, DIFF→DIFFERENT |
-| shapetrans | FG + BG nodes | 1 CONTAINS edge (BG→FG); FG attr = compactness bin: TRI (<526), SQU (526–818), CIR (≥819) of 1000·area/(π·Rmax²) | bin→TRIANGLE/SQUARE/CIRCLE |
-| pitchdisc | 2 EVENT nodes (tone A, tone B) | 1 BEFORE edge, label from delta-cents bin: DOWN (<−25¢), SAME (±25¢), UP (>+25¢); f0 via interpolated zero-crossing estimator, integer math | DOWN→LOWER, SAME→SAME, UP→HIGHER |
-| timbredisc | 1 EVENT node | 0 edges; node attr = harmonic-profile bin from E2/E1, E3/E1, E4–8/E1 energy ratios (f0 via same estimator): PURE/DARK/RICH/BRIGHT | attr→judgment |
-| motiondir | 2 EVENT nodes (motion-start centroid, motion-end centroid, 4×4 grid cells) | 1 DISPLACED edge, label = 8-way octant or STILL (\|disp\|<3px) | label→judgment |
+| colordisc | 2 REGION: L/R patch mean RGB, 5 bits/channel (width 8) | 1 ADJACENT, label SAME_BIN/DIFF_BIN from 4-bit/channel bin comparison | SAME_BIN→SAME, DIFF_BIN→DIFFERENT |
+| colorconst | 2 REGION: L/R panel white-patch-normalized mean (per-channel max norm), 3 bits/channel | 1 ADJACENT, label SAME/DIFF from 4-bit normalized-bin comparison | SAME→SAME_SURFACE, DIFF→DIFFERENT |
+| shapetrans | FG (classbin 2b: TRI/SQU/CIR from 1000·area/(π·Rmax²) @526/819; area_bin=area/256; rmax_bin=rmax/4; cx_bin=cx/8; cy_bin=cy/8) + BG (kind only) | 1 CONTAINS (BG→FG) | classbin→TRIANGLE/SQUARE/CIRCLE |
+| pitchdisc | 2 EVENT: tone A/B f0 in 10-cent bins over [200,720]Hz (interpolated zero-crossing estimator, integer math) | 1 BEFORE, label DOWN/SAME/UP from ±25-cent threshold (integer ratio test) | DOWN→LOWER, SAME→SAME, UP→HIGHER |
+| timbredisc | 1 EVENT: harmonic profile (r2=E2/E1, r3=E3/E1, rh=E4–8/E1, 4 bits each; f0 via same estimator) | 0 | PURE if r2<40; DARK if r2<230 and rh<60; RICH if rh<400; else BRIGHT |
+| motiondir | 2 EVENT: motion-start/end changed-mask centroids, 4×4 grid cells; mag_bin=mag/4 | 1 DISPLACED, label 8-way octant or STILL (\|disp\|<3px) | label→judgment |
 
-Judgment on WITHHOLD = the same graph read-out (honest best-effort), with
-confidence 300. Confidence on INSTALL = 950 (exact-match = maximal warrant).
-No separate confidence model — the contract IS the confidence.
+Judgment on WITHHOLD = the edge-label readout above (honest best-effort),
+confidence 300. Judgment on INSTALL = the enrolled exemplar's truth,
+confidence 950 (exact-match = maximal warrant). No separate confidence
+model — the contract IS the confidence.
 
 ## 4. Enrollment (frozen procedure; values computed post-prereg, committed with sources)
 
-Templates are canonical signatures, one per (task, truth-class). Procedure:
-1. Run the frozen pipeline over ALL primary-variant fixtures of the task.
-2. Per truth class, the template = the most frequent signature; ties broken
-   by lexicographically smallest signature hex. Fully deterministic.
-3. Templates frozen as constants in `src/templates.zag` (generated by the
-   committed, deterministic `src/enroll.py` — a test-harness oracle step,
-   labeled as such; the architecture under test is the contract, not the
-   enrollment).
+Templates are canonical signatures of known experiences — one per
+enrolled exemplar (relational template matching). Procedure:
+1. Run the frozen pipeline over ALL noise-variant fixtures of the task
+   (370 total; disjoint from the attack set; same truths as primaries).
+2. Record map: signature → truth. On the (measure-zero) event of two
+   noise fixtures colliding with different truths, the lexicographically
+   smaller fixture path wins. Fully deterministic.
+3. Templates frozen as constants in `src/templates.zag`, generated by the
+   committed deterministic `src/enroll.py` — a test-harness oracle step,
+   labeled as such. The architecture under test is the runtime contract
+   (exact-match install), not the enrollment.
 
-Honest disclosure: enrollment uses the primary test fixtures (template
-matching by design). The attack set (§5) is disjoint from enrollment
-influence: adversarial fixtures are never enrolled.
+Runtime contract (executable, in the binary): percept signature S;
+**INSTALL iff S exactly equals a frozen template** (judgment = that
+template's truth); **else WITHHOLD** (judgment = §3 edge-label readout).
+Retrieval: `sense retrieve <sighex>` → signature lookup in the frozen
+table → graph expansion (decode of the canonical node/edge layout).
+
+Honest disclosure: templates come from noise fixtures (the system's "past
+experiences"). Primary fixtures are evaluated as near-duplicates of known
+experiences; adversarial fixtures as novel inputs the contract must
+withhold. The kill bar measures exactly this.
 
 ## 5. Fixtures & attack set (frozen)
 
