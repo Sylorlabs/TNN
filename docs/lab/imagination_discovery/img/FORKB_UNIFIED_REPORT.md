@@ -86,3 +86,18 @@ crew — separate fresh judges follow per protocol. Sol/Grok-4.7 opinion
 gathering is handled elsewhere. The moon crescent is now legible and
 honest; whether the whole image reads as imagined is for the blind
 gate to decide.
+
+## Trace-integrity corrections (2026-09-22, Test 4)
+
+Per TRACE_INTEGRITY_RESULT.md (10/13 bars hold), three T2/T9 claims in
+the trace above are STRUCK from the architecture evidence and one is
+qualified. The mechanisms stand; the claims were wrong:
+
+- T2 "sun's disc IN the frame" — false (ndcx = −1.29, disc out of
+  frame; only the glow is in-frame).
+- T9 "near rubble sharpest in frame" — false as stated (massif
+  2.73 > foreground 2.32); D-SHARP (2.759 ≥ 1.20) still holds.
+- T2 "faint stars near zenith only" — the "only" is false (6,845
+  star-like points elsewhere in the sky).
+- T3/T13 "~19% lit" — qualified: 19.3% geometrically lit, thin dim
+  crescent, not 19% bright pixels.

@@ -191,3 +191,30 @@ of the composition is untouched.
 - `r8b_alien.zag` — the single unified trace (source)
 - `r8b_alien_1024.bmp` — canonical 1024² output (pure-Zag BMP)
 - `r8b_alien_1024.png` — preview of the same
+
+## Trace-integrity corrections (2026-09-22, Test 4)
+
+The trace-integrity audit (TRACE_INTEGRITY_RESULT.md, verifier
+`~/workspace/stall_sweep/ti_final.py`, 10/13 bars hold) struck three
+quantitative claims. The mechanisms stand; the claims about them were
+wrong. Corrections:
+
+1. **T2 "sun's disc IN the frame" — STRUCK.** The camera projection of
+   the sun vector gives ndcx = −1.29 (|ndcx| > 1): the disc is 29% of a
+   half-width past the left edge, OUT of frame. Only the sun's glow is
+   in-frame. The "honesty anchor" as stated does not exist. Corrected:
+   the sun's glow is in-frame; the disc itself sits just out of frame.
+2. **T9 "near rubble sharpest in frame" — STRUCK (literal reading).**
+   Mean abs gradient: foreground third 2.32, middle third 2.73, sky
+   2.20. The massif (middle) out-resolves the foreground. The D-SHARP
+   bar (object vs its own background, ratio 2.759 ≥ 1.20) still holds;
+   the frame-global superlative does not.
+3. **T2 "faint stars near zenith only" — STRUCK ("only").** Star-like
+   point sources: 390 in the zenith band, 6,845 elsewhere in the sky.
+   Faint points exist; they are not confined to the zenith.
+4. **T3/T13 "~19% lit" — QUALIFIED.** True as phase geometry (52.1°
+   elongation → 19.3% geometrically lit) and the crescent is genuinely
+   visible as a thin amber arc on the sunward limb. But it is NOT 19%
+   bright pixels: the crescent is dimmer than the sky across most of
+   its arc. Read as "19% geometrically lit; thin dim crescent", not
+   "bold crescent".
