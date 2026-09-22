@@ -32,7 +32,48 @@
 
 **Metric correction (honest):** raw H-symmetry is confounded by vertical gradients (any sunset-over-water scores high). The binding metric is now gradient-detrended symmetry; PREREG bar updated to <0.30 detrended. f3g5's raw 0.929 → detrended -0.080: no mirror tell, just a strong gradient.
 
-## Known limits (not fixed tonight)
+## V3 red-team pass (gpt-5.6-sol via UnoRouter, 2026-09-22 ~07:00 UTC)
+
+Two fresh critiques (image set + video) after the grok-4.7 provider hard stop.
+All HIGH/MEDIUM tells were fixed in the Zag sources; fixes verified by re-render.
+
+**Image tells closed:**
+| Image | Tell (severity) | Fix applied |
+|---|---|---|
+| G6 signal garden | HIGH — six bars read as enumerated palette request / procedural UI motif | widths varied 20-64px, green occludes amber, teal desaturated into ground, one glow removed |
+| G4 harbor lights | HIGH — postcard template, algorithmic light scatter | 5→4 lights, one occluded by dark shape, only one reflection connects; second became a broken offset glint |
+| G2 greenhouse | HIGH — sparse symbolic cues, geometric mullions | middle mullion broken out of alignment + faded into field, faint cool secondary glow added |
+| G1 ember coast | MED — too-legible fire→reflection correspondence | main reflection widened + interrupted by dark water band, second streak shortened and offset laterally |
+| G3 paper storm | MED — compositionally "solved" accent | band B tapered to a stub at its end, red blotch moved onto band A's edge (partially absorbed) |
+| G5 clay field | LOW — empty-by-default minimalism | three low-contrast tonal blotches crossing dome and shadow (material behavior) |
+
+**Video tells closed:**
+| Tell (severity) | Fix applied |
+|---|---|
+| HIGH — linear interpolation reads as crossfade/ghosting | `f3_vidfield_g`: per-cell ±2/8 lead/lag (deterministic), endpoints still exact |
+| HIGH — 8fps stepping | 12fps / 36 frames (buffer 25.2MB < 33MB slice limit) |
+| HIGH — independent per-frame grain = digital shimmer | temporally-correlated grain: persistent + changing components |
+| MED — uniform noise = post-process filter look | monochromatic grain, amplitude ∝ darkness (film-like, 1.5x shadows → 0.5x highlights) |
+| MED — keyframe plateau / exact keyframe hit | keys spread over all 36 frames (pos8 = fr·24/35), no hold; offsets keep interior organic |
+
+**Caught during v3 implementation (self-review):**
+- `f3_rect`'s last param is a *pixel feather radius* — passed 350-600 on three occlusion/glint rects, creating giant blobs. Fixed to 14-24.
+- Diagonal `f3_band`s bead on the 24-cell grid at sub-cell widths; widened g3's bands (60→96, 34→80) for continuous ink.
+- New-frame-count bug: chunk index tables were hardcoded 192 bytes (24 frames); parameterized to NF·8.
+
+## Final measured metrics (v6 images)
+
+| image | unique colors | raw H-sym | detrended H-sym | bar |
+|---|---|---|---|---|
+| f3g1 | 16,768 | 0.364 | -0.272 | PASS |
+| f3g2 | 12,614 | 0.197 | -0.029 | PASS |
+| f3g3 | 6,391 | -0.009 | -0.146 | PASS |
+| f3g4 | 8,498 | 0.331 | -0.040 | PASS |
+| f3g5 | 3,500 | 0.706* | -0.087 | PASS |
+| f3g6 | 15,076 | 0.012 | -0.217 | PASS |
+
+\* raw confounded by vertical gradient; binding metric is detrended (< 0.30).
+- Video: true motion-advection morph (vs per-cell timing offsets) and audio-visual coupling (filter swell tied to visual transitions) are deferred.
 - Content detail still bounded by the 24x24 field grid (bilinear smooth). A 48x48 grid refactor was scoped: ~40 touch sites, deferred as follow-up (logged).
 - Video keyframe content unchanged (same 4 imagined keys); only fidelity upgraded.
 - Audio substrate still sine-LUT (separate track owns the replacement).
