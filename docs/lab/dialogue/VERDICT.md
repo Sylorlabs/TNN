@@ -127,3 +127,31 @@ It resolves follow-ups, revises on correction (never repeats), switches
 referents, handles weird styles (96.7%), stacks topics, catches
 contradictions, and — crucially — **composes novel answers from multi-turn
 state**. It understands what's happening; it does not merely repeat.
+
+## Addendum — WE-09 resolved (morphology crew, 2026-09-21)
+
+The single miss (WE-09 turn 1, `i'm curious about the birth year of the guy
+who wrote the martian`) is fixed. Full battery now scores **370/370**
+(WEIRD 30/30), 5/5 byte-identical (digest
+`35aaae8ac1bbf764d1f710403a9302ad1f4f9b5327c9b13793cd90299834474b`),
+zero regressions. Full report: `docs/lab/dialogue/morphology/`.
+
+**Correction to this verdict's root cause:** "the keyword core cannot bridge
+'birth year' → 'born'" was true but incomplete. A byte-exact pipeline
+mirror proved the bridge alone leaves the WROTE fact winning 2/12 vs the
+BORN fact's 1/12 — and tie-breaks to the wrong person. WE-09 was a
+morphology gap stacked on a composition gap (question focus vs
+relative-clause referent under Jaccard).
+
+**The repair (two parts, `dialogue.zag` +75 lines):**
+1. `irregular_norm`: 16 irregular inflections → lemma (birth/born→bear,
+   won→win, built→build, taught→teach, ran→run, …), applied symmetrically
+   in `proc_token` after the frozen stemmer.
+2. A `birth year of <person-desc>` composition branch (last in
+   `do_compose`): resolves the person named, or via `author_of(work)` for
+   `wrote <work>` relative clauses, and emits their born-fact verbatim.
+
+**Reverted:** bridging wrote/written/writing caused 37 regressions by
+collapsing the KB's load-bearing active/passive distinction — removed,
+documented as boundary probe C04. Derivational (high/tall) and synonym
+(penned/wrote) gaps characterized as out of scope.
