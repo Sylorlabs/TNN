@@ -160,26 +160,39 @@ cd ~/workspace/tnn-lab/imagination_discovery/aud
 ./synth aud1 d_aud1_vespera.wav   # D-AUD-1
 ./synth aud2 d_aud2_cryovolcano.wav  # D-AUD-2
 ./synth aud3 d_aud3_planetvoice.wav  # D-AUD-3
+./synth aud3v2 d_aud3_planetvoice_v2.wav  # D-AUD-3 v2 (A-NATIVE cleanup)
 ./synth aud4 d_aud4_inspired.wav  # D-AUD-4
-python3 bars.py d_aud1_vespera.wav d_aud2_cryovolcano.wav d_aud3_planetvoice.wav d_aud4_inspired.wav
-python3 native_check.py d_aud4_inspired.wav  # A-NATIVE (D-AUD-4 only)
+python3 bars.py d_aud1_vespera.wav d_aud2_cryovolcano.wav d_aud3_planetvoice.wav d_aud3_planetvoice_v2.wav d_aud4_inspired.wav
+python3 native_check.py d_aud1_vespera.wav d_aud2_cryovolcano.wav d_aud3_planetvoice.wav d_aud3_planetvoice_v2.wav d_aud4_inspired.wav  # A-NATIVE
 ```
 
-`argv[1]` selects the subject (`aud1`/`aud2`/`aud3`/`aud4`); `argv[2]`
+`argv[1]` selects the subject (`aud1`/`aud2`/`aud3`/`aud3v2`/`aud4`); `argv[2]`
 overrides the output path (default `d_aud1.wav` / `d_aud2.wav` /
-`d_aud3.wav` / `d_aud4.wav`).
+`d_aud3.wav` / `d_aud3_planetvoice_v2.wav` / `d_aud4.wav`).
 
 ## Measured bars (2026-09-22, `bars.py` + `native_check.py`)
 
-| Bar | Threshold | D-AUD-1 (VESPERA) | D-AUD-2 (CRYOVOLCANO) | D-AUD-3 (PLANETVOICE) | D-AUD-4 (INSPIRED) |
-|---|---|---|---|---|---|
-| A-DUR | ≥20 s, 44.1 kHz, mono, 16-bit | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS |
-| A-EVOLVE | centroid std ≥400 Hz | 2040.2 Hz — PASS | 1717.1 Hz — PASS | 2755.6 Hz — PASS | 1208.5 Hz — PASS |
-| A-SPEC | ≥2% energy above 8 kHz | 23.89% — PASS | 22.71% — PASS | 10.79% — PASS | 2.70% — PASS (transients only, no hiss) |
-| A-NOHARM | ≥30% frames flatness >0.30 | 57.14% — PASS | 33.33% — PASS | 33.33% — PASS | **0.00% — FAIL, honestly held** |
-| A-NATIVE | native field-recording quality | — (predates bar) | — (predates bar) | — (predates bar) | PASS (measured; see INSPIRED.md) |
-| A-DET | two clean reruns byte-identical | PASS | PASS | PASS | PASS |
+| Bar | Threshold | D-AUD-1 (VESPERA) | D-AUD-2 (CRYOVOLCANO) | D-AUD-3 (PLANETVOICE) | D-AUD-3 v2 (cleanup) | D-AUD-4 (INSPIRED) |
+|---|---|---|---|---|---|---|
+| A-DUR | ≥20 s, 44.1 kHz, mono, 16-bit | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS | 21.000 s — PASS |
+| A-EVOLVE | centroid std ≥400 Hz | 2040.2 Hz — PASS | 1717.1 Hz — PASS | 2755.6 Hz — PASS | 297.8 Hz — **FAIL, honestly held** | 1208.5 Hz — PASS |
+| A-SPEC | ≥2% energy above 8 kHz | 23.89% — PASS | 22.71% — PASS | 10.79% — PASS | 0.34% — **FAIL, honestly held** | 2.70% — PASS (transients only, no hiss) |
+| A-NOHARM | ≥30% frames flatness >0.30 | 57.14% — PASS | 33.33% — PASS | 33.33% — PASS | 0.00% — **FAIL, honestly held** | **0.00% — FAIL, honestly held** |
+| A-NATIVE | native field-recording quality (`native_check.py`) | FAIL (quiet-HF 0.558, ZCR 0.323) | FAIL (quiet-HF 0.431, ZCR 0.297) | FAIL (quiet-HF 0.577, ZCR 0.266) | **PASS** (quiet-HF 0.013, ZCR 0.055, floor −53.2 dBFS) | PASS (measured; see INSPIRED.md) |
+| A-DET | two clean reruns byte-identical | PASS | PASS | PASS | PASS | PASS |
 
+**The v2 bar tension, stated plainly:** D-AUD-3 v2 fails A-EVOLVE,
+A-SPEC, and A-NOHARM. This is not a worse piece — it is what those bars
+look like with the hiss removed. Measured root cause: in v1 the
+full-span white-noise bed contributed roughly 95% of the mix energy
+(centroid mean 4097 Hz vs v2's 715 Hz; quiet moments 57.7% HF hiss vs
+v2's 1.3%). A-EVOLVE's "evolution" was the bed's LFO breathing, A-SPEC's
+"spectrum" was the bed, A-NOHARM's "flatness" was white noise by
+definition. Worse, A-SPEC's HF demand contradicts the world's own physics
+(PLANETVOICE.md: argon kills high frequencies — "a world heard through a
+subwoofer"). The bars' intents are sound; their thresholds were
+calibrated on hiss-gamed audio and need recalibration on clean renders.
+That call belongs to the lead — frozen bars change only on his word.
 A-NOHARM on D-AUD-4: the bar was previously passed by white-noise hiss
 beds. Real Mars wind scores 0%, real ice crackling scores 0% on it. Per
 the lead's standing rule the bar is reported, not gamed; ears outrank bars.
@@ -188,15 +201,20 @@ SHA-256:
 - `d_aud1_vespera.wav`: `0a07a35d4c6b319ae0b7b3a62ecac92e083fa317e2c9dde2ca0327a065ffbbd6`
 - `d_aud2_cryovolcano.wav`: `29126caeebe26dc7553ccbe9cba03d4a7518d28b5514c8d835ab199853628a3e`
 - `d_aud3_planetvoice.wav`: `7728fbee2d00ec0d1f791c379dd0430b37aae86fa86e00bba25f90fe42d0612c`
+- `d_aud3_planetvoice_v2.wav`: `5d4f1d85b1db0f46e20178d3af00d71d571502ca882b1f27e59c068aae683f85`
 - `d_aud4_inspired.wav`: `865b02ecabbf595d9b1986f2d8e14deef7e4c47e097b5c6dc873b73b65640416`
 
 ## Honest limitations
 
 - No blind listening was performed by the builder. The lead's ears are the
-  final judge; mechanical bars are necessary, not sufficient.
-- D-AUD-1–3: the white-noise beds are prominent (they carry the flatness
-  bar). The mixes are intentionally airy/hissy rather than dry. D-AUD-4
-  deletes both hiss beds outright (A-NATIVE) and fails A-NOHARM honestly.
+  final judge; mechanical bars are necessary, not sufficient. The lead
+  already ruled on D-AUD-3 v1: "shitty mic" — hence v2.
+- D-AUD-1, D-AUD-2, D-AUD-3 v1: the white-noise beds are prominent (they
+  carry the flatness bar). The mixes are intentionally airy/hissy rather
+  than dry — all three FAIL the A-NATIVE bar. D-AUD-3 v2 and D-AUD-4
+  delete the hiss beds outright and pass A-NATIVE; both fail A-NOHARM
+  honestly, and v2 additionally fails A-EVOLVE/A-SPEC honestly (see the
+  bar-tension note above — those thresholds were calibrated on hiss).
 - Resonator gains were set empirically to avoid blowup (R=0.99 gives ~27×
   resonant gain); levels are tuned by measurement, not by ear.
 - `bars.py` flatness uses a 1e-30 floor; deep spectral valleys from the
@@ -207,7 +225,7 @@ SHA-256:
 - `synth.zag` — the synthesizer (pure Zag)
 - `bars.py` — verification-only analyzer (numpy; never generates audio)
 - `native_check.py` — A-NATIVE verifier (numpy; never generates audio)
-- `d_aud1_vespera.wav`, `d_aud2_cryovolcano.wav`, `d_aud3_planetvoice.wav`, `d_aud4_inspired.wav` — deliverables
+- `d_aud1_vespera.wav`, `d_aud2_cryovolcano.wav`, `d_aud3_planetvoice.wav`, `d_aud3_planetvoice_v2.wav`, `d_aud4_inspired.wav` — deliverables
 - `README.md` — this file
 - `PLANETVOICE.md` — the imagined world behind D-AUD-3
 - `INSPIRED.md` — the inspiration lineage behind D-AUD-4

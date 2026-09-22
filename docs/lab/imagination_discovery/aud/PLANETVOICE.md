@@ -94,9 +94,30 @@ deliverables after the `render_geyser` resonance-parameter refactor
   deliverable source. Rebuild: `znc synth.zag --no-zagd --no-analyze
   --no-foreground-cache -o synth3`, then `./synth3 aud3 d_aud3_planetvoice.wav`.
 
+## v2 cleanup pass (2026-09-22, A-NATIVE)
+
+The lead listened to v1 and ruled it sounded "like it was from a shitty
+mic" — so the same world was re-rendered clean as
+`d_aud3_planetvoice_v2.wav` (`score_aud3_v2`, subject `aud3v2`;
+`score_aud3` untouched, v1 re-renders byte-identical). Same 10 elements,
+same timings, same story; only the capture chain changed:
+
+- Deleted the full-span white-noise bed (the static).
+- Air bed 0.40 → 0.06; new glass-sand sizzle (~150 sparse
+  micro-transients) for honest HF life.
+- Ice-crack/vent transients got ≥1.5 ms smooth attacks (no digital edges).
+- Ridge-wind/gust resonators broadened (R 0.96→0.90, 0.97→0.94).
+
+Measured: quiet moments went from 57.7% HF hiss to 1.3%; noise floor
+−45.5 → −53.2 dBFS; ZCR 0.266 → 0.055; A-NATIVE PASS. Honestly reported:
+v2 fails A-EVOLVE/A-SPEC/A-NOHARM — those bars were calibrated on the
+hiss (see README's bar-tension note). The world didn't change; the mic
+got cleaned.
+
 ## Files
 
-- `d_aud3_planetvoice.wav` — the deliverable (21 s, 44.1 kHz, mono, 16-bit)
+- `d_aud3_planetvoice.wav` — the v1 deliverable (21 s, 44.1 kHz, mono, 16-bit)
+- `d_aud3_planetvoice_v2.wav` — the A-NATIVE cleanup render (same format)
 - `synth.zag` — generator (adds `render_chorus` + `score_aud3`; `render_geyser`
   gained a resonance parameter, aud1/aud2 unaffected)
 - `PLANETVOICE.md` — this file
