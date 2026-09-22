@@ -185,9 +185,9 @@ Any change to this prereg after the commit SHA is recorded requires a
 dated amendment with rationale. The trial MUST NOT start until the prereg
 commit SHA is recorded below.
 
-**Prereg commit SHA:** (to be filled after `git commit`)
-**KB SHA-256:** (to be filled from ledger header)
-**Audit result:** (to be filled: `audit_forbidden.py` exit code)
+**Prereg commit SHA:** 6631774678c2242540b7f44362889302ff1b63f1
+**KB SHA-256:** 6d26878a3c9a7e1c3c798429bf3ef28a71a75823322d50926263a4cfe4f63d3c
+**Audit result:** audit_forbidden.py exit 0 (clean)
 
 ---
 
