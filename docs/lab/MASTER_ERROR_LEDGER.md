@@ -123,6 +123,13 @@ deliberative logic.
 | **`patch_brace` defect** (bug-blindness): writes its re-emitted copy into `cx` even when returning 0; the fallback then DOUBLES the program (measured 148→295 bytes on mislabeled-PARSE input); never fires on the T3 battery | Measured latent defect. Must fix (§6) | `coding/bug-blindness/RESULTS-Q3.md`, verdict `a978fdc90638` | 2026-09-22 |
 | **Write-family morphology patch** (dialogue): bridging wrote/written/writing caused 37 regressions by collapsing the KB's active/passive distinction | Measured and REVERTED. Table ships without it; characterized boundary (high/tall, penned/wrote remain) | `dialogue/morphology/VERDICT.md`, `41c8aa6ea898` | 2026-09-22 |
 | Grok's 104 wrong-values (Sol-vs-Grok): no subject gate (32/48 distractor), no polarity gate in fallback (negation 24/24, hedge 24/24 confabulations), coref-resolved entities lex-invisible (multi 20/24), install-order ties (typo 4/48) → SG-WRONG 0.2407, failed the frozen ≤0.05 gate | MEASURED. Result: SCENARIO-FIT, no champion; frozen hybrid inherited the errors (did not win). Follow-up ordered: Grok-proposes→Sol-verifies (§6) | `prose-learning/sol-vs-grok/VERDICT.md`, `e18a2ca13589` | 2026-09-22 |
+| **B-T1 re-attack** (GROK47 overnight): the `_8`/code 0.3276 "non-zero" cell is **100% spurious XOR-collision relocations** (genuine=0 of 40 sampled vocab entries; genuine relocation mathematically impossible for |X|≥7). Perturbed-leg annihilator pinned at exactly L=7 (pert=0.0 for L∈{8,16,64}; L=6 survives 0.8789). H2 (empty-vocab zeroing) sustained; H3 (bytes competitive) refuted by its own kill bar (fair handling: _64 0.9961 > _16 0.9778 > raw_micro 0.7884 dead last 9/9) | Binding B-T1 FAIL stands (bars bind), but FAIL is **artifact-driven**, not unit-driven — materially strengthens the B-T1 probe-amendment case (§6) | `docs/lab/GROK47_OVERNIGHT/representation/VERDICT_SHEET.md` | 2026-09-22 |
+| **Sine-LUT mandate attack SUSTAINED** (GROK47 overnight): literal 256-entry table in both field audio paths; the program's reinterpretation ("basis oscillators remain sines") is honest in docs but does not satisfy the literal order; emit.zag's Taylor sine proves a no-table method exists | Sustained. Phase-3 head-to-head proposed (preregistered, both voices) (§6) | `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` | 2026-09-22 |
+| **Info-source attack #2 SUSTAINED as headline-reframing** (GROK47 overnight): the R0→R2 comparison confounds *information* with *gating policy*; worker's GK2-8 independently proves the sense has zero truth discrimination | Sustained. Follow-up IS-R3 arm proposed: R0 install policy + search access (needs crew prereg before build) (§6) | `docs/lab/GROK47_OVERNIGHT/senses-integrity/VERDICT_SHEET.md` | 2026-09-22 |
+| **TT1 common-mode spoof (H5b)** (GROK47 overnight): TT1 otherwise 15/15 PASSED, byte-identical reruns, RNG clean — but has **no structural defense** against common-mode spoof | Documented corruption boundary (§6) | `docs/lab/GROK47_OVERNIGHT/reasoning/VERDICT_SHEET.md` | 2026-09-22 |
+| **Memory R7: O3 revive dead-end** (GROK47 overnight): consolidate→condemn→revive→consolidate = 0,0,**312** — revived id permanently stuck in CANDIDATE. Probe-only Q1 repair (allow CANDIDATE incl. revived to consolidate) fixes it while all three existing guards behave identically | Defect CONFIRMED natively, byte-identical reruns. Repair is probe-only; adoption is Micah's (§6) | `docs/lab/GROK47_OVERNIGHT/memory/VERDICT_SHEET.md` | 2026-09-22 |
+| **Memory R6: P0's "fine" kill bar FAILED** (GROK47 overnight): P2 (corroborated revive) matches P0 byte-for-byte on genuine recovery and strictly dominates on adversarial resurrection; P1 pays one-observation recovery cost | Measured. P2 proposed as the revive policy (§6) | `docs/lab/GROK47_OVERNIGHT/memory/VERDICT_SHEET.md` | 2026-09-22 |
+| **Memory R2: ctx=31 hangs, ctx=32 contributes zero** (GROK47 overnight): verified timeout on ctx=31; probe-only ctx-guard wrapper ([0,30]) demonstrated; canonical `psm.zag` untouched (SHA `a17f7e75…` re-verified) | Defect confirmed. Guard adoption is Micah's (§6) | `docs/lab/GROK47_OVERNIGHT/memory/VERDICT_SHEET.md` | 2026-09-22 |
 
 ---
 
@@ -197,6 +204,41 @@ live in `redteam/bar-audit/PROPOSED_BARS.md`; the independent protocol lives in
 | Grok supplemental scrutiny | Grok timed out 3× and was excluded from the red-team panel; supplement if it recovers | Open |
 | Lab-wide init-hygiene + silent-threshold audit | Bounds-check every capped structure; fail loud, never silent (attack #7 recommendation) | Ordered, not run |
 | Bar-sensitivity audit across headline trials | Tighten bars until something trips; report margins (attack #5 recommendation) | Partially done via the bar audit; lab-wide pass still open |
+| B-T1 probe amendment | Binding FAIL stands but proven artifact-driven; re-attack materially strengthens the case | Needs Micah's signature; not enacted |
+| IS-R3 arm (R0 install policy + search access) | Proposed follow-up to the info-source headline-reframing | Needs crew prereg before build |
+| Sine-LUT phase-3 head-to-head | Taylor-sine (no-table) vs 256-entry LUT, preregistered, both voices | Proposed, not run |
+| Imagination packets: re-render + re-blind | Audio/AVI carry B1 (v2) and B1+B2 (fields) rectification/mistuning; M3f provenance labels + same-dir key; Q4 footer key + inferable mode vocab; M3f cells not factorially interpretable | Must happen before binding ratings |
+| Dialogue VERDICT re-freeze | Frozen 2026-09-22 (bc7e19…) stale: birth-year fix never rebuilt; native rebuild scores 370/370, new digest 35aaae8a… | Re-freeze at 370/370 or amend |
+| coding T3 binary vs source | `coding/src/learner.zag` now differs from frozen T3 binary (patch_brace doubling fix) | Pin old binary or re-freeze new one |
+| imagine.zag SHA256SUMS re-record | Recorded 7ea9b80b… ≠ current 949addd6… (M4 behavioral guard passes) | Re-record needed |
+| scale-up VERDICT honest-fail annotation | `scale_learner.zag:954` probes ids ∈ [0,n/4) only; params verdict carries the annotation, scale-up does not | FAIL-open fix candidate |
+| RC2 executed overnight | Was "PROPOSED, not run"; worker ran it natively: first run 8 failures (EVIDENCE_RC2_20260922T062422Z), then passing (EVIDENCE_RC2_20260922T062523Z); both preserved | Needs Micah's acknowledgment |
+| Strength rulings 3–5 + wave8 amendment | Awaiting Micah | Open |
+| Memory open questions (R3 slot-reuse invisibility; R4 non-atomic churn; R5 vacuous promotion; R6 revive-threshold scaling; R7 O3 dead-end intent) | Documented in the memory verdict sheet | Open; R6 needs its own prereg |
+| grok-4.7 credit top-up + 4.7-vs-4.6 showdown | 429 insufficient_credits ($−0.02) since 2026-09-21 23:30 PDT; sol timed out 23:46 PDT; showdown UNRUN (no corpus exists); pipeline validated, capture script ready | Top-up needs Micah; rerun showdown on recovery |
+
+---
+
+## §7 — GROK47 overnight corrections (2026-09-22)
+
+False claims, corrections, and process errors from the 2026-09-21/22 everything-everywhere loop
+(7 native sector workers; grok-4.7 down all night on 429 insufficient_credits; gpt-5.6-sol timed out
+23:46 PDT; all substantive work native or natively adjudicated).
+
+| What was claimed | What was wrong | What evidence showed | Correction | Commit / doc reference | Date |
+|---|---|---|---|---|---|
+| TNN has a "simplicity bias" (v1 imagination's limited "Google Slides" quality attributed to model preference) | Disproved: v1's quality came from the crew's chosen substrate (≤32 discrete elements, basic shapes, simple notes), not a model preference | Native emitter + field track proved bounded scene construction (QA 36/36 both modes); substrate, not bias, was the ceiling | Claim DISPROVED and recorded (was outstanding from the imagination track) | this ledger; `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` | 2026-09-22 |
+| Coordinator: grok-4.7 is "degrading" — truncating substantive completions to ~50–90 bytes | Tooling artifact, not model degradation: stock `chat.py` line 26 hard-codes `"max_tokens": 16` | Senses worker diagnosed; coordinator verified; wrapper with explicit max_tokens returns full completions | All truncated grok-4.7 outputs VOID as model-degradation evidence; use `~/workspace/grok47/senses/grokchat.py` (default 1500), never stock chat.py | `docs/lab/GROK47_OVERNIGHT/FALLBACK_LOG.md` | 2026-09-22 |
+| Imagination v2 verdict rendered (H1 vs H0) | `verify_v2.py` inoperable as shipped: seeks "D" lines, logs use "E" → crash; wrong default binary path; gen() hardcodes 4 notes vs 3+1 in dump → crash | Reran its own M1/M2 code (paths fixed only): M1 1.54×/1.26× FAIL (bar ≥2×), M2 17/24 FAIL (bar ≥18), M4 PASS → **H1 NOT SUPPORTED, H0 survives** | Fields amendment's "H1 vs H0 verdict stands independently" UNSUPPORTED (conclusion-laundering risk; sol concurred) | `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` | 2026-09-22 |
+| Imagination packets rating-ready (blind audio/video) | Stale distorted audio: v2 WAVs carry the B1 rectification bug too; field WAVs carry B1+B2 — mistuning systematically disadvantages fields vs v2 in blind audio | Native measurement of min/max/zero-crossings/DC (the "dollar tree mic" confound) | Packet audio/AVI must be RE-RENDERED before binding ratings | `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` | 2026-09-22 |
+| Imagination packets blind | M3f: per-item provenance labels + same-dir key; Q4: same-document footer key + inferable mode vocabulary; M3f cells inconsistent (audio briefs omit v1; briefs 5–6 omit v2) — not factorially interpretable | Native review of packet materials | Re-blind required before binding ratings (§6) | `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` | 2026-09-22 |
+| Dialogue VERDICT.md (frozen 2026-09-22, digest bc7e19…) current | Morphology-crew birth-year fix landed in `dialogue.zag` source but was never rebuilt | Native rebuild+rerun: 370/370 (WE-09 passes), 5/5 byte-identical, new digest 35aaae8a… | Recommend dialogue crew re-freeze verdict at 370/370 or amend | `docs/lab/GROK47_OVERNIGHT/language/VERDICT_SHEET.md` | 2026-09-22 |
+| coding/src/learner.zag matches the frozen coding-trial binary | Now differs: patch_brace doubling fix landed in source this loop | Native diff | Any re-run of frozen T3 must pin the old binary or re-freeze the new one | `docs/lab/GROK47_OVERNIGHT/language/VERDICT_SHEET.md` | 2026-09-22 |
+| imagine.zag SHA256SUMS current | Recorded hash 7ea9b80b… ≠ current 949addd6… | Native rehash; M4 behavioral guard passes | Re-record needed | `docs/lab/GROK47_OVERNIGHT/imagination/VERDICT_SHEET.md` §3 | 2026-09-22 |
+| scale-up VERDICT.md carries honest-fail coverage annotation | It does not: `scale_learner.zag:954` probes ids ∈ [0,n/4) only; the params verdict carries the annotation, scale-up lacks it | Worker cross-check vs params verdict | FAIL-open fix candidate (§6) | `docs/lab/GROK47_OVERNIGHT/representation/VERDICT_SHEET.md` | 2026-09-22 |
+| sol's t5_core review targets the standardized file | It reviewed a different (English) variant: cited line numbers past the end of the standardized file | Native re-adjudication against the actual file | Every hypothesis re-adjudicated natively; none touch frozen showdown evidence | `docs/lab/GROK47_OVERNIGHT/teacher/VERDICT_SHEET.md` §4 | 2026-09-22 |
+| Teacher worker's hand-built distractor-truth map | Wrong: against authoritative `ground_truth_notes.md`, grok-4.6's distractor used the TRUE value 11/12 (other(22) once, id 71) — matches GROK_ENGLISH_VERDICT.md | Mechanical re-verification of the 4.6 corpus | RESOLVED, closed | `docs/lab/GROK47_OVERNIGHT/teacher/VERDICT_SHEET.md` §3 | 2026-09-22 |
+| grok-4.7 available for the overnight loop | Gateway 429 `insufficient_credits` (org balance $−0.02) from 2026-09-21 23:30 PDT; gpt-5.6-sol timed out 23:46 PDT | Direct probes; worker re-probes | Fallback chain invoked; hourly re-probe cron (`grok47-recovery-probe`); fully native mode. Credit top-up needs Micah (§6) | `docs/lab/GROK47_OVERNIGHT/FALLBACK_LOG.md` | 2026-09-22 |
 
 ---
 
@@ -206,21 +248,17 @@ live in `redteam/bar-audit/PROPOSED_BARS.md`; the independent protocol lives in
 |---|---|---|
 | §1 Our false claims / corrections | 26 claim rows (62 claim groups touched in the sweep: 36 annotate, 25 restate, 1 retract; 0 measured values deleted) | All corrected in-document |
 | §2 False accusations against TNN cleared | 4 | All cleared with evidence |
-| §3 Valid red-team captures | 12 | All landed; repairs ordered where applicable |
+| §3 Valid red-team captures | 19 | All landed; repairs ordered where applicable |
 | §4 Red-team / process misses | 7 | Documented; open ones cross-referenced to §6 |
 | §5 Internal process errors | 8 | Corrected; policy changes recorded |
-| §6 Open / unresolved governance and follow-ups | 32 | Awaiting Micah's word or further testing |
-| **Total** | **89** | |
+| §6 Open / unresolved governance and follow-ups | 44 | Awaiting Micah's word or further testing |
+| §7 GROK47 overnight corrections | 12 | All recorded with evidence |
+| **Total** | **120** | |
 
-**Never corrected (as of 2026-09-22):** two items are documented but not yet amended in their
-canonical reports, and are NOT counted as corrected above:
-1. The coding trial's `CODING_REPORT.md` architecture section has not yet been amended to record
-   that `teach` was never invoked, `do_teach` is a no-op, classification lived in the Python driver,
-   and the claimed "called fns defined?" self-review check is dead code — all documented in
-   `coding/bug-blindness/VERDICT-BB.md` (`a978fdc90638`) but the original report still reads as written.
-2. Prose-v2 `VERDICT.md` §5 KB2-QUALITY (Q=−0.0570, "unbinned negative") carries no annotation about the
-   conditional INVERSE re-binning if proposed C3 is signed (flagged by Crew C, left untouched as out of mandate).
-
-Everything else in §1 was corrected in-document with dated notes. Every proposed replacement bar is
-pending Micah's signature — per the standing rule, none of the corrected documents move bars, schedules,
-metrics, gates, tests, or kill criteria without that dated amendment.
+**Never corrected (as of 2026-09-22):** none outstanding — the two items previously listed here
+are now annotated in-document with dated CORRECTION 2026-09-22 notes:
+1. `coding/CODING_REPORT.md` architecture section now carries the correction (`teach` never invoked,
+   `do_teach` a no-op, classification lived in the Python driver, self-review check dead code).
+2. Prose-v2 `VERDICT.md` KB2-QUALITY row now carries the conditional INVERSE re-binning note
+   (revisit if proposed C3 is signed).
+The disproved "simplicity bias" claim is recorded in §7 above.

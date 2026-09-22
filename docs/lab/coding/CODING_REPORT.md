@@ -17,6 +17,8 @@
   - invokes learner, writes source, compiles, runs vectors, returns compiler evidence
   - retries up to 6 iterations; makes NO coding decisions
 
+> **CORRECTION 2026-09-22** (documented in `coding/bug-blindness/VERDICT-BB.md`, `a978fdc90638`; master error ledger): the architecture description above overstates the learner. `teach` was never invoked in the trial; `do_teach` is a no-op; pattern classification lived in the Python driver, not the learner; and the claimed "called fns defined?" self-review check is dead code. Measured tier results are unaffected — only the architectural attribution is corrected.
+
 ## Tier Results (Arm A: Repair Loop, 5 reps)
 
 | Tier | N | First-attempt | Final (≤6 iters) | Notes |

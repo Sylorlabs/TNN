@@ -50,6 +50,8 @@ fact (dense phrasing coverage) the exact-key machinery is robust. v2 fails on
 
 > **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 14] The KB2-NOSILENT **PASS** above is annotated: the SUB-NEG battery contains duplicate probe strings with conflicting expects (probes 18/30 and 19/31 are identical strings, §3), so 36/36 is impossible **by construction** — the battery cannot be fully satisfied no matter what the learner does. Two expect-unknown probes (ids 18, 19) returned VALUE from live asserted keys; the bar's literal condition holds, but the PASS is the letter of the bar on a defective battery. Proposed N8 (all probe strings unique per battery) pending signature.
 
+> **CORRECTION 2026-09-22 (GROK47 overnight, Crew C flag):** the KB2-QUALITY outcome above (Q = −0.0570, "unbinned negative") carries no annotation about the **conditional INVERSE re-binning if proposed C3 is signed** — i.e., if Micah signs the C3 amendment, this cell's binning must be revisited under the inverse rule. Flagged by Crew C; left untouched here as out of mandate. Proposed C3 pending signature.
+
 ## 3. Sub-battery results (independent runs, sol-entity based)
 
 | Sub-battery | Bar | Result | Verdict |
