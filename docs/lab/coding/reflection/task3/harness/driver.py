@@ -31,7 +31,7 @@ def main():
             i += 1
     wid, arm, deliv = kw["id"], kw["arm"], kw["deliv"]
     src, wd = kw["src"], kw["workdir"]
-    checker, cmode, logf = kw.get("checker"), kw.get("cmode"), kw["log"]
+    checker, cmode, carg, logf = kw.get("checker"), kw.get("cmode"), kw.get("carg"), kw["log"]
     hdr = os.path.dirname(os.path.abspath(__file__))
     if checker and not os.path.isabs(checker):
         checker = os.path.join(hdr, checker)
@@ -65,6 +65,8 @@ def main():
     ccmd = [sys.executable, checker]
     if cmode:
         ccmd += ["--mode", cmode]
+    if carg:
+        ccmd += [carg]
     p = subprocess.run(ccmd, stdin=open(outpath, "rb"), capture_output=True,
                        cwd=os.path.abspath(wd), timeout=30)
     rec["check"] = {"rc": p.returncode,
