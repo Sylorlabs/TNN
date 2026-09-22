@@ -1,0 +1,32 @@
+"""Calibration vocabulary: VISIBLE to the implementation crews.
+Same slice structure as the scored battery; disjoint vocabulary/values."""
+CONFIG = {
+    "relations": [
+        ("cargo capacity", "freight capacity"),
+        ("crew size", "crew complement"),
+        ("hull length", "overall length"),
+        ("top speed", "maximum speed"),
+        ("launch year", "build year"),
+        ("pier number", "dock assignment"),
+        ("berth count", "mooring slots"),
+        ("draft depth", "hull draft"),
+        ("beam width", "hull breadth"),
+        ("fuel capacity", "bunker volume"),
+        ("cabin count", "stateroom number"),
+        ("anchor weight", "anchor mass"),
+    ],
+    "ent_main": ["Corvane", "Vexley", "Marrowick", "Pellisor",
+                 "Dunmore", "Kestrel", "Vanemor", "Sorrelbay"],
+    "ent_neg": ["Wraithmoor", "Nullhaven", "Vexmoor", "Duskhaven",
+                "Grimshaw", "Netherby", "Voidspar", "Dimsdale"],
+    "ent_hedge": ["Hazeport", "Mistral", "Doubtfell", "Querymere",
+                  "Perhapston", "Maybeth", "Rumorwick", "Seemly"],
+    "ent_contr": ["Clashport", "Rivalline", "Feudholm", "Strifemere",
+                  "Contendia", "Oppostad", "Versus", "Antipode"],
+    "ent_distr": ["Ghostharbor", "Nullisland", "Vaporwick", "Misthaven",
+                  "Shadowport", "Fogmere", "Echobay", "Duskline"],
+    "distr_rels": ["wingspan", "flag color", "captain name"],
+    "value_params": (20, 37, 13, 380, 1850, 150),  # V0,RMUL,EMUL,MOD,Y0,YMOD
+    "year_rel": 4,
+    "contr_delta": 17,
+}
