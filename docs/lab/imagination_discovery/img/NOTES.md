@@ -107,3 +107,90 @@ Render time (1024², lab VM): alien ~7.8 s, arch ~1.9 s.
   lava veins are subtle at 1024².
 - `disc` binary, `.zagd`/`.zag-cache` files, and debug renders are build
   artifacts and are excluded from the commit.
+
+---
+
+## Round 2 repairs (2026-09-22) — blind-gate tell fixes
+
+The round-1 images passed all mechanical bars but failed the fresh blind
+gate. A separate blind crew listed 7 tells; this round repairs each one
+structurally in `disc.zag` (source SHA
+`f3f61e1d9a19323fc4ceeb9200b18bb082541785000fe7be5c3496c5aa515b34`).
+Aesthetics were NOT self-judged — a separate blind crew re-judges.
+
+### D-IMG-1 (alien) repairs
+
+1. **PASTED PLANET** — rewritten planet renderer (`d_sky2`): a thin limb
+   haze rim plus a forward-scatter halo biased toward the shared sun side
+   (upper-left) sits between planet and sky; the cloud deck renders BEHIND
+   the planet; wispy cirrus filaments drift IN FRONT of the lower limb;
+   the back ring carries the planet's shadow bite; the ring casts a shadow
+   band onto the planet; the front ring crosses the planet's lower half
+   with its own terminator darkening. Cloud and terrain lighting both key
+   off the same upper-left sun.
+2. **FRACTAL-MOUNTAIN TILING** — terrain is now three ordered depth planes
+   (`d_edge_far/mid/near`), each with its own field scale: far = broad
+   massifs (150px ridge cells, heavy warp), mid = crags (48px cells),
+   near = scree/detail (14px cells). Per-plane aerial perspective
+   (strong blue wash on far, warm and contrasty on near), strata banding
+   on far/mid, erosion streaks on mid/near, lava flows on near.
+3. **LOWER-THIRD MUSH** — the near plane keeps full fine-octave detail
+   (no blur with distance; contrast is preserved, only color warms and
+   aerial perspective tints).
+
+### D-IMG-2 (architecture) repairs
+
+4. **ARCH SEAMS** — the cyclic over/under relation is preserved (mitered
+   quads, each beam over one neighbor and under the other), but the butt
+   look is gone: the winner's lap gets a scarf bevel (darkening within
+   10px of the cut), an end fade at the lap tip, a highlight lip along its
+   inner edge, the loser gets a soft contact shadow beside the cut, and
+   ambient occlusion grounds each inner corner.
+5. **IDENTICAL BEAM MOTTLE** — per-beam material: separate hash seeds per
+   beam, per-beam tint (warm / cool / neutral), directional weathering
+   streaks and scratch lines along each beam's axis, per-beam grain,
+   mottle, cracks, and edge wear.
+6. **FLAT SHADOW** — a 12-sample shadow cone along the light direction:
+   samples near the frame stay hard (contact), farther samples spread in a
+   widening cone, giving a contact-hardened soft shadow with
+   distance-dependent penumbra on the wall.
+7. **VOID BACKGROUND** — a full environment: night sky with stars and a
+   dim glow, rock wall with strata and vertical shading, stone floor with
+   a light pool under the frame, distance fog and horizon ambient
+   occlusion, plus vignette.
+
+### Round-2 measurements (final, 2026-09-22)
+
+| Subject | File | Size | grad(O) | grad(B) | Ratio | D-RES | D-SHARP | D-COMP |
+|---|---|---|---|---|---|---|---|---|
+| D-IMG-1 alien | `d-img-1_alien_1024.bmp` | 1024×1024 24-bit | 10.254 | 4.115 | 2.492 | PASS | PASS | PASS |
+| D-IMG-2 arch  | `d-img-2_arch_1024.bmp`  | 1024×1024 24-bit | 1.996  | 0.838 | 2.383 | PASS | PASS | PASS |
+
+Determinism (two separate clean processes, final binary, 2026-09-22):
+- alien BMP: `55b69f70…7753e` both runs — identical.
+- arch BMP: `45d8a9c9…cda2643` both runs — identical.
+
+Render time (1024², lab VM): alien ~10–11 s, arch ~6 s.
+
+### Round-2 artifact SHA-256
+
+| File | SHA-256 |
+|---|---|
+| `d-img-1_alien_1024.bmp` | `55b69f7058eee945243e6f09f448e5409febed77c8fdce6cf5e6d3923677753e` |
+| `d-img-1_alien_1024.png` | `595f0718adaf93839f582d1f5d42367f01e2e2854d44a1e9cd86debeca8a560a` |
+| `d-img-2_arch_1024.bmp`  | `45d8a9c925fbca0b48bb037a93ef42cede577dcc61ca39663e86968e6cda2643` |
+| `d-img-2_arch_1024.png`  | `bfe4b4e0093674918f2a35f5b3ced30a023cb9b91ca08d4c26acfb88dac20714` |
+| `disc.zag` | `f3f61e1d9a19323fc4ceeb9200b18bb082541785000fe7be5c3496c5aa515b34` |
+| `verify_bars.py` | `a413f6b8537aa46335b5bb829d26326f6c4c91001c488ebd70840de49d11c18f` |
+
+### Round-2 honest limitations
+
+- The blind re-judgment is a separate crew's gate; nothing here claims it
+  passed — only that the 7 listed tells were addressed structurally.
+- 2048² remains untested (prereg minimum is 1024²).
+- The architecture scene still uses `f64` for beam geometry; all texture
+  noise remains integer-hash based.
+- During round 2 a first draft of the wisps-in-front fix used the planet
+  bounding box directly and left a faint rectangular boundary in the sky;
+  caught on inspection and fixed with a radial falloff — the final images
+  carry no box edges.
