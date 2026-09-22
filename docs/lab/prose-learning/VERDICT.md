@@ -27,8 +27,10 @@ Digest (truncated) / ledger terminal hash per source are in the run logs'
 | KB-EXTRACT (≥0.99) | value-scan success on 960 train sentences | **PASS** — 1.0000 all sources, zero failures |
 | KB-PROSE-VIABLE (≥0.98 clean) | prose must reach integer baseline −2pp | **TRIPS on all four** — 0.8289 / 0.9649 / 0.8947 / 0.8772. No re-tuning was done. The prose path underperforms the integer-leg baseline by 3.5–17pp. |
 | KB-DETERMINISM | 5/5 byte-identical | **PASS** — full logs byte-identical per source; binary self-verifies (ledger recompute + double digest) |
-| KB-QUALITY | Q = mean(grok,sol) − step; ≥0.02 matters, \|Q\|<0.02 none | Q = 0.8969 − 0.8947 = **+0.0022** → **NO-DIFFERENTIATION**. The numeric-channel result reproduces in prose. |
+| KB-QUALITY | Q = mean(grok,sol) − step; ±0.05 three-bin rule (corrected; proposed C3): Q≥+0.05 matters, \|Q\|<0.05 none, Q≤−0.05 INVERSE | Q = 0.8969 − 0.8947 = **+0.0022** → **NO-DIFFERENTIATION** (\|Q\|<0.05). The numeric-channel result reproduces in prose. |
 | KB-FALSEHOOD | absorption vs integer-leg 49/49 | **12/12 on every source** — prose gives the learner no additional grip on smooth lies. |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [F-a] The KB-QUALITY band above is corrected from the prereg's ±0.02 to the **±0.05 three-bin rule** (Q≥+0.05 QUALITY-MATTERS, |Q|<0.05 NO-DIFFERENTIATION, Q≤−0.05 INVERSE): the ±0.02 band sits **below the measurement noise floor** (binomial SE(Q)≈0.024 at n=228; band edge at ~0.8 SE; a true-zero Q escapes the NO-DIFFERENTIATION bin by noise alone ~40% of the time), so the old band could not support a no-differentiation claim. Q=+0.0022 still lands NO-DIFFERENTIATION under the corrected band — outcome unchanged, footing corrected. Proposed C3 pending signature.
 
 ## Why the prose path underperforms (frozen-spec-inherent mechanisms)
 
@@ -55,8 +57,9 @@ prose maximizes ties. Wording SHAPE affects this pipeline more than model "quali
 
 ## Answers to the two mandated questions
 
-1. **Does model quality differentiate when the TNN reads words?** No — per the
-   frozen rule, |Q| = 0.0022 < 0.02. The quality hypothesis is refuted in the
+1. **Does model quality differentiate when the TNN reads words?** No —
+   |Q| = 0.0022 < 0.05 under the corrected ±0.05 three-bin rule (proposed C3;
+   see the KB-QUALITY correction note above). The quality hypothesis is refuted in the
    prose channel too, under this pipeline. (Scope: bag-of-stemmed-content-words
    retrieval; a richer comprehension architecture is a different experiment.)
 2. **Falsehood absorption, prose vs integer legs?** Identical: 12/12 in prose,

@@ -45,8 +45,10 @@ fact (dense phrasing coverage) the exact-key machinery is robust. v2 fails on
 | **KB2-VIABLE** | clean mastery **228/228 per source** | **FAIL** — grok 59/228, sol 65/228, step 75/228, muse-native 144/228. Decisive on all 4 sources. No re-tuning performed. |
 | **KB2-DET** | 5/5 byte-identical per source (championship); 3/3 (sub-batteries) | **PASS** — championship: 1 distinct md5 across 5 reps × 4 sources. Sub-batteries: 1 distinct md5 across 3 reps × 7. |
 | **KB2-QUALITY** | Q = mean(clean grok, clean sol) − clean step; ≥+0.02 matters, \|Q\|<0.02 none | **Q = −0.0570** — in **neither** preregistered bin. Reported exactly as preregistered: unbinned negative. Scores track teacher phrasing (muse-native's prose happens to key-match), not model quality. Consistent with Micah's separate abandonment of the quality hypothesis (refuted twice). |
-| **KB2-FALSEHOOD** | absorption vs v1's 12/12 — measurement | See §4. **Measurement recorded; brief's figures irreconcilable (flagged).** |
+| **KB2-FALSEHOOD** | absorption vs v1's 12/12 — measurement | See §4 (figures reconciled under frozen ABS-3; the §4 discrepancy flag is retracted per `v3/GATE0_RESOLUTION.md`). |
 | **KB2-NOSILENT** | no probe returns a value from a negated-only, hedged-only, or contradicted key | **PASS** — zero VALUE verdicts from contradicted (entity, relation) pairs on all 4 championship sources; contr sub-battery 0 VALUE verdicts; hedge 0 VALUE on hedge-only probes; neg VALUEs (ids 18, 19) came from **live asserted keys** (see §3 battery defect), never the negated value. |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 14] The KB2-NOSILENT **PASS** above is annotated: the SUB-NEG battery contains duplicate probe strings with conflicting expects (probes 18/30 and 19/31 are identical strings, §3), so 36/36 is impossible **by construction** — the battery cannot be fully satisfied no matter what the learner does. Two expect-unknown probes (ids 18, 19) returned VALUE from live asserted keys; the bar's literal condition holds, but the PASS is the letter of the bar on a defective battery. Proposed N8 (all probe strings unique per battery) pending signature.
 
 ## 3. Sub-battery results (independent runs, sol-entity based)
 
@@ -59,6 +61,8 @@ fact (dense phrasing coverage) the exact-key machinery is robust. v2 fails on
 | SUB-MULTI | ≥22/24 | **24/24** (7 derived installs fired) | **PASS** |
 | SUB-CORE | ≥22/24 | **11/24** | **FAIL** |
 | SUB-DISTR | 228/228, i.e. unchanged | **65/240** (clean correct set **identical** to championship sol: 65/228) | **FAIL** — distractors caused **zero** change on the clean 228 |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [H6] The SUB-HEDGE **PASS as written** row above is annotated: of the 12 hedged-only probes, only 7 returned HEDGED — the other 5 (ids 12, 13, 21, 22, 23) fell through to UNKNOWN via quarantine-key brittleness, i.e. the quarantine **fails to label nearly half its hedged items**. The prereg bar tests leakage only (no hedged value returned), so the PASS does not establish that the quarantine works. Proposed N7 (hedged-only probes return HEDGED on ≥10/12) pending signature.
 
 ### Miss/defect mechanisms (verified in the logs, all spec-faithful)
 
@@ -110,6 +114,8 @@ figures (closest is the third row: 10/12, 12/12, 12/12, 12/12). The numbers
 above are the mechanical truth from `runs/champ_*_rep1.log`; the brief's
 figures should not be cited.
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 13] The discrepancy flag above is RETRACTED per `v3/GATE0_RESOLUTION.md` (2026-09-22): the brief's figures reproduce exactly under the frozen ABS-3 metric (INSTALL event, attitude=asserted, correct multi-token parsing): **grok 9/12, sol/step/muse-native 11/12**. The middle table row (4, 6, 7, 5) was computed with a log-line parser that silently dropped multi-token entities — a measurement bug, not a mechanism finding.
+
 **What v2 actually does with planted falsehoods** (all verified in logs):
 
 1. **Falsehood-vs-falsehood contradiction collisions.** The two planted D
@@ -126,11 +132,17 @@ figures should not be cited.
    The lie sits live in the store but is unreachable through the probe's
    phrasing.
 4. Net: under the v1-identical probe metric, v2 absorbs **far fewer**
-   falsehoods (0–4/12 vs 12/12) — but **not** because it detects lies. It is
-   the same paraphrase brittleness: the falsehood usually can't be retrieved
-   (UNKNOWN), or two falsehoods collide (CONTRADICTION). Train-side, the
-   false values still install live in 4–7/12 cases — the store holds the lie;
-   the probe can't reach it.
+   falsehoods (0–4/12 vs 12/12) — but **not** because it detects lies, and
+   the probe metric is not the frozen absorption measure. Under the frozen
+   ABS-3 metric (false value installed as asserted, `v3/GATE0_RESOLUTION.md`),
+   v2 installs **9–11/12** falsehoods as asserted (grok 9/12, sol/step/muse-native
+   11/12) vs v1's 12/12. The probe metric measures *retrievability*; ABS-3
+   measures *installation* — the brittleness is in retrieval, not absorption.
+   It is the same paraphrase brittleness: the falsehood usually can't be
+   retrieved (UNKNOWN), or two falsehoods collide (CONTRADICTION). Train-side,
+   the lies install live in the store; the probe can't reach them.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 13] RESTATED: the "far fewer (0–4/12)" headline above used the probe metric; the frozen ABS-3 metric gives 9–11/12 vs v1's 12/12. Measurement-only bar — no pass/fail change.
 
 ## 5. Mandated answer (a) — quality differentiation retest
 
@@ -163,6 +175,8 @@ refutation, which Micah has separately acted on.
 - v2 buys genuine machinery v1 lacks — contradiction flagging, hedged-value
   quarantine, negation denial, and a working 2-step inference rule — all
   deterministic, ledger-chained, oracle-verified.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [H6] "hedged-value quarantine" in the line above must not be read as the quarantine working: 5/12 hedged-only probes were mislabeled UNKNOWN (key brittleness, §3), and the SUB-HEDGE bar tested leakage only. Proposed N7 (hedged-only probes return HEDGED on ≥10/12) pending signature.
 - v2 pays for it with paraphrase robustness: exact (entity, relation-set)
   keys turn single-exposure rephrasing from v1's 0.83–0.96 into 0.26–0.63.
   KB2-VIABLE (228/228) fails decisively on all four sources.

@@ -62,6 +62,8 @@ These answers cannot be retrieved — they require:
 **Verdict: TNN understands what's happening in the dialogue.** It does not
 merely repeat; it composes novel answers from multi-turn state.
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 10] The novelty claim above is ANNOTATED: COMPOSE-NOVEL is **self-attested** — the binary asserts the compose response is not a substring of any KB fact or prior turn and prints `COMPOSE-NOVEL=1` per its own check (PREREG.md novelty control); the independent oracle (`verify_dialogue.py`) consumes the binary's own novel flag and checks outputs against KB facts, it does **not** independently verify novelty. The "understands, doesn't merely repeat" headline therefore rests on a binary-asserted flag, not oracle-verified novelty. Proposed N14, and K17 (promote to kill bar ≥24/28 with independent oracle novelty verification), pending signature.
+
 ## The one failure: WE-09 (honest gap)
 
 **Input:** `i'm curious about the birth year of the guy who wrote the martian`  
@@ -127,6 +129,8 @@ It resolves follow-ups, revises on correction (never repeats), switches
 referents, handles weird styles (96.7%), stacks topics, catches
 contradictions, and — crucially — **composes novel answers from multi-turn
 state**. It understands what's happening; it does not merely repeat.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 10] The "composes novel answers" claim above is binary-asserted, not oracle-verified — see the correction note under "Understand vs Repeat". Proposed N14 and K17 (kill bar ≥24/28 with independent oracle novelty verification) pending signature.
 
 ## Addendum — WE-09 resolved (morphology crew, 2026-09-21)
 
