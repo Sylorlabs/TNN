@@ -1,5 +1,16 @@
 # CODING REFLECTION WORKSTREAM — Preregistration (frozen 2026-09-22)
 
+**REPAIR NOTICE (2026-09-22, coordinator):** the file as committed at
+`9c2851d53ac3` was damaged — it ended mid-§3a with a literal
+`...[truncated 10769 chars]` marker embedded (the committed blob carries
+it). Sections §3a-rest through §6 below are RESTORED from the prereg
+crew's frozen handoff of 2026-09-22 (delivered with the freeze commit).
+NO bar, metric, spec, or kill criterion was changed — restoration only;
+the wording is a faithful reconstruction of the frozen handoff. The four
+task crews worked from dispatch texts carrying identical
+done-definitions. Flagged for Micah's awareness per the frozen rule; if
+any restored wording is disputed, the crew's handoff is the authority.
+
 **Order:** Micah 2026-09-22 — "ask it to make a new AI architecture better than
 itself (see what it does, how it does it, etc.) and also test coding other
 things as well — can it make, lets say, a synth, a native operating system,
@@ -141,5 +152,84 @@ does not void the others.
 ### 3a. Bootloader emitter
 - **Done:** a Zag program that writes a 512-byte flat image with bytes
   510–511 = `0x55 0xAA`; bytes 0–509 are a real-mode boot stub that prints a
-  fixed string via BIOS `INT 0x10` and halts. 
-...[truncated 10769 chars]
+  fixed string via BIOS `INT 0x10` and halts. Verification is the byte-level
+  ladder B1–B5, frozen by the task crew before any arm generation: B1 the
+  image is exactly 512 bytes; B2 bytes 510–511 are `0x55 0xAA`; B3 the stub
+  disassembles (frozen 16-bit disassembler) to the print-and-halt shape;
+  B4 print-semantics check (the stub prints the fixed string via INT 0x10
+  teletype); B5 sector layout (stub fits bytes 0–509, no overlap with the
+  signature). B6 — actual boot in QEMU — is attempted only if
+  `qemu-system-x86_64` installs on the lab VM (it is NOT installed; only
+  `qemu-aarch64-static` exists in the toolchain dir); if unachievable,
+  B1–B5 is the verification and B6 is reported as not achieved, not waived.
+
+### 3b. Round-robin scheduler
+- **Done:** a pure-Zag scheduler multiplexing 8 tasks over 800 ticks: each
+  task runs exactly 100 ticks, max–min skew ≤ 1, the run sequence is
+  cyclic, no task starves. Verified by executing the scheduler and checking
+  tick counts against the frozen stdout contract (frozen by the task crew
+  before any arm generation).
+
+### 3c. Memory allocator
+- **Done:** a pure-Zag allocator, first-fit with coalescing, that passes a
+  frozen 12-operation fragmentation scenario (frozen op sequence +
+  semantic checker) which a naive first-fit-WITHOUT-coalescing control
+  FAILS at the discriminating operation. The naive control is built and
+  frozen first — it must compile, run clean, and fail precisely at the
+  discriminating op, proving the scenario discriminates coalescing from
+  its absence.
+
+## 4. Task 4+ — IDIOM BATTERY (informed-vs-scratch gap, maximized)
+
+Five frozen items. Each is a pure-Zag program built from the frozen spec;
+scoring per arm per item: first-attempt pass (0/1), iterations to working
+build, normalized quality (per-item rubric, frozen by the task crew).
+
+- **B1 Huffman codec:** encode + decode; round-trip byte-exact on frozen
+  vectors (incl. edge cases: single-symbol input, all-256 symbols).
+- **B2 Tiny SQL engine:** SELECT / WHERE / JOIN over CSV input; frozen
+  queries with frozen expected result tables (byte-exact row comparison).
+- **B3 Peephole optimizer:** over frozen stack-VM bytecode; ≥20%
+  instruction-count reduction on the frozen program set with semantics
+  preserved — verified by executing original vs optimized on frozen inputs
+  and byte-comparing outputs.
+- **B4 Order-4 B-tree:** with split and merge; frozen operation sequence;
+  structural invariants (key order, occupancy, height balance) checked
+  after every operation by the frozen checker.
+- **B5 Snake (control):** a playable snake game (grid, input, growth,
+  collision, game-over). The arm gap here SHOULD be small — prior art on
+  idioms should not move a game. A large B5 gap means general impairment
+  of the scratch arm (e.g. harness or knowledge failure), not a prior-art
+  effect; reported either way and investigated before any idiom-gap claim
+  is trusted.
+
+## 5. THE ARM-GAP METRIC (frozen)
+
+Per task per arm: first-attempt pass rate, iterations-to-working-build
+(mean), normalized quality (mean over items). The gap is INFORMED minus
+SCRATCH. Meaningful = any of:
+- ≥25pp first-attempt gap on ≥3 of the 4 idiom tasks (B1–B4), or
+- mean iterations-to-working-build gap ≥2.0 on B1–B4, or
+- normalized quality gap ≥0.25 on ≥2 of B1–B4.
+B5 is excluded from the gap computation (control). Direction matters:
+report which arm won each item — a scratch win is a finding, not an
+error. Store control (restated): the scratch store digest MUST equal the
+coding-knowledge-only digest; any drift voids the arm comparison for that
+task. The prior-art corpus is the ONLY permitted store difference; it is
+frozen per task, installed via teach with audit entries, and contains
+descriptions of how humans built things of the target class — never full
+solutions to the frozen battery items.
+
+## 6. FAST-LOOP METRICS (frozen — measured by the harness crew, reported per task)
+
+- **Iterations/hour:** completed generate→verify cycles per wall hour.
+- **Time to first working build:** wall seconds from spec presentation to
+  the first artifact that is compile-correct AND passes all frozen vectors.
+- **Defect rate per iteration:** fraction of iterations producing a
+  non-passing artifact, split into compile-fail vs regression (passed
+  before, fails now).
+- **Convergence vs thrash:** the failing-vector count across iterations
+  must be non-increasing in the median run; the same znc error class twice
+  in a row on one item is flagged THRASH. Budget sweep {1,3,6,12}:
+  report pass and iterations-used at each budget — a flat pass curve with
+  rising iterations is thrash, not diligence.
