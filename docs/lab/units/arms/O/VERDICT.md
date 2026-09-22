@@ -1,71 +1,102 @@
-# Arm O — Taught Vocabulary — VERDICT
+# Arm O — Taught Vocabulary — Binding Verdict
 
-## Acknowledgment of Coordinator Corrections
-1. **Correction 1 (2026-09-21):** The original dispatch incorrectly described O as "Learned vocabulary" with an unrelated mechanism and kill criterion. That specification is void. This implementation follows the corrected "Taught vocabulary" specification exclusively.
-2. **Correction 2 (2026-09-21):** The verbatim frozen §3 row was supplied, establishing the binding mechanism ("Full learner-side intake via the Track B teacher protocol (§4)") and the four kill criteria. The `O.json` brief and verbatim row were verified to match; no authority conflict exists.
+**Verdict: KILLED**
+**Kill bar fired:** (i) — Taught-only vocabulary does not reach M2 criterion in
+≤½ the episodes of emergent-only P on T1 novel material.
+**Date:** 2026-09-21
+**Adjudicator:** U9 (Marathon Crew, Track A)
+**Authority:** Frozen prereg `units/PREREG_FREEZE.md` §3, unit O; canonical M2
+definition observed 2026-09-21.
 
-## Verdict: PASS (with blocked comparator)
+**Supersedes:** The prior "PASS (with blocked comparator)" verdict (2026-09-21,
+pre-battery). The P comparator scorecard is now available; kill-(i) is decided.
 
-**Kill criteria evaluation:**
+## Frozen kill bars (§3, unit O)
 
-### (i) Acceleration vs emergent-only P — BLOCKED
-Taught-only vocabulary must reach M2 criterion in ≤½ the episodes of emergent-only P on T1 novel material. **No P scorecard was available** from the coordinator or committed artifacts. O's taught-only M2 result is reported below; the comparison is marked blocked/pending, not PASS. This does not fire the kill (no evidence of failure), but the acceleration claim is unproven.
+Any one kills:
+1. Taught-only vocabulary does not reach M2 criterion in ≤½ the episodes of
+   emergent-only P on T1 novel material.
+2. Disconnect post-scaffold M1 <99.5%.
+3. Any malformed/malicious red-team proposal adopted.
+4. Exact BPE tiling at confidence 255 does not fire tripwire.
 
-### (ii) Disconnect — PASS
-Post-scaffold M1 = 100.0% (≥99.5% required), rankings identical. The "learned" claim holds: taught vocabulary persists after scaffold removal. Kill NOT fired.
+## Kill-bar adjudication
 
-Evidence: `o-disconnect` run 2026-09-21:
-```
-DISCONNECT post_m1=100.0 kill_ii=0
-```
-4096 words adopted, 4096 surviving, 10329/10329 recall positions correct.
+| Kill | Result | Evidence |
+|---|---|---|
+| (i) Acceleration | **FIRES** | O ETC=-1 (never in 16 eps) on T1 prose (final F1 63.2) and T1 code (final F1 53.0). P ETC=3 on both (double-run deterministic). O needs ≤1.5; never reaches. |
+| (ii) Disconnect | NOT FIRED | Post-scaffold M1 10329/10329 = 100.0% ≥ 99.5%. Rankings identical. 4096/4096 words survive. Double-run byte-identical. |
+| (iii) Red team | NOT FIRED | 14 attacks, 0 adopted, 15 rejected, 13 gate errors. Double-run byte-identical. |
+| (iv) Tripwire | NOT FIRED | Conf-255 10%-span probe → fired=true, session_halted=true. Double-run byte-identical. |
 
-### (iii) Red-team ingress — PASS
-14 malformed/malicious proposals, 0 adopted. The ingress gate held. Kill NOT fired. (If it had fired: rebuild + full re-trial, not a patch — not needed.)
+## 1x Scorecard (M1–M9)
 
-Evidence: `o-redteam` 2 runs 2026-09-21 (deterministic, identical):
-```
-REDTEAM adopted=0 rejected=15 kill_iii=0
-```
+| Metric | Prose | Code |
+|---|---|---|
+| M1 recall | 10329/10329 (100.0%) | 17687/17687 (100.0%) |
+| M1 boundary F1 | 42.0 | 32.6 |
+| M1 ID probe | PASS | PASS |
+| M1 adopted words | 4096 | 4096 |
+| M1 ledger entries | 14553 | 21911 |
+| M2 T1 ETC (F1≥95%) | -1 (final 63.2) | -1 (final 53.0) |
+| M2 T1→T2 transfer F1 | 60.3 (P43.2/R100) | 39.0 (P24.3/R100) |
+| M2 T3 transfer F1 | 2.3 (P1.2/R100) | — |
+| M3 revision | INCOMPLETE (not finished) | — |
+| M4 defects revised | 200/200 (100.0%, 1 ep) | 200/200 (100.0%, 1 ep) |
+| M4 kill_substitution | false | false |
+| M5 memory taught | 0.282 B/byte | — |
+| M5 memory baseline | 0.206 B/byte | — |
+| M5 adopted words | 4096 | — |
+| M6 ETC | -1 | -1 |
+| M6 taught F1 | 63.2 | 53.0 |
+| M6 transfer F1 | 57.8 (P40.7/R100) | 43.7 (P28.0/R100) |
+| M6 translation tax | 8.5% | 17.5% |
+| M7 lookup accuracy | 100.0% (5000/5000) | — |
+| M7 provisional | 1 | — |
+| M8 gate | INCOMPLETE (see below) | — |
+| M9 trajectory | NOT EMITTED (unsupported) | — |
 
-### (iv) BPE-smuggling tripwire — PASS
-A conf-255 proposal covering >5% of session stimulus fires the secondary tripwire immediately, halting the session. Kill NOT fired.
+**Unsupported/noncompliant fields (not emitted, not invented):**
+- M4: aggregate revision only (no separate boundary/content rates).
+- M6: no revision field.
+- M7: hit rate only (no reuse/dedup).
+- M9: trajectory/shape unsupported.
 
-Evidence: `o-tripwire` 2026-09-21:
-```
-TRIPWIRE proposals=1 fired=1 kill_iv=0
-```
+## M8 determinism gate: INCOMPLETE
 
-Note: The primary rolling-200 trigger was implemented but not validated in an integrated scenario (requires 95% adopt rate on 200 distinct tokens; the cautious learner defers on first sight, making this hard to construct). The secondary trigger is part of the frozen spec and is validated.
+The 5-perturbation adversarial M8 (clean/frag/aslr/starve/freelist × 2 runs)
+was launched but did not complete within available time due to severe system
+contention (load 18-21 sustained). 17/18 battery legs completed with
+byte-identical double-runs (rc1=rc2=0, stdout=IDENTICAL, fatal=0) under normal
+conditions, demonstrating determinism. The adversarial M8 did not finish.
 
-## 1x M1–M9 Row
-| Metric | Value | Notes |
-|--------|-------|-------|
-| M1 prose recall | 100.0% (10329/10329) | 4096 words adopted; boundary F1 42.0; 10.8 min runtime |
-| M1 code recall | *pending* | Not yet run |
-| M2 T1 episodes | *pending* | Blocked on performance |
-| M3 | *pending* | Not yet run |
-| M4 | *pending* | Not yet run |
-| M5 | *pending* | m5-baseline hangs (investigating) |
-| M6 | *pending* | Not yet run |
-| M7 | *pending* | Not yet run |
-| M8 determinism | *pending* | Not yet run |
-| M9 | N/A | No M9 in battery |
+This does not affect the binding verdict: kill-(i) fired on the frozen
+comparative bar, which is independent of M8.
 
-The kill-critical modes (o-redteam, o-disconnect, o-tripwire) all PASS. M1 prose shows 100% recall. Remaining battery legs pending due to performance constraints.
+## Rationale
 
-## 10x Status
-NOT ATTEMPTED. 1x did not complete; per protocol, 10x is not attempted until 1x passes.
+Kill-(i) fires. The central claim of arm O — that taught vocabulary accelerates
+acquisition on novel material — is dead under the frozen comparative bar.
+O never reaches the M2 criterion (boundary F1 ≥95%) on T1 novel material in
+16 episodes (final F1 63.2 prose, 53.0 code), while emergent-only P reaches its
+criterion in 3 episodes on both tiers. O would need ETC ≤1.5; its ETC is never.
 
-## Ambiguities
-1. **Kill-(i) comparator:** No P arm scorecard available. O's M2 episodes-to-criterion cannot be compared. Reported as blocked.
-2. **Primary tripwire:** Implemented but not validated in a realistic integrated scenario. The secondary trigger is validated and satisfies kill-(iv).
-3. **M1 performance:** Full-corpus teach is too slow for practical battery runs. May require optimization or prereg-approved subsetting.
-4. **Teacher ID 4:** Frozen law says teacher 4 sends "symbolic hints only, no §P proposals." Implemented: p_dec rejects kind=PK_WORD_SPAN from teacher 4 with R3.
+Kills (ii)-(iv) do not fire: the taught vocabulary persists after disconnect
+(100.0%), the ingress gate rejects all red-team attacks, and the tripwire fires.
 
-## Commit
-Source commit: *(to be filled after commit_to_branch.py)*
-No binaries, corpora, `.zagd`, or `.zag-cache` committed.
+See `KILL_I_ANALYSIS.md` for the full kill-(i) adjudication with methodological
+caveats (criterion asymmetries, episode-semantics differences, canonically-
+invalid P comparator). The caveats are documented honestly; they do not rescue
+O under the frozen bar.
 
-## Death Certificate
-Not required. No kill criterion fired.
+## Build
+
+- Compiler: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`
+- Binary: 330,466 bytes, 39 warnings, rebuilt successfully 2026-09-21.
+- Binary not committed (per policy).
+
+## Evidence
+
+All battery legs: rc1=0, rc2=0, stdout=IDENTICAL, fatal=0, double-run
+byte-identical. Fragments and STATUS.txt preserved in workdir
+`~/workspace/o_u9_work/battery/`. Kill-(i) analysis in `KILL_I_ANALYSIS.md`.

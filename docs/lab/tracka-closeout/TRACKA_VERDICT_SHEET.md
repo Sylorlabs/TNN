@@ -47,7 +47,7 @@
 | M | KILLED (scoped: cross-store/global identity) | yes | PASS | 1x |
 | M2 | KILLED | yes (28.8%/26.8% at 10x) | n/a | 10x (K2 leg) |
 | N | PASS | no | PASS | 1x (10x ATTEMPTED—FAILED, toolchain) |
-| O | PROVISIONAL | unresolved | PENDING | partial 1x |
+| O | KILLED (kill-i: acceleration) | yes | INCOMPLETE | 1x |
 | P | PASS | no | PASS | 1x |
 | Q | KILLED | yes | PASS | 1x |
 | R | KILLED | yes (OR-kill: 100.0 vs 100.0 tie) | PASS | 1x |
