@@ -208,4 +208,6 @@ are flat after the first order of magnitude — for the winner and the loser.
 - `2c7a894b629f1f54a0c9a1c9d546f2a480af4996` — calibration, instrumented B,
   validation/relation harness
 - `f34a167292a28814363044e3d615d5943cef097d` — KB4 stream-order fix, KB5 script
-- (this commit) — resumable pipeline, fit/analyze/kb5, results, verdict
+- `1c01a1adcf8dcec824b77f11e83a9c3fe91c2634` — resumable pipeline,
+  fit/analyze/kb5, VERDICT.md, results, plot data, small manifests
+- `85bc26877aec756f3b0c2904796d24143853e30e` — large manifests (T2/T3/T4)
