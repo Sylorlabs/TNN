@@ -1,0 +1,424 @@
+// sg_sol.zag — Sol contender for PREREG-SG (Sol-vs-Grok prose duel).
+// Factorized quorum semantic index with proof-carrying retrieval.
+// Pure Zag, zero RNG, byte-identical reruns. Implements SPEC-SOL.md.
+// Uses the frozen front end via @import("sg_parse.zag") — read-only.
+@import("sg_parse.zag")
+
+// ---------------- proof-arena emit helpers ----------------
+fn emit(a:[]u8,s:[]u8)void {
+    let u:i32=g32(a,0) as i32;
+    copy_bytes(a,u,s,0,s.len);
+    p32(a,0,(u+s.len) as i64);
+    return;
+}
+fn emitl(a:[]u8,s:[]u8,n:i32)void {
+    let u2:i32=g32(a,0) as i32;
+    copy_bytes(a,u2,s,0,n);
+    p32(a,0,(u2+n) as i64);
+    return;
+}
+fn emit_i64(a:[]u8,v:i64)void {
+    let t:[]u8=nio_alloc(24);
+    let nn:i32=i64str(v,t);
+    emitl(a,t,nn);
+    nio_free(t);
+    return;
+}
+
+// ---------------- row tables (flat []u8 arenas, u32 accessors) ----------------
+// row_meta: [0..4) row count; row r at 4+r*32:
+//   +0 subj(i64) +8 val(i64) +16 pol(u32) +20 pred_n(u32) +24 lex_n(u32) +28 dead(u32)
+// row_pred: r*32, 8 u32 pred uids. row_lex: r*64, 16 u32 lex uids.
+fn mb(r:i32)i32 { return 4+r*32; }
+fn pbase(r:i32)i32 { return r*32; }
+fn lbase(r:i32)i32 { return r*64; }
+fn nrows(meta:[]u8)i32 { return g32(meta,0) as i32; }
+fn r_subj(m:[]u8,r:i32)i64 { return g64(m,mb(r)); }
+fn r_val(m:[]u8,r:i32)i64 { return g64(m,mb(r)+8); }
+fn r_pol(m:[]u8,r:i32)i64 { return g32(m,mb(r)+16); }
+fn r_predn(m:[]u8,r:i32)i32 { return g32(m,mb(r)+20) as i32; }
+fn r_lexn(m:[]u8,r:i32)i32 { return g32(m,mb(r)+24) as i32; }
+fn r_dead(m:[]u8,r:i32)i32 { return g32(m,mb(r)+28) as i32; }
+fn r_store(m:[]u8,r:i32,subj:i64,val:i64,pol:i64,pn:i32,ln:i32)void {
+    p64(m,mb(r),subj);
+    p64(m,mb(r)+8,val);
+    p32(m,mb(r)+16,pol);
+    p32(m,mb(r)+20,pn as i64);
+    p32(m,mb(r)+24,ln as i64);
+    p32(m,mb(r)+28,0);
+    return;
+}
+fn r_kill(m:[]u8,r:i32)void { p32(m,mb(r)+28,1); return; }
+fn rp_get(p:[]u8,r:i32,k:i32)i64 { return g32(p,pbase(r)+k*4); }
+fn rp_set(p:[]u8,r:i32,k:i32,v:i64)void { p32(p,pbase(r)+k*4,v); return; }
+fn rl_get(l:[]u8,r:i32,k:i32)i64 { return g32(l,lbase(r)+k*4); }
+fn rl_set(l:[]u8,r:i32,k:i32,v:i64)void { p32(l,lbase(r)+k*4,v); return; }
+
+// sorted-set equality between stored pred set and relbuf[0..rn)
+fn pred_eq(p:[]u8,r:i32,relbuf:[]u8,rn:i32,meta:[]u8)i32 {
+    if(r_predn(meta,r)!=rn){return 0;}
+    let k:i32=0;
+    while(k<rn){
+        if(rp_get(p,r,k)!=g32(relbuf,k*4)){return 0;}
+        k=k+1;
+    }
+    return 1;
+}
+// |probe.lex cap row.lex| on sorted deduped sets
+fn lex_inter(l:[]u8,r:i32,lx:[]u8,ln:i32,meta:[]u8)i32 {
+    let rn2:i32=r_lexn(meta,r);
+    let c:i32=0;
+    let a:i32=0;
+    while(a<ln){
+        let uu:i64=g32(lx,a*4);
+        let b:i32=0;
+        while(b<rn2){
+            if(rl_get(l,r,b)==uu){c=c+1;break;}
+            b=b+1;
+        }
+        a=a+1;
+    }
+    return c;
+}
+// quorum factors
+fn fac_subj(meta:[]u8,r:i32,psubj:i64)i32 {
+    if(r_subj(meta,r)==psubj){return 1;}
+    return 0;
+}
+fn fac_obj(pvok:i64,pval:i64,meta:[]u8,r:i32)i32 {
+    if(pvok==0){return 1;}
+    if(pval==r_val(meta,r)){return 1;}
+    return 0;
+}
+fn fac_lex(lexa:[]u8,meta:[]u8,r:i32,lx:[]u8,ln:i32)i32 {
+    let inter:i32=lex_inter(lexa,r,lx,ln,meta);
+    let ii:i64=inter as i64;
+    let lhs:i64=2*ii*ii;
+    let rhs:i64=(ln as i64)*(r_lexn(meta,r) as i64);
+    if(lhs>=rhs){return 1;}
+    return 0;
+}
+fn quorum_ok(pe:i32,fs:i32,fo:i32,fl:i32)i32 {
+    if(pe==0){return 0;}
+    if(fs+fo+fl>=2){return 1;}
+    return 0;
+}
+// contradiction test for one live row vs an installing pol=0 row
+fn contra_hit(meta:[]u8,pred:[]u8,r:i32,relbuf:[]u8,rn:i32,subj:i64,val:i64)i32 {
+    if(r_dead(meta,r)==1){return 0;}
+    if(pred_eq(pred,r,relbuf,rn,meta)==0){return 0;}
+    if(r_subj(meta,r)!=subj){return 0;}
+    if(r_pol(meta,r)!=0){return 0;}
+    if(r_val(meta,r)==val){return 0;}
+    return 1;
+}
+// sorted deduped lex set from cpos->tsuid; returns count
+fn build_lex(tsuid:[]u8,cpos:[]u8,cn:i32,lx:[]u8)i32 {
+    let k:i32=0;
+    while(k<cn){
+        let ti:i32=g32(cpos,k*4) as i32;
+        p32(lx,k*4,g32(tsuid,ti*4));
+        k=k+1;
+    }
+    isort32(lx,cn);
+    let w:i32=0;
+    let r2:i32=0;
+    while(r2<cn){
+        let u3:i64=g32(lx,r2*4);
+        if(w==0){p32(lx,0,u3);w=1;}
+        else{
+            if(g32(lx,(w-1)*4)!=u3){p32(lx,w*4,u3);w=w+1;}
+        }
+        r2=r2+1;
+    }
+    return w;
+}
+// install one frame row (with contradiction dead-marking)
+fn install_row(meta:[]u8,pred:[]u8,lexa:[]u8,subj:i64,val:i64,pol:i64,relbuf:[]u8,rn:i32,lx:[]u8,ln:i32)void {
+    let n:i32=nrows(meta);
+    if(n>=2048){return;}
+    let dead:i32=0;
+    if(pol==0){
+        let r:i32=0;
+        while(r<n){
+            if(contra_hit(meta,pred,r,relbuf,rn,subj,val)==1){
+                r_kill(meta,r);
+                dead=1;
+            }
+            r=r+1;
+        }
+    }
+    r_store(meta,n,subj,val,pol,rn,ln);
+    let k2:i32=0;
+    while(k2<rn){rp_set(pred,n,k2,g32(relbuf,k2*4));k2=k2+1;}
+    let j:i32=0;
+    while(j<ln){rl_set(lexa,n,j,g32(lx,j*4));j=j+1;}
+    if(dead==1){r_kill(meta,n);}
+    p32(meta,0,(n+1) as i64);
+    return;
+}
+// one teach sentence: prep, extract frame, install. Returns eid (or -1 sentinel).
+fn teach_sent(vbytes:[]u8,vent:[]u8,tb:[]u8,a2x:i32,sln:i32,lowb:[]u8,stembuf:[]u8,linka:[]u8,toff:[]u8,tlen:[]u8,tsoff:[]u8,tslen:[]u8,tsuid:[]u8,tflags:[]u8,tval:[]u8,cpos:[]u8,vtokb:[]u8,sctx:[]u8,ebuf:[]u8,entstem:[]u8,etmp:[]u8,relbuf:[]u8,peid:i64,pbuf:[]u8,pentstem:[]u8,lxbuf:[]u8,meta:[]u8,pred:[]u8,lexa:[]u8)i64 {
+    prep_sentence(vbytes,vent,tb,a2x,sln,lowb,stembuf,linka,toff,tlen,tsoff,tslen,tsuid,tflags,tval,cpos,vtokb,sctx,ebuf,entstem,etmp,relbuf,peid,pbuf,0,pentstem,0,0,2);
+    let eid:i64=g64(sctx,64);
+    if(eid==4294967295){return 4294967295;}
+    let vok:i64=g32(sctx,80);
+    if(vok==0){return eid;}
+    let rn:i32=g32(sctx,44) as i32;
+    if(rn>8){return eid;}
+    let pol:i64=g32(sctx,72);
+    let val:i64=g64(sctx,88);
+    let cn:i32=g32(sctx,4) as i32;
+    let ln:i32=build_lex(tsuid,cpos,cn,lxbuf);
+    if(ln>16){return eid;}
+    install_row(meta,pred,lexa,eid,val,pol,relbuf,rn,lxbuf,ln);
+    return eid;
+}
+// one probe sentence: prep, stage frame into prelbuf/plxbuf. Returns pred count.
+fn probe_sent(vbytes:[]u8,vent:[]u8,pb:[]u8,a3:i32,sln:i32,lowb:[]u8,stembuf:[]u8,linka:[]u8,toff:[]u8,tlen:[]u8,tsoff:[]u8,tslen:[]u8,tsuid:[]u8,tflags:[]u8,tval:[]u8,cpos:[]u8,vtokb:[]u8,sctx:[]u8,ebuf:[]u8,entstem:[]u8,etmp:[]u8,relbuf:[]u8,peid:i64,pbuf:[]u8,pentstem:[]u8,prelbuf:[]u8,plxbuf:[]u8,pln4:[]u8)i32 {
+    prep_sentence(vbytes,vent,pb,a3,sln,lowb,stembuf,linka,toff,tlen,tsoff,tslen,tsuid,tflags,tval,cpos,vtokb,sctx,ebuf,entstem,etmp,relbuf,peid,pbuf,0,pentstem,0,1,2);
+    let rn:i32=g32(sctx,44) as i32;
+    let k:i32=0;
+    while(k<rn){p32(prelbuf,k*4,g32(relbuf,k*4));k=k+1;}
+    let cn:i32=g32(sctx,4) as i32;
+    let ln:i32=build_lex(tsuid,cpos,cn,plxbuf);
+    p32(pln4,0,ln as i64);
+    return rn;
+}
+// retrieval for one probe: stdout verdict + proof trace line
+fn sol_retrieve(meta:[]u8,pred:[]u8,lexa:[]u8,prel:[]u8,prn:i32,plx:[]u8,pln:i32,psubj:i64,ppol:i64,pvok:i64,pval:i64,proof:[]u8,pid:[]u8)void {
+    let nrow:i32=nrows(meta);
+    let cand:i32=0;
+    let quorum:i32=0;
+    let best_dead:i32=-1;
+    let bds:i32=0;
+    let bdo:i32=0;
+    let bdl:i32=0;
+    let best_live:i32=-1;
+    let bls:i32=0;
+    let blo:i32=0;
+    let bll:i32=0;
+    if(psubj!=4294967295){
+        let r:i32=0;
+        while(r<nrow){
+            if(pred_eq(pred,r,prel,prn,meta)==1){
+                cand=cand+1;
+                let pe:i32=0;
+                if(r_pol(meta,r)==ppol){pe=1;}
+                let fs:i32=fac_subj(meta,r,psubj);
+                let fo:i32=fac_obj(pvok,pval,meta,r);
+                let fl:i32=fac_lex(lexa,meta,r,plx,pln);
+                if(quorum_ok(pe,fs,fo,fl)==1){
+                    quorum=quorum+1;
+                    if(r_dead(meta,r)==1){
+                        if(best_dead<0){best_dead=r;bds=fs;bdo=fo;bdl=fl;}
+                    }
+                    else{
+                        if(best_live<0){best_live=r;bls=fs;blo=fo;bll=fl;}
+                    }
+                }
+            }
+            r=r+1;
+        }
+    }
+    let vcode:i32=0;
+    let vval:i64=0;
+    let fs2:i32=0;
+    let fo2:i32=0;
+    let fl2:i32=0;
+    let dd:i32=0;
+    if(best_dead>=0){
+        vcode=2;
+        fs2=bds;
+        fo2=bdo;
+        fl2=bdl;
+        dd=1;
+    }
+    else{
+        if(best_live>=0){
+            vcode=1;
+            vval=r_val(meta,best_live);
+            fs2=bls;
+            fo2=blo;
+            fl2=bll;
+        }
+    }
+    pr(pid);
+    pr("\t");
+    if(vcode==1){pr("VALUE:");prn(vval);}
+    else{
+        if(vcode==2){pr("CONTRADICTION");}
+        else{pr("UNKNOWN");}
+    }
+    prl("");
+    emit(proof,pid);
+    emit(proof,"\tSOL cand=");
+    emit_i64(proof,cand as i64);
+    emit(proof," quorum=");
+    emit_i64(proof,quorum as i64);
+    emit(proof," subj=");
+    emit_i64(proof,fs2 as i64);
+    emit(proof," obj=");
+    emit_i64(proof,fo2 as i64);
+    emit(proof," lex=");
+    emit_i64(proof,fl2 as i64);
+    emit(proof," dead=");
+    emit_i64(proof,dd as i64);
+    emit(proof," verdict=");
+    if(vcode==1){emit(proof,"VALUE:");emit_i64(proof,vval);}
+    else{
+        if(vcode==2){emit(proof,"CONTRADICTION");}
+        else{emit(proof,"UNKNOWN");}
+    }
+    emit(proof,"\n");
+    return;
+}
+fn write_file(path:[]u8,data:[]u8,len:i32)void {
+    let p:[]u8=z_cstr(path);
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(p) as i64),577,420,0,0,0);
+    nio_free(p);
+    if(fd<0){return;}
+    let off:i32=0;
+    while(off<len){
+        let w:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(data) as i64)+(off as i64),(len-off) as i64,0,0,0);
+        if(w<=0){off=len;}
+        else{off=off+(w as i32);}
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    return;
+}
+fn main()void {
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    // vocab (v1 header semantics: vbytes used-count starts at 8, vent count at 0)
+    let vbytes:[]u8=nio_alloc(2097152);
+    let vent:[]u8=nio_alloc(262152);
+    p32(vbytes,0,8);
+    p32(vent,0,0);
+    // parser scratch
+    let linka:[]u8=nio_alloc(262144);
+    p32(linka,0,4);
+    let lowb:[]u8=nio_alloc(256);
+    let stembuf:[]u8=nio_alloc(32768);
+    let toff:[]u8=nio_alloc(1024);
+    let tlen:[]u8=nio_alloc(1024);
+    let tsoff:[]u8=nio_alloc(1024);
+    let tslen:[]u8=nio_alloc(1024);
+    let tsuid:[]u8=nio_alloc(1024);
+    let tflags:[]u8=nio_alloc(1024);
+    let tval:[]u8=nio_alloc(2048);
+    let cpos:[]u8=nio_alloc(1024);
+    let vtokb:[]u8=nio_alloc(64);
+    let sctx:[]u8=nio_alloc(128);
+    let ebuf:[]u8=nio_alloc(4096);
+    let entstem:[]u8=nio_alloc(256);
+    let etmp:[]u8=nio_alloc(256);
+    let relbuf:[]u8=nio_alloc(2048);
+    let pbuf:[]u8=nio_alloc(4096);
+    let pentstem:[]u8=nio_alloc(256);
+    // row tables + staging buffers
+    let row_pred:[]u8=nio_alloc(65536);
+    let row_lex:[]u8=nio_alloc(131072);
+    let row_meta:[]u8=nio_alloc(65540);
+    p32(row_meta,0,0);
+    let lxbuf:[]u8=nio_alloc(1024);
+    let prelbuf:[]u8=nio_alloc(1024);
+    let plxbuf:[]u8=nio_alloc(1024);
+    let pln4:[]u8=nio_alloc(4);
+    // proof arena (header = used byte offset, data starts at 4)
+    let proof:[]u8=nio_alloc(1048576);
+    p32(proof,0,4);
+    // ---- teach pass ----
+    let tb:[]u8=read_all(a1);
+    let pos:i32=0;
+    while(pos<tb.len){
+        let le:i32=pos;
+        while(le<tb.len && tb[le]!=10){le=le+1;}
+        if(le>pos){
+            let f1:i32=pos;
+            while(f1<le && tb[f1]!=9){f1=f1+1;}
+            let peid:i64=4294967295;
+            let t0:i32=f1+1;
+            if(t0>le){t0=le;}
+            let seg:i32=t0;
+            let k2:i32=t0;
+            while(k2<=le){
+                let isend:i32=0;
+                if(k2==le){isend=1;}
+                else{
+                    let cc:u8=tb[k2];
+                    if(cc==46 || cc==63 || cc==33){isend=1;}
+                }
+                if(isend==1){
+                    let a2x:i32=seg;
+                    let b2:i32=k2;
+                    while(a2x<b2 && tb[a2x]==32){a2x=a2x+1;}
+                    while(b2>a2x && tb[b2-1]==32){b2=b2-1;}
+                    if(b2>a2x){
+                        let ne:i64=teach_sent(vbytes,vent,tb,a2x,b2-a2x,lowb,stembuf,linka,toff,tlen,tsoff,tslen,tsuid,tflags,tval,cpos,vtokb,sctx,ebuf,entstem,etmp,relbuf,peid,pbuf,pentstem,lxbuf,row_meta,row_pred,row_lex);
+                        if(ne!=4294967295){peid=ne;}
+                    }
+                    seg=k2+1;
+                }
+                k2=k2+1;
+            }
+        }
+        pos=le+1;
+    }
+    // ---- probe pass (peid threads across probe lines) ----
+    let pb:[]u8=read_all(a2);
+    let peid2:i64=4294967295;
+    let pos2:i32=0;
+    while(pos2<pb.len){
+        let le2:i32=pos2;
+        while(le2<pb.len && pb[le2]!=10){le2=le2+1;}
+        if(le2>pos2){
+            let q1:i32=pos2;
+            while(q1<le2 && pb[q1]!=9){q1=q1+1;}
+            let pid:[]u8=pb[pos2..q1];
+            let q2:i32=q1+1;
+            while(q2<le2 && pb[q2]!=9){q2=q2+1;}
+            let t02:i32=q1+1;
+            if(t02>q2){t02=q2;}
+            let le2t:i32=q2;
+            let prn2:i32=0;
+            let got2:i32=0;
+            let seg2:i32=t02;
+            let k3:i32=t02;
+            while(k3<=le2t){
+                let isend2:i32=0;
+                if(k3==le2t){isend2=1;}
+                else{
+                    let dd2:u8=pb[k3];
+                    if(dd2==46 || dd2==63 || dd2==33){isend2=1;}
+                }
+                if(isend2==1){
+                    let a3:i32=seg2;
+                    let b3:i32=k3;
+                    while(a3<b3 && pb[a3]==32){a3=a3+1;}
+                    while(b3>a3 && pb[b3-1]==32){b3=b3-1;}
+                    if(b3>a3){
+                        prn2=probe_sent(vbytes,vent,pb,a3,b3-a3,lowb,stembuf,linka,toff,tlen,tsoff,tslen,tsuid,tflags,tval,cpos,vtokb,sctx,ebuf,entstem,etmp,relbuf,peid2,pbuf,pentstem,prelbuf,plxbuf,pln4);
+                        let pe2:i64=g64(sctx,64);
+                        if(pe2!=4294967295){peid2=pe2;}
+                        got2=1;
+                    }
+                    seg2=k3+1;
+                }
+                k3=k3+1;
+            }
+            let psubj:i64=g64(sctx,64);
+            if(got2==0){psubj=4294967295;}
+            let ppol:i64=g32(sctx,72);
+            let pvok:i64=g32(sctx,80);
+            let pval:i64=g64(sctx,88);
+            let pln2:i32=g32(pln4,0) as i32;
+            sol_retrieve(row_meta,row_pred,row_lex,prelbuf,prn2,plxbuf,pln2,psubj,ppol,pvok,pval,proof,pid);
+        }
+        pos2=le2+1;
+    }
+    let used:i32=(g32(proof,0) as i32)-4;
+    let pdata:[]u8=proof[4..4+used];
+    write_file("proof_sol.txt",pdata,used);
+    return;
+}

@@ -182,6 +182,20 @@ ck(len(not_uids) == 1, f"'not' marker uids not consistent: {not_uids}")
 ck(len(might_uids) == 1, f"'might' marker uids not consistent: {might_uids}")
 ck(not_uids != might_uids, "not/might marker uid collision")
 
+# 9. MULTI (diagnostic): coref-mediated novel relation
+for i in range(24):
+    sid = f"M{i:02d}"
+    ss = frames[sid]
+    ck(len(ss) == 2, f"{sid} should have 2 sentences")
+    s1, s2 = ss[0], ss[1]
+    ps = frames[f"PM{i:02d}"][0]
+    want_v2 = int(expected[f"PM{i:02d}"]["verdict"].split(":")[1])
+    ck(s2["vok"] == 1 and s2["val"] == want_v2, f"{sid} s2 value frame wrong")
+    ck(ps["relset"] < s2["relset"] and 1 <= len(s2["relset"]) - len(ps["relset"]) <= 2,
+       f"{sid} s2 rel not probe-rel + residue")
+    ck(ps["relset"] not in taught_rels, f"PM{i:02d} rel not novel")
+    ck(ps["eid"] == s2["eid"], f"PM{i:02d} eid != s2 eid")
+
 print("FAILURES:", len(fails))
 for m in fails[:40]:
     print(" -", m)

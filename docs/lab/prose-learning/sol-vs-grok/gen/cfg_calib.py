@@ -26,6 +26,14 @@ CONFIG = {
     "ent_distr": ["Ghostharbor", "Nullisland", "Vaporwick", "Misthaven",
                   "Shadowport", "Fogmere", "Echobay", "Duskline"],
     "distr_rels": ["wingspan", "flag color", "captain name"],
+    "multi_rels": [
+        ("ink blot", "parchment stain"),
+        ("bell tone", "chime pitch"),
+        ("rail pennant", "bulwark banner"),
+        ("harbor echo", "bay reverb"),
+    ],
+    "multi_v0": 500,
+    "multi_dv": 7,
     "value_params": (20, 37, 13, 380, 1850, 150),  # V0,RMUL,EMUL,MOD,Y0,YMOD
     "year_rel": 4,
     "contr_delta": 17,

@@ -81,16 +81,22 @@ def build(cfg, out):
         for j, dr in enumerate(DISTR_RELS):
             P(f"DR{k:02d}{j}", f'What is the {dr} of "{e}"?', "distr", "UNKNOWN")
 
+    # MULTI (diagnostic): s1 anchors a directly-taught family (coref source);
+    # s2 asserts a NOVEL relation (cfg multi_rels) via the pronoun, so the
+    # probe is ONLY answerable through coref-mediated retrieval.
+    # (2026-09-22 instrument fix: the original multi reused directly-taught
+    # (relation, entity) pairs, making it redundant with canon.)
     for i in range(24):
-        e = ENT_MAIN[i % 8]
+        mi = i % len(cfg["multi_rels"])
+        ei2 = (i // len(cfg["multi_rels"])) % 8
+        e = ENT_MAIN[ei2]
         ria = i % 12
-        rib = (i + 5) % 12
         raa, _ = RELATIONS[ria]
-        rab, _ = RELATIONS[rib]
-        v1 = value(ria, i % 8)
-        v2 = value(rib, i % 8)
-        T(f"M{i:02d}", f'The {raa} of "{e}" is {v1}. It has a {rab} of {v2}.')
-        P(f"PM{i:02d}", f'What is the {rab} of "{e}"?', "multi", f"VALUE:{v2}")
+        mra, mrb = cfg["multi_rels"][mi]
+        v1 = value(ria, ei2)
+        v2 = cfg["multi_v0"] + i * cfg["multi_dv"]
+        T(f"M{i:02d}", f'The {raa} of "{e}" is {v1}. It has a {mra} of {v2}.')
+        P(f"PM{i:02d}", f'What is the {mra} of "{e}"?', "multi", f"VALUE:{v2}")
 
     with open(os.path.join(out, "teach_sg.txt"), "w") as f:
         for i, t in teach:
