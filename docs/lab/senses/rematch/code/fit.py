@@ -137,32 +137,39 @@ def evaluate(recs, params_by_key):
     return out
 
 def kb4(recs_fresh, recs_adv, params_by_key):
-    """Memory rule over streams (approach, task), primary then adversarial,
-    sorted-path order. Returns per-approach adv false-install rate."""
+    """Memory rule exactly as round 1 (shared apply_memory_rule): per
+    (approach, task) streams over TEST-FRESH primary + ADV_R1 adversarial
+    fixtures, sorted-path order (variants interleaved by path sort).
+    Returns per-approach adv false-install rate."""
     out = {}
     for approach in ("A", "B"):
-        stream = []
-        for variant, recs in (("primary", recs_fresh), ("adversarial", recs_adv)):
-            for r in recs:
-                if r["approach"] != approach or "error" in r:
-                    continue
-                stream.append((variant, r))
-        stream.sort(key=lambda x: (0 if x[0] == "primary" else 1, x[1]["rel"]))
-        installed = []
-        adv_installs = adv_false = 0
-        withholds = 0
-        for variant, r in stream:
-            j = fitted_judgment(approach, r["task"], params_by_key[(approach, r["task"])], r)
-            action, entry = apply_memory_rule(installed, j, r["confidence"],
-                                              r["truth"], r["rel"])
-            if action == "INSTALL":
-                if variant == "adversarial":
-                    adv_installs += 1
+        adv_installs = adv_false = withholds = 0
+        streams = {}
+        for task in TASKS:
+            stream = [r for r in recs_fresh + recs_adv
+                      if r["approach"] == approach and r["task"] == task
+                      and "error" not in r]
+            stream.sort(key=lambda r: r["rel"])
+            installed = []
+            s_installs = s_false = s_with = 0
+            for r in stream:
+                j = fitted_judgment(approach, task, params_by_key[(approach, task)], r)
+                action, entry = apply_memory_rule(installed, j, r["confidence"],
+                                                 r["truth"], r["rel"])
+                if action == "INSTALL":
+                    s_installs += 1
                     if entry["false_install"]:
-                        adv_false += 1
-            else:
-                withholds += 1
-        out[approach] = {"adv_installs": adv_installs,
+                        s_false += 1
+                    if r["rel"].split("/")[1] == "adversarial":
+                        adv_installs += 1
+                        if entry["false_install"]:
+                            adv_false += 1
+                else:
+                    s_with += 1
+                    withholds += 1
+            streams[task] = {"installs": s_installs, "false_installs": s_false,
+                             "withholds": s_with}
+        out[approach] = {"streams": streams, "adv_installs": adv_installs,
                          "adv_false_installs": adv_false,
                          "adv_false_install_rate": (adv_false / adv_installs
                                                     if adv_installs else 0.0),
