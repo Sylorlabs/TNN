@@ -151,3 +151,87 @@ in the generation path (Python is harness-only now).
 - Blind packet rebuilt with Zag BMPs + novel-probe section + video section;
   v1/v2 PNGs still Python-rendered (flagged in-packet, native re-render
   pending on the element tracks).
+
+## 2026-09-22 ~06:20-06:45 UTC — GOAL-A quality ladder (G-series)
+- Added to src/field.zag (purely additive): f3_raster_g (480x480, per-pixel
+  deterministic grain via f3_hash2, +/-14), f3_gen_g1..g6 (briefs 21-26,
+  asymmetric compositions), f3_emit_bmp_g + `f3gbmp`, f3_emit_avi_g
+  (480x480, per-frame grain, 44.1kHz f3_synth_hifi audio) + `f3gavi`.
+- Caught in self-review: cell-level f3_dither at amt 60-90 makes 20px mosaic
+  blocks at 480p; reduced to 8-14 in G builders, pixel grain carries texture.
+- Verification: G-BMP 6/6 byte-identical reruns; G-AVI 2/2 byte-identical;
+  RIFF parses (480x480, 24f@8fps, 44.1kHz/16-bit, idx1); audio bipolar,
+  DC 0.02%FS, 0 clips, peak 0.732FS.
+- Regression: 14/14 legacy BMP + 2/2 legacy AVI byte-identical under new binary.
+- Metrics: detrended H-symmetry -0.24..0.00 (6/6 < 0.30 bar; raw metric was
+  gradient-confounded — corrected in GOALA PREREG); unique colors 3.5k-24.5k.
+- Shipped: your_files/imagination_fields/f3g{1..6}.bmp+png,
+  your_files/imagination_video/f3gvid{1,2}.avi.
+- Commits: 7eff683689ed (code), b775d8ec274f (docs path fix).
+- Note: commit_to_branch.py maps ~/workspace/tnn-lab/<p> -> docs/lab/<p>;
+  GOALA docs live at ~/workspace/tnn-lab/GOALA_INDINGUISHABLE/ (NOT under
+  docs/lab/ locally). Stray blobs at docs/lab/docs/lab/GOALA... from first
+  commit are superseded, flagged for cleanup.
+- Deferred: 48x48 field grid refactor (~40 sites); G-video keyframe content;
+  sine-LUT replacement (audio track).
+
+## 2026-09-22 ~06:52 UTC — PROVIDER HARD STOP: grok-4.7 via ExperimentalLabs
+- ExperimentalLabs org out of platform credits (HTTP 429 insufficient_credits,
+  balance -$0.02). ALL experientiallabs calls now fail; hard stop per policy.
+- Fallback executed per Micah's standing order: all reasoning switched to
+  gpt-5.6-sol via UnoRouter (verified live) or native.
+- Both GOAL-A workers (tell-hunt b6693062, human-ref 5e88890b) notified via
+  subagent.send; instructed to log fallback in their FALLBACKS sections.
+- My two pending grok critiques re-issued through unorouter/gpt-5.6-sol.
+- NOTE for parent: the overnight grok-loop coordinator (parent's child a8c3a253)
+  is affected identically. Top-up at
+  https://platform.experientiallabs.ai/credits (min $5) is a SPENDING decision
+  for Micah — flagged, not acted on.
+
+## 2026-09-22 ~07:00-07:45 UTC — GOAL-A V3 red-team pass (sol critiques)
+- grok-4.7 dead (ExperimentalLabs credits exhausted, 429); both critiques run
+  through gpt-5.6-sol via UnoRouter instead. Image + video critiques archived
+  under GOALA_INDINGUISHABLE/raw/sol-critiques/.
+- All HIGH/MEDIUM image tells fixed in f3_gen_g1..g6 (see QUALITY-LADDER.md V3).
+- Video: f3_vidfield_g (organic per-cell keyframe timing), 12fps/36 frames,
+  temporally-correlated luminance-dependent grain in f3_raster_g V3.
+- Bugs caught: chunk index tables hardcoded 192B (panicked at 36 frames);
+  f3_rect soft param is a PIXEL feather radius (350-600 created giant blobs);
+  diagonal f3_band beads on 24-cell grid at sub-cell widths (widened).
+- Verification: G-BMP 6/6 det; G-AVI 2/2 det; legacy 14/14 BMP + 2/2 AVI identical.
+- Shipped finals: your_files/imagination_fields/f3g{1..6}.bmp+png,
+  your_files/imagination_video/f3gvid{1,2}.avi + _preview.mp4.
+- Commit a44a952d26a2 (tnn-native-lab).
+- znc lesson: f3_rect(..., soft) feather is in field pixels; keep <= 24 for
+  hard shapes. f3_band needs width >= ~2 cells (80+) for continuous diagonals.
+
+## 2026-09-22 ~06:50 UTC — PROVIDER FALLBACK + GOAL-A NATIVE PASS (no APIs)
+- Provider state (verified by direct probe): ExperientialLabs grok-4.7
+  HARD-DOWN — HTTP 429 insufficient_credits, balance -$0.02 (needs Micah
+  top-up; min $5 at platform.experientiallabs.ai/credits — spending decision,
+  flagged not acted on). gpt-5.6-sol via UnoRouter timing out (choices:null).
+  Standing order: proceed NATIVELY; max ONE API probe/hour to detect
+  recovery. Killed redundant image-critique retry loop (proc_2625cac6c408);
+  the one successful sol image critique used a STALE V2-state prompt (its FIX
+  list = what V3 implemented) — struck as a V3 re-attack. Video re-attack
+  errored (choices:null). No valid external V3 blind re-attack completed.
+- GOAL-A native work (track owner as analyst; documented weakening — analyst
+  knows the fixes, not truly blind):
+  - G5 V4 repair in src/field.zag f3_gen_g5: asymmetric tonal mass (two
+    deep-umber lobes left, one pale lobe upper-right; cloud-shadow / uneven
+    kiln firing). Canonical metrics: raw H-sym 0.706 -> 0.471 (original
+    <0.60 bar now 6/6 PASS), detrended -0.087 -> -0.398, colors 3500 -> 3844.
+    g1-g4,g6 byte-identical; g5 2/2 byte-identical reruns. Shipped
+    your_files/imagination_fields/f3g5.bmp+png (sha256 8d20ab4b...).
+  - Native re-attack: G3>G5>G1>G4>G2>G6; new OPEN tells I-T12 (G1
+    disconnected pale streak), I-T13 (G2 radial-glow focal marker);
+    video V-T4/V-T5/V-T6 stay OPEN (vid1 diff 28.33 organic morph, vid2 diff
+    4.95 near-static opening, both subject-less). G6 still weakest.
+  - blind_g1.html rewritten (no "generated entirely by TNN's own code";
+    neutral wording; video specs corrected to 36 frames).
+  - BLIND-G1.md bar reconciled to frozen 0%-"obviously AI" default
+    (earlier >=4/6 draft reverted).
+  - Docs: GOALA_INDINGUISHABLE/{PREREG,QUALITY-LADDER,TELL-CLOSURE,BLIND-G1}.md
+    updated; commit pending.
+- Sealed mood map untouched (~/workspace/tnn-lab/imagination/hidden_files/mood_blind_map.txt not opened).
+- Next API probe eligible no earlier than ~07:50 UTC (one/hour rule).

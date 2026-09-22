@@ -40,3 +40,24 @@ Frozen 2026-09-22 ~06:20 UTC. Track owner: go-time subagent (grok-first).
 - Re-rendering legacy 8kHz emitters (Micah's call, byte-identical preserved).
 - Opening the sealed mood blind map (~/workspace/tnn-lab/imagination/hidden_files/mood_blind_map.txt) — NEVER.
 - Sine-LUT replacement (audio track's pending work; this track measures and red-teams audio, doesn't rebuild the synth).
+
+## Amendment 2026-09-22 ~06:50 UTC — provider fallback, native re-attack
+- ExperientialLabs grok-4.7 HARD-DOWN: HTTP 429 insufficient_credits, balance
+  -$0.02 (verified by direct probe; top-up is a spending decision for Micah —
+  flagged, not acted on). gpt-5.6-sol via UnoRouter timing out intermittently
+  (`choices: null`). Standing order: proceed NATIVELY; max ONE API probe per
+  hour to detect recovery; no retry burning (a redundant image-critique retry
+  loop was killed).
+- TELL-CLOSE bar analyst substitution: while providers are down, the "fresh
+  blind red-team" is the track owner (native). DOCUMENTED WEAKENING: the
+  analyst knows the fixes and cannot be truly blind. Closure still requires
+  the measured bar; tells the native analyst spots stay OPEN; external blind
+  re-attack resumes when providers recover.
+- Record correction: the earlier "sol blind re-attack on G v6" was not a valid
+  V3 re-attack (image prompt described the V2 pre-repair state; video errored).
+  Struck from the closure record; see TELL-CLOSURE.md.
+- G5 V4 repair: raw H-symmetry 0.706 → 0.471, closing the ORIGINAL raw < 0.60
+  bar on 6/6 (genuine compositional change, not metric gaming). Detrended bar
+  unchanged and still binding.
+- BLIND-G1.md bar reconciled to this prereg's frozen default: 0% "obviously
+  AI" across all 8 pieces (an earlier draft's ≥4/6 weakening reverted).

@@ -9,9 +9,12 @@
 Present the 6 images (and 2 videos) to Micah without telling him they are TNN-made or what changed. For each, he answers: **"human-made" / "can't tell" / "obviously AI"**, plus one line on what tipped him if "obviously AI".
 
 ## Bar (frozen before his ratings)
-- **PASS**: ≥4/6 images not rated "obviously AI", and neither video rated "obviously AI".
-- **PARTIAL**: 3/6 images pass.
-- **FAIL**: ≤2/6 images pass, or either video "obviously AI".
+Restored to the PREREG default (2026-09-22): **0% "obviously AI"** on forced
+choice, >50% "human-made" or "can't tell". An earlier draft of this file
+weakened this to ≥4/6 images not "obviously AI" (allowing two image failures);
+that weakening is reverted — the original zero-tolerance criterion stands.
+- **PASS**: zero "obviously AI" ratings across all 8 pieces (6 images + 2 videos).
+- **FAIL**: any piece rated "obviously AI".
 - Every "obviously AI" with a named tip → new tell for the TELL-HUNT loop.
 
 ## Notes

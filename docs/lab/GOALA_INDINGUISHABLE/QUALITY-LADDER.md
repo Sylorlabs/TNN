@@ -69,10 +69,31 @@ All HIGH/MEDIUM tells were fixed in the Zag sources; fixes verified by re-render
 | f3g2 | 12,614 | 0.197 | -0.029 | PASS |
 | f3g3 | 6,391 | -0.009 | -0.146 | PASS |
 | f3g4 | 8,498 | 0.331 | -0.040 | PASS |
-| f3g5 | 3,500 | 0.706* | -0.087 | PASS |
+| f3g5 | 3,844 | 0.471 | -0.398 | PASS (V4) |
 | f3g6 | 15,076 | 0.012 | -0.217 | PASS |
 
 \* raw confounded by vertical gradient; binding metric is detrended (< 0.30).
+V4 note: g5's raw 0.706 (V3) failed the ORIGINAL raw < 0.60 bar. Rather than
+bend the bar, g5 was repaired natively (V4, 2026-09-22 ~06:50 UTC): two
+overlapping deep-umber lobes darken the left field (cloud-shadow / uneven kiln
+firing), one pale lobe lifts the upper right. Genuine compositional change —
+also answers the "empty by default" weakness — not metric gaming. Canonical
+metrics (proc_6f9a7672f775 script): raw 0.706 → **0.471** (< 0.60 PASS),
+detrended −0.087 → −0.398 (< 0.30 PASS), unique colors 3,500 → 3,844.
+g1–g4, g6 byte-identical (V3 renders untouched); g5 2/2 byte-identical reruns.
+
+## V4 native repair pass (2026-09-22 ~06:50 UTC, no providers available)
+
+ExperientialLabs grok-4.7 hard-down (429 insufficient_credits); sol via
+UnoRouter timing out. Standing order: proceed natively, max one API probe/hour.
+- g5 V4 repair above (raw bar now 6/6 PASS on the original < 0.60 bar).
+- Native re-attack of all 6 V3/V4 images + both videos by the track owner
+  (documented limitation: analyst knows the fixes — weaker than a fresh blind;
+  see TELL-CLOSURE.md). Residual tells recorded, none hidden.
+- blind_g1.html rewritten: no authorship reveal ("generated entirely by TNN's
+  own code" removed), video specs corrected to 36 frames, neutral wording.
+- BLIND-G1.md bar reconciled to the frozen PREREG default: 0% "obviously AI"
+  across all 8 pieces (an earlier draft had weakened this to ≥4/6 — reverted).
 - Video: true motion-advection morph (vs per-cell timing offsets) and audio-visual coupling (filter swell tied to visual transitions) are deferred.
 - Content detail still bounded by the 24x24 field grid (bilinear smooth). A 48x48 grid refactor was scoped: ~40 touch sites, deferred as follow-up (logged).
 - Video keyframe content unchanged (same 4 imagined keys); only fidelity upgraded.
