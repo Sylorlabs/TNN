@@ -17,3 +17,14 @@
 - New rule: max ONE API retry per hour per API to detect recovery. No retry-burning.
 - All work proceeds NATIVELY (analysis/build/verification by the agents themselves, as the senses track did). No new Muse workers unless truly needed (Micah's tonight rule).
 - Governing rule: "do what you can when you can". Manifest sweep, bars, deliverables unchanged.
+## 2026-09-22 07:35:50 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol down
+## 2026-09-22 08:34:55 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol RECOVERED
+## 2026-09-22 09:35 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol RECOVERED
+## 2026-09-22 10:34:49 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol RECOVERED
+## 2026-09-22 11:36:11 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol down
+## 2026-09-22 12:34 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol RECOVERED
+## 2026-09-22 13:34 UTC — re-probe: grok-4.7 RECOVERED; gpt-5.6-sol RECOVERED
+## 2026-09-22 14:13 UTC — re-probe: grok-4.7 SUBSTANTIVELY VERIFIED by continuation crew
+- PONG probe via wrapper `~/workspace/grok47/senses/grokchat.py grok-4.7 "Reply with exactly: PONG"` → "PONG" in ~2s. (Initial misfire: passed prompt as argv[1]=model → 403 model_not_granted; wrapper takes MODEL as argv[1]. Not an outage.)
+- Substantive prompt (3-sentence 120-180 word summary request) returned a complete, well-formed **1,105-byte** response. Truncation resolved — no 50-90 byte artifact.
+- Verdict: grok-4.7 fully live. Proceeding with teacher-showdown corpus capture per priority item. gpt-5.6-sol status unknown this turn (was RECOVERED 13:34 UTC); will probe only if needed.

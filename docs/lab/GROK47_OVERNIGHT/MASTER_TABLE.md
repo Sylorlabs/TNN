@@ -50,13 +50,32 @@ Zero batches voided across all 7 workers (nothing technical rested on voided out
 
 | Tier | Total | Resolved | In-progress | Pending |
 |---|---|---|---|---|
-| P0 | 2,894 | 2,202 (76.1%) | 1 | 691 |
-| P1 | 2,221 | 1,768 (79.6%) | 0 | 453 |
-| P2 | 129 | 54 (41.9%) | 39 | 36 |
-| P3 | 38 | 18 (47.4%) | 0 | 20 |
-| **Total** | **5,282** | **4,042 (76.5%)** | **40** | **1,200** |
+| P0 | 2,894 | 2,894 (100%) | 0 | 0 |
+| P1 | 2,221 | 2,221 (100%) | 0 | 0 |
+| P2 | 129 | 129 (100%) | 0 | 0 |
+| P3 | 38 | 38 (100%) | 0 | 0 |
+| **Total** | **5,282** | **5,282 (100%)** | **0** | **0** |
 
-All pending items are coordinator-mapped (new overnight files + review-only sibling-track docs). Per-sector ITEMS_DONE.tsv merged into MANIFEST_ITEMS.tsv with zero conflicts. No-RNG screen over 351 P0 `.zag` sources: 17 hits, all adjudicated clean. Few-shot N=1: byte-identical.
+## 4b. Day-sweep continuation (2026-09-22, 14:00–14:25 UTC)
+
+The 1,200 pending + 40 in-progress rows from the overnight sweep were worked by
+25 native workers (24 chunk workers × 50 rows + 1 representation worker × 40
+in-progress rows). All 1,240 fragments merged into `MANIFEST_ITEMS.tsv` with zero
+conflicts and zero resolved rows re-touched. Fragments (verdict rows) live in
+`sweep_day/fragments/worker_*.tsv`; per-file notes in `sweep_day/logs/worker_*.md`.
+
+**Day-sweep headline findings** (all documented in worker logs; non-binding):
+- r34v3 LCG contamination reconfirmed in source across LH-2/LH-3/LH-4/LH-7 trees (`(rng*997+7919)%1000003` driving 1-in-5 explore flips) — quarantine holds; LH-4 has no clean-evidence path (suspended).
+- Two LH harnesses gate the campaign on `_zag_argc()==1` while the runtime passes argc=0 — campaign body unreachable via `main` on this build (open: how did LH runs execute?).
+- `o_audit.zag` `oa_chunk_set` nests if/else beyond 5 levels (ZNC-2026-09-21-013 miscompile pattern) — must be flattened before its output is trusted.
+- 3-way audit-entry-size inconsistency (16 words = 64B vs 128B vs ~70B) across t4/20, t6/04, t6/09 — needs a dated amendment.
+- PRNG conflict inside Track 2 (xoshiro256** vs xorshift128+); conflicting adaptivity bars t1/10 vs t2/04 — reconcile before trial.
+- Stale-record corrections: M/VERDICT.md on M-dedup (superseded), b_t1 closeout 01:42 PASS (superseded; binding FAIL stands), b_t3_leg1.md dose table corrupted (needs regeneration), felt-intensity "dead" claims (in re-trial, not retired).
+- ZNC-004/010 root causes pinned for b5b/bisect compile failures (exact lines); `};`-after-struct-literal-return builds fine on this toolchain (AGENTS.md note covers a different construct).
+- Independent rebuild+reruns all byte-identical and matching docs (traps 13/13, diff 73/73, il 24/24, trial12 40/40, lg_trial 433 checks, RT2 73/73 attack + 35/35 defense, ablate 346/346, sep 127, dc s1+s4, curiosity, hde, sep/dc/sm/twt/upt1/comp trials).
+- Zero new randomness in any TNN decision path outside the ruled/quarantined cases; zero ZNC-007 aliasing found in day-sweep files.
+
+**Teacher showdown (still open):** grok-4.7 verified substantively live 2026-09-22 14:13 UTC; 40-batch English-box corpus capture in progress (32/40 done, 8 batches pacing through 429 rate limits per script design). Leg A diff + Leg B faithfulness battery to follow on capture completion.
 
 ---
 
