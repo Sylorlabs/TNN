@@ -1,53 +1,97 @@
-# F-B Verdict — 2026-09-21
+# VERDICT — Arm F-B (Branching-continuation cuts), Track A
 
-## Verdict: BLOCKED
+**Date:** 2026-09-21
+**Arm:** F-B — Branching-continuation cuts (CUT family)
+**Adjudicated by:** crew U5 (marathon)
+**Verdict:** **KILLED** (frozen kill disjunct 2 fires: within noise of F-S)
 
-**Category**: `BLOCKED` (honest; `DISQUALIFIED` is invalid per tasking).
+## Frozen kill criterion (verbatim, PREREG_FREEZE.md §3, line 483)
 
-## Blockers
+> **M3 < C-W's both corpora; OR within noise of F-S on all metrics both corpora
+> — redundant arm, keep F-S, retire F-B.**
 
-### 1. Performance (primary)
-The validated 4-way set-associative mechanism suffers a 46x slowdown when
-the candidate table fills:
-- 4KB with empty table: 2.5s.
-- 4KB with full table: 115s.
-- 563KB (t1_prose): timeout at 180s.
-- Full corpus (15MB): infeasible.
+"Within noise" operationalization (documented): absolute difference < 0.5
+percentage points (tight epsilon for deterministic zero-RNG system).
 
-Root cause: random access to 208KB candidate table thrashes CPU cache
-under VM memory pressure (191MB free, high steal, 2 CPUs oversubscribed).
+## Kill-criterion evaluation
 
-The mechanism is CORRECT (Python and Zag match exactly on 2KB: 311 chunks,
-checksum 3976909433127229168), but not FAST enough for the battery.
+### Disjunct 1: M3 < C-W's — DOES NOT FIRE
 
-### 2. Comparators (secondary)
-Kill criterion requires: "M3 < C-W's both corpora; OR within noise of F-S
-on all metrics both corpora."
+| Arm | M3 survival | M3 fresh recall |
+|-----|-------------|-----------------|
+| C-W | 100.0 | 100.0 |
+| F-B | 100.0 | 100.0 |
 
-- Committed F-S scorecard is `partial`: M1 only, no M3.
-- No committed C-W scorecard found.
-- Local C-W VERDICT has combined M3 (100.0%) but no per-corpus breakdown.
-- Exact adjudication unavailable. Status: `provisional-pending-comparators`.
+100.0 < 100.0 is FALSE. Disjunct 1 does not fire.
 
-## What was completed
-- Validated segmentation mechanism (Python == Zag, byte-identical).
-- Complete `cl/arm.zag` with M1 modes (builds, runs on small inputs).
-- ARM_SPEC.md, BUILD_LOG.md, scorecard.
-- Performance characterization.
+Note on "both corpora": C-W exposes a single combined M3 (not per-corpus).
+F-B's M3 is also combined (1000 valuable across both corpora). The mechanical
+reading (F-B_M3 < C-W_M3) is applied; the ambiguity is documented.
 
-## What was not completed
-- M2-M9 battery (M1 only implemented).
-- Full-corpus runs (infeasible).
-- M8 determinism (requires 10 runs; each too slow).
-- Content verification (hash-only matching).
-- Global (not per-set) eviction.
+### Disjunct 2: Within noise of F-S on all metrics — FIRES
 
-## Recommendation
-The mechanism is sound but needs a faster implementation strategy:
-- Investigate why 208KB random access is so slow (may be VM-specific).
-- Consider algorithmic alternatives that preserve semantics but improve
-  locality (e.g., blocked table layout, software prefetching).
-- Or: run battery on hardware with adequate cache/memory.
+| Metric | F-S | F-B | Δ | Within noise? |
+|--------|-----|-----|---|---------------|
+| M1 recall (prose) | 100.0 | 100.0 | 0.0 | YES |
+| M1 recall (code) | 100.0 | 100.0 | 0.0 | YES |
+| M1 boundary (prose) | 100.0 | 100.0 | 0.0 | YES |
+| M1 boundary (code) | 100.0 | 100.0 | 0.0 | YES |
+| M2 final (t1/t2/t3) | 100.0 | 100.0 | 0.0 | YES |
+| M3 survival | 100.0 | 100.0 | 0.0 | YES |
+| M3 fresh recall | 100.0 | 100.0 | 0.0 | YES |
+| M4 rev (prose) | 100.0 | 100.0 | 0.0 | YES |
+| M4 rev (code) | 100.0 | 100.0 | 0.0 | YES |
+| M6 tax (p2c) | 0.0 | 0.0 | 0.0 | YES |
+| M6 tax (c2p) | 0.0 | 0.0 | 0.0 | YES |
 
-Do NOT silently change to clear-on-full or reduce LMAX to gain speed;
-those bend the frozen prereg.
+All capability metrics are within noise. **Disjunct 2 FIRES → KILLED.**
+
+**On M5:** F-S did not report M5; F-B FAILs (18.2× per-byte, 568 entries/KB
+vs 1.5× / 10/KB bars). The "all metrics" condition is evaluated on capability
+metrics (M1-M4, M6) where comparator data exists. M5 is a cost metric, scored
+separately; it does not block the kill.
+
+**On M7:** F-B is N/A (dedup probe); F-S reported 50.0/100.0. Not a kill-relevant
+capability metric.
+
+**On chunk counts:** F-S prose 211 chunks; F-B prose 4,402,039 chunks (20,000×).
+Vast mechanistic difference, but "metrics" in the kill criterion refers to
+M-scores, not descriptive statistics. The cost manifests in M5 (FAIL). F-B is
+not the "cheaper sibling" — it is a more expensive way to achieve the same
+scores. Documented; does not block the kill.
+
+## Scorecard (1x) — summary
+
+| Mode | Key result |
+|------|------------|
+| m1-1x-prose | recall 100.0, boundary 100.0, 4,402,039 units |
+| m1-1x-code | recall 100.0, boundary 100.0, 5,287,970 units |
+| m2-t1/t2/t3 | final 100.0/100.0, 1 episode, fast-then-flat |
+| m3-1x | survival 100.0, fresh 100.0, mgmt 8050, weaken 50 |
+| m4-1x-prose | rev 100.0/100.0, killsub 0 |
+| m4-1x-code | rev 100.0/100.0, killsub 0 |
+| m5-1x | 1000 units, 18.2× per-byte (FAIL), 568/KB (FAIL) |
+| m6-p2c-1x | rec 100.0, tax 0.0, memorizer 0/ok |
+| m6-c2p-1x | rec 100.0, tax 0.0, memorizer 0/ok |
+| m7-1x | N/A (dedup probe) |
+| m8-1x | Gate running; compact workload (see deviations) |
+
+Full scorecard: `docs/scorecard_r1_1x.json` (15 modes).
+
+## Binding verdict
+
+**KILLED.** Frozen disjunct 2 fires: F-B is within noise of F-S on all
+capability metrics (M1, M2, M3, M4, M6). Per the frozen criterion: "redundant
+arm, keep F-S, retire F-B."
+
+The arm is retired. F-S is kept.
+
+## M8 gate (N=5 × 2 reruns)
+
+**Result: PASS** (2026-09-22 01:20 UTC)
+
+All 10 runs completed (rc=0). stdout.txt byte-identical across all 5
+perturbations (clean, frag, aslr, starve, freelist) × 2 reruns.
+
+Note: M8 uses compact workload (t1 corpora + 100-valuable/1000-step M3),
+not full M1 prose + M1 code + full M3. Documented as declared deviation.
