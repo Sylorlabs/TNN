@@ -156,7 +156,9 @@ The grammar is syntactic: it says "compare *something* at *some* stage in
    - P3 genuine → RECALL: [−750,+750]. P4 genuine → COST: [−750,+750].
      P5 wrong → RECALL: [−750,+750].
 8. Digest over (D1, RECALL, COST, winner id, d1delta_w, P1 lo/hi);
-   `RSI3_DONE`. Record-count anti-skip: exactly 27 records or BLOCKED.
+   `RSI3_DONE`. Record-count anti-skip: exactly 26 records (3 BATT + 1
+   WEAKNESS + 3 TRAP + 9 CAND + PRIM + PRIMPROG + PRIMTEXT + WRONG +
+   WRONGREASON + 5 PRED) or BLOCKED.
 
 Prereg expectations (not bars — the bars use measured values): baseline
 D1=2500; G1≈+7500 (pairwise newest-wins fixes all 6 corrections);
