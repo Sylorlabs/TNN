@@ -246,14 +246,14 @@ False claims, corrections, and process errors from the 2026-09-21/22 everything-
 
 | Category | Rows | Status |
 |---|---|---|
-| §1 Our false claims / corrections | 26 claim rows (62 claim groups touched in the sweep: 36 annotate, 25 restate, 1 retract; 0 measured values deleted) | All corrected in-document |
+| §1 Our false claims / corrections | 29 claim rows (62 claim groups touched in the sweep: 36 annotate, 25 restate, 1 retract; 0 measured values deleted) | All corrected in-document |
 | §2 False accusations against TNN cleared | 4 | All cleared with evidence |
 | §3 Valid red-team captures | 19 | All landed; repairs ordered where applicable |
 | §4 Red-team / process misses | 7 | Documented; open ones cross-referenced to §6 |
 | §5 Internal process errors | 8 | Corrected; policy changes recorded |
-| §6 Open / unresolved governance and follow-ups | 44 | Awaiting Micah's word or further testing |
+| §6 Open / unresolved governance and follow-ups | 46 | Awaiting Micah's word or further testing |
 | §7 GROK47 overnight corrections | 12 | All recorded with evidence |
-| **Total** | **120** | |
+| **Total** | **125** | |
 
 **Never corrected (as of 2026-09-22):** none outstanding — the two items previously listed here
 are now annotated in-document with dated CORRECTION 2026-09-22 notes:

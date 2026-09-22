@@ -68,4 +68,4 @@ All pending items are coordinator-mapped (new overnight files + review-only sibl
 4. Sine-LUT reinterpretation authorization (structural); Arm C stays parked (gate amendment unsigned).
 5. IS-R3 arm prereg; sine-LUT phase-3 head-to-head; dialogue re-freeze; packets re-render/re-blind.
 
-Full detail: `PENDING_FOR_MORNING.md` · Error ledger: `MASTER_ERROR_LEDGER.md` (120 rows, nothing never-corrected).
+Full detail: `PENDING_FOR_MORNING.md` · Error ledger: `MASTER_ERROR_LEDGER.md` (125 rows, nothing never-corrected).
