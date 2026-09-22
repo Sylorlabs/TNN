@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Deterministic battery author for the recency-vs-coherence trial.
+
+No RNG. Hand-designed values per the frozen PREREG_R4C.md class targets;
+every target is ASSERTED by recomputation before anything is written.
+Outputs:
+  battery_r4c.csv      (oracle only — carries gt)
+  battery_table.zag.txt (Zag data literal — NO gt; pasted into rsi4c.zag)
+"""
+import csv, sys
+
+EQ, LT, GT = 0, 1, 2
+SILENT = -1
+
+def sat(v, aval, op):
+    if op == EQ: return v == aval
+    if op == LT: return v < aval
+    return v > aval
+
+def score(vold, vnew, rels, pick):
+    v = vnew if pick == "NEW" else vold
+    return sum(1 if sat(v, a, op) else -1 for (a, op) in rels)
+
+def apply_chan(rels, cidx, caval):
+    if cidx == SILENT: return rels
+    out = [list(r) for r in rels]
+    out[cidx][0] = caval
+    return [(a, op) for (a, op) in out]
+
+items = []
+iid = 0
+def add(key, vold, vnew, rels, cidx, caval, gt, cls):
+    global iid
+    iid += 1
+    items.append(dict(id=iid, key=key, vold=vold, vnew=vnew,
+                      rels=rels, cidx=cidx, caval=caval, gt=gt, cls=cls))
+
+# N-clean x6: NEW strictly wins pre; channel SILENT
+for i in range(6):
+    o, n, m = 100+10*i, 200+10*i, 150+10*i
+    add(1000+i, o, n, [(m, LT), (m, GT), (n, EQ)], SILENT, 0, "NEW", "N-clean")
+# O-clean x6: OLD strictly wins pre; channel SILENT
+for i in range(6):
+    o, n, m = 200+10*i, 100+10*i, 150+10*i
+    add(2000+i, o, n, [(m, LT), (m, GT), (o, EQ)], SILENT, 0, "OLD", "O-clean")
+# ADV-NEW x2: OLD wins pre (stale anchor); correction flips to NEW
+for i in range(2):
+    o, n, m = 100+10*i, 200+10*i, 150+10*i
+    add(3000+i, o, n, [(o, EQ), (m, LT), (m, GT)], 0, n, "NEW", "ADV-NEW")
+# ADV-OLD x2: NEW wins pre (stale anchor); correction flips to OLD
+for i in range(2):
+    o, n, m = 200+10*i, 100+10*i, 150+10*i
+    add(4000+i, o, n, [(n, EQ), (m, LT), (m, GT)], 0, o, "OLD", "ADV-OLD")
+# NEITHER x8: tie pre (both <= 0); SILENT
+for i in range(8):
+    o, n, m = 100+10*i, 200+10*i, 150+10*i
+    add(5000+i, o, n, [(m, LT), (m, GT), (999, EQ)], SILENT, 0, "WITHHOLD", "NEITHER")
+
+assert len(items) == 24, len(items)
+
+# --- assert every prereg construction target ---
+for it in items:
+    rels = it["rels"]
+    so_pre = score(it["vold"], it["vnew"], rels, "OLD")
+    sn_pre = score(it["vold"], it["vnew"], rels, "NEW")
+    rels_post = apply_chan(rels, it["cidx"], it["caval"])
+    so_post = score(it["vold"], it["vnew"], rels_post, "OLD")
+    sn_post = score(it["vold"], it["vnew"], rels_post, "NEW")
+    cls, gt = it["cls"], it["gt"]
+    if cls == "N-clean":
+        assert sn_pre > so_pre and it["cidx"] == SILENT and gt == "NEW", it
+    elif cls == "O-clean":
+        assert so_pre > sn_pre and it["cidx"] == SILENT and gt == "OLD", it
+    elif cls == "ADV-NEW":
+        assert so_pre > sn_pre and sn_post > so_post and gt == "NEW", it
+    elif cls == "ADV-OLD":
+        assert sn_pre > so_pre and so_post > sn_post and gt == "OLD", it
+    elif cls == "NEITHER":
+        assert so_pre == sn_pre <= 0 and so_post == sn_post and gt == "WITHHOLD", it
+    else:
+        raise AssertionError(cls)
+
+# arm sanity: what each arm SHOULD do (mirrors the Zag logic)
+def arm_recency(it): return "NEW"
+def arm_coherence(it):
+    so = score(it["vold"], it["vnew"], it["rels"], "OLD")
+    sn = score(it["vold"], it["vnew"], it["rels"], "NEW")
+    return "NEW" if sn > so else ("OLD" if so > sn else "WITHHOLD")
+def arm_askfirst(it):
+    r, c = "NEW", arm_coherence(it)
+    if c == "NEW": return ("NEW", 0)
+    rels = apply_chan(it["rels"], it["cidx"], it["caval"])
+    so = score(it["vold"], it["vnew"], rels, "OLD")
+    sn = score(it["vold"], it["vnew"], rels, "NEW")
+    v = "NEW" if sn > so else ("OLD" if so > sn else "WITHHOLD")
+    return (v, 1)
+
+exp = {}
+for name, fn in [("base", lambda it: ("WITHHOLD", 0)),
+                 ("recency", lambda it: ("NEW", 0)),
+                 ("coherence", lambda it: (arm_coherence(it), 0)),
+                 ("askfirst", arm_askfirst)]:
+    acc = wrong = 0
+    for it in items:
+        v = fn(it); v = v[0] if isinstance(v, tuple) else v
+        if v == it["gt"]: acc += 1
+        elif v in ("NEW", "OLD"): wrong += 1
+    exp[name] = (acc, wrong)
+print("expected (acc, wrong):", exp)
+assert exp["askfirst"][0] > exp["coherence"][0] > exp["recency"][0], exp
+assert exp["askfirst"][1] <= exp["coherence"][1] <= exp["recency"][1], exp
+
+# --- write CSV (oracle only) ---
+with open("battery_r4c.csv", "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(["id","key","vold","vnew","a1","op1","a2","op2","a3","op3",
+                "cidx","caval","gt","class"])
+    for it in items:
+        (a1,op1),(a2,op2),(a3,op3) = it["rels"]
+        w.writerow([it["id"],it["key"],it["vold"],it["vnew"],a1,op1,a2,op2,
+                    a3,op3,it["cidx"],it["caval"],it["gt"],it["cls"]])
+
+# --- write Zag data literal (NO gt) ---
+with open("battery_table.zag.txt", "w") as f:
+    f.write("// generated by gen_battery_r4c.py — DO NOT HAND-EDIT\n")
+    f.write("// 24 items x 12 i32: id,key,vold,vnew,a1,op1,a2,op2,a3,op3,cidx,caval\n")
+    f.write("// cidx: 0/1/2 = correct that relation's anchor to caval; -1 = SILENT\n")
+    f.write("fn batt_data()[288]i32 {\n    return [\n")
+    for it in items:
+        (a1,op1),(a2,op2),(a3,op3) = it["rels"]
+        vals = [it["id"],it["key"],it["vold"],it["vnew"],a1,op1,a2,op2,
+                a3,op3,it["cidx"],it["caval"]]
+        f.write("        " + ",".join(str(v) for v in vals) + ",\n")
+    f.write("    ];\n}\n")
+print("wrote battery_r4c.csv and battery_table.zag.txt")
