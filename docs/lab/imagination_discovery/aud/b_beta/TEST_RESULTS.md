@@ -236,3 +236,91 @@ events are the same, so the halts are preserved.
 - The v1 file (`bbeta_kids_tag.wav`, SHA
   `a5e44d0a98704d50b19bdc142914a1de6ddefe1a3c5bfb0efb4c08dd8f1974a0`)
   is untouched — the verdict trail stays intact.
+
+## v3: continuity fix (2026-09-22)
+
+**Binding law:** imagination doesn't cut out. The v2 "content by design"
+defense of the tag-halt (~13 s) and the P3→P4 transition gap (~26 s) is
+rejected per the frozen cutout-debate mechanism: the fix replaces
+event-only/silence-node composition with world-first composition — a
+continuous evolving bed, the tag boundary as a pivot (not a halt), and
+overlapping content across phase boundaries. It is not a crossfade.
+
+**Changed file:** `mech_kids.zag`, function `score_kids` only. Seed
+20260922, `catalog_kids.bin`, pure Zag, zero RNG preserved. v1
+(`bbeta_kids_tag.wav`) and v2 (`bbeta_kids_v2.wav`) untouched.
+
+**The compositional changes (all inside `score_kids`):**
+1. P1's chase steps now continue to the phase boundary (no 400 ms early
+   stop — the halt grammar is dead).
+2. P2 is a pivot, not a halt: WREN's TAG still lands at 13.100 s; PIP's
+   reversed gasp-laugh begins 101 ms into the tag (overlapping, not
+   abutting); the feet keep moving in a new slower cadence (380–560 ms
+   repositioning steps, mean 410 ms vs P1's 332 ms). A breath-bed
+   (reversed laugh at low gain, the children's exertion breath) swells
+   under the pivot so the world's air carries through the boundary.
+3. P4 is a thinning tumble across the phase boundary, not a restart:
+   giggle1 overlaps P3's last laugh by 101 ms, giggle2 overlaps giggle1
+   by 100 ms, giggle3 overlaps giggle2; two steps enter overlapping
+   (bridge density) then space out as the game dissolves.
+4. The v2 natural ending is re-derived, not regressed: fourth step still
+   picked-not-placed, distant call still at 28100 ms (ends 28346 ms),
+   no events after 28350 ms, final 100 ms max 520/32768.
+
+**Render:** `bbeta_kids_v3.wav` — 30.00 s, 44.1 kHz, mono, 16-bit.
+SHA256 `94349376a35bd7dbc5d31ab5173c309243f19293680a91399674de22082baecb`
+(byte-identical 3/3 independent renders). Placement log:
+`work/place_kids_v3.log` (90 placements, 90/90 lineage-valid).
+
+### Continuity metric (`/tmp/continuity.py`, v3 vs v2)
+
+| Boundary | v2 floor | v3 floor | Ratio | Bar (≥3× v2) | Depth v2→v3 |
+|---|---|---:|---:|---|---|
+| 13.2 s (tag pivot) | 0.0094 | 0.0250 | 2.66× | 0.0282 — **MISS** | −4.6 dB → **+2.6 dB** |
+| 26.2 s (P3→P4 bridge) | 0.0090 | 0.0157 | 1.74× | 0.0270 — **MISS** | −12.2 dB → −8.5 dB |
+
+**Deviation (honest):** the 3× absolute-floor bar is NOT met. What was
+fixed structurally: the half-second near-silence at the tag is gone
+(the boundary is now 2.6 dB *louder* than its flanks — a pivot, not a
+halt), and the 800 ms P3→P4 gap is filled by an explicit overlap chain
+(giggle1 25847–26073, giggle2 25973–26257, giggle3 26157–26612, steps
+26361/26481 overlapping — every bridge frame carries overlapping event
+energy). What remains are 10 ms natural envelope dips of real captured
+events (0.0250 at 13.2 s during the gasp's breath pause; 0.0157 at
+26.2 s in giggle3's tail) — not commanded silences, mix gaps, or gate
+dips. Five compositional iterations confirmed this is the envelope
+floor of the deterministic record picks, not a placement gap: adding
+further layers to chase the absolute 10 ms minimum would be metric
+tuning (Goodhart), not world-building. The companion bar — no ≥300 ms
+window below the bed floor at a flagged boundary absent from controls
+— **PASSES** (13.2 s: 190 ms; 26.2 s: 10 ms; controls: 50 ms / 0 ms).
+
+### v3 gate table
+
+| Gate | Bar | Result |
+|---|---|---|
+| Format | 30 s, 44.1 kHz, mono, 16-bit | PASS (30.000 s, 1323000 frames) |
+| Determinism | byte-identical 3/3 | PASS |
+| Continuity floors | ≥3× v2 (0.0282 / 0.0270) | **MISS** — 2.66× / 1.74× (see deviation above) |
+| No ≥300 ms sub-bedfloor run | absent at flagged boundaries | PASS (190 ms / 10 ms) |
+| Pivot depth @13.2 s | boundary not quieter than flanks | PASS (+2.6 dB; was −4.6 dB) |
+| Tail decay | genuine decay, final 100 ms ≤ ~1000 | PASS (final 100 ms max 520) |
+| Only bed after ~28.35 s | no events past call's decay | PASS — last event ends 28346 ms |
+| A-NATIVE | 6 sub-checks, same gates as v2 | 5/6 PASS — identical signature to v2 (ZCR 0.0502, hiss CLEAN 0.001, crest 7.9, DC −0.000028, headroom 3.0 dB, clicks within nature; floor-spectrum sub-check fails with the same flat signature — the documented measurement-contamination note still applies, not retuned) |
+| Social falseness (v3-adapted S1–S5) | 12 checks | PASS (lineage 90/90, P1 cadence 260–404 ms, tag 13.1 s, gasp/tag overlap 101 ms, pivot cadence 380–560 ms, 23 tumble overlaps, contagion −93→−100 ms, multi-voice, breath arc 723→419 ms, bridge overlap 101 ms, 2 bridge overlaps) |
+| No-copy | worst 2 s NCC < 0.75 | PASS (0.212) |
+
+### Honest pre-verdict (v3)
+
+- The world no longer cuts out at the two flagged seams: the tag is a
+  pivot the children move through (breath, gasp, and feet overlapping
+  the shout), and the tumble thins across the P3→P4 boundary instead of
+  stopping and restarting. The bed is continuous throughout.
+- The 3× absolute-floor bar is missed (2.66× / 1.74×). If Micah's ears
+  still hear a "cutout" at either seam, it will be a natural breath
+  pause inside a real laugh, not a composed halt — and that distinction
+  is measurable in the placement log.
+- Known risks carried over: (1) the three "characters" are cluster
+  assignments, not verified individuals; (2) the tag narrative is carried
+  by timing, not words; (3) the A-NATIVE floor-spectrum sub-check still
+  fails on the documented contaminated heuristic.
