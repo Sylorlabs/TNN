@@ -51,6 +51,14 @@ fn f3_get32(ar:[]u8, w:i64) i64 {
     let at:i64 = w * 4;
     return (ar[at] as i64) + (ar[at+1] as i64) * 256 + (ar[at+2] as i64) * 65536 + (ar[at+3] as i64) * 16777216;
 }
+// signed variant: sign-extends bit 31 (f3_get32 is unsigned 0..2^32-1).
+// REQUIRED when interpreting mix samples (peak/abs/scale); the synth's own
+// accumulation is mod-2^32 and stays correct with the unsigned read.
+fn f3_get32s(ar:[]u8, w:i64) i64 {
+    let v:i64 = f3_get32(ar, w);
+    if (v >= 2147483648) { v = v - 4294967296; }
+    return v;
+}
 fn f3_n(ar:[]u8) i64 { return f3_get32(ar, 0); }
 fn f3_type(ar:[]u8) i64 { return f3_get32(ar, 1); }
 fn f3_frames(ar:[]u8) i64 { return f3_get32(ar, 2); }
@@ -846,7 +854,11 @@ fn f3_wavname(which:i64) []u8 {
     if (which == 4) { return "f3song.wav"; }
     if (which == 5) { return "f3unheard.wav"; }
     if (which == 6) { return "f3vid1.wav"; }
-    return "f3vid2.wav";
+    if (which == 7) { return "f3vid2.wav"; }
+    if (which == 8) { return "f3mood_happy.wav"; }
+    if (which == 9) { return "f3mood_scary.wav"; }
+    if (which == 10) { return "f3mood_calm.wav"; }
+    return "f3song_hifi.wav";
 }
 fn f3_zcstr(s:[]u8) []u8 {
     if (s.len < 1 || s.len > 4095) { return ""; }
@@ -881,7 +893,7 @@ fn f3_write_wav(dir:[]u8, which:i64, data:[]u8) i64 {
     if (w != data.len) { return -3; }
     return 0;
 }
-fn f3_wav_header(data:[]u8, nsamp:i64) void {
+fn f3_wav_header_sr(data:[]u8, nsamp:i64, sr:i64) void {
     let dl:i64 = nsamp * 2;
     data[0] = 82 as u8; data[1] = 73 as u8; data[2] = 70 as u8; data[3] = 70 as u8;
     f3_put32(data, 1, 36 + dl);
@@ -890,12 +902,15 @@ fn f3_wav_header(data:[]u8, nsamp:i64) void {
     f3_put32(data, 4, 16);
     j2_put16(data, 10, 1);
     j2_put16(data, 11, 1);
-    f3_put32(data, 6, 8000);
-    f3_put32(data, 7, 16000);
+    f3_put32(data, 6, sr);
+    f3_put32(data, 7, sr * 2);
     j2_put16(data, 16, 2);
     j2_put16(data, 17, 16);
     data[36] = 100 as u8; data[37] = 97 as u8; data[38] = 116 as u8; data[39] = 97 as u8;
     f3_put32(data, 10, dl);
+}
+fn f3_wav_header(data:[]u8, nsamp:i64) void {
+    f3_wav_header_sr(data, nsamp, 8000);
 }
 fn f3_synth_total(ar:[]u8) i64 {
     let frames:i64 = f3_frames(ar);
@@ -1023,6 +1038,148 @@ fn f3_emit_wav(ar:[]u8, dir:[]u8, which:i64, lut:[]u8) i64 {
     }
     nio_free(mix);
     f3_wav_header(pcm, total);
+    let rc:i64 = f3_write_wav(dir, which, pcm);
+    nio_free(pcm);
+    return rc;
+}
+// ---------------- HI-FI synth (Phase 1: 44100 Hz, per-sample envelopes, headroom) ----------------
+// Same imagined field -> PCM contract as f3_synth, but: 44100 Hz / 2756 samples per
+// frame (62.494 ms; field grid unchanged), energy LINEARLY INTERPOLATED per sample
+// between adjacent frames (kills the 16 Hz frame-step zipper that read as harshness),
+// sub-unit fixed-point phase (idx=(pha>>16)&255, <0.5 cent detune), Nyquist cap at
+// 22050 Hz, and peak normalized to 24000 (0.73 FS) so clipping is impossible by
+// construction. Legacy 8 kHz f3_synth is untouched (AVI path depends on it).
+fn f3_hifi_spf() i64 { return 2756; }
+fn f3_hifi_tail() i64 { return 5512; }
+fn f3_synth_total_hifi(ar:[]u8) i64 {
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    let total:i64 = frames * f3_hifi_spf() + f3_hifi_tail();
+    if (total > 500000) { total = 500000; }
+    if (total < 44100) { total = 44100; }
+    return total;
+}
+fn f3_synth_hifi(ar:[]u8, lut:[]u8, total:i64) []u8 {
+    let SR:i64 = 44100;
+    let SPF:i64 = f3_hifi_spf();
+    let TAIL:i64 = f3_hifi_tail();
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    // per-bin fp16 freq + Nyquist max-harmonic at 22050
+    let fbb:[]u8 = nio_alloc(192);
+    if (fbb.len == 0) { return ""; }
+    let mhb:[]u8 = nio_alloc(192);
+    if (mhb.len == 0) { nio_free(fbb); return ""; }
+    let f16:i64 = 7208960;
+    let b:i64 = 0;
+    while (b < 48) {
+        f3_put32(fbb, b, f16);
+        let hz:i64 = f16 / 65536;
+        let mh:i64 = 1;
+        if (hz > 0) { mh = 22050 / hz; }
+        if (mh < 1) { mh = 1; }
+        if (mh > 8) { mh = 8; }
+        f3_put32(mhb, b, mh);
+        // tuning: exact 2^(1/12) per bin (contract: bin b -> 110*2^(b/12) Hz).
+        // (Legacy 8 kHz f3_synth uses 1117040 = 9.5 cents/semitone sharp,
+        // compounding — a tuning bug, left untouched there for AVI determinism.)
+        f16 = f16 * 1110928 / 1048576;
+        b = b + 1;
+    }
+    // brightness table: 11 levels x 8 harmonics, w = 1000 / h^d, d = 4 - q*3/10
+    let btab:[]u8 = nio_alloc(352);
+    if (btab.len == 0) { nio_free(fbb); nio_free(mhb); return ""; }
+    let q:i64 = 0;
+    while (q < 11) {
+        let d:i64 = 4 - q * 3 / 10;
+        let h:i64 = 1;
+        while (h <= 8) {
+            let pw:i64 = 1;
+            let di:i64 = 0;
+            while (di < d) { pw = pw * h; di = di + 1; }
+            f3_put32(btab, q * 8 + h - 1, 1000 / pw);
+            h = h + 1;
+        }
+        q = q + 1;
+    }
+    let mix:[]u8 = nio_alloc((total * 4) as i32);
+    if (mix.len == 0) { nio_free(fbb); nio_free(mhb); nio_free(btab); return ""; }
+    let z2:i64 = 0;
+    while (z2 < total) { f3_put32(mix, z2, 0); z2 = z2 + 1; }
+    // voice loop: bin x harmonic. Phase is per-voice local (deterministic);
+    // energy is interpolated per sample between frame energies (no zipper).
+    let bb:i64 = 0;
+    while (bb < 48) {
+        let h2:i64 = 1;
+        while (h2 <= f3_get32(mhb, bb)) {
+            let inc:i64 = f3_get32(fbb, bb) * h2 * 256 / SR;
+            let pha:i64 = 0;
+            let t:i64 = 0;
+            while (t < frames) {
+                let e0:i64 = f3_acell(ar, t, bb);
+                let e1:i64 = 0;
+                if (t + 1 < frames) { e1 = f3_acell(ar, t + 1, bb); }
+                let bq:i64 = f3_abri(ar, t, bb) / 100;
+                if (bq > 10) { bq = 10; }
+                if (bq < 0) { bq = 0; }
+                let w:i64 = f3_get32(btab, bq * 8 + h2 - 1);
+                let nsp:i64 = SPF;
+                if (t == frames - 1) { nsp = SPF + TAIL; }
+                let base:i64 = t * SPF;
+                if ((e0 > 0 || e1 > 0) && w > 0) {
+                    let s:i64 = 0;
+                    while (s < nsp) {
+                        let es:i64 = (e0 * (nsp - s) + e1 * s) / nsp;
+                        let ew:i64 = es * 28 * w / 1000;
+                        let idx:i64 = (pha >> 16) & 255;
+                        let cur:i64 = f3_get32(mix, base + s);
+                        f3_put32(mix, base + s, cur + j2_get16(lut, idx) * ew / 32767);
+                        pha = pha + inc;
+                        s = s + 1;
+                    }
+                } else {
+                    pha = pha + inc * nsp;
+                }
+                t = t + 1;
+            }
+            h2 = h2 + 1;
+        }
+        bb = bb + 1;
+    }
+    nio_free(fbb);
+    nio_free(mhb);
+    nio_free(btab);
+    return mix;
+}
+fn f3_emit_wav_hifi(ar:[]u8, dir:[]u8, which:i64, lut:[]u8) i64 {
+    let total:i64 = f3_synth_total_hifi(ar);
+    let mix:[]u8 = f3_synth_hifi(ar, lut, total);
+    if (mix.len == 0) { return -10; }
+    let peak:i64 = 0;
+    let ps:i64 = 0;
+    while (ps < total) {
+        let av:i64 = f3_get32s(mix, ps);
+        if (av < 0) { av = 0 - av; }
+        if (av > peak) { peak = av; }
+        ps = ps + 1;
+    }
+    if (peak < 1) { peak = 1; }
+    // normalize peak -> 24000 (0.73 FS): headroom, zero clipping by construction.
+    // the clamps below are dead-code safety; the harness asserts they never fire.
+    let pcm:[]u8 = nio_alloc((44 + total * 2) as i32);
+    if (pcm.len == 0) { nio_free(mix); return -11; }
+    let s2:i64 = 0;
+    while (s2 < total) {
+        let v:i64 = f3_get32s(mix, s2) * 24000 / peak;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        j2_put16(pcm, 22 + s2, v);
+        s2 = s2 + 1;
+    }
+    nio_free(mix);
+    f3_wav_header_sr(pcm, total, 44100);
     let rc:i64 = f3_write_wav(dir, which, pcm);
     nio_free(pcm);
     return rc;
@@ -1530,6 +1687,70 @@ fn f3_gen_unheard(ar:[]u8) void {
     f3_tone(ar, 8, 42, 44, 800, 0, 1, 900);
 }
 
+// ---------------- MOOD-1: intent-labeled pieces (see MOOD-PREREG.md, frozen before composing) ----------------
+// mood: 0=HAPPY, 1=SCARY, 2=CALM. Bins: bin b = 110*2^(b/12) Hz. C3=3 G3=10 C4=15 E4=19 G4=22 C5=27 D5=29 E5=31 G5=34 A5=36 C6=39
+fn f3_gen_mood(ar:[]u8, mood:i64) void {
+    f3_anew(ar);
+    if (mood == 0) {
+        // HAPPY: C major pentatonic, brisk 2-frame notes, high register, bright, kick+hats.
+        f3_tone(ar, 27, 0, 1, 700, 1, 1, 850);
+        f3_tone(ar, 29, 2, 3, 700, 1, 1, 850);
+        f3_tone(ar, 31, 4, 5, 700, 1, 1, 850);
+        f3_tone(ar, 34, 6, 7, 700, 1, 1, 850);
+        f3_tone(ar, 36, 8, 9, 750, 1, 1, 900);
+        f3_tone(ar, 34, 10, 11, 700, 1, 1, 850);
+        f3_tone(ar, 31, 12, 13, 700, 1, 1, 850);
+        f3_tone(ar, 29, 14, 15, 700, 1, 1, 850);
+        f3_tone(ar, 31, 16, 17, 700, 1, 1, 850);
+        f3_tone(ar, 34, 18, 19, 700, 1, 1, 850);
+        f3_tone(ar, 36, 20, 21, 750, 1, 1, 900);
+        f3_tone(ar, 39, 22, 23, 800, 1, 1, 900);
+        f3_tone(ar, 36, 24, 27, 800, 1, 2, 900);
+        f3_tone(ar, 34, 28, 29, 700, 1, 1, 850);
+        f3_tone(ar, 31, 30, 31, 700, 1, 1, 850);
+        f3_tone(ar, 29, 32, 33, 700, 1, 1, 850);
+        f3_tone(ar, 27, 34, 39, 750, 1, 3, 850);
+        f3_tone(ar, 3, 0, 7, 550, 1, 2, 400);
+        f3_tone(ar, 8, 8, 15, 550, 1, 2, 400);
+        f3_tone(ar, 10, 16, 23, 550, 1, 2, 400);
+        f3_tone(ar, 3, 24, 31, 550, 1, 2, 400);
+        f3_tone(ar, 10, 32, 35, 550, 1, 2, 400);
+        f3_tone(ar, 3, 36, 39, 600, 1, 3, 400);
+        let k:i64 = 0;
+        while (k < 6) {
+            f3_tone(ar, 3, k * 8, k * 8 + 1, 900, 0, 1, 200);
+            f3_noise(ar, k * 8 + 4, k * 8 + 4, 220, 800);
+            k = k + 1;
+        }
+        return;
+    }
+    if (mood == 1) {
+        // SCARY: low minor-2nd cluster drones, tritone, slow descending sweeps,
+        // sparse irregular low thumps, thin high whine, noise unease bed.
+        f3_tone(ar, 3, 0, 47, 500, 8, 8, 400);
+        f3_tone(ar, 4, 0, 47, 500, 10, 8, 400);
+        f3_tone(ar, 9, 0, 47, 350, 10, 10, 350);
+        f3_sweep(ar, 30, 12, 4, 20, 400, 400);
+        f3_sweep(ar, 24, 8, 26, 42, 350, 350);
+        f3_tone(ar, 1, 6, 7, 900, 0, 1, 300);
+        f3_tone(ar, 2, 23, 24, 900, 0, 1, 300);
+        f3_tone(ar, 1, 40, 41, 900, 0, 1, 300);
+        f3_tone(ar, 42, 10, 38, 150, 12, 12, 700);
+        f3_noise(ar, 0, 47, 120, 300);
+        return;
+    }
+    // CALM: open 5ths/octaves pad, slow soft arpeggio, no percussion.
+    f3_harm(ar, 15, 0, 47, 250, 6, 6, 450);
+    f3_harm(ar, 22, 0, 47, 200, 8, 8, 400);
+    f3_harm(ar, 27, 8, 47, 150, 8, 8, 400);
+    f3_tone(ar, 15, 0, 7, 400, 4, 4, 450);
+    f3_tone(ar, 19, 8, 15, 400, 4, 4, 450);
+    f3_tone(ar, 22, 16, 23, 400, 4, 4, 450);
+    f3_tone(ar, 27, 24, 31, 450, 4, 4, 450);
+    f3_tone(ar, 31, 32, 39, 400, 4, 4, 450);
+    f3_tone(ar, 34, 16, 31, 180, 8, 8, 450);
+}
+
 // ---------------- VIDEO: image sequence + audio, imagined together ----------------
 fn f3_video_key(v:i64, k:i64, ar:[]u8) void {
     f3_vnew(ar);
@@ -1772,6 +1993,51 @@ fn main() i32 {
             nio_free(arb);
             w = w + 1;
         }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3mood") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3mood-needs-outdir");
+            return 1;
+        }
+        let lut4:[]u8 = nio_alloc(512);
+        j2_sin_init(lut4);
+        let arm:[]u8 = nio_alloc(24576);
+        let md:i64 = 0;
+        while (md < 3) {
+            f3_gen_mood(arm, md);
+            _zag_print("MOOD ");
+            _zag_print(_zag_i64_to_str(md));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_wav(arm, a2, 8 + md, lut4)));
+            md = md + 1;
+        }
+        nio_free(arm);
+        nio_free(lut4);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3hifi") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3hifi-needs-outdir");
+            return 1;
+        }
+        let lut5:[]u8 = nio_alloc(512);
+        j2_sin_init(lut5);
+        let ah:[]u8 = nio_alloc(24576);
+        f3_build(ah, 17);
+        _zag_print("HIFI song rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(ah, a2, 11, lut5)));
+        let md:i64 = 0;
+        while (md < 3) {
+            f3_gen_mood(ah, md);
+            _zag_print("HIFI mood ");
+            _zag_print(_zag_i64_to_str(md));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(ah, a2, 8 + md, lut5)));
+            md = md + 1;
+        }
+        nio_free(ah);
+        nio_free(lut5);
         return 0;
     }
     if (_zag_strcmp(a1, "f3avi") == 1) {
