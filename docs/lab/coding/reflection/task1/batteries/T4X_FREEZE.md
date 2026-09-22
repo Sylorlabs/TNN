@@ -4,6 +4,20 @@
 generation (reflection PREREG §1.2). Any change needs a dated amendment with
 Micah's re-approval.
 
+## Amendment 2026-09-22 — provenance disclosure
+
+The eight T4x **families** (recursion, popcount, nested triangle, sentinel
+argv sum, character filtering, two accumulators, fizzbuzz dispatch,
+run-length encoding) were specified in the reflection prereg. The eight
+**concrete item texts** (exact spec wordings, test vectors, expected outputs
+in `batteries/t4x.json`, and the reference solutions in `t4x_ref/`) were
+authored during Task 1 setup on 2026-09-22 and were **not present in the
+original prereg or the prior workspace** — the prereg named the families,
+not the items. This is disclosed here rather than left ambiguous: the
+novelty claim for T4x rests on (a) the constructs being absent from all
+baseline training (audited below) and (b) the items being frozen before any
+challenger generation, not on the items pre-dating the prereg.
+
 ## Design rationale
 
 Each item requires a construct ABSENT from all baseline training, verified by
