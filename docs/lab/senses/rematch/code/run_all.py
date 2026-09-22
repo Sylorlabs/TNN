@@ -73,6 +73,16 @@ def work(args):
 
 def main():
     root, out, variants = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+    done = set()
+    if os.path.exists(out):
+        with open(out) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    done.add((r["rel"], r["approach"]))
+                except Exception:
+                    pass
+        print("resume: %d records already cached" % len(done), flush=True)
     jobs = []
     for task in TASKS:
         td = os.path.join(root, TDIRS[task])
@@ -86,28 +96,57 @@ def main():
                 fp = os.path.join(vd, f)
                 rel = os.path.relpath(fp, root)
                 for approach in ("A", "B"):
-                    jobs.append((approach, task, fp))
-    print("jobs: %d" % len(jobs), flush=True)
-    with Pool(2) as pool:
-        recs = pool.map(work, jobs, chunksize=8)
-    # attach truths
-    for r in recs:
-        tf = r["fixture"] + ".truth"
-        try:
-            with open(tf) as fh:
-                r["truth"] = fh.read().strip().split("=", 1)[1].strip()
-        except Exception:
-            r["truth"] = None
-        r["rel"] = os.path.relpath(r["fixture"], root)
-    recs.sort(key=lambda r: (r["rel"], r["approach"]))
-    errs = sum(1 for r in recs if "error" in r)
-    with open(out, "w") as f:
+                    if (rel, approach) not in done:
+                        jobs.append((approach, task, fp))
+    print("jobs: %d (skipped %d)" % (len(jobs), len(done)), flush=True)
+    # chunked processing with incremental appends: a reboot loses at most
+    # one chunk, and resume skips everything already cached.
+    CHUNK = 2000
+    total_errs = 0
+    for ci in range(0, len(jobs), CHUNK):
+        chunk = jobs[ci:ci + CHUNK]
+        with Pool(2) as pool:
+            recs = pool.map(work, chunk, chunksize=8)
         for r in recs:
-            f.write(json.dumps(r) + "\n")
-    print("wrote %d records, errors %d -> %s" % (len(recs), errs, out), flush=True)
-    if errs:
+            tf = r["fixture"] + ".truth"
+            try:
+                with open(tf) as fh:
+                    r["truth"] = fh.read().strip().split("=", 1)[1].strip()
+            except Exception:
+                r["truth"] = None
+            r["rel"] = os.path.relpath(r["fixture"], root)
+        recs.sort(key=lambda r: (r["rel"], r["approach"]))
+        with open(out, "a") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        ce = sum(1 for r in recs if "error" in r)
+        total_errs += ce
+        print("  chunk %d/%d: %d records, %d errors" %
+              (ci // CHUNK + 1, (len(jobs) + CHUNK - 1) // CHUNK,
+               len(recs), ce), flush=True)
         for r in recs:
             if "error" in r:
                 print("ERR", r["rel"], r["approach"], r["error"], flush=True)
+    # final deterministic sort of the whole file
+    merged = []
+    with open(out) as f:
+        for line in f:
+            try:
+                merged.append(json.loads(line))
+            except Exception:
+                pass
+    seen = set()
+    dedup = []
+    for r in merged:
+        k = (r["rel"], r["approach"])
+        if k not in seen:
+            seen.add(k)
+            dedup.append(r)
+    dedup.sort(key=lambda r: (r["rel"], r["approach"]))
+    errs = sum(1 for r in dedup if "error" in r)
+    with open(out, "w") as f:
+        for r in dedup:
+            f.write(json.dumps(r) + "\n")
+    print("wrote %d records, errors %d -> %s" % (len(dedup), errs, out), flush=True)
 
 main()
