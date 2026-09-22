@@ -1,0 +1,526 @@
+@import("substrate/R33_NATIVE_IO_V1.zag")
+// ============================================================
+// ocean.zag — D-VID-1 "alien ocean": moving liquid surface of an
+// extrasolar sea. 1024x1024, 48 frames, 24-bit BMP sequence.
+//
+// GENERATIVE DESIGN (no template primitives anywhere in this file:
+// no rect/band/blotch/fill/gradient placement calls; grep-audited):
+//
+//   * Multi-scale deterministic integer-hash value noise, fBm octaves,
+//     domain warping. Everything derives from coordinate hashes; there
+//     is no RNG in any decision path, so identical input -> byte-
+//     identical output.
+//   * TEMPORAL MODEL (film-grain style: persistent + changing + grain):
+//       persistent: large-scale color-domain / depth / drift fields are
+//         3D value noise with LOW time frequency (2-4 time cells over
+//         the 48-frame sequence) -> the same sea throughout, slowly
+//         evolving, strongly time-correlated.
+//       changing:   wave-crest filaments (ridged fBm) are ADVECTED in x
+//         (160 px of travel over the sequence) and the fine ripple
+//         field is 3D noise at HIGHER time frequency (8 time cells) ->
+//         visible moving waves, smoothly time-correlated, never
+//         independent per-frame shimmer.
+//       grain:      per-pixel deterministic hash dither (+/-2 LSB,
+//         uncorrelated frame to frame, tiny amplitude) -> anti-banding
+//         film-grain layer; fine detail stays sharp, never blurred.
+//   * Two-tier evaluation: smooth large-scale fields (depth, hue, drift,
+//     plus the warp displacement itself) are evaluated on a 257x257
+//     coarse grid per frame and bilinearly sampled per pixel (they are
+//     smooth by construction); all SHARP detail (crest filaments,
+//     ripple, sparkle, dither) is evaluated at full 1024 resolution per
+//     pixel. No blur pass exists anywhere.
+//   * Frame-by-frame emission: each 1024x1024x3 frame (3,145,728 bytes,
+//     under the 2^25 slice cap) is rendered into one buffer, written to
+//     disk as BMP, then the buffer is reused. No slice > 2^25 bytes.
+//
+// znc lessons honored: sign handling via masked 63-bit hashes; no `};`;
+// shallow if/else nesting; no `as []i32` indexed aliasing (byte
+// accessors only); O_TRUNC (never O_EXCL); _zag_arg never freed;
+// _zag_strcmp == 1 means equal; argv[1] selects config.
+// ============================================================
+
+// ---------------- small helpers ----------------
+fn o_clamp255(v:i64) i64 {
+    if (v < 0) { return 0; }
+    if (v > 255) { return 255; }
+    return v;
+}
+fn o_clamp01k(v:i64) i64 {
+    if (v < 0) { return 0; }
+    if (v > 1000) { return 1000; }
+    return v;
+}
+fn o_mix(a:i64, b:i64, t:i64) i64 {
+    return a + (b - a) * t / 1000;
+}
+fn o_ss(t:i64) i64 {
+    // smoothstep on 0..1000 -> 0..1000
+    if (t <= 0) { return 0; }
+    if (t >= 1000) { return 1000; }
+    return t * t * (3000 - 2 * t) / 1000000;
+}
+fn o_atoi(s:[]u8) i64 {
+    let v:i64 = 0;
+    let i:i64 = 0;
+    while (i < s.len) {
+        let c:i64 = s[i] as i64;
+        if (c < 48 || c > 57) { return v; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------- deterministic integer-hash value noise ----------------
+// All hashes mix with 64-bit wrap, mask to 63 bits (non-negative), then
+// `% 1001` (low bits avalanche; the f3_hash2 battle-tested pattern).
+fn o_hash2(ix:i64, iy:i64, seed:i64) i64 {
+    let h:i64 = (ix * 374761393 + iy * 668265263 + seed * 974634211) & 9223372036854775807;
+    h = h ^ (h >> 13);
+    h = (h * 1274126177) & 9223372036854775807;
+    h = h ^ (h >> 16);
+    // NOTE (2026-09-22): the high-bit multiply-shift scale ((h>>22)*1000)>>41
+    // is nearly LINEAR in lattice coords for this single-multiply mixer
+    // (verified bit-identical vs Python) — low-bit `% 1001` avalanches
+    // properly and matches the battle-tested f3_hash2 pattern.
+    return h % 1001;
+}
+fn o_hash3(ix:i64, iy:i64, iz:i64, seed:i64) i64 {
+    let h:i64 = (ix * 374761393 + iy * 668265263 + iz * 2246822519 + seed * 3266489917) & 9223372036854775807;
+    h = h ^ (h >> 13);
+    h = (h * 1274126177) & 9223372036854775807;
+    h = h ^ (h >> 16);
+    return h % 1001;
+}
+fn o_ss8(t:i64) i64 {
+    // smoothstep 0..255 -> 0..256
+    return t * t * (768 - 2 * t) >> 16;
+}
+fn o_vn2(x8:i64, y8:i64, seed:i64) i64 {
+    // 2D value noise, fp8 coords -> 0..999
+    let ix:i64 = x8 >> 8;
+    let iy:i64 = y8 >> 8;
+    let fx:i64 = x8 & 255;
+    let fy:i64 = y8 & 255;
+    let sx:i64 = o_ss8(fx);
+    let sy:i64 = o_ss8(fy);
+    let v00:i64 = o_hash2(ix, iy, seed);
+    let v10:i64 = o_hash2(ix + 1, iy, seed);
+    let v01:i64 = o_hash2(ix, iy + 1, seed);
+    let v11:i64 = o_hash2(ix + 1, iy + 1, seed);
+    let a:i64 = v00 + (v10 - v00) * sx / 256;
+    let b:i64 = v01 + (v11 - v01) * sx / 256;
+    return a + (b - a) * sy / 256;
+}
+fn o_vn3(x8:i64, y8:i64, z8:i64, seed:i64) i64 {
+    // 3D value noise, fp8 coords -> 0..999
+    let ix:i64 = x8 >> 8;
+    let iy:i64 = y8 >> 8;
+    let iz:i64 = z8 >> 8;
+    let fx:i64 = x8 & 255;
+    let fy:i64 = y8 & 255;
+    let fz:i64 = z8 & 255;
+    let sx:i64 = o_ss8(fx);
+    let sy:i64 = o_ss8(fy);
+    let sz:i64 = o_ss8(fz);
+    let c000:i64 = o_hash3(ix, iy, iz, seed);
+    let c100:i64 = o_hash3(ix + 1, iy, iz, seed);
+    let c010:i64 = o_hash3(ix, iy + 1, iz, seed);
+    let c110:i64 = o_hash3(ix + 1, iy + 1, iz, seed);
+    let c001:i64 = o_hash3(ix, iy, iz + 1, seed);
+    let c101:i64 = o_hash3(ix + 1, iy, iz + 1, seed);
+    let c011:i64 = o_hash3(ix, iy + 1, iz + 1, seed);
+    let c111:i64 = o_hash3(ix + 1, iy + 1, iz + 1, seed);
+    let x00:i64 = c000 + (c100 - c000) * sx / 256;
+    let x10:i64 = c010 + (c110 - c010) * sx / 256;
+    let x01:i64 = c001 + (c101 - c001) * sx / 256;
+    let x11:i64 = c011 + (c111 - c011) * sx / 256;
+    let y0:i64 = x00 + (x10 - x00) * sy / 256;
+    let y1:i64 = x01 + (x11 - x01) * sy / 256;
+    return y0 + (y1 - y0) * sz / 256;
+}
+fn o_fbm3(x8:i64, y8:i64, z8:i64, oct:i64, seed:i64) i64 {
+    let sum:i64 = 0;
+    let amp:i64 = 1000;
+    let tot:i64 = 0;
+    let xx:i64 = x8;
+    let yy:i64 = y8;
+    let zz:i64 = z8;
+    let s:i64 = seed;
+    let o:i64 = 0;
+    while (o < oct) {
+        sum = sum + o_vn3(xx, yy, zz, s) * amp / 1000;
+        tot = tot + amp;
+        xx = xx * 2;
+        yy = yy * 2;
+        zz = zz * 2;
+        amp = amp / 2;
+        s = s + 131;
+        o = o + 1;
+    }
+    return sum * 1000 / tot;
+}
+fn o_ridge2(x8:i64, y8:i64, oct:i64, seed:i64) i64 {
+    // ridged fBm: filaments along the n=0.5 contours, sharpened by
+    // squaring -> wave-crest lines. 0..999.
+    let sum:i64 = 0;
+    let amp:i64 = 1000;
+    let tot:i64 = 0;
+    let xx:i64 = x8;
+    let yy:i64 = y8;
+    let s:i64 = seed;
+    let o:i64 = 0;
+    while (o < oct) {
+        let n:i64 = o_vn2(xx, yy, s);
+        let d:i64 = 2 * n - 1000;
+        if (d < 0) { d = 0 - d; }
+        let r:i64 = 1000 - d;
+        r = r * r / 1000;
+        sum = sum + r * amp / 1000;
+        tot = tot + amp;
+        xx = xx * 2;
+        yy = yy * 2;
+        amp = amp / 2;
+        s = s + 131;
+        o = o + 1;
+    }
+    return sum * 1000 / tot;
+}
+
+// ---------------- coarse grid (smooth large-scale fields) ----------------
+// GS cells per side, 3 u16 channels: depth, hue, drift. Bilinearly
+// sampled per pixel. Grid is rebuilt per frame with the frame's time
+// coordinate baked into the 3D noise.
+fn o_gs() i64 { return 256; }
+fn o_gput(g:[]u8, cell:i64, ch:i64, v:i64) void {
+    let at:i64 = (cell * 5 + ch) * 2;
+    g[at] = (v & 255) as u8;
+    g[at + 1] = ((v >> 8) & 255) as u8;
+}
+fn o_gget(g:[]u8, cell:i64, ch:i64) i64 {
+    let at:i64 = (cell * 5 + ch) * 2;
+    return (g[at] as i64) + (g[at + 1] as i64) * 256;
+}
+fn o_grid_build(g:[]u8, tz_slow8:i64, tz_mid8:i64) void {
+    let N:i64 = o_gs() + 1;
+    let gy:i64 = 0;
+    while (gy < N) {
+        let gx:i64 = 0;
+        while (gx < N) {
+            // domain warp at F=3 (persistent, slow time)
+            let qx:i64 = o_fbm3(gx * 3, gy * 3, tz_slow8, 2, 11);
+            let qy:i64 = o_fbm3(gx * 3, gy * 3, tz_slow8, 2, 12);
+            let wx:i64 = gx * 3 + (qx - 500) * 4 / 1000;
+            let wy:i64 = gy * 3 + (qy - 500) * 4 / 1000;
+            // depth field at F=6 on warped coords
+            let depth:i64 = o_fbm3(wx * 2, wy * 2, tz_slow8, 3, 21);
+            // hue (color domain) at F=2, slow time
+            let hue:i64 = o_fbm3(gx * 2, gy * 2, tz_slow8, 2, 31);
+            // drift (current brightness) at F=4, mid time
+            let drift:i64 = o_fbm3(gx * 4, gy * 4, tz_mid8, 2, 41);
+            let cell:i64 = gy * N + gx;
+            o_gput(g, cell, 0, depth);
+            o_gput(g, cell, 1, hue);
+            o_gput(g, cell, 2, drift);
+            o_gput(g, cell, 3, qx);
+            o_gput(g, cell, 4, qy);
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+}
+fn o_grid_sample(g:[]u8, gx8:i64, gy8:i64, ch:i64) i64 {
+    let N:i64 = o_gs() + 1;
+    let ix:i64 = gx8 >> 8;
+    let iy:i64 = gy8 >> 8;
+    if (ix > 255) { ix = 255; }
+    if (iy > 255) { iy = 255; }
+    let fx:i64 = gx8 & 255;
+    let fy:i64 = gy8 & 255;
+    let c00:i64 = o_gget(g, iy * N + ix, ch);
+    let c10:i64 = o_gget(g, iy * N + ix + 1, ch);
+    let c01:i64 = o_gget(g, (iy + 1) * N + ix, ch);
+    let c11:i64 = o_gget(g, (iy + 1) * N + ix + 1, ch);
+    let a:i64 = c00 + (c10 - c00) * fx / 256;
+    let b:i64 = c01 + (c11 - c01) * fx / 256;
+    return a + (b - a) * fy / 256;
+}
+
+// ---------------- per-pixel render ----------------
+fn o_render_pixel(g:[]u8, x:i64, y:i64, f:i64, tz_slow8:i64, tz_fast8:i64, adv8:i64, out_r:*i64, out_g:*i64, out_b:*i64) void {
+    o_render_pixel_dbg(g, x, y, f, tz_slow8, tz_fast8, adv8, 0, out_r, out_g, out_b);
+}
+fn o_render_pixel_dbg(g:[]u8, x:i64, y:i64, f:i64, tz_slow8:i64, tz_fast8:i64, adv8:i64, dbg:i64, out_r:*i64, out_g:*i64, out_b:*i64) void {
+    // smooth large-scale fields from the coarse grid (4 px per cell)
+    let depth:i64 = o_grid_sample(g, x * 64, y * 64, 0);
+    let hue:i64 = o_grid_sample(g, x * 64, y * 64, 1);
+    let drift:i64 = o_grid_sample(g, x * 64, y * 64, 2);
+    // warp displacement (+/-90 px) sampled from the same warp field that
+    // shapes the depth domain -> fine detail swirls coherently with the
+    // large-scale currents instead of running in parallel diagonal lines
+    let wqx:i64 = o_grid_sample(g, x * 64, y * 64, 3) - 500;
+    let wqy:i64 = o_grid_sample(g, x * 64, y * 64, 4) - 500;
+    let swx:i64 = x * 6 + adv8 * 6 / 256 + wqx * 27 / 100;
+    let swy:i64 = y * 6 + wqy * 27 / 100;
+    // swell: slow 3D, advected + warped (modulates crest amplitude)
+    let swell:i64 = o_fbm3(swx, swy, tz_slow8, 2, 61);
+    let crx:i64 = x * 8 + adv8 / 32 + wqx * 9 / 25;
+    let cry:i64 = y * 8 + wqy * 9 / 25;
+    // crest: advected + warped 2D ridged filaments (traveling wave trains)
+    let cr:i64 = o_ridge2(crx, cry, 3, 51);
+    let crest:i64 = cr * (600 + swell * 4 / 10) / 1000;
+    let rpx:i64 = x * 24 + adv8 * 3 / 32 + wqx * 27 / 25;
+    let rpy:i64 = y * 24 + wqy * 27 / 25;
+    // ripple: fine 3D, advected + warped, faster time (changing component)
+    let ripple:i64 = o_fbm3(rpx, rpy, tz_fast8, 2, 71);
+    // ---- color: palette from hue field (three anchors, smooth blends)
+    let t1:i64 = o_ss(o_clamp01k((hue - 150) * 1000 / 350));
+    let t2:i64 = o_ss(o_clamp01k((hue - 550) * 1000 / 350));
+    // A deep indigo (28,52,128) -> B teal (14,168,198) -> C violet (138,66,208)
+    let r:i64 = o_mix(o_mix(28, 14, t1), 138, t2);
+    let gg:i64 = o_mix(o_mix(52, 168, t1), 66, t2);
+    let b:i64 = o_mix(o_mix(128, 198, t1), 208, t2);
+    // luminance from depth + drift
+    let L:i64 = 165 + depth * 60 / 1000 + drift * 60 / 1000;
+    r = r * L / 255;
+    gg = gg * L / 255;
+    b = b * L / 255;
+    // foam on crests
+    let fm:i64 = o_ss(o_clamp01k((crest - 600) * 1000 / 300));
+    r = r + 150 * fm / 1000;
+    gg = gg + 210 * fm / 1000;
+    b = b + 195 * fm / 1000;
+    // specular glints where ripple peaks meet crest
+    if (ripple > 620 && crest > 500) {
+        let gl:i64 = (ripple - 620) * crest / 380;
+        r = r + 190 * gl / 1000;
+        gg = gg + 205 * gl / 1000;
+        b = b + 225 * gl / 1000;
+    }
+    // sparkle: deterministic, only on strong crest+ripple
+    let sp:i64 = o_hash3(x, y, f, 77);
+    if (dbg == 5) {
+        // debug: crest grayscale
+        let cg:i64 = crest * 255 / 1000;
+        out_r.* = cg; out_g.* = cg; out_b.* = cg;
+        return;
+    }
+    if (dbg == 6) {
+        // debug: ripple grayscale
+        let cg2:i64 = ripple * 255 / 1000;
+        out_r.* = cg2; out_g.* = cg2; out_b.* = cg2;
+        return;
+    }
+    if (dbg == 7) {
+        // debug: warp field (r=wqx, g=wqy)
+        out_r.* = o_clamp255((wqx + 500) * 255 / 1000);
+        out_g.* = o_clamp255((wqy + 500) * 255 / 1000);
+        out_b.* = 128;
+        return;
+    }
+    if (dbg == 8) {
+        // debug: raw first-octave vn2 of crest coords (tests the noise itself)
+        let nn:i64 = o_vn2(crx, cry, 51) * 255 / 1000;
+        out_r.* = nn; out_g.* = nn; out_b.* = nn;
+        return;
+    }
+    if (sp > 988 && crest > 680 && ripple > 600) {
+        r = r + 170;
+        gg = gg + 190;
+        b = b + 200;
+    }
+    // film-grain dither: +/-2 LSB, per-frame uncorrelated, anti-banding
+    let dith:i64 = o_hash3(x, y, f + 500, 78) % 5 - 2;
+    r = r + dith;
+    gg = gg + dith;
+    b = b + dith;
+    out_r.* = o_clamp255(r);
+    out_g.* = o_clamp255(gg);
+    out_b.* = o_clamp255(b);
+}
+
+// ---------------- BMP emission ----------------
+fn o_put32(buf:[]u8, off:i64, v:i64) void {
+    buf[off] = (v & 255) as u8;
+    buf[off + 1] = ((v >> 8) & 255) as u8;
+    buf[off + 2] = ((v >> 16) & 255) as u8;
+    buf[off + 3] = ((v >> 24) & 255) as u8;
+}
+fn o_put16(buf:[]u8, off:i64, v:i64) void {
+    buf[off] = (v & 255) as u8;
+    buf[off + 1] = ((v >> 8) & 255) as u8;
+}
+fn o_zcstr_copy(s:[]u8) []u8 {
+    // _zag_arg results are non-owned; copy + NUL-terminate for syscalls
+    let b:[]u8 = nio_alloc((s.len + 1) as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0 as u8;
+    return b;
+}
+fn o_write_all(fd:i64, data:[]u8) i64 {
+    // nio_write_all caps at 1MB; BMPs are ~3.1MB, so loop the raw syscall
+    let at:i64 = 0;
+    let calls:i64 = 0;
+    while (at < data.len && calls < 65536) {
+        let n:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(data) as i64) + at, (data.len as i64) - at, 0, 0, 0);
+        calls = calls + 1;
+        if (n == -4) { continue; }
+        if (n <= 0) { return -7407; }
+        at = at + n;
+    }
+    if (at != data.len) { return -7407; }
+    return at;
+}
+fn o_frame_path(dir:[]u8, f:i64) []u8 {
+    // "<dir>/dvid1_f<NN>.bmp" NUL-terminated. O_TRUNC open: no O_EXCL.
+    let b:[]u8 = nio_alloc((dir.len + 16) as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < dir.len && dir[i] != 0) { b[i] = dir[i]; i = i + 1; }
+    b[i] = 47 as u8; i = i + 1; // '/'
+    b[i] = 100 as u8; i = i + 1; // d
+    b[i] = 118 as u8; i = i + 1; // v
+    b[i] = 105 as u8; i = i + 1; // i
+    b[i] = 100 as u8; i = i + 1; // d
+    b[i] = 49 as u8; i = i + 1;  // 1
+    b[i] = 95 as u8; i = i + 1;  // _
+    b[i] = 102 as u8; i = i + 1; // f
+    b[i] = (48 + f / 10) as u8; i = i + 1;
+    b[i] = (48 + f % 10) as u8; i = i + 1;
+    b[i] = 46 as u8; i = i + 1;  // .
+    b[i] = 98 as u8; i = i + 1;  // b
+    b[i] = 109 as u8; i = i + 1; // m
+    b[i] = 112 as u8; i = i + 1; // p
+    b[i] = 0 as u8;
+    return b;
+}
+fn o_emit_frame(f:i64, dir:[]u8, bmp:[]u8, g:[]u8, dbg:i64) i64 {
+    let W:i64 = 1024;
+    let H:i64 = 1024;
+    // time coordinates for this frame
+    let t01k:i64 = f * 1000 / 47;
+    let tz_slow8:i64 = t01k * 512 / 1000;   // 2 time cells over sequence
+    let tz_mid8:i64 = t01k * 1024 / 1000;   // 4 time cells
+    let tz_fast8:i64 = t01k * 2048 / 1000;  // 8 time cells
+    let adv8:i64 = 40960 * f / 47;          // 160 px of travel, fp8
+    o_grid_build(g, tz_slow8, tz_mid8);
+    // render pixels straight into bottom-up BGR rows (row = 3072, no pad)
+    let y:i64 = 0;
+    while (y < H) {
+        let rowbase:i64 = 54 + (H - 1 - y) * W * 3;
+        let x:i64 = 0;
+        while (x < W) {
+            let r:i64 = 0;
+            let gg:i64 = 0;
+            let b:i64 = 0;
+            o_render_pixel_dbg(g, x, y, f, tz_slow8, tz_fast8, adv8, dbg, &r, &gg, &b);
+            let at:i64 = rowbase + x * 3;
+            bmp[at] = b as u8;
+            bmp[at + 1] = gg as u8;
+            bmp[at + 2] = r as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // BMP header
+    let rowbytes:i64 = W * 3;
+    let imgsz:i64 = rowbytes * H;
+    bmp[0] = 66 as u8; bmp[1] = 77 as u8; // 'BM'
+    o_put32(bmp, 2, 54 + imgsz);
+    o_put32(bmp, 6, 0);
+    o_put32(bmp, 10, 54);
+    o_put32(bmp, 14, 40);
+    o_put32(bmp, 18, W);
+    o_put32(bmp, 22, H);
+    o_put16(bmp, 26, 1);
+    o_put16(bmp, 28, 24);
+    o_put32(bmp, 30, 0);
+    o_put32(bmp, 34, imgsz);
+    o_put32(bmp, 38, 0);
+    o_put32(bmp, 42, 0);
+    o_put32(bmp, 46, 0);
+    o_put32(bmp, 50, 0);
+    // write to disk (O_WRONLY|O_CREAT|O_TRUNC = 577; never O_EXCL)
+    let path:[]u8 = o_frame_path(dir, f);
+    if (path.len == 0) { return -20; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(path) as i64, 577, 420, 0, 0, 0);
+    nio_free(path);
+    if (fd < 0) { return -21; }
+    let w:i64 = o_write_all(fd, bmp);
+    nio_close(fd);
+    if (w != bmp.len) { return -22; }
+    return 0;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let adir:[]u8 = _zag_arg(2);
+    if (adir.len == 0) {
+        _zag_println("usage: ocean_bin all <dir> | ocean_bin f <dir> <n>");
+        return 1;
+    }
+    let dir:[]u8 = o_zcstr_copy(adir);
+    if (dir.len == 0) { return 2; }
+    // frame buffer: 54 + 1024*1024*3 = 3,145,782 bytes (< 2^25)
+    let bmp:[]u8 = nio_alloc(3145782);
+    if (bmp.len == 0) { nio_free(dir); return 3; }
+    // coarse grid: 257*257 cells * 5 ch * 2 bytes
+    // ch0 depth, ch1 hue, ch2 drift, ch3 warpx, ch4 warpy
+    let g:[]u8 = nio_alloc(660490);
+    if (g.len == 0) { nio_free(dir); nio_free(bmp); return 4; }
+    let rc:i64 = 0;
+    if (_zag_strcmp(a1, "all") == 1) {
+        let f:i64 = 0;
+        while (f < 48) {
+            rc = o_emit_frame(f, dir, bmp, g, 0);
+            _zag_print("frame ");
+            _zag_print(_zag_i64_to_str(f));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(rc));
+            if (rc != 0) { f = 48; }
+            f = f + 1;
+        }
+    } else if (_zag_strcmp(a1, "f") == 1) {
+        let a3:[]u8 = _zag_arg(3);
+        let n:i64 = o_atoi(a3);
+        if (n < 0 || n > 47) {
+            _zag_println("error=frame-0..47");
+            rc = 5;
+        } else {
+            rc = o_emit_frame(n, dir, bmp, g, 0);
+            _zag_print("frame ");
+            _zag_print(_zag_i64_to_str(n));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(rc));
+        }
+    } else if (_zag_strcmp(a1, "dbg") == 1) {
+        // debug: render one field as grayscale (5=crest 6=ripple 7=warp 8=vn2)
+        let a3d:[]u8 = _zag_arg(3);
+        let nd:i64 = o_atoi(a3d);
+        let a4:[]u8 = _zag_arg(4);
+        let ch:i64 = 5;
+        if (_zag_strcmp(a4, "ripple") == 1) { ch = 6; }
+        if (_zag_strcmp(a4, "warp") == 1) { ch = 7; }
+        if (_zag_strcmp(a4, "vn2") == 1) { ch = 8; }
+        if (nd < 0 || nd > 47) {
+            _zag_println("error=frame-0..47");
+            rc = 5;
+        } else {
+            rc = o_emit_frame(nd, dir, bmp, g, ch);
+            _zag_print("dbg frame ");
+            _zag_print(_zag_i64_to_str(nd));
+            _zag_print(" ch=");
+            _zag_println(_zag_i64_to_str(ch));
+        }
+    } else {
+        _zag_println("usage: ocean_bin all <dir> | ocean_bin f <dir> <n>");
+        rc = 6;
+    }
+    nio_free(dir);
+    nio_free(bmp);
+    nio_free(g);
+    if (rc != 0) { return 7; }
+    return 0;
+}
