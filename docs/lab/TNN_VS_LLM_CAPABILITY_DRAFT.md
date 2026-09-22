@@ -9,6 +9,23 @@ There is no LLM size that replicates what TNN does — not because TNN is bigger
 because the differences are architectural. You cannot scale your way to deliberate memory,
 auditable belief, or byte-identical replay. Those are design properties, not emergent ones.
 
+## Parameters buy nothing (2026-09-21, measured)
+
+Two scaling programs, same null result — and the null is the finding:
+
+| Axis | Range tested | Result |
+|---|---|---|
+| Data | 240 → 6,585,360 facts | mastery 1.0 throughout; exactly 4 ops/fact, 92 B/fact, linear cost |
+| Parameters (capacity knobs) | 0.25× → 8× slots, buffers, depth, redundancy | **16 of 19 configs byte-identical learners** — zero behavioral difference, only cost |
+
+Above the minimum capacity that fits the facts, bigger tables change nothing.
+Below it, degradation is exactly proportional and graceful — what fits stays perfect.
+**Capability is set by mechanisms and information sources, not buffer sizes.**
+What *did* buy capability: new mechanisms (conflict-driven deliberation: 156/156
+contradictions resolved at baseline cost on quiet facts) and new information
+(the live web-search sense). Evidence: `docs/lab/scale/params/`, `docs/lab/new-mechanisms/`,
+`docs/lab/senses/web-search/v2/`.
+
 ## How to read this
 
 This is not a benchmark shootout. It is a capability map: for each thing TNN demonstrably
