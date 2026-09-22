@@ -193,6 +193,40 @@ own knowledge, but their knowledge is not credited to the learner and must be
 withdrawn before qualification. This separation is fundamental to every result
 in this repository.
 
+## So what's the catch: STORAGE
+
+TNN's deal is simple: it's a storage eater, not a RAM eater and not a compute
+eater. Every fact it learns costs real bytes — about 220 of them. That's ~92
+bytes for the fact itself plus ~128 bytes for the audit entry that makes the
+fact replayable and tamper-evident. Nothing is smeared into mystery weights.
+You can count exactly what it knows, and exactly what that costs:
+
+| Facts learned | Storage | Feels like |
+|---|---|---|
+| 1 thousand | 220 KB | nothing |
+| 100 thousand | 22 MB | a few photos |
+| 1 million | 220 MB | a short video |
+| 100 million | 22 GB | a laptop folder |
+| 1 billion | 220 GB | a cheap SSD |
+| 10 billion | 2.2 TB | a hard drive |
+
+The marginal cost never changes: one more fact is always 220 bytes and about
+6 microseconds to install. Compare that with a 70B-parameter LLM, which burns
+~140 GB of VRAM whether it knows ten facts or ten billion — and learning one
+new fact means retraining. Below roughly 150–600 million facts TNN uses *less*
+storage than the model's weights; above that it uses more. But TNN's bytes
+live on disk — a billion facts is on the order of five dollars a month of
+ordinary cloud storage — while the LLM's weights have to sit in the most
+expensive memory there is just to answer "hi".
+
+Two honest caveats. First, more than half of the 220 bytes is the audit
+ledger: the price of the integrity guarantees (exact replay, tamper evidence),
+not of the knowledge itself. Deliberate consolidation — one of the five
+organs — could compress cold facts and bring that number down; it hasn't been
+measured yet. Second, everything above was measured with the knowledge base
+resident in RAM; what happens to install and recall speed when it outgrows RAM
+is being measured now.
+
 ## The architecture
 
 TNN’s architecture is a set of interacting generic mechanisms, not a bag of
