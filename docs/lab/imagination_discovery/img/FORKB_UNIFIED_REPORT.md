@@ -42,15 +42,29 @@ geology/history/intent, never noise-on-shapes) and causal light
   crescent" was contradicted by the depiction) → reconceived Cinder's
   orbit to ~44° elongation (young crescent, ~14% lit) and strengthened
   planetshine. Depiction judged deliberation; the trace records it.
+- T13: oracle verdict (Micah's eyes) — the image reads human-made
+  (watercolor, not-AI-smell PASS) BUT the moon "is a random black
+  dot". T12's crescent was pixel-measurable yet eye-invisible at
+  display size: the methodological fix is that depiction must judge
+  deliberation AT DISPLAY SIZE. Reconceived: ~52° elongation (bold
+  crescent, ~19% lit), larger disc (r=80), planetshine ~2.2x — moon
+  only, style untouched. Acceptance checked at 256px: unambiguously a
+  crescent moon.
+- T13b: oracle verdict (other humans' eyes) — AI, "because the
+  mountains cut off weirdly": ridge silhouettes sliced mid-stroke by
+  the frame edges. Fix: deliberate lateral taper in the height field
+  (past the near ground; view axis derived from the T9 camera), so
+  relief eases to smooth hazy lowland before the border. Checked at
+  256px: no landform cut mid-stroke at either edge; center untouched.
 
 ## Mechanical bars (all recorded, exact)
 
 | Bar | Result | Evidence |
 |---|---|---|
 | D-RES | PASS | 1024x1024 BMP, 3,145,782 bytes |
-| D-SHARP | PASS | grad(O)=2.425, grad(B)=0.882, ratio=2.750 ≥ 1.20 |
+| D-SHARP | PASS | grad(O)=2.414, grad(B)=0.875, ratio=2.759 ≥ 1.20 (re-verified after T13/T13b) |
 | D-COMP | PASS | zero banned primitive tokens in r8b_alien.zag code (grep audit; the shared verify_bars.py flags var1_terminus.zag, another crew's file — not Fork B) |
-| D-DET | PASS | two independent clean 1024² renders byte-identical: SHA-256 `b6cda4971432f2c8bce6b2e9519c1e6e0aaa051e05543b1bfde67db51bf67bd3` |
+| D-DET | PASS | two independent clean 1024² renders byte-identical: SHA-256 `3829e21610cd9f3d35defe77fad3fae8aaecdc132a42b8291a66550237ffaefc` (re-verified after T13/T13b) |
 | Trace-only restructure check | PASS | post-restructure 256² smoke was byte-identical to pre-restructure (37d1fce3…), proving the T0..T12 reorganization changed zero behavior |
 
 Build: pinned znc `znc_linux_x86_64_abed8aa1`, `--no-zagd --no-analyze`,

@@ -45,12 +45,13 @@ faint stars near the zenith only.
 ## T3 — DELIBERATION: the moon in the same sky
 
 The world has a moon, so the sky does too. Cinder is airless: sharp
-terminator, no atmospheric softening. Reconceived in T12 (see below):
-it hangs ~44 deg from the sun — a young crescent, ~14% lit — so the
-crescent must be clearly legible; a black disc would mean the phase
-geometry failed, and gibbous would mean the light transport is lying.
-Its dark side gets planetshine (earthshine is real), the one derived
-secondary light.
+terminator, no atmospheric softening. Reconceived in T13 (see below):
+it hangs ~52 deg from the sun — a bold crescent, ~19% lit, on a
+larger disc (r=80) — so the phase reads at display size, not just in
+pixels; a black dot would mean the phase geometry failed, and gibbous
+would mean the light transport is lying. Its dark side gets
+planetshine (earthshine is real), the one derived secondary light,
+strengthened so the full disc reads as a world.
 
 DEPICTION: analytic sphere, crater-perturbed normal, lit by the T1
 sun. The phase is computed, never painted.
@@ -132,6 +133,46 @@ from the sun, a young crescent (~14% lit, like a 3-day-old moon), and
 strengthened planetshine — earthshine is real, and the dark side must
 read as a world. Depiction judged deliberation and found it wanting;
 the trace records the verdict.
+
+## T13 — FEEDBACK (oracle: Micah's eyes, 1024)
+
+The image reads as human-made — watercolor, a PASS on the not-AI
+smell — BUT the moon "is a random black dot". T12's crescent was
+pixel-measurable yet eye-invisible at display size: the trace
+overclaimed a second time, and the failure this time is
+methodological — depiction must judge deliberation AT DISPLAY SIZE,
+not in pixel statistics. Phone-screen scale is the seeing that counts.
+
+Reconception (moon only; the style verdict is binding, nothing else
+in the scene changes): Cinder hangs ~52 deg from the sun — a bolder
+crescent (~19% lit) — subtends a larger disc (r=80, ~122px at 1024,
+~30px at phone size), and planetshine is strengthened ~2.2x so the
+dark side reads as a world rather than a hole in the sky. Acceptance
+was checked at 256px wide: lit limb on the sunward side, full disc
+readable against the violet sky — unambiguously a crescent moon, not
+a dot. The phase is still computed from the T1 sun, never painted;
+earthshine is still the only secondary light.
+
+## T13b — FEEDBACK (oracle: other humans' eyes, 1024)
+
+Micah showed the image to other humans. Their verdict: AI — because
+the mountains cut off weirdly. The massif's west flank and the right
+hills hit the left/right frame edges as truncated ridge silhouettes,
+and that is what convicts it. (This overturns the earlier solo
+"human-made" read; the other humans' eyes are now the binding signal
+on this point.) Depiction judged deliberation again: a ridge that dies
+mid-stroke at the border is a compositional failure, not a world
+failure.
+
+Reconception (composition only; the world and the style are
+unchanged): a deliberate lateral taper in the height field — past the
+near ground (depth gate 220, so the foreground rubble is untouched),
+relief eases toward smooth lowland as the view ray nears the lateral
+frame edge (smoothstep on edge fraction and depth, view axis derived
+from the T9 camera, never placed). Landforms now resolve into hazy
+low ground before the border instead of being sliced by it. Checked
+at 256px: no ridge line is cut mid-stroke at either edge; the center
+of the composition is untouched.
 
 ## What this is not
 
