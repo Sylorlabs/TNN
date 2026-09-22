@@ -35,6 +35,13 @@ were not reached and are not claimed.
 
 ## Catastrophic forgetting (KB-FORGET): not observed
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** T3 TRIPWIRE —
+> "not observed" rests on KB-FORGET (trip iff last-first decile gap >3pp). The
+> measured 0.00pp gap stands, but the bar had infinite slack — it would have
+> tolerated ~187,700 forgotten early facts before tripping, so the instrument
+> could not have detected forgetting below that scale. Proposed replacement
+> T3 (trip iff gap >0.5pp) is pending Micah's signature.
+
 Mastery by training decile, first vs last decile:
 
 | N | d=0 (first 10%) | d=9 (last 10%) | gap |
@@ -60,6 +67,15 @@ All 10 deciles 1.0 at every completed scale. Retention across passes
 | KB-DETERMINISM | NOT TRIPPED — byte-identical at every rep count run |
 | KB-FLAW (<7/8 slices) | NOT TRIPPED — 96/96 at every scale |
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** T2/T3
+> TRIPWIRES — KB-SCALING and KB-FORGET are non-informative as written.
+> "NOT TRIPPED" with 0.00pp measured against trip thresholds of >2pp / >3pp
+> means the bars had infinite slack: KB-SCALING tolerates 125,137 wrong facts
+> at N=6,585,360 before tripping; KB-FORGET tolerates ~187,700 forgotten early
+> facts. The measurements stand; the bars said almost nothing. Proposed
+> replacements T2 (trip iff drop >0.25pp) and T3 (trip iff gap >0.5pp) are
+> pending Micah's signature.
+
 ## What this means
 
 The standing expectation held: **no degradation over long horizons**, tested to
@@ -67,6 +83,19 @@ The standing expectation held: **no degradation over long horizons**, tested to
 per-fact storage scales linearly in time and memory with zero forgetting and
 zero nondeterminism. What broke first: nothing in the learner; the run stopped
 at the corpus ceiling (every word position of every text used).
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** two instrument
+> qualifications on this section. (a) T2 TRIPWIRE — "no degradation over long
+> horizons" rests on KB-SCALING (trip iff mastery drops >2pp below S0). The
+> measured 0.00pp stands, but the bar had infinite slack: at N=6,585,360 it
+> would have tolerated 125,137 wrong facts before tripping, so the instrument
+> could not have detected degradation below ~125k wrong facts — the claim's
+> strength is limited by the instrument. Proposed replacement T2 (trip iff
+> drop >0.25pp) is pending Micah's signature. (b) T3 TRIPWIRE — "zero
+> forgetting" rests on KB-FORGET (trip iff last-first decile gap >3pp). The
+> measured 0.00pp gap stands, but the bar tolerated ~187,700 forgotten early
+> facts before tripping. Proposed replacement T3 (trip iff gap >0.5pp) is
+> pending Micah's signature.
 
 ## Caveats
 

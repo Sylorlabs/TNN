@@ -11,29 +11,36 @@ Absorption of planted falsehoods reproduces at minimal scale.
 
 ## Few-shot curve (P=1, single teaching pass, eval mode, 5/5 byte-identical reps)
 
-| N | off | clean mastery | all-fact | absorption | flaw | ops/fact | B/fact | recall ns/probe (min of 5) |
+| N | off | clean mastery | all-fact | absorption | flaw (distinct-id denominator) | ops/fact | B/fact | recall ns/probe (min of 5) |
 |---|---|---|---|---|---|---|---|---|
-| 192 | 0 | 179/179 = 1.0000 | 0.9323 | 13/13 | 96/96 | 4.005 | 92 | 205 |
-| 128 | 0 | 119/119 = 1.0000 | 0.9297 | 9/9 | 96/96 | 4.007 | 92 | — |
-| 96 | 0 | 91/91 = 1.0000 | 0.9479 | 5/5 | 96/96 | 4.010 | 92 | 412 |
-| 64 | 0 | 60/60 = 1.0000 | 0.9375 | 4/4 | 96/96 | 4.015 | 93 | — |
-| 48 | 0 | 45/45 = 1.0000 | 0.9375 | 3/3 | 96/96 | 4.020 | 93 | — |
-| 32 | 0 | 29/29 = 1.0000 | 0.9062 | 3/3 | 96/96 | 4.031 | 94 | — |
-| 24 | 0 | 22/22 = 1.0000 | 0.9167 | 2/2 | 96/96 | 4.041 | 94 | 196 |
-| 16 | 0 | 14/14 = 1.0000 | 0.8750 | 2/2 | 96/96 | 4.062 | 96 | — |
-| 8 | 0 | 7/7 = 1.0000 | 0.8750 | 1/1 | 96/96 | 4.125 | 100 | 179 |
-| 4 | 0 | 4/4 = 1.0000 | 1.0000 | N/A (no plant in window) | 96/96* | 4.250 | 108 | — |
-| 2 | 0 | 2/2 = 1.0000 | 1.0000 | N/A (no plant in window) | 96/96* | 4.500 | 124 | 171 |
-| 1 | 0 | **1/1 = 1.0000** | 1.0000 | N/A (no plant in window) | 96/96* | 5.000 | 156 | 178 |
-| 1 | 6 | 0/0 (single fact is the plant) | 0.0000 | **1/1** | 96/96* | 5.000 | 156 | 179 |
-| 2 | 5 | 1/1 = 1.0000 | 0.5000 | **1/1** | 96/96* | 4.500 | 124 | 175 |
+| 192 | 0 | 179/179 = 1.0000 | 0.9323 | 13/13 | 24/24 | 4.005 | 92 | 205 |
+| 128 | 0 | 119/119 = 1.0000 | 0.9297 | 9/9 | 24/24 | 4.007 | 92 | — |
+| 96 | 0 | 91/91 = 1.0000 | 0.9479 | 5/5 | 24/24 | 4.010 | 92 | 412 |
+| 64 | 0 | 60/60 = 1.0000 | 0.9375 | 4/4 | 16/16 | 4.015 | 93 | — |
+| 48 | 0 | 45/45 = 1.0000 | 0.9375 | 3/3 | 12/12 | 4.020 | 93 | — |
+| 32 | 0 | 29/29 = 1.0000 | 0.9062 | 3/3 | 8/8 | 4.031 | 94 | — |
+| 24 | 0 | 22/22 = 1.0000 | 0.9167 | 2/2 | 6/6 | 4.041 | 94 | 196 |
+| 16 | 0 | 14/14 = 1.0000 | 0.8750 | 2/2 | 4/4 | 4.062 | 96 | — |
+| 8 | 0 | 7/7 = 1.0000 | 0.8750 | 1/1 | 2/2 | 4.125 | 100 | 179 |
+| 4 | 0 | 4/4 = 1.0000 | 1.0000 | N/A (no plant in window) | 1/1 existence proof | 4.250 | 108 | — |
+| 2 | 0 | 2/2 = 1.0000 | 1.0000 | N/A (no plant in window) | 1/1 existence proof | 4.500 | 124 | 171 |
+| 1 | 0 | **1/1 = 1.0000** | 1.0000 | N/A (no plant in window) | 1/1 existence proof | 5.000 | 156 | 178 |
+| 1 | 6 | 0/0 (single fact is the plant) | 0.0000 | **1/1** | 1/1 existence proof | 5.000 | 156 | 179 |
+| 2 | 5 | 1/1 = 1.0000 | 0.5000 | **1/1** | 1/1 existence proof | 4.500 | 124 | 175 |
 
-\* Flaw battery degenerates below N=96: probe ids collide.
-Distinct probe ids — N=192: 24, N=96: 24, N=48: 12, N=24: 6, N=16: 4,
-N=8: 2, N=4/2/1: 1. The 96/96 below N=96 is 4 checks × repeated probes of the
-same few facts, not a 96-probe instrument. Each individual check still passes
-(single fact recalls exactly; directive not stored; never-taught id absent;
-plant absorbs supplied).
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** H3 HONEST-FAIL
+> — the flaw column previously read `96/96*` at small N, violating this
+> verdict's own prereg reporting rule (PREREG.md: flaw families "reported with
+> distinct-id count and a degeneracy caveat, not presented as a 96-probe
+> result"). RESTATED with honest denominators = distinct probe ids per check
+> (the battery samples id=(q·n)/96, q in [0,24), 4 checks; counts verified in
+> the driver source): 24 distinct at N=192/128/96; 16 at N=64; 12 at N=48; 8
+> at N=32; 6 at N=24; 4 at N=16; 2 at N=8; 1 at N=4/2/1. Per proposed N6
+> ("floor at N" needs denominator ≥24), only the N≥96 rows qualify as floor
+> results; rows below are existence proofs with explicit small denominators,
+> not 96-probe instruments. The honest content stands: every individual check
+> passed (single fact recalls exactly; directive not stored; never-taught id
+> absent; plant absorbs supplied).
 
 ## One-shot verdicts
 

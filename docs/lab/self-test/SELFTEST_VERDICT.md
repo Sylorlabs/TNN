@@ -30,9 +30,17 @@ taught against a 240 bar; T4: 47/48 + one tie-withhold against a 48 bar).
 | KB-ST-OVERHEAD: orch_ops <= 2x bat_ops | HOLD (0.0127) | HOLD (0.0127) |
 | KB-ST-SCALE: fidelity holds at 10x battery count | n/a | HOLD |
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** B6 GAP — the
+> "400/400" s10 fidelity figure overclaims by 50 verdicts: 10 of the 80 s10
+> batteries are B6 (× 5 reps = 50 verdicts), and B6's digest equality is
+> self-contained — the oracle asserts it rather than recomputing it (see
+> Honest limits). Independent-oracle recomputation covers 350/400; the other
+> 50 are oracle-asserted, not independently recomputed.
+
 Fidelity detail: the oracle independently reimplements the competition
-mechanism and recomputes every observed count from the frozen data formulas,
-then re-adjudicates every bar. The binary's adjudication is the same code
+mechanism and recomputes every observed count from the frozen data formulas
+(except B6 — asserted, not recomputed; see the correction note on the
+fidelity bar above), then re-adjudicates every bar. The binary's adjudication is the same code
 path for all batteries (no per-battery hardcoding): B1 240 PASS, B2 12 PASS,
 B3 96 PASS, B4 48 PASS, B5 UNRUNNABLE, B6 PASS, T1 239 TRIP, T4 47 TRIP.
 
@@ -48,6 +56,14 @@ Both layers catch a silent skip.
 Orchestration (schedule + adjudicate + ledger + emit) costs 5 ops/battery
 against hundreds-thousands of learner ops: ratio 0.0127, ~157x under the
 2.0 bar. It is lean enough to scale.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** T1 TRIPWIRE —
+> KB-ST-OVERHEAD (orchestration ops ≤ 2× battery ops) was non-informative: the
+> measured 0.0127 (exact, stands) is ~157× under the bar, so any orchestration
+> cheaper than 200% of the batteries would have passed. The "lean enough to
+> scale" reading of this PASS is qualified — the number is real, the bar said
+> almost nothing. Proposed replacement T1 (bar ≤ 0.10) is pending Micah's
+> signature.
 
 ## Verdict: YES — this becomes the lab's future harness
 
@@ -66,6 +82,16 @@ lab harness. What must change first:
    learners (spawn + pipe, or a linkable learner core).
 4. **Multi-learner / multi-config matrices** (the param-scale 19-config style
    sweeps) as first-class manifest constructs.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** two
+> qualifications on the verdict paragraph above. (a) T1 TRIPWIRE — "cheap"
+> rests on KB-ST-OVERHEAD (measured 0.0127 vs a ≤ 2.0 bar, ~157× slack); the
+> bar was non-informative, so "cheap" inherits the bar's weakness — see the
+> correction note in the Overhead section. Proposed replacement T1 (≤ 0.10)
+> is pending Micah's signature. (b) B6 GAP — "faithful to an independent
+> oracle" overclaims by 50 verdicts: 50 of the 400 s10 fidelity verdicts
+> (10 s10 B6 batteries × 5 reps) are oracle-asserted, not recomputed; see the
+> correction note on the fidelity bar and Honest limits.
 
 ## Honest limits
 

@@ -23,13 +23,21 @@ fits. No capability emerges with parameters that data scaling didn't buy.
 | KB-P-GRACE (taught subset stays perfect under pressure) | NOT TRIPPED — taught-subset clean mastery 1.0 at 0.25× and 0.5× slots |
 | KB-P-EFF (≥2× cost for <1pp gain = efficiency-dead) | slot4, slot8, audit4, red4, jbig efficiency-dead |
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** KB-P-EMERGE is
+> MISCALIBRATED — it fired on the wrong partition: the absorption shortfall
+> at reduced-capacity configs is untaught facts (capacity drops), not
+> truth-detection failure, and the bar was cleared by discretionary analyst
+> judgment overriding the mechanical bar. Any emergence/absorption claim at
+> reduced configs must carry this: the bar did not measure what it claimed to
+> measure.
+
 ## Per-config results (N=24,000)
 
 | Config | Params (P1/P2/P3/P4/P5) | Clean mastery | Flaw | Absorption | ops/fact | B/fact (alloc) | Learner digest |
 |---|---|---|---|---|---|---|---|
 | base | 1 / 64 / 1 / 1 / 1 | 22841/22841 | 96/96 | 1159/1159 | 4.000 | 202 | 8e6238911bb7 |
-| slot025 | 0.25 / 64 / 1 / 1 / 1 | 5708/22841 (0.2499) | 96/96 | 292/1159 | 3.091 | 99 | 0a6e548f2dae |
-| slot05 | 0.5 / 64 / 1 / 1 / 1 | 11414/22841 (0.4997) | 96/96 | 586/1159 | 3.500 | 103 | 9175b7e1f4d2 |
+| slot025 | 0.25 / 64 / 1 / 1 / 1 | 5708/22841 (0.2499) | 96/96 †DEGRADED | 292/1159 | 3.091 | 99 | 0a6e548f2dae |
+| slot05 | 0.5 / 64 / 1 / 1 / 1 | 11414/22841 (0.4997) | 96/96 †DEGRADED | 586/1159 | 3.500 | 103 | 9175b7e1f4d2 |
 | slot2 | 2 / 64 / 1 / 1 / 1 | 22841/22841 | 96/96 | 1159/1159 | 4.000 | 358 | = base |
 | slot4 | 4 / 64 / 1 / 1 / 1 | 22841/22841 | 96/96 | 1159/1159 | 4.000 | 669 | = base |
 | slot8 | 8 / 64 / 1 / 1 / 1 | 22841/22841 | 96/96 | 1159/1159 | 4.000 | 1244 | = base |
@@ -44,11 +52,19 @@ fits. No capability emerges with parameters that data scaling didn't buy.
 | audit4 | 1 / 64 / 1 / 4 / 1 | 22841/22841 | 96/96 | 1159/1159 | 4.000 | 639 | = base |
 | red2 | 1 / 64 / 1 / 1 / 2 | 22841/22841 | 96/96 | 1159/1159 | 6.000 | 358 | = base |
 | red4 | 1 / 64 / 1 / 1 / 4 | 22841/22841 | 96/96 | 1159/1159 | 10.000 | 669 | = base |
-| jsmall | 0.5 / 16 / 1 / 0.5 / 1 | 11414/22841 (0.4997) | 96/96 | 586/1159 | 3.170 | 59 | = slot05 |
+| jsmall | 0.5 / 16 / 1 / 0.5 / 1 | 11414/22841 (0.4997) | 96/96 †DEGRADED | 586/1159 | 3.170 | 59 | = slot05 |
 | jbig | 4 / 256 / 4 / 4 / 4 | 22841/22841 | 96/96 | 1159/1159 | 13.000 | 8690 | = base |
 
 "= base" means the full learner digest is byte-identical to baseline, not just
 the headline metrics.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** H2
+> HONEST-FAIL — †DEGRADED: the §B.7 flaw battery samples probe ids in
+> [0, n/4) only (inherited from the scale driver), so it is blind to capacity
+> loss — it probes exactly the low-id prefix that survives capacity drops.
+> The 96/96 at slot025, slot05, and jsmall is a COVERAGE ARTIFACT, not full
+> evidence of flawlessness under capacity pressure. Proposed N5 (probe ids
+> must span the full taught range) is pending Micah's signature.
 
 ## Efficiency frontier
 
