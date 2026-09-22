@@ -99,7 +99,9 @@ instrument resolves 24 facts; below N=96 probe ids collide — documented).
 | CAN see | BLIND to |
 |---|---|
 | Storage fidelity at scale: 1.0000 from N=1 to N=6,585,360, exactly linear cost, byte-identical reruns. One-shot learning is real for this schema | **Generalization.** Train and test are the SAME mapping. Paraphrase/single-exposure rephrasing is untested in the integer channel by construction — and where tested (prose v2, exact keys), it collapsed to 0.26–0.63. The mastery headline is storage, not understanding |
-| No degradation over horizons (the standing expectation, holding) | Content truth under teacher noise: clean mastery 1.0000 coexists with 93/192 true mastery at 50% noise — "mastery" is vs the teacher's claims, not vs the world |
+| No degradation over horizons (the standing expectation, holding — with an instrument caveat: KB-SCALING tolerated 125,137 wrong facts and KB-FORGET ~187,700 forgotten facts before tripping, so the bars could not have detected degradation below those tolerances; measured 0.00pp stands) | Content truth under teacher noise: clean mastery 1.0000 coexists with 93/192 true mastery at 50% noise — "mastery" is vs the teacher's claims, not vs the world |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** the "no degradation over horizons" cell now carries the T2/T3 tripwire qualifier — the scale bars had infinite slack (KB-SCALING: 125,137 wrong facts tolerated at N=6,585,360; KB-FORGET: ~187,700 forgotten facts tolerated). Measured 0.00pp stands; the claim's strength is limited by the instrument. Proposed replacements (trip iff drop >0.25pp / gap >0.5pp) pending Micah's signature.
 | Recall latency (~0.2–0.4 µs/probe, O(1)) | Predicates outside the 24 frozen categories; novel compositions of facts |
 
 ---

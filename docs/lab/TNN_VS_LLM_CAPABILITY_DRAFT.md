@@ -18,6 +18,8 @@ Two scaling programs, same null result — and the null is the finding:
 | Data | 240 → 6,585,360 facts | mastery 1.0 throughout; exactly 4 ops/fact, 92 B/fact, linear cost |
 | Parameters (capacity knobs) | 0.25× → 8× slots, buffers, depth, redundancy | **16 of 19 configs byte-identical learners** — zero behavioral difference, only cost |
 
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** on the Data row — "mastery 1.0 throughout" is the measured value; the bar behind it (KB-SCALING, trip iff mastery drops >2pp) has infinite slack: measured drop 0.00pp, and it tolerates 125,137 wrong facts at N=6,585,360 before tripping. "1.0" is exact to the battery's resolution; the bar could not have failed short of six figures of wrong facts. (T2)
+
 Above the minimum capacity that fits the facts, bigger tables change nothing.
 Below it, degradation is exactly proportional and graceful — what fits stays perfect.
 **Capability is set by mechanisms and information sources, not buffer sizes.**
@@ -25,6 +27,8 @@ What *did* buy capability: new mechanisms (conflict-driven deliberation: 156/156
 contradictions resolved at baseline cost on quiet facts) and new information
 (the live web-search sense). Evidence: `docs/lab/scale/params/`, `docs/lab/new-mechanisms/`,
 `docs/lab/senses/web-search/v2/`.
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** on "degradation is exactly proportional and graceful" — qualified: the flaw battery behind reduced-config readings samples ids in [0, n/4) only, blind to capacity loss beyond 4×; per the audit the reduced-config 96/96 is a coverage artifact and must be marked DEGRADED. "Graceful" describes the probed quarter of the id range, not the full store. (H2)
 
 ## How to read this
 
@@ -42,6 +46,8 @@ does, what is the LLM equivalent, and what size LLM does it take to replicate it
 | Audit trail: every belief carries its ledger entry; full replay to exact state | No provenance: no LLM can show you *why* it believes something | **No size** |
 | Long-horizon stability: no degradation at 100x the training horizon | Context degradation is the signature LLM weakness (lost-in-the-middle, drift, collapse) | Larger windows delay it; **no size** eliminates it |
 | Learning from a single evidence confrontation, no reward signal | LLMs learn via gradient updates over massive data; one-shot deliberate revision is not a thing | **No size** |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** on "no degradation at 100x" — qualified: the scale-program evidence behind this row rests on KB-SCALING (trip iff mastery drop >2pp; measured 0.00pp; tolerates 125,137 wrong facts at N=6,585,360) and KB-FORGET (trip iff last−first decile gap >3pp; measured 0.00pp; tolerates ~187,700 forgotten early facts), both with infinite slack. "No degradation" means none detectable within the battery's resolution, not absolute absence. (T2, T3)
 
 ## The efficiency footnote
 

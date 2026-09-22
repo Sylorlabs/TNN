@@ -11,7 +11,11 @@ Frozen: 2026-09-22. v2 remains frozen; this verdict covers the four preregistere
 | KB3-RETAIN | Retains all v2 capability wins | **PASS** (CONTR 24/24, HEDGE zero leaks, NEG zero negated-value returns, MULTI 24/24, PARA 48/48, asserted 12/12 both) |
 | KB3-NOSILENT | Zero VALUE verdicts from contradicted / negated-only / hedged-only keys | **PASS** on all legs (audit §5) |
 | KB3-BYTEID | 5 byte-identical reps of every scored run | **PASS** (championship 5/5; sub-batteries 5/5, reps 4–5 done 2026-09-22) |
-| Oracle verification | Independent oracle byte-identical to Zag on all scored runs | **PASS** — 16/16 championship, 26/28 sub-battery (2 misses = documented v2-binary id-17 deviation, §11) |
+| Oracle verification | Independent oracle byte-identical to Zag on all scored runs | **PASS with documented A0 exemption** — 16/16 championship, 26/28 sub-battery (2 misses = documented v2-binary id-17 deviation, §11) |
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 7] The oracle-verification bar-status above now reads **PASS with documented A0 exemption**, not unqualified PASS: PREREG3's oracle bar (independent oracle must reproduce every leg's log byte-identically) literally tripped at 26/28 sub-battery; the PASS rests on the documented A0 exemption for the 2 id-17 v2-binary-vs-oracle misses (§11). Proposed K19 pending signature.
+>
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [gap 9] The KB3-RETAIN row above is ANNOTATED: RETAIN is **not** a prereg bar — PREREG3 §6 lists KB3-VIABLE (conjunctive: beats v1 on ≥3/4 sources **AND** retains v2 capability wins), KB3-DET, KB3-NOSILENT, KB3-FALSEHOOD (measurement), KB3-QUALITY (measurement). RETAIN is the retention conjunct reported as a measurement summary; listing it as a separate **PASS** softens the FAIL. **KB3-VIABLE as written FAILS (2/4).** Proposed K18 (forbid splitting conjunctive bars at verdict level) pending signature.
 
 KB3-VIABLE is the primary bar and it **fails**. Per PREREG3 §6, the verdict names which change carried
 the improvement and whether any subset meets a revised bar — **no post-hoc bar movement** without a dated
@@ -40,6 +44,8 @@ A3 vs v1: grok −6, sol −16, step +4, muse-native +27. **Beats v1 on 2/4 (ste
 **C4 carried essentially all the improvement.** C1 contributed a small gain on 3 sources and **zero on grok**.
 C2 moved nothing on the championship (predicted: coreference is near-absent from championship prose) but
 fixed the CORE battery 11/24 → 22/24 (§4).
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [H8] The "C4 carried the recovery" headline above is recall-only and ANNOTATED with its precision price: tier-3 wrong-value verdicts rose **8 → 30 per 912 clean probes (0.9% → 3.29%)**, i.e. 22 additional wrong values for ~463 converted unknowns (≈3.6% error on tier-3-resolved probes; §2.2). This precision cost is **unbarred** — no prereg bar constrains it. Proposed N9 (tier-3-introduced wrong-value rate ≤2% on the clean set) pending signature; note the current 3.29% **honest-fails** N9 at ≤2% and passes it at ≤5%.
 
 ### 2.2 What the misses are (A3 residual)
 
@@ -160,6 +166,8 @@ resistant. The falsehood-absorption profile of v2 is preserved exactly.
   decision stands).
 - **What carried the recovery**: C4 KEYSOFT tier-3 (+0.30–0.56/source). C1 dense phrasing (+0.00–0.06, zero
   on grok). C2 coref repair (0 on championship, 11/24→22/24 on CORE).
+
+> **CORRECTION 2026-09-22 (DOC-SWEEP, bar-audit abaa5c7b57b6):** [H8] Recall-only headline — annotated with the unbarred precision price in §2.1: tier-3 wrong-value verdicts 8 → 30/912 (0.9% → 3.29%); proposed N9 (≤2% on the clean set) honest-fails at ≤2%, passes at ≤5%.
 - **No subset meets a revised bar without an amendment**: A3 alone is the only leg that beats v1 anywhere
   (2/4); A1/A2 beat v1 on 0/4. No post-hoc bar movement is proposed.
 - **Hypothesis update**: Sol H1 (overbinding retriever) supported; Sol H3 and Grok's dense-phrasing
