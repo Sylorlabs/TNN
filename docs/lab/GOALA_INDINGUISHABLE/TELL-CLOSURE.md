@@ -99,8 +99,35 @@ Video (frames extracted from preview MP4s; motion measured):
 New tell rows:
 | # | Tell (source) | Status | Evidence / fix |
 |---|---|---|---|
-| I-T12 | G1: disconnected pale horizontal streak left of fire (native re-attack) | OPEN | needs source: cloud break vs artifact; fix = connect it to the fire glow or remove |
-| I-T13 | G2: perfect radial-gradient lamp glow = generic focal marker (native re-attack) | OPEN | fix = irregular glow (occlusion, asymmetry, secondary scatter) |
+| I-T12 | G1: disconnected pale horizontal streak left of fire (native re-attack) | CLOSED (V5b, 2026-09-22) | Test-both: V5a (remove → haze wisps) and V5b (connect: band broken into two segments with a gap at the fire glow, tapering toward it, asymmetric tilt/offset; fire drawn in front). Shipped V5b — preserves the brief's horizon cue. 6/6 images raw H-sym < 0.60 (g1 0.347), detrended < 0.30 (g1 0.073). Byte-identical 3/3 clean runs (sha256 4ac7de63…). |
+| I-T13 | G2: perfect radial-gradient lamp glow = generic focal marker (native re-attack) | CLOSED (2026-09-22) | Two concentric centered blotches replaced: two overlapping offset glow lobes (non-circular) + offset secondary scatter + hot core kept + dark mullion bar drawn AFTER the glow (foreground occlusion; lamp sits behind the frame). Raw H-sym 0.293, detrended 0.034. Byte-identical 3/3 (sha256 5734b305…). |
+
+## V4 subject-video closure (2026-09-22, Goal-A finish crew)
+
+Pure-Zag subject system added to the G-video path (`f3_vidsubject_g` in
+`imagination/src/field.zag`; legacy `f3_emit_avi` untouched; 480x480, 36f,
+12fps, 44.1kHz; existing `f3_video_audio` kept — V-T7 deferred by design,
+audio chunks bit-identical). Normal vision throughout.
+
+| # | Tell | Status | Evidence |
+|---|---|---|---|
+| V-T4 | No coherent subject — animated static | CLOSED | v1: bird (flapping wings, 8-frame deterministic triangle), 36/36 frames, bbox 19.6–28.8%; v2: lit boat, 36/36 frames, bbox 17.3–47.5%. Integration: ridge/piling occlusion, dawn glow, following reflection, speed-coupled wake/lamp. Template-persistence self-attack: mean MAD 29.0 (v1) / 40.8 (v2) vs 0.00 rigid floor (sanity-checked). |
+| V-T5 | v2 near-static; unstructured pixel change, no motion path | CLOSED | Eased velocity profile: hold 0–5, accelerate, cruise, decelerate, settle 32–35. Active mean abs frame diff 6.60 (v1) / 3.18 (v2) — both > 2.0 bar. Temporal raster-grain frozen (constant seed) so frame change is coherent motion, not shimmer (tested both; evidence chose frozen). Coherence: subject-dominated, inside/outside ratios 7.8x–45x (v2). Caveat: v1 has 3 isolated frozen frame pairs (0→1, 6→7, 31→32) from integer morph quantization — 1/12 s each, minor. |
+| V-T6 | No shot structure / narrative beats | CLOSED | Establish → move → settle with continuous interpolation. Position-triggered events (not frame numbers): bird swoop + landing descent with wing-fold onto far ridge (s>900), tone ramp to silhouette; boat hesitation zone + piling occlusion. Byte-identical 2/2 renders (fe0d2fb3…, d7aa5f22…); reconciled source re-verified byte-identical by coordinator. |
+
+## Micah redirect (2026-09-22 ~07:46 PDT)
+
+Micah's verdict on the G-series: reads as blurry (480x480 + heavy grain =
+fuzzy) and template-driven (placed f3_blotch/f3_band primitives). Orders:
+(1) mechanical repairs in flight finished and reported (above); (2) NO
+further blind-judging rounds on the old 480x480 series — superseded, judge
+budget not spent; (3) high-res rebuild NOT started here — a dedicated
+discovery wave is dispatched for the new program ("I discovered some
+high-quality alien planet", judged by "would you have guessed AI"; high
+resolution and SHARP; no template primitives as the creative ceiling; audio
+gets zero forced instruments with full frequency freedom). The V5 image
+renders and V4 videos above remain the byte-identical mechanical baseline,
+not the new creative bar.
 
 ## Residual risks (from W1 blind re-attack, apply to next wave)
 - Cross-image hash-residual fingerprint (shared f3_hash2 grain signature across the set).
