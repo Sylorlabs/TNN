@@ -1,6 +1,34 @@
 # PAM REBUILD — Fork G3 prereg (FROZEN 2026-09-22, before any build output)
 
 ## 0. Amendments
+- **AMENDMENT 2 (2026-09-22, pre-enrollment, pre-results):** §3 extractor
+  corrections for t2/t3/t6. Reason: the stage-1 (empty-template) binary's
+  WITHHOLD readouts exposed three extractor bugs against the frozen
+  generator's known construction — measured on primary fixtures with the
+  unenrolled binary only; no enrolled-template results existed yet and no
+  templates were frozen or committed. Mechanism classes unchanged; only the
+  extraction details were corrected:
+  - t2 colorconst: SAME_SURFACE iff every channel's 4-bit normalized bin
+    is within 1 (was: exact bin equality). The generator uses a full
+    Bradford chromatic adaptation (not diagonal in sRGB), so white-patch
+    normalization leaves small residuals; exact equality over-rejected
+    (stage-1 readout 52.5% → 80% on primaries, 0 false-accepts either way).
+  - t3 shapetrans: FG = pixels with brightness (r+g+b) > 480 (was:
+    minority-brightness side of the mean). The minority heuristic latched
+    onto bright photo regions (e.g. sky) instead of the shape; the
+    generator draws the shape at (235,235,235) on a photo dimmed to
+    ≤114/channel, so the fixed bright threshold isolates the shape
+    (stage-1 readout 36.7% → 100% on primaries).
+  - t6 motiondir: global translation by exhaustive block matching —
+    downsample frame0/frame7 to 16×16, SAD over (dx,dy)∈[−4,4] cells,
+    ties → smallest |dx|+|dy| (was: change-mask centroids). A global
+    translation changes pixels everywhere, so the change-mask centroid
+    sits at frame center regardless of direction; the fixture window
+    translates rigidly with no wraparound, so block matching recovers the
+    true displacement (stage-1 readout 41.7% → 96.7% on primaries; the 2
+    remaining misses are photo-texture aliasing). Node attrs are now
+    displacement bins (dxbin=fdx+16, dybin=fdy+16) rather than centroid
+    grid cells; the 2-EVENT + 1-DISPLACED graph shape is unchanged.
 - **AMENDMENT 1 (2026-09-22, pre-build, no results seen):** §3/§4 revised.
   Reason: working through the contract honestly, per-class consensus
   templates fail on spread classes (DIFFERENT/HIGHER/… have no single
@@ -63,11 +91,11 @@ edges carry the coarse relation label (also the WITHHOLD judgment readout).
 | task | nodes (kind, attrs) | edges (label) | withhold readout → judgment |
 |---|---|---|---|
 | colordisc | 2 REGION: L/R patch mean RGB, 5 bits/channel (width 8) | 1 ADJACENT, label SAME_BIN/DIFF_BIN from 4-bit/channel bin comparison | SAME_BIN→SAME, DIFF_BIN→DIFFERENT |
-| colorconst | 2 REGION: L/R panel white-patch-normalized mean (per-channel max norm), 3 bits/channel | 1 ADJACENT, label SAME/DIFF from 4-bit normalized-bin comparison | SAME→SAME_SURFACE, DIFF→DIFFERENT |
-| shapetrans | FG (classbin 2b: TRI/SQU/CIR from 1000·area/(π·Rmax²) @526/819; area_bin=area/256; rmax_bin=rmax/4; cx_bin=cx/8; cy_bin=cy/8) + BG (kind only) | 1 CONTAINS (BG→FG) | classbin→TRIANGLE/SQUARE/CIRCLE |
+| colorconst | 2 REGION: L/R panel white-patch-normalized mean (per-channel max norm), 3 bits/channel | 1 ADJACENT, label SAME/DIFF from 4-bit normalized-bin comparison with ±1-bin tolerance | SAME→SAME_SURFACE, DIFF→DIFFERENT |
+| shapetrans | FG = pixels with brightness >480 (classbin 2b: TRI/SQU/CIR from 1000·area/(π·Rmax²) @526/819; area_bin=area/256; rmax_bin=rmax/4; cx_bin=cx/8; cy_bin=cy/8) + BG (kind only) | 1 CONTAINS (BG→FG) | classbin→TRIANGLE/SQUARE/CIRCLE |
 | pitchdisc | 2 EVENT: tone A/B f0 in 10-cent bins over [200,720]Hz (interpolated zero-crossing estimator, integer math) | 1 BEFORE, label DOWN/SAME/UP from ±25-cent threshold (integer ratio test) | DOWN→LOWER, SAME→SAME, UP→HIGHER |
 | timbredisc | 1 EVENT: harmonic profile (r2=E2/E1, r3=E3/E1, rh=E4–8/E1, 4 bits each; f0 via same estimator) | 0 | PURE if r2<40; DARK if r2<230 and rh<60; RICH if rh<400; else BRIGHT |
-| motiondir | 2 EVENT: motion-start/end changed-mask centroids, 4×4 grid cells; mag_bin=mag/4 | 1 DISPLACED, label 8-way octant or STILL (\|disp\|<3px) | label→judgment |
+| motiondir | 2 EVENT: motion-start/end; node attrs dxbin=fdx+16, dybin=fdy+16 from block-matched global translation (16×16 SAD, ±4 cells); mag_bin=mag/4 | 1 DISPLACED, label 8-way octant or STILL (\|disp\|<3px) | label→judgment |
 
 Judgment on WITHHOLD = the edge-label readout above (honest best-effort),
 confidence 300. Judgment on INSTALL = the enrolled exemplar's truth,
