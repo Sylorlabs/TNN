@@ -10,24 +10,22 @@ First full request failed: HTTP 429 `insufficient_quota`, org balance
 Status: Grok hammering is blocked. NO top-up without Micah's approval.
 Surfaced to parent/Micah.
 
-## Fallback: gpt-5.6-sol via UnoRouter — OPERATIONAL
+## gpt-5.6-sol via UnoRouter — DEGRADED, then DOWN
 
-`~/workspace/skills/unorouter/bin/sol.py`. Used for:
-- V2 human-taste theme values (corner radius 16, spacing 4px, bg 15,16,18,
-  surface 30,31,35, accent 255,82,112, text 247,247,245, muted 157,160,168,
-  title 24 / body 16 / caption 12, borderless cards w/ shadow, comfortable
-  density, 20px h / 24px v screen padding, 16px card padding,
-  12px related / 24px section rhythm)
-- predicted machine-vs-human differences (confirmed in renders)
-- red-team critiques (this track)
+Operational 2026-09-21/22 for short prompts (V2 theme values, red-team).
+Long prompts intermittently returned `choices: null` / zero tokens / HTTP 524.
+`temperature` param removed after correlating with failures (length, not
+temperature, looked causal).
 
-Reliability notes: short focused prompts work; long prompts intermittently
-return `choices: null` / zero tokens / HTTP 524. `temperature` param removed
-after correlating with failures (one long failure persisted without it —
-length, not temperature, looks causal).
+**2026-09-22 ~00:47 PDT update: sol is now timing out on direct probe too.**
+Both APIs hard-down. Standing rule from parent: max ONE retry per hour to
+detect recovery; do not burn the night retrying. All design-track work
+proceeds natively — the toolkit, scorer, renders, and verification are
+100% Zag-native already; Sol only ever supplied numbers (theme tokens) and
+prose critiques, never pixels or mechanisms.
 
-## Purity statement
+## Purity statement (unchanged)
 
-Sol supplied NUMBERS (theme tokens). Every pixel, glyph, component, and
-layout decision in the renders was produced by Zag code. No LLM-generated
-imagery, no copied assets. The font is a hand-entered 5x7 bitmap table.
+Every pixel, glyph, component, and layout decision in the renders was
+produced by Zag code. No LLM-generated imagery, no copied assets. The font
+is a hand-entered 5x7 bitmap table.
