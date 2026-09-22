@@ -1,7 +1,11 @@
 # PROPOSED prereg amendment — human audio pitch-handle wording
 
-Date: 2026-09-22. Status: **PROPOSED — NOT APPLIED. Requires Micah's
-explicit approval.** (Per the frozen `PREREG.md` amendment rule.)
+Date: 2026-09-22. Status: **APPLIED 2026-09-22.** Approved under Micah's
+standing test-governance rule (tests and their documentation fixes do not
+require his approval); verifier-confirmed wording gap, behavior already
+correct. Applied to `PREREG.md` §Q1 with a dated CORRECTION note. No
+mechanism, bar, metric, question, or score changed; all recorded Q1/Q2/Q3
+results stand as-is.
 
 ## The gap
 

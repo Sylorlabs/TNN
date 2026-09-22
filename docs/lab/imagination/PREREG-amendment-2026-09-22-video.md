@@ -1,9 +1,6 @@
 # PROPOSED prereg amendment — explicit VIDEO/TEMPORAL imagination tests
 
-Date: 2026-09-22. Status: **PROPOSED — NOT APPLIED. Requires Micah's
-explicit approval.** (Frozen `PREREG.md` says any change to questions,
-batteries, bars, metrics, or taste functions needs a dated amendment;
-this is the dated proposal.)
+Date: 2026-09-22. Status: **APPLIED 2026-09-22 — approved by Micah's standing test-authorization (2026-09-21 22:20: tests never need approval) and explicit video-battery order.** (Frozen `PREREG.md` says any change to questions, batteries, bars, metrics, or taste functions needs a dated amendment; this is the dated amendment.)
 
 ## Governance gap it fixes
 

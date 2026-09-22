@@ -39,7 +39,7 @@ query ops are legal:
 | Domain | MACHINE-WAY attrs (raw values) | HUMAN-WAY attrs (percept handles) |
 |---|---|---|
 | VISUAL | kind∈{rect,circle,triangle,text}; x,y,w,h in 0..1000; r,g,b in 0..255 | kind; zone∈{0..8} (3×3: TL,TC,TR,ML,C,MR,BL,BC,BR); color handle from the 155-vocab (1000–1071 chromatic, 2000–2004 achromatic); shape tuple (corners 3000–3003, curvature 3100–3102, symmetry 3200–3203) |
-| AUDIO | freq_hz (i32), dur_ms, amp 0..1000 | pitch-bin handle 4000–4047 (bin = round(12·log2(f/110)), clamped); timbre handle 5000–5003 |
+| AUDIO | freq_hz (i32), dur_ms, amp 0..1000 | pitch-bin handle 4000–4047 (stored as the ordered bin index 0–47; monotone in frequency, disjoint from machine Hz values) (bin = round(12·log2(f/110)), clamped); timbre handle 5000–5003 | <!-- CORRECTION 2026-09-22 (PREREG-amendment-2026-09-22-pitch.md, verifier-confirmed): prereg said handles 4000–4047; implementation stores the ordered bin index 0–47. Wording only; behavior correct, no rescore. -->
 | STRUCT | x,y,z in cm 0..1000; size 1..500 | zone 0..8; rel∈{NONE,LEFT_OF,RIGHT_OF,ABOVE,BELOW,STACKED_ON,NEAR} + rel_target element index |
 
 Ops (both modes, answered ONLY from the partition — the brief text is

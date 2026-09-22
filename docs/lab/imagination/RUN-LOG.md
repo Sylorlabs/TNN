@@ -82,12 +82,37 @@ SHA256: m=`f7f82ae06399720f8da6365545e28876de19399f515277bd3ad9fdc930288f52`,
 h=`cfbaecf87186650a494df4ea5b6ec100406197fdb122ccd71b60f5f62dbc0ad2`.
 Logs: `logs/q3m_repN.txt`, `logs/q3h_repN.txt`.
 
+## 2026-09-22 ~05:23 — Q1V video battery applied + run
+
+Amendment applied: `PROPOSED-amendment-video-2026-09-22.md` →
+`PREREG-amendment-2026-09-22-video.md`, status set to APPLIED 2026-09-22
+(approved by Micah's standing test-authorization 2026-09-21 22:20 and his
+explicit video-battery order). Battery spec, scenes, and IMAG-V bar
+(≥9/12 per mode) unchanged from the proposal.
+
+`src/imagine.zag` extended (additive only): domain=4 VIDEO, one element per
+frame (machine: frame,x,y,r,g,b,dx,dy; human: frame,zone,color,
+dir-handle 6000–6008, speed-handle 6100–6102, shape tuple), 4 scenes
+(V1 ball rolls L→R 3f; V2 bird arch 4f; V3 car accelerates 3f;
+V4 pendulum out-and-back 4f), 4 queries (`query_trajectory`,
+`query_speed_change`, `query_reentry`, `query_midpoint`), displacement-
+consistent edits. Rebuilt with
+`toolchain/bin/znc_linux_x86_64_abed8aa1 --no-zagd --no-analyze
+--no-foreground-cache` → `src/imagine_bin` (226401 bytes), no errors.
+
+Runs: `imagine_bin q1v m all` / `q1v h all`, 5 reps each, byte-identical.
+Independent verifier `verify_q1v.py` (hand-written from the spec, not the
+binary): machine **12/12** all reps, human **12/12** all reps.
+IMAG-V (≥9/12): **PASS both modes**. Full scene/question/answer tables:
+`Q1V-RESULTS.md`. Logs: `logs/q1vm_repN.txt`, `logs/q1vh_repN.txt`.
+SHA256: m=`55b26e0579528345ee218668557227d1fe6f3806f2566bd7b76c5fea6a221f40`,
+h=`5bb4428240b6591662339150330275548c4a22c6277f7d4d5c84799b1190faa3`
+(all in SHA256SUMS).
+
 ## Pending (in flight)
 
 - Q2 GEN-1/GEN-2/GEN-3 mechanical verification + text-only Q1 control +
   Q1/Q2 5-rep determinism + Q4 blind packet → delegated subagent,
   results land in `Q2-VERIFY.md` / `Q4-PACKET.md`.
 - Q4 human rating: needs Micah (or approved outside panel).
-- Proposed video/temporal amendment (`PROPOSED-amendment-video-2026-09-22.md`):
-  drafted, NOT applied — needs Micah's explicit approval.
-- `VERDICT.md`, `SHA256SUMS`, commit (after Q2 results land).
+- `VERDICT.md`, commit (after Q2 results land).
