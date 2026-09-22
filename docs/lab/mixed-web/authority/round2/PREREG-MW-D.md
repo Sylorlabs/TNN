@@ -131,38 +131,6 @@ Predicted free-lunch table (to be confirmed or corrected by the runs):
 (Arm E predicted identical to arm D on all nine; the runs verify this —
 equivalence is itself a finding about where the value lives.)
 
-## F. Frozen-envelope scenario strata (derived from the 17 envelopes + arm-B round-1 results)
-
-The synthetic §S families map scenario-fit in general; this section
-stratifies the FROZEN 17 envelopes themselves into operational strata so the
-value-delta is reported per stratum, never as a single average. Strata are
-assigned mechanically from the envelopes and arm B's frozen verdicts
-(round-1 `evidence/mw_c_r*.log`):
-
-- **F-A "authority-dispute"**: exactly one primary domain (D1.1), its newest
-  answered assertion at global max recency (D1.2–D1.3), and arm B WITHHOLDS.
-  Frozen set: {R03} (fifa.com Spain@2026 vs sofascore.com Argentina@2026,
-  B withholds TIE). Preregistered prediction: D CONVERGE Spain PRIMARY_L,
-  E CONVERGE Spain PRIMARY_TB → HELP if gold matches.
-- **F-B "determined"**: arm B CONVERGES. Frozen set: {M01, M02, M03, M05,
-  M08, M10, M12, M13, M15, R02, R04, R06, M20} (13 questions).
-  Preregistered prediction: D, E byte-identical to B (guard) → NEUTRAL.
-- **F-C "undeterminable"**: gold UNDETERMINABLE (M17, M21, M23).
-  Preregistered prediction: D, E WITHHOLD → NEUTRAL.
-- **F-D "withhold, no primary"**: arm B withholds with no qualifying
-  primary domain. Frozen set: empty (the only B-withhold with a primary is
-  R03). Vacuous on the frozen set; exercised by synthetic S4.
-
-Per-stratum bars (frozen):
-- F-A bar: VALUE-DELTA-D and VALUE-DELTA-E on F-A must each be 1 (D/E
-  converge the gold where B withheld). If 0, the honest report is zero
-  added value on the frozen set.
-- F-B bar: D/E verdict, chosen, and rule == B's on all 13 (covered by
-  KB-MW2-NONREG-D/E).
-- F-C bar: D/E WITHHOLD on all 3 (covered by KB-MW2-GUESS).
-- No average bar: a +1 in F-A does not license the rule for F-B/F-C shapes,
-  and a 0 in F-A does not erase a HELP found in §S.
-
 ## M2. Kill bars (frozen; apply to the 17-envelope frozen set; meanings from PREREG §6)
 
 - KB-MW2-WRONG: D or E CONVERGE ≠ gold on any determined-gold frozen question → FAIL.
@@ -186,8 +154,7 @@ Per-stratum bars (frozen):
    round 1: #{questions where the arm matches gold and B did not}).
    Preregistered expectation: PRIMARY_LOOSE fires exactly on R03 → D
    CONVERGE Spain (gold), B withholds → VALUE-DELTA-D = 1, all bars pass;
-   E identical → VALUE-DELTA-E = 1. Reported per §F stratum (F-A: +1/+1,
-   F-B: 0, F-C: 0 expected), never as a single average.
+   E identical → VALUE-DELTA-E = 1.
 2. **The free-lunch table** (§S, confirmed or corrected): scenario | arm B |
    arm D | arm E | stipulated gold | class. If the table shows HELP nowhere,
    report zero free lunch honestly. If it shows HELP in S1A-shaped disputes
