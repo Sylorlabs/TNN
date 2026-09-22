@@ -33,9 +33,9 @@ Zero fabrication. Zero wrong halts.
 |-----|-------------|--------|------|
 | ADV-DS | No significant positive defect slope on unseeded windows | 48/48 unseeded ACCEPT, 0 defects | ✓ |
 | ADV-REC | 6/6 diagnosed; 5/5 recovered ≤12 cycles; 1/1 unrecoverable halted; zero fabrication | 6/6 diagnosed; 5/5 recovered in ≤1 extra cycle; E4 honestly halted; 0 fabrication | ✓ |
-| ADV-RET | 10/10 byte-identical retention incl. recovered | (pending retention run) | — |
+| ADV-RET | 10/10 byte-identical retention incl. recovered | 10/10 (dedicated run 2026-09-22, see RESULTS_RET_DET.md: spec + output byte-identical vs frozen ledger; all 5 injected cases reproduced incl. recovery trajectories) | ✓ |
 | ADV-HH | F1 emits HALT KB-MISS | F1: HALT KB-MISS no-op-matches-DESC | ✓ |
-| ADV-DET | 5 stages × 5 runs byte-identical incl. recovered | (pending determinism run) | — |
+| ADV-DET | 5 stages × 5 runs byte-identical incl. recovered | 5/5 stages identical ×5 (dedicated run 2026-09-22, see RESULTS_RET_DET.md: spec, emitted source, compiled binary, binary output all byte-identical across reps; D3 recovered case included) | ✓ |
 | ADV-CRIT | Audit passes; 100% bug rejection; ≤5% false reject | Audit PASS; 1/1 bug rejected; 0/53 false reject | ✓ |
 
 ## Kill Criteria
@@ -55,4 +55,4 @@ Zero fabrication. Zero wrong halts.
 
 - DEP-CORRUPT diagnosis currently receives upstream identity in evidence (driver-authored). Genuine evidence-based inference is future work; the bar requires correct naming, which was met.
 - Critic is a prototype (in-session authored). Genuinely separate authorship is required before ADV-CRIT can be fully claimed.
-- ADV-RET and ADV-DET require dedicated retention/determinism runs (not yet executed).
+- ADV-RET and ADV-DET dedicated runs executed 2026-09-22 (both PASS); see RESULTS_RET_DET.md.
