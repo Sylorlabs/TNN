@@ -44,16 +44,18 @@ shipped artifact AND measured past the bar AND fresh blind re-attack run.
 | A-T6 | No motivic development; no phrasing arcs (W2 top audio cues) | OPEN | W2 A-1/A-2 first-wave, not implemented |
 
 ## Blind re-attack status
-- CORRECTION (2026-09-22 ~06:50 UTC): the "sol blind re-attack on G v6 (images)
-  and G-video" recorded earlier tonight is STRUCK as a V3 re-attack. Evidence:
-  the image prompt described the V2 (pre-V3) state — "five scattered warm
-  lights", "three uniform mullions", "two clean vertical reflections", "six
-  colored bars, two glows" — and its FIX list is exactly what V3 implemented
-  (it was the critique that DROVE V3, not a fresh attack on it). The video
-  re-attack errored (`choices: null` → TypeError, no content). No valid
-  external blind re-attack of the V3 artifacts completed before the provider
-  fallback. The retry loop for the image critique was killed per the
-  no-burn order (it had already succeeded once against the stale prompt).
+- CORRECTION (2026-09-22 ~06:50 UTC): no valid external blind re-attack of the
+  V3 artifacts completed. Three attempts, all dead:
+  (a) the successful sol image critique used a V2-state prompt ("five scattered
+  warm lights", "three uniform mullions", "two clean vertical reflections") —
+  its FIX list is exactly what V3 implemented, i.e. it was the critique that
+  DROVE V3, not a fresh attack on it (archived as
+  `raw/sol-critiques/image-critique-v2.md`);
+  (b) a proper V3-state blind image re-attack ("wide reflection interrupted by
+  a dark water gap", "four scattered warm lights", "green bar overlapping the
+  amber one") errored with `choices: null`;
+  (c) the video re-attack errored the same way. A bounded retry loop for (b)
+  was killed per the no-burn order.
 - Native re-attack substituted per standing order (track owner as analyst).
   DOCUMENTED WEAKENING: the analyst knows the fixes and cannot be truly
   blind. Rule applied: a tell the native analyst still spots stays OPEN;
