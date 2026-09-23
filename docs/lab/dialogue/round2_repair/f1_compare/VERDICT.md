@@ -73,4 +73,4 @@ unrelated yes/no ("did X write Y") and "birth year" branches are untouched.
 ## Commits (branch `tnn-native-lab`)
 
 - `1d826c7` — PREREG_F1.md frozen before implementation.
-- (this commit) — repaired fork + HELDOUT.md + build notes + run logs + this verdict.
+- `390d17c25614bfb86ccf337c48078c7f64ca0ec1` — repaired fork + HELDOUT.md + build notes + run logs + this verdict.
