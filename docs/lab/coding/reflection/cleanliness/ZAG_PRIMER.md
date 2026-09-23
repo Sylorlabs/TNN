@@ -52,7 +52,11 @@ fn main()void {
 - To print a space-separated list: print each number, then `" "`, and `"\n"` at the end.
 
 ## Slices (dynamic)
-- Allocate bytes: `let p:*u8=_zag_malloc(n) as *u8;` (only if you need it.)
+- Writable copy of a string: `let out:[]u8=_zag_strdup(s);` — returns a mutable
+  []u8 of the same length. Write bytes: `out[i]=s[n-1-i];` (writes through a
+  []u8 work; never write into a string literal — literals are read-only).
+- Raw bytes: `let p:*u8=_zag_malloc(n) as *u8;` with `p[i]=v;` (only if needed).
+- `_zag_print` takes a string literal or a []u8 — never a `*u8`.
 
 ## Rules
 - No imports, no stdlib, no comments needed unless logic is non-obvious.
