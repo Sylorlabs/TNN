@@ -85,8 +85,16 @@ def slugify(title):
 def main():
     os.makedirs(RUN, exist_ok=True)
     n_art, n_sent = 0, 0
+    # checkpoint for resume
+    ckpt_path = os.path.join(RUN, "wiki.ckpt")
+    skip_arts = 0
+    if os.path.exists(ckpt_path):
+        with open(ckpt_path) as f:
+            skip_arts = int(f.read().strip() or "0")
+        print(f"resuming: skipping {skip_arts} articles", flush=True)
+    out_path = os.path.join(RUN, "wiki.bin")
     with bz2.open(DUMP, "rt", encoding="utf-8", errors="replace") as f, \
-         open(os.path.join(RUN, "wiki.bin"), "wb") as out:
+         open(out_path, "ab" if skip_arts > 0 else "wb") as out:
         buf = []
         inpage = False
         for line in f:
@@ -99,6 +107,14 @@ def main():
             buf.append(line)
             if "</page>" in line:
                 inpage = False
+                n_art += 1
+                # skip already-processed articles on resume
+                if n_art <= skip_arts:
+                    continue
+                # checkpoint every 20k articles
+                if n_art % 20000 == 0:
+                    with open(ckpt_path, "w") as cf:
+                        cf.write(str(n_art))
                 page = "".join(buf)
                 m = re.search(r"<ns>(.*?)</ns>", page)
                 if not m or m.group(1) != "0":
@@ -130,9 +146,11 @@ def main():
                     out.write(bytes([3]) + struct.pack(">H", len(key)) + struct.pack(">I", len(sb)) + key + sb)
                     si += 1
                     n_sent += 1
-                n_art += 1
                 if n_art % 20000 == 0:
                     print(f"  ... {n_art} articles, {n_sent} sentences", flush=True)
+    # remove checkpoint on success
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
     print(f"wiki: {n_art} articles, {n_sent} sentences")
 
 if __name__ == "__main__":
