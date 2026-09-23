@@ -105,7 +105,11 @@ while True:
     if dec == "BARREN":
         st["barren"] += 1
         log(f"BARREN round accepted (barren=b{st['barren']})")
-        save_state(st); rnd += 1; continue
+        save_state(st)
+        commit_round(["rsi/autonomous_run_1/work/state.json",
+                      "rsi/autonomous_run_1/work/checkpoints.log"],
+                     f"autonomous run 1 round {rnd}: BARREN (b{st['barren']})")
+        rnd += 1; continue
 
     if dec == "WEBQUERY":
         # The deliberation identified a knowledge gap. The driver cannot browse;
