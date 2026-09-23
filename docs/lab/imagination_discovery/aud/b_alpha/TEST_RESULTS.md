@@ -332,3 +332,26 @@ DC-subtraction change (was `a4f20cc4...` pre-change).
 3. Micah's ear oracle on all three — the final kill/confirm for every claim.
 4. Multi-distance no-copy gate — implement ≥2 independent measures.
 5. Minimum-variation gate — formalize and run.
+
+## Battery 1e: component-isolation renders (2026-09-23)
+
+**Trigger:** Micah's ear verdict on v4 — "nothing improved, same damn result."
+v4 fixed the bed; all 56 events were unchanged. Five isolation renders so he
+can point at the bad component. Full analysis in `FINDINGS_1e.md`.
+
+| Clip | Content |
+|---|---|
+| `b_alpha_kids_1e_a_bedonly.wav` | bed only, true mix level (−48.4 dBFS RMS) |
+| `b_alpha_kids_1e_b_eventsonly.wav` | 56 events only, true mix level (−20.2 dBFS RMS) |
+| `b_alpha_kids_1e_c_mix_v4replica.wav` | full mix, byte-identical to v4 (`5a1b1f7b…`) |
+| `b_alpha_kids_1e_d_mix_noharsh.wav` | mix minus the 6 harsh-atom placements |
+| `b_alpha_kids_1e_e_mix_replaced.wav` | mix with harsh atoms swapped for lowest-crest same-class atoms |
+
+Key measurements: the 5 harsh atoms carry 11% of event energy (ai=4 ranks
+#49/56 by placed RMS); no digital defects in any of them; events cover 75%
+of the timeline (sparse-scheduling hypothesis rejected); the systemic fact
+is peak-normalization of every atom to 0.55–0.75 FS over a −48.4 dBFS bed
+(~31 dB contrast, unchanged since v1). Recommendation: v5 changes gain
+staging, not atoms.
+
+**Micah ear oracle:** AWAITING.
