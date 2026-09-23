@@ -1,0 +1,165 @@
+// texcorr_gate.zag — Illuminant-invariant SAME_SURFACE detector.
+// Pure Zag, zero RNG, deterministic. Reads a 128x64 RGB .img fixture
+// (8-byte header: w u32le, h u32le, then RGB bytes), splits into left/right
+// 64x64 panels, converts to grayscale, computes normalized cross-correlation.
+// Outputs corr x10000 and gate decision: corr >= 9500 -> SAME_SURFACE.
+//
+// This is the KNOWLEDGE signal that rescues:
+//   R2-10 CCN-1 (95 false installs): extreme-illuminant SAME_SURFACE judged DIFFERENT
+//   R2-11 COL-2 (350 false installs): illuminant-drift SAME judged DIFFERENT
+// The frozen front ends compare raw RGB means (fooled by illuminant change);
+// spatial texture correspondence survives the illuminant shift.
+//
+// Usage: texcorr_gate <fixture.img>
+// Exit 0, stdout: "corr=<i64> gate=<SAME_SURFACE|DIFFERENT>\n"
+
+@import("R33_NATIVE_IO_V1.zag")
+
+// --- minimal substrate (no imports; self-contained) ---
+
+fn z_cstr(s:[]u8) []u8 {
+    let n:i64 = s.len as i64;
+    let b:[]u8 = nio_alloc((n + 1) as i32);
+    let i:i64 = 0;
+    while(i < n) { b[i as i32] = s[i as i32]; i = i + 1; }
+    b[n as i32] = 0;
+    return b;
+}
+
+fn z_read(path:[]u8, buf:[]u8, cap:i64) i64 {
+    let p:[]u8 = z_cstr(path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(p) as i64, 0, 0, 0, 0, 0);
+    if(fd < 0) { return -1; }
+    let r:i64 = nio_read_exact(fd, buf, cap as i32);
+    nio_close(fd);
+    return r;
+}
+
+fn z_write_stdout(s:[]u8) void {
+    let fd:i64 = 1;
+    nio_write_all(fd, s);
+    return;
+}
+
+fn i64_to_str(v:i64) []u8 {
+    // handles non-negative only (corr is 0..10000, gate is text)
+    let b:[]u8 = nio_alloc(24);
+    if(v == 0) { b[0] = 48; return b[0..1]; }
+    let tmp:[]u8 = nio_alloc(24);
+    let n:i64 = 0;
+    let x:i64 = v;
+    while(x > 0) { tmp[n as i32] = (((x % 10) + 48) as u8); x = x / 10; n = n + 1; }
+    let i:i64 = 0;
+    while(i < n) { b[i as i32] = tmp[(n - 1 - i) as i32]; i = i + 1; }
+    return b[0..n];
+}
+
+fn get32(buf:[]u8, o:i64) i64 {
+    return (buf[o as i32] as i64) | ((buf[(o+1) as i32] as i64) << 8) |
+           ((buf[(o+2) as i32] as i64) << 16) | ((buf[(o+3) as i32] as i64) << 24);
+}
+
+// integer sqrt (floor), for normalization denominators
+fn isqrt(x:i64) i64 {
+    if(x <= 0) { return 0; }
+    let r:i64 = x;
+    let y:i64 = (r + 1) / 2;
+    while(y < r) { r = y; y = (r + x / r) / 2; }
+    return r;
+}
+
+fn main() i32 {
+    let path:[]u8 = _zag_arg(1);
+    if(path.len == 0) { return 1; }
+    // 128x64x3 + 8 = 24584 bytes; cap 1MB
+    let buf:[]u8 = nio_alloc(1 << 20);
+    let n:i64 = z_read(path, buf, 1 << 20);
+    if(n < 8 + 128*64*3) { return 2; }
+    let w:i64 = get32(buf, 0);
+    let h:i64 = get32(buf, 4);
+    if(w != 128) { return 3; }
+    if(h != 64) { return 4; }
+    let hw:i64 = w / 2; // 64
+    let base:i64 = 8;
+    // grayscale panels as i64 accumulators; we need sum, sumsq, and dot.
+    // g = (77*R + 150*G + 29*B) / 256  (integer math, scale by 256 to keep precision)
+    // Use scaled grayscale gs = 77*R+150*G+29*B (0..65535). Correlation is
+    // scale-invariant, so we can use gs directly.
+    let cnt:i64 = hw * h; // 4096
+    let sa:i64 = 0; let sb:i64 = 0;
+    let saa:i64 = 0; let sbb:i64 = 0;
+    let sab:i64 = 0;
+    // NOTE: saa can reach 4096 * 65535^2 ~ 1.76e13, fits in i64 (9.2e18). sab similar.
+    let y:i64 = 0;
+    while(y < h) {
+        let x:i64 = 0;
+        while(x < hw) {
+            let oa:i64 = base + (y * w + x) * 3;
+            let ob:i64 = base + (y * w + x + hw) * 3;
+            let ra:i64 = buf[oa as i32] as i64;
+            let ga:i64 = buf[(oa+1) as i32] as i64;
+            let ba:i64 = buf[(oa+2) as i32] as i64;
+            let rb:i64 = buf[ob as i32] as i64;
+            let gb:i64 = buf[(ob+1) as i32] as i64;
+            let bb:i64 = buf[(ob+2) as i32] as i64;
+            let gsa:i64 = 77*ra + 150*ga + 29*ba;
+            let gsb:i64 = 77*rb + 150*gb + 29*bb;
+            sa = sa + gsa; sb = sb + gsb;
+            saa = saa + gsa*gsa; sbb = sbb + gsb*gsb;
+            sab = sab + gsa*gsb;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    // Pearson r = (n*sab - sa*sb) / sqrt((n*saa - sa^2)(n*sbb - sb^2))
+    // n*sab up to 4096 * 1.76e13 ~ 7.2e16 fits in i64. sa*sb up to (4096*65535)^2 ~ 7.2e16 fits.
+    let num:i64 = cnt*sab - sa*sb;
+    let da:i64 = cnt*saa - sa*sa;
+    let db:i64 = cnt*sbb - sb*sb;
+    let corr10000:i64 = 0;
+    if(da > 0) {
+        if(db > 0) {
+            let den:i64 = isqrt(da) * isqrt(db);
+            // isqrt(da)*isqrt(db) may overflow? isqrt(7.2e16)~2.7e8, product ~7.2e16 fits.
+            if(den > 0) {
+                // corr = num / sqrt(da*db); want x10000.
+                // num up to 7.2e16, x10000 -> 7.2e20 OVERFLOWS.
+                // Do: corr10000 = (num / isqrt(da*db)) ... still need care.
+                // Use: num*10000/den via splitting: (num/den)*10000 + ((num%den)*10000)/den
+                let q:i64 = num / den;
+                let r2:i64 = num % den;
+                corr10000 = q * 10000 + (r2 * 10000) / den;
+            }
+        }
+    }
+    // clamp (integer truncation artifacts)
+    if(corr10000 > 10000) { corr10000 = 10000; }
+    if(corr10000 < -10000) { corr10000 = -10000; }
+    // gate: corr >= 0.95 -> SAME_SURFACE
+    let gate_same:i64 = 0;
+    if(corr10000 >= 9500) { gate_same = 1; }
+    // output
+    let out:[]u8 = nio_alloc(64);
+    // "corr=" + digits + " gate=" + word + "\n"
+    out[0]=99; out[1]=111; out[2]=114; out[3]=114; out[4]=61; // "corr="
+    let cs:[]u8 = i64_to_str(corr10000);
+    let i:i64 = 0;
+    while(i < (cs.len as i64)) { out[(5+i) as i32] = cs[i as i32]; i = i + 1; }
+    let p:i64 = 5 + (cs.len as i64);
+    out[p as i32]=32; out[(p+1) as i32]=103; out[(p+2) as i32]=97; out[(p+3) as i32]=116; out[(p+4) as i32]=101; out[(p+5) as i32]=61; // " gate="
+    p = p + 6;
+    if(gate_same == 1) {
+        // "SAME_SURFACE"
+        out[p as i32]=83; out[(p+1) as i32]=65; out[(p+2) as i32]=77; out[(p+3) as i32]=69; out[(p+4) as i32]=95;
+        out[(p+5) as i32]=83; out[(p+6) as i32]=85; out[(p+7) as i32]=82; out[(p+8) as i32]=70; out[(p+9) as i32]=65; out[(p+10) as i32]=67; out[(p+11) as i32]=69;
+        p = p + 12;
+    } else {
+        // "DIFFERENT"
+        out[p as i32]=68; out[(p+1) as i32]=73; out[(p+2) as i32]=70; out[(p+3) as i32]=70; out[(p+4) as i32]=69; out[(p+5) as i32]=82; out[(p+6) as i32]=69; out[(p+7) as i32]=78; out[(p+8) as i32]=84;
+        p = p + 9;
+    }
+    out[p as i32] = 10;
+    p = p + 1;
+    z_write_stdout(out[0..p]);
+    return 0;
+}
