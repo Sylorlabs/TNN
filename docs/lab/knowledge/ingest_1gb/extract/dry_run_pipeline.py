@@ -8,11 +8,17 @@ Validates end-to-end BEFORE the full wiktionary extraction completes:
 All work happens in run/dry/; the real run/ artifacts are untouched.
 Deterministic glue; the mechanisms (merge, ingest) are the real ones.
 """
-import os, sys, struct, subprocess, hashlib
+import os, sys, struct, subprocess, hashlib, argparse
 
 BASE = os.path.expanduser("~/workspace/tnn-lab/knowledge/ingest_1gb")
 RUN = os.path.join(BASE, "run")
 DRY = os.path.join(RUN, "dry")
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--ingest-bin", default=os.path.expanduser("~/workspace/ingest_bin_v2"),
+                   help="path to the Zag ingest binary")
+    return p.parse_args()
 EXT = os.path.join(BASE, "extract")
 sys.path.insert(0, EXT)
 
@@ -30,6 +36,7 @@ def count_records(path):
     return n
 
 def main():
+    args = parse_args()
     os.makedirs(DRY, exist_ok=True)
 
     # 1. filter current wikt.bin (resume is in skip phase; no appends happening)
@@ -67,7 +74,7 @@ def main():
     # build/ dir mid-run (cause unknown); rebuilt to ~/workspace/ingest_bin_v2.
     ncap = nf * 11 // 10
     store = os.path.join(DRY, "store_dry")
-    bbin = os.path.expanduser("~/workspace/ingest_bin_v2")
+    bbin = args.ingest_bin
     print(f"ingesting {nf} facts, ncap={ncap} ...", flush=True)
     r = subprocess.run([bbin, "ingest", facts, os.path.join(DRY, "bad.bin"),
                         store, str(ncap)])

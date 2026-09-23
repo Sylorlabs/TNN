@@ -34,7 +34,11 @@ Kinds: 1=wikt sense, 2=wikt inflection, 3=wiki sentence, 4=wordnet gloss.
 
 - Input records: 4,247,408
 - Unique output: 3,707,990 records
-- Duplicate keys removed: 539,418 (12.7% — primarily wiki append overlap)
+- Duplicate keys counted: 539,418 (12.7% — primarily wiki append overlap).
+  **Correction (2026-09-23):** the original merge counted duplicates but did
+  NOT remove them — it wrote all records including duplicates. The
+  "removed" claim in earlier versions of this report was false. The fixed
+  `merge_sort.py` performs deterministic keep-first dedupe.
 - Output verified: 3,707,990 records by independent scan.
 
 ## 4. Ingest
@@ -50,7 +54,17 @@ S5 store via Zag `build/ingest_bin` (built from `build/ingest.zag`).
 - Blob chunks: 12, total 379,490,901 bytes
 - Audit clock: 57
 
-**Caveat:** 9 lessons (1,110,933 records) were CAL-rejected during ingest and not installed. The CAL (Content Assurance Logic) gate rejected these as a unit. Root cause under investigation — likely data quality issues in the wiki append-overlap region. The 2.6M installed facts are validated and sealed.
+**Caveat (superseded 2026-09-23):** 9 lessons were CAL-rejected during the
+original ingest and not installed. **Correction:** 9 lessons × 65,536 =
+**589,824** records (not 1,110,933 as stated in earlier versions — the
+arithmetic was wrong). Root cause established: (1) the merge did not
+deduplicate, so lessons 3, 14, 23, 28, 31, 39 opened with a duplicate of the
+preceding lesson's final key (G2 on record 0); (2) Wiktionary emitted
+97,854 kind-1 short-text and 3 kind-2 malformed-key records (G3), so lessons
+43, 48, 50 opened with four consecutive G3-invalid records. The CAL gate
+correctly rejected the degenerate records; dropping the nine whole lessons
+was collateral damage. All valid facts are recovered in the final ingest
+(see `gaps/GAPS_VERDICT.md`).
 
 ### Scale parameters
 - S5 slots (NCAP): 4,078,789 (3,707,990 × 1.1)
