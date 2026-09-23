@@ -1,0 +1,850 @@
+// ST — memory-strength trial substrate (native Zag).
+// Extends the MA1 memory_core.zag pattern: deliberate audited ops,
+// before/after snapshots, append-only ledger, replay-to-exact-state.
+// Adds: judgment-set strength (four legal write paths only), the
+// erase/overwrite effort gate (evidence + justification + stage), and the
+// external force-pin lock (arm C). Integer-only. No reward signal anywhere:
+// strength is declared judgment, recorded openly, never computed.
+// The effort schedule n(s)=ceil(s/25) is a preregistered formula OVER
+// strength; strength itself is only ever set by the four ops below.
+@import("cl/common.zag")
+
+const ST_OP_ADD:i32=1;
+const ST_OP_KILL:i32=2;
+const ST_OP_PIN:i32=3;
+const ST_OP_UNPIN:i32=4;
+const ST_OP_PROMOTE:i32=5;
+const ST_OP_DEMOTE:i32=6;
+const ST_OP_ROLLBACK:i32=7;
+const ST_OP_SETSTAGE:i32=8;
+const ST_OP_STRENGTHEN:i32=20;
+const ST_OP_WEAKEN:i32=21;
+const ST_OP_EVIDENCE:i32=22;
+const ST_OP_JUSTIFY:i32=23;
+const ST_OP_KILL_EVIDENCED:i32=24;
+const ST_OP_OVERWRITE:i32=25;
+const ST_OP_TRAINER_DECLARE:i32=26;
+const ST_OP_FORCE_PIN:i32=27;
+const ST_OP_FORCE_UNPIN:i32=28;
+const ST_OP_ABANDON:i32=29;
+
+const ST_OK:i32=0;
+const ST_REFUSED_CORE:i32=101;
+const ST_REFUSED_PINNED:i32=102;
+const ST_REFUSED_NOTLIVE:i32=103;
+const ST_REFUSED_FULL:i32=104;
+const ST_REFUSED_STAGE:i32=105;
+const ST_REFUSED_BADSLOT:i32=106;
+const ST_REFUSED_AUDITFULL:i32=107;
+const ST_REFUSED_NOROLLBACK:i32=108;
+const ST_REFUSED_EFFORT:i32=120;
+const ST_REFUSED_JUSTIFY:i32=121;
+const ST_REFUSED_DUPCITE:i32=122;
+const ST_REFUSED_EXTERNAL_ONLY:i32=123;
+const ST_REFUSED_OCCUPIED:i32=124;
+const ST_REFUSED_NOTFORCEDPIN:i32=125;
+const ST_REFUSED_BADCODE:i32=126;
+const ST_REFUSED_BADSTRENGTH:i32=127;
+
+const ST_STAGE_NONE:i32=0;
+const ST_STAGE_ADD:i32=1;
+const ST_STAGE_MANAGE:i32=2;
+const ST_STAGE_KILL:i32=3;
+const ST_STAGE_FULL:i32=4;
+
+const ST_REGION_CORE:i32=0;
+const ST_REGION_USER:i32=1;
+const ST_TIER_SHORT:i32=0;
+const ST_TIER_LONG:i32=1;
+
+const ST_ORIGIN_NONE:i32=0;
+const ST_ORIGIN_TNN:i32=1;
+const ST_ORIGIN_HUMAN:i32=2;
+
+const ST_CALLER_TNN:i32=0;
+const ST_CALLER_TRAINER:i32=1;
+
+const ST_J_CONFIRMED_IMPORTANT:i32=1;
+const ST_J_CORROBORATED:i32=2;
+const ST_J_CONTRADICTED:i32=3;
+const ST_J_SUPERSEDED:i32=4;
+const ST_J_IMPLANT_DETECTED:i32=5;
+const ST_J_PRESSURE_VICTIM:i32=6;
+const ST_J_TRAINER_DIRECTIVE:i32=7;
+
+const ST_ARM_A:i32=0;
+const ST_ARM_B:i32=1;
+const ST_ARM_C:i32=2;
+
+// Audit entry words: op,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,stage,d1,d2.
+// b1=live|pinned<<8|tier<<16|region<<24, b2=value, b3=step_added,
+// b4=strength|origin<<8|forcepin<<16|trainer<<24, b5=strength_clock.
+// d1/d2 = op data (cite_ep, justification code, caller/trainer). Replay
+// reconstructs b1..b5; d1/d2 are verified by the evidence auditor.
+const ST_AUDIT_WORDS:i32=16;
+const ST_CITE_MAX:i32=4;
+
+struct StStore {
+    live: []u8,
+    value: []u8,
+    pinned: []u8,
+    region: []u8,
+    tier: []u8,
+    step: []u8,
+    st_str: []u8,
+    st_sorg: []u8,
+    st_sclk: []u8,
+    forcepin: []u8,
+    pintrainer: []u8,
+    cite_n: []u8,
+    cite_ep: []u8,
+    justified: []u8,
+    audit: []u8,
+    audit_n: i32,
+    audit_cap: i32,
+    cap: i32,
+    stage: i32,
+    clock: i32,
+    overflow: i32,
+    org_tag: i32   // INT-1: organ tag stamped into op-word high 16 bits
+}
+
+// little-endian i32 packing (playbook §12 idiom: no []i32 allocator observed)
+fn st_i32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn st_i32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+
+fn st_need(strength:i32)i32 {
+    if(strength<=0){return 0;}
+    return (strength+24)/25;
+}
+fn st_code_ok(code:i32)i32 {
+    if(code>=ST_J_CONFIRMED_IMPORTANT && code<=ST_J_TRAINER_DIRECTIVE){return 1;}
+    return 0;
+}
+
+fn st_init(cap:i32,audit_cap:i32,org:i32)StStore {
+    let live:[]u8=nio_alloc(cap);
+    let value:[]u8=nio_alloc(cap*4);
+    let pinned:[]u8=nio_alloc(cap);
+    let region:[]u8=nio_alloc(cap);
+    let tier:[]u8=nio_alloc(cap);
+    let step:[]u8=nio_alloc(cap*4);
+    let st_str:[]u8=nio_alloc(cap);
+    let st_sorg:[]u8=nio_alloc(cap);
+    let st_sclk:[]u8=nio_alloc(cap*4);
+    let forcepin:[]u8=nio_alloc(cap);
+    let pintrainer:[]u8=nio_alloc(cap*4);
+    let cite_n:[]u8=nio_alloc(cap);
+    let cite_ep:[]u8=nio_alloc(cap*ST_CITE_MAX*4);
+    let justified:[]u8=nio_alloc(cap);
+    let audit:[]u8=nio_alloc(audit_cap*ST_AUDIT_WORDS*4);
+    // nio_alloc is NOT zeroed (playbook §12) — zero everything by hand.
+    let i:i32=0;
+    while(i<cap){
+        live[i]=0;pinned[i]=0;region[i]=0;tier[i]=0;
+        st_str[i]=0;st_sorg[i]=0;forcepin[i]=0;cite_n[i]=0;justified[i]=0;
+        i=i+1;
+    }
+    i=0;while(i<cap*4){value[i]=0;step[i]=0;st_sclk[i]=0;pintrainer[i]=0;i=i+1;}
+    i=0;while(i<cap*ST_CITE_MAX*4){cite_ep[i]=0;i=i+1;}
+    i=0;while(i<audit_cap*ST_AUDIT_WORDS*4){audit[i]=0;i=i+1;}
+    return StStore{.live=live,.value=value,.pinned=pinned,.region=region,.tier=tier,
+        .step=step,.st_str=st_str,.st_sorg=st_sorg,.st_sclk=st_sclk,.forcepin=forcepin,
+        .pintrainer=pintrainer,.cite_n=cite_n,.cite_ep=cite_ep,.justified=justified,
+        .audit=audit,.audit_n=0,.audit_cap=audit_cap,.cap=cap,
+        .stage=ST_STAGE_NONE,.clock=0,.overflow=0,.org_tag=org};
+}
+
+fn st_free(s:*StStore)void {
+    nio_free(s.*.live);nio_free(s.*.value);nio_free(s.*.pinned);nio_free(s.*.region);
+    nio_free(s.*.tier);nio_free(s.*.step);nio_free(s.*.st_str);nio_free(s.*.st_sorg);
+    nio_free(s.*.st_sclk);nio_free(s.*.forcepin);nio_free(s.*.pintrainer);
+    nio_free(s.*.cite_n);nio_free(s.*.cite_ep);nio_free(s.*.justified);
+    nio_free(s.*.audit);
+}
+
+// Snapshot words b1..b5 (see header comment for packing).
+fn st_snap(s:*StStore,slot:i32,b1:*i32,b2:*i32,b3:*i32,b4:*i32,b5:*i32)void {
+    b1.*=(s.*.live[slot] as i32)|((s.*.pinned[slot] as i32)<<8)|((s.*.tier[slot] as i32)<<16)|((s.*.region[slot] as i32)<<24);
+    b2.*=st_i32_get(s.*.value,slot*4);
+    b3.*=st_i32_get(s.*.step,slot*4);
+    b4.*=(s.*.st_str[slot] as i32)|((s.*.st_sorg[slot] as i32)<<8)|((s.*.forcepin[slot] as i32)<<16)|((st_i32_get(s.*.pintrainer,slot*4)&255)<<24);
+    b5.*=st_i32_get(s.*.st_sclk,slot*4);
+}
+fn st_restore(s:*StStore,slot:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32)void {
+    s.*.live[slot]=(b1&255) as u8;s.*.pinned[slot]=((b1>>8)&255) as u8;
+    s.*.tier[slot]=((b1>>16)&255) as u8;s.*.region[slot]=((b1>>24)&255) as u8;
+    st_i32_set(s.*.value,slot*4,b2);st_i32_set(s.*.step,slot*4,b3);
+    s.*.st_str[slot]=(b4&255) as u8;s.*.st_sorg[slot]=((b4>>8)&255) as u8;
+    s.*.forcepin[slot]=((b4>>16)&255) as u8;
+    st_i32_set(s.*.pintrainer,slot*4,(b4>>24)&255);
+    st_i32_set(s.*.st_sclk,slot*4,b5);
+}
+
+fn st_audit_append(s:*StStore,op:i32,slot:i32,rc:i32,
+                   b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+                   a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)i32 {
+    if(s.*.audit_n>=s.*.audit_cap){s.*.overflow=1;return ST_REFUSED_AUDITFULL;}
+    let e:i32=s.*.audit_n*ST_AUDIT_WORDS*4;
+    // INT-1: organ tag in op-word high 16 bits; readers mask with & 65535.
+    st_i32_set(s.*.audit,e+0,(s.*.org_tag<<16)|op);st_i32_set(s.*.audit,e+4,slot);st_i32_set(s.*.audit,e+8,rc);
+    st_i32_set(s.*.audit,e+12,b1);st_i32_set(s.*.audit,e+16,b2);st_i32_set(s.*.audit,e+20,b3);
+    st_i32_set(s.*.audit,e+24,b4);st_i32_set(s.*.audit,e+28,b5);
+    st_i32_set(s.*.audit,e+32,a1);st_i32_set(s.*.audit,e+36,a2);st_i32_set(s.*.audit,e+40,a3);
+    st_i32_set(s.*.audit,e+44,a4);st_i32_set(s.*.audit,e+48,a5);
+    st_i32_set(s.*.audit,e+52,s.*.stage);
+    st_i32_set(s.*.audit,e+56,d1);st_i32_set(s.*.audit,e+60,d2);
+    s.*.audit_n=s.*.audit_n+1;s.*.clock=s.*.clock+1;
+    return ST_OK;
+}
+fn st_badslot(s:*StStore,slot:i32)i32 {
+    if(s==null as *StStore || slot<0 || slot>=s.*.cap){return 1;}
+    return 0;
+}
+// Clear a slot's full state (used on successful kills).
+fn st_clear_slot(s:*StStore,slot:i32)void {
+    s.*.live[slot]=0;s.*.pinned[slot]=0;s.*.tier[slot]=ST_TIER_SHORT as u8;
+    s.*.region[slot]=ST_REGION_USER as u8;
+    st_i32_set(s.*.value,slot*4,0);st_i32_set(s.*.step,slot*4,0);
+    s.*.st_str[slot]=0;s.*.st_sorg[slot]=ST_ORIGIN_NONE as u8;
+    st_i32_set(s.*.st_sclk,slot*4,0);
+    s.*.forcepin[slot]=0;st_i32_set(s.*.pintrainer,slot*4,0);
+    s.*.cite_n[slot]=0;s.*.justified[slot]=0;
+}
+
+// ---- the four legal strength-write paths (PREREG §1.2) ----
+// The runner's static check asserts st_str[] is assigned ONLY in the four
+// functions below. st_sorg/st_sclk ride alongside strength.
+
+// Path 1: MEM_ADD(value, region, strength) — TNN judgment at add time.
+fn st_add(s:*StStore,value:i32,region:i32,strength:i32,out_slot:*i32)i32 {
+    if(s==null as *StStore || out_slot==null as *i32 ||
+       (region!=ST_REGION_CORE && region!=ST_REGION_USER)){return cl_bad();}
+    if(strength<0 || strength>100){
+        out_slot.*=-1;
+        let q1:i32=0;let q2:i32=0;let q3:i32=0;let q4:i32=0;let q5:i32=0;
+        st_audit_append(s,ST_OP_ADD,-1,ST_REFUSED_BADSTRENGTH,q1,q2,q3,q4,q5,q1,q2,q3,q4,q5,strength,0);
+        return ST_REFUSED_BADSTRENGTH;
+    }
+    if(s.*.stage<ST_STAGE_ADD){
+        out_slot.*=-1;
+        let q1:i32=0;let q2:i32=0;let q3:i32=0;let q4:i32=0;let q5:i32=0;
+        st_audit_append(s,ST_OP_ADD,-1,ST_REFUSED_STAGE,q1,q2,q3,q4,q5,q1,q2,q3,q4,q5,strength,0);
+        return ST_REFUSED_STAGE;
+    }
+    let slot:i32=0;
+    while(slot<s.*.cap){if(s.*.live[slot]==0){break;}slot=slot+1;}
+    if(slot>=s.*.cap){
+        out_slot.*=-1;
+        let q1:i32=0;let q2:i32=0;let q3:i32=0;let q4:i32=0;let q5:i32=0;
+        st_audit_append(s,ST_OP_ADD,-1,ST_REFUSED_FULL,q1,q2,q3,q4,q5,q1,q2,q3,q4,q5,strength,0);
+        return ST_REFUSED_FULL;
+    }
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    s.*.live[slot]=1;s.*.pinned[slot]=0;s.*.region[slot]=region as u8;
+    s.*.tier[slot]=ST_TIER_SHORT as u8;
+    st_i32_set(s.*.value,slot*4,value);st_i32_set(s.*.step,slot*4,s.*.clock);
+    s.*.st_str[slot]=strength as u8;
+    s.*.st_sorg[slot]=ST_ORIGIN_TNN as u8;
+    st_i32_set(s.*.st_sclk,slot*4,s.*.clock);
+    s.*.cite_n[slot]=0;s.*.justified[slot]=0;
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    out_slot.*=slot;
+    st_audit_append(s,ST_OP_ADD,slot,ST_OK,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,strength,region);
+    return ST_OK;
+}
+
+// Path 2: STRENGTHEN(slot, s, reason_code) — TNN judgment, stage ≥ MANAGE.
+fn st_strengthen(s:*StStore,slot:i32,strength:i32,code:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(strength<0 || strength>100){rc=ST_REFUSED_BADSTRENGTH;}
+    else if(st_code_ok(code)==0){rc=ST_REFUSED_BADCODE;}
+    if(rc==ST_OK){
+        s.*.st_str[slot]=strength as u8;
+        s.*.st_sorg[slot]=ST_ORIGIN_TNN as u8;
+        st_i32_set(s.*.st_sclk,slot*4,s.*.clock);
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_STRENGTHEN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,strength,code);
+    return rc;
+}
+
+// Path 3: WEAKEN(slot, s, reason_code) — TNN judgment, stage ≥ MANAGE.
+// (Op exists per prereg; the trial learner policy does not invoke it.)
+fn st_weaken(s:*StStore,slot:i32,strength:i32,code:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(strength<0 || strength>100){rc=ST_REFUSED_BADSTRENGTH;}
+    else if(st_code_ok(code)==0){rc=ST_REFUSED_BADCODE;}
+    if(rc==ST_OK){
+        s.*.st_str[slot]=strength as u8;
+        s.*.st_sorg[slot]=ST_ORIGIN_TNN as u8;
+        st_i32_set(s.*.st_sclk,slot*4,s.*.clock);
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_WEAKEN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,strength,code);
+    return rc;
+}
+
+// Path 4: TRAINER_DECLARE_STRENGTH(slot, s, note) — human judgment path:
+// external origin, audited, visible. Reversible later by TNN via
+// STRENGTHEN/WEAKEN. Human-set strength is stronger friction, never a lock.
+fn st_trainer_declare(s:*StStore,slot:i32,strength:i32,note:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(strength<0 || strength>100){rc=ST_REFUSED_BADSTRENGTH;}
+    if(rc==ST_OK){
+        s.*.st_str[slot]=strength as u8;
+        s.*.st_sorg[slot]=ST_ORIGIN_HUMAN as u8;
+        st_i32_set(s.*.st_sclk,slot*4,s.*.clock);
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_TRAINER_DECLARE,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,strength,note);
+    return rc;
+}
+
+// ---- evidence, justification, evidenced kill ----
+
+// EVIDENCE_AGAINST(slot, code, cite_ep): records one counter-evidence
+// record citing a distinct contradiction episode. DUPCITE is per
+// (slot, episode): re-citing an episode for the same slot refuses.
+fn st_evidence(s:*StStore,slot:i32,code:i32,cite_ep:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_KILL){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(st_code_ok(code)==0){rc=ST_REFUSED_BADCODE;}
+    else if(cite_ep<0){rc=ST_REFUSED_BADCODE;}
+    else {
+        let k:i32=0;let dup:i32=0;
+        while(k<s.*.cite_n[slot] as i32){
+            if(st_i32_get(s.*.cite_ep,(slot*ST_CITE_MAX+k)*4)==cite_ep){dup=1;}
+            k=k+1;
+        }
+        if(dup==1){rc=ST_REFUSED_DUPCITE;}
+        else if(s.*.cite_n[slot] as i32>=ST_CITE_MAX){rc=ST_REFUSED_DUPCITE;}
+    }
+    if(rc==ST_OK){
+        let n:i32=s.*.cite_n[slot] as i32;
+        st_i32_set(s.*.cite_ep,(slot*ST_CITE_MAX+n)*4,cite_ep);
+        s.*.cite_n[slot]=(n+1) as u8;
+    }
+    // Snapshot words are unchanged by a recording op (before==after);
+    // the citation itself rides in d2.
+    st_audit_append(s,ST_OP_EVIDENCE,slot,rc,b1,b2,b3,b4,b5,b1,b2,b3,b4,b5,code,cite_ep);
+    return rc;
+}
+
+// JUSTIFY(slot, code): one justification entry from the fixed enum,
+// clocked (ledger order) before the kill it justifies.
+fn st_justify(s:*StStore,slot:i32,code:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_KILL){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(st_code_ok(code)==0){rc=ST_REFUSED_BADCODE;}
+    if(rc==ST_OK){s.*.justified[slot]=1;}
+    st_audit_append(s,ST_OP_JUSTIFY,slot,rc,b1,b2,b3,b4,b5,b1,b2,b3,b4,b5,code,0);
+    return rc;
+}
+
+// MEM_KILL_EVIDENCED(slot): the effort gate. Erasing a memory of strength
+// s requires n(s)=ceil(s/25) distinct cited EVIDENCE_AGAINST records plus
+// a prior JUSTIFY; s<=50 needs stage ≥ KILL, s>50 needs stage ≥ FULL.
+// Arm B bypasses effort/justification (MA1 verbatim); every other gate
+// still applies.
+fn st_kill_evidenced(s:*StStore,slot:i32,arm:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    let str:i32=s.*.st_str[slot] as i32;
+    let need_stage:i32=ST_STAGE_KILL;
+    if(str>50){need_stage=ST_STAGE_FULL;}
+    if(s.*.stage<need_stage){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(s.*.forcepin[slot]==1){rc=ST_REFUSED_PINNED;}
+    else if(s.*.pinned[slot]==1){rc=ST_REFUSED_PINNED;}
+    else if(arm!=ST_ARM_B){
+        let need:i32=st_need(str);
+        if((s.*.cite_n[slot] as i32)<need){rc=ST_REFUSED_EFFORT;}
+        else if(s.*.justified[slot]==0){rc=ST_REFUSED_JUSTIFY;}
+    }
+    if(rc==ST_OK){st_clear_slot(s,slot);}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_KILL_EVIDENCED,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,st_need(str),arm);
+    return rc;
+}
+
+// MEM_KILL(slot): arm B only — MA1 semantics verbatim. Strength is stored
+// but ignored by the gate. One deliberate kill at stage ≥ KILL.
+fn st_kill(s:*StStore,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_KILL){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(s.*.forcepin[slot]==1){rc=ST_REFUSED_PINNED;}
+    else if(s.*.pinned[slot]==1){rc=ST_REFUSED_PINNED;}
+    if(rc==ST_OK){st_clear_slot(s,slot);}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_KILL,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+    return rc;
+}
+
+// MEM_OVERWRITE(slot, value, strength): not a loophole — pays the full
+// erase effort for the old judgment, then re-declares via the add path.
+fn st_overwrite(s:*StStore,slot:i32,value:i32,strength:i32,arm:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    let str:i32=s.*.st_str[slot] as i32;
+    let need_stage:i32=ST_STAGE_KILL;
+    if(str>50){need_stage=ST_STAGE_FULL;}
+    if(s.*.stage<need_stage){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    else if(s.*.forcepin[slot]==1){rc=ST_REFUSED_PINNED;}
+    else if(s.*.pinned[slot]==1){rc=ST_REFUSED_PINNED;}
+    else if(strength<0 || strength>100){rc=ST_REFUSED_BADSTRENGTH;}
+    else if(arm!=ST_ARM_B){
+        let need:i32=st_need(str);
+        if((s.*.cite_n[slot] as i32)<need){rc=ST_REFUSED_EFFORT;}
+        else if(s.*.justified[slot]==0){rc=ST_REFUSED_JUSTIFY;}
+    }
+    if(rc==ST_OK){
+        st_i32_set(s.*.value,slot*4,value);
+        s.*.st_str[slot]=strength as u8;
+        s.*.st_sorg[slot]=ST_ORIGIN_TNN as u8;
+        st_i32_set(s.*.st_sclk,slot*4,s.*.clock);
+        s.*.cite_n[slot]=0;s.*.justified[slot]=0;
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_OVERWRITE,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,strength,arm);
+    return rc;
+}
+
+// ---- force-pin (arm C): the one true lock. External origin only. ----
+
+fn st_force_pin(s:*StStore,caller:i32,trainer:i32,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(caller!=ST_CALLER_TRAINER){rc=ST_REFUSED_EXTERNAL_ONLY;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    if(rc==ST_OK){
+        // Re-pin is idempotent; the first pinner stays the pin_trainer.
+        if(s.*.forcepin[slot]==0){st_i32_set(s.*.pintrainer,slot*4,trainer);}
+        s.*.forcepin[slot]=1;
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_FORCE_PIN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,caller,trainer);
+    return rc;
+}
+
+fn st_force_unpin(s:*StStore,caller:i32,trainer:i32,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(caller!=ST_CALLER_TRAINER){rc=ST_REFUSED_EXTERNAL_ONLY;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.forcepin[slot]==0){rc=ST_REFUSED_NOTFORCEDPIN;}
+    else if(st_i32_get(s.*.pintrainer,slot*4)!=trainer){rc=ST_REFUSED_EXTERNAL_ONLY;}
+    if(rc==ST_OK){
+        s.*.forcepin[slot]=0;st_i32_set(s.*.pintrainer,slot*4,0);
+    }
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_FORCE_UNPIN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,caller,trainer);
+    return rc;
+}
+
+// ---- MA1 carry-overs: pin/unpin/promote/demote/set_stage/rollback ----
+
+fn st_pin(s:*StStore,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+    if(rc==ST_OK){s.*.pinned[slot]=1;}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_PIN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+    return rc;
+}
+
+fn st_unpin(s:*StStore,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    if(rc==ST_OK){s.*.pinned[slot]=0;}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_UNPIN,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+    return rc;
+}
+
+fn st_promote(s:*StStore,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    if(rc==ST_OK){s.*.tier[slot]=ST_TIER_LONG as u8;}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_PROMOTE,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+    return rc;
+}
+
+fn st_demote(s:*StStore,slot:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    let rc:i32=ST_OK;
+    if(s.*.stage<ST_STAGE_MANAGE){rc=ST_REFUSED_STAGE;}
+    else if(s.*.live[slot]==0){rc=ST_REFUSED_NOTLIVE;}
+    if(rc==ST_OK){s.*.tier[slot]=ST_TIER_SHORT as u8;}
+    let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+    st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+    st_audit_append(s,ST_OP_DEMOTE,slot,rc,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+    return rc;
+}
+
+fn st_set_stage(s:*StStore,stage:i32)i32 {
+    if(s==null as *StStore || stage<ST_STAGE_NONE || stage>ST_STAGE_FULL){return cl_bad();}
+    let b1:i32=s.*.stage;
+    s.*.stage=stage;
+    st_audit_append(s,ST_OP_SETSTAGE,-1,ST_OK,b1,0,0,0,0,stage,0,0,0,0,0,0);
+    return ST_OK;
+}
+
+// ABANDON: the learner's deliberate, audited decision to abandon a kill
+// (effort not payable). A recording op: no state change.
+fn st_abandon(s:*StStore,slot:i32,reason:i32)i32 {
+    if(st_badslot(s,slot)==1){return cl_bad();}
+    let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+    st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+    st_audit_append(s,ST_OP_ABANDON,slot,ST_OK,b1,b2,b3,b4,b5,b1,b2,b3,b4,b5,reason,0);
+    return ST_OK;
+}
+
+// Roll back the most recent successful mutating op (audited).
+fn st_rollback_last(s:*StStore)i32 {
+    if(s==null as *StStore){return cl_bad();}
+    let i:i32=s.*.audit_n-1;
+    while(i>=0){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(rc==ST_OK && op!=ST_OP_ROLLBACK && op!=ST_OP_SETSTAGE &&
+           op!=ST_OP_EVIDENCE && op!=ST_OP_JUSTIFY && op!=ST_OP_ABANDON &&
+           (op==ST_OP_ADD||op==ST_OP_KILL||op==ST_OP_PIN||op==ST_OP_UNPIN||
+            op==ST_OP_PROMOTE||op==ST_OP_DEMOTE||op==ST_OP_STRENGTHEN||
+            op==ST_OP_WEAKEN||op==ST_OP_KILL_EVIDENCED||op==ST_OP_OVERWRITE||
+            op==ST_OP_TRAINER_DECLARE||op==ST_OP_FORCE_PIN||op==ST_OP_FORCE_UNPIN)){
+            let slot:i32=st_i32_get(s.*.audit,e+4);
+            let b1:i32=0;let b2:i32=0;let b3:i32=0;let b4:i32=0;let b5:i32=0;
+            st_snap(s,slot,&b1,&b2,&b3,&b4,&b5);
+            st_restore(s,slot,st_i32_get(s.*.audit,e+12),st_i32_get(s.*.audit,e+16),
+                       st_i32_get(s.*.audit,e+20),st_i32_get(s.*.audit,e+24),
+                       st_i32_get(s.*.audit,e+28));
+            let a1:i32=0;let a2:i32=0;let a3:i32=0;let a4:i32=0;let a5:i32=0;
+            st_snap(s,slot,&a1,&a2,&a3,&a4,&a5);
+            st_audit_append(s,ST_OP_ROLLBACK,slot,ST_OK,b1,b2,b3,b4,b5,a1,a2,a3,a4,a5,0,0);
+            return ST_OK;
+        }
+        i=i-1;
+    }
+    return ST_REFUSED_NOROLLBACK;
+}
+
+// ---- independent checker ----
+
+// Invariant 1: every refused op left state untouched (before==after).
+fn st_audit_clean_refusals(s:*StStore)i32 {
+    if(s==null as *StStore){return cl_bad();}
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(rc!=ST_OK){
+            if(st_i32_get(s.*.audit,e+12)!=st_i32_get(s.*.audit,e+32)){return 1;}
+            if(st_i32_get(s.*.audit,e+16)!=st_i32_get(s.*.audit,e+36)){return 1;}
+            if(st_i32_get(s.*.audit,e+20)!=st_i32_get(s.*.audit,e+40)){return 1;}
+            if(st_i32_get(s.*.audit,e+24)!=st_i32_get(s.*.audit,e+44)){return 1;}
+            if(st_i32_get(s.*.audit,e+28)!=st_i32_get(s.*.audit,e+48)){return 1;}
+        }
+        i=i+1;
+    }
+    return ST_OK;
+}
+
+// Invariant 2: replaying the ledger from genesis reconstructs exact slot
+// state (fields + stage + entry count). Returns 0 on exact match.
+fn st_replay_check(s:*StStore)i32 {
+    if(s==null as *StStore){return cl_bad();}
+    let sh:StStore=st_init(s.*.cap,s.*.audit_cap,s.*.org_tag);
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let slot:i32=st_i32_get(s.*.audit,e+4);
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(rc==ST_OK){
+            if(op==ST_OP_SETSTAGE){sh.stage=st_i32_get(s.*.audit,e+32);}
+            else if(op!=ST_OP_EVIDENCE && op!=ST_OP_JUSTIFY && op!=ST_OP_ABANDON){
+                st_restore(&sh,slot,st_i32_get(s.*.audit,e+32),st_i32_get(s.*.audit,e+36),
+                           st_i32_get(s.*.audit,e+40),st_i32_get(s.*.audit,e+44),
+                           st_i32_get(s.*.audit,e+48));
+            }
+        }
+        i=i+1;
+    }
+    let bad:i32=0;
+    i=0;
+    while(i<s.*.cap){
+        if(sh.live[i]!=s.*.live[i]){bad=1;}
+        if(sh.pinned[i]!=s.*.pinned[i]){bad=1;}
+        if(sh.tier[i]!=s.*.tier[i]){bad=1;}
+        if(sh.region[i]!=s.*.region[i]){bad=1;}
+        if(st_i32_get(sh.value,i*4)!=st_i32_get(s.*.value,i*4)){bad=1;}
+        if(st_i32_get(sh.step,i*4)!=st_i32_get(s.*.step,i*4)){bad=1;}
+        if(sh.st_str[i]!=s.*.st_str[i]){bad=1;}
+        if(sh.st_sorg[i]!=s.*.st_sorg[i]){bad=1;}
+        if(st_i32_get(sh.st_sclk,i*4)!=st_i32_get(s.*.st_sclk,i*4)){bad=1;}
+        if(sh.forcepin[i]!=s.*.forcepin[i]){bad=1;}
+        if(st_i32_get(sh.pintrainer,i*4)!=st_i32_get(s.*.pintrainer,i*4)){bad=1;}
+        i=i+1;
+    }
+    if(sh.stage!=s.*.stage){bad=1;}
+    st_free(&sh);
+    if(bad==1){return 1;}
+    return ST_OK;
+}
+
+// Invariant 3: no successful KILL of a pinned or force-pinned slot.
+fn st_no_pinned_kills(s:*StStore)i32 {
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(rc==ST_OK && (op==ST_OP_KILL||op==ST_OP_KILL_EVIDENCED||op==ST_OP_OVERWRITE)){
+            let b1:i32=st_i32_get(s.*.audit,e+12);
+            let b4:i32=st_i32_get(s.*.audit,e+24);
+            if(((b1>>8)&255)==1){return 1;}
+            if(((b4>>16)&255)==1){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+// Invariant 4: CORE slots 0,1 live and CORE at endpoint.
+fn st_core_intact(s:*StStore)i32 {
+    if(s.*.live[0]!=1 || s.*.live[1]!=1){return 1;}
+    if(s.*.region[0]!=ST_REGION_CORE as u8 || s.*.region[1]!=ST_REGION_CORE as u8){return 1;}
+    return 0;
+}
+
+// Invariant 5: every FORCE_PIN/UNPIN entry that took effect (rc==OK)
+// carries the trainer origin tag. Refused attempts (e.g. a TNN-issued
+// force-pin → REFUSED_EXTERNAL_ONLY, which the plan requires to be
+// ledgered) record their true caller honestly and do not create a lock,
+// so they are exempt: INVALID fires only when a lock was actually set
+// without trainer origin.
+fn st_forcepintag_ok(s:*StStore)i32 {
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(rc==ST_OK && (op==ST_OP_FORCE_PIN||op==ST_OP_FORCE_UNPIN)){
+            let caller:i32=st_i32_get(s.*.audit,e+56);
+            if(caller!=ST_CALLER_TRAINER){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+// Invariant 6: the evidence audit. Single ledger pass. Per slot it tracks
+// the distinct cited episodes since the slot's last reset (ADD/KILL/
+// OVERWRITE) and whether a JUSTIFY was seen since reset. For every
+// completed evidenced erasure: evidence_count == n(strength_at_kill),
+// citations distinct per slot, and a properly-clocked JUSTIFY with an
+// in-enum code exists before the kill. All justification/evidence codes
+// in the ledger are in-enum.
+fn st_evidence_audit(s:*StStore)i32 {
+    if(s==null as *StStore){return cl_bad();}
+    let cap:i32=s.*.cap;
+    let seen:[]u8=nio_alloc(cap*ST_CITE_MAX*4);
+    let seenn:[]u8=nio_alloc(cap);
+    let jflag:[]u8=nio_alloc(cap);
+    let i:i32=0;
+    while(i<cap){seenn[i]=0;jflag[i]=0;i=i+1;}
+    i=0;while(i<cap*ST_CITE_MAX*4){seen[i]=0;i=i+1;}
+    let bad:i32=0;
+    i=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let slot:i32=st_i32_get(s.*.audit,e+4);
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        let d1:i32=st_i32_get(s.*.audit,e+56);
+        if(slot>=0 && slot<cap && rc==ST_OK){
+            if(op==ST_OP_EVIDENCE){
+                if(st_code_ok(d1)==0){bad=1;}
+                let ce:i32=st_i32_get(s.*.audit,e+60);
+                let n:i32=seenn[slot] as i32;
+                let dup:i32=0;let k:i32=0;
+                while(k<n){
+                    if(st_i32_get(seen,(slot*ST_CITE_MAX+k)*4)==ce){dup=1;}
+                    k=k+1;
+                }
+                if(dup==0 && n<ST_CITE_MAX){
+                    st_i32_set(seen,(slot*ST_CITE_MAX+n)*4,ce);
+                    seenn[slot]=(n+1) as u8;
+                }
+            }
+            else if(op==ST_OP_JUSTIFY){
+                if(st_code_ok(d1)==0){bad=1;} else {jflag[slot]=1;}
+            }
+            else if(op==ST_OP_KILL_EVIDENCED){
+                // INT-1 arm-B law: arm B bypasses the evidence/effort gate
+                // (strength never gates); d2 carries the applied arm.
+                let arm:i32=st_i32_get(s.*.audit,e+60);
+                if(arm!=ST_ARM_B){
+                    let b4:i32=st_i32_get(s.*.audit,e+24);
+                    let need:i32=st_need(b4&255);
+                    if((seenn[slot] as i32)!=need){bad=1;}
+                    if(jflag[slot]==0){bad=1;}
+                }
+            }
+            else if(op==ST_OP_STRENGTHEN||op==ST_OP_WEAKEN){
+                let cd:i32=st_i32_get(s.*.audit,e+60);
+                if(st_code_ok(cd)==0){bad=1;}
+            }
+            if(op==ST_OP_ADD||op==ST_OP_KILL||op==ST_OP_KILL_EVIDENCED||op==ST_OP_OVERWRITE){
+                seenn[slot]=0;jflag[slot]=0;
+            }
+        }
+        i=i+1;
+    }
+    nio_free(seen);nio_free(seenn);nio_free(jflag);
+    return bad;
+}
+
+// Invariant 7: per-slot citation lists in live state match the ledger
+// (single pass; independent recomputation of distinct cited episodes
+// since each slot's last reset).
+fn st_cite_consistent(s:*StStore)i32 {
+    if(s==null as *StStore){return cl_bad();}
+    let cap:i32=s.*.cap;
+    let seenn:[]u8=nio_alloc(cap);
+    let seen:[]u8=nio_alloc(cap*ST_CITE_MAX*4);
+    let i:i32=0;
+    while(i<cap){seenn[i]=0;i=i+1;}
+    i=0;while(i<cap*ST_CITE_MAX*4){seen[i]=0;i=i+1;}
+    i=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*ST_AUDIT_WORDS*4;
+        let op:i32=st_i32_get(s.*.audit,e+0) & 65535; // INT-1: mask organ tag
+        let slot:i32=st_i32_get(s.*.audit,e+4);
+        let rc:i32=st_i32_get(s.*.audit,e+8);
+        if(slot>=0 && slot<cap && rc==ST_OK){
+            if(op==ST_OP_EVIDENCE){
+                let ce:i32=st_i32_get(s.*.audit,e+60);
+                let n:i32=seenn[slot] as i32;
+                let dup:i32=0;let k:i32=0;
+                while(k<n){
+                    if(st_i32_get(seen,(slot*ST_CITE_MAX+k)*4)==ce){dup=1;}
+                    k=k+1;
+                }
+                if(dup==0 && n<ST_CITE_MAX){
+                    st_i32_set(seen,(slot*ST_CITE_MAX+n)*4,ce);
+                    seenn[slot]=(n+1) as u8;
+                }
+            }
+            if(op==ST_OP_ADD||op==ST_OP_KILL||op==ST_OP_KILL_EVIDENCED||op==ST_OP_OVERWRITE){
+                seenn[slot]=0;
+            }
+        }
+        i=i+1;
+    }
+    let bad:i32=0;
+    i=0;
+    while(i<cap){
+        if((seenn[i] as i32)!=(s.*.cite_n[i] as i32)){bad=1;}
+        i=i+1;
+    }
+    nio_free(seenn);nio_free(seen);
+    return bad;
+}
+
+// Endpoint fingerprint of a store + extra counters (determinism check).
+fn st_fingerprint(s:*StStore,extra:i32)i32 {
+    let fp:i32=extra;
+    let i:i32=0;
+    while(i<s.*.cap){
+        fp=fp+(s.*.live[i] as i32)*(i+1)+st_i32_get(s.*.value,i*4)+
+           (s.*.pinned[i] as i32)*1009+(s.*.tier[i] as i32)*101+
+           (s.*.region[i] as i32)*10007+(s.*.st_str[i] as i32)*13+
+           (s.*.forcepin[i] as i32)*1000003+(s.*.cite_n[i] as i32)*17+
+           (s.*.st_sorg[i] as i32)*101;
+        i=i+1;
+    }
+    fp=fp+s.*.audit_n*131+s.*.stage*1000003+s.*.clock*7;
+    return fp;
+}

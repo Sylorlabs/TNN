@@ -1,0 +1,948 @@
+// r0_core.zag — R0 CORE: native Zag reimplementation of the R31 dual-route
+// endogenous chunker (Track R0 of the TNN representation program).
+//
+// Prereg: PREREG_FREEZE.md §2 (FROZEN 2026-09-21, Micah signed), R-1..R-9.
+// Source mechanism: units/ARCHAEOLOGY_R31.md (verdict: RESURRECT) and the
+// recovered 1,148-line Zag spec
+// (units/archaeology_r31/docs_generations_R31_tnn_r31_endogenous_chunking.zag).
+// Ported from i32 32-symbol microstate streams to byte streams (alphabet 256).
+//
+// HARD LAWS (prereg §1): pure Zag; ZERO randomness in any AI decision path;
+// byte-identical reruns mandatory (M8). Every function below is deterministic
+// given the state arena: no RNG, no clock, no pointer/address hashing, no
+// uninitialized memory reads (r0_init zeroes the arena explicitly).
+//
+// State model: the caller allocates ONE []i32 arena of r0_arena_words() words
+// (via zalloc_i) and passes it to every call. All bank/proposal/pair/ledger/
+// threshold state lives in the arena at fixed offsets. No hidden allocation.
+//
+// Fixed point: i32 scale 1000 (R0_FP). Purity/conflict in 1/1000 units.
+// Utility in 1/1000 units: utility = gain*0.02 + max(0,purity-0.2)*log1p(seen)*len.
+//
+// Ledger: 16-word entries, stride 64 i32 words. Word map (task spec):
+//   op@0, slot@4, rc@8, b1..b5@12..28, a1..a5@32..48, stage@52, d1@56, d2@60.
+// Op codes adopt crew-1's scheme (ALPHABET_A-F.md: CUT_PROPOSE=0xC0 ...), the
+// flagship arm-D vocabulary this track feeds, plus R0 extensions 0xC9..0xCC.
+// (Prereg A-3 opcode unification is Micah's call; R0's choice is documented in
+// API.md and can be remapped by amendment.)
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const R0_FP:i32 = 1000;
+
+const R0_LMIN:i32 = 2;
+const R0_LMAX:i32 = 8; // R-2: giant-span bar, matches reference enumeration range
+
+const R0_LEG_REC:i32 = 0; // recovered-parameter leg (R-8)
+const R0_LEG_RD:i32 = 1;  // re-derived leg (R-7 test-both)
+
+const R0_PROP_CAP:i32 = 4096;
+const R0_BANK_CAP_REC:i32 = 700;  // R-8 recovered inventory size
+const R0_BANK_CAP_RD:i32 = 1024;  // R-7 re-derived leg: room for byte-stream diversity
+const R0_BANK_CAP_MAX:i32 = 1024;
+const R0_PAIR_CAP:i32 = 512;
+const R0_LEDGER_CAP:i32 = 2048; // entries; 2048*64 words = 512 KiB
+
+// Chunk states
+const R0_ST_EMPTY:i32 = 0;
+const R0_ST_LIVE:i32 = 1;
+const R0_ST_TOMB:i32 = 2; // tombstoned: bytes retained, successor recorded, never reused
+
+// Op codes (decimal; hex in comments). Crew-1 scheme + R0 extensions.
+const R0_OP_PROPOSE:i32 = 192; // 0xC0 CUT_PROPOSE
+const R0_OP_COMMIT:i32 = 193;  // 0xC1 CUT_COMMIT
+const R0_OP_REFUSE:i32 = 194;  // 0xC2 CUT_REFUSE
+const R0_OP_ROLLBACK:i32 = 195; // 0xC3 CUT_ROLLBACK
+const R0_OP_SPLIT:i32 = 196;   // 0xC4 CUT_SPLIT
+const R0_OP_MERGE:i32 = 197;   // 0xC5 CUT_MERGE
+const R0_OP_KILL:i32 = 198;    // 0xC6 CUT_KILL
+const R0_OP_REUSE:i32 = 199;   // 0xC7 CHUNK_REUSE
+const R0_OP_OBSERVE:i32 = 200; // 0xC8 SPAN_OBSERVE
+const R0_OP_RECRUIT:i32 = 201; // 0xC9 R0 ext: support-gap recruit / abstain
+const R0_OP_TRUST:i32 = 202;   // 0xCA R0 ext: dual-route trust update
+const R0_OP_SEGMENT:i32 = 203; // 0xCB R0 ext: segmentation committed
+const R0_OP_THRESH:i32 = 204;  // 0xCC R0 ext: learned-threshold adaptation
+
+// Stage codes (recovered spec)
+const R0_STAGE_SENSOR:i32 = 1;
+const R0_STAGE_MEMORY:i32 = 5;
+const R0_STAGE_REVISION:i32 = 9;
+const R0_STAGE_DECISION:i32 = 10;
+
+// Arena layout. Header 0..31, then proposal/bank/pair/ledger regions.
+const R0H_LEG:i32 = 0;
+const R0H_BANK_N:i32 = 1;   // next chunk ID (= issued count; IDs are 0..bank_n-1)
+const R0H_PROP_N:i32 = 2;
+const R0H_PAIR_N:i32 = 3;
+const R0H_LRN_CONFLICT:i32 = 4; // 1/1000 units
+const R0H_LRN_UTILFLOOR:i32 = 5; // 1/1000 units
+const R0H_LRN_PAIRSEEN:i32 = 6;
+const R0H_LRN_GAIN:i32 = 7;     // 1/1000 units
+const R0H_LRN_MINSUP:i32 = 8;
+const R0H_LRN_MARGIN:i32 = 9;
+const R0H_W_CHUNK:i32 = 10; // dual-route trust weights, 0..2000
+const R0H_W_RAW:i32 = 11;
+const R0H_LEDGER_N:i32 = 12;
+const R0H_BANK_CAP:i32 = 13;
+
+const R0_PROP_BASE:i32 = 32;
+// proposal slot: 0:hash 1:len 2:seen 3:contdiv 4:contbyte 5..12:data[8] 13..16:lab[4]
+const R0_PROP_STRIDE:i32 = 17;
+const R0_PO_DATA:i32 = 5;
+const R0_PO_LAB:i32 = 13;
+
+const R0_BANK_BASE:i32 = 69664; // 32 + 4096*17
+// bank slot: 0:len 1:use 2:util 3:seen 4:state 5:succ 6:regret 7..14:data[8] 15..18:lab[4]
+const R0_BANK_STRIDE:i32 = 19;
+const R0_BO_DATA:i32 = 7;
+const R0_BO_LAB:i32 = 15;
+
+const R0_PAIR_BASE:i32 = 89120; // 69664 + 1024*19
+// pair slot: 0:hash 1:count 2:a 3:b
+const R0_PAIR_STRIDE:i32 = 4;
+
+const R0_LEDGER_BASE:i32 = 91168; // 89120 + 512*4
+const R0_LEDGER_STRIDE:i32 = 64;  // 16-word sparse entries
+
+const R0_ARENA_WORDS:i32 = 222240; // 91168 + 2048*64
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+fn r0_min(a:i32,b:i32)i32 @noalloc { if(a<b){return a;} return b; }
+fn r0_max(a:i32,b:i32)i32 @noalloc { if(a>b){return a;} return b; }
+fn r0_clamp(x:i32,lo:i32,hi:i32)i32 @noalloc {
+    if(x<lo){return lo;} if(x>hi){return hi;} return x;
+}
+fn r0_abs(x:i32)i32 @noalloc { if(x<0){return 0-x;} return x; }
+
+// FNV-1a 32-bit over bytes, folded to non-negative i32. Deterministic.
+fn r0_fnv(bytes:[]i32,start:i32,n:i32)i32 @noalloc {
+    let h:i64 = 2166136261;
+    let i:i32 = 0;
+    while(i<n){
+        h = (h ^ ((bytes[start+i] & 255) as i64)) * 16777619;
+        h = h & 4294967295;
+        i = i+1;
+    }
+    return (h & 2147483647) as i32;
+}
+
+// Deterministic integer ln(1+seen)*1000 via fixed-point log2. seen >= 0.
+fn r0_log1p_1000(seen:i32)i32 @noalloc {
+    if(seen<=0){return 0;}
+    let x:i64 = (seen as i64)+1;
+    let ip:i32 = 0;
+    let t:i64 = x;
+    while(t>1){ t = t/2; ip = ip+1; }
+    let pow:i64 = 1;
+    let k:i32 = 0;
+    while(k<ip){ pow = pow*2; k = k+1; }
+    // mantissa m in [1024,2048): m = x*1024/2^ip
+    let m:i64 = x*1024/pow;
+    let frac:i32 = 0;
+    let bit:i32 = 500;
+    let j:i32 = 0;
+    while(j<10){
+        m = m*m/1024;
+        if(m>=2048){ m = m/2; frac = frac+bit; }
+        bit = bit/2;
+        j = j+1;
+    }
+    let log2_1000:i64 = (ip as i64)*1000 + (frac as i64);
+    return ((log2_1000*693+500)/1000) as i32; // ln2 ~= 0.6931
+}
+
+// ---------------------------------------------------------------------------
+// Arena accessors
+// ---------------------------------------------------------------------------
+fn r0_pbase(p:i32)i32 @noalloc { return R0_PROP_BASE + p*R0_PROP_STRIDE; }
+fn r0_bbase(id:i32)i32 @noalloc { return R0_BANK_BASE + id*R0_BANK_STRIDE; }
+fn r0_pairbase(p:i32)i32 @noalloc { return R0_PAIR_BASE + p*R0_PAIR_STRIDE; }
+fn r0_ebase(e:i32)i32 @noalloc { return R0_LEDGER_BASE + e*R0_LEDGER_STRIDE; }
+
+fn r0_arena_words()i32 @noalloc { return R0_ARENA_WORDS; }
+
+fn r0_init(st:[]i32, leg:i32)void {
+    let i:i32 = 0;
+    while(i<R0_ARENA_WORDS){ st[i]=0; i=i+1; }
+    st[R0H_LEG]=leg;
+    if(leg==R0_LEG_RD){
+        st[R0H_BANK_CAP]=R0_BANK_CAP_RD;
+        st[R0H_LRN_CONFLICT]=500;
+        st[R0H_LRN_PAIRSEEN]=4;
+        st[R0H_LRN_GAIN]=500;
+        st[R0H_LRN_MINSUP]=4;
+        st[R0H_LRN_MARGIN]=3;
+    } else {
+        st[R0H_BANK_CAP]=R0_BANK_CAP_REC;
+        st[R0H_LRN_CONFLICT]=400;
+        st[R0H_LRN_PAIRSEEN]=3;
+        st[R0H_LRN_GAIN]=0;
+        st[R0H_LRN_MINSUP]=3;
+        st[R0H_LRN_MARGIN]=2;
+    }
+    st[R0H_LRN_UTILFLOOR]=0;
+    st[R0H_W_CHUNK]=1000;
+    st[R0H_W_RAW]=1000;
+}
+
+fn r0_leg(st:[]i32)i32 @noalloc { return st[R0H_LEG]; }
+fn r0_bank_cap(st:[]i32)i32 @noalloc { return st[R0H_BANK_CAP]; }
+fn r0_chunk_count(st:[]i32)i32 @noalloc { return st[R0H_BANK_N]; } // issued IDs: 0..n-1
+
+fn r0_live_count(st:[]i32)i32 {
+    let n:i32 = st[R0H_BANK_N];
+    let c:i32 = 0;
+    let id:i32 = 0;
+    while(id<n){ if(st[r0_bbase(id)+4]==R0_ST_LIVE){ c=c+1; } id=id+1; }
+    return c;
+}
+
+fn r0_tomb_count(st:[]i32)i32 {
+    let n:i32 = st[R0H_BANK_N];
+    let c:i32 = 0;
+    let id:i32 = 0;
+    while(id<n){ if(st[r0_bbase(id)+4]==R0_ST_TOMB){ c=c+1; } id=id+1; }
+    return c;
+}
+
+// K-R3: tombstone/live ratio in 1/1000 units. Ghost IDs are impossible by
+// construction: every issued ID 0..bank_n-1 resolves to retained bytes.
+fn r0_tombstone_ratio1000(st:[]i32)i32 {
+    let live:i32 = r0_live_count(st);
+    let tomb:i32 = r0_tomb_count(st);
+    if(live<=0){ if(tomb<=0){return 0;} return 1000000; }
+    return tomb*1000/live;
+}
+
+// ---------------------------------------------------------------------------
+// Ledger — 16-word entries, stride 64.
+// ---------------------------------------------------------------------------
+fn r0_ledger_count(st:[]i32)i32 @noalloc { return st[R0H_LEDGER_N]; }
+
+fn r0_ledger_emit(st:[]i32, op:i32, slot:i32, rc:i32,
+    b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+    a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,
+    stage:i32, d1:i32, d2:i32)i32 {
+    let n:i32 = st[R0H_LEDGER_N];
+    if(n>=R0_LEDGER_CAP){ return -1; }
+    let e:i32 = r0_ebase(n);
+    st[e+0]=op; st[e+4]=slot; st[e+8]=rc;
+    st[e+12]=b1; st[e+16]=b2; st[e+20]=b3; st[e+24]=b4; st[e+28]=b5;
+    st[e+32]=a1; st[e+36]=a2; st[e+40]=a3; st[e+44]=a4; st[e+48]=a5;
+    st[e+52]=stage; st[e+56]=d1; st[e+60]=d2;
+    st[R0H_LEDGER_N]=n+1;
+    return n;
+}
+
+// FNV-1a hash chain over all ledger words (M8 evidence).
+fn r0_ledger_hash(st:[]i32)i32 @noalloc {
+    let h:i64 = 2166136261;
+    let n:i32 = st[R0H_LEDGER_N];
+    let e:i32 = 0;
+    while(e<n){
+        let base:i32 = r0_ebase(e);
+        let w:i32 = 0;
+        while(w<64){
+            let v:i64 = st[base+w] as i64;
+            h = (h ^ (v & 255)) * 16777619; h = h & 4294967295;
+            h = (h ^ ((v/256) & 255)) * 16777619; h = h & 4294967295;
+            h = (h ^ ((v/65536) & 255)) * 16777619; h = h & 4294967295;
+            h = (h ^ ((v/16777216) & 255)) * 16777619; h = h & 4294967295;
+            w = w+1;
+        }
+        e = e+1;
+    }
+    return (h & 2147483647) as i32;
+}
+
+// ---------------------------------------------------------------------------
+// Observe — enumerate spans 2..R0_LMAX at every position (R-2), hash, count.
+// label: -1 = count only; 0..3 = count + grounded-consequence label
+//   bit0 = recall success (a), bit1 = discrimination consistency (b) [R-1].
+// next_byte: byte following the span, -1 at stream end (for contdiv).
+// ---------------------------------------------------------------------------
+fn r0_span_equal_seq(seq:[]i32,start:i32,n:i32,st:[]i32,p:i32)i32 @noalloc {
+    let base:i32 = r0_pbase(p)+R0_PO_DATA;
+    let i:i32 = 0;
+    while(i<n){ if(seq[start+i]!=st[base+i]){return 0;} i=i+1; }
+    return 1;
+}
+
+fn r0_find_proposal(st:[]i32,seq:[]i32,start:i32,n:i32)i32 {
+    let h:i32 = r0_fnv(seq,start,n);
+    let count:i32 = st[R0H_PROP_N];
+    let p:i32 = 0;
+    while(p<count){
+        let base:i32 = r0_pbase(p);
+        if(st[base]==h && st[base+1]==n && r0_span_equal_seq(seq,start,n,st,p)==1){ return p; }
+        p=p+1;
+    }
+    return -1;
+}
+
+fn r0_proposal_seen(st:[]i32,p:i32)i32 @noalloc {
+    if(p<0){return 0;}
+    return st[r0_pbase(p)+2];
+}
+
+// First-seen continuation byte, or -2 if none recorded yet.
+fn r0_proposal_contb(st:[]i32,p:i32)i32 @noalloc {
+    if(p<0){return -2;}
+    return st[r0_pbase(p)+4];
+}
+
+fn r0_observe_span(st:[]i32,seq:[]i32,start:i32,n:i32,label:i32,next_byte:i32)i32 {
+    if(n<R0_LMIN || n>R0_LMAX){return -1;}
+    let p:i32 = r0_find_proposal(st,seq,start,n);
+    if(p<0){
+        let count:i32 = st[R0H_PROP_N];
+        if(count>=R0_PROP_CAP){return -1;}
+        p = count;
+        st[R0H_PROP_N]=count+1;
+        let base:i32 = r0_pbase(p);
+        st[base]=r0_fnv(seq,start,n);
+        st[base+1]=n;
+        st[base+2]=0; st[base+3]=0; st[base+4]=-2;
+        let i:i32 = 0;
+        while(i<n){ st[base+R0_PO_DATA+i]=seq[start+i]; i=i+1; }
+        i=0; while(i<4){ st[base+R0_PO_LAB+i]=0; i=i+1; }
+    }
+    let base:i32 = r0_pbase(p);
+    st[base+2]=st[base+2]+1;
+    // continuation diversity (saturating at 2): word-like spans vary.
+    if(next_byte>=0){
+        if(st[base+4]==-2){ st[base+4]=next_byte; st[base+3]=1; }
+        else if(st[base+3]<2 && next_byte!=st[base+4]){ st[base+3]=2; }
+    }
+    if(label>=0){
+        let l:i32 = label & 3;
+        st[base+R0_PO_LAB+l]=st[base+R0_PO_LAB+l]+1;
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Purity / compression gain / utility (i32 fixed point, scale 1000)
+// ---------------------------------------------------------------------------
+// R-1 (frozen): purity = majority-label fraction over grounded consequence
+// labels. Re-derived leg (R-7 test-both): purity = joint-success fraction
+// (label 3 = recall success AND discrimination consistency).
+fn r0_purity1000(st:[]i32, lab0:i32,lab1:i32,lab2:i32,lab3:i32)i32 @noalloc {
+    let total:i32 = lab0+lab1+lab2+lab3;
+    if(total<=0){return 0;}
+    if(st[R0H_LEG]==R0_LEG_RD){
+        return lab3*1000/total;
+    }
+    let m:i32 = lab0;
+    if(lab1>m){m=lab1;} if(lab2>m){m=lab2;} if(lab3>m){m=lab3;}
+    return m*1000/total;
+}
+
+fn r0_proposal_purity1000(st:[]i32,p:i32)i32 @noalloc {
+    let base:i32 = r0_pbase(p)+R0_PO_LAB;
+    return r0_purity1000(st, st[base],st[base+1],st[base+2],st[base+3]);
+}
+
+fn r0_chunk_purity1000(st:[]i32,id:i32)i32 @noalloc {
+    let base:i32 = r0_bbase(id)+R0_BO_LAB;
+    return r0_purity1000(st, st[base],st[base+1],st[base+2],st[base+3]);
+}
+
+// conflict = minority-label fraction = 1000 - purity.
+fn r0_chunk_conflict1000(st:[]i32,id:i32)i32 @noalloc {
+    return 1000 - r0_chunk_purity1000(st,id);
+}
+
+// Verbatim from the recovered spec: (n-1)*seen-(n+3). Larger chunks must recur
+// enough to repay their stored representation.
+fn r0_compression_gain(n:i32,seen:i32)i32 @noalloc {
+    let g:i64 = ((n-1) as i64)*(seen as i64) - ((n+3) as i64);
+    if(g>100000000){return 100000000;}
+    if(g<-100000000){return -100000000;}
+    return g as i32;
+}
+
+// utility = gain*0.02 + max(0,purity-0.2)*log1p(seen)*len, in 1/1000.
+// R-2 anti-giant-span-exploit: the compression term is CAPPED so grounding
+// dominates (REC cap 1000 = 1.0; RD cap 500 = 0.5).
+fn r0_utility1000(st:[]i32, gain:i32, purity1000:i32, seen:i32, len:i32)i32 @noalloc {
+    let comp:i32 = gain*20; // gain*0.02 in 1/1000
+    let cap:i32 = 1000;
+    if(st[R0H_LEG]==R0_LEG_RD){ cap=500; }
+    if(comp>cap){ comp=cap; }
+    if(comp<-1000000){ comp=-1000000; }
+    let g:i32 = purity1000-200;
+    if(g<0){ g=0; }
+    let lp:i32 = r0_log1p_1000(seen);
+    let ground:i64 = (g as i64)*(lp as i64)*(len as i64)/1000;
+    if(ground>2000000000){ ground=2000000000; }
+    return comp + (ground as i32);
+}
+
+fn r0_proposal_utility1000(st:[]i32,p:i32)i32 @noalloc {
+    let base:i32 = r0_pbase(p);
+    let n:i32 = st[base+1];
+    let seen:i32 = st[base+2];
+    let gain:i32 = r0_compression_gain(n,seen);
+    let pur:i32 = r0_proposal_purity1000(st,p);
+    return r0_utility1000(st,gain,pur,seen,n);
+}
+
+// ---------------------------------------------------------------------------
+// Promote — recovered rule: seen>=S AND purity>=P AND utility>0.
+// REC: S=5, P=340 (R-8). RD: S=6, P=400 (re-derived).
+// Candidates ranked by utility (desc), capped at remaining inventory, then
+// stored longest-first (verdict sheet). IDs are issuance order, never reused.
+// ---------------------------------------------------------------------------
+fn r0_promote_seen_bar(st:[]i32)i32 @noalloc {
+    if(st[R0H_LEG]==R0_LEG_RD){return 6;}
+    return 5;
+}
+fn r0_promote_purity_bar(st:[]i32)i32 @noalloc {
+    if(st[R0H_LEG]==R0_LEG_RD){return 400;}
+    return 340;
+}
+
+fn r0_bank_has_span(st:[]i32,seq:[]i32,start:i32,n:i32)i32 {
+    // true if any issued chunk (live or tombstoned) holds these exact bytes.
+    let count:i32 = st[R0H_BANK_N];
+    let id:i32 = 0;
+    while(id<count){
+        let base:i32 = r0_bbase(id);
+        if(st[base]==n){
+            let same:i32 = 1;
+            let i:i32 = 0;
+            while(i<n){ if(st[base+R0_BO_DATA+i]!=seq[start+i]){same=0;i=n;} else {i=i+1;} }
+            if(same==1){return 1;}
+        }
+        id=id+1;
+    }
+    return 0;
+}
+
+// Selection sort of idx[0..k) by (utility desc, len desc, hash asc).
+fn r0_sort_candidates(st:[]i32, idx:[]i32, k:i32, by_len_first:i32)void {
+    let i:i32 = 0;
+    while(i<k){
+        let best:i32 = i;
+        let j:i32 = i+1;
+        while(j<k){
+            let swap:i32 = 0;
+            if(by_len_first==1){
+                let lj:i32 = st[r0_pbase(idx[j])+1];
+                let lb:i32 = st[r0_pbase(idx[best])+1];
+                if(lj>lb){swap=1;}
+                else if(lj==lb){
+                    let uj:i32 = r0_proposal_utility1000(st,idx[j]);
+                    let ub:i32 = r0_proposal_utility1000(st,idx[best]);
+                    if(uj>ub){swap=1;}
+                    else if(uj==ub && st[r0_pbase(idx[j])]<st[r0_pbase(idx[best])]){swap=1;}
+                }
+            } else {
+                let uj:i32 = r0_proposal_utility1000(st,idx[j]);
+                let ub:i32 = r0_proposal_utility1000(st,idx[best]);
+                if(uj>ub){swap=1;}
+                else if(uj==ub){
+                    let lj:i32 = st[r0_pbase(idx[j])+1];
+                    let lb:i32 = st[r0_pbase(idx[best])+1];
+                    if(lj>lb){swap=1;}
+                    else if(lj==lb && st[r0_pbase(idx[j])]<st[r0_pbase(idx[best])]){swap=1;}
+                }
+            }
+            if(swap==1){ let t:i32=idx[j]; idx[j]=idx[best]; idx[best]=t; }
+            j=j+1;
+        }
+        i=i+1;
+    }
+}
+
+fn r0_promote(st:[]i32, idx:[]i32)i32 {
+    let seen_bar:i32 = r0_promote_seen_bar(st);
+    let pur_bar:i32 = r0_promote_purity_bar(st);
+    let pcount:i32 = st[R0H_PROP_N];
+    let k:i32 = 0;
+    let p:i32 = 0;
+    while(p<pcount){
+        let base:i32 = r0_pbase(p);
+        let seen:i32 = st[base+2];
+        if(seen>=seen_bar){
+            let pur:i32 = r0_proposal_purity1000(st,p);
+            if(pur>=pur_bar && r0_proposal_utility1000(st,p)>0){
+                idx[k]=p; k=k+1;
+            }
+        }
+        p=p+1;
+    }
+    if(k==0){return 0;}
+    // rank by utility, cap at remaining inventory
+    r0_sort_candidates(st,idx,k,0);
+    let room:i32 = st[R0H_BANK_CAP]-st[R0H_BANK_N];
+    if(room<0){room=0;}
+    if(k>room){k=room;}
+    if(k==0){return 0;}
+    // store longest-first
+    r0_sort_candidates(st,idx,k,1);
+    let done:i32 = 0;
+    let i:i32 = 0;
+    while(i<k){
+        let pp:i32 = idx[i];
+        let pbase:i32 = r0_pbase(pp);
+        let n:i32 = st[pbase+1];
+        // dedup against already-issued spans (live or tombstoned)
+        let dup:i32 = 0;
+        let id:i32 = 0;
+        let bn:i32 = st[R0H_BANK_N];
+        while(id<bn){
+            let bb:i32 = r0_bbase(id);
+            if(st[bb]==n){
+                let same:i32 = 1;
+                let j:i32 = 0;
+                while(j<n){
+                    if(st[bb+R0_BO_DATA+j]!=st[pbase+R0_PO_DATA+j]){same=0;j=n;} else {j=j+1;}
+                }
+                if(same==1){dup=1;id=bn;} else {id=id+1;}
+            } else {id=id+1;}
+        }
+        if(dup==0){
+            let at:i32 = st[R0H_BANK_N];
+            st[R0H_BANK_N]=at+1;
+            let bb:i32 = r0_bbase(at);
+            st[bb]=n; st[bb+1]=0;
+            st[bb+2]=r0_proposal_utility1000(st,pp);
+            st[bb+3]=st[pbase+2]; st[bb+4]=R0_ST_LIVE; st[bb+5]=-1; st[bb+6]=0;
+            let j:i32 = 0;
+            while(j<n){ st[bb+R0_BO_DATA+j]=st[pbase+R0_PO_DATA+j]; j=j+1; }
+            j=0; while(j<4){ st[bb+R0_BO_LAB+j]=st[pbase+R0_PO_LAB+j]; j=j+1; }
+            r0_ledger_emit(st,R0_OP_PROPOSE,pp,0,
+                n,st[pbase+2],r0_proposal_purity1000(st,pp),0,0,
+                0,0,0,0,0,R0_STAGE_DECISION,st[pbase],r0_proposal_utility1000(st,pp));
+            r0_ledger_emit(st,R0_OP_COMMIT,at,0,
+                n,st[pbase+2],st[bb+2],0,0,
+                0,0,0,0,0,R0_STAGE_MEMORY,st[pbase],0);
+            done=done+1;
+        }
+        i=i+1;
+    }
+    return done;
+}
+
+// ---------------------------------------------------------------------------
+// Chunk queries (ID -> span mapping; tombstones resolve — never ghost IDs)
+// ---------------------------------------------------------------------------
+fn r0_chunk_state(st:[]i32,id:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    return st[r0_bbase(id)+4];
+}
+fn r0_chunk_len(st:[]i32,id:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    return st[r0_bbase(id)];
+}
+fn r0_chunk_use(st:[]i32,id:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    return st[r0_bbase(id)+1];
+}
+fn r0_chunk_utility(st:[]i32,id:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return 0;}
+    return st[r0_bbase(id)+2];
+}
+fn r0_chunk_succ(st:[]i32,id:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    return st[r0_bbase(id)+5];
+}
+fn r0_chunk_bytes(st:[]i32,id:i32,out:[]i32,max_out:i32)i32 @noalloc {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    let base:i32 = r0_bbase(id);
+    let n:i32 = st[base];
+    if(n>max_out){n=max_out;}
+    let i:i32 = 0;
+    while(i<n){ out[i]=st[base+R0_BO_DATA+i]; i=i+1; }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// Segment — greedy longest-match; unmatched bytes -> single-byte literal
+// fallback with negative IDs (id = -1 - byte). Exact round-trip guaranteed.
+// ---------------------------------------------------------------------------
+fn r0_chunk_match(st:[]i32,seq:[]i32,start:i32,seqlen:i32)i32 @noalloc {
+    let best:i32 = -1;
+    let best_len:i32 = 0;
+    let count:i32 = st[R0H_BANK_N];
+    let id:i32 = 0;
+    while(id<count){
+        let base:i32 = r0_bbase(id);
+        if(st[base+4]==R0_ST_LIVE){
+            let n:i32 = st[base];
+            if(n>best_len && start+n<=seqlen){
+                let same:i32 = 1;
+                let i:i32 = 0;
+                while(i<n){
+                    if(seq[start+i]!=st[base+R0_BO_DATA+i]){same=0;i=n;} else {i=i+1;}
+                }
+                if(same==1){best=id;best_len=n;}
+            }
+        }
+        id=id+1;
+    }
+    return best;
+}
+
+fn r0_segment(st:[]i32,seq:[]i32,seqlen:i32,
+    out_id:[]i32,out_start:[]i32,out_len:[]i32,max_out:i32)i32 {
+    let pos:i32 = 0;
+    let nout:i32 = 0;
+    let nchunks:i32 = 0;
+    let nlits:i32 = 0;
+    while(pos<seqlen && nout<max_out){
+        let c:i32 = r0_chunk_match(st,seq,pos,seqlen);
+        out_start[nout]=pos;
+        if(c>=0){
+            out_id[nout]=c;
+            out_len[nout]=st[r0_bbase(c)];
+            let bb:i32 = r0_bbase(c);
+            st[bb+1]=st[bb+1]+1;
+            pos=pos+st[bb];
+            nchunks=nchunks+1;
+        } else {
+            out_id[nout]=-1-(seq[pos] & 255);
+            out_len[nout]=1;
+            pos=pos+1;
+            nlits=nlits+1;
+        }
+        nout=nout+1;
+    }
+    r0_ledger_emit(st,R0_OP_SEGMENT,0,0,
+        nout,nchunks,nlits,0,0, 0,0,0,0,0,
+        R0_STAGE_MEMORY,r0_fnv(seq,0,seqlen),0);
+    return nout;
+}
+
+// Reconstruct: id<0 -> literal byte (-1-id); else chunk bytes (any state).
+// Returns byte count, or -1 on unknown ID (loud failure — K-R5).
+fn r0_reconstruct(st:[]i32,ids:[]i32,n:i32,out:[]i32,max_out:i32)i32 {
+    let w:i32 = 0;
+    let q:i32 = 0;
+    while(q<n && w<max_out){
+        let id:i32 = ids[q];
+        if(id<0){
+            out[w]=-1-id; w=w+1;
+        } else {
+            if(id>=st[R0H_BANK_N]){return -1;}
+            let base:i32 = r0_bbase(id);
+            let j:i32 = 0;
+            while(j<st[base] && w<max_out){ out[w]=st[base+R0_BO_DATA+j]; w=w+1; j=j+1; }
+        }
+        q=q+1;
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------------------
+// Delayed regret: revise chunk utility from downstream evidence.
+// ---------------------------------------------------------------------------
+fn r0_regret_update(st:[]i32,id:i32,useful:i32,recon_ok:i32,rate:i32)void {
+    if(id<0 || id>=st[R0H_BANK_N]){return;}
+    let base:i32 = r0_bbase(id);
+    if(st[base+4]!=R0_ST_LIVE){return;}
+    if(useful==1 && recon_ok==1){
+        st[base+2]=r0_clamp(st[base+2]+rate,-100000000,100000000);
+        st[base+6]=r0_max(0,st[base+6]-rate);
+    } else {
+        st[base+2]=r0_clamp(st[base+2]-rate,-100000000,100000000);
+        st[base+6]=st[base+6]+rate;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Split / merge — ledger-audited. Boundaries are mutable hypotheses.
+// split iff use_count>=3 AND conflict>=learned_conflict
+//                    AND utility<=learned_utility_floor.
+// merge iff pair_seen>=learned_pair_seen
+//              AND joint_gain - separate_regret >= learned_gain.
+// ---------------------------------------------------------------------------
+fn r0_split_at(st:[]i32,id:i32,split_at:i32)i32 {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    let base:i32 = r0_bbase(id);
+    if(st[base+4]!=R0_ST_LIVE){return -1;}
+    let old_len:i32 = st[base];
+    if(split_at<2 || old_len-split_at<2){return -1;}
+    if(st[R0H_BANK_N]>=st[R0H_BANK_CAP]){return -1;}
+    let new_id:i32 = st[R0H_BANK_N];
+    st[R0H_BANK_N]=new_id+1;
+    let nbase:i32 = r0_bbase(new_id);
+    let suffix:i32 = old_len-split_at;
+    let j:i32 = 0;
+    while(j<suffix){ st[nbase+R0_BO_DATA+j]=st[base+R0_BO_DATA+split_at+j]; j=j+1; }
+    st[nbase]=suffix; st[nbase+1]=0;
+    st[nbase+2]=st[base+2]/2;
+    st[nbase+3]=0; st[nbase+4]=R0_ST_LIVE; st[nbase+5]=-1; st[nbase+6]=0;
+    j=0; while(j<4){ st[nbase+R0_BO_LAB+j]=st[base+R0_BO_LAB+j]/2; j=j+1; }
+    st[base]=split_at;
+    st[base+2]=st[base+2]/2;
+    st[base+4]=R0_ST_TOMB; // parent retires; bytes retained, lineage recorded
+    st[base+5]=new_id;      // successor: first child (second child in ledger b2)
+    r0_ledger_emit(st,R0_OP_SPLIT,id,0,
+        id,new_id,split_at,old_len,0, 0,0,0,0,0,
+        R0_STAGE_REVISION,st[base+2],1);
+    return new_id;
+}
+
+// Policy wrapper: checks the recovered firing condition, then splits at len/2.
+fn r0_maybe_split(st:[]i32,id:i32)i32 {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    let base:i32 = r0_bbase(id);
+    if(st[base+4]!=R0_ST_LIVE){return -1;}
+    if(st[base+1]<3){return -1;}
+    if(r0_chunk_conflict1000(st,id)<st[R0H_LRN_CONFLICT]){return -1;}
+    if(st[base+2]>st[R0H_LRN_UTILFLOOR]){return -1;}
+    return r0_split_at(st,id,st[base]/2);
+}
+
+fn r0_pair_hash(a:i32,b:i32)i32 @noalloc {
+    let h:i64 = ((a+4099) as i64)*65537 + ((b+8191) as i64)*257;
+    h = h & 4294967295;
+    return (h & 2147483647) as i32;
+}
+
+fn r0_observe_pair(st:[]i32,a:i32,b:i32)void {
+    if(a<0 || b<0){return;}
+    let h:i32 = r0_pair_hash(a,b);
+    let n:i32 = st[R0H_PAIR_N];
+    let p:i32 = 0;
+    while(p<n){
+        let base:i32 = r0_pairbase(p);
+        if(st[base]==h && st[base+2]==a && st[base+3]==b){
+            st[base+1]=st[base+1]+1;
+            return;
+        }
+        p=p+1;
+    }
+    if(n>=R0_PAIR_CAP){return;}
+    let base:i32 = r0_pairbase(n);
+    st[base]=h; st[base+1]=1; st[base+2]=a; st[base+3]=b;
+    st[R0H_PAIR_N]=n+1;
+}
+
+fn r0_pair_seen(st:[]i32,a:i32,b:i32)i32 @noalloc {
+    let n:i32 = st[R0H_PAIR_N];
+    let p:i32 = 0;
+    while(p<n){
+        let base:i32 = r0_pairbase(p);
+        if(st[base+2]==a && st[base+3]==b){return st[base+1];}
+        p=p+1;
+    }
+    return 0;
+}
+
+fn r0_merge_ids(st:[]i32,a:i32,b:i32)i32 {
+    if(a<0 || b<0 || a>=st[R0H_BANK_N] || b>=st[R0H_BANK_N] || a==b){return -1;}
+    let ba:i32 = r0_bbase(a);
+    let bb:i32 = r0_bbase(b);
+    if(st[ba+4]!=R0_ST_LIVE || st[bb+4]!=R0_ST_LIVE){return -1;}
+    let na:i32 = st[ba];
+    let nb:i32 = st[bb];
+    if(na+nb>R0_LMAX){return -1;}
+    if(st[R0H_BANK_N]>=st[R0H_BANK_CAP]){return -1;}
+    let id:i32 = st[R0H_BANK_N];
+    st[R0H_BANK_N]=id+1;
+    let bc:i32 = r0_bbase(id);
+    let i:i32 = 0;
+    while(i<na){ st[bc+R0_BO_DATA+i]=st[ba+R0_BO_DATA+i]; i=i+1; }
+    let j:i32 = 0;
+    while(j<nb){ st[bc+R0_BO_DATA+na+j]=st[bb+R0_BO_DATA+j]; j=j+1; }
+    st[bc]=na+nb; st[bc+1]=0;
+    st[bc+2]=(st[ba+2]+st[bb+2])/2;
+    st[bc+3]=0; st[bc+4]=R0_ST_LIVE; st[bc+5]=-1; st[bc+6]=0;
+    j=0; while(j<4){ st[bc+R0_BO_LAB+j]=(st[ba+R0_BO_LAB+j]+st[bb+R0_BO_LAB+j])/2; j=j+1; }
+    st[ba+4]=R0_ST_TOMB; st[ba+5]=id;
+    st[bb+4]=R0_ST_TOMB; st[bb+5]=id;
+    return id;
+}
+
+// Policy wrapper: checks the recovered firing condition.
+fn r0_maybe_merge(st:[]i32,a:i32,b:i32)i32 {
+    let ps:i32 = r0_pair_seen(st,a,b);
+    if(ps<st[R0H_LRN_PAIRSEEN]){return -1;}
+    if(a<0 || b<0 || a>=st[R0H_BANK_N] || b>=st[R0H_BANK_N]){return -1;}
+    let ba:i32 = r0_bbase(a);
+    let bb:i32 = r0_bbase(b);
+    if(st[ba+4]!=R0_ST_LIVE || st[bb+4]!=R0_ST_LIVE){return -1;}
+    let na:i32 = st[ba];
+    let nb:i32 = st[bb];
+    if(na+nb>R0_LMAX){return -1;}
+    let jgain:i32 = r0_compression_gain(na+nb,ps)*20;
+    let cap:i32 = 1000;
+    if(st[R0H_LEG]==R0_LEG_RD){cap=500;}
+    if(jgain>cap){jgain=cap;}
+    let regret:i32 = st[ba+6]+st[bb+6];
+    if(jgain-regret < st[R0H_LRN_GAIN]){return -1;}
+    let id:i32 = r0_merge_ids(st,a,b);
+    if(id>=0){
+        r0_ledger_emit(st,R0_OP_MERGE,id,0,
+            a,b,ps,na+nb,0, 0,0,0,0,0,
+            R0_STAGE_REVISION,jgain,regret);
+    }
+    return id;
+}
+
+// Archive (kill): tombstone without successor. Ledger-audited.
+fn r0_archive(st:[]i32,id:i32,reason:i32)i32 {
+    if(id<0 || id>=st[R0H_BANK_N]){return -1;}
+    let base:i32 = r0_bbase(id);
+    if(st[base+4]!=R0_ST_LIVE){return -1;}
+    st[base+4]=R0_ST_TOMB;
+    st[base+5]=-1;
+    r0_ledger_emit(st,R0_OP_KILL,id,0,
+        0,0,0,0,0, 0,0,0,0,0,
+        R0_STAGE_REVISION,st[base+2],reason);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Learned thresholds — deterministic adaptation from delayed merge evidence.
+// Emits R0_OP_THRESH so threshold learning is audited, never silent.
+// ---------------------------------------------------------------------------
+fn r0_learn_thresholds(st:[]i32, merge_helped:i32, merge_regret:i32)void {
+    if(merge_helped==1){
+        st[R0H_LRN_GAIN]=r0_max(0,st[R0H_LRN_GAIN]-25);
+    }
+    if(merge_regret==1){
+        st[R0H_LRN_GAIN]=st[R0H_LRN_GAIN]+50;
+    }
+    r0_ledger_emit(st,R0_OP_THRESH,0,0,
+        st[R0H_LRN_GAIN],st[R0H_LRN_PAIRSEEN],st[R0H_LRN_CONFLICT],0,0,
+        0,0,0,0,0,
+        R0_STAGE_DECISION,merge_helped,merge_regret);
+}
+
+// ---------------------------------------------------------------------------
+// Support-gap recruitment — teacher supplies a grounded whole experience;
+// learner recruits the largest unsupported raw span iff learned min-support
+// is met AND it beats the runner-up by the learned margin, else abstains (-1).
+// ---------------------------------------------------------------------------
+fn r0_support_gap_recruit(st:[]i32,seq:[]i32,seqlen:i32)i32 {
+    // coverage: greedy longest-match over live chunks; find the two largest
+    // uncovered runs (best + runner-up).
+    let i:i32 = 0;
+    let bs:i32 = -1;
+    let bn:i32 = 0;
+    let rs:i32 = -1;
+    let rn:i32 = 0;
+    while(i<seqlen){
+        let c:i32 = r0_chunk_match(st,seq,i,seqlen);
+        if(c>=0){ i=i+st[r0_bbase(c)]; }
+        else {
+            // extend uncovered run
+            let s:i32 = i;
+            while(i<seqlen && r0_chunk_match(st,seq,i,seqlen)<0){ i=i+1; }
+            let z:i32 = i-s;
+            if(z>bn){ rs=bs; rn=bn; bs=s; bn=z; }
+            else if(z>rn){ rs=s; rn=z; }
+        }
+    }
+    if(bn<=0){
+        r0_ledger_emit(st,R0_OP_RECRUIT,-1,0, 0,0,0,0,0, 0,0,0,0,0,
+            R0_STAGE_DECISION,0,4);
+        return -1;
+    }
+    // support of the best gap span = its observed count in the proposal table.
+    // Only recruit spans within the chunk length range.
+    let glen:i32 = bn;
+    if(glen>R0_LMAX){glen=R0_LMAX;}
+    let gstart:i32 = bs;
+    let sup:i32 = 0;
+    let pp:i32 = r0_find_proposal(st,seq,gstart,glen);
+    if(pp>=0){sup=st[r0_pbase(pp)+2];}
+    // runner-up support: same treatment for the second gap (may be 0).
+    let rsup:i32 = 0;
+    if(rn>0){
+        let rlen:i32 = rn;
+        if(rlen>R0_LMAX){rlen=R0_LMAX;}
+        let rp:i32 = r0_find_proposal(st,seq,rs,rlen);
+        if(rp>=0){rsup=st[r0_pbase(rp)+2];}
+    }
+    if(sup<st[R0H_LRN_MINSUP]){
+        r0_ledger_emit(st,R0_OP_RECRUIT,-1,0, gstart,glen,sup,0,0, 0,0,0,0,0,
+            R0_STAGE_DECISION,0,1);
+        return -1;
+    }
+    if(sup-rsup < st[R0H_LRN_MARGIN]){
+        r0_ledger_emit(st,R0_OP_RECRUIT,-1,0, gstart,glen,sup,rsup,0, 0,0,0,0,0,
+            R0_STAGE_DECISION,0,2);
+        return -1;
+    }
+    if(st[R0H_BANK_N]>=st[R0H_BANK_CAP]){
+        r0_ledger_emit(st,R0_OP_RECRUIT,-1,0, gstart,glen,sup,0,0, 0,0,0,0,0,
+            R0_STAGE_DECISION,0,3);
+        return -1;
+    }
+    // Do not recruit a span already issued (live or tombstoned).
+    if(r0_bank_has_span(st,seq,gstart,glen)==1){
+        r0_ledger_emit(st,R0_OP_RECRUIT,-1,0, gstart,glen,sup,0,0, 0,0,0,0,0,
+            R0_STAGE_DECISION,0,5);
+        return -1;
+    }
+    let id:i32 = st[R0H_BANK_N];
+    st[R0H_BANK_N]=id+1;
+    let bc:i32 = r0_bbase(id);
+    st[bc]=glen; st[bc+1]=0;
+    let pur:i32 = 0;
+    if(pp>=0){pur=r0_proposal_purity1000(st,pp);}
+    st[bc+2]=r0_utility1000(st,r0_compression_gain(glen,sup),pur,sup,glen);
+    st[bc+3]=sup; st[bc+4]=R0_ST_LIVE; st[bc+5]=-1; st[bc+6]=0;
+    let k:i32 = 0;
+    while(k<glen){ st[bc+R0_BO_DATA+k]=seq[gstart+k]; k=k+1; }
+    k=0;
+    if(pp>=0){
+        let pb:i32 = r0_pbase(pp);
+        while(k<4){ st[bc+R0_BO_LAB+k]=st[pb+R0_PO_LAB+k]; k=k+1; }
+    } else {
+        while(k<4){ st[bc+R0_BO_LAB+k]=0; k=k+1; }
+    }
+    r0_ledger_emit(st,R0_OP_RECRUIT,id,0,
+        gstart,glen,sup,rsup,0, 0,0,0,0,0,
+        R0_STAGE_DECISION,pur,0);
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// Dual route — raw high-fidelity evidence runs alongside the chunked route.
+// Trust weights shift ONLY by delayed downstream evidence. Chunking never
+// erases evidence: the raw route is always queryable.
+// ---------------------------------------------------------------------------
+fn r0_dual_score(st:[]i32, chunk_score:i32, raw_score:i32,
+    recon_err:i32, disagreement:i32)i32 @noalloc {
+    let cw:i32 = st[R0H_W_CHUNK]-recon_err-disagreement/2;
+    if(cw<0){cw=0;}
+    let rw:i32 = st[R0H_W_RAW]+recon_err+disagreement/2;
+    return chunk_score*cw/1000 + raw_score*rw/1000;
+}
+
+fn r0_dual_trust_update(st:[]i32, chunk_helped:i32, raw_helped:i32,
+    recon_ok:i32, rate:i32)void {
+    if(chunk_helped==1 && recon_ok==1){
+        st[R0H_W_CHUNK]=r0_clamp(st[R0H_W_CHUNK]+rate,0,2000);
+    } else {
+        st[R0H_W_CHUNK]=r0_clamp(st[R0H_W_CHUNK]-rate,0,2000);
+    }
+    if(raw_helped==1){
+        st[R0H_W_RAW]=r0_clamp(st[R0H_W_RAW]+rate,0,2000);
+    } else {
+        st[R0H_W_RAW]=r0_clamp(st[R0H_W_RAW]-rate/2,0,2000);
+    }
+    r0_ledger_emit(st,R0_OP_TRUST,0,0,
+        st[R0H_W_CHUNK],st[R0H_W_RAW],rate,0,0, 0,0,0,0,0,
+        R0_STAGE_DECISION,chunk_helped,raw_helped);
+}
+
+fn r0_should_retrieve_raw(recon_err:i32, disagreement:i32, uncertainty:i32,
+    cost:i32, threshold:i32)i32 @noalloc {
+    let v:i32 = recon_err*3+disagreement*2+uncertainty*2-cost;
+    if(v>=threshold){return 1;}
+    return 0;
+}
+
+fn r0_w_chunk(st:[]i32)i32 @noalloc { return st[R0H_W_CHUNK]; }
+fn r0_w_raw(st:[]i32)i32 @noalloc { return st[R0H_W_RAW]; }

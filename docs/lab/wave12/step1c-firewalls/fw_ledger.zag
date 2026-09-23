@@ -1,0 +1,269 @@
+// fw_ledger.zag — canonical append-only ledger (finding 15) + shared codec helpers.
+// Entry layout (fixed binary, SHA256-chained):
+//   idx:u32@0 | episode:u32@4 | clock:u64@8 | op:u8@16 | prev_hash:32B@17 |
+//   payload:CANON@49 | entry_hash:32B@49+plen
+//   entry_hash = SHA256(prev_hash || canonical(idx||episode||clock||op||payload))
+// Payloads are fixed templates of LE ints and raw hashes ONLY. No free text
+// is ever encoded here (stricter than a whitelist: there is no string writer).
+// Allowed imports (frozen, PREREG_FIREWALLS.md §1): substrate/cl/common.zag.
+@import("substrate/cl/common.zag")
+
+// op codes (frozen)
+const FW_OP_VERDICT:i32=1;
+const FW_OP_MEMOP:i32=2;
+const FW_OP_REFUSAL:i32=3;
+const FW_OP_STATEHASH:i32=4;
+const FW_OP_VARCHOICE:i32=5;
+const FW_OP_GATE:i32=6;
+// phases
+const FW_PHASE_JUDGE:i32=1;
+const FW_PHASE_EXPR:i32=2;
+// errors
+const FW_E_PHASE:i32=3001;
+const FW_E_FULL:i32=3002;
+// entry geometry
+const FW_LED_STRIDE:i32=144;   // max entry: 49 + 56 + 32 = 137 < 144
+const FW_LED_CAP:i32=512;
+
+struct LedState {
+    buf:[]u8,
+    n:i32,
+    cap:i32,
+    prev:[]u8,
+    phase:i32,
+}
+
+// ---- LE helpers (shared by the whole FW build) ----
+fn fw_u16_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8);
+}
+fn fw_u16_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+}
+fn fw_u32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn fw_u32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+fn fw_u64_get(b:[]u8,at:i32)i64 {
+    let v:i64=(b[at] as i64);
+    v=v|((b[at+1] as i64)<<8);v=v|((b[at+2] as i64)<<16);v=v|((b[at+3] as i64)<<24);
+    v=v|((b[at+4] as i64)<<32);v=v|((b[at+5] as i64)<<40);
+    v=v|((b[at+6] as i64)<<48);v=v|((b[at+7] as i64)<<56);
+    return v;
+}
+fn fw_u64_set(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;b[at+2]=((v>>16)&255) as u8;
+    b[at+3]=((v>>24)&255) as u8;b[at+4]=((v>>32)&255) as u8;
+    b[at+5]=((v>>40)&255) as u8;b[at+6]=((v>>48)&255) as u8;
+    b[at+7]=((v>>56)&255) as u8;
+}
+fn fw_i32_get(b:[]u8,at:i32)i32 { return fw_u32_get(b,at); }
+fn fw_i32_set(b:[]u8,at:i32,v:i32)void { fw_u32_set(b,at,v); }
+fn fw_bytes_eq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0; while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+fn fw_copy(dst:[]u8,dst_at:i32,src:[]u8,src_at:i32,n:i32)void {
+    let i:i32=0; while(i<n){dst[dst_at+i]=src[src_at+i];i=i+1;}
+}
+fn fw_zero(b:[]u8)void { let i:i32=0; while(i<b.len){b[i]=0;i=i+1;} }
+fn fw_sha(b:[]u8,out32:[]u8)i32 { return ns_sha256(b,out32); }
+fn fw_hex_digit(v:i32)u8 {
+    if(v<10){return (48+v) as u8;} return (87+v) as u8;
+}
+fn fw_hex(out64:[]u8,src32:[]u8)void {
+    let i:i32=0;
+    while(i<32){
+        let v:i32=src32[i] as i32;
+        out64[i*2]=fw_hex_digit((v>>4)&15);
+        out64[i*2+1]=fw_hex_digit(v&15);
+        i=i+1;
+    }
+}
+fn fw_pnum(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+
+// ---- ledger core ----
+fn fw_led_init(l:*LedState,buf:[]u8,cap:i32,prev:[]u8)void {
+    l.buf=buf; l.n=0; l.cap=cap; l.prev=prev; l.phase=FW_PHASE_JUDGE;
+    fw_zero(buf); fw_zero(prev);
+}
+fn fw_led_at(l:*LedState,idx:i32)i32 { return idx*FW_LED_STRIDE; }
+
+// payload template lengths by op (frozen)
+fn fw_pay_len(op:i32)i32 {
+    if(op==FW_OP_VERDICT){return 56;}
+    if(op==FW_OP_MEMOP){return 20;}
+    if(op==FW_OP_REFUSAL){return 44;}
+    if(op==FW_OP_STATEHASH){return 32;}
+    if(op==FW_OP_VARCHOICE){return 44;}
+    if(op==FW_OP_GATE){return 8;}
+    return -1;
+}
+
+// Append. Phase-guarded: appends are legal only in the judge phase.
+// Returns the entry idx, or FW_E_PHASE / FW_E_FULL on refusal.
+fn fw_led_append(l:*LedState,episode:i32,clock:i64,op:i32,payload:[]u8,plen:i32)i32 {
+    if(l.phase!=FW_PHASE_JUDGE){return FW_E_PHASE;}
+    if(l.n>=l.cap){return FW_E_FULL;}
+    if(plen!=fw_pay_len(op)){return FW_E_FULL;}
+    let at:i32=fw_led_at(l,l.n);
+    let b:[]u8=l.buf;
+    fw_u32_set(b,at+0,l.n);
+    fw_u32_set(b,at+4,episode);
+    fw_u64_set(b,at+8,clock);
+    b[at+16]=op as u8;
+    fw_copy(b,at+17,l.prev,0,32);
+    fw_copy(b,at+49,payload,0,plen);
+    // entry_hash = SHA256(prev_hash || idx||episode||clock||op||payload)
+    let tmp:[]u8=nio_alloc(160);
+    let eh:[]u8=nio_alloc(32);
+    if(tmp.len!=160||eh.len!=32){nio_free(tmp);nio_free(eh);return FW_E_FULL;}
+    fw_copy(tmp,0,l.prev,0,32);
+    fw_u32_set(tmp,32,l.n);
+    fw_u32_set(tmp,36,episode);
+    fw_u64_set(tmp,40,clock);
+    tmp[48]=op as u8;
+    fw_copy(tmp,49,payload,0,plen);
+    let tlen:i32=49+plen;
+    let ts:[]u8=tmp[0..tlen];
+    if(ns_sha256(ts,eh)!=0){nio_free(tmp);nio_free(eh);return FW_E_FULL;}
+    fw_copy(b,at+49+plen,eh,0,32);
+    fw_copy(l.prev,0,eh,0,32);
+    nio_free(tmp); nio_free(eh);
+    let idx:i32=l.n;
+    l.n=l.n+1;
+    return idx;
+}
+
+// Recompute the whole chain. Returns 0 if intact, else (first bad idx)+1.
+fn fw_led_verify(l:*LedState)i32 {
+    let b:[]u8=l.buf;
+    let prev:[]u8=nio_alloc(32); let eh:[]u8=nio_alloc(32);
+    let tmp:[]u8=nio_alloc(160);
+    if(prev.len!=32||eh.len!=32||tmp.len!=160){
+        nio_free(prev);nio_free(eh);nio_free(tmp);return -1;}
+    fw_zero(prev);
+    let i:i32=0;
+    while(i<l.n){
+        let at:i32=fw_led_at(l,i);
+        let op:i32=b[at+16] as i32;
+        let plen:i32=fw_pay_len(op);
+        if(plen<0){nio_free(prev);nio_free(eh);nio_free(tmp);return i+1;}
+        // prev link
+        let k:i32=0; let ok:i32=1;
+        while(k<32){if(b[at+17+k]!=prev[k]){ok=0;}k=k+1;}
+        if(ok==0){nio_free(prev);nio_free(eh);nio_free(tmp);return i+1;}
+        fw_copy(tmp,0,prev,0,32);
+        fw_u32_set(tmp,32,fw_u32_get(b,at+0));
+        fw_u32_set(tmp,36,fw_u32_get(b,at+4));
+        fw_u64_set(tmp,40,fw_u64_get(b,at+8));
+        tmp[48]=op as u8;
+        fw_copy(tmp,49,b,at+49,plen);
+        let tlen:i32=49+plen;
+        let ts:[]u8=tmp[0..tlen];
+        if(ns_sha256(ts,eh)!=0){nio_free(prev);nio_free(eh);nio_free(tmp);return i+1;}
+        k=0;
+        while(k<32){if(b[at+49+plen+k]!=eh[k]){ok=0;}k=k+1;}
+        if(ok==0){nio_free(prev);nio_free(eh);nio_free(tmp);return i+1;}
+        fw_copy(prev,0,eh,0,32);
+        i=i+1;
+    }
+    nio_free(prev);nio_free(eh);nio_free(tmp);
+    return 0;
+}
+
+// ---- payload encoders (fixed templates; ints and hashes only) ----
+// VERDICT(1): code u8, pad3, ruleset u32, ev_slots 4x u32, digest 32B = 56
+fn fw_pay_verdict(out:[]u8,vcode:i32,ruleset:i32,ev:[]u8,digest:[]u8)i32 {
+    out[0]=vcode as u8; out[1]=0; out[2]=0; out[3]=0;
+    fw_u32_set(out,4,ruleset);
+    fw_copy(out,8,ev,0,16);
+    fw_copy(out,24,digest,0,32);
+    return 56;
+}
+// MEMORY_OP(2): op u8, pad3, slot u32, cite_ep u32, auth u8, pad3, strength i32 = 20
+fn fw_pay_memop(out:[]u8,op:i32,slot:i32,cite_ep:i32,auth:i32,strength:i32)i32 {
+    out[0]=op as u8; out[1]=0; out[2]=0; out[3]=0;
+    fw_u32_set(out,4,slot);
+    fw_u32_set(out,8,cite_ep);
+    out[12]=auth as u8; out[13]=0; out[14]=0; out[15]=0;
+    fw_i32_set(out,16,strength);
+    return 20;
+}
+// REFUSAL(3): code u8, pad3, rule_id u32, input_hash 32B, action u8, pad3 = 44
+fn fw_pay_refusal(out:[]u8,code:i32,rule_id:i32,ihash:[]u8,action:i32)i32 {
+    out[0]=code as u8; out[1]=0; out[2]=0; out[3]=0;
+    fw_u32_set(out,4,rule_id);
+    fw_copy(out,8,ihash,0,32);
+    out[40]=action as u8; out[41]=0; out[42]=0; out[43]=0;
+    return 44;
+}
+// STATE_HASH(4): state_hash 32B = 32
+fn fw_pay_statehash(out:[]u8,h:[]u8)i32 {
+    fw_copy(out,0,h,0,32);
+    return 32;
+}
+// VARIATION_CHOICE(5): variant u16, pad2, selector_hash 32B, policy u32,
+// forced u8, pad3 = 44
+fn fw_pay_varchoice(out:[]u8,variant:i32,selhash:[]u8,policy:i32,forced:i32)i32 {
+    fw_u16_set(out,0,variant);
+    out[2]=0; out[3]=0;
+    fw_copy(out,4,selhash,0,32);
+    fw_u32_set(out,36,policy);
+    out[40]=forced as u8; out[41]=0; out[42]=0; out[43]=0;
+    return 44;
+}
+// GATE_EVENT(6): from u8, to u8, pad2, ep u32 = 8
+fn fw_pay_gate(out:[]u8,from:i32,to:i32,ep:i32)i32 {
+    out[0]=from as u8; out[1]=to as u8; out[2]=0; out[3]=0;
+    fw_u32_set(out,4,ep);
+    return 8;
+}
+
+// VARIANT_EQ: semantic ledger comparison for the forced-variant batteries.
+// A hash chain cannot be byte-identical except in variant_id when the
+// variant_id sits inside a chained entry: the entry_hash, and every
+// downstream prev_hash/entry_hash, are deterministic functions of it. So
+// VARIANT_EQ is defined as:
+//   1. both ledgers' chains verify individually (fw_led_verify) — any
+//      tampering inside either ledger is caught here, not masked away;
+//   2. entry counts match, header fields (idx, episode, clock, op) match,
+//      and PAYLOAD bytes match, with the 2 variant_id bytes of
+//      VARIATION_CHOICE entries maskable (maskvar=1).
+// Chain-mechanical fields (prev_hash, entry_hash) are excluded from the
+// cross-mode comparison: they are fully determined by the payloads plus the
+// frozen chain formula, which step 1 already verifies per ledger.
+// Returns 0 if equal under the rule, else 1.
+fn fw_led_cmp(a:*LedState,b:*LedState,maskvar:i32)i32 {
+    if(fw_led_verify(a)!=0){return 1;}
+    if(fw_led_verify(b)!=0){return 1;}
+    if(a.n!=b.n){return 1;}
+    let i:i32=0;
+    while(i<a.n){
+        let aa:i32=fw_led_at(a,i); let bb:i32=fw_led_at(b,i);
+        let op:i32=a.buf[aa+16] as i32;
+        if((b.buf[bb+16] as i32)!=op){return 1;}
+        // header: idx@0, episode@4, clock@8 (16 bytes; op@16 checked above)
+        let k:i32=0;
+        while(k<16){
+            if(a.buf[aa+k]!=b.buf[bb+k]){return 1;}
+            k=k+1;
+        }
+        // payload bytes @49, mask variant_id (u16 @ payload+0) when asked
+        let plen:i32=fw_pay_len(op);
+        if(plen<0){return 1;}
+        k=0;
+        while(k<plen){
+            let skip:i32=0;
+            if(maskvar==1 && op==FW_OP_VARCHOICE && k<2){skip=1;}
+            if(skip==0 && a.buf[aa+49+k]!=b.buf[bb+49+k]){return 1;}
+            k=k+1;
+        }
+        i=i+1;
+    }
+    return 0;
+}

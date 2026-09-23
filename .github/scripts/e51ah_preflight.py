@@ -1,3 +1,6 @@
+# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
+# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
+# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 """Generate native synthetic self-tests; never call an experiment entry point."""
 from pathlib import Path
 
@@ -51,5 +54,5 @@ scratch = Path(".scratch/e51ah/preflight")
 scratch.mkdir(parents=True, exist_ok=True)
 (scratch / "NATIVE_SELFTEST.zag").write_text(prefix + main)
 (scratch / "tnn_r32_e45_investigation_core.zag").write_bytes(
-    Path("Research/tnn_r32_e45_investigation_core.zag").read_bytes())
+    Path("docs/generations/R32/tnn_r32_e45_investigation_core.zag").read_bytes())
 print("Generated synthetic-only native entry point: no E50/E51 experiments invoked.")

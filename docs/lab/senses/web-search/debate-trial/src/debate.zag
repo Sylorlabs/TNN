@@ -1,0 +1,575 @@
+// debate.zag — DEBATABLE-CLAIMS OPINION + DEBATE TRIAL decision program.
+// Pure Zag, zero RNG. Modes (argv[1]):
+//   opine  <evidence.tsv>            -> OPINION lines (prereg §3.5 rule)
+//   rubric <phase1.tsv> <debate.tsv> -> RUBRIC lines (prereg §5.3)
+//   chain  <prevhex64> <payloadfile> -> new ledger hash hex (prereg §4.3)
+//   verify <ledger.htsv>             -> VERIFY OK n | VERIFY FAIL seq
+//
+// Evidence line format: "<ev_id> <claim> <source> <stance>"
+//   claim: D1..D5 ; source: 1=web 2=helper 3=debate ; stance: 1=SUPPORTS 0=REFUTES 2=NEUTRAL
+// Lines starting with '#' or blank are ignored.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------- utils ----------
+
+fn z_equal(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+
+fn pstr(s:[]u8)void {
+    _zag_print(s);
+    return;
+}
+
+fn pi64(v:i64)void {
+    let s:[]u8=_zag_i64_to_str(v);
+    _zag_print(s);
+    nio_free(s);
+    return;
+}
+
+fn pi32(v:i32)void {
+    pi64(v as i64);
+    return;
+}
+
+// hex char -> value, -1 invalid
+fn hexval(c:i32)i32 {
+    if(c>=48 && c<=57){return c-48;}
+    if(c>=97 && c<=102){return c-97+10;}
+    if(c>=65 && c<=70){return c-65+10;}
+    return -1;
+}
+
+fn hexdecode64(h:[]u8)[]u8 {
+    let out:[]u8=nio_alloc(32);
+    if(h.len!=64){return out;}
+    let i:i32=0;
+    while(i<32){
+        let a:i32=hexval(h[2*i] as i32);
+        let b:i32=hexval(h[2*i+1] as i32);
+        if(a<0 || b<0){return out;}
+        out[i]=(a*16+b) as u8;
+        i=i+1;
+    }
+    return out;
+}
+
+// ---------- file reading (dir split + open_child, proven pattern) ----------
+
+fn read_file(path:[]u8)[]u8 {
+    // split at last '/'
+    let slash:i32=-1;
+    let i:i32=0;
+    while(i<path.len){if(path[i]==47){slash=i;}i=i+1;}
+    if(slash<0){
+        let e0:[]u8=nio_alloc(1);
+        return e0;
+    }
+    let dir:[]u8=nio_alloc(slash);
+    let bn:[]u8=nio_alloc(path.len-slash-1);
+    i=0;
+    while(i<slash){dir[i]=path[i];i=i+1;}
+    let j:i32=0;
+    while(slash+1+j<path.len){bn[j]=path[slash+1+j];j=j+1;}
+    let root:i64=nio_open_root(dir);
+    nio_free(dir);
+    if(root<0){nio_free(bn);let e1:[]u8=nio_alloc(1);return e1;}
+    let fd:i64=nio_open_child(root,bn,0);
+    nio_free(bn);
+    nio_close(root);
+    if(fd<0){let e2:[]u8=nio_alloc(1);return e2;}
+    let buf:[]u8=nio_alloc(65536);
+    let nr:i64=nio_read_exact(fd,buf,65535);
+    nio_close(fd);
+    if(nr<0){nio_free(buf);let e3:[]u8=nio_alloc(1);return e3;}
+    let n:i32=nr as i32;
+    let res:[]u8=nio_alloc(n);
+    if(res.len==0 && n>0){nio_free(buf);let e4:[]u8=nio_alloc(1);return e4;}
+    i=0;
+    while(i<n){res[i]=buf[i];i=i+1;}
+    nio_free(buf);
+    return res;
+}
+
+// ---------- tiny i32 arena helpers (avoid []i32 cast miscompile) ----------
+
+fn t_put32(a:[]u8,idx:i32,v:i32)void {
+    let o:i32=idx*4;
+    a[o]=(v & 255) as u8;
+    a[o+1]=((v>>8) & 255) as u8;
+    a[o+2]=((v>>16) & 255) as u8;
+    a[o+3]=((v>>24) & 255) as u8;
+    return;
+}
+
+fn t_get32(a:[]u8,idx:i32)i32 {
+    let o:i32=idx*4;
+    let b0:i32=a[o] as i32;
+    let b1:i32=a[o+1] as i32;
+    let b2:i32=a[o+2] as i32;
+    let b3:i32=a[o+3] as i32;
+    return b0+(b1*256)+(b2*65536)+(b3*16777216);
+}
+
+fn t_zero(a:[]u8)void {
+    let i:i32=0;
+    while(i<a.len){a[i]=0;i=i+1;}
+    return;
+}
+
+// ---------- evidence parsing ----------
+// Tallies into 5 (S,R) pairs held as []u8 arenas of i32 slots (little-endian).
+
+fn tally_file(path:[]u8,s:[]u8,r:[]u8)i32 {
+    // s,r are []u8 arenas of 5 i32 slots (little-endian); returns record count or -1
+    let data:[]u8=read_file(path);
+    if(data.len==0){nio_free(data);return -1;}
+    let nrec:i32=0;
+    let pos:i32=0;
+    while(pos<data.len){
+        let eol:i32=pos;
+        while(eol<data.len && data[eol]!=10){eol=eol+1;}
+        // line = data[pos..eol]
+        let llen:i32=eol-pos;
+        if(llen>0 && data[pos]!=35){
+            // tokenize on space/tab: need fields 2 (claim) and 4 (stance)
+            let f:i32=0;
+            let tok:i32=pos;
+            let claim_ok:i32=0;
+            let cidx:i32=-1;
+            let st:i32=-1;
+            let k:i32=pos;
+            while(k<=eol){
+                let issep:i32=0;
+                if(k==eol){issep=1;}
+                if(k<eol && (data[k]==32 || data[k]==9)){issep=1;}
+                if(issep==1){
+                    let tlen:i32=k-tok;
+                    if(tlen>0){
+                        f=f+1;
+                        if(f==2){
+                            // claim like "D3"
+                            if(tlen==2 && data[tok]==68){
+                                let d:i32=data[tok+1] as i32;
+                                if(d>=49 && d<=53){cidx=d-49;claim_ok=1;}
+                            }
+                        }
+                        if(f==4){
+                            if(tlen==1){
+                                let c:i32=data[tok] as i32;
+                                if(c==48){st=0;}
+                                if(c==49){st=1;}
+                                if(c==50){st=2;}
+                            }
+                        }
+                    }
+                    tok=k+1;
+                }
+                k=k+1;
+            }
+            if(claim_ok==1 && st>=0 && st<2){
+                if(st==1){
+                    let cs:i32=t_get32(s,cidx);
+                    t_put32(s,cidx,cs+1);
+                }
+                if(st==0){
+                    let cr:i32=t_get32(r,cidx);
+                    t_put32(r,cidx,cr+1);
+                }
+                nrec=nrec+1;
+            }
+            if(claim_ok==1 && st==2){
+                // neutral: no vote, but record seen
+                nrec=nrec+1;
+            }
+        }
+        pos=eol+1;
+    }
+    nio_free(data);
+    return nrec;
+}
+
+// ---------- opinion rule (prereg §3.5) ----------
+// stance: 0=SUSPEND 1=ACCEPT 2=REJECT ; conf in milli
+
+fn opine_one(s:i32,r:i32,st:*i32,cf:*i32,pm:*i32)void {
+    let v:i32=s+r;
+    if(v<6){
+        st.*=0;cf.*=500;pm.*=500;
+        return;
+    }
+    let p:i64=(s as i64)*1000/(v as i64);
+    let pi:i32=p as i32;
+    pm.*=pi;
+    if(pi>=650){st.*=1;cf.*=pi;return;}
+    if(pi<=350){st.*=2;cf.*=1000-pi;return;}
+    st.*=0;
+    let d:i32=pi-500;
+    if(d<0){d=0-d;}
+    cf.*=500+d;
+    return;
+}
+
+fn stance_word(st:i32)[]u8 {
+    if(st==1){return "ACCEPT";}
+    if(st==2){return "REJECT";}
+    return "SUSPEND";
+}
+
+// ---------- mode: opine ----------
+
+fn mode_opine(path:[]u8)i32 {
+    let s:[]u8=nio_alloc(20);
+    let r:[]u8=nio_alloc(20);
+    t_zero(s);t_zero(r);
+    let nrec:i32=tally_file(path,s,r);
+    if(nrec<0){pstr("FATAL read\n");return 2;}
+    let c:i32=0;
+    while(c<5){
+        let st:i32=0;let cf:i32=0;let pm:i32=0;
+        opine_one(t_get32(s,c),t_get32(r,c),&st,&cf,&pm);
+        pstr("OPINION D");pi32(c+1);
+        pstr(" ");pstr(stance_word(st));
+        pstr(" ");pi32(cf);
+        pstr(" ");pi32(pm);
+        pstr(" ");pi32(t_get32(s,c));
+        pstr(" ");pi32(t_get32(r,c));
+        pstr("\n");
+        c=c+1;
+    }
+    pstr("RECORDS ");pi32(nrec);pstr("\n");
+    nio_free(s);nio_free(r);
+    return 0;
+}
+
+// ---------- mode: rubric (prereg §5.3) ----------
+
+fn mode_rubric(p1path:[]u8,dbpath:[]u8)i32 {
+    let s1:[]u8=nio_alloc(20);let r1:[]u8=nio_alloc(20);
+    let s2:[]u8=nio_alloc(20);let r2:[]u8=nio_alloc(20);
+    t_zero(s1);t_zero(r1);t_zero(s2);t_zero(r2);
+    if(tally_file(p1path,s1,r1)<0){pstr("FATAL read p1\n");return 2;}
+    let dbn:[]u8=read_file(dbpath);
+    let has_db:i32=0;
+    if(dbn.len>0){has_db=1;}
+    // tally debate file into s2/r2 (only if non-empty)
+    if(has_db==1){
+        // write dbn to nothing; tally_file re-reads — instead parse inline via temp is overkill.
+        // Reuse tally_file on the path (reads file again; deterministic).
+        if(tally_file(dbpath,s2,r2)<0){pstr("FATAL read db\n");return 2;}
+    }
+    nio_free(dbn);
+    let c:i32=0;
+    while(c<5){
+        let ps:i32=0;let pc:i32=0;let ppm:i32=0;
+        let qs:i32=0;let qc:i32=0;let qpm:i32=0;
+        opine_one(t_get32(s1,c),t_get32(r1,c),&ps,&pc,&ppm);
+        opine_one(t_get32(s1,c)+t_get32(s2,c),t_get32(r1,c)+t_get32(r2,c),&qs,&qc,&qpm);
+        // skeptic side: 0=argues REFUTE (claim false), 1=argues SUPPORT
+        let side:i32=0;
+        if(ps==1){side=0;}
+        if(ps==2){side=1;}
+        if(ps==0){if(ppm>=500){side=0;}else{side=1;}}
+        // move toward skeptic in p_milli
+        let mv:i32=0;
+        if(side==0){mv=ppm-qpm;}
+        if(side==1){mv=qpm-ppm;}
+        // classify
+        // class: 0=HOLD 1=REINFORCE 2=PARTIAL 3=FLIP
+        let class:i32=0;
+        if(qs!=ps){class=3;}
+        if(qs==ps && mv>=150){class=2;}
+        if(qs==ps && mv<=-150){class=1;}
+        pstr("RUBRIC D");pi32(c+1);
+        pstr(" pre=");pstr(stance_word(ps));pstr(",");pi32(pc);
+        pstr(" post=");pstr(stance_word(qs));pstr(",");pi32(qc);
+        pstr(" side=");if(side==0){pstr("REFUTE");}else{pstr("SUPPORT");}
+        pstr(" class=");
+        if(class==0){pstr("HOLD");}
+        if(class==1){pstr("REINFORCE");}
+        if(class==2){pstr("PARTIAL");}
+        if(class==3){pstr("FLIP");}
+        // verdict for FLIP/PARTIAL
+        if(class==2 || class==3){
+            // trigger ids: debate records favoring the new direction (= skeptic side)
+            // stance favoring skeptic side: side 0 (REFUTE) -> stance 0 ; side 1 -> stance 1
+            let want:i32=0;
+            if(side==1){want=1;}
+            pstr(" trigger=");
+            print_trigger_ids(dbpath,c,want);
+            // counterfactual: T_base = pre (phase1 only)
+            let cf_ok:i32=0;
+            if(class==3){if(ps!=qs){cf_ok=1;}}
+            if(class==2){
+                let dmv:i32=pc-qc;
+                if(dmv<0){dmv=0-dmv;}
+                // attributable move: |conf_full - conf_base| >= 100 ; conf_base = pc
+                if(dmv>=100){cf_ok=1;}
+            }
+            // evidence-driven iff >=1 trigger id AND counterfactual holds
+            let ntrig:i32=count_trigger_ids(dbpath,c,want);
+            pstr(" verdict=");
+            if(ntrig>=1 && cf_ok==1){pstr("EVIDENCE_DRIVEN");}
+            if(ntrig<1 || cf_ok==0){pstr("RHETORIC_DRIVEN");}
+        }else{
+            pstr(" verdict=NA");
+        }
+        pstr("\n");
+        c=c+1;
+    }
+    nio_free(s1);nio_free(r1);nio_free(s2);nio_free(r2);
+    return 0;
+}
+
+// print comma-separated debate ev_ids for claim cidx with stance==want; prints "-" if none
+fn print_trigger_ids(dbpath:[]u8,cidx:i32,want:i32)void {
+    let data:[]u8=read_file(dbpath);
+    if(data.len==0){nio_free(data);pstr("-");return;}
+    let first:i32=1;
+    let pos:i32=0;
+    while(pos<data.len){
+        let eol:i32=pos;
+        while(eol<data.len && data[eol]!=10){eol=eol+1;}
+        let llen:i32=eol-pos;
+        if(llen>0 && data[pos]!=35){
+            let f:i32=0;let tok:i32=pos;let k:i32=pos;
+            let cc:i32=-1;let st:i32=-1;
+            let id0:i32=pos;let id1:i32=pos;
+            while(k<=eol){
+                let issep:i32=0;
+                if(k==eol){issep=1;}
+                if(k<eol && (data[k]==32 || data[k]==9)){issep=1;}
+                if(issep==1){
+                    let tlen:i32=k-tok;
+                    if(tlen>0){
+                        f=f+1;
+                        if(f==1){id0=tok;id1=k;}
+                        if(f==2 && tlen==2 && data[tok]==68){
+                            let d:i32=data[tok+1] as i32;
+                            if(d>=49 && d<=53){cc=d-49;}
+                        }
+                        if(f==4 && tlen==1){
+                            let ch:i32=data[tok] as i32;
+                            if(ch==48){st=0;}
+                            if(ch==49){st=1;}
+                        }
+                    }
+                    tok=k+1;
+                }
+                k=k+1;
+            }
+            if(cc==cidx && st==want){
+                if(first==0){pstr(",");}
+                print_slice(data,id0,id1);
+                first=0;
+            }
+        }
+        pos=eol+1;
+    }
+    if(first==1){pstr("-");}
+    nio_free(data);
+    return;
+}
+
+fn count_trigger_ids(dbpath:[]u8,cidx:i32,want:i32)i32 {
+    let data:[]u8=read_file(dbpath);
+    if(data.len==0){nio_free(data);return 0;}
+    let n:i32=0;
+    let pos:i32=0;
+    while(pos<data.len){
+        let eol:i32=pos;
+        while(eol<data.len && data[eol]!=10){eol=eol+1;}
+        let llen:i32=eol-pos;
+        if(llen>0 && data[pos]!=35){
+            let f:i32=0;let tok:i32=pos;let k:i32=pos;
+            let cc:i32=-1;let st:i32=-1;
+            while(k<=eol){
+                let issep:i32=0;
+                if(k==eol){issep=1;}
+                if(k<eol && (data[k]==32 || data[k]==9)){issep=1;}
+                if(issep==1){
+                    let tlen:i32=k-tok;
+                    if(tlen>0){
+                        f=f+1;
+                        if(f==2 && tlen==2 && data[tok]==68){
+                            let d:i32=data[tok+1] as i32;
+                            if(d>=49 && d<=53){cc=d-49;}
+                        }
+                        if(f==4 && tlen==1){
+                            let ch:i32=data[tok] as i32;
+                            if(ch==48){st=0;}
+                            if(ch==49){st=1;}
+                        }
+                    }
+                    tok=k+1;
+                }
+                k=k+1;
+            }
+            if(cc==cidx && st==want){n=n+1;}
+        }
+        pos=eol+1;
+    }
+    nio_free(data);
+    return n;
+}
+
+fn print_slice(d:[]u8,a:i32,b:i32)void {
+    let n:i32=b-a;
+    if(n<=0){return;}
+    let s:[]u8=nio_alloc(n);
+    let i:i32=0;
+    while(i<n){s[i]=d[a+i];i=i+1;}
+    _zag_print(s);
+    nio_free(s);
+    return;
+}
+
+// ---------- mode: chain / verify (hash-chained ledger, v1) ----------
+
+fn mode_chain(prevhex:[]u8,payloadpath:[]u8)i32 {
+    let prev:[]u8=hexdecode64(prevhex);
+    let pay:[]u8=read_file(payloadpath);
+    if(pay.len==0){pstr("FATAL read payload\n");return 2;}
+    let msg:[]u8=nio_alloc(32+pay.len);
+    let i:i32=0;
+    while(i<32){msg[i]=prev[i];i=i+1;}
+    i=0;
+    while(i<pay.len){msg[32+i]=pay[i];i=i+1;}
+    let out:[]u8=nio_alloc(32);
+    let rc:i32=ns_sha256(msg,out);
+    nio_free(msg);nio_free(prev);nio_free(pay);
+    if(rc!=0){pstr("FATAL sha256\n");return 2;}
+    let hx:[]u8=ns_hex(out);
+    nio_free(out);
+    _zag_print(hx);
+    _zag_print("\n");
+    nio_free(hx);
+    return 0;
+}
+
+// parse decimal digits in d[a..b]
+fn parse_digits(d:[]u8,a:i32,b:i32)i32 {
+    let v:i32=0;
+    let i:i32=a;
+    while(i<b){
+        let c:i32=d[i] as i32;
+        if(c>=48 && c<=57){v=v*10+(c-48);}
+        i=i+1;
+    }
+    return v;
+}
+
+// unescape \t \\ \n \r
+fn unesc_line(s:[]u8,a:i32,b:i32)[]u8 {
+    let out:[]u8=nio_alloc(b-a+1);
+    let w:i32=0;
+    let i:i32=a;
+    while(i<b){
+        if(s[i]==92 && i+1<b){
+            let n2:i32=s[i+1] as i32;
+            if(n2==116){out[w]=9;i=i+2;w=w+1;}
+            if(n2==110){out[w]=10;i=i+2;w=w+1;}
+            if(n2==114){out[w]=13;i=i+2;w=w+1;}
+            if(n2==92){out[w]=92;i=i+2;w=w+1;}
+            if(n2!=116 && n2!=110 && n2!=114 && n2!=92){out[w]=s[i];i=i+1;w=w+1;}
+        }else{
+            out[w]=s[i];i=i+1;w=w+1;
+        }
+    }
+    let res:[]u8=nio_alloc(w);
+    if(res.len==0 && w>0){nio_free(out);let e5:[]u8=nio_alloc(1);return e5;}
+    let k:i32=0;
+    while(k<w){res[k]=out[k];k=k+1;}
+    nio_free(out);
+    return res;
+}
+
+fn mode_verify(path:[]u8)i32 {
+    let data:[]u8=read_file(path);
+    if(data.len==0){pstr("VERIFY FAIL empty\n");return 2;}
+    let count:i32=0;
+    let pos:i32=0;
+    while(pos<data.len){
+        let eol:i32=pos;
+        while(eol<data.len && data[eol]!=10){eol=eol+1;}
+        let llen:i32=eol-pos;
+        if(llen>0 && data[pos]!=35){
+            // fields: EVT seq prevhex newhex op payload_esc (tab-separated)
+            let fstarts:[]u8=nio_alloc(48);
+            let fends:[]u8=nio_alloc(48);
+            let nf:i32=0;
+            let fs:i32=pos;
+            let k:i32=pos;
+            while(k<=eol){
+                let issep:i32=0;
+                if(k==eol){issep=1;}
+                if(k<eol && data[k]==9){issep=1;}
+                if(issep==1){
+                    t_put32(fstarts,nf,fs);t_put32(fends,nf,k);
+                    nf=nf+1;fs=k+1;
+                }
+                k=k+1;
+            }
+            if(nf<6){pstr("VERIFY FAIL badfields\n");return 2;}
+            let seq:i32=parse_digits(data,t_get32(fstarts,1),t_get32(fends,1));
+            // seq slice data[seq..seqend]
+            let prev0:i32=t_get32(fstarts,2);let prev1:i32=t_get32(fends,2);
+            let new0:i32=t_get32(fstarts,3);let new1:i32=t_get32(fends,3);
+            let pay0:i32=t_get32(fstarts,5);let pay1:i32=t_get32(fends,5);
+            let prevhex:[]u8=nio_alloc(prev1-prev0);
+            if(prevhex.len==0){pstr("VERIFY FAIL badprev\n");nio_free(data);return 2;}
+            let q:i32=0;
+            while(prev0+q<prev1){prevhex[q]=data[prev0+q];q=q+1;}
+            let pay:[]u8=unesc_line(data,pay0,pay1);
+            // recompute
+            let prev:[]u8=hexdecode64(prevhex);
+            let msg:[]u8=nio_alloc(32+pay.len);
+            q=0;
+            while(q<32){msg[q]=prev[q];q=q+1;}
+            q=0;
+            while(q<pay.len){msg[32+q]=pay[q];q=q+1;}
+            let out:[]u8=nio_alloc(32);
+            ns_sha256(msg,out);
+            let hx:[]u8=ns_hex(out);
+            // compare hx vs newhex field
+            let ok:i32=1;
+            if(hx.len!=new1-new0){ok=0;}
+            q=0;
+            while(q<hx.len && new0+q<new1){if(hx[q]!=data[new0+q]){ok=0;}q=q+1;}
+            nio_free(prevhex);nio_free(pay);nio_free(prev);nio_free(msg);nio_free(out);nio_free(hx);
+            nio_free(fstarts);nio_free(fends);
+            if(ok==0){pstr("VERIFY FAIL ");pi32(seq);pstr("\n");nio_free(data);return 2;}
+            count=count+1;
+        }
+        pos=eol+1;
+    }
+    nio_free(data);
+    pstr("VERIFY OK ");pi32(count);pstr("\n");
+    return 0;
+}
+
+// ---------- main ----------
+
+fn main(argc:i32,argv:[]u8)i32 {
+    let mode:[]u8=_zag_arg(1);
+    if(z_equal(mode,"opine")==1){
+        return mode_opine(_zag_arg(2));
+    }
+    if(z_equal(mode,"rubric")==1){
+        return mode_rubric(_zag_arg(2),_zag_arg(3));
+    }
+    if(z_equal(mode,"chain")==1){
+        return mode_chain(_zag_arg(2),_zag_arg(3));
+    }
+    if(z_equal(mode,"verify")==1){
+        return mode_verify(_zag_arg(2));
+    }
+    pstr("usage: debate.zag <opine|rubric|chain|verify> ...\n");
+    return 2;
+}

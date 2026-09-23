@@ -1,0 +1,792 @@
+@import("R33_NATIVE_SHA256_V2.zag")
+// s5_store.zag — TNN canonical DEFAULT memory store (S5 codec).
+//
+// Micah's order 2026-09-22: "make that the default."
+// Verdict source: ops/storage-compression/evidence/FINAL_REPORT.md
+//   S5 = 5.53 B/fact at 1M, 94% smaller than baseline, faster on every metric.
+//
+// What S5 is (combines all winning trial ideas):
+//   S3: identity index — dense-sequential ids, id==slot, no index storage.
+//   S4: derived audit — successful adds are DERIVED from ordered slots,
+//       not written per-add. Non-derivable events (episodes, failures,
+//       REVISES, DELETES) go in a compact 20B event log. Per-chunk SHA-256
+//       flat hash manifest + final seal for tamper evidence.
+//   S5: tagged-width values — per-chunk width in {1,2,4,8} bytes, signed iff
+//       the chunk's min<0. Min/max scanned at chunk seal.
+//
+// NEW vs the trial (which was add-only):
+//   - sc_revise / sc_delete with full audit events (old/new values carried
+//     in the event log; tombstone flags retained in slot bytes).
+//   - sc_replay_check: proves the derived-audit contract holds under
+//     mutation (event log + slots mutually consistent).
+//   - cslots is a runtime parameter (chunked store is mandatory: no slice
+//     may exceed 2^25 bytes; chunking is proven semantics-preserving).
+//
+// BOUNDARIES (honest):
+//   - Values are i64. String payloads need interning (a listed remaining fork).
+//   - Ids are dense-sequential (S3 H5). Sparse/external ids need a fallback.
+//   - Deletes tombstone (bytes retained) — the price of a derivable audit.
+//     Physical compaction is a separate (listed) fork.
+//   - No persistent disk tier yet: this is the heap layout. A disk format
+//     would specify its own layout with this written basis as the start.
+//
+// Byte basis: WRITTEN/LOGICAL bytes per fact (per PREREG amendment A1.1).
+
+// ---------- byte helpers ----------
+fn sc_alloc(n:i32)[]u8 {
+    if(n<1){let e:[]u8="";return e;}
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    if((p as i64)==0){let e2:[]u8="";return e2;}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn sc_g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|(((b[o+1] as i32)&255)<<8);
+    v=v|(((b[o+2] as i32)&255)<<16);
+    v=v|(((b[o+3] as i32)&255)<<24);
+    return v;
+}
+fn sc_s32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+}
+fn sc_g64(b:[]u8,o:i64)i64 {
+    let v:i64=0;
+    let o32:i32=o as i32;
+    v=v|((b[o32] as i64)&255);
+    v=v|(((b[o32+1] as i64)&255)<<8);
+    v=v|(((b[o32+2] as i64)&255)<<16);
+    v=v|(((b[o32+3] as i64)&255)<<24);
+    v=v|(((b[o32+4] as i64)&255)<<32);
+    v=v|(((b[o32+5] as i64)&255)<<40);
+    v=v|(((b[o32+6] as i64)&255)<<48);
+    v=v|(((b[o32+7] as i64)&255)<<56);
+    return v;
+}
+fn sc_s64(b:[]u8,o:i64,v:i64)void {
+    let o32:i32=o as i32;
+    b[o32]=(v&255) as u8;
+    b[o32+1]=((v>>8)&255) as u8;
+    b[o32+2]=((v>>16)&255) as u8;
+    b[o32+3]=((v>>24)&255) as u8;
+    b[o32+4]=((v>>32)&255) as u8;
+    b[o32+5]=((v>>40)&255) as u8;
+    b[o32+6]=((v>>48)&255) as u8;
+    b[o32+7]=((v>>56)&255) as u8;
+}
+fn sc_g16(b:[]u8,o:i32)i32 {
+    let v:i32=(b[o] as i32)&255;
+    v=v|((((b[o+1] as i32)&255))<<8);
+    if(v>=32768){v=v-65536;}
+    return v;
+}
+fn sc_s16(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+}
+
+// ---------- store ----------
+struct ScStore {
+    cap:i32, n:i32, cslots:i32,
+    nchunks:i32, chunk_ptrs:[]u8,
+    // S3 H5: dense index deleted (identity: id==slot for dense-sequential ids)
+    // S4 H1: per-add audit deleted (derivable from slots). Flat manifest of
+    // per-chunk SHA-256 hashes + compact event log for non-derivable events.
+    // (Not a hash chain: chain makes sealed-chunk mutation O(tail); the flat
+    // manifest preserves tamper-evidence with O(chunk) mutation.)
+    chashes:[]u8,
+    nsealed:i32,
+    events:[]u8,
+    events_n:i32, events_cap:i32,
+    seal:[]u8,
+    // S5 H3: fill buffer (one chunk: cslots x 8B values + cslots x 4B meta) +
+    // per-chunk width tags (w | 16 if signed).
+    fill_buf:[]u8,
+    widths:[]u8,
+    clkbase:[]u8,
+    learn_gate:i32, clock:i32,
+    ops_add:i64, ops_rev:i64, ops_del:i64,
+    ops_verify:i64, ops_audit:i64, ops_find:i64
+}
+// meta flags byte (offset +2 in the 4B meta): bit0 = tombstone (deleted)
+const S5_FLAG_TOMBSTONE:i32=1;
+// event tags: 7 = episode, 1 = failure (trial); 8/9 = revise head/cont, 10 = delete
+const S5_EV_REVISE_HEAD:i32=8;
+const S5_EV_REVISE_CONT:i32=9;
+const S5_EV_DELETE:i32=10;
+
+fn sc_store_init(cap:i32,cslots:i32,s:*ScStore)i32 {
+    if(cslots<16||cap<1){return -1;}
+    let nchunks:i32=(cap+cslots-1)/cslots;
+    let cptrs:[]u8=sc_alloc(nchunks*8);
+    if(cptrs.len==0){return -1;}
+    let ci:i32=0;
+    while(ci<nchunks){
+        let ch:[]u8=sc_alloc(cslots*12);
+        if(ch.len==0){return -1;}
+        sc_s64(cptrs,ci*8,_zag_slice_ptr(ch) as i64);
+        ci=ci+1;
+    }
+    // S3 H5: no index chunks; identity id==slot
+    // S4 H1: chunk hashes (nchunks x 32B) + event log (growable).
+    // No eager audit preallocation (H8): event log starts at 256 events.
+    let chn:[]u8=sc_alloc(nchunks*32);
+    if(chn.len==0){return -1;}
+    let evb:[]u8=sc_alloc(256*20);
+    if(evb.len==0){return -1;}
+    let sl:[]u8=sc_alloc(32);
+    if(sl.len==0){return -1;}
+    s.*.cap=cap;s.*.n=0;s.*.cslots=cslots;
+    s.*.nchunks=nchunks;s.*.chunk_ptrs=cptrs;
+    s.*.chashes=chn;s.*.nsealed=0;
+    s.*.events=evb;s.*.events_n=0;s.*.events_cap=256;
+    s.*.seal=sl;
+    let fb:[]u8=sc_alloc(cslots*12);
+    if(fb.len==0){return -1;}
+    let wd:[]u8=sc_alloc(nchunks);
+    if(wd.len==0){return -1;}
+    s.*.fill_buf=fb;s.*.widths=wd;
+    let ckb:[]u8=sc_alloc(nchunks*4);
+    if(ckb.len==0){return -1;}
+    ci=0;
+    while(ci<nchunks*4){ckb[ci]=255;ci=ci+1;} // 0xFFFFFFFF = unset
+    s.*.clkbase=ckb;
+    s.*.learn_gate=1;s.*.clock=0;
+    s.*.ops_add=0;s.*.ops_rev=0;s.*.ops_del=0;
+    s.*.ops_verify=0;s.*.ops_audit=0;s.*.ops_find=0;
+    return 0;
+}
+fn sc_slot_chunk(s:*ScStore,c:i32)[]u8 {
+    // filling chunk (c==nsealed) lives in fill_buf (8B values);
+    // sealed chunks are compact (widths[c]).
+    if(c==s.*.nsealed){
+        return s.*.fill_buf;
+    }
+    let ptrs:[]u8=s.*.chunk_ptrs;
+    let p:i64=sc_g64(ptrs,c*8);
+    let cp:*u8=p as *u8;
+    let wtag:i32=(s.*.widths[c] as i32)&255;
+    let w:i32=wtag&15;
+    return cp[0..s.*.cslots*(w+4)];
+}
+// S3 H5: identity index. ids are dense-sequential 0..n-1 taught in order,
+// slots append in add order, so index[id] == id. No storage.
+fn sc_id2slot(s:*ScStore,id:i32)i32 {
+    if(id<0||id>=s.*.n){return -1;}
+    return id;
+}
+
+// S5 H3: width-tagged values. Width from (min,max): 1/2/4/8, signed iff min<0.
+fn sc_wval(b:[]u8,o:i32,v:i64,w:i32)void {
+    if(w==8){sc_s64(b,o as i64,v);return;}
+    if(w==4){sc_s32(b,o,v as i32);return;}
+    if(w==2){b[o]=(v&255) as u8;b[o+1]=((v>>8)&255) as u8;return;}
+    b[o]=(v&255) as u8;
+}
+fn sc_rval(b:[]u8,o:i32,w:i32,signed:i32)i64 {
+    if(w==8){return sc_g64(b,o as i64);}
+    if(w==4){
+        let v:i32=sc_g32(b,o);
+        if(signed!=0){
+            if(v<0){return v as i64;}
+            return v as i64;
+        }
+        return (v as i64)&4294967295;
+    }
+    if(w==2){
+        let v:i32=((b[o] as i32)&255)|((((b[o+1] as i32)&255))<<8);
+        if(signed!=0&&v>=32768){return (v-65536) as i64;}
+        return v as i64;
+    }
+    let v2:i32=(b[o] as i32)&255;
+    if(signed!=0&&v2>=128){return (v2-256) as i64;}
+    return v2 as i64;
+}
+// does v fit in (w, signed)? 1 = yes.
+fn sc_fits(v:i64,w:i32,signed:i32)i32 {
+    if(w==8){return 1;}
+    if(w==4){
+        if(signed!=0){
+            if(v>=-2147483648&&v<=2147483647){return 1;}
+            return 0;
+        }
+        if(v>=0&&v<=4294967295){return 1;}
+        return 0;
+    }
+    if(w==2){
+        if(signed!=0){
+            if(v>=-32768&&v<=32767){return 1;}
+            return 0;
+        }
+        if(v>=0&&v<=65535){return 1;}
+        return 0;
+    }
+    if(signed!=0){
+        if(v>=-128&&v<=127){return 1;}
+        return 0;
+    }
+    if(v>=0&&v<=255){return 1;}
+    return 0;
+}
+fn sc_pick_width(mn:i64,mx:i64)i32 { // wtag = w | (signed?16:0); w in {1,2,4,8}
+    let signed:i32=0;
+    if(mn<0){signed=16;}
+    let w:i32=8;
+    if(signed==0){
+        if(mx<=255){w=1;}
+        else{
+            if(mx<=65535){w=2;}
+            else{
+                if(mx<=4294967295){w=4;}
+            }
+        }
+    }else{
+        if(mn>=-128&&mx<=127){w=1;}
+        else{
+            if(mn>=-32768&&mx<=32767){w=2;}
+            else{
+                if(mn>=-2147483648&&mx<=2147483647){w=4;}
+            }
+        }
+    }
+    return w|signed;
+}
+// used slot bytes of sealed chunk j (for chain hashing and accounting)
+fn sc_chunk_used(s:*ScStore,j:i32)i32 {
+    let wtag:i32=(s.*.widths[j] as i32)&255;
+    let w:i32=wtag&15;
+    let cnt:i32=s.*.cslots;
+    if(j==s.*.nsealed-1){
+        let rem:i32=s.*.n-j*s.*.cslots;
+        if(rem<cnt){cnt=rem;}
+    }
+    return cnt*(w+4);
+}
+// S5: compact the fill buffer to width w, install as chunk c.
+// The chunk hash is NOT computed here; sc_seal_final hashes all sealed
+// chunks in bulk (deferred: per-mutation rehashing through a slow SHA256
+// is O(revises * chunk); bulk rehash at seal is O(total_bytes) once).
+// count = slots used in this chunk.
+fn sc_compact_and_seal(s:*ScStore,c:i32,count:i32)i32 {
+    let cs:i32=s.*.cslots;
+    let fb:[]u8=s.*.fill_buf;
+    // scan min/max over used slots
+    let mn:i64=0; let mx:i64=0;
+    let k:i32=0;
+    if(count>0){
+        mn=sc_g64(fb,0); mx=mn;
+        k=1;
+        while(k<count){
+            let v:i64=sc_g64(fb,(k*8) as i64);
+            if(v<mn){mn=v;}
+            if(v>mx){mx=v;}
+            k=k+1;
+        }
+    }
+    let wtag:i32=sc_pick_width(mn,mx);
+    let w:i32=wtag&15;
+    // allocate compact chunk: cslots x (w+4)
+    let csize:i32=cs*(w+4);
+    let cc:[]u8=sc_alloc(csize);
+    if(cc.len==0){return -1;}
+    let moff:i32=cs*w;
+    k=0;
+    while(k<count){
+        let v:i64=sc_g64(fb,(k*8) as i64);
+        sc_wval(cc,k*w,v,w);
+        // meta: clock_delta i16 @0, flags u8 @2, spare u8 @3
+        let m:i32=cs*8+k*4;
+        cc[moff+k*4]=fb[m];cc[moff+k*4+1]=fb[m+1];
+        cc[moff+k*4+2]=fb[m+2];cc[moff+k*4+3]=fb[m+3];
+        k=k+1;
+    }
+    // install (hash deferred to sc_seal_final)
+    let cptrs:[]u8=s.*.chunk_ptrs;
+    sc_s64(cptrs,c*8,_zag_slice_ptr(cc) as i64);
+    s.*.widths[c]=wtag as u8;
+    s.*.nsealed=s.*.nsealed+1;
+    return 0;
+}
+// Hash a single sealed chunk from its bytes into the flat manifest.
+// Used by sc_seal_final (bulk) — NOT by revise/delete (deferred).
+fn sc_rehash_chunk(s:*ScStore,c:i32)i32 {
+    let used:i32=sc_chunk_used(s,c);
+    let chk:[]u8=sc_slot_chunk(s,c);
+    let chn:[]u8=s.*.chashes;
+    let out:[]u8=sc_alloc(32);
+    if(out.len==0){return -1;}
+    if(ns_sha256(chk[0..used],out)!=0){return -2;}
+    let i:i32=0;
+    while(i<32){chn[c*32+i]=out[i];i=i+1;}
+    return 0;
+}
+// S5 event record stride: 20 bytes. Layout: tag u8 @0, pos u32 @1,
+// p0 u32 @5, p1 u32 @9, p2 u32 @13. (revise head/cont carry 17B of payload;
+// 20B keeps every record self-aligned and boundary-safe.)
+//   tag=7 episode: stage u32 @5.
+//   tag=1 failure: rc u8 @5, id u32 @6.
+//   tag=8 revise-head: slot u32 @5, old_lo u32 @9, old_hi u32 @13.
+//   tag=9 revise-cont: new_lo u32 @5, new_hi u32 @9, clock u32 @13.
+//   tag=10 delete: slot u32 @5, clock u32 @9.
+fn sc_event_grow(s:*ScStore)i32 {
+    let cap:i32=s.*.events_cap;
+    let ncap:i32=cap*2;
+    let nb:[]u8=sc_alloc(ncap*20);
+    if(nb.len==0){return -1;}
+    let ob:[]u8=s.*.events;
+    let i:i32=0;
+    let nn:i32=s.*.events_n*20;
+    while(i<nn){nb[i]=ob[i];i=i+1;}
+    s.*.events=nb;s.*.events_cap=ncap;
+    return 0;
+}
+fn sc_event_append(s:*ScStore,tag:i32,pos:i32,p0:i32,p1:i32)i32 {
+    let n:i32=s.*.events_n;
+    if(n>=s.*.events_cap){
+        if(sc_event_grow(s)!=0){return -1;}
+    }
+    let ev:[]u8=s.*.events;
+    let o:i32=n*20;
+    ev[o]=tag as u8;
+    sc_s32(ev,o+1,pos);
+    sc_s32(ev,o+5,p0);
+    sc_s32(ev,o+9,p1);
+    s.*.events_n=n+1;
+    s.*.ops_audit=s.*.ops_audit+1;
+    return 0;
+}
+fn sc_revise_event(s:*ScStore,pos:i32,slot:i32,old_v:i64,new_v:i64,clock:i32)i32 {
+    let n:i32=s.*.events_n;
+    if(n+1>=s.*.events_cap){
+        if(sc_event_grow(s)!=0){return -1;}
+    }
+    let ev:[]u8=s.*.events;
+    let o:i32=n*20;
+    ev[o]=8;
+    sc_s32(ev,o+1,pos);
+    sc_s32(ev,o+5,slot);
+    sc_s32(ev,o+9,old_v as i32);
+    sc_s32(ev,o+13,(old_v>>32) as i32);
+    let o2:i32=(n+1)*20;
+    ev[o2]=9;
+    sc_s32(ev,o2+1,pos);
+    sc_s32(ev,o2+5,new_v as i32);
+    sc_s32(ev,o2+9,(new_v>>32) as i32);
+    sc_s32(ev,o2+13,clock);
+    s.*.events_n=n+2;
+    s.*.ops_audit=s.*.ops_audit+2;
+    return 0;
+}
+fn sc_episode(s:*ScStore,stage:i32)i32 {
+    s.*.clock=s.*.clock+1;
+    return sc_event_append(s,7,s.*.n,stage,0);
+}
+// Seal the final partial chunk (driver calls after passes).
+fn sc_seal_tail(s:*ScStore)i32 {
+    let cs:i32=s.*.cslots;
+    let n:i32=s.*.n;
+    if(n%cs==0){return 0;} // no partial chunk
+    return sc_compact_and_seal(s,n/cs,n%cs);
+}
+// Final seal: bulk-rehash all sealed chunks from bytes into the manifest,
+// then SHA256(chashes || event_log || metadata).
+// Binds every chunk hash, every event byte, and (n, nsealed, cslots).
+// Contract: the manifest (chashes) is ONLY valid after this returns 0.
+// Revise/delete leave it stale; the bytes are the truth until seal.
+fn sc_seal_final(s:*ScStore)i32 {
+    let ns:i32=s.*.nsealed;
+    let c:i32=0;
+    while(c<ns){
+        if(sc_rehash_chunk(s,c)!=0){return -3;}
+        c=c+1;
+    }
+    let en:i32=s.*.events_n*20;
+    let total:i32=ns*32+en+12;
+    let buf:[]u8=sc_alloc(total);
+    if(buf.len==0){return -1;}
+    let chn:[]u8=s.*.chashes;
+    let i:i32=0;
+    let hn:i32=ns*32;
+    while(i<hn){buf[i]=chn[i];i=i+1;}
+    let ev:[]u8=s.*.events;
+    i=0;
+    while(i<en){buf[hn+i]=ev[i];i=i+1;}
+    sc_s32(buf,hn+en,s.*.n);
+    sc_s32(buf,hn+en+4,ns);
+    sc_s32(buf,hn+en+8,s.*.cslots);
+    let out:[]u8=s.*.seal;
+    let rc:i32=ns_sha256(buf,out);
+    if(rc!=0){return -2;}
+    return 0;
+}
+// Verify: recompute every chunk hash from slot bytes, then the seal.
+// 0 = intact, 1 = tamper in a slot chunk, 2 = tamper in event log/metadata.
+fn sc_manifest_verify(s:*ScStore)i32 {
+    let chn:[]u8=s.*.chashes;
+    let ns:i32=s.*.nsealed;
+    let c:i32=0;
+    while(c<ns){
+        let used:i32=sc_chunk_used(s,c);
+        let chk:[]u8=sc_slot_chunk(s,c);
+        let out:[]u8=sc_alloc(32);
+        if(out.len==0){return -1;}
+        if(ns_sha256(chk[0..used],out)!=0){return -2;}
+        let i:i32=0;
+        while(i<32){
+            if(out[i]!=chn[c*32+i]){return 1;} // TAMPER in chunk c
+            i=i+1;
+        }
+        c=c+1;
+    }
+    let en:i32=s.*.events_n*20;
+    let total:i32=ns*32+en+12;
+    let buf:[]u8=sc_alloc(total);
+    if(buf.len==0){return -1;}
+    let i2:i32=0;
+    let hn2:i32=ns*32;
+    while(i2<hn2){buf[i2]=chn[i2];i2=i2+1;}
+    let ev:[]u8=s.*.events;
+    i2=0;
+    while(i2<en){buf[hn2+i2]=ev[i2];i2=i2+1;}
+    sc_s32(buf,hn2+en,s.*.n);
+    sc_s32(buf,hn2+en+4,ns);
+    sc_s32(buf,hn2+en+8,s.*.cslots);
+    let out2:[]u8=sc_alloc(32);
+    if(out2.len==0){return -1;}
+    if(ns_sha256(buf,out2)!=0){return -2;}
+    let sl:[]u8=s.*.seal;
+    i2=0;
+    while(i2<32){
+        if(out2[i2]!=sl[i2]){return 2;} // TAMPER in event log/metadata
+        i2=i2+1;
+    }
+    return 0;
+}
+
+// ---------- slot access ----------
+// meta layout (both fill_buf and compact chunks): clock_delta i16 @0,
+// flags u8 @2, spare u8 @3.
+fn sc_meta_off(s:*ScStore,c:i32,k:i32,sealed_w:i32)i32 {
+    // sealed_w<0 => filling chunk (fill_buf layout)
+    if(sealed_w<0){return s.*.cslots*8+k*4;}
+    return s.*.cslots*sealed_w+k*4;
+}
+fn sc_flags(s:*ScStore,slot:i32)i32 {
+    let cs:i32=s.*.cslots;
+    let c:i32=slot/cs;
+    let k:i32=slot%cs;
+    if(c==s.*.nsealed){
+        return (s.*.fill_buf[cs*8+k*4+2] as i32)&255;
+    }
+    let wtag:i32=(s.*.widths[c] as i32)&255;
+    let w:i32=wtag&15;
+    let ch:[]u8=sc_slot_chunk(s,c);
+    return (ch[cs*w+k*4+2] as i32)&255;
+}
+fn sc_is_tombstoned(s:*ScStore,slot:i32)i32 {
+    if((sc_flags(s,slot)&S5_FLAG_TOMBSTONE)!=0){return 1;}
+    return 0;
+}
+fn sc_read_value(s:*ScStore,slot:i32)i64 {
+    let cs:i32=s.*.cslots;
+    let c:i32=slot/cs;
+    let k:i32=slot%cs;
+    if(c==s.*.nsealed){
+        return sc_g64(s.*.fill_buf,(k*8) as i64);
+    }
+    let wtag:i32=(s.*.widths[c] as i32)&255;
+    let w:i32=wtag&15;
+    let sg:i32=0;
+    if((wtag&16)!=0){sg=1;}
+    let ch:[]u8=sc_slot_chunk(s,c);
+    return sc_rval(ch,k*w,w,sg);
+}
+// recall stored value for id; returns 1 if found (value via out),
+// 0 if never added or tombstoned (deleted).
+fn sc_recall(s:*ScStore,id:i32,out:*i64)i32 {
+    let slot:i32=sc_id2slot(s,id);
+    if(slot<0){return 0;}
+    if(sc_is_tombstoned(s,slot)==1){return 0;}
+    out.*=sc_read_value(s,slot);
+    return 1;
+}
+// deliberate add. rc: 0 ok, 1 dupe, 2 cap, 3 gate-closed.
+fn sc_add(s:*ScStore,id:i32,v:i64,out_slot:*i32)i32 {
+    if(s.*.learn_gate==0){
+        sc_event_append(s,1,s.*.n,3,id); // S4: gate failure -> event
+        return 3;
+    }
+    let dupe:i32=sc_id2slot(s,id);
+    s.*.ops_find=s.*.ops_find+1;
+    if(dupe>=0){
+        sc_event_append(s,1,s.*.n,1,id); // S4: dupe failure -> event
+        return 1;
+    }
+    let n:i32=s.*.n;
+    if(n>=s.*.cap){
+        sc_event_append(s,1,s.*.n,2,id); // S4: cap failure -> event
+        return 2;
+    }
+    let cs:i32=s.*.cslots;
+    let fb:[]u8=s.*.fill_buf;
+    let cn:i32=n/cs;
+    let r2:i32=n%cs;
+    sc_s64(fb,(r2*8) as i64,v);
+    let mo2:i32=cs*8+r2*4;
+    let ckb2:[]u8=s.*.clkbase;
+    let base:i32=sc_g32(ckb2,cn*4);
+    if(base==-1){ base=s.*.clock; sc_s32(ckb2,cn*4,base); }
+    sc_s16(fb,mo2,s.*.clock-base);
+    fb[mo2+2]=0; // flags
+    fb[mo2+3]=0; // spare
+    s.*.n=n+1;
+    s.*.ops_add=s.*.ops_add+1;
+    out_slot.*=n;
+    // S4 H1: successful add writes NO audit record (derivable from slot).
+    // S5: compact+seal the chunk when it fills.
+    if((n+1)%cs==0){
+        sc_compact_and_seal(s,cn,cs);
+    }
+    return 0;
+}
+// deliberate revise. rc: 0 ok, 1 absent, 2 already deleted, 3 internal error.
+// The old value is carried in the event log (2 records); the slot bytes are
+// rewritten in place. If the new value overflows the chunk's tagged width,
+// the chunk is re-sealed wider and the chain re-hashed from that chunk.
+fn sc_revise(s:*ScStore,id:i32,new_v:i64)i32 {
+    let slot:i32=sc_id2slot(s,id);
+    if(slot<0){return 1;}
+    if(sc_is_tombstoned(s,slot)==1){return 2;}
+    let old_v:i64=sc_read_value(s,slot);
+    if(old_v==new_v){return 0;} // no-op revise: nothing to record
+    let cs:i32=s.*.cslots;
+    let c:i32=slot/cs;
+    let k:i32=slot%cs;
+    // stamp clock delta
+    let base:i32=sc_g32(s.*.clkbase,c*4);
+    let delta:i32=s.*.clock-base;
+    if(c==s.*.nsealed){
+        // filling chunk: 8B values, always fits
+        sc_s64(s.*.fill_buf,(k*8) as i64,new_v);
+        sc_s16(s.*.fill_buf,cs*8+k*4,delta);
+    }else{
+        let wtag:i32=(s.*.widths[c] as i32)&255;
+        let w:i32=wtag&15;
+        let sg:i32=0;
+        if((wtag&16)!=0){sg=1;}
+        if(sc_fits(new_v,w,sg)==1){
+            let ch:[]u8=sc_slot_chunk(s,c);
+            sc_wval(ch,k*w,new_v,w);
+            sc_s16(ch,cs*w+k*4,delta);
+        }else{
+            // width overflow: re-seal the chunk wider with the new value
+            // staged in (compaction without rehash; single rehash below).
+            if(sc_reseal_chunk_ovr(s,c,slot,new_v)!=0){return 3;}
+        }
+    }
+    if(sc_revise_event(s,s.*.n,slot,old_v,new_v,s.*.clock)!=0){return 3;}
+    // Note: chunk hash NOT refreshed here (deferred to sc_seal_final).
+    // The manifest is only valid after seal; the bytes are the truth.
+    s.*.ops_rev=s.*.ops_rev+1;
+    return 0;
+}
+// re-seal chunk c with slot ovr_slot forced to ovr_v (for revise overflow).
+// Hash deferred to sc_seal_final (bulk).
+fn sc_reseal_chunk_ovr(s:*ScStore,c:i32,ovr_slot:i32,ovr_v:i64)i32 {
+    let cs:i32=s.*.cslots;
+    let old:[]u8=sc_slot_chunk(s,c);
+    let wtag:i32=(s.*.widths[c] as i32)&255;
+    let ow:i32=wtag&15;
+    let osigned:i32=0;
+    if((wtag&16)!=0){osigned=1;}
+    let omoff:i32=cs*ow;
+    let count:i32=cs;
+    if(c==s.*.nsealed-1){
+        let rem:i32=s.*.n-c*cs;
+        if(rem<count){count=rem;}
+    }
+    let mn:i64=ovr_v; let mx:i64=ovr_v;
+    let k:i32=0;
+    while(k<count){
+        let v:i64=sc_rval(old,k*ow,ow,osigned);
+        let kk:i32=c*cs+k;
+        if(kk==ovr_slot){v=ovr_v;}
+        if(v<mn){mn=v;}
+        if(v>mx){mx=v;}
+        k=k+1;
+    }
+    let nwtag:i32=sc_pick_width(mn,mx);
+    let nw:i32=nwtag&15;
+    let cc:[]u8=sc_alloc(cs*(nw+4));
+    if(cc.len==0){return -1;}
+    let moff:i32=cs*nw;
+    k=0;
+    while(k<count){
+        let v:i64=sc_rval(old,k*ow,ow,osigned);
+        let kk2:i32=c*cs+k;
+        if(kk2==ovr_slot){v=ovr_v;}
+        sc_wval(cc,k*nw,v,nw);
+        cc[moff+k*4]=old[omoff+k*4];cc[moff+k*4+1]=old[omoff+k*4+1];
+        cc[moff+k*4+2]=old[omoff+k*4+2];cc[moff+k*4+3]=old[omoff+k*4+3];
+        k=k+1;
+    }
+    // re-stamp the revised slot's clock delta
+    let base:i32=sc_g32(s.*.clkbase,c*4);
+    let kk3:i32=ovr_slot-c*cs;
+    let d:i32=s.*.clock-base;
+    cc[moff+kk3*4]=(d&255) as u8;
+    cc[moff+kk3*4+1]=((d>>8)&255) as u8;
+    let cptrs:[]u8=s.*.chunk_ptrs;
+    sc_s64(cptrs,c*8,_zag_slice_ptr(cc) as i64);
+    s.*.widths[c]=nwtag as u8;
+    return 0;
+}
+// deliberate delete. rc: 0 ok, 1 absent, 2 already deleted.
+// Tombstone: flag bit set in slot meta; value bytes RETAINED (the price of a
+// derivable audit; physical compaction is a separate fork). Slot not reused.
+fn sc_delete(s:*ScStore,id:i32)i32 {
+    let slot:i32=sc_id2slot(s,id);
+    if(slot<0){return 1;}
+    if(sc_is_tombstoned(s,slot)==1){return 2;}
+    let cs:i32=s.*.cslots;
+    let c:i32=slot/cs;
+    let k:i32=slot%cs;
+    if(c==s.*.nsealed){
+        let fb:[]u8=s.*.fill_buf;
+        fb[cs*8+k*4+2]=fb[cs*8+k*4+2]|(S5_FLAG_TOMBSTONE as u8);
+    }else{
+        let wtag:i32=(s.*.widths[c] as i32)&255;
+        let w:i32=wtag&15;
+        let ch:[]u8=sc_slot_chunk(s,c);
+        let mo:i32=cs*w+k*4+2;
+        ch[mo]=ch[mo]|(S5_FLAG_TOMBSTONE as u8);
+    }
+    if(sc_event_append(s,S5_EV_DELETE,s.*.n,slot,s.*.clock)!=0){return 1;}
+    // Note: chunk hash NOT refreshed here (deferred to sc_seal_final).
+    s.*.ops_del=s.*.ops_del+1;
+    return 0;
+}
+// live (non-tombstoned) fact count
+fn sc_live_count(s:*ScStore)i32 {
+    let live:i32=0;
+    let id:i32=0;
+    while(id<s.*.n){
+        if(sc_is_tombstoned(s,id)==0){live=live+1;}
+        id=id+1;
+    }
+    return live;
+}
+// ---------- derived-audit replay check ----------
+// Proves the S4 contract holds under mutation: every revise event's new value
+// matches the slot bytes; every delete event matches a tombstone flag; every
+// tombstoned slot has a delete event; live recall matches the replay.
+// Returns 0 = consistent, >0 = first inconsistency class found.
+fn sc_replay_check(s:*ScStore)i32 {
+    let n:i32=s.*.n;
+    // side arrays: last revise new value + seen flag per slot; delete seen
+    let rev_seen:[]u8=sc_alloc(n);
+    if(rev_seen.len==0&&n>0){return 98;}
+    let rev_new:[]u8=sc_alloc(n*8);
+    if(rev_new.len==0&&n>0){return 98;}
+    let del_seen:[]u8=sc_alloc(n);
+    if(del_seen.len==0&&n>0){return 98;}
+    let ei:i32=0;
+    while(ei<s.*.events_n){
+        let ev:[]u8=s.*.events;
+        let o:i32=ei*20;
+        let tag:i32=(ev[o] as i32)&255;
+        if(tag==S5_EV_REVISE_HEAD){
+            let slot:i32=sc_g32(ev,o+5);
+            if(slot<0||slot>=n){return 1;}
+            let o2:i32=(ei+1)*20;
+            if(ei+1>=s.*.events_n){return 2;}
+            if(((ev[o2] as i32)&255)!=S5_EV_REVISE_CONT){return 3;}
+            let new_lo:i64=(sc_g32(ev,o2+5) as i64)&4294967295;
+            let new_hi:i64=sc_g32(ev,o2+9) as i64;
+            let new_v:i64=new_lo|(new_hi<<32);
+            rev_seen[slot]=1;
+            sc_s64(rev_new,(slot*8) as i64,new_v);
+            ei=ei+1; // consume cont record
+        }else{
+            if(tag==S5_EV_DELETE){
+                let slot2:i32=sc_g32(ev,o+5);
+                if(slot2<0||slot2>=n){return 4;}
+                del_seen[slot2]=1;
+            }
+        }
+        ei=ei+1;
+    }
+    // cross-check against slot bytes
+    let id:i32=0;
+    while(id<n){
+        let tomb:i32=sc_is_tombstoned(s,id);
+        if(del_seen[id]==1){
+            if(tomb==0){return 5;} // delete event but no tombstone
+        }else{
+            if(tomb==1){return 6;} // tombstone but no delete event
+        }
+        if(rev_seen[id]==1){
+            let want:i64=sc_g64(rev_new,(id*8) as i64);
+            let got:i64=sc_read_value(s,id);
+            if(got!=want){return 7;} // revise event disagrees with slot bytes
+        }
+        // live recall consistency
+        let v:i64=0;
+        let found:i32=sc_recall(s,id,&v);
+        if(tomb==1){
+            if(found!=0){return 8;}
+        }else{
+            if(found!=1){return 9;}
+            if(rev_seen[id]==1){
+                let want2:i64=sc_g64(rev_new,(id*8) as i64);
+                if(v!=want2){return 10;}
+            }
+        }
+        id=id+1;
+    }
+    return 0;
+}
+// ---------- accounting (written basis, per A1.1) ----------
+// total written bytes: used slot bytes + widths + clkbase + chashes + events + seal
+fn sc_written_bytes(s:*ScStore)i64 {
+    let cs:i32=s.*.cslots;
+    let sb:i64=0;
+    let c:i32=0;
+    while(c<s.*.nsealed){
+        sb=sb+sc_chunk_used(s,c) as i64;
+        c=c+1;
+    }
+    // filling chunk (if partial): used slots at 12B in fill_buf
+    let frem:i32=s.*.n-s.*.nsealed*cs;
+    if(frem<0){frem=0;}
+    if(frem>cs){frem=cs;}
+    sb=sb+(frem*12) as i64;
+    sb=sb+(s.*.nchunks) as i64;      // widths: 1B/chunk
+    sb=sb+(s.*.nchunks*4) as i64;    // clkbase: 4B/chunk
+    sb=sb+(s.*.nsealed*32) as i64;   // chunk hashes (flat manifest)
+    sb=sb+(s.*.events_n*20) as i64;  // event log
+    sb=sb+32;                        // final seal
+    return sb;
+}
+// deterministic digest over logical state: (id, found, value) for all ids.
+// Chunk-size-independent: the chunked==unchunked equivalence proof compares this.
+fn sc_digest(s:*ScStore)i64 {
+    let hh:i64=1469598103934665603;
+    let id:i32=0;
+    while(id<s.*.n){
+        let v:i64=0;
+        let found:i32=sc_recall(s,id,&v);
+        let x:i64=(id as i64)*1000003+v+1;
+        if(found==0){x=x^0xDEADBEEF;}
+        hh=hh^x;
+        hh=hh*1099511628211;
+        id=id+1;
+    }
+    return hh;
+}

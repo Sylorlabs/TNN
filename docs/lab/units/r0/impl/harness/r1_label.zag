@@ -1,0 +1,310 @@
+// r1_label.zag — R-1 "grounded consequence" reference implementation.
+// PREREG_FREEZE §2 R0.4 / §0 R-1 (LOAD-BEARING): for text/code byte streams, a
+// span OCCURRENCE's consequence label = (a) recall success of the span in a
+// probe episode + (b) downstream discrimination consistency (the span's
+// presence predicts the same probe outcome across occurrences).
+// purity(span) = majority-label fraction over occurrences.
+//
+// ARCHITECTURE: this module is an AGGREGATION API. The specific probe task and
+// the outcome encoding are NOT invented here — the battery manifest defines
+// the concrete hidden probe and the expected outcome BEFORE execution, and the
+// battery supplies per-occurrence observations (recall_success 0/1,
+// probe_outcome 0/1). This module contributes what R-1 freezes and nothing
+// more: deterministic byte-span grouping, exact occurrence accounting, and
+// the label/purity aggregation:
+//   b = 1 iff probe_outcome agrees across ALL occurrences of the span
+//   label(o_j) = 2*a_j + b  in {0,1,2,3}
+//   purity = majority-label fraction (millipoints)
+// Singleton spans (k < 2) are not labeled.
+//
+// AMBIGUITY FLAG (documented, not silently resolved): the frozen R-1 text does
+// not specify the concrete probe task or the outcome encoding; this module
+// takes observations as input. Any battery that wires a specific probe task
+// must record it in its preregistered manifest before execution.
+//
+// R-7 test-both: purity mode 0 = majority-label (frozen default);
+// mode 1 = recall-only variant (majority over a alone). The mode is an input;
+// varying it is a test-both leg, not a redefinition.
+//
+// TOOLCHAIN NOTE (ZNC-2026-09-19-001 / ZNC-2026-09-21-004): 3+ sequential
+// []i32/[]i64 stores corrupt. All tables here are []u8-backed LE cells
+// (hc_le32_set/get, hc_le64_set/get). See driver.zag STORESEQ probe.
+//
+// Scope note: this reference implementation runs on probe-scale units
+// (<= 2^20 bytes). Full-corpus labeling is done per probe episode by the
+// battery crews, never as one 9MB pass.
+@import("harness_common.zag")
+
+const R1_MIN_LEN:i32=3;
+const R1_LMAX:i32=64;
+const R1_MAX_DISTINCT:i32=65536;
+const R1_MAX_OCC:i32=1024;
+
+// hash-table slot layout (stride 24, []u8 cells):
+//   content hash u64 @0, len i32 @8, first start i32 @12, count i32 @16
+const R1_SLOT_STRIDE:i32=24;
+const R1_PURITY_MAJORITY:i32=0;  // frozen default
+const R1_PURITY_RECALL_ONLY:i32=1; // R-7 test-both leg
+
+struct R1Params {
+    min_len:i32,
+    lmax:i32
+}
+fn r1_default_params()R1Params {
+    return R1Params{.min_len=R1_MIN_LEN,.lmax=R1_LMAX};
+}
+
+struct R1Table {
+    slots:[]u8,    // R1_MAX_DISTINCT * 24 bytes
+    n:i32,         // distinct inserted
+    truncated:i32  // 1 if table filled before scan completed
+}
+
+fn r1_fnv(data:[]u8) i64 {
+    let h:i64=1469598103934665603;
+    let i:i32=0;
+    while(i<data.len){
+        h=h^(data[i] as i64);h=h*1099511628211;i=i+1;
+    }
+    return h;
+}
+
+fn r1_slot_hash(t:[]u8,slot:i32)i64 { return hc_le64_get(t,slot*R1_SLOT_STRIDE); }
+fn r1_slot_len(t:[]u8,slot:i32)i32 { return hc_le32_get(t,slot*R1_SLOT_STRIDE+8); }
+fn r1_slot_first(t:[]u8,slot:i32)i32 { return hc_le32_get(t,slot*R1_SLOT_STRIDE+12); }
+fn r1_slot_count(t:[]u8,slot:i32)i32 { return hc_le32_get(t,slot*R1_SLOT_STRIDE+16); }
+fn r1_slot_set(t:[]u8,slot:i32,h:i64,len:i32,first:i32,count:i32)void {
+    // []u8 cell writes only — no multi-store []i32/[]i64 sequences
+    hc_le64_set(t,slot*R1_SLOT_STRIDE,h);
+    hc_le32_set(t,slot*R1_SLOT_STRIDE+8,len);
+    hc_le32_set(t,slot*R1_SLOT_STRIDE+12,first);
+    hc_le32_set(t,slot*R1_SLOT_STRIDE+16,count);
+}
+
+fn r1_table_new()R1Table {
+    let s:[]u8=nio_alloc(R1_MAX_DISTINCT*R1_SLOT_STRIDE);
+    if(s.len==R1_MAX_DISTINCT*R1_SLOT_STRIDE){
+        // empty marker: hash = -1 (all bytes 0xFF)
+        let i:i32=0;while(i<s.len){s[i]=255;i=i+1;}
+    }
+    return R1Table{.slots=s,.n=0,.truncated=0};
+}
+
+// Deterministic scan: positions ascending, lengths ascending.
+// Returns number of distinct spans.
+fn r1_enumerate(t:*R1Table,S:[]u8,p:*R1Params)i32 {
+    let tab:[]u8=t.*.slots;
+    if(tab.len!=R1_MAX_DISTINCT*R1_SLOT_STRIDE){return -1;}
+    let n:i32=S.len;
+    let i:i32=0;
+    while(i<=n-p.*.min_len){
+        let lmax:i32=p.*.lmax;
+        if(i+lmax>n){lmax=n-i;}
+        let L:i32=p.*.min_len;
+        while(L<=lmax){
+            let h:i64=r1_fnv(S[i..(i+L)]);
+            let slot:i32=((h%R1_MAX_DISTINCT) as i32);
+            if(slot<0){slot=-slot;}
+            // open addressing; verify by full byte compare on hit
+            let guard:i32=0;
+            while(guard<R1_MAX_DISTINCT){
+                if(r1_slot_hash(tab,slot)==-1){
+                    if(t.*.n<R1_MAX_DISTINCT){
+                        r1_slot_set(tab,slot,h,L,i,1);
+                        t.*.n=t.*.n+1;
+                    }else{t.*.truncated=1;}
+                    guard=R1_MAX_DISTINCT;
+                } else {
+                    if(r1_slot_hash(tab,slot)==h && r1_slot_len(tab,slot)==L){
+                        let f:i32=r1_slot_first(tab,slot);
+                        if(nio_equal(S[i..(i+L)],S[f..(f+L)])==1){
+                            r1_slot_set(tab,slot,h,L,f,r1_slot_count(tab,slot)+1);
+                            guard=R1_MAX_DISTINCT;
+                        } else {slot=slot+1;if(slot>=R1_MAX_DISTINCT){slot=0;}guard=guard+1;}
+                    } else {slot=slot+1;if(slot>=R1_MAX_DISTINCT){slot=0;}guard=guard+1;}
+                }
+            }
+            L=L+1;
+        }
+        i=i+1;
+    }
+    return t.*.n;
+}
+
+// Collect occurrence offsets (ascending) of the span at table index idx.
+// out is []u8-backed LE i32 cells holding R1_MAX_OCC offsets; returns the
+// occurrence count, or -1 on bad index. trunc is set to 1 via the out-param
+// slot R1_MAX_OCC (cell past the offset region) if the cap was hit.
+fn r1_find_occurrences(t:*R1Table,idx:i32,S:[]u8,out:[]u8)i32 {
+    let tab:[]u8=t.*.slots;
+    if(idx<0 || idx>=R1_MAX_DISTINCT || r1_slot_hash(tab,idx)==-1){return -1;}
+    let len:i32=r1_slot_len(tab,idx);
+    let first:i32=r1_slot_first(tab,idx);
+    let no:i32=0;
+    let i:i32=0;
+    while(i+len<=S.len && no<R1_MAX_OCC){
+        if(nio_equal(S[i..(i+len)],S[first..(first+len)])==1){
+            hc_le32_set(out,no*4,i);no=no+1;
+        }
+        i=i+1;
+    }
+    if(i+len<=S.len){hc_le32_set(out,R1_MAX_OCC*4,1);}else{hc_le32_set(out,R1_MAX_OCC*4,0);}
+    return no;
+}
+
+// Find the table slot of a literal span content. Returns slot or -1.
+fn r1_find_span(t:*R1Table,S:[]u8,content:[]u8) i32 {
+    let tab:[]u8=t.*.slots;
+    let h:i64=r1_fnv(content);
+    let slot:i32=((h%R1_MAX_DISTINCT) as i32);
+    if(slot<0){slot=-slot;}
+    let guard:i32=0;
+    while(guard<R1_MAX_DISTINCT){
+        if(r1_slot_hash(tab,slot)==-1){return -1;}
+        if(r1_slot_hash(tab,slot)==h && r1_slot_len(tab,slot)==content.len){
+            let f:i32=r1_slot_first(tab,slot);
+            if(nio_equal(S[f..(f+content.len)],content)==1){return slot;}
+        }
+        slot=slot+1;if(slot>=R1_MAX_DISTINCT){slot=0;}guard=guard+1;
+    }
+    return -1;
+}
+
+struct R1SpanReport {
+    len:i32,
+    count:i32,
+    b:i32,          // discrimination consistency (span-level): 0/1
+    c0:i32, c1:i32, c2:i32, c3:i32,  // label counts: label = a*2+b
+    purity_milli:i64,
+    mode:i32
+}
+
+// Aggregate one span's battery-supplied probe observations.
+//   rec[j]  = recall success (0/1) of occurrence j in its probe episode,
+//             as []u8-backed LE i32 cells
+//   outc[j] = downstream probe outcome (0/1) for occurrence j, per the
+//             battery's preregistered manifest (probe task + expected
+//             outcome recorded before execution), as LE i32 cells
+//   n       = occurrence count (must be >= 2; singletons are not labeled)
+//   mode    = R1_PURITY_MAJORITY (frozen) or R1_PURITY_RECALL_ONLY (R-7 leg)
+// b = 1 iff probe_outcome is identical across all occurrences.
+// Cell arrays (not []i32) keep every indexed store in the []u8-safe pattern.
+fn r1_aggregate(rec:[]u8,outc:[]u8,n:i32,len:i32,mode:i32)R1SpanReport {
+    let rep:R1SpanReport=R1SpanReport{.len=len,.count=n,.b=0,.c0=0,.c1=0,
+        .c2=0,.c3=0,.purity_milli=0,.mode=mode};
+    if(n<2){return rep;}
+    let b:i32=1;
+    let j:i32=1;
+    while(j<n){
+        if(hc_le32_get(outc,j*4)!=hc_le32_get(outc,0)){b=0;}
+        j=j+1;
+    }
+    rep.b=b;
+    let na1:i32=0; // recall-only tally (R-7 leg)
+    j=0;
+    while(j<n){
+        let a:i32=0;if(hc_le32_get(rec,j*4)==1){a=1;na1=na1+1;}
+        let lab:i32=a*2+b;
+        if(lab==0){rep.c0=rep.c0+1;}
+        if(lab==1){rep.c1=rep.c1+1;}
+        if(lab==2){rep.c2=rep.c2+1;}
+        if(lab==3){rep.c3=rep.c3+1;}
+        j=j+1;
+    }
+    if(mode==R1_PURITY_RECALL_ONLY){
+        let m:i32=na1;if(n-na1>m){m=n-na1;}
+        rep.purity_milli=(m as i64)*1000/(n as i64);
+    } else {
+        let m:i32=rep.c0;
+        if(rep.c1>m){m=rep.c1;}if(rep.c2>m){m=rep.c2;}if(rep.c3>m){m=rep.c3;}
+        rep.purity_milli=(m as i64)*1000/(n as i64);
+    }
+    return rep;
+}
+
+fn r1_table_free(t:*R1Table)void {
+    nio_free(t.*.slots);
+    t.*.n=0;
+}
+
+// r1_test: deterministic aggregation test. The "battery manifest" is hardcoded
+// below as the preregistered probe definition + per-occurrence observations;
+// the test verifies grouping exactness and aggregation math against hand-
+// computed expectations. Returns fail count (0 = pass).
+fn r1_test()i32 {
+    let fails:i32=0;
+    // S = "abcababcab": spans "ab"@[0,3,5,8], "bc"@[1,6], "cab"@[2,7]
+    let S:[]u8="abcababcab";
+    let params:R1Params=R1Params{.min_len=2,.lmax=4};
+    let t:R1Table=r1_table_new();
+    let nd:i32=r1_enumerate(&t,S,&params);
+    if(nd<3){fails=fails+1;}
+    if(t.truncated!=0){fails=fails+1;}
+    let occ:[]u8=nio_alloc(R1_MAX_OCC*4+4);
+
+    // --- case 1: "ab", 4 occurrences, outcomes agree -> b=1
+    let ab:[]u8="ab";
+    let slot:i32=r1_find_span(&t,S,ab);
+    if(slot<0){fails=fails+1;}
+    let n_ab:i32=r1_find_occurrences(&t,slot,S,occ);
+    if(n_ab!=4){fails=fails+1;}
+    if(hc_le32_get(occ,0)!=0||hc_le32_get(occ,4)!=3||hc_le32_get(occ,8)!=5||hc_le32_get(occ,12)!=8){fails=fails+1;}
+    // manifest M1: recall=[1,1,0,0], outcome=[1,1,1,1] ([]u8 LE cells)
+    let rec1:[]u8=nio_alloc(16);let out1:[]u8=nio_alloc(16);
+    hc_le32_set(rec1,0,1);hc_le32_set(rec1,4,1);hc_le32_set(rec1,8,0);hc_le32_set(rec1,12,0);
+    hc_le32_set(out1,0,1);hc_le32_set(out1,4,1);hc_le32_set(out1,8,1);hc_le32_set(out1,12,1);
+    let r1:R1SpanReport=r1_aggregate(rec1,out1,4,2,R1_PURITY_MAJORITY);
+    // labels: 3,3,1,1 -> c1=2,c3=2, b=1, purity=500
+    if(r1.b!=1||r1.c1!=2||r1.c3!=2||r1.c0!=0||r1.c2!=0){fails=fails+1;}
+    if(r1.purity_milli!=500){fails=fails+1;}
+    let r1r:R1SpanReport=r1_aggregate(rec1,out1,4,2,R1_PURITY_RECALL_ONLY);
+    if(r1r.purity_milli!=500){fails=fails+1;} // recall-only: 2 ok / 2 fail
+    nio_free(rec1);nio_free(out1);
+
+    // --- case 2: "bc", 2 occurrences, outcomes disagree -> b=0
+    let bc:[]u8="bc";
+    slot=r1_find_span(&t,S,bc);
+    if(slot<0){fails=fails+1;}
+    let n_bc:i32=r1_find_occurrences(&t,slot,S,occ);
+    if(n_bc!=2){fails=fails+1;}
+    if(hc_le32_get(occ,0)!=1||hc_le32_get(occ,4)!=6){fails=fails+1;}
+    // manifest M2: recall=[1,0], outcome=[1,0]
+    let rec2:[]u8=nio_alloc(8);let out2:[]u8=nio_alloc(8);
+    hc_le32_set(rec2,0,1);hc_le32_set(rec2,4,0);
+    hc_le32_set(out2,0,1);hc_le32_set(out2,4,0);
+    let r2:R1SpanReport=r1_aggregate(rec2,out2,2,2,R1_PURITY_MAJORITY);
+    // labels: 2*1+0=2, 2*0+0=0 -> c2=1,c0=1, b=0, purity=500
+    if(r2.b!=0||r2.c2!=1||r2.c0!=1){fails=fails+1;}
+    if(r2.purity_milli!=500){fails=fails+1;}
+    nio_free(rec2);nio_free(out2);
+
+    // --- case 3: "cab", 2 occurrences, unanimous -> purity 1000
+    let cab:[]u8="cab";
+    slot=r1_find_span(&t,S,cab);
+    if(slot<0){fails=fails+1;}
+    let n_cab:i32=r1_find_occurrences(&t,slot,S,occ);
+    if(n_cab!=2){fails=fails+1;}
+    if(hc_le32_get(occ,0)!=2||hc_le32_get(occ,4)!=7){fails=fails+1;}
+    // manifest M3: recall=[1,1], outcome=[0,0]
+    let rec3:[]u8=nio_alloc(8);let out3:[]u8=nio_alloc(8);
+    hc_le32_set(rec3,0,1);hc_le32_set(rec3,4,1);
+    hc_le32_set(out3,0,0);hc_le32_set(out3,4,0);
+    let r3:R1SpanReport=r1_aggregate(rec3,out3,2,3,R1_PURITY_MAJORITY);
+    // labels: 2*1+1=3, 2*1+1=3 -> c3=2, b=1, purity=1000
+    if(r3.b!=1||r3.c3!=2||r3.purity_milli!=1000){fails=fails+1;}
+    nio_free(rec3);nio_free(out3);
+
+    // --- case 4: singleton spans are not labeled
+    let rec4:[]u8=nio_alloc(4);let out4:[]u8=nio_alloc(4);
+    hc_le32_set(rec4,0,1);hc_le32_set(out4,0,1);
+    let rs:R1SpanReport=r1_aggregate(rec4,out4,1,2,R1_PURITY_MAJORITY);
+    if(rs.c0+rs.c1+rs.c2+rs.c3!=0||rs.purity_milli!=0){fails=fails+1;}
+    nio_free(rec4);nio_free(out4);
+
+    nio_free(occ);
+    r1_table_free(&t);
+    _zag_print("R1_TEST,distinct=");hc_num(nd as i64);
+    _zag_print(",fails=");hc_num(fails as i64);_zag_println("");
+    _zag_println("R1_TEST,case,ab(b=1,c1=2,c3=2,pur=500),bc(b=0,c0=1,c2=1,pur=500),cab(b=1,c3=2,pur=1000)");
+    return fails;
+}

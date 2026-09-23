@@ -1,0 +1,1423 @@
+// teacher.zag — Arm 3 Variation A: deliberative adaptive teacher (teacher_id=3).
+//
+// A pure-Zag teacher whose (spec, stimulus, history) -> proposal mapping lives
+// ENTIRELY in the teacher. Per-session fixed-size deterministic state (SPEC.md
+// section 3); no RNG, no wallclock, no learning machinery, no cross-session
+// state. Reads STUDENT_DECISION events as history input; every proposal is a
+// pure function of (spec, stimulus cursor, history buffer).
+//
+// Modes:
+//   teach <script> <tape> [heapfill]  -- run a session; optional heapfill
+//                                        pattern = adversarial heap perturbation
+//   test                              -- self-tests (ported §P/§C batteries +
+//                                        policy unit tests on the real policy fns)
+// Exit codes: 0 clean END; 1..10 §P iron-rule self-violation (unreachable by
+// construction; INTEGRITY + halt if ever hit); 11 §C tripwire fired;
+// 12 incomplete (no END); 13 script/IO error.
+//
+// Script grammar (NO proposal directives exist — proposals cannot be scripted):
+//   SESSION <session_id:u64> <stim_len:u64>
+//   STIMFILE <gt_file>            (only the S stimulus bytes are read; U lines ignored)
+//   D <seq:u64> <ADOPT|REVISE|REJECT|DEFER> [reason:u16] [rev_start:u64 rev_end:u64]
+//   TURN <n:u64>
+//   END
+@import("sp345.zag")
+
+// ================= proposal descriptor (128 B, []u8 arena) =================
+// @0 kind u8 | @1 conf u8 | @2 appeals_used u8 | @3 flags u8 |
+// @8 span_s u64 | @16 span_e u64 | @24 aux_n u8 | @25 ground_n u8 |
+// @32 aux pairs (3x16) | @80 ground pairs (3x16)
+fn dd_new()[]u8 {
+    let d:[]u8=nio_alloc(128);
+    let i:i32=0;while(i<128){d[i]=0;i=i+1;}
+    return d;
+}
+fn dg_kind(d:[]u8)i32 {return d[0] as i32;}
+fn dg_conf(d:[]u8)i32 {return d[1] as i32;}
+fn dg_appeals(d:[]u8)i32 {return d[2] as i32;}
+fn dg_flags(d:[]u8)i32 {return d[3] as i32;}
+fn dg_s(d:[]u8)i64 {return t345_get64(d,8);}
+fn dg_e(d:[]u8)i64 {return t345_get64(d,16);}
+fn dg_auxn(d:[]u8)i32 {return d[24] as i32;}
+fn dg_groundn(d:[]u8)i32 {return d[25] as i32;}
+fn ds_kind(d:[]u8,v:i32)void {d[0]=v as u8;}
+fn ds_conf(d:[]u8,v:i32)void {d[1]=v as u8;}
+fn ds_appeals(d:[]u8,v:i32)void {d[2]=v as u8;}
+fn ds_flags(d:[]u8,v:i32)void {d[3]=v as u8;}
+fn ds_s(d:[]u8,v:i64)void {t345_set64(d,8,v);}
+fn ds_e(d:[]u8,v:i64)void {t345_set64(d,16,v);}
+fn ds_auxn(d:[]u8,v:i32)void {d[24]=v as u8;}
+fn ds_groundn(d:[]u8,v:i32)void {d[25]=v as u8;}
+fn dg_aux_s(d:[]u8,i:i32)i64 {return t345_get64(d,32+i*16);}
+fn dg_aux_e(d:[]u8,i:i32)i64 {return t345_get64(d,32+i*16+8);}
+fn dg_ground_s(d:[]u8,i:i32)i64 {return t345_get64(d,80+i*16);}
+fn dg_ground_e(d:[]u8,i:i32)i64 {return t345_get64(d,80+i*16+8);}
+fn dd_copy(dst:[]u8,src:[]u8)void {
+    let i:i32=0;while(i<128){dst[i]=src[i];i=i+1;}
+}
+// add one aux span; 1 ok, 0 full/invalid
+fn dd_aux_add(d:[]u8,s:i64,e:i64)i32 {
+    let n:i32=dg_auxn(d);
+    if(n>=3 || s<0 || e<=s){return 0;}
+    t345_set64(d,32+n*16,s);t345_set64(d,32+n*16+8,e);
+    ds_auxn(d,n+1);return 1;
+}
+fn dd_ground_add(d:[]u8,s:i64,e:i64)i32 {
+    let n:i32=dg_groundn(d);
+    if(n>=3 || s<0 || e<=s){return 0;}
+    t345_set64(d,80+n*16,s);t345_set64(d,80+n*16+8,e);
+    ds_groundn(d,n+1);return 1;
+}
+
+// ================= session + work state =================
+// TState: session_id, stim_len, seq, cursor, hist_n, dead_n, hist[], dead[]
+struct TState {a:i64,b:i64,c:i64,d:i64,e:i64,f:i64,g:[]u8,h:[]u8}
+fn st_new()*TState {
+    let p:*TState=_zag_malloc(96) as *TState;
+    p[0].a=0;p[0].b=0;p[0].c=0;p[0].d=0;p[0].e=0;p[0].f=0;
+    let h:[]u8=nio_alloc(64*48);let i:i32=0;while(i<64*48){h[i]=0;i=i+1;}
+    p[0].g=h;
+    let dd:[]u8=nio_alloc(64*24);i=0;while(i<64*24){dd[i]=0;i=i+1;}
+    p[0].h=dd;
+    return p;
+}
+fn st_session(p:*TState)i64 {return p[0].a;}
+fn st_stimlen(p:*TState)i64 {return p[0].b;}
+fn st_seq(p:*TState)i64 {return p[0].c;}
+fn st_cursor(p:*TState)i64 {return p[0].d;}
+fn st_histn(p:*TState)i64 {return p[0].e;}
+fn st_set_session(p:*TState,v:i64)void {p[0].a=v;}
+fn st_set_stimlen(p:*TState,v:i64)void {p[0].b=v;}
+fn st_seq_inc(p:*TState)void {p[0].c=p[0].c+1;}
+fn st_set_cursor(p:*TState,v:i64)void {p[0].d=v;}
+// TWork: n_tokens, tok[], n_regions, reg[], agenda[], ag[]
+struct TWork {a:i64,b:[]u8,c:i64,d:[]u8,e:[]u8,f:[]u8}
+fn w_new()*TWork {
+    let p:*TWork=_zag_malloc(128) as *TWork;
+    p[0].a=0;p[0].b="";p[0].c=0;p[0].d="";p[0].e="";p[0].f="";
+    return p;
+}
+
+// history record (48 B): seq@0 s@8 e@16 verdict@24 reason@25 appeals@26 kind@27 rs@32 re@40
+fn hist_append(st:*TState,seq:i64,s:i64,e:i64,verdict:i32,reason:i32,appeals:i32,kind:i32,rs:i64,re:i64)void {
+    let hb:[]u8=st[0].g;
+    let n:i64=st[0].e;
+    if(n>=64){
+        // drop oldest (deterministic shift)
+        let i:i32=0;while(i<63*48){hb[i]=hb[i+48];i=i+1;}
+        n=63;st[0].e=63;
+    }
+    let o:i32=(n as i32)*48;
+    t345_set64(hb,o,seq);t345_set64(hb,o+8,s);t345_set64(hb,o+16,e);
+    hb[o+24]=verdict as u8;hb[o+25]=reason as u8;hb[o+26]=appeals as u8;hb[o+27]=kind as u8;
+    t345_set64(hb,o+32,rs);t345_set64(hb,o+40,re);
+    st[0].e=n+1;
+}
+// dead record (24 B): s@0 e@8 consec@16 dead@17
+fn dead_find(st:*TState,s:i64,e:i64)i32 {
+    let db:[]u8=st[0].h;
+    let i:i64=0;
+    while(i<st[0].f){
+        let o:i32=(i as i32)*24;
+        if(t345_get64(db,o)==s && t345_get64(db,o+8)==e){return i as i32;}
+        i=i+1;
+    }
+    return -1;
+}
+fn dead_get(st:*TState,s:i64,e:i64)i32 {
+    let i:i32=dead_find(st,s,e);
+    if(i>=0){return i;}
+    if(st[0].f>=64){return -1;}
+    let o:i32=(st[0].f as i32)*24;
+    let db:[]u8=st[0].h;
+    t345_set64(db,o,s);t345_set64(db,o+8,e);db[o+16]=0;db[o+17]=0;
+    st[0].f=st[0].f+1;
+    return (st[0].f-1) as i32;
+}
+fn span_dead(st:*TState,s:i64,e:i64)i32 {
+    let i:i32=dead_find(st,s,e);
+    if(i<0){return 0;}
+    let db:[]u8=st[0].h;
+    if(db[i*24+17]==1){return 1;}
+    return 0;
+}
+fn mark_dead(st:*TState,s:i64,e:i64)void {
+    let i:i32=dead_get(st,s,e);
+    if(i<0){return;}
+    let db:[]u8=st[0].h;db[i*24+17]=1;
+}
+fn consec_reset(st:*TState,s:i64,e:i64)void {
+    let i:i32=dead_find(st,s,e);
+    if(i<0){return;}
+    let db:[]u8=st[0].h;db[i*24+16]=0;
+}
+// §B.5 two-consecutive rule, enforced in-teacher
+fn final_reject(st:*TState,s:i64,e:i64)void {
+    let i:i32=dead_get(st,s,e);
+    if(i<0){return;}
+    let db:[]u8=st[0].h;
+    let c:i32=(db[i*24+16] as i32)+1;
+    db[i*24+16]=c as u8;
+    if(c>=2){db[i*24+17]=1;}
+}
+
+// region record (50 B): adopt@0 u8 | spans 3x16 @2
+fn rg_adopt(w:*TWork,r:i64)i32 {
+    let rb:[]u8=w[0].d;
+    return rb[(r as i32)*50] as i32;
+}
+fn rg_adopt_inc(w:*TWork,r:i64)void {
+    let rb:[]u8=w[0].d;
+    let o:i32=(r as i32)*50;
+    rb[o]=((rb[o] as i32)+1) as u8;
+}
+fn rg_push(w:*TWork,r:i64,s:i64,e:i64)void {
+    let rb:[]u8=w[0].d;
+    let a:i32=rg_adopt(w,r);
+    let idx:i32=(a-1)%3;
+    let o:i32=(r as i32)*50+2+idx*16;
+    t345_set64(rb,o,s);t345_set64(rb,o+8,e);
+}
+fn rg_last(w:*TWork,r:i64,s:*i64,e:*i64)void {
+    let rb:[]u8=w[0].d;
+    let a:i32=rg_adopt(w,r);
+    let idx:i32=(a-1)%3;
+    let o:i32=(r as i32)*50+2+idx*16;
+    s[0]=t345_get64(rb,o);e[0]=t345_get64(rb,o+8);
+}
+// k = min(adopt,3) most-recent-first spans packed into out (k*16); returns k
+fn rg_list(w:*TWork,r:i64,out:[]u8)i32 {
+    let rb:[]u8=w[0].d;
+    let a:i32=rg_adopt(w,r);
+    let k:i32=a;if(k>3){k=3;}
+    let j:i32=0;
+    while(j<k){
+        let idx:i32=(a-1-j)%3;
+        let o:i32=(r as i32)*50+2+idx*16;
+        t345_set64(out,j*16,t345_get64(rb,o));t345_set64(out,j*16+8,t345_get64(rb,o+8));
+        j=j+1;
+    }
+    return k;
+}
+
+// ================= agenda (8 x 128 B deque, shift-based, no negative indices) =================
+fn ag_count(w:*TWork)i64 {return t345_get64(w[0].f,0);}
+fn ag_set_count(w:*TWork,v:i64)void {t345_set64(w[0].f,0,v);}
+fn ag_init(w:*TWork)void {
+    let ab:[]u8=nio_alloc(8*128);
+    let i:i32=0;while(i<8*128){ab[i]=0;i=i+1;}
+    w[0].e=ab;
+    let cb:[]u8=nio_alloc(16);
+    i=0;while(i<16){cb[i]=0;i=i+1;}
+    w[0].f=cb;
+}
+fn ag_push_back(w:*TWork,d:[]u8)i32 {
+    let n:i64=ag_count(w);
+    if(n>=8){return -1;}
+    let ab:[]u8=w[0].e;
+    let o:i32=(n as i32)*128;
+    let i:i32=0;while(i<128){ab[o+i]=d[i];i=i+1;}
+    ag_set_count(w,n+1);return 0;
+}
+fn ag_push_front(w:*TWork,d:[]u8)i32 {
+    let n:i64=ag_count(w);
+    if(n>=8){return -1;}
+    let ab:[]u8=w[0].e;
+    // shift right by one slot
+    let i:i64=n;
+    while(i>0){
+        let a2:i32=(i as i32)*128;let b2:i32=((i-1) as i32)*128;
+        let j:i32=0;while(j<128){ab[a2+j]=ab[b2+j];j=j+1;}
+        i=i-1;
+    }
+    let j:i32=0;while(j<128){ab[j]=d[j];j=j+1;}
+    ag_set_count(w,n+1);return 0;
+}
+// peek head into out (no pop); 1 ok, 0 empty
+fn ag_peek(w:*TWork,out:[]u8)i32 {
+    if(ag_count(w)<=0){return 0;}
+    let ab:[]u8=w[0].e;
+    let j:i32=0;while(j<128){out[j]=ab[j];j=j+1;}
+    return 1;
+}
+fn ag_pop_head(w:*TWork,out:[]u8)i32 {
+    let n:i64=ag_count(w);
+    if(n<=0){return 0;}
+    let ab:[]u8=w[0].e;
+    let j:i32=0;while(j<128){out[j]=ab[j];j=j+1;}
+    let i:i64=1;
+    while(i<n){
+        let a2:i32=((i-1) as i32)*128;let b2:i32=(i as i32)*128;
+        j=0;while(j<128){ab[a2+j]=ab[b2+j];j=j+1;}
+        i=i+1;
+    }
+    ag_set_count(w,n-1);return 1;
+}
+// drop agenda items whose primary span == (s,e) (kind != RETRACT)
+fn ag_purge_span(w:*TWork,s:i64,e:i64)void {
+    let n:i64=ag_count(w);
+    let ab:[]u8=w[0].e;
+    let i:i64=0;
+    while(i<n){
+        let o:i32=(i as i32)*128;
+        let k:i32=ab[o] as i32;
+        let ps:i64=t345_get64(ab,o+8);let pe:i64=t345_get64(ab,o+16);
+        if(k!=5 && ps==s && pe==e){
+            // shift left over slot i
+            let j:i64=i+1;
+            while(j<n){
+                let a2:i32=((j-1) as i32)*128;let b2:i32=(j as i32)*128;
+                let q:i32=0;while(q<128){ab[a2+q]=ab[b2+q];q=q+1;}
+                j=j+1;
+            }
+            n=n-1;
+        } else { i=i+1; }
+    }
+    ag_set_count(w,n);
+}
+
+// ================= tokenizer: maximal runs of non-space bytes =================
+fn tok_count(stim:[]u8)i64 {
+    let n:i64=0;let i:i32=0;let in_tok:i32=0;
+    while(i<stim.len){
+        if(stim[i]==32){in_tok=0;}
+        else{if(in_tok==0){n=n+1;in_tok=1;}}
+        i=i+1;
+    }
+    return n;
+}
+fn tok_fill(stim:[]u8,tok:[]u8)void {
+    let n:i64=0;let i:i32=0;
+    while(i<stim.len){
+        if(stim[i]!=32){
+            let s:i32=i;
+            while(i<stim.len && stim[i]!=32){i=i+1;}
+            t345_set64(tok,(n as i32)*16,s as i64);
+            t345_set64(tok,(n as i32)*16+8,i as i64);
+            n=n+1;
+        } else { i=i+1; }
+    }
+}
+fn tok_s(w:*TWork,ti:i64)i64 {return t345_get64(w[0].b,(ti as i32)*16);}
+fn tok_e(w:*TWork,ti:i64)i64 {return t345_get64(w[0].b,(ti as i32)*16+8);}
+
+// ================= grounding builders (SPEC §7) =================
+fn g_init(d:[]u8,s:i64,e:i64,sl:i64)void {
+    ds_groundn(d,0);
+    let ls:i64=s-12;if(ls<0){ls=0;}
+    if(s>ls){dd_ground_add(d,ls,s);}
+    let re2:i64=e+12;if(re2>sl){re2=sl;}
+    if(re2>e){dd_ground_add(d,e,re2);}
+}
+fn g_appeal(d:[]u8,s:i64,e:i64,sl:i64,au:i32)void {
+    ds_groundn(d,0);
+    dd_ground_add(d,s,e);
+    if(au==1){
+        let a:i64=s-24;if(a<0){a=0;}
+        if(s>a){dd_ground_add(d,a,s);}
+        let b:i64=e+24;if(b>sl){b=sl;}
+        if(b>e){dd_ground_add(d,e,b);}
+    } else {
+        let a0:i64=s-40;if(a0<0){a0=0;}
+        let a1:i64=s-16;if(a1<0){a1=0;}
+        if(a1>a0){dd_ground_add(d,a0,a1);}
+        let b0:i64=e+16;if(b0>sl){b0=sl;}
+        let b1:i64=e+40;if(b1>sl){b1=sl;}
+        if(b1>b0){dd_ground_add(d,b0,b1);}
+    }
+}
+fn g_defer(d:[]u8,s:i64,e:i64,sl:i64)void {
+    g_init(d,s,e,sl);
+    dd_ground_add(d,s,e);
+}
+
+// ================= proposal builders (SPEC §7) =================
+fn min_i64(a:i64,b:i64)i64 {if(a<b){return a;}return b;}
+fn max_i64(a:i64,b:i64)i64 {if(a>b){return a;}return b;}
+fn build_wordspan(st:*TState,w:*TWork,d:[]u8,ti:i64)void {
+    let s:i64=tok_s(w,ti);let e:i64=tok_e(w,ti);
+    ds_kind(d,1);ds_appeals(d,0);ds_flags(d,0);
+    ds_s(d,s);ds_e(d,e);ds_auxn(d,0);
+    g_init(d,s,e,st[0].b);
+    let tl:i64=e-s;if(tl>16){tl=16;}
+    let c:i32=128+(tl as i32)*4+(dg_groundn(d))*8;
+    ds_conf(d,c);
+}
+fn build_boundary(d:[]u8,e:i64,adopt:i32)void {
+    ds_kind(d,2);ds_appeals(d,0);ds_flags(d,0);
+    ds_s(d,e);ds_e(d,e+1);ds_auxn(d,0);ds_groundn(d,0);
+    let a:i32=adopt;if(a>8){a=8;}
+    ds_conf(d,96+a*8);
+}
+fn build_group_bbox(aux:[]u8,n:i32,bs:*i64,be:*i64)void {
+    let s:i64=t345_get64(aux,0);let e:i64=t345_get64(aux,8);
+    let i:i32=1;
+    while(i<n){
+        let a:i64=t345_get64(aux,i*16);let b:i64=t345_get64(aux,i*16+8);
+        if(a<s){s=a;}if(b>e){e=b;}
+        i=i+1;
+    }
+    bs[0]=s;be[0]=e;
+}
+fn build_group(d:[]u8,aux:[]u8,n:i32,gs:i64,ge:i64,base_conf:i32,per:i32)void {
+    ds_kind(d,3);ds_appeals(d,0);ds_flags(d,0);ds_auxn(d,0);ds_groundn(d,0);
+    let i:i32=0;
+    while(i<n){dd_aux_add(d,t345_get64(aux,i*16),t345_get64(aux,i*16+8));i=i+1;}
+    let bs:i64=0;let be:i64=0;
+    build_group_bbox(aux,n,&bs,&be);
+    ds_s(d,bs);ds_e(d,be);
+    if(gs>=0){dd_ground_add(d,gs,ge);}
+    let nn:i32=n;if(nn>4){nn=4;}
+    ds_conf(d,base_conf+nn*per);
+}
+fn build_sameas(d:[]u8,rs:i64,re:i64,s:i64,e:i64)void {
+    ds_kind(d,4);ds_appeals(d,0);ds_flags(d,0);ds_auxn(d,0);ds_groundn(d,0);
+    ds_s(d,rs);ds_e(d,re);
+    dd_aux_add(d,rs,re);dd_aux_add(d,s,e);
+    dd_ground_add(d,s,e);
+    ds_conf(d,120);
+}
+fn build_retract(d:[]u8,target:i64)void {
+    ds_kind(d,5);ds_appeals(d,0);ds_flags(d,0);
+    ds_s(d,target);ds_e(d,target+1);
+    ds_auxn(d,0);ds_groundn(d,0);ds_conf(d,64);
+}
+fn build_appeal(d:[]u8,old:[]u8,sl:i64,au:i32)void {
+    dd_copy(d,old);
+    ds_appeals(d,au);
+    g_appeal(d,dg_s(d),dg_e(d),sl,au);
+    let c:i32=dg_conf(old)-20;
+    if(c<1){c=1;}
+    ds_conf(d,c);
+}
+fn build_defer_reprop(d:[]u8,old:[]u8,sl:i64)void {
+    dd_copy(d,old);
+    ds_flags(d,dg_flags(old)|1);
+    g_defer(d,dg_s(d),dg_e(d),sl);
+    let c:i32=dg_conf(old)-10;
+    if(c<1){c=1;}
+    ds_conf(d,c);
+}
+
+// ================= next-proposal selection (SPEC §8) =================
+fn next_proposal(st:*TState,w:*TWork,d:[]u8)i32 {
+    let tmp:[]u8=dd_new();
+    while(ag_peek(w,tmp)==1){
+        let k:i32=dg_kind(tmp);
+        if(k!=5 && span_dead(st,dg_s(tmp),dg_e(tmp))==1){
+            let drop:[]u8=dd_new();
+            ag_pop_head(w,drop);nio_free(drop);
+            continue;
+        }
+        ag_pop_head(w,d);
+        nio_free(tmp);
+        return 1;
+    }
+    nio_free(tmp);
+    while(st[0].d<w[0].a){
+        let ti:i64=st[0].d;
+        let s:i64=tok_s(w,ti);let e:i64=tok_e(w,ti);
+        if(span_dead(st,s,e)==1){st[0].d=st[0].d+1;continue;}
+        build_wordspan(st,w,d,ti);
+        return 1;
+    }
+    return 0;
+}
+
+// ================= session helpers =================
+fn cursor_advance(st:*TState,w:*TWork,e:i64)void {
+    let c:i64=st[0].d;
+    while(c<w[0].a){
+        if(tok_s(w,c)>=e){break;}
+        c=c+1;
+    }
+    st[0].d=c;
+}
+fn v_halt(t:*Tape,code:i32,n_prop:i64,tw:*TW,sl:i64,why:[]u8)void {
+    let e:*TBuf=ev_integrity(code,n_prop,tw[0].covered_n,sl,0,0,0,0,0);
+    tape_event(t,7,tbuf_bytes(e));tbuf_free(e);
+    let f:*TBuf=ev_footer(t[0].count,t[0].chain,why);
+    tape_event(t,9,tbuf_bytes(f));tbuf_free(f);
+}
+// emit one proposal: hostile self-check, TEACHER_MSG, tripwire. 0 ok, else exit code.
+fn emit_proposal(st:*TState,t:*Tape,tw:*TW,d:[]u8,n_prop:i64)i32 {
+    let sl:i64=st[0].b;
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=st[0].a;ph[0].seq=st[0].c;
+    ph[0].kind=dg_kind(d);ph[0].span_start=dg_s(d);ph[0].span_end=dg_e(d);
+    ph[0].confidence=dg_conf(d);
+    let pt:*PropT=propt_new();
+    pt[0].aux_count=dg_auxn(d);pt[0].ground_count=dg_groundn(d);
+    let an:i32=dg_auxn(d);
+    if(an>0){
+        let ab:[]u8=nio_alloc(an*16);
+        let i:i32=0;
+        while(i<an){t345_set64(ab,i*16,dg_aux_s(d,i));t345_set64(ab,i*16+8,dg_aux_e(d,i));i=i+1;}
+        pt[0].aux=ab;
+    }
+    let gn:i32=dg_groundn(d);
+    if(gn>0){
+        let gb:[]u8=nio_alloc(gn*16);
+        let i:i32=0;
+        while(i<gn){t345_set64(gb,i*16,dg_ground_s(d,i));t345_set64(gb,i*16+8,dg_ground_e(d,i));i=i+1;}
+        pt[0].ground=gb;
+    }
+    let wire:[]u8=sp_encode(ph,pt);
+    // hostile-path self-check: exactly what the student ingress gate sees
+    let qh:*PropH=proph_new();
+    let qt:*PropT=propt_new();
+    let vc:i32=sp_decode(wire,qh,qt);
+    if(vc==0){vc=sp_validate(qh,qt,st[0].a,st[0].c,sl);}
+    if(vc!=0){
+        // internal policy bug: never emit the violation; INTEGRITY + halt
+        _zag_print("VARA: IRON SELF-VIOLATION code=");_zag_println(_zag_i64_to_str(vc as i64));
+        nio_free(wire);sp_free(pt);sp_free(qt);
+        _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+        v_halt(t,1000+vc,n_prop,tw,sl,"HALTED:VIOLATION");
+        return vc;
+    }
+    tape_event(t,3,wire);
+    let fc:i32=tw_propose(tw,dg_s(d),dg_e(d),dg_conf(d));
+    nio_free(wire);sp_free(pt);sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+    if(fc!=0){
+        _zag_print("VARA: TRIPWIRE FIRED code=");_zag_println(_zag_i64_to_str(fc as i64));
+        v_halt(t,fc,n_prop,tw,sl,"HALTED:TRIPWIRE");
+        return 11;
+    }
+    _zag_print("VARA_PROP,");_zag_print(_zag_i64_to_str(st[0].c));
+    _zag_print(",");_zag_print(_zag_i64_to_str(dg_kind(d) as i64));
+    _zag_print(",");_zag_print(_zag_i64_to_str(dg_s(d)));
+    _zag_print(",");_zag_print(_zag_i64_to_str(dg_e(d)));
+    _zag_print(",");_zag_println(_zag_i64_to_str(dg_conf(d) as i64));
+    st[0].c=st[0].c+1;
+    return 0;
+}
+
+// ================= decision application: the deliberative state machine (SPEC §9) =================
+fn apply_decision(st:*TState,w:*TWork,d:[]u8,seq:i64,verdict:i32,reason:i32,rs:i64,re:i64,has_rev:i32)void {
+    let k:i32=dg_kind(d);let s:i64=dg_s(d);let e:i64=dg_e(d);let sl:i64=st[0].b;
+    let ns:i64=s;let ne:i64=e;
+    if(verdict==2 && has_rev==1){ns=rs;ne=re;}
+    hist_append(st,seq,s,e,verdict,reason,dg_appeals(d),k,rs,re);
+    if(verdict==1){consec_reset(st,s,e);}
+    if(verdict==2 && has_rev==1){consec_reset(st,rs,re);}
+    if(k==5){return;} // RETRACT: terminal, record only
+    if(verdict==1){ // ADOPT
+        if(k==1){
+            let r:i64=s/64;
+            rg_adopt_inc(w,r);rg_push(w,r,s,e);
+            let a:i32=rg_adopt(w,r);
+            if(a%3==0){
+                if(e+1<=sl){
+                    let bd:[]u8=dd_new();
+                    build_boundary(bd,e,a);
+                    ag_push_back(w,bd);nio_free(bd);
+                }
+                let aux:[]u8=nio_alloc(48);
+                let n2:i32=rg_list(w,r,aux);
+                let gd:[]u8=dd_new();
+                build_group(gd,aux,n2,s,e,110,6);
+                ag_push_back(w,gd);nio_free(gd);nio_free(aux);
+            }
+        }
+        cursor_advance(st,w,e);
+    } else if(verdict==2){ // REVISE: student's correction is canonical
+        let sd:[]u8=dd_new();
+        build_sameas(sd,rs,re,s,e);
+        ag_push_back(w,sd);nio_free(sd);
+        let r:i64=rs/64;
+        if(rg_adopt(w,r)>0){
+            let axs:i64=0;let axe:i64=0;
+            rg_last(w,r,&axs,&axe);
+            let aux2:[]u8=nio_alloc(32);
+            t345_set64(aux2,0,rs);t345_set64(aux2,8,re);
+            t345_set64(aux2,16,axs);t345_set64(aux2,24,axe);
+            let gd:[]u8=dd_new();
+            build_group(gd,aux2,2,rs,re,116,0);
+            ag_push_back(w,gd);nio_free(gd);nio_free(aux2);
+        }
+        let me2:i64=e;if(re>me2){me2=re;}
+        cursor_advance(st,w,me2);
+    } else if(verdict==3){ // REJECT
+        if(reason==1){
+            let maxa:i32=1;if(k==1){maxa=2;}
+            let au:i32=dg_appeals(d)+1;
+            if(au>maxa){final_reject(st,ns,ne);cursor_advance(st,w,e);}
+            else{
+                let ad:[]u8=dd_new();
+                build_appeal(ad,d,sl,au);
+                ag_push_front(w,ad);nio_free(ad);
+            }
+        } else if(reason==2 || reason==5){
+            mark_dead(st,ns,ne);ag_purge_span(w,ns,ne);
+            if(reason==2 && seq+1<=sl){
+                let rd:[]u8=dd_new();
+                build_retract(rd,seq);
+                ag_push_front(w,rd);nio_free(rd);
+            }
+            cursor_advance(st,w,e);
+        } else {
+            // R3/R4/R6: final for the session, no appeal
+            final_reject(st,ns,ne);mark_dead(st,ns,ne);ag_purge_span(w,ns,ne);
+            cursor_advance(st,w,e);
+        }
+    } else if(verdict==4){ // DEFER
+        if((dg_flags(d)&1)!=0){cursor_advance(st,w,e);}
+        else{
+            let fd:[]u8=dd_new();
+            build_defer_reprop(fd,d,sl);
+            ag_push_front(w,fd);nio_free(fd);
+        }
+    }
+}
+
+// ================= script parsing =================
+// item (48 B): @0 type u8 (1=D,2=TURN); D: seq@8 u64 verdict@16 u8 reason@17 u8
+// has_rev@18 u8 rs@24 u64 re@32 u64; TURN: n@8 u64
+fn v_next_tok(line:[]u8,pos:*i32)[]u8 {
+    let i:i32=pos[0];
+    while(i<line.len && (line[i]==32 || line[i]==9)){i=i+1;}
+    let j:i32=i;
+    while(j<line.len && line[j]!=32 && line[j]!=9){j=j+1;}
+    pos[0]=j;
+    return line[i..j];
+}
+fn v_u64(tok:[]u8,ok:*i32)i64 {
+    let v:i64=-1;t345_parse_u64(tok,&v);
+    if(v<0){ok[0]=0;}return v;
+}
+fn v_verdict(tok:[]u8)i32 {
+    if(_zag_strcmp(tok,"ADOPT")==1){return 1;}
+    if(_zag_strcmp(tok,"REVISE")==1){return 2;}
+    if(_zag_strcmp(tok,"REJECT")==1){return 3;}
+    if(_zag_strcmp(tok,"DEFER")==1){return 4;}
+    return 0;
+}
+struct VParse {
+    items:[]u8,n_items:i64,session_id:i64,stim_len:i64,
+    stimfile:[]u8,saw_end:i32,d_total:i64,err:[]u8
+}
+fn vparse_new()*VParse {
+    let p:*VParse=_zag_malloc(96) as *VParse;
+    let it:[]u8=nio_alloc(4352*48);
+    let i:i32=0;while(i<4352*48){it[i]=0;i=i+1;}
+    p[0].items=it;p[0].n_items=0;p[0].session_id=-1;p[0].stim_len=-1;
+    p[0].stimfile="";p[0].saw_end=0;p[0].d_total=0;p[0].err="";
+    return p;
+}
+fn vparse_item_d(vp:*VParse,seq:i64,verdict:i32,reason:i32,has_rev:i32,rs:i64,re:i64)i32 {
+    if(vp[0].n_items>=4352){return -1;}
+    let o:i32=(vp[0].n_items as i32)*48;
+    let it:[]u8=vp[0].items;
+    it[o]=1;
+    t345_set64(it,o+8,seq);it[o+16]=verdict as u8;it[o+17]=reason as u8;it[o+18]=has_rev as u8;
+    t345_set64(it,o+24,rs);t345_set64(it,o+32,re);
+    vp[0].n_items=vp[0].n_items+1;vp[0].d_total=vp[0].d_total+1;
+    return 0;
+}
+fn vparse_item_turn(vp:*VParse,n:i64)i32 {
+    if(vp[0].n_items>=4352){return -1;}
+    let o:i32=(vp[0].n_items as i32)*48;
+    let it:[]u8=vp[0].items;
+    it[o]=2;t345_set64(it,o+8,n);
+    vp[0].n_items=vp[0].n_items+1;
+    return 0;
+}
+fn v_parse(text:[]u8)*VParse {
+    let vp:*VParse=vparse_new();
+    let saw_session:i32=0;let have_sf:i32=0;
+    let i:i32=0;
+    while(i<text.len){
+        let j:i32=i;while(j<text.len && text[j]!=10){j=j+1;}
+        let line:[]u8=text[i..j];i=j+1;
+        if(line.len==0 || line[0]==35){continue;}
+        if(vp[0].saw_end==1){vp[0].err="content after END";return vp;}
+        let pos:i32=0;
+        let head:[]u8=v_next_tok(line,&pos);
+        if(_zag_strcmp(head,"SESSION")==1){
+            if(saw_session==1){vp[0].err="duplicate SESSION";return vp;}
+            let ok:i32=1;
+            let sid:i64=v_u64(v_next_tok(line,&pos),&ok);
+            let sl:i64=v_u64(v_next_tok(line,&pos),&ok);
+            if(ok==0 || sid<0 || sl<1 || sl>65536){vp[0].err="bad SESSION line";return vp;}
+            vp[0].session_id=sid;vp[0].stim_len=sl;saw_session=1;
+        } else if(_zag_strcmp(head,"STIMFILE")==1){
+            if(saw_session==0){vp[0].err="STIMFILE before SESSION";return vp;}
+            if(have_sf==1){vp[0].err="duplicate STIMFILE";return vp;}
+            let p:[]u8=v_next_tok(line,&pos);
+            if(p.len==0){vp[0].err="bad STIMFILE line";return vp;}
+            vp[0].stimfile=p;have_sf=1;
+        } else if(_zag_strcmp(head,"D")==1){
+            if(saw_session==0){vp[0].err="D before SESSION";return vp;}
+            let ok:i32=1;
+            let seq:i64=v_u64(v_next_tok(line,&pos),&ok);
+            let vd:i32=v_verdict(v_next_tok(line,&pos));
+            let reason:i32=0;let has_rev:i32=0;let rs:i64=0;let re:i64=0;
+            let t3:[]u8=v_next_tok(line,&pos);
+            if(vd==0){ok=0;}
+            if(vd==1 || vd==4){
+                if(t3.len>0){
+                    let r2:i64=v_u64(t3,&ok);
+                    if(r2!=0){ok=0;}
+                    if(v_next_tok(line,&pos).len>0){ok=0;}
+                }
+            } else if(vd==3){
+                if(t3.len==0){ok=0;}
+                else{
+                    reason=v_u64(t3,&ok) as i32;
+                    if(reason<1 || reason>6){ok=0;}
+                    if(v_next_tok(line,&pos).len>0){ok=0;}
+                }
+            } else if(vd==2){
+                if(t3.len==0){ok=0;}
+                else{
+                    reason=v_u64(t3,&ok) as i32;
+                    if(reason<1 || reason>5){ok=0;}
+                    let t4:[]u8=v_next_tok(line,&pos);
+                    let t5:[]u8=v_next_tok(line,&pos);
+                    if(t4.len==0 || t5.len==0){ok=0;}
+                    else{
+                        rs=v_u64(t4,&ok);re=v_u64(t5,&ok);
+                        if(rs<0 || re<=rs){ok=0;}else{has_rev=1;}
+                    }
+                    if(v_next_tok(line,&pos).len>0){ok=0;}
+                }
+            }
+            if(ok==0 || seq<0){vp[0].err="bad D line";return vp;}
+            if(vparse_item_d(vp,seq,vd,reason,has_rev,rs,re)!=0){vp[0].err="too many items";return vp;}
+        } else if(_zag_strcmp(head,"TURN")==1){
+            if(saw_session==0){vp[0].err="TURN before SESSION";return vp;}
+            let ok:i32=1;
+            let tn:i64=v_u64(v_next_tok(line,&pos),&ok);
+            if(ok==0 || tn<0){vp[0].err="bad TURN line";return vp;}
+            if(vparse_item_turn(vp,tn)!=0){vp[0].err="too many items";return vp;}
+        } else if(_zag_strcmp(head,"END")==1){
+            vp[0].saw_end=1;
+        } else {vp[0].err="unknown directive";return vp;}
+    }
+    if(saw_session==0){vp[0].err="no SESSION";return vp;}
+    if(have_sf==0){vp[0].err="no STIMFILE";return vp;}
+    return vp;
+}
+fn vparse_free(vp:*VParse)void {
+    nio_free(vp[0].items);
+    _zag_free(vp as *i8);
+}
+
+// ================= adversarial heap perturbation =================
+// Deterministically perturbs heap layout/content before the session: 512
+// leaked blocks of pattern-derived sizes/contents. Any read of uninitialized
+// memory changes the tape across patterns; byte-identical tapes across
+// patterns prove full initialization.
+fn heap_perturb(seed:i64)void {
+    let i:i64=0;
+    while(i<512){
+        let sz:i32=(16+((seed*(i+1)+i*i)%2048)) as i32;
+        let b:[]u8=nio_alloc(sz);
+        let j:i32=0;
+        while(j<sz){b[j]=((seed+i+j)%251) as u8;j=j+1;}
+        i=i+1; // deliberately leaked: perturbs heap layout for later allocs
+    }
+    _zag_print("VARA_HEAPFILL,");_zag_println(_zag_i64_to_str(seed));
+}
+
+// script-error exit that still leaves a logged tape (INTEGRITY + footer)
+fn v_early_exit(tape_name:[]u8,icode:i32,exitcode:i32,why:[]u8)i32 {
+    let t:*Tape=tape_open();
+    let e:*TBuf=ev_integrity(icode,0,0,0,0,0,0,0,0);
+    tape_event(t,7,tbuf_bytes(e));tbuf_free(e);
+    let f:*TBuf=ev_footer(t[0].count,t[0].chain,why);
+    tape_event(t,9,tbuf_bytes(f));tbuf_free(f);
+    tape_write_file(t,tape_name);
+    tape_close(t);
+    return exitcode;
+}
+
+fn run_teach(script:[]u8,tape_name:[]u8,hf:[]u8)i32 {
+    if(hf.len>0){
+        let seed:i64=-1;t345_parse_u64(hf,&seed);
+        if(seed<0){_zag_println("VARA: bad heapfill pattern");return 64;}
+        heap_perturb(seed);
+    }
+    let text:[]u8=t345_read_file(script,1048576);
+    if(text.len==0){
+        _zag_println("VARA: cannot read script");
+        return v_early_exit(tape_name,1300,13,"HALTED:SCRIPT_ERROR");
+    }
+    let vp:*VParse=v_parse(text);
+    if(vp[0].err.len>0){
+        _zag_print("VARA: script error: ");_zag_println(vp[0].err);
+        // exact INTEGRITY codes per SPEC §10: directive-level errors get
+        // 1013/1014; all other script malformations are 1300.
+        let icode:i32=1300;
+        if(_zag_strcmp(vp[0].err,"unknown directive")==1){icode=1013;}
+        if(_zag_strcmp(vp[0].err,"content after END")==1){icode=1014;}
+        let r0:i32=v_early_exit(tape_name,icode,13,"HALTED:SCRIPT_ERROR");
+        vparse_free(vp);nio_free(text);return r0;
+    }
+    if(vp[0].saw_end==0){
+        _zag_println("VARA: missing END");
+        let r1:i32=v_early_exit(tape_name,1012,12,"HALTED:INCOMPLETE");
+        vparse_free(vp);nio_free(text);return r1;
+    }
+    let g:*GT=gt_load(vp[0].stimfile);
+    if(g[0].n<0){
+        _zag_println("VARA: cannot load stimulus file");
+        let r2:i32=v_early_exit(tape_name,1015,13,"HALTED:SCRIPT_ERROR");
+        vparse_free(vp);gt_free(g);nio_free(text);return r2;
+    }
+    if((g[0].stim.len as i64)!=vp[0].stim_len){
+        _zag_println("VARA: stim_len mismatch with STIMFILE");
+        let r3:i32=v_early_exit(tape_name,1011,13,"HALTED:SCRIPT_ERROR");
+        vparse_free(vp);gt_free(g);nio_free(text);return r3;
+    }
+    // semantic validation of REVISE spans before running
+    let it0:[]u8=vp[0].items;
+    let vi:i64=0;let vok:i32=1;
+    while(vi<vp[0].n_items){
+        let io:i32=(vi as i32)*48;
+        if(it0[io]==1 && (it0[io+16] as i32)==2){
+            let vre2:i64=t345_get64(it0,io+32);
+            if(vre2>vp[0].stim_len){vok=0;}
+        }
+        vi=vi+1;
+    }
+    if(vok==0){
+        _zag_println("VARA: REVISE span out of stimulus range");
+        let r4:i32=v_early_exit(tape_name,1300,13,"HALTED:SCRIPT_ERROR");
+        vparse_free(vp);gt_free(g);nio_free(text);return r4;
+    }
+    // ---- init fixed-size per-session state ----
+    let st:*TState=st_new();
+    st_set_session(st,vp[0].session_id);st_set_stimlen(st,vp[0].stim_len);
+    let w:*TWork=w_new();
+    let nt:i64=tok_count(g[0].stim);
+    let cap:i64=nt;if(cap<1){cap=1;}
+    let tb:[]u8=nio_alloc((cap as i32)*16);
+    tok_fill(g[0].stim,tb);
+    w[0].a=nt;w[0].b=tb;
+    let nr:i64=(vp[0].stim_len+63)/64;
+    w[0].c=nr;
+    let rb:[]u8=nio_alloc((nr as i32)*50);
+    let zi:i32=0;while(zi<(nr as i32)*50){rb[zi]=0;zi=zi+1;}
+    w[0].d=rb;
+    ag_init(w);
+    // ---- tape ----
+    let t:*Tape=tape_open();
+    let pr:[]u8=nio_alloc(32);
+    zi=0;while(zi<32){pr[zi]=0;zi=zi+1;}
+    let e:*TBuf=ev_header(vp[0].session_id,3,pr,"arm3-varA-deliberative/maxprop=4096");
+    tape_event(t,1,tbuf_bytes(e));tbuf_free(e);
+    e=ev_stimulus(1,0,vp[0].stim_len);
+    tape_event(t,2,tbuf_bytes(e));tbuf_free(e);
+    nio_free(pr);
+    let tw:*TW=tw_new(vp[0].stim_len);
+    // ---- main loop ----
+    let it:[]u8=vp[0].items;
+    let ip:i64=0;let n_items:i64=vp[0].n_items;
+    let n_prop:i64=0;let d_consumed:i64=0;
+    let exhausted:i32=0;let capped:i32=0;
+    let rc:i32=0;
+    // The first proposal needs no prior decision (it starts the dialogue);
+    // every later proposal is preceded by the student's decision on the
+    // previous one. lastd always holds the most recently emitted proposal.
+    let lastd:[]u8=dd_new();
+    if(next_proposal(st,w,lastd)==1){
+        if(n_prop>=4096){capped=1;}
+        else{
+            let ec0:i32=emit_proposal(st,t,tw,lastd,n_prop);
+            if(ec0!=0){rc=ec0;}else{n_prop=n_prop+1;}
+        }
+    }
+    while(rc==0 && capped==0){
+        while(ip<n_items && it[(ip as i32)*48]==2){
+            let tn:i64=t345_get64(it,(ip as i32)*48+8);
+            let te:*TBuf=ev_turn(tn);
+            tape_event(t,8,tbuf_bytes(te));tbuf_free(te);
+            ip=ip+1;
+        }
+        if(ip>=n_items || it[(ip as i32)*48]!=1){exhausted=1;break;}
+        let io:i32=(ip as i32)*48;
+        let dseq:i64=t345_get64(it,io+8);
+        let vd:i32=it[io+16] as i32;
+        let vreason:i32=it[io+17] as i32;
+        let hrev:i32=it[io+18] as i32;
+        let vrs:i64=t345_get64(it,io+24);
+        let vre:i64=t345_get64(it,io+32);
+        if(dseq!=st[0].c-1){
+            _zag_print("VARA: decision seq mismatch: got ");
+            _zag_print(_zag_i64_to_str(dseq));
+            _zag_print(" want ");_zag_println(_zag_i64_to_str(st[0].c-1));
+            v_halt(t,1300,n_prop,tw,vp[0].stim_len,"HALTED:SCRIPT_ERROR");
+            rc=13;break;
+        }
+        ip=ip+1;d_consumed=d_consumed+1;
+        let de:*TBuf=ev_decision(dseq,vd,vreason,vrs,vre,0);
+        tape_event(t,12,tbuf_bytes(de));tbuf_free(de);
+        tw_decide(tw,dseq,vd);
+        // post-decision tripwire recheck: decisions complete the accept_rate leg
+        if(tw_fire1(tw)==1){
+            _zag_println("VARA: TRIPWIRE FIRED code=1 (on decision)");
+            v_halt(t,1,n_prop,tw,vp[0].stim_len,"HALTED:TRIPWIRE");
+            rc=11;break;
+        }
+        apply_decision(st,w,lastd,dseq,vd,vreason,vrs,vre,hrev);
+        if(n_prop>=4096){capped=1;break;}
+        if(next_proposal(st,w,lastd)==0){break;}
+        let ec:i32=emit_proposal(st,t,tw,lastd,n_prop);
+        if(ec!=0){rc=ec;break;}
+        n_prop=n_prop+1;
+    }
+    nio_free(lastd);
+    // trailing TURNs
+    while(ip<n_items && it[(ip as i32)*48]==2){
+        let tn2:i64=t345_get64(it,(ip as i32)*48+8);
+        let te2:*TBuf=ev_turn(tn2);
+        tape_event(t,8,tbuf_bytes(te2));tbuf_free(te2);
+        ip=ip+1;
+    }
+    if(rc==0){
+        if(d_consumed<vp[0].d_total){
+            _zag_println("VARA: unconsumed decisions at END");
+            v_halt(t,1300,n_prop,tw,vp[0].stim_len,"HALTED:SCRIPT_ERROR");
+            rc=13;
+        } else {
+            let why:[]u8="OK";
+            if(exhausted==1){why="OK:DECISIONS_EXHAUSTED";}
+            if(capped==1){why="OK:PROPOSAL_CAP";}
+            let f:*TBuf=ev_footer(t[0].count,t[0].chain,why);
+            tape_event(t,9,tbuf_bytes(f));tbuf_free(f);
+        }
+    }
+    if(tape_write_file(t,tape_name)!=0){_zag_println("VARA: tape write failed");rc=13;}
+    _zag_print("VARA_END,proposals=");_zag_print(_zag_i64_to_str(n_prop));
+    _zag_print(",consumed=");_zag_print(_zag_i64_to_str(d_consumed));
+    _zag_print(",events=");_zag_print(_zag_i64_to_str(t[0].count));
+    _zag_print(",chain=");_zag_println(ns_hex(t[0].chain));
+    tw_free(tw);tape_close(t);
+    gt_free(g);vparse_free(vp);
+    nio_free(st[0].g);nio_free(st[0].h);_zag_free(st as *i8);
+    nio_free(w[0].b);nio_free(w[0].d);nio_free(w[0].e);nio_free(w[0].f);_zag_free(w as *i8);
+    nio_free(text);
+    return rc;
+}
+
+// ================= test mode =================
+fn vt_chk(name:[]u8,actual:i32,expected:i32,f:*i32)void {
+    _zag_print("VARA_TEST,");_zag_print(name);_zag_print(",");
+    _zag_print(_zag_i64_to_str(actual as i64));_zag_print(",");_zag_println(_zag_i64_to_str(expected as i64));
+    if(actual!=expected){f[0]=f[0]+1;}
+}
+// ---- ported §P battery (same codec as the arm-3 driver; proves this binary's path) ----
+fn vt_t_roundtrip(f:*i32)void {
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=77;ph[0].seq=5;ph[0].kind=1;
+    ph[0].span_start=10;ph[0].span_end=20;ph[0].confidence=200;
+    let pt:*PropT=propt_new();
+    pt[0].aux_count=1;pt[0].ground_count=2;
+    pt[0].aux=nio_alloc(16);t345_set64(pt[0].aux,0,1);t345_set64(pt[0].aux,8,2);
+    pt[0].ground=nio_alloc(32);t345_set64(pt[0].ground,0,3);t345_set64(pt[0].ground,8,4);
+    t345_set64(pt[0].ground,16,5);t345_set64(pt[0].ground,24,6);
+    let wire:[]u8=sp_encode(ph,pt);
+    let qh:*PropH=proph_new();
+    let qt:*PropT=propt_new();
+    vt_chk("vt.roundtrip.decode",sp_decode(wire,qh,qt),0,f);
+    vt_chk("vt.roundtrip.validate",sp_validate(qh,qt,77,5,100),0,f);
+    vt_chk("vt.roundtrip.span",((qh[0].span_start==10 && qh[0].span_end==20) as i32),1,f);
+    vt_chk("vt.roundtrip.aux0",t345_get64(qt[0].aux,0) as i32,1,f);
+    vt_chk("vt.roundtrip.g1e",t345_get64(qt[0].ground,24) as i32,6,f);
+    nio_free(wire);sp_free(pt);sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+}
+fn vt_t_tamper(f:*i32)void {
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=1;ph[0].seq=0;ph[0].kind=1;
+    ph[0].span_start=0;ph[0].span_end=4;ph[0].confidence=100;
+    let pt:*PropT=propt_new();
+    let wire:[]u8=sp_encode(ph,pt);
+    wire[30]=wire[30]^1;
+    let qh:*PropH=proph_new();
+    let qt:*PropT=propt_new();
+    vt_chk("vt.tamper.checksum",sp_decode(wire,qh,qt),V_CHECKSUM(),f);
+    nio_free(wire);sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+}
+fn vt_t_iron(f:*i32)void {
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=9;ph[0].seq=0;ph[0].kind=1;
+    ph[0].span_start=2;ph[0].span_end=8;ph[0].confidence=50;
+    let pt:*PropT=propt_new();
+    vt_chk("vt.iron.seq_gap",sp_validate(ph,pt,9,3,100),V_SEQ(),f);
+    ph[0].teacher_id=1;
+    vt_chk("vt.iron.teacher1",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].teacher_id=2;
+    vt_chk("vt.iron.teacher2",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].teacher_id=3;ph[0].kind=9;
+    vt_chk("vt.iron.kind",sp_validate(ph,pt,9,0,100),V_KIND(),f);
+    ph[0].kind=1;ph[0].span_end=200;
+    vt_chk("vt.iron.range",sp_validate(ph,pt,9,0,100),V_RANGE(),f);
+    ph[0].span_end=8;
+    let bad:[]u8=nio_alloc(sp_wire_len(0,0));
+    t345_set32(bad,0,0xDEADBEEF);
+    let qh:*PropH=proph_new();
+    let qt:*PropT=propt_new();
+    vt_chk("vt.iron.badmagic",sp_decode(bad,qh,qt),V_BAD_MAGIC(),f);
+    nio_free(bad);
+    let big:[]u8=nio_alloc(220);
+    t345_set32(big,0,0x54505250);t345_set16(big,4,1);big[43]=9;
+    vt_chk("vt.iron.counts",sp_decode(big,qh,qt),V_COUNTS(),f);
+    nio_free(big);
+    sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+}
+fn vt_t_iron2(f:*i32)void {
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=9;ph[0].seq=0;ph[0].kind=1;
+    ph[0].span_start=2;ph[0].span_end=8;ph[0].confidence=50;
+    let pt:*PropT=propt_new();
+    let qh:*PropH=proph_new();
+    let qt:*PropT=propt_new();
+    ph[0].kind=5;ph[0].span_start=4;ph[0].span_end=5;
+    vt_chk("vt.iron2.retract_ok",sp_validate(ph,pt,9,0,100),V_OK(),f);
+    ph[0].kind=1;ph[0].span_start=2;ph[0].span_end=8;
+    let w0:[]u8=sp_encode(ph,pt);w0[4]=2;
+    vt_chk("vt.iron2.bad_version",sp_decode(w0,qh,qt),V_BAD_VERSION(),f);
+    nio_free(w0);
+    pt[0].aux_count=1;pt[0].aux=nio_alloc(16);
+    t345_set64(pt[0].aux,0,2);t345_set64(pt[0].aux,8,6);
+    let w1:[]u8=sp_encode(ph,pt);
+    vt_chk("vt.iron2.len_trunc",sp_decode(w1[0..60],qh,qt),V_LEN(),f);
+    nio_free(w1);sp_free(pt);pt[0].aux="";pt[0].aux_count=0;
+    ph[0].span_start=10;ph[0].span_end=5;
+    vt_chk("vt.iron2.span_invert",sp_validate(ph,pt,9,0,100),V_SPAN(),f);
+    ph[0].span_end=10;
+    vt_chk("vt.iron2.span_equal",sp_validate(ph,pt,9,0,100),V_SPAN(),f);
+    ph[0].span_start=2;ph[0].span_end=8;
+    ph[0].confidence=300;
+    vt_chk("vt.iron2.conf_300",sp_validate(ph,pt,9,0,100),V_SPAN(),f);
+    ph[0].confidence=50;
+    ph[0].seq=5;
+    vt_chk("vt.iron2.seq_dup",sp_validate(ph,pt,9,6,100),V_SEQ(),f);
+    ph[0].seq=0;
+    ph[0].kind=0;
+    vt_chk("vt.iron2.kind0",sp_validate(ph,pt,9,0,100),V_KIND(),f);
+    ph[0].kind=6;
+    vt_chk("vt.iron2.kind6",sp_validate(ph,pt,9,0,100),V_KIND(),f);
+    ph[0].kind=1;
+    ph[0].teacher_id=0;
+    vt_chk("vt.iron2.teacher0",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].teacher_id=4;
+    vt_chk("vt.iron2.teacher4",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].teacher_id=5;
+    vt_chk("vt.iron2.teacher5",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].teacher_id=3;ph[0].session_id=10;
+    vt_chk("vt.iron2.sess_mismatch",sp_validate(ph,pt,9,0,100),V_BAD_TEACHER(),f);
+    ph[0].session_id=9;
+    let big:[]u8=nio_alloc(64);
+    t345_set32(big,0,0x54505250);t345_set16(big,4,1);big[43]=0;big[44]=9;
+    vt_chk("vt.iron2.counts_ground9",sp_decode(big,qh,qt),V_COUNTS(),f);
+    nio_free(big);
+    pt[0].aux_count=1;pt[0].aux=nio_alloc(16);
+    t345_set64(pt[0].aux,0,200);t345_set64(pt[0].aux,8,300);
+    vt_chk("vt.iron2.range_aux",sp_validate(ph,pt,9,0,100),V_RANGE(),f);
+    sp_free(pt);pt[0].aux="";pt[0].aux_count=0;
+    pt[0].ground_count=1;pt[0].ground=nio_alloc(16);
+    t345_set64(pt[0].ground,0,0);t345_set64(pt[0].ground,8,500);
+    vt_chk("vt.iron2.range_ground",sp_validate(ph,pt,9,0,100),V_RANGE(),f);
+    sp_free(pt);pt[0].ground="";pt[0].ground_count=0;
+    ph[0].span_start=95;ph[0].span_end=100;
+    vt_chk("vt.iron2.range_edge_ok",sp_validate(ph,pt,9,0,100),V_OK(),f);
+    sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+}
+// ---- ported §C battery ----
+fn vt_t_tw_window(f:*i32)void {
+    let tw:*TW=tw_new(1000);
+    let k:i64=0;
+    while(k<200){
+        tw_propose(tw,k*5,k*5+5,255);
+        tw_decide(tw,k,1);
+        k=k+1;
+    }
+    let d:i64=0;let a:i64=0;let m:i64=0;
+    tw_counts(tw,&d,&a,&m);
+    let cond:i32=0;
+    if(tw[0].covered_n*100>=1000*95 && d>0 && a*100>=d*95 && m*100>=d*90){cond=1;}
+    vt_chk("vt.tripwire.cumulative_fires",cond,1,f);
+    vt_chk("vt.tripwire.halt_at_950",tw[0].covered_n as i32,950,f);
+    vt_chk("vt.tripwire.fired_flag",tw[0].fired,1,f);
+    vt_chk("vt.tripwire.fire_code",tw[0].fire_code,1,f);
+    tw_free(tw);
+}
+fn vt_t_tw_dump(f:*i32)void {
+    let tw:*TW=tw_new(1000);
+    vt_chk("vt.tripwire.dump",tw_propose(tw,0,60,255),2,f);
+    tw_free(tw);
+}
+fn vt_t_tw_nofire94(f:*i32)void {
+    let tw:*TW=tw_new(1000);
+    let k:i64=0;let fired:i32=0;
+    while(k<188){let fc:i32=tw_propose(tw,k*5,k*5+5,255);if(fc!=0){fired=1;}tw_decide(tw,k,1);k=k+1;}
+    vt_chk("vt.tripwire.nofire_94pct",fired,0,f);
+    tw_free(tw);
+}
+fn vt_t_tw_nofire_halfrevise(f:*i32)void {
+    let tw:*TW=tw_new(1000);
+    let k:i64=0;
+    while(k<200){tw_propose(tw,k*5,k*5+5,255);
+        if(k%2==0){tw_decide(tw,k,1);}else{tw_decide(tw,k,2);}
+        k=k+1;}
+    let d:i64=0;let a:i64=0;let m:i64=0;
+    tw_counts(tw,&d,&a,&m);
+    let cond:i32=0;
+    if(tw[0].covered_n*100>=1000*95 && d>0 && a*100>=d*95 && m*100>=d*90){cond=1;}
+    vt_chk("vt.tripwire.nofire_halfrevise",cond,0,f);
+    tw_free(tw);
+}
+// ---- policy unit tests: run against the REAL policy functions ----
+fn vtt_state()*TState {
+    let st:*TState=st_new();
+    st_set_session(st,1);st_set_stimlen(st,200);
+    return st;
+}
+fn vtt_work(st:*TState,stim:[]u8)*TWork {
+    let w:*TWork=w_new();
+    let nt:i64=tok_count(stim);
+    let cap:i64=nt;if(cap<1){cap=1;}
+    let tb:[]u8=nio_alloc((cap as i32)*16);
+    tok_fill(stim,tb);
+    w[0].a=nt;w[0].b=tb;
+    let nr:i64=(st[0].b+63)/64;
+    w[0].c=nr;
+    let rb:[]u8=nio_alloc((nr as i32)*50);
+    let zi:i32=0;while(zi<(nr as i32)*50){rb[zi]=0;zi=zi+1;}
+    w[0].d=rb;
+    ag_init(w);
+    return w;
+}
+fn vtt_free(st:*TState,w:*TWork)void {
+    nio_free(st[0].g);nio_free(st[0].h);_zag_free(st as *i8);
+    nio_free(w[0].b);nio_free(w[0].d);nio_free(w[0].e);nio_free(w[0].f);_zag_free(w as *i8);
+}
+fn vt_t_tokenize(f:*i32)void {
+    let s:[]u8="ab cd efg";
+    vt_chk("vt.tokenize.n",tok_count(s) as i32,3,f);
+    let tb:[]u8=nio_alloc(48);tok_fill(s,tb);
+    vt_chk("vt.tokenize.t0s",t345_get64(tb,0) as i32,0,f);
+    vt_chk("vt.tokenize.t0e",t345_get64(tb,8) as i32,2,f);
+    vt_chk("vt.tokenize.t1s",t345_get64(tb,16) as i32,3,f);
+    vt_chk("vt.tokenize.t1e",t345_get64(tb,24) as i32,5,f);
+    vt_chk("vt.tokenize.t2s",t345_get64(tb,32) as i32,6,f);
+    vt_chk("vt.tokenize.t2e",t345_get64(tb,40) as i32,9,f);
+    nio_free(tb);
+}
+fn vt_t_appeal_chain(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"0123456789abcdefghij");
+    let d:[]u8=dd_new();
+    build_wordspan(st,w,d,0);
+    vt_chk("vt.appeal.span_s",dg_s(d) as i32,0,f);
+    vt_chk("vt.appeal.span_e",dg_e(d) as i32,20,f);
+    vt_chk("vt.appeal.conf0",dg_conf(d),200,f);
+    vt_chk("vt.appeal.ground0_n",dg_groundn(d),1,f);
+    apply_decision(st,w,d,0,3,1,0,0,0); // R1
+    vt_chk("vt.appeal.ag1",ag_count(w) as i32,1,f);
+    let a1:[]u8=dd_new();ag_pop_head(w,a1);
+    vt_chk("vt.appeal.a1kind",dg_kind(a1),1,f);
+    vt_chk("vt.appeal.a1appeals",dg_appeals(a1),1,f);
+    vt_chk("vt.appeal.a1conf",dg_conf(a1),180,f);
+    vt_chk("vt.appeal.a1g0s",dg_ground_s(a1,0) as i32,0,f);
+    vt_chk("vt.appeal.a1g0e",dg_ground_e(a1,0) as i32,20,f);
+    vt_chk("vt.appeal.a1g1s",dg_ground_s(a1,1) as i32,20,f);
+    apply_decision(st,w,a1,1,3,1,0,0,0); // R1 again
+    vt_chk("vt.appeal.ag2",ag_count(w) as i32,1,f);
+    let a2:[]u8=dd_new();ag_pop_head(w,a2);
+    vt_chk("vt.appeal.a2appeals",dg_appeals(a2),2,f);
+    vt_chk("vt.appeal.a2conf",dg_conf(a2),160,f);
+    apply_decision(st,w,a2,2,3,1,0,0,0); // R1 third: final, stop
+    vt_chk("vt.appeal.ag3",ag_count(w) as i32,0,f);
+    vt_chk("vt.appeal.cursor",st[0].d as i32,1,f);
+    vt_chk("vt.appeal.notdead",span_dead(st,0,20),0,f);
+    let nx:[]u8=dd_new();
+    vt_chk("vt.appeal.done",next_proposal(st,w,nx),0,f);
+    nio_free(nx);nio_free(d);nio_free(a1);nio_free(a2);
+    vtt_free(st,w);
+}
+fn vt_t_r5_dead(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    apply_decision(st,w,d,0,3,5,0,0,0); // REJECT R5
+    vt_chk("vt.r5.dead",span_dead(st,0,2),1,f);
+    vt_chk("vt.r5.agenda",ag_count(w) as i32,0,f);
+    let nx:[]u8=dd_new();
+    vt_chk("vt.r5.next",next_proposal(st,w,nx),1,f);
+    vt_chk("vt.r5.next_s",dg_s(nx) as i32,3,f);
+    nio_free(nx);nio_free(d);vtt_free(st,w);
+}
+fn vt_t_twoconsec(f:*i32)void {
+    let st:*TState=vtt_state();
+    final_reject(st,30,35);
+    vt_chk("vt.consec.once",span_dead(st,30,35),0,f);
+    final_reject(st,30,35);
+    vt_chk("vt.consec.twice",span_dead(st,30,35),1,f);
+    vt_chk("vt.consec.other",span_dead(st,36,40),0,f);
+    nio_free(st[0].g);nio_free(st[0].h);_zag_free(st as *i8);
+}
+fn vt_t_defer(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    apply_decision(st,w,d,0,4,0,0,0,0); // DEFER
+    vt_chk("vt.defer.ag1",ag_count(w) as i32,1,f);
+    let r1:[]u8=dd_new();ag_pop_head(w,r1);
+    vt_chk("vt.defer.flag",dg_flags(r1)&1,1,f);
+    vt_chk("vt.defer.conf",dg_conf(r1),dg_conf(d)-10,f);
+    vt_chk("vt.defer.groundn",dg_groundn(r1),2,f);
+    apply_decision(st,w,r1,1,4,0,0,0,0); // DEFER again: move on
+    vt_chk("vt.defer.ag2",ag_count(w) as i32,0,f);
+    vt_chk("vt.defer.cursor",st[0].d as i32,1,f);
+    nio_free(d);nio_free(r1);vtt_free(st,w);
+}
+fn vt_t_revise(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb cc dd");
+    let d0:[]u8=dd_new();build_wordspan(st,w,d0,0);
+    apply_decision(st,w,d0,0,1,0,0,0,0); // ADOPT (0,2)
+    let d:[]u8=dd_new();build_wordspan(st,w,d,1); // (3,5)
+    apply_decision(st,w,d,1,2,1,3,4,1); // REVISE -> (3,4)
+    vt_chk("vt.revise.ag",ag_count(w) as i32,2,f);
+    let s1:[]u8=dd_new();ag_pop_head(w,s1);
+    vt_chk("vt.revise.sameas",dg_kind(s1),4,f);
+    vt_chk("vt.revise.sa_s",dg_s(s1) as i32,3,f);
+    vt_chk("vt.revise.sa_e",dg_e(s1) as i32,4,f);
+    vt_chk("vt.revise.sa_aux",dg_auxn(s1),2,f);
+    vt_chk("vt.revise.sa_conf",dg_conf(s1),120,f);
+    let s2:[]u8=dd_new();ag_pop_head(w,s2);
+    vt_chk("vt.revise.group",dg_kind(s2),3,f);
+    vt_chk("vt.revise.gr_aux",dg_auxn(s2),2,f);
+    vt_chk("vt.revise.gr_s",dg_s(s2) as i32,0,f);
+    vt_chk("vt.revise.gr_e",dg_e(s2) as i32,4,f);
+    vt_chk("vt.revise.cursor",st[0].d as i32,2,f);
+    nio_free(d0);nio_free(d);nio_free(s1);nio_free(s2);vtt_free(st,w);
+}
+fn vt_t_region3(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb cc dd");
+    let i:i64=0;
+    while(i<3){
+        let d:[]u8=dd_new();build_wordspan(st,w,d,i);
+        apply_decision(st,w,d,i,1,0,0,0,0);
+        nio_free(d);i=i+1;
+    }
+    vt_chk("vt.region3.ag",ag_count(w) as i32,2,f);
+    let b:[]u8=dd_new();ag_pop_head(w,b);
+    vt_chk("vt.region3.bkind",dg_kind(b),2,f);
+    vt_chk("vt.region3.bs",dg_s(b) as i32,8,f);
+    vt_chk("vt.region3.be",dg_e(b) as i32,9,f);
+    vt_chk("vt.region3.bconf",dg_conf(b),120,f);
+    let g:[]u8=dd_new();ag_pop_head(w,g);
+    vt_chk("vt.region3.gkind",dg_kind(g),3,f);
+    vt_chk("vt.region3.gaux",dg_auxn(g),3,f);
+    vt_chk("vt.region3.g0s",dg_aux_s(g,0) as i32,6,f);
+    vt_chk("vt.region3.g2e",dg_aux_e(g,2) as i32,2,f);
+    nio_free(b);nio_free(g);vtt_free(st,w);
+}
+fn vt_t_r2_retract(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    apply_decision(st,w,d,7,3,2,0,0,0); // REJECT R2, seq 7
+    vt_chk("vt.r2.dead",span_dead(st,0,2),1,f);
+    vt_chk("vt.r2.ag",ag_count(w) as i32,1,f);
+    let r:[]u8=dd_new();ag_pop_head(w,r);
+    vt_chk("vt.r2.rkind",dg_kind(r),5,f);
+    vt_chk("vt.r2.rs",dg_s(r) as i32,7,f);
+    vt_chk("vt.r2.re",dg_e(r) as i32,8,f);
+    vt_chk("vt.r2.conf",dg_conf(r),64,f);
+    nio_free(d);nio_free(r);vtt_free(st,w);
+}
+fn vt_t_r3_final(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    apply_decision(st,w,d,0,3,3,0,0,0); // REJECT R3: final, no appeal
+    vt_chk("vt.r3.dead",span_dead(st,0,2),1,f);
+    vt_chk("vt.r3.ag",ag_count(w) as i32,0,f);
+    vt_chk("vt.r3.cursor",st[0].d as i32,1,f);
+    nio_free(d);vtt_free(st,w);
+}
+fn vt_t_retract_guard(f:*i32)void {
+    let st:*TState=vtt_state();
+    st_set_stimlen(st,5); // seq+1=8 > stim_len 5: retract must be skipped
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    apply_decision(st,w,d,7,3,2,0,0,0); // REJECT R2, seq 7
+    vt_chk("vt.rguard.dead",span_dead(st,0,2),1,f);
+    vt_chk("vt.rguard.noag",ag_count(w) as i32,0,f);
+    nio_free(d);vtt_free(st,w);
+}
+fn vt_t_agenda_drop(f:*i32)void {
+    let st:*TState=vtt_state();
+    let w:*TWork=vtt_work(st,"aa bb");
+    let d:[]u8=dd_new();build_wordspan(st,w,d,0);
+    mark_dead(st,0,2);
+    ag_push_back(w,d);
+    let nx:[]u8=dd_new();
+    vt_chk("vt.agdrop.next",next_proposal(st,w,nx),1,f);
+    vt_chk("vt.agdrop.s",dg_s(nx) as i32,3,f);
+    vt_chk("vt.agdrop.agenda",ag_count(w) as i32,0,f);
+    nio_free(d);nio_free(nx);vtt_free(st,w);
+}
+fn vt_test()i32 {
+    let f:i32=0;
+    vt_t_roundtrip(&f);vt_t_tamper(&f);vt_t_iron(&f);vt_t_iron2(&f);
+    vt_t_tw_window(&f);vt_t_tw_dump(&f);vt_t_tw_nofire94(&f);vt_t_tw_nofire_halfrevise(&f);
+    vt_t_tokenize(&f);vt_t_appeal_chain(&f);vt_t_r5_dead(&f);vt_t_twoconsec(&f);
+    vt_t_defer(&f);vt_t_revise(&f);vt_t_region3(&f);vt_t_r2_retract(&f);
+    vt_t_r3_final(&f);vt_t_retract_guard(&f);vt_t_agenda_drop(&f);
+    _zag_print("VARA_FAILURES,");_zag_println(_zag_i64_to_str(f as i64));
+    if(f!=0){return 1;}return 0;
+}
+
+// ================= §P ingress probe =================
+// probe <case> <tape>: builds a valid proposal, tampers its §P wire per <case>,
+// and feeds the tampered wire through the REAL hostile decode/validate path
+// (the same sp_decode/sp_validate the emission gate uses). On violation V:
+// INTEGRITY (1000+V) + footer HALTED:VIOLATION + exit V + zero TEACHER_MSG.
+// Cases: bad_magic(1) bad_version(2) bad_length(10) bad_checksum(7)
+//   bad_counts(9) bad_teacher(3) bad_session(3) bad_seq(4) bad_kind(6)
+//   bad_span(5) bad_aux(8) bad_ground(8).
+// (bad_conf is wire-unrepresentable — confidence is u8 on the wire — and is
+// covered at the Prop level by vt.iron2.conf_300.)
+fn probe_fix_checksum(wire:[]u8)void {
+    let co:i32=wire.len-9;
+    t345_set64(wire,co+1,t345_fnv(wire[0..co+1]));
+}
+// tampers wire in place per case; returns 0 on known case, -1 unknown.
+// bad_length is handled by the caller via slicing (cannot truncate in place).
+fn probe_tamper(case:[]u8,wire:[]u8)i32 {
+    if(_zag_strcmp(case,"bad_magic")==1){wire[0]=wire[0]^0xFF;return 0;}
+    if(_zag_strcmp(case,"bad_version")==1){wire[5]=wire[5]^0xFF;return 0;}
+    if(_zag_strcmp(case,"bad_checksum")==1){wire[30]=wire[30]^0xFF;return 0;}
+    if(_zag_strcmp(case,"bad_counts")==1){wire[60]=9;return 0;}
+    if(_zag_strcmp(case,"bad_teacher")==1){t345_set32(wire,6,4);probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_session")==1){t345_set64(wire,10,9999);probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_seq")==1){t345_set64(wire,18,99);probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_kind")==1){wire[26]=9;probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_span")==1){t345_set64(wire,35,0);probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_aux")==1){t345_set64(wire,44,200);t345_set64(wire,52,300);probe_fix_checksum(wire);return 0;}
+    if(_zag_strcmp(case,"bad_ground")==1){t345_set64(wire,61,200);t345_set64(wire,69,300);probe_fix_checksum(wire);return 0;}
+    return -1;
+}
+fn probe_known(case:[]u8)i32 {
+    if(_zag_strcmp(case,"bad_magic")==1){return 1;}
+    if(_zag_strcmp(case,"bad_version")==1){return 1;}
+    if(_zag_strcmp(case,"bad_length")==1){return 1;}
+    if(_zag_strcmp(case,"bad_checksum")==1){return 1;}
+    if(_zag_strcmp(case,"bad_counts")==1){return 1;}
+    if(_zag_strcmp(case,"bad_teacher")==1){return 1;}
+    if(_zag_strcmp(case,"bad_session")==1){return 1;}
+    if(_zag_strcmp(case,"bad_seq")==1){return 1;}
+    if(_zag_strcmp(case,"bad_kind")==1){return 1;}
+    if(_zag_strcmp(case,"bad_span")==1){return 1;}
+    if(_zag_strcmp(case,"bad_aux")==1){return 1;}
+    if(_zag_strcmp(case,"bad_ground")==1){return 1;}
+    return 0;
+}
+fn run_probe(case:[]u8,tape_name:[]u8)i32 {
+    if(probe_known(case)==0){
+        _zag_println("usage: teacher probe <case> <tape>");return 64;
+    }
+    let g:*GT=gt_load("gt_demo.txt");
+    if(g[0].n<0){_zag_println("VARA: probe cannot load gt_demo.txt");return 64;}
+    let sl:i64=g[0].stim.len as i64;
+    let t:*Tape=tape_open();
+    let pr:[]u8=nio_alloc(32);
+    let zi:i32=0;while(zi<32){pr[zi]=0;zi=zi+1;}
+    let e:*TBuf=ev_header(9000,3,pr,"arm3-varA-deliberative/probe");
+    tape_event(t,1,tbuf_bytes(e));tbuf_free(e);
+    e=ev_stimulus(1,0,sl);
+    tape_event(t,2,tbuf_bytes(e));tbuf_free(e);
+    nio_free(pr);
+    // valid base proposal: WORD_SPAN [0,5) conf 200, aux [10,20), ground [0,5)
+    let ph:*PropH=proph_new();
+    ph[0].teacher_id=3;ph[0].session_id=9000;ph[0].seq=0;ph[0].kind=1;
+    ph[0].span_start=0;ph[0].span_end=5;ph[0].confidence=200;
+    let pt:*PropT=propt_new();
+    pt[0].aux_count=1;pt[0].ground_count=1;
+    pt[0].aux=nio_alloc(16);t345_set64(pt[0].aux,0,10);t345_set64(pt[0].aux,8,20);
+    pt[0].ground=nio_alloc(16);t345_set64(pt[0].ground,0,0);t345_set64(pt[0].ground,8,5);
+    let wire:[]u8=sp_encode(ph,pt);
+    // sanity: the untampered wire must validate (else the probe itself is broken)
+    let sh:*PropH=proph_new();let st2:*PropT=propt_new();
+    let sv:i32=sp_decode(wire,sh,st2);
+    if(sv==0){sv=sp_validate(sh,st2,9000,0,sl);}
+    sp_free(st2);_zag_free(sh as *i8);_zag_free(st2 as *i8);
+    if(sv!=0){
+        _zag_println("VARA: probe base wire invalid; aborting");
+        nio_free(wire);sp_free(pt);
+        _zag_free(ph as *i8);_zag_free(pt as *i8);
+        gt_free(g);tape_close(t);
+        return 64;
+    }
+    if(_zag_strcmp(case,"bad_length")==1){
+        wire=wire[0..wire.len-1];
+    } else {
+        probe_tamper(case,wire);
+    }
+    // the hostile ingress gate: exactly what emit_proposal runs pre-emission
+    let qh:*PropH=proph_new();let qt:*PropT=propt_new();
+    let vc:i32=sp_decode(wire,qh,qt);
+    if(vc==0){vc=sp_validate(qh,qt,9000,0,sl);}
+    nio_free(wire);sp_free(pt);sp_free(qt);
+    _zag_free(ph as *i8);_zag_free(pt as *i8);_zag_free(qh as *i8);_zag_free(qt as *i8);
+    gt_free(g);
+    if(vc==0){
+        _zag_print("VARA: probe case ");_zag_print(case);
+        _zag_println(" did NOT violate; probe bug");
+        tape_close(t);
+        return 64;
+    }
+    if(vc<1 || vc>10){
+        _zag_println("VARA: probe violation out of range; probe bug");
+        tape_close(t);
+        return 64;
+    }
+    let ie:*TBuf=ev_integrity(1000+vc,0,0,0,0,0,0,0,0);
+    tape_event(t,7,tbuf_bytes(ie));tbuf_free(ie);
+    let f:*TBuf=ev_footer(t[0].count,t[0].chain,"HALTED:VIOLATION");
+    tape_event(t,9,tbuf_bytes(f));tbuf_free(f);
+    if(tape_write_file(t,tape_name)!=0){_zag_println("VARA: probe tape write failed");tape_close(t);return 13;}
+    tape_close(t);
+    _zag_print("VARA: probe ");_zag_print(case);
+    _zag_print(" violation=");_zag_println(_zag_i64_to_str(vc as i64));
+    _zag_print("VARA_END,proposals=0,violations=1,code=");
+    _zag_println(_zag_i64_to_str((1000+vc) as i64));
+    return vc;
+}
+fn main()i32 {
+    let mode:[]u8=_zag_arg(1);
+    if(_zag_strcmp(mode,"")==1){_zag_println("usage: teacher <teach|test> ...");return 64;}
+    if(_zag_strcmp(mode,"test")==1){return vt_test();}
+    if(_zag_strcmp(mode,"teach")==1){
+        let script:[]u8=_zag_arg(2);
+        let tape:[]u8=_zag_arg(3);
+        let hf:[]u8=_zag_arg(4);
+        if(_zag_strcmp(script,"")==1 || _zag_strcmp(tape,"")==1){
+            _zag_println("usage: teacher teach <script> <tape> [heapfill]");return 64;
+        }
+        return run_teach(script,tape,hf);
+    }
+    if(_zag_strcmp(mode,"probe")==1){
+        let pcase:[]u8=_zag_arg(2);
+        let ptape:[]u8=_zag_arg(3);
+        if(_zag_strcmp(pcase,"")==1 || _zag_strcmp(ptape,"")==1){
+            _zag_println("usage: teacher probe <case> <tape>");return 64;
+        }
+        return run_probe(pcase,ptape);
+    }
+    _zag_println("usage: teacher <teach|test|probe> ...");
+    return 64;
+}

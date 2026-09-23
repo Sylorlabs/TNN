@@ -1,0 +1,70 @@
+# Dialogue battery knowledge base (38 facts)
+
+0. Herman Melville wrote the novel Moby Dick.
+1. Herman Melville was born in 1819.
+2. Moby Dick was published in 1851.
+3. Moby Dick was written by Herman Melville.
+4. Jane Austen wrote the novel Pride and Prejudice.
+5. Jane Austen was born in 1775.
+6. Pride and Prejudice was published in 1813.
+7. Pride and Prejudice was written by Jane Austen.
+8. Charles Darwin wrote On the Origin of Species.
+9. Charles Darwin was born in 1809.
+10. On the Origin of Species was published in 1859.
+11. On the Origin of Species was written by Charles Darwin.
+12. Marie Curie discovered radium.
+13. Marie Curie was born in 1867.
+14. Marie Curie won the Nobel Prize in 1903.
+15. Andy Weir wrote The Martian.
+16. Andy Weir was born in 1972.
+17. The Martian was published in 2011.
+18. The Eiffel Tower is in Paris.
+19. The Eiffel Tower was built in 1889.
+20. The Eiffel Tower is 330 meters tall.
+21. The Montparnasse Tower is in Paris.
+22. The Montparnasse Tower was built in 1973.
+23. The Montparnasse Tower is 210 meters tall.
+24. The Louvre is in Paris.
+25. The Louvre opened as a museum in 1793.
+26. The Statue of Liberty is a landmark in New York.
+27. The Statue of Liberty was dedicated in 1886.
+28. The Statue of Liberty is 93 meters tall.
+29. Big Ben is a landmark in London.
+30. Big Ben is 96 meters tall.
+31. The Colosseum is in Rome.
+32. The Colosseum was completed in 80 AD.
+33. Paris is the capital of France.
+34. Berlin is the capital of Germany.
+35. Water boils at 100 degrees Celsius at sea level.
+36. Mount Everest is 8849 meters tall.
+37. The Amazon River is 6400 kilometers long.
+
+## Entities
+
+0. herman melville (person)
+1. jane austen (person)
+2. charles darwin (person)
+3. marie curie (person)
+4. andy weir (person)
+5. moby dick (other)
+6. pride and prejudice (other)
+7. on the origin of species (other)
+8. the martian (other)
+9. radium (other)
+10. nobel prize (other)
+11. eiffel tower (other)
+12. montparnasse tower (other)
+13. louvre (other)
+14. statue of liberty (other)
+15. big ben (other)
+16. colosseum (other)
+17. paris (other)
+18. berlin (other)
+19. france (other)
+20. germany (other)
+21. new york (other)
+22. london (other)
+23. rome (other)
+24. mount everest (other)
+25. amazon river (other)
+26. water (other)
