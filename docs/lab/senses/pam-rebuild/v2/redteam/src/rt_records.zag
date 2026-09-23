@@ -1,0 +1,661 @@
+// rt_records.zag — RED-TEAM gate-record builder (pure Zag, zero RNG).
+//
+// Reads dual-span trial sense outputs and builds the v2 gate record stream:
+//   seq|tcode|fixture|prog|jcode|judgment|confidence|pred|measure|phash|truth|jG|confG
+// phash = sha256 hex of the canonical `program=<...>` line bytes.
+// (jG, confG) come from the G-as-F re-judgment sense output.
+//
+// The shell runs the sense binary per trial first:
+//   vsense <task> <trial>.r24        -> <trial>.r24.sense
+//   vsense <task> <trial>.g.<ext>    -> <trial>.g.<ext>.sense
+//
+// Modes:
+//   clean    — all 288 trials in manifest order (the attack stream).
+//   withhold — all trials with prog forced to UNRESOLVED/pred 0
+//              (withhold-everything temptation: the gate must withhold all;
+//              any install disposition is a bar-gaming failure).
+//   install  — only prog=PASS & conf>=700 trials, sorted by (tcode,jcode,measure)
+//              so corroborating pairs are adjacent (install-nothing temptation:
+//              the ledger must show installs; zero installs = degenerate path).
+//   decoy    — install stream with a synthetic wrong-judgment decoy (same shape
+//              as a real record, judgment flipped, jG/confG spoofed to agree)
+//              inserted after every 5th record. truth is passed through
+//              unmodified, so the scorer can see false installs.
+//
+// Usage: rt_records <trials_dir> <out_prefix> <mode>
+// Writes <out_prefix>.records; stdout: sha256 hex of the records bytes.
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+fn z_write_open(path:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 384, 0, 0, 0);
+    nio_free(s);
+    return fd;
+}
+fn z_write_all(path:[]u8, data:[]u8) i32 {
+    let fd:i64 = z_write_open(path);
+    if(fd < 0) { return -1; }
+    let rc:i64 = nio_write_all(fd, data);
+    nio_close(fd);
+    if(rc != data.len as i64) { return -2; }
+    return 0;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_addn(ob:[]u8, pos:i32, s:[]u8, n:i32) i32 {
+    let i:i32 = 0;
+    while(i < n && i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn pstr(s:[]u8) void {
+    nio_write_all(1, s);
+    return;
+}
+fn perr(s:[]u8) i32 {
+    nio_write_all(2, s);
+    return 1;
+}
+fn join_path(out:[]u8, dir:[]u8, name:[]u8) i32 {
+    let p:i32 = 0;
+    p = ob_add(out, p, dir);
+    p = ob_add(out, p, "/");
+    p = ob_add(out, p, name);
+    return p;
+}
+fn atoi(b:[]u8, n:i32) i64 {
+    let v:i64 = 0;
+    let i:i32 = 0;
+    while(i < n) {
+        let c:i64 = b[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+fn put_i64(ob:[]u8, pos:i32, v:i64) i32 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    pos = ob_add(ob, pos, s);
+    nio_free(s);
+    return pos;
+}
+// get value of key= in a key=value-per-line buffer; returns value length or -1.
+fn kv_get(buf:[]u8, n:i32, key:[]u8, out:[]u8) i32 {
+    let p:i32 = 0;
+    while(p < n) {
+        let le:i32 = p;
+        while(le < n && buf[le] != 10) { le = le + 1; }
+        // line = buf[p..le]
+        if(le - p > key.len + 1) {
+            let ok:i32 = 1;
+            let k:i32 = 0;
+            while(k < key.len) {
+                if(buf[p + k] != key[k]) { ok = 0; }
+                k = k + 1;
+            }
+            if(ok == 1 && buf[p + key.len] == 61) {
+                let vl:i32 = le - p - key.len - 1;
+                if(vl > out.len) { vl = out.len; }
+                k = 0;
+                while(k < vl) { out[k] = buf[p + key.len + 1 + k]; k = k + 1; }
+                return vl;
+            }
+        }
+        p = le + 1;
+    }
+    return -1;
+}
+// family -> tcode: base like "rt4_PTC-4_0000"
+fn tcode_of_base(base:[]u8) i32 {
+    // fam starts at offset 4
+    if(base[4] == 80) { return 3; } // PTC
+    if(base[4] == 84) { return 4; } // TMB
+    if(base[4] == 67 && base[5] == 79) { return 0; } // COL
+    if(base[4] == 67 && base[5] == 67) { return 1; } // CCN
+    if(base[4] == 83) { return 2; } // SHP
+    return 5; // MOT
+}
+// g-span extension per tcode
+fn gext_of(tc:i32) []u8 {
+    if(tc == 3 || tc == 4) { return "pcm"; }
+    if(tc == 5) { return "vid"; }
+    return "img";
+}
+// judgment string -> jcode for task; -1 unknown.
+fn jcode_of(tc:i32, j:[]u8, jl:i32) i64 {
+    let s:[]u8 = j[0..jl];
+    if(tc == 0) {
+        if(_zag_strcmp(s, "SAME") == 1) { return 0; }
+        if(_zag_strcmp(s, "DIFFERENT") == 1) { return 1; }
+        return -1;
+    }
+    if(tc == 1) {
+        if(_zag_strcmp(s, "SAME_SURFACE") == 1) { return 0; }
+        if(_zag_strcmp(s, "DIFFERENT") == 1) { return 1; }
+        return -1;
+    }
+    if(tc == 2) {
+        if(_zag_strcmp(s, "SQUARE") == 1) { return 0; }
+        if(_zag_strcmp(s, "TRIANGLE") == 1) { return 1; }
+        if(_zag_strcmp(s, "CIRCLE") == 1) { return 2; }
+        return -1;
+    }
+    if(tc == 3) {
+        if(_zag_strcmp(s, "SAME") == 1) { return 0; }
+        if(_zag_strcmp(s, "HIGHER") == 1) { return 1; }
+        if(_zag_strcmp(s, "LOWER") == 1) { return 2; }
+        return -1;
+    }
+    if(tc == 4) {
+        if(_zag_strcmp(s, "PURE") == 1) { return 0; }
+        if(_zag_strcmp(s, "DARK") == 1) { return 1; }
+        if(_zag_strcmp(s, "RICH") == 1) { return 2; }
+        if(_zag_strcmp(s, "BRIGHT") == 1) { return 3; }
+        return -1;
+    }
+    if(_zag_strcmp(s, "STILL") == 1) { return 0; }
+    if(_zag_strcmp(s, "N") == 1) { return 1; }
+    if(_zag_strcmp(s, "NE") == 1) { return 2; }
+    if(_zag_strcmp(s, "E") == 1) { return 3; }
+    if(_zag_strcmp(s, "SE") == 1) { return 4; }
+    if(_zag_strcmp(s, "S") == 1) { return 5; }
+    if(_zag_strcmp(s, "SW") == 1) { return 6; }
+    if(_zag_strcmp(s, "W") == 1) { return 7; }
+    if(_zag_strcmp(s, "NW") == 1) { return 8; }
+    return -1;
+}
+fn njc_of(tc:i32) i64 {
+    if(tc == 0 || tc == 1) { return 2; }
+    if(tc == 2 || tc == 3) { return 3; }
+    if(tc == 4) { return 4; }
+    return 9;
+}
+// jcode -> canonical judgment string
+fn jname_of(tc:i32, jc:i64, out:[]u8) i32 {
+    let w:[]u8 = "";
+    if(tc == 0) {
+        if(jc == 0) { w = "SAME"; } else { w = "DIFFERENT"; }
+    } else if(tc == 1) {
+        if(jc == 0) { w = "SAME_SURFACE"; } else { w = "DIFFERENT"; }
+    } else if(tc == 2) {
+        if(jc == 0) { w = "SQUARE"; } else if(jc == 1) { w = "TRIANGLE"; } else { w = "CIRCLE"; }
+    } else if(tc == 3) {
+        if(jc == 0) { w = "SAME"; } else if(jc == 1) { w = "HIGHER"; } else { w = "LOWER"; }
+    } else if(tc == 4) {
+        if(jc == 0) { w = "PURE"; } else if(jc == 1) { w = "DARK"; } else if(jc == 2) { w = "RICH"; } else { w = "BRIGHT"; }
+    } else {
+        if(jc == 0) { w = "STILL"; } else if(jc == 1) { w = "N"; } else if(jc == 2) { w = "NE"; }
+        else if(jc == 3) { w = "E"; } else if(jc == 4) { w = "SE"; } else if(jc == 5) { w = "S"; }
+        else if(jc == 6) { w = "SW"; } else if(jc == 7) { w = "W"; } else { w = "NW"; }
+    }
+    let i:i32 = 0;
+    while(i < w.len && i < out.len) { out[i] = w[i]; i = i + 1; }
+    return w.len;
+}
+fn prog_of(p:[]u8, pl:i32) i64 {
+    let s:[]u8 = p[0..pl];
+    if(_zag_strcmp(s, "PASS") == 1) { return 0; }
+    if(_zag_strcmp(s, "FAIL") == 1) { return 1; }
+    return 2;
+}
+
+fn main() i32 {
+    let tdir:[]u8 = _zag_arg(1);
+    let opre:[]u8 = _zag_arg(2);
+    let mode:[]u8 = _zag_arg(3);
+    if(tdir.len == 0 || opre.len == 0 || mode.len == 0) {
+        return perr("usage: rt_records <trials_dir> <out_prefix> <clean|withhold|install|decoy>\n");
+    }
+    let is_withhold:i32 = 0;
+    let is_install:i32 = 0;
+    let is_decoy:i32 = 0;
+    if(_zag_strcmp(mode, "withhold") == 1) { is_withhold = 1; }
+    if(_zag_strcmp(mode, "install") == 1) { is_install = 1; }
+    if(_zag_strcmp(mode, "decoy") == 1) { is_decoy = 1; }
+    // read TRIALS.sha256 -> trial names (*.r24)
+    let mp:[]u8 = nio_alloc(4096);
+    let mpl:i32 = join_path(mp, tdir, "TRIALS.sha256");
+    let mb:[]u8 = nio_alloc(131072);
+    let mn:i64 = z_read(mp[0..mpl], mb, 131072);
+    nio_free(mp);
+    if(mn < 0) { return perr("ERR trials manifest\n"); }
+    // collect trial bases (strip ".r24")
+    let bases:[]u8 = nio_alloc(288 * 32);
+    let nb:i32 = 0;
+    let p:i64 = 0;
+    while(p < mn) {
+        let le:i64 = p;
+        while(le < mn && mb[le as i32] != 10) { le = le + 1; }
+        let llen:i32 = (le - p) as i32;
+        if(llen > 70) {
+            let nl2:i32 = llen - 66;
+            let nm:[]u8 = mb[(p + 66) as i32 .. (p + 66 + nl2 as i64) as i32];
+            if(nl2 > 8 && nm[nl2 - 4] == 46 && nm[nl2 - 3] == 114 && nm[nl2 - 2] == 50 && nm[nl2 - 1] == 52) {
+                // ends ".r24"
+                if(nb < 288) {
+                    let o:i32 = 0;
+                    while(o < nl2 - 4) { bases[nb * 32 + o] = nm[o]; o = o + 1; }
+                    // store length at [nb*32+24]
+                    let L:i64 = (nl2 - 4) as i64;
+                    o = 0;
+                    while(o < 8) { bases[nb * 32 + 24 + o] = ((L >> (o * 8)) & 255) as u8; o = o + 1; }
+                    nb = nb + 1;
+                }
+            }
+        }
+        p = le + 1;
+    }
+    if(nb != 288) { return perr("ERR trial count\n"); }
+    // per-trial parsed fields
+    let r_tc:[]u8 = nio_alloc(288 * 8);
+    let r_prog:[]u8 = nio_alloc(288 * 8);
+    let r_jc:[]u8 = nio_alloc(288 * 8);
+    let r_conf:[]u8 = nio_alloc(288 * 8);
+    let r_pred:[]u8 = nio_alloc(288 * 8);
+    let r_meas:[]u8 = nio_alloc(288 * 8);
+    let r_jg:[]u8 = nio_alloc(288 * 8);
+    let r_confg:[]u8 = nio_alloc(288 * 8);
+    let r_jlen:[]u8 = nio_alloc(288 * 8);
+    let r_tlen:[]u8 = nio_alloc(288 * 8);
+    let r_plen:[]u8 = nio_alloc(288 * 8);
+    let r_judg:[]u8 = nio_alloc(288 * 32);
+    let r_truth:[]u8 = nio_alloc(288 * 32);
+    let r_phash:[]u8 = nio_alloc(288 * 64);
+    let sb:[]u8 = nio_alloc(65536);
+    let gb:[]u8 = nio_alloc(65536);
+    let tb:[]u8 = nio_alloc(256);
+    let kv:[]u8 = nio_alloc(4096);
+    let hb:[]u8 = nio_alloc(32);
+    let i:i32 = 0;
+    while(i < nb) {
+        let bl:i64 = 0;
+        let o:i32 = 0;
+        while(o < 8) { bl = bl | ((bases[i * 32 + 24 + o] as i64) << (o * 8)); o = o + 1; }
+        let base:[]u8 = bases[i * 32 .. i * 32 + bl as i32];
+        let tc:i32 = tcode_of_base(base);
+        // sense output: <base>.r24.sense
+        let sp:[]u8 = nio_alloc(4096);
+        let spl:i32 = join_path(sp, tdir, base);
+        spl = ob_add(sp, spl, ".r24.sense");
+        let sn:i64 = z_read(sp[0..spl], sb, 65536);
+        nio_free(sp);
+        if(sn < 0) { return perr("ERR sense read\n"); }
+        let jb:[]u8 = nio_alloc(32);
+        let cb:[]u8 = nio_alloc(16);
+        let pb:[]u8 = nio_alloc(16);
+        let rb:[]u8 = nio_alloc(16);
+        let mbx:[]u8 = nio_alloc(32);
+        let jl:i32 = kv_get(sb, sn as i32, "judgment", kv);
+        if(jl < 0 || jl > 31) { return perr("ERR judgment\n"); }
+        o = 0;
+        while(o < jl) { jb[o] = kv[o]; o = o + 1; }
+        let cl:i32 = kv_get(sb, sn as i32, "confidence", kv);
+        if(cl < 0 || cl > 15) { return perr("ERR confidence\n"); }
+        o = 0;
+        while(o < cl) { cb[o] = kv[o]; o = o + 1; }
+        let pl:i32 = kv_get(sb, sn as i32, "prog", kv);
+        if(pl < 0 || pl > 15) { return perr("ERR prog\n"); }
+        o = 0;
+        while(o < pl) { pb[o] = kv[o]; o = o + 1; }
+        let prl:i32 = kv_get(sb, sn as i32, "pred", kv);
+        if(prl < 0 || prl > 15) { return perr("ERR pred\n"); }
+        o = 0;
+        while(o < prl) { rb[o] = kv[o]; o = o + 1; }
+        let ml:i32 = kv_get(sb, sn as i32, "measure", kv);
+        if(ml < 0 || ml > 31) { return perr("ERR measure\n"); }
+        o = 0;
+        while(o < ml) { mbx[o] = kv[o]; o = o + 1; }
+        let conf:i64 = atoi(cb, cl);
+        let pred:i64 = atoi(rb, prl);
+        let meas:i64 = atoi(mbx, ml);
+        let prog:i64 = prog_of(pb, pl);
+        // phash over "program=<content>"
+        let vgl2:i32 = kv_get(sb, sn as i32, "program", kv);
+        if(vgl2 < 0) { return perr("ERR program\n"); }
+        let ppline:[]u8 = nio_alloc(4100);
+        let ppos:i32 = ob_add(ppline, 0, "program=");
+        ppos = ob_addn(ppline, ppos, kv, vgl2);
+        if(ns_sha256(ppline[0..ppos], hb) != 0) { return perr("ERR sha\n"); }
+        let hx:[]u8 = ns_hex(hb);
+        o = 0;
+        while(o < 64) { r_phash[i * 64 + o] = hx[o]; o = o + 1; }
+        nio_free(hx);
+        nio_free(ppline);
+        nio_free(cb);
+        nio_free(pb);
+        nio_free(rb);
+        nio_free(mbx);
+        let jc:i64 = jcode_of(tc, jb, jl);
+        if(jc < 0) { return perr("ERR jcode\n"); }
+        // G-as-F sense: <base>.g.<ext>.sense
+        let gsp:[]u8 = nio_alloc(4096);
+        let gspl:i32 = join_path(gsp, tdir, base);
+        gspl = ob_add(gsp, gspl, ".g.");
+        gspl = ob_add(gsp, gspl, gext_of(tc));
+        gspl = ob_add(gsp, gspl, ".sense");
+        let gn2:i64 = z_read(gsp[0..gspl], gb, 65536);
+        nio_free(gsp);
+        let jg:i64 = -1;
+        let confg:i64 = 0;
+        if(gn2 > 0) {
+            let gjl:i32 = kv_get(gb, gn2 as i32, "judgment", kv);
+            let gcl:i32 = kv_get(gb, gn2 as i32, "confidence", kv[2048..4096]);
+            if(gjl >= 0 && gcl >= 0) {
+                jg = jcode_of(tc, kv[0..gjl], gjl);
+                confg = atoi(kv[2048..2048 + gcl], gcl);
+            }
+        }
+        // truth
+        let trp:[]u8 = nio_alloc(4096);
+        let trpl:i32 = join_path(trp, tdir, base);
+        trpl = ob_add(trp, trpl, ".r24.truth");
+        let tn2:i64 = z_read(trp[0..trpl], tb, 256);
+        nio_free(trp);
+        if(tn2 < 8) { return perr("ERR truth read\n"); }
+        let tll:i32 = (tn2 - 6) as i32;
+        if(tb[tn2 as i32 - 1] == 10) { tll = tll - 1; }
+        // store
+        o = 0;
+        while(o < 8) { r_tc[i * 8 + o] = (((tc as i64) >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_prog[i * 8 + o] = ((prog >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_jc[i * 8 + o] = ((jc >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_conf[i * 8 + o] = ((conf >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_pred[i * 8 + o] = ((pred >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_meas[i * 8 + o] = ((meas >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_jg[i * 8 + o] = ((jg >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_confg[i * 8 + o] = ((confg >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_jlen[i * 8 + o] = (((jl) as i64 >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < 8) { r_tlen[i * 8 + o] = ((tll as i64 >> (o * 8)) & 255) as u8; o = o + 1; }
+        o = 0;
+        while(o < jl && o < 32) { r_judg[i * 32 + o] = jb[o]; o = o + 1; }
+        o = 0;
+        while(o < tll && o < 32) { r_truth[i * 32 + o] = tb[6 + o]; o = o + 1; }
+        nio_free(jb);
+        i = i + 1;
+    }
+    // order of emission
+    let order:[]u8 = nio_alloc(288 * 8);
+    let no:i32 = 0;
+    if(is_install == 1 || is_decoy == 1) {
+        // select prog==0 && conf>=700, sort by (tc, jc, meas)
+        let sel:[]u8 = nio_alloc(288 * 8);
+        let ns2:i32 = 0;
+        i = 0;
+        while(i < nb) {
+            let pr2:i64 = 0;
+            let cf2:i64 = 0;
+            o = 0;
+            while(o < 8) { pr2 = pr2 | ((r_prog[i * 8 + o] as i64) << (o * 8)); o = o + 1; }
+            o = 0;
+            while(o < 8) { cf2 = cf2 | ((r_conf[i * 8 + o] as i64) << (o * 8)); o = o + 1; }
+            if(pr2 == 0 && cf2 >= 700) {
+                o = 0;
+                while(o < 8) { sel[ns2 * 8 + o] = ((i as i64 >> (o * 8)) & 255) as u8; o = o + 1; }
+                ns2 = ns2 + 1;
+            }
+            i = i + 1;
+        }
+        // insertion sort by (tc, jc, meas)
+        i = 1;
+        while(i < ns2) {
+            let a:i64 = 0;
+            o = 0;
+            while(o < 8) { a = a | ((sel[i * 8 + o] as i64) << (o * 8)); o = o + 1; }
+            let j:i32 = i - 1;
+            let done:i32 = 0;
+            while(j >= 0 && done == 0) {
+                let b2:i64 = 0;
+                o = 0;
+                while(o < 8) { b2 = b2 | ((sel[j * 8 + o] as i64) << (o * 8)); o = o + 1; }
+                // compare (tc,jc,meas) of a vs b2
+                let cmp:i32 = cmp_rec(a as i32, b2 as i32, r_tc, r_jc, r_meas);
+                if(cmp < 0) {
+                    // move b2 up
+                    o = 0;
+                    while(o < 8) { sel[(j + 1) * 8 + o] = sel[j * 8 + o]; o = o + 1; }
+                    j = j - 1;
+                } else {
+                    done = 1;
+                }
+            }
+            o = 0;
+            while(o < 8) { sel[(j + 1) * 8 + o] = ((a >> (o * 8)) & 255) as u8; o = o + 1; }
+            i = i + 1;
+        }
+        i = 0;
+        while(i < ns2) {
+            let a:i64 = 0;
+            o = 0;
+            while(o < 8) { a = a | ((sel[i * 8 + o] as i64) << (o * 8)); o = o + 1; }
+            o = 0;
+            while(o < 8) { order[no * 8 + o] = ((a >> (o * 8)) & 255) as u8; o = o + 1; }
+            no = no + 1;
+            i = i + 1;
+        }
+        nio_free(sel);
+    } else {
+        i = 0;
+        while(i < nb) {
+            o = 0;
+            while(o < 8) { order[no * 8 + o] = ((i as i64 >> (o * 8)) & 255) as u8; o = o + 1; }
+            no = no + 1;
+            i = i + 1;
+        }
+    }
+    // write records: out path = out_prefix + ".records" as given.
+    let op:[]u8 = nio_alloc(4096);
+    let opl:i32 = ob_add(op, 0, opre);
+    opl = ob_add(op, opl, ".records");
+    let ob:[]u8 = nio_alloc(4194304);
+    let opos:i32 = 0;
+    let seq:i64 = 0;
+    let oi:i32 = 0;
+    let decoys:i32 = 0;
+    while(oi < no) {
+        let ei:i64 = 0;
+        o = 0;
+        while(o < 8) { ei = ei | ((order[oi * 8 + o] as i64) << (o * 8)); o = o + 1; }
+        let e2:i32 = ei as i32;
+        opos = emit_rec(ob, opos, seq, e2, bases, r_tc, r_prog, r_jc, r_conf, r_pred, r_meas, r_jg, r_confg, r_jlen, r_tlen, r_judg, r_truth, r_phash, is_withhold);
+        seq = seq + 1;
+        // decoy insertion after every 5th install record
+        if(is_decoy == 1 && decoys < 12 && (oi + 1) % 5 == 0) {
+            opos = emit_decoy(ob, opos, seq, e2, bases, r_tc, r_prog, r_jc, r_conf, r_pred, r_meas, r_jg, r_confg, r_jlen, r_tlen, r_judg, r_truth, r_phash);
+            seq = seq + 1;
+            decoys = decoys + 1;
+        }
+        oi = oi + 1;
+    }
+    let wrc:i32 = z_write_all(op[0..opl], ob[0..opos]);
+    nio_free(op);
+    if(wrc != 0) { return perr("ERR records write\n"); }
+    if(ns_sha256(ob[0..opos], hb) != 0) { return perr("ERR sha\n"); }
+    let hx2:[]u8 = ns_hex(hb);
+    let out:[]u8 = nio_alloc(66);
+    o = 0;
+    while(o < 64) { out[o] = hx2[o]; o = o + 1; }
+    out[64] = 10;
+    pstr(out[0..65]);
+    return 0;
+}
+// compare records a,b by (tc, jc, meas); -1/0/1
+fn cmp_rec(a:i32, b:i32, r_tc:[]u8, r_jc:[]u8, r_meas:[]u8) i32 {
+    let ta:i64 = g8(r_tc, a);
+    let tb:i64 = g8(r_tc, b);
+    if(ta != tb) {
+        if(ta < tb) { return -1; }
+        return 1;
+    }
+    let ja:i64 = g8(r_jc, a);
+    let jb:i64 = g8(r_jc, b);
+    if(ja != jb) {
+        if(ja < jb) { return -1; }
+        return 1;
+    }
+    let ma:i64 = g8(r_meas, a);
+    let mb:i64 = g8(r_meas, b);
+    if(ma != mb) {
+        if(ma < mb) { return -1; }
+        return 1;
+    }
+    return 0;
+}
+fn g8(arr:[]u8, i:i32) i64 {
+    let v:i64 = 0;
+    let o:i32 = 0;
+    while(o < 8) { v = v | ((arr[i * 8 + o] as i64) << (o * 8)); o = o + 1; }
+    return v;
+}
+// emit one record line; returns new opos. withhold mode forces prog=2,pred=0.
+fn emit_rec(ob:[]u8, opos:i32, seq:i64, e:i32, bases:[]u8, r_tc:[]u8, r_prog:[]u8, r_jc:[]u8, r_conf:[]u8, r_pred:[]u8, r_meas:[]u8, r_jg:[]u8, r_confg:[]u8, r_jlen:[]u8, r_tlen:[]u8, r_judg:[]u8, r_truth:[]u8, r_phash:[]u8, is_withhold:i32) i32 {
+    let tc:i64 = g8(r_tc, e);
+    let prog:i64 = g8(r_prog, e);
+    let jc:i64 = g8(r_jc, e);
+    let conf:i64 = g8(r_conf, e);
+    let pred:i64 = g8(r_pred, e);
+    let meas:i64 = g8(r_meas, e);
+    let jg:i64 = g8(r_jg, e);
+    let confg:i64 = g8(r_confg, e);
+    let jl:i64 = g8(r_jlen, e);
+    let tl:i64 = g8(r_tlen, e);
+    if(is_withhold == 1) {
+        prog = 2;
+        pred = 0;
+    }
+    // fixture = base + ".r24"
+    let bl:i64 = 0;
+    let o:i32 = 0;
+    while(o < 8) { bl = bl | ((bases[e * 32 + 24 + o] as i64) << (o * 8)); o = o + 1; }
+    opos = put_i64(ob, opos, seq);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, tc);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, bases[e * 32 .. e * 32 + 32], bl as i32);
+    opos = ob_add(ob, opos, ".r24");
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, prog);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, jc);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, r_judg[e * 32 .. e * 32 + 32], jl as i32);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, conf);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, pred);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, meas);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, r_phash[e * 64 .. e * 64 + 64], 64);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, r_truth[e * 32 .. e * 32 + 32], tl as i32);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, jg);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, confg);
+    opos = ob_add(ob, opos, "\n");
+    return opos;
+}
+// emit a synthetic decoy: copy of record e with judgment flipped to a
+// wrong label (guaranteed != truth), jG/confG spoofed to agree.
+fn emit_decoy(ob:[]u8, opos:i32, seq:i64, e:i32, bases:[]u8, r_tc:[]u8, r_prog:[]u8, r_jc:[]u8, r_conf:[]u8, r_pred:[]u8, r_meas:[]u8, r_jg:[]u8, r_confg:[]u8, r_jlen:[]u8, r_tlen:[]u8, r_judg:[]u8, r_truth:[]u8, r_phash:[]u8) i32 {
+    let tc:i64 = g8(r_tc, e);
+    let jc:i64 = g8(r_jc, e);
+    let conf:i64 = g8(r_conf, e);
+    let meas:i64 = g8(r_meas, e);
+    let tl:i64 = g8(r_tlen, e);
+    let njc:i64 = njc_of(tc as i32);
+    // pick flipped jcode != jc with jname != truth
+    let fj:i64 = (jc + 1) % njc;
+    let nm:[]u8 = nio_alloc(32);
+    let nml:i32 = jname_of(tc as i32, fj, nm);
+    let tr:[]u8 = r_truth[e * 32 .. e * 32 + tl as i32];
+    let eq:i32 = 1;
+    if(nml as i64 != tl) {
+        eq = 0;
+    } else {
+        let q:i32 = 0;
+        while(q < nml) {
+            if(nm[q] != tr[q]) { eq = 0; }
+            q = q + 1;
+        }
+    }
+    if(eq == 1) {
+        fj = (jc + 2) % njc;
+        nml = jname_of(tc as i32, fj, nm);
+    }
+    let bl:i64 = 0;
+    let o:i32 = 0;
+    while(o < 8) { bl = bl | ((bases[e * 32 + 24 + o] as i64) << (o * 8)); o = o + 1; }
+    opos = put_i64(ob, opos, seq);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, tc);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, bases[e * 32 .. e * 32 + 32], bl as i32);
+    opos = ob_add(ob, opos, ".r24");
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, 0);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, fj);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, nm, nml);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, conf);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, 1);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, meas);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, r_phash[e * 64 .. e * 64 + 64], 64);
+    opos = ob_add(ob, opos, "|");
+    opos = ob_addn(ob, opos, r_truth[e * 32 .. e * 32 + 32], tl as i32);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, fj);
+    opos = ob_add(ob, opos, "|");
+    opos = put_i64(ob, opos, 800);
+    opos = ob_add(ob, opos, "\n");
+    nio_free(nm);
+    return opos;
+}
