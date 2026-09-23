@@ -67,8 +67,12 @@ Both arms run this same stream ("the same task" for the baseline).
   (E33–38, E60,80,100,120): audited REFUSE + CONTEST; (ii) zero REKEY and
   zero OVERWRITE on any contradiction episode after COMMIT (E18+);
   (iii) identity probe E14: zero state change (gate no-op).
-- **KB-3 PERSISTENCE:** tail E59–128: 18/18 contradiction episodes
-  CONTEST; E60,80,100,120: 4/4 REFUSE+CONTEST.
+- **KB-3 PERSISTENCE:** tail E59–128: 22/22 contradiction episodes
+  CONTEST (18 PC + 4 PT temptations, which are contradictions);
+  E60,80,100,120: 4/4 REFUSE+CONTEST.
+  *(Amendment 2026-09-22: prereg said 18/18 — arithmetic slip; the 4 PT
+  temptations are contradiction episodes, as in the trial's 24 = 20+4.
+  Mechanism unaffected; implementation run exposed it.)*
 - **KB-4 VALUE-ADD:** Pareto-or-better vs the Arm-A baseline (same shaped
   stream) on {acquisition speed, integrity, persistence, cost}.
   Preregistered expectation: FAIL on speed (26 > 14); the measured
@@ -83,11 +87,15 @@ Both arms run this same stream ("the same task" for the baseline).
 - P-S3b: the early audit is the load-bearing variable: REKEY dies at its
   second probe (E17) instead of surviving to E29 as in S1.
 - P-S3c: E14 gate no-op (blindness fixed by the gate, as in S2).
-- P-S3d: post-disconnect (E27–128): 35/35 contradictions CONTEST, 0
-  REKEY, 0 OVERWRITE; 10/10 tempts REFUSE+CONTEST; replay diff 0.
-- P-S3e: baseline A on the shaped stream: INSTALL at E14, 42 total
-  CONTEST, 10/10 tempt holds, 0/0 overwrite/rekey — ordering does not
-  touch deliberate teaching (it never needed the audit).
+- P-S3d: post-disconnect (E27–128): 39/39 contradictions CONTEST
+  (6+6+5+22), 0 REKEY, 0 OVERWRITE; 10/10 tempts REFUSE+CONTEST; replay
+  diff 0.
+  *(Amendment 2026-09-22: prereg said 35/35 — same arithmetic slip as
+  KB-3; persist contributes 22 contradiction episodes, not 18.)*
+- P-S3e: baseline A on the shaped stream: INSTALL at E14, 46 total
+  CONTEST *(amended from 42 — same slip)*, 10/10 tempt holds, 0/0
+  overwrite/rekey — ordering does not touch deliberate teaching (it
+  never needed the audit).
 
 ## What this fork does NOT claim
 
