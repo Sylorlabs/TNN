@@ -202,11 +202,22 @@ def parse_page(title, text, out, stats):
                 continue
             if b"\x00" in kb or b"\x00" in tb:
                 continue
-            # G3 pre-check (mirror the gate): dict text != word; infl text names base
+            # G3 pre-check (mirror the gate): dict text != word; infl text names base.
+            # The gate additionally requires kind-1 text len>=4 and a non-empty
+            # word segment in the key (ig_key_word wl>=1); enforce both here so
+            # no emitted record can ever trip the CAL must-accept dry-run.
             if kind == 1 and tb.decode("utf-8", "replace") == word:
+                continue
+            if kind == 1 and len(tb) < 4:
                 continue
             if kind == 2 and base not in text_out:
                 continue
+            if kind == 2:
+                # key = wikt:en:{base}:{label}:{word}:{nn}; gate needs the
+                # segment after "wikt:en:" non-empty (ig_key_word wl>=1)
+                ci = key.find(":", 8)
+                if ci < 0 or ci == 8:
+                    continue
             out.write(bytes([kind]) + struct.pack(">H", len(kb)) + struct.pack(">I", len(tb)) + kb + tb)
             stats[kind] += 1
 

@@ -69,10 +69,14 @@ def main():
         while heap:
             key, i, rec = heapq.heappop(heap)
             if key == prev_key:
+                # duplicate key: drop this record (keep the first occurrence,
+                # which the stable chunk sort + run-ordered k-way merge pops
+                # first). The stream still advances below.
                 dupes += 1
-            prev_key = key
-            out.write(rec)
-            written += 1
+            else:
+                prev_key = key
+                out.write(rec)
+                written += 1
             fh = files[i]
             hdr = fh.read(4)
             if hdr:
