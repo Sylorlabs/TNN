@@ -7,7 +7,6 @@ Master table of contents for the True Neural Network (TNN) research archive.
 - `program/` — charter, autonomy position, architecture, evaluation doctrine, living status map.
 - `hypotheses/` — one falsifiable claim per file, with an evidence table linking experiments to results.
 - `generations/` — R27 through R33, each with its own `INDEX.md`, handoff, reports, and per-experiment directories.
-- `lab/` — the active native-lab waves. Headline results: `lab/wave6/doc-front/INTEGRITY_HEADLINE.md` (wave-5 integrity) and `lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md` (speech-act learning: 7.1% to 50.0%).
 
 ## Conventions
 

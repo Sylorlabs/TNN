@@ -1,0 +1,1079 @@
+@import("s5_store.zag")
+// dd_main.zag — duplicate-fact investigation over the S5 canonical store.
+// Modes (argv[1]): scan | prove | exp1 | exp2
+// Pure Zag. Zero RNG in scanner/policy/proofs. The workload generator uses
+// splitmix64-of-index as a DETERMINISTIC fixture function (same precedent as
+// workload.zag) — test data, never a decision path.
+//
+// Claim encoding (packed triple, i64 value):
+//   v = subj | (rel<<20) | (obj<<32)   [subj 20b | rel 12b | obj 32b]
+// Subject aliases [100000,104096) -> canon s-100000 (synonym wording).
+// Relation aliases [1000,1064) -> canon r-1000.
+// Relations 0..31 single-valued (conflict = contradiction); 32..63 multi-valued.
+
+// ---------- tunables ----------
+const DD_NCLAIM:i32=40000;
+const DD_CAP:i32=200000;
+const DD_CSLOTS:i32=1024;
+const DD_NSRC:i32=50;
+const DD_HMBITS:i32=19;          // hash map: 2^19 slots x 24B = 12MB
+const DD_GENSEED:i64=777;
+const DD_CORRSEED:i64=31337;
+
+// ---------- print / parse helpers ----------
+fn dd_pnum(v:i64)void {
+    let s:[]u8=_zag_i64_to_str(v);
+    _zag_print(s);
+    _zag_free(_zag_slice_ptr(s));
+}
+fn dd_atoi(s:[]u8)i64 {
+    let v:i64=0;
+    let i:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c<48||c>57){break;}
+        v=v*10+((c as i64)-48);
+        i=i+1;
+    }
+    return v;
+}
+fn dd_streq(a:[]u8,b:[]u8)i32 {
+    if(_zag_strcmp(a,b)==1){return 1;}
+    return 0;
+}
+// ---------- deterministic fixture function (splitmix64 of index) ----------
+fn dd_lshr(v:i64,bits:i32,mask:i64)i64 { return (v>>bits)&mask; }
+fn dd_mix(state:i64)i64 {
+    let golden:i64=0x9E3779B97F4A7C15 as i64;
+    let x:i64=state+golden;
+    let z:i64=x;
+    z=((z^(dd_lshr(z,30,0x3FFFFFFFF))) * (0xBF58476D1CE4E5B9 as i64));
+    z=((z^(dd_lshr(z,27,0x1FFFFFFFFF))) * (0x94D049BB133111EB as i64));
+    return z^(dd_lshr(z,31,0x1FFFFFFFF));
+}
+fn dd_draw(seed:i64,idx:i64)i64 {
+    let golden:i64=0x9E3779B97F4A7C15 as i64;
+    return dd_mix(seed+(idx+1)*golden);
+}
+fn dd_urmod(d:i64,r:i64)i64 {
+    let v:i64=d%r;
+    if(v<0){v=v+r;}
+    return v;
+}
+// ---------- claim encoding ----------
+fn dd_pack(subj:i64,rel:i64,obj:i64)i64 {
+    return subj | (rel<<20) | (obj<<32);
+}
+fn dd_subj(v:i64)i64 { return v & 1048575; }
+fn dd_rel(v:i64)i64 { return (v>>20) & 4095; }
+fn dd_obj(v:i64)i64 { return (v>>32) & 4294967295; }
+fn dd_canon_subj(s:i64)i64 {
+    if(s>=100000 && s<104096){ return s-100000; }
+    return s;
+}
+fn dd_canon_rel(r:i64)i64 {
+    if(r>=1000 && r<1064){ return r-1000; }
+    return r;
+}
+fn dd_canon_val(v:i64)i64 {
+    return dd_pack(dd_canon_subj(dd_subj(v)),dd_canon_rel(dd_rel(v)),dd_obj(v));
+}
+fn dd_single_valued(r:i64)i32 {
+    if(r<32){return 1;}
+    return 0;
+}
+// ---------- open-addressing hash map ----------
+// entry 24B: key_lo u32 @0, key_hi u32 @4, aux_lo u32 @8, aux_hi u32 @12,
+// used u8 @16.
+fn dd_hm_alloc()[]u8 {
+    return sc_alloc((1<<DD_HMBITS)*24);
+}
+fn dd_hm_clear(a:[]u8)void {
+    let i:i32=0;
+    while(i<a.len){a[i]=0;i=i+1;}
+}
+fn dd_hm_key_at(a:[]u8,o:i32)i64 {
+    let lo:i64=(sc_g32(a,o) as i64)&4294967295;
+    let hi:i64=sc_g32(a,o+4) as i64;
+    return lo|(hi<<32);
+}
+fn dd_hm_aux_at(a:[]u8,o:i32)i64 {
+    let lo:i64=(sc_g32(a,o+8) as i64)&4294967295;
+    let hi:i64=sc_g32(a,o+12) as i64;
+    return lo|(hi<<32);
+}
+fn dd_hm_set(a:[]u8,o:i32,key:i64,aux:i64)void {
+    sc_s32(a,o,key as i32);
+    sc_s32(a,o+4,(key>>32) as i32);
+    sc_s32(a,o+8,aux as i32);
+    sc_s32(a,o+12,(aux>>32) as i32);
+    a[o+16]=1;
+}
+// find slot for key. *found=1 -> o is the entry; *found=0 -> o is empty slot.
+// returns -1 on table-full (should not happen at our load factors).
+fn dd_hm_slot(a:[]u8,key:i64,found:*i32)i32 {
+    let mask:i64=((1<<DD_HMBITS) as i64)-1;
+    let h:i64=dd_mix(key ^ (0x9E3779B97F4A7C15 as i64));
+    let i:i64=h&mask;
+    let tries:i32=0;
+    let lim:i32=1<<DD_HMBITS;
+    while(tries<lim){
+        let o:i32=(i*24) as i32;
+        let used:i32=(a[o+16] as i32)&255;
+        if(used==0){found.*=0;return o;}
+        if(dd_hm_key_at(a,o)==key){found.*=1;return o;}
+        i=(i+1)&mask;
+        tries=tries+1;
+    }
+    found.*=0;
+    return -1;
+}
+// ---------- workload generator ----------
+// gt_claim: n*4 bytes i32 per fact (claim idx)
+// gt_var:   n bytes u8 per fact (0 normal,1 sem-subj,2 sem-rel,3 conflict)
+// gt_src:   n*4 bytes i32 per fact (source id)
+// one_copy: if 1, emit exactly one (normal) copy per claim (dedup baseline)
+// returns n facts, or -1 on add failure.
+fn dd_gen(st:*ScStore,gt_claim:[]u8,gt_var:[]u8,gt_src:[]u8,one_copy:i32)i32 {
+    let n:i32=0;
+    let c:i32=0;
+    while(c<DD_NCLAIM){
+        let s:i64=c as i64;
+        let r:i64=((c*7)%64) as i64;
+        let o:i64=c as i64;
+        let copies:i32=1+16/(1+(c%17));
+        if(one_copy==1){copies=1;}
+        let k:i32=0;
+        while(k<copies){
+            let vs:i64=s;
+            let vr:i64=r;
+            let vo:i64=o;
+            let vv:i32=0;
+            if(one_copy==0){
+                if(c<4096 && c%11==0 && k%2==1){vs=100000+s;vv=1;}
+                else{
+                    if(c%13==0 && k%2==0){vr=1000+r;if(vv==0){vv=2;}}
+                }
+                if(k==copies-1 && c%29==0 && r<32){
+                    vo=(o ^ (0xBEEF as i64))&4294967295;
+                    vv=3;
+                }
+            }
+            let val:i64=dd_pack(vs,vr,vo);
+            let src:i32=(dd_urmod(dd_draw(DD_GENSEED,n as i64),DD_NSRC as i64)) as i32;
+            if(vv==3){src=9*(1+(c%5));}
+            let slot:i32=-1;
+            let rc:i32=sc_add(st,n,val,&slot);
+            if(rc!=0||slot!=n){return -1;}
+            sc_s32(gt_claim,n*4,c);
+            gt_var[n]=vv as u8;
+            sc_s32(gt_src,n*4,src);
+            n=n+1;
+            k=k+1;
+        }
+        c=c+1;
+    }
+    return n;
+}
+fn dd_store_new()ScStore {
+    let st:ScStore=ScStore{.cap=0,.n=0,.cslots=0,.nchunks=0,.chunk_ptrs="",
+        .chashes="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_rev=0,.ops_del=0,
+        .ops_verify=0,.ops_audit=0,.ops_find=0};
+    return st;
+}
+
+// ---------- scanner ----------
+// cls bits per id: 1=exact-dup member, 2=semantic-dup member (mixed canon
+// group), 4=conflict member. repE/ecnt: exact groups; repS/scnt/sval/smix:
+// canon groups; cg_*: conflict groups. hm: scratch 2^19 map.
+// Returns live distinct value count; *nconf = # conflict groups.
+fn dd_scan(st:*ScStore,n:i32,gt_claim:[]u8,gt_var:[]u8,cls:[]u8,
+    repE:[]u8,ecnt:[]u8,repS:[]u8,scnt:[]u8,sval:[]u8,smix:[]u8,
+    cg_obj:[]u8,cg_cnt:[]u8,cg_multi:[]u8,hm:[]u8,nconf:*i32)i32 {
+    // zero count/class arrays: dd_scan may run twice on one store (prove mode)
+    let zi:i32=0;
+    while(zi<n){
+        cls[zi]=0;
+        sc_s32(ecnt,zi*4,0);
+        sc_s32(scnt,zi*4,0);
+        sc_s32(cg_cnt,zi*4,0);
+        cg_multi[zi]=0;
+        smix[zi]=0;
+        zi=zi+1;
+    }
+    let id:i32=0;
+    // ---- pass 1: exact (value -> first id) ----
+    dd_hm_clear(hm);
+    let distinct:i32=0;
+    id=0;
+    while(id<n){
+        if(sc_is_tombstoned(st,id)==0){
+            let v:i64=sc_read_value(st,id);
+            let found:i32=0;
+            let o:i32=dd_hm_slot(hm,v,&found);
+            if(o<0){return -1;}
+            if(found==1){
+                let rep:i32=(dd_hm_aux_at(hm,o)) as i32;
+                sc_s32(repE,id*4,rep);
+                sc_s32(ecnt,rep*4,sc_g32(ecnt,rep*4)+1);
+            }else{
+                dd_hm_set(hm,o,v,id as i64);
+                distinct=distinct+1;
+                sc_s32(repE,id*4,id);
+                sc_s32(ecnt,id*4,1);
+            }
+        }else{
+            sc_s32(repE,id*4,-1);
+            sc_s32(ecnt,id*4,0);
+        }
+        id=id+1;
+    }
+    id=0;
+    while(id<n){
+        let rep:i32=sc_g32(repE,id*4);
+        if(rep>=0 && sc_g32(ecnt,rep*4)>1){cls[id]=cls[id]|1;}
+        id=id+1;
+    }
+    // ---- pass 2: semantic (canon value -> first id; mixed values only) ----
+    dd_hm_clear(hm);
+    id=0;
+    while(id<n){
+        if(sc_is_tombstoned(st,id)==0){
+            let v:i64=sc_read_value(st,id);
+            let cv:i64=dd_canon_val(v);
+            let found:i32=0;
+            let o:i32=dd_hm_slot(hm,cv,&found);
+            if(o<0){return -1;}
+            if(found==1){
+                let rep:i32=(dd_hm_aux_at(hm,o)) as i32;
+                sc_s32(repS,id*4,rep);
+                sc_s32(scnt,rep*4,sc_g32(scnt,rep*4)+1);
+                if(sc_g64(sval,(rep*8) as i64)!=v){smix[rep]=1;}
+            }else{
+                dd_hm_set(hm,o,cv,id as i64);
+                sc_s32(repS,id*4,id);
+                sc_s32(scnt,id*4,1);
+                sc_s64(sval,(id*8) as i64,v);
+                smix[id]=0;
+            }
+        }else{
+            sc_s32(repS,id*4,-1);
+            sc_s32(scnt,id*4,0);
+        }
+        id=id+1;
+    }
+    id=0;
+    while(id<n){
+        let rep:i32=sc_g32(repS,id*4);
+        if(rep>=0 && sc_g32(scnt,rep*4)>1 && smix[rep]==1){cls[id]=cls[id]|2;}
+        id=id+1;
+    }
+    // ---- pass 3: conflict ((canon subj,canon rel) -> distinct objs) ----
+    dd_hm_clear(hm);
+    let ng:i32=0;
+    id=0;
+    while(id<n){
+        if(sc_is_tombstoned(st,id)==0){
+            let v:i64=sc_read_value(st,id);
+            let cr:i64=dd_canon_rel(dd_rel(v));
+            if(dd_single_valued(cr)==1){
+                let cs:i64=dd_canon_subj(dd_subj(v));
+                let key:i64=(cs<<12)|cr;
+                let ob:i64=dd_obj(v);
+                let found:i32=0;
+                let o:i32=dd_hm_slot(hm,key,&found);
+                if(o<0){return -1;}
+                if(found==1){
+                    let gi:i32=(dd_hm_aux_at(hm,o)) as i32;
+                    sc_s32(cg_cnt,gi*4,sc_g32(cg_cnt,gi*4)+1);
+                    if(sc_g64(cg_obj,(gi*8) as i64)!=ob){cg_multi[gi]=1;}
+                }else{
+                    dd_hm_set(hm,o,key,ng as i64);
+                    sc_s64(cg_obj,(ng*8) as i64,ob);
+                    sc_s32(cg_cnt,ng*4,1);
+                    cg_multi[ng]=0;
+                    ng=ng+1;
+                }
+            }
+        }
+        id=id+1;
+    }
+    id=0;
+    while(id<n){
+        if(sc_is_tombstoned(st,id)==0){
+            let v:i64=sc_read_value(st,id);
+            let cr:i64=dd_canon_rel(dd_rel(v));
+            if(dd_single_valued(cr)==1){
+                let cs:i64=dd_canon_subj(dd_subj(v));
+                let key:i64=(cs<<12)|cr;
+                let found:i32=0;
+                let o:i32=dd_hm_slot(hm,key,&found);
+                if(found==1){
+                    let gi:i32=(dd_hm_aux_at(hm,o)) as i32;
+                    if(cg_multi[gi]==1){cls[id]=cls[id]|4;}
+                }
+            }
+        }
+        id=id+1;
+    }
+    let nc:i32=0;
+    let gi2:i32=0;
+    while(gi2<ng){
+        if(cg_multi[gi2]==1){nc=nc+1;}
+        gi2=gi2+1;
+    }
+    nconf.*=nc;
+    return distinct;
+}
+// count class stats from cls/repE/ecnt/repS/scnt/smix
+fn dd_class_stats(n:i32,cls:[]u8,repE:[]u8,ecnt:[]u8,repS:[]u8,scnt:[]u8,
+    smix:[]u8,hm_hist:[]u8)void {
+    // hm_hist: 10 x i32 histogram of exact group sizes (idx 0..8, 9=9+)
+    let id:i32=0;
+    let e_ids:i64=0;
+    let s_ids:i64=0;
+    let c_ids:i64=0;
+    let u_ids:i64=0;
+    while(id<n){
+        let b:i32=(cls[id] as i32)&255;
+        if((b&1)!=0){e_ids=e_ids+1;}
+        if((b&2)!=0){s_ids=s_ids+1;}
+        if((b&4)!=0){c_ids=c_ids+1;}
+        if(b==0){u_ids=u_ids+1;}
+        id=id+1;
+    }
+    let e_groups:i64=0;
+    id=0;
+    while(id<n){
+        if(sc_g32(repE,id*4)==id){
+            let sz:i32=sc_g32(ecnt,id*4);
+            if(sz>1){
+                e_groups=e_groups+1;
+                let h:i32=sz;
+                if(h>9){h=9;}
+                sc_s32(hm_hist,h*4,sc_g32(hm_hist,h*4)+1);
+            }
+        }
+        id=id+1;
+    }
+    let s_groups:i64=0;
+    id=0;
+    while(id<n){
+        if(sc_g32(repS,id*4)==id && sc_g32(scnt,id*4)>1 && smix[id]==1){
+            s_groups=s_groups+1;
+        }
+        id=id+1;
+    }
+    _zag_print("DD_CLASS,live_exact_ids=");dd_pnum(e_ids);
+    _zag_print(",live_sem_ids=");dd_pnum(s_ids);
+    _zag_print(",live_conflict_ids=");dd_pnum(c_ids);
+    _zag_print(",unique_ids=");dd_pnum(u_ids);_zag_println("");
+    _zag_print("DD_CLASS,exact_groups=");dd_pnum(e_groups);
+    _zag_print(",sem_groups=");dd_pnum(s_groups);_zag_println("");
+    let h2:i32=1;
+    while(h2<=9){
+        _zag_print("DD_HIST,exact_size");
+        if(h2==9){_zag_print("_9plus");}else{_zag_print("_");dd_pnum(h2 as i64);}
+        _zag_print("=");dd_pnum(sc_g32(hm_hist,h2*4) as i64);_zag_println("");
+        h2=h2+1;
+    }
+}
+
+// ---------- mode: scan ----------
+fn dd_mode_scan()void {
+    let st:ScStore=dd_store_new();
+    if(sc_store_init(DD_CAP,DD_CSLOTS,&st)!=0){_zag_println("DD_SCAN,init_fail");return;}
+    let gt_claim:[]u8=sc_alloc(DD_CAP*4);
+    let gt_var:[]u8=sc_alloc(DD_CAP);
+    let gt_src:[]u8=sc_alloc(DD_CAP*4);
+    let n:i32=dd_gen(&st,gt_claim,gt_var,gt_src,0);
+    if(n<0){_zag_println("DD_SCAN,gen_fail");return;}
+    _zag_print("DD_SCAN,n_facts=");dd_pnum(n as i64);_zag_println("");
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    let cls:[]u8=sc_alloc(n);
+    let repE:[]u8=sc_alloc(n*4);
+    let ecnt:[]u8=sc_alloc(n*4);
+    let repS:[]u8=sc_alloc(n*4);
+    let scnt:[]u8=sc_alloc(n*4);
+    let sval:[]u8=sc_alloc(n*8);
+    let smix:[]u8=sc_alloc(n);
+    let cg_obj:[]u8=sc_alloc(n*8);
+    let cg_cnt:[]u8=sc_alloc(n*4);
+    let cg_multi:[]u8=sc_alloc(n);
+    let hm:[]u8=dd_hm_alloc();
+    let nconf:i32=0;
+    let distinct:i32=dd_scan(&st,n,gt_claim,gt_var,cls,repE,ecnt,repS,scnt,
+        sval,smix,cg_obj,cg_cnt,cg_multi,hm,&nconf);
+    if(distinct<0){_zag_println("DD_SCAN,scan_fail");return;}
+    _zag_print("DD_SCAN,live=");dd_pnum(sc_live_count(&st) as i64);
+    _zag_print(",distinct_values=");dd_pnum(distinct as i64);
+    _zag_print(",conflict_groups=");dd_pnum(nconf as i64);_zag_println("");
+    let hm_hist:[]u8=sc_alloc(10*4);
+    dd_class_stats(n,cls,repE,ecnt,repS,scnt,smix,hm_hist);
+    // ---- ground-truth scoring ----
+    // (a) exact groups must be claim-pure (catches hash collisions)
+    let tmpc:[]u8=sc_alloc(n*4);
+    let ii:i32=0;
+    while(ii<n){sc_s32(tmpc,ii*4,-1);ii=ii+1;}
+    let exact_err:i64=0;
+    ii=0;
+    while(ii<n){
+        if(((cls[ii] as i32)&1)!=0){
+            let rep:i32=sc_g32(repE,ii*4);
+            let gc:i32=sc_g32(gt_claim,ii*4);
+            let tc:i32=sc_g32(tmpc,rep*4);
+            if(tc==-1){sc_s32(tmpc,rep*4,gc);}
+            else{if(tc!=gc){exact_err=exact_err+1;}}
+        }
+        ii=ii+1;
+    }
+    // (b) semantic variants must be caught; (c) conflicts must be caught
+    let claim_has_var:[]u8=sc_alloc(DD_NCLAIM);
+    let claim_has_conf:[]u8=sc_alloc(DD_NCLAIM);
+    ii=0;
+    while(ii<n){
+        let c4:i32=sc_g32(gt_claim,ii*4);
+        let vv:i32=(gt_var[ii] as i32)&255;
+        if(vv==1||vv==2){claim_has_var[c4]=1;}
+        if(vv==3){claim_has_conf[c4]=1;}
+        ii=ii+1;
+    }
+    let sem_miss:i64=0;
+    let sem_err:i64=0;
+    let conf_miss:i64=0;
+    let conf_err:i64=0;
+    ii=0;
+    while(ii<n){
+        let c5:i32=sc_g32(gt_claim,ii*4);
+        let vv2:i32=(gt_var[ii] as i32)&255;
+        let cb:i32=(cls[ii] as i32)&255;
+        if((vv2==1||vv2==2) && (cb&2)==0){sem_miss=sem_miss+1;}
+        if((cb&2)!=0 && claim_has_var[c5]==0){sem_err=sem_err+1;}
+        if(vv2==3 && (cb&4)==0){conf_miss=conf_miss+1;}
+        if((cb&4)!=0 && claim_has_conf[c5]==0){conf_err=conf_err+1;}
+        ii=ii+1;
+    }
+    _zag_print("DD_SCORE,exact_impure_groups=");dd_pnum(exact_err);
+    _zag_print(",sem_miss=");dd_pnum(sem_miss);
+    _zag_print(",sem_spurious=");dd_pnum(sem_err);
+    _zag_print(",conflict_miss=");dd_pnum(conf_miss);
+    _zag_print(",conflict_spurious=");dd_pnum(conf_err);_zag_println("");
+    // (d) every miss must be a singleton claim (exactly 1 copy): a duplicate
+    // class needs >=2 copies by definition; singletons belong to the verdict
+    // layer (corroboration), not the duplicate scanner.
+    let ccnt2:[]u8=sc_alloc(DD_NCLAIM*4);
+    ii=0;
+    while(ii<n){
+        let c6:i32=sc_g32(gt_claim,ii*4);
+        sc_s32(ccnt2,c6*4,sc_g32(ccnt2,c6*4)+1);
+        ii=ii+1;
+    }
+    let miss_non_singleton:i64=0;
+    ii=0;
+    while(ii<n){
+        let vv3:i32=(gt_var[ii] as i32)&255;
+        let cb2:i32=(cls[ii] as i32)&255;
+        let missed:i32=0;
+        if((vv3==1||vv3==2) && (cb2&2)==0){missed=1;}
+        if(vv3==3 && (cb2&4)==0){missed=1;}
+        if(missed==1){
+            let c7:i32=sc_g32(gt_claim,ii*4);
+            if(sc_g32(ccnt2,c7*4)!=1){miss_non_singleton=miss_non_singleton+1;}
+        }
+        ii=ii+1;
+    }
+    _zag_print("DD_SCORE,miss_non_singleton=");dd_pnum(miss_non_singleton);_zag_println("");
+    // (b/c) REFINED ground-truth scoring.
+    // A variant fact (var 1/2) is "expected semantic" only if its claim has
+    // >=2 NON-CONFLICT copies sharing one canon value with differing raw
+    // values. A variant whose only sibling is a conflicting assertion (var 3)
+    // is correctly NOT a semantic duplicate: after canonicalization the two
+    // copies are genuinely different claims (different objects) — the pair
+    // is a conflict, not a wording variant.
+    // A var-3 fact is "expected conflict" only if its claim has >=2 copies
+    // (a lone conflicting assertion has nothing to conflict with; it belongs
+    // to the verdict/corroboration layer, measured in exp2).
+    let claim_first:[]u8=sc_alloc(DD_NCLAIM*4);
+    ii=0;
+    while(ii<DD_NCLAIM){sc_s32(claim_first,ii*4,-1);ii=ii+1;}
+    ii=0;
+    while(ii<n){
+        let c9:i32=sc_g32(gt_claim,ii*4);
+        if(sc_g32(claim_first,c9*4)==-1){sc_s32(claim_first,c9*4,ii);}
+        ii=ii+1;
+    }
+    let exp_sem:[]u8=sc_alloc(DD_NCLAIM);
+    let exp_conf:[]u8=sc_alloc(DD_NCLAIM);
+    let c10:i32=0;
+    while(c10<DD_NCLAIM){
+        let f0:i32=sc_g32(claim_first,c10*4);
+        if(f0>=0){
+            let nc2:i32=sc_g32(ccnt2,c10*4);
+            // semantic expectation over non-conflict copies
+            let canon0:i64=0;
+            let have_canon:i32=0;
+            let all_same_canon:i32=1;
+            let raw_same:i32=1;
+            let raw0:i64=0;
+            let nnz:i32=0;
+            let j:i32=0;
+            while(j<nc2){
+                let fid:i32=f0+j;
+                let w2:i32=(gt_var[fid] as i32)&255;
+                if(w2!=3){
+                    let vv5:i64=sc_read_value(&st,fid);
+                    let cv5:i64=dd_canon_val(vv5);
+                    if(have_canon==0){canon0=cv5;raw0=vv5;have_canon=1;}
+                    else{
+                        if(cv5!=canon0){all_same_canon=0;}
+                        if(vv5!=raw0){raw_same=0;}
+                    }
+                    nnz=nnz+1;
+                }
+                j=j+1;
+            }
+            if(nnz>=2 && all_same_canon==1 && raw_same==0){exp_sem[c10]=1;}
+            if(nc2>=2){
+                // conflict expectation: any var-3 copy present
+                let j2:i32=0;
+                while(j2<nc2){
+                    if(((gt_var[f0+j2] as i32)&255)==3){exp_conf[c10]=1;j2=nc2;}
+                    j2=j2+1;
+                }
+            }
+        }
+        c10=c10+1;
+    }
+    sem_miss=0;
+    sem_err=0;
+    conf_miss=0;
+    conf_err=0;
+    let lone_conf:i64=0;   // var-3 singletons: verdict-layer cases, not scanner misses
+    let var_conf_ok:i64=0; // variant+conflict pairs correctly conflict-flagged
+    ii=0;
+    while(ii<n){
+        let c11:i32=sc_g32(gt_claim,ii*4);
+        let vv6:i32=(gt_var[ii] as i32)&255;
+        let cb4:i32=(cls[ii] as i32)&255;
+        if((vv6==1||vv6==2) && exp_sem[c11]==1 && (cb4&2)==0){sem_miss=sem_miss+1;}
+        if((cb4&2)!=0 && exp_sem[c11]==0){sem_err=sem_err+1;}
+        if(vv6==3 && exp_conf[c11]==1 && (cb4&4)==0){conf_miss=conf_miss+1;}
+        if((cb4&4)!=0 && exp_conf[c11]==0){conf_err=conf_err+1;}
+        if(vv6==3 && exp_conf[c11]==0){lone_conf=lone_conf+1;}
+        if((vv6==1||vv6==2) && exp_sem[c11]==0 && (cb4&4)!=0){var_conf_ok=var_conf_ok+1;}
+        ii=ii+1;
+    }
+    _zag_print("DD_SCORE2,sem_miss=");dd_pnum(sem_miss);
+    _zag_print(",sem_spurious=");dd_pnum(sem_err);
+    _zag_print(",conflict_miss=");dd_pnum(conf_miss);
+    _zag_print(",conflict_spurious=");dd_pnum(conf_err);
+    _zag_print(",lone_conflict_singletons=");dd_pnum(lone_conf);
+    _zag_print(",variant_conflict_pairs_flagged=");dd_pnum(var_conf_ok);_zag_println("");
+    let wb:i64=sc_written_bytes(&st);
+    let live:i32=sc_live_count(&st);
+    _zag_print("DD_SCAN,written_bytes=");dd_pnum(wb);
+    _zag_print(",b_per_live_fact_x1000=");dd_pnum((wb*1000)/(live as i64));_zag_println("");
+    _zag_print("DD_SCAN,manifest=");dd_pnum(sc_manifest_verify(&st) as i64);
+    _zag_print(",replay=");dd_pnum(sc_replay_check(&st) as i64);_zag_println("");
+    _zag_println("DD_SCAN,done");
+}
+// ---------- mode: prove (deletion safety) ----------
+fn dd_mode_prove()void {
+    let st:ScStore=dd_store_new();
+    if(sc_store_init(DD_CAP,DD_CSLOTS,&st)!=0){_zag_println("DD_PROVE,init_fail");return;}
+    let gt_claim:[]u8=sc_alloc(DD_CAP*4);
+    let gt_var:[]u8=sc_alloc(DD_CAP);
+    let gt_src:[]u8=sc_alloc(DD_CAP*4);
+    let n:i32=dd_gen(&st,gt_claim,gt_var,gt_src,0);
+    if(n<0){_zag_println("DD_PROVE,gen_fail");return;}
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    let cls:[]u8=sc_alloc(n);
+    let repE:[]u8=sc_alloc(n*4);
+    let ecnt:[]u8=sc_alloc(n*4);
+    let repS:[]u8=sc_alloc(n*4);
+    let scnt:[]u8=sc_alloc(n*4);
+    let sval:[]u8=sc_alloc(n*8);
+    let smix:[]u8=sc_alloc(n);
+    let cg_obj:[]u8=sc_alloc(n*8);
+    let cg_cnt:[]u8=sc_alloc(n*4);
+    let cg_multi:[]u8=sc_alloc(n);
+    let hm:[]u8=dd_hm_alloc();
+    let nconf:i32=0;
+    let distinct_before:i32=dd_scan(&st,n,gt_claim,gt_var,cls,repE,ecnt,repS,
+        scnt,sval,smix,cg_obj,cg_cnt,cg_multi,hm,&nconf);
+    if(distinct_before<0){_zag_println("DD_PROVE,scan_fail");return;}
+    // snapshot full recall table
+    let rv:[]u8=sc_alloc(n*8);
+    let rf:[]u8=sc_alloc(n);
+    let i:i32=0;
+    while(i<n){
+        let v:i64=0;
+        let f:i32=sc_recall(&st,i,&v);
+        rf[i]=f as u8;
+        sc_s64(rv,(i*8) as i64,v);
+        i=i+1;
+    }
+    let live_before:i32=sc_live_count(&st);
+    let bytes_before:i64=sc_written_bytes(&st);
+    let c_before:i64=0;
+    i=0;
+    while(i<n){if(((cls[i] as i32)&4)!=0){c_before=c_before+1;}i=i+1;}
+    _zag_print("DD_PROVE,n=");dd_pnum(n as i64);
+    _zag_print(",live_before=");dd_pnum(live_before as i64);
+    _zag_print(",distinct_before=");dd_pnum(distinct_before as i64);
+    _zag_print(",conflict_ids_before=");dd_pnum(c_before);_zag_println("");
+    // conflict flag per exact group
+    let grp_conf:[]u8=sc_alloc(n);
+    i=0;
+    while(i<n){
+        if(((cls[i] as i32)&4)!=0){
+            let rep:i32=sc_g32(repE,i*4);
+            if(rep>=0){grp_conf[rep]=1;}
+        }
+        i=i+1;
+    }
+    // delete: exact-dup non-rep members of conflict-free groups
+    let del:[]u8=sc_alloc(n);
+    let ndel:i64=0;
+    let nskip:i64=0;
+    i=0;
+    while(i<n){
+        let rep:i32=sc_g32(repE,i*4);
+        if(rep>=0 && rep!=i && sc_g32(ecnt,rep*4)>1){
+            if(grp_conf[rep]==1){nskip=nskip+1;}
+            else{
+                let rc:i32=sc_delete(&st,i);
+                if(rc!=0){
+                    _zag_print("DD_PROVE,FAIL,delete_rc,id=");dd_pnum(i as i64);
+                    _zag_print(",rc=");dd_pnum(rc as i64);_zag_println("");
+                    return;
+                }
+                del[i]=1;
+                ndel=ndel+1;
+            }
+        }
+        i=i+1;
+    }
+    _zag_print("DD_PROVE,deleted=");dd_pnum(ndel);
+    _zag_print(",skipped_conflicted=");dd_pnum(nskip);_zag_println("");
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    // P5a: no deleted id was a conflict member
+    i=0;
+    while(i<n){
+        if(del[i]==1 && ((cls[i] as i32)&4)!=0){
+            _zag_println("DD_PROVE,FAIL,P5a_conflict_member_deleted");
+            return;
+        }
+        i=i+1;
+    }
+    // P1: retained ids recall identically
+    i=0;
+    while(i<n){
+        if(del[i]==0){
+            let v:i64=0;
+            let f:i32=sc_recall(&st,i,&v);
+            if(f!=(rf[i] as i32) || v!=sc_g64(rv,(i*8) as i64)){
+                _zag_print("DD_PROVE,FAIL,P1_recall_changed,id=");dd_pnum(i as i64);_zag_println("");
+                return;
+            }
+        }else{
+            let v2:i64=0;
+            if(sc_recall(&st,i,&v2)!=0){
+                _zag_print("DD_PROVE,FAIL,P1_deleted_still_recalls,id=");dd_pnum(i as i64);_zag_println("");
+                return;
+            }
+        }
+        i=i+1;
+    }
+    // P2: distinct live values unchanged (rescan)
+    let nconf2:i32=0;
+    let distinct_after:i32=dd_scan(&st,n,gt_claim,gt_var,cls,repE,ecnt,repS,
+        scnt,sval,smix,cg_obj,cg_cnt,cg_multi,hm,&nconf2);
+    if(distinct_after!=distinct_before){
+        _zag_print("DD_PROVE,FAIL,P2_distinct,before=");dd_pnum(distinct_before as i64);
+        _zag_print(",after=");dd_pnum(distinct_after as i64);_zag_println("");
+        return;
+    }
+    // P3: audit + manifest consistent
+    if(sc_replay_check(&st)!=0){_zag_println("DD_PROVE,FAIL,P3_replay");return;}
+    if(sc_manifest_verify(&st)!=0){_zag_println("DD_PROVE,FAIL,P3_manifest");return;}
+    // P4: live count + delete events audited
+    let live_after:i32=sc_live_count(&st);
+    if((live_after as i64)!=((live_before as i64)-ndel)){
+        _zag_println("DD_PROVE,FAIL,P4_live_count");return;
+    }
+    let dev:i64=0;
+    let e:i32=0;
+    while(e<st.events_n){
+        if(((st.events[e*20] as i32)&255)==10){dev=dev+1;}
+        e=e+1;
+    }
+    if(dev!=ndel){
+        _zag_print("DD_PROVE,FAIL,P4_delete_events,have=");dd_pnum(dev);
+        _zag_print(",want=");dd_pnum(ndel);_zag_println("");
+        return;
+    }
+    // P5b: conflict ids all still live
+    let c_after:i64=0;
+    i=0;
+    while(i<n){if(((cls[i] as i32)&4)!=0){c_after=c_after+1;}i=i+1;}
+    if(c_after!=c_before){
+        _zag_print("DD_PROVE,FAIL,P5b_conflict_ids,before=");dd_pnum(c_before);
+        _zag_print(",after=");dd_pnum(c_after);_zag_println("");
+        return;
+    }
+    // P6: bytes
+    let bytes_after:i64=sc_written_bytes(&st);
+    _zag_print("DD_PROVE,bytes_before=");dd_pnum(bytes_before);
+    _zag_print(",bytes_after=");dd_pnum(bytes_after);
+    _zag_print(",b_per_live_before_x1000=");dd_pnum((bytes_before*1000)/(live_before as i64));
+    _zag_print(",b_per_live_after_x1000=");dd_pnum((bytes_after*1000)/(live_after as i64));_zag_println("");
+    _zag_println("DD_PROVE,ok=1");
+}
+
+// ---------- corruption helpers (exp1) ----------
+fn dd_flip_bit(st:*ScStore,s:i32,bit:i32)void {
+    let cs:i32=st.*.cslots;
+    let c:i32=s/cs;
+    let k:i32=s%cs;
+    let by:i32=bit/8;
+    let bm:u8=((1<<(bit%8)) as i32) as u8;
+    if(c==st.*.nsealed){
+        let fb:[]u8=st.*.fill_buf;
+        let off:i32=k*8+by;
+        fb[off]=fb[off]^bm;
+    }else{
+        let wtag:i32=(st.*.widths[c] as i32)&255;
+        let w:i32=wtag&15;
+        let ch:[]u8=sc_slot_chunk(st,c);
+        let off:i32=k*w+by;
+        ch[off]=ch[off]^bm;
+    }
+}
+fn dd_corrupt(st:*ScStore,n:i32,pct:i32)i64 {
+    let ncorr:i64=0;
+    let s:i32=0;
+    while(s<n){
+        if(dd_urmod(dd_draw(DD_CORRSEED,s as i64),100)<(pct as i64)){
+            dd_flip_bit(st,s,s%62);
+            ncorr=ncorr+1;
+        }
+        s=s+1;
+    }
+    return ncorr;
+}
+// claim -> member fact ids
+fn dd_claim_index(gt_claim:[]u8,n:i32,nclaim:i32,ccnt:[]u8,coff:[]u8,memb:[]u8)void {
+    let i:i32=0;
+    while(i<n){
+        let c:i32=sc_g32(gt_claim,i*4);
+        sc_s32(ccnt,c*4,sc_g32(ccnt,c*4)+1);
+        i=i+1;
+    }
+    let acc:i32=0;
+    let c:i32=0;
+    while(c<nclaim){
+        sc_s32(coff,c*4,acc);
+        acc=acc+sc_g32(ccnt,c*4);
+        c=c+1;
+    }
+    let fill:[]u8=sc_alloc(nclaim*4);
+    i=0;
+    while(i<n){
+        let c2:i32=sc_g32(gt_claim,i*4);
+        let pos:i32=sc_g32(coff,c2*4)+sc_g32(fill,c2*4);
+        sc_s32(memb,pos*4,i);
+        sc_s32(fill,c2*4,sc_g32(fill,c2*4)+1);
+        i=i+1;
+    }
+}
+// adjudicate one claim by plurality over live copies; 1=survives,0=not;
+// *disagree=1 if copies disagreed.
+fn dd_adjudicate(st:*ScStore,coff:[]u8,ccnt:[]u8,memb:[]u8,c:i32,
+    true_v:i64,disagree:*i32) i32 {
+    let start:i32=sc_g32(coff,c*4);
+    let cnt:i32=sc_g32(ccnt,c*4);
+    // collect live values (k<=17 by construction, scratch 32x8)
+    let vals:[]u8=sc_alloc(32*8);
+    let nv:i32=0;
+    let m:i32=0;
+    while(m<cnt){
+        let fid:i32=sc_g32(memb,(start+m)*4);
+        let v:i64=0;
+        if(sc_recall(st,fid,&v)==1){
+            // canonicalize: wording variants are the same claim; only
+            // object-level differences count as disagreement.
+            sc_s64(vals,(nv*8) as i64,dd_canon_val(v));
+            nv=nv+1;
+        }
+        m=m+1;
+    }
+    if(nv==0){disagree.*=0;return 0;}
+    // plurality
+    let best_v:i64=sc_g64(vals,0);
+    let best_c:i32=0;
+    let a:i32=0;
+    while(a<nv){
+        let va:i64=sc_g64(vals,(a*8) as i64);
+        let cc:i32=0;
+        let b:i32=0;
+        while(b<nv){
+            if(sc_g64(vals,(b*8) as i64)==va){cc=cc+1;}
+            b=b+1;
+        }
+        if(cc>best_c){best_c=cc;best_v=va;}
+        a=a+1;
+    }
+    // disagreement?
+    disagree.*=0;
+    let d:i32=0;
+    while(d<nv){
+        if(sc_g64(vals,(d*8) as i64)!=best_v){disagree.*=1;d=nv;}
+        d=d+1;
+    }
+    if(best_v==true_v){return 1;}
+    return 0;
+}
+fn dd_exp1_one(pct:i32,one_copy:i32)void {
+    let st:ScStore=dd_store_new();
+    if(sc_store_init(DD_CAP,DD_CSLOTS,&st)!=0){_zag_println("DD_EXP1,init_fail");return;}
+    let gt_claim:[]u8=sc_alloc(DD_CAP*4);
+    let gt_var:[]u8=sc_alloc(DD_CAP);
+    let gt_src:[]u8=sc_alloc(DD_CAP*4);
+    let n:i32=dd_gen(&st,gt_claim,gt_var,gt_src,one_copy);
+    if(n<0){_zag_println("DD_EXP1,gen_fail");return;}
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    let ncorr:i64=dd_corrupt(&st,n,pct);
+    let mv:i32=sc_manifest_verify(&st); // expect 1: tamper-evidence intact
+    let ccnt:[]u8=sc_alloc(DD_NCLAIM*4);
+    let coff:[]u8=sc_alloc(DD_NCLAIM*4);
+    let memb:[]u8=sc_alloc(n*4);
+    dd_claim_index(gt_claim,n,DD_NCLAIM,ccnt,coff,memb);
+    let surv:i64=0;
+    let dis:i64=0;
+    let c:i32=0;
+    while(c<DD_NCLAIM){
+        let true_v:i64=dd_pack(c as i64,((c*7)%64) as i64,c as i64);
+        let dg:i32=0;
+        let s2:i32=dd_adjudicate(&st,coff,ccnt,memb,c,true_v,&dg);
+        surv=surv+(s2 as i64);
+        dis=dis+(dg as i64);
+        c=c+1;
+    }
+    let tag:[]u8="dup";
+    if(one_copy==1){tag="dedup";}
+    _zag_print("DD_EXP1,store=");_zag_print(tag);
+    _zag_print(",pct=");dd_pnum(pct as i64);
+    _zag_print(",n_facts=");dd_pnum(n as i64);
+    _zag_print(",corrupted_slots=");dd_pnum(ncorr);
+    _zag_print(",manifest_after_corrupt=");dd_pnum(mv as i64);
+    _zag_print(",claims_survived_x10000=");dd_pnum((surv*10000)/(DD_NCLAIM as i64));
+    _zag_print(",claims_with_disagreement=");dd_pnum(dis);_zag_println("");
+}
+fn dd_mode_exp1(pct:i32)void {
+    dd_exp1_one(pct,0);
+    dd_exp1_one(pct,1);
+    _zag_println("DD_EXP1,done");
+}
+// ---------- mode: exp2 (corroboration) ----------
+const DD2_NCLAIM:i32=20000;
+const DD2_CAP:i32=120000;
+fn dd_gen2(st:*ScStore,e_claim:[]u8,e_src:[]u8,coord:i32)i32 {
+    let n:i32=0;
+    let c:i32=0;
+    while(c<DD2_NCLAIM){
+        let s:i64=c as i64;
+        let r:i64=((c*3)%64) as i64;
+        let k:i32=1+(c%5);
+        let j:i32=0;
+        while(j<k){
+            let src:i32=(c*7+j*13)%50;
+            let o:i64=c as i64;
+            // Noise rate 1/3 (was 1/9): at 1/9 the arithmetic of the source
+            // schedule yields ZERO claims with >=2 noisy sources, so a
+            // coordinated lie could never manifest and the run was vacuous.
+            // Same rate in both runs; only the CORRELATION differs:
+            // coord==0: each noisy source invents its own false object
+            //           (independent errors never agree);
+            // coord==1: all noisy sources assert the SAME false object
+            //           (shared bad origin: errors agree).
+            if(src%3==0){
+                o=((c as i64)^(0xBEEF as i64)^((src as i64)*2654435761))&4294967295;
+                if(coord==1){o=((c as i64)^(0xBEEF as i64))&4294967295;}
+                if(o==(c as i64)){o=o^(0xF00D as i64);}
+            }
+            let val:i64=dd_pack(s,r,o);
+            let slot:i32=-1;
+            if(sc_add(st,n,val,&slot)!=0){return -1;}
+            sc_s32(e_claim,n*4,c);
+            sc_s32(e_src,n*4,src);
+            n=n+1;
+            j=j+1;
+        }
+        c=c+1;
+    }
+    return n;
+}
+fn dd_popcnt(x:i64)i32 {
+    let c:i32=0;
+    let i:i32=0;
+    while(i<50){
+        if((x&((1 as i64)<<i))!=0){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+fn dd_eval2(st:*ScStore,n:i32,e_claim:[]u8,e_src:[]u8,label:[]u8)void {
+    let hm:[]u8=dd_hm_alloc();
+    dd_hm_clear(hm);
+    // groups keyed by full value (s,r,o)
+    let g_val:[]u8=sc_alloc(n*8);
+    let g_mask:[]u8=sc_alloc(n*8);
+    let g_claim:[]u8=sc_alloc(n*4);
+    let ng:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let v:i64=sc_read_value(st,i);
+        let src:i32=sc_g32(e_src,i*4);
+        let c:i32=sc_g32(e_claim,i*4);
+        let found:i32=0;
+        let o:i32=dd_hm_slot(hm,v,&found);
+        if(o<0){_zag_println("DD_EXP2,map_full");return;}
+        let bit:i64=(1 as i64)<<src;
+        if(found==1){
+            let gi:i32=(dd_hm_aux_at(hm,o)) as i32;
+            let m:i64=sc_g64(g_mask,(gi*8) as i64);
+            sc_s64(g_mask,(gi*8) as i64,m|bit);
+        }else{
+            dd_hm_set(hm,o,v,ng as i64);
+            sc_s64(g_val,(ng*8) as i64,v);
+            sc_s64(g_mask,(ng*8) as i64,bit);
+            sc_s32(g_claim,ng*4,c);
+            ng=ng+1;
+        }
+        i=i+1;
+    }
+    // per-claim truth stats (single-valued only)
+    let tc_nsrc:[]u8=sc_alloc(DD2_NCLAIM*4);   // sources on TRUE triple
+    let tc_true_seen:[]u8=sc_alloc(DD2_NCLAIM);
+    let tc_false_inst:[]u8=sc_alloc(DD2_NCLAIM); // a false triple hit >=2
+    let cal_tot:[]u8=sc_alloc(8*8);  // idx k=1..7 (k sources)
+    let cal_ok:[]u8=sc_alloc(8*8);
+    let gi:i32=0;
+    while(gi<ng){
+        let v:i64=sc_g64(g_val,(gi*8) as i64);
+        let c:i32=sc_g32(g_claim,gi*4);
+        let r:i64=((c*3)%64) as i64;
+        if(r<32){
+            let ns:i32=dd_popcnt(sc_g64(g_mask,(gi*8) as i64));
+            let true_v:i64=dd_pack(c as i64,r,c as i64);
+            if(v==true_v){
+                sc_s32(tc_nsrc,c*4,ns);
+                tc_true_seen[c]=1;
+            }else{
+                if(ns>=2){tc_false_inst[c]=1;}
+            }
+            if(ns>=1 && ns<=7){
+                sc_s64(cal_tot,(ns*8) as i64,sc_g64(cal_tot,(ns*8) as i64)+1);
+                if(v==true_v){
+                    sc_s64(cal_ok,(ns*8) as i64,sc_g64(cal_ok,(ns*8) as i64)+1);
+                }
+            }
+        }
+        gi=gi+1;
+    }
+    let sv_claims:i64=0;
+    let fa:i64=0;
+    let ma:i64=0;
+    let c2:i32=0;
+    while(c2<DD2_NCLAIM){
+        let r2:i64=((c2*3)%64) as i64;
+        if(r2<32){
+            sv_claims=sv_claims+1;
+            if(tc_false_inst[c2]==1){fa=fa+1;}
+            if(tc_true_seen[c2]==1 && sc_g32(tc_nsrc,c2*4)<2){ma=ma+1;}
+        }
+        c2=c2+1;
+    }
+    // Policy B: first assertion per (s,r)
+    dd_hm_clear(hm);
+    let fb:i64=0;
+    i=0;
+    while(i<n){
+        let c:i32=sc_g32(e_claim,i*4);
+        let r:i64=((c*3)%64) as i64;
+        if(r<32){
+            let key:i64=((c as i64)<<6)|r;
+            let found:i32=0;
+            let o:i32=dd_hm_slot(hm,key,&found);
+            if(o<0){_zag_println("DD_EXP2,map2_full");return;}
+            if(found==0){
+                dd_hm_set(hm,o,key,i as i64);
+                let v:i64=sc_read_value(st,i);
+                if(dd_obj(v)!=(c as i64)){fb=fb+1;}
+            }
+        }
+        i=i+1;
+    }
+    _zag_print("DD_EXP2,run=");_zag_print(label);
+    _zag_print(",single_valued_claims=");dd_pnum(sv_claims);
+    _zag_print(",A_false_installs=");dd_pnum(fa);
+    _zag_print(",A_false_rate_x10000=");dd_pnum((fa*10000)/sv_claims);
+    _zag_print(",A_misses_uncorroborated_true=");dd_pnum(ma);
+    _zag_print(",B_false_installs=");dd_pnum(fb);
+    _zag_print(",B_false_rate_x10000=");dd_pnum((fb*10000)/sv_claims);_zag_println("");
+    let k2:i32=1;
+    while(k2<=7){
+        let t:i64=sc_g64(cal_tot,(k2*8) as i64);
+        if(t>0){
+            _zag_print("DD_EXP2,run=");_zag_print(label);
+            _zag_print(",calib_sources=");dd_pnum(k2 as i64);
+            _zag_print(",n=");dd_pnum(t);
+            _zag_print(",p_true_x10000=");dd_pnum((sc_g64(cal_ok,(k2*8) as i64)*10000)/t);_zag_println("");
+        }
+        k2=k2+1;
+    }
+}
+fn dd_mode_exp2()void {
+    let coord:i32=0;
+    while(coord<=1){
+        let st:ScStore=dd_store_new();
+        if(sc_store_init(DD2_CAP,DD_CSLOTS,&st)!=0){_zag_println("DD_EXP2,init_fail");return;}
+        let e_claim:[]u8=sc_alloc(DD2_CAP*4);
+        let e_src:[]u8=sc_alloc(DD2_CAP*4);
+        let n:i32=dd_gen2(&st,e_claim,e_src,coord);
+        if(n<0){_zag_println("DD_EXP2,gen_fail");return;}
+        sc_seal_tail(&st);
+        sc_seal_final(&st);
+        let label:[]u8="independent_noise";
+        if(coord==1){label="coordinated_lie";}
+        _zag_print("DD_EXP2,n_facts=");dd_pnum(n as i64);
+        _zag_print(",run=");_zag_print(label);_zag_println("");
+        dd_eval2(&st,n,e_claim,e_src,label);
+        coord=coord+1;
+    }
+    _zag_println("DD_EXP2,done");
+}
+// ---------- main ----------
+fn main()void {
+    let a1:[]u8=_zag_arg(1);
+    if(a1.len==0){_zag_println("usage: dd_main <scan|prove|exp1 [pct]|exp2>");return;}
+    if(dd_streq(a1,"scan")==1){dd_mode_scan();return;}
+    if(dd_streq(a1,"prove")==1){dd_mode_prove();return;}
+    if(dd_streq(a1,"exp1")==1){
+        let a2:[]u8=_zag_arg(2);
+        let pct:i32=5;
+        if(a2.len!=0){pct=dd_atoi(a2) as i32;}
+        if(pct<1||pct>50){_zag_println("DD_EXP1,bad_pct");return;}
+        dd_mode_exp1(pct);
+        return;
+    }
+    if(dd_streq(a1,"exp2")==1){dd_mode_exp2();return;}
+    _zag_println("DD_EXP2,unknown_mode");
+}

@@ -1,13 +1,10 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 from pathlib import Path
 import base64
 import gzip
 import hashlib
 
 ROOT = Path('.')
-TRANSPORT = ROOT / 'docs' / 'generations' / 'R32' / 'runs' / 'R32_E51AE_NATIVE' / 'transport'
+TRANSPORT = ROOT / 'Research' / 'R32_E51AE_NATIVE' / 'transport'
 OUT = ROOT / '.scratch' / 'e51ae_recovery'
 OUT.mkdir(parents=True, exist_ok=True)
 

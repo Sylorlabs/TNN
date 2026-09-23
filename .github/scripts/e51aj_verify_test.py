@@ -1,6 +1,3 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 """Synthetic arithmetic, scheduling and full-shape evidence tests, not research data."""
 from collections import Counter
 import csv
@@ -90,7 +87,7 @@ def full_fixture(root):
     save("NATIVE_BUILD_2","SYNTHETIC_NOT_EXECUTABLE")
     save("COMPILER_SHA256SUMS.txt",V["COMPILER"]+"  SYNTHETIC_IDENTITY_ONLY\n")
     save("preflight/RESULT.log","E51AJ_SYNTHETIC_SELFTESTS_PASS=1\n")
-    pin_path = "docs/generations/R32/R32_E51AJ_SOURCE_PIN.json"
+    pin_path = "Research/R32_E51AJ_SOURCE_PIN.json"
     pin = json.dumps({"source_sha256":source_sha})
     save("inputs/"+pin_path,pin)
     save("SOURCE_MANIFEST.json",json.dumps({"parent_scientific_commit":V["PARENT"],"source_sha256":source_sha,

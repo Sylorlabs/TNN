@@ -1,6 +1,3 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 """Assemble E51AI without running scientific entry points or altering frozen AH."""
 from pathlib import Path
 import hashlib
@@ -20,17 +17,17 @@ for name in ("e51x", "e51y", "e51ad", "e51ah"):
 parent = Path(".scratch/e51ah/tnn_r32_e51ah_grounded_preservation_replay.zag").read_bytes()
 if hashlib.sha256(parent).hexdigest() != AH_SHA:
     raise SystemExit("Frozen complete E51AH assembly mismatch")
-prefix_path = "docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag"
+prefix_path = "Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag"
 prefix = subprocess.check_output(["git", "show", f"{SOURCE}:{prefix_path}"]).decode()
 prefix = prefix.replace("E51AE", "E51AI").replace("e51ae", "e51ai")
 prefix = prefix.replace("trajectory_critical_candidate_residual_v1", "longitudinal_context_diagnostic_v1")
 prefix = prefix.replace("native_candidate_value_capacity_discriminator_not_promotion", "exploratory_persistent_learning_diagnostic_not_qualification")
 prefix = prefix.replace("residual_features,32_evaluator_blind_terminal_features", "residual_features,current_quadratic_real_lag_destroyed_lag_matched_controls")
-helper = Path("docs/generations/R32/runs/R32_E51AI_NATIVE/01_helpers.zagfrag").read_text()
-tail = Path("docs/generations/R32/runs/R32_E51AI_NATIVE/02_run.zagfrag").read_text()
+helper = Path("Research/R32_E51AI_NATIVE/01_helpers.zagfrag").read_text()
+tail = Path("Research/R32_E51AI_NATIVE/02_run.zagfrag").read_text()
 fragment = helper + "\n" + prefix + "\n" + tail
 src = parent.decode()
-old = Path("docs/generations/R32/runs/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text()
+old = Path("Research/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text()
 new = old.replace("e51ah", "e51ai")
 marker = "fn e51y_run(\n"
 if src.count(marker) != 1 or src.count(old) != 1:
@@ -55,10 +52,10 @@ core = Path(".scratch/e51ah/tnn_r32_e45_investigation_core.zag")
 
 inherited = json.loads(Path(".scratch/e51ah/TRANSITIVE_SOURCE_MANIFEST.json").read_text())
 paths = {x["path"] for x in inherited["files"]}
-paths.update((".github/scripts/e51ah_assemble.py", "docs/generations/R32/R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md"))
-paths.update(str(p) for p in Path("docs/generations/R32/runs/R32_E51AH_NATIVE").glob("*.zagfrag"))
-paths.update(("docs/generations/R32/R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md", "docs/generations/R32/R32_E51AI_HARDCODING_LEDGER.json"))
-paths.update(str(p) for p in Path("docs/generations/R32/runs/R32_E51AI_NATIVE").glob("*.zagfrag"))
+paths.update((".github/scripts/e51ah_assemble.py", "Research/R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md"))
+paths.update(str(p) for p in Path("Research/R32_E51AH_NATIVE").glob("*.zagfrag"))
+paths.update(("Research/R32_E51AI_LONGITUDINAL_CONTEXT_PREREG.md", "Research/R32_E51AI_HARDCODING_LEDGER.json"))
+paths.update(str(p) for p in Path("Research/R32_E51AI_NATIVE").glob("*.zagfrag"))
 paths.update(str(p) for p in Path(".github/scripts").glob("e51ai_*.py"))
 paths.add(".github/workflows/r32-e51ai-native.yml")
 entries = []

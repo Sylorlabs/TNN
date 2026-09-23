@@ -1,17 +1,14 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 from pathlib import Path
 import subprocess
 
 PINNED_BLOBS = {
-    "docs/generations/R32/R32_E51AG_CURRENT_RESIDUAL_REPLICATION_PREREG.md": "212821c903ae05ddb3446b77c7a6fb4f421f05ad",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01a_contract_selection.zagfrag": "7881bf966d0a41dbb01abca61be438446b58ea77",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01b_objective_fit.zagfrag": "dcf6a244c1589b56065d2ce3349827de55777ac7",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01c_evaluation.zagfrag": "e739fb1c5f3529ceda2f8edd7a66d96891c9b71e",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag": "d056a87e525699d1f7532bdc4a01b22af386a7ea",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02b_run_development.zagfrag": "f2bc7df4e5211962ccf7d6159eb4f6ecb7ae5652",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02c_run_local.zagfrag": "2157436269c77126a3a1a606b3bdd9c8be837f34",
+    "Research/R32_E51AG_CURRENT_RESIDUAL_REPLICATION_PREREG.md": "212821c903ae05ddb3446b77c7a6fb4f421f05ad",
+    "Research/R32_E51AE_NATIVE/01a_contract_selection.zagfrag": "7881bf966d0a41dbb01abca61be438446b58ea77",
+    "Research/R32_E51AE_NATIVE/01b_objective_fit.zagfrag": "dcf6a244c1589b56065d2ce3349827de55777ac7",
+    "Research/R32_E51AE_NATIVE/01c_evaluation.zagfrag": "e739fb1c5f3529ceda2f8edd7a66d96891c9b71e",
+    "Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag": "d056a87e525699d1f7532bdc4a01b22af386a7ea",
+    "Research/R32_E51AE_NATIVE/02b_run_development.zagfrag": "f2bc7df4e5211962ccf7d6159eb4f6ecb7ae5652",
+    "Research/R32_E51AE_NATIVE/02c_run_local.zagfrag": "2157436269c77126a3a1a606b3bdd9c8be837f34",
 }
 
 for path, expected in PINNED_BLOBS.items():
@@ -43,16 +40,16 @@ if not base_path.exists():
 src = base_path.read_text()
 
 parent_paths = (
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01a_contract_selection.zagfrag",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01b_objective_fit.zagfrag",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01c_evaluation.zagfrag",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02b_run_development.zagfrag",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02c_run_local.zagfrag",
+    "Research/R32_E51AE_NATIVE/01a_contract_selection.zagfrag",
+    "Research/R32_E51AE_NATIVE/01b_objective_fit.zagfrag",
+    "Research/R32_E51AE_NATIVE/01c_evaluation.zagfrag",
+    "Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag",
+    "Research/R32_E51AE_NATIVE/02b_run_development.zagfrag",
+    "Research/R32_E51AE_NATIVE/02c_run_local.zagfrag",
 )
 parent = transform_parent("".join(Path(p).read_text() for p in parent_paths))
-contract = Path("docs/generations/R32/runs/R32_E51AG_NATIVE/01d_replication_contract.zagfrag").read_text()
-tail = Path("docs/generations/R32/runs/R32_E51AG_NATIVE/02d_run_replication.zagfrag").read_text()
+contract = Path("Research/R32_E51AG_NATIVE/01d_replication_contract.zagfrag").read_text()
+tail = Path("Research/R32_E51AG_NATIVE/02d_run_replication.zagfrag").read_text()
 
 # The replication helper is a top-level function and must be inserted before
 # the transformed E51AG run function. The treatment body itself remains the
@@ -76,8 +73,8 @@ if frag.count("fn e51ag_replication_world_gate()i32 {") != 1:
 if frag.find("fn e51ag_replication_world_gate()i32 {") > frag.find(run_marker):
     raise SystemExit("E51AG replication helper is not top-level-before-run")
 
-old_injection = Path("docs/generations/R32/runs/R32_E51AD_NATIVE/03_main_injection.zagfrag").read_text()
-new_injection = Path("docs/generations/R32/runs/R32_E51AG_NATIVE/03_main_injection.zagfrag").read_text()
+old_injection = Path("Research/R32_E51AD_NATIVE/03_main_injection.zagfrag").read_text()
+new_injection = Path("Research/R32_E51AG_NATIVE/03_main_injection.zagfrag").read_text()
 marker = "fn e51y_run(\n"
 if src.count(marker) != 1:
     raise SystemExit(f"E51AG function insertion marker count {src.count(marker)}")
@@ -90,6 +87,6 @@ scratch = Path(".scratch/e51ag")
 scratch.mkdir(parents=True, exist_ok=True)
 (scratch / "E51AG_FRAGMENT.zag").write_text(frag)
 (scratch / "tnn_r32_e51ag_current_residual_replication.zag").write_text(src)
-core = Path("docs/generations/R32/tnn_r32_e45_investigation_core.zag")
+core = Path("Research/tnn_r32_e45_investigation_core.zag")
 (scratch / "tnn_r32_e45_investigation_core.zag").write_bytes(core.read_bytes())
 (scratch / "SOURCE_PIN_GATE.txt").write_text("1\n")

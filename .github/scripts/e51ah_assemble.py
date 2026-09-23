@@ -1,6 +1,3 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 from pathlib import Path
 import ast
 import hashlib
@@ -8,13 +5,7 @@ import json
 import subprocess
 
 
-PARENT_SOURCE_REV = "495ce3a4a6d1ae1585d9cc55d216e4433e8b8ce3"
-# 2026-09-20: PARENT_SOURCE_REV rebased to the reorg path-remap commit
-# (495ce3a4). The parent assemblers' Research/ literals were mechanically
-# remapped to docs/generations/R32/... in that commit (all moves verified
-# byte-identical via git blob hashes), so the frozen_parent_entry tamper
-# check below now attests the parents are byte-identical to their
-# post-remap state. The pre-remap rev was 80069f979084f0dcc6341fffe59b8e1a7ad2e7f1.
+PARENT_SOURCE_REV = "80069f979084f0dcc6341fffe59b8e1a7ad2e7f1"
 PARENT_ASSEMBLERS = (
     ".github/scripts/e51x_assemble.py",
     ".github/scripts/e51y_assemble.py",
@@ -24,11 +15,11 @@ PARENT_ASSEMBLED_SHA256 = "67ac4a8412e4098a9572a248bee2be1c9b6ea9699fd52cc568e5e
 CORE_SHA256 = "6812efb4c2cb990a59bd0f33f0a44469950201cac6633099fa4f4b2c7ae276e0"
 
 PINNED_BLOBS = {
-    "docs/generations/R32/R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md": "bd6f34e689b73004b7d3605fb37e63bba7a532c9",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01a_contract_selection.zagfrag": "7881bf966d0a41dbb01abca61be438446b58ea77",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/01b_objective_fit.zagfrag": "dcf6a244c1589b56065d2ce3349827de55777ac7",
-    "docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag": "d056a87e525699d1f7532bdc4a01b22af386a7ea",
-    "docs/generations/R32/runs/R32_E51AD_NATIVE/03_main_injection.zagfrag": "3c616cecb3c75258b7aa4aab85cb198295d9a381",
+    "Research/R32_E51AH_GROUNDED_PRESERVATION_REPLAY_PREREG.md": "bd6f34e689b73004b7d3605fb37e63bba7a532c9",
+    "Research/R32_E51AE_NATIVE/01a_contract_selection.zagfrag": "7881bf966d0a41dbb01abca61be438446b58ea77",
+    "Research/R32_E51AE_NATIVE/01b_objective_fit.zagfrag": "dcf6a244c1589b56065d2ce3349827de55777ac7",
+    "Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag": "d056a87e525699d1f7532bdc4a01b22af386a7ea",
+    "Research/R32_E51AD_NATIVE/03_main_injection.zagfrag": "3c616cecb3c75258b7aa4aab85cb198295d9a381",
 }
 
 
@@ -43,17 +34,17 @@ def frozen_parent_entry(path: str) -> dict:
     return {"path": path, "git_blob": actual, "sha256": hashlib.sha256(data).hexdigest()}
 
 
-# These three frozen assemblers use literal docs/generations/R32 paths for all source reads.
+# These three frozen assemblers use literal Research paths for all source reads.
 # Verify the scripts before inspecting their literals; the assembled-source and
 # imported-core pins below independently cover the complete cognitive bytes.
 parent_manifest = [frozen_parent_entry(path) for path in PARENT_ASSEMBLERS]
 parent_paths = {path for path in PINNED_BLOBS if "R32_E51AH" not in path}
-parent_paths.add("docs/generations/R32/tnn_r32_e45_investigation_core.zag")
+parent_paths.add("Research/tnn_r32_e45_investigation_core.zag")
 for script in PARENT_ASSEMBLERS:
     for node in ast.walk(ast.parse(Path(script).read_text())):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value
-            if value.startswith("docs/generations/R32/") and value.endswith((".zagfrag", ".zag")):
+            if value.startswith("Research/") and value.endswith((".zagfrag", ".zag")):
                 parent_paths.add(value)
 parent_manifest.extend(frozen_parent_entry(path) for path in sorted(parent_paths))
 
@@ -168,19 +159,19 @@ support = transform_support(
     "".join(
         Path(path).read_text()
         for path in (
-            "docs/generations/R32/runs/R32_E51AE_NATIVE/01a_contract_selection.zagfrag",
-            "docs/generations/R32/runs/R32_E51AE_NATIVE/01b_objective_fit.zagfrag",
+            "Research/R32_E51AE_NATIVE/01a_contract_selection.zagfrag",
+            "Research/R32_E51AE_NATIVE/01b_objective_fit.zagfrag",
         )
     )
 )
 replay_helpers = Path(
-    "docs/generations/R32/runs/R32_E51AH_NATIVE/01d_preservation_replay.zagfrag"
+    "Research/R32_E51AH_NATIVE/01d_preservation_replay.zagfrag"
 ).read_text()
 run_prefix = transform_run_prefix(
-    Path("docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag").read_text()
+    Path("Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag").read_text()
 )
 run_tail = Path(
-    "docs/generations/R32/runs/R32_E51AH_NATIVE/02b_run_preservation_replay.zagfrag"
+    "Research/R32_E51AH_NATIVE/02b_run_preservation_replay.zagfrag"
 ).read_text()
 frag = support + replay_helpers + run_prefix + run_tail
 
@@ -242,8 +233,8 @@ if run_tail.find("e51ah_development_open_gate") > run_tail.find(
 ):
     raise SystemExit("E51AH validation appears before development opening gate")
 
-old_injection = Path("docs/generations/R32/runs/R32_E51AD_NATIVE/03_main_injection.zagfrag").read_text()
-new_injection = Path("docs/generations/R32/runs/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text()
+old_injection = Path("Research/R32_E51AD_NATIVE/03_main_injection.zagfrag").read_text()
+new_injection = Path("Research/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text()
 function_marker = "fn e51y_run(\n"
 if src.count(function_marker) != 1:
     raise SystemExit(f"E51AH function insertion marker count {src.count(function_marker)}")
@@ -256,7 +247,7 @@ scratch = Path(".scratch/e51ah")
 scratch.mkdir(parents=True, exist_ok=True)
 (scratch / "E51AH_FRAGMENT.zag").write_text(frag)
 (scratch / "tnn_r32_e51ah_grounded_preservation_replay.zag").write_text(src)
-core = Path("docs/generations/R32/tnn_r32_e45_investigation_core.zag")
+core = Path("Research/tnn_r32_e45_investigation_core.zag")
 if hashlib.sha256(core.read_bytes()).hexdigest() != CORE_SHA256:
     raise SystemExit("E51AH imported core identity failure")
 (scratch / "tnn_r32_e45_investigation_core.zag").write_bytes(core.read_bytes())

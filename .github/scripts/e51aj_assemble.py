@@ -1,6 +1,3 @@
-# 2026-09-20 path migration: pre-reorg Research/ paths remapped to post-reorg
-# locations (docs/generations/R32/..., src/tools/toolchain/...). All content
-# moves verified byte-identical via git blob hashes. Historical R32 tooling.
 """Assemble E51AJ from immutable E51AI inputs without executing cognition."""
 from pathlib import Path
 import hashlib
@@ -44,7 +41,7 @@ def assemble():
         if Path(path).read_bytes() != subprocess.check_output(["git", "show", f"{PARENT}:{path}"]):
             raise ValueError(f"frozen parent input changed: {path}")
         paths.add(path)
-    original = Path("docs/generations/R32/runs/R32_E51AI_NATIVE/01_helpers.zagfrag").read_text()
+    original = Path("Research/R32_E51AI_NATIVE/01_helpers.zagfrag").read_text()
     reused = "\n".join(function(original, name) for name in (
         "e51ai_feature_pair", "e51ai_raw", "e51ai_hash", "e51ai_fit", "e51ai_choice", "e51ai_success"
     )).replace("e51ai", "e51aj").replace("E51AI", "E51AJ")
@@ -52,12 +49,12 @@ def assemble():
     for forbidden in ("probe_", "e51aj_evaluate", "truth", "meta[", "mode", "checkpoint"):
         if forbidden in fit:
             raise ValueError(f"learner channel violation: {forbidden}")
-    prefix = Path("docs/generations/R32/runs/R32_E51AE_NATIVE/02a_run_direct.zagfrag").read_text()
+    prefix = Path("Research/R32_E51AE_NATIVE/02a_run_direct.zagfrag").read_text()
     prefix = prefix.replace("e51ae", "e51aj").replace("E51AE", "E51AJ")
     prefix = prefix.replace("trajectory_critical_candidate_residual_v1", "shared_start_replay_order_dose_v1")
     prefix = prefix.replace("native_candidate_value_capacity_discriminator_not_promotion", "exploratory_replay_order_dose_not_qualification")
     prefix = prefix.replace("residual_features,32_evaluator_blind_terminal_features", "residual_features,32_current_plus_32_same_episode_lag")
-    data = Path("docs/generations/R32/runs/R32_E51AI_NATIVE/02_run.zagfrag").read_text()
+    data = Path("Research/R32_E51AI_NATIVE/02_run.zagfrag").read_text()
     data = "    let train_x" + data.split("    let train_x", 1)[1].split("    let weights", 1)[0]
     data = data.replace("e51ai", "e51aj").replace("E51AI", "E51AJ")
     data = replace_once(data, "let stage:i32=111+dataset;", "let stage:i32=119+replica*8+dataset;")
@@ -72,18 +69,18 @@ def assemble():
     let replica:i32=0;
     while(replica<3){
 """
-    native = Path("docs/generations/R32/runs/R32_E51AJ_NATIVE")
+    native = Path("Research/R32_E51AJ_NATIVE")
     fragment = ((native / "01_schedule.zagfrag").read_text() + "\n" + reused + "\n" +
                 (native / "02_measure.zagfrag").read_text() + "\n" + prefix + beginning + data +
                 (native / "03_continue.zagfrag").read_text())
-    old_entry = Path("docs/generations/R32/runs/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text().replace("e51ah", "e51ai")
+    old_entry = Path("Research/R32_E51AH_NATIVE/03_main_injection.zagfrag").read_text().replace("e51ah", "e51ai")
     new_entry = old_entry.replace("e51ai", "e51aj")
     source = replace_once(parent, "fn e51y_run(\n", fragment + "\nfn e51y_run(\n")
     source = replace_once(source, old_entry, new_entry)
     if source.count("let e51ai_completion:i32=e51ai_run(") or source.count("let e51aj_completion:i32=e51aj_run(") != 1:
         raise ValueError("wrong active scientific entry point")
     digest = hashlib.sha256(source.encode()).hexdigest()
-    pin = Path("docs/generations/R32/R32_E51AJ_SOURCE_PIN.json")
+    pin = Path("Research/R32_E51AJ_SOURCE_PIN.json")
     if pin.exists() and json.loads(pin.read_text())["source_sha256"] != digest:
         raise ValueError("E51AJ source pin mismatch")
     (OUT / "SOURCE.zag").write_text(source)
@@ -92,7 +89,7 @@ def assemble():
     (OUT / core).write_bytes((Path(".scratch/e51ai") / core).read_bytes())
     paths.update(str(p) for p in native.glob("*.zagfrag"))
     paths.update(str(p) for p in Path(".github/scripts").glob("e51aj_*.py"))
-    paths.update(("docs/generations/R32/R32_E51AJ_REPLAY_ORDER_DOSE_PREREG.md", "docs/generations/R32/R32_E51AJ_HARDCODING_LEDGER.json",
+    paths.update(("Research/R32_E51AJ_REPLAY_ORDER_DOSE_PREREG.md", "Research/R32_E51AJ_HARDCODING_LEDGER.json",
                   ".github/workflows/r32-e51aj-native.yml"))
     if pin.exists():
         paths.add(str(pin))

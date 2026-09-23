@@ -1,31 +1,4 @@
-> **2026-09-20 maintenance note:** the R33-generation material below is the
-> September 2026 archive state, kept for provenance — it is historical, not the
-> current program. The active program is the **TNN native lab** under
-> [`docs/lab/`](docs/lab) (waves 1–9: deliberate memory, reasoning control,
-> integrity, felt intensity, strength, trust tiers, five-organ integration).
-> The current headline results are the wave-5 integrity finding,
-> [`docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md`](docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md)
-> (PROVISIONAL — wording pending sign-off), and the epistemic-wave
-> speech-act learning result,
-> [`docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md`](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md)
-> (PROVISIONAL). R27 at step 60,423 remains the
-> canonical accepted checkpoint.
-
 # TNN — True Neural Network Research
-
-## Headline result — you can't understand it until you've learned more of it
-
-**Epistemic wave (2026-09-22):** two identical TNN deliberators faced 70
-weird-English utterances — sarcasm, jokes, hypotheticals, analogies,
-counterfactuals, poetry, implicature. The one that had first learned what
-those speech acts *are* (as ordinary learned knowledge, nothing hardcoded)
-withheld the non-factual ones **50.0%** of the time vs **7.1%** for the one
-that only knew facts (+42.9pp), while both held 12/12 on planted falsehoods.
-Honest boundary, trialed: one lesson per concept is not enough — neither
-arm passes the 8/10 bar, and a volume experiment is running to find where
-more learning stops helping.
-
-Read the [full speech-act learning result](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md).
 
 ## Current entry point — R33 research generation
 
@@ -33,26 +6,26 @@ Read the [full speech-act learning result](docs/lab/prose-learning/epistemic_wav
 now has a shared observation, action/consequence, checkpoint, storage, and
 simulated-world boundary. Its first five-child engineering run passed with
 fresh-process recovery and measured resource accounting. Read the
-[current continuing-life entry point](docs/generations/R33/runs/R33_CONTINUING_LIFE_V1/CURRENT_ENTRY_POINT.md)
-and [architecture assessment](docs/generations/R33/runs/R33_CONTINUING_LIFE_V1/ARCHITECTURE_ASSESSMENT.md)
+[current continuing-life entry point](Research/R33_CONTINUING_LIFE_V1/CURRENT_ENTRY_POINT.md)
+and [architecture assessment](Research/R33_CONTINUING_LIFE_V1/ARCHITECTURE_ASSESSMENT.md)
 for the exact scope. This is infrastructure evidence; it does not establish
 integrated learning or R27 behavioral continuity.
 
-**September 6 status:** [N13A fingerprint-memory corrective regression](docs/generations/R33/R33_NATIVE_N13A_RESULT.md)
+**September 6 status:** [N13A fingerprint-memory corrective regression](Research/R33_NATIVE_N13A_RESULT.md)
 is closed as bounded engineering evidence; the R33 program is not. N13A completed
 6/6 children, 24,601 child checks and 62 parent checks, exact fresh-process replay,
 and independent evidence-only postrun confirmation under the unchanged384MiB gate.
 There are 26 recorded diagnostic batches and zero R33 training runs. Original
 parent source/behavior continuity remains blocked; read the
-[earlier program-wide summary](docs/generations/R33/R33_PROGRESS_SUMMARY_20260906.md) and
-[eighteen-stage status map](docs/generations/R33/R33_PROGRAM_STATUS_20260906.json).
+[earlier program-wide summary](Research/R33_PROGRESS_SUMMARY_20260906.md) and
+[eighteen-stage status map](Research/R33_PROGRAM_STATUS_20260906.json).
 Original parent behavior/source recovery, full runtime/sensory qualification
 and the later scientific program remain open. Historical first-deliverable
 completion and compile-only passages below are not current launch instructions.
 
-Continue from the [R33 handoff](docs/generations/R33/R33_HANDOFF.md),
-[current state](docs/generations/R33/R33_CURRENT_STATE.json), and
-[master plan](docs/generations/R33/R33_MASTER_PLAN.md). R27 remains the accepted brain at
+Continue from the [R33 handoff](Research/R33_HANDOFF.md),
+[current state](Research/R33_CURRENT_STATE.json), and
+[master plan](Research/R33_MASTER_PLAN.md). R27 remains the accepted brain at
 step 60,423 with zero newborn restarts. R32/E51AJ is the completed inherited
 experimental frontier; creating R33 does not promote a successor.
 
@@ -60,10 +33,10 @@ R33's first deliverable supplies the audited research hierarchy, telemetry and
 authority specifications, independent reviews, and a frozen nontraining boundary
 audit. Native compilation is not fixture execution or sensory qualification.
 B000 has subsequently executed once and [confirmed all five scoped boundary
-defects](docs/generations/R33/R33_B000_RESULT.md). Corrective implementation and qualification
+defects](Research/R33_B000_RESULT.md). Corrective implementation and qualification
 are in progress; the master plan is not complete.
-See the [completion record](docs/generations/R33/R33_FIRST_DELIVERABLE.md) and
-[batch status](docs/generations/R33/R33_B000_EXECUTION_STATUS.json) for the exact boundary.
+See the [completion record](Research/R33_FIRST_DELIVERABLE.md) and
+[batch status](Research/R33_B000_EXECUTION_STATUS.json) for the exact boundary.
 
 Trainer means a **human/person/group**. A Master or automated teacher is an
 attributed teaching aid, not the trainer and not learner competence. Active TNN
@@ -82,7 +55,7 @@ alive, reason over support and contradiction, and choose actions that can settle
 important questions.
 
 The autonomy position is documented in
-[`docs/program/TNN_AUTONOMY_POSITION.md`](docs/program/TNN_AUTONOMY_POSITION.md): TNN
+[`Research/TNN_AUTONOMY_POSITION.md`](Research/TNN_AUTONOMY_POSITION.md): TNN
 should increasingly own how it learns—replay, inquiry, memory, representation
 and reversible structural proposals—while the trainer and protected supervisor
 retain goals, values, permissions, provenance, rollback and safety authority.
@@ -93,9 +66,9 @@ state, learner-owned memory/representation, and a planned milestone-gated path t
 learner-owned structural plasticity. It is not one flat neural network, and the
 current research implementation is much smaller and more constrained than that
 long-term target. See
-[`docs/program/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md`](docs/program/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md)
+[`Research/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md`](Research/TNN_ARCHITECTURE_ROLES_AND_CONNECTIONS.md)
 and the
-[`TNN Mega Plan`](docs/program/TNN_MEGA_PLAN_WHITE_BOX_DEVELOPMENTAL_ARCHITECTURE.md).
+[`TNN Mega Plan`](Research/TNN_MEGA_PLAN_WHITE_BOX_DEVELOPMENTAL_ARCHITECTURE.md).
 
 The project is deliberately **not** a transformer, LLM, BPE/tokenizer pipeline,
 next-token objective, fixed knowledge graph, or confidence-threshold classifier.
@@ -193,40 +166,6 @@ own knowledge, but their knowledge is not credited to the learner and must be
 withdrawn before qualification. This separation is fundamental to every result
 in this repository.
 
-## So what's the catch: STORAGE
-
-TNN's deal is simple: it's a storage eater, not a RAM eater and not a compute
-eater. Every fact it learns costs real bytes — about 220 of them. That's ~92
-bytes for the fact itself plus ~128 bytes for the audit entry that makes the
-fact replayable and tamper-evident. Nothing is smeared into mystery weights.
-You can count exactly what it knows, and exactly what that costs:
-
-| Facts learned | Storage | Feels like |
-|---|---|---|
-| 1 thousand | 220 KB | nothing |
-| 100 thousand | 22 MB | a few photos |
-| 1 million | 220 MB | a short video |
-| 100 million | 22 GB | a laptop folder |
-| 1 billion | 220 GB | a cheap SSD |
-| 10 billion | 2.2 TB | a hard drive |
-
-The marginal cost never changes: one more fact is always 220 bytes and about
-6 microseconds to install. Compare that with a 70B-parameter LLM, which burns
-~140 GB of VRAM whether it knows ten facts or ten billion — and learning one
-new fact means retraining. Below roughly 150–600 million facts TNN uses *less*
-storage than the model's weights; above that it uses more. But TNN's bytes
-live on disk — a billion facts is on the order of five dollars a month of
-ordinary cloud storage — while the LLM's weights have to sit in the most
-expensive memory there is just to answer "hi".
-
-Two honest caveats. First, more than half of the 220 bytes is the audit
-ledger: the price of the integrity guarantees (exact replay, tamper evidence),
-not of the knowledge itself. Deliberate consolidation — one of the five
-organs — could compress cold facts and bring that number down; it hasn't been
-measured yet. Second, everything above was measured with the knowledge base
-resident in RAM; what happens to install and recall speed when it outgrows RAM
-is being measured now.
-
 ## The architecture
 
 TNN’s architecture is a set of interacting generic mechanisms, not a bag of
@@ -248,7 +187,7 @@ Each consequential mutable decision is expected to have a parent-linked causal
 trace: evidence enters a sensory route, a hypothesis is revised, memory is
 retrieved or changed, a prediction/action is chosen, the outcome is observed,
 and delayed regret can revise the mechanism. See
-[`docs/generations/R27/TNN_R27_TRACEABILITY.md`](docs/generations/R27/TNN_R27_TRACEABILITY.md).
+[`Research/TNN_R27_TRACEABILITY.md`](Research/TNN_R27_TRACEABILITY.md).
 
 ### White-box and staged autonomy contract
 
@@ -519,14 +458,14 @@ checksum manifest.
 
 | Location | What it contains |
 |---|---|
-| [`docs/program/NEXT_AGENT_START_HERE.md`](docs/program/NEXT_AGENT_START_HERE.md) | Current frontier and operational constraints. |
-| [`docs/generations/R32/R32_CURRENT_STATE.json`](docs/generations/R32/R32_CURRENT_STATE.json) | Canonical status, architecture flags, benchmark summary, and next priority. |
-| [`docs/generations/R31/R31_FINAL_REPORT.md`](docs/generations/R31/R31_FINAL_REPORT.md) | R31 reference-only architecture results and boundaries. |
-| [`docs/generations/R32/R32_E45_NEGATIVE_RESULTS_AND_EVALUATOR_REPAIR.md`](docs/generations/R32/R32_E45_NEGATIVE_RESULTS_AND_EVALUATOR_REPAIR.md) | Full native E45–E50 result narrative and tables. |
-| [`docs/generations/R32/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md`](docs/generations/R32/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md) | Why the next experiment targets continuation value, not a positive UNKNOWN bias. |
-| [`docs/generations/R32/tnn_r32_e50_provenance_temporal_contention_discriminator.zag`](docs/generations/R32/tnn_r32_e50_provenance_temporal_contention_discriminator.zag) | Latest native E50 experimental source. |
-| [`docs/generations/R32/runs/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/`](docs/generations/R32/runs/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/) | E50 source, binaries, raw ledger, seeds, canonical records, evidence JSON, and SHA-256 manifest. |
-| [`docs/program/TNN_NATIVE_MIGRATION_STATUS.md`](docs/program/TNN_NATIVE_MIGRATION_STATUS.md) | Native-only migration boundary: Zag cognition versus Python reference/evaluator archive. |
+| [`Research/NEXT_AGENT_START_HERE.md`](Research/NEXT_AGENT_START_HERE.md) | Current frontier and operational constraints. |
+| [`Research/R32_CURRENT_STATE.json`](Research/R32_CURRENT_STATE.json) | Canonical status, architecture flags, benchmark summary, and next priority. |
+| [`Research/R31_FINAL_REPORT.md`](Research/R31_FINAL_REPORT.md) | R31 reference-only architecture results and boundaries. |
+| [`Research/R32_E45_NEGATIVE_RESULTS_AND_EVALUATOR_REPAIR.md`](Research/R32_E45_NEGATIVE_RESULTS_AND_EVALUATOR_REPAIR.md) | Full native E45–E50 result narrative and tables. |
+| [`Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md`](Research/R32_E51_ACTION_VALUE_GEOMETRY_AUDIT.md) | Why the next experiment targets continuation value, not a positive UNKNOWN bias. |
+| [`Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag`](Research/tnn_r32_e50_provenance_temporal_contention_discriminator.zag) | Latest native E50 experimental source. |
+| [`Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/`](Research/R32_E50_PROVENANCE_TEMPORAL_CONTENTION_NEGATIVE_3ECA4702_NO_TESTED_CONTENTION_RESCUE/) | E50 source, binaries, raw ledger, seeds, canonical records, evidence JSON, and SHA-256 manifest. |
+| [`Research/TNN_NATIVE_MIGRATION_STATUS.md`](Research/TNN_NATIVE_MIGRATION_STATUS.md) | Native-only migration boundary: Zag cognition versus Python reference/evaluator archive. |
 
 The maintained checkout is native-only: TNN cognition and qualification are
 implemented in Zag v2. Historical Python experiments are deliberately kept in
@@ -535,11 +474,11 @@ supported runtime.
 
 ### A practical reading order
 
-1. Read [`docs/program/TNN_USER_RESEARCH_PREFERENCES.md`](docs/program/TNN_USER_RESEARCH_PREFERENCES.md)
+1. Read [`Research/TNN_USER_RESEARCH_PREFERENCES.md`](Research/TNN_USER_RESEARCH_PREFERENCES.md)
    for the non-negotiable methodological constraints.
-2. Read [`docs/generations/R31/R31_FINAL_REPORT.md`](docs/generations/R31/R31_FINAL_REPORT.md) for the
+2. Read [`Research/R31_FINAL_REPORT.md`](Research/R31_FINAL_REPORT.md) for the
    dual-route/chunking decision and its reference-only limits.
-3. Read [`docs/generations/R32/R32_CURRENT_STATE.json`](docs/generations/R32/R32_CURRENT_STATE.json) for
+3. Read [`Research/R32_CURRENT_STATE.json`](Research/R32_CURRENT_STATE.json) for
    the current canonical status and exact native frontier.
 4. Read the E45–E50 report and inspect the individual evidence bundle before
    repeating or extending a terminal-controller experiment.
