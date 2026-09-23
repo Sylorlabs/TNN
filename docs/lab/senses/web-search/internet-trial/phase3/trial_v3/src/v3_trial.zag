@@ -1,0 +1,396 @@
+// v3_trial.zag -- HELL-HOLE V3 trial driver, pure Zag, zero RNG, deterministic.
+//
+// Per candidate per arm:
+//   1. R3 gate: gated ? WITHHOLD (terminal, pre-search)
+//   2. R6 logic: logic==CONTRADICTS ? REJECT (precedence over evidence/joke)
+//   3. Joke: is_joke ? classify intent -> (helper rule) -> REJECT/WITHHOLD
+//   4. R5: weighted vote over repaired R1/R2 tags -> INSTALL/REJECT/WITHHOLD
+//
+// Usage: v3_trial <candidates.tsv> <votes.tsv> <jokes.tsv> <arm>
+//   candidates.tsv: id \t gated \t logic \t is_joke
+//   votes.tsv:      cand \t tag \t weight
+//   jokes.tsv:      id \t cls_intent \t h_intent \t h_marker \t text
+//                   (h_intent=0 means solo arm, no helper)
+//   arm: "solo" or "helper" (for ledger labeling only)
+//
+// Output (stdout): tab-separated ledger, one row per candidate:
+//   arm \t seq \t cid \t disp \t attrib \t detail
+// disp: 2=INSTALL, 3=REJECT, 4=WITHHOLD
+// attrib: R3 | R6 | JOKE | R5
+//
+// Intent codes (actual classifier numbering): 2=JOKING, 3=SATIRE, 5=UNCERTAIN.
+// Joke disposition: JOKING/SATIRE -> REJECT; UNCERTAIN -> WITHHOLD.
+// Helper rule (frozen asymmetric): AGREE if h==c; ADOPT_HELPER if h in {2,3}
+//   and marker is a substring of the lowercased text; else KEEP_CLASSIFIER.
+//   (No SINCERE code exists; the helper cannot manufacture one.)
+
+// ---------- alloc / io ----------
+fn z_alloc(n:i32)[]u8{
+    if(n<1 || n>33554432){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn z_cstr(s:[]u8)[]u8{
+    if(s.len<1 || s.len>4194304){return "";}
+    let b:[]u8=z_alloc(s.len+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    return b;
+}
+fn read_all(path:[]u8)[]u8{
+    let cs:[]u8=z_cstr(path);
+    if(cs.len==0){return "";}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,0,0,0,0,0);
+    if(fd<0){return "";}
+    let cap:i32=8388608;
+    let buf:[]u8=z_alloc(cap);
+    if(buf.len==0){_zag_raw_syscall(3,fd,0,0,0,0,0);return "";}
+    let at:i32=0;
+    while(at<cap){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(cap-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){break;}
+        at=at+(n as i32);
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    return buf[0..at];
+}
+// ---------- string helpers ----------
+fn tolower(b:[]u8)[]u8{
+    let o:[]u8=z_alloc(b.len+1);
+    let i:i32=0;
+    while(i<b.len){
+        let c:u8=b[i];
+        if(c>=65 && c<=90){o[i]=c+32;}else{o[i]=c;}
+        i=i+1;
+    }
+    return o;
+}
+fn has_sub(hay:[]u8,ndl:[]u8)i32{
+    if(ndl.len==0 || ndl.len>hay.len){return 0;}
+    let i:i32=0;
+    while(i+ndl.len<=hay.len){
+        let j:i32=0;
+        while(j<ndl.len && hay[i+j]==ndl[j]){j=j+1;}
+        if(j==ndl.len){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+fn parse_i32(s:[]u8)i32{
+    let v:i32=0;
+    let i:i32=0;
+    let neg:i32=0;
+    if(s.len>0 && s[0]==45){neg=1;i=1;}
+    while(i<s.len && s[i]>=48 && s[i]<=57){
+        v=v*10+((s[i]-48) as i32);
+        i=i+1;
+    }
+    if(neg!=0){v=0-v;}
+    return v;
+}
+fn append_i32(buf:[]u8,p:i32,v:i32)i32{
+    if(v<0){buf[p]=45;p=p+1;v=0-v;}
+    if(v==0){buf[p]=48;return p+1;}
+    let tmp:[]u8=z_alloc(16);
+    let n:i32=0;
+    while(v>0){tmp[n]=(48+((v%10) as u8));v=v/10;n=n+1;}
+    let i:i32=n-1;
+    while(i>=0){buf[p]=tmp[i];p=p+1;i=i-1;}
+    return p;
+}
+// ---------- main ----------
+fn main()void{
+    let cand_path:[]u8=_zag_arg(1);
+    let vote_path:[]u8=_zag_arg(2);
+    let joke_path:[]u8=_zag_arg(3);
+    let arm:[]u8=_zag_arg(4);
+    if(cand_path.len==0){_zag_println("usage: v3_trial <cands> <votes> <jokes> <arm>");return;}
+    let cands:[]u8=read_all(cand_path);
+    let votes:[]u8=read_all(vote_path);
+    let jokes:[]u8=read_all(joke_path);
+    // Parse candidates into parallel arrays (max 32)
+    let c_id:[]u8=z_alloc(32*16);
+    let c_gated:[]u8=z_alloc(32);
+    let c_logic:[]u8=z_alloc(32);
+    let c_joke:[]u8=z_alloc(32);
+    let nc:i32=0;
+    let i:i32=0;
+    while(i<cands.len){
+        let ls:i32=i;
+        while(i<cands.len && cands[i]!=10){i=i+1;}
+        let line:[]u8=cands[ls..i];
+        if(i<cands.len){i=i+1;}
+        if(line.len<5){continue;}
+        // split tabs: id, gated, logic, is_joke
+        let t1:i32=0;
+        while(t1<line.len && line[t1]!=9){t1=t1+1;}
+        let t2:i32=t1+1;
+        while(t2<line.len && line[t2]!=9){t2=t2+1;}
+        let t3:i32=t2+1;
+        while(t3<line.len && line[t3]!=9){t3=t3+1;}
+        let id:[]u8=line[0..t1];
+        // copy id into slot
+        let k:i32=0;
+        while(k<id.len && k<15){c_id[nc*16+k]=id[k];k=k+1;}
+        c_id[nc*16+k]=0;
+        c_gated[nc]=parse_i32(line[t1+1..t2]) as u8;
+        c_logic[nc]=parse_i32(line[t2+1..t3]) as u8;
+        c_joke[nc]=parse_i32(line[t3+1..line.len]) as u8;
+        nc=nc+1;
+    }
+    // Parse votes: cand(6) -> accumulate w0,w1,w2 (max 32 cands)
+    let v_w0:[]u8=z_alloc(32*4);
+    let v_w1:[]u8=z_alloc(32*4);
+    let v_w2:[]u8=z_alloc(32*4);
+    // helper to get/set i32 in u8 arena (LE)
+    i=0;
+    while(i<votes.len){
+        let ls:i32=i;
+        while(i<votes.len && votes[i]!=10){i=i+1;}
+        let line:[]u8=votes[ls..i];
+        if(i<votes.len){i=i+1;}
+        if(line.len<5){continue;}
+        let t1:i32=0;
+        while(t1<line.len && line[t1]!=9){t1=t1+1;}
+        let t2:i32=t1+1;
+        while(t2<line.len && line[t2]!=9){t2=t2+1;}
+        let cid:[]u8=line[0..t1];
+        let tag:i32=parse_i32(line[t1+1..t2]);
+        let w:i32=parse_i32(line[t2+1..line.len]);
+        // find cand index by id prefix "V3-XX"
+        let ci:i32=0;
+        let found:i32=-1;
+        while(ci<nc){
+            let m:i32=1;
+            let kk:i32=0;
+            while(kk<cid.len && kk<6){
+                if(c_id[ci*16+kk]!=cid[kk]){m=0;}
+                kk=kk+1;
+            }
+            if(m!=0){found=ci;}
+            ci=ci+1;
+        }
+        if(found<0){continue;}
+        // add weight to w[tag]
+        let base:i32=found*4;
+        let cur:i32=0;
+        if(tag==0){
+            cur=(v_w0[base] as i32)|((v_w0[base+1] as i32)<<8)|((v_w0[base+2] as i32)<<16)|((v_w0[base+3] as i32)<<24);
+            cur=cur+w;
+            v_w0[base]=(cur&255) as u8;v_w0[base+1]=((cur>>8)&255) as u8;v_w0[base+2]=((cur>>16)&255) as u8;v_w0[base+3]=((cur>>24)&255) as u8;
+        }
+        if(tag==1){
+            cur=(v_w1[base] as i32)|((v_w1[base+1] as i32)<<8)|((v_w1[base+2] as i32)<<16)|((v_w1[base+3] as i32)<<24);
+            cur=cur+w;
+            v_w1[base]=(cur&255) as u8;v_w1[base+1]=((cur>>8)&255) as u8;v_w1[base+2]=((cur>>16)&255) as u8;v_w1[base+3]=((cur>>24)&255) as u8;
+        }
+        if(tag==2){
+            cur=(v_w2[base] as i32)|((v_w2[base+1] as i32)<<8)|((v_w2[base+2] as i32)<<16)|((v_w2[base+3] as i32)<<24);
+            cur=cur+w;
+            v_w2[base]=(cur&255) as u8;v_w2[base+1]=((cur>>8)&255) as u8;v_w2[base+2]=((cur>>16)&255) as u8;v_w2[base+3]=((cur>>24)&255) as u8;
+        }
+    }
+    // Parse jokes: id -> (cls, h, marker, text)
+    // store in small arrays keyed by joke index 0..3 (V3-14..17)
+    let j_cls:[]u8=z_alloc(4);
+    let j_h:[]u8=z_alloc(4);
+    let j_marker:[]u8=z_alloc(4*64);
+    let j_text:[]u8=z_alloc(4*512);
+    i=0;
+    while(i<jokes.len){
+        let ls:i32=i;
+        while(i<jokes.len && jokes[i]!=10){i=i+1;}
+        let line:[]u8=jokes[ls..i];
+        if(i<jokes.len){i=i+1;}
+        if(line.len<5){continue;}
+        let t1:i32=0;
+        while(t1<line.len && line[t1]!=9){t1=t1+1;}
+        let t2:i32=t1+1;
+        while(t2<line.len && line[t2]!=9){t2=t2+1;}
+        let t3:i32=t2+1;
+        while(t3<line.len && line[t3]!=9){t3=t3+1;}
+        let t4:i32=t3+1;
+        while(t4<line.len && line[t4]!=9){t4=t4+1;}
+        let cid:[]u8=line[0..t1];
+        // joke index: V3-14->0, 15->1, 16->2, 17->3
+        let ji:i32=-1;
+        if(cid.len>=5){
+            let nn:i32=parse_i32(cid[3..5]);
+            ji=nn-14;
+        }
+        if(ji<0 || ji>3){continue;}
+        j_cls[ji]=parse_i32(line[t1+1..t2]) as u8;
+        j_h[ji]=parse_i32(line[t2+1..t3]) as u8;
+        let mk:[]u8=line[t3+1..t4];
+        let kk:i32=0;
+        while(kk<mk.len && kk<63){j_marker[ji*64+kk]=mk[kk];kk=kk+1;}
+        j_marker[ji*64+kk]=0;
+        let tx:[]u8=line[t4+1..line.len];
+        kk=0;
+        while(kk<tx.len && kk<511){j_text[ji*512+kk]=tx[kk];kk=kk+1;}
+        j_text[ji*512+kk]=0;
+    }
+    // Emit ledger
+    let seq:i32=0;
+    while(seq<nc){
+        let gated:i32=c_gated[seq] as i32;
+        let logic:i32=c_logic[seq] as i32;
+        let isj:i32=c_joke[seq] as i32;
+        let disp:i32=0;
+        let attrib:[]u8="";
+        let detail:[]u8=z_alloc(256);
+        if(gated!=0){
+            disp=4;attrib="R3";
+            let d:[]u8="terminal WITHHOLD: claim_type gated (CONTESTED/EVOLVED/SKEPTICISM)";
+            let kk:i32=0;
+            while(kk<d.len){detail[kk]=d[kk];kk=kk+1;}
+        }else{
+            if(logic==2){
+                disp=3;attrib="R6";
+                let d:[]u8="CONTRADICTS: seeded mechanistic logic (component facts + composition steps)";
+                let kk:i32=0;
+                while(kk<d.len){detail[kk]=d[kk];kk=kk+1;}
+            }else{
+                if(isj!=0){
+                    // joke pipeline
+                    let idnum:i32=parse_i32(c_id[seq*16+3..seq*16+5]);
+                    let ji:i32=idnum-14;
+                    let cls:i32=j_cls[ji] as i32;
+                    let h:i32=j_h[ji] as i32;
+                    let intent:i32=cls;
+                    let rule:[]u8="CLASSIFIER_ONLY";
+                    if(h!=0){
+                        if(h==cls){
+                            rule="AGREE";
+                        }else{
+                            let nonsinc:i32=0;
+                            if(h==2){nonsinc=1;}
+                            if(h==3){nonsinc=1;}
+                            if(nonsinc!=0){
+                                // marker substring check on lowercased text
+                                let ml:i32=0;
+                                while(ml<64 && j_marker[ji*64+ml]!=0){ml=ml+1;}
+                                let tln:i32=0;
+                                while(tln<512 && j_text[ji*512+tln]!=0){tln=tln+1;}
+                                let low:[]u8=tolower(j_text[ji*512..ji*512+tln]);
+                                let sub:i32=has_sub(low,j_marker[ji*64..ji*64+ml]);
+                                if(sub!=0){
+                                    intent=h;
+                                    rule="ADOPT_HELPER";
+                                }else{
+                                    rule="KEEP_CLASSIFIER";
+                                }
+                            }else{
+                                rule="KEEP_CLASSIFIER";
+                            }
+                        }
+                    }
+                    // disposition from intent: 2/3 -> REJECT, 5 -> WITHHOLD
+                    if(intent==2 || intent==3){
+                        disp=3;
+                    }else{
+                        disp=4;
+                    }
+                    attrib="JOKE";
+                    let d0:[]u8="cls=";
+                    let p:i32=0;
+                    while(p<d0.len){detail[p]=d0[p];p=p+1;}
+                    if(cls==2){detail[p]=50;p=p+1;}
+                    if(cls==3){detail[p]=51;p=p+1;}
+                    if(cls==5){detail[p]=53;p=p+1;}
+                    let d1:[]u8=" rule=";
+                    let q:i32=0;
+                    while(q<d1.len){detail[p]=d1[q];p=p+1;q=q+1;}
+                    q=0;
+                    while(q<rule.len){detail[p]=rule[q];p=p+1;q=q+1;}
+                    let d2:[]u8=" final=";
+                    q=0;
+                    while(q<d2.len){detail[p]=d2[q];p=p+1;q=q+1;}
+                    if(intent==2){detail[p]=50;p=p+1;}
+                    if(intent==3){detail[p]=51;p=p+1;}
+                    if(intent==5){detail[p]=53;p=p+1;}
+                }else{
+                    // R5 vote
+                    let base:i32=seq*4;
+                    let w0:i32=(v_w0[base] as i32)|((v_w0[base+1] as i32)<<8)|((v_w0[base+2] as i32)<<16)|((v_w0[base+3] as i32)<<24);
+                    let w1:i32=(v_w1[base] as i32)|((v_w1[base+1] as i32)<<8)|((v_w1[base+2] as i32)<<16)|((v_w1[base+3] as i32)<<24);
+                    let w2:i32=(v_w2[base] as i32)|((v_w2[base+1] as i32)<<8)|((v_w2[base+2] as i32)<<16)|((v_w2[base+3] as i32)<<24);
+                    let best:i32=0;
+                    let bestw:i32=w0;
+                    if(w1>bestw){best=1;bestw=w1;}
+                    if(w2>bestw){best=2;bestw=w2;}
+                    if(bestw<8){
+                        disp=4;
+                    }else{
+                        if(best==1){disp=2;}
+                        if(best==2){disp=3;}
+                        if(best==0){disp=4;}
+                    }
+                    attrib="R5";
+                    let d0:[]u8="w0=";
+                    let p:i32=0;
+                    while(p<d0.len){detail[p]=d0[p];p=p+1;}
+                    // append w0,w1,w2 as decimal
+                    let tmp:[]u8=z_alloc(16);
+                    let nn:i32=0;
+                    let vv:i32=w0;
+                    if(vv==0){detail[p]=48;p=p+1;}
+                    while(vv>0){tmp[nn]=(48+((vv%10) as u8));vv=vv/10;nn=nn+1;}
+                    let qq:i32=nn-1;
+                    while(qq>=0){detail[p]=tmp[qq];p=p+1;qq=qq-1;}
+                    detail[p]=32;p=p+1;
+                    let d1:[]u8="w1=";
+                    let q2:i32=0;
+                    while(q2<d1.len){detail[p]=d1[q2];p=p+1;q2=q2+1;}
+                    vv=w1;nn=0;
+                    if(vv==0){detail[p]=48;p=p+1;}
+                    while(vv>0){tmp[nn]=(48+((vv%10) as u8));vv=vv/10;nn=nn+1;}
+                    qq=nn-1;
+                    while(qq>=0){detail[p]=tmp[qq];p=p+1;qq=qq-1;}
+                    detail[p]=32;p=p+1;
+                    let d2:[]u8="w2=";
+                    q2=0;
+                    while(q2<d2.len){detail[p]=d2[q2];p=p+1;q2=q2+1;}
+                    vv=w2;nn=0;
+                    if(vv==0){detail[p]=48;p=p+1;}
+                    while(vv>0){tmp[nn]=(48+((vv%10) as u8));vv=vv/10;nn=nn+1;}
+                    qq=nn-1;
+                    while(qq>=0){detail[p]=tmp[qq];p=p+1;qq=qq-1;}
+                }
+            }
+        }
+        // emit: arm \t seq \t cid \t disp \t attrib \t detail
+        // build line in buffer, single print (avoids helper-print newline bug)
+        let line:[]u8=z_alloc(1024);
+        let lp:i32=0;
+        let ai:i32=0;
+        while(ai<arm.len){line[lp]=arm[ai];lp=lp+1;ai=ai+1;}
+        line[lp]=9;lp=lp+1;
+        lp=append_i32(line,lp,seq);
+        line[lp]=9;lp=lp+1;
+        let il:i32=0;
+        while(il<16 && c_id[seq*16+il]!=0){il=il+1;}
+        let ii:i32=0;
+        while(ii<il){line[lp]=c_id[seq*16+ii];lp=lp+1;ii=ii+1;}
+        line[lp]=9;lp=lp+1;
+        lp=append_i32(line,lp,disp);
+        line[lp]=9;lp=lp+1;
+        ai=0;
+        while(ai<attrib.len){line[lp]=attrib[ai];lp=lp+1;ai=ai+1;}
+        line[lp]=9;lp=lp+1;
+        let dl:i32=0;
+        while(dl<256 && detail[dl]!=0){dl=dl+1;}
+        let di:i32=0;
+        while(di<dl){line[lp]=detail[di];lp=lp+1;di=di+1;}
+        _zag_print(line[0..lp]);
+        _zag_println("");
+        seq=seq+1;
+    }
+    return;
+}
