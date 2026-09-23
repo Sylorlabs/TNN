@@ -1,0 +1,2235 @@
+// R2-9 Witness-Emission PAM — pure Zag, zero RNG, deterministic.
+// sense CLI: fixture bytes in -> percept records + emission artifacts +
+//            install/withhold dispositions out, hash-chained ledger.
+// Usage:
+//   sense <task> <fixture> [outdir] [emit|noemit]     single trial
+//   sense batch <trials.tsv> <outdir> [emit|noemit]   batch
+// The percept+disposition path is a pure function of (task, fixture bytes).
+// The emission pass runs after and only READS (KB-E5 ablation: emit vs
+// noemit must leave percepts/dispositions byte-identical).
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- state arena ------------------------------------------------
+// One arena S (allocated once in main) carries all mutable percept state:
+//   0: ops i64 | 8: judgment i64 | 16: conf i64 | 24: disp i64 | 32: nsel i64
+//   40: sel0kind,48: sel0a,56: sel0b,64: sel0c,72: sel0d,80: sel0e,88: sel0f
+//   96: sel1kind,104: sel1a,112: sel1b,120: sel1c,128: sel1d,136: sel1e,144: sel1f
+//   152: claim_len i64 | 160: warrant_len i64
+//   168: claim bytes (1024) | 1192: warrant bytes (2048)
+//   3240+: per-task scratch
+// Selection kinds: 0 = audio byte span (a=start_byte,b=end_byte),
+//                  1 = pixel rect (a=x,b=y,c=w,d=h),
+//                  2 = video region (a=x,b=y,c=w,d=h,e=frame0,f=frame1).
+
+fn p64(b:[]u8,o:i32,v:i64)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+    b[o+4]=((v>>32)&255) as u8;
+    b[o+5]=((v>>40)&255) as u8;
+    b[o+6]=((v>>48)&255) as u8;
+    b[o+7]=((v>>56)&255) as u8;
+    return;
+}
+
+fn g64(b:[]u8,o:i32)i64 {
+    let v:i64=(b[o] as i64)|((b[o+1] as i64)<<8)|((b[o+2] as i64)<<16)|((b[o+3] as i64)<<24)
+         |((b[o+4] as i64)<<32)|((b[o+5] as i64)<<40)|((b[o+6] as i64)<<48)|((b[o+7] as i64)<<56);
+    return v;
+}
+
+fn op_add(S:[]u8,n:i64)void {
+    p64(S,0,g64(S,0)+n);
+    return;
+}
+
+fn st_judgment(S:[]u8)i64 { return g64(S,8); }
+fn st_set_judgment(S:[]u8,v:i64)void { p64(S,8,v); return; }
+
+// ---------------- math helpers (f64) ----------------------------------
+fn f_abs(x:f64)f64 {
+    if(x<0.0){return 0.0-x;}
+    return x;
+}
+
+fn f_sqrt(x:f64)f64 {
+    if(x<=0.0){return 0.0;}
+    let y:f64=x;
+    if(y<1.0){y=1.0;}
+    let i:i32=0;
+    while(i<14){y=0.5*(y+x/y);i=i+1;}
+    return y;
+}
+
+fn f_cbrt(x:f64)f64 {
+    if(x==0.0){return 0.0;}
+    let neg:i32=0;
+    let ax:f64=x;
+    if(x<0.0){neg=1;ax=0.0-x;}
+    let y:f64=ax;
+    if(y<1.0){y=1.0;}
+    let i:i32=0;
+    while(i<16){y=(2.0*y+ax/(y*y))/3.0;i=i+1;}
+    if(neg!=0){return 0.0-y;}
+    return y;
+}
+
+// ln via atanh series: ln(x) = 2*(y + y^3/3 + ...), y=(x-1)/(x+1)
+fn f_ln(x:f64)f64 {
+    if(x<=0.0){return 0.0;}
+    let y:f64=(x-1.0)/(x+1.0);
+    let y2:f64=y*y;
+    let term:f64=y;
+    let sum:f64=y;
+    let k:f64=3.0;
+    let i:i32=0;
+    while(i<14){term=term*y2;sum=sum+term/k;k=k+2.0;i=i+1;}
+    return 2.0*sum;
+}
+
+// exp via range halving + taylor
+fn f_exp(x:f64)f64 {
+    let neg:i32=0;
+    let ax:f64=x;
+    if(x<0.0){neg=1;ax=0.0-x;}
+    let halv:i32=0;
+    while(ax>1.0){ax=ax*0.5;halv=halv+1;}
+    let term:f64=1.0;
+    let sum:f64=1.0;
+    let k:f64=1.0;
+    let i:i32=0;
+    while(i<16){term=term*ax/k;sum=sum+term;k=k+1.0;i=i+1;}
+    let j:i32=0;
+    while(j<halv){sum=sum*sum;j=j+1;}
+    if(neg!=0){return 1.0/sum;}
+    return sum;
+}
+
+fn f_pow(x:f64,e:f64)f64 {
+    if(x<=0.0){return 0.0;}
+    return f_exp(e*f_ln(x));
+}
+
+// ---------------- R2-11B compressed-percept stash + generative renderer -----
+// The percept pass stashes a COMPRESSED PERCEPT at S+70000 (task tag at
+// 70000, features after). The renderer (emit path) reads ONLY this region
+// plus the percept's own selection records; it never reads source pixels.
+// Render ops are counted at S+70128, separate from the percept ops counter
+// at S+0, so the B4 emit/noemit ablation compares percept state
+// byte-identically. The renderer never writes S[0..70128).
+
+fn pfix(S:[]u8,o:i32,x:f64)void {
+    p64(S,o,((x*1099511627776.0) as i64));
+    return;
+}
+
+fn gfix(S:[]u8,o:i32)f64 {
+    return (g64(S,o) as f64)/1099511627776.0;
+}
+
+fn r_ops(S:[]u8,n:i64)void {
+    p64(S,70128,g64(S,70128)+n);
+    return;
+}
+
+// sine with argument reduction to [0,pi/2] + Taylor to x^13. Deterministic.
+fn f_sin(x:f64)f64 {
+    let twopi:f64=6.283185307179586;
+    let q:f64=x/twopi;
+    let qi:i64=q as i64;
+    let r:f64=x-(qi as f64)*twopi;
+    let s:f64=1.0;
+    if(r>3.141592653589793){r=r-3.141592653589793;s=0.0-1.0;}
+    if(r>1.5707963267948966){r=3.141592653589793-r;}
+    let r2:f64=r*r;
+    let term:f64=r;
+    let sum:f64=r;
+    term=0.0-term*r2/6.0;sum=sum+term;
+    term=0.0-term*r2/20.0;sum=sum+term;
+    term=0.0-term*r2/42.0;sum=sum+term;
+    term=0.0-term*r2/72.0;sum=sum+term;
+    term=0.0-term*r2/110.0;sum=sum+term;
+    term=0.0-term*r2/156.0;sum=sum+term;
+    return s*sum;
+}
+
+// inverse of lab_of: CIELAB -> sRGB bytes 0..255 (clamped)
+fn lab_to_rgb(L:f64,A:f64,B:f64,or_:*i32,og_:*i32,ob_:*i32)void {
+    let fy:f64=(L+16.0)/116.0;
+    let fx:f64=fy+A/500.0;
+    let fz:f64=fy-B/200.0;
+    let fx3:f64=fx*fx*fx;
+    let fy3:f64=fy*fy*fy;
+    let fz3:f64=fz*fz*fz;
+    let xr:f64=fx3;
+    if(fx3<=0.008856){xr=(fx-16.0/116.0)/7.787;}
+    let yr:f64=fy3;
+    if(fy3<=0.008856){yr=(fy-16.0/116.0)/7.787;}
+    let zr:f64=fz3;
+    if(fz3<=0.008856){zr=(fz-16.0/116.0)/7.787;}
+    let x:f64=xr*0.95047;
+    let y:f64=yr;
+    let z:f64=zr*1.08883;
+    let rl:f64=3.2404542*x-1.5371385*y-0.4985314*z;
+    let gl:f64=-0.9692660*x+1.8760108*y+0.0415560*z;
+    let bl:f64=0.0556434*x-0.2040259*y+1.0572252*z;
+    if(rl<0.0){rl=0.0;}
+    if(rl>1.0){rl=1.0;}
+    if(gl<0.0){gl=0.0;}
+    if(gl>1.0){gl=1.0;}
+    if(bl<0.0){bl=0.0;}
+    if(bl>1.0){bl=1.0;}
+    let r1:f64=12.92*rl;
+    if(rl>0.0031308){r1=1.055*f_pow(rl,0.4166666666666667)-0.055;}
+    let g1:f64=12.92*gl;
+    if(gl>0.0031308){g1=1.055*f_pow(gl,0.4166666666666667)-0.055;}
+    let b1:f64=12.92*bl;
+    if(bl>0.0031308){b1=1.055*f_pow(bl,0.4166666666666667)-0.055;}
+    or_.*=((r1*255.0)+0.5) as i32;
+    og_.*=((g1*255.0)+0.5) as i32;
+    ob_.*=((b1*255.0)+0.5) as i32;
+    return;
+}
+
+fn rms_span(buf:[]u8,off:i32,nsamp:i32)f64 {
+    let ss:f64=0.0;
+    let i:i32=0;
+    while(i<nsamp){
+        let v:i32=s16le(buf,off+i*2);
+        ss=ss+(v as f64)*(v as f64);
+        i=i+1;
+    }
+    return f_sqrt(ss/(nsamp as f64));
+}
+
+// shapetrans compressed percept: largest-component class stats from the
+// label map at S+3936 (written by the percept pass). Counters at 70200+.
+fn stash_shape(S:[]u8,src:[]u8)void {
+    let c:i32=0;
+    while(c<65){p64(S,70200+c*8,0);c=c+1;}
+    let y:i32=0;
+    while(y<96){
+        let x:i32=0;
+        while(x<96){
+            let lb:i32=S[3936+y*96+x] as i32;
+            if(lb<0){lb=0;}
+            if(lb>64){lb=64;}
+            p64(S,70200+lb*8,g64(S,70200+lb*8)+1);
+            x=x+1;
+        }
+        y=y+1;
+    }
+    let best:i32=0;
+    let bestn:i64=0;
+    let cc:i32=1;
+    while(cc<=64){
+        let nn:i64=g64(S,70200+cc*8);
+        if(nn>bestn){bestn=nn;best=cc;}
+        cc=cc+1;
+    }
+    let fill:i64=0;let fcnt:i64=0;let bg:i64=0;let bgc:i64=0;
+    let sx:i64=0;let sy:i64=0;
+    y=0;
+    while(y<96){
+        let x2:i32=0;
+        while(x2<96){
+            let o:i32=8+(y*96+x2)*3;
+            let gv:i64=((src[o] as i64)+(src[o+1] as i64)+(src[o+2] as i64))/3;
+            let lb:i32=S[3936+y*96+x2] as i32;
+            if(lb==best){if(best!=0){fill=fill+gv;fcnt=fcnt+1;sx=sx+(x2 as i64);sy=sy+(y as i64);}}
+            else{if(lb==0){bg=bg+gv;bgc=bgc+1;}}
+            x2=x2+1;
+        }
+        y=y+1;
+    }
+    op_add(S,(9216*2) as i64);
+    let cx:f64=48.0;let cy:f64=48.0;
+    let fg:i64=128;let bgv:i64=128;
+    if(best!=0){if(fcnt>0){cx=(sx as f64)/(fcnt as f64);cy=(sy as f64)/(fcnt as f64);fg=fill/fcnt;}}
+    if(bgc>0){bgv=bg/bgc;}
+    p64(S,70000,2);
+    p64(S,70008,fg);
+    p64(S,70016,bgv);
+    pfix(S,70024,cx);
+    pfix(S,70032,cy);
+    return;
+}
+
+// selection validity (mirrors emit_render's bounds checks)
+fn sel_ok(src:[]u8,n:i32,S:[]u8,idx:i32)i32 {
+    let o:i32=40+idx*56;
+    let kind:i64=g64(S,o);
+    let a:i64=g64(S,o+8);let b:i64=g64(S,o+16);let c:i64=g64(S,o+24);
+    let d:i64=g64(S,o+32);let e:i64=g64(S,o+40);let f:i64=g64(S,o+48);
+    if(kind==0){
+        let start:i32=a as i32;
+        let end:i32=b as i32;
+        if(start<8){return 0;}
+        if(end>n){return 0;}
+        if(end<=start){return 0;}
+        return 1;
+    }
+    if(kind==1){
+        let x:i32=a as i32;let y:i32=b as i32;
+        let rw:i32=c as i32;let rh:i32=d as i32;
+        let sw:i32=g32(src,0);
+        if(x<0){return 0;}
+        if(y<0){return 0;}
+        if(rw<=0){return 0;}
+        if(rh<=0){return 0;}
+        if(x+rw>sw){return 0;}
+        return 1;
+    }
+    let x:i32=a as i32;let y:i32=b as i32;
+    let rw:i32=c as i32;let rh:i32=d as i32;
+    let f0:i32=e as i32;let f1:i32=f as i32;
+    let sw:i32=g32(src,4);
+    let sh:i32=g32(src,8);
+    let nf:i32=g32(src,0);
+    if(x<0){return 0;}
+    if(y<0){return 0;}
+    if(rw<=0){return 0;}
+    if(rh<=0){return 0;}
+    if(x+rw>sw){return 0;}
+    if(y+rh>sh){return 0;}
+    if(f0<0){return 0;}
+    if(f1>=nf){return 0;}
+    if(f1<f0){return 0;}
+    return 1;
+}
+
+// ---------------- string helpers --------------------------------------
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){if(s[s.len-1]==10){return s[0..s.len-1];}}
+    return s;
+}
+
+// fixed-point decimal formatting, dec fractional digits
+fn f64s(x:f64,dec:i32)[]u8 {
+    let neg:i32=0;
+    let ax:f64=x;
+    if(x<0.0){neg=1;ax=0.0-x;}
+    let scale:f64=1.0;
+    let d:i32=0;
+    while(d<dec){scale=scale*10.0;d=d+1;}
+    let total:i64=((ax*scale)+0.5) as i64;
+    let sci:i64=scale as i64;
+    let ip:i64=total/sci;
+    let fp:i64=total-ip*sci;
+    let out:[]u8=nio_alloc(64);
+    let n:i32=0;
+    if(neg!=0){out[0]=45;n=1;}
+    let ips:[]u8=i64s(ip);
+    let k:i32=0;
+    while(k<ips.len){out[n+k]=ips[k];k=k+1;}
+    n=n+ips.len;
+    if(dec>0){
+        out[n]=46;n=n+1;
+        let div:i64=sci/10;
+        while(div>0){
+            let dg:i64=fp/div;
+            out[n]=(dg as u8)+48;n=n+1;
+            fp=fp-dg*div;div=div/10;
+        }
+    }
+    let r:[]u8=out[0..n];
+    // NOTE: out intentionally not freed (returned slice aliases it); the
+    // analyzer-clean alternative (copy) costs more than the 64B leak.
+    return r;
+}
+
+fn str_eq(a:[]u8,b:[]u8)i32 {
+    return nio_equal(a,b);
+}
+
+// ---------------- byte buffer append -----------------------------------
+fn b_put8(b:[]u8,at:i32,v:u8)i32 {
+    b[at]=v;
+    return at+1;
+}
+
+fn b_put(b:[]u8,at:i32,s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){b[at+i]=s[i];i=i+1;}
+    return at+s.len;
+}
+
+fn b_put_i64(b:[]u8,at:i32,v:i64)i32 {
+    return b_put(b,at,i64s(v));
+}
+
+fn b_put_f64(b:[]u8,at:i32,v:f64,dec:i32)i32 {
+    return b_put(b,at,f64s(v,dec));
+}
+
+// ---------------- file IO ----------------------------------------------
+fn read_file(path:[]u8,buf:[]u8,maxb:i32)i32 {
+    let cs:[]u8=nio_cstr(path);
+    if(cs.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,0,0,0,0,0);
+    nio_free(cs);
+    if(fd<0){return -1;}
+    let n:i64=nio_read_exact(fd,buf,maxb);
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    if(n<0){return -1;}
+    return n as i32;
+}
+
+fn write_file(path:[]u8,data:[]u8)i32 {
+    let cs:[]u8=nio_cstr(path);
+    if(cs.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,577,420,0,0,0);
+    nio_free(cs);
+    if(fd<0){return -1;}
+    let n:i64=nio_write_all(fd,data);
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    if(n!=(data.len as i64)){return -1;}
+    return 0;
+}
+
+fn path2(a:[]u8,b:[]u8)[]u8 {
+    let out:[]u8=nio_alloc(a.len+b.len+2);
+    let at:i32=b_put(out,0,a);
+    at=b_put8(out,at,47);
+    at=b_put(out,at,b);
+    let r:[]u8=out[0..at];
+    // NOTE: out intentionally not freed (returned slice aliases it).
+    return r;
+}
+
+// little-endian readers over []u8
+fn g32(b:[]u8,o:i32)i32 {
+    let v:i32=(b[o] as i32)|((b[o+1] as i32)<<8)|((b[o+2] as i32)<<16)|((b[o+3] as i32)<<24);
+    return v;
+}
+
+fn p32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+    return;
+}
+
+fn s16le(b:[]u8,o:i32)i32 {
+    let v:i32=(b[o] as i32)|((b[o+1] as i32)<<8);
+    if(v>=32768){v=v-65536;}
+    return v;
+}
+
+// ---------------- task / judgment vocabularies ---------------------------
+fn task_code(name:[]u8)i32 {
+    if(str_eq(name,"colordisc")!=0){return 0;}
+    if(str_eq(name,"colorconst")!=0){return 1;}
+    if(str_eq(name,"shapetrans")!=0){return 2;}
+    if(str_eq(name,"pitchdisc")!=0){return 3;}
+    if(str_eq(name,"timbredisc")!=0){return 4;}
+    if(str_eq(name,"motiondir")!=0){return 5;}
+    return -1;
+}
+
+fn task_name(t:i32)[]u8 {
+    if(t==0){return "colordisc";}
+    if(t==1){return "colorconst";}
+    if(t==2){return "shapetrans";}
+    if(t==3){return "pitchdisc";}
+    if(t==4){return "timbredisc";}
+    if(t==5){return "motiondir";}
+    return "?";
+}
+
+fn jname(t:i32,j:i64)[]u8 {
+    if(t==0){
+        if(j==0){return "SAME";}
+        return "DIFFERENT";
+    }
+    if(t==1){
+        if(j==0){return "SAME_SURFACE";}
+        return "DIFFERENT";
+    }
+    if(t==2){
+        if(j==0){return "CIRCLE";}
+        if(j==1){return "TRIANGLE";}
+        return "SQUARE";
+    }
+    if(t==3){
+        if(j==0){return "SAME";}
+        if(j==1){return "HIGHER";}
+        return "LOWER";
+    }
+    if(t==4){
+        if(j==0){return "PURE";}
+        if(j==1){return "BRIGHT";}
+        if(j==2){return "DARK";}
+        return "RICH";
+    }
+    if(j==0){return "STILL";}
+    if(j==1){return "N";}
+    if(j==2){return "NE";}
+    if(j==3){return "E";}
+    if(j==4){return "SE";}
+    if(j==5){return "S";}
+    if(j==6){return "SW";}
+    if(j==7){return "W";}
+    return "NW";
+}
+
+// ---------------- selection / claim / warrant writers -------------------
+fn sel_set(S:[]u8,idx:i32,kind:i64,a:i64,b:i64,c:i64,d:i64,e:i64,f:i64)void {
+    let o:i32=40+idx*56;
+    p64(S,o,kind);p64(S,o+8,a);p64(S,o+16,b);p64(S,o+24,c);
+    p64(S,o+32,d);p64(S,o+40,e);p64(S,o+48,f);
+    return;
+}
+
+fn claim_put(S:[]u8,s:[]u8)void {
+    let n:i32=s.len;
+    if(n>1024){n=1024;}
+    let i:i32=0;
+    while(i<n){S[168+i]=s[i];i=i+1;}
+    p64(S,152,n as i64);
+    return;
+}
+
+fn warrant_put(S:[]u8,s:[]u8)void {
+    let n:i32=s.len;
+    if(n>2048){n=2048;}
+    let i:i32=0;
+    while(i<n){S[1192+i]=s[i];i=i+1;}
+    p64(S,160,n as i64);
+    return;
+}
+
+fn claim_get(S:[]u8)[]u8 {
+    let n:i32=g64(S,152) as i32;
+    return S[168..168+n];
+}
+
+fn warrant_get(S:[]u8)[]u8 {
+    let n:i32=g64(S,160) as i32;
+    return S[1192..1192+n];
+}
+
+// ---------------- color math (f64) --------------------------------------
+fn srgb_lin(c:f64)f64 {
+    let v:f64=c/255.0;
+    if(v<=0.04045){return v/12.92;}
+    return f_pow((v+0.055)/1.055,2.4);
+}
+
+fn lab_of(r:f64,g:f64,b:f64,oL:*f64,oA:*f64,oB:*f64)void {
+    let rl:f64=srgb_lin(r);
+    let gl:f64=srgb_lin(g);
+    let bl:f64=srgb_lin(b);
+    let x:f64=0.4124564*rl+0.3575761*gl+0.1804375*bl;
+    let y:f64=0.2126729*rl+0.7151522*gl+0.0721750*bl;
+    let z:f64=0.0193339*rl+0.1191920*gl+0.9503041*bl;
+    let fx:f64=f_cbrt(x/0.95047);
+    let fy:f64=f_cbrt(y/1.0);
+    let fz:f64=f_cbrt(z/1.08883);
+    oL.*=116.0*fy-16.0;
+    oA.*=500.0*(fx-fy);
+    oB.*=200.0*(fy-fz);
+    return;
+}
+
+// ---------------- percept: colordisc ------------------------------------
+fn p_colordisc(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<8+128*64*3){return -1;}
+    let w:i32=g32(src,0);
+    let h:i32=g32(src,4);
+    if(w!=128){return -1;}
+    if(h!=64){return -1;}
+    let sr:i64=0;let sg:i64=0;let sb:i64=0;
+    let tr:i64=0;let tg:i64=0;let tb:i64=0;
+    let y:i32=0;
+    while(y<64){
+        let x:i32=0;
+        while(x<128){
+            let o:i32=8+(y*128+x)*3;
+            let rv:i64=src[o] as i64;
+            let gv:i64=src[o+1] as i64;
+            let bv:i64=src[o+2] as i64;
+            if(x<64){sr=sr+rv;sg=sg+gv;sb=sb+bv;}
+            else{tr=tr+rv;tg=tg+gv;tb=tb+bv;}
+            x=x+1;
+        }
+        y=y+1;
+    }
+    op_add(S,8192);
+    let npx:f64=4096.0;
+    let L1:f64=0.0;let A1:f64=0.0;let B1:f64=0.0;
+    let L2:f64=0.0;let A2:f64=0.0;let B2:f64=0.0;
+    lab_of((sr as f64)/npx,(sg as f64)/npx,(sb as f64)/npx,&L1,&A1,&B1);
+    lab_of((tr as f64)/npx,(tg as f64)/npx,(tb as f64)/npx,&L2,&A2,&B2);
+    let dL:f64=L2-L1;
+    let dA:f64=A2-A1;
+    let dB:f64=B2-B1;
+    let de:f64=f_sqrt(dL*dL+dA*dA+dB*dB);
+    let mr1:f64=(sr as f64)/npx;
+    let mg1:f64=(sg as f64)/npx;
+    let mb1:f64=(sb as f64)/npx;
+    let mr2:f64=(tr as f64)/npx;
+    let mg2:f64=(tg as f64)/npx;
+    let mb2:f64=(tb as f64)/npx;
+    let dr:f64=mr2-mr1;
+    let dg:f64=mg2-mg1;
+    let db:f64=mb2-mb1;
+    let rgbe:f64=f_sqrt(dr*dr+dg*dg+db*db);
+    let j:i64=0;
+    if(de>=2.6){j=1;}
+    let conf:i64=((f_abs(de-2.6))*250.0) as i64;
+    if(conf>1000){conf=1000;}
+    if(conf<0){conf=0;}
+    // gate: metamer-suspect (small RGB distance, large perceptual distance)
+    // and illuminant-ambiguous (difference concentrated on the b* axis).
+    let metam:i32=0;
+    if(rgbe<30.0){if(de>=2.6){metam=1;}}
+    let illam:i32=0;
+    if(f_abs(dB)>2.0*f_sqrt(dL*dL+dA*dA)){if(de>1.5){if(de<6.0){illam=1;}}}
+    let disp:i64=1;
+    if(metam!=0){disp=0;}
+    if(illam!=0){disp=0;}
+    if(conf<150){disp=0;}
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,2);
+    sel_set(S,0,1,0,0,64,64,0,0);
+    sel_set(S,1,1,64,0,64,64,0,0);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"patches ");
+    at=b_put(cb,at,jname(0,j));
+    at=b_put(cb,at," (dE76 vs 2.6)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"dE76=");
+    at=b_put_f64(wb,at,de,3);
+    at=b_put(wb,at,"; rgbE=");
+    at=b_put_f64(wb,at,rgbe,2);
+    at=b_put(wb,at,"; metamer_suspect=");
+    at=b_put_i64(wb,at,metam as i64);
+    at=b_put(wb,at,"; illuminant_ambiguous=");
+    at=b_put_i64(wb,at,illam as i64);
+
+    // R2-11B: compressed-percept stash (renderer input; percept record untouched)
+    p64(S,70000,0);
+    pfix(S,70008,L1);pfix(S,70016,A1);pfix(S,70024,B1);
+    pfix(S,70032,L2);pfix(S,70040,A2);pfix(S,70048,B2);
+    pfix(S,70056,de);pfix(S,70064,rgbe);
+    pfix(S,70072,mr1);pfix(S,70080,mg1);pfix(S,70088,mb1);
+    pfix(S,70096,mr2);pfix(S,70104,mg2);pfix(S,70112,mb2);
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+
+// 3x3 inverse of symmetric A into S scratch at base (9 f64). Returns 0 ok.
+fn inv3(S:[]u8,base:i32,a00:f64,a01:f64,a02:f64,a11:f64,a12:f64,a22:f64)i32 {
+    let det:f64=a00*(a11*a22-a12*a12)-a01*(a01*a22-a12*a02)+a02*(a01*a12-a11*a02);
+    if(f_abs(det)<1.0e-9){return -1;}
+    let i00:f64=(a11*a22-a12*a12)/det;
+    let i01:f64=(a02*a12-a01*a22)/det;
+    let i02:f64=(a01*a12-a02*a11)/det;
+    let i11:f64=(a00*a22-a02*a02)/det;
+    let i12:f64=(a02*a01-a00*a12)/det;
+    let i22:f64=(a00*a11-a01*a01)/det;
+    // store raw bits via f64->i64 bit copy through arithmetic is unsafe;
+    // instead store scaled fixed-point (2^40) as i64.
+    p64(S,base,((i00*1099511627776.0) as i64));
+    p64(S,base+8,((i01*1099511627776.0) as i64));
+    p64(S,base+16,((i02*1099511627776.0) as i64));
+    p64(S,base+24,((i11*1099511627776.0) as i64));
+    p64(S,base+32,((i12*1099511627776.0) as i64));
+    p64(S,base+40,((i22*1099511627776.0) as i64));
+    return 0;
+}
+
+fn inv3_get(S:[]u8,base:i32,r:i32,c:i32)f64 {
+    // symmetric: map (r,c) to stored triangle
+    let rr:i32=r;
+    let cc:i32=c;
+    if(rr>cc){let t:i32=rr;rr=cc;cc=t;}
+    let o:i32=base;
+    if(rr==0){if(cc==0){o=base;}else{if(cc==1){o=base+8;}else{o=base+16;}}}
+    else{if(rr==1){if(cc==1){o=base+24;}else{o=base+32;}}else{o=base+40;}}
+    return (g64(S,o) as f64)/1099511627776.0;
+}
+
+// accumulate normal equations over one panel pair region; returns resid rms
+// and stores M (3x3 row-major f64 fixed) at mbase.
+fn fit_map(src:[]u8,S:[]u8,x0:i32,x1:i32,mbase:i32) f64 {
+    let a00:f64=0.0;let a01:f64=0.0;let a02:f64=0.0;
+    let a11:f64=0.0;let a12:f64=0.0;let a22:f64=0.0;
+    let b00:f64=0.0;let b01:f64=0.0;let b02:f64=0.0;
+    let b10:f64=0.0;let b11:f64=0.0;let b12:f64=0.0;
+    let b20:f64=0.0;let b21:f64=0.0;let b22:f64=0.0;
+    let cnt:i64=0;
+    let y:i32=0;
+    while(y<64){
+        let x:i32=x0;
+        while(x<x1){
+            let o1:i32=8+(y*128+x)*3;
+            let o2:i32=8+(y*128+x+64)*3;
+            let x0v:f64=src[o1] as f64;
+            let x1v:f64=(src[o1+1] as f64);
+            let x2v:f64=(src[o1+2] as f64);
+            let y0v:f64=src[o2] as f64;
+            let y1v:f64=(src[o2+1] as f64);
+            let y2v:f64=(src[o2+2] as f64);
+            a00=a00+x0v*x0v;a01=a01+x0v*x1v;a02=a02+x0v*x2v;
+            a11=a11+x1v*x1v;a12=a12+x1v*x2v;a22=a22+x2v*x2v;
+            b00=b00+y0v*x0v;b01=b01+y0v*x1v;b02=b02+y0v*x2v;
+            b10=b10+y1v*x0v;b11=b11+y1v*x1v;b12=b12+y1v*x2v;
+            b20=b20+y2v*x0v;b21=b21+y2v*x1v;b22=b22+y2v*x2v;
+            cnt=cnt+1;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    op_add(S,cnt);
+    if(inv3(S,3360,a00,a01,a02,a11,a12,a22)!=0){return -1.0;}
+    // M = B * invA, row-major into mbase (fixed 2^40)
+    let r:i32=0;
+    while(r<3){
+        let c:i32=0;
+        while(c<3){
+            let bv0:f64=0.0;let bv1:f64=0.0;let bv2:f64=0.0;
+            if(r==0){bv0=b00;bv1=b01;bv2=b02;}
+            else{if(r==1){bv0=b10;bv1=b11;bv2=b12;}else{bv0=b20;bv1=b21;bv2=b22;}}
+            let mv:f64=bv0*inv3_get(S,3360,0,c)+bv1*inv3_get(S,3360,1,c)+bv2*inv3_get(S,3360,2,c);
+            p64(S,mbase+(r*3+c)*8,((mv*1099511627776.0) as i64));
+            c=c+1;
+        }
+        r=r+1;
+    }
+    // residual
+    let ss:f64=0.0;
+    let y2:i32=0;
+    while(y2<64){
+        let x:i32=x0;
+        while(x<x1){
+            let o1:i32=8+(y2*128+x)*3;
+            let o2:i32=8+(y2*128+x+64)*3;
+            let xv0:f64=src[o1] as f64;
+            let xv1:f64=(src[o1+1] as f64);
+            let xv2:f64=(src[o1+2] as f64);
+            let k:i32=0;
+            while(k<3){
+                let m0:f64=(g64(S,mbase+(k*3+0)*8) as f64)/1099511627776.0;
+                let m1:f64=(g64(S,mbase+(k*3+1)*8) as f64)/1099511627776.0;
+                let m2:f64=(g64(S,mbase+(k*3+2)*8) as f64)/1099511627776.0;
+                let pred:f64=m0*xv0+m1*xv1+m2*xv2;
+                let yv:f64=src[o2+k] as f64;
+                let d:f64=yv-pred;
+                ss=ss+d*d;
+                k=k+1;
+            }
+            x=x+1;
+        }
+        y2=y2+1;
+    }
+    op_add(S,cnt);
+    return f_sqrt(ss/((cnt*3) as f64));
+}
+
+// fallback: 1D linear fit (right = a*left + b) per channel, for singular
+// (e.g. grayscale) panels where the 3x3 matrix is rank-deficient.
+// Returns RMS residual, or -1 on failure.
+fn panel_fit1d(src:[]u8) f64 {
+    let sx:f64=0.0; let sy:f64=0.0; let sxx:f64=0.0; let sxy:f64=0.0;
+    let cnt:f64=0.0;
+    let y:i32=0;
+    while(y<64){
+        let x:i32=0;
+        while(x<64){
+            let o1:i32=8+(y*128+x)*3;
+            let o2:i32=8+(y*128+x+64)*3;
+            // use luminance (average of RGB) for the 1D fit
+            let l1:f64=((src[o1] as f64)+(src[o1+1] as f64)+(src[o1+2] as f64))/3.0;
+            let l2:f64=((src[o2] as f64)+(src[o2+1] as f64)+(src[o2+2] as f64))/3.0;
+            sx=sx+l1; sy=sy+l2; sxx=sxx+l1*l1; sxy=sxy+l1*l2;
+            cnt=cnt+1.0;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    let denom:f64=cnt*sxx-sx*sx;
+    if(f_abs(denom)<1e-9){return -1.0;}
+    let a:f64=(cnt*sxy-sx*sy)/denom;
+    let b:f64=(sy-a*sx)/cnt;
+    // residual
+    let ss:f64=0.0;
+    y=0;
+    while(y<64){
+        let x:i32=0;
+        while(x<64){
+            let o1:i32=8+(y*128+x)*3;
+            let o2:i32=8+(y*128+x+64)*3;
+            let l1:f64=((src[o1] as f64)+(src[o1+1] as f64)+(src[o1+2] as f64))/3.0;
+            let l2:f64=((src[o2] as f64)+(src[o2+1] as f64)+(src[o2+2] as f64))/3.0;
+            let pred:f64=a*l1+b;
+            let d:f64=l2-pred;
+            ss=ss+d*d;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    return f_sqrt(ss/cnt);
+}
+// ---------------- percept: colorconst -----------------------------------
+fn p_colorconst(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<8+128*64*3){return -1;}
+    let w:i32=g32(src,0);
+    let h:i32=g32(src,4);
+    if(w!=128){return -1;}
+    if(h!=64){return -1;}
+    let resid:f64=fit_map(src,S,0,64,3432);
+    if(resid<0.0){
+        // fallback for singular (e.g. grayscale) panels: 1D luminance fit
+        resid=panel_fit1d(src);
+        if(resid<0.0){return -1;}
+    }
+    let j:i64=1;
+    if(resid<5.0){j=0;}
+    let conf:i64=((f_abs(resid-5.0))*120.0) as i64;
+    if(conf>1000){conf=1000;}
+    if(conf<0){conf=0;}
+    // mixed-illuminant check: fit each half separately
+    let rl:f64=fit_map(src,S,0,32,3504);
+    let rr:f64=fit_map(src,S,32,64,3576);
+    let mixed:i32=0;
+    if(rl>=0.0){if(rr>=0.0){if(rl<5.0){if(rr<5.0){
+        let md:f64=0.0;
+        let k:i32=0;
+        while(k<9){
+            let d:f64=((g64(S,3504+k*8)-g64(S,3576+k*8)) as f64)/1099511627776.0;
+            let ad:f64=f_abs(d);
+            if(ad>md){md=ad;}
+            k=k+1;
+        }
+        if(md>0.35){mixed=1;}
+    }}}}
+    let disp:i64=1;
+    if(mixed!=0){disp=0;}
+    if(conf<150){disp=0;}
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,2);
+    sel_set(S,0,1,0,0,64,64,0,0);
+    sel_set(S,1,1,64,0,64,64,0,0);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"panels ");
+    at=b_put(cb,at,jname(1,j));
+    at=b_put(cb,at," (linear-map residual vs 5.0)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"resid_rms=");
+    at=b_put_f64(wb,at,resid,3);
+    at=b_put(wb,at,"; half_resid=");
+    at=b_put_f64(wb,at,rl,3);
+    at=b_put(wb,at,"/");
+    at=b_put_f64(wb,at,rr,3);
+    at=b_put(wb,at,"; mixed_illuminant=");
+    at=b_put_i64(wb,at,mixed as i64);
+
+    // R2-11B: panel means for the renderer (percept record untouched)
+    let cm1r:f64=0.0;let cm1g:f64=0.0;let cm1b:f64=0.0;
+    let cm2r:f64=0.0;let cm2g:f64=0.0;let cm2b:f64=0.0;
+    let scy:i32=0;
+    while(scy<64){
+        let scx:i32=0;
+        while(scx<64){
+            let so1:i32=8+(scy*128+scx)*3;
+            let so2:i32=8+(scy*128+scx+64)*3;
+            cm1r=cm1r+(src[so1] as f64);cm1g=cm1g+(src[so1+1] as f64);cm1b=cm1b+(src[so1+2] as f64);
+            cm2r=cm2r+(src[so2] as f64);cm2g=cm2g+(src[so2+1] as f64);cm2b=cm2b+(src[so2+2] as f64);
+            scx=scx+1;
+        }
+        scy=scy+1;
+    }
+    op_add(S,8192 as i64);
+    p64(S,70000,1);
+    pfix(S,70008,resid);
+    pfix(S,70016,cm1r/4096.0);pfix(S,70024,cm1g/4096.0);pfix(S,70032,cm1b/4096.0);
+    pfix(S,70040,cm2r/4096.0);pfix(S,70048,cm2g/4096.0);pfix(S,70056,cm2b/4096.0);
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+// ---------------- ray table: 24 rays at 15 deg ----------------------
+fn ray_cos(i:i32)f64 {
+    if(i==0){return 1.0000000000;}
+    if(i==1){return 0.9659258263;}
+    if(i==2){return 0.8660254038;}
+    if(i==3){return 0.7071067812;}
+    if(i==4){return 0.5000000000;}
+    if(i==5){return 0.2588190451;}
+    if(i==6){return 0.0000000000;}
+    if(i==7){return -0.2588190451;}
+    if(i==8){return -0.5000000000;}
+    if(i==9){return -0.7071067812;}
+    if(i==10){return -0.8660254038;}
+    if(i==11){return -0.9659258263;}
+    if(i==12){return -1.0000000000;}
+    if(i==13){return -0.9659258263;}
+    if(i==14){return -0.8660254038;}
+    if(i==15){return -0.7071067812;}
+    if(i==16){return -0.5000000000;}
+    if(i==17){return -0.2588190451;}
+    if(i==18){return -0.0000000000;}
+    if(i==19){return 0.2588190451;}
+    if(i==20){return 0.5000000000;}
+    if(i==21){return 0.7071067812;}
+    if(i==22){return 0.8660254038;}
+    if(i==23){return 0.9659258263;}
+    return 1.0;
+}
+fn ray_sin(i:i32)f64 {
+    if(i==0){return 0.0000000000;}
+    if(i==1){return 0.2588190451;}
+    if(i==2){return 0.5000000000;}
+    if(i==3){return 0.7071067812;}
+    if(i==4){return 0.8660254038;}
+    if(i==5){return 0.9659258263;}
+    if(i==6){return 1.0000000000;}
+    if(i==7){return 0.9659258263;}
+    if(i==8){return 0.8660254038;}
+    if(i==9){return 0.7071067812;}
+    if(i==10){return 0.5000000000;}
+    if(i==11){return 0.2588190451;}
+    if(i==12){return 0.0000000000;}
+    if(i==13){return -0.2588190451;}
+    if(i==14){return -0.5000000000;}
+    if(i==15){return -0.7071067812;}
+    if(i==16){return -0.8660254038;}
+    if(i==17){return -0.9659258263;}
+    if(i==18){return -1.0000000000;}
+    if(i==19){return -0.9659258263;}
+    if(i==20){return -0.8660254038;}
+    if(i==21){return -0.7071067812;}
+    if(i==22){return -0.5000000000;}
+    if(i==23){return -0.2588190451;}
+    return 0.0;
+}
+
+// ---------------- percept: shapetrans -----------------------------------
+// Thresholds: mean+50 floor 140; largest-component radial profile (24 rays);
+// circle if std/mean<0.12 else peak-count (3=triangle,4=square).
+fn profile_class(S:[]u8,cx:f64,cy:f64,comp_id:i32) i64 {
+    // returns: 0 circle, 1 triangle, 2 square, -1 ambiguous; conf in S@3200
+    let base:i32=3648;
+    let i:i32=0;
+    while(i<24){
+        let cs:f64=ray_cos(i);
+        let sn:f64=ray_sin(i);
+        let t:f64=0.5;
+        let last:f64=0.0;
+        while(t<75.0){
+            let px:i32=(cx+t*cs) as i32;
+            let py:i32=(cy+t*sn) as i32;
+            if(px<0){break;}
+            if(px>=96){break;}
+            if(py<0){break;}
+            if(py>=96){break;}
+            let lab:i32=S[3936+py*96+px] as i32;
+            if(lab!=comp_id){break;}
+            last=t;
+            t=t+0.5;
+        }
+        p64(S,base+i*8,((last*1099511627776.0) as i64));
+        i=i+1;
+    }
+    op_add(S,24*150);
+    let mean:f64=0.0;
+    i=0;
+    while(i<24){mean=mean+((g64(S,base+i*8) as f64)/1099511627776.0);i=i+1;}
+    mean=mean/24.0;
+    if(mean<2.0){p64(S,3200,0);return -1;}
+    let sd:f64=0.0;
+    i=0;
+    while(i<24){
+        let r:f64=(g64(S,base+i*8) as f64)/1099511627776.0;
+        let d:f64=r-mean;
+        sd=sd+d*d;
+        i=i+1;
+    }
+    sd=f_sqrt(sd/24.0);
+    if(sd/mean<0.12){
+        p64(S,3200,((1000.0*(1.0-(sd/mean)/0.12)) as i64));
+        return 0;
+    }
+    // smooth circularly and count local maxima above 1.1*mean
+    let npeak:i32=0;
+    let minpeak:f64=1.0e18;
+    i=0;
+    while(i<24){
+        let r0:f64=(g64(S,base+((i+23)%24)*8) as f64)/1099511627776.0;
+        let r1:f64=(g64(S,base+i*8) as f64)/1099511627776.0;
+        let r2:f64=(g64(S,base+((i+1)%24)*8) as f64)/1099511627776.0;
+        let s:f64=(r0+r1+r2)/3.0;
+        p64(S,base+192+i*8,((s*1099511627776.0) as i64));
+        i=i+1;
+    }
+    i=0;
+    while(i<24){
+        let s0:f64=(g64(S,base+192+((i+23)%24)*8) as f64)/1099511627776.0;
+        let s1:f64=(g64(S,base+192+i*8) as f64)/1099511627776.0;
+        let s2:f64=(g64(S,base+192+((i+1)%24)*8) as f64)/1099511627776.0;
+        if(s1>s0){if(s1>s2){if(s1>1.1*mean){npeak=npeak+1;if(s1<minpeak){minpeak=s1;}}}}
+        i=i+1;
+    }
+    if(npeak==3){p64(S,3200,((((minpeak-mean)/(0.25*mean))*1000.0) as i64));return 1;}
+    if(npeak==4){p64(S,3200,((((minpeak-mean)/(0.25*mean))*1000.0) as i64));return 2;}
+    p64(S,3200,0);
+    return -1;
+}
+
+fn p_shapetrans(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<8+96*96*3){return -1;}
+    let w:i32=g32(src,0);
+    let h:i32=g32(src,4);
+    if(w!=96){return -1;}
+    if(h!=96){return -1;}
+    // mean gray, then threshold
+    let gsum:i64=0;
+    let y:i32=0;
+    while(y<96){
+        let x:i32=0;
+        while(x<96){
+            let o:i32=8+(y*96+x)*3;
+            gsum=gsum+((src[o] as i64)+(src[o+1] as i64)+(src[o+2] as i64))/3;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    op_add(S,9216);
+    let gmean:i64=gsum/9216;
+    let thr:i64=gmean+50;
+    if(thr<140){thr=140;}
+    // mask + flood fill (labels at S+3936, stack at S+13152)
+    let ncomp:i32=0;
+    let fgcount:i64=0;
+    // component stats at S+50016: 8 i64 per comp: cnt,sumx,sumy,minx,maxx,miny,maxy,_
+    y=0;
+    while(y<96){
+        let x:i32=0;
+        while(x<96){
+            S[3936+y*96+x]=0;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    let comp:i32=0;
+    y=0;
+    while(y<96){
+        let x:i32=0;
+        while(x<96){
+            let o:i32=8+(y*96+x)*3;
+            let gv:i64=((src[o] as i64)+(src[o+1] as i64)+(src[o+2] as i64))/3;
+            if(gv>thr){
+                fgcount=fgcount+1;
+                if((S[3936+y*96+x] as i32)==0){
+                    comp=comp+1;
+                    if(comp>64){return -1;}
+                    // flood fill
+                    let sp:i32=0;
+                    p32(S,13152+sp*4,y*96+x);
+                    sp=sp+1;
+                    S[3936+y*96+x]=comp as u8;
+                    let cnt:i64=0;
+                    let sx:i64=0;let sy:i64=0;
+                    let mnx:i64=96;let mxx:i64=0;let mny:i64=96;let mxy:i64=0;
+                    while(sp>0){
+                        sp=sp-1;
+                        let cell:i32=g32(S,13152+sp*4);
+                        let cx0:i32=cell%96;
+                        let cy0:i32=cell/96;
+                        cnt=cnt+1;sx=sx+(cx0 as i64);sy=sy+(cy0 as i64);
+                        if((cx0 as i64)<mnx){mnx=cx0 as i64;}
+                        if((cx0 as i64)>mxx){mxx=cx0 as i64;}
+                        if((cy0 as i64)<mny){mny=cy0 as i64;}
+                        if((cy0 as i64)>mxy){mxy=cy0 as i64;}
+                        // 4-neighbors
+                        let nx:i32=cx0-1;
+                        if(nx>=0){
+                            let go:i32=8+(cy0*96+nx)*3;
+                            let gv2:i64=((src[go] as i64)+(src[go+1] as i64)+(src[go+2] as i64))/3;
+                            if(gv2>thr){if((S[3936+cy0*96+nx] as i32)==0){
+                                S[3936+cy0*96+nx]=comp as u8;
+                                p32(S,13152+sp*4,cy0*96+nx);sp=sp+1;
+                            }}
+                        }
+                        nx=cx0+1;
+                        if(nx<96){
+                            let go:i32=8+(cy0*96+nx)*3;
+                            let gv2:i64=((src[go] as i64)+(src[go+1] as i64)+(src[go+2] as i64))/3;
+                            if(gv2>thr){if((S[3936+cy0*96+nx] as i32)==0){
+                                S[3936+cy0*96+nx]=comp as u8;
+                                p32(S,13152+sp*4,cy0*96+nx);sp=sp+1;
+                            }}
+                        }
+                        let ny2:i32=cy0-1;
+                        if(ny2>=0){
+                            let go:i32=8+(ny2*96+cx0)*3;
+                            let gv2:i64=((src[go] as i64)+(src[go+1] as i64)+(src[go+2] as i64))/3;
+                            if(gv2>thr){if((S[3936+ny2*96+cx0] as i32)==0){
+                                S[3936+ny2*96+cx0]=comp as u8;
+                                p32(S,13152+sp*4,ny2*96+cx0);sp=sp+1;
+                            }}
+                        }
+                        ny2=cy0+1;
+                        if(ny2<96){
+                            let go:i32=8+(ny2*96+cx0)*3;
+                            let gv2:i64=((src[go] as i64)+(src[go+1] as i64)+(src[go+2] as i64))/3;
+                            if(gv2>thr){if((S[3936+ny2*96+cx0] as i32)==0){
+                                S[3936+ny2*96+cx0]=comp as u8;
+                                p32(S,13152+sp*4,ny2*96+cx0);sp=sp+1;
+                            }}
+                        }
+                    }
+                    let cb2:i32=50016+(comp-1)*64;
+                    p64(S,cb2,cnt);p64(S,cb2+8,sx);p64(S,cb2+16,sy);
+                    p64(S,cb2+24,mnx);p64(S,cb2+32,mxx);p64(S,cb2+40,mny);p64(S,cb2+48,mxy);
+                    op_add(S,cnt);
+                }
+            }
+            x=x+1;
+        }
+        y=y+1;
+    }
+    ncomp=comp;
+    let j:i64=0;
+    let conf:i64=0;
+    let disp:i64=0;
+    let bx0:i64=0;let by0:i64=0;let bw:i64=0;let bh:i64=0;
+    if(fgcount>=200){if(ncomp>=1){
+        // largest component
+        let best:i32=1;
+        let bestn:i64=g64(S,50016);
+        let c2:i32=2;
+        while(c2<=ncomp){
+            let nn:i64=g64(S,50016+(c2-1)*64);
+            if(nn>bestn){bestn=nn;best=c2;}
+            c2=c2+1;
+        }
+        // second-largest for ambiguity gate
+        let second:i64=0;
+        c2=1;
+        while(c2<=ncomp){
+            if(c2!=best){
+                let nn:i64=g64(S,50016+(c2-1)*64);
+                if(nn>second){second=nn;}
+            }
+            c2=c2+1;
+        }
+        let cb3:i32=50016+(best-1)*64;
+        let cx:f64=(g64(S,cb3+8) as f64)/(g64(S,cb3) as f64);
+        let cy:f64=(g64(S,cb3+16) as f64)/(g64(S,cb3) as f64);
+        let cls:i64=profile_class(S,cx,cy,best);
+        conf=g64(S,3200);
+        if(conf>1000){conf=1000;}
+        if(conf<0){conf=0;}
+        if(cls>=0){
+            j=cls;
+            disp=1;
+            if(second*2>=bestn){disp=0;}
+            if(conf<150){disp=0;}
+        }
+        bx0=g64(S,cb3+24);by0=g64(S,cb3+40);
+        bw=g64(S,cb3+32)-bx0+1;bh=g64(S,cb3+48)-by0+1;
+    }}
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,1);
+    sel_set(S,0,1,bx0,by0,bw,bh,0,0);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"shape ");
+    at=b_put(cb,at,jname(2,j));
+    at=b_put(cb,at," (radial profile, 24 rays)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"ncomp=");
+    at=b_put_i64(wb,at,ncomp as i64);
+    at=b_put(wb,at,"; fg=");
+    at=b_put_i64(wb,at,fgcount);
+    at=b_put(wb,at,"; thr=");
+    at=b_put_i64(wb,at,thr);
+
+    // R2-11B: compressed-percept stash (renderer input; percept record untouched)
+    stash_shape(S,src);
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+
+// ---------------- percept: pitchdisc ------------------------------------
+// Autocorrelation f0 on each 6400-sample tone (lags 20..90), parabolic
+// interpolation, plus zero-crossing cross-check and stationarity gate.
+fn est_f0(buf:[]u8,off:i32,nsamp:i32,S:[]u8)f64 {
+    let bestL:i32=20;
+    let bestS:i64=0;
+    let first:i32=1;
+    let L:i32=20;
+    while(L<=90){
+        let acc:i64=0;
+        let i:i32=0;
+        while(i<nsamp-L){
+            let a:i32=s16le(buf,off+i*2);
+            let b:i32=s16le(buf,off+(i+L)*2);
+            acc=acc+(a as i64)*(b as i64);
+            i=i+1;
+        }
+        if(first!=0){bestS=acc;first=0;}
+        else{if(acc>bestS){bestS=acc;bestL=L;}}
+        L=L+1;
+    }
+    op_add(S,(nsamp as i64)*71);
+    // parabolic interpolation around bestL
+    let sm:i64=0;let s0:i64=0;let sp:i64=0;
+    let L2:i32=bestL-1;
+    if(L2<20){L2=20;}
+    let L3:i32=bestL+1;
+    if(L3>90){L3=90;}
+    let LL:i32=20;
+    while(LL<=90){
+        let acc:i64=0;
+        let i:i32=0;
+        while(i<nsamp-LL){
+            let a:i32=s16le(buf,off+i*2);
+            let b:i32=s16le(buf,off+(i+LL)*2);
+            acc=acc+(a as i64)*(b as i64);
+            i=i+1;
+        }
+        if(LL==L2){sm=acc;}
+        if(LL==bestL){s0=acc;}
+        if(LL==L3){sp=acc;}
+        LL=LL+1;
+    }
+    op_add(S,(nsamp as i64)*71);
+    let lag:f64=bestL as f64;
+    let den:f64=(sm as f64)-2.0*(s0 as f64)+(sp as f64);
+    if(f_abs(den)>1.0){
+        let d:f64=((sm as f64)-(sp as f64))/(2.0*den);
+        if(d>-1.0){if(d<1.0){lag=lag+d;}}
+    }
+    return 16000.0/lag;
+}
+
+fn zc_f0(buf:[]u8,off:i32,nsamp:i32,S:[]u8)f64 {
+    let zc:i64=0;
+    let prev:i32=s16le(buf,off);
+    let i:i32=1;
+    while(i<nsamp){
+        let v:i32=s16le(buf,off+i*2);
+        if(prev<0){if(v>=0){zc=zc+1;}}
+        else{if(prev>0){if(v<=0){zc=zc+1;}}}
+        prev=v;
+        i=i+1;
+    }
+    op_add(S,nsamp as i64);
+    return (zc as f64)*16000.0/(2.0*(nsamp as f64));
+}
+
+fn p_pitchdisc(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<8+14080*2){return -1;}
+    let rate:i32=g32(src,0);
+    let cnt:i32=g32(src,4);
+    if(rate!=16000){return -1;}
+    if(cnt!=14080){return -1;}
+    let base:i32=8;
+    let f0:f64=est_f0(src,base,6400,S);
+    let f1:f64=est_f0(src,base+7680*2,6400,S);
+    // stationarity: first vs second half of each tone
+    let f0a:f64=est_f0(src,base,3200,S);
+    let f0b:f64=est_f0(src,base+3200*2,3200,S);
+    let f1a:f64=est_f0(src,base+7680*2,3200,S);
+    let f1b:f64=est_f0(src,base+7680*2+3200*2,3200,S);
+    let nonstat:i32=0;
+    if(f_abs(f0a-f0b)/f0>0.003){nonstat=1;}
+    if(f_abs(f1a-f1b)/f1>0.003){nonstat=1;}
+    // zero-crossing cross-check
+    let z0:f64=zc_f0(src,base,6400,S);
+    let z1:f64=zc_f0(src,base+7680*2,6400,S);
+    let xfail:i32=0;
+    if(f_abs(z0-f0)/f0>0.02){xfail=1;}
+    if(f_abs(z1-f1)/f1>0.02){xfail=1;}
+    let rel:f64=f_abs(f1-f0)/f0;
+    let j:i64=0;
+    if(rel>=0.005){
+        j=1;
+        if(f1<f0){j=2;}
+    }
+    let conf:i64=((f_abs(rel-0.005))*100000.0) as i64;
+    if(conf>1000){conf=1000;}
+    if(conf<0){conf=0;}
+    let disp:i64=1;
+    if(nonstat!=0){disp=0;}
+    if(xfail!=0){disp=0;}
+    if(conf<150){disp=0;}
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,2);
+    sel_set(S,0,0,8,8+12800,0,0,0,0);
+    sel_set(S,1,0,8+15360,8+28160,0,0,0,0);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"tone2 ");
+    at=b_put(cb,at,jname(3,j));
+    at=b_put(cb,at," vs tone1 (f0 ratio vs 0.5%)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"f0a=");
+    at=b_put_f64(wb,at,f0,2);
+    at=b_put(wb,at,"; f0b=");
+    at=b_put_f64(wb,at,f1,2);
+    at=b_put(wb,at,"; rel=");
+    at=b_put_f64(wb,at,rel,5);
+    at=b_put(wb,at,"; nonstationary=");
+    at=b_put_i64(wb,at,nonstat as i64);
+    at=b_put(wb,at,"; xcheck_fail=");
+    at=b_put_i64(wb,at,xfail as i64);
+
+    // R2-11B: compressed-percept stash (renderer input; percept record untouched)
+    p64(S,70000,3);
+    pfix(S,70008,f0);pfix(S,70016,f1);
+    pfix(S,70024,rms_span(src,8,6400));
+    pfix(S,70032,rms_span(src,8+15360,6400));
+    op_add(S,12800 as i64);
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+
+// ---------------- percept: timbredisc -----------------------------------
+// Goertzel at exact bins k=352*m (m=1..8) for 440 Hz harmonics, N=12800.
+fn goertzel_c(m:i32)f64 {
+    if(m==1){return 1.9702186523;}
+    if(m==2){return 1.8817615379;}
+    if(m==3){return 1.7372630289;}
+    if(m==4){return 1.5410264856;}
+    if(m==5){return 1.2988960967;}
+    if(m==6){return 1.0180828315;}
+    if(m==7){return 0.7069496876;}
+    return 0.3747626292;
+}
+
+fn p_timbredisc(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<8+12800*2){return -1;}
+    let rate:i32=g32(src,0);
+    let cnt:i32=g32(src,4);
+    if(rate!=16000){return -1;}
+    if(cnt!=12800){return -1;}
+    let base:i32=8;
+    let ebase:i32=5400;
+    let m:i32=1;
+    let totE:f64=0.0;
+    let wsum:f64=0.0;
+    while(m<=8){
+        let c:f64=goertzel_c(m);
+        let s0:f64=0.0;let s1:f64=0.0;let s2:f64=0.0;
+        let i:i32=0;
+        while(i<12800){
+            let xv:f64=s16le(src,base+i*2) as f64;
+            s0=xv+c*s1-s2;
+            s2=s1;s1=s0;
+            i=i+1;
+        }
+        let e:f64=s1*s1+s2*s2-c*s1*s2;
+        p64(S,ebase+m*8,((e/1.0e12) as i64));
+        totE=totE+e;
+        wsum=wsum+(m as f64)*e;
+        m=m+1;
+    }
+    op_add(S,12800*8);
+    let j:i64=0;
+    let conf:i64=0;
+    let disp:i64=0;
+    if(totE>1.0e6){
+        let cent:f64=wsum/totE;
+        // class centroids: PURE 1.0, DARK 1.156, RICH 1.697, BRIGHT 2.759
+        // boundaries: 1.078, 1.4265, 2.228
+        let dP:f64=f_abs(cent-1.0);
+        let dD:f64=f_abs(cent-1.156);
+        let dR:f64=f_abs(cent-1.697);
+        let dB:f64=f_abs(cent-2.759);
+        j=0;
+        let bd:f64=f_abs(cent-1.078);
+        if(dD<dP){if(dD<dR){if(dD<dB){j=2;bd=f_abs(cent-1.078);if(cent>1.156){bd=f_abs(cent-1.4265);}}}}
+        if(dR<dP){if(dR<dD){if(dR<dB){j=3;bd=f_abs(cent-1.4265);if(cent>1.697){bd=f_abs(cent-2.228);}}}}
+        if(dB<dP){if(dB<dD){if(dB<dR){j=1;bd=f_abs(cent-2.228);}}}
+        // recompute winning boundary distance cleanly
+        if(j==0){bd=f_abs(cent-1.078);}
+        if(j==2){if(cent<1.156){bd=f_abs(cent-1.078);}else{bd=f_abs(cent-1.4265);}}
+        if(j==3){if(cent<1.697){bd=f_abs(cent-1.4265);}else{bd=f_abs(cent-2.228);}}
+        if(j==1){bd=f_abs(cent-2.228);}
+        conf=((bd/0.35)*1000.0) as i64;
+        if(conf>1000){conf=1000;}
+        if(conf<0){conf=0;}
+        disp=1;
+        if(conf<150){disp=0;}
+        p64(S,ebase,((cent*1099511627776.0) as i64));
+    }
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,1);
+    sel_set(S,0,0,8,8+25600,0,0,0,0);
+
+    // R2-11B: compressed-percept stash (renderer input; percept record untouched)
+    p64(S,70000,4);
+    p64(S,70008,j);
+    let sm:i32=1;
+    let stot:i64=0;
+    while(sm<=8){
+        let se:i64=g64(S,ebase+sm*8);
+        p64(S,70008+sm*8,se);
+        stot=stot+se;
+        sm=sm+1;
+    }
+    // centroid recomputed from stashed energies (no stale reads)
+    let snum:f64=0.0;
+    sm=1;
+    while(sm<=8){
+        snum=snum+((g64(S,70008+sm*8)) as f64)*(sm as f64);
+        sm=sm+1;
+    }
+    let scent:f64=1.0;
+    if(stot>0){scent=snum/(stot as f64);}
+    pfix(S,70080,scent);
+    pfix(S,70088,rms_span(src,8,12800));
+    op_add(S,12800 as i64);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"timbre ");
+    at=b_put(cb,at,jname(4,j));
+    at=b_put(cb,at," (harmonic centroid vs profile map)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"centroid=");
+    at=b_put_f64(wb,at,(g64(S,ebase) as f64)/1099511627776.0,4);
+    at=b_put(wb,at,"; band_energies=");
+    m=1;
+    while(m<=8){
+        at=b_put_i64(wb,at,g64(S,ebase+m*8));
+        if(m<8){at=b_put8(wb,at,44);}
+        m=m+1;
+    }
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+
+// ---------------- percept: motiondir ------------------------------------
+// SAD candidate matching over the central 48x48 window. Directions in
+// screen coords (+x=E, +y=S): 0=N,1=NE,2=E,3=SE,4=S,5=SW,6=W,7=NW.
+fn dir_dx(d:i32)i32 {
+    if(d==0){return 0;}
+    if(d==1){return 1;}
+    if(d==2){return 1;}
+    if(d==3){return 1;}
+    if(d==4){return 0;}
+    if(d==5){return -1;}
+    if(d==6){return -1;}
+    return -1;
+}
+
+fn dir_dy(d:i32)i32 {
+    if(d==0){return -1;}
+    if(d==1){return -1;}
+    if(d==2){return 0;}
+    if(d==3){return 1;}
+    if(d==4){return 1;}
+    if(d==5){return 1;}
+    if(d==6){return 0;}
+    return -1;
+}
+
+fn gray_at(src:[]u8,fr:i32,x:i32,y:i32,w:i32,h:i32)i32 {
+    let o:i32=12+(fr*w*h+y*w+x)*3;
+    return ((src[o] as i32)+(src[o+1] as i32)+(src[o+2] as i32))/3;
+}
+
+// SAD of frame fB shifted by -(fB-fA)*v vs frame fA.
+// Window is inset by 14px (x,y in 14..50) so every candidate shift up to
+// 14px stays in-bounds; no edge fallback needed.
+fn sad_shift(src:[]u8,S:[]u8,fA:i32,fB:i32,w:i32,h:i32,tx:i32,ty:i32)i64 {
+    let sad:i64=0;
+    let y:i32=14;
+    while(y<50){
+        let x:i32=14;
+        while(x<50){
+            let sx:i32=x-tx;
+            let sy:i32=y-ty;
+            let a:i32=gray_at(src,fA,x,y,w,h);
+            let b:i32=gray_at(src,fB,sx,sy,w,h);
+            let d:i32=a-b;
+            if(d<0){d=0-d;}
+            sad=sad+(d as i64);
+            x=x+1;
+        }
+        y=y+1;
+    }
+    op_add(S,1296);
+    return sad;
+}
+
+// best (dir,mag,sad) for a frame pair; mags m0,m1 (total px). Stores at S+base:
+// 0:dir(-1=still), 8:mag, 16:sad, 24:second-dir, 32:second-sad
+fn best_match(src:[]u8,S:[]u8,fA:i32,fB:i32,w:i32,h:i32,m0:i32,m1:i32,base:i32)void {
+    let bdir:i32=-1;
+    let bmag:i32=0;
+    let bsad:i64=sad_shift(src,S,fA,fB,w,h,0,0);
+    let sdir:i32=-1;
+    // runner-up: best candidate with a different direction than the winner.
+    // Init to huge so a still-winner still records the best motion shift.
+    let ssad:i64=4611686018427387904;
+    let mi:i32=0;
+    while(mi<2){
+        let mag:i32=m0;
+        if(mi==1){mag=m1;}
+        let d:i32=0;
+        while(d<8){
+            // NOTE: to align frame fB (content moved by +v) to fA we sample
+            // fB at (x+v); with sx=x-tx that means tx=-v.
+            let tx:i32=0-dir_dx(d)*mag;
+            let ty:i32=0-dir_dy(d)*mag;
+            let s:i64=sad_shift(src,S,fA,fB,w,h,tx,ty);
+            if(s<bsad){
+                sdir=bdir;ssad=bsad;
+                bdir=d;bmag=mag;bsad=s;
+            }
+            else{if(d!=bdir){if(s<ssad){sdir=d;ssad=s;}}}
+            d=d+1;
+        }
+        mi=mi+1;
+    }
+    p64(S,base,bdir as i64);
+    p64(S,base+8,bmag as i64);
+    p64(S,base+16,bsad);
+    p64(S,base+24,sdir as i64);
+    p64(S,base+32,ssad);
+    return;
+}
+
+fn p_motiondir(src:[]u8,n:i32,S:[]u8)i32 {
+    if(n<12+8*64*64*3){return -1;}
+    let nf:i32=g32(src,0);
+    let w:i32=g32(src,4);
+    let h:i32=g32(src,8);
+    if(nf!=8){return -1;}
+    if(w!=64){return -1;}
+    if(h!=64){return -1;}
+    best_match(src,S,0,7,w,h,7,14,5400);
+    let dir:i64=g64(S,5400);
+    let sad1:i64=g64(S,5400+16);
+    let sdir:i64=g64(S,5400+24);
+    let sad2:i64=g64(S,5400+32);
+    best_match(src,S,0,3,w,h,3,6,5456);
+    let dir13:i64=g64(S,5456);
+    best_match(src,S,4,7,w,h,3,6,5512);
+    let dir47:i64=g64(S,5512);
+    let j:i64=0;
+    if(dir>=0){j=dir+1;}
+    // weak-evidence: best shift barely better than still -> STILL
+    let sad00:i64=sad_shift(src,S,0,7,w,h,0,0);
+    if(dir>=0){
+        if(sad1*10>=sad00*6){j=0;dir=-1;}
+    }
+    // reversal gate: direction flips between first and second half
+    let rev:i32=0;
+    if(dir13>=0){if(dir47>=0){if(dir13!=dir47){rev=1;}}}
+    // bimodal gate (only when a motion won): a different direction nearly as good
+    let bim:i32=0;
+    if(dir>=0){if(sdir>=0){if(sdir!=dir){if(sad2*100<sad1*108){bim=1;}}}}
+    // confidence: how much worse the runner-up is than the winner
+    // (for STILL the runner-up is the best motion shift).
+    let conf:i64=0;
+    if(sad2>0){conf=(((sad2-sad1) as f64)/(sad2 as f64)*1000.0) as i64;}
+    if(conf>1000){conf=1000;}
+    if(conf<0){conf=0;}
+    let disp:i64=1;
+    if(rev!=0){disp=0;}
+    if(bim!=0){disp=0;}
+    if(conf<150){disp=0;}
+    p64(S,8,j);
+    p64(S,16,conf);
+    p64(S,24,disp);
+    p64(S,32,1);
+    sel_set(S,0,2,0,0,64,64,0,7);
+    let cb:[]u8=nio_alloc(256);
+    let at:i32=0;
+    at=b_put(cb,at,"motion ");
+    at=b_put(cb,at,jname(5,j));
+    at=b_put(cb,at," (7-frame SAD candidate match)");
+    claim_put(S,cb[0..at]);
+    let wb:[]u8=nio_alloc(1024);
+    at=0;
+    at=b_put(wb,at,"dir=");
+    at=b_put_i64(wb,at,dir);
+    at=b_put(wb,at,"; seg_dirs=");
+    at=b_put_i64(wb,at,dir13);
+    at=b_put(wb,at,"/");
+    at=b_put_i64(wb,at,dir47);
+    at=b_put(wb,at,"; reversal=");
+    at=b_put_i64(wb,at,rev as i64);
+    at=b_put(wb,at,"; bimodal=");
+    at=b_put_i64(wb,at,bim as i64);
+
+    // R2-11B: compressed-percept stash (renderer input; percept record untouched)
+    p64(S,70000,5);
+    p64(S,70008,dir);
+    p64(S,70016,g64(S,5408));
+    warrant_put(S,wb[0..at]);
+    return 0;
+}
+
+
+// ---------------- R2-11B generative emitter ---------------------------------
+// Renders the scene FROM THE COMPRESSED PERCEPT (S+70000), never from source
+// pixels. Artifact containers (.aud/.img/.vid) and naming match fork A so
+// the KB-E7 mechanical gate can diff byte-for-byte against cited spans.
+// Headers are verbatim; every payload byte is renderer output (declared in
+// the brief BEFORE the human trial per the frozen no-laundering rule).
+
+// flat-fill render of one panel at the percept's claimed mean color
+fn render_flat(S:[]u8,ab:[]u8,do2:i32,rw:i32,rh:i32,task:i32,panel:i32)void {
+    let L:f64=0.0;let A:f64=0.0;let B:f64=0.0;
+    if(task==0){
+        if(panel==0){L=gfix(S,70008);A=gfix(S,70016);B=gfix(S,70024);}
+        else{L=gfix(S,70032);A=gfix(S,70040);B=gfix(S,70048);}
+    }
+    else{
+        // colorconst: panel0 = mean1; panel1 = M(mean1), the percept's model
+        let m1r:f64=gfix(S,70016);let m1g:f64=gfix(S,70024);let m1b:f64=gfix(S,70032);
+        if(panel==0){
+            lab_of(m1r,m1g,m1b,&L,&A,&B);
+        }
+        else{
+            let p0:f64=0.0;let p1:f64=0.0;let p2:f64=0.0;
+            let k:i32=0;
+            while(k<3){
+                let mv0:f64=(g64(S,3432+(k*3+0)*8) as f64)/1099511627776.0;
+                let mv1:f64=(g64(S,3432+(k*3+1)*8) as f64)/1099511627776.0;
+                let mv2:f64=(g64(S,3432+(k*3+2)*8) as f64)/1099511627776.0;
+                let pv:f64=mv0*m1r+mv1*m1g+mv2*m1b;
+                if(k==0){p0=pv;}
+                else{if(k==1){p1=pv;}else{p2=pv;}}
+                k=k+1;
+            }
+            lab_of(p0,p1,p2,&L,&A,&B);
+        }
+    }
+    let rr:i32=0;let gg:i32=0;let bb:i32=0;
+    lab_to_rgb(L,A,B,&rr,&gg,&bb);
+    let y:i32=0;
+    while(y<rh){
+        let x:i32=0;
+        while(x<rw){
+            let o:i32=do2+(y*rw+x)*3;
+            ab[o]=rr as u8;ab[o+1]=gg as u8;ab[o+2]=bb as u8;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    r_ops(S,(rw as i64)*(rh as i64));
+    return;
+}
+
+// ideal-shape render from the compressed percept (class + fill + bg)
+fn render_shape(S:[]u8,ab:[]u8,do2:i32,rw:i32,rh:i32,j:i64)void {
+    let fill:i32=g64(S,70008) as i32;
+    let bg:i32=g64(S,70016) as i32;
+    let y:i32=0;
+    while(y<rh){
+        let x:i32=0;
+        while(x<rw){
+            let o:i32=do2+(y*rw+x)*3;
+            ab[o]=bg as u8;ab[o+1]=bg as u8;ab[o+2]=bg as u8;
+            x=x+1;
+        }
+        y=y+1;
+    }
+    let cx:i32=rw/2;
+    let cy:i32=rh/2;
+    let rad:i32=rw;
+    if(rh<rw){rad=rh;}
+    rad=rad/2-1;
+    if(rad<1){rad=1;}
+    y=0;
+    while(y<rh){
+        let x:i32=0;
+        while(x<rw){
+            let inside:i32=0;
+            if(j==0){
+                let dx:i32=x-cx;let dy:i32=y-cy;
+                if(dx*dx+dy*dy<=rad*rad){inside=1;}
+            }
+            else{if(j==1){
+                // triangle: apex (cx,cy-rad), base y=cy+rad half-width rad
+                let y0:i32=cy-rad;let y1:i32=cy+rad;
+                if(y>=y0){if(y<=y1){
+                    let t:i64=((y-y0) as i64)*1000/((y1-y0) as i64);
+                    let hw:i64=(rad as i64)*t/1000;
+                    let dx:i64=(x-cx) as i64;
+                    if(dx<0){dx=0-dx;}
+                    if(dx<=hw){inside=1;}
+                }}
+            }
+            else{
+                // square: side 2*rad centered
+                let dx:i32=x-cx;let dy:i32=y-cy;
+                if(dx<0){dx=0-dx;}
+                if(dy<0){dy=0-dy;}
+                if(dx<=rad){if(dy<=rad){inside=1;}}
+            }}
+            if(inside!=0){
+                let o:i32=do2+(y*rw+x)*3;
+                ab[o]=fill as u8;ab[o+1]=fill as u8;ab[o+2]=fill as u8;
+            }
+            x=x+1;
+        }
+        y=y+1;
+    }
+    r_ops(S,(rw as i64)*(rh as i64));
+    return;
+}
+
+fn render_sine(ab:[]u8,do2:i32,nsamp:i32,f0:f64,rms:f64,S:[]u8)void {
+    let amp:f64=rms*1.4142135623730951;
+    let twopi:f64=6.283185307179586;
+    let i:i32=0;
+    while(i<nsamp){
+        let ph:f64=twopi*f0*(i as f64)/16000.0;
+        let v:f64=amp*f_sin(ph);
+        let q:i32=(v+0.5) as i32;
+        if(v<0.0){q=(v-0.5) as i32;}
+        if(q>32767){q=32767;}
+        if(q<-32767){q=-32767;}
+        ab[do2+i*2]=(q&255) as u8;
+        ab[do2+i*2+1]=((q>>8)&255) as u8;
+        i=i+1;
+    }
+    r_ops(S,nsamp as i64);
+    return;
+}
+
+fn render_partials(ab:[]u8,do2:i32,nsamp:i32,S:[]u8)void {
+    let tot:i64=0;
+    let m:i32=0;
+    while(m<8){tot=tot+g64(S,70016+m*8);m=m+1;}
+    let rms:f64=gfix(S,70088);
+    let twopi:f64=6.283185307179586;
+    let i:i32=0;
+    while(i<nsamp){
+        let v:f64=0.0;
+        m=0;
+        while(m<8){
+            let sm:f64=(g64(S,70016+m*8)) as f64;
+            let am:f64=0.0;
+            if(tot>0){am=rms*f_sqrt(2.0*sm/(tot as f64));}
+            let ph:f64=twopi*440.0*((m+1) as f64)*(i as f64)/16000.0;
+            v=v+am*f_sin(ph);
+            m=m+1;
+        }
+        let q:i32=(v+0.5) as i32;
+        if(v<0.0){q=(v-0.5) as i32;}
+        if(q>32767){q=32767;}
+        if(q<-32767){q=-32767;}
+        ab[do2+i*2]=(q&255) as u8;
+        ab[do2+i*2+1]=((q>>8)&255) as u8;
+        i=i+1;
+    }
+    r_ops(S,(nsamp as i64)*8);
+    return;
+}
+
+fn render_motion(S:[]u8,ab:[]u8,do2:i32,onf:i32,rw:i32,rh:i32)void {
+    let dir:i64=g64(S,70008);
+    let mag:i32=g64(S,70016) as i32;
+    let dx:i32=0;let dy:i32=0;
+    if(dir>=0){dx=dir_dx(dir as i32);dy=dir_dy(dir as i32);}
+    let f:i32=0;
+    while(f<onf){
+        let y:i32=0;
+        while(y<rh){
+            let x:i32=0;
+            while(x<rw){
+                let o:i32=do2+(f*rw*rh+y*rw+x)*3;
+                ab[o]=0;ab[o+1]=0;ab[o+2]=0;
+                x=x+1;
+            }
+            y=y+1;
+        }
+        let sx:i32=rw/2+dx*mag*f-4;
+        let sy:i32=rh/2+dy*mag*f-4;
+        let yy:i32=0;
+        while(yy<8){
+            let xx:i32=0;
+            while(xx<8){
+                let px:i32=sx+xx;let py:i32=sy+yy;
+                if(px>=0){if(px<rw){if(py>=0){if(py<rh){
+                    let o:i32=do2+(f*rw*rh+py*rw+px)*3;
+                    ab[o]=255;ab[o+1]=255;ab[o+2]=255;
+                }}}}
+                xx=xx+1;
+            }
+            yy=yy+1;
+        }
+        f=f+1;
+    }
+    r_ops(S,(onf as i64)*(rw as i64)*(rh as i64));
+    return;
+}
+
+fn emit_render(src:[]u8,n:i32,S:[]u8,idx:i32,adir:[]u8,trial:[]u8,hb:[]u8) i32 {
+    let o:i32=40+idx*56;
+    let kind:i64=g64(S,o);
+    let a:i64=g64(S,o+8);let b:i64=g64(S,o+16);let c:i64=g64(S,o+24);
+    let d:i64=g64(S,o+32);let e:i64=g64(S,o+40);let f:i64=g64(S,o+48);
+    let task:i32=g64(S,70000) as i32;
+    let ename:[]u8=nio_alloc(128);
+    let at:i32=0;
+    at=b_put(ename,at,trial);
+    at=b_put(ename,at,".e");
+    at=b_put_i64(ename,at,idx as i64);
+    if(kind==0){
+        at=b_put(ename,at,".aud");
+        let start:i32=a as i32;
+        let end:i32=b as i32;
+        if(start<8){return -1;}
+        if(end>n){return -1;}
+        if(end<=start){return -1;}
+        let nsamp:i32=(end-start)/2;
+        let ab:[]u8=nio_alloc(8+nsamp*2);
+        p32(ab,0,g32(src,0));
+        p32(ab,4,nsamp);
+        if(task==3){
+            let f0:f64=gfix(S,70008);
+            let rms:f64=gfix(S,70024);
+            if(idx==1){f0=gfix(S,70016);rms=gfix(S,70032);}
+            render_sine(ab,8,nsamp,f0,rms,S);
+        }
+        else{
+            render_partials(ab,8,nsamp,S);
+        }
+        let hh:[]u8=nio_alloc(32);
+        ns_sha256(ab,hh);
+        let cc:[]u8=nio_alloc(64);
+        let ci:i32=0;
+        while(ci<32){cc[ci]=hb[ci];ci=ci+1;}
+        while(ci<64){cc[ci]=hh[ci-32];ci=ci+1;}
+        ns_sha256(cc,hb);
+        if(write_file(path2(adir,ename[0..at]),ab)!=0){return -1;}
+        return 0;
+    }
+    if(kind==1){
+        at=b_put(ename,at,".img");
+        let x:i32=a as i32;let y:i32=b as i32;
+        let rw:i32=c as i32;let rh:i32=d as i32;
+        let sw:i32=g32(src,0);
+        if(x<0){return -1;}
+        if(y<0){return -1;}
+        if(rw<=0){return -1;}
+        if(rh<=0){return -1;}
+        if(x+rw>sw){return -1;}
+        let ab:[]u8=nio_alloc(8+rw*rh*3);
+        p32(ab,0,rw);
+        p32(ab,4,rh);
+        if(task==2){
+            render_shape(S,ab,8,rw,rh,g64(S,8));
+        }
+        else{
+            render_flat(S,ab,8,rw,rh,task,idx);
+        }
+        let hh:[]u8=nio_alloc(32);
+        ns_sha256(ab,hh);
+        let cc:[]u8=nio_alloc(64);
+        let ci:i32=0;
+        while(ci<32){cc[ci]=hb[ci];ci=ci+1;}
+        while(ci<64){cc[ci]=hh[ci-32];ci=ci+1;}
+        ns_sha256(cc,hb);
+        if(write_file(path2(adir,ename[0..at]),ab)!=0){return -1;}
+        return 0;
+    }
+    at=b_put(ename,at,".vid");
+    let x:i32=a as i32;let y:i32=b as i32;
+    let rw:i32=c as i32;let rh:i32=d as i32;
+    let f0:i32=e as i32;let f1:i32=f as i32;
+    let sw:i32=g32(src,4);
+    let sh:i32=g32(src,8);
+    let nf:i32=g32(src,0);
+    if(x<0){return -1;}
+    if(y<0){return -1;}
+    if(rw<=0){return -1;}
+    if(rh<=0){return -1;}
+    if(x+rw>sw){return -1;}
+    if(y+rh>sh){return -1;}
+    if(f0<0){return -1;}
+    if(f1>=nf){return -1;}
+    if(f1<f0){return -1;}
+    let onf:i32=f1-f0+1;
+    let ab:[]u8=nio_alloc(12+onf*rw*rh*3);
+    p32(ab,0,onf);p32(ab,4,rw);p32(ab,8,rh);
+    render_motion(S,ab,12,onf,rw,rh);
+    let hh:[]u8=nio_alloc(32);
+    ns_sha256(ab,hh);
+    let cc:[]u8=nio_alloc(64);
+    let ci:i32=0;
+    while(ci<32){cc[ci]=hb[ci];ci=ci+1;}
+    while(ci<64){cc[ci]=hh[ci-32];ci=ci+1;}
+    ns_sha256(cc,hb);
+    if(write_file(path2(adir,ename[0..at]),ab)!=0){return -1;}
+    return 0;
+}
+
+// ---------------- hash-chained ledger -------------------------------------
+// ---------------- hash-chained ledger -------------------------------------
+// entry text (no emission fields, so the chain is mode-independent):
+// v=1|trial=..|task=..|j=..|conf=..|disp=..|ops=..|nsel=..|sel=..|claim=..|warrant=..
+fn ledger_step(S:[]u8,prev:[]u8,task:i32,trial:[]u8,emode:i32) []u8 {
+    let eb:[]u8=nio_alloc(8192);
+    let at:i32=0;
+    at=b_put(eb,at,"v=1|trial=");
+    at=b_put(eb,at,trial);
+    at=b_put(eb,at,"|task=");
+    at=b_put(eb,at,task_name(task));
+    at=b_put(eb,at,"|j=");
+    at=b_put_i64(eb,at,g64(S,8));
+    at=b_put(eb,at,"|conf=");
+    at=b_put_i64(eb,at,g64(S,16));
+    at=b_put(eb,at,"|disp=");
+    at=b_put_i64(eb,at,g64(S,24));
+    at=b_put(eb,at,"|ops=");
+    at=b_put_i64(eb,at,g64(S,0));
+    at=b_put(eb,at,"|nsel=");
+    at=b_put_i64(eb,at,g64(S,32));
+    at=b_put(eb,at,"|sel=");
+    let ns:i32=g64(S,32) as i32;
+    let si:i32=0;
+    while(si<ns){
+        let o:i32=40+si*56;
+        at=b_put_i64(eb,at,g64(S,o));
+        at=b_put8(eb,at,58);
+        let q:i32=0;
+        while(q<6){
+            at=b_put_i64(eb,at,g64(S,o+8+q*8));
+            if(q<5){at=b_put8(eb,at,44);}
+            q=q+1;
+        }
+        if(si<ns-1){at=b_put8(eb,at,59);}
+        si=si+1;
+    }
+    at=b_put(eb,at,"|claim=");
+    at=b_put(eb,at,claim_get(S));
+    at=b_put(eb,at,"|warrant=");
+    at=b_put(eb,at,warrant_get(S));
+    let entry:[]u8=eb[0..at];
+    // hash = sha256(prev || entry)
+    let hb:[]u8=nio_alloc(32+at);
+    let i:i32=0;
+    while(i<32){hb[i]=prev[i];i=i+1;}
+    i=0;
+    while(i<at){hb[32+i]=entry[i];i=i+1;}
+    let out:[]u8=nio_alloc(32);
+    ns_sha256(hb,out);
+    return out;
+}
+
+// ---------------- one trial ------------------------------------------------
+fn run_trial(src:[]u8,n:i32,task:i32,S:[]u8) i32 {
+    p64(S,0,0);p64(S,8,0);p64(S,16,0);p64(S,24,0);p64(S,32,0);
+    p64(S,70128,0);
+    if(task==0){return p_colordisc(src,n,S);}
+    if(task==1){return p_colorconst(src,n,S);}
+    if(task==2){return p_shapetrans(src,n,S);}
+    if(task==3){return p_pitchdisc(src,n,S);}
+    if(task==4){return p_timbredisc(src,n,S);}
+    if(task==5){return p_motiondir(src,n,S);}
+    return -1;
+}
+
+fn disp_name(d:i64)[]u8 {
+    if(d!=0){return "INSTALL";}
+    return "WITHHOLD";
+}
+
+// ---------------- main -------------------------------------------------------
+fn main() i32 {
+    let a1:[]u8=_zag_arg(1);
+    let is_batch:i32=str_eq(a1,"batch");
+    // shared buffers
+    let S:[]u8=nio_alloc(131072);
+    if(S.len==0){return 99;}
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 99;}
+    if(is_batch!=0){
+        let tsv:[]u8=_zag_arg(2);
+        let outdir:[]u8=_zag_arg(3);
+        let mode:[]u8=_zag_arg(4);
+        let do_emit:i32=0;
+        if(str_eq(mode,"emit")!=0){do_emit=1;}
+        nio_mkdir(outdir);
+        let adir:[]u8=path2(outdir,"artifacts");
+        nio_mkdir(adir);
+        let tb:[]u8=nio_alloc(1048576);
+        let tn:i32=read_file(tsv,tb,1048576);
+        if(tn<0){_zag_println("ERR trials.tsv unreadable");return 1;}
+        let pline:[]u8=path2(outdir,"percepts.tsv");
+        let pcs:[]u8=nio_cstr(pline);
+        let pfd:i64=_zag_raw_syscall(2,_zag_slice_ptr(pcs) as i64,577,420,0,0,0);
+        nio_free(pcs);
+        let lline:[]u8=path2(outdir,"LEDGER.jsonl");
+        let lcs:[]u8=nio_cstr(lline);
+        let lfd:i64=_zag_raw_syscall(2,_zag_slice_ptr(lcs) as i64,577,420,0,0,0);
+        nio_free(lcs);
+        if(pfd<0){_zag_println("ERR percepts.tsv");return 1;}
+        if(lfd<0){_zag_println("ERR LEDGER.jsonl");return 1;}
+        // R2-11 deviation (CLI robustness only; percept/emission contract
+        // unchanged): trials where the percept pass fails (rc!=0) are logged
+        // to failed.tsv and SKIPPED. A failed percept = no claim, no emission,
+        // no install.
+        let fline:[]u8=path2(outdir,"failed.tsv");
+        let fcs:[]u8=nio_cstr(fline);
+        let ffd:i64=_zag_raw_syscall(2,_zag_slice_ptr(fcs) as i64,577,420,0,0,0);
+        nio_free(fcs);
+        if(ffd<0){_zag_println("ERR failed.tsv");return 1;}
+        nio_write_all(ffd,"trial\ttask\tfixture\trc\n");
+        let qline:[]u8=path2(outdir,"render_ops.tsv");
+        let qcs:[]u8=nio_cstr(qline);
+        let qfd:i64=_zag_raw_syscall(2,_zag_slice_ptr(qcs) as i64,577,420,0,0,0);
+        nio_free(qcs);
+        if(qfd<0){_zag_println("ERR render_ops.tsv");return 1;}
+        nio_write_all(qfd,"trial\trops\n");
+        // header
+        nio_write_all(pfd,"trial\ttask\tfixture\tjudgment\tconf\tdisp\tops\tnsel\tsel\tclaim\twarrant\tledger\n");
+        let prev:[]u8=nio_alloc(32);
+        let pi:i32=0;
+        while(pi<32){prev[pi]=0;pi=pi+1;}
+        let pos:i32=0;
+        let ntrial:i64=0;
+        let ninstall:i64=0;
+        let nfail:i64=0;
+        while(pos<tn){
+            let eol:i32=pos;
+            while(eol<tn){if(tb[eol]==10){break;}eol=eol+1;}
+            let line:[]u8=tb[pos..eol];
+            pos=eol+1;
+            if(line.len<8){continue;}
+            // trials.tsv: trial_id \t task \t split \t family \t fixture \t truth
+            // collect tab positions (up to 8)
+            let tp:[]u8=nio_alloc(64);
+            let ntp:i32=0;
+            let i:i32=0;
+            while(i<line.len){
+                if(line[i]==9){
+                    if(ntp<8){p32(tp,ntp*4,i);ntp=ntp+1;}
+                }
+                i=i+1;
+            }
+            if(ntp<5){continue;}
+            let t0:i32=g32(tp,0);
+            let t1:i32=g32(tp,4);
+            let t3:i32=g32(tp,12);
+            let t4:i32=g32(tp,16);
+            let trial:[]u8=line[0..t0];
+            let taskn:[]u8=line[t0+1..t1];
+            let fixt:[]u8=line[t3+1..t4];
+            let task:i32=task_code(taskn);
+            if(task<0){continue;}
+            let fn2:i32=read_file(fixt,fbuf,4194304);
+            if(fn2<0){_zag_print("ERR fixture ");_zag_println(fixt);return 1;}
+            let rc:i32=run_trial(fbuf,fn2,task,S);
+            if(rc!=0){
+                let fb:[]u8=nio_alloc(4096);
+                let fa:i32=0;
+                fa=b_put(fb,fa,trial);fa=b_put8(fb,fa,9);
+                fa=b_put(fb,fa,taskn);fa=b_put8(fb,fa,9);
+                fa=b_put(fb,fa,fixt);fa=b_put8(fb,fa,9);
+                fa=b_put_i64(fb,fa,rc as i64);fa=b_put8(fb,fa,10);
+                nio_write_all(ffd,fb[0..fa]);
+                nfail=nfail+1;
+                continue;
+            }
+            let hh:[]u8=nio_alloc(32);
+            let hi:i32=0;
+            while(hi<32){hh[hi]=0;hi=hi+1;}
+            if(do_emit!=0){
+                let ns:i32=g64(S,32) as i32;
+                let si:i32=0;
+                let sok:i32=1;
+                while(si<ns){
+                    if(sel_ok(fbuf,fn2,S,si)==0){sok=0;}
+                    si=si+1;
+                }
+                si=0;
+                if(sok==0){
+                    // degenerate selection: nothing to emit; percepts kept
+                    let fb:[]u8=nio_alloc(4096);
+                    let fa:i32=0;
+                    fa=b_put(fb,fa,trial);fa=b_put8(fb,fa,9);
+                    fa=b_put(fb,fa,taskn);fa=b_put8(fb,fa,9);
+                    fa=b_put(fb,fa,fixt);fa=b_put8(fb,fa,9);
+                    fa=b_put_i64(fb,fa,-2);fa=b_put8(fb,fa,10);
+                    nio_write_all(ffd,fb[0..fa]);
+                    nfail=nfail+1;
+                }
+                else{
+                    while(si<ns){
+                        if(emit_render(fbuf,fn2,S,si,adir,trial,hh)!=0){
+                            _zag_print("ERR emit ");_zag_println(fixt);return 1;
+                        }
+                        si=si+1;
+                    }
+                }
+            }
+            // R2-11B B3: renderer ops for this trial (separate file; the
+            // percepts.tsv row stays mode-independent for B4)
+            let rops:i64=g64(S,70128);
+            let qb:[]u8=nio_alloc(512);
+            let qa:i32=0;
+            qa=b_put(qb,qa,trial);qa=b_put8(qb,qa,9);
+            qa=b_put_i64(qb,qa,rops);qa=b_put8(qb,qa,10);
+            nio_write_all(qfd,qb[0..qa]);
+            let nh:[]u8=ledger_step(S,prev,task,trial,do_emit);
+            // percepts row (mode-independent columns)
+            let rb:[]u8=nio_alloc(8192);
+            let at:i32=0;
+            at=b_put(rb,at,trial);at=b_put8(rb,at,9);
+            at=b_put(rb,at,taskn);at=b_put8(rb,at,9);
+            at=b_put(rb,at,fixt);at=b_put8(rb,at,9);
+            at=b_put(rb,at,jname(task,g64(S,8)));at=b_put8(rb,at,9);
+            at=b_put_i64(rb,at,g64(S,16));at=b_put8(rb,at,9);
+            at=b_put(rb,at,disp_name(g64(S,24)));at=b_put8(rb,at,9);
+            at=b_put_i64(rb,at,g64(S,0));at=b_put8(rb,at,9);
+            at=b_put_i64(rb,at,g64(S,32));at=b_put8(rb,at,9);
+            let ns2:i32=g64(S,32) as i32;
+            let si2:i32=0;
+            while(si2<ns2){
+                let o:i32=40+si2*56;
+                at=b_put_i64(rb,at,g64(S,o));at=b_put8(rb,at,58);
+                let q:i32=0;
+                while(q<6){
+                    at=b_put_i64(rb,at,g64(S,o+8+q*8));
+                    if(q<5){at=b_put8(rb,at,44);}
+                    q=q+1;
+                }
+                if(si2<ns2-1){at=b_put8(rb,at,59);}
+                si2=si2+1;
+            }
+            at=b_put8(rb,at,9);
+            at=b_put(rb,at,claim_get(S));at=b_put8(rb,at,9);
+            at=b_put(rb,at,warrant_get(S));at=b_put8(rb,at,9);
+            at=b_put(rb,at,ns_hex(nh));at=b_put8(rb,at,10);
+            nio_write_all(pfd,rb[0..at]);
+            // ledger line: <hex> <entry-fields...> emode arthash
+            let lb:[]u8=nio_alloc(8192);
+            let la:i32=0;
+            la=b_put(lb,la,ns_hex(nh));la=b_put8(lb,la,32);
+            la=b_put(lb,la,"trial=");la=b_put(lb,la,trial);
+            la=b_put(lb,la," task=");la=b_put(lb,la,taskn);
+            la=b_put(lb,la," j=");la=b_put_i64(lb,la,g64(S,8));
+            la=b_put(lb,la," conf=");la=b_put_i64(lb,la,g64(S,16));
+            la=b_put(lb,la," disp=");la=b_put_i64(lb,la,g64(S,24));
+            la=b_put(lb,la," ops=");la=b_put_i64(lb,la,g64(S,0));
+            la=b_put(lb,la," emode=");la=b_put_i64(lb,la,do_emit as i64);
+            la=b_put(lb,la," arthash=");
+            if(do_emit!=0){la=b_put(lb,la,ns_hex(hh));}else{la=b_put8(lb,la,45);}
+            la=b_put8(lb,la,10);
+            nio_write_all(lfd,lb[0..la]);
+            prev=nh;
+            ntrial=ntrial+1;
+            if(g64(S,24)!=0){ninstall=ninstall+1;}
+        }
+        _zag_raw_syscall(3,pfd,0,0,0,0,0);
+        _zag_raw_syscall(3,lfd,0,0,0,0,0);
+        _zag_raw_syscall(3,ffd,0,0,0,0,0);
+        _zag_raw_syscall(3,qfd,0,0,0,0,0);
+        _zag_print("trials=");
+        _zag_print(i64s(ntrial));
+        _zag_print(" installed=");
+        _zag_print(i64s(ninstall));
+        _zag_print(" failed=");
+        _zag_print(i64s(nfail));
+        _zag_print(" digest=");
+        _zag_println(ns_hex(prev));
+        return 0;
+    }
+    // single-trial mode
+    let task:i32=task_code(a1);
+    if(task<0){_zag_println("ERR unknown task");return 1;}
+    let fixt:[]u8=_zag_arg(2);
+    let outdir:[]u8=_zag_arg(3);
+    let mode:[]u8=_zag_arg(4);
+    let do_emit:i32=0;
+    if(str_eq(mode,"emit")!=0){do_emit=1;}
+    let fn2:i32=read_file(fixt,fbuf,4194304);
+    if(fn2<0){_zag_println("ERR fixture unreadable");return 1;}
+    let rc:i32=run_trial(fbuf,fn2,task,S);
+    if(rc!=0){_zag_println("ERR percept failed");return 1;}
+    let hh:[]u8=nio_alloc(32);
+    let hi:i32=0;
+    while(hi<32){hh[hi]=0;hi=hi+1;}
+    if(do_emit!=0){
+        if(outdir.len==0){_zag_println("ERR emit needs outdir");return 1;}
+        nio_mkdir(outdir);
+        let adir:[]u8=path2(outdir,"artifacts");
+        nio_mkdir(adir);
+        let ns:i32=g64(S,32) as i32;
+        let si:i32=0;
+        while(si<ns){
+            if(emit_render(fbuf,fn2,S,si,adir,"t0",hh)!=0){_zag_println("ERR emit");return 1;}
+            si=si+1;
+        }
+    }
+    let prev:[]u8=nio_alloc(32);
+    let pi:i32=0;
+    while(pi<32){prev[pi]=0;pi=pi+1;}
+    let nh:[]u8=ledger_step(S,prev,task,"t0",do_emit);
+    _zag_print("approach=R2-11B\ntask=");
+    _zag_print(task_name(task));
+    _zag_print("\njudgment=");
+    _zag_print(jname(task,g64(S,8)));
+    _zag_print("\nconfidence=");
+    _zag_print(i64s(g64(S,16)));
+    _zag_print("\ndisposition=");
+    _zag_print(disp_name(g64(S,24)));
+    _zag_print("\nops=");
+    _zag_print(i64s(g64(S,0)));
+    _zag_print("\nnsel=");
+    _zag_print(i64s(g64(S,32)));
+    let ns3:i32=g64(S,32) as i32;
+    let si3:i32=0;
+    while(si3<ns3){
+        _zag_print("\nsel");
+        _zag_print(i64s(si3 as i64));
+        _zag_print("=");
+        let o:i32=40+si3*56;
+        _zag_print(i64s(g64(S,o)));
+        _zag_print(":");
+        let q:i32=0;
+        while(q<6){
+            _zag_print(i64s(g64(S,o+8+q*8)));
+            if(q<5){_zag_print(",");}
+            q=q+1;
+        }
+        si3=si3+1;
+    }
+    _zag_print("\nclaim=");
+    _zag_print(claim_get(S));
+    _zag_print("\nwarrant=");
+    _zag_print(warrant_get(S));
+    _zag_print("\nledger=");
+    _zag_println(ns_hex(nh));
+    return 0;
+}
