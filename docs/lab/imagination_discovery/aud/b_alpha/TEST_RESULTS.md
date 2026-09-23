@@ -139,6 +139,66 @@ his ears are final.
 
 ---
 
+## Battery 1d: Kids / playground — v4 bed rewrite (2026-09-23)
+
+**Artifact:** `clips/b_alpha_kids_v4.wav` — re-render addressing Micah's ear
+verdict on v3: "still cuts out, has weird random cut outs and has weird
+noises in between like i thought i heard static and also heard mouse squeaks
+at the same time." His ears overruled v3's passing A-NATIVE metrics.
+
+**Diagnosis (traced to source, not guessed):** built an instrumented
+renderer logging every `place_event` (exact sample start, atom, cls, ratio,
+gain) and every bed chunk onset — verified byte-identical to shipped v3
+(`3f1f36a9c755a280eca64395c9740a14d8cbc516f2b8f87f5b189d2b05440b50`).
+A Python replica of the bed + events correlated 0.9999+ with v3 in test
+windows, enabling component-wise attribution of every symptom:
+
+- **"Random cutouts":** v3's 1 s edge fades didn't save short chunks. For
+  chunks < 2 s, `ff=wlen/2`; when `ln-44100 < 4410`, `step=ln`
+  (butt-jointed). Short chunks faded to ZERO at their midpoint boundary,
+  then the next started from zero. 20 ms RMS scan: 8+ dips 18–31 dB
+  (3.59 s −18.7 dB/900 ms; 10.80 s −28.6 dB; 14.97 s −26.6 dB; 20.19 s;
+  21.63 s; 25.40/25.72/26.09 s). Secondary: texture RMS varied 129..1006
+  with no loudness matching — ambience audibly pumped between chunks.
+- **"Static":** no sustained static (spectral-flatness scan clean). The
+  percept is brief broadband transient grains in bed textures + the level
+  pumping above.
+- **"Mouse squeaks":** 9–16 kHz transient scan + per-component HF
+  attribution. Bed: tx3 @ 28.73 s, tx6/tx7 @ 29.32 s in v3's tail
+  (bed-schedule correlation 0.99999 — definitively bed, not score).
+  Events: ai=4 (w1 call) @ 23.16 s — broadband click 1.326 s into the atom
+  (strongest, +31.7 dB); ai=23 (w1 call) @ 1.22 s; ai=103 (w3 laugh) @
+  19.50 s — harsh loud onset; ai=105 (w3 laugh) @ 16.32 s — tonal;
+  ai=108 (w3 footstep) @ 26.52 s. Raw-atom HF ≡ placed HF for all: they are
+  real recorded sounds in w1–w5, not renderer artifacts. Preserved and
+  identified explicitly here, not silently removed.
+
+**Fix in the source** (`src/render.zag`, pure Zag, zero RNG):
+- `bed()` rewritten: (1) deterministic waveform-quality qualification —
+  each texture's RMS and crest factor computed in-Zag; accepted only if
+  rms<600 (quiet) and crest<7.0 (stable). 3 of 13 qualify (tx0, tx1, tx2);
+  the click/squeak carriers (tx3, tx5–tx10) are rejected by criterion, not
+  by hardcoded index. (2) Per-chunk RMS normalization to a common target —
+  no level pumping. (3) Guaranteed crossfade overlap at every boundary
+  (`step = wlen - xf`, 0.5 s crossfade clamped to wlen/2) — never
+  butt-jointed, never fades to zero alone. 26 chunks (v3: 41).
+- Events: unchanged — same 56 scored events, seed 6101, catalog.
+
+| Check | Result |
+|---|---|
+| Format/duration | 30.00 s mono 44.1 kHz PCM16 ✓ |
+| Determinism | 2/2 byte-identical: `5a1b1f7b1f359f4fa6fff40580e72be5c34f33f300dc4b2f9a6140c78eb4ab44` |
+| Bed continuity (tail 27–30 s, 20 ms RMS) | max dip −4.6 dB (v3: −16.5 dB) — dropouts gone |
+| Bed level | −50.0 dBFS RMS, consistent (v3: −47.8 dBFS with pumping) |
+| Bed HF spikes (v3's 27.18/28.80/29.75 s) | GONE — zero bed squeaks |
+| Event HF transients | 14 remain, all traced to legitimate scored atoms (listed above) |
+| Clipping / DC | peak 0.679, dc −0.000015 ✓ |
+| Near-silence runs | max 2.9 ms — no digital gaps |
+
+**Micah ear oracle:** AWAITING.
+
+---
+
 ## Battery 1c companions: planet / ocean / alien-ocean v2 re-renders (2026-09-22)
 
 **Renderer provenance:** all three re-rendered with a binary built from the
