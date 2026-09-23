@@ -72,7 +72,7 @@ def main():
         f.write("id\tcat\tquestion\tresponse\tnovel\tmech\tmatched_key\n")
         for pid in sorted(set(know) | set(reas)):
             cat, q, keys = (know if pid in know else reas)[pid]
-            resp, novel = (kr if pid in kr else rr)[(pid, 1)]
+            resp, novel = (kr if (pid, 1) in kr else rr)[(pid, 1)]
             ok, key = mech_verdict(keys, resp)
             f.write(f"{pid}\t{cat}\t{q}\t{resp}\t{novel}\t{'CORRECT' if ok else 'INCORRECT'}\t{key}\n")
     print("wrote mechanical.tsv")

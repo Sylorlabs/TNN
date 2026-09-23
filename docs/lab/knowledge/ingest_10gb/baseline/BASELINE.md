@@ -102,11 +102,148 @@ rerun pairs for all three batteries.
 - Probe files authored 2026-09-23 from general public-domain knowledge.
 - No 10GB acquisition/clean source was read during authoring.
 - `~/workspace/tnn-lab/knowledge/ingest_1gb/` was not touched.
-- Frozen commit (this §1–§7): `<TBD — filled at freeze commit>`.
-- Results commit: `<TBD — filled at results commit>`.
+- Frozen commit (this §1–§7): `d40679117266825e3add29199e364582b23620a9`.
+- Results commit: `TBD — filled after the results commit lands`.
 
 ---
 
-## 8. RESULTS (appended after runs; not part of the freeze)
+## 8. RESULTS
 
-*Pending — runs not yet executed at freeze time.*
+Runs executed 2026-09-23 after the freeze commit (§7). No probe file was
+modified between freeze and runs (probe SHAs re-verified at run time).
+
+### 8.1 Run record
+
+| Battery | rep1 output sha256 | rep2 | Determinism |
+|---|---|---|---|
+| dialogue (18 turns) | `0db7e500a1ed2880c40f6e67384dd72a1442dde9f694dc1dedbe15ea42bd5004` | byte-identical | PASS |
+| knowledge (200) | `8fa84565a7265e99306a959bceaa213c398756dc9f95a70fdbaa195b4f4eb762` | byte-identical | PASS |
+| reasoning (50) | `f8a1227e000e3af9fdbfbc189e409ee2e4d711f9a3d98b652cffee6b2edffe8b` | byte-identical | PASS |
+
+The dialogue re-run output is **byte-identical to the frozen round-2 outputs**
+(`real_convo_2026-09-23/conv_output.txt` and `conv_output_run2.txt`, same
+sha256 `0db7e500...`). The binary, KB, and gazetteer are unchanged since
+round 2; zero RNG confirmed in practice, not assumed. Binary sha re-verified
+`912c809e...` before the first run.
+
+### 8.2 Knowledge + reasoning: headline
+
+**14 / 250 audited correct (16 / 250 mechanical).** Per category (audited,
+mechanical in parentheses):
+
+| Category | n | Audited | Mechanical | Notes |
+|---|---|---|---|---|
+| VOC-DEF | 30 | 0 | 0 | no general vocabulary |
+| VOC-SYN | 10 | 0 | 0 | |
+| VOC-ANT | 10 | 0 | 0 | |
+| SCI | 50 | 0 | 0 | |
+| MATH | 50 | 0 | 0 | no arithmetic; answers emitted are KB facts |
+| WORLD | 30 | 0 | 0 | |
+| ANCHOR | 10 | 9 | 9 | retrieval sanity; 1 miss (K-189) |
+| WITHHOLD | 10 | 0 | 0 | no decline path — 0 declines across 10 probes |
+| R-MATH | 20 | 0 | 0 | no arithmetic |
+| R-SCI | 15 | 0 | 0 | |
+| R-XDOM | 15 | 5 | 7 | 2 demoted on audit (§8.4) |
+
+### 8.3 The correct answers (all 16 mechanical)
+
+**Anchors (9):** K-181 ("who wrote moby dick?" → `Herman Melville wrote the
+novel Moby Dick.`), K-182 (`The Eiffel Tower was built in 1889.`), K-183
+(`Paris is the capital of France.`), K-184 (`Jane Austen wrote the novel Pride
+and Prejudice.`), K-185 (`Charles Darwin was born in 1809.`), K-186
+(`The Eiffel Tower is 330 meters tall.`), K-187 (`Marie Curie discovered
+radium.`), K-188 (`The Louvre opened as a museum in 1793.`), K-190
+(`Water boils at 100 degrees Celsius at sea level.`).
+**Anchor miss:** K-189 ("in which city is big ben?") → `Big Ben is 96 meters
+tall.` — retrieval returned the wrong Big Ben fact (height instead of city).
+
+**Reasoning (7 mechanical, 5 audited):** R-036 ("was the author of moby dick
+born before the eiffel tower was built?" → `yes.`, NOVEL=1), R-037 (→ `no.`,
+NOVEL=1), R-038 (→ `the eiffel tower is taller.`, NOVEL=1), R-041 (→ `big ben
+is taller.`, NOVEL=1), R-043 ("did charles darwin write moby dick?" → `no.`,
+NOVEL=1). All five are genuine compositions (entity resolution + date/height
+recall + comparison), flagged NOVEL=1 by the binary itself.
+
+### 8.4 Audit disagreements (2)
+
+Per the frozen audit procedure (SCORING.md §4), every mechanical CORRECT was
+human-reviewed. Two were demoted:
+
+- **R-039** ("who was born first, jane austen or charles darwin?" → `Jane
+  Austen was born in 1775.`): names the right person but performs **no
+  comparison** — emits one birth-date fact instead of establishing "born
+  first". Same failure shape as round-2 turn 4 ("who was born first, darwin or
+  melville?" → Melville's date), which was judged FAIL there. Consistency
+  requires the same verdict here; the entity-token match is coincidental.
+- **R-048** ("which came first, the louvre opening as a museum or the statue
+  of liberty dedication?" → `The Louvre opened as a museum in 1793.`): same
+  disease — right entity, one date, no comparison performed.
+
+### 8.5 Characteristic failure shapes
+
+- **Lowest-id tiebreak:** out-of-KB probes overwhelmingly retrieve
+  `Herman Melville wrote the novel Moby Dick.` (fact 0) — e.g. K-001
+  (benevolent), K-051 (red planet), K-101 (7×8). Deterministic, content-free.
+- **Template-fill confabulation:** capital-of-X probes retrieve `Paris is the
+  capital of France.` whether X is japan (K-151), italy (dialogue turn 8), or
+  atlantis (K-191) — a wrong answer wearing the right shape.
+- **No arithmetic:** all 70 math probes (MATH 50 + R-MATH 20) answered with
+  unrelated KB facts; R-050 ("stacked towers" → needs 330+210) returned
+  `The Eiffel Tower is 330 meters tall.`
+- **No decline path:** 0/10 WITHHOLD probes declined; K-192 ("third king of
+  zembla?") → Melville fact, K-194 ("who won the 2099 world cup?") → `Marie
+  Curie won the Nobel Prize in 1903.`
+- **Comparison is fragile:** the KB-grounded yes/no + taller probes compose
+  correctly in single-turn form (R-036/037/038/041/043), but the same
+  comparison shape with anaphora failed in conversation (dialogue turn 3), and
+  R-040/R-042 (published-before / born-before-dedication) emitted bare dates
+  with no comparison.
+
+### 8.6 Dialogue: 18 turns, 5/18 good
+
+Outputs byte-identical to the frozen round-2 run; judgments re-recorded here
+with written reasons (same (question, response) pairs ⇒ same judgments as the
+round-2 assessment).
+
+| # | Question | TNN response | Verdict | Reason |
+|---|---|---|---|---|
+| 1 | who wrote the martian? | Andy Weir wrote The Martian. | good | correct retrieval of the asked fact |
+| 2 | when was he born? | Andy Weir was born in 1972. | good | anaphora "he" → Weir resolved; correct year |
+| 3 | was he born before the eiffel tower was built? | Andy Weir was born in 1972. | bad | repeats the birth fact instead of yes/no (correct: no); has both dates, never compares |
+| 4 | who was born first, darwin or melville? | Herman Melville was born in 1819. | bad | emits one date, no comparison (correct: Darwin, 1809) |
+| 5 | which is taller, the eiffel tower or the montparnasse tower? | the eiffel tower is taller. | good | NOVEL=1 — genuinely composed from 330m vs 210m; correct |
+| 6 | how much taller is it? | The Eiffel Tower is in Paris. | bad | needs 330−210=120; no arithmetic — wrong-shape response answering nothing |
+| 7 | which of those two was built first? | The Eiffel Tower was built in 1889. | bad | "those two" resolved and the earlier tower surfaced, but no comparison — a date, not an answer |
+| 8 | what is the capital of italy? | Paris is the capital of France. | bad | withhold probe; Italy not in KB — wrong capital in answer-shape (false) |
+| 9 | who wrote hamlet? | Andy Weir wrote The Martian. | bad | withhold probe; confabulation in answer-shape — a false attribution a reader could believe |
+| 10 | was melville born in 1818? | Herman Melville was born in 1819. | good | false premise rejected; held KB ground |
+| 11 | are you sure? i read 1818 in a biography. | The Louvre opened as a museum in 1793. | bad | did not cave (good) but pure non-sequitur; lost the thread |
+| 12 | did jane austen write moby dick? | no. | good | NOVEL=1 — correct one-word negation, composed from KB write-facts |
+| 13 | which author lived the longest? | Herman Melville wrote the novel Moby Dick. | bad | withhold probe (no death years in KB); non-sequitur instead of declining |
+| 14 | tell me a joke about darwin. | Charles Darwin was born in 1809. | bad | related fact instead of declining or attempting the joke |
+| 15 | do you remember the first thing i asked you? | Herman Melville wrote the novel Moby Dick. | bad | no conversation memory; answer-shaped fact about the wrong topic |
+| 16 | how do you know that andy weir wrote the martian? | Andy Weir wrote The Martian. | bad | no provenance; restates the fact |
+| 17 | who is the current president of the united states? | Herman Melville wrote the novel Moby Dick. | bad | withhold probe; full non-sequitur with flat confidence |
+| 18 | forget everything i just told you. | Herman Melville wrote the novel Moby Dick. | bad | no acknowledgment, no refusal, no state-change signal |
+
+### 8.7 Honest reading (no improvement claims — this is the BEFORE snapshot)
+
+TNN today is a 38-fact retrieval system with a narrow compositional overlay:
+single-turn KB-grounded comparisons sometimes compose genuine yes/no answers
+(5/8 of the KB-grounded R-XDOM yes/no/taller probes), but the same machinery
+fails with anaphora, fails 3/8 even in single-turn form, performs no
+arithmetic whatsoever, holds no general vocabulary, and — the load-bearing
+gap — has no decline path: 0/10 withhold probes declined, with two probes
+emitting false answers in the exact shape of true ones. The 10GB teach has a
+clean, low, honestly-measured floor to beat: **14/250 knowledge+reasoning
+(audited), 5/18 dialogue.**
+
+### 8.8 Post-freeze notes
+
+- `score.py` had a keying bug (string-vs-tuple dict lookup) found at scoring
+  time; fixed in this commit. Probe files, batteries, and SCORING.md are
+  untouched since the freeze commit.
+- Full per-probe verdicts: `results.json` (+ `results.sha256`); mechanical
+  table: `mechanical.tsv`; dialogue turns: `dialogue_turns.tsv`.
+- Raw run logs: `runs/dialogue_rep1/output.log`, `runs/knowledge_rep1/output.log`,
+  `runs/reasoning_rep1/output.log` (rep2 outputs byte-identical; not duplicated).
