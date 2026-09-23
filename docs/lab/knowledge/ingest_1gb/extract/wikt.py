@@ -19,7 +19,16 @@ def main():
     os.makedirs(RUN, exist_ok=True)
     stats = {1: 0, 2: 0}
     n_pages = 0
-    out = open(os.path.join(RUN, "wikt.bin"), "wb")
+    # checkpoint: number of pages already processed (for resume after restart)
+    ckpt_path = os.path.join(RUN, "wikt.ckpt")
+    skip_pages = 0
+    if os.path.exists(ckpt_path):
+        with open(ckpt_path) as f:
+            skip_pages = int(f.read().strip() or "0")
+        print(f"resuming: skipping {skip_pages} pages", flush=True)
+    out_path = os.path.join(RUN, "wikt.bin")
+    # append mode if resuming, write mode if fresh
+    out = open(out_path, "ab" if skip_pages > 0 else "wb")
     buf = b""
     off = 0
     with bz2.open(DUMP, "rb") as f:
@@ -45,6 +54,15 @@ def main():
                     continue
                 page = buf[ps:pe + 7]
                 off = pe + 7
+                n_pages += 1
+                # skip already-processed pages on resume
+                if n_pages <= skip_pages:
+                    continue
+                # checkpoint every 50k pages
+                if n_pages % 50000 == 0:
+                    with open(ckpt_path, "w") as cf:
+                        cf.write(str(n_pages))
+                    print(f"  ... {n_pages} pages, senses={stats[1]}, infl={stats[2]}", flush=True)
                 # fast filters on bytes
                 if b"<ns>0</ns>" not in page:
                     continue
@@ -73,10 +91,10 @@ def main():
                 except Exception:
                     continue
                 parse_page_text(title_s, text_s, out, stats)
-                n_pages += 1
-                if n_pages % 200000 == 0:
-                    print(f"  ... {n_pages} pages, senses={stats[1]}, infl={stats[2]}", flush=True)
     out.close()
+    # remove checkpoint on successful completion
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
     print(f"wiktionary: {n_pages} pages, kind1={stats[1]}, kind2={stats[2]}")
 
 if __name__ == "__main__":
