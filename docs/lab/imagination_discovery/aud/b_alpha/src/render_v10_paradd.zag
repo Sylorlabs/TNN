@@ -1,0 +1,769 @@
+@import("common_v5.zag")
+// ============================================================
+// render_v10_paradd.zag - AUDIO V10 Fork B (PARADD): parallel
+// parametric additive synthesis. Frozen design per PREREG_V10.md
+// (from Grok's proposal r1_grok.md).
+//
+// Four parallel channels, all continuous state, all parameters C0/C1
+// in time - no atoms, no splicing, no gated on/off triggers:
+//  - 3 voice channels: sine-LUT osc + 4 harmonic partials
+//    (ratios 1.0/1.12/1.25/1.40, detuned by fixed hash offsets),
+//    smooth bump envelopes (40-80 ms attack, 150-400 ms release),
+//    pitch instability (5.5 Hz vibrato +/-1.2%, 0.7 Hz wander
+//    +/-0.8%), aspiration noise per child. 3 independently
+//    controlled children (f0 280-520 Hz).
+//  - laughter: 2 units, hash noise through time-varying 2nd-order
+//    bandpass (800-1800 Hz, Q 3-6, coeffs at 5.8 ms control rate,
+//    linearly blended per sample), slow bursty gain (0.4-1.2 s
+//    sigmoid swells) + mild 4.8 Hz syllabic pulsation.
+//  - footsteps: damped sinusoids (2.5-6 kHz), smooth 1.5 ms raised
+//    onset + exponential decay (80-400 ms) + impact noise boost.
+//  - ambience: hash noise through slowly-varying 4-pole lowpass
+//    (cutoff wanders at 0.3-2 Hz), bounded away from silence.
+// Control: deterministic hash-chain scene script (72 events), one
+// composed moment: yard alive -> chase -> trip -> laugh -> wind
+// down (V9's arc). Voice/laugh params live on control tracks
+// (256-sample ticks); every output sample is a combination of
+// continuous phase accumulators and memory-bearing IIR filters.
+// Pure Zag, zero RNG in render path (h32/h01 hash streams only).
+// Byte-identical reruns guaranteed: everything is a pure function
+// of the frozen seed.
+//
+// V2 iteration notes (2026-09-23, resume crew): inherited clip1.wav
+// failed G-STA/G-LURCH/G-DRIFT and had 4 unexplained CHOP-3 spikes.
+// Mechanism fixes (bars untouched):
+//  - f0 track is now an amp-weighted sum, normalized per sample by
+//    the amp track: overlapping utterances on one channel blend pitch
+//    continuously (the old fp_put jumped f0 at overlap onset - a
+//    hidden gating artifact, likely the CHOP-3 spikes).
+//  - footstep raised onset 1.5 ms -> 10 ms; impact noise boost
+//    0.25 -> 0.12 and riding the same raised onset (no hard noise
+//    jump at strike); step freq range lowered 2.5-6 kHz -> 2-4.4 kHz;
+//    trip step 0.34 -> 0.22; gasp attack 30 -> 80 ms.
+//  - murmur density 12 -> 24 events, amp up: the playground never
+//    goes quiet, the arc rides on top (G-STA: 1 s RMS floor lifted).
+//  - soft laughs added at 11 s (chase) and 25.5 s (wind down) so
+//    midrange laughter presence spans the arc (G-DRIFT).
+//  - ambience LP wander center 320 -> 360 Hz.
+// V3 iteration notes (2026-09-23): v2 fixed STA/LURCH but regressed
+// G-PER (0.381, peak at 3.2 s lag: the pure 0.33 Hz sine wander of the
+// laugh bandpass Q put a 3 s periodicity into the laugh envelope) and
+// G-DRIFT worsened (1258: ambience-only seconds sat at ~400 Hz while
+// voice seconds with white aspiration/impact noise sat at ~4000 Hz).
+// Mechanism fixes:
+//  - laugh bandpass fc/Q wander is now incommensurate multi-sine
+//    (lfc_of/lq_of; no single period, still C1, still 800-1800/Q 3-6).
+//  - ambience: two-layer bed (4-pole body ~750 Hz + 2-pole air 2.3 kHz)
+//    so midrange energy never vanishes; wander rates incommensurate.
+//  - voice aspiration through a per-channel 1-pole LP (~1.8 kHz):
+//    breath is not white; kills the HF centroid drag of active seconds.
+//  - footstep impact boost through a 1-pole LP (~3 kHz): thump, not snap.
+// Why choppiness is impossible by construction: every output sample
+// is a combination of continuous phase accumulators and
+// memory-bearing IIR filters; all parameters are C1 in time (smooth
+// sstep bumps, linear per-sample track blends, amp-weighted f0);
+// there is no atom placement, no gated on/off triggering, no chunk
+// ring/buffer splicing anywhere in this source.
+// ============================================================
+
+const NS:i64 = 1323000;      // 30 s * 44100
+const NKT:i64 = 5169;        // control ticks + 1 (256-sample grid)
+const SEED:i64 = 20260923;
+const NEVMAX:i64 = 96;
+
+// ---------- quadrant sine (arg in [0, 2*pi)) ----------
+fn fsin_q(x:f64)f64{
+    let t:f64=x;
+    let s:f64=1.0;
+    if(t>=3.141592653589793){t=t-3.141592653589793;s=-1.0;}
+    if(t>=1.5707963267948966){t=3.141592653589793-t;}
+    let x2:f64=t*t;
+    let x3:f64=x2*t;
+    let x5:f64=x3*x2;
+    let x7:f64=x5*x2;
+    let x9:f64=x7*x2;
+    return s*(t-x3/6.0+x5/120.0-x7/5040.0+x9/362880.0);
+}
+// ---------- reduced sine (control-rate use, any arg) ----------
+fn fsin_red(x:f64)f64{
+    let t:f64=x;
+    while(t>=6.283185307179586){t=t-6.283185307179586;}
+    while(t<0.0){t=t+6.283185307179586;}
+    return fsin_q(t);
+}
+// ---------- fixed-point track access (element index -> byte off <<3) ----------
+fn fp_put(b:[]u8,e:i64,x:f64,sc:f64)void{
+    put64(b,e<<3,(x*sc) as i64);
+}
+fn fp_get(b:[]u8,e:i64,sc:f64)f64{
+    return (get64(b,e<<3) as f64)/sc;
+}
+fn fp_add(b:[]u8,e:i64,x:f64,sc:f64)void{
+    let o:i64=e<<3;
+    put64(b,o,get64(b,o)+((x*sc) as i64));
+}
+// ---------- event table access: 8 i64 fields per event ----------
+fn evg(ev:[]u8,i:i64,f:i64)i64{
+    return get64(ev,((i*8+f))<<3);
+}
+fn evs(ev:[]u8,i:i64,f:i64,v:i64)void{
+    put64(ev,((i*8+f))<<3,v);
+}
+// fields: 0 t0_ms | 1 dur_ms | 2 kind(0 voice,1 laugh,2 step)
+//         3 chan/unit | 4 f0a_x16 / step freq_x16 | 5 f0b_x16
+//         6 amp_x1e6 | 7 atk_ms_x16 / laugh rise_ms_x16 / step tau_ms_x16
+fn ev_add(ev:[]u8,n:i64,t0ms:f64,durms:f64,kind:i64,ch:i64,a:f64,b:f64,amp:f64,aux:f64)i64{
+    evs(ev,n,0,(t0ms as i64));
+    evs(ev,n,1,(durms as i64));
+    evs(ev,n,2,kind);
+    evs(ev,n,3,ch);
+    evs(ev,n,4,(a*16.0) as i64);
+    evs(ev,n,5,(b*16.0) as i64);
+    evs(ev,n,6,(amp*1000000.0) as i64);
+    evs(ev,n,7,(aux*16.0) as i64);
+    return n+1;
+}
+// ---------- 2048-entry sine LUT, Q30 ----------
+fn lut_init(lut:[]u8)void{
+    let i:i64=0;
+    while(i<2048){
+        let s:f64=fsin_q(6.283185307179586*(i as f64)/2048.0);
+        put64(lut,i<<3,(s*1073741824.0) as i64);
+        i=i+1;
+    }
+}
+fn lut_at(lut:[]u8,ph:f64)f64{
+    let idx:i64=(ph*2048.0) as i64;
+    if(idx<0){idx=0;}
+    if(idx>2047){idx=2047;}
+    return (get64(lut,idx<<3) as f64)/1073741824.0;
+}
+
+// ---------- scene script: 72 deterministic hash-chain events ----------
+// One composed moment: yard alive (0-6) -> chase (6-14) -> trip
+// (14.6) -> laugh (15-22) -> wind down (22-30).
+fn script_build(ev:[]u8,nout:*i64)void{
+    let n:i64=0;
+    let i:i64=0;
+    // P1: yard alive - 5 utterances, 4 light steps
+    i=0;
+    while(i<5){
+        let t:f64=0.4+5.2*h01(SEED,100+i);
+        let dur:f64=0.3+0.5*h01(SEED,200+i);
+        let ch:i64=h32(SEED,300+i)%3;
+        let f0a:f64=280.0+140.0*h01(SEED,400+i);
+        let f0b:f64=f0a+(h01(SEED,500+i)-0.5)*160.0;
+        let amp:f64=0.14+0.14*h01(SEED,600+i);
+        let atk:f64=40.0+40.0*h01(SEED,650+i);
+        let rel:f64=150.0+250.0*h01(SEED,660+i);
+        n=ev_add(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,atk*1000.0+rel);
+        i=i+1;
+    }
+    i=0;
+    while(i<4){
+        let t:f64=0.8+4.8*h01(SEED,700+i);
+        let fr:f64=2000.0+2200.0*h01(SEED,710+i);
+        let tau:f64=80.0+200.0*h01(SEED,720+i);
+        let amp:f64=0.05+0.05*h01(SEED,730+i);
+        n=ev_add(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,tau);
+        i=i+1;
+    }
+    // P2: chase - 6 excited utterances, 16 quicker steps
+    i=0;
+    while(i<6){
+        let t:f64=6.3+7.2*h01(SEED,800+i);
+        let dur:f64=0.25+0.5*h01(SEED,810+i);
+        let ch:i64=h32(SEED,820+i)%3;
+        let f0a:f64=360.0+160.0*h01(SEED,830+i);
+        let f0b:f64=f0a+(h01(SEED,840+i)-0.5)*200.0;
+        let amp:f64=0.18+0.16*h01(SEED,850+i);
+        let atk:f64=40.0+40.0*h01(SEED,860+i);
+        let rel:f64=150.0+250.0*h01(SEED,870+i);
+        n=ev_add(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,atk*1000.0+rel);
+        i=i+1;
+    }
+    i=0;
+    while(i<16){
+        let t:f64=6.2+7.4*h01(SEED,900+i);
+        let fr:f64=2200.0+2200.0*h01(SEED,910+i);
+        let tau:f64=80.0+150.0*h01(SEED,920+i);
+        let amp:f64=0.06+0.06*h01(SEED,930+i);
+        n=ev_add(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,tau);
+        i=i+1;
+    }
+    // P3: trip - one heavy step, then a gasp
+    n=ev_add(ev,n,14550.0,0.0,2,0,2300.0,0.0,0.22,400.0);
+    n=ev_add(ev,n,14950.0,350.0,0,1,480.0,220.0,0.32,80.0*1000.0+250.0);
+    // P4: laughter - 4 bursts across 2 units + 3 soft utterances
+    // (a soft chase-laugh at 11 s and the three main bursts)
+    n=ev_add(ev,n,11000.0,1200.0,1,0,0.0,0.0,0.22,600.0);
+    n=ev_add(ev,n,15500.0,1600.0,1,0,0.0,0.0,0.42,700.0);
+    n=ev_add(ev,n,17900.0,2000.0,1,1,0.0,0.0,0.5,900.0);
+    n=ev_add(ev,n,20300.0,1400.0,1,0,0.0,0.0,0.4,600.0);
+    i=0;
+    while(i<3){
+        let t:f64=16.2+5.0*h01(SEED,1000+i);
+        let dur:f64=0.3+0.4*h01(SEED,1010+i);
+        let ch:i64=h32(SEED,1020+i)%3;
+        let f0a:f64=300.0+120.0*h01(SEED,1030+i);
+        let f0b:f64=f0a+(h01(SEED,1040+i)-0.5)*140.0;
+        let amp:f64=0.1+0.06*h01(SEED,1050+i);
+        n=ev_add(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,50.0*1000.0+200.0);
+        i=i+1;
+    }
+    // P5: wind down - 3 soft utterances, 4 slow steps, one soft laugh
+    // (keeps laughter presence across the arc, stabilizes centroid)
+    i=0;
+    while(i<3){
+        let t:f64=22.5+5.5*h01(SEED,1100+i);
+        let dur:f64=0.35+0.5*h01(SEED,1110+i);
+        let ch:i64=h32(SEED,1120+i)%3;
+        let f0a:f64=280.0+120.0*h01(SEED,1130+i);
+        let f0b:f64=f0a+(h01(SEED,1140+i)-0.5)*120.0;
+        let amp:f64=0.10+0.08*h01(SEED,1150+i);
+        n=ev_add(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,60.0*1000.0+250.0);
+        i=i+1;
+    }
+    n=ev_add(ev,n,25500.0,1400.0,1,1,0.0,0.0,0.26,700.0);
+    i=0;
+    while(i<4){
+        let t:f64=23.0+5.5*h01(SEED,1200+i);
+        let fr:f64=2000.0+2200.0*h01(SEED,1210+i);
+        let tau:f64=100.0+200.0*h01(SEED,1220+i);
+        let amp:f64=0.04+0.04*h01(SEED,1230+i);
+        n=ev_add(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,tau);
+        i=i+1;
+    }
+    // background murmur: near-continuous child presence (density bed).
+    // 24 events keep the 1 s RMS floor up through the quiet stretches
+    // (G-STA): the playground never goes quiet, the arc rides on top.
+    // v5: attack 60 -> 40 ms (still smooth sstep, still C1) so acoustic
+    // transients sit closer to script timestamps (CHOP-3 tolerance).
+    i=0;
+    while(i<24){
+        let t:f64=0.5+29.0*h01(SEED,1300+i);
+        let dur:f64=0.45+0.45*h01(SEED,1310+i);
+        let ch:i64=h32(SEED,1320+i)%3;
+        let f0a:f64=280.0+140.0*h01(SEED,1330+i);
+        let f0b:f64=f0a+(h01(SEED,1340+i)-0.5)*200.0;
+        let amp:f64=0.08+0.06*h01(SEED,1350+i);
+        n=ev_add(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,40.0*1000.0+250.0);
+        i=i+1;
+    }
+    // insertion sort by t0 (deterministic, strict)
+    let a:i64=1;
+    while(a<n){
+        let b:i64=a;
+        while(b>0 && evg(ev,b,0)<evg(ev,b-1,0)){
+            let f:i64=0;
+            while(f<8){
+                let tmp:i64=evg(ev,b,f);
+                evs(ev,b,f,evg(ev,b-1,f));
+                evs(ev,b-1,f,tmp);
+                f=f+1;
+            }
+            b=b-1;
+        }
+        a=a+1;
+    }
+    nout.*=n;
+}
+// ---------- smooth bump with sstep attack/release (C1 at ends) ----------
+fn bump1(x:f64,rf:f64,ff:f64)f64{
+    if(rf<0.001 && ff<0.001){return 1.0;}
+    if(x<0.0){return 0.0;}
+    if(x>1.0){return 0.0;}
+    if(rf>0.001 && x<rf){return sstep(x/rf);}
+    if(ff>0.001 && x>1.0-ff){return sstep((1.0-x)/ff);}
+    return 1.0;
+}
+// ---------- voice utterance -> control tracks ----------
+// amp track: additive smooth bumps (overlaps sum - fine, still C1).
+// f0 track: AMP-WEIGHTED sum (amp*e*f0); the render normalizes by the amp
+// track per sample, so overlapping utterances on one channel blend pitch
+// continuously instead of jumping (the old fp_put jumped f0 at overlap
+// onset - a hidden gating artifact; this keeps every parameter C1).
+fn vbump(vamp:[]u8,vf0:[]u8,c:i64,t0ms:i64,durms:i64,atkms:i64,relms:i64,f0a:f64,f0b:f64,amp:f64)void{
+    let k0:i64=((t0ms as f64)*44.1/256.0) as i64;
+    let k1:i64=(((t0ms+durms) as f64)*44.1/256.0) as i64;
+    if(k1<=k0){k1=k0+1;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let rf:f64=((atkms as f64)*44.1/256.0)/span;
+    let ff:f64=((relms as f64)*44.1/256.0)/span;
+    let k:i64=k0;
+    while(k<=k1){
+        let x:f64=((k-k0) as f64)/span;
+        let e:f64=bump1(x,rf,ff);
+        let el:i64=c*NKT+k;
+        fp_add(vamp,el,amp*e,1073741824.0);
+        let f0v:f64=f0a+(f0b-f0a)*sstep(x);
+        fp_add(vf0,el,amp*e*f0v,4096.0);
+        k=k+1;
+    }
+}
+// ---------- laugh burst -> control tracks ----------
+fn lbump(lgain:[]u8,lfc:[]u8,lq:[]u8,u:i64,t0ms:i64,durms:i64,risems:i64,amp:f64)void{
+    let k0:i64=((t0ms as f64)*44.1/256.0) as i64;
+    let k1:i64=(((t0ms+durms) as f64)*44.1/256.0) as i64;
+    if(k1<=k0){k1=k0+1;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let rf:f64=((risems as f64)*44.1/256.0)/span;
+    let k:i64=k0;
+    while(k<=k1){
+        let x:f64=((k-k0) as f64)/span;
+        let e:f64=bump1(x,rf,rf);
+        let el:i64=u*NKT+k;
+        fp_add(lgain,el,amp*e,1073741824.0);
+        let t:f64=(k as f64)*256.0/44100.0;
+        fp_put(lfc,el,lfc_of(t,u),16.0);
+        fp_put(lq,el,lq_of(t,u),1024.0);
+        k=k+1;
+    }
+}
+// ---------- expand script into control tracks ----------
+fn tracks_build(ev:[]u8,nev:i64,vamp:[]u8,vf0:[]u8,lgain:[]u8,lfc:[]u8,lq:[]u8)void{
+    // default laugh filter tracks (harmless: gain is 0 outside bursts)
+    let k:i64=0;
+    while(k<NKT){
+        let t:f64=(k as f64)*256.0/44100.0;
+        let u:i64=0;
+        while(u<2){
+            let el:i64=u*NKT+k;
+            fp_put(lfc,el,lfc_of(t,u),16.0);
+            fp_put(lq,el,lq_of(t,u),1024.0);
+            u=u+1;
+        }
+        k=k+1;
+    }
+    let i:i64=0;
+    while(i<nev){
+        let kind:i64=evg(ev,i,2);
+        if(kind==0){
+            let ch:i64=evg(ev,i,3);
+            let f0a:f64=(evg(ev,i,4) as f64)/16.0;
+            let f0b:f64=(evg(ev,i,5) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let ax:i64=evg(ev,i,7);
+            let atkms:i64=ax/16000;
+            let relms:i64=(ax-(atkms*16000))/16;
+            vbump(vamp,vf0,ch,evg(ev,i,0),evg(ev,i,1),atkms,relms,f0a,f0b,amp);
+        }
+        if(kind==1){
+            let u2:i64=evg(ev,i,3);
+            let amp2:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let risems:i64=evg(ev,i,7)/16;
+            lbump(lgain,lfc,lq,u2,evg(ev,i,0),evg(ev,i,1),risems,amp2);
+        }
+        i=i+1;
+    }
+}
+// ---------- per-tick biquad coeffs (RBJ bandpass, constant 0 dB peak) ----------
+fn coeff_build(lfc:[]u8,lq:[]u8,lb0:[]u8,lb2:[]u8,la1:[]u8,la2:[]u8)void{
+    let u:i64=0;
+    while(u<2){
+        let k:i64=0;
+        while(k<NKT){
+            let el:i64=u*NKT+k;
+            let fc:f64=fp_get(lfc,el,16.0);
+            let q:f64=fp_get(lq,el,1024.0);
+            let w:f64=6.283185307179586*fc/44100.0;
+            let sn:f64=fsin_red(w);
+            let cs:f64=fsin_red(w+1.5707963267948966);
+            let al:f64=sn/(2.0*q);
+            let a0:f64=1.0+al;
+            fp_put(lb0,el,al/a0,1073741824.0);
+            fp_put(lb2,el,-al/a0,1073741824.0);
+            fp_put(la1,el,-2.0*cs/a0,1073741824.0);
+            fp_put(la2,el,(1.0-al)/a0,1073741824.0);
+            k=k+1;
+        }
+        u=u+1;
+    }
+}
+
+// ---------- linear interpolation of a control track at sample n ----------
+fn track2(tr:[]u8,c:i64,n:i64,sc:f64)f64{
+    let k:i64=n>>8;
+    if(k>=NKT-1){k=NKT-2;}
+    let fr:f64=((n-(k<<8)) as f64)/256.0;
+    let e0:i64=c*NKT+k;
+    let a:f64=fp_get(tr,e0,sc);
+    let b:f64=fp_get(tr,e0+1,sc);
+    return a+(b-a)*fr;
+}
+fn mix_add(mix:[]u8,n:i64,s:f64)void{
+    let o:i64=n<<3;
+    put64(mix,o,get64(mix,o)+((s*16777216.0) as i64));
+}
+fn mix_peak(m:[]u8)void{
+    let peak:i64=0;
+    let s:i64=0;
+    while(s<NS){
+        let v:i64=get64(m,s<<3);
+        if(v<0){v=-v;}
+        if(v>peak){peak=v;}
+        s=s+1;
+    }
+    print_str("peak_q24=");print_i64(peak);
+    print_str(" peak_fs=");
+    print_f3((peak as f64)/16777216.0);
+    print_nl();
+}
+// ---------- laugh filter wander: incommensurate multi-sine ----------
+// (no single period -> aperiodic envelope; the old pure 0.5/0.33 Hz
+// sines put a 2 s/3 s periodicity into the laugh envelope and tripped
+// G-PER. Still C1 smooth, still deterministic, still 800-1800 Hz / Q 3-6.)
+fn lfc_of(t:f64,u:i64)f64{
+    let w1:f64=fsin_red(6.283185307179586*0.47*t+(u as f64)*2.1);
+    let w2:f64=fsin_red(6.283185307179586*0.31*t+(u as f64)*4.7);
+    let w3:f64=fsin_red(6.283185307179586*0.83*t+(u as f64)*1.2);
+    return 800.0+1000.0*(0.5+0.5*(0.55*w1+0.30*w2+0.15*w3));
+}
+fn lq_of(t:f64,u:i64)f64{
+    let q1:f64=fsin_red(6.283185307179586*0.29*t+(u as f64)*1.3);
+    let q2:f64=fsin_red(6.283185307179586*0.53*t+(u as f64)*3.1);
+    return 3.0+3.0*(0.5+0.5*(0.6*q1+0.4*q2));
+}
+// ---------- pass 1: ambience - hash noise, 4-pole LP body + 2-pole air ----------
+// The bed must carry midrange energy at ALL times: a dark-only bed lets
+// the 1 s centroid collapse in quiet seconds (G-DRIFT). Body ~750 Hz
+// wander + air layer at 2.3 kHz (distant-play wash). All wander rates
+// incommensurate (G-PER guard). Bounded away from silence.
+fn amb_pass(mix:[]u8,master:f64,amblevel:f64)void{
+    let y1:f64=0.0;
+    let y2:f64=0.0;
+    let y3:f64=0.0;
+    let y4:f64=0.0;
+    let z1:f64=0.0;
+    let z2:f64=0.0;
+    let p1:f64=0.0;
+    let p2:f64=0.0;
+    let g1:f64=0.0;
+    let g2:f64=0.0;
+    let g3:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        p1=p1+6.283185307179586*0.37/44100.0;
+        if(p1>=6.283185307179586){p1=p1-6.283185307179586;}
+        p2=p2+6.283185307179586*0.83/44100.0;
+        if(p2>=6.283185307179586){p2=p2-6.283185307179586;}
+        g1=g1+6.283185307179586*0.61/44100.0;
+        if(g1>=6.283185307179586){g1=g1-6.283185307179586;}
+        g2=g2+6.283185307179586*1.27/44100.0;
+        if(g2>=6.283185307179586){g2=g2-6.283185307179586;}
+        g3=g3+6.283185307179586*0.43/44100.0;
+        if(g3>=6.283185307179586){g3=g3-6.283185307179586;}
+        let fc:f64=750.0*(1.0+0.35*fsin_q(p1+0.5)+0.18*fsin_q(p2+1.7));
+        let w:f64=6.283185307179586*fc/44100.0;
+        let a:f64=w/(1.0+w);
+        let wa:f64=6.283185307179586*2300.0/44100.0;
+        let aa:f64=wa/(1.0+wa);
+        let x:f64=(h01(71001,n)-0.5)*2.0;
+        y1=y1+a*(x-y1);
+        y2=y2+a*(y1-y2);
+        y3=y3+a*(y2-y3);
+        y4=y4+a*(y3-y4);
+        z1=z1+aa*(x-z1);
+        z2=z2+aa*(z1-z2);
+        let gb:f64=0.36*(1.0+0.25*fsin_q(g1+1.0)+0.14*fsin_q(g2+0.9));
+        let ga:f64=0.12*(1.0+0.30*fsin_q(g3+0.4));
+        mix_add(mix,n,(gb*y4+ga*z2)*amblevel*master);
+        n=n+1;
+    }
+}
+// ---------- pass 2: 3 voice channels, additive partials + aspiration ----------
+fn voice_pass(mix:[]u8,vamp:[]u8,vf0:[]u8,lut:[]u8,cp:[]u8,master:f64)void{
+    let ph0:f64=0.0;
+    let ph1:f64=0.0;
+    let ph2:f64=0.0;
+    let vp0:f64=0.0;
+    let vp1:f64=0.0;
+    let vp2:f64=0.0;
+    let wp0:f64=0.0;
+    let wp1:f64=0.0;
+    let wp2:f64=0.0;
+    // aspiration LP state per channel (breath is not white: 1-pole ~1.8 kHz
+    // keeps the air without dragging the 1 s centroid up - G-DRIFT guard)
+    let as0:f64=0.0;
+    let as1:f64=0.0;
+    let as2:f64=0.0;
+    let aal:f64=6.283185307179586*1800.0/44100.0;
+    aal=aal/(1.0+aal);
+    let n:i64=0;
+    while(n<NS){
+        let c:i64=0;
+        while(c<3){
+            let amp:f64=track2(vamp,c,n,1073741824.0);
+            // f0 track holds the amp-weighted f0 sum; normalize so pitch
+            // blends continuously through overlapping utterances (C1).
+            // amp~0 guard: f0 value is inaudible then, any smooth value ok.
+            let f0w:f64=track2(vf0,c,n,4096.0);
+            let f0:f64=300.0;
+            if(amp>0.0000001){f0=f0w*1073741824.0/(4096.0*amp);}
+            let r2:f64=fp_get(cp,c*10+0,1000000.0);
+            let r3:f64=fp_get(cp,c*10+1,1000000.0);
+            let r4:f64=fp_get(cp,c*10+2,1000000.0);
+            let o2:f64=fp_get(cp,c*10+3,1000000.0);
+            let o3:f64=fp_get(cp,c*10+4,1000000.0);
+            let o4:f64=fp_get(cp,c*10+5,1000000.0);
+            let p2:f64=fp_get(cp,c*10+6,1000000.0);
+            let p3:f64=fp_get(cp,c*10+7,1000000.0);
+            let p4:f64=fp_get(cp,c*10+8,1000000.0);
+            // per-channel phase/vibrato state via locals
+            let ph:f64=ph0;
+            let vp:f64=vp0;
+            let wp:f64=wp0;
+            if(c==1){ph=ph1;vp=vp1;wp=wp1;}
+            if(c==2){ph=ph2;vp=vp2;wp=wp2;}
+            vp=vp+6.283185307179586*5.5/44100.0;
+            if(vp>=6.283185307179586){vp=vp-6.283185307179586;}
+            wp=wp+6.283185307179586*0.7/44100.0;
+            if(wp>=6.283185307179586){wp=wp-6.283185307179586;}
+            let fm:f64=1.0+0.012*fsin_q(vp)+0.008*fsin_q(wp);
+            ph=ph+f0*fm/44100.0;
+            if(ph>=1.0){ph=ph-1.0;}
+            let f2:f64=ph*r2+o2;
+            f2=f2-((f2 as i64) as f64);
+            if(f2<0.0){f2=f2+1.0;}
+            let f3:f64=ph*r3+o3;
+            f3=f3-((f3 as i64) as f64);
+            if(f3<0.0){f3=f3+1.0;}
+            let f4:f64=ph*r4+o4;
+            f4=f4-((f4 as i64) as f64);
+            if(f4<0.0){f4=f4+1.0;}
+            let s:f64=lut_at(lut,ph)+p2*lut_at(lut,f2)+p3*lut_at(lut,f3)+p4*lut_at(lut,f4);
+            let alp:f64=as0;
+            if(c==1){alp=as1;}
+            if(c==2){alp=as2;}
+            let rawnz:f64=(h01(72001+c,n)-0.5)*2.0;
+            alp=alp+aal*(rawnz-alp);
+            let asp:f64=alp*0.10*amp;
+            let v:f64=amp*(s/2.4)*0.9+asp;
+            mix_add(mix,n,v*master);
+            if(c==0){ph0=ph;vp0=vp;wp0=wp;as0=alp;}
+            if(c==1){ph1=ph;vp1=vp;wp1=wp;as1=alp;}
+            if(c==2){ph2=ph;vp2=vp;wp2=wp;as2=alp;}
+            c=c+1;
+        }
+        n=n+1;
+    }
+}
+// ---------- pass 3: laughter - 2 bandpass units, bursty gain ----------
+fn laugh_pass(mix:[]u8,lgain:[]u8,lb0:[]u8,lb2:[]u8,la1:[]u8,la2:[]u8,master:f64)void{
+    let x10:f64=0.0;
+    let x20:f64=0.0;
+    let y10:f64=0.0;
+    let y20:f64=0.0;
+    let x11:f64=0.0;
+    let x21:f64=0.0;
+    let y11:f64=0.0;
+    let y21:f64=0.0;
+    let up0:f64=0.0;
+    let up1:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        let u:i64=0;
+        while(u<2){
+            let gain:f64=track2(lgain,u,n,1073741824.0);
+            let b0:f64=track2(lb0,u,n,1073741824.0);
+            let b2:f64=track2(lb2,u,n,1073741824.0);
+            let a1:f64=track2(la1,u,n,1073741824.0);
+            let a2:f64=track2(la2,u,n,1073741824.0);
+            let x:f64=(h01(73001+u,n)-0.5)*2.0;
+            let up:f64=up0;
+            let xx1:f64=x10;
+            let xx2:f64=x20;
+            let yy1:f64=y10;
+            let yy2:f64=y20;
+            if(u==1){up=up1;xx1=x11;xx2=x21;yy1=y11;yy2=y21;}
+            let y:f64=b0*x+b2*xx2-a1*yy1-a2*yy2;
+            xx2=xx1;
+            xx1=x;
+            yy2=yy1;
+            yy1=y;
+            up=up+6.283185307179586*4.8/44100.0;
+            if(up>=6.283185307179586){up=up-6.283185307179586;}
+            let pg:f64=1.0-0.30*(0.5+0.5*fsin_q(up+(u as f64)*2.4));
+            mix_add(mix,n,gain*pg*0.55*y*master);
+            if(u==0){up0=up;x10=xx1;x20=xx2;y10=yy1;y20=yy2;}
+            if(u==1){up1=up;x11=xx1;x21=xx2;y11=yy1;y21=yy2;}
+            u=u+1;
+        }
+        n=n+1;
+    }
+}
+
+// ---------- pass 4: footsteps - damped sinusoids, raised onset ----------
+fn step_pass(mix:[]u8,ev:[]u8,nev:i64,lut:[]u8,master:f64)void{
+    let i:i64=0;
+    while(i<nev){
+        if(evg(ev,i,2)==2){
+            let t0ms:i64=evg(ev,i,0);
+            let fr:f64=(evg(ev,i,4) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let tau:f64=((evg(ev,i,7) as f64)/16.0)/1000.0;
+            let n0:i64=((t0ms as f64)*44.1) as i64;
+            let n1:i64=n0+(((6.0*tau*44100.0)) as i64);
+            if(n1>NS){n1=NS;}
+            if(n0<0){n0=0;}
+            let kd:f64=1.0-1.0/(tau*44100.0);
+            // 10 ms raised onset (was 1.5 ms: too fast, G-LURCH killer)
+            let kr:f64=1.0-1.0/(0.010*44100.0);
+            let r:f64=1.0;
+            let d:f64=1.0;
+            let ph:f64=0.0;
+            // impact-boost LP state (1-pole ~3 kHz: thump, not white snap)
+            let bz:f64=0.0;
+            let abl:f64=6.283185307179586*3000.0/44100.0;
+            abl=abl/(1.0+abl);
+            let n:i64=n0;
+            while(n<n1){
+                r=r*kr;
+                d=d*kd;
+                let env:f64=amp*(1.0-r)*d;
+                ph=ph+fr/44100.0;
+                if(ph>=1.0){ph=ph-1.0;}
+                let nz:f64=(h01(74001,n)-0.5)*2.0;
+                bz=bz+abl*(nz-bz);
+                // impact boost rides the SAME raised onset (no abrupt
+                // noise jump at strike; was 0.25 with a hard start).
+                let s:f64=env*lut_at(lut,ph)+0.12*amp*bz*d*d*(1.0-r);
+                mix_add(mix,n,s*master);
+                n=n+1;
+            }
+        }
+        i=i+1;
+    }
+}
+// ---------- write scene-script transient timestamps (CHOP-3 audit) ----------
+// one "SS.FFF" seconds line per event (manual decimal formatting:
+// the stdout print path has a znc literal-formatting quirk).
+fn w_int(b:[]u8,p:i64,v:i64)i64{
+    let x:i64=v;
+    if(x==0){b[p]=48;return p+1;}
+    let d:i64=1;
+    let t:i64=x;
+    while(t>=10){d=d*10;t=t/10;}
+    while(d>=1){
+        b[p]=(((x/d)%10)+48) as u8;
+        p=p+1;
+        d=d/10;
+    }
+    return p;
+}
+fn ev_write(path:[]u8,ev:[]u8,nev:i64)i64{
+    let bp:*u8=_zag_malloc(nev*16+8) as *u8;
+    if(bp==null as *u8){return -1;}
+    let b:[]u8=bp[0..(nev*16+8)];
+    let p:i64=0;
+    let i:i64=0;
+    while(i<nev){
+        let ms:i64=evg(ev,i,0);
+        let sec:i64=ms/1000;
+        let fr:i64=ms-sec*1000;
+        p=w_int(b,p,sec);
+        b[p]=46;p=p+1;
+        b[p]=((fr/100)+48) as u8;p=p+1;
+        b[p]=(((fr/10)%10)+48) as u8;p=p+1;
+        b[p]=((fr%10)+48) as u8;p=p+1;
+        b[p]=10;p=p+1;
+        i=i+1;
+    }
+    let out:[]u8=b[0..p];
+    let rc:i64=file_write(path,out);
+    _zag_free(bp);
+    return rc;
+}
+fn main()i32{
+    let outp:[]u8=_zag_arg(1);
+    if(outp.len==0){
+        print_str("usage: render_v10_paradd <out.wav>\n");
+        return 1;
+    }
+    let master:f64=2.22;
+    // v4: amblevel 2.0 -> 1.4. The v3 bed was the dominant continuous
+    // sound (-12 dB RMS) and its noise crests crossed the CHOP-3 flux
+    // threshold; v2's quieter bed had 0 unexplained spikes. The bed
+    // keeps its v3 spectrum (750 Hz body + 2.3 kHz air) for G-DRIFT,
+    // just sits lower in the mix where a bed belongs.
+    let amblevel:f64=1.4;
+    // ---- arenas (all explicitly zeroed) ----
+    let evp:*u8=_zag_malloc(NEVMAX*64) as *u8;
+    let ev:[]u8=evp[0..(NEVMAX*64)];
+    let vamp:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let vf0:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let lgain:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lfc:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lq:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lb0:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lb2:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let la1:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let la2:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lut:[]u8=(_zag_malloc(2048*8) as *u8)[0..(2048*8)];
+    let cp:[]u8=(_zag_malloc(3*10*8) as *u8)[0..(3*10*8)];
+    let mix:[]u8=(_zag_malloc(NS*8) as *u8)[0..(NS*8)];
+    let z:i64=0;
+    while(z<NS*8){mix[z]=0;z=z+1;}
+    z=0;
+    while(z<3*NKT*8){vamp[z]=0;vf0[z]=0;z=z+1;}
+    z=0;
+    while(z<2*NKT*8){lgain[z]=0;lfc[z]=0;lq[z]=0;lb0[z]=0;lb2[z]=0;la1[z]=0;la2[z]=0;z=z+1;}
+    z=0;
+    while(z<NEVMAX*64){ev[z]=0;z=z+1;}
+    // ---- per-child fixed detune/partial params (hash-derived) ----
+    let c:i64=0;
+    while(c<3){
+        let s1:f64=h01(SEED,9000+c);
+        let d2:f64=0.03+0.05*h01(SEED,9010+c);
+        if(s1<0.5){d2=-d2;}
+        let s2:f64=h01(SEED,9020+c);
+        let d3:f64=0.03+0.05*h01(SEED,9030+c);
+        if(s2<0.5){d3=-d3;}
+        let s3:f64=h01(SEED,9040+c);
+        let d4:f64=0.03+0.05*h01(SEED,9050+c);
+        if(s3<0.5){d4=-d4;}
+        fp_put(cp,c*10+0,1.12*(1.0+d2),1000000.0);
+        fp_put(cp,c*10+1,1.25*(1.0+d3),1000000.0);
+        fp_put(cp,c*10+2,1.40*(1.0+d4),1000000.0);
+        fp_put(cp,c*10+3,h01(SEED,9060+c)*6.283185307179586,1000000.0);
+        fp_put(cp,c*10+4,h01(SEED,9070+c)*6.283185307179586,1000000.0);
+        fp_put(cp,c*10+5,h01(SEED,9080+c)*6.283185307179586,1000000.0);
+        fp_put(cp,c*10+6,0.5*(0.9+0.2*h01(SEED,9090+c)),1000000.0);
+        fp_put(cp,c*10+7,0.32*(0.9+0.2*h01(SEED,9100+c)),1000000.0);
+        fp_put(cp,c*10+8,0.22*(0.9+0.2*h01(SEED,9110+c)),1000000.0);
+        c=c+1;
+    }
+    lut_init(lut);
+    print_str("lut ok\n");
+    let np:*u8=_zag_malloc(8) as *u8;
+    let npp:*i64=np as *i64;
+    npp.*=0;
+    script_build(ev,npp);
+    let nev:i64=npp.*;
+    _zag_free(np);
+    print_str("events=");print_i64(nev);print_nl();
+    tracks_build(ev,nev,vamp,vf0,lgain,lfc,lq);
+    print_str("tracks ok\n");
+    coeff_build(lfc,lq,lb0,lb2,la1,la2);
+    print_str("coeffs ok\n");
+    amb_pass(mix,master,amblevel);
+    print_str("amb ok\n");
+    voice_pass(mix,vamp,vf0,lut,cp,master);
+    print_str("voice ok\n");
+    laugh_pass(mix,lgain,lb0,lb2,la1,la2,master);
+    print_str("laugh ok\n");
+    step_pass(mix,ev,nev,lut,master);
+    print_str("steps ok\n");
+    let rc:i64=wav_write(outp,mix,NS);
+    print_str("render rc=");print_i64(rc);print_nl();
+    let evpath:[]u8=_zag_arg(2);
+    if(evpath.len>0){
+        let erc:i64=ev_write(evpath,ev,nev);
+        print_str("events rc=");print_i64(erc);print_nl();
+    }
+    return (rc<0) as i32;
+}
