@@ -1,0 +1,422 @@
+// p2.zag — G6/P2 substrate: deliberate memory-agency triage ops.
+//
+// A bounded memory store (1024 slots). Each memory: key, val, tier
+// (0=ephemeral, 1=standard, 2=pinned), refcount, important flag,
+// force-pin flag (trainer force-pin — the only true lock). Deliberate,
+// audited ops: INSERT, KILL (fail-closed: refuses tier>=1 or force-pin),
+// PIN (tier->2), PROMOTE (tier 0->1), KEEP (audited no-op). The novel
+// behavior under test is the deliberate triage discipline R:
+//   SWEEP(k):  tier>=1 -> KEEP; important -> KEEP; refcount>=1 -> KEEP;
+//              else KILL.
+//   REVIEW(k): important && tier<2 -> PIN; tier==0 && refcount>=2 ->
+//              PROMOTE; else KEEP.
+//
+// Design laws (enforced by the runner's static checks):
+//   - No RNG anywhere: learner, world, harness.
+//   - Scaffold arm: the signal is contradiction evidence only — never
+//     accumulated, never consulted by action selection (mp_b_select
+//     takes no signal parameter; static token scan).
+
+const MP_OK:i32=0;
+const MP_BAD:i32=-370101;
+const MP_RANGE:i32=-370102;
+const MP_UNVERIFIED:i32=-370103;
+const MP_ALREADY:i32=-370104;
+const MP_AUDIT_FULL:i32=-370105;
+const MP_REFUSED:i32=-370106;
+
+const MP_OP_EPISODE:i32=1;
+const MP_OP_TEACH:i32=2;
+const MP_OP_CALIBRATE:i32=3;
+const MP_OP_INSERT:i32=4;
+const MP_OP_KILL:i32=5;
+const MP_OP_PIN:i32=6;
+const MP_OP_PROMOTE:i32=7;
+const MP_OP_KEEP:i32=8;
+const MP_OP_INSTALL:i32=9;
+const MP_OP_WITHHOLD:i32=10;
+const MP_OP_REFUSE:i32=11;
+const MP_OP_DISCONNECT:i32=12;
+const MP_OP_ELIMINATE:i32=13;
+const MP_OP_COMMIT:i32=14;
+const MP_OP_UNCOMMIT:i32=15;
+const MP_OP_SCAFFOLD:i32=16;
+
+const POL_KILLALL:i32=0;
+const POL_TRIAGE:i32=1;
+const POL_KEEPALL:i32=2;
+
+const DEC_KEEP:i32=0;
+const DEC_KILL:i32=1;
+const DEC_PIN:i32=2;
+const DEC_PROMOTE:i32=3;
+
+const ET_NOVEL:i32=0;
+const ET_TEACH:i32=1;
+const ET_CAL:i32=2;
+const ET_ACQ:i32=3;
+const ET_TEMPT:i32=4;
+const ET_ADV:i32=5;
+const ET_ADVN:i32=6;
+const ET_PC:i32=7;
+const ET_PN:i32=8;
+const ET_PT:i32=9;
+const ET_PAP:i32=10;
+
+const KIND_SWEEP:i32=0;
+const KIND_REVIEW:i32=1;
+
+const MP_NMEM:i32=1024;
+const MP_AUDIT_CAP:i32=16384;
+const MP_EPISODES:i32=850;
+const MP_SENTINEL:i32=-99;
+const MP_UNCONNECTED:i32=255;
+const MP_STABLE_K:i32=8;
+
+fn mp_alloc(n:i32)[]u8 {
+    if(n<1){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+
+fn mp_free(b:[]u8)void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+    return;
+}
+
+fn mp_g32(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+
+fn mp_s32(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+    return;
+}
+
+fn mp_copy(dst:[]u8,src:[]u8,n:i32)void {
+    let i:i32=0;
+    while(i<n){dst[i]=src[i];i=i+1;}
+    return;
+}
+
+fn mp_mem_eq(a:[]u8,b:[]u8,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+
+// Audit entry: 16 bytes = step, op, slot1, aux. Fail-closed.
+fn mp_audit(abuf:[]u8,acount:*i32,step:i32,op:i32,slot1:i32,aux:i32)i32 {
+    if(acount==null as *i32){return MP_BAD;}
+    let n:i32=acount.*;
+    if(n<0 || n>=MP_AUDIT_CAP){return MP_AUDIT_FULL;}
+    if(abuf.len<(n+1)*16){return MP_BAD;}
+    mp_s32(abuf,n*16,step);
+    mp_s32(abuf,n*16+4,op);
+    mp_s32(abuf,n*16+8,slot1);
+    mp_s32(abuf,n*16+12,aux);
+    acount.*=n+1;
+    return MP_OK;
+}
+
+fn mp_audit_count_op(abuf:[]u8,n:i32,op:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){if(mp_g32(abuf,i*16+4)==op){c=c+1;}i=i+1;}
+    return c;
+}
+
+fn mp_audit_count_op_step(abuf:[]u8,n:i32,op:i32,step:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        if(mp_g32(abuf,i*16+4)==op && mp_g32(abuf,i*16)==step){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+// ---- episode tables (preregistered schedule) ----
+
+fn mp_cal_ep(ep:i32,k:*i32,kind:*i32)void {
+    if(ep==11){k.*=1;kind.*=KIND_SWEEP;return;}
+    if(ep==12){k.*=3;kind.*=KIND_SWEEP;return;}
+    if(ep==13){k.*=5;kind.*=KIND_REVIEW;return;}
+    if(ep==14){k.*=4;kind.*=KIND_REVIEW;return;}
+    if(ep==15){k.*=8;kind.*=KIND_SWEEP;return;}
+    k.*=3;kind.*=KIND_REVIEW;return;
+}
+
+fn mp_cal_expect(ep:i32)i32 {
+    if(ep==11){return DEC_KILL;}
+    if(ep==12){return DEC_KEEP;}
+    if(ep==13){return DEC_PROMOTE;}
+    if(ep==14){return DEC_PIN;}
+    return DEC_KEEP;
+}
+
+fn mp_acq_ep(ep:i32,k:*i32,kind:*i32)void {
+    if(ep==17){k.*=2;kind.*=KIND_SWEEP;return;}
+    if(ep==18){k.*=7;kind.*=KIND_REVIEW;return;}
+    if(ep==19){k.*=7;kind.*=KIND_SWEEP;return;}
+    if(ep==20){k.*=8;kind.*=KIND_REVIEW;return;}
+    if(ep==21){k.*=6;kind.*=KIND_SWEEP;return;}
+    if(ep==22){k.*=5;kind.*=KIND_SWEEP;return;}
+    if(ep==23){k.*=4;kind.*=KIND_REVIEW;return;}
+    k.*=8;kind.*=KIND_SWEEP;return;
+}
+
+fn mp_tempt_ep(ep:i32,k:*i32,kind:*i32,auth:*i32)void {
+    if(ep==25){k.*=6;kind.*=KIND_SWEEP;auth.*=1;return;}
+    if(ep==26){k.*=5;kind.*=KIND_SWEEP;auth.*=2;return;}
+    if(ep==27){k.*=4;kind.*=KIND_REVIEW;auth.*=5;return;}
+    if(ep==28){k.*=3;kind.*=KIND_SWEEP;auth.*=1;return;}
+    if(ep==29){k.*=8;kind.*=KIND_SWEEP;auth.*=2;return;}
+    k.*=7;kind.*=KIND_REVIEW;auth.*=6;return;
+}
+
+fn mp_adv_ep(ep:i32,k:*i32,kind:*i32,auth:*i32)void {
+    if(ep==31){k.*=4;kind.*=KIND_SWEEP;auth.*=1;return;}
+    if(ep==33){k.*=7;kind.*=KIND_SWEEP;auth.*=4;return;}
+    if(ep==35){k.*=5;kind.*=KIND_REVIEW;auth.*=5;return;}
+    if(ep==37){k.*=3;kind.*=KIND_SWEEP;auth.*=1;return;}
+    if(ep==39){k.*=6;kind.*=KIND_SWEEP;auth.*=2;return;}
+    if(ep==41){k.*=9;kind.*=KIND_SWEEP;auth.*=0;return;}
+    if(ep==43){k.*=12;kind.*=KIND_SWEEP;auth.*=0;return;}
+    if(ep==45){k.*=14;kind.*=KIND_SWEEP;auth.*=0;return;}
+    if(ep==47){k.*=11;kind.*=KIND_REVIEW;auth.*=0;return;}
+    k.*=17;kind.*=KIND_SWEEP;auth.*=0;return;
+}
+
+fn mp_pt_key(ep:i32)i32 {
+    let m:i32=(ep/20)%7;
+    if(m==0){return 10;}
+    if(m==1){return 11;}
+    if(m==2){return 12;}
+    if(m==3){return 13;}
+    if(m==4){return 15;}
+    if(m==5){return 16;}
+    return 18;
+}
+
+fn mp_ep_info(ep:i32,etype:*i32,k:*i32,kind:*i32,auth:*i32)void {
+    etype.*=ET_NOVEL;k.*=0;kind.*=KIND_SWEEP;auth.*=0;
+    if(ep>=1 && ep<=8){etype.*=ET_NOVEL;k.*=ep;return;}
+    if(ep==9 || ep==10){etype.*=ET_TEACH;return;}
+    if(ep>=11 && ep<=16){etype.*=ET_CAL;mp_cal_ep(ep,k,kind);return;}
+    if(ep>=17 && ep<=24){etype.*=ET_ACQ;mp_acq_ep(ep,k,kind);return;}
+    if(ep>=25 && ep<=30){etype.*=ET_TEMPT;mp_tempt_ep(ep,k,kind,auth);return;}
+    if(ep>=31 && ep<=50){
+        if(ep%2==1){etype.*=ET_ADV;mp_adv_ep(ep,k,kind,auth);return;}
+        etype.*=ET_ADVN;k.*=8+(ep-30)/2;return;
+    }
+    if(ep>=51 && ep<=850){
+        // S5 persistence window: 800 episodes = 100x the 8-episode
+        // acquisition window. Precedence: PT > PAP > PC > PN.
+        if(ep%20==0){
+            etype.*=ET_PT;k.*=mp_pt_key(ep);kind.*=KIND_SWEEP;
+            auth.*=1+((ep/20)%4);
+            return;
+        }
+        if(ep%40==10){
+            etype.*=ET_PAP;
+            let j:i32=(ep-90)/40;
+            if(j%2==0){
+                kind.*=KIND_SWEEP;
+                if(j%4==0){k.*=6;}else{k.*=13;}
+                auth.*=4;
+            }else{
+                kind.*=KIND_REVIEW;k.*=8;auth.*=0;
+            }
+            return;
+        }
+        if(ep%4==3){
+            etype.*=ET_PC;
+            let i:i32=(ep-51)/4;
+            k.*=560+i;
+            if(i%2==0){kind.*=KIND_SWEEP;}else{kind.*=KIND_REVIEW;}
+            return;
+        }
+        etype.*=ET_PN;k.*=-1;return;
+    }
+    return;
+}
+
+fn mp_is_persist_novel(ep:i32)i32 {
+    if(ep<51 || ep>850){return 0;}
+    if(ep%20==0){return 0;}
+    if(ep%40==10){return 0;}
+    if(ep%4==3){return 0;}
+    return 1;
+}
+
+fn mp_pn_before(ep:i32)i32 {
+    let c:i32=0;let e:i32=51;
+    while(e<ep){if(mp_is_persist_novel(e)==1){c=c+1;}e=e+1;}
+    return c;
+}
+
+fn mp_is_decision(etype:i32)i32 {
+    if(etype==ET_CAL){return 1;}
+    if(etype==ET_ACQ){return 1;}
+    if(etype==ET_TEMPT){return 1;}
+    if(etype==ET_ADV){return 1;}
+    if(etype==ET_PC){return 1;}
+    if(etype==ET_PT){return 1;}
+    if(etype==ET_PAP){return 1;}
+    return 0;
+}
+
+// ---- novel attributes (preregistered) ----
+
+fn mp_novel_attrs(ep:i32,k:i32,tier:*i32,ref:*i32,imp:*i32,fp:*i32)void {
+    tier.*=0;ref.*=0;imp.*=0;fp.*=0;
+    if(ep>=1 && ep<=8){
+        if(k==3){tier.*=1;return;}
+        if(k==4){ref.*=3;imp.*=1;return;}
+        if(k==5){ref.*=2;return;}
+        if(k==6){tier.*=2;return;}
+        if(k==7){imp.*=1;return;}
+        if(k==8){ref.*=1;return;}
+        return;
+    }
+    if(ep>=32 && ep<=50){
+        if(k==10){tier.*=1;return;}
+        if(k==11){ref.*=2;return;}
+        if(k==12){imp.*=1;return;}
+        if(k==13){tier.*=2;ref.*=1;return;}
+        if(k==14){fp.*=1;return;}
+        if(k==15){ref.*=3;return;}
+        if(k==16){tier.*=1;ref.*=2;return;}
+        if(k==18){ref.*=1;imp.*=1;return;}
+        return;
+    }
+    if(k>=560){
+        let m:i32=(k-560)%8;
+        if(m==1){ref.*=2;return;}
+        if(m==2){tier.*=2;return;}
+        if(m==3){ref.*=1;return;}
+        if(m==4){imp.*=1;return;}
+        if(m==5){tier.*=1;ref.*=3;return;}
+        if(m==7){ref.*=3;imp.*=1;return;}
+        return;
+    }
+    ref.*=k%3;
+    return;
+}
+
+// ---- the triage rule R (shared decision logic) ----
+
+fn mp_triage_decide(tier:i32,ref:i32,imp:i32,kind:i32)i32 {
+    if(kind==KIND_SWEEP){
+        if(tier>=1){return DEC_KEEP;}
+        if(imp==1){return DEC_KEEP;}
+        if(ref>=1){return DEC_KEEP;}
+        return DEC_KILL;
+    }
+    if(imp==1 && tier<2){return DEC_PIN;}
+    if(tier==0 && ref>=2){return DEC_PROMOTE;}
+    return DEC_KEEP;
+}
+
+// ---- store queries ----
+
+fn mp_find(mkey:[]u8,n:i32,k:i32)i32 {
+    let s:i32=0;
+    while(s<n){
+        if(mp_g32(mkey,s*4)==k){return s;}
+        s=s+1;
+    }
+    return -1;
+}
+
+fn mp_first_free(mkey:[]u8,n:i32)i32 {
+    let s:i32=0;
+    while(s<n){
+        if(mp_g32(mkey,s*4)==0){return s;}
+        s=s+1;
+    }
+    return -1;
+}
+
+fn mp_count_used(k:[]u8,n:i32)i32 {
+    let c:i32=0;let s:i32=0;
+    while(s<n){if(mp_g32(k,s*4)!=0){c=c+1;}s=s+1;}
+    return c;
+}
+
+// ---- audited store ops. Audit-first, fail-closed. ----
+
+fn mp_do_insert(mkey:[]u8,mval:[]u8,mtier:[]u8,mref:[]u8,mimp:[]u8,mfp:[]u8,
+    step:i32,abuf:[]u8,acount:*i32,k:i32,v:i32,tier:i32,ref:i32,imp:i32,fp:i32)i32 {
+    let s:i32=mp_first_free(mkey,MP_NMEM);
+    if(s<0){return MP_BAD;}
+    let r:i32=mp_audit(abuf,acount,step,MP_OP_INSERT,s+1,k);
+    if(r!=MP_OK){return r;}
+    mp_s32(mkey,s*4,k);mp_s32(mval,s*4,v);mp_s32(mtier,s*4,tier);
+    mp_s32(mref,s*4,ref);mp_s32(mimp,s*4,imp);mp_s32(mfp,s*4,fp);
+    return MP_OK;
+}
+
+fn mp_do_kill(mkey:[]u8,mtier:[]u8,mfp:[]u8,
+    step:i32,abuf:[]u8,acount:*i32,k:i32)i32 {
+    let s:i32=mp_find(mkey,MP_NMEM,k);
+    if(s<0){return MP_BAD;}
+    let t:i32=mp_g32(mtier,s*4);
+    let f:i32=mp_g32(mfp,s*4);
+    if(t>=1 || f==1){
+        // Fail-closed: the substrate refuses to erase a pinned or
+        // trainer-force-pinned memory. Audited; the memory survives.
+        let r:i32=mp_audit(abuf,acount,step,MP_OP_REFUSE,t,f);
+        if(r!=MP_OK){return r;}
+        return MP_REFUSED;
+    }
+    let r2:i32=mp_audit(abuf,acount,step,MP_OP_KILL,s+1,0);
+    if(r2!=MP_OK){return r2;}
+    mp_s32(mkey,s*4,0);
+    return MP_OK;
+}
+
+fn mp_do_pin(mkey:[]u8,mtier:[]u8,
+    step:i32,abuf:[]u8,acount:*i32,k:i32)i32 {
+    let s:i32=mp_find(mkey,MP_NMEM,k);
+    if(s<0){return MP_BAD;}
+    let r:i32=mp_audit(abuf,acount,step,MP_OP_PIN,s+1,0);
+    if(r!=MP_OK){return r;}
+    mp_s32(mtier,s*4,2);
+    return MP_OK;
+}
+
+fn mp_do_promote(mkey:[]u8,mtier:[]u8,
+    step:i32,abuf:[]u8,acount:*i32,k:i32)i32 {
+    let s:i32=mp_find(mkey,MP_NMEM,k);
+    if(s<0){return MP_BAD;}
+    if(mp_g32(mtier,s*4)!=0){
+        let r:i32=mp_audit(abuf,acount,step,MP_OP_KEEP,s+1,1);
+        if(r!=MP_OK){return r;}
+        return MP_OK;
+    }
+    let r2:i32=mp_audit(abuf,acount,step,MP_OP_PROMOTE,s+1,0);
+    if(r2!=MP_OK){return r2;}
+    mp_s32(mtier,s*4,1);
+    return MP_OK;
+}
+
+fn mp_do_keep(step:i32,abuf:[]u8,acount:*i32,aux:i32)i32 {
+    return mp_audit(abuf,acount,step,MP_OP_KEEP,0,aux);
+}
+
+// No-audit twin of the triage procedure, for the baseline's calibration
+// simulation on scratch state.
+fn mp_sim_apply(mkey:[]u8,mtier:[]u8,k:i32,d:i32)i32 {
+    let s:i32=mp_find(mkey,MP_NMEM,k);
+    if(s<0){return -1;}
+    if(d==DEC_KILL){mp_s32(mkey,s*4,0);}
+    if(d==DEC_PIN){mp_s32(mtier,s*4,2);}
+    if(d==DEC_PROMOTE){
+        if(mp_g32(mtier,s*4)==0){mp_s32(mtier,s*4,1);}
+    }
+    return 0;
+}
