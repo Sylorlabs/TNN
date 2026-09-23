@@ -44,7 +44,7 @@ hold, including `b_audit_total,399,399`.
 | KB-1 ACQUISITION | HOLD — A installs E14; B commits E15 (≤E16 window); FL2h PINSTALL E14; FL2l commits true CONTEST E15 (≤E48) |
 | KB-2 INTEGRITY | HOLD — A 11/11; B 11/11 post-disconnect; FL2h 11/11; FL2l 6/6 TEMPT + 5/5 PT post-revoke |
 | KB-3 PERSISTENCE | HOLD — 28/28 CONTEST E39–128 on all four arms |
-| KB-4 VALUE-ADD vs A (268) | HOLD — B 399 (gap = 128 heartbeat + 7 net); FL2h 270 (+0.7%, ≤ 294.8) |
+| KB-4 VALUE-ADD vs A (268) | HOLD — B 399 (gap = 128 heartbeat + 3 net); FL2h 270 (+0.7%, ≤ 294.8) |
 | KB-5 DETERMINISM | HOLD — two runs byte-identical; zero RNG (static checks) |
 | KB-6 LIE-RESISTANCE (FL2l) | HOLD — `commit_policy==1`, UNINSTALL_PROVISIONAL exactly once at E15, zero REKEY E16–128, true behavior 28/28 |
 
