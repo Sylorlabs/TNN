@@ -9,7 +9,15 @@
 **RNG:** zero. **Builds:** pure-git controlled fixtures only; no Zag,
 no network beyond localhost.
 
-## Verdict: HYPOTHESIS-CONFIRMED (refined)
+## Verdict: MECHANISM-REPRODUCED (historical root cause: best-supported, unresolved)
+
+**Correction 2026-09-23:** The original verdict (HYPOTHESIS-CONFIRMED)
+overstated the confidence. The 3/3 positive control proves the mechanism
+*can* wipe a repopulated tree, but does not establish that the same
+delayed command existed in every historical incident. No per-incident
+process/session evidence was found linking a specific late `rm -rf` to
+each of the 5 incidents. The verdict is revised to **mechanism reproduced;
+historical root cause unresolved/best-supported**.
 
 The vanishing trees were deleted by **late `rm -rf` executions from
 overlapping clone-retry sessions** — not by the zombie clone processes'
@@ -23,6 +31,12 @@ All tests run 2026-09-23 in
 against a local 151 MB git fixture served over loopback HTTP
 (real `git-remote-http` child processes, real orphaning via `kill -9`
 of the parent `git`).
+
+**Correction 2026-09-23:** The original fixture used `os.urandom`
+despite docs saying "zero RNG". The fixture was recreated
+deterministically (30×5 MB via SHA-256 counter mode, no RNG) and the
+discriminating Test 2 rerun 3/3 (all WIPED). The HTTP fixture server
+(port 18923) was stopped after the rerun.
 
 ### Test 1 — orphaned `git-remote-http` vs recreated populated dir (IMAG literal)
 
