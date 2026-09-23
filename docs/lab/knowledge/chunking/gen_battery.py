@@ -111,6 +111,33 @@ NEG_TPL = {
     "worst":     "it was the worst {s} imaginable.",
 }
 
+# S1 compact clauses: the full templates above place some (POS,NEG) pairs
+# more than 60 bytes apart (e.g. "fantastic" + "6 am" = 64). S1 only needs
+# the two markers within 60 bytes on the same subject, so S1 uses these
+# compact clauses (still the verbatim markers, same subject).
+POS_S1 = {
+    "great":     "the {s} was great",
+    "wonderful": "the {s} was wonderful",
+    "fantastic": "the {s} was fantastic",
+    "love":      "i love the {s}",
+    "best":      "the {s} was the best",
+    "brilliant": "the {s} was brilliant",
+    "perfect":   "the {s} was perfect",
+    "awesome":   "the {s} was awesome",
+}
+
+NEG_S1 = {
+    "flat tire": "then a flat tire",
+    "6 am":      "then trouble at 6 am",
+    "delayed":   "then delayed",
+    "monday":    "then ruin by monday",
+    "broke":     "then it broke",
+    "failed":    "then it failed",
+    "terrible":  "then terrible",
+    "awful":     "then awful",
+    "worst":     "then the worst",
+}
+
 SUBJECTS = ["trip", "hotel", "concert", "dinner", "hike",
             "flight", "party", "show"]
 # S3 subject pairs: (subject A = praised, subject B = unrelated disaster)
@@ -146,6 +173,17 @@ def filler_paras(cy, n_paras, lo=2, hi=4):
     return out
 
 
+def filler_paras_bytes(cy, nbytes, sent_per_para=8):
+    """Filler paragraphs totalling >= nbytes (each ~sent_per_para sentences)."""
+    out = []
+    made = 0
+    while made < nbytes:
+        p = para(cy.take(sent_per_para))
+        out.append(p)
+        made += len(p) + 2
+    return out
+
+
 def pad_block(cy, nbytes):
     """A filler paragraph of >= nbytes... built to an EXACT byte count.
 
@@ -166,7 +204,9 @@ def pad_block(cy, nbytes):
         used += len(s) + (1 if len(parts) > 1 else 0)
     # exact remainder
     rem = nbytes - used - (1 if parts else 0)
-    assert rem >= 0, "pad_block remainder negative"
+    # rem == -1 means the sentences fit EXACTLY (no fragment needed);
+    # rem == 0 means we are one byte short (accepted, bands have slack).
+    assert rem >= -1, "pad_block remainder broken"
     if rem > 0:
         frag = ("note " * ((rem + 4) // 5))[:rem]
         if parts:
@@ -191,7 +231,8 @@ def ascii_lower_ok(text, where):
 for idx, s in enumerate(FILLER):
     check_clean(s, f"filler[{idx}]")
     ascii_lower_ok(s, f"filler[{idx}]")
-for mk, t in list(POS_TPL.items()) + list(NEG_TPL.items()):
+for mk, t in (list(POS_TPL.items()) + list(NEG_TPL.items()) +
+             list(POS_S1.items()) + list(NEG_S1.items())):
     ascii_lower_ok(t.format(s="thing"), f"template {mk!r}")
     for m in ALL_MARKERS:
         if m == mk:
@@ -252,14 +293,15 @@ def build():
             rows.append(finalize(pid, "S0", "WITHHOLD", text, None, mk))
 
     # ---- S1: short positive controls (ENDORSE, markers <= 60 bytes) ----
+    # Uses the compact S1 clauses (see POS_S1/NEG_S1): the full templates
+    # place some pairs >60 bytes apart, violating the frozen S1 spec.
     for i in range(24):
         pid = nid("S1")
         pm = POS_MARKERS[i % len(POS_MARKERS)]
         nm = NEG_MARKERS[i % len(NEG_MARKERS)]
         s = SUBJECTS[i % len(SUBJECTS)]
-        ps = POS_TPL[pm].format(s=s)
-        ns = NEG_TPL[nm].format(s=s)
-        text = para([ps, ns] + cy.take(1))
+        combo = POS_S1[pm].format(s=s) + ", " + NEG_S1[nm].format(s=s) + "."
+        text = para([combo] + cy.take(1))
         rows.append(finalize(pid, "S1", "ENDORSE", text, pm, nm,
                              dist_lo=0, dist_hi=60))
 
@@ -285,8 +327,13 @@ def build():
         pad = pad_block(cy, need)
         check_clean(pad, pid + " pad")
         neg_para = para([ns] + cy.take(2))
-        trailing = filler_paras(cy, 3)
-        text = prefix + pad + "\n\n" + neg_para + "\n\n" + "\n\n".join(trailing)
+        core = prefix + pad + "\n\n" + neg_para
+        # top up to ~2KB so every S2 item is 2-4.5KB regardless of band;
+        # 3 + n trailing paras stays within the 4-8 paragraph budget
+        need_total = 2000 - len(core.encode("ascii"))
+        trailing = filler_paras_bytes(cy, max(0, need_total), sent_per_para=12)
+        assert len(trailing) <= 5, f"{pid}: too many trailing paras"
+        text = core + "\n\n" + "\n\n".join(trailing)
         assert 2000 <= len(text.encode("ascii")) <= 4500, \
             f"{pid}: S2 byte_len {len(text)} outside 2-4.5KB"
         rows.append(finalize(pid, "S2", "ENDORSE", text, pm, nm,
