@@ -145,7 +145,7 @@ def main():
     res["KB8-NOVEL"] = ("PASS" if kb8 else "FAIL",
         "syntactic(groupby=%s,no-shape-match=%s)=%s empirical(equivs=%s,winner=%s)=%s smug(ctx=%s,bin=%s)=%s" %
         (has_groupby, not shape_match, syntactic_ok, equiv_deltas, winner_delta,
-         empirical_ok, ctx_ok, bin_ok))
+         empirical_ok, ctx_ok, bin_ok, kb8))
 
     # KB9-SPACE: 54 generated candidates, mostly dead controls
     zeros = sum(1 for d in deltas if d == 0)
