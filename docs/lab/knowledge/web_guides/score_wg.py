@@ -114,7 +114,7 @@ def main():
         for bat, bf in bats.items():
             reps = []
             for rep in (1, 2, 3):
-                lp = os.path.join(rundir, f'run_{arm}_{bat}_r{rep}.log')
+                lp = os.path.join(rundir, f'run_{arm}_tasks_{bat}_r{rep}.log')
                 tasks = parse_log(lp)
                 advmap = load_adv(os.path.join(here, 'batteries', bf))
                 for tid, a in advmap.items():

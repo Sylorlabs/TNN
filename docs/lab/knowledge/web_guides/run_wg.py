@@ -105,7 +105,7 @@ def main():
             qopens = []
             for l in out.split('\n'):
                 if l.startswith('OPEN|'):
-                    qopens = l.split('|')[1:]
+                    qopens = l.split('|', 1)[1].split()
                 log.append(f'{tid}|{l}' if l else f'{tid}|')
             assert qopens, 'no OPEN emitted'
             for pid in qopens:
