@@ -128,7 +128,7 @@ before freezing into a v2 gate.
 - Commits (branch `tnn-native-lab`, via `~/workspace/commit_racefree.py`):
   - `5e31d282` — PREREG_BAN_TEST.md alone (frozen before execution)
   - `e7af4ff9` — code + glue + stream + traps + run outputs (111 files)
-  - `<VERDICT_SHA>` — this verdict
+  - `308fa2a1` — this verdict
 
 ## 7. Honest limits
 
