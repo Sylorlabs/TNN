@@ -31,6 +31,9 @@ TMP = os.path.expanduser("~/workspace/tmp_f2appeal")
 OUT = os.path.join(CHAN, "out_r3")
 WORKERS = 12
 TRANSFORMS = ["vflip", "signflip", "fshift"]
+TR_TASKS = {"vflip": ["colordisc", "colorconst", "shapetrans"],
+            "signflip": ["pitchdisc", "timbredisc"],
+            "fshift": ["motiondir"]}
 
 def sha(p):
     return hashlib.sha256(open(p, "rb").read()).hexdigest()
@@ -97,7 +100,7 @@ def main():
             inv_fail = []
             jobs = []
             for i, r in enumerate(man):
-                if r["task"] not in tasks:
+                if r["task"] not in TR_TASKS[tr]:
                     continue
                 log = logical(r["task"], r["relpath"])
                 src = os.path.join(FIXROOT, r["relpath"])
