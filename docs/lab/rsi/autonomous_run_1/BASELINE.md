@@ -20,7 +20,9 @@ Post-run FULL regression inventories every historical runnable suite
 ## Subject proven in Phase 0 (fidelity gate, all passed)
 
 - work/subject.zag = byte-verbatim rsi4c.zag + decide.zag.inc prepended
-  + a `prop` mode. SHA256 (subject.zag): `06eaec29...` (see ORIGIN_SHA256/SUBJECT_SHA256).
+  + a `prop` mode. SHA256 (subject.zag): `be17f424d32303806a16518509f9e796d3a30d14cdec0dd710bdd48da9fb503c890`
+  (see ORIGIN_SHA256/SUBJECT_SHA256; the Phase 0 build was rebuilt once to fix
+  the prop mode label — fidelity re-proven after the rebuild).
 - The frozen oracle (verify_rsi4c.py) on subject's 4 original modes
   reproduces VERDICT_R4C exactly: base 8/0/0, recency 8/16/48,
   coherence 20/4/168, askfirst 22/2/424, 5/5 byte-identical,

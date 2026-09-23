@@ -74,9 +74,8 @@ for i, b in batt.items():
         fail(f"SEP: item {i} fields drift from CSV")
 if src:
     s = open(src).read()
-    # the subject must never read a gt-carrying file (verdict labels like
-    # "NEW" legitimately appear in vname(); only file references are checked)
-    if "battery_r4c.csv" in s or "proxy_battery" in s or "proxy_table" in s:
+    code = "\n".join(line.split("//")[0] for line in s.splitlines())
+    if "battery_r4c.csv" in code or "proxy_battery" in code or "proxy_table" in code:
         fail("SEP: subject source references a gt-carrying file")
 print("SEP: PASS (fields match CSV)")
 

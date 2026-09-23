@@ -62,10 +62,10 @@ new_loop = """        let v:i32=0; let cons:i32=0; let ops:i32=0;
             ops=arm_ops(mode,cons);
         }"""
 src = src.replace(old_loop, new_loop)
-# 3) mname: add prop label
+# 3) mname: add prop label (before the askfirst fallthrough return)
 old_mname = '    let s4:[]u8="askfirst";return s4;'
 assert old_mname in src
-src = src.replace(old_mname, old_mname + '\n    if(m==5){let s5:[]u8="prop";return s5;}')
+src = src.replace(old_mname, '    if(m==5){let s5:[]u8="prop";return s5;}\n' + old_mname)
 subj = inc + "\n" + src
 open(os.path.join(WORK, "subject.zag"), "w").write(subj)
 
