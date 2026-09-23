@@ -250,7 +250,8 @@ fix.
 - `45a52291` — first parallel bz2 worker (superseded)
 - `52156b3e` — feeder + static-file worker
 - `4fe36acd` — finalize script
-- [FINAL verdict commit — to be added]
+- `c2bd231e` — gap closure verdict (this file), REPORT.md corrections,
+  verify_e1.py memory fix, dry_run_pipeline.py --ingest-bin arg
 
 ## REPORT.md corrections applied
 
