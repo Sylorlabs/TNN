@@ -204,4 +204,5 @@ the experiment tried to make it *more* adaptive and broke it.
 ## Commits
 
 - Spec + battery + calibration: `b871edfe2116997063732f6c94c5ce348b39a32a`
-- Trial sources + logs + analysis + this verdict: [to be filled at commit]
+- Trial sources + logs + analysis + this verdict: `1394add710b787b8bd6f804a81fe4428c60ff14f`
+  (parent `aebcd29b37a5`, branch `tnn-native-lab`, 41 files, no binaries/caches)
