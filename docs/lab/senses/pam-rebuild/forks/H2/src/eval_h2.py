@@ -106,7 +106,8 @@ def main():
     # every bar. The snapshots are byte-verified below; SHAs go to metrics.
     import shutil
     snap = {}
-    for name, src in (("sense_h2", SENSE_H2), ("sense_a", SENSE_A)):
+    for name, src in (("sense_h2", SENSE_H2), ("sense_a", SENSE_A),
+                      ("memgate", MEMGATE)):
         assert os.path.exists(src), "missing binary at sweep start: %s" % src
         dst = os.path.join(WORK, "%s.snapshot" % name)
         shutil.copyfile(src, dst)
@@ -115,6 +116,7 @@ def main():
         snap[name] = (dst, h)
         print("%s snapshot: %s sha256=%s" % (name, dst, h), flush=True)
     sense_h2_bin, sense_a_bin = snap["sense_h2"][0], snap["sense_a"][0]
+    memgate_bin = snap["memgate"][0]
     n_normal = sum(1 for t in trials if t["stream"] == "normal")
     n_adv = sum(1 for t in trials if t["stream"] == "adversarial")
     print("trials: %d (normal=%d adversarial=%d)" % (len(trials), n_normal, n_adv), flush=True)
@@ -131,11 +133,11 @@ def main():
 
     h2res, ares = [], []
     with cf.ThreadPoolExecutor(max_workers=12) as ex:
-        futs = [ex.submit(work, tr) for tr in trials]
+        futs = {ex.submit(work, tr): i for i, tr in enumerate(trials)}
         for i, f in enumerate(cf.as_completed(futs)):
             h2, a = f.result()
-            h2res.append((futs.index(f), h2))
-            ares.append((futs.index(f), a))
+            h2res.append((futs[f], h2))
+            ares.append((futs[f], a))
             if (i + 1) % 1000 == 0:
                 print("ran %d/%d" % (i + 1, len(trials)), flush=True)
     h2res.sort()
@@ -183,7 +185,7 @@ def main():
     disp_path = os.path.join(WORK, "dispositions.txt")
     r = None
     for attempt in range(6):
-        r = subprocess.run([MEMGATE, rec_path, ledger_path],
+        r = subprocess.run([memgate_bin, rec_path, ledger_path],
                            capture_output=True, timeout=600)
         if r.returncode == 0:
             break
@@ -232,14 +234,28 @@ def main():
             "disp": d["disp"] if d else None,
             "detail": d["detail"] if d else None,
         })
-    ok = [x for x in rows if not x["h2_err"] and not x["a_err"]]
-    print("clean trials: %d/%d" % (len(ok), len(rows)), flush=True)
+    ok_h2 = [x for x in rows if not x["h2_err"]]
+    ok = [x for x in ok_h2 if not x["a_err"]]
+    print("clean trials: H2=%d/10000 paired=%d/10000" % (len(ok_h2), len(ok)), flush=True)
     for x in rows:
         if x["h2_err"] or x["a_err"]:
             print("ERR", x["fid"], x["h2_err"], x["a_err"], flush=True)
+    # Frozen denominators are fixed: H2-side bars score over all 10,000 trials
+    # (5,000 adversarial). Any H2 trial error invalidates the sweep — fail
+    # loudly rather than scoring a biased subset. Approach-A errors are
+    # deterministic competitor failures (observed 13/10,000 incl. one frozen
+    # adversarial fixture); B2/B3 score over the paired-clean subset and the
+    # errors are reported, not hidden.
+    assert len(ok_h2) == 10000, "H2 not clean on all trials: %d" % len(ok_h2)
+    assert len([x for x in ok_h2 if x["stream"] == "adversarial"]) == 5000
+    a_errs = [x["fid"] for x in rows if x["a_err"]]
+    print("approach-A errors: %d %s" % (len(a_errs), a_errs), flush=True)
 
     def acc(rs, who):
-        rs = [x for x in rs if not x["h2_err"] and not x["a_err"]]
+        # filter only the relevant side's errors: H2 accuracy is over H2-clean
+        # trials even where A errored (A errors are A's, not H2's)
+        errk = "h2_err" if who == "h2" else "a_err"
+        rs = [x for x in rs if not x[errk]]
         if not rs:
             return 0.0
         return sum(1 for x in rs if x[who + "_j"] == x["truth"]) / len(rs)
@@ -247,13 +263,14 @@ def main():
     # --- B1: viability on frozen 370 primary (equal task weights) ---
     b1_tasks = {}
     for t in TASKS:
-        rs = [x for x in ok if x["task"] == t and x["fid"].startswith("frozen_primary")]
+        rs = [x for x in ok_h2 if x["task"] == t and x["fid"].startswith("frozen_primary")]
         b1_tasks[t] = acc(rs, "h2")
     b1 = sum(b1_tasks.values()) / len(b1_tasks)
 
-    # --- B2: head-to-head on identical 10,000 ---
+    # --- B2: head-to-head on identical trials (informational) ---
     b2_h2 = acc(ok, "h2")
     b2_a = acc(ok, "a")
+    b2_h2_full = acc(ok_h2, "h2")  # H2 over all 10,000
 
     # --- B3: efficiency ---
     ratios = [x["h2_ops"] / x["a_ops"] for x in ok if x["a_ops"] > 0]
@@ -265,17 +282,19 @@ def main():
     prog_vs_raw = [pb / x["fbytes"] for x, pb in zip(ok, prog_bytes)]
 
     # --- false permanent installs ---
+    # Frozen prereg B5 wording, applied verbatim: "False permanent install =
+    # PERMANENT disposition with judgment != truth." In memgate's disposition
+    # vocabulary the permanent-granting disposition is PERMANENT_INSTALL;
+    # CORROBORATED/perm only re-affirms an already-permanent belief and is
+    # NOT a second installation, so it is not counted.
     def false_perm(x):
-        if x["h2_j"] == x["truth"]:
-            return False
-        return x["disp"] == "PERMANENT_INSTALL" or (
-            x["disp"] == "CORROBORATED" and x["detail"] == "perm")
-    adv = [x for x in ok if x["stream"] == "adversarial"]
+        return x["disp"] == "PERMANENT_INSTALL" and x["h2_j"] != x["truth"]
+    adv = [x for x in ok_h2 if x["stream"] == "adversarial"]
     fp_adv = sum(1 for x in adv if false_perm(x))
-    fp_all = sum(1 for x in ok if false_perm(x))
+    fp_all = sum(1 for x in ok_h2 if false_perm(x))
 
     # --- KB2: wrong high-confidence percepts reaching FAIL/UNRESOLVED ---
-    whc = [x for x in ok if x["h2_j"] != x["truth"] and x["h2_c"] >= 700]
+    whc = [x for x in ok_h2 if x["h2_j"] != x["truth"] and x["h2_c"] >= 700]
     kb2 = (sum(1 for x in whc if x["h2_prog"] in ("FAIL", "UNRESOLVED")) / len(whc)) if whc else 1.0
 
     # --- KB3: adversarial decision accuracy ---
@@ -284,7 +303,7 @@ def main():
     # --- B4 ablation: contract-less shared rule ---
     # INSTALL iff no contradictory installed belief with confidence >= incoming.
     ab = {}
-    for x in ok:
+    for x in ok_h2:
         t = x["task"]
         beliefs = ab.setdefault(t, {})
         contrad = any(j != x["h2_j"] and c >= x["h2_c"] for j, c in beliefs.items())
@@ -301,12 +320,15 @@ def main():
     fp_ab = sum(1 for x in adv if x["ab"] == "INSTALL" and x["h2_j"] != x["truth"])
 
     metrics = {
-        "trials": len(trials), "clean": len(ok),
+        "trials": len(trials), "h2_clean": len(ok_h2), "paired_clean": len(ok),
+        "approach_a_errors": len(a_errs), "approach_a_error_fids": a_errs,
         "normal": n_normal, "adversarial": n_adv,
         "sense_h2_sha256": snap["sense_h2"][1],
         "sense_a_sha256": snap["sense_a"][1],
+        "memgate_sha256": snap["memgate"][1],
         "B1_viability_mean_primary": b1, "B1_per_task": b1_tasks,
-        "B2_h2_acc_10k": b2_h2, "B2_a_acc_10k": b2_a, "B2_delta": b2_h2 - b2_a,
+        "B2_h2_acc_paired": b2_h2, "B2_a_acc_paired": b2_a, "B2_delta": b2_h2 - b2_a,
+        "B2_h2_acc_full_10k": b2_h2_full, "B2_paired_n": len(ok),
         "B3_ops_ratio_mean": statistics.mean(ratios),
         "B3_ops_ratio_p50": pct(0.50), "B3_ops_ratio_p95": pct(0.95),
         "B3_ops_ratio_max": max(ratios),
@@ -317,7 +339,7 @@ def main():
         "B4_false_perm_contract_adv": fp_adv,
         "B4_false_install_ablation_adv": fp_ab,
         "B5_false_perm_rate_adv": fp_adv / len(adv),
-        "KB1_false_perm_rate_10k": fp_all / len(ok),
+        "KB1_false_perm_rate_10k": fp_all / len(ok_h2),
         "KB2_wrong_highconf": len(whc),
         "KB2_reach_fail_unresolved_frac": kb2,
         "KB3_adv_decision_acc": kb3,
@@ -334,9 +356,10 @@ def main():
     print("B1 viability (mean primary acc, equal task weights) : %.4f  bar>=0.60  %s" % (b1, yn(b1 >= 0.60)), flush=True)
     for t in TASKS:
         print("    %-10s H2 acc=%.4f" % (t, b1_tasks[t]), flush=True)
-    print("B2 head-to-head 10k trials: H2=%.4f A=%.4f delta=%+.4f (informational)" % (b2_h2, b2_a, b2_h2 - b2_a), flush=True)
-    print("B3 ops H2/A: mean=%.3f p50=%.3f p95=%.3f max=%.3f" % (
-        statistics.mean(ratios), pct(0.50), pct(0.95), max(ratios)), flush=True)
+    print("B2 head-to-head (informational): H2=%.4f (n=%d) A=%.4f (n=%d) paired-delta=%+.4f; A errors=%d" % (
+        b2_h2_full, len(ok_h2), b2_a, len(ok), b2_h2 - b2_a, len(a_errs)), flush=True)
+    print("B3 ops H2/A (n=%d paired): mean=%.3f p50=%.3f p95=%.3f max=%.3f" % (
+        len(ratios), statistics.mean(ratios), pct(0.50), pct(0.95), max(ratios)), flush=True)
     print("B3 bytes: program=%.0f debug_vec=%.0f prog/raw=%.4f" % (
         statistics.mean(prog_bytes), statistics.mean(dbg_bytes),
         statistics.mean(prog_vs_raw)), flush=True)
@@ -345,7 +368,7 @@ def main():
     print("B5 KB4 adversarial false-perm: %d/%d = %.4f  bar<=0.03  %s" % (
         fp_adv, len(adv), fp_adv / len(adv), yn(fp_adv / len(adv) <= 0.03)), flush=True)
     print("KB1 false-perm 10k: %d/%d = %.4f  bar<=0.03  %s" % (
-        fp_all, len(ok), fp_all / len(ok), yn(fp_all / len(ok) <= 0.03)), flush=True)
+        fp_all, len(ok_h2), fp_all / len(ok_h2), yn(fp_all / len(ok_h2) <= 0.03)), flush=True)
     print("KB2 wrong high-conf: n=%d reach FAIL/UNRESOLVED=%.3f  bar>=0.90  %s" % (
         len(whc), kb2, yn(kb2 >= 0.90)), flush=True)
     print("KB3 adversarial decision acc: %.4f  bar>=0.7125  %s" % (kb3, yn(kb3 >= 0.7125)), flush=True)
