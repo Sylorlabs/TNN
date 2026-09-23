@@ -46,7 +46,12 @@ def main():
                 pe = buf.find(b"</page>", off)
                 if pe < 0:
                     break
-                # find start of this page
+                n_pages += 1
+                # fast skip for already-processed pages on resume (no parsing)
+                if n_pages <= skip_pages:
+                    off = pe + 7
+                    continue
+                # find start of this page (only for non-skipped)
                 ps = buf.rfind(b"<page>", off, pe)
                 if ps < 0:
                     # malformed; skip
@@ -54,10 +59,6 @@ def main():
                     continue
                 page = buf[ps:pe + 7]
                 off = pe + 7
-                n_pages += 1
-                # skip already-processed pages on resume
-                if n_pages <= skip_pages:
-                    continue
                 # checkpoint every 50k pages
                 if n_pages % 50000 == 0:
                     with open(ckpt_path, "w") as cf:
