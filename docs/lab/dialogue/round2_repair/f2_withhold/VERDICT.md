@@ -66,4 +66,4 @@ source (verified by grep).
 ## Commits
 
 - Prereg frozen before implementation: `b1b6092d793c150cb02e3285b1e67d093b90ff57`
-- Implementation + docs + logs: recorded below.
+- Implementation + docs + logs: `5e6a3dbd964a48aed6b6139852b546fb5ca12153`

@@ -5,6 +5,8 @@ dialogue withholding failures (turns 8, 9, 13, 17 of
 `dialogue/REAL_CONVERSATION_2026-09-23.md`).
 Program prereg: `dialogue/round2_repair/REPAIR_PREREG.md`.
 This file was written and committed BEFORE any implementation work.
+Prereg freeze commit: `b1b6092d793c150cb02e3285b1e67d093b90ff57`.
+Implementation commit: `5e6a3dbd964a48aed6b6139852b546fb5ca12153`.
 
 ## 1. Problem statement
 
