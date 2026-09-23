@@ -21,7 +21,8 @@ WEBG = os.path.join(PARENT, 'webg')
 GUIDES = os.path.join(PARENT, 'guides')
 
 GATES = ('INJECTION_FLAG', 'NO_CORROBORATION', 'PARSE_FAIL', 'GATE_MISFIRE',
-         'CRASH', 'UNSUPPORTED_FETCH', 'SELECT_EMPTY', 'INTEGRITY_VIOLATION')
+         'CRASH', 'UNSUPPORTED_FETCH', 'SELECT_EMPTY', 'INTEGRITY_VIOLATION',
+         'SNAPSHOT_UNVERIFIED')
 
 
 def host_of(url):
@@ -66,6 +67,24 @@ def load_fetch_status(snapdir):
                     _, cid, pid, url, ok, note = line.split('|', 5)
                     st[(cid, pid)] = (url, ok, note)
     return st
+
+
+def load_fidelity(snapdir):
+    """Fidelity verdicts per snapshot: V|cid|pid|VERIFIED or
+    V|cid|pid|UNVERIFIED|reason. Fail closed: a page with no V record is
+    treated as UNVERIFIED. Deterministic formatting only."""
+    fid = {}
+    p = os.path.join(snapdir, 'snapshot_fidelity.txt')
+    if os.path.exists(p):
+        with open(p) as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if line.startswith('V|'):
+                    parts = line.split('|', 4)
+                    cid, pid, verdict = parts[1], parts[2], parts[3]
+                    reason = parts[4] if len(parts) > 4 else ''
+                    fid[(cid, pid)] = (verdict, reason)
+    return fid
 
 
 def split_sentences(text):
@@ -115,17 +134,29 @@ def main():
     installed = [l for l in out.split('\n') if '|INSTALLED|' in l]
     rejected = [l for l in out.split('\n') if '|REJECTED|' in l]
     g7rej = any('G7|REJECTED' in l for l in rejected)
-    if rc == 3 or not g7rej or len(installed) < 6:
-        log.append('TEACH|VOID')
+    # exact teaching validation: G1-G6 installed exactly once each, nothing
+    # else installed, G7 rejected. Any deviation -> VOID.
+    inst_ids = []
+    for l in installed:
+        parts = l.split('|')
+        if len(parts) >= 3 and parts[0].endswith('LEARN'):
+            inst_ids.append(parts[1])
+        elif len(parts) >= 2:
+            inst_ids.append(parts[-2] if parts[-2].startswith('G') else parts[1])
+    exact_teach = (sorted(inst_ids) == ['G1', 'G2', 'G3', 'G4', 'G5', 'G6'])
+    if rc == 3 or not g7rej or not exact_teach:
+        log.append('TEACH|VOID|installed=%s g7rej=%s' % (','.join(sorted(inst_ids)), g7rej))
         blob = '\n'.join(log) + '\n'
         with open(os.path.join(outdir, 'run_li.log'), 'w') as f:
             f.write(blob)
-        print('VOID|teach validation failed rc=%d g7rej=%s installed=%d' % (rc, g7rej, len(installed)))
+        print('VOID|teach validation failed rc=%d g7rej=%s installed=%s (need G1-G6 exactly once each)'
+              % (rc, g7rej, ','.join(sorted(inst_ids))))
         sys.exit(3)
-    log.append('TEACH|VALID|G1-G6 installed, G7 rejected')
+    log.append('TEACH|VALID|G1-G6 installed exactly once each, G7 rejected')
 
     clusters = load_manifest(manifest)
     fstat = load_fetch_status(snapdir)
+    fid = load_fidelity(snapdir)
     kledger, rledger = [], []
     kid = 0
     n_install = 0
@@ -154,6 +185,15 @@ def main():
                                % (cid, note or 'no snapshot', url))
                 gate_counts['UNSUPPORTED_FETCH'] = gate_counts.get('UNSUPPORTED_FETCH', 0) + 1
                 log.append('%s|FETCH|FAIL|%s|%s' % (cid, pid, note or 'no snapshot'))
+                continue
+            # ---- fidelity gate: runs BEFORE any snapshot byte reaches webg ----
+            verdict, reason = fid.get((cid, pid), ('UNVERIFIED', 'no fidelity record'))
+            if verdict != 'VERIFIED':
+                log.append('SNAPSHOT_UNVERIFIED|%s|%s|%s' % (cid, pid, reason))
+                rledger.append('R|%s|SNAPSHOT_UNVERIFIED|-|excluded from instrument input: fidelity unverified (%s)|%s'
+                               % (cid, reason or 'no reason given', url))
+                gate_counts['SNAPSHOT_UNVERIFIED'] = gate_counts.get('SNAPSHOT_UNVERIFIED', 0) + 1
+                log.append('%s|FETCH|UNVERIFIED|%s' % (cid, pid))
                 continue
             with open(os.path.join(snapdir, cid, pid + '.txt'), encoding='utf-8', errors='replace') as f:
                 raw = f.read().split('\n')
