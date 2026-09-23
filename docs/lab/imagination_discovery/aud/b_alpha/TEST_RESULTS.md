@@ -137,6 +137,67 @@ crossfades + release fades only.
 **Micah ear oracle:** AWAITING — the measurements show no audible chops;
 his ears are final.
 
+---
+
+## Battery 1c companions: planet / ocean / alien-ocean v2 re-renders (2026-09-22)
+
+**Renderer provenance:** all three re-rendered with a binary built from the
+committed fixed `src/render.zag` (bed 1 s smoothstep crossfades +
+`place_event` 8 ms attack / 60 ms release). The binary reproduces
+`clips/b_alpha_kids_v3.wav` byte-identically
+(`3f1f36a9c755a280eca64395c9740a14d8cbc516f2b8f87f5b189d2b05440b50`),
+proving it is the fixed renderer. Same seed 6101, same catalogs, same
+scores as the v1s — the only delta is the bed crossfades + release fades
+(same relationship as kids v3→v2). No scored-event changes: every fast
+envelope drop/rise in each v2 matches a v1 drop/rise within ~30 ms, so all
+remaining transients are content-driven (scored events + bed texture
+motion), none are new render artifacts.
+
+### Planet v2 — `clips/b_alpha_planet_v2.wav` (21.00 s, catalog2, score_planet)
+
+| Check | Result |
+|---|---|
+| Determinism | 2/2 byte-identical: `7e561a5aa97661594fa9a5f51789a6c74439ea55bc0557ce90b747f8feaa043a` |
+| Hard digital cuts (exact-zero runs ≥64 from audible) | v1: 1 (20.997 s tail chop, 131 zeros, pre −56.1 dBFS) → **v2: 0** |
+| Fast envelope drops >12 dB/60 ms | 20 → 19; rises 25 → 25; all times match v1 (scored event onsets/ends, zero cliffs) |
+| A-NATIVE | PASS — dc=−0.0000008, peak=0.679, maxjump=0.3723@19.509 s (smooth swing ctx [−0.2944,−0.1019,0.2705,0.3876,0.2625] — natural transient, not a click), zcr=0.0314, quietest-100 ms −62.7 dBFS@8.20 s zcr=0.0934 (no hiss) |
+| v1↔v2 correlation | 0.9945 — composition unchanged |
+
+**Micah ear oracle:** AWAITING-EARS.
+
+### Ocean v2 — `clips/b_alpha_ocean_v2.wav` (30.00 s, catalog3, score_ocean)
+
+Retains its negative-control status (direct ocean referents — disqualified
+as Test 3 evidence, kept as the invalid-path control). Re-rendered for the
+same bed defect, nothing else.
+
+| Check | Result |
+|---|---|
+| Determinism | 2/2 byte-identical: `fda70d5548484ce7dd0cb78a0de3eacb8e51d1076ef0fbe686efb15958c9cbca` |
+| Hard digital cuts (exact-zero runs ≥64 from audible) | v1: 0 → v2: **3 flags, all traced benign** (smooth fades through the quantization floor — zero discontinuities): 23.732 s (185 zeros): butt-jointed chunk boundary at 23.760 s, smooth V dip −17.8→−73.4→−41.7 dBFS over ~1.5 s (the fix's by-design crossfade through zero; v1 had a hard cliff −13.8→−37.6→−26.6 at the same boundary), max single-sample jump −29.8 dBFS in region; 29.532 s (185 zeros): sub-floor dip at the 29.560 s overlap boundary, envelope −55.8→−78.3→−36.6 smooth, max jump −49.7 dBFS; 29.988 s (551 zeros): intended final-chunk fade-out reaching digital zero 12.5 ms before clip end, max jump −55.0 dBFS |
+| Fast envelope drops >12 dB/60 ms | 15 → 17; rises 14 → 14; all times match v1 (content-driven) |
+| A-NATIVE | PASS — dc=−0.0000104, peak=0.679, maxjump=0.1281@22.415 s (natural), zcr=0.0403, quietest-100 ms −84.3 dBFS@11.90 s zcr=0.0005 (no hiss) |
+| v1↔v2 correlation | 0.9938 — composition unchanged |
+
+**Micah ear oracle:** AWAITING-EARS. Note for his brief: the 23.7 s region
+now breathes through a ~1.5 s quiet dip instead of v1's hard cliff — smooth
+by construction, but the dip reaches the digital floor, so his ears decide
+whether it reads as a natural swell or a dropout.
+
+### Alien-ocean v2 — `clips/b_alpha_alien_ocean_v2.wav` (30.00 s, catalog2, score_alien)
+
+| Check | Result |
+|---|---|
+| Determinism | 2/2 byte-identical: `1173dabd1cfc157de2a3bf335320696a52b5cc51ef2ef411aaa355a39c1e27c7` |
+| Hard digital cuts (exact-zero runs ≥64 from audible) | v1: 0 → v2: **1 flag, traced benign**: 29.997 s (152 zeros) = final-chunk fade-out tail; tail envelope −47.5→−19.8 (event swell)→−49.6→0 continuous |
+| Fast envelope drops >12 dB/60 ms | 34 → 29; rises 36 → 38; all times match v1 (surf wave-sets, storm rolls, whale-call passes — content-driven) |
+| A-NATIVE | PASS — dc=−0.0000588, peak=0.679, maxjump=0.1821@20.985 s (smooth swing, natural), zcr=0.0282, quietest-100 ms −67.6 dBFS@9.60 s zcr=0.0587 (no hiss) |
+| v1↔v2 correlation | 0.9871 — composition unchanged |
+
+**Micah ear oracle:** AWAITING-EARS.
+
+---
+
 ## Test 2: Kethra's planet voice (rebuild from scratch)
 
 **Artifact:** `clips/b_alpha_planet_v1.wav`
