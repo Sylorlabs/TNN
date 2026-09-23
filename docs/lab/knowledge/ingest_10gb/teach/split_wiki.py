@@ -60,9 +60,21 @@ def main():
 
     eof = False
     while not eof:
-        c = inp.read(CHUNK)
-        if not c:
+        # accumulate small pipe reads into a >=1MB buffer: bzcat trickles
+        # (~9KB/read under CPU contention) and per-read Python overhead
+        # dominated at 6 pages/sec. Amortize by batching reads.
+        chunks = []
+        total = 0
+        while total < (1 << 20):
+            c = inp.read(CHUNK - total)
+            if not c:
+                break
+            chunks.append(c)
+            total += len(c)
+        if not chunks:
             eof = True
+            continue
+        c = b"".join(chunks)
         buf += c
         # extract complete <page>...</page> elements
         pos = 0
