@@ -1,0 +1,616 @@
+// vgate_h3.zag — PAM v2 hardening fork H3: PREREG_V2-IE_AMEND1.
+// Adapts memgate.zag (R2-4): adds independent-evidence adjudication of
+// CONFLICT_WITHHELD via the disjoint G-span re-judgment (jG/confG record
+// fields 11/12). REVISE_INSTALL supersedes the permanent slot with ledger audit.
+//
+// Reads a deterministic per-trial record stream (one line per trial):
+//   seq|tcode|fixture|prog|jcode|judgment|confidence|pred|measure|phash|truth
+// where prog: 0=PASS 1=FAIL 2=UNRESOLVED; tcode: 0..5 =
+// colordisc colorconst shapetrans pitchdisc timbredisc motiondir;
+// phash = sha256 hex of the canonical `program=` line emitted by sense_h2
+// (binds the ledger to the actual program text); truth is PASSED THROUGH
+// to the disposition output for scoring and is NEVER used in any gate rule
+// (static check: the string "truth" appears only in field-copy code).
+//
+// Frozen semantics (PREREG_H2.md section 2):
+//  - FAIL  -> never installed; stored as negative evidence (deduped).
+//  - UNRESOLVED -> withheld (deliberation hypothesis); suppressed if it
+//    matches stored negative evidence.
+//  - PASS  -> provisional install ONLY (pred is always 1 when prog=PASS;
+//    a pred=0 PASS is withheld defensively). Permanence needs >=1 later
+//    same-task PASS with the same judgment class and |measure| within the
+//    task's fixed corroboration tolerance. A conflicting PASS reverses a
+//    PROVISIONAL install (reversible); against a PERMANENT program the new
+//    trial is CONFLICT-withheld (robust: keep the durable memory).
+//  - Retrieval: every trial is checked against stored programs of its task
+//    stream; a trial matching stored negative evidence is SUPPRESSED.
+// Corroboration tolerances (fixed): colordisc 8, colorconst 40,
+// shapetrans 60, pitchdisc 4000, timbredisc 120, motiondir 0 (jcode equal).
+//
+// Output: dispositions on stdout, one per line:
+//   seq|tcode|fixture|disposition|detail|truth
+// Ledger: one sha256 hash-chained link per trial appended to <ledger_path>:
+//   <prev_hex>|<hash_hex>|<canonical>
+// with canonical = record_line|DISP=<disposition>|DETAIL=<detail> and
+// hash = sha256(prev_raw32 || canonical_bytes); genesis prev = 32 zero bytes.
+//
+// CLI: memgate <records_path> <ledger_path>
+// Exit 0 on success; approach=H2 + error=<reason>, exit 1 on failure.
+// Pure Zag, integer math only, zero RNG, fully deterministic.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- little-endian accessors over []u8 arenas ----------------
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+// ---------------- channel attestation (amendment R2) ----------------
+// Registered-channel key (frozen test registration; amendment A1.2 R2).
+fn ch_key() []u8 { return "PAMV2-REG-CHANNEL-2026-09-23"; }
+// verify attestation: recompute hex(sha256(KEY|seq|fixture|jG|confG)) and
+// compare against the sidecar entry. Returns 1 iff valid.
+fn att_verify(seq:i64, fx:[]u8, fxn:i32, jg:i64, confg:i64, want:[]u8) i32 {
+    let ib:[]u8 = nio_alloc(512);
+    let p:i32 = ob_add(ib, 0, ch_key());
+    p = ob_add(ib, p, "|");
+    p = ob_add(ib, p, _zag_i64_to_str(seq));
+    p = ob_add(ib, p, "|");
+    p = ob_addn(ib, p, fx, fxn);
+    p = ob_add(ib, p, "|");
+    p = ob_add(ib, p, _zag_i64_to_str(jg));
+    p = ob_add(ib, p, "|");
+    p = ob_add(ib, p, _zag_i64_to_str(confg));
+    let dg:[]u8 = nio_alloc(32);
+    let hx:[]u8 = "";
+    if(ns_sha256(ib[0..p], dg) == 0) { hx = ns_hex(dg); }
+    nio_free(ib);
+    nio_free(dg);
+    if(hx.len != 64 || want.len != 64) { return 0; }
+    let i:i32 = 0;
+    while(i < 64) {
+        if(hx[i] != want[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// ---------------- trial history (amendment R4) ----------------
+// append-only log of (tcode, jcode, prog, measure) per trial.
+fn hist_put(ht:[]u8, hj:[]u8, hp:[]u8, hm:[]u8, n:i64, tc:i32, jc:i64, pr:i32, meas:i64) i64 {
+    if(n >= 4096) { return n; }
+    t_put64(ht, n as i32 * 8, tc as i64);
+    t_put64(hj, n as i32 * 8, jc);
+    t_put64(hp, n as i32 * 8, pr as i64);
+    t_put64(hm, n as i32 * 8, meas);
+    return n + 1;
+}
+// cf1-class corroboration: >=1 PRIOR trial, same task, same jcode,
+// prog=PASS, |measure| within tol.
+fn has_corr(ht:[]u8, hj:[]u8, hp:[]u8, hm:[]u8, n:i64, tc:i32, jc:i64, meas:i64, tol:i64) i32 {
+    let i:i64 = 0;
+    while(i < n) {
+        if(t_get64(ht, i as i32 * 8) == tc as i64 && t_get64(hj, i as i32 * 8) == jc
+           && t_get64(hp, i as i32 * 8) == 0 && iabs(t_get64(hm, i as i32 * 8) - meas) <= tol) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+
+// ---------------- file IO -------------------------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+// open for write, O_WRONLY|O_CREAT|O_TRUNC, mode 0600.
+fn z_write_open(path:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 384, 0, 0, 0);
+    nio_free(s);
+    return fd;
+}
+
+// ---------------- line builders -------------------------------------------
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_addn(ob:[]u8, pos:i32, s:[]u8, n:i32) i32 {
+    let i:i32 = 0;
+    while(i < n && i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+
+// ---------------- record parsing ------------------------------------------
+// Copy the which-th '|' field (0-based) of line[0..llen) into out.
+// Returns the field length, or -1 if absent.
+fn field(line:[]u8, llen:i32, which:i32, out:[]u8) i32 {
+    let fi:i32 = 0;
+    let st:i32 = 0;
+    let i:i32 = 0;
+    while(i <= llen) {
+        let c:u8 = 10;
+        if(i < llen) { c = line[i]; }
+        if(c == 124 || i == llen) {
+            if(fi == which) {
+                let n:i32 = i - st;
+                if(n > out.len) { n = out.len; }
+                let k:i32 = 0;
+                while(k < n) { out[k] = line[st + k]; k = k + 1; }
+                return n;
+            }
+            fi = fi + 1;
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+fn atoi(b:[]u8, n:i32) i64 {
+    let v:i64 = 0;
+    let neg:i64 = 1;
+    let i:i32 = 0;
+    if(n > 0 && b[0] == 45) { neg = -1; i = 1; }
+    while(i < n) {
+        let c:i64 = b[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v * neg;
+}
+
+// corroboration tolerance per task (prereg section 2, fixed)
+fn tol_of(tc:i32) i64 {
+    if(tc == 0) { return 8; }
+    if(tc == 1) { return 40; }
+    if(tc == 2) { return 60; }
+    if(tc == 3) { return 4000; }
+    if(tc == 4) { return 120; }
+    return 0;
+}
+
+// ---------------- main ----------------------------------------------------
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let a2:[]u8 = _zag_arg(2);
+    let a3:[]u8 = _zag_arg(3);
+    if(a1.len == 0 || a2.len == 0 || a3.len == 0) {
+        let ob:[]u8 = nio_alloc(128);
+        let pos:i32 = ob_kv(ob, 0, "approach", "H3");
+        pos = ob_kv(ob, pos, "error", "usage: vgate_h3 <records> <gatt> <ledger>");
+        nio_write_all(1, ob[0..pos]);
+        nio_free(ob);
+        return 1;
+    }
+    // read the whole records file (10k lines, ~1.6MB worst case)
+    let fmax:i32 = 8388608;
+    let fb:[]u8 = nio_alloc(fmax);
+    if(fb.len == 0) { return 1; }
+    let n:i64 = z_read(a1, fb, fmax);
+    if(n < 0) {
+        let ob:[]u8 = nio_alloc(128);
+        let pos:i32 = ob_kv(ob, 0, "approach", "H3");
+        pos = ob_kv(ob, pos, "error", "records_read_failed");
+        nio_write_all(1, ob[0..pos]);
+        nio_free(ob);
+        return 1;
+    }
+    let nl:i64 = n;
+    // per-task state: provisional + permanent slots
+    let prov_on:[]u8 = nio_alloc(48);
+    let prov_j:[]u8 = nio_alloc(48);
+    let prov_m:[]u8 = nio_alloc(48);
+    let prov_s:[]u8 = nio_alloc(48);
+    let perm_on:[]u8 = nio_alloc(48);
+    let perm_j:[]u8 = nio_alloc(48);
+    let perm_m:[]u8 = nio_alloc(48);
+    let perm_s:[]u8 = nio_alloc(48);
+    // negative evidence: 256 (jcode, measure) pairs per task
+    let neg_j:[]u8 = nio_alloc(6 * 256 * 8);
+    let neg_m:[]u8 = nio_alloc(6 * 256 * 8);
+    let neg_n:[]u8 = nio_alloc(48);
+    // trial history + incumbent-confidence arenas (amendment R4)
+    let hist_tc:[]u8 = nio_alloc(4096 * 8);
+    let hist_jc:[]u8 = nio_alloc(4096 * 8);
+    let hist_pr:[]u8 = nio_alloc(4096 * 8);
+    let hist_meas:[]u8 = nio_alloc(4096 * 8);
+    let hist_n:i64 = 0;
+    let perm_c:[]u8 = nio_alloc(48);
+    let t:i32 = 0;
+    while(t < 6) {
+        t_put64(prov_on, t * 8, 0);
+        t_put64(perm_on, t * 8, 0);
+        t_put64(neg_n, t * 8, 0);
+        t_put64(perm_c, t * 8, 0);
+        t = t + 1;
+    }
+    // channel-attestation sidecar: lines "seq|hex64" (amendment R2)
+    let gb2:[]u8 = nio_alloc(1048576);
+    let gn2:i64 = z_read(a2, gb2, 1048576);
+    let gtab:[]u8 = nio_alloc(4096 * 64);
+    let ghas:[]u8 = nio_alloc(4096);
+    if(gn2 > 0) {
+        let gp:i64 = 0;
+        while(gp < gn2) {
+            let ge:i64 = gp;
+            while(ge < gn2 && gb2[ge as i32] != 10) { ge = ge + 1; }
+            let gs:i64 = gp;
+            while(gs < ge && gb2[gs as i32] != 124) { gs = gs + 1; }
+            if(gs < ge) {
+                let sq:i64 = atoi(gb2[gp as i32 .. gs as i32], (gs - gp) as i32);
+                if(sq >= 0 && sq < 4096 && ge - gs - 1 >= 64) {
+                    let k:i32 = 0;
+                    while(k < 64) {
+                        gtab[sq as i32 * 64 + k] = gb2[(gs + 1 + k as i64) as i32];
+                        k = k + 1;
+                    }
+                    ghas[sq as i32] = 1;
+                }
+            }
+            gp = ge + 1;
+        }
+    }
+    nio_free(gb2);
+    // output buffers: dispositions to stdout, ledger to file
+    let ob:[]u8 = nio_alloc(2097152);
+    let lg:[]u8 = nio_alloc(8388608);
+    if(ob.len == 0 || lg.len == 0) { return 1; }
+    let opos:i32 = 0;
+    let lpos:i32 = 0;
+    // hash chain: 32-byte previous link, genesis = zeros
+    let prev:[]u8 = nio_alloc(32);
+    let hbuf:[]u8 = nio_alloc(32);
+    let i:i32 = 0;
+    while(i < 32) { prev[i] = 0; i = i + 1; }
+    let hb:[]u8 = nio_alloc(4096);
+    let fb2:[]u8 = nio_alloc(512);
+    let fxb:[]u8 = nio_alloc(512);
+    let fnum:[]u8 = nio_alloc(64);
+    // walk lines
+    let p:i64 = 0;
+    let trials:i64 = 0;
+    while(p < nl) {
+        let le:i64 = p;
+        while(le < nl && fb[le as i32] != 10) { le = le + 1; }
+        let llen:i32 = (le - p) as i32;
+        if(llen > 0 && llen < 4000) {
+            let line:[]u8 = fb[p as i32 .. (p + llen as i64) as i32];
+            let nf:i32 = field(line, llen, 0, fnum);
+            let seq:i64 = atoi(fnum, nf);
+            nf = field(line, llen, 1, fnum);
+            let tc:i32 = atoi(fnum, nf) as i32;
+            let fxlen:i32 = field(line, llen, 2, fxb);
+            nf = field(line, llen, 3, fnum);
+            let pr:i32 = atoi(fnum, nf) as i32;
+            nf = field(line, llen, 4, fnum);
+            let jc:i64 = atoi(fnum, nf);
+            let jlen:i32 = field(line, llen, 5, fb2);
+            nf = field(line, llen, 6, fnum);
+            let conf:i64 = atoi(fnum, nf);
+            nf = field(line, llen, 7, fnum);
+            let pred:i64 = atoi(fnum, nf);
+            nf = field(line, llen, 8, fnum);
+            let meas:i64 = atoi(fnum, nf);
+            // V2: independent-evidence re-judgment on the disjoint G span.
+            // jG=-1 / confG=0 when the trial has no G span (harness).
+            nf = field(line, llen, 11, fnum);
+            let jg:i64 = atoi(fnum, nf);
+            nf = field(line, llen, 12, fnum);
+            let confg:i64 = atoi(fnum, nf);
+            let att_ok:i32 = 0;
+            if(jg >= 0 && seq >= 0 && seq < 4096 && ghas[seq as i32] == 1) {
+                att_ok = att_verify(seq, fxb, fxlen, jg, confg,
+                    gtab[seq as i32 * 64 .. seq as i32 * 64 + 64]);
+            }
+            // fields 9 (phash) and 10 (truth) are opaque to the gate;
+            // truth is copied to disposition output only, never used in rules.
+            let disp:[]u8 = "";
+            let det:[]u8 = "";
+            if(tc >= 0 && tc < 6 && (pr == 0 || pr == 1 || pr == 2)) {
+                let tol:i64 = tol_of(tc);
+                // negative-evidence match?
+                let nm:i32 = 0;
+                let nn:i64 = t_get64(neg_n, tc * 8);
+                let k:i64 = 0;
+                while(k < nn) {
+                    if(t_get64(neg_j, (tc * 256 + k as i32) * 8) == jc
+                       && iabs(t_get64(neg_m, (tc * 256 + k as i32) * 8) - meas) <= tol) {
+                        nm = 1;
+                        break;
+                    }
+                    k = k + 1;
+                }
+                if(pr == 1) {
+                    // FAIL: never installed; stored as negative evidence.
+                    if(nm == 0 && nn < 256) {
+                        t_put64(neg_j, (tc * 256 + nn as i32) * 8, jc);
+                        t_put64(neg_m, (tc * 256 + nn as i32) * 8, meas);
+                        t_put64(neg_n, tc * 8, nn + 1);
+                    }
+                    disp = "NEGATIVE_EVIDENCE";
+                    if(nm == 1) { det = "dup"; } else { det = "stored"; }
+                } else if(pr == 2) {
+                    // UNRESOLVED: withheld; suppressed on negative match.
+                    if(nm == 1) {
+                        disp = "SUPPRESSED";
+                        det = "neg";
+                    } else {
+                        disp = "WITHHELD";
+                        det = "unresolved";
+                    }
+                } else {
+                    // PASS.
+                    if(pred == 0) {
+                        disp = "WITHHELD";
+                        det = "pred0";
+                    } else if(nm == 1) {
+                        disp = "SUPPRESSED";
+                        det = "neg";
+                    } else if(t_get64(perm_on, tc * 8) == 1) {
+                        let pj:i64 = t_get64(perm_j, tc * 8);
+                        let pm:i64 = t_get64(perm_m, tc * 8);
+                        if(jc == pj && iabs(pm - meas) <= tol) {
+                            disp = "CORROBORATED";
+                            det = "perm";
+                        } else if(jc != pj) {
+                            disp = "CONFLICT_WITHHELD";
+                            let ps:i64 = t_get64(perm_s, tc * 8);
+                            let tmp:[]u8 = nio_alloc(96);
+                            let q:i32 = ob_add(tmp, 0, "perm_seq=");
+                            q = ob_add(tmp, q, _zag_i64_to_str(ps));
+                            let c2:i32 = 0;
+                            while(c2 < q) { fb2[256 + c2] = tmp[c2]; c2 = c2 + 1; }
+                            nio_free(tmp);
+                            det = fb2[256..256 + q];
+                        } else {
+                            disp = "CORROBORATED";
+                            det = "perm-measure-diff";
+                        }
+                    } else if(t_get64(prov_on, tc * 8) == 1) {
+                        let pj:i64 = t_get64(prov_j, tc * 8);
+                        let pm:i64 = t_get64(prov_m, tc * 8);
+                        if(jc == pj && iabs(pm - meas) <= tol) {
+                            // corroboration: permanence (threshold = 1)
+                            t_put64(perm_on, tc * 8, 1);
+                            t_put64(perm_j, tc * 8, jc);
+                            t_put64(perm_m, tc * 8, meas);
+                            t_put64(perm_s, tc * 8, seq);
+                            t_put64(perm_c, tc * 8, conf);
+                            t_put64(prov_on, tc * 8, 0);
+                            disp = "PERMANENT_INSTALL";
+                            det = "corroborated";
+                        } else if(jc != pj) {
+                            // conflict: reverse the provisional, install new
+                            let old:i64 = t_get64(prov_s, tc * 8);
+                            t_put64(prov_j, tc * 8, jc);
+                            t_put64(prov_m, tc * 8, meas);
+                            t_put64(prov_s, tc * 8, seq);
+                            disp = "PROVISIONAL_INSTALL";
+                            let tmp:[]u8 = nio_alloc(96);
+                            let q:i32 = ob_add(tmp, 0, "reversed_old=");
+                            q = ob_add(tmp, q, _zag_i64_to_str(old));
+                            let c2:i32 = 0;
+                            while(c2 < q) { fb2[256 + c2] = tmp[c2]; c2 = c2 + 1; }
+                            nio_free(tmp);
+                            det = fb2[256..256 + q];
+                        } else {
+                            disp = "CORROBORATED";
+                            det = "prov-measure-diff";
+                        }
+                    } else {
+                        t_put64(prov_on, tc * 8, 1);
+                        t_put64(prov_j, tc * 8, jc);
+                        t_put64(prov_m, tc * 8, meas);
+                        t_put64(prov_s, tc * 8, seq);
+                        disp = "PROVISIONAL_INSTALL";
+                        det = "new";
+                    }
+                }
+            } else {
+                disp = "WITHHELD";
+                det = "bad-record";
+            }
+            // V2-A adjudication layer: re-examine CONFLICT_WITHHELD against
+            // independent evidence. REVISE-install (supersede with ledger audit)
+            // iff the disjoint-span re-judgment verifies the formation judgment.
+            // V2 independent-evidence signal: full front-end re-judgment on
+            // the disjoint G span agrees with the formation judgment, both
+            // at install confidence. Calibrated on R2-4 frozen data + gexp:
+            // P(signal | correct high-conf)=93.9%, P(signal | wrong high-conf)=0.6%.
+            let ind:i32 = 0;
+            if(pr == 0 && jg >= 0 && jg == jc && confg >= 700 && conf >= 700 && att_ok == 1) { ind = 1; }
+            if(_zag_strcmp(disp, "CONFLICT_WITHHELD") == 1) {
+                                let corr:i32 = has_corr(hist_tc, hist_jc, hist_pr, hist_meas, hist_n, tc, jc, meas, tol_of(tc));
+                let mrg:i64 = conf - t_get64(perm_c, tc * 8);
+                if(ind == 1 && corr == 1 && mrg >= 100) {
+                    let oldj:i64 = t_get64(perm_j, tc * 8);
+                    let oldm:i64 = t_get64(perm_m, tc * 8);
+                    let olds:i64 = t_get64(perm_s, tc * 8);
+                    t_put64(perm_j, tc * 8, jc);
+                    t_put64(perm_m, tc * 8, meas);
+                    t_put64(perm_s, tc * 8, seq);
+                    t_put64(perm_c, tc * 8, conf);
+                    t_put64(prov_on, tc * 8, 0);
+                    disp = "REVISE_INSTALL";
+                    let tmp:[]u8 = nio_alloc(160);
+                    let q:i32 = ob_add(tmp, 0, "adj_r4 oldj=");
+                    q = ob_add(tmp, q, _zag_i64_to_str(oldj));
+                    q = ob_add(tmp, q, " oldm=");
+                    q = ob_add(tmp, q, _zag_i64_to_str(oldm));
+                    q = ob_add(tmp, q, " oldseq=");
+                    q = ob_add(tmp, q, _zag_i64_to_str(olds));
+                    q = ob_add(tmp, q, " mrg=");
+                    q = ob_add(tmp, q, _zag_i64_to_str(mrg));
+                    let c2:i32 = 0;
+                    while(c2 < q) { fb2[256 + c2] = tmp[c2]; c2 = c2 + 1; }
+                    nio_free(tmp);
+                    det = fb2[256..256 + q];
+                }
+            }
+            hist_n = hist_put(hist_tc, hist_jc, hist_pr, hist_meas, hist_n, tc, jc, pr, meas);
+                        // disposition line: seq|tcode|fixture|disposition|detail|truth
+            opos = ob_add(ob, opos, _zag_i64_to_str(seq));
+            opos = ob_add(ob, opos, "|");
+            opos = ob_add(ob, opos, _zag_i64_to_str(tc as i64));
+            opos = ob_add(ob, opos, "|");
+            opos = ob_addn(ob, opos, fxb, fxlen);
+            opos = ob_add(ob, opos, "|");
+            opos = ob_add(ob, opos, disp);
+            opos = ob_add(ob, opos, "|");
+            opos = ob_add(ob, opos, det);
+            opos = ob_add(ob, opos, "|");
+            let tln:i32 = field(line, llen, 10, fb2);
+            opos = ob_addn(ob, opos, fb2, tln);
+            opos = ob_add(ob, opos, "\n");
+            // ledger link: canonical = line|DISP=<disp>|DETAIL=<det>
+            let clen:i32 = 0;
+            let c2:i32 = 0;
+            while(c2 < llen) {
+                if(clen >= 3800) { break; }
+                hb[clen] = line[c2];
+                clen = clen + 1;
+                c2 = c2 + 1;
+            }
+            clen = ob_add(hb, clen, "|DISP=");
+            clen = ob_add(hb, clen, disp);
+            clen = ob_add(hb, clen, "|DETAIL=");
+            clen = ob_add(hb, clen, det);
+            // hash input = prev(32) || canonical
+            let hin:[]u8 = nio_alloc(32 + clen);
+            let c3:i32 = 0;
+            while(c3 < 32) { hin[c3] = prev[c3]; c3 = c3 + 1; }
+            c3 = 0;
+            while(c3 < clen) { hin[32 + c3] = hb[c3]; c3 = c3 + 1; }
+            let rc:i32 = ns_sha256(hin, hbuf);
+            nio_free(hin);
+            if(rc != 0) {
+                let eb:[]u8 = nio_alloc(128);
+                let ep:i32 = ob_kv(eb, 0, "approach", "H3");
+                ep = ob_kv(eb, ep, "error", "sha_failed");
+                nio_write_all(1, eb[0..ep]);
+                nio_free(eb);
+                return 1;
+            }
+            let ph:[]u8 = ns_hex(prev);
+            let hh2:[]u8 = ns_hex(hbuf);
+            lpos = ob_add(lg, lpos, ph);
+            lpos = ob_add(lg, lpos, "|");
+            lpos = ob_add(lg, lpos, hh2);
+            lpos = ob_add(lg, lpos, "|");
+            lpos = ob_addn(lg, lpos, hb, clen);
+            lpos = ob_add(lg, lpos, "\n");
+            nio_free(ph);
+            nio_free(hh2);
+            let c4:i32 = 0;
+            while(c4 < 32) { prev[c4] = hbuf[c4]; c4 = c4 + 1; }
+            trials = trials + 1;
+        }
+        p = le + 1;
+    }
+    // write ledger file
+    let lfd:i64 = z_write_open(a3);
+    if(lfd < 0) {
+        let eb:[]u8 = nio_alloc(128);
+        let ep:i32 = ob_kv(eb, 0, "approach", "H3");
+        ep = ob_kv(eb, ep, "error", "ledger_open_failed");
+        nio_write_all(1, eb[0..ep]);
+        nio_free(eb);
+        return 1;
+    }
+    // nio_write_all caps at 1MB per call; chunk the ledger write.
+    let woff:i32 = 0;
+    let wok:i32 = 1;
+    while(woff < lpos) {
+        let wlen:i32 = lpos - woff;
+        if(wlen > 1048576) { wlen = 1048576; }
+        if(nio_write_all(lfd, lg[woff..woff + wlen]) != wlen as i64) {
+            wok = 0;
+            break;
+        }
+        woff = woff + wlen;
+    }
+    if(wok == 0) {
+        let eb:[]u8 = nio_alloc(128);
+        let ep:i32 = ob_kv(eb, 0, "approach", "H3");
+        ep = ob_kv(eb, ep, "error", "ledger_write_failed");
+        nio_write_all(1, eb[0..ep]);
+        nio_free(eb);
+        return 1;
+    }
+    nio_close(lfd);
+    // chunk the stdout dispositions too (may exceed 1MB)
+    woff = 0;
+    wok = 1;
+    while(woff < opos) {
+        let wlen:i32 = opos - woff;
+        if(wlen > 1048576) { wlen = 1048576; }
+        if(nio_write_all(1, ob[woff..woff + wlen]) != wlen as i64) {
+            wok = 0;
+            break;
+        }
+        woff = woff + wlen;
+    }
+    if(wok == 0) { return 1; }
+    let sb:[]u8 = nio_alloc(128);
+    let sp2:i32 = ob_add(sb, 0, "vgate_h3: trials=");
+    sp2 = ob_add(sb, sp2, _zag_i64_to_str(trials));
+    sp2 = ob_add(sb, sp2, "\n");
+    nio_write_all(2, sb[0..sp2]);
+    nio_free(sb);
+    return 0;
+}
