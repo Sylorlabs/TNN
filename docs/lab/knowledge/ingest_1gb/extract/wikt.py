@@ -62,11 +62,59 @@ def link_repl(m):
         return inner.rsplit("|", 1)[1]
     return inner
 
+def expand_templates(s):
+    """Parse {{...}} with nesting. Link-like templates (l/m/link/ll) yield
+    their display text; all other templates are dropped."""
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        if s.startswith("{{", i):
+            # find matching }} with depth counting
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if s.startswith("{{", j):
+                    depth += 1; j += 2
+                elif s.startswith("}}", j):
+                    depth -= 1; j += 2
+                else:
+                    j += 1
+            inner = s[i+2:j-2] if depth == 0 else s[i+2:]
+            # split top-level args (respect nested {{}})
+            args, cur, d2, k = [], [], 0, 0
+            while k < len(inner):
+                if inner.startswith("{{", k):
+                    d2 += 1; cur.append("{{"); k += 2
+                elif inner.startswith("}}", k):
+                    d2 -= 1; cur.append("}}"); k += 2
+                elif inner[k] == "|" and d2 == 0:
+                    args.append("".join(cur)); cur = []; k += 1
+                else:
+                    cur.append(inner[k]); k += 1
+            args.append("".join(cur))
+            tname = args[0].strip().lower() if args else ""
+            if tname in ("l", "m", "link", "ll"):
+                # display = last positional arg (skip named args with =)
+                disp = None
+                for a in args[1:]:
+                    a = a.strip()
+                    if not a or "=" in a:
+                        continue
+                    if a in ("en",):
+                        continue
+                    disp = a
+                if disp:
+                    out.append(expand_templates(disp))
+            # else: drop the template
+            i = j if depth == 0 else n
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
 def clean_def(s):
     s = re.sub(r"<!--.*?-->", "", s, flags=re.S)
-    # drop label templates {{lb|en|...}} {{label|...}}
-    s = re.sub(r"\{\{(lb|label)\|[^}]*\}\}", "", s)
-    s = strip_nested(s, "{{", "}}")
+    s = expand_templates(s)
     for _ in range(3):
         ns2 = re.sub(r"\[\[([^\[\]]+)\]\]", link_repl, s)
         if ns2 == s:
@@ -114,11 +162,11 @@ def parse_page(title, text, out, stats):
             continue
         sensenum = 0
         for line in body.split("\n"):
-            if not line.startswith("# "):
+            # sense lines: '# ' top-level or '## ' subsenses; skip '#*'/ '#:' examples
+            m = re.match(r"^#{1,2} ", line)
+            if not m:
                 continue
-            if line.startswith(("#*", "#:")):
-                continue
-            raw = line[2:].strip()
+            raw = line[m.end():].strip()
             if not raw:
                 continue
             # form-of detection: first template
