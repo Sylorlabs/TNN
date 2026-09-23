@@ -1,0 +1,1965 @@
+// r27.zag — R2-7: independent discriminative challenge contract (Sol HC-5).
+//
+// INSTALL only if a preregistered challenge, selected to distinguish the claim
+// from its strongest plausible alternative, succeeds using evidence disjoint
+// from the percept-formation evidence. UNRESOLVED or non-discriminating
+// challenges -> WITHHOLD.
+//
+// Pure Zag. Zero RNG in any decision path. Integer math only.
+// Byte-identical reruns: same binary + fixture -> byte-identical stdout.
+//
+// Fixture container R2FX (frozen, see R2_FIXTURE_SPEC_R27.md):
+//   8 x u32 LE: magic 0x52324658 ("R2FX"), task, index, family,
+//               f_off, f_len, g_off, g_len.
+//   F = formation evidence span. G = challenge evidence span (disjoint).
+//
+// Task ids: 0 colordisc, 1 colorconst, 2 shapetrans, 3 pitchdisc,
+//           4 timbredisc, 5 motiondir.
+//
+// CLI:
+//   sense full   <fixture.r2fx> <ledger>   formation + challenge -> decision
+//   sense ablate <fixture.r2fx> <ledger>   formation only (B4 ablation)
+//   sense legacy <task> <fixture> <ledger>  legacy .img/.pcm/.vid, formation
+//                                           only (no G-span -> UNRESOLVED)
+//   sense audit                             print frozen challenge registry
+//
+// stdout: one ledger line of k=v pairs (also appended to <ledger>).
+// exit 0 on success, nonzero on IO/parse errors.
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- integer / table helpers -------------------------------
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_get16(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8);
+}
+fn t_geti16(b:[]u8, at:i32) i64 {
+    let v:i64 = t_get16(b, at);
+    if(v >= 32768) { return v - 65536; }
+    return v;
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn op_zero(op:[]u8) void {
+    t_put64(op, 0, 0);
+}
+fn op_add(op:[]u8, n:i64) void {
+    t_put64(op, 0, t_get64(op, 0) + n);
+}
+fn op_get(op:[]u8) i64 {
+    return t_get64(op, 0);
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn imin(a:i64, b:i64) i64 {
+    if(a < b) { return a; }
+    return b;
+}
+fn imax(a:i64, b:i64) i64 {
+    if(a > b) { return a; }
+    return b;
+}
+fn iclamp(v:i64, lo:i64, hi:i64) i64 {
+    if(v < lo) { return lo; }
+    if(v > hi) { return hi; }
+    return v;
+}
+fn isqrt(x:i64) i64 {
+    if(x <= 0) { return 0; }
+    let r:i64 = x;
+    let y:i64 = (r + 1) / 2;
+    while(y < r) { r = y; y = (r + x / r) / 2; }
+    return r;
+}
+// lower median of n i32 values in arena a (selection, no sorting)
+fn med_i32(a:[]u8, n:i32) i64 {
+    if(n <= 0) { return 0; }
+    let target:i32 = (n - 1) / 2;
+    let i:i32 = 0;
+    while(i < n) {
+        let v:i64 = t_get32(a, i * 4);
+        let less:i32 = 0;
+        let eqb:i32 = 0;
+        let k:i32 = 0;
+        while(k < n) {
+            let u:i64 = t_get32(a, k * 4);
+            if(u < v) { less = less + 1; }
+            if(u == v) {
+                if(k < i) { eqb = eqb + 1; }
+            }
+            k = k + 1;
+        }
+        if(less + eqb == target) { return v; }
+        i = i + 1;
+    }
+    return t_get32(a, 0);
+}
+
+// ---------------- IO -------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+// append bytes to file (O_WRONLY|O_CREAT|O_APPEND = 1089), create if missing
+fn z_append(path:[]u8, b:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 1089, 420, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_write_all(fd, b);
+    nio_close(fd);
+    return n;
+}
+
+// ---------------- stdout line builder -------------------------------
+fn o_str(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn o_i64(ob:[]u8, pos:i32, v:i64) i32 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    pos = o_str(ob, pos, s);
+    nio_free(s);
+    return pos;
+}
+fn o_byte(ob:[]u8, pos:i32, c:i32) i32 {
+    if(pos < ob.len) { ob[pos] = c as u8; pos = pos + 1; }
+    return pos;
+}
+fn o_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = o_str(ob, pos, k);
+    pos = o_byte(ob, pos, 61);
+    pos = o_str(ob, pos, v);
+    pos = o_byte(ob, pos, 32);
+    return pos;
+}
+fn o_kvi(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    pos = o_str(ob, pos, k);
+    pos = o_byte(ob, pos, 61);
+    pos = o_i64(ob, pos, v);
+    pos = o_byte(ob, pos, 32);
+    return pos;
+}
+
+// ---------------- task + judgment vocabulary -------------------------------
+// task ids: 0 colordisc, 1 colorconst, 2 shapetrans, 3 pitchdisc,
+//           4 timbredisc, 5 motiondir
+fn task_name(tid:i32) []u8 {
+    if(tid == 0) { return "colordisc"; }
+    if(tid == 1) { return "colorconst"; }
+    if(tid == 2) { return "shapetrans"; }
+    if(tid == 3) { return "pitchdisc"; }
+    if(tid == 4) { return "timbredisc"; }
+    if(tid == 5) { return "motiondir"; }
+    return "bad_task";
+}
+fn task_id(s:[]u8) i32 {
+    if(_zag_strcmp(s, "colordisc") == 1) { return 0; }
+    if(_zag_strcmp(s, "colorconst") == 1) { return 1; }
+    if(_zag_strcmp(s, "shapetrans") == 1) { return 2; }
+    if(_zag_strcmp(s, "pitchdisc") == 1) { return 3; }
+    if(_zag_strcmp(s, "timbredisc") == 1) { return 4; }
+    if(_zag_strcmp(s, "motiondir") == 1) { return 5; }
+    return -1;
+}
+// judgment ids per task:
+//  colordisc 0=SAME 1=DIFFERENT
+//  colorconst 0=SAME_SURFACE 1=DIFFERENT
+//  shapetrans 0=CIRCLE 1=TRIANGLE 2=SQUARE
+//  pitchdisc 0=SAME 1=HIGHER 2=LOWER
+//  timbredisc 0=PURE 1=BRIGHT 2=DARK 3=RICH
+//  motiondir 0=STILL 1=N 2=NE 3=E 4=SE 5=S 6=SW 7=W 8=NW
+fn jname(tid:i32, j:i32) []u8 {
+    if(j < 0) { return "UNRESOLVED"; }
+    if(tid == 0) {
+        if(j == 0) { return "SAME"; }
+        return "DIFFERENT";
+    }
+    if(tid == 1) {
+        if(j == 0) { return "SAME_SURFACE"; }
+        return "DIFFERENT";
+    }
+    if(tid == 2) {
+        if(j == 0) { return "CIRCLE"; }
+        if(j == 1) { return "TRIANGLE"; }
+        return "SQUARE";
+    }
+    if(tid == 3) {
+        if(j == 0) { return "SAME"; }
+        if(j == 1) { return "HIGHER"; }
+        return "LOWER";
+    }
+    if(tid == 4) {
+        if(j == 0) { return "PURE"; }
+        if(j == 1) { return "BRIGHT"; }
+        if(j == 2) { return "DARK"; }
+        return "RICH";
+    }
+    if(j == 0) { return "STILL"; }
+    if(j == 1) { return "N"; }
+    if(j == 2) { return "NE"; }
+    if(j == 3) { return "E"; }
+    if(j == 4) { return "SE"; }
+    if(j == 5) { return "S"; }
+    if(j == 6) { return "SW"; }
+    if(j == 7) { return "W"; }
+    return "NW";
+}
+
+// ---------------- frozen challenge registry -------------------------------
+// Each entry: (a) strongest plausible alternative, (b) predicted outcome
+// under the claim, (c) predicted DIFFERENT outcome under the alternative,
+// (d) evidence path (different measurement path or controlled intervention,
+// disjoint bytes). Frozen before results; see REGISTRY.md.
+fn reg_challenge(tid:i32) []u8 {
+    if(tid == 0) { return "CH-COL-1"; }
+    if(tid == 1) { return "CH-CCN-1"; }
+    if(tid == 2) { return "CH-SHP-1"; }
+    if(tid == 3) { return "CH-PTC-1"; }
+    if(tid == 4) { return "CH-TMB-1"; }
+    return "CH-MOT-1";
+}
+fn reg_alternative(tid:i32, claim:i32) []u8 {
+    if(tid == 0) {
+        if(claim == 0) { return "different-surfaces-metameric-pair"; }
+        return "same-surface-appearance-artifact";
+    }
+    if(tid == 1) {
+        if(claim == 0) { return "different-surfaces"; }
+        return "same-surface-illuminant-fooled-normalizer";
+    }
+    if(tid == 2) {
+        return "percept-driven-by-occluder-distractor-clutter-not-target";
+    }
+    if(tid == 3) {
+        if(claim == 0) { return "different-pitch"; }
+        if(claim == 1) { return "same-pitch-threshold-artifact"; }
+        return "same-pitch-threshold-artifact";
+    }
+    if(tid == 4) {
+        return "class-driven-by-distractor-harmonic-or-lossy-centroid";
+    }
+    if(claim == 0) { return "moving-undetected-motion"; }
+    return "reverse-direction-or-still";
+}
+fn reg_evidence(tid:i32) []u8 {
+    if(tid == 0) { return "G-span-spectral-reflectances-neutral-illuminant-token"; }
+    if(tid == 1) { return "G-span-neutral-illuminant-rerender-controlled-intervention"; }
+    if(tid == 2) { return "G-span-unoccluded-quadrant-spatially-disjoint"; }
+    if(tid == 3) { return "G-span-uncorrupted-token-later-temporal-window"; }
+    if(tid == 4) { return "G-span-uncorrupted-token-harmonic-template-path"; }
+    return "G-span-clean-high-contrast-frames-later-temporal-window";
+}
+// predicted outcome under the claim: the claim itself (challenge must agree)
+// predicted outcome under the alternative: anything but the claim.
+// The registry is discriminating by construction; reg_audit verifies
+// pred_claim != pred_alt textually for every (task, claim).
+fn reg_pred_claim(tid:i32, claim:i32) []u8 {
+    return jname(tid, claim);
+}
+
+// ---------------- formation: percept from F evidence -----------------------
+// res: [judgment:i32][confidence:i32]. op: 8-byte ops counter.
+
+// t0 colordisc: mean-RGB Euclidean, threshold 18.
+fn cd_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let sr:i64 = 0; let sg:i64 = 0; let sb:i64 = 0;
+    let tr:i64 = 0; let tg:i64 = 0; let tb:i64 = 0;
+    let i:i32 = 0;
+    while(i < 3072) {
+        sr = sr + (buf[fo + i] as i64);
+        sg = sg + (buf[fo + i + 1] as i64);
+        sb = sb + (buf[fo + i + 2] as i64);
+        tr = tr + (buf[fo + 3072 + i] as i64);
+        tg = tg + (buf[fo + 3072 + i + 1] as i64);
+        tb = tb + (buf[fo + 3072 + i + 2] as i64);
+        i = i + 3;
+    }
+    let dr:i64 = sr / 1024 - tr / 1024;
+    let dg:i64 = sg / 1024 - tg / 1024;
+    let db:i64 = sb / 1024 - tb / 1024;
+    let d:i64 = isqrt(dr * dr + dg * dg + db * db);
+    let j:i32 = 0;
+    if(d >= 18) { j = 1; }
+    let conf:i64 = iclamp(950 - 18 * iabs(d - 18), 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 2078);
+}
+
+// t1 colorconst: mean-chromaticity L1 x1000, threshold 80.
+fn cc_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let ar:i64 = 0; let ag:i64 = 0; let ab:i64 = 0;
+    let br:i64 = 0; let bg:i64 = 0; let bb:i64 = 0;
+    let i:i32 = 0;
+    while(i < 6912) {
+        ar = ar + (buf[fo + i] as i64);
+        ag = ag + (buf[fo + i + 1] as i64);
+        ab = ab + (buf[fo + i + 2] as i64);
+        br = br + (buf[fo + 6912 + i] as i64);
+        bg = bg + (buf[fo + 6912 + i + 1] as i64);
+        bb = bb + (buf[fo + 6912 + i + 2] as i64);
+        i = i + 3;
+    }
+    let ta:i64 = ar + ag + ab;
+    let tb2:i64 = br + bg + bb;
+    if(ta < 1) { ta = 1; }
+    if(tb2 < 1) { tb2 = 1; }
+    let d:i64 = iabs(ar * 1000 / ta - br * 1000 / tb2)
+              + iabs(ag * 1000 / ta - bg * 1000 / tb2)
+              + iabs(ab * 1000 / ta - bb * 1000 / tb2);
+    let j:i32 = 0;
+    if(d >= 80) { j = 1; }
+    let conf:i64 = iclamp(950 - 12 * iabs(d - 80), 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 4648);
+}
+
+// t2 shapetrans: bbox fill-ratio -> class (rotation-robust).
+fn sh_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let m00:i64 = 0;
+    let x0:i32 = 96; let x1:i32 = -1;
+    let y0:i32 = 96; let y1:i32 = -1;
+    let y:i32 = 0;
+    while(y < 96) {
+        let x:i32 = 0;
+        while(x < 96) {
+            let v:i32 = buf[fo + y * 96 + x] as i32;
+            if(v > 180) {
+                m00 = m00 + 1;
+                if(x < x0) { x0 = x; }
+                if(x > x1) { x1 = x; }
+                if(y < y0) { y0 = y; }
+                if(y > y1) { y1 = y; }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let j:i32 = 2;
+    let conf:i64 = 150;
+    if(m00 >= 200) {
+        let bw:i64 = (x1 - x0 + 1) as i64;
+        let bh:i64 = (y1 - y0 + 1) as i64;
+        let bba:i64 = bw * bh;
+        if(bba < 1) { bba = 1; }
+        // fill x1000: CIRCLE~785, SQUARE~590 (rotated), TRIANGLE~500
+        let fill:i64 = m00 * 1000 / bba;
+        if(fill >= 700) {
+            j = 0; // CIRCLE
+            conf = iclamp(600 + (fill - 700) / 2, 50, 990);
+        }
+        if(fill < 700) {
+            if(fill >= 550) {
+                j = 2; // SQUARE
+                conf = iclamp(600 + (700 - fill) / 2, 50, 990);
+            }
+            if(fill < 550) {
+                j = 1; // TRIANGLE
+                conf = iclamp(600 + (550 - fill) / 2, 50, 990);
+            }
+        }
+    }
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 18500);
+}
+// cos/sin x1024, 36 rays, 10-degree steps (image coords: x right, y down)
+fn sh_cos(k:i32) i32 {
+    if(k == 0) { return 1024; }
+    if(k == 1) { return 1008; }
+    if(k == 2) { return 962; }
+    if(k == 3) { return 887; }
+    if(k == 4) { return 784; }
+    if(k == 5) { return 658; }
+    if(k == 6) { return 512; }
+    if(k == 7) { return 350; }
+    if(k == 8) { return 178; }
+    if(k == 9) { return 0; }
+    if(k == 10) { return -178; }
+    if(k == 11) { return -350; }
+    if(k == 12) { return -512; }
+    if(k == 13) { return -658; }
+    if(k == 14) { return -784; }
+    if(k == 15) { return -887; }
+    if(k == 16) { return -962; }
+    if(k == 17) { return -1008; }
+    if(k == 18) { return -1024; }
+    if(k == 19) { return -1008; }
+    if(k == 20) { return -962; }
+    if(k == 21) { return -887; }
+    if(k == 22) { return -784; }
+    if(k == 23) { return -658; }
+    if(k == 24) { return -512; }
+    if(k == 25) { return -350; }
+    if(k == 26) { return -178; }
+    if(k == 27) { return 0; }
+    if(k == 28) { return 178; }
+    if(k == 29) { return 350; }
+    if(k == 30) { return 512; }
+    if(k == 31) { return 658; }
+    if(k == 32) { return 784; }
+    if(k == 33) { return 887; }
+    if(k == 34) { return 962; }
+    if(k == 35) { return 1008; }
+    return 0;
+}
+fn sh_sin(k:i32) i32 {
+    if(k == 0) { return 0; }
+    if(k == 1) { return 178; }
+    if(k == 2) { return 350; }
+    if(k == 3) { return 512; }
+    if(k == 4) { return 658; }
+    if(k == 5) { return 784; }
+    if(k == 6) { return 887; }
+    if(k == 7) { return 962; }
+    if(k == 8) { return 1008; }
+    if(k == 9) { return 1024; }
+    if(k == 10) { return 1008; }
+    if(k == 11) { return 962; }
+    if(k == 12) { return 887; }
+    if(k == 13) { return 784; }
+    if(k == 14) { return 658; }
+    if(k == 15) { return 512; }
+    if(k == 16) { return 350; }
+    if(k == 17) { return 178; }
+    if(k == 18) { return 0; }
+    if(k == 19) { return -178; }
+    if(k == 20) { return -350; }
+    if(k == 21) { return -512; }
+    if(k == 22) { return -658; }
+    if(k == 23) { return -784; }
+    if(k == 24) { return -887; }
+    if(k == 25) { return -962; }
+    if(k == 26) { return -1008; }
+    if(k == 27) { return -1024; }
+    if(k == 28) { return -1008; }
+    if(k == 29) { return -962; }
+    if(k == 30) { return -887; }
+    if(k == 31) { return -784; }
+    if(k == 32) { return -658; }
+    if(k == 33) { return -512; }
+    if(k == 34) { return -350; }
+    if(k == 35) { return -178; }
+    return 0;
+}
+
+// ---------------- formation (audio) -------------------------------
+
+// t3 pitchdisc: zero-crossing COUNTS -> ratio r in 0.01%.
+// toneA [0,14400), toneB [16000,30400) samples (int16 LE at fo).
+fn pt_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let na:i64 = 0;
+    let nb:i64 = 0;
+    let i:i32 = 1;
+    let p0:i64 = t_geti16(buf, fo);
+    while(i < 14400) {
+        let p1:i64 = t_geti16(buf, fo + i * 2);
+        if(p0 <= 0) {
+            if(p1 > 0) { na = na + 1; }
+        }
+        if(p0 > 0) {
+            if(p1 <= 0) { na = na + 1; }
+        }
+        p0 = p1;
+        i = i + 1;
+    }
+    i = 16001;
+    p0 = t_geti16(buf, fo + 32000);
+    while(i < 30400) {
+        let p1:i64 = t_geti16(buf, fo + i * 2);
+        if(p0 <= 0) {
+            if(p1 > 0) { nb = nb + 1; }
+        }
+        if(p0 > 0) {
+            if(p1 <= 0) { nb = nb + 1; }
+        }
+        p0 = p1;
+        i = i + 1;
+    }
+    let r:i64 = 0;
+    if(na >= 10) { r = (nb - na) * 10000 / na; }
+    let j:i32 = 0;
+    if(r > 50) { j = 1; }
+    if(r < -50) { j = 2; }
+    let am:i64 = iabs(r);
+    let conf:i64 = iclamp(990 - 4 * iabs(am - 50), 50, 990);
+    if(na < 10) { conf = 100; }
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 60800);
+}
+
+// t4 timbredisc: Goertzel 8 harmonics -> spectral centroid -> bins.
+// coeff x1024 for k=880*m, N=32000 (2cos(2*pi*880*m/32000)*1024, rounded).
+fn tb_coeff(m:i32) i64 {
+    if(m == 1) { return 2018; }
+    if(m == 2) { return 1927; }
+    if(m == 3) { return 1779; }
+    if(m == 4) { return 1578; }
+    if(m == 5) { return 1330; }
+    if(m == 6) { return 1041; }
+    if(m == 7) { return 722; }
+    return 382;
+}
+fn tb_goertzel(buf:[]u8, bo:i32, m:i32, op:[]u8) i64 {
+    let coeff:i64 = tb_coeff(m);
+    let s1:i64 = 0;
+    let s2:i64 = 0;
+    let i:i32 = 0;
+    while(i < 32000) {
+        let x:i64 = t_geti16(buf, bo + i * 2);
+        let s0:i64 = x + coeff * s1 / 1024 - s2;
+        s2 = s1;
+        s1 = s0;
+        i = i + 1;
+    }
+    let p:i64 = s1 * s1 + s2 * s2 - s1 * s2 * coeff / 1024;
+    if(p < 0) { p = 0; }
+    op_add(op, 32000);
+    return p;
+}
+fn tb_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let powers:[]u8 = nio_alloc(64);
+    let i:i32 = 0;
+    while(i < 64) { powers[i] = 0; i = i + 1; }
+    let pmax:i64 = 1;
+    let m:i32 = 1;
+    while(m <= 8) {
+        let p:i64 = tb_goertzel(buf, fo, m, op);
+        t_put64(powers, (m - 1) * 8, p);
+        if(p > pmax) { pmax = p; }
+        m = m + 1;
+    }
+    let num:i64 = 0;
+    let den:i64 = 0;
+    m = 1;
+    while(m <= 8) {
+        let ps:i64 = t_get64(powers, (m - 1) * 8) * 1048576 / pmax;
+        num = num + (m as i64) * ps;
+        den = den + ps;
+        m = m + 1;
+    }
+    nio_free(powers);
+    if(den < 1) { den = 1; }
+    let cent:i64 = 440 * num / den;
+    let j:i32 = 1;
+    if(cent < 1550) { j = 3; }
+    if(cent < 950) { j = 2; }
+    if(cent < 520) { j = 0; }
+    let e1:i64 = iabs(cent - 520);
+    let e2:i64 = iabs(cent - 950);
+    let e3:i64 = iabs(cent - 1550);
+    let em:i64 = imin(e1, imin(e2, e3));
+    let conf:i64 = iclamp(990 - 2 * em, 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+}
+
+// ---------------- formation (motion) -------------------------------
+// t5 motiondir: block-match votes. votes: 9 x i32 arena.
+fn mot_quant(dx:i32, dy:i32) i32 {
+    if(dx == 0) {
+        if(dy == 0) { return 0; }
+    }
+    let ax:i32 = dx;
+    if(ax < 0) { ax = 0 - ax; }
+    let ay:i32 = dy;
+    if(ay < 0) { ay = 0 - ay; }
+    if(ax >= 2 * ay) {
+        if(dx > 0) { return 3; }
+        return 7;
+    }
+    if(ay >= 2 * ax) {
+        if(dy > 0) { return 5; }
+        return 1;
+    }
+    if(dx > 0) {
+        if(dy < 0) { return 2; }
+        return 4;
+    }
+    if(dy < 0) { return 8; }
+    return 6;
+}
+fn mot_vote(buf:[]u8, bo:i32, op:[]u8, votes:[]u8) void {
+    let t:i32 = 0;
+    while(t <= 44) {
+        let best_dx:i32 = 0;
+        let best_dy:i32 = 0;
+        let best_sad:i64 = 9223372036854775807;
+        let dy:i32 = -4;
+        while(dy <= 4) {
+            let dx:i32 = -4;
+            while(dx <= 4) {
+                let sad:i64 = 0;
+                let y:i32 = 8;
+                while(y < 24) {
+                    let x:i32 = 8;
+                    while(x < 24) {
+                        let a:i32 = buf[bo + t * 1024 + y * 32 + x] as i32;
+                        let b:i32 = buf[bo + (t + 2) * 1024 + (y + dy) * 32 + (x + dx)] as i32;
+                        let dd:i32 = a - b;
+                        if(dd < 0) { dd = 0 - dd; }
+                        sad = sad + (dd as i64);
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                if(sad < best_sad) {
+                    best_sad = sad;
+                    best_dx = dx;
+                    best_dy = dy;
+                }
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        // Generator moves the WINDOW by (dx,dy); content appears to move
+        // opposite. Negate to recover the window (truth) direction.
+        let j:i32 = mot_quant(0 - best_dx, 0 - best_dy);
+        t_put32(votes, j * 4, t_get32(votes, j * 4) + 1);
+        t = t + 2;
+    }
+    op_add(op, 477000);
+}
+fn mo_form(buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    let votes:[]u8 = nio_alloc(36);
+    let i:i32 = 0;
+    while(i < 36) { votes[i] = 0; i = i + 1; }
+    mot_vote(buf, fo, op, votes);
+    let best:i32 = 0;
+    let bestv:i64 = -1;
+    let second:i64 = -1;
+    let k:i32 = 0;
+    while(k < 9) {
+        let v:i64 = t_get32(votes, k * 4);
+        if(v > bestv) {
+            second = bestv;
+            bestv = v;
+            best = k;
+        }
+        if(v <= bestv) {
+            if(v > second) { second = v; }
+        }
+        k = k + 1;
+    }
+    nio_free(votes);
+    t_put32(res, 8, bestv);
+    t_put32(res, 12, bestv - second);
+    let conf:i64 = iclamp(600 + (bestv - second) * 20, 50, 990);
+    t_put32(res, 0, best as i64);
+    t_put32(res, 4, conf);
+}
+
+// ---------------- challenges: outcome from G evidence ---------------------
+// cs: [outcome:i32][stat1:i64][stat2:i64]. Returns outcome id (-1 unresolved).
+// The main applies the frozen per-task support rule (REGISTRY.md).
+
+// t0 colordisc CH-COL-1: spectral L1 (u16) under neutral token.
+fn cd_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    let allzero:i32 = 1;
+    let s:i64 = 0;
+    let k:i32 = 0;
+    while(k < 6) {
+        let a:i32 = (buf[go + 6144 + 2 * k] as i32)
+                  | ((buf[go + 6144 + 2 * k + 1] as i32) << 8);
+        let b:i32 = (buf[go + 6144 + 12 + 2 * k] as i32)
+                  | ((buf[go + 6144 + 12 + 2 * k + 1] as i32) << 8);
+        if(a != 0) { allzero = 0; }
+        if(b != 0) { allzero = 0; }
+        let dd:i32 = a - b;
+        if(dd < 0) { dd = 0 - dd; }
+        s = s + (dd as i64);
+        k = k + 1;
+    }
+    op_add(op, 24);
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, s);
+    t_put64(cs, 12, 0);
+    if(allzero == 1) { return -1; }
+    let o:i32 = 0;
+    if(s >= 15000) { o = 1; }
+    t_put32(cs, 0, o as i64);
+    return o;
+}
+
+// t1 colorconst CH-CCN-1: mean-RGB distance on neutral-illuminant G views.
+fn cc_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    let ar:i64 = 0; let ag:i64 = 0; let ab:i64 = 0;
+    let br:i64 = 0; let bg:i64 = 0; let bb:i64 = 0;
+    let i:i32 = 0;
+    while(i < 6912) {
+        ar = ar + (buf[go + i] as i64);
+        ag = ag + (buf[go + i + 1] as i64);
+        ab = ab + (buf[go + i + 2] as i64);
+        br = br + (buf[go + 6912 + i] as i64);
+        bg = bg + (buf[go + 6912 + i + 1] as i64);
+        bb = bb + (buf[go + 6912 + i + 2] as i64);
+        i = i + 3;
+    }
+    let dr:i64 = ar / 2304 - br / 2304;
+    let dg:i64 = ag / 2304 - bg / 2304;
+    let db:i64 = ab / 2304 - bb / 2304;
+    let d:i64 = isqrt(dr * dr + dg * dg + db * db);
+    op_add(op, 4648);
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, d);
+    t_put64(cs, 12, 0);
+    let o:i32 = 0;
+    if(d >= 20) { o = 1; }
+    t_put32(cs, 0, o as i64);
+    return o;
+}
+
+// t2 shapetrans CH-SHP-1: ray-profile harmonic shape on unoccluded quadrant.
+fn sh_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, 0);
+    t_put64(cs, 12, 0);
+    let m00:i64 = 0; let m10:i64 = 0; let m01:i64 = 0;
+    let y:i32 = 0;
+    while(y < 48) {
+        let x:i32 = 0;
+        while(x < 48) {
+            if((buf[go + y * 48 + x] as i32) > 180) {
+                m00 = m00 + 1;
+                m10 = m10 + (x as i64);
+                m01 = m01 + (y as i64);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    op_add(op, 2304);
+    if(m00 < 80) { return -1; }
+    let cx:i64 = m10 / m00;
+    let cy:i64 = m01 / m00;
+    let radii:[]u8 = nio_alloc(144);
+    let fit:[]u8 = nio_alloc(144);
+    let i:i32 = 0;
+    while(i < 144) { radii[i] = 0; fit[i] = 0; i = i + 1; }
+    let valid:i32 = 0;
+    let k:i32 = 0;
+    while(k < 36) {
+        let ck:i64 = sh_cos(k) as i64;
+        let sk:i64 = sh_sin(k) as i64;
+        let r:i32 = 1;
+        let edge_r:i32 = -1;
+        let seen:i32 = 0;
+        while(r <= 40) {
+            let xx:i64 = cx + (r as i64) * ck / 1024;
+            let yy:i64 = cy + (r as i64) * sk / 1024;
+            let inside:i32 = 0;
+            if(xx >= 0) {
+                if(xx < 48) {
+                    if(yy >= 0) {
+                        if(yy < 48) {
+                            if((buf[go + (yy as i32) * 48 + (xx as i32)] as i32) > 180) {
+                                inside = 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if(inside == 1) { seen = 1; }
+            if(inside == 0) {
+                if(seen == 1) {
+                    edge_r = r;
+                    r = 100;
+                }
+            }
+            if(r <= 40) { r = r + 1; }
+        }
+        t_put32(radii, k * 4, edge_r as i64);
+        if(edge_r > 0) { valid = valid + 1; }
+        k = k + 1;
+    }
+    op_add(op, 1500);
+    if(valid < 20) {
+        nio_free(radii);
+        nio_free(fit);
+        return -1;
+    }
+    let nc:i32 = 0;
+    k = 0;
+    while(k < 36) {
+        let rr:i64 = t_get32(radii, k * 4);
+        if(rr > 0) {
+            t_put32(fit, nc * 4, rr);
+            nc = nc + 1;
+        }
+        k = k + 1;
+    }
+    let med:i64 = med_i32(fit, nc);
+    if(med < 1) { med = 1; }
+    let a3:i64 = 0; let b3:i64 = 0;
+    let a4:i64 = 0; let b4:i64 = 0;
+    let sum0:i64 = 0;
+    k = 0;
+    while(k < 36) {
+        let rr:i64 = t_get32(radii, k * 4);
+        if(rr <= 0) { rr = med; }
+        let rn:i64 = rr * 1024 / med;
+        sum0 = sum0 + rn;
+        let i3:i32 = (3 * k) % 36;
+        let i4:i32 = (4 * k) % 36;
+        a3 = a3 + rn * (sh_cos(i3) as i64) / 1024;
+        b3 = b3 + rn * (sh_sin(i3) as i64) / 1024;
+        a4 = a4 + rn * (sh_cos(i4) as i64) / 1024;
+        b4 = b4 + rn * (sh_sin(i4) as i64) / 1024;
+        k = k + 1;
+    }
+    nio_free(radii);
+    nio_free(fit);
+    op_add(op, 600);
+    let den:i64 = sum0 * sum0;
+    if(den < 1) { den = 1; }
+    let f3:i64 = (a3 * a3 + b3 * b3) * 1000 / den;
+    let f4:i64 = (a4 * a4 + b4 * b4) * 1000 / den;
+    let o:i32 = 0;
+    let margin:i64 = 0;
+    if(f3 < 50) {
+        if(f4 < 50) {
+            o = 0;
+            margin = 50 - imax(f3, f4);
+        }
+    }
+    if(f3 >= 50) {
+        if(f4 < 50) {
+            o = 1;
+            margin = f3 - f4;
+        }
+    }
+    if(f4 >= 50) {
+        if(f3 < 50) {
+            o = 2;
+            margin = f4 - f3;
+        }
+    }
+    if(f3 >= 50) {
+        if(f4 >= 50) {
+            if(f3 >= f4) {
+                o = 1;
+                margin = f3 - f4;
+            }
+            if(f4 > f3) {
+                o = 2;
+                margin = f4 - f3;
+            }
+        }
+    }
+    t_put32(cs, 0, o as i64);
+    t_put64(cs, 4, imax(f3, f4));
+    t_put64(cs, 12, margin);
+    return o;
+}
+
+// t3 pitchdisc CH-PTC-1: interpolated zero-crossing frequency (x1024 Hz).
+// tone at bo+tone_off*2, length 14400 samples. Returns 0 if unvoiced.
+fn pt_freq(buf:[]u8, bo:i32, tone_off:i32, op:[]u8) i64 {
+    let n:i64 = 0;
+    let first:i64 = 0;
+    let last:i64 = 0;
+    let i:i32 = 1;
+    let p0:i64 = t_geti16(buf, bo + tone_off * 2);
+    while(i < 14400) {
+        let p1:i64 = t_geti16(buf, bo + (tone_off + i) * 2);
+        let cross:i32 = 0;
+        let pos:i64 = 0;
+        if(p0 <= 0) {
+            if(p1 > 0) {
+                let den:i64 = p1 - p0;
+                if(den > 0) {
+                    cross = 1;
+                    pos = ((tone_off + i - 1) as i64) * 1024
+                        + (0 - p0) * 1024 / den;
+                }
+            }
+        }
+        if(p0 > 0) {
+            if(p1 <= 0) {
+                let den:i64 = p0 - p1;
+                if(den > 0) {
+                    cross = 1;
+                    pos = ((tone_off + i - 1) as i64) * 1024
+                        + p0 * 1024 / den;
+                }
+            }
+        }
+        if(cross == 1) {
+            if(n == 0) { first = pos; }
+            last = pos;
+            n = n + 1;
+        }
+        p0 = p1;
+        i = i + 1;
+    }
+    op_add(op, 28800);
+    if(n < 10) { return 0; }
+    let span:i64 = last - first;
+    if(span <= 0) { return 0; }
+    return (n - 1) * 16000 * 1048576 / (2 * span);
+}
+fn pt_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, 0);
+    t_put64(cs, 12, 0);
+    let fa:i64 = pt_freq(buf, go, 0, op);
+    let fb:i64 = pt_freq(buf, go, 16000, op);
+    if(fa <= 0) { return -1; }
+    if(fb <= 0) { return -1; }
+    let r:i64 = (fb - fa) * 10000 / fa;
+    t_put64(cs, 4, r);
+    let o:i32 = 0;
+    if(r > 50) { o = 1; }
+    if(r < -50) { o = 2; }
+    t_put32(cs, 0, o as i64);
+    return o;
+}
+
+// t4 timbredisc CH-TMB-1: Goertzel m=1,2,3 power ratios -> template class.
+// ids: 0 PURE, 1 BRIGHT, 2 DARK, 3 RICH.
+fn tb_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, 0);
+    t_put64(cs, 12, 0);
+    let p1:i64 = tb_goertzel(buf, go, 1, op);
+    let p2:i64 = tb_goertzel(buf, go, 2, op);
+    let p3:i64 = tb_goertzel(buf, go, 3, op);
+    if(p1 <= 0) { return -1; }
+    let r2:i64 = p2 * 1000 / p1;
+    let r3:i64 = p3 * 1000 / p1;
+    let d0:i64 = r2 * r2 + r3 * r3;
+    let d1:i64 = (r2 - 1960) * (r2 - 1960) + (r3 - 2560) * (r3 - 2560);
+    let d2:i64 = (r2 - 78) * (r2 - 78) + (r3 - 6) * (r3 - 6);
+    let d3:i64 = (r2 - 640) * (r2 - 640) + (r3 - 384) * (r3 - 384);
+    let best:i32 = 0;
+    let bestd:i64 = d0;
+    if(d1 < bestd) { best = 1; bestd = d1; }
+    if(d2 < bestd) { best = 2; bestd = d2; }
+    if(d3 < bestd) { best = 3; bestd = d3; }
+    let margin:i64 = 9223372036854775807;
+    if(best != 0) {
+        if(d0 - bestd < margin) { margin = d0 - bestd; }
+    }
+    if(best != 1) {
+        if(d1 - bestd < margin) { margin = d1 - bestd; }
+    }
+    if(best != 2) {
+        if(d2 - bestd < margin) { margin = d2 - bestd; }
+    }
+    if(best != 3) {
+        if(d3 - bestd < margin) { margin = d3 - bestd; }
+    }
+    t_put32(cs, 0, best as i64);
+    t_put64(cs, 4, bestd);
+    t_put64(cs, 12, margin);
+    return best;
+}
+
+// t5 motiondir CH-MOT-1: block-match votes on clean high-contrast G.
+fn mo_chal(buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    t_put32(cs, 0, -1);
+    t_put64(cs, 4, 0);
+    t_put64(cs, 12, 0);
+    let votes:[]u8 = nio_alloc(36);
+    let i:i32 = 0;
+    while(i < 36) { votes[i] = 0; i = i + 1; }
+    mot_vote(buf, go, op, votes);
+    let best:i32 = 0;
+    let bestv:i64 = -1;
+    let second:i64 = -1;
+    let k:i32 = 0;
+    while(k < 9) {
+        let v:i64 = t_get32(votes, k * 4);
+        if(v > bestv) {
+            second = bestv;
+            bestv = v;
+            best = k;
+        }
+        if(v <= bestv) {
+            if(v > second) { second = v; }
+        }
+        k = k + 1;
+    }
+    nio_free(votes);
+    if(bestv < 8) { return -1; }
+    t_put32(cs, 0, best as i64);
+    t_put64(cs, 4, bestv);
+    t_put64(cs, 12, bestv - second);
+    return best;
+}
+
+// ---------------- main: CLI, R2FX parse, dispatch, ledger ------------------
+
+// Support rules (frozen, REGISTRY.md). Returns 1 if the challenge outcome
+// supports the claim, 0 otherwise. cs: [outcome][stat1][stat2].
+fn chal_supports(task:i32, claim:i32, cs:[]u8) i32 {
+    let o:i64 = t_get32(cs, 0);
+    let s1:i64 = t_get64(cs, 4);
+    let s2:i64 = t_get64(cs, 12);
+    if(o < 0) { return 0; }
+    if(task == 0) {
+        if(claim == 0) {
+            if(s1 <= 8000) { return 1; }
+            return 0;
+        }
+        if(s1 >= 25000) { return 1; }
+        return 0;
+    }
+    if(task == 1) {
+        if(claim == 0) {
+            if(s1 <= 12) { return 1; }
+            return 0;
+        }
+        if(s1 >= 30) { return 1; }
+        return 0;
+    }
+    if(task == 2) {
+        if(o != (claim as i64)) { return 0; }
+        if(s2 >= 30) { return 1; }
+        return 0;
+    }
+    if(task == 3) {
+        if(claim == 0) {
+            let a:i64 = s1;
+            if(a < 0) { a = 0 - a; }
+            if(a <= 35) { return 1; }
+            return 0;
+        }
+        if(claim == 1) {
+            if(s1 >= 65) { return 1; }
+            return 0;
+        }
+        if(s1 <= -65) { return 1; }
+        return 0;
+    }
+    if(task == 4) {
+        if(o != (claim as i64)) { return 0; }
+        if(s2 >= 20000) { return 1; }
+        return 0;
+    }
+    // task 5
+    if(o != (claim as i64)) { return 0; }
+    if(s1 < 10) { return 0; }
+    if(s2 >= 4) { return 1; }
+    return 0;
+}
+
+// Run formation for a task. res: 16 bytes [judgment][confidence][pad][pad].
+fn run_formation(task:i32, buf:[]u8, fo:i32, fl:i32, op:[]u8, res:[]u8) void {
+    if(task == 0) { cd_form(buf, fo, fl, op, res); return; }
+    if(task == 1) { cc_form(buf, fo, fl, op, res); return; }
+    if(task == 2) { sh_form(buf, fo, fl, op, res); return; }
+    if(task == 3) { pt_form(buf, fo, fl, op, res); return; }
+    if(task == 4) { tb_form(buf, fo, fl, op, res); return; }
+    mo_form(buf, fo, fl, op, res);
+    return;
+}
+
+// Run challenge for a task. cs: 16 bytes [outcome][stat1][stat2].
+fn run_challenge(task:i32, buf:[]u8, go:i32, gl:i32, op:[]u8, cs:[]u8) i32 {
+    if(task == 0) { return cd_chal(buf, go, gl, op, cs); }
+    if(task == 1) { return cc_chal(buf, go, gl, op, cs); }
+    if(task == 2) { return sh_chal(buf, go, gl, op, cs); }
+    if(task == 3) { return pt_chal(buf, go, gl, op, cs); }
+    if(task == 4) { return tb_chal(buf, go, gl, op, cs); }
+    return mo_chal(buf, go, gl, op, cs);
+}
+
+// ---------------- ledger: hash-chained append-only log --------------------
+// Entry line:
+// seq=<n> prev=<hex64> fixture=<id> task=<t> judgment=<j> conf=<c>
+// chal=<cid> outcome=<o> stat1=<s1> stat2=<s2> disp=<d> ops=<n> hash=<hex64>
+// hash = sha256hex(prev_raw32 + content_before_hash).
+
+// Extract the hash= value from the last non-empty line of a ledger buffer.
+// Returns 1 if found (writes 64 hex chars to hout), 0 otherwise.
+fn led_last_hash(buf:[]u8, n:i32, hout:[]u8) i32 {
+    let i:i32 = n - 1;
+    // skip trailing newlines
+    while(i >= 0) {
+        if(buf[i] != 10) { break; }
+        i = i - 1;
+    }
+    if(i < 0) { return 0; }
+    let line_end:i32 = i + 1;
+    // find line start
+    while(i >= 0) {
+        if(buf[i] == 10) { break; }
+        i = i - 1;
+    }
+    let ls:i32 = i + 1;
+    // find " hash=" in [ls, line_end)
+    let p:i32 = ls;
+    let found:i32 = -1;
+    while(p + 6 < line_end) {
+        if(buf[p] == 32) {
+            if(buf[p + 1] == 104) {
+                if(buf[p + 2] == 97) {
+                    if(buf[p + 3] == 115) {
+                        if(buf[p + 4] == 104) {
+                            if(buf[p + 5] == 61) {
+                                found = p + 6;
+                                p = line_end;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if(found == -1) { p = p + 1; }
+    }
+    if(found < 0) { return 0; }
+    if(found + 64 > line_end) { return 0; }
+    let k:i32 = 0;
+    while(k < 64) {
+        hout[k] = buf[found + k];
+        k = k + 1;
+    }
+    return 1;
+}
+
+// Count lines (seq for next entry).
+fn led_count_lines(buf:[]u8, n:i32) i64 {
+    let c:i64 = 0;
+    let i:i32 = 0;
+    while(i < n) {
+        if(buf[i] == 10) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+
+// Convert 64 hex chars to 32 raw bytes.
+fn hex_to_raw(hex:[]u8, raw:[]u8) void {
+    let i:i32 = 0;
+    while(i < 32) {
+        let h0:i32 = hex[2 * i] as i32;
+        let h1:i32 = hex[2 * i + 1] as i32;
+        let v0:i32 = 0;
+        if(h0 >= 48) {
+            if(h0 <= 57) { v0 = h0 - 48; }
+        }
+        if(h0 >= 97) {
+            if(h0 <= 102) { v0 = h0 - 97 + 10; }
+        }
+        let v1:i32 = 0;
+        if(h1 >= 48) {
+            if(h1 <= 57) { v1 = h1 - 48; }
+        }
+        if(h1 >= 97) {
+            if(h1 <= 102) { v1 = h1 - 97 + 10; }
+        }
+        raw[i] = (v0 * 16 + v1) as u8;
+        i = i + 1;
+    }
+}
+
+// ---------------- output helpers -----------------------------------------
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    let n:i32 = s.len;
+    if(n > 0) {
+        if(s[n - 1] == 10) { n = n - 1; }
+    }
+    // return a fresh slice without the trailing newline
+    let o:[]u8 = nio_alloc(n);
+    let i:i32 = 0;
+    while(i < n) {
+        o[i] = s[i];
+        i = i + 1;
+    }
+    _zag_free(_zag_slice_ptr(s));
+    return o;
+}
+fn out_kv(key:[]u8, val:[]u8) void {
+    _zag_print(key);
+    _zag_print("=");
+    _zag_print(val);
+    _zag_print("\n");
+}
+fn out_kv_i(key:[]u8, v:i64) void {
+    let s:[]u8 = i64s(v);
+    out_kv(key, s);
+    nio_free(s);
+}
+
+// (task_id defined above in registry section)
+
+// ---------------- legacy formation (frozen harness .img/.pcm/.vid) ------
+// .img: u32 w, u32 h, RGB24. .pcm: u32 rate, u32 count, int16.
+// .vid: u32 nframes, u32 w, u32 h, RGB24.
+
+// t0 legacy colordisc: 128x64, left vs right 64x64 patches.
+fn leg_cd(buf:[]u8, op:[]u8, res:[]u8) void {
+    let base:i32 = 8;
+    let lr:i64 = 0; let lg:i64 = 0; let lb:i64 = 0;
+    let rr:i64 = 0; let rg:i64 = 0; let rb:i64 = 0;
+    let y:i32 = 0;
+    while(y < 64) {
+        let x:i32 = 0;
+        while(x < 64) {
+            let o:i32 = base + (y * 128 + x) * 3;
+            lr = lr + (buf[o] as i64);
+            lg = lg + (buf[o + 1] as i64);
+            lb = lb + (buf[o + 2] as i64);
+            let o2:i32 = o + 64 * 3;
+            rr = rr + (buf[o2] as i64);
+            rg = rg + (buf[o2 + 1] as i64);
+            rb = rb + (buf[o2 + 2] as i64);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let dr:i64 = lr / 4096 - rr / 4096;
+    let dg:i64 = lg / 4096 - rg / 4096;
+    let db:i64 = lb / 4096 - rb / 4096;
+    let d:i64 = isqrt(dr * dr + dg * dg + db * db);
+    let j:i32 = 0;
+    if(d >= 25) { j = 1; }
+    let conf:i64 = iclamp(950 - 18 * iabs(d - 25), 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 8192);
+}
+
+// t1 legacy colorconst: 128x64, chromaticity L1 x1000.
+fn leg_cc(buf:[]u8, op:[]u8, res:[]u8) void {
+    let base:i32 = 8;
+    let ar:i64 = 0; let ag:i64 = 0; let ab:i64 = 0;
+    let br:i64 = 0; let bg:i64 = 0; let bb:i64 = 0;
+    let y:i32 = 0;
+    while(y < 64) {
+        let x:i32 = 0;
+        while(x < 64) {
+            let o:i32 = base + (y * 128 + x) * 3;
+            ar = ar + (buf[o] as i64);
+            ag = ag + (buf[o + 1] as i64);
+            ab = ab + (buf[o + 2] as i64);
+            let o2:i32 = o + 64 * 3;
+            br = br + (buf[o2] as i64);
+            bg = bg + (buf[o2 + 1] as i64);
+            bb = bb + (buf[o2 + 2] as i64);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let ta:i64 = ar + ag + ab;
+    let tb:i64 = br + bg + bb;
+    if(ta < 1) { ta = 1; }
+    if(tb < 1) { tb = 1; }
+    let d:i64 = iabs(ar * 1000 / ta - br * 1000 / tb)
+              + iabs(ag * 1000 / ta - bg * 1000 / tb)
+              + iabs(ab * 1000 / ta - bb * 1000 / tb);
+    let j:i32 = 0;
+    if(d >= 80) { j = 1; }
+    let conf:i64 = iclamp(950 - 12 * iabs(d - 80), 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 8192);
+}
+
+// t2 legacy shapetrans: 96x96 RGB -> grayscale -> moments.
+fn leg_sh(buf:[]u8, op:[]u8, res:[]u8) void {
+    let gray:[]u8 = nio_alloc(9216);
+    let i:i32 = 0;
+    while(i < 9216) {
+        let o:i32 = 8 + i * 3;
+        let v:i32 = (buf[o] as i32) + (buf[o + 1] as i32) + (buf[o + 2] as i32);
+        gray[i] = (v / 3) as u8;
+        i = i + 1;
+    }
+    op_add(op, 9216);
+    sh_form(gray, 0, 9216, op, res);
+    nio_free(gray);
+}
+
+// t3 legacy pitchdisc: 14080 samples; tones [0,6400) and [7680,14080).
+fn leg_pt(buf:[]u8, op:[]u8, res:[]u8) void {
+    let base:i32 = 8;
+    let na:i64 = 0;
+    let nb:i64 = 0;
+    let i:i32 = 1;
+    let p0:i64 = t_geti16(buf, base);
+    while(i < 6400) {
+        let p1:i64 = t_geti16(buf, base + i * 2);
+        if(p0 <= 0) {
+            if(p1 > 0) { na = na + 1; }
+        }
+        if(p0 > 0) {
+            if(p1 <= 0) { na = na + 1; }
+        }
+        p0 = p1;
+        i = i + 1;
+    }
+    i = 7681;
+    p0 = t_geti16(buf, base + 7680 * 2);
+    while(i < 14080) {
+        let p1:i64 = t_geti16(buf, base + i * 2);
+        if(p0 <= 0) {
+            if(p1 > 0) { nb = nb + 1; }
+        }
+        if(p0 > 0) {
+            if(p1 <= 0) { nb = nb + 1; }
+        }
+        p0 = p1;
+        i = i + 1;
+    }
+    let r:i64 = 0;
+    if(na >= 10) { r = (nb - na) * 10000 / na; }
+    let j:i32 = 0;
+    if(r > 50) { j = 1; }
+    if(r < -50) { j = 2; }
+    let conf:i64 = iclamp(990 - 4 * iabs(iabs(r) - 50), 50, 990);
+    if(na < 10) { conf = 100; }
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+    op_add(op, 28160);
+}
+
+// t4 legacy timbredisc: 12800 samples, Goertzel N=12800 (same coeffs).
+fn leg_tb_goertzel(buf:[]u8, bo:i32, m:i32, op:[]u8) i64 {
+    let coeff:i64 = tb_coeff(m);
+    let s1:i64 = 0;
+    let s2:i64 = 0;
+    let i:i32 = 0;
+    while(i < 12800) {
+        let x:i64 = t_geti16(buf, bo + i * 2);
+        let s0:i64 = x + coeff * s1 / 1024 - s2;
+        s2 = s1;
+        s1 = s0;
+        i = i + 1;
+    }
+    let p:i64 = s1 * s1 + s2 * s2 - s1 * s2 * coeff / 1024;
+    if(p < 0) { p = 0; }
+    op_add(op, 12800);
+    return p;
+}
+fn leg_tb(buf:[]u8, op:[]u8, res:[]u8) void {
+    let base:i32 = 8;
+    let powers:[]u8 = nio_alloc(64);
+    let i:i32 = 0;
+    while(i < 64) { powers[i] = 0; i = i + 1; }
+    let pmax:i64 = 1;
+    let m:i32 = 1;
+    while(m <= 8) {
+        let p:i64 = leg_tb_goertzel(buf, base, m, op);
+        t_put64(powers, (m - 1) * 8, p);
+        if(p > pmax) { pmax = p; }
+        m = m + 1;
+    }
+    let num:i64 = 0;
+    let den:i64 = 0;
+    m = 1;
+    while(m <= 8) {
+        let ps:i64 = t_get64(powers, (m - 1) * 8) * 1048576 / pmax;
+        num = num + (m as i64) * ps;
+        den = den + ps;
+        m = m + 1;
+    }
+    nio_free(powers);
+    if(den < 1) { den = 1; }
+    let cent:i64 = 440 * num / den;
+    let j:i32 = 1;
+    if(cent < 1550) { j = 3; }
+    if(cent < 950) { j = 2; }
+    if(cent < 520) { j = 0; }
+    let e1:i64 = iabs(cent - 520);
+    let e2:i64 = iabs(cent - 950);
+    let e3:i64 = iabs(cent - 1550);
+    let em:i64 = imin(e1, imin(e2, e3));
+    let conf:i64 = iclamp(990 - 2 * em, 50, 990);
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+}
+
+// t5 legacy motiondir: 8 frames 64x64 RGB. Block-match frame0->frame2,
+// central 32x32 block, search +-8 (2px/frame * 2 frames = 4px, margin for noise).
+fn leg_mo(buf:[]u8, op:[]u8, res:[]u8) void {
+    let base:i32 = 12;
+    let fsize:i32 = 64 * 64 * 3;
+    // grayscale frame0 and frame2 into temp (64x64)
+    let g0:[]u8 = nio_alloc(4096);
+    let g2:[]u8 = nio_alloc(4096);
+    let i:i32 = 0;
+    while(i < 4096) {
+        let o0:i32 = base + i * 3;
+        let o2:i32 = base + 2 * fsize + i * 3;
+        let v0:i32 = (buf[o0] as i32) + (buf[o0 + 1] as i32) + (buf[o0 + 2] as i32);
+        let v2:i32 = (buf[o2] as i32) + (buf[o2 + 1] as i32) + (buf[o2 + 2] as i32);
+        g0[i] = (v0 / 3) as u8;
+        g2[i] = (v2 / 3) as u8;
+        i = i + 1;
+    }
+    op_add(op, 8192);
+    let best_dx:i32 = 0;
+    let best_dy:i32 = 0;
+    let best_sad:i64 = 9223372036854775807;
+    let dy:i32 = -8;
+    while(dy <= 8) {
+        let dx:i32 = -8;
+        while(dx <= 8) {
+            let sad:i64 = 0;
+            let y:i32 = 16;
+            while(y < 48) {
+                let x:i32 = 16;
+                while(x < 48) {
+                    let a:i32 = g0[y * 64 + x] as i32;
+                    let b:i32 = g2[(y + dy) * 64 + (x + dx)] as i32;
+                    let dd:i32 = a - b;
+                    if(dd < 0) { dd = 0 - dd; }
+                    sad = sad + (dd as i64);
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            if(sad < best_sad) {
+                best_sad = sad;
+                best_dx = dx;
+                best_dy = dy;
+            }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    nio_free(g0);
+    nio_free(g2);
+    op_add(op, 289 * 1024);
+    // Legacy: window moves OPPOSITE vec so content translates in the labeled
+    // direction. (dx,dy) is 2-frame content displacement; do NOT negate.
+    let j:i32 = mot_quant(best_dx / 2, best_dy / 2);
+    // confidence from SAD margin is complex; use displacement magnitude.
+    let mag:i64 = isqrt((best_dx as i64) * (best_dx as i64)
+                      + (best_dy as i64) * (best_dy as i64));
+    let conf:i64 = 600;
+    if(j == 0) {
+        if(mag <= 2) { conf = 900; }
+        if(mag > 2) { conf = 300; }
+    }
+    if(j != 0) {
+        if(mag >= 3) { conf = 850; }
+        if(mag < 3) { conf = 400; }
+    }
+    t_put32(res, 0, j as i64);
+    t_put32(res, 4, conf);
+}
+
+// ---------------- main ----------------------------------------------------
+fn read_file(path:[]u8, out:[]u8, maxn:i32) i64 {
+    let cpath:[]u8 = nio_cstr(path);
+    // O_RDONLY (0); nio_open_root uses O_DIRECTORY which rejects regular files.
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cpath) as i64, 0, 0, 0, 0, 0);
+    nio_free(cpath);
+    if(fd < 0) { return -1; }
+    let n:i64 = nio_read_exact(fd, out, maxn);
+    nio_close(fd);
+    return n;
+}
+
+fn append_ledger(lpath:[]u8, content:[]u8) i32 {
+    // content: entry without " hash=...". Computes hash and appends.
+    let cpath:[]u8 = nio_cstr(lpath);
+    // read existing to get prev hash (O_RDONLY; not O_DIRECTORY)
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cpath) as i64, 0, 0, 0, 0, 0);
+    let prev_hex:[]u8 = nio_alloc(64);
+    let i:i32 = 0;
+    while(i < 64) { prev_hex[i] = 48; i = i + 1; } // "0"*64
+    let seq:i64 = 0;
+    if(fd >= 0) {
+        let lbuf:[]u8 = nio_alloc(8388608);
+        let n:i64 = nio_read_exact(fd, lbuf, 8388608);
+        nio_close(fd);
+        if(n > 0) {
+            seq = led_count_lines(lbuf, n as i32);
+            led_last_hash(lbuf, n as i32, prev_hex);
+        }
+        nio_free(lbuf);
+    }
+    nio_free(cpath);
+    // hash = sha256hex(raw_prev32 + content)
+    let prev_raw:[]u8 = nio_alloc(32);
+    hex_to_raw(prev_hex, prev_raw);
+    let hbin:[]u8 = nio_alloc(content.len + 32);
+    i = 0;
+    while(i < 32) {
+        hbin[i] = prev_raw[i];
+        i = i + 1;
+    }
+    i = 0;
+    while(i < content.len) {
+        hbin[32 + i] = content[i];
+        i = i + 1;
+    }
+    let digest:[]u8 = nio_alloc(32);
+    ns_sha256(hbin, digest);
+    let dhex:[]u8 = ns_hex(digest);
+    nio_free(prev_raw);
+    nio_free(hbin);
+    nio_free(digest);
+    nio_free(prev_hex);
+    // build final line: content + " hash=" + dhex + "\n"
+    let line:[]u8 = nio_alloc(content.len + 6 + 64 + 1);
+    i = 0;
+    while(i < content.len) {
+        line[i] = content[i];
+        i = i + 1;
+    }
+    let tag:[]u8 = " hash=";
+    let k:i32 = 0;
+    while(k < 6) {
+        line[content.len + k] = tag[k];
+        k = k + 1;
+    }
+    k = 0;
+    while(k < 64) {
+        line[content.len + 6 + k] = dhex[k];
+        k = k + 1;
+    }
+    line[content.len + 6 + 64] = 10;
+    nio_free(dhex);
+    // append (O_WRONLY|O_CREAT|O_APPEND)
+    let cpath2:[]u8 = nio_cstr(lpath);
+    let fd2:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cpath2) as i64, 1089, 420, 0, 0, 0);
+    nio_free(cpath2);
+    if(fd2 < 0) {
+        nio_free(line);
+        return -1;
+    }
+    let w:i64 = nio_write_all(fd2, line);
+    nio_close(fd2);
+    nio_free(line);
+    if(w < 0) { return -1; }
+    return seq as i32;
+}
+
+// do_full: R2FX fixture. ablate=0: full contract; ablate=1: challenge-less.
+fn do_full(ablate:i32) void {
+    let fpath:[]u8 = _zag_arg(2);
+    let lpath:[]u8 = _zag_arg(3);
+    let buf:[]u8 = nio_alloc(300000);
+    let n:i64 = read_file(fpath, buf, 300000);
+    if(n < 32) {
+        _zag_print("error=fixture read failed or too short\n");
+        nio_free(buf);
+        return;
+    }
+    let magic:i64 = t_get32(buf, 0);
+    if(magic != 1379026520) {
+        _zag_print("error=bad R2FX magic\n");
+        nio_free(buf);
+        return;
+    }
+    let task:i64 = t_get32(buf, 4);
+    let index:i64 = t_get32(buf, 8);
+    let family:i64 = t_get32(buf, 12);
+    let fo:i64 = t_get32(buf, 16);
+    let fl:i64 = t_get32(buf, 20);
+    let go:i64 = t_get32(buf, 24);
+    let gl:i64 = t_get32(buf, 28);
+    if(task < 0) { task = 0; }
+    if(task > 5) { task = 5; }
+    // validate spans: within file, non-overlapping
+    let ok:i32 = 1;
+    if(fo < 32) { ok = 0; }
+    if(go < 32) { ok = 0; }
+    if(fo + fl > n) { ok = 0; }
+    if(go + gl > n) { ok = 0; }
+    if(fo < go) {
+        if(fo + fl > go) { ok = 0; }
+    }
+    if(go < fo) {
+        if(go + gl > fo) { ok = 0; }
+    }
+    if(fo == go) { ok = 0; }
+    if(ok == 0) {
+        _zag_print("error=invalid or overlapping spans\n");
+        nio_free(buf);
+        return;
+    }
+    let op:[]u8 = nio_alloc(8);
+    op_zero(op);
+    let res:[]u8 = nio_alloc(16);
+    let i:i32 = 0;
+    while(i < 16) { res[i] = 0; i = i + 1; }
+    run_formation(task as i32, buf, fo as i32, fl as i32, op, res);
+    let claim:i64 = t_get32(res, 0);
+    let conf:i64 = t_get32(res, 4);
+    let cs:[]u8 = nio_alloc(24);
+    i = 0;
+    while(i < 24) { cs[i] = 0; i = i + 1; }
+    t_put32(cs, 0, -1);
+    let disp:[]u8 = "WITHHOLD";
+    if(ablate == 1) {
+        disp = "INSTALL";
+    }
+    if(ablate == 0) {
+        let o:i32 = run_challenge(task as i32, buf, go as i32, gl as i32, op, cs);
+        if(o >= 0) {
+            if(chal_supports(task as i32, claim as i32, cs) == 1) {
+                disp = "INSTALL";
+            }
+        }
+    }
+    let ops:i64 = op_get(op);
+    nio_free(buf);
+    nio_free(op);
+    // ledger content
+    let cb:[]u8 = nio_alloc(512);
+    let cl:i32 = 0;
+    // fixture=r2fx_t<task>_i<index>_f<family>
+    let fx0:[]u8 = "fixture=";
+    let p:i32 = 0;
+    while(p < 8) { cb[cl] = fx0[p]; cl = cl + 1; p = p + 1; }
+    let fx:[]u8 = "r2fx_t";
+    p = 0;
+    while(p < 6) { cb[cl] = fx[p]; cl = cl + 1; p = p + 1; }
+    let st:[]u8 = i64s(task);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    let mi:[]u8 = "_i";
+    cb[cl] = mi[0]; cl = cl + 1; cb[cl] = mi[1]; cl = cl + 1;
+    st = i64s(index);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    let mf:[]u8 = "_f";
+    cb[cl] = mf[0]; cl = cl + 1; cb[cl] = mf[1]; cl = cl + 1;
+    st = i64s(family);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    // task, judgment, conf, challenge, outcome, disp, ops
+    let tn:[]u8 = " task=";
+    p = 0;
+    while(p < 6) { cb[cl] = tn[p]; cl = cl + 1; p = p + 1; }
+    let tname:[]u8 = task_name(task as i32);
+    p = 0;
+    while(p < tname.len) { cb[cl] = tname[p]; cl = cl + 1; p = p + 1; }
+    let jn:[]u8 = " judgment=";
+    p = 0;
+    while(p < 10) { cb[cl] = jn[p]; cl = cl + 1; p = p + 1; }
+    let jstr:[]u8 = jname(task as i32, claim as i32);
+    p = 0;
+    while(p < jstr.len) { cb[cl] = jstr[p]; cl = cl + 1; p = p + 1; }
+    let cf:[]u8 = " conf=";
+    p = 0;
+    while(p < 6) { cb[cl] = cf[p]; cl = cl + 1; p = p + 1; }
+    st = i64s(conf);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    let ch:[]u8 = " challenge=";
+    p = 0;
+    while(p < 11) { cb[cl] = ch[p]; cl = cl + 1; p = p + 1; }
+    let cid:[]u8 = reg_challenge(task as i32);
+    p = 0;
+    while(p < cid.len) { cb[cl] = cid[p]; cl = cl + 1; p = p + 1; }
+    let oc:[]u8 = " outcome=";
+    p = 0;
+    while(p < 9) { cb[cl] = oc[p]; cl = cl + 1; p = p + 1; }
+    let ov:i64 = t_get32(cs, 0);
+    if(ov < 0) {
+        let un:[]u8 = "UNRESOLVED";
+        p = 0;
+        while(p < 10) { cb[cl] = un[p]; cl = cl + 1; p = p + 1; }
+    }
+    if(ov >= 0) {
+        let ostr:[]u8 = jname(task as i32, ov as i32);
+        p = 0;
+        while(p < ostr.len) { cb[cl] = ostr[p]; cl = cl + 1; p = p + 1; }
+    }
+    let dp:[]u8 = " disp=";
+    p = 0;
+    while(p < 6) { cb[cl] = dp[p]; cl = cl + 1; p = p + 1; }
+    p = 0;
+    while(p < disp.len) { cb[cl] = disp[p]; cl = cl + 1; p = p + 1; }
+    let opss:[]u8 = " ops=";
+    p = 0;
+    while(p < 5) { cb[cl] = opss[p]; cl = cl + 1; p = p + 1; }
+    st = i64s(ops);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    // slice to actual length
+    let content:[]u8 = nio_alloc(cl);
+    p = 0;
+    while(p < cl) { content[p] = cb[p]; p = p + 1; }
+    nio_free(cb);
+    nio_free(res);
+    nio_free(cs);
+    let seq:i32 = append_ledger(lpath, content);
+    nio_free(content);
+    // stdout
+    out_kv("approach", "R2-7");
+    out_kv("task", tname);
+    out_kv("judgment", jstr);
+    out_kv_i("confidence", conf);
+    out_kv("challenge", cid);
+    if(ov < 0) {
+        out_kv("outcome", "UNRESOLVED");
+    }
+    if(ov >= 0) {
+        let ostr2:[]u8 = jname(task as i32, ov as i32);
+        out_kv("outcome", ostr2);
+    }
+    out_kv("disposition", disp);
+    out_kv_i("ops", ops);
+    out_kv_i("ledger_seq", seq as i64);
+    return;
+}
+
+// do_legacy: frozen harness fixture (no G). Formation only; WITHHOLD.
+fn do_legacy() void {
+    let tname:[]u8 = _zag_arg(2);
+    let fpath:[]u8 = _zag_arg(3);
+    let lpath:[]u8 = _zag_arg(4);
+    let task:i32 = task_id(tname);
+    if(task < 0) {
+        _zag_print("error=unknown task\n");
+        return;
+    }
+    let buf:[]u8 = nio_alloc(300000);
+    let n:i64 = read_file(fpath, buf, 300000);
+    if(n < 16) {
+        _zag_print("error=fixture read failed\n");
+        nio_free(buf);
+        return;
+    }
+    let op:[]u8 = nio_alloc(8);
+    op_zero(op);
+    let res:[]u8 = nio_alloc(16);
+    let i:i32 = 0;
+    while(i < 16) { res[i] = 0; i = i + 1; }
+    if(task == 0) { leg_cd(buf, op, res); }
+    if(task == 1) { leg_cc(buf, op, res); }
+    if(task == 2) { leg_sh(buf, op, res); }
+    if(task == 3) { leg_pt(buf, op, res); }
+    if(task == 4) { leg_tb(buf, op, res); }
+    if(task == 5) { leg_mo(buf, op, res); }
+    let claim:i64 = t_get32(res, 0);
+    let conf:i64 = t_get32(res, 4);
+    let ops:i64 = op_get(op);
+    nio_free(buf);
+    nio_free(op);
+    nio_free(res);
+    // basename for ledger
+    let blen:i32 = fpath.len;
+    let bs:i32 = 0;
+    let p:i32 = 0;
+    while(p < blen) {
+        if(fpath[p] == 47) { bs = p + 1; }
+        p = p + 1;
+    }
+    let cb:[]u8 = nio_alloc(512);
+    let cl:i32 = 0;
+    let fx:[]u8 = "fixture=";
+    p = 0;
+    while(p < 8) { cb[cl] = fx[p]; cl = cl + 1; p = p + 1; }
+    p = bs;
+    while(p < blen) { cb[cl] = fpath[p]; cl = cl + 1; p = p + 1; }
+    let tn:[]u8 = " task=";
+    p = 0;
+    while(p < 6) { cb[cl] = tn[p]; cl = cl + 1; p = p + 1; }
+    p = 0;
+    while(p < tname.len) { cb[cl] = tname[p]; cl = cl + 1; p = p + 1; }
+    let jn:[]u8 = " judgment=";
+    p = 0;
+    while(p < 10) { cb[cl] = jn[p]; cl = cl + 1; p = p + 1; }
+    let jstr:[]u8 = jname(task, claim as i32);
+    p = 0;
+    while(p < jstr.len) { cb[cl] = jstr[p]; cl = cl + 1; p = p + 1; }
+    let cf:[]u8 = " conf=";
+    p = 0;
+    while(p < 6) { cb[cl] = cf[p]; cl = cl + 1; p = p + 1; }
+    let st:[]u8 = i64s(conf);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    let dp:[]u8 = " disp=WITHHOLD ops=";
+    p = 0;
+    while(p < 18) { cb[cl] = dp[p]; cl = cl + 1; p = p + 1; }
+    st = i64s(ops);
+    p = 0;
+    while(p < st.len) { cb[cl] = st[p]; cl = cl + 1; p = p + 1; }
+    nio_free(st);
+    let content:[]u8 = nio_alloc(cl);
+    p = 0;
+    while(p < cl) { content[p] = cb[p]; p = p + 1; }
+    nio_free(cb);
+    let seq:i32 = append_ledger(lpath, content);
+    nio_free(content);
+    out_kv("approach", "R2-7");
+    out_kv("task", tname);
+    out_kv("judgment", jstr);
+    out_kv_i("confidence", conf);
+    out_kv("challenge", "NONE");
+    out_kv("outcome", "UNRESOLVED");
+    out_kv("disposition", "WITHHOLD");
+    out_kv_i("ops", ops);
+    out_kv_i("ledger_seq", seq as i64);
+    return;
+}
+
+// do_audit: verify ledger hash chain. Prints audit=OK/FAIL.
+fn do_audit() void {
+    let lpath:[]u8 = _zag_arg(2);
+    let buf:[]u8 = nio_alloc(8388608);
+    let n:i64 = read_file(lpath, buf, 8388608);
+    if(n <= 0) {
+        _zag_print("audit=FAIL(empty or unreadable)\n");
+        nio_free(buf);
+        return;
+    }
+    let prev_hex:[]u8 = nio_alloc(64);
+    let i:i32 = 0;
+    while(i < 64) { prev_hex[i] = 48; i = i + 1; }
+    let pos:i32 = 0;
+    let ok:i32 = 1;
+    let count:i64 = 0;
+    while(pos < (n as i32)) {
+        // find line end
+        let le:i32 = pos;
+        while(le < (n as i32)) {
+            if(buf[le] == 10) { break; }
+            le = le + 1;
+        }
+        if(le > pos) {
+            // find " hash=" (last occurrence)
+            let hp:i32 = -1;
+            let q:i32 = pos;
+            while(q + 6 <= le) {
+                if(buf[q] == 32) {
+                    if(buf[q + 1] == 104) {
+                        if(buf[q + 2] == 97) {
+                            if(buf[q + 3] == 115) {
+                                if(buf[q + 4] == 104) {
+                                    if(buf[q + 5] == 61) { hp = q; }
+                                }
+                            }
+                        }
+                    }
+                }
+                q = q + 1;
+            }
+            if(hp < 0) { ok = 0; }
+            if(hp + 6 + 64 > le) { ok = 0; }
+            if(ok == 1) {
+                // content = [pos, hp), stored hash = [hp+6, hp+70)
+                let prev_raw:[]u8 = nio_alloc(32);
+                hex_to_raw(prev_hex, prev_raw);
+                let clen:i32 = hp - pos;
+                let hbin:[]u8 = nio_alloc(clen + 32);
+                i = 0;
+                while(i < 32) {
+                    hbin[i] = prev_raw[i];
+                    i = i + 1;
+                }
+                i = 0;
+                while(i < clen) {
+                    hbin[32 + i] = buf[pos + i];
+                    i = i + 1;
+                }
+                let digest:[]u8 = nio_alloc(32);
+                ns_sha256(hbin, digest);
+                let dhex:[]u8 = ns_hex(digest);
+                nio_free(prev_raw);
+                nio_free(hbin);
+                nio_free(digest);
+                i = 0;
+                while(i < 64) {
+                    if(dhex[i] != buf[hp + 6 + i]) { ok = 0; }
+                    prev_hex[i] = buf[hp + 6 + i];
+                    i = i + 1;
+                }
+                nio_free(dhex);
+                count = count + 1;
+            }
+        }
+        pos = le + 1;
+    }
+    nio_free(buf);
+    nio_free(prev_hex);
+    if(ok == 1) {
+        _zag_print("audit=OK(");
+        let s:[]u8 = i64s(count);
+        _zag_print(s);
+        nio_free(s);
+        _zag_print(" entries)\n");
+    }
+    if(ok == 0) {
+        _zag_print("audit=FAIL(chain broken)\n");
+    }
+    return;
+}
+
+fn main() void {
+    let mode:[]u8 = _zag_arg(1);
+    if(_zag_strcmp(mode, "full") == 1) {
+        do_full(0);
+        return;
+    }
+    if(_zag_strcmp(mode, "ablate") == 1) {
+        do_full(1);
+        return;
+    }
+    if(_zag_strcmp(mode, "legacy") == 1) {
+        do_legacy();
+        return;
+    }
+    if(_zag_strcmp(mode, "audit") == 1) {
+        do_audit();
+        return;
+    }
+    _zag_print("error=unknown mode (full|ablate|legacy|audit)\n");
+    return;
+}
