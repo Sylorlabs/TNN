@@ -103,7 +103,7 @@ rerun pairs for all three batteries.
 - No 10GB acquisition/clean source was read during authoring.
 - `~/workspace/tnn-lab/knowledge/ingest_1gb/` was not touched.
 - Frozen commit (this §1–§7): `d40679117266825e3add29199e364582b23620a9`.
-- Results commit: `TBD — filled after the results commit lands`.
+- Results commit: `175927eeaf652234af2275af73349366c7f11fa9`.
 
 ---
 
