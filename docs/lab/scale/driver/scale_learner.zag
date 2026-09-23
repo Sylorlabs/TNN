@@ -16,54 +16,33 @@
 //   C=24, N=C*M. rep is accepted but NOT printed (byte-identical reps).
 //
 // Build: znc_linux_x86_64_abed8aa1 scale_learner.zag -o scale_learner --no-analyze
-// See BUILD.md. Do not commit (lead commits via commit_big_files.py).
+// (run from scale/driver/; the @import below resolves relative to this file's
+// directory, the proven dedup/r2 pattern). See BUILD.md. Do not commit
+// (lead commits via commit_big_files.py).
+//
+// Storage lineage: the bespoke 24B-slot + dense-index store is RETIRED. This
+// driver adopts the canonical S5 store + merge gate verbatim via @import:
+//   ops/storage-compression/adopt/s5_merge.zag  (pulls in s5_store.zag ->
+//   R33_NATIVE_SHA256_V2.zag -> R33_NATIVE_IO_V1.zag)
+// S5 owns: ScStore, sc_store_init, sc_add, sc_recall, sc_delete, sc_revise,
+// sc_seal_tail/final, sc_digest, sc_replay_check, sc_manifest_verify,
+// sc_written_bytes, sc_compact_and_seal, the mg_* merge gate, and the
+// sc_alloc/sc_g32/sc_s32/sc_g64/sc_s64 accessors (S5's sc_g64 takes an i64
+// offset; the one widened call-site convention was proven benign in
+// PORT_EQUIV.md and is re-proven by the S1 parity run below).
+// The driver keeps: the decision core (evidence -> sc_verify -> deliberate
+// add), the 16-word deliberation audit (now a standalone ScAudit16 struct;
+// S5's ScStore carries no audit fields), corpus handling, and all measures.
+// Rationale for the raw-S5 main teach path (not the merge gate): the
+// learner's unit of knowledge is the (id -> value) fact; duplicate VALUES
+// across ids are distinct facts (two words of length 5). Gate-level folding
+// would collapse them and break learning-read by id. The gate is compiled in
+// and is the sanctioned ingest path for duplicate-bearing streams; the
+// `chain` argv mode proves the full dedup chain on this binary.
+@import("../../ops/storage-compression/adopt/s5_merge.zag")
 
-fn sc_alloc(n:i32)[]u8 {
-    if(n<1){let e:[]u8="";return e;}
-    let p:*u8=_zag_malloc(n as i64) as *u8;
-    if((p as i64)==0){let e2:[]u8="";return e2;}
-    let b:[]u8=p[0..n];
-    let i:i32=0;
-    while(i<n){b[i]=0;i=i+1;}
-    return b;
-}
-fn sc_g32(b:[]u8,o:i32)i32 {
-    let v:i32=0;
-    v=v|((b[o] as i32)&255);
-    v=v|(((b[o+1] as i32)&255)<<8);
-    v=v|(((b[o+2] as i32)&255)<<16);
-    v=v|(((b[o+3] as i32)&255)<<24);
-    return v;
-}
-fn sc_s32(b:[]u8,o:i32,v:i32)void {
-    b[o]=(v&255) as u8;
-    b[o+1]=((v>>8)&255) as u8;
-    b[o+2]=((v>>16)&255) as u8;
-    b[o+3]=((v>>24)&255) as u8;
-}
-fn sc_g64(b:[]u8,o:i32)i64 {
-    let v:i64=0;
-    v=v|((b[o] as i64)&255);
-    v=v|(((b[o+1] as i64)&255)<<8);
-    v=v|(((b[o+2] as i64)&255)<<16);
-    v=v|(((b[o+3] as i64)&255)<<24);
-    v=v|(((b[o+4] as i64)&255)<<32);
-    v=v|(((b[o+5] as i64)&255)<<40);
-    v=v|(((b[o+6] as i64)&255)<<48);
-    v=v|(((b[o+7] as i64)&255)<<56);
-    return v;
-}
-fn sc_s64(b:[]u8,o:i64,v:i64)void {
-    let o32:i32=o as i32;
-    b[o32]=(v&255) as u8;
-    b[o32+1]=((v>>8)&255) as u8;
-    b[o32+2]=((v>>16)&255) as u8;
-    b[o32+3]=((v>>24)&255) as u8;
-    b[o32+4]=((v>>32)&255) as u8;
-    b[o32+5]=((v>>40)&255) as u8;
-    b[o32+6]=((v>>48)&255) as u8;
-    b[o32+7]=((v>>56)&255) as u8;
-}
+// sc_alloc/sc_g32/sc_s32/sc_g64/sc_s64: adopted from s5_store.zag via the
+// @import above (single canonical definitions; S5's sc_g64 takes i64 offset).
 fn sc_pnum(v:i64)void {
     let s:[]u8=_zag_i64_to_str(v);
     _zag_print(s);
@@ -734,99 +713,55 @@ fn sc_fact_truth(cx:*ScCorpus,c:i32,t:i32,k:i32)i64 {
 // add; same 16-word audit layout; same lifecycle constants. Storage is
 // chunked; duplicate check is a dense id->slot index.
 
-struct ScStore {
-    cap:i32, n:i32,
-    nchunks:i32, chunk_ptrs:[]u8,
-    nidxchunks:i32, idx_ptrs:[]u8,
-    audit_ptrs:[]u8,
-    audit_nchunks:i32, audit_n:i32, audit_cap:i32,
-    learn_gate:i32, clock:i32,
-    ops_add:i64, ops_verify:i64, ops_audit:i64, ops_find:i64
+// ================= LEARNER CORE (ported from t5_core.zag) =================
+// Decision logic identical: evidence -> eliminative verify -> deliberate
+// add; same 16-word audit layout; same lifecycle constants. Storage is the
+// canonical S5 store (adopted via @import at the top of this file).
+
+// ---------- standalone 16-word deliberation audit ----------
+// The audit is the learner's deliberation record: one 64-byte record per
+// teach decision (op=1; rc 0=added, 1=dupe, 2=cap, 3=gate-closed) plus
+// episode markers (op=7). It is NOT part of S5's ScStore (S5 carries its
+// own 20-byte event log for storage mutations). Layout identical to the
+// retired bespoke store: 16 words, op@0, slot@4, rc@8, b1..b5@12..28,
+// a1..a5@32..48, stage@52, d1@56, d2@60.
+struct ScAudit16 {
+    chunk_ptrs:[]u8,
+    nchunks:i32, n:i32, cap:i32
 }
-const SC_CHUNK_SLOTS:i32=4096;
-const SC_CHUNK_BYTES:i32=98304;
-const SC_IDX_CHUNK_BYTES:i32=16384;
-const SC_AUDIT_CHUNK_RECS:i32=16384;
-const SC_AUDIT_CHUNK_BYTES:i32=1048576;
-fn sc_store_init(cap:i32,s:*ScStore)i32 {
-    let nchunks:i32=(cap+4095)/SC_CHUNK_SLOTS;
+const SC_AU16_CHUNK_RECS:i32=16384;
+const SC_AU16_CHUNK_BYTES:i32=1048576;
+fn sc_au16_init(cap:i32,a:*ScAudit16)i32 {
+    let nchunks:i32=(cap+SC_AU16_CHUNK_RECS-1)/SC_AU16_CHUNK_RECS;
     let cptrs:[]u8=sc_alloc(nchunks*8);
     if(cptrs.len==0){return -1;}
     let ci:i32=0;
     while(ci<nchunks){
-        let ch:[]u8=sc_alloc(SC_CHUNK_BYTES);
+        let ch:[]u8=sc_alloc(SC_AU16_CHUNK_BYTES);
         if(ch.len==0){return -1;}
-        sc_s64(cptrs,ci*8,_zag_slice_ptr(ch) as i64);
+        sc_s64(cptrs,(ci*8) as i64,_zag_slice_ptr(ch) as i64);
         ci=ci+1;
     }
-    let nidx:i32=(cap+4095)/SC_CHUNK_SLOTS;
-    let iptrs:[]u8=sc_alloc(nidx*8);
-    if(iptrs.len==0){return -1;}
-    ci=0;
-    while(ci<nidx){
-        let ix:[]u8=sc_alloc(SC_IDX_CHUNK_BYTES);
-        if(ix.len==0){return -1;}
-        let k:i32=0;
-        while(k<SC_IDX_CHUNK_BYTES){ix[k]=255;k=k+1;}
-        sc_s64(iptrs,ci*8,_zag_slice_ptr(ix) as i64);
-        ci=ci+1;
-    }
-    let acap:i32=cap*2+8192;
-    let an:i32=(acap+SC_AUDIT_CHUNK_RECS-1)/SC_AUDIT_CHUNK_RECS;
-    let aptrs:[]u8=sc_alloc(an*8);
-    if(aptrs.len==0){return -1;}
-    ci=0;
-    while(ci<an){
-        let ach:[]u8=sc_alloc(SC_AUDIT_CHUNK_BYTES);
-        if(ach.len==0){return -1;}
-        sc_s64(aptrs,ci*8,_zag_slice_ptr(ach) as i64);
-        ci=ci+1;
-    }
-    s.*.cap=cap;s.*.n=0;
-    s.*.nchunks=nchunks;s.*.chunk_ptrs=cptrs;
-    s.*.nidxchunks=nidx;s.*.idx_ptrs=iptrs;
-    s.*.audit_ptrs=aptrs;s.*.audit_nchunks=an;
-    s.*.audit_n=0;s.*.audit_cap=acap;
-    s.*.learn_gate=1;s.*.clock=0;
-    s.*.ops_add=0;s.*.ops_verify=0;s.*.ops_audit=0;s.*.ops_find=0;
+    a.*.chunk_ptrs=cptrs;
+    a.*.nchunks=nchunks;a.*.n=0;a.*.cap=cap;
     return 0;
 }
-fn sc_slot_chunk(s:*ScStore,c:i32)[]u8 {
-    let ptrs:[]u8=s.*.chunk_ptrs;
-    let p:i64=sc_g64(ptrs,c*8);
+fn sc_au16_chunk(a:*ScAudit16,c:i32)[]u8 {
+    let ptrs:[]u8=a.*.chunk_ptrs;
+    let p:i64=sc_g64(ptrs,(c*8) as i64);
     let cp:*u8=p as *u8;
-    return cp[0..SC_CHUNK_BYTES];
-}
-fn sc_idx_chunk(s:*ScStore,c:i32)[]u8 {
-    let ptrs:[]u8=s.*.idx_ptrs;
-    let p:i64=sc_g64(ptrs,c*8);
-    let cp:*u8=p as *u8;
-    return cp[0..SC_IDX_CHUNK_BYTES];
-}
-fn sc_id2slot_get(s:*ScStore,id:i32)i32 {
-    let ch:[]u8=sc_idx_chunk(s,id/SC_CHUNK_SLOTS);
-    return sc_g32(ch,(id%SC_CHUNK_SLOTS)*4);
-}
-fn sc_id2slot_set(s:*ScStore,id:i32,slot:i32)void {
-    let ch:[]u8=sc_idx_chunk(s,id/SC_CHUNK_SLOTS);
-    sc_s32(ch,(id%SC_CHUNK_SLOTS)*4,slot);
-}
-fn sc_audit_chunk(s:*ScStore,c:i32)[]u8 {
-    let ptrs:[]u8=s.*.audit_ptrs;
-    let p:i64=sc_g64(ptrs,c*8);
-    let cp:*u8=p as *u8;
-    return cp[0..SC_AUDIT_CHUNK_BYTES];
+    return cp[0..SC_AU16_CHUNK_BYTES];
 }
 // audit append: 16 words (64B). rc: 0 ok, 1 cap, 2 store-cap.
-fn sc_audit_append(s:*ScStore,op:i32,slot:i32,rc:i32,
+fn sc_au16_append(a:*ScAudit16,op:i32,slot:i32,rc:i32,
     b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
     a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,
     stage:i32,d1:i32,d2:i32)i32 {
-    let n:i32=s.*.audit_n;
-    if(n>=s.*.audit_cap){return 1;}
-    let c:i32=n/SC_AUDIT_CHUNK_RECS;
-    let r:i32=n%SC_AUDIT_CHUNK_RECS;
-    let ch:[]u8=sc_audit_chunk(s,c);
+    let n:i32=a.*.n;
+    if(n>=a.*.cap){return 1;}
+    let c:i32=n/SC_AU16_CHUNK_RECS;
+    let r:i32=n%SC_AU16_CHUNK_RECS;
+    let ch:[]u8=sc_au16_chunk(a,c);
     let o:i32=r*64;
     sc_s32(ch,o,op);sc_s32(ch,o+4,slot);sc_s32(ch,o+8,rc);
     sc_s32(ch,o+12,b1);sc_s32(ch,o+16,b2);sc_s32(ch,o+20,b3);
@@ -834,13 +769,13 @@ fn sc_audit_append(s:*ScStore,op:i32,slot:i32,rc:i32,
     sc_s32(ch,o+32,a1);sc_s32(ch,o+36,a2);sc_s32(ch,o+40,a3);
     sc_s32(ch,o+44,a4);sc_s32(ch,o+48,a5);
     sc_s32(ch,o+52,stage);sc_s32(ch,o+56,d1);sc_s32(ch,o+60,d2);
-    s.*.audit_n=n+1;
-    s.*.ops_audit=s.*.ops_audit+1;
+    a.*.n=n+1;
     return 0;
 }
-fn sc_episode(s:*ScStore,stage:i32)i32 {
+// episode marker: bumps the store clock, appends a 16-word op=7 record.
+fn sc_audit_episode(s:*ScStore,a:*ScAudit16,stage:i32)i32 {
     s.*.clock=s.*.clock+1;
-    return sc_audit_append(s,7,-1,0,0,0,0,0,0,0,0,0,0,0,stage,0,0);
+    return sc_au16_append(a,7,-1,0,0,0,0,0,0,0,0,0,0,0,stage,0,0);
 }
 // evidence buffer (per-pass allocation, reset per fact)
 struct ScEv { n:i32, codes:[]u8, vals:[]u8 }
@@ -885,48 +820,11 @@ fn sc_ev_verdict(e:*ScEv)i32 {
     let vs:[]u8=e.*.vals;
     return sc_g64(vs,((n-1)*8) as i64) as i32;
 }
-// deliberate add (t5_add field writes / return codes)
-fn sc_add(s:*ScStore,id:i32,v:i64,out_slot:*i32)i32 {
-    if(s.*.learn_gate==0){
-        sc_audit_append(s,1,-1,3,id,0,0,0,0,0,0,0,0,0,0,0,0);
-        return 3;
-    }
-    let dupe:i32=sc_id2slot_get(s,id);
-    s.*.ops_find=s.*.ops_find+1;
-    if(dupe>=0){
-        sc_audit_append(s,1,dupe,1,id,0,0,0,0,0,0,0,0,0,0,0,0);
-        return 1;
-    }
-    let n:i32=s.*.n;
-    if(n>=s.*.cap){
-        sc_audit_append(s,1,-1,2,id,0,0,0,0,0,0,0,0,0,0,0,0);
-        return 2;
-    }
-    let ch:[]u8=sc_slot_chunk(s,n/SC_CHUNK_SLOTS);
-    let o:i32=(n%SC_CHUNK_SLOTS)*24;
-    sc_s32(ch,o,id);
-    sc_s32(ch,o+4,1);
-    sc_s32(ch,o+8,1000);
-    sc_s32(ch,o+12,s.*.clock);
-    sc_s64(ch,(o+16) as i64,v);
-    sc_id2slot_set(s,id,n);
-    s.*.n=n+1;
-    s.*.ops_add=s.*.ops_add+1;
-    out_slot.*=n;
-    sc_audit_append(s,1,n,0,id,1,0,0,0,(v&2147483647) as i32,((v>>32)&2147483647) as i32,0,0,0,0,0,0);
-    return 0;
-}
-// recall stored value for id; returns 1 if found (value via out), else 0
-fn sc_recall(s:*ScStore,id:i32,out:*i64)i32 {
-    let slot:i32=sc_id2slot_get(s,id);
-    if(slot<0){return 0;}
-    let ch:[]u8=sc_slot_chunk(s,slot/SC_CHUNK_SLOTS);
-    let o:i32=(slot%SC_CHUNK_SLOTS)*24;
-    out.*=sc_g64(ch,(o+16) as i64);
-    return 1;
-}
+// sc_add / sc_recall: adopted from s5_store.zag via the @import above.
+// The learner teaches dense ids 0..n-1 (id==slot); duplicate VALUES across
+// ids are distinct facts and are NOT folded on the main teach path.
 // teach one supplied value (harness computes obs/probe/supplied; learner never touches truth)
-fn sc_teach_value(s:*ScStore,ev:*ScEv,id:i32,obs:i64,probe:i64,directive:i64,has_dir:i32)void {
+fn sc_teach_value(s:*ScStore,a:*ScAudit16,ev:*ScEv,id:i32,obs:i64,probe:i64,directive:i64,has_dir:i32)void {
     sc_ev_reset(ev);
     sc_ev_add(ev,1,obs);
     sc_ev_add(ev,2,probe);
@@ -935,7 +833,20 @@ fn sc_teach_value(s:*ScStore,ev:*ScEv,id:i32,obs:i64,probe:i64,directive:i64,has
     s.*.ops_verify=s.*.ops_verify+1;
     if(sc_ev_verdict(ev)==1){
         let slot:i32=-1;
-        sc_add(s,id,obs,&slot);
+        let rc:i32=sc_add(s,id,obs,&slot);
+        // 16-word deliberation record, same layout as the retired bespoke
+        // sc_add: op=1, b1=id, b2=1 on success; rc mirrors S5's return code
+        // (0=added, 1=dupe, 2=cap, 3=gate-closed).
+        if(rc==0){
+            sc_au16_append(a,1,slot,0,id,1,0,0,0,(obs&2147483647) as i32,((obs>>32)&2147483647) as i32,0,0,0,0,0,0);
+        } else {
+            if(rc==1){
+                let dupe:i32=sc_id2slot(s,id);
+                sc_au16_append(a,1,dupe,1,id,0,0,0,0,0,0,0,0,0,0,0,0);
+            } else {
+                sc_au16_append(a,1,-1,rc,id,0,0,0,0,0,0,0,0,0,0,0,0);
+            }
+        }
     }
 }
 
@@ -982,8 +893,8 @@ fn sc_flaw(s:*ScStore,cx:*ScCorpus,m:i32,n:i32)void {
 }
 
 // train one pass over ids [0,n)
-fn sc_run_pass(s:*ScStore,ev:*ScEv,cx:*ScCorpus,m:i32,n:i32,pass:i32)void {
-    sc_episode(s,pass);
+fn sc_run_pass(s:*ScStore,a:*ScAudit16,ev:*ScEv,cx:*ScCorpus,m:i32,n:i32,pass:i32)void {
+    sc_audit_episode(s,a,pass);
     let id:i32=0;
     while(id<n){
         let c:i32=id/m; let i:i32=id%m;
@@ -992,7 +903,7 @@ fn sc_run_pass(s:*ScStore,ev:*ScEv,cx:*ScCorpus,m:i32,n:i32,pass:i32)void {
         let truth:i64=sc_fact_truth(cx,c,t,k);
         let sup:i64=sc_supplied(id,c,truth);
         // class-4 direct supply: obs=probe=supplied; distractor directive filtered
-        sc_teach_value(s,ev,id,sup,sup,truth+1000000,0);
+        sc_teach_value(s,a,ev,id,sup,sup,truth+1000000,0);
         id=id+1;
     }
 }
@@ -1036,6 +947,476 @@ fn sc_run_eval(s:*ScStore,cx:*ScCorpus,m:i32,n:i32,
     }
 }
 
+// ================= DEDUP CHAIN MODE =================
+// Proves the canonical S5 store + merge gate on THIS binary (the integrated
+// learner). Deterministic (splitmix64-of-index draws only); no corpus.
+//   chain small: R2-B5 parity shape (600 claims, cslots=64, one gate).
+//   chain big:   1GB-scale ingest, 40 lessons x 65536 claims = 2,621,440
+//                claims with a 12.7%-style exact-duplicate profile, merged
+//                through per-lesson gates (hmbits=17) against a one-copy
+//                baseline built from the same stream in the same run.
+//                Per-lesson written-byte equality, end-of-ingest digest
+//                equality, then delete/revise/re-add mutations,
+//                sc_seal_tail x2, sc_seal_final, full learning-read verify.
+// No timestamps or timings in output: two runs are byte-identical.
+
+// 30-bit value magnitudes (mirrors blob-offset value widths)
+fn sc_chain_val(lesson:i64,j:i64)i64 {
+    let m:i64=((1 as i64)<<30)-1;
+    return 1+(sc_draw(lesson*1000003+777,j)&m);
+}
+// hex print of an i64 digest (16 nibbles, no newline)
+fn sc_chain_hex(v:i64)void {
+    let hexd:[]u8="0123456789abcdef";
+    let ni:i32=0;
+    while(ni<16){
+        let shift:i64=((15-ni) as i64)*4;
+        let nib:i32=((v>>shift)&15) as i32;
+        _zag_print(hexd[nib..nib+1]);
+        ni=ni+1;
+    }
+}
+// learning-read verification over ground truth:
+// every live id must recall exactly gt_val[id]; every dead id must fail.
+// Returns mismatch count.
+fn sc_chain_verify_read(s:*ScStore,gtv:[]u8,gtl:[]u8,n:i32)i64 {
+    let bad:i64=0;
+    let id:i32=0;
+    while(id<n){
+        let v:i64=0;
+        let f:i32=sc_recall(s,id,&v);
+        if(((gtl[id] as i32)&255)==1){
+            if(f!=1){bad=bad+1;}
+            else{
+                let ev:i64=sc_g64(gtv,(id*8) as i64);
+                if(v!=ev){bad=bad+1;}
+            }
+        } else {
+            if(f!=0){bad=bad+1;}
+        }
+        id=id+1;
+    }
+    return bad;
+}
+// zeroed S5 store literal helper (field list must match s5_store.zag)
+fn sc_chain_store()ScStore {
+    return ScStore{.cap=0,.n=0,.cslots=0,.nchunks=0,.chunk_ptrs="",
+        .chashes="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,
+        .ops_add=0,.ops_rev=0,.ops_del=0,.ops_verify=0,.ops_audit=0,.ops_find=0};
+}
+
+// ---------- small: R2-B5 parity shape ----------
+fn sc_chain_small()void {
+    _zag_println("CHAIN_SMALL,start");
+    let s:ScStore=sc_chain_store();
+    if(sc_store_init(700,64,&s)!=0){_zag_println("CHAIN_SMALL,ok=0,why=init");return;}
+    let g:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+    if(mg_init(&g,10)!=0){_zag_println("CHAIN_SMALL,ok=0,why=mginit");return;}
+    let gtv:[]u8=sc_alloc(1024*8);
+    let gtl:[]u8=sc_alloc(1024);
+    if(gtv.len==0||gtl.len==0){_zag_println("CHAIN_SMALL,ok=0,why=gtalloc");return;}
+    // 300 base values x (1 + c%3) copies = 600 claims
+    let folds:i64=0;
+    let c:i32=0;
+    while(c<300){
+        let v:i64=1+(sc_draw(100,c)&(((1 as i64)<<20)-1));
+        let copies:i32=1+(c%3);
+        let r:i32=0;
+        while(r<copies){
+            let slot:i32=-1; let mrg:i32=0;
+            if(mg_add(&s,&g,v,(c%50),(c%40),&slot,&mrg)!=0){
+                _zag_println("CHAIN_SMALL,ok=0,why=mgadd");return;
+            }
+            if(mrg==1){folds=folds+1;}
+            r=r+1;
+        }
+        c=c+1;
+    }
+    if(s.n!=300){_zag_println("CHAIN_SMALL,ok=0,why=n300");return;}
+    if(folds!=300){_zag_println("CHAIN_SMALL,ok=0,why=folds300");return;}
+    let id:i32=0;
+    while(id<300){
+        let v:i64=0;
+        sc_recall(&s,id,&v);
+        sc_s64(gtv,(id*8) as i64,v);
+        gtl[id]=1;
+        id=id+1;
+    }
+    // delete 50: id%6==0
+    let nd:i32=0;
+    id=0;
+    while(id<300){
+        if(id%6==0){
+            if(mg_delete(&s,&g,id)!=0){_zag_println("CHAIN_SMALL,ok=0,why=del");return;}
+            gtl[id]=0;
+            nd=nd+1;
+        }
+        id=id+1;
+    }
+    if(nd!=50){_zag_println("CHAIN_SMALL,ok=0,why=nd50");return;}
+    // revise 30: id%10==7 (disjoint from id%6==0, proven)
+    let nr:i32=0;
+    id=0;
+    while(id<300){
+        if(id%10==7){
+            let nv:i64=((1 as i64)<<31)+(id as i64);
+            if(mg_revise(&s,&g,id,nv,3,3)!=0){_zag_println("CHAIN_SMALL,ok=0,why=rev");return;}
+            sc_s64(gtv,(id*8) as i64,nv);
+            nr=nr+1;
+        }
+        id=id+1;
+    }
+    if(nr!=30){_zag_println("CHAIN_SMALL,ok=0,why=nr30");return;}
+    // re-add 20 deleted (fresh values, through the gate so it stays consistent)
+    let nra:i32=0;
+    id=0;
+    while(id<300 && nra<20){
+        if(((gtl[id] as i32)&255)==0){
+            let v:i64=((1 as i64)<<31)+3000000+(nra as i64);
+            let slot:i32=-1; let mrg:i32=0;
+            if(mg_add(&s,&g,v,2,2,&slot,&mrg)!=0){_zag_println("CHAIN_SMALL,ok=0,why=readd");return;}
+            if(mrg!=0){_zag_println("CHAIN_SMALL,ok=0,why=readd_merged");return;}
+            sc_s64(gtv,(slot*8) as i64,v);
+            gtl[slot]=1;
+            nra=nra+1;
+        }
+        id=id+1;
+    }
+    // re-add 20 live (folded)
+    let nrf:i32=0;
+    id=1;
+    while(id<300 && nrf<20){
+        if(((gtl[id] as i32)&255)==1){
+            let v:i64=sc_g64(gtv,(id*8) as i64);
+            let slot:i32=-1; let mrg:i32=0;
+            if(mg_add(&s,&g,v,2,2,&slot,&mrg)!=0){_zag_println("CHAIN_SMALL,ok=0,why=refold");return;}
+            if(mrg!=1||slot!=id){_zag_println("CHAIN_SMALL,ok=0,why=refold_slot");return;}
+            nrf=nrf+1;
+        }
+        id=id+1;
+    }
+    let t1:i32=sc_seal_tail(&s);
+    let t2:i32=sc_seal_tail(&s);
+    if(t1!=0||t2!=0){_zag_println("CHAIN_SMALL,ok=0,why=sealtail");return;}
+    if(sc_seal_final(&s)!=0){_zag_println("CHAIN_SMALL,ok=0,why=sealfinal");return;}
+    if(mg_replay_check(&s,&g)!=0){_zag_println("CHAIN_SMALL,ok=0,why=mgreplay");return;}
+    if(sc_replay_check(&s)!=0){_zag_println("CHAIN_SMALL,ok=0,why=screplay");return;}
+    if(sc_manifest_verify(&s)!=0){_zag_println("CHAIN_SMALL,ok=0,why=manifest");return;}
+    let bad:i64=sc_chain_verify_read(&s,gtv,gtl,s.n);
+    if(bad!=0){_zag_println("CHAIN_SMALL,ok=0,why=read");return;}
+    _zag_print("CHAIN_SMALL,ok=1,n=");
+    sc_pnum(s.n as i64);
+    _zag_print(",live=270,deleted=50,revised=30,readded=20,refolded=20,digest=");
+    sc_chain_hex(sc_digest(&s));
+    _zag_println("");
+}
+
+// ---------- big: 1GB-scale ingest + full chain ----------
+// gate pool: the 40 per-lesson gates stay alive for the final replay check;
+// ScMergeGate fields are saved in parallel arrays.
+struct ScGatePool {
+    nb:[]u8, hb:[]u8, nv:[]u8, tabp:[]u8
+}
+fn sc_gatepool_init(p:*ScGatePool,n:i32)i32 {
+    p.*.nb=sc_alloc(n*4); p.*.hb=sc_alloc(n*4);
+    p.*.nv=sc_alloc(n*4); p.*.tabp=sc_alloc(n*8);
+    if(p.*.nb.len==0||p.*.hb.len==0){return -1;}
+    if(p.*.nv.len==0||p.*.tabp.len==0){return -1;}
+    return 0;
+}
+fn sc_gatepool_save(p:*ScGatePool,L:i32,g:*ScMergeGate)void {
+    sc_s32(p.*.nb,L*4,g.*.nbuckets);
+    sc_s32(p.*.hb,L*4,g.*.hmbits);
+    sc_s32(p.*.nv,L*4,g.*.nvals);
+    sc_s64(p.*.tabp,(L*8) as i64,_zag_slice_ptr(g.*.table) as i64);
+}
+fn sc_gatepool_load(p:*ScGatePool,L:i32,g:*ScMergeGate)void {
+    g.*.nbuckets=sc_g32(p.*.nb,L*4);
+    g.*.hmbits=sc_g32(p.*.hb,L*4);
+    let tp:i64=sc_g64(p.*.tabp,(L*8) as i64);
+    let cp:*u8=tp as *u8;
+    g.*.table=cp[0..g.*.nbuckets*40];
+    g.*.nvals=sc_g32(p.*.nv,L*4);
+}
+// lesson of a stored id from the per-lesson start offsets
+fn sc_id_lesson(lstart:[]u8,nl:i32,id:i32)i32 {
+    let L:i32=0;
+    while(L<nl){
+        let s0:i32=sc_g32(lstart,L*4);
+        let s1:i32=sc_g32(lstart,(L+1)*4);
+        if(id>=s0 && id<s1){return L;}
+        L=L+1;
+    }
+    return -1;
+}
+// baseline seen-set: open addressing, 131072 i64 slots, 0 = empty (values >= 1)
+fn sc_seen_has(seen:[]u8,v:i64)i32 {
+    let mask:i64=131071;
+    let h:i64=sc_mix(v)&mask;
+    while(1){
+        let e:i64=sc_g64(seen,h*8);
+        if(e==0){return 0;}
+        if(e==v){return 1;}
+        h=(h+1)&mask;
+    }
+    return 0;
+}
+fn sc_seen_put(seen:[]u8,v:i64)void {
+    let mask:i64=131071;
+    let h:i64=sc_mix(v)&mask;
+    while(1){
+        let e:i64=sc_g64(seen,h*8);
+        if(e==0){sc_s64(seen,h*8,v);return;}
+        if(e==v){return;}
+        h=(h+1)&mask;
+    }
+}
+fn sc_chain_big()void {
+    _zag_println("CHAIN_BIG,start");
+    let cap:i32=2621440;
+    let mrg:ScStore=sc_chain_store();
+    let bas:ScStore=sc_chain_store();
+    if(sc_store_init(cap,4096,&mrg)!=0){_zag_println("CHAIN_BIG,ok=0,why=init_mrg");return;}
+    if(sc_store_init(cap,4096,&bas)!=0){_zag_println("CHAIN_BIG,ok=0,why=init_bas");return;}
+    let gtv:[]u8=sc_alloc((cap as i64)*8);
+    let gtl:[]u8=sc_alloc(cap);
+    if(gtv.len==0||gtl.len==0){_zag_println("CHAIN_BIG,ok=0,why=gtalloc");return;}
+    let pool:ScGatePool=ScGatePool{.nb="",.hb="",.nv="",.tabp=""};
+    if(sc_gatepool_init(&pool,40)!=0){_zag_println("CHAIN_BIG,ok=0,why=pool");return;}
+    let lstart:[]u8=sc_alloc(41*4);
+    if(lstart.len==0){_zag_println("CHAIN_BIG,ok=0,why=lstart");return;}
+    // ---- ingest: 40 lessons x 65536 claims ----
+    let L:i32=0;
+    while(L<40){
+        let g:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+        if(mg_init(&g,17)!=0){
+            _zag_print("CHAIN_BIG,ok=0,why=mginit,L=");sc_pnum(L as i64);_zag_println("");return;
+        }
+        sc_s32(lstart,L*4,mrg.n);
+        // lesson claim values: dupes must repeat the ACTUAL earlier value
+        let lv:[]u8=sc_alloc(65536*8);
+        let seen:[]u8=sc_alloc(131072*8);
+        if(seen.len==0||lv.len==0){
+            _zag_print("CHAIN_BIG,ok=0,why=seen,L=");sc_pnum(L as i64);_zag_println("");return;
+        }
+        let folds0:i64=0;
+        let j:i32=0;
+        while(j<65536){
+            // 12.66% exact duplicates: every (j%79)<10 for j>=79 repeats
+            // the ACTUAL value claim j-79 carried (it may itself be a dupe).
+            let v:i64=0;
+            if(j>=79 && (j%79)<10){
+                v=sc_g64(lv,((j-79)*8) as i64);
+            } else {
+                v=sc_chain_val(L as i64,j as i64);
+            }
+            sc_s64(lv,(j*8) as i64,v);
+            let slot:i32=-1; let mrgf:i32=0;
+            if(mg_add(&mrg,&g,v,(j%50),(j%40),&slot,&mrgf)!=0){
+                _zag_print("CHAIN_BIG,ok=0,why=mgadd,L=");sc_pnum(L as i64);_zag_println("");return;
+            }
+            if(mrgf==1){folds0=folds0+1;}
+            // baseline: gate-independent first-occurrence dedup; must agree
+            // with the gate's fold decision on every claim.
+            let was:i32=sc_seen_has(seen,v);
+            if((mrgf==0 && was==1)||(mrgf==1 && was==0)){
+                _zag_print("CHAIN_BIG,ok=0,why=gate_seen_disagree,L=");sc_pnum(L as i64);_zag_println("");return;
+            }
+            if(was==0){
+                sc_seen_put(seen,v);
+                let slot2:i32=-1;
+                if(sc_add(&bas,bas.n,v,&slot2)!=0){
+                    _zag_print("CHAIN_BIG,ok=0,why=basadd,L=");sc_pnum(L as i64);_zag_println("");return;
+                }
+                sc_s64(gtv,((mrg.n-1)*8) as i64,v);
+                gtl[mrg.n-1]=1;
+            }
+            j=j+1;
+        }
+        let wm:i64=sc_written_bytes(&mrg);
+        let wb:i64=sc_written_bytes(&bas);
+        _zag_print("CHAIN_BIG_LESSON,L=");sc_pnum(L as i64);
+        _zag_print(",n=");sc_pnum(mrg.n as i64);
+        _zag_print(",written_mrg=");sc_pnum(wm);
+        _zag_print(",written_bas=");sc_pnum(wb);
+        _zag_print(",folds=");sc_pnum(folds0);
+        _zag_println("");
+        if(wm!=wb||mrg.n!=bas.n){
+            _zag_print("CHAIN_BIG,ok=0,why=byte_identity,L=");sc_pnum(L as i64);_zag_println("");return;
+        }
+        sc_gatepool_save(&pool,L,&g);
+        L=L+1;
+    }
+    sc_s32(lstart,40*4,mrg.n);
+    let dm:i64=sc_digest(&mrg);
+    let db:i64=sc_digest(&bas);
+    _zag_print("CHAIN_BIG_INGEST,n=");sc_pnum(mrg.n as i64);
+    _zag_print(",digest_mrg=");sc_chain_hex(dm);
+    _zag_print(",digest_bas=");sc_chain_hex(db);
+    _zag_print(",events_mrg=");sc_pnum(mrg.events_n as i64);
+    _zag_print(",events_bas=");sc_pnum(bas.events_n as i64);
+    _zag_println("");
+    if(dm!=db||mrg.events_n!=0||bas.events_n!=0){
+        _zag_println("CHAIN_BIG,ok=0,why=ingest_digest");return;
+    }
+    // ---- mutations on the merged store ----
+    // delete: id%24==0, up to 4000
+    let nd:i32=0;
+    let id:i32=0;
+    while(id<mrg.n && nd<4000){
+        if(id%24==0){
+            let L2:i32=sc_id_lesson(lstart,40,id);
+            let g2:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+            sc_gatepool_load(&pool,L2,&g2);
+            if(mg_delete(&mrg,&g2,id)!=0){
+                _zag_println("CHAIN_BIG,ok=0,why=del");return;
+            }
+            sc_gatepool_save(&pool,L2,&g2);
+            gtl[id]=0;
+            nd=nd+1;
+        }
+        id=id+1;
+    }
+    // revise: id%40==7, up to 2000 live ids, to unique fresh values
+    let nr:i32=0;
+    id=0;
+    while(id<mrg.n && nr<2000){
+        if(id%40==7 && ((gtl[id] as i32)&255)==1){
+            let L2:i32=sc_id_lesson(lstart,40,id);
+            let g2:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+            sc_gatepool_load(&pool,L2,&g2);
+            let nv:i64=((1 as i64)<<31)+(id as i64);
+            if(mg_revise(&mrg,&g2,id,nv,3,3)!=0){
+                _zag_println("CHAIN_BIG,ok=0,why=rev");return;
+            }
+            sc_gatepool_save(&pool,L2,&g2);
+            sc_s64(gtv,(id*8) as i64,nv);
+            nr=nr+1;
+        }
+        id=id+1;
+    }
+    // re-add 20 deleted (fresh values, through lesson-39's gate)
+    let g39:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+    sc_gatepool_load(&pool,39,&g39);
+    let nra:i32=0;
+    while(nra<20){
+        let v:i64=((1 as i64)<<31)+3000000+(nra as i64);
+        let slot:i32=-1; let mrgf:i32=0;
+        if(mg_add(&mrg,&g39,v,7,7,&slot,&mrgf)!=0){
+            _zag_println("CHAIN_BIG,ok=0,why=readd");return;
+        }
+        if(mrgf!=0){_zag_println("CHAIN_BIG,ok=0,why=readd_merged");return;}
+        sc_s64(gtv,(slot*8) as i64,v);
+        gtl[slot]=1;
+        nra=nra+1;
+    }
+    sc_gatepool_save(&pool,39,&g39);
+    // re-add 20 live (folded through their own lesson gates)
+    let nrf:i32=0;
+    id=1;
+    while(id<mrg.n && nrf<20){
+        if(((gtl[id] as i32)&255)==1 && id%24!=0){
+            let L2:i32=sc_id_lesson(lstart,40,id);
+            let g2:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+            sc_gatepool_load(&pool,L2,&g2);
+            let v:i64=sc_g64(gtv,(id*8) as i64);
+            let slot:i32=-1; let mrgf:i32=0;
+            if(mg_add(&mrg,&g2,v,7,7,&slot,&mrgf)!=0){
+                _zag_println("CHAIN_BIG,ok=0,why=refold");return;
+            }
+            if(mrgf!=1||slot!=id){_zag_println("CHAIN_BIG,ok=0,why=refold_slot");return;}
+            sc_gatepool_save(&pool,L2,&g2);
+            nrf=nrf+1;
+        }
+        id=id+1;
+    }
+    // double seal_tail (idempotency) + seal_final
+    let t1:i32=sc_seal_tail(&mrg);
+    let t2:i32=sc_seal_tail(&mrg);
+    let tf:i32=sc_seal_final(&mrg);
+    _zag_print("CHAIN_BIG_SEAL,tail1=");sc_pnum(t1 as i64);
+    _zag_print(",tail2=");sc_pnum(t2 as i64);
+    _zag_print(",final=");sc_pnum(tf as i64);
+    _zag_println("");
+    if(t1!=0||t2!=0||tf!=0){_zag_println("CHAIN_BIG,ok=0,why=seal");return;}
+    // ---- full verification ----
+    // per-lesson gate consistency, scoped to each gate's id-range
+    // (gate 39 also owns the 20 re-added ids past lstart[40]).
+    L=0;
+    while(L<40){
+        let g:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+        sc_gatepool_load(&pool,L,&g);
+        let r0:i32=sc_g32(lstart,L*4);
+        let r1:i32=sc_g32(lstart,(L+1)*4);
+        if(L==39){r1=mrg.n;}
+        let rc:i32=sc_chain_gate_check(&mrg,&g,r0,r1);
+        if(rc!=0){
+            _zag_print("CHAIN_BIG,ok=0,why=gatecheck,L=");sc_pnum(L as i64);
+            _zag_print(",cls=");sc_pnum(rc as i64);_zag_println("");
+            return;
+        }
+        L=L+1;
+    }
+    if(sc_replay_check(&mrg)!=0){_zag_println("CHAIN_BIG,ok=0,why=screplay");return;}
+    if(sc_manifest_verify(&mrg)!=0){_zag_println("CHAIN_BIG,ok=0,why=manifest");return;}
+    let bad:i64=sc_chain_verify_read(&mrg,gtv,gtl,mrg.n);
+    if(bad!=0){
+        _zag_print("CHAIN_BIG,ok=0,why=read,bad=");sc_pnum(bad);_zag_println("");
+        return;
+    }
+    let live:i64=0;
+    id=0;
+    while(id<mrg.n){
+        if(((gtl[id] as i32)&255)==1){live=live+1;}
+        id=id+1;
+    }
+    _zag_print("CHAIN_BIG,ok=1,n=");sc_pnum(mrg.n as i64);
+    _zag_print(",live=");sc_pnum(live);
+    _zag_print(",deleted=");sc_pnum(nd as i64);
+    _zag_print(",revised=");sc_pnum(nr as i64);
+    _zag_print(",readded=20,refolded=20,digest=");
+    sc_chain_hex(sc_digest(&mrg));
+    _zag_println("");
+}
+// scoped gate/store consistency for one lesson's id-range.
+// same checks as canonical mg_replay_check, restricted to [id0,id1).
+fn sc_chain_gate_check(s:*ScStore,g:*ScMergeGate,id0:i32,id1:i32)i32 {
+    let t:[]u8=g.*.table;
+    let cnt:i32=0;
+    let b:i32=0;
+    while(b<g.*.nbuckets){
+        let o:i32=b*40;
+        if(((t[o+32] as i32)&255)==1){
+            let slot:i32=sc_g32(t,(o+8) as i64);
+            if(slot<id0||slot>=id1){return 1;}
+            if(sc_is_tombstoned(s,slot)==1){return 2;}
+            if(sc_read_value(s,slot)!=sc_g64(t,o as i64)){return 3;}
+            cnt=cnt+1;
+        }
+        b=b+1;
+    }
+    if(cnt!=g.*.nvals){return 4;}
+    let id:i32=id0;
+    while(id<id1){
+        if(sc_is_tombstoned(s,id)==0){
+            let v:i64=sc_read_value(s,id);
+            let found:i32=0;
+            let o2:i32=mg_find(g,v,&found);
+            if(found!=1){return 5;}
+            if(sc_g32(g.*.table,(o2+8) as i64)!=id){return 6;}
+        }
+        id=id+1;
+    }
+    return 0;
+}
+fn sc_chain_mode(which:[]u8)void {
+    if(_zag_strcmp(which,"small")==1){sc_chain_small();return;}
+    if(_zag_strcmp(which,"big")==1){sc_chain_big();return;}
+    _zag_println("usage: scale_learner chain <small|big>");
+}
+
 fn main()void {
     let a1:[]u8=_zag_arg(1);
     let a2:[]u8=_zag_arg(2);
@@ -1044,8 +1425,14 @@ fn main()void {
     let a5:[]u8=_zag_arg(5);
     let a6:[]u8=_zag_arg(6);
     let a7:[]u8=_zag_arg(7);
+    // dedup-chain proof mode (no corpus): scale_learner chain <small|big>
+    if(_zag_strcmp(a1,"chain")==1){
+        sc_chain_mode(a2);
+        return;
+    }
     if(a1.len==0||a2.len==0||a3.len==0||a4.len==0||a5.len==0||a6.len==0||a7.len==0){
         _zag_println("usage: scale_learner <train|eval> <N> <C> <M> <P> <rep> <texts_dir>");
+        _zag_println("       scale_learner chain <small|big>");
         return;
     }
     let is_eval:i32=0;
@@ -1072,18 +1459,23 @@ fn main()void {
     let tw:i32=sc_corpus_init(a7,&cx);
     if(tw<0){_zag_println("corpus init failed");return;}
     _zag_print("SCALE_TRUTH,texts=10,words_total=");sc_pnum(tw as i64);_zag_println("");
-    // store
-    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
-        .nidxchunks=0,.idx_ptrs="",
-        .audit_ptrs="",.audit_nchunks=0,.audit_n=0,.audit_cap=0,
-        .learn_gate=0,.clock=0,.ops_add=0,.ops_verify=0,.ops_audit=0,.ops_find=0};
-    if(sc_store_init(n,&st)!=0){_zag_println("store init failed");return;}
+    // store: canonical S5 (adopted). 4096 slots/chunk matches the retired
+    // bespoke store's chunking.
+    let st:ScStore=ScStore{.cap=0,.n=0,.cslots=0,.nchunks=0,.chunk_ptrs="",
+        .chashes="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,
+        .ops_add=0,.ops_rev=0,.ops_del=0,.ops_verify=0,.ops_audit=0,.ops_find=0};
+    if(sc_store_init(n,4096,&st)!=0){_zag_println("store init failed");return;}
+    // deliberation audit: 16-word records, same 2x headroom as before
+    let au:ScAudit16=ScAudit16{.chunk_ptrs="",.nchunks=0,.n=0,.cap=0};
+    if(sc_au16_init(n*2+8192,&au)!=0){_zag_println("audit init failed");return;}
     let ev:ScEv=ScEv{.n=0,.codes="",.vals=""};
     sc_ev_init(&ev);
     // passes
     let p:i32=1;
     while(p<=npass){
-        sc_run_pass(&st,&ev,&cx,m,n,p);
+        sc_run_pass(&st,&au,&ev,&cx,m,n,p);
         let cn:i32=0; let cd:i32=0; let an2:i32=0;
         let dn:[]u8=sc_alloc(40); let dd:[]u8=sc_alloc(40);
         let bn:i32=0; let bd:i32=0;
@@ -1116,21 +1508,24 @@ fn main()void {
     sc_flaw(&st,&cx,m,n);
     _zag_print("SCALE_OPS,add=");sc_pnum(st.ops_add);
     _zag_print(",verify=");sc_pnum(st.ops_verify);
-    _zag_print(",audit=");sc_pnum(st.ops_audit);
+    _zag_print(",audit=");sc_pnum(au.n as i64);
     _zag_print(",find=");sc_pnum(st.ops_find);
-    let tot:i64=st.ops_add+st.ops_verify+st.ops_audit+st.ops_find;
+    let tot:i64=st.ops_add+st.ops_verify+(au.n as i64)+st.ops_find;
     _zag_print(",total=");sc_pnum(tot);
     _zag_print(",ops_per_fact_x1000=");sc_pnum((tot*1000)/(n as i64));_zag_println("");
-    let bpf_slot:i64=24;
-    let bpf_idx:i64=4;
-    let bpf_audit:i64=(st.ops_audit*64)/(n as i64);
-    _zag_print("SCALE_MEM,slot_bpf=");sc_pnum(bpf_slot);
-    _zag_print(",index_bpf=");sc_pnum(bpf_idx);
-    _zag_print(",audit_bpf=");sc_pnum(bpf_audit);
-    _zag_print(",total_bpf=");sc_pnum(bpf_slot+bpf_idx+bpf_audit);
-    _zag_print(",slot_chunks=");sc_pnum(st.nchunks as i64);
-    _zag_print(",idx_chunks=");sc_pnum(st.nidxchunks as i64);
-    _zag_print(",audit_chunks=");sc_pnum(st.audit_nchunks as i64);
+    // S5 storage accounting: sc_written_bytes = slots + widths + clkbase +
+    // chunk hashes + event log + seal. The 16-word deliberation audit is
+    // reported separately (kept from the retired store, same 64 B/record).
+    let s5bytes:i64=sc_written_bytes(&st);
+    let s5_bpf:i64=s5bytes/(n as i64);
+    let au_bpf:i64=64;
+    _zag_print("SCALE_MEM,s5_bpf=");sc_pnum(s5_bpf);
+    _zag_print(",audit16_bpf=");sc_pnum(au_bpf);
+    _zag_print(",total_bpf=");sc_pnum(s5_bpf+au_bpf);
+    _zag_print(",s5_chunks=");sc_pnum(st.nchunks as i64);
+    _zag_print(",s5_sealed=");sc_pnum(st.nsealed as i64);
+    _zag_print(",s5_events=");sc_pnum(st.events_n as i64);
+    _zag_print(",audit_chunks=");sc_pnum(au.nchunks as i64);
     _zag_println("");
     // deterministic digest over (id, recalled value) for all ids
     let hh:i64=1469598103934665603;
