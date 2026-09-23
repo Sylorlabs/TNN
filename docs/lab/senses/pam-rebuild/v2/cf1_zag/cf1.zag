@@ -1,0 +1,504 @@
+// cf1.zag — Pure-Zag reimplementation of the R2-4 cf1 corroborated-revision replay.
+// Mirrors /tmp/autopsy3.py Gate(revision=True, challenger_conf=700) branch-for-branch.
+//
+// CLI: cf1 <records_path> <mrgf_tsv_path> <mode>
+//   mode = "cf1"    : baseline corroborated-revision replay.
+//   mode = "margin" : cf1 + margin bar: timbredisc CORROBORATED requires mrgF > 382,
+//                     else WITHHELD (excludes the six corroborated-wrong RICH trials).
+//
+// Output on stdout: one disposition per trial, in seq order:
+//   seq|disposition
+// On stderr: metrics (RK-3, false installs, RK-2) and SHA-256 of the disposition stream.
+//
+// The disposition stream hashed is the LF-joined disposition names with trailing LF,
+// i.e. "WITHHELD\nPROVISIONAL_INSTALL\n...". This is the canonical stream; the
+// target digest's input serialization (from the Python runs) was not documented,
+// so the digest is reported for the canonical stream.
+//
+// Pure Zag, zero RNG, deterministic. Uses R33_NATIVE_IO_V1 + R33_NATIVE_SHA256_V2.
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- arena i32 accessors (little-endian) -----------------------
+fn t_put32(a:[]u8, idx:i32, v:i32) void {
+    let o:i32 = idx * 4;
+    a[o] = (v & 255) as u8;
+    a[o + 1] = ((v >> 8) & 255) as u8;
+    a[o + 2] = ((v >> 16) & 255) as u8;
+    a[o + 3] = ((v >> 24) & 255) as u8;
+}
+fn t_get32(a:[]u8, idx:i32) i32 {
+    let o:i32 = idx * 4;
+    let b0:i32 = a[o] as i32;
+    let b1:i32 = a[o + 1] as i32;
+    let b2:i32 = a[o + 2] as i32;
+    let b3:i32 = a[o + 3] as i32;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+fn t_put64(a:[]u8, idx:i32, v:i64) void {
+    t_put32(a, idx * 2, (v & 4294967295) as i32);
+    t_put32(a, idx * 2 + 1, ((v >> 32) & 4294967295) as i32);
+}
+fn t_get64(a:[]u8, idx:i32) i64 {
+    let lo:i64 = (t_get32(a, idx * 2) as i64) & 4294967295;
+    let hi:i64 = (t_get32(a, idx * 2 + 1) as i64) & 4294967295;
+    return lo | (hi << 32);
+}
+
+// ---------------- basic helpers --------------------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+fn z_stderr(s:[]u8) void {
+    // write to fd 2, chunked.
+    let i:i32 = 0;
+    while(i < s.len) {
+        let n:i32 = s.len - i;
+        if(n > 8192) { n = 8192; }
+        let chunk:[]u8 = s[i..i+n];
+        _zag_raw_syscall(1, 2, _zag_slice_ptr(chunk) as i64, n as i64, 0, 0, 0);
+        i = i + n;
+    }
+}
+fn z_stdout(s:[]u8) void {
+    let i:i32 = 0;
+    while(i < s.len) {
+        let n:i32 = s.len - i;
+        if(n > 8192) { n = 8192; }
+        let chunk:[]u8 = s[i..i+n];
+        _zag_raw_syscall(1, 1, _zag_slice_ptr(chunk) as i64, n as i64, 0, 0, 0);
+        i = i + n;
+    }
+}
+// parse decimal integer from s[lo..hi-1]; returns -1 on error (inputs are non-negative).
+fn parse_int(s:[]u8, lo:i32, hi:i32) i32 {
+    if(lo >= hi) { return -1; }
+    let v:i32 = 0;
+    let i:i32 = lo;
+    while(i < hi) {
+        let c:i32 = s[i] as i32;
+        if(c < 48 || c > 57) { return -1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+// find byte c in s starting at lo; returns index or -1.
+fn find_byte(s:[]u8, lo:i32, c:u8) i32 {
+    let i:i32 = lo;
+    while(i < s.len) {
+        if(s[i] == c) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+fn iabs32(x:i32) i32 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn tol_of(tc:i32) i32 {
+    if(tc == 0) { return 8; }
+    if(tc == 1) { return 40; }
+    if(tc == 2) { return 60; }
+    if(tc == 3) { return 4000; }
+    if(tc == 4) { return 120; }
+    return 0;
+}
+// disposition code -> name. Codes:
+// 0 WITHHELD, 1 PROVISIONAL_INSTALL, 2 CORROBORATED, 3 PERMANENT_INSTALL,
+// 4 CONFLICT_WITHHELD, 5 NEGATIVE_EVIDENCE, 6 SUPPRESSED,
+// 7 REVISED_INSTALL, 8 CHALLENGER_PROV.
+fn disp_name(code:i32) []u8 {
+    if(code == 0) { return "WITHHELD"; }
+    if(code == 1) { return "PROVISIONAL_INSTALL"; }
+    if(code == 2) { return "CORROBORATED"; }
+    if(code == 3) { return "PERMANENT_INSTALL"; }
+    if(code == 4) { return "CONFLICT_WITHHELD"; }
+    if(code == 5) { return "NEGATIVE_EVIDENCE"; }
+    if(code == 6) { return "SUPPRESSED"; }
+    if(code == 7) { return "REVISED_INSTALL"; }
+    return "CHALLENGER_PROV";
+}
+fn is_install(code:i32) i32 {
+    if(code == 1 || code == 2 || code == 3 || code == 7 || code == 8) { return 1; }
+    return 0;
+}
+fn is_perm_install(code:i32) i32 {
+    if(code == 3 || code == 7) { return 1; }
+    return 0;
+}
+// append s to ob at pos; returns new pos.
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_add_int(ob:[]u8, pos:i32, v:i32) i32 {
+    // non-negative integers only.
+    if(v == 0) {
+        if(pos < ob.len) { ob[pos] = 48; pos = pos + 1; }
+        return pos;
+    }
+    let tmp:[]u8 = nio_alloc(16);
+    let n:i32 = 0;
+    let x:i32 = v;
+    while(x > 0) {
+        tmp[n] = ((x % 10) + 48) as u8;
+        n = n + 1;
+        x = x / 10;
+    }
+    let i:i32 = n - 1;
+    while(i >= 0) {
+        if(pos < ob.len) { ob[pos] = tmp[i]; pos = pos + 1; }
+        i = i - 1;
+    }
+    nio_free(tmp);
+    return pos;
+}
+
+// ---------------- main ------------------------------------------------------
+fn main() i32 {
+    let rec_path:[]u8 = _zag_arg(1);
+    let mrg_path:[]u8 = _zag_arg(2);
+    let mode:[]u8 = _zag_arg(3);
+    if(rec_path.len == 0 || mrg_path.len == 0 || mode.len == 0) {
+        z_stderr("usage: cf1 <records> <mrgf.tsv> <cf1|margin>\n");
+        return 1;
+    }
+    let is_margin:i32 = 0;
+    if(_zag_strcmp(mode, "margin") == 1) { is_margin = 1; }
+
+    // Read records.txt (1.5MB).
+    let rec_buf:[]u8 = nio_alloc(4194304);
+    if(rec_buf.len == 0) { z_stderr("alloc rec failed\n"); return 1; }
+    let rec_n:i64 = z_read(rec_path, rec_buf, 4194304);
+    if(rec_n < 0) { z_stderr("read records failed\n"); return 1; }
+    let rn:i32 = rec_n as i32;
+
+    // Read mrgf.tsv (small).
+    let mrg_buf:[]u8 = nio_alloc(1048576);
+    if(mrg_buf.len == 0) { z_stderr("alloc mrg failed\n"); return 1; }
+    let mrg_n:i64 = z_read(mrg_path, mrg_buf, 1048576);
+    if(mrg_n < 0) { z_stderr("read mrgf failed\n"); return 1; }
+    let mn:i32 = mrg_n as i32;
+
+    // Build seq -> (mrgF, phash) from mrgf.tsv.
+    // mrgF array: 11840 i32, init to -2 (unknown).
+    let mrgf:[]u8 = nio_alloc(11840 * 4);
+    // phash table: 11840 x 64 bytes for cross-binding.
+    let phtab:[]u8 = nio_alloc(11840 * 64);
+    if(mrgf.len == 0 || phtab.len == 0) { z_stderr("alloc mrgf arr failed\n"); return 1; }
+    let i:i32 = 0;
+    while(i < 11840) { t_put32(mrgf, i, -2); i = i + 1; }
+    i = 0;
+    while(i < 11840 * 64) { phtab[i] = 0; i = i + 1; }
+    // Parse tsv lines: seq|phash|mrgF
+    let p:i32 = 0;
+    let tsv_ph:[]u8 = nio_alloc(64);
+    while(p < mn) {
+        let le:i32 = find_byte(mrg_buf, p, 10);
+        if(le < 0) { le = mn; }
+        // seq = field 0
+        let f1:i32 = find_byte(mrg_buf, p, 124);
+        let sq:i32 = parse_int(mrg_buf, p, f1);
+        // phash = field 1 (64 hex chars)
+        let f2:i32 = find_byte(mrg_buf, f1 + 1, 124);
+        let q:i32 = 0;
+        while(q < 64) { tsv_ph[q] = mrg_buf[f1 + 1 + q]; q = q + 1; }
+        // mrgF = field 2 (may be empty)
+        let mv:i32 = -1;
+        if(f2 + 1 < le) { mv = parse_int(mrg_buf, f2 + 1, le); }
+        if(sq >= 0 && sq < 11840) {
+            t_put32(mrgf, sq, mv);
+            q = 0;
+            while(q < 64) { phtab[sq * 64 + q] = tsv_ph[q]; q = q + 1; }
+        }
+        p = le + 1;
+    }
+    nio_free(tsv_ph);
+
+    // Gate state arenas.
+    // perm/prov/chal: 6 tasks x 4 i32 (jc, meas, seq, valid).
+    let perm:[]u8 = nio_alloc(6 * 4 * 4);
+    let prov:[]u8 = nio_alloc(6 * 4 * 4);
+    let chal:[]u8 = nio_alloc(6 * 4 * 4);
+    // neg: 6 x 256 x 2 i32 (jc, meas); neg_n: 6 i32.
+    let neg:[]u8 = nio_alloc(6 * 256 * 2 * 4);
+    let neg_n:[]u8 = nio_alloc(6 * 4);
+    if(perm.len == 0 || prov.len == 0 || chal.len == 0 || neg.len == 0 || neg_n.len == 0) {
+        z_stderr("alloc gate failed\n"); return 1;
+    }
+    i = 0;
+    while(i < 6 * 4) { t_put32(perm, i, 0); t_put32(prov, i, 0); t_put32(chal, i, 0); i = i + 1; }
+    i = 0;
+    while(i < 6) { t_put32(neg_n, i, 0); i = i + 1; }
+    // neg payload need not be pre-zeroed (only indices < neg_n are read).
+
+    // Output buffer for "seq|disposition\n" lines and digest stream.
+    let out:[]u8 = nio_alloc(2097152);
+    let dstream:[]u8 = nio_alloc(1048576);
+    if(out.len == 0 || dstream.len == 0) { z_stderr("alloc out failed\n"); return 1; }
+    let opos:i32 = 0;
+    let dpos:i32 = 0;
+
+    // Metrics.
+    let rk3_n:i32 = 0; let rk3_d:i32 = 0;
+    let false_perm:i32 = 0;
+    let rk2_n:i32 = 0; let rk2_d:i32 = 0;
+    let ntrials:i32 = 0;
+
+    // Parse records.txt line by line.
+    p = 0;
+    while(p < rn) {
+        let le:i32 = find_byte(rec_buf, p, 10);
+        if(le < 0) { le = rn; }
+        if(le > p) {
+            // fields: seq|tcode|fixture|prog|jcode|judgment|conf|pred|meas|phash|truth
+            let f:[]u8 = nio_alloc(12 * 4);
+            let nf:i32 = 0;
+            let s:i32 = p;
+            while(nf < 11) {
+                let e:i32 = find_byte(rec_buf, s, 124);
+                if(e < 0 || e > le) { e = le; }
+                t_put32(f, nf, s);
+                nf = nf + 1;
+                if(e >= le) { s = le; break; }
+                s = e + 1;
+            }
+            // field starts in f[0..10]; field k spans [f[k], f[k+1]) except last to le.
+            let seq:i32 = parse_int(rec_buf, t_get32(f, 0), t_get32(f, 1) - 1);
+            let tc:i32 = parse_int(rec_buf, t_get32(f, 1), t_get32(f, 2) - 1);
+            let prog:i32 = parse_int(rec_buf, t_get32(f, 3), t_get32(f, 4) - 1);
+            let jc:i32 = parse_int(rec_buf, t_get32(f, 4), t_get32(f, 5) - 1);
+            let conf:i32 = parse_int(rec_buf, t_get32(f, 6), t_get32(f, 7) - 1);
+            let pred:i32 = parse_int(rec_buf, t_get32(f, 7), t_get32(f, 8) - 1);
+            let meas:i32 = parse_int(rec_buf, t_get32(f, 8), t_get32(f, 9) - 1);
+            // phash field: [f[9], f[10]) minus trailing '|'
+            let ph_lo:i32 = t_get32(f, 9);
+            let ph_hi:i32 = t_get32(f, 10) - 1;
+            // truth field: [f[10], le)
+            let tr_lo:i32 = t_get32(f, 10);
+            let tr_hi:i32 = le;
+            nio_free(f);
+
+            // Cross-bind mrgF: verify tsv phash == record phash for this seq.
+            // If mismatch, treat mrgF as unknown (-1) — do not trust unbound values.
+            let mrgF:i32 = -1;
+            if(seq >= 0 && seq < 11840) {
+                let cand:i32 = t_get32(mrgf, seq);
+                // compare 64-byte phash
+                let ok:i32 = 1;
+                if(ph_hi - ph_lo != 64) { ok = 0; }
+                else {
+                    let qi:i32 = 0;
+                    while(qi < 64) {
+                        if(rec_buf[ph_lo + qi] != phtab[seq * 64 + qi]) { ok = 0; }
+                        qi = qi + 1;
+                    }
+                }
+                if(ok == 1) { mrgF = cand; }
+            }
+
+            // ---- Gate step (mirrors autopsy3.py) ----
+            let disp:i32 = 0;
+            // negative match?
+            let tol:i32 = tol_of(tc);
+            let nn:i32 = t_get32(neg_n, tc);
+            let nm:i32 = 0;
+            let k:i32 = 0;
+            while(k < nn) {
+                let nj:i32 = t_get32(neg, (tc * 256 + k) * 2);
+                let nmv:i32 = t_get32(neg, (tc * 256 + k) * 2 + 1);
+                if(nj == jc && iabs32(nmv - meas) <= tol) { nm = 1; }
+                k = k + 1;
+            }
+            if(prog == 1) {
+                if(nm == 0 && nn < 256) {
+                    t_put32(neg, (tc * 256 + nn) * 2, jc);
+                    t_put32(neg, (tc * 256 + nn) * 2 + 1, meas);
+                    t_put32(neg_n, tc, nn + 1);
+                }
+                disp = 5; // NEGATIVE_EVIDENCE
+            } else if(prog == 2) {
+                if(nm == 1) { disp = 6; } else { disp = 0; } // SUPPRESSED / WITHHELD
+            } else if(pred == 0) {
+                disp = 0; // WITHHELD
+            } else if(nm == 1) {
+                disp = 6; // SUPPRESSED
+            } else {
+                let pv:i32 = t_get32(perm, tc * 4 + 3);
+                if(pv == 1) {
+                    let pj:i32 = t_get32(perm, tc * 4);
+                    let pm:i32 = t_get32(perm, tc * 4 + 1);
+                    let ps:i32 = t_get32(perm, tc * 4 + 2);
+                    if(jc != pj) {
+                        if(conf >= 700) {
+                            let cv:i32 = t_get32(chal, tc * 4 + 3);
+                            let cj:i32 = t_get32(chal, tc * 4);
+                            let cm:i32 = t_get32(chal, tc * 4 + 1);
+                            if(cv == 1 && cj == jc && iabs32(cm - meas) <= tol) {
+                                t_put32(perm, tc * 4, jc);
+                                t_put32(perm, tc * 4 + 1, meas);
+                                t_put32(perm, tc * 4 + 2, seq);
+                                t_put32(chal, tc * 4 + 3, 0);
+                                disp = 7; // REVISED_INSTALL
+                            } else {
+                                t_put32(chal, tc * 4, jc);
+                                t_put32(chal, tc * 4 + 1, meas);
+                                t_put32(chal, tc * 4 + 2, seq);
+                                t_put32(chal, tc * 4 + 3, 1);
+                                disp = 8; // CHALLENGER_PROV
+                            }
+                        } else {
+                            disp = 4; // CONFLICT_WITHHELD
+                        }
+                    } else {
+                        // same jcode: margin bar (margin mode, timbredisc only)
+                        if(is_margin == 1 && tc == 4 && (mrgF < 0 || mrgF <= 382)) {
+                            disp = 0; // WITHHELD
+                        } else {
+                            disp = 2; // CORROBORATED
+                        }
+                    }
+                } else {
+                    let vv:i32 = t_get32(prov, tc * 4 + 3);
+                    if(vv == 1) {
+                        let pj:i32 = t_get32(prov, tc * 4);
+                        let pm:i32 = t_get32(prov, tc * 4 + 1);
+                        if(jc == pj && iabs32(pm - meas) <= tol) {
+                            t_put32(perm, tc * 4, jc);
+                            t_put32(perm, tc * 4 + 1, meas);
+                            t_put32(perm, tc * 4 + 2, seq);
+                            t_put32(perm, tc * 4 + 3, 1);
+                            t_put32(prov, tc * 4 + 3, 0);
+                            disp = 3; // PERMANENT_INSTALL
+                        } else if(jc != pj) {
+                            t_put32(prov, tc * 4, jc);
+                            t_put32(prov, tc * 4 + 1, meas);
+                            t_put32(prov, tc * 4 + 2, seq);
+                            disp = 1; // PROVISIONAL_INSTALL
+                        } else {
+                            disp = 2; // CORROBORATED
+                        }
+                    } else {
+                        t_put32(prov, tc * 4, jc);
+                        t_put32(prov, tc * 4 + 1, meas);
+                        t_put32(prov, tc * 4 + 2, seq);
+                        t_put32(prov, tc * 4 + 3, 1);
+                        disp = 1; // PROVISIONAL_INSTALL
+                    }
+                }
+            }
+
+            // Emit "seq|disposition\n" to stdout buffer; disposition name to digest stream.
+            opos = ob_add_int(out, opos, seq);
+            opos = ob_add(out, opos, "|");
+            let dn:[]u8 = disp_name(disp);
+            opos = ob_add(out, opos, dn);
+            opos = ob_add(out, opos, "\n");
+            dpos = ob_add(dstream, dpos, dn);
+            dpos = ob_add(dstream, dpos, "\n");
+
+            // Metrics: need judgment==truth? Compare judgment field to truth field.
+            // judgment spans [f5, f6); truth spans [tr_lo, tr_hi). Recompute bounds.
+            // (f was freed; recompute quickly by scanning.)
+            // Simpler: correctness via conf/truth is not needed for gate; compute here.
+            ntrials = ntrials + 1;
+            // Determine correct: judgment string == truth string.
+            // Find judgment field bounds again.
+            let q1:i32 = p;
+            let qc:i32 = 0;
+            let j_lo:i32 = 0; let j_hi:i32 = 0;
+            while(qc < 5) { q1 = find_byte(rec_buf, q1, 124) + 1; qc = qc + 1; }
+            j_lo = q1;
+            let qe:i32 = find_byte(rec_buf, q1, 124);
+            j_hi = qe;
+            let jl:i32 = j_hi - j_lo;
+            let tl:i32 = tr_hi - tr_lo;
+            let correct:i32 = 0;
+            if(jl == tl) {
+                correct = 1;
+                let qi:i32 = 0;
+                while(qi < jl) {
+                    if(rec_buf[j_lo + qi] != rec_buf[tr_lo + qi]) { correct = 0; }
+                    qi = qi + 1;
+                }
+            }
+            let hc:i32 = 0;
+            if(conf >= 700) { hc = 1; }
+            if(correct == 1 && hc == 1) {
+                rk2_d = rk2_d; // not wrong
+            }
+            if(correct == 0 && hc == 1) {
+                rk2_d = rk2_d + 1;
+                if(is_perm_install(disp) == 1) { rk2_n = rk2_n + 1; }
+            }
+            if(correct == 1 && hc == 1) {
+                rk3_d = rk3_d + 1;
+                if(prog == 0 && is_install(disp) == 1) { rk3_n = rk3_n + 1; }
+            }
+            if(is_perm_install(disp) == 1 && correct == 0) {
+                false_perm = false_perm + 1;
+            }
+        }
+        p = le + 1;
+    }
+
+    // Write stdout buffer.
+    z_stdout(out[0..opos]);
+
+    // SHA-256 of disposition stream.
+    let dg:[]u8 = nio_alloc(32);
+    let rc:i32 = ns_sha256(dstream[0..dpos], dg);
+    // hex encode
+    let hx:[]u8 = nio_alloc(64);
+    let hi2:i32 = 0;
+    while(hi2 < 32) {
+        let b:i32 = dg[hi2] as i32;
+        let h1:i32 = (b >> 4) & 15;
+        let h2:i32 = b & 15;
+        if(h1 < 10) { hx[hi2*2] = (48 + h1) as u8; } else { hx[hi2*2] = (87 + h1) as u8; }
+        if(h2 < 10) { hx[hi2*2+1] = (48 + h2) as u8; } else { hx[hi2*2+1] = (87 + h2) as u8; }
+        hi2 = hi2 + 1;
+    }
+    let rep:[]u8 = nio_alloc(512);
+    let rp:i32 = 0;
+    rp = ob_add(rep, rp, "trials=");
+    rp = ob_add_int(rep, rp, ntrials);
+    rp = ob_add(rep, rp, " rk3=");
+    rp = ob_add_int(rep, rp, rk3_n);
+    rp = ob_add(rep, rp, "/");
+    rp = ob_add_int(rep, rp, rk3_d);
+    rp = ob_add(rep, rp, " false_perm=");
+    rp = ob_add_int(rep, rp, false_perm);
+    rp = ob_add(rep, rp, " rk2=");
+    rp = ob_add_int(rep, rp, rk2_n);
+    rp = ob_add(rep, rp, "/");
+    rp = ob_add_int(rep, rp, rk2_d);
+    rp = ob_add(rep, rp, " digest=");
+    rp = ob_add(rep, rp, hx);
+    rp = ob_add(rep, rp, "\n");
+    z_stderr(rep[0..rp]);
+    return 0;
+}
