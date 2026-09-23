@@ -70,3 +70,12 @@ Under `crossref/runs/T3/T3-HARDEN/evidence/audiocont-battery/`:
 
 The 1.4 GB of WAV renders, compiled binaries, `.zag-cache`, `.zagd`, and
 `__pycache__` are NOT committed (excluded by policy; listed in manifest).
+
+## Provenance note (2026-09-23, post-verdict)
+
+The full gx battery (12 renders) was re-rendered from the committed
+`r2g.zag` with the pinned toolchain: rebuilt binary byte-identical to
+recovered `r2g_bin`, all 12 renders byte-identical to the recovered WAVs
+(see `H2_RUNLOG.md` provenance addendum for SHAs). The recovered renders
+are authentic generator outputs; the Grok gap is in the analysis logic,
+not render provenance. Verdict unchanged: **PARTIAL**.
