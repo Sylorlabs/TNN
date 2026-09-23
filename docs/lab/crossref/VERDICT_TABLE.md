@@ -40,3 +40,9 @@ Full reports: `runs/wave2/crews/<FAMILY>/{VERDICT.md,RUNLOG.md}`; full tally: `r
 - T2-JOKE: REPRODUCED with the frozen PARTIAL standing (arm-specific K1 kill-bar trip).
 - T2-DUEL: REPRODUCED as SCENARIO-FIT, no overall champion.
 - This table covers Wave 2 only. Earlier waves (R1–R5) are recorded in the scratch-crossref workspace; later waves append here.
+
+## Wave 2 — heavy families (dispatched after the main batch)
+
+| Family | Verdict | Headline |
+|---|---|---|
+| T2-SCALE | REPRODUCED | Scale-up anchor (N=240) + mid-scale (N=240,000) exact: mastery 1.0000, 96/96 flaw battery, 4.000 ops / 92 B per fact, 3/3 byte-identical reruns; mid-scale log byte-identical to committed s3_r0.log (sha256 17d5ee80…0fdb656). 6.58M ceiling sweep NOT re-run (Type B honest limit). |
