@@ -155,6 +155,30 @@ rebuilt from current source with the pinned toolchain reproduce the
 recorded binaries byte-identically (`5ca4bad3…3b65d6`,
 `03140334…5e104e2e40040`).
 
+## Final full-suite evaluation (2026-09-23)
+
+`src/eval_h2.py` (snapshot-hardened: sense_h2 + sense_a + memgate
+snapshots, SHA-recorded; memgate retried up to 6× on the flaky ledger
+write; strict frozen `false_perm`; H2-clean assert on all 10,000) ran the
+complete frozen suite: H2 clean 10,000/10,000 (5,000 adversarial);
+Approach A clean 9,987/10,000 (13 deterministic shapetrans failures,
+listed in metrics). Ledger: 10,000 links, independently verified,
+`a1a8b21f…` (2,917,419 bytes), byte-identical across runs.
+
+`src/score_h2.py` (independent scorer) re-ran memgate over the
+checkpoints requiring byte-identical dispositions, re-verified the
+10,000-link chain, and pinned all three snapshot SHAs — agrees with
+`eval_h2.py` on every bar.
+
+`src/det_h2.py` B6: 60/60 fixtures ×3 byte-identical for sense_h2 and
+Approach A; memgate ledger 3× byte-identical; independent 60-link
+recompute valid. B6 PASS.
+
+Verdict: **H2 DIED on kill criterion #2** — 42/108 = 38.9% of wrong
+high-confidence percepts reached FAIL/UNRESOLVED (bar ≥ 90%). All other
+bars and kills pass; B4 proves the contract load-bearing (0 vs 186).
+See `evidence/EVIDENCE_H2.md` and `VERDICT_H2.md`.
+
 Both binaries' run health (clean runs, bad-read counts) is reported by the
 eval itself in `evidence/metrics.json`.
 
