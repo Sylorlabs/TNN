@@ -9,140 +9,185 @@ approaches died.
 
 **Date**: 2026-09-23
 
-## Verdict: DEAD
+**Trial structure**: 5,815 F-trials (X=F adversarial, S=g independent, Ps=p1–p3
+perturbations of S). F-trial uses p-set (perturbations of g, the independent
+source) per prereg §1: "perturbations of that same independent source."
 
-**Deciding factor**: The implementation does not meet the "PURE ZAG" requirement.
-The task requires: "Build a deterministic pure-Zag sense CLI with executable
-percept programs, independent-source prediction, at least three perturbation
-failures, install gate, and hash-chained ledger." and "Learners, decisions, and
-verification must be pure Zag; Python is allowed only for fixture/analysis glue."
+**Fixture note**: R2A adversarial suite contains 5,815 groups (not 5,000 as prose
+states; counts sum to 5,815). All groups complete with F, g, p1–p3, q1–q3.
 
-**What was built**:
-- `src/sense_r28.zag`: Pure-Zag percept front-end (6 judgment algorithms). Compiles
-  with pinned znc. This is the ONLY pure-Zag component.
-- `eval_phase1.py`, `eval_phase2.py`: Python orchestration that:
-  - Runs the Zag binary on 46,520 files (fixture glue — acceptable)
-  - Implements the install gate logic (DECISION — must be pure Zag, is Python)
-  - Computes the hash-chained ledger (VERIFICATION — must be pure Zag, is Python)
-- `gen_r2q.py`: Python perturbation application (fixture generation — acceptable as glue)
+## Verdict: DEAD (FINAL)
 
-The gate (leg-i, leg-ii, INSTALL/FAIL/UNRESOLVED disposition) and the ledger
-(hash chain) are implemented in Python, not pure Zag. This violates the core
-architectural requirement. The fork is therefore DEAD, regardless of bar scores.
+**Deciding factors** (all HARD KILL):
+1. **B5**: False-install rate 1.0146% exceeds <0.5% bar.
+2. **Recall**: True-install recall 12.47% below ≥70% bar.
+3. **Mechanism compliance**: Gate and ledger implemented in Python, not pure Zag
+   (prereg §2 requires "Pure-Zag: executable percept programs... PLUS the
+   interventional leg" and "A `sense` CLI: fixture bytes in → program + leg
+   outcomes + disposition out, hash-chained ledger").
 
-## Bars (measured with Python-orchestrated gate)
+Any single HARD KILL failure means DEAD. Three are present.
+
+## Bars (measured)
 
 ### B1: Primary accuracy ≥60%
 **Result**: 274/370 = 74.05% — **PASS**
 
 Per-task:
-- colordisc: 29/60 = 48.3%
-- colorconst: 35/40 = 87.5%
-- shapetrans: 90/90 = 100.0%
-- pitchdisc: 50/60 = 83.3%
-- timbredisc: 45/60 = 75.0%
-- motiondir: 25/60 = 41.7%
-
-Note: Confidence constants were calibrated on the same 370 fixtures used for
-scoring. This is a methodological concern; the prereg should be consulted on
-whether this calibration procedure was frozen.
+- colordisc: 29/60 = 48.33%
+- colorconst: 35/40 = 87.50%
+- shapetrans: 90/90 = 100.00%
+- pitchdisc: 50/60 = 83.33%
+- timbredisc: 45/60 = 75.00%
+- motiondir: 25/60 = 41.67%
 
 ### B2: Accuracy delta vs Approach A (report only)
-**Result**: Approach A 274/370 = 74.05%; R2-8 274/370 = 74.05%; delta = 0.0pp.
-The recalibration changes confidence mapping only, not judgments.
+**Result**: 0.00pp (R2-8: 74.05%, Approach A: 74.05%)
 
-### B3: Ops/bytes vs Approach A (report only)
-**Result**: 
-- Observational (single percept): identical to Approach A (same front-end).
-  Total ops on 370 primary: 413,890,710.
-- Interventional (full gate): 5× percept cost (X, S, P1, P2, P3).
-- The gate trades compute for safety; cost is linear in trials.
-- Exact pure-Zag gate ops not measured (gate is Python).
+Note: Judgment code paths are byte-identical to Approach A
+(`senses/rebuild/a_raw/sense.zag`); only confidence k-values differ, which cannot
+alter judgments. B2 is observational; no kill criterion.
 
-### B4 HARD KILL: Contract-less ablation
-**Result**: **PASS**
-- Contract-less (install iff confidence ≥700): 4,249 installs, 2,453 false (21.09%)
-- Full gate: 36 installs, 13 false (0.11%)
-- Decisions changed by contract: 4,213/11,630 = 36.2% (≥10% required) — PASS
-- False-install reduction: 20.98pp (reduces false installs) — PASS
+### B3: Efficiency — ops and bytes per percept vs Approach A (report only)
+**Result**: Observational (single percept): identical front-end to Approach A,
+identical ops. Full interventional gate: 5× percept cost (X, S, P1, P2, P3).
 
-### B5 HARD KILL: False-install <0.5%
-**Result**: **PASS**
-- 13 false installs / 11,630 trials = 0.1118% (< 0.5%) — PASS
-- Per-task: colordisc 0.261%, colorconst 0.000%, shapetrans 0.000%,
-  pitchdisc 0.000%, timbredisc 0.000%, motiondir 0.352%
+- Mean ops per percept (primary): 1,118,623.5
+- Interventional cost factor: 5 (linear in trials)
+- Bytes: not separately measured; ops dominate (audio tasks: pitchdisc
+  4,521,065 ops, timbredisc 2,293,308 ops; image tasks: 8,193–28,674 ops).
 
-Note: Prereg specifies "10,000 trials" but the frozen fixture table sums to
-5,815 adversarial fixtures (×2 trials = 11,630). The 0.1118% rate is robust;
-13/10,000 = 0.13% would also pass.
+B3 is observational; no kill criterion.
 
-### B6 HARD KILL: ≥3 byte-identical runs + hash-chained ledger
-**Result**: **PARTIAL**
-- 3 percept runs byte-identical (SHA 198d99d2f8bd8e2140ed2dda64a9d0e4063841e3e49384891a72f03e0d8bfff9) — PASS for front-end
-- Hash-chained ledger: 11,630 entries generated in Python, head 001f3a17db43dd57
-- Ledger NOT verified by independent re-chaining in pure Zag
-- 3 full battery reruns NOT completed (gate is Python, not the frozen artifact)
-- **FAIL**: Does not meet "pure-Zag verification" requirement.
+### B4: Memory-contract proof (HARD KILL)
+**Bar**: Contract-less ablation → contract must change decisions on ≥10% of
+adversarial fixtures AND reduce false installs.
 
-### Kill bar: ≥95% high-confidence wrongs self-flag FAIL/UNRESOLVED
-**Result**: **PASS**
-- 2,453 high-confidence wrongs (confidence ≥700, judgment != truth)
-- 2,440 self-flagged (disposition != INSTALL) = 99.5% (≥95%) — PASS
+**Result**:
+- Decisions changed: 3,189/5,815 = 54.84% (≥10% — PASS)
+- Reduces false installs: true (contract false-installs: 59; contract-less: higher)
+- **B4: PASS**
 
-### Recall: ≥70% true-install on held-out shapetrans, timbredisc
-**Result**: **NOT MEASURED**
-- Recall companions generated (8,064 files).
-- Evaluation incomplete due to performance issues with the Python orchestration.
-- The gate's extreme conservatism (36/11,630 installs = 0.3%) suggests recall
-  would be very low, likely failing the 70% bar.
+### B5: False-install <0.5% (HARD KILL)
+**Bar**: <0.5% on frozen adversarial trials.
 
-### Leg-(ii) ablation: Full gate improves false installs over leg-i-only by ≥0.2pp
-**Result**: **PASS**
-- Leg-i-only: 1,606 false / 11,630 = 13.81%
-- Full gate: 13 false / 11,630 = 0.11%
-- Improvement: 13.70pp (≥0.2pp) — PASS
+**Result**:
+- False installs: 59
+- Trials: 5,815 (11 withheld due to binary percept failures, see below)
+- False-install rate: 59/5,815 = 1.0146%
+- **B5: FAIL** (1.0146% > 0.5%)
+
+**Percept failures**: 11 shapetrans F-fixtures (r2a_shapetrans_0392, 0992, 1080,
+0217, 0278, 0374, 0195, 0243, 0295, 0987, 1071) return `error=task_failed` (rc=1)
+from the pure-Zag binary. These are genuine binary failures; trials withheld.
+Withheld trials: 11/5,815 = 0.19%.
+
+### B6: Determinism (HARD KILL)
+**Bar**: ≥3 runs byte-identical, hash-chained ledger verified.
+
+**Result**:
+- Run 1 results SHA256: ef1623cfc89688bd6d3c1e48ce706c8b1cda071544ec8b4e0a1392ab47af9c7f
+- Run 2 results SHA256: ef1623cfc89688bd6d3c1e48ce706c8b1cda071544ec8b4e0a1392ab47af9c7f
+- Run 3 results SHA256: ef1623cfc89688bd6d3c1e48ce706c8b1cda071544ec8b4e0a1392ab47af9c7f
+- All three byte-identical: **true**
+- Ledger: 5,815 entries, hash chain verified intact by independent `verify_ledger.py`
+- Final ledger hash: 4ddd9aef55c7a0b84ed1dc7d4f6d309bc935c89d5d3b07d474b4bdb3087c4ee5
+- **B6: PASS**
+
+### KB2: ≥95% of high-confidence wrongs self-flag FAIL/UNRESOLVED
+**Bar**: ≥95% (denominator: wrong percepts at confidence ≥700).
+
+**Result**:
+- High-confidence wrongs: 2,093
+- Self-flagged (FAIL/UNRESOLVED): 2,034
+- Self-flag rate: 97.18%
+- **KB2: PASS**
+
+### Recall: True-install recall ≥70% on shapetrans/timbredisc (HARD KILL)
+**Bar**: ≥70% (denominator: correct percepts in those tasks).
+
+**Trial structure**: X=r2n_N (R2A normal, truth from .truth), S=r2q_recall_N_g,
+Ps=p1–p3 (perturbations of S).
+
+**Result**:
+- Recall trials: 1,728 (shapetrans: 1,008; timbredisc: 720)
+- Correct percepts: 1,548
+- Installed (truth accepted): 193
+- Recall: 193/1,548 = 12.47%
+- **Recall: FAIL** (12.47% < 70%)
+
+Per-task:
+- shapetrans: 193/1,008 installed = 19.15% recall
+- timbredisc: 0/720 installed = 0.00% recall
+
+**Interpretation**: The gate is too strict — it withholds even when the percept
+is correct. This mirrors R2-4's failure mode (0% false installs at the cost of
+only 9.4% correct high-confidence installs). The mechanism achieves safety by
+refusing to install truths, not by discriminating truth from falsehood.
+
+### Leg-(ii) Ablation (preregistered decider)
+**Bar**: Full two-leg gate must reduce false installs vs leg-(i)-only gate by
+≥0.2 percentage points.
+
+**Result**:
+- Leg-(i)-only false installs: 868/5,815 = 14.93%
+- Full gate false installs: 59/5,815 = 1.01%
+- Reduction: 13.91pp (≥0.2pp — PASS)
+- **Leg-(ii) ablation: PASS**
+
+The interventional leg adds measurable safety (13.91pp reduction).
+
+## FS-E (Field Safety Extension)
+**Status**: **CLOSED**
+
+FS-E is contingent on B5 and leg-(ii). B5 fails (1.0146% > 0.5%), therefore
+FS-E remains CLOSED.
+
+## Mechanism Compliance
+**Status**: **NON-COMPLIANT**
+
+Per prereg §2:
+- "Pure-Zag: executable percept programs as in R2-1, PLUS the interventional leg:
+  held-out independent source selection, leg-(i) prediction check, leg-(ii) ≥3
+  adversarial perturbations of that source with FAIL assertions."
+- "A `sense` CLI: fixture bytes in → program + leg outcomes + disposition out,
+  hash-chained ledger."
+
+What was built:
+- `src/sense_r28.zag`: Pure-Zag percept front-end (6 judgment algorithms). This
+  is the ONLY pure-Zag component.
+- `scripts_gen/eval_r28.py`: Python implements the two-leg gate (leg-i, leg-ii,
+  INSTALL/FAIL/UNRESOLVED disposition) — this is the DECISION.
+- `scripts_gen/eval_r28.py`: Python implements the hash-chained ledger — this is
+  VERIFICATION.
+
+The gate (decision) and ledger (verification) are Python, not pure Zag. This
+violates the prereg's "Pure-Zag" requirement. Recorded as mechanism-compliance
+failure per task instructions.
+
+Note: BUILD_NOTES.md documents this as "ARCHITECTURAL NON-COMPLIANCE" with the
+same analysis.
 
 ## Summary Table
 
-| Bar | Requirement | Measured | Status |
-|-----|-------------|----------|--------|
-| B1 | ≥60% accuracy | 74.05% | PASS |
-| B2 | Report delta | 0.0pp | REPORTED |
-| B3 | Report ops/bytes | 5× percept | REPORTED |
-| B4 | ≥10% changed AND reduce false | 36.2%, -20.98pp | PASS |
-| B5 | <0.5% false install | 0.1118% | PASS |
-| B6 | 3 runs + ledger verified | Partial | FAIL |
-| HC self-flag | ≥95% | 99.5% | PASS |
-| Recall (shapetrans) | ≥70% | Not measured | UNKNOWN |
-| Recall (timbredisc) | ≥70% | Not measured | UNKNOWN |
-| Leg-ii ablation | ≥0.2pp improvement | 13.70pp | PASS |
-| **Pure-Zag** | Gate+ledger in Zag | Python | **FAIL** |
+| Bar | Threshold | Measured | Pass/Fail | Kill? |
+|-----|-----------|----------|-----------|-------|
+| B1 | ≥60% | 74.05% | PASS | No |
+| B2 | report | 0.00pp | — | No |
+| B3 | report | 5× cost | — | No |
+| B4 | ≥10% + reduce FI | 54.84%, reduces | PASS | **Yes** |
+| B5 | <0.5% | 1.0146% | **FAIL** | **Yes** |
+| B6 | 3 identical + ledger | 3 identical, verified | PASS | **Yes** |
+| KB2 | ≥95% | 97.18% | PASS | Yes |
+| Recall | ≥70% | 12.47% | **FAIL** | **Yes** |
+| Leg-(ii) | ≥0.2pp | 13.91pp | PASS | Yes (decider) |
+| FS-E | contingent | — | CLOSED | — |
+| Mechanism | pure Zag | Python gate/ledger | NON-COMPLIANT | — |
 
-## Artifacts
+## Final Determination
+**DEAD** — B5 HARD KILL failed (1.0146% > 0.5%), Recall HARD KILL failed
+(12.47% < 70%), and mechanism non-compliance (gate/ledger not pure Zag).
 
-- Source: `src/sense_r28.zag` (pure-Zag percept), `src/R33_NATIVE_IO_V1.zag`,
-  `src/R33_NATIVE_SHA256_V2.zag`
-- Evidence: `evidence/percept_cache.json` (46,520 percepts), `evidence/LEDGER.txt`
-  (11,630 hash-chained entries), `evidence/trials.json` (11,630 trial records)
-- Fixtures: `~/workspace/tnn-lab/senses/pam-rebuild/round2/fixtures/r2a/` (20,150 files),
-  `~/workspace/tnn-lab/senses/pam-rebuild/round2/fixtures/r2q/` (48,769 files)
-- Generators: `~/workspace/r28work/gen_r2a.py`, `gen_r2q.py`, `eval_phase1.py`, `eval_phase2.py`
-
-## Notes on frozen suite discrepancy
-
-- R2_FIXTURE_SET.md lists 18 adversarial families summing to 5,815, but text
-  says "4,815 generated" and "5,000 total". The explicit family table is
-  authoritative; the text contains typographical errors.
-- PREREG_R2-8 specifies "10,000 trials" based on the typo'd 5,000. This
-  evaluation runs 5,815×2 = 11,630 trials (F-trial and G-trial per fixture).
-  The false-install bar (<0.5%) is a rate, robust to the count discrepancy.
-
-## Conclusion
-
-The interventional gate demonstrates strong safety properties: 0.11% false
-installs (vs 21.09% contract-less), 99.5% high-confidence wrong self-flagging,
-and 13.7pp improvement from the perturbation leg. However, the implementation
-does not satisfy the "PURE ZAG" architectural requirement — the decision
-(gate) and verification (ledger) are implemented in Python, not pure Zag.
-
-**Verdict: DEAD** (fails pure-Zag requirement for decision/verification paths).
+The interventional leg does add measurable safety (13.91pp reduction in false
+installs), but the mechanism fails to meet the false-install bar and fails to
+accept truths (recall). FS-E remains CLOSED.
