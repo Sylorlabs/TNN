@@ -1,7 +1,7 @@
 # VERDICT — T2-SENSESINT (replacement crew)
 
 **Family:** T2-SENSESINT — senses-integrity: 140/140 (Type C: committed-evidence re-derivation)
-**Verdict: PARTIAL**
+**Verdict: REPRODUCED** (amended 2026-09-23 — see §10; original PARTIAL verdict in §§1–9 stands as the record at closeout time)
 **Crew:** T2-SENSESINT REPLACEMENT (predecessor killed by daemon restart; no inherited state)
 **Date:** 2026-09-23
 
@@ -176,3 +176,46 @@ bytes (named in §5). Nothing re-run live (Type C); the GK battery digests
 (`488af9ab…` / `7f351a53…` / `94575a9a…`) are unverifiable from the
 committed record. If the GK sources are committed, the verdict upgrades on
 re-run.
+
+---
+
+## 10. Recovery amendment (2026-09-23, Wave-2 crossref evidence-recovery coordinator)
+
+**Verdict: PARTIAL → REPRODUCED.** The frozen rule's named PARTIAL condition
+("any item's evidence is missing") no longer holds.
+
+Recovery executed per the frozen `RECOVERY_PREREG.md`
+(`docs/lab/crossref/runs/T2/SENSESINT/RECOVERY_PREREG.md`, committed alone at
+`a94cc0e7a4025edfb41635a15ec008176fe82b90`):
+
+- **3 P0 GK sources RECOVERED** (restored from the frozen crew workdir
+  `~/workspace/grok47/senses/gk-scratch/`, byte-identical, exact manifest sizes
+  5285/6329/4235, zero edits, zero commits ever in branch history):
+  `senses/web-search/v2/src/gk{1,2,3}_trial.zag` (commit
+  `16ddf755fee7ab41765d961f01e0d2a3f0f2c875`).
+- **7 P2 jsonl RECOVERED** (workdir copies, exact manifest sizes, all lines valid
+  JSONL): `senses/web-search/internet-trial/evidence/phase1/*.jsonl` (commit
+  `c9bd2b210f781eb60bc9ebcaa1a280225a758184`). No P2 downgrades needed.
+- **3 manifest sizes CORRECTED** in `ITEMS_DONE.tsv` (kb5.py 2189→2731, run_all.py
+  4302→5801 at `0e9b6ccf5eb42915fca58e9fcf0be49b1c0cc759`; PROPOSED_BARS.md
+  11587→11846 at `79fb9a7b9b1494235b2b11e651a8107c8246fca7` — a third stale size
+  the closeout checker missed, found by the coordinator's own 140/140 sweep).
+
+**Digest re-derivation (honest bar, committed sources, pinned
+`znc_linux_x86_64_abed8aa1`, N=3 runs each, zero RNG, zero source edits):**
+GK1 `488af9ab375eae17cf65015240fb5c8a2f111ed6ca2eee354778b12b74a0db5c` —
+**YES**; GK2 `7f351a53524d67fdb182357dcbf0215af526a6b70d7f6d66ce008d0c301fdf4b` —
+**YES**; GK3 `94575a9a6c9e4aaa916676b6301a57d643c65f28d51d748f36492ac359814d13` —
+**YES**. All three byte-identical across reruns and byte-identical to the crew's
+original run logs; case-level outcomes and kill bars (tamper=1 only on GK2-15
+positive control; GK1 7/7, GK2 8/8, GK3 4/4) match VERDICT_SHEET §3.
+
+**140/140 verification at head:** recursive subtree trees
+(`docs/lab/senses|redteam|info-source|mixed-web`) — 140/140 paths present,
+140/140 sizes match the amended manifest.
+
+Full record: `docs/lab/crossref/runs/T2/SENSESINT/RECOVERY_VERDICT.md`.
+Caveats: recovery is restore-not-reimplementation; scratch verification preceded
+the frozen prereg (recorded honestly in the verdict); concurrent branch commits
+mean the parent should re-run the cheap tree check before closing the track in
+`VERDICT_TABLE.md`; Type C — no live-web recapture of the internet-trial jsonl.
