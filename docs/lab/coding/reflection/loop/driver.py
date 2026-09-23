@@ -1,38 +1,36 @@
 #!/usr/bin/env python3
 """Fast-loop harness driver — deterministic plumbing ONLY.
 
-The driver makes NO coding decisions. In particular it does NOT:
-  - classify compiler errors (no regexes, no keyword scans on stderr),
-  - choose repair strategies,
-  - edit, patch, or otherwise transform source code,
-  - interpret test failures beyond byte comparison.
+Promoted 2026-09-22 (Micah: "take the free lunch";
+frozen prereg coding/reflection/speed_intel/PROMOTION_PREREG.md):
+  P1: --budget default 6 -> 4 (Arm 1 knee).
+  P2: learner diagnose runs the combo path (3a prune + 3b branch-and-bound
+      over the pruned survivor set) by default; the mask travels as
+      diagnose argv[9] ("ab" default, "classic" escape hatch).
+  P3: fail-fast precheck routing always-on: before each znc invocation the
+      driver asks the LEARNER (`precheck <spec> <src>`) whether the source
+      will compile. --no-precheck disables it.
 
-It invokes the learner binary, writes source files, runs znc, runs test
-vectors, and hands evidence to the learner VERBATIM. Every coding
-decision (generate / diagnose / revise) lives in learner.zag's
-`gen` / `diagnose` modes. The driver contains no error-pattern matching.
+Same law as always: the driver makes NO coding decisions. It does NOT
+classify errors, choose repairs, edit code, or interpret test failures
+beyond byte comparison.
 
-Loop protocol per item (budget = max iterations):
-  1. gate check via learner (`gate <spec>`); REFUSE -> outcome=gate-refused.
-  2. initial source: `gen` output (mode=gen) or the provided seed (mode=seed).
-     A gen output starting with a learner-declared failure sentinel
-     (UNKNOWN_GOAL / UNTAUGHT: / NEED_CARD: / UNKNOWN_TIER / REFUSED:)
-     is routed to `diagnose` as evtype=GEN. Sentinel routing is protocol
-     plumbing (like checking a return code), not diagnosis.
-  3. per iteration: write source -> znc compile (rc + raw stderr captured
-     verbatim) -> run test vectors (stdout/rc compared byte-exact).
-     On failure, build the evidence envelope and call
-     `diagnose <spec> <src> <evtype> <envelope> <patterns> <demo> <card>`.
-  4. parse the DIAG line + @@SRC@@ block. A strategy starting with
-     "halt-" stops the loop (the LEARNER decided to stop). A revision
-     byte-identical to its input also stops the loop (stall guard).
-  5. every step is logged: spec, each source version (sha256), each raw
-     evidence blob (sha256), each DIAG line + trace.
+- Precheck routing is sentinel-style (first output line only, like
+  GEN_SENTINELS / a return code): `PRECHECK FAIL` -> diagnose with
+  evtype=PRECHECK, skipping znc; `PRECHECK OK` -> compile as usual. The
+  reason text travels VERBATIM into the evidence envelope; the driver
+  classifies nothing. Every precheck-FAIL source is logged to
+  <out>.fp_candidates.jsonl for post-hoc false-positive validation
+  (compiled separately; those validation invocations are NOT counted in
+  the loop's znc cost).
+- Per-iteration records carry: `znc` (1/0), `precheck` (ok/fail/n/a[-gen]),
+  `evals` (learner-reported hypothesis-evaluations).
 
-Determinism: the driver adds no timestamps, no randomness, no dict-order
-dependence to the canonical log. Same battery + same learner binary ->
-byte-identical canonical log.
+Verify the no-classification law with the INTERFACE.md grep (compiler
+error-code and stderr-phrase patterns): it must hit nothing in this file
+outside comments and docstrings.
 """
+
 import json, subprocess, sys, os, time, hashlib, shutil
 
 ZNC = '/home/hatch/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1'
@@ -40,6 +38,12 @@ LEARNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'work', 'lear
 ALL_PATTERNS = "p_math,p_search,p_slice,p_strrev,p_func,p_loop,p_struct,p_sort,p_argv,p_strcnt,p_slicefill"
 
 GEN_SENTINELS = ("UNKNOWN_GOAL", "UNTAUGHT:", "NEED_CARD:", "UNKNOWN_TIER", "REFUSED:")
+
+# Diagnose-path mask plumbing (not error classification): the mask is a fixed
+# driver constant passed to the learner's `diagnose` as argv[9], like --budget.
+#   "ab"      -> combo default (3a prune + 3b branch-and-bound over survivors)
+#   "classic" -> old full-evaluation path (control/rollback escape hatch)
+# Precheck routing is always-on unless --no-precheck.
 
 
 def sha(b: bytes) -> str:
@@ -110,7 +114,22 @@ def trailer(prev_class, prev_strat, stalled, cycle):
     return "PREV %s/%s\nSTALLED %d\nCYCLE %d\n" % (prev_class, prev_strat, stalled, cycle)
 
 
-def run_item(item, budget, workdir, tlog):
+def run_precheck(spec, src):
+    """Ask the LEARNER whether src will compile. Returns (ok, reason_text).
+
+    Sentinel-style routing (like GEN_SENTINELS): the driver only checks the
+    first output line, exactly as it checks a return code. The reason text
+    is passed VERBATIM to diagnose as the evidence envelope; the driver
+    classifies nothing.
+    """
+    out = run_learner(['precheck', spec, src])
+    lines = out.split('\n')
+    if lines and lines[0] == 'PRECHECK FAIL':
+        return False, '\n'.join(lines[1:])
+    return True, ''
+
+
+def run_item(item, budget, workdir, tlog, mask, use_precheck, fp_log, stats):
     os.makedirs(workdir, exist_ok=True)
     iid = item['id']
     spec = item.get('spec', '')
@@ -145,13 +164,36 @@ def run_item(item, budget, workdir, tlog):
         zag_path = os.path.join(workdir, '%s_i%d.zag' % (iid, it))
         bin_path = os.path.join(workdir, '%s_i%d.bin' % (iid, it))
 
+        # 3c fail-fast precheck: the LEARNER predicts compile failure from
+        # the source alone (brace balance, defined names, dup defs, arity).
+        # Sentinel routing only: first output line decides the branch.
+        precheck_ok, precheck_reason = True, ''
+        if use_precheck and not (gen_failed and it == 1):
+            stats['precheck_calls'] += 1
+            precheck_ok, precheck_reason = run_precheck(spec, src)
+
         if gen_failed and it == 1:
             evtype = 'GEN'
             ev = 'GENFAIL %s\n' % src.strip().split('\n')[0][:120] + trailer(prev_class, prev_strat, 0, 0)
             rc, stderr = None, None
+            precheck_status = 'n/a-gen'
+            znc_invoked = 0
+        elif use_precheck and not precheck_ok:
+            # learner predicts compile failure: route straight to diagnose
+            # with evtype=PRECHECK, skipping the znc invocation.
+            evtype = 'PRECHECK'
+            ev = precheck_reason + trailer(prev_class, prev_strat, 0, 0)
+            rc, stderr = None, None
+            precheck_status = 'fail'
+            znc_invoked = 0
+            stats['precheck_fail'] += 1
+            fp_log.append({'id': iid, 'iter': it, 'src': src})
         else:
+            precheck_status = 'ok' if use_precheck else 'n/a'
             l0 = time.monotonic()
             rc, stderr = compile_src(src, zag_path, bin_path)
+            stats['znc_invocations'] += 1
+            znc_invoked = 1
             compile_ms = (time.monotonic() - l0) * 1000
             if rc == 0:
                 l0 = time.monotonic()
@@ -162,6 +204,7 @@ def run_item(item, budget, workdir, tlog):
                                   'src_sha256': sha(src_bytes),
                                   'compile_ms': round(compile_ms, 1),
                                   'test_ms': round(test_ms, 1),
+                                  'znc': 1, 'precheck': precheck_status,
                                   'ms': round((time.monotonic() - i0) * 1000, 1)})
                     outcome = 'pass'
                     break
@@ -182,7 +225,7 @@ def run_item(item, budget, workdir, tlog):
                 evtype = 'COMPILE'
 
         l0 = time.monotonic()
-        dout = run_learner(['diagnose', spec, src, evtype, ev, patterns, demo, card])
+        dout = run_learner(['diagnose', spec, src, evtype, ev, patterns, demo, card, mask])
         diag_ms = (time.monotonic() - l0) * 1000
         d, new_src = parse_diag(dout)
         if d is None or new_src is None:
@@ -190,6 +233,7 @@ def run_item(item, budget, workdir, tlog):
                           'src_sha256': sha(src_bytes),
                           'evidence_sha256': sha(ev.encode('utf-8')),
                           'diag_raw_sha256': sha(dout.encode('utf-8')),
+                          'znc': znc_invoked, 'precheck': precheck_status,
                           'ms': round((time.monotonic() - i0) * 1000, 1)})
             outcome = 'diag-unparseable'
             break
@@ -197,9 +241,11 @@ def run_item(item, budget, workdir, tlog):
         new_bytes = new_src.encode('utf-8')
         rec = {'n': it, 'evtype': evtype, 'result': 'revised',
                'class': d.get('class', '?'), 'strategy': d.get('strategy', '?'),
-               'score': d.get('score', '?'), 'trace': d.get('trace', '?'),
+               'score': d.get('score', '?'), 'evals': d.get('evals', '?'),
+               'trace': d.get('trace', '?'),
                'src_sha256': sha(src_bytes), 'new_src_sha256': sha(new_bytes),
                'evidence_sha256': sha(ev.encode('utf-8')),
+               'znc': znc_invoked, 'precheck': precheck_status,
                'ms': round((time.monotonic() - i0) * 1000, 1)}
         if evtype == 'COMPILE':
             rec['compile_ms'] = round(compile_ms, 1)
@@ -244,10 +290,16 @@ def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('battery')
-    ap.add_argument('--budget', type=int, default=6)
+    ap.add_argument('--budget', type=int, default=4)
     ap.add_argument('--workdir', default='work/run')
     ap.add_argument('--out', default='work/run.json')
     ap.add_argument('--only', default='')
+    ap.add_argument('--mask', default='ab', choices=['ab', 'classic'],
+                    help='diagnose path: ab (default combo: 3a prune + 3b '
+                         'branch-and-bound) or classic (old full evaluation; '
+                         'control/rollback only)')
+    ap.add_argument('--no-precheck', action='store_true',
+                    help='disable fail-fast precheck routing (escape hatch)')
     args = ap.parse_args()
 
     with open(args.battery) as bf:
@@ -258,16 +310,29 @@ def main():
         items = [i for i in items if i['id'] in want]
     results = []
     tlog = []
+    fp_log = []  # every precheck-FAIL source, for post-hoc false-positive validation
+    stats = {'znc_invocations': 0, 'precheck_calls': 0, 'precheck_fail': 0}
     for item in items:
-        r = run_item(item, args.budget, os.path.join(args.workdir, item['id']), tlog)
+        r = run_item(item, args.budget, os.path.join(args.workdir, item['id']), tlog,
+                     args.mask, not args.no_precheck, fp_log, stats)
         results.append(r)
         print("%-16s budget=%2d iters=%2d outcome=%-18s %.1fs" %
               (r['id'], r['budget'], r['iters_used'], r['outcome'], r['time_s']), flush=True)
     report = {'battery': battery.get('name', ''), 'budget': args.budget,
-              'learner': 'learner.zag', 'items': results}
+              'learner': 'learner.zag', 'mask': args.mask,
+              'precheck': not args.no_precheck,
+              'stats': stats, 'items': results}
     with open(args.out, 'w') as f:
         json.dump(report, f, indent=1, sort_keys=True)
-    print('wrote', args.out, 'digest', sha(canonical(report).encode()))
+    if fp_log:
+        fp_path = args.out + '.fp_candidates.jsonl'
+        with open(fp_path, 'w') as f:
+            for e in fp_log:
+                f.write(json.dumps(e) + '\n')
+        print('wrote', fp_path, '(%d precheck-fail sources)' % len(fp_log))
+    print('wrote', args.out, 'digest', sha(canonical(report).encode()),
+          'znc_invocations', stats['znc_invocations'],
+          'precheck', '%d/%d' % (stats['precheck_fail'], stats['precheck_calls']))
 
 
 if __name__ == '__main__':

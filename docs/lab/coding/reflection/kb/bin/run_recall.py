@@ -5,7 +5,12 @@ Does NOT make coding decisions. It: builds kb.dat (3x determinism check),
 runs kb_main gen (3x byte-identical check), compiles emitted programs with
 the pinned znc, runs frozen vectors, compares to frozen expectations,
 runs the gate battery and the A1/A2 ablations, and writes results JSON.
+
+Recall defaults to the indexed path (P4): kb_install builds <kbdat>.idx and
+kb_main auto-loads it. Pass --flat to force flat recall via the escape
+hatch (still builds the index; recall ignores it).
 """
+import argparse
 import subprocess, hashlib, json, os, sys, shutil
 
 KB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,8 +72,15 @@ def entries_without(drop_id):
     return "\n".join(out)
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--flat", action="store_true",
+                    help="force flat recall (escape hatch); default is indexed auto")
+    args = ap.parse_args()
+    # extra argv for kb_main: ["flat"] in escape-hatch mode, [] otherwise
+    recall_extra = ["flat"] if args.flat else []
+    res_name = "recall_results_flat.json" if args.flat else "recall_results.json"
+    res = {"flat_mode": args.flat, "install": {}, "gen": [], "gate": [], "ablation": {}}
     gens, gates = load_specs()
-    res = {"install": {}, "gen": [], "gate": [], "ablation": {}}
 
     kb_install = os.path.join(BIN, "kb_install")
     kb_main = os.path.join(BIN, "kb_main")
@@ -107,7 +119,7 @@ def main():
         rec = {"id": g["id"], "spec": g["spec"]}
         outs = []
         for r in range(3):
-            p = run([kb_main, "gen", kbdat, g["spec"]])
+            p = run([kb_main, "gen", kbdat, g["spec"]] + recall_extra)
             outs.append(p.stdout)
         rec["gen_deterministic"] = len(set(outs)) == 1
         rec["gen_bytes"] = len(outs[0])
@@ -160,7 +172,7 @@ def main():
 
     # ---- gate battery ----
     for gt in gates:
-        p = run([kb_main, "gate", kbdat, gt["spec"]])
+        p = run([kb_main, "gate", kbdat, gt["spec"]] + recall_extra)
         got = p.stdout.decode().strip()
         want = gt["expected"]
         ok = got.startswith(want)
@@ -174,7 +186,7 @@ def main():
         open(vtxt, "w").write(entries_without(drop))
         p = run([kb_install, vtxt, vdat])
         w1 = [g for g in gens if g["id"] == "w1"][0]
-        q = run([kb_main, "gen", vdat, w1["spec"]])
+        q = run([kb_main, "gen", vdat, w1["spec"]] + recall_extra)
         out = q.stdout.decode(errors="replace")
         first = out.split("\n", 1)[0]
         res["ablation"][aid] = {
@@ -183,7 +195,7 @@ def main():
             "kb_miss": "KB-MISS" in out,
         }
 
-    json.dump(res, open(os.path.join(LOG, "recall_results.json"), "w"), indent=1)
+    json.dump(res, open(os.path.join(LOG, res_name), "w"), indent=1)
 
     # ---- console summary ----
     print("install: entries digest: %s" % res["install"]["digest_line"])
