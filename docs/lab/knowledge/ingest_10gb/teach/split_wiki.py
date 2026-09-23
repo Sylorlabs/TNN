@@ -8,7 +8,7 @@ wb:{slug}:{n} with n restarting per page, so multi-page files produce
 duplicate keys (verified 2026-09-23). Unique slug per page keeps keys unique.
 
 Usage: bzcat dump.bz2 | python3 split_wiki.py <outbase> <stem> [pages_per_shard]
-       [pages_per_shard] [skip_n] [start_n]
+       [skip_n] [start_n]
 Writes <outbase>/shard_<nn>/wikipedia/<stem>_n<n:08d>.xml
 If skip_n>0, the first skip_n pages are counted but not written (fast resume);
 numbering starts at start_n (default 0). Use skip_n=start_n to continue a
@@ -24,14 +24,14 @@ CHUNK = 1 << 24  # 16MB
 def main():
     outbase = sys.argv[1]
     stem = sys.argv[2]
-    pps = int(sys.argv[3]) if len(sys.argv) > 4 else 50000
-    skip_n = int(sys.argv[4]) if len(sys.argv) > 5 else 0
-    n_pages = int(sys.argv[5]) if len(sys.argv) > 6 else 0
+    pps = int(sys.argv[3]) if len(sys.argv) > 3 else 50000
+    skip_n = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    start_n = int(sys.argv[5]) if len(sys.argv) > 5 else 0
     seen = 0  # pages seen in stream (for skip)
     head = b"<mediawiki>\n"
     tail = b"</mediawiki>\n"
     buf = b""
-    n_pages = 0
+    n_pages = start_n
     cur_shard = -1
     cur_dir = None
     inp = sys.stdin.buffer
