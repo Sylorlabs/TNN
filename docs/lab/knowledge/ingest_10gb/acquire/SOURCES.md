@@ -64,16 +64,17 @@ Method (deterministic):
    "Public domain in the USA."
 3. Ranked by LoCC download count descending, ties by ebook ID ascending
    (`gutenberg_ranked.tsv`).
-4. Probed the top 1,500 candidates' plain-text URLs (HEAD Content-Length);
-   1,421 usable, 79 unavailable or unusable (skipped, documented in
-   `gutenberg_probed.tsv`).
+4. Probed the top 3,000 candidates' plain-text URLs (HEAD Content-Length);
+   2,783 usable, 217 unavailable or unusable (skipped; per-candidate results
+   in the working file `gutenberg_probed.tsv`, not part of the corpus).
 5. Selected the smallest top-N of usable ranked entries reaching the byte
-   margin: first top-1,015 for the initial 750 MB margin, extended to top-1,334
-   after ineligible OpenStax PDFs were removed, then extended to top-1,745
-   (from 2,783 usable probed out of top-3,000 candidates) after Biology 2e
-   proved undownloadable. Cumulative probed bytes for the 1,745: 1,512,684,151.
+   margin, in three stages: top-1,015 for the initial ~750 MB margin, extended
+   to top-1,334 after the five ineligible OpenStax PDFs were excluded (§6),
+   then extended to top-1,745 after Biology 2e proved undownloadable — the
+   final 1,745 drawn from the top-3,000 probe's 2,783 usable entries.
+   Cumulative bytes for the 1,745: 1,512,684,151.
 
-All 1,334 plain-text files (`gutenberg/pg<EID>.txt`) are public domain.
+All 1,745 plain-text files (`gutenberg/pg<EID>.txt`) are public domain.
 Per-book source URLs are in the manifest (the `https://www.gutenberg.org/cache/epub/<id>/pg<id>.txt`
 or `/files/<id>/<id>-0.txt` URL actually downloaded).
 
@@ -83,8 +84,12 @@ The ingest-1GB corpus (`tnn-lab/knowledge/ingest_1gb/corpus/`) contains
 `enwiktionary-latest-pages-articles.xml.bz2` (1,632,298,458 bytes),
 `simplewiki-latest-pages-articles.xml.bz2` (356,186,307 bytes), and
 `wordnet31.zip` (11,058,667 bytes). None of these files — nor any byte-identical
-copy of them — is present in this corpus. Verified by filename and size;
-no SHA256 collisions.
+copy of them — is present in this corpus. Verified by filename and by direct SHA256
+comparison: the three files' hashes —
+`06acca8138eacb3e8ae9c1d6232f836e37c3bf9b6d582a86693731fe0d336c20`
+(enwiktionary), `6832fd106ae0e4734a349d6351709fc219ccebad5850234214a57e653f7812f8`
+(simplewiki), and `2a9e7da7d0c17ad875e4171a4d28ae17ab6969c7d67f1cf0f59d65c66d0fdd37`
+(wordnet31) — match none of the 1,765 hashes in this manifest.
 
 ## 6. Excluded material
 
@@ -99,5 +104,6 @@ acquisition policy prohibits:
 - openstax/calculus-volume-3.pdf (75,066,769 bytes)
 
 Total excluded: 444,622,556 bytes. They are quarantined in the working area and
-were replaced by extending the Gutenberg selection (top-1,015 → top-1,334),
-which is why the Gutenberg count exceeds the originally planned ~1,000.
+were replaced by extending the Gutenberg selection (top-1,015 → top-1,334
+→ top-1,745; the last extension also covered Biology 2e), which is why the
+Gutenberg count exceeds the originally planned ~1,000.

@@ -23,8 +23,9 @@
 - **Wikipedia**: deterministic 1/8 slice — every eighth multistream split by
   starting page ID (indices 0, 8, 16, …) from the enwiki-20260901 snapshot.
 - **Gutenberg**: ranked 78,593 public-domain-USA records by download count
-  (ties by ebook ID); probed top 1,500; skipped 79 unavailable; selected the
-  smallest top-N (N=1,334) reaching the byte margin.
+  (ties by ebook ID); probed the top 3,000 candidates; skipped 217 unavailable
+  or unusable; selected the smallest top-N (N=1,745) of the 2,783 usable
+  ranked entries reaching the byte margin.
 - **OpenStax**: interior copyright page verified as CC BY 4.0 for each PDF;
   five CC BY-NC-SA PDFs excluded (see SOURCES.md §6).
 - **Stack Exchange**: full site dumps for Math, Physics, Chemistry, Biology.
@@ -32,7 +33,8 @@
 ## Deduplication
 
 None of the ingest-1GB corpus files (enwiktionary, simplewiki, wordnet31)
-are present in this corpus.
+are present in this corpus — verified by filename and by direct SHA256
+comparison of the three files against all 1,765 manifest hashes (zero matches).
 
 ## Columns
 
