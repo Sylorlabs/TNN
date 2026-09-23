@@ -12,8 +12,9 @@ OUT = os.path.expanduser("~/workspace/tnn-lab/senses/pam-rebuild/round2/forks/R2
 
 TASKS = ["colordisc", "colorconst", "shapetrans", "pitchdisc", "timbredisc", "motiondir"]
 # adversarial families for the 100: (family, task)
-ADVFAM = [("COL-1", "colordisc"), ("CCN-2", "colorconst"), ("SHP-1", "shapetrans"),
-          ("SHP-2", "shapetrans"), ("PTC-2", "pitchdisc"), ("MOT-2", "motiondir")]
+# Family names match the generator's trials.tsv and prereg §3 (R2A- prefixed).
+ADVFAM = [("R2A-COL-1", "colordisc"), ("R2A-CCN-2", "colorconst"), ("R2A-SHP-1", "shapetrans"),
+          ("R2A-SHP-2", "shapetrans"), ("R2A-PTC-2", "pitchdisc"), ("R2A-MOT-2", "motiondir")]
 
 def lcg(seed):
     s = seed
@@ -51,7 +52,8 @@ def main():
             sample.append(pool[idx[k]])
 
     # 100 adversarial: stratified across 6 families (17,17,17,17,16,16)
-    per_fam = {"COL-1": 17, "CCN-2": 17, "SHP-1": 17, "SHP-2": 17, "PTC-2": 16, "MOT-2": 16}
+    per_fam = {"R2A-COL-1": 17, "R2A-CCN-2": 17, "R2A-SHP-1": 17,
+               "R2A-SHP-2": 17, "R2A-PTC-2": 16, "R2A-MOT-2": 16}
     for fam, task in ADVFAM:
         pool = [t for t in adv if t["family"] == fam and t["task"] == task]
         if len(pool) < per_fam[fam]:
