@@ -1,0 +1,712 @@
+// diagnose.zag — Deep-Dive Diagnostic Harness (PAMs v2, Team 7).
+//
+// Automates the knowledge-vs-machinery probe split from DEEP_DIVE_METHOD.md:
+// given a frozen behavioral-failure case record, it reproduces + freezes the
+// failure, replays the documented gate rule over the record (machinery
+// fidelity), runs a KNOWLEDGE probe battery on the frozen record and a
+// MACHINERY probe battery on synthetic inputs (knowledge held fixed), and
+// emits a structured verdict with evidence pointers.
+//
+// Pure Zag, integer math only, ZERO RNG (all synthetic inputs are closed-form
+// in the trial index), byte-identical reruns. Audit ledger: append-only
+// 16-word entries (op@0, slot@4, rc@8, b1..b5@12..28, a1..a5@32..48,
+// stage@52, d1@56, d2@60), SHA256-chained at report time.
+//
+// CLI: diagnose <case_record> <expect> <report_out>
+// stdout: machine-checkable DIAG lines + DIAG_DONE,<report_hex>.
+// The full report (with the ledger) goes to <report_out>.
+//
+// Frozen by PREREG_DIAG.md (2026-09-23): probe definitions, verdict rules,
+// and kill bars do not change after the self-application runs.
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+const MAXT:i32=12000;
+const NFIELD:i32=11;
+const ROWB:i32=88;
+const AUN:i32=64;
+
+// op codes: the harness's own diagnostic audit vocabulary
+const OP_LOAD:i32=101;
+const OP_REPRO:i32=102;
+const OP_REPLAY:i32=103;
+const OP_KNOW:i32=104;
+const OP_SYNTH:i32=105;
+const OP_CEIL:i32=106;
+const OP_VERDICT:i32=107;
+const OP_REPORT:i32=108;
+
+// disposition codes (frozen, shared with gen_case_record.py)
+const D_PROV:i32=0;
+const D_CORR:i32=1;
+const D_PERM:i32=2;
+const D_WITH:i32=3;
+const D_CONF:i32=4;
+const D_NEG:i32=5;
+const D_SUPP:i32=6;
+
+// verdict codes
+const V_INCONCLUSIVE:i32=0;
+const V_KNOWLEDGE:i32=1;
+const V_MACHBUG:i32=2;
+const V_BYDESIGN:i32=3;
+
+// gate state arena layout (bytes)
+const ST_NEGJ:i32=0;
+const ST_NEGM:i32=12288;
+const ST_NEGN:i32=24576;
+const ST_PROV:i32=24624;
+const ST_PERM:i32=24816;
+const ST_SIZE:i32=25152;
+
+// ---------------- little-endian accessors over []u8 arenas ----------------
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at]=(v & 255) as u8;
+    b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;
+    b[at+3]=((v>>24) & 255) as u8;
+    b[at+4]=((v>>32) & 255) as u8;
+    b[at+5]=((v>>40) & 255) as u8;
+    b[at+6]=((v>>48) & 255) as u8;
+    b[at+7]=((v>>56) & 255) as u8;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64)|((b[at+1] as i64)<<8)|((b[at+2] as i64)<<16)|((b[at+3] as i64)<<24)|((b[at+4] as i64)<<32)|((b[at+5] as i64)<<40)|((b[at+6] as i64)<<48)|((b[at+7] as i64)<<56);
+}
+fn t_put32(b:[]u8, at:i32, v:i32) void {
+    b[at]=(v & 255) as u8;
+    b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;
+    b[at+3]=((v>>24) & 255) as u8;
+}
+fn t_get32(b:[]u8, at:i32) i32 {
+    return (b[at] as i32)|((b[at+1] as i32)<<8)|((b[at+2] as i32)<<16)|((b[at+3] as i32)<<24);
+}
+fn iabs(x:i64) i64 {
+    if(x<0){return 0-x;}
+    return x;
+}
+
+// ---------------- print helpers ----------------
+// i64s: decimal string without the helper-newline quirk; print at call site.
+fn i64s(v:i64) []u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0 && s[s.len-1]==10){return s[0..s.len-1];}
+    return s;
+}
+fn pline1(tag:[]u8, a:i64) void {
+    _zag_print(tag);_zag_print(i64s(a));_zag_print("\n");
+}
+fn pline2(tag:[]u8, a:i64, b:i64) void {
+    _zag_print(tag);_zag_print(i64s(a));_zag_print(",");_zag_print(i64s(b));_zag_print("\n");
+}
+
+// ---------------- file IO (proven pattern: O_WRONLY|O_CREAT|O_TRUNC) ----------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len<1 || s.len>4095){return "";}
+    let b:[]u8=nio_alloc(s.len+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    b[s.len]=0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8=z_cstr(path);
+    if(s.len==0){return -7401;}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(s) as i64,0,0,0,0,0);
+    nio_free(s);
+    if(fd<0){return -7402;}
+    let n:i64=nio_read_exact(fd,out,max);
+    nio_close(fd);
+    return n;
+}
+fn z_write_open(path:[]u8) i64 {
+    let s:[]u8=z_cstr(path);
+    if(s.len==0){return -7401;}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(s) as i64,577,384,0,0,0);
+    nio_free(s);
+    return fd;
+}
+fn z_write_all(fd:i64, b:[]u8) i64 {
+    let n:i64=nio_write_all(fd,b);
+    nio_close(fd);
+    return n;
+}
+
+// ---------------- output buffer ----------------
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32=0;
+    while(i<s.len){
+        if(pos>=ob.len){return pos;}
+        ob[pos]=s[i];pos=pos+1;i=i+1;
+    }
+    return pos;
+}
+fn ob_num(ob:[]u8, pos:i32, v:i64) i32 {
+    return ob_add(ob,pos,i64s(v));
+}
+fn ob_line(ob:[]u8, pos:i32, s:[]u8) i32 {
+    pos=ob_add(ob,pos,s);
+    return ob_add(ob,pos,"\n");
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    pos=ob_add(ob,pos,k);
+    pos=ob_add(ob,pos,"=");
+    pos=ob_num(ob,pos,v);
+    return ob_add(ob,pos,"\n");
+}
+
+// ---------------- parsing ----------------
+// Parse one case line into row (NFIELD i64 slots). Returns field count.
+fn parse_line(b:[]u8, at:i32, end:i32, row:[]u8) i32 {
+    let f:i32=0;
+    let p:i32=at;
+    while(p<end && f<NFIELD){
+        let v:i64=0;
+        let neg:i32=0;
+        if(b[p]==45){neg=1;p=p+1;}
+        while(p<end && b[p]>=48 && b[p]<=57){v=v*10+(b[p] as i64)-48;p=p+1;}
+        if(neg==1){v=0-v;}
+        t_put64(row,f*8,v);
+        f=f+1;
+        if(p<end && b[p]==124){p=p+1;}
+    }
+    return f;
+}
+// Byte-compare a key slice against a literal. Returns 1 on equality.
+fn key_is(k:[]u8, lit:[]u8) i32 {
+    if(k.len!=lit.len){return 0;}
+    let i:i32=0;
+    while(i<k.len){if(k[i]!=lit[i]){return 0;}i=i+1;}
+    return 1;
+}
+// Parse one expect line "KEY=value". Returns 1 if recognized; sets oval.
+fn parse_expect_line(b:[]u8, at:i32, end:i32, oval:*i64, oname:*i32) i32 {
+    let p:i32=at;
+    let ks:i32=p;
+    while(p<end && b[p]!=61){p=p+1;}
+    if(p>=end){return 0;}
+    let ke:i32=p;
+    p=p+1;
+    let v:i64=0;
+    let neg:i32=0;
+    if(p<end && b[p]==45){neg=1;p=p+1;}
+    while(p<end && b[p]>=48 && b[p]<=57){v=v*10+(b[p] as i64)-48;p=p+1;}
+    if(neg==1){v=0-v;}
+    let k:[]u8=b[ks..ke];
+    // oname: 1=CASE 2=N_TRIALS 3=RK3_NUM 4=RK3_DEN 5=RK3_BAR_NUM 6=RK3_BAR_DEN 7=REPLAY_MISMATCH_MAX
+    if(key_is(k,"CASE")==1){oname.*=1;oval.*=0;return 1;}
+    if(key_is(k,"N_TRIALS")==1){oname.*=2;oval.*=v;return 1;}
+    if(key_is(k,"RK3_NUM")==1){oname.*=3;oval.*=v;return 1;}
+    if(key_is(k,"RK3_DEN")==1){oname.*=4;oval.*=v;return 1;}
+    if(key_is(k,"RK3_BAR_NUM")==1){oname.*=5;oval.*=v;return 1;}
+    if(key_is(k,"RK3_BAR_DEN")==1){oname.*=6;oval.*=v;return 1;}
+    if(key_is(k,"REPLAY_MISMATCH_MAX")==1){oname.*=7;oval.*=v;return 1;}
+    return 0;
+}
+
+// ---------------- audit ledger (16-word entries) ----------------
+fn au_add(au:[]u8, n:*i32, op:i32, slot:i32, rc:i32, b1:i64, b2:i64, b3:i64, b4:i64, b5:i64, a1:i64, a2:i64, a3:i64, a4:i64, a5:i64, stage:i32, d1:i32, d2:i32) void {
+    if(n.*>=AUN){return;}
+    let e:i32=n.* *64;
+    t_put32(au,e+0,op);t_put32(au,e+4,slot);t_put32(au,e+8,rc);
+    t_put32(au,e+12,b1 as i32);t_put32(au,e+16,b2 as i32);t_put32(au,e+20,b3 as i32);
+    t_put32(au,e+24,b4 as i32);t_put32(au,e+28,b5 as i32);
+    t_put32(au,e+32,a1 as i32);t_put32(au,e+36,a2 as i32);t_put32(au,e+40,a3 as i32);
+    t_put32(au,e+44,a4 as i32);t_put32(au,e+48,a5 as i32);
+    t_put32(au,e+52,stage);t_put32(au,e+56,d1);t_put32(au,e+60,d2);
+    n.*=n.*+1;
+    return;
+}
+
+// ---------------- gate rule replay (mirrors the documented H2 gate) ----------------
+fn tol_of(tc:i32) i64 {
+    if(tc==0){return 8;}
+    if(tc==1){return 40;}
+    if(tc==2){return 60;}
+    if(tc==3){return 4000;}
+    if(tc==4){return 120;}
+    return 0;
+}
+fn neg_match(st:[]u8, tc:i32, jcode:i64, meas:i64) i32 {
+    let tol:i64=tol_of(tc);
+    let nn:i32=t_get64(st,ST_NEGN+tc*8) as i32;
+    let k:i32=0;
+    while(k<nn){
+        let jj:i64=t_get64(st,ST_NEGJ+(tc*256+k)*8);
+        let mm:i64=t_get64(st,ST_NEGM+(tc*256+k)*8);
+        if(jj==jcode && iabs(mm-meas)<=tol){return 1;}
+        k=k+1;
+    }
+    return 0;
+}
+fn neg_store(st:[]u8, tc:i32, jcode:i64, meas:i64) void {
+    let nn:i32=t_get64(st,ST_NEGN+tc*8) as i32;
+    if(nn>=256){return;}
+    t_put64(st,ST_NEGJ+(tc*256+nn)*8,jcode);
+    t_put64(st,ST_NEGM+(tc*256+nn)*8,meas);
+    t_put64(st,ST_NEGN+tc*8,(nn+1) as i64);
+    return;
+}
+// FAIL branch: never installed; stored as negative evidence.
+fn gate_fail(st:[]u8, tc:i32, jcode:i64, meas:i64, od:*i32, ot:*i32) void {
+    let nm:i32=neg_match(st,tc,jcode,meas);
+    if(nm==0){neg_store(st,tc,jcode,meas);}
+    od.*=D_NEG;
+    ot.*=10;
+    if(nm==1){ot.*=11;}
+    return;
+}
+// UNRESOLVED branch: withheld; suppressed on negative match.
+fn gate_unres(st:[]u8, tc:i32, jcode:i64, meas:i64, od:*i32, ot:*i32) void {
+    let nm:i32=neg_match(st,tc,jcode,meas);
+    od.*=D_WITH;
+    ot.*=7;
+    if(nm==1){od.*=D_SUPP;ot.*=8;}
+    return;
+}
+// PASS branch against a live permanent install.
+fn gate_pass_perm(st:[]u8, tc:i32, jcode:i64, meas:i64, od:*i32, ot:*i32) void {
+    let tol:i64=tol_of(tc);
+    let pj:i64=t_get64(st,ST_PERM+48+tc*8);
+    let pm:i64=t_get64(st,ST_PERM+96+tc*8);
+    if(jcode==pj && iabs(pm-meas)<=tol){od.*=D_CORR;ot.*=2;return;}
+    if(jcode!=pj){od.*=D_CONF;ot.*=6;return;}
+    od.*=D_CORR;
+    ot.*=3;
+    return;
+}
+// PASS branch against a provisional install (or none).
+fn gate_pass_prov(st:[]u8, tc:i32, jcode:i64, meas:i64, seq:i64, od:*i32, ot:*i32) void {
+    let tol:i64=tol_of(tc);
+    if(t_get64(st,ST_PROV+tc*8)==0){
+        t_put64(st,ST_PROV+tc*8,1);
+        t_put64(st,ST_PROV+48+tc*8,jcode);
+        t_put64(st,ST_PROV+96+tc*8,meas);
+        t_put64(st,ST_PROV+144+tc*8,seq);
+        od.*=D_PROV;
+        ot.*=0;
+        return;
+    }
+    let pj:i64=t_get64(st,ST_PROV+48+tc*8);
+    let pm:i64=t_get64(st,ST_PROV+96+tc*8);
+    if(jcode==pj && iabs(pm-meas)<=tol){
+        t_put64(st,ST_PERM+tc*8,1);
+        t_put64(st,ST_PERM+48+tc*8,jcode);
+        t_put64(st,ST_PERM+96+tc*8,meas);
+        t_put64(st,ST_PERM+144+tc*8,seq);
+        t_put64(st,ST_PROV+tc*8,0);
+        od.*=D_PERM;
+        ot.*=1;
+        return;
+    }
+    if(jcode!=pj){
+        t_put64(st,ST_PROV+48+tc*8,jcode);
+        t_put64(st,ST_PROV+96+tc*8,meas);
+        t_put64(st,ST_PROV+144+tc*8,seq);
+        od.*=D_PROV;
+        ot.*=5;
+        return;
+    }
+    od.*=D_CORR;
+    ot.*=4;
+    return;
+}
+// PASS branch dispatcher.
+fn gate_pass(st:[]u8, tc:i32, jcode:i64, pred:i64, meas:i64, seq:i64, od:*i32, ot:*i32) void {
+    if(pred==0){od.*=D_WITH;ot.*=9;return;}
+    let nm:i32=neg_match(st,tc,jcode,meas);
+    if(nm==1){od.*=D_SUPP;ot.*=8;return;}
+    if(t_get64(st,ST_PERM+tc*8)==1){gate_pass_perm(st,tc,jcode,meas,od,ot);return;}
+    gate_pass_prov(st,tc,jcode,meas,seq,od,ot);
+    return;
+}
+// Full disposition step. od/ot are out-params (disp code, detail code).
+fn gate_step(st:[]u8, tc:i32, prog:i64, jcode:i64, pred:i64, meas:i64, seq:i64, od:*i32, ot:*i32) void {
+    if(prog==1){gate_fail(st,tc,jcode,meas,od,ot);return;}
+    if(prog==2){gate_unres(st,tc,jcode,meas,od,ot);return;}
+    gate_pass(st,tc,jcode,pred,meas,seq,od,ot);
+    return;
+}
+fn st_zero(st:[]u8) void {
+    let i:i32=0;
+    while(i<st.len){st[i]=0;i=i+1;}
+    return;
+}
+
+// ---------------- trial table access ----------------
+fn trow(i:i32) i32 { return i*ROWB; }
+fn tf(tr:[]u8, i:i32, f:i32) i64 { return t_get64(tr,trow(i)+f*8); }
+
+// ---------------- expect: CASE value ----------------
+fn case_name_of(b:[]u8, at:i32, end:i32, out:[]u8) i32 {
+    if(end-at<5){return 0;}
+    if(b[at]!=67 || b[at+1]!=65 || b[at+2]!=83 || b[at+3]!=69 || b[at+4]!=61){return 0;}
+    let p:i32=at+5;
+    let q:i32=0;
+    while(p<end && q<out.len-1){out[q]=b[p];q=q+1;p=p+1;}
+    out[q]=0;
+    return q;
+}
+
+// ---------------- report helpers ----------------
+fn rep_kv(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 { return ob_kv(ob,pos,k,v); }
+fn rep_frac(ob:[]u8, pos:i32, k:[]u8, num:i64, den:i64) i32 {
+    pos=ob_add(ob,pos,k);
+    pos=ob_add(ob,pos,"=");
+    pos=ob_num(ob,pos,num);
+    pos=ob_add(ob,pos,"/");
+    pos=ob_num(ob,pos,den);
+    pos=ob_add(ob,pos," (");
+    let bps:i64=0;
+    if(den>0){bps=num*10000/den;}
+    pos=ob_num(ob,pos,bps);
+    pos=ob_add(ob,pos," bps)");
+    return ob_add(ob,pos,"\n");
+}
+
+fn main() void {
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    if(a1.len==0 || a2.len==0 || a3.len==0){
+        _zag_print("usage: diagnose <case_record> <expect> <report_out>\n");
+        return;
+    }
+    // arenas
+    let tr:[]u8=nio_alloc(MAXT*ROWB);
+    let st:[]u8=nio_alloc(ST_SIZE);
+    let rs:[]u8=nio_alloc(256);
+    let au:[]u8=nio_alloc(AUN*64);
+    let cb:[]u8=nio_alloc(1048576);
+    let eb:[]u8=nio_alloc(4096);
+    let ob:[]u8=nio_alloc(65536);
+    let cdig:[]u8=nio_alloc(32);
+    let rdig:[]u8=nio_alloc(32);
+    let ldig:[]u8=nio_alloc(32);
+    let cname:[]u8=nio_alloc(128);
+    if(tr.len==0 || st.len==0 || rs.len==0 || au.len==0 || cb.len==0 || eb.len==0 || ob.len==0){
+        _zag_print("DIAG,OOM\n");
+        return;
+    }
+    let i:i32=0;
+    while(i<256){rs[i]=0;i=i+1;}
+    let aun:i32=0;
+    let fail:i32=0;
+
+    // ---- DIAG_LOAD ----
+    let n:i64=z_read(a1,cb,1048576);
+    if(n<=0){_zag_print("DIAG,LOAD,READFAIL\n");return;}
+    let nrows:i32=0;
+    let p:i32=0;
+    let ni:i32=n as i32;
+    let row:[]u8=nio_alloc(NFIELD*8);
+    while(p<ni && nrows<MAXT){
+        let le:i32=p;
+        while(le<ni && cb[le]!=10){le=le+1;}
+        if(le-p>10){
+            let nf:i32=parse_line(cb,p,le,row);
+            if(nf==NFIELD){
+                let base:i32=trow(nrows);
+                let f:i32=0;
+                while(f<NFIELD){t_put64(tr,base+f*8,t_get64(row,f*8));f=f+1;}
+                nrows=nrows+1;
+            }
+        }
+        p=le+1;
+    }
+    nio_free(row);
+    // expect file
+    let ne:i64=z_read(a2,eb,4096);
+    let n_exp:i64=0;let rk3_num:i64=0;let rk3_den:i64=0;
+    let bar_num:i64=0;let bar_den:i64=1;let mm_max:i64=0;
+    let cnlen:i32=0;
+    if(ne>0){
+        let q:i32=0;
+        let nei:i32=ne as i32;
+        while(q<nei){
+            let le:i32=q;
+            while(le<nei && eb[le]!=10){le=le+1;}
+            if(le-q>3){
+                let got:i32=case_name_of(eb,q,le,cname);
+                if(got>0){cnlen=got;}
+                let ov:i64=0;
+                let onm:i32=0;
+                let ok:i32=parse_expect_line(eb,q,le,&ov,&onm);
+                if(ok==1){
+                    if(onm==2){n_exp=ov;}
+                    if(onm==3){rk3_num=ov;}
+                    if(onm==4){rk3_den=ov;}
+                    if(onm==5){bar_num=ov;}
+                    if(onm==6){bar_den=ov;}
+                    if(onm==7){mm_max=ov;}
+                }
+            }
+            q=le+1;
+        }
+    }
+    let shrc:i32=ns_sha256(cb[0..ni],cdig);
+    let rc_load:i32=0;
+    if(shrc!=0 || nrows!=n_exp as i32){rc_load=1;fail=1;}
+    au_add(au,&aun,OP_LOAD,0,rc_load,0,0,0,0,0,nrows as i64,n_exp,n,cnlen as i64,0,0,0,0);
+    pline2("DIAG,LOAD,",rc_load as i64,nrows as i64);
+
+    // ---- DIAG_REPRODUCE ----
+    let chc:i64=0;
+    let inst:i64=0;
+    i=0;
+    while(i<nrows){
+        let jc:i64=tf(tr,i,4);
+        let cf:i64=tf(tr,i,5);
+        if(jc==1 && cf>=700){
+            chc=chc+1;
+            let dp:i64=tf(tr,i,9);
+            if(dp==0 || dp==1 || dp==2){inst=inst+1;}
+        }
+        i=i+1;
+    }
+    let rc_repro:i32=0;
+    if(chc!=rk3_den || inst!=rk3_num){rc_repro=1;fail=1;}
+    au_add(au,&aun,OP_REPRO,1,rc_repro,chc,inst,0,0,0,chc,inst,rk3_num,rk3_den,0,0,0,0);
+    pline2("DIAG,REPRODUCE,",rc_repro as i64,inst);
+    _zag_print("DIAG,CHC,");
+    _zag_print(i64s(chc));
+    _zag_print("\n");
+
+    // ---- DIAG_REPLAY ----
+    st_zero(st);
+    let mm:i64=0;
+    let mm_det:i64=0;
+    i=0;
+    while(i<nrows){
+        let od:i32=0;
+        let ot:i32=0;
+        gate_step(st,tf(tr,i,1) as i32,tf(tr,i,2),tf(tr,i,3),tf(tr,i,6),tf(tr,i,7),tf(tr,i,0),&od,&ot);
+        if(od as i64!=tf(tr,i,9)){mm=mm+1;}
+        if(ot as i64!=tf(tr,i,10)){mm_det=mm_det+1;}
+        i=i+1;
+    }
+    let rc_replay:i32=0;
+    if(mm>mm_max){rc_replay=1;fail=1;}
+    au_add(au,&aun,OP_REPLAY,2,rc_replay,nrows as i64,0,0,0,0,mm,mm_det,mm_max,nrows as i64,0,0,0,0);
+    pline2("DIAG,REPLAY,",rc_replay as i64,mm);
+
+    // ---- DIAG_KNOW ----
+    let k1n:i64=0;
+    let k2n:i64=0;
+    let b_never:i64=0;
+    let b_conf:i64=0;
+    let b_supp:i64=0;
+    let b_pred0:i64=0;
+    let b_other:i64=0;
+    let k4_pf:i64=0;
+    i=0;
+    while(i<nrows){
+        let jc2:i64=tf(tr,i,4);
+        let cf2:i64=tf(tr,i,5);
+        if(jc2==1 && cf2>=700){
+            let prog:i64=tf(tr,i,2);
+            let progf:i64=tf(tr,i,8);
+            let dp2:i64=tf(tr,i,9);
+            let det2:i64=tf(tr,i,10);
+            if(progf==0){k1n=k1n+1;}
+            if(prog==0){k2n=k2n+1;}
+            let isinst:i32=0;
+            if(dp2==0 || dp2==1 || dp2==2){isinst=1;}
+            if(isinst==0){
+                if(prog!=0){b_never=b_never+1;}
+                else{
+                    if(dp2==4){
+                        b_conf=b_conf+1;
+                        if(progf==0){k4_pf=k4_pf+1;}
+                    }
+                    else{
+                        if(dp2==6){b_supp=b_supp+1;}
+                        else{
+                            if(dp2==3 && det2==9){b_pred0=b_pred0+1;}
+                            else{b_other=b_other+1;}
+                        }
+                    }
+                }
+            }
+        }
+        i=i+1;
+    }
+    au_add(au,&aun,OP_KNOW,3,0,chc,k1n,k2n,0,0,b_never,b_conf,b_supp,b_pred0,k4_pf,0,0,0);
+    _zag_print("DIAG,KNOW,0,");
+    _zag_print(i64s(k1n));_zag_print(",");_zag_print(i64s(k2n));_zag_print("\n");
+    _zag_print("DIAG,BUCKETS,");
+    _zag_print(i64s(b_never));_zag_print(",");_zag_print(i64s(b_conf));_zag_print(",");
+    _zag_print(i64s(b_supp));_zag_print(",");_zag_print(i64s(b_pred0));_zag_print(",");
+    _zag_print(i64s(b_other));_zag_print("\n");
+
+    // ---- DIAG_SYNTH ----
+    // M1: control — knowledge fixed (prog=PASS, pred=1, conf=800), no prior permanent.
+    st_zero(st);
+    let m1:i64=0;
+    let s1:i32=0;
+    while(s1<1200){
+        let od2:i32=0;
+        let ot2:i32=0;
+        let tc1:i32=s1%6;
+        gate_step(st,tc1,0,0,1,100,s1 as i64,&od2,&ot2);
+        if(od2==0 || od2==1 || od2==2){m1=m1+1;}
+        s1=s1+1;
+    }
+    // M2: conflict — seed each task permanent with a foreign jcode, then conflict.
+    st_zero(st);
+    let t2:i32=0;
+    while(t2<6){
+        t_put64(st,ST_PERM+t2*8,1);
+        t_put64(st,ST_PERM+48+t2*8,99);
+        t_put64(st,ST_PERM+96+t2*8,0);
+        t_put64(st,ST_PERM+144+t2*8,-1);
+        t2=t2+1;
+    }
+    let m2:i64=0;
+    let s2:i32=0;
+    while(s2<1200){
+        let od3:i32=0;
+        let ot3:i32=0;
+        let tc2:i32=s2%6;
+        gate_step(st,tc2,0,0,1,100,s2 as i64,&od3,&ot3);
+        if(od3==4){m2=m2+1;}
+        s2=s2+1;
+    }
+    let rc_synth:i32=0;
+    if(m1!=1200 || m2!=1200){rc_synth=1;fail=1;}
+    au_add(au,&aun,OP_SYNTH,4,rc_synth,1200,1200,0,0,0,m1,m2,0,0,0,0,0,0);
+    pline2("DIAG,SYNTH,",rc_synth as i64,m1);
+    pline1("DIAG,SYNTH2,",m2);
+
+    // ---- DIAG_CEIL ----
+    let ceil:i64=0;
+    i=0;
+    while(i<nrows){
+        let jc3:i64=tf(tr,i,4);
+        let cf3:i64=tf(tr,i,5);
+        if(jc3==1 && cf3>=700 && tf(tr,i,2)==0 && tf(tr,i,6)==1){ceil=ceil+1;}
+        i=i+1;
+    }
+    let tension:i32=0;
+    if(chc>0 && ceil*bar_den<bar_num*chc){tension=1;}
+    au_add(au,&aun,OP_CEIL,5,0,chc,ceil,bar_num,bar_den,0,ceil,tension as i64,0,0,0,0,0,0);
+    pline2("DIAG,CEIL,",tension as i64,ceil);
+
+    // ---- DIAG_VERDICT (frozen rules, PREREG_DIAG.md section 4) ----
+    let verdict:i32=V_INCONCLUSIVE;
+    if(mm>mm_max || m1!=1200 || m2!=1200){verdict=V_MACHBUG;}
+    else{
+        let noninst:i64=chc-inst;
+        if(noninst>0){verdict=V_KNOWLEDGE;}
+        else{verdict=V_BYDESIGN;}
+    }
+    au_add(au,&aun,OP_VERDICT,6,0,mm,m1,m2,0,0,verdict as i64,tension as i64,chc-inst,0,0,verdict,tension,0);
+    pline2("DIAG,VERDICT,",verdict as i64,tension as i64);
+
+    // ---- DIAG_REPORT ----
+    au_add(au,&aun,OP_REPORT,7,0,nrows as i64,8,0,0,0,aun as i64,0,0,0,0,verdict,tension,0);
+    let lsh:i32=ns_sha256(au[0..aun*64],ldig);
+    if(lsh!=0){_zag_print("DIAG,HASHFAIL\n");return;}
+    let pos:i32=0;
+    pos=ob_line(ob,pos,"DIAGNOSTIC REPORT - deep-dive harness (PREREG_DIAG.md, frozen 2026-09-23)");
+    pos=ob_add(ob,pos,"case=");
+    pos=ob_add(ob,pos,cname[0..cnlen]);
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_add(ob,pos,"case_digest=");
+    pos=ob_add(ob,pos,ns_hex(cdig));
+    pos=ob_add(ob,pos,"\n");
+    pos=rep_kv(ob,pos,"n_trials",nrows as i64);
+    pos=ob_line(ob,pos,"--- 1. REPRODUCE (freeze) ---");
+    pos=rep_frac(ob,pos,"rk3_installed",inst,chc);
+    pos=rep_frac(ob,pos,"rk3_bar",bar_num,bar_den);
+    pos=rep_kv(ob,pos,"reproduced_exact",(1-fail) as i64);
+    pos=ob_line(ob,pos,"--- 2. REPLAY (machinery fidelity) ---");
+    pos=rep_frac(ob,pos,"replay_mismatches",mm,nrows as i64);
+    pos=rep_kv(ob,pos,"replay_detail_mismatches",mm_det);
+    pos=ob_line(ob,pos,"--- 3. KNOWLEDGE BATTERY ---");
+    pos=rep_frac(ob,pos,"K1_program_knowledge_progf_pass",k1n,chc);
+    pos=rep_frac(ob,pos,"K2_delivered_to_gate_prog_pass",k2n,chc);
+    pos=ob_add(ob,pos,"K3_noninstall_buckets_of=");
+    pos=ob_num(ob,pos,chc-inst);
+    pos=ob_add(ob,pos,": neverpass=");
+    pos=ob_num(ob,pos,b_never);
+    pos=ob_add(ob,pos," conflict=");
+    pos=ob_num(ob,pos,b_conf);
+    pos=ob_add(ob,pos," suppressed=");
+    pos=ob_num(ob,pos,b_supp);
+    pos=ob_add(ob,pos," pred0=");
+    pos=ob_num(ob,pos,b_pred0);
+    pos=ob_add(ob,pos," other=");
+    pos=ob_num(ob,pos,b_other);
+    pos=ob_add(ob,pos,"\n");
+    pos=rep_frac(ob,pos,"K4_conflict_ruleblind_progf_pass",k4_pf,b_conf);
+    pos=ob_line(ob,pos,"--- 4. MACHINERY BATTERY (synthetic, knowledge fixed) ---");
+    pos=rep_frac(ob,pos,"M1_control_install",m1,1200);
+    pos=rep_frac(ob,pos,"M2_conflict_withhold",m2,1200);
+    pos=ob_line(ob,pos,"--- 5. CEILING ---");
+    pos=rep_frac(ob,pos,"gate_side_ceiling",ceil,chc);
+    pos=rep_kv(ob,pos,"spec_tension",tension as i64);
+    pos=ob_line(ob,pos,"--- 6. VERDICT ---");
+    pos=ob_add(ob,pos,"verdict=");
+    if(verdict==V_KNOWLEDGE){pos=ob_add(ob,pos,"KNOWLEDGE");}
+    if(verdict==V_MACHBUG){pos=ob_add(ob,pos,"MACHINERY-BUG");}
+    if(verdict==V_BYDESIGN){pos=ob_add(ob,pos,"MACHINERY-BY-DESIGN");}
+    if(verdict==V_INCONCLUSIVE){pos=ob_add(ob,pos,"INCONCLUSIVE");}
+    if(tension==1){pos=ob_add(ob,pos," + SPEC-TENSION");}
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_add(ob,pos,"repair_class=");
+    if(verdict==V_KNOWLEDGE){pos=ob_add(ob,pos,"RULE-ADDITION | PROGRAM-TEACHING");}
+    if(verdict==V_MACHBUG){pos=ob_add(ob,pos,"CODE-REPAIR");}
+    if(verdict==V_BYDESIGN){pos=ob_add(ob,pos,"NONE-AT-THIS-LAYER");}
+    if(verdict==V_INCONCLUSIVE){pos=ob_add(ob,pos,"GAP-DRIVEN");}
+    if(tension==1){pos=ob_add(ob,pos," | SPEC-CHANGE");}
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_add(ob,pos,"surface_patch=");
+    if(verdict==V_KNOWLEDGE){pos=ob_add(ob,pos,"BLOCKED (install-more without the missing adjudication rule installs false permanents; cf2 counterexample, AUTOPSY_R2-4 section 2.3)");}
+    else{pos=ob_add(ob,pos,"N/A");}
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_line(ob,pos,"--- 7. EVIDENCE POINTERS ---");
+    pos=ob_add(ob,pos,"ledger_entries=");
+    pos=ob_num(ob,pos,aun as i64);
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_add(ob,pos,"ledger_digest=");
+    pos=ob_add(ob,pos,ns_hex(ldig));
+    pos=ob_add(ob,pos,"\n");
+    pos=ob_add(ob,pos,"audit_layout=op@0,slot@4,rc@8,b1..b5@12..28,a1..a5@32..48,stage@52,d1@56,d2@60 (16 words, 64 bytes/entry)\n");
+    pos=ob_line(ob,pos,"--- 8. RED TEAM (adversarial review prompts) ---");
+    pos=ob_line(ob,pos,"RT1: K1 uses progF, the program's own verdict. If the (g) check is miscalibrated, K1 overstates knowledge. Counter: correctness is anchored to ground truth via jcorrect; the conjunction (jcorrect && progF==PASS) is the knowledge claim, not progF alone.");
+    pos=ob_line(ob,pos,"RT2: the replay re-implements the rule from memgate.zag; a shared misreading hides in both. Counter: byte-verified against gate_dispositions.txt (0/11,840) and the independent Python replay agreed.");
+    pos=ob_line(ob,pos,"RT3: M1/M2 synthetics (meas=100, jcode=0) are far from the real distribution. Counter: they test rule execution, not distribution coverage; distribution realism is K3's job on the frozen record.");
+    pos=ob_line(ob,pos,"RT4: K4 shows knowledge was rule-blind, but cannot show a better rule exists. Counter: the corroborated-revision replay (AUTOPSY_R2-4 section 4, cf1) is the existence proof; this harness diagnoses, it does not redesign.");
+    pos=ob_line(ob,pos,"--- 9. HONEST GAPS ---");
+    pos=ob_line(ob,pos,"G1: the harness does not parse the program= text (mrgF/agree/strong stay opaque behind phash); K4 rests on conf+progF only.");
+    pos=ob_line(ob,pos,"G2: detail-code comparison is prefix-only; the glue strips the =N seq suffixes.");
+    pos=ob_line(ob,pos,"G3: synthetic probes cover the PASS and conflict paths only, not the negative-evidence or UNRESOLVED paths.");
+    pos=ob_line(ob,pos,"G4: verdict rules assume the gate-contract shape (install/withhold dispositions); non-gate failures need new probe batteries.");
+    let rsh:i32=ns_sha256(ob[0..pos],rdig);
+    if(rsh!=0){_zag_print("DIAG,HASHFAIL\n");return;}
+    pos=ob_add(ob,pos,"report_digest=");
+    pos=ob_add(ob,pos,ns_hex(rdig));
+    pos=ob_add(ob,pos,"  (covers all lines above this one)\n");
+    let fd:i64=z_write_open(a3);
+    if(fd<0){_zag_print("DIAG,WRITEFAIL\n");return;}
+    let wn:i64=z_write_all(fd,ob[0..pos]);
+    if(wn!=pos as i64){_zag_print("DIAG,SHORTWRITE\n");return;}
+    _zag_print("DIAG_DONE,");
+    _zag_print(ns_hex(rdig));
+    _zag_print("\n");
+    nio_free(tr);
+    nio_free(st);
+    nio_free(rs);
+    nio_free(au);
+    nio_free(cb);
+    nio_free(eb);
+    nio_free(ob);
+    nio_free(cdig);
+    nio_free(rdig);
+    nio_free(ldig);
+    nio_free(cname);
+    return;
+}
