@@ -46,3 +46,4 @@ Full reports: `runs/wave2/crews/<FAMILY>/{VERDICT.md,RUNLOG.md}`; full tally: `r
 | Family | Verdict | Headline |
 |---|---|---|
 | T2-SCALE | REPRODUCED | Scale-up anchor (N=240) + mid-scale (N=240,000) exact: mastery 1.0000, 96/96 flaw battery, 4.000 ops / 92 B per fact, 3/3 byte-identical reruns; mid-scale log byte-identical to committed s3_r0.log (sha256 17d5ee80…0fdb656). 6.58M ceiling sweep NOT re-run (Type B honest limit). |
+| T2-THROUGHPUT | PARTIAL | Contention-robust anchors held: install 5.93–6.41 µs/fact (±10% of 6.2), 4 ops / 92 B exact, determinism byte-identical ×3. Wall-clock anchors (recall, deliberation, emission) fell outside bands under VM load 18–35 vs original crew's 8–13; O(1) ordering holds. Named gap: quiet-VM rerun of wall-clock anchors at original-comparable load — pending. |
