@@ -174,4 +174,4 @@ Plus the 5 good round-2 turns: `who wrote the martian?`, `when was he born?`
 
 ## 8. Commit record
 
-- PREREG_F2.md frozen: <commit id recorded at commit time>
+- PREREG_F2.md frozen: b1b6092d793c150cb02e3285b1e67d093b90ff57 (2026-09-23, before any implementation)
