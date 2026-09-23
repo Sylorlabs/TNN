@@ -1,0 +1,244 @@
+@import("s5_store.zag")
+// s5_merge.zag — ingest-time exact-value merge gate for the S5 store.
+//
+// Policy (ops/storage-compression/dedup/DEDUP_POLICY.md rule 1):
+//   merge-on-add, not add-then-delete. A fact whose value already exists
+//   among live claims is NOT stored again; its source id is folded into
+//   the claim's per-claim source record (assert count + source mask +
+//   origin mask — the signal the corroboration experiments need).
+//
+// Why this exists: with the S5 store, add-then-delete costs ~20 B/fact in
+// audit log and reclaims zero physical bytes (measured 1.90 MB → 4.15 MB
+// for 112,481 deletions, round 1). Merging at ingest pays no delete events
+// at all.
+//
+// What the gate does and does NOT do:
+//   - Merges EXACT byte-identical values only (the proven-safe direction).
+//   - Never merges different values; never deletes conflicts; semantic
+//     variants and conflict groups remain the scanner's / verdict layer's
+//     job.
+//   - Tracks per-value: assert count, distinct-source mask, distinct-origin
+//     mask. Origin diversity is the defense against coordinated lies
+//     (round 1: 2 agreeing sources are only 56.1% reliable under a shared
+//     bad origin). Sources sharing an origin must count once.
+//   - Stays consistent under mg_revise / mg_delete; mg_replay_check proves
+//     the gate map and the slot bytes agree.
+//
+// Contracts:
+//   - src_id, origin_id in [0,64) (u64 masks; wider provenance is a listed
+//     follow-up). Out-of-range -> rc 4.
+//   - The gate is the ONLY sanctioned ingest path once adopted: raw sc_add
+//     bypass breaks the one-slot-per-value invariant (mg_replay_check
+//     reports it as class 5/6 rather than silently accepting it).
+//   - ids stay dense-sequential over STORED claims: a merged duplicate
+//     consumes no id and no slot.
+//
+// rc codes (mg_add/mg_revise/mg_delete): 0 ok; 1 absent (revise/delete);
+//   2 already-deleted (delete) / cap (add); 3 gate-closed/learn-gate;
+//   4 bad src/org id; 5 map full (sized wrong); 6 gate invariant broken;
+//   7 revise would collide with an existing live value.
+
+// ---------- gate ----------
+struct ScMergeGate {
+    hmbits:i32, nbuckets:i32,
+    table:[]u8,   // stride MG_STRIDE per bucket (open addressing)
+    nvals:i32     // distinct live values
+}
+// entry layout: key i64 @0, slot i32 @8, asserts i32 @12,
+//               src_mask u64 @16, org_mask u64 @24, used u8 @32
+const MG_STRIDE:i32=40;
+const MG_USED_EMPTY:i32=0;
+const MG_USED_OCC:i32=1;
+const MG_USED_DEL:i32=2;
+
+fn mg_new()ScMergeGate {
+    let g:ScMergeGate=ScMergeGate{.hmbits=0,.nbuckets=0,.table="",.nvals=0};
+    return g;
+}
+// deterministic 64-bit mix of the value (splitmix64; NOT randomness —
+// pure function of the key, same family as the round-1 fixture draws).
+fn mg_hash(v:i64)i64 {
+    let golden:i64=0x9E3779B97F4A7C15 as i64;
+    let z:i64=v+golden;
+    z=(z^(z>>30))* (0xBF58476D1CE4E5B9 as i64);
+    z=(z^(z>>27))* (0x94D049BB133111EB as i64);
+    return z^(z>>31);
+}
+fn mg_popcnt64(x:i64)i32 {
+    let c:i32=0;
+    let i:i32=0;
+    while(i<64){
+        if((x&((1 as i64)<<i))!=0){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+fn mg_init(g:*ScMergeGate,hmbits:i32)i32 {
+    if(hmbits<4||hmbits>20){return -1;}
+    let nb:i32=1<<hmbits;
+    let t:[]u8=sc_alloc(nb*MG_STRIDE);
+    if(t.len==0){return -1;}
+    g.*.hmbits=hmbits;g.*.nbuckets=nb;g.*.table=t;g.*.nvals=0;
+    return 0;
+}
+fn mg_key_at(t:[]u8,o:i32)i64 { return sc_g64(t,o as i64); }
+fn mg_slot_at(t:[]u8,o:i32)i32 { return sc_g32(t,o+8); }
+fn mg_asserts_at(t:[]u8,o:i32)i32 { return sc_g32(t,o+12); }
+fn mg_srcmask_at(t:[]u8,o:i32)i64 { return sc_g64(t,(o+16) as i64); }
+fn mg_orgmask_at(t:[]u8,o:i32)i64 { return sc_g64(t,(o+24) as i64); }
+// find: *found=1 -> o holds key; *found=0 -> o is the insert position
+// (first deleted slot wins over later empty ones). -1 = table full.
+fn mg_find(g:*ScMergeGate,key:i64,found:*i32)i32 {
+    let t:[]u8=g.*.table;
+    let mask:i64=(g.*.nbuckets as i64)-1;
+    let i:i64=mg_hash(key)&mask;
+    let first_del:i32=-1;
+    let tries:i32=0;
+    let lim:i32=g.*.nbuckets;
+    while(tries<lim){
+        let o:i32=(i*MG_STRIDE) as i32;
+        let u:i32=(t[o+32] as i32)&255;
+        if(u==MG_USED_EMPTY){
+            found.*=0;
+            if(first_del>=0){return first_del;}
+            return o;
+        }
+        if(u==MG_USED_OCC){
+            if(mg_key_at(t,o)==key){found.*=1;return o;}
+        }else{
+            if(first_del<0){first_del=o;}
+        }
+        i=(i+1)&mask;
+        tries=tries+1;
+    }
+    found.*=0;
+    if(first_del>=0){return first_del;}
+    return -1;
+}
+fn mg_insert_at(g:*ScMergeGate,o:i32,key:i64,slot:i32,src:i32,org:i32)void {
+    let t:[]u8=g.*.table;
+    sc_s64(t,o as i64,key);
+    sc_s32(t,o+8,slot);
+    sc_s32(t,o+12,1);
+    sc_s64(t,(o+16) as i64,(1 as i64)<<src);
+    sc_s64(t,(o+24) as i64,(1 as i64)<<org);
+    t[o+32]=MG_USED_OCC as u8;
+    g.*.nvals=g.*.nvals+1;
+}
+fn mg_remove_at(g:*ScMergeGate,o:i32)void {
+    let t:[]u8=g.*.table;
+    t[o+32]=MG_USED_DEL as u8;
+    g.*.nvals=g.*.nvals-1;
+}
+fn mg_fold_at(g:*ScMergeGate,o:i32,src:i32,org:i32)void {
+    let t:[]u8=g.*.table;
+    sc_s32(t,o+12,mg_asserts_at(t,o)+1);
+    sc_s64(t,(o+16) as i64,mg_srcmask_at(t,o)|((1 as i64)<<src));
+    sc_s64(t,(o+24) as i64,mg_orgmask_at(t,o)|((1 as i64)<<org));
+}
+// Ingest one assertion. *out_merged=1 -> duplicate folded into *out_slot
+// (nothing stored); 0 -> fresh claim stored at *out_slot.
+fn mg_add(s:*ScStore,g:*ScMergeGate,v:i64,src:i32,org:i32,
+    out_slot:*i32,out_merged:*i32)i32 {
+    if(src<0||src>=64||org<0||org>=64){return 4;}
+    let found:i32=0;
+    let o:i32=mg_find(g,v,&found);
+    if(o<0){return 5;}
+    if(found==1){
+        mg_fold_at(g,o,src,org);
+        out_slot.*=mg_slot_at(g.*.table,o);
+        out_merged.*=1;
+        return 0;
+    }
+    let id:i32=s.*.n;
+    let slot:i32=-1;
+    let rc:i32=sc_add(s,id,v,&slot);
+    if(rc!=0){return rc;}
+    mg_insert_at(g,o,v,slot,src,org);
+    out_slot.*=slot;
+    out_merged.*=0;
+    return 0;
+}
+// Revise id to new_v, keeping the gate consistent. A revise to the SAME
+// value is a corroborating assertion: the source folds into the live entry.
+fn mg_revise(s:*ScStore,g:*ScMergeGate,id:i32,new_v:i64,src:i32,org:i32)i32 {
+    if(src<0||src>=64||org<0||org>=64){return 4;}
+    if(id<0||id>=s.*.n){return 1;}
+    if(sc_is_tombstoned(s,id)==1){return 2;}
+    let old_v:i64=sc_read_value(s,id);
+    let found:i32=0;
+    let o:i32=mg_find(g,old_v,&found);
+    if(found!=1){return 6;}
+    if(mg_slot_at(g.*.table,o)!=id){return 6;}
+    if(old_v==new_v){
+        mg_fold_at(g,o,src,org);
+        return 0;
+    }
+    let f2:i32=0;
+    let o2:i32=mg_find(g,new_v,&f2);
+    if(f2==1){return 7;} // another live claim already holds new_v
+    let rc:i32=sc_revise(s,id,new_v);
+    if(rc!=0){return rc;}
+    mg_remove_at(g,o);
+    let f3:i32=0;
+    let o3:i32=mg_find(g,new_v,&f3);
+    if(o3<0){return 5;}
+    mg_insert_at(g,o3,new_v,id,src,org);
+    return 0;
+}
+// Delete id; drop the value's gate entry iff id is its representative.
+fn mg_delete(s:*ScStore,g:*ScMergeGate,id:i32)i32 {
+    let rc:i32=sc_delete(s,id);
+    if(rc!=0){return rc;}
+    let v:i64=sc_read_value(s,id); // value bytes retained by tombstone
+    let found:i32=0;
+    let o:i32=mg_find(g,v,&found);
+    if(found!=1){return 6;}
+    if(mg_slot_at(g.*.table,o)!=id){return 6;}
+    mg_remove_at(g,o);
+    return 0;
+}
+// Query the source record for value v. Returns 1 if live, else 0.
+fn mg_query(g:*ScMergeGate,v:i64,slot:*i32,asserts:*i32,nsrc:*i32,norg:*i32)i32 {
+    let found:i32=0;
+    let o:i32=mg_find(g,v,&found);
+    if(found!=1){return 0;}
+    let t:[]u8=g.*.table;
+    slot.*=mg_slot_at(t,o);
+    asserts.*=mg_asserts_at(t,o);
+    nsrc.*=mg_popcnt64(mg_srcmask_at(t,o));
+    norg.*=mg_popcnt64(mg_orgmask_at(t,o));
+    return 1;
+}
+// Gate/store consistency: every gate entry points at a live slot holding
+// the key; every live slot's value is in the gate at the right slot.
+// 0 = consistent; >0 = first inconsistency class.
+fn mg_replay_check(s:*ScStore,g:*ScMergeGate)i32 {
+    let t:[]u8=g.*.table;
+    let cnt:i32=0;
+    let b:i32=0;
+    while(b<g.*.nbuckets){
+        let o:i32=b*MG_STRIDE;
+        if(((t[o+32] as i32)&255)==MG_USED_OCC){
+            let slot:i32=mg_slot_at(t,o);
+            if(slot<0||slot>=s.*.n){return 1;}
+            if(sc_is_tombstoned(s,slot)==1){return 2;}
+            if(sc_read_value(s,slot)!=mg_key_at(t,o)){return 3;}
+            cnt=cnt+1;
+        }
+        b=b+1;
+    }
+    if(cnt!=g.*.nvals){return 4;}
+    let id:i32=0;
+    while(id<s.*.n){
+        if(sc_is_tombstoned(s,id)==0){
+            let v:i64=sc_read_value(s,id);
+            let found:i32=0;
+            let o2:i32=mg_find(g,v,&found);
+            if(found!=1){return 5;}
+            if(mg_slot_at(g.*.table,o2)!=id){return 6;}
+        }
+        id=id+1;
+    }
+    return 0;
+}

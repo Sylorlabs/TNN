@@ -1,0 +1,471 @@
+@import("../../adopt/s5_merge.zag")
+// (import is relative to this file's directory; s5_merge.zag in turn
+// imports s5_store.zag relative to adopt/)
+// dd_r2.zag — round-2 delete-logic verification driver.
+// Modes: sealfix | merge | chain | adv
+// Pure Zag, zero RNG (splitmix64-of-index draws only), deterministic.
+// Build from ops/storage-compression/adopt (imports resolve via CWD):
+//   znc ../dedup/r2/dd_r2.zag -o ../dedup/r2/dd_r2 --no-analyze
+
+fn r2_pnum(v:i64)void {
+    let s:[]u8=_zag_i64_to_str(v);
+    _zag_print(s);
+    _zag_free(_zag_slice_ptr(s));
+}
+fn r2_streq(a:[]u8,b:[]u8)i32 {
+    if(_zag_strcmp(a,b)==1){return 1;}
+    return 0;
+}
+fn r2_lshr(v:i64,bits:i32,mask:i64)i64 { return (v>>bits)&mask; }
+fn r2_mix(state:i64)i64 {
+    let golden:i64=0x9E3779B97F4A7C15 as i64;
+    let x:i64=state+golden;
+    let z:i64=x;
+    z=((z^(r2_lshr(z,30,0x3FFFFFFFF))) * (0xBF58476D1CE4E5B9 as i64));
+    z=((z^(r2_lshr(z,27,0x1FFFFFFFFF))) * (0x94D049BB133111EB as i64));
+    return z^(r2_lshr(z,31,0x1FFFFFFFF));
+}
+fn r2_draw(seed:i64,idx:i64)i64 {
+    let golden:i64=0x9E3779B97F4A7C15 as i64;
+    return r2_mix(seed+(idx+1)*golden);
+}
+fn r2_urmod(d:i64,r:i64)i64 {
+    let v:i64=d%r;
+    if(v<0){v=v+r;}
+    return v;
+}
+fn r2_pack(subj:i64,rel:i64,obj:i64)i64 {
+    return subj | (rel<<20) | (obj<<32);
+}
+fn r2_store_new()ScStore {
+    let st:ScStore=ScStore{.cap=0,.n=0,.cslots=0,.nchunks=0,.chunk_ptrs="",
+        .chashes="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_rev=0,.ops_del=0,
+        .ops_verify=0,.ops_audit=0,.ops_find=0};
+    return st;
+}
+fn r2_fail(tag:[]u8,msg:[]u8)void {
+    _zag_print(tag);_zag_print(",FAIL,");_zag_println(msg);
+}
+
+// ---------- B1: seal-fix port regression ----------
+// 200 facts, cslots=64 -> 3 full chunks + 8-slot partial tail.
+// Tombstone in sealed chunks AND in the tail, then seal_tail TWICE.
+fn r2_mode_sealfix()void {
+    let st:ScStore=r2_store_new();
+    if(sc_store_init(4096,64,&st)!=0){r2_fail("R2_SEALFIX","init");return;}
+    let n:i32=200;
+    let i:i32=0;
+    while(i<n){
+        let slot:i32=-1;
+        if(sc_add(&st,i,(i*3+1) as i64,&slot)!=0){r2_fail("R2_SEALFIX","add");return;}
+        i=i+1;
+    }
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    let del:[]u8=sc_alloc(n);
+    let dellist:[]u8=sc_alloc(6*4);
+    sc_s32(dellist,0,5);sc_s32(dellist,4,17);sc_s32(dellist,8,70);
+    sc_s32(dellist,12,130);sc_s32(dellist,16,195);sc_s32(dellist,20,199);
+    let d:i32=0;
+    while(d<6){
+        let id:i32=sc_g32(dellist,d*4);
+        if(sc_delete(&st,id)!=0){r2_fail("R2_SEALFIX","delete");return;}
+        del[id]=1;
+        d=d+1;
+    }
+    sc_seal_tail(&st); // second call: pre-fix resurrects tail tombstones
+    sc_seal_final(&st);
+    i=0;
+    while(i<n){
+        let v:i64=0;
+        let f:i32=sc_recall(&st,i,&v);
+        if(del[i]==1){
+            if(f!=0){r2_fail("R2_SEALFIX","deleted_still_recalls");return;}
+        }else{
+            if(f!=1||v!=(i*3+1) as i64){r2_fail("R2_SEALFIX","live_changed");return;}
+        }
+        i=i+1;
+    }
+    if(sc_replay_check(&st)!=0){r2_fail("R2_SEALFIX","replay");return;}
+    if(sc_manifest_verify(&st)!=0){r2_fail("R2_SEALFIX","manifest");return;}
+    if(sc_live_count(&st)!=n-6){r2_fail("R2_SEALFIX","live_count");return;}
+    _zag_print("R2_SEALFIX,n=");r2_pnum(n as i64);
+    _zag_print(",deleted=6,live=");r2_pnum(sc_live_count(&st) as i64);
+    _zag_println("");
+    _zag_println("R2_SEALFIX,ok=1");
+}
+
+// ---------- B2/B3/B4: merge gate ----------
+// 2000 claims x 1..5 copies; merge ingest vs one-copy raw baseline.
+fn r2_mode_merge()void {
+    let st:ScStore=r2_store_new();
+    if(sc_store_init(8192,64,&st)!=0){r2_fail("R2_MERGE","init");return;}
+    let g:ScMergeGate=mg_new();
+    if(mg_init(&g,14)!=0){r2_fail("R2_MERGE","ginit");return;}
+    let base:ScStore=r2_store_new();
+    if(sc_store_init(8192,64,&base)!=0){r2_fail("R2_MERGE","binit");return;}
+    let nc:i32=2000;
+    let nstored:i64=0;
+    let nmerged:i64=0;
+    let c:i32=0;
+    while(c<nc){
+        let r:i64=((c*3)%64) as i64;
+        let v:i64=r2_pack(c as i64,r,c as i64);
+        let copies:i32=1+(c%5);
+        let slotb:i32=-1;
+        if(sc_add(&base,c,v,&slotb)!=0){r2_fail("R2_MERGE","badd");return;}
+        let j:i32=0;
+        while(j<copies){
+            let src:i32=(c*7+j*13)%50;
+            let org:i32=src%40;
+            let slot:i32=-1;
+            let mrg:i32=-1;
+            let rc:i32=mg_add(&st,&g,v,src,org,&slot,&mrg);
+            if(rc!=0){r2_fail("R2_MERGE","madd");return;}
+            if(mrg==1){nmerged=nmerged+1;}else{nstored=nstored+1;}
+            j=j+1;
+        }
+        c=c+1;
+    }
+    if(nstored!=nc as i64){r2_fail("R2_MERGE","nstored");return;}
+    if(nmerged!=(6000-nc) as i64){r2_fail("R2_MERGE","nmerged");return;}
+    // per-value source records
+    c=0;
+    while(c<nc){
+        let r:i64=((c*3)%64) as i64;
+        let v:i64=r2_pack(c as i64,r,c as i64);
+        let copies:i32=1+(c%5);
+        let slot:i32=-1;let asserts:i32=0;let nsrc:i32=0;let norg:i32=0;
+        if(mg_query(&g,v,&slot,&asserts,&nsrc,&norg)!=1){r2_fail("R2_MERGE","qmiss");return;}
+        if(slot!=c){r2_fail("R2_MERGE","qslot");return;}
+        if(asserts!=copies){r2_fail("R2_MERGE","qasserts");return;}
+        if(nsrc!=copies){r2_fail("R2_MERGE","qnsrc");return;} // step 13 mod 50, j<5: all distinct
+        let rv:i64=0;
+        if(sc_recall(&st,slot,&rv)!=1||rv!=v){r2_fail("R2_MERGE","qrecall");return;}
+        c=c+1;
+    }
+    // B3: no delete events, no failure events; bytes == one-copy baseline
+    if(st.events_n!=0){r2_fail("R2_MERGE","events_nonzero");return;}
+    let e:i32=0;
+    while(e<st.events_n){
+        if(((st.events[e*20] as i32)&255)==10){r2_fail("R2_MERGE","delete_event");return;}
+        e=e+1;
+    }
+    let bm:i64=sc_written_bytes(&st);
+    let bb:i64=sc_written_bytes(&base);
+    if(bm!=bb){r2_fail("R2_MERGE","bytes");return;}
+    // B4: digest equality — no lost facts
+    if(sc_digest(&st)!=sc_digest(&base)){r2_fail("R2_MERGE","digest");return;}
+    if(sc_replay_check(&st)!=0){r2_fail("R2_MERGE","replay");return;}
+    if(mg_replay_check(&st,&g)!=0){r2_fail("R2_MERGE","mgreplay");return;}
+    _zag_print("R2_MERGE,claims=");r2_pnum(nc as i64);
+    _zag_print(",stored=");r2_pnum(nstored);
+    _zag_print(",merged=");r2_pnum(nmerged);
+    _zag_print(",bytes=");r2_pnum(bm);
+    _zag_print(",events=0,digest_match=1");_zag_println("");
+    _zag_println("R2_MERGE,ok=1");
+}
+
+// ---------- B5: full chain under mutation ----------
+// merge ingest -> delete 50 reps -> revise 30 -> re-add 20 deleted (fresh)
+// -> re-add 20 live (folded) -> seal_tail x2 -> seal_final.
+fn r2_mode_chain()void {
+    let st:ScStore=r2_store_new();
+    if(sc_store_init(2048,64,&st)!=0){r2_fail("R2_CHAIN","init");return;}
+    let g:ScMergeGate=mg_new();
+    if(mg_init(&g,12)!=0){r2_fail("R2_CHAIN","ginit");return;}
+    let nc:i32=600;
+    let gt_live:[]u8=sc_alloc(1024);
+    let gt_val:[]u8=sc_alloc(1024*8);
+    // ingest: copies = 1+(c%3)
+    let c:i32=0;
+    while(c<nc){
+        let r:i64=((c*3)%64) as i64;
+        let v:i64=r2_pack(c as i64,r,c as i64);
+        let copies:i32=1+(c%3);
+        let j:i32=0;
+        while(j<copies){
+            let src:i32=(c*7+j*13)%50;
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,v,src,src%40,&slot,&mrg)!=0){r2_fail("R2_CHAIN","add");return;}
+            j=j+1;
+        }
+        gt_live[c]=1;
+        sc_s64(gt_val,(c*8) as i64,v);
+        c=c+1;
+    }
+    if(st.n!=nc){r2_fail("R2_CHAIN","n_after_ingest");return;}
+    // delete 50 reps: c%12==0
+    let ndel:i32=0;
+    c=0;
+    while(c<nc){
+        if(c%12==0){
+            if(mg_delete(&st,&g,c)!=0){r2_fail("R2_CHAIN","del");return;}
+            gt_live[c]=0;
+            ndel=ndel+1;
+        }
+        c=c+1;
+    }
+    if(ndel!=50){r2_fail("R2_CHAIN","ndel");return;}
+    // revise 30: c%20==7 -> fresh value
+    let nrev:i32=0;
+    c=0;
+    while(c<nc){
+        if(c%20==7){
+            let r:i64=((c*3)%64) as i64;
+            let w:i64=r2_pack(c as i64,r,((c as i64^0xABCD)&0xFFFFF));
+            if(mg_revise(&st,&g,c,w,5,5)!=0){r2_fail("R2_CHAIN","rev");return;}
+            sc_s64(gt_val,(c*8) as i64,w);
+            nrev=nrev+1;
+        }
+        c=c+1;
+    }
+    if(nrev!=30){r2_fail("R2_CHAIN","nrev");return;}
+    // re-add 20 deleted values: fresh store (asserts restart)
+    let nra:i32=0;
+    c=0;
+    while(c<nc){
+        if(c%12==0&&nra<20){
+            let v:i64=sc_g64(gt_val,(c*8) as i64);
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,v,2,2,&slot,&mrg)!=0){r2_fail("R2_CHAIN","readd");return;}
+            if(mrg!=0){r2_fail("R2_CHAIN","readd_merged");return;}
+            if(slot!=nc+nra){r2_fail("R2_CHAIN","readd_slot");return;}
+            gt_live[nc+nra]=1;
+            sc_s64(gt_val,((nc+nra)*8) as i64,v);
+            let asserts:i32=0;let ns:i32=0;let no:i32=0;let qs:i32=-1;
+            if(mg_query(&g,v,&qs,&asserts,&ns,&no)!=1){r2_fail("R2_CHAIN","readd_q");return;}
+            if(asserts!=1||ns!=1){r2_fail("R2_CHAIN","readd_asserts");return;}
+            nra=nra+1;
+        }
+        c=c+1;
+    }
+    if(nra!=20){r2_fail("R2_CHAIN","nra");return;}
+    // re-add 20 live values: folded
+    let nfold:i32=0;
+    c=0;
+    while(c<nc){
+        if(c%30==3&&nfold<20){
+            let v:i64=sc_g64(gt_val,(c*8) as i64);
+            let copies:i32=1+(c%3);
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,v,3,3,&slot,&mrg)!=0){r2_fail("R2_CHAIN","refold");return;}
+            if(mrg!=1){r2_fail("R2_CHAIN","refold_notmerged");return;}
+            if(slot!=c){r2_fail("R2_CHAIN","refold_slot");return;}
+            let asserts:i32=0;let ns:i32=0;let no:i32=0;let qs:i32=-1;
+            if(mg_query(&g,v,&qs,&asserts,&ns,&no)!=1){r2_fail("R2_CHAIN","refold_q");return;}
+            if(asserts!=copies+1){r2_fail("R2_CHAIN","refold_asserts");return;}
+            nfold=nfold+1;
+        }
+        c=c+1;
+    }
+    if(nfold!=20){r2_fail("R2_CHAIN","nfold");return;}
+    sc_seal_tail(&st);
+    sc_seal_tail(&st);
+    sc_seal_final(&st);
+    // verify against ground truth
+    if(mg_replay_check(&st,&g)!=0){r2_fail("R2_CHAIN","mgreplay");return;}
+    if(sc_replay_check(&st)!=0){r2_fail("R2_CHAIN","replay");return;}
+    if(sc_manifest_verify(&st)!=0){r2_fail("R2_CHAIN","manifest");return;}
+    let total:i32=nc+20;
+    let live:i32=0;
+    let id:i32=0;
+    while(id<total){
+        let v:i64=0;
+        let f:i32=sc_recall(&st,id,&v);
+        if(gt_live[id]==1){
+            live=live+1;
+            let want:i64=sc_g64(gt_val,(id*8) as i64);
+            if(f!=1||v!=want){r2_fail("R2_CHAIN","live_recall");return;}
+            // verdict -> learning-read tie: gate slot for the value == id
+            let qs:i32=-1;let qa:i32=0;let qn:i32=0;let qo:i32=0;
+            if(mg_query(&g,want,&qs,&qa,&qn,&qo)!=1){r2_fail("R2_CHAIN","tie_q");return;}
+            if(qs!=id){r2_fail("R2_CHAIN","tie_slot");return;}
+        }else{
+            if(f!=0){r2_fail("R2_CHAIN","dead_recalls");return;}
+        }
+        id=id+1;
+    }
+    if(live!=570){r2_fail("R2_CHAIN","live570");return;}
+    if(sc_live_count(&st)!=570){r2_fail("R2_CHAIN","sc_live570");return;}
+    _zag_print("R2_CHAIN,total_ids=");r2_pnum(total as i64);
+    _zag_print(",live=570,deleted=50,revised=30,readded=20,refolded=20");_zag_println("");
+    _zag_println("R2_CHAIN,ok=1");
+}
+
+// ---------- B6: adversarial corroboration ----------
+// 3,000 single-valued claims, barred range (single bad origin):
+//   40 honest sources (1 per origin, independent 1/3 noise, each invents
+//   its OWN false object) + 1 bad origin with 8 sockpuppet source ids that
+//   always assert the SAME false object per claim (shared bad origin).
+// Claims 3000..3499: boundary probe — a SECOND colluding origin (41)
+// joins the lie on c%3==0 (measured, not barred).
+// Verdicts: A_src = install iff >=2 distinct SOURCE ids agree;
+//           A_org = install iff >=2 distinct ORIGINS agree.
+fn r2_adv_lie(c:i32)i64 {
+    let cc:i64=c as i64;
+    let o:i64=(cc^(0xBEEF as i64))&4294967295;
+    if(o==cc){o=(o^(0xF00D as i64))&4294967295;}
+    return r2_pack(cc,(c%32) as i64,o);
+}
+fn r2_adv_hval(c:i32,h:i32)i64 {
+    let cc:i64=c as i64;
+    let o_s:i64=(cc^(0xBEEF as i64))&4294967295;
+    let o:i64=cc;
+    if(r2_urmod(r2_draw(777+cc,h as i64),3)==0){
+        o=(cc^(0xBEEF as i64)^(((h+1) as i64)*2654435761))&4294967295;
+        let guard:i32=0;
+        // terminates in <=2 iterations: the two forbidden values differ
+        // from each other's ^0xF00D (0xBEEF != 0xF00D), so one xor escapes.
+        while((o==cc||o==o_s)&&guard<8){
+            o=(o^(0xF00D as i64))&4294967295;
+            guard=guard+1;
+        }
+    }
+    return r2_pack(cc,(c%32) as i64,o);
+}
+// evaluate one candidate value: update counters, check learning-read tie.
+// was_inst_* = install decision under each rule. Returns 0 ok, 1 tie-fail.
+fn r2_adv_evalval(g:*ScMergeGate,st:*ScStore,v:i64,is_true:i32,is_r1:i32,
+    fa_src:*i64,fa_org:*i64,ti_src:*i64,ti_org:*i64,
+    c2n:*i64,c2ok:*i64,c3n:*i64,c3ok:*i64,g2n:*i64,g2ok:*i64,
+    was_inst_src:*i32,was_inst_org:*i32)i32 {
+    let slot:i32=-1;let a:i32=0;let nsrc:i32=0;let norg:i32=0;
+    if(mg_query(g,v,&slot,&a,&nsrc,&norg)!=1){
+        was_inst_src.*=0;was_inst_org.*=0;return 0;
+    }
+    let ins:i32=0;let ino:i32=0;
+    if(nsrc>=2){ins=1;}
+    if(norg>=2){ino=1;}
+    was_inst_src.*=ins;was_inst_org.*=ino;
+    if(is_r1==0){
+        if(is_true==1){
+            if(ins==1){ti_src.*=ti_src.*+1;}
+            if(ino==1){ti_org.*=ti_org.*+1;}
+        }else{
+            if(ins==1){fa_src.*=fa_src.*+1;}
+            if(ino==1){fa_org.*=fa_org.*+1;}
+        }
+        if(nsrc==2){c2n.*=c2n.*+1;if(is_true==1){c2ok.*=c2ok.*+1;}}
+        if(nsrc==3){c3n.*=c3n.*+1;if(is_true==1){c3ok.*=c3ok.*+1;}}
+        if(norg==2){g2n.*=g2n.*+1;if(is_true==1){g2ok.*=g2ok.*+1;}}
+    }
+    if(ins==1||ino==1){
+        let rv:i64=0;
+        if(sc_recall(st,slot,&rv)!=1||rv!=v){return 1;}
+    }
+    return 0;
+}
+fn r2_mode_adv()void {
+    let st:ScStore=r2_store_new();
+    if(sc_store_init(16384,128,&st)!=0){r2_fail("R2_ADV","init");return;}
+    let g:ScMergeGate=mg_new();
+    if(mg_init(&g,15)!=0){r2_fail("R2_ADV","ginit");return;}
+    let c:i32=0;
+    while(c<3500){
+        let nh:i32=1+(c%4);
+        let ns:i32=0;
+        if(c%3==0){ns=3;}else{if(c%3==1){ns=1;}}
+        let j:i32=0;
+        while(j<nh){
+            let h:i32=(c*11+j*17)%40;
+            let v:i64=r2_adv_hval(c,h);
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,v,h,h,&slot,&mrg)!=0){r2_fail("R2_ADV","add");return;}
+            j=j+1;
+        }
+        let L:i64=r2_adv_lie(c);
+        j=0;
+        while(j<ns){
+            let s:i32=40+((c*5+j*7)%8);
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,L,s,40,&slot,&mrg)!=0){r2_fail("R2_ADV","addsock");return;}
+            j=j+1;
+        }
+        if(c>=3000&&c%3==0){
+            let slot:i32=-1;let mrg:i32=-1;
+            if(mg_add(&st,&g,L,48,41,&slot,&mrg)!=0){r2_fail("R2_ADV","add41a");return;}
+            if(mg_add(&st,&g,L,49,41,&slot,&mrg)!=0){r2_fail("R2_ADV","add41b");return;}
+        }
+        c=c+1;
+    }
+    let fa_src:i64=0;let fa_org:i64=0;
+    let ti_src:i64=0;let ti_org:i64=0;
+    let atk:i64=0;let atk_with:i64=0;let fa2:i64=0;
+    let c2n:i64=0;let c2ok:i64=0;let c3n:i64=0;let c3ok:i64=0;
+    let g2n:i64=0;let g2ok:i64=0;
+    c=0;
+    while(c<3500){
+        let t:i64=r2_pack(c as i64,(c%32) as i64,c as i64);
+        let L:i64=r2_adv_lie(c);
+        let nh:i32=1+(c%4);
+        let ns:i32=0;
+        if(c%3==0){ns=3;}else{if(c%3==1){ns=1;}}
+        let it_s:i32=0;let it_o:i32=0;
+        let is_r1:i32=0;
+        if(c>=3000){is_r1=1;}
+        if(r2_adv_evalval(&g,&st,t,1,is_r1,&fa_src,&fa_org,&ti_src,&ti_org,
+            &c2n,&c2ok,&c3n,&c3ok,&g2n,&g2ok,&it_s,&it_o)!=0){r2_fail("R2_ADV","tie");return;}
+        if(it_s==1&&it_o==0){r2_fail("R2_ADV","org_miss");return;}
+        let j:i32=0;
+        while(j<nh){
+            let h:i32=(c*11+j*17)%40;
+            let v:i64=r2_adv_hval(c,h);
+            if(v!=t){
+                let ws:i32=0;let wo:i32=0;
+                if(r2_adv_evalval(&g,&st,v,0,is_r1,&fa_src,&fa_org,&ti_src,&ti_org,
+                    &c2n,&c2ok,&c3n,&c3ok,&g2n,&g2ok,&ws,&wo)!=0){r2_fail("R2_ADV","tie2");return;}
+            }
+            j=j+1;
+        }
+        if(ns>0){
+            let il_s:i32=0;let il_o:i32=0;
+            if(r2_adv_evalval(&g,&st,L,0,is_r1,&fa_src,&fa_org,&ti_src,&ti_org,
+                &c2n,&c2ok,&c3n,&c3ok,&g2n,&g2ok,&il_s,&il_o)!=0){r2_fail("R2_ADV","tie3");return;}
+            if(c<3000&&c%3==0){
+                atk=atk+1;
+                if(il_o==0){atk_with=atk_with+1;}
+            }
+            if(c>=3000&&c%3==0){
+                if(il_o==1){fa2=fa2+1;}
+            }
+        }
+        c=c+1;
+    }
+    // B6 bars
+    if(fa_org!=0){r2_fail("R2_ADV","org_false_install");return;}
+    if(fa_src<1){r2_fail("R2_ADV","attack_did_not_land");return;}
+    if(atk_with!=atk){r2_fail("R2_ADV","attack_not_withheld");return;}
+    if(mg_replay_check(&st,&g)!=0){r2_fail("R2_ADV","mgreplay");return;}
+    if(sc_replay_check(&st)!=0){r2_fail("R2_ADV","replay");return;}
+    _zag_print("R2_ADV,claims=3000,fa_src=");r2_pnum(fa_src);
+    _zag_print(",fa_org=0,attack_claims=");r2_pnum(atk);
+    _zag_print(",attack_withheld_org=");r2_pnum(atk_with);
+    _zag_print(",true_installed_src=");r2_pnum(ti_src);
+    _zag_print(",true_installed_org=");r2_pnum(ti_org);_zag_println("");
+    _zag_print("R2_ADV,calib_nsrc2_n=");r2_pnum(c2n);
+    _zag_print(",p_true_x10000=");
+    if(c2n>0){r2_pnum((c2ok*10000)/c2n);}else{r2_pnum(0 as i64);}
+    _zag_print(",calib_nsrc3_n=");r2_pnum(c3n);
+    _zag_print(",p_true_x10000=");
+    if(c3n>0){r2_pnum((c3ok*10000)/c3n);}else{r2_pnum(0 as i64);}
+    _zag_print(",calib_norg2_n=");r2_pnum(g2n);
+    _zag_print(",p_true_x10000=");
+    if(g2n>0){r2_pnum((g2ok*10000)/g2n);}else{r2_pnum(0 as i64);}
+    _zag_println("");
+    _zag_print("R2_ADV2,two_origin_claims=500,two_origin_attacks=167,fa_org_2origin=");
+    r2_pnum(fa2);_zag_println("");
+    _zag_println("R2_ADV,ok=1");
+}
+
+fn main()void {
+    let a1:[]u8=_zag_arg(1);
+    if(a1.len==0){_zag_println("usage: dd_r2 <sealfix|merge|chain|adv>");return;}
+    if(r2_streq(a1,"sealfix")==1){r2_mode_sealfix();return;}
+    if(r2_streq(a1,"merge")==1){r2_mode_merge();return;}
+    if(r2_streq(a1,"chain")==1){r2_mode_chain();return;}
+    if(r2_streq(a1,"adv")==1){r2_mode_adv();return;}
+    _zag_println("R2,unknown_mode");
+}

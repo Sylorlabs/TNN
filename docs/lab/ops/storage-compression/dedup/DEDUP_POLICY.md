@@ -67,9 +67,15 @@ what must survive.**
 
 ## Hardening notes (from building this)
 
-- Port the 1-line `sc_seal_tail` idempotency guard to
-  `ops/storage-compression/adopt/s5_store.zag` (double-seal currently
-  resurrects tombstoned slots — proven by P1 failure before the fix).
+- ~~Port the 1-line `sc_seal_tail` idempotency guard to
+  `ops/storage-compression/adopt/s5_store.zag`~~ DONE 2026-09-23
+  (round-2 verification: canonical copy now byte-identical to the fixed
+  `dedup/src` copy; regression + sensitivity control in
+  `dedup/r2/EVIDENCE_R2.md` §1).
+- Ingest-time merge gate BUILT 2026-09-23: `adopt/s5_merge.zag`
+  (`mg_add`/`mg_revise`/`mg_delete`/`mg_query`/`mg_replay_check`;
+  exact-value merge, per-value assert/source/origin records).
+  Verified in `dedup/r2/EVIDENCE_R2.md` §§2–4.
 - Delete events should record the surviving representative id
   (`d1`/`d2` are free) so "deleted X, kept Y" is auditable from the log
   alone.
