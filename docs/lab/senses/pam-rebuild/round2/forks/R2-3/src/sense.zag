@@ -1,0 +1,289 @@
+// sense.zag — R2-3 admission instrument.
+//
+// CLI: sense <gate_id> <pair_dir> <report_path> <ledger_path>
+//   gate_id: 0 = reference, 1 = broken positive control.
+//   pair_dir: directory containing r2p_<task>_<idx>.pair (task 0-5, idx 0-199).
+//
+// For each pair: the gate names its formation/gate evidence sources; the
+// instrument feeds it the declared bytes, judges both, withholds iff the
+// judgments disagree. Overlap audit: gate_src == formation_src -> overlap.
+//
+// Output: deterministic report (key=value lines) + hash-chained ledger.
+// Zero RNG, no wall-clock. Byte-identical reruns required (B6).
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("r2p_gates.zag")
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+fn z_write_new(path:[]u8, data:[]u8) i64 {
+    // O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 420, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_write_all(fd, data);
+    nio_close(fd);
+    return n;
+}
+
+// output buffer helpers
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn ob_kint(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    return ob_kv(ob, pos, k, _zag_i64_to_str(v));
+}
+fn z_atoi(s:[]u8) i64 {
+    let v:i64 = 0;
+    let i:i32 = 0;
+    while(i < s.len) {
+        let c:i64 = s[i] as i64;
+        if(c < 48 || c > 57) { return -1; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+// task names for pair file paths
+fn task_name(t:i32) []u8 {
+    if(t == 0) { return "colordisc"; }
+    if(t == 1) { return "colorconst"; }
+    if(t == 2) { return "shapetrans"; }
+    if(t == 3) { return "pitchdisc"; }
+    if(t == 4) { return "timbredisc"; }
+    return "motiondir";
+}
+
+fn fail(msg:[]u8) i32 {
+    let ob:[]u8 = nio_alloc(256);
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "error", msg);
+    nio_write_all(1, ob[0..pos]);
+    return 1;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let a2:[]u8 = _zag_arg(2);
+    let a3:[]u8 = _zag_arg(3);
+    let a4:[]u8 = _zag_arg(4);
+    if(a1.len == 0) { return fail("no_gate_id"); }
+    if(a2.len == 0) { return fail("no_pair_dir"); }
+    if(a3.len == 0) { return fail("no_report_path"); }
+    if(a4.len == 0) { return fail("no_ledger_path"); }
+    let gid:i64 = z_atoi(a1);
+    if(gid < 0 || gid > 1) { return fail("bad_gate_id"); }
+    let gate:i32 = gid as i32;
+    if(gate_valid(gate) == 0) { return fail("gate_rejected_no_name"); }
+
+    let fsrc:i32 = gate_formation_src(gate);
+    let gsrc:i32 = gate_gate_src(gate);
+    // A gate that cannot name its disjoint evidence sets (0/1) is rejected
+    // before evaluation.
+    if(fsrc < 0 || fsrc > 1) { return fail("gate_rejected_formation_unnamed"); }
+    if(gsrc < 0 || gsrc > 1) { return fail("gate_rejected_gate_unnamed"); }
+    let overlap_declared:i32 = 0;
+    if(fsrc == gsrc) { overlap_declared = 1; }
+
+    // buffers
+    let pairbuf:[]u8 = nio_alloc(2000000);  // max pair file ~1.2MB
+    if(pairbuf.len == 0) { return fail("alloc_failed"); }
+    let pathbuf:[]u8 = nio_alloc(4096);
+    if(pathbuf.len == 0) { return fail("alloc_failed"); }
+    let repbuf:[]u8 = nio_alloc(65536);
+    if(repbuf.len == 0) { return fail("alloc_failed"); }
+    let ledbuf:[]u8 = nio_alloc(400000);
+    if(ledbuf.len == 0) { return fail("alloc_failed"); }
+
+    // ledger hash chain
+    let hprev:[]u8 = nio_alloc(32);
+    let hnew:[]u8 = nio_alloc(32);
+    let hhex:[]u8 = nio_alloc(64);
+    let hbin:[]u8 = nio_alloc(64);
+    // h0 = SHA256("R2P-LEDGER-v1" || gate_name)
+    let seed:[]u8 = nio_alloc(64);
+    let sp:i32 = 0;
+    sp = ob_add(seed, sp, "R2P-LEDGER-v1");
+    sp = ob_add(seed, sp, gate_name(gate));
+    if(ns_sha256(seed[0..sp], hprev) != 0) { return fail("sha_failed"); }
+    nio_free(seed);
+
+    let lpos:i32 = 0;
+    lpos = ob_add(ledbuf, lpos, "R2P-LEDGER-v1\n");
+    lpos = ob_kv(ledbuf, lpos, "gate", gate_name(gate));
+    lpos = ob_kint(ledbuf, lpos, "n", 1200);
+
+    let withheld:i64 = 0;
+    let overlap_ct:i64 = 0;
+    let processed:i64 = 0;
+    let errors:i64 = 0;
+
+    let task:i32 = 0;
+    while(task < 6) {
+        let idx:i32 = 0;
+        while(idx < 200) {
+            // build path: <dir>/r2p_<task>_<idx3>.pair
+            let pp:i32 = 0;
+            pp = ob_add(pathbuf, pp, a2);
+            pp = ob_add(pathbuf, pp, "/r2p_");
+            pp = ob_add(pathbuf, pp, task_name(task));
+            pp = ob_add(pathbuf, pp, "_");
+            let idxs:[]u8 = _zag_i64_to_str(idx as i64);
+            // zero-pad to 3
+            if(idxs.len == 1) { pp = ob_add(pathbuf, pp, "00"); }
+            if(idxs.len == 2) { pp = ob_add(pathbuf, pp, "0"); }
+            pp = ob_add(pathbuf, pp, idxs);
+            pp = ob_add(pathbuf, pp, ".pair");
+            let n:i64 = z_read(pathbuf[0..pp], pairbuf, 2000000);
+            if(n < 64) {
+                // B1: failures reported, never silently skipped
+                errors = errors + 1;
+            } else {
+                // parse header
+                let p_task:i64 = (pairbuf[4] as i64) | ((pairbuf[5] as i64) << 8)
+                    | ((pairbuf[6] as i64) << 16) | ((pairbuf[7] as i64) << 24);
+                let p_idx:i64 = (pairbuf[8] as i64) | ((pairbuf[9] as i64) << 8)
+                    | ((pairbuf[10] as i64) << 16) | ((pairbuf[11] as i64) << 24);
+                // scene u64 at 12..20 (not needed for scoring)
+                let f_len:i64 = (pairbuf[20] as i64) | ((pairbuf[21] as i64) << 8)
+                    | ((pairbuf[22] as i64) << 16) | ((pairbuf[23] as i64) << 24);
+                let g_len:i64 = (pairbuf[24] as i64) | ((pairbuf[25] as i64) << 8)
+                    | ((pairbuf[26] as i64) << 16) | ((pairbuf[27] as i64) << 24);
+                if(p_task != task as i64 || p_idx != idx as i64) {
+                    errors = errors + 1;
+                } else {
+                    if(64 + f_len + g_len > n) {
+                        errors = errors + 1;
+                    } else {
+                        let f_blob:[]u8 = pairbuf[64..(64 + f_len as i32)];
+                        let g_blob:[]u8 = pairbuf[(64 + f_len as i32)..(64 + f_len as i32 + g_len as i32)];
+                        // feed the gate its DECLARED evidence
+                        let ev_f:[]u8 = f_blob;
+                        if(fsrc == 1) { ev_f = g_blob; }
+                        let ev_g:[]u8 = g_blob;
+                        if(gsrc == 0) { ev_g = f_blob; }
+                        let jf:i32 = gate_judge(gate, task, ev_f);
+                        let jg:i32 = gate_judge(gate, task, ev_g);
+                        let wh:i64 = 0;
+                        if(jf != jg) { wh = 1; withheld = withheld + 1; }
+                        if(overlap_declared == 1) { overlap_ct = overlap_ct + 1; }
+                        processed = processed + 1;
+                        // ledger entry: seq || jf || jg || wh
+                        let seq:i64 = (task as i64) * 200 + (idx as i64);
+                        let eb:i32 = 0;
+                        // hbin: prev_hash(32) || seq(4BE) || jf(1) || jg(1) || wh(1)
+                        let bi:i32 = 0;
+                        while(bi < 32) { hbin[bi] = hprev[bi]; bi = bi + 1; }
+                        hbin[32] = ((seq >> 24) & 255) as u8;
+                        hbin[33] = ((seq >> 16) & 255) as u8;
+                        hbin[34] = ((seq >> 8) & 255) as u8;
+                        hbin[35] = (seq & 255) as u8;
+                        hbin[36] = (jf & 255) as u8;
+                        hbin[37] = (jg & 255) as u8;
+                        hbin[38] = (wh & 255) as u8;
+                        if(ns_sha256(hbin[0..39], hnew) != 0) { return fail("sha_failed"); }
+                        // ledger line: e <seq> <jf> <jg> <wh> <hashhex>
+                        lpos = ob_add(ledbuf, lpos, "e ");
+                        lpos = ob_add(ledbuf, lpos, _zag_i64_to_str(seq));
+                        lpos = ob_add(ledbuf, lpos, " ");
+                        lpos = ob_add(ledbuf, lpos, _zag_i64_to_str(jf as i64));
+                        lpos = ob_add(ledbuf, lpos, " ");
+                        lpos = ob_add(ledbuf, lpos, _zag_i64_to_str(jg as i64));
+                        lpos = ob_add(ledbuf, lpos, " ");
+                        lpos = ob_add(ledbuf, lpos, _zag_i64_to_str(wh));
+                        lpos = ob_add(ledbuf, lpos, " ");
+                        lpos = ob_add(ledbuf, lpos, ns_hex(hnew));
+                        lpos = ob_add(ledbuf, lpos, "\n");
+                        // copy hnew -> hprev
+                        bi = 0;
+                        while(bi < 32) { hprev[bi] = hnew[bi]; bi = bi + 1; }
+                        eb = eb + 1;
+                    }
+                }
+            }
+            idx = idx + 1;
+        }
+        task = task + 1;
+    }
+
+    // final hash hex
+    let hx:[]u8 = ns_hex(hprev);
+    // report
+    let rpos:i32 = 0;
+    rpos = ob_kv(repbuf, rpos, "gate", gate_name(gate));
+    rpos = ob_kint(repbuf, rpos, "gate_formation_src", fsrc as i64);
+    rpos = ob_kint(repbuf, rpos, "gate_gate_src", gsrc as i64);
+    rpos = ob_kint(repbuf, rpos, "pairs_total", 1200);
+    rpos = ob_kint(repbuf, rpos, "pairs_processed", processed);
+    rpos = ob_kint(repbuf, rpos, "pairs_error", errors);
+    rpos = ob_kint(repbuf, rpos, "pairs_withheld", withheld);
+    rpos = ob_kint(repbuf, rpos, "withhold_pct_x100", (withheld * 10000) / 1200);
+    rpos = ob_kint(repbuf, rpos, "overlap_pairs", overlap_ct);
+    rpos = ob_kint(repbuf, rpos, "overlap_pct_x100", (overlap_ct * 10000) / 1200);
+    // verdicts per frozen bars
+    // B5: withhold >= 90%
+    let b5:i32 = 0;
+    if(withheld * 100 >= 90 * 1200) { b5 = 1; }
+    rpos = ob_kint(repbuf, rpos, "B5_withhold_ge_90", b5);
+    // B4 (positive control expectations): overlap 100% AND withhold < 50%
+    let b4_overlap:i32 = 0;
+    if(overlap_ct == 1200) { b4_overlap = 1; }
+    let b4_withhold:i32 = 0;
+    if(withheld * 100 < 50 * 1200) { b4_withhold = 1; }
+    rpos = ob_kint(repbuf, rpos, "B4_overlap_100", b4_overlap);
+    rpos = ob_kint(repbuf, rpos, "B4_withhold_lt_50", b4_withhold);
+    rpos = ob_kv(repbuf, rpos, "ledger_final", hx);
+
+    // ledger tail
+    lpos = ob_kv(ledbuf, lpos, "final", hx);
+    lpos = ob_kint(ledbuf, lpos, "withheld", withheld);
+    lpos = ob_kint(ledbuf, lpos, "overlap", overlap_ct);
+
+    if(z_write_new(a3, repbuf[0..rpos]) < 0) { return fail("report_write_failed"); }
+    if(z_write_new(a4, ledbuf[0..lpos]) < 0) { return fail("ledger_write_failed"); }
+
+    // stdout: brief
+    let ob:[]u8 = nio_alloc(1024);
+    let q:i32 = 0;
+    q = ob_kv(ob, q, "gate", gate_name(gate));
+    q = ob_kint(ob, q, "withheld", withheld);
+    q = ob_kint(ob, q, "overlap", overlap_ct);
+    q = ob_kv(ob, q, "ledger_final", hx);
+    nio_write_all(1, ob[0..q]);
+    return 0;
+}
