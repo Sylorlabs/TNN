@@ -1,0 +1,818 @@
+@import("R33_NATIVE_IO_V1.zag")
+
+// novel.zag — H3 novelty-detection module.
+// Frozen spec: PREREG_H3_NOVELTY.md (sylorlabs/TNN, branch tnn-native-lab).
+// Pure Zag: classification, corroboration, reporting. Fully deterministic.
+// webg is untouched; this module operates on the taught state K plus
+// one corpus input file prepared by the driver glue (sentence-splitting
+// and formatting only, no reasoning, same division as LI-1).
+//
+// Usage: novel <kfile> <corpusfile> <outdir>
+//   kfile:      lines "K|<seq>|<raw installed-memory text>" (raw; norm applied here)
+//   corpusfile: lines "CORPUS|<cid>", "PAGE|<pid>|OK|FETCHFAIL",
+//               "T|<title>", "F|<framing>", "S|<sentence>"
+//   outdir:     report.txt, audit.txt, installs.txt, withholds.txt
+//
+// LESION: 0 = normal recall; 1 = recall-always-match (every sentence KNOWN);
+// 2 = recall-never-match (no sentence ever matches K). Calibration controls
+// only; the committed source ships LESION=0.
+
+const LESION:i32=0;
+
+const MAXK:i32=4096;
+const MAXPAGES:i32=16;
+const MAXLINES:i32=2048;
+const NBUFSZ:i32=16384;
+
+// ---------- small helpers ----------
+
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0 && s[s.len-1]==10){
+        if(s.len==1){return "";}
+        return s[0..s.len-1];
+    }
+    return s;
+}
+
+fn p32(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;
+    b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;
+    b[at+3]=((v>>24)&255) as u8;
+    return;
+}
+
+fn g32(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+
+fn bstart(s:[]u8,p:[]u8)i32 {
+    if(p.len>s.len){return 0;}
+    let i:i32=0;
+    while(i<p.len){
+        if(s[i]!=p[i]){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+fn beq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){
+        if(a[i]!=b[i]){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+// substring test (needle n in haystack h)
+fn has_sub(h:[]u8,n:[]u8)i32 {
+    if(n.len==0){return 1;}
+    if(n.len>h.len){return 0;}
+    let i:i32=0;
+    while(i+n.len<=h.len){
+        let j:i32=0;
+        while(j<n.len){
+            if(h[i+j]!=n[j]){break;}
+            j=j+1;
+        }
+        if(j==n.len){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn next_line(b:[]u8,pos:*i32,ls:*i32,ll:*i32)i32 {
+    if(pos[0]>=b.len){return 0;}
+    let s:i32=pos[0];
+    let e:i32=s;
+    while(e<b.len && b[e]!=10){e=e+1;}
+    ls[0]=s;
+    ll[0]=e-s;
+    if(e<b.len){pos[0]=e+1;}else{pos[0]=e;}
+    return 1;
+}
+
+// append s to b at pos; returns new pos
+fn cat(b:[]u8,pos:i32,s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){
+        b[pos+i]=s[i];
+        i=i+1;
+    }
+    return pos+s.len;
+}
+
+// append s plus newline; returns new pos
+fn emit_line(b:[]u8,pos:i32,s:[]u8)i32 {
+    let p:i32=cat(b,pos,s);
+    b[p]=10;
+    return p+1;
+}
+
+fn popcnt(x:i32)i32 {
+    let c:i32=0;
+    let v:i32=x;
+    let i:i32=0;
+    while(i<32){
+        if((v&1)==1){c=c+1;}
+        v=v>>1;
+        i=i+1;
+    }
+    return c;
+}
+
+// ---------- norm: lowercase + whitespace-collapse (frozen WG-1/LI-1 rule) ----------
+// Character model (documented, frozen with this module):
+//  - lowercase: ASCII A-Z -> a-z ONLY. Non-ASCII bytes pass through unfolded.
+//    (Fixed 2026-09-23: an earlier revision also folded byte values 192..222
+//    as if they were Latin-1 capitals; on UTF-8 input those bytes are
+//    multibyte lead bytes, so the fold corrupted them instead of lowercasing.
+//    The fold never fired on any ASCII-only input, so no verdict on the
+//    frozen official battery changes — proven byte-identical reruns.)
+//  - whitespace: 0x09 0x0A 0x0B 0x0C 0x0D 0x20 0xA0; runs collapse to one 0x20; trimmed.
+//  - every other byte (incl. UTF-8 multibyte, zero-width/format chars) passes through.
+// Writes into dst (caller-sized); returns normalized length.
+fn is_ws(c:u8)i32 {
+    if(c==9){return 1;}
+    if(c==10){return 1;}
+    if(c==11){return 1;}
+    if(c==12){return 1;}
+    if(c==13){return 1;}
+    if(c==32){return 1;}
+    if(c==160){return 1;}
+    return 0;
+}
+
+fn fold_byte(c:u8)u8 {
+    if(c>=65 && c<=90){return (c+32) as u8;}
+    return c;
+}
+
+fn norm_into(dst:[]u8,s:[]u8)i32 {
+    let w:i32=0;
+    let i:i32=0;
+    let pending:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(is_ws(c)==1){
+            pending=1;
+            i=i+1;
+            continue;
+        }
+        if(pending==1 && w>0){
+            dst[w]=32;
+            w=w+1;
+            pending=0;
+        }
+        if(pending==1){pending=0;}
+        dst[w]=fold_byte(c);
+        w=w+1;
+        i=i+1;
+    }
+    return w;
+}
+
+// ---------- injection scan (LI-1 G6 class) ----------
+// Case-insensitive via normed input. One hit flags the whole page.
+fn inject_hit(n:[]u8)i32 {
+    if(has_sub(n,"ignore")==1){return 1;}
+    if(has_sub(n,"disregard")==1){return 1;}
+    if(has_sub(n,"override")==1){return 1;}
+    if(has_sub(n,"you must")==1){return 1;}
+    if(has_sub(n,"report that")==1){return 1;}
+    if(has_sub(n,"do not follow")==1){return 1;}
+    if(has_sub(n,"system prompt")==1){return 1;}
+    if(has_sub(n,"ai assistant")==1){return 1;}
+    return 0;
+}
+
+// ---------- file IO (same substrate as webg) ----------
+
+fn nio_unlink_child(root:i64,name:[]u8)void {
+    if(root<0 || nio_name_valid(name)!=1){return;}
+    let s:[]u8=nio_cstr(name);
+    if(s.len==0){return;}
+    _zag_raw_syscall(263,root,_zag_slice_ptr(s) as i64,0,0,0,0);
+    nio_free(s);
+    return;
+}
+
+fn read_file(dir:[]u8,name:[]u8,ok:*i32)[]u8 {
+    ok[0]=0;
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let buf:[]u8=nio_alloc(1048576);
+    if(buf.len==0){nio_close(fd); return "";}
+    let n:i64=nio_read_exact(fd,buf,1048575);
+    nio_close(fd);
+    if(n<0){nio_free(buf); return "";}
+    ok[0]=1;
+    let nn:i32=n as i32;
+    return buf[0..nn];
+}
+
+fn read_path(path:[]u8,ok:*i32)[]u8 {
+    let k:i32=path.len-1;
+    while(k>=0 && path[k]!=47){k=k-1;}
+    if(k<0){return read_file(".",path,ok);}
+    let dir:[]u8=path[0..k];
+    let name:[]u8=path[k+1..path.len];
+    if(k==0){dir="/";}
+    return read_file(dir,name,ok);
+}
+
+fn write_file(dir:[]u8,name:[]u8,data:[]u8)i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return 0;}
+    nio_unlink_child(root,name);
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return 0;}
+    let n:i64=nio_write_all(fd,data);
+    nio_close(fd);
+    if(n<0){return 0;}
+    return 1;
+}
+
+// ---------- table builders ----------
+
+fn find_byte(s:[]u8,from:i32,c:u8)i32 {
+    let i:i32=from;
+    while(i<s.len){
+        if(s[i]==c){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+
+// norm text and add to K table (dedupe by normed bytes)
+fn k_add(kar:[]u8,ktab:[]u8,kn:*i32,kpos:*i32,text:[]u8,nbuf:[]u8)void {
+    let nl:i32=norm_into(nbuf,text);
+    let i:i32=0;
+    while(i<kn[0]){
+        let eo:i32=g32(ktab,i*12);
+        let el:i32=g32(ktab,i*12+4);
+        if(el==nl && beq(kar[eo..eo+el],nbuf[0..nl])==1){return;}
+        i=i+1;
+    }
+    if(kn[0]>=MAXK){return;}
+    if(kpos[0]+nl>kar.len){return;}
+    let j:i32=0;
+    while(j<nl){
+        kar[kpos[0]+j]=nbuf[j];
+        j=j+1;
+    }
+    p32(ktab,kn[0]*12,kpos[0]);
+    p32(ktab,kn[0]*12+4,nl);
+    p32(ktab,kn[0]*12+8,kn[0]);
+    kn[0]=kn[0]+1;
+    kpos[0]=kpos[0]+nl;
+    return;
+}
+
+fn k_lookup(kar:[]u8,ktab:[]u8,kn:i32,n:[]u8)i32 {
+    let i:i32=0;
+    while(i<kn){
+        let eo:i32=g32(ktab,i*12);
+        let el:i32=g32(ktab,i*12+4);
+        if(el==n.len && beq(kar[eo..eo+el],n)==1){return g32(ktab,i*12+8);}
+        i=i+1;
+    }
+    return -1;
+}
+
+// store one corpus line: pageidx, role (0=T 1=F 2=S), normed+raw text
+fn line_add(rar:[]u8,nar:[]u8,ltab:[]u8,lnc:*i32,rpos:*i32,npos:*i32,pageidx:i32,role:i32,raw:[]u8,nbuf:[]u8)void {
+    if(lnc[0]>=MAXLINES){return;}
+    let nl:i32=norm_into(nbuf,raw);
+    if(rpos[0]+raw.len>rar.len){return;}
+    if(npos[0]+nl>nar.len){return;}
+    let j:i32=0;
+    while(j<raw.len){
+        rar[rpos[0]+j]=raw[j];
+        j=j+1;
+    }
+    j=0;
+    while(j<nl){
+        nar[npos[0]+j]=nbuf[j];
+        j=j+1;
+    }
+    let e:i32=lnc[0]*24;
+    p32(ltab,e,pageidx);
+    p32(ltab,e+4,role);
+    p32(ltab,e+8,npos[0]);
+    p32(ltab,e+12,nl);
+    p32(ltab,e+16,rpos[0]);
+    p32(ltab,e+20,raw.len);
+    lnc[0]=lnc[0]+1;
+    rpos[0]=rpos[0]+raw.len;
+    npos[0]=npos[0]+nl;
+    return;
+}
+
+// ---------- main ----------
+
+fn main()i32 {
+    let kpath:[]u8=_zag_arg(1);
+    let cpath:[]u8=_zag_arg(2);
+    let odir:[]u8=_zag_arg(3);
+
+    let kar:[]u8=nio_alloc(4194304);
+    let ktab:[]u8=nio_alloc(MAXK*12);
+    let kn:i32=0;
+    let kpos:i32=0;
+    let par:[]u8=nio_alloc(65536);
+    let ptab:[]u8=nio_alloc(MAXPAGES*12);
+    let pn:i32=0;
+    let ppos:i32=0;
+    let rar:[]u8=nio_alloc(4194304);
+    let nar:[]u8=nio_alloc(4194304);
+    let ltab:[]u8=nio_alloc(MAXLINES*24);
+    let lnc:i32=0;
+    let rpos:i32=0;
+    let npos:i32=0;
+    let nbuf:[]u8=nio_alloc(NBUFSZ);
+    let lbuf:[]u8=nio_alloc(32768);
+
+    // ---- load K: lines "K|<seq>|<raw text>" ----
+    let ok:i32=0;
+    let kb:[]u8=read_path(kpath,&ok);
+    if(ok==1){
+        let kln:i32=0;
+        let kls:i32=0;
+        let kll:i32=0;
+        while(next_line(kb,&kln,&kls,&kll)==1){
+            let ln:[]u8=kb[kls..kls+kll];
+            if(ln.len>0 && ln[ln.len-1]==13){ln=ln[0..ln.len-1];}
+            if(bstart(ln,"K|")==0){continue;}
+            let p1:i32=find_byte(ln,0,124);
+            if(p1<0){continue;}
+            let p2:i32=find_byte(ln,p1+1,124);
+            if(p2<0){continue;}
+            k_add(kar,ktab,&kn,&kpos,ln[p2+1..ln.len],nbuf);
+        }
+    }
+
+    // ---- parse corpus file ----
+    let cid:[]u8="";
+    let curpage:i32=-1;
+    let cb:[]u8=read_path(cpath,&ok);
+    if(ok==1){
+        let cln:i32=0;
+        let cls:i32=0;
+        let cll:i32=0;
+        while(next_line(cb,&cln,&cls,&cll)==1){
+            let ln2:[]u8=cb[cls..cls+cll];
+            if(ln2.len>0 && ln2[ln2.len-1]==13){ln2=ln2[0..ln2.len-1];}
+            if(ln2.len==0){continue;}
+            if(bstart(ln2,"CORPUS|")==1){
+                cid=ln2[7..ln2.len];
+                continue;
+            }
+            if(bstart(ln2,"PAGE|")==1){
+                let pa:i32=find_byte(ln2,5,124);
+                let pid:[]u8="";
+                let pflags:i32=0;
+                if(pa<0){
+                    pid=ln2[5..ln2.len];
+                }else{
+                    pid=ln2[5..pa];
+                    if(beq(ln2[pa+1..ln2.len],"FETCHFAIL")==1){pflags=2;}
+                }
+                if(pn<MAXPAGES && ppos+pid.len<=par.len){
+                    let cp:i32=0;
+                    while(cp<pid.len){
+                        par[ppos+cp]=pid[cp];
+                        cp=cp+1;
+                    }
+                    p32(ptab,pn*12,ppos);
+                    p32(ptab,pn*12+4,pid.len);
+                    p32(ptab,pn*12+8,pflags);
+                    ppos=ppos+pid.len;
+                    curpage=pn;
+                    pn=pn+1;
+                }else{
+                    curpage=-1;
+                }
+                continue;
+            }
+            if(curpage<0){continue;}
+            if(bstart(ln2,"T|")==1){
+                line_add(rar,nar,ltab,&lnc,&rpos,&npos,curpage,0,ln2[2..ln2.len],nbuf);
+                continue;
+            }
+            if(bstart(ln2,"F|")==1){
+                line_add(rar,nar,ltab,&lnc,&rpos,&npos,curpage,1,ln2[2..ln2.len],nbuf);
+                continue;
+            }
+            if(bstart(ln2,"S|")==1){
+                line_add(rar,nar,ltab,&lnc,&rpos,&npos,curpage,2,ln2[2..ln2.len],nbuf);
+                continue;
+            }
+        }
+    }
+
+    // ---- injection scan: one hit on any T/F/S line flags the whole page ----
+    let flagbuf:[]u8=nio_alloc(65536);
+    let flagpos:i32=0;
+    let nflags:i32=0;
+    let pi:i32=0;
+    while(pi<pn){
+        let fl:i32=g32(ptab,pi*12+8);
+        if((fl&2)==0){
+            let sli:i32=0;
+            let hit:i32=0;
+            while(sli<lnc){
+                if(g32(ltab,sli*24)==pi){
+                    let noff:i32=g32(ltab,sli*24+8);
+                    let nlen:i32=g32(ltab,sli*24+12);
+                    if(inject_hit(nar[noff..noff+nlen])==1){hit=1; break;}
+                }
+                sli=sli+1;
+            }
+            if(hit==1){
+                p32(ptab,pi*12+8,fl|1);
+                let poff:i32=g32(ptab,pi*12);
+                let plen:i32=g32(ptab,pi*12+4);
+                let lp:i32=0;
+                lp=cat(lbuf,lp,"FLAG|INJECTION|");
+                lp=cat(lbuf,lp,cid);
+                lp=cat(lbuf,lp,"|");
+                lp=cat(lbuf,lp,par[poff..poff+plen]);
+                flagpos=emit_line(flagbuf,flagpos,lbuf[0..lp]);
+                nflags=nflags+1;
+            }
+        }
+        pi=pi+1;
+    }
+
+    // ---- classify S-lines on usable pages ----
+    let acc:[]u8=nio_alloc(MAXLINES*4);
+    let accn:i32=0;
+    let judg:[]u8=nio_alloc(MAXLINES*4);
+    let lknow:[]u8=nio_alloc(MAXLINES*4);
+    let lgrp:[]u8=nio_alloc(MAXLINES*4);
+    // known-form table: known= counts DISTINCT normed forms (RT2 oracle
+    // convention; the frozen prereg does not pin occurrences-vs-forms).
+    let kgtab:[]u8=nio_alloc(MAXLINES*8);
+    let kgn:i32=0;
+    let zi:i32=0;
+    while(zi<MAXLINES){
+        p32(judg,zi*4,0);
+        p32(lknow,zi*4,-1);
+        p32(lgrp,zi*4,-1);
+        zi=zi+1;
+    }
+    let known_ct:i32=0;
+    let cli:i32=0;
+    while(cli<lnc){
+        let crole:i32=g32(ltab,cli*24+4);
+        if(crole!=2){
+            cli=cli+1;
+            continue;
+        }
+        let cpg:i32=g32(ltab,cli*24);
+        let cpfl:i32=g32(ptab,cpg*12+8);
+        if((cpfl&3)!=0){
+            p32(judg,cli*4,4);
+            cli=cli+1;
+            continue;
+        }
+        let cno:i32=g32(ltab,cli*24+8);
+        let cnl:i32=g32(ltab,cli*24+12);
+        let dup:i32=0;
+        let dai:i32=0;
+        while(dai<accn){
+            let doi:i32=g32(acc,dai*4);
+            if(g32(ltab,doi*24)==cpg){
+                let doo:i32=g32(ltab,doi*24+8);
+                let dol:i32=g32(ltab,doi*24+12);
+                if(dol==cnl && beq(nar[doo..doo+dol],nar[cno..cno+cnl])==1){dup=1; break;}
+            }
+            dai=dai+1;
+        }
+        if(dup==1){
+            p32(judg,cli*4,3);
+            cli=cli+1;
+            continue;
+        }
+        let isknown:i32=0;
+        let kseq:i32=-1;
+        if(LESION==1){
+            isknown=1;
+        }else{
+            if(LESION!=2){
+                kseq=k_lookup(kar,ktab,kn,nar[cno..cno+cnl]);
+                if(kseq>=0){isknown=1;}
+            }
+        }
+        if(isknown==1){
+            p32(judg,cli*4,1);
+            p32(lknow,cli*4,kseq);
+            let kfi:i32=0;
+            let kfound:i32=0;
+            while(kfi<kgn){
+                let kfo:i32=g32(kgtab,kfi*8);
+                let kfl:i32=g32(kgtab,kfi*8+4);
+                if(kfl==cnl && beq(nar[kfo..kfo+kfl],nar[cno..cno+cnl])==1){kfound=1; break;}
+                kfi=kfi+1;
+            }
+            if(kfound==0){
+                p32(kgtab,kgn*8,cno);
+                p32(kgtab,kgn*8+4,cnl);
+                kgn=kgn+1;
+                known_ct=known_ct+1;
+            }
+        }else{
+            p32(judg,cli*4,2);
+        }
+        p32(acc,accn*4,cli);
+        accn=accn+1;
+        cli=cli+1;
+    }
+
+    // ---- corroboration: group candidates by normalized bytes ----
+    let gtab:[]u8=nio_alloc(MAXLINES*16);
+    let gn:i32=0;
+    let gai:i32=0;
+    while(gai<accn){
+        let gsi:i32=g32(acc,gai*4);
+        if(g32(judg,gsi*4)!=2){
+            gai=gai+1;
+            continue;
+        }
+        let gpg:i32=g32(ltab,gsi*24);
+        let gno:i32=g32(ltab,gsi*24+8);
+        let gnl:i32=g32(ltab,gsi*24+12);
+        let ggi:i32=0;
+        let gfound:i32=-1;
+        while(ggi<gn){
+            let ggo:i32=g32(gtab,ggi*16);
+            let ggl:i32=g32(gtab,ggi*16+4);
+            if(ggl==gnl && beq(nar[ggo..ggo+ggl],nar[gno..gno+gnl])==1){gfound=ggi; break;}
+            ggi=ggi+1;
+        }
+        if(gfound>=0){
+            let gmm:i32=g32(gtab,gfound*16+8);
+            p32(gtab,gfound*16+8,gmm|(1<<gpg));
+            p32(lgrp,gsi*4,gfound);
+        }else{
+            p32(gtab,gn*16,gno);
+            p32(gtab,gn*16+4,gnl);
+            p32(gtab,gn*16+8,1<<gpg);
+            p32(gtab,gn*16+12,gsi);
+            p32(lgrp,gsi*4,gn);
+            gn=gn+1;
+        }
+        gai=gai+1;
+    }
+
+    // ---- per-group decision: INSTALL (>=2 pages) or WITHHOLD (single source) ----
+    let instbuf:[]u8=nio_alloc(1048576);
+    let instpos:i32=0;
+    let withbuf:[]u8=nio_alloc(1048576);
+    let withpos:i32=0;
+    let gkid:[]u8=nio_alloc(MAXLINES*4);
+    let gwidd:[]u8=nio_alloc(MAXLINES*4);
+    let ninst:i32=0;
+    let nwith:i32=0;
+    let dgi:i32=0;
+    while(dgi<gn){
+        let dgm:i32=g32(gtab,dgi*16+8);
+        let dgo:i32=g32(gtab,dgi*16);
+        let dgl:i32=g32(gtab,dgi*16+4);
+        let dlp:i32=0;
+        if(popcnt(dgm)>=2){
+            ninst=ninst+1;
+            p32(gkid,dgi*4,ninst);
+            p32(gwidd,dgi*4,0);
+            dlp=cat(lbuf,dlp,"K|");
+            dlp=cat(lbuf,dlp,cid);
+            dlp=cat(lbuf,dlp,"-N");
+            dlp=cat(lbuf,dlp,i64s(ninst as i64));
+            dlp=cat(lbuf,dlp,"|");
+            dlp=cat(lbuf,dlp,cid);
+            dlp=cat(lbuf,dlp,"|");
+            dlp=cat(lbuf,dlp,nar[dgo..dgo+dgl]);
+            dlp=cat(lbuf,dlp,"|");
+            let db:i32=0;
+            let dfp:i32=1;
+            while(db<MAXPAGES){
+                if((dgm&(1<<db))!=0){
+                    if(dfp==0){dlp=cat(lbuf,dlp,",");}
+                    let dqo:i32=g32(ptab,db*12);
+                    let dql:i32=g32(ptab,db*12+4);
+                    dlp=cat(lbuf,dlp,par[dqo..dqo+dql]);
+                    dfp=0;
+                }
+                db=db+1;
+            }
+            instpos=emit_line(instbuf,instpos,lbuf[0..dlp]);
+        }else{
+            nwith=nwith+1;
+            p32(gkid,dgi*4,0);
+            p32(gwidd,dgi*4,nwith);
+            // single page holding this candidate: first set bit
+            let db2:i32=0;
+            let spid:[]u8="";
+            while(db2<MAXPAGES){
+                if((dgm&(1<<db2))!=0){
+                    let dqo2:i32=g32(ptab,db2*12);
+                    let dql2:i32=g32(ptab,db2*12+4);
+                    spid=par[dqo2..dqo2+dql2];
+                    break;
+                }
+                db2=db2+1;
+            }
+            dlp=cat(lbuf,dlp,"W|");
+            dlp=cat(lbuf,dlp,cid);
+            dlp=cat(lbuf,dlp,"-W");
+            dlp=cat(lbuf,dlp,i64s(nwith as i64));
+            dlp=cat(lbuf,dlp,"|");
+            dlp=cat(lbuf,dlp,cid);
+            dlp=cat(lbuf,dlp,"|SINGLE_SOURCE|");
+            dlp=cat(lbuf,dlp,spid);
+            dlp=cat(lbuf,dlp,"|");
+            dlp=cat(lbuf,dlp,nar[dgo..dgo+dgl]);
+            withpos=emit_line(withbuf,withpos,lbuf[0..dlp]);
+        }
+        dgi=dgi+1;
+    }
+
+    // ---- audit: one line per S-line occurrence, in file order ----
+    let auditbuf:[]u8=nio_alloc(2097152);
+    let auditpos:i32=0;
+    let ali:i32=0;
+    while(ali<lnc){
+        if(g32(ltab,ali*24+4)!=2){
+            ali=ali+1;
+            continue;
+        }
+        let apg:i32=g32(ltab,ali*24);
+        let apo:i32=g32(ptab,apg*12);
+        let apl:i32=g32(ptab,apg*12+4);
+        let aj:i32=g32(judg,ali*4);
+        let alp:i32=0;
+        alp=cat(lbuf,alp,"AUD|");
+        alp=cat(lbuf,alp,cid);
+        alp=cat(lbuf,alp,"|");
+        alp=cat(lbuf,alp,par[apo..apo+apl]);
+        alp=cat(lbuf,alp,"|");
+        alp=cat(lbuf,alp,i64s(ali as i64));
+        alp=cat(lbuf,alp,"|");
+        if(aj==1){
+            alp=cat(lbuf,alp,"KNOWN|KSEQ=");
+            alp=cat(lbuf,alp,i64s(g32(lknow,ali*4) as i64));
+        }else{
+            if(aj==2){
+                let agr:i32=g32(lgrp,ali*4);
+                if(agr>=0 && g32(gkid,agr*4)>0){
+                    alp=cat(lbuf,alp,"INSTALLED|");
+                    alp=cat(lbuf,alp,cid);
+                    alp=cat(lbuf,alp,"-N");
+                    alp=cat(lbuf,alp,i64s(g32(gkid,agr*4) as i64));
+                }else{
+                    if(agr>=0){
+                        alp=cat(lbuf,alp,"WITHHELD|");
+                        alp=cat(lbuf,alp,cid);
+                        alp=cat(lbuf,alp,"-W");
+                        alp=cat(lbuf,alp,i64s(g32(gwidd,agr*4) as i64));
+                        alp=cat(lbuf,alp,":SINGLE_SOURCE");
+                    }else{
+                        alp=cat(lbuf,alp,"CANDIDATE|ERROR-NO-GROUP");
+                    }
+                }
+            }else{
+                if(aj==3){
+                    alp=cat(lbuf,alp,"DUP|SAME-PAGE");
+                }else{
+                    if((g32(ptab,apg*12+8)&1)!=0){
+                        alp=cat(lbuf,alp,"EXCLUDED|INJECTION");
+                    }else{
+                        alp=cat(lbuf,alp,"EXCLUDED|FETCHFAIL");
+                    }
+                }
+            }
+        }
+        auditpos=emit_line(auditbuf,auditpos,lbuf[0..alp]);
+        ali=ali+1;
+    }
+    // page-level summaries
+    let qpi:i32=0;
+    while(qpi<pn){
+        let qpo:i32=g32(ptab,qpi*12);
+        let qpl:i32=g32(ptab,qpi*12+4);
+        let qfl:i32=g32(ptab,qpi*12+8);
+        let qtot:i32=0;
+        let qacc:i32=0;
+        let qli:i32=0;
+        while(qli<lnc){
+            if(g32(ltab,qli*24)==qpi && g32(ltab,qli*24+4)==2){
+                qtot=qtot+1;
+                let qj:i32=g32(judg,qli*4);
+                if(qj==1 || qj==2){qacc=qacc+1;}
+            }
+            qli=qli+1;
+        }
+        let qlp:i32=0;
+        qlp=cat(lbuf,qlp,"AUDPAGE|");
+        qlp=cat(lbuf,qlp,cid);
+        qlp=cat(lbuf,qlp,"|");
+        qlp=cat(lbuf,qlp,par[qpo..qpo+qpl]);
+        qlp=cat(lbuf,qlp,"|");
+        if((qfl&1)!=0){
+            qlp=cat(lbuf,qlp,"INJECTED");
+        }else{
+            if((qfl&2)!=0){
+                qlp=cat(lbuf,qlp,"FETCHFAIL");
+            }else{
+                qlp=cat(lbuf,qlp,"OK");
+            }
+        }
+        qlp=cat(lbuf,qlp,"|s_total=");
+        qlp=cat(lbuf,qlp,i64s(qtot as i64));
+        qlp=cat(lbuf,qlp,"|s_accepted=");
+        qlp=cat(lbuf,qlp,i64s(qacc as i64));
+        auditpos=emit_line(auditbuf,auditpos,lbuf[0..qlp]);
+        qpi=qpi+1;
+    }
+
+    // ---- corpus verdict (frozen, exactly one) ----
+    let checkable:i32=accn;
+    let verdict:[]u8="EMPTY";
+    if(checkable==0){
+        verdict="INFRA-FAIL";
+    }else{
+        if(ninst>0){
+            verdict="NOVEL";
+        }else{
+            if(nwith>0){verdict="WITHHELD";}
+        }
+    }
+
+    // ---- report ----
+    let repbuf:[]u8=nio_alloc(65536);
+    let reppos:i32=0;
+    if(flagpos>0){
+        let fli:i32=0;
+        while(fli<flagpos){
+            repbuf[reppos]=flagbuf[fli];
+            fli=fli+1;
+            reppos=reppos+1;
+        }
+    }
+    let rlp:i32=0;
+    rlp=cat(lbuf,rlp,"REPORT|");
+    rlp=cat(lbuf,rlp,cid);
+    rlp=cat(lbuf,rlp,"|");
+    rlp=cat(lbuf,rlp,verdict);
+    rlp=cat(lbuf,rlp,"|known=");
+    rlp=cat(lbuf,rlp,i64s(known_ct as i64));
+    rlp=cat(lbuf,rlp,"|novel_installed=");
+    rlp=cat(lbuf,rlp,i64s(ninst as i64));
+    rlp=cat(lbuf,rlp,"|novel_withheld=");
+    rlp=cat(lbuf,rlp,i64s(nwith as i64));
+    if(beq(verdict,"NOVEL")==1){
+        rlp=cat(lbuf,rlp,"|installed=");
+        let ii:i32=1;
+        while(ii<=ninst){
+            if(ii>1){rlp=cat(lbuf,rlp,",");}
+            rlp=cat(lbuf,rlp,cid);
+            rlp=cat(lbuf,rlp,"-N");
+            rlp=cat(lbuf,rlp,i64s(ii as i64));
+            ii=ii+1;
+        }
+    }
+    if(beq(verdict,"WITHHELD")==1){
+        rlp=cat(lbuf,rlp,"|withheld=");
+        let wi:i32=1;
+        while(wi<=nwith){
+            if(wi>1){rlp=cat(lbuf,rlp,",");}
+            rlp=cat(lbuf,rlp,cid);
+            rlp=cat(lbuf,rlp,"-W");
+            rlp=cat(lbuf,rlp,i64s(wi as i64));
+            rlp=cat(lbuf,rlp,":SINGLE_SOURCE");
+            wi=wi+1;
+        }
+    }
+    if(beq(verdict,"INFRA-FAIL")==1){
+        rlp=cat(lbuf,rlp,"|reason=zero-checkable-sentences");
+    }
+    reppos=emit_line(repbuf,reppos,lbuf[0..rlp]);
+
+    // ---- write output files ----
+    write_file(odir,"report.txt",repbuf[0..reppos]);
+    write_file(odir,"audit.txt",auditbuf[0..auditpos]);
+    write_file(odir,"installs.txt",instbuf[0..instpos]);
+    write_file(odir,"withholds.txt",withbuf[0..withpos]);
+
+    // ---- stdout mirrors the report ----
+    _zag_print(repbuf[0..reppos]);
+    return 0;
+}
