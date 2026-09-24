@@ -1,0 +1,1111 @@
+// render_c.zag — Contender C: bounded-feedback AR, grok's H3 (ATTACKS.md 9/11).
+//
+// Three pieces (Attack 11):
+//   Piece 1 — PAR motif path (default, always): s[t] = F(plan, t), pure.
+//     Verbatim PAR synthesis (voice_q16/bed_q16); zero carried state.
+//   Piece 2 — H3 region-scoped servo (THE piece nobody built): per region,
+//     a continuous output-conditioned gain loop with PLAN-DERIVED targets
+//     T = K_PLAN * plan_rms(block) (HYBRID_SPEC.md section 5; never frozen
+//     literals) and BOUNDARY STATE RESET (gain re-seeded to plan identity at
+//     every region start; regions are plan-defined: rest gaps >= 0.5 s in
+//     event activity). Continuous feedback ONLY intra-region; no
+//     cross-region carry; no plan mutation; the servo nudges ONE execution
+//     parameter (uniform block gain), never event existence/timing/pitch.
+//     Update (contractive, exact factor 1/2 outside the deadband):
+//       g_{k+1} = (g_k + g_k * T / m_k) / 2,  g in [0.5, 2.0]
+//     where m_k is the measured RMS of the block just rendered with g_k
+//     (uniform post-render scalar, so m_k = g_k * S_k exactly and the fixed
+//     point is g* = T/S_k). A 5% deadband keeps it silent on the happy path
+//     (residual regulator, not a second composer); a fault veto HOLDS state
+//     when the block is implausible (peak > 8 FS or RMS outside [0.35x,2.5x]
+//     of plan target) so corruption is never tracked as level. Silence
+//     (m==0) holds state — bounded by the region length, then reset.
+//     This replaces the old AR's g -> clamp(T_frozen/(g*S)): a neutrally
+//     stable involution (f(f(g)) = g, f' = -1) with rail pins and sustained
+//     2-cycles constructible from plan text (Attack 4). The v2 hybrid
+//     DELETED the servo; this build repairs it per H3 instead.
+//   Piece 3 — RESPOND as a discrete plan-level octave latch (Attack 11):
+//     one-shot, gated (single-voice window, stationarity, 40-4000 Hz),
+//     corrects OCTAVE errors only via the plan's own nominal * 2^k.
+//     The latch NEVER mutates the plan: the corrected execution pitch is a
+//     renderer-local annotation in the ovr arena (0 = render nominal).
+// Pure Zag, pinned znc, zero RNG in the render path.
+const SR:i64 = 44100;
+const NSAMP:i64 = 1323000;
+const NEVMAX:i64 = 64;
+const EVF:i64 = 12;
+const EVSZ:i64 = 96;
+// hybrid block geometry + exception-path constants
+const BLK:i64 = 1024;
+const K_PLAN:i64 = 49585; // analytic->measured power-map calibration, Q16.
+// Measured 2026-09-24 on this build against fixture plan_v1.txt:
+// median(measured_rms / analytic_rms) = 0.7566 over 1292 blocks;
+// spread min/med 0.57, max/med 1.43, all inside the [0.35, 2.5] fault band.
+// Re-calibration procedure: rebuild, run `cal`, take the median ratio.
+const SILENCE_FLOOR:i64 = 2000; // plan-quiet blocks skip the rms band
+const PEAK_IMPOSS:i64 = 524288000; // 8.0 FS in Q16: no plan content reaches it
+const ZCR_HALF_TOL:i64 = 12; // window-half agreement, percent
+// H3 servo bounds (Attack 9/11)
+const G_MIN:i64 = 32768; // 0.5, Q16
+const G_MAX:i64 = 131072; // 2.0, Q16
+const DEADBAND_PC:i64 = 10; // servo silent while |T-m| < 10% of max(T,m):
+    // the analytic plan_rms carries ~+-9% per-block model error (central
+    // 80% on the fixture, 2026-09-24: p10 0.92 / p90 1.09 of m/T) from
+    // coherent voice cross-terms the analytic cannot know. The servo is a
+    // residual regulator: it acts only on deviations the model cannot
+    // explain, never hunting inside its own error floor.
+const REGION_GAP:i64 = 22050; // 0.5 s of event-silence starts a new region
+const NREGMAX:i64 = 64;
+
+// ---------- io ----------
+fn cstr(s:[]u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let p:*u8 = _zag_malloc((s.len + 1) as i64) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..(s.len + 1)];
+    let i:i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn w_all(fd:i64, b:[]u8) i64 {
+    let at:i64 = 0;
+    let blen:i64 = b.len as i64;
+    while (at < blen) {
+        let n:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(b) as i64) + at, blen - at, 0, 0, 0);
+        if (n == -4) { continue; }
+        if (n <= 0) { return -7407; }
+        at = at + n;
+    }
+    return at;
+}
+fn file_read(path:[]u8, cap:i64) []u8 {
+    let cs:[]u8 = cstr(path);
+    if (cs.len == 0) { return ""; }
+    let fd:i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 0, 0, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return ""; }
+    let p:*u8 = _zag_malloc(cap) as *u8;
+    if (p == null as *u8) { _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0); return ""; }
+    let at:i64 = 0;
+    while (at < cap) {
+        let n:i64 = _zag_raw_syscall(0, fd, (p as i64) + at, cap - at, 0, 0, 0);
+        if (n == -4) { continue; }
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    let b:[]u8 = p[0..at];
+    return b;
+}
+fn file_write(path:[]u8, b:[]u8) i64 {
+    let cs:[]u8 = cstr(path);
+    if (cs.len == 0) { return -3; }
+    let fd:i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 438, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return -4; }
+    let wr:i64 = w_all(fd, b);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (wr < 0) { return -5; }
+    return 0;
+}
+fn pout(s:[]u8) void {
+    _zag_raw_syscall(1, 1, (_zag_slice_ptr(s) as i64), (s.len as i64), 0, 0, 0);
+}
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    if (s.len > 0) {
+        if (s[s.len - 1] == 10) { return s[0..s.len - 1]; }
+    }
+    return s;
+}
+
+// ---------- 64-bit arena slots (byte offset) ----------
+fn nio_alloc(n:i32) []u8 {
+    if (n < 1 || n > 33554432) { return ""; }
+    let p:*u8 = _zag_malloc(n) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..n];
+    let i:i32 = 0;
+    while (i < n) { b[i] = 0; i = i + 1; }
+    return b;
+}
+fn nio_free(b:[]u8) void { if (b.len > 0) { _zag_free(_zag_slice_ptr(b)); } }
+fn put64(b:[]u8, i:i64, v:i64) void {
+    b[i] = (v & 255) as u8;
+    b[i+1] = ((v >> 8) & 255) as u8;
+    b[i+2] = ((v >> 16) & 255) as u8;
+    b[i+3] = ((v >> 24) & 255) as u8;
+    b[i+4] = ((v >> 32) & 255) as u8;
+    b[i+5] = ((v >> 40) & 255) as u8;
+    b[i+6] = ((v >> 48) & 255) as u8;
+    b[i+7] = ((v >> 56) & 255) as u8;
+}
+fn get64(b:[]u8, i:i64) i64 {
+    return (b[i] as i64) | ((b[i+1] as i64) << 8) | ((b[i+2] as i64) << 16) | ((b[i+3] as i64) << 24) | ((b[i+4] as i64) << 32) | ((b[i+5] as i64) << 40) | ((b[i+6] as i64) << 48) | ((b[i+7] as i64) << 56);
+}
+fn evg(ev:[]u8, e:i64, f:i64) i64 { return get64(ev, e * EVSZ + f * 8); }
+fn evs(ev:[]u8, e:i64, f:i64, v:i64) void { put64(ev, e * EVSZ + f * 8, v); }
+
+// ---------- sine: quadrant polynomial (f64), 1024-entry Q15 LUT ----------
+fn fsin_q(x:f64) f64 {
+    let t:f64 = x;
+    let s:f64 = 1.0;
+    if (t >= 3.141592653589793) { t = t - 3.141592653589793; s = -1.0; }
+    if (t >= 1.5707963267948966) { t = 3.141592653589793 - t; }
+    let x2:f64 = t * t;
+    let x3:f64 = x2 * t;
+    let x5:f64 = x3 * x2;
+    let x7:f64 = x5 * x2;
+    let x9:f64 = x7 * x2;
+    return s * (t - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0);
+}
+fn lut_init(lut:[]u8) void {
+    let i:i64 = 0;
+    while (i < 1024) {
+        let s:f64 = fsin_q(6.283185307179586 * (i as f64) / 1024.0);
+        put64(lut, i * 8, (s * 32767.0) as i64);
+        i = i + 1;
+    }
+}
+fn lsin(lut:[]u8, idx:i64) i64 { return get64(lut, (idx & 1023) * 8); }
+
+// ---------- ascii float ----------
+fn atof(s:[]u8, st:i64, en:i64) f64 {
+    let neg:f64 = 1.0;
+    let v:f64 = 0.0;
+    let i:i64 = st;
+    if (i < en && s[i] == 45) { neg = -1.0; i = i + 1; }
+    while (i < en && s[i] >= 48 && s[i] <= 57) { v = v * 10.0 + ((s[i] - 48) as f64); i = i + 1; }
+    if (i < en && s[i] == 46) {
+        i = i + 1;
+        let div:f64 = 10.0;
+        while (i < en && s[i] >= 48 && s[i] <= 57) { v = v + ((s[i] - 48) as f64) / div; div = div * 10.0; i = i + 1; }
+    }
+    return neg * v;
+}
+fn pow2(x:f64) f64 {
+    // 2^x for x in [-1,1] via taylor on e^(x ln2)
+    let y:f64 = x * 0.6931471805599453;
+    let t:f64 = 1.0;
+    let term:f64 = 1.0;
+    let k:i64 = 1;
+    while (k <= 12) {
+        term = term * y / (k as f64);
+        t = t + term;
+        k = k + 1;
+    }
+    return t;
+}
+
+// ---------- plan parse ----------
+// event fields: 0 t0 1 dur 2 f0q16 3 ampq16 4 tim 5 glideq16
+//               6 vibinc_q32 7 vibbeta_q32 8 kind 9 rspw0 10 rspw1 11 nomq16
+fn parse_plan(path:[]u8, ev:[]u8, bed:[]u8) i64 {
+    let raw:[]u8 = file_read(path, 65536);
+    if (raw.len == 0) { return -1; }
+    let nev:i64 = 0;
+    let pos:i64 = 0;
+    let n:i64 = raw.len as i64;
+    while (pos < n) {
+        let le:i64 = pos;
+        while (le < n && raw[le] != 10) { le = le + 1; }
+        if (le > pos && raw[pos] != 35) {
+            // tokenize: first token
+            let p:i64 = pos;
+            while (p < le && raw[p] == 32) { p = p + 1; }
+            let t0s:i64 = p;
+            while (p < le && raw[p] != 32) { p = p + 1; }
+            let t0e:i64 = p;
+            // collect up to 9 numeric fields
+            let f:[]u8 = nio_alloc(72);
+            let nf:i64 = 0;
+            while (p < le && nf < 9) {
+                while (p < le && raw[p] == 32) { p = p + 1; }
+                if (p >= le) { break; }
+                let fs:i64 = p;
+                while (p < le && raw[p] != 32) { p = p + 1; }
+                put64(f, nf * 8, ((atof(raw, fs, p) * 65536.0) as i64));
+                nf = nf + 1;
+            }
+            if (t0e - t0s == 3 && raw[t0s] == 66 && raw[t0s+1] == 69 && raw[t0s+2] == 68) {
+                // BED t0 t1 freq amp
+                if (nf >= 4) {
+                    put64(bed, 0, (get64(f, 0) * SR) / 65536);
+                    put64(bed, 8, (get64(f, 8) * SR) / 65536);
+                    put64(bed, 16, get64(f, 16));
+                    put64(bed, 24, get64(f, 24) / 1000);
+                }
+            }
+            if (t0e - t0s == 5 && raw[t0s] == 69 && raw[t0s+1] == 86 && raw[t0s+2] == 69 && raw[t0s+3] == 78 && raw[t0s+4] == 84) {
+                // EVENT t0 dur freq amp timbre glide vibhz vibc
+                if (nf >= 8 && nev < NEVMAX) {
+                    evs(ev, nev, 0, (get64(f, 0) * SR) / 65536);
+                    evs(ev, nev, 1, (get64(f, 8) * SR) / 65536);
+                    evs(ev, nev, 2, get64(f, 16));
+                    evs(ev, nev, 3, get64(f, 24) / 1000);
+                    evs(ev, nev, 4, get64(f, 32) / 65536);
+                    evs(ev, nev, 5, get64(f, 40));
+                    let vibhz:f64 = (get64(f, 48) as f64) / 65536.0;
+                    let vibc:f64 = (get64(f, 56) as f64) / 65536.0;
+                    let f0:f64 = (get64(f, 16) as f64) / 65536.0;
+                    let df:f64 = f0 * (pow2(vibc / 1200.0) - 1.0);
+                    let beta:f64 = 0.0;
+                    if (vibhz > 0.001) { beta = df / vibhz; }
+                    evs(ev, nev, 6, (vibhz * 4294967296.0 / (SR as f64)) as i64);
+                    evs(ev, nev, 7, (beta * 4294967296.0) as i64);
+                    evs(ev, nev, 8, 0);
+                    nev = nev + 1;
+                }
+            }
+            if (t0e - t0s == 7 && raw[t0s] == 82 && raw[t0s+1] == 69 && raw[t0s+2] == 83 && raw[t0s+3] == 80 && raw[t0s+4] == 79 && raw[t0s+5] == 78 && raw[t0s+6] == 68) {
+                // RESPOND t0 dur w0 w1 amp timbre nominal
+                if (nf >= 7 && nev < NEVMAX) {
+                    evs(ev, nev, 0, (get64(f, 0) * SR) / 65536);
+                    evs(ev, nev, 1, (get64(f, 8) * SR) / 65536);
+                    evs(ev, nev, 2, get64(f, 48));
+                    evs(ev, nev, 3, get64(f, 32) / 1000);
+                    evs(ev, nev, 4, get64(f, 40) / 65536);
+                    evs(ev, nev, 5, 0);
+                    evs(ev, nev, 6, 0);
+                    evs(ev, nev, 7, 0);
+                    evs(ev, nev, 8, 1);
+                    evs(ev, nev, 9, (get64(f, 16) * SR) / 65536);
+                    evs(ev, nev, 10, (get64(f, 24) * SR) / 65536);
+                    evs(ev, nev, 11, get64(f, 48));
+                    nev = nev + 1;
+                }
+            }
+            nio_free(f);
+        }
+        pos = le + 1;
+    }
+    return nev;
+}
+
+// ---------- pure voice: sample t of event e (zero carried state) ----------
+fn voice_q16(ev:[]u8, lut:[]u8, e:i64, t:i64, f0ov:i64) i64 {
+    let t0:i64 = evg(ev, e, 0);
+    let dur:i64 = evg(ev, e, 1);
+    let tr:i64 = t - t0;
+    if (tr < 0 || tr >= dur || dur <= 0) { return 0; }
+    // f0ov: renderer-local execution pitch override (RESPOND octave latch).
+    // The plan arena itself is NEVER mutated: the override lives in a
+    // separate arena and only selects the execution pitch. Event existence,
+    // timing, and the stored nominal pitch are untouched.
+    let f0q:i64 = evg(ev, e, 2);
+    if (f0ov != 0) { f0q = f0ov; }
+    let ampq:i64 = evg(ev, e, 3);
+    let tim:i64 = evg(ev, e, 4);
+    let glideq:i64 = evg(ev, e, 5);
+    let vinc:i64 = evg(ev, e, 6);
+    let vbeta:i64 = evg(ev, e, 7);
+    if (tim < 1) { tim = 1; }
+    if (tim > 13) { tim = 13; }
+    // envelope: 40 ms attack / 150 ms release raised cosine, capped at dur/2
+    let atk:i64 = 1764;
+    if (dur / 2 < atk) { atk = dur / 2; }
+    let rel:i64 = 6615;
+    if (dur / 2 < rel) { rel = dur / 2; }
+    let envq:i64 = 65536;
+    if (tr < atk && atk > 0) {
+        let x:i64 = (tr * 1024) / atk;
+        envq = 32768 - lsin(lut, 256 + x / 2);
+    } else {
+        let rem:i64 = dur - tr;
+        if (rem < rel && rel > 0) {
+            let x:i64 = (rem * 1024) / rel;
+            envq = 32768 + lsin(lut, 256 + x / 2);
+        }
+    }
+    // phase in cycles Q32: f0*tr/SR + glide*tr^2/(2*dur*SR), pure fn of t
+    let ph:i64 = ((f0q * tr) / SR) * 65536;
+    if (glideq != 0) {
+        let g1:i64 = (glideq * tr) / dur;
+        ph = ph + ((g1 * tr) / (2 * SR)) * 65536;
+    }
+    // vibrato PM: beta * sin(2*pi*fv*tr), pure fn of t
+    if (vbeta != 0 && vinc != 0) {
+        let vph:i64 = vinc * tr;
+        vph = vph - (vph / 4294967296) * 4294967296;
+        let vs:i64 = lsin(lut, (vph / 4194304) & 1023);
+        ph = ph + (vbeta * vs) / 32768;
+    }
+    // wrap to [0, 2^32)
+    ph = ph - (ph / 4294967296) * 4294967296;
+    if (ph < 0) { ph = ph + 4294967296; }
+    let acc:i64 = 0;
+    let hsum:i64 = 0;
+    let h:i64 = 1;
+    while (h <= tim) {
+        let idx:i64 = ((ph * h) / 4194304) & 1023;
+        acc = acc + (65536 / h) * lsin(lut, idx);
+        hsum = hsum + 65536 / h;
+        h = h + 1;
+    }
+    // normalize the harmonic stack: voice peak ~= amp (not amp * sum(1/h))
+    acc = (acc * 65536) / hsum;
+    let v:i64 = (acc * envq) / 2147483648;
+    v = (v * ampq) / 65536;
+    return v;
+}
+fn bed_q16(bed:[]u8, lut:[]u8, t:i64) i64 {
+    let b0:i64 = get64(bed, 0);
+    let b1:i64 = get64(bed, 8);
+    if (t < b0 || t >= b1) { return 0; }
+    let fq:i64 = get64(bed, 16);
+    let ampq:i64 = get64(bed, 24);
+    // 25 ms raised-cosine edge fades
+    let ed:i64 = 1102;
+    let envq:i64 = 65536;
+    let tin:i64 = t - b0;
+    if (tin < ed) {
+        let x:i64 = (tin * 1024) / ed;
+        envq = 32768 - lsin(lut, 256 + x / 2);
+    } else {
+        let tout:i64 = b1 - t;
+        if (tout < ed) {
+            let x:i64 = (tout * 1024) / ed;
+            envq = 32768 + lsin(lut, 256 + x / 2);
+        }
+    }
+    let ph:i64 = ((fq * t) / SR) * 65536;
+    ph = ph - (ph / 4294967296) * 4294967296;
+    if (ph < 0) { ph = ph + 4294967296; }
+    let acc:i64 = 0;
+    let hsum:i64 = 0;
+    let h:i64 = 1;
+    while (h <= 3) {
+        let idx:i64 = ((ph * h) / 4194304) & 1023;
+        acc = acc + (65536 / h) * lsin(lut, idx);
+        hsum = hsum + 65536 / h;
+        h = h + 1;
+    }
+    acc = (acc * 65536) / hsum;
+    let v:i64 = (acc * envq) / 2147483648;
+    v = (v * ampq) / 65536;
+    return v;
+}
+
+// ---------- hybrid pieces 2+3: analysis, plan target, block render, latch ----------
+
+fn fsqrt(x:f64) f64 {
+    if (x <= 0.0) { return 0.0; }
+    let g:f64 = x;
+    if (g < 1.0) { g = 1.0; }
+    let i:i64 = 0;
+    while (i < 40) {
+        g = (g + x / g) / 2.0;
+        i = i + 1;
+    }
+    return g;
+}
+
+fn isqrt(x:i64) i64 {
+    if (x <= 0) { return 0; }
+    let g:i64 = x;
+    if (g > 4294967296) { g = 4294967296; }
+    let i:i64 = 0;
+    while (i < 60) {
+        let ng:i64 = (g + x / g) / 2;
+        if (ng >= g) { break; }
+        g = ng;
+        i = i + 1;
+    }
+    return g;
+}
+
+// analyze mix[lo:hi): ana[0]=zcr Q6M, ana[8]=rms Q16 FS, ana[16]=peak Q16
+fn analyze(mix:[]u8, lo:i64, hi:i64, ana:[]u8) void {
+    put64(ana, 0, 0);
+    put64(ana, 8, 0);
+    put64(ana, 16, 0);
+    let n:i64 = hi - lo;
+    if (n <= 1) { return; }
+    let zc:i64 = 0;
+    let prev:i64 = get64(mix, lo * 8);
+    let sumsq:f64 = 0.0;
+    let peak:i64 = 0;
+    let t:i64 = lo;
+    while (t < hi) {
+        let v:i64 = get64(mix, t * 8);
+        if (t > lo) {
+            if ((prev < 0 && v >= 0) || (prev >= 0 && v < 0)) { zc = zc + 1; }
+        }
+        prev = v;
+        let vf:f64 = (v as f64) / 65536.0;
+        sumsq = sumsq + vf * vf;
+        let av:i64 = v;
+        if (av < 0) { av = 0 - av; }
+        if (av > peak) { peak = av; }
+        t = t + 1;
+    }
+    put64(ana, 0, (zc * 1000000) / n);
+    let mean:f64 = sumsq / (n as f64);
+    put64(ana, 8, (fsqrt(mean) * 65536.0) as i64);
+    put64(ana, 16, peak);
+}
+
+// voice envelope at note-relative time tr (Q16), replicating voice_q16's
+// raised-cosine attack/release exactly (same LUT formula).
+fn venv_q16(lut:[]u8, tr:i64, dur:i64) i64 {
+    let atk:i64 = 1764;
+    if (dur / 2 < atk) { atk = dur / 2; }
+    let rel:i64 = 6615;
+    if (dur / 2 < rel) { rel = dur / 2; }
+    if (tr < atk && atk > 0) {
+        let x:i64 = (tr * 1024) / atk;
+        return 32768 - lsin(lut, 256 + x / 2);
+    }
+    let rem:i64 = dur - tr;
+    if (rem < rel && rel > 0) {
+        let x:i64 = (rem * 1024) / rel;
+        return 32768 + lsin(lut, 256 + x / 2);
+    }
+    return 65536;
+}
+
+// bed edge-fade envelope (Q16) at sample mid, replicating bed_q16's
+// 25 ms raised-cosine fades exactly (same LUT formula).
+fn bedenv_q16(lut:[]u8, tin:i64, tout:i64) i64 {
+    let ed:i64 = 1102;
+    if (tin < ed) {
+        let x:i64 = (tin * 1024) / ed;
+        return 32768 - lsin(lut, 256 + x / 2);
+    }
+    if (tout < ed) {
+        let x:i64 = (tout * 1024) / ed;
+        return 32768 + lsin(lut, 256 + x / 2);
+    }
+    return 65536;
+}
+// analytic plan POWER (Q32) at sample mid. Voice rms ~= amp*crest(timbre)*
+// envelope(tr), crest(tim) ~= 0.51+0.197/tim (Q16: 33423+12911/tim).
+// Bed: 3-harmonic stack, crest 0.5718, with exact edge-fade envelope.
+// Saturating: a fault-band target.
+fn plan_p2(ev:[]u8, lut:[]u8, bed:[]u8, nev:i64, mid:i64) i64 {
+    let p2:i64 = 0;
+    let e:i64 = 0;
+    while (e < nev) {
+        let t0:i64 = evg(ev, e, 0);
+        let dur:i64 = evg(ev, e, 1);
+        if (t0 <= mid && mid < t0 + dur) {
+            let ampq:i64 = evg(ev, e, 3);
+            let tim:i64 = evg(ev, e, 4);
+            if (tim < 1) { tim = 1; }
+            if (tim > 13) { tim = 13; }
+            let cr:i64 = 33423 + 12911 / tim;
+            let vr:i64 = (ampq * cr) / 65536;
+            if (vr > 3037000499) { vr = 3037000499; }
+            if (vr < -3037000499) { vr = -3037000499; }
+            vr = (vr * venv_q16(lut, mid - t0, dur)) / 65536;
+            if (p2 < 4611686018427387904) { p2 = p2 + vr * vr; }
+        }
+        e = e + 1;
+    }
+    let b0:i64 = get64(bed, 0);
+    let b1:i64 = get64(bed, 8);
+    if (b0 <= mid && mid < b1) {
+        let bamp:i64 = get64(bed, 24);
+        let brms:i64 = (bamp * 37473) / 65536;
+        brms = (brms * bedenv_q16(lut, mid - b0, b1 - mid)) / 65536;
+        if (brms > 3037000499) { brms = 3037000499; }
+        if (p2 < 4611686018427387904) { p2 = p2 + brms * brms; }
+    }
+    return p2;
+}
+
+// analytic plan rms (Q16) over [bs,bs1): mean of 4 quarter-point powers.
+fn plan_rms_raw(ev:[]u8, lut:[]u8, bed:[]u8, nev:i64, bs:i64, bs1:i64) i64 {
+    let p2t:i64 = 0;
+    let s:i64 = 0;
+    while (s < 4) {
+        let mid:i64 = bs + ((bs1 - bs) * (2 * s + 1)) / 8;
+        p2t = p2t + plan_p2(ev, lut, bed, nev, mid) / 4;
+        s = s + 1;
+    }
+    return isqrt(p2t);
+}
+
+// piece 1: render [bs,bs1) as a pure function of the plan. The bed is WRITTEN
+// (overwrite — the exception path's re-render must replace corrupted bytes);
+// voices accumulate. Integer adds commute, so this block-major order is
+// bit-identical to PAR's event-major order.
+fn render_block(ev:[]u8, lut:[]u8, bed:[]u8, mix:[]u8, nev:i64, bs:i64, bs1:i64, ovr:[]u8) void {
+    let t:i64 = bs;
+    while (t < bs1) {
+        put64(mix, t * 8, bed_q16(bed, lut, t));
+        t = t + 1;
+    }
+    let e:i64 = 0;
+    while (e < nev) {
+        let t0:i64 = evg(ev, e, 0);
+        let dur:i64 = evg(ev, e, 1);
+        let a:i64 = t0;
+        if (a < bs) { a = bs; }
+        let b:i64 = t0 + dur;
+        if (b > bs1) { b = bs1; }
+        if (b > NSAMP) { b = NSAMP; }
+        if (a < b) {
+            let f0ov:i64 = get64(ovr, e * 8);
+            let t2:i64 = a;
+            while (t2 < b) {
+                put64(mix, t2 * 8, get64(mix, t2 * 8) + voice_q16(ev, lut, e, t2, f0ov));
+                t2 = t2 + 1;
+            }
+        }
+        e = e + 1;
+    }
+}
+
+// nearest octave offset k = round(log2(r)) for r > 0, via dyadic reduction.
+// k != 0  <=>  |1200 * log2(r)| > 600 cents (half an octave).
+fn oct_shift(r:f64) i64 {
+    if (r <= 0.0) { return 0; }
+    let k:i64 = 0;
+    let x:f64 = r;
+    while (x >= 2.0) { x = x / 2.0; k = k + 1; }
+    while (x < 1.0) { x = x * 2.0; k = k - 1; }
+    if (x >= 1.41421356) { k = k + 1; }
+    return k;
+}
+
+// H3 region computation (plan-defined): a new region starts wherever the
+// plan's EVENT activity (kind 0; RESPOND excluded) shows a rest gap >=
+// REGION_GAP samples. rgs[] receives region start samples; returns count.
+// Region 0 always starts at 0. Deterministic pure function of the plan.
+fn compute_regions(ev:[]u8, nev:i64, rgs:[]u8) i64 {
+    let nr:i64 = 1;
+    put64(rgs, 0, 0);
+    let cur_end:i64 = 0;
+    let e:i64 = 0;
+    while (e < nev) {
+        if (evg(ev, e, 8) == 0) {
+            let t0:i64 = evg(ev, e, 0);
+            let dur:i64 = evg(ev, e, 1);
+            if (t0 - cur_end >= REGION_GAP && nr < NREGMAX) {
+                put64(rgs, nr * 8, t0);
+                nr = nr + 1;
+            }
+            let eend:i64 = t0 + dur;
+            if (eend > cur_end) { cur_end = eend; }
+        }
+        e = e + 1;
+    }
+    return nr;
+}
+
+// render one block plan-pure into a temp buffer (block-relative indexing),
+// for the H3 servo's veto re-measurement (see piece 2).
+fn render_block_tmp(ev:[]u8, lut:[]u8, bed:[]u8, tmp:[]u8, nev:i64, bs:i64, bs1:i64, ovr:[]u8) void {
+    let t:i64 = bs;
+    while (t < bs1) {
+        put64(tmp, (t - bs) * 8, bed_q16(bed, lut, t));
+        t = t + 1;
+    }
+    let e:i64 = 0;
+    while (e < nev) {
+        let t0:i64 = evg(ev, e, 0);
+        let dur:i64 = evg(ev, e, 1);
+        let a:i64 = t0;
+        if (a < bs) { a = bs; }
+        let b:i64 = t0 + dur;
+        if (b > bs1) { b = bs1; }
+        if (b > NSAMP) { b = NSAMP; }
+        if (a < b) {
+            let f0ov:i64 = get64(ovr, e * 8);
+            let t2:i64 = a;
+            while (t2 < b) {
+                put64(tmp, (t2 - bs) * 8, get64(tmp, (t2 - bs) * 8) + voice_q16(ev, lut, e, t2, f0ov));
+                t2 = t2 + 1;
+            }
+        }
+        e = e + 1;
+    }
+}
+
+// ---------- wav ----------
+fn wav_write(path:[]u8, mix:[]u8, nsamp:i64) i64 {
+    // peak normalize to 0.85 FS
+    let peak:i64 = 0;
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get64(mix, i * 8);
+        if (v < 0) { v = 0 - v; }
+        if (v > peak) { peak = v; }
+        i = i + 1;
+    }
+    if (peak == 0) { peak = 1; }
+    pout("C mix peak_q16: ");
+    pout(i64s(peak));
+    pout("\n");
+    let total:i64 = 44 + nsamp * 2;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    out[0] = 82; out[1] = 73; out[2] = 70; out[3] = 70;
+    let sz:i64 = 36 + nsamp * 2;
+    out[4] = (sz & 255) as u8; out[5] = ((sz >> 8) & 255) as u8;
+    out[6] = ((sz >> 16) & 255) as u8; out[7] = ((sz >> 24) & 255) as u8;
+    out[8] = 87; out[9] = 65; out[10] = 86; out[11] = 69;
+    out[12] = 102; out[13] = 109; out[14] = 116; out[15] = 32;
+    out[16] = 16; out[17] = 0; out[18] = 0; out[19] = 0;
+    out[20] = 1; out[21] = 0;
+    out[22] = 1; out[23] = 0;
+    out[24] = 68; out[25] = 172; out[26] = 0; out[27] = 0;
+    out[28] = 136; out[29] = 88; out[30] = 1; out[31] = 0;
+    out[32] = 2; out[33] = 0;
+    out[34] = 16; out[35] = 0;
+    out[36] = 100; out[37] = 97; out[38] = 116; out[39] = 97;
+    let ds:i64 = nsamp * 2;
+    out[40] = (ds & 255) as u8; out[41] = ((ds >> 8) & 255) as u8;
+    out[42] = ((ds >> 16) & 255) as u8; out[43] = ((ds >> 24) & 255) as u8;
+    i = 0;
+    while (i < nsamp) {
+        let v:i64 = (get64(mix, i * 8) * 27852) / peak;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        if (v < 0) { v = v + 65536; }
+        let o:i64 = 44 + i * 2;
+        out[o] = (v & 255) as u8;
+        out[o+1] = ((v >> 8) & 255) as u8;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(path, out);
+    nio_free(out);
+    return rc;
+}
+
+// raw mix dump (s32 LE, no mastering): for content-identity checks at the
+// MIX level — global peak normalization would mask generation differences.
+fn mix_write(path:[]u8, mix:[]u8, nsamp:i64) i64 {
+    let total:i64 = nsamp * 4;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get64(mix, i * 8);
+        if (v > 2147483647) { v = 2147483647; }
+        if (v < -2147483648) { v = -2147483648; }
+        if (v < 0) { v = v + 4294967296; }
+        let o:i64 = i * 4;
+        out[o] = (v & 255) as u8;
+        out[o+1] = ((v >> 8) & 255) as u8;
+        out[o+2] = ((v >> 16) & 255) as u8;
+        out[o+3] = ((v >> 24) & 255) as u8;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(path, out);
+    nio_free(out);
+    return rc;
+}
+
+fn str_eq(a:[]u8, b:[]u8) i64 {
+    if (a.len != b.len) { return 0; }
+    let i:i64 = 0;
+    while (i < a.len as i64) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// render_events (hybrid's event-major path) is DELETED in contender C:
+// it is dead code (the H3 main loop uses block-major render_block) and it
+// mutated the plan arena (RESPOND kind/pitch rewrite), which the
+// no-plan-mutation law forbids. The RESPOND execution override lives in the
+// separate ovr arena; render_block consults it without touching the plan.
+fn render_bed(bed:[]u8, lut:[]u8, mix:[]u8, lo:i64, hi:i64) void {
+    let bt0:i64 = get64(bed, 0);
+    let bt1:i64 = get64(bed, 8);
+    let a:i64 = bt0;
+    if (a < lo) { a = lo; }
+    let b:i64 = bt1;
+    if (b > hi) { b = hi; }
+    if (b > NSAMP) { b = NSAMP; }
+    let t:i64 = a;
+    while (t < b) {
+        put64(mix, t * 8, get64(mix, t * 8) + bed_q16(bed, lut, t));
+        t = t + 1;
+    }
+}
+
+fn main() i32 {
+    let planp:[]u8 = _zag_arg(1);
+    if (planp.len == 0) { planp = "../fixture/plan_v1.txt"; }
+    let outp:[]u8 = _zag_arg(2);
+    if (outp.len == 0) { outp = "out_hyb.wav"; }
+    let mode:[]u8 = _zag_arg(3);
+    if (mode.len == 0) { mode = "seq"; }
+
+    let lut:[]u8 = nio_alloc(8192);
+    lut_init(lut);
+    let ev:[]u8 = nio_alloc((NEVMAX * EVSZ) as i32);
+    let z:i64 = 0;
+    while (z < (NEVMAX * EVSZ) as i64) { ev[z] = 0; z = z + 1; }
+    let bed:[]u8 = nio_alloc(32);
+    z = 0;
+    while (z < 32) { bed[z] = 0; z = z + 1; }
+    let nev:i64 = parse_plan(planp, ev, bed);
+    pout("C events parsed: ");
+    pout(i64s(nev));
+    pout("\n");
+    if (nev < 0) { return 3; }
+
+    let mix:[]u8 = nio_alloc((NSAMP * 8) as i32);
+    if (mix.len == 0) { return 4; }
+    z = 0;
+    while (z < (NSAMP * 8) as i64) { mix[z] = 0; z = z + 1; }
+    let ana:[]u8 = nio_alloc(32);
+    z = 0;
+    while (z < 32) { ana[z] = 0; z = z + 1; }
+    let rgs:[]u8 = nio_alloc((NREGMAX * 8) as i32);
+    let tmp:[]u8 = nio_alloc((BLK * 8) as i32);
+    // ovr: renderer-local RESPOND execution-pitch overrides, one i64 per
+    // event (0 = none). The latch writes here; the plan arena is immutable.
+    let ovr:[]u8 = nio_alloc((nev * 8) as i32);
+    z = 0;
+    while (z < (nev * 8) as i64) { ovr[z] = 0; z = z + 1; }
+
+    let nblocks:i64 = 0;
+    let nveto:i64 = 0;
+    let nadapt:i64 = 0;
+    let nlatch:i64 = 0;
+    let nkeep:i64 = 0;
+
+    // ---- H3 regions (plan-defined) + boundary state reset ----
+    let nr:i64 = compute_regions(ev, nev, rgs);
+    pout("C regions=");
+    pout(i64s(nr));
+    pout(" starts:");
+    let ri:i64 = 0;
+    while (ri < nr) {
+        pout(" ");
+        pout(i64s(get64(rgs, ri * 8)));
+        ri = ri + 1;
+    }
+    pout("\n");
+
+    let r:i64 = 0;
+    while (r < nr) {
+        let rs0:i64 = get64(rgs, r * 8);
+        let rs1:i64 = NSAMP;
+        if (r + 1 < nr) { rs1 = get64(rgs, (r + 1) * 8); }
+        // Boundary state reset: servo re-seeded to plan identity.
+        // No cross-region carry, by construction.
+        let g:i64 = 65536;
+        let rb:i64 = 0;
+        let bs:i64 = rs0;
+        while (bs < rs1) {
+            let bs1:i64 = bs + BLK;
+            if (bs1 > rs1) { bs1 = rs1; }
+
+        // ---- piece 3: RESPOND octave latch (discrete plan-level event) ----
+        // Fires once, at the block containing rt0, BEFORE that block renders,
+        // measuring only already-rendered (and exception-healed) audio.
+        let e:i64 = 0;
+        while (e < nev) {
+            if (evg(ev, e, 8) == 1) {
+                let rt0:i64 = evg(ev, e, 0);
+                if (rt0 >= bs && rt0 < bs1) {
+                    let w0:i64 = evg(ev, e, 9);
+                    let w1:i64 = evg(ev, e, 10);
+                    if (w1 > bs) { w1 = bs; }
+                    let nom:i64 = evg(ev, e, 11);
+                    let nomf:f64 = (nom as f64) / 65536.0;
+                    // well-posedness: exactly one rendered voice overlaps
+                    // the source window (self excluded).
+                    let nv:i64 = 0;
+                    let e2:i64 = 0;
+                    while (e2 < nev) {
+                        if (e2 != e) {
+                            let kind2:i64 = evg(ev, e2, 8);
+                            if (kind2 == 0 || kind2 == 1) {
+                                let a2:i64 = evg(ev, e2, 0);
+                                let b2:i64 = a2 + evg(ev, e2, 1);
+                                if (a2 < w1 && b2 > w0) { nv = nv + 1; }
+                            }
+                        }
+                        e2 = e2 + 1;
+                    }
+                    let f0:i64 = nom;
+                    let fmh:i64 = 0;
+                    let ko:i64 = 0;
+                    let dec:i64 = 0;
+                    let rsn:i64 = 0;
+                    if (nv == 1 && w1 > w0 + 200 && nomf > 1.0) {
+                        let midw:i64 = w0 + (w1 - w0) / 2;
+                        analyze(mix, w0, midw, ana);
+                        let z1:i64 = get64(ana, 0);
+                        analyze(mix, midw, w1, ana);
+                        let z2:i64 = get64(ana, 0);
+                        let dz:i64 = z1 - z2;
+                        if (dz < 0) { dz = 0 - dz; }
+                        let zm:i64 = z1;
+                        if (z2 > zm) { zm = z2; }
+                        if (zm > 0 && dz * 100 <= zm * ZCR_HALF_TOL) {
+                            let fm:f64 = ((z1 + z2) as f64) / 2000000.0 * 22050.0;
+                            fmh = fm as i64;
+                            if (fm >= 40.0 && fm <= 4000.0) {
+                                ko = oct_shift(fm / nomf);
+                                if (ko != 0) {
+                                    // octave correction of the PLAN nominal:
+                                    // plan-derived, never the raw measurement.
+                                    f0 = nom;
+                                    if (ko > 0) {
+                                        let qi:i64 = 0;
+                                        while (qi < ko) { f0 = f0 * 2; qi = qi + 1; }
+                                    } else {
+                                        let qi:i64 = 0;
+                                        while (qi < 0 - ko) { f0 = f0 / 2; qi = qi + 1; }
+                                    }
+                                    dec = 1;
+                                    rsn = 4;
+                                } else { rsn = 3; }
+                            } else { rsn = 2; }
+                        } else { rsn = 1; }
+                    }
+                    // NO-PLAN-MUTATION LAW: the parsed plan arena is immutable
+                    // after parsing. The latch's octave-corrected execution
+                    // pitch is a renderer-local annotation in the separate
+                    // ovr arena (0 = no override: render the plan's nominal
+                    // pitch). Event existence, timing, kind, and the stored
+                    // nominal are never touched; the servo is forbidden from
+                    // pitch adjustment entirely.
+                    put64(ovr, e * 8, f0);
+                    if (dec == 1) { nlatch = nlatch + 1; } else { nkeep = nkeep + 1; }
+                    pout("C RESPOND e=");
+                    pout(i64s(e));
+                    pout(" nvoice=");
+                    pout(i64s(nv));
+                    pout(" fm=");
+                    pout(i64s(fmh));
+                    pout("Hz nom=");
+                    pout(i64s(nomf as i64));
+                    pout("Hz k=");
+                    pout(i64s(ko));
+                    pout(" rsn=");
+                    pout(i64s(rsn));
+                    if (dec == 1) {
+                        pout(" -> LATCHED f0=");
+                        pout(i64s(f0));
+                    } else {
+                        pout(" -> nominal");
+                    }
+                    pout("\n");
+                }
+            }
+            e = e + 1;
+        }
+
+        // ---- piece 1: PAR motif path (pure f(plan,t)) ----
+        render_block(ev, lut, bed, mix, nev, bs, bs1, ovr);
+
+        // ---- fault injection (test modes only; never in production) ----
+        if (str_eq(mode, "fault") || str_eq(mode, "faultmix")) {
+            let cut:i64 = 3 * SR;
+            if (bs <= cut && cut < bs1) {
+                let j:i64 = 0;
+                while (j < 64) {
+                    put64(mix, (cut + j) * 8, get64(mix, (cut + j) * 8) ^ 2147483647);
+                    j = j + 1;
+                }
+                pout("C fault injected at t=3s\n");
+            }
+        }
+        if (str_eq(mode, "susfault") || str_eq(mode, "susfaultmix") ||
+            str_eq(mode, "sus5") || str_eq(mode, "sus5mix") ||
+            str_eq(mode, "sus1292") || str_eq(mode, "sus1292mix")) {
+            // sus5*: corrupt only the first 5 s of blocks, then stop: the
+            // settling test — the servo must re-settle, not 2-cycle.
+            // sus1292*: the frozen §5 attack — corrupt exactly 1292 flat
+            // 1024-sample blocks (1292*1024 = 1,322,688 samples, the whole
+            // fixture save the 208-sample tail), every block, whole run.
+            let corrup:i64 = 1;
+            if (str_eq(mode, "sus5") || str_eq(mode, "sus5mix")) {
+                if (bs >= 5 * SR) { corrup = 0; }
+            }
+            if (str_eq(mode, "sus1292") || str_eq(mode, "sus1292mix")) {
+                if (bs >= 1292 * 1024) { corrup = 0; }
+            }
+            if (corrup == 1) {
+                let j:i64 = 0;
+                while (j < 64 && bs + j < bs1) {
+                    put64(mix, (bs + j) * 8, get64(mix, (bs + j) * 8) ^ 2147483647);
+                    j = j + 1;
+                }
+            }
+        }
+        // ---- C-CAVEAT red team: faults AT a servo-adapt block boundary ----
+        // CAVT = sample 211080 = t=4.7864 s, the boundary after the adapt
+        // block with dg=-6223 (-9.5%) in the clean fixture trace (motif
+        // region, where the C-only flux spikes cluster). Test-only modes.
+        let cavt:i64 = 211080;
+        if (str_eq(mode, "cavburst") || str_eq(mode, "cavburstmix")) {
+            if (bs <= cavt && cavt < bs1) {
+                let j:i64 = 0;
+                while (j < 64) {
+                    put64(mix, (cavt + j) * 8, get64(mix, (cavt + j) * 8) ^ 2147483647);
+                    j = j + 1;
+                }
+                pout("C cavburst injected at adapt boundary t=4.7864s\n");
+            }
+        }
+        if (str_eq(mode, "cavdc") || str_eq(mode, "cavdcmix")) {
+            // +0.1 FS DC for 2 s starting exactly at the adapt boundary
+            let dce:i64 = cavt + 88200;
+            if (bs1 > cavt && bs < dce) {
+                let lo:i64 = bs;
+                if (lo < cavt) { lo = cavt; }
+                let hi:i64 = bs1;
+                if (hi > dce) { hi = dce; }
+                let j:i64 = lo;
+                while (j < hi) {
+                    put64(mix, j * 8, get64(mix, j * 8) + 6553);
+                    j = j + 1;
+                }
+                if (bs <= cavt && cavt < bs1) { pout("C cavdc injected at adapt boundary t=4.7864s\n"); }
+            }
+        }
+        if (str_eq(mode, "dropout") || str_eq(mode, "dropoutmix")) {
+            // full-block dropout at t=3s: exercises the rms LOWER edge
+            // (a 64-sample zeroing would only move block rms x0.97 —
+            // below the detection floor; the floor is documented).
+            let cutd:i64 = 3 * SR;
+            if (bs <= cutd && cutd < bs1) {
+                let j:i64 = 0;
+                while (j < bs1 - bs) {
+                    put64(mix, (bs + j) * 8, 0);
+                    j = j + 1;
+                }
+                pout("C dropout injected: block zeroed at t=3s\n");
+            }
+        }
+
+        // ---- piece 2: H3 region-scoped servo (continuous, contractive) ----
+        // The block was rendered plan-pure above; apply the current servo
+        // gain as a UNIFORM post-render scalar. Because the scalar is
+        // uniform, measured m = g * S exactly (S = plan-pure block RMS),
+        // which is what makes the update below a strict contraction.
+        if (g != 65536) {
+            let t3:i64 = bs;
+            while (t3 < bs1) {
+                put64(mix, t3 * 8, (get64(mix, t3 * 8) * g) / 65536);
+                t3 = t3 + 1;
+            }
+        }
+        // Target T = K_PLAN * plan_rms(block): derived from the plan under
+        // render (HYBRID_SPEC.md section 5), never a frozen literal.
+        analyze(mix, bs, bs1, ana);
+        let m:i64 = get64(ana, 8);
+        let peak:i64 = get64(ana, 16);
+        let praw:i64 = plan_rms_raw(ev, lut, bed, nev, bs, bs1);
+        let T:i64 = (praw * K_PLAN) / 65536;
+        // st: 0 idle (deadband) | 1 adapt | 2 veto-re-measure | 3 silence-hold
+        let st:i64 = 0;
+        if (T < SILENCE_FLOOR) {
+            // The plan says (near-)silence: there is no contour to track.
+            // HOLD the gain — do not chase the noise floor down (that would
+            // pin the rail at G_MIN in every gap: the old AR's disease in a
+            // new form). Silence holds state; the region boundary resets it.
+            // Corruption during silence is also held, never tracked, so the
+            // post-fault trajectory cannot diverge from the clean one.
+            st = 3;
+        } else {
+            let veto:i64 = 0;
+            if (peak > PEAK_IMPOSS) { veto = 1; }
+            if (T >= SILENCE_FLOOR) {
+                if (m * 2 > T * 5) { veto = 1; }
+                if (m * 20 < T * 7) { veto = 1; }
+            }
+            if (veto == 1) {
+                // Corruption is not a level to track: the corrupted bytes
+                // carry no information about the plan's contour, so the
+                // servo re-measures the block's PLAN-PURE render (into tmp)
+                // and updates from that. The tmp render is scaled by the
+                // current g with the SAME per-sample integer arithmetic as
+                // the main loop, so the re-measured m is BIT-EXACTLY what
+                // the clean run would have measured: the post-fault gain
+                // trajectory cannot diverge by even 1 LSB (RT-CASCADE and
+                // sus5 re-settling: post-cut diffs = 0). The output bytes
+                // stay as-is (H3 does not heal bytes); only the update is
+                // protected.
+                render_block_tmp(ev, lut, bed, tmp, nev, bs, bs1, ovr);
+                if (g != 65536) {
+                    let t3:i64 = 0;
+                    while (t3 < bs1 - bs) {
+                        put64(tmp, t3 * 8, (get64(tmp, t3 * 8) * g) / 65536);
+                        t3 = t3 + 1;
+                    }
+                }
+                analyze(tmp, 0, bs1 - bs, ana);
+                m = get64(ana, 8);
+                nveto = nveto + 1;
+            }
+            let M:i64 = T;
+                if (m > M) { M = m; }
+                if (M < 1) { M = 1; }
+                let d:i64 = T - m;
+                if (d < 0) { d = 0 - d; }
+                if (d * 100 < DEADBAND_PC * M) {
+                    st = 0; // residual regulator: silent on the happy path
+                } else {
+                    // Contractive update: g <- (g + g*T/m)/2.
+                    // With m = g*S: u = g*S/T obeys u <- (u+1)/2, i.e.
+                    // |u_{k+1} - 1| = |u_k - 1|/2 exactly. Lipschitz 1/2.
+                    // Fixed point g* = T/S: the block renders at the plan's
+                    // analytic contour. Clamped to [0.5, 2.0].
+                    let q:i64 = (g * T) / m;
+                    g = (g + q) / 2;
+                    if (g < G_MIN) { g = G_MIN; }
+                    if (g > G_MAX) { g = G_MAX; }
+                    st = 1;
+                    nadapt = nadapt + 1;
+                }
+            if (veto == 1) { st = 2; } // trace marks the veto source
+        }
+        pout("C rg=");
+        pout(i64s(r));
+        pout(" rb=");
+        pout(i64s(rb));
+        pout(" g=");
+        pout(i64s(g));
+        pout(" m=");
+        pout(i64s(m));
+        pout(" T=");
+        pout(i64s(T));
+        pout(" st=");
+        pout(i64s(st));
+        pout("\n");
+
+            nblocks = nblocks + 1;
+            rb = rb + 1;
+            bs = bs1;
+        }
+        r = r + 1;
+    }
+
+    pout("C blocks=");
+    pout(i64s(nblocks));
+    pout(" vetoes=");
+    pout(i64s(nveto));
+    pout(" adapts=");
+    pout(i64s(nadapt));
+    pout(" latched=");
+    pout(i64s(nlatch));
+    pout(" kept=");
+    pout(i64s(nkeep));
+    pout("\n");
+
+    let rc:i64 = 0;
+    if (str_eq(mode, "seqmix") || str_eq(mode, "faultmix") || str_eq(mode, "susfaultmix") || str_eq(mode, "dropoutmix") || str_eq(mode, "sus5mix") || str_eq(mode, "sus1292mix")) {
+        rc = mix_write(outp, mix, NSAMP);
+    } else {
+        rc = wav_write(outp, mix, NSAMP);
+    }
+    pout("C wrote ");
+    pout(outp);
+    pout(" rc=");
+    pout(i64s(rc));
+    pout("\n");
+    return 0;
+}
