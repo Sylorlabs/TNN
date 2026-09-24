@@ -90,6 +90,18 @@ def main():
 
     h35_body = strip_main_and_imports(h35)
     h36_body = strip_main_and_imports(h36)
+    # B-3536 composition hygiene: drop h35's `fn m36` (the PRE-REPAIR
+    # hardcoded-seed mode-36 regression battery). It is dead code in the
+    # composition — the 36-side is the repaired fresh-seed path (r36
+    # mechanisms + this driver's comp36* batteries) — and it carries six
+    # copies of the stale hardcoded seed (305419896/2596069104), which would
+    # otherwise sit in the attacker's read set outside the marked
+    # M36-ATTACKER-CLASS fixture. Nothing in the composition calls m36.
+    m36 = extract_fn(h35_body, "m36")
+    assert m36 is not None, "h35 m36 not found"
+    assert "fn m36(" not in h36_body
+    h35_body = h35_body.replace(m36, "", 1)
+    print("dropped dead h35 m36 (stale hardcoded seed, uncalled)", flush=True)
     # drop shared fns from h36 body
     for n in shared:
         m = extract_fn(h36_body, n)
