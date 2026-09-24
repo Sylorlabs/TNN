@@ -109,3 +109,6 @@ Claim P2 (dive forensics §3): ZCR-of-sum on dyads reads the perceptual "missing
 - All binaries rebuilt 2026-09-24 with pinned toolchain `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1` from the sources above (SHAs listed per fork). Stock source SHA matches the frozen dive SHA exactly.
 - `render_c_fx.zag` (SHA `b8d95c6523b4cf5d95124d928096675f9b5a8fa04cbb40413383d072a05843a8`): stock + burst/dcshift fault-injection modes + fixed mix_write dispatch. In clean seqmix mode it is BIT-IDENTICAL to stock (0 diffs over 1323000 samples).
 - Do NOT commit: binaries, `.zag-cache/`, `.zagd.semantic-ready` under `crew_c/src/`.
+
+### 2026-09-24 — C-deadband RT-CASCADE (fault)
+- faultmix on deadband: 64 total diffs (the injected 64 samples), 0 pre-fault, 0 post-fault. veto=1, adapts=513. Veto logic untouched by the deadband change; cascade protection identical to stock.
