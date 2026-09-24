@@ -306,8 +306,8 @@ def score_calib(eps, fork_kind):
     # (probe claims have no following WORLD; gt is the battery's ground truth)
     by_src = {}
     for e in probe_says:
-        by_src.setdefault(e["src"], []).append(e["gt"])
-    rel = {s: sum(g) / len(g) for s, g in by_src.items()}
+        by_src.setdefault(e["src"], []).append(e)
+    rel = {s: sum(e["gt"] for e in es) / len(es) for s, es in by_src.items()}
     out = {"n_sources": len(by_src)}
     if fork_kind in ("k", "l"):
         trusts = {}
@@ -357,7 +357,8 @@ def score_cost(rows):
 def main():
     sdir, rdir, ftag, thpath, outp = sys.argv[1:6]
     thresholds = json.load(open(thpath)) if os.path.exists(thpath) else {}
-    theta = thresholds.get(ftag, {}).get("theta_admit_milli")
+    theta_milli = thresholds.get(ftag, {}).get("theta_admit_milli")
+    theta = theta_milli / 1000.0 if theta_milli is not None else None
     fork_kind = thresholds.get(ftag, {}).get("kind", ftag)
     res = {"fork": ftag, "batteries": {}}
     for bat, fn in [("ST-1", score_st1), ("ST-1N", score_st1),
