@@ -25,6 +25,36 @@
   a coordination point, not a blocker — WS3-A's own K1–K7 bars are
   self-contained.
 
+### 2026-09-24 ~08:25 PDT — leg 2: retune built (WS3-A)
+- `src/sense_after.zag`: R1 retire disp 6; R2 bounded nudge
+  `min(topc-1,popcap)`, `popconf=50+nudge` (popcap driver-set: 5 after /
+  0 control); R3 evidence gate (installed conf≥50 contradiction zeroes nudge,
+  WITHHOLD — `ws_decide` now consults installed table on unknown facts);
+  R4 `ws_install`→`ws3_install` (install needs verified==1 non-popularity
+  warrant; topc gate removed from install path; popularity ledger-tagged POP
+  op 80); R5 override unchanged. Diff vs frozen original: 171 changed lines,
+  all retune.
+- `src/gen_drivers.py`: single fixture table → 3 drivers (before/after/
+  control); result hashes via hashlib matching `ws_result_hash`.
+- znc notes honored: struct extended by append only; custom digit itoa;
+  define-before-use; []u8 arenas only.
+
+### 2026-09-24 ~08:35 PDT — leg 3: runs + kill bars (WS3-A)
+- 3 binaries, pinned toolchain; N=3 runs/arm byte-identical (K7 HOLD).
+- BEFORE exhibits the bug as preregistered: lie installed 4/4 (A2/A3/A5/A10
+  I=7); C1 disp 6 + install of false majority; C2b keeps D1 despite installed
+  Paris@80; B1V refused install.
+- AFTER: 0 installs on popularity (all V=0 → I=8); bounded bend (F51–F55,
+  cap holds at A10); C1/C2b → WITHHOLD nudge 0; B1V installs lonely truth
+  under WORLD-SETTLE (stored "Ouagadougou" verified); A2V installs under
+  TEACHER-CONFIRM (deliberate agency intact); D3 tamper path intact (D9).
+- `shared/POPBIAS_PROBES/score_popbias.py`: K1–K7 all HOLD, exit 0.
+- Shared handoff written: `shared/POPBIAS_PROBES/` (PROBES.md,
+  probes_table.json, score_popbias.py). Interim notes: `WS3A_PRELIM.md`.
+- Follow-ups: mixed-web/mw_sense.zag MAJORITY wants the same retune
+  (separate trial); WS3-B adapter mapping for PROVISIONAL; whether Micah
+  wants the retune promoted into the live info-source module.
+
 ---
 
 # WS3-B RUNLOG — popularity-bias adversarial battery
