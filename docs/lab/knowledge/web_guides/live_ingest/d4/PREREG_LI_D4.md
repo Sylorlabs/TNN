@@ -305,3 +305,42 @@ still already quite rather almost nearly
 
 Kept as content (never glue): no not never none nothing nobody neither,
 all quantifiers (every each all both few many), numerals, and all other tokens.
+
+---
+
+## Amendment 1 (2026-09-24 — before any result-producing run; no verdict data seen)
+
+1. **Modal row clarification (Appendix A.1).** The row
+   `modal: will,would,can,could,shall,should,may,might,must` is a grouping
+   label, not a stem. Normative mapping (as implemented in `d4_triple.zag`):
+   will→will, would→will, can→can, could→can, shall→shall, should→shall,
+   may→may, might→may, must→must. This matches §2.1 ("the table's lemma for
+   that form", e.g. marks→mark, was→be). No behavior change; the
+   implementation already does exactly this. Found during the pre-run
+   implementation-vs-prereg audit (the draft's §2.1 examples and the
+   implementation agreed; only the Appendix row label was ambiguous).
+
+2. **Implementation transcription gaps (no prereg change).** The frozen
+   prereg requires `lost:lose` and `showing:show`; the first implementation
+   transcription omitted them. Added before any result run. The frozen
+   prereg is normative over the implementation, not vice versa.
+
+3. **Confirm family (no change).** Neither the frozen prereg nor the
+   implementation contains confirm/confirms/confirmed/confirming. A
+   sentence whose only verb-table verb is "confirmed" fails closed ("") by
+   design. Recorded as a table-coverage boundary (Appendix A is finite),
+   not a mechanism defect. W3 was re-authored with covered vocabulary
+   (see 4).
+
+4. **W battery scope (secondary measures only, not kill bars).** W1–W3 are
+   false-paraphrase probes (attacks), per the coordinator brief:
+   - W1 predicate swap (marks→hides): expect WITHHOLD both arms (D4
+     correctly refuses; stems differ).
+   - W2 argument swap (harbor/quarry diathesis trap): expect control
+     WITHHOLD, D4 INSTALL — attack success via the §2.2 diathesis rule.
+   - W3 modal/tense collapse ("marks" vs "will mark"): expect control
+     WITHHOLD, D4 INSTALL — attack success; auxiliaries are verb tokens
+     excluded from argument sets, so present vs future collapses to one
+     triple. The first W3 draft (honest active/passive with "confirmed")
+     is superseded: it would have failed closed in D4 on the uncovered
+     verb, a table-coverage artifact rather than a mechanism test.
