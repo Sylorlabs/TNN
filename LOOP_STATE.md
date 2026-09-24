@@ -975,3 +975,20 @@ unchanged, nothing added this wave); the CV-1 decline-citation fix
 re-test on a fresh sealed gaming set; G1 re-freeze (validated geometry
 plus recalibrated T-gate) as legitimate next-wave work under a fresh
 prereg.
+
+Independent-judge addendum (post-close review): an independent judge
+subagent reviewed the full written record and rendered rulings in
+docs/lab/rsi/runs/wave-20260924-1121pdt/debate/JUDGE_INDEPENDENT_1121.md,
+repairing the coordinator-as-judge deviation disclosed above. M1
+CONFIRM ADOPT [NEW] (commit order independently verified: 68c3bb868
+freeze before 5aec600dc seal before 1783234e0 implementation; one
+correction added: the CV-B1 confabulation-definition blind spot, which
+covers only emitted answers and lets false declines slip through, is
+carried as a traveled defect for future preregs; no bar moved). M2
+CONFIRM DISCARD [NEW] with a partial framing overturn: the record
+supports a dual defect (geometrically defective point sets AND the
+T-gate calibration miss), not a prereg-spec defect alone. M3 CONFIRM
+both stand-downs. M4 CONFIRM FIT. M5 CONFIRM memo stands, ruled
+consistent with the Python-anywhere rule (no wave evidence existed to
+void). No verdict changed; nothing added to or removed from his judge
+queue; his five governance decisions untouched.
