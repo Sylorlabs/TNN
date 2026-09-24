@@ -57,7 +57,7 @@ and no done-verdict. DONE = verdict committed. BLOCKED-ON-MICAH = needs his word
 | KB4 F2 appeal | DONE | binding verdict WRAPS 17:04Z Sep 23 | — | — |
 | motion3 | DONE | VERDICT_MOTION3.md committed | — | — |
 | senses-rematch | DONE | VERDICT: B STAYS DEAD | — | — |
-| teacher-showdown Leg C | STALLED? | no commits in 500; no live proc found | unknown | VERIFY then re-dispatch — brief #2 below |
+| teacher-showdown Leg C | DONE | ran COMPLETE 2026-09-22 (audit window artifact); missing local evidence committed `ccd06d3e` 2026-09-24 | — | grok-4.7 champion teacher; Leg C +10.5pp clean, +26/−0 probes |
 
 ## Open wave-2 items (not stalls, tracked for parent)
 
@@ -88,16 +88,18 @@ branch with no open items; (b) per the standing flagship-alive rule, draft the n
 experiment (what comes after the rematch verdict — e.g. motion-coherence fork or a V11-style coordinator
 round), frozen BEFORE any implementation; (c) commit the prereg. Do NOT re-run the rematch.
 
-### Brief #2: teacher-showdown Leg C verification
+### Brief #2: teacher-showdown Leg C verification — RESOLVED 2026-09-24
 
-**Inherited state:** memory records Leg C as STAFFED, but the 500-commit scan (back to 2026-09-23T06:48Z)
-shows zero showdown commits and no live processes matched. Either the crew died in the daemon restart
-without committing, or it was never actually launched (cf. memory/2026-09-22.md#L289 pattern).
-**Verify first:** search the branch for teacher-showdown artifacts newer than 2026-09-22; check local
-workdirs for a showdown dir with fresh mtimes.
-**Task for fresh crew:** if a partial Leg C exists, resume it from its own RUNLOG; if nothing exists,
-re-dispatch Leg C per the original teacher-showdown plan (class-3 standardized rerun, identical teacher
-completeness), frozen prereg first.
+**Resolution:** the audit's "STALLED?" classification was an artifact of the 500-commit window
+(2026-09-23T06:48Z → 2026-09-24T05:22Z), which did not reach back to the Leg C commits of 2026-09-22.
+Leg C ran COMPLETE 2026-09-22; verdict `docs/lab/GROK47_OVERNIGHT/teacher/LEGC_VERDICT.md` (blob
+`56dae906`) was already on branch. A verify crew independently re-verified: corpus SHA256 matches,
+5/5 prose runs byte-identical, oracle cross-check 0-diff, Δ_clean = +24/228 (+10.5pp, z≈3.5), 26
+probes gained / 0 lost. The only gap — primary prose evidence existed only locally — was committed
+2026-09-24 as `ccd06d3e` (binaries/.zagd excluded). grok-4.7 is the champion teacher (Leg B
+faithfulness blowout + Leg C prose win). Audit lesson: recursive-tree queries against
+`tnn-native-lab` can silently truncate (~26k files); a 0-path filter result is not evidence of
+absence — use the contents API at a commit ref.
 
 ---
 Roster maintained at `docs/lab/ops/wave_roster/LIVE_ROSTER.md` (lab-relative `ops/wave_roster/LIVE_ROSTER.md`).
