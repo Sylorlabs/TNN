@@ -1,0 +1,248 @@
+// admit_claim.zag — SELF-PAM gate core.
+//
+// Extracts cf1's gate-step (v2/cf1_zag/cf1.zag, lines 324-413) as an
+// in-process Zag function. Keeps verbatim per the frozen prereg
+// (docs/lab/senses/pam-rebuild/selfpam/PREREG.md §3.1):
+//   - the state arenas (perm / prov / chal / neg)
+//   - the 700 high-confidence bar
+//   - the per-task/per-type tolerance table (tol_of)
+//   - the 9 disposition codes (§3.5) and the install law:
+//       nothing installs on first appearance;
+//       permanence = provisional re-observed within tolerance;
+//       revision = high-conf (>=700) challenger corroborated twice;
+//       pointwise adjudication banned (trial-1145 rule).
+//
+// COMPOSITION DELTAS (documented, frozen here):
+//   D1 (install bar, from PREREG_V2-IE_AMEND1 R2/R3 via the C1 corroborator):
+//       PERMANENT_INSTALL (3) and REVISED_INSTALL (7) additionally require
+//       the corroborating observation to arrive over the attested
+//       independent channel (src=1, corr_observe with valid gatt). An
+//       unattested re-observation leaves the claim provisional (disp 1 / 8).
+//   D2 (evidence-hash cross-binding, from PREREG §3.3): the provisional and
+//       challenger slots store the claim's evhash; promotion requires the
+//       attested bytes' sha256 to match the stored evhash byte-for-byte.
+//       Mismatch => WITHHELD (fail closed, margin unknown).
+//
+// API (in-process; zero RNG; deterministic):
+//   sp_init() -> []u8
+//       Fresh zeroed gate-state blob (4096 B). The prereg's signature
+//       admit_claim(task, jcode, conf, meas, evhash) takes no state handle;
+//       znc edition 2026 has no mutable globals, so the state handle is the
+//       leading argument on every entry point. The five prereg arguments
+//       follow it in prereg order.
+//   admit_claim(st, task, jcode, conf, meas, evhash) -> i32
+//       Draft-claim presentation (proposer channel, prog=PASS, pred=1).
+//       evhash must be exactly 32 bytes (sha256 of the cited evidence
+//       bundle); task must be 0 (v1 codebook { FACT = 0 }). Violations
+//       fail closed to WITHHELD.
+//   admit_neg(st, task, jcode, meas) -> i32
+//       Negative-evidence record (prog=1 analog). Returns 5.
+//   corr_observe(st, task, jcode, conf, meas, ev, evn, gatt) -> i32
+//       Corroborator-channel record (attested independent evidence, IE R2).
+//       ev[0..evn] are the bytes the C1 probe re-measured; gatt is the
+//       64-hex channel attestation over
+//         sha256hex(CHANNEL_KEY || jcode || "|" || conf || "|" || meas
+//                   || "|" || hex(sha256(ev))).
+//       The gate recomputes sha256(ev), verifies gatt byte-for-byte, and
+//       requires conf >= 700 (IE R3). Any failure => WITHHELD (unattested
+//       independent evidence is treated as absent).
+//
+// State blob layout (offsets in bytes):
+//   perm slot @0, prov slot @48, chal slot @96 (48 B each):
+//       jc i32 @+0, meas i32 @+4, valid i32 @+8, obs i32 @+12, evhash 32B @+16
+//   neg_n i32 @144
+//   neg table @148: 256 x (jc i32, meas i32) = 2048 B
+//   obs counter i32 @2196  (monotonic observation index, diagnostic)
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- arena i32 accessors (little-endian; cf1 verbatim) ---------
+fn sp_put32(a:[]u8, idx:i32, v:i32) void {
+    let o:i32 = idx * 4;
+    a[o] = (v & 255) as u8;
+    a[o + 1] = ((v >> 8) & 255) as u8;
+    a[o + 2] = ((v >> 16) & 255) as u8;
+    a[o + 3] = ((v >> 24) & 255) as u8;
+}
+fn sp_get32(a:[]u8, idx:i32) i32 {
+    let o:i32 = idx * 4;
+    let b0:i32 = a[o] as i32;
+    let b1:i32 = a[o + 1] as i32;
+    let b2:i32 = a[o + 2] as i32;
+    let b3:i32 = a[o + 3] as i32;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+fn sp_iabs32(x:i32) i32 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+
+// ---------------- frozen tables (cf1 verbatim) -------------------------------
+// Per-task/per-type tolerance table. v1 codebook has FACT = 0 only; the
+// table is kept verbatim and the FACT tolerance (8) is the §8 starting bid,
+// PROVISIONAL pending Micah's threshold sign-off.
+fn sp_tol_of(tc:i32) i32 {
+    if(tc == 0) { return 8; }
+    if(tc == 1) { return 40; }
+    if(tc == 2) { return 60; }
+    if(tc == 3) { return 4000; }
+    if(tc == 4) { return 120; }
+    return 0;
+}
+// 9 disposition codes, verbatim semantics (PREREG §3.5).
+fn sp_disp_name(code:i32) []u8 {
+    if(code == 0) { return "WITHHELD"; }
+    if(code == 1) { return "PROVISIONAL_INSTALL"; }
+    if(code == 2) { return "CORROBORATED"; }
+    if(code == 3) { return "PERMANENT_INSTALL"; }
+    if(code == 4) { return "CONFLICT_WITHHELD"; }
+    if(code == 5) { return "NEGATIVE_EVIDENCE"; }
+    if(code == 6) { return "SUPPRESSED"; }
+    if(code == 7) { return "REVISED_INSTALL"; }
+    return "CHALLENGER_PROV";
+}
+fn sp_is_install(code:i32) i32 {
+    if(code == 1 || code == 2 || code == 3 || code == 7 || code == 8) { return 1; }
+    return 0;
+}
+
+// ---------------- state ------------------------------------------------------
+fn sp_init() []u8 {
+    let st:[]u8 = nio_alloc(4096);
+    if(st.len == 0) { return st; }
+    let i:i32 = 0;
+    while(i < 4096) { st[i] = 0; i = i + 1; }
+    return st;
+}
+fn sp_slot_valid(st:[]u8, base:i32) i32 { return sp_get32(st, (base + 8) / 4); }
+fn sp_slot_put(st:[]u8, base:i32, jc:i32, meas:i32, evhash:[]u8) void {
+    sp_put32(st, base / 4, jc);
+    sp_put32(st, (base + 4) / 4, meas);
+    sp_put32(st, (base + 8) / 4, 1);
+    let oc:i32 = sp_get32(st, 2196 / 4);
+    sp_put32(st, (base + 12) / 4, oc);
+    sp_put32(st, 2196 / 4, oc + 1);
+    let k:i32 = 0;
+    while(k < 32) { st[base + 16 + k] = evhash[k]; k = k + 1; }
+}
+fn sp_slot_clear(st:[]u8, base:i32) void {
+    sp_put32(st, (base + 8) / 4, 0);
+}
+// byte-for-byte evhash compare of slot's stored hash vs h (32 B).
+fn sp_evhash_eq(st:[]u8, base:i32, h:[]u8) i32 {
+    let k:i32 = 0;
+    while(k < 32) {
+        if(st[base + 16 + k] != h[k]) { return 0; }
+        k = k + 1;
+    }
+    return 1;
+}
+
+// ---------------- the gate step (cf1 lines 324-413, extracted) --------------
+// prog: 0 = draft/PASS presentation, 1 = negative-evidence record.
+// pred: 1 (the claim reached the gate). src: 0 = proposer, 1 = attested C1.
+// evhash: 32-byte claim evidence hash (stored on first observation,
+//         cross-bound on promotion per D2).
+fn sp_step(st:[]u8, task:i32, jcode:i32, conf:i32, meas:i32,
+           prog:i32, pred:i32, src:i32, evhash:[]u8) i32 {
+    let disp:i32 = 0;
+    let tol:i32 = sp_tol_of(task);
+    let nn:i32 = sp_get32(st, 144 / 4);
+    let nm:i32 = 0;
+    let k:i32 = 0;
+    while(k < nn) {
+        let nj:i32 = sp_get32(st, (148 + k * 8) / 4);
+        let nmv:i32 = sp_get32(st, (148 + k * 8 + 4) / 4);
+        if(nj == jcode && sp_iabs32(nmv - meas) <= tol) { nm = 1; }
+        k = k + 1;
+    }
+    if(prog == 1) {
+        if(nm == 0 && nn < 256) {
+            sp_put32(st, (148 + nn * 8) / 4, jcode);
+            sp_put32(st, (148 + nn * 8 + 4) / 4, meas);
+            sp_put32(st, 144 / 4, nn + 1);
+        }
+        disp = 5; // NEGATIVE_EVIDENCE
+    } else if(pred == 0) {
+        disp = 0; // WITHHELD
+    } else if(nm == 1) {
+        disp = 6; // SUPPRESSED
+    } else {
+        let pv:i32 = sp_slot_valid(st, 0);
+        if(pv == 1) {
+            let pj:i32 = sp_get32(st, 0);
+            if(jcode != pj) {
+                if(conf >= 700) {
+                    let cv:i32 = sp_slot_valid(st, 96);
+                    let cj:i32 = sp_get32(st, 96 / 4);
+                    let cm:i32 = sp_get32(st, (96 + 4) / 4);
+                    if(cv == 1 && cj == jcode && sp_iabs32(cm - meas) <= tol
+                       && sp_evhash_eq(st, 96, evhash) == 1) {
+                        if(src == 1) {
+                            sp_slot_put(st, 0, jcode, meas, evhash);
+                            sp_slot_clear(st, 96);
+                            disp = 7; // REVISED_INSTALL
+                        } else {
+                            disp = 8; // D1: unattested second challenger stays provisional
+                        }
+                    } else if(cv == 1 && cj == jcode && sp_iabs32(cm - meas) <= tol) {
+                        disp = 0; // D2: agreeing challenger, evidence unbound => fail closed
+                    } else {
+                        sp_slot_put(st, 96, jcode, meas, evhash);
+                        disp = 8; // CHALLENGER_PROV
+                    }
+                } else {
+                    disp = 4; // CONFLICT_WITHHELD
+                }
+            } else {
+                disp = 2; // CORROBORATED
+            }
+        } else {
+            let vv:i32 = sp_slot_valid(st, 48);
+            if(vv == 1) {
+                let pj:i32 = sp_get32(st, 48 / 4);
+                let pm:i32 = sp_get32(st, (48 + 4) / 4);
+                if(jcode == pj && sp_iabs32(pm - meas) <= tol) {
+                    if(sp_evhash_eq(st, 48, evhash) == 0) {
+                        disp = 0; // D2: re-observation cites different evidence => fail closed
+                    } else if(src == 1) {
+                        sp_slot_put(st, 0, jcode, meas, evhash);
+                        sp_slot_clear(st, 48);
+                        disp = 3; // PERMANENT_INSTALL
+                    } else {
+                        disp = 1; // D1: unattested re-observation stays provisional
+                    }
+                } else if(jcode != pj) {
+                    sp_slot_put(st, 48, jcode, meas, evhash);
+                    disp = 1; // PROVISIONAL_INSTALL
+                } else {
+                    disp = 2; // CORROBORATED
+                }
+            } else {
+                sp_slot_put(st, 48, jcode, meas, evhash);
+                disp = 1; // PROVISIONAL_INSTALL
+            }
+        }
+    }
+    return disp;
+}
+
+// ---------------- published entries -----------------------------------------
+fn admit_claim(st:[]u8, task:i32, jcode:i32, conf:i32, meas:i32, evhash:[]u8) i32 {
+    if(st.len < 4096) { return 0; }
+    if(task != 0) { return 0; }       // v1 codebook: { FACT = 0 }; no other types
+    if(evhash.len != 32) { return 0; } // fail closed: unbound evidence
+    return sp_step(st, task, jcode, conf, meas, 0, 1, 0, evhash);
+}
+fn admit_neg(st:[]u8, task:i32, jcode:i32, meas:i32) i32 {
+    if(st.len < 4096) { return 0; }
+    if(task != 0) { return 0; }
+    let zero:[]u8 = nio_alloc(32);
+    if(zero.len == 0) { return 0; }
+    let i:i32 = 0;
+    while(i < 32) { zero[i] = 0; i = i + 1; }
+    let d:i32 = sp_step(st, task, jcode, 0, meas, 1, 1, 0, zero);
+    nio_free(zero);
+    return d;
+}
