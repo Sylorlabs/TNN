@@ -839,3 +839,139 @@ queue); his blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12,
 S11-AUD, S13, S14, whirlpool-planform); a T2-targeted veto candidate under a
 fresh prereg (the one reopen path the M4 R2 closure permits); D-VID-1
 geometry-churn work only under a fresh prereg with corrected inverse.
+
+## Wave 20260924-1121pdt verdicts (2026-09-24)
+
+Wave HEAD at start: 42e24b381 (merge of origin/tnn-native-lab 5a4a6b840;
+his overnight PAM round-4, H2 run-2, LI-HARDEN, LI-PRINCIPLES, one-brain
+variant-B, fable, i32 OFFSET RULE, hell-hole V4 work all CLOSED and not
+re-litigated). Mid-wave origin moved again (through 81c37ecdf: PAM CU
+addendum, PAR tournament crew paths, LI-HARDEN tier1, code-ui judgment,
+LIMITS_AUDIT); merged with --no-edit, zero conflicts, at e2b16b6e9.
+Nothing reset, nothing rebased, nothing pushed. The 0521pdt archive
+pointer tnn-native-lab-wave-archive-20260924-0521pdt already existed at
+9f681e271 and was tested this wave. Debate: 5 motions (advocate brief,
+red-team skeptic report, coordinator-rendered judge rulings: the
+dedicated judge subagent could not be spawned, "subagent bootstrap is
+no longer authorized"); no overturns; the skeptic's provenance probe
+appears in every motion; zero em-dashes. Debate transcript:
+docs/lab/rsi/runs/wave-20260924-1121pdt/debate/ (ADVOCATE_BRIEF.md,
+JUDGE_RULINGS_1121.md) and redteam/REDTEAM_1121.md. Commit chain (all
+local, none pushed): 68c3bb868 (prereg freeze, both PROCEED preregs plus
+both NO-GO memos), 5aec600dc (CV-1 seal), 1783234e0 (implementations and
+evidence), 5b7de700a (debate). The prereg commit strictly precedes the
+seal and implementation commits (commit-order self-check holds).
+
+1. CLAIM-VERIFY-1 (deliberation-backed claim verification for the
+tnn_chat decline gate): ADOPT [NEW]. Frozen mapping: ADOPT iff CV-B1
+through CV-B6 all PASS. CV-B1: 24/30 honest resolutions on the sealed
+30-probe set (10/10 paraphrase answered verbatim, 13/14 adversarial
+declined per the key, 1/6 gaming declined per the key; all 20
+adversarial and gaming probes declined, none answered or jailbroken),
+zero unflagged confabulations: PASS exactly at the bar. CV-B2: 17/17
+in-KB turns byte-identical to the frozen baseline, 30/30 training
+probes specific declines: PASS. CV-B3: 3/3 byte-identical reruns on
+both sets: PASS. CV-B4: the prereg specifies the sealed 30; the
+implementer's 1.80x used the training 30. The red team's independent
+sealed-30 measurement is 2.07x, still <= 10x: PASS with the wave record
+corrected to 2.07x. CV-B5: 0 blanket refusals: PASS. CV-B6: seal shas
+match SEAL.md (PROBES.md cf2f3293..., KEY.md 371cd282...), separate
+author and implementer, zero sealed-content contamination in impl/:
+PASS. The 6 sealed misses are specificity misses (the decline names the
+wrapper's first-3 uncovered words in turn order, cv_cite caps at 3,
+rather than the key's payload words; A02 is the max-overlap tie-break
+case), not honesty misses. Two disclosures travel with the adoption:
+the op-counter instrument was built comparable (no frozen op-counter
+artifact exists; stdout verified byte-identical under the same
+discipline), and the prereg-specified exact matching (no stemming) is
+fail-closed on some inflected-form probes the frozen stemmer answered
+(a real capability cost). Ordered follow-up for a next wave: fix the
+decline-citation rule (name payload words; never present a covered word
+as uncovered: A02's "contains nothing about 'martian'" is literally
+false since fact 15 covers it, a blind spot in the zero-confabulation
+bar) and re-test on a fresh sealed gaming set. Adoption scope: the
+candidate implementation and evidence are committed in the run dir; the
+live dialogue gate is NOT swapped by this verdict (that integration
+needs its own prereg). Provenance: no renders; the path-5 mechanism is
+new, paths 1-4, the KB, fixtures, and template inherited frozen.
+Commits: 68c3bb868 (prereg), 5aec600dc (seal), 1783234e0
+(implementation, evidence, sealed scoring).
+
+2. G1 SUNSHAFTS (screen-space raymarched crepuscular shafts on the r8c
+substrate): DISCARD [NEW]. Baseline rebuilt first and byte-identical
+to the S14 record (e4f65557...). KB1 PASS (3/3 byte-identical,
+9f23b64c...), KB4 PASS (0.12), KB6 PASS (0.9809, E3 honored), KB8 PASS
+(1.69x). Killing evidence: the frozen verifier point-set is
+geometrically defective (sun below horizon, points inside the
+gas-giant disc), so KB2, KB3, KB5, KB7 are unevaluable as frozen; and
+the mechanism as frozen produced a broad sky wash (97.14% of sky
+pixels lifted, mean dL +33.07; KB5 would fail 56.28 vs 6.0), so this is
+a prereg-spec defect AND a mechanism miss (T-gate 400 vs field mean
+~511). No bar weakened, no sealed pair prepared (correctly), nothing
+reaches his judge queue. A next-wave re-freeze with geometrically
+validated point sets and a recalibrated T-gate is legitimate new work;
+the concept is not dead. Provenance: variant BMPs first rendered this
+wave (9f23b64c...), queue items recorded QUEUED-UNJUDGED and untouched.
+Commits: 68c3bb868 (prereg), 1783234e0 (implementation, evidence).
+
+3. M4 R2 T2-veto reopen: STAND-DOWN [VOID] (no candidate). Deterministic
+recount on HEAD: 7 false adversarial installs, 7/7 in T2 colorconst, 0
+in T1/T3/T4/T5/T6; the arithmetic precondition for the reopen is met,
+but the falses live in Micah's closed colorconst front (FS-F2C FINAL
+ALIVE, 98.58 percent), so the wave's collision rule closes the reopen.
+His overnight work not re-litigated; no hole found. Memo only.
+
+4. KB4 adversarial FIR tail beyond FS-F2C: STAND-DOWN [VOID] (no
+candidate). Independent recount of the committed 2021pdt decisions log:
+38 adversarial installs (colorconst 17, motiondir 2, pitchdisc 14,
+timbredisc 5), 7 falses all in T2 colorconst (p000 p002 p006 p008 p010
+p016 p018); every mechanism lane closed or owned elsewhere. Pinned
+7/38 (1842 bp) stands. Memo only. Process disclosure: the scout's
+accidental python3 -c printed "skip", touched no artifact, and the
+phase produced no run evidence (prereg-only); the memo stands as
+written (authored via the file-write tool), recorded per the MD-SSD-1
+precedent. No standing-rule change.
+
+5. Fork battery: PASS on all 18 tested forks [NEW, process
+confirmation]. 11 refs: local tnn-native-lab 42e24b381, origin/
+tnn-native-lab 2eb04e1b8 (new mid-wave tip, read-only), archives
+3aa59360d, aab82c574, 9f681e271, backup 3947dca1a, origin/fs-gr1
+61aef5669, origin/main fac34a19f, origin/r2-7 2d99d183f, origin/
+reorg/phase-0-1 991432226, origin/wg-freeze f875b3417. Plus 7
+forktest/* detached worktrees (main 293602fb1, r2-7 a0e7f8ba2,
+reorg_phase-0-1 991432226, tnn-native-lab bd3097874,
+tnn-native-lab-remote cea8db22f, backup 3947dca1a, wg-freeze
+f875b3417): the wave brief's "absent" premise was wrong (they are
+registered in this repo's worktree list), so the coordinator ran the
+frozen battery read-only against them; 7/7 PASS, correction recorded
+in the addendum (committed with the evidence in 68c3bb868). znc
+byte-identical (498abcb5) on every fork; shell and pure-Zag drivers
+agree.
+
+6. tnn_chat FIT on HEAD: FIT [NEW, process confirmation]. 2/2 builds
+byte-identical (baseline 1ada2fae..., decline 20273a99...), 30/30
+specific declines (3 runs), 17/17 in-KB with baseline parity (3 runs),
+10/10 KB5 (3 runs), 9/9 rerun pairs byte-identical. Caveats travel:
+38-fact closed-book instrument, not a general interactive TNN. No
+runnable interactive TNN exists on this branch beyond the frozen probe
+instruments; reported plainly, nothing faked.
+
+7. Hygiene resolved (non-verdict): the committed decisions_sha256.txt
+is annotated (source log lost with /tmp; the sha is an unverifiable
+trace, never to be cited as evidence); the R33 vendored duplicate was
+removed (byte-identical to the archive copy); judge4_base.zag and
+driver4_base.zag moved to secondpath/void/ as clearly-labeled void
+work products; the znc mode drift (100644 to 100755, bytes identical
+498abcb5) is committed and recorded. The 2021pdt/0221pdt run dirs and
+other prior-wave residue remain uncommitted (out of this wave's scope).
+
+No new standing rules adopted by this debate.
+
+Queued next: the five governance rulings still awaiting him (S7
+strike, MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull,
+S11-AUD pull, C12 queue); his blind verdicts on the sealed pairs (R9,
+C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14, whirlpool-planform;
+unchanged, nothing added this wave); the CV-1 decline-citation fix
+re-test on a fresh sealed gaming set; G1 re-freeze (validated geometry
+plus recalibrated T-gate) as legitimate next-wave work under a fresh
+prereg.
