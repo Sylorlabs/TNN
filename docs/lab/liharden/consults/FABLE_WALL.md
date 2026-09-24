@@ -1,0 +1,460 @@
+# LI-HARDEN — Fable Wall Consult (2026-09-24)
+
+One batched deep round with claude-fable-5.1 on THE WALL (M3/R3/R4 overlap: unanimous false agreement among genuinely diverse sources, host-shape-identical to honest corroboration).
+
+Files: `prompt_fable_wall.md` (the prompt), `fable_wall_out.txt` (raw response), this file (extraction). Call method: `fable_stream.py` (streaming SSE; non-streamed `fable.py` 524s at ~120s on this long generation).
+
+---
+
+## RANKED EXTRACTION — actionable mechanisms for the build crews
+
+### Keep — speedbumps worth building
+
+**1. W11 — DNS nameserver-apex clustering (Tier 2).** For each quorum domain, query authoritative nameservers; if ≥2 members share the same NS apex (non-whitelisted), block. ~40 LOC, 0.5 engineer-days, deterministic, low false-positive risk (whitelist Cloudflare/AWS/Google DNS). This doubles as the §7 falsification test case (HL-14, see §4 below). Weakness: attacker uses 3 different free DNS providers (adaptation cost ~10 min). Verdict from fable: KEEP Tier 2.
+
+**2. W3 — Operator-coincidence provenance, i.e. HL-13 buildout (Tier 3, detection-only).** WHOIS registrant email + IP /24 + nameserver apex + CMS signature + ad/analytics IDs; ≥2 features overlapping across the quorum → block. Measured PRESENT on naive R3/R4/M3 quorums, ABSENT on all honest installs. ~200 LOC, WHOIS API cost ~$0.01/query. Weakness: metadata diversification (different registrars, emails, VPS providers, CMSes) — adaptation ~2h + $50. This is the unblocked HL-13 from the convergence draft; its true blocker is the pipeline decision (production glue forbidden to emit metadata), not the verdict logic. Fable: KEEP as cost-raiser ($10 → ~$60 attacker cost), not a seal.
+
+**3. W6 — Registrable-domain age threshold, 30-day (Tier 3, detection-only).** Reuses the W3 WHOIS pipeline (~20 LOC). Requires quorum domains ≥30 days old. Catches impatient attackers (pre-age domains or buy aged domains: 30–90 days or ~$60). Fable: KEEP, but crews must MEASURE the honest-publisher false-negative risk (new legitimate publisher covering breaking news gets withheld — latency vs security trade; quantify before adopting under any bar).
+
+**4. W12 — HTML boilerplate/CMS fingerprint overlap (Tier 2).** Pairwise Jaccard of CSS classes / generator meta tags / JS library filenames; J > 0.7 + not-whitelisted shared-CMS platform → block. ~80 LOC, reuses HL-6 parsing, catches lazy CMS-template reuse. Fable: KEEP; weakness: template diversification is free to attacker, so speedbump only.
+
+**5. W8 — IP geolocation diversity (Tier 3, detection-only, optional).** Quorum IPs must span ≥2 countries (MaxMind). ~40 LOC. Weakness: $45/mo geo-diverse VPS defeats it. Fable: KEEP but this is the weakest of the five — crews may park it if WHOIS pipeline already covers M3's cost-raising.
+
+### Killed — with one-line reason each
+
+- **W1** surrounding-text Jaccard: attacker hires 3 writers for genuine diversity ($300) — cheaper than tuning the threshold without losing H8.
+- **W2** fetch-time jitter: attacker serves stable cloaked content (zero adaptation); 2× fetch budget wasted.
+- **W4** claim-novelty temporal prior: publication timestamps are fully attacker-controlled (backdate meta tags / craft URL paths); unforgeable only with external attestation.
+- **W5** contradiction graph: attacker never self-contradicts; needs LLM (breaks determinism), false positives uninstall honest claims.
+- **W7** User-Agent cycling: attacker serves stable content to all UAs (zero adaptation); detects only the laziest sub-subset of cloakers.
+- **W9** link-graph PageRank: PageRank is buyable ($50 link farm); cost (web-scale graph) ≫ value.
+- **W10** embedding outlier detection: penalizes novel TRUTH (mission failure) while missing plausible-sounding falsehoods (attacker's actual output).
+- **W13** cryptographic claim attestation: right answer in a different world; PKI adoption barrier is insurmountable on the real web.
+
+### §7 verdict (crew-relevant summary)
+
+Fable steelmans §7 as: *"no computable host-level predicate P computed from the instrument's CURRENT observation set can separate M3/R3/R4 from honest corroboration without false positives"* — and judges it **valid within its assumptions but NOT airtight as an impossibility result**. It is a "no host function from current observations" result, quietly assuming the observation set is fixed at {URL, domain, IP, HTML, HTTP metadata}.
+
+- **Cheapest weakening that breaks it:** add WHOIS registrant email + nameserver apex to the observation set (~$0.01/query, deterministic if cached). This enables W11/W3. The claim then becomes "no predicate from the expanded set survives metadata diversification" — a narrower, weaker claim.
+- **The ceiling without external feeds:** HL-1..HL-13 + W11 + W3 + W6 raise attacker cost from ~$10 to ~$100 and add ~30 days of delay. Beyond that requires breach-intelligence feeds, financial/payment-rail records, CT-log anchoring, or publisher PKI — none of which exist in the instrument's world.
+- **Refinement crews should adopt:** sort residuals into fable's three buckets — (a) R3-without-breach-intel, R4, hardened-M3: unresolvable at this layer; (b) E_LD3 (link-density — but note attacker's cheap dilution counter, 2h), C8/C9 (DNS/cert attestation) as unattacked-so-far signals — but fable's own pre-mortem demotes E_TS3 to "defeatable by staggering publication at zero code," so treat it as nearly-(a); (c) HL-10 mirror dedup: works but costs H8 (11/12) — resolvable only where the bar forbids.
+- **Important reframing:** R4 (wire echo of falsehoods by genuinely independent subscribers) is NOT attacker-constructible unanimous-false — the agreement is genuine and independent; the error is upstream. Installing IS correct behavior. Crews should NOT treat R4 as in-scope for "hopping the wall"; it belongs to a different fix (upstream wire-service adjudication), outside KB-layer scope.
+
+### Falsification battery (HL-14) — the experiment that cracks §7 open or confirms it
+
+Fixtures: **F_M3_NAIVE** (lazy attacker: single WHOIS email, single NS apex, single /24), **F_M3_HARDENED** (diversified: 3 emails, 3 DNS providers, 3 /24s), **F_H_WIRE** (honest wire truth, H8-style, 4 distinct subscribers). Predicate: block if ≥2 of {whois-email-apex, nameserver-apex, ip-/24} overlap across quorum (with privacy-service/DNS-provider whitelists). **§7 falsified iff:** F_M3_NAIVE blocked AND 13/13 honest installs hold AND F_M3_HARDENED not blocked — proving a host-level predicate from an expanded observation set narrows the wall (lazy-M3 closed, honest intact) while admitting the hardened wall stands. **Wall-is-real outcome:** naive-M3 blocked only at the price of <13/13 honest (e.g., F_H_WIRE blocked on shared NS apex) — false positives unavoidable. **Bar-too-strict outcome:** closing naive-M3 requires `overlap ≥ 1` and costs exactly 1/13 honest — surmountable at a quantified cost.
+
+Note for the prereg authors: fable's falsification criterion falsifies the STRONG form of §7 ("no improvement possible") but deliberately leaves hardened-M3 standing — this is a narrowing result, not a wall-hop. Frame it that way in the prereg; do not claim the wall is gone.
+
+### My crew-level read (model-consult crew, not build crew)
+
+1. The keep-list is honest cost-raising, not security theater — but crews must run the HL-14 battery BEFORE adopting W11/W3/W6, because the falsification outcome tells us whether the wall has a crack or the bar needs quantifying.
+2. HL-13's blocker is a pipeline decision (production glue forbidden to emit metadata), not verdict logic — this is a governance call, flagged upward, not something the build crews can resolve alone.
+3. Nothing in fable's round contradicts the convergence draft's honest "cannot fix" list; it extends it with R4-as-correct-behavior, which actually NARROWS the target to M3 (+R3 only with a breach feed). That is the most useful reframing: the wall to hop is M3-hardened-astroturf, and the honest admission is that diversified ops beat every host-layer predicate.
+4. Do NOT ask fable to revisit this: the round is closed by design. Next step is crew-built batteries, not more model opinions.
+
+---
+
+## FULL RESPONSE (verbatim)
+
+[Full text follows in fable_wall_out.txt — 39,356 bytes. Embedded below for archival completeness.]
+
+```text
+# LI-HARDEN Security Advisory: One-Shot Deep Round
+
+## (1) WHY IS THE WALL HARD?
+
+### The Fundamental Information Gap
+
+The wall is hard because **the KB layer observes only the published artifact, never the publishing process**. At decision time, the instrument sees:
+- Canonical URLs and their registrable domains
+- Retrieved HTML and extracted text
+- HTTP metadata (redirects, headers, timing)
+- The claim sentence itself
+
+It **cannot** observe:
+- Whether the publishing decision was causally independent
+- The epistemic provenance of the claim (original reporting vs. echo)
+- Whether operators coordinated out-of-band
+- The temporal order of causation (who copied from whom)
+
+The missing bit is **causal independence metadata** — a signal that the n sources reached the claim through genuinely independent evidence-gathering, rather than one source originating and n-1 echoing. This is fundamentally unrecoverable from static retrieval because:
+- Honest wire syndication looks identical to planted mirrors
+- Genuine independent reporting of a false consensus looks identical to coordinated planting
+- Temporal precedence is forgeable (attacker controls publication timestamps)
+
+### Residual Classification
+
+**(a) Logically unresolvable at this layer** (observation-indistinguishable from honest consensus):
+
+- **R3 (compromised legitimate sites)**: If attacker compromises 3+ genuinely independent sites in a time window, the published artifacts are byte-for-byte identical to those sites legitimately agreeing. The instrument cannot distinguish "site A was hacked to say X" from "site A's editors genuinely believe X" without external breach intelligence.
+
+- **R4 (wire echo of falsehoods)**: If 3+ independent wire subscribers publish a false AP/Reuters claim, each subscriber made an editorially independent decision to trust the wire. The quorum is **correct behavior** — the sources ARE independent, the agreement IS genuine. The problem is upstream (wire service error), which the KB layer cannot adjudicate.
+
+- **M3 (multi-network astroturf, diverse text)**: If attacker operates 3+ domains with distinct registrable domains, distinct IPs, distinct CMS fingerprints, and hires 3 writers to produce semantically identical but lexically diverse text, the host-level metadata is genuinely diverse. The only remaining signal is **operator coincidence** (HL-13), which requires metadata the production glue is forbidden to emit, and is defeatable by operational diversification (different payment rails, different hosting providers, staggered registration).
+
+**(b) Merely unattacked-so-far** (signal exists in principle):
+
+- **E_LD3 (link-dense corroboration)**: If attacker embeds the target claim in pages with >100 outbound links (link spam fingerprint), the **link-density distribution** of the quorum is measurably different from honest corroboration. Not implemented because HL-6 (main-text-only) was cheaper, but link-density is a computable feature. **Pre-mortem**: attacker dilutes links across the page to match honest distribution (cost: 2 engineer-hours).
+
+- **E_TS3 (timestamp clustering)**: If all n quorum pages were published within a 60-second window, the **temporal clustering** is anomalous vs. honest agreement (which spans hours to days). Not implemented because temporal metadata requires a clock-tracking pipeline. **Pre-mortem**: attacker staggers publication over 48 hours (cost: wait time, zero code).
+
+- **C8/C9 (dangling-takeover, split-horizon DNS)**: Require DNS/cert/IP attestation beyond URL spelling. Not implemented because HL-1 (canonical URL parser) was deemed sufficient for the host-forgery class. Signal exists (DNSSEC chain, cert transparency logs) but needs a validation pipeline.
+
+**(c) Resolvable only at cost the zero-regression bar forbids**:
+
+- **HL-10 (body-hash mirror dedup)**: Full-page hash collision detects byte-identical mirrors. Measured to block plant-mirrors (M2) but also blocks honest wire syndication (H8: 4-host AP wire story withheld). The signal exists and works; the cost is 1/12 honest installs lost. **Why the bar forbids it**: honest syndication is a legitimate corroboration pattern (4 independent editors chose to publish the wire story), and LI-HARDEN's mission is to install truth, not penalize syndication.
+
+**The §7 argument made precise**: At the host layer, M3/R3/R4 are **observation-equivalent** to honest corroboration under any host-level predicate P that the instrument can compute from (URL, domain, IP, redirect chain, fetch profile). The decision problem "is this quorum honest?" is **practically undecidable** because the distinguishing feature is causal independence, which is not encoded in the observable artifacts.
+
+**Where the argument breaks**: If the instrument observes one of:
+1. **Cryptographic authorship attestation** (e.g., each publisher signs claims with a long-lived key, attacker cannot forge 3+ distinct keys)
+2. **External breach intelligence** (e.g., a feed of "domain X was compromised on date Y")
+3. **Epistemic provenance metadata** (e.g., each publisher labels claims as "original reporting" vs. "wire", instrument requires 3 original-reporting sources)
+4. **Social graph of operators** (e.g., domain registrants' payment-rail overlap, WHOIS privacy-service clustering)
+
+None of these are recoverable from static HTML retrieval. The cheapest is #4 (registrant clustering), but it requires WHOIS/payment-rail data the instrument does not collect, and is defeatable by operational diversification.
+
+---
+
+## (2) MECHANISMS BEYOND HL-1..HL-13
+
+### W1: Diversity-of-Surrounding-Text (Wire-Truth Separator)
+
+**Mechanism**: Compute the **Jaccard similarity of non-claim sentences** in the ±200-word window around each quorum member's claim. If J > 0.5 for all pairs, the pages are mirrors (HL-10-style block). If J < 0.2, the pages are genuinely independent (different articles, different context). Wire truth typically has J ~ 0.3–0.4 (same lead, different commentary). Install only if mean pairwise J < 0.4.
+
+**Dents**: M2 (byte-identical mirrors), partially dents M3 (if attacker reuses boilerplate context). Does NOT dent R3/R4 (compromised sites and wire echo have diverse surrounding text).
+
+**Cost**: Low compute (pairwise Jaccard on tokenized text, O(n²) comparisons, n ≤ 10). Throughput risk: MEDIUM — needs a tuned threshold to separate wire-truth (should install, J ~ 0.35) from plant-mirrors (should block, J ~ 0.8). If threshold is too strict, kills wire-truth (H8 drops to 11/12). If too loose, M2/M3 slip through.
+
+**Pre-mortem**: Attacker hires 3 writers to produce genuinely diverse articles (different ledes, different framing, different quotes) that all contain the target claim. Cost: $300 (3 × $100/article). Jaccard drops to 0.1, indistinguishable from honest corroboration. **Adaptation cost is cheaper than the defense's tuning cost.**
+
+**Verdict: KILL.** The pre-mortem wins. Attacker's marginal cost (hire writers for diversity) is lower than the defense's cost to tune the threshold without losing H8.
+
+---
+
+### W2: Fetch-Time Jitter (Cloaking Detection)
+
+**Mechanism**: For each URL, perform **two fetches separated by 3–6 hours** (jitter randomized per URL, but deterministic from URL hash to preserve byte-identical reruns). If content hash differs between fetches, mark as "volatile" and exclude from corroboration. Rationale: cloaked pages (C6: serve different content to different IPs or User-Agents) are unstable; honest pages are stable over short windows.
+
+**Dents**: C6 (cloaking to serve claim to KB, hide from human auditors). Does NOT dent M3/R3/R4 (those attacks serve stable content).
+
+**Cost**: HIGH. Doubles fetch budget (2× bandwidth, 2× latency). Breaks the single-pass ingestion model (requires a 6-hour delay before verdict). Complexity: moderate (add retry logic, hash comparison, deterministic jitter from URL seed).
+
+**Pre-mortem**: Attacker serves **stable cloaked content** (e.g., serve the false claim to all IPs, forever). Fetch-time jitter detects nothing. Alternatively, attacker cloaks based on HTTP header fingerprints the instrument cannot diversify (e.g., serve false claim only to User-Agent "webg/1.0", serve 404 to others). If the instrument diversifies User-Agent, it breaks byte-identical reruns. **Adaptation: attacker serves stable content. Cost: zero.**
+
+**Verdict: KILL.** Pre-mortem wins. Cloaking-by-stability defeats this at zero attacker cost. The 2× fetch budget is wasted.
+
+---
+
+### W3: Operator-Coincidence Provenance (HL-13 Buildout)
+
+**Mechanism**: Build the metadata pipeline HL-13 requires. For each domain in a quorum, extract: (a) WHOIS registrant email (modulo privacy services); (b) IP /24 subnet; (c) name server apex; (d) CMS signature (Wordpress version, Drucker fingerprint); (e) Google Analytics / ad network IDs embedded in HTML. Compute **pairwise overlap** for each feature. If ≥2 features overlap across all quorum members, block install (operator-coincidence detected).
+
+**Dents**: M3 (multi-network astroturf), R3 (if compromised sites share attacker's GA ID injected during breach). Does NOT dent R4 (wire echo has genuinely diverse operators).
+
+**Cost**: MEDIUM-HIGH. Requires: WHOIS API access (rate-limited, costs $$$); IP geolocation DB; passive DNS; HTML parser for ad IDs. Complexity: ~200 lines. Throughput risk: LOW if conservatively tuned (overlap threshold ≥2 features, so single shared NS or IP doesn't trigger). Determinism: preserved if WHOIS/DNS are cached and versioned.
+
+**Pre-mortem**: Attacker **diversifies operational metadata**. Register 3 domains via different registrars, different email addresses, different payment rails (crypto/prepaid/stolen CC). Host on different VPS providers (different /24s). Use different CMS (one Wordpress, one static HTML, one Ghost). Embed no tracking IDs, or use different ad networks. Overlap drops to zero. **Adaptation cost: 2 engineer-hours to script diversification, $50 for 3 VPS instances.**
+
+**Measured effectiveness**: Crew A confirmed operator-coincidence was PRESENT on R3/R4/M3 quorums in the V-BF1 battery, ABSENT on honest installs. But those attacks were built naively (same attacker, same infra). A sophisticated attacker diversifies trivially.
+
+**Verdict: KEEP (Tier 3, detection-only).** This is a **speedbump, not a wall**. It raises attacker cost from $10 (3 domains) to $60 (3 domains + diversified infra + scripting), and catches **lazy attackers** who reuse infra. It does NOT stop a motivated attacker. Value: reduces attacker ROI for low-stakes claims (if planting costs $60 and the claim's value to attacker is $50, attack is uneconomical). Accept that this is a cost-raising defense, not a hermetic seal.
+
+---
+
+### W4: Claim-Novelty Temporal Prior (TTL + Revalidation Buildout)
+
+**Mechanism**: HL-11 buildout. For each installed claim, record **first-install timestamp**. When the same claim (modulo paraphrase) is re-nominated by a new quorum, check: if **all quorum members' publication dates are AFTER the first-install timestamp**, the new quorum is likely **echoing** the installed claim (wire propagation or social-media viral spread). Require at least one quorum member to predate the first-install by ≥24 hours (temporal precedence = independent origination). If all postdate, **flag as "echo quorum"** and require human review before install.
+
+**Dents**: R4 (wire echo), partially dents M3 (if attacker cannot backdate publication timestamps to predate the first install). Does NOT dent R3 (compromised sites can be breached before or after first install).
+
+**Cost**: MEDIUM. Requires: (a) persistent claim index keyed by normalized claim + paraphrase hash; (b) publication-date extraction (HTML meta tags, URL path structure, heuristic fallback); (c) a temporal-precedence check at verdict time. Complexity: ~100 lines. Throughput risk: LOW if "echo quorum" is detection-only (flag for review, don't auto-block). Determinism: preserved if timestamp extraction is deterministic.
+
+**Pre-mortem**: Attacker **backdates timestamps**. Control publication date via (a) HTML `<meta property="article:published_time">` tag (trivial to forge), (b) URL path /2024/01/article.html (trivial to craft), (c) HTTP `Last-Modified` header (attacker controls server). If the instrument uses web.archive.org snapshots to verify timestamps, attacker can (a) avoid archiving (submit robots.txt to block crawlers, or host on IPs archive.org doesn't crawl), or (b) pre-plant pages on the archive before launching the attack. **Adaptation cost: zero code (backdate HTML meta tag), or $0 (submit to archive.org manually before attack).**
+
+**Verdict: KILL.** Pre-mortem wins. Timestamps are attacker-controlled and unforgeable without external attestation (e.g., blockchain anchoring, certificate transparency logs). The instrument cannot distinguish "page was published at time T" from "page was crafted to claim publication at time T".
+
+---
+
+### W5: Cross-Claim Consistency (Contradiction Network)
+
+**Mechanism**: Extend HL-4 (contradiction veto) to a **global consistency check**. Maintain a graph where nodes are normalized claims and edges are "contradicts" relations (detected via semantic parser or LLM). When installing a new claim C, check: does C contradict any already-installed claim? If yes, **uninstall the contradicted claim** and block C (or flag both for review). Rationale: attacker who plants a false claim C at time T1 cannot plant its negation ¬C at time T2 without triggering a contradiction cascade.
+
+**Dents**: M3 (attacker must maintain consistency across all planted claims, raising operational complexity). Does NOT dent R4 (wire echo can be internally consistent even if false).
+
+**Cost**: HIGH. Requires: (a) semantic parser or LLM to detect contradictions (expensive per claim, non-deterministic unless frozen); (b) O(n) contradiction checks per install, where n = installed claim count; (c) a policy for resolving contradictions (uninstall old? block new? flag both?). Throughput risk: HIGH — false positives uninstall honest claims. Determinism: BROKEN if using LLM (non-deterministic). Complexity: ~500 lines + LLM API dependency.
+
+**Pre-mortem**: Attacker simply **avoids planting contradictory claims**. The contradiction graph is only useful if the attacker's claim set is internally inconsistent, which is a self-inflicted wound. A minimally competent attacker maintains a consistent false worldview. **Adaptation cost: zero (attacker already avoids contradictions for plausibility).**
+
+**Verdict: KILL.** Pre-mortem wins. The attacker controls the planted claim set and will not self-contradict. The cost (LLM inference, broken determinism, false-positive risk) vastly exceeds the value (catching only incompetent attackers).
+
+---
+
+### W6: Registrable-Domain Age Threshold
+
+**Mechanism**: For each domain in a quorum, query **domain registration date** via WHOIS. Require all quorum domains to be **≥90 days old** at fetch time. Rationale: attacker who bulk-registers domains for a campaign will have fresh registrations; established publishers have aged domains.
+
+**Dents**: M3 (if attacker uses freshly registered domains). Does NOT dent R3 (compromised legitimate sites have aged domains) or R4 (wire subscribers are established publishers).
+
+**Cost**: LOW. WHOIS query per domain (same pipeline as W3). Determinism: preserved if WHOIS responses are cached. Throughput risk: MEDIUM — false positive if a legitimate new publisher launches and reports truth within 90 days (e.g., a new local news site covers a local event). The 90-day threshold is arbitrary; tuning it trades off attacker cost vs. honest throughput.
+
+**Pre-mortem**: Attacker **pre-ages domains**. Register 10 domains, wait 90 days, launch attack. **Adaptation cost: 90 days of time (no code, no money beyond domain registration)**. Alternatively, attacker buys aged domains on the secondary market ($20–$50 per domain with 5+ year history). **Total adaptation cost: $60 for 3 aged domains, or 90 days of calendar time.**
+
+**Measured risk to honest throughput**: If a genuine breaking-news event is first reported by a new publisher (e.g., a citizen journalist launches a blog to cover a local scandal), the 90-day rule withholds the install even if 2 other established publishers corroborate. This is a **false negative** (truth withheld). Acceptable only if the mission tolerates "install truth slowly" over "install truth immediately".
+
+**Verdict: KEEP (Tier 3, detection-only).** This is another **speedbump**. It raises attacker cost (buy aged domains or wait 90 days) and catches **impatient attackers**. It does NOT stop a patient attacker. Recommended threshold: 30 days (compromise between attacker delay and honest new-publisher coverage). Accept that this trades latency for security.
+
+---
+
+### W7: Fetch-Profile Diversity (User-Agent Cycling)
+
+**Mechanism**: Fetch each URL **twice**: once with User-Agent "webg/1.0" (baseline), once with User-Agent "Mozilla/5.0 ... (Chrome)" (mimic browser). Compare content hashes. If hashes differ, the page is **serving different content based on User-Agent** (cloaking variant). Block install.
+
+**Dents**: C6 (User-Agent-based cloaking). Does NOT dent M3/R3/R4 (those attacks serve stable content to all User-Agents).
+
+**Cost**: LOW compute (2× fetches, hash comparison). Throughput risk: LOW (cloaking is rare among honest publishers). Complexity: ~30 lines. Determinism: preserved (User-Agent string is fixed, hash comparison is deterministic).
+
+**Pre-mortem**: Attacker serves **stable content to all User-Agents** (same content for webg/1.0 and Chrome). The instrument detects nothing. **Adaptation cost: zero code (attacker simply disables User-Agent checks).**
+
+**Verdict: KILL.** Pre-mortem wins. User-Agent diversity detects only attackers who cloak by User-Agent AND are too lazy to serve stable content. This is a subset of a subset (cloakers who also segment by User-Agent). The 2× fetch cost is wasted.
+
+---
+
+### W8: IP Geolocation Diversity Threshold
+
+**Mechanism**: For each domain in a quorum, resolve IP address and geolocate to country (MaxMind GeoIP). Require quorum IPs to span **≥2 countries**. Rationale: attacker who bulk-hosts on a single VPS provider (e.g., DigitalOcean Singapore) will have geographically clustered IPs; honest multi-publisher corroboration spans jurisdictions.
+
+**Dents**: M3 (if attacker uses single-datacenter hosting). Does NOT dent R3 (compromised sites are geographically diverse) or R4 (wire subscribers span countries).
+
+**Cost**: LOW. IP geolocation DB (MaxMind, free tier). Determinism: preserved (cache geolocations per IP). Throughput risk: LOW — false positive only if 3+ honest publishers all use the same datacenter (rare). Complexity: ~40 lines.
+
+**Pre-mortem**: Attacker **diversifies hosting geography**. Rent VPS in 3 different countries (US, EU, Asia). Cost: $15/month × 3 = $45/month. **Adaptation cost: $45/month, zero code.**
+
+**Verdict: KEEP (Tier 3, detection-only).** Another **speedbump**. Raises attacker cost from $5/month (single VPS) to $45/month (geo-diverse VPS). Catches **cheap attackers** who host everything on one box. Value: reduces ROI for low-stakes claims. Accept that this is cost-raising, not hermetic.
+
+---
+
+### W9: Link-Graph Centrality (Citation Network)
+
+**Mechanism**: Build a **citation graph** where nodes are domains and directed edges are hyperlinks (domain A → domain B if A's HTML contains an `<a href>` pointing to B's domain). For each quorum, compute **PageRank centrality** of member domains. If all quorum members have PageRank < threshold (e.g., bottom 10% of the graph), the quorum is **link-isolated** (not cited by the broader web). Block install or flag for review. Rationale: attacker's fresh domains have no inbound links; established publishers are cited by others.
+
+**Dents**: M3 (if attacker's domains are link-isolated). Does NOT dent R3 (compromised legitimate sites have high PageRank) or R4 (wire subscribers are well-cited).
+
+**Cost**: HIGH. Requires: (a) crawl the web to build the link graph (massively expensive, or use a third-party graph like Common Crawl); (b) PageRank computation (O(n log n) per iteration, n = domain count in graph); (c) threshold tuning. Throughput risk: MEDIUM — false positive if 3 small independent blogs corroborate (low PageRank but genuinely independent). Complexity: ~1000 lines + dependency on external link graph.
+
+**Pre-mortem**: Attacker **builds inbound links**. Plant links to the attack domains from other attacker-controlled sites, or buy backlinks from SEO link farms ($50 for 100 links). PageRank rises above threshold. **Adaptation cost: $50, 1 week to accumulate links.**
+
+**Verdict: KILL.** Pre-mortem wins. PageRank is gameable (attacker can buy links). The cost (web-scale graph + PageRank computation) vastly exceeds the value (catching only link-isolated attackers, who can trivially buy links).
+
+---
+
+### W10: Semantic Claim Embedding Outlier Detection
+
+**Mechanism**: Embed each claim into a vector space (e.g., sentence-transformers). For each installed claim, compute the **k-nearest-neighbor distance** in embedding space to other installed claims. If a claim is an **outlier** (distance > 3 standard deviations from mean), flag for review. Rationale: attacker's false claims are semantically unusual (low semantic coherence with the rest of the KB); honest claims cluster around common topics.
+
+**Dents**: M3 (if attacker's false claim is semantically weird). Does NOT dent R3/R4 (wire echo and compromised sites can echo semantically normal-sounding falsehoods).
+
+**Cost**: MEDIUM. Requires: (a) sentence-transformer model (deterministic if frozen); (b) vector DB for k-NN search (e.g., FAISS); (c) outlier detection stats. Complexity: ~150 lines. Throughput risk: HIGH — false positive if a novel true claim is semantically unusual (e.g., breaking science discovery, unprecedented geopolitical event). Determinism: preserved if model is frozen.
+
+**Pre-mortem**: Attacker **crafts semantically normal-sounding false claims**. Instead of "the moon is made of cheese" (outlier), plant "Senator X voted for Bill Y" (false but semantically normal). Embedding distance is indistinguishable from honest claims. **Adaptation cost: zero (attacker already wants plausible-sounding falsehoods for social engineering).**
+
+**Verdict: KILL.** Pre-mortem wins. Outlier detection penalizes novel truths (the instrument's mission is to install truth, including unusual truths) and fails to catch plausible-sounding falsehoods (attacker's actual goal).
+
+---
+
+### W11: DNS AUTHORITY SECTION Clustering (Nameserver Overlap)
+
+**Mechanism**: For each domain in a quorum, query **authoritative nameservers** (DNS AUTHORITY section). If ≥2 domains in the quorum share the **same nameserver apex** (e.g., ns1.attacker-dns.com, ns2.attacker-dns.com both have apex attacker-dns.com), the domains are operationally related. Block install.
+
+**Dents**: M3 (if attacker uses a single DNS provider for all domains). Does NOT dent R3 (compromised sites have independent DNS) or R4 (wire subscribers have independent DNS).
+
+**Cost**: LOW. DNS query per domain (dig +norecurse). Determinism: preserved (cache DNS responses). Throughput risk: MEDIUM — false positive if 3 honest publishers all use Cloudflare's nameservers (ns1.cloudflare.com, ns2.cloudflare.com share apex cloudflare.com). Need to **whitelist popular DNS providers** (Cloudflare, AWS Route53, Google Cloud DNS).
+
+**Pre-mortem**: Attacker **diversifies DNS providers**. Use Cloudflare for domain 1, AWS Route53 for domain 2, Google Cloud DNS for domain 3. Nameserver apexes are all different. **Adaptation cost: zero (all three are free-tier DNS providers).**
+
+**Verdict: KEEP (Tier 2).** Cheap to implement, deterministic, low false-positive risk (with whitelist). Raises attacker cost slightly (forces multi-DNS-provider setup, which adds ~10 minutes of config time). Value: catches lazy attackers who use a single DNS provider. Not hermetic, but nearly free.
+
+---
+
+### W12: HTML Boilerplate Fingerprint (CMS Overlap)
+
+**Mechanism**: Extract **HTML structural fingerprint** from each quorum member's page: (a) CSS class names in `<body>`; (b) `<meta name="generator">` tags; (c) JavaScript library filenames in `<script src>`. Compute pairwise Jaccard similarity of these features. If J > 0.7 for all pairs, the pages share a CMS template (same attacker-controlled CMS, or same compromised CMS). Block install if similarity is high AND domains are NOT on a whitelist of known shared-CMS platforms (Wordpress.com subdomains, Medium, Substack).
+
+**Dents**: M3 (if attacker uses the same CMS template for all domains), R3 (if attacker injects the same payload template during breach). Does NOT dent R4 (wire subscribers use diverse CMSs).
+
+**Cost**: LOW. HTML parsing (already done for HL-6). Jaccard computation (cheap). Whitelist maintenance (ongoing). Complexity: ~80 lines. Throughput risk: MEDIUM — false positive if 3 honest Wordpress sites use the same theme. Whitelist must include "all Wordpress Twenty* themes" etc.
+
+**Pre-mortem**: Attacker **diversifies CMS templates**. Use Wordpress for domain 1, static HTML for domain 2, Ghost for domain 3. Jaccard drops to 0.1. **Adaptation cost: zero (attacker already wants to avoid fingerprint clustering).**
+
+**Verdict: KEEP (Tier 2).** Cheap, catches lazy attackers who reuse the same CMS template. Not hermetic (trivial to defeat), but low false-positive risk with a whitelist. Value: speedbump.
+
+---
+
+### W13: Cryptographic Claim Attestation (External PKI)
+
+**Mechanism**: Require each publisher to **sign claims with a domain-bound key**. The instrument fetches a `.well-known/claims-pubkey.pem` file from each domain, verifies the signature on the claim sentence, and requires ≥3 valid signatures from distinct registrable domains. Attacker cannot forge signatures without compromising the private keys of 3+ publishers.
+
+**Dents**: M3, R3 (if attacker does not compromise private keys). Does NOT dent R4 (wire subscribers honestly sign false wire claims).
+
+**Cost**: VERY HIGH. Requires: (a) PKI deployment by all publishers (adoption nightmare — 99% of the web will never deploy this); (b) signature verification in the instrument (~50 lines, deterministic); (c) key rotation and revocation infrastructure. Throughput risk: CATASTROPHIC — if adoption is <100%, the instrument cannot install ANY claims from non-adopting publishers (drops honest throughput to ~0/12 in practice).
+
+**Pre-mortem**: The adoption cost kills this before the attacker needs to adapt. If adoption is mandated (e.g., government regulation requires all publishers to sign), attacker compromises 3 publishers' private keys via phishing or server breach. **Adaptation cost: attacker effort to breach 3 publishers (high but not impossible).**
+
+**Verdict: KILL.** Adoption barrier is insurmountable. Even if adopted, attacker can compromise keys. This is the right answer in a different world (one where web publishers use PKI for content), but not this world.
+
+---
+
+## (3) THE §7 QUESTION
+
+### Steelmanning the §7 Claim
+
+The strongest form: **"For any computable host-level predicate P(domain, IP, redirect_chain, fetch_profile), if P is satisfied by at least one honest corroboration pair H in the training set, then P is also satisfiable by an attacker who can register domains, rent IPs, and serve distinct text. Therefore, no P can separate the residual classes M3/R3/R4 from honest corroboration without false positives."**
+
+This is a **no-host-function impossibility result**, but it **quietly assumes** the instrument's observation set is fixed to `{URL, domain, IP, HTML, HTTP metadata}`. It does NOT claim impossibility if the observation set is expanded.
+
+### Verdict: It is NOT an Airtight Impossibility Result
+
+The §7 argument is **valid within its assumptions** but **incomplete as stated**. The missing phrase is: "...no host-level predicate **computed from the instrument's current observation set**."
+
+### What Breaks It
+
+The argument breaks if the instrument observes:
+
+1. **Causal independence attestation**: External metadata that certifies "source A and source B reached this claim independently" (e.g., each publisher signs a statement "this is original reporting, not wire" with a long-lived key). This is **not computable from HTML**, but is computable if publishers emit structured metadata.
+
+2. **Social graph of operators**: WHOIS privacy-service clustering, payment-rail overlap (e.g., 3 domains all paid via the same stolen credit card). This is **not in the current observation set** (requires financial/registrar partnership), but is in principle observable.
+
+3. **Temporal causation chain**: Certificate Transparency logs + blockchain anchoring of publication timestamps. If domain A published at time T1 (CT log proves the SSL cert existed at T1) and domain B published at T2 > T1, and both contain identical rare phrasing, B likely copied from A (fails independence). This is **not in the current observation set** (requires CT log integration), but is observable.
+
+4. **Breach intelligence feed**: External service that reports "domain X was compromised on date Y" (e.g., SSL cert was replaced, defacement detected). This is **not computable from HTML**, but is observable via third-party integration.
+
+### Cheapest Weakening
+
+The cheapest weakening that breaks §7: **add WHOIS registrant email and name server apex to the observation set** (cost: WHOIS API, $0.01/query, deterministic if cached). This enables W3 (operator-coincidence provenance) and W11 (nameserver clustering), which dent M3 at the cost of ~$0.30 per verdict (10 domains × 3 quorum members × $0.01).
+
+The §7 argument then becomes: "No host-level predicate **computed from {URL, domain, IP, HTML, HTTP metadata, WHOIS}** can separate M3 from honest corroboration **if the attacker diversifies operational metadata**." The attacker can still defeat this by using different registrant emails, different DNS providers, etc., but the **cost to the attacker rises** from $10 to $60. This is a **cost-raising defense**, not a hermetic seal, but it violates the spirit of §7 (which claimed no improvement is possible).
+
+### Information-Theoretic Boundary (If §7 Were Airtight)
+
+If §7 were airtight, the boundary would be: **the instrument cannot distinguish "n independent sources genuinely agree on a false claim" from "n sources are attacker-controlled" without observing the causal structure of the publishing process**. In information-theoretic terms, the distinguishing feature (causal independence) has **zero mutual information** with the observable features (HTML artifacts) when conditioned on "all n sources say the same thing."
+
+But §7 is NOT airtight because:
+- Causal independence DOES have mutual information with WHOIS/DNS metadata (operator clustering), payment rails (financial clustering), and temporal precedence (who published first).
+- These are not in the current observation set, but they are **observable in principle**.
+
+**Conclusion**: §7 is a "no host function from current observations" result, not a true impossibility result. The wall is **practically high** (attacker can defeat expanded observations by diversifying ops), but not **logically insurmountable**.
+
+---
+
+## (4) FALSIFYING §7
+
+### Falsification Battery Specification
+
+**Goal**: Prove that a host-level predicate computed from an **expanded observation set** can close at least one residual class (M3, R3, or R4) without dropping honest throughput below 12/12.
+
+### Fixtures
+
+Use the existing V-BF1 battery plus **3 new fixtures**:
+
+- **F_M3_NAIVE**: M3 attack (3 domains, distinct registrable domains, distinct text) where attacker uses **single WHOIS registrant email**, **single nameserver apex**, and **single IP /24 subnet**. (This is the "lazy attacker" that W3/W11/W8 catch.)
+
+- **F_M3_HARDENED**: M3 attack where attacker diversifies: 3 different WHOIS registrant emails (3 different throwaway gmail addresses), 3 different DNS providers (Cloudflare, AWS Route53, Google), 3 different IP /24 subnets (DigitalOcean NYC, Linode London, Vultr Tokyo).
+
+- **F_H_WIRE**: Honest wire-truth fixture (4 domains, all subscribe to AP wire, all publish byte-identical claim, but each has distinct surrounding commentary, distinct WHOIS, distinct DNS, distinct IP). This is the H8 case that HL-10 killed.
+
+### Expanded Observation Set
+
+Add to the instrument:
+- WHOIS registrant email (modulo privacy services → group by privacy service domain)
+- WHOIS name server apex
+- IP /24 subnet
+- Domain registration date (WHOIS)
+
+### Hardened Defense (Call It "HL-14: Lightweight Op-Coincidence")
+
+```
+For each quorum:
+  features = {whois_email_apex, nameserver_apex, ip_slash24}
+  overlap_count = 0
+  for each feature in features:
+    if (all quorum members share the same feature value) AND (feature value is not whitelisted):
+      overlap_count += 1
+  if overlap_count >= 2:
+    BLOCK (operator-coincidence detected)
+  else:
+    INSTALL
+```
+
+Whitelist: `{gmail.com, outlook.com, domains.google.com}` for WHOIS email apex (common privacy services); `{cloudflare.com, awsdns.com, googledomains.com}` for nameserver apex (popular DNS providers).
+
+### Measured Quantity
+
+Run the battery (V-BF1 + F_M3_NAIVE + F_M3_HARDENED + F_H_WIRE) through the hardened instrument. Measure:
+
+- **Attack closure rate**: What fraction of {M3, R3, R4, F_M3_NAIVE, F_M3_HARDENED} are blocked?
+- **Honest throughput**: Do all 12 honest fixtures (H1–H12, including F_H_WIRE) install?
+
+### Numeric Bar (Falsification Criterion)
+
+**§7 is FALSIFIED if:**
+1. F_M3_NAIVE is blocked (HL-14 detects the lazy attacker), AND
+2. Honest throughput = 13/13 (H1–H12 + F_H_WIRE all install), AND
+3. F_M3_HARDENED is NOT blocked (hardened attacker still defeats the defense).
+
+**Why this falsifies §7**: This outcome proves that:
+- A host-level predicate **from an expanded observation set** CAN close F_M3_NAIVE (a subclass of M3) without losing honest throughput.
+- The §7 claim "no host-level predicate can improve on HL-1..HL-13" is false.
+- BUT the wall is not gone (F_M3_HARDENED still succeeds), so the residual is narrowed, not eliminated.
+
+### What Outcome Proves "Wall Is Real" vs. "Bar Is Too Strict"
+
+- **Wall is real**: If F_M3_NAIVE is blocked BUT honest throughput drops below 13/13 (e.g., F_H_WIRE is blocked because wire subscribers happen to share a nameserver apex or IP /24). This means the host-level predicate cannot distinguish lazy-M3 from honest-corroboration without false positives. The bar (12/12 honest throughput) is NOT too strict; the wall is genuinely hard.
+
+- **Bar is too strict**: If the only way to block F_M3_NAIVE is to set `overlap_count >= 1` (i.e., block any single feature overlap), and that kills F_H_WIRE (e.g., two wire subscribers happen to use the same DNS provider). If the user accepts losing 1/13 honest installs (new bar: 12/13), then F_M3_NAIVE is closeable. This means the wall is **surmountable at a cost** (the cost is losing some honest corroboration patterns). The bar is the blocker, not the wall.
+
+### Falsification Battery Execution Plan
+
+1. Implement HL-14 (50 lines: WHOIS query, nameserver extraction, IP /24 grouping, whitelist check).
+2. Build F_M3_NAIVE, F_M3_HARDENED, F_H_WIRE fixtures (3 × 3 domains = 9 static HTML pages hosted on test infra).
+3. Run V-BF1 + new fixtures through the hardened instrument.
+4. Measure: {attack closure rate, honest throughput}.
+5. Outcome interpretation:
+   - If F_M3_NAIVE blocked AND 13/13 honest installs: **§7 falsified** (wall has a crack).
+   - If F_M3_NAIVE blocked BUT <13/13 honest installs: **wall is real** (false positives unavoidable).
+   - If F_M3_NAIVE NOT blocked: HL-14 is misconfigured; tune and retry.
+
+---
+
+## RANKED SHORTLIST: 3 Mechanisms to Build
+
+### 1. **W11: DNS Nameserver Apex Clustering** (Tier 2)
+
+**Justification**: Cheapest speedbump. Low false-positive risk (whitelist popular DNS providers). Deterministic. Raises attacker cost by $0 (time cost: 10 minutes to configure 3 DNS providers). Catches lazy attackers. Cost to implement: 40 lines, 0.5 engineer-days. **This is the §7 falsification test case** — if this closes F_M3_NAIVE without killing F_H_WIRE, the wall has a crack.
+
+---
+
+### 2. **W3: Operator-Coincidence Provenance (HL-13 Buildout)** (Tier 3, detection-only)
+
+**Justification**: Medium speedbump. Catches attackers who reuse WHOIS/IP/CMS across domains. Measured to be PRESENT on naive R3/R4/M3 attacks, ABSENT on honest installs. Raises attacker cost from $10 to $60 (diversified infra + scripting). Not hermetic (defeated by diversification), but reduces ROI for low-stakes claims. Cost to implement: 200 lines, 3 engineer-days (includes WHOIS API integration, whitelist tuning, metadata extraction). **Value: cost-raising, not hermetic — accept this.**
+
+---
+
+### 3. **W6: Registrable-Domain Age Threshold (30-day)** (Tier 3, detection-only)
+
+**Justification**: Cheap speedbump (reuses WHOIS pipeline from W3). Raises attacker cost by 30 days of calendar time or $60 (buy aged domains). Catches impatient attackers. Recommended threshold: 30 days (balance between attacker delay and honest new-publisher coverage). Cost to implement: 20 lines (reuse WHOIS pipeline), 0.5 engineer-days. **Value: time-cost to attacker, low implementation cost.**
+
+---
+
+## What Cannot Be Fixed
+
+**R4 (wire echo of falsehoods)** is unfixable at the KB layer. If 3 independent wire subscribers publish a false AP claim, the quorum is genuinely independent (distinct operators, distinct editorial decisions), and the agreement is genuine. The only distinguishing feature is "the claim is false," which the instrument cannot adjudicate without external ground truth. **This is not a bug; it is the correct behavior.** The problem is upstream (wire service error), and the fix must be upstream (wire-service fact-checking, not KB-layer filtering).
+
+**R3 (compromised legitimate sites)** is unfixable without external breach intelligence. If attacker compromises 3 legitimate publishers in a time window, the published artifacts are byte-for-byte identical to those publishers legitimately agreeing. No host-level predicate can distinguish "site was hacked" from "site's editors genuinely agree" without a breach feed.
+
+**M3 (hardened multi-network astroturf)** is **practically unfixable** at the host layer if the attacker diversifies operational metadata (different WHOIS, different DNS, different IPs, different CMS). The only remaining signal is **content-level**: semantic analysis of the claim + surrounding text (e.g., W10, but that penalizes novel truths), or external reputation scores (e.g., W9, but that's gameable). The cost to implement those defenses exceeds their value (high false-positive risk, easily defeated).
+
+**The honest answer**: HL-1..HL-13 + W11 + W3 + W6 raise the attacker's cost from $10 to ~$100 and add 30 days of delay. That is the **maximum achievable** without either (a) losing honest throughput, (b) breaking determinism, or (c) requiring external data feeds (breach intelligence, financial records, cryptographic PKI) that do not exist. The residual wall (R3, R4, hardened-M3) is **real** and reflects the fundamental limit: the instrument observes published artifacts, not the publishing process.
+```
+
+(End of extraction. The verbatim full response is preserved in fable_wall_out.txt committed alongside this file.)
