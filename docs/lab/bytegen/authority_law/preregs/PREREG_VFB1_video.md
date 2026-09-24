@@ -34,6 +34,7 @@ production emitters, or the rendering plan.
 | P6 | Decision brief | `docs/lab/bytegen/authority_question/DECISION_BRIEF.md` at P1, blob SHA `49d7efe186aefd9ae67e24708495bef1392f2f8f` (VERIFIED) |
 | P7 | Toolchain | `tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1` — filename pin as cited in the draft; exact binary SHA-256 recorded in the run log at freeze (build with `--no-zagd --no-analyze --no-foreground-cache`) |
 | P8 | V-DET manifest (determinism precedent) | cited in draft §0 as manifest `400ae5c6…938b26ac` (truncated prefix as cited; full 64-hex digest recorded in the run log at freeze) |
+| P9 | Fixture sources (existence/provenance pins; fixture SHAs recorded at freeze per §2) | `tnn-lab/imagination_discovery/vid/ocean.zag` at P1, blob SHA `c7728042f88bcca010aa3660f5e11b337d16b79c` (VERIFIED); `tnn-lab/imagination/src/field.zag` at P1, blob SHA `89b96789c9b92bcf041d941b716c75fbc1411d8b` (VERIFIED) |
 
 All pins resolved against true lineage at P1. If any pin fails to resolve,
 it is written "UNRESOLVED — needs re-pin" and the battery may not start.

@@ -33,7 +33,7 @@ production emitters, or the dialogue plan.
 | P5 | Dialogue authority recommendation | `docs/lab/bytegen/authority_question/teams/dialogue/AUTHORITY_RECOMMENDATION.md` at P1, blob SHA `c6a095d66a22b04ad5fbea939f1681a76acf0e3b` (VERIFIED) |
 | P6 | Decision brief | `docs/lab/bytegen/authority_question/DECISION_BRIEF.md` at P1, blob SHA `49d7efe186aefd9ae67e24708495bef1392f2f8f` (VERIFIED) |
 | P7 | Toolchain | `tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1` — filename pin as cited in the draft; exact binary SHA-256 recorded in the run log at freeze |
-| P8 | Binary under test | `tnn-lab/dialogue/dialogue.zag` (pure Zag, zero RNG) — source pinned at P1; any future deliberation-veto build is tested separately under a prereg amendment (§3f) |
+| P8 | Binary under test | `tnn-lab/dialogue/dialogue.zag` (pure Zag, zero RNG) at P1, blob SHA `964b2bc2bd9c186bbd7efab56f9e68a231eb2c8d` (VERIFIED); any future deliberation-veto build is tested separately under a prereg amendment (§3f) |
 | P9 | Functional baseline | VERDICT.md frozen battery (370 turns): every turn type ≥70% (observed 99.7–100%), weird-style gap ≤30pp, 5/5 byte-identical reruns — as cited in the draft; regression against this baseline kills the battery (K6) |
 
 All pins resolved against true lineage at P1. If any pin fails to resolve,

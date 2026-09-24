@@ -34,8 +34,8 @@ or the story plan.
 | P5 | Story authority recommendation | `docs/lab/bytegen/authority_question/teams/story/AUTHORITY_RECOMMENDATION.md` at P1, blob SHA `4326c76cbebaf587c2b0345f19bc38d9b5121fab` (VERIFIED) |
 | P6 | Decision brief | `docs/lab/bytegen/authority_question/DECISION_BRIEF.md` at P1, blob SHA `49d7efe186aefd9ae67e24708495bef1392f2f8f` (VERIFIED) |
 | P7 | Toolchain | `tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1` — filename pin as cited in the draft; exact binary SHA-256 recorded in the run log at freeze |
-| P8 | Word sets / classes | `tnn-lab/GOALB_STORY/inputs/words.txt` (S1–S8, 5–12 words each), `tnn-lab/GOALB_STORY/inputs/classes.txt` — pinned at P1; frozen, uneditable during the battery |
-| P9 | Existing verifier | `verify_goalb.py` (B1 coverage oracle) — pinned at P1 |
+| P8 | Word sets / classes | `tnn-lab/GOALB_STORY/inputs/words.txt` (S1–S8, 5–12 words each) at P1, blob SHA `7ff39c41220e1b9a4d3af731a2962b5b78524703` (VERIFIED); `tnn-lab/GOALB_STORY/inputs/classes.txt` at P1, blob SHA `4d853669e4c42121b2a00b7e4fbd41b96157acb6` (VERIFIED); frozen, uneditable during the battery |
+| P9 | Existing verifier | `tnn-lab/GOALB_STORY/src/verify_goalb.py` (B1 coverage oracle) at P1, blob SHA `814899bc87bf5eefe3a8719a95bbcff25f87ea6a` (VERIFIED) |
 
 All pins resolved against true lineage at P1. If any pin fails to resolve,
 it is written "UNRESOLVED — needs re-pin" and the battery may not start.
