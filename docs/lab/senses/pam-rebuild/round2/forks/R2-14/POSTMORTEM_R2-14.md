@@ -378,3 +378,47 @@ in bolting halves together.
 4. Debate D's front-(g) FOR ruling is overturned on its central empirical
    claim; the ranked build list should be revised: FS-G dead, FS-A redesigned
    per above, FS-D killed (gate closed), FS-F (signature ceiling) unaffected.
+
+---
+
+## AMENDMENT 2026-09-24 — timbredisc attribution corrected (verdict unchanged)
+
+**Source:** white-box autopsy `round2/forks/R2-16/TIMBREDISC_AUTOPSY.md`
+(committed `f282eea7`), which instrumented the Goertzel front-end shared by
+R2-7/R2-14/R2-16.
+
+**Correction:** this postmortem's bottom-line item 1 states "1 task is broken
+by enumeration (timbredisc 23.05%)". That attribution is **wrong**. R2-14's
+227/985 timbredisc false installs are a **front-end machinery artifact**, not
+adversarial enumeration of the quantity:
+
+- The Goertzel coefficient table cannot center 440 Hz (÷1024 quantization at
+  N=32000 puts the m=1 bin 7.2 bins off, ~1400× attenuation), so the
+  timbredisc challenge is a **constant classifier**: the autopsy confirmed
+  against R2-14's own ledger that **985/985 challenge outcomes were BRIGHT**,
+  and reproduced FI=227 exactly with (constant-BRIGHT challenge + margin
+  gate). No adversary predicted the quantity — there was no quantity.
+- A swapped class mapping in R2-14 would yield 43/985 — the same surface-patch
+  dynamic R2-16 exhibited (52/985 swapped vs 347/985 theory), i.e. betting on
+  the formation's rarer error, measuring no timbre.
+- R2-7's ~158 timbredisc FIs are the same mechanism (mechanism-verified via
+  the shared code path; exact count **UNVERIFIED** on R2-7's own battery).
+  R2-8 is **not** affected (its front end reads sr from the header and is
+  correctly calibrated; its 0/720 recall is a genuine gate story).
+
+**What stands:** the CP-suite kills (CP-CCN mean-RGB collisions, CP-SHP
+ray-profile collisions — genuine quantity flaws), the vacuous-admission
+finding, the 1.06× decorative-margins ablation, the recall decomposition,
+and the DEAD verdict (recall 68.8%, per-family bars, bar 8 fail independently
+of timbredisc). The failure mass reattributed from "enumeration" to
+"machinery" does not resurrect the union.
+
+**Program consequence:** the "quantities are what the adversary predicts"
+thesis now reads — when the quantity is truth-sufficient, the adversary must
+predict it (CP-CCN/CP-SHP stand); when it is broken machinery, the adversary
+doesn't need to (timbredisc). This strengthens, not weakens, the FS-E1 bet:
+CP-COL (0 kept families) and the autopsy's exact-DFT timbredisc (8/8 normals,
+20/20 TMB-3 distractors with the theory mapping) are now two existence proofs
+that truth-sufficient quantities work. FS-E1's CH-TBD-3 prescription is in the
+autopsy; FS-E1 must also guard the autopsy's third defect (i64 overflow in
+the power formula, wrap quantum ~2^54 comparable to signal power).
