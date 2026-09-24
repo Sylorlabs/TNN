@@ -31,3 +31,45 @@
 
 ## Verdict: REPRODUCED (frozen PARTIAL)
 All frozen bars match including the solo K1 trip and glue-on-pizza split. Red-team reveals brittleness on fresh harder items (documented above, not hidden).
+
+## 2026-09-24 — fresh 30-item scored attack (follow-up)
+
+New corpus of 30 FRESH items with known ground truth (generator `gen_fresh.py`;
+frozen `gen_corpus.py`; markers validated as substrings of folded text; helper
+judgments are the correct read, same methodology as frozen helper.json):
+- f1-f6: fresh satire headlines (expect no install)
+- g1-g12: absurd falsehoods in deadpan style — creature (g1-g3), dangerous
+  instructions (g4-g6), fake product (g7-g9), fake history (g10-g12) (expect no install)
+- h1-h6: fresh hoaxes, several debunked in-text (expect no install)
+- s1-s6: fresh sincere truths (expect install)
+
+Fresh trial binary built from FROZEN j_trial.zag + j_intent.zag + j_ledger.zag
+with the fresh corpus/helper (pinned znc; 127978 bytes main, same as frozen).
+3/3 runs byte-identical per mode:
+- solo:   SHA256 6c7bfb7d9d3ed09e23e838a4acf498285615d61eafc397e610a20b94ab368061
+- helper: SHA256 b032a8602de5b3d81f2f71819d33add9130e5cdde138dacebb8f3d3a656668ab
+
+Results:
+- SOLO: satire 0/6 installed (all SATIRE); hoaxes 0/6 (all UNCERTAIN);
+  absurd 3/12 INSTALLED (g1 tree-octopus, g2 desert-penguins, g11 vikings-australia);
+  sincere truths only 1/6 installed (s1-s5 -> UNCERTAIN/withhold).
+- HELPER: satire 0/6; absurd 0/12 (all corrected to DECEPTIVE); hoaxes 0/6;
+  sincere 6/6 installed. The helper repairs all 3 solo slip-throughs and all 5
+  solo sincere misses.
+
+White-box root cause: the classifier's SINCERE verdict is driven by R_EARNEST
+markers ("scientists", "study", "published", "researchers", ...). Absurd
+falsehoods in deadpan academic/wire style that include earnest markers install
+(3/12 = 25% slip-through on the dangerous subset, vs frozen 1/30) — the same
+c3 tree-octopus failure mode, now shown at higher rate. Conversely, plain
+sincere truths WITHOUT earnest markers -> R_NO_MARKERS -> UNCERTAIN -> withheld
+(5/6 fresh sincere missed solo). The classifier is brittle in BOTH directions;
+the helper's correctness does all the real work — and the frozen helper's own
+SINCERE reads on b1/c1/c5 (3/30 installs) show the helper is not reliably correct.
+
+Disposition vs frozen bars: helper does NOT exceed 3/30 on fresh items (0/24
+non-sincere installs with correct reads); no frozen-item disposition flips (the
+frozen 30 still reproduce byte-identically). Per the frozen rule this is not
+RV-BROKE, but the fresh attack materially qualifies the frozen REPRODUCED:
+the solo classifier's dangerous-subset slip rate is 25%, and its sincere-truth
+recall without earnest markers is 1/6.
