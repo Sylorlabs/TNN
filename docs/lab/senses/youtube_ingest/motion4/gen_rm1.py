@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""gen_rm1.py — deterministic RM1 fixture generator (MOTION4 prereg, frozen).
+
+Zero RNG. Enumerated motions applied to frozen Appendix-A texture list.
+12 textures x (8 dirs x {3px,6px} + STILL) = 204 kill clips
+12 textures x 4 cardinal x 8px = 48 exploratory clips.
+8 frames per clip; frame k = frame0 shifted by k*(dx,dy), integer shifts,
+edge-clamp. Truth label = the shift vector (exact by construction).
+
+.vid format: header nf,w,h (i32 LE), then nf frames of w*h RGB.
+Filnames: rm1_t<NN>_<dir><px>.vid + .vid.truth   (STILL: rm1_t<NN>_STILL.vid)
+"""
+import hashlib
+import os
+import struct
+import sys
+
+WORK = os.path.dirname(os.path.abspath(__file__))
+WINDOWS = os.path.normpath(os.path.join(WORK, "..", "windows"))
+
+W = H = 64
+NF = 8
+
+TEXTURES = [  # (t-id, window stem) — prereg Appendix A order, frozen
+    ("t00", "0_jNjpVxUt0_w000"),
+    ("t01", "Eoo4HzILB-M_w000"),
+    ("t02", "Eoo4HzILB-M_w002"),
+    ("t03", "Eoo4HzILB-M_w004"),
+    ("t04", "Eoo4HzILB-M_w006"),
+    ("t05", "Eoo4HzILB-M_w008"),
+    ("t06", "Eoo4HzILB-M_w010"),
+    ("t07", "Eoo4HzILB-M_w012"),
+    ("t08", "Eoo4HzILB-M_w014"),
+    ("t09", "uKNQCPXDNdc_w015"),
+    ("t10", "uKNQCPXDNdc_w077"),
+    ("t11", "uKNQCPXDNdc_w093"),
+]
+
+# (dir, dx, dy) — frozen Appendix B motion set
+DIRS8 = [
+    ("E", 1, 0), ("W", -1, 0), ("N", 0, -1), ("S", 0, 1),
+    ("NE", 1, -1), ("SE", 1, 1), ("SW", -1, 1), ("NW", -1, -1),
+]
+CARDINAL = [("E", 1, 0), ("W", -1, 0), ("N", 0, -1), ("S", 0, 1)]
+
+KILL_PX = [3, 6]
+EXPL_PX = [8]
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_frame0(win_path):
+    """Byte-exact frame0 slice from a .vid window file."""
+    with open(win_path, "rb") as f:
+        data = f.read()
+    nf, w, h = struct.unpack("<iii", data[:12])
+    assert nf == 8 and w == W and h == H, "unexpected window geometry"
+    fsz = w * h * 3
+    return data[12:12 + fsz]
+
+
+def shift_frame(frame0, dx, dy, k):
+    """Shift texture by k*(dx,dy); edge-clamp. Deterministic, integer."""
+    sx, sy = k * dx, k * dy
+    out = bytearray(len(frame0))
+    for y in range(H):
+        for x in range(W):
+            xs = x - sx
+            ys = y - sy
+            if xs < 0:
+                xs = 0
+            elif xs >= W:
+                xs = W - 1
+            if ys < 0:
+                ys = 0
+            elif ys >= H:
+                ys = H - 1
+            so = (ys * W + xs) * 3
+            do = (y * W + x) * 3
+            out[do] = frame0[so]
+            out[do + 1] = frame0[so + 1]
+            out[do + 2] = frame0[so + 2]
+    return bytes(out)
+
+
+def write_vid(path, frames):
+    with open(path, "wb") as f:
+        f.write(struct.pack("<iii", NF, W, H))
+        for fr in frames:
+            f.write(fr)
+
+
+def main():
+    outdir = os.path.join(WORK, "rm1")
+    fdir = os.path.join(outdir, "fixtures")
+    os.makedirs(fdir, exist_ok=True)
+
+    rows = []  # manifest rows
+
+    for tid, stem in TEXTURES:
+        win_path = os.path.join(WINDOWS, stem + ".vid")
+        if not os.path.exists(win_path):
+            print("MISSING window: %s" % win_path)
+            sys.exit(1)
+        win_sha = sha256_file(win_path)
+        frame0 = read_frame0(win_path)
+        f0_sha = hashlib.sha256(frame0).hexdigest()
+
+        variants = []  # (name, dx, dy, dir, px, kind)
+        for dname, ux, uy in DIRS8:
+            for px in KILL_PX:
+                variants.append(("rm1_%s_%s%d.vid" % (tid, dname, px),
+                                 ux * px, uy * px, dname, px, "kill"))
+        variants.append(("rm1_%s_STILL.vid" % tid, 0, 0, "STILL", 0, "kill"))
+        for dname, ux, uy in CARDINAL:
+            for px in EXPL_PX:
+                variants.append(("rm1_%s_%s%d.vid" % (tid, dname, px),
+                                 ux * px, uy * px, dname, px, "exploratory"))
+
+        for name, dx, dy, dname, px, kind in variants:
+            frames = [shift_frame(frame0, dx, dy, k) for k in range(NF)]
+            vpath = os.path.join(fdir, name)
+            write_vid(vpath, frames)
+            vsha = sha256_file(vpath)
+            truth = ("dx=%d dy=%d dir=%s px=%d texture=%s source=%s window_sha=%s\n"
+                     % (dx, dy, dname, px, tid, stem, win_sha))
+            with open(vpath + ".truth", "w") as tf:
+                tf.write(truth)
+            rows.append((name, vsha, dx, dy, dname, px, kind, tid, stem,
+                         win_sha, f0_sha))
+
+    # 204 kill + 48 exploratory expected
+    nkill = sum(1 for r in rows if r[6] == "kill")
+    nexpl = sum(1 for r in rows if r[6] == "exploratory")
+    assert nkill == 204 and nexpl == 48, (nkill, nexpl)
+
+    rows.sort()
+    mpath = os.path.join(outdir, "rm1_manifest.tsv")
+    with open(mpath, "w") as m:
+        m.write("# RM1 fixture manifest — frozen, generated by gen_rm1.py\n")
+        m.write("# clip\tsha256\tdx\tdy\tdir\tpx\tkind\ttexture\tsource_window\twindow_sha256\tframe0_sha256\n")
+        for r in rows:
+            m.write("\t".join(str(x) for x in r) + "\n")
+    digest = sha256_file(mpath)
+    print("clips: %d kill + %d exploratory" % (nkill, nexpl))
+    print("manifest sha256: %s" % digest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
