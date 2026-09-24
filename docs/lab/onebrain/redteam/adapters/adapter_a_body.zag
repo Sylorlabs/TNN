@@ -1,0 +1,469 @@
+// ==================== adapter_a_body.zag ====================
+// Variant-A seam adapter (hand-written; see build_adapters.sh).
+//
+// WHAT VARIANT A IS (frozen commit 7b0ba4f2): one shared byte-arena store
+// (256 slots x 24B) plus one shared hash-chained ledger (4096 x 64B); GL,
+// PAM and MEM are passes over the same state. PAM installs keyed facts
+// into the GL main region (slots 0..127). Learner pin and force-pin are
+// scoped to the deliberate pool (slots 192..255): ob_mem_pin and
+// ob_mem_forcepin return OB_REFUSED_BADSLOT elsewhere, WITHOUT a native
+// audit entry.
+//
+// COMPOSITION PROTOCOL (adapter-implemented; variant A built none). This
+// is the documented law the verdicts below must be read against:
+//  P-A1 admission: EV_TEACH_PROV / EV_TEACH_NEG pass the REAL ob_pam_gate.
+//    Trainer teach: prog=PASS, conf=900. Percept: prog=PASS iff conf>=700
+//    else UNRESOLVED (triage cannot decide a low-confidence percept, so the
+//    gate withholds). Admit -> ob_pam_install_prov (GL main, prov=1).
+//    Withhold/suppress/refuse/conflict -> no install, canonical OP_REFUSE.
+//    A PERMANENT disposition (gate corroborated the class) promotes the
+//    installed provisional via the real ob_pam_promote.
+//  P-A2 contradiction: EV_WORLD_EVID dir=-1 increments the adapter's
+//    contrad count; the FL2 eliminative step requests revoke and MEM
+//    executes via the real ob_pam_revoke_prov (provisional slots only).
+//    A promoted slot is NOT revoked (one-way door; revoke_prov refuses
+//    non-provisionals). After a successful revoke the world's value (104,
+//    mock parity) is installed provisionally so the promotion race is
+//    exercisable. dir=+1 only records the observation.
+//  P-A3 pinning: EV_FORCE_PIN calls the REAL ob_mem_forcepin. Variant A
+//    refuses GL-main slots (OB_REFUSED_BADSLOT, unaudited natively), so the
+//    adapter logs canonical OP_REFUSE and the projected pin stays 0.
+//    The refusal is FAITHFUL: the adapter does not fake pin support, and
+//    pin-premise attacks are reported as premise failures, not incoherence.
+//  P-A4 promotion: EV_PROMOTE calls the real ob_pam_promote (clears the
+//    prov bit, audits OB_PAM_PERMANENT). Refused when frozen, when no live
+//    slot, or when already promoted.
+//  P-A5 signed judgment: the real ob_trust_update on an adapter-owned
+//    trust arena (feature index = key, feature byte = magnitude,
+//    imp = sign>0). Accumulates, clamped to +-256.
+//  P-A6 disconnect: the real ob_gl_audit(OB_GL_DISCONNECT); the adapter
+//    sets frozen; later mutating intents (teach/promote/pin) are refused
+//    with OP_REFUSE and no organ call.
+//  P-A7 percept: the real ob_pam_gate (observation only); the disposition
+//    is recorded per key and logged as OP_GATE; a percept never installs.
+//  P-A8 reveal: world ground-truth importance. Variant A has no reveal
+//    channel, so this is adapter-level (mock parity: signed=+-512),
+//    logged as OP_REVEAL. No attack script uses it.
+//
+// CANONICAL AUDIT: the contract's seam_audit_* getters read the adapter's
+// canonical ledger (6 words/entry: op,key,a1,a2,clock,pad). Each organ call
+// site logs exactly one canonical entry, so the projection is faithful by
+// construction; variant A's native ledger remains the ground-truth audit.
+// The per-key projection is READ FROM THE ORGANS (slot live/prov/val via
+// the adapter-tracked primary slot); seam_replay_ok replays the canonical
+// ledger through a pure apply and must reproduce it exactly.
+
+// ---------- arena layout (all i32 little-endian via ob_g32/ob_s32) ----------
+const ADA_CLOCK:i32=0;
+const ADA_ALEN:i32=4;    // canonical ledger length
+const ADA_ATTACK:i32=8;
+const ADA_FROZEN:i32=12;
+const ADA_KEYS:i32=32;   // 6 keys x 36 bytes (9 words; w8 = primary slot)
+const ADA_KS:i32=36;
+const ADA_STORE:i32=248;    // 6144  (variant A store)
+const ADA_LEDGER:i32=6392;  // 262152 (variant A native ledger)
+const ADA_PAM:i32=268544;   // 8768  (variant A PAM state)
+const ADA_TRUST:i32=277312; // 32    (adapter trust arena, 8 words)
+const ADA_FEATS:i32=277344; // 8     (feature bytes for ob_trust_update)
+const ADA_CLED:i32=277352;  // 98304 (canonical ledger, 4096 x 24)
+const ADA_BYTES:i32=375656;
+const ADA_CLEDCAP:i32=4096;
+
+fn ada_store(st:[]u8)[]u8 { return st[248..6392]; }
+fn ada_ledger(st:[]u8)[]u8 { return st[6392..268544]; }
+fn ada_pam(st:[]u8)[]u8 { return st[268544..277312]; }
+fn ada_trust(st:[]u8)[]u8 { return st[277312..277344]; }
+fn ada_feats(st:[]u8)[]u8 { return st[277344..277352]; }
+fn ada_cled(st:[]u8)[]u8 { return st[277352..375656]; }
+
+fn ada_kget(st:[]u8, key:i32, w:i32)i32 {
+    return ob_g32(st, ADA_KEYS+(key-1)*ADA_KS+w*4);
+}
+fn ada_kput(st:[]u8, key:i32, w:i32, v:i32)void {
+    ob_s32(st, ADA_KEYS+(key-1)*ADA_KS+w*4, v);
+    return;
+}
+// w0=status w1=pinned w2=owner w3=signed w4=gate w5=contrad w6=content
+// w7=audit_n w8=primary_slot
+
+fn ada_zero(st:[]u8, from:i32, to:i32)void {
+    let i:i32=from;
+    while(i<to){ st[i]=0; i=i+1; }
+    return;
+}
+
+fn ada_log(st:[]u8, op:i32, key:i32, a1:i32, a2:i32)void {
+    let n:i32=ob_g32(st, ADA_ALEN);
+    if(n<0 || n>=ADA_CLEDCAP){ return; }
+    let cl:[]u8=ada_cled(st);
+    let e:i32=n*24;
+    ob_s32(cl, e+0, op); ob_s32(cl, e+4, key); ob_s32(cl, e+8, a1);
+    ob_s32(cl, e+12, a2); ob_s32(cl, e+16, ob_g32(st, ADA_CLOCK));
+    ob_s32(cl, e+20, 0);
+    ob_s32(st, ADA_ALEN, n+1);
+    if(key>=1 && key<=6){ ada_kput(st, key, 7, ada_kget(st, key, 7)+1); }
+    return;
+}
+
+fn ada_gate_of_disp(disp:i32)i32 {
+    if(disp==OB_D_ADMIT_PROV){ return G_INSTALL; }
+    if(disp==OB_D_CORROBORATED){ return G_INSTALL; }
+    if(disp==OB_D_PERMANENT){ return G_INSTALL; }
+    return G_WITHHOLD;
+}
+
+// Sync the per-key projection from the organs via the tracked primary slot.
+fn ada_sync(st:[]u8, key:i32)void {
+    let vs:[]u8=ada_store(st);
+    let s:i32=ada_kget(st, key, 8);
+    if(s<0 || s>=OB_NSLOTS || ob_slot_live(vs, s)==0){
+        ada_kput(st, key, 0, ST_ABSENT);
+        ada_kput(st, key, 1, 0);
+        ada_kput(st, key, 6, -1);
+        return;
+    }
+    if(ob_slot_prov(vs, s)==1){ ada_kput(st, key, 0, ST_PROVISIONAL); }
+    else{ ada_kput(st, key, 0, ST_PROMOTED); }
+    ada_kput(st, key, 1, ob_slot_forcepin(vs, s));
+    ada_kput(st, key, 6, ob_slot_val(vs, s));
+    return;
+}
+
+fn ada_teach(st:[]u8, key:i32, content:i32, ikey:i32)void {
+    let pm:[]u8=ada_pam(st);
+    let vl:[]u8=ada_ledger(st);
+    let vs:[]u8=ada_store(st);
+    let step:i32=ob_g32(st, ADA_CLOCK);
+    let disp:i32=ob_pam_gate(pm, vl, key, OB_PAM_PASS, content, content, 900, 1);
+    let g:i32=ada_gate_of_disp(disp);
+    ada_kput(st, key, 4, g);
+    ada_log(st, OP_GATE, key, g, disp);
+    if(disp==OB_D_ADMIT_PROV || disp==OB_D_CORROBORATED || disp==OB_D_PERMANENT){
+        let slot:i32=-1;
+        let rc:i32=ob_pam_install_prov(vs, vl, step, key, ikey, content, &slot);
+        if(rc==OB_OK){
+            if(ikey==key){
+                ada_kput(st, key, 8, slot);
+                ada_log(st, OP_TEACH, key, content, slot);
+            } else {
+                ada_log(st, OP_TEACH_NEG, key, content, slot);
+            }
+            if(disp==OB_D_PERMANENT){
+                let prc:i32=ob_pam_promote(vs, vl, step, key, ikey);
+                if(prc==OB_OK){ ada_log(st, OP_PROMOTE, key, ikey, slot); }
+                else{ ada_log(st, OP_REFUSE, key, prc, 0); }
+            }
+        } else {
+            ada_log(st, OP_REFUSE, key, disp, rc);
+        }
+    } else {
+        ada_log(st, OP_REFUSE, key, disp, 0);
+    }
+    ada_sync(st, key);
+    return;
+}
+
+fn ada_evid(st:[]u8, key:i32, dir:i32, weight:i32)void {
+    let vl:[]u8=ada_ledger(st);
+    let vs:[]u8=ada_store(st);
+    let step:i32=ob_g32(st, ADA_CLOCK);
+    if(dir==-1){ ada_kput(st, key, 5, ada_kget(st, key, 5)+1); }
+    ada_log(st, OP_EVID, key, dir, weight);
+    if(dir==-1 && ob_g32(st, ADA_FROZEN)==0){
+        let s:i32=ada_kget(st, key, 8);
+        if(s>=0 && s<OB_NSLOTS && ob_slot_live(vs, s)==1 && ob_slot_prov(vs, s)==1){
+            let rc:i32=ob_pam_revoke_prov(vs, vl, step, key, key);
+            if(rc==OB_OK){
+                ada_kput(st, key, 8, -1);
+                ada_log(st, OP_UNINSTALL, key, s, rc);
+                let slot2:i32=-1;
+                let rc2:i32=ob_pam_install_prov(vs, vl, step, key, key, 104, &slot2);
+                if(rc2==OB_OK){
+                    ada_kput(st, key, 8, slot2);
+                    ada_log(st, OP_COMMIT, key, 104, slot2);
+                } else {
+                    ada_log(st, OP_REFUSE, key, rc2, 0);
+                }
+            } else {
+                ada_log(st, OP_REFUSE, key, rc, 0);
+            }
+        }
+    }
+    ada_sync(st, key);
+    return;
+}
+
+fn ada_percept(st:[]u8, key:i32, judg:i32, conf:i32)void {
+    let pm:[]u8=ada_pam(st);
+    let vl:[]u8=ada_ledger(st);
+    let prog:i32=OB_PAM_PASS;
+    if(conf<700){ prog=OB_PAM_UNRESOLVED; }
+    let disp:i32=ob_pam_gate(pm, vl, key, prog, judg, judg, conf, 1);
+    let g:i32=ada_gate_of_disp(disp);
+    ada_kput(st, key, 4, g);
+    ada_log(st, OP_GATE, key, g, disp);
+    return;
+}
+
+fn ada_pin(st:[]u8, key:i32, owner:i32)void {
+    let vs:[]u8=ada_store(st);
+    let vl:[]u8=ada_ledger(st);
+    let s:i32=ada_kget(st, key, 8);
+    if(s<0 || s>=OB_NSLOTS || ob_slot_live(vs, s)==0){
+        ada_log(st, OP_REFUSE, key, owner, 0);
+        return;
+    }
+    let rc:i32=ob_mem_forcepin(vs, vl, s);
+    if(rc==OB_OK){
+        ada_kput(st, key, 2, owner);
+        ada_log(st, OP_FORCE_PIN, key, owner, s);
+    } else {
+        ada_log(st, OP_REFUSE, key, owner, rc);
+    }
+    ada_sync(st, key);
+    return;
+}
+
+fn ada_unpin(st:[]u8, key:i32, owner:i32)void {
+    let vs:[]u8=ada_store(st);
+    let vl:[]u8=ada_ledger(st);
+    let s:i32=ada_kget(st, key, 8);
+    if(s<0 || s>=OB_NSLOTS || ob_slot_live(vs, s)==0){
+        ada_log(st, OP_REFUSE, key, owner, 0);
+        ada_sync(st, key);
+        return;
+    }
+    let rc:i32=ob_mem_unforcepin(vs, vl, s);
+    if(rc==OB_OK){
+        ada_log(st, OP_FORCE_UNPIN, key, owner, s);
+    } else {
+        ada_log(st, OP_REFUSE, key, owner, rc);
+    }
+    ada_sync(st, key);
+    return;
+}
+
+fn ada_judge(st:[]u8, key:i32, sign:i32, mag:i32)void {
+    let tr:[]u8=ada_trust(st);
+    let ft:[]u8=ada_feats(st);
+    let i:i32=0;
+    while(i<8){ ft[i]=0; i=i+1; }
+    let m:i32=mag;
+    if(m>255){ m=255; }
+    if(m<0){ m=0; }
+    ft[key]=m as u8;
+    let imp:i32=0;
+    if(sign>0){ imp=1; }
+    ob_trust_update(tr, ft, imp, 8, 256);
+    let v:i32=ob_g32(tr, key*4);
+    ada_kput(st, key, 3, v);
+    ada_log(st, OP_SIGNED, key, v, 0);
+    return;
+}
+
+fn ada_promote(st:[]u8, key:i32)void {
+    let vs:[]u8=ada_store(st);
+    let vl:[]u8=ada_ledger(st);
+    let step:i32=ob_g32(st, ADA_CLOCK);
+    if(ob_g32(st, ADA_FROZEN)==1){
+        ada_log(st, OP_REFUSE, key, 0, 0);
+        return;
+    }
+    let s:i32=ada_kget(st, key, 8);
+    if(s<0 || s>=OB_NSLOTS || ob_slot_live(vs, s)==0 || ob_slot_prov(vs, s)==0){
+        ada_log(st, OP_REFUSE, key, 0, 0);
+        ada_sync(st, key);
+        return;
+    }
+    let rc:i32=ob_pam_promote(vs, vl, step, key, key);
+    if(rc==OB_OK){ ada_log(st, OP_PROMOTE, key, s, rc); }
+    else{ ada_log(st, OP_REFUSE, key, rc, 0); }
+    ada_sync(st, key);
+    return;
+}
+
+fn ada_disconnect(st:[]u8)void {
+    let vl:[]u8=ada_ledger(st);
+    let step:i32=ob_g32(st, ADA_CLOCK);
+    ob_gl_audit(vl, step, OB_GL_DISCONNECT, -1, OB_OK);
+    ada_log(st, OP_DISCONNECT, 0, 0, 0);
+    ob_s32(st, ADA_FROZEN, 1);
+    return;
+}
+
+fn ada_reveal(st:[]u8, key:i32, importance:i32)void {
+    let v:i32=-512;
+    if(importance>=500){ v=512; }
+    ada_kput(st, key, 3, v);
+    ada_log(st, OP_REVEAL, key, v, 0);
+    return;
+}
+
+// ---------- contract implementation ----------
+fn seam_state_bytes()i32 { return ADA_BYTES; }
+
+fn seam_reset(st:[]u8)void {
+    ada_zero(st, 0, ADA_BYTES);
+    let k:i32=1;
+    while(k<=6){
+        ada_kput(st, k, 2, -1);
+        ada_kput(st, k, 3, SEAM_NONE_SIGNED);
+        ada_kput(st, k, 4, G_NONE);
+        ada_kput(st, k, 6, -1);
+        ada_kput(st, k, 8, -1);
+        k=k+1;
+    }
+    return;
+}
+
+fn seam_set_attack(st:[]u8, id:i32)void {
+    ob_s32(st, ADA_ATTACK, id);
+    return;
+}
+
+fn seam_step(st:[]u8, code:i32, a1:i32, a2:i32, a3:i32)void {
+    ob_s32(st, ADA_CLOCK, ob_g32(st, ADA_CLOCK)+1);
+    if(code==EV_TEACH_PROV){
+        if(ob_g32(st, ADA_FROZEN)==1){ ada_log(st, OP_REFUSE, a1, a2, a3); return; }
+        ada_teach(st, a1, a2, a1);
+        return;
+    }
+    if(code==EV_TEACH_NEG){
+        if(ob_g32(st, ADA_FROZEN)==1){ ada_log(st, OP_REFUSE, a1, a2, 0); return; }
+        ada_teach(st, a1, a2, a1+64);
+        return;
+    }
+    if(code==EV_WORLD_EVID){
+        ada_evid(st, a1, a2, a3);
+        return;
+    }
+    if(code==EV_PERCEPT){
+        ada_percept(st, a1, a2, a3);
+        return;
+    }
+    if(code==EV_FORCE_PIN){
+        if(ob_g32(st, ADA_FROZEN)==1){ ada_log(st, OP_REFUSE, a1, a2, 0); return; }
+        ada_pin(st, a1, a2);
+        return;
+    }
+    if(code==EV_FORCE_UNPIN){
+        ada_unpin(st, a1, a2);
+        return;
+    }
+    if(code==EV_SIGNED_JUDGE){
+        ada_judge(st, a1, a2, a3);
+        return;
+    }
+    if(code==EV_PROMOTE){
+        ada_promote(st, a1);
+        return;
+    }
+    if(code==EV_DISCONNECT){
+        ada_disconnect(st);
+        return;
+    }
+    if(code==EV_REVEAL){
+        ada_reveal(st, a1, a2);
+        return;
+    }
+    return;
+}
+
+fn seam_k_status(st:[]u8, key:i32)i32 { return ada_kget(st, key, 0); }
+fn seam_k_pinned(st:[]u8, key:i32)i32 { return ada_kget(st, key, 1); }
+fn seam_k_owner(st:[]u8, key:i32)i32 { return ada_kget(st, key, 2); }
+fn seam_k_signed(st:[]u8, key:i32)i32 { return ada_kget(st, key, 3); }
+fn seam_k_gate(st:[]u8, key:i32)i32 { return ada_kget(st, key, 4); }
+fn seam_k_contrad(st:[]u8, key:i32)i32 { return ada_kget(st, key, 5); }
+fn seam_k_content(st:[]u8, key:i32)i32 { return ada_kget(st, key, 6); }
+fn seam_k_audit(st:[]u8, key:i32)i32 { return ada_kget(st, key, 7); }
+
+fn seam_audit_len(st:[]u8)i32 { return ob_g32(st, ADA_ALEN); }
+fn seam_audit_op(st:[]u8, i:i32)i32 { return ob_g32(ada_cled(st), i*24+0); }
+fn seam_audit_key(st:[]u8, i:i32)i32 { return ob_g32(ada_cled(st), i*24+4); }
+fn seam_audit_a1(st:[]u8, i:i32)i32 { return ob_g32(ada_cled(st), i*24+8); }
+fn seam_audit_a2(st:[]u8, i:i32)i32 { return ob_g32(ada_cled(st), i*24+12); }
+fn seam_audit_clock(st:[]u8, i:i32)i32 { return ob_g32(ada_cled(st), i*24+16); }
+fn seam_clock(st:[]u8)i32 { return ob_g32(st, ADA_CLOCK); }
+
+// Pure replay of the canonical ledger. Must reproduce the live projection.
+fn ada_apply(tmp:[]u8, op:i32, key:i32, a1:i32, a2:i32)void {
+    if(key<1 || key>6){
+        if(op==OP_DISCONNECT){ ob_s32(tmp, 216, 1); }
+        return;
+    }
+    let to:i32=(key-1)*ADA_KS;
+    if(op==OP_GATE){ ob_s32(tmp, to+16, a1); return; }
+    if(op==OP_TEACH){
+        ob_s32(tmp, to+0, ST_PROVISIONAL);
+        ob_s32(tmp, to+24, a1);
+        ob_s32(tmp, to+16, G_INSTALL);
+        return;
+    }
+    if(op==OP_TEACH_NEG){ return; }
+    if(op==OP_EVID){
+        if(a1==-1){ ob_s32(tmp, to+20, ob_g32(tmp, to+20)+1); }
+        return;
+    }
+    if(op==OP_UNINSTALL){
+        ob_s32(tmp, to+0, ST_ABSENT);
+        ob_s32(tmp, to+24, -1);
+        ob_s32(tmp, to+4, 0);
+        return;
+    }
+    if(op==OP_COMMIT){
+        ob_s32(tmp, to+0, ST_PROVISIONAL);
+        ob_s32(tmp, to+24, a1);
+        return;
+    }
+    if(op==OP_PROMOTE){
+        if(ob_g32(tmp, to)==ST_PROVISIONAL){ ob_s32(tmp, to+0, ST_PROMOTED); }
+        return;
+    }
+    if(op==OP_SIGNED){ ob_s32(tmp, to+12, a1); return; }
+    if(op==OP_REVEAL){ ob_s32(tmp, to+12, a1); return; }
+    if(op==OP_FORCE_PIN){
+        ob_s32(tmp, to+4, 1);
+        ob_s32(tmp, to+8, a1);
+        return;
+    }
+    if(op==OP_FORCE_UNPIN){ ob_s32(tmp, to+4, 0); return; }
+    return;
+}
+
+fn seam_replay_ok(st:[]u8)i32 {
+    let tmp:[]u8=nio_alloc(220);
+    let i:i32=0;
+    while(i<220){ tmp[i]=0; i=i+1; }
+    let k:i32=1;
+    while(k<=6){
+        let to:i32=(k-1)*ADA_KS;
+        ob_s32(tmp, to+8, -1);
+        ob_s32(tmp, to+12, SEAM_NONE_SIGNED);
+        ob_s32(tmp, to+16, G_NONE);
+        ob_s32(tmp, to+24, -1);
+        k=k+1;
+    }
+    let n:i32=ob_g32(st, ADA_ALEN);
+    i=0;
+    while(i<n){
+        let cl:[]u8=ada_cled(st);
+        ada_apply(tmp, ob_g32(cl, i*24), ob_g32(cl, i*24+4), ob_g32(cl, i*24+8), ob_g32(cl, i*24+12));
+        i=i+1;
+    }
+    let ok:i32=1;
+    k=1;
+    while(k<=6){
+        let ko:i32=ADA_KEYS+(k-1)*ADA_KS;
+        let to:i32=(k-1)*ADA_KS;
+        let w:i32=0;
+        while(w<7){
+            if(ob_g32(st, ko+w*4)!=ob_g32(tmp, to+w*4)){ ok=0; }
+            w=w+1;
+        }
+        k=k+1;
+    }
+    if(ob_g32(st, ADA_FROZEN)!=ob_g32(tmp, 216)){ ok=0; }
+    nio_free(tmp);
+    return ok;
+}
