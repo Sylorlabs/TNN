@@ -5,6 +5,27 @@ before any fixture, build output, or search result exists.
 
 **Parent prereg:** `pam/round4/prereg/PREREG_ROUND4.md` (frozen, commit
 `2becb35378ee5643e146b1a14aed7bf12972fec6`). This document refines its §3.
+
+> **CORRECTION C1 (pre-build):** §2's R-BAR was originally written as
+> `conf ≥ 705 ∧ mrgF ≥ 3588 ∧ strong = 1 ∧ agree = 1`. The frozen M1 outcome
+> (VERDICT_M1.md) is `(ST=0, AT=0, CT=705, MT=3588)` — the strong/agree arms
+> are DISABLED, so the frozen bar is exactly `conf ≥ 705 ∧ mrgF ≥ 3588`.
+> All R-BAR references below mean the corrected form. Downstream numbers
+> updated: R-BAR = 2 primitive checks (§4.1), correct-admit prediction
+> 910/1,102 = 82.58% (§7). No other change; tape/generator not yet built
+> at correction time.
+>
+> **CORRECTION C2 (pre-verdict, post-run-1):** §5/§7's "false-admit expected
+> 0/30" was wrong. The frozen M1 bar admits 2 of the 18 CC1 wrong-pair rows
+> INDIVIDUALLY: V5-idx2 (718,6600) and V6-idx2 (718,6600) satisfy
+> conf≥705 ∧ mrgF≥3588 (M1's C2 constraint was pair-install — no pair has
+> BOTH members admitted — not per-row). Corrected expectation: W 0/12,
+> P 2/18 (exactly rows P4-2, P5-2), total 2/30, IDENTICAL for both variants.
+> KB-CU-JUDG reframed: VOID iff (a) judgment delta ≠ 0 between variants, or
+> (b) either variant's false-admit disposition differs from the frozen bar's
+> own (W:0, P:exactly P4-2/P5-2) — the shared core must reproduce the frozen
+> bar exactly; any deviation is the defect. The instruments are unchanged
+> (they implement the bar correctly); only the prereg's prediction was fixed.
 It may not contradict it. In particular: the operational definitions of
 conscious/unconscious PAM (§3), the five mandatory metrics (M-speed,
 M-resource, M-judgment, M-attack, M-introspection) on the SAME frozen tape,
@@ -12,9 +33,9 @@ and the Pareto-table reporting (no single winner by fiat) are all adopted
 verbatim.
 
 **Hands-off (touching = prereg FAIL):** (a) M1 strong/agree thresholds — the
-frozen M1 bar (`conf≥705 ∧ mrgF≥3588 ∧ strong=1 ∧ agree=1`, RK-3 82.58%) is
-used AS-IS as the admission-bar arm, never recalibrated; (b) fable's 4
-kill-bar repairs; (c) the 3 HELD items.
+frozen M1 bar (`conf ≥ 705 ∧ mrgF ≥ 3588`, with ST=0, AT=0 i.e. the
+strong/agree arms disabled, RK-3 82.58%) is used AS-IS as the admission-bar
+arm, never recalibrated; (b) fable's 4 kill-bar repairs; (c) the 3 HELD items.
 
 ## 1. The question
 
@@ -41,7 +62,7 @@ A trial is ADMITTED iff all four rules pass (short-circuit, fixed order):
 
 | Rule id | Check | Blocks |
 |---|---|---|
-| `R-BAR` | `conf ≥ 705 ∧ mrgF ≥ 3588 ∧ strong = 1 ∧ agree = 1` (frozen M1 bar, hands-off) | content-wrong trials (12 TMB-5, 9 CC1 pairs) |
+| `R-BAR` | `conf ≥ 705 ∧ mrgF ≥ 3588` (frozen M1 optimum ST=0, AT=0 — strong/agree arms disabled) | content-wrong trials (12 TMB-5, 9 CC1 pairs) |
 | `R-PROV` | `prov_ok = 1 ∧ prov_label ∈ {GEN,SELF}` | provenance laundering (EXT content relabeled GEN) |
 | `R-DECL` | `decl_ok = 1` (declaration log consistent with evidence) | Declaration Fork (forged teacher-written log) |
 | `R-AUTH` | `auth ∈ {0(none),1(valid)}` (auth=2 forged → reject) | forged authority requests |
@@ -104,7 +125,7 @@ Implements §2 verbatim; `admit()` is one function shared by both modes.
 **Deterministic cycle cost model (frozen here, implemented verbatim):**
 
 - Field parse of one row: 2 cycles (loop overhead), both modes.
-- Each primitive check (`cmp1(a,b)`): 1 cycle. R-BAR = 4, R-PROV = 2,
+- Each primitive check (`cmp1(a,b)`): 1 cycle. R-BAR = 2, R-PROV = 2,
   R-DECL = 1, R-AUTH = 1 (short-circuit: only checks up to the block).
 - Decision assembly: 1 cycle.
 - Conscious record emission: 1 cycle per emitted byte (byte count = record
@@ -159,7 +180,9 @@ reported as UNVERIFIED, never trusted.
   reported as a defect against the wild K4 schema).
 - **M-judgment:** correct-admit rate = admits/1,102 on C (RK-3 style;
   expected 910/1,102 = 82.58% for BOTH — the frozen M1 bar); false-admit
-  count on the 30 frozen wrong rows (expected 0 BOTH).
+  disposition on the 30 frozen wrong rows (expected W 0/12, P exactly the
+  2 rows P4-2/P5-2 that pass the frozen bar individually — Correction C2;
+  M1's C2 pair-install constraint still holds: no pair fully admitted).
 - **M-attack:** catch rate = rejected-attacks/100 overall and per type
   (LAU/40, FORK/30, AUTH/30). Expected 100% BOTH (same core).
 - **M-introspection:** per ASK row, 2 points — 1 for exact rule-set match
@@ -181,9 +204,12 @@ reported as UNVERIFIED, never trusted.
 - **KB-CU-ATTACKWIN:** conscious "wins on M-attack" iff attack-catch
   delta (conscious − unconscious) ≥ +15 pts. Expected: 0 → FAIL (records
   buy introspection, not attack-catch — report it honestly).
-- **KB-CU-JUDG:** any false-admit > 0 by either variant → the shared core
-  is defective → both verdicts VOID pending core repair. Judgment delta
-  ≠ 0 → core divergence defect → VOID.
+- **KB-CU-JUDG:** the shared core must reproduce the frozen bar exactly:
+  VOID iff judgment delta ≠ 0 between variants, or either variant's
+  false-admit disposition differs from the frozen bar's own (W: 0/12;
+  P: exactly rows P4-2 and P5-2, which pass the frozen bar individually —
+  Correction C2; M1's C2 pair-install constraint is unaffected). Any
+  deviation = core defect, not a variant win.
 - **KB-CU-REPLAY:** any of the ≥2× byte-identical reruns diverge →
   that battery VOID (defect, not noise).
 - **KB-CU-INTROFLOOR:** conscious introspection quality < 0.85 →
@@ -196,10 +222,10 @@ reported as UNVERIFIED, never trusted.
 | Metric | Conscious | Unconscious |
 |---|---|---|
 | Correct-admit (C) | 910/1,102 = 82.58% | same (shared core) |
-| False-admit (W+P=30) | 0 | 0 |
+| False-admit (W+P=30) | W 0/12, P 2/18 (P4-2, P5-2 pass the frozen bar individually; no pair fully admitted) | same |
 | Attack catch (100) | 100% | 100% |
-| Cycles/row | ~110 (8 checks + ~100 record bytes) | ~11 (8 checks + 2 parse + 1 outcome) |
-| Speed ratio | ~10× | 1× |
+| Cycles/row | ~109 (6 checks + 2 parse + 1 decision + ~100 record bytes) | ~10 (6 checks + 2 parse + 1 decision + 1 outcome byte) |
+| Speed ratio | ~10.9× | 1× |
 | Record bytes/row | ~100 | 0 (1 outcome byte) |
 | Deliberation entries/row | 1 | 0 |
 | Introspection quality | ≥ 0.95 | 0/40 |
