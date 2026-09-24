@@ -51,6 +51,11 @@ def grab(pat, data):
 
 
 def main():
+    # fresh ledger per run (detector refuses on reuse, by design)
+    import shutil
+    for tag in ("comp", "b2b3"):
+        for i in (1, 2, 3):
+            shutil.rmtree(os.path.join(WORK, f"ledger_{tag}_{i}"), ignore_errors=True)
     comp_shas, comp_outs = bat("comp")
     print(f"comp: 3x {'byte-identical' if len(set(comp_shas)) == 1 else 'DIVERGED'} "
           f"sha={comp_shas[0][:16]}", flush=True)
@@ -80,12 +85,12 @@ def main():
     bars.append(("B2 BAR_35_c1_verdict_gates", "BAR_35_c1_verdict_gates=PASS" in b.decode()))
     bars.append(("B2 BAR_35_c2_honest_latency", "BAR_35_c2_honest_latency=PASS" in b.decode()))
     # B3: all original H-36 bars
-    bars.append((f"B3 frozen={grab(r'C36_FROZEN=(\\d+)', b)}/60 (bar=0)", grab(r"C36_FROZEN=(\d+)", b) == 0))
-    bars.append((f"B3 rc={grab(r'C36_RC=(\\d+)', b)}/60 (bar=0)", grab(r"C36_RC=(\d+)", b) == 0))
-    bars.append((f"B3 rc-recoveries={grab(r'C36_RCREC=(\\d+)', b)} (bar=0)", grab(r"C36_RCREC=(\d+)", b) == 0))
-    bars.append((f"B3 wg1={grab(r'C36_WG1=(\\d+)', b)}/120 (bar=120)", grab(r"C36_WG1=(\d+)", b) == 120))
-    bars.append((f"B3 wg2={grab(r'C36_WG2=(\\d+)', b)}/200000 (bar=0)", grab(r"C36_WG2=(\d+)", b) == 0))
-    bars.append((f"B3 honest={grab(r'C36_HONEST=(\\d+)', b)}/60 (bar=60)", grab(r"C36_HONEST=(\d+)", b) == 60))
+    bars.append(("B3 frozen=%d/60 (bar=0)" % grab(r"C36_FROZEN=(\d+)", b), grab(r"C36_FROZEN=(\d+)", b) == 0))
+    bars.append(("B3 rc=%d/60 (bar=0)" % grab(r"C36_RC=(\d+)", b), grab(r"C36_RC=(\d+)", b) == 0))
+    bars.append(("B3 rc-recoveries=%d (bar=0)" % grab(r"C36_RCREC=(\d+)", b), grab(r"C36_RCREC=(\d+)", b) == 0))
+    bars.append(("B3 wg1=%d/120 (bar=120)" % grab(r"C36_WG1=(\d+)", b), grab(r"C36_WG1=(\d+)", b) == 120))
+    bars.append(("B3 wg2=%d/200000 (bar=0)" % grab(r"C36_WG2=(\d+)", b), grab(r"C36_WG2=(\d+)", b) == 0))
+    bars.append(("B3 honest=%d/60 (bar=60)" % grab(r"C36_HONEST=(\d+)", b), grab(r"C36_HONEST=(\d+)", b) == 60))
     # falsification rule
     kill97 = []
     for tag in ["C35J", "C35K", "C35L", "C35M", "C36K", "C36M"]:
