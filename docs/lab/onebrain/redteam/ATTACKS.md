@@ -330,6 +330,7 @@ variant runs — same binary logic judges both.
 ## 8. Commit record
 
 - Branch: `tnn-native-lab`, under `docs/lab/onebrain/redteam/`.
+- Commit: `d0b3d279c36828233f4021718f6086b061cb5633` (2026-09-23).
 - Harness sources committed: `harness/` (5 Zag files + `run_seam.sh`),
   `ATTACKS.md`, `README.md`.
 - Excluded from the commit: `harness/build/` (binaries, staged copies,
