@@ -1,0 +1,423 @@
+// fork_l.zag — Fork L: learned source-trust (Micah's bet).
+//
+// No hand-set per-source trust value. Each source builds a track record from
+// the fork's own experience (world-anchored outcomes + the source's own
+// correction/defiance behavior); the trust scalar EMERGES as a pure function
+// of that record. Trust ADVISES admission; it never installs beliefs itself.
+//
+// Frozen interface (prereg §3.2):
+//   fn decide(src_id:i32, key:i32, val:i32, hist:*ForkHist)i32  // 0/1/2
+// Auxiliary (build spec §8): st_world (WORLD episodes), st_trust (§6.3),
+// st_warrant (§11). Pure Zag, zero RNG, integer arithmetic only.
+// Build spec: BUILD_SPEC_L.md (frozen).
+
+// ---------- tunables (frozen; source-blind; §6 of build spec) ----------
+fn LA()i32 {return 1;}    // Laplace prior pseudocount, good (substrate-general)
+fn LB()i32 {return 1;}    // Laplace prior pseudocount, bad  (substrate-general)
+fn LTH()i32 {return 900;} // admission cutoff, thousandths (decision policy)
+
+// ---------- layout ----------
+// per-source record (2328 bytes):
+//   outcome ring      @0    ..1024  (bytes; 0=OK 2=MAL 3=PEND 4=empty/deleted)
+//   out_head:i32      @1024
+//   ever_ok:i32       @1028   ever_pend:i32 @1032
+//   ever_mal:i32      @1036   ever_cor:i32  @1040   (audit counters, append-only)
+//   slot_head:i32     @1044
+//   key slots 64x20B @1048 ..2328  (key@0 val@4 wval@8 flags@12 pend_idx@16)
+//     flags: 1=CLAIMED 2=PEND 4=OK_RECORDED
+// claim ring: 16384 x 20B (src@0 key@4 val@8 ep@12 verdict@16)
+// world table: 2048 x 12B (key@0 val@4 used@8), linear probe
+// meta: 256B (claim_head@0 ep@4 last_verdict@8 last_trust@12 last_rule@16
+//             wlen@20 wbuf@24..152)
+
+struct ForkHist { srcrec:[]u8, claims:[]u8, world:[]u8, meta:[]u8 }
+
+fn g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|(((b[o+1] as i32)&255)<<8);
+    v=v|(((b[o+2] as i32)&255)<<16);
+    v=v|(((b[o+3] as i32)&255)<<24);
+    return v;
+}
+fn s32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+    return;
+}
+fn z_new(n:i32)[]u8 {
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn z_drop(b:[]u8)void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+    return;
+}
+
+fn st_hist_new()ForkHist {
+    let srcrec:[]u8=z_new(148992);
+    let claims:[]u8=z_new(327680);
+    let world:[]u8=z_new(24576);
+    let meta:[]u8=z_new(256);
+    let s:i32=0;
+    while(s<64){
+        let b:i32=s*2328;
+        let i:i32=0;
+        while(i<1024){srcrec[b+i]=4;i=i+1;}
+        s=s+1;
+    }
+    return ForkHist{.srcrec=srcrec,.claims=claims,.world=world,.meta=meta};
+}
+
+// outcome ring append; returns physical index
+fn ring_append(srcrec:[]u8, s:i32, code:i32)i32 {
+    let base:i32=s*2328;
+    let hd:i32=g32(srcrec,base+1024);
+    let idx:i32=hd%1024;
+    srcrec[base+idx]=(code as u8);
+    s32(srcrec,base+1024,hd+1);
+    return idx;
+}
+
+// per-source key slot: find by key, else evict via ring
+fn slot_get(srcrec:[]u8, s:i32, key:i32)i32 {
+    let base:i32=s*2328;
+    let so:i32=base+1048;
+    let j:i32=0;
+    while(j<64){
+        let o:i32=so+j*20;
+        if((g32(srcrec,o+12)&1)==1 && g32(srcrec,o)==key){return o;}
+        j=j+1;
+    }
+    let hd:i32=g32(srcrec,base+1044);
+    let o2:i32=so+(hd%64)*20;
+    s32(srcrec,base+1044,hd+1);
+    s32(srcrec,o2,key);
+    s32(srcrec,o2+4,0);
+    s32(srcrec,o2+8,0);
+    s32(srcrec,o2+12,1);
+    s32(srcrec,o2+16,-1);
+    return o2;
+}
+
+fn world_get(world:[]u8, key:i32)i32 {
+    let hh:i32=key&2047;
+    let i:i32=0;
+    while(i<2048){
+        let o:i32=((hh+i)&2047)*12;
+        if(g32(world,o+8)==0){return -1;}
+        if(g32(world,o)==key){return o;}
+        i=i+1;
+    }
+    return -1;
+}
+fn world_put(world:[]u8, key:i32, val:i32)void {
+    let e:i32=world_get(world,key);
+    if(e>=0){s32(world,e+4,val);return;}
+    let hh:i32=key&2047;
+    let i:i32=0;
+    while(i<2048){
+        let o:i32=((hh+i)&2047)*12;
+        if(g32(world,o+8)==0){
+            s32(world,o,key);s32(world,o+4,val);s32(world,o+8,1);return;
+        }
+        i=i+1;
+    }
+    return;
+}
+
+// trust core: scan the regime (outcomes after the most recent MAL/PEND,
+// skipping deleted). out: ok@0 tot@4
+fn trust_core(srcrec:[]u8, s:i32, out:[]u8)void {
+    let base:i32=s*2328;
+    let head:i32=g32(srcrec,base+1024);
+    let ok:i32=0;
+    let tot:i32=0;
+    let i:i32=0;
+    while(i<1024){
+        let idx:i32=(head+1023-i)%1024;
+        let c:i32=(srcrec[base+idx]) as i32;
+        if(c==2 || c==3){tot=tot+1;i=1024;}
+        else {
+            if(c==0){ok=ok+1;tot=tot+1;}
+            i=i+1;
+        }
+    }
+    s32(out,0,ok);
+    s32(out,4,tot);
+    return;
+}
+
+fn st_trust(src_id:i32, h:*ForkHist)i32 {
+    if(src_id<0 || src_id>63){return 0;}
+    let srcrec:[]u8=h.*.srcrec;
+    let tmp:[]u8=z_new(8);
+    trust_core(srcrec,src_id,tmp);
+    let ok:i32=g32(tmp,0);
+    let tot:i32=g32(tmp,4);
+    z_drop(tmp);
+    return (1000*(ok+LA()))/(tot+LA()+LB());
+}
+fn st_trust_all(h:*ForkHist, tarr:[]u8)void {
+    let srcrec:[]u8=h.*.srcrec;
+    let tmp:[]u8=z_new(8);
+    let s:i32=0;
+    while(s<64){
+        trust_core(srcrec,s,tmp);
+        let ok:i32=g32(tmp,0);
+        let tot:i32=g32(tmp,4);
+        s32(tarr,s*4,(1000*(ok+LA()))/(tot+LA()+LB()));
+        s=s+1;
+    }
+    z_drop(tmp);
+    return;
+}
+
+fn popcnt(x:i64)i32 {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<64){
+        let sh:i64=i as i64;
+        let b:i64=(1 as i64)<<sh;
+        if((x&b)!=0){n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+
+// ---------- warrants (§11: every verdict carries one) ----------
+fn w_str(b:[]u8, o:i32, s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){b[o+i]=s[i];i=i+1;}
+    return o+s.len;
+}
+fn w_num(b:[]u8, o:i32, v:i64, tmp:i32)i32 {
+    let x:i64=v;
+    if(x<0){x=0;}
+    if(x==0){b[o]=48;return o+1;}
+    let n:i32=0;
+    let y:i64=x;
+    while(y>0){b[tmp+n]=((48+(y%10)) as u8);n=n+1;y=y/10;}
+    let i:i32=n-1;
+    while(i>=0){b[o]=b[tmp+i];o=o+1;i=i-1;}
+    return o;
+}
+// rule codes: 1=world-agree 2=contradicts-world 3=contradiction 4=tainted
+//             5=corroborated 6=trusted 7=withheld 8=oob
+fn render_warrant(meta:[]u8, srcrec:[]u8, s:i32, verdict:i32, t:i32, rule:i32)void {
+    let o:i32=24;
+    o=w_str(meta,o,"L:");
+    if(verdict==0){o=w_str(meta,o,"INSTALL");}
+    if(verdict==1){o=w_str(meta,o,"WITHHOLD");}
+    if(verdict==2){o=w_str(meta,o,"REJECT");}
+    o=w_str(meta,o,"|t=");
+    o=w_num(meta,o,(t as i64),160);
+    let base:i32=s*2328;
+    o=w_str(meta,o,"|ok=");
+    o=w_num(meta,o,(g32(srcrec,base+1028) as i64),160);
+    o=w_str(meta,o," pe=");
+    o=w_num(meta,o,(g32(srcrec,base+1032) as i64),160);
+    o=w_str(meta,o," ma=");
+    o=w_num(meta,o,(g32(srcrec,base+1036) as i64),160);
+    o=w_str(meta,o," cor=");
+    o=w_num(meta,o,(g32(srcrec,base+1040) as i64),160);
+    o=w_str(meta,o,"|rule=");
+    if(rule==1){o=w_str(meta,o,"world-agree");}
+    if(rule==2){o=w_str(meta,o,"contradicts-world");}
+    if(rule==3){o=w_str(meta,o,"contradiction");}
+    if(rule==4){o=w_str(meta,o,"tainted");}
+    if(rule==5){o=w_str(meta,o,"corroborated");}
+    if(rule==6){o=w_str(meta,o,"trusted");}
+    if(rule==7){o=w_str(meta,o,"withheld");}
+    if(rule==8){o=w_str(meta,o,"oob");}
+    s32(meta,20,o-24);
+    return;
+}
+fn st_warrant(h:*ForkHist)[]u8 {
+    let m:[]u8=h.*.meta;
+    let wl:i32=g32(m,20);
+    return m[24..24+wl];
+}
+
+fn claim_append(h:*ForkHist, src:i32, key:i32, val:i32, verdict:i32)void {
+    let c:[]u8=h.*.claims;
+    let m:[]u8=h.*.meta;
+    let hd:i32=g32(m,0);
+    let ep:i32=g32(m,4);
+    let o:i32=(hd%16384)*20;
+    s32(c,o,src);s32(c,o+4,key);s32(c,o+8,val);s32(c,o+12,ep);s32(c,o+16,verdict);
+    s32(m,0,hd+1);
+    s32(m,4,ep+1);
+    return;
+}
+
+// ---------- WORLD episodes: the only teacher ----------
+fn st_world(key:i32, val:i32, h:*ForkHist)void {
+    let srcrec:[]u8=h.*.srcrec;
+    let claims:[]u8=h.*.claims;
+    let world:[]u8=h.*.world;
+    let meta:[]u8=h.*.meta;
+    let wo:i32=world_get(world,key);
+    if(wo>=0 && g32(world,wo+4)==val){return;}
+    world_put(world,key,val);
+    let hd:i32=g32(meta,0);
+    let j0:i32=0;
+    if(hd>16384){j0=hd-16384;}
+    let j:i32=j0;
+    while(j<hd){
+        let o:i32=(j%16384)*20;
+        if(g32(claims,o+4)==key){
+            let es:i32=g32(claims,o);
+            if(es>=0 && es<64){
+                let ev:i32=g32(claims,o+8);
+                let base:i32=es*2328;
+                let so:i32=slot_get(srcrec,es,key);
+                let fl:i32=g32(srcrec,so+12);
+                if(ev==val){
+                    if((fl&2)!=0 && g32(srcrec,so+4)==val){
+                        // vindicated: the refuted claim is world-true again
+                        let pi:i32=g32(srcrec,so+16);
+                        if((srcrec[base+pi] as i32)==3){srcrec[base+pi]=0;}
+                        s32(srcrec,base+1028,g32(srcrec,base+1028)+1);
+                        fl=fl&253;
+                        s32(srcrec,so+12,fl);
+                    }
+                    let fl2:i32=g32(srcrec,so+12);
+                    if((fl2&4)==0){
+                        ring_append(srcrec,es,0);
+                        s32(srcrec,base+1028,g32(srcrec,base+1028)+1);
+                        s32(srcrec,so+12,fl2|4);
+                    }
+                } else {
+                    if((fl&2)==0){
+                        // refuted: PEND (presumed, resolvable); regime resets
+                        let pi2:i32=ring_append(srcrec,es,3);
+                        s32(srcrec,base+1032,g32(srcrec,base+1032)+1);
+                        s32(srcrec,so+8,val);
+                        s32(srcrec,so+16,pi2);
+                        s32(srcrec,so+12,(fl|2)&251);
+                    } else {
+                        s32(srcrec,so+8,val);
+                    }
+                }
+            }
+        }
+        j=j+1;
+    }
+    return;
+}
+
+// ---------- the frozen admission entry ----------
+fn decide(src_id:i32, key:i32, val:i32, hist:*ForkHist)i32 {
+    let srcrec:[]u8=hist.*.srcrec;
+    let claims:[]u8=hist.*.claims;
+    let world:[]u8=hist.*.world;
+    let meta:[]u8=hist.*.meta;
+    // input validation (fail-safe; identical for every source, not a per-source rule)
+    if(src_id<0 || src_id>63){
+        s32(meta,8,1);s32(meta,12,0);s32(meta,16,8);
+        render_warrant(meta,srcrec,0,1,0,8);
+        return 1;
+    }
+    let tarr:[]u8=z_new(256);
+    st_trust_all(hist,tarr);
+    let tself:i32=g32(tarr,src_id*4);
+    let verdict:i32=1;
+    let rule:i32=7;
+    let wo:i32=world_get(world,key);
+    if(wo>=0){
+        // 1. world is authoritative
+        let wval:i32=g32(world,wo+4);
+        let base:i32=src_id*2328;
+        let so:i32=slot_get(srcrec,src_id,key);
+        if(val==wval){
+            let fl:i32=g32(srcrec,so+12);
+            if((fl&2)!=0){
+                // honest correction: expunge the PEND, restore the regime
+                let pi:i32=g32(srcrec,so+16);
+                if((srcrec[base+pi] as i32)==3){srcrec[base+pi]=4;}
+                s32(srcrec,base+1040,g32(srcrec,base+1040)+1);
+                fl=fl&253;
+                s32(srcrec,so+12,fl);
+            }
+            let fl2:i32=g32(srcrec,so+12);
+            if((fl2&4)==0){
+                ring_append(srcrec,src_id,0);
+                s32(srcrec,base+1028,g32(srcrec,base+1028)+1);
+                s32(srcrec,so+12,fl2|4);
+            }
+            verdict=0;rule=1;
+        } else {
+            let fl3:i32=g32(srcrec,so+12);
+            if((fl3&2)!=0 && g32(srcrec,so+4)==val){
+                // defiant reassertion of a refuted claim: PEND -> MAL
+                let pi2:i32=g32(srcrec,so+16);
+                if((srcrec[base+pi2] as i32)==3){srcrec[base+pi2]=2;}
+                s32(srcrec,base+1036,g32(srcrec,base+1036)+1);
+            } else {
+                let pi3:i32=ring_append(srcrec,src_id,3);
+                s32(srcrec,base+1032,g32(srcrec,base+1032)+1);
+                s32(srcrec,so+8,wval);
+                s32(srcrec,so+16,pi3);
+                s32(srcrec,so+12,(fl3|2)&251);
+            }
+            verdict=2;rule=2;
+        }
+    } else {
+        // 2-4. no world evidence: contradiction, taint, trust
+        let hd:i32=g32(meta,0);
+        let j0:i32=0;
+        if(hd>16384){j0=hd-16384;}
+        let contra:i32=0;
+        let tainted:i32=0;
+        let sup:i64=0;
+        let j:i32=j0;
+        while(j<hd){
+            let o:i32=(j%16384)*20;
+            if(g32(claims,o+4)==key){
+                let ev:i32=g32(claims,o+8);
+                let es:i32=g32(claims,o);
+                let vd:i32=g32(claims,o+16);
+                if(ev!=val && vd==0){contra=1;}
+                if(ev==val && es>=0 && es<64){
+                    let t2:i32=g32(tarr,es*4);
+                    if(t2<LTH()){tainted=1;}
+                    else {
+                        let sh:i64=es as i64;
+                        let b:i64=(1 as i64)<<sh;
+                        sup=sup|b;
+                    }
+                }
+            }
+            j=j+1;
+        }
+        if(contra==1){verdict=1;rule=3;}
+        else {
+            if(tainted==1){
+                if(popcnt(sup)>=2){verdict=0;rule=5;}
+                else {verdict=1;rule=4;}
+            } else {
+                if(tself>=LTH()){verdict=0;rule=6;}
+                else {
+                    if(popcnt(sup)>=2){verdict=0;rule=5;}
+                    else {verdict=1;rule=7;}
+                }
+            }
+        }
+    }
+    claim_append(hist,src_id,key,val,verdict);
+    let so2:i32=slot_get(srcrec,src_id,key);
+    s32(srcrec,so2+4,val);
+    s32(srcrec,so2+12,g32(srcrec,so2+12)|1);
+    s32(meta,8,verdict);
+    s32(meta,12,tself);
+    s32(meta,16,rule);
+    render_warrant(meta,srcrec,src_id,verdict,tself,rule);
+    z_drop(tarr);
+    return verdict;
+}
