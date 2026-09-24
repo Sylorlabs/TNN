@@ -805,13 +805,17 @@ precedent (`c213d4d0`).
       `35f5917002377dc64e8ba28b63d00d7a48ce1463`,
       `docs/lab/onebrain/debates/DEBATE.md` (blob
       `628eaabfffe8684408605f372156c56d6e1d3527`)
-- [ ] PREREG.md committed ALONE to `tnn-native-lab` under
-      `docs/lab/onebrain/` (no sources, no evidence)
-- [ ] Commit SHA recorded here and reported
-- [ ] GitHub API verification of the landed file (blob SHA + path)
+- [x] PREREG.md committed ALONE to `tnn-native-lab` under
+      `docs/lab/onebrain/` (no sources, no evidence) — verified 2026-09-24
+      via GitHub API: commit `20ef2fda485db03abaa7bbf1d0d987a6e6050ae6`
+      diff contains exactly one file, `added docs/lab/onebrain/PREREG.md`
+- [x] Commit SHA recorded here and reported
+- [x] GitHub API verification of the landed file (blob SHA + path) —
+      verified 2026-09-24: `docs/lab/onebrain/PREREG.md` @ `20ef2fda`,
+      blob `307b8e15bafe9068c8955917be71ad6ca5530b4e`, 47,409 bytes
 
 Commit method: `~/workspace/commit_racefree.py` with
 `TMPDIR=~/workspace/tmp_commit`, lab-relative path `onebrain/PREREG.md`
 → repo path `docs/lab/onebrain/PREREG.md`. No binaries, no `.zagd`.
 
-Freeze commit SHA: (filled after commit)
+Freeze commit SHA: `20ef2fda485db03abaa7bbf1d0d987a6e6050ae6`
