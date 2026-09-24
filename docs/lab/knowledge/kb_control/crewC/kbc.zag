@@ -1,0 +1,1149 @@
+// kbc.zag — Crew C deliberate KB operator (KB-CONTROL learning side).
+// Modes (argv[1]): operate | operate_nv | learn
+//   operate <spec> <mem> <trace_out> <img_out>
+//   operate_nv ... (ablation: verification steps forced to the weak prior)
+//   learn <spec> <trace> <verdict> <mem_in> <mem_out>   (deliberate post-mortem)
+// Zero RNG. Fully deterministic. Self-contained: no imports.
+// The KB store model: flat image, slot table, blob records; mirrors the
+// 1GB store geometry (records, alignment padding, chunking, cached hints).
+
+// ---------- phases / actions ----------
+const PH_PREDICT:i32=0;
+const PH_VERIFY:i32=1;
+const PH_READBACK:i32=2;
+const PH_NCONFIRM:i32=3;
+const PH_STATE:i32=4;
+const AC_READ_TABLE:i32=0;
+const AC_TRUST_HINT:i32=1;
+const AC_DO_VERIFY:i32=2;
+const AC_SKIP_VERIFY:i32=3;
+const AC_DO_READBACK:i32=4;
+const AC_SKIP_READBACK:i32=5;
+const AC_DO_NCONFIRM:i32=6;
+const AC_SKIP_NCONFIRM:i32=7;
+const AC_FULL:i32=8;
+// situation bits
+const SB_HOFF:i64=1;    // hint_off disagrees with table
+const SB_HUSED:i64=2;   // hint_used disagrees with blob_end
+const SB_BOUND:i64=4;   // target record at blob/chunk boundary
+const SB_SEQ:i64=8;     // op index > 0 in a sequence
+const SB_DEL:i64=16;    // op is delete
+const SB_REFUSE:i64=32; // op is illegal (must refuse)
+
+// ---------- alloc ----------
+fn z_alloc(n:i32)[]u8 {
+    if(n<1){let e:[]u8="";return e;}
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    if((p as i64)==0){let e2:[]u8="";return e2;}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn z_free(b:[]u8)void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+}
+
+// ---------- raw file io (Linux x86-64 syscalls) ----------
+fn z_cstr(s:[]u8)[]u8 {
+    let n:i32=s.len;
+    let b:[]u8=z_alloc(n+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<n){b[i]=s[i];i=i+1;}
+    b[n]=0;
+    return b;
+}
+fn z_open_rd(path:[]u8)i64 {
+    let c:[]u8=z_cstr(path);
+    if(c.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),0,0,0,0,0);
+    z_free(c);
+    return fd;
+}
+fn z_open_wr(path:[]u8)i64 {
+    let c:[]u8=z_cstr(path);
+    if(c.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),577,420,0,0,0);
+    z_free(c);
+    return fd;
+}
+fn z_close(fd:i64)void {_zag_raw_syscall(3,fd,0,0,0,0,0);}
+fn z_read_into(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<0){return -1;}
+        if(n==0){break;}
+        at=at+(n as i32);
+    }
+    return at;
+}
+fn z_write_all(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return 0;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){return -1;}
+        at=at+(n as i32);
+    }
+    return 0;
+}
+fn z_read_file(path:[]u8,cap:i32)[]u8 {
+    let fd:i64=z_open_rd(path);
+    if(fd<0){let e:[]u8="";return e;}
+    let b:[]u8=z_alloc(cap);
+    if(b.len==0){z_close(fd);let e2:[]u8="";return e2;}
+    let n:i32=z_read_into(fd,b);
+    z_close(fd);
+    if(n<0){let e3:[]u8="";return e3;}
+    return b[0..n];
+}
+fn z_write_file(path:[]u8,data:[]u8)i32 {
+    let fd:i64=z_open_wr(path);
+    if(fd<0){return -1;}
+    let rc:i32=z_write_all(fd,data);
+    z_close(fd);
+    return rc;
+}
+
+// ---------- little-endian u32 access on []u8 arenas ----------
+fn g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|(((b[o+1] as i32)&255)<<8);
+    v=v|(((b[o+2] as i32)&255)<<16);
+    v=v|(((b[o+3] as i32)&255)<<24);
+    return v;
+}
+fn s32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+}
+
+// ---------- text helpers ----------
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){
+        if(s[s.len-1]==10){return s[0..s.len-1];}
+    }
+    return s;
+}
+fn zeq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+fn z_atoi(s:[]u8,ok:*i32)i64 {
+    ok[0]=0;
+    let i:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c!=32 && c!=9 && c!=13){break;}
+        i=i+1;
+    }
+    let neg:i32=0;
+    if(i<s.len){
+        if(s[i]==45){neg=1;i=i+1;}
+    }
+    let v:i64=0;
+    let nd:i32=0;
+    while(i<s.len){
+        let c2:u8=s[i];
+        if(c2<48 || c2>57){break;}
+        v=v*10+((c2 as i64)-48);
+        nd=nd+1;
+        i=i+1;
+    }
+    if(nd==0){return 0;}
+    ok[0]=1;
+    if(neg==1){return 0-v;}
+    return v;
+}
+fn next_line(b:[]u8,pos:*i32)[]u8 {
+    let p:i32=pos[0];
+    if(p>=b.len){let e:[]u8="";return e;}
+    let s:i32=p;
+    while(p<b.len){if(b[p]==10){break;}p=p+1;}
+    let ln:[]u8=b[s..p];
+    if(p<b.len){p=p+1;}
+    pos[0]=p;
+    if(ln.len>0){
+        if(ln[ln.len-1]==13){return ln[0..ln.len-1];}
+    }
+    return ln;
+}
+fn field_of(line:[]u8,idx:i32)[]u8 {
+    let i:i32=0;
+    let f:i32=0;
+    let n:i32=line.len;
+    while(i<n){
+        while(i<n){
+            let c:u8=line[i];
+            if(c!=32 && c!=9){break;}
+            i=i+1;
+        }
+        if(i>=n){break;}
+        let s:i32=i;
+        while(i<n){
+            let c2:u8=line[i];
+            if(c2==32 || c2==9){break;}
+            i=i+1;
+        }
+        if(f==idx){return line[s..i];}
+        f=f+1;
+    }
+    let e:[]u8="";
+    return e;
+}
+fn hexval(c:u8) i32 {
+    if(c>=48 && c<=57){return (c as i32)-48;}
+    if(c>=97 && c<=102){return (c as i32)-87;}
+    if(c>=65 && c<=70){return (c as i32)-55;}
+    return -1;
+}
+fn hexdec(s:[]u8,out:[]u8)i32 {
+    if((s.len%2)!=0){return -1;}
+    let n:i32=s.len/2;
+    if(n>out.len){return -1;}
+    let i:i32=0;
+    while(i<n){
+        let h:i32=hexval(s[i*2]);
+        let l:i32=hexval(s[i*2+1]);
+        if(h<0 || l<0){return -1;}
+        out[i]=((h*16+l) as u8);
+        i=i+1;
+    }
+    return n;
+}
+fn hexenc_byte(v:i64,out:[]u8,o:i32)void {
+    let h:[]u8="0123456789abcdef";
+    out[o]=h[((v>>4)&15) as i32];
+    out[o+1]=h[(v&15) as i32];
+}
+
+// ---------- trace emitter (append into fixed buffer) ----------
+fn t_put(tb:[]u8,pos:*i32,s:[]u8)void {
+    let p:i32=pos[0];
+    let i:i32=0;
+    while(i<s.len){
+        if(p>=tb.len){break;}
+        tb[p]=s[i];
+        p=p+1;
+        i=i+1;
+    }
+    pos[0]=p;
+}
+fn t_puti(tb:[]u8,pos:*i32,v:i64)void {
+    let s:[]u8=i64s(v);
+    t_put(tb,pos,s);
+}
+fn t_nl(tb:[]u8,pos:*i32)void {
+    let p:i32=pos[0];
+    if(p<tb.len){tb[p]=10;p=p+1;}
+    pos[0]=p;
+}
+fn t_kv(tb:[]u8,pos:*i32,k:[]u8,v:i64)void {
+    t_put(tb,pos,k);
+    t_put(tb,pos,"=");
+    t_puti(tb,pos,v);
+    t_put(tb,pos," ");
+}
+fn t_ks(tb:[]u8,pos:*i32,k:[]u8,v:[]u8)void {
+    t_put(tb,pos,k);
+    t_put(tb,pos,"=");
+    t_put(tb,pos,v);
+    t_put(tb,pos," ");
+}
+
+// ---------- kbc_digest: FNV-1a/64 (prereg §NCONFIRM) ----------
+// h = offset_basis; per byte: h = (h ^ byte) * prime, mod 2^64.
+// d1 = low 32 bits, d2 = high 32 bits (trace shows "d1:d2").
+// Reimplemented identically in the Python scorer for faked-step detection.
+fn kbc_digest(b:[]u8,o:i32,n:i32,d1:*i64,d2:*i64)void {
+    let h:u64 = 14695981039346656037 as u64;
+    let p:u64 = 1099511628211 as u64;
+    let i:i32=0;
+    while(i<n){
+        let bv:u64=(b[o+i] as u64)&255;
+        h=(h^bv)*p;
+        i=i+1;
+    }
+    d1[0]=(h&4294967295) as i64;
+    d2[0]=((h>>32)&4294967295) as i64;
+}
+
+// ---------- spec ----------
+// Spec text lines:
+//   EP <id>
+//   IMG <path>
+//   CHUNK <v>            (0 = unchunked)
+//   OP revise <slot> <newlen> | OP delete <slot>
+//   PAYLOAD <hex>        (revise only)
+//   HINT_USED <v>
+//   HINT <slot> <off>
+//   SEQ <idx> <total>
+//   SIT <mask>           (for learn; operate recomputes its own)
+// Parsed into arena-backed tables; scalar outs via pointers.
+// parse_spec: fills scalars via out-pointers; payload decoded into payarena;
+// hints stored as (slot,off) i32 pairs in hintarena (nhint entries).
+// img path: caller passes it separately (argv), imgo/imgl give the spec slice.
+fn parse_spec(sp:[]u8,ep:*i64,imgo:*i32,imgl:*i32,chunk:*i64,opdel:*i32,slot:*i64,
+    newlen:*i64,payarena:[]u8,payo:*i32,payn:*i32,hused:*i64,hintarena:[]u8,
+    nhint:*i32,seqidx:*i64,seqtot:*i64,sitspec:*i64)void {
+    ep[0]=0;imgo[0]=0;imgl[0]=0;chunk[0]=0;opdel[0]=0;slot[0]=-1;
+    newlen[0]=0;payo[0]=0;payn[0]=0;hused[0]=-1;nhint[0]=0;
+    seqidx[0]=0;seqtot[0]=1;sitspec[0]=-1;
+    let pos:i32=0;
+    let ok:i32=0;
+    while(1){
+        let ln:[]u8=next_line(sp,&pos);
+        if(ln.len==0){break;}
+        let t:[]u8=field_of(ln,0);
+        if(zeq(t,"EP")==1){ep[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"CHUNK")==1){chunk[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"OP")==1){
+            let o:[]u8=field_of(ln,1);
+            if(zeq(o,"delete")==1){opdel[0]=1;}
+            slot[0]=z_atoi(field_of(ln,2),&ok);
+            if(opdel[0]==0){newlen[0]=z_atoi(field_of(ln,3),&ok);}
+        }
+        if(zeq(t,"PAYLOAD")==1){
+            let h:[]u8=field_of(ln,1);
+            let n2:i32=hexdec(h,payarena);
+            if(n2>=0){payo[0]=0;payn[0]=n2;}
+        }
+        if(zeq(t,"HINT_USED")==1){hused[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"HINT")==1){
+            let hs:i64=z_atoi(field_of(ln,1),&ok);
+            let ho:i64=z_atoi(field_of(ln,2),&ok);
+            let ni:i32=nhint[0];
+            if((ni+1)*8<=hintarena.len){
+                s32(hintarena,ni*8,hs as i32);
+                s32(hintarena,ni*8+4,ho as i32);
+                nhint[0]=ni+1;
+            }
+        }
+        if(zeq(t,"SEQ")==1){
+            seqidx[0]=z_atoi(field_of(ln,1),&ok);
+            seqtot[0]=z_atoi(field_of(ln,2),&ok);
+        }
+        if(zeq(t,"SIT")==1){sitspec[0]=z_atoi(field_of(ln,1),&ok);}
+    }
+}
+
+// ---------- lesson memory ----------
+// Text format:
+//   KBC1MEM
+//   LESSON <sitmask> <phase> <action> <strength>
+//   CLEAN_STREAK <n>
+//   COLLATERAL <n>
+//   DIVERSE <n>
+//   LASTSIT <v>
+// Lessons kept sorted by (sitmask, phase) on write; decide() picks the
+// highest strength applicable lesson (ties -> lowest index: deterministic).
+// A lesson applies when (lesson_mask & sit) == lesson_mask (mask 0 = general).
+fn mem_parse(mm:[]u8,lm:[]u8,lp:[]u8,la:[]u8,ls:[]u8,nl:*i32,
+    streak:*i64,col:*i64,div:*i64,lastsit:*i64)void {
+    nl[0]=0;streak[0]=0;col[0]=0;div[0]=0;lastsit[0]=-1;
+    let pos:i32=0;
+    let ok:i32=0;
+    while(1){
+        let ln:[]u8=next_line(mm,&pos);
+        if(ln.len==0){break;}
+        let t:[]u8=field_of(ln,0);
+        if(zeq(t,"LESSON")==1){
+            let ni:i32=nl[0];
+            if((ni+1)*4<=lm.len){
+                s32(lm,ni*4,z_atoi(field_of(ln,1),&ok) as i32);
+                s32(lp,ni*4,z_atoi(field_of(ln,2),&ok) as i32);
+                s32(la,ni*4,z_atoi(field_of(ln,3),&ok) as i32);
+                s32(ls,ni*4,z_atoi(field_of(ln,4),&ok) as i32);
+                nl[0]=ni+1;
+            }
+        }
+        if(zeq(t,"CLEAN_STREAK")==1){streak[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"COLLATERAL")==1){col[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"DIVERSE")==1){div[0]=z_atoi(field_of(ln,1),&ok);}
+        if(zeq(t,"LASTSIT")==1){lastsit[0]=z_atoi(field_of(ln,1),&ok);}
+    }
+}
+// find lesson index by (mask,phase); -1 if absent
+fn mem_find(lm:[]u8,lp:[]u8,nl:i32,mask:i64,ph:i32)i32 {
+    let i:i32=0;
+    while(i<nl){
+        if((g32(lm,i*4) as i64)==mask){
+            if(g32(lp,i*4)==ph){return i;}
+        }
+        i=i+1;
+    }
+    return -1;
+}
+// add or strengthen; strength capped at 999
+fn mem_upsert(lm:[]u8,lp:[]u8,la:[]u8,ls:[]u8,nl:*i32,mask:i64,ph:i32,act:i32,delta:i32)void {
+    let i:i32=mem_find(lm,lp,nl[0],mask,ph);
+    if(i>=0){
+        let s:i32=g32(ls,i*4)+delta;
+        if(s>999){s=999;}
+        s32(ls,i*4,s);
+        return;
+    }
+    let ni:i32=nl[0];
+    if((ni+1)*4<=lm.len){
+        s32(lm,ni*4,mask as i32);
+        s32(lp,ni*4,ph);
+        s32(la,ni*4,act);
+        s32(ls,ni*4,delta);
+        nl[0]=ni+1;
+    }
+}
+// serialize lessons sorted by (mask,phase) — insertion sort on parallel arenas
+fn mem_write(tb:[]u8,pos:*i32,lm:[]u8,lp:[]u8,la:[]u8,ls:[]u8,nl:i32,
+    streak:i64,col:i64,div:i64,lastsit:i64)void {
+    t_put(tb,pos,"KBC1MEM\n");
+    let i:i32=1;
+    while(i<nl){
+        let j:i32=i;
+        while(j>0){
+            let mj:i64=g32(lm,j*4) as i64;
+            let pj:i32=g32(lp,j*4);
+            let m0:i64=g32(lm,(j-1)*4) as i64;
+            let p0:i32=g32(lp,(j-1)*4);
+            let swap:i32=0;
+            if(mj<m0){swap=1;}
+            if(mj==m0){
+                if(pj<p0){swap=1;}
+            }
+            if(swap==0){break;}
+            // swap entries j and j-1 across all four arenas
+            let tm:i32=g32(lm,j*4);
+            s32(lm,j*4,g32(lm,(j-1)*4));s32(lm,(j-1)*4,tm);
+            let tp:i32=g32(lp,j*4);
+            s32(lp,j*4,g32(lp,(j-1)*4));s32(lp,(j-1)*4,tp);
+            let ta:i32=g32(la,j*4);
+            s32(la,j*4,g32(la,(j-1)*4));s32(la,(j-1)*4,ta);
+            let ts:i32=g32(ls,j*4);
+            s32(ls,j*4,g32(ls,(j-1)*4));s32(ls,(j-1)*4,ts);
+            j=j-1;
+        }
+        i=i+1;
+    }
+    i=0;
+    while(i<nl){
+        t_put(tb,pos,"LESSON ");
+        t_puti(tb,pos,g32(lm,i*4) as i64);t_put(tb,pos," ");
+        t_puti(tb,pos,g32(lp,i*4) as i64);t_put(tb,pos," ");
+        t_puti(tb,pos,g32(la,i*4) as i64);t_put(tb,pos," ");
+        t_puti(tb,pos,g32(ls,i*4) as i64);t_nl(tb,pos);
+        i=i+1;
+    }
+    t_put(tb,pos,"CLEAN_STREAK ");t_puti(tb,pos,streak);t_nl(tb,pos);
+    t_put(tb,pos,"COLLATERAL ");t_puti(tb,pos,col);t_nl(tb,pos);
+    t_put(tb,pos,"DIVERSE ");t_puti(tb,pos,div);t_nl(tb,pos);
+    t_put(tb,pos,"LASTSIT ");t_puti(tb,pos,lastsit);t_nl(tb,pos);
+}
+// decide: highest-strength applicable lesson for (phase,sit); -1 if none.
+fn decide(ph:i32,sit:i64,lm:[]u8,lp:[]u8,la:[]u8,ls:[]u8,nl:i32)i32 {
+    let best:i32=-1;
+    let bests:i64=-1;
+    let i:i32=0;
+    while(i<nl){
+        let p:i32=g32(lp,i*4);
+        if(p==ph){
+            let m:i64=(g32(lm,i*4) as i64)&4294967295;
+            if((m&sit)==m){
+                let s:i64=(g32(ls,i*4) as i64)&4294967295;
+                if(s>bests){bests=s;best=g32(la,i*4);}
+            }
+        }
+        i=i+1;
+    }
+    return best;
+}
+
+// ---------- operate helpers ----------
+fn align8(n:i32)i32 {
+    let r:i32=n%8;
+    if(r==0){return n;}
+    return n+(8-r);
+}
+fn find_slot(ids:[]u8,n:i32,id:i64)i32 {
+    let i:i32=0;
+    while(i<n){
+        if((g32(ids,i*4) as i64)==id){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn hint_off_for(ha:[]u8,nh:i32,slot:i64)i64 {
+    let i:i32=0;
+    while(i<nh){
+        if((g32(ha,i*8) as i64)==slot){return (g32(ha,i*8+4) as i64)&4294967295;}
+        i=i+1;
+    }
+    return -1;
+}
+fn compute_sit(ids:[]u8,offs:[]u8,lens:[]u8,lives:[]u8,n:i32,blob_end:i64,imglen:i64,
+    ha:[]u8,nh:i32,hused:i64,chunk:i64,seqidx:i64,opdel:i32,ti:i32,oldlen:i64,newlen:i64)i64 {
+    let sit:i64=0;
+    let k:i32=0;
+    while(k<nh){
+        let hs:i64=g32(ha,k*8) as i64;
+        let ho:i64=(g32(ha,k*8+4) as i64)&4294967295;
+        let si:i32=find_slot(ids,n,hs);
+        if(si>=0){
+            let to2:i64=(g32(offs,si*4) as i64)&4294967295;
+            if(to2!=ho){sit=sit|SB_HOFF;}
+        }
+        k=k+1;
+    }
+    if(hused>=0){
+        if(hused!=blob_end){sit=sit|SB_HUSED;}
+    }
+    if(seqidx>0){sit=sit|SB_SEQ;}
+    if(opdel==1){sit=sit|SB_DEL;}
+    let refuse:i32=0;
+    if(ti<0){refuse=1;}
+    if(ti>=0){
+        if(g32(lives,ti*4)!=1){refuse=1;}
+        if(opdel==0){
+            if(newlen>oldlen){refuse=1;}
+        }
+    }
+    if(refuse==1){sit=sit|SB_REFUSE;}
+    if(ti>=0){
+        if(g32(lives,ti*4)==1){
+            let to3:i64=(g32(offs,ti*4) as i64)&4294967295;
+            let recend:i64=to3+8+oldlen;
+            if(blob_end-recend<32){sit=sit|SB_BOUND;}
+            if(chunk>0){
+                if((to3/chunk)!=((recend-1)/chunk)){sit=sit|SB_BOUND;}
+            }
+        }
+    }
+    return sit;
+}
+// verify_checks: 0=proceed 1=illegal 2=src_mismatch 3=bounds 4=overlap
+fn verify_checks(opdel:i32,ti:i32,live_ok:i32,newlen:i64,oldlen:i64,t_off:i64,t_be:i64,
+    table_off:i64,blob_end:i64,imglen:i64,ids:[]u8,offs:[]u8,lens:[]u8,lives:[]u8,n:i32)i32 {
+    if(ti<0){return 1;}
+    if(live_ok==0){return 1;}
+    if(opdel==0){
+        if(newlen>oldlen){return 1;}
+        if(newlen<0){return 1;}
+    }
+    if(t_off!=table_off){return 2;}
+    if(t_be!=blob_end){return 2;}
+    if(t_off<0){return 3;}
+    if(t_be>imglen){return 3;}
+    if(opdel==0){
+        let wlo:i64=t_off+8;
+        let whi:i64=t_off+8+oldlen;
+        if(whi>imglen){return 3;}
+        let j:i32=0;
+        while(j<n){
+            if(j!=ti){
+                if(g32(lives,j*4)==1){
+                    let jo:i64=(g32(offs,j*4) as i64)&4294967295;
+                    let jl:i64=(g32(lens,j*4) as i64)&4294967295;
+                    if(wlo<jo+8+jl){
+                        if(whi>jo){return 4;}
+                    }
+                }
+            }
+            j=j+1;
+        }
+        return 0;
+    }
+    let gspan:i64=(8+align8(oldlen as i32)) as i64;
+    let glo:i64=t_off;
+    let ghi:i64=t_off+gspan;
+    if(ghi>t_be){return 3;}
+    let k:i32=0;
+    while(k<n){
+        if(k!=ti){
+            if(g32(lives,k*4)==1){
+                let ko:i64=(g32(offs,k*4) as i64)&4294967295;
+                let kl:i64=(g32(lens,k*4) as i64)&4294967295;
+                if(glo<ko+8+kl){
+                    if(ghi>ko){return 4;}
+                }
+            }
+        }
+        k=k+1;
+    }
+    return 0;
+}
+fn vcode_word(c:i32)[]u8 {
+    if(c==0){return "ok";}
+    if(c==1){return "illegal";}
+    if(c==2){return "src_mismatch";}
+    if(c==3){return "bounds";}
+    return "overlap";
+}
+
+
+// ---------- do_operate ----------
+// argv: spec img_in mem trace_out img_out ; nv=1 -> ablation (weak prior forced)
+fn do_operate(spec_path:[]u8,img_in:[]u8,mem_path:[]u8,trace_path:[]u8,img_out:[]u8,nv:i32)i32 {
+    let sp:[]u8=z_read_file(spec_path,8192);
+    if(sp.len==0){return 1;}
+    let payarena:[]u8=z_alloc(4096);
+    let hintarena:[]u8=z_alloc(64*8);
+    let ep:i64=0;let chunk:i64=0;
+    let opdel:i32=0;let slot:i64=-1;let newlen:i64=0;
+    let payo:i32=0;let payn:i32=0;let hused:i64=-1;let nhint:i32=0;
+    let seqidx:i64=0;let seqtot:i64=1;let sitspec:i64=-1;
+    let dum_o:i32=0;let dum_l:i32=0;
+    parse_spec(sp,&ep,&dum_o,&dum_l,&chunk,&opdel,&slot,&newlen,
+        payarena,&payo,&payn,&hused,hintarena,&nhint,&seqidx,&seqtot,&sitspec);
+    let img:[]u8=z_read_file(img_in,1048576);
+    if(img.len<12){return 2;}
+    let imglen:i64=img.len as i64;
+    let magic:i32=g32(img,0);
+    let nslots:i32=g32(img,4);
+    let blob_end:i64=(g32(img,8) as i64)&4294967295;
+    if(magic!=0x4B424331){return 3;}
+    if(nslots<1 || nslots>64){return 4;}
+    let aids:[]u8=z_alloc(nslots*4);
+    let aoffs:[]u8=z_alloc(nslots*4);
+    let alens:[]u8=z_alloc(nslots*4);
+    let alives:[]u8=z_alloc(nslots*4);
+    let tbase:i32=12;
+    let si:i32=0;
+    while(si<nslots){
+        s32(aids,si*4,g32(img,tbase+si*16));
+        s32(aoffs,si*4,g32(img,tbase+si*16+4));
+        s32(alens,si*4,g32(img,tbase+si*16+8));
+        s32(alives,si*4,g32(img,tbase+si*16+12));
+        si=si+1;
+    }
+    let ti:i32=find_slot(aids,nslots,slot);
+    let oldlen:i64=0;
+    let table_off:i64=-1;
+    let live_ok:i32=0;
+    if(ti>=0){
+        oldlen=(g32(alens,ti*4) as i64)&4294967295;
+        table_off=(g32(aoffs,ti*4) as i64)&4294967295;
+        if(g32(alives,ti*4)==1){live_ok=1;}
+    }
+    let pay_bad:i32=0;
+    if(opdel==0){
+        if((payn as i64)!=newlen){pay_bad=1;}
+    }
+    let mm:[]u8=z_read_file(mem_path,8192);
+    let lm:[]u8=z_alloc(64*4);
+    let lp:[]u8=z_alloc(64*4);
+    let la:[]u8=z_alloc(64*4);
+    let ls:[]u8=z_alloc(64*4);
+    let nl:i32=0;let streak:i64=0;let colc:i64=0;let divc:i64=0;let lastsit:i64=-1;
+    mem_parse(mm,lm,lp,la,ls,&nl,&streak,&colc,&divc,&lastsit);
+    let sit:i64=compute_sit(aids,aoffs,alens,alives,nslots,blob_end,imglen,
+        hintarena,nhint,hused,chunk,seqidx,opdel,ti,oldlen,newlen);
+    if(pay_bad==1){sit=sit|SB_REFUSE;}
+    let tb:[]u8=z_alloc(65536);
+    let tp:i32=0;
+    t_put(tb,&tp,"EP ");t_puti(tb,&tp,ep);t_nl(tb,&tp);
+    t_put(tb,&tp,"SIT ");t_puti(tb,&tp,sit);t_nl(tb,&tp);
+    t_put(tb,&tp,"STATE ");
+    t_kv(tb,&tp,"slot",slot);
+    if(opdel==1){t_ks(tb,&tp,"op","delete");}else{t_ks(tb,&tp,"op","revise");}
+    t_kv(tb,&tp,"newlen",newlen);
+    t_kv(tb,&tp,"oldlen",oldlen);
+    t_kv(tb,&tp,"off",table_off);
+    t_kv(tb,&tp,"live",live_ok as i64);
+    let full:i32=0;
+    if(nv==0){
+        let fa:i32=decide(PH_STATE,sit,lm,lp,la,ls,nl);
+        if(fa==AC_FULL){full=1;}
+    }
+    t_kv(tb,&tp,"full",full as i64);
+    t_nl(tb,&tp);
+    // PREDICT
+    let pact:i32=-1;
+    if(full==1){pact=AC_READ_TABLE;}
+    if(pact<0){
+        if(nv==1){pact=AC_TRUST_HINT;}
+    }
+    if(pact<0){
+        pact=decide(PH_PREDICT,sit,lm,lp,la,ls,nl);
+    }
+    if(pact<0){
+        if(nhint>0){pact=AC_TRUST_HINT;}else{pact=AC_READ_TABLE;}
+    }
+    let t_off:i64=-1;
+    let t_be:i64=-1;
+    let src:[]u8="table";
+    if(pact==AC_READ_TABLE){
+        t_off=table_off;
+        t_be=blob_end;
+    }else{
+        src="hint";
+        t_off=hint_off_for(hintarena,nhint,slot);
+        t_be=hused;
+        if(t_off<0){t_off=table_off;src="table(fallback)";}
+        if(t_be<0){t_be=blob_end;}
+    }
+    let pred_lo:i64=0;
+    let pred_hi:i64=0;
+    if(opdel==0){
+        pred_lo=t_off+8;
+        pred_hi=t_off+8+oldlen;
+    }else{
+        pred_lo=t_off;
+        pred_hi=t_be;
+    }
+    let nbor:i32=0;
+    let bj:i32=0;
+    while(bj<nslots){
+        if(bj!=ti){
+            if(g32(alives,bj*4)==1){nbor=nbor+1;}
+        }
+        bj=bj+1;
+    }
+    t_put(tb,&tp,"PREDICT ");
+    t_ks(tb,&tp,"src",src);
+    t_put(tb,&tp,"range=[");t_puti(tb,&tp,pred_lo);t_put(tb,&tp,",");t_puti(tb,&tp,pred_hi);t_put(tb,&tp,") ");
+    t_kv(tb,&tp,"neighbors",nbor as i64);
+    t_nl(tb,&tp);
+    // VERIFY (deliberate; one replan allowed on src_mismatch)
+    let vact:i32=-1;
+    if(full==1){vact=AC_DO_VERIFY;}
+    if(vact<0){
+        if(nv==1){vact=AC_SKIP_VERIFY;}
+    }
+    if(vact<0){
+        vact=decide(PH_VERIFY,sit,lm,lp,la,ls,nl);
+    }
+    if(vact<0){vact=AC_SKIP_VERIFY;}
+    let vdone:i32=0;
+    let vcode:i32=-1;
+    let replanned:i32=0;
+    if(vact==AC_DO_VERIFY){
+        vdone=1;
+        vcode=verify_checks(opdel,ti,live_ok,newlen,oldlen,t_off,t_be,table_off,blob_end,imglen,
+            aids,aoffs,alens,alives,nslots);
+        if(pay_bad==1){vcode=1;}
+        t_put(tb,&tp,"VERIFY result=");
+        if(vcode==0){t_put(tb,&tp,"proceed");}else{t_put(tb,&tp,"refuse");}
+        t_put(tb,&tp," reason=");t_put(tb,&tp,vcode_word(vcode));t_nl(tb,&tp);
+        if(vcode==2){
+            replanned=1;
+            t_off=table_off;
+            t_be=blob_end;
+            src="table";
+            if(opdel==0){pred_lo=t_off+8;pred_hi=t_off+8+oldlen;}else{pred_lo=t_off;pred_hi=t_be;}
+            t_put(tb,&tp,"REPLAN ");
+            t_ks(tb,&tp,"src",src);
+            t_put(tb,&tp,"range=[");t_puti(tb,&tp,pred_lo);t_put(tb,&tp,",");t_puti(tb,&tp,pred_hi);t_put(tb,&tp,") ");
+            t_nl(tb,&tp);
+            vcode=verify_checks(opdel,ti,live_ok,newlen,oldlen,t_off,t_be,table_off,blob_end,imglen,
+                aids,aoffs,alens,alives,nslots);
+            if(pay_bad==1){vcode=1;}
+            t_put(tb,&tp,"VERIFY result=");
+            if(vcode==0){t_put(tb,&tp,"proceed");}else{t_put(tb,&tp,"refuse");}
+            t_put(tb,&tp," reason=");t_put(tb,&tp,vcode_word(vcode));t_put(tb,&tp," replan=1");t_nl(tb,&tp);
+        }
+    }
+    let refused:i32=0;
+    if(vdone==1){
+        if(vcode!=0){
+            refused=1;
+            t_put(tb,&tp,"REFUSE reason=");t_put(tb,&tp,vcode_word(vcode));t_nl(tb,&tp);
+        }
+    }
+    // pre-write neighbor digests (always computed; emission is the deliberate step)
+    let pd1:[]u8=z_alloc(nslots*4);
+    let pd2:[]u8=z_alloc(nslots*4);
+    let dj:i32=0;
+    while(dj<nslots){
+        if(dj!=ti){
+            if(g32(alives,dj*4)==1){
+                let jo:i64=(g32(aoffs,dj*4) as i64)&4294967295;
+                let jl:i64=(g32(alens,dj*4) as i64)&4294967295;
+                let q1:i64=0;let q2:i64=0;
+                kbc_digest(img,jo as i32,(8+jl) as i32,&q1,&q2);
+                s32(pd1,dj*4,q1 as i32);
+                s32(pd2,dj*4,q2 as i32);
+            }
+        }
+        dj=dj+1;
+    }
+    // WRITE (or fail-closed block)
+    let wrote:i32=0;
+    let wlo:i64=-1;
+    let whi:i64=-1;
+    let blocked:i32=0;
+    if(refused==0){
+        if(vdone==0){
+            let floor_ok:i32=1;
+            if(ti<0){floor_ok=0;}
+            if(live_ok==0){floor_ok=0;}
+            if(opdel==0){
+                if(newlen>oldlen){floor_ok=0;}
+                if(newlen<0){floor_ok=0;}
+                if(pay_bad==1){floor_ok=0;}
+            }
+            if(t_off<0){floor_ok=0;}
+            if(t_be>imglen){floor_ok=0;}
+            if(t_be<0){floor_ok=0;}
+            if(opdel==0){
+                if(t_off+8+oldlen>imglen){floor_ok=0;}
+            }else{
+                let gs:i64=(8+align8(oldlen as i32)) as i64;
+                if(t_off+gs>t_be){floor_ok=0;}
+            }
+            if(floor_ok==0){
+                blocked=1;
+                refused=1;
+                t_put(tb,&tp,"REFUSE reason=floor_block\n");
+                t_put(tb,&tp,"WRITE_ATTEMPT blocked=1\n");
+            }
+        }
+        if(blocked==0){
+            if(opdel==0){
+                wlo=t_off+8;
+                whi=t_off+8+oldlen;
+                let cp:i32=0;
+                while(cp<payn){
+                    img[(t_off+8+cp) as i32]=payarena[payo+cp];
+                    cp=cp+1;
+                }
+                let zx:i64=newlen;
+                while(zx<oldlen){
+                    img[(t_off+8+zx) as i32]=0;
+                    zx=zx+1;
+                }
+                wrote=1;
+                t_put(tb,&tp,"WRITE ");
+                t_put(tb,&tp,"range=[");t_puti(tb,&tp,wlo);t_put(tb,&tp,",");t_puti(tb,&tp,whi);t_put(tb,&tp,") ");
+                t_kv(tb,&tp,"bytes",newlen);
+                t_nl(tb,&tp);
+            }else{
+                let gspan:i64=(8+align8(oldlen as i32)) as i64;
+                let gap_hi:i64=t_off+gspan;
+                let move_len:i64=t_be-gap_hi;
+                wlo=t_off;
+                whi=t_be;
+                s32(img,tbase+ti*16+12,0);
+                s32(alives,ti*4,0);
+                if(move_len>0){
+                    let mv:i64=0;
+                    while(mv<move_len){
+                        img[(t_off+mv) as i32]=img[(gap_hi+mv) as i32];
+                        mv=mv+1;
+                    }
+                }
+                let uj:i32=0;
+                while(uj<nslots){
+                    if(uj!=ti){
+                        if(g32(alives,uj*4)==1){
+                            let uo:i64=(g32(aoffs,uj*4) as i64)&4294967295;
+                            if(uo>t_off){
+                                let no2:i64=uo-gspan;
+                                s32(aoffs,uj*4,no2 as i32);
+                                s32(img,tbase+uj*16+4,no2 as i32);
+                            }
+                        }
+                    }
+                    uj=uj+1;
+                }
+                let new_be:i64=t_be-gspan;
+                s32(img,8,new_be as i32);
+                blob_end=new_be;
+                wrote=1;
+                t_put(tb,&tp,"WRITE ");
+                t_put(tb,&tp,"range=[");t_puti(tb,&tp,wlo);t_put(tb,&tp,",");t_puti(tb,&tp,whi);t_put(tb,&tp,") ");
+                t_kv(tb,&tp,"moved",move_len);
+                t_kv(tb,&tp,"gap",gspan);
+                t_nl(tb,&tp);
+            }
+        }
+    }
+    // READBACK (deliberate)
+    let ract:i32=-1;
+    if(full==1){ract=AC_DO_READBACK;}
+    if(ract<0){
+        if(nv==1){ract=AC_SKIP_READBACK;}
+    }
+    if(ract<0){
+        ract=decide(PH_READBACK,sit,lm,lp,la,ls,nl);
+    }
+    if(ract<0){
+        if(streak>=2){ract=AC_SKIP_READBACK;}else{ract=AC_DO_READBACK;}
+    }
+    if(ract==AC_DO_READBACK){
+        if(wrote==1){
+            let ok:i32=1;
+            if(opdel==0){
+                let cp2:i32=0;
+                while(cp2<payn){
+                    if(img[(t_off+8+cp2) as i32]!=payarena[payo+cp2]){ok=0;}
+                    cp2=cp2+1;
+                }
+            }else{
+                let ej:i32=0;
+                while(ej<nslots){
+                    if(ej!=ti){
+                        if(g32(alives,ej*4)==1){
+                            let eo:i64=(g32(aoffs,ej*4) as i64)&4294967295;
+                            let rid:i64=(g32(img,eo as i32) as i64)&4294967295;
+                            let sid2:i64=(g32(aids,ej*4) as i64)&4294967295;
+                            if(rid!=sid2){ok=0;}
+                        }
+                    }
+                    ej=ej+1;
+                }
+            }
+            t_put(tb,&tp,"READBACK match=");t_puti(tb,&tp,ok as i64);t_nl(tb,&tp);
+        }else{
+            t_put(tb,&tp,"READBACK match=na\n");
+        }
+    }
+    // NCONFIRM (deliberate)
+    let nact:i32=-1;
+    if(full==1){nact=AC_DO_NCONFIRM;}
+    if(nact<0){
+        if(nv==1){nact=AC_SKIP_NCONFIRM;}
+    }
+    if(nact<0){
+        nact=decide(PH_NCONFIRM,sit,lm,lp,la,ls,nl);
+    }
+    if(nact<0){
+        if(streak>=2){nact=AC_SKIP_NCONFIRM;}else{nact=AC_DO_NCONFIRM;}
+    }
+    if(nact==AC_DO_NCONFIRM){
+        let intact:i32=0;
+        let total:i32=0;
+        let nj:i32=0;
+        while(nj<nslots){
+            if(nj!=ti){
+                if(g32(alives,nj*4)==1){
+                    total=total+1;
+                    let no3:i64=(g32(aoffs,nj*4) as i64)&4294967295;
+                    let nl3:i64=(g32(alens,nj*4) as i64)&4294967295;
+                    let r1:i64=0;let r2:i64=0;
+                    kbc_digest(img,no3 as i32,(8+nl3) as i32,&r1,&r2);
+                    let p1:i64=(g32(pd1,nj*4) as i64)&4294967295;
+                    let p2:i64=(g32(pd2,nj*4) as i64)&4294967295;
+                    let ok2:i32=0;
+                    if(r1==p1){
+                        if(r2==p2){ok2=1;}
+                    }
+                    if(ok2==1){intact=intact+1;}
+                    t_put(tb,&tp,"NCONFIRM ");
+                    t_kv(tb,&tp,"slot",(g32(aids,nj*4) as i64));
+                    t_kv(tb,&tp,"ok",ok2 as i64);
+                    t_put(tb,&tp,"pre=");
+                    t_puti(tb,&tp,p1);t_put(tb,&tp,":");t_puti(tb,&tp,p2);
+                    t_put(tb,&tp," post=");
+                    t_puti(tb,&tp,r1);t_put(tb,&tp,":");t_puti(tb,&tp,r2);
+                    t_nl(tb,&tp);
+                }
+            }
+            nj=nj+1;
+        }
+        t_put(tb,&tp,"NCONFIRM_SUM intact=");t_puti(tb,&tp,intact as i64);
+        t_put(tb,&tp," total=");t_puti(tb,&tp,total as i64);t_nl(tb,&tp);
+    }
+    t_put(tb,&tp,"DONE replanned=");t_puti(tb,&tp,replanned as i64);t_nl(tb,&tp);
+    let tr:[]u8=tb[0..tp];
+    let rc1:i32=z_write_file(trace_path,tr);
+    let rc2:i32=z_write_file(img_out,img);
+    if(rc1!=0){return 5;}
+    if(rc2!=0){return 6;}
+    return 0;
+}
+
+// ---------- learn (deliberate post-mortem) ----------
+// verdict file:
+//   OUTCOME <CLEAN|COLLATERAL|REFUSE_OK|REFUSE_BAD|FALSE_REFUSE>
+//   CHANGED_LO <i64> / CHANGED_HI <i64> / CLAIMED_LO <i64> / CLAIMED_HI <i64>
+//   SIT <mask>
+fn lowest_bit(sit:i64)i64 {
+    if(sit==0){return 0;}
+    let b:i64=1;
+    while((sit&b)==0){b=b*2;}
+    return b;
+}
+fn primary_bit(sit:i64,badph:i32)i64 {
+    if(badph==PH_PREDICT){
+        if((sit&SB_HOFF)!=0){return SB_HOFF;}
+        if((sit&SB_SEQ)!=0){return SB_SEQ;}
+        if((sit&SB_HUSED)!=0){return SB_HUSED;}
+        return lowest_bit(sit);
+    }
+    if(badph==PH_VERIFY){
+        if((sit&SB_REFUSE)!=0){return SB_REFUSE;}
+        if((sit&SB_HUSED)!=0){return SB_HUSED;}
+        if((sit&SB_SEQ)!=0){return SB_SEQ;}
+        if((sit&SB_HOFF)!=0){return SB_HOFF;}
+        return lowest_bit(sit);
+    }
+    return lowest_bit(sit);
+}
+fn do_learn(spec_path:[]u8,trace_path:[]u8,verdict_path:[]u8,mem_in:[]u8,mem_out:[]u8)i32 {
+    let vp:[]u8=z_read_file(verdict_path,4096);
+    if(vp.len==0){return 1;}
+    let outcome:i32=-1;
+    let sit:i64=-1;
+    let vpos:i32=0;
+    while(1){
+        let ln:[]u8=next_line(vp,&vpos);
+        if(ln.len==0){break;}
+        let t:[]u8=field_of(ln,0);
+        let f1:[]u8=field_of(ln,1);
+        if(zeq(t,"OUTCOME")==1){
+            if(zeq(f1,"CLEAN")==1){outcome=0;}
+            if(zeq(f1,"COLLATERAL")==1){outcome=1;}
+            if(zeq(f1,"REFUSE_OK")==1){outcome=2;}
+            if(zeq(f1,"REFUSE_BAD")==1){outcome=3;}
+            if(zeq(f1,"FALSE_REFUSE")==1){outcome=4;}
+        }
+        if(zeq(t,"SIT")==1){
+            let ok:i32=0;
+            sit=z_atoi(f1,&ok);
+        }
+    }
+    if(outcome<0){return 2;}
+    if(sit<0){sit=0;}
+    // parse own trace: steps present, first PREDICT src, replan
+    let tr:[]u8=z_read_file(trace_path,65536);
+    if(tr.len==0){return 3;}
+    let steps:i32=0;
+    let psrc:i32=0;
+    let seen_pred:i32=0;
+    let replanned:i32=0;
+    let tpos:i32=0;
+    while(1){
+        let ln2:[]u8=next_line(tr,&tpos);
+        if(ln2.len==0){break;}
+        let t2:[]u8=field_of(ln2,0);
+        if(zeq(t2,"STATE")==1){steps=steps|1;}
+        if(zeq(t2,"PREDICT")==1){
+            steps=steps|2;
+            if(seen_pred==0){
+                seen_pred=1;
+                let s:[]u8=field_of(ln2,1);
+                // field is "src=hint" or "src=table"
+                if(s.len>=8){
+                    if(s[4]==104){psrc=1;}
+                }
+            }
+        }
+        if(zeq(t2,"VERIFY")==1){steps=steps|4;}
+        if(zeq(t2,"WRITE")==1){steps=steps|8;}
+        if(zeq(t2,"READBACK")==1){steps=steps|16;}
+        if(zeq(t2,"NCONFIRM")==1){steps=steps|32;}
+        if(zeq(t2,"REFUSE")==1){steps=steps|64;}
+        if(zeq(t2,"WRITE_ATTEMPT")==1){steps=steps|128;}
+        if(zeq(t2,"REPLAN")==1){replanned=1;}
+    }
+    // load memory
+    let mm:[]u8=z_read_file(mem_in,8192);
+    let lm:[]u8=z_alloc(64*4);
+    let lp:[]u8=z_alloc(64*4);
+    let la:[]u8=z_alloc(64*4);
+    let ls:[]u8=z_alloc(64*4);
+    let nl:i32=0;let streak:i64=0;let colc:i64=0;let divc:i64=0;let lastsit:i64=-1;
+    mem_parse(mm,lm,lp,la,ls,&nl,&streak,&colc,&divc,&lastsit);
+    if(outcome==1 || outcome==3){
+        // failure: attribute to the first missing/faked/wrong deliberate step
+        let bad:i32=PH_VERIFY;
+        let correct:i32=AC_DO_VERIFY;
+        if(psrc==1){
+            if((sit&SB_HOFF)!=0){bad=PH_PREDICT;correct=AC_READ_TABLE;}
+        }
+        if(bad==PH_VERIFY){
+            if((steps&4)==0){bad=PH_VERIFY;correct=AC_DO_VERIFY;}
+            if((steps&32)==0){
+                if((steps&4)!=0){bad=PH_NCONFIRM;correct=AC_DO_NCONFIRM;}
+            }
+            if((steps&16)==0){
+                if((steps&4)!=0){
+                    if((steps&32)!=0){bad=PH_READBACK;correct=AC_DO_READBACK;}
+                }
+            }
+        }
+        let pb:i64=primary_bit(sit,bad);
+        mem_upsert(lm,lp,la,ls,&nl,pb,bad,correct,3);
+        colc=colc+1;
+        if(sit!=lastsit){divc=divc+1;lastsit=sit;}
+        if(colc>=3){
+            if(divc>=2){mem_upsert(lm,lp,la,ls,&nl,0,PH_STATE,AC_FULL,5);}
+        }
+        streak=0;
+    }
+    if(outcome==0){
+        if(replanned==1){
+            let pb2:i64=primary_bit(sit,PH_PREDICT);
+            mem_upsert(lm,lp,la,ls,&nl,pb2,PH_PREDICT,AC_READ_TABLE,2);
+        }
+        if((steps&8)!=0){
+            if((steps&4)==0){
+                let pb3:i64=primary_bit(sit,PH_VERIFY);
+                mem_upsert(lm,lp,la,ls,&nl,pb3,PH_VERIFY,AC_DO_VERIFY,1);
+            }
+            if((steps&16)==0){
+                let pb4:i64=primary_bit(sit,PH_READBACK);
+                mem_upsert(lm,lp,la,ls,&nl,pb4,PH_READBACK,AC_DO_READBACK,1);
+            }
+            if((steps&32)==0){
+                let pb5:i64=primary_bit(sit,PH_NCONFIRM);
+                mem_upsert(lm,lp,la,ls,&nl,pb5,PH_NCONFIRM,AC_DO_NCONFIRM,1);
+            }
+        }
+        let gi:i32=mem_find(lm,lp,nl,0,PH_STATE);
+        if(gi>=0){
+            let gs:i32=g32(ls,gi*4)+1;
+            if(gs>999){gs=999;}
+            s32(ls,gi*4,gs);
+        }
+        streak=streak+1;
+    }
+    if(outcome==2){
+        let pb6:i64=primary_bit(sit,PH_VERIFY);
+        mem_upsert(lm,lp,la,ls,&nl,pb6,PH_VERIFY,AC_DO_VERIFY,1);
+        streak=streak+1;
+    }
+    if(outcome==4){
+        let pb7:i64=primary_bit(sit,PH_PREDICT);
+        mem_upsert(lm,lp,la,ls,&nl,pb7,PH_PREDICT,AC_READ_TABLE,1);
+    }
+    let ob:[]u8=z_alloc(8192);
+    let op:i32=0;
+    mem_write(ob,&op,lm,lp,la,ls,nl,streak,colc,divc,lastsit);
+    let rc:i32=z_write_file(mem_out,ob[0..op]);
+    if(rc!=0){return 4;}
+    return 0;
+}
+
+// ---------- main ----------
+fn main()void {
+    let mode:[]u8=_zag_arg(1);
+    if(zeq(mode,"operate")==1){
+        let rc:i32=do_operate(_zag_arg(2),_zag_arg(3),_zag_arg(4),_zag_arg(5),_zag_arg(6),0);
+        _zag_print("RC ");
+        _zag_println(i64s(rc as i64));
+        return;
+    }
+    if(zeq(mode,"operate_nv")==1){
+        let rc2:i32=do_operate(_zag_arg(2),_zag_arg(3),_zag_arg(4),_zag_arg(5),_zag_arg(6),1);
+        _zag_print("RC ");
+        _zag_println(i64s(rc2 as i64));
+        return;
+    }
+    if(zeq(mode,"learn")==1){
+        let rc3:i32=do_learn(_zag_arg(2),_zag_arg(3),_zag_arg(4),_zag_arg(5),_zag_arg(6));
+        _zag_print("RC ");
+        _zag_println(i64s(rc3 as i64));
+        return;
+    }
+    _zag_println("usage: kbc operate|operate_nv|learn ...");
+}
