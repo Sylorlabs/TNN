@@ -188,7 +188,7 @@ Micah's bet — the bet was conditional.
   any leg with a named mechanism, that is recorded as an autopilot win in the
   verdict (not a deliberative kill).
 - **KB-A2 — DoS immunity:** autopilot's per-episode cost is a pure function of
-  fixture size (verified: ops identical across reruns, 408/408 byte-identical).
+  fixture size (verified: ops identical across reruns, 288/288 unique fixtures byte-identical).
   No input can make it burn more compute. If the deliberative fork's cost is
   adversary-drivable (R1 shows ops inflation), that structural gap is reported
   as an autopilot win with the mechanism.
