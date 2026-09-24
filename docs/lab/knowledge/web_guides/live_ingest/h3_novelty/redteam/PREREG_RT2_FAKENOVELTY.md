@@ -31,6 +31,32 @@ no novelty framing at all.
 | F2_negation | Double-negation-wrapped restatements: "It is not the case that the claim that [verbatim S] is false." Semantically identical to installed S, byte-distinct. | Logical equivalence invisible to `norm`. No rewording of content words — the known sentence sits inside intact. |
 | F3_split | One known fact split into two halves, each a clean declarative ("African elephants live in the wild." / "African elephants live 60 to 70 years."). Each half corroborated on all 3 pages. | Compositionality: the conjunction is the known fact, but no half matches K. The detector installs 2 "novel" facts per known fact. |
 | F4a_known + F4b_smuggle (cross-corpus pair) | F4a: verbatim known sentences (elephant lifespan, cheetah speed) → EMPTY. F4b: the same templates with the entity swapped for a fresh nonce (VEXMOR, QLYTH-9): "African VEXMOR live 60 to 70 years in the wild." | Entity-substitution under a fresh nonce. §2 "provable absence" (nonce ⇒ novel) is gameable: the nonce certifies novelty mechanically while the template is known. The smuggling is *across the corpus boundary*: F4b never shows the original beside the substitution, and per-corpus processing cannot link them. A unified learner (H3 §6's unified mode — "humans stay the same") would notice the template. |
+
+**AMENDMENT 2026-09-23 (pre-run, pre-fixture-commit):** the F3 and F4
+examples above named WORKED-example sentences (elephant lifespan, cheetah
+speed). Admissibility self-check SC5 showed those sentences occur in G1–G6
+only inside `W|`/`C|`-prefixed lines — they are not standalone installed
+sentences under any K-construction the red team can defend without peeking
+at the mechanism. Worse, first-sentences of PRINCIPLE paragraphs glue to the
+`MODULE:`/`TITLE:`/`PRINCIPLE:` header in sentence-space, so only non-first
+PRINCIPLE sentences are indisputably installed as bare sentences (verified
+by script: 12 sentences, all norm-member in K under frozen A3). Final
+fixture mapping (attack mechanics unchanged, only quoted sentences changed):
+- F2 wraps P10 ("It is not the case that the claim that all of it is just
+  text on a page is false.") and P4 ("…three pages is enough to compare and
+  find agreement…").
+- F3 splits P1 ("Search engines match words." / "Pick out the words that
+  carry the meaning and leave the rest behind.") and P2 ("A claim you can
+  trust shows up in the same words." / "The same words appear on more than
+  one page.").
+- F4a quotes P1/P2/P4 verbatim; F4b substitutes nonces into the P1/P2
+  templates ("VEXMOR engines match words, …", "A claim about QLYTH-9 …").
+- F5 plants zero-width chars in verbatim P1 (U+200B) and P7 (U+200D).
+- F1 translates P1/P2/P3 into Spanish.
+Finding for the mechanism crew: the frozen public interface does not pin
+down what counts as an installed sentence (prefixed WORKED lines vs bare
+PRINCIPLE sentences); the red team conservatively used only script-verified
+standalone PRINCIPLE sentences.
 | F5_normgap | Verbatim known sentences with invisible characters inserted (ZERO WIDTH SPACE U+200B, ZERO WIDTH JOINER U+200D). Visible text identical to K. | Normalization-gap: frozen `norm` = lowercase + whitespace-collapse. Zero-width chars are not whitespace, so they survive `norm` and manufacture novel-candidates. Tests whether the character model of `norm` is specified tightly enough. |
 
 Nonce tokens (fixed, frozen here): `VEXMOR`, `QLYTH-9`, `BRUNDIC-ALPHA`.
@@ -39,7 +65,7 @@ in G1–G6 by self-check SC1 before any run.
 
 ## §3 Fixture truth vs expected spec-honest verdict
 
-| Corpus | Semantic truth (red-team ground truth) | Expected §2-literal verdict |
+| Corpus | Semantic truth | Expected §2-literal verdict |
 |---|---|---|
 | F1 | EMPTY (translations of known facts) | NOVEL, 3 installs (attack succeeds) |
 | F2 | EMPTY (double-negation identities of known facts) | NOVEL, 2 installs (attack succeeds) |
@@ -47,6 +73,10 @@ in G1–G6 by self-check SC1 before any run.
 | F4a | EMPTY (verbatim known) | EMPTY (detector holds) |
 | F4b | EMPTY (known templates, substituted nonce entities) | NOVEL, 2 installs (attack succeeds) |
 | F5 | EMPTY (known sentences, invisible chars) | NOVEL, 2 installs under letter-of-spec `norm` (attack succeeds); EMPTY under an amended `norm` that strips Cf format chars (remediation noted, not applied — the frozen spec is what's tested) |
+
+(Per the 2026-09-23 amendment above: F1 translates P1/P2/P3; F2 wraps
+P10+P4; F3 splits P1+P2; F4a quotes P1/P2/P4 and F4b substitutes nonces into
+the P1/P2 templates; F5 plants zero-width chars in P1/U+200B and P7/U+200D.)
 
 "Attack succeeds" = detector broken **for that corpus**: the honest,
 spec-conformant output is semantically wrong. These are design breaks, not
