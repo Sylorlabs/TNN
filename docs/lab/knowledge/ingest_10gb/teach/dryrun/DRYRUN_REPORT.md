@@ -214,7 +214,13 @@ expected record count/size. (Or fix `merge_zag.zag` with an
 
 ## 7. Commits
 
-_TBD_
+- `454d48b40d4f5c4541c538ea8cf19d52193631f4` on main (parent 0c6e48f937af):
+  DRY RUN report + results + gate.zag blob-parse fix (DRYRUN-FINDING-2).
+  Files: `knowledge/ingest_10gb/teach/gate.zag`,
+  `knowledge/ingest_10gb/teach/dryrun/DRYRUN_REPORT.md`,
+  `knowledge/ingest_10gb/teach/dryrun/probe_results.tsv`,
+  `knowledge/ingest_10gb/teach/dryrun/SHAS.txt`.
+  (Committed via `commit_racefree.py` with `TMPDIR=~/workspace/tmp_commit`.)
 
 ## 8. Artifacts (dry-run dir)
 
