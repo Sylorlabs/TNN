@@ -198,4 +198,4 @@ double the trap/admit rounds.
 - §12 amendment + frozen encoding spec (spec-first): `bc4da5d2`
 - harness_v2 (§6 verbatim implementation): `fbf85acf`
 - items_v2 + configs_v2 (translation + approved configs): `393f4d9`
-- This results document: (commit D, on push)
+- This results document: `bd386f97bcd66d8c0eeec9e393e242bcabdd68d6`
