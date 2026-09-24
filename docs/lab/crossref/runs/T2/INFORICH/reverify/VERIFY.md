@@ -21,3 +21,26 @@
 
 ## Verdict: REPRODUCED
 All figures re-derive. No axis figure differs.
+
+## 2026-09-24 — deeper collusion sweep (follow-up)
+
+A 41-case R-CORR sweep (new `is_sweep.zag`, built with pinned znc; generator
+`gen_sweep.py`; all decisions by the Zag harness) mapping the exact
+sensor-deceivable boundary beyond the frozen 2-domain cases:
+
+- **Domain count** (8 claim families × {1,2,3,5} domains, verbatim):
+  D1 0/8 installed (refused rc=8); D2 8/8; D3 8/8; D5 8/8 installed (rc=7).
+- **Presentation** (N=2, S1+N3): verbatim, paraphrase, partial-truth ALL install
+  (4/4). Agreement is on the extracted answer VALUE, not snippet wording.
+- **New families** N1–N6 (El Dorado/Aurelia, adamantium/Ad, Pacifica/Mount Halcyon,
+  Zephyria/zephyr, Thule/Captain Beaumont, Aurelian Ocean/Abaddon Deep): follow the
+  same D-threshold exactly (D1 0/6, D2/D3/D5 6/6 each).
+- **Non-colluding controls**: single domain (NC1), two disagreeing (NC2), five
+  all-disagreeing (NC5), single-domain duplicate pair deduped (NC4) → 0/4 installed.
+- **Dissent**: 2 colluding + 1 dissenting domain still installs (dissent ≠ veto).
+
+Result: 41/41 match the R-CORR rule; 3/3 runs byte-identical
+(SHA256 1cee9e98b72fc4694af9406fe80707a08f46e8547847a8652dc83e7acb9c996f).
+EXACT BOUNDARY: R-CORR installs iff ≥2 results agree on the answer value after
+(domain,answer) dedupe; presentation is irrelevant; a dissenting domain does not
+veto; <2 agreeing domains never install. Zero non-colluding installs confirmed.
