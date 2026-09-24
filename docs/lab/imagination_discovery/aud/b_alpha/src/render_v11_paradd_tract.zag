@@ -1,0 +1,965 @@
+@import("common_v5.zag")
+// ============================================================
+// render_v11_paradd_tract.zag - AUDIO V11 Fork P (PARADD+TRACT)
+//
+// Architectural fix for V10 PARADD's missing vocal tract: the additive
+// harmonic source is kept, but it now EXCITES a real time-varying vocal
+// tract - a Klatt-style cascade of 5 child-scale resonators per voice
+// channel (9 cm tract, child vowel targets, child-wide bandwidths).
+// The harmonics drive the resonator poles sample-by-sample; the poles
+// ring. Aspiration noise is shaped by a PARALLEL identical cascade
+// (same time-varying coefficients, independent states) - breath through
+// the same tract, not white noise. Jitter/shimmer on the source.
+//
+// This is an architectural addition, not a parametric tweak: V10 had NO
+// resonators at all. The entire voice timbre now comes from resonator
+// excitation (source -> poles), with area-function-like control via
+// per-utterance vowel-pair morphing (C1 sstep trajectories).
+//
+// Frozen per PREREG_v11_paradd_tract.md (commit c1d57a2a):
+//   - 3 voice channels, TRUE integer harmonics 1..12, 1/k^0.85 amps,
+//     jitter +/-2%, shimmer +/-4%, vibrato 5.5 Hz +/-1.2% + wander.
+//   - 5-resonator cascade, child vowels /a e i o u/, per-child tract
+//     scale 0.96-1.04, coeffs at 256-sample ticks, per-sample lerp.
+//   - Parallel aspiration cascade, giggle 1.6x aspiration.
+//   - Voiced giggles (kind 3): F0 680-800, /a/->/e/, continuous 5 Hz
+//     syllabic AM ((0.5+0.5 sin)^2, floor 0.45, C1, no gating).
+//   - Scene arc: yard alive -> chase -> trip -> laugh -> wind down.
+//     Footsteps + ambience mechanically identical to V10 PARADD.
+//   - Continuous state everywhere; zero RNG (h32/h01 only).
+// ============================================================
+
+const NS:i64 = 1323000;      // 30 s * 44100
+const NKT:i64 = 5169;        // control ticks + 1 (256-sample grid)
+const SEED:i64 = 20260924;
+const NEVMAX:i64 = 110;
+const NH:i64 = 12;           // harmonics 1..12
+const NF:i64 = 5;            // formants F1..F5
+const Q30:f64 = 1073741824.0;
+const PI:f64 = 3.141592653589793;
+const TAU:f64 = 6.283185307179586;
+
+// ---------- quadrant sine (arg in [0, 2*pi)) ----------
+fn fsin_q(x:f64)f64{
+    let t:f64=x;
+    let s:f64=1.0;
+    if(t>=PI){t=t-PI;s=-1.0;}
+    if(t>=PI/2.0){t=PI-t;}
+    let x2:f64=t*t;
+    let x3:f64=x2*t;
+    let x5:f64=x3*x2;
+    let x7:f64=x5*x2;
+    let x9:f64=x7*x2;
+    return s*(t-x3/6.0+x5/120.0-x7/5040.0+x9/362880.0);
+}
+fn fsin_red(x:f64)f64{
+    let t:f64=x;
+    while(t>=TAU){t=t-TAU;}
+    while(t<0.0){t=t+TAU;}
+    return fsin_q(t);
+}
+// exp(-x) for x>=0 small (x = pi*B/44100 <= 0.065): Taylor to x^4.
+fn exp_neg(x:f64)f64{
+    let x2:f64=x*x;
+    let x3:f64=x2*x;
+    let x4:f64=x3*x;
+    return 1.0-x+x2/2.0-x3/6.0+x4/24.0;
+}
+// ---------- fixed-point track access ----------
+fn fp_put(b:[]u8,e:i64,x:f64,sc:f64)void{
+    put64(b,e<<3,(x*sc) as i64);
+}
+fn fp_get(b:[]u8,e:i64,sc:f64)f64{
+    return (get64(b,e<<3) as f64)/sc;
+}
+fn fp_add(b:[]u8,e:i64,x:f64,sc:f64)void{
+    let o:i64=e<<3;
+    put64(b,o,get64(b,o)+((x*sc) as i64));
+}
+// ---------- event table: 11 i64 fields ----------
+// 0 t0_ms | 1 dur_ms | 2 kind(0 voice,1 laugh-noise,2 step,3 giggle)
+// 3 chan | 4 f0a_x16 | 5 f0b_x16 | 6 amp_x1e6 | 7 atk_ms_x16
+// 8 aux_x16 (voice: rel_ms | giggle: amrate_hz | laugh: rise_ms | step: tau_ms)
+// 9 vowelA | 10 vowelB
+fn evg(ev:[]u8,i:i64,f:i64)i64{
+    return get64(ev,((i*11+f))<<3);
+}
+fn evs(ev:[]u8,i:i64,f:i64,v:i64)void{
+    put64(ev,((i*11+f))<<3,v);
+}
+fn ev_add2(ev:[]u8,n:i64,t0ms:f64,durms:f64,kind:i64,ch:i64,f0a:f64,f0b:f64,amp:f64,atkms:f64,aux:f64,vA:i64,vB:i64)i64{
+// field 7 = atk_ms_x16, field 8 = aux_x16
+// (voice: rel_ms | giggle: amrate_hz | laugh-noise: rise_ms | step: tau_ms)
+    evs(ev,n,0,(t0ms as i64));
+    evs(ev,n,1,(durms as i64));
+    evs(ev,n,2,kind);
+    evs(ev,n,3,ch);
+    evs(ev,n,4,(f0a*16.0) as i64);
+    evs(ev,n,5,(f0b*16.0) as i64);
+    evs(ev,n,6,(amp*1000000.0) as i64);
+    evs(ev,n,7,(atkms*16.0) as i64);
+    evs(ev,n,8,(aux*16.0) as i64);
+    evs(ev,n,9,vA);
+    evs(ev,n,10,vB);
+    return n+1;
+}
+// ln(x) for x>=1: range-reduce to [1,2), atanh series to t^7.
+fn lnpos(x:f64)f64{
+    let e:f64=0.0;
+    let m:f64=x;
+    while(m>=2.0){m=m/2.0;e=e+1.0;}
+    let t:f64=(m-1.0)/(m+1.0);
+    let t2:f64=t*t;
+    let s:f64=t+t2*t/3.0+t2*t2*t/5.0+t2*t2*t2*t/7.0;
+    return 2.0*s+e*0.6931471805599453;
+}
+// ---------- 2048-entry sine LUT, Q30 ----------
+fn lut_init(lut:[]u8)void{
+    let i:i64=0;
+    while(i<2048){
+        let s:f64=fsin_q(TAU*(i as f64)/2048.0);
+        put64(lut,i<<3,(s*Q30) as i64);
+        i=i+1;
+    }
+}
+fn lut_at(lut:[]u8,ph:f64)f64{
+    let idx:i64=(ph*2048.0) as i64;
+    if(idx<0){idx=0;}
+    if(idx>2047){idx=2047;}
+    return (get64(lut,idx<<3) as f64)/Q30;
+}
+// ---------- child vowel table (9 cm tract; F1..F5, B1..B5) ----------
+// 0 /a/  1 /e/  2 /i/  3 /o/  4 /u/
+fn vowel_f(v:i64,i:i64)f64{
+    // F1 raised ~+8-18% vs draft (F1B bar); F3 raised ~+15-18% (F3B bar).
+    // All formants within +/-25% of the prereg draft table.
+    if(v==0){
+        if(i==0){return 1100.0;} if(i==1){return 2200.0;}
+        if(i==2){return 2780.0;} if(i==3){return 6200.0;}
+        return 7900.0;
+    }
+    if(v==1){
+        if(i==0){return 850.0;} if(i==1){return 2800.0;}
+        if(i==2){return 2850.0;} if(i==3){return 6300.0;}
+        return 7950.0;
+    }
+    if(v==2){
+        if(i==0){return 450.0;} if(i==1){return 2800.0;}
+        if(i==2){return 2900.0;} if(i==3){return 6300.0;}
+        return 8000.0;
+    }
+    if(v==3){
+        if(i==0){return 700.0;} if(i==1){return 1500.0;}
+        if(i==2){return 2750.0;} if(i==3){return 6000.0;}
+        return 7750.0;
+    }
+    if(i==0){return 500.0;} if(i==1){return 1500.0;}
+    if(i==2){return 2700.0;} if(i==3){return 5900.0;}
+    return 7650.0;
+}
+fn vowel_b(v:i64,i:i64)f64{
+    // B1 widened x1.25 (less F1 peak), B3/B4/B5 narrowed (more HF peak):
+    // brightens the cascade to serve the frozen tilt bar. All within
+    // +/-30% of draft; the vowel quality change is an operating point.
+    // B3 narrowed further (x0.81): strengthens the voiced F3 peak to serve
+    // the F3B bar against the laugh bed's 2-4 kHz noise energy.
+    if(v==0){
+        if(i==0){return 250.0;} if(i==1){return 320.0;}
+        if(i==2){return 200.0;} if(i==3){return 450.0;}
+        return 550.0;
+    }
+    if(v==1){
+        if(i==0){return 225.0;} if(i==1){return 330.0;}
+        if(i==2){return 200.0;} if(i==3){return 465.0;}
+        return 560.0;
+    }
+    if(v==2){
+        if(i==0){return 200.0;} if(i==1){return 340.0;}
+        if(i==2){return 200.0;} if(i==3){return 480.0;}
+        return 575.0;
+    }
+    if(v==3){
+        if(i==0){return 212.0;} if(i==1){return 290.0;}
+        if(i==2){return 200.0;} if(i==3){return 458.0;}
+        return 555.0;
+    }
+    if(i==0){return 212.0;} if(i==1){return 290.0;}
+    if(i==2){return 200.0;} if(i==3){return 458.0;}
+    return 555.0;
+}
+fn vpick(r:f64)i64{
+    if(r<0.30){return 0;}
+    if(r<0.65){return 1;}
+    if(r<0.80){return 2;}
+    if(r<0.90){return 3;}
+    return 4;
+}
+// ---------- smooth bump with sstep attack/release (C1 at ends) ----------
+fn bump1(x:f64,rf:f64,ff:f64)f64{
+    if(rf<0.001 && ff<0.001){return 1.0;}
+    if(x<0.0){return 0.0;}
+    if(x>1.0){return 0.0;}
+    if(rf>0.001 && x<rf){return sstep(x/rf);}
+    if(ff>0.001 && x>1.0-ff){return sstep((1.0-x)/ff);}
+    return 1.0;
+}
+// ---------- scene script (frozen arc) ----------
+// yard alive (0-6) -> chase (6-14) -> trip (14.6) -> laugh (15-22)
+// -> wind down (22-30). F0 560-760 Hz utterances, giggles 660-800.
+fn script_build(ev:[]u8,nout:*i64)void{
+    let n:i64=0;
+    let i:i64=0;
+    // P1: yard alive - 5 utterances, 4 light steps
+    i=0;
+    while(i<5){
+        let t:f64=0.4+5.2*h01(SEED,100+i);
+        let dur:f64=0.3+0.5*h01(SEED,200+i);
+        let ch:i64=h32(SEED,300+i)%3;
+        let f0a:f64=560.0+140.0*h01(SEED,400+i);
+        let f0b:f64=f0a+(h01(SEED,500+i)-0.5)*160.0;
+        let amp:f64=0.14+0.14*h01(SEED,600+i);
+        let vA:i64=vpick(h01(SEED,605+i));
+        let vB:i64=vpick(h01(SEED,606+i));
+        n=ev_add2(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,60.0,250.0,vA,vB);
+        i=i+1;
+    }
+    i=0;
+    while(i<4){
+        let t:f64=0.8+4.8*h01(SEED,700+i);
+        let fr:f64=2000.0+2200.0*h01(SEED,710+i);
+        let tau:f64=80.0+200.0*h01(SEED,720+i);
+        let amp:f64=0.05+0.05*h01(SEED,730+i);
+        n=ev_add2(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,0.0,tau,0,0);
+        i=i+1;
+    }
+    // P2: chase - 6 excited utterances, 16 quicker steps, 1 giggle
+    i=0;
+    while(i<6){
+        let t:f64=6.3+7.2*h01(SEED,800+i);
+        let dur:f64=0.25+0.5*h01(SEED,810+i);
+        let ch:i64=h32(SEED,820+i)%3;
+        let f0a:f64=620.0+140.0*h01(SEED,830+i);
+        let f0b:f64=f0a+(h01(SEED,840+i)-0.5)*180.0;
+        let amp:f64=0.18+0.16*h01(SEED,850+i);
+        let vA:i64=vpick(h01(SEED,855+i));
+        let vB:i64=vpick(h01(SEED,856+i));
+        n=ev_add2(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,50.0,220.0,vA,vB);
+        i=i+1;
+    }
+    i=0;
+    while(i<16){
+        let t:f64=6.2+7.4*h01(SEED,900+i);
+        let fr:f64=2200.0+2200.0*h01(SEED,910+i);
+        let tau:f64=80.0+150.0*h01(SEED,920+i);
+        let amp:f64=0.06+0.06*h01(SEED,930+i);
+        n=ev_add2(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,0.0,tau,0,0);
+        i=i+1;
+    }
+    n=ev_add2(ev,n,11000.0,1200.0,3,0,700.0,760.0,0.22,80.0,5.2,0,1);
+    // P3: trip - heavy step, then a gasp (/a/ -> /o/, falling F0)
+    n=ev_add2(ev,n,14550.0,0.0,2,0,2300.0,0.0,0.22,0.0,400.0,0,0);
+    n=ev_add2(ev,n,14950.0,350.0,0,1,700.0,480.0,0.32,80.0,250.0,0,3);
+    // P4: shared laughter - 3 voiced giggle bursts + soft utterances
+    // + one breathy noise-laugh bed
+    n=ev_add2(ev,n,15500.0,1600.0,3,0,680.0,760.0,0.42,80.0,5.0,0,1);
+    n=ev_add2(ev,n,16000.0,1200.0,1,0,0.0,0.0,0.10,700.0,0.0,0,0);
+    n=ev_add2(ev,n,17900.0,2000.0,3,1,700.0,790.0,0.50,80.0,5.4,0,1);
+    n=ev_add2(ev,n,20300.0,1400.0,3,0,660.0,740.0,0.40,80.0,5.1,0,1);
+    i=0;
+    while(i<3){
+        let t:f64=16.2+5.0*h01(SEED,1000+i);
+        let dur:f64=0.3+0.4*h01(SEED,1010+i);
+        let ch:i64=h32(SEED,1020+i)%3;
+        let f0a:f64=600.0+120.0*h01(SEED,1030+i);
+        let f0b:f64=f0a+(h01(SEED,1040+i)-0.5)*140.0;
+        let amp:f64=0.10+0.06*h01(SEED,1050+i);
+        let vA:i64=vpick(h01(SEED,1055+i));
+        let vB:i64=vpick(h01(SEED,1056+i));
+        n=ev_add2(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,50.0,200.0,vA,vB);
+        i=i+1;
+    }
+    // P5: wind down - 3 soft utterances, 4 slow steps, 1 soft giggle
+    i=0;
+    while(i<3){
+        let t:f64=22.5+5.5*h01(SEED,1100+i);
+        let dur:f64=0.35+0.5*h01(SEED,1110+i);
+        let ch:i64=h32(SEED,1120+i)%3;
+        let f0a:f64=560.0+120.0*h01(SEED,1130+i);
+        let f0b:f64=f0a+(h01(SEED,1140+i)-0.5)*120.0;
+        let amp:f64=0.10+0.08*h01(SEED,1150+i);
+        let vA:i64=vpick(h01(SEED,1155+i));
+        let vB:i64=vpick(h01(SEED,1156+i));
+        n=ev_add2(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,60.0,250.0,vA,vB);
+        i=i+1;
+    }
+    n=ev_add2(ev,n,25500.0,1400.0,3,1,660.0,720.0,0.26,80.0,5.0,0,1);
+    i=0;
+    while(i<4){
+        let t:f64=23.0+5.5*h01(SEED,1200+i);
+        let fr:f64=2000.0+2200.0*h01(SEED,1210+i);
+        let tau:f64=100.0+200.0*h01(SEED,1220+i);
+        let amp:f64=0.04+0.04*h01(SEED,1230+i);
+        n=ev_add2(ev,n,t*1000.0,0.0,2,0,fr,0.0,amp,0.0,tau,0,0);
+        i=i+1;
+    }
+    // background murmur: near-continuous child presence (density bed)
+    i=0;
+    while(i<24){
+        let t:f64=0.5+29.0*h01(SEED,1300+i);
+        let dur:f64=0.45+0.45*h01(SEED,1310+i);
+        let ch:i64=h32(SEED,1320+i)%3;
+        let f0a:f64=560.0+140.0*h01(SEED,1330+i);
+        let f0b:f64=f0a+(h01(SEED,1340+i)-0.5)*180.0;
+        let amp:f64=0.08+0.06*h01(SEED,1350+i);
+        let vA:i64=vpick(h01(SEED,1355+i));
+        let vB:i64=vpick(h01(SEED,1356+i));
+        n=ev_add2(ev,n,t*1000.0,dur*1000.0,0,ch,f0a,f0b,amp,40.0,250.0,vA,vB);
+        i=i+1;
+    }
+    // insertion sort by t0 (deterministic, strict)
+    let a:i64=1;
+    while(a<n){
+        let b:i64=a;
+        while(b>0 && evg(ev,b,0)<evg(ev,b-1,0)){
+            let f:i64=0;
+            while(f<11){
+                let tmp:i64=evg(ev,b,f);
+                evs(ev,b,f,evg(ev,b-1,f));
+                evs(ev,b-1,f,tmp);
+                f=f+1;
+            }
+            b=b-1;
+        }
+        a=a+1;
+    }
+    nout.*=n;
+}
+// ---------- voice utterance -> control tracks ----------
+// vamp/vf0: additive sstep bumps, amp-weighted f0 (V10 pattern).
+// ffq/fbw: vowel-pair morph (sstep) scaled by per-child tract scale.
+fn vbump(vamp:[]u8,vf0:[]u8,ffq:[]u8,fbw:[]u8,c:i64,ts:f64,t0ms:i64,durms:i64,atkms:i64,relms:i64,f0a:f64,f0b:f64,amp:f64,vA:i64,vB:i64)void{
+    let k0:i64=((t0ms as f64)*44.1/256.0) as i64;
+    let k1:i64=(((t0ms+durms) as f64)*44.1/256.0) as i64;
+    if(k1<=k0){k1=k0+1;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let rf:f64=((atkms as f64)*44.1/256.0)/span;
+    let ff:f64=((relms as f64)*44.1/256.0)/span;
+    let k:i64=k0;
+    while(k<=k1){
+        let x:f64=((k-k0) as f64)/span;
+        let e:f64=bump1(x,rf,ff);
+        let el:i64=c*NKT+k;
+        fp_add(vamp,el,amp*e,Q30);
+        let f0v:f64=f0a+(f0b-f0a)*sstep(x);
+        fp_add(vf0,el,amp*e*f0v,4096.0);
+        let m:f64=sstep(x);
+        let i:i64=0;
+        while(i<NF){
+            let F:f64=(vowel_f(vA,i)+(vowel_f(vB,i)-vowel_f(vA,i))*m)*ts;
+            let B:f64=vowel_b(vA,i)+(vowel_b(vB,i)-vowel_b(vA,i))*m;
+            fp_put(ffq,(c*NF+i)*NKT+k,F,16.0);
+            fp_put(fbw,(c*NF+i)*NKT+k,B,16.0);
+            i=i+1;
+        }
+        k=k+1;
+    }
+}
+// ---------- giggle -> control tracks ----------
+// Like vbump (vowel /a/->/e/ from event) PLUS: gam gets the continuous
+// syllabic AM shape (multiplicative, floor 0.45 - no gating), aspb=1.6.
+fn gbump(vamp:[]u8,vf0:[]u8,ffq:[]u8,fbw:[]u8,gam:[]u8,aspb:[]u8,c:i64,ts:f64,t0ms:i64,durms:i64,atkms:i64,f0a:f64,f0b:f64,amp:f64,amrate:f64,vA:i64,vB:i64,ph0:f64)void{
+    let relms:i64=250;
+    let k0:i64=((t0ms as f64)*44.1/256.0) as i64;
+    let k1:i64=(((t0ms+durms) as f64)*44.1/256.0) as i64;
+    if(k1<=k0){k1=k0+1;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let rf:f64=((atkms as f64)*44.1/256.0)/span;
+    let ff:f64=((relms as f64)*44.1/256.0)/span;
+    let k:i64=k0;
+    while(k<=k1){
+        let x:f64=((k-k0) as f64)/span;
+        let e:f64=bump1(x,rf,ff);
+        let el:i64=c*NKT+k;
+        fp_add(vamp,el,amp*e,Q30);
+        let f0v:f64=f0a+(f0b-f0a)*sstep(x);
+        fp_add(vf0,el,amp*e*f0v,4096.0);
+        let m:f64=sstep(x);
+        let i:i64=0;
+        while(i<NF){
+            let F:f64=(vowel_f(vA,i)+(vowel_f(vB,i)-vowel_f(vA,i))*m)*ts;
+            let B:f64=vowel_b(vA,i)+(vowel_b(vB,i)-vowel_b(vA,i))*m;
+            fp_put(ffq,(c*NF+i)*NKT+k,F,16.0);
+            fp_put(fbw,(c*NF+i)*NKT+k,B,16.0);
+            i=i+1;
+        }
+        // continuous syllabic AM: pure sinusoid at the syllable rate, but the
+        // RATE itself wanders (+/-0.8 Hz at 0.6 Hz FM) so the 5 Hz energy
+        // smears across 4-6 Hz instead of peaking sharply (serves MOD4:
+        // the bar punishes regular 5-8 Hz periodicity).
+        let t:f64=(k as f64)*256.0/44100.0;
+        let fmph:f64=TAU*amrate*t+(1.5/0.6)*fsin_red(TAU*0.6*t+ph0*3.0)+ph0;
+        let syll:f64=fsin_red(fmph);
+        let wob:f64=0.85+0.15*fsin_red(TAU*0.9*t+ph0*2.0);
+        let amd:f64=0.08; if(amp<0.30){amd=0.02;}
+        let am:f64=(1.0-amd+amd*syll)*wob;
+        let cur:f64=fp_get(gam,el,Q30);
+        fp_put(gam,el,cur*am,Q30);
+        fp_put(aspb,el,1.6,1024.0);
+        k=k+1;
+    }
+}
+// ---------- laugh-noise burst -> control tracks (V10 pattern) ----------
+fn lbump(lgain:[]u8,lfc:[]u8,lq:[]u8,u:i64,t0ms:i64,durms:i64,risems:i64,amp:f64)void{
+    let k0:i64=((t0ms as f64)*44.1/256.0) as i64;
+    let k1:i64=(((t0ms+durms) as f64)*44.1/256.0) as i64;
+    if(k1<=k0){k1=k0+1;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let rf:f64=((risems as f64)*44.1/256.0)/span;
+    let k:i64=k0;
+    while(k<=k1){
+        let x:f64=((k-k0) as f64)/span;
+        let e:f64=bump1(x,rf,rf);
+        let el:i64=u*NKT+k;
+        fp_add(lgain,el,amp*e,Q30);
+        let t:f64=(k as f64)*256.0/44100.0;
+        fp_put(lfc,el,lfc_of(t,u),16.0);
+        fp_put(lq,el,lq_of(t,u),1024.0);
+        k=k+1;
+    }
+}
+// ---------- neutral-vowel init for formant tracks ----------
+fn form_init(ffq:[]u8,fbw:[]u8,ts:[]u8)void{
+    let c:i64=0;
+    while(c<3){
+        let s:f64=fp_get(ts,c,1024.0);
+        let k:i64=0;
+        while(k<NKT){
+            let i:i64=0;
+            while(i<NF){
+                fp_put(ffq,(c*NF+i)*NKT+k,vowel_f(0,i)*s,16.0);
+                fp_put(fbw,(c*NF+i)*NKT+k,vowel_b(0,i),16.0);
+                i=i+1;
+            }
+            k=k+1;
+        }
+        c=c+1;
+    }
+}
+// ---------- expand script into control tracks ----------
+fn tracks_build(ev:[]u8,nev:i64,vamp:[]u8,vf0:[]u8,ffq:[]u8,fbw:[]u8,gam:[]u8,aspb:[]u8,lgain:[]u8,lfc:[]u8,lq:[]u8,ts:[]u8)void{
+    // defaults: gam=1 (no AM), aspb=1 (no boost), laugh filter wander
+    let k:i64=0;
+    while(k<NKT){
+        let t:f64=(k as f64)*256.0/44100.0;
+        let c:i64=0;
+        while(c<3){
+            fp_put(gam,c*NKT+k,1.0,Q30);
+            fp_put(aspb,c*NKT+k,1.0,1024.0);
+            c=c+1;
+        }
+        let u:i64=0;
+        while(u<2){
+            let el:i64=u*NKT+k;
+            fp_put(lfc,el,lfc_of(t,u),16.0);
+            fp_put(lq,el,lq_of(t,u),1024.0);
+            u=u+1;
+        }
+        k=k+1;
+    }
+    let i:i64=0;
+    while(i<nev){
+        let kind:i64=evg(ev,i,2);
+        let ch:i64=evg(ev,i,3);
+        if(kind==0){
+            let s:f64=fp_get(ts,ch,1024.0);
+            vbump(vamp,vf0,ffq,fbw,ch,s,
+                evg(ev,i,0),evg(ev,i,1),
+                evg(ev,i,7)/16,(evg(ev,i,8)/16) as i64,
+                (evg(ev,i,4) as f64)/16.0,(evg(ev,i,5) as f64)/16.0,
+                (evg(ev,i,6) as f64)/1000000.0,
+                evg(ev,i,9),evg(ev,i,10));
+        }
+        if(kind==3){
+            let s2:f64=fp_get(ts,ch,1024.0);
+            gbump(vamp,vf0,ffq,fbw,gam,aspb,ch,s2,
+                evg(ev,i,0),evg(ev,i,1),
+                evg(ev,i,7)/16,
+                (evg(ev,i,4) as f64)/16.0,(evg(ev,i,5) as f64)/16.0,
+                (evg(ev,i,6) as f64)/1000000.0,
+                (evg(ev,i,8) as f64)/16.0,
+                evg(ev,i,9),evg(ev,i,10),
+                h01(SEED,6000+i)*TAU);
+        }
+        if(kind==1){
+            lbump(lgain,lfc,lq,evg(ev,i,3),
+                evg(ev,i,0),evg(ev,i,1),
+                evg(ev,i,7)/16,
+                (evg(ev,i,6) as f64)/1000000.0);
+        }
+        i=i+1;
+    }
+}
+// ---------- resonator + laugh-biquad coeffs at control ticks ----------
+fn coeff_build(lfc:[]u8,lq:[]u8,lb0:[]u8,lb2:[]u8,la1:[]u8,la2:[]u8,
+               ffq:[]u8,fbw:[]u8,ra:[]u8,rb:[]u8,rc:[]u8)void{
+    let u:i64=0;
+    while(u<2){
+        let k:i64=0;
+        while(k<NKT){
+            let el:i64=u*NKT+k;
+            let fc:f64=fp_get(lfc,el,16.0);
+            let q:f64=fp_get(lq,el,1024.0);
+            let w:f64=TAU*fc/44100.0;
+            let sn:f64=fsin_red(w);
+            let cs:f64=fsin_red(w+PI/2.0);
+            let al:f64=sn/(2.0*q);
+            let a0:f64=1.0+al;
+            fp_put(lb0,el,al/a0,Q30);
+            fp_put(lb2,el,-al/a0,Q30);
+            fp_put(la1,el,-2.0*cs/a0,Q30);
+            fp_put(la2,el,(1.0-al)/a0,Q30);
+            k=k+1;
+        }
+        u=u+1;
+    }
+    // vocal-tract cascade resonators: y = a*x + b*y1 + c*y2,
+    // b = 2*R*cos(w), c = -R^2, a = 1-b-c (unity DC gain),
+    // R = exp(-pi*B/44100).
+    let c:i64=0;
+    while(c<3){
+        let fi:i64=0;
+        while(fi<NF){
+            let k2:i64=0;
+            while(k2<NKT){
+                let el2:i64=(c*NF+fi)*NKT+k2;
+                let F:f64=fp_get(ffq,el2,16.0);
+                let B:f64=fp_get(fbw,el2,16.0);
+                let w2:f64=TAU*F/44100.0;
+                let R:f64=exp_neg(PI*B/44100.0);
+                let co:f64=fsin_q(w2+PI/2.0);
+                let b:f64=2.0*R*co;
+                let cc:f64=-R*R;
+                let a:f64=1.0-b-cc;
+                fp_put(ra,el2,a,Q30);
+                fp_put(rb,el2,b,Q30);
+                fp_put(rc,el2,cc,Q30);
+                k2=k2+1;
+            }
+            fi=fi+1;
+        }
+        c=c+1;
+    }
+}
+// ---------- linear interpolation of a control track at sample n ----------
+fn track2(tr:[]u8,c:i64,n:i64,sc:f64)f64{
+    let k:i64=n>>8;
+    if(k>=NKT-1){k=NKT-2;}
+    let fr:f64=((n-(k<<8)) as f64)/256.0;
+    let e0:i64=c*NKT+k;
+    let a:f64=fp_get(tr,e0,sc);
+    let b:f64=fp_get(tr,e0+1,sc);
+    return a+(b-a)*fr;
+}
+fn mix_add(mix:[]u8,n:i64,s:f64)void{
+    let o:i64=n<<3;
+    put64(mix,o,get64(mix,o)+((s*16777216.0) as i64));
+}
+fn mix_peak(m:[]u8)void{
+    let peak:i64=0;
+    let s:i64=0;
+    while(s<NS){
+        let v:i64=get64(m,s<<3);
+        if(v<0){v=-v;}
+        if(v>peak){peak=v;}
+        s=s+1;
+    }
+    print_str("peak_q24=");print_i64(peak);
+    print_str(" peak_fs=");
+    print_f3((peak as f64)/16777216.0);
+    print_nl();
+}
+// ---------- laugh filter wander: incommensurate multi-sine (V10) ----------
+fn lfc_of(t:f64,u:i64)f64{
+    let w1:f64=fsin_red(TAU*0.47*t+(u as f64)*2.1);
+    let w2:f64=fsin_red(TAU*0.31*t+(u as f64)*4.7);
+    let w3:f64=fsin_red(TAU*0.83*t+(u as f64)*1.2);
+    return 800.0+1000.0*(0.5+0.5*(0.55*w1+0.30*w2+0.15*w3));
+}
+fn lq_of(t:f64,u:i64)f64{
+    let q1:f64=fsin_red(TAU*0.29*t+(u as f64)*1.3);
+    let q2:f64=fsin_red(TAU*0.53*t+(u as f64)*3.1);
+    return 3.0+3.0*(0.5+0.5*(0.6*q1+0.4*q2));
+}
+// ---------- pass 1: ambience (V10, mechanically identical) ----------
+fn amb_pass(mix:[]u8,master:f64,amblevel:f64)void{
+    let y1:f64=0.0;
+    let y2:f64=0.0;
+    let y3:f64=0.0;
+    let y4:f64=0.0;
+    let z1:f64=0.0;
+    let z2:f64=0.0;
+    let p1:f64=0.0;
+    let p2:f64=0.0;
+    let g1:f64=0.0;
+    let g2:f64=0.0;
+    let g3:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        p1=p1+TAU*0.37/44100.0;
+        if(p1>=TAU){p1=p1-TAU;}
+        p2=p2+TAU*0.83/44100.0;
+        if(p2>=TAU){p2=p2-TAU;}
+        g1=g1+TAU*0.61/44100.0;
+        if(g1>=TAU){g1=g1-TAU;}
+        g2=g2+TAU*1.27/44100.0;
+        if(g2>=TAU){g2=g2-TAU;}
+        g3=g3+TAU*0.43/44100.0;
+        if(g3>=TAU){g3=g3-TAU;}
+        let fc:f64=750.0*(1.0+0.35*fsin_q(p1+0.5)+0.18*fsin_q(p2+1.7));
+        let w:f64=TAU*fc/44100.0;
+        let a:f64=w/(1.0+w);
+        let wa:f64=TAU*2300.0/44100.0;
+        let aa:f64=wa/(1.0+wa);
+        let x:f64=(h01(71001,n)-0.5)*2.0;
+        y1=y1+a*(x-y1);
+        y2=y2+a*(y1-y2);
+        y3=y3+a*(y2-y3);
+        y4=y4+a*(y3-y4);
+        z1=z1+aa*(x-z1);
+        z2=z2+aa*(z1-z2);
+        let gb:f64=0.36*(1.0+0.25*fsin_q(g1+1.0)+0.14*fsin_q(g2+0.9));
+        let ga:f64=0.12*(1.0+0.30*fsin_q(g3+0.4));
+        mix_add(mix,n,(gb*y4+ga*z2)*amblevel*master);
+        n=n+1;
+    }
+}
+// ---------- pass 2: one voice channel ----------
+// Additive harmonic source (1..12, 1/k^0.85) with jitter/shimmer,
+// exciting the 5-resonator child-tract cascade; parallel cascade
+// shapes the aspiration noise (same coeffs, separate states).
+fn voice_chan(mix:[]u8,ch:i64,vamp:[]u8,vf0:[]u8,gam:[]u8,aspb:[]u8,
+              ra:[]u8,rb:[]u8,rc:[]u8,lut:[]u8,ha:[]u8,hp:[]u8,
+              master:f64,vscale:f64,aspg:f64)void{
+    let ph:f64=0.0;
+    let vp:f64=0.0;
+    let wp:f64=0.0;
+    let jit:f64=1.0;
+    let shm:f64=1.0;
+    let cyc:i64=0;
+    // resonator states: voiced (y) and aspiration (a), 5 formants x2
+    let y10:f64=0.0; let y11:f64=0.0; let y12:f64=0.0;
+    let y13:f64=0.0; let y14:f64=0.0;
+    let y20:f64=0.0; let y21:f64=0.0; let y22:f64=0.0;
+    let y23:f64=0.0; let y24:f64=0.0;
+    let a10:f64=0.0; let a11:f64=0.0; let a12:f64=0.0;
+    let a13:f64=0.0; let a14:f64=0.0;
+    let a20:f64=0.0; let a21:f64=0.0; let a22:f64=0.0;
+    let a23:f64=0.0; let a24:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        let amp:f64=track2(vamp,ch,n,Q30);
+        // f0 track holds the amp-weighted f0 sum (Hz x amp); the amp
+        // track holds the amp sum. track2 already undoes the fixed-point
+        // scales, so the normalized pitch is simply f0w/amp.
+        // (NOTE 2026-09-24: V10 multiplied by Q30/4096 here = x262144,
+        // aliasing every voice into ultrasonic hash. Fixed.)
+        let f0w:f64=track2(vf0,ch,n,4096.0);
+        let f0:f64=300.0;
+        if(amp>0.0000001){f0=f0w/amp;}
+        let gv:f64=track2(gam,ch,n,Q30);
+        let ab:f64=track2(aspb,ch,n,1024.0);
+        vp=vp+TAU*5.5/44100.0;
+        if(vp>=TAU){vp=vp-TAU;}
+        wp=wp+TAU*0.7/44100.0;
+        if(wp>=TAU){wp=wp-TAU;}
+        let fm:f64=1.0+0.012*fsin_q(vp)+0.008*fsin_q(wp);
+        ph=ph+f0*fm*jit/44100.0;
+        if(ph>=1.0){
+            ph=ph-1.0;
+            cyc=cyc+1;
+            jit=1.0+0.02*(h01(81001+ch,cyc)-0.5)*2.0;
+            shm=1.0+0.04*(h01(82001+ch,cyc)-0.5)*2.0;
+        }
+        // additive harmonic source, k=1..12
+        let s:f64=0.0;
+        let k:i64=0;
+        while(k<NH){
+            let hk:f64=ph*((k+1) as f64)+fp_get(hp,ch*NH+k,1000000.0);
+            hk=hk-((hk as i64) as f64);
+            if(hk<0.0){hk=hk+1.0;}
+            s=s+fp_get(ha,ch*NH+k,1000000.0)*lut_at(lut,hk);
+            k=k+1;
+        }
+        s=s*amp*gv*shm;
+        // voiced cascade: source excites the 5 resonators in series
+        let x:f64=s;
+        let fi:i64=0;
+        while(fi<NF){
+            let ci:i64=ch*NF+fi;
+            let ca:f64=track2(ra,ci,n,Q30);
+            let cb:f64=track2(rb,ci,n,Q30);
+            let cc:f64=track2(rc,ci,n,Q30);
+            let d1:f64=y10; let d2:f64=y20;
+            if(fi==1){d1=y11;d2=y21;}
+            if(fi==2){d1=y12;d2=y22;}
+            if(fi==3){d1=y13;d2=y23;}
+            if(fi==4){d1=y14;d2=y24;}
+            let y:f64=ca*x+cb*d1+cc*d2;
+            if(fi==0){y20=y10;y10=y;}
+            if(fi==1){y21=y11;y11=y;}
+            if(fi==2){y22=y12;y12=y;}
+            if(fi==3){y23=y13;y13=y;}
+            if(fi==4){y24=y14;y14=y;}
+            x=y;
+            fi=fi+1;
+        }
+        let vv:f64=x;
+        // aspiration cascade: same coeffs, independent states
+        let nz:f64=(h01(83001+ch,n)-0.5)*2.0;
+        x=nz;
+        fi=0;
+        while(fi<NF){
+            let ci2:i64=ch*NF+fi;
+            let ca2:f64=track2(ra,ci2,n,Q30);
+            let cb2:f64=track2(rb,ci2,n,Q30);
+            let cc2:f64=track2(rc,ci2,n,Q30);
+            let e1:f64=a10; let e2:f64=a20;
+            if(fi==1){e1=a11;e2=a21;}
+            if(fi==2){e1=a12;e2=a22;}
+            if(fi==3){e1=a13;e2=a23;}
+            if(fi==4){e1=a14;e2=a24;}
+            let y2:f64=ca2*x+cb2*e1+cc2*e2;
+            if(fi==0){a20=a10;a10=y2;}
+            if(fi==1){a21=a11;a11=y2;}
+            if(fi==2){a22=a12;a12=y2;}
+            if(fi==3){a23=a13;a13=y2;}
+            if(fi==4){a24=a14;a14=y2;}
+            x=y2;
+            fi=fi+1;
+        }
+        let aa:f64=x*aspg*ab*amp*gv;
+        mix_add(mix,n,(vv+aa)*vscale*master);
+        n=n+1;
+    }
+}
+// ---------- pass 3: laugh-noise - 2 bandpass units (V10, 0.5x) ----------
+fn laugh_pass(mix:[]u8,lgain:[]u8,lb0:[]u8,lb2:[]u8,la1:[]u8,la2:[]u8,master:f64)void{
+    let x10:f64=0.0;
+    let x20:f64=0.0;
+    let y10:f64=0.0;
+    let y20:f64=0.0;
+    let x11:f64=0.0;
+    let x21:f64=0.0;
+    let y11:f64=0.0;
+    let y21:f64=0.0;
+    let up0:f64=0.0;
+    let up1:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        let u:i64=0;
+        while(u<2){
+            let gain:f64=track2(lgain,u,n,Q30);
+            let b0:f64=track2(lb0,u,n,Q30);
+            let b2:f64=track2(lb2,u,n,Q30);
+            let a1:f64=track2(la1,u,n,Q30);
+            let a2:f64=track2(la2,u,n,Q30);
+            let x:f64=(h01(73001+u,n)-0.5)*2.0;
+            let up:f64=up0;
+            let xx1:f64=x10;
+            let xx2:f64=x20;
+            let yy1:f64=y10;
+            let yy2:f64=y20;
+            if(u==1){up=up1;xx1=x11;xx2=x21;yy1=y11;yy2=y21;}
+            let y:f64=b0*x+b2*xx2-a1*yy1-a2*yy2;
+            xx2=xx1;
+            xx1=x;
+            yy2=yy1;
+            yy1=y;
+            up=up+TAU*4.8/44100.0;
+            if(up>=TAU){up=up-TAU;}
+            let pg:f64=1.0-0.08*(0.5+0.5*fsin_q(up+(u as f64)*2.4));
+            mix_add(mix,n,gain*pg*0.55*y*0.5*master);
+            if(u==0){up0=up;x10=xx1;x20=xx2;y10=yy1;y20=yy2;}
+            if(u==1){up1=up;x11=xx1;x21=xx2;y11=yy1;y21=yy2;}
+            u=u+1;
+        }
+        n=n+1;
+    }
+}
+// ---------- pass 4: footsteps (V10, mechanically identical) ----------
+fn step_pass(mix:[]u8,ev:[]u8,nev:i64,lut:[]u8,master:f64)void{
+    let i:i64=0;
+    while(i<nev){
+        if(evg(ev,i,2)==2){
+            let t0ms:i64=evg(ev,i,0);
+            let fr:f64=(evg(ev,i,4) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let tau:f64=((evg(ev,i,8) as f64)/16.0)/1000.0;
+            let n0:i64=((t0ms as f64)*44.1) as i64;
+            let n1:i64=n0+(((6.0*tau*44100.0)) as i64);
+            if(n1>NS){n1=NS;}
+            if(n0<0){n0=0;}
+            let kd:f64=1.0-1.0/(tau*44100.0);
+            let kr:f64=1.0-1.0/(0.010*44100.0);
+            let r:f64=1.0;
+            let d:f64=1.0;
+            let ph:f64=0.0;
+            let bz:f64=0.0;
+            let abl:f64=TAU*3000.0/44100.0;
+            abl=abl/(1.0+abl);
+            let n:i64=n0;
+            while(n<n1){
+                r=r*kr;
+                d=d*kd;
+                let env:f64=amp*(1.0-r)*d;
+                ph=ph+fr/44100.0;
+                if(ph>=1.0){ph=ph-1.0;}
+                let nz:f64=(h01(74001,n)-0.5)*2.0;
+                bz=bz+abl*(nz-bz);
+                let s:f64=env*lut_at(lut,ph)+0.12*amp*bz*d*d*(1.0-r);
+                mix_add(mix,n,s*master);
+                n=n+1;
+            }
+        }
+        i=i+1;
+    }
+}
+// ---------- event audit file ----------
+fn w_int(b:[]u8,p:i64,v:i64)i64{
+    let x:i64=v;
+    if(x==0){b[p]=48;return p+1;}
+    let d:i64=1;
+    let t:i64=x;
+    while(t>=10){d=d*10;t=t/10;}
+    while(d>=1){
+        b[p]=(((x/d)%10)+48) as u8;
+        p=p+1;
+        d=d/10;
+    }
+    return p;
+}
+fn ev_write(path:[]u8,ev:[]u8,nev:i64)i64{
+    let bp:*u8=_zag_malloc(nev*16+8) as *u8;
+    if(bp==null as *u8){return -1;}
+    let b:[]u8=bp[0..(nev*16+8)];
+    let p:i64=0;
+    let i:i64=0;
+    while(i<nev){
+        let ms:i64=evg(ev,i,0);
+        let sec:i64=ms/1000;
+        let fr:i64=ms-sec*1000;
+        p=w_int(b,p,sec);
+        b[p]=46;p=p+1;
+        b[p]=((fr/100)+48) as u8;p=p+1;
+        b[p]=(((fr/10)%10)+48) as u8;p=p+1;
+        b[p]=((fr%10)+48) as u8;p=p+1;
+        b[p]=10;p=p+1;
+        i=i+1;
+    }
+    let out:[]u8=b[0..p];
+    let rc:i64=file_write(path,out);
+    _zag_free(bp);
+    return rc;
+}
+fn main()i32{
+    let outp:[]u8=_zag_arg(1);
+    if(outp.len==0){
+        print_str("usage: render_v11_paradd_tract <out.wav>\n");
+        return 1;
+    }
+    let master:f64=1.40;
+    let amblevel:f64=2.2;
+    let vscale:f64=0.10;
+    let aspg:f64=0.60;
+    // ---- arenas (all explicitly zeroed) ----
+    let evp:*u8=_zag_malloc(NEVMAX*11*8) as *u8;
+    let ev:[]u8=evp[0..(NEVMAX*11*8)];
+    let vamp:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let vf0:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let gam:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let aspb:[]u8=(_zag_malloc(3*NKT*8) as *u8)[0..(3*NKT*8)];
+    let ffq:[]u8=(_zag_malloc(3*NF*NKT*8) as *u8)[0..(3*NF*NKT*8)];
+    let fbw:[]u8=(_zag_malloc(3*NF*NKT*8) as *u8)[0..(3*NF*NKT*8)];
+    let ra:[]u8=(_zag_malloc(3*NF*NKT*8) as *u8)[0..(3*NF*NKT*8)];
+    let rb:[]u8=(_zag_malloc(3*NF*NKT*8) as *u8)[0..(3*NF*NKT*8)];
+    let rc:[]u8=(_zag_malloc(3*NF*NKT*8) as *u8)[0..(3*NF*NKT*8)];
+    let lgain:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lfc:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lq:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lb0:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lb2:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let la1:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let la2:[]u8=(_zag_malloc(2*NKT*8) as *u8)[0..(2*NKT*8)];
+    let lut:[]u8=(_zag_malloc(2048*8) as *u8)[0..(2048*8)];
+    let ha:[]u8=(_zag_malloc(3*NH*8) as *u8)[0..(3*NH*8)];
+    let hp:[]u8=(_zag_malloc(3*NH*8) as *u8)[0..(3*NH*8)];
+    let ts:[]u8=(_zag_malloc(3*8) as *u8)[0..(3*8)];
+    let mix:[]u8=(_zag_malloc(NS*8) as *u8)[0..(NS*8)];
+    let z:i64=0;
+    while(z<NS*8){mix[z]=0;z=z+1;}
+    z=0;
+    while(z<3*NKT*8){vamp[z]=0;vf0[z]=0;gam[z]=0;aspb[z]=0;z=z+1;}
+    z=0;
+    while(z<3*NF*NKT*8){ffq[z]=0;fbw[z]=0;ra[z]=0;rb[z]=0;rc[z]=0;z=z+1;}
+    z=0;
+    while(z<2*NKT*8){lgain[z]=0;lfc[z]=0;lq[z]=0;lb0[z]=0;lb2[z]=0;la1[z]=0;la2[z]=0;z=z+1;}
+    z=0;
+    while(z<NEVMAX*11*8){ev[z]=0;z=z+1;}
+    // ---- per-child harmonic amps/phases + tract scale (hash-derived) ----
+    let c:i64=0;
+    while(c<3){
+        fp_put(ts,c,0.96+0.08*h01(SEED,5000+c),1024.0);
+        let k:i64=0;
+        while(k<NH){
+            let kk:f64=(k+1) as f64;
+            // child glottal tilt: a_k = k^-0.60 (compromise: F3B needs
+            // brightness but 0.55 widened F2DYN too much)
+            let amp:f64=exp_neg(0.55*lnpos(kk));
+            fp_put(ha,c*NH+k,amp,1000000.0);
+            fp_put(hp,c*NH+k,h01(SEED,5100+c*20+k),1000000.0);
+            k=k+1;
+        }
+        c=c+1;
+    }
+    lut_init(lut);
+    print_str("lut ok\n");
+    let np:*u8=_zag_malloc(8) as *u8;
+    let npp:*i64=np as *i64;
+    npp.*=0;
+    script_build(ev,npp);
+    let nev:i64=npp.*;
+    _zag_free(np);
+    print_str("events=");print_i64(nev);print_nl();
+    form_init(ffq,fbw,ts);
+    tracks_build(ev,nev,vamp,vf0,ffq,fbw,gam,aspb,lgain,lfc,lq,ts);
+    print_str("tracks ok\n");
+    coeff_build(lfc,lq,lb0,lb2,la1,la2,ffq,fbw,ra,rb,rc);
+
+
+    amb_pass(mix,master,amblevel);
+    c=0;
+    while(c<3){
+        voice_chan(mix,c,vamp,vf0,gam,aspb,ra,rb,rc,lut,ha,hp,master,vscale,aspg);
+        print_str("voice ");print_i64(c);print_str(" ok\n");
+        c=c+1;
+    }
+    laugh_pass(mix,lgain,lb0,lb2,la1,la2,master);
+    print_str("laugh ok\n");
+    step_pass(mix,ev,nev,lut,master);
+    print_str("steps ok\n");
+    mix_peak(mix);
+    let rcw:i64=wav_write(outp,mix,NS);
+    print_str("render rc=");print_i64(rcw);print_nl();
+    let evpath:[]u8=_zag_arg(2);
+    if(evpath.len>0){
+        let erc:i64=ev_write(evpath,ev,nev);
+        print_str("events rc=");print_i64(erc);print_nl();
+    }
+    return (rcw<0) as i32;
+}
