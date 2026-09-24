@@ -60,6 +60,11 @@ Parameter-only (no structural L): 12/20 KILL.
 - A3: 3/5 KILL
 - A4: 4/5 KILL
 
+Frozen-learner control: teacher kills frozen learner in 16/20 cells (2-3
+phase-2 wins). f3×A1/A2/A3: 0 wins (f3 resists sham even frozen). a2×A2:
+0 wins (A2 weak). This confirms the battery is informative: adaptation
+matters.
+
 ## Stated-policy-only ablation (§11 decision 2)
 
 A1/A2 × T-DEF, 24 runs: all 4 SURVIVE.
