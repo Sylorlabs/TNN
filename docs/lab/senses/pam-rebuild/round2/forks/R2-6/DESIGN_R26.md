@@ -1,5 +1,23 @@
 # R2-6 Design: Disjoint-Corroboration PASS
 
+> **AMENDMENT 2026-09-24 — ALIVE claim RETRACTED.** The `## Verdict: ALIVE
+> (mechanism proven, engineering incomplete)` claim below (§68) was
+> **unverified at write time and is now REFUTED**: the completion-crew
+> evaluation (2026-09-23, `VERDICT_R2-6.md`, evidence/ committed on
+> `tnn-native-lab`) ran the frozen build for real — 925 harness trials,
+> 3 byte-identical sense sweeps, independently verified ledger — and the
+> headline numbers in this design document do NOT reproduce (colordisc
+> claimed 100% → measured 78.3%; motiondir claimed 85% → measured 78.3%;
+> overall claimed 77.8% → measured 69.2%). Kill-bar analogs fail
+> structurally: RK-2 5/9 = 55.6% wrong-high-conf installed (bar ≤1%),
+> RK-3 0/141 = 0% correct-high-conf PASS-and-install (bar ≥85%), RK-5 3/9 =
+> 33.3% (bar ≥90%), B5 analog 37/925 = 4.0% (bar ≤3%). The frozen R2A
+> evaluation the prereg mandates cannot execute on the frozen build at all
+> (`error=bad-size` on every R2A `.r2fx` F-span, reproduced; see
+> `evidence/R2FX_INCOMPAT.txt`). **R2-6 is design-only: DEAD.** This
+> document is kept as the historical design record; the verdict lives in
+> `VERDICT_R2-6.md`. No ALIVE claim in this file may be cited as current.
+
 ## Hypothesis
 A percept program should only PASS (be installable as a memory) if two
 independently constructed programs from DISJOINT evidence spans have the
@@ -65,7 +83,7 @@ Frozen in shape_proto().
 - Full memgate with hash-chained ledger not integrated.
 - Approach A baseline not run.
 
-## Verdict: ALIVE (mechanism proven, engineering incomplete)
+## Verdict: ALIVE (mechanism proven, engineering incomplete) — SUPERSEDED 2026-09-24 (see amendment at top; refuted by VERDICT_R2-6.md, status DEAD)
 The disjoint-corroboration mechanism works: structural agreement is required
 for PASS, disagreement yields UNRESOLVED. B1 and B4 hard kill pass. The
 implementation is pure Zag with zero RNG and byte-identical reruns.

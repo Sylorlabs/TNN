@@ -67,9 +67,14 @@ through the normal op path so refusals stay possible and audited.
 
 **ob_arbiter.zag — the arbiter.** Owns the message queue, the routing
 table (claim episode → mem slot), the provisional-claim register, and its
-own audit log. Processes each episode's queue in precedence phases
-P0..P5, FIFO within a phase. Applies PAM verdicts, routes admitted
-installs to the memory organ, applies revokes/promotes, enforces P4
+own audit log. Processes each episode's queue in a single FIFO pass in
+arrival order (P1 retired 2026-09-24; P1-alt is the dispatch). Assigns
+`seq` at receipt, ignoring organ-supplied order bits (P5). Implements the
+C3/C7 promotion-window predicate in the `M_PROMOTE` branch
+(deliberation layer): a pending unadjudicated same-claim `M_REVOKE`
+refuses promotion with ledgered `ARB_REFUSED_CONTRADICTED` (204), no
+mutation, citing the revoke's receipt seq. Applies PAM verdicts, routes
+admitted installs to the memory organ, applies revokes, enforces P4
 (refusals terminal). Reads the FL2 organ's local log as its published
 trace to derive the PAM claim observation (see below).
 
