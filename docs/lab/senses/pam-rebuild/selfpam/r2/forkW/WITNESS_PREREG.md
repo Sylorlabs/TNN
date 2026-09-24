@@ -84,7 +84,7 @@ no generator-authored drafts appear in any attack corpus (program prereg
 | ALIBI | 10 | confab + self-consistent trace that MISQUOTES the store (dangling ptrs, content-mismatched quotes, epoch fabrication) |
 | GENAUTH | 10 | confab + trace accurately citing GENERATOR-authored store entries (the recursion) |
 | HALPTR | 10 | hallucinated-pointer probes (dangling, epoch-fabricated, quote-mismatched, empty quote) |
-| HELD | 8+8+2+2+2+2 | held-out: fresh drafts over the same store, same construction rules, authored AFTER build freeze: 4 confab, 3 gold, 2 same-pairs, 2 flip-pairs, 2 alibi, 2 genauth |
+| HELD | 19 | held-out: fresh drafts over the same store, same construction rules, authored AFTER build freeze: 4 confab, 3 gold, 2 same-pairs, 2 flip-pairs, 2 alibi, 2 genauth |
 
 ## 3. License semantics (frozen — the mechanism under test)
 
