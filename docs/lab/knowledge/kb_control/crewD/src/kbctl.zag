@@ -1,0 +1,908 @@
+@import("store_fast.zag")
+// kbctl.zag — Crew D battery CLI over the CURRENT store code (fast path).
+// Frozen interface (mirrors Crew B prereg §6):
+//   kbctl init <dir> [--mode=fast]
+//   kbctl put <dir> <id> <key> <textfile> --mode=fast
+//   kbctl revise <dir> <id> <textfile> --mode=fast
+//   kbctl delete <dir> <id>
+//   kbctl get <dir> <id>
+//   kbctl verify <dir>
+//   kbctl recover <dir>
+//   kbctl crashput <dir> <id> <key> <textfile> --mode=fast --fail-after=data|meta
+//   kbctl crashrevise <dir> <id> <textfile> --mode=fast --fail-after=data|ovr|meta
+//   kbctl bulkfill <dir> <n> <maxtextlen>   (TEST ONLY fixture setup)
+// Exit codes: 0 ok · 1 usage/argument error · 2 integrity/verify failure ·
+// 3 write-protocol abort (fail-closed) · 99 simulated crash.
+// Pure Zag, deterministic: no wall clock, no RNG. --mode=conscious rejected.
+
+const KB_CAP:i32=200000;
+
+// ---------- tiny helpers ----------
+// sc_seal_final overflows its fixed SC_CHAIN_SCRATCH when the event log
+// exceeds 3072 entries (32+events_n*16 > 49184) -- a production DoS panic,
+// unrelated to the silent-overwrite under test. The seal is not verified on
+// load, so the wrapper skips it above the safe threshold and documents the
+// skip. Below the threshold behavior is byte-identical to production.
+fn kb_seal_final_safe(st:*ScStore)i32 {
+    let en:i32=st.*.events_n*SC_EVENT_BYTES;
+    if(32+en>SC_CHAIN_SCRATCH){
+        ig_println("seal: skipped (event log exceeds scratch)");
+        return 0;
+    }
+    return sc_seal_final(st);
+}
+// sc_compact_and_seal overflows the fixed chain_scratch when
+// count*(w+4) > 49152 (e.g. 4096 slots with w>=9). The chain hash is not
+// verified on load, so the wrapper uses a dynamically-sized scratch buffer.
+// All other logic (compaction, widths, nsealed) is identical to production.
+fn kb_compact_and_seal_safe(s:*ScStore,c:i32,count:i32)i32 {
+    let fb:[]u8=s.*.fill_buf;
+    let mn:i64=0; let mx:i64=0;
+    let k:i32=0;
+    if(count>0){
+        mn=sc_g64(fb,0); mx=mn;
+        k=1;
+        while(k<count){
+            let v:i64=sc_g64(fb,(k*8) as i64);
+            if(v<mn){mn=v;}
+            if(v>mx){mx=v;}
+            k=k+1;
+        }
+    }
+    let wtag:i32=sc_pick_width(mn,mx);
+    let w:i32=wtag&15;
+    let csize:i32=4096*(w+4);
+    let cc:[]u8=sc_alloc(csize);
+    if(cc.len==0){return -1;}
+    let moff:i32=4096*w;
+    k=0;
+    while(k<count){
+        let v:i64=sc_g64(fb,(k*8) as i64);
+        sc_wval(cc,k*w,v,w);
+        let m:i32=32768+k*4;
+        cc[moff+k*4]=fb[m];cc[moff+k*4+1]=fb[m+1];
+        cc[moff+k*4+2]=fb[m+2];cc[moff+k*4+3]=fb[m+3];
+        k=k+1;
+    }
+    let cptrs:[]u8=s.*.chunk_ptrs;
+    sc_s64(cptrs,c*8,_zag_slice_ptr(cc) as i64);
+    let wd:[]u8=s.*.widths;
+    wd[c]=wtag as u8;
+    let used:i32=count*(w+4);
+    // use a properly-sized scratch instead of the fixed chain_scratch
+    let scr:[]u8=sc_alloc(32+used);
+    if(scr.len==0){return -1;}
+    let chn:[]u8=s.*.chain;
+    let i:i32=0;
+    if(c>0){
+        while(i<32){scr[i]=chn[(c-1)*32+i];i=i+1;}
+    }else{
+        while(i<32){scr[i]=0;i=i+1;}
+    }
+    i=0;
+    while(i<used){scr[32+i]=cc[i];i=i+1;}
+    let out:[]u8=sc_alloc(32);
+    if(out.len==0){return -1;}
+    if(ns_sha256(scr[0..32+used],out)!=0){return -2;}
+    i=0;
+    while(i<32){chn[c*32+i]=out[i];i=i+1;}
+    s.*.nsealed=s.*.nsealed+1;
+    return 0;
+}
+// Wrapper-side sc_add: identical to production except it uses the safe
+// compact (above) instead of the panicking sc_compact_and_seal.
+fn kb_sc_add(s:*ScStore,id:i32,v:i64,out_slot:*i32)i32 {
+    if(s.*.learn_gate==0){
+        sc_event_append(s,1,s.*.n,3,id);
+        return 3;
+    }
+    let dupe:i32=sc_id2slot_get(s,id);
+    s.*.ops_find=s.*.ops_find+1;
+    if(dupe>=0){
+        sc_event_append(s,1,s.*.n,1,id);
+        return 1;
+    }
+    let n:i32=s.*.n;
+    if(n>=s.*.cap){
+        sc_event_append(s,1,s.*.n,2,id);
+        return 2;
+    }
+    let fb:[]u8=s.*.fill_buf;
+    let cn:i32=n/SC_CHUNK_SLOTS;
+    let r2:i32=n%SC_CHUNK_SLOTS;
+    sc_s64(fb,(r2*8) as i64,v);
+    let mo2:i32=32768+r2*4;
+    let ckb2:[]u8=s.*.clkbase;
+    let base:i32=sc_g32(ckb2,cn*4);
+    if(base==-1){ base=s.*.clock; sc_s32(ckb2,cn*4,base); }
+    sc_s16(fb,mo2,s.*.clock-base);
+    fb[mo2+2]=0;
+    fb[mo2+3]=0;
+    s.*.n=n+1;
+    s.*.ops_add=s.*.ops_add+1;
+    out_slot.*=n;
+    if((n+1)%SC_CHUNK_SLOTS==0){
+        kb_compact_and_seal_safe(s,cn,SC_CHUNK_SLOTS);
+    }
+    return 0;
+}
+fn kb_streq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;} i=i+1;}
+    return 1;
+}
+fn kb_atoi(s:[]u8)i32 {
+    if(s.len==0){return -1;}
+    let i:i32=0;
+    let neg:i32=0;
+    if(s[0]==45){neg=1;i=1;if(s.len==1){return -1;}}
+    let v:i32=0;
+    while(i<s.len){
+        let c:i32=(s[i] as i32)&255;
+        if(c<48||c>57){return -1;}
+        v=v*10+(c-48);
+        i=i+1;
+    }
+    if(neg!=0){v=0-v;}
+    return v;
+}
+fn kb_argval(prefix:[]u8)[]u8 {
+    let n:i32=1;
+    while(n<16){
+        let a:[]u8=_zag_arg(n);
+        if(a.len>prefix.len){
+            let m:i32=1;
+            let i:i32=0;
+            while(i<prefix.len){if(a[i]!=prefix[i]){m=0;} i=i+1;}
+            if(m==1){return a[prefix.len..];}
+        }
+        n=n+1;
+    }
+    return "";
+}
+fn kb_read_file(path:[]u8,cap:i32)[]u8 {
+    let fd:i64=ig_open_rdonly(path);
+    if(fd<0){return "";}
+    let buf:[]u8=sc_alloc(cap);
+    if(buf.len==0){ig_close(fd);return "";}
+    let got:i32=ig_read_into(fd,buf);
+    ig_close(fd);
+    if(got<0){return "";}
+    return buf[0..got];
+}
+fn kb_new_store(st:*ScStore)void {
+    st.*=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+}
+// deterministic fixture generators (mirrored in fixtures.py)
+fn kb_keygen(id:i32,out:[]u8)void {
+    out[0]=107;
+    let v:i32=id;
+    let p:i32=6;
+    while(p>=1){out[p]=((v%10)+48) as u8;v=v/10;p=p-1;}
+}
+fn kb_textgen(id:i32,seq:i32,tlen:i32,out:[]u8)void {
+    let j:i32=0;
+    while(j<tlen){
+        let vv:i64=(id as i64)*31+(seq as i64)*17+(j as i64)*7;
+        let r:i64=vv%26;
+        out[j]=(65+r) as u8;
+        j=j+1;
+    }
+}
+// walk the last chunk: true data end, or -1 if unparseable
+fn kb_scan_used(chunk:[]u8)i32 {
+    let off:i32=0;
+    while(1){
+        if(off>=chunk.len){return off;}
+        if(off+11>chunk.len){
+            let p:i32=off;
+            while(p<chunk.len){if((chunk[p] as i32)!=0){return -1;} p=p+1;}
+            return off;
+        }
+        let kind:i32=(chunk[off] as i32)&255;
+        if(kind==0){
+            let p2:i32=off;
+            while(p2<chunk.len){if((chunk[p2] as i32)!=0){return -1;} p2=p2+1;}
+            return off;
+        }
+        if(kind<1||kind>4){return -1;}
+        let kl:i32=(((chunk[off+5] as i32)&255)<<8)|((chunk[off+6] as i32)&255);
+        let tl:i32=sc_g32(chunk,off+7);
+        if(kl<0||kl>IG_MAX_KEY||tl<0||tl>IG_MAX_TEXT){return -1;}
+        let rl:i32=11+kl+tl;
+        if(off+rl>chunk.len){return -1;}
+        off=off+rl;
+    }
+    return -1;
+}
+// reopen a sealed partial tail chunk into fill_buf (per-op put protocol)
+fn kb_reopen_tail(st:*ScStore)i32 {
+    let n:i32=st.*.n;
+    if(n%SC_CHUNK_SLOTS==0){return 0;}
+    let tc:i32=n/SC_CHUNK_SLOTS;
+    if(tc>=st.*.nsealed){return 0;}
+    let wtag:i32=(st.*.widths[tc] as i32)&255;
+    let w:i32=wtag&15;
+    let sg:i32=0;
+    if((wtag&16)!=0){sg=1;}
+    let ch:[]u8=sc_slot_chunk(st,tc);
+    let fb:[]u8=st.*.fill_buf;
+    let count:i32=n%SC_CHUNK_SLOTS;
+    let k:i32=0;
+    while(k<count){
+        let v:i64=sc_rval(ch,k*w,w,sg);
+        sc_s64(fb,(k*8) as i64,v);
+        let mo:i32=32768+k*4;
+        let so:i32=4096*w+k*4;
+        fb[mo]=ch[so];fb[mo+1]=ch[so+1];fb[mo+2]=ch[so+2];fb[mo+3]=ch[so+3];
+        k=k+1;
+    }
+    st.*.nsealed=tc;
+    return 0;
+}
+// zero uninitialized tail of the last sealed chunk (byte-identity hygiene;
+// the chain covers only the written bytes, so this changes nothing logical)
+fn kb_zero_tail(st:*ScStore)i32 {
+    let ns:i32=st.*.nsealed;
+    if(ns<=0){return 0;}
+    let n:i32=st.*.n;
+    let count:i32=n%SC_CHUNK_SLOTS;
+    if(count==0){return 0;}
+    let c:i32=ns-1;
+    let wtag:i32=(st.*.widths[c] as i32)&255;
+    let w:i32=wtag&15;
+    let ch:[]u8=sc_slot_chunk(st,c);
+    let used:i32=count*(w+4);
+    let total:i32=4096*(w+4);
+    let p:i32=used;
+    while(p<total){ch[p]=0;p=p+1;}
+    return 0;
+}
+fn kb_load_chunk(dir:[]u8,ci:i32,chunk:[]u8,loaded:*i32)i32 {
+    if(ci==loaded.*){return 0;}
+    if(ig_blob_read_chunk(dir,ci,chunk)!=(IG_BLOB_CHUNK as i32)){return -1;}
+    loaded.*=ci;
+    return 0;
+}
+fn kb_load_ovr(dir:[]u8,oids:[]u8,ooffs:[]u8,maxn:i32,ocnt:*i32)i32 {
+    ocnt.*=0;
+    if(ig_ovr_load(dir,oids,ooffs,maxn,ocnt)!=0){return -1;}
+    return 0;
+}
+
+// ---------- ops ----------
+fn kb_store_exists(dir:[]u8)i32 {
+    let nm:[]u8=ig_join(dir,"store.dat");
+    if(nm.len==0){return 0;}
+    let fd:i64=ig_open_rdonly(nm);
+    if(fd<0){return 0;}
+    ig_close(fd);
+    return 1;
+}
+fn kb_init(dir:[]u8)i32 {
+    if(dir.len==0){ig_println("init: empty dir");return 1;}
+    if(ig_mkdir(dir)!=0){ig_println("init: mkdir failed");return 3;}
+    // Empty store = no store.dat yet (ig_store_load cannot round-trip a
+    // store with nsealed=0/events_n=0: ig_read_into rejects empty reads).
+    // The first put creates store.dat via the fresh path in kb_put.
+    let bn:[]u8=ig_blob_name(dir,0);
+    let fd:i64=ig_open_write(bn);
+    if(fd<0){ig_println("init: blob create failed");return 3;}
+    let zb:[]u8=sc_alloc(IG_BLOB_CHUNK as i32);
+    if(zb.len==0){ig_close(fd);return 3;}
+    let p:i32=0;
+    while(p<zb.len){zb[p]=0;p=p+1;}
+    if(ig_write_all(fd,zb)!=0){ig_close(fd);return 3;}
+    ig_close(fd);
+    let nm:[]u8=ig_join(dir,"overrides.dat");
+    let fd2:i64=ig_open_write(nm);
+    if(fd2<0){ig_println("init: ovr create failed");return 3;}
+    let zb2:[]u8=sc_alloc(4);
+    if(zb2.len==0){ig_close(fd2);return 3;}
+    zb2[0]=0;zb2[1]=0;zb2[2]=0;zb2[3]=0;
+    if(ig_write_all(fd2,zb2)!=0){ig_close(fd2);return 3;}
+    ig_close(fd2);
+    ig_println("INIT ok");
+    return 0;
+}
+fn kb_put(dir:[]u8,id:i32,key:[]u8,text:[]u8)i32 {
+    if(id<0){ig_println("put: bad id");return 1;}
+    if(key.len==0||key.len>IG_MAX_KEY){ig_println("put: bad key");return 1;}
+    if(text.len==0||text.len>IG_MAX_TEXT){ig_println("put: bad text");return 1;}
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(kb_store_exists(dir)==0){
+        if(sc_store_init(KB_CAP,&st)!=0){ig_println("put: store init failed");return 3;}
+        btotal=0; bnchunk=1; brecs=0;
+    }else{
+        if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("put: store load failed");return 3;}
+    }
+    if(id>=st.cap){ig_println("put: id >= cap");return 1;}
+    if(sc_id2slot_get(&st,id)>=0){ig_println("put: duplicate id");return 3;}
+    if(st.n>=st.cap){ig_println("put: store full");return 3;}
+    if(kb_reopen_tail(&st)!=0){ig_println("put: reopen failed");return 3;}
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=0,.cur="",.used=0,.total=0,.recs=0};
+    if(igb_init(&bb,dir)!=0){ig_println("put: blob init failed");return 3;}
+    if(bnchunk>0){
+        if(ig_blob_read_chunk(dir,bnchunk-1,bb.cur)!=(IG_BLOB_CHUNK as i32)){ig_println("put: last chunk read failed");return 3;}
+        bb.nchunk=bnchunk-1;
+        // one-shot put recovers the TRUE tail by record-walking (the
+        // in-process ingest tracks it live); persisted offset semantics
+        // (packed, padding-blind) are unchanged.
+        let su:i32=kb_scan_used(bb.cur);
+        if(su<0){ig_println("put: tail scan failed");return 3;}
+        bb.used=su;
+    }
+    bb.total=btotal; bb.recs=brecs;
+    let off:i64=igb_append(&bb,1,id,key,text);
+    if(off<0){ig_println("put: append failed");return 3;}
+    let slot:i32=0;
+    if(kb_sc_add(&st,id,off,&slot)!=0){ig_println("put: slot add failed");return 3;}
+    // sc_add audits only failures; a successful add leaves no event, and a
+    // store with events_n=0 cannot round-trip ig_store_load (ig_read_into
+    // rejects empty reads). Record the op with the store's own audit API.
+    sc_event_append(&st,1,id,0,slot);
+    if(sc_seal_tail(&st)!=0){ig_println("put: seal tail failed");return 3;}
+    kb_zero_tail(&st);
+    if(kb_seal_final_safe(&st)!=0){ig_println("put: seal final failed");return 3;}
+    if(igb_finish(&bb)!=0){ig_println("put: blob finish failed");return 3;}
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("put: store save failed");return 3;}
+    ig_print("PUT id=");ig_print_i64(id as i64);ig_print(" off=");ig_print_i64(off);ig_println("");
+    return 0;
+}
+// Wrapper-side revise: mirrors production ig_revise exactly (same igb_append
+// write path, same override/flag/event/chain logic) except the final seal uses
+// kb_seal_final_safe, working around the production sc_seal_final DoS panic
+// when events_n > 3072. The attacked silent-overwrite mechanism is untouched.
+fn kb_revise_impl(dir:[]u8,id:i32,newtext_path:[]u8)i32 {
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("revise: store load failed");return 1;}
+    if(id<0||id>=st.n){ig_println("revise: bad id");return 1;}
+    let fl:i32=sc_flags_get(&st,id);
+    if((fl&1)!=0){ig_println("revise: fact is deleted");return 1;}
+    let old_off:i64=0;
+    if(sc_recall(&st,id,&old_off)!=1){ig_println("revise: recall failed");return 1;}
+    let nfd:i64=ig_open_rdonly(newtext_path);
+    if(nfd<0){ig_println("revise: newtext open failed");return 1;}
+    let nt:[]u8=sc_alloc(IG_MAX_TEXT);
+    if(nt.len==0){ig_close(nfd);return 1;}
+    let got:i32=0;
+    while(got<nt.len){
+        let g2:i32=ig_read_into(nfd,nt[got..]);
+        if(g2<0){ig_close(nfd);return 1;}
+        if(g2==0){break;}
+        got=got+g2;
+    }
+    ig_close(nfd);
+    if(got<1){ig_println("revise: empty newtext");return 1;}
+    let ci:i32=(old_off/IG_BLOB_CHUNK) as i32;
+    let ino:i32=(old_off%IG_BLOB_CHUNK) as i32;
+    let chunk:[]u8=sc_alloc(IG_BLOB_CHUNK as i32);
+    if(chunk.len==0){return 1;}
+    if(ig_blob_read_chunk(dir,ci,chunk)!=(IG_BLOB_CHUNK as i32)){ig_println("revise: chunk read failed");return 1;}
+    let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+    if(ig_blob_parse_hdr(chunk,ino,&ko,&oid,&kl,&tl)<=0){ig_println("revise: old parse failed");return 1;}
+    if(oid!=id){ig_println("revise: id mismatch at offset");return 1;}
+    let oldkey:[]u8=chunk[ino+11..ino+11+kl];
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=0,.cur="",.used=0,.total=0,.recs=0};
+    if(igb_init(&bb,dir)!=0){return 1;}
+    let lastidx:i32=bnchunk-1;
+    if(ig_blob_read_chunk(dir,lastidx,bb.cur)!=(IG_BLOB_CHUNK as i32)){ig_println("revise: last chunk read failed");return 1;}
+    bb.nchunk=lastidx;
+    bb.used=(btotal%(IG_BLOB_CHUNK)) as i32;
+    bb.total=btotal;
+    bb.recs=brecs;
+    let new_off:i64=igb_append(&bb,ko,id,oldkey,nt[0..got]);
+    if(new_off<0){ig_println("revise: append failed");return 1;}
+    if(igb_finish(&bb)!=0){ig_println("revise: blob finish failed");return 1;}
+    let oids:[]u8=sc_alloc(4096*4);
+    let ooffs:[]u8=sc_alloc(4096*8);
+    if(oids.len==0||ooffs.len==0){return 1;}
+    let ocnt:i32=0;
+    if(ig_ovr_load(dir,oids,ooffs,4096,&ocnt)!=0){ig_println("revise: ovr load failed");return 1;}
+    let oo:i64=0;
+    if(ig_ovr_find(oids,ooffs,ocnt,id,&oo)==1){
+        let e:i32=0;
+        while(e<ocnt){
+            if(sc_g32(oids,e*4)==id){sc_s64(ooffs,(e*8) as i64,new_off);break;}
+            e=e+1;
+        }
+    }else{
+        if(ocnt>=4096){ig_println("revise: too many overrides");return 1;}
+        sc_s32(oids,ocnt*4,id);
+        sc_s64(ooffs,(ocnt*8) as i64,new_off);
+        ocnt=ocnt+1;
+    }
+    if(ig_ovr_save(dir,oids,ooffs,ocnt)!=0){ig_println("revise: ovr save failed");return 1;}
+    if(sc_flags_set(&st,id,fl|2)!=0){ig_println("revise: flags set failed");return 1;}
+    sc_event_append(&st,9,id,(old_off&4294967295) as i32,(new_off&4294967295) as i32);
+    if(sc_chain_recompute_all(&st)!=0){ig_println("revise: rechain failed");return 1;}
+    if(kb_seal_final_safe(&st)!=0){ig_println("revise: reseal failed");return 1;}
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("revise: store save failed");return 1;}
+    let sealhex:[]u8=sc_alloc(64);
+    if(sealhex.len==0){return 1;}
+    ig_hex32(st.seal,sealhex);
+    ig_print("revised id=");
+    ig_print_i64(id as i64);
+    ig_print(" new_off=");
+    ig_print_i64(new_off);
+    ig_print(" seal=");
+    ig_println(sealhex);
+    return 0;
+}
+// Wrapper-side delete: mirrors production ig_delete except safe seal.
+fn kb_delete_impl(dir:[]u8,id:i32)i32 {
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("delete: store load failed");return 1;}
+    if(id<0||id>=st.n){ig_println("delete: bad id");return 1;}
+    let fl:i32=sc_flags_get(&st,id);
+    if((fl&1)!=0){ig_println("delete: already deleted");return 1;}
+    if(sc_flags_set(&st,id,fl|1)!=0){ig_println("delete: flags set failed");return 1;}
+    sc_event_append(&st,10,id,0,0);
+    if(sc_chain_recompute_all(&st)!=0){ig_println("delete: rechain failed");return 1;}
+    if(kb_seal_final_safe(&st)!=0){ig_println("delete: reseal failed");return 1;}
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=bnchunk,.cur="",.used=0,.total=btotal,.recs=brecs};
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("delete: store save failed");return 1;}
+    let sealhex:[]u8=sc_alloc(64);
+    if(sealhex.len==0){return 1;}
+    ig_hex32(st.seal,sealhex);
+    ig_print("deleted id=");
+    ig_print_i64(id as i64);
+    ig_print(" seal=");
+    ig_println(sealhex);
+    return 0;
+}
+fn kb_revise(dir:[]u8,id:i32,text:[]u8,textpath:[]u8)i32 {
+    if(id<0){ig_println("revise: bad id");return 1;}
+    if(text.len==0){ig_println("revise: empty text");return 1;}
+    let rc:i32=kb_revise_impl(dir,id,textpath);
+    if(rc!=0){return 3;}
+    return 0;
+}
+fn kb_delete(dir:[]u8,id:i32)i32 {
+    if(id<0){ig_println("delete: bad id");return 1;}
+    let rc:i32=kb_delete_impl(dir,id);
+    if(rc!=0){return 3;}
+    return 0;
+}
+fn kb_get(dir:[]u8,id:i32)i32 {
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(kb_store_exists(dir)==0){ig_println("NOTFOUND");return 1;}
+    if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("get: store load failed");return 3;}
+    if(id<0||id>=st.n){ig_println("NOTFOUND");return 1;}
+    let fl:i32=sc_flags_get(&st,id);
+    if((fl&1)!=0){ig_println("NOTFOUND");return 1;}
+    let off:i64=0;
+    if(sc_recall(&st,id,&off)!=1){ig_println("NOTFOUND");return 1;}
+    let oids:[]u8=sc_alloc(4096*4);
+    let ooffs:[]u8=sc_alloc(4096*8);
+    let ocnt:i32=0;
+    if(oids.len==0||ooffs.len==0){return 3;}
+    if(kb_load_ovr(dir,oids,ooffs,4096,&ocnt)!=0){ig_println("get: ovr load failed");return 3;}
+    let oo:i64=0;
+    if(ig_ovr_find(oids,ooffs,ocnt,id,&oo)==1){off=oo;}
+    let ci:i32=(off/IG_BLOB_CHUNK) as i32;
+    let ino:i32=(off%IG_BLOB_CHUNK) as i32;
+    if(ci<0||ci>=bnchunk||ino<0){ig_println("CORRUPT");return 2;}
+    let chunk:[]u8=sc_alloc(IG_BLOB_CHUNK as i32);
+    if(chunk.len==0){return 3;}
+    if(ig_blob_read_chunk(dir,ci,chunk)!=(IG_BLOB_CHUNK as i32)){ig_println("CORRUPT");return 2;}
+    let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+    if(ig_blob_parse_hdr(chunk,ino,&ko,&oid,&kl,&tl)<=0){ig_println("CORRUPT");return 2;}
+    if(oid!=id){ig_println("CORRUPT");return 2;}
+    if(kl<0||kl>IG_MAX_KEY||tl<0||tl>IG_MAX_TEXT){ig_println("CORRUPT");return 2;}
+    if(ino+11+kl+tl>(IG_BLOB_CHUNK as i32)){ig_println("CORRUPT");return 2;}
+    let h:[]u8=sc_alloc(32);
+    if(h.len==0){return 3;}
+    if(ns_sha256(chunk[ino..ino+11+kl+tl],h)!=0){ig_println("get: hash failed");return 3;}
+    let hx:[]u8=sc_alloc(64);
+    if(hx.len==0){return 3;}
+    ig_hex32(h,hx);
+    ig_print("OK kind=");ig_print_i64(ko as i64);
+    ig_print(" id=");ig_print_i64(id as i64);
+    ig_print(" keylen=");ig_print_i64(kl as i64);
+    ig_print(" textlen=");ig_print_i64(tl as i64);
+    ig_print(" sha256=");ig_print(hx);ig_println("");
+    ig_print(chunk[ino+11..ino+11+kl]);
+    ig_print("\n");
+    ig_print(chunk[ino+11+kl..ino+11+kl+tl]);
+    return 0;
+}
+// verify: full census. Prints offset_mismatches (K2) and content_bad (K1)
+// separately. rc=2 if either is nonzero.
+fn kb_verify(dir:[]u8)i32 {
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    if(kb_store_exists(dir)==0){
+        ig_println("VERIFY n=0 live=0 deleted=0 chunk_corrupt=0 offset_mismatches=0 unreadable=0 digest=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 OK");
+        return 0;
+    }
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("verify: store load failed");return 3;}
+    let n:i32=st.n;
+    let oids:[]u8=sc_alloc(4096*4);
+    let ooffs:[]u8=sc_alloc(4096*8);
+    let ocnt:i32=0;
+    if(oids.len==0||ooffs.len==0){return 3;}
+    if(kb_load_ovr(dir,oids,ooffs,4096,&ocnt)!=0){ig_println("verify: ovr load failed");return 3;}
+    let chunk:[]u8=sc_alloc(IG_BLOB_CHUNK as i32);
+    if(chunk.len==0){return 3;}
+    let loaded:i32=-1;
+    // chunk geometry check: every chunk file exactly C bytes, tail zero.
+    // Non-fatal: count corrupt chunks, then run the census anyway so the
+    // oracle can identify victim slots.
+    let chunk_corrupt:i64=0;
+    let c:i32=0;
+    while(c<bnchunk){
+        if(kb_load_chunk(dir,c,chunk,&loaded)!=0){chunk_corrupt=chunk_corrupt+1;}
+        else{
+            if(kb_scan_used(chunk)<0){chunk_corrupt=chunk_corrupt+1;}
+        }
+        c=c+1;
+    }
+    loaded=-1;
+    let dg:[]u8=sc_alloc(n*44+32);
+    if(dg.len==0&&n>0){return 3;}
+    let dpos:i32=0;
+    let mism_off:i64=0;
+    let unread:i64=0;
+    let live:i64=0;
+    let del:i64=0;
+    let id:i32=0;
+    while(id<n){
+        let fl:i32=sc_flags_get(&st,id);
+        if((fl&1)!=0){del=del+1;id=id+1;continue;}
+        live=live+1;
+        let stored:i64=0;
+        if(sc_recall(&st,id,&stored)!=1){unread=unread+1;mism_off=mism_off+1;id=id+1;continue;}
+        let eff:i64=stored;
+        let oo:i64=0;
+        if(ig_ovr_find(oids,ooffs,ocnt,id,&oo)==1){eff=oo;}
+        // K2: stored (slot) offset must parse to this slot's id
+        let ci:i32=(stored/IG_BLOB_CHUNK) as i32;
+        let ino:i32=(stored%IG_BLOB_CHUNK) as i32;
+        let ok_off:i32=0;
+        if(ci>=0&&ci<bnchunk&&ino>=0){
+            if(kb_load_chunk(dir,ci,chunk,&loaded)==0){
+                let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+                if(ig_blob_parse_hdr(chunk,ino,&ko,&oid,&kl,&tl)>0){
+                    if(oid==id){ok_off=1;}
+                }
+            }
+        }
+        if(ok_off==0){mism_off=mism_off+1;}
+        // read path: effective offset must parse to this id
+        let eci:i32=(eff/IG_BLOB_CHUNK) as i32;
+        let eino:i32=(eff%IG_BLOB_CHUNK) as i32;
+        let got:i32=0;
+        let ekl:i32=0; let etl:i32=0; let eko:i32=0;
+        if(eci>=0&&eci<bnchunk&&eino>=0){
+            if(kb_load_chunk(dir,eci,chunk,&loaded)==0){
+                let ko2:i32=0; let oid2:i32=0; let kl2:i32=0; let tl2:i32=0;
+                if(ig_blob_parse_hdr(chunk,eino,&ko2,&oid2,&kl2,&tl2)>0){
+                    if(oid2==id&&kl2>=0&&kl2<=IG_MAX_KEY&&tl2>=0&&tl2<=IG_MAX_TEXT){
+                        got=1; ekl=kl2; etl=tl2; eko=ko2;
+                    }
+                }
+            }
+        }
+        if(got==0){unread=unread+1;id=id+1;continue;}
+        let h:[]u8=sc_alloc(32);
+        if(h.len==0){return 3;}
+        if(ns_sha256(chunk[eino..eino+11+ekl+etl],h)!=0){return 3;}
+        let hx2:[]u8=sc_alloc(64);
+        if(hx2.len==0){return 3;}
+        ig_hex32(h,hx2);
+        ig_print("SLOT id=");ig_print_i64(id as i64);
+        ig_print(" off=");ig_print_i64(eff);
+        ig_print(" kind=");ig_print_i64(eko as i64);
+        ig_print(" keylen=");ig_print_i64(ekl as i64);
+        ig_print(" textlen=");ig_print_i64(etl as i64);
+        ig_print(" sha=");ig_print(hx2);ig_println("");
+        sc_s32(dg,dpos,id);dpos=dpos+4;
+        sc_s64(dg,dpos as i64,eff);dpos=dpos+8;
+        let q:i32=0;
+        while(q<32){dg[dpos+q]=h[q];q=q+1;}
+        dpos=dpos+32;
+        id=id+1;
+    }
+    let dh:[]u8=sc_alloc(32);
+    if(dh.len==0){return 3;}
+    if(ns_sha256(dg[0..dpos],dh)!=0){return 3;}
+    let hx:[]u8=sc_alloc(64);
+    if(hx.len==0){return 3;}
+    ig_hex32(dh,hx);
+    ig_print("VERIFY n=");ig_print_i64(n as i64);
+    ig_print(" live=");ig_print_i64(live);
+    ig_print(" deleted=");ig_print_i64(del);
+    ig_print(" chunk_corrupt=");ig_print_i64(chunk_corrupt);
+    ig_print(" offset_mismatches=");ig_print_i64(mism_off);
+    ig_print(" unreadable=");ig_print_i64(unread);
+    ig_print(" digest=");ig_print(hx);
+    if(chunk_corrupt==0&&mism_off==0&&unread==0){ig_println(" OK");return 0;}
+    ig_println(" FAIL");
+    return 2;
+}
+fn kb_recover(dir:[]u8)i32 {
+    // fast path: no journal; the store is always loadable. Verify + no-op.
+    ig_println("RECOVERED 0");
+    return 0;
+}
+// crashput: like kb_put, but exit(99) after the chosen durable stage.
+fn kb_crashput(dir:[]u8,id:i32,key:[]u8,text:[]u8,stage:[]u8)i32 {
+    if(id<0){ig_println("put: bad id");return 1;}
+    if(key.len==0||key.len>IG_MAX_KEY){ig_println("put: bad key");return 1;}
+    if(text.len==0||text.len>IG_MAX_TEXT){ig_println("put: bad text");return 1;}
+    if(kb_streq(stage,"data")!=1&&kb_streq(stage,"meta")!=1){ig_println("crashput: bad stage");return 1;}
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(kb_store_exists(dir)==0){
+        if(sc_store_init(KB_CAP,&st)!=0){ig_println("put: store init failed");return 3;}
+        btotal=0; bnchunk=1; brecs=0;
+    }else{
+        if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("put: store load failed");return 3;}
+    }
+    if(id>=st.cap){ig_println("put: id >= cap");return 1;}
+    if(sc_id2slot_get(&st,id)>=0){ig_println("put: duplicate id");return 3;}
+    if(st.n>=st.cap){ig_println("put: store full");return 3;}
+    if(kb_reopen_tail(&st)!=0){ig_println("put: reopen failed");return 3;}
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=0,.cur="",.used=0,.total=0,.recs=0};
+    if(igb_init(&bb,dir)!=0){ig_println("put: blob init failed");return 3;}
+    if(bnchunk>0){
+        if(ig_blob_read_chunk(dir,bnchunk-1,bb.cur)!=(IG_BLOB_CHUNK as i32)){ig_println("put: last chunk read failed");return 3;}
+        bb.nchunk=bnchunk-1;
+        let su:i32=kb_scan_used(bb.cur);
+        if(su<0){ig_println("put: tail scan failed");return 3;}
+        bb.used=su;
+    }
+    bb.total=btotal; bb.recs=brecs;
+    let off:i64=igb_append(&bb,1,id,key,text);
+    if(off<0){ig_println("put: append failed");return 3;}
+    if(igb_finish(&bb)!=0){ig_println("put: blob finish failed");return 3;}
+    // STAGE data: chunk file durable, slot not yet added
+    if(kb_streq(stage,"data")==1){ig_println("CRASHED after=data");return 99;}
+    let slot:i32=0;
+    if(kb_sc_add(&st,id,off,&slot)!=0){ig_println("put: slot add failed");return 3;}
+    sc_event_append(&st,1,id,0,slot);
+    if(sc_seal_tail(&st)!=0){ig_println("put: seal tail failed");return 3;}
+    kb_zero_tail(&st);
+    if(kb_seal_final_safe(&st)!=0){ig_println("put: seal final failed");return 3;}
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("put: store save failed");return 3;}
+    // STAGE meta: store.dat durable (slot added)
+    if(kb_streq(stage,"meta")==1){ig_println("CRASHED after=meta");return 99;}
+    ig_println("crashput: unreachable");
+    return 3;
+}
+// crashrevise: mechanical copy of ig_revise with fail-after exits.
+// (diff vs ig_revise recorded in the build manifest.)
+fn kb_crashrevise(dir:[]u8,id:i32,textpath:[]u8,stage:[]u8)i32 {
+    if(id<0){ig_println("revise: bad id");return 1;}
+    if(kb_streq(stage,"data")!=1&&kb_streq(stage,"ovr")!=1&&kb_streq(stage,"meta")!=1){ig_println("crashrevise: bad stage");return 1;}
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    let btotal:i64=0; let bnchunk:i32=0; let brecs:i64=0;
+    if(ig_store_load(&st,&btotal,&bnchunk,&brecs,dir)!=0){ig_println("revise: store load failed");return 3;}
+    if(id<0||id>=st.n){ig_println("revise: bad id");return 1;}
+    let fl:i32=sc_flags_get(&st,id);
+    if((fl&1)!=0){ig_println("revise: fact is deleted");return 3;}
+    let old_off:i64=0;
+    if(sc_recall(&st,id,&old_off)!=1){ig_println("revise: recall failed");return 3;}
+    let nfd:i64=ig_open_rdonly(textpath);
+    if(nfd<0){ig_println("revise: newtext open failed");return 1;}
+    let nt:[]u8=sc_alloc(IG_MAX_TEXT);
+    if(nt.len==0){ig_close(nfd);return 3;}
+    let got:i32=0;
+    while(got<nt.len){
+        let g2:i32=ig_read_into(nfd,nt[got..]);
+        if(g2<0){ig_close(nfd);return 3;}
+        if(g2==0){break;}
+        got=got+g2;
+    }
+    ig_close(nfd);
+    if(got<1){ig_println("revise: empty newtext");return 1;}
+    let ci:i32=(old_off/IG_BLOB_CHUNK) as i32;
+    let ino:i32=(old_off%IG_BLOB_CHUNK) as i32;
+    let chunk:[]u8=sc_alloc(IG_BLOB_CHUNK as i32);
+    if(chunk.len==0){return 3;}
+    if(ig_blob_read_chunk(dir,ci,chunk)!=(IG_BLOB_CHUNK as i32)){ig_println("revise: chunk read failed");return 3;}
+    let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+    if(ig_blob_parse_hdr(chunk,ino,&ko,&oid,&kl,&tl)<=0){ig_println("revise: old parse failed");return 3;}
+    if(oid!=id){ig_println("revise: id mismatch at offset");return 3;}
+    let oldkey:[]u8=chunk[ino+11..ino+11+kl];
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=0,.cur="",.used=0,.total=0,.recs=0};
+    if(igb_init(&bb,dir)!=0){return 3;}
+    let lastidx:i32=bnchunk-1;
+    if(ig_blob_read_chunk(dir,lastidx,bb.cur)!=(IG_BLOB_CHUNK as i32)){ig_println("revise: last chunk read failed");return 3;}
+    bb.nchunk=lastidx;
+    bb.used=(btotal%(IG_BLOB_CHUNK)) as i32;
+    bb.total=btotal;
+    bb.recs=brecs;
+    let new_off:i64=igb_append(&bb,ko,id,oldkey,nt[0..got]);
+    if(new_off<0){ig_println("revise: append failed");return 3;}
+    if(igb_finish(&bb)!=0){ig_println("revise: blob finish failed");return 3;}
+    // STAGE data: new record bytes durable in chunk, override not yet updated
+    if(kb_streq(stage,"data")==1){ig_println("CRASHED after=data");return 99;}
+    let oids:[]u8=sc_alloc(4096*4);
+    let ooffs:[]u8=sc_alloc(4096*8);
+    if(oids.len==0||ooffs.len==0){return 3;}
+    let ocnt:i32=0;
+    if(ig_ovr_load(dir,oids,ooffs,4096,&ocnt)!=0){ig_println("revise: ovr load failed");return 3;}
+    let oo:i64=0;
+    if(ig_ovr_find(oids,ooffs,ocnt,id,&oo)==1){
+        let e:i32=0;
+        while(e<ocnt){
+            if(sc_g32(oids,e*4)==id){sc_s64(ooffs,(e*8) as i64,new_off);break;}
+            e=e+1;
+        }
+    }else{
+        if(ocnt>=4096){ig_println("revise: too many overrides");return 3;}
+        sc_s32(oids,ocnt*4,id);
+        sc_s64(ooffs,(ocnt*8) as i64,new_off);
+        ocnt=ocnt+1;
+    }
+    if(ig_ovr_save(dir,oids,ooffs,ocnt)!=0){ig_println("revise: ovr save failed");return 3;}
+    // STAGE ovr: override durable, flags/seal not yet updated
+    if(kb_streq(stage,"ovr")==1){ig_println("CRASHED after=ovr");return 99;}
+    if(sc_flags_set(&st,id,fl|2)!=0){ig_println("revise: flags set failed");return 3;}
+    sc_event_append(&st,9,id,(old_off&4294967295) as i32,(new_off&4294967295) as i32);
+    if(sc_chain_recompute_all(&st)!=0){ig_println("revise: rechain failed");return 3;}
+    if(kb_seal_final_safe(&st)!=0){ig_println("revise: reseal failed");return 3;}
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("revise: store save failed");return 3;}
+    // STAGE meta: store.dat durable (flags+seal updated)
+    if(kb_streq(stage,"meta")==1){ig_println("CRASHED after=meta");return 99;}
+    ig_println("crashrevise: unreachable");
+    return 3;
+}
+// bulkfill: TEST-ONLY in-process fill (fixture setup for the genuine leg).
+fn kb_bulkfill(dir:[]u8,n:i32,maxtextlen:i32)i32 {
+    if(n<1||n>KB_CAP){ig_println("bulkfill: bad n");return 1;}
+    if(maxtextlen<1||maxtextlen>IG_MAX_TEXT){ig_println("bulkfill: bad maxtextlen");return 1;}
+    if(kb_store_exists(dir)==1){ig_println("bulkfill: store exists");return 1;}
+    if(ig_mkdir(dir)!=0){ig_println("bulkfill: mkdir failed");return 3;}
+    let st:ScStore=ScStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",
+        .fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0,.ops_add=0,.ops_find=0,.ops_audit=0};
+    if(sc_store_init(KB_CAP,&st)!=0){ig_println("bulkfill: store init failed");return 3;}
+    let bb:IgBlob=IgBlob{.dir="",.nchunk=0,.cur="",.used=0,.total=0,.recs=0};
+    if(igb_init(&bb,dir)!=0){ig_println("bulkfill: blob init failed");return 3;}
+    let key:[]u8=sc_alloc(8);
+    let text:[]u8=sc_alloc(IG_MAX_TEXT);
+    if(key.len==0||text.len==0){return 3;}
+    let i:i32=0;
+    while(i<n){
+        kb_keygen(i,key[0..7]);
+        let tlen:i32=1+(((i*7919+13)%maxtextlen));
+        kb_textgen(i,0,tlen,text[0..tlen]);
+        let off:i64=igb_append(&bb,1,i,key[0..7],text[0..tlen]);
+        if(off<0){ig_println("bulkfill: append failed");return 3;}
+        let slot:i32=0;
+        if(kb_sc_add(&st,i,off,&slot)!=0){ig_println("bulkfill: slot add failed");return 3;}
+        sc_event_append(&st,1,i,0,slot);
+        i=i+1;
+    }
+    // safe tail seal: use the non-panicking compact when the tail is partial
+    let _tailn:i32=st.n%SC_CHUNK_SLOTS;
+    if(_tailn!=0){
+        if(kb_compact_and_seal_safe(&st,st.n/SC_CHUNK_SLOTS,_tailn)!=0){ig_println("bulkfill: seal tail failed");return 3;}
+    }
+    kb_zero_tail(&st);
+    if(kb_seal_final_safe(&st)!=0){ig_println("bulkfill: seal final failed");return 3;}
+    if(igb_finish(&bb)!=0){ig_println("bulkfill: blob finish failed");return 3;}
+    if(ig_store_save(&st,&bb,dir)!=0){ig_println("bulkfill: store save failed");return 3;}
+    let nm:[]u8=ig_join(dir,"overrides.dat");
+    let fd:i64=ig_open_write(nm);
+    if(fd<0){ig_println("bulkfill: ovr create failed");return 3;}
+    let zb:[]u8=sc_alloc(4);
+    if(zb.len==0){ig_close(fd);return 3;}
+    zb[0]=0;zb[1]=0;zb[2]=0;zb[3]=0;
+    if(ig_write_all(fd,zb)!=0){ig_close(fd);return 3;}
+    ig_close(fd);
+    ig_print("BULKFILL n=");ig_print_i64(n as i64);ig_println("");
+    return 0;
+}
+fn main()i32 {
+    let cmd:[]u8=_zag_arg(1);
+    let mode:[]u8=kb_argval("--mode=");
+    if(kb_streq(cmd,"init")==1){
+        if(mode.len>0&&kb_streq(mode,"fast")!=1){ig_println("init: only --mode=fast supported");return 1;}
+        return kb_init(_zag_arg(2));
+    }
+    if(kb_streq(cmd,"put")==1){
+        if(kb_streq(mode,"fast")!=1){ig_println("put: --mode=fast required");return 1;}
+        let id:i32=kb_atoi(_zag_arg(3));
+        let key:[]u8=_zag_arg(4);
+        let tf:[]u8=_zag_arg(5);
+        if(id<0||key.len==0||tf.len==0){ig_println("usage: kbctl put <dir> <id> <key> <textfile> --mode=fast");return 1;}
+        let text:[]u8=kb_read_file(tf,IG_MAX_TEXT);
+        if(text.len==0){ig_println("put: empty/unreadable text");return 1;}
+        return kb_put(_zag_arg(2),id,key,text);
+    }
+    if(kb_streq(cmd,"revise")==1){
+        if(kb_streq(mode,"fast")!=1){ig_println("revise: --mode=fast required");return 1;}
+        let id2:i32=kb_atoi(_zag_arg(3));
+        let tf2:[]u8=_zag_arg(4);
+        if(id2<0||tf2.len==0){ig_println("usage: kbctl revise <dir> <id> <textfile> --mode=fast");return 1;}
+        let text2:[]u8=kb_read_file(tf2,IG_MAX_TEXT);
+        if(text2.len==0){ig_println("revise: empty/unreadable text");return 1;}
+        return kb_revise(_zag_arg(2),id2,text2,tf2);
+    }
+    if(kb_streq(cmd,"delete")==1){
+        let id3:i32=kb_atoi(_zag_arg(3));
+        if(id3<0){ig_println("usage: kbctl delete <dir> <id>");return 1;}
+        return kb_delete(_zag_arg(2),id3);
+    }
+    if(kb_streq(cmd,"get")==1){
+        let id4:i32=kb_atoi(_zag_arg(3));
+        if(id4<0){ig_println("usage: kbctl get <dir> <id>");return 1;}
+        return kb_get(_zag_arg(2),id4);
+    }
+    if(kb_streq(cmd,"verify")==1){
+        return kb_verify(_zag_arg(2));
+    }
+    if(kb_streq(cmd,"recover")==1){
+        return kb_recover(_zag_arg(2));
+    }
+    if(kb_streq(cmd,"crashput")==1){
+        if(kb_streq(mode,"fast")!=1){ig_println("crashput: --mode=fast required");return 1;}
+        let stage:[]u8=kb_argval("--fail-after=");
+        let id5:i32=kb_atoi(_zag_arg(3));
+        let key5:[]u8=_zag_arg(4);
+        let tf5:[]u8=_zag_arg(5);
+        if(id5<0||key5.len==0||tf5.len==0||stage.len==0){ig_println("usage: kbctl crashput <dir> <id> <key> <textfile> --mode=fast --fail-after=data|meta");return 1;}
+        let text5:[]u8=kb_read_file(tf5,IG_MAX_TEXT);
+        if(text5.len==0){ig_println("crashput: empty/unreadable text");return 1;}
+        return kb_crashput(_zag_arg(2),id5,key5,text5,stage);
+    }
+    if(kb_streq(cmd,"crashrevise")==1){
+        if(kb_streq(mode,"fast")!=1){ig_println("crashrevise: --mode=fast required");return 1;}
+        let stage2:[]u8=kb_argval("--fail-after=");
+        let id6:i32=kb_atoi(_zag_arg(3));
+        let tf6:[]u8=_zag_arg(4);
+        if(id6<0||tf6.len==0||stage2.len==0){ig_println("usage: kbctl crashrevise <dir> <id> <textfile> --mode=fast --fail-after=data|ovr|meta");return 1;}
+        return kb_crashrevise(_zag_arg(2),id6,tf6,stage2);
+    }
+    if(kb_streq(cmd,"bulkfill")==1){
+        let n:i32=kb_atoi(_zag_arg(3));
+        let mtl:i32=kb_atoi(_zag_arg(4));
+        if(n<1||mtl<1){ig_println("usage: kbctl bulkfill <dir> <n> <maxtextlen>");return 1;}
+        return kb_bulkfill(_zag_arg(2),n,mtl);
+    }
+    ig_println("usage: kbctl <init|put|revise|delete|get|verify|recover|crashput|crashrevise|bulkfill> ...");
+    return 1;
+}
