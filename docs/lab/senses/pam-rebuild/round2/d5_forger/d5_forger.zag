@@ -1,0 +1,453 @@
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// d5_forger.zag — D5 forger-standalone probe (H-PAM-14 cheap kill).
+// Frozen prereg: PREREG_D5_FORGER.md (commit d879bd8d).
+// Pure Zag, zero randomness. argv[1]=fixture dir, argv[2]=D5_MANIFEST.tsv path.
+//
+// Data-flow barrier (auditable by signature):
+//   front_end(image bytes) -> summary label            (front-end evidence only)
+//   forge(label, outbuf)   -> canonical counterfeit    (label only; never bytes/truth)
+//   discriminate(forged_judgment, truth) -> success    (truth only; never bytes/summary)
+// The forger NEVER sees the truth; the discriminator NEVER sees the percept.
+//
+// znc landmines respected: no []i32 casts (manual LE decode), no slice ==,
+// no .* on non-pointers, no bare blocks, no `try` identifier, return; in voids.
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 8191) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let total:i64 = 0;
+    let done:i32 = 0;
+    while(done == 0) {
+        let rem:i64 = (max as i64) - total;
+        if(rem <= 0) { done = 1; }
+        if(done == 0) {
+            let p:i64 = (_zag_slice_ptr(out) as i64) + total;
+            let n:i64 = _zag_raw_syscall(0, fd, p, rem, 0, 0, 0);
+            if(n <= 0) { done = 1; }
+            if(done == 0) { total = total + n; }
+        }
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return total;
+}
+
+fn z_exit(code:i64) void {
+    _zag_raw_syscall(60, code, 0, 0, 0, 0, 0);
+    return;
+}
+
+// ---- output buffer ----
+fn ob_init() []u8 {
+    let b:[]u8 = nio_alloc(8192);
+    return b;
+}
+
+fn ob_puts(b:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { b[pos + i] = s[i]; i = i + 1; }
+    return pos + s.len;
+}
+
+fn ob_puti(b:[]u8, pos:i32, v:i64) i32 {
+    let neg:i32 = 0;
+    let x:i64 = v;
+    if(x < 0) { neg = 1; x = 0 - x; }
+    let tmp:[]u8 = nio_alloc(24);
+    let n:i32 = 0;
+    if(x == 0) { tmp[0] = 48; n = 1; }
+    while(x > 0) {
+        tmp[n] = ((x % 10) + 48) as u8;
+        x = x / 10;
+        n = n + 1;
+    }
+    if(neg == 1) { b[pos] = 45; pos = pos + 1; }
+    let i:i32 = n - 1;
+    while(i >= 0) { b[pos] = tmp[i]; pos = pos + 1; i = i - 1; }
+    nio_free(tmp);
+    return pos;
+}
+
+// ---- sha256 verify: hex-compare digest of data[0..n] against 64-char hex field ----
+fn sha_ok(data:[]u8, n:i32, hexf:[]u8, hlen:i32) i32 {
+    if(hlen != 64) { return 0; }
+    let dg:[]u8 = nio_alloc(32);
+    if(dg.len != 32) { return 0; }
+    let sl:[]u8 = data[0..n];
+    let rc:i32 = ns_sha256(sl, dg);
+    if(rc != 0) { nio_free(dg); return 0; }
+    let hx:[]u8 = ns_hex(dg);
+    nio_free(dg);
+    if(hx.len != 64) { nio_free(hx); return 0; }
+    let ok:i32 = 1;
+    let i:i32 = 0;
+    while(i < 64) {
+        if((hx[i] as i32) != (hexf[i] as i32)) { ok = 0; }
+        i = i + 1;
+    }
+    nio_free(hx);
+    return ok;
+}
+
+// ---- image front-end: 1=SAME, 0=DIFFERENT. SAME iff d2 < 625*4096*4096 ----
+fn le32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) + (b[at+1] as i64)*256 + (b[at+2] as i64)*65536 + (b[at+3] as i64)*16777216;
+}
+
+fn front_end(px:[]u8, npix:i32) i32 {
+    // px: 128x64 RGB row-major, npix=8192. left half x<64, right half x>=64.
+    let slr:i64 = 0;
+    let slg:i64 = 0;
+    let slb:i64 = 0;
+    let srr:i64 = 0;
+    let srg:i64 = 0;
+    let srb:i64 = 0;
+    let y:i32 = 0;
+    while(y < 64) {
+        let x:i32 = 0;
+        while(x < 64) {
+            let o:i32 = (y*128 + x)*3;
+            slr = slr + (px[o] as i64);
+            slg = slg + (px[o+1] as i64);
+            slb = slb + (px[o+2] as i64);
+            let o2:i32 = (y*128 + x + 64)*3;
+            srr = srr + (px[o2] as i64);
+            srg = srg + (px[o2+1] as i64);
+            srb = srb + (px[o2+2] as i64);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let dr:i64 = slr - srr;
+    let dg:i64 = slg - srg;
+    let db:i64 = slb - srb;
+    let d2:i64 = dr*dr + dg*dg + db*db;
+    if(d2 < 10485760000) { return 1; }
+    return 0;
+}
+
+// ---- forger: label -> canonical counterfeit. NEVER sees bytes or truth. ----
+// label: 1=SAME, 0=DIFFERENT. Writes 128x64 RGB into out (24576 bytes).
+fn forge(label:i32, out:[]u8) void {
+    let i:i32 = 0;
+    if(label == 1) {
+        while(i < 24576) { out[i] = 128; i = i + 1; }
+    }
+    if(label == 0) {
+        let y:i32 = 0;
+        while(y < 64) {
+            let x:i32 = 0;
+            while(x < 64) {
+                let o:i32 = (y*128 + x)*3;
+                out[o] = 200; out[o+1] = 60; out[o+2] = 60;
+                let o2:i32 = (y*128 + x + 64)*3;
+                out[o2] = 60; out[o2+1] = 60; out[o2+2] = 200;
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+    return;
+}
+
+fn beq(a:[]u8, al:i32, b:[]u8, bl:i32) i32 {
+    if(al != bl) { return 0; }
+    let i:i32 = 0;
+    while(i < al) {
+        if((a[i] as i32) != (b[i] as i32)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() void {
+    let ob:[]u8 = ob_init();
+    let pos:i32 = 0;
+    pos = ob_puts(ob, pos, "D5 forger-standalone probe | prereg d879bd8d\n");
+
+    let dir:[]u8 = _zag_arg(1);
+    let tsvp:[]u8 = _zag_arg(2);
+    if(dir.len == 0 || tsvp.len == 0) {
+        pos = ob_puts(ob, pos, "ABORT usage: d5_forger <fixture-dir> <D5_MANIFEST.tsv>\n");
+        let eo:[]u8 = ob[0..pos];
+        _zag_print(eo);
+        z_exit(2);
+        return;
+    }
+
+    // forger-competence gate (frozen §7): front_end(canonical(S)) == S for both.
+    let cs:[]u8 = nio_alloc(24576);
+    let cd:[]u8 = nio_alloc(24576);
+    forge(1, cs);
+    forge(0, cd);
+    let js:i32 = front_end(cs, 8192);
+    let jd:i32 = front_end(cd, 8192);
+    let comp:i32 = 0;
+    if(js == 1) { comp = comp + 1; }
+    if(jd == 0) { comp = comp + 1; }
+    pos = ob_puts(ob, pos, "competence=");
+    pos = ob_puti(ob, pos, comp as i64);
+    pos = ob_puts(ob, pos, "/2\n");
+    if(comp != 2) {
+        pos = ob_puts(ob, pos, "ABORT forger-competence gate failed: probe invalid\n");
+        let eo2:[]u8 = ob[0..pos];
+        _zag_print(eo2);
+        z_exit(3);
+        return;
+    }
+    // forged judgments are fixed by the competence gate: SAME->SAME, DIFF->DIFF.
+    nio_free(cs);
+    nio_free(cd);
+
+    let tsv:[]u8 = nio_alloc(131072);
+    let tn:i64 = z_read(tsvp, tsv, 131072);
+    if(tn <= 0) {
+        pos = ob_puts(ob, pos, "ABORT cannot read manifest tsv\n");
+        let eo3:[]u8 = ob[0..pos];
+        _zag_print(eo3);
+        z_exit(4);
+        return;
+    }
+    let tlen:i32 = tn as i32;
+
+    let fbuf:[]u8 = nio_alloc(24584 + 64);
+    let tbuf:[]u8 = nio_alloc(512);
+
+    let sha_n:i64 = 0;
+    let hs:i64 = 0; let ht:i64 = 0; let fs:i64 = 0; let ft:i64 = 0;
+    let f0s:i64 = 0; let f0t:i64 = 0;
+    let f1s:i64 = 0; let f1t:i64 = 0;
+    let f2s:i64 = 0; let f2t:i64 = 0;
+    let f3s:i64 = 0; let f3t:i64 = 0;
+    let f4s:i64 = 0; let f4t:i64 = 0;
+
+    // field scratch: 5 fields x 256 bytes
+    let f0:[]u8 = nio_alloc(256);
+    let f1:[]u8 = nio_alloc(256);
+    let f2:[]u8 = nio_alloc(256);
+    let f3:[]u8 = nio_alloc(256);
+    let f4:[]u8 = nio_alloc(256);
+    // field lengths as 5 separate i64 locals (no []i64 casts anywhere)
+    let l0:i64 = 0; let l1:i64 = 0; let l2:i64 = 0; let l3:i64 = 0; let l4:i64 = 0;
+
+    let full:[]u8 = nio_alloc(8192);
+
+    let i:i32 = 0;
+    while(i < tlen) {
+        // line end
+        let le:i32 = i;
+        while(le < tlen && (tsv[le] as i32) != 10) { le = le + 1; }
+        if(le > i && (tsv[i] as i32) != 35) {
+            // split 5 tab fields
+            l0 = 0; l1 = 0; l2 = 0; l3 = 0; l4 = 0;
+            let fi:i32 = 0;
+            let fs2:i32 = i;
+            let k:i32 = i;
+            while(k <= le) {
+                let c:i32 = 10;
+                if(k < le) { c = tsv[k] as i32; }
+                if(c == 9 || c == 10) {
+                    let dst:[]u8 = f0;
+                    if(fi == 1) { dst = f1; }
+                    if(fi == 2) { dst = f2; }
+                    if(fi == 3) { dst = f3; }
+                    if(fi == 4) { dst = f4; }
+                    let m:i32 = 0;
+                    while(fs2 + m < k && m < 256) { dst[m] = tsv[fs2 + m]; m = m + 1; }
+                    if(fi == 0) { l0 = m as i64; }
+                    if(fi == 1) { l1 = m as i64; }
+                    if(fi == 2) { l2 = m as i64; }
+                    if(fi == 3) { l3 = m as i64; }
+                    if(fi == 4) { l4 = m as i64; }
+                    fi = fi + 1;
+                    fs2 = k + 1;
+                }
+                k = k + 1;
+            }
+            if(fi == 5) {
+                // class: f0 == "honest" -> 0 else 1
+                let cls:i32 = 1;
+                let hw:[]u8 = "honest";
+                if(beq(f0, l0 as i32, hw, 6) == 1) { cls = 0; }
+                // fixture path = dir + "/" + f1
+                let p:i32 = 0;
+                let q:i32 = 0;
+                while(q < dir.len) { full[p] = dir[q]; p = p + 1; q = q + 1; }
+                full[p] = 47; p = p + 1;
+                q = 0;
+                while(q < (l1 as i32)) { full[p] = f1[q]; p = p + 1; q = q + 1; }
+                let fp:[]u8 = full[0..p];
+                let fn2:i64 = z_read(fp, fbuf, 24584 + 64);
+                if(fn2 != 24584) {
+                    pos = ob_puts(ob, pos, "ABORT bad fixture size\n");
+                    let eo4:[]u8 = ob[0..pos];
+                    _zag_print(eo4);
+                    z_exit(5);
+                    return;
+                }
+                if(sha_ok(fbuf, 24584, f2, l2 as i32) == 0) {
+                    pos = ob_puts(ob, pos, "ABORT fixture sha mismatch: ");
+                    pos = ob_puts(ob, pos, fp);
+                    pos = ob_puts(ob, pos, "\n");
+                    let eo5:[]u8 = ob[0..pos];
+                    _zag_print(eo5);
+                    z_exit(6);
+                    return;
+                }
+                sha_n = sha_n + 1;
+                // truth path = dir + "/" + f3
+     
+                // truth path = dir + "/" + f3
+                p = 0;
+                q = 0;
+                while(q < dir.len) { full[p] = dir[q]; p = p + 1; q = q + 1; }
+                full[p] = 47; p = p + 1;
+                q = 0;
+                while(q < (l3 as i32)) { full[p] = f3[q]; p = p + 1; q = q + 1; }
+                let tp:[]u8 = full[0..p];
+                let tn2:i64 = z_read(tp, tbuf, 512);
+                if(tn2 <= 0 || tn2 > 60) {
+                    pos = ob_puts(ob, pos, "ABORT bad truth size\n");
+                    let eo6:[]u8 = ob[0..pos];
+                    _zag_print(eo6);
+                    z_exit(7);
+                    return;
+                }
+                if(sha_ok(tbuf, tn2 as i32, f4, l4 as i32) == 0) {
+                    pos = ob_puts(ob, pos, "ABORT truth sha mismatch: ");
+                    pos = ob_puts(ob, pos, tp);
+                    pos = ob_puts(ob, pos, "\n");
+                    let eo7:[]u8 = ob[0..pos];
+                    _zag_print(eo7);
+                    z_exit(8);
+                    return;
+                }
+                sha_n = sha_n + 1;
+                // truth label: "truth=SAME" / "truth=DIFFERENT"
+                let tl:i32 = tn2 as i32;
+                if((tbuf[tl-1] as i32) == 10) { tl = tl - 1; }
+                let truth:i32 = -1;
+                let sw:[]u8 = "SAME";
+                let dw:[]u8 = "DIFFERENT";
+                if(beq(tbuf[6..tl], (tl-6) as i32, sw, 4) == 1) { truth = 1; }
+                if(beq(tbuf[6..tl], (tl-6) as i32, dw, 9) == 1) { truth = 0; }
+                if(truth < 0) {
+                    pos = ob_puts(ob, pos, "ABORT bad truth label\n");
+                    let eo8:[]u8 = ob[0..pos];
+                    _zag_print(eo8);
+                    z_exit(9);
+                    return;
+                }
+                // front-end on the percept (front-end evidence only)
+                if(le32(fbuf, 0) != 128 || le32(fbuf, 4) != 64) {
+                    pos = ob_puts(ob, pos, "ABORT bad image header\n");
+                    let eo9:[]u8 = ob[0..pos];
+                    _zag_print(eo9);
+                    z_exit(10);
+                    return;
+                }
+                let px:[]u8 = fbuf[8..24584];
+                let s:i32 = front_end(px, 8192);
+                // forger (label only): forged judgment fixed by competence gate
+                let fj:i32 = s;
+                // discriminate: success iff forged judgment == truth
+                let succ:i32 = 0;
+                if(fj == truth) { succ = 1; }
+                // family from filename index (frozen index ranges, prereg §3)
+                let un:i32 = 0;
+                let ui:i32 = 0;
+                while(ui < (l1 as i32)) {
+                    if((f1[ui] as i32) == 95) { un = ui; }
+                    ui = ui + 1;
+                }
+                let idx:i64 = 0;
+                let d:i32 = 0;
+                while(d < 4) {
+                    idx = idx*10 + (((f1[un+1+d] as i32) - 48) as i64);
+                    d = d + 1;
+                }
+                if(cls == 0) {
+                    hs = hs + 1;
+                    if(succ == 1) { ht = ht + 1; }
+                    if(idx < 360) { f0t = f0t + 1; if(succ == 1) { f0s = f0s + 1; } }
+                    if(idx >= 360) { f1t = f1t + 1; if(succ == 1) { f1s = f1s + 1; } }
+                }
+                if(cls == 1) {
+                    fs = fs + 1;
+                    if(succ == 1) { ft = ft + 1; }
+                    if(idx < 400) { f2t = f2t + 1; if(succ == 1) { f2s = f2s + 1; } }
+                    if(idx >= 400 && idx < 750) { f3t = f3t + 1; if(succ == 1) { f3s = f3s + 1; } }
+                    if(idx >= 750) { f4t = f4t + 1; if(succ == 1) { f4s = f4s + 1; } }
+                }
+            }
+        }
+        i = le + 1;
+    }
+
+    pos = ob_puts(ob, pos, "sha_verified=");
+    pos = ob_puti(ob, pos, sha_n);
+    pos = ob_puts(ob, pos, "/512\n");
+    pos = ob_puts(ob, pos, "honest succ=");
+    pos = ob_puti(ob, pos, ht);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, hs);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "false succ=");
+    pos = ob_puti(ob, pos, ft);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, fs);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "margin_num=");
+    pos = ob_puti(ob, pos, ft*hs - ht*fs);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "fam honest-SAME succ=");
+    pos = ob_puti(ob, pos, f0s);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, f0t);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "fam honest-DIFF succ=");
+    pos = ob_puti(ob, pos, f1s);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, f1t);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "fam COL-1 succ=");
+    pos = ob_puti(ob, pos, f2s);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, f2t);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "fam COL-2 succ=");
+    pos = ob_puti(ob, pos, f3s);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, f3t);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "fam COL-3 succ=");
+    pos = ob_puti(ob, pos, f4s);
+    pos = ob_puts(ob, pos, " total=");
+    pos = ob_puti(ob, pos, f4t);
+    pos = ob_puts(ob, pos, "\n");
+    pos = ob_puts(ob, pos, "forger_ops_per_percept=147456\n");
+    let mn:i64 = ft*hs - ht*fs;
+    if(mn <= 0) {
+        pos = ob_puts(ob, pos, "verdict=KILL\n");
+    }
+    if(mn > 0) {
+        pos = ob_puts(ob, pos, "verdict=SURVIVE\n");
+    }
+    let eo:[]u8 = ob[0..pos];
+    _zag_print(eo);
+    return;
+}
