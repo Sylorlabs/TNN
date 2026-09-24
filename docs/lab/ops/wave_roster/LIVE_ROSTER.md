@@ -13,7 +13,7 @@ and no done-verdict. DONE = verdict committed. BLOCKED-ON-MICAH = needs his word
 | wave | status | last evidence | crew/agent | next action |
 |---|---|---|---|---|
 | PAMs | RUNNING | 05:00Z SELF-PAM R2 Fork C commit `0a2e006c`; fs-e4b judge procs live | self-pam R2, PAM rebuild FS-E1/E4b crews | none; V4 next round HELD (see blocked list) |
-| video | STALLED | last video-specific commit 07:52Z `4e1fc55f` (H3ADV fixtures); senses-rematch VERDICT done; local video dirs 18–41h quiet | none live | RE-DISPATCH — brief #1 below |
+| video | RUNNING (rewoken 2026-09-24) | MOTION4 round: prereg `f69f5653`, impl `ea94ab9e`, fixtures `da343904`, RM2 `c86c9182`, VERDICT `ff452f8f` — FAIL on K2 only, 6/7 pass | kill-battery crew done | repair round needs Micah's sign-off (prereg amendment) |
 | audio | RUNNING | 05:14Z V11 fork P prereg `c1d57a2a`; voice_sig procs on fork_p live | V11 coordinator + forks G/P/R/W | none |
 | image | BLOCKED-ON-MICAH | r10 beauty round + finalized oracle brief 09:24Z | — | Micah's eyes on r10 oracle brief |
 | text | RUNNING | 18:29Z gap-closure fixes commit | gap-closure crew | monitor; 11h quiet is within tolerance |
@@ -75,7 +75,11 @@ and no done-verdict. DONE = verdict committed. BLOCKED-ON-MICAH = needs his word
 
 ## Re-dispatch briefs
 
-### Brief #1 (TOP PRIORITY — flagship): video line coordinator
+### Brief #1 (TOP PRIORITY — flagship): video line coordinator — RESOLVED 2026-09-24, MOTION4 round complete
+
+**What ran:** rematch verdict verified clean (B STAYS DEAD, branch copy byte-identical, 5 rematch commits resolve); caught the M3 source gap (motion3.zag never committed — closed as `9d8b7edc`, rebuilt byte-identical). Frozen prereg MOTION4 (`f69f5653`): coarse-to-fine coherence-field extension of M3, ≤1.5M ops. Implementation `ea94ab9e` (K6 determinism proven, 973,568 ops). RM1 fixtures `da343904` (252 clips), RM2 labels `c86c9182` (committed before any motion4 run). M3 baseline on RM1: 1/96 on 6px (≈0%), 0 false.
+**Verdict (`ff452f8f`): MOTION4 FAILS — K2 only, 6/7 kill bars pass.** K3 blew past its bar (81.3% vs 40% on 6px fast motion, 0 false on 204 clips). K2 failed on both clauses: 1 false-STILL (p006, sub-E_FLOOR evidence let S2's STILL claim pass unchallenged through frozen P5) and moving-catch 7/26 < 25/26 (18 forced withholds via frozen still_dir_conflict rule). Fable audit: CONFIRM.
+**Next:** repair round is a prereg amendment — revise frozen P5 so a scale blind to displacement d cannot claim STILL at d (kills both the 18 withholds and the p006 false-STILL), or rewrite K2's bar to scope 1px/frame out. Needs Micah's sign-off before any source is touched.
 
 **Inherited state:** senses-rematch VERDICT committed (B STAYS DEAD: A 83.8% vs B 56.6% at T4; B never crossed A).
 H3ADV video fixtures committed 07:52Z (part of Fork H3 counterfactual-predictive-state work).
