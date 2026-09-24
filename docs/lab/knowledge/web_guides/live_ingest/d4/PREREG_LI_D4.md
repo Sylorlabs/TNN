@@ -344,3 +344,45 @@ all quantifiers (every each all both few many), numerals, and all other tokens.
      triple. The first W3 draft (honest active/passive with "confirmed")
      is superseded: it would have failed closed in D4 on the uncovered
      verb, a table-coverage artifact rather than a mechanism test.
+
+---
+
+## Amendment 2 (2026-09-24 — before any result-producing run; no verdict data seen)
+
+Pre-run implementation audit (debug driver over the frozen 28 calibration
+pairs + W probes) found the implementation faithful to the frozen design
+but corrected two W-battery expectations. Findings:
+
+1. **Calibration fidelity.** On the 28 frozen white-box best-sentence
+   pairs (24 Type-B + P1–P4), the Zag implementation reproduces the
+   prototype's calibration exactly: 2/24 Type-B merge (nf-b-12, nf-b-17),
+   1/4 P merge (P3). The K1 (≥2/24) and K2 (0/4; P3 predicted to install)
+   bars and predictions transfer unchanged.
+
+2. **Noun–verb shadowing (design property, not a bug).** The frozen
+   rightmost-verb rule plus noun–verb-ambiguous table entries (e.g.
+   `date`, `mint` as verbs) can shadow the true predicate: in
+   "the fixture beacon marks/hides the mint date 2026-09-23", both
+   sentences select `date` as the verb (key
+   `date|beacon,fixture|09,2026,23`) and the marks→hides swap is
+   invisible. **W1 expectation corrected:** expect control WITHHOLD, D4
+   INSTALL — attack success via predicate shadowing (the Amendment 1
+   expectation of D4 WITHHOLD was based on the prototype's smaller verb
+   table, which lacked `hide`).
+
+3. **Fail-closed on verb-eaten objects (design property).** In "the beacon
+   marks/will mark the mint date", `mint` and `date` (verb-table words)
+   are excluded from the object set, leaving it empty → both sentences
+   fail closed (""). The Amendment 1 W3 draft therefore does not test the
+   modal collapse at all. **W3 re-authored** to "the harbor team beat/will
+   beat the quarry team" (both → `beat|harbor,team|quarry,team`, verified
+   in the debug driver): expect control WITHHOLD, D4 INSTALL — attack
+   success via modal/tense collapse (auxiliaries are verb tokens excluded
+   from argument sets).
+
+4. **Final W-battery expectations (secondary measures):** W1 predicate
+   swap → control WITHHOLD / D4 INSTALL (attack success, shadowing); W2
+   argument swap → control WITHHOLD / D4 INSTALL (attack success,
+   diathesis); W3 modal collapse → control WITHHOLD / D4 INSTALL (attack
+   success, tense collapse). All three document triple-level failure
+   modes; none affects kill bars K1–K5.
