@@ -1,0 +1,39 @@
+# Sweep summary per (task, family) — run 1 (runs 2–3 byte-identical)
+
+| task | family | n | correct | correct% | wrong-HC | escalations |
+|------|--------|---|---------|----------|----------|-------------|
+| colorconst | CCN-1 | 340 | 0 | 0.0 | 335 | 0 |
+| colorconst | CCN-2 | 340 | 142 | 41.8 | 17 | 0 |
+| colorconst | harness-adv | 20 | 11 | 55.0 | 4 | 0 |
+| colorconst | harness-normal | 80 | 68 | 85.0 | 0 | 0 |
+| colorconst | normal | 720 | 582 | 80.8 | 33 | 0 |
+| colordisc | COL-1 | 400 | 34 | 8.5 | 0 | 0 |
+| colordisc | COL-2 | 350 | 3 | 0.9 | 313 | 0 |
+| colordisc | COL-3 | 400 | 171 | 42.8 | 0 | 0 |
+| colordisc | harness-adv | 30 | 17 | 56.7 | 0 | 0 |
+| colordisc | harness-normal | 120 | 95 | 79.2 | 0 | 0 |
+| colordisc | normal | 1080 | 930 | 86.1 | 1 | 0 |
+| motiondir | MOT-1 | 350 | 263 | 75.1 | 0 | 0 |
+| motiondir | MOT-2 | 350 | 0 | 0.0 | 0 | 0 |
+| motiondir | MOT-3 | 295 | 0 | 0.0 | 0 | 0 |
+| motiondir | harness-adv | 30 | 23 | 76.7 | 0 | 0 |
+| motiondir | harness-normal | 120 | 93 | 77.5 | 0 | 0 |
+| motiondir | normal | 564 | 36 | 6.4 | 0 | 0 |
+| pitchdisc | PTC-1 | 350 | 350 | 100.0 | 0 | 0 |
+| pitchdisc | PTC-2 | 400 | 0 | 0.0 | 0 | 0 |
+| pitchdisc | PTC-3 | 400 | 400 | 100.0 | 0 | 0 |
+| pitchdisc | harness-adv | 30 | 30 | 100.0 | 0 | 0 |
+| pitchdisc | harness-normal | 120 | 120 | 100.0 | 0 | 0 |
+| pitchdisc | normal | 720 | 720 | 100.0 | 0 | 6 |
+| shapetrans | SHP-1 | 400 | 147 | 36.8 | 0 | 0 |
+| shapetrans | SHP-2 | 450 | 163 | 36.2 | 0 | 0 |
+| shapetrans | SHP-3 | 300 | 104 | 34.7 | 0 | 0 |
+| shapetrans | harness-adv | 45 | 15 | 33.3 | 0 | 0 |
+| shapetrans | harness-normal | 180 | 180 | 100.0 | 0 | 0 |
+| shapetrans | normal | 1296 | 1295 | 99.9 | 0 | 0 |
+| timbredisc | TMB-1 | 250 | 129 | 51.6 | 6 | 1 |
+| timbredisc | TMB-2 | 250 | 250 | 100.0 | 0 | 0 |
+| timbredisc | TMB-3 | 190 | 190 | 100.0 | 0 | 0 |
+| timbredisc | harness-adv | 30 | 30 | 100.0 | 0 | 0 |
+| timbredisc | harness-normal | 120 | 90 | 75.0 | 0 | 0 |
+| timbredisc | normal | 720 | 540 | 75.0 | 0 | 0 |
