@@ -30,3 +30,26 @@
 ## 2026-09-24 ~08:50 PDT — coordination + close
 - WS1-A active in shared workdir (PREREG_WS1A.md frozen 08:10 PDT): KB-control anomaly verification on FRESH batteries (cap x adv x rep, 18 cells), arms D1/D3/A2. No leg overlap with WS1-B. Their D3 arm covers the untrained-deliberation re-verification requested in WS1_COORDINATION.md.
 - Final commit: 77eedd0757faf5b31ebbdf7cb0972b0ba88b7ac8 (tnn-native-lab).
+
+---
+
+# WS1-A RUNLOG — KB-control anomaly: deliberate vs autopilot cost (Micah's "consciousness bill" leg)
+
+## 2026-09-24 ~08:10 PDT — prereg frozen before any new run
+- Wrote and committed `docs/lab/cognition_ws/ws1/PREREG_WS1A.md` BEFORE any fresh run: commit `403906826516f3c76c0a26ff1b60e94a094370d9` (tnn-native-lab).
+- Frozen battery: 18 cells (cap 32/128/512 × adv 0/15/35% × rep 1/3) × 3 arms (deliberate-trained, deliberate-untrained, silent autopilot) × 3 reruns = 162 executions.
+- Fresh deterministic generator (seed S=7, new truth functions, A/B/C/D phases); primary metric W = find_steps + scan_steps + mutops (+ suppressions). Wall-clock secondary (VM noise).
+- Confirm bar: median W(auto)/W(trained) >= 1.5 overall; >= 2.0 in >=75% of adversarial/large cells; accuracy gate trained vs auto <= 0.05; byte-identical reruns; >=70% of gap mechanically assigned to scans/overwrite churn.
+
+## 2026-09-24 ~15:20 PDT — sources built, battery launched
+- New sources in `src/`: w1a_gen.zag (fresh generator), w1a_time.zag (CLOCK_MONOTONIC ns), w1a_memory_core.zag (MA copy, MA_CAP=512, MA_AUDIT_CAP=16384, only size consts changed), w1a_common.zag (shared harness + W1C counters), w1a_arm1.zag (trained policy verbatim + counters), w1a_arm3.zag (naive policy verbatim + counters), w1a_psm.zag (psm mode=0 verbatim + c_age/c_find/c_scan/c_overwrite/c_evict counters), w1a_auto.zag (autopilot driver + probe).
+- Build: pinned znc `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`, `--no-zagd --no-analyze --no-foreground-cache`. Three binaries in `build/` (scratch, never committed).
+
+## 2026-09-24 ~16:00 PDT — battery complete, VERDICT: CONFIRMED
+- 162/162 runs rc=0. Rerun byte-identity: 54/54 cell-arms identical modulo wall_ns measurement lines (wall is VM-noisy by design); in-driver digest match=1 on all 162.
+- Median W(auto)/W(trained) = 2.73 (18/18 cells >= 2.0; range 2.48–2.97). Adversarial+large subregime: 8/8 >= 2.0 (median 2.67). Accuracy: trained and auto both 1.0000 on all 18 cells (0 gate failures). Scans assign 103.4% of the aggregate W gap (overwrite=0, evict=0 on all cells — last-wins/eviction never fired; gap is scan-driven, not churn-driven).
+- W/ep: trained 9.5–178.4, auto 27.3–459.7 across regimes. Memory: trained/naive 667,648 B fixed arenas; auto 66,752–84,992 B fixed (~8–10x smaller, 2.5–3x costlier work). Zero per-episode allocation all arms.
+- Naive (untrained): collateral true-kills 0 benign → 681 on cap512a35r3 (phenomenon replicates; exact 28 was generator-specific). Naive slightly cheaper on raw W (0.91–1.00x trained) — savings paid in collateral damage. Training is load-bearing.
+- Conditions map: no flip anywhere tested; ratio narrows slightly with adversarial pressure (2.88→2.58 at cap512) but never approaches 1.0.
+- Honesty notes: (1) cost advantage only on this battery — no accuracy gap demonstrated; (2) W ratios are conservative lower bounds (auto's counted steps cost more wall/step); (3) wall-clock too noisy for precise mapping.
+- Verdict doc: WS1A_VERDICT.md. Evidence commit: (pending — this commit).
