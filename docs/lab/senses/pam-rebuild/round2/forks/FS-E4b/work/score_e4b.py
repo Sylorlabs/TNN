@@ -34,11 +34,11 @@ def main():
     ev, lists, e4b = sys.argv[1:4]
     quals = [t for t in TASKS
              if os.path.exists(os.path.join(ev, 'run1_adv_%s.txt.out' % t))]
-    # corrupted-G diagnostic: judge once
+    # corrupted-G diagnostic: judge once (skip if output already exists)
     for t in quals:
         lp = os.path.join(lists, 'corrupt_%s.txt' % t)
         led = os.path.join(ev, 'judge_corrupt_%s.txt' % t)
-        if os.path.exists(lp):
+        if os.path.exists(lp) and not os.path.exists(led + '.out'):
             rc = subprocess.run([e4b, 'judge_list', lp, led]).returncode
             if rc != 0:
                 print('DRIVER FAILED corrupt %s' % t, flush=True)
