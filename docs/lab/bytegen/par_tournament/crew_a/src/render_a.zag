@@ -1,0 +1,774 @@
+// render_par.zag — Fork PAR: TRUE parallel renderer.
+// Every sample is a pure function s[t] = F(plan, t) with ZERO carried
+// sequential state: no phase accumulators, no IIR memory, no frame carry.
+// The whole block is computable in any order (proven by the order modes:
+// seq / rev / stride renders must be byte-identical).
+// Pure Zag, pinned znc, zero RNG in the render path.
+const SR:i64 = 44100;
+const NSAMP:i64 = 1323000;
+const NEVMAX:i64 = 64;
+const EVF:i64 = 12;
+const EVSZ:i64 = 96;
+
+// ---------- io ----------
+fn cstr(s:[]u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let p:*u8 = _zag_malloc((s.len + 1) as i64) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..(s.len + 1)];
+    let i:i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn w_all(fd:i64, b:[]u8) i64 {
+    let at:i64 = 0;
+    let blen:i64 = b.len as i64;
+    while (at < blen) {
+        let n:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(b) as i64) + at, blen - at, 0, 0, 0);
+        if (n == -4) { continue; }
+        if (n <= 0) { return -7407; }
+        at = at + n;
+    }
+    return at;
+}
+fn file_read(path:[]u8, cap:i64) []u8 {
+    let cs:[]u8 = cstr(path);
+    if (cs.len == 0) { return ""; }
+    let fd:i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 0, 0, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return ""; }
+    let p:*u8 = _zag_malloc(cap) as *u8;
+    if (p == null as *u8) { _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0); return ""; }
+    let at:i64 = 0;
+    while (at < cap) {
+        let n:i64 = _zag_raw_syscall(0, fd, (p as i64) + at, cap - at, 0, 0, 0);
+        if (n == -4) { continue; }
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    let b:[]u8 = p[0..at];
+    return b;
+}
+fn file_write(path:[]u8, b:[]u8) i64 {
+    let cs:[]u8 = cstr(path);
+    if (cs.len == 0) { return -3; }
+    let fd:i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 438, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return -4; }
+    let wr:i64 = w_all(fd, b);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (wr < 0) { return -5; }
+    return 0;
+}
+fn pout(s:[]u8) void {
+    _zag_raw_syscall(1, 1, (_zag_slice_ptr(s) as i64), (s.len as i64), 0, 0, 0);
+}
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    if (s.len > 0) {
+        if (s[s.len - 1] == 10) { return s[0..s.len - 1]; }
+    }
+    return s;
+}
+
+// ---------- 64-bit arena slots (byte offset) ----------
+fn nio_alloc(n:i32) []u8 {
+    if (n < 1 || n > 33554432) { return ""; }
+    let p:*u8 = _zag_malloc(n) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..n];
+    let i:i32 = 0;
+    while (i < n) { b[i] = 0; i = i + 1; }
+    return b;
+}
+fn nio_free(b:[]u8) void { if (b.len > 0) { _zag_free(_zag_slice_ptr(b)); } }
+fn put64(b:[]u8, i:i64, v:i64) void {
+    b[i] = (v & 255) as u8;
+    b[i+1] = ((v >> 8) & 255) as u8;
+    b[i+2] = ((v >> 16) & 255) as u8;
+    b[i+3] = ((v >> 24) & 255) as u8;
+    b[i+4] = ((v >> 32) & 255) as u8;
+    b[i+5] = ((v >> 40) & 255) as u8;
+    b[i+6] = ((v >> 48) & 255) as u8;
+    b[i+7] = ((v >> 56) & 255) as u8;
+}
+fn get64(b:[]u8, i:i64) i64 {
+    return (b[i] as i64) | ((b[i+1] as i64) << 8) | ((b[i+2] as i64) << 16) | ((b[i+3] as i64) << 24) | ((b[i+4] as i64) << 32) | ((b[i+5] as i64) << 40) | ((b[i+6] as i64) << 48) | ((b[i+7] as i64) << 56);
+}
+fn evg(ev:[]u8, e:i64, f:i64) i64 { return get64(ev, e * EVSZ + f * 8); }
+fn evs(ev:[]u8, e:i64, f:i64, v:i64) void { put64(ev, e * EVSZ + f * 8, v); }
+
+// ---------- sine: quadrant polynomial (f64), 1024-entry Q15 LUT ----------
+fn fsin_q(x:f64) f64 {
+    let t:f64 = x;
+    let s:f64 = 1.0;
+    if (t >= 3.141592653589793) { t = t - 3.141592653589793; s = -1.0; }
+    if (t >= 1.5707963267948966) { t = 3.141592653589793 - t; }
+    let x2:f64 = t * t;
+    let x3:f64 = x2 * t;
+    let x5:f64 = x3 * x2;
+    let x7:f64 = x5 * x2;
+    let x9:f64 = x7 * x2;
+    return s * (t - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0);
+}
+fn lut_init(lut:[]u8) void {
+    let i:i64 = 0;
+    while (i < 1024) {
+        let s:f64 = fsin_q(6.283185307179586 * (i as f64) / 1024.0);
+        put64(lut, i * 8, (s * 32767.0) as i64);
+        i = i + 1;
+    }
+}
+fn lsin(lut:[]u8, idx:i64) i64 { return get64(lut, (idx & 1023) * 8); }
+
+// ---------- ascii float ----------
+fn atof(s:[]u8, st:i64, en:i64) f64 {
+    let neg:f64 = 1.0;
+    let v:f64 = 0.0;
+    let i:i64 = st;
+    if (i < en && s[i] == 45) { neg = -1.0; i = i + 1; }
+    while (i < en && s[i] >= 48 && s[i] <= 57) { v = v * 10.0 + ((s[i] - 48) as f64); i = i + 1; }
+    if (i < en && s[i] == 46) {
+        i = i + 1;
+        let div:f64 = 10.0;
+        while (i < en && s[i] >= 48 && s[i] <= 57) { v = v + ((s[i] - 48) as f64) / div; div = div * 10.0; i = i + 1; }
+    }
+    return neg * v;
+}
+fn pow2(x:f64) f64 {
+    // 2^x for x in [-1,1] via taylor on e^(x ln2)
+    let y:f64 = x * 0.6931471805599453;
+    let t:f64 = 1.0;
+    let term:f64 = 1.0;
+    let k:i64 = 1;
+    while (k <= 12) {
+        term = term * y / (k as f64);
+        t = t + term;
+        k = k + 1;
+    }
+    return t;
+}
+
+// ---------- plan parse ----------
+// event fields: 0 t0 1 dur 2 f0q16 3 ampq16 4 tim 5 glideq16
+//               6 vibinc_q32 7 vibbeta_q32 8 kind 9 rspw0 10 rspw1 11 nomq16
+fn parse_plan(path:[]u8, ev:[]u8, bed:[]u8, durp:*i64) i64 {
+    let raw:[]u8 = file_read(path, 65536);
+    if (raw.len == 0) { return -1; }
+    let nev:i64 = 0;
+    let pos:i64 = 0;
+    let n:i64 = raw.len as i64;
+    while (pos < n) {
+        let le:i64 = pos;
+        while (le < n && raw[le] != 10) { le = le + 1; }
+        if (le > pos && raw[pos] != 35) {
+            // tokenize: first token
+            let p:i64 = pos;
+            while (p < le && raw[p] == 32) { p = p + 1; }
+            let t0s:i64 = p;
+            while (p < le && raw[p] != 32) { p = p + 1; }
+            let t0e:i64 = p;
+            // collect up to 9 numeric fields
+            let f:[]u8 = nio_alloc(72);
+            let nf:i64 = 0;
+            while (p < le && nf < 9) {
+                while (p < le && raw[p] == 32) { p = p + 1; }
+                if (p >= le) { break; }
+                let fs:i64 = p;
+                while (p < le && raw[p] != 32) { p = p + 1; }
+                put64(f, nf * 8, ((atof(raw, fs, p) * 65536.0) as i64));
+                nf = nf + 1;
+            }
+            if (t0e - t0s == 3 && raw[t0s] == 66 && raw[t0s+1] == 69 && raw[t0s+2] == 68) {
+                // BED t0 t1 freq amp
+                if (nf >= 4) {
+                    put64(bed, 0, (get64(f, 0) * SR) / 65536);
+                    put64(bed, 8, (get64(f, 8) * SR) / 65536);
+                    put64(bed, 16, get64(f, 16));
+                    put64(bed, 24, get64(f, 24) / 1000);
+                }
+            }
+            if (t0e - t0s == 5 && raw[t0s] == 68 && raw[t0s+1] == 85 && raw[t0s+2] == 82 && raw[t0s+3] == 95 && raw[t0s+4] == 83) {
+                // DUR_S seconds -> total sample count (plan-declared duration)
+                if (nf >= 1) {
+                    let ns:i64 = (get64(f, 0) * SR) / 65536;
+                    if (ns > 26460000) { ns = 26460000; }
+                    if (ns > 0) { durp.* = ns; }
+                }
+            }
+            if (t0e - t0s == 5 && raw[t0s] == 69 && raw[t0s+1] == 86 && raw[t0s+2] == 69 && raw[t0s+3] == 78 && raw[t0s+4] == 84) {
+                // EVENT t0 dur freq amp timbre glide vibhz vibc
+                if (nf >= 8 && nev < NEVMAX) {
+                    evs(ev, nev, 0, (get64(f, 0) * SR) / 65536);
+                    evs(ev, nev, 1, (get64(f, 8) * SR) / 65536);
+                    evs(ev, nev, 2, get64(f, 16));
+                    evs(ev, nev, 3, get64(f, 24) / 1000);
+                    evs(ev, nev, 4, get64(f, 32) / 65536);
+                    evs(ev, nev, 5, get64(f, 40));
+                    let vibhz:f64 = (get64(f, 48) as f64) / 65536.0;
+                    let vibc:f64 = (get64(f, 56) as f64) / 65536.0;
+                    let f0:f64 = (get64(f, 16) as f64) / 65536.0;
+                    let df:f64 = f0 * (pow2(vibc / 1200.0) - 1.0);
+                    let beta:f64 = 0.0;
+                    if (vibhz > 0.001) { beta = df / vibhz; }
+                    evs(ev, nev, 6, (vibhz * 4294967296.0 / (SR as f64)) as i64);
+                    evs(ev, nev, 7, (beta * 4294967296.0) as i64);
+                    evs(ev, nev, 8, 0);
+                    nev = nev + 1;
+                }
+            }
+            if (t0e - t0s == 7 && raw[t0s] == 82 && raw[t0s+1] == 69 && raw[t0s+2] == 83 && raw[t0s+3] == 80 && raw[t0s+4] == 79 && raw[t0s+5] == 78 && raw[t0s+6] == 68) {
+                // RESPOND t0 dur w0 w1 amp timbre nominal
+                if (nf >= 7 && nev < NEVMAX) {
+                    evs(ev, nev, 0, (get64(f, 0) * SR) / 65536);
+                    evs(ev, nev, 1, (get64(f, 8) * SR) / 65536);
+                    evs(ev, nev, 2, get64(f, 48));
+                    evs(ev, nev, 3, get64(f, 32) / 1000);
+                    evs(ev, nev, 4, get64(f, 40) / 65536);
+                    evs(ev, nev, 5, 0);
+                    evs(ev, nev, 6, 0);
+                    evs(ev, nev, 7, 0);
+                    evs(ev, nev, 8, 1);
+                    evs(ev, nev, 9, (get64(f, 16) * SR) / 65536);
+                    evs(ev, nev, 10, (get64(f, 24) * SR) / 65536);
+                    evs(ev, nev, 11, get64(f, 48));
+                    nev = nev + 1;
+                }
+            }
+            nio_free(f);
+        }
+        pos = le + 1;
+    }
+    return nev;
+}
+
+// ---------- pure voice: sample t of event e (zero carried state) ----------
+fn voice_q16(ev:[]u8, lut:[]u8, e:i64, t:i64) i64 {
+    let t0:i64 = evg(ev, e, 0);
+    let dur:i64 = evg(ev, e, 1);
+    let tr:i64 = t - t0;
+    if (tr < 0 || tr >= dur || dur <= 0) { return 0; }
+    let f0q:i64 = evg(ev, e, 2);
+    let ampq:i64 = evg(ev, e, 3);
+    let tim:i64 = evg(ev, e, 4);
+    let glideq:i64 = evg(ev, e, 5);
+    let vinc:i64 = evg(ev, e, 6);
+    let vbeta:i64 = evg(ev, e, 7);
+    if (tim < 1) { tim = 1; }
+    if (tim > 13) { tim = 13; }
+    // envelope: 40 ms attack / 150 ms release raised cosine, capped at dur/2
+    let atk:i64 = 1764;
+    if (dur / 2 < atk) { atk = dur / 2; }
+    let rel:i64 = 6615;
+    if (dur / 2 < rel) { rel = dur / 2; }
+    let envq:i64 = 65536;
+    if (tr < atk && atk > 0) {
+        let x:i64 = (tr * 1024) / atk;
+        envq = 32768 - lsin(lut, 256 + x / 2);
+    } else {
+        let rem:i64 = dur - tr;
+        if (rem < rel && rel > 0) {
+            let x:i64 = (rem * 1024) / rel;
+            envq = 32768 + lsin(lut, 256 + x / 2);
+        }
+    }
+    // phase in cycles Q32: f0*tr/SR + glide*tr^2/(2*dur*SR), pure fn of t
+    let ph:i64 = ((f0q * tr) / SR) * 65536;
+    if (glideq != 0) {
+        let g1:i64 = (glideq * tr) / dur;
+        ph = ph + ((g1 * tr) / (2 * SR)) * 65536;
+    }
+    // vibrato PM: beta * sin(2*pi*fv*tr), pure fn of t
+    if (vbeta != 0 && vinc != 0) {
+        let vph:i64 = vinc * tr;
+        vph = vph - (vph / 4294967296) * 4294967296;
+        let vs:i64 = lsin(lut, (vph / 4194304) & 1023);
+        ph = ph + (vbeta * vs) / 32768;
+    }
+    // wrap to [0, 2^32)
+    ph = ph - (ph / 4294967296) * 4294967296;
+    if (ph < 0) { ph = ph + 4294967296; }
+    let acc:i64 = 0;
+    let hsum:i64 = 0;
+    let h:i64 = 1;
+    while (h <= tim) {
+        let idx:i64 = ((ph * h) / 4194304) & 1023;
+        acc = acc + (65536 / h) * lsin(lut, idx);
+        hsum = hsum + 65536 / h;
+        h = h + 1;
+    }
+    // normalize the harmonic stack: voice peak ~= amp (not amp * sum(1/h))
+    acc = (acc * 65536) / hsum;
+    let v:i64 = (acc * envq) / 2147483648;
+    v = (v * ampq) / 65536;
+    return v;
+}
+fn bed_q16(bed:[]u8, lut:[]u8, t:i64) i64 {
+    let b0:i64 = get64(bed, 0);
+    let b1:i64 = get64(bed, 8);
+    if (t < b0 || t >= b1) { return 0; }
+    let fq:i64 = get64(bed, 16);
+    let ampq:i64 = get64(bed, 24);
+    // 25 ms raised-cosine edge fades
+    let ed:i64 = 1102;
+    let envq:i64 = 65536;
+    let tin:i64 = t - b0;
+    if (tin < ed) {
+        let x:i64 = (tin * 1024) / ed;
+        envq = 32768 - lsin(lut, 256 + x / 2);
+    } else {
+        let tout:i64 = b1 - t;
+        if (tout < ed) {
+            let x:i64 = (tout * 1024) / ed;
+            envq = 32768 + lsin(lut, 256 + x / 2);
+        }
+    }
+    let ph:i64 = ((fq * t) / SR) * 65536;
+    ph = ph - (ph / 4294967296) * 4294967296;
+    if (ph < 0) { ph = ph + 4294967296; }
+    let acc:i64 = 0;
+    let hsum:i64 = 0;
+    let h:i64 = 1;
+    while (h <= 3) {
+        let idx:i64 = ((ph * h) / 4194304) & 1023;
+        acc = acc + (65536 / h) * lsin(lut, idx);
+        hsum = hsum + 65536 / h;
+        h = h + 1;
+    }
+    acc = (acc * 65536) / hsum;
+    let v:i64 = (acc * envq) / 2147483648;
+    v = (v * ampq) / 65536;
+    return v;
+}
+
+// ---------- wav ----------
+fn wav_write(path:[]u8, mix:[]u8, nsamp:i64) i64 {
+    // peak normalize to 0.85 FS
+    let peak:i64 = 0;
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get64(mix, i * 8);
+        if (v < 0) { v = 0 - v; }
+        if (v > peak) { peak = v; }
+        i = i + 1;
+    }
+    if (peak == 0) { peak = 1; }
+    pout("PAR mix peak_q16: ");
+    pout(i64s(peak));
+    pout("\n");
+    let total:i64 = 44 + nsamp * 2;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    out[0] = 82; out[1] = 73; out[2] = 70; out[3] = 70;
+    let sz:i64 = 36 + nsamp * 2;
+    out[4] = (sz & 255) as u8; out[5] = ((sz >> 8) & 255) as u8;
+    out[6] = ((sz >> 16) & 255) as u8; out[7] = ((sz >> 24) & 255) as u8;
+    out[8] = 87; out[9] = 65; out[10] = 86; out[11] = 69;
+    out[12] = 102; out[13] = 109; out[14] = 116; out[15] = 32;
+    out[16] = 16; out[17] = 0; out[18] = 0; out[19] = 0;
+    out[20] = 1; out[21] = 0;
+    out[22] = 1; out[23] = 0;
+    out[24] = 68; out[25] = 172; out[26] = 0; out[27] = 0;
+    out[28] = 136; out[29] = 88; out[30] = 1; out[31] = 0;
+    out[32] = 2; out[33] = 0;
+    out[34] = 16; out[35] = 0;
+    out[36] = 100; out[37] = 97; out[38] = 116; out[39] = 97;
+    let ds:i64 = nsamp * 2;
+    out[40] = (ds & 255) as u8; out[41] = ((ds >> 8) & 255) as u8;
+    out[42] = ((ds >> 16) & 255) as u8; out[43] = ((ds >> 24) & 255) as u8;
+    i = 0;
+    while (i < nsamp) {
+        let v:i64 = (get64(mix, i * 8) * 27852) / peak;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        if (v < 0) { v = v + 65536; }
+        let o:i64 = 44 + i * 2;
+        out[o] = (v & 255) as u8;
+        out[o+1] = ((v >> 8) & 255) as u8;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(path, out);
+    nio_free(out);
+    return rc;
+}
+
+// raw mix dump (s32 LE, no mastering): for content-identity checks at the
+// MIX level — global peak normalization would mask generation differences.
+fn mix_write(path:[]u8, mix:[]u8, nsamp:i64) i64 {
+    let total:i64 = nsamp * 4;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get64(mix, i * 8);
+        if (v > 2147483647) { v = 2147483647; }
+        if (v < -2147483648) { v = -2147483648; }
+        if (v < 0) { v = v + 4294967296; }
+        let o:i64 = i * 4;
+        out[o] = (v & 255) as u8;
+        out[o+1] = ((v >> 8) & 255) as u8;
+        out[o+2] = ((v >> 16) & 255) as u8;
+        out[o+3] = ((v >> 24) & 255) as u8;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(path, out);
+    nio_free(out);
+    return rc;
+}
+
+fn file_open_trunc(path:[]u8) i64 {
+    let cs:[]u8 = cstr(path);
+    if (cs.len == 0) { return -3; }
+    let fd:i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 438, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    return fd;
+}
+fn file_close(fd:i64) void {
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+}
+fn mix_write_fd(fd:i64, mix:[]u8, nsamp:i64) i64 {
+    let total:i64 = nsamp * 4;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get64(mix, i * 8);
+        if (v > 2147483647) { v = 2147483647; }
+        if (v < -2147483648) { v = -2147483648; }
+        if (v < 0) { v = v + 4294967296; }
+        let o:i64 = i * 4;
+        out[o] = (v & 255) as u8;
+        out[o+1] = ((v >> 8) & 255) as u8;
+        out[o+2] = ((v >> 16) & 255) as u8;
+        out[o+3] = ((v >> 24) & 255) as u8;
+        i = i + 1;
+    }
+    let wr:i64 = w_all(fd, out);
+    nio_free(out);
+    if (wr < 0) { return -5; }
+    return 0;
+}
+fn str_eq(a:[]u8, b:[]u8) i64 {
+    if (a.len != b.len) { return 0; }
+    let i:i64 = 0;
+    while (i < a.len as i64) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// render a sample-range [lo,hi) of all events; visit order depends on mode.
+// voice_q16 is a pure function of (plan, t): no carried state anywhere.
+// order 5 = event permutation probe (§5): events visited in stride order
+// (k*7919)%nev; integer adds commute, so the mix must be bit-identical.
+fn render_events(ev:[]u8, lut:[]u8, mix:[]u8, nev:i64, order:i64, lo:i64, hi:i64, bo:i64) void {
+    let e:i64 = 0;
+    while (e < nev) {
+        let ee:i64 = e;
+        if (order == 5) { ee = (e * 7919) % nev; }
+        let t0:i64 = evg(ev, ee, 0);
+        let dur:i64 = evg(ev, ee, 1);
+        let kind:i64 = evg(ev, ee, 8);
+        if (kind == 1) {
+            // RESPOND: PAR cannot measure rendered output (pure f(plan,t)).
+            // Honest fallback: render the plan's nominal pitch.
+            evs(ev, ee, 2, evg(ev, ee, 11));
+            evs(ev, ee, 8, 0);
+        }
+        let a:i64 = t0;
+        if (a < lo) { a = lo; }
+        let b:i64 = t0 + dur;
+        if (b > hi) { b = hi; }
+        if (a < b) {
+            if (order == 1 || order == 4) {
+                let t:i64 = b - 1;
+                while (t >= a) {
+                    put64(mix, (t - bo) * 8, get64(mix, (t - bo) * 8) + voice_q16(ev, lut, ee, t));
+                    t = t - 1;
+                }
+            } else if (order == 2) {
+                let span:i64 = b - a;
+                let k:i64 = 0;
+                while (k < span) {
+                    let t:i64 = a + (k * 7919) % span;
+                    put64(mix, (t - bo) * 8, get64(mix, (t - bo) * 8) + voice_q16(ev, lut, ee, t));
+                    k = k + 1;
+                }
+            } else {
+                let t:i64 = a;
+                while (t < b) {
+                    put64(mix, (t - bo) * 8, get64(mix, (t - bo) * 8) + voice_q16(ev, lut, ee, t));
+                    t = t + 1;
+                }
+            }
+        }
+        e = e + 1;
+    }
+}
+fn render_bed(bed:[]u8, lut:[]u8, mix:[]u8, lo:i64, hi:i64, bo:i64) void {
+    let bt0:i64 = get64(bed, 0);
+    let bt1:i64 = get64(bed, 8);
+    let a:i64 = bt0;
+    if (a < lo) { a = lo; }
+    let b:i64 = bt1;
+    if (b > hi) { b = hi; }
+    let t:i64 = a;
+    while (t < b) {
+        put64(mix, (t - bo) * 8, get64(mix, (t - bo) * 8) + bed_q16(bed, lut, t));
+        t = t + 1;
+    }
+}
+
+// ---------- fault injection (RT-CASCADE family; deterministic, zero RNG) ----------
+// kind: 1 = 64-sample multi-bit XOR (legacy) ; 2 = TRUE single-bit flip ;
+//       3 = burst (1 s deterministic loud pattern) ; 4 = dropout (1 s zero) ;
+//       5 = DC shift (1 s, +2^30)
+fn apply_fault(mix:[]u8, kind:i64, at:i64, len:i64) void {
+    let j:i64 = 0;
+    while (j < len) {
+        let idx:i64 = (at + j) * 8;
+        if (kind == 1) {
+            put64(mix, idx, get64(mix, idx) ^ 2147483647);
+        } else {
+            if (kind == 2) {
+                put64(mix, idx, get64(mix, idx) ^ 1);
+            } else {
+                if (kind == 3) {
+                    let v:i64 = (((at + j) * 2654435761) & 2147483647) - 1073741824;
+                    put64(mix, idx, v);
+                } else {
+                    if (kind == 4) {
+                        put64(mix, idx, 0);
+                    } else {
+                        if (kind == 5) {
+                            put64(mix, idx, get64(mix, idx) + 1073741824);
+                        }
+                    }
+                }
+            }
+        }
+        j = j + 1;
+    }
+}
+
+// ---------- blocked generation (§5 sustained-corruption probe) ----------
+// Generates the mix in 1024-sample blocks (yet another visit order — the
+// voice/bed functions are pure in t, so any tiling is valid). With
+// corrupt=1, after generating block b the mix region of block b is XORed
+// with a deterministic block-indexed pattern, simulating sustained
+// corruption of the output medium DURING generation. Generation never reads
+// the mix, so every generated sample must equal the clean render;
+// final mix must equal clean XOR the patterns exactly.
+fn render_blocked(ev:[]u8, lut:[]u8, mix:[]u8, nev:i64, bed:[]u8, corrupt:i64, ns:i64) void {
+    let nb:i64 = (ns + 1024 - 1) / 1024;
+    let b:i64 = 0;
+    while (b < nb) {
+        let lo:i64 = b * 1024;
+        let hi:i64 = lo + 1024;
+        if (hi > ns) { hi = ns; }
+        let e:i64 = 0;
+        while (e < nev) {
+            let kind:i64 = evg(ev, e, 8);
+            if (kind == 1) {
+                evs(ev, e, 2, evg(ev, e, 11));
+                evs(ev, e, 8, 0);
+            }
+            let t0:i64 = evg(ev, e, 0);
+            let dur:i64 = evg(ev, e, 1);
+            let a:i64 = t0;
+            if (a < lo) { a = lo; }
+            let bb:i64 = t0 + dur;
+            if (bb > hi) { bb = hi; }
+            let t:i64 = a;
+            while (t < bb) {
+                put64(mix, t * 8, get64(mix, t * 8) + voice_q16(ev, lut, e, t));
+                t = t + 1;
+            }
+            e = e + 1;
+        }
+        let t2:i64 = lo;
+        while (t2 < hi) {
+            put64(mix, t2 * 8, get64(mix, t2 * 8) + bed_q16(bed, lut, t2));
+            t2 = t2 + 1;
+        }
+        if (corrupt == 1) {
+            let j:i64 = 0;
+            while (j < hi - lo) {
+                // 16-bit pattern: (clean ^ pat) provably stays in s32 range,
+                // so the mix dump's i32 clamp can never mask a deviation.
+                let pat:i64 = ((b * 2654435761 + j * 97) & 65535);
+                put64(mix, (lo + j) * 8, get64(mix, (lo + j) * 8) ^ pat);
+                j = j + 1;
+            }
+        }
+        b = b + 1;
+    }
+}
+
+fn stream_render(ev:[]u8, lut:[]u8, nev:i64, bed:[]u8, outp:[]u8, nsamp:i64) i64 {
+    // Windowed generation for plans longer than the 2^25 mix-slice limit:
+    // render [lo,hi) into a small buffer with base offset bo=lo, dump s32
+    // straight to the file. Pure f(plan,t) per sample; windowing changes
+    // nothing (verify: stream output of the 30 s plan cmps clean vs seq+mix).
+    let fd:i64 = file_open_trunc(outp);
+    if (fd < 0) { return -4; }
+    let ws:i64 = 44100;
+    let w:i64 = 0;
+    let rc:i64 = 0;
+    while (w * ws < nsamp) {
+        let lo:i64 = w * ws;
+        let hi:i64 = lo + ws;
+        if (hi > nsamp) { hi = nsamp; }
+        let wn:i64 = hi - lo;
+        let mix:[]u8 = nio_alloc((wn * 8) as i32);
+        if (mix.len == 0) { file_close(fd); return 4; }
+        let z:i64 = 0;
+        while (z < wn * 8) { mix[z] = 0; z = z + 1; }
+        render_events(ev, lut, mix, nev, 0, lo, hi, lo);
+        render_bed(bed, lut, mix, lo, hi, lo);
+        rc = mix_write_fd(fd, mix, wn);
+        nio_free(mix);
+        if (rc != 0) { file_close(fd); return rc; }
+        w = w + 1;
+    }
+    file_close(fd);
+    return 0;
+}
+
+fn main() i32 {
+    let planp:[]u8 = _zag_arg(1);
+    if (planp.len == 0) { planp = "../fixture/plan_v1.txt"; }
+    let outp:[]u8 = _zag_arg(2);
+    if (outp.len == 0) { outp = "out_par.wav"; }
+    let mode:[]u8 = _zag_arg(3);
+    // order mode: seq | rev | stride | evperm (§5 event-permutation probe)
+    // fault modes: seq+fault | rev+fault (legacy 64-sample) ;
+    //   seq+fault1mix (TRUE single-bit) ; seq+faultburst ; seq+faultdrop ;
+    //   seq+faultdc ; sustain+mix (§5: per-block corruption during gen) ;
+    //   blocked+mix (blocked generation, no corruption: order proof)
+    let order:i64 = 0;
+    if (str_eq(mode, "rev")) { order = 1; }
+    if (str_eq(mode, "stride")) { order = 2; }
+    if (str_eq(mode, "seq+fault")) { order = 3; }
+    if (str_eq(mode, "rev+fault")) { order = 4; }
+    if (str_eq(mode, "seq+faultmix")) { order = 3; }
+    if (str_eq(mode, "evperm+mix")) { order = 5; }
+    // fault spec: kind 0 none, 1 xor64, 2 single-bit, 3 burst, 4 drop, 5 dc
+    let fkind:i64 = 0;
+    let fat:i64 = 3 * SR;
+    let flen:i64 = 64;
+    if (str_eq(mode, "seq+fault1mix")) { fkind = 2; flen = 1; }
+    if (str_eq(mode, "seq+faultburst")) { fkind = 3; fat = 10 * SR; flen = SR; }
+    if (str_eq(mode, "seq+faultdrop")) { fkind = 4; fat = 10 * SR; flen = SR; }
+    if (str_eq(mode, "seq+faultdc")) { fkind = 5; fat = 10 * SR; flen = SR; }
+
+    let lut:[]u8 = nio_alloc(8192);
+    lut_init(lut);
+    let ev:[]u8 = nio_alloc((NEVMAX * EVSZ) as i32);
+    let z:i64 = 0;
+    while (z < (NEVMAX * EVSZ) as i64) { ev[z] = 0; z = z + 1; }
+    let bed:[]u8 = nio_alloc(32);
+    z = 0;
+    while (z < 32) { bed[z] = 0; z = z + 1; }
+    let nsamp:i64 = NSAMP;
+    let nev:i64 = parse_plan(planp, ev, bed, &nsamp);
+    // plan-declared duration (DUR_S); default 30 s. Sized before generation.
+    pout("PAR events parsed: ");
+    pout(i64s(nev));
+    pout("\n");
+    if (nev < 0) { return 3; }
+    pout("PAR nsamp=");
+    pout(i64s(nsamp));
+    pout("\n");
+
+    let rc:i64 = 0;
+    if (str_eq(mode, "seq+streammix")) {
+        rc = stream_render(ev, lut, nev, bed, outp, nsamp);
+        pout("PAR stream render done rc=");
+        pout(i64s(rc));
+        pout("\n");
+    } else {
+    let mix:[]u8 = nio_alloc((nsamp * 8) as i32);
+    if (mix.len == 0) { return 4; }
+    z = 0;
+    while (z < (nsamp * 8) as i64) { mix[z] = 0; z = z + 1; }
+
+    if (str_eq(mode, "sustain+mix") || str_eq(mode, "blocked+mix")) {
+        let cor:i64 = 0;
+        if (str_eq(mode, "sustain+mix")) { cor = 1; }
+        render_blocked(ev, lut, mix, nev, bed, cor, nsamp);
+        pout("PAR blocked render done corrupt=");
+        pout(i64s(cor));
+        pout("\n");
+    } else {
+        if (order == 3 || order == 4) {
+            // RT-CASCADE for PAR: generate pre-cut samples, corrupt the mix
+            // buffer at t=3 s, then generate post-cut samples. Generation never
+            // reads the mix, so post-cut samples must be bit-identical to a
+            // clean render (no cascade possible by construction).
+            let cut:i64 = 3 * SR;
+            render_events(ev, lut, mix, nev, order, 0, cut, 0);
+            render_bed(bed, lut, mix, 0, cut, 0);
+            let j:i64 = 0;
+            while (j < 64) {
+                put64(mix, (cut + j) * 8, get64(mix, (cut + j) * 8) ^ 2147483647);
+                j = j + 1;
+            }
+            pout("PAR fault injected at t=3s; generating post-cut samples\n");
+            render_events(ev, lut, mix, nev, order, cut, nsamp, 0);
+            render_bed(bed, lut, mix, cut, nsamp, 0);
+        } else {
+            if (fkind != 0) {
+                // fault-model family: pre-fault gen, fault, post-fault gen.
+                // The fault window [fat,fat+flen) is NEVER regenerated: the
+                // fault is the final word there. Post-fault generation starts
+                // at fat+flen, so any difference outside the window would be
+                // a genuine cascade (impossible for pure f(plan,t)).
+                render_events(ev, lut, mix, nev, 0, 0, fat, 0);
+                render_bed(bed, lut, mix, 0, fat, 0);
+                apply_fault(mix, fkind, fat, flen);
+                pout("PAR fault kind=");
+                pout(i64s(fkind));
+                pout(" injected; generating post-fault samples\n");
+                render_events(ev, lut, mix, nev, 0, fat + flen, nsamp, 0);
+                render_bed(bed, lut, mix, fat + flen, nsamp, 0);
+            } else {
+                render_events(ev, lut, mix, nev, order, 0, nsamp, 0);
+                render_bed(bed, lut, mix, 0, nsamp, 0);
+            }
+        }
+    }
+
+    if (str_eq(mode, "seq+faultmix")) {
+        // mix-level fault run: caller compares against the clean mix
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "seq+mix")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "seq+fault1mix")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "seq+faultburst")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "seq+faultdrop")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "seq+faultdc")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "sustain+mix")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "blocked+mix")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else if (str_eq(mode, "evperm+mix")) {
+        rc = mix_write(outp, mix, nsamp);
+    } else {
+        rc = wav_write(outp, mix, nsamp);
+    }
+    } // end non-streaming else
+    pout("PAR wrote ");
+    pout(outp);
+    pout(" rc=");
+    pout(i64s(rc));
+    pout("\n");
+    return 0;
+}
