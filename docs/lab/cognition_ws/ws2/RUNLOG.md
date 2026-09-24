@@ -59,3 +59,54 @@ Full rebuild + ingest (33 items; PD01 dedup→first) + choose (S6 everywhere)
 - Outcomes: FLAT 39 FOUND/6 TOKEN_MISS/6 FALSE_POSITIVE;
   IMPOSED 28/17/6; SELF 39/6/6 (choose picked S6 for all domains+global).
 - Interim failure map: `ws2/WS2A_PRELIM.md`.
+
+---
+
+# WS2-C RUNLOG — TNN deliberative retrieval (figure-it-out scheme)
+
+## 2026-09-24 — assignment
+WS2-C: TNN finds its OWN way to 100% retrieval. Crew builds scaffolding
+(harness, fixtures, instrumentation, red teams); all scheme decisions by
+TNN's native deliberation, recorded in its audit trail. Pure Zag, zero RNG,
+3 byte-identical reruns. Bar: 100% on 12 sealed holdout probes or FAIL.
+
+## 2026-09-24 — prereg frozen (PREREG_WS2C.md)
+- Visible: 51 WS2-A probes + 48 MORG design queries. Sealed: 12 MORG
+  astronomy holdout probes (never staged for deliberation).
+- Mechanism palette: hint {STRICT,VERIFY,SOFT} × score {COUNT,IDF,COVER} ×
+  abstain {NEVER,ZERO} × expand {NONE,CLUSTER}. Greedy loop: observe misses
+  → classify → hypothesize → predict → test → adopt iff misses drop with
+  zero regressions.
+- Fixture correction: probe_corpus.txt = 35 physical lines incl. header =
+  34 data lines, 33 unique ids (PD01 duplicated).
+
+## 2026-09-24 — engine built (delib.zag)
+Pure-Zag deliberative engine: `deliberate <workdir>` runs the loop, writes
+audit.md/scheme.json/results.txt/census.txt; `bar <scheme> <corpus>
+<queries> <outdir>` runs the sealed evaluation. Two bugs found and fixed
+during bring-up: hint field index (type at field 3, not 2); gold-id slice
+offsets relative to field slice, not query buffer.
+
+## 2026-09-24 — deliberation landed
+5 rounds. Adopted M_HM1 (VERIFY) 30→17 misses, zero regressions. Rejected
+M_AB1 (2 regressions: abstention empties zero-evidence-but-passing probes),
+M_HM2 (bonuses outrank weak text, 17→19), M_EX1 (completion undone by
+re-truncation, no gain). Final scheme: (VERIFY,COUNT,NEVER,NONE).
+P-AGE symmetry held all rounds. 17 visible misses remain (4 PARA, 6 NEG,
+4 cluster, 3 hint).
+
+## 2026-09-24 — sealed bar: FAIL (11/12)
+H07 MISS(F_UNCLASSIFIED): SUBJ probe, sh=telescope, text "everything about
+telescopes", gold AS21–30. Plural "telescopes" has zero exact-token overlap
+with gold vocabulary ("telescope" singular); VERIFY drops the CORRECT hint
+because the hint set scores 0 — it cannot distinguish "contradicted" from
+"unverifiable due to vocabulary mismatch". Mechanism ceiling, not a search
+failure. Full diagnosis in WS2C_PRELIM.md.
+
+## 2026-09-24 — reruns + red teams
+- R1/R2/R3 full pipelines byte-identical (audit edca12a2…, retrieval
+  1f179896…, scheme afbc8b21…).
+- R1 hint-swaps: 8/12 miss (graceful, no crash). R2 id-rename: identical
+  11/12. R3 novel zero-overlap: 5/6 junk (abstention gap, documented).
+- R4 seal: clean (all H01–H12 hits are PH01 substrings or the engine's own
+  seal assertion; no holdout files staged).
