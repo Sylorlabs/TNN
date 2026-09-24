@@ -81,7 +81,8 @@ hypothesis is falsified on the performance bars.
 
 ## Commits
 
-- FS-E4 closeout: 7b24f0c5
-- FS-E4b prereg (alone): a9a48b3f
-- FS-E4b sources: 6d9942d7 (+ fix bda95a8f)
-- FS-E4b evidence + verdict: [SHA]
+- FS-E4 closeout: 7b24f0c5bdc99515d58e4ad834cb64bae4404664
+- FS-E4b prereg (alone): a9a48b3f95b52e7735a54e76ed3e71559f86a2d4
+- FS-E4b sources: 6d9942d7466338485d9c91baedaa04ca545ae597 (+ fix bda95a8f4d1cc476f9b214c54bb3d0ff60506176)
+- FS-E4b source fixes (buffer repair): 03966df32cdf5a4aacf047e15fccb0f6785f548a
+- FS-E4b evidence + verdict: d1dd133d6871935207856bef1d084e84a7ce6fde
