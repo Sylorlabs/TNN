@@ -18,7 +18,7 @@ effect. One miss is DISCARD.
 
 | Bar | Frozen | Measured | Result |
 |---|---|---|---|
-| KB1-DET 3/3 byte-identical | pass | sha256 30a9cd5c404c4b14393660cfc305064c56e6e19745e093b0b146feb013a x3 | PASS |
+| KB1-DET 3/3 byte-identical | pass | sha256 30a9cd5c404c4b14393660cfc305064c56e6e19745e093b0a9ab0b146feb013a x3 | PASS |
 | KB2-FOCUS acutance ratio, 40 F3 points | >= 1.30 | 1.18 (11804 bp) | FAIL |
 | KB3-STONE acutance ratio, 80 stone points | >= 1.20 | 1.90 (19027 bp) | PASS |
 | KB4-SKY acutance ratio, 12 sky points | <= 1.10 | 1.00 (10000 bp) | PASS |
@@ -54,7 +54,7 @@ queue (R9, S11-IMG, S13, S14, C1, C2v3) is untouched by this wave.
 
 - Prereg: 35f81a256 (prereg-only commit, before any D19 code)
 - Implementation + evidence: f26e277da
-- This verdict SHA fill-in: <this commit>
+- This verdict SHA fill-in: f26e277da (verdict first committed here; placeholder filled per debate M3 ruling, 2026-09-24)
 
 ## Follow-up note (not a claim)
 
