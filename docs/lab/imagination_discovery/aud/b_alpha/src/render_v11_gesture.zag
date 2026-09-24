@@ -1,0 +1,652 @@
+@import("common_v5.zag")
+// ============================================================
+// render_v11_gesture.zag - AUDIO V11 Fork G (GESTURE).
+// Gesture-driven phonation-state machine driving a child waveguide tract.
+// Frozen design: PREREG_v11_gesture.md (commit efa5f35a).
+//
+// Source: naive sawtooth (phase accumulator) -> 256-entry "Glottal Shaper"
+// LUT with three frozen curves blended by continuous effort e in [0,1]:
+//   pressed (hard-clip knee, shouts/onsets), modal (soft-clip, steady
+//   voice), breathy (sigmoid, releases/giggles). Jitter 2-4% of period,
+//   5.5 Hz vibrato +-1.2%, 0.7 Hz wander +-0.8%, shimmer.
+// Gesture states per utterance (expanded to 256-sample control tracks):
+//   Inhale (60-90 ms, breath noise through open tract) -> Attack (30-60 ms,
+//   +20% pitch overshoot, pressed) -> Sustain (150-600 ms, modal, wobble)
+//   -> Release (50-90 ms, -10% pitch drop, breathy air leak).
+//   Giggle syllable = rapid Attack(35ms)->Release(60ms) loop at 5-8 Hz.
+// Tract: 13-section Kelly-Lochbaum digital waveguide, ~10 cm child tract,
+// per-section damping (wide child bandwidths), glottis reflection with
+// source injection, lips -0.9, 1-zero radiation HP. Vowel area-function
+// LUTs (/i/,/e/,/a/,/o/,/u/, child scale); the shaper output EXCITES the
+// tract, so formants are real resonances.
+// Scene: 30 s playground (yard -> chase -> shared laughter -> wind-down),
+// 3 child voices, footsteps (child thud), 2-layer noise bed.
+// Pure Zag, zero RNG in render path (h32/h01 hash streams only).
+// Byte-identical reruns: everything is a pure function of the frozen seed.
+// ============================================================
+
+const NS:i64 = 1323000;      // 30 s * 44100
+const NKT:i64 = 5169;        // control ticks + 1 (256-sample grid)
+const SEED:i64 = 20260923;
+const NEVMAX:i64 = 96;
+const NSEC:i64 = 13;         // waveguide sections
+const NJ:i64 = 12;           // junctions
+const NTR:i64 = 15;          // 5 tracks x 3 voices
+// hash streams (fixed salts)
+const HS_JIT:i64 = 81001;
+const HS_SHM:i64 = 81002;
+const HS_BR:i64 = 81003;
+const HS_BED:i64 = 81004;
+const HS_STP:i64 = 81005;
+
+// ---------- quadrant sine (arg in [0, 2*pi)) ----------
+fn fsin_q(x:f64)f64{
+    let t:f64=x;
+    let s:f64=1.0;
+    if(t>=3.141592653589793){t=t-3.141592653589793;s=-1.0;}
+    if(t>=1.5707963267948966){t=3.141592653589793-t;}
+    let x2:f64=t*t;
+    let x3:f64=x2*t;
+    let x5:f64=x3*x2;
+    let x7:f64=x5*x2;
+    let x9:f64=x7*x2;
+    return s*(t-x3/6.0+x5/120.0-x7/5040.0+x9/362880.0);
+}
+
+// ---------- glottal shaper LUTs: 3 x 256 entries, Q24 ----------
+fn shaper_init(lut:[]u8)void{
+    let c:i64=0;
+    while(c<3){
+        let i:i64=0;
+        while(i<256){
+            let x:f64=((i as f64)/127.5)-1.0;
+            let y:f64=x;
+            if(c==0){
+                let t:f64=3.0*x;
+                if(t>1.0){t=1.0;}
+                if(t<-1.0){t=-1.0;}
+                y=t;
+            }
+            if(c==1){
+                y=1.5*x-0.5*x*x*x;
+                if(y>1.0){y=1.0;}
+                if(y<-1.0){y=-1.0;}
+            }
+            if(c==2){
+                let ax:f64=x;
+                if(ax<0.0){ax=-ax;}
+                y=x/(1.0+1.5*ax);
+            }
+            put64(lut,((c*256+i))<<3,(y*16777216.0) as i64);
+            i=i+1;
+        }
+        c=c+1;
+    }
+}
+fn shaper_at(lut:[]u8,c:i64,x:f64)f64{
+    let idx:i64=((x+1.0)*127.5) as i64;
+    if(idx<0){idx=0;}
+    if(idx>255){idx=255;}
+    return (get64(lut,((c*256+idx))<<3) as f64)/16777216.0;
+}
+
+// ---------- child vowel area LUTs: 5 x 13, Q10. order /i/,/e/,/a/,/o/,/u/ ----------
+fn areas_init(a:[]u8)void{
+    // /i/
+    put64(a,0<<3,(2.0*1024.0) as i64);put64(a,1<<3,(2.6*1024.0) as i64);
+    put64(a,2<<3,(3.2*1024.0) as i64);put64(a,3<<3,(2.4*1024.0) as i64);
+    put64(a,4<<3,(1.6*1024.0) as i64);put64(a,5<<3,(1.0*1024.0) as i64);
+    put64(a,6<<3,(0.6*1024.0) as i64);put64(a,7<<3,(0.5*1024.0) as i64);
+    put64(a,8<<3,(0.7*1024.0) as i64);put64(a,9<<3,(1.2*1024.0) as i64);
+    put64(a,10<<3,(2.0*1024.0) as i64);put64(a,11<<3,(3.0*1024.0) as i64);
+    put64(a,12<<3,(4.0*1024.0) as i64);
+    // /e/
+    put64(a,13<<3,(2.0*1024.0) as i64);put64(a,14<<3,(2.4*1024.0) as i64);
+    put64(a,15<<3,(3.0*1024.0) as i64);put64(a,16<<3,(2.6*1024.0) as i64);
+    put64(a,17<<3,(2.0*1024.0) as i64);put64(a,18<<3,(1.6*1024.0) as i64);
+    put64(a,19<<3,(1.8*1024.0) as i64);put64(a,20<<3,(2.4*1024.0) as i64);
+    put64(a,21<<3,(3.2*1024.0) as i64);put64(a,22<<3,(4.0*1024.0) as i64);
+    put64(a,23<<3,(4.6*1024.0) as i64);put64(a,24<<3,(5.0*1024.0) as i64);
+    put64(a,25<<3,(5.4*1024.0) as i64);
+    // /a/
+    put64(a,26<<3,(0.78*1024.0) as i64);put64(a,27<<3,(1.18*1024.0) as i64);
+    put64(a,28<<3,(3.12*1024.0) as i64);put64(a,29<<3,(3.46*1024.0) as i64);
+    put64(a,30<<3,(2.7*1024.0) as i64);put64(a,31<<3,(3.66*1024.0) as i64);
+    put64(a,32<<3,(3.7*1024.0) as i64);put64(a,33<<3,(6.131*1024.0) as i64);
+    put64(a,34<<3,(7.98*1024.0) as i64);put64(a,35<<3,(9.62*1024.0) as i64);
+    put64(a,36<<3,(10.38*1024.0) as i64);put64(a,37<<3,(9.4*1024.0) as i64);
+    put64(a,38<<3,(11.3*1024.0) as i64);
+    // /o/
+    put64(a,39<<3,(1.436*1024.0) as i64);put64(a,40<<3,(2.3*1024.0) as i64);
+    put64(a,41<<3,(4.476*1024.0) as i64);put64(a,42<<3,(3.98*1024.0) as i64);
+    put64(a,43<<3,(2.724*1024.0) as i64);put64(a,44<<3,(2.676*1024.0) as i64);
+    put64(a,45<<3,(1.9*1024.0) as i64);put64(a,46<<3,(1.38*1024.0) as i64);
+    put64(a,47<<3,(3.3*1024.0) as i64);put64(a,48<<3,(2.971*1024.0) as i64);
+    put64(a,49<<3,(2.4*1024.0) as i64);put64(a,50<<3,(0.4*1024.0) as i64);
+    put64(a,51<<3,(1.1*1024.0) as i64);
+    // /u/
+    put64(a,52<<3,(2.0*1024.0) as i64);put64(a,53<<3,(2.6*1024.0) as i64);
+    put64(a,54<<3,(3.0*1024.0) as i64);put64(a,55<<3,(3.4*1024.0) as i64);
+    put64(a,56<<3,(3.0*1024.0) as i64);put64(a,57<<3,(2.6*1024.0) as i64);
+    put64(a,58<<3,(2.4*1024.0) as i64);put64(a,59<<3,(2.2*1024.0) as i64);
+    put64(a,60<<3,(2.0*1024.0) as i64);put64(a,61<<3,(1.6*1024.0) as i64);
+    put64(a,62<<3,(1.2*1024.0) as i64);put64(a,63<<3,(0.8*1024.0) as i64);
+    put64(a,64<<3,(0.6*1024.0) as i64);
+}
+fn aget(a:[]u8,v:i64,s:i64)f64{
+    return (get64(a,((v*13+s))<<3) as f64)/1024.0;
+}
+
+// ---------- event table: 10 i64 fields ----------
+// 0 t0_ms | 1 dur_ms | 2 kind(0 utt,1 giggle,2 step) | 3 chan
+// 4 f0a_x16 | 5 f0b_x16 | 6 amp_x1e6 | 7 vow0_x16 | 8 vow1_x16
+// 9 aux (utype 0 chant/1 shout/2 call/3 whimper | nsyll | tau_ms_x16)
+fn evg(ev:[]u8,i:i64,f:i64)i64{
+    return get64(ev,((i*10+f))<<3);
+}
+fn evs(ev:[]u8,i:i64,f:i64,v:i64)void{
+    put64(ev,((i*10+f))<<3,v);
+}
+fn ev_add(ev:[]u8,n:i64,t0ms:f64,durms:f64,kind:i64,ch:i64,a:f64,b:f64,amp:f64,v0:f64,v1:f64,aux:f64)i64{
+    evs(ev,n,0,(t0ms as i64));
+    evs(ev,n,1,(durms as i64));
+    evs(ev,n,2,kind);
+    evs(ev,n,3,ch);
+    evs(ev,n,4,(a*16.0) as i64);
+    evs(ev,n,5,(b*16.0) as i64);
+    evs(ev,n,6,(amp*1000000.0) as i64);
+    evs(ev,n,7,(v0*16.0) as i64);
+    evs(ev,n,8,(v1*16.0) as i64);
+    evs(ev,n,9,(aux*16.0) as i64);
+    return n+1;
+}
+
+// ---------- scene script: 30 s playground arc ----------
+// vowel ids: 0 /i/ 1 /e/ 2 /a/ 3 /o/ 4 /u/
+fn script_build(ev:[]u8,nout:*i64)void{
+    let n:i64=0;
+    // P1 yard 0-8 s: chants + calls
+    n=ev_add(ev,n,500.0,900.0,0,0,600.0,640.0,0.50,2.0,2.0,0.0);
+    n=ev_add(ev,n,1800.0,1200.0,0,1,680.0,600.0,0.45,3.0,2.0,2.0);
+    n=ev_add(ev,n,3200.0,800.0,0,2,615.0,655.0,0.50,2.0,3.0,0.0);
+    n=ev_add(ev,n,4600.0,1000.0,0,0,655.0,595.0,0.40,2.0,3.0,2.0);
+    n=ev_add(ev,n,5800.0,700.0,0,1,735.0,695.0,0.45,3.0,2.0,0.0);
+    n=ev_add(ev,n,6900.0,900.0,0,2,560.0,600.0,0.40,3.0,2.0,2.0);
+    // P2 chase 8-16 s: shouts, calls, giggle chains
+    n=ev_add(ev,n,8400.0,600.0,0,1,720.0,780.0,0.80,2.0,2.0,1.0);
+    n=ev_add(ev,n,9300.0,550.0,0,0,660.0,740.0,0.85,2.0,2.0,1.0);
+    n=ev_add(ev,n,10200.0,800.0,0,2,580.0,640.0,0.60,2.0,3.0,2.0);
+    n=ev_add(ev,n,11000.0,1400.0,1,0,640.0,640.0,0.70,2.0,2.0,8.0);
+    n=ev_add(ev,n,12800.0,500.0,0,1,775.0,735.0,0.80,2.0,2.0,1.0);
+    n=ev_add(ev,n,13600.0,1200.0,1,2,580.0,580.0,0.65,2.0,1.0,7.0);
+    // P3 shared laughter 16-24 s
+    n=ev_add(ev,n,16500.0,1600.0,1,0,660.0,660.0,0.75,2.0,2.0,9.0);
+    n=ev_add(ev,n,18400.0,1500.0,1,1,735.0,735.0,0.70,2.0,1.0,8.0);
+    n=ev_add(ev,n,20200.0,1400.0,1,2,600.0,600.0,0.70,2.0,3.0,8.0);
+    n=ev_add(ev,n,21900.0,700.0,0,0,715.0,795.0,0.80,2.0,2.0,1.0);
+    n=ev_add(ev,n,22800.0,900.0,0,1,660.0,600.0,0.50,3.0,2.0,2.0);
+    // P4 wind-down 24-30 s
+    n=ev_add(ev,n,24500.0,1100.0,0,2,560.0,520.0,0.40,3.0,2.0,2.0);
+    n=ev_add(ev,n,26000.0,1000.0,0,0,600.0,560.0,0.38,2.0,3.0,2.0);
+    n=ev_add(ev,n,27400.0,1000.0,1,1,640.0,640.0,0.45,2.0,2.0,5.0);
+    n=ev_add(ev,n,28600.0,800.0,0,2,615.0,575.0,0.30,2.0,3.0,2.0);
+    // footsteps: light yard, fast chase, sparse later
+    let i:i64=0;
+    while(i<5){
+        let t:f64=1200.0+1400.0*(i as f64);
+        n=ev_add(ev,n,t,0.0,2,0,110.0+15.0*(i as f64),0.0,0.10,0.0,0.0,120.0);
+        i=i+1;
+    }
+    i=0;
+    while(i<16){
+        let t:f64=8600.0+450.0*(i as f64);
+        let fr:f64=100.0+45.0*h01(SEED,6100+i);
+        n=ev_add(ev,n,t,0.0,2,0,fr,0.0,0.10,0.0,0.0,100.0);
+        i=i+1;
+    }
+    n=ev_add(ev,n,17000.0,0.0,2,0,110.0,0.0,0.12,0.0,0.0,110.0);
+    n=ev_add(ev,n,19500.0,0.0,2,0,125.0,0.0,0.12,0.0,0.0,110.0);
+    n=ev_add(ev,n,22000.0,0.0,2,0,105.0,0.0,0.12,0.0,0.0,110.0);
+    n=ev_add(ev,n,25200.0,0.0,2,0,110.0,0.0,0.09,0.0,0.0,120.0);
+    n=ev_add(ev,n,27800.0,0.0,2,0,100.0,0.0,0.09,0.0,0.0,120.0);
+    // murmur bed: low soft utterances keep the playground alive
+    i=0;
+    while(i<24){
+        let t:f64=400.0+29200.0*h01(SEED,6200+i);
+        let dur:f64=400.0+300.0*h01(SEED,6210+i);
+        let ch:i64=h32(SEED,6220+i)%3;
+        let f0a:f64=575.0+160.0*h01(SEED,6230+i);
+        let f0b:f64=f0a+(h01(SEED,6240+i)-0.5)*120.0;
+        let amp:f64=0.10+0.08*h01(SEED,6250+i);
+        let v0:f64=2.0+h01(SEED,6260+i)*1.0;
+        n=ev_add(ev,n,t,dur,0,ch,f0a,f0b,amp,v0,v0,2.0);
+        i=i+1;
+    }
+    // insertion sort by t0 (deterministic, strict)
+    let a:i64=1;
+    while(a<n){
+        let b:i64=a;
+        while(b>0 && evg(ev,b,0)<evg(ev,b-1,0)){
+            let f:i64=0;
+            while(f<10){
+                let tmp:i64=evg(ev,b,f);
+                evs(ev,b,f,evg(ev,b-1,f));
+                evs(ev,b-1,f,tmp);
+                f=f+1;
+            }
+            b=b-1;
+        }
+        a=a+1;
+    }
+    nout.*=n;
+}
+
+// ---------- control tracks ----------
+// layout: T = c*5 + t; t: 0 amp, 1 f0w, 2 effw, 3 breathw, 4 voww
+// amp stored x2^30; f0w amp-weighted x65536; effw/breathw amp-weighted x2^30;
+// voww amp-weighted x16. Render normalizes weighted tracks by amp.
+fn tr_add(tr:[]u8,T:i64,k:i64,v:f64,sc:f64)void{
+    if(k<0){return;}
+    if(k>=NKT){return;}
+    let o:i64=((T*NKT+k))<<3;
+    put64(tr,o,get64(tr,o)+((v*sc) as i64));
+}
+fn trk2(tr:[]u8,T:i64,n:i64,sc:f64)f64{
+    let k:i64=n>>8;
+    if(k>=NKT-1){k=NKT-2;}
+    let fr:f64=((n-(k<<8)) as f64)/256.0;
+    let e0:i64=(T*NKT+k)<<3;
+    let a:f64=(get64(tr,e0) as f64)/sc;
+    let b:f64=(get64(tr,e0+8) as f64)/sc;
+    return a+(b-a)*fr;
+}
+fn tick_of(ms:f64)i64{
+    return ((ms*44.1/256.0) as i64);
+}
+// write one gesture segment [k0,k1): amp/eff/breath envelopes sstepped,
+// f0 and vow glided with sstep
+fn seg(tr:[]u8,c:i64,k0:i64,k1:i64,amp0:f64,amp1:f64,f00:f64,f01:f64,eff0:f64,eff1:f64,br0:f64,br1:f64,vw0:f64,vw1:f64)void{
+    if(k1<=k0){return;}
+    if(k0<0){k0=0;}
+    if(k1>=NKT){k1=NKT-1;}
+    let span:f64=(k1-k0) as f64;
+    let k:i64=k0;
+    while(k<k1){
+        let x:f64=sstep(((k-k0) as f64)/span);
+        let e:f64=amp0+(amp1-amp0)*x;
+        let f0v:f64=f00+(f01-f00)*x;
+        let ef:f64=eff0+(eff1-eff0)*x;
+        let br:f64=br0+(br1-br0)*x;
+        let vw:f64=vw0+(vw1-vw0)*x;
+        let T:i64=c*5;
+        tr_add(tr,T+0,k,e,1073741824.0);
+        tr_add(tr,T+1,k,e*f0v,65536.0);
+        tr_add(tr,T+2,k,e*ef,1073741824.0);
+        tr_add(tr,T+3,k,e*br,1073741824.0);
+        tr_add(tr,T+4,k,e*vw,16.0);
+        k=k+1;
+    }
+}
+// utterance -> gesture tracks (with inhale pre-roll)
+fn utt_expand(tr:[]u8,c:i64,t0ms:f64,durms:f64,f0a:f64,f0b:f64,amp:f64,v0:f64,v1:f64,utype:i64)void{
+    let atk:f64=45.0;
+    let rel:f64=70.0;
+    let eff_s:f64=0.52;
+    let br_s:f64=0.08;
+    let ov:f64=1.20;
+    if(utype==1){atk=30.0;rel=60.0;eff_s=0.75;br_s=0.12;ov=1.22;}
+    if(utype==2){atk=50.0;rel=80.0;eff_s=0.55;br_s=0.08;ov=1.18;}
+    if(utype==3){atk=80.0;rel=90.0;eff_s=0.32;br_s=0.30;ov=1.12;}
+    let k0:i64=tick_of(t0ms);
+    let ka:i64=tick_of(t0ms+atk);
+    let kr:i64=tick_of(t0ms+durms-rel);
+    let k3:i64=tick_of(t0ms+durms);
+    let ki:i64=tick_of(t0ms-70.0);
+    // inhale: breath noise through open tract, tiny amp
+    seg(tr,c,ki,k0,0.0,0.06,f0a,f0a,0.05,0.05,0.0,0.6,v0,v0);
+    // attack: fast amp rise, +20% overshoot decaying, pressed
+    seg(tr,c,k0,ka,0.0,amp,f0a*ov,f0a,0.9,0.9,0.05,0.05,v0,v0);
+    // sustain: modal wobble, vowel morph
+    seg(tr,c,ka,kr,amp,amp,f0a,f0b,0.9,eff_s,0.05,br_s,v0,v1);
+    // release: pitch -10%, breathy leak
+    seg(tr,c,kr,k3,amp,0.0,f0b,f0b*0.9,eff_s,0.12,br_s,0.35,v1,v1);
+}
+// giggle chain -> rapid attack/release syllable loops
+fn gig_expand(tr:[]u8,c:i64,t0ms:f64,durms:f64,f0:f64,amp:f64,vw:f64,nsyll:i64)void{
+    let per:f64=durms/(nsyll as f64);
+    let ki:i64=tick_of(t0ms-60.0);
+    let k0:i64=tick_of(t0ms);
+    seg(tr,c,ki,k0,0.0,0.06,f0,f0,0.05,0.05,0.0,0.6,vw,vw);
+    let i:i64=0;
+    while(i<nsyll){
+        let st:f64=t0ms+(i as f64)*per;
+        let ka:i64=tick_of(st+35.0);
+        let ke:i64=tick_of(st+per);
+        let ks:i64=tick_of(st);
+        // attack 35 ms: pressed, pitch up
+        seg(tr,c,ks,ka,amp*0.3,amp,f0*1.15,f0*1.05,0.9,0.9,0.10,0.10,vw,vw);
+        // release: breathy, pitch down, air burst
+        seg(tr,c,ka,ke,amp,amp*0.25,f0*1.05,f0*0.95,0.9,0.15,0.10,0.35,vw,vw);
+        i=i+1;
+    }
+}
+fn tracks_build(tr:[]u8,ev:[]u8,nev:i64)void{
+    let i:i64=0;
+    while(i<nev){
+        let kind:i64=evg(ev,i,2);
+        let ch:i64=evg(ev,i,3);
+        if(kind==0){
+            let f0a:f64=(evg(ev,i,4) as f64)/16.0;
+            let f0b:f64=(evg(ev,i,5) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let v0:f64=(evg(ev,i,7) as f64)/16.0;
+            let v1:f64=(evg(ev,i,8) as f64)/16.0;
+            let ut:i64=(((evg(ev,i,9) as f64)/16.0) as i64);
+            utt_expand(tr,ch,(evg(ev,i,0) as f64),(evg(ev,i,1) as f64),f0a,f0b,amp,v0,v1,ut);
+        }
+        if(kind==1){
+            let f0:f64=(evg(ev,i,4) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let vw:f64=(evg(ev,i,7) as f64)/16.0;
+            let ns:i64=(((evg(ev,i,9) as f64)/16.0) as i64);
+            gig_expand(tr,ch,(evg(ev,i,0) as f64),(evg(ev,i,1) as f64),f0,amp,vw,ns);
+        }
+        i=i+1;
+    }
+}
+
+// ---------- mix helpers ----------
+fn mix_add(m:[]u8,n:i64,s:f64)void{
+    let o:i64=n<<3;
+    put64(m,o,get64(m,o)+((s*16777216.0) as i64));
+}
+// waveguide state access: pr 0..12, pl 13..25 (Q24)
+fn wget(ws:[]u8,c:i64,e:i64)f64{
+    return (get64(ws,(((c*26+e))<<3)) as f64)/16777216.0;
+}
+fn wput(ws:[]u8,c:i64,e:i64,v:f64)void{
+    put64(ws,(((c*26+e))<<3),(v*16777216.0) as i64);
+}
+// per-voice areas (13, Q10) and reflectances (12, Q30)
+fn aput(ar:[]u8,c:i64,s:i64,v:f64)void{
+    put64(ar,(((c*13+s))<<3),(v*1024.0) as i64);
+}
+fn rput(rf:[]u8,c:i64,j:i64,v:f64)void{
+    put64(rf,(((c*12+j))<<3),(v*1073741824.0) as i64);
+}
+fn rget(rf:[]u8,c:i64,j:i64)f64{
+    return (get64(rf,(((c*12+j))<<3)) as f64)/1073741824.0;
+}
+// recompute areas + reflectances for voice c at vowel position vow
+fn tract_update(lut:[]u8,ar:[]u8,rf:[]u8,c:i64,vow:f64,ascale:f64)void{
+    let v:f64=vow;
+    if(v<0.0){v=0.0;}
+    if(v>4.0){v=4.0;}
+    let v0:i64=v as i64;
+    if(v0>3){v0=3;}
+    let fr:f64=v-(v0 as f64);
+    let s:i64=0;
+    while(s<13){
+        let a0:f64=aget(lut,v0,s);
+        let a1:f64=aget(lut,v0+1,s);
+        aput(ar,c,s,(a0+(a1-a0)*fr)*ascale);
+        s=s+1;
+    }
+    let j:i64=0;
+    while(j<12){
+        let A0:f64=(get64(ar,(((c*13+j))<<3)) as f64)/1024.0;
+        let A1:f64=(get64(ar,(((c*13+j+1))<<3)) as f64)/1024.0;
+        rput(rf,c,j,(A0-A1)/(A0+A1));
+        j=j+1;
+    }
+}
+
+// ---------- pass 1: ambience (two-layer bed, proven V10-V3) ----------
+fn amb_pass(mix:[]u8,master:f64,amblevel:f64)void{
+    let y1:f64=0.0;
+    let y2:f64=0.0;
+    let y3:f64=0.0;
+    let y4:f64=0.0;
+    let z1:f64=0.0;
+    let z2:f64=0.0;
+    let p1:f64=0.0;
+    let p2:f64=0.0;
+    let g1:f64=0.0;
+    let g2:f64=0.0;
+    let g3:f64=0.0;
+    let n:i64=0;
+    while(n<NS){
+        p1=p1+6.283185307179586*0.37/44100.0;
+        if(p1>=6.283185307179586){p1=p1-6.283185307179586;}
+        p2=p2+6.283185307179586*0.83/44100.0;
+        if(p2>=6.283185307179586){p2=p2-6.283185307179586;}
+        g1=g1+6.283185307179586*0.61/44100.0;
+        if(g1>=6.283185307179586){g1=g1-6.283185307179586;}
+        g2=g2+6.283185307179586*1.27/44100.0;
+        if(g2>=6.283185307179586){g2=g2-6.283185307179586;}
+        g3=g3+6.283185307179586*0.43/44100.0;
+        if(g3>=6.283185307179586){g3=g3-6.283185307179586;}
+        let fc:f64=750.0*(1.0+0.35*fsin_q(p1+0.5)+0.18*fsin_q(p2+1.7));
+        let w:f64=6.283185307179586*fc/44100.0;
+        let a:f64=w/(1.0+w);
+        let wa:f64=6.283185307179586*2300.0/44100.0;
+        let aa:f64=wa/(1.0+wa);
+        let x:f64=(h01(HS_BED,n)-0.5)*2.0;
+        y1=y1+a*(x-y1);
+        y2=y2+a*(y1-y2);
+        y3=y3+a*(y2-y3);
+        y4=y4+a*(y3-y4);
+        z1=z1+aa*(x-z1);
+        z2=z2+aa*(z1-z2);
+        let gb:f64=0.36*(1.0+0.25*fsin_q(g1+1.0)+0.14*fsin_q(g2+0.9));
+        let ga:f64=0.12*(1.0+0.30*fsin_q(g3+0.4));
+        mix_add(mix,n,(gb*y4+ga*z2)*amblevel*master);
+        n=n+1;
+    }
+}
+
+// ---------- pass 2: voices - shaper -> child waveguide ----------
+fn voice_pass(mix:[]u8,tr:[]u8,lut:[]u8,alut:[]u8,ws:[]u8,ar:[]u8,rf:[]u8,vmaster:f64,damp:f64,radc:f64,breath_gain:f64,jitamp:f64)void{
+    let ph0:f64=0.0;
+    let ph1:f64=0.0;
+    let ph2:f64=0.0;
+    let vp0:f64=0.0;
+    let vp1:f64=0.0;
+    let vp2:f64=0.0;
+    let wp0:f64=0.0;
+    let wp1:f64=0.0;
+    let wp2:f64=0.0;
+    let rp0:f64=0.0;
+    let rp1:f64=0.0;
+    let rp2:f64=0.0;
+    let tk0:i64=-1;
+    let tk1:i64=-1;
+    let tk2:i64=-1;
+    // per-voice tract area scale (anatomy variation, frozen)
+    let asc0:f64=1.00;
+    let asc1:f64=0.94;
+    let asc2:f64=1.06;
+    let n:i64=0;
+    while(n<NS){
+        let c:i64=0;
+        while(c<3){
+            let T:i64=c*5;
+            let amp:f64=trk2(tr,T+0,n,1073741824.0);
+            let f0:f64=600.0;
+            let eff:f64=0.5;
+            let br:f64=0.0;
+            let vw:f64=2.0;
+            if(amp>0.0000001){
+                f0=trk2(tr,T+1,n,65536.0)/amp;
+                eff=trk2(tr,T+2,n,1073741824.0)/amp;
+                br=trk2(tr,T+3,n,1073741824.0)/amp;
+                vw=trk2(tr,T+4,n,16.0)/amp;
+            }
+            let k:i64=n>>8;
+            let asc:f64=asc0;
+            if(c==1){asc=asc1;}
+            if(c==2){asc=asc2;}
+            if(c==0 && k!=tk0){tract_update(alut,ar,rf,c,vw,asc);tk0=k;}
+            if(c==1 && k!=tk1){tract_update(alut,ar,rf,c,vw,asc);tk1=k;}
+            if(c==2 && k!=tk2){tract_update(alut,ar,rf,c,vw,asc);tk2=k;}
+            // vibrato + wander LFOs
+            let ph:f64=ph0;
+            let vp:f64=vp0;
+            let wp:f64=wp0;
+            let rp:f64=rp0;
+            if(c==1){ph=ph1;vp=vp1;wp=wp1;rp=rp1;}
+            if(c==2){ph=ph2;vp=vp2;wp=wp2;rp=rp2;}
+            vp=vp+6.283185307179586*5.5/44100.0;
+            if(vp>=6.283185307179586){vp=vp-6.283185307179586;}
+            wp=wp+6.283185307179586*0.7/44100.0;
+            if(wp>=6.283185307179586){wp=wp-6.283185307179586;}
+            let f0e:f64=f0*(1.0+0.012*fsin_q(vp)+0.008*fsin_q(wp));
+            // jitter: hash phase-increment noise, 2-4% of period
+            let jit:f64=1.0+jitamp*(h01(HS_JIT,c*NS+n)-0.5)*2.0;
+            ph=ph+f0e*jit/44100.0;
+            if(ph>=1.0){ph=ph-1.0;}
+            let x:f64=ph*2.0-1.0;
+            let p:f64=shaper_at(lut,0,x);
+            let m:f64=shaper_at(lut,1,x);
+            let b:f64=shaper_at(lut,2,x);
+            let g:f64=m;
+            if(eff<0.5){g=b+(m-b)*2.0*eff;}
+            if(eff>=0.5){g=m+(p-m)*(2.0*eff-1.0);}
+            // shimmer
+            g=g*(1.0+0.05*(h01(HS_SHM,c*NS+n)-0.5)*2.0*eff);
+            let nz:f64=(h01(HS_BR,c*NS+n)-0.5)*2.0;
+            let exc:f64=g*amp+nz*br*breath_gain;
+            // glottal reflection with effort coupling; open on inhale
+            let rg:f64=0.92-0.10*(1.0-eff);
+            if(br>0.4){rg=0.45+0.20*eff;}
+            // Kelly-Lochbaum scatter, correct in-place with scalar carry:
+            // new_pr[j+1]=(1+r)*pr[j]-r*pl[j+1]; new_pl[j]=r*pr[j]+(1-r)*pl[j+1]
+            let a:f64=wget(ws,c,0);
+            let j:i64=0;
+            while(j<12){
+                let b2:f64=wget(ws,c,13+j+1);
+                let r:f64=rget(rf,c,j);
+                let nr:f64=((1.0+r)*a-r*b2)*damp;
+                let nl:f64=(r*a+(1.0-r)*b2)*damp;
+                let an:f64=wget(ws,c,j+1);
+                wput(ws,c,j+1,nr);
+                wput(ws,c,13+j,nl);
+                a=an;
+                j=j+1;
+            }
+            let pl0:f64=wget(ws,c,13);
+            let prN:f64=wget(ws,c,12);
+            wput(ws,c,0,rg*pl0+exc);
+            wput(ws,c,13+12,-0.9*prN);
+            let out:f64=0.1*prN;
+            // lip radiation: 1-zero high-pass
+            let y:f64=out-radc*rp;
+            rp=out;
+            mix_add(mix,n,y*vmaster);
+            if(c==0){ph0=ph;vp0=vp;wp0=wp;rp0=rp;}
+            if(c==1){ph1=ph;vp1=vp;wp1=wp;rp1=rp;}
+            if(c==2){ph2=ph;vp2=vp;wp2=wp;rp2=rp;}
+            c=c+1;
+        }
+        n=n+1;
+    }
+}
+
+// ---------- pass 3: footsteps - child thud (resonant) + noise burst ----------
+fn step_pass(mix:[]u8,ev:[]u8,nev:i64,lut:[]u8,master:f64)void{
+    let i:i64=0;
+    while(i<nev){
+        if(evg(ev,i,2)==2){
+            let t0ms:i64=evg(ev,i,0);
+            let fr:f64=(evg(ev,i,4) as f64)/16.0;
+            let amp:f64=(evg(ev,i,6) as f64)/1000000.0;
+            let tau:f64=((evg(ev,i,9) as f64)/16.0)/1000.0;
+            let n0:i64=((t0ms as f64)*44.1) as i64;
+            let n1:i64=n0+(((6.0*tau*44100.0)) as i64);
+            if(n1>NS){n1=NS;}
+            if(n0<0){n0=0;}
+            let kd:f64=1.0-1.0/(tau*44100.0);
+            let kr:f64=1.0-1.0/(0.010*44100.0);
+            let abl:f64=6.283185307179586*1000.0/44100.0;
+            abl=abl/(1.0+abl);
+            let r:f64=1.0;
+            let d:f64=1.0;
+            let ph:f64=0.0;
+            let bz:f64=0.0;
+            let n:i64=n0;
+            while(n<n1){
+                r=r*kr;
+                d=d*kd;
+                let env:f64=amp*(1.0-r)*d;
+                ph=ph+fr/44100.0;
+                if(ph>=1.0){ph=ph-1.0;}
+                let nz:f64=(h01(HS_STP,n)-0.5)*2.0;
+                bz=bz+abl*(nz-bz);
+                // thud: damped low sine + LP'd contact noise riding the onset
+                let s:f64=env*lut_sin(ph)+0.5*amp*bz*d*(1.0-r);
+                mix_add(mix,n,s*master);
+                n=n+1;
+            }
+        }
+        i=i+1;
+    }
+}
+fn lut_sin(ph:f64)f64{
+    return fsin_q(ph*6.283185307179586);
+}
+
+fn main()i32{
+    let outp:[]u8=_zag_arg(1);
+    if(outp.len==0){
+        print_str("usage: render_v11_gesture <out.wav>\n");
+        return 1;
+    }
+    // tuning knobs (within PREREG_v11_gesture.md §8 ranges)
+    let master:f64=2.0;
+    let amblevel:f64=0.5;
+    let vmaster:f64=10.0;
+    let damp:f64=0.9992;
+    let radc:f64=0.85;
+    let breath_gain:f64=0.25;
+    let jitamp:f64=0.015;
+    // ---- arenas (explicitly zeroed) ----
+    let evp:*u8=_zag_malloc(NEVMAX*80) as *u8;
+    let ev:[]u8=evp[0..(NEVMAX*80)];
+    let tr:[]u8=(_zag_malloc(NTR*NKT*8) as *u8)[0..(NTR*NKT*8)];
+    let lut:[]u8=(_zag_malloc(3*256*8) as *u8)[0..(3*256*8)];
+    let alut:[]u8=(_zag_malloc(5*13*8) as *u8)[0..(5*13*8)];
+    let ws:[]u8=(_zag_malloc(3*26*8) as *u8)[0..(3*26*8)];
+    let ar:[]u8=(_zag_malloc(3*13*8) as *u8)[0..(3*13*8)];
+    let rf:[]u8=(_zag_malloc(3*12*8) as *u8)[0..(3*12*8)];
+    let mix:[]u8=(_zag_malloc(NS*8) as *u8)[0..(NS*8)];
+    let z:i64=0;
+    while(z<NS*8){mix[z]=0;z=z+1;}
+    z=0;
+    while(z<NTR*NKT*8){tr[z]=0;z=z+1;}
+    z=0;
+    while(z<NEVMAX*80){ev[z]=0;z=z+1;}
+    z=0;
+    while(z<3*26*8){ws[z]=0;z=z+1;}
+    shaper_init(lut);
+    print_str("shaper ok\n");
+    areas_init(alut);
+    print_str("areas ok\n");
+    let np:*u8=_zag_malloc(8) as *u8;
+    let npp:*i64=np as *i64;
+    npp.*=0;
+    script_build(ev,npp);
+    let nev:i64=npp.*;
+    _zag_free(np);
+    print_str("events=");print_i64(nev);print_nl();
+    tracks_build(tr,ev,nev);
+    print_str("tracks ok\n");
+    amb_pass(mix,master,amblevel);
+    print_str("amb ok\n");
+    voice_pass(mix,tr,lut,alut,ws,ar,rf,vmaster,damp,radc,breath_gain,jitamp);
+    print_str("voice ok\n");
+    step_pass(mix,ev,nev,lut,master);
+    print_str("steps ok\n");
+    let rc:i64=wav_write(outp,mix,NS);
+    print_str("render rc=");print_i64(rc);print_nl();
+    return (rc<0) as i32;
+}
