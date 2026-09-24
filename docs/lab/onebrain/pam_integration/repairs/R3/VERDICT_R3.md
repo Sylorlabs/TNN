@@ -83,4 +83,4 @@ Files changed (identical edit in all three src trees):
 ## Commits (sylorlabs/TNN, branch tnn-native-lab)
 
 - Prereg: `5d4584e523422c16743cb8698aedc207ba8ff8a0`
-- Evidence+verdict: `FILL_EVIDENCE_SHA` (to be filled at commit time)
+- Evidence+verdict: `f4f1131f6d66f18c0da98d55d8b071fb1b0b3d60`
