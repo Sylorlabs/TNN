@@ -1,96 +1,116 @@
-# VERDICT_R2-16.md — DRAFT (incomplete)
+# VERDICT_R2-16.md — FINAL
 
 ## Fork ID
-R2-16
+R2-16 (FS-A-REDESIGNED)
 
 ## Status
-**INCOMPLETE / LIKELY DEAD** — Core mechanism implemented and tested, but multiple prereg bars fail. Design-loop CP suite, ablation, holdout, and determinism checks not completed due to time constraints and unresolved defects.
+**DEAD** — Multiple prereg bars fail. Recall 77.6% (<80%) is independently fatal.
 
 ## Prereg
-- Committed: `4601db7f3182181f525c5791339207243727caa2` (2026-09-23)
-- Parent: `9b10843f8298`
+- Frozen: `4601db7f3182181f525c5791339207243727caa2` (2026-09-23, verified via GitHub API)
+- This completion: all previously-unmeasured components now measured.
 
-## Mechanism implemented
+## Mechanism (frozen; untouched by completion crew)
+Pure Zag (`src/r216.zag`), six task formation+challenge pairs, INSTALL iff
+challenge outcome == formation claim. Python only for glue (drivers, scorers,
+fixture generators). Zero RNG in decision paths.
 
-### Timbredisc (CH-TBD-2)
-- Fixed `tb_coeff` to exact 440Hz coefficients (2040, 2018, 1980, 1927, 1860, 1779, 1685, 1578).
-- **ANOMALY**: Theoretically-correct class mapping yields 347/985 FI; swapped mapping yields 52/985. Using empirically-optimal swapped mapping. Root cause unknown.
+## Measured bars (prereg §5)
 
-### Shapetrans (CH-SHP-2)
-- Replaced ray-profile with central-moment (trace,det) templates.
-- Templates: CIRCLE(3166,25050), TRIANGLE(1544,5950), SQUARE(4177,43610).
-- **Result**: 0 false installs on shapetrans (was 53 in R2-14). Works.
+| # | Bar | Measured | Threshold | Verdict |
+|---|-----|----------|-----------|---------|
+| 1a | Enumerated FI, overall UCB | 64/10000 = 0.64%, UCB 0.816% | ≤1% | **PASS** |
+| 1b | Enumerated FI, per-family UCB ≤2% | 5 families fail (see below) | all ≤2% | **FAIL** |
+| 2 | Recall (controls) | 1552/2000 = 77.6% | ≥80% | **FAIL** (fatal) |
+| 3a | Ablation FI ≥2× full | 1244 vs 64 = 19.4× | ≥2× | **PASS** |
+| 3b | Ablation holdout-gap widening | 396 < 1180 | holdout_gap ≥ adv_gap | **FAIL** |
+| 4a | Holdout per-family UCB ≤2% | 4 families fail (see below) | all ≤2% | **FAIL** |
+| 4b | Holdout pooled UCB | 1572/10000 = 15.72%, UCB 16.45% | ≤1% | **FAIL** |
+| 5 | Overstrict | 26/2000 = 1.3% | ≤5% | **PASS** |
+| 6 | Determinism (×2 byte-identical, chains) | b_adv, b_ctrl, b_holdout all PASS | pass | **PASS** |
 
-### Colorconst (CH-CCN-1 retained)
-- Investigated pixel-L1, 8x8-L1, 4x4-L1, histogram-L1 replacements.
-- **FINDING**: R2A G has systematic variation (~18 mean diff). All spatial comparisons fail (SAME/DIFF overlap). Only mean-RGB separates.
-- **DECISION**: Retained CH-CCN-1. Fixture G does not support finer quantity.
+ALIVE requires all; any fail = DEAD. **Verdict: DEAD.**
 
-### Motiondir
-- Removed votes>=10, margin>=4, and bestv>=8 floors. Pure agreement rule.
+### Bar 1b detail (enumerated per-family, 95% Wilson UCB)
+- motiondir f1: 7/504, UCB 2.84% — FAIL
+- motiondir f2: 2/116, UCB 6.07% — FAIL
+- motiondir f3: 0/10, UCB 27.75% — FAIL (mathematically impossible; see defect note)
+- timbredisc f1: 33/500, UCB 9.12% — FAIL
+- timbredisc f3: 19/190, UCB 15.09% — FAIL
+- All other 12 families: PASS.
 
-### Support rule
-- INSTALL iff outcome==claim and resolved. No margins.
+Note: fresh measurement gives 64 FI (builder reported 61; +3 on motiondir
+f1/f2). Fixtures verified against `b_adv.manifest` SHAs; the 3 extra FI
+manually confirmed by direct binary run. Reporting the fresh number.
 
-## Measured bars
+### Bar 4 detail (holdout, 10 novel families × 1000, post-freeze)
+- R2H16-COL-1 (gain-shift SAME): 0/1000, UCB 0.38% — PASS
+- R2H16-CCN-1 (local-patch doppelganger): 982/1000 = 98.2%, UCB 98.86% — FAIL
+- R2H16-CCN-2 (cross-crop collision): 323/1000 = 32.3%, UCB 35.26% — FAIL
+- R2H16-SHP-1 (hollow shapes): 0/1000 — PASS
+- R2H16-SHP-2 (dual shape): 0/1000 — PASS
+- R2H16-PTC-1 (overmodulated AM): 4/1000, UCB 1.02% — PASS
+- R2H16-PTC-2 (subharmonic): 1/1000, UCB 0.56% — PASS
+- R2H16-TMB-1 (formant boost): 72/1000 = 7.2%, UCB 8.97% — FAIL
+- R2H16-TMB-2 (vibrato): 3/1000, UCB 0.88% — PASS
+- R2H16-MOT-1 (checkerboard drift): 187/1000 = 18.7%, UCB 21.23% — FAIL
+- Pooled: 1572/10000, UCB 16.45% — FAIL (≤1%).
 
-### 1. Enumerated adversarial (10,000 trials)
-- **False installs**: 61/10,000 = 0.61%
-- **Overall UCB (95%)**: 0.783% — **PASSES** (≤1%)
-- Per-task: colordisc 0, colorconst 2, shapetrans 0, pitchdisc 1, timbredisc 52, motiondir 6
-- Per-family UCB:
-  - colorconst f1: 2/690, UCB 1.05% — PASS
-  - pitchdisc f1: 1/710, UCB 0.79% — PASS
-  - motiondir f1: 5/504, UCB 2.30% — **FAIL** (>2%)
-  - motiondir f2: 1/116, UCB 4.72% — **FAIL** (>2%)
-  - timbredisc f1: 33/500, UCB 9.12% — **FAIL** (>2%)
-  - timbredisc f3: 19/190, UCB 15.09% — **FAIL** (>2%)
-- **PREREG DEFECT**: motiondir f2 (n=116) and f3 (n=10) cannot pass ≤2% even with zero FI (UCB0=3.21%, 27.75%). Bar mathematically unachievable.
+The colorconst mechanism is fundamentally broken against local changes:
+an 8×8 patch replacement (0.7% of pixels) defeats both formation and
+challenge (98.2% FI). Mean-RGB cannot see it.
 
-### 2. Recall (2,000 controls)
-- **Recall**: 1552/2000 = 77.6% — **FAIL** (≥80%)
-- Per-task:
-  - colordisc: 987/1080 = 91.4% (ceiling 93.0%)
-  - colorconst: 389/720 = 54.0% (ceiling 56.8%)
-  - motiondir: 176/200 = 88.0% (ceiling 96.5%)
-- **Overstrict**: 26/2000 = 1.3% — PASS (≤5%)
+### Bar 3 detail (ablation)
+Implemented as deterministic post-hoc glue (`src/score_ablation.py`); the
+frozen Zag binary has no bank mode and the mechanism was not touched.
+1-NN on formation confidence vs frozen bank (first 20 TRUE + 20 FALSE
+exemplars per task in battery order; ties → FALSE).
+- B-adv: abl FI 1244/10000 (12.44%) vs full 64/10000 (0.64%) → 19.4×. PASS.
+- Holdout: abl FI 1968/10000 vs full 1572/10000.
+- Gap: (1968−1572)=396 ≥ (1244−64)=1180? No. FAIL.
 
-### 3. Ablation (abl_bank)
-- **NOT IMPLEMENTED**. Exemplar extraction script written but not run. Bank tables not generated. Zag ablate mode not updated.
+### Bar 6 detail (determinism)
+- b_adv union ×2: byte-identical (ledger f99a8295…, stdout 3f1c4fba…), chain OK.
+- b_ctrl union ×2: byte-identical (ledger 1e7f8022…, stdout bad91f30…), chain OK.
+- b_holdout union ×2: byte-identical (ledger 57c22583…, stdout 33931626…), chain OK.
 
-### 4. Design-loop CP suite
-- **NOT RUN**. No iterations completed.
+## Achievements
+1. Shapetrans central-moment challenge: 0 FI on enumerated (was 53 in R2-14);
+   0 FI on both holdout shape families.
+2. Overall enumerated FI UCB 0.816% passes the ≤1% bar.
+3. Overstrictness eliminated: 1.3% (was 96.5% in R2-14 with margins).
+4. Determinism: all batteries byte-identical ×2 with verified hash chains.
+5. Ablation confirms the G-challenge carries the load (19.4× FI without it).
 
-### 5. Novel holdout (10×1,000)
-- **NOT GENERATED**. Families not defined.
+## Failures
+1. **Recall 77.6% < 80%** — fatal. The truth-quantity challenges withhold
+   too many correct formations (colorconst 54.0% recall is the main drag).
+2. **Per-family FI bars** — timbredisc f1/f3 and motiondir f1/f2 fail on
+   enumerated; the frozen swapped timbredisc mapping's root cause (Goertzel
+   bias) was never resolved.
+3. **Holdout catastrophe** — colorconst local-patch: 98.2% FI. The
+   mean-RGB quantity is blind to local edits; both formation and challenge
+   fail together.
+4. **Ablation gap** — the holdout gap does not widen (396 < 1180).
 
-### 6. Post-freeze CP suite
-- **NOT RUN**.
+## Prereg defects (noted, not amended post-results)
+1. Per-family Wilson UCB ≤2% is mathematically impossible for n≲200 even
+   with zero errors (motiondir f2 n=116: UCB₀=3.21%; f3 n=10: UCB₀=27.75%).
+   Scored honestly as FAIL.
+2. §2 describes CH-CCN-2 (pixel-L1) but the frozen built mechanism retains
+   CH-CCN-1 (mean-RGB) per the builder's investigation. Documented; mechanism
+   not altered.
+3. `abl_bank` was specified but never implemented in the frozen Zag; the
+   completion measured it as post-hoc glue with fully disclosed semantics.
 
-### 7. Determinism (byte-identical ×2)
-- **NOT VERIFIED**. Single runs only.
-
-## Design-loop iterations
-0 (CP suite not run).
-
-## White-box findings
-
-1. **Timbredisc coefficient defect** (fixed): R2-14 used 880*m Hz, correct is 440*m Hz.
-2. **Timbredisc mapping anomaly** (unresolved): Correct mapping performs 7x worse than swapped. Systematic bias in Goertzel vs generator templates.
-3. **Shapetrans ray-profile defect** (fixed): Ray harmonics misclassified square as circle. Moment-based replacement achieves 0 FI.
-4. **Colorconst G noise** (unfixable): Systematic ~18 variation prevents pixel-level comparison. Mean-RGB is the only viable quantity.
-5. **Prereg per-family bar defect**: Mathematically impossible for n<200.
-
-## Commit hashes
+## Commits
 - Prereg: `4601db7f3182181f525c5791339207243727caa2`
-- Sources/results: **NOT COMMITTED** (incomplete)
+- Sources + builder results (pre-completion): `26fd4bb68863c7709d9d40da964b08762a5cab6b`
+- Completion evidence + verdict: (this commit)
 
-## ALIVE/DEAD
-**DEAD** (fails recall ≥80% and per-family UCB ≤2%).
-
-## Recommendations
-1. Amend prereg per-family bar for small n (or exclude n<500 families).
-2. Investigate timbredisc Goertzel bias (white-box).
-3. Investigate colorconst G generation (systematic variation).
-4. If recall is critical, relax challenges further (trades off FI).
-5. Complete ablation, CP suite, holdout, determinism before re-verdict.
+## Recommendation
+Do not revive. The colorconst quantity (mean-RGB) is structurally
+inadequate; the recall ceiling (~80.3% per prereg §7) was not reached;
+and the timbredisc mapping anomaly remains unexplained. A successor fork
+would need a spatially-sensitive colorconst quantity and a white-box
+fix for the Goertzel bias.
