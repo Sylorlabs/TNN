@@ -20,10 +20,10 @@ before any fixture, build output, or search result exists.
 > INDIVIDUALLY: V5-idx2 (718,6600) and V6-idx2 (718,6600) satisfy
 > conf≥705 ∧ mrgF≥3588 (M1's C2 constraint was pair-install — no pair has
 > BOTH members admitted — not per-row). Corrected expectation: W 0/12,
-> P 2/18 (exactly rows P4-2, P5-2), total 2/30, IDENTICAL for both variants.
+> P 2/18 (exactly rows P5-2, P6-2), total 2/30, IDENTICAL for both variants.
 > KB-CU-JUDG reframed: VOID iff (a) judgment delta ≠ 0 between variants, or
 > (b) either variant's false-admit disposition differs from the frozen bar's
-> own (W:0, P:exactly P4-2/P5-2) — the shared core must reproduce the frozen
+> own (W:0, P:exactly P5-2/P6-2) — the shared core must reproduce the frozen
 > bar exactly; any deviation is the defect. The instruments are unchanged
 > (they implement the bar correctly); only the prereg's prediction was fixed.
 It may not contradict it. In particular: the operational definitions of
@@ -181,7 +181,7 @@ reported as UNVERIFIED, never trusted.
 - **M-judgment:** correct-admit rate = admits/1,102 on C (RK-3 style;
   expected 910/1,102 = 82.58% for BOTH — the frozen M1 bar); false-admit
   disposition on the 30 frozen wrong rows (expected W 0/12, P exactly the
-  2 rows P4-2/P5-2 that pass the frozen bar individually — Correction C2;
+  2 rows P5-2/P6-2 that pass the frozen bar individually — Correction C2;
   M1's C2 pair-install constraint still holds: no pair fully admitted).
 - **M-attack:** catch rate = rejected-attacks/100 overall and per type
   (LAU/40, FORK/30, AUTH/30). Expected 100% BOTH (same core).
@@ -207,7 +207,7 @@ reported as UNVERIFIED, never trusted.
 - **KB-CU-JUDG:** the shared core must reproduce the frozen bar exactly:
   VOID iff judgment delta ≠ 0 between variants, or either variant's
   false-admit disposition differs from the frozen bar's own (W: 0/12;
-  P: exactly rows P4-2 and P5-2, which pass the frozen bar individually —
+  P: exactly rows P5-2 and P6-2, which pass the frozen bar individually —
   Correction C2; M1's C2 pair-install constraint is unaffected). Any
   deviation = core defect, not a variant win.
 - **KB-CU-REPLAY:** any of the ≥2× byte-identical reruns diverge →
@@ -222,7 +222,7 @@ reported as UNVERIFIED, never trusted.
 | Metric | Conscious | Unconscious |
 |---|---|---|
 | Correct-admit (C) | 910/1,102 = 82.58% | same (shared core) |
-| False-admit (W+P=30) | W 0/12, P 2/18 (P4-2, P5-2 pass the frozen bar individually; no pair fully admitted) | same |
+| False-admit (W+P=30) | W 0/12, P 2/18 (P5-2, P6-2 pass the frozen bar individually; no pair fully admitted) | same |
 | Attack catch (100) | 100% | 100% |
 | Cycles/row | ~109 (6 checks + 2 parse + 1 decision + ~100 record bytes) | ~10 (6 checks + 2 parse + 1 decision + 1 outcome byte) |
 | Speed ratio | ~10.9× | 1× |
