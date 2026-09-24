@@ -50,3 +50,9 @@ Full reports: `runs/wave2/crews/<FAMILY>/{VERDICT.md,RUNLOG.md}`; full tally: `r
 | T2-SPEECHACT | REPRODUCED | PoC 7.1%→50.0% exact; volume ladder peak-and-decline reproduced (76% peak @2) and count-rule flip to monotone corrected curve 5→8→21→24→30→32→38; transfer degeneracy confirmed; implicature fixes killed as before; WHY_SARCASM H3/H4/H5 survive, H1/H2 killed. 180/180 + 330/330 cells byte-identical to committed; ≥3 identical reps per cell. |
 | T2-LHADV | REPRODUCED | Full 54-stage battery: 3/3 byte-identical runs, ledger byte-identical to committed; 52/54 accepted with the same 2 honest halts (D9 UNRECOVERABLE, F1 KB-MISS); ADV-DS 47/47, ADV-REC 6/6+5/5, ADV-HH 54/54, ADV-CRIT 51/51, ADV-DIAG correct, 0 fabrication; ADV-RET 10/10, ADV-DET 5/5×5. |
 | T2-REMATCH | REPRODUCED | All four budgets (T1–T4) rerun, caches byte-identical: B never crosses A (−20.0 to −27.8pp), B never reaches 60% (max 56.6%), KB6 confirmed=false ("B STAYS DEAD"), KB5 determinism digest 100b19f4… matches on 3 fresh reruns; compare_results ALL MATCH T0–T4. Survived 6 VM reboots via resumable pipeline. |
+
+## Wave 3 — Tier 3 (verification-of-record + spot reruns)
+
+| Family | Verdict | Headline |
+|---|---|---|
+| T3-FELT | RECORD-MISSING | Named prereg commit c9bbff95c6f1 does not resolve on tnn-native-lab (1,600 commits scanned; none start c9bbff9). Anomalies: (1) the prereg record exists under a different SHA (6a0302122848, byte-identical content); (2) a results commit 5b1213eaee44 exists on-branch, committed ~80 min after the approval-gated prereg with no recorded Micah approval. Governance calls: amend the prereg SHA; adjudicate the standing of the results commit. |
