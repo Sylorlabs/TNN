@@ -66,7 +66,7 @@
    (commit_racefree.py or commit_big_files.py, TMPDIR=~/workspace/tmp_commit).
 
 ## Commits (crew 5, tnn-native-lab)
-- <TBD>: job_wiki_crew4.sh (verify-based resume), verify_split.py (new),
+- 819097b4 (tnn-native-lab): job_wiki_crew4.sh (verify-based resume), verify_split.py (new),
   STATUS_20260924_crew5.md.
 
 ## Box discipline (unchanged)
