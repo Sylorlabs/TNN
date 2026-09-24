@@ -1,0 +1,1177 @@
+// H7 utterance-type learner — Crew 2 mechanism (generic FL2 guided learning).
+// Pure Zag, zero RNG, deterministic.
+//
+// KB-H7-HARD0: this file contains no utterance-type keyword lists, regexes,
+// type-name string constants, or type constants in control flow. All type
+// names, consequences, markers, and curriculum content live in data files and
+// in the learned knowledge store. Matching is generic byte-substring
+// deliberation over learned entries; routing is generic partition logic.
+//
+// Partition discipline (constructed-mode amendment R2): BELIEF and TYPED are
+// disjoint byte arenas. belief_recall indexes the belief arena only. The only
+// belief writer is belief_install (Phase-1 facts). There is no TYPED->BELIEF
+// write path anywhere in this file.
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------- generic byte helpers ----------
+
+fn eq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){ return 0; }
+    let i:i32=0;
+    while(i<a.len){
+        if(a[i]!=b[i]){ return 0; }
+        i=i+1;
+    }
+    return 1;
+}
+
+fn has_sub(hay:[]u8,ndl:[]u8)i32 {
+    if(ndl.len==0 || ndl.len>hay.len){ return 0; }
+    let i:i32=0;
+    while(i+ndl.len<=hay.len){
+        let j:i32=0;
+        while(j<ndl.len && hay[i+j]==ndl[j]){ j=j+1; }
+        if(j==ndl.len){ return 1; }
+        i=i+1;
+    }
+    return 0;
+}
+
+fn to_lower(dst:[]u8,src:[]u8)[]u8 {
+    let i:i32=0;
+    while(i<src.len){
+        let c:u8=src[i];
+        if(c>=65 && c<=90){ dst[i]=c+32; } else { dst[i]=c; }
+        i=i+1;
+    }
+    return dst[0..src.len];
+}
+
+fn t_put32(a:[]u8,o:i32,v:i32)void {
+    a[o]=(v&255) as u8;
+    let s1:i32=(v>>8)&255;
+    a[o+1]=s1 as u8;
+    let s2:i32=(v>>16)&255;
+    a[o+2]=s2 as u8;
+    let s3:i32=(v>>24)&255;
+    a[o+3]=s3 as u8;
+}
+
+fn t_get32(a:[]u8,o:i32)i32 {
+    let b0:i32=a[o] as i32;
+    let b1:i32=(a[o+1] as i32)<<8;
+    let b2:i32=(a[o+2] as i32)<<16;
+    let b3:i32=(a[o+3] as i32)<<24;
+    return b0+b1+b2+b3;
+}
+
+// _zag_i64_to_str emits a trailing newline when called inside a helper;
+// strip it so call-site printing stays on one line.
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){
+        if(s[s.len-1]==10){ return s[0..s.len-1]; }
+    }
+    return s;
+}
+
+fn zfill(a:[]u8)void {
+    let i:i32=0;
+    while(i<a.len){ a[i]=0; i=i+1; }
+}
+
+fn arg_copy(n:i32)[]u8 {
+    let s:[]u8=_zag_arg(n);
+    let b:[]u8=nio_alloc(s.len+1);
+    let i:i32=0;
+    while(i<s.len){ b[i]=s[i]; i=i+1; }
+    return b[0..s.len];
+}
+
+fn read_file(root:i64,name:[]u8)[]u8 {
+    let fd:i64=nio_open_child(root,name,0);
+    if(fd<0){ return nio_alloc(0); }
+    let buf:[]u8=nio_alloc(1048576);
+    let n:i64=nio_read_exact(fd,buf,1048576);
+    nio_close(fd);
+    if(n<0){ return nio_alloc(0); }
+    return buf[0..n as i32];
+}
+
+// ---------- audit ledger ----------
+// 64-byte entries. Header layout follows the lab convention: op@0, slot@4,
+// rc@8, then payload words. Op codes are generic harness ops (not
+// utterance-type constants):
+// 1 EPISODE  2 FACT_INSTALL  3 TEACH_TYPE  4 EXEMPLAR  5 PREDICT  6 CORRECT
+// 7 MARKER_ADD  8 MARKER_REVOKE  9 MARKER_COMMIT  10 CALIBRATE  11 PROBE
+// 12 TYPED_WRITE  13 LEAKCHECK  14 RECALL  15 SAID_WRITE  16 SUPP_PROBE
+// 17 PHASE  18 NEGCTL
+
+fn au(abuf:[]u8,acount:*i32,acap:i32,op:i32,slot:i32,rc:i32,w1:i32,w2:i32,w3:i32)i32 {
+    let n:i32=acount.*;
+    if(n<0 || n>=acap){ return -1; }
+    let o:i32=n*64;
+    t_put32(abuf,o,op);
+    t_put32(abuf,o+4,slot);
+    t_put32(abuf,o+8,rc);
+    t_put32(abuf,o+12,w1);
+    t_put32(abuf,o+16,w2);
+    t_put32(abuf,o+20,w3);
+    let i:i32=24;
+    while(i<64){ abuf[o+i]=0; i=i+1; }
+    acount.*=n+1;
+    return 0;
+}
+
+// ---------- partitioned store ----------
+// BELIEF arena: bent entries stride 16: off@0 len@4 status@8
+// TYPED arena:  tent entries stride 32: off@0 len@4 name_off@8 name_len@12
+//               spk_off@16 spk_len@20 said@24
+// The two pools are disjoint slices. belief_recall indexes belief only.
+
+fn belief_install(bent:[]u8,bn:*i32,bpool:[]u8,bu:*i32,utt:[]u8,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let n:i32=bn.*;
+    if(n*16+16>bent.len){ return -1; }
+    if(bu.*+utt.len>bpool.len){ return -2; }
+    let o:i32=bu.*;
+    let i:i32=0;
+    while(i<utt.len){ bpool[o+i]=utt[i]; i=i+1; }
+    let e:i32=n*16;
+    t_put32(bent,e,o);
+    t_put32(bent,e+4,utt.len);
+    t_put32(bent,e+8,1);
+    bn.*=n+1;
+    bu.*=o+utt.len;
+    au(abuf,acount,acap,2,slot,0,n,utt.len,0);
+    return n;
+}
+
+fn belief_recall(bent:[]u8,bn:i32,bpool:[]u8,idx:i32)[]u8 {
+    if(idx<0 || idx>=bn){ return bpool[0..0]; }
+    let e:i32=idx*16;
+    let o:i32=t_get32(bent,e);
+    let l:i32=t_get32(bent,e+4);
+    return bpool[o..o+l];
+}
+
+fn typed_write(tent:[]u8,tn:*i32,tpool:[]u8,tu:*i32,
+    utt:[]u8,name:[]u8,spk:[]u8,said:i32,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let n:i32=tn.*;
+    if(n*32+32>tent.len){ return -1; }
+    let need:i32=utt.len+name.len+spk.len;
+    if(tu.*+need>tpool.len){ return -2; }
+    let ou:i32=tu.*;
+    let i:i32=0;
+    while(i<utt.len){ tpool[ou+i]=utt[i]; i=i+1; }
+    let onm:i32=ou+utt.len;
+    i=0;
+    while(i<name.len){ tpool[onm+i]=name[i]; i=i+1; }
+    let osp:i32=onm+name.len;
+    i=0;
+    while(i<spk.len){ tpool[osp+i]=spk[i]; i=i+1; }
+    let e:i32=n*32;
+    t_put32(tent,e,ou);
+    t_put32(tent,e+4,utt.len);
+    t_put32(tent,e+8,onm);
+    t_put32(tent,e+12,name.len);
+    t_put32(tent,e+16,osp);
+    t_put32(tent,e+20,spk.len);
+    t_put32(tent,e+24,said);
+    tn.*=n+1;
+    tu.*=osp+spk.len;
+    au(abuf,acount,acap,12,slot,0,n,utt.len,said);
+    if(said==1){ au(abuf,acount,acap,15,slot,0,n,spk.len,0); }
+    return n;
+}
+
+// typed_recall_said: first said-record whose speaker bytes equal spk.
+// Reads the TYPED arena only; never touches BELIEF.
+fn typed_recall_said(tent:[]u8,tn:i32,tpool:[]u8,spk:[]u8)[]u8 {
+    let i:i32=0;
+    while(i<tn){
+        let e:i32=i*32;
+        if(t_get32(tent,e+24)==1){
+            let so:i32=t_get32(tent,e+16);
+            let sl:i32=t_get32(tent,e+20);
+            let sb:[]u8=tpool[so..so+sl];
+            if(eq(sb,spk)==1){
+                let o:i32=t_get32(tent,e);
+                let l:i32=t_get32(tent,e+4);
+                return tpool[o..o+l];
+            }
+        }
+        i=i+1;
+    }
+    return tpool[0..0];
+}
+
+// ---------- knowledge store: taught type concepts ----------
+// kent stride 32: name_off@0 name_len@4 flags@8 status@12 cons_off@16 cons_len@20
+// flags bits: 1 = route typed (withhold from belief), 2 = record said.
+// The name and consequence are opaque bytes from teaching; the mechanism
+// never interprets them beyond byte equality and the generic flag bits.
+
+fn know_teach(kent:[]u8,kn:*i32,kpool:[]u8,ku:*i32,name:[]u8,flags:i32,cons:[]u8,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let n:i32=kn.*;
+    if(n*32+32>kent.len){ return -1; }
+    if(ku.*+name.len+cons.len>kpool.len){ return -2; }
+    let on:i32=ku.*;
+    let i:i32=0;
+    while(i<name.len){ kpool[on+i]=name[i]; i=i+1; }
+    let oc:i32=on+name.len;
+    i=0;
+    while(i<cons.len){ kpool[oc+i]=cons[i]; i=i+1; }
+    let e:i32=n*32;
+    t_put32(kent,e,on);
+    t_put32(kent,e+4,name.len);
+    t_put32(kent,e+8,flags);
+    t_put32(kent,e+12,2);
+    t_put32(kent,e+16,oc);
+    t_put32(kent,e+20,cons.len);
+    kn.*=n+1;
+    ku.*=oc+cons.len;
+    au(abuf,acount,acap,3,slot,0,n,flags,0);
+    return n;
+}
+
+fn know_find(kent:[]u8,kn:i32,kpool:[]u8,name:[]u8)i32 {
+    let k:i32=0;
+    while(k<kn){
+        let e:i32=k*32;
+        let o:i32=t_get32(kent,e);
+        let l:i32=t_get32(kent,e+4);
+        if(eq(kpool[o..o+l],name)==1){ return k; }
+        k=k+1;
+    }
+    return -1;
+}
+
+fn know_name(kent:[]u8,kpool:[]u8,k:i32)[]u8 {
+    let e:i32=k*32;
+    let o:i32=t_get32(kent,e);
+    let l:i32=t_get32(kent,e+4);
+    return kpool[o..o+l];
+}
+
+fn know_flags(kent:[]u8,k:i32)i32 {
+    return t_get32(kent,k*32+8);
+}
+
+// ---------- learned markers ----------
+// ment stride 24: know_idx@0 field@4 status@8 support@12 off@16 len@20
+// field: 0=UTT 1=CTX 2=SPK (generic utterance fields)
+// status: 1=PROVISIONAL 2=COMMITTED 3=REVOKED
+
+fn marker_add(ment:[]u8,mn:*i32,mcap:i32,mpool:[]u8,mu:*i32,
+    know_idx:i32,field:i32,ng:[]u8,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let n:i32=mn.*;
+    let m:i32=0;
+    while(m<n){
+        let e:i32=m*24;
+        if(t_get32(ment,e)==know_idx && t_get32(ment,e+4)==field){
+            let mo:i32=t_get32(ment,e+16);
+            let ml:i32=t_get32(ment,e+20);
+            if(ml==ng.len && eq(mpool[mo..mo+ml],ng)==1){
+                if(t_get32(ment,e+8)!=3){
+                    t_put32(ment,e+12,t_get32(ment,e+12)+1);
+                }
+                return m;
+            }
+        }
+        m=m+1;
+    }
+    if(n>=mcap){ return -2; }
+    if(mu.*+ng.len>mpool.len){ return -3; }
+    let o:i32=mu.*;
+    let i:i32=0;
+    while(i<ng.len){ mpool[o+i]=ng[i]; i=i+1; }
+    let e2:i32=n*24;
+    t_put32(ment,e2,know_idx);
+    t_put32(ment,e2+4,field);
+    t_put32(ment,e2+8,1);
+    t_put32(ment,e2+12,1);
+    t_put32(ment,e2+16,o);
+    t_put32(ment,e2+20,ng.len);
+    mn.*=n+1;
+    mu.*=o+ng.len;
+    au(abuf,acount,acap,7,slot,0,n,field,ng.len);
+    return n;
+}
+
+fn marker_revoke(ment:[]u8,m:i32,abuf:[]u8,acount:*i32,acap:i32,slot:i32,why:i32)void {
+    t_put32(ment,m*24+8,3);
+    au(abuf,acount,acap,8,slot,0,m,why,0);
+    return;
+}
+
+// ---------- generic tokenizer + n-gram candidate extraction ----------
+// Words are [a-z0-9]+ runs over the lowered field bytes.
+// UTT yields 2-grams and 3-grams only: single utterance words are never
+// markers (structural guard against single-word trope triggers).
+// CTX and SPK yield 1-, 2-, 3-grams.
+
+fn extract_ngrams(ment:[]u8,mn:*i32,mcap:i32,mpool:[]u8,mu:*i32,
+    know_idx:i32,field:[]u8,fid:i32,min_n:i32,max_n:i32,
+    wstarts:[]u8,wends:[]u8,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let nw:i32=0;
+    let i:i32=0;
+    while(i<field.len){
+        let c:u8=field[i];
+        let isw:i32=0;
+        if(c>=97 && c<=122){ isw=1; }
+        if(c>=48 && c<=57){ isw=1; }
+        if(isw==1){
+            let s:i32=i;
+            let cont:i32=1;
+            while(i<field.len && cont==1){
+                let d:u8=field[i];
+                let isw2:i32=0;
+                if(d>=97 && d<=122){ isw2=1; }
+                if(d>=48 && d<=57){ isw2=1; }
+                if(isw2==0){ cont=0; }
+                if(cont==1){ i=i+1; }
+            }
+            if(nw<64){
+                t_put32(wstarts,nw*4,s);
+                t_put32(wends,nw*4,i);
+                nw=nw+1;
+            }
+        }
+        if(isw==0){ i=i+1; }
+    }
+    let added:i32=0;
+    let nn:i32=min_n;
+    while(nn<=max_n){
+        let w:i32=0;
+        while(w+nn<=nw){
+            let a:i32=t_get32(wstarts,w*4);
+            let b:i32=t_get32(wends,(w+nn-1)*4);
+            let r:i32=marker_add(ment,mn,mcap,mpool,mu,know_idx,fid,field[a..b],
+                abuf,acount,acap,slot);
+            if(r>=0){ added=added+1; }
+            w=w+1;
+        }
+        nn=nn+1;
+    }
+    return added;
+}
+
+// field bytes of an item-list entry (ilist stride 40)
+fn ifield(ipool:[]u8,ient:[]u8,x:i32,f:i32)[]u8 {
+    let xe:i32=x*40;
+    if(f==1){
+        let o:i32=t_get32(ient,xe+8);
+        let l:i32=t_get32(ient,xe+12);
+        return ipool[o..o+l];
+    }
+    if(f==2){
+        let o2:i32=t_get32(ient,xe+16);
+        let l2:i32=t_get32(ient,xe+20);
+        return ipool[o2..o2+l2];
+    }
+    let o3:i32=t_get32(ient,xe);
+    let l3:i32=t_get32(ient,xe+4);
+    return ipool[o3..o3+l3];
+}
+
+// byte-lexicographic name order (deterministic, content-agnostic tiebreak)
+fn name_less(kpool:[]u8,kent:[]u8,a:i32,b:i32)i32 {
+    let oa:i32=t_get32(kent,a*32);
+    let la:i32=t_get32(kent,a*32+4);
+    let ob:i32=t_get32(kent,b*32);
+    let lb:i32=t_get32(kent,b*32+4);
+    let n:i32=la;
+    if(lb<n){ n=lb; }
+    let i:i32=0;
+    while(i<n){
+        let ca:i32=kpool[oa+i] as i32;
+        let cb:i32=kpool[ob+i] as i32;
+        if(ca<cb){ return 1; }
+        if(ca>cb){ return 0; }
+        i=i+1;
+    }
+    if(la<lb){ return 1; }
+    return 0;
+}
+
+// ---------- generic deliberation ----------
+// Match the utterance against every live marker of every committed concept.
+// Verdict 1=WITHHOLD (route typed), 0=ENDORSE. Best-scoring concept wins.
+
+fn predict(kent:[]u8,kn:i32,kpool:[]u8,ment:[]u8,mn:i32,mpool:[]u8,
+    utt_l:[]u8,ctx_l:[]u8,spk_l:[]u8,name_out:[]u8,nlen:*i32,
+    scores:[]u8)i32 {
+    let k:i32=0;
+    while(k<kn){ t_put32(scores,k*4,0); k=k+1; }
+    let m:i32=0;
+    while(m<mn){
+        let e:i32=m*24;
+        let st:i32=t_get32(ment,e+8);
+        let live:i32=0;
+        if(st==1){ live=1; }
+        if(st==2){ live=1; }
+        if(live==1){
+            let ki:i32=t_get32(ment,e);
+            if(t_get32(kent,ki*32+12)==2){
+                let f:i32=t_get32(ment,e+4);
+                let fb:[]u8=utt_l;
+                if(f==1){ fb=ctx_l; }
+                if(f==2){ fb=spk_l; }
+                let mo:i32=t_get32(ment,e+16);
+                let ml:i32=t_get32(ment,e+20);
+                if(has_sub(fb,mpool[mo..mo+ml])==1){
+                    t_put32(scores,ki*4,t_get32(scores,ki*4)+1);
+                }
+            }
+        }
+        m=m+1;
+    }
+    let best:i32=-1;
+    let bests:i32=0;
+    k=0;
+    while(k<kn){
+        let s:i32=t_get32(scores,k*4);
+        if(s>0){
+            let take:i32=0;
+            if(best==-1){ take=1; }
+            if(best!=-1 && s>bests){ take=1; }
+            if(best!=-1 && s==bests && name_less(kpool,kent,k,best)==1){ take=1; }
+            if(take==1){ best=k; bests=s; }
+        }
+        k=k+1;
+    }
+    if(best==-1){ nlen.*=0; return 0; }
+    let nm:[]u8=know_name(kent,kpool,best);
+    let i:i32=0;
+    while(i<nm.len){ name_out[i]=nm[i]; i=i+1; }
+    nlen.*=nm.len;
+    return 1;
+}
+
+// ---------- FL2 eliminative calibration ----------
+// Any live marker matching an ENDORSE item is revoked (precision gate).
+// Provisional markers seen in >=2 exemplars graduate to COMMITTED.
+
+fn calibrate(ment:[]u8,mn:i32,mpool:[]u8,
+    ipool:[]u8,ient:[]u8,ine:i32,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let revoked:i32=0;
+    let m:i32=0;
+    while(m<mn){
+        let e0:i32=m*24;
+        if(t_get32(ment,e0+8)!=3){
+            let f:i32=t_get32(ment,e0+4);
+            let mo:i32=t_get32(ment,e0+16);
+            let ml:i32=t_get32(ment,e0+20);
+            let ng:[]u8=mpool[mo..mo+ml];
+            let x:i32=0;
+            let hit:i32=0;
+            while(x<ine && hit==0){
+                if(has_sub(ifield(ipool,ient,x,f),ng)==1){ hit=1; }
+                x=x+1;
+            }
+            if(hit==1){
+                marker_revoke(ment,m,abuf,acount,acap,slot,1);
+                revoked=revoked+1;
+            }
+        }
+        m=m+1;
+    }
+    let committed:i32=0;
+    m=0;
+    while(m<mn){
+        let e1:i32=m*24;
+        if(t_get32(ment,e1+8)==1 && t_get32(ment,e1+12)>=2){
+            t_put32(ment,e1+8,2);
+            au(abuf,acount,acap,9,slot,0,m,t_get32(ment,e1+12),0);
+            committed=committed+1;
+        }
+        m=m+1;
+    }
+    au(abuf,acount,acap,10,slot,0,revoked,committed,mn);
+    return revoked;
+}
+
+// ---------- FL2 per-exemplar correction ----------
+// The learner predicts; the teacher corrects. A miss (ENDORSE on a WITHHOLD
+// exemplar) installs provisional markers extracted from the exemplar. A
+// wrong-type WITHHOLD revokes the wrong type's firing markers (eliminative),
+// then extracts markers for the right type.
+
+fn learn_exemplar(kent:[]u8,kn:i32,kpool:[]u8,ment:[]u8,mn:*i32,mcap:i32,
+    mpool:[]u8,mu:*i32,know_idx:i32,
+    utt_l:[]u8,ctx_l:[]u8,spk_l:[]u8,
+    wstarts:[]u8,wends:[]u8,name_buf:[]u8,nlen:*i32,scores:[]u8,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32)i32 {
+    let v:i32=predict(kent,kn,kpool,ment,mn.*,mpool,utt_l,ctx_l,spk_l,
+        name_buf,nlen,scores);
+    let pname:[]u8=name_buf[0..nlen.*];
+    let tname:[]u8=know_name(kent,kpool,know_idx);
+    au(abuf,acount,acap,5,slot,v,nlen.*,0,0);
+    if(v==1 && eq(pname,tname)==1){
+        au(abuf,acount,acap,6,slot,0,0,0,0);
+        return 0;
+    }
+    if(v==0){
+        let a1:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,utt_l,0,2,3,
+            wstarts,wends,abuf,acount,acap,slot);
+        let a2:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,ctx_l,1,1,3,
+            wstarts,wends,abuf,acount,acap,slot);
+        let a3:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,spk_l,2,1,3,
+            wstarts,wends,abuf,acount,acap,slot);
+        au(abuf,acount,acap,6,slot,1,a1+a2,a3,0);
+        return 1;
+    }
+    let wk:i32=know_find(kent,kn,kpool,pname);
+    if(wk>=0){
+        let m:i32=0;
+        while(m<mn.*){
+            let e0:i32=m*24;
+            if(t_get32(ment,e0)==wk && t_get32(ment,e0+8)!=3){
+                let f:i32=t_get32(ment,e0+4);
+                let fb:[]u8=utt_l;
+                if(f==1){ fb=ctx_l; }
+                if(f==2){ fb=spk_l; }
+                let mo:i32=t_get32(ment,e0+16);
+                let ml:i32=t_get32(ment,e0+20);
+                if(has_sub(fb,mpool[mo..mo+ml])==1){
+                    marker_revoke(ment,m,abuf,acount,acap,slot,2);
+                }
+            }
+            m=m+1;
+        }
+    }
+    let b1:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,utt_l,0,2,3,
+        wstarts,wends,abuf,acount,acap,slot);
+    let b2:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,ctx_l,1,1,3,
+        wstarts,wends,abuf,acount,acap,slot);
+    let b3:i32=extract_ngrams(ment,mn,mcap,mpool,mu,know_idx,spk_l,2,1,3,
+        wstarts,wends,abuf,acount,acap,slot);
+    au(abuf,acount,acap,6,slot,2,b1+b2,b3,0);
+    return 2;
+}
+
+// ---------- item lists ----------
+// ient stride 40: utt_off@0 utt_len@4 ctx_off@8 ctx_len@12 spk_off@16
+// spk_len@20 exp_verdict@24 exp_name_off@28 exp_name_len@32
+
+fn ilist_add(ipool:[]u8,iu:*i32,ient:[]u8,in_:*i32,icap:i32,
+    utt:[]u8,ctx:[]u8,spk:[]u8,ev:i32,ename:[]u8)i32 {
+    let n:i32=in_.*;
+    if(n>=icap){ return -1; }
+    let need:i32=utt.len+ctx.len+spk.len+ename.len;
+    if(iu.*+need>ipool.len){ return -2; }
+    let ou:i32=iu.*;
+    let i:i32=0;
+    while(i<utt.len){ ipool[ou+i]=utt[i]; i=i+1; }
+    let oc:i32=ou+utt.len;
+    i=0;
+    while(i<ctx.len){ ipool[oc+i]=ctx[i]; i=i+1; }
+    let os:i32=oc+ctx.len;
+    i=0;
+    while(i<spk.len){ ipool[os+i]=spk[i]; i=i+1; }
+    let oe:i32=os+spk.len;
+    i=0;
+    while(i<ename.len){ ipool[oe+i]=ename[i]; i=i+1; }
+    let e:i32=n*40;
+    t_put32(ient,e,ou);
+    t_put32(ient,e+4,utt.len);
+    t_put32(ient,e+8,oc);
+    t_put32(ient,e+12,ctx.len);
+    t_put32(ient,e+16,os);
+    t_put32(ient,e+20,spk.len);
+    t_put32(ient,e+24,ev);
+    t_put32(ient,e+28,oe);
+    t_put32(ient,e+32,ename.len);
+    in_.*=n+1;
+    iu.*=oe+ename.len;
+    return n;
+}
+
+fn next_line(data:[]u8,pos:*i32)[]u8 {
+    let p:i32=pos.*;
+    let e:i32=p;
+    while(e<data.len && data[e]!=10){ e=e+1; }
+    pos.*=e+1;
+    return data[p..e];
+}
+
+fn strip_cr(line:[]u8)[]u8 {
+    if(line.len>0 && line[line.len-1]==13){ return line[0..line.len-1]; }
+    return line;
+}
+
+fn field_at(line:[]u8,k:i32)[]u8 {
+    let i:i32=0;
+    let f:i32=0;
+    let s:i32=0;
+    while(i<line.len){
+        if(line[i]==124){
+            if(f==k){ return line[s..i]; }
+            f=f+1;
+            s=i+1;
+        }
+        i=i+1;
+    }
+    if(f==k){ return line[s..line.len]; }
+    return line[0..0];
+}
+
+fn fname(prefix:[]u8,t:i32,suffix:[]u8,out:[]u8)[]u8 {
+    let i:i32=0;
+    while(i<prefix.len){ out[i]=prefix[i]; i=i+1; }
+    out[i]=(48+t) as u8;
+    i=i+1;
+    let j:i32=0;
+    while(j<suffix.len){ out[i+j]=suffix[j]; j=j+1; }
+    return out[0..i+j];
+}
+
+// load id|spk|ctx|utt|E  or  id|spk|ctx|utt|W|name
+fn load_set(root:i64,fname_:[]u8,ppool:[]u8,pu:*i32,pent:[]u8,pn:*i32,pcap:i32)i32 {
+    let data:[]u8=read_file(root,fname_);
+    if(data.len==0){ return -1; }
+    let pos:i32=0;
+    while(pos<data.len){
+        let line:[]u8=strip_cr(next_line(data,&pos));
+        if(line.len>0){
+            let expf:[]u8=field_at(line,4);
+            let ev:i32=0;
+            if(expf.len>0 && expf[0]==87){ ev=1; }
+            ilist_add(ppool,pu,pent,pn,pcap,field_at(line,3),field_at(line,2),
+                field_at(line,1),ev,field_at(line,5));
+        }
+    }
+    return pn.*;
+}
+
+// score probes in [r0,r1); log=1 routes WITHHOLD items to the typed partition
+fn score_set(kent:[]u8,kn:i32,kpool:[]u8,ment:[]u8,mn:i32,mpool:[]u8,
+    ipool:[]u8,ient:[]u8,r0:i32,r1:i32,
+    utt_l:[]u8,ctx_l:[]u8,spk_l:[]u8,name_buf:[]u8,nlen:*i32,scores:[]u8,
+    log:i32,tent:[]u8,tn:*i32,tpool:[]u8,tu:*i32,
+    abuf:[]u8,acount:*i32,acap:i32,slot0:i32,
+    out_c:*i32,out_t:*i32)i32 {
+    let c:i32=0;
+    let tc:i32=0;
+    let x:i32=r0;
+    while(x<r1){
+        let ul:[]u8=to_lower(utt_l,ifield(ipool,ient,x,0));
+        let cl:[]u8=to_lower(ctx_l,ifield(ipool,ient,x,1));
+        let sl:[]u8=to_lower(spk_l,ifield(ipool,ient,x,2));
+        let v:i32=predict(kent,kn,kpool,ment,mn,mpool,ul,cl,sl,
+            name_buf,nlen,scores);
+        let xe:i32=x*40;
+        let ev:i32=t_get32(ient,xe+24);
+        if(v==ev){ c=c+1; }
+        let no:i32=t_get32(ient,xe+28);
+        let nl:i32=t_get32(ient,xe+32);
+        let enm:[]u8=ipool[no..no+nl];
+        if(ev==1 && v==1 && nlen.*==nl && eq(name_buf[0..nlen.*],enm)==1){ tc=tc+1; }
+        if(ev==0 && v==0){ tc=tc+1; }
+        au(abuf,acount,acap,11,slot0+x,v,ev,nlen.*,0);
+        if(log==1 && ev==1){
+            let ki:i32=know_find(kent,kn,kpool,enm);
+            let said:i32=0;
+            if(ki>=0 && (know_flags(kent,ki)&2)!=0){ said=1; }
+            typed_write(tent,tn,tpool,tu,ifield(ipool,ient,x,0),enm,
+                ifield(ipool,ient,x,2),said,abuf,acount,acap,slot0+x);
+        }
+        x=x+1;
+    }
+    out_c.*=c;
+    out_t.*=tc;
+    return 0;
+}
+
+// KB-H7-LEAK1 measurement: every 16-byte window of typed session bytes
+// against the belief pool. Tag reads are never used.
+fn leak_audit(tent:[]u8,tn:i32,tpool:[]u8,tu:i32,
+    bpool:[]u8,bu:i32,
+    abuf:[]u8,acount:*i32,acap:i32,slot:i32,tag:[]u8)i32 {
+    let hits:i32=0;
+    let i:i32=0;
+    while(i<tn){
+        let e:i32=i*32;
+        let o:i32=t_get32(tent,e);
+        let l:i32=t_get32(tent,e+4);
+        let w:i32=0;
+        while(w+16<=l){
+            if(has_sub(bpool[0..bu],tpool[o+w..o+w+16])==1){
+                hits=hits+1;
+                au(abuf,acount,acap,13,slot,1,i,w,l);
+                _zag_print("LEAKWIN|");
+                _zag_print(tag);
+                _zag_print("|");
+                _zag_print(tpool[o+w..o+w+16]);
+                _zag_print("\n");
+            }
+            w=w+1;
+        }
+        i=i+1;
+    }
+    au(abuf,acount,acap,13,slot,0,hits,tn,0);
+    return hits;
+}
+
+fn h7check(name:[]u8,actual:i32,expected:i32,fails:*i32)void {
+    _zag_print("H7_CHECK,");
+    _zag_print(name);
+    _zag_print(",");
+    _zag_print(i64s(actual as i64));
+    _zag_print(",");
+    _zag_print(i64s(expected as i64));
+    _zag_print("\n");
+    if(actual!=expected){ fails.*=fails.*+1; }
+    return;
+}
+
+fn checkn(pre:[]u8,num:i32,actual:i32,expected:i32,fails:*i32)void {
+    _zag_print("H7_CHECK,");
+    _zag_print(pre);
+    _zag_print(i64s(num as i64));
+    _zag_print(",");
+    _zag_print(i64s(actual as i64));
+    _zag_print(",");
+    _zag_print(i64s(expected as i64));
+    _zag_print("\n");
+    if(actual!=expected){ fails.*=fails.*+1; }
+    return;
+}
+
+fn emit_curve(t:i32,step:i32,set:[]u8,cc:i32,nn:i32,ct:i32)void {
+    _zag_print("CURVE|");
+    _zag_print(i64s(t as i64));
+    _zag_print("|");
+    _zag_print(i64s(step as i64));
+    _zag_print("|");
+    _zag_print(set);
+    _zag_print("|");
+    _zag_print(i64s(cc as i64));
+    _zag_print("|");
+    _zag_print(i64s(nn as i64));
+    _zag_print("|type|");
+    _zag_print(i64s(ct as i64));
+    _zag_print("\n");
+    return;
+}
+
+
+// ============================================================================
+// H7 red-team driver main (replaces the curriculum-runner main).
+// The mechanism above is byte-identical to crew2's h7_main.zag; this main
+// drives it through the red-team batteries using ONLY the real APIs:
+//   ingest: belief_install (teacher-taught sincere, mirrors Phase 1)
+//           predict + typed_write routing (withhold->typed, endorse->no install,
+//           mirrors score_set/learn_exemplar routing in the original main)
+//   recall: belief_recall over belief slots (the learner's real recall path;
+//           no query-time type filter exists in this build, so none is added)
+// usage: h7rt <curriculum_dir> <out_dir> <script_file> <mode>
+//   mode: "0" = mechanism enabled, "1" = machinery disabled (every utterance
+//         treated as sincere -> ATTACK turns belief_install'ed; negative control)
+// The script file must sit inside <out_dir> (read via the out dir root).
+// Writes the six interchange files into <out_dir>.
+// ============================================================================
+
+fn zpad4(v:i32,out:[]u8)[]u8 {
+    out[0]=(48+(((v/1000)%10))) as u8;
+    out[1]=(48+(((v/100)%10))) as u8;
+    out[2]=(48+(((v/10)%10))) as u8;
+    out[3]=(48+((v%10))) as u8;
+    return out[0..4];
+}
+
+fn buf_put(buf:[]u8,used:i32,chunk:[]u8)i32 {
+    let i:i32=0;
+    while(i<chunk.len){
+        if(used>=buf.len){ return -1; }
+        buf[used]=chunk[i];
+        used=used+1;
+        i=i+1;
+    }
+    return used;
+}
+
+fn write_file(root:i64,name:[]u8,data:[]u8)i32 {
+    let fd:i64=nio_open_child(root,name,1);
+    if(fd<0){ return -1; }
+    let w:i64=nio_write_all(fd,data);
+    nio_close(fd);
+    if(w<0){ return -2; }
+    return 0;
+}
+
+// export one item's belief slots: ITEMID:idx|rawbytes per line, into buf
+fn dump_slots(buf:[]u8,used:i32,item:[]u8,
+    bent:[]u8,bn:i32,bpool:[]u8,pad:[]u8)i32 {
+    let u:i32=used;
+    let i:i32=0;
+    while(i<bn){
+        let sb:[]u8=belief_recall(bent,bn,bpool,i);
+        u=buf_put(buf,u,item);
+        u=buf_put(buf,u,":");
+        u=buf_put(buf,u,i64s(i as i64));
+        u=buf_put(buf,u,"|");
+        u=buf_put(buf,u,sb);
+        u=buf_put(buf,u,"\n");
+        if(u<0){ return -1; }
+        i=i+1;
+    }
+    return u;
+}
+
+fn main()void {
+    let curdir:[]u8=arg_copy(1);
+    let outdir:[]u8=arg_copy(2);
+    let scriptname:[]u8=arg_copy(3);
+    let marg:[]u8=arg_copy(4);
+    let mode:i32=0;
+    if(marg.len>0 && marg[0]==49){ mode=1; }
+    let darg:[]u8=arg_copy(5);
+    let debug:i32=0;
+    if(darg.len>0 && darg[0]==49){ debug=1; }
+    let cur:i64=nio_open_root(curdir);
+    if(cur<0){ _zag_print("ERR curdir\n"); return; }
+    let out:i64=nio_open_root(outdir);
+    if(out<0){ _zag_print("ERR outdir\n"); return; }
+
+    // ---- arenas (identical sizes to the mechanism main) ----
+    let abuf:[]u8=nio_alloc(4194304);
+    let acount:i32=0;
+    let acap:i32=65536;
+    let bent:[]u8=nio_alloc(4096);
+    let bn:i32=0;
+    let bpool:[]u8=nio_alloc(65536);
+    let bu:i32=0;
+    let tent:[]u8=nio_alloc(131072);
+    let tn:i32=0;
+    let tpool:[]u8=nio_alloc(1048576);
+    let tu:i32=0;
+    let kent:[]u8=nio_alloc(512);
+    let kn:i32=0;
+    let kpool:[]u8=nio_alloc(8192);
+    let ku:i32=0;
+    let ment:[]u8=nio_alloc(393216);
+    let mn:i32=0;
+    let mcap:i32=16384;
+    let mpool:[]u8=nio_alloc(524288);
+    let mu:i32=0;
+    let utt_l:[]u8=nio_alloc(4096);
+    let ctx_l:[]u8=nio_alloc(2048);
+    let spk_l:[]u8=nio_alloc(512);
+    let name_buf:[]u8=nio_alloc(256);
+    let nlen:i32=0;
+    let scores:[]u8=nio_alloc(64);
+    zfill(scores);
+    let wstarts:[]u8=nio_alloc(256);
+    let wends:[]u8=nio_alloc(256);
+    let fnbuf:[]u8=nio_alloc(64);
+    let pad:[]u8=nio_alloc(8);
+    let ep:i32=1;
+
+    // ---- Phase 2a: teach the 5 type concepts (identical to mechanism main) ----
+    let types_data:[]u8=read_file(cur,"types.txt");
+    if(types_data.len==0){ _zag_print("ERR types\n"); return; }
+    let pos:i32=0;
+    while(pos<types_data.len){
+        let line:[]u8=strip_cr(next_line(types_data,&pos));
+        if(line.len>0){
+            let nm:[]u8=field_at(line,0);
+            let fl:[]u8=field_at(line,1);
+            let cons:[]u8=field_at(line,2);
+            let fval:i32=0;
+            let q:i32=0;
+            while(q<fl.len){ fval=fval*10+((fl[q] as i32)-48); q=q+1; }
+            if(know_teach(kent,&kn,kpool,&ku,nm,fval,cons,abuf,&acount,acap,ep)<0){
+                _zag_print("ERR teach\n"); return;
+            }
+            ep=ep+1;
+        }
+    }
+
+    // ---- endorse pool: facts + calib, lowered (identical to mechanism main) ----
+    let ipool:[]u8=nio_alloc(32768);
+    let iu:i32=0;
+    let ient:[]u8=nio_alloc(2560);
+    let ine:i32=0;
+    let eul:[]u8=nio_alloc(4096);
+    let ecl:[]u8=nio_alloc(2048);
+    let esl:[]u8=nio_alloc(512);
+    let facts_data:[]u8=read_file(cur,"facts.txt");
+    if(facts_data.len==0){ _zag_print("ERR facts\n"); return; }
+    pos=0;
+    while(pos<facts_data.len){
+        let line2:[]u8=strip_cr(next_line(facts_data,&pos));
+        if(line2.len>0){
+            ilist_add(ipool,&iu,ient,&ine,64,to_lower(eul,field_at(line2,1)),
+                ipool[0..0],ipool[0..0],0,ipool[0..0]);
+        }
+    }
+    let calib_data:[]u8=read_file(cur,"calib.txt");
+    if(calib_data.len==0){ _zag_print("ERR calib\n"); return; }
+    pos=0;
+    while(pos<calib_data.len){
+        let line3:[]u8=strip_cr(next_line(calib_data,&pos));
+        if(line3.len>0){
+            ilist_add(ipool,&iu,ient,&ine,64,to_lower(eul,field_at(line3,3)),
+                to_lower(ecl,field_at(line3,2)),to_lower(esl,field_at(line3,1)),
+                0,ipool[0..0]);
+        }
+    }
+
+    // ---- Phase 2b: FL2 exemplar training (identical to mechanism main;
+    //      probe-set scoring omitted: score_set never mutates markers) ----
+    let steps:[]u8=nio_alloc(40);
+    zfill(steps);
+    t_put32(steps,0,2);  t_put32(steps,4,0);
+    t_put32(steps,8,4);  t_put32(steps,12,2);
+    t_put32(steps,16,8); t_put32(steps,20,4);
+    t_put32(steps,24,16);t_put32(steps,28,8);
+    t_put32(steps,32,32);t_put32(steps,36,16);
+    let t:i32=1;
+    while(t<=5){
+        let exname:[]u8=fname("ex",t,".txt",fnbuf);
+        let exdata:[]u8=read_file(cur,exname);
+        if(exdata.len==0){ _zag_print("ERR ex\n"); return; }
+        let xpool:[]u8=nio_alloc(32768);
+        let xu:i32=0;
+        let xent:[]u8=nio_alloc(1280);
+        let xn:i32=0;
+        pos=0;
+        while(pos<exdata.len){
+            let line4:[]u8=strip_cr(next_line(exdata,&pos));
+            if(line4.len>0){
+                ilist_add(xpool,&xu,xent,&xn,32,field_at(line4,3),field_at(line4,2),
+                    field_at(line4,1),1,field_at(line4,5));
+            }
+        }
+        let s:i32=0;
+        while(s<5){
+            let hi:i32=t_get32(steps,s*8);
+            let lo:i32=t_get32(steps,s*8+4);
+            let e:i32=lo;
+            while(e<hi){
+                let ul:[]u8=to_lower(utt_l,ifield(xpool,xent,e,0));
+                let cl:[]u8=to_lower(ctx_l,ifield(xpool,xent,e,1));
+                let sl:[]u8=to_lower(spk_l,ifield(xpool,xent,e,2));
+                learn_exemplar(kent,kn,kpool,ment,&mn,mcap,mpool,&mu,t-1,ul,cl,sl,
+                    wstarts,wends,name_buf,&nlen,scores,abuf,&acount,acap,ep);
+                let xe2:i32=e*40;
+                let enm:[]u8=xpool[t_get32(xent,xe2+28)..t_get32(xent,xe2+28)+t_get32(xent,xe2+32)];
+                let ki2:i32=know_find(kent,kn,kpool,enm);
+                let said2:i32=0;
+                if(ki2>=0 && (know_flags(kent,ki2)&2)!=0){ said2=1; }
+                typed_write(tent,&tn,tpool,&tu,ifield(xpool,xent,e,0),enm,
+                    ifield(xpool,xent,e,2),said2,abuf,&acount,acap,ep);
+                ep=ep+1;
+                e=e+1;
+            }
+            calibrate(ment,mn,mpool,ipool,ient,ine,abuf,&acount,acap,ep);
+            ep=ep+1;
+            s=s+1;
+        }
+        t=t+1;
+    }
+    // training digest: LIVE markers per concept (predict treats status 1+2 as
+    // live; status 2 alone is just the promotion count, not the working set)
+    let dk:i32=0;
+    while(dk<kn){
+        let cm:i32=0;
+        let pv:i32=0;
+        let dm:i32=0;
+        while(dm<mn){
+            let de:i32=dm*24;
+            if(t_get32(ment,de)==dk && t_get32(ment,de+8)==2){ cm=cm+1; }
+            if(t_get32(ment,de)==dk &&
+                (t_get32(ment,de+8)==1 || t_get32(ment,de+8)==2)){ pv=pv+1; }
+            dm=dm+1;
+        }
+        _zag_print("TRAINDIGEST|");
+        _zag_print(i64s(dk as i64));
+        _zag_print("|live|");
+        _zag_print(i64s(pv as i64));
+        _zag_print("|committed|");
+        _zag_print(i64s(cm as i64));
+        _zag_print("|markers|");
+        _zag_print(i64s(mn as i64));
+        _zag_print("\n");
+        dk=dk+1;
+    }
+
+    // ---- red-team run ----
+    let sdata:[]u8=read_file(out,scriptname);
+    if(sdata.len==0){ _zag_print("ERR script\n"); return; }
+    let sess:[]u8=nio_alloc(2097152);
+    let su:i32=0;
+    let dump:[]u8=nio_alloc(1048576);
+    let du:i32=0;
+    let dumpn:[]u8=nio_alloc(1048576);
+    let dnu:i32=0;
+    let recl:[]u8=nio_alloc(2097152);
+    let ru:i32=0;
+    let pmap:[]u8=nio_alloc(262144);
+    let pu2:i32=0;
+    let kinds:[]u8=nio_alloc(65536);
+    let ku2:i32=0;
+    let resp:[]u8=nio_alloc(65536);
+    let seq:i32=0;
+    let nitems:i32=0;
+    let nwithhold:i32=0;
+    let nendorse:i32=0;
+    let cur_item:[]u8=nio_alloc(64);
+    let cur_len:i32=0;
+    let spos:i32=0;
+    while(spos<sdata.len){
+        let line:[]u8=strip_cr(next_line(sdata,&spos));
+        if(line.len>0){
+        let tag:[]u8=field_at(line,0);
+        if(eq(tag,"CLASS")==1){
+            // export previous item's dumps, then reset per-item state
+            if(cur_len>0){
+                du=dump_slots(dump,du,cur_item[0..cur_len],bent,bn,bpool,pad);
+                dnu=dump_slots(dumpn,dnu,cur_item[0..cur_len],bent,bn,bpool,pad);
+                if(du<0 || dnu<0){ _zag_print("ERR dump\n"); return; }
+            }
+            let iid:[]u8=field_at(line,1);
+            let ci:i32=0;
+            while(ci<iid.len){ cur_item[ci]=iid[ci]; ci=ci+1; }
+            cur_len=iid.len;
+            bn=0; bu=0; tn=0; tu=0; acount=0;
+            ku2=buf_put(kinds,ku2,iid);
+            ku2=buf_put(kinds,ku2,"|");
+            ku2=buf_put(kinds,ku2,field_at(line,2));
+            ku2=buf_put(kinds,ku2,"\n");
+            nitems=nitems+1;
+        }
+        if(eq(tag,"CHECK")==1){
+            pu2=buf_put(pmap,pu2,field_at(line,1));
+            pu2=buf_put(pmap,pu2,"|");
+            pu2=buf_put(pmap,pu2,field_at(line,2));
+            pu2=buf_put(pmap,pu2,"|");
+            pu2=buf_put(pmap,pu2,field_at(line,3));
+            pu2=buf_put(pmap,pu2,"\n");
+        }
+        if(eq(tag,"TURN")==1){
+            let iid2:[]u8=field_at(line,1);
+            let tnum:[]u8=field_at(line,2);
+            let role:[]u8=field_at(line,3);
+            let phase:[]u8=field_at(line,4);
+            let text:[]u8=field_at(line,5);
+            seq=seq+1;
+            // session log: SEQ|ITEM|TURN|ROLE|TEXT (every input byte)
+            su=buf_put(sess,su,zpad4(seq,pad));
+            su=buf_put(sess,su,"|");
+            su=buf_put(sess,su,iid2);
+            su=buf_put(sess,su,"|");
+            su=buf_put(sess,su,tnum);
+            su=buf_put(sess,su,"|");
+            su=buf_put(sess,su,role);
+            su=buf_put(sess,su,"|");
+            su=buf_put(sess,su,text);
+            su=buf_put(sess,su,"\n");
+            if(su<0){ _zag_print("ERR sess\n"); return; }
+            if(eq(role,"TEACH")==1){
+                // teacher-taught sincere fact: the real Phase-1 install path
+                if(belief_install(bent,&bn,bpool,&bu,text,abuf,&acount,acap,ep)<0){
+                    _zag_print("ERR install\n"); return;
+                }
+            }
+            if(eq(role,"ATTACK")==1){
+                if(mode==1){
+                    // machinery disabled: every utterance treated as sincere
+                    if(belief_install(bent,&bn,bpool,&bu,text,abuf,&acount,acap,ep)<0){
+                        _zag_print("ERR install\n"); return;
+                    }
+                } else {
+                    let ul2:[]u8=to_lower(utt_l,text);
+                    let v:i32=predict(kent,kn,kpool,ment,mn,mpool,ul2,
+                        ctx_l[0..0],spk_l[0..0],name_buf,&nlen,scores);
+                    if(v==1){
+                        nwithhold=nwithhold+1;
+                        if(debug==1){
+                            _zag_print("ROUTE|");
+                            _zag_print(iid2);
+                            _zag_print("|");
+                            _zag_print(tnum);
+                            _zag_print("|WITHHOLD|");
+                            _zag_print(name_buf[0..nlen]);
+                            _zag_print("\n");
+                        }
+                        let nm2:[]u8=name_buf[0..nlen];
+                        let ki3:i32=know_find(kent,kn,kpool,nm2);
+                        let said3:i32=0;
+                        if(ki3>=0 && (know_flags(kent,ki3)&2)!=0){ said3=1; }
+                        typed_write(tent,&tn,tpool,&tu,text,nm2,spk_l[0..0],said3,
+                            abuf,&acount,acap,ep);
+                    }
+                    // ENDORSE on a novel attack utterance: the real learner
+                    // installs nothing (mirrors probe handling in the
+                    // mechanism main); there is no auto-install path.
+                    if(v==0){ nendorse=nendorse+1; }
+                    if(debug==1 && v==0){
+                        _zag_print("ROUTE|");
+                        _zag_print(iid2);
+                        _zag_print("|");
+                        _zag_print(tnum);
+                        _zag_print("|ENDORSE\n");
+                    }
+                }
+            }
+            if(eq(role,"PROBE")==1){
+                // real recall path: belief_recall over belief slots, joined.
+                // (This build has no query-time type filter; none is added.)
+                let rlen:i32=0;
+                if(bn==0){
+                    rlen=buf_put(resp,rlen,"NO-RECALLABLE-BELIEF");
+                } else {
+                    let bi:i32=0;
+                    while(bi<bn){
+                        let sb2:[]u8=belief_recall(bent,bn,bpool,bi);
+                        rlen=buf_put(resp,rlen,sb2);
+                        if(bi<bn-1){ rlen=buf_put(resp,rlen,"; "); }
+                        bi=bi+1;
+                    }
+                }
+                ru=buf_put(recl,ru,iid2);
+                ru=buf_put(recl,ru,"|");
+                ru=buf_put(recl,ru,phase);
+                ru=buf_put(recl,ru,"|");
+                ru=buf_put(recl,ru,field_at(line,5));
+                ru=buf_put(recl,ru,"|");
+                ru=buf_put(recl,ru,resp[0..rlen]);
+                ru=buf_put(recl,ru,"\n");
+                if(ru<0 || rlen<0){ _zag_print("ERR recall\n"); return; }
+            }
+            ep=ep+1;
+        }
+        }
+    }
+    // export final item's dumps
+    if(cur_len>0){
+        du=dump_slots(dump,du,cur_item[0..cur_len],bent,bn,bpool,pad);
+        dnu=dump_slots(dumpn,dnu,cur_item[0..cur_len],bent,bn,bpool,pad);
+    }
+    let w1:i32=write_file(out,"session_log.txt",sess[0..su]);
+    let w2:i32=write_file(out,"belief_dump.txt",dump[0..du]);
+    let w3:i32=write_file(out,"belief_dump_naive.txt",dumpn[0..dnu]);
+    let w4:i32=write_file(out,"recall_log.txt",recl[0..ru]);
+    let w5:i32=write_file(out,"payload_map.txt",pmap[0..pu2]);
+    let w6:i32=write_file(out,"item_kinds.txt",kinds[0..ku2]);
+    _zag_print("DRIVER|items|");
+    _zag_print(i64s(nitems as i64));
+    _zag_print("|mode|");
+    _zag_print(i64s(mode as i64));
+    _zag_print("|withhold|");
+    _zag_print(i64s(nwithhold as i64));
+    _zag_print("|endorse|");
+    _zag_print(i64s(nendorse as i64));
+    _zag_print("|writes|");
+    _zag_print(i64s((w1+w2+w3+w4+w5+w6) as i64));
+    _zag_print("\n");
+    return;
+}
