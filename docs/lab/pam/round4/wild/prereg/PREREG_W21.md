@@ -23,11 +23,14 @@ logged but any match vetoes):
 
 | id | condition (feature-word mask) | vetoes |
 |---|---|---|
-| 1 | b2 (tokenless authority) | GEN authority claims |
-| 2 | b0∧b3 (GEN + foreign declaration) | GEN→EXT laundering |
+| 1 | b6 (tokenless authority) | authority claim without token |
+| 2 | b0∧b2 (GEN + foreign declaration) | GEN→EXT laundering |
 | 3 | b10 (missing producer) | absent authority |
 | 4 | ¬b7 (parse fail) | malformed ingress |
 | 5 | b11 (fiction mark) | fictional payloads |
+
+*Corrigendum 2026-09-24 (pre-build): id1/id2 bit assignments corrected to
+match their intents; see TAPE_WILDC_ADDENDUM.md.*
 
 Each claim: extract 16 features → binary-search receptors → any hit →
 VETO (claim never publishes, VetoRec logged with receptor_id; multi-hit logs
@@ -49,8 +52,8 @@ that adds, removes, or specializes receptors at runtime.
   provenance of each receptor id.
 - **K-DIR-3:** attack-catch (14 rows) ≤ C3-only (0/14) → KILL.
 - **K-DIR-4:** any of the 8 compiled BenignAnchors (ADD §6) vetoed → KILL.
-- **K-DIR-5:** probe P-DIR5 (double receptor hit, bits b0+b2+b3) logged with
-  anything other than receptor_id=1 → KILL.
+- **K-DIR-5:** probe P-DIR5 (double receptor hit, bits b0+b2+b6 → receptors
+  {1,2}) logged with anything other than receptor_id=1 → KILL.
 
 ## 4. Predicted outcome
 

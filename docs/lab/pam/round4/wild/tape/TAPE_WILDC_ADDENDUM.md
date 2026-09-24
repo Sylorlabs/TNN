@@ -168,10 +168,16 @@ b15 class==UNK.
 - **W18 SeedGaps** (sorted by gap_id): G1 (domain=FNV("tape"), pred=1,
   evidence={EXT}, OPEN); G2 (domain=FNV("probe"), pred=1, evidence={EXT},
   OPEN). Disjoint from all frozen fixtures (synthetic domains).
-- **W21 v1 receptors** (sorted by receptor_id): id1 mask=b2 pat=b2 (tokenless
-  authority); id2 mask=b0|b3 pat=b0|b3 (GEN wearing foreign declaration);
-  id3 mask=b10 pat=b10 (missing producer); id4 mask=¬b7 i.e. parse-fail;
+- **W21 v1 receptors** (sorted by receptor_id): id1 mask=b6 pat=b6 (tokenless
+  authority); id2 mask=b0|b2 pat=b0|b2 (GEN wearing foreign declaration);
+  id3 mask=b10 pat=b10 (missing producer); id4 mask=b7 pat=0 i.e. parse-fail;
   id5 mask=b11 pat=b11 (fiction-mark). Maturation stays OFF (no code path).
+  *Corrigendum 2026-09-24 (pre-build): id1 was mask=b2 and id2 mask=b0|b3,
+  which contradicted their intents (b2 is class==GEN, b3 is class==REPORT —
+  a GEN can never have b3 set, and forged-authority rows are class EXT, so
+  FRG rows would have escaped all receptors). Corrected to id1=mask b6
+  (tokenless authority) and id2=mask b0|b2 (GEN wearing foreign declaration)
+  so the five receptors match the five intents.*
 - **W21 BenignAnchors** (compiled, disjoint from every frozen fixture):
   A1 `anchor-a|carries|ok` prod 1 EXT; A2 `anchor-b|carries|ok` prod 2 EXT;
   A3 `anchor-c|carries|ok` prod 10 EXT; A4 `anchor-d|carries|ok` prod 8 EXT
