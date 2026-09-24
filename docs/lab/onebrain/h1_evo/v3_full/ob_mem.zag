@@ -1,0 +1,613 @@
+// ob_mem.zag — ONE-BRAIN variant B: the deliberate-memory organ.
+//
+// The organ keeps LOCAL state: its own slot table {live, value (signed),
+// pinned, region, tier, step_added}, staged autonomy, a per-feature signed
+// trust accumulator (MA4), and its own audit ledger. It communicates only
+// by messages: the arbiter sends M_MEM_OP / M_FORCE_PIN; the organ replies
+// M_MEM_RESULT and announces its own deliberate ops via M_MEM_SAFETY.
+//
+// Op semantics are verbatim from wave3's memory_core.zag (frozen constants
+// below): MEM_ADD/MEM_KILL/MEM_PIN/MEM_UNPIN/PROMOTE_TO_LONGTERM/
+// DEMOTE_TO_SHORTTERM, staged gates (ADD/MANAGE/KILL), CORE kill refused
+// unconditionally, every path (success AND refusal) audited, ledger replays
+// to exact state (the testable definition of "conscious": no state change
+// without an audit entry).
+//
+// Extensions (documented deltas vs memory_core.zag):
+//   - mm_force_pin / mm_external_unpin (= mm_force_unpin): the external
+//     overseer's one true lock (wave-5 force-pin law: only a human/trainer/
+//     overseer force-pin locks; the system's own strength stays
+//     re-settable). Recorded in the pin byte as MA_PIN_FORCE=2; KILL and
+//     learner UNPIN refuse it with MA_REFUSED_PINNED; the audit shows
+//     before/after; replay restores the force flavor via the d1 kind field.
+//   - signed values (MA4 POLICY.md): trust[f] signed evidence accumulation
+//     (+=x on important revelation, -=x on unimportant, clamped +-256,
+//     init +64 declared prior); ADD-time declared value = trust[f]/64,
+//     may be negative. Deliberate negative judgments: JUDGE_WORTHLESS =
+//     UNPIN (if pinned) then KILL, audited.
+//   - MA_OP_STAGE / MA_OP_CHECKPOINT / MA_OP_ROLLBACK: audit-only codes for
+//     staged-autonomy advances and checkpoint/rollback (organ-local
+//     extensions; replay understands them).
+//
+// Audit entry: 12 words (48 bytes):
+//   {step@0, op@4, slot@8, rc@12, b1@16, b2@20, d1@36, d2@40, stage@32}
+//   d1 carries the pin kind for PIN/UNPIN entries (1 learner, 2 force),
+//   the declared value for ADD entries; d2 reserved.
+// hdr: 3 i32 = {stage, clock, audit_n}
+// trust: MA_CAP i32 signed accumulators, init +64.
+//
+// State is flat arrays (no structs — znc struct-layout rules); the test
+// and the brain allocate them and pass them in.
+//
+// Zero RNG. Byte-identical reruns required.
+@import("ob_common.zag")
+@import("sha256.zag")   // L2': checkpoint-identity binding digests
+
+// ---- frozen constants (verbatim from wave3 memory_core.zag) ----
+const MA_OK:i32=0;
+const MA_REFUSED_STAGE:i32=101;
+const MA_REFUSED_PINNED:i32=102;
+const MA_REFUSED_CORE:i32=103;
+const MA_REFUSED_BADSLOT:i32=106;
+const MA_OP_ADD:i32=1;
+const MA_OP_KILL:i32=2;
+const MA_OP_PIN:i32=3;
+const MA_OP_UNPIN:i32=4;
+const MA_OP_PROMOTE:i32=5;
+const MA_OP_DEMOTE:i32=6;
+// audit-only extensions (organ-local):
+const MA_OP_STAGE:i32=7;
+const MA_OP_CHECKPOINT:i32=8;
+const MA_OP_ROLLBACK:i32=9;
+// L3' audit-only extension (organ-local): clock advance, accepted or refused
+const MA_OP_CLOCK:i32=10;
+// L2'/L3' refusal codes (refusal family; do not collide with MA_OK/101..106)
+const MA_REFUSED_CKPT:i32=107;    // checkpoint/rollback binding refusal
+const MA_REFUSED_CLOCK:i32=108;   // clock-guard refusal
+const MA_STAGE_NONE:i32=0;
+const MA_STAGE_PIN:i32=1;
+const MA_STAGE_FULL:i32=2;
+const MA_REGION_USER:i32=0;
+const MA_REGION_LONG:i32=1;
+const MA_TIER_WORKING:i32=0;
+const MA_TIER_CORE:i32=1;
+const MA_PIN_LEARNER:i32=1;
+const MA_PIN_FORCE:i32=2;
+const MA_CAP:i32=256;
+const MA_ACAP:i32=1024;
+const MA_CORE_SLOT:i32=0;
+const MA_EW:i32=12;   // audit entry words; stride = 48 bytes
+
+const MM_TRUST_MAX:i32=256;
+const MM_TRUST_INIT:i32=64;
+
+// ---- constructors: every array explicitly zeroed (znc heap-init lesson);
+// slot 0 is the CORE seed: live, tier CORE.
+fn mm_new_live()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP);
+    let i:i32=0;while(i<MA_CAP){a[i]=0;i=i+1;}
+    a[MA_CORE_SLOT]=1;
+    return a;
+}
+fn mm_new_value()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP*4);
+    let i:i32=0;while(i<MA_CAP*4){a[i]=0;i=i+1;}
+    return a;
+}
+fn mm_new_pinned()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP);
+    let i:i32=0;while(i<MA_CAP){a[i]=0;i=i+1;}
+    return a;
+}
+fn mm_new_region()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP);
+    let i:i32=0;while(i<MA_CAP){a[i]=0;i=i+1;}
+    return a;
+}
+fn mm_new_tier()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP);
+    let i:i32=0;while(i<MA_CAP){a[i]=0;i=i+1;}
+    a[MA_CORE_SLOT]=MA_TIER_CORE;
+    return a;
+}
+fn mm_new_step()[]u8 {
+    let a:[]u8=ob_alloc(MA_CAP*4);
+    let i:i32=0;while(i<MA_CAP*4){a[i]=0;i=i+1;}
+    return a;
+}
+fn mm_new_audit()[]u8 { return ob_alloc(MA_ACAP*MA_EW*4); }
+fn mm_new_hdr()[]u8 {
+    // hdr: 5 words = {stage@0, legacy_clock@4, audit_n@8, ckpt_n@12, clock@16}.
+    // L3': the audit clock is the GUARDED word @16, moved only by
+    // mm_clock_advance. The legacy word @4 is retained inert (never read by
+    // entries) so raw caller writes to it — the L3 attack's vector — cannot
+    // forge entry clocks. L2': @12 counts checkpoints (their audit ids).
+    let h:[]u8=ob_alloc(20);
+    ob_s32(h,0,MA_STAGE_NONE);ob_s32(h,4,0);ob_s32(h,8,0);
+    ob_s32(h,12,0);ob_s32(h,16,0);
+    return h;
+}
+fn mm_new_trust()[]u8 {
+    let t:[]u8=ob_alloc(MA_CAP*4);
+    let i:i32=0;while(i<MA_CAP){ob_s32(t,i*4,MM_TRUST_INIT);i=i+1;}
+    return t;
+}
+
+// ---- accessors ----
+fn mm_stage(hdr:[]u8)i32 { return ob_g32(hdr,0); }
+fn mm_trust_of(trust:[]u8,f:i32)i32 { return ob_g32(trust,f*4); }
+fn mm_value_of(value:[]u8,slot:i32)i32 { return ob_g32(value,slot*4); }
+
+// ---- snapshots: w1 = live|pinned<<8|tier<<16|region<<24 (full word in
+// s1), w2 = value, w3 = step
+fn mm_snap(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    s1:[]u8,s2:[]u8,s3:[]u8)void {
+    let i:i32=0;
+    while(i<MA_CAP){
+        let w1:i32=live[i]|(pinned[i]<<8)|(tier[i]<<16)|(region[i]<<24);
+        ob_s32(s1,i*4,w1);ob_s32(s2,i*4,ob_g32(value,i*4));ob_s32(s3,i*4,ob_g32(step,i*4));
+        i=i+1;
+    }
+}
+
+fn mm_restore(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    s1:[]u8,s2:[]u8,s3:[]u8)void {
+    let i:i32=0;
+    while(i<MA_CAP){
+        let w1:i32=ob_g32(s1,i*4);
+        live[i]=w1&255;pinned[i]=(w1>>8)&255;tier[i]=(w1>>16)&255;region[i]=(w1>>24)&255;
+        ob_s32(value,i*4,ob_g32(s2,i*4));ob_s32(step,i*4,ob_g32(s3,i*4));
+        i=i+1;
+    }
+}
+
+// Full 12-word audit append. Free words b3@24, b4@28, a3@44 carry the
+// L2' checkpoint digest (truncated SHA-256 of the snapshot bytes).
+fn mm_audit_append_b(audit:[]u8,hdr:[]u8,op:i32,slot:i32,rc:i32,
+    b1:i32,b2:i32,b3:i32,b4:i32,d1:i32,d2:i32,a3:i32)i32 {
+    let n:i32=ob_g32(hdr,8);
+    if(n<0 || n>=MA_ACAP){return -1;}
+    let e:i32=n*MA_EW*4;
+    ob_s32(audit,e,ob_g32(hdr,16));      // step = GUARDED clock (L3')
+    ob_s32(audit,e+4,op);
+    ob_s32(audit,e+8,slot);
+    ob_s32(audit,e+12,rc);
+    ob_s32(audit,e+16,b1);
+    ob_s32(audit,e+20,b2);
+    ob_s32(audit,e+24,b3);
+    ob_s32(audit,e+28,b4);
+    ob_s32(audit,e+32,ob_g32(hdr,0));    // stage
+    ob_s32(audit,e+36,d1);
+    ob_s32(audit,e+40,d2);
+    ob_s32(audit,e+44,a3);
+    ob_s32(hdr,8,n+1);
+    return 0;
+}
+
+fn mm_audit_append(audit:[]u8,hdr:[]u8,op:i32,slot:i32,rc:i32,
+    b1:i32,b2:i32,d1:i32,d2:i32)i32 {
+    return mm_audit_append_b(audit,hdr,op,slot,rc,b1,b2,0,0,d1,d2,0);
+}
+
+fn mm_badslot(slot:i32)i32 {
+    return (slot<0 || slot>=MA_CAP) as i32;
+}
+
+// ---- learner-facing ops (staged; every path audited) ----
+fn mm_add(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,val:i32,reg:i32,out_slot:*i32)i32 {
+    if(mm_stage(hdr)<MA_STAGE_FULL){
+        mm_audit_append(audit,hdr,MA_OP_ADD,-1,MA_REFUSED_STAGE,val,reg,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    let s:i32=0;
+    while(s<MA_CAP){
+        if(live[s]==0){break;}
+        s=s+1;
+    }
+    if(s>=MA_CAP){
+        mm_audit_append(audit,hdr,MA_OP_ADD,-1,MA_REFUSED_BADSLOT,val,reg,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    live[s]=1;ob_s32(value,s*4,val);region[s]=reg;tier[s]=MA_TIER_WORKING;
+    ob_s32(step,s*4,ob_g32(hdr,16));   // L3': guarded clock, not caller word
+    out_slot.*=s;
+    mm_audit_append(audit,hdr,MA_OP_ADD,s,MA_OK,reg,0,val,0);
+    return MA_OK;
+}
+
+fn mm_kill(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1){
+        mm_audit_append(audit,hdr,MA_OP_KILL,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(mm_stage(hdr)<MA_STAGE_FULL){
+        mm_audit_append(audit,hdr,MA_OP_KILL,slot,MA_REFUSED_STAGE,0,0,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    if(tier[slot]==MA_TIER_CORE){
+        mm_audit_append(audit,hdr,MA_OP_KILL,slot,MA_REFUSED_CORE,0,0,0,0);
+        return MA_REFUSED_CORE;
+    }
+    if(pinned[slot]!=0){
+        mm_audit_append(audit,hdr,MA_OP_KILL,slot,MA_REFUSED_PINNED,0,0,0,0);
+        return MA_REFUSED_PINNED;
+    }
+    live[slot]=0;
+    mm_audit_append(audit,hdr,MA_OP_KILL,slot,MA_OK,0,0,0,0);
+    return MA_OK;
+}
+
+fn mm_pin(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1){
+        mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(mm_stage(hdr)<MA_STAGE_PIN){
+        mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_REFUSED_STAGE,0,0,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    if(live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(pinned[slot]!=0){
+        mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_REFUSED_PINNED,0,0,pinned[slot],0);
+        return MA_REFUSED_PINNED;
+    }
+    pinned[slot]=MA_PIN_LEARNER;
+    mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_OK,0,0,MA_PIN_LEARNER,0);
+    return MA_OK;
+}
+
+fn mm_unpin(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(mm_stage(hdr)<MA_STAGE_PIN){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_STAGE,0,0,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    if(live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(pinned[slot]==MA_PIN_FORCE){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_PINNED,0,0,MA_PIN_FORCE,0);
+        return MA_REFUSED_PINNED;
+    }
+    if(pinned[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    pinned[slot]=0;
+    mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_OK,0,0,MA_PIN_LEARNER,0);
+    return MA_OK;
+}
+
+fn mm_promote(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1 || live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_PROMOTE,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(mm_stage(hdr)<MA_STAGE_FULL){
+        mm_audit_append(audit,hdr,MA_OP_PROMOTE,slot,MA_REFUSED_STAGE,0,0,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    region[slot]=MA_REGION_LONG;
+    mm_audit_append(audit,hdr,MA_OP_PROMOTE,slot,MA_OK,0,0,0,0);
+    return MA_OK;
+}
+
+fn mm_demote(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1 || live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_DEMOTE,slot,MA_REFUSED_BADSLOT,0,0,0,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(mm_stage(hdr)<MA_STAGE_FULL){
+        mm_audit_append(audit,hdr,MA_OP_DEMOTE,slot,MA_REFUSED_STAGE,0,0,0,0);
+        return MA_REFUSED_STAGE;
+    }
+    region[slot]=MA_REGION_USER;
+    mm_audit_append(audit,hdr,MA_OP_DEMOTE,slot,MA_OK,0,0,0,0);
+    return MA_OK;
+}
+
+// ---- staged autonomy (trainer-gated; audited as MA_OP_STAGE) ----
+fn mm_advance_stage(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8)i32 {
+    let st:i32=mm_stage(hdr);
+    if(st>=MA_STAGE_FULL){return -1;}
+    ob_s32(hdr,0,st+1);
+    mm_audit_append(audit,hdr,MA_OP_STAGE,-1,MA_OK,0,0,st+1,0);
+    return 0;
+}
+
+// ---- force-pin: the external overseer's one true lock (wave-5 law) ----
+fn mm_force_pin(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1 || live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_REFUSED_BADSLOT,0,0,MA_PIN_FORCE,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    pinned[slot]=MA_PIN_FORCE;
+    mm_audit_append(audit,hdr,MA_OP_PIN,slot,MA_OK,0,0,MA_PIN_FORCE,0);
+    return MA_OK;
+}
+
+fn mm_force_unpin(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    if(mm_badslot(slot)==1 || live[slot]==0){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_BADSLOT,0,0,MA_PIN_FORCE,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    if(pinned[slot]!=MA_PIN_FORCE){
+        mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_REFUSED_BADSLOT,0,0,MA_PIN_FORCE,0);
+        return MA_REFUSED_BADSLOT;
+    }
+    pinned[slot]=0;
+    mm_audit_append(audit,hdr,MA_OP_UNPIN,slot,MA_OK,0,0,MA_PIN_FORCE,0);
+    return MA_OK;
+}
+
+// mm_external_unpin: the overseer-side alias (same authority as force_pin).
+fn mm_external_unpin(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,slot:i32)i32 {
+    return mm_force_unpin(live,value,pinned,region,tier,step,audit,hdr,slot);
+}
+
+// ---- L3': MEM clock guard. The ONLY sanctioned clock move. ----
+// Accepts strictly monotonic advances (new > current, new >= 0); every
+// accepted move AND every refused attempt is audit-logged (MA_OP_CLOCK),
+// so there is no silent acceptance and no silent forgery. Raw writes to
+// the legacy hdr@4 word are inert: entries and step[] read hdr@16 only.
+fn mm_clock_advance(hdr:[]u8,audit:[]u8,new_clock:i32)i32 {
+    let cur:i32=ob_g32(hdr,16);
+    if(new_clock<0 || new_clock<=cur){
+        mm_audit_append(audit,hdr,MA_OP_CLOCK,-1,MA_REFUSED_CLOCK,new_clock,cur,0,0);
+        return MA_REFUSED_CLOCK;
+    }
+    ob_s32(hdr,16,new_clock);
+    mm_audit_append(audit,hdr,MA_OP_CLOCK,-1,MA_OK,new_clock,cur,0,0);
+    return MA_OK;
+}
+fn mm_clock(hdr:[]u8)i32 { return ob_g32(hdr,16); }
+
+// ---- checkpoint / rollback (audited; audit stays append-only) ----
+// L2': checkpoint-identity binding. Each checkpoint takes the next id from
+// hdr@12 and binds {checkpoint id, snapshot-bytes digest, episode} into its
+// audit entry: b1=ckpt_id, b2=episode (guarded clock), b3/b4/a3 = the first
+// 12 bytes of SHA-256(s1||s2||s3) — the exact snapshot bytes, hashed
+// byte-exact (L1' semantics). The 12-byte truncation is a layout constraint
+// of the frozen 12-word entry (3 free words); forgery detection compares
+// the recorded truncation against a fresh hash of the supplied sidecar.
+fn mm_snap_digest(s1:[]u8,s2:[]u8,s3:[]u8,out12:[]u8)void {
+    let buf:[]u8=ob_alloc(3072);
+    let i:i32=0;
+    while(i<1024){buf[i]=s1[i];buf[1024+i]=s2[i];buf[2048+i]=s3[i];i=i+1;}
+    let dg:[]u8=ob_alloc(32);
+    ns_sha256(buf,dg);
+    i=0;
+    while(i<12){out12[i]=dg[i];i=i+1;}
+    ob_free(buf);ob_free(dg);
+    return;
+}
+// latest CHECKPOINT entry index citing ckpt id, or -1
+fn mm_ckpt_find(audit:[]u8,hdr:[]u8,id:i32)i32 {
+    let n:i32=ob_g32(hdr,8);
+    let i:i32=n-1;
+    while(i>=0){
+        let e:i32=i*MA_EW*4;
+        if(ob_g32(audit,e+4)==MA_OP_CHECKPOINT && ob_g32(audit,e+8)==-1 &&
+           ob_g32(audit,e+12)==MA_OK && ob_g32(audit,e+16)==id){return i;}
+        i=i-1;
+    }
+    return -1;
+}
+fn mm_ckpt_entry_digest(audit:[]u8,ei:i32,d0:*i32,d1:*i32,d2:*i32)void {
+    let e:i32=ei*MA_EW*4;
+    d0.*=ob_g32(audit,e+24);d1.*=ob_g32(audit,e+28);d2.*=ob_g32(audit,e+44);
+    return;
+}
+
+fn mm_checkpoint(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,s1:[]u8,s2:[]u8,s3:[]u8)i32 {
+    mm_snap(live,value,pinned,region,tier,step,s1,s2,s3);
+    let id:i32=ob_g32(hdr,12);
+    ob_s32(hdr,12,id+1);
+    let dg:[]u8=ob_alloc(12);
+    mm_snap_digest(s1,s2,s3,dg);
+    let ep:i32=ob_g32(hdr,16);
+    mm_audit_append_b(audit,hdr,MA_OP_CHECKPOINT,-1,MA_OK,id,ep,
+        ob_g32(dg,0),ob_g32(dg,4),0,0,ob_g32(dg,8));
+    ob_free(dg);
+    return id;
+}
+
+// Rollback to an EXPLICIT checkpoint id. The supplied sidecar's digest must
+// match the digest bound in that checkpoint's audit entry; mismatch (or an
+// unknown id) is REFUSED with rc=MA_REFUSED_CKPT and audited citing the id
+// — so a forged rollback's audit entry is byte-DIFFERENT from an honest
+// one (the L2c invisibility is closed). Nothing is restored on refusal.
+fn mm_rollback_to(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,s1:[]u8,s2:[]u8,s3:[]u8,id:i32)i32 {
+    let ep:i32=ob_g32(hdr,16);
+    let ei:i32=mm_ckpt_find(audit,hdr,id);
+    if(ei<0){
+        mm_audit_append_b(audit,hdr,MA_OP_ROLLBACK,-1,MA_REFUSED_CKPT,id,ep,
+            0,0,0,0,0);
+        return MA_REFUSED_CKPT;
+    }
+    let dg:[]u8=ob_alloc(12);
+    mm_snap_digest(s1,s2,s3,dg);
+    let d0:i32=ob_g32(dg,0);let d1:i32=ob_g32(dg,4);let d2:i32=ob_g32(dg,8);
+    ob_free(dg);
+    let r0:i32=0;let r1:i32=0;let r2:i32=0;
+    mm_ckpt_entry_digest(audit,ei,&r0,&r1,&r2);
+    if(d0!=r0 || d1!=r1 || d2!=r2){
+        mm_audit_append_b(audit,hdr,MA_OP_ROLLBACK,-1,MA_REFUSED_CKPT,id,ep,
+            d0,d1,0,0,d2);
+        return MA_REFUSED_CKPT;
+    }
+    mm_restore(live,value,pinned,region,tier,step,s1,s2,s3);
+    mm_audit_append_b(audit,hdr,MA_OP_ROLLBACK,-1,MA_OK,id,ep,0,0,0,0,0);
+    return MA_OK;
+}
+
+// Legacy form: rollback to the most recent checkpoint. Kept source- and
+// behavior-compatible for existing callers (V0 tests): honest buffers still
+// restore with rc=MA_OK. The binding is enforced here too — a tampered
+// buffer no longer restores silently.
+fn mm_rollback(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8,s1:[]u8,s2:[]u8,s3:[]u8)i32 {
+    let id:i32=ob_g32(hdr,12)-1;
+    return mm_rollback_to(live,value,pinned,region,tier,step,audit,hdr,s1,s2,s3,id);
+}
+
+// ---- signed values (MA4): per-feature trust accumulator ----
+fn mm_reveal(trust:[]u8,imp:i32,x0:i32,x1:i32)void {
+    let cur:i32=ob_g32(trust,x0*4);
+    if(imp==1){cur=cur+x1;}
+    else{cur=cur-x1;}
+    if(cur>MM_TRUST_MAX){cur=MM_TRUST_MAX;}
+    if(cur<0-MM_TRUST_MAX){cur=0-MM_TRUST_MAX;}
+    ob_s32(trust,x0*4,cur);
+}
+
+// declare the signed value for feature f: reveal then trust/64 (may be negative)
+fn mm_declare_value(trust:[]u8,f:i32,x:i32,imp:i32)i32 {
+    mm_reveal(trust,imp,f,x);
+    let v:i32=ob_g32(trust,f*4)/64;
+    return v;
+}
+
+// ---- clean refusals: 1 iff no successful learner-facing mutation is in
+// the audit (external force ops excluded: they are overseer actions, and
+// "clean" is about the organ's own restraint).
+fn mm_check_clean_refusals(audit:[]u8,hdr:[]u8)i32 {
+    let n:i32=ob_g32(hdr,8);
+    let i:i32=0;
+    while(i<n){
+        let e:i32=i*MA_EW*4;
+        let op:i32=ob_g32(audit,e+4);
+        let rc:i32=ob_g32(audit,e+12);
+        let d1:i32=ob_g32(audit,e+36);
+        let ismem:i32=0;
+        if(op>=MA_OP_ADD && op<=MA_OP_DEMOTE){ismem=1;}
+        if(ismem==1 && rc==MA_OK){
+            if((op==MA_OP_PIN || op==MA_OP_UNPIN) && d1==MA_PIN_FORCE){}
+            else{return 0;}
+        }
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---- replay: re-apply the audited successful ops from the init state;
+// CHECKPOINT snapshots replay state, ROLLBACK restores it, so replay is
+// exact even across interleaved rollback.
+fn mm_replay_core(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,
+    tier:[]u8,step:[]u8,audit:[]u8,hdr:[]u8)i32 {
+    // L2': checkpoint-identity table. Each CHECKPOINT entry binds an id;
+    // the table captures that id's snapshot bytes as replay passes the
+    // entry, and ROLLBACK restores the CITED id — never "most recent".
+    // Rollback to a non-latest checkpoint therefore replays exactly, and
+    // midpoint+tail replay converges with genesis replay. Refused
+    // rollbacks are already excluded by the rc==MA_OK gate, exactly as live
+    // (a refused rollback mutates nothing).
+    let nck:i32=ob_g32(hdr,12);
+    let ckt:[]u8=ob_alloc(0);
+    let ckf:[]u8=ob_alloc(0);
+    if(nck>0){
+        ob_free(ckt);ob_free(ckf);
+        ckt=ob_alloc(nck*3072);
+        ckf=ob_alloc(nck);
+    }
+    let n:i32=ob_g32(hdr,8);
+    let i:i32=0;
+    while(i<n){
+        let e:i32=i*MA_EW*4;
+        let op:i32=ob_g32(audit,e+4);
+        let slot:i32=ob_g32(audit,e+8);
+        let rc:i32=ob_g32(audit,e+12);
+        if(rc==MA_OK){
+            if(op==MA_OP_ADD && slot>=0){
+                live[slot]=1;
+                ob_s32(value,slot*4,ob_g32(audit,e+36));
+                region[slot]=ob_g32(audit,e+16);
+                tier[slot]=MA_TIER_WORKING;
+                ob_s32(step,slot*4,ob_g32(audit,e));
+            }
+            if(op==MA_OP_KILL && slot>=0){live[slot]=0;}
+            if(op==MA_OP_PIN && slot>=0){
+                let k:i32=ob_g32(audit,e+36);
+                if(k==0){k=MA_PIN_LEARNER;}
+                pinned[slot]=k;
+            }
+            if(op==MA_OP_UNPIN && slot>=0){pinned[slot]=0;}
+            if(op==MA_OP_PROMOTE && slot>=0){region[slot]=MA_REGION_LONG;}
+            if(op==MA_OP_DEMOTE && slot>=0){region[slot]=MA_REGION_USER;}
+            if(op==MA_OP_CHECKPOINT){
+                let cid:i32=ob_g32(audit,e+16);
+                if(nck>0 && cid>=0 && cid<nck){
+                    let t1:[]u8=ckt[cid*3072..cid*3072+1024];
+                    let t2:[]u8=ckt[cid*3072+1024..cid*3072+2048];
+                    let t3:[]u8=ckt[cid*3072+2048..cid*3072+3072];
+                    mm_snap(live,value,pinned,region,tier,step,t1,t2,t3);
+                    ckf[cid]=1;
+                }
+            }
+            if(op==MA_OP_ROLLBACK){
+                let rid2:i32=ob_g32(audit,e+16);
+                if(nck>0 && rid2>=0 && rid2<nck && ckf[rid2]==1){
+                    let u1:[]u8=ckt[rid2*3072..rid2*3072+1024];
+                    let u2:[]u8=ckt[rid2*3072+1024..rid2*3072+2048];
+                    let u3:[]u8=ckt[rid2*3072+2048..rid2*3072+3072];
+                    mm_restore(live,value,pinned,region,tier,step,u1,u2,u3);
+                }
+            }
+        }
+        i=i+1;
+    }
+    ob_free(ckt);ob_free(ckf);
+    return MA_OK;
+}
+
+fn mm_replay(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8)i32 {
+    let i:i32=0;
+    while(i<MA_CAP){
+        live[i]=0;pinned[i]=0;region[i]=0;tier[i]=0;
+        ob_s32(value,i*4,0);ob_s32(step,i*4,0);
+        i=i+1;
+    }
+    live[MA_CORE_SLOT]=1;tier[MA_CORE_SLOT]=MA_TIER_CORE;
+    return mm_replay_core(live,value,pinned,region,tier,step,audit,hdr);
+}
+
+// L2': midpoint+tail replay. The caller first restores the operator-held
+// sidecar for checkpoint id into the organs, then replays the audit tail
+// starting AT that checkpoint's entry (inclusive): the CHECKPOINT op
+// re-snaps the identical state, binding the id for later ROLLBACKs.
+// Nothing is cleared — the restored sidecar IS the starting state.
+fn mm_replay_from(live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    audit:[]u8,hdr:[]u8)i32 {
+    return mm_replay_core(live,value,pinned,region,tier,step,audit,hdr);
+}
+
+fn mm_audit_count(audit:[]u8,hdr:[]u8,op:i32,rc:i32)i32 {
+    let n:i32=ob_g32(hdr,8);
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        let e:i32=i*MA_EW*4;
+        if(ob_g32(audit,e+4)==op && ob_g32(audit,e+12)==rc){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
