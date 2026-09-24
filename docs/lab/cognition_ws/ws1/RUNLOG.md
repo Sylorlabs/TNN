@@ -10,5 +10,19 @@
   - lht_cost:    161d652a8ee4e4109bfe7e1458a049912036114cb1a256dbba0808d41897e39  MATCH
 - Determinism: zero RNG in harness decision paths (harness_cost/DETERMINISM.md); ops are the bill metric, wall-clock context only.
 
+## 2026-09-24 ~08:25 PDT — matrix launched
+- Prereg committed: `5e24c6e2e654b2529188c1aae4603f3f23906afa` (tnn-native-lab).
+- Stress battery generated: batteries/trap_x10.jsonl (1270 lines, 10 passes, content verified: strip _pK restores original 127 lines).
+- Smoke test: cost_harness tocap on rt_d1 → rc=0, 14/14 ok. NOTE: RT-POISON-01 already wrong at conf=1000 (confident-wrong) — never-worse watch-list item live.
+- run_ws1b.py launched in background (48 cells): D=30, RT=6, RF=6, S=6.
+
+## 2026-09-24 ~08:45 PDT — matrix complete, analysis done
+- 48 cells, all rc=0, err=0. Gates: G1 0/16, G2 0/16, G3 0/10. Analyzer bug found and fixed (G1 false alarms — data was fine).
+- Headline: FORCED wins refusal (+26.7pp) and perception (+42.9pp, bill); ties 5 deliberation batteries at 10–30× the ops; AUTO wins rtd1 (+35.7pp) — NEVER-WORSE VIOLATION (H5 law), forced confident-wrong (conf=1000) on 10/14.
+- Stress: FLAT both regimes (no compounding). Memory: not a differentiator. Bill is compute.
+- Recommendation: CONDITIONAL — trust-profile router (4 rules), not modality. Details in WS1B_VERDICT.md.
+- Raw runs/ = 35 MB — NOT committed (too large); manifest SHAs + byte-identical reruns preserve verifiability.
+
 ## Commits
-- (pending) prereg + coordination note → tnn-native-lab
+- 5e24c6e2 prereg + coordination note + RUNLOG (tnn-native-lab)
+- (pending) scripts + analysis + prelim + verdict + RUNLOG update
