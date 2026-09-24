@@ -51,8 +51,11 @@ Equivalence proof:
   templates.
 - Old vs new `bin/learn`: `compose` byte-identical on t01/t04/t13/t26;
   `teach` byte-identical on the full curriculum.
-- Regression runs b1d/b1e (new binary + new driver) are compared
-  byte-for-byte against b1b/b1c in the determinism report.
+- Regression runs b1d/b1e (new binary + new driver): both 26/26 pass,
+  median 0 revisions; normalized decision evidence byte-identical to
+  b1b/b1c across all four runs (sha256
+  10e352cf559b641bacb339999a6e6088b81d4d34e97c6067ffad48cb9349b2ae).
+  The findcard remediation changed nothing behaviorally.
 
 ## Scope note — T2 site builder
 
