@@ -1,3 +1,12 @@
+# SUPERSEDED — see VERDICT_TRAINING.md (2026-09-24, corrected rerun)
+
+> This document records the FIRST training cycle, whose trainer binaries
+> carried a field-index bug (trained on f2..f8+garbage instead of f1..f8;
+> see `superseded_fieldindex_bug/README.md`). Its "§6 secondary: NOT RUN"
+> section is stale — the gate experiment was subsequently built, run, and
+> evaluated. The canonical final verdict is **VERDICT_TRAINING.md**.
+> This file is preserved as the predecessor crew's record, not the result.
+
 # H-0 VERDICT — Micah's training hypothesis (PREREG_TRAINING.md v1)
 
 **Verdict: H FALSIFIED AT TRAINING LEVEL. The trained head is DEGENERATE.**
