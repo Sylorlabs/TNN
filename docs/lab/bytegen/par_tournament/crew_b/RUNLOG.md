@@ -142,3 +142,4 @@ more robust exactly here (documented, not re-tested).
   `gate_bin` = `~/workspace/tnn-lab/imagination_discovery/aud/b_alpha/consistency_gate/src/gate_bin`
 - Excerpts rendered to `excerpts/` as `WITHHELD-NOT-FOR-REVIEW_*` (policy:
   never presented to Micah; judgment queue comes first).
+DET_BATTERY: 20/20 reruns of B-fix (render_b_fix.zag, fixture plan_v1.txt) byte-identical to ref b7d3a71e…8784 (sha256sum match, 2026-09-24). Zero RNG in render path confirmed.
