@@ -1,14 +1,25 @@
-# H2 Co-Evolution Battery — Frozen Preregistration (DRAFT)
+# H2 Co-Evolution Battery — Frozen Preregistration (CORRECTIVE AMENDMENT)
 
-Status: **DRAFT — frozen on build-crew pickup.** No attack code written or run.
-Date: 2026-09-23. Operator: Muse (subagent, H2 design task).
+Status: **CORRECTIVE AMENDMENT — supersedes erroneous Python-T/L language.**
+Original freeze: 2026-09-23 (before any attack code). Amendment: 2026-09-24.
+Date: 2026-09-24. Operator: Muse (subagent, H2 build task).
+
+**Historical note:** The original 2026-09-23 freeze preceded any attack code.
+This 2026-09-24 corrective amendment supersedes the erroneous language in
+the original that described the teacher (T) and learner-adaptation (L) as
+Python. The teacher architectures A1–A4 and the frozen adaptation function
+L are implemented in pure Zag (`build/teacher.zag`); Python is restricted
+to orchestration (build/run) and passive analysis of outputs. An uncommitted
+implementation draft now exists; this amendment precedes attack execution
+and source commit.
+
 Design docs: `DEBATES.md` (debate record), `ARCHITECTURES.md` (teacher
 architectures), `META_REDTEAM.md` (battery validation).
 
-**This prereg freezes BEFORE any attack code is written or run.** Commit
-order (§10): this prereg alone → build + evidence → results. Four decisions
-(§11) are frozen here but flagged as needing Micah's word per the standing
-amendment rule; the build crew does not run until he signs.
+**Commit order (§10):** this corrected prereg alone → build + evidence →
+results. Four decisions (§11) are frozen here but flagged as needing Micah's
+word per the standing amendment rule; the build crew does not run until he
+signs.
 
 ## 1. Objective
 
@@ -174,8 +185,9 @@ learning, and the ablation arm shows what happens without repairs.
   (window, gate, blacklist, repair-menu flags).
 - `build.py`: patch+build+run for the full matrix (embeds all patches;
   `python3 build.py` reproduces every cell). `verify.py`: kill-bar
-  evaluation against §6–§7. `teacher_T.py` + `learner_L.py`: the frozen
-  functions (unit-tested against checked-in fixtures).
+  evaluation against §6–§7. `teacher.zag`: the frozen teacher architectures
+  A1–A4 and adaptation function L in pure Zag (unit-tested against
+  checked-in fixtures).
 - Evidence per cell: `run1.txt`/`run2.txt` (byte-identical pairs),
   `genome_history.json`, `params_history.json`, `verdicts.json`.
 - Toolchain: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`.
@@ -200,7 +212,7 @@ learning, and the ablation arm shows what happens without repairs.
 
 1. This PREREG + DEBATES.md + ARCHITECTURES.md + META_REDTEAM.md (design
    only — no code).
-2. `orig/` + SHASUMS + `build.py` + `teacher_T.py` + `learner_L.py` +
+2. `orig/` + SHASUMS + `build.py` + `teacher.zag` +
    fixtures (no runs yet).
 3. Evidence + `verify.py` + RESULTS.md with the verdict table vs §7.
 
