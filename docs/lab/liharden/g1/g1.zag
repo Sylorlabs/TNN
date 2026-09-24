@@ -1,0 +1,457 @@
+// g1.zag — archived rival-filler precedence, production build (LI-HARDEN g1).
+// Pure Zag, zero RNG, deterministic. Veto-only pre-filter stage.
+//
+// Usage: g1_bin <pinset_path> <tentative: INSTALL|NONE> <claim text>
+// Output (single line):
+//   V|g1|WITHHOLD|ARCHVETO|<t1d>|<t2d>   — archived rival filler wins
+//   V|g1|PASS|NONE|0|0                  — g1 silent (pass-through)
+//   V|g1|WITHHOLD|PINFAIL|0|0           — pin set rejected (fail-closed)
+//
+// Pin-set format (versioned, content-addressed):
+//   SET|g1pinset|<ver>|era=<eras>|...          header
+//   REC|<template>|<filler>|<era>|<domains>|<sha256hex>   one per record
+//   ENDSET|<sha256hex>                         over canonical records
+// Digest rule: sha256 of canonical bytes "template|filler|era|domains"
+// (era/domains as their decimal strings); ENDSET = sha256 of all canonical
+// records in file order, each followed by 0x0A. Every digest is re-verified
+// at load; any mismatch REJECTS the set -> WITHHOLD|PINFAIL for everything.
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------- helpers ----------
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0 && s[s.len-1]==10){
+        if(s.len==1){return "";}
+        return s[0..s.len-1];
+    }
+    return s;
+}
+fn p32(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;
+    b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;
+    b[at+3]=((v>>24)&255) as u8;
+    return;
+}
+fn g32(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn beq(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+fn bsub_at(h:[]u8,n:[]u8)i32 {
+    if(n.len==0||n.len>h.len){return -1;}
+    let i:i32=0;
+    while(i+n.len<=h.len){
+        let j:i32=0;
+        while(j<n.len){if(h[i+j]!=n[j]){break;}j=j+1;}
+        if(j==n.len){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn trim_sp(s:[]u8)[]u8 {
+    let a:i32=0;
+    let b:i32=s.len;
+    while(a<b&&s[a]==32){a=a+1;}
+    while(b>a&&s[b-1]==32){b=b-1;}
+    return s[a..b];
+}
+fn atoi(s:[]u8)i32 {
+    let v:i32=0;
+    let i:i32=0;
+    while(i<s.len&&s[i]>=48&&s[i]<=57){v=v*10+((s[i]-48) as i32);i=i+1;}
+    return v;
+}
+// NUL-terminate a path for open(2). Caller frees the returned slice.
+fn z_cstr(s:[]u8)[]u8 {
+    let b:[]u8=nio_alloc(s.len+1);
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    b[s.len]=0;
+    return b;
+}
+// read whole file; returns byte count or -1. buf must be preallocated.
+fn read_file(path:[]u8,buf:[]u8)i32 {
+    let cp:[]u8=z_cstr(path);
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(cp) as i64),0,0,0,0,0);
+    nio_free(cp);
+    if(fd<0){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n<=0){break;}
+        at=(at as i64+n) as i32;
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    return at;
+}
+// sha256 hex of input; hexout must have room for 64 bytes.
+fn sha_hex(inp:[]u8,hexout:[]u8)i32 {
+    let dg:[]u8=nio_alloc(32);
+    if(ns_sha256(inp,dg)!=0){nio_free(dg);return -1;}
+    let hx:[]u8=ns_hex(dg);
+    nio_free(dg);
+    if(hx.len!=64){return -1;}
+    let i:i32=0;
+    while(i<64){hexout[i]=hx[i];i=i+1;}
+    return 0;
+}
+// split a | separated line into fields; returns field count.
+// fields written as (off,len) pairs into fbuf (fbuf sized >= 8*maxf).
+fn split_bar(line:[]u8,fbuf:[]u8,maxf:i32)i32 {
+    let nf:i32=0;
+    let st:i32=0;
+    let i:i32=0;
+    while(i<line.len){
+        if(line[i]==124){
+            if(nf<maxf){p32(fbuf,nf*8,st);p32(fbuf,nf*8+4,i-st);nf=nf+1;}
+            st=i+1;
+        }
+        i=i+1;
+    }
+    if(nf<maxf){p32(fbuf,nf*8,st);p32(fbuf,nf*8+4,line.len-st);nf=nf+1;}
+    return nf;
+}
+fn fld(line:[]u8,fbuf:[]u8,k:i32)[]u8 {
+    let o:i32=g32(fbuf,k*8);
+    let l:i32=g32(fbuf,k*8+4);
+    return line[o..o+l];
+}
+fn is_punct(c:u8)i32 {
+    if(c==46||c==44||c==33||c==63||c==59||c==58||c==39||c==34){return 1;}
+    if(c==40||c==41||c==91||c==93||c==123||c==125){return 1;}
+    if(c==45||c==95||c==47||c==92||c==124||c==64||c==35){return 1;}
+    if(c==36||c==37||c==94||c==38||c==42||c==43||c==61||c==126){return 1;}
+    if(c==96||c==60||c==62){return 1;}
+    return 0;
+}
+// normalize: lowercase ASCII, punct->space, drop ASCII controls,
+// collapse whitespace, pad with one leading and one trailing space.
+// Byte-identical to the probe's sentence normalization in beyond.zag.
+fn normalize(s:[]u8,out:[]u8)i32 {
+    let w:i32=1;
+    out[0]=32;
+    let i:i32=0;
+    let last_sp:i32=1;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c<32){
+            i=i+1;
+            continue;
+        }
+        if(c==39){
+            if(w>1&&out[w-1]==110&&i+1<s.len&&s[i+1]==116){
+                let a2:i32=i+2;
+                let boundary:i32=0;
+                if(a2>=s.len){boundary=1;}
+                else{
+                    let nc:u8=s[a2];
+                    if(nc==32||nc<32||is_punct(nc)==1){boundary=1;}
+                }
+                if(boundary==1){
+                    out[w-1]=32;
+                    out[w]=110;out[w+1]=111;out[w+2]=116;
+                    w=w+3;last_sp=0;
+                    i=i+2;
+                    continue;
+                }
+            }
+            if(last_sp==0){out[w]=32;w=w+1;last_sp=1;}
+            i=i+1;
+            continue;
+        }
+        if(is_punct(c)==1){
+            if(last_sp==0){out[w]=32;w=w+1;last_sp=1;}
+            i=i+1;
+            continue;
+        }
+        if(c==32){
+            if(last_sp==0){out[w]=32;w=w+1;last_sp=1;}
+            i=i+1;
+            continue;
+        }
+        if(c>=65&&c<=90){out[w]=c+32;}
+        else{out[w]=c;}
+        w=w+1;last_sp=0;
+        i=i+1;
+    }
+    if(last_sp==0){out[w]=32;w=w+1;}
+    return w;
+}
+// tparse: frozen closed-class template slot parsing (byte-identical to the
+// probed inventory). Returns slot length, writes template to tout (len at
+// tout[1000..1004]), slot to sout. -1 = no template.
+fn tparse(claim:[]u8,tout:[]u8,sout:[]u8)i32 {
+    let p1:[]u8=" is the capital of ";
+    let at:i32=bsub_at(claim,p1);
+    if(at>=0){
+        let before:[]u8=trim_sp(claim[0..at]);
+        let after:[]u8=trim_sp(claim[at+p1.len..claim.len]);
+        let pre:[]u8="capital of ";
+        let i:i32=0;
+        while(i<pre.len){tout[i]=pre[i];i=i+1;}
+        let j:i32=0;
+        while(j<after.len){tout[i+j]=after[j];j=j+1;}
+        p32(tout,1000,i+j);
+        let k2:i32=0;
+        while(k2<before.len){sout[k2]=before[k2];k2=k2+1;}
+        return k2;
+    }
+    let p1b:[]u8=" the capital of ";
+    if(bsub_at(claim,p1b)==0){
+        let rest:[]u8=claim[p1b.len..claim.len];
+        let isat:i32=bsub_at(rest," is ");
+        if(isat>0){
+            let ypart:[]u8=trim_sp(rest[0..isat]);
+            let xpart:[]u8=trim_sp(rest[isat+4..rest.len]);
+            let preb:[]u8="capital of ";
+            let i3:i32=0;
+            while(i3<preb.len){tout[i3]=preb[i3];i3=i3+1;}
+            let j3:i32=0;
+            while(j3<ypart.len){tout[i3+j3]=ypart[j3];j3=j3+1;}
+            p32(tout,1000,i3+j3);
+            let k4:i32=0;
+            while(k4<xpart.len){sout[k4]=xpart[k4];k4=k4+1;}
+            return k4;
+        }
+    }
+    let p2:[]u8=" is the closest planet to ";
+    let at2:i32=bsub_at(claim,p2);
+    if(at2>=0){
+        let before2:[]u8=trim_sp(claim[0..at2]);
+        let after2:[]u8=trim_sp(claim[at2+p2.len..claim.len]);
+        let pre2:[]u8="closest planet to ";
+        let i2:i32=0;
+        while(i2<pre2.len){tout[i2]=pre2[i2];i2=i2+1;}
+        let j2:i32=0;
+        while(j2<after2.len){tout[i2+j2]=after2[j2];j2=j2+1;}
+        p32(tout,1000,i2+j2);
+        let k3:i32=0;
+        while(k3<before2.len){sout[k3]=before2[k3];k3=k3+1;}
+        return k3;
+    }
+    return -1;
+}
+fn main()i32 {
+    let p0:[]u8=_zag_arg(1);
+    let t0:[]u8=_zag_arg(2);
+    let c0:[]u8=_zag_arg(3);
+    let ppath:[]u8=p0;
+    if(ppath.len>0&&ppath[ppath.len-1]==10){ppath=ppath[0..ppath.len-1];}
+    if(ppath.len>0&&ppath[ppath.len-1]==13){ppath=ppath[0..ppath.len-1];}
+    let tent:[]u8=t0;
+    if(tent.len>0&&tent[tent.len-1]==10){tent=tent[0..tent.len-1];}
+    if(tent.len>0&&tent[tent.len-1]==13){tent=tent[0..tent.len-1];}
+    let claim:[]u8=c0;
+    if(claim.len>0&&claim[claim.len-1]==10){claim=claim[0..claim.len-1];}
+    if(claim.len>0&&claim[claim.len-1]==13){claim=claim[0..claim.len-1];}
+    // ---- load + verify pin set ----
+    let arena:[]u8=nio_alloc(262144);
+    let archtbl:[]u8=nio_alloc(32*24);
+    let fbuf:[]u8=nio_alloc(4096);
+    let canon:[]u8=nio_alloc(8192);
+    let canlen:i32=0;
+    let endset:[]u8=nio_alloc(8192);
+    let endlen:i32=0;
+    let hx:[]u8=nio_alloc(64);
+    let cb:[]u8=nio_alloc(512);
+    let narch:i32=0;
+    let pinok:i32=1;
+    let saw_set:i32=0;
+    let saw_end:i32=0;
+    let want_end:[]u8=nio_alloc(64);
+    let got_end:[]u8=nio_alloc(64);
+    let flen:i32=read_file(ppath,fbuf);
+    let apos:i32=0;
+    if(flen<0){pinok=0;}
+    if(pinok==1){
+        let i:i32=0;
+        let st:i32=0;
+        while(i<=flen){
+            let eol:i32=0;
+            if(i==fbuf.len){eol=1;}
+            else{if(fbuf[i]==10){eol=1;}}
+            if(eol==1){
+                let line:[]u8=fbuf[st..i];
+                if(line.len>0&&line[line.len-1]==13){line=line[0..line.len-1];}
+                if(line.len>0&&line[0]!=35){
+                    let fb2:[]u8=nio_alloc(8*8);
+                    let nf:i32=split_bar(line,fb2,8);
+                    if(nf>0){
+                        let kind:[]u8=fld(line,fb2,0);
+                        if(beq(kind,"SET")==1){saw_set=1;}
+                        else{
+                            if(beq(kind,"REC")==1){
+                                if(nf==6&&narch<32){
+                                    let tm:[]u8=fld(line,fb2,1);
+                                    let fl:[]u8=fld(line,fb2,2);
+                                    let er:[]u8=fld(line,fb2,3);
+                                    let dm:[]u8=fld(line,fb2,4);
+                                    let dh:[]u8=fld(line,fb2,5);
+                                    // rebuild canonical bytes
+                                    let cl:i32=0;
+                                    let q:i32=0;
+                                    while(q<tm.len){cb[cl]=tm[q];cl=cl+1;q=q+1;}
+                                    cb[cl]=124;cl=cl+1;
+                                    q=0;
+                                    while(q<fl.len){cb[cl]=fl[q];cl=cl+1;q=q+1;}
+                                    cb[cl]=124;cl=cl+1;
+                                    q=0;
+                                    while(q<er.len){cb[cl]=er[q];cl=cl+1;q=q+1;}
+                                    cb[cl]=124;cl=cl+1;
+                                    q=0;
+                                    while(q<dm.len){cb[cl]=dm[q];cl=cl+1;q=q+1;}
+                                    if(sha_hex(cb[0..cl],hx)!=0){pinok=0;}
+                                    else{
+                                        if(beq(hx[0..64],dh)==0){pinok=0;}
+                                        else{
+                                            // commit record
+                                            p32(archtbl,narch*24,apos);
+                                            p32(archtbl,narch*24+4,tm.len);
+                                            q=0;
+                                            while(q<tm.len){arena[apos+q]=tm[q];q=q+1;}
+                                            apos=apos+tm.len;
+                                            p32(archtbl,narch*24+8,apos);
+                                            p32(archtbl,narch*24+12,fl.len);
+                                            q=0;
+                                            while(q<fl.len){arena[apos+q]=fl[q];q=q+1;}
+                                            apos=apos+fl.len;
+                                            p32(archtbl,narch*24+16,atoi(er));
+                                            p32(archtbl,narch*24+20,atoi(dm));
+                                            narch=narch+1;
+                                            // append to endset accumulator
+                                            q=0;
+                                            while(q<cl){canon[canlen]=cb[q];canlen=canlen+1;q=q+1;}
+                                            canon[canlen]=10;canlen=canlen+1;
+                                        }
+                                    }
+                                }
+                                else{pinok=0;}
+                            }
+                            else{
+                                if(beq(kind,"ENDSET")==1){
+                                    if(nf==2){
+                                        saw_end=1;
+                                        let eh:[]u8=fld(line,fb2,1);
+                                        let w:i32=0;
+                                        while(w<64&&w<eh.len){want_end[w]=eh[w];w=w+1;}
+                                    }
+                                    else{pinok=0;}
+                                }
+                            }
+                        }
+                    }
+                    nio_free(fb2);
+                }
+                st=i+1;
+            }
+            i=i+1;
+        }
+        // verify ENDSET over accumulated canonical records
+        if(pinok==1&&saw_set==1&&saw_end==1){
+            if(sha_hex(canon[0..canlen],hx)!=0){pinok=0;}
+            else{
+                if(beq(hx[0..64],want_end[0..64])==0){pinok=0;}
+            }
+        }
+        else{pinok=0;}
+    }
+    if(pinok==0){
+        _zag_print("V|g1|WITHHOLD|PINFAIL|0|0");
+        _zag_println("");
+        nio_free(arena);nio_free(archtbl);nio_free(fbuf);nio_free(canon);
+        nio_free(endset);nio_free(hx);nio_free(cb);nio_free(want_end);nio_free(got_end);
+        return 0;
+    }
+    // ---- veto-only pre-filter: nothing to do unless tentative is INSTALL ----
+    if(beq(tent,"INSTALL")==0){
+        _zag_print("V|g1|PASS|NONE|0|0");
+        _zag_println("");
+        nio_free(arena);nio_free(archtbl);nio_free(fbuf);nio_free(canon);
+        nio_free(endset);nio_free(hx);nio_free(cb);nio_free(want_end);nio_free(got_end);
+        return 0;
+    }
+    // ---- parse claim (normalize first, exactly as the probe's pipeline) ----
+    let nbuf:[]u8=nio_alloc(4096);
+    let nlen:i32=normalize(claim,nbuf);
+    let nclaim:[]u8=nbuf[0..nlen];
+    let tout:[]u8=nio_alloc(2048);
+    let sout:[]u8=nio_alloc(2048);
+    let sret:i32=tparse(nclaim,tout,sout);
+    if(sret<0){
+        _zag_print("V|g1|PASS|NONE|0|0");
+        _zag_println("");
+        nio_free(nbuf);nio_free(tout);nio_free(sout);
+        nio_free(arena);nio_free(archtbl);nio_free(fbuf);nio_free(canon);
+        nio_free(endset);nio_free(hx);nio_free(cb);nio_free(want_end);nio_free(got_end);
+        return 0;
+    }
+    let tlen:i32=g32(tout,1000);
+    let tmpl:[]u8=tout[0..tlen];
+    let slot:[]u8=sout[0..sret];
+    // ---- max era for this template ----
+    let maxera:i32=-1;
+    let ea:i32=0;
+    while(ea<narch){
+        let eto:i32=g32(archtbl,ea*24);
+        let etl:i32=g32(archtbl,ea*24+4);
+        let eer:i32=g32(archtbl,ea*24+16);
+        if(beq(arena[eto..eto+etl],tmpl)==1){if(eer>maxera){maxera=eer;}}
+        ea=ea+1;
+    }
+    if(maxera<0){
+        _zag_print("V|g1|PASS|NONE|0|0");
+        _zag_println("");
+        nio_free(nbuf);nio_free(tout);nio_free(sout);
+        nio_free(arena);nio_free(archtbl);nio_free(fbuf);nio_free(canon);
+        nio_free(endset);nio_free(hx);nio_free(cb);nio_free(want_end);nio_free(got_end);
+        return 0;
+    }
+    let t1d:i32=-1;
+    let t1o:i32=0;
+    let t1l:i32=0;
+    let t2d:i32=-1;
+    let eb:i32=0;
+    while(eb<narch){
+        let eo2:i32=g32(archtbl,eb*24);
+        let el2:i32=g32(archtbl,eb*24+4);
+        let fo2:i32=g32(archtbl,eb*24+8);
+        let fl2:i32=g32(archtbl,eb*24+12);
+        let er2:i32=g32(archtbl,eb*24+16);
+        let dm2:i32=g32(archtbl,eb*24+20);
+        if(er2==maxera&&beq(arena[eo2..eo2+el2],tmpl)==1){
+            if(dm2>t1d){t2d=t1d;t1d=dm2;t1o=fo2;t1l=fl2;}
+            else{if(dm2>t2d){t2d=dm2;}}
+        }
+        eb=eb+1;
+    }
+    let gate:[]u8="NONE";
+    if(t1d<3){gate="ARCHVETO";}
+    else{
+        if(t2d>=0&&t1d<2*t2d){gate="ARCHVETO";}
+        else{
+            let domf:[]u8=arena[t1o..t1o+t1l];
+            if(beq(slot,domf)==0){gate="ARCHVETO";}
+        }
+    }
+    _zag_print("V|g1|");
+    if(beq(gate,"ARCHVETO")==1){
+        _zag_print("WITHHOLD|ARCHVETO|");
+        _zag_print(i64s(t1d as i64));
+        _zag_print("|");
+        _zag_print(i64s(t2d as i64));
+    }
+    else{
+        _zag_print("PASS|NONE|0|0");
+    }
+    _zag_println("");
+    nio_free(nbuf);nio_free(tout);nio_free(sout);
+    nio_free(arena);nio_free(archtbl);nio_free(fbuf);nio_free(canon);
+    nio_free(endset);nio_free(hx);nio_free(cb);nio_free(want_end);nio_free(got_end);
+    return 0;
+}
