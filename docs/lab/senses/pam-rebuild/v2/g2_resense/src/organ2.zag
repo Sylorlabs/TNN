@@ -1,0 +1,610 @@
+// organ2.zag — SECOND ORGAN: local byte-texture classifier.
+//
+// Reads ONLY the frozen attended neighborhoods of the raw F payload plus the
+// 8-byte fixture header (sample/pixel geometry). NEVER the first organ's
+// judgment, confidence, margin, program verdict, or agreement.
+// Pure Zag, zero RNG, fully deterministic.
+//
+// Architectural distance from organ 1 (vsense.zag) is by construction:
+//  - timbre: time-domain differencing ratio (high-freq energy), NO f0,
+//    NO autocorrelation, NO harmonic centroid, NO DFT.
+//  - pitch: rising-zero-crossing f0 per window, median-aggregated,
+//    NO autocorrelation, NO harmonic grid.
+//  - color: RGB half-means, NO CIELAB.
+//  - colorconst: RGB per-mille chromaticity, NO CIELAB.
+//  - shapetrans: bbox fill-ratio over attended patches,
+//    NO area/perimeter/circularity moments.
+//  - motiondir: 2-D SSD block matching, NO 1-D projection profiles.
+// Own byte helpers (o2_ prefix); shares nothing with organ1 except the
+// runtime (nio_alloc/_zag_arg) provided by the importing driver.
+
+// ---------------- own minimal helpers ----------------
+fn o2_u32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8) | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn o2_i16(b:[]u8, at:i32) i64 {
+    let v:i64 = (b[at] as i64) | ((b[at+1] as i64) << 8);
+    if(v >= 32768) { v = v - 65536; }
+    return v;
+}
+fn o2_put64(b:[]u8, at:i64, v:i64) void {
+    let a:i32 = at as i32;
+    b[a] = (v & 255) as u8;
+    b[a+1] = ((v >> 8) & 255) as u8;
+    b[a+2] = ((v >> 16) & 255) as u8;
+    b[a+3] = ((v >> 24) & 255) as u8;
+    b[a+4] = ((v >> 32) & 255) as u8;
+    b[a+5] = ((v >> 40) & 255) as u8;
+    b[a+6] = ((v >> 48) & 255) as u8;
+    b[a+7] = ((v >> 56) & 255) as u8;
+    return;
+}
+fn o2_get64(b:[]u8, at:i64) i64 {
+    let a:i32 = at as i32;
+    return (b[a] as i64) | ((b[a+1] as i64) << 8) | ((b[a+2] as i64) << 16) | ((b[a+3] as i64) << 24)
+         | ((b[a+4] as i64) << 32) | ((b[a+5] as i64) << 40) | ((b[a+6] as i64) << 48) | ((b[a+7] as i64) << 56);
+}
+fn o2_abs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn o2_isqrt(x:i64) i64 {
+    if(x <= 0) { return 0; }
+    let lo:i64 = 0;
+    let hi:i64 = x;
+    if(hi > 3037000500) { hi = 3037000500; }
+    while(lo < hi) {
+        let mid:i64 = (lo + hi + 1) / 2;
+        if(mid <= x / mid) { lo = mid; }
+        else { hi = mid - 1; }
+    }
+    return lo;
+}
+fn o2_zero(b:[]u8, n:i64) void {
+    let i:i64 = 0;
+    while(i < n) { b[i as i32] = 0; i = i + 1; }
+    return;
+}
+// insertion sort of n i64s at a[0..8n); returns median (avg of two if even)
+fn o2_median(a:[]u8, n:i64) i64 {
+    let i:i64 = 1;
+    while(i < n) {
+        let key:i64 = o2_get64(a, i*8);
+        let j:i64 = i - 1;
+        while(j >= 0) {
+            if(o2_get64(a, j*8) <= key) { break; }
+            o2_put64(a, (j+1)*8, o2_get64(a, j*8));
+            j = j - 1;
+        }
+        o2_put64(a, (j+1)*8, key);
+        i = i + 1;
+    }
+    if(n % 2 == 1) { return o2_get64(a, (n/2)*8); }
+    return (o2_get64(a, ((n/2)-1)*8) + o2_get64(a, (n/2)*8)) / 2;
+}
+// frozen attention offset k (0..63) for length N
+fn o2_off(k:i64, N:i64) i64 {
+    return ((2*k+1) * N) / 128;
+}
+
+// ---------------- timbredisc (tcode 4) ----------------
+// Time-domain brightness: per 97-sample window,
+//   r = 1000 * sum((s[i+1]-s[i])^2) / sum(s[i]^2).
+// Median r over 64 windows vs boundaries B1<B2<B3.
+fn o2_timbre(f:[]u8, b1:i64, b2:i64, b3:i64) []u8 {
+    let cnt:i64 = o2_u32(f, 4);
+    let rs:[]u8 = nio_alloc(512);
+    o2_zero(rs, 512);
+    let nr:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let off:i64 = o2_off(k, cnt);
+        let lo:i64 = off - 48;
+        if(lo < 0) { lo = 0; }
+        let hi:i64 = off + 49;
+        if(hi > cnt) { hi = cnt; }
+        let e:i64 = 0;
+        let d:i64 = 0;
+        let i:i64 = lo;
+        while(i < hi) {
+            let s:i64 = o2_i16(f, (8+2*i) as i32);
+            e = e + s*s;
+            i = i + 1;
+        }
+        i = lo;
+        while(i+1 < hi) {
+            let df:i64 = o2_i16(f, (8+2*(i+1)) as i32) - o2_i16(f, (8+2*i) as i32);
+            d = d + df*df;
+            i = i + 1;
+        }
+        if(e > 0) {
+            o2_put64(rs, nr*8, (1000*d)/e);
+            nr = nr + 1;
+        }
+        k = k + 1;
+    }
+    let lab:[]u8 = "PURE";
+    if(nr > 0) {
+        let med:i64 = o2_median(rs, nr);
+        if(med < b1) { lab = "PURE"; }
+        else {
+            if(med < b2) { lab = "DARK"; }
+            else {
+                if(med < b3) { lab = "RICH"; }
+                else { lab = "BRIGHT"; }
+            }
+        }
+    }
+    nio_free(rs);
+    return lab;
+}
+// feature only (for calibration): median r, or -1 if no valid window
+fn o2_timbre_feat(f:[]u8) i64 {
+    let cnt:i64 = o2_u32(f, 4);
+    let rs:[]u8 = nio_alloc(512);
+    o2_zero(rs, 512);
+    let nr:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let off:i64 = o2_off(k, cnt);
+        let lo:i64 = off - 48;
+        if(lo < 0) { lo = 0; }
+        let hi:i64 = off + 49;
+        if(hi > cnt) { hi = cnt; }
+        let e:i64 = 0;
+        let d:i64 = 0;
+        let i:i64 = lo;
+        while(i < hi) {
+            let s:i64 = o2_i16(f, (8+2*i) as i32);
+            e = e + s*s;
+            i = i + 1;
+        }
+        i = lo;
+        while(i+1 < hi) {
+            let df:i64 = o2_i16(f, (8+2*(i+1)) as i32) - o2_i16(f, (8+2*i) as i32);
+            d = d + df*df;
+            i = i + 1;
+        }
+        if(e > 0) {
+            o2_put64(rs, nr*8, (1000*d)/e);
+            nr = nr + 1;
+        }
+        k = k + 1;
+    }
+    let med:i64 = -1;
+    if(nr > 0) { med = o2_median(rs, nr); }
+    nio_free(rs);
+    return med;
+}
+
+// ---------------- pitchdisc (tcode 3) ----------------
+// Rising-zero-crossing f0 per 193-sample window; median per tone region.
+fn o2_zc_f0(f:[]u8, lo:i64, hi:i64, sr:i64) i64 {
+    let iv:[]u8 = nio_alloc(2048);
+    o2_zero(iv, 2048);
+    let ni:i64 = 0;
+    let last:i64 = -1;
+    let i:i64 = lo;
+    while(i+1 < hi) {
+        let s0:i64 = o2_i16(f, (8+2*i) as i32);
+        let s1:i64 = o2_i16(f, (8+2*(i+1)) as i32);
+        if(s0 <= 0 && s1 > 0) {
+            if(last >= 0 && ni < 256) {
+                o2_put64(iv, ni*8, i - last);
+                ni = ni + 1;
+            }
+            last = i;
+        }
+        i = i + 1;
+    }
+    let f0:i64 = -1;
+    if(ni >= 2) {
+        let miv:i64 = o2_median(iv, ni);
+        if(miv > 0) { f0 = (sr*1000)/miv; }
+    }
+    nio_free(iv);
+    return f0;
+}
+fn o2_pitch(f:[]u8) []u8 {
+    let sr:i64 = o2_u32(f, 0);
+    let cnt:i64 = o2_u32(f, 4);
+    let tone:i64 = (cnt*10)/22;
+    let gap:i64 = cnt - 2*tone;
+    let fa:[]u8 = nio_alloc(512);
+    let fb:[]u8 = nio_alloc(512);
+    o2_zero(fa, 512);
+    o2_zero(fb, 512);
+    let na:i64 = 0;
+    let nb:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let off:i64 = o2_off(k, cnt);
+        let lo:i64 = off - 96;
+        if(lo < 0) { lo = 0; }
+        let hi:i64 = off + 97;
+        if(hi > cnt) { hi = cnt; }
+        if(off < tone) {
+            let f0:i64 = o2_zc_f0(f, lo, hi, sr);
+            if(f0 > 0 && na < 64) { o2_put64(fa, na*8, f0); na = na + 1; }
+        } else {
+            if(off >= tone+gap) {
+                let f0:i64 = o2_zc_f0(f, lo, hi, sr);
+                if(f0 > 0 && nb < 64) { o2_put64(fb, nb*8, f0); nb = nb + 1; }
+            }
+        }
+        k = k + 1;
+    }
+    let lab:[]u8 = "SAME";
+    if(na > 0 && nb > 0) {
+        let fA:i64 = o2_median(fa, na);
+        let fB:i64 = o2_median(fb, nb);
+        let mx:i64 = fA;
+        if(fB > mx) { mx = fB; }
+        let d:i64 = (o2_abs(fB-fA)*1000000)/mx;
+        if(d >= 5000) {
+            if(fB > fA) { lab = "HIGHER"; }
+            else { lab = "LOWER"; }
+        }
+    }
+    nio_free(fa);
+    nio_free(fb);
+    return lab;
+}
+
+// ---------------- colordisc (tcode 0) ----------------
+// RGB half-means over attended 5x5 patches; euclidean distance vs T_col.
+fn o2_colordisc(f:[]u8, tcol:i64) []u8 {
+    let w:i64 = o2_u32(f, 0);
+    let h:i64 = o2_u32(f, 4);
+    let N:i64 = w*h;
+    let hw:i64 = w/2;
+    let lsr:i64 = 0; let lsg:i64 = 0; let lsb:i64 = 0; let ln:i64 = 0;
+    let rsr:i64 = 0; let rsg:i64 = 0; let rsb:i64 = 0; let rn:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let dy:i64 = -2;
+        while(dy <= 2) {
+            let dx:i64 = -2;
+            while(dx <= 2) {
+                let px:i64 = x+dx;
+                if(px < 0) { px = 0; }
+                if(px >= w) { px = w-1; }
+                let py:i64 = y+dy;
+                if(py < 0) { py = 0; }
+                if(py >= h) { py = h-1; }
+                let bi:i64 = 8+3*(py*w+px);
+                let cr:i64 = f[bi as i32] as i64;
+                let cg:i64 = f[(bi+1) as i32] as i64;
+                let cb:i64 = f[(bi+2) as i32] as i64;
+                if(x < hw) { lsr = lsr+cr; lsg = lsg+cg; lsb = lsb+cb; ln = ln+1; }
+                else { rsr = rsr+cr; rsg = rsg+cg; rsb = rsb+cb; rn = rn+1; }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        k = k+1;
+    }
+    let lab:[]u8 = "SAME";
+    if(ln > 0 && rn > 0) {
+        let dr:i64 = lsr/ln - rsr/rn;
+        let dg:i64 = lsg/ln - rsg/rn;
+        let db:i64 = lsb/ln - rsb/rn;
+        let dist:i64 = o2_isqrt(dr*dr+dg*dg+db*db);
+        if(dist >= tcol) { lab = "DIFFERENT"; }
+    }
+    return lab;
+}
+// feature only (for calibration)
+fn o2_colordisc_feat(f:[]u8) i64 {
+    let w:i64 = o2_u32(f, 0);
+    let h:i64 = o2_u32(f, 4);
+    let N:i64 = w*h;
+    let hw:i64 = w/2;
+    let lsr:i64 = 0; let lsg:i64 = 0; let lsb:i64 = 0; let ln:i64 = 0;
+    let rsr:i64 = 0; let rsg:i64 = 0; let rsb:i64 = 0; let rn:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let dy:i64 = -2;
+        while(dy <= 2) {
+            let dx:i64 = -2;
+            while(dx <= 2) {
+                let px:i64 = x+dx;
+                if(px < 0) { px = 0; }
+                if(px >= w) { px = w-1; }
+                let py:i64 = y+dy;
+                if(py < 0) { py = 0; }
+                if(py >= h) { py = h-1; }
+                let bi:i64 = 8+3*(py*w+px);
+                let cr:i64 = f[bi as i32] as i64;
+                let cg:i64 = f[(bi+1) as i32] as i64;
+                let cb:i64 = f[(bi+2) as i32] as i64;
+                if(x < hw) { lsr = lsr+cr; lsg = lsg+cg; lsb = lsb+cb; ln = ln+1; }
+                else { rsr = rsr+cr; rsg = rsg+cg; rsb = rsb+cb; rn = rn+1; }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        k = k+1;
+    }
+    if(ln == 0 || rn == 0) { return -1; }
+    let dr:i64 = lsr/ln - rsr/rn;
+    let dg:i64 = lsg/ln - rsg/rn;
+    let db:i64 = lsb/ln - rsb/rn;
+    return o2_isqrt(dr*dr+dg*dg+db*db);
+}
+
+// ---------------- colorconst (tcode 1) ----------------
+// Per-mille chromaticity distance between half-means vs T_cc.
+fn o2_colorconst(f:[]u8, tcc:i64) []u8 {
+    let w:i64 = o2_u32(f, 0);
+    let h:i64 = o2_u32(f, 4);
+    let N:i64 = w*h;
+    let hw:i64 = w/2;
+    let lsr:i64 = 0; let lsg:i64 = 0; let lsb:i64 = 0; let ln:i64 = 0;
+    let rsr:i64 = 0; let rsg:i64 = 0; let rsb:i64 = 0; let rn:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let dy:i64 = -2;
+        while(dy <= 2) {
+            let dx:i64 = -2;
+            while(dx <= 2) {
+                let px:i64 = x+dx;
+                if(px < 0) { px = 0; }
+                if(px >= w) { px = w-1; }
+                let py:i64 = y+dy;
+                if(py < 0) { py = 0; }
+                if(py >= h) { py = h-1; }
+                let bi:i64 = 8+3*(py*w+px);
+                let cr:i64 = f[bi as i32] as i64;
+                let cg:i64 = f[(bi+1) as i32] as i64;
+                let cb:i64 = f[(bi+2) as i32] as i64;
+                if(x < hw) { lsr = lsr+cr; lsg = lsg+cg; lsb = lsb+cb; ln = ln+1; }
+                else { rsr = rsr+cr; rsg = rsg+cg; rsb = rsb+cb; rn = rn+1; }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        k = k+1;
+    }
+    let lab:[]u8 = "SAME_SURFACE";
+    if(ln > 0 && rn > 0) {
+        let lsum:i64 = lsr+lsg+lsb;
+        let rsum:i64 = rsr+rsg+rsb;
+        let lr:i64 = 0; let lg:i64 = 0; let lb:i64 = 0;
+        let rr:i64 = 0; let rg:i64 = 0; let rb:i64 = 0;
+        if(lsum > 0) { lr = (lsr*1000)/lsum; lg = (lsg*1000)/lsum; lb = (lsb*1000)/lsum; }
+        if(rsum > 0) { rr = (rsr*1000)/rsum; rg = (rsg*1000)/rsum; rb = (rsb*1000)/rsum; }
+        let dr:i64 = lr-rr; let dg:i64 = lg-rg; let db:i64 = lb-rb;
+        let dist:i64 = o2_isqrt(dr*dr+dg*dg+db*db);
+        if(dist >= tcc) { lab = "DIFFERENT"; }
+    }
+    return lab;
+}
+fn o2_colorconst_feat(f:[]u8) i64 {
+    let w:i64 = o2_u32(f, 0);
+    let h:i64 = o2_u32(f, 4);
+    let N:i64 = w*h;
+    let hw:i64 = w/2;
+    let lsr:i64 = 0; let lsg:i64 = 0; let lsb:i64 = 0; let ln:i64 = 0;
+    let rsr:i64 = 0; let rsg:i64 = 0; let rsb:i64 = 0; let rn:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let dy:i64 = -2;
+        while(dy <= 2) {
+            let dx:i64 = -2;
+            while(dx <= 2) {
+                let px:i64 = x+dx;
+                if(px < 0) { px = 0; }
+                if(px >= w) { px = w-1; }
+                let py:i64 = y+dy;
+                if(py < 0) { py = 0; }
+                if(py >= h) { py = h-1; }
+                let bi:i64 = 8+3*(py*w+px);
+                let cr:i64 = f[bi as i32] as i64;
+                let cg:i64 = f[(bi+1) as i32] as i64;
+                let cb:i64 = f[(bi+2) as i32] as i64;
+                if(x < hw) { lsr = lsr+cr; lsg = lsg+cg; lsb = lsb+cb; ln = ln+1; }
+                else { rsr = rsr+cr; rsg = rsg+cg; rsb = rsb+cb; rn = rn+1; }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        k = k+1;
+    }
+    if(ln == 0 || rn == 0) { return -1; }
+    let lsum:i64 = lsr+lsg+lsb;
+    let rsum:i64 = rsr+rsg+rsb;
+    let lr:i64 = 0; let lg:i64 = 0; let lb:i64 = 0;
+    let rr:i64 = 0; let rg:i64 = 0; let rb:i64 = 0;
+    if(lsum > 0) { lr = (lsr*1000)/lsum; lg = (lsg*1000)/lsum; lb = (lsb*1000)/lsum; }
+    if(rsum > 0) { rr = (rsr*1000)/rsum; rg = (rsg*1000)/rsum; rb = (rsb*1000)/rsum; }
+    let dr:i64 = lr-rr; let dg:i64 = lg-rg; let db:i64 = lb-rb;
+    return o2_isqrt(dr*dr+dg*dg+db*db);
+}
+
+// ---------------- shapetrans (tcode 2) ----------------
+// Bbox fill-ratio over attended 5x5 patches; nearest frozen prototype.
+fn o2_shapetrans(f:[]u8) []u8 {
+    let w:i64 = o2_u32(f, 0);
+    let h:i64 = o2_u32(f, 4);
+    let N:i64 = w*h;
+    let minx:i64 = 999999;
+    let maxx:i64 = -1;
+    let miny:i64 = 999999;
+    let maxy:i64 = -1;
+    let cnt:i64 = 0;
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let dy:i64 = -2;
+        while(dy <= 2) {
+            let dx:i64 = -2;
+            while(dx <= 2) {
+                let px:i64 = x+dx;
+                if(px < 0) { px = 0; }
+                if(px >= w) { px = w-1; }
+                let py:i64 = y+dy;
+                if(py < 0) { py = 0; }
+                if(py >= h) { py = h-1; }
+                let bi:i64 = 8+3*(py*w+px);
+                let lum:i64 = (f[bi as i32] as i64) + (f[(bi+1) as i32] as i64) + (f[(bi+2) as i32] as i64);
+                if(lum > 400) {
+                    if(px < minx) { minx = px; }
+                    if(px > maxx) { maxx = px; }
+                    if(py < miny) { miny = py; }
+                    if(py > maxy) { maxy = py; }
+                    cnt = cnt+1;
+                }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        k = k+1;
+    }
+    if(cnt == 0) { return "CIRCLE"; }
+    let area:i64 = (maxx-minx+1)*(maxy-miny+1);
+    let fill:i64 = (1000*cnt)/area;
+    let dc:i64 = o2_abs(fill-785);
+    let ds:i64 = o2_abs(fill-1000);
+    let dt:i64 = o2_abs(fill-500);
+    if(dc <= ds && dc <= dt) { return "CIRCLE"; }
+    if(ds <= dt) { return "SQUARE"; }
+    return "TRIANGLE";
+}
+
+// ---------------- motiondir (tcode 5) ----------------
+// 2-D SSD block matching between frames 0 and 3 over attended 5x5 patches.
+// Label convention matches organ1's dir_of/dir_name mapping.
+fn o2_dir_of(dx:i64, dy:i64) i64 {
+    let ax:i64 = o2_abs(dx);
+    let ay:i64 = o2_abs(dy);
+    let mag2:i64 = dx*dx + dy*dy;
+    if(mag2 < 9) { return 0; }
+    if(ax > 2*ay) {
+        if(dx > 0) { return 3; }
+        return 7;
+    }
+    if(ay > 2*ax) {
+        if(dy > 0) { return 5; }
+        return 1;
+    }
+    if(dx > 0 && dy < 0) { return 2; }
+    if(dx > 0 && dy > 0) { return 4; }
+    if(dx < 0 && dy > 0) { return 6; }
+    return 8;
+}
+fn o2_dir_name(d:i64) []u8 {
+    if(d == 0) { return "STILL"; }
+    if(d == 1) { return "N"; }
+    if(d == 2) { return "NE"; }
+    if(d == 3) { return "E"; }
+    if(d == 4) { return "SE"; }
+    if(d == 5) { return "S"; }
+    if(d == 6) { return "SW"; }
+    if(d == 7) { return "W"; }
+    return "NW";
+}
+fn o2_motiondir(f:[]u8) []u8 {
+    let w:i64 = o2_u32(f, 4);
+    let h:i64 = o2_u32(f, 8);
+    let fsz:i64 = w*h*3;
+    let N:i64 = w*h;
+    let f0b:i64 = 12;
+    let f3b:i64 = 12+3*fsz;
+    let vxs:[]u8 = nio_alloc(512);
+    let vys:[]u8 = nio_alloc(512);
+    o2_zero(vxs, 512);
+    o2_zero(vys, 512);
+    let k:i64 = 0;
+    while(k < 64) {
+        let gx:i64 = k % 8;
+        let gy:i64 = k / 8;
+        let x:i64 = ((2*gx+1)*w)/16;
+        let y:i64 = ((2*gy+1)*h)/16;
+        let best_dx:i64 = 0;
+        let best_dy:i64 = 0;
+        let best_e:i64 = 9223372036854775807;
+        let dy:i64 = -8;
+        while(dy <= 8) {
+            let dx:i64 = -8;
+            while(dx <= 8) {
+                let e:i64 = 0;
+                let oy:i64 = -2;
+                while(oy <= 2) {
+                    let ox:i64 = -2;
+                    while(ox <= 2) {
+                        let px0:i64 = x+ox+dx;
+                        if(px0 < 0) { px0 = 0; }
+                        if(px0 >= w) { px0 = w-1; }
+                        let py0:i64 = y+oy+dy;
+                        if(py0 < 0) { py0 = 0; }
+                        if(py0 >= h) { py0 = h-1; }
+                        let px3:i64 = x+ox;
+                        if(px3 < 0) { px3 = 0; }
+                        if(px3 >= w) { px3 = w-1; }
+                        let py3:i64 = y+oy;
+                        if(py3 < 0) { py3 = 0; }
+                        if(py3 >= h) { py3 = h-1; }
+                        let i0:i64 = f0b+(py0*w+px0)*3;
+                        let i3:i64 = f3b+(py3*w+px3)*3;
+                        let dr:i64 = (f[i0 as i32] as i64) - (f[i3 as i32] as i64);
+                        let dg:i64 = (f[(i0+1) as i32] as i64) - (f[(i3+1) as i32] as i64);
+                        let db:i64 = (f[(i0+2) as i32] as i64) - (f[(i3+2) as i32] as i64);
+                        e = e + dr*dr + dg*dg + db*db;
+                        ox = ox+1;
+                    }
+                    oy = oy+1;
+                }
+                if(e < best_e) {
+                    best_e = e; best_dx = dx; best_dy = dy;
+                } else {
+                    if(e == best_e) {
+                        let curm:i64 = o2_abs(dx)+o2_abs(dy);
+                        let bestm:i64 = o2_abs(best_dx)+o2_abs(best_dy);
+                        if(curm < bestm) { best_dx = dx; best_dy = dy; }
+                    }
+                }
+                dx = dx+1;
+            }
+            dy = dy+1;
+        }
+        o2_put64(vxs, k*8, 0-best_dx);
+        o2_put64(vys, k*8, 0-best_dy);
+        k = k+1;
+    }
+    let mdx:i64 = o2_median(vxs, 64);
+    let mdy:i64 = o2_median(vys, 64);
+    nio_free(vxs);
+    nio_free(vys);
+    return o2_dir_name(o2_dir_of(mdx, mdy));
+}
+
+// ---------------- dispatcher ----------------
+// tcode: 0 colordisc, 1 colorconst, 2 shapetrans, 3 pitchdisc, 4 timbredisc, 5 motiondir
+fn o2_label(tcode:i64, f:[]u8, b1:i64, b2:i64, b3:i64, tcol:i64, tcc:i64) []u8 {
+    if(tcode == 0) { return o2_colordisc(f, tcol); }
+    if(tcode == 1) { return o2_colorconst(f, tcc); }
+    if(tcode == 2) { return o2_shapetrans(f); }
+    if(tcode == 3) { return o2_pitch(f); }
+    if(tcode == 4) { return o2_timbre(f, b1, b2, b3); }
+    return o2_motiondir(f);
+}
