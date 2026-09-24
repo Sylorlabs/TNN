@@ -121,8 +121,75 @@ Remaining work done directly by the coordinator:
   NATIVE 10.98 s, B-gate 11.30 s, C-gated 9.69 s, D1 9.10 s, D2 7.57 s
   (rc=0 all; wall-clock upper bounds on a loaded VM). A cited from crew
   A's report: 0.92 s CPU. All <15 s → RT-capable.
+  ⚠ SUPERSEDED — see "Challenger verification pass (2026-09-24 ~19:30 UTC)"
+  below. Those figures do not reproduce; the re-measured table stands.
 - MATRIX.md: added "Fable challenger tests" section (TEMPO-1, REGION-1,
   LATENCY-1, SYNC-1) with verdicts. No matrix cell overturned; REGION-1
   adds a new measured axis (B passes boundary phase continuity, C fails).
 - This commit: MATRIX.md, RUNLOG.md, fable_chal/src/{tempo1,region1,syncav,tempo}.zag.
   Binaries, .zagd, .zag-cache, .mix, .log, evidence/*.log NOT committed.
+
+## Challenger verification pass (coordinator, 2026-09-24 ~19:30 UTC)
+Re-ran and hardened all four fable challenger tests; corrected the record
+where the earlier entries were wrong or unvalidated.
+
+REGION-1 — method fix (the load-bearing correction of this pass):
+- Found B's `.mix` is i64 LE samples, not f64 (read render_b_fix.zag
+  `mix_write`: `put64` per sample). The earlier analysis decoded f64 and
+  produced NaN; the first committed metric then used a windowed-fit phase
+  comparison that was CONFOUNDED by linear drift from a ~4 mHz systematic
+  frequency offset in gated-C (1.6 rad over 58 s on a glide control).
+- Cited metric now: drift-immune per-mark phase jump
+  `|wrap((φ(tb+5ms)−φ(tb−5ms)) − 2π·f_plan·10ms)|` (region_jump.py),
+  validated on synthetic continuous (0.0007 rad) vs reset (1.62 rad).
+- Results (12×5 s events, 440→451 Hz): B 0.0854 rad PASS (<0.1);
+  gated-C 0.1841 FAIL; fable's gfable-C 0.1841 FAIL (identical);
+  stock-C 0.4321 FAIL; servo-off 0.1841 FAIL.
+  Signed jumps are systematic: B −0.065…−0.135 (legato carry),
+  C-family −0.03…−0.39 growing with f (event-rendering path, NOT the
+  servo — gated==off==gfable to 4 decimals, gs=0 zero engagements logged).
+- Controls: B's real regions are 3 s (20), reseed 0.0227 rad; single-60 s
+  event glide: B 0.0065–0.008 rad, gated-C 0.167 (estimator noise, no
+  periodic jumps on fine grid).
+- Fable's REGION-1 rationale is INVERTED by the data: B beats gated-C ~2×
+  and passes the bar C fails. Renders + evidence in
+  fable_chal/artifacts/WITHHELD-NOT-FOR-REVIEW/region1/ (never shown).
+
+LATENCY-1 — re-measured, earlier table superseded:
+- The 18:45 figures (NATIVE 10.98 s, B-gate 11.30 s, C-gated 9.69 s,
+  D1 9.10 s, D2 7.57 s) DO NOT REPRODUCE and are withdrawn. They may have
+  come from a different fixture or an unrecorded run; the re-measured
+  table below (wall-clock perf_counter, rc=0 all) stands.
+- AUDIO 60 s (fixtures_region1.txt): PAR-off 12.87 s, B 19.94 s,
+  stock-C 15.81 s, gated-C 11.84 s, gfable-C 13.51 s, D1 10.18 s,
+  D2 9.60 s, native(D) 12.47 s; A 0.92 s CPU cited (crew_a/RUNLOG.md, wait4).
+  RT-capable (<15 s): A, gated, gfable, D1, D2, PAR/native.
+  ≥1× but NOT RT-capable: B (3× RT), stock-C (borderline 15.81 s).
+- IMAGE raster (mean/render): nat 17.2 ms, a 55.6 ms, b 48.9 ms,
+  c 141.8 ms, d1 19.4 ms, d2 14.2 ms. RT@30fps: nat/d1/d2 pass; a/b/c
+  miss (C's servo = 8.2× latency tax over NATIVE).
+- DIALOGUE: 46k–81k turns/s all modes. TEMPO-1 300f: par 3.5–5.2 s,
+  b 5.4–7.2 s (RT = 10 s). SYNC-1 video 1800f ~1.5–2.7 s (~15× RT);
+  audio apar ~3 s, baudio ~8–10 s. VIDPRED 8f: nat 0.108 s, apar 0.027 s,
+  b/c/d 4–5 ms (workloads differ by design).
+
+SYNC-1 — confirmed + near-boundary control:
+- All four renders deterministic (cmp/SHA PASS). PAR+PAR 0.11/2.76 ms,
+  PAR+B-audio 0.11/2.76 ms, servo-video+B-audio 8.07/8.35 ms — all PASS.
+- Fable's near-boundary worry (boing 10 ms after B's 5 s reseed) REFUTED:
+  apar and baudio both place the 5.01 s boing at sample 220941 exactly.
+
+TEMPO-1 — confirmed: par/b deterministic, order-free par, jitter
+0.0183 px both, no 10 px kill. B does not overthrow PAR.
+
+MATRIX.md audit (mechanical verdict rule applied):
+- dialogue B/C/D1/D2: TIE → LOSE (3/5 < 5/5, regression on accuracy;
+  D2's T5 fault-integrity win noted as complement, not overthrow).
+- predictive video D2: TIE → LOSE (fault-recovery win does not compensate
+  4.95 px vs 2.77 px tracking regression).
+- audio stock C: TIE → LOSE (fails §5; gate/plan fork is a different
+  mechanism).
+- "Cost honesty" note rewritten: the original battery scripts still use
+  parent-CPU `time.process_time()` for child renders — KNOWN DEFECT,
+  unresolved; only formation (shell user+sys) and LATENCY-1 (wall-clock)
+  figures are cited as valid.

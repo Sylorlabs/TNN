@@ -16,12 +16,12 @@ with no compensating win.
 
 | Path | NATIVE | A (pure PAR) | B (plan-seeded region state) | C (bounded servo) | D1 (bidi two-pass) | D2 (PLANREF) |
 |---|---|---|---|---|---|---|
-| **audio** (siblings) | incumbent | TIE — NO OVERTHROW (crew_a: partial win on quality/coherence/cascade; −46% COST regression blocks §6) | **WIN** — OVERTHROW (crew_b B-fix; release-envelope bug fixed, stands on every §6 bar) | TIE — NO OVERTHROW (crew_c: stock C fails §5 cue30 confident-wrong latch to 110 Hz; gate/plan fork recommended as fix = different mechanism) | TIE (crew_d: NATIVE keeps) | **WIN** — OVERTHROW (crew_d: caveat closed by native measurement) |
+| **audio** (siblings) | incumbent | TIE — NO OVERTHROW (crew_a: partial win on quality/coherence/cascade; −46% COST regression blocks §6) | **WIN** — OVERTHROW (crew_b B-fix; release-envelope bug fixed, stands on every §6 bar) | LOSE — NO OVERTHROW (crew_c: stock C fails §5, cue30 confident-wrong latch to 110 Hz; the recommended gate/plan fork is a different mechanism, plan-reference/B-like) | TIE (crew_d: NATIVE keeps) | **WIN** — OVERTHROW (crew_d: caveat closed by native measurement) |
 | **image** (raster) | ref | **WIN** — PERM 0 diffs (order-free); COH 0/180 vs nat 72/180 (z-correct); cascade 168 px exact footprint, 1 quadrant | LOSE — cascade 1536 px (whole tile, 9.1× amplification); COH 180/180 | LOSE — same as B on every bar (servo active — bytes differ from B — but changes no outcome) | LOSE — cascade 224 px (blur halo); COH 105/180 | TIE — cascade 168 px exact; 4 plan-latches correct draw/z disagreement at probe pixels; COH 66/180 (still FAIL) |
 | **image formation** | n/a (no native formation) | **WIN** — seq/shard/assemble theme plans byte-identical (SHA `0121763f…`); true one-pass formation 0.112 s user CPU (dive's 0.29 s was `render_bin score` double-counting all 224 candidates twice — see RUNLOG); S=2 shards 0.058 s each; S=8 linear projection ≈0.015 s ⇒ ≈7.5× idealized | — | — | — | — |
 | **video generative** | ref | **WIN** — frames order-free (scr == seq, 0 diffs; a(scr) byte-identical to nat(seq)); cascade 1 frame; recurrence frame7==frame0 PASS | TIE — cascade 1 frame; COH PASS; **byte-identical to C on this fixture (C servo inert — disclosed, not implied separation)** | TIE — same as B (servo inert here) | LOSE — cascade spreads fault to frames 0–3 (backward smoothing violates containment); recurrence FAIL (frame 0 context-dependent) | TIE — cascade 1 frame; COH PASS; clean render byte-identical to NATIVE (0 latches — verification pass adds safety, changes nothing observable) |
-| **video predictive** | ref (tracks: mean 2.77 px) | LOSE as pure PAR (order-free but tracker diverges: mean 4.95 px, final 9.90 px — index-only fiction); A-serialized = byte-identical to NATIVE but concedes parallelism (TIE with extra steps) | LOSE — plan-only state audited clean (zero rendered bytes) but tracker wrong (4.95 px); cannot repair a wrong motion model | LOSE — same as B | LOSE — tracker wrong (4.95 px) + backward smoothing | TIE keeps NATIVE — box-fault probe: D2 latched all 8 frames and recovered byte-identically (strict win on fault-recovery) BUT tracking regresses to 4.95 px vs NATIVE's 2.77 px; no clean overthrow |
-| **dialogue** | ref (5/5) | LOSE — 2/5 (T1,T5); no state → `unknown.` on T2/T3/T4 | TIE-keeps-NATIVE — 3/5; plan entity state resolves ellipsis (T2 "he") but not rendered-wording refs (T3/T4 `unknown.`) | TIE-keeps-NATIVE — 3/5; servo inert on fixture (resets to 50/turn, changes no outcome — disclosed) | TIE-keeps-NATIVE — 3/5; backward token pass helps nothing here | TIE keeps NATIVE — 3/5 BUT strict win on fault-integrity: T5 post-compose `no,`→`yes,` flip detected, latched, correct answer restored (NATIVE and B emit the corruption); still fails T3/T4 — integrity complement, not overthrow |
+| **video predictive** | ref (tracks: mean 2.77 px) | LOSE as pure PAR (order-free but tracker diverges: mean 4.95 px, final 9.90 px — index-only fiction); A-serialized = byte-identical to NATIVE but concedes parallelism (TIE with extra steps) | LOSE — plan-only state audited clean (zero rendered bytes) but tracker wrong (4.95 px); cannot repair a wrong motion model | LOSE — same as B | LOSE — tracker wrong (4.95 px) + backward smoothing | LOSE — box-fault probe: D2 latched all 8 frames and recovered byte-identically (strict win on fault-recovery) BUT tracking regresses to 4.95 px vs NATIVE's 2.77 px; the recovery win does not compensate the primary-axis regression — no overthrow |
+| **dialogue** | ref (5/5) | LOSE — 2/5 (T1,T5); no state → `unknown.` on T2/T3/T4 | LOSE — 3/5 < 5/5; plan entity state resolves ellipsis (T2 "he") but not rendered-wording refs (T3/T4 `unknown.`) — regression on the accuracy axis, no compensating win | LOSE — 3/5; servo inert on fixture (resets to 50/turn, changes no outcome — disclosed) | LOSE — 3/5; backward token pass helps nothing here | LOSE — 3/5 BUT strict win on fault-integrity: T5 post-compose `no,`→`yes,` flip detected, latched, correct answer restored (NATIVE and B emit the corruption); still fails T3/T4 — integrity complement, not overthrow |
 
 ## Hypothesis-map retest (dive map was: image→PAR, gen-video→PAR, pred-video→state, dialogue→state)
 
@@ -57,14 +57,21 @@ with no compensating win.
   fault recovery; predictive-video box-fault recovery; image 4 probe
   latches), but it only overthrows where the plan's declared values are
   *right* and NATIVE's output is *wrong* (audio). Where the plan is wrong
-  (predictive video's nominal velocity) or the win is sub-bar (image),
-  it ties.
-- **Cost honesty:** all raster/render CPU figures below ~1 ms are timer
-  floor, reported as such. The load-bearing image cost is FORMATION
-  (0.112 s), not raster. Python `time.process_time()` was NOT used for
-  subprocess CPU anywhere (it measures the parent); shell user+sys timing
-  was used for formation, min-of-3 process_time for sub-ms renders with
-  the floor disclosed.
+  (predictive video's nominal velocity) the fault-recovery win does not
+  compensate the tracking regression (cell: LOSE); where the win is sub-bar
+  (image) it ties. D2's dialogue fault-integrity win likewise does not
+  compensate 3/5 < 5/5 (cell: LOSE, integrity complement).
+- **Cost honesty (KNOWN DEFECT, unresolved):** the original battery scripts
+  (`img_battery.py`, `vidg_battery.py`, `vidp_battery.py`, `dial_battery.py`)
+  still use `time.process_time()`, which measures PARENT Python CPU, not the
+  Zag child's — every sub-ms per-render figure from those scripts is
+  unreliable and must not be cited as child CPU. Valid methods are
+  `os.times().children_user + children_system` or `wait4`, with per-child
+  RSS (not cumulative `RUSAGE_CHILDREN.ru_maxrss`). The load-bearing image
+  FORMATION figure (0.112 s one-pass, 0.058 s shards) used shell user+sys
+  timing and stands; all LATENCY-1 figures in this matrix are wall-clock
+  `perf_counter()` around direct subprocess calls and stand. Cost
+  comparisons await the vidgen scratch-hoisting + timing-method fix rerun.
 - **Fixture incident:** `fixtures/img_plan.txt` was overwritten mid-session
   by `formimg seq <path>` (argv2 is the output plan path). It was
   reverse-engineered from the surviving pre-clobber renders and validated:
@@ -89,30 +96,51 @@ the remaining work directly. Evidence logs: fable_chal/evidence/.
   jitter). Generative-video → PAR cell STANDS.
 
 ### REGION-1 (audio region-boundary phase continuity)
-60 s 440 Hz tone, region boundaries every 5 s, drift 440→451 Hz.
-Evidence: region1.log (first metric) + region1_jump.log (refined per-mark metric).
-- Refined 5 s-mark phase jump, mean over 11 boundaries (bar: mean<0.1 rad):
-  **B mean=0.0854 rad PASS** (max 0.1345); gated-C mean=0.1841 FAIL;
-  stock-C mean=0.4321 FAIL; servo-off mean=0.1841 FAIL.
-  (First metric read b mean=0.1428 FAIL — marginal; the refined per-mark
-  measurement is the cited one.)
-- B's plan-seeded region state gives ~2–5× better boundary phase continuity
-  than C's gain-servo family on the same fixture. The C-family's servo
-  resets produce measurable phase steps (gated==off exactly: gate never
-  opened during the tone, so gating neither helps nor harms here).
-- **Verdict: new axis where B strictly beats C on audio.** No matrix cell
-  overturned (no contender claimed boundary phase continuity), but the
-  B-vs-C separation, previously disclosed as fixture-dependent, now has a
-  clean audio separation: B passes REGION-1, C fails.
+60 s 440 Hz tone, 12×5 s event boundaries, drift 440→451 Hz.
+Evidence: fable_chal/evidence/region1.log (CITED), region1_jump.log.
+- First metric (windowed quadrature fit) was CONFOUNDED by linear phase drift
+  from a ~4 mHz systematic frequency offset in gated-C; the cited metric is the
+  drift-immune per-mark phase jump
+  `|wrap((φ(tb+5ms)−φ(tb−5ms)) − 2π·f_plan·10ms)|`, validated on synthetic
+  continuous (0.0007 rad) vs reset (1.62 rad) steps.
+- Cited 11-boundary means (bar: mean<0.1 rad): **B 0.0854 rad PASS**
+  (max 0.1345); gated-C 0.1841 FAIL; fable's gfable-C 0.1841 FAIL (identical);
+  stock-C 0.4321 FAIL; servo-off 0.1841 FAIL (identical).
+- Signed jumps are SYSTEMATIC, not noise: B −0.065…−0.135 rad
+  (legato carry), C-family −0.03…−0.39 rad growing with frequency
+  (event-rendering path). The C-family step is NOT the servo — gated==off==
+  gfable to 4 decimals and the servo logs show zero engagements (gs=0) on
+  this clean drift.
+- Controls: B's actual regions are 3 s (20 regions), reseed 0.0227 rad;
+  single-60 s-event glide control: B 0.0065–0.008 rad (essentially perfect),
+  gated-C 0.167 rad (interior estimator noise, no periodic jumps).
+- **Verdict: fable's REGION-1 rationale is INVERTED by the data — B beats
+  gated-C ~2× on phase continuity and passes the bar C fails.** No matrix
+  cell overturned (no contender claimed boundary phase continuity), but the
+  B-vs-C separation is now a clean measured audio axis, and the C-family's
+  event-start phase step is a real (if sub-kill) artifact. B's win costs
+  latency: B is the slowest audio contender (see LATENCY-1).
 
-### LATENCY-1 (real-time rendering viability, 60 s fixture/plan_v1.txt)
-Wall-clock, this (loaded) VM — upper bounds. Evidence: this section.
-- NATIVE 10.98 s, B-gate 11.30 s, C-gated 9.69 s, D1 9.10 s, D2 7.57 s
-  (all rc=0, byte-valid outputs). A: crew A measured 0.92 s CPU on the
-  same fixture class (cited from crew A's report).
-- Bars: <60 s = 1× minimum; <15 s = RT-capable. **All contenders
-  RT-capable** (>4× faster than real time even on a contended VM).
-  No cell changes; fable's latency point is answered with numbers.
+### LATENCY-1 (real-time rendering viability, wall clock this VM)
+Evidence: fable_chal/evidence/latency1.log. Bars: <60 s = 1× RT minimum;
+<15 s = RT-capable; >60 s = offline-only.
+- AUDIO 60 s: PAR-off 12.87 s, A 0.92 s CPU (cited crew_a, wait4),
+  B 19.94 s, stock-C 15.81 s, gated-C 11.84 s, gfable-C 13.51 s,
+  D1 10.18 s, D2 9.60 s, native(D) 12.47 s (all rc=0).
+  RT-capable: A, gated, gfable, D1, D2, PAR/native. NOT RT-capable:
+  B (3× RT) and stock-C (borderline, 15.81 s). Nobody is offline-only.
+- IMAGE 96×64 raster (mean/render): nat 17.2 ms, a 55.6 ms, b 48.9 ms,
+  c 141.8 ms, d1 19.4 ms, d2 14.2 ms. RT@30fps (33 ms): nat/d1/d2 pass;
+  a/b/c miss — C's servo is an 8.2× latency tax over NATIVE.
+- DIALOGUE: 46k–81k turns/s all modes (≫ interactive RT).
+- TEMPO-1 300f: par 3.5–5.2 s, b 5.4–7.2 s (RT@30fps = 10 s) — both sub-RT.
+- SYNC-1: video 1800f ~1.5–2.7 s (~15× RT); audio apar ~3 s (10× RT),
+  baudio ~8–10 s (3× RT).
+- PREDICTIVE VIDEO 8f: nat 0.108 s, apar 0.027 s, b/c/d 4–5 ms
+  (workloads differ: nat is sequential simulation, b/c/d plan-seeded).
+- **Verdict: fable's latency point answered with numbers. B's REGION-1
+  phase-continuity win comes with the worst audio latency (not RT-capable);
+  C's servo costs 8× on image raster. No cell changes.**
 
 ### SYNC-1 (cross-path audiovisual synchronization)
 30 s bouncing ball @60 fps + "boing" per ground contact. Evidence: sync1.log.
@@ -123,11 +151,17 @@ Wall-clock, this (loaded) VM — upper bounds. Evidence: this section.
   servo-video+B-audio mean=8.07 ms max=8.35 ms.
 - Bars: every event ≤50 ms AND mean <10 ms: **PASS all three combos**
   (kill: >50 ms desync — not triggered).
+- Near-boundary control (fable's worry: boing 10 ms after B's 5 s reseed):
+  apar and baudio both place the 5.01 s boing onset at sample 220941
+  exactly — zero reseed delay. Refuted with numbers.
 - **Verdict: the per-path map is production-compatible for AV sync.**
   Servo video adds ~8 ms mean offset vs PAR video but stays inside the bar.
 
 ### Challenger summary
-No matrix cell overturned. TEMPO-1 and SYNC-1 confirm the map;
-LATENCY-1 confirms real-time viability everywhere; REGION-1 adds a new
-measured axis (B beats C on boundary phase continuity) without changing
-any verdict.
+No matrix cell overturned. TEMPO-1 and SYNC-1 confirm the map (SYNC-1's
+near-boundary control refutes the reseed-delay worry with sample-exact
+numbers); LATENCY-1 answers the real-time question with numbers — B and
+stock-C are ≥1× but not RT-capable on the 60 s audio case, everything else
+is; REGION-1 inverts fable's rationale (B passes, C fails) and adds a clean
+measured B-vs-C audio axis, with the C-family event-start phase step now a
+documented artifact.
