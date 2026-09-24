@@ -12,7 +12,7 @@ TASKS = ['colordisc', 'colorconst', 'pitchdisc', 'timbredisc', 'motiondir']
 def read_spans(path):
     b = open(path, 'rb').read()
     magic, task, index, family, fo, fl, go, gl = struct.unpack('<8I', b[:32])
-    assert magic == 0x52463258, path
+    assert magic == 0x52324658, path
     return task, index, family, b[fo:fo+fl], b[go:go+gl]
 
 def main():
@@ -64,7 +64,7 @@ def main():
                 assert len(f_adv) == len(f_true), (task, len(f_adv), len(f_true))
                 fl = len(f_true)
                 fo, go, gl = 32, 32 + fl, len(f_adv)
-                head = struct.pack('<8I', 0x52463258, t_task, t_idx, 9, fo, fl, go, gl)
+                head = struct.pack('<8I', 0x52324658, t_task, t_idx, 9, fo, fl, go, gl)
                 body = head + f_true + f_adv
                 fid = 'cor_%s_%s' % (task, c['idx'])
                 p = os.path.join(cord, task, fid + '.r2fx')
