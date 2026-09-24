@@ -28,3 +28,17 @@
 
 ## Verdict: REPRODUCED
 All four mechanical bars match on a fresh rebuild; the two-judge B2 FAIL re-derives exactly with DEL 4/8 / POS 0/8. No mechanical bar flipped.
+
+## 2026-09-24 — verifier fix (follow-up)
+The `evidence/verify_goalb.py` committed in b7e8fa3391e8e0cfbe9a39f14c328b6e21f04087
+had a faulty B1 parser: it read words.txt as a flat word list and chunked it
+`words[(n-1)*per : n*per]`, treating each whole `S<n>: word,word,...` line as one
+"word" — reporting B1 0/16 on the same log. It has been REPLACED with a faithful
+mirror of the frozen `GOALB_STORY/src/verify_goalb.py`:
+`S<n>: word,word,...` per-set parsing, word-boundary regex against STORY lines
+only, frozen B3 corpus (dialogue/kb.txt + battery.txt + prose-learning/v3/inputs3*),
+frozen B4 sliding-16-byte-window check. Re-run on the committed fresh rep1.log:
+B1-COVERAGE 16/16, B3-NOVELTY 16/16, B4-SUBSTRING 16/16 clean,
+kb-sha256=3ef27296c147a101eea0f093940cdbe1bb8be9fe58c21118119646aec6889be1.
+B5: rep1/rep2/rep3 byte-identical (9dd1c20c25684a305887148dcd80768b8d208309aa1eb31fa070439e47870dd7).
+The mechanical bars now reproduce END-TO-END through the committed verifier.
