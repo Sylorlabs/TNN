@@ -1,0 +1,631 @@
+// motion4.zag — multi-scale coherence-field motion direction (M4).
+//
+// Frozen design: PREREG_MOTION4.md (2026-09-24). Coarse-to-fine
+// coherence-field extension of the frozen M3 primitive:
+// identical per-scale M3 pipeline (PREREG_MOTION3.md §3 design,
+// §4 constants) at three scales (S0 full-res, S1 2x2 floor-mean,
+// S2 4x4 floor-mean of the S0 luminance plane), with cross-scale
+// direction agreement P5 (PREREG_MOTION4.md §4 step 4).
+//
+// CLI: motion4 <fixture.vid>
+// stdout key=value lines in the motion3 form:
+//   approach=M4, task=motiondir,
+//   judgment=<STILL|N|NE|E|SE|S|SW|W|NW|WITHHOLD>,
+//   decision=<CANDIDATE|WITHHOLD>, confidence=0..1000, reason=<code>,
+//   debug_vec=<per-scale win/coh_pm/G_pm/Ebar>, ops=<n>.
+// Exit 0 on success; on failure stdout gets approach=M4 + task=motiondir
+// + error=<reason> and the exit code is 1.
+//
+// Fixture: .vid, header = nf,w,h (i32 LE), then nf frames of w*h RGB
+// (identical to M3).
+//
+// Pyramid (frozen §4 step 2): S0 = full plane; S1 = 2x2 block average
+// (floor division); S2 = 4x4 block average (floor division) — both
+// taken directly over the S0 luminance plane ("exact integer means").
+// Effective full-res search range: S0 ±2px, S1 ±4px, S2 ±8px.
+//
+// Per-scale constants (frozen §5, scale-local pixel units):
+//   BLOCK 8, STRIDE 8, R 2, COH_DIR 667, COH_STILL_MAX 667,
+//   G_MIN_PM 500, VOTE_FRAC 1/4, E_FLOOR 64 — the same numbers at
+//   every scale.
+//
+// P5 resolution (frozen §4 step 4):
+//   - DirCands = scales with decision=CANDIDATE and an 8-way judgment;
+//     StillCands = scales with decision=CANDIDATE and judgment=STILL.
+//   - DirCands != empty AND StillCands != empty -> WITHHOLD,
+//     reason=still_dir_conflict, confidence=0.
+//   - DirCands with >=2 distinct direction bins -> WITHHOLD,
+//     reason=scale_disagree, confidence=0.
+//   - DirCands with exactly one bin B -> judgment=B, decision=CANDIDATE,
+//     confidence = min over DirCands of scale confidences,
+//     reason=coherent_multiscale.
+//   - Elif StillCands != empty -> judgment=STILL, decision=CANDIDATE,
+//     confidence = min over StillCands, reason = finest still reason.
+//   - Else -> WITHHOLD, reason = S0's reason code, confidence=0.
+//   A blind scale's WITHHOLD never vetoes; any scale's positive claim
+//   must survive every other scale's positive claims.
+//
+// ops (frozen §4 step 5): the M3 lum-build px-adds at S0 verbatim plus
+// SAD inner-loop pixel comparisons at every scale; the pyramid
+// downsample passes count 0. On the standard 8-frame 64x64 clip this
+// reproduces the frozen estimates exactly: 749,568 (S0) + 179,200 (S1)
+// + 44,800 (S2) = 973,568 < 1.5M ceiling.
+//
+// All arithmetic integer (i64). Zero RNG. Deterministic: same binary +
+// fixture -> byte-identical stdout.
+//
+// znc bug workarounds honored (as motion3.zag): no argc gate; no
+// `as []i32` casts ([]u8 arenas + LE accessors only); no `};`; arenas
+// explicitly initialized; no slice >= 2^25 indexed; paths NUL-terminated
+// via z_cstr; shallow else-nesting; no function named zalloc; no bare
+// blocks inside function bodies.
+//
+// Per-scale result arena rb (8 x i32 LE):
+//   slot0 decision: 1 CANDIDATE, 0 WITHHOLD
+//   slot1 judgment bin: 0 STILL, 1 N, 2 NE, 3 E, 4 SE, 5 S, 6 SW, 7 W, 8 NW
+//   slot2 confidence 0..1000
+//   slot3 coh_pm, slot4 g_pm, slot5 ebar (debug features)
+//   slot6 reason code: 0 coherent, 1 subnoise_still, 2 exact_still,
+//     3 incoherent, 4 sparse, 5 subpixel, 6 weak,
+//     10 degenerate (scale plane < 8x8 — internal only, never printed)
+//   slot7 argmax winning bin (M3 debug_vec semantics: reported even on
+//     WITHHOLD/STILL outcomes; the STILL bin always has E=0)
+
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------------- little-endian accessors over []u8 arenas ----------------
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn op_add(op:[]u8, n:i64) void {
+    t_put64(op, 0, t_get64(op, 0) + n);
+}
+fn isqrt(x:i64) i64 {
+    if(x <= 0) { return 0; }
+    if(x == 1) { return 1; }
+    let r:i64 = x;
+    if(r > 3037000499) { r = 3037000499; }
+    let y:i64 = (r + 1) / 2;
+    while(y < r) { r = y; y = (r + x / r) / 2; }
+    return r;
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn imin(a:i64, b:i64) i64 {
+    if(a < b) { return a; }
+    return b;
+}
+fn imax(a:i64, b:i64) i64 {
+    if(a > b) { return a; }
+    return b;
+}
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn ob_kint(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    return ob_kv(ob, pos, k, _zag_i64_to_str(v));
+}
+fn ob_pair(ob:[]u8, pos:i32, name:[]u8, v:i64) i32 {
+    pos = ob_add(ob, pos, name);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, _zag_i64_to_str(v));
+    pos = ob_add(ob, pos, ";");
+    return pos;
+}
+fn fail(reason:[]u8) i32 {
+    let ob:[]u8 = nio_alloc(256);
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "approach", "M4");
+    pos = ob_kv(ob, pos, "task", "motiondir");
+    pos = ob_kv(ob, pos, "error", reason);
+    nio_write_all(1, ob[0..pos]);
+    nio_free(ob);
+    return 1;
+}
+fn lum16(lum:[]u8, at:i32) i64 {
+    return (lum[at] as i64) | ((lum[at+1] as i64) << 8);
+}
+fn lum_store(lum:[]u8, at:i32, v:i64) void {
+    lum[at] = (v & 255) as u8;
+    lum[at+1] = ((v >> 8) & 255) as u8;
+}
+// Direction bin for a vote offset: 0 STILL, 1 N, 2 NE, 3 E, 4 SE,
+// 5 S, 6 SW, 7 W, 8 NW. Same octant rule as sense.zag / motion3.
+fn octant_bin(ox:i64, oy:i64) i32 {
+    if(ox == 0 && oy == 0) { return 0; }
+    let ax:i64 = iabs(ox);
+    let ay:i64 = iabs(oy);
+    if(ax >= 2 * ay) {
+        if(ox > 0) { return 3; }
+        return 7;
+    }
+    if(ay >= 2 * ax) {
+        if(oy > 0) { return 5; }
+        return 1;
+    }
+    if(ox > 0 && oy > 0) { return 4; }
+    if(ox < 0 && oy > 0) { return 6; }
+    if(ox > 0 && oy < 0) { return 2; }
+    return 8;
+}
+fn bin_name(b:i32, ob:[]u8, pos:i32) i32 {
+    if(b == 0) { pos = ob_kv(ob, pos, "judgment", "STILL"); }
+    if(b == 1) { pos = ob_kv(ob, pos, "judgment", "N"); }
+    if(b == 2) { pos = ob_kv(ob, pos, "judgment", "NE"); }
+    if(b == 3) { pos = ob_kv(ob, pos, "judgment", "E"); }
+    if(b == 4) { pos = ob_kv(ob, pos, "judgment", "SE"); }
+    if(b == 5) { pos = ob_kv(ob, pos, "judgment", "S"); }
+    if(b == 6) { pos = ob_kv(ob, pos, "judgment", "SW"); }
+    if(b == 7) { pos = ob_kv(ob, pos, "judgment", "W"); }
+    if(b == 8) { pos = ob_kv(ob, pos, "judgment", "NW"); }
+    return pos;
+}
+// Internal reason code -> printed string. Codes 0..6 are the M3
+// reason codes verbatim; 7..9 are the P5 resolution codes.
+fn reason_str(code:i32, ob:[]u8, pos:i32) i32 {
+    if(code == 0) { pos = ob_kv(ob, pos, "reason", "coherent"); }
+    if(code == 1) { pos = ob_kv(ob, pos, "reason", "subnoise_still"); }
+    if(code == 2) { pos = ob_kv(ob, pos, "reason", "exact_still"); }
+    if(code == 3) { pos = ob_kv(ob, pos, "reason", "incoherent"); }
+    if(code == 4) { pos = ob_kv(ob, pos, "reason", "sparse"); }
+    if(code == 5) { pos = ob_kv(ob, pos, "reason", "subpixel"); }
+    if(code == 6) { pos = ob_kv(ob, pos, "reason", "weak"); }
+    if(code == 7) { pos = ob_kv(ob, pos, "reason", "still_dir_conflict"); }
+    if(code == 8) { pos = ob_kv(ob, pos, "reason", "scale_disagree"); }
+    if(code == 9) { pos = ob_kv(ob, pos, "reason", "coherent_multiscale"); }
+    return pos;
+}
+
+// The M3 pipeline verbatim, run on one scale's luminance plane.
+// lum: u16 LE luminance arena, nf frames of ws x hs.
+// Fills rb (7 x i32 LE result slots). Counts SAD px-visits in op.
+// Caller guarantees ws >= 8, hs >= 8.
+fn scale_run(lum:[]u8, ws:i32, hs:i32, nf:i32, op:[]u8, rb:[]u8) void {
+    let npx:i64 = (ws as i64) * (hs as i64);
+    // evidence per direction bin, 9 x i64, explicitly zeroed
+    let eb:[]u8 = nio_alloc(72);
+    if(eb.len == 0) { return; }
+    let zi:i32 = 0;
+    while(zi < 72) { eb[zi] = 0; zi = zi + 1; }
+    let nbx:i32 = ws / 8;
+    let nby:i32 = hs / 8;
+    let e_total:i64 = 0;
+    let n_vote:i64 = 0;
+    let g_num:i64 = 0;
+    let t:i32 = 0;
+    while(t < nf - 1) {
+        let by:i32 = 0;
+        while(by < nby) {
+            let bx:i32 = 0;
+            while(bx < nbx) {
+                let best_sad:i64 = 0;
+                let sad0:i64 = 0;
+                let best_ox:i32 = 0;
+                let best_oy:i32 = 0;
+                let first:i32 = 1;
+                let oy:i32 = -2;
+                while(oy <= 2) {
+                    let ox:i32 = -2;
+                    while(ox <= 2) {
+                        let sad:i64 = 0;
+                        let v:i32 = 0;
+                        while(v < 8) {
+                            let u:i32 = 0;
+                            while(u < 8) {
+                                let x0:i32 = bx * 8 + u;
+                                let y0:i32 = by * 8 + v;
+                                let x1:i32 = imin(imax(x0 + ox, 0), ws - 1);
+                                let y1:i32 = imin(imax(y0 + oy, 0), hs - 1);
+                                let a0:i32 = ((t as i64) * npx * 2
+                                    + (y0 as i64) * (ws as i64) * 2
+                                    + (x0 as i64) * 2) as i32;
+                                let a1:i32 = (((t + 1) as i64) * npx * 2
+                                    + (y1 as i64) * (ws as i64) * 2
+                                    + (x1 as i64) * 2) as i32;
+                                sad = sad + iabs(lum16(lum, a1) - lum16(lum, a0));
+                                u = u + 1;
+                            }
+                            v = v + 1;
+                        }
+                        op_add(op, 64);
+                        if(ox == 0 && oy == 0) { sad0 = sad; }
+                        let take:i32 = 0;
+                        if(first == 1) { take = 1; }
+                        if(first == 0 && sad < best_sad) { take = 1; }
+                        if(first == 0 && sad == best_sad) {
+                            let cab:i64 = iabs(ox as i64) + iabs(oy as i64);
+                            let bab:i64 = iabs(best_ox as i64) + iabs(best_oy as i64);
+                            if(cab < bab) { take = 1; }
+                            if(cab == bab && ox < best_ox) { take = 1; }
+                            if(cab == bab && ox == best_ox && oy < best_oy) { take = 1; }
+                        }
+                        if(take == 1) {
+                            best_sad = sad;
+                            best_ox = ox;
+                            best_oy = oy;
+                            first = 0;
+                        }
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
+                }
+                let e:i64 = sad0 - best_sad;
+                if(e > 0) {
+                    n_vote = n_vote + 1;
+                    e_total = e_total + e;
+                    g_num = g_num + isqrt((best_ox as i64) * (best_ox as i64)
+                                        + (best_oy as i64) * (best_oy as i64));
+                    let bbin:i32 = octant_bin(best_ox as i64, best_oy as i64);
+                    t_put64(eb, bbin * 8, t_get64(eb, bbin * 8) + e);
+                }
+                bx = bx + 1;
+            }
+            by = by + 1;
+        }
+        t = t + 1;
+    }
+    let n_tot:i64 = ((nbx * nby) as i64) * ((nf - 1) as i64);
+    // winning bin (ties -> fixed order STILL,N,NE,E,SE,S,SW,W,NW)
+    let win:i32 = 0;
+    let ewin:i64 = t_get64(eb, 0);
+    let b:i32 = 1;
+    while(b < 9) {
+        let ee:i64 = t_get64(eb, b * 8);
+        if(ee > ewin) { ewin = ee; win = b; }
+        b = b + 1;
+    }
+    nio_free(eb);
+    // debug features, shared by all three outcomes
+    let coh_pm:i64 = 0;
+    let g_pm:i64 = 0;
+    let ebar:i64 = 0;
+    if(e_total != 0) {
+        coh_pm = 1000 * ewin / e_total;
+        g_pm = 1000 * g_num / n_vote;
+        ebar = e_total / n_vote;
+    }
+    // decision, frozen rules (PREREG_MOTION3.md section 3.6), constants
+    // interpreted in this scale's own pixel units
+    let decision:i64 = 0;
+    let bin:i64 = 0;
+    let conf:i64 = 0;
+    let rs:i64 = 3;
+    if(e_total == 0) {
+        decision = 1;
+        bin = 0;
+        conf = 1000;
+        rs = 2;
+    }
+    if(e_total != 0) {
+        let dir_ok:i32 = 0;
+        if(win != 0 && coh_pm >= 667 && g_pm >= 500
+           && n_vote * 4 >= n_tot && ebar >= 64) { dir_ok = 1; }
+        let still_ok:i32 = 0;
+        if(ebar < 64 && coh_pm < 667) { still_ok = 1; }
+        if(dir_ok == 1) {
+            decision = 1;
+            bin = win as i64;
+            conf = (coh_pm - 667) * 1000 / 333;
+            if(conf < 1) { conf = 1; }
+            if(conf > 1000) { conf = 1000; }
+            rs = 0;
+        }
+        if(dir_ok == 0 && still_ok == 1) {
+            decision = 1;
+            bin = 0;
+            conf = 1000 * (64 - ebar) / 64;
+            if(coh_pm >= 334) { conf = conf / 2; }
+            rs = 1;
+        }
+        if(dir_ok == 0 && still_ok == 0) {
+            decision = 0;
+            bin = 0;
+            conf = 0;
+            rs = 3;
+            if(n_vote * 4 < n_tot) { rs = 4; }
+            if(n_vote * 4 >= n_tot && g_pm < 500) { rs = 5; }
+            if(n_vote * 4 >= n_tot && g_pm >= 500 && ebar < 64) { rs = 6; }
+        }
+    }
+    t_put32(rb, 0, decision);
+    t_put32(rb, 4, bin);
+    t_put32(rb, 8, conf);
+    t_put32(rb, 12, coh_pm);
+    t_put32(rb, 16, g_pm);
+    t_put32(rb, 20, ebar);
+    t_put32(rb, 24, rs);
+    t_put32(rb, 28, win as i64);
+    return;
+}
+
+// Zero a 32-byte result arena.
+fn rb_zero(rb:[]u8) void {
+    let i:i32 = 0;
+    while(i < 32) { rb[i] = 0; i = i + 1; }
+    return;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if(a1.len == 0) { return fail("no_fixture"); }
+    let buf:[]u8 = nio_alloc(8388608);
+    if(buf.len == 0) { return fail("alloc_failed"); }
+    let n:i64 = z_read(a1, buf, 8388608);
+    if(n < 12) { return fail("read_failed"); }
+    let op:[]u8 = nio_alloc(8);
+    if(op.len == 0) { return fail("alloc_failed"); }
+    let zi:i32 = 0;
+    while(zi < 8) { op[zi] = 0; zi = zi + 1; }
+    let nf:i32 = t_get32(buf, 0) as i32;
+    let w:i32 = t_get32(buf, 4) as i32;
+    let h:i32 = t_get32(buf, 8) as i32;
+    if(nf < 2 || nf > 32) { return fail("bad_header"); }
+    if(w < 8 || h < 8 || w > 512 || h > 512) { return fail("bad_header"); }
+    let fsz:i64 = (w as i64) * (h as i64) * 3;
+    if(12 + (nf as i64) * fsz > n) { return fail("short_file"); }
+    let npx:i64 = (w as i64) * (h as i64);
+    // keep the luminance arena well under the 2^25 index limit
+    if((nf as i64) * npx * 2 >= 16777216) { return fail("too_big"); }
+    // S0 luminance planes, u16 LE (M3 verbatim, incl. ops counting)
+    let lum0:[]u8 = nio_alloc(((nf as i64) * npx * 2) as i32);
+    if(lum0.len == 0) { return fail("alloc_failed"); }
+    let t:i32 = 0;
+    while(t < nf) {
+        let p:i32 = 0;
+        while(p < npx as i32) {
+            let o:i32 = (12 + (t as i64) * fsz + (p as i64) * 3) as i32;
+            let l:i64 = (buf[o] as i64) + (buf[o+1] as i64) + (buf[o+2] as i64);
+            let at:i32 = ((t as i64) * npx * 2 + (p as i64) * 2) as i32;
+            lum_store(lum0, at, l);
+            p = p + 1;
+        }
+        op_add(op, npx);
+        t = t + 1;
+    }
+    nio_free(buf);
+    // Pyramid: S1 = 2x2 floor-mean of S0, S2 = 4x4 floor-mean of S0.
+    // Exact integer means, no rounding modes. Remainder pixels ignored.
+    let w1:i32 = w / 2;
+    let h1:i32 = h / 2;
+    let npx1:i64 = (w1 as i64) * (h1 as i64);
+    let lum1:[]u8 = nio_alloc(((nf as i64) * npx1 * 2) as i32);
+    if(lum1.len == 0) { return fail("alloc_failed"); }
+    t = 0;
+    while(t < nf) {
+        let y:i32 = 0;
+        while(y < h1) {
+            let x:i32 = 0;
+            while(x < w1) {
+                let b0:i32 = ((t as i64) * npx * 2
+                    + ((y * 2) as i64) * (w as i64) * 2
+                    + ((x * 2) as i64) * 2) as i32;
+                let s:i64 = lum16(lum0, b0) + lum16(lum0, b0 + 2)
+                          + lum16(lum0, b0 + (w as i32) * 2)
+                          + lum16(lum0, b0 + (w as i32) * 2 + 2);
+                let at:i32 = ((t as i64) * npx1 * 2
+                    + (y as i64) * (w1 as i64) * 2
+                    + (x as i64) * 2) as i32;
+                lum_store(lum1, at, s / 4);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        t = t + 1;
+    }
+    let w2:i32 = w / 4;
+    let h2:i32 = h / 4;
+    let npx2:i64 = (w2 as i64) * (h2 as i64);
+    let lum2:[]u8 = nio_alloc(((nf as i64) * npx2 * 2) as i32);
+    if(lum2.len == 0) { return fail("alloc_failed"); }
+    t = 0;
+    while(t < nf) {
+        let y:i32 = 0;
+        while(y < h2) {
+            let x:i32 = 0;
+            while(x < w2) {
+                let s:i64 = 0;
+                let dy:i32 = 0;
+                while(dy < 4) {
+                    let dx:i32 = 0;
+                    while(dx < 4) {
+                        let b0:i32 = ((t as i64) * npx * 2
+                            + ((y * 4 + dy) as i64) * (w as i64) * 2
+                            + ((x * 4 + dx) as i64) * 2) as i32;
+                        s = s + lum16(lum0, b0);
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                let at:i32 = ((t as i64) * npx2 * 2
+                    + (y as i64) * (w2 as i64) * 2
+                    + (x as i64) * 2) as i32;
+                lum_store(lum2, at, s / 16);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        t = t + 1;
+    }
+    // Per-scale M3 runs. A scale whose plane is < 8x8 cannot run the
+    // 8x8-block pipeline; it is recorded as blind (WITHHOLD, internal
+    // reason 10 degenerate) and never vetoes per P5. Unreachable on
+    // the frozen batteries (all frames >= 64x64).
+    let rb0:[]u8 = nio_alloc(32);
+    if(rb0.len == 0) { return fail("alloc_failed"); }
+    let rb1:[]u8 = nio_alloc(32);
+    if(rb1.len == 0) { return fail("alloc_failed"); }
+    let rb2:[]u8 = nio_alloc(32);
+    if(rb2.len == 0) { return fail("alloc_failed"); }
+    rb_zero(rb0);
+    rb_zero(rb1);
+    rb_zero(rb2);
+    scale_run(lum0, w, h, nf, op, rb0);
+    if(w1 >= 8 && h1 >= 8) {
+        scale_run(lum1, w1, h1, nf, op, rb1);
+    }
+    if(w1 < 8 || h1 < 8) {
+        t_put32(rb1, 24, 10);
+    }
+    if(w2 >= 8 && h2 >= 8) {
+        scale_run(lum2, w2, h2, nf, op, rb2);
+    }
+    if(w2 < 8 || h2 < 8) {
+        t_put32(rb2, 24, 10);
+    }
+    nio_free(lum0);
+    nio_free(lum1);
+    nio_free(lum2);
+    // P5 cross-scale resolution.
+    let dir_n:i64 = 0;
+    let dir_bin:i32 = -1;
+    let dir_distinct:i32 = 0;
+    let still_n:i64 = 0;
+    let min_dir_conf:i64 = 1001;
+    let min_still_conf:i64 = 1001;
+    let finest_still_rs:i32 = -1;
+    let s:i32 = 0;
+    while(s < 3) {
+        let rb:[]u8 = rb0;
+        if(s == 1) { rb = rb1; }
+        if(s == 2) { rb = rb2; }
+        let dec:i64 = t_get32(rb, 0);
+        let bn:i64 = t_get32(rb, 4);
+        let cf:i64 = t_get32(rb, 8);
+        let rs:i64 = t_get32(rb, 24);
+        if(dec == 1 && bn == 0) {
+            still_n = still_n + 1;
+            if(cf < min_still_conf) { min_still_conf = cf; }
+            if(finest_still_rs < 0) { finest_still_rs = rs as i32; }
+        }
+        if(dec == 1 && bn != 0) {
+            dir_n = dir_n + 1;
+            if(cf < min_dir_conf) { min_dir_conf = cf; }
+            if(dir_bin < 0) { dir_bin = bn as i32; }
+            if(bn != dir_bin as i64) { dir_distinct = 1; }
+        }
+        s = s + 1;
+    }
+    let ob:[]u8 = nio_alloc(4096);
+    if(ob.len == 0) { return fail("alloc_failed"); }
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "approach", "M4");
+    pos = ob_kv(ob, pos, "task", "motiondir");
+    let out_conf:i64 = 0;
+    if(dir_n > 0 && still_n > 0) {
+        pos = ob_kv(ob, pos, "judgment", "WITHHOLD");
+        pos = ob_kv(ob, pos, "decision", "WITHHOLD");
+        out_conf = 0;
+        pos = reason_str(7, ob, pos);
+    }
+    if(dir_n > 0 && still_n == 0 && dir_distinct == 1) {
+        pos = ob_kv(ob, pos, "judgment", "WITHHOLD");
+        pos = ob_kv(ob, pos, "decision", "WITHHOLD");
+        out_conf = 0;
+        pos = reason_str(8, ob, pos);
+    }
+    if(dir_n > 0 && still_n == 0 && dir_distinct == 0) {
+        pos = bin_name(dir_bin, ob, pos);
+        pos = ob_kv(ob, pos, "decision", "CANDIDATE");
+        out_conf = min_dir_conf;
+        pos = reason_str(9, ob, pos);
+    }
+    if(dir_n == 0 && still_n > 0) {
+        pos = ob_kv(ob, pos, "judgment", "STILL");
+        pos = ob_kv(ob, pos, "decision", "CANDIDATE");
+        out_conf = min_still_conf;
+        pos = reason_str(finest_still_rs, ob, pos);
+    }
+    if(dir_n == 0 && still_n == 0) {
+        pos = ob_kv(ob, pos, "judgment", "WITHHOLD");
+        pos = ob_kv(ob, pos, "decision", "WITHHOLD");
+        out_conf = 0;
+        let s0rs:i32 = t_get32(rb0, 24) as i32;
+        pos = reason_str(s0rs, ob, pos);
+    }
+    pos = ob_kint(ob, pos, "confidence", out_conf);
+    // debug_vec: per-scale win/coh_pm/G_pm/Ebar
+    pos = ob_add(ob, pos, "debug_vec=");
+    s = 0;
+    while(s < 3) {
+        let rb:[]u8 = rb0;
+        if(s == 1) { rb = rb1; }
+        if(s == 2) { rb = rb2; }
+        if(s > 0) { pos = ob_add(ob, pos, "|"); }
+        pos = ob_add(ob, pos, "s");
+        pos = ob_add(ob, pos, _zag_i64_to_str(s as i64));
+        pos = ob_add(ob, pos, ":win=");
+        pos = ob_add(ob, pos, _zag_i64_to_str(t_get32(rb, 28)));
+        pos = ob_add(ob, pos, ";coh_pm=");
+        pos = ob_add(ob, pos, _zag_i64_to_str(t_get32(rb, 12)));
+        pos = ob_add(ob, pos, ";g_pm=");
+        pos = ob_add(ob, pos, _zag_i64_to_str(t_get32(rb, 16)));
+        pos = ob_add(ob, pos, ";ebar=");
+        pos = ob_add(ob, pos, _zag_i64_to_str(t_get32(rb, 20)));
+        s = s + 1;
+    }
+    pos = ob_add(ob, pos, "\n");
+    nio_free(rb0);
+    nio_free(rb1);
+    nio_free(rb2);
+    pos = ob_kint(ob, pos, "ops", t_get64(op, 0));
+    if(nio_write_all(1, ob[0..pos]) != pos as i64) { return fail("write_failed"); }
+    return 0;
+}
