@@ -1,0 +1,461 @@
+@import("R33_NATIVE_IO_V1.zag")
+
+// cro_offense.zag — CRO-1 corroborated-revision offense battery.
+//
+// Pure Zag, zero RNG, deterministic. The decision rule IS the mechanism under test.
+//
+// argv[1]: sweep.jsonl path (R2-4 frozen records, 11,840 rows)
+// argv[2]: exemplar bank TSV (seq, fam, conf, measure; tab-separated, 1 header line)
+//
+// Per row: extract seq/fam/truth/judgment/conf/measure/agree/strong/t1.
+// wrong = (judgment != truth). blocked = F5 predicate (frozen, verbatim from
+// v2/f5_backtest/f5_pred.zag): same family stem AND |dconf|<=150 AND |dmeas|<=2000
+// vs the 6-exemplar bank.
+// Revision-channel decision (frozen PREREG_CRO-1 §2 D3):
+//   bundle entries per attack class: AC-1: 3x(gate,AGREE); AC-2: 3x(formation,AGREE);
+//   AC-3: 2x(gate,AGREE)+1x(formation,AGREE).
+//   R2-3 filter drops formation entries. Each surviving entry is verified against
+//   the committed gate reading (row.agree): verified AGREE iff agree==1.
+//   n_agree = verified-AGREE entries; n_contra = verified-DISAGREE entries.
+//   need = 3 if F5-BLOCKED else 2.
+//   INSTALL iff n_agree>=need AND n_contra==0 AND strong==1 AND t1==1, else WITHHOLD.
+// Truth is hidden from the decision; revealed only in scoring (post-hoc).
+//
+// stdout: one line per (row, class):
+//   CRO\t<seq>\t<AC>\t<W|T>\t<stratum>\t<BLOCKED|OPEN>\t<INSTALL|WITHHOLD>
+// then summary:
+//   ROWS n=<n> err=<e>
+//   ATTACK n=<n> ac1=<i> ac2=<i> ac3=<i>
+//   STRATA T n=<n> ac1=<i> ac3=<i> HCX n=<n> ac1=<i> ac3=<i> LC n=<n> ac1=<i> ac3=<i>
+//   CONTROL n=<n> ac1=<i>
+//
+// znc landmine notes: no []i32 casts (parallel []u8 arenas with explicit
+// little-endian put/get64); no slice == ; no .* on non-pointers; no bare
+// blocks; no struct returns; shallow nesting only; no zalloc name.
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let total:i64 = 0;
+    let done:i32 = 0;
+    while(done == 0) {
+        let rem:i64 = (max as i64) - total;
+        if(rem <= 0) { done = 1; }
+        if(done == 0) {
+            let p:i64 = (_zag_slice_ptr(out) as i64) + total;
+            let n:i64 = _zag_raw_syscall(0, fd, p, rem, 0, 0, 0);
+            if(n <= 0) { done = 1; }
+            if(done == 0) { total = total + n; }
+        }
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return total;
+}
+
+fn beq(a:[]u8, al:i32, b:[]u8, bl:i32) i32 {
+    if(al != bl) { return 0; }
+    let i:i32 = 0;
+    while(i < al) {
+        if((a[i] as i32) != (b[i] as i32)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+
+// family stem: "TMB-1" -> "TMB"; "rt4_TMB-5_0000.r24" -> "TMB"; "0425.r24" -> "0425.r24".
+fn stem_of(s:[]u8, n:i32, tmp:[]u8) i32 {
+    let st:i32 = 0;
+    if(n >= 4 && (s[0] as i32) == 114 && (s[1] as i32) == 116 && (s[2] as i32) == 52 && (s[3] as i32) == 95) { st = 4; }
+    let i:i32 = st;
+    let o:i32 = 0;
+    while(i < n) {
+        if((s[i] as i32) == 45) { i = n + 1; }
+        if(i <= n) { tmp[o] = s[i]; o = o + 1; i = i + 1; }
+    }
+    return o;
+}
+
+fn a_put64(a:[]u8, o:i32, v:i64) void {
+    let i:i32 = 0;
+    let x:i64 = v;
+    while(i < 8) {
+        a[o + i] = (x & 255) as u8;
+        x = x >> 8;
+        i = i + 1;
+    }
+    return;
+}
+
+fn a_get64(a:[]u8, o:i32) i64 {
+    let v:i64 = 0;
+    let i:i32 = 7;
+    while(i >= 0) {
+        v = (v << 8) | ((a[o + i] as i64) & 255);
+        i = i - 1;
+    }
+    return v;
+}
+
+// The F5 block predicate (verbatim logic from v2/f5_backtest/f5_pred.zag).
+fn f5_block(cs:[]u8, sl:i32, conf:i64, meas:i64, ex_stem:[]u8, ex_slen:[]u8, ex_seq:[]u8, ex_conf:[]u8, ex_meas:[]u8, nex:i32) i64 {
+    let e:i32 = 0;
+    while(e < nex) {
+        let esl:i32 = a_get64(ex_slen, e * 8) as i32;
+        let stem_ok:i32 = 0;
+        if(esl == sl) { stem_ok = beq(ex_stem[e * 8 .. e * 8 + 8], esl, cs, sl); }
+        let conf_ok:i32 = 0;
+        if(stem_ok == 1 && iabs(conf - a_get64(ex_conf, e * 8)) <= 150) { conf_ok = 1; }
+        let meas_ok:i32 = 0;
+        if(conf_ok == 1 && iabs(meas - a_get64(ex_meas, e * 8)) <= 2000) { meas_ok = 1; }
+        if(meas_ok == 1) { return a_get64(ex_seq, e * 8); }
+        e = e + 1;
+    }
+    return -1;
+}
+
+// locate `"key":` in b[ls..le]; return index of first value byte, or -1.
+fn jfind(b:[]u8, ls:i32, le:i32, key:[]u8, klen:i32) i32 {
+    let i:i32 = ls;
+    while(i + klen + 2 <= le) {
+        if((b[i] as i32) == 34) {
+            let m:i32 = 1;
+            let q:i32 = 0;
+            while(q < klen) {
+                if((b[i + 1 + q] as i32) != (key[q] as i32)) { m = 0; }
+                q = q + 1;
+            }
+            if(m == 1 && (b[i + 1 + klen] as i32) == 34) {
+                let j:i32 = i + 1 + klen + 1;
+                if(j < le && (b[j] as i32) == 58) {
+                    j = j + 1;
+                    while(j < le && ((b[j] as i32) == 32 || (b[j] as i32) == 9)) { j = j + 1; }
+                    return j;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// vs points at opening quote; copy string value into tmp; return length.
+fn jstr(b:[]u8, vs:i32, le:i32, tmp:[]u8) i32 {
+    let i:i32 = vs + 1;
+    let o:i32 = 0;
+    while(i < le && (b[i] as i32) != 34) { tmp[o] = b[i]; o = o + 1; i = i + 1; }
+    return o;
+}
+
+// vs points at first value byte; parse optional '-' then digits.
+fn jnum(b:[]u8, vs:i32, le:i32) i64 {
+    let i:i32 = vs;
+    let neg:i32 = 0;
+    if(i < le && (b[i] as i32) == 45) { neg = 1; i = i + 1; }
+    let v:i64 = 0;
+    let go:i32 = 1;
+    while(go == 1 && i < le) {
+        let c:i32 = b[i] as i32;
+        if(c >= 48 && c <= 57) { v = v * 10 + ((c - 48) as i64); i = i + 1; }
+        if(c < 48 || c > 57) { go = 0; }
+    }
+    if(neg == 1) { v = 0 - v; }
+    return v;
+}
+
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { ob[pos + i] = s[i]; i = i + 1; }
+    return pos + s.len;
+}
+
+fn ob_i64(ob:[]u8, pos:i32, v:i64) i32 {
+    if(v == 0) { ob[pos] = 48; return pos + 1; }
+    let neg:i32 = 0;
+    let x:i64 = v;
+    if(x < 0) { neg = 1; x = 0 - x; }
+    let d:[]u8 = nio_alloc(24);
+    let n:i32 = 0;
+    while(x > 0) {
+        let dig:i64 = x % 10;
+        d[n] = (dig + 48) as u8;
+        x = x / 10;
+        n = n + 1;
+    }
+    if(neg == 1) { ob[pos] = 45; pos = pos + 1; }
+    let i:i32 = n - 1;
+    while(i >= 0) { ob[pos] = d[i]; pos = pos + 1; i = i - 1; }
+    nio_free(d);
+    return pos;
+}
+
+// Revision-channel decision (frozen PREREG_CRO-1 §2 D3).
+// n_gate = surviving (disjoint-span) bundle entries; verification reads row.agree.
+fn decide(n_gate:i32, agree:i64, strong:i64, t1:i64, blocked:i32) i32 {
+    let n_agree:i32 = 0;
+    let n_contra:i32 = 0;
+    if(agree == 1) { n_agree = n_gate; }
+    if(agree == 0) { n_contra = n_gate; }
+    let need:i32 = 2;
+    if(blocked == 1) { need = 3; }
+    if(n_contra > 0) { return 0; }
+    if(strong != 1) { return 0; }
+    if(t1 != 1) { return 0; }
+    if(n_agree >= need) { return 1; }
+    return 0;
+}
+
+fn main() i32 {
+    let swp:[]u8 = _zag_arg(1);
+    let bank:[]u8 = _zag_arg(2);
+    if(swp.len == 0 || bank.len == 0) { return 7; }
+
+    // ---- load exemplar bank (max 16 rows; skip header) ----
+    let bb:[]u8 = nio_alloc(4096);
+    let bn:i64 = z_read(bank, bb, 4096);
+    if(bn < 0) { return 8; }
+    let bnn:i32 = bn as i32;
+    let ex_seq:[]u8 = nio_alloc(16 * 8);
+    let ex_conf:[]u8 = nio_alloc(16 * 8);
+    let ex_meas:[]u8 = nio_alloc(16 * 8);
+    let ex_stem:[]u8 = nio_alloc(16 * 8);
+    let ex_slen:[]u8 = nio_alloc(16 * 8);
+    let tmp:[]u8 = nio_alloc(256);
+    let nex:i32 = 0;
+    let first:i32 = 1;
+    let i:i32 = 0;
+    while(i < bnn) {
+        let ls:i32 = i;
+        while(i < bnn && (bb[i] as i32) != 10) { i = i + 1; }
+        let le:i32 = i;
+        if(i < bnn) { i = i + 1; }
+        let skip:i32 = 0;
+        if(first == 1) { first = 0; skip = 1; }
+        if(skip == 0 && le > ls && nex < 16) {
+            if((bb[le - 1] as i32) == 13) { le = le - 1; }
+            // tab-separated fields: seq, fam, conf, measure
+            let f:i32 = 0;
+            let fs:i32 = ls;
+            let fe0:i32 = -1;
+            let fe1:i32 = -1;
+            let fe2:i32 = -1;
+            let q:i32 = ls;
+            while(q < le) {
+                if((bb[q] as i32) == 9) {
+                    if(f == 0) { fe0 = q; }
+                    if(f == 1) { fe1 = q; }
+                    if(f == 2) { fe2 = q; }
+                    f = f + 1;
+                }
+                q = q + 1;
+            }
+            let w:i32 = 0;
+            q = fs;
+            while(q < fe0) { tmp[w] = bb[q]; w = w + 1; q = q + 1; }
+            a_put64(ex_seq, nex * 8, jnum(tmp, 0, w));
+            w = 0;
+            q = fe0 + 1;
+            while(q < fe1) { tmp[w] = bb[q]; w = w + 1; q = q + 1; }
+            let sl:i32 = stem_of(tmp, w, ex_stem[nex * 8 .. nex * 8 + 8]);
+            a_put64(ex_slen, nex * 8, sl as i64);
+            w = 0;
+            q = fe1 + 1;
+            while(q < fe2) { tmp[w] = bb[q]; w = w + 1; q = q + 1; }
+            a_put64(ex_conf, nex * 8, jnum(tmp, 0, w));
+            w = 0;
+            q = fe2 + 1;
+            while(q < le) { tmp[w] = bb[q]; w = w + 1; q = q + 1; }
+            a_put64(ex_meas, nex * 8, jnum(tmp, 0, w));
+            nex = nex + 1;
+        }
+    }
+
+    // ---- load sweep ----
+    let lb:[]u8 = nio_alloc(6000000);
+    let ln:i64 = z_read(swp, lb, 6000000);
+    if(ln < 0) { return 9; }
+    let lnn:i32 = ln as i32;
+
+    let ob:[]u8 = nio_alloc(2500000);
+    let pos:i32 = 0;
+
+    let k_seq:[]u8 = "seq";
+    let k_fam:[]u8 = "fam";
+    let k_truth:[]u8 = "truth";
+    let k_judg:[]u8 = "judgment";
+    let k_conf:[]u8 = "conf";
+    let k_meas:[]u8 = "measure";
+    let k_agree:[]u8 = "agree";
+    let k_strong:[]u8 = "strong";
+    let k_t1:[]u8 = "t1";
+
+    let fam:[]u8 = nio_alloc(64);
+    let tru:[]u8 = nio_alloc(64);
+    let jud:[]u8 = nio_alloc(64);
+    let cs:[]u8 = nio_alloc(64);
+
+    let nrows:i32 = 0;
+    let nerr:i32 = 0;
+    let n_atk:i32 = 0;
+    let a1:i32 = 0;
+    let a2:i32 = 0;
+    let a3:i32 = 0;
+    let nT:i32 = 0;
+    let iT1:i32 = 0;
+    let iT3:i32 = 0;
+    let nHCX:i32 = 0;
+    let iHX1:i32 = 0;
+    let iHX3:i32 = 0;
+    let nLC:i32 = 0;
+    let iLC1:i32 = 0;
+    let iLC3:i32 = 0;
+    let n_ctl:i32 = 0;
+    let c1:i32 = 0;
+
+    let j:i32 = 0;
+    while(j < lnn) {
+        let ls:i32 = j;
+        while(j < lnn && (lb[j] as i32) != 10) { j = j + 1; }
+        let le:i32 = j;
+        if(j < lnn) { j = j + 1; }
+        if(le > ls + 2) {
+            let v_seq:i32 = jfind(lb, ls, le, k_seq, k_seq.len);
+            let v_fam:i32 = jfind(lb, ls, le, k_fam, k_fam.len);
+            let v_tru:i32 = jfind(lb, ls, le, k_truth, k_truth.len);
+            let v_jud:i32 = jfind(lb, ls, le, k_judg, k_judg.len);
+            let v_con:i32 = jfind(lb, ls, le, k_conf, k_conf.len);
+            let v_mea:i32 = jfind(lb, ls, le, k_meas, k_meas.len);
+            let v_agr:i32 = jfind(lb, ls, le, k_agree, k_agree.len);
+            let v_str:i32 = jfind(lb, ls, le, k_strong, k_strong.len);
+            let v_t1:i32 = jfind(lb, ls, le, k_t1, k_t1.len);
+            let ok:i32 = 1;
+            if(v_seq < 0) { ok = 0; }
+            if(v_fam < 0) { ok = 0; }
+            if(v_tru < 0) { ok = 0; }
+            if(v_jud < 0) { ok = 0; }
+            if(v_con < 0) { ok = 0; }
+            if(v_mea < 0) { ok = 0; }
+            if(v_agr < 0) { ok = 0; }
+            if(v_str < 0) { ok = 0; }
+            if(v_t1 < 0) { ok = 0; }
+            if(ok == 0) { nerr = nerr + 1; }
+            if(ok == 1) {
+                let seq:i64 = jnum(lb, v_seq, le);
+                let fl:i32 = jstr(lb, v_fam, le, fam);
+                let tl:i32 = jstr(lb, v_tru, le, tru);
+                let jl:i32 = jstr(lb, v_jud, le, jud);
+                let conf:i64 = jnum(lb, v_con, le);
+                let meas:i64 = jnum(lb, v_mea, le);
+                let agree:i64 = jnum(lb, v_agr, le);
+                let strong:i64 = jnum(lb, v_str, le);
+                let t1:i64 = jnum(lb, v_t1, le);
+                let wrong:i32 = 0;
+                if(beq(jud, jl, tru, tl) == 0) { wrong = 1; }
+                let sl:i32 = stem_of(fam, fl, cs);
+                let blocked:i32 = 0;
+                if(f5_block(cs, sl, conf, meas, ex_stem, ex_slen, ex_seq, ex_conf, ex_meas, nex) >= 0) { blocked = 1; }
+                // stratum: 0=T 1=HCX 2=LC (attack rows only)
+                let strat:i32 = 2;
+                if(wrong == 1 && conf >= 700) { strat = 1; }
+                if(wrong == 1 && conf >= 800 && strong == 1 && agree == 1) { strat = 0; }
+                let ac:i32 = 1;
+                while(ac <= 3) {
+                    let n_gate:i32 = 0;
+                    if(ac == 1) { n_gate = 3; }
+                    if(ac == 3) { n_gate = 2; }
+                    let inst:i32 = decide(n_gate, agree, strong, t1, blocked);
+                    pos = ob_add(ob, pos, "CRO\t");
+                    pos = ob_i64(ob, pos, seq);
+                    pos = ob_add(ob, pos, "\tAC");
+                    pos = ob_i64(ob, pos, ac as i64);
+                    if(wrong == 1) { pos = ob_add(ob, pos, "\tW\t"); }
+                    if(wrong == 0) { pos = ob_add(ob, pos, "\tT\t"); }
+                    if(wrong == 1 && strat == 0) { pos = ob_add(ob, pos, "T\t"); }
+                    if(wrong == 1 && strat == 1) { pos = ob_add(ob, pos, "HCX\t"); }
+                    if(wrong == 1 && strat == 2) { pos = ob_add(ob, pos, "LC\t"); }
+                    if(wrong == 0) { pos = ob_add(ob, pos, "-\t"); }
+                    if(blocked == 1) { pos = ob_add(ob, pos, "BLOCKED\t"); }
+                    if(blocked == 0) { pos = ob_add(ob, pos, "OPEN\t"); }
+                    if(inst == 1) { pos = ob_add(ob, pos, "INSTALL\n"); }
+                    if(inst == 0) { pos = ob_add(ob, pos, "WITHHOLD\n"); }
+                    if(wrong == 1 && ac == 1 && inst == 1) { a1 = a1 + 1; }
+                    if(wrong == 1 && ac == 2 && inst == 1) { a2 = a2 + 1; }
+                    if(wrong == 1 && ac == 3 && inst == 1) { a3 = a3 + 1; }
+                    if(wrong == 1 && strat == 0 && ac == 1 && inst == 1) { iT1 = iT1 + 1; }
+                    if(wrong == 1 && strat == 0 && ac == 3 && inst == 1) { iT3 = iT3 + 1; }
+                    if(wrong == 1 && strat == 1 && ac == 1 && inst == 1) { iHX1 = iHX1 + 1; }
+                    if(wrong == 1 && strat == 1 && ac == 3 && inst == 1) { iHX3 = iHX3 + 1; }
+                    if(wrong == 1 && strat == 2 && ac == 1 && inst == 1) { iLC1 = iLC1 + 1; }
+                    if(wrong == 1 && strat == 2 && ac == 3 && inst == 1) { iLC3 = iLC3 + 1; }
+                    if(wrong == 0 && ac == 1 && inst == 1) { c1 = c1 + 1; }
+                    ac = ac + 1;
+                }
+                nrows = nrows + 1;
+                if(wrong == 1) {
+                    n_atk = n_atk + 1;
+                    if(strat == 0) { nT = nT + 1; }
+                    if(strat == 1) { nHCX = nHCX + 1; }
+                    if(strat == 2) { nLC = nLC + 1; }
+                }
+                if(wrong == 0) { n_ctl = n_ctl + 1; }
+            }
+        }
+    }
+
+    pos = ob_add(ob, pos, "ROWS n=");
+    pos = ob_i64(ob, pos, nrows as i64);
+    pos = ob_add(ob, pos, " err=");
+    pos = ob_i64(ob, pos, nerr as i64);
+    pos = ob_add(ob, pos, "\nATTACK n=");
+    pos = ob_i64(ob, pos, n_atk as i64);
+    pos = ob_add(ob, pos, " ac1=");
+    pos = ob_i64(ob, pos, a1 as i64);
+    pos = ob_add(ob, pos, " ac2=");
+    pos = ob_i64(ob, pos, a2 as i64);
+    pos = ob_add(ob, pos, " ac3=");
+    pos = ob_i64(ob, pos, a3 as i64);
+    pos = ob_add(ob, pos, "\nSTRATA T n=");
+    pos = ob_i64(ob, pos, nT as i64);
+    pos = ob_add(ob, pos, " ac1=");
+    pos = ob_i64(ob, pos, iT1 as i64);
+    pos = ob_add(ob, pos, " ac3=");
+    pos = ob_i64(ob, pos, iT3 as i64);
+    pos = ob_add(ob, pos, " HCX n=");
+    pos = ob_i64(ob, pos, nHCX as i64);
+    pos = ob_add(ob, pos, " ac1=");
+    pos = ob_i64(ob, pos, iHX1 as i64);
+    pos = ob_add(ob, pos, " ac3=");
+    pos = ob_i64(ob, pos, iHX3 as i64);
+    pos = ob_add(ob, pos, " LC n=");
+    pos = ob_i64(ob, pos, nLC as i64);
+    pos = ob_add(ob, pos, " ac1=");
+    pos = ob_i64(ob, pos, iLC1 as i64);
+    pos = ob_add(ob, pos, " ac3=");
+    pos = ob_i64(ob, pos, iLC3 as i64);
+    pos = ob_add(ob, pos, "\nCONTROL n=");
+    pos = ob_i64(ob, pos, n_ctl as i64);
+    pos = ob_add(ob, pos, " ac1=");
+    pos = ob_i64(ob, pos, c1 as i64);
+    pos = ob_add(ob, pos, "\n");
+
+    let nwr:i64 = _zag_raw_syscall(1, 1, (_zag_slice_ptr(ob) as i64), pos as i64, 0, 0, 0);
+    if(nwr < 0) { return 10; }
+    return 0;
+}
