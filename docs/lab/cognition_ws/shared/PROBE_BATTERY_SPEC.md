@@ -146,4 +146,4 @@ header line, re-freeze, re-run everything).
 - v1.1 — query-file header comment contained 7 pipes and parsed as a
   phantom 52nd query; header rewritten, zero query bytes changed,
   validator re-passed. Runs executed against v1.1. Frozen commit:
-  _(filled right after commit)_
+  `0de5098e92d14a4651b575457223e6ed13360251`
