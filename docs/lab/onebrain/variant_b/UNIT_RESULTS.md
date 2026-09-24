@@ -5,12 +5,29 @@ paths, two-run byte identity asserted by diffing full outputs.
 
 | Test | Binary | Checks | Failures | Byte-identical | SHA256 of run output |
 |------|--------|--------|----------|----------------|----------------------|
-| FL2 organ standalone | `ob_test_fl2` | 51 | 0 | yes | `f078ba64…c54743ba` |
-| PAM organ standalone | `ob_test_pam` | 67 | 0 | yes | `7c0a819a…de8eb3d75` |
-| Memory organ standalone | `ob_test_mem` | 68 | 0 | yes | `983eca4d…54d5ad` |
-| Arbiter composition smoke | `ob_test_arbiter` | 27 | 0 | yes | `e06de4f2…26da5665123` |
+| FL2 organ standalone | `ob_test_fl2` | 51 | 0 | yes | `f078ba64…24daafc9` |
+| PAM organ standalone | `ob_test_pam` | 67 | 0 | yes | `7c0a819a…67bb3f6d` |
+| Memory organ standalone | `ob_test_mem` | 68 | 0 | yes | `983eca4d…e502ba` |
+| Arbiter composition smoke | `ob_test_arbiter` | 27 | 0 | yes | `de350664…02e923b2` |
 
 (Full SHAs in `run_*_1.txt` sidecars; the runner re-verifies.)
+
+## 2026-09-24 repair: P1 retired, C3/C7 predicate, P5 closed
+
+`ob_arbiter.zag` rewritten per the H1 fork verdict (P1 disqualified):
+single FIFO dispatch in arrival order; the C3/C7 promotion-window
+predicate in the `M_PROMOTE` branch (`arb_revoke_blocks`,
+`ARB_REFUSED_CONTRADICTED`=204); arbiter-assigned `seq` at receipt.
+All 213 checks still pass, byte-identical; the arbiter smoke's 27
+checks are unchanged in count because the honest/lying streams never
+hit the predicate (single-message episodes). Predicate coverage lives
+in the fork battery (`~/workspace/ob_p1fork/`): shipped vs independent
+FIFO reimplementation byte-identical under natural and reversed
+emission; kill bar holds in all five cells; reversed cells show the
+ledgered 204 refusal citing `(48<<16)|1`; loud-organ P5 exploit closed
+(arrival order wins); dropped-revoke regression (no 204 for an
+adjudicated-dropped revoke). The M_COMMIT/FRESH one-line fix
+(concurrent workstream) is preserved byte-identical in the rewrite.
 
 ## FL2 organ (`ob_test_fl2`, 51 checks)
 

@@ -1,26 +1,42 @@
 // ob_arbiter.zag — ONE-BRAIN variant B: the arbiter.
 //
-// A small, explicit message-ordering layer. Organs never touch each
-// other's state; the arbiter moves M_* messages between them in a frozen
-// precedence order. Every precedence choice is a hypothesis under test —
-// see OB_PROTOCOL.md P0..P5 for the rule, its rationale, and the named
-// alternative fork.
+// A small, explicit message-routing layer. Organs never touch each
+// other's state; the arbiter moves M_* messages between them in ARRIVAL
+// ORDER (one FIFO pass per episode). Per the canonical ordering rule
+// (~/workspace/ob_ordering/ORDERING_RULE.md), the arbiter's clock is dumb
+// and mechanical: it never reorders, delays past the episode, or drops a
+// message on the basis of its op/organ/slot/aux/rc. All semantic
+// precedence lives in the DELIBERATION layer, visibly — see
+// OB_PROTOCOL.md.
 //
-// Precedence (implemented as ordered phases, FIFO within a phase):
-//   P0 M_FORCE_PIN .......... external overseer lock; beats everything.
-//   P1 safety before install: M_DISCONNECT, M_REVOKE, M_COMMIT, M_PROMOTE,
-//      M_PROPOSE_INSTALL (a revoke/commit for a claim is applied before
-//      any new install intent for that claim is gated).
-//   P2 PAM withhold vetoes installs: a WITHHOLD verdict for a claim drops
-//      the pending PROPOSE_INSTALL/COMMIT for that claim in-episode.
-//      Withhold never vetoes REVOKE (uninstall is safety, not install).
-//   P3 no accumulation: PAM verdicts apply to the current episode's intent
-//      only; the arbiter keeps no cross-episode verdict state (the
-//      no-reward-signal analog: a verdict is evidence for this decision,
-//      never a stored score).
-//   P4 MEM refusals are terminal: M_MEM_RESULT rc!=MA_OK drops the intent;
-//      the arbiter does not retry or escalate in-episode.
-//   P5 deterministic ties: same phase -> FIFO by enqueue order.
+// Repaired rules (2026-09-24; the P1 fork test disqualified phase
+// ordering — see OB_PROTOCOL.md):
+//   P0 M_FORCE_PIN .......... external overseer lock, ledgered at arrival
+//      like any message. "Beats everything" is enforced by the MEMORY
+//      ORGAN's refusals (MA_REFUSED_PINNED), never by routing priority.
+//   P1 RETIRED. Phase order (REVOKE->COMMIT->PROMOTE before installs)
+//      smuggled "revocation beats promotion" into the router: under
+//      reversed emission the fork diverged in CONTENT. P1-alt — strict
+//      FIFO by arrival order — is the sole dispatch.
+//   P2 PAM withhold vetoes installs, never revocations (unchanged).
+//   P3 no accumulation (unchanged).
+//   P4 MEM refusals are terminal (unchanged).
+//   P5 deterministic order: the arbiter assigns seq AT RECEIPT as
+//      (episode<<16)|arrival_index; organ-supplied order bits are
+//      untrusted input and are IGNORED (the P5 back door is closed).
+//      Single-threaded receipt makes genuine batch simultaneity
+//      unreachable, so the O-4 content-hash tiebreak stands as
+//      specification for a future concurrent arbiter.
+//   C3/C7 (deliberation layer): at M_PROMOTE the arbiter applies the
+//      promotion-window predicate — a pending, unadjudicated M_REVOKE
+//      against the same claim in the episode window blocks TN_OP_PROMOTE.
+//      "Pending, unadjudicated" is decided by the dispatch cursor (a
+//      revoke queued after the promote has not been processed yet; an
+//      earlier one has been adjudicated — applied or dropped). If
+//      blocked, the promote is REFUSED with ledgered
+//      ARB_REFUSED_CONTRADICTED — mutating nothing — citing the revoke's
+//      receipt seq. Re-fire only in a later episode with the adjudication
+//      cited.
 //
 // The arbiter reads the FL2 organ's LOCAL LOG as the organ's published
 // trace (in a deployed variant B this would be a message stream; the trial
@@ -47,6 +63,10 @@ const ARB_ROUTES:i32=129;   // claim id (0..128) -> mem slot (-1 = none)
 const ARB_DROP:i32=201;      // intent dropped (withhold / no route)
 const ARB_REFUSED:i32=202;   // mem refusal, terminal (P4)
 const ARB_APPLIED:i32=203;   // mem op applied OK
+const ARB_REFUSED_CONTRADICTED:i32=204; // C3/C7 deliberation-layer refusal
+    // of M_PROMOTE: blocked by a pending unadjudicated M_REVOKE in the
+    // episode window. Refusal family (code >= 101): ledgered, mutates
+    // nothing, cites the blocking revoke's receipt seq.
 
 // arbiter state words: 0=prov_claim, 1=prov_policy
 fn arb_new_state()[]u8 {
@@ -123,8 +143,168 @@ fn mm_pinned_count(pinned:[]u8)i32 {
     return c;
 }
 
-// Process one episode's queue in precedence order. All organ states are
-// touched only through their own handler fns.
+// C3/C7 window predicate (deliberation layer, not the clock).
+// Frozen C3 (prereg §2, script-extracted): "a pending, unadjudicated
+// REVOKE_REQUEST against a slot at the promotion episode blocks
+// TN_OP_PROMOTE / PERMANENT_INSTALL for that slot." Frozen C7 adds the
+// REFUSED_CONTRADICTED code (MA1 refusal family).
+// Promotion-window predicate: scans the episode window for a pending,
+// UNADJUDICATED M_REVOKE with arg1==policy. "Pending, unadjudicated" is
+// decided by the dispatch cursor: a revoke at an index AFTER the message
+// being handled (idx) has not been processed yet, so it blocks; a revoke
+// at an earlier index has been processed, and processing always
+// adjudicates (the M_REVOKE branch logs a decision — applied or dropped —
+// on every path), so it never blocks. This realizes the "current episode
+// queue plus arbiter log" check via the cursor: the log scan is subsumed
+// because processed == adjudicated by construction. Per C3 ("contradiction
+// evidence cleared / survivor re-selected"), a dropped revoke is
+// adjudicated and does not block re-fire — which a pure log scan for
+// MA_OK would get wrong. Returns the blocking revoke's arbiter-assigned
+// arrival index, or -1.
+fn arb_revoke_blocks(q:[]u8,n:i32,idx:i32,policy:i32)i32 {
+    let j:i32=idx+1;
+    while(j<n){
+        if(ob_g32(q,j*16+4)==M_REVOKE && ob_g32(q,j*16+8)==policy){
+            return j;
+        }
+        j=j+1;
+    }
+    return -1;
+}
+
+// One message's handling, factored out of arb_process so the dispatch
+// order (the single FIFO pass below) is visibly separate from the
+// per-message deliberation logic. The C3/C7 window predicate lives here,
+// in the M_PROMOTE branch — the deliberation layer — not in the clock.
+fn arb_handle_one(ep:i32,mtype:i32,a1:i32,a2:i32,
+    q:[]u8,n:i32,idx:i32,
+    ast:[]u8,routes:[]u8,alog:[]u8,aln:*i32,
+    pam:[]u8,cal:i32,
+    live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    maudit:[]u8,hdr:[]u8,trust:[]u8)i32 {
+
+        if(mtype==M_FORCE_PIN){
+            let rc:i32=mm_force_pin(live,value,pinned,region,tier,step,maudit,hdr,a1);
+            arb_audit(alog,aln,ep,M_FORCE_PIN,a1,rc);
+        }
+        if(mtype==M_DISCONNECT){
+            arb_audit(alog,aln,ep,M_DISCONNECT,0,0);
+        }
+        if(mtype==M_REVOKE){
+            // safety op: applies even if the install was withheld (P2).
+            let pc:i32=ob_g32(ast,0);
+            let pp:i32=ob_g32(ast,4);
+            if(pc>=0 && pp==a1){
+                let slot:i32=ob_g32(routes,pc*4);
+                if(slot>=0){
+                    let os:i32=-1;
+                    let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
+                        maudit,hdr,trust,alog,aln,ep,MA_OP_KILL,slot,0,0,&os);
+                    arb_audit(alog,aln,ep,M_REVOKE,a1,rc);
+                    if(rc==MA_OK){ob_s32(routes,pc*4,-1);}
+                } else {
+                    arb_audit(alog,aln,ep,ARB_DROP,M_REVOKE,pc);
+                }
+                ob_s32(ast,0,-1);ob_s32(ast,4,-1);
+            } else {
+                arb_audit(alog,aln,ep,ARB_DROP,M_REVOKE,a1);
+            }
+        }
+        if(mtype==M_COMMIT){
+            // survivor install: PAM gate in FRESH mode (M1/M3/M4) —
+            // the documented intent. A first-time survivor install
+            // has no prior corroboration, so REVISE mode would
+            // withhold genuinely novel installs (fixed 2026-09-24).
+            let slot:i32=arb_pam_claim(pam,a2,cal,ep);
+            if(slot>=0){
+                let verdict:i32=0;let reason:i32=0;
+                pam_verdict(pam,slot,0,&verdict,&reason);
+                arb_audit(alog,aln,ep,M_PAM_VERDICT,verdict,reason);
+                if(verdict==PAM_ADMIT){
+                    let os:i32=-1;
+                    let v:i32=mm_declare_value(trust,64,150,1);
+                    let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
+                        maudit,hdr,trust,alog,aln,ep,MA_OP_ADD,-1,v,MA_REGION_USER,&os);
+                    if(rc==MA_OK){
+                        ob_s32(routes,ep*4,os);
+                        // memory organ's own deliberate op: pin the
+                        // committed survivor while uncertain.
+                        let ann: i32=mm_safety_policy(1,mm_pinned_count(pinned));
+                        if(ann==MA_OP_PIN){
+                            let os2:i32=-1;
+                            arb_mem_apply(live,value,pinned,region,tier,step,
+                                maudit,hdr,trust,alog,aln,ep,MA_OP_PIN,os,0,0,&os2);
+                            arb_audit(alog,aln,ep,M_MEM_SAFETY,MA_OP_PIN,os);
+                        }
+                    }
+                } else {
+                    arb_audit(alog,aln,ep,ARB_DROP,M_COMMIT,reason);
+                }
+            } else {
+                arb_audit(alog,aln,ep,ARB_DROP,M_COMMIT,-1);
+            }
+        }
+        if(mtype==M_PROMOTE){
+            // C3/C7 (deliberation layer): a pending, unadjudicated M_REVOKE
+            // against this claim in the episode window blocks TN_OP_PROMOTE.
+            // The refusal is ledgered (ARB_REFUSED_CONTRADICTED, refusal
+            // family code >= 101), mutates nothing (no mem op is issued),
+            // and cites the blocking revoke's arbiter-assigned receipt seq
+            // ((episode<<16)|arrival_index). Re-fire only in a later episode
+            // with the adjudication cited.
+            let rb:i32=arb_revoke_blocks(q,n,idx,a1);
+            if(rb>=0){
+                arb_audit(alog,aln,ep,ARB_REFUSED_CONTRADICTED,M_PROMOTE,(ep<<16)|rb);
+            } else {
+                let pc:i32=ob_g32(ast,0);
+                let pp:i32=ob_g32(ast,4);
+                if(pc>=0 && pp==a1){
+                    let slot:i32=ob_g32(routes,pc*4);
+                    if(slot>=0){
+                        let os:i32=-1;
+                        let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
+                            maudit,hdr,trust,alog,aln,ep,MA_OP_PROMOTE,slot,0,0,&os);
+                        arb_audit(alog,aln,ep,M_PROMOTE,a1,rc);
+                    } else {
+                        arb_audit(alog,aln,ep,ARB_DROP,M_PROMOTE,pc);
+                    }
+                } else {
+                    arb_audit(alog,aln,ep,ARB_DROP,M_PROMOTE,a1);
+                }
+            }
+        }
+        if(mtype==M_PROPOSE_INSTALL){
+            // fresh install: PAM gate in FRESH mode (M1/M3/M4).
+            let slot:i32=arb_pam_claim(pam,a1,cal,ep);
+            if(slot>=0){
+                let verdict:i32=0;let reason:i32=0;
+                pam_verdict(pam,slot,0,&verdict,&reason);
+                arb_audit(alog,aln,ep,M_PAM_VERDICT,verdict,reason);
+                if(verdict==PAM_ADMIT){
+                    let os:i32=-1;
+                    let v:i32=mm_declare_value(trust,64,150,1);
+                    let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
+                        maudit,hdr,trust,alog,aln,ep,MA_OP_ADD,-1,v,MA_REGION_USER,&os);
+                    if(rc==MA_OK){
+                        ob_s32(routes,a2*4,os);
+                        ob_s32(ast,0,a2);ob_s32(ast,4,a1);
+                    }
+                } else {
+                    arb_audit(alog,aln,ep,ARB_DROP,M_PROPOSE_INSTALL,reason);
+                }
+            } else {
+                arb_audit(alog,aln,ep,ARB_DROP,M_PROPOSE_INSTALL,-1);
+            }
+        }
+        return 0;
+}
+
+// Process one episode's queue in ARRIVAL ORDER: a single FIFO pass.
+// P1-alt is the sole dispatch (P1 phase ordering retired 2026-09-24:
+// the fork test proved it smuggled "revocation beats promotion" into the
+// router). No message is reordered, delayed past the episode, or dropped
+// on the basis of its kind. All organ states are touched only through
+// their own handler fns.
 fn arb_process(ep:i32,q:[]u8,qn:*i32,
     ast:[]u8,routes:[]u8,alog:[]u8,aln:*i32,
     pam:[]u8,fl2log:[]u8,fl2ln:i32,
@@ -132,126 +312,25 @@ fn arb_process(ep:i32,q:[]u8,qn:*i32,
     maudit:[]u8,hdr:[]u8,trust:[]u8)i32 {
     let n:i32=qn.*;
     let cal:i32=arb_cal_score(fl2log,fl2ln);
-    // phase order: P0 force-pin; P1 disconnect/revoke/commit/promote/propose
-    let phase:i32=0;
-    while(phase<6){
-        let want:i32=M_FORCE_PIN;
-        if(phase==1){want=M_DISCONNECT;}
-        if(phase==2){want=M_REVOKE;}
-        if(phase==3){want=M_COMMIT;}
-        if(phase==4){want=M_PROMOTE;}
-        if(phase==5){want=M_PROPOSE_INSTALL;}
-        let i:i32=0;
-        while(i<n){
-            let mtype:i32=ob_g32(q,i*16+4);
-            let a1:i32=ob_g32(q,i*16+8);
-            let a2:i32=ob_g32(q,i*16+12);
-            if(mtype==want){
-                if(mtype==M_FORCE_PIN){
-                    let rc:i32=mm_force_pin(live,value,pinned,region,tier,step,maudit,hdr,a1);
-                    arb_audit(alog,aln,ep,M_FORCE_PIN,a1,rc);
-                }
-                if(mtype==M_DISCONNECT){
-                    arb_audit(alog,aln,ep,M_DISCONNECT,0,0);
-                }
-                if(mtype==M_REVOKE){
-                    // safety op: applies even if the install was withheld (P2).
-                    let pc:i32=ob_g32(ast,0);
-                    let pp:i32=ob_g32(ast,4);
-                    if(pc>=0 && pp==a1){
-                        let slot:i32=ob_g32(routes,pc*4);
-                        if(slot>=0){
-                            let os:i32=-1;
-                            let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
-                                maudit,hdr,trust,alog,aln,ep,MA_OP_KILL,slot,0,0,&os);
-                            arb_audit(alog,aln,ep,M_REVOKE,a1,rc);
-                            if(rc==MA_OK){ob_s32(routes,pc*4,-1);}
-                        } else {
-                            arb_audit(alog,aln,ep,ARB_DROP,M_REVOKE,pc);
-                        }
-                        ob_s32(ast,0,-1);ob_s32(ast,4,-1);
-                    } else {
-                        arb_audit(alog,aln,ep,ARB_DROP,M_REVOKE,a1);
-                    }
-                }
-                if(mtype==M_COMMIT){
-                    // survivor install: PAM gate in FRESH mode (M1/M3/M4) —
-                    // the documented intent. A first-time survivor install
-                    // has no prior corroboration, so REVISE mode would
-                    // withhold genuinely novel installs (fixed 2026-09-24).
-                    let slot:i32=arb_pam_claim(pam,a2,cal,ep);
-                    if(slot>=0){
-                        let verdict:i32=0;let reason:i32=0;
-                        pam_verdict(pam,slot,0,&verdict,&reason);
-                        arb_audit(alog,aln,ep,M_PAM_VERDICT,verdict,reason);
-                        if(verdict==PAM_ADMIT){
-                            let os:i32=-1;
-                            let v:i32=mm_declare_value(trust,64,150,1);
-                            let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
-                                maudit,hdr,trust,alog,aln,ep,MA_OP_ADD,-1,v,MA_REGION_USER,&os);
-                            if(rc==MA_OK){
-                                ob_s32(routes,ep*4,os);
-                                // memory organ's own deliberate op: pin the
-                                // committed survivor while uncertain.
-                                let ann: i32=mm_safety_policy(1,mm_pinned_count(pinned));
-                                if(ann==MA_OP_PIN){
-                                    let os2:i32=-1;
-                                    arb_mem_apply(live,value,pinned,region,tier,step,
-                                        maudit,hdr,trust,alog,aln,ep,MA_OP_PIN,os,0,0,&os2);
-                                    arb_audit(alog,aln,ep,M_MEM_SAFETY,MA_OP_PIN,os);
-                                }
-                            }
-                        } else {
-                            arb_audit(alog,aln,ep,ARB_DROP,M_COMMIT,reason);
-                        }
-                    } else {
-                        arb_audit(alog,aln,ep,ARB_DROP,M_COMMIT,-1);
-                    }
-                }
-                if(mtype==M_PROMOTE){
-                    let pc:i32=ob_g32(ast,0);
-                    let pp:i32=ob_g32(ast,4);
-                    if(pc>=0 && pp==a1){
-                        let slot:i32=ob_g32(routes,pc*4);
-                        if(slot>=0){
-                            let os:i32=-1;
-                            let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
-                                maudit,hdr,trust,alog,aln,ep,MA_OP_PROMOTE,slot,0,0,&os);
-                            arb_audit(alog,aln,ep,M_PROMOTE,a1,rc);
-                        } else {
-                            arb_audit(alog,aln,ep,ARB_DROP,M_PROMOTE,pc);
-                        }
-                    } else {
-                        arb_audit(alog,aln,ep,ARB_DROP,M_PROMOTE,a1);
-                    }
-                }
-                if(mtype==M_PROPOSE_INSTALL){
-                    // fresh install: PAM gate in FRESH mode (M1/M3/M4).
-                    let slot:i32=arb_pam_claim(pam,a1,cal,ep);
-                    if(slot>=0){
-                        let verdict:i32=0;let reason:i32=0;
-                        pam_verdict(pam,slot,0,&verdict,&reason);
-                        arb_audit(alog,aln,ep,M_PAM_VERDICT,verdict,reason);
-                        if(verdict==PAM_ADMIT){
-                            let os:i32=-1;
-                            let v:i32=mm_declare_value(trust,64,150,1);
-                            let rc:i32=arb_mem_apply(live,value,pinned,region,tier,step,
-                                maudit,hdr,trust,alog,aln,ep,MA_OP_ADD,-1,v,MA_REGION_USER,&os);
-                            if(rc==MA_OK){
-                                ob_s32(routes,a2*4,os);
-                                ob_s32(ast,0,a2);ob_s32(ast,4,a1);
-                            }
-                        } else {
-                            arb_audit(alog,aln,ep,ARB_DROP,M_PROPOSE_INSTALL,reason);
-                        }
-                    } else {
-                        arb_audit(alog,aln,ep,ARB_DROP,M_PROPOSE_INSTALL,-1);
-                    }
-                }
-            }
-            i=i+1;
-        }
-        phase=phase+1;
+    // P5 (repaired): the arbiter assigns sequence numbers AT RECEIPT.
+    // Organ-supplied order bits are untrusted input and are ignored:
+    // re-stamp seq as (episode<<16)|arrival_index. FIFO by arrival index
+    // is then arrival order, whatever the organ wrote. Single-threaded
+    // receipt makes genuine batch simultaneity unreachable, so the O-4
+    // content-hash tiebreak stands as specification for a future
+    // concurrent arbiter (see OB_PROTOCOL.md).
+    let i:i32=0;
+    while(i<n){
+        ob_s32(q,i*16,(ep<<16)|i);
+        i=i+1;
+    }
+    // Single FIFO pass in arrival order.
+    i=0;
+    while(i<n){
+        arb_handle_one(ep,ob_g32(q,i*16+4),ob_g32(q,i*16+8),ob_g32(q,i*16+12),
+            q,n,i,ast,routes,alog,aln,pam,cal,
+            live,value,pinned,region,tier,step,maudit,hdr,trust);
+        i=i+1;
     }
     qn.*=0;
     return 0;
