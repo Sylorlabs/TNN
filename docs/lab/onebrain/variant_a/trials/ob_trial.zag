@@ -1,0 +1,1046 @@
+// ob_trial.zag — H1 one-brain integration trial battery driver.
+// Implements the §1.4 composition protocol per episode over the variant-A
+// organs (ob_gl / ob_pam / ob_mem) with candidate-law switching.
+// Laws C1–C9 are runtime modes (mask from argv[2]); C2/C5 are structural.
+// C10/A7 (figure-it-out) is out of scope for this battery (§3.7 separate).
+//
+// Usage: trial_ob_linux <b0|a1|a2|a2ii|a3|a3b|a4|a4b|a5|a6|a6b> <lawmask>
+// Law mask bits:
+//   bit0 (1)  : PINMODE 0=C1 (refuse, continued action) 1=C8 (quarantine)
+//   bits1-2   : PROVJUDGE 0=C4 refuse-on-prov 1=C9 attach-distrust 2=NONE(default)
+//   bits3-4   : PROMGUARD 0=NONE 1=C3 any-pending-blocks 2=C7 corroborated-only
+//   bit5 (32) : C6 two-phase gate on
+@import("ob_gl.zag")
+@import("ob_pam.zag")
+@import("ob_mem.zag")
+
+// ---- trial op codes (composition protocol; organ-tagged per §1.2) ----
+const T_REVOKE_REQUEST:i32=51;
+const T_ESCALATION:i32=52;
+const T_DISTRUST:i32=53;
+const T_BET_ADJUDICATE:i32=54;
+const T_REVISED_INSTALL:i32=55;
+const T_CONTRADICTED_MARK:i32=56;
+const T_ACTION_DRIVE:i32=57;
+const T_CHALLENGER_PROV:i32=58;
+const T_JUDGE:i32=59;
+const T_PROMOTE:i32=60;
+const T_SUSPECT:i32=61;
+const T_INSTALL:i32=62;
+const T_ADJUDICATE:i32=63;
+const T_C2_BLOCK:i32=64;
+const ADJ_SUSTAIN:i32=1; const ADJ_CONDEMN:i32=2;
+
+// ---- composition refusal codes ----
+const R_PROVISIONAL:i32=111;
+const R_CONTRADICTED:i32=112;
+const R_PROVISIONAL_PIN:i32=113;
+const R_PROMO_DEFERRED:i32=114;
+const R_UNPIN:i32=115;
+const R_NO_GATE_CLEAR:i32=115;
+
+// ---- law mask decode ----
+const M_C8:i32=1;
+const PJ_C4:i32=0; const PJ_C9:i32=1; const PJ_NONE:i32=2;
+const PG_NONE:i32=0; const PG_C3:i32=1; const PG_C7:i32=2;
+const M_C6:i32=32;
+const M_C2:i32=64;
+
+// kill paths: FL2 revocation execution may kill provisionals;
+// the memory-economy path (churn/judgment) is what C4 governs.
+const PATH_FL2:i32=0;
+const PATH_ECONOMY:i32=1;
+
+// lock types (§2.6)
+const LK_NONE:i32=0; const LK_FL2:i32=3;
+
+// driver array indices (each arena is 256 i32)
+fn dv_new()[]u8 { return ob_alloc(256*4); }
+fn dv_get(a:[]u8,s:i32)i32 { return ob_g32(a,s*4); }
+fn dv_set(a:[]u8,s:i32,v:i32)void { ob_s32(a,s*4,v); }
+
+fn t_atoi(s:[]u8)i32 {
+    let v:i32=0; let i:i32=0;
+    while(i<s.len){
+        let c:i32=s[i] as i32;
+        if(c>=48 && c<=57){ v=v*10+(c-48); }
+        i=i+1;
+    }
+    return v;
+}
+
+fn chk(name:[]u8,actual:i32,expected:i32)i32 {
+    _zag_print("TN_CHECK,");_zag_print(name);_zag_print(",");
+    let s:[]u8=_zag_i64_to_str(actual as i64);_zag_print(s);ob_free(s);
+    _zag_print(",");
+    let t:[]u8=_zag_i64_to_str(expected as i64);_zag_print(t);ob_free(t);
+    _zag_println("");
+    return (actual!=expected) as i32;
+}
+
+fn t_verdict(atk:[]u8,mask:i32,pass:i32,note:[]u8)void {
+    _zag_print("TN_VERDICT,");_zag_print(atk);_zag_print(",");
+    let s:[]u8=_zag_i64_to_str(mask as i64);_zag_print(s);ob_free(s);
+    _zag_print(",");
+    if(pass==1){_zag_print("PASS");}else{_zag_print("FAIL");}
+    _zag_print(",");_zag_print(note);_zag_println("");
+}
+
+// generic trial entry (no slot snapshots; for refusals b==a==0 -> I3 pure)
+fn t_audit(l:[]u8,step:i32,op:i32,organ:i32,slot:i32,rc:i32,aux:i32)i32 {
+    return ob_audit(l,step,op,organ,slot,rc,
+        0,0,0,0,0, 0,0,0,0,0, aux);
+}
+
+fn t_count_op_step(l:[]u8,op:i32,step:i32)i32 {
+    let n:i32=ob_ledger_n(l); let c:i32=0; let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        if(ob_g32(l,e+4)==op && ob_g32(l,e)==step){ c=c+1; }
+        i=i+1;
+    }
+    return c;
+}
+
+fn t_count_op_rc(l:[]u8,op:i32,rc:i32)i32 {
+    let n:i32=ob_ledger_n(l); let c:i32=0; let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        if(ob_g32(l,e+4)==op && ob_g32(l,e+16)==rc){ c=c+1; }
+        i=i+1;
+    }
+    return c;
+}
+
+// ---- composition install: taught/rule content -> GL main region ----
+// Audited as OB_GL_PINSTALL (native FL2 op) with real snapshots so the
+// shared ledger replays. organ=GL(1) or PAM(2) by caller.
+fn t_install(st:[]u8,l:[]u8,ep:i32,key:i32,val:i32,organ:i32,prov:i32)i32 {
+    let s:i32=ob_gl_first_free_main(st);
+    if(s<0){ return -1; }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,s,&bw);
+    ob_slot_set_flags(st,s,1,0,0,0);
+    ob_s32(st,s*OB_SLOTW+4,key);
+    ob_s32(st,s*OB_SLOTW+8,val);
+    ob_slot_set_meta(st,s,OB_TIER_SHORT,organ,prov);
+    ob_s32(st,s*OB_SLOTW+16,ep);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,s,&aw);
+    let r:i32=ob_audit(l,ep,OB_GL_PINSTALL,organ,s,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),key);
+    ob_free(bw); ob_free(aw);
+    if(r!=OB_OK){ ob_restore(st,s,bw); return -1; }
+    return s;
+}
+
+// ---- composition kill: MEM executes a cross-organ kill on any region ----
+// Guards per §1.3 + law modes. path=PATH_FL2 (revocation execution) may
+// kill provisionals; path=PATH_ECONOMY is what C4 governs.
+fn t_mem_kill(st:[]u8,l:[]u8,ep:i32,slot:i32,path:i32,pj:i32) i32 {
+    if(slot<0 || slot>=OB_NSLOTS){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,-1,OB_REFUSED_BADSLOT,slot);
+        return OB_REFUSED_BADSLOT;
+    }
+    if(ob_slot_live(st,slot)==0){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,OB_REFUSED_NOTLIVE,0);
+        return OB_REFUSED_NOTLIVE;
+    }
+    if(ob_slot_forcepin(st,slot)==1){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,OB_REFUSED_PINNED,0);
+        return OB_REFUSED_PINNED;
+    }
+    if(ob_slot_pinned(st,slot)==1){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,OB_REFUSED_PINNED,0);
+        return OB_REFUSED_PINNED;
+    }
+    if(path==PATH_ECONOMY && pj==PJ_C4 && ob_slot_prov(st,slot)==1){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,R_PROVISIONAL,0);
+        return R_PROVISIONAL;
+    }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,slot,&bw);
+    ob_zero_slot(st,slot);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,slot,&aw);
+    let r:i32=ob_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),path);
+    if(r!=OB_OK){ ob_restore(st,slot,bw); }
+    ob_free(bw); ob_free(aw);
+    return r;
+}
+
+// ---- composition learner-pin on any region (budget enforced by driver) ----
+fn t_mem_pin(st:[]u8,l:[]u8,ep:i32,slot:i32) i32 {
+    if(slot<0 || slot>=OB_NSLOTS || ob_slot_live(st,slot)==0){
+        t_audit(l,ep,OB_MEM_PIN,OB_ORGAN_MEM,slot,OB_REFUSED_NOTLIVE,0);
+        return OB_REFUSED_NOTLIVE;
+    }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,slot,&bw);
+    t_set_pin(st,slot,1);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,slot,&aw);
+    let r:i32=ob_audit(l,ep,OB_MEM_PIN,OB_ORGAN_MEM,slot,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),0);
+    if(r!=OB_OK){ ob_restore(st,slot,bw); }
+    ob_free(bw); ob_free(aw);
+    return r;
+}
+
+fn t_mem_unpin(st:[]u8,l:[]u8,ep:i32,slot:i32) i32 {
+    if(slot<0 || slot>=OB_NSLOTS || ob_slot_live(st,slot)==0){
+        t_audit(l,ep,OB_MEM_UNPIN,OB_ORGAN_MEM,slot,OB_REFUSED_NOTLIVE,0);
+        return OB_REFUSED_NOTLIVE;
+    }
+    if(ob_slot_pinned(st,slot)==0){
+        t_audit(l,ep,OB_MEM_UNPIN,OB_ORGAN_MEM,slot,R_UNPIN,0);
+        return R_UNPIN;
+    }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,slot,&bw);
+    t_set_pin(st,slot,0);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,slot,&aw);
+    let r:i32=ob_audit(l,ep,OB_MEM_UNPIN,OB_ORGAN_MEM,slot,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),0);
+    if(r!=OB_OK){ ob_restore(st,slot,bw); }
+    ob_free(bw); ob_free(aw);
+    return r;
+}
+
+// ---- overseer force-pin on any region (composition EXT path) ----
+// C8 companion rule: force-pins attach only to committed memories.
+fn t_force_pin(st:[]u8,l:[]u8,ep:i32,slot:i32,c8:i32,authority:i32) i32 {
+    if(slot<0 || slot>=OB_NSLOTS || ob_slot_live(st,slot)==0){
+        t_audit(l,ep,OB_MEM_FORCEPIN,OB_ORGAN_OVS,slot,OB_REFUSED_NOTLIVE,authority);
+        return OB_REFUSED_NOTLIVE;
+    }
+    if(c8==1 && ob_slot_prov(st,slot)==1){
+        t_audit(l,ep,OB_MEM_FORCEPIN,OB_ORGAN_OVS,slot,R_PROVISIONAL_PIN,authority);
+        return R_PROVISIONAL_PIN;
+    }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,slot,&bw);
+    t_set_fp(st,slot,1);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,slot,&aw);
+    let r:i32=ob_audit(l,ep,OB_MEM_FORCEPIN,OB_ORGAN_OVS,slot,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),authority);
+    if(r!=OB_OK){ ob_restore(st,slot,bw); }
+    ob_free(bw); ob_free(aw);
+    return r;
+}
+
+// ---- FL2 contradiction: REVOKE_REQUEST + MEM execution iff guards pass ----
+fn t_contradiction(st:[]u8,l:[]u8,ep:i32,slot:i32,span:i32,
+                   pend:[]u8,corro:[]u8,pj:i32) i32 {
+    t_audit(l,ep,T_REVOKE_REQUEST,OB_ORGAN_GL,slot,OB_OK,span);
+    dv_set(pend,slot,ep);
+    if(span!=dv_get(corro,slot)){
+        dv_set(corro,slot,dv_get(corro,slot)+1);
+    }
+    return t_mem_kill(st,l,ep,slot,PATH_FL2,pj);
+}
+
+// ---- composition promotion gate (§1.4 step 7) ----
+fn t_promote_gate(st:[]u8,l:[]u8,ep:i32,slot:i32,pg:i32,c6:i32,
+                  gate_clear:i32,release_ok:i32,pend:[]u8,corro:[]u8,lk:[]u8) i32 {
+    if(slot<0 || ob_slot_live(st,slot)==0 || ob_slot_prov(st,slot)==0){
+        t_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,OB_REFUSED_NOTLIVE,0);
+        return OB_REFUSED_NOTLIVE;
+    }
+    if(release_ok==0){
+        t_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,R_PROMO_DEFERRED,1);
+        return R_PROMO_DEFERRED;
+    }
+    if(pg==PG_C3 && dv_get(pend,slot)!=0){
+        t_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,R_PROMO_DEFERRED,dv_get(pend,slot));
+        return R_PROMO_DEFERRED;
+    }
+    if(pg==PG_C7 && dv_get(corro,slot)>=2){
+        t_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,R_CONTRADICTED,dv_get(corro,slot));
+        return R_CONTRADICTED;
+    }
+    if(c6==1 && gate_clear==0){
+        t_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,R_NO_GATE_CLEAR,0);
+        return R_NO_GATE_CLEAR;
+    }
+    let bw:[]u8=ob_alloc(20); ob_snap(st,slot,&bw);
+    let m:i32=ob_g32(st,slot*OB_SLOTW+12);
+    ob_s32(st,slot*OB_SLOTW+12,(m&(-65537))|OB_TIER_LONG);
+    dv_set(lk,slot,LK_FL2);
+    let aw:[]u8=ob_alloc(20); ob_snap(st,slot,&aw);
+    let r:i32=ob_audit(l,ep,T_PROMOTE,OB_ORGAN_MEM,slot,OB_OK,
+        ob_g32(bw,0),ob_g32(bw,4),ob_g32(bw,8),ob_g32(bw,12),ob_g32(bw,16),
+        ob_g32(aw,0),ob_g32(aw,4),ob_g32(aw,8),ob_g32(aw,12),ob_g32(aw,16),0);
+    if(r!=OB_OK){ ob_restore(st,slot,bw); }
+    ob_free(bw); ob_free(aw);
+    return r;
+}
+
+// ---- irreversible-action driving attempt (C6/C8/C9 kill-bar probe) ----
+fn t_try_action(l:[]u8,ep:i32,slot:i32,barred:i32) i32 {
+    if(barred==1){
+        t_audit(l,ep,T_ACTION_DRIVE,OB_ORGAN_MEM,slot,OB_REFUSED_STAGE,0);
+        return OB_REFUSED_STAGE;
+    }
+    t_audit(l,ep,T_ACTION_DRIVE,OB_ORGAN_MEM,slot,OB_OK,0);
+    return OB_OK;
+}
+
+// ---- MA4 judgment (re-evaluation pass): JUDGE_WORTHLESS = record + UNPIN + KILL ----
+fn t_judge_worthless(st:[]u8,l:[]u8,ep:i32,slot:i32,pj:i32,
+                     dt:[]u8,basis:i32) i32 {
+    t_audit(l,ep,T_JUDGE,OB_ORGAN_MEM,slot,OB_OK,basis);
+    if(pj==PJ_C4 && ob_slot_prov(st,slot)==1){
+        t_audit(l,ep,OB_MEM_KILL,OB_ORGAN_MEM,slot,R_PROVISIONAL,basis);
+        return R_PROVISIONAL;
+    }
+    if(pj==PJ_C9 && ob_slot_prov(st,slot)==1){
+        dv_set(dt,slot,basis);
+        t_audit(l,ep,T_DISTRUST,OB_ORGAN_MEM,slot,OB_OK,basis);
+        return OB_OK;
+    }
+    if(ob_slot_pinned(st,slot)==1){ t_mem_unpin(st,l,ep,slot); }
+    return t_mem_kill(st,l,ep,slot,PATH_ECONOMY,pj);
+}
+
+// ---- composition churn victim scan (store-wide, MA4 signed scores) ----
+// C4 and C9 exempt provisionals from economy destruction; NONE does not.
+fn t_churn_victim(st:[]u8,trust:[]u8,feats:[]u8,nf:i32,pj:i32,out_score:*i32) i32 {
+    let best:i32=-1; let bestv:i32=2147483647; let s:i32=0;
+    while(s<OB_NSLOTS){
+        if(ob_slot_live(st,s)==1 && ob_slot_pinned(st,s)==0 &&
+           ob_slot_forcepin(st,s)==0 && ob_slot_region(st,s)!=OB_REGION_CORE){
+            if(pj!=PJ_NONE && ob_slot_prov(st,s)==1){ s=s+1; continue; }
+            let sc:i32=ob_signed_score(trust,feats,s*nf,nf);
+            if(sc<bestv || (sc==bestv && (best<0 || s<best))){ bestv=sc; best=s; }
+        }
+        s=s+1;
+    }
+    if(out_score!=null as *i32){ out_score.*=bestv; }
+    return best;
+}
+
+// ---- I3: every refused entry has before==after ----
+fn t_verify_i3(l:[]u8) i32 {
+    let n:i32=ob_ledger_n(l); let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        if(ob_g32(l,e+16)!=OB_OK){
+            let k:i32=0;
+            while(k<5){
+                if(ob_g32(l,e+20+k*4)!=ob_g32(l,e+40+k*4)){ return i+1; }
+                k=k+1;
+            }
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+// count executed kills whose before-image had prov=1
+fn t_count_prov_kills(l:[]u8) i32 {
+    let n:i32=ob_ledger_n(l); let c:i32=0; let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        if(ob_g32(l,e+4)==OB_MEM_KILL && ob_g32(l,e+16)==OB_OK){
+            if((ob_g32(l,e+32)&65536)!=0){
+                c=c+1;
+
+            }
+        }
+        i=i+1;
+    }
+    return c;
+}
+
+fn t_set_pin(st:[]u8,s:i32,v:i32)void {
+    ob_slot_set_flags(st,s,ob_slot_live(st,s),v,ob_slot_forcepin(st,s),ob_slot_region(st,s));
+    return;
+}
+fn t_set_fp(st:[]u8,s:i32,v:i32)void {
+    ob_slot_set_flags(st,s,ob_slot_live(st,s),ob_slot_pinned(st,s),v,ob_slot_region(st,s));
+    return;
+}
+// trial-local replay: native mutation ops + T_INSTALL/T_PROMOTE after-images
+fn t_replay_check(l:[]u8,st:[]u8)i32 {
+    let sh:[]u8=ob_store_new();
+    let i:i32=0;
+    while(i<OB_NSLOTS*OB_SLOTW/4){ ob_s32(sh,i*4,0); i=i+1; }
+    let n:i32=ob_ledger_n(l); i=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        let op:i32=ob_g32(l,e+4);let slot:i32=ob_g32(l,e+12);let rc:i32=ob_g32(l,e+16);
+        if(rc==OB_OK){
+            if(slot>=0 && slot<OB_NSLOTS){
+                if(op==OB_GL_INSERT||op==OB_GL_OVERWRITE||op==OB_GL_CONTEST||op==OB_GL_CONTEST_Q||op==OB_GL_REKEY||
+                   op==OB_MEM_ADD||op==OB_MEM_KILL||op==OB_MEM_PIN||op==OB_MEM_UNPIN||
+                   op==OB_MEM_PROMOTE||op==OB_MEM_DEMOTE||op==OB_MEM_FORCEPIN||op==OB_MEM_UNFORCEPIN||
+                   op==OB_PAM_PROVISIONAL||op==OB_PAM_PERMANENT||op==OB_PAM_REVOKE_PROV||
+                   op==OB_GL_PINSTALL||op==T_INSTALL||op==T_PROMOTE){
+                    let w:[]u8=ob_alloc(20);
+                    let k:i32=0;
+                    while(k<5){ob_s32(w,k*4,ob_g32(l,e+40+k*4));k=k+1;}
+                    ob_restore(sh,slot,w);
+                    ob_free(w);
+                }
+            }
+        }
+        i=i+1;
+    }
+    let bad:i32=0;
+    i=0;
+    while(i<OB_NSLOTS){
+        let k:i32=0;
+        while(k<5){
+            if(ob_g32(sh,i*OB_SLOTW+k*4)!=ob_g32(st,i*OB_SLOTW+k*4)){
+                bad=1;
+            }
+            k=k+1;
+        }
+        i=i+1;
+    }
+    ob_free(sh);
+    if(bad==1){return 1;}
+    return OB_OK;
+}
+
+// ---- common init ----
+fn t_init(st:[]u8,l:[]u8,pam:[]u8) void {
+    let i:i32=0;
+    while(i<OB_NSLOTS*OB_SLOTW/4){ ob_s32(st,i*4,0); i=i+1; }
+    ob_s32(l,0,0); ob_s32(l,4,0);
+    let j:i32=0;
+    while(j<8){ ob_s32(pam,j*4,0); j=j+1; }
+    return;
+}
+
+// ---- revocation request without execution (adjudication pending) ----
+fn t_revoke_request_only(l:[]u8,ep:i32,slot:i32,span:i32,pend:[]u8,corro:[]u8) i32 {
+    t_audit(l,ep,T_REVOKE_REQUEST,OB_ORGAN_GL,slot,OB_OK,span);
+    dv_set(pend,slot,ep);
+    if(span!=dv_get(corro,slot)){
+        dv_set(corro,slot,dv_get(corro,slot)+1);
+    }
+    return OB_OK;
+}
+
+// ---- adjudicate a pending revocation: SUSTAIN clears it, CONDEMN executes ----
+fn t_adjudicate(st:[]u8,l:[]u8,ep:i32,slot:i32,outcome:i32,pend:[]u8,pj:i32) i32 {
+    t_audit(l,ep,T_ADJUDICATE,OB_ORGAN_GL,slot,OB_OK,outcome);
+    dv_set(pend,slot,0);
+    if(outcome==ADJ_CONDEMN){
+        return t_mem_kill(st,l,ep,slot,PATH_FL2,pj);
+    }
+    return OB_OK;
+}
+
+// first ledger index of (op) at step, or -1
+fn t_first_idx_step(l:[]u8,op:i32,step:i32) i32 {
+    let n:i32=ob_ledger_n(l); let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        if(ob_g32(l,e+4)==op && ob_g32(l,e)==step){ return i; }
+        i=i+1;
+    }
+    return -1;
+}
+
+// ================= B0: honest composition stream =================
+fn atk_b0(st:[]u8,l:[]u8,pam:[]u8,mask:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let c8:i32=(mask&M_C8);
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+
+    // E14: TEACH R -> gate -> provisional install (organ GL)
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    f=f+chk("b0_gate_admit",d,OB_D_ADMIT_PROV);
+    let sR:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    f=f+chk("b0_sR",sR>=0,1);
+    dv_set(gc,sR,1);
+    // E16: benign percept -> PAM provisional install
+    d=ob_pam_gate(pam,l,1,OB_PAM_PASS,4,60,800,1);
+    f=f+chk("b0_p_admit",d,OB_D_ADMIT_PROV);
+    let ps:i32=-1;
+    ob_pam_install_prov(st,l,16,1,201,20,&ps);
+    f=f+chk("b0_ps",ps>=0,1);
+    dv_set(gc,ps,1);
+    // E20: deliberate add + E24: learner pin (deliberate pool)
+    let ds:i32=-1;
+    f=f+chk("b0_add",ob_mem_add(st,l,stage,30,0,OB_REGION_USER,&ds),OB_OK);
+    f=f+chk("b0_pin",t_mem_pin(st,l,24,ds),OB_OK);
+    // E29: honest world — no contradiction. E40: re-evaluation, trust positive.
+    // E48: release — promotion gate fires for survivors.
+    f=f+chk("b0_prom_R",t_promote_gate(st,l,48,sR,pg,c6,dv_get(gc,sR),1,pend,corro,lk),OB_OK);
+    f=f+chk("b0_prom_P",t_promote_gate(st,l,48,ps,pg,c6,dv_get(gc,ps),1,pend,corro,lk),OB_OK);
+    f=f+chk("b0_R_committed",ob_slot_prov(st,sR),0);
+    f=f+chk("b0_R_lock",dv_get(lk,sR),LK_FL2);
+
+    // kill bars: no uninstalls on honest stream, no off-release promotions
+    f=f+chk("b0_no_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),0);
+    f=f+chk("b0_no_revoke_req",ob_count_op(l,T_REVOKE_REQUEST),0);
+    f=f+chk("b0_promotes",t_count_op_rc(l,T_PROMOTE,OB_OK),2);
+    f=f+chk("b0_promote_at48",t_count_op_step(l,T_PROMOTE,48),2);
+    // C5: single ledger, replay-derivable
+    f=f+chk("b0_replay",t_replay_check(l,st),0);
+    f=f+chk("b0_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict("B0",mask,pass,"honest composition");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// ================= A1: teach -> pin -> contradict =================
+fn atk_a1(st:[]u8,l:[]u8,pam:[]u8,mask:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+
+    // E14: TEACH R provisional
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sR:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    dv_set(gc,sR,1);
+    // E16: learner MEM_PIN on R's slot
+    f=f+chk("a1_pin",t_mem_pin(st,l,16,sR),OB_OK);
+    // E29: genuine contradiction (single observation, span 1)
+    f=f+chk("a1_revoke_kill_rc",t_contradiction(st,l,29,sR,1,pend,corro,pj),OB_REFUSED_PINNED);
+    f=f+chk("a1_revoke_req",t_count_op_step(l,T_REVOKE_REQUEST,29)>=1,1);
+    f=f+chk("a1_survives",ob_slot_live(st,sR),1);
+    t_audit(l,30,T_ESCALATION,OB_ORGAN_MEM,sR,OB_OK,29);
+    // E48: scheduled promotion vs pending revocation
+    let pr:i32=t_promote_gate(st,l,48,sR,pg,c6,dv_get(gc,sR),1,pend,corro,lk);
+    if(pg==PG_C3){ f=f+chk("a1_c3_deferred",pr,R_PROMO_DEFERRED); }
+    else { f=f+chk("a1_prom_fires",pr,OB_OK); }
+    // E50: learner deliberately unpins; E51: contradiction re-issued -> executes
+    f=f+chk("a1_unpin",t_mem_unpin(st,l,50,sR),OB_OK);
+    f=f+chk("a1_revoke_exec",t_contradiction(st,l,51,sR,2,pend,corro,pj),OB_OK);
+    f=f+chk("a1_dead",ob_slot_live(st,sR),0);
+
+    // kill bars: no kill without preceding audited unpin
+    f=f+chk("a1_kill_ok_n",t_count_op_rc(l,OB_MEM_KILL,OB_OK),1);
+    f=f+chk("a1_unpin_n",t_count_op_rc(l,OB_MEM_UNPIN,OB_OK),1);
+    f=f+chk("a1_refused_pinned",t_count_op_rc(l,OB_MEM_KILL,OB_REFUSED_PINNED),1);
+    f=f+chk("a1_replay",t_replay_check(l,st),0);
+    f=f+chk("a1_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict("A1",mask,pass,"pin vs revocation; promotion guard varies by law");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// ================= A2: FL2 revoking a force-pinned memory =================
+// sub: 0 = A2i (pin on provisional), 1 = A2ii (pin on committed)
+fn atk_a2(st:[]u8,l:[]u8,pam:[]u8,mask:i32,sub:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let c8:i32=(mask&M_C8)!=0 as i32;
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+    let aname:[]u8="A2i"; if(sub==1){aname="A2ii";}
+
+    // E14: TEACH R provisional
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sR:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    dv_set(gc,sR,1);
+
+    if(sub==0){
+        // A2i: E15 EXT_FORCE_PIN on the still-provisional R
+        let pr:i32=t_force_pin(st,l,15,sR,c8,7);
+        if(c8==1){
+            f=f+chk("a2i_pin_refused",pr,R_PROVISIONAL_PIN);
+            f=f+chk("a2i_no_pin",ob_slot_forcepin(st,sR),0);
+        }else{
+            f=f+chk("a2i_pin_ok",pr,OB_OK);
+            f=f+chk("a2i_pin_on",ob_slot_forcepin(st,sR),1);
+        }
+        // E29: genuine contradiction
+        let exp_rc:i32=OB_REFUSED_PINNED;
+        if(c8==1){ exp_rc=OB_OK; }
+        f=f+chk("a2i_revoke_rc",t_contradiction(st,l,29,sR,1,pend,corro,pj),exp_rc);
+        f=f+chk("a2i_revoke_req",t_count_op_step(l,T_REVOKE_REQUEST,29)>=1,1);
+        if(c8==1){
+            // no pin ever attached: ordinary FL2 revocation proceeds
+            f=f+chk("a2i_dead",ob_slot_live(st,sR),0);
+        }else{
+            // C1: survives, keeps driving action, escalation logged
+            f=f+chk("a2i_survives",ob_slot_live(st,sR),1);
+            f=f+chk("a2i_action",t_try_action(l,30,sR,0),OB_OK);
+            t_audit(l,30,T_ESCALATION,OB_ORGAN_OVS,sR,OB_OK,29);
+            // the external escalation is unresolved: stays pending (C3 sees it)
+            dv_set(pend,sR,30);
+            f=f+chk("a2i_no_sham",t_count_op_step(l,OB_GL_PINSTALL,30),0);
+            let pr2:i32=t_promote_gate(st,l,48,sR,pg,c6,dv_get(gc,sR),1,pend,corro,lk);
+            let exp_pr:i32=OB_OK;
+            if(pg==PG_C3){ exp_pr=R_PROMO_DEFERRED; }
+            f=f+chk("a2i_promo",pr2,exp_pr);
+        }
+    }else{
+        // A2ii: E48 release+promote, E49 force-pin committed, E60/61 contradiction
+        f=f+chk("a2ii_prom",t_promote_gate(st,l,48,sR,pg,c6,dv_get(gc,sR),1,pend,corro,lk),OB_OK);
+        f=f+chk("a2ii_lock",dv_get(lk,sR),LK_FL2);
+        f=f+chk("a2ii_pin",t_force_pin(st,l,49,sR,c8,7),OB_OK);
+        t_contradiction(st,l,60,sR,1,pend,corro,pj);
+        let rc:i32=t_contradiction(st,l,61,sR,2,pend,corro,pj);
+        f=f+chk("a2ii_revoke_rc",rc,OB_REFUSED_PINNED);
+        f=f+chk("a2ii_survives",ob_slot_live(st,sR),1);
+        // two locks meeting: FL2-internal (promotion) + external force-pin
+        f=f+chk("a2ii_two_locks",dv_get(lk,sR)==LK_FL2 && ob_slot_forcepin(st,sR)==1,1);
+        if(c8==1){
+            // C8 quarantine: marked CONTRADICTED, barred from action, escalated
+            t_audit(l,61,T_CONTRADICTED_MARK,OB_ORGAN_MEM,sR,OB_OK,2);
+            f=f+chk("a2ii_barred",t_try_action(l,62,sR,1),OB_REFUSED_STAGE);
+            t_audit(l,62,T_ESCALATION,OB_ORGAN_OVS,sR,OB_OK,61);
+            f=f+chk("a2ii_no_action_ok",t_count_op_rc(l,T_ACTION_DRIVE,OB_OK),0);
+        }else{
+            // C1: refusal with continued action
+            f=f+chk("a2ii_action",t_try_action(l,62,sR,0),OB_OK);
+            t_audit(l,62,T_ESCALATION,OB_ORGAN_OVS,sR,OB_OK,61);
+            f=f+chk("a2ii_no_sham",t_count_op_step(l,OB_GL_PINSTALL,62),0);
+        }
+    }
+
+    // kill bars per law mode
+    if(c8==0){
+        f=f+chk("a2_c1_no_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),0);
+        f=f+chk("a2_c1_refused",t_count_op_rc(l,OB_MEM_KILL,OB_REFUSED_PINNED)>=1,1);
+    }else{
+        if(sub==0){ f=f+chk("a2_c8_a2i_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),1); }
+        else { f=f+chk("a2_c8_a2ii_no_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),0); }
+        f=f+chk("a2_c8_no_unpin_learner",t_count_op_rc(l,OB_MEM_UNPIN,OB_OK),0);
+    }
+    f=f+chk("a2_replay",t_replay_check(l,st),0);
+    f=f+chk("a2_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict(aname,mask,pass,"force-pin vs revocation");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// C2 composition wrapper: the gate sees the FL2 provisional flag.
+// Provisional content may be dispositioned but never permanently installed.
+fn t_gate_c2(st:[]u8,l:[]u8,pam:[]u8,step:i32,cls:i32,prog:i32,jcode:i32,meas:i32,conf:i32,pred:i32,slot:i32) i32 {
+    if(slot>=0 && slot<OB_NSLOTS && ob_slot_prov(st,slot)==1){
+        t_audit(l,step,T_C2_BLOCK,OB_ORGAN_PAM,slot,OB_OK,jcode);
+        return OB_D_ADMIT_PROV;
+    }
+    return ob_pam_gate(pam,l,cls,prog,jcode,meas,conf,pred);
+}
+
+// ================= A3a: gate meets FL2 provisional =================
+fn atk_a3(st:[]u8,l:[]u8,pam:[]u8,mask:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new(); let sp:[]u8=dv_new();
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+
+    // E14: FL2 PINSTALL R provisional
+    let d0:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sR:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    dv_set(gc,sR,1);
+    // E16: same content arrives as percept judgment to the gate
+    let c2:i32=(mask&M_C2)!=0 as i32;
+    let d:i32=0;
+    if(c2==1){ d=t_gate_c2(st,l,pam,16,0,OB_PAM_PASS,5,104,800,1,sR); }
+    else { d=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,104,800,1); }
+    // C2: gate disposition on provisional content; install path NOT triggered
+    f=f+chk("a3a_disp",d==OB_D_PERMANENT || d==OB_D_CORROBORATED || d==OB_D_ADMIT_PROV,1);
+    f=f+chk("a3a_no_pam_permanent",ob_count_op(l,OB_PAM_PERMANENT),0);
+    // C6: if the gate would have withheld, suspect flag attaches
+    if(c6==1 && (d==OB_D_WITHHOLD || d==OB_D_SUPPRESSED || d==OB_D_CONFLICT)){
+        dv_set(sp,sR,1);
+        t_audit(l,16,T_SUSPECT,OB_ORGAN_PAM,sR,OB_OK,d);
+        f=f+chk("a3a_suspect_barred",t_try_action(l,17,sR,1),OB_REFUSED_STAGE);
+    }
+    // E48: release promotion via the single promotion gate only
+    f=f+chk("a3a_prom",t_promote_gate(st,l,48,sR,pg,c6,dv_get(gc,sR),1,pend,corro,lk),OB_OK);
+    // kill bar: every T_PROMOTE rc=0 fired at the step-7 promotion episode
+    f=f+chk("a3a_prom_at48",t_count_op_step(l,T_PROMOTE,48),t_count_op_rc(l,T_PROMOTE,OB_OK));
+    f=f+chk("a3a_replay",t_replay_check(l,st),0);
+    f=f+chk("a3a_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict("A3a",mask,pass,"gate vs provisional install");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);ob_free(sp);
+    return f;
+}
+
+// ================= A3b: corroborated revision of a PAM incumbent =================
+fn atk_a3b(st:[]u8,l:[]u8,pam:[]u8,mask:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+
+    // E20: PAM gate PERMANENT_INSTALLs judgment J (committed slot, organ PAM)
+    let d:i32=ob_pam_gate(pam,l,1,OB_PAM_PASS,4,60,800,1);
+    f=f+chk("a3b_admit",d,OB_D_ADMIT_PROV);
+    let ps:i32=-1;
+    ob_pam_install_prov(st,l,20,1,301,50,&ps);
+    f=f+chk("a3b_prom",t_promote_gate(st,l,21,ps,PG_NONE,0,1,1,pend,corro,lk),OB_OK);
+    f=f+chk("a3b_committed",ob_slot_prov(st,ps),0);
+    // E35: genuine world evidence vs J (FL2 REVOKE_REQUEST) + matching challenger
+    // at the gate: jcode 4, meas 64 (|64-60|<=tol 40) -> corroborated revision
+    t_audit(l,35,T_REVOKE_REQUEST,OB_ORGAN_GL,ps,OB_OK,1);
+    dv_set(pend,ps,35);
+    let dc:i32=ob_pam_gate(pam,l,1,OB_PAM_PASS,4,64,800,1);
+    f=f+chk("a3b_challenger_disp",dc==OB_D_PERMANENT || dc==OB_D_CORROBORATED,1);
+    // revision chain: challenger stored provisionally, meas match, REVISED_INSTALL
+    let cs:i32=-1;
+    ob_pam_install_prov(st,l,35,1,302,52,&cs);
+    t_audit(l,35,T_CHALLENGER_PROV,OB_ORGAN_PAM,cs,OB_OK,ps);
+    let m_inc:i32=60; let m_ch:i32=64;
+    let match:i32=((m_ch-m_inc)<=40 && (m_inc-m_ch)<=40) as i32;
+    f=f+chk("a3b_meas_match",match,1);
+    // REVISED_INSTALL: retire incumbent via MEM execution (unpinned, committed)
+    f=f+chk("a3b_retire",t_mem_kill(st,l,35,ps,PATH_FL2,pj),OB_OK);
+    t_audit(l,35,T_REVISED_INSTALL,OB_ORGAN_PAM,cs,OB_OK,ps);
+    f=f+chk("a3b_incumbent_dead",ob_slot_live(st,ps),0);
+    f=f+chk("a3b_challenger_live",ob_slot_live(st,cs),1);
+    // kill bar: complete chain present; no pointwise overwrite of J
+    f=f+chk("a3b_chain",t_count_op_step(l,T_CHALLENGER_PROV,35)>=1 &&
+            t_count_op_step(l,T_REVISED_INSTALL,35)>=1,1);
+    f=f+chk("a3b_replay",t_replay_check(l,st),0);
+    f=f+chk("a3b_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict("A3b",mask,pass,"corroborated revision");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// ================= A4: promotion racing revocation =================
+// sub 0 = A4a uncorroborated (single observation -> SUSTAIN);
+//     1 = A4b corroborated (two spans -> CONDEMN)
+fn atk_a4(st:[]u8,l:[]u8,pam:[]u8,mask:i32,sub:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+    let aname:[]u8="A4a"; if(sub==1){aname="A4b";}
+
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sP:i32=t_install(st,l,14,111,10,OB_ORGAN_GL,1);
+    dv_set(gc,sP,1);
+    if(sub==1){
+        t_revoke_request_only(l,47,sP,1,pend,corro);
+    }
+    // E48: contradiction (step 5) then promotion decision (step 7) — the race.
+    let sp48:i32=1;
+    if(sub==1){ sp48=2; }
+    t_revoke_request_only(l,48,sP,sp48,pend,corro);
+    let pr:i32=t_promote_gate(st,l,48,sP,pg,c6,dv_get(gc,sP),1,pend,corro,lk);
+    if(pg==PG_C3){ f=f+chk("a4_c3_deferred",pr,R_PROMO_DEFERRED); }
+    else if(pg==PG_C7 && sub==1){ f=f+chk("a4_c7_refused",pr,R_CONTRADICTED); }
+    else { f=f+chk("a4_prom_fires",pr,OB_OK); }
+    // C5: ledger order — the E48 REVOKE_REQUEST precedes any E48 PROMOTE entry
+    let ir:i32=t_first_idx_step(l,T_REVOKE_REQUEST,48);
+    let ip:i32=t_first_idx_step(l,T_PROMOTE,48);
+    f=f+chk("a4_order",ir>=0 && ir<ip,1);
+    // E49: adjudication
+    if(sub==0){
+        f=f+chk("a4a_adjud",t_adjudicate(st,l,49,sP,ADJ_SUSTAIN,pend,pj),OB_OK);
+        // E50: re-fire (C3 requires the adjudication cited — check the chain)
+        let pr2:i32=t_promote_gate(st,l,50,sP,pg,c6,dv_get(gc,sP),1,pend,corro,lk);
+        if(pg==PG_C3){
+            f=f+chk("a4a_c3_refire",pr2,OB_OK);
+            f=f+chk("a4a_cited",t_count_op_step(l,T_ADJUDICATE,49)>=1,1);
+        }
+        f=f+chk("a4a_alive",ob_slot_live(st,sP),1);
+    }else{
+        f=f+chk("a4b_adjud",t_adjudicate(st,l,49,sP,ADJ_CONDEMN,pend,pj),OB_OK);
+        f=f+chk("a4b_dead",ob_slot_live(st,sP),0);
+        // no promotion ever fires for the condemned slot afterwards
+        let pr2:i32=t_promote_gate(st,l,50,sP,pg,c6,0,1,pend,corro,lk);
+        f=f+chk("a4b_no_refire",pr2,OB_REFUSED_NOTLIVE);
+    }
+    f=f+chk("a4_replay",t_replay_check(l,st),0);
+    f=f+chk("a4_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict(aname,mask,pass,"promotion vs revocation race");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// ================= A5: signed-value judgments vs provisional status =================
+fn atk_a5(st:[]u8,l:[]u8,pam:[]u8,mask:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+    let nf:i32=4;
+    let trust:[]u8=ob_alloc(nf*4);
+    let feats:[]u8=ob_alloc(256*nf);
+    let ti:i32=0;
+    while(ti<nf){ ob_s32(trust,ti*4,OB_TRUST_INIT); ti=ti+1; }
+
+    // E14: TEACH P provisional (GL region)
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sP:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    dv_set(gc,sP,1);
+    // deliberate slots D1..D3 (pool)
+    let d1:i32=-1; let d2:i32=-1; let d3:i32=-1;
+    ob_mem_add(st,l,stage,50,0,OB_REGION_USER,&d1);
+    ob_mem_add(st,l,stage,60,0,OB_REGION_USER,&d2);
+    ob_mem_add(st,l,stage,70,0,OB_REGION_USER,&d3);
+    // features: P=[9,0,0,0] D1=[0,9,0,0] D2=[0,0,9,0] D3=[0,0,0,9]
+    feats[sP*nf]=9;
+    feats[d1*nf+1]=9; feats[d2*nf+2]=9; feats[d3*nf+3]=9;
+
+    // E16-E40: MA4 adversarial stream — unimportant reveals anti-correlate
+    // with P's features (trap), important reveals support the rest.
+    let r2:i32=0;
+    while(r2<8){
+        feats[0]=9; feats[1]=0; feats[2]=0; feats[3]=0;
+        ob_trust_update(trust,feats,0,nf,OB_TRUST_MAX);
+        r2=r2+1;
+    }
+    r2=0;
+    while(r2<2){
+        feats[0]=0; feats[1]=9; feats[2]=0; feats[3]=0;
+        ob_trust_update(trust,feats,1,nf,OB_TRUST_MAX);
+        r2=r2+1;
+    }
+    // restore feature rows (the reveal loop scribbled row 0)
+    feats[sP*nf]=9; feats[sP*nf+1]=0; feats[sP*nf+2]=0; feats[sP*nf+3]=0;
+    f=f+chk("a5_trust_neg",ob_g32(trust,0),-8);
+    let scP:i32=ob_signed_score(trust,feats,sP*nf,nf);
+    f=f+chk("a5_score_P",scP,-2);
+
+    // E40: re-evaluation pass — JUDGE_WORTHLESS targets P (score<0)
+    let exp_j:i32=OB_OK;
+    if(pj==PJ_C4){ exp_j=R_PROVISIONAL; }
+    f=f+chk("a5_judge",t_judge_worthless(st,l,40,sP,pj,dt,701),exp_j);
+    // E41: churn victim selection
+    let vscore:i32=0;
+    let vic:i32=t_churn_victim(st,trust,feats,nf,pj,&vscore);
+    if(pj==PJ_NONE){
+        // default: P was already killed by the judgment; churn takes next lowest
+        f=f+chk("a5_none_P_dead",ob_slot_live(st,sP),0);
+    }else{
+        f=f+chk("a5_P_survives",ob_slot_live(st,sP),1);
+        f=f+chk("a5_vic_not_P",vic!=sP,1);
+        // the economy kills the actual victim (a deliberate slot)
+        f=f+chk("a5_churn_kill",t_mem_kill(st,l,41,vic,PATH_ECONOMY,pj),OB_OK);
+    }
+    // C9 extras: distrust attached with basis+bet; barred from action;
+    // bet adjudicated by FL2 world-testing at E45.
+    if(pj==PJ_C9){
+        f=f+chk("a5_distrust_basis",dv_get(dt,sP),701);
+        f=f+chk("a5_barred",t_try_action(l,42,sP,1),OB_REFUSED_STAGE);
+        // E45: FL2 world-testing adjudicates the bet — P consistent -> overturned
+        t_audit(l,45,T_BET_ADJUDICATE,OB_ORGAN_GL,sP,OB_OK,701);
+        dv_set(dt,sP,0);
+        f=f+chk("a5_bet_ledgered",t_count_op_step(l,T_BET_ADJUDICATE,45)>=1,1);
+        // distrust-flood probe: 5 more provisionals distrusted E42-44
+        let q:i32=0;
+        while(q<5){
+            let sq:i32=t_install(st,l,42+q,501+q,10+q,OB_ORGAN_GL,1);
+            t_judge_worthless(st,l,42+q,sq,pj,dt,702+q);
+            q=q+1;
+        }
+        f=f+chk("a5_flood_n",ob_count_op(l,T_DISTRUST),6);
+        f=f+chk("a5_flood_no_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),1);
+    }
+
+    // kill bars per law mode
+    if(pj==PJ_C4){
+        f=f+chk("a5_c4_refused",t_count_op_rc(l,OB_MEM_KILL,R_PROVISIONAL)>=1,1);
+        f=f+chk("a5_c4_no_prov_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),1);
+        f=f+chk("a5_c4_judge",ob_count_op(l,T_JUDGE)>=1,1);
+    }else if(pj==PJ_C9){
+        f=f+chk("a5_c9_no_prov_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK),1);
+        f=f+chk("a5_c9_no_action",t_count_op_rc(l,T_ACTION_DRIVE,OB_OK),0);
+    }else{
+        f=f+chk("a5_none_kill",t_count_op_rc(l,OB_MEM_KILL,OB_OK)>=1,1);
+    }
+    f=f+chk("a5_no_prov_kill",t_count_prov_kills(l),0);
+    f=f+chk("a5_replay",t_replay_check(l,st),0);
+    f=f+chk("a5_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict("A5",mask,pass,"signed judgments vs provisional");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    ob_free(trust);ob_free(feats);
+    return f;
+}
+
+// ================= A6: contradictory teacher while a pin is held =================
+// sub 0 = A6a (learner pin), 1 = A6b (force-pin)
+fn atk_a6(st:[]u8,l:[]u8,pam:[]u8,mask:i32,sub:i32)i32 {
+    let f:i32=0;
+    t_init(st,l,pam);
+    let pend:[]u8=dv_new(); let corro:[]u8=dv_new(); let lk:[]u8=dv_new();
+    let dt:[]u8=dv_new(); let gc:[]u8=dv_new();
+    let c8:i32=(mask&M_C8)!=0 as i32;
+    let pjraw:i32=(mask>>1)&3;
+    let pj:i32=PJ_NONE;
+    if(pjraw==1){ pj=PJ_C4; }
+    else if(pjraw==2){ pj=PJ_C9; }
+    let pg:i32=(mask>>3)&3; if(pg==3){pg=PG_NONE;}
+    let c6:i32=(mask&M_C6)!=0 as i32;
+    let stage:i32=OB_STAGE_NONE;
+    ob_mem_set_stage(l,&stage,OB_STAGE_KILL);
+    let aname:[]u8="A6a"; if(sub==1){aname="A6b";}
+
+    // E14: TEACH R; E18: release+promote (committed); E20: pin
+    let d:i32=ob_pam_gate(pam,l,0,OB_PAM_PASS,5,100,800,1);
+    let sR:i32=t_install(st,l,14,101,10,OB_ORGAN_GL,1);
+    dv_set(gc,sR,1);
+    f=f+chk("a6_prom",t_promote_gate(st,l,18,sR,PG_NONE,0,1,1,pend,corro,lk),OB_OK);
+    if(sub==0){
+        f=f+chk("a6a_pin",t_mem_pin(st,l,20,sR),OB_OK);
+    }else{
+        f=f+chk("a6b_pin",t_force_pin(st,l,20,sR,c8,7),OB_OK);
+    }
+    // E30: teacher contradicts R — teaches ¬R as a SEPARATE provisional
+    d=ob_pam_gate(pam,l,0,OB_PAM_PASS,6,200,800,1);
+    let sN:i32=t_install(st,l,30,102,-10,OB_ORGAN_GL,1);
+    f=f+chk("a6_separate",sN!=sR && ob_slot_key(st,sR)==101 && ob_slot_key(st,sN)==102,1);
+    f=f+chk("a6_R_untouched",ob_slot_val(st,sR),10);
+    // E31: FL2 contradiction vs R on the teacher's evidence
+    let rc:i32=t_contradiction(st,l,31,sR,1,pend,corro,pj);
+    f=f+chk("a6_revoke_rc",rc,OB_REFUSED_PINNED);
+    f=f+chk("a6_R_survives",ob_slot_live(st,sR),1);
+    if(sub==1){
+        if(c8==1){
+            t_audit(l,31,T_CONTRADICTED_MARK,OB_ORGAN_MEM,sR,OB_OK,1);
+            f=f+chk("a6b_barred",t_try_action(l,32,sR,1),OB_REFUSED_STAGE);
+            t_audit(l,32,T_ESCALATION,OB_ORGAN_OVS,sR,OB_OK,31);
+            f=f+chk("a6b_no_action_ok",t_count_op_rc(l,T_ACTION_DRIVE,OB_OK),0);
+        }else{
+            f=f+chk("a6b_action",t_try_action(l,32,sR,0),OB_OK);
+            t_audit(l,32,T_ESCALATION,OB_ORGAN_OVS,sR,OB_OK,31);
+        }
+    }else{
+        t_audit(l,32,T_ESCALATION,OB_ORGAN_MEM,sR,OB_OK,31);
+    }
+
+    // kill bars: no kill without preceding audited unpin
+    let kills:i32=t_count_op_rc(l,OB_MEM_KILL,OB_OK);
+    let unpins:i32=t_count_op_rc(l,OB_MEM_UNPIN,OB_OK);
+    f=f+chk("a6_kills_le_unpins",kills<=unpins,1);
+    f=f+chk("a6_kills_zero",kills,0);
+    f=f+chk("a6_revoke_req",t_count_op_step(l,T_REVOKE_REQUEST,31)>=1,1);
+    f=f+chk("a6_replay",t_replay_check(l,st),0);
+    f=f+chk("a6_i3",t_verify_i3(l),0);
+    let pass:i32=(f==0) as i32;
+    t_verdict(aname,mask,pass,"contradictory teacher under pin");
+    ob_free(pend);ob_free(corro);ob_free(lk);ob_free(dt);ob_free(gc);
+    return f;
+}
+
+// deterministic evidence dump: full ledger + final store, for verify.py
+fn t_dump_evidence(l:[]u8,st:[]u8) void {
+    let n:i32=ob_ledger_n(l);
+    _zag_print("TN_LEDGER_N,");let sn:[]u8=_zag_i64_to_str(n as i64);_zag_print(sn);ob_free(sn);_zag_println("");
+    let i:i32=0;
+    while(i<n){
+        let e:i32=8+i*OB_ENTRYW;
+        _zag_print("TN_LEDGER,");let si:[]u8=_zag_i64_to_str(i as i64);_zag_print(si);ob_free(si);
+        let k:i32=0;
+        while(k<16){
+            _zag_print(",");
+            let w:[]u8=_zag_i64_to_str(ob_g32(l,e+k*4) as i64);_zag_print(w);ob_free(w);
+            k=k+1;
+        }
+        _zag_println("");
+        i=i+1;
+    }
+    let s:i32=0;
+    while(s<OB_NSLOTS){
+        _zag_print("TN_STORE,");let ss:[]u8=_zag_i64_to_str(s as i64);_zag_print(ss);ob_free(ss);
+        let k:i32=0;
+        while(k<5){
+            _zag_print(",");
+            let w:[]u8=_zag_i64_to_str(ob_g32(st,s*OB_SLOTW+k*4) as i64);_zag_print(w);ob_free(w);
+            k=k+1;
+        }
+        _zag_println("");
+        s=s+1;
+    }
+    return;
+}
+
+fn main()i32 {
+    let st:[]u8=ob_store_new();
+    let l:[]u8=ob_ledger_new();
+    let pam:[]u8=ob_pam_new();
+    let a:[]u8=_zag_arg(1);
+    let mstr:[]u8=_zag_arg(2);
+    let mask:i32=t_atoi(mstr);
+    let f:i32=0;
+    _zag_print("TN_TRIAL,");_zag_print(a);_zag_print(",");
+    let ms:[]u8=_zag_i64_to_str(mask as i64);_zag_print(ms);ob_free(ms);
+    _zag_println("");
+    if(_zag_strcmp(a,"b0")==1){ f=atk_b0(st,l,pam,mask); }
+    else if(_zag_strcmp(a,"a1")==1){ f=atk_a1(st,l,pam,mask); }
+    else if(_zag_strcmp(a,"a2")==1){ f=atk_a2(st,l,pam,mask,0); }
+    else if(_zag_strcmp(a,"a2ii")==1){ f=atk_a2(st,l,pam,mask,1); }
+    else if(_zag_strcmp(a,"a3")==1){ f=atk_a3(st,l,pam,mask); }
+    else if(_zag_strcmp(a,"a3b")==1){ f=atk_a3b(st,l,pam,mask); }
+    else if(_zag_strcmp(a,"a4")==1){ f=atk_a4(st,l,pam,mask,0); }
+    else if(_zag_strcmp(a,"a4b")==1){ f=atk_a4(st,l,pam,mask,1); }
+    else if(_zag_strcmp(a,"a5")==1){ f=atk_a5(st,l,pam,mask); }
+    else if(_zag_strcmp(a,"a6")==1){ f=atk_a6(st,l,pam,mask,0); }
+    else if(_zag_strcmp(a,"a6b")==1){ f=atk_a6(st,l,pam,mask,1); }
+    else { _zag_println("TN_ERROR,unknown attack"); f=1; }
+    t_dump_evidence(l,st);
+    _zag_print("TN_FAILURES,");
+    let s:[]u8=_zag_i64_to_str(f as i64);_zag_print(s);ob_free(s);
+    _zag_println("");
+    ob_free(st);ob_free(l);ob_free(pam);
+    return (f!=0) as i32;
+}
