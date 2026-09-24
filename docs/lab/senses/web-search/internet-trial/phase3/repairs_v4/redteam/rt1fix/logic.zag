@@ -1,0 +1,1028 @@
+// logic.zag -- LOGIC-CORE native logic engine (Track G, hell-hole V4).
+//
+// Pure-Zag engine: (claim proposition, evidence propositions) ->
+//   {NEUTRAL, AFFIRM, DENY} via native structural logical rules,
+//   emitting a proof trace (rule IDs fired).
+// No lexicon heuristics, no web, no seeded verdicts, zero RNG.
+//
+// Proposition syntax: see ../PROPSYNTAX.md.
+// Interface: argv[1] = TSV  id \t claim_prop \t evidence_props \t oracle
+//   (evidence_props = ";"-separated; oracle ignored by the engine)
+// Output per line:  id SP tag SP proof \n
+//   tag: 0=NEUTRAL, 1=AFFIRM, 2=DENY
+//   proof: ";"-separated rule IDs in firing order (empty when none fired).
+//
+// Deterministic, zero RNG, pure Zag. Pinned toolchain:
+//   ~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1
+//
+// znc gotchas honored (see ~/AGENTS.md): no `as []i32`/`as []u32`/`as []u16`
+// indexed tables (u8 arenas + LE helpers instead), no slice ==, no argc gate,
+// all slices far below the 2^25 limit, else-nesting <= 4 (early returns),
+// no large structs, `return;` in void fns, 7-arg syscalls, NUL-terminated
+// paths for open(2).
+
+// ==================== memory ====================
+fn z_alloc(n:i32)[]u8{
+    if(n<1 || n>33554432){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn z_free(b:[]u8)void{
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+    return;
+}
+fn z_cstr(s:[]u8)[]u8{
+    if(s.len<1 || s.len>4194304){return "";}
+    let b:[]u8=z_alloc(s.len+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    return b;
+}
+
+// ==================== file input ====================
+fn read_all(path:[]u8)[]u8{
+    let cs:[]u8=z_cstr(path);
+    if(cs.len==0){return "";}
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,0,0,0,0,0);
+    z_free(cs);
+    if(fd<0){return "";}
+    let cap:i32=8388608;
+    let buf:[]u8=z_alloc(cap);
+    if(buf.len==0){_zag_raw_syscall(3,fd,0,0,0,0,0);return "";}
+    let at:i32=0;
+    while(at<cap){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(cap-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){break;}
+        at=at+(n as i32);
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    return buf[0..at];
+}
+
+// ==================== byte utils ====================
+fn z_eq(a:[]u8,b:[]u8)i32{
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+fn z_starts(h:[]u8,n:[]u8)i32{
+    if(n.len>h.len){return 0;}
+    let k:i32=0;
+    while(k<n.len){if(h[k]!=n[k]){return 0;}k=k+1;}
+    return 1;
+}
+// first index of needle in h, or -1
+fn z_find(h:[]u8,n:[]u8)i32{
+    if(n.len==0){return 0;}
+    if(n.len>h.len){return -1;}
+    let i:i32=0;
+    while(i+n.len<=h.len){
+        let k:i32=0;
+        while(k<n.len){if(h[i+k]!=n[k]){break;}k=k+1;}
+        if(k==n.len){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn z_isdig(b:i32)i32{
+    if(b>=48 && b<=57){return 1;}
+    return 0;
+}
+fn z_isspace(b:i32)i32{
+    if(b==32 || b==9 || b==10 || b==13 || b==11 || b==12){return 1;}
+    return 0;
+}
+fn z_isident(b:i32)i32{
+    if(b>=48 && b<=57){return 1;}
+    if(b>=65 && b<=90){return 1;}
+    if(b>=97 && b<=122){return 1;}
+    if(b==95){return 1;}
+    return 0;
+}
+// LE int arena accessors (never `as []i32`; see ZNC-2026-09-21-007)
+fn a_put(b:[]u8,i:i32,v:i32)void{
+    let o:i32=i<<2;
+    b[o]=(v & 255) as u8;
+    b[o+1]=((v>>8) & 255) as u8;
+    b[o+2]=((v>>16) & 255) as u8;
+    b[o+3]=((v>>24) & 255) as u8;
+    return;
+}
+fn a_get(b:[]u8,i:i32)i32{
+    let o:i32=i<<2;
+    let v:i32=(b[o] as i32) & 255;
+    v=v | (((b[o+1] as i32) & 255)<<8);
+    v=v | (((b[o+2] as i32) & 255)<<16);
+    v=v | (((b[o+3] as i32) & 255)<<24);
+    return v;
+}
+
+// ==================== parser ====================
+// Parser state lives in a u8 arena `ps` (LE i32 slots):
+//   0 PST = input position, 1 OST = canonical-output position,
+//   2 QOK, 3 QV, 4 QU = quantity parse results,
+//   6 RLO, 7 RHI, 8 RU = range-literal parse results.
+fn app_b(out:[]u8,ps:[]u8,b:i32)void{
+    let o:i32=a_get(ps,1);
+    out[o]=b as u8;
+    a_put(ps,1,o+1);
+    return;
+}
+fn app_s(out:[]u8,ps:[]u8,t:[]u8)void{
+    let o:i32=a_get(ps,1);
+    let i:i32=0;
+    while(i<t.len){out[o+i]=t[i];i=i+1;}
+    a_put(ps,1,o+t.len);
+    return;
+}
+// decimal rendering of i64 (no leading zeros, '-' for negatives)
+fn app_i64(out:[]u8,ps:[]u8,v:i64)void{
+    if(v==0){app_b(out,ps,48);return;}
+    let neg:i32=0;
+    let x:i64=v;
+    if(x<0){neg=1;x=0-x;}
+    let dg:[]u8=z_alloc(24);
+    if(dg.len==0){return;}
+    let n:i32=0;
+    while(x>0){dg[n]=((x%10) as i32+48) as u8;n=n+1;x=x/10;}
+    if(neg==1){app_b(out,ps,45);}
+    let i:i32=n-1;
+    while(i>=0){app_b(out,ps,dg[i] as i32);i=i-1;}
+    z_free(dg);
+    return;
+}
+fn ps_skip(s:[]u8,ps:[]u8)void{
+    let p:i32=a_get(ps,0);
+    while(p<s.len && z_isspace(s[p] as i32)==1){p=p+1;}
+    a_put(ps,0,p);
+    return;
+}
+// read [A-Za-z0-9_]+ into tmp (lowercased); returns length, or -1
+fn ps_ident(s:[]u8,ps:[]u8,tmp:[]u8)i32{
+    ps_skip(s,ps);
+    let p:i32=a_get(ps,0);
+    let n:i32=0;
+    while(p<s.len && z_isident(s[p] as i32)==1){
+        let b:i32=s[p] as i32;
+        if(b>=65 && b<=90){b=b+32;}
+        tmp[n]=b as u8;
+        n=n+1;p=p+1;
+    }
+    if(n==0){return -1;}
+    a_put(ps,0,p);
+    return n;
+}
+// expect a single byte (after skipping spaces); 1 ok, 0 fail
+fn ps_expect(s:[]u8,ps:[]u8,b:i32)i32{
+    ps_skip(s,ps);
+    let p:i32=a_get(ps,0);
+    if(p<s.len && (s[p] as i32)==b){a_put(ps,0,p+1);return 1;}
+    return 0;
+}
+fn mv_left(out:[]u8,dst:i32,src:i32,n:i32)void{
+    let i:i32=0;
+    while(i<n){out[dst+i]=out[src+i];i=i+1;}
+    return;
+}
+// word numbers: one..ninety + tens+ones composites; -1 if unknown
+fn word_num_ones(w:[]u8)i64{
+    if(z_eq(w,"one")){return 1;}
+    if(z_eq(w,"two")){return 2;}
+    if(z_eq(w,"three")){return 3;}
+    if(z_eq(w,"four")){return 4;}
+    if(z_eq(w,"five")){return 5;}
+    if(z_eq(w,"six")){return 6;}
+    if(z_eq(w,"seven")){return 7;}
+    if(z_eq(w,"eight")){return 8;}
+    if(z_eq(w,"nine")){return 9;}
+    return -1;
+}
+fn word_num(w:[]u8)i64{
+    let r:i64=word_num_ones(w);
+    if(r>0){return r;}
+    if(z_eq(w,"ten")){return 10;}
+    if(z_eq(w,"eleven")){return 11;}
+    if(z_eq(w,"twelve")){return 12;}
+    if(z_eq(w,"thirteen")){return 13;}
+    if(z_eq(w,"fourteen")){return 14;}
+    if(z_eq(w,"fifteen")){return 15;}
+    if(z_eq(w,"sixteen")){return 16;}
+    if(z_eq(w,"seventeen")){return 17;}
+    if(z_eq(w,"eighteen")){return 18;}
+    if(z_eq(w,"nineteen")){return 19;}
+    if(z_eq(w,"twenty")){return 20;}
+    if(z_eq(w,"thirty")){return 30;}
+    if(z_eq(w,"forty")){return 40;}
+    if(z_eq(w,"fifty")){return 50;}
+    if(z_eq(w,"sixty")){return 60;}
+    if(z_eq(w,"seventy")){return 70;}
+    if(z_eq(w,"eighty")){return 80;}
+    if(z_eq(w,"ninety")){return 90;}
+    if(z_starts(w,"twenty") && w.len>6){let q:i64=word_num_ones(w[6..]);if(q>0){return 20+q;}}
+    if(z_starts(w,"thirty") && w.len>6){let q:i64=word_num_ones(w[6..]);if(q>0){return 30+q;}}
+    if(z_starts(w,"forty") && w.len>5){let q:i64=word_num_ones(w[5..]);if(q>0){return 40+q;}}
+    if(z_starts(w,"fifty") && w.len>5){let q:i64=word_num_ones(w[5..]);if(q>0){return 50+q;}}
+    if(z_starts(w,"sixty") && w.len>5){let q:i64=word_num_ones(w[5..]);if(q>0){return 60+q;}}
+    if(z_starts(w,"seventy") && w.len>7){let q:i64=word_num_ones(w[7..]);if(q>0){return 70+q;}}
+    if(z_starts(w,"eighty") && w.len>6){let q:i64=word_num_ones(w[6..]);if(q>0){return 80+q;}}
+    if(z_starts(w,"ninety") && w.len>6){let q:i64=word_num_ones(w[6..]);if(q>0){return 90+q;}}
+    return -1;
+}
+// decimal digits -> i64, -1 on any non-digit (empty -> -1)
+fn parse_dec(t:[]u8)i64{
+    if(t.len==0){return -1;}
+    let i:i32=0;
+    let v:i64=0;
+    while(i<t.len){
+        let b:i32=t[i] as i32;
+        if(z_isdig(b)==0){return -1;}
+        v=v*10+(b-48) as i64;
+        i=i+1;
+    }
+    return v;
+}
+// strip trailing '_' then remove all '_' -> dst; returns length
+fn deunder(t:[]u8,dst:[]u8)i32{
+    let e:i32=t.len;
+    while(e>0 && t[e-1]==95){e=e-1;}
+    let i:i32=0;
+    let n:i32=0;
+    while(i<e){if(t[i]!=95){dst[n]=t[i];n=n+1;}i=i+1;}
+    return n;
+}
+// unit suffix table: longest match wins; backtrack on number-parse failure.
+// codes: 0 count,1 sec,2 min,3 hr,4 day,5 wk,6 mo,7 yr
+fn unit_code_for(suf:[]u8)i32{
+    if(z_eq(suf,"seconds")){return 1;}
+    if(z_eq(suf,"second")){return 1;}
+    if(z_eq(suf,"secs")){return 1;}
+    if(z_eq(suf,"sec")){return 1;}
+    if(z_eq(suf,"s")){return 1;}
+    if(z_eq(suf,"minutes")){return 2;}
+    if(z_eq(suf,"minute")){return 2;}
+    if(z_eq(suf,"mins")){return 2;}
+    if(z_eq(suf,"min")){return 2;}
+    if(z_eq(suf,"hours")){return 3;}
+    if(z_eq(suf,"hour")){return 3;}
+    if(z_eq(suf,"hrs")){return 3;}
+    if(z_eq(suf,"hr")){return 3;}
+    if(z_eq(suf,"days")){return 4;}
+    if(z_eq(suf,"day")){return 4;}
+    if(z_eq(suf,"d")){return 4;}
+    if(z_eq(suf,"weeks")){return 5;}
+    if(z_eq(suf,"week")){return 5;}
+    if(z_eq(suf,"wks")){return 5;}
+    if(z_eq(suf,"wk")){return 5;}
+    if(z_eq(suf,"w")){return 5;}
+    if(z_eq(suf,"months")){return 6;}
+    if(z_eq(suf,"month")){return 6;}
+    if(z_eq(suf,"mos")){return 6;}
+    if(z_eq(suf,"mo")){return 6;}
+    if(z_eq(suf,"years")){return 7;}
+    if(z_eq(suf,"year")){return 7;}
+    if(z_eq(suf,"yrs")){return 7;}
+    if(z_eq(suf,"yr")){return 7;}
+    if(z_eq(suf,"y")){return 7;}
+    return -1;
+}
+// (unit table scan lives inside parse_qty_value; no separate longest-match needed)
+// parse a quantity value token -> ps slots QOK/QV/QU. Native number+unit parsing.
+// Tries unit suffixes longest-first; backtracks to a shorter suffix (or bare
+// count) when the remainder is not a number. e.g. "thirty" must NOT read "y"
+// as a year unit ("thirt" is not a number -> falls back to count 30).
+fn parse_qty_value(tok:[]u8,ps:[]u8,tmp:[]u8)i32{
+    a_put(ps,2,0);
+    let t2:[]u8=z_alloc(64);
+    if(t2.len==0){return -1;}
+    // whole token as a bare count FIRST: "eighty" must read 80, not "eight"+"y".
+    let nw:i32=deunder(tok,t2);
+    let vw:i64=parse_dec(t2[0..nw]);
+    if(vw<0){vw=word_num(t2[0..nw]);}
+    if(vw>=0){
+        a_put(ps,2,1);
+        a_put(ps,3,vw as i32);
+        a_put(ps,4,0);
+        z_free(t2);
+        return 0;
+    }
+    // otherwise longest unit suffix whose remainder is a number ("3sec",
+    // "six_months"). "thirty" must NOT read "y" as years ("thirt" is not a
+    // number -> keep scanning shorter suffixes).
+    let tbl:[]u8="seconds|second|minutes|minute|hours|months|years|secs|mins|hrs|days|weeks|wks|month|mos|sec|min|day|hour|week|year|yrs|hr|wk|mo|yr|s|d|w|y";
+    let p:i32=0;
+    let st:i32=0;
+    while(p<=tbl.len){
+        if(p==tbl.len || (tbl[p] as i32)==124){
+            let sl:i32=p-st;
+            if(sl>0 && sl<tok.len){
+                let k:i32=0;
+                let ok:i32=1;
+                while(k<sl){if(tok[tok.len-sl+k]!=tbl[st+k]){ok=0;break;}k=k+1;}
+                if(ok==1){
+                    let nl:i32=deunder(tok[0..tok.len-sl],t2);
+                    let v:i64=parse_dec(t2[0..nl]);
+                    if(v<0){v=word_num(t2[0..nl]);}
+                    if(v>=0){
+                        a_put(ps,2,1);
+                        a_put(ps,3,v as i32);
+                        a_put(ps,4,unit_code_for(tbl[st..p]));
+                        z_free(t2);
+                        return 0;
+                    }
+                }
+            }
+            st=p+1;
+        }
+        p=p+1;
+    }
+    // unreachable: whole-token parse at the top already covered the bare-count case.
+    z_free(t2);
+    return -1;
+}
+
+// ==================== proposition parser ====================
+// Recursive descent; writes canonical form into out (lowercased names,
+// UPPERCASE operator keywords). Canonicalizations:
+//   AFTER(x,y) -> BEFORE(y,x);  NOT(NOT(P)) -> P;
+//   word numbers/digits -> decimal; quantities -> converted values + unit.
+// Returns 0 ok, -1 parse error.
+fn unit_mult(u:i32)i64{
+    if(u==2){return 60;}
+    if(u==3){return 3600;}
+    if(u==4){return 86400;}
+    if(u==5){return 604800;}
+    if(u==6){return 2592000;}
+    if(u==7){return 31536000;}
+    return 1;
+}
+fn unit_name(u:i32)[]u8{
+    if(u==1){return "sec";}
+    if(u==2){return "min";}
+    if(u==3){return "hr";}
+    if(u==4){return "day";}
+    if(u==5){return "wk";}
+    if(u==6){return "mo";}
+    if(u==7){return "yr";}
+    return "count";
+}
+// range literal "22_to_33" / "between_22_and_33" -> ps slots 6,7,8 (lo,hi,unit). 1 ok / 0 fail.
+fn parse_range_lit(tok:[]u8,ps:[]u8,tmp:[]u8)i32{
+    let a:[]u8="";
+    let b:[]u8="";
+    if(z_starts(tok,"between_")==1){
+        let rest:[]u8=tok[8..];
+        let pi:i32=z_find(rest,"_and_");
+        if(pi<0){return 0;}
+        a=rest[0..pi];
+        b=rest[pi+5..];
+    }else{
+        let pi:i32=z_find(tok,"_to_");
+        if(pi<0){return 0;}
+        a=tok[0..pi];
+        b=tok[pi+4..];
+    }
+    if(parse_qty_value(a,ps,tmp)!=0){return 0;}
+    if(a_get(ps,2)==0){return 0;}
+    let va:i32=a_get(ps,3);
+    let ua:i32=a_get(ps,4);
+    if(parse_qty_value(b,ps,tmp)!=0){return 0;}
+    if(a_get(ps,2)==0){return 0;}
+    let vb:i32=a_get(ps,3);
+    let ub:i32=a_get(ps,4);
+    if(ua!=ub){return 0;}
+    a_put(ps,6,va);
+    a_put(ps,7,vb);
+    a_put(ps,8,ua);
+    return 1;
+}
+fn parse_prop(s:[]u8,ps:[]u8,out:[]u8,tmp:[]u8)i32{
+    ps_skip(s,ps);
+    let nl:i32=ps_ident(s,ps,tmp);
+    if(nl<0){return -1;}
+    let nm:[]u8=tmp[0..nl];
+    ps_skip(s,ps);
+    let p:i32=a_get(ps,0);
+    if(p>=s.len || (s[p] as i32)!=40){
+        // bare identifier -> 0-arg atom
+        app_s(out,ps,nm);
+        app_s(out,ps,"()");
+        return 0;
+    }
+    a_put(ps,0,p+1);
+    // ---- NOT / MAYBE ----
+    if(z_eq(nm,"not")==1){
+        let o0:i32=a_get(ps,1);
+        app_s(out,ps,"not(");
+        if(parse_prop(s,ps,out,tmp)!=0){return -1;}
+        if(ps_expect(s,ps,41)==0){return -1;}
+        app_s(out,ps,")");
+        let ost:i32=a_get(ps,1);
+        // NOT(NOT(X)) -> X : inner region out[o0+4 .. ost-1]
+        if(ost-o0>9){
+            let inner:[]u8=out[o0+4..ost-1];
+            if(z_starts(inner,"not(")==1){
+                let n:i32=ost-o0-10;
+                mv_left(out,o0,o0+8,n);
+                a_put(ps,1,o0+n);
+            }
+        }
+        return 0;
+    }
+    if(z_eq(nm,"maybe")==1){
+        app_s(out,ps,"maybe(");
+        if(parse_prop(s,ps,out,tmp)!=0){return -1;}
+        if(ps_expect(s,ps,41)==0){return -1;}
+        app_s(out,ps,")");
+        return 0;
+    }
+    // ---- CAUSE / IF ----
+    if(z_eq(nm,"cause")==1 || z_eq(nm,"if")==1){
+        if(z_eq(nm,"cause")==1){app_s(out,ps,"cause(");}else{app_s(out,ps,"if(");}
+        if(parse_prop(s,ps,out,tmp)!=0){return -1;}
+        if(ps_expect(s,ps,44)==0){return -1;}
+        app_s(out,ps,",");
+        if(parse_prop(s,ps,out,tmp)!=0){return -1;}
+        if(ps_expect(s,ps,41)==0){return -1;}
+        app_s(out,ps,")");
+        return 0;
+    }
+    // ---- ALL / SOME / NONE ----
+    if(z_eq(nm,"all")==1 || z_eq(nm,"some")==1 || z_eq(nm,"none")==1){
+        if(z_eq(nm,"all")==1){app_s(out,ps,"all(");}
+        if(z_eq(nm,"some")==1){app_s(out,ps,"some(");}
+        if(z_eq(nm,"none")==1){app_s(out,ps,"none(");}
+        let dl:i32=ps_ident(s,ps,tmp);
+        if(dl<0){return -1;}
+        app_s(out,ps,tmp[0..dl]);
+        if(ps_expect(s,ps,44)==0){return -1;}
+        app_s(out,ps,",");
+        if(parse_prop(s,ps,out,tmp)!=0){return -1;}
+        if(ps_expect(s,ps,41)==0){return -1;}
+        app_s(out,ps,")");
+        return 0;
+    }
+    // ---- BEFORE / AFTER (AFTER(x,y) -> BEFORE(y,x)) ----
+    if(z_eq(nm,"before")==1 || z_eq(nm,"after")==1){
+        let is_after:i32=z_eq(nm,"after");
+        let xl:i32=ps_ident(s,ps,tmp);
+        if(xl<0){return -1;}
+        let sv:[]u8=z_alloc(64);
+        if(sv.len==0){return -1;}
+        let k:i32=0;
+        while(k<xl){sv[k]=tmp[k];k=k+1;}
+        if(ps_expect(s,ps,44)==0){z_free(sv);return -1;}
+        let yl:i32=ps_ident(s,ps,tmp);
+        if(yl<0){z_free(sv);return -1;}
+        if(ps_expect(s,ps,41)==0){z_free(sv);return -1;}
+        app_s(out,ps,"before(");
+        if(is_after==1){
+            app_s(out,ps,tmp[0..yl]);
+            app_s(out,ps,",");
+            app_s(out,ps,sv[0..xl]);
+        }else{
+            app_s(out,ps,sv[0..xl]);
+            app_s(out,ps,",");
+            app_s(out,ps,tmp[0..yl]);
+        }
+        app_s(out,ps,")");
+        z_free(sv);
+        return 0;
+    }
+    // ---- QTY ----
+    if(z_eq(nm,"qty")==1){
+        app_s(out,ps,"qty(");
+        let tl:i32=ps_ident(s,ps,tmp);
+        if(tl<0){return -1;}
+        app_s(out,ps,tmp[0..tl]);
+        if(ps_expect(s,ps,44)==0){return -1;}
+        app_s(out,ps,",");
+        let ml:i32=ps_ident(s,ps,tmp);
+        if(ml<0){return -1;}
+        let md:[]u8=tmp[0..ml];
+        let mo:i32=0;
+        if(z_eq(md,"exactly")==1){mo=1;}
+        if(z_eq(md,"range")==1){mo=2;}
+        if(z_eq(md,"at_least")==1){mo=3;}
+        if(z_eq(md,"at_most")==1){mo=4;}
+        if(z_eq(md,"more_than")==1){mo=5;}
+        if(z_eq(md,"less_than")==1){mo=6;}
+        if(mo==0){return -1;}
+        app_s(out,ps,md);
+        app_s(out,ps,",");
+        if(ps_expect(s,ps,44)==0){return -1;}
+        let lo:i64=0;
+        let hi:i64=0;
+        let uc:i32=0;
+        if(mo==2){
+            let v1l:i32=ps_ident(s,ps,tmp);
+            if(v1l<0){return -1;}
+            let v1:[]u8=z_alloc(64);
+            if(v1.len==0){return -1;}
+            let k:i32=0;
+            while(k<v1l){v1[k]=tmp[k];k=k+1;}
+            ps_skip(s,ps);
+            let pp:i32=a_get(ps,0);
+            if(pp<s.len && (s[pp] as i32)==44){
+                a_put(ps,0,pp+1);
+                let v2l:i32=ps_ident(s,ps,tmp);
+                if(v2l<0){z_free(v1);return -1;}
+                if(ps_expect(s,ps,41)==0){z_free(v1);return -1;}
+                if(parse_qty_value(v1[0..v1l],ps,tmp)!=0){z_free(v1);return -1;}
+                if(a_get(ps,2)==0){z_free(v1);return -1;}
+                let qv1:i32=a_get(ps,3);
+                let qu1:i32=a_get(ps,4);
+                if(parse_qty_value(tmp[0..v2l],ps,tmp)!=0){z_free(v1);return -1;}
+                if(a_get(ps,2)==0){z_free(v1);return -1;}
+                let qv2:i32=a_get(ps,3);
+                let qu2:i32=a_get(ps,4);
+                z_free(v1);
+                if(qu1!=qu2){return -1;}
+                uc=qu1;
+                lo=(qv1 as i64)*unit_mult(uc);
+                hi=(qv2 as i64)*unit_mult(uc);
+            }else{
+                if(ps_expect(s,ps,41)==0){z_free(v1);return -1;}
+                if(parse_range_lit(v1[0..v1l],ps,tmp)==0){z_free(v1);return -1;}
+                z_free(v1);
+                uc=a_get(ps,8);
+                lo=(a_get(ps,6) as i64)*unit_mult(uc);
+                hi=(a_get(ps,7) as i64)*unit_mult(uc);
+            }
+        }else{
+            let vl:i32=ps_ident(s,ps,tmp);
+            if(vl<0){return -1;}
+            if(ps_expect(s,ps,41)==0){return -1;}
+            if(parse_qty_value(tmp[0..vl],ps,tmp)!=0){return -1;}
+            if(a_get(ps,2)==0){return -1;}
+            uc=a_get(ps,4);
+            let vv:i64=(a_get(ps,3) as i64)*unit_mult(uc);
+            lo=vv;
+            hi=vv;
+        }
+        if(mo==1){app_i64(out,ps,lo);app_s(out,ps,",");app_i64(out,ps,hi);}
+        if(mo==2){app_i64(out,ps,lo);app_s(out,ps,",");app_i64(out,ps,hi);}
+        if(mo==3){app_i64(out,ps,lo);app_s(out,ps,",");app_s(out,ps,"INF");}
+        if(mo==4){app_s(out,ps,"-INF");app_s(out,ps,",");app_i64(out,ps,hi);}
+        if(mo==5){app_i64(out,ps,lo);app_s(out,ps,",");app_s(out,ps,"INF");}
+        if(mo==6){app_s(out,ps,"-INF");app_s(out,ps,",");app_i64(out,ps,hi);}
+        app_s(out,ps,",");
+        // unit class: bare counts stay "count"; every time unit is converted
+        // to seconds above, so all of them canonicalize to "sec".
+        if(uc==0){app_s(out,ps,"count");}else{app_s(out,ps,"sec");}
+        app_s(out,ps,")");
+        return 0;
+    }
+    // ---- atom: PRED(arg1,arg2,...) ----
+    app_s(out,ps,nm);
+    app_s(out,ps,"(");
+    ps_skip(s,ps);
+    let pz:i32=a_get(ps,0);
+    if(pz<s.len && (s[pz] as i32)==41){
+        // 0-arg atom: PRED()
+        a_put(ps,0,pz+1);
+        app_s(out,ps,")");
+        return 0;
+    }
+    let first:i32=1;
+    while(1==1){
+        let al:i32=ps_ident(s,ps,tmp);
+        if(al<0){return -1;}
+        if(first==0){app_s(out,ps,",");}
+        app_s(out,ps,tmp[0..al]);
+        first=0;
+        ps_skip(s,ps);
+        let pp:i32=a_get(ps,0);
+        if(pp>=s.len){return -1;}
+        let ch:i32=s[pp] as i32;
+        if(ch==44){a_put(ps,0,pp+1);continue;}
+        if(ch==41){a_put(ps,0,pp+1);break;}
+        return -1;
+    }
+    app_s(out,ps,")");
+    return 0;
+}
+
+// ==================== rule machinery ====================
+// Proposition kind from canonical prefix:
+//   1 not, 2 cause, 3 qty, 4 all, 5 some, 6 none, 7 if, 8 maybe, 9 before, 0 atom
+fn pkind(c:[]u8)i32{
+    if(z_starts(c,"not(")==1){return 1;}
+    if(z_starts(c,"cause(")==1){return 2;}
+    if(z_starts(c,"qty(")==1){return 3;}
+    if(z_starts(c,"all(")==1){return 4;}
+    if(z_starts(c,"some(")==1){return 5;}
+    if(z_starts(c,"none(")==1){return 6;}
+    if(z_starts(c,"if(")==1){return 7;}
+    if(z_starts(c,"maybe(")==1){return 8;}
+    if(z_starts(c,"before(")==1){return 9;}
+    return 0;
+}
+// inner of NOT(p), or "" when not a negation
+fn is_not(c:[]u8)[]u8{
+    if(z_starts(c,"not(")==1 && c.len>5 && c[c.len-1]==41){return c[4..c.len-1];}
+    return "";
+}
+// slice inside the outermost parens ("" when malformed)
+fn pin(c:[]u8)[]u8{
+    let o:i32=z_find(c,"(");
+    if(o<0 || c.len<2 || c[c.len-1]!=41){return "";}
+    return c[o+1..c.len-1];
+}
+// split s on top-level commas; stores (off,len) pairs in parts (2 slots each);
+// returns part count (capped storage at maxn).
+fn split_top(s:[]u8,parts:[]u8,maxn:i32)i32{
+    let n:i32=0;
+    let st:i32=0;
+    let depth:i32=0;
+    let i:i32=0;
+    while(i<s.len){
+        let ch:i32=s[i] as i32;
+        if(ch==40){depth=depth+1;}
+        if(ch==41){depth=depth-1;}
+        if(ch==44 && depth==0){
+            if(n<maxn){a_put(parts,2*n,st);a_put(parts,2*n+1,i-st);}
+            n=n+1;
+            st=i+1;
+        }
+        i=i+1;
+    }
+    if(n<maxn){a_put(parts,2*n,st);a_put(parts,2*n+1,s.len-st);}
+    n=n+1;
+    return n;
+}
+fn spart(s:[]u8,parts:[]u8,k:i32)[]u8{
+    let o:i32=a_get(parts,2*k);
+    let l:i32=a_get(parts,2*k+1);
+    return s[o..o+l];
+}
+// R-NEG-DENY: P vs NOT(P), structurally, either direction.
+// A top-level MAYBE hedge asserts nothing, so it can neither be denied
+// nor deny: the rule does not fire when either side is hedged.
+fn r_neg_deny(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)==8 || pkind(e)==8){return 0;}
+    let ic:[]u8=is_not(c);
+    if(ic.len>0 && z_eq(ic,e)==1){return 1;}
+    let ie:[]u8=is_not(e);
+    if(ie.len>0 && z_eq(ie,c)==1){return 1;}
+    return 0;
+}
+// R-IDENT-AFFIRM: structurally identical (MAYBE never affirms)
+fn r_ident_affirm(c:[]u8,e:[]u8)i32{
+    if(pkind(c)==8 || pkind(e)==8){return 0;}
+    return z_eq(c,e);
+}
+// R-CAU-AFFIRM: claim q vs CAUSE(r,q), with a SUBSTANTIVE reason.
+// A vacuous reason (NOT(...), MAYBE(...), IF(...)) asserts nothing positive,
+// so an adversarial evidence author could otherwise install any claim q via
+// CAUSE(NOT(anything),q). The reason must be a non-vacuous asserted
+// proposition: atom, qty, temporal, causal, or quantified.
+fn r_cau_affirm(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)==2 || pkind(e)!=2){return 0;}
+    let pe:[]u8=pin(e);
+    if(split_top(pe,parts,2)!=2){return 0;}
+    let r:[]u8=spart(pe,parts,0);
+    let rk:i32=pkind(r);
+    if(rk==1 || rk==7 || rk==8){return 0;}
+    let q:[]u8=spart(pe,parts,1);
+    return z_eq(q,c);
+}
+// R-CAU-DENY: claim q vs CAUSE(r, NOT(q))
+fn r_cau_deny(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)==2 || pkind(e)!=2){return 0;}
+    let pe:[]u8=pin(e);
+    if(split_top(pe,parts,2)!=2){return 0;}
+    let q:[]u8=spart(pe,parts,1);
+    let iq:[]u8=is_not(q);
+    if(iq.len>0 && z_eq(iq,c)==1){return 1;}
+    return 0;
+}
+// R-CAU-PROP-DENY: claim CAUSE(r,q) vs NOT(r) / NOT(q) / CAUSE(r,NOT(q))
+fn r_cau_prop_deny(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)!=2){return 0;}
+    let pc:[]u8=pin(c);
+    if(split_top(pc,parts,2)!=2){return 0;}
+    let r:[]u8=spart(pc,parts,0);
+    let q:[]u8=spart(pc,parts,1);
+    let ie:[]u8=is_not(e);
+    if(ie.len>0){
+        if(z_eq(ie,r)==1){return 1;}
+        if(z_eq(ie,q)==1){return 1;}
+        return 0;
+    }
+    if(pkind(e)==2){
+        let pe:[]u8=pin(e);
+        if(split_top(pe,parts,2)!=2){return 0;}
+        let r2:[]u8=spart(pe,parts,0);
+        let q2:[]u8=spart(pe,parts,1);
+        if(z_eq(r2,r)==1){
+            let iq:[]u8=is_not(q2);
+            if(iq.len>0 && z_eq(iq,q)==1){return 1;}
+        }
+    }
+    return 0;
+}
+// R-QNT-DENY: ALL vs SOME NOT / NONE vs SOME / ALL vs NONE / SOME vs ALL NOT
+fn r_qnt_deny(c:[]u8,e:[]u8,parts:[]u8)i32{
+    let q1:i32=pkind(c);
+    let q2:i32=pkind(e);
+    if(q1<4 || q1>6 || q2<4 || q2>6){return 0;}
+    let pc:[]u8=pin(c);
+    if(split_top(pc,parts,2)!=2){return 0;}
+    let dom1:[]u8=spart(pc,parts,0);
+    let body1:[]u8=spart(pc,parts,1);
+    let pe:[]u8=pin(e);
+    if(split_top(pe,parts,2)!=2){return 0;}
+    let dom2:[]u8=spart(pe,parts,0);
+    let body2:[]u8=spart(pe,parts,1);
+    if(z_eq(dom1,dom2)==0){return 0;}
+    let ib1:[]u8=is_not(body1);
+    let pol1:i32=0;
+    let pb1:[]u8=body1;
+    if(ib1.len>0){pol1=1;pb1=ib1;}
+    let ib2:[]u8=is_not(body2);
+    let pol2:i32=0;
+    let pb2:[]u8=body2;
+    if(ib2.len>0){pol2=1;pb2=ib2;}
+    if(z_eq(pb1,pb2)==0){return 0;}
+    if(q1==4 && pol1==0 && q2==5 && pol2==1){return 1;}
+    if(q1==5 && pol1==1 && q2==4 && pol2==0){return 1;}
+    if(q1==6 && pol1==0 && q2==5 && pol2==0){return 1;}
+    if(q1==5 && pol1==0 && q2==6 && pol2==0){return 1;}
+    if(q1==4 && pol1==0 && q2==6 && pol2==0){return 1;}
+    if(q1==6 && pol1==0 && q2==4 && pol2==0){return 1;}
+    if(q1==5 && pol1==0 && q2==4 && pol2==1){return 1;}
+    if(q1==4 && pol1==1 && q2==5 && pol2==0){return 1;}
+    return 0;
+}
+fn parse_i64(t:[]u8)i64{
+    if(t.len==0){return 0;}
+    let neg:i32=0;
+    let i:i32=0;
+    if(t[0]==45){neg=1;i=1;}
+    let v:i64=0;
+    while(i<t.len){
+        let b:i32=t[i] as i32;
+        if(z_isdig(b)==0){return 0;}
+        v=v*10+(b-48) as i64;
+        i=i+1;
+    }
+    if(neg==1){v=0-v;}
+    return v;
+}
+fn qty_bound(t:[]u8)i64{
+    if(z_eq(t,"INF")==1){return 4000000000000000000;}
+    if(z_eq(t,"-INF")==1){return -4000000000000000000;}
+    return parse_i64(t);
+}
+// R-QTY: 0 none / 1 DENY (disjoint) / 2 AFFIRM (evidence interval ⊆ claim)
+fn r_qty(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)!=3 || pkind(e)!=3){return 0;}
+    let pc:[]u8=pin(c);
+    if(split_top(pc,parts,5)!=5){return 0;}
+    let thing_c:[]u8=spart(pc,parts,0);
+    let mode_c:[]u8=spart(pc,parts,1);
+    let lo_c:[]u8=spart(pc,parts,2);
+    let hi_c:[]u8=spart(pc,parts,3);
+    let unit_c:[]u8=spart(pc,parts,4);
+    let pe:[]u8=pin(e);
+    if(split_top(pe,parts,5)!=5){return 0;}
+    let thing_e:[]u8=spart(pe,parts,0);
+    let mode_e:[]u8=spart(pe,parts,1);
+    let lo_e:[]u8=spart(pe,parts,2);
+    let hi_e:[]u8=spart(pe,parts,3);
+    let unit_e:[]u8=spart(pe,parts,4);
+    if(z_eq(thing_c,thing_e)==0){return 0;}
+    if(z_eq(unit_c,unit_e)==0){return 0;}
+    let clo:i64=qty_bound(lo_c);
+    let chi:i64=qty_bound(hi_c);
+    let elo:i64=qty_bound(lo_e);
+    let ehi:i64=qty_bound(hi_e);
+    let clo_o:i32=0;
+    let chi_o:i32=0;
+    let elo_o:i32=0;
+    let ehi_o:i32=0;
+    if(z_eq(mode_c,"more_than")==1){clo_o=1;}
+    if(z_eq(mode_c,"less_than")==1){chi_o=1;}
+    if(z_eq(mode_e,"more_than")==1){elo_o=1;}
+    if(z_eq(mode_e,"less_than")==1){ehi_o=1;}
+    // disjoint?
+    if(chi<elo){return 1;}
+    if(chi==elo && (chi_o==1 || elo_o==1)){return 1;}
+    if(ehi<clo){return 1;}
+    if(ehi==clo && (ehi_o==1 || clo_o==1)){return 1;}
+    // evidence ⊆ claim ?
+    let lok:i32=0;
+    if(clo<elo){lok=1;}
+    if(clo==elo && elo_o>=clo_o){lok=1;}
+    let hik:i32=0;
+    if(ehi<chi){hik=1;}
+    if(ehi==chi && ehi_o>=chi_o){hik=1;}
+    if(lok==1 && hik==1){return 2;}
+    return 0;
+}
+// R-TMP-DENY: BEFORE(x,y) vs BEFORE(y,x), x != y (AFTER canonicalized away)
+fn r_tmp_deny(c:[]u8,e:[]u8,parts:[]u8)i32{
+    if(pkind(c)!=9 || pkind(e)!=9){return 0;}
+    let pc:[]u8=pin(c);
+    if(split_top(pc,parts,2)!=2){return 0;}
+    let x1:[]u8=spart(pc,parts,0);
+    let y1:[]u8=spart(pc,parts,1);
+    let pe:[]u8=pin(e);
+    if(split_top(pe,parts,2)!=2){return 0;}
+    let x2:[]u8=spart(pe,parts,0);
+    let y2:[]u8=spart(pe,parts,1);
+    if(z_eq(x1,y1)==1){return 0;}
+    if(z_eq(x1,y2)==1 && z_eq(y1,x2)==1){return 1;}
+    return 0;
+}
+fn rid_name(rid:i32,ob:[]u8,ps:[]u8)void{
+    if(rid==1){app_s(ob,ps,"R-NEG-DENY");return;}
+    if(rid==2){app_s(ob,ps,"R-CAU-DENY");return;}
+    if(rid==3){app_s(ob,ps,"R-CAU-PROP-DENY");return;}
+    if(rid==4){app_s(ob,ps,"R-QNT-DENY");return;}
+    if(rid==5){app_s(ob,ps,"R-QTY-DENY");return;}
+    if(rid==6){app_s(ob,ps,"R-TMP-DENY");return;}
+    if(rid==7){app_s(ob,ps,"R-IDENT-AFFIRM");return;}
+    if(rid==8){app_s(ob,ps,"R-CAU-AFFIRM");return;}
+    if(rid==9){app_s(ob,ps,"R-QTY-AFFIRM");return;}
+    if(rid==10){app_s(ob,ps,"R-COND-MP");return;}
+    app_s(ob,ps,"R-?");
+    return;
+}
+// append rid unless already present; returns new count
+fn fire(fr:[]u8,nf:i32,rid:i32)i32{
+    let i:i32=0;
+    while(i<nf){if((fr[i] as i32)==rid){return nf;}i=i+1;}
+    fr[nf]=rid as u8;
+    return nf+1;
+}
+
+// ==================== driver ====================
+fn process_line(line:[]u8,ps:[]u8,cbuf:[]u8,ebase:[]u8,elens:[]u8,fr:[]u8,ob:[]u8,tmp:[]u8,parts:[]u8)void{
+    // NOTE (audit item 12 / oracle containment): only fields 0..2 are read.
+    // Field 3 (oracle) is never parsed; the scorer is a separate process.
+    let fp:[]u8=z_alloc(72);
+    if(fp.len==0){return;}
+    let nf0:i32=0;
+    let st0:i32=0;
+    let i0:i32=0;
+    while(i0<line.len){
+        if((line[i0] as i32)==9){
+            if(nf0<8){a_put(fp,2*nf0,st0);a_put(fp,2*nf0+1,i0-st0);}
+            nf0=nf0+1;
+            st0=i0+1;
+        }
+        i0=i0+1;
+    }
+    if(nf0<8){a_put(fp,2*nf0,st0);a_put(fp,2*nf0+1,line.len-st0);}
+    nf0=nf0+1;
+    if(nf0<3){z_free(fp);return;}
+    let id:[]u8=line[a_get(fp,0)..a_get(fp,0)+a_get(fp,1)];
+    let cl:[]u8=line[a_get(fp,2)..a_get(fp,2)+a_get(fp,3)];
+    let ev:[]u8=line[a_get(fp,4)..a_get(fp,4)+a_get(fp,5)];
+    z_free(fp);
+    // claim -> canonical (opaque fallback keeps the engine total)
+    a_put(ps,0,0);
+    a_put(ps,1,0);
+    if(parse_prop(cl,ps,cbuf,tmp)!=0){
+        a_put(ps,1,0);
+        app_s(cbuf,ps,"lit(");
+        app_s(cbuf,ps,cl);
+        app_s(cbuf,ps,")");
+    }
+    let clen:i32=a_get(ps,1);
+    let ccan:[]u8=cbuf[0..clen];
+    // evidence props -> canonical slots
+    let ne:i32=0;
+    let es:i32=0;
+    let j:i32=0;
+    while(j<=ev.len){
+        let isend:i32=0;
+        if(j==ev.len){isend=1;}
+        else{if((ev[j] as i32)==59){isend=1;}}
+        if(isend==1 && ne<8 && j>es){
+            let ep:[]u8=ev[es..j];
+            let eb:[]u8=ebase[ne*4096..ne*4096+4096];
+            a_put(ps,0,0);
+            a_put(ps,1,0);
+            if(parse_prop(ep,ps,eb,tmp)!=0){
+                a_put(ps,1,0);
+                app_s(eb,ps,"lit(");
+                app_s(eb,ps,ep);
+                app_s(eb,ps,")");
+            }
+            a_put(elens,ne,a_get(ps,1));
+            ne=ne+1;
+        }
+        if(isend==1){es=j+1;}
+        j=j+1;
+    }
+    // ---- rule evaluation ----
+    let nfr:i32=0;
+    let deny:i32=0;
+    let aff:i32=0;
+    let k:i32=0;
+    while(k<ne){
+        let el:i32=a_get(elens,k);
+        let e:[]u8=ebase[k*4096..k*4096+el];
+        let dr:i32=0;
+        if(r_neg_deny(ccan,e,parts)==1){nfr=fire(fr,nfr,1);deny=1;dr=1;}
+        if(dr==0 && r_cau_deny(ccan,e,parts)==1){nfr=fire(fr,nfr,2);deny=1;dr=1;}
+        if(dr==0 && r_cau_prop_deny(ccan,e,parts)==1){nfr=fire(fr,nfr,3);deny=1;dr=1;}
+        if(dr==0 && r_qnt_deny(ccan,e,parts)==1){nfr=fire(fr,nfr,4);deny=1;dr=1;}
+        if(dr==0){
+            let qr:i32=r_qty(ccan,e,parts);
+            if(qr==1){nfr=fire(fr,nfr,5);deny=1;dr=1;}
+            if(qr==2){nfr=fire(fr,nfr,9);aff=1;}
+        }
+        if(dr==0 && r_tmp_deny(ccan,e,parts)==1){nfr=fire(fr,nfr,6);deny=1;dr=1;}
+        if(r_ident_affirm(ccan,e)==1){nfr=fire(fr,nfr,7);aff=1;}
+        if(r_cau_affirm(ccan,e,parts)==1){nfr=fire(fr,nfr,8);aff=1;}
+        k=k+1;
+    }
+    // R-COND-MP: IF(a,b) + separate evidence prop == a, with b == claim
+    let m1:i32=0;
+    let mp_done:i32=0;
+    while(m1<ne && mp_done==0){
+        let e1:[]u8=ebase[m1*4096..m1*4096+a_get(elens,m1)];
+        if(pkind(e1)==7){
+            let pe1:[]u8=pin(e1);
+            if(split_top(pe1,parts,2)==2){
+                let aa:[]u8=spart(pe1,parts,0);
+                let bb:[]u8=spart(pe1,parts,1);
+                if(z_eq(bb,ccan)==1){
+                    let m2:i32=0;
+                    while(m2<ne){
+                        if(m2!=m1){
+                            let e2:[]u8=ebase[m2*4096..m2*4096+a_get(elens,m2)];
+                            if(z_eq(e2,aa)==1){nfr=fire(fr,nfr,10);aff=1;mp_done=1;break;}
+                        }
+                        m2=m2+1;
+                    }
+                }
+            }
+        }
+        m1=m1+1;
+    }
+    let tag:i32=0;
+    if(aff==1){tag=1;}
+    if(deny==1){tag=2;}
+    a_put(ps,1,0);
+    app_s(ob,ps,id);
+    app_s(ob,ps," ");
+    app_b(ob,ps,48+tag);
+    let f:i32=0;
+    while(f<nfr){
+        if(f==0){app_s(ob,ps," ");}else{app_s(ob,ps,";");}
+        rid_name(fr[f] as i32,ob,ps);
+        f=f+1;
+    }
+    app_b(ob,ps,10);
+    _zag_print(ob[0..a_get(ps,1)]);
+    return;
+}
+fn main()i32{
+    let path:[]u8=_zag_arg(1);
+    if(path.len==0){
+        _zag_println("usage: logic <input.tsv>");
+        return 2;
+    }
+    let data:[]u8=read_all(path);
+    if(data.len==0){
+        _zag_println("logic: cannot read input");
+        return 3;
+    }
+    let ps:[]u8=z_alloc(128);
+    let cbuf:[]u8=z_alloc(8192);
+    let ebase:[]u8=z_alloc(32768);
+    let elens:[]u8=z_alloc(64);
+    let fr:[]u8=z_alloc(64);
+    let ob:[]u8=z_alloc(8192);
+    let tmp:[]u8=z_alloc(512);
+    let parts:[]u8=z_alloc(128);
+    if(ps.len==0 || cbuf.len==0 || ebase.len==0 || elens.len==0){return 4;}
+    if(fr.len==0 || ob.len==0 || tmp.len==0 || parts.len==0){return 4;}
+    let n:i32=data.len;
+    let i:i32=0;
+    let ls:i32=0;
+    while(i<=n){
+        let eol:i32=0;
+        if(i==n){eol=1;}
+        else{if((data[i] as i32)==10){eol=1;}}
+        if(eol==1){
+            let le:i32=i;
+            if(le>ls && (data[le-1] as i32)==13){le=le-1;}
+            if(le>ls){process_line(data[ls..le],ps,cbuf,ebase,elens,fr,ob,tmp,parts);}
+            ls=i+1;
+        }
+        i=i+1;
+    }
+    return 0;
+}
