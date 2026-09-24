@@ -6,8 +6,12 @@ Exit 1 + 'SWEEP FAIL' listing every hit otherwise.
 """
 import re, sys, pathlib
 
-CUR = pathlib.Path.home() / "workspace/tnn-lab/rsi/autonomous_run_2/work/curriculum"
-BAT = pathlib.Path.home() / "workspace/tnn-lab/rsi/autonomous_run_2/work/verify_battery"
+HERE = pathlib.Path(__file__).resolve().parent
+RUN2 = HERE.parent
+TEACH = RUN2 / "work" / "teach"
+CUR = TEACH / "curriculum"
+BAT = TEACH / "scenarios"
+KEYS_FILE = TEACH / "keys.txt"
 
 # Fixed substrings, case-insensitive
 FIXED_CI = ["ask-first", "askfirst", "N-clean", "O-clean", "ADV-OLD",
@@ -42,7 +46,7 @@ def check_file(path, skip_digit=False):
     return hits
 
 def main():
-    targets = sorted(CUR.glob("lesson_*.txt")) + sorted(BAT.glob("scenario_*.txt")) + [BAT / "keys.txt"]
+    targets = sorted(CUR.glob("*.txt")) + sorted(BAT.glob("V*.txt")) + [KEYS_FILE]
     assert targets, "no targets"
     # F-CORE cross-check note: every F-CORE token above must be non-empty by construction.
     failed = False

@@ -285,11 +285,11 @@ def main():
     fixed_ci, token_ci, token_cs = build_fcore()
     print(f"F-CORE: {len(fixed_ci)} fixed, {len(token_ci)} ci-tokens, {len(token_cs)} cs-tokens",
           file=sys.stderr)
-    cur = RUN2 / "work/curriculum"
-    bat = RUN2 / "work/verify_battery"
-    targets = sorted(cur.glob("lesson_*.txt")) + sorted(bat.glob("scenario_*.txt"))
+    cur = RUN2 / "work/teach/curriculum"
+    bat = RUN2 / "work/teach/scenarios"
+    targets = sorted(cur.glob("*.txt")) + sorted(bat.glob("V*.txt"))
     # keys.txt: phrase/token checks apply, digit rule does not (D-TEACH §7.3)
-    key_path = bat / "keys.txt"
+    key_path = RUN2 / "work/teach/keys.txt"
     failed = False
     for t in targets:
         hits = check_file(t, fixed_ci, token_ci, token_cs)
