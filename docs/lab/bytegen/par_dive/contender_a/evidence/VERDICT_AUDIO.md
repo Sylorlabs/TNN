@@ -17,6 +17,8 @@
 | **COST** wall (6 interleaved, s32 mix) | median **6.40 s** | median **4.38 s** | **NATIVE WINS** (~46%) |
 | **RT-LONG** (cue 440, nominal 880) | **440.00 Hz, +0.00 cents** | 453.75 Hz, +53.27 cents | **A WINS** |
 | **RT-LONG** near-miss (nominal 460) | **440.00 Hz, +0.00 cents** | — | A ignores nominal |
+| **RT-LONG** glide cue (+1200c glide) | plan resolves **440 Hz**; sine renders 439.50 Hz (-1.97c) | — | glide can't confuse formation |
+| **RT-LONG** vibrato cue (5.5 Hz) | plan resolves **440 Hz** | — | vibrato can't confuse formation |
 | **RT-CASCADE** single-bit @3s, post-cut diffs | **0 / 1,190,699** | 5,791 | **A WINS** |
 | **RT-CASCADE** burst @10s | pre 0, win 44,100/44,100, post **0** | — | A: zero cascade |
 | **RT-CASCADE** dropout @10s | pre 0, win 44,098/44,100, post **0** | — | A: zero cascade (2 clean-zeros) |
