@@ -31,3 +31,29 @@ Note: ws2/RUNLOG.md belongs to WS2-A; this is the WS2-B log.
 - Implement src/toc.zag (pure Zag, @import lib.zag), build with pinned znc.
 - Run primary battery (51) + maintenance leg (7); grade; 3x determinism.
 - Diagnose misses individually; measure bill; write WS2B_PRELIM.md; verdict.
+
+## 2026-09-24 — Implementation complete, evaluation complete
+
+### Critical bug fixed: insertion-sort position clobber
+- All 6 insertion sorts used `else { b=-1; }` to break the inner loop,
+  which destroyed the insertion position. Fixed with a separate `done` flag.
+- Also fixed: 3-field query parser (text from field 2, not field 1);
+  tok_set_low lowercasing contract enforced at call sites.
+
+### Evaluation results
+- Official battery (51): 46/51. T-exact 45/45 PASS. T-para 1/6 (QP04 via stemming).
+  - 5 misses (QP01,02,03,05,06): all P-PARA with zero token overlap (verified
+    by validate_battery.py). 4 correctly abstained, 1 false positive (QP05
+    via token "before").
+- Maintenance leg (7): 7/7 PASS (install/revise/delete all verified).
+- Total: 53/58.
+- Determinism: 3 clean reruns byte-identical (SHA-256 verified).
+
+### Bill
+- ToC disk: 33 items 6,930B; 36 install 7,557B; 36 revise 7,577B; 35 delete 7,368B.
+- Ops (official after 51 lookups): toc_rd=15843 toc_wr=310 kw_build=33 agg_re=23
+  item_rd=2 item_wr=33 score=1143.
+
+### Verdict
+ADOPT with iteration. 100% on all retrievable probes. P-PARA misses are
+vocabulary-gap (expected per battery spec), not mechanism bugs.
