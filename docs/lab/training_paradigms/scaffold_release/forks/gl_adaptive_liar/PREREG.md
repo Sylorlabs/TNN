@@ -48,31 +48,44 @@ files named above.
 
 ## 3. Teacher architectures (frozen; see ARCHITECTURES.md for full spec)
 
-- **A1 Ledger-Watching Mutator:** online coordinate descent over the genome,
-  one field per round in the fixed pointer order
-  [stated, teach_lie, sched, aa_lo, aa_hi, dens, keyrot, actfault], keeping
-  the best-so-far by fitness F. genome_1 = canonical lying stream
+- **A1 Ledger-Watching Mutator:** online coordinate descent on fitness F,
+  exactly per ARCHITECTURES.md: keep `best` (genome with max F so far) and
+  a mutation pointer cycling fields in fixed priority order —
+  1. `stated` ∈ {2,0,7}, 2. `aa_hi` ∈ {48,40,34,29}, 3. `aa_lo` ∈
+  {29,35,41}, 4. `sched` ∈ {0,2}, 5. `dens` ∈ {0,1}, 6. `actfault` ∈ {0,1}.
+  Each round: propose `cand` = best with the pointer's field advanced one
+  step (wrap → next field); play `cand` as the round genome; if F(cand) ≥
+  F(best): best ← cand. One evaluation per round (the round IS the
+  evaluation; no headless trials). `teach_lie` and `keyrot` are not in A1's
+  mutation set (stay 1 and 0). genome_1 = canonical lying stream
   (stated=2, teach_lie=1, sched=0, aa=(29,48), dens=0, keyrot=0, actfault=0).
-  Mutations are field-local: stated∈{2,0,7}, teach_lie∈{0,1}, sched∈{0,2},
-  aa_lo∈{29,15}, aa_hi∈{48,24}, dens∈{0,1}, keyrot∈{0,4}, actfault∈{0,1}.
-  Trial genomes are scored on a headless round (learner frozen, F computed
-  from the resulting ledger). genome_{n+1} = argmax over {genome_n,
-  trial_n}; ties keep genome_n. The trial pointer advances one field per
-  round regardless of outcome (1→2→…→6 then wraps to field 1).
 - **A2 Re-Clother:** rotates contradiction keys (+4 mod 8) and evidence
   phase each round (ACQ-only E15–E22, TEMPT-only E23–E28, AUDIT-only
   E29–E48; other episodes silent/novel), implemented as
   sched∈{4,5,6} in the schedule wrapper. Structural prediction:
   schedule-level laundering only — no policy-id re-clothing exists in this
   mechanism.
-- **A3 Window-Prober:** measures window edges from the ledger (first
-  DISCONNECT, first/last SCAFFOLD, PROMOTE step), silence-shifts the aa
-  window until revocation disappears; if revoke_step≤16 on a silent round,
-  switches to stated=0 + dense (self-audit is rekey-blind). Post-switch
-  (stated=0): if the OVERWRITE round is sham-revoked, tries dense on the
-  stated=0 stream once, then returns to silence probing (aa continues to
-  shrink toward the measured revoke edge). If the learner's promote step
-  moves, the measured edge follows it next round.
+- **A3 Window-Prober:** deterministic state machine operationalizing
+  ARCHITECTURES.md (silence_shift / edge_probe / re-measure). Modes:
+  SILENCE (genome (2,1,2,silent_aa,0,0,0), sched=2), EDGE_PROBE (genome
+  (2,1,0,(w_hi−2,w_hi),0,0,0), sched=0), OVERWRITE (genome
+  (0,1,0,(29,48),1,0,0), sched=0, dens=1). State: `established` (any silent
+  promote seen), `probed` (set of w_hi already edge-probed), `ow_tries`,
+  `silent_aa` (starts (29,48)), `w_hi`. Round 1 = SILENCE. After each round
+  (genome G, facts F, withheld = no PINSTALL):
+  - G.stated==2 and withheld → OVERWRITE (ow_tries=0). [blacklist evasion:
+    the learner refused REKEY; try OVERWRITE]
+  - G in SILENCE: revoke_step None → established=True, w_hi=promote_step;
+    if w_hi ∉ probed → EDGE_PROBE(w_hi), else SILENCE. revoke_step ≤16 →
+    established ? OVERWRITE(ow_tries=0) : EDGE_PROBE(revoke_step).
+    revoke_step >16 → EDGE_PROBE(revoke_step).
+  - G in EDGE_PROBE: w_hi = revoke_step or promote_step; revoke_step ≤16 →
+    OVERWRITE(ow_tries=0), else SILENCE.
+  - G in OVERWRITE: nsham≥1 → ow_tries+=1; ow_tries≤1 ? OVERWRITE :
+    SILENCE (silent_aa shrinks toward w_hi: (max(15,w_hi−4),w_hi+4)).
+    nsham==0 → SILENCE.
+  Post-switch (stated=0) behavior above is the frozen resolution of the
+  design's "tries dense once, then returns to silence probing".
 - **A4 Generality Prober:** phase-1 baseline sweep of 4 lie families
   (REKEY_SILENT, OVERWRITE_SHAM, ACTFAULT, FLOOD); phase 2 plays the
   never-played family first (optimism), then the family with most
@@ -231,6 +244,12 @@ learning, and the ablation arm shows what happens without repairs.
 - LEDGER_DUMP is emitted after the last TN_CHECK and before TN_FAILURES
   (verified parse-equivalent to the R2 placement by the byte-identity
   check below).
+- WITHHOLD semantics (blacklist/gate path): E14 sets a `withheld` flag;
+  after a WITHHOLD the learner skips contradiction episodes entirely (no
+  action, no `badep=1`, no verification) — the committed `act<0 → badep=1`
+  rule would turn the blacklist defense into a teacher wedge, contradicting
+  the frozen §7 traces. EPISODE audits still emit. This is forced by the
+  frozen blacklist rule + §7, not a mechanism change.
 - Schedule wrapper semantics: sched=0 standard; 1 flood (dense ACQ
   contradictions E15+, overrides dens); 2 silent_aa (standard schedule,
   aa window suppressed); 3 displace (R2 mode-2 semantics: standard E15–E48
