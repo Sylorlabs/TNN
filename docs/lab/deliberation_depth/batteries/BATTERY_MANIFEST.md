@@ -142,4 +142,4 @@ that would leak the verdict; the trace is recorded in `provenance` only).
 
 Committed to branch `tnn-native-lab` under
 `docs/lab/deliberation_depth/batteries/` via `commit_racefree.py`
-(lab-relative paths). Commit SHA: _TBD_.
+(lab-relative paths). Commit SHA: da5f56216049c83b729766e4eb77320e0c44609c.
