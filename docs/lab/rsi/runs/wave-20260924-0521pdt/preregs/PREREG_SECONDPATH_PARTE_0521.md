@@ -192,10 +192,10 @@ tnn-native-lab-wave-archive-20260923-2321pdt,
 docs/lab/rsi/runs/wave-20260923-2321pdt/preregs/PREREG_SECONDPATH_PARTE.md).
 S10 addendum commit: fb307a1b7
 (docs/lab/rsi/runs/wave-20260924-0221pdt/preregs/ADDENDUM_SECONDPATH_PARTE_PBAGREE.md).
-Re-freeze commit of this file: RECORDED_BELOW (filled in by the
-SHA-record commit that immediately follows this re-freeze; both
-commits contain only this file and both strictly precede this
-wave's first implementation commit).
+Re-freeze commit of this file: 7a0f69b62565adffff901551e2a5f879e0f7eecc
+(filled in by the SHA-record commit that immediately follows this
+re-freeze; both commits contain only this file and both strictly
+precede this wave's first implementation commit).
 PB-AGREE bound: "disagrees with path A on at most 5% of fixtures =
 500 bp", resolved per the addendum; the 5000 bp reading is retired
 and may not appear as a bound.
