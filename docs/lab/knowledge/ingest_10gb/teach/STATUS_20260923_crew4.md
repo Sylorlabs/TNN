@@ -28,16 +28,27 @@ confirmed the teach invocation form.
 ## Commits (crew 4)
 - `f5c3fb26` (tnn-native-lab): STATUS_20260923_crew4.md, job_wiki_crew4.sh,
   merge_run1_zag.sh under knowledge/ingest_10gb/teach/.
+- `e5abb692` (tnn-native-lab): merge_run2_zag.sh, run2_clean.sh, STATUS update.
+- `a7cdb741` (tnn-native-lab): STATUS update (daemon restart, en14 resume).
 
-### IN PROGRESS (updated 2026-09-24 04:37 UTC)
-- **Wiki splits** (job_wiki_crew4.sh, restarted after daemon restart killed the
-  first run at en14=24,136 files):
-  en14/17/19/22/24/26/27 sequential + en1 resume (skip=13942 start=13942,
-  precondition verified: 13,942 contiguous files en1_n00000000..en1_n00013941)
-  + consolidate → stage/wiki_in + batched clean → stage/wiki_run1.
-  Log: logs/wiki_splits_crew4.log. Resume verified: en14 files 0..24135
-  contiguous and well-formed; script correctly detected "have 24136 pages".
-  NOTE: `grep ^en1` falsely matches en14_ files; use find -name "en1_n*.xml".
+## RESUME INSTRUCTIONS (for next crew / after restart)
+
+If job_wiki_crew4.sh is not running:
+1. Check progress: `tail -3 ~/workspace/scratch_10gb_work/logs/wiki_splits_crew4.log`
+2. Verify existing files are contiguous (per stem): the script auto-resumes by
+   counting `find $OUT -name "${stem}_n*.xml" | wc -l` and passing as skip/start.
+3. Simply re-run: `~/workspace/scratch_10gb_work/job_wiki_crew4.sh` (background).
+   It handles: en14/17/19/22/24/26/27 splits → en1 resume → consolidate →
+   batched clean → stage/wiki_run1.
+4. WARNING: `grep ^en1` falsely matches en14_ files. Use `find -name "en1_n*.xml"`.
+
+### IN PROGRESS (updated 2026-09-24 05:10 UTC)
+- **Wiki splits** (job_wiki_crew4.sh running):
+  en14 at 24,136 files (resume from daemon restart; in skip phase, will start
+  writing new files once it passes page 24,136).
+  Remaining: en14 (partial), en17, en19, en22, en24, en26, en27, en1 resume,
+  consolidate, clean. This is a ~40h long pole at ~7 pages/sec.
+  Log: logs/wiki_splits_crew4.log.
 
 ### Benchmark (crew 4)
 New split_wiki.py (read-accumulation) on en14 bz2: 934 pages / 180s = 5.2/sec —
@@ -71,16 +82,15 @@ bottleneck. Decision: leave en9 (PID 1880) undisturbed; no restart benefit.
   stage/se_math_run1/facts.dat (in progress), stage/wiki_run1/facts.dat (todo)
 
 ## Next steps (for crew 4 continuation or crew 5)
-1. Wait for math (sub010-017) → merge sub-shards are produced by clean_batched
-   automatically (final streaming k-way merge at end).
-2. Wait for en9 (PID 1880) → run job_wiki_crew4.sh (sequential, ~long pole).
-3. Merge run-1: merge_run1_zag.sh → facts_run1.dat (+SHA). Python cross-check
-   if time permits.
-4. Run-2: repeat ALL cleanings independently (fresh out dirs *_run2), merge,
-   require SHA(facts_run2.dat)==SHA(facts_run1.dat).
-5. Teach ×2 (teach_store.sh pattern), diff -r stores, record installed/rejected.
-6. panswer ×2, diff answers.tsv, score_panswer.py, autopsy, new connections.
-7. Commit deliverables to tnn-native-lab under knowledge/ingest_10gb/teach/
+1. Wiki splits running (job_wiki_crew4.sh). Wait for completion (~40h).
+   If killed, re-run the script (it auto-resumes). See RESUME INSTRUCTIONS above.
+2. After wiki splits + clean → stage/wiki_run1/facts.dat exists:
+   Run merge_run1_zag.sh → facts_run1.dat (+SHA). Python cross-check if time.
+3. Run-2: run2_clean.sh (repeats all 8 cleanings to *_r2 dirs), then
+   merge_run2_zag.sh (merges + requires SHA facts_run2 == facts_run1).
+4. Teach ×2 (teach_store.sh pattern), diff -r stores, record installed/rejected.
+5. panswer ×2, diff answers.tsv, score_panswer.py, autopsy, new connections.
+6. Commit deliverables to tnn-native-lab under knowledge/ingest_10gb/teach/
    (commit_racefree.py or commit_big_files.py, TMPDIR=~/workspace/tmp_commit).
 
 ## Box discipline
