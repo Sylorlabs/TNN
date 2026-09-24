@@ -1,0 +1,22 @@
+# H0 ground truth (all TRUE claims)
+
+- H0-01: H0-01 calibration beacon activated 2026-09-20
+- H0-02: H0-02 reference mass weighs 12 kilograms
+- H0-03: H0-03 sensor array has 48 active nodes
+- H0-04: 300 meters of cable laid for H0-04 beacon link
+- H0-05: H0-05 chamber held -40 degrees for 6 hours
+- H0-06: H0-06 pressure vessel tested at 101 kilopascals
+- H0-07: 7 antennas mounted on H0-07 relay mast
+- H0-08: H0-08 recorder captured 256 samples
+- H0-09: H0-09 power bus delivers 24 volts
+- H0-10: H0-10 beacon needs 15 minute warmup
+- H0-11: 3 backup copies of H0-11 configuration
+- H0-12: H0-12 calibration cycle repeats every 90 days
+- H0-13: H0-13 transmitter reached 5 kilometers
+- H0-14: 18 bolts tightened on H0-14 mounting frame
+- H0-15: H0-15 cooling loop holds 2 liters of coolant
+- H0-16: H0-16 unit completed 72 hour soak test
+- H0-17: H0-17 amplifier provides 9 decibels gain
+- H0-18: 4 second delay between H0-18 trigger and beacon pulse
+- H0-19: 60 hertz hum from H0-19 transformer
+- H0-20: H0-20 log archive holds 1000 pages
