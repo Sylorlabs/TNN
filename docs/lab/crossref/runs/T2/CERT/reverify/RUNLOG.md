@@ -44,3 +44,53 @@ Agree/diverge stated in VERIFY.md. No Tier-3 work was redone.
 - reverify/VERIFY.md, reverify/RUNLOG.md, reverify/evidence/{tally2_run1.out,
   plant_nio_urandom.zag, plant_attest_PASS.json, results_tsv.sha256}
   (to be committed via commit_racefree.py; binaries excluded)
+
+## 2026-09-24 — RV2 + RV3 corrective completion (follow-up commit)
+
+Prereg: 5f067515 (frozen; adopted, committed alone pre-implementation).
+
+### RV2 — symbol gap proven at toolchain level
+- Pinned-znc builds of `nio_open_readonly`/`_zag_rand` callers abort with
+  "native: call to unknown function" for each; full dirty1 variation.zag build
+  aborts with both errors at plant_urandom line 102. Neither symbol in the
+  vendored R33_NATIVE_IO_V1.zag. dirty1 binary unreproducible — VERIFIED AS
+  DESCRIBED. Original plant.bin absent from lab tree (search negative).
+- Deterministic shim (_zag_rand=42, raw-syscall nio_open_readonly) builds;
+  3x byte-identical outputs c524e5f2b... but NOT a reproduction (semantics changed;
+  plant_urandom is dead code in the committed source; certifier flagged the
+  _zag_rand source token, R6a, not behavior).
+- Battery scan: dirty1_urandom is the ONLY module with unresolvable references
+  (plant11 defines its own deterministic _zag_rand — no gap; dirty2/3/5, r1: 0 hits).
+
+### RV3 — 5-plant red team + rngscan second leg
+- gen_plants.py (deterministic glue) built 14 cases: P1 empty, P2 4MiB/4MiB+1,
+  P3 truncated-ev/runs7/ident0/bad-manifest, P4 missing-module/-evidence/-manifest,
+  P5 128/129 manifest entries + binary at/over 33,554,431 cap.
+- run_rv3.py ran each 3x old + 3x new with pinned thincert binaries.
+- Result: 0 flips. 13/14 agree exactly (verdict + byte-identical attestations);
+  P4c: both exit 2 (no manifest -> usage-IO), no attestation.
+- P5a_128 / P5b_129: thincert_old CRASHES ("invalid or double free", no
+  attestation); thincert_new PASS/FAIL-correct. Bisect: PASS<=64, crash>=70,
+  follows manifest count not builddir count.
+- White-box: old binary's manifest tables = 3 consecutive same-size
+  `as []i32` casts (thincert_orig.zag:763-765) = exact ZNC-2026-09-21-007 trigger.
+  Minimal probe on pinned toolchain PROVES 2nd/3rd casts' slots 0-2 alias the
+  previous array's slots 65-67 (layout-dependent offset; 2026-09-21 probe saw 9-11).
+  At <=65 entries the aliased slots are uninitialized heap (historical verdicts
+  survived by allocator luck); at >=66 entries live values crash the heap.
+  thincert_new (arena transform) immune at 128 entries.
+- Historical impact: NONE. Largest historical manifest: 2 M/S entries; no
+  historical row changes class. Instrument-robustness divergence, not a verdict
+  flip. Reported plainly in VERIFY.md.
+- rngscan leg: rs1_empty FAIL both (vendored BAD), rs2_clean PASS both
+  (fixed module with valid deterministic vary_expr), rs3_badev FAIL both
+  (1 REPLAY hit). All 3x deterministic, all agreeing.
+
+### Kill-bar disposition: RV-CONFIRM
+RV1 (35,0,34,0,0,1) re-derived; RV2 gap proven with failed-build evidence;
+RV3 0 flips. The 0-flips claim REPRODUCES; dirty1 gap VERIFIED AS DESCRIBED.
+
+Evidence committed: reverify/evidence/{rv2_symbol_gap.txt, rv3_summary.tsv,
+rv3_p5a_crash.txt, thincert_full_digests.txt, rngscan_digests.txt, gen_plants.py,
+run_rv3.py, bisect_crash.py, bisect2_crash.py} + updated VERIFY.md/RUNLOG.md.
+No binaries committed.
