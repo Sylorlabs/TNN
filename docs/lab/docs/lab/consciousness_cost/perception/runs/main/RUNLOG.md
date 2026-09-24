@@ -1,0 +1,46 @@
+# three-arm battery run log
+
+- F1 omission/om_p1.pcm: SAME conf=285 ops=5583041 resense=0 wall=1.830s rss=16332KB bi=True errs=none
+- F1 omission/om_p2.pcm: SAME conf=285 ops=5583041 resense=0 wall=2.223s rss=16332KB bi=True errs=none
+- F1 omission/om_p3.pcm: SAME conf=285 ops=5583041 resense=0 wall=3.010s rss=16332KB bi=True errs=none
+- F1 omission/om_p4.pcm: HIGHER conf=951 ops=5583041 resense=0 wall=2.465s rss=16332KB bi=True errs=none
+- F1 omission/om_t1.pcm: PURE conf=272 ops=2824296 resense=0 wall=1.307s rss=16332KB bi=True errs=none
+- F1 omission/om_t2.pcm: BRIGHT conf=491 ops=2824296 resense=0 wall=2.245s rss=16332KB bi=True errs=none
+- F1 inattentional/ib_m1.vid: E conf=500 ops=28674 resense=0 wall=0.209s rss=16332KB bi=True errs=none
+- F1 inattentional/ib_m2.vid: W conf=789 ops=28674 resense=0 wall=0.384s rss=16332KB bi=True errs=none
+- F1 ambiguity/am_p1.pcm: HIGHER conf=19 ops=5583041 resense=0 wall=3.439s rss=16332KB bi=True errs=none
+- F1 ambiguity/am_c1.img: DIFFERENT conf=16 ops=4097 resense=0 wall=0.403s rss=16332KB bi=True errs=none
+- F1 illusion/il_c1.img: DIFFERENT conf=90 ops=4097 resense=0 wall=0.500s rss=16332KB bi=True errs=none
+- F1 illusion/il_c2.img: SAME_SURFACE conf=555 ops=4097 resense=0 wall=0.440s rss=16332KB bi=True errs=none
+- F1 redteam/rt_p1.pcm: SAME conf=2 ops=5583041 resense=0 wall=4.498s rss=16332KB bi=True errs=none
+- F1 redteam/rt_c1.img: SAME conf=16 ops=4097 resense=0 wall=0.308s rss=16332KB bi=True errs=none
+- F2 omission/om_p1.pcm: HIGHER conf=1000 ops=8188 resense=1 wall=0.080s rss=16332KB bi=True errs=none
+- F2 omission/om_p2.pcm: LOWER conf=1000 ops=8188 resense=1 wall=0.077s rss=16332KB bi=True errs=none
+- F2 omission/om_p3.pcm: SAME conf=886 ops=10236 resense=1 wall=0.088s rss=16332KB bi=True errs=none
+- F2 omission/om_p4.pcm: HIGHER conf=1000 ops=10236 resense=1 wall=0.149s rss=16332KB bi=True errs=none
+- F2 omission/om_t1.pcm: BRIGHT conf=1000 ops=8956 resense=1 wall=0.057s rss=16332KB bi=True errs=none
+- F2 omission/om_t2.pcm: BRIGHT conf=1000 ops=4861 resense=0 wall=0.100s rss=16332KB bi=True errs=none
+- F2 inattentional/ib_m1.vid: W conf=1000 ops=43008 resense=1 wall=0.338s rss=16332KB bi=True errs=none
+- F2 inattentional/ib_m2.vid: W conf=1000 ops=67584 resense=1 wall=0.422s rss=16332KB bi=True errs=none
+- F2 ambiguity/am_p1.pcm: HIGHER conf=22 ops=20476 resense=1 wall=0.088s rss=16332KB bi=True errs=none
+- F2 ambiguity/am_c1.img: DIFFERENT conf=25 ops=19456 resense=1 wall=0.042s rss=16332KB bi=True errs=none
+- F2 illusion/il_c1.img: SAME_SURFACE conf=1000 ops=16384 resense=1 wall=0.050s rss=16332KB bi=True errs=none
+- F2 illusion/il_c2.img: DIFFERENT conf=1000 ops=16384 resense=1 wall=0.020s rss=16332KB bi=True errs=none
+- F2 redteam/rt_p1.pcm: SAME conf=886 ops=20476 resense=1 wall=0.092s rss=16332KB bi=True errs=none
+- F2 redteam/rt_c1.img: SAME conf=300 ops=19456 resense=1 wall=0.041s rss=16332KB bi=True errs=none
+- F3 omission/om_p1.pcm: HIGHER conf=1000 ops=10236 resense=1 wall=0.063s rss=16332KB bi=True errs=none
+- F3 omission/om_p2.pcm: LOWER conf=1000 ops=10236 resense=1 wall=0.072s rss=16332KB bi=True errs=none
+- F3 omission/om_p3.pcm: SAME conf=1000 ops=10236 resense=1 wall=0.052s rss=16332KB bi=True errs=none
+- F3 omission/om_p4.pcm: HIGHER conf=1000 ops=10236 resense=1 wall=0.127s rss=16332KB bi=True errs=none
+- F3 omission/om_t1.pcm: BRIGHT conf=1000 ops=17147 resense=1 wall=0.013s rss=16332KB bi=True errs=none
+- F3 omission/om_t2.pcm: BRIGHT conf=1000 ops=4861 resense=0 wall=0.017s rss=16332KB bi=True errs=none
+- F3 inattentional/ib_m1.vid: W conf=1000 ops=67584 resense=1 wall=0.290s rss=16332KB bi=True errs=none
+- F3 inattentional/ib_m2.vid: W conf=1000 ops=67584 resense=1 wall=0.339s rss=16332KB bi=True errs=none
+- F3 ambiguity/am_p1.pcm: HIGHER conf=22 ops=10236 resense=1 wall=0.080s rss=16332KB bi=True errs=none
+- F3 ambiguity/am_c1.img: DIFFERENT conf=25 ops=13312 resense=1 wall=0.034s rss=16332KB bi=True errs=none
+- F3 illusion/il_c1.img: SAME_SURFACE conf=1000 ops=24576 resense=1 wall=0.130s rss=16332KB bi=True errs=none
+- F3 illusion/il_c2.img: SAME_SURFACE conf=875 ops=24576 resense=1 wall=0.053s rss=16332KB bi=True errs=none
+- F3 redteam/rt_p1.pcm: SAME conf=90 ops=10236 resense=1 wall=0.026s rss=16332KB bi=True errs=none
+- F3 redteam/rt_c1.img: SAME conf=25 ops=13312 resense=1 wall=0.072s rss=16332KB bi=True errs=none
+
+byte-identical failures: 0
