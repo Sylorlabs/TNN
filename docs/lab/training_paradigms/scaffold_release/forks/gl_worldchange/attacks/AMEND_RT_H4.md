@@ -110,7 +110,7 @@ LEDGER — the raw audit ledger is ground truth, the index is derived.
 ## A-RT4. Methodology (frozen for this crew)
 
 - Attack streams are pure Zag, deterministic, zero RNG. `rt_streams.zag`
-  defines `rt_stream(sid,ep,out)` for sids 10–13, 20–22, 30–35 in the frozen
+  defines `rt_stream(sid,ep,out)` for sids 10–13, 20–23, 30–35 in the frozen
   `WcEp` schema; sids <10 delegate to the frozen `wc_stream`.
 - Per-target drivers link the target's committed substrate/mechanism with
   the attack episodes. Where the target's episode policy is reimplemented
@@ -132,12 +132,32 @@ LEDGER — the raw audit ledger is ground truth, the index is derived.
 - M0: KB-WC1 SURVIVES on V1–V5 (no history machinery; trust −1 on V1–V4 from
   the E2-style eliminations; V5: A never installed). RT-WC2 W1/W2: trust
   damage −1 expected (M0 punishes the honest update itself — the echo is
-  moot, per BASELINE_M0 §4). Sid 22: M0 installs B at E13 honest world;
-  unauthenticated E12 corroboration is inert (B not yet announced... actually
-  B WAS announced at E11; E12 WORLD(k1,B) matches the quarantined contestant
-  → check what M0 does: E11 UPDATE→CONTEST quarantines B; E12 WORLD(k1,B):
-  installed is still A, cur=A≠B → CONTEST + eliminative sequence revokes A
-  as lie, installs B. So M0 installs B on the ADVERSARY's E12 echo — the
-  reverse exploit WORKS against M0: unauthenticated evidence drives the
-  install one episode early). RT-WC3: all NULL (surface absent).
+  moot, per BASELINE_M0 §4). Sid 22: E11 UPDATE→CONTEST quarantines B;
+  E12 WORLD(k1,B): installed is still A, cur=A≠B → CONTEST + eliminative
+  sequence revokes A as lie and installs B. So M0 installs B on the
+  ADVERSARY's E12 echo — the reverse exploit WORKS against M0:
+  unauthenticated evidence drives the install one episode early). RT-WC3: all NULL (surface absent).
+- Sid 23: M0 installs B at E12 on the adversary's sole confirmation, takes
+  trust −1 for revoking teacher-taught A; E13 honest WORLD(k1,A) then
+  re-revokes B (world-taught, no further trust cost) and reinstalls A.
+  Final q_now=A but trust=−1 manufactured purely by adversary evidence.
 - M1/M2: no predictions — targets not landed; blindness holds.
+
+## A-RT6. Addendum 2026-09-23 — sid 23, WC2-R3 sharp reverse (preregistered before execution)
+
+Sid 22 showed the adversary's pre-corroboration driving the install one
+episode early, but the honest world confirmed at E13 anyway, so the trust
+damage was unattributable. Sid 23 isolates attribution — **adversary-only
+confirmation, honest world dissents**:
+
+| sid | variant | episodes |
+|-----|---------|----------|
+| 23 | W3 sharp reverse: adversary manufactures a world-change | E1–10 honest A (odd `TEACH(k1,A)` / even `WORLD(k1,A)`); E11 `UPDATE(k1,A→B)`; E12 `WORLD(k1,B)` **unauthenticated** (adversary's sole confirmation — the honest world never says B); E13–20 `WORLD(k1,A)` (honest world: the change never happened) |
+
+Question: can unauthenticated WORLD evidence alone (a) drive the install of
+B and (b) manufacture trust damage against an honest teacher for a
+world-change that never occurred? A correct target: B never installed on
+adversary evidence alone (or installed provisionally and rolled back WITHOUT
+trust damage when the honest world dissents); trust ≥ 0 throughout; final
+`q_now(k1)=A`. Kill (reverse direction): trust < 0 caused by adversary-only
+evidence, or B held at end against the honest world's sustained dissent.
