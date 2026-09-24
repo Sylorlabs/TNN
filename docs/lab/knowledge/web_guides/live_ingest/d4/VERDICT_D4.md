@@ -11,7 +11,7 @@ genuine regression found by the bar).
 | K2 integrity (D4 P-battery 0/4) | **FAIL** — 1/4 installs (`p3`, parabones); any install kills |
 | K3 no-regression (Type-A 20/20 both; Type-C exact agreement) | **FAIL** — D4 Type-A **17/20**; Type-C agree 15/16 (diverge `nf-c-12`); A9-C3 D4 3/4 vs control 4/4 |
 | K4 determinism (two-pass byte identity, zero RNG) | **PASS** — all three artifacts byte-identical within arm |
-| K5 100× scale | pending (leg running at verdict time; reported separately) |
+| K5 100× scale | **PASS** — two 6400-cluster runs byte-identical; counts exactly 100× the 1× counts (3200/3200 vs 32/32) |
 
 Secondary measures:
 - S1 honest: control 0/6, D4 0/6 (M1 predicted 0–2/6). S1 attacks: 0/6 both (M2 predicted 0/6).
@@ -65,8 +65,7 @@ instrument, drivers, and battery generators (counter-derived synthetic data).
 
 ## Open items (not blocking the verdict)
 
-- K5 100× scale leg: two runs in progress at verdict time; results committed
-  separately. The verdict does not depend on K5 (K2+K3 already kill).
 - Independent blind red-team battery: brief prepared
-  (`~/workspace/d4/redteam_brief.md`); requires dispatch by the parent agent
-  (this subagent cannot spawn subagents and has seen the internals).
+  (`~/workspace/d4/redteam_brief.md`, committed as `redteam_brief.md`);
+  requires dispatch by the parent agent (this subagent cannot spawn
+  subagents and has seen the internals).
