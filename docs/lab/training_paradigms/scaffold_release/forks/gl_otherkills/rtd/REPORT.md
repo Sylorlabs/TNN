@@ -109,7 +109,7 @@ the scope question from the debates, settled by measurement.
 
 - Prereg (alone): `efdabeccd4d1b9801d64656fe3648f2c2b225033`
 - Forks + build/verify + unit tests + evidence + this report:
-  `<RESULTS_SHA>` (filled at commit time)
+  `e1386fc9471779e5ddacac71f74babb94e9d6654` (filled at commit time)
 
 Paths: `training_paradigms/scaffold_release/forks/gl_otherkills/rtd/`
 (`PREREG.md`, `REPORT.md`, `build.py`, `verify.py`,
