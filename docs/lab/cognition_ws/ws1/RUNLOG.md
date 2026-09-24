@@ -26,3 +26,7 @@
 ## Commits
 - 5e24c6e2 prereg + coordination note + RUNLOG (tnn-native-lab)
 - (pending) scripts + analysis + prelim + verdict + RUNLOG update
+
+## 2026-09-24 ~08:50 PDT — coordination + close
+- WS1-A active in shared workdir (PREREG_WS1A.md frozen 08:10 PDT): KB-control anomaly verification on FRESH batteries (cap x adv x rep, 18 cells), arms D1/D3/A2. No leg overlap with WS1-B. Their D3 arm covers the untrained-deliberation re-verification requested in WS1_COORDINATION.md.
+- Final commit: 77eedd0757faf5b31ebbdf7cb0972b0ba88b7ac8 (tnn-native-lab).
