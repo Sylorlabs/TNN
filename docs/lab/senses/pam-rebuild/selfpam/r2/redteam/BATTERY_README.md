@@ -11,15 +11,17 @@ All programs are pure Zag, zero RNG, pinned toolchain
 - `src/build_para.zag` — deterministic paraphrase/avalanche generator.
   Inputs: `battery/rules.tsv`, `battery/bases.tsv`.
   Outputs: `pairs_sm.tsv` (150), `pairs_ss.tsv` (150), `pairs_flip.tsv` (100),
-  `aval.tsv` (45 chains x 7 rows). No RNG; iteration order fixed.
+  `aval.tsv` (30 chains x 7 rows: A-001..A-015 grounded, A-016..A-030
+  confabulated, per frozen prereg §3 C-AVAL). No RNG; iteration order fixed.
 - `src/gen_trace.zag` — deterministic trace + ground-truth generator.
   Inputs: the 8 hand-authored ITEM files, STORE.tsv, pairs, aval, ANNOT, FAB.
-  Outputs: `TRACE.tsv` (1521 lines), `GT.tsv` (705 lines).
+  Outputs: `TRACE.tsv` (1521 lines), `GT.tsv` (690 lines: 660 item GT + 30 chain GTF).
 - `src/validate.zag` — pure-Zag battery validity checker. Run as
   `validate <battery-dir>`; prints VALIDATE_OK or VALIDATE_FAIL lines.
   Checks: exact counts, 5/7/4/6-field shapes, unique ids, label vocab,
   rule-id vocab per pair set, SS token edit distance <= 3 (Amendment 01),
-  avalanche 45x7 step ordering, STORE 40 WORLD + 10 GENERATOR,
+  avalanche 30x7 step ordering (A-001..A-015 grounded, A-016..A-030
+  confabulated; GTF labels STABLEF/CATCHF respectively), STORE 40 WORLD + 10 GENERATOR,
   TRACE id coverage + sequential steps, GT/ANNOT one-to-one coverage.
 - `src/manifest.zag` — pure-Zag manifest generator: MANIFEST.tsv with
   path, byte size, FNV-1a-32 per file. SHA256SUMS.txt is the external
