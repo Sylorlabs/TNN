@@ -1,0 +1,1092 @@
+// judge.zag — approach-A judgment logic as a library (no main).
+//
+// Verbatim-logic port of the six task functions from
+// docs/lab/senses/rebuild/a_raw/sense.zag. The ONLY changes vs the
+// committed source:
+//   - each task takes a view parameter selecting full or sub evidence:
+//       colordisc/colorconst/shapetrans: (rs, rstep) row start/stride.
+//         full = (0,1); P1 = (0,2); P2 = (1,2).
+//       pitchdisc: (off_a, cnt_a, off_b, cnt_b) quarter windows.
+//         full = tone halves; P1 = quarters (0,2); P2 = quarters (1,3).
+//       timbredisc: (off, sub) sample window. full = whole tone;
+//         P1 = first half; P2 = second half.
+//       motiondir: (t0, t1) frame-pair range. full = (1,nf);
+//         P1 = (1,nf/2); P2 = (nf/2,nf).
+//   - shapetrans scales the sampled area by rstep so the prototype
+//     ratios (1000/637/414) apply unchanged to strided views.
+//   - instead of writing key=value lines, each task returns -1 on error,
+//     else (jcode<<32)|confidence as i64.
+//
+// For the FULL view every line of arithmetic, every threshold, every
+// ops add, and every confidence formula is identical to a_raw/sense.zag,
+// so the baseline reproduces approach A exactly (verified by the
+// port-fidelity check in BUILD_LOG.md).
+//
+// Judgment codes:
+//   colordisc:  0=SAME 1=DIFFERENT
+//   colorconst: 0=SAME_SURFACE 1=DIFFERENT
+//   shapetrans: 0=CIRCLE 1=SQUARE 2=TRIANGLE
+//   pitchdisc:  0=SAME 1=HIGHER 2=LOWER
+//   timbredisc: 0=PURE 1=DARK 2=RICH 3=BRIGHT
+//   motiondir:  0=STILL 1=N 2=NE 3=E 4=SE 5=S 6=SW 7=W 8=NW
+
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------------- little-endian accessors over []u8 arenas ----------------
+fn t_put16(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+}
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get16(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8);
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn t_geti16(b:[]u8, at:i32) i64 {
+    let v:i64 = t_get16(b, at);
+    if(v >= 32768) { return v - 65536; }
+    return v;
+}
+
+// ---------------- ops counter (8-byte arena) ------------------------------
+fn op_add(op:[]u8, n:i64) void {
+    t_put64(op, 0, t_get64(op, 0) + n);
+}
+
+// ---------------- integer math -------------------------------------------
+fn isqrt(x:i64) i64 {
+    if(x <= 0) { return 0; }
+    if(x == 1) { return 1; }
+    let r:i64 = x;
+    if(r > 3037000499) { r = 3037000499; }
+    let y:i64 = (r + 1) / 2;
+    while(y < r) { r = y; y = (r + x / r) / 2; }
+    return r;
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn imin(a:i64, b:i64) i64 {
+    if(a < b) { return a; }
+    return b;
+}
+fn imax(a:i64, b:i64) i64 {
+    if(a > b) { return a; }
+    return b;
+}
+
+// ---------------- file IO -------------------------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+// Open a path read-only and read it whole. Returns bytes read or negative.
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+// Create/truncate a path and write bytes whole. Returns 0 or negative.
+fn z_write_new(path:[]u8, data:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7501; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 384, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7502; }
+    let w:i64 = nio_write_all(fd, data);
+    nio_close(fd);
+    if(w != data.len as i64) { return -7503; }
+    return 0;
+}
+
+// pack/unpack (jcode, confidence)
+fn j_pack(jc:i32, conf:i64) i64 {
+    return ((jc as i64) << 32) | (conf & 4294967295);
+}
+fn j_code(r:i64) i32 {
+    return (r >> 32) as i32;
+}
+fn j_conf(r:i64) i64 {
+    return r & 4294967295;
+}
+
+// sin(p) * 1024, p = turn in [0, 2^32). Table-free fixed-point Taylor with
+// quadrant folding. (Verbatim from a_raw/sense.zag.)
+fn ng_sin1024(p:i64) i64 {
+    let q:i64 = (p >> 30) & 3;
+    let fr:i64 = p & 1073741823;
+    let x:i64 = (fr * 1608) >> 30;
+    let xx:i64 = x;
+    if(q == 1 || q == 3) { xx = 1608 - x; }
+    let x2:i64 = xx * xx;
+    let term:i64 = xx;
+    let sum:i64 = xx;
+    let k:i64 = 1;
+    while(k <= 7) {
+        term = 0 - term * x2 / ((2 * k) * (2 * k + 1) * 1048576);
+        sum = sum + term;
+        k = k + 1;
+    }
+    if(q >= 2) { return 0 - sum; }
+    return sum;
+}
+
+// ---------------- audio helpers (verbatim) --------------------------------
+fn pcm_peak(buf:[]u8, off:i32, cnt:i32) i64 {
+    let p:i64 = 0;
+    let i:i32 = 0;
+    while(i < cnt) {
+        let s:i64 = iabs(t_geti16(buf, off + i * 2));
+        if(s > p) { p = s; }
+        i = i + 1;
+    }
+    return p;
+}
+fn harm_energy(buf:[]u8, off:i32, w:i32, sr:i64, f0m:i64, nhmax:i32, op:[]u8) i64 {
+    if(f0m <= 0 || w < 64) { return 0; }
+    let pinc1:i64 = f0m * 4294967296 / (1000 * sr);
+    if(pinc1 <= 0) { return 0; }
+    let tot:i64 = 0;
+    let h:i64 = 1;
+    while(h <= nhmax as i64) {
+        if(2 * h * f0m >= sr * 1000) { break; }
+        let pinc:i64 = h * pinc1;
+        let re:i64 = 0;
+        let im:i64 = 0;
+        let i:i32 = 0;
+        while(i < w) {
+            let s:i64 = t_geti16(buf, off + i * 2);
+            let p:i64 = ((i as i64) * pinc) & 4294967295;
+            re = re + s * ng_sin1024((p + 1073741824) & 4294967295) / 1024;
+            im = im + s * ng_sin1024(p) / 1024;
+            i = i + 1;
+        }
+        op_add(op, (2 * w) as i64);
+        tot = tot + (re * re + im * im) / 1048576;
+        h = h + 1;
+    }
+    return tot;
+}
+fn f0_robust(buf:[]u8, off:i32, cnt:i32, sr:i64, op:[]u8) i64 {
+    let w:i32 = cnt;
+    if(w > 2048) { w = 2048; }
+    if(w < 512) { return 0; }
+    let peak:i64 = pcm_peak(buf, off, w);
+    if(peak < 256) { return 0; }
+    let ms:i64 = 0;
+    let i:i32 = 0;
+    while(i < w) { ms = ms + t_geti16(buf, off + i * 2); i = i + 1; }
+    let mean:i64 = ms / (w as i64);
+    op_add(op, (2 * w) as i64);
+    let lmin:i32 = (sr / 2000) as i32;
+    if(lmin < 2) { lmin = 2; }
+    let lmax:i32 = (sr / 50) as i32;
+    if(lmax > w / 3) { lmax = w / 3; }
+    if(lmax < lmin + 2) { return 0; }
+    let nl:i32 = lmax - lmin + 3;
+    let ra:[]u8 = nio_alloc((nl * 8) as i32);
+    if(ra.len == 0) { return 0; }
+    let l:i32 = lmin - 1;
+    while(l <= lmax + 1) {
+        let acc:i64 = 0;
+        let nn:i32 = w - l;
+        let n:i32 = 0;
+        while(n < nn) {
+            let a:i64 = t_geti16(buf, off + n * 2) - mean;
+            let b:i64 = t_geti16(buf, off + (n + l) * 2) - mean;
+            acc = acc + a * b;
+            n = n + 1;
+        }
+        op_add(op, nn as i64);
+        t_put64(ra, (l - (lmin - 1)) * 8, acc);
+        l = l + 1;
+    }
+    let gmax:i64 = 0;
+    l = lmin;
+    while(l <= lmax) {
+        let r:i64 = t_get64(ra, (l - (lmin - 1)) * 8);
+        if(r > gmax) { gmax = r; }
+        l = l + 1;
+    }
+    let lstar:i32 = -1;
+    let r0:i64 = 0;
+    let rm:i64 = 0;
+    let rp:i64 = 0;
+    if(gmax > 0) {
+        l = lmin;
+        while(l <= lmax) {
+            let q0:i64 = t_get64(ra, (l - (lmin - 1)) * 8);
+            let qm:i64 = t_get64(ra, (l - 1 - (lmin - 1)) * 8);
+            let qp:i64 = t_get64(ra, (l + 1 - (lmin - 1)) * 8);
+            if(q0 >= qm && q0 >= qp && q0 * 2 >= gmax) {
+                lstar = l;
+                r0 = q0;
+                rm = qm;
+                rp = qp;
+                break;
+            }
+            l = l + 1;
+        }
+    }
+    nio_free(ra);
+    if(lstar < 0) { return 0; }
+    let den:i64 = 2 * (rm - 2 * r0 + rp);
+    let poff:i64 = 0;
+    if(den != 0) { poff = (rm - rp) * 1024 / den; }
+    if(poff < -512) { poff = -512; }
+    if(poff > 512) { poff = 512; }
+    let period_1024:i64 = (lstar as i64) * 1024 + poff;
+    if(period_1024 <= 0) { return 0; }
+    let f0c:i64 = sr * 1000 * 1024 / period_1024;
+    let best_k:i32 = -30;
+    let best_s:i64 = -1;
+    let k:i32 = -30;
+    while(k <= 30) {
+        let f0k:i64 = f0c + f0c * (k as i64) / 1000;
+        let s:i64 = harm_energy(buf, off, w, sr, f0k, 6, op);
+        if(s > best_s) { best_s = s; best_k = k; }
+        k = k + 1;
+    }
+    if(best_s <= 0) { return 0; }
+    let sm:i64 = harm_energy(buf, off, w, sr, f0c + f0c * ((best_k - 1) as i64) / 1000, 6, op);
+    let sp:i64 = harm_energy(buf, off, w, sr, f0c + f0c * ((best_k + 1) as i64) / 1000, 6, op);
+    let den2:i64 = 2 * (sm - 2 * best_s + sp);
+    let koff:i64 = 0;
+    if(den2 != 0) { koff = (sm - sp) * 1024 / den2; }
+    if(koff < -512) { koff = -512; }
+    if(koff > 512) { koff = 512; }
+    let f0m:i64 = f0c + f0c * ((best_k as i64) * 1024 + koff) / (1024 * 1000);
+    if(f0m <= 0) { return 0; }
+    let e0:i64 = harm_energy(buf, off, w, sr, f0m, 8, op);
+    let ehalf:i64 = harm_energy(buf, off, w, sr, f0m / 2, 16, op);
+    let edbl:i64 = harm_energy(buf, off, w, sr, f0m * 2, 4, op);
+    if(ehalf > e0 + e0 / 20) { return f0m / 2; }
+    if(edbl > e0 + e0 / 20) { return f0m * 2; }
+    return f0m;
+}
+
+// ================= KB4V2: f0_fast ========================================
+// Frozen per PREREG_KB4V2.md. Integer autocorrelation pitch estimator.
+// Identical to f0_robust through the parabolic refinement (stage 1), then
+// returns f0c directly. Deliberately OMITS stage 2 (61-point harmonic DFT
+// grid) and the octave/2x-3x guard. Ops counted at the same grain.
+fn f0_fast(buf:[]u8, off:i32, cnt:i32, sr:i64, op:[]u8) i64 {
+    let w:i32 = cnt;
+    if(w > 2048) { w = 2048; }
+    if(w < 512) { return 0; }
+    let peak:i64 = pcm_peak(buf, off, w);
+    if(peak < 256) { return 0; }
+    let ms:i64 = 0;
+    let i:i32 = 0;
+    while(i < w) { ms = ms + t_geti16(buf, off + i * 2); i = i + 1; }
+    let mean:i64 = ms / (w as i64);
+    op_add(op, (2 * w) as i64);
+    let lmin:i32 = (sr / 2000) as i32;
+    if(lmin < 2) { lmin = 2; }
+    let lmax:i32 = (sr / 50) as i32;
+    if(lmax > w / 3) { lmax = w / 3; }
+    if(lmax < lmin + 2) { return 0; }
+    let nl:i32 = lmax - lmin + 3;
+    let ra:[]u8 = nio_alloc((nl * 8) as i32);
+    if(ra.len == 0) { return 0; }
+    let l:i32 = lmin - 1;
+    while(l <= lmax + 1) {
+        let acc:i64 = 0;
+        let nn:i32 = w - l;
+        let n:i32 = 0;
+        while(n < nn) {
+            let a:i64 = t_geti16(buf, off + n * 2) - mean;
+            let b:i64 = t_geti16(buf, off + (n + l) * 2) - mean;
+            acc = acc + a * b;
+            n = n + 1;
+        }
+        op_add(op, nn as i64);
+        t_put64(ra, (l - (lmin - 1)) * 8, acc);
+        l = l + 1;
+    }
+    let gmax:i64 = 0;
+    l = lmin;
+    while(l <= lmax) {
+        let r:i64 = t_get64(ra, (l - (lmin - 1)) * 8);
+        if(r > gmax) { gmax = r; }
+        l = l + 1;
+    }
+    let lstar:i32 = -1;
+    let r0:i64 = 0;
+    let rm:i64 = 0;
+    let rp:i64 = 0;
+    if(gmax > 0) {
+        l = lmin;
+        while(l <= lmax) {
+            let q0:i64 = t_get64(ra, (l - (lmin - 1)) * 8);
+            let qm:i64 = t_get64(ra, (l - 1 - (lmin - 1)) * 8);
+            let qp:i64 = t_get64(ra, (l + 1 - (lmin - 1)) * 8);
+            if(q0 >= qm && q0 >= qp && q0 * 2 >= gmax) {
+                lstar = l;
+                r0 = q0;
+                rm = qm;
+                rp = qp;
+                break;
+            }
+            l = l + 1;
+        }
+    }
+    nio_free(ra);
+    if(lstar < 0) { return 0; }
+    let den:i64 = 2 * (rm - 2 * r0 + rp);
+    let poff:i64 = 0;
+    if(den != 0) { poff = (rm - rp) * 1024 / den; }
+    if(poff < -512) { poff = -512; }
+    if(poff > 512) { poff = 512; }
+    let period_1024:i64 = (lstar as i64) * 1024 + poff;
+    if(period_1024 <= 0) { return 0; }
+    return sr * 1000 * 1024 / period_1024;
+}
+
+// ================= KB4V2: T4 judgment =====================================
+// Frozen per PREREG_KB4V2.md. Uses f0_fast and the 5000 ppm contract
+// boundary (0.5% JND) instead of f0_robust and the 20000 ppm threshold.
+fn j_pitchdisc_kb4v2(buf:[]u8, n:i32, op:[]u8, off_a:i32, cnt_a:i32, off_b:i32, cnt_b:i32) i64 {
+    let sr:i32 = t_get32(buf, 0) as i32;
+    let cnt:i32 = t_get32(buf, 4) as i32;
+    if(sr < 1000 || sr > 192000) { return -1; }
+    if(cnt < 64 || (cnt % 2) == 1 || cnt > 4000000) { return -1; }
+    if(8 + (cnt as i64) * 2 > n as i64) { return -1; }
+    let end:i64 = 8 + (cnt as i64) * 2;
+    if(off_a < 8 || off_b < 8 || cnt_a < 1 || cnt_b < 1) { return -1; }
+    if((off_a as i64) + (cnt_a as i64) * 2 > end) { return -1; }
+    if((off_b as i64) + (cnt_b as i64) * 2 > end) { return -1; }
+    let fam:i64 = f0_fast(buf, off_a, cnt_a, sr as i64, op);
+    let fbm:i64 = f0_fast(buf, off_b, cnt_b, sr as i64, op);
+    if(fam <= 0 || fbm <= 0) { return -1; }
+    let d:i64 = iabs(fbm - fam) * 1000000 / imax(fam, 1);
+    op_add(op, 1);
+    let ji:i32 = 0;
+    if(d >= 5000 && fbm > fam) { ji = 1; }
+    if(d >= 5000 && fbm <= fam) { ji = 2; }
+    let mg:i64 = iabs(d - 5000);
+    return j_pack(ji, 1000 * mg / (mg + 50000));
+}
+
+// ================= TASK 1: colordisc =====================================
+// Verbatim logic; rows sampled as y = rs, rs+rstep, ... np counts sampled
+// patch pixels (full view: np = hw*h, identical to a_raw).
+fn j_colordisc(buf:[]u8, n:i32, op:[]u8, rs:i32, rstep:i32) i64 {
+    let w:i32 = t_get32(buf, 0) as i32;
+    let h:i32 = t_get32(buf, 4) as i32;
+    if(w < 2 || h < 1 || w > 4096 || h > 4096) { return -1; }
+    if((w % 2) == 1) { return -1; }
+    if(8 + (w as i64) * (h as i64) * 3 > n as i64) { return -1; }
+    if(rs < 0 || rstep < 1 || rs >= rstep) { return -1; }
+    let hw:i32 = w / 2;
+    let s1r:i64 = 0; let s1g:i64 = 0; let s1b:i64 = 0;
+    let s2r:i64 = 0; let s2g:i64 = 0; let s2b:i64 = 0;
+    let np:i64 = 0;
+    let y:i32 = rs;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < hw) {
+            let o1:i32 = 8 + (y * w + x) * 3;
+            s1r = s1r + (buf[o1] as i64);
+            s1g = s1g + (buf[o1+1] as i64);
+            s1b = s1b + (buf[o1+2] as i64);
+            let o2:i32 = 8 + (y * w + hw + x) * 3;
+            s2r = s2r + (buf[o2] as i64);
+            s2g = s2g + (buf[o2+1] as i64);
+            s2b = s2b + (buf[o2+2] as i64);
+            np = np + 1;
+            x = x + 1;
+        }
+        y = y + rstep;
+    }
+    if(np < 1) { return -1; }
+    op_add(op, 2 * np);
+    let m1r:i64 = s1r / np; let m1g:i64 = s1g / np; let m1b:i64 = s1b / np;
+    let m2r:i64 = s2r / np; let m2g:i64 = s2g / np; let m2b:i64 = s2b / np;
+    let dr:i64 = m1r - m2r; let dg:i64 = m1g - m2g; let db:i64 = m1b - m2b;
+    let dist:i64 = isqrt(dr*dr + dg*dg + db*db);
+    op_add(op, 1);
+    let ji:i32 = 0;
+    if(dist > 40) { ji = 1; }
+    let mg:i64 = iabs(dist - 40);
+    return j_pack(ji, 1000 * mg / (mg + 60));
+}
+
+// ================= TASK 2: colorconst ====================================
+// Verbatim logic; strided rows as above.
+fn j_colorconst(buf:[]u8, n:i32, op:[]u8, rs:i32, rstep:i32) i64 {
+    let w:i32 = t_get32(buf, 0) as i32;
+    let h:i32 = t_get32(buf, 4) as i32;
+    if(w < 2 || h < 1 || w > 4096 || h > 4096) { return -1; }
+    if((w % 2) == 1) { return -1; }
+    if(8 + (w as i64) * (h as i64) * 3 > n as i64) { return -1; }
+    if(rs < 0 || rstep < 1 || rs >= rstep) { return -1; }
+    let hw:i32 = w / 2;
+    let s1r:i64 = 0; let s1g:i64 = 0; let s1b:i64 = 0;
+    let s2r:i64 = 0; let s2g:i64 = 0; let s2b:i64 = 0;
+    let x1r:i64 = 0; let x1g:i64 = 0; let x1b:i64 = 0;
+    let x2r:i64 = 0; let x2g:i64 = 0; let x2b:i64 = 0;
+    let np:i64 = 0;
+    let y:i32 = rs;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < hw) {
+            let o1:i32 = 8 + (y * w + x) * 3;
+            let r1:i64 = buf[o1] as i64;
+            let g1:i64 = buf[o1+1] as i64;
+            let b1:i64 = buf[o1+2] as i64;
+            s1r = s1r + r1; s1g = s1g + g1; s1b = s1b + b1;
+            x1r = imax(x1r, r1); x1g = imax(x1g, g1); x1b = imax(x1b, b1);
+            let o2:i32 = 8 + (y * w + hw + x) * 3;
+            let r2:i64 = buf[o2] as i64;
+            let g2:i64 = buf[o2+1] as i64;
+            let b2:i64 = buf[o2+2] as i64;
+            s2r = s2r + r2; s2g = s2g + g2; s2b = s2b + b2;
+            x2r = imax(x2r, r2); x2g = imax(x2g, g2); x2b = imax(x2b, b2);
+            np = np + 1;
+            x = x + 1;
+        }
+        y = y + rstep;
+    }
+    if(np < 1) { return -1; }
+    op_add(op, 2 * np);
+    let n1r:i64 = 0; let n1g:i64 = 0; let n1b:i64 = 0;
+    let n2r:i64 = 0; let n2g:i64 = 0; let n2b:i64 = 0;
+    if(x1r > 0) { n1r = s1r * 1000 / (np * x1r); }
+    if(x1g > 0) { n1g = s1g * 1000 / (np * x1g); }
+    if(x1b > 0) { n1b = s1b * 1000 / (np * x1b); }
+    if(x2r > 0) { n2r = s2r * 1000 / (np * x2r); }
+    if(x2g > 0) { n2g = s2g * 1000 / (np * x2g); }
+    if(x2b > 0) { n2b = s2b * 1000 / (np * x2b); }
+    let dr:i64 = n1r - n2r; let dg:i64 = n1g - n2g; let db:i64 = n1b - n2b;
+    let dist:i64 = isqrt(dr*dr + dg*dg + db*db);
+    op_add(op, 1);
+    let ji:i32 = 0;
+    if(dist > 150) { ji = 1; }
+    let mg:i64 = iabs(dist - 150);
+    return j_pack(ji, 1000 * mg / (mg + 120));
+}
+
+// ================= TASK 3: shapetrans ====================================
+// Verbatim logic; strided rows; sampled area scaled by rstep so the
+// prototype ratios apply unchanged.
+fn j_shapetrans(buf:[]u8, n:i32, op:[]u8, rs:i32, rstep:i32) i64 {
+    let w:i32 = t_get32(buf, 0) as i32;
+    let h:i32 = t_get32(buf, 4) as i32;
+    if(w < 4 || h < 4 || w > 4096 || h > 4096) { return -1; }
+    let npx:i64 = (w as i64) * (h as i64);
+    if(8 + npx * 3 > n as i64) { return -1; }
+    if(rs < 0 || rstep < 1 || rs >= rstep) { return -1; }
+    let nb:i64 = 0;
+    let ns:i64 = 0;
+    let y:i32 = rs;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < w) {
+            let o:i32 = 8 + (y * w + x) * 3;
+            let lum:i64 = (buf[o] as i64) + (buf[o+1] as i64) + (buf[o+2] as i64);
+            if(lum > 382) { nb = nb + 1; }
+            ns = ns + 1;
+            x = x + 1;
+        }
+        y = y + rstep;
+    }
+    if(ns < 1) { return -1; }
+    op_add(op, ns);
+    let fgbright:i32 = 0;
+    if(2 * nb <= ns) { fgbright = 1; }
+    let a:i64 = 0; let sx:i64 = 0; let sy:i64 = 0;
+    y = rs;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < w) {
+            let o:i32 = 8 + (y * w + x) * 3;
+            let lum:i64 = (buf[o] as i64) + (buf[o+1] as i64) + (buf[o+2] as i64);
+            let isb:i32 = 0;
+            if(lum > 382) { isb = 1; }
+            if(isb == fgbright) {
+                a = a + 1;
+                sx = sx + x as i64;
+                sy = sy + y as i64;
+            }
+            x = x + 1;
+        }
+        y = y + rstep;
+    }
+    op_add(op, ns);
+    if(a * (rstep as i64) < 9) { return -1; }
+    let cx:i64 = sx / a;
+    let cy:i64 = sy / a;
+    let maxd2:i64 = 0;
+    y = rs;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < w) {
+            let o:i32 = 8 + (y * w + x) * 3;
+            let lum:i64 = (buf[o] as i64) + (buf[o+1] as i64) + (buf[o+2] as i64);
+            let isb:i32 = 0;
+            if(lum > 382) { isb = 1; }
+            if(isb == fgbright) {
+                let dx:i64 = x as i64 - cx;
+                let dy:i64 = y as i64 - cy;
+                let d2:i64 = dx*dx + dy*dy;
+                if(d2 > maxd2) { maxd2 = d2; }
+            }
+            x = x + 1;
+        }
+        y = y + rstep;
+    }
+    op_add(op, ns);
+    if(maxd2 < 1) { return -1; }
+    let ratio:i64 = a * (rstep as i64) * 1000000 / (3142 * maxd2);
+    let dc:i64 = iabs(ratio - 1000);
+    let ds:i64 = iabs(ratio - 637);
+    let dt:i64 = iabs(ratio - 414);
+    op_add(op, 3);
+    let cls:i32 = 0;
+    if(ds < dc && ds < dt) { cls = 1; }
+    if(dt < dc && dt <= ds) { cls = 2; }
+    let best:i64 = dc;
+    if(cls == 1) { best = ds; }
+    if(cls == 2) { best = dt; }
+    let other:i64 = dc;
+    if(cls == 0) { other = imin(ds, dt); }
+    if(cls == 1) { other = imin(dc, dt); }
+    if(cls == 2) { other = imin(dc, ds); }
+    let margin:i64 = other - best;
+    return j_pack(cls, 1000 * margin / (margin + 150));
+}
+
+// ================= TASK 4: pitchdisc =====================================
+// Verbatim logic; f0 estimated on the given sub-windows.
+fn j_pitchdisc(buf:[]u8, n:i32, op:[]u8, off_a:i32, cnt_a:i32, off_b:i32, cnt_b:i32) i64 {
+    let sr:i32 = t_get32(buf, 0) as i32;
+    let cnt:i32 = t_get32(buf, 4) as i32;
+    if(sr < 1000 || sr > 192000) { return -1; }
+    if(cnt < 64 || (cnt % 2) == 1 || cnt > 4000000) { return -1; }
+    if(8 + (cnt as i64) * 2 > n as i64) { return -1; }
+    let end:i64 = 8 + (cnt as i64) * 2;
+    if(off_a < 8 || off_b < 8 || cnt_a < 1 || cnt_b < 1) { return -1; }
+    if((off_a as i64) + (cnt_a as i64) * 2 > end) { return -1; }
+    if((off_b as i64) + (cnt_b as i64) * 2 > end) { return -1; }
+    let fam:i64 = f0_robust(buf, off_a, cnt_a, sr as i64, op);
+    let fbm:i64 = f0_robust(buf, off_b, cnt_b, sr as i64, op);
+    if(fam <= 0 || fbm <= 0) { return -1; }
+    let d:i64 = iabs(fbm - fam) * 1000000 / imax(fam, 1);
+    op_add(op, 1);
+    let ji:i32 = 0;
+    if(d >= 20000 && fbm > fam) { ji = 1; }
+    if(d >= 20000 && fbm <= fam) { ji = 2; }
+    let mg:i64 = iabs(d - 20000);
+    return j_pack(ji, 1000 * mg / (mg + 50000));
+}
+
+// ================= TASK 5: timbredisc ====================================
+// Verbatim logic; f0 and centroid computed on the given sub-window.
+fn j_timbredisc(buf:[]u8, n:i32, op:[]u8, off:i32, sub:i32) i64 {
+    let sr:i32 = t_get32(buf, 0) as i32;
+    let cnt:i32 = t_get32(buf, 4) as i32;
+    if(sr < 1000 || sr > 192000) { return -1; }
+    if(cnt < 256 || cnt > 4000000) { return -1; }
+    if(8 + (cnt as i64) * 2 > n as i64) { return -1; }
+    if(off < 8 || sub < 256) { return -1; }
+    if((off as i64) + (sub as i64) * 2 > 8 + (cnt as i64) * 2) { return -1; }
+    let f0m:i64 = f0_robust(buf, off, sub, sr as i64, op);
+    if(f0m < 50000 || f0m > 2000000) { return -1; }
+    let nh:i32 = 0;
+    let h:i64 = 1;
+    while(h <= 8) {
+        if(2 * h * f0m < (sr as i64) * 1000) { nh = nh + 1; }
+        h = h + 1;
+    }
+    if(nh < 3) { return -1; }
+    let w:i32 = sub;
+    if(w > 2048) { w = 2048; }
+    let pinc1:i64 = f0m * 4294967296 / (1000 * (sr as i64));
+    let se:i64 = 0;
+    let she:i64 = 0;
+    h = 1;
+    while(h <= nh as i64) {
+        let pinc:i64 = h * pinc1;
+        let re:i64 = 0;
+        let im:i64 = 0;
+        let i:i32 = 0;
+        while(i < w) {
+            let s:i64 = t_geti16(buf, off + i * 2);
+            let p:i64 = ((i as i64) * pinc) & 4294967295;
+            re = re + s * ng_sin1024((p + 1073741824) & 4294967295) / 1024;
+            im = im + s * ng_sin1024(p) / 1024;
+            i = i + 1;
+        }
+        op_add(op, (2 * w) as i64);
+        let e:i64 = (re * re + im * im) / 1048576;
+        se = se + e;
+        she = she + h * e;
+        h = h + 1;
+    }
+    if(se <= 0) { return -1; }
+    let r:i64 = 1000 * she / se;
+    op_add(op, nh as i64);
+    let ji:i32 = 0;
+    if(r >= 1075 && r < 1400) { ji = 1; }
+    if(r >= 1400 && r < 3000) { ji = 2; }
+    if(r >= 3000) { ji = 3; }
+    let m0:i64 = iabs(r - 1075);
+    let m1:i64 = iabs(r - 1400);
+    let m2:i64 = iabs(r - 3000);
+    let margin:i64 = imin(m0, imin(m1, m2));
+    return j_pack(ji, 1000 * margin / (margin + 200));
+}
+
+// ================= TASK 6: motiondir =====================================
+// Verbatim logic; frame pairs t in [t0, t1).
+fn j_motiondir(buf:[]u8, n:i32, op:[]u8, t0:i32, t1:i32) i64 {
+    let nf:i32 = t_get32(buf, 0) as i32;
+    let w:i32 = t_get32(buf, 4) as i32;
+    let h:i32 = t_get32(buf, 8) as i32;
+    if(nf < 2 || nf > 1024) { return -1; }
+    if(w < 2 || h < 2 || w > 512 || h > 512) { return -1; }
+    let fsz:i64 = (w as i64) * (h as i64) * 3;
+    if(12 + (nf as i64) * fsz > n as i64) { return -1; }
+    if(t0 < 1 || t1 > nf || t0 >= t1) { return -1; }
+    let npx:i32 = w * h;
+    let have:i32 = 0;
+    let fcx:i64 = 0; let fcy:i64 = 0;
+    let lcx:i64 = 0; let lcy:i64 = 0;
+    let t:i32 = t0;
+    while(t < t1) {
+        let mc:i64 = 0; let mx:i64 = 0; let my:i64 = 0;
+        let p:i32 = 0;
+        while(p < npx) {
+            let o0:i32 = (12 + ((t - 1) as i64) * fsz + (p as i64) * 3) as i32;
+            let o1:i32 = (12 + (t as i64) * fsz + (p as i64) * 3) as i32;
+            let d:i64 = iabs((buf[o1] as i64) - (buf[o0] as i64))
+                      + iabs((buf[o1+1] as i64) - (buf[o0+1] as i64))
+                      + iabs((buf[o1+2] as i64) - (buf[o0+2] as i64));
+            if(d > 90) {
+                mc = mc + 1;
+                mx = mx + (p % w) as i64;
+                my = my + (p / w) as i64;
+            }
+            p = p + 1;
+        }
+        op_add(op, npx as i64);
+        if(mc > 0) {
+            let cx:i64 = mx / mc;
+            let cy:i64 = my / mc;
+            if(have == 0) { fcx = cx; fcy = cy; have = 1; }
+            lcx = cx; lcy = cy;
+        }
+        t = t + 1;
+    }
+    let dx:i64 = 0; let dy:i64 = 0;
+    if(have == 1) { dx = lcx - fcx; dy = lcy - fcy; }
+    let mag2:i64 = dx*dx + dy*dy;
+    let mag:i64 = isqrt(mag2);
+    op_add(op, 2);
+    let dir:i32 = 0;
+    if(mag2 >= 9) {
+        let ax:i64 = iabs(dx); let ay:i64 = iabs(dy);
+        if(ax >= 2 * ay) {
+            dir = 3;
+            if(dx < 0) { dir = 7; }
+        }
+        if(ay >= 2 * ax) {
+            dir = 5;
+            if(dy < 0) { dir = 1; }
+        }
+        if(ax < 2 * ay && ay < 2 * ax) {
+            dir = 4;
+            if(dx < 0 && dy > 0) { dir = 6; }
+            if(dx > 0 && dy < 0) { dir = 2; }
+            if(dx < 0 && dy < 0) { dir = 8; }
+        }
+    }
+    let mg:i64 = iabs(mag - 3);
+    return j_pack(dir, 1000 * mg / (mg + 4));
+}
+
+// MD-SSD-1 (wave-20260923-2021pdt, preregistered): motiondir second-path
+// front end for the CANDIDATE arm only. Whole-window SSD translation
+// estimator between frame 0 and frame nf-1. Shares no machinery with
+// j_motiondir (no per-pixel threshold, no change centroid, no
+// first/last pair statistics). Frozen spec in PREREG.md section 2.
+// The frozen j_motiondir above is untouched (baseline arm).
+fn j_motiondir2(buf:[]u8, n:i32, op:[]u8) i64 {
+    let nf:i32 = t_get32(buf, 0) as i32;
+    let w:i32 = t_get32(buf, 4) as i32;
+    let h:i32 = t_get32(buf, 8) as i32;
+    if(nf < 2 || nf > 1024) { return -1; }
+    if(w < 64 || h < 64 || w > 512 || h > 512) { return -1; }
+    let fsz:i64 = (w as i64) * (h as i64) * 3;
+    if(12 + (nf as i64) * fsz > n as i64) { return -1; }
+    // frame A = 0, frame B = nf-1. interior xx,yy in {14..48} step 2;
+    // for shifts in [-14,14] the frame-A read xx-sx stays in [0,62].
+    let best_sx:i32 = 0; let best_sy:i32 = 0;
+    let best:i64 = 4000000000;
+    let sy:i32 = -14;
+    while(sy <= 14) {
+        let sx:i32 = -14;
+        while(sx <= 14) {
+            let ssd:i64 = 0;
+            let yy:i32 = 14;
+            while(yy < 50) {
+                let xx:i32 = 14;
+                while(xx < 50) {
+                    let ax0:i64 = ((yy - sy) as i64) * (w as i64) + ((xx - sx) as i64);
+                    let o7:i32 = (12 + ((nf - 1) as i64) * fsz + ((yy as i64) * (w as i64) + (xx as i64)) * 3) as i32;
+                    let o0:i32 = (12 + ax0 * 3) as i32;
+                    let lb:i64 = (buf[o7] as i64) + (buf[o7+1] as i64) + (buf[o7+2] as i64);
+                    let la:i64 = (buf[o0] as i64) + (buf[o0+1] as i64) + (buf[o0+2] as i64);
+                    let d:i64 = lb - la;
+                    ssd = ssd + d * d;
+                    xx = xx + 2;
+                }
+                yy = yy + 2;
+            }
+            op_add(op, 2592);
+            if(ssd < best) { best = ssd; best_sx = sx; best_sy = sy; }
+            sx = sx + 2;
+        }
+        sy = sy + 2;
+    }
+    let dx:i64 = best_sx as i64; let dy:i64 = best_sy as i64;
+    let mag2:i64 = dx*dx + dy*dy;
+    let mag:i64 = isqrt(mag2);
+    let dir:i32 = 0;
+    if(mag2 >= 9) {
+        let ax:i64 = iabs(dx); let ay:i64 = iabs(dy);
+        if(ax >= 2 * ay) {
+            dir = 3;
+            if(dx < 0) { dir = 7; }
+        }
+        if(ay >= 2 * ax) {
+            dir = 5;
+            if(dy < 0) { dir = 1; }
+        }
+        if(ax < 2 * ay && ay < 2 * ax) {
+            dir = 4;
+            if(dx < 0 && dy > 0) { dir = 6; }
+            if(dx > 0 && dy < 0) { dir = 2; }
+            if(dx < 0 && dy < 0) { dir = 8; }
+        }
+    }
+    let mg:i64 = iabs(mag - 3);
+    return j_pack(dir, 1000 * mg / (mg + 4));
+}
+
+// ================= SECOND PATH PART C: PATH B (candidate-arm veto only) ===
+// Frozen declarations for wave-20260924-0521pdt, second judgment path part C.
+//
+// T4 path B choice (frozen, exactly one): Goertzel-bank harmonic peak picker.
+//   The zero-crossing histogram alternative was NOT implemented.
+//   Three stages:
+//     1. dominant single frequency on fixed linear grid 100..8000 Hz,
+//        20 Hz steps, w=512;
+//     2. subharmonic check fbest/k (k=1..8) via fixed-H harmonic comb
+//        energy (H=5, w=1024); near-ties within 0.5% break toward the
+//        higher f0 (smaller k) for pure-tone consistency;
+//     3. refine +-20000 ppm at 2500 ppm steps (w=2048, H=6) with
+//        parabolic interpolation.
+//   Independent sine (b4_sin1024); never calls f0_fast, f0_robust, or
+//   any autocorrelation buffer. Never calls path-A spectral features.
+//
+// T5 path B (frozen): f0-free whole-band fixed-filter-band energy ratios.
+//   Fixed linear grid 100..8000 Hz at 100 Hz, w=256; spectral centroid
+//   (energy-weighted mean frequency) in Hz. No pitch estimator input
+//   anywhere in the path. Frozen thresholds (Hz): 506 / 712 / 1463,
+//   calibrated on all 150 T5 fixtures 2026-09-24 (classes perfectly
+//   separated: 0:423-498, 1:514-664, 2:761-1427, 3:1500).
+//
+// Path B is candidate-arm veto only. It never votes, ranks, aggregates,
+// or becomes primary. j_pitchdisc2 and j_timbredisc2 return judgments in
+// the same packed format as path A, for disagreement comparison only.
+//
+// PB-IND: this section contains no reference to f0_fast, f0_robust,
+// autocorrelation buffers, or path-A spectral features. Verified by
+// static grep (see evidence).
+
+fn b4_sin1024(p:i64) i64 {
+    let q:i64 = (p >> 30) & 3;
+    let fr:i64 = p & 1073741823;
+    let x:i64 = (fr * 1608) >> 30;
+    let xx:i64 = x;
+    if(q == 1 || q == 3) { xx = 1608 - x; }
+    let x2:i64 = xx * xx;
+    let term:i64 = xx;
+    let sum:i64 = xx;
+    let k:i64 = 1;
+    while(k <= 7) {
+        term = 0 - term * x2 / ((2 * k) * (2 * k + 1) * 1048576);
+        sum = sum + term;
+        k = k + 1;
+    }
+    if(q >= 2) { return 0 - sum; }
+    return sum;
+}
+
+fn b4_peak(buf:[]u8, off:i32, cnt:i32) i64 {
+    let p:i64 = 0;
+    let i:i32 = 0;
+    while(i < cnt) {
+        let s:i64 = t_geti16(buf, off + i * 2);
+        if(s < 0) { s = 0 - s; }
+        if(s > p) { p = s; }
+        i = i + 1;
+    }
+    return p;
+}
+
+// Goertzel DFT energy at fmhz (milliHz). b4_sin1024 only.
+fn b4_dft_energy(buf:[]u8, off:i32, w:i32, sr:i64, fmhz:i64, op:[]u8) i64 {
+    if(fmhz <= 0 || w < 64) { return 0; }
+    let pinc:i64 = fmhz * 4294967296 / (1000 * sr);
+    if(pinc <= 0) { return 0; }
+    let re:i64 = 0;
+    let im:i64 = 0;
+    let i:i32 = 0;
+    while(i < w) {
+        let s:i64 = t_geti16(buf, off + i * 2);
+        let p:i64 = ((i as i64) * pinc) & 4294967295;
+        re = re + s * b4_sin1024((p + 1073741824) & 4294967295) / 1024;
+        im = im + s * b4_sin1024(p) / 1024;
+        i = i + 1;
+    }
+    op_add(op, (2 * w) as i64);
+    return (re * re + im * im) / 1048576;
+}
+
+// Harmonic comb energy at f0m (milliHz), nh harmonics, fixed H.
+fn b4_comb_energy(buf:[]u8, off:i32, w:i32, sr:i64, f0m:i64, nh:i32, op:[]u8) i64 {
+    if(f0m <= 0 || w < 64) { return 0; }
+    let tot:i64 = 0;
+    let h:i64 = 1;
+    while(h <= nh as i64) {
+        if(2 * h * f0m >= sr * 1000) { break; }
+        tot = tot + b4_dft_energy(buf, off, w, sr, h * f0m, op);
+        h = h + 1;
+    }
+    return tot;
+}
+
+// T4 path B f0 estimator: Goertzel-bank harmonic peak picker (frozen choice).
+// Returns f0 in milliHz, or 0 on failure.
+fn b4_f0_goertzel(buf:[]u8, off:i32, cnt:i32, sr:i64, op:[]u8) i64 {
+    // Skip leading silence: first sample with |s| >= 256.
+    let skip:i32 = 0;
+    while(skip < cnt) {
+        let s:i64 = t_geti16(buf, off + skip * 2);
+        if(s < 0) { s = 0 - s; }
+        if(s >= 256) { break; }
+        skip = skip + 1;
+    }
+    op_add(op, skip as i64);
+    if(skip >= cnt) { return 0; }
+    let so:i32 = off + skip * 2;
+    let savail:i32 = cnt - skip;
+    let w:i32 = savail;
+    if(w > 1024) { w = 1024; }
+    if(w < 512) { return 0; }
+    if(b4_peak(buf, so, w) < 256) { return 0; }
+    // Stage 1: dominant frequency, 100..8000 Hz, 20 Hz grid, w=512.
+    let w1:i32 = 512;
+    if(w1 > w) { w1 = w; }
+    let fbest:i64 = 0;
+    let ebest:i64 = -1;
+    let f:i64 = 100000;
+    while(f <= 8000000) {
+        let e:i64 = b4_dft_energy(buf, so, w1, sr, f, op);
+        if(e > ebest) { ebest = e; fbest = f; }
+        f = f + 20000;
+    }
+    if(ebest <= 0 || fbest <= 0) { return 0; }
+    // Stage 2: fundamental = fbest/k, best comb energy, w=1024, H=5.
+    // Near-ties within 0.5% break toward the higher f0 (smaller k).
+    let w2:i32 = 1024;
+    if(w2 > w) { w2 = w; }
+    let ce:[]u8 = nio_alloc(8 * 8);
+    if(ce.len == 0) { return 0; }
+    let emax:i64 = -1;
+    let k:i64 = 1;
+    while(k <= 8) {
+        let fc:i64 = fbest / k;
+        let e:i64 = 0;
+        if(fc >= 50000 && fc <= 2000000) {
+            e = b4_comb_energy(buf, so, w2, sr, fc, 5, op);
+        }
+        t_put64(ce, (k - 1) * 8, e);
+        if(e > emax) { emax = e; }
+        k = k + 1;
+    }
+    if(emax <= 0) { nio_free(ce); return 0; }
+    let f0best:i64 = 0;
+    k = 1;
+    while(k <= 8) {
+        let e:i64 = t_get64(ce, (k - 1) * 8);
+        if(e * 200 >= emax * 199) {
+            f0best = fbest / k;
+            break;
+        }
+        k = k + 1;
+    }
+    nio_free(ce);
+    if(f0best <= 0) { return 0; }
+    // Stage 3: refine +-20000 ppm at 2500 ppm steps, w=2048, H=6.
+    let w3:i32 = 2048;
+    if(w3 > savail) { w3 = savail; }
+    let ge:[]u8 = nio_alloc(17 * 16);
+    if(ge.len == 0) { return 0; }
+    let gi:i32 = 0;
+    let d:i64 = -20000;
+    while(d <= 20000) {
+        let fc:i64 = f0best + f0best * d / 1000000;
+        let e:i64 = 0;
+        if(fc >= 50000 && fc <= 2000000) {
+            e = b4_comb_energy(buf, so, w3, sr, fc, 6, op);
+        }
+        t_put64(ge, gi * 16, d);
+        t_put64(ge, gi * 16 + 8, e);
+        gi = gi + 1;
+        d = d + 2500;
+    }
+    let bi:i32 = 0;
+    let be:i64 = -1;
+    gi = 0;
+    while(gi < 17) {
+        let e:i64 = t_get64(ge, gi * 16 + 8);
+        if(e > be) { be = e; bi = gi; }
+        gi = gi + 1;
+    }
+    if(be <= 0) { nio_free(ge); return 0; }
+    let doff:i64 = 0;
+    if(bi > 0 && bi < 16) {
+        let em:i64 = t_get64(ge, (bi - 1) * 16 + 8);
+        let e0:i64 = be;
+        let ep:i64 = t_get64(ge, (bi + 1) * 16 + 8);
+        let den:i64 = 2 * (em - 2 * e0 + ep);
+        if(den != 0) { doff = (em - ep) * 1024 / den; }
+        if(doff < -512) { doff = -512; }
+        if(doff > 512) { doff = 512; }
+        doff = doff * 2500 / 1024;
+    }
+    let dbest:i64 = t_get64(ge, bi * 16) + doff;
+    nio_free(ge);
+    let f0r:i64 = f0best + f0best * dbest / 1000000;
+    if(f0r <= 0) { return 0; }
+    return f0r;
+}
+
+// T5 path B: f0-free spectral centroid (Hz) on fixed grid.
+// Returns centroid in Hz, or -1 on failure.
+fn b4_balance(buf:[]u8, off:i32, cnt:i32, sr:i64, op:[]u8) i64 {
+    let w:i32 = cnt;
+    if(w > 2048) { w = 2048; }
+    if(w < 512) { return -1; }
+    let skip:i32 = 0;
+    while(skip < w) {
+        let s:i64 = t_geti16(buf, off + skip * 2);
+        if(s < 0) { s = 0 - s; }
+        if(s >= 256) { break; }
+        skip = skip + 1;
+    }
+    if(skip >= w) { return -1; }
+    let so:i32 = off + skip * 2;
+    let wu:i32 = 256;
+    if(wu > w - skip) { wu = w - skip; }
+    let se:i64 = 0;
+    let sfe:i64 = 0;
+    let f:i64 = 100000;
+    while(f <= 8000000) {
+        let e:i64 = b4_dft_energy(buf, so, wu, sr, f, op);
+        se = se + e;
+        sfe = sfe + (f / 1000) * e;
+        f = f + 100000;
+    }
+    if(se <= 0) { return -1; }
+    return sfe / se;
+}
+
+// T4 path B judgment: same interface as j_pitchdisc_kb4v2 (the candidate),
+// but f0 via b4_f0_goertzel (Goertzel-bank harmonic peak picker).
+// Uses the candidate's 5000 ppm threshold (not the baseline's 20000).
+// Veto-only; never votes or ranks.
+fn j_pitchdisc2(buf:[]u8, n:i32, op:[]u8, off_a:i32, cnt_a:i32, off_b:i32, cnt_b:i32) i64 {
+    let sr:i32 = t_get32(buf, 0) as i32;
+    let cnt:i32 = t_get32(buf, 4) as i32;
+    if(sr < 1000 || sr > 192000) { return -1; }
+    if(cnt < 64 || (cnt % 2) == 1 || cnt > 4000000) { return -1; }
+    if(8 + (cnt as i64) * 2 > n as i64) { return -1; }
+    let end:i64 = 8 + (cnt as i64) * 2;
+    if(off_a < 8 || off_b < 8 || cnt_a < 1 || cnt_b < 1) { return -1; }
+    if((off_a as i64) + (cnt_a as i64) * 2 > end) { return -1; }
+    if((off_b as i64) + (cnt_b as i64) * 2 > end) { return -1; }
+    let fam:i64 = b4_f0_goertzel(buf, off_a, cnt_a, sr as i64, op);
+    let fbm:i64 = b4_f0_goertzel(buf, off_b, cnt_b, sr as i64, op);
+    if(fam <= 0 || fbm <= 0) { return -1; }
+    let d:i64 = iabs(fbm - fam) * 1000000 / imax(fam, 1);
+    op_add(op, 1);
+    let ji:i32 = 0;
+    if(d >= 5000 && fbm > fam) { ji = 1; }
+    if(d >= 5000 && fbm <= fam) { ji = 2; }
+    let mg:i64 = iabs(d - 5000);
+    return j_pack(ji, 1000 * mg / (mg + 50000));
+}
+
+// T5 path B judgment: f0-free spectral centroid (Hz) with frozen
+// thresholds 506 / 712 / 1463 Hz. No pitch estimator input.
+// Veto-only; never votes or ranks.
+fn j_timbredisc2(buf:[]u8, n:i32, op:[]u8, off:i32, sub:i32) i64 {
+    let sr:i32 = t_get32(buf, 0) as i32;
+    let cnt:i32 = t_get32(buf, 4) as i32;
+    if(sr < 1000 || sr > 192000) { return -1; }
+    if(cnt < 256 || cnt > 4000000) { return -1; }
+    if(8 + (cnt as i64) * 2 > n as i64) { return -1; }
+    if(off < 8 || sub < 256) { return -1; }
+    if((off as i64) + (sub as i64) * 2 > 8 + (cnt as i64) * 2) { return -1; }
+    let c:i64 = b4_balance(buf, off, sub, sr as i64, op);
+    if(c < 0) { return -1; }
+    let ji:i32 = 0;
+    if(c >= 506 && c < 712) { ji = 1; }
+    if(c >= 712 && c < 1463) { ji = 2; }
+    if(c >= 1463) { ji = 3; }
+    let m0:i64 = iabs(c - 506);
+    let m1:i64 = iabs(c - 712);
+    let m2:i64 = iabs(c - 1463);
+    let margin:i64 = imin(m0, imin(m1, m2));
+    return j_pack(ji, 1000 * margin / (margin + 200));
+}
