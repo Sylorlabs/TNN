@@ -25,12 +25,19 @@ confirmed the teach invocation form.
   MANIFEST.json written (clean_batched format + merge_note documenting the
   Zag two-stage re-merge).
 
-### IN PROGRESS (updated 2026-09-24 03:40 UTC)
-- **Wiki splits** (job_wiki_crew4.sh, background proc_054d228d1975):
+## Commits (crew 4)
+- `f5c3fb26` (tnn-native-lab): STATUS_20260923_crew4.md, job_wiki_crew4.sh,
+  merge_run1_zag.sh under knowledge/ingest_10gb/teach/.
+
+### IN PROGRESS (updated 2026-09-24 04:37 UTC)
+- **Wiki splits** (job_wiki_crew4.sh, restarted after daemon restart killed the
+  first run at en14=24,136 files):
   en14/17/19/22/24/26/27 sequential + en1 resume (skip=13942 start=13942,
   precondition verified: 13,942 contiguous files en1_n00000000..en1_n00013941)
   + consolidate → stage/wiki_in + batched clean → stage/wiki_run1.
-  Log: logs/wiki_splits_crew4.log.
+  Log: logs/wiki_splits_crew4.log. Resume verified: en14 files 0..24135
+  contiguous and well-formed; script correctly detected "have 24136 pages".
+  NOTE: `grep ^en1` falsely matches en14_ files; use find -name "en1_n*.xml".
 
 ### Benchmark (crew 4)
 New split_wiki.py (read-accumulation) on en14 bz2: 934 pages / 180s = 5.2/sec —
