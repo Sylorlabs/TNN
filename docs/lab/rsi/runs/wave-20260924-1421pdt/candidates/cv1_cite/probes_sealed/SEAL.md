@@ -18,4 +18,10 @@ tie-break traps (A01, A04, A05, A06) and inflected-form variants (A03),
 10 gaming with payload sets the old first-3 cap cannot fully name; every
 decline probe has at least one globally uncovered word.
 
-Seal-open log: (to be filled at scoring time with commit hash).
+Seal-open log: retroactive fill per independent judge correction
+wave-20260924-1421pdt (the log line was left blank at scoring time, a
+process defect; the requirement to fill it at scoring time stands for the
+next wave). Seal opened for scoring in commit 5c53da6ba
+(2026-09-24T22:07:22Z): PROBES.md and KEY.md shas re-verified against the
+pins above at that commit; no implementation file changed after seal-open
+(source diff clean per red-team recompute).

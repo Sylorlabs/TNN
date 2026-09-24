@@ -992,3 +992,112 @@ both stand-downs. M4 CONFIRM FIT. M5 CONFIRM memo stands, ruled
 consistent with the Python-anywhere rule (no wave evidence existed to
 void). No verdict changed; nothing added to or removed from his judge
 queue; his five governance decisions untouched.
+
+---
+
+## Wave 20260924-1421pdt verdicts (2026-09-24)
+
+Debate transcript: docs/lab/rsi/runs/wave-20260924-1421pdt/debate/DEBATE_1421.md
+(advocate plus skeptic, skeptic's provenance probe verbatim in all four
+motions; commit 125595e862). Independent judge rulings:
+docs/lab/rsi/runs/wave-20260924-1421pdt/debate/JUDGE_INDEPENDENT_1421.md
+(commit 581cc45bc). Prereg commit-order self-check over this wave's commits:
+PASS, no UNVERIFIABLE ORDERING (CV-1 prereg 963f872ae strictly before seal
+de1cd2c42 strictly before impl 5c53da6ba; G1 prereg 1d8d40013 strictly before
+impl 782dbb228; each committed alone). No verdict was overturned on rhetoric;
+no frozen bar was weakened.
+
+1. CV-1 decline-citation fix re-test: DISCARD [NEW]. Fresh frozen prereg,
+fresh sealed 30 (10 paraphrase / 10 adversarial / 10 gaming; PROBES.md
+1ea86906, KEY.md 8b4b6a89, fresh vs 1121pdt), pure-Zag implementation of the
+three prereg-specified rule edits on the adopted 1121pdt cv1.zag, byte-identical
+reruns (3/3, transcripts f129728c). CVC-B1 20/30 (bar >=24/30) FAIL, CVC-B2
+16/20 FAIL, CVC-B3 PASS (0 covered words named in any decline, machine-checked;
+92/92 quoted decline words KB-absent), CVC-B4 FAIL (4/10 paraphrases answered),
+CVC-B5 PASS (17/17 INKB byte-identical db6b7075), CVC-B6 PASS (1.60x ops),
+CVC-B7 PASS, CVC-B8 PASS (seal shas match; frozen scope source/KB/build/scorer
+independently clean). Killing evidence: all 10 misses returned NOTED. from the
+frozen path-4 assertion handler because the probes lacked interrogative form;
+they never reached the citation mechanism under test. Framing per red-team and
+judge: BOTH a probe-form defect AND a prereg-spec gap (F9 never specified
+interrogative form; the confound list never considered path-4 interception),
+refined to assertion-pattern plus gazetteer-entity matching (interrogative
+probes with assertion fragments still route to NOTED, shown on post-build
+diagnostics qmark.txt/noted2.txt), not mere "?"-absence. The 20/20 score on
+the 20 probes that reached path 5 stays strictly conditional (non-random
+subset defined by the frozen router) and supports only a fresh next-wave
+re-test of the unchanged implementation. Python contact: one accidental
+python3 -c computing the cost ratio from two literals; touched no artifact,
+read/wrote nothing, output unused (ratio 1.6046 independently recomputed from
+committed op streams 1338.07/833.90). NO evidence void under the 0521pdt
+Python-anywhere rule and the 1121pdt M5 precedent; disclosed in evidence.
+Record corrections applied per judge: the false "0 hits over impl/"
+contamination sentence narrowed to the CVC-B8 frozen scope with transcript
+hits stated plainly; qmark.txt/noted2.txt documented as post-build
+diagnostics; SEAL.md seal-open log filled retroactively (process defect
+noted, fill-at-scoring-time requirement stands for next wave). Commits:
+963f872ae (prereg), de1cd2c42 (seal), 5c53da6ba (impl, evidence).
+
+2. G1 SUNSHAFTS re-freeze: DISCARD [NEW]. Both 1121pdt defects were repaired
+and held: geometric validator V1-V6 PASS (sun 76px above ridge, margin >= 40;
+39/48/64/24 kept points all in sky, runner cross-check identical), T-gate
+recalibrated per the frozen procedure (measured mean_T=569, std_T=92 on the
+rebuilt baseline first, gate=707; sky wash 97.14% down to 1.1%, 3651 of
+325786 px). Baseline rebuilt byte-identical to the S14 record (e4f65557).
+KB1 PASS (3/3 byte-identical, 8076028d), KB4/KB5/KB6/KB7 PASS, KB8 PASS
+(2.04x, bar 3x). Killing evidence: KB2 shaft ratio 1.0000 (bar >= 1.12) FAIL,
+KB3 var(dL) 0.00 (bar >= 60.0) FAIL; 0 of 39 validated wedge points receive
+any lift; the lift concentrates in a faint blob (2238 px, max dL 9) at x
+888-1023, y 254-305, about 870px from the sun. The march-mean transmittance
+rewards long line-of-sight alignments through low-density corridors far from
+the sun, not fan-shaped shafts radiating from it. Ruled a genuine mechanism
+miss, not a freeze defect and not unpassable-by-construction (red-team
+independently recomputed from the committed BMPs). Attribution caveat
+sustained: the frozen 1.5-sigma gate rationale assumed a normality the T field
+lacks (1.1% lifted vs ~7% promised); two coupled unknowns were frozen together,
+so the next prereg must measure the actual T distribution and decouple gate
+from geometry. No sealed pair prepared (correctly); nothing reaches his judge
+queue. Queued next: min-D line-of-sight redesign note, legitimate only under
+a fresh prereg. Commits: 1d8d40013 (prereg), 782dbb228 (impl, evidence).
+
+3. Fork battery: PASS on all 19 tested forks [NEW, process confirmation].
+Shell and pure-Zag harnesses agree; znc byte-identical (498abcb5) everywhere;
+NEG1/NEG2 negative controls discriminated on all 19; zero CANNOT-CONFIRM.
+Tested: local tnn-native-lab at ef6801b3 (brief pinned 28088d207, an ancestor;
+HEAD moved under the battery via concurrent worker commits), four wave
+archives, wave-debate-session-1-backup 3947dca1a, origin/tnn-native-lab at
+9d4f484bfe (moved twice mid-wave: e1f78ba35 to ad7919c25 to 9d4f484bfe;
+tested read-only, never checked out), origin/fs-gr1 23f6c0f9, origin/main
+f2a0ecfd, origin/r2-7 2d99d183f, origin/reorg/phase-0-1 991432226,
+origin/wg-freeze f875b3417, all seven forktest/* worktrees. Not tested: three
+detached worktrees at ~/workspace/tnn-rsi-wave3/ (all bd3097874, same sha as
+a tested one; queued for next-wave enumeration). Commit: d6abc7333.
+
+4. tnn_chat FIT on merged HEAD: FIT [NEW, process confirmation]. Decline
+binary rebuilt byte-identical to 20273a99, baseline to 1ada2fae; 30/30
+specific declines, 17/17 in-KB with baseline parity, 10/10 KB5 (3 runs each);
+9/9 rerun pairs byte-identical. Zero FIT deviation across the e1f78ba35 merge
+(2992 files, 470300 insertions). Scoped literally: re-certifies the 38-fact
+closed-book probe chain on merge commit 28088d207 only; not merge review.
+Caveats travel: not a general interactive TNN; no runnable interactive TNN
+exists on this branch beyond the frozen probe instruments. Commit: ef6801b3a.
+
+5. Independent judge rulings (581cc45bc): M1 CONFIRM DISCARD, M2 CONFIRM
+DISCARD, M3 CONFIRM PASS, M4 CONFIRM FIT. No verdict changed. No new standing
+rules adopted; existing rules plus tighter next-wave preregs suffice. Micah's
+five governance rulings untouched.
+
+Queued next: the five governance rulings still awaiting him (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12
+queue); his blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12,
+S11-AUD, S13, S14, whirlpool-planform; unchanged, nothing added this wave);
+CV-1 re-test with amended F9 (require "?" AND exclude assertion-pattern
+fragments with gazetteer entities; pin what routing knowledge the probe
+author may use; pin gazetteer membership as a probe-reachability condition)
+on a fresh sealed set, implementation unchanged; G1 redesign only under a
+fresh prereg (measured T distribution, decoupled gate and geometry, explicit
+fan-direction design decision); fork battery enumeration of the three wave3
+worktrees plus znc mode normalization; staffing note for the next coordinator
+(two waves spent on G1 internals while the frontier line is PAMs v2 and
+b_alpha v9). Note: origin/tnn-native-lab is now at 9d4f484bfe, 6 commits ahead
+of local; the merge is the next run's run-start step.

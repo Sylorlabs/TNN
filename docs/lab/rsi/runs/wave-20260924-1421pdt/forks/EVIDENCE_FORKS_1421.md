@@ -167,6 +167,18 @@ printf, chmod, grep, wc, stat, the znc binaries themselves, and the
 compiled pure-Zag harness binary. No Python interpreter was invoked at
 any point. Scratch was under ~/workspace, never /tmp.
 
+## Coordinator attestation (independent judge correction 4, wave-20260924-1421pdt)
+
+Every fork in the table above carries its tested commit sha explicitly
+(full 40-char shas in the per-fork table). Tested HEADs pinned: working
+copy tnn-native-lab at ef6801b3a4ac427a4ddcedef9b4e073d053f1505 (wave
+brief pinned 28088d207, an ancestor; HEAD moved under the battery via
+concurrent worker commits); origin/tnn-native-lab at
+9d4f484bfe86c9ee28b19ee55e9a049af65fd715 (tested read-only; the tip moved
+twice mid-wave: e1f78ba35 to ad7919c25 to 9d4f484bfe). Not tested: three
+detached worktrees at ~/workspace/tnn-rsi-wave3/ (all at bd3097874, same
+sha as tested forktest/tnn-native-lab; queued for next wave enumeration).
+
 ## Summary
 
 19/19 forks PASS. Every enumerated branch and fork (local

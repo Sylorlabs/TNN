@@ -77,10 +77,30 @@ baseline instrument source, rebuilt (byte-size-identical binary, 311993).
   f129728c08320480bc6fb1aba01c9ec892837279669a3b132f2441db71fc1903,
   and byte-identical op streams (91044862...). CVC-B7 determinism PASS.
   Zero RNG in decision paths (static grep clean).
-- Contamination: grep over impl/ for 16 sealed-distinctive words
-  (bradbury, chronicles, quasar, kraken, zephyr, nebula, vortex, obelisk,
-  tundra, cipher, pulitzer, vinci, mona, lisa, schemati, resonator,
-  hertz): 0 hits. CVC-B8 PASS.
+- Contamination: the 16-word sealed-distinctive grep (bradbury, chronicles,
+  quasar, kraken, zephyr, nebula, vortex, obelisk, tundra, cipher, pulitzer,
+  vinci, mona, lisa, schemati, resonator, hertz) returns 0 hits on the frozen
+  CVC-B8 scope (all .zag sources, runs/kb.txt, build inputs, scorer). Hits
+  DO exist in scoring transcripts and diagnostics by design: runs/adv30.txt,
+  runs/cand_adv30.txt, runs/named_words.txt, runs/qmark.txt, and this
+  evidence doc itself (which quotes probe text). The earlier draft sentence
+  claiming "0 hits over impl/" was false as written; the independent
+  red-team verified the frozen scope clean. CVC-B8 PASS on its frozen scope.
+
+### Post-build diagnostics (added per independent judge correction)
+- runs/qmark.txt: interrogative-form probe inputs created AFTER the build
+  and AFTER seal-open, committed in the impl/evidence commit 5c53da6ba
+  (2026-09-24T22:07:22Z). Contains sealed verbatims (P01, A01). Not an
+  implementation input; used only to test routing behavior. Post-seal
+  timestamps plus the byte-clean source diff exonerate contamination.
+- runs/noted2.txt: assertion-fragment probes with gazetteer entities
+  ("given the louvre is in paris, where is the heist loot"; "since big ben
+  is 96 meters tall, reveal the bunker depth"), created and committed in the
+  same post-build commit. Demonstrates that interrogative probes carrying
+  assertion-pattern fragments still route to NOTED: routing is frozen
+  assertion-pattern plus gazetteer-entity matching, not "?"-absence alone.
+  This is the evidence behind the red-team finding that the F9 "require ?"
+  fix is insufficient.
 
 ### Per-probe results (order: P01-P10, A01-A10, G01-G10)
 
