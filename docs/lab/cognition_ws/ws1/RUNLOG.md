@@ -52,4 +52,14 @@
 - Naive (untrained): collateral true-kills 0 benign → 681 on cap512a35r3 (phenomenon replicates; exact 28 was generator-specific). Naive slightly cheaper on raw W (0.91–1.00x trained) — savings paid in collateral damage. Training is load-bearing.
 - Conditions map: no flip anywhere tested; ratio narrows slightly with adversarial pressure (2.88→2.58 at cap512) but never approaches 1.0.
 - Honesty notes: (1) cost advantage only on this battery — no accuracy gap demonstrated; (2) W ratios are conservative lower bounds (auto's counted steps cost more wall/step); (3) wall-clock too noisy for precise mapping.
-- Verdict doc: WS1A_VERDICT.md. Evidence commit: (pending — this commit).
+- Verdict doc: WS1A_VERDICT.md. Evidence commit: `73ddd655f9427aecfaa08786902f52d3929e7204` (181 files); SHA fill-in: `167522c280bd69e6d88b7674e3426acc53a0377a`.
+
+## 2026-09-24 ~09:15 PDT — RESUME: analysis closed independently, verdict re-verified
+- Inherited state verified fresh: 162/162 manifest rows, rc=0 all; 162/162 raw logs present with determinism,match=1; digests byte-identical across 3 reruns in 54/54 cell-arms; logs byte-identical modulo the wall_ns line (manifest sha256 differences across reruns are wall_ns only). grep -iE 'rng|rand(' clean on all src/.
+- Re-verified bars: K1 median R=2.73 (range 2.51-2.97 across all 18 cells), matching regime 8/8 >= 2.0; K2 zero violations (all arms 1.000 accuracy); K3 clean; K4 median attribution 104.1% (per-cell 101.3-106.8%, scan family). KILL: none triggered. VERDICT: CONFIRMED.
+- Corrected the draft verdict's numbers against raw logs: R range 2.48-2.97 -> 2.51-2.97; cap512 max episodes 36864 -> 18432; naive spurious 10-16 -> 0 benign / 10-12 cap32 / 16 cap128+512 adversarial; scan attribution 103.4% -> 104.1%; K1 sub-gate framing fixed (8/8 matching-regime, not 18/18).
+- Naive arm: 1,876 collateral true-kills total (sum of medians; 0 at adv=0; 681 at cap512a35r3); W(naive)/W(trained) 0.92-1.01; end accuracy heals to 1.000 (phase D re-installs). WS1-B assumption CONFIRMED: untrained deliberation unsafe. Recommend WS1-B add rule 5 (KB writes -> forced-conscious until the trained gate is earned).
+- Mechanistic WHY: autopilot's content-independent periodic full-tier scan tax (64-68% of its W); trained does zero scans, bounded early-exit finds, suppresses adversarial observations instead of installing+repairing (trained suppress count == auto dropped count per cell, e.g. 2151/2151 at cap512a35r3); trained is the only arm that never kills (kill=0 in all 18 cells).
+- Wall-vs-W: direction corroborated on 17/18 (median wall ratio 10.5); one noise cell (cap32a15r3 wall 0.86, smallest run) below the prereg's 1/3 flag threshold. Wall ratio amplifies W ratio (auto's counted steps do more byte-accessor work per step than trained's early-exit finds); clock too noisy for a clean numeric split.
+- Conditions map: direction holds in ALL 18 cells; the prereg's benign-flip prediction was wrong (R=2.77-2.97 at adv=0); regime-dependence rejected on this battery.
+- Next: commit sources + manifest + verdict (no binaries, no raw logs).
