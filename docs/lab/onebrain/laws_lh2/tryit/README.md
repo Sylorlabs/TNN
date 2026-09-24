@@ -60,7 +60,7 @@ DETERMINISM: 3/3 byte-identical
 ## Same files in the repo
 
 `docs/lab/onebrain/laws_lh2/tryit/` on branch `tnn-native-lab`,
-commit `REPO_SHA_PLACEHOLDER`.
+commit `1ccad2e0d039aea24d387cbf27443a461ebf8283`.
 
 ## Troubleshooting
 
