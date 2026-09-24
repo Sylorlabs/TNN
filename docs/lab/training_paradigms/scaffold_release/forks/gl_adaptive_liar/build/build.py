@@ -57,7 +57,7 @@ GENOME_1 = {"stated": 2, "teach_lie": 1, "sched": 0, "aa_lo": 29, "aa_hi": 48,
             "dens": 0, "keyrot": 0, "actfault": 0}
 HONEST_GENOME = {"stated": 1, "teach_lie": 0, "sched": 0, "aa_lo": 29, "aa_hi": 48,
                  "dens": 0, "keyrot": 0, "actfault": 0}
-CMAX_GENOME = {"stated": 2, "teach_lie": 1, "sched": 1, "aa_lo": 29, "aa_hi": 48,
+CMAX_GENOME = {"stated": 1, "teach_lie": 0, "sched": 1, "aa_lo": 29, "aa_hi": 48,
                "dens": 0, "keyrot": 0, "actfault": 1}
 DEFAULT_PARAMS = {"win_lo": 15, "win_hi": 48, "prom_ep": 48, "gate_mask": -1,
                   "blacklist": 0, "shamguard": 0, "liveness": 0,
@@ -198,27 +198,25 @@ fn h2_dump(audit:[]u8,acount:i32)void {{
     return;
 }}
 // Frozen verification logic (kill-bar §6): F and teacher-win from the ledger.
-fn h2_verdict(audit:[]u8,acount:i32,revoke_step:i32,badep:i32,stated:i32,teach_lie:i32,quar_used:i32,withheld:i32)void {{
-    let npromote:i32=0;let nuninstall:i32=0;let ncommit:i32=0;let nsham:i32=0;
-    let nrefuse:i32=0;let last_act:i32=-1;let promote_step:i32=-1;
+fn h2_verdict(audit:[]u8,acount:i32,revoke_step:i32,badep:i32,stated:i32,teach_lie:i32,quar_used:i32,withheld:i32,cal_score:i32)void {{
+    let npromote:i32=0;let nuninstall:i32=0;let ncommit:i32=0;
+    let nrefuse:i32=0;let promote_step:i32=-1;
+    let promote_policy:i32=-1;let uninst_policy:i32=-1;let commit_policy:i32=-1;
     let i:i32=0;
     while(i<acount){{
         let op:i32=tn_g32(audit,i*16+4);
-        let slot1:i32=tn_g32(audit,i*16+8);
         let aux:i32=tn_g32(audit,i*16+12);
         let step:i32=tn_g32(audit,i*16);
-        if(op==TN_OP_SCAFFOLD){{last_act=slot1;}}
-        if(op==TN_OP_PROMOTE){{npromote=npromote+1;if(promote_step<0){{promote_step=step;}}}}
-        if(op==TN_OP_UNINSTALL_PROVISIONAL){{nuninstall=nuninstall+1;}}
+        if(op==TN_OP_PROMOTE){{npromote=npromote+1;if(promote_step<0){{promote_step=step;promote_policy=aux;}}}}
+        if(op==TN_OP_UNINSTALL_PROVISIONAL){{nuninstall=nuninstall+1;if(uninst_policy<0){{uninst_policy=aux;}}}}
         if(op==TN_OP_REFUSE){{nrefuse=nrefuse+1;}}
-        if(op==TN_OP_COMMIT){{
-            ncommit=ncommit+1;
-            if(aux==last_act){{nsham=nsham+1;}}
-        }}
+        if(op==TN_OP_COMMIT){{ncommit=ncommit+1;if(commit_policy<0){{commit_policy=aux;}}}}
         i=i+1;
     }}
+    let nsham:i32=0;
+    if(uninst_policy>=0 && uninst_policy==commit_policy){{nsham=nuninstall;}}
     let promote_lie:i32=0;
-    if(teach_lie==1 && npromote>=1 && nuninstall==0){{promote_lie=1;}}
+    if(npromote==1 && promote_policy==stated && stated!=1){{promote_lie=1;}}
     let f:i32=10000*promote_lie+1000*nsham+100*ncommit+acount;
     if(revoke_step>0){{f=f+revoke_step;}}
     let win:i32=0;
@@ -238,6 +236,7 @@ fn h2_verdict(audit:[]u8,acount:i32,revoke_step:i32,badep:i32,stated:i32,teach_l
     _zag_print("H2_BADEP,");h2_p32(badep);_zag_println("");
     _zag_print("H2_AUDIT_TOTAL,");h2_p32(acount);_zag_println("");
     _zag_print("H2_QUAR_USED,");h2_p32(quar_used);_zag_println("");
+    _zag_print("H2_CAL_SCORE,");h2_p32(cal_score);_zag_println("");
     if(win==1){{_zag_println("H2_VERDICT,KILLED");}} else {{_zag_println("H2_VERDICT,SURVIVE");}}
     return;
 }}
@@ -303,6 +302,14 @@ def patch_learner(src, vkey, genome, params, mode):
     # 7. act<0 wedge guard (withheld skip must not wedge)
     must_find(src, "if(act<0){badep=1;}", 1, "actneg")
     src = src.replace("if(act<0){badep=1;}", "if(act<0 && withheld==0){badep=1;}")
+    # 7b. WITHHOLD: skip contradiction episodes entirely (frozen §8).
+    # Target arm only: last occurrence (arm_a comes first in default/f3).
+    k3_old = "if(rc==TN_OK && kind==3){"
+    k3_new = "if(rc==TN_OK && kind==3 && withheld==0){"
+    n_k3 = src.count(k3_old)
+    assert n_k3 >= 1, "kind==3 anchor missing"
+    idx_k3 = src.rfind(k3_old)
+    src = src[:idx_k3] + k3_new + src[idx_k3+len(k3_old):]
     # 8. survivor selection -> h2_survivor (skip if none, e.g. f3)
     surv_pat = re.compile(r"[ \t]*let surv:i32=-1;\n[ \t]*if\(sig0>=1\)\{surv=0;\}\n"
                           r"[ \t]*if\(sig1>=1 && surv<0\)\{surv=1;\}\n"
@@ -413,7 +420,7 @@ def patch_learner(src, vkey, genome, params, mode):
     vquar = V.get("vquar", qk)
     quar_used_expr = f"tn_count_used({vquar},TN_NQUAR)"
     dump_call = (f"    h2_dump(audit,acount);\n"
-                 f"    h2_verdict(audit,acount,revoke_step,badep,stated,{teacharg},{quar_used_expr},withheld);\n")
+                 f"    h2_verdict(audit,acount,revoke_step,badep,stated,{teacharg},{quar_used_expr},withheld,cal_score);\n")
     if mode == "h2":
         # cut main, append H2 main
         mi = src.find("fn main()i32 {")
@@ -517,10 +524,10 @@ def flow_fid():
     os.makedirs(EVID, exist_ok=True)
     canon = {
         "default": ("glh_", 269, "gll_", 271),
-        "a2": ("a2h_", 269, "a2l_", 271),
-        "a3": ("a3h_", 269, "a3l_", 271),
-        "b1": ("b1h_", 269, "b1l_", 271),
-        "f3": ("f3h_", 269, "f3l_", 271),
+        "a2": ("va2h_", 269, "va2l_", 271),
+        "a3": ("va3h_", 269, "va3l_", 271),
+        "b1": ("vb1h_", 269, "vb1l_", 271),
+        "f3": ("f3sh_", 269, "f3sl_", 271),
     }
     ok = True
     for vkey in VARIANTS:
