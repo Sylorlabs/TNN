@@ -1,0 +1,215 @@
+// delib_harness.zag — H5 deliberation-depth judge harness (Phase 1).
+//
+// Usage:
+//   delib_harness <items.jsonl> <depth.cfg> <results.jsonl> <ledger.jsonl>
+//
+// Reads judgment items (JSONL) and a depth config, runs the deliberative
+// judgment procedure (dlb_delib.zag) on each item, and writes:
+//   results.jsonl — one JSON object per item: id, task_type, verdict,
+//                   confidence, rounds_used, evidence_consumed, ground_truth,
+//                   correct, ledger_first, ledger_last, ledger_head
+//   ledger.jsonl  — SHA256-chained audit record of every deliberation step
+//
+// Determinism: no RNG, no timestamps, no PIDs. The same inputs always produce
+// byte-identical outputs. Exit code: 0 = all items clean; N>0 = N item errors;
+// 101 = config error; 102 = IO error; 103 = ledger error.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+
+fn dh_emit_result(res:*DOut,it:*Item,st:*DSt,first:i64,last:i64,lg:*LG)void {
+    dout_str(res,"{\"id\":\"");
+    dout_str(res,dj_id(it));
+    dout_str(res,"\",\"task_type\":\"");
+    dout_str(res,dj_tt(it));
+    dout_str(res,"\",\"verdict\":\"");
+    dout_str(res,dj_hid(it,st.*.leader));
+    dout_str(res,"\",\"confidence\":");
+    dout_i64(res,st.*.conf as i64);
+    dout_str(res,",\"rounds_used\":");
+    dout_i64(res,st.*.rounds as i64);
+    dout_str(res,",\"evidence_consumed\":");
+    dout_i64(res,st.*.consumed as i64);
+    dout_str(res,",\"ground_truth\":\"");
+    dout_str(res,dj_gt(it));
+    let corr:i32=0;
+    if(dlb_streq(dj_hid(it,st.*.leader),dj_gt(it))==1){corr=1;}
+    dout_str(res,"\",\"correct\":");
+    dout_i64(res,corr as i64);
+    dout_str(res,",\"ledger_first\":");
+    dout_i64(res,first);
+    dout_str(res,",\"ledger_last\":");
+    dout_i64(res,last);
+    dout_str(res,",\"ledger_head\":\"");
+    dout_str(res,lg_head_hex(lg));
+    dout_str(res,"\"}");
+    dout_line(res);
+}
+fn dh_emit_error(res:*DOut,lineno:i32,code:i32)void {
+    dout_str(res,"{\"line\":");
+    dout_i64(res,lineno as i64);
+    dout_str(res,",\"error\":\"E_PARSE_");
+    let s:[]u8=dlb_i64s(code as i64);
+    // code is negative; emit magnitude for readability
+    if(s.len>0 && s[0]==45){dout_str(res,s[1..s.len]);}
+    if(s.len==0 || s[0]!=45){dout_str(res,s);}
+    nio_free(s);
+    dout_str(res,"\"}");
+    dout_line(res);
+}
+fn dh_item_alloc(it:*Item)i32 {
+    it.*.hid=nio_alloc(16*8);
+    it.*.eid=nio_alloc(64*8);
+    it.*.evns=nio_alloc(64*4);
+    it.*.evna=nio_alloc(64*4);
+    it.*.sup=nio_alloc(64*16*8);
+    it.*.att=nio_alloc(64*16*8);
+    if(it.*.hid.len==0 || it.*.eid.len==0){return -1;}
+    return 0;
+}
+fn dh_item_free(it:*Item)void {
+    nio_free(it.*.hid);nio_free(it.*.eid);nio_free(it.*.evns);nio_free(it.*.evna);
+    nio_free(it.*.sup);nio_free(it.*.att);
+}
+fn dh_st_alloc(st:*DSt,hcap:i32)i32 {
+    st.*.scores=nio_alloc(16*8);
+    st.*.alive=nio_alloc(16);
+    st.*.hist_l=nio_alloc(hcap*4);
+    st.*.hist_m=nio_alloc(hcap*8);
+    st.*.hist_c=nio_alloc(hcap*4); // §12 amendment: per-round confidence history (c_0 := c_1 at slot 0)
+    st.*.hcap=hcap;
+    if(st.*.scores.len==0 || st.*.alive.len==0){return -1;}
+    return 0;
+}
+fn dh_st_free(st:*DSt)void {
+    nio_free(st.*.scores);nio_free(st.*.alive);
+    nio_free(st.*.hist_l);nio_free(st.*.hist_m);nio_free(st.*.hist_c);
+}
+fn dh_run(items_path:[]u8,cfg_path:[]u8,res_path:[]u8,led_path:[]u8)i32 {
+    // ---- config ----
+    let cfgbuf:[]u8=nio_alloc(8192);
+    if(cfgbuf.len==0){return 102;}
+    let cn:i64=dlb_read_file(cfg_path,cfgbuf);
+    if(cn<0){nio_free(cfgbuf);return 102;}
+    let cfg:DCfg=DCfg{.mode:-1,.shallow_rounds:-1,.deep_rounds:-1,.amin:-1,.amax:-1,.conf_thr:-1,.stab_win:-1,.eps:-1,.elim_margin:-1,.refute_thr:-1,.evcap:-1};
+    let crc:i32=dlb_cfg_parse(&cfg,cfgbuf,cn as i32);
+    nio_free(cfgbuf);
+    if(crc!=0){return 101;}
+    // ---- items ----
+    let ibuf:[]u8=nio_alloc(4194304);
+    if(ibuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(items_path,ibuf);
+    if(bn<0){nio_free(ibuf);return 102;}
+    let blen:i32=bn as i32;
+    // ---- item arenas ----
+    let it:Item=Item{.line:"",.id_off:-1,.id_len:0,.tt_off:-1,.tt_len:0,.gt_off:-1,.gt_len:0,.nh:0,.ne:0,.hid:"",.eid:"",.evns:"",.evna:"",.sup:"",.att:"",.maxh:16,.maxe:64,.maxl:16};
+    if(dh_item_alloc(&it)!=0){nio_free(ibuf);return 102;}
+    // ---- deliberation state ----
+    let maxr:i32=cfg.shallow_rounds;
+    if(cfg.deep_rounds>maxr){maxr=cfg.deep_rounds;}
+    if(cfg.amax>maxr){maxr=cfg.amax;}
+    let hcap:i32=maxr+2;
+    let st:DSt=DSt{.scores:"",.alive:"",.hist_l:"",.hist_m:"",.hist_c:"",.rounds:0,.consumed:0,.leader:-1,.margin:0,.conf:0,.hcap:hcap};
+    if(dh_st_alloc(&st,hcap)!=0){dh_item_free(&it);nio_free(ibuf);return 102;}
+    // ---- outputs ----
+    let res:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&res,4194304)!=0){return 102;}
+    if(dout_init(&lgo,8388608)!=0){return 102;}
+    let lg:LG=LG{.seq:0,.prev:"",.head:""};
+    if(lg_init(&lg)!=0){return 102;}
+    let ok:i32=1;
+    let rc:i32=lg_step(&lg,&lgo,"-",0,"GENESIS","delib_harness phase1");
+    if(rc==0){
+        let td:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+        if(dout_init(&td,1024)==0){
+            dlb_cfg_summary(&cfg,&td);
+            rc=lg_step(&lg,&lgo,"-",0,"CONFIG",dout_bytes(&td));
+            dout_free(&td);
+        }
+    }
+    if(rc!=0){ok=0;}
+    // ---- main loop over lines ----
+    let items:i32=0;let good:i32=0;let errs:i32=0;
+    let pos:i32=0;let lineno:i32=0;
+    while(pos<blen && ok==1){
+        let e:i32=pos;
+        while(e<blen && ibuf[e]!=10){e=e+1;}
+        lineno=lineno+1;
+        let line:[]u8=ibuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>65536){
+            dh_emit_error(&res,lineno,-20);
+            errs=errs+1;
+        }
+        if(line.len>0 && line.len<=65536){
+            items=items+1;
+            let prc:i32=dj_parse_item(&it,line,16,64,16);
+            if(prc!=0){
+                dh_emit_error(&res,lineno,prc);
+                let td2:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+                if(dout_init(&td2,256)==0){
+                    dout_str(&td2,"line=");
+                    dout_i64(&td2,lineno as i64);
+                    dout_str(&td2," code=");
+                    dout_i64(&td2,prc as i64);
+                    let lrc:i32=lg_step(&lg,&lgo,"-",lineno,"ERROR",dout_bytes(&td2));
+                    dout_free(&td2);
+                    if(lrc!=0){ok=0;}
+                }
+                errs=errs+1;
+            }
+            if(prc==0){
+                let first:i64=lg.seq;
+                let drc:i32=dlb_run(&st,&it,&cfg,&lg,&lgo);
+                if(drc!=0){ok=0;}
+                if(drc==0){
+                    let last:i64=lg.seq-1;
+                    dh_emit_result(&res,&it,&st,first,last,&lg);
+                    if(res.err!=0){ok=0;}
+                    if(lgo.err!=0){ok=0;}
+                    good=good+1;
+                }
+            }
+        }
+        pos=e+1;
+    }
+    // ---- write outputs ----
+    let wrc:i64=0;
+    if(ok==1 && res.err==0 && lgo.err==0){
+        wrc=dlb_write_file(res_path,dout_bytes(&res),res.n);
+        if(wrc>=0){wrc=dlb_write_file(led_path,dout_bytes(&lgo),lgo.n);}
+    }
+    nio_free(ibuf);
+    dh_item_free(&it);
+    dh_st_free(&st);
+    dout_free(&res);dout_free(&lgo);
+    lg_free(&lg);
+    // ---- stdout summary (not part of cmp'd outputs) ----
+    let sum:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&sum,256)==0){
+        dout_str(&sum,"items=");
+        dout_i64(&sum,items as i64);
+        dout_str(&sum," ok=");
+        dout_i64(&sum,good as i64);
+        dout_str(&sum," err=");
+        dout_i64(&sum,errs as i64);
+        dout_line(&sum);
+        _zag_print(dout_bytes(&sum));
+        dout_free(&sum);
+    }
+    if(ok==0 || wrc<0){return 103;}
+    return errs;
+}
+fn main()i32 {
+    if(_zag_argc()<5){
+        _zag_println("usage: delib_harness <items.jsonl> <depth.cfg> <results.jsonl> <ledger.jsonl>");
+        return 64;
+    }
+    // NOTE: _zag_arg returns a non-owned slice; never free it (AGENTS.md).
+    return dh_run(_zag_arg(1),_zag_arg(2),_zag_arg(3),_zag_arg(4));
+}
