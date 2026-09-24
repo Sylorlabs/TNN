@@ -28,4 +28,34 @@ Read and mapped:
   `ws2/fixtures/validate_battery.py` (build-time invariant checker).
 - Validator passes: PARA zero-overlap vs gold, NEG zero-overlap vs all,
   X1 dhint-mismatch, non-NEG queries token-matchable.
-- Frozen commit: _(pending)_
+- Frozen commit: `df0ea3ecf5c1377762c072f0476eb18abcbd9305`
+  (sylorlabs/TNN, tnn-native-lab) — committed BEFORE any probe run.
+
+## 2026-09-24 — battery amendment v1 → v1.1 (BEFORE any valid run)
+Defect found at first run: the query-file header comment contained 7 pipes,
+so `parse_queries` counted it as a 52nd phantom query. Fix: header comment
+rewritten (zero query bytes changed), version bumped to v1.1 in both
+fixture headers. Validator re-passed. The v1 run was discarded; all runs
+below are v1.1. (This is exactly the pre-declared amendment procedure.)
+
+## 2026-09-24 — harness built
+- `ws2/probe.zag`: instrumented driver reusing lib.zag primitives
+  (`build_tab`, `build_hay`, `is_candidate`, `tok_count`, `topk`,
+  `parse_queries`); per-query TSV trace
+  `qid|kind|scheme|installed|candidate|lvl|score|rank|top1|nret|outcome|fail`;
+  self-consistency check (trace predicate vs topk predicate).
+- `ws2/build.sh`, `ws2/run_battery.sh`, `ws2/analyze.py`,
+  `ws2/fixtures/calib.txt` (SELF choose).
+- All 4 binaries built clean first try with the pinned znc.
+
+## 2026-09-24 — run1 + run2 (v1.1), byte-identical
+Full rebuild + ingest (33 items; PD01 dedup→first) + choose (S6 everywhere)
++ census + 51-query trace × 3 arms, from clean dirs, twice.
+- census (all arms, pre+post): `6c257346868b794e8926e4eeb59d64a98c7149233b5d57c9e96765488e5a79f5`
+- trace_flat:    `a5ea1fb983ea984bc6edfb5d6d2e89f50832befd288b02bcf6f76a313b36c620`
+- trace_imposed: `e1dc6ad44c4e504444da38014cb59375f2fc99880bb9ac8f82355822e020073b`
+- trace_self:    `275c09b91468977b0ba48e82ee60c34eb0ccae94bc4d4827f6a3f276a0ddd08e`
+- inconsistencies=0 (both runs). run1 vs run2: all 6 files byte-identical.
+- Outcomes: FLAT 39 FOUND/6 TOKEN_MISS/6 FALSE_POSITIVE;
+  IMPOSED 28/17/6; SELF 39/6/6 (choose picked S6 for all domains+global).
+- Interim failure map: `ws2/WS2A_PRELIM.md`.

@@ -139,5 +139,11 @@ Corpus and query files are frozen at the commit recorded below; any later
 edit is a new battery version (bump `battery_version` in the files'
 header line, re-freeze, re-run everything).
 
-**Battery version:** v1
-**Frozen commit:** _(filled after commit — before any run)_
+**Battery version:** v1.1
+**Version history:**
+- v1 — initial freeze. Frozen commit:
+  `df0ea3ecf5c1377762c072f0476eb18abcbd9305` (committed before any run).
+- v1.1 — query-file header comment contained 7 pipes and parsed as a
+  phantom 52nd query; header rewritten, zero query bytes changed,
+  validator re-passed. Runs executed against v1.1. Frozen commit:
+  _(filled right after commit)_
