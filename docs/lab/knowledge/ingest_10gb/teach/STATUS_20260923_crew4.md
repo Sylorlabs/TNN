@@ -42,13 +42,14 @@ If job_wiki_crew4.sh is not running:
    batched clean → stage/wiki_run1.
 4. WARNING: `grep ^en1` falsely matches en14_ files. Use `find -name "en1_n*.xml"`.
 
-### IN PROGRESS (updated 2026-09-24 05:10 UTC)
-- **Wiki splits** (job_wiki_crew4.sh running):
-  en14 at 24,136 files (resume from daemon restart; in skip phase, will start
-  writing new files once it passes page 24,136).
-  Remaining: en14 (partial), en17, en19, en22, en24, en26, en27, en1 resume,
-  consolidate, clean. This is a ~40h long pole at ~7 pages/sec.
+### IN PROGRESS (updated 2026-09-24 06:21 UTC)
+- **Wiki splits** (job_wiki_crew4.sh running, 3rd start after 2 daemon restarts):
+  en14 at 40,338 files (in skip phase, will write once past page 40,338).
+  Remaining: en14 (~133K to go), en17, en19, en22, en24, en26, en27,
+  en1 resume, consolidate, clean. ~40h long pole at ~6/sec.
+  The script auto-resumes; just re-run it after any restart.
   Log: logs/wiki_splits_crew4.log.
+- **Commits**: f5c3fb26, e5abb692, a7cdb741, e67d193e, 28167ff8 (tnn-native-lab).
 
 ### Benchmark (crew 4)
 New split_wiki.py (read-accumulation) on en14 bz2: 934 pages / 180s = 5.2/sec —
