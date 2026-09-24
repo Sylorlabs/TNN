@@ -29,6 +29,9 @@ MODE_STATED = 3    # stated-policy-only scope (not in 760; separate)
 # Honest teacher genome (round 7, states CONTEST, standard world)
 GENOME_HONEST = [1, 0, 0, 29, 48, 0, 0, 0]
 
+# Default learner params (frozen)
+DEFAULT_LP = [15,48,48,-1,0,0,0,0,0]
+
 def sh(cmd, **kw):
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
     return r
@@ -325,7 +328,6 @@ def run_meta_controls(cells_dir, out_dir):
         3: [2,1,2,29,48,0,0,0],
         4: [2,1,2,29,48,0,0,0],
     }
-    DEFAULT_LP = [15,48,48,-1,0,0,0,0,0]
     for arch in ARCHES:
         name = f"cstatic_{ARCH_NAMES[arch]}"
         lines = []
@@ -356,6 +358,7 @@ def run_meta_controls(cells_dir, out_dir):
             lines.append(f"CTRL,cstatic,{','.join(str(x) for x in vals)}")
         ctrl_lines.append((name, lines))
     # C-noise: arch=9 teacher, per arch (use default variant; arch label for grouping)
+    # Uses DEFAULT_LP (frozen learner) so F flatness isolates teacher behavior.
     for arch in ARCHES:
         name = f"cnoise_{ARCH_NAMES[arch]}"
         lines = []
@@ -363,6 +366,8 @@ def run_meta_controls(cells_dir, out_dir):
         cur_genome = [2,1,0,29,48,0,0,0]
         for rnd in range(1, 7):
             ng, lp, sha = bat.run_teacher(9, rnd, cur_genome, MODE_FULL, evidence)
+            # Override lp with frozen defaults (C-noise isolates teacher; learner frozen)
+            lp = DEFAULT_LP
             tag = f"{name}_{rnd}"
             cell, binp = bat.get_cell("default", ng, lp, tag)
             out = bat.run_learner(binp)
