@@ -26,7 +26,7 @@ and no done-verdict. DONE = verdict committed. BLOCKED-ON-MICAH = needs his word
 | wave | status | last evidence | crew/agent | next action |
 |---|---|---|---|---|
 | r12_v4 round-3 fix | RUNNING | `znc r12_v4_r3.zag` compiling at 05:50Z (rt2fix3) | round-3 fix crew | none; verdict + fresh re-attack pending |
-| H2 revival (adaptive liar) | RUNNING | commits through 05:08Z `9e129e92`; gl_adaptive_liar battery.py live | H2 revival crew | none |
+| H2 revival (adaptive liar) | DONE (round 1) | prereg `6bb794a8`, evidence `2ee2b09a` (216 files); 630 runs byte-identical | H2 revival crew done | PROVISIONAL — §11 unsigned, no verdict language; successor prereg (A5/A7/C1, ROW-ATTEST, D-COST, D-ESCROW) not started |
 | live-ingestion hardening | RUNNING | 05:00Z LI-HARDEN-GLUE `9c959cd4` | LI-HARDEN crews | none |
 | bytegen deep investigation | RUNNING | 04:46Z `1d97706d`; local bytegen active 0h | bytegen crew | none |
 | memory self-org (MORG) | RUNNING | 05:02Z `03a1f171` fixtures+scorer | MORG crew 1 | none |
