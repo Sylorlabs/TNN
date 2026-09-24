@@ -1,0 +1,407 @@
+@import("vendor/R33_NATIVE_IO_V1.zag")
+@import("vendor/b303134_common_6e74ce54.zag")
+
+// x2_common.zag — B-3034X2 composition driver (frozen prereg 4b5d673f).
+// The 30+34 composition rebuilt as a REAL driver-owned mechanism:
+//   - real queue with CAP=40 (D2 triage is a capacity bound, not a comment)
+//   - real per-epoch principal verdict objects (duplicate/no-record rejection
+//     at presentation; K counted by the driver, never fixture-passed)
+//   - driver-owned monotonic clock with cross-call state (x2_reset never
+//     touches it); temporal rule t_verdict < t_dec evaluated on driver time
+//   - E_gap: gap marks + principal gap attestations bound to a driver sentinel
+//   - E-TIME: driver-owned epoch world; promotion-time re-verification
+//   - payload continuity across epochs (the D2 continuity the old he!=h0
+//     could never enforce); promotion ledger (no remint)
+//   - sink: the ONLY act_sink call site is the promotion path; fires iff
+//     the continuity-checked extra != 0 (reachable on extra-consistent
+//     goals, silent on false G because false G never promotes)
+//   - x2_decide_nop: the preregistered 34-half ablation (flat 30-half,
+//     static world, no K/temporal/gap/epoch machinery)
+// Pure Zag, zero RNG. State is one []u8 arena passed to every call
+// (no globals). All tables via []u8 LE32 accessors (ZNC-007).
+
+// ---------- state arena layout (byte offsets) ----------
+// 0: clk | 4: q_len | 8: o_len | 12: g_len | 16: l_len
+// 24: queue 40 x 40B (id,epoch,label,conf,meas,extra,seed,digest64,t_q)
+// 1624: objects 512 x 32B (id,epoch,bit,t_verdict,claimed64,is_gap,t_stored)
+// 18008: gap marks 128 x 8B (id,epoch)
+// 19032: promotion ledger 256 x 4B (id)
+//
+// Digests/bounds are 64-bit (j_tag bar: full-64-bit binding). All hash
+// outputs are non-negative (mod 2^31-1 mixing), so two LE32 halves suffice.
+fn t_put64(b:[]u8, o:i32, v:i64) void {
+    t_put32(b, o, v % 4294967296);
+    t_put32(b, o + 4, v / 4294967296);
+    return;
+}
+fn t_get64(b:[]u8, o:i32) i64 {
+    return t_get32(b, o) + t_get32(b, o + 4) * 4294967296;
+}
+fn x2_state_new() []u8 {
+    let st:[]u8 = nio_alloc(20480);
+    let i:i32 = 0;
+    while(i < 20480) { st[i] = 0; i = i + 1; }
+    return st;
+}
+fn x2_reset(st:[]u8) void {
+    t_put32(st, 4, 0);
+    t_put32(st, 8, 0);
+    t_put32(st, 12, 0);
+    t_put32(st, 16, 0);
+    return;
+}
+fn x2_now(st:[]u8) i64 { return t_get32(st, 0); }
+fn x2_tick(st:[]u8) i64 {
+    let c:i64 = t_get32(st, 0);
+    t_put32(st, 0, c + 1);
+    return c;
+}
+fn qoff(i:i32) i32 { return 24 + i * 40; }
+fn ooff(i:i32) i32 { return 1624 + i * 32; }
+fn goff(i:i32) i32 { return 18008 + i * 8; }
+fn loff(i:i32) i32 { return 19032 + i * 4; }
+
+// ---------- driver-owned world + digests ----------
+// E-TIME epoch world (driver-owned): the label flips at the promotion epoch.
+fn wle(id:i64, e:i64, seed:i64) i64 {
+    if(e < 2) { return wl(id, seed); }
+    return 1 - wl(id, seed);
+}
+fn dh6(a:i64, b:i64, c:i64, d:i64, e:i64, f:i64) i64 {
+    return th_mix(toyhash5(a, b, c, d, e), f);
+}
+fn gap_sentinel(id:i64, epoch:i64) i64 {
+    return toyhash3(id, epoch, 999);
+}
+
+// ---------- table scans ----------
+fn qfind(st:[]u8, id:i64, epoch:i64) i64 {
+    let n:i64 = t_get32(st, 4);
+    let i:i64 = 0;
+    while(i < n) {
+        let o:i32 = qoff(i as i32);
+        let eq:i64 = 0;
+        if(t_get32(st, o) == id) { eq = eq + 1; }
+        if(t_get32(st, o + 4) == epoch) { eq = eq + 1; }
+        if(eq == 2) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+fn ocount(st:[]u8, id:i64, epoch:i64) i64 {
+    let m:i64 = t_get32(st, 8);
+    let c:i64 = 0;
+    let i:i64 = 0;
+    while(i < m) {
+        let o:i32 = ooff(i as i32);
+        let eq:i64 = 0;
+        if(t_get32(st, o) == id) { eq = eq + 1; }
+        if(t_get32(st, o + 4) == epoch) { eq = eq + 1; }
+        if(eq == 2) { c = c + 1; }
+        i = i + 1;
+    }
+    return c;
+}
+fn ofind_first(st:[]u8, id:i64, epoch:i64) i64 {
+    let m:i64 = t_get32(st, 8);
+    let i:i64 = 0;
+    while(i < m) {
+        let o:i32 = ooff(i as i32);
+        let eq:i64 = 0;
+        if(t_get32(st, o) == id) { eq = eq + 1; }
+        if(t_get32(st, o + 4) == epoch) { eq = eq + 1; }
+        if(eq == 2) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+fn gmarked(st:[]u8, id:i64, epoch:i64) i32 {
+    let g:i64 = t_get32(st, 12);
+    let i:i64 = 0;
+    while(i < g) {
+        let o:i32 = goff(i as i32);
+        let eq:i64 = 0;
+        if(t_get32(st, o) == id) { eq = eq + 1; }
+        if(t_get32(st, o + 4) == epoch) { eq = eq + 1; }
+        if(eq == 2) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn lhas(st:[]u8, id:i64) i32 {
+    let n:i64 = t_get32(st, 16);
+    let i:i64 = 0;
+    while(i < n) {
+        if(t_get32(st, loff(i as i32)) == id) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------- retirement ----------
+// A decision consumes its presentation (AMENDMENT A1): the decided id's
+// queue records, verdict objects, and gap marks are removed on every
+// terminal decide path. The driver clock and promotion ledger are NEVER
+// retired (cross-call state).
+fn x2_retire(st:[]u8, id:i64) void {
+    let n:i64 = t_get32(st, 4);
+    let w:i64 = 0;
+    let r:i64 = 0;
+    while(r < n) {
+        if(t_get32(st, qoff(r as i32)) != id) {
+            if(w != r) {
+                let a:i32 = qoff(w as i32);
+                let b:i32 = qoff(r as i32);
+                let k:i32 = 0;
+                while(k < 40) { st[a + k] = st[b + k]; st[b + k] = 0; k = k + 1; }
+            }
+            w = w + 1;
+        }
+        r = r + 1;
+    }
+    t_put32(st, 4, w);
+    let m:i64 = t_get32(st, 8);
+    w = 0;
+    r = 0;
+    while(r < m) {
+        if(t_get32(st, ooff(r as i32)) != id) {
+            if(w != r) {
+                let a:i32 = ooff(w as i32);
+                let b:i32 = ooff(r as i32);
+                let k:i32 = 0;
+                while(k < 32) { st[a + k] = st[b + k]; st[b + k] = 0; k = k + 1; }
+            }
+            w = w + 1;
+        }
+        r = r + 1;
+    }
+    t_put32(st, 8, w);
+    let g:i64 = t_get32(st, 12);
+    w = 0;
+    r = 0;
+    while(r < g) {
+        if(t_get32(st, goff(r as i32)) != id) {
+            if(w != r) {
+                let a:i32 = goff(w as i32);
+                let b:i32 = goff(r as i32);
+                let k:i32 = 0;
+                while(k < 8) { st[a + k] = st[b + k]; st[b + k] = 0; k = k + 1; }
+            }
+            w = w + 1;
+        }
+        r = r + 1;
+    }
+    t_put32(st, 12, w);
+    return;
+}
+
+// ---------- presentation ----------
+// rc: 0 ok, 2 QUEUE_FULL
+fn x2_enqueue(st:[]u8, id:i64, epoch:i64, label:i64, conf:i64, meas:i64, extra:i64, seed:i64) i32 {
+    let n:i64 = t_get32(st, 4);
+    if(n >= 40) { return 2; }
+    let o:i32 = qoff(n as i32);
+    t_put32(st, o, id);
+    t_put32(st, o + 4, epoch);
+    t_put32(st, o + 8, label);
+    t_put32(st, o + 12, conf);
+    t_put32(st, o + 16, meas);
+    t_put32(st, o + 20, extra);
+    t_put32(st, o + 24, seed);
+    t_put64(st, o + 28, dh6(id, label, conf, meas, extra, seed));
+    t_put32(st, o + 36, x2_tick(st));
+    t_put32(st, 4, n + 1);
+    return 0;
+}
+// rc: 0 ok, 2 GAP_FULL
+fn x2_gap(st:[]u8, id:i64, epoch:i64) i32 {
+    let n:i64 = t_get32(st, 12);
+    if(n >= 128) { return 2; }
+    let o:i32 = goff(n as i32);
+    t_put32(st, o, id);
+    t_put32(st, o + 4, epoch);
+    t_put32(st, 12, n + 1);
+    x2_tick(st);
+    return 0;
+}
+// rc: 0 ok, 2 OBJ_FULL, 4 DUPLICATE, 5 NO_RECORD
+fn x2_verdict(st:[]u8, id:i64, epoch:i64, bit:i64, t_verdict:i64, claimed_bound:i64, is_gap:i64) i32 {
+    let m:i64 = t_get32(st, 8);
+    let i:i64 = 0;
+    while(i < m) {
+        let o:i32 = ooff(i as i32);
+        let eq:i64 = 0;
+        if(t_get32(st, o) == id) { eq = eq + 1; }
+        if(t_get32(st, o + 4) == epoch) { eq = eq + 1; }
+        if(t_get32(st, o + 12) == t_verdict) { eq = eq + 1; }
+        if(t_get64(st, o + 16) == claimed_bound) { eq = eq + 1; }
+        if(eq == 4) { return 4; }
+        i = i + 1;
+    }
+    let ok:i32 = 0;
+    if(is_gap == 1) {
+        if(gmarked(st, id, epoch) == 1) { ok = 1; }
+    } else {
+        if(qfind(st, id, epoch) != -1) { ok = 1; }
+    }
+    if(ok == 0) { return 5; }
+    if(m >= 512) { return 2; }
+    let o:i32 = ooff(m as i32);
+    t_put32(st, o, id);
+    t_put32(st, o + 4, epoch);
+    t_put32(st, o + 8, bit);
+    t_put32(st, o + 12, t_verdict);
+    t_put64(st, o + 16, claimed_bound);
+    t_put32(st, o + 24, is_gap);
+    t_put32(st, o + 28, x2_tick(st));
+    t_put32(st, 8, m + 1);
+    return 0;
+}
+
+// ---------- decision ----------
+// packed: bit0=promoted, bit1=sink_fired, bits2+=rc
+// rc: 0 OK, 2 FULL, 4 DUPLICATE, 5 NO_RECORD, 6 ALREADY_PROMOTED,
+//     7 PAYLOAD_SPLIT, 8 MISSING_EPOCH, 9 MULTI_OBJECT, 10 NO_CORROB,
+//     11 LATE, 12 BIND_FAIL, 13 EPOCH_FALSE
+fn x2_pack(promoted:i32, fired:i32, rc:i32) i64 {
+    return (promoted as i64) + (fired as i64) * 2 + (rc as i64) * 4;
+}
+fn x2_up_pr(r:i64) i32 {
+    if((r % 2) == 1) { return 1; }
+    return 0;
+}
+fn x2_up_fi(r:i64) i32 {
+    let q:i64 = r / 2;
+    if((q % 2) == 1) { return 1; }
+    return 0;
+}
+fn x2_up_rc(r:i64) i32 {
+    return ((r / 4) % 256) as i32;
+}
+fn x2_decide_inner(st:[]u8, id:i64, n_epochs:i64) i64 {
+    if(lhas(st, id) == 1) { return x2_pack(0, 0, 6); }
+    let t_dec:i64 = x2_tick(st);
+    let e:i64 = 0;
+    while(e < n_epochs) {
+        let cnt:i64 = ocount(st, id, e);
+        if(cnt == 0) { return x2_pack(0, 0, 8); }
+        if(cnt > 1) { return x2_pack(0, 0, 9); }
+        let oi:i64 = ofind_first(st, id, e);
+        let o:i32 = ooff(oi as i32);
+        let bit:i64 = t_get32(st, o + 8);
+        let tv:i64 = t_get32(st, o + 12);
+        let cb:i64 = t_get64(st, o + 16);
+        if(bit != 1) { return x2_pack(0, 0, 10); }
+        if(tv >= t_dec) { return x2_pack(0, 0, 11); }
+        let isge:i32 = gmarked(st, id, e);
+        let exp:i64 = 0;
+        if(isge == 1) {
+            exp = gap_sentinel(id, e);
+        } else {
+            let qi:i64 = qfind(st, id, e);
+            if(qi == -1) { return x2_pack(0, 0, 5); }
+            exp = t_get64(st, qoff(qi as i32) + 28);
+        }
+        if(cb != exp) { return x2_pack(0, 0, 12); }
+        if(isge == 0) {
+            let qi:i64 = qfind(st, id, e);
+            let qo:i32 = qoff(qi as i32);
+            let lab:i64 = t_get32(st, qo + 8);
+            let cf:i64 = t_get32(st, qo + 12);
+            let ms:i64 = t_get32(st, qo + 16);
+            let sd:i64 = t_get32(st, qo + 24);
+            let ok:i32 = 1;
+            if(lab != wle(id, e, sd)) { ok = 0; }
+            let dc:i64 = cf - wc(id, sd);
+            if(dc < 0) { dc = 0 - dc; }
+            if(dc > 10) { ok = 0; }
+            let dm:i64 = ms - wm(id, sd);
+            if(dm < 0) { dm = 0 - dm; }
+            if(dm > 50) { ok = 0; }
+            if(ok == 0) { return x2_pack(0, 0, 13); }
+        }
+        e = e + 1;
+    }
+    let ex0:i64 = 0;
+    let have:i32 = 0;
+    let split:i32 = 0;
+    e = 0;
+    while(e < n_epochs) {
+        if(gmarked(st, id, e) == 0) {
+            let qi:i64 = qfind(st, id, e);
+            let ex:i64 = t_get32(st, qoff(qi as i32) + 20);
+            if(have == 0) { ex0 = ex; have = 1; }
+            else { if(ex != ex0) { split = 1; } }
+        }
+        e = e + 1;
+    }
+    if(split == 1) { return x2_pack(0, 0, 7); }
+    let ln:i64 = t_get32(st, 16);
+    if(ln >= 256) { return x2_pack(0, 0, 2); }
+    t_put32(st, loff(ln as i32), id);
+    t_put32(st, 16, ln + 1);
+    let fired:i32 = 0;
+    if(ex0 != 0) { fired = 1; }
+    return x2_pack(1, fired, 0);
+}
+
+// ---------- the preregistered 34-half ablation ----------
+// x2_decide_nop_inner: the preregistered 34-half ablation (AMENDMENT A2).
+// The 30-half ALONE: find the first bit=1 non-gap verdict object with a
+// queued record for its epoch; require its bound to match the driver's
+// digest for that epoch's record; require that epoch's record label to
+// match the STATIC world wl(id,seed). Nops: the per-epoch K loop, the
+// driver-clock temporal check, the gap machinery, the E-TIME epoch world,
+// the payload-continuity rule. Same packing as x2_decide.
+fn x2_decide_nop_inner(st:[]u8, id:i64, n_epochs:i64) i64 {
+    if(lhas(st, id) == 1) { return x2_pack(0, 0, 6); }
+    x2_tick(st);
+    let m:i64 = t_get32(st, 8);
+    let found:i64 = -1;
+    let i:i64 = 0;
+    while(i < m) {
+        let o:i32 = ooff(i as i32);
+        let ok:i32 = 1;
+        if(found != -1) { ok = 0; }
+        if(t_get32(st, o) != id) { ok = 0; }
+        if(t_get32(st, o + 8) != 1) { ok = 0; }
+        if(t_get32(st, o + 24) != 0) { ok = 0; }
+        if(ok == 1) {
+            let ep:i64 = t_get32(st, o + 4);
+            if(qfind(st, id, ep) != -1) { found = i; }
+        }
+        i = i + 1;
+    }
+    if(found == -1) { return x2_pack(0, 0, 10); }
+    let fo:i32 = ooff(found as i32);
+    let fep:i64 = t_get32(st, fo + 4);
+    let fcb:i64 = t_get64(st, fo + 16);
+    let fqi:i64 = qfind(st, id, fep);
+    if(fcb != t_get64(st, qoff(fqi as i32) + 28)) { return x2_pack(0, 0, 12); }
+    // AMENDMENT A2: the 30-half alone checks the STATIC world only for the
+    // found object's epoch (no all-record scan — that scan made X2/X3a
+    // indistinguishable and X6 unsatisfiable).
+    let fqo:i32 = qoff(fqi as i32);
+    let fsd:i64 = t_get32(st, fqo + 24);
+    if(t_get32(st, fqo + 8) != wl(id, fsd)) { return x2_pack(0, 0, 13); }
+    let ex_first:i64 = t_get32(st, fqo + 20);
+    let ln:i64 = t_get32(st, 16);
+    if(ln >= 256) { return x2_pack(0, 0, 2); }
+    t_put32(st, loff(ln as i32), id);
+    t_put32(st, 16, ln + 1);
+    let fired:i32 = 0;
+    if(ex_first != 0) { fired = 1; }
+    return x2_pack(1, fired, 0);
+}
+
+// ---------- decide wrappers: retirement on every terminal path (A1) ----------
+fn x2_decide(st:[]u8, id:i64, n_epochs:i64) i64 {
+    let r:i64 = x2_decide_inner(st, id, n_epochs);
+    x2_retire(st, id);
+    return r;
+}
+fn x2_decide_nop(st:[]u8, id:i64, n_epochs:i64) i64 {
+    let r:i64 = x2_decide_nop_inner(st, id, n_epochs);
+    x2_retire(st, id);
+    return r;
+}
