@@ -1,0 +1,649 @@
+// ob_laws.zag — FABLE COMPOSITION LAWS engine (9 laws), one-brain variant B.
+//
+// ADDITIVE layer: no existing variant_b file is modified. The laws dispatch
+// wrapper (laws_process) verifies provenance PRE-EXECUTION and delegates
+// authenticated messages to the FROZEN arb_handle_one. Organ code never
+// touches the provenance registry (static check in run_ob_laws.sh).
+//
+// Pure Zag. Zero RNG. Byte-identical reruns required.
+//
+// Law map:
+//   1 N-AUTH ................. provenance envelope + registry + pre-execution verify
+//   2 weighted conflict ...... W_H>W_C>W_S>W_P, gap>delta wins else collision+escalate
+//   3 dependency DAG ......... promote/surface records depends_on; kill -> re-eval
+//   4 bounded deliberation ... exactly N=10 rounds on ties, then escalation
+//   5 provisional tagging .... visible but tagged; promotion untags; kill re-evals
+//   6 indep corroboration .... shared root counts once; unknown -> single-source
+//   7 escalation transparency . complete entries enforced by constructor
+//   8 quarantine rehab ....... un-quarantine only on corroborated independent evidence
+//   9 append-only revisions .. hash-chained log; replay byte-exact; forgery detected
+@import("ob_common.zag")
+@import("ob_tn.zag")
+@import("ob_fl2.zag")
+@import("ob_pam.zag")
+@import("ob_mem.zag")
+@import("ob_arbiter.zag")
+@import("../../toolchain/R33_NATIVE_SHA256_V2.zag")
+
+// ---- laws audit codes (301..311; never collide with M_*/MA_*/ARB_* codes) ----
+const LAWS_REFUSED_UNAUTH:i32=301; // REFUSED_UNAUTHENTICATED, pre-execution
+const LAWS_AUTH_OK:i32=302;        // message authenticated and executed
+const LAWS_ATTACK:i32=303;         // ledgered attack attempt (a1=claimed, a2=true emitter)
+const LAWS_WCOLLISION:i32=304;     // weight collision (a1=wc, a2=wi)
+const LAWS_ESCALATED:i32=305;      // escalation written (a1=esc id, a2=code)
+const LAWS_DELIB_WIN:i32=306;      // decided without escalation (a1=winner req, a2=weight)
+const LAWS_DEP_REEVAL:i32=307;     // dependency re-eval (a1=content, a2=cause base)
+const LAWS_QUAR:i32=308;           // quarantine rehab (a1=id, a2=1 lifted / 0 held)
+const LAWS_FORGE:i32=310;          // revision forgery detected (a1=first bad idx)
+const LAWS_REV:i32=311;            // legitimate revision appended (a1=seq)
+// refusal reasons (a2 of LAWS_REFUSED_UNAUTH):
+const LAWS_R_TAMPER:i32=1;         // content_hash mismatch
+const LAWS_R_FORGED_ID:i32=2;      // claimed requester_id != true emitter
+const LAWS_R_UNREG:i32=3;          // claimed id not registered
+const LAWS_R_REPLAY:i32=4;         // nonce not strictly increasing
+
+// ==================== LAW 1: N-AUTH (provenance authentication) ====
+// Requester ids: 0 ARBITER, 1 FL2, 2 PAM, 3 MEM (ob_common.zag), 4 EXT.
+const ORG_EXT:i32=4;
+const LAWS_NID:i32=5;
+const LREG_STRIDE:i32=16; // {registered(4), last_nonce(4), issued(4), reserved(4)}
+// seal flag word at LAWS_NID*LREG_STRIDE.
+
+fn laws_registry_new()[]u8 {
+    return ob_alloc(LAWS_NID*LREG_STRIDE+4);
+}
+
+// Governance setup: register all five ids, zero counters. Called once.
+fn laws_registry_open(reg:[]u8)i32 {
+    let i:i32=0;
+    while(i<LAWS_NID){
+        ob_s32(reg,i*LREG_STRIDE,1);
+        ob_s32(reg,i*LREG_STRIDE+4,0);
+        ob_s32(reg,i*LREG_STRIDE+8,0);
+        i=i+1;
+    }
+    return 0;
+}
+
+// Governance closes registration. After this, laws_reg_write REFUSES.
+fn laws_registry_seal(reg:[]u8)i32 {
+    ob_s32(reg,LAWS_NID*LREG_STRIDE,1);
+    return 0;
+}
+
+fn laws_registry_sealed(reg:[]u8)i32 {
+    return ob_g32(reg,LAWS_NID*LREG_STRIDE);
+}
+
+// Governance-only registry write. REFUSES (301 family) once sealed.
+// Organ sources must never reference this function (static check).
+fn laws_reg_write(reg:[]u8,id:i32)i32 {
+    if(laws_registry_sealed(reg)==1){ return LAWS_REFUSED_UNAUTH; }
+    if(id<0 || id>=LAWS_NID){ return -1; }
+    ob_s32(reg,id*LREG_STRIDE,1);
+    ob_s32(reg,id*LREG_STRIDE+4,0);
+    ob_s32(reg,id*LREG_STRIDE+8,0);
+    return 0;
+}
+
+fn laws_reg_nonce(reg:[]u8,id:i32)i32 {
+    return ob_g32(reg,id*LREG_STRIDE+4);
+}
+
+// Canonical hash input: 28 LE bytes {domain, mtype, a1, a2, claimed, nonce, 0}.
+fn laws_hash_msg(mtype:i32,a1:i32,a2:i32,claimed:i32,nonce:i32,out:[]u8)i32 {
+    let b:[]u8=ob_alloc(28);
+    ob_s32(b,0,1279619411); // "LAWS" domain separator
+    ob_s32(b,4,mtype); ob_s32(b,8,a1); ob_s32(b,12,a2);
+    ob_s32(b,16,claimed); ob_s32(b,20,nonce); ob_s32(b,24,0);
+    let rc:i32=ns_sha256(b,out);
+    ob_free(b);
+    return rc;
+}
+
+fn laws_hash_eq(a:[]u8,b:[]u8)i32 {
+    let i:i32=0; let d:i32=0;
+    while(i<32){ if(a[i]!=b[i]){ d=1; } i=i+1; }
+    return d; // 0 = equal
+}
+
+// Provenance sidecar: 48 bytes/entry {true_emitter, claimed, nonce, hash[32], pad[4]}.
+const LPROV_STRIDE:i32=48;
+fn laws_prov_new(cap:i32)[]u8 {
+    return ob_alloc(cap*LPROV_STRIDE);
+}
+
+// Honest emit path (arbiter receipt): claimed must be registered; nonce is
+// issued as issued+1 (strictly increasing per requester). The registry bump
+// here is RECEIPT bookkeeping, not the requesting organ rewriting its own
+// registration (registration bits are untouched after seal).
+fn laws_emit(q:[]u8,qn:*i32,cap:i32,prov:[]u8,ep:i32,reg:[]u8,
+    true_emitter:i32,claimed:i32,mtype:i32,a1:i32,a2:i32)i32 {
+    if(claimed<0 || claimed>=LAWS_NID){ return -1; }
+    if(ob_g32(reg,claimed*LREG_STRIDE)==0){ return -2; }
+    let n:i32=qn.*;
+    if(n<0 || n>=cap){ return -3; }
+    let nonce:i32=ob_g32(reg,claimed*LREG_STRIDE+8)+1;
+    ob_s32(reg,claimed*LREG_STRIDE+8,nonce);
+    let h:[]u8=ob_alloc(32);
+    laws_hash_msg(mtype,a1,a2,claimed,nonce,h);
+    ob_s32(q,n*16,(ep<<16)|n);
+    ob_s32(q,n*16+4,mtype); ob_s32(q,n*16+8,a1); ob_s32(q,n*16+12,a2);
+    let po:i32=n*LPROV_STRIDE;
+    ob_s32(prov,po,true_emitter); ob_s32(prov,po+4,claimed); ob_s32(prov,po+8,nonce);
+    ob_copy(prov[po+12..po+44],h,32);
+    ob_free(h);
+    qn.*=n+1;
+    return 0;
+}
+
+// Harness/attack emit path: writes EXACTLY the envelope it is told, touching
+// no registry state. Models what an attacker (or a faulty channel) delivers.
+fn laws_emit_raw(q:[]u8,qn:*i32,cap:i32,prov:[]u8,ep:i32,
+    true_emitter:i32,claimed:i32,nonce:i32,hash:[]u8,
+    mtype:i32,a1:i32,a2:i32)i32 {
+    let n:i32=qn.*;
+    if(n<0 || n>=cap){ return -1; }
+    ob_s32(q,n*16,(ep<<16)|n);
+    ob_s32(q,n*16+4,mtype); ob_s32(q,n*16+8,a1); ob_s32(q,n*16+12,a2);
+    let po:i32=n*LPROV_STRIDE;
+    ob_s32(prov,po,true_emitter); ob_s32(prov,po+4,claimed); ob_s32(prov,po+8,nonce);
+    ob_copy(prov[po+12..po+44],hash,32);
+    qn.*=n+1;
+    return 0;
+}
+
+// Honest external-overseer path: true emitter IS the EXT channel.
+// Only governance/test setup may call this (static discipline: organs never do).
+fn laws_emit_ext(q:[]u8,qn:*i32,cap:i32,prov:[]u8,ep:i32,reg:[]u8,
+    mtype:i32,a1:i32,a2:i32)i32 {
+    return laws_emit(q,qn,cap,prov,ep,reg,ORG_EXT,ORG_EXT,mtype,a1,a2);
+}
+
+// Laws dispatch: verify EVERY message pre-execution, then delegate
+// authenticated messages to the frozen arb_handle_one. Refused messages are
+// ledgered (301 + 303) and their queue entry zeroed so the C3/C7
+// contradiction-window scan never sees them. NOTHING refused is executed.
+fn laws_process(ep:i32,q:[]u8,qn:*i32,prov:[]u8,reg:[]u8,
+    ast:[]u8,routes:[]u8,alog:[]u8,aln:*i32,
+    pam:[]u8,fl2log:[]u8,fl2ln:i32,
+    live:[]u8,value:[]u8,pinned:[]u8,region:[]u8,tier:[]u8,step:[]u8,
+    maudit:[]u8,hdr:[]u8,trust:[]u8)i32 {
+    let n:i32=qn.*;
+    let cal:i32=arb_cal_score(fl2log,fl2ln);
+    // P5: arbiter assigns seq at receipt, exactly as arb_process does.
+    let i:i32=0;
+    while(i<n){ ob_s32(q,i*16,(ep<<16)|i); i=i+1; }
+    i=0;
+    while(i<n){
+        let po:i32=i*LPROV_STRIDE;
+        let te:i32=ob_g32(prov,po);
+        let cl:i32=ob_g32(prov,po+4);
+        let nonce:i32=ob_g32(prov,po+8);
+        let mtype:i32=ob_g32(q,i*16+4);
+        let a1:i32=ob_g32(q,i*16+8);
+        let a2:i32=ob_g32(q,i*16+12);
+        let h:[]u8=ob_alloc(32);
+        laws_hash_msg(mtype,a1,a2,cl,nonce,h);
+        let bad:i32=0; let reason:i32=0;
+        if(laws_hash_eq(h,prov[po+12..po+44])!=0){ bad=1; reason=LAWS_R_TAMPER; }
+        if(bad==0 && cl!=te){ bad=1; reason=LAWS_R_FORGED_ID; }
+        if(bad==0 && (cl<0 || cl>=LAWS_NID || ob_g32(reg,cl*LREG_STRIDE)==0)){
+            bad=1; reason=LAWS_R_UNREG;
+        }
+        if(bad==0 && nonce<=ob_g32(reg,cl*LREG_STRIDE+4)){ bad=1; reason=LAWS_R_REPLAY; }
+        ob_free(h);
+        if(bad==1){
+            arb_audit(alog,aln,ep,LAWS_REFUSED_UNAUTH,mtype,reason);
+            arb_audit(alog,aln,ep,LAWS_ATTACK,cl,te);
+            ob_s32(q,i*16+4,0);
+        } else {
+            ob_s32(reg,cl*LREG_STRIDE+4,nonce);
+            arb_audit(alog,aln,ep,LAWS_AUTH_OK,cl,mtype);
+            arb_handle_one(ep,mtype,a1,a2,q,n,i,ast,routes,alog,aln,pam,cal,
+                live,value,pinned,region,tier,step,maudit,hdr,trust);
+        }
+        i=i+1;
+    }
+    qn.*=0;
+    return 0;
+}
+
+// ==================== LAW 7: escalation transparency ============
+// Escalation entry: 10 words (40B):
+//   {id, a_req, a_nonce, b_req, b_nonce, hist_off, hist_n, sum_off, sum_len, code}
+// Both sides' provenance + deliberation-history slice + human-readable
+// summary are MANDATORY. laws_escalate REFUSES to write an entry with any
+// field missing (returns negative, writes nothing). Law 7's kill bar:
+// one missing-field escalation in the log FAILs the law.
+const LESC_STRIDE:i32=40;
+const LESC_F_ID:i32=0; const LESC_F_AREQ:i32=1; const LESC_F_ANONCE:i32=2;
+const LESC_F_BREQ:i32=3; const LESC_F_BNONCE:i32=4;
+const LESC_F_HISTOFF:i32=5; const LESC_F_HISTN:i32=6;
+const LESC_F_SUMOFF:i32=7; const LESC_F_SUMLEN:i32=8; const LESC_F_CODE:i32=9;
+
+fn laws_esc_new(cap:i32)[]u8 { return ob_alloc(cap*LESC_STRIDE); }
+fn laws_esc_sum_new(cap:i32)[]u8 { return ob_alloc(cap); }
+// Deliberation history: 16B entries {round, side, note0, note1}.
+fn laws_dh_new(cap:i32)[]u8 { return ob_alloc(cap*16); }
+fn laws_dh_add(dh:[]u8,dhn:*i32,cap:i32,round:i32,side:i32,n0:i32,n1:i32)i32 {
+    let n:i32=dhn.*;
+    if(n<0 || n>=cap){ return -1; }
+    ob_s32(dh,n*16,round); ob_s32(dh,n*16+4,side);
+    ob_s32(dh,n*16+8,n0); ob_s32(dh,n*16+12,n1);
+    dhn.*=n+1;
+    return 0;
+}
+
+fn laws_escalate(el:[]u8,eln:*i32,elcap:i32,els:[]u8,elsn:*i32,elscap:i32,dh:[]u8,
+    a_req:i32,a_nonce:i32,b_req:i32,b_nonce:i32,
+    hist_off:i32,hist_n:i32,summ:[]u8,code:i32)i32 {
+    // Completeness gate: ANY missing field -> refuse, write nothing.
+    if(a_req<0 || b_req<0 || a_nonce<0 || b_nonce<0){ return -1; }
+    if(hist_n<1){ return -1; }
+    if(summ.len<1){ return -1; }
+    let n:i32=eln.*;
+    if(n<0 || n>=elcap){ return -2; }
+    let sn:i32=elsn.*;
+    if(sn<0 || sn+summ.len>elscap){ return -2; }
+    let eo:i32=n*LESC_STRIDE;
+    ob_s32(el,eo,n);
+    ob_s32(el,eo+4,a_req); ob_s32(el,eo+8,a_nonce);
+    ob_s32(el,eo+12,b_req); ob_s32(el,eo+16,b_nonce);
+    ob_s32(el,eo+20,hist_off); ob_s32(el,eo+24,hist_n);
+    ob_s32(el,eo+28,sn); ob_s32(el,eo+32,summ.len); ob_s32(el,eo+36,code);
+    ob_copy(els[sn..sn+summ.len],summ,summ.len);
+    elsn.*=sn+summ.len;
+    eln.*=n+1;
+    return n;
+}
+
+fn laws_esc_field(el:[]u8,id:i32,f:i32)i32 {
+    return ob_g32(el,id*LESC_STRIDE+f*4);
+}
+
+// ==================== LAW 2: weighted conflict resolution ======
+// Frozen test values: W_H=100 > W_C=60 > W_S=40 > W_P=20, delta=20.
+// Governance-tunable via laws_weights_set. Higher weight wins iff
+// gap > delta; else COLLISION is ledgered and the conflict escalates.
+const LW_D_H:i32=100; const LW_D_C:i32=60; const LW_D_S:i32=40;
+const LW_D_P:i32=20; const LW_D_D:i32=20;
+// wctx: 6 words {W_H, W_C, W_S, W_P, DELTA, collisions}
+fn laws_wctx_new()[]u8 {
+    let w:[]u8=ob_alloc(24);
+    ob_s32(w,0,LW_D_H); ob_s32(w,4,LW_D_C); ob_s32(w,8,LW_D_S);
+    ob_s32(w,12,LW_D_P); ob_s32(w,16,LW_D_D); ob_s32(w,20,0);
+    return w;
+}
+
+fn laws_weights_set(wctx:[]u8,h:i32,c:i32,s:i32,p:i32,d:i32)i32 {
+    ob_s32(wctx,0,h); ob_s32(wctx,4,c); ob_s32(wctx,8,s);
+    ob_s32(wctx,12,p); ob_s32(wctx,16,d);
+    return 0;
+}
+
+fn laws_gap(a:i32,b:i32)i32 {
+    let g:i32=a-b;
+    if(g<0){ g=0-g; }
+    return g;
+}
+
+// Returns 1 (challenger wins), 0 (incumbent holds), 2 (collision->escalated).
+fn laws_weighted_decide(wctx:[]u8,wc:i32,wi:i32,cid:i32,iid:i32,
+    alog:[]u8,aln:*i32,ep:i32,
+    el:[]u8,eln:*i32,elcap:i32,els:[]u8,elsn:*i32,elscap:i32,
+    dh:[]u8,dhn:*i32,dhcap:i32,summ:[]u8)i32 {
+    let delta:i32=ob_g32(wctx,16);
+    let gap:i32=laws_gap(wc,wi);
+    if(gap>delta){
+        if(wc>wi){ arb_audit(alog,aln,ep,LAWS_DELIB_WIN,cid,wc); return 1; }
+        arb_audit(alog,aln,ep,LAWS_DELIB_WIN,iid,wi);
+        return 0;
+    }
+    let cc:i32=ob_g32(wctx,20)+1;
+    ob_s32(wctx,20,cc);
+    arb_audit(alog,aln,ep,LAWS_WCOLLISION,wc,wi);
+    // The decide record itself is the deliberation history for this
+    // escalation, so the law-7 history field is never empty.
+    let ho:i32=dhn.*;
+    laws_dh_add(dh,dhn,dhcap,0,-1,gap,delta);
+    let esc:i32=laws_escalate(el,eln,elcap,els,elsn,elscap,dh,
+        cid,0,iid,0,ho,1,summ,2);
+    arb_audit(alog,aln,ep,LAWS_ESCALATED,esc,2);
+    return 2;
+}
+
+// ==================== LAW 4: bounded deliberation ==============
+// Frozen bound N=10. Tied weights (|gap| <= delta) run EXACTLY N rounds
+// (2N history entries), then escalate. More than N rounds is
+// unrepresentable (hard bound below); a silent winner is unrepresentable
+// (every terminal path writes a ledger entry).
+const LAWS_DELIB_N:i32=10;
+
+fn laws_deliberate(wctx:[]u8,dh:[]u8,dhn:*i32,dhcap:i32,
+    el:[]u8,eln:*i32,elcap:i32,els:[]u8,elsn:*i32,elscap:i32,
+    alog:[]u8,aln:*i32,ep:i32,
+    wa:i32,wb:i32,a_req:i32,a_nonce:i32,b_req:i32,b_nonce:i32,summ:[]u8)i32 {
+    let delta:i32=ob_g32(wctx,16);
+    let gap:i32=laws_gap(wa,wb);
+    if(gap>delta){
+        if(wa>wb){ arb_audit(alog,aln,ep,LAWS_DELIB_WIN,a_req,wa); return 1; }
+        arb_audit(alog,aln,ep,LAWS_DELIB_WIN,b_req,wb);
+        return 0;
+    }
+    let ho:i32=dhn.*;
+    let r:i32=0;
+    while(r<LAWS_DELIB_N){
+        laws_dh_add(dh,dhn,dhcap,r,a_req,wa,wb);
+        laws_dh_add(dh,dhn,dhcap,r,b_req,wb,wa);
+        r=r+1;
+    }
+    let esc:i32=laws_escalate(el,eln,elcap,els,elsn,elscap,dh,
+        a_req,a_nonce,b_req,b_nonce,ho,2*LAWS_DELIB_N,summ,4);
+    arb_audit(alog,aln,ep,LAWS_ESCALATED,esc,4);
+    return 2;
+}
+
+// ============ LAWS 3+5: dependency DAG + provisional tagging =====
+// Content store: LC_CMAX ids x 12B {state, tag, live}.
+//   state: 0 absent, 1 provisional, 2 committed. tag=1 means provisional
+//   (law 5: visible but TAGGED). live=1 means currently in force.
+// Law 5: provisional content is VISIBLE (query returns live even when
+// provisional); downstream conclusions inherit DEPENDS_ON_PROVISIONAL;
+// promotion REMOVES the tag; kill triggers re-eval via law 3.
+const LC_CMAX:i32=32;
+const LC_STRIDE:i32=12;
+fn laws_lc_new()[]u8 { return ob_alloc(LC_CMAX*LC_STRIDE); }
+fn laws_lc_state(lc:[]u8,id:i32)i32 { return ob_g32(lc,id*LC_STRIDE); }
+fn laws_lc_tag(lc:[]u8,id:i32)i32 { return ob_g32(lc,id*LC_STRIDE+4); }
+fn laws_lc_live(lc:[]u8,id:i32)i32 { return ob_g32(lc,id*LC_STRIDE+8); }
+
+fn laws_content_install(lc:[]u8,id:i32,provisional:i32)i32 {
+    if(id<0 || id>=LC_CMAX){ return -1; }
+    if(provisional==1){
+        ob_s32(lc,id*LC_STRIDE,1); ob_s32(lc,id*LC_STRIDE+4,1);
+    } else {
+        ob_s32(lc,id*LC_STRIDE,2); ob_s32(lc,id*LC_STRIDE+4,0);
+    }
+    ob_s32(lc,id*LC_STRIDE+8,1);
+    return 0;
+}
+
+// Law 5: promotion removes the tag.
+fn laws_content_promote(lc:[]u8,id:i32)i32 {
+    if(id<0 || id>=LC_CMAX){ return -1; }
+    ob_s32(lc,id*LC_STRIDE,2);
+    ob_s32(lc,id*LC_STRIDE+4,0);
+    return 0;
+}
+
+// Dependency edges: 8B {dep, base}.
+fn laws_dep_new(cap:i32)[]u8 { return ob_alloc(cap*8); }
+fn laws_dep_add(deps:[]u8,depn:*i32,cap:i32,dep:i32,base:i32)i32 {
+    let n:i32=depn.*;
+    if(n<0 || n>=cap){ return -1; }
+    ob_s32(deps,n*8,dep); ob_s32(deps,n*8+4,base);
+    depn.*=n+1;
+    return 0;
+}
+
+// Law 3: derive records the dependency. Law 5: the child inherits
+// DEPENDS_ON_PROVISIONAL when the base is tagged.
+fn laws_content_derive(lc:[]u8,deps:[]u8,depn:*i32,dcap:i32,child:i32,base:i32)i32 {
+    laws_content_install(lc,child,1);
+    laws_dep_add(deps,depn,dcap,child,base);
+    if(laws_lc_tag(lc,base)==1){ ob_s32(lc,child*LC_STRIDE+4,1); }
+    return 0;
+}
+
+fn laws_dep_has_live_base(lc:[]u8,deps:[]u8,depn:i32,dep:i32)i32 {
+    let i:i32=0; let f:i32=0;
+    while(i<depn){
+        if(ob_g32(deps,i*8)==dep && laws_lc_live(lc,ob_g32(deps,i*8+4))==1){ f=1; }
+        i=i+1;
+    }
+    return f;
+}
+
+fn laws_dep_has_any_edge(deps:[]u8,depn:i32,dep:i32)i32 {
+    let j:i32=0; let e:i32=0;
+    while(j<depn){ if(ob_g32(deps,j*8)==dep){ e=1; } j=j+1; }
+    return e;
+}
+
+// Re-evaluation ledger: 20B entries {ep, content, old_live, new_live, cause}.
+// A dependent with edges but NO live base is revoked; one with another live
+// base (independent corroboration) survives. Fixpoint over the edge set.
+fn laws_dep_reeval(lc:[]u8,deps:[]u8,depn:i32,ep:i32,cause:i32,
+    evl:[]u8,evn:*i32,evcap:i32,alog:[]u8,aln:*i32)i32 {
+    let changed:i32=1;
+    while(changed==1){
+        changed=0;
+        let i:i32=0;
+        while(i<depn){
+            let dep:i32=ob_g32(deps,i*8);
+            if(laws_lc_live(lc,dep)==1 && laws_dep_has_any_edge(deps,depn,dep)==1
+                && laws_dep_has_live_base(lc,deps,depn,dep)==0){
+                ob_s32(lc,dep*LC_STRIDE+8,0);
+                let n:i32=evn.*;
+                if(n>=0 && n<evcap){
+                    ob_s32(evl,n*20,ep); ob_s32(evl,n*20+4,dep);
+                    ob_s32(evl,n*20+8,1); ob_s32(evl,n*20+12,0);
+                    ob_s32(evl,n*20+16,cause);
+                    evn.*=n+1;
+                }
+                arb_audit(alog,aln,ep,LAWS_DEP_REEVAL,dep,cause);
+                changed=1;
+            }
+            i=i+1;
+        }
+    }
+    return 0;
+}
+
+// mode 0 = EAGER (preregistered law behavior): re-eval at kill time.
+// mode 1 = LAZY (measured): re-eval deferred to query time.
+fn laws_content_kill(lc:[]u8,deps:[]u8,depn:i32,dcap:i32,id:i32,ep:i32,mode:i32,
+    evl:[]u8,evn:*i32,evcap:i32,pk:[]u8,pkn:*i32,alog:[]u8,aln:*i32)i32 {
+    if(id<0 || id>=LC_CMAX){ return -1; }
+    ob_s32(lc,id*LC_STRIDE+8,0);
+    if(mode==0){
+        laws_dep_reeval(lc,deps,depn,ep,id,evl,evn,evcap,alog,aln);
+    } else {
+        let n:i32=pkn.*;
+        ob_s32(pk,n*4,id);
+        pkn.*=n+1;
+    }
+    return 0;
+}
+
+// Law 5 visibility: query returns live even for provisional content.
+// Lazy mode drains the pending-kill list here (re-eval at query).
+fn laws_content_query(lc:[]u8,deps:[]u8,depn:i32,dcap:i32,id:i32,ep:i32,
+    evl:[]u8,evn:*i32,evcap:i32,pk:[]u8,pkn:*i32,alog:[]u8,aln:*i32)i32 {
+    let n:i32=pkn.*;
+    if(n>0){
+        let k:i32=0;
+        while(k<n){
+            laws_dep_reeval(lc,deps,depn,ep,ob_g32(pk,k*4),evl,evn,evcap,alog,aln);
+            k=k+1;
+        }
+        pkn.*=0;
+    }
+    return laws_lc_live(lc,id);
+}
+
+// ==================== LAW 6: independence-aware corroboration ==
+// Source registry: LS_SMAX x 4B {root}. root=-1 (or unset) = unknown
+// independence. Sources sharing a root count as ONE source; unknown
+// independence -> the corroboration set is treated as SINGLE-SOURCE.
+const LS_SMAX:i32=16;
+fn laws_src_new()[]u8 {
+    let s:[]u8=ob_alloc(LS_SMAX*4);
+    let i:i32=0;
+    while(i<LS_SMAX){ ob_s32(s,i*4,-2); i=i+1; }
+    return s;
+}
+fn laws_src_add(src:[]u8,id:i32,root:i32)i32 {
+    if(id<0 || id>=LS_SMAX){ return -1; }
+    ob_s32(src,id*4,root);
+    return 0;
+}
+fn laws_src_root(src:[]u8,id:i32)i32 { return ob_g32(src,id*4); }
+
+fn laws_effective_sources(src:[]u8,ids:[]u8,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let r:i32=laws_src_root(src,ob_g32(ids,i*4));
+        if(r<0){ return 1; }
+        i=i+1;
+    }
+    let roots:[]u8=ob_alloc(n*4);
+    let nr:i32=0;
+    i=0;
+    while(i<n){
+        let r:i32=laws_src_root(src,ob_g32(ids,i*4));
+        let j:i32=0; let seen:i32=0;
+        while(j<nr){ if(ob_g32(roots,j*4)==r){ seen=1; } j=j+1; }
+        if(seen==0){ ob_s32(roots,nr*4,r); nr=nr+1; }
+        i=i+1;
+    }
+    ob_free(roots);
+    return nr;
+}
+
+const PROMOTE_MIN_INDEP:i32=2;
+fn laws_corroborate(src:[]u8,ids:[]u8,n:i32)i32 {
+    if(laws_effective_sources(src,ids,n)>=PROMOTE_MIN_INDEP){ return 1; }
+    return 0;
+}
+// The naive baseline the law replaces: pure vote counting.
+fn laws_vote_baseline(n:i32)i32 {
+    if(n>=PROMOTE_MIN_INDEP){ return 1; }
+    return 0;
+}
+
+// ==================== LAW 8: quarantine rehabilitation =========
+// Un-quarantine ONLY on corroborated independent evidence. Frozen
+// threshold: QUAR_REHAB_MIN_INDEP effectively-independent sources.
+const LQ_QMAX:i32=16;
+const QUAR_REHAB_MIN_INDEP:i32=2;
+fn laws_quar_new()[]u8 { return ob_alloc(LQ_QMAX*4); }
+fn laws_quarantine(q:[]u8,id:i32)i32 {
+    if(id<0 || id>=LQ_QMAX){ return -1; }
+    ob_s32(q,id*4,1);
+    return 0;
+}
+fn laws_quar_state(q:[]u8,id:i32)i32 { return ob_g32(q,id*4); }
+fn laws_rehab(q:[]u8,src:[]u8,id:i32,ev_ids:[]u8,n:i32,
+    alog:[]u8,aln:*i32,ep:i32)i32 {
+    if(id<0 || id>=LQ_QMAX){ return -1; }
+    if(ob_g32(q,id*4)==0){ return -2; }
+    if(n<1){ arb_audit(alog,aln,ep,LAWS_QUAR,id,0); return 0; }
+    let eff:i32=laws_effective_sources(src,ev_ids,n);
+    if(eff>=QUAR_REHAB_MIN_INDEP){
+        ob_s32(q,id*4,0);
+        arb_audit(alog,aln,ep,LAWS_QUAR,id,1);
+        return 1;
+    }
+    arb_audit(alog,aln,ep,LAWS_QUAR,id,0);
+    return 0;
+}
+
+// ==================== LAW 9: append-only revisions =============
+// Revision entries: 80B {seq(4), prev_hash[32], op(4), widx(4), wval(4), phash[32]}.
+// entry_hash(i) = sha256(prev_hash(i) || op || widx || wval); entry 0 chains
+// from a zero genesis. laws_rev_verify recomputes the whole chain: any
+// forged byte breaks it. Replay applies ops 0..T to a zeroed snapshot.
+const LREV_STRIDE:i32=80;
+fn laws_rev_new(cap:i32)[]u8 { return ob_alloc(cap*LREV_STRIDE); }
+
+fn laws_rev_entry_hash(rev:[]u8,idx:i32,out:[]u8)i32 {
+    let b:[]u8=ob_alloc(44);
+    ob_copy(b[0..32],rev[idx*LREV_STRIDE+4..idx*LREV_STRIDE+36],32);
+    ob_s32(b,32,ob_g32(rev,idx*LREV_STRIDE+36));
+    ob_s32(b,36,ob_g32(rev,idx*LREV_STRIDE+40));
+    ob_s32(b,40,ob_g32(rev,idx*LREV_STRIDE+44));
+    let rc:i32=ns_sha256(b,out);
+    ob_free(b);
+    return rc;
+}
+
+fn laws_rev_append(rev:[]u8,revn:*i32,cap:i32,op:i32,widx:i32,wval:i32,
+    alog:[]u8,aln:*i32,ep:i32)i32 {
+    let n:i32=revn.*;
+    if(n<0 || n>=cap){ return -1; }
+    let eo:i32=n*LREV_STRIDE;
+    ob_s32(rev,eo,n);
+    if(n==0){
+        let z:[]u8=ob_alloc(32);
+        ob_copy(rev[eo+4..eo+36],z,32);
+        ob_free(z);
+    } else {
+        let ph:[]u8=ob_alloc(32);
+        laws_rev_entry_hash(rev,n-1,ph);
+        ob_copy(rev[eo+4..eo+36],ph,32);
+        ob_free(ph);
+    }
+    ob_s32(rev,eo+36,op); ob_s32(rev,eo+40,widx); ob_s32(rev,eo+44,wval);
+    let pb:[]u8=ob_alloc(12);
+    ob_s32(pb,0,op); ob_s32(pb,4,widx); ob_s32(pb,8,wval);
+    let ph2:[]u8=ob_alloc(32);
+    ns_sha256(pb,ph2);
+    ob_copy(rev[eo+48..eo+80],ph2,32);
+    ob_free(pb); ob_free(ph2);
+    revn.*=n+1;
+    arb_audit(alog,aln,ep,LAWS_REV,n,op);
+    return 0;
+}
+
+// 0 = chain intact; else first bad index + 1.
+fn laws_rev_verify(rev:[]u8,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let eo:i32=i*LREV_STRIDE;
+        let pb:[]u8=ob_alloc(12);
+        ob_s32(pb,0,ob_g32(rev,eo+36));
+        ob_s32(pb,4,ob_g32(rev,eo+40));
+        ob_s32(pb,8,ob_g32(rev,eo+44));
+        let ph:[]u8=ob_alloc(32);
+        ns_sha256(pb,ph);
+        let bad:i32=laws_hash_eq(ph,rev[eo+48..eo+80]);
+        ob_free(pb); ob_free(ph);
+        if(bad!=0){ return i+1; }
+        if(i>0){
+            let eh:[]u8=ob_alloc(32);
+            laws_rev_entry_hash(rev,i-1,eh);
+            let bad2:i32=laws_hash_eq(eh,rev[eo+4..eo+36]);
+            ob_free(eh);
+            if(bad2!=0){ return i+1; }
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+fn laws_rev_replay(rev:[]u8,n:i32,t:i32,snap:[]u8,snapw:i32)i32 {
+    let i:i32=0;
+    while(i<snapw){ ob_s32(snap,i*4,0); i=i+1; }
+    i=0;
+    while(i<=t && i<n){
+        let eo:i32=i*LREV_STRIDE;
+        if(ob_g32(rev,eo+36)==1){
+            let wx:i32=ob_g32(rev,eo+40);
+            if(wx>=0 && wx<snapw){ ob_s32(snap,wx*4,ob_g32(rev,eo+44)); }
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+// ---- battery check printer: LAW_CHECK,<px><name>,<actual>,<expected> ----
+fn laws_check(px:[]u8,name:[]u8,actual:i32,expected:i32)i32 {
+    _zag_print("LAW_CHECK,");_zag_print(px);_zag_print(name);_zag_print(",");
+    let s:[]u8=_zag_i64_to_str(actual as i64);_zag_print(s);ob_free(s);
+    _zag_print(",");
+    let t:[]u8=_zag_i64_to_str(expected as i64);_zag_print(t);ob_free(t);
+    _zag_println("");
+    return (actual!=expected) as i32;
+}
