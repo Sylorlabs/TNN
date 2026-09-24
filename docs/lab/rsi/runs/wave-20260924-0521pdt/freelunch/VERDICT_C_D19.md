@@ -53,7 +53,8 @@ queue (R9, S11-IMG, S13, S14, C1, C2v3) is untouched by this wave.
 ## Commits
 
 - Prereg: 35f81a256 (prereg-only commit, before any D19 code)
-- Implementation + evidence: <to be filled after commit>
+- Implementation + evidence: f26e277da
+- This verdict SHA fill-in: <this commit>
 
 ## Follow-up note (not a claim)
 
