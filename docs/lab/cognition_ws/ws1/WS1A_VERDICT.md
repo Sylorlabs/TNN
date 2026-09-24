@@ -153,7 +153,8 @@ trained gate is earned.
   raw 162 logs stay local — manifest SHAs + byte-identity verification preserve
   verifiability), `WS1A_PRELIM.md`, `analyze_ws1a.py` (analysis script), this verdict.
 - Binaries in `build/` are scratch artifacts, never committed.
-- Verdict evidence commit SHA: (appended after commit lands).
+- Verdict evidence commit: `73ddd655f9427aecfaa08786902f52d3929e7204`
+  (tnn-native-lab, parent `4b782176bc3e`; 181 files).
 
 ## 11. Caveats
 
