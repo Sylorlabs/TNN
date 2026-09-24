@@ -1,0 +1,608 @@
+@import("../../src/common_v5.zag")
+// ============================================================
+// VOICE SIGNATURE instrument v2 — V11 judging protocol, objective prong.
+// Pure Zag, deterministic, zero RNG.
+// Usage: voice_sig <clip.wav>  -> VS_* lines on stdout, exit 0.
+//
+// Design notes (why v2):
+//   v1 selected "voiced" frames by raw-signal autocorrelation peak. On the
+//   real-child anchor (a distant, quiet playground recording, -35 dBFS) the
+//   raw autocorrelation locks onto low-frequency rumble, not voices; on the
+//   V10 renders it found almost no periodic frames at all. v2 therefore:
+//   (a) removes rumble first (y = x - 441-tap moving average, ~100 Hz cut),
+//   (b) requires the autocorrelation peak to be a LOCAL MAXIMUM (not the
+//   range edge), (c) gates "clean voice frames" on peak >= 0.60 with F0 in
+//   [150,800] Hz. Formants/HNR/tilt are measured only on clean frames.
+//   A scene with <25 clean frames reports VS_OK 0: no measurable voice
+//   signature (which is itself a verdict-relevant finding).
+//
+// Method (frozen with this binary):
+//   - 44.1 kHz mono 16-bit; 30 ms frames (1323), 15 ms hop (661).
+//   - Screen: frame RMS(y) >= median+1 dB (floor -55 dBFS), ZCR in
+//     [0.020, 0.500].
+//   - Periodicity: normalized autocorrelation of mean-removed y over lags
+//     55..735 (60..801 Hz), normalized by R(0) (zero-lag energy); peak =
+//     strongest local maximum; parabolic interpolation; clean iff
+//     peak >= 0.60 and 150 <= F0 <= 800 Hz.
+//     (Fixed 2026-09-24: was normalized by R(55), inflating peaks/HNR.)
+//   - HNR = 10*log10(peak/(1-peak)).
+//   - Formants: the anchor's clean play voices sit at F0 ~ 600-800 Hz, so
+//     harmonic spacing exceeds formant bandwidths and peak-picking is
+//     unreliable (the known child-formant problem). Instead we report
+//     LPC(12)-envelope ENERGY CENTROIDS in the F1/F2/F3 bands
+//     (VS_F1B 200-1250 Hz, VS_F2B 700-3400 Hz, VS_F3B 1500-4600 Hz): always
+//     defined, deterministic, and sensitive to vocal-tract size.
+//   - Tilt: octave regression of envelope dB at 250/500/1000/2000/4000 Hz.
+//   - MOD4: max normalized autocorrelation of the 25 ms RMS(y) envelope
+//     over lags 5..20 windows (2..8 Hz syllabic modulation).
+// ============================================================
+
+// floor(log2(x))*1024, x>0.
+fn vs_log2fp(x:i64)i64{
+    if(x<=1){return 0;}
+    let e:i64=0;
+    let t:i64=x;
+    if((t>>32)!=0){e=e+32;t=t>>32;}
+    if((t>>16)!=0){e=e+16;t=t>>16;}
+    if((t>>8)!=0){e=e+8;t=t>>8;}
+    if((t>>4)!=0){e=e+4;t=t>>4;}
+    if((t>>2)!=0){e=e+2;t=t>>2;}
+    if((t>>1)!=0){e=e+1;}
+    let r:i64=e*1024;
+    let y:i64=0;
+    if(e>=24){y=x>>(e-24);}else{y=x<<(24-e);}
+    y=y & 33554431;
+    let i:i64=1;
+    while(i<=10){
+        y=(y*y)>>24;
+        if(y>=33554432){y=y>>1;r=r+(1024>>i);}
+        i=i+1;
+    }
+    return r;
+}
+
+// milli-dB of sumsq over n samples.
+fn vs_mdb(sumsq:i64,n:i64)i64{
+    if(sumsq<=0){return -120000;}
+    if(n<=0){return -120000;}
+    let d:i64=vs_log2fp(sumsq)-vs_log2fp(n);
+    return d*3010/1024;
+}
+
+// cos(x), x in [0,pi], Taylor to x^8 with pi/2 fold.
+fn vs_cosr(x:f64)f64{
+    let a:f64=x;
+    let sgn:f64=1.0;
+    if(a>1.5707963267948966){a=3.141592653589793-a;sgn=-1.0;}
+    let x2:f64=a*a;
+    let x4:f64=x2*x2;
+    return sgn*(1.0-x2/2.0+x4/24.0-x4*x2/720.0+x4*x4/40320.0);
+}
+fn vs_cosg(x:f64)f64{
+    let y:f64=x;
+    while(y>=6.283185307179586){y=y-6.283185307179586;}
+    while(y<0.0){y=y+6.283185307179586;}
+    if(y>3.141592653589793){return -vs_cosr(6.283185307179586-y);}
+    return vs_cosr(y);
+}
+fn vs_sing(x:f64)f64{return vs_cosg(x-1.5707963267948966);}
+fn vs_sqrt(x:f64)f64{
+    if(x<=0.0){return 0.0;}
+    let g:f64=x;
+    if(g<1.0){g=1.0;}
+    let i:i64=0;
+    while(i<40){g=0.5*(g+x/g);i=i+1;}
+    return g;
+}
+
+// selection sort on i64 elements at 8-byte stride.
+fn vs_sort(a:[]u8,n:i64)void{
+    let i:i64=0;
+    while(i<n){
+        let m:i64=i;
+        let j:i64=i+1;
+        while(j<n){
+            if(get64(a,j*8)<get64(a,m*8)){m=j;}
+            j=j+1;
+        }
+        if(m!=i){
+            let t:i64=get64(a,i*8);
+            put64(a,i*8,get64(a,m*8));
+            put64(a,m*8,t);
+        }
+        i=i+1;
+    }
+}
+fn vs_median(a:[]u8,n:i64)i64{
+    vs_sort(a,n);
+    if((n%2)==1){return get64(a,(n/2)*8);}
+    return (get64(a,(n/2-1)*8)+get64(a,(n/2)*8))/2;
+}
+fn vs_pct(a:[]u8,n:i64,p:i64)i64{
+    vs_sort(a,n);
+    let r:i64=(p*n+50)/100;
+    if(r<1){r=1;}
+    if(r>n){r=n;}
+    return get64(a,(r-1)*8);
+}
+fn vs_copy(dst:[]u8,src:[]u8,n:i64)void{
+    let i:i64=0;
+    while(i<n){put64(dst,i*8,get64(src,i*8));i=i+1;}
+}
+
+// ---------- single-syscall line printers ----------
+fn vs_putc(b:[]u8,p:i64,c:u8)i64{b[p]=c;return p+1;}
+fn vs_putstr(b:[]u8,p:i64,s:[]u8)i64{
+    let i:i64=0;
+    while(i<(s.len as i64)){b[p+i]=s[i];i=i+1;}
+    return p+i;
+}
+fn vs_puti64(b:[]u8,p:i64,v:i64)i64{
+    let x:i64=v;
+    if(x<0){b[p]=45;p=p+1;x=-x;}
+    if(x==0){b[p]=48;return p+1;}
+    let d:i64=0;
+    let rev:i64=0;
+    let xx:i64=x;
+    while(xx>0){rev=rev*10+(xx%10);xx=xx/10;d=d+1;}
+    while(d>0){b[p]=((rev%10)+48) as u8;rev=rev/10;p=p+1;d=d-1;}
+    return p;
+}
+fn vs_putf(b:[]u8,p:i64,v:f64,nd:i64)i64{
+    let x:f64=v;
+    if(x<0.0){b[p]=45;p=p+1;x=-x;}
+    let ip:i64=(x as i64);
+    let sc:f64=1.0;
+    let k:i64=0;
+    while(k<nd){sc=sc*10.0;k=k+1;}
+    let fp:i64=((x-(ip as f64))*sc) as i64;
+    p=vs_puti64(b,p,ip);
+    b[p]=46;p=p+1;
+    let need:i64=nd;
+    let div:i64=(sc/10.0) as i64;
+    while(need>0){
+        let dg:i64=0;
+        if(div>0){dg=fp/div;fp=fp-dg*div;div=div/10;}
+        b[p]=(48+dg) as u8;p=p+1;
+        need=need-1;
+    }
+    return p;
+}
+fn vs_line(b:[]u8,p:i64)void{
+    b[p]=10;
+    _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),(p+1) as i64,0,0,0);
+}
+fn vs_kv(b:[]u8,id:[]u8,v:f64,nd:i64)void{
+    let p:i64=0;
+    p=vs_putstr(b,p,id);
+    p=vs_putc(b,p,32);
+    p=vs_putf(b,p,v,nd);
+    vs_line(b,p);
+}
+fn vs_kvi(b:[]u8,id:[]u8,v:i64)void{
+    let p:i64=0;
+    p=vs_putstr(b,p,id);
+    p=vs_putc(b,p,32);
+    p=vs_puti64(b,p,v);
+    vs_line(b,p);
+}
+
+fn main()i32{
+    let lb:*u8=_zag_malloc(256) as *u8;
+    let line:[]u8=lb[0..256];
+    let path:[]u8=_zag_arg(1);
+    if(path.len==0){
+        let p0:i64=vs_putstr(line,0,"usage: voice_sig <clip.wav>");
+        vs_line(line,p0);
+        return 2;
+    }
+    let raw:[]u8=file_read(path,80000000);
+    if(raw.len==0){
+        let p0:i64=vs_putstr(line,0,"read fail");
+        vs_line(line,p0);
+        return 2;
+    }
+    let samp:[]u8=wav_parse(raw);
+    if(samp.len==0){
+        let p0:i64=vs_putstr(line,0,"wav parse fail");
+        vs_line(line,p0);
+        return 2;
+    }
+    let nsamp:i64=(samp.len as i64)/2;
+    if(nsamp<441000){
+        let p0:i64=vs_putstr(line,0,"clip too short (<10s)");
+        vs_line(line,p0);
+        return 2;
+    }
+
+    // ---- rumble removal: y = x - MA441(x) ----
+    let yp:*u8=_zag_malloc(nsamp*8) as *u8;
+    let y:[]u8=yp[0..(nsamp*8)];
+    let wsum:i64=0;
+    let i:i64=0;
+    while(i<nsamp){
+        let s:i64=get16s(samp,i*2);
+        wsum=wsum+s;
+        if(i>=441){wsum=wsum-get16s(samp,(i-441)*2);}
+        let wl:i64=i+1;
+        if(wl>441){wl=441;}
+        put64(y,i*8,s-wsum/wl);
+        i=i+1;
+    }
+
+    let FRAME:i64=1323;
+    let HOP:i64=661;
+    let NF:i64=(nsamp-FRAME)/HOP+1;
+
+    // ---- pass 1: energy + ZCR on y ----
+    let rmp:*u8=_zag_malloc(NF*8) as *u8;
+    let rmsdb:[]u8=rmp[0..(NF*8)];
+    let zcp:*u8=_zag_malloc(NF*8) as *u8;
+    let zcr:[]u8=zcp[0..(NF*8)];
+    let f:i64=0;
+    while(f<NF){
+        let base:i64=f*HOP;
+        let ss:i64=0;
+        let zc:i64=0;
+        let prev:i64=0;
+        let j:i64=0;
+        while(j<FRAME){
+            let s:i64=get64(y,(base+j)*8);
+            ss=ss+s*s;
+            if(j>0){
+                if(prev<0){if(s>=0){zc=zc+1;}}
+                else{if(s<0){zc=zc+1;}}
+            }
+            prev=s;
+            j=j+1;
+        }
+        put64(rmsdb,f*8,vs_mdb(ss,FRAME));
+        put64(zcr,f*8,(zc*1000)/FRAME);
+        f=f+1;
+    }
+    let tmp:*u8=_zag_malloc(NF*8) as *u8;
+    let tdb:[]u8=tmp[0..(NF*8)];
+    vs_copy(tdb,rmsdb,NF);
+    let med:i64=vs_median(tdb,NF);
+    let thr:i64=med+1000;
+    if(thr<-55000){thr=-55000;}
+
+    // Hamming window, fixed point x2^20.
+    let hmp:*u8=_zag_malloc(FRAME*8) as *u8;
+    let ham:[]u8=hmp[0..(FRAME*8)];
+    let hi:i64=0;
+    while(hi<FRAME){
+        let c:f64=vs_cosg(6.283185307179586*(hi as f64)/((FRAME-1) as f64));
+        put64(ham,hi*8,((0.54-0.46*c)*1048576.0) as i64);
+        hi=hi+1;
+    }
+
+    // scratch arenas.
+    let rap:*u8=_zag_malloc(681*8) as *u8;
+    let ra:[]u8=rap[0..(681*8)];
+    let rrp:*u8=_zag_malloc(13*8) as *u8;
+    let rr:[]u8=rrp[0..(13*8)];
+    let afp:*u8=_zag_malloc(13*8) as *u8;
+    let af:[]u8=afp[0..(13*8)];
+    let edp:*u8=_zag_malloc(256*8) as *u8;
+    let edb:[]u8=edp[0..(256*8)];
+
+    // per-clean-frame results.
+    let f0p:*u8=_zag_malloc(NF*8) as *u8;
+    let f0a:[]u8=f0p[0..(NF*8)];
+    let hnp:*u8=_zag_malloc(NF*8) as *u8;
+    let hnra:[]u8=hnp[0..(NF*8)];
+    let f1p:*u8=_zag_malloc(NF*8) as *u8;
+    let f1a:[]u8=f1p[0..(NF*8)];
+    let f2p:*u8=_zag_malloc(NF*8) as *u8;
+    let f2a:[]u8=f2p[0..(NF*8)];
+    let f3p:*u8=_zag_malloc(NF*8) as *u8;
+    let f3a:[]u8=f3p[0..(NF*8)];
+    let tip:*u8=_zag_malloc(NF*8) as *u8;
+    let tilta:[]u8=tip[0..(NF*8)];
+    let cep:*u8=_zag_malloc(NF*8) as *u8;
+    let centa:[]u8=cep[0..(NF*8)];
+
+    let nv:i64=0;
+    f=0;
+    while(f<NF){
+        if(get64(rmsdb,f*8)>=thr){
+            let zc:i64=get64(zcr,f*8);
+            if(zc>=20&&zc<=500){
+                let base:i64=f*HOP;
+                // frame mean.
+                let msum:i64=0;
+                let j:i64=0;
+                while(j<FRAME){msum=msum+get64(y,(base+j)*8);j=j+1;}
+                let mn:i64=msum/FRAME;
+                // zero-lag energy R(0) for normalization (NOT R(55)).
+                let r0:i64=0;
+                j=0;
+                while(j<FRAME){
+                    let d:i64=get64(y,(base+j)*8)-mn;
+                    r0=r0+d*d;
+                    j=j+1;
+                }
+                // autocorrelation lags 55..735.
+                let li:i64=0;
+                while(li<681){
+                    let lag:i64=55+li;
+                    let s:i64=0;
+                    j=0;
+                    let nn:i64=FRAME-lag;
+                    while(j<nn){
+                        s=s+(get64(y,(base+j)*8)-mn)*(get64(y,(base+j+lag)*8)-mn);
+                        j=j+1;
+                    }
+                    put64(ra,li*8,s);
+                    li=li+1;
+                }
+                if(r0>0){
+                    let r0f:f64=(r0 as f64);
+                    // local-maximum peak pick.
+                    let blag:i64=-1;
+                    let bval:f64=0.0;
+                    li=1;
+                    while(li<680){
+                        let rpm:f64=(get64(ra,(li-1)*8) as f64)/r0f;
+                        let rcm:f64=(get64(ra,li*8) as f64)/r0f;
+                        let rpn:f64=(get64(ra,(li+1)*8) as f64)/r0f;
+                        if(rcm>rpm&&rcm>=rpn){
+                            if(rcm>bval){bval=rcm;blag=55+li;}
+                        }
+                        li=li+1;
+                    }
+                    if(blag>0&&bval>=0.60){
+                        // parabolic interpolation.
+                        let lagest:f64=(blag as f64);
+                        let y0:f64=(get64(ra,(blag-55-1)*8) as f64)/r0f;
+                        let y2:f64=(get64(ra,(blag-55+1)*8) as f64)/r0f;
+                        let den:f64=y0-2.0*bval+y2;
+                        if(den<0.0){
+                            let sh:f64=0.5*(y0-y2)/den;
+                            if(sh>-1.0&&sh<1.0){lagest=(blag as f64)+sh;}
+                        }
+                        let f0:f64=44100.0/lagest;
+                        if(f0>=150.0&&f0<=800.0){
+                            put64(f0a,nv*8,((f0*1000.0) as i64));
+                            // HNR = 10*log10(bval/(1-bval)).
+                            let hn:i64=40000;
+                            if(bval<0.9999){
+                                // ratio scaled x2^20: bval/(1-bval)
+                                let num:i64=((bval*1048576.0) as i64);
+                                let den2:i64=(((1.0-bval)*1048576.0) as i64);
+                                if(den2>0&&num>0){
+                                    hn=(vs_log2fp((num<<20)/den2)-20480)*3010/1024;
+                                }
+                            }
+                            put64(hnra,nv*8,hn);
+                            // LPC(12) on windowed pre-emphasized y.
+                            let k:i64=0;
+                            while(k<=12){
+                                let s:f64=0.0;
+                                let i2:i64=0;
+                                let nn:i64=FRAME-k;
+                                while(i2<nn){
+                                    let x0:f64=(get64(y,(base+i2)*8) as f64);
+                                    let x1:f64=(get64(y,(base+i2+k)*8) as f64);
+                                    let px0:f64=0.0;
+                                    let px1:f64=0.0;
+                                    if(i2>0){px0=(get64(y,(base+i2-1)*8) as f64);}
+                                    if(i2+k>0){px1=(get64(y,(base+i2+k-1)*8) as f64);}
+                                    let y0w:f64=(x0-0.97*px0)*((get64(ham,i2*8) as f64)/1048576.0);
+                                    let y1w:f64=(x1-0.97*px1)*((get64(ham,(i2+k)*8) as f64)/1048576.0);
+                                    s=s+y0w*y1w;
+                                    i2=i2+1;
+                                }
+                                put64(rr,k*8,(s as i64));
+                                k=k+1;
+                            }
+                            let r0f2:f64=(get64(rr,0) as f64);
+                            if(r0f2>0.0){
+                                let E:f64=1.0;
+                                let zi:i64=1;
+                                while(zi<=12){put64(af,zi*8,0);zi=zi+1;}
+                                let ii:i64=1;
+                                while(ii<=12){
+                                    let acc:f64=0.0;
+                                    let jj:i64=1;
+                                    while(jj<ii){
+                                        acc=acc+((get64(af,jj*8) as f64)/16777216.0)*((get64(rr,(ii-jj)*8) as f64)/r0f2);
+                                        jj=jj+1;
+                                    }
+                                    let kk:f64=(((get64(rr,ii*8) as f64)/r0f2)-acc)/E;
+                                    if(kk>0.999){kk=0.999;}
+                                    if(kk<-0.999){kk=-0.999;}
+                                    put64(af,ii*8,((kk*16777216.0) as i64));
+                                    jj=1;
+                                    while(jj<ii){
+                                        let aj:f64=(get64(af,jj*8) as f64)/16777216.0;
+                                        let am:f64=(get64(af,(ii-jj)*8) as f64)/16777216.0;
+                                        put64(af,jj*8,(((aj-kk*am)*16777216.0) as i64));
+                                        jj=jj+1;
+                                    }
+                                    E=E*(1.0-kk*kk);
+                                    if(E<0.000001){E=0.000001;}
+                                    ii=ii+1;
+                                }
+                                let sumFE:f64=0.0;
+                                let sumE:f64=0.0;
+                                // Formant-band resonance centroids on the LPC
+                                // envelope (linear energy). Peak-picking is
+                                // unreliable on high-F0 child play voices
+                                // (harmonic spacing exceeds formant
+                                // bandwidths); the band centroid captures the
+                                // same vocal-tract resonance distribution
+                                // robustly and is always defined.
+                                let s1fe:f64=0.0;
+                                let s1e:f64=0.0;
+                                let s2fe:f64=0.0;
+                                let s2e:f64=0.0;
+                                let s3fe:f64=0.0;
+                                let s3e:f64=0.0;
+                                let m2:i64=1;
+                                while(m2<256){
+                                    let fr:f64=(m2 as f64)*6000.0/256.0;
+                                    let w:f64=6.283185307179586*fr/44100.0;
+                                    let c:f64=vs_cosg(w);
+                                    let sn:f64=vs_sing(w);
+                                    let re:f64=1.0;
+                                    let im:f64=0.0;
+                                    let ck:f64=c;
+                                    let sk:f64=sn;
+                                    let ckp:f64=1.0;
+                                    let skp:f64=0.0;
+                                    let qk:i64=1;
+                                    while(qk<=12){
+                                        let ak:f64=(get64(af,qk*8) as f64)/16777216.0;
+                                        re=re-ak*ck;
+                                        im=im+ak*sk;
+                                        let ckn:f64=2.0*c*ck-ckp;
+                                        let skn:f64=2.0*c*sk-skp;
+                                        ckp=ck;ck=ckn;skp=sk;sk=skn;
+                                        qk=qk+1;
+                                    }
+                                    let E2:f64=1.0/(re*re+im*im);
+                                    sumFE=sumFE+fr*E2;
+                                    sumE=sumE+E2;
+                                    if(fr>=200.0&&fr<=1250.0){s1fe=s1fe+fr*E2;s1e=s1e+E2;}
+                                    if(fr>=700.0&&fr<=3400.0){s2fe=s2fe+fr*E2;s2e=s2e+E2;}
+                                    if(fr>=1500.0&&fr<=4600.0){s3fe=s3fe+fr*E2;s3e=s3e+E2;}
+                                    let escf:f64=E2*1024.0;
+                                    let esc:i64=1;
+                                    if(escf>=1.0){
+                                        if(escf>8000000000000000000.0){esc=8000000000000000000;}
+                                        else{esc=(escf as i64);}
+                                    }
+                                    put64(edb,m2*8,(vs_log2fp(esc)-10240)*3010/1024);
+                                    m2=m2+1;
+                                }
+                                let f1b:i64=0;
+                                if(s1e>0.0){f1b=((s1fe/s1e) as i64);}
+                                let f2b:i64=0;
+                                if(s2e>0.0){f2b=((s2fe/s2e) as i64);}
+                                let f3b:i64=0;
+                                if(s3e>0.0){f3b=((s3fe/s3e) as i64);}
+                                put64(f1a,nv*8,f1b);
+                                put64(f2a,nv*8,f2b);
+                                put64(f3a,nv*8,f3b);
+                                let tilt:i64=(-2*get64(edb,11*8)-get64(edb,21*8)+get64(edb,85*8)+2*get64(edb,171*8))/10;
+                                put64(tilta,nv*8,tilt);
+                                let cent:i64=0;
+                                if(sumE>0.0){cent=((sumFE/sumE) as i64);}
+                                put64(centa,nv*8,cent);
+                                nv=nv+1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        f=f+1;
+    }
+
+    // ---- MOD4: syllabic modulation of 25 ms RMS(y) envelope ----
+    let W25:i64=1102;
+    let NW:i64=nsamp/W25;
+    let enp:*u8=_zag_malloc(NW*8) as *u8;
+    let env:[]u8=enp[0..(NW*8)];
+    let w2:i64=0;
+    while(w2<NW){
+        let ss:i64=0;
+        let j:i64=0;
+        let base:i64=w2*W25;
+        while(j<W25){
+            let s:i64=get64(y,(base+j)*8);
+            ss=ss+s*s;
+            j=j+1;
+        }
+        put64(env,w2*8,vs_mdb(ss,W25));
+        w2=w2+1;
+    }
+    // normalized autocorr of envelope, lags 5..20 (2..8 Hz at 40 Hz rate).
+    let emean:f64=0.0;
+    w2=0;
+    while(w2<NW){emean=emean+(get64(env,w2*8) as f64);w2=w2+1;}
+    emean=emean/(NW as f64);
+    let evar:f64=0.0;
+    w2=0;
+    while(w2<NW){
+        let d:f64=(get64(env,w2*8) as f64)-emean;
+        evar=evar+d*d;
+        w2=w2+1;
+    }
+    let mod4:f64=0.0;
+    if(evar>0.0){
+        let lg:i64=5;
+        while(lg<=20){
+            let ac:f64=0.0;
+            w2=0;
+            while(w2<NW-lg){
+                ac=ac+((get64(env,w2*8) as f64)-emean)*((get64(env,(w2+lg)*8) as f64)-emean);
+                w2=w2+1;
+            }
+            let nrm:f64=ac/evar;
+            if(nrm>mod4){mod4=nrm;}
+            lg=lg+1;
+        }
+    }
+
+    // ---- output ----
+    let ok:i64=0;
+    if(nv>=25){ok=1;}
+    vs_kvi(line,"VS_OK",ok);
+    vs_kvi(line,"VS_NFRAMES",NF);
+    vs_kvi(line,"VS_NVOICED",nv);
+    vs_kv(line,"VS_MOD4",mod4,3);
+    if(ok==0){
+        let p0:i64=vs_putstr(line,0,"VS_NOTE too few clean voice frames for signature");
+        vs_line(line,p0);
+        return 0;
+    }
+    vs_kv(line,"VS_VFRAC",(nv as f64)/(NF as f64),3);
+    vs_copy(tdb,f0a,nv);
+    vs_kv(line,"VS_F0_MED",(vs_median(tdb,nv) as f64)/1000.0,1);
+    vs_copy(tdb,f0a,nv);
+    vs_kv(line,"VS_F0_P10",(vs_pct(tdb,nv,10) as f64)/1000.0,1);
+    vs_copy(tdb,f0a,nv);
+    vs_kv(line,"VS_F0_P90",(vs_pct(tdb,nv,90) as f64)/1000.0,1);
+    let v1p:*u8=_zag_malloc(nv*8) as *u8;
+    let v1:[]u8=v1p[0..(nv*8)];
+    let n1:i64=0;
+    let i3:i64=0;
+    while(i3<nv){
+        put64(v1,n1*8,get64(f1a,i3*8));
+        n1=n1+1;
+        i3=i3+1;
+    }
+    vs_kv(line,"VS_F1B",((vs_median(v1,n1) as f64)),0);
+    let n2:i64=0;
+    i3=0;
+    while(i3<nv){
+        put64(v1,n2*8,get64(f2a,i3*8));
+        n2=n2+1;
+        i3=i3+1;
+    }
+    vs_kv(line,"VS_F2B",((vs_median(v1,n2) as f64)),0);
+    // F2B IQR (formant-band movement across clean frames).
+    vs_copy(tdb,v1,n2);
+    let q90:i64=vs_pct(tdb,n2,90);
+    vs_copy(tdb,v1,n2);
+    let q10:i64=vs_pct(tdb,n2,10);
+    vs_kv(line,"VS_F2B_IQR",((q90-q10) as f64),0);
+    let n3:i64=0;
+    i3=0;
+    while(i3<nv){
+        put64(v1,n3*8,get64(f3a,i3*8));
+        n3=n3+1;
+        i3=i3+1;
+    }
+    vs_kv(line,"VS_F3B",((vs_median(v1,n3) as f64)),0);
+    vs_copy(tdb,hnra,nv);
+    vs_kv(line,"VS_HNR_MED",(vs_median(tdb,nv) as f64)/1000.0,1);
+    vs_copy(tdb,tilta,nv);
+    vs_kv(line,"VS_TILT_MED",(vs_median(tdb,nv) as f64)/1000.0,1);
+    vs_copy(tdb,centa,nv);
+    vs_kv(line,"VS_CENT_MED",(vs_median(tdb,nv) as f64),0);
+    return 0;
+}
