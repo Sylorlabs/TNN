@@ -1,0 +1,956 @@
+@import("common_v5.zag")
+// ============================================================
+// FORK W — child-scale digital-waveguide vocal tract (Sol Paradigm 1,
+// CS-DWGVT). Pure Zag, zero RNG (hash streams only), deterministic.
+// 13-section Kelly-Lochbaum tract (9 cm child) + child two-mass vocal
+// folds + source-filter back-pressure coupling + hash breath noise.
+//
+// Modes (argv[1]):
+//   fold <k1> <dur_s>   : two-mass fold model alone -> glottal flow WAV
+//   vowel <v> <ft> <dur>: full voice, fixed vowel v, tissue freq ft -> WAV
+//   scene               : full 30 s playground scene -> WAV
+// Output path is argv[2] (default per mode).
+//
+// D1 deviation (documented): Sol's k1=2/k2=4 N/m is statically
+// inconsistent (aero force ~0.011 N vs spring 3e-4 N at rest gap: folds
+// blow open, no oscillation; tissue resonance 50 Hz contradicts Sol's
+// own F0 220-450 Hz claim). Stiffness SCALE is set from the oscillation
+// condition k ~= F_aero/x0 with F0 = sqrt(k/m)/2pi; Sol's RATIOS
+// (k2=2*k1, kc=0.5*k1, d1, d2, masses, Ps range) are preserved. The
+// tension parameter then spans the physiological play/shout F0 range.
+// ============================================================
+
+// ---- math helpers (Taylor, from V10 artic) ----
+fn fsinr(x:f64)f64{
+    let twopi:f64=6.283185307179586;
+    let q:f64=x/twopi;
+    let qi:i64=(q as i64);
+    if(q<0.0){
+        if((qi as f64)!=q){qi=qi-1;}
+    }
+    let r:f64=x-(qi as f64)*twopi;
+    if(r>3.141592653589793){r=r-twopi;}
+    let s:f64=1.0;
+    if(r>1.5707963267948966){
+        r=3.141592653589793-r;
+    }else{
+        if(r<-1.5707963267948966){r=-3.141592653589793-r;s=-1.0;}
+    }
+    let x2:f64=r*r;
+    let x4:f64=x2*x2;
+    return s*(r-r*x2/6.0+r*x4/120.0-r*x4*x2/5040.0+r*x4*x4/362880.0);
+}
+fn fcosr(x:f64)f64{return fsinr(x+1.5707963267948966);}
+fn fexp(x:f64)f64{return 1.0+x+x*x/2.0+x*x*x/6.0;}
+fn smoother(x:f64)f64{
+    if(x<=0.0){return 0.0;}
+    if(x>=1.0){return 1.0;}
+    return x*x*x*(10.0-15.0*x+6.0*x*x);
+}
+
+// ---- voice state block access (all f64) ----
+// Layout:
+//  0..13  L[14]    (right-going waves arriving at junctions 0..13)
+// 14..27  R[14]    (left-going waves arriving at junctions 0..13)
+// 28..39  rc[12]   (internal junction reflection coeffs)
+// 40..52  area[13] (current section areas, cm2)
+// 53..56  fx1,fv1,fx2,fv2 (fold state, SI)
+// 57      radPrev  (lip radiation filter state)
+// 58      ncount   (hash noise counter)
+// 59..67  k1,k2,kc,Psub,damp,srcGain,leakGain,vgain,rg
+// 68..73  gigAM,abdamp,cyc,lastU,agFrac,psupPa
+// 74..87  L2[14]   (scratch next)
+// 88..101 R2[14]   (scratch next)
+// 102..107 (unused pad)
+// 108..113 sgF[6]  (subglottal fwd delay line)
+// 114..119 sgB[6]  (subglottal bwd delay line)
+// Block size: 120
+fn g(s:*f64,i:i64)f64{
+    let q:*f64=((s as i64)+i*8) as *f64;
+    return q.*;
+}
+fn p(s:*f64,i:i64,v:f64)void{
+    let q:*f64=((s as i64)+i*8) as *f64;
+    q.*=v;
+    return;
+}
+fn valloc() *f64{
+    let mp:*u8=_zag_malloc(120*8) as *u8;
+    if(mp==null as *u8){return (0 as i64) as *f64;}
+    let s:*f64=(mp as i64) as *f64;
+    let i:i64=0;
+    while(i<120){p(s,i,0.0);i=i+1;}
+    return s;
+}
+
+// ---- fold constants (SI) ----
+const M1:f64=0.00002;
+const M2:f64=0.00001;
+const D1:f64=0.005;
+const D2:f64=0.003;
+const LG:f64=0.007;
+const TH1:f64=0.002;
+const TH2:f64=0.0005;
+const X01:f64=0.00015;
+const X02:f64=0.00015;
+const RHO:f64=1.14;
+const SUBS:i64=4;
+const DTS:f64=0.000005668934240362812;
+const DCOL1:f64=0.03;
+const DCOL2:f64=0.02;
+const CD:f64=0.7;
+// Active myoelastic energy input (Van der Pol): real vocal folds are not
+// passive — laryngeal muscles provide the energy for oscillation. The
+// passive tissue + aerodynamics alone (above) has a stable static
+// equilibrium and will not self-oscillate with any physical parameters.
+// F_active = +GAMMA*v*(1-(x/XREF)^2): negative damping (energy input) for
+// small displacements, positive damping (amplitude limiting) for large.
+const GAMMA:f64=0.004;
+const XREF:f64=0.00018;
+
+// two-mass fold model: SUBS substeps. Reads k1,k2,kc,Psub,psupPa,abdamp
+// from state; writes fx1,fv1,fx2,fv2,lastU,agFrac. Returns mean U (m3/s).
+fn fold_step(s:*f64,seed:i64)f64{
+    let k1:f64=g(s,59);
+    let k2:f64=g(s,60);
+    let kc:f64=g(s,61);
+    let psub:f64=g(s,62);
+    let psup:f64=g(s,73);
+    let abd:f64=g(s,69);
+    let x1:f64=g(s,53);
+    let v1:f64=g(s,54);
+    let x2:f64=g(s,55);
+    let v2:f64=g(s,56);
+    let kcol1:f64=40.0*k1;
+    let kcol2:f64=40.0*k2;
+    let d1e:f64=D1*(1.0+abd*20.0);
+    let d2e:f64=D2*(1.0+abd*20.0);
+    let aleak:f64=0.03*2.0*LG*X01;
+    let usum:f64=0.0;
+    let agmin:f64=1.0;
+    let nc:f64=g(s,58);
+    let q:i64=0;
+    while(q<SUBS){
+        // audio-rate micro perturbation of Psub (+-1%): natural jitter
+        nc=nc+1.0;
+        let pj:f64=1.0+0.01*(2.0*h01(seed,(nc as i64))-1.0);
+        let psj:f64=psub*pj;
+        let ag1:f64=2.0*LG*(X01+x1);
+        let ag2:f64=2.0*LG*(X02+x2);
+        let a1c:f64=ag1;
+        if(a1c<0.0){a1c=0.0;}
+        let a2c:f64=ag2;
+        if(a2c<0.0){a2c=0.0;}
+        let amn:f64=a1c;
+        if(a2c<amn){amn=a2c;}
+        if(amn<agmin){agmin=amn;}
+        let dp:f64=psj-psup;
+        if(dp<0.0){dp=0.0;}
+        // orifice flow with discharge coefficient (vena contracta +
+        // viscosity): U = Cd*Amin*sqrt(2*dP/rho). Without Cd the inviscid
+        // velocity saturates the Bernoulli drop (P1->0, choked, no
+        // oscillation). Cd=0.7 keeps the wall pressure high.
+        let uu:f64=CD*amn*fsqrt(2.0*dp/RHO)+aleak*fsqrt(2.0*psj/RHO);
+        // Bernoulli along the glottal channel (both referenced to Psub):
+        // P1 = Ps - (rho/2)(U/Ag1)^2 (inlet, never separates).
+        // P2: if divergent (Ag2>Ag1) the flow separates at the minimum and
+        // P2 collapses to Psup; if convergent, full Bernoulli recovery.
+        let p1:f64=psj;
+        if(a1c>0.000000000001){
+            p1=psj-0.5*RHO*(uu/a1c)*(uu/a1c);
+        }
+        let p2:f64=psup;
+        if(a2c<=a1c&&a2c>0.000000000001){
+            p2=psj-0.5*RHO*(uu/a2c)*(uu/a2c);
+        }
+        if(p1<-3000.0){p1=-3000.0;}
+        if(p1>4000.0){p1=4000.0;}
+        if(p2<-3000.0){p2=-3000.0;}
+        if(p2>4000.0){p2=4000.0;}
+        // IF72: channel pressure at each mass level pushes the fold open
+        // laterally (F = l*d*P). P1~Psub at the wide inferior end, P2 after
+        // the Bernoulli drop. The mucosal-wave phase lag (x1 leads x2)
+        // makes this do net positive work -> self-oscillation.
+        let f1:f64=LG*TH1*p1;
+        let f2:f64=LG*TH2*p2;
+        // Active myoelastic input (Van der Pol): guarantees a stable limit
+        // cycle; gated by phonation flag at idx 102 (>0.5 = voice on).
+        let phon:f64=g(s,102);
+        if(phon>0.5){
+            let vdp1:f64=1.0-(x1/XREF)*(x1/XREF);
+            let vdp2:f64=1.0-(x2/XREF)*(x2/XREF);
+            f1=f1+GAMMA*v1*vdp1;
+            f2=f2+GAMMA*0.5*v2*vdp2;
+        }
+        if(x1<-X01){f1=f1+kcol1*(-(x1+X01))-DCOL1*v1;}
+        if(x2<-X02){f2=f2+kcol2*(-(x2+X02))-DCOL2*v2;}
+        let a1:f64=(f1-k1*x1-kc*(x1-x2)-d1e*v1)/M1;
+        v1=v1+a1*DTS;
+        x1=x1+v1*DTS;
+        let a2:f64=(f2-k2*x2-kc*(x2-x1)-d2e*v2)/M2;
+        v2=v2+a2*DTS;
+        x2=x2+v2*DTS;
+        if(x1<-0.00045){x1=-0.00045;}
+        if(x1>0.0012){x1=0.0012;}
+        if(x2<-0.00045){x2=-0.00045;}
+        if(x2>0.0012){x2=0.0012;}
+        if(v1<-3.0){v1=-3.0;}
+        if(v1>3.0){v1=3.0;}
+        if(v2<-3.0){v2=-3.0;}
+        if(v2>3.0){v2=3.0;}
+        usum=usum+uu;
+        q=q+1;
+    }
+    p(s,53,x1);
+    p(s,54,v1);
+    p(s,55,x2);
+    p(s,56,v2);
+    p(s,58,nc);
+    let um:f64=usum/(SUBS as f64);
+    p(s,71,um);
+    let arest:f64=2.0*LG*X01;
+    let agf:f64=agmin/arest;
+    if(agf>1.0){agf=1.0;}
+    p(s,72,agf);
+    return um;
+}
+
+// ---- child vowel area-function LUTs (13 sections, cm2, glottis->lips) ----
+// Initial shapes for child formant targets; tuned empirically vs the
+// frozen instrument (see FINDINGS iteration log).
+// vowel 0=/a/ 1=/i/ 2=/u/ 3=/e/ 4=/o/
+fn vowel_area(v:i64,i:i64)f64{
+    if(v==0){
+        if(i==0){return 1.2;}
+        if(i==1){return 1.0;}
+        if(i==2){return 0.8;}
+        if(i==3){return 0.7;}
+        if(i==4){return 0.8;}
+        if(i==5){return 1.0;}
+        if(i==6){return 1.4;}
+        if(i==7){return 2.0;}
+        if(i==8){return 2.8;}
+        if(i==9){return 3.8;}
+        if(i==10){return 5.0;}
+        if(i==11){return 6.5;}
+        return 8.0;
+    }
+    if(v==1){
+        if(i==0){return 2.0;}
+        if(i==1){return 1.8;}
+        if(i==2){return 1.5;}
+        if(i==3){return 1.2;}
+        if(i==4){return 1.0;}
+        if(i==5){return 0.9;}
+        if(i==6){return 0.9;}
+        if(i==7){return 1.0;}
+        if(i==8){return 1.2;}
+        if(i==9){return 1.3;}
+        if(i==10){return 1.1;}
+        if(i==11){return 0.9;}
+        return 0.8;
+    }
+    if(v==2){
+        if(i==0){return 1.5;}
+        if(i==1){return 1.2;}
+        if(i==2){return 0.8;}
+        if(i==3){return 0.6;}
+        if(i==4){return 0.7;}
+        if(i==5){return 1.0;}
+        if(i==6){return 1.4;}
+        if(i==7){return 1.8;}
+        if(i==8){return 1.6;}
+        if(i==9){return 1.2;}
+        if(i==10){return 0.8;}
+        if(i==11){return 0.5;}
+        return 0.4;
+    }
+    if(v==3){
+        if(i==0){return 2.0;}
+        if(i==1){return 1.8;}
+        if(i==2){return 1.5;}
+        if(i==3){return 1.2;}
+        if(i==4){return 0.9;}
+        if(i==5){return 0.8;}
+        if(i==6){return 1.0;}
+        if(i==7){return 1.4;}
+        if(i==8){return 1.8;}
+        if(i==9){return 2.2;}
+        if(i==10){return 2.6;}
+        if(i==11){return 2.8;}
+        return 3.0;
+    }
+    if(i==0){return 1.8;}
+    if(i==1){return 1.5;}
+    if(i==2){return 1.2;}
+    if(i==3){return 1.0;}
+    if(i==4){return 1.1;}
+    if(i==5){return 1.4;}
+    if(i==6){return 1.8;}
+    if(i==7){return 2.2;}
+    if(i==8){return 2.4;}
+    if(i==9){return 2.2;}
+    if(i==10){return 1.8;}
+    if(i==11){return 1.2;}
+    return 0.8;
+}
+// recompute rc[12] from area[13]
+fn areas_to_rc(s:*f64)void{
+    let j:i64=0;
+    while(j<12){
+        let a0:f64=g(s,40+j);
+        let a1:f64=g(s,40+j+1);
+        let r:f64=0.0;
+        if(a0+a1>0.0001){r=(a0-a1)/(a0+a1);}
+        p(s,28+j,r);
+        j=j+1;
+    }
+    return;
+}
+// set areas to vowel v (hard), recompute rc
+fn vowel_set(s:*f64,v:i64)void{
+    let i:i64=0;
+    while(i<13){p(s,40+i,vowel_area(v,i));i=i+1;}
+    areas_to_rc(s);
+    return;
+}
+// move areas toward vowel v by fraction f (per control tick)
+fn vowel_glide(s:*f64,v:i64,f:f64)void{
+    let i:i64=0;
+    while(i<13){
+        let cur:f64=g(s,40+i);
+        let tgt:f64=vowel_area(v,i);
+        p(s,40+i,cur+(tgt-cur)*f);
+        i=i+1;
+    }
+    areas_to_rc(s);
+    return;
+}
+
+// ---- subglottal waveguide: 6-section uniform tube (child trachea) ----
+// Deviation from Sol's 2-section/1.4 cm (documented in FINDINGS): 1.4 cm
+// puts the first tube resonance at 12.5 kHz, above the audio band of
+// interest; a child trachea is ~5 cm, giving in-band coloring of the
+// breath noise. 6 sections x 0.794 cm = 4.76 cm, uniform 1.2 cm2,
+// closed far end (r=+0.9): resonances at 1838/5514/9190 Hz.
+// Two 6-sample delay lines at indices 108..113 (fwd) and 114..119 (bwd).
+// Driven by breath noise at the glottis end; output = pressure there.
+fn sg_tick(s:*f64,noise:f64)f64{
+    let damp:f64=0.995;
+    let b0:f64=g(s,114);
+    let outp:f64=noise+b0;
+    let nb5:f64=0.9*g(s,113)*damp;
+    let i:i64=0;
+    while(i<5){p(s,114+i,g(s,114+i+1)*damp);i=i+1;}
+    p(s,119,nb5);
+    i=5;
+    while(i>0){p(s,108+i,g(s,108+i-1)*damp);i=i-1;}
+    p(s,108,noise);
+    return outp;
+}
+
+// ---- main vocal-tract waveguide tick (one audio sample) ----
+// src: glottal injection wave. nsg: subglottal-colored breath noise.
+// Returns radiated sample (after lip-radiation 1-zero HP).
+// Stores supraglottal pressure (Pa) at idx 73 for next sample's folds.
+fn wg_tick(s:*f64,src:f64,nsg:f64)f64{
+    let damp:f64=g(s,63);
+    let rg:f64=g(s,67);
+    let r0:f64=g(s,14);
+    let l0:f64=rg*r0+src+nsg;
+    let l13:f64=g(s,13);
+    let rl:f64=-0.7;
+    let r13:f64=rl*l13;
+    let rad:f64=(1.0+rl)*l13;
+    p(s,73,(r0+l0)*1000.0);
+    let j:i64=1;
+    while(j<13){
+        let u:f64=g(s,j);
+        let v:f64=g(s,14+j);
+        let r:f64=g(s,28+j-1);
+        let outR:f64=(1.0+r)*u-r*v;
+        let outL:f64=r*u+(1.0-r)*v;
+        p(s,74+j+1,outR*damp);
+        p(s,88+j-1,outL*damp);
+        j=j+1;
+    }
+    p(s,75,l0*damp);
+    p(s,100,r13*damp);
+    p(s,74,0.0);
+    p(s,101,0.0);
+    j=0;
+    while(j<14){
+        p(s,j,g(s,74+j));
+        p(s,14+j,g(s,88+j));
+        j=j+1;
+    }
+    let rp:f64=g(s,57);
+    p(s,57,rad);
+    let vg:f64=g(s,66);
+    return (rad-rp)*vg;
+}
+
+// ---- full voice tick: folds -> injection + noise -> tract -> radiated ----
+fn voice_tick(s:*f64,n:i64,nseed:i64)f64{
+    let uu:f64=fold_step(s,nseed);
+    let a0:f64=g(s,40)*0.0001;
+    let z0w:f64=399.0/a0/1000.0;
+    let src:f64=uu*z0w*0.5*g(s,64);
+    let nz:f64=2.0*h01(nseed,n)-1.0;
+    let agf:f64=g(s,72);
+    let namp:f64=g(s,65)*(0.05+0.95*agf);
+    let sgout:f64=sg_tick(s,nz*namp);
+    let rad:f64=wg_tick(s,src,sgout);
+    let rg:f64=0.95-0.5*agf;
+    if(rg<0.3){rg=0.3;}
+    p(s,67,rg);
+    return rad;
+}
+
+// decimal string -> f64 (simple, no exponent)
+fn parsef(s:[]u8)f64{
+    let neg:f64=1.0;
+    let i:i64=0;
+    if(s.len>0){
+        if(s[0]==45){neg=-1.0;i=1;}
+    }
+    let ip:f64=0.0;
+    while(i<(s.len as i64)){
+        let c:u8=s[i];
+        if(c==46){break;}
+        if(c>=48&&c<=57){ip=ip*10.0+((c-48) as f64);}
+        i=i+1;
+    }
+    let fp:f64=0.0;
+    let div:f64=10.0;
+    if(i<(s.len as i64)){
+        i=i+1;
+        while(i<(s.len as i64)){
+            let c:u8=s[i];
+            if(c>=48&&c<=57){fp=fp+((c-48) as f64)/div;div=div*10.0;}
+            i=i+1;
+        }
+    }
+    return neg*(ip+fp);
+}
+fn parsei(s:[]u8)i64{
+    let neg:i64=1;
+    let i:i64=0;
+    if(s.len>0){
+        if(s[0]==45){neg=-1;i=1;}
+    }
+    let v:i64=0;
+    while(i<(s.len as i64)){
+        let c:u8=s[i];
+        if(c>=48&&c<=57){v=v*10+((c-48) as i64);}
+        i=i+1;
+    }
+    return neg*v;
+}
+fn str_eq(a:[]u8,b:[]u8)i64{
+    if(a.len!=b.len){return 0;}
+    let i:i64=0;
+    while(i<(a.len as i64)){
+        if(a[i]!=b[i]){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---- mode: fold <k1> <dur_s> <out.wav> : fold model alone -> flow WAV ----
+fn mode_fold(k1:f64,dur:f64,path:[]u8)i32{
+    let nsamp:i64=((dur*44100.0) as i64);
+    let mp:*u8=_zag_malloc(nsamp*8) as *u8;
+    if(mp==null as *u8){return 9;}
+    let mix:[]u8=mp[0..(nsamp*8)];
+    let s:i64=0;
+    while(s<nsamp){put64(mix,s*8,0);s=s+1;}
+    let vs:*f64=valloc();
+    p(vs,59,k1);
+    p(vs,60,2.0*k1);
+    p(vs,61,0.5*k1);
+    p(vs,62,800.0);
+    p(vs,73,0.0);
+    p(vs,69,0.0);
+    let n:i64=0;
+    let umax:f64=0.000000001;
+    while(n<nsamp){
+        let uu:f64=fold_step(vs,777);
+        if(n>4410){
+            let au:f64=uu;
+            if(au<0.0){au=-au;}
+            if(au>umax){umax=au;}
+        }
+        n=n+1;
+    }
+    // second pass: re-run and record normalized (deterministic, same trajectory)
+    p(vs,53,0.0);p(vs,54,0.0);p(vs,55,0.0);p(vs,56,0.0);p(vs,58,0.0);
+    n=0;
+    while(n<nsamp){
+        let uu:f64=fold_step(vs,777);
+        let v: f64 = 0.0;
+        if(n>4410){v=uu/umax*0.35;}
+        put64(mix,n*8,((v*16777216.0) as i64));
+        n=n+1;
+    }
+    print_str("umax=");print_f3(umax*1000000.0);print_str(" cm3/s");print_nl();
+    return wav_write(path,mix,nsamp);
+}
+
+// ---- mode: foldbg <k1> <dur_s> : print x1/x2/U trajectory stats ----
+fn mode_foldbg(k1:f64,dur:f64)i32{
+    let nsamp:i64=((dur*44100.0) as i64);
+    let vs:*f64=valloc();
+    p(vs,59,k1);
+    p(vs,60,2.0*k1);
+    p(vs,61,0.5*k1);
+    p(vs,62,800.0);
+    p(vs,73,0.0);
+    p(vs,69,0.0);
+    // kick: displace x1 to trigger
+    p(vs,53,0.0001);
+    let n:i64=0;
+    let x1min:f64=1.0;
+    let x1max:f64=-1.0;
+    let umin:f64=1.0;
+    let umax:f64=-1.0;
+    while(n<nsamp){
+        let uu:f64=fold_step(vs,777);
+        let x1:f64=g(vs,53);
+        if(n>22050){
+            if(x1<x1min){x1min=x1;}
+            if(x1>x1max){x1max=x1;}
+            if(uu<umin){umin=uu;}
+            if(uu>umax){umax=uu;}
+        }
+        // print a few samples of x1 (mm) and U (cm3/s) at 0.5s, 1.0s, 1.5s
+        if(n==22050||n==44100||n==66150){
+            print_str("t=");print_f3((n as f64)/44100.0);
+            print_str(" x1mm=");print_f3(x1*1000.0);
+            print_str(" x2mm=");print_f3(g(vs,55)*1000.0);
+            print_str(" Ucm3=");print_f3(uu*1000000.0);
+            print_nl();
+        }
+        n=n+1;
+    }
+    print_str("x1 pp mm=");print_f3((x1max-x1min)*1000.0);
+    print_str(" U pp cm3=");print_f3((umax-umin)*1000000.0);
+    print_nl();
+    return 0;
+}
+
+// ---- mode: mech <k1> <k2> <kc> : mechanical ring test (Psub=0) ----
+fn mode_mech(k1:f64,k2:f64,kc:f64)i32{
+    let vs:*f64=valloc();
+    p(vs,59,k1);
+    p(vs,60,k2);
+    p(vs,61,kc);
+    p(vs,62,0.0);
+    p(vs,73,0.0);
+    p(vs,69,0.0);
+    p(vs,53,0.0002);
+    let dbg:i64=0;
+    while(dbg<5){
+        let u0:f64=fold_step(vs,777);
+        print_str("step ");print_f3(dbg as f64);
+        print_str(" x1mm=");print_f3(g(vs,53)*1000.0);
+        print_str(" v1=");print_f3(g(vs,54));
+        print_nl();
+        dbg=dbg+1;
+    }
+    // reset for the main measurement
+    p(vs,53,0.0002);
+    p(vs,54,0.0);p(vs,55,0.0);p(vs,56,0.0);p(vs,58,0.0);
+    let n:i64=0;
+    let x1min:f64=1.0;
+    let x1max:f64=-1.0;
+    let zc:i64=0;
+    let prev:f64=0.0002;
+    while(n<44100){
+        let uu:f64=fold_step(vs,777);
+        let x1:f64=g(vs,53);
+        if(n>22050){
+            if(x1<x1min){x1min=x1;}
+            if(x1>x1max){x1max=x1;}
+            if(prev<0.0&&x1>=0.0){zc=zc+1;}
+        }
+        prev=x1;
+        n=n+1;
+    }
+    print_str("mech x1ppmm=");print_f3((x1max-x1min)*1000.0);
+    print_str(" zc_up_0.5s=");print_f3(zc as f64);
+    print_str(" estF0=");print_f3((zc as f64)*2.0);
+    print_nl();
+    return 0;
+}
+
+// ---- mode: vowel <v> <k1> <dur> <out.wav> : full voice, fixed vowel ----
+fn mode_vowel(v:i64,k1:f64,dur:f64,path:[]u8)i32{
+    let nsamp:i64=((dur*44100.0) as i64);
+    let mp:*u8=_zag_malloc(nsamp*8) as *u8;
+    if(mp==null as *u8){return 9;}
+    let mix:[]u8=mp[0..(nsamp*8)];
+    let s:i64=0;
+    while(s<nsamp){put64(mix,s*8,0);s=s+1;}
+    let vs:*f64=valloc();
+    vowel_set(vs,v);
+    p(vs,59,k1);
+    p(vs,60,k1*0.25);
+    p(vs,61,k1*0.33);
+    p(vs,62,800.0);
+    p(vs,63,0.9985);
+    p(vs,64,1.0);
+    p(vs,65,0.0004);
+    p(vs,66,300.0);
+    p(vs,67,0.9);
+    p(vs,69,0.0);
+    p(vs,102,1.0);
+    // start adducted
+    p(vs,53,-0.00012);
+    p(vs,55,-0.00012);
+    let n:i64=0;
+    let peak:f64=0.000000001;
+    while(n<nsamp){
+        let y:f64=voice_tick(vs,n,1001);
+        if(n>4410){
+            let ay:f64=y;
+            if(ay<0.0){ay=-ay;}
+            if(ay>peak){peak=ay;}
+        }
+        n=n+1;
+    }
+    // second pass for recording (deterministic)
+    p(vs,53,-0.00012);p(vs,54,0.0);p(vs,55,-0.00012);p(vs,56,0.0);
+    p(vs,57,0.0);p(vs,58,0.0);p(vs,67,0.9);p(vs,71,0.0);p(vs,72,1.0);p(vs,73,0.0);
+    let i2:i64=108;
+    while(i2<120){p(vs,i2,0.0);i2=i2+1;}
+    let j2:i64=0;
+    while(j2<14){p(vs,j2,0.0);p(vs,14+j2,0.0);j2=j2+1;}
+    n=0;
+    while(n<nsamp){
+        let y:f64=voice_tick(vs,n,1001);
+        let vv:f64=0.0;
+        if(n>4410){vv=y/peak*0.35;}
+        put64(mix,n*8,((vv*16777216.0) as i64));
+        n=n+1;
+    }
+    return wav_write(path,mix,nsamp);
+}
+fn mode_traj(k1:f64,k2:f64,kc:f64,psub:f64)i32{
+    let vs:*f64=valloc();
+    p(vs,59,k1);
+    p(vs,60,k2);
+    p(vs,61,kc);
+    p(vs,62,psub);
+    p(vs,73,0.0);
+    p(vs,69,0.0);
+    // start ADDUCTED: x=-0.12mm -> 0.03mm half-width (nearly closed)
+    p(vs,53,-0.00012);
+    p(vs,55,-0.00012);
+    let n:i64=0;
+    while(n<2000){
+        let uu:f64=fold_step(vs,777);
+        if(n%200==0){
+            print_str("n=");print_f3(n as f64);
+            print_str(" x1=");print_f3(g(vs,53)*1000.0);
+            print_str(" x2=");print_f3(g(vs,55)*1000.0);
+            print_str(" U=");print_f3(uu*1000000.0);
+            print_nl();
+        }
+        n=n+1;
+    }
+    return 0;
+}
+fn mode_foldrat(k1:f64,k2:f64,kc:f64,psub:f64,abd:f64,dur:f64)i32{
+    let nsamp:i64=((dur*44100.0) as i64);
+    let vs:*f64=valloc();
+    p(vs,59,k1);
+    p(vs,60,k2);
+    p(vs,61,kc);
+    p(vs,62,psub);
+    p(vs,73,0.0);
+    p(vs,69,abd);
+    // start from closed rest (far from the open equilibrium)
+    p(vs,53,0.0);p(vs,54,0.0);p(vs,55,0.0);p(vs,56,0.0);
+    let n:i64=0;
+    let x1min:f64=1.0;
+    let x1max:f64=-1.0;
+    while(n<nsamp){
+        let uu:f64=fold_step(vs,777);
+        let x1:f64=g(vs,53);
+        if(n>22050){
+            if(x1<x1min){x1min=x1;}
+            if(x1>x1max){x1max=x1;}
+        }
+        n=n+1;
+    }
+    print_str("x1ppmm=");print_f3((x1max-x1min)*1000.0);
+    print_nl();
+    return 0;
+}
+
+fn main()i32{
+    let mode:[]u8=_zag_arg(1);
+    if(str_eq(mode,"fold")==1){
+        let k1:f64=parsef(_zag_arg(2));
+        let dur:f64=parsef(_zag_arg(3));
+        let path:[]u8=_zag_arg(4);
+        if(path.len==0){path="fold.wav";}
+        return mode_fold(k1,dur,path);
+    }
+    if(str_eq(mode,"foldbg")==1){
+        let k1:f64=parsef(_zag_arg(2));
+        let dur:f64=parsef(_zag_arg(3));
+        return mode_foldbg(k1,dur);
+    }
+    if(str_eq(mode,"traj")==1){
+        let k1:f64=parsef(_zag_arg(2));
+        let k2:f64=parsef(_zag_arg(3));
+        let kc:f64=parsef(_zag_arg(4));
+        let psub:f64=parsef(_zag_arg(5));
+        return mode_traj(k1,k2,kc,psub);
+    }
+    if(str_eq(mode,"vowel")==1){
+        let v:i64=parsei(_zag_arg(2));
+        let k1:f64=parsef(_zag_arg(3));
+        let dur:f64=parsef(_zag_arg(4));
+        let path:[]u8=_zag_arg(5);
+        if(path.len==0){path="vowel.wav";}
+        return mode_vowel(v,k1,dur,path);
+    }
+    if(str_eq(mode,"scene")==1){
+        let path:[]u8=_zag_arg(2);
+        if(path.len==0){path="scene.wav";}
+        return mode_scene(path);
+    }
+    if(str_eq(mode,"foldrat")==1){
+        let k1:f64=parsef(_zag_arg(2));
+        let k2:f64=parsef(_zag_arg(3));
+        let kc:f64=parsef(_zag_arg(4));
+        let psub:f64=parsef(_zag_arg(5));
+        let abd:f64=parsef(_zag_arg(6));
+        let dur:f64=parsef(_zag_arg(7));
+        return mode_foldrat(k1,k2,kc,psub,abd,dur);
+    }
+    if(str_eq(mode,"mech")==1){
+        let k1:f64=parsef(_zag_arg(2));
+        let k2:f64=parsef(_zag_arg(3));
+        let kc:f64=parsef(_zag_arg(4));
+        return mode_mech(k1,k2,kc);
+    }
+    print_str("usage: render_v11_waveguide <fold|foldbg|foldrat|vowel|scene> ...");
+    print_nl();
+    return 2;
+}
+
+// ---- scene control: returns phonation (0/1), vowel, k1 scale for voice vi at time t ----
+// Three child voices with sparse utterances across the 30 s playground arc.
+fn scene_voice(t:f64,vi:i64,seed:i64,phon:*f64,vow:*f64,ksc:*f64)void{
+    let p:f64=0.0;
+    let v:f64=0.0;
+    let k:f64=1.0;
+    // Voice 0: child A (base k1 360 -> ~615 Hz)
+    if(vi==0){
+        // 2-6s: calling "come on!" (vowel /a/ -> /o/)
+        if(t>=2.0&&t<3.2){p=1.0;v=0.0;k=1.0+0.08*fsinr(t*12.0);}
+        if(t>=3.5&&t<4.8){p=1.0;v=4.0;k=1.05+0.06*fsinr(t*9.0);}
+        // 10-14s: chase shouts (higher, louder)
+        if(t>=10.0&&t<11.0){p=1.0;v=0.0;k=1.18;}
+        if(t>=11.5&&t<12.5){p=1.0;v=3.0;k=1.22+0.05*fsinr(t*15.0);}
+        if(t>=13.0&&t<13.8){p=1.0;v=0.0;k=1.15;}
+        // 17-21s: laughing (pulsed phonation handled separately)
+        if(t>=17.0&&t<20.5){p=2.0;v=0.0;k=1.1;}
+        // 25-28s: soft wind-down
+        if(t>=25.0&&t<26.2){p=1.0;v=4.0;k=0.92;}
+        if(t>=26.8&&t<27.8){p=1.0;v=3.0;k=0.90;}
+    }
+    // Voice 1: child B (base k1 330 -> ~590 Hz)
+    if(vi==1){
+        if(t>=3.0&&t<4.0){p=1.0;v=3.0;k=1.0;}
+        if(t>=5.0&&t<6.2){p=1.0;v=0.0;k=1.06;}
+        if(t>=11.0&&t<12.0){p=1.0;v=4.0;k=1.20;}
+        if(t>=12.8&&t<14.0){p=1.0;v=0.0;k=1.16+0.07*fsinr(t*11.0);}
+        if(t>=18.0&&t<21.0){p=2.0;v=0.0;k=1.08;}
+        if(t>=26.0&&t<27.0){p=1.0;v=3.0;k=0.94;}
+        if(t>=27.5&&t<28.5){p=1.0;v=4.0;k=0.91;}
+    }
+    // Voice 2: child C (base k1 390 -> ~660 Hz, youngest/highest)
+    if(vi==2){
+        if(t>=1.0&&t<2.2){p=1.0;v=0.0;k=1.0+0.10*fsinr(t*14.0);}
+        if(t>=4.2&&t<5.5){p=1.0;v=1.0;k=1.04;}
+        if(t>=9.0&&t<10.0){p=1.0;v=0.0;k=1.19;}
+        if(t>=12.0&&t<13.0){p=1.0;v=3.0;k=1.24;}
+        if(t>=16.5&&t<20.0){p=2.0;v=0.0;k=1.12;}
+        if(t>=24.0&&t<25.2){p=1.0;v=4.0;k=0.93;}
+        if(t>=27.8&&t<28.8){p=1.0;v=0.0;k=0.89;}
+    }
+    phon.*=p;
+    vow.*=v;
+    ksc.*=k;
+    return;
+}
+
+// ---- footstep burst: 35ms lowpassed noise with exponential decay ----
+fn add_step(mix:[]u8,nsamp:i64,tstep:f64,gain:f64,seed:i64)void{
+    let s0:i64=((tstep*44100.0) as i64);
+    if(s0<0||s0>=nsamp){return;}
+    let len:i64=1544; // 35ms
+    if(s0+len>nsamp){len=nsamp-s0;}
+    let lp:f64=0.0;
+    let n:i64=0;
+    while(n<len){
+        let nz:f64=2.0*h01(seed,s0+n)-1.0;
+        lp=lp+0.25*(nz-lp);
+        let env:f64=fexp(-((n as f64)/280.0));
+        let v:f64=lp*env*gain;
+        let cur:i64=get64(mix,(s0+n)*8);
+        put64(mix,(s0+n)*8,cur+((v*16777216.0) as i64));
+        n=n+1;
+    }
+    return;
+}
+
+// ---- mode: scene <out.wav> : full 30 s playground scene ----
+fn mode_scene(path:[]u8)i32{
+    let nsamp:i64=1323000; // 30 s
+    let mp:*u8=_zag_malloc(nsamp*8) as *u8;
+    if(mp==null as *u8){return 9;}
+    let mix:[]u8=mp[0..(nsamp*8)];
+    let s:i64=0;
+    while(s<nsamp){put64(mix,s*8,0);s=s+1;}
+    // three voice states
+    let v0:*f64=valloc();
+    let v1:*f64=valloc();
+    let v2:*f64=valloc();
+    // base k1 per voice (F0 ~615, ~590, ~660 Hz)
+    let vi:i64=0;
+    while(vi<3){
+        let vs:*f64=v0;
+        if(vi==1){vs=v1;}
+        if(vi==2){vs=v2;}
+        vowel_set(vs,0);
+        p(vs,62,800.0);
+        p(vs,63,0.9985);
+        p(vs,64,1.0);
+        p(vs,65,0.0011);
+        p(vs,66,300.0);
+        p(vs,67,0.9);
+        p(vs,69,0.0);
+        p(vs,102,0.0);
+        // adducted rest
+        p(vs,53,-0.00012);
+        p(vs,55,-0.00012);
+        vi=vi+1;
+    }
+    // Pass 1: voices
+    let n:i64=0;
+    while(n<nsamp){
+        let t:f64=(n as f64)/44100.0;
+        vi=0;
+        while(vi<3){
+            let vs:*f64=v0;
+            if(vi==1){vs=v1;}
+            if(vi==2){vs=v2;}
+            let ph:f64=0.0;
+            let vw:f64=0.0;
+            let ks:f64=1.0;
+            // inline scene_voice (avoid pointer-out params for speed)
+            // F0 via utterance-level k1 steps (Van der Pol tracks slow changes)
+            if(vi==0){
+                if(t>=2.0&&t<3.2){ph=1.0;vw=0.0;ks=0.85+0.08*fsinr(t*1.8);}
+                if(t>=3.5&&t<4.8){ph=1.0;vw=4.0;ks=1.05+0.08*fsinr(t*1.5);}
+                if(t>=10.0&&t<11.0){ph=1.0;vw=0.0;ks=1.35+0.06*fsinr(t*2.2);}
+                if(t>=11.5&&t<12.5){ph=1.0;vw=3.0;ks=1.42+0.06*fsinr(t*1.9);}
+                if(t>=13.0&&t<13.8){ph=1.0;vw=0.0;ks=1.30+0.06*fsinr(t*2.0);}
+                if(t>=17.0&&t<20.5){ph=2.0;vw=0.0;ks=1.15;}
+                if(t>=25.0&&t<26.2){ph=1.0;vw=4.0;ks=0.72+0.05*fsinr(t*1.2);}
+                if(t>=26.8&&t<27.8){ph=1.0;vw=3.0;ks=0.68+0.05*fsinr(t*1.1);}
+            }
+            if(vi==1){
+                if(t>=3.0&&t<4.0){ph=1.0;vw=3.0;ks=0.88+0.07*fsinr(t*1.6);}
+                if(t>=5.0&&t<6.2){ph=1.0;vw=0.0;ks=1.08+0.07*fsinr(t*1.7);}
+                if(t>=11.0&&t<12.0){ph=1.0;vw=4.0;ks=1.38+0.06*fsinr(t*2.1);}
+                if(t>=12.8&&t<14.0){ph=1.0;vw=0.0;ks=1.32+0.07*fsinr(t*1.8);}
+                if(t>=18.0&&t<21.0){ph=2.0;vw=0.0;ks=1.12;}
+                if(t>=26.0&&t<27.0){ph=1.0;vw=3.0;ks=0.74+0.05*fsinr(t*1.3);}
+                if(t>=27.5&&t<28.5){ph=1.0;vw=4.0;ks=0.70+0.05*fsinr(t*1.2);}
+            }
+            if(vi==2){
+                if(t>=1.0&&t<2.2){ph=1.0;vw=0.0;ks=0.82+0.08*fsinr(t*1.9);}
+                if(t>=4.2&&t<5.5){ph=1.0;vw=1.0;ks=1.02+0.07*fsinr(t*1.6);}
+                if(t>=9.0&&t<10.0){ph=1.0;vw=0.0;ks=1.36+0.06*fsinr(t*2.0);}
+                if(t>=12.0&&t<13.0){ph=1.0;vw=3.0;ks=1.44+0.06*fsinr(t*2.3);}
+                if(t>=16.5&&t<20.0){ph=2.0;vw=0.0;ks=1.18;}
+                if(t>=24.0&&t<25.2){ph=1.0;vw=4.0;ks=0.73+0.05*fsinr(t*1.1);}
+                if(t>=27.8&&t<28.8){ph=1.0;vw=0.0;ks=0.69+0.05*fsinr(t*1.0);}
+            }
+            // laughter: pulse phonation at ~8 Hz (away from 4 Hz MOD4 band)
+            if(ph==2.0){
+                let lp:f64=fsinr(t*50.3+((vi as f64)*2.1));
+                if(lp>-0.3){ph=1.0;}else{ph=0.0;}
+                ks=ks*(1.0+0.08*fsinr(t*23.0+((vi as f64)*1.3)));
+            }
+            if(ph>0.5){
+                let base:f64=360.0;
+                if(vi==1){base=330.0;}
+                if(vi==2){base=390.0;}
+                p(vs,59,base*ks);
+                p(vs,60,base*ks*0.25);
+                p(vs,61,base*ks*0.33);
+                p(vs,102,1.0);
+                // glide vowel toward target
+                vowel_glide(vs,vw as i64,0.002);
+                let y:f64=voice_tick(vs,n,1001+vi*77);
+                let cur:i64=get64(mix,n*8);
+                put64(mix,n*8,cur+((y*16777216.0) as i64));
+            }else{
+                p(vs,102,0.0);
+            }
+            vi=vi+1;
+        }
+        n=n+1;
+    }
+    // Pass 2: footsteps
+    let ft:f64=0.5;
+    while(ft<8.0){
+        add_step(mix,nsamp,ft,0.05,9001);
+        ft=ft+0.55+0.12*(h01(9001,(ft*10.0) as i64)-0.5);
+    }
+    ft=8.2;
+    while(ft<16.0){
+        add_step(mix,nsamp,ft,0.08,9002);
+        ft=ft+0.36+0.07*(h01(9002,(ft*10.0) as i64)-0.5);
+    }
+    ft=24.5;
+    while(ft<29.5){
+        add_step(mix,nsamp,ft,0.04,9003);
+        ft=ft+0.72+0.18*(h01(9003,(ft*10.0) as i64)-0.5);
+    }
+    // Pass 3: ambience (wind + sparse birds)
+    let wlp:f64=0.0;
+    n=0;
+    while(n<nsamp){
+        let t:f64=(n as f64)/44100.0;
+        // wind: lowpassed hash, slow swell
+        let wn:f64=2.0*h01(7777,n)-1.0;
+        wlp=wlp+0.02*(wn-wlp);
+        let wamp:f64=0.018+0.012*fsinr(t*0.9)+0.008*fsinr(t*0.23+1.0);
+        let wv:f64=wlp*wamp*3.0;
+        // birds: 5 chirps at fixed times
+        let bv:f64=0.0;
+        let bi:i64=0;
+        while(bi<5){
+            let bt:f64=4.0+((bi as f64)*5.3);
+            let dt:f64=t-bt;
+            if(dt>0.0&&dt<0.4){
+                let f:f64=2800.0+1200.0*fsinr(dt*40.0);
+                bv=bv+0.06*fsinr(dt*f*6.2831853)*fexp(-dt*8.0);
+            }
+            bi=bi+1;
+        }
+        let cur:i64=get64(mix,n*8);
+        put64(mix,n*8,cur+(((wv+bv)*16777216.0) as i64));
+        n=n+1;
+    }
+    return wav_write(path,mix,nsamp);
+}
