@@ -1,0 +1,606 @@
+// gate_r28.zag — pure-Zag R2-8 mapping-freeze battery driver.
+//
+// Implements the two-leg interventional gate + hash-chained ledger in Zag,
+// curing the frozen build's mechanism non-compliance (Python gate/ledger).
+//
+// Usage:
+//   gate_r28 <mode> <trials.tsv> <base_dir> <results> <ledger> <genesis> <summary>
+//   mode: adversarial | recall | primary
+//
+// adversarial/recall rows: trial_id \t task \t relX \t relS \t relP1 \t relP2 \t relP3 \t truth
+// primary rows:            task \t relpath \t truth      (relpath relative to base_dir)
+//
+// Gate (frozen BUILD_NOTES semantics):
+//   leg-(i) PASS iff all percepts ok AND j(X)==j(S) AND c(X)>=700 AND c(S)>=700.
+//   leg-(ii) per Pi: FAIL if j(Pi)!=j(X), else FAIL if |f(X)-f(Pi)| > 3*sigma_task
+//     (integer-exact: |d|*10 > sigma10), else REPLAY-CONSISTENT.
+//   INSTALL_full iff leg-(i) AND all 3 Pi FAIL.
+//   INSTALL_legi  iff leg-(i).
+//   INSTALL_nocontract iff all percepts ok AND c(X)>=700.
+//   Any failed percept -> WITHHOLD everywhere (judgment "?", conf -1, feat -1).
+//
+// Ledger (frozen): genesis line, then per trial "<prev_hex> <entry_hex> <canon>",
+//   canon = '|'.join(trial_id,task,relX,relS,relP1,relP2,relP3,truth,
+//                    jX,cX,fX,jS,cS, jP1,cP1,fP1,r1, jP2,cP2,fP2,r2, jP3,cP3,fP3,r3,
+//                    leg_i,disp_full),
+//   entry = hex(sha256(prev_hex_ascii + canon_bytes)).
+//   rN in {FAIL,PASS}; leg_i in {True,False}; disp in {INSTALL,WITHHOLD}.
+//
+// Laws: zero RNG, no timestamps, no stdout in output files. >=3 runs byte-identical.
+
+@import("percept_r28.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- file IO ----------------
+fn z_open_write(path:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -1; }
+    // O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644 = 420
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 420, 0, 0, 0);
+    nio_free(s);
+    return fd;
+}
+fn z_hash_file(path:[]u8, buf:[]u8, dgst:[]u8) i32 {
+    let n:i64 = z_read(path, buf, buf.len as i32);
+    if(n < 0) { return -1; }
+    return ns_sha256(buf[0..n as i32], dgst);
+}
+
+// ---------------- small helpers ----------------
+fn seq(a:[]u8, b:[]u8) i32 {
+    if(_zag_strcmp(a, b) == 1) { return 1; }
+    return 0;
+}
+fn find_byte(buf:[]u8, s:i32, e:i32, b:u8) i32 {
+    let i:i32 = s;
+    while(i < e) {
+        if(buf[i] == b) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+// value of the line starting with key+"=" inside ob[0..n]; empty slice if absent
+fn ob_val(ob:[]u8, n:i32, key:[]u8) []u8 {
+    let i:i32 = 0;
+    while(i < n) {
+        let eol:i32 = find_byte(ob, i, n, 10);
+        if(eol < 0) { eol = n; }
+        if(eol - i > key.len) {
+            let ok:i32 = 1;
+            let k:i32 = 0;
+            while(k < key.len) {
+                if(ob[i+k] != key[k]) { ok = 0; }
+                k = k + 1;
+            }
+            if(ok == 1 && ob[i+key.len] == 61) {
+                return ob[i+key.len+1 .. eol];
+            }
+        }
+        i = eol + 1;
+    }
+    return ob[0..0];
+}
+fn parse_i64(s:[]u8) i64 {
+    let v:i64 = 0;
+    let neg:i64 = 1;
+    let i:i32 = 0;
+    if(s.len > 0 && s[0] == 45) { neg = -1; i = 1; }
+    while(i < s.len) {
+        let c:i32 = s[i] as i32;
+        if(c >= 48 && c <= 57) { v = v*10 + ((c - 48) as i64); }
+        i = i + 1;
+    }
+    return v * neg;
+}
+fn task_id(name:[]u8) i32 {
+    if(seq(name, "colordisc") == 1) { return 1; }
+    if(seq(name, "colorconst") == 1) { return 2; }
+    if(seq(name, "shapetrans") == 1) { return 3; }
+    if(seq(name, "pitchdisc") == 1) { return 4; }
+    if(seq(name, "timbredisc") == 1) { return 5; }
+    if(seq(name, "motiondir") == 1) { return 6; }
+    return 0;
+}
+// 10x the frozen 3*sigma_task (exact for integer features)
+fn sigma10(tid:i32) i64 {
+    if(tid == 1) { return 28; }
+    if(tid == 2) { return 542; }
+    if(tid == 3) { return 175; }
+    if(tid == 4) { return 402; }
+    if(tid == 5) { return 26; }
+    return 100;
+}
+// tab field k (0-based) of line buf[s..e]; empty slice if missing
+fn field(buf:[]u8, s:i32, e:i32, k:i32) []u8 {
+    let i:i32 = s;
+    let f:i32 = 0;
+    let fs:i32 = s;
+    while(i < e) {
+        if(buf[i] == 9) {
+            if(f == k) { return buf[fs..i]; }
+            f = f + 1;
+            fs = i + 1;
+        }
+        i = i + 1;
+    }
+    if(f == k) { return buf[fs..e]; }
+    return buf[e..e];
+}
+fn join_path(base:[]u8, rel:[]u8, out:[]u8) []u8 {
+    let p:i32 = 0;
+    p = ob_add(out, p, base);
+    p = ob_add(out, p, "/");
+    p = ob_add(out, p, rel);
+    return out[0..p];
+}
+
+// ---------------- percept runner ----------------
+// res arena (64B): 0:ok 8:conf 16:feat 24:marg 32:ops 40:jlen 48..64:judgment
+fn run_percept(tid:i32, path:[]u8, fbuf:[]u8, op:[]u8, ob:[]u8, res:[]u8, poly:[]u8) void {
+    t_put64(res, 0, 0);
+    t_put64(res, 8, -1);
+    t_put64(res, 16, -1);
+    t_put64(res, 24, -1);
+    t_put64(res, 32, 0);
+    t_put64(res, 40, 1);
+    res[48] = 63; // "?" default
+    let np2:i32 = percept_run(tid, path, fbuf, op, ob, poly);
+    if(np2 < 0) { return; }
+    let jv:[]u8 = ob_val(ob, np2, "judgment");
+    let cv:[]u8 = ob_val(ob, np2, "confidence");
+    let fv:[]u8 = ob_val(ob, np2, "feature");
+    let mv:[]u8 = ob_val(ob, np2, "margin");
+    if(jv.len == 0 || cv.len == 0 || fv.len == 0) { return; }
+    t_put64(res, 0, 1);
+    t_put64(res, 8, parse_i64(cv));
+    t_put64(res, 16, parse_i64(fv));
+    t_put64(res, 24, parse_i64(mv));
+    t_put64(res, 32, t_get64(op, 0));
+    let jl:i64 = jv.len as i64;
+    if(jl > 16) { jl = 16; }
+    t_put64(res, 40, jl);
+    let i:i32 = 0;
+    while((i as i64) < jl) { res[48+i] = jv[i]; i = i + 1; }
+}
+fn r_ok(r:[]u8) i64 { return t_get64(r, 0); }
+fn r_conf(r:[]u8) i64 { return t_get64(r, 8); }
+fn r_feat(r:[]u8) i64 { return t_get64(r, 16); }
+fn r_marg(r:[]u8) i64 { return t_get64(r, 24); }
+fn r_ops(r:[]u8) i64 { return t_get64(r, 32); }
+fn r_judg(r:[]u8) []u8 {
+    let jl:i32 = t_get64(r, 40) as i32;
+    return r[48 .. 48+jl];
+}
+
+// ---------------- counters arena ----------------
+// slots: 0:n 1:nfail 2:fi_full 3:fi_legi 4:fi_noc 5:changed 6:hc_wrong 7:hc_flag
+//        8:n_wrong 9:recall_denom 10:recall_inst 11:prim_correct 12:prim_n 13:prim_ops
+//        20..31: per-task correct (tid 1..6 -> slot 20+tid)
+//        40..51: per-task n       (tid 1..6 -> slot 40+tid)
+fn cadd(c:[]u8, i:i32, d:i64) void { t_put64(c, i*8, t_get64(c, i*8) + d); }
+fn cget(c:[]u8, i:i32) i64 { return t_get64(c, i*8); }
+fn cset(c:[]u8, i:i32, v:i64) void { t_put64(c, i*8, v); }
+
+// ---------------- ledger ----------------
+// prev: 64B hex buffer (updated in place). dgst: 32B. inb: >=1088B scratch.
+// Appends "<prev> <entry> <canon>\n" to lbuf at lpos; returns new lpos.
+fn ledger_append(prev:[]u8, dgst:[]u8, inb:[]u8, canon:[]u8, cn:i32,
+                 lbuf:[]u8, lpos:i32) i32 {
+    let ip:i32 = 0;
+    ip = ob_add(inb, ip, prev);
+    ip = ob_add(inb, ip, canon[0..cn]);
+    if(ns_sha256(inb[0..ip], dgst) != 0) { return -1; }
+    let eh:[]u8 = ns_hex(dgst);
+    let p:i32 = lpos;
+    p = ob_add(lbuf, p, prev);
+    p = ob_add(lbuf, p, " ");
+    p = ob_add(lbuf, p, eh);
+    p = ob_add(lbuf, p, " ");
+    p = ob_add(lbuf, p, canon[0..cn]);
+    p = ob_add(lbuf, p, "\n");
+    // prev := entry hex
+    let i:i32 = 0;
+    while(i < 64) { prev[i] = eh[i]; i = i + 1; }
+    return p;
+}
+
+// ---------------- gate ----------------
+// leg-(ii) FAIL test for one perturbation. Returns 1 = FAIL (good), 0 = PASS.
+fn pfail(rP:[]u8, jX:[]u8, fX:i64, s10:i64, ok:i64) i32 {
+    if(ok == 0) { return 0; }
+    if(seq(r_judg(rP), jX) == 0) { return 1; }
+    let d:i64 = fX - r_feat(rP);
+    if(d < 0) { d = -d; }
+    if(d*10 > s10) { return 1; }
+    return 0;
+}
+fn tf_str(v:i32) []u8 {
+    if(v == 1) { return "True"; }
+    return "False";
+}
+fn iw_str(v:i32) []u8 {
+    if(v == 1) { return "INSTALL"; }
+    return "WITHHOLD";
+}
+fn fr_str(v:i32) []u8 {
+    if(v == 1) { return "FAIL"; }
+    return "PASS";
+}
+
+// Processes one adversarial/recall trial: 5 percepts, gate, one results line,
+// one ledger line. Updates counters in c. Returns (rpos<<32)|lpos.
+fn do_adv_trial(mode:i32, tid:i32, trial_id:[]u8, task:[]u8,
+                relX:[]u8, relS:[]u8, relP1:[]u8, relP2:[]u8, relP3:[]u8, truth:[]u8,
+                base:[]u8, fbuf:[]u8, op:[]u8, ob:[]u8, pathb:[]u8,
+                canon:[]u8, inb:[]u8, dgst:[]u8, prev:[]u8, poly:[]u8,
+                res:[]u8, rbuf:[]u8, lbuf:[]u8, rpos:i32, lpos:i32, c:[]u8) i64 {
+    let rX:[]u8 = res[0..64];
+    let rS:[]u8 = res[64..128];
+    let rP1:[]u8 = res[128..192];
+    let rP2:[]u8 = res[192..256];
+    let rP3:[]u8 = res[256..320];
+    let pX:[]u8 = join_path(base, relX, pathb);
+    run_percept(tid, pX, fbuf, op, ob, rX, poly);
+    let pS:[]u8 = join_path(base, relS, pathb);
+    run_percept(tid, pS, fbuf, op, ob, rS, poly);
+    let p1:[]u8 = join_path(base, relP1, pathb);
+    run_percept(tid, p1, fbuf, op, ob, rP1, poly);
+    let p2:[]u8 = join_path(base, relP2, pathb);
+    run_percept(tid, p2, fbuf, op, ob, rP2, poly);
+    let p3:[]u8 = join_path(base, relP3, pathb);
+    run_percept(tid, p3, fbuf, op, ob, rP3, poly);
+    let ok:i64 = 1;
+    if(r_ok(rX) == 0 || r_ok(rS) == 0) { ok = 0; }
+    if(r_ok(rP1) == 0 || r_ok(rP2) == 0 || r_ok(rP3) == 0) { ok = 0; }
+    let jX:[]u8 = r_judg(rX);
+    let jS:[]u8 = r_judg(rS);
+    let cX:i64 = r_conf(rX);
+    let cS:i64 = r_conf(rS);
+    let fX:i64 = r_feat(rX);
+    let leg_i:i32 = 0;
+    let f1:i32 = 0;
+    let f2:i32 = 0;
+    let f3:i32 = 0;
+    if(ok == 1) {
+        if(seq(jX, jS) == 1 && cX >= 700 && cS >= 700) { leg_i = 1; }
+        let s10:i64 = sigma10(tid);
+        f1 = pfail(rP1, jX, fX, s10, ok);
+        f2 = pfail(rP2, jX, fX, s10, ok);
+        f3 = pfail(rP3, jX, fX, s10, ok);
+    }
+    let d_full:i32 = 0;
+    let d_legi:i32 = 0;
+    let d_noc:i32 = 0;
+    if(leg_i == 1 && f1 == 1 && f2 == 1 && f3 == 1) { d_full = 1; }
+    if(leg_i == 1) { d_legi = 1; }
+    if(ok == 1 && cX >= 700) { d_noc = 1; }
+    // counters
+    cadd(c, 0, 1);
+    if(ok == 0) { cadd(c, 1, 1); }
+    let wrong:i32 = 0;
+    if(seq(jX, truth) == 0) { wrong = 1; }
+    if(mode == 0) {
+        if(wrong == 1) { cadd(c, 8, 1); }
+        if(d_full == 1 && wrong == 1) { cadd(c, 2, 1); }
+        if(d_legi == 1 && wrong == 1) { cadd(c, 3, 1); }
+        if(d_noc == 1 && wrong == 1) { cadd(c, 4, 1); }
+        if(d_full != d_noc) { cadd(c, 5, 1); }
+        if(wrong == 1 && cX >= 700) {
+            cadd(c, 6, 1);
+            if(d_full == 0) { cadd(c, 7, 1); }
+        }
+    }
+    if(mode == 1) {
+        if(r_ok(rX) == 1 && wrong == 0) {
+            cadd(c, 9, 1);
+            if(d_full == 1) { cadd(c, 10, 1); }
+        }
+    }
+    // ledger canon
+    let cn:i32 = 0;
+    cn = ob_add(canon, cn, trial_id); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, task); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, relX); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, relS); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, relP1); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, relP2); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, relP3); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, truth); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, jX); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(cX)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(fX)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, jS); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(cS)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, r_judg(rP1)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_conf(rP1))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_feat(rP1))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, fr_str(f1)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, r_judg(rP2)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_conf(rP2))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_feat(rP2))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, fr_str(f2)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, r_judg(rP3)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_conf(rP3))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_feat(rP3))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, fr_str(f3)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, tf_str(leg_i)); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, iw_str(d_full));
+    lpos = ledger_append(prev, dgst, inb, canon, cn, lbuf, lpos);
+    // results line (TSV)
+    let rp:i32 = rpos;
+    rp = ob_add(rbuf, rp, trial_id); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, task); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, relX); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, relS); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, relP1); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, relP2); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, relP3); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, truth); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, jX); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(cX)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(fX)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, jS); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(cS)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, r_judg(rP1)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_conf(rP1))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_feat(rP1))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, fr_str(f1)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, r_judg(rP2)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_conf(rP2))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_feat(rP2))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, fr_str(f2)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, r_judg(rP3)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_conf(rP3))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_feat(rP3))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, fr_str(f3)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, tf_str(leg_i)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, iw_str(d_full)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, iw_str(d_legi)); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, iw_str(d_noc)); rp = ob_add(rbuf, rp, "\n");
+    let packed:i64 = ((rp as i64) << 32) | (lpos as i64);
+    return packed;
+}
+
+// ---------------- primary mode ----------------
+// One primary fixture: single percept. Counters: 11:correct 12:n 13:ops,
+// 20+tid: per-task correct, 40+tid: per-task n.
+fn do_prim_trial(tid:i32, task:[]u8, rel:[]u8, truth:[]u8,
+                 base:[]u8, fbuf:[]u8, op:[]u8, ob:[]u8, pathb:[]u8,
+                 canon:[]u8, inb:[]u8, dgst:[]u8, prev:[]u8, poly:[]u8,
+                 res:[]u8, rbuf:[]u8, lbuf:[]u8, rpos:i32, lpos:i32, c:[]u8) i64 {
+    let r:[]u8 = res[0..64];
+    let p:[]u8 = join_path(base, rel, pathb);
+    run_percept(tid, p, fbuf, op, ob, r, poly);
+    cadd(c, 12, 1);
+    cadd(c, 40+tid, 1);
+    let j:[]u8 = r_judg(r);
+    if(r_ok(r) == 1 && seq(j, truth) == 1) {
+        cadd(c, 11, 1);
+        cadd(c, 20+tid, 1);
+    }
+    cadd(c, 13, r_ops(r));
+    let cn:i32 = 0;
+    cn = ob_add(canon, cn, task); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, rel); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, truth); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, j); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_conf(r))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_marg(r))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_feat(r))); cn = ob_add(canon, cn, "|");
+    cn = ob_add(canon, cn, _zag_i64_to_str(r_ops(r)));
+    lpos = ledger_append(prev, dgst, inb, canon, cn, lbuf, lpos);
+    let rp:i32 = rpos;
+    rp = ob_add(rbuf, rp, task); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, rel); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, truth); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, j); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_conf(r))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_marg(r))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_feat(r))); rp = ob_add(rbuf, rp, "\t");
+    rp = ob_add(rbuf, rp, _zag_i64_to_str(r_ops(r))); rp = ob_add(rbuf, rp, "\n");
+    let packed:i64 = ((rp as i64) << 32) | (lpos as i64);
+    return packed;
+}
+fn bool_str(v:i32) []u8 {
+    if(v == 1) { return "true"; }
+    return "false";
+}
+fn sum_kv(sbuf:[]u8, sp:i32, k:[]u8, v:[]u8) i32 {
+    sp = ob_add(sbuf, sp, k);
+    sp = ob_add(sbuf, sp, "=");
+    sp = ob_add(sbuf, sp, v);
+    sp = ob_add(sbuf, sp, "\n");
+    return sp;
+}
+
+// ---------------- main ----------------
+fn main() i32 {
+    let mode_s:[]u8 = _zag_arg(1);
+    let tsv_path:[]u8 = _zag_arg(2);
+    let base:[]u8 = _zag_arg(3);
+    let res_path:[]u8 = _zag_arg(4);
+    let led_path:[]u8 = _zag_arg(5);
+    let genesis:[]u8 = _zag_arg(6);
+    let sum_path:[]u8 = _zag_arg(7);
+    let mode:i32 = 0;
+    if(seq(mode_s, "recall") == 1) { mode = 1; }
+    if(seq(mode_s, "primary") == 1) { mode = 2; }
+    let tsv:[]u8 = nio_alloc(4194304);
+    let fbuf:[]u8 = nio_alloc(8388608);
+    let op:[]u8 = nio_alloc(8);
+    let ob:[]u8 = nio_alloc(65536);
+    let pathb:[]u8 = nio_alloc(4096);
+    let canon:[]u8 = nio_alloc(4096);
+    let inb:[]u8 = nio_alloc(2048);
+    let dgst:[]u8 = nio_alloc(32);
+    let prev:[]u8 = nio_alloc(64);
+    let res:[]u8 = nio_alloc(320);
+    let rbuf:[]u8 = nio_alloc(4194304);
+    let lbuf:[]u8 = nio_alloc(6291456);
+    let c:[]u8 = nio_alloc(512);
+    let poly:[]u8 = nio_alloc(1609*8);
+    if(poly.len == 0) { return 99; }
+    sin_init(poly);
+    let sbuf:[]u8 = nio_alloc(65536);
+    let pbuf:[]u8 = nio_alloc(256);
+    if(tsv.len == 0 || fbuf.len == 0) { return 99; }
+    if(rbuf.len == 0 || lbuf.len == 0) { return 99; }
+    if(c.len == 0 || sbuf.len == 0) { return 99; }
+    let zi:i32 = 0;
+    while(zi < 64) { t_put64(c, zi*8, 0); zi = zi + 1; }
+    if(ns_sha256(genesis, dgst) != 0) { return 98; }
+    let geh:[]u8 = ns_hex(dgst);
+    let gi:i32 = 0;
+    while(gi < 64) { prev[gi] = geh[gi]; gi = gi + 1; }
+    let lpos:i32 = 0;
+    lpos = ob_add(lbuf, lpos, "genesis ");
+    lpos = ob_add(lbuf, lpos, prev);
+    lpos = ob_add(lbuf, lpos, "\n");
+    let tn:i64 = z_read(tsv_path, tsv, 4194304);
+    if(tn < 0) { return 97; }
+    let tni:i32 = tn as i32;
+    let rpos:i32 = 0;
+    let s:i32 = 0;
+    let ntrials:i32 = 0;
+    while(s < tni) {
+        let eol:i32 = find_byte(tsv, s, tni, 10);
+        if(eol < 0) { eol = tni; }
+        if(eol > s) {
+            if(mode == 2) {
+                let task:[]u8 = field(tsv, s, eol, 0);
+                let rel:[]u8 = field(tsv, s, eol, 1);
+                let truth:[]u8 = field(tsv, s, eol, 2);
+                let tid2:i32 = task_id(task);
+                let pk:i64 = do_prim_trial(tid2, task, rel, truth, base, fbuf, op, ob,
+                                           pathb, canon, inb, dgst, prev, poly, res,
+                                           rbuf, lbuf, rpos, lpos, c);
+                rpos = (pk >> 32) as i32;
+                lpos = (pk & 4294967295) as i32;
+            } else {
+                let trial_id:[]u8 = field(tsv, s, eol, 0);
+                let task:[]u8 = field(tsv, s, eol, 1);
+                let relX:[]u8 = field(tsv, s, eol, 2);
+                let relS:[]u8 = field(tsv, s, eol, 3);
+                let relP1:[]u8 = field(tsv, s, eol, 4);
+                let relP2:[]u8 = field(tsv, s, eol, 5);
+                let relP3:[]u8 = field(tsv, s, eol, 6);
+                let truth:[]u8 = field(tsv, s, eol, 7);
+                let tid:i32 = task_id(task);
+                let pk2:i64 = do_adv_trial(mode, tid, trial_id, task, relX, relS,
+                                           relP1, relP2, relP3, truth,
+                                           base, fbuf, op, ob, pathb,
+                                           canon, inb, dgst, prev, poly, res,
+                                           rbuf, lbuf, rpos, lpos, c);
+                rpos = (pk2 >> 32) as i32;
+                lpos = (pk2 & 4294967295) as i32;
+            }
+            ntrials = ntrials + 1;
+            if(ntrials % 1000 == 0) {
+                let pp:i32 = 0;
+                pp = ob_add(pbuf, pp, "trial ");
+                pp = ob_add(pbuf, pp, _zag_i64_to_str(ntrials as i64));
+                pp = ob_add(pbuf, pp, "\n");
+                nio_write_all(1, pbuf[0..pp]);
+            }
+        }
+        s = eol + 1;
+    }
+    let rfd:i64 = z_open_write(res_path);
+    if(rfd < 0) { return 96; }
+    if(nio_write_all(rfd, rbuf[0..rpos]) != rpos as i64) { return 95; }
+    nio_close(rfd);
+    let lfd:i64 = z_open_write(led_path);
+    if(lfd < 0) { return 94; }
+    if(nio_write_all(lfd, lbuf[0..lpos]) != lpos as i64) { return 93; }
+    nio_close(lfd);
+    if(ns_sha256(rbuf[0..rpos], dgst) != 0) { return 92; }
+    let rhex:[]u8 = ns_hex(dgst);
+    if(ns_sha256(lbuf[0..lpos], dgst) != 0) { return 91; }
+    let lhex:[]u8 = ns_hex(dgst);
+    // summary
+    let sp:i32 = 0;
+    sp = sum_kv(sbuf, sp, "ledger_final_hash", prev);
+    sp = sum_kv(sbuf, sp, "results_sha256", rhex);
+    sp = sum_kv(sbuf, sp, "ledger_sha256", lhex);
+    if(mode == 2) {
+        let bc:i64 = cget(c, 11);
+        let bn:i64 = cget(c, 12);
+        let b1p:i32 = 0;
+        if(5*bc >= 3*bn) { b1p = 1; }
+        sp = ob_kint(sbuf, sp, "B1_correct", bc);
+        sp = ob_kint(sbuf, sp, "B1_n", bn);
+        sp = sum_kv(sbuf, sp, "B1_pass", bool_str(b1p));
+        sp = ob_kint(sbuf, sp, "B3_total_ops", cget(c, 13));
+        sp = ob_kint(sbuf, sp, "B3_n", bn);
+        let t2:i32 = 1;
+        while(t2 <= 6) {
+            let nm:[]u8 = "colordisc";
+            if(t2 == 2) { nm = "colorconst"; }
+            if(t2 == 3) { nm = "shapetrans"; }
+            if(t2 == 4) { nm = "pitchdisc"; }
+            if(t2 == 5) { nm = "timbredisc"; }
+            if(t2 == 6) { nm = "motiondir"; }
+            let kp:i32 = 0;
+            kp = ob_add(pbuf, kp, "pt_correct_");
+            kp = ob_add(pbuf, kp, nm);
+            sp = ob_kint(sbuf, sp, pbuf[0..kp], cget(c, 20+t2));
+            kp = 0;
+            kp = ob_add(pbuf, kp, "pt_n_");
+            kp = ob_add(pbuf, kp, nm);
+            sp = ob_kint(sbuf, sp, pbuf[0..kp], cget(c, 40+t2));
+            t2 = t2 + 1;
+        }
+    }
+    if(mode == 1) {
+        let dn:i64 = cget(c, 9);
+        let ist:i64 = cget(c, 10);
+        let rp2:i32 = 0;
+        if(dn > 0 && 10*ist >= 7*dn) { rp2 = 1; }
+        sp = ob_kint(sbuf, sp, "n_recall_trials", cget(c, 0));
+        sp = ob_kint(sbuf, sp, "recall_correct", dn);
+        sp = ob_kint(sbuf, sp, "recall_installed", ist);
+        sp = sum_kv(sbuf, sp, "recall_pass", bool_str(rp2));
+    }
+    if(mode == 0) {
+        let n:i64 = cget(c, 0);
+        let nf:i64 = cget(c, 1);
+        let fi:i64 = cget(c, 2);
+        let fig:i64 = cget(c, 3);
+        let fin:i64 = cget(c, 4);
+        let chg:i64 = cget(c, 5);
+        let hcw:i64 = cget(c, 6);
+        let hcf:i64 = cget(c, 7);
+        let b5p:i32 = 0;
+        if(200*fi < n) { b5p = 1; }
+        let kb2p:i32 = 0;
+        if(hcw > 0 && 20*hcf >= 19*hcw) { kb2p = 1; }
+        let b4p:i32 = 0;
+        if(10*chg >= n && fin > fi) { b4p = 1; }
+        let alp:i32 = 0;
+        if(500*(fig - fi) >= n) { alp = 1; }
+        sp = ob_kint(sbuf, sp, "n_trials", n);
+        sp = ob_kint(sbuf, sp, "n_percept_failed_trials", nf);
+        sp = ob_kint(sbuf, sp, "B5_false_installs", fi);
+        sp = sum_kv(sbuf, sp, "B5_pass", bool_str(b5p));
+        sp = ob_kint(sbuf, sp, "KB2_highconf_wrong", hcw);
+        sp = ob_kint(sbuf, sp, "KB2_self_flagged", hcf);
+        sp = sum_kv(sbuf, sp, "KB2_pass", bool_str(kb2p));
+        sp = ob_kint(sbuf, sp, "B4_decisions_changed", chg);
+        sp = ob_kint(sbuf, sp, "B4_fi_contractless", fin);
+        sp = sum_kv(sbuf, sp, "B4_pass", bool_str(b4p));
+        sp = ob_kint(sbuf, sp, "legii_fi_legi_only", fig);
+        sp = sum_kv(sbuf, sp, "legii_ablation_pass", bool_str(alp));
+    }
+    let sfd:i64 = z_open_write(sum_path);
+    if(sfd < 0) { return 90; }
+    if(nio_write_all(sfd, sbuf[0..sp]) != sp as i64) { return 89; }
+    nio_close(sfd);
+    let qp:i32 = 0;
+    qp = ob_add(pbuf, qp, "done trials=");
+    qp = ob_add(pbuf, qp, _zag_i64_to_str(ntrials as i64));
+    qp = ob_add(pbuf, qp, " ledger_final=");
+    qp = ob_add(pbuf, qp, prev);
+    qp = ob_add(pbuf, qp, "\n");
+    nio_write_all(1, pbuf[0..qp]);
+    return 0;
+}
