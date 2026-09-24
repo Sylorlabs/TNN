@@ -1,0 +1,2257 @@
+// kbcore.zag — Crew B conscious-control KB store core.
+// Pure Zag. Imports: kbcfg.zag (KB_CHUNK), R33_NATIVE_SHA256_V2.zag (ns_sha256).
+// Design (frozen prereg PREREG_KB_CONTROL_CREWB.md):
+//   - exactly ONE record-byte write site (kb_write_record_at), fenced by V1-V3
+//   - revise = append + pointer swap; delete = tombstone; old bytes never touched
+//   - total counts EVERY byte (records+padding+trailers); padding un-forgettable
+//   - journaled two-phase commit; power loss fails closed
+//   - read-back-verify + neighbor-integrity check per mutation
+
+const KB_TRAILER_LEN:i64=16;
+const KB_JWIN:i32=1048576;
+
+// ---------- alloc + accessors ([]u8 arenas; never as []i32 casts) ----------
+fn k_alloc(n:i32)[]u8 {
+    if(n<1){let e:[]u8="";return e;}
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    if((p as i64)==0){let e2:[]u8="";return e2;}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn k_g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|((((b[o+1] as i32)&255))<<8);
+    v=v|((((b[o+2] as i32)&255))<<16);
+    v=v|((((b[o+3] as i32)&255))<<24);
+    return v;
+}
+fn k_s32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+    return;
+}
+fn k_g64(b:[]u8,o:i64)i64 {
+    let o32:i32=o as i32;
+    let v:i64=0;
+    v=v|((b[o32] as i64)&255);
+    v=v|((((b[o32+1] as i64)&255))<<8);
+    v=v|((((b[o32+2] as i64)&255))<<16);
+    v=v|((((b[o32+3] as i64)&255))<<24);
+    v=v|((((b[o32+4] as i64)&255))<<32);
+    v=v|((((b[o32+5] as i64)&255))<<40);
+    v=v|((((b[o32+6] as i64)&255))<<48);
+    v=v|((((b[o32+7] as i64)&255))<<56);
+    return v;
+}
+fn k_s64(b:[]u8,o:i64,v:i64)void {
+    let o32:i32=o as i32;
+    b[o32]=(v&255) as u8;
+    b[o32+1]=((v>>8)&255) as u8;
+    b[o32+2]=((v>>16)&255) as u8;
+    b[o32+3]=((v>>24)&255) as u8;
+    b[o32+4]=((v>>32)&255) as u8;
+    b[o32+5]=((v>>40)&255) as u8;
+    b[o32+6]=((v>>48)&255) as u8;
+    b[o32+7]=((v>>56)&255) as u8;
+    return;
+}
+fn k_memcpy(dst:[]u8,doff:i32,src:[]u8,soff:i32,n:i32)void {
+    let i:i32=0;
+    while(i<n){dst[doff+i]=src[soff+i];i=i+1;}
+    return;
+}
+fn k_memeq(a:[]u8,aoff:i32,b:[]u8,boff:i32,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){if((a[aoff+i] as i32)!=(b[boff+i] as i32)){return 0;}i=i+1;}
+    return 1;
+}
+fn k_iszero(b:[]u8,off:i32,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){if((b[off+i] as i32)!=0){return 0;}i=i+1;}
+    return 1;
+}
+fn k_zerorange(b:[]u8,off:i32,n:i32)void {
+    let i:i32=0;
+    while(i<n){b[off+i]=0;i=i+1;}
+    return;
+}
+
+// ---------- print ----------
+fn k_i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){
+        if(s[s.len-1]==10){return s[0..s.len-1];}
+    }
+    return s;
+}
+fn k_print(s:[]u8)void {_zag_print(s);return;}
+fn k_println(s:[]u8)void {_zag_println(s);return;}
+fn k_print_i64(v:i64)void {_zag_print(k_i64s(v));return;}
+fn k_hex32(src:[]u8,dst:[]u8)void {
+    let i:i32=0;
+    while(i<32){
+        let v:i32=(src[i] as i32)&255;
+        let hi:i32=(v>>4)&15;
+        let lo:i32=v&15;
+        if(hi<10){dst[i*2]=(48+hi) as u8;}else{dst[i*2]=(87+hi) as u8;}
+        if(lo<10){dst[i*2+1]=(48+lo) as u8;}else{dst[i*2+1]=(87+lo) as u8;}
+        i=i+1;
+    }
+    return;
+}
+
+// ---------- file IO (Linux x86-64 raw syscalls) ----------
+fn k_cstr(s:[]u8)[]u8 {
+    let n:i32=s.len;
+    let b:[]u8=k_alloc(n+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<n){b[i]=s[i];i=i+1;}
+    b[n]=0;
+    return b;
+}
+fn k_open_rdonly(path:[]u8)i64 {
+    let c:[]u8=k_cstr(path);
+    if(c.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),0,0,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn k_open_write(path:[]u8)i64 {
+    let c:[]u8=k_cstr(path);
+    if(c.len==0){return -1;}
+    // O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644; no O_EXCL
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),577,420,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn k_open_append(path:[]u8)i64 {
+    let c:[]u8=k_cstr(path);
+    if(c.len==0){return -1;}
+    // O_WRONLY|O_CREAT|O_APPEND = 1089, mode 0644
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),1089,420,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn k_close(fd:i64)void {_zag_raw_syscall(3,fd,0,0,0,0,0);return;}
+fn k_read_into(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<0){return -1;}
+        if(n==0){break;}
+        at=at+(n as i32);
+    }
+    return at;
+}
+fn k_pread_full(fd:i64,buf:[]u8,off:i64)i32 {
+    // pread(2)=17: read exactly buf.len bytes at off; -1 on short/error
+    if(buf.len<1){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(17,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,off+(at as i64),0,0);
+        if(n==-4){continue;}
+        if(n<0){return -1;}
+        if(n==0){return -1;}
+        at=at+(n as i32);
+    }
+    return at;
+}
+fn k_write_all(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return 0;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){return -1;}
+        at=at+(n as i32);
+    }
+    return 0;
+}
+fn k_fsync(fd:i64)i32 {
+    // fsync = 74
+    let rc:i64=_zag_raw_syscall(74,fd,0,0,0,0,0);
+    if(rc!=0){return -1;}
+    return 0;
+}
+fn k_fsync_dir(dir:[]u8)i32 {
+    let fd:i64=k_open_rdonly(dir);
+    if(fd<0){return -1;}
+    let rc:i32=k_fsync(fd);
+    k_close(fd);
+    return rc;
+}
+fn k_mkdir(dir:[]u8)i32 {
+    let c:[]u8=k_cstr(dir);
+    if(c.len==0){return -1;}
+    // mkdir(2)=83, mode 0755=493; ignore EEXIST
+    _zag_raw_syscall(83,(_zag_slice_ptr(c) as i64),493,0,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return 0;
+}
+fn k_rename(a:[]u8,b:[]u8)i32 {
+    let ca:[]u8=k_cstr(a);
+    let cb:[]u8=k_cstr(b);
+    if(ca.len==0||cb.len==0){return -1;}
+    // renameat(2)=264 (plain rename(38) returns EINVAL on this VM; renameat works)
+    // args: olddirfd, oldpath, newdirfd, newpath, flags; AT_FDCWD=-100
+    let rc:i64=_zag_raw_syscall(264,-100,(_zag_slice_ptr(ca) as i64),-100,(_zag_slice_ptr(cb) as i64),0,0);
+    _zag_free(_zag_slice_ptr(ca));
+    _zag_free(_zag_slice_ptr(cb));
+    if(rc!=0){return -1;}
+    return 0;
+}
+fn k_file_size(path:[]u8)i64 {
+    // size via lseek(2)=8 SEEK_END; -1 if missing
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let sz:i64=_zag_raw_syscall(8,fd,0,2,0,0,0);
+    k_close(fd);
+    if(sz<0){return -1;}
+    return sz;
+}
+fn k_unlink(path:[]u8)i32 {
+    let c:[]u8=k_cstr(path);
+    if(c.len==0){return -1;}
+    // unlink(2)=87
+    _zag_raw_syscall(87,(_zag_slice_ptr(c) as i64),0,0,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return 0;
+}
+
+// ---------- paths ----------
+fn k_join(dir:[]u8,name:[]u8)[]u8 {
+    let b:[]u8=k_alloc(dir.len+1+name.len);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<dir.len){b[i]=dir[i];i=i+1;}
+    b[dir.len]=47;
+    i=0;
+    while(i<name.len){b[dir.len+1+i]=name[i];i=i+1;}
+    return b;
+}
+fn k_6digit(buf:[]u8,off:i32,idx:i32)void {
+    let d:i32=100000;
+    let p:i32=off;
+    while(d>=1){
+        buf[p]=((idx/d)%10+48) as u8;
+        p=p+1;
+        d=d/10;
+    }
+    return;
+}
+fn k_chunk_name(dir:[]u8,idx:i32)[]u8 {
+    // "chunk_000000.dat"
+    let nm:[]u8=k_alloc(15);
+    if(nm.len==0){return nm;}
+    nm[0]=99;nm[1]=104;nm[2]=117;nm[3]=110;nm[4]=107;nm[5]=95;
+    k_6digit(nm,6,idx);
+    nm[12]=46;nm[13]=100;nm[14]=97;
+    // need 16 bytes: "chunk_000000.dat" is 16 chars
+    let nm2:[]u8=k_alloc(16);
+    if(nm2.len==0){return nm2;}
+    k_memcpy(nm2,0,nm,0,15);
+    nm2[15]=116;
+    return k_join(dir,nm2);
+}
+fn k_chunk_tmp(dir:[]u8,idx:i32)[]u8 {
+    // "chunk_000000.tmp"
+    let nm:[]u8=k_alloc(16);
+    if(nm.len==0){return nm;}
+    nm[0]=99;nm[1]=104;nm[2]=117;nm[3]=110;nm[4]=107;nm[5]=95;
+    k_6digit(nm,6,idx);
+    nm[12]=46;nm[13]=116;nm[14]=109;nm[15]=112;
+    return k_join(dir,nm);
+}
+
+// ---------- store structs (flat, <=8 fields each) ----------
+struct KbMeta {
+    nchunks:i32,   // fully flushed chunks (files chunk_000000..nchunks-1)
+    total:i64,     // EVERY byte assigned: records + padding + trailers
+    jsize:i64,     // journal.dat size
+    nslots:i32,    // slot entries (one per id ever seen)
+    slotcap:i32,
+    cur_used:i32,  // data bytes in cur (open chunk = index nchunks)
+    jseq:i64,      // next journal seq (also the logical clock)
+    nlive:i32      // live (non-deleted) slots
+}
+struct KbMem {
+    s_id:[]u8,     // 4B LE each
+    s_off:[]u8,    // 8B LE each
+    s_len:[]u8,    // 4B each
+    s_hash:[]u8,   // 32B each
+    s_flags:[]u8,  // 1B each: bit0 deleted, bit1 revised
+    cur:[]u8,      // KB_CHUNK bytes: open chunk buffer
+    dir:[]u8,
+    lprev:[]u8     // 32B ledger head
+}
+
+// ---------- slot table ([]u8 arenas) ----------
+fn kb_slot_find(mm:*KbMem,mt:*KbMeta,id:i32)i32 {
+    let n:i32=mt.*.nslots;
+    let i:i32=0;
+    while(i<n){
+        if(k_g32(mm.*.s_id,i*4)==id){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn kb_slot_grow(mt:*KbMeta,mm:*KbMem)i32 {
+    let cap:i32=mt.*.slotcap;
+    let ncap:i32=cap*2;
+    if(ncap<16){ncap=16;}
+    let nid:[]u8=k_alloc(ncap*4);
+    let noff:[]u8=k_alloc(ncap*8);
+    let nlen:[]u8=k_alloc(ncap*4);
+    let nh:[]u8=k_alloc(ncap*32);
+    let nf:[]u8=k_alloc(ncap);
+    if(nid.len==0||noff.len==0||nlen.len==0||nh.len==0||nf.len==0){return -1;}
+    let n:i32=mt.*.nslots;
+    k_memcpy(nid,0,mm.*.s_id,0,n*4);
+    k_memcpy(noff,0,mm.*.s_off,0,n*8);
+    k_memcpy(nlen,0,mm.*.s_len,0,n*4);
+    k_memcpy(nh,0,mm.*.s_hash,0,n*32);
+    k_memcpy(nf,0,mm.*.s_flags,0,n);
+    mm.*.s_id=nid;mm.*.s_off=noff;mm.*.s_len=nlen;mm.*.s_hash=nh;mm.*.s_flags=nf;
+    mt.*.slotcap=ncap;
+    return 0;
+}
+fn kb_slot_add(mt:*KbMeta,mm:*KbMem,id:i32,off:i64,len:i32,hash:[]u8,flags:i32)i32 {
+    if(mt.*.nslots>=mt.*.slotcap){
+        if(kb_slot_grow(mt,mm)!=0){return -1;}
+    }
+    let i:i32=mt.*.nslots;
+    k_s32(mm.*.s_id,i*4,id);
+    k_s64(mm.*.s_off,(i*8) as i64,off);
+    k_s32(mm.*.s_len,i*4,len);
+    k_memcpy(mm.*.s_hash,i*32,hash,0,32);
+    mm.*.s_flags[i]=(flags&255) as u8;
+    mt.*.nslots=i+1;
+    if((flags&1)==0){mt.*.nlive=mt.*.nlive+1;}
+    return i;
+}
+fn kb_slot_set(mm:*KbMem,i:i32,off:i64,len:i32,hash:[]u8,flags:i32)void {
+    k_s64(mm.*.s_off,(i*8) as i64,off);
+    k_s32(mm.*.s_len,i*4,len);
+    k_memcpy(mm.*.s_hash,i*32,hash,0,32);
+    mm.*.s_flags[i]=(flags&255) as u8;
+    return;
+}
+// predecessor: slot index with max off < new_off (for neighbor check)
+fn kb_find_prev(mm:*KbMem,mt:*KbMeta,new_off:i64,poff:*i64,plen:*i32,pid:*i32,phash:[]u8)i32 {
+    let best:i32=-1;
+    let bestoff:i64=-1;
+    let n:i32=mt.*.nslots;
+    let i:i32=0;
+    while(i<n){
+        let o:i64=k_g64(mm.*.s_off,(i*8) as i64);
+        if(o<new_off){
+            if(o>bestoff){bestoff=o;best=i;}
+        }
+        i=i+1;
+    }
+    if(best<0){poff.*=-1;plen.*=0;pid.*=0;return 0;}
+    poff.*=bestoff;
+    plen.*=k_g32(mm.*.s_len,best*4);
+    pid.*=k_g32(mm.*.s_id,best*4);
+    k_memcpy(phash,0,mm.*.s_hash,best*32,32);
+    return 1;
+}
+
+// ---------- record format ----------
+// [1B kind][4B id LE][2B klen BE][4B tlen LE][key][text]  (11B header)
+fn kb_parse_hdr(buf:[]u8,off:i32,kind_out:*i32,id_out:*i32,klen_out:*i32,tlen_out:*i32)i32 {
+    if(off<0){return -1;}
+    if(off+11>buf.len){return 0;}
+    let kind:i32=(buf[off] as i32)&255;
+    if(kind==0){return 0;}
+    let id:i32=k_g32(buf,off+1);
+    let kl:i32=(((buf[off+5] as i32)&255)<<8)|((buf[off+6] as i32)&255);
+    let tl:i32=k_g32(buf,off+7);
+    if(kl<0||tl<0){return -1;}
+    if(off+11+kl+tl>buf.len){return -1;}
+    kind_out.*=kind;id_out.*=id;klen_out.*=kl;tlen_out.*=tl;
+    return 11+kl+tl;
+}
+fn kb_stage(kind:i32,id:i32,key:[]u8,text:[]u8,rec:[]u8,hash_out:[]u8)i32 {
+    // build record in rec, re-parse it, hash it. returns reclen or -1.
+    let klen:i32=key.len;
+    let tlen:i32=text.len;
+    if(klen<1||klen>65535){return -1;}
+    if(tlen<1){return -1;}
+    let reclen:i32=11+klen+tlen;
+    if(reclen>rec.len){return -1;}
+    rec[0]=(kind&255) as u8;
+    k_s32(rec,1,id);
+    rec[5]=((klen>>8)&255) as u8;
+    rec[6]=(klen&255) as u8;
+    k_s32(rec,7,tlen);
+    k_memcpy(rec,11,key,0,klen);
+    k_memcpy(rec,11+klen,text,0,tlen);
+    // re-parse what we staged (deliberate: never trust the builder)
+    let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+    let pr:i32=kb_parse_hdr(rec,0,&k2,&id2,&kl2,&tl2);
+    if(pr!=reclen){return -1;}
+    if(k2!=kind||id2!=id||kl2!=klen||tl2!=tlen){return -1;}
+    if(ns_sha256(rec[0..reclen],hash_out)!=0){return -1;}
+    return reclen;
+}
+fn kb_hash_of(data:[]u8,out:[]u8)i32 {
+    if(ns_sha256(data,out)!=0){return -1;}
+    return 0;
+}
+
+// ---------- journal ----------
+// entry framing: [4B elen][payload][4B elen]
+// payload: [8B seq][1B op][...]
+//   op 1 PUT_INTENT:    [4B id][8B off][4B len][32B hash][8B nb_before][8B tb_before][4B rlen][rlen]
+//   op 2 PUT_COMMIT:    [8B seq_ref]
+//   op 3 REVISE_INTENT: same as PUT_INTENT
+//   op 4 REVISE_COMMIT: [8B seq_ref]
+//   op 5 DEL_INTENT:    [4B id][8B nb_before][8B tb_before]
+//   op 6 DEL_COMMIT:    [8B seq_ref]
+fn kb_journal_path(mm:*KbMem)[]u8 {return k_join(mm.*.dir,"journal.dat");}
+fn kb_ledger_path(mm:*KbMem)[]u8 {return k_join(mm.*.dir,"ledger.dat");}
+fn kb_store_path(mm:*KbMem)[]u8 {return k_join(mm.*.dir,"store.dat");}
+
+// append payload (framed) + fsync; returns entry start offset or -1
+fn kb_journal_append(mt:*KbMeta,mm:*KbMem,payload:[]u8)i64 {
+    let start:i64=mt.*.jsize;
+    let path:[]u8=kb_journal_path(mm);
+    let fd:i64=k_open_append(path);
+    if(fd<0){return -1;}
+    let lb:[]u8=k_alloc(4);
+    if(lb.len==0){k_close(fd);return -1;}
+    k_s32(lb,0,payload.len);
+    if(k_write_all(fd,lb)!=0){k_close(fd);return -1;}
+    if(k_write_all(fd,payload)!=0){k_close(fd);return -1;}
+    if(k_write_all(fd,lb)!=0){k_close(fd);return -1;}
+    if(k_fsync(fd)!=0){k_close(fd);return -1;}
+    k_close(fd);
+    mt.*.jsize=start+8+(payload.len as i64);
+    return start;
+}
+// read-back-verify: the fsync'd journal bytes must equal the staged payload
+fn kb_journal_readback(mt:*KbMeta,mm:*KbMem,start:i64,want:[]u8)i32 {
+    let n:i32=8+want.len;
+    let buf:[]u8=k_alloc(n);
+    if(buf.len==0){return -1;}
+    let path:[]u8=kb_journal_path(mm);
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let got:i32=k_pread_full(fd,buf,start);
+    k_close(fd);
+    if(got!=n){return -1;}
+    if(k_g32(buf,0)!=want.len){return -2;}
+    if(k_g32(buf,4+want.len)!=want.len){return -2;}
+    if(k_memeq(buf,4,want,0,want.len)!=1){return -3;}
+    return 0;
+}
+// ---------- journal truncate (torn tail) ----------
+fn kb_journal_truncate(mm:*KbMem,cut:i64)i32 {
+    // rewrite journal.dat = first `cut` bytes (atomic via tmp+rename)
+    let path:[]u8=kb_journal_path(mm);
+    let tmpp:[]u8=k_join(mm.*.dir,"journal.new");
+    let rf:i64=k_open_rdonly(path);
+    if(rf<0){return -1;}
+    let wf:i64=k_open_write(tmpp);
+    if(wf<0){k_close(rf);return -1;}
+    let win:[]u8=k_alloc(KB_JWIN);
+    if(win.len==0){k_close(rf);k_close(wf);return -1;}
+    let left:i64=cut;
+    let ok:i32=1;
+    while(left>0){
+        let want:i32=KB_JWIN;
+        if((left as i64)<(want as i64)){want=left as i32;}
+        let got:i32=k_read_into(rf,win[0..want]);
+        if(got!=want){ok=0;break;}
+        if(k_write_all(wf,win[0..want])!=0){ok=0;break;}
+        left=left-(got as i64);
+    }
+    k_close(rf);
+    if(ok!=1){k_close(wf);return -1;}
+    if(k_fsync(wf)!=0){k_close(wf);return -1;}
+    k_close(wf);
+    if(k_rename(tmpp,path)!=0){return -1;}
+    if(k_fsync_dir(mm.*.dir)!=0){return -1;}
+    return 0;
+}
+
+// ---------- journal pass-1 scan ----------
+// Verifies framing of every entry. Returns: 0 clean, 1 torn-tail truncated,
+// -1 corrupt (fail closed), -2 io. Out: nentries, max committed seq, dirty.
+fn kb_journal_scan(mt:*KbMeta,mm:*KbMem,nentries:*i32,maxcommit:*i64,maxseq:*i64,dirty:*i32)i32 {
+    let path:[]u8=kb_journal_path(mm);
+    let size:i64=k_file_size(path);
+    if(size<0){return -2;}
+    nentries.*=0;maxcommit.*=0;maxseq.*=0;dirty.*=0;
+    if(size==0){return 0;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -2;}
+    let n:i32=0;
+    let mc:i64=0;
+    let ms:i64=0;
+    let mi:i64=0;
+    let pos:i64=0;
+    let hb:[]u8=k_alloc(4);
+    let sb:[]u8=k_alloc(9);
+    let tb:[]u8=k_alloc(4);
+    let cb:[]u8=k_alloc(8);
+    if(hb.len==0||sb.len==0||tb.len==0||cb.len==0){k_close(fd);return -2;}
+    let rc:i32=0;
+    while(pos<size){
+        if(k_pread_full(fd,hb,pos)!=4){
+            // header unreadable: torn at pos (pos<size here)
+            k_close(fd);
+            if(kb_journal_truncate(mm,pos)!=0){return -2;}
+            mt.*.jsize=pos;
+            nentries.*=n;maxcommit.*=mc;maxseq.*=ms;dirty.*=1;
+            return 1;
+        }
+        let elen:i32=k_g32(hb,0);
+        if(elen<10||elen>16777216){k_close(fd);return -1;}
+        let eend:i64=pos+8+(elen as i64);
+        if(eend>size){
+            k_close(fd);
+            if(kb_journal_truncate(mm,pos)!=0){return -2;}
+            mt.*.jsize=pos;
+            nentries.*=n;maxcommit.*=mc;maxseq.*=ms;dirty.*=1;
+            return 1;
+        }
+        if(k_pread_full(fd,sb,pos+4)!=9){k_close(fd);return -1;}
+        if(k_pread_full(fd,tb,pos+4+(elen as i64))!=4){k_close(fd);return -1;}
+        if(k_g32(tb,0)!=elen){k_close(fd);return -1;}
+        let sq:i64=k_g64(sb,0);
+        if(sq>ms){ms=sq;}
+        let op:i32=(sb[8] as i32)&255;
+        if(op<1||op>6){k_close(fd);return -1;}
+        if(op==1||op==3||op==5){
+            if(sq>mi){mi=sq;}
+        }
+        if(op==2||op==4||op==6){
+            if(k_pread_full(fd,cb,pos+4+9)!=8){k_close(fd);return -1;}
+            let ref:i64=k_g64(cb,0);
+            if(ref>mc){mc=ref;}
+        }
+        n=n+1;
+        pos=eend;
+    }
+    k_close(fd);
+    nentries.*=n;maxcommit.*=mc;maxseq.*=ms;
+    // DIRTY if there's an intact intent never committed (crash leftover).
+    // Aborted intents are truncated from the journal, so any uncommitted
+    // intent here is a crash, not a deliberate abort.
+    if(mi>mc){dirty.*=1;}else{dirty.*=0;}
+    return rc;
+}
+
+// ---------- ledger (hash-chained audit) ----------
+// entry: [32B prev][1B op][4B id][8B off][4B len][32B hash] = 81B
+// ops: 1 put, 2 revise, 3 delete, 4 verify_fail, 5 recover
+fn kb_ledger_append(mt:*KbMeta,mm:*KbMem,op:i32,id:i32,off:i64,len:i32,hash:[]u8)i32 {
+    let e:[]u8=k_alloc(81);
+    let nh:[]u8=k_alloc(32);
+    if(e.len==0||nh.len==0){return -1;}
+    k_memcpy(e,0,mm.*.lprev,0,32);
+    e[32]=(op&255) as u8;
+    k_s32(e,33,id);
+    k_s64(e,37,off);
+    k_s32(e,45,len);
+    k_memcpy(e,49,hash,0,32);
+    if(ns_sha256(e,nh)!=0){return -1;}
+    let path:[]u8=kb_ledger_path(mm);
+    let fd:i64=k_open_append(path);
+    if(fd<0){return -1;}
+    if(k_write_all(fd,e)!=0){k_close(fd);return -1;}
+    if(k_fsync(fd)!=0){k_close(fd);return -1;}
+    k_close(fd);
+    k_memcpy(mm.*.lprev,0,nh,0,32);
+    return 0;
+}
+fn kb_ledger_recompute(mm:*KbMem,do_truncate:i32) i32 {
+    // walk ledger.dat; recompute head into mm.lprev.
+    // returns 0 ok, 1 torn (truncated if do_truncate), -1 corrupt, -2 io.
+    let path:[]u8=kb_ledger_path(mm);
+    let size:i64=k_file_size(path);
+    if(size<0){return -2;}
+    let head:[]u8=k_alloc(32);
+    if(head.len==0){return -2;}
+    // head starts zero (k_alloc zero-fills)
+    if(size==0){k_memcpy(mm.*.lprev,0,head,0,32);return 0;}
+    if(size%81!=0){
+        if(do_truncate==0){return 1;}
+        // truncate torn tail
+        let cut:i64=(size/81)*81;
+        let tmpp:[]u8=k_join(mm.*.dir,"ledger.new");
+        let rf:i64=k_open_rdonly(path);
+        let wf:i64=k_open_write(tmpp);
+        if(rf<0||wf<0){if(rf>=0){k_close(rf);}if(wf>=0){k_close(wf);}return -2;}
+        let win:[]u8=k_alloc(KB_JWIN);
+        if(win.len==0){k_close(rf);k_close(wf);return -2;}
+        let left:i64=cut;
+        let ok:i32=1;
+        while(left>0){
+            let want:i32=KB_JWIN;
+            if(left<(want as i64)){want=left as i32;}
+            let got:i32=k_read_into(rf,win[0..want]);
+            if(got!=want){ok=0;break;}
+            if(k_write_all(wf,win[0..want])!=0){ok=0;break;}
+            left=left-(got as i64);
+        }
+        k_close(rf);
+        if(ok!=1){k_close(wf);return -2;}
+        if(k_fsync(wf)!=0){k_close(wf);return -2;}
+        k_close(wf);
+        if(k_rename(tmpp,path)!=0){return -2;}
+        k_fsync_dir(mm.*.dir);
+        size=cut;
+    }
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -2;}
+    let e:[]u8=k_alloc(81);
+    let nh:[]u8=k_alloc(32);
+    if(e.len==0||nh.len==0){k_close(fd);return -2;}
+    let n:i64=size/81;
+    let i:i64=0;
+    let rc:i32=0;
+    while(i<n){
+        if(k_pread_full(fd,e,i*81)!=81){rc=-2;break;}
+        if(k_memeq(e,0,head,0,32)!=1){rc=-1;break;}
+        if(ns_sha256(e,nh)!=0){rc=-2;break;}
+        k_memcpy(head,0,nh,0,32);
+        i=i+1;
+    }
+    k_close(fd);
+    if(rc!=0){return rc;}
+    k_memcpy(mm.*.lprev,0,head,0,32);
+    return 0;
+}
+
+// ---------- journal<->ledger completeness (streaming) ----------
+// A committed mutation = a journal commit frame (op 2/4/6) referencing an
+// intent (op 1/3/5). Crash point 3 (after journal commit, before ledger
+// append) leaves a durable committed mutation with NO ledger entry.
+// Ordered exact correspondence: the journal's committed mutations in journal
+// order must match the ledger's mutation entries (op 1/2/3) in ledger order,
+// one to one.
+//   kb_ll_run(do_fix=0) = audit: count every divergence (missing, wrong,
+//       duplicate, reordered, removed, or extra ledger mutation); bad.* is
+//       the count and the caller fails closed.
+//   kb_ll_run(do_fix=1) = reconcile: append ONLY a missing deterministic
+//       suffix in journal order, hash-chained from the current head, during
+//       load-with-replay. Any non-prefix divergence fails closed (rc=-2);
+//       a fix never rewrites, reorders, or skips.
+// Bounded: O(1) memory (one 1MB ledger window, one pending intent, small
+// headers). No whole-file loads, no fixed caps: the journal already streams
+// and the ledger streams in 1MB windows. The journal is clean when this runs
+// (strict load rejects dirty journals; recover replays first), so intents
+// strictly alternate with their commits; anything else fails closed.
+// Non-mutation ledger entries (op 4 verify_fail, 5 recover) are skipped in
+// both directions and never compared.
+fn kb_ll_nextmut(lfd:i64,lsz:i64,lwin:[]u8,lpos:*i64,lwn:*i32,lri:*i32,ebuf:[]u8)i32 {
+    // advance to the next ledger mutation entry (op 1/2/3).
+    // returns 0 with the 81B entry in ebuf, 1 if exhausted, -1 io, -2 corrupt.
+    while(1){
+        if(lri.*>=lwn.*){
+            if(lpos.*>=lsz){return 1;}
+            let rem:i64=lsz-lpos.*;
+            let want:i32=KB_JWIN;
+            if(rem<(want as i64)){want=rem as i32;}
+            want=want-(want%81);
+            if(want<81){return -2;}
+            if(k_pread_full(lfd,lwin[0..want],lpos.*)!=want){return -1;}
+            lpos.*=lpos.*+(want as i64);
+            lwn.*=want;
+            lri.*=0;
+        }
+        let b:i32=lri.*;
+        lri.*=b+81;
+        let lop:i32=(lwin[b+32] as i32)&255;
+        if(lop==1||lop==2||lop==3){
+            k_memcpy(ebuf,0,lwin,b,81);
+            return 0;
+        }
+    }
+    return -2;
+}
+fn kb_ll_run(mt:*KbMeta,mm:*KbMem,do_fix:i32,bad:*i32,crash_after:i32)i32 {
+    bad.*=0;
+    let ca:i32=crash_after;
+    let lpath:[]u8=kb_ledger_path(mm);
+    let lsz:i64=k_file_size(lpath);
+    if(lsz<0){return -1;}
+    if(lsz%81!=0){return -2;}
+    let lfd:i64=k_open_rdonly(lpath);
+    if(lfd<0){return -1;}
+    let lwin:[]u8=k_alloc(KB_JWIN);
+    let ebuf:[]u8=k_alloc(81);
+    let phash:[]u8=k_alloc(32);
+    if(lwin.len==0||ebuf.len==0||phash.len==0){k_close(lfd);return -1;}
+    let lpos:i64=0;
+    let lwn:i32=0;
+    let lri:i32=0;
+    let jpath:[]u8=kb_journal_path(mm);
+    let jsz:i64=k_file_size(jpath);
+    if(jsz<0){k_close(lfd);return -1;}
+    let jfd:i64=k_open_rdonly(jpath);
+    if(jfd<0){k_close(lfd);return -1;}
+    let hb:[]u8=k_alloc(4);
+    let sb:[]u8=k_alloc(9);
+    let pb:[]u8=k_alloc(57);
+    if(hb.len==0||sb.len==0||pb.len==0){k_close(lfd);k_close(jfd);return -1;}
+    let pos:i64=0;
+    let badc:i32=0;
+    let fixed:i32=0;
+    let ppend:i32=0;
+    let pseq:i64=0;
+    let plop:i32=0;
+    let pid:i32=0;
+    let poff:i64=0;
+    let plen:i32=0;
+    let rc:i32=0;
+    while(pos<jsz){
+        if(k_pread_full(jfd,hb,pos)!=4){rc=-1;break;}
+        let elen:i32=k_g32(hb,0);
+        if(elen<10||elen>16777216){rc=-2;break;}
+        let eend:i64=pos+(elen as i64)+8;
+        if(eend>jsz){rc=-2;break;}
+        if(k_pread_full(jfd,sb,pos+4)!=9){rc=-1;break;}
+        let sq:i64=k_g64(sb,0);
+        let op:i32=(sb[8] as i32)&255;
+        if(op==1||op==3||op==5){
+            if(ppend!=0){rc=-2;break;}
+            let lop:i32=1;
+            if(op==3){lop=2;}
+            if(op==5){lop=3;}
+            if(op==5){
+                if(elen!=29){rc=-2;break;}
+                if(k_pread_full(jfd,pb[0..29],pos+4)!=29){rc=-1;break;}
+                pid=k_g32(pb,9);
+                poff=0;
+                plen=0;
+                k_zerorange(phash,0,32);
+            }else{
+                if(elen<57){rc=-2;break;}
+                if(k_pread_full(jfd,pb,pos+4)!=57){rc=-1;break;}
+                pid=k_g32(pb,9);
+                poff=k_g64(pb,13);
+                plen=k_g32(pb,21);
+                k_memcpy(phash,0,pb,25,32);
+            }
+            pseq=sq;
+            plop=lop;
+            ppend=1;
+        }else{
+            if(op==2||op==4||op==6){
+                if(elen!=17){rc=-2;break;}
+                if(ppend==0){rc=-2;break;}
+                if(k_pread_full(jfd,pb[0..17],pos+4)!=17){rc=-1;break;}
+                if(k_g64(pb,9)!=pseq){rc=-2;break;}
+                let nr:i32=kb_ll_nextmut(lfd,lsz,lwin,&lpos,&lwn,&lri,ebuf);
+                if(nr<0){rc=nr;break;}
+                if(nr==1){
+                    if(do_fix!=0){
+                        if(kb_ledger_append(mt,mm,plop,pid,poff,plen,phash)!=0){rc=-1;break;}
+                        fixed=fixed+1;
+                        if(ca>0){
+                            ca=ca-1;
+                            if(ca==0){rc=99;break;}
+                        }
+                    }else{
+                        badc=badc+1;
+                    }
+                }else{
+                    let lop2:i32=(ebuf[32] as i32)&255;
+                    let same:i32=0;
+                    if(lop2==plop&&k_g32(ebuf,33)==pid&&k_g64(ebuf,37)==poff&&k_g32(ebuf,45)==plen&&k_memeq(ebuf,49,phash,0,32)==1){same=1;}
+                    if(same==0){
+                        if(do_fix!=0){rc=-2;break;}
+                        badc=badc+1;
+                    }
+                }
+                ppend=0;
+            }else{rc=-2;break;}
+        }
+        pos=eend;
+    }
+    if(rc==0){
+        if(ppend!=0){rc=-2;}
+    }
+    if(rc==0){
+        // every journal mutation consumed: the ledger must hold no further
+        // mutation entries (extras are silent divergence).
+        let nr:i32=kb_ll_nextmut(lfd,lsz,lwin,&lpos,&lwn,&lri,ebuf);
+        if(nr<0){rc=nr;}
+        else{
+            if(nr==0){
+                if(do_fix!=0){rc=-2;}
+                else{badc=badc+1;}
+            }
+        }
+    }
+    k_close(lfd);
+    k_close(jfd);
+    if(rc!=0){return rc;}
+    bad.*=badc;
+    if(do_fix!=0){return fixed;}
+    return 0;
+}
+
+// ---------- store.dat checkpoint ----------
+// [8B magic "KBCTL001"][4B nchunks][8B total][4B nlive][4B cur_used] = 28B
+fn kb_store_save(mt:*KbMeta,mm:*KbMem)i32 {
+    let b:[]u8=k_alloc(28);
+    if(b.len==0){return -1;}
+    b[0]=75;b[1]=66;b[2]=67;b[3]=84;b[4]=76;b[5]=48;b[6]=48;b[7]=49;
+    k_s32(b,8,mt.*.nchunks);
+    k_s64(b,12,mt.*.total);
+    k_s32(b,20,mt.*.nlive);
+    k_s32(b,24,mt.*.cur_used);
+    let path:[]u8=kb_store_path(mm);
+    let tmpp:[]u8=k_join(mm.*.dir,"store.new");
+    let fd:i64=k_open_write(tmpp);
+    if(fd<0){return -1;}
+    if(k_write_all(fd,b)!=0){k_close(fd);return -1;}
+    if(k_fsync(fd)!=0){k_close(fd);return -1;}
+    k_close(fd);
+    // re-read back before rename (read-back-verify for the checkpoint too)
+    let fd2:i64=k_open_rdonly(tmpp);
+    if(fd2<0){return -1;}
+    let v:[]u8=k_alloc(28);
+    if(v.len==0){k_close(fd2);return -1;}
+    if(k_read_into(fd2,v)!=28){k_close(fd2);return -1;}
+    k_close(fd2);
+    if(k_memeq(v,0,b,0,28)!=1){return -1;}
+    if(k_rename(tmpp,path)!=0){return -1;}
+    if(k_fsync_dir(mm.*.dir)!=0){return -1;}
+    return 0;
+}
+fn kb_store_load(mt:*KbMeta,mm:*KbMem)i32 {
+    // returns 0 ok, 1 not initialized, -1 corrupt
+    let path:[]u8=kb_store_path(mm);
+    if(k_file_size(path)!=28){return 1;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return 1;}
+    let b:[]u8=k_alloc(28);
+    if(b.len==0){k_close(fd);return -1;}
+    if(k_read_into(fd,b)!=28){k_close(fd);return -1;}
+    k_close(fd);
+    if((b[0] as i32)!=75||(b[1] as i32)!=66||(b[2] as i32)!=67||(b[3] as i32)!=84){return -1;}
+    if((b[4] as i32)!=76||(b[5] as i32)!=48||(b[6] as i32)!=48||(b[7] as i32)!=49){return -1;}
+    mt.*.nchunks=k_g32(b,8);
+    mt.*.total=k_g64(b,12);
+    mt.*.nlive=k_g32(b,20);
+    mt.*.cur_used=k_g32(b,24);
+    if(mt.*.nchunks<0||mt.*.total<0||mt.*.cur_used<0){return -1;}
+    return 0;
+}
+
+// ---------- chunk trailer ----------
+// last 16B of a flushed chunk: [8B used LE][4B seq LE][4B magic "KBCT"]
+fn kb_trailer_check(dir:[]u8,idx:i32,used_out:*i32)i32 {
+    // 1 valid trailer, 0 absent/invalid, -1 io error
+    let path:[]u8=k_chunk_name(dir,idx);
+    if(k_file_size(path)!=KB_CHUNK){return 0;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let t:[]u8=k_alloc(16);
+    if(t.len==0){k_close(fd);return -1;}
+    let rc:i32=k_pread_full(fd,t,KB_CHUNK-KB_TRAILER_LEN);
+    k_close(fd);
+    if(rc!=16){return -1;}
+    let used:i64=k_g64(t,0);
+    let seq:i32=k_g32(t,8);
+    if(seq!=idx){return 0;}
+    if((t[12] as i32)!=75||(t[13] as i32)!=66||(t[14] as i32)!=67||(t[15] as i32)!=84){return 0;}
+    if(used<0||used>(KB_CHUNK-KB_TRAILER_LEN)){return 0;}
+    if(used<0||used>(KB_CHUNK-KB_TRAILER_LEN)){return 0;}
+    used_out.*=used as i32;
+    return 1;
+}
+fn kb_adopt_orphans(mt:*KbMeta,mm:*KbMem)i32 {
+    // a flushed-but-unadopted chunk (rollover completed, store.dat stale)
+    // is adopted from its self-describing trailer. returns adoptions or -1.
+    let n:i32=0;
+    while(1){
+        let used:i32=0;
+        let tr:i32=kb_trailer_check(mm.*.dir,mt.*.nchunks,&used);
+        if(tr<0){return -1;}
+        if(tr==0){break;}
+        mt.*.nchunks=mt.*.nchunks+1;
+        mt.*.total=(mt.*.nchunks as i64)*KB_CHUNK;
+        mt.*.cur_used=0;
+        n=n+1;
+    }
+    return n;
+}
+
+// ---------- rollover (atomic: tmp + fsync + re-read + rename) ----------
+// total advances by the WHOLE chunk: padding is inside the counted region.
+// There is no separate padding quantity to forget (the G-bug class).
+fn kb_rollover(mt:*KbMeta,mm:*KbMem)i32 {
+    let ch:i64=KB_CHUNK;
+    let cap:i32=(ch-KB_TRAILER_LEN) as i32;
+    let used:i32=mt.*.cur_used;
+    if(used<0||used>cap){return -1;}
+    let cur:[]u8=mm.*.cur;
+    // zero tail [used, cap)
+    k_zerorange(cur,used,cap-used);
+    // trailer: [used:8][seq:4][magic:4] at [ch-16..ch-1]
+    k_s64(cur,ch-KB_TRAILER_LEN,used as i64);
+    k_s32(cur,(ch-8) as i32,mt.*.nchunks);
+    cur[(ch-4) as i32]=75;cur[(ch-3) as i32]=66;cur[(ch-2) as i32]=67;cur[(ch-1) as i32]=84;
+    let dir:[]u8=mm.*.dir;
+    let final:[]u8=k_chunk_name(dir,mt.*.nchunks);
+    let tmp:[]u8=k_chunk_tmp(dir,mt.*.nchunks);
+    let fd:i64=k_open_write(tmp);
+    if(fd<0){return -1;}
+    if(k_write_all(fd,cur)!=0){k_close(fd);return -1;}
+    if(k_fsync(fd)!=0){k_close(fd);return -1;}
+    k_close(fd);
+    // re-read the tmp file BEFORE rename: bytes on disk must equal cur
+    let fd2:i64=k_open_rdonly(tmp);
+    if(fd2<0){return -1;}
+    let back:[]u8=k_alloc(ch as i32);
+    if(back.len==0){k_close(fd2);return -1;}
+    let got:i32=k_read_into(fd2,back);
+    k_close(fd2);
+    if(got!=(ch as i32)){return -1;}
+    if(k_memeq(back,0,cur,0,ch as i32)!=1){return -1;}
+    if(k_rename(tmp,final)!=0){return -1;}
+    if(k_fsync_dir(dir)!=0){return -1;}
+    mt.*.nchunks=mt.*.nchunks+1;
+    mt.*.cur_used=0;
+    // total recomputed from components (nchunks*CHUNK + cur_used), NOT
+    // total+CHUNK: total already includes the old cur_used bytes.
+    mt.*.total=(mt.*.nchunks as i64)*ch;
+    // fresh chunk invariant: cur beyond cur_used is zero
+    k_zerorange(cur,0,ch as i32);
+    return 0;
+}
+
+// ---------- THE single record-byte write site ----------
+// Fenced by V1 (append-only invariant), V2 (capacity), V3 (freshness).
+// ALL record bytes reach the chunk buffer ONLY through this function.
+// (kb_apply_replay may SKIP the write when the region is already identical;
+// it never writes bytes itself.)
+fn kb_write_record_at(mt:*KbMeta,mm:*KbMem,off:i64,rec:[]u8)i32 {
+    let ch:i64=KB_CHUNK;
+    let cap:i32=(ch-KB_TRAILER_LEN) as i32;
+    // V1: off recomputed from components must equal total. A padding-blind
+    // counter (the G-bug) diverges here and trips fail-closed.
+    let expect:i64=(mt.*.nchunks as i64)*ch+(mt.*.cur_used as i64);
+    if(off!=expect){return -11;}
+    if(off!=mt.*.total){return -12;}
+    // V2: capacity — a record never crosses a chunk boundary / trailer
+    let ino:i32=(off%ch) as i32;
+    if(ino<0){return -13;}
+    if((ino as i64)+(rec.len as i64)>(cap as i64)){return -13;}
+    // V3: freshness — the target region must be all zero (no live data)
+    let cur:[]u8=mm.*.cur;
+    if(k_iszero(cur,ino,rec.len)!=1){return -14;}
+    let i:i32=0;
+    while(i<rec.len){cur[ino+i]=rec[i];i=i+1;}
+    mt.*.cur_used=mt.*.cur_used+rec.len;
+    mt.*.total=mt.*.total+(rec.len as i64);
+    return 0;
+}
+
+// ---------- record byte reader (chunk file or open-chunk buffer) ----------
+fn kb_read_record_bytes(mt:*KbMeta,mm:*KbMem,off:i64,len:i32,out:[]u8)i32 {
+    let ch:i64=KB_CHUNK;
+    if(off<0||len<1){return -1;}
+    let cidx:i32=(off/ch) as i32;
+    let ino:i32=(off%ch) as i32;
+    if(ino+len>(ch as i32)){return -1;}
+    if(cidx<mt.*.nchunks){
+        let path:[]u8=k_chunk_name(mm.*.dir,cidx);
+        let fd:i64=k_open_rdonly(path);
+        if(fd<0){return -1;}
+        let rc:i32=k_pread_full(fd,out,(ino as i64));
+        k_close(fd);
+        if(rc!=len){return -1;}
+        return 0;
+    }
+    if(cidx==mt.*.nchunks){
+        k_memcpy(out,0,mm.*.cur,ino,len);
+        return 0;
+    }
+    return -1;
+}
+
+// ---------- neighbor-integrity check ----------
+// The physically preceding record's hash must be unchanged after our write.
+// In append-only this always passes unless our addressing overlapped it
+// (exactly the G3 clobber pattern) — it is a deliberate tripwire.
+fn kb_neighbor_check(mt:*KbMeta,mm:*KbMem,new_off:i64,poff:i64,plen:i32,pid:i32,phash:[]u8)i32 {
+    if(poff<0){return 0;}
+    let rb:[]u8=k_alloc(plen);
+    let hh:[]u8=k_alloc(32);
+    if(rb.len==0||hh.len==0){return -1;}
+    if(kb_read_record_bytes(mt,mm,poff,plen,rb)!=0){return -1;}
+    if(kb_hash_of(rb,hh)!=0){return -1;}
+    if(k_memeq(hh,0,phash,0,32)!=1){return -2;}
+    let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+    if(kb_parse_hdr(rb,0,&k2,&id2,&kl2,&tl2)!=plen){return -2;}
+    if(id2!=pid){return -2;}
+    return 0;
+}
+
+// ---------- slot getters ----------
+fn kb_s_off(mm:*KbMem,i:i32)i64 {return k_g64(mm.*.s_off,(i*8) as i64);}
+fn kb_s_len(mm:*KbMem,i:i32)i32 {return k_g32(mm.*.s_len,i*4);}
+fn kb_s_id(mm:*KbMem,i:i32)i32 {return k_g32(mm.*.s_id,i*4);}
+fn kb_s_flags(mm:*KbMem,i:i32)i32 {return (mm.*.s_flags[i] as i32)&255;}
+
+// ---------- intent application (pass 2 + replay) ----------
+// Rebuilds state from the journal. Every check that can fail, fails closed.
+// is_replay=0: fresh rebuild (region must be zero; strict write site).
+// is_replay=1: crash-recovery replay (region zero -> write; identical -> skip).
+fn kb_apply_intent(mt:*KbMeta,mm:*KbMem,pay:[]u8,elen:i32,is_replay:i32)i32 {
+    if(elen<29){return -1;}
+    let op:i32=(pay[8] as i32)&255;
+    if(op==1||op==3){
+        let id:i32=k_g32(pay,9);
+        let off:i64=k_g64(pay,13);
+        let len:i32=k_g32(pay,21);
+        let nb:i64=k_g64(pay,57);
+        let tb:i64=k_g64(pay,65);
+        let rlen:i32=k_g32(pay,73);
+        let roff:i32=77;
+        let old_off:i64=0;
+        let old_len:i32=0;
+        if(op==3){
+            if(elen<121){return -1;}
+            old_off=k_g64(pay,77);
+            old_len=k_g32(pay,85);
+            roff=121;
+        }
+        // op==1 re-add: if elen==121+rlen, the old triple is present
+        if(op==1&&elen==121+rlen){
+            old_off=k_g64(pay,77);
+            old_len=k_g32(pay,85);
+            roff=121;
+        }
+        if(rlen!=len||len<12){return -1;}
+        if(elen!=roff+rlen){return -1;}
+        if(id<1||off<0){return -1;}
+        let hh:[]u8=k_alloc(32);
+        if(hh.len==0){return -1;}
+        if(kb_hash_of(pay[roff..roff+rlen],hh)!=0){return -1;}
+        if(k_memeq(hh,0,pay,25,32)!=1){return -1;}
+        // rollover synthesis: the intent's chunk must already be adopted
+        // or be adopted now from its trailer. The (nb,tb) check happens
+        // AFTER synthesis, not before.
+        while(mt.*.total<off){
+            if(off%KB_CHUNK!=0){return -1;}
+            if(off!=(mt.*.nchunks as i64+1)*KB_CHUNK){return -1;}
+            let used:i32=0;
+            let tr:i32=kb_trailer_check(mm.*.dir,mt.*.nchunks,&used);
+            if(tr!=1){return -1;}
+            mt.*.nchunks=mt.*.nchunks+1;
+            mt.*.total=off;
+            mt.*.cur_used=0;
+            k_zerorange(mm.*.cur,0,KB_CHUNK as i32);
+        }
+        // journal self-consistency: staged state must equal current state
+        // (after synthesis has adopted any rolled-over chunk)
+        if(nb!=(mt.*.nchunks as i64)){return -1;}
+        if(tb!=mt.*.total){return -1;}
+        if(off!=mt.*.total){return -1;}
+        let ch:i64=KB_CHUNK;
+        let ino:i32=(off%ch) as i32;
+        if(is_replay!=0){
+            if(k_iszero(mm.*.cur,ino,len)==1){
+                if(kb_write_record_at(mt,mm,off,pay[roff..roff+rlen])!=0){return -1;}
+            }else{
+                // idempotent re-replay: bytes already present from an
+                // earlier recovery that crashed after writing
+                if(k_memeq(mm.*.cur,ino,pay,roff,len)!=1){return -1;}
+                mt.*.cur_used=mt.*.cur_used+len;
+                mt.*.total=mt.*.total+(len as i64);
+            }
+        }else{
+            if(kb_write_record_at(mt,mm,off,pay[roff..roff+rlen])!=0){return -1;}
+        }
+        let si:i32=kb_slot_find(mm,mt,id);
+        if(op==1){
+            if(si<0){
+                if(kb_slot_add(mt,mm,id,off,len,hh,0)<0){return -1;}
+            }else{
+                if((kb_s_flags(mm,si)&1)==0){return -1;}
+                kb_slot_set(mm,si,off,len,hh,2);
+                mt.*.nlive=mt.*.nlive+1;
+            }
+        }else{
+            if(si<0){return -1;}
+            let fl:i32=kb_s_flags(mm,si);
+            if((fl&1)!=0){return -1;}
+            if(kb_s_off(mm,si)!=old_off){return -1;}
+            if(kb_s_len(mm,si)!=old_len){return -1;}
+            kb_slot_set(mm,si,off,len,hh,fl|2);
+        }
+        return 0;
+    }
+    if(op==5){
+        if(elen!=29){return -1;}
+        let id:i32=k_g32(pay,9);
+        let nb:i64=k_g64(pay,13);
+        let tb:i64=k_g64(pay,21);
+        if(nb!=(mt.*.nchunks as i64)){return -1;}
+        if(tb!=mt.*.total){return -1;}
+        let si:i32=kb_slot_find(mm,mt,id);
+        if(si<0){return -1;}
+        let fl:i32=kb_s_flags(mm,si);
+        if((fl&1)!=0){return -1;}
+        kb_slot_set(mm,si,kb_s_off(mm,si),kb_s_len(mm,si),mm.*.s_hash[si*32..si*32+32],fl|1);
+        mt.*.nlive=mt.*.nlive-1;
+        return 0;
+    }
+    return -1;
+}
+
+// ---------- pass 2: apply committed intents ----------
+fn kb_load_apply(mt:*KbMeta,mm:*KbMem,mc:i64)i32 {
+    let path:[]u8=kb_journal_path(mm);
+    let size:i64=mt.*.jsize;
+    if(size==0){return 0;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let hb:[]u8=k_alloc(4);
+    let sb:[]u8=k_alloc(9);
+    if(hb.len==0||sb.len==0){k_close(fd);return -1;}
+    let pos:i64=0;
+    while(pos<size){
+        if(k_pread_full(fd,hb,pos)!=4){k_close(fd);return -1;}
+        let elen:i32=k_g32(hb,0);
+        if(elen<10||elen>16777216){k_close(fd);return -1;}
+        if(k_pread_full(fd,sb,pos+4)!=9){k_close(fd);return -1;}
+        let sq:i64=k_g64(sb,0);
+        let op:i32=(sb[8] as i32)&255;
+        if(op==1||op==3||op==5){
+            if(sq<=mc){
+                let pay:[]u8=k_alloc(elen);
+                if(pay.len==0){k_close(fd);return -1;}
+                if(k_pread_full(fd,pay,pos+4)!=elen){k_close(fd);return -1;}
+                if(kb_apply_intent(mt,mm,pay,elen,0)!=0){k_close(fd);return -1;}
+            }
+        }
+        pos=pos+8+(elen as i64);
+    }
+    k_close(fd);
+    return 0;
+}
+
+// ---------- replay uncommitted intents (recovery) ----------
+fn kb_replay_uncommitted(mt:*KbMeta,mm:*KbMem,mc:i64)i32 {
+    let path:[]u8=kb_journal_path(mm);
+    let size:i64=mt.*.jsize;
+    if(size==0){return 0;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let hb:[]u8=k_alloc(4);
+    let sb:[]u8=k_alloc(9);
+    if(hb.len==0||sb.len==0){k_close(fd);return -1;}
+    let pos:i64=0;
+    let n:i32=0;
+    while(pos<size){
+        if(k_pread_full(fd,hb,pos)!=4){k_close(fd);return -1;}
+        let elen:i32=k_g32(hb,0);
+        if(elen<10||elen>16777216){k_close(fd);return -1;}
+        if(k_pread_full(fd,sb,pos+4)!=9){k_close(fd);return -1;}
+        let sq:i64=k_g64(sb,0);
+        let op:i32=(sb[8] as i32)&255;
+        if((op==1||op==3||op==5)&&sq>mc){
+            let pay:[]u8=k_alloc(elen);
+            if(pay.len==0){k_close(fd);return -1;}
+            if(k_pread_full(fd,pay,pos+4)!=elen){k_close(fd);return -1;}
+            if(kb_apply_intent(mt,mm,pay,elen,1)!=0){k_close(fd);return -1;}
+            let cop:i32=2;
+            if(op==3){cop=4;}
+            if(op==5){cop=6;}
+            let cp:[]u8=k_alloc(17);
+            if(cp.len==0){k_close(fd);return -1;}
+            k_s64(cp,0,mt.*.jseq);
+            cp[8]=(cop&255) as u8;
+            k_s64(cp,9,sq);
+            k_close(fd);
+            if(kb_journal_append(mt,mm,cp)<0){return -1;}
+            mt.*.jseq=mt.*.jseq+1;
+            fd=k_open_rdonly(path);
+            if(fd<0){return -1;}
+            n=n+1;
+        }
+        pos=pos+8+(elen as i64);
+    }
+    k_close(fd);
+    return n;
+}
+
+// ---------- load ----------
+// do_replay=0: strict (verify/get use this) — dirty journal -> return 3.
+// do_replay=1: heal — replay uncommitted intents, persist.
+// returns 0 ok, 1 not initialized, 2 corrupt (fail closed), 3 dirty.
+fn kb_load(dir:[]u8,mt:*KbMeta,mm:*KbMem,do_replay:i32,nreplayed:*i32,nreconciled:*i32,reconcile_crash:i32)i32 {
+    // AUTHORITATIVE rebuild: state is reconstructed from zero by
+    // (1) adopting flushed chunks with valid trailers, then
+    // (2) applying journaled intents in order (their staged (nb,tb)
+    // pairs chain-verify the reconstruction from genesis).
+    // store.dat is only an init marker; its values are informational.
+    // returns 0 ok, 1 not initialized, 2 corrupt (fail closed), 3 dirty.
+    nreconciled.*=0;
+    mt.*.nchunks=0;mt.*.total=0;mt.*.jsize=0;
+    mt.*.nslots=0;mt.*.slotcap=0;mt.*.cur_used=0;
+    mt.*.jseq=1;mt.*.nlive=0;
+    let d:[]u8=k_alloc(dir.len);
+    if(d.len==0){return 2;}
+    k_memcpy(d,0,dir,0,dir.len);
+    mm.*.dir=d;
+    let sl:i32=kb_store_load(mt,mm);
+    if(sl==1){return 1;}
+    if(sl!=0){return 2;}
+    // NOTE: store.dat values are NOT seeded into mt; rebuild is from zero.
+    mt.*.nchunks=0;mt.*.total=0;mt.*.nlive=0;mt.*.cur_used=0;mt.*.jseq=1;
+    mm.*.cur=k_alloc(KB_CHUNK as i32);
+    mm.*.s_id="";mm.*.s_off="";mm.*.s_len="";mm.*.s_hash="";mm.*.s_flags="";
+    mm.*.lprev=k_alloc(32);
+    if(mm.*.cur.len==0||mm.*.lprev.len==0){return 2;}
+    mt.*.nlive=0;
+    let lr:i32=kb_ledger_recompute(mm,do_replay);
+    if(lr!=0){if(lr==1){return 3;}return 2;}
+    // NOTE: orphan chunks are NOT adopted here. The journal replay
+    // (kb_load_apply -> kb_apply_intent) adopts flushed chunks on demand
+    // via trailer-checked rollover synthesis, driven by each intent's
+    // (nb,tb). A chunk file without a journal intent is uncommitted
+    // data from a crashed rollover and must be ignored, not adopted.
+    let ne:i32=0;let mc:i64=0;let ms:i64=0;let dy:i32=0;
+    let sr:i32=kb_journal_scan(mt,mm,&ne,&mc,&ms,&dy);
+    if(sr<0){return 2;}
+    if(sr==1||dy==1){
+        if(do_replay==0){return 3;}
+    }
+    mt.*.jsize=k_file_size(kb_journal_path(mm));
+    if(mt.*.jsize<0){return 2;}
+    mt.*.jseq=ms+1;
+    if(mt.*.jseq<1){mt.*.jseq=1;}
+    let la2:i32=kb_load_apply(mt,mm,mc);
+    if(la2!=0){return 2;}
+    if(mt.*.total!=(mt.*.nchunks as i64)*KB_CHUNK+(mt.*.cur_used as i64)){return 2;}
+    nreplayed.*=0;
+    if(do_replay!=0){
+        let rp:i32=kb_replay_uncommitted(mt,mm,mc);
+        if(rp<0){return 2;}
+        nreplayed.*=rp;
+        if(rp>0){
+            let zh:[]u8=k_alloc(32);
+            if(zh.len==0){return 2;}
+            if(kb_ledger_append(mt,mm,5,0,0,rp,zh)!=0){return 2;}
+        }
+        // K2: reconcile journal<->ledger. Crash point 3 (after journal
+        // commit, before ledger append) leaves a committed mutation with no
+        // ledger entry; append the missing entries now (deterministic,
+        // journal order) so no later verify can silently accept the gap.
+        let dummy:i32=0;
+        let nfx:i32=kb_ll_run(mt,mm,1,&dummy,reconcile_crash);
+        if(nfx==99){return 99;}
+        if(nfx<0){return 2;}
+        nreconciled.*=nfx;
+        if(kb_store_save(mt,mm)!=0){return 2;}
+    }
+    return 0;
+}
+
+// ---------- conscious drivers ----------
+// return: 0 ok, 1 usage/arg error, 3 protocol abort (fail closed), 99 simulated crash
+
+// rollback helper: excise the just-appended intent, ledger the abort
+fn kb_abort_intent(mt:*KbMeta,mm:*KbMem,jstart:i64,op:i32,id:i32,off:i64,len:i32,hh:[]u8)i32 {
+    kb_journal_truncate(mm,jstart);
+    mt.*.jsize=jstart;
+    mt.*.jseq=mt.*.jseq-1;
+    kb_ledger_append(mt,mm,4,id,off,len,hh);
+    return 3;
+}
+
+fn kb_do_put(mt:*KbMeta,mm:*KbMem,id:i32,key:[]u8,text:[]u8,
+             poff:*i64,plen:*i32,pid:*i32,phash:[]u8,fail_after:i32)i32 {
+    if(id<1||key.len<1||text.len<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si>=0){
+        if((kb_s_flags(mm,si)&1)==0){return 1;}
+    }
+    let rec:[]u8=k_alloc(11+key.len+text.len);
+    let hh:[]u8=k_alloc(32);
+    if(rec.len==0||hh.len==0){return 3;}
+    let rl:i32=kb_stage(1,id,key,text,rec,hh);
+    if(rl<0){return 1;}
+    let cap:i32=(KB_CHUNK-KB_TRAILER_LEN) as i32;
+    if((rl as i64)>(cap as i64)){return 1;}
+    if(mt.*.cur_used+rl>cap){
+        if(kb_rollover(mt,mm)!=0){return 3;}
+    }
+    let nb:i32=mt.*.nchunks;
+    let tb:i64=mt.*.total;
+    let off:i64=tb;
+    // For re-add (si>=0), include the old triple for history (like revise).
+    // Payload: 77+rl for new, 121+rl for re-add with old triple.
+    let paylen:i32=77+rl;
+    let old_off:i64=0;
+    let old_len:i32=0;
+    let old_hash:[]u8=k_alloc(32);
+    if(old_hash.len==0){return 3;}
+    if(si>=0){
+        old_off=kb_s_off(mm,si);
+        old_len=kb_s_len(mm,si);
+        k_memcpy(old_hash,0,mm.*.s_hash,si*32,32);
+        paylen=121+rl;
+    }
+    let pay:[]u8=k_alloc(paylen);
+    if(pay.len==0){return 3;}
+    let seq:i64=mt.*.jseq;
+    k_s64(pay,0,seq);
+    pay[8]=1;
+    k_s32(pay,9,id);
+    k_s64(pay,13,off);
+    k_s32(pay,21,rl);
+    k_memcpy(pay,25,hh,0,32);
+    k_s64(pay,57,nb as i64);
+    k_s64(pay,65,tb);
+    k_s32(pay,73,rl);
+    if(si>=0){
+        // re-add: include old triple for history
+        k_s64(pay,77,old_off);
+        k_s32(pay,85,old_len);
+        k_memcpy(pay,89,old_hash,0,32);
+        k_memcpy(pay,121,rec,0,rl);
+    }else{
+        k_memcpy(pay,77,rec,0,rl);
+    }
+    let js:i64=kb_journal_append(mt,mm,pay);
+    if(js<0){return 3;}
+    mt.*.jseq=seq+1;
+    if(fail_after==1){return 99;}
+    let rb2:i32=kb_journal_readback(mt,mm,js,pay);
+    if(rb2!=0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    let wr:i32=kb_write_record_at(mt,mm,off,rec[0..rl]);
+    if(wr!=0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    if(fail_after==2){return 99;}
+    let nc:i32=kb_neighbor_check(mt,mm,off,poff.*,plen.*,pid.*,phash);
+    if(nc!=0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    let sa:i32=0;
+    if(si<0){
+        sa=kb_slot_add(mt,mm,id,off,rl,hh,0);
+        if(sa<0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    }else{
+        kb_slot_set(mm,si,off,rl,hh,2);
+        mt.*.nlive=mt.*.nlive+1;
+    }
+    let cp:[]u8=k_alloc(17);
+    if(cp.len==0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    k_s64(cp,0,mt.*.jseq);
+    cp[8]=2;
+    k_s64(cp,9,seq);
+    let cjs:i64=kb_journal_append(mt,mm,cp);
+    if(cjs<0){return kb_abort_intent(mt,mm,js,1,id,off,rl,hh);}
+    mt.*.jseq=mt.*.jseq+1;
+    if(fail_after==3){return 99;}
+    let la:i32=kb_ledger_append(mt,mm,1,id,off,rl,hh);
+    if(la!=0){return 3;}
+    let ss:i32=kb_store_save(mt,mm);
+    if(ss!=0){return 3;}
+    poff.*=off;plen.*=rl;pid.*=id;
+    k_memcpy(phash,0,hh,0,32);
+    return 0;
+}
+
+fn kb_do_revise(mt:*KbMeta,mm:*KbMem,id:i32,text:[]u8,
+                poff:*i64,plen:*i32,pid:*i32,phash:[]u8,fail_after:i32)i32 {
+    if(id<1||text.len<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si<0){return 1;}
+    let sfl:i32=kb_s_flags(mm,si);
+    if((sfl&1)!=0){return 1;}
+    let old_off:i64=kb_s_off(mm,si);
+    let old_len:i32=kb_s_len(mm,si);
+    let old_hash:[]u8=k_alloc(32);
+    if(old_hash.len==0){return 3;}
+    k_memcpy(old_hash,0,mm.*.s_hash,si*32,32);
+    // read old record for kind+key (never trust the slot alone)
+    let ob:[]u8=k_alloc(old_len);
+    if(ob.len==0){return 3;}
+    if(kb_read_record_bytes(mt,mm,old_off,old_len,ob)!=0){return 3;}
+    let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+    if(kb_parse_hdr(ob,0,&k2,&id2,&kl2,&tl2)!=old_len){return 3;}
+    if(id2!=id){return 3;}
+    let oh:[]u8=k_alloc(32);
+    if(oh.len==0){return 3;}
+    if(kb_hash_of(ob,oh)!=0){return 3;}
+    if(k_memeq(oh,0,old_hash,0,32)!=1){return 3;}
+    let rec:[]u8=k_alloc(11+kl2+text.len);
+    let hh:[]u8=k_alloc(32);
+    if(rec.len==0||hh.len==0){return 3;}
+    let rl:i32=kb_stage(k2,id,ob[11..11+kl2],text,rec,hh);
+    if(rl<0){return 1;}
+    let cap:i32=(KB_CHUNK-KB_TRAILER_LEN) as i32;
+    if((rl as i64)>(cap as i64)){return 1;}
+    if(mt.*.cur_used+rl>cap){
+        if(kb_rollover(mt,mm)!=0){return 3;}
+    }
+    let nb:i32=mt.*.nchunks;
+    let tb:i64=mt.*.total;
+    let off:i64=tb;
+    let pay:[]u8=k_alloc(121+rl);
+    if(pay.len==0){return 3;}
+    let seq:i64=mt.*.jseq;
+    k_s64(pay,0,seq);
+    pay[8]=3;
+    k_s32(pay,9,id);
+    k_s64(pay,13,off);
+    k_s32(pay,21,rl);
+    k_memcpy(pay,25,hh,0,32);
+    k_s64(pay,57,nb as i64);
+    k_s64(pay,65,tb);
+    k_s32(pay,73,rl);
+    k_s64(pay,77,old_off);
+    k_s32(pay,85,old_len);
+    k_memcpy(pay,89,old_hash,0,32);
+    k_memcpy(pay,121,rec,0,rl);
+    let js:i64=kb_journal_append(mt,mm,pay);
+    if(js<0){return 3;}
+    mt.*.jseq=seq+1;
+    if(fail_after==1){return 99;}
+    if(kb_journal_readback(mt,mm,js,pay)!=0){return kb_abort_intent(mt,mm,js,3,id,off,rl,hh);}
+    if(kb_write_record_at(mt,mm,off,rec[0..rl])!=0){return kb_abort_intent(mt,mm,js,3,id,off,rl,hh);}
+    if(fail_after==2){return 99;}
+    if(kb_neighbor_check(mt,mm,off,poff.*,plen.*,pid.*,phash)!=0){return kb_abort_intent(mt,mm,js,3,id,off,rl,hh);}
+    kb_slot_set(mm,si,off,rl,hh,sfl|2);
+    let cp:[]u8=k_alloc(17);
+    if(cp.len==0){return kb_abort_intent(mt,mm,js,3,id,off,rl,hh);}
+    k_s64(cp,0,mt.*.jseq);
+    cp[8]=4;
+    k_s64(cp,9,seq);
+    if(kb_journal_append(mt,mm,cp)<0){return kb_abort_intent(mt,mm,js,3,id,off,rl,hh);}
+    mt.*.jseq=mt.*.jseq+1;
+    if(fail_after==3){return 99;}
+    if(kb_ledger_append(mt,mm,2,id,off,rl,hh)!=0){return 3;}
+    if(kb_store_save(mt,mm)!=0){return 3;}
+    poff.*=off;plen.*=rl;pid.*=id;
+    k_memcpy(phash,0,hh,0,32);
+    return 0;
+}
+
+fn kb_do_delete(mt:*KbMeta,mm:*KbMem,id:i32,fail_after:i32)i32 {
+    if(id<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si<0){return 1;}
+    let sfl:i32=kb_s_flags(mm,si);
+    if((sfl&1)!=0){return 1;}
+    let pay:[]u8=k_alloc(29);
+    if(pay.len==0){return 3;}
+    let seq:i64=mt.*.jseq;
+    k_s64(pay,0,seq);
+    pay[8]=5;
+    k_s32(pay,9,id);
+    k_s64(pay,13,mt.*.nchunks as i64);
+    k_s64(pay,21,mt.*.total);
+    let js:i64=kb_journal_append(mt,mm,pay);
+    if(js<0){return 3;}
+    mt.*.jseq=seq+1;
+    if(kb_journal_readback(mt,mm,js,pay)!=0){return kb_abort_intent(mt,mm,js,5,id,0,0,mm.*.lprev);}
+    if(fail_after==1){return 99;}
+    kb_slot_set(mm,si,kb_s_off(mm,si),kb_s_len(mm,si),mm.*.s_hash[si*32..si*32+32],sfl|1);
+    mt.*.nlive=mt.*.nlive-1;
+    if(fail_after==2){return 99;}
+    let cp:[]u8=k_alloc(17);
+    if(cp.len==0){return kb_abort_intent(mt,mm,js,5,id,0,0,mm.*.lprev);}
+    k_s64(cp,0,mt.*.jseq);
+    cp[8]=6;
+    k_s64(cp,9,seq);
+    if(kb_journal_append(mt,mm,cp)<0){return kb_abort_intent(mt,mm,js,5,id,0,0,mm.*.lprev);}
+    mt.*.jseq=mt.*.jseq+1;
+    if(fail_after==3){return 99;}
+    let zh:[]u8=k_alloc(32);
+    if(zh.len==0){return 3;}
+    if(kb_ledger_append(mt,mm,3,id,0,0,zh)!=0){return 3;}
+    if(kb_store_save(mt,mm)!=0){return 3;}
+    return 0;
+}
+
+// ---------- fast drivers (correct padding accounting; none of V1/V3/journal/fsync/readback/neighbor/ledger) ----------
+// THE fast record-byte write site: V2 capacity only. The measured delta
+// between this and kb_write_record_at is the cost of thoroughness.
+fn kb_write_fast(mt:*KbMeta,mm:*KbMem,off:i64,rec:[]u8)i32 {
+    let ch:i64=KB_CHUNK;
+    let cap:i32=(ch-KB_TRAILER_LEN) as i32;
+    let ino:i32=(off%ch) as i32;
+    if(ino<0){return -1;}
+    if((ino as i64)+(rec.len as i64)>(cap as i64)){return -1;}
+    let cur:[]u8=mm.*.cur;
+    let i:i32=0;
+    while(i<rec.len){cur[ino+i]=rec[i];i=i+1;}
+    mt.*.cur_used=mt.*.cur_used+rec.len;
+    mt.*.total=mt.*.total+(rec.len as i64);
+    return 0;
+}
+fn kb_do_put_fast(mt:*KbMeta,mm:*KbMem,id:i32,key:[]u8,text:[]u8,
+                  hist:[]u8,histn:*i32)i32 {
+    if(id<1||key.len<1||text.len<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si>=0){
+        if((kb_s_flags(mm,si)&1)==0){return 1;}
+    }
+    let rec:[]u8=k_alloc(11+key.len+text.len);
+    let hh:[]u8=k_alloc(32);
+    if(rec.len==0||hh.len==0){return 1;}
+    let rl:i32=kb_stage(1,id,key,text,rec,hh);
+    if(rl<0){return 1;}
+    let cap:i32=(KB_CHUNK-KB_TRAILER_LEN) as i32;
+    if((rl as i64)>(cap as i64)){return 1;}
+    if(mt.*.cur_used+rl>cap){
+        if(kb_rollover(mt,mm)!=0){return 1;}
+    }
+    if(kb_write_fast(mt,mm,mt.*.total,rec[0..rl])!=0){return 1;}
+    if(si<0){
+        if(kb_slot_add(mt,mm,id,mt.*.total-(rl as i64),rl,hh,0)<0){return 1;}
+    }else{
+        kb_slot_set(mm,si,mt.*.total-(rl as i64),rl,hh,2);
+        mt.*.nlive=mt.*.nlive+1;
+    }
+    return 0;
+}
+fn kb_hist_add(hist:[]u8,hn:*i32,id:i32,off:i64,len:i32,hash:[]u8)i32 {
+    // stride 48, unified layout: [8B off][4B len][32B hash][4B id]
+    let i:i32=hn.*;
+    k_s64(hist,(i*48) as i64,off);
+    k_s32(hist,i*48+8,len);
+    k_memcpy(hist,i*48+12,hash,0,32);
+    k_s32(hist,i*48+44,id);
+    hn.*=i+1;
+    return 0;
+}
+fn kb_do_revise_fast(mt:*KbMeta,mm:*KbMem,id:i32,text:[]u8,hist:[]u8,histn:*i32)i32 {
+    if(id<1||text.len<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si<0){return 1;}
+    let sfl:i32=kb_s_flags(mm,si);
+    if((sfl&1)!=0){return 1;}
+    let old_off:i64=kb_s_off(mm,si);
+    let old_len:i32=kb_s_len(mm,si);
+    let ob:[]u8=k_alloc(old_len);
+    if(ob.len==0){return 1;}
+    if(kb_read_record_bytes(mt,mm,old_off,old_len,ob)!=0){return 1;}
+    let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+    if(kb_parse_hdr(ob,0,&k2,&id2,&kl2,&tl2)!=old_len){return 1;}
+    if(id2!=id){return 1;}
+    let oh:[]u8=k_alloc(32);
+    if(oh.len==0){return 1;}
+    if(kb_hash_of(ob,oh)!=0){return 1;}
+    let rec:[]u8=k_alloc(11+kl2+text.len);
+    let hh:[]u8=k_alloc(32);
+    if(rec.len==0||hh.len==0){return 1;}
+    let rl:i32=kb_stage(k2,id,ob[11..11+kl2],text,rec,hh);
+    if(rl<0){return 1;}
+    let cap:i32=(KB_CHUNK-KB_TRAILER_LEN) as i32;
+    if((rl as i64)>(cap as i64)){return 1;}
+    if(mt.*.cur_used+rl>cap){
+        if(kb_rollover(mt,mm)!=0){return 1;}
+    }
+    let off:i64=mt.*.total;
+    if(kb_write_fast(mt,mm,off,rec[0..rl])!=0){return 1;}
+    // history: old triple survives for the census
+    kb_hist_add(hist,histn,id,old_off,old_len,oh);
+    kb_slot_set(mm,si,off,rl,hh,sfl|2);
+    return 0;
+}
+fn kb_do_delete_fast(mt:*KbMeta,mm:*KbMem,id:i32)i32 {
+    if(id<1){return 1;}
+    let si:i32=kb_slot_find(mm,mt,id);
+    if(si<0){return 1;}
+    let sfl:i32=kb_s_flags(mm,si);
+    if((sfl&1)!=0){return 1;}
+    kb_slot_set(mm,si,kb_s_off(mm,si),kb_s_len(mm,si),mm.*.s_hash[si*32..si*32+32],sfl|1);
+    mt.*.nlive=mt.*.nlive-1;
+    return 0;
+}
+
+// ---------- fast-mode persistence ----------
+// slotdir.dat: [4B nslots][nslots*49B: id,off,len,hash,flags][4B nhist][nhist*48B: id,off,len,hash]
+fn kb_slotdir_path(mm:*KbMem)[]u8 {return k_join(mm.*.dir,"slotdir.dat");}
+fn kb_persist_fast(mt:*KbMeta,mm:*KbMem,hist:[]u8,hn:i32)i32 {
+    let dir:[]u8=mm.*.dir;
+    // open chunk file (no trailer: partial by design; no fsync: fast)
+    let final:[]u8=k_chunk_name(dir,mt.*.nchunks);
+    let tmp:[]u8=k_chunk_tmp(dir,mt.*.nchunks);
+    let fd:i64=k_open_write(tmp);
+    if(fd<0){return -1;}
+    if(k_write_all(fd,mm.*.cur)!=0){k_close(fd);return -1;}
+    k_close(fd);
+    if(k_rename(tmp,final)!=0){return -1;}
+    // slotdir
+    let ns:i32=mt.*.nslots;
+    let nb:[]u8=k_alloc(4+ns*49+4+hn*48);
+    if(nb.len==0){return -1;}
+    k_s32(nb,0,ns);
+    let i:i32=0;
+    while(i<ns){
+        let o:i32=4+i*49;
+        k_s32(nb,o,kb_s_id(mm,i));
+        k_s64(nb,(o+4) as i64,kb_s_off(mm,i));
+        k_s32(nb,o+12,kb_s_len(mm,i));
+        k_memcpy(nb,o+16,mm.*.s_hash,i*32,32);
+        nb[o+48]=mm.*.s_flags[i];
+        i=i+1;
+    }
+    let ho:i32=4+ns*49;
+    k_s32(nb,ho,hn);
+    k_memcpy(nb,ho+4,hist,0,hn*48);
+    let sp:[]u8=kb_slotdir_path(mm);
+    let fd2:i64=k_open_write(sp);
+    if(fd2<0){return -1;}
+    if(k_write_all(fd2,nb)!=0){k_close(fd2);return -1;}
+    k_close(fd2);
+    if(kb_store_save(mt,mm)!=0){return -1;}
+    return 0;
+}
+fn kb_load_fast(dir:[]u8,mt:*KbMeta,mm:*KbMem,hist:[]u8,hn:*i32)i32 {
+    mt.*.nchunks=0;mt.*.total=0;mt.*.jsize=0;
+    mt.*.nslots=0;mt.*.slotcap=0;mt.*.cur_used=0;
+    mt.*.jseq=1;mt.*.nlive=0;
+    let d:[]u8=k_alloc(dir.len);
+    if(d.len==0){return 2;}
+    k_memcpy(d,0,dir,0,dir.len);
+    mm.*.dir=d;
+    let sl:i32=kb_store_load(mt,mm);
+    if(sl==1){return 1;}
+    if(sl!=0){return 2;}
+    mm.*.cur=k_alloc(KB_CHUNK as i32);
+    mm.*.s_id="";mm.*.s_off="";mm.*.s_len="";mm.*.s_hash="";mm.*.s_flags="";
+    mm.*.lprev=k_alloc(32);
+    if(mm.*.cur.len==0||mm.*.lprev.len==0){return 2;}
+    mt.*.nlive=0;
+    if(kb_adopt_orphans(mt,mm)<0){return 2;}
+    // slotdir
+    let sp:[]u8=kb_slotdir_path(mm);
+    let sz:i64=k_file_size(sp);
+    if(sz<4){return 2;}
+    let fd:i64=k_open_rdonly(sp);
+    if(fd<0){return 2;}
+    let b4:[]u8=k_alloc(4);
+    if(b4.len==0){k_close(fd);return 2;}
+    if(k_read_into(fd,b4)!=4){k_close(fd);return 2;}
+    let ns:i32=k_g32(b4,0);
+    if(ns<0||ns>100000000){k_close(fd);return 2;}
+    if(sz!=4+(ns as i64)*49+4){ 
+        // history section follows; read rest separately
+    }
+    let i:i32=0;
+    while(i<ns){
+        let rec:[]u8=k_alloc(49);
+        if(rec.len==0){k_close(fd);return 2;}
+        if(k_read_into(fd,rec)!=49){k_close(fd);return 2;}
+        let hh:[]u8=k_alloc(32);
+        if(hh.len==0){k_close(fd);return 2;}
+        k_memcpy(hh,0,rec,16,32);
+        if(kb_slot_add(mt,mm,k_g32(rec,0),k_g64(rec,4),(k_g32(rec,12)),hh,(rec[48] as i32)&255)<0){k_close(fd);return 2;}
+        i=i+1;
+    }
+    if(k_read_into(fd,b4)!=4){k_close(fd);return 2;}
+    let nh:i32=k_g32(b4,0);
+    if(nh<0||nh>100000000){k_close(fd);return 2;}
+    let j:i32=0;
+    while(j<nh){
+        let rec:[]u8=k_alloc(48);
+        if(rec.len==0){k_close(fd);return 2;}
+        if(k_read_into(fd,rec)!=48){k_close(fd);return 2;}
+        k_memcpy(hist,j*48,rec,0,48);
+        j=j+1;
+    }
+    k_close(fd);
+    hn.*=nh;
+    // open chunk file (partial, no trailer)
+    let cp:[]u8=k_chunk_name(mm.*.dir,mt.*.nchunks);
+    if(k_file_size(cp)==KB_CHUNK){
+        let fd2:i64=k_open_rdonly(cp);
+        if(fd2<0){return 2;}
+        if(k_read_into(fd2,mm.*.cur)!=(KB_CHUNK as i32)){k_close(fd2);return 2;}
+        k_close(fd2);
+    }else{
+        // missing open-chunk file: only ok if no slot lives in the open chunk
+        let k:i32=0;
+        while(k<mt.*.nslots){
+            if(kb_s_off(mm,k)>=(mt.*.nchunks as i64)*KB_CHUNK){return 2;}
+            k=k+1;
+        }
+    }
+    if(mt.*.total!=(mt.*.nchunks as i64)*KB_CHUNK+(mt.*.cur_used as i64)){return 2;}
+    return 0;
+}
+
+// ---------- deterministic text/key generation (fixtures; zero RNG) ----------
+fn kb_gen_text(id:i32,len:i32,out:[]u8)void {
+    let i:i32=0;
+    while(i<len){out[i]=(((id*131+i*17)&255)) as u8;i=i+1;}
+    return;
+}
+fn kb_gen_key(id:i32,out:[]u8)void {
+    out[0]=107;
+    k_6digit(out,1,id);
+    return;
+}
+fn kb_read_textfile(path:[]u8,maxn:i32,out:[]u8,len_out:*i32)i32 {
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let got:i32=k_read_into(fd,out[0..maxn]);
+    k_close(fd);
+    if(got<0){return -1;}
+    len_out.*=got;
+    return 0;
+}
+
+// ---------- get ----------
+fn kb_get(dir:[]u8,id:i32,mode:i32)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let nr:i32=0;
+    let nf:i32=0;
+    if(mode==1){
+        let hist:[]u8=k_alloc(8);
+        let hn:i32=0;
+        let lr:i32=kb_load_fast(dir,&mt,&mm,hist,&hn);
+        if(lr==1){k_println("NOTINIT");return 1;}
+        if(lr!=0){k_println("LOADFAIL");return 2;}
+    }else{
+        let lr:i32=kb_load(dir,&mt,&mm,1,&nr,&nf,0);
+        if(lr==1){k_println("NOTINIT");return 1;}
+        if(lr!=0){k_println("LOADFAIL");return 2;}
+    }
+    let si:i32=kb_slot_find(&mm,&mt,id);
+    if(si<0){k_println("NOTFOUND");return 0;}
+    if((kb_s_flags(&mm,si)&1)!=0){k_println("NOTFOUND");return 0;}
+    let off:i64=kb_s_off(&mm,si);
+    let len:i32=kb_s_len(&mm,si);
+    let rb:[]u8=k_alloc(len);
+    if(rb.len==0){k_println("LOADFAIL");return 2;}
+    if(kb_read_record_bytes(&mt,&mm,off,len,rb)!=0){k_println("CORRUPT");return 2;}
+    let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+    if(kb_parse_hdr(rb,0,&k2,&id2,&kl2,&tl2)!=len){k_println("CORRUPT");return 2;}
+    if(id2!=id){k_println("CORRUPT");return 2;}
+    let hh:[]u8=k_alloc(32);
+    if(hh.len==0){k_println("LOADFAIL");return 2;}
+    if(kb_hash_of(rb,hh)!=0){k_println("CORRUPT");return 2;}
+    if(k_memeq(hh,0,mm.s_hash,si*32,32)!=1){k_println("CORRUPT");return 2;}
+    let hx:[]u8=k_alloc(64);
+    k_hex32(hh,hx);
+    k_print("kind=");k_print_i64(k2 as i64);
+    k_print(" id=");k_print_i64(id as i64);
+    k_print(" key=");k_print(rb[11..11+kl2]);
+    k_print(" len=");k_print_i64(tl2 as i64);
+    k_print(" hash=");k_println(hx);
+    k_println(rb[11+kl2..11+kl2+tl2]);
+    return 0;
+}
+
+// ---------- census: full-store verification ----------
+// For each slot: read bytes, reparse, id match, sha256 match.
+// Build history (conscious: from journal revise intents; fast: from slotdir).
+// Walk every chunk (flushed + open): every physical record must be a slot
+// or a history entry, with matching length and hash. No unknown bytes.
+// Ledger digest = sha256 of the ledger file.
+// Prints summary; returns 0 ok, 2 FAIL, 3 DIRTY (conscious, needs recover).
+fn kb_hist_from_journal(mt:*KbMeta,mm:*KbMem,hist:[]u8,hn:*i32,cap:i32)i32 {
+    let path:[]u8=kb_journal_path(mm);
+    let size:i64=mt.*.jsize;
+    if(size==0){hn.*=0;return 0;}
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let hb:[]u8=k_alloc(4);
+    let sb:[]u8=k_alloc(17);
+    if(hb.len==0||sb.len==0){k_close(fd);return -1;}
+    let mc:i64=0;
+    let pos:i64=0;
+    while(pos<size){
+        if(k_pread_full(fd,hb,pos)!=4){k_close(fd);return -1;}
+        let elen:i32=k_g32(hb,0);
+        if(elen<17||elen>16777216){k_close(fd);return -1;}
+        if(k_pread_full(fd,sb,pos+4)!=17){k_close(fd);return -1;}
+        let op:i32=(sb[8] as i32)&255;
+        if(op==2||op==4||op==6){
+            let sr2:i64=k_g64(sb,9);
+            if(sr2>mc){mc=sr2;}
+        }
+        pos=pos+8+(elen as i64);
+    }
+    pos=0;
+    let n:i32=0;
+    while(pos<size){
+        if(k_pread_full(fd,hb,pos)!=4){k_close(fd);return -1;}
+        let elen:i32=k_g32(hb,0);
+        if(elen<17){k_close(fd);return -1;}
+        if(k_pread_full(fd,sb,pos+4)!=17){k_close(fd);return -1;}
+        let sq:i64=k_g64(sb,0);
+        let op:i32=(sb[8] as i32)&255;
+        if(op==3&&sq<=mc){
+            let pay:[]u8=k_alloc(elen);
+            if(pay.len==0){k_close(fd);return -1;}
+            if(k_pread_full(fd,pay,pos+4)!=elen){k_close(fd);return -1;}
+            if(elen<121){k_close(fd);return -1;}
+            if(n>=cap){k_close(fd);return -1;}
+            k_s64(hist,(n*48) as i64,k_g64(pay,77));
+            k_s32(hist,n*48+8,k_g32(pay,85));
+            k_memcpy(hist,n*48+12,pay,89,32);
+            k_s32(hist,n*48+44,k_g32(pay,9));
+            n=n+1;
+        }
+        // op==1 re-add (put on tombstoned id) includes old triple at 77..120
+        // if payload is 121+rl (vs 77+rl for new puts)
+        if(op==1&&sq<=mc&&elen>=121){
+            let pay:[]u8=k_alloc(elen);
+            if(pay.len==0){k_close(fd);return -1;}
+            if(k_pread_full(fd,pay,pos+4)!=elen){k_close(fd);return -1;}
+            // Check if this is a re-add by verifying the payload has the
+            // old-triple layout: elen should be 121+rl where rl is at pay[73]
+            let rl2:i32=k_g32(pay,73);
+            if(elen==121+rl2){
+                if(n>=cap){k_close(fd);return -1;}
+                k_s64(hist,(n*48) as i64,k_g64(pay,77));
+                k_s32(hist,n*48+8,k_g32(pay,85));
+                k_memcpy(hist,n*48+12,pay,89,32);
+                k_s32(hist,n*48+44,k_g32(pay,9));
+                n=n+1;
+            }
+        }
+        pos=pos+8+(elen as i64);
+    }
+    k_close(fd);
+    hn.*=n;
+    return 0;
+}
+// account one physical record: must be a slot or history entry
+fn kb_account2(mt:*KbMeta,mm:*KbMem,hist:[]u8,hn:i32,goff:i64,glen:i32,hh:[]u8,found:*i32)void {
+    let i:i32=0;
+    while(i<mt.*.nslots){
+        if(kb_s_off(mm,i)==goff){
+            if(kb_s_len(mm,i)!=glen){found.*=-1;return;}
+            if(k_memeq(hh,0,mm.*.s_hash,i*32,32)!=1){found.*=-2;return;}
+            found.*=1;
+            return;
+        }
+        i=i+1;
+    }
+    let j:i32=0;
+    while(j<hn){
+        if(k_g64(hist,(j*48) as i64)==goff){
+            if(k_g32(hist,j*48+8)!=glen){found.*=-3;return;}
+            if(k_memeq(hh,0,hist,j*48+12,32)!=1){found.*=-4;return;}
+            found.*=1;
+            return;
+        }
+        j=j+1;
+    }
+    found.*=0;
+    return;
+}
+fn kb_walk_region(mt:*KbMeta,mm:*KbMem,buf:[]u8,base:i64,used:i32,
+                 hist:[]u8,hn:i32,nrec:*i64,db:*i64) i32 {
+    // returns 0 ok, negative on failure; prints reason
+    let pos:i32=0;
+    while(pos<used){
+        let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+        let rc:i32=kb_parse_hdr(buf,pos,&k2,&id2,&kl2,&tl2);
+        if(rc==0){
+            if(k_iszero(buf,pos,used-pos)!=1){
+                k_print("CENSUS FAIL nonzero-pad base=");k_print_i64(base);
+                k_print(" pos=");k_print_i64(pos as i64);k_println("");
+                return -1;
+            }
+            return 0;
+        }
+        if(rc<0){
+            k_print("CENSUS FAIL parse base=");k_print_i64(base);
+            k_print(" pos=");k_print_i64(pos as i64);k_println("");
+            return -2;
+        }
+        let hh:[]u8=k_alloc(32);
+        if(hh.len==0){return -9;}
+        if(kb_hash_of(buf[pos..pos+rc],hh)!=0){return -9;}
+        let f:i32=0;
+        kb_account2(mt,mm,hist,hn,base+(pos as i64),rc,hh,&f);
+        if(f!=1){
+            k_print("CENSUS FAIL unaccounted base=");k_print_i64(base);
+            k_print(" pos=");k_print_i64(pos as i64);
+            k_print(" code=");k_print_i64(f as i64);k_println("");
+            return -3;
+        }
+        nrec.*=nrec.*+1;
+        db.*=db.*+(rc as i64);
+        pos=pos+rc;
+    }
+    return 0;
+}
+fn kb_ledger_digest(mm:*KbMem,out:[]u8,entries:*i64)i32 {
+    let path:[]u8=kb_ledger_path(mm);
+    let sz:i64=k_file_size(path);
+    if(sz<0){return -1;}
+    if(sz%81!=0){return -1;}
+    if(sz>33554432){return -1;}
+    entries.*=sz/81;
+    if(sz==0){
+        if(kb_hash_of("",out)!=0){return -1;}
+        return 0;
+    }
+    let fd:i64=k_open_rdonly(path);
+    if(fd<0){return -1;}
+    let all:[]u8=k_alloc(sz as i32);
+    if(all.len==0){k_close(fd);return -1;}
+    if(k_read_into(fd,all)!=(sz as i32)){k_close(fd);return -1;}
+    k_close(fd);
+    if(kb_hash_of(all,out)!=0){return -1;}
+    return 0;
+}
+fn kb_census(dir:[]u8,mode:i32)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let hcap:i32=500000;
+    let hist:[]u8=k_alloc(hcap*48);
+    if(hist.len==0){k_println("CENSUS NOMEM");return 2;}
+    let hn:i32=0;
+    let nr:i32=0;
+    let nf:i32=0;
+    if(mode==0){
+        let lr:i32=kb_load(dir,&mt,&mm,0,&nr,&nf,0);
+        if(lr==3){k_println("CENSUS DIRTY journal-has-uncommitted-work run-recover");return 3;}
+        if(lr!=0){k_println("CENSUS LOADFAIL");return 2;}
+        if(kb_hist_from_journal(&mt,&mm,hist,&hn,hcap)!=0){k_println("CENSUS HISTFAIL");return 2;}
+    }else{
+        if(kb_load_fast(dir,&mt,&mm,hist,&hn)!=0){k_println("CENSUS LOADFAIL");return 2;}
+    }
+    // 1. per-slot: read, reparse, id, hash
+    let i:i32=0;
+    while(i<mt.nslots){
+        let id:i32=kb_s_id(&mm,i);
+        let off:i64=kb_s_off(&mm,i);
+        let len:i32=kb_s_len(&mm,i);
+        if(id<1||len<12||off<0){
+            k_print("CENSUS FAIL bad-slot-entry i=");k_print_i64(i as i64);k_println("");
+            return 2;
+        }
+        let rb:[]u8=k_alloc(len);
+        if(rb.len==0){k_println("CENSUS NOMEM");return 2;}
+        if(kb_read_record_bytes(&mt,&mm,off,len,rb)!=0){
+            k_print("CENSUS FAIL read id=");k_print_i64(id as i64);k_println("");
+            return 2;
+        }
+        let k2:i32=0;let id2:i32=0;let kl2:i32=0;let tl2:i32=0;
+        if(kb_parse_hdr(rb,0,&k2,&id2,&kl2,&tl2)!=len){
+            k_print("CENSUS FAIL parse id=");k_print_i64(id as i64);k_println("");
+            return 2;
+        }
+        if(id2!=id){
+            k_print("CENSUS FAIL id-mismatch id=");k_print_i64(id as i64);k_println("");
+            return 2;
+        }
+        let hh:[]u8=k_alloc(32);
+        if(hh.len==0){k_println("CENSUS NOMEM");return 2;}
+        if(kb_hash_of(rb,hh)!=0){return 2;}
+        if(k_memeq(hh,0,mm.s_hash,i*32,32)!=1){
+            k_print("CENSUS FAIL hash-mismatch id=");k_print_i64(id as i64);
+            k_print(" off=");k_print_i64(off);k_println("");
+            return 2;
+        }
+        i=i+1;
+    }
+    // 2. chunk walk: every physical record accounted for
+    let nrec:i64=0;
+    let db:i64=0;
+    let cbuf:[]u8=k_alloc(KB_CHUNK as i32);
+    if(cbuf.len==0){k_println("CENSUS NOMEM");return 2;}
+    let c:i32=0;
+    while(c<mt.nchunks){
+        let used:i32=0;
+        if(kb_trailer_check(mm.dir,c,&used)!=1){
+            k_print("CENSUS FAIL trailer c=");k_print_i64(c as i64);k_println("");
+            return 2;
+        }
+        let cp:[]u8=k_chunk_name(mm.dir,c);
+        let fd:i64=k_open_rdonly(cp);
+        if(fd<0){k_println("CENSUS FAIL chunk-open");return 2;}
+        if(k_read_into(fd,cbuf)!=(KB_CHUNK as i32)){k_close(fd);k_println("CENSUS FAIL chunk-read");return 2;}
+        k_close(fd);
+        if(kb_walk_region(&mt,&mm,cbuf,(c as i64)*KB_CHUNK,used,hist,hn,&nrec,&db)!=0){return 2;}
+        c=c+1;
+    }
+    if(kb_walk_region(&mt,&mm,mm.cur,(mt.nchunks as i64)*KB_CHUNK,mt.cur_used,hist,hn,&nrec,&db)!=0){return 2;}
+    // 3. ledger digest
+    let dg:[]u8=k_alloc(32);
+    let le:i64=0;
+    if(dg.len==0){k_println("CENSUS NOMEM");return 2;}
+    if(kb_ledger_digest(&mm,dg,&le)!=0){k_println("CENSUS FAIL ledger");return 2;}
+    // 4. journal<->ledger completeness: every committed mutation must have
+    // exactly one ledger entry. A crash-point-3 gap fails closed here.
+    let bad:i32=0;
+    if(kb_ll_run(&mt,&mm,0,&bad,0)!=0){k_println("CENSUS FAIL ledger-audit");return 2;}
+    if(bad!=0){
+        k_print("CENSUS FAIL journal-ledger-gap bad=");k_print_i64(bad as i64);k_println("");
+        return 2;
+    }
+    let hx:[]u8=k_alloc(64);
+    k_hex32(dg,hx);
+    k_print("CENSUS mode=");
+    if(mode==0){k_print("conscious");}else{k_print("fast");}
+    k_print(" slots=");k_print_i64(mt.nslots as i64);
+    k_print(" live=");k_print_i64(mt.nlive as i64);
+    k_print(" hist=");k_print_i64(hn as i64);
+    k_print(" chunks=");k_print_i64(mt.nchunks as i64);
+    k_print(" records=");k_print_i64(nrec);
+    k_print(" data=");k_print_i64(db);
+    k_println("");
+    k_print("LEDGER entries=");k_print_i64(le);
+    k_print(" digest=");k_println(hx);
+    k_println("OK");
+    return 0;
+}
+
+// ---------- text spec resolution ----------
+fn kb_spec_text(spec:[]u8,id:i32,text:[]u8,tlen:*i32)i32 {
+    // "gen:<n>" -> deterministic bytes; "file:<path>" -> file bytes
+    if(spec.len>4&&spec[0]==103&&spec[1]==101&&spec[2]==110&&spec[3]==58){
+        let n:i32=ig_atoi(spec[4..]);
+        if(n<1||n>1048576){return -1;}
+        kb_gen_text(id,n,text);
+        tlen.*=n;
+        return 0;
+    }
+    if(spec.len>5&&spec[0]==102&&spec[1]==105&&spec[2]==108&&spec[3]==101&&spec[4]==58){
+        let ln:i32=0;
+        if(kb_read_textfile(spec[5..],1048576,text,&ln)!=0){return -1;}
+        if(ln<1){return -1;}
+        tlen.*=ln;
+        return 0;
+    }
+    return -1;
+}
+fn kb_next_field(line:[]u8,pos:*i32,buf:[]u8)i32 {
+    let i:i32=pos.*;
+    while(i<line.len&&line[i]==32){i=i+1;}
+    if(i>=line.len){pos.*=i;return -1;}
+    let j:i32=0;
+    while(i<line.len&&line[i]!=32){
+        if(j>=buf.len){return -2;}
+        buf[j]=line[i];
+        i=i+1;j=j+1;
+    }
+    pos.*=i;
+    return j;
+}
+fn kb_field_is(line:[]u8,pos:*i32,buf:[]u8,word:[]u8) i32 {
+    let fl:i32=kb_next_field(line,pos,buf);
+    if(fl!=word.len){return 0;}
+    if(k_memeq(buf,0,word,0,word.len)!=1){return 0;}
+    return 1;
+}
+// ---------- batch ----------
+fn kb_batch(dir:[]u8,opsfile:[]u8,mode:i32,fail_after:i32)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let osz:i64=k_file_size(opsfile);
+    if(osz<0||osz>16777216){k_println("BATCH bad-opsfile");return 1;}
+    let ofd:i64=k_open_rdonly(opsfile);
+    if(ofd<0){k_println("BATCH bad-opsfile");return 1;}
+    let ob:[]u8=k_alloc(osz as i32);
+    if(osz>0&&k_read_into(ofd,ob)!=(osz as i32)){k_close(ofd);k_println("BATCH bad-opsfile");return 1;}
+    k_close(ofd);
+    let nlines:i32=1;
+    let ci:i32=0;
+    while(ci<ob.len){
+        if(ob[ci]==10){nlines=nlines+1;}
+        ci=ci+1;
+    }
+    let hist:[]u8="";
+    let hn:i32=0;
+    if(mode==1){
+        hist=k_alloc(nlines*48);
+        if(hist.len==0&&nlines>0){k_println("BATCH NOMEM");return 1;}
+    }
+    let nr:i32=0;
+    let nf:i32=0;
+    if(mode==0){
+        let lr:i32=kb_load(dir,&mt,&mm,1,&nr,&nf,0);
+        if(lr==1){k_println("BATCH NOTINIT");return 1;}
+        if(lr!=0){k_println("BATCH LOADFAIL");return 2;}
+    }else{
+        if(kb_load_fast(dir,&mt,&mm,hist,&hn)!=0){k_println("BATCH LOADFAIL");return 2;}
+    }
+    let poff:i64=0;let plen:i32=0;let pid:i32=0;
+    let phash:[]u8=k_alloc(32);
+    if(phash.len==0){k_println("BATCH NOMEM");return 2;}
+    kb_find_prev(&mm,&mt,mt.total,&poff,&plen,&pid,phash);
+    let fbuf:[]u8=k_alloc(4096);
+    let tbuf:[]u8=k_alloc(1048576);
+    if(fbuf.len==0||tbuf.len==0){k_println("BATCH NOMEM");return 2;}
+    let pos:i32=0;
+    let lineno:i32=0;
+    let nops:i32=0;
+    while(pos<ob.len){
+        let eol:i32=pos;
+        while(eol<ob.len&&ob[eol]!=10){eol=eol+1;}
+        let line:[]u8=ob[pos..eol];
+        if(eol<ob.len){eol=eol+1;}
+        pos=eol;
+        lineno=lineno+1;
+        if(line.len>0&&line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0&&line[0]!=35){
+            let fp:i32=0;
+            let rc:i32=-99;
+            if(kb_field_is(line,&fp,fbuf,"put")==1){
+                let fl:i32=kb_next_field(line,&fp,fbuf);
+                if(fl<1){rc=1;}else{
+                    let id:i32=ig_atoi(fbuf[0..fl]);
+                    fl=kb_next_field(line,&fp,fbuf);
+                    if(fl<1){rc=1;}else{
+                        let key:[]u8=k_alloc(fl);
+                        k_memcpy(key,0,fbuf,0,fl);
+                        fl=kb_next_field(line,&fp,fbuf);
+                        if(fl<1){rc=1;}else{
+                            let tlen:i32=0;
+                            if(kb_spec_text(fbuf[0..fl],id,tbuf,&tlen)!=0){rc=1;}else{
+                                if(mode==0){rc=kb_do_put(&mt,&mm,id,key,tbuf[0..tlen],&poff,&plen,&pid,phash,fail_after);}
+                                else{rc=kb_do_put_fast(&mt,&mm,id,key,tbuf[0..tlen],hist,&hn);}
+                            }
+                        }
+                    }
+                }
+            }else{
+                fp=0;
+                if(kb_field_is(line,&fp,fbuf,"revise")==1){
+                    let fl:i32=kb_next_field(line,&fp,fbuf);
+                    if(fl<1){rc=1;}else{
+                        let id:i32=ig_atoi(fbuf[0..fl]);
+                        fl=kb_next_field(line,&fp,fbuf);
+                        if(fl<1){rc=1;}else{
+                            let tlen:i32=0;
+                            if(kb_spec_text(fbuf[0..fl],id,tbuf,&tlen)!=0){rc=1;}else{
+                                if(mode==0){rc=kb_do_revise(&mt,&mm,id,tbuf[0..tlen],&poff,&plen,&pid,phash,fail_after);}
+                                else{rc=kb_do_revise_fast(&mt,&mm,id,tbuf[0..tlen],hist,&hn);}
+                            }
+                        }
+                    }
+                }else{
+                    fp=0;
+                    if(kb_field_is(line,&fp,fbuf,"delete")==1){
+                        let fl:i32=kb_next_field(line,&fp,fbuf);
+                        if(fl<1){rc=1;}else{
+                            let id:i32=ig_atoi(fbuf[0..fl]);
+                            if(mode==0){rc=kb_do_delete(&mt,&mm,id,fail_after);}
+                            else{rc=kb_do_delete_fast(&mt,&mm,id);}
+                        }
+                    }else{rc=1;}
+                }
+            }
+            if(rc==99){k_print("OPFAIL line=");k_print_i64(lineno as i64);k_println(" rc=99");return 99;}
+            if(rc!=0){
+                k_print("OPFAIL line=");k_print_i64(lineno as i64);
+                k_print(" rc=");k_print_i64(rc as i64);k_println("");
+                return rc;
+            }
+            nops=nops+1;
+        }
+    }
+    if(mode==1){
+        if(kb_persist_fast(&mt,&mm,hist,hn)!=0){k_println("BATCH persist-fail");return 2;}
+    }
+    k_print("BATCH ops=");k_print_i64(nops as i64);k_println(" rc=0");
+    return 0;
+}
+// ---------- init / recover / dump / stats ----------
+fn kb_init(dir:[]u8)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    k_mkdir(dir);
+    mm.dir=dir;
+    if(k_file_size(kb_store_path(&mm))>=0){k_println("INIT already-initialized");return 1;}
+    if(kb_store_save(&mt,&mm)!=0){k_println("INIT store-fail");return 1;}
+    let fd:i64=k_open_write(kb_journal_path(&mm));
+    if(fd<0){k_println("INIT journal-fail");return 1;}
+    k_close(fd);
+    let fd2:i64=k_open_write(kb_ledger_path(&mm));
+    if(fd2<0){k_println("INIT ledger-fail");return 1;}
+    k_close(fd2);
+    // empty slotdir: [4B nslots=0][4B nhist=0]
+    let sd:[]u8=k_alloc(8);
+    if(sd.len==0){k_println("INIT slotdir-fail");return 1;}
+    k_s32(sd,0,0);
+    k_s32(sd,4,0);
+    let fd3:i64=k_open_write(kb_slotdir_path(&mm));
+    if(fd3<0){k_println("INIT slotdir-fail");return 1;}
+    if(k_write_all(fd3,sd)!=0){k_close(fd3);k_println("INIT slotdir-fail");return 1;}
+    if(k_fsync(fd3)!=0){k_close(fd3);k_println("INIT slotdir-fail");return 1;}
+    k_close(fd3);
+    k_println("INIT ok");
+    return 0;
+}
+fn kb_recover(dir:[]u8,fail_after:i32)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let nr:i32=0;
+    let nf:i32=0;
+    let rc:i32=kb_load(dir,&mt,&mm,1,&nr,&nf,fail_after);
+    if(rc==1){k_println("RECOVER NOTINIT");return 1;}
+    if(rc==99){k_println("RECOVER CRASH-SIMULATED");return 99;}
+    if(rc==2){k_println("RECOVER FAIL integrity");return 2;}
+    k_print("RECOVERED replayed=");k_print_i64(nr as i64);
+    k_print(" reconciled=");k_print_i64(nf as i64);k_println("");
+    return 0;
+}
+fn kb_dump(dir:[]u8)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let nr:i32=0;
+    let nf:i32=0;
+    let lr:i32=kb_load(dir,&mt,&mm,1,&nr,&nf,0);
+    if(lr==1){k_println("NOTINIT");return 1;}
+    if(lr!=0){k_println("LOADFAIL");return 2;}
+    let i:i32=0;
+    while(i<mt.nslots){
+        let hx:[]u8=k_alloc(64);
+        k_hex32(mm.s_hash[i*32..i*32+32],hx);
+        k_print("id=");k_print_i64(kb_s_id(&mm,i) as i64);
+        k_print(" off=");k_print_i64(kb_s_off(&mm,i));
+        k_print(" len=");k_print_i64(kb_s_len(&mm,i) as i64);
+        k_print(" flags=");k_print_i64(kb_s_flags(&mm,i) as i64);
+        k_print(" hash=");k_println(hx);
+        i=i+1;
+    }
+    return 0;
+}
+fn kb_stats(dir:[]u8)i32 {
+    let mt:KbMeta=KbMeta{.nchunks=0,.total=0,.jsize=0,.nslots=0,.slotcap=0,.cur_used=0,.jseq=1,.nlive=0};
+    let mm:KbMem=KbMem{.s_id="",.s_off="",.s_len="",.s_hash="",.s_flags="",.cur="",.dir="",.lprev=""};
+    let nr:i32=0;
+    let nf:i32=0;
+    let lr:i32=kb_load(dir,&mt,&mm,1,&nr,&nf,0);
+    if(lr==1){k_println("NOTINIT");return 1;}
+    if(lr!=0){k_println("LOADFAIL");return 2;}
+    let dg:[]u8=k_alloc(32);
+    let le:i64=0;
+    if(dg.len==0){return 2;}
+    if(kb_ledger_digest(&mm,dg,&le)!=0){k_println("STATS ledger-fail");return 2;}
+    let hx:[]u8=k_alloc(64);
+    k_hex32(dg,hx);
+    k_print("STATS chunks=");k_print_i64(mt.nchunks as i64);
+    k_print(" total=");k_print_i64(mt.total);
+    k_print(" cur_used=");k_print_i64(mt.cur_used as i64);
+    k_print(" slots=");k_print_i64(mt.nslots as i64);
+    k_print(" live=");k_print_i64(mt.nlive as i64);
+    k_print(" jsize=");k_print_i64(mt.jsize);
+    k_print(" jseq=");k_print_i64(mt.jseq);
+    k_println("");
+    k_print("LEDGER entries=");k_print_i64(le);
+    k_print(" digest=");k_println(hx);
+    return 0;
+}
