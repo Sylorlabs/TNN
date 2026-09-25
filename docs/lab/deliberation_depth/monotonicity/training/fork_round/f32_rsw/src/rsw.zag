@@ -1,0 +1,154 @@
+// rsw.zag — F32 RSW (Regime-Switch Calibrator) shared mechanism.
+// Frozen authority: PREREG_FORKROUND.md §3 (F32) + ideas/grok_forks.md Fork 1
+// (authoritative on mechanism detail). Pure integer fixed-point; zero RNG.
+// Included by both train_f32.zag and policy_f32.zag so train/eval emit
+// math is textually identical.
+@import("dlb_util.zag")
+
+// truncation-toward-zero division, b>0 (deterministic regardless of codegen)
+fn rsw_tdiv(a:i64,b:i64)i64 {
+    if(b<=0){return 0;}
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn rsw_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+// depth value -> slot 0..6 ; -1 unknown
+fn rsw_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+// interior-ratio invariant: (k+1)*1000/(n+2); cold start rho(0,0)=500;
+// codomain [1,998] by construction (0 and 1000 unreachable).
+fn rsw_rho(k:i64,n:i64)i64 {
+    return rsw_tdiv((k+1)*1000,n+2);
+}
+
+// ---- arena layouts (i64 LE slots) ----
+// cells: idx=(r*7+j)*2 + 0:n 1:k                       (210 slots)
+// trans: idx=((r*7+j)*6) + 0:nstay 1:scstay 2:nall 3:scall 4:kall 5:kstay (630)
+// regime: r  (0=LATCH, 1=TRACK)                        (15 slots)
+// ghist: r*3+{0,1,2}  (last three pooled gamma evals)  (45 slots)
+// nswitch: r  (regime switch count)                    (15 slots)
+fn rsw_cidx(r:i32,j:i32,f:i32)i32 { return (r*7+j)*2+f; }
+fn rsw_tidx(r:i32,j:i32,f:i32)i32 { return (r*7+j)*6+f; }
+
+// key from features; m,yld via out-params.
+// m=min(4,f1/200); my=f5 at depth 1 else
+// min(1000,max(0,f5-f5p)*1000/max((d-dp)*1000/64,1)); yld=min(2,my/400).
+// r = m*3+yld in {0..14}. f7 is NOT a key (FM2).
+fn rsw_key(f1:i64,f5:i64,f5p:i64,d:i32,dp:i32,first:i32,om:*i64,oy:*i64)i32 {
+    let mm:i64=rsw_tdiv(f1,200);
+    if(mm>4){mm=4;}
+    if(mm<0){mm=0;}
+    let my:i64=f5;
+    if(first==0){
+        let df2:i64=((d-dp) as i64)*1000/64;
+        if(df2<1){df2=1;}
+        let num:i64=f5-f5p;
+        if(num<0){num=0;}
+        my=rsw_tdiv(num*1000,df2);
+    }
+    my=rsw_clamp(my,0,1000);
+    let yy:i64=rsw_tdiv(my,400);
+    if(yy>2){yy=2;}
+    if(yy<0){yy=0;}
+    om.*=mm;
+    oy.*=yy;
+    return (mm*3+yy) as i32;
+}
+
+// Per-depth closed-form shift delta_t(r) = dA_t(r) - E_t(r) - beta.
+// Factored as a helper for clarity. Identical integer semantics to the
+// inlined form; build note, not a mechanism change.
+fn rsw_delta(trans:[]u8,r:i32,t:i32,beta:i64)i64 {
+    // Arena layout: field 4 = kall, field 5 = kstay (see header comment).
+    // (2026-09-24: an earlier revision read them swapped; the independent
+    // Python resim caught the divergence. No compiler bug was involved.)
+    let nstay:i64=au_get64(trans,rsw_tidx(r,t,0));
+    let nall:i64=au_get64(trans,rsw_tidx(r,t,2));
+    if(nstay<=0 || nall<=0){return 0;}
+    let scstay:i64=au_get64(trans,rsw_tidx(r,t,1));
+    let scall:i64=au_get64(trans,rsw_tidx(r,t,3));
+    let kall:i64=au_get64(trans,rsw_tidx(r,t,4));
+    let kstay:i64=au_get64(trans,rsw_tidx(r,t,5));
+    let e:i64=rsw_tdiv(scstay,nstay)-rsw_tdiv(scall,nall);
+    let da:i64=rsw_tdiv(kstay*1000,nstay)-rsw_tdiv(kall*1000,nall);
+    return da-e-beta;
+}
+// regime(r)=0 LATCH: C=clamp(C*+S,1,999), S=sum of min(delta,0), beta=2.
+// regime(r)=1 TRACK: C=clamp(rho(k_{r,j},n_{r,j})+min(S,0),1,999),
+//   S=sum of unrestricted delta, beta=4.
+// delta_t(r) = dA_t(r) - E_t(r) - beta; empty denominators -> depth skipped.
+// At depth 1 (first=1): C = C* = rho(k_{r,0},n_{r,0}) (S_0=0), both regimes.
+// Flip/trauma (first=0 only): f3>0 or f8>f8p -> C=min(C,Cprev-1).
+// cstar is set on first=1 and read on first=0.
+fn rsw_emit(cells:[]u8,trans:[]u8,regime:[]u8,r:i32,j:i32,first:i32,cstar:*i64,cprev:i64,f3:i64,f8:i64,f8p:i64)i32 {
+    let c:i64=0;
+    if(first==1){
+        cstar.*=rsw_rho(au_get64(cells,rsw_cidx(r,0,1)),au_get64(cells,rsw_cidx(r,0,0)));
+        c=cstar.*;
+        c=rsw_clamp(c,1,999);
+    } else {
+        let track:i32=0;
+        if(au_get64(regime,r)==1){track=1;}
+        let beta:i64=2;
+        if(track==1){beta=4;}
+        let s:i64=0;
+        let t:i32=1;
+        while(t<=j){
+            let delta:i64=rsw_delta(trans,r,t,beta);
+            if(track==1){s=s+delta;}
+            if(track==0 && delta<0){s=s+delta;}
+            t=t+1;
+        }
+        if(track==1){
+            let rho:i64=rsw_rho(au_get64(cells,rsw_cidx(r,j,1)),au_get64(cells,rsw_cidx(r,j,0)));
+            let ms:i64=s;
+            if(ms>0){ms=0;}
+            c=rho+ms;
+        } else {
+            c=cstar.*+s;
+        }
+        c=rsw_clamp(c,1,999);
+        if(f3>0 || f8>f8p){
+            let cap:i64=cprev-1;
+            if(c>cap){c=cap;}
+        }
+    }
+    return c as i32;
+}
+
+// Pooled released count for key r (over all 7 depths).
+fn rsw_pooled_n(cells:[]u8,r:i32)i64 {
+    let n:i64=0;
+    let j:i32=0;
+    while(j<7){
+        n=n+au_get64(cells,rsw_cidx(r,j,0));
+        j=j+1;
+    }
+    return n;
+}
+
+// Pooled gamma_r = rho_deep - rho_shallow (deep: j>=4, shallow: j<=1).
+fn rsw_gamma(cells:[]u8,r:i32)i64 {
+    let kd:i64=0; let nd:i64=0; let ks:i64=0; let ns:i64=0;
+    let j:i32=0;
+    while(j<7){
+        let k:i64=au_get64(cells,rsw_cidx(r,j,1));
+        let n:i64=au_get64(cells,rsw_cidx(r,j,0));
+        if(j>=4){kd=kd+k;nd=nd+n;}
+        if(j<=1){ks=ks+k;ns=ns+n;}
+        j=j+1;
+    }
+    return rsw_rho(kd,nd)-rsw_rho(ks,ns);
+}
