@@ -82,5 +82,21 @@ src/, logs/, params/, results/, analysis/ (+ polbuild/ for the policy build).
 
 ## 4. Run record (append-only)
 
-- (pending) 10× A/B: `train_loss_bin_{a,b} features.tsv 10
-  params/loss_params_10x_{a,b}.zag logs/log_loss_10x_{a,b}.tsv`
+- 2026-09-24: 10× A/B: `train_loss_bin_{a,b} ../../features/features.tsv 10
+  params/loss_params_10x_{a,b}.zag logs/log_loss_10x_{a,b}.tsv` — both RC=0.
+  Params A/B byte-identical (cmp); logs A/B byte-identical (cmp).
+  Final weights: w=[555154,−11709,0,254922,437683,−243336,507499,160],
+  b=151339.
+- 10× go/no-go: (a) PASS (weights≠init); (b) FAIL (Var(C)=0 after epoch 10);
+  (c) PASS (meanConfCorrect=1.0). §14 item 4 μ-check: 0.1039% < 1% → DEAD.
+  → STOP: no 100×, no silent rescaling.
+- Policy build: polbuild/ (v2 policy.zag + harness + 10× params as
+  mt_params.zag), binaries policy_loss_{a,b} A/B byte-identical
+  (build artifacts only, not committed).
+- Eval: `run_eval.sh loss10x polbuild/policy_loss_a 17 0` — 37/37 legs
+  A/B byte-identical; M4 refs copied. TSVs in results/ (74 files).
+- Analysis: `analyze.py results_loss10x 17` → analysis/analyze_m17.txt;
+  guards → analysis/GUARDS_LOSS.md; verdict → VERDICT_LOSS.md.
+- Verdict: **LOSS KILLED** — failing bars **B3** (2 strict G-rises,
+  redteam), **B5** (separation 0.000 < 0.20), **B8** (vacuous G-flatness).
+  Degenerate fixed point conf≡1000.
