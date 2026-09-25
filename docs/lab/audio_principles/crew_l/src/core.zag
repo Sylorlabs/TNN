@@ -1,0 +1,555 @@
+// Crew L core: WAV io, tone renderer, input organ (ingest/framing/RMS/F0/ZCR/bands/onsets).
+// Pure Zag, zero RNG, deterministic. Pinned znc: ~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1
+// Numeric tables are []i64 via (p[0..N*8]) as []i64 (verified non-aliasing 2026-09-25).
+// NEVER as []i32/u32/u16 (ZNC-2026-09-21-007).
+
+const SR: i64 = 44100;
+const FR: i64 = 2048;
+const HOP: i64 = 1024;
+const LAG_LO: i64 = 36;    // int(44100/1200)
+const LAG_HI: i64 = 551;   // int(44100/80)
+const TWO_PI: f64 = 6.283185307179586;
+const HALF_PI: f64 = 1.5707963267948966;
+const PI: f64 = 3.141592653589793;
+
+// ---------- syscalls ----------
+fn cstr(s: []u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let p: *u8 = _zag_malloc((s.len + 1) as i64);
+    if (p == null as *u8) { return ""; }
+    let b: []u8 = p[0..(s.len + 1)];
+    let i: i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn w_all(fd: i64, b: []u8) i64 {
+    let at: i64 = 0;
+    let blen: i64 = b.len as i64;
+    while (at < blen) {
+        let n: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(b) as i64) + at, blen - at, 0, 0, 0);
+        if (n == -4) { continue; }
+        if (n <= 0) { return -7407; }
+        at = at + n;
+    }
+    return at;
+}
+
+fn file_read(path: []u8, cap: i64) []u8 {
+    let cs: []u8 = cstr(path);
+    if (cs.len == 0) { return ""; }
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 0, 0, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return ""; }
+    let p: *u8 = _zag_malloc(cap);
+    if (p == null as *u8) { _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0); return ""; }
+    let at: i64 = 0;
+    while (at < cap) {
+        let n: i64 = _zag_raw_syscall(0, fd, (p as i64) + at, cap - at, 0, 0, 0);
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    let b: []u8 = p[0..at];
+    return b;
+}
+
+fn file_write(path: []u8, b: []u8) i64 {
+    let cs: []u8 = cstr(path);
+    if (cs.len == 0) { return -3; }
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 438, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return -4; }
+    let rc: i64 = w_all(fd, b);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return rc;
+}
+
+// ---------- small utils ----------
+fn i64s(v: i64) []u8 {
+    let s: []u8 = _zag_i64_to_str(v);
+    if (s.len > 0 && s[s.len - 1] == 10) { return s[0..(s.len - 1)]; }
+    return s;
+}
+
+// content equality for []u8 (== is NOT content equality per ZNC lesson)
+fn streq(a: []u8, b: []u8) i64 {
+    if (a.len != b.len) { return 0; }
+    let i: i64 = 0;
+    while (i < a.len) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn after_colon(s: []u8) []u8 {
+    let i: i64 = 0;
+    while (i < s.len) {
+        if (s[i] == 58) { return s[(i + 1)..s.len]; }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn parse_i64(s: []u8) i64 {
+    let v: i64 = 0;
+    let i: i64 = 0;
+    while (i < s.len) {
+        let c: i64 = (s[i] as i64) - 48;
+        if (c < 0 || c > 9) { return -1; }
+        v = v * 10 + c;
+        i = i + 1;
+    }
+    return v;
+}
+
+fn parse_env(s: []u8) i64 {
+    if (streq(s, "flat") == 1) { return 0; }
+    if (streq(s, "rise") == 1) { return 1; }
+    if (streq(s, "decay") == 1) { return 2; }
+    return -1;
+}
+
+// append s into buf at pos; returns new pos
+fn scat(buf: []u8, pos: i64, s: []u8) i64 {
+    let i: i64 = 0;
+    while (i < s.len) { buf[pos + i] = s[i]; i = i + 1; }
+    return pos + s.len;
+}
+
+fn isqrt(x: i64) i64 {
+    if (x <= 0) { return 0; }
+    let r: i64 = x;
+    let y: i64 = (r + 1) / 2;
+    while (y < r) { r = y; y = (r + x / r) / 2; }
+    return r;
+}
+
+fn fsqrt(x: f64) f64 {
+    if (x <= 0.0) { return 0.0; }
+    let r: f64 = x;
+    let i: i64 = 0;
+    while (i < 60) {
+        let nr: f64 = 0.5 * (r + x / r);
+        let d: f64 = nr - r;
+        if (d < 0.0) { d = -d; }
+        r = nr;
+        if (d < 1e-15) { break; }
+        i = i + 1;
+    }
+    return r;
+}
+
+// ---------- trig (Taylor, [0, pi/2]) ----------
+fn cos_t(x: f64) f64 {
+    let x2: f64 = x * x;
+    let x4: f64 = x2 * x2;
+    let x6: f64 = x4 * x2;
+    let x8: f64 = x4 * x4;
+    let x10: f64 = x8 * x2;
+    return 1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0 - x10 / 3628800.0;
+}
+
+fn cosr(x: f64) f64 {
+    let r: f64 = x;
+    while (r < 0.0) { r = r + TWO_PI; }
+    while (r >= TWO_PI) { r = r - TWO_PI; }
+    if (r > PI) { r = TWO_PI - r; }
+    if (r > HALF_PI) { return -cos_t(PI - r); }
+    return cos_t(r);
+}
+
+fn sinr(x: f64) f64 { return cosr(x - HALF_PI); }
+
+// ---------- WAV writer ----------
+fn write_wav(path: []u8, smp: []i64, n: i64) i64 {
+    let total: i64 = 44 + n * 2;
+    let p: *u8 = _zag_malloc(total);
+    if (p == null as *u8) { return -1; }
+    let w: []u8 = p[0..total];
+    w[0] = 82; w[1] = 73; w[2] = 70; w[3] = 70;
+    let sz: i64 = 36 + n * 2;
+    w[4] = (sz & 255) as u8; w[5] = ((sz >> 8) & 255) as u8;
+    w[6] = ((sz >> 16) & 255) as u8; w[7] = ((sz >> 24) & 255) as u8;
+    w[8] = 87; w[9] = 65; w[10] = 86; w[11] = 69;
+    w[12] = 102; w[13] = 109; w[14] = 116; w[15] = 32;
+    w[16] = 16; w[17] = 0; w[18] = 0; w[19] = 0;
+    w[20] = 1; w[21] = 0;
+    w[22] = 1; w[23] = 0;
+    w[24] = 68; w[25] = 172; w[26] = 0; w[27] = 0;
+    w[28] = 136; w[29] = 88; w[30] = 1; w[31] = 0;
+    w[32] = 2; w[33] = 0;
+    w[34] = 16; w[35] = 0;
+    w[36] = 100; w[37] = 97; w[38] = 116; w[39] = 97;
+    let ds: i64 = n * 2;
+    w[40] = (ds & 255) as u8; w[41] = ((ds >> 8) & 255) as u8;
+    w[42] = ((ds >> 16) & 255) as u8; w[43] = ((ds >> 24) & 255) as u8;
+    let i: i64 = 0;
+    while (i < n) {
+        let v: i64 = smp[i];
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        if (v < 0) { v = v + 65536; }
+        let o: i64 = 44 + i * 2;
+        w[o] = (v & 255) as u8;
+        w[o + 1] = ((v >> 8) & 255) as u8;
+        i = i + 1;
+    }
+    let rc: i64 = file_write(path, w);
+    _zag_free(p);
+    return rc;
+}
+
+// ---------- WAV reader ----------
+// fills smp[0..n], returns n or negative error
+fn u16le(b: []u8, o: i64) i64 {
+    return ((b[o] as i64) & 255) | ((((b[o + 1] as i64) & 255)) << 8);
+}
+fn u32le(b: []u8, o: i64) i64 {
+    return ((b[o] as i64) & 255) | ((((b[o + 1] as i64) & 255)) << 8) | ((((b[o + 2] as i64) & 255)) << 16) | ((((b[o + 3] as i64) & 255)) << 24);
+}
+
+fn read_wav(path: []u8, smp: []i64, cap: i64) i64 {
+    let b: []u8 = file_read(path, 44 + cap * 2 + 128);
+    if ((b.len as i64) < 44) { return -1; }
+    if (b[0] != 82 || b[1] != 73 || b[2] != 70 || b[3] != 70) { return -2; }
+    if (b[8] != 87 || b[9] != 65 || b[10] != 86 || b[11] != 69) { return -3; }
+    // walk chunks from 12
+    let pos: i64 = 12;
+    let fmt_ok: i64 = 0;
+    let data_off: i64 = -1;
+    let data_n: i64 = 0;
+    let blen: i64 = b.len as i64;
+    while (pos + 8 <= blen) {
+        let is_fmt: i64 = 0;
+        if (b[pos] == 102 && b[pos + 1] == 109 && b[pos + 2] == 116 && b[pos + 3] == 32) { is_fmt = 1; }
+        let is_data: i64 = 0;
+        if (b[pos] == 100 && b[pos + 1] == 97 && b[pos + 2] == 116 && b[pos + 3] == 97) { is_data = 1; }
+        let sz: i64 = u32le(b, pos + 4);
+        if (is_fmt == 1) {
+            if (u16le(b, pos + 8) != 1) { return -4; }
+            if (u16le(b, pos + 10) != 1) { return -5; }
+            if (u32le(b, pos + 12) != 44100) { return -6; }
+            if (u16le(b, pos + 22) != 16) { return -7; }
+            fmt_ok = 1;
+        }
+        if (is_data == 1) {
+            data_off = pos + 8;
+            data_n = sz / 2;
+        }
+        pos = pos + 8 + sz;
+    }
+    if (fmt_ok == 0) { return -8; }
+    if (data_off < 0) { return -9; }
+    if (data_off + data_n * 2 > blen) { return -10; }
+    if (data_n > cap) { return -11; }
+    let i: i64 = 0;
+    while (i < data_n) {
+        let v: i64 = u16le(b, data_off + i * 2);
+        if (v >= 32768) { v = v - 65536; }
+        smp[i] = v;
+        i = i + 1;
+    }
+    return data_n;
+}
+
+// ---------- tone renderer ----------
+// f_mhz: frequency milli-Hz; env: 0 flat, 1 rise, 2 decay; boost: shape boost steps
+// hf_mhz/hg_milli: HF variant (0/0 = off)
+fn render_tone(smp: []i64, n: i64, f_mhz: i64, env: i64, boost: i64, hf_mhz: i64, hg_milli: i64) void {
+    let f: f64 = (f_mhz as f64) / 1000.0;
+    let inc: f64 = TWO_PI * f / 44100.0;
+    let hf_inc: f64 = 0.0;
+    if (hf_mhz > 0) { hf_inc = TWO_PI * ((hf_mhz as f64) / 1000.0) / 44100.0; }
+    let hg: f64 = (hg_milli as f64) / 1000.0;
+    let lo: f64 = 0.05;
+    let bb: i64 = 0;
+    while (bb < boost) { lo = lo / 2.0; bb = bb + 1; }
+    let ph: f64 = 0.0;
+    let ph_hf: f64 = 0.0;
+    let t: i64 = 0;
+    let nf: f64 = (n - 1) as f64;
+    while (t < n) {
+        let e: f64 = 1.0;
+        if (env == 1) { e = lo + (0.9 - lo) * ((t as f64) / nf); }
+        if (env == 2) { e = 0.9 - (0.9 - lo) * ((t as f64) / nf); }
+        // 5 ms raised-cosine edge fades (220 samples)
+        if (t < 220) {
+            let m: f64 = 0.5 - 0.5 * cosr(PI * (t as f64) / 220.0);
+            e = e * m;
+        }
+        if (t >= n - 220) {
+            let m2: f64 = 0.5 - 0.5 * cosr(PI * ((n - 1 - t) as f64) / 220.0);
+            e = e * m2;
+        }
+        let v: f64 = 16384.0 * e * cosr(ph);
+        if (hg_milli > 0) { v = v + 16384.0 * hg * e * cosr(ph_hf); }
+        let q: i64 = (v + 0.5) as i64;
+        if (v < 0.0) { q = (v - 0.5) as i64; }
+        smp[t] = q;
+        ph = ph + inc;
+        if (ph >= TWO_PI) { ph = ph - TWO_PI; }
+        if (hg_milli > 0) {
+            ph_hf = ph_hf + hf_inc;
+            if (ph_hf >= TWO_PI) { ph_hf = ph_hf - TWO_PI; }
+        }
+        t = t + 1;
+    }
+    return;
+}
+
+// ---------- organ ----------
+fn build_hann(wq: []i64) void {
+    let i: i64 = 0;
+    while (i < FR) {
+        let h: f64 = 0.5 - 0.5 * cosr(TWO_PI * (i as f64) / 2047.0);
+        wq[i] = ((h * 256.0) + 0.5) as i64;
+        i = i + 1;
+    }
+    return;
+}
+
+fn frame_rms(s: []i64, base: i64) i64 {
+    let acc: i64 = 0;
+    let i: i64 = 0;
+    while (i < FR) {
+        let v: i64 = s[base + i];
+        acc = acc + v * v;
+        i = i + 1;
+    }
+    return isqrt(acc / FR);
+}
+
+// res layout: 0 f0_mhz | 1 voiced | 2 nfr | 3 env | 4 rms_mean | 5 zcr_mean
+//             6 b0r | 7 b1r | 8 b2r | 9 b3r (x1e6) | 10 onsets
+// twc/tws: Q30 twiddle tables (512x512); only touched when do_bands==1
+fn organ_measure(path: []u8, smp: []i64, cap: i64, wq: []i64, do_bands: i64, twc: []i64, tws: []i64, res: []i64) i64 {
+    let nsmp: i64 = read_wav(path, smp, cap);
+    if (nsmp < FR) { return -20; }
+    let nfr: i64 = (nsmp - FR) / HOP + 1;
+
+    let p1: *u8 = _zag_malloc(2048 * 8);
+    let p2: *u8 = _zag_malloc(516 * 8);
+    let p3: *u8 = _zag_malloc(4096 * 8);
+    let p4: *u8 = _zag_malloc(4096 * 8);
+    if (p1 == null as *u8 || p2 == null as *u8 || p3 == null as *u8 || p4 == null as *u8) { return -21; }
+    let xw: []i64 = (p1[0..(2048 * 8)]) as []i64;
+    let ac: []i64 = (p2[0..(516 * 8)]) as []i64;
+    let f0l: []i64 = (p3[0..(4096 * 8)]) as []i64;
+    let rmsl: []i64 = (p4[0..(4096 * 8)]) as []i64;
+
+    let voiced: i64 = 0;
+    let zcr_acc: i64 = 0;
+    let rms_acc: i64 = 0;
+    let f: i64 = 0;
+    while (f < nfr) {
+        let base: i64 = f * HOP;
+        let rms: i64 = frame_rms(smp, base);
+        rmsl[f] = rms;
+        rms_acc = rms_acc + rms;
+        // zcr
+        let zc: i64 = 0;
+        let i: i64 = 1;
+        while (i < FR) {
+            let a: i64 = smp[base + i];
+            let b: i64 = smp[base + i - 1];
+            if ((a >= 0 && b < 0) || (a < 0 && b >= 0)) { zc = zc + 1; }
+            i = i + 1;
+        }
+        zcr_acc = zcr_acc + zc;
+        // mean, window (Q8), autocorr
+        let sum: i64 = 0;
+        i = 0;
+        while (i < FR) { sum = sum + smp[base + i]; i = i + 1; }
+        let mn: i64 = sum / FR;
+        i = 0;
+        while (i < FR) {
+            xw[i] = ((smp[base + i] - mn) * wq[i]) >> 8;
+            i = i + 1;
+        }
+        let e0: i64 = 0;
+        i = 0;
+        while (i < FR) { e0 = e0 + xw[i] * xw[i]; i = i + 1; }
+        if (e0 > 0) {
+            let L: i64 = LAG_LO;
+            while (L <= LAG_HI) {
+                let a: i64 = 0;
+                i = 0;
+                while (i < FR - L) { a = a + xw[i] * xw[i + L]; i = i + 1; }
+                ac[L - LAG_LO] = a;
+                L = L + 1;
+            }
+            let pk: i64 = LAG_LO;
+            let best: i64 = ac[0];
+            L = LAG_LO + 1;
+            while (L <= LAG_HI) {
+                if (ac[L - LAG_LO] > best) { best = ac[L - LAG_LO]; pk = L; }
+                L = L + 1;
+            }
+            let lagf: f64 = pk as f64;
+            if (pk > LAG_LO && pk < LAG_HI) {
+                let fa: f64 = ac[pk - 1 - LAG_LO] as f64;
+                let fb: f64 = best as f64;
+                let fc: f64 = ac[pk + 1 - LAG_LO] as f64;
+                let den: f64 = fa - 2.0 * fb + fc;
+                if (den > 1e-9 || den < -1e-9) { lagf = (pk as f64) + 0.5 * (fa - fc) / den; }
+            }
+            let r: f64 = (best as f64) / (e0 as f64);
+            if (r >= 0.40 && rms > 104) {
+                let mhz: i64 = ((44100.0 / lagf * 1000.0) + 0.5) as i64;
+                f0l[voiced] = mhz;
+                voiced = voiced + 1;
+            }
+        }
+        f = f + 1;
+    }
+
+    // median f0 (lower-middle)
+    let f0_mhz: i64 = 0;
+    if (voiced > 0) {
+        let i: i64 = 1;
+        while (i < voiced) {
+            let key: i64 = f0l[i];
+            let j: i64 = i - 1;
+            while (j >= 0 && f0l[j] > key) { f0l[j + 1] = f0l[j]; j = j - 1; }
+            f0l[j + 1] = key;
+            i = i + 1;
+        }
+        f0_mhz = f0l[(voiced - 1) / 2];
+    }
+
+    // env from thirds
+    let third: i64 = nfr / 3;
+    let e1: i64 = 0;
+    let e3: i64 = 0;
+    let i: i64 = 0;
+    while (i < third) { e1 = e1 + rmsl[i]; i = i + 1; }
+    i = 2 * third;
+    while (i < nfr) { e3 = e3 + rmsl[i]; i = i + 1; }
+    let n1: i64 = third;
+    let n3: i64 = nfr - 2 * third;
+    if (n1 < 1) { n1 = 1; }
+    if (n3 < 1) { n3 = 1; }
+    e1 = e1 / n1;
+    e3 = e3 / n3;
+    let env: i64 = 0;
+    let emax: i64 = e1;
+    if (e3 > emax) { emax = e3; }
+    if (emax >= 200) {
+        if (e3 >= 2 * e1) { env = 1; }
+        if (e1 >= 2 * e3) { env = 2; }
+    }
+
+    // bands: naive DFT N=512 full-rate, every 8th frame
+    let b0: f64 = 0.0;
+    let b1: f64 = 0.0;
+    let b2: f64 = 0.0;
+    let b3: f64 = 0.0;
+    let btot: f64 = 0.0;
+    if (do_bands == 1) {
+        f = 0;
+        while (f < nfr) {
+            let base: i64 = f * HOP;
+            let k: i64 = 0;
+            while (k < 512) {
+                let re: i64 = 0;
+                let im: i64 = 0;
+                let n: i64 = 0;
+                while (n < 512) {
+                    let xn: i64 = smp[base + n];
+                    re = re + xn * twc[k * 512 + n];
+                    im = im + xn * tws[k * 512 + n];
+                    n = n + 1;
+                }
+                let rf: f64 = re as f64;
+                let qf: f64 = im as f64;
+                let pw: f64 = rf * rf + qf * qf;
+                if (k <= 255) { btot = btot + pw; }
+                if (k <= 23) { b0 = b0 + pw; }
+                if (k >= 24 && k <= 46) { b1 = b1 + pw; }
+                if (k >= 47 && k <= 92) { b2 = b2 + pw; }
+                if (k >= 93 && k <= 185) { b3 = b3 + pw; }
+                k = k + 1;
+            }
+            f = f + 8;
+        }
+    }
+
+    // onsets: rms derivative threshold
+    let onsets: i64 = 0;
+    let prev: i64 = rmsl[0];
+    f = 1;
+    while (f < nfr) {
+        let r: i64 = rmsl[f];
+        let thr: i64 = prev >> 2;
+        if (thr < 300) { thr = 300; }
+        if (r - prev > thr) { onsets = onsets + 1; }
+        prev = r;
+        f = f + 1;
+    }
+
+    res[0] = f0_mhz;
+    res[1] = voiced;
+    res[2] = nfr;
+    res[3] = env;
+    if (nfr > 0) { res[4] = rms_acc / nfr; } else { res[4] = 0; }
+    if (nfr > 0) { res[5] = zcr_acc / nfr; } else { res[5] = 0; }
+    res[6] = 0; res[7] = 0; res[8] = 0; res[9] = 0;
+    if (do_bands == 1 && btot > 0.0) {
+        res[6] = ((b0 / btot * 1000000.0) + 0.5) as i64;
+        res[7] = ((b1 / btot * 1000000.0) + 0.5) as i64;
+        res[8] = ((b2 / btot * 1000000.0) + 0.5) as i64;
+        res[9] = ((b3 / btot * 1000000.0) + 0.5) as i64;
+    }
+    res[10] = onsets;
+
+    _zag_free(p1); _zag_free(p2); _zag_free(p3); _zag_free(p4);
+    return 0;
+}
+
+// Q30 twiddle tables for N=512 naive DFT
+fn q30(x: f64) i64 {
+    if (x >= 0.0) { return ((x * 1073741824.0) + 0.5) as i64; }
+    return ((x * 1073741824.0) - 0.5) as i64;
+}
+
+fn build_twiddles(twc: []i64, tws: []i64) void {
+    let k: i64 = 0;
+    while (k < 512) {
+        let n: i64 = 0;
+        while (n < 512) {
+            let ang: f64 = TWO_PI * ((k * n) as f64) / 512.0;
+            twc[k * 512 + n] = q30(cosr(ang));
+            tws[k * 512 + n] = q30(sinr(ang));
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    return;
+}
+
+// semitone-grid planner: nearest 440*2^(k/12), k in [-29,17]; ties -> lower k
+fn plan_mhz(target_mhz: i64) i64 {
+    let t: f64 = (target_mhz as f64) / 1000.0;
+    let r: f64 = 1.0594630943592953;
+    let best_d: f64 = 1e18;
+    let best_f: f64 = 440.0;
+    let k: i64 = -29;
+    while (k <= 17) {
+        let g: f64 = 440.0;
+        let j: i64 = 0;
+        if (k >= 0) {
+            while (j < k) { g = g * r; j = j + 1; }
+        }
+        if (k < 0) {
+            while (j > k) { g = g / r; j = j - 1; }
+        }
+        let d: f64 = g - t;
+        if (d < 0.0) { d = -d; }
+        if (d < best_d) { best_d = d; best_f = g; }
+        k = k + 1;
+    }
+    return ((best_f * 1000.0) + 0.5) as i64;
+}
