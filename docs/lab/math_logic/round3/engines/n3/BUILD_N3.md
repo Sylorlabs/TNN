@@ -100,3 +100,29 @@ plus 3 separate process invocations per problem — all byte-identical.
 `math_logic/round3/engines/n3/n3.zag`, `math_logic/round3/engines/n3/BUILD_N3.md`.
 Excluded: `n3_bin`, `.zagd.semantic-ready`, `.zag-cache/`.
 Committed via `~/workspace/commit_racefree.py` with TMPDIR=`~/workspace/tmp_commit`.
+
+## Repair 2026-09-25 (v2 rescore): PREMISES:/TARGET: presentation
+
+- **Defect (found in v1 scoring):** n3 required a `STATEMENT:` line. Twins
+  (37), b5x_nl (60), and b6x_nl (3) files use `PREMISES:` bullet lines plus a
+  same-line `TARGET:`, so n3 exited 4 (no-verdict) on all 100.
+- **Fix (parser/presentation only, `n3.zag`):** new `n3_build_pt()` extracts
+  the premise lines after the `PREMISES:` header (to blank line / `TARGET:`
+  line / next field / EOF) and presents `premises-text + "\nTARGET: " +
+  target-text` as the problem bytes; bullets verbatim; the 9-byte joiner is
+  the only synthetic byte run; the resulting presentation is a contiguous
+  substring of the file (byte-verified) and all ledger spans stay
+  file-grounded. `n3_parse_prob` keeps its original STATEMENT: path when the
+  file has one and falls back to the presentation otherwise; the goal span
+  for the fallback path is the target text (when no "prove that"/"show that"
+  phrase exists), so the CLAIM names the actual target; S0 stays the full
+  presentation.
+- **Reasoning machinery provably untouched:** all six threads, strikes,
+  T-GOAL/T-LEMMA/T-CONSTRUCT/T-CONTRA/T-DEFEAT machinery, discharge,
+  fixpoint, kill logic, and verdict logic are byte-identical (diff vs
+  pre-repair source: the new builder fn + restructured `n3_parse_prob`).
+- **Rebuild:** same pinned toolchain and command (build CWD unchanged).
+  Binary SHA-256: `519afe7c3dce9c97534d347b4f185da0178e3f2ff817d221550e38d966ed9540`;
+  size 210,814 bytes. `n3_bin` and any `.zagd` are excluded from commits.
+- **Verification:** re-scored all 146 problems ×3 (byte-identical); repaired
+  traces re-audited (see SCORECARD_R3_V2.md).

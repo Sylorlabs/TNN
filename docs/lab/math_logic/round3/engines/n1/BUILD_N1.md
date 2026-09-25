@@ -142,3 +142,24 @@ Store: the pinned NL store above. Command per problem:
   **byte** offsets to `au_get32`/`au_put32` (they take element indices);
   struct locals need full literal initializers; the candidate-count slot
   needs arena element 2000*6 (off-by-one).
+
+## Repair 2026-09-25 (v2 rescore): hole-provenance span emission
+
+- **Defect (found in v1 scoring):** inference states recorded hole offsets as
+  premise-relative (`n1_match` runs on the premise's tx slice
+  `tx[oN..oN+lN]`), but the trace printer indexed the whole tx arena
+  absolutely (`tx[ho..ho+hl]`). Every hole span cited the wrong bytes;
+  v1 trace honesty was 8/24 on R3N and 0/12 on the sampled twin traces.
+- **Fix (emission only, `n1.zag` ~line 1764):** at the `n1_hm_put` call site
+  in `n1_try_add`, convert `ho` to tx-absolute by adding the premise's
+  arena base (`po = o0/o1/o2` per `prem`, then `n1_hm_put(c,id,eq,pid2,hid,po+ho,hl)`).
+- **Reasoning machinery provably untouched:** the `hm` table is written by
+  `n1_try_add` and read only by the trace emitter (`n1_emit`'s hole print
+  loop); `mb`, `n1_build_out`, `n1_con_ok`, search, referee, and verdict
+  logic are byte-identical (diff vs pre-repair source: 1 comment + 4 lines
+  at the single call site).
+- **Rebuild:** same pinned toolchain and command (build CWD unchanged).
+  Binary SHA-256: `d9a9a4cd57b0868c72963f854da068237ba4003c21c014885e792115e9d92aab`;
+  size 283,414 bytes. `n1_bin` and any `.zagd` are excluded from commits.
+- **Verification:** re-scored all 146 problems ×3 (byte-identical); repaired
+  traces re-audited (see SCORECARD_R3_V2.md).

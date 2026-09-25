@@ -133,3 +133,27 @@ All six give the intended verdict; all are 3× byte-identical externally.
 ## Commit
 - Sources-only: `n2.zag`, `BUILD_N2.md` under `math_logic/round3/engines/n2/`.
 - Excluded: `n2_bin`, `.zag-cache/`, `.zagd.semantic-ready`.
+
+## Repair 2026-09-25 (v2 rescore): multiline STATEMENT: block parser
+
+- **Defect (found in v1 scoring):** n2 required the statement value on the
+  same line (`STATEMENT: <value>` or `TARGET: <value>`). All 24 R3N files use
+  a bare `STATEMENT:` header line with the content on the following lines, so
+  n2 exited 4 (no-verdict) on every R3N problem.
+- **Fix (parser only, `n2.zag`):** new `n2_stmt_block()` finds a bare
+  `STATEMENT:` header line and returns the following contiguous block through
+  blank line / new field header (`WORD...:`) / EOF; bullet prefixes kept as
+  raw bytes; `*so/*sl` name a true file span (no copy); `*hs/*he` names the
+  header-through-block region so premises are excluded exactly as the old
+  same-line path excluded its statement line. `n2_prepare` fallback order:
+  same-line `STATEMENT:` → same-line `TARGET:` → multiline block; paths 1–2
+  behave exactly as before.
+- **Reasoning machinery provably untouched:** only the input parser changed;
+  goal skeleton, candidate ranking, support traversal, weakest-candidate
+  elimination, and verdict logic are byte-identical (diff vs pre-repair
+  source: the new parser fn + reordered fallback block in `n2_prepare`).
+- **Rebuild:** same pinned toolchain and command (build CWD unchanged).
+  Binary SHA-256: `9f82b3bc2c974476e36f0f5ce0821825d81486203eaa3132e1de05ce178349e7`;
+  size 213,782 bytes. `n2_bin` and any `.zagd` are excluded from commits.
+- **Verification:** re-scored all 146 problems ×3 (byte-identical); repaired
+  traces re-audited (see SCORECARD_R3_V2.md).
