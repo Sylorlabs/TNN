@@ -1101,3 +1101,126 @@ worktrees plus znc mode normalization; staffing note for the next coordinator
 (two waves spent on G1 internals while the frontier line is PAMs v2 and
 b_alpha v9). Note: origin/tnn-native-lab is now at 9d4f484bfe, 6 commits ahead
 of local; the merge is the next run's run-start step.
+
+## Wave 20260924-1721pdt verdicts (2026-09-24) [INCOMPLETE: cron timeout before debate]
+
+Wave HEAD at start: 53616213e (run-start merge of origin/tnn-native-lab,
+Micah's pam-rebuild round2 b3034x2 commits; merged cleanly, no conflicts).
+This wave's evidence commits are all local, none pushed. The scheduled run
+hit its execution timeout after all four workstream workers finished and
+committed their evidence, but BEFORE the red-team review of the G1 v3
+evidence and BEFORE the mandatory debate group could convene. The CV-1,
+fork battery, and tnn_chat evidence were red-team reviewed and confirmed;
+the G1 v3 verdict below is worker-reported and has NOT been independently
+red-teamed or debated. No verdict below was adopted into any live
+instrument; nothing was added to or removed from Micah's sealed judge
+queue; his five governance rulings are untouched; his frontier files under
+docs/lab/senses/pam-rebuild/ were not touched. No Python anywhere in wave
+work (static checks clean in every workstream). Zero em-dashes in wave docs.
+
+1. CV-1 decline-citation fix re-test: ADOPT [RE-CERT] (red-team CONFIRMED).
+Fresh frozen prereg with amended F9 (dad5ef955): probes must carry "?" AND
+exclude assertion-pattern fragments with gazetteer entities; probe-author
+routing knowledge pinned; gazetteer membership pinned as the
+probe-reachability condition. Fresh sealed 30-probe set (10 paraphrase /
+10 adversarial / 10 gaming; PROBES.md 5b1c378a, KEY.md 53076443), seal
+committed alone (b1951de11) strictly after the prereg; the SEAL.md seal-open
+log was filled at scoring time, not retroactively (the 1421pdt process
+defect not repeated). Implementation UNCHANGED and byte-identical to the
+1421pdt committed blobs (RE-CERTIFICATION lineage; the 1421pdt impl commit
+is an ancestor of this wave's seal commit, so no probe-informed change was
+possible). Scoring on the fresh set: CVC-B1 30/30 honest resolutions, zero
+unflagged confabulations (bar >=24/30); CVC-B2 20/20 payload naming;
+CVC-B3 0 coverage violations (97/97 quoted decline words KB-absent);
+CVC-B4 10/10 paraphrases answered verbatim; CVC-B5 17/17 INKB byte parity
+(db6b7075) plus 30/30 ADV declines, 0 blanket refusals; CVC-B6 1.73x ops
+(bar 10x); CVC-B7 3/3 byte-identical reruns; CVC-B8 seal integrity with
+author/implementer separation attested. The 1421pdt DISCARD is confirmed as
+a probe-form measurement artifact, not a mechanism miss: the frozen
+baseline fails 13 of the 20 decline probes on payload naming while the
+candidate names every key payload word on all 20, so 30/30 measures the
+fix, not a friendly subset. Red-team spot-recomputed every bar from the
+committed git record with exact matches. Traveling caveats: the paraphrase
+battery is narrow by design (exact word forms, single-fact coverage; the
+empty-uncovered truthful fallback is never exercised); do not cite this
+ADOPT as broad citation-quality evidence. Author/implementer separation is
+an attestation under one worker session (moot here via byte-inheritance).
+Commits: dad5ef955 (prereg), b1951de11 (seal), 91b7ee160 (impl+evidence),
+de8616b5f (scoring+verdict). Commit-order self-check PASS, no
+UNVERIFIABLE ORDERING.
+
+2. Fork battery: PASS on all 23 tested forks [NEW, process confirmation]
+(red-team CONFIRMED). Full enumeration: 7 local branches (tnn-native-lab,
+five wave archives, wave-debate-session-1-backup), origin/tnn-native-lab
+tested read-only at moved tip 75532a04c ("H5 SR-S9"; never checked out, no
+ref created), 5 other remote heads fetched into FETCH_HEAD only (no local
+refs), all 7 forktest/* detached worktrees, and the 3 previously untracked
+wave3 worktrees (probe, senses, trades at ~/workspace/tnn-rsi-wave3/, all
+bd3097874) enumerated and tested this wave. Shell and pure-Zag harnesses
+agree 23/23; znc byte-identical (498abcb5) everywhere; NEG1/NEG2
+discriminate on all 23; zero CANNOT-CONFIRM. znc mode normalization: the
+working-copy znc was 754 vs 100755 in the index, bytes identical;
+normalized to 755 before any battery run (mode bits cannot alter bytes).
+The chmod +x after git-show/file extraction recurs every wave (644/660/770
+on extracted copies) and is a permanent documented fixture. Divergence
+correction: origin/tnn-native-lab did not merely move ahead; local and
+origin DIVERGED at ca2402b44 (41 local-only commits, 10 origin-only
+commits), so the pending merge is a genuine divergent merge, not a
+fast-forward; the results file's "behind" wording understates it. The merge
+is the next run's run-start step. Commit: 543fbfbf8.
+
+3. tnn_chat FIT on merged HEAD: FIT [NEW, process confirmation] (red-team
+CONFIRMED). Scoped literally to merge commit 53616213e, not merge review:
+decline binary rebuilt byte-identical to 20273a99, baseline to 1ada2fae;
+30/30 specific declines (0 blanket refusals); 17/17 in-KB turns with
+baseline parity; 10/10 KB5; 9/9 rerun pairs byte-identical; pinned znc
+498abcb5; kb.txt and gaz.txt match canonical shas. Plain-language caveat
+in the file: this certifies the 38-fact closed-book probe chain only; no
+runnable interactive TNN exists on this branch beyond the frozen probe
+instruments; nothing faked. Commit: 5b625c0be.
+
+4. G1 SUNSHAFTS v3 (directional-contrast fan selection): DISCARD [NEW],
+worker-reported, NOT red-teamed, NOT debated. Phase 1: measured the actual
+T distribution on the byte-identical rebuilt r8c baseline (n=325786,
+mean 569, std 92, skewness -0.376 left-skewed; 1.12% above the old 707 gate
+vs 6.68% predicted under normality; radial band means 447 near sun to 654
+far, a 207-step spread). Fresh prereg (acf7cedce) with a genuinely new
+mechanism: per-pixel 7-ray fan, lift only where the sunward ray is a
+strict angular local minimum (delta > 0) AND the radial-band-normalized
+clarity score passes a measured-quantile gate, decoupling gate from
+geometry. Red-team novelty certification: CERTIFIED as genuinely new, but
+found a sign contradiction (frozen formula admitted the densest decile;
+prose described the clearest decile); resolved by dated coordinator
+decision (S10) adopting the prose-intended reading with SGATE = 1152 on the
+flipped score, derived from the measured p10 with no renders involved;
+addendum committed alone (1da140387) before any implementation. Phase 2
+implementation (39707e077) per prereg plus addendum, pure Zag. Verdict
+(3b10a4577): baseline gate PASS (e4f65557), validator V1-V6 PASS, tripwire
+87 per mille PASS, KB1 3/3 byte-identical PASS, KB4/KB5/KB6/KB7/KB8 PASS
+(cost 2.10x, bar 3x); KB2 shaft ratio 1.0000 vs bar >= 1.12 FAIL, KB3
+var(dL) 0.00 vs bar >= 60.0 FAIL: 0 of 39 validated wedge points receive
+any lift. Killing evidence: the v2 failure mode is gone (lift is
+sun-anchored, 77% of 2609 lifted pixels within 200 px of the sun, max dL
+35 vs v2's 9 at 870 px away), but the delta > 0 predicate selected a band
+BELOW the sun (y 308..458), disjoint from the frozen upward wedge fan;
+the frozen mechanism was sector-agnostic and nothing preferred the upward
+sector the WEDGE set measures. Ruled a mechanism miss, not a freeze
+defect. No sealed pair prepared (correctly); nothing reaches his judge
+queue. The worker's staffing note: three waves spent on G1 internals; this
+is the honest terminal state for the line until a new design idea exists;
+the frontier remains PAMs v2 and b_alpha v9. Because the timeout hit
+before independent review, this DISCARD must be treated as provisional
+until a future wave red-teams the evidence and a debate group rules.
+
+Queued next: the five governance rulings still awaiting him (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12
+queue); his blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12,
+S11-AUD, S13, S14, whirlpool-planform; unchanged, nothing added this wave);
+red-team review of the G1 v3 evidence plus the mandatory debate group over
+this wave's slate (deferred by the timeout); the pending divergent merge
+at ca2402b44 (41 local vs 10 origin-only commits) as the next run's
+run-start step, with post-merge FIT re-certification per the literal-scope
+rule; CV-1 citation work is closed on the ordered defects (do not cite the
+ADOPT as broad citation-quality evidence); G1 sunshafts stand down until a
+new design idea exists (sector prior or shaft-scale flank geometry under a
+fresh prereg).
