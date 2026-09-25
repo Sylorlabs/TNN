@@ -1,0 +1,352 @@
+// train_f33.zag — F33 SRS deterministic trainer.
+//
+// Fits the F33 (Selection-Residual Subtraction) mechanism on the frozen
+// training features TSV, per FROZEN_HYPERPARAMS.md (recorded before run).
+//
+// Single deterministic pass over features.tsv in file order, heldout=0
+// cells only. Builds:
+//   (a) margin×survivor ledger: per key (m,s), m=min(4,f1/200), s=min(3,f6/250),
+//       n/k of RELEASED outcomes; C* = rho(k,n) = (k+1)*1000/(n+2)
+//   (b) residual tables per (key, d_idx): transition sums
+//       n_stay, S_stay, n_all, S_all, k_stay, k_all and
+//       delta_d = clamp(tdiv(kstay*1000,nstay)-tdiv(kall*1000,nall)
+//                 - (tdiv(Sstay,nstay)-tdiv(Sall,nall)) - 3, -40, 40)
+//       (0 when a denominator is empty: the depth is skipped)
+// Emit per released training cell (delta frozen from previous items):
+//   d=1: C = C* ; d>1: C = clamp(C* + sum_{j<=d_idx} delta_j - pi, 1, 999)
+//   pi = min(400, 1_{f3>0}*50 + max(0, f8-f8^(1))/8)
+//
+// Usage: train_f33 <features.tsv> <params_out.zag> <log_out.tsv>
+// Pure Zag, zero RNG. []u8 arenas + LE accessors; no zalloc.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+
+// truncation-toward-zero division, b>0 (deterministic regardless of codegen)
+fn f33_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn f33_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+fn f33_min(a:i64,b:i64)i64 {
+    if(a<b){return a;}
+    return b;
+}
+fn f33_max(a:i64,b:i64)i64 {
+    if(a>b){return a;}
+    return b;
+}
+// rho(k,n) = (k+1)*1000/(n+2); k,n >= 0 so plain div == truncation
+fn f33_rho(k:i64,n:i64)i64 {
+    return (k+1)*1000/(n+2);
+}
+// depth value -> slot 0..6 ; -1 unknown
+fn f33_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+// solved-identity delta from transition sums (exact integer rules)
+fn f33_newdelta(nstay:i64,sstay:i64,nall:i64,sall:i64,kstay:i64,kall:i64)i64 {
+    if(nstay==0 || nall==0){return 0;}
+    let e:i64=f33_tdiv(sstay,nstay)-f33_tdiv(sall,nall);
+    let da:i64=f33_tdiv(kstay*1000,nstay)-f33_tdiv(kall*1000,nall);
+    return f33_clamp(da-e-3,-40,40);
+}
+// find tab positions: fills tabs[0..nft] with field end offsets
+fn f33_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+// field slice [s,e) of line given tab ends; s = previous end+1 (or 0)
+fn f33_fstart(tabs:[]u8,fi:i32)i32 {
+    if(fi==0){return 0;}
+    return au_get32(tabs,fi-1)+1;
+}
+
+// per-item slot find/create; ids stored in idbuf, index in idix (off,len)
+fn f33_item_slot(id:[]u8,idix:[]u8,idbuf:[]u8,nitems:*i32,ibn:*i32) i32 {
+    let n:i32=nitems.*;
+    let s:i32=0;
+    while(s<n){
+        let off:i32=au_get32(idix,s*2+0);
+        let ln:i32=au_get32(idix,s*2+1);
+        if(ln==id.len && dlb_streq(idbuf[off..off+ln],id)==1){return s;}
+        s=s+1;
+    }
+    if(n>=2048){return -1;}
+    let off2:i32=ibn.*;
+    if(off2+id.len>idbuf.len){return -1;}
+    let c:i32=0;
+    while(c<id.len){idbuf[off2+c]=id[c];c=c+1;}
+    au_put32(idix,n*2+0,off2);
+    au_put32(idix,n*2+1,id.len);
+    ibn.*=off2+id.len;
+    nitems.*=n+1;
+    return n;
+}
+
+fn f33_train(feat_path:[]u8,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    // ledger: n,k per key (20 i64)
+    let led_n:[]u8=nio_alloc(20*8); let led_k:[]u8=nio_alloc(20*8);
+    // transition sums per key*7+ds (140 i64 each)
+    let t_nstay:[]u8=nio_alloc(140*8); let t_sstay:[]u8=nio_alloc(140*8);
+    let t_nall:[]u8=nio_alloc(140*8);  let t_sall:[]u8=nio_alloc(140*8);
+    let t_kstay:[]u8=nio_alloc(140*8); let t_kall:[]u8=nio_alloc(140*8);
+    let t_delta:[]u8=nio_alloc(140*8);
+    au_zero(led_n);au_zero(led_k);
+    au_zero(t_nstay);au_zero(t_sstay);au_zero(t_nall);
+    au_zero(t_sall);au_zero(t_kstay);au_zero(t_kall);au_zero(t_delta);
+    // per-item state (2048 slots)
+    let idbuf:[]u8=nio_alloc(1048576);
+    let idix:[]u8=nio_alloc(2048*2*4);
+    let i_key:[]u8=nio_alloc(2048*4);   let i_cstar:[]u8=nio_alloc(2048*8);
+    let i_f81:[]u8=nio_alloc(2048*4);   let i_relp:[]u8=nio_alloc(2048*4);
+    let i_cp:[]u8=nio_alloc(2048*8);    let i_yp:[]u8=nio_alloc(2048*4);
+    let i_hasp:[]u8=nio_alloc(2048*4);
+    au_zero(idix);au_zero(i_key);au_zero(i_cstar);au_zero(i_f81);
+    au_zero(i_relp);au_zero(i_cp);au_zero(i_yp);au_zero(i_hasp);
+    let nitems:i32=0; let ibn:i32=0;
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){return 102;}
+    let log:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&log,4194304)!=0){return 102;}
+    let ok:i32=1;
+    let ntrain:i32=0; let nrel:i32=0;
+    let pos:i32=0;
+    while(pos<blen && ok==1){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0){
+            f33_split(line,tabs);
+            let id:[]u8=line[f33_fstart(tabs,0)..au_get32(tabs,0)];
+            let heldout:i32=dlb_atoi(line[f33_fstart(tabs,2)..au_get32(tabs,2)]);
+            if(heldout==0){
+                let depth:i32=dlb_atoi(line[f33_fstart(tabs,3)..au_get32(tabs,3)]);
+                let ds:i32=f33_dslot(depth);
+                if(ds>=0){
+                    let rel:i32=dlb_atoi(line[f33_fstart(tabs,5)..au_get32(tabs,5)]);
+                    let y:i32=0;
+                    if(rel==1){
+                        let yc:u8=line[f33_fstart(tabs,6)];
+                        if(yc==49){y=1;}
+                    }
+                    let f1:i32=dlb_atoi(line[f33_fstart(tabs,7)..au_get32(tabs,7)]);
+                    let f3:i32=dlb_atoi(line[f33_fstart(tabs,9)..au_get32(tabs,9)]);
+                    let f6:i32=dlb_atoi(line[f33_fstart(tabs,12)..au_get32(tabs,12)]);
+                    let f8:i32=dlb_atoi(line[f33_fstart(tabs,14)..au_get32(tabs,14)]);
+                    let si:i32=f33_item_slot(id,idix,idbuf,&nitems,&ibn);
+                    if(si<0){ok=0;}
+                    if(si>=0){
+                        ntrain=ntrain+1;
+                        if(ds==0){
+                            let m:i32=f33_min(4,(f1 as i64)/200) as i32;
+                            let s:i32=f33_min(3,(f6 as i64)/250) as i32;
+                            let key:i32=m*4+s;
+                            let cstar:i64=f33_rho(au_get64(led_k,key),au_get64(led_n,key));
+                            let C:i64=cstar;
+                            if(rel==1){
+                                nrel=nrel+1;
+                                dout_str(&log,id);dout_byte(&log,9);
+                                dout_i64(&log,depth as i64);dout_byte(&log,9);
+                                dout_i64(&log,key as i64);dout_byte(&log,9);
+                                dout_i64(&log,C);dout_byte(&log,9);
+                                dout_i64(&log,y as i64);dout_byte(&log,9);
+                                dout_i64(&log,0);dout_line(&log);
+                                au_put64(led_n,key,au_get64(led_n,key)+1);
+                                au_put64(led_k,key,au_get64(led_k,key)+(y as i64));
+                            }
+                            au_put32(i_key,si,key);
+                            au_put64(i_cstar,si,cstar);
+                            au_put32(i_f81,si,f8);
+                            au_put32(i_relp,si,rel);
+                            au_put64(i_cp,si,C);
+                            au_put32(i_yp,si,y);
+                            au_put32(i_hasp,si,1);
+                        }
+                        if(ds>0){
+                            if(au_get32(i_hasp,si)==0){ok=0;}
+                            if(au_get32(i_hasp,si)==1){
+                                let key:i32=au_get32(i_key,si);
+                                let cstar:i64=au_get64(i_cstar,si);
+                                let f81:i32=au_get32(i_f81,si);
+                                let relp:i32=au_get32(i_relp,si);
+                                let cp:i64=au_get64(i_cp,si);
+                                let yp:i32=au_get32(i_yp,si);
+                                let txi:i32=key*7+ds;
+                                if(relp==1){
+                                    au_put64(t_nall,txi,au_get64(t_nall,txi)+1);
+                                    au_put64(t_sall,txi,au_get64(t_sall,txi)+cp);
+                                    au_put64(t_kall,txi,au_get64(t_kall,txi)+(yp as i64));
+                                    if(rel==1){
+                                        au_put64(t_nstay,txi,au_get64(t_nstay,txi)+1);
+                                        au_put64(t_sstay,txi,au_get64(t_sstay,txi)+cp);
+                                        au_put64(t_kstay,txi,au_get64(t_kstay,txi)+(yp as i64));
+                                    }
+                                    au_put64(t_delta,txi,f33_newdelta(
+                                        au_get64(t_nstay,txi),au_get64(t_sstay,txi),
+                                        au_get64(t_nall,txi),au_get64(t_sall,txi),
+                                        au_get64(t_kstay,txi),au_get64(t_kall,txi)));
+                                }
+                                let C:i64=0;
+                                let pi:i64=0;
+                                if(rel==1){
+                                    let flip:i64=0;
+                                    if(f3>0){flip=50;}
+                                    let trauma:i64=f33_max(0,(f8-f81) as i64)/8;
+                                    pi=f33_min(400,flip+trauma);
+                                    let cum:i64=0;
+                                    let j:i32=1;
+                                    while(j<=ds){
+                                        cum=cum+au_get64(t_delta,key*7+j);
+                                        j=j+1;
+                                    }
+                                    C=f33_clamp(cstar+cum-pi,1,999);
+                                    nrel=nrel+1;
+                                    dout_str(&log,id);dout_byte(&log,9);
+                                    dout_i64(&log,depth as i64);dout_byte(&log,9);
+                                    dout_i64(&log,key as i64);dout_byte(&log,9);
+                                    dout_i64(&log,C);dout_byte(&log,9);
+                                    dout_i64(&log,y as i64);dout_byte(&log,9);
+                                    dout_i64(&log,pi);dout_line(&log);
+                                }
+                                au_put32(i_relp,si,rel);
+                                au_put64(i_cp,si,C);
+                                au_put32(i_yp,si,y);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if(log.err!=0){ok=0;}
+        pos=e+1;
+    }
+    // summary to stdout (literals only)
+    _zag_println("F33 train: pass complete");
+    let wrc:i64=0;
+    if(ok==1 && log.err==0){
+        // summary tables as '#'-comment lines at end of the log TSV
+        dout_str(&log,"# train_cells=");dout_i64(&log,ntrain as i64);
+        dout_str(&log," released=");dout_i64(&log,nrel as i64);
+        dout_str(&log," items=");dout_i64(&log,nitems as i64);dout_line(&log);
+        let key2:i32=0;
+        while(key2<20){
+            dout_str(&log,"# key ");dout_i64(&log,key2 as i64);
+            dout_str(&log," n=");dout_i64(&log,au_get64(led_n,key2));
+            dout_str(&log," k=");dout_i64(&log,au_get64(led_k,key2));
+            dout_str(&log," cstar=");dout_i64(&log,f33_rho(au_get64(led_k,key2),au_get64(led_n,key2)));
+            dout_str(&log," delta=[");
+            let j2:i32=1;
+            while(j2<=6){
+                dout_i64(&log,au_get64(t_delta,key2*7+j2));
+                if(j2<6){dout_str(&log,",");}
+                j2=j2+1;
+            }
+            dout_str(&log,"] nstay/nall per d=[");
+            j2=1;
+            while(j2<=6){
+                dout_i64(&log,au_get64(t_nstay,key2*7+j2));
+                dout_str(&log,"/");
+                dout_i64(&log,au_get64(t_nall,key2*7+j2));
+                if(j2<6){dout_str(&log,",");}
+                j2=j2+1;
+            }
+            dout_line(&log);
+            key2=key2+1;
+        }
+        wrc=dlb_write_file(log_path,dout_bytes(&log),log.n);
+    }
+    // params file
+    let prm:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&prm,65536)!=0){ok=0;}
+    if(ok==1){
+        dout_str(&prm,"// GENERATED by train_f33.zag - never hand-edit.\n");
+        dout_str(&prm,"// F33 SRS fitted params (single deterministic pass).\n");
+        let key:i32=0;
+        while(key<20){
+            dout_str(&prm,"// key ");dout_i64(&prm,key as i64);
+            dout_str(&prm,": n=");dout_i64(&prm,au_get64(led_n,key));
+            dout_str(&prm," k=");dout_i64(&prm,au_get64(led_k,key));
+            dout_str(&prm," cstar=");dout_i64(&prm,f33_rho(au_get64(led_k,key),au_get64(led_n,key)));
+            dout_line(&prm);
+            key=key+1;
+        }
+        dout_str(&prm,"fn f33_cstar(key:i32)i64 {\n");
+        key=0;
+        while(key<20){
+            dout_str(&prm,"    if(key==");dout_i64(&prm,key as i64);
+            dout_str(&prm,"){return ");
+            dout_i64(&prm,f33_rho(au_get64(led_k,key),au_get64(led_n,key)));
+            dout_str(&prm,";}\n");
+            key=key+1;
+        }
+        dout_str(&prm,"    return 500;\n}\n");
+        dout_str(&prm,"fn f33_delta(key:i32,di:i32)i64 {\n");
+        dout_str(&prm,"    if(di<=0||di>6){return 0;}\n");
+        key=0;
+        while(key<20){
+            dout_str(&prm,"    if(key==");dout_i64(&prm,key as i64);dout_str(&prm,"){\n");
+            let j:i32=1;
+            while(j<=6){
+                dout_str(&prm,"        if(di==");dout_i64(&prm,j as i64);
+                dout_str(&prm,"){return ");
+                dout_i64(&prm,au_get64(t_delta,key*7+j));
+                dout_str(&prm,";}\n");
+                j=j+1;
+            }
+            dout_str(&prm,"    }\n");
+            key=key+1;
+        }
+        dout_str(&prm,"    return 0;\n}\n");
+        if(prm.err==0){
+            let pw:i64=dlb_write_file(params_path,dout_bytes(&prm),prm.n);
+            if(pw<0){ok=0;}
+        }
+        if(prm.err!=0){ok=0;}
+    }
+    nio_free(fbuf);
+    nio_free(led_n);nio_free(led_k);
+    nio_free(t_nstay);nio_free(t_sstay);nio_free(t_nall);
+    nio_free(t_sall);nio_free(t_kstay);nio_free(t_kall);nio_free(t_delta);
+    nio_free(idbuf);nio_free(idix);
+    nio_free(i_key);nio_free(i_cstar);nio_free(i_f81);
+    nio_free(i_relp);nio_free(i_cp);nio_free(i_yp);nio_free(i_hasp);
+    nio_free(tabs);
+    dout_free(&log);dout_free(&prm);
+    if(ok==0 || wrc<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<4){
+        _zag_println("usage: train_f33 <features.tsv> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    return f33_train(_zag_arg(1),_zag_arg(2),_zag_arg(3));
+}
