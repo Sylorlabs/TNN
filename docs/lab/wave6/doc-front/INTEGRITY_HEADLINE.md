@@ -2,10 +2,11 @@
 id: W5-INTEGRITY
 title: "TNN does not corrupt its own reasoning — the wave-5 integrity result"
 generation: native-lab wave-5
-status: PROVISIONAL
+status: SIGNED — Micah Cooley, 2026-09-25 (red team passed; signed per his conditional order "red team it, if good sign it")
 hypotheses: [H-07, H-10]
 artifacts: docs/lab/wave5/{integ-1,deliberative-refusal,redteam-rt2,trap-upgrade,ledger-gating}
-updated: 2026-09-20
+updated: 2026-09-25
+redteam: 2026-09-25 — attacked every claim against the committed evidence; four stale wordings found and fixed (trust-tier status, MATRIX.md, H-07, R33 heading); no substantive hole found
 ---
 
 # TNN does not corrupt its own reasoning
@@ -169,9 +170,14 @@ tracked correctly. Named residual: **two consecutive fabricated
 contradictions still force UNCOMMIT** — the in-mechanism fix raises the
 fabrication budget, it cannot close the hole, because a single
 observation channel cannot distinguish sustained fabrication from a
-genuine world shift. The principled fix is architectural:
-multi-source corroboration / trust tiers (specified in `DEFENSE.md` §4,
-not yet built). This is the program's sharpest open integrity problem.
+genuine world shift. The architectural fix — multi-source
+corroboration / trust tiers — has since been **built and trialed as a
+standalone scheme** (wave-9 trust-tiers, 2026-09-20: amended redesign
+holds, SRR 93.75% ≥ 90%, the original A5 killer 36/36 held; see
+`docs/lab/wave9/trust-tiers/RESULTS.md`). It has **not** yet been
+integrated into the wave-5 learner itself, so the sensor hole on the
+learner remains open. This is the program's sharpest open integrity
+problem.
 
 ## The disciplines behind the result
 
@@ -207,10 +213,18 @@ wave-5 trial re-verified them:
   the 10x horizon (`docs/lab/wave5/integ-1/stretch/STRETCH_RESULTS.md`).
   The 100x no-degradation figure belongs to deliberative-refusal (2,000
   blocks, flat 1000‰ hold).
-- **The sensor hole is real and open.** Sustained observation spoofing
-  breaks the hold. Corroborated elimination raises the fabrication
-  budget (35/35); it does not close the hole. Multi-source trust tiers
-  are specified, not built.
+
+  > **CORRECTION 2026-09-24 (DOC-SWEEP):** this bullet previously said the
+  > 4,800-episode stretch was "defined but not run." It ran on 2026-09-20
+  > with verdict POSITIVE (137/137 gates, 1,440/1,440 trap-correct, no
+  > degradation at the 10x horizon) — see
+  > `docs/lab/wave5/integ-1/stretch/STRETCH_RESULTS.md`. The wording above
+  > now matches the evidence on disk and the committed branch revision.
+- **The sensor hole is real and open on the learner.** Sustained observation
+  spoofing breaks the hold. Corroborated elimination raises the fabrication
+  budget (35/35); it does not close the hole. Multi-source trust tiers are
+  now built and trialed as a standalone scheme (wave-9, amended redesign
+  holds 2026-09-20) but not yet integrated into this learner.
 - **The deep audit is sparse.** One negative control's take fell in no
   audit window and was caught by the harness's rule/ownership checks,
   not the trainer's instrument. In a deployment with only sparse
@@ -222,10 +236,51 @@ wave-5 trial re-verified them:
   controls were enforced in every trial, and the negative results
   (E45–E50) remain valid negatives.
 
+## Red-team record (2026-09-25)
+
+Before signing, the doc was attacked against the committed evidence:
+
+- **Every headline number re-derived from the trial results.** 0 cheat
+  signatures / 8 families, 2,595/2,595 refusals, myopic 1,327, pressure
+  1,405 (280,488 vs 147,835), 1000‰ flat hold, 137/137 gates +
+  `INTEG_FAILURES,0` + byte-identical `cb986552…`, 11.16x horizon,
+  trap fires (E=8, F=G=H=1), arm-C A sig1=1 / B sig=1 / HACK h2=1, 8/8
+  claims blocked + 60/60 `IL_OK` + 433 `LG_CHECK` / 0 mismatches, rt2
+  73/73 (R1 HOLD, R2/R3 BREAK, false COMMIT @s15, false-theory
+  disconnect @s24), defense 35/35, stretch POSITIVE (4,800 episodes,
+  137/137, 1,440/1,440) — all verified. No number was adjusted.
+- **Counterexample hunt.** The sr-followups failed first run (45/114
+  mismatches) was examined: it was a preregistration modeling error
+  with every soundness invariant holding, confirmatory re-run 155/155 —
+  not a learner-integrity counterexample. No evidence of the learner
+  cheating was found anywhere.
+- **Qualifier probes.** "Does not disconnect on anything but genuinely
+  verified work" vs R3's disconnect-on-fabrication: covered by the
+  "when the verification channel is clean" scope in the same paragraph.
+  "Genuinely attractive temptations": evidenced by the myopic variant
+  taking 1,327 of the same offers. The pressure arm's 1,405 takes are
+  disclosed with ex-post profitability numbers. The framing
+  "truthful but sensor-deceivable" held.
+- **Four stale wordings found and fixed:** (1) "trust tiers specified,
+  not built" → wave-9 built and trialed them (amended redesign holds);
+  updated to "built, not yet integrated into this learner." (2) Root
+  README's "Current entry point — R33 research generation" heading
+  claimed a currency its own maintenance note denies → repaired to
+  archive wording. (3) `docs/hypotheses/MATRIX.md` had no wave-5 rows →
+  added. (4) H-07's "native cognitive results are negatives" open
+  question → revised; wave-5 integrity added to its evidence.
+- **All links checked live** on `tnn-native-lab` 2026-09-25: every
+  evidence pointer resolves; all section anchors valid.
+
+No substantive hole was found. **SIGNED — Micah Cooley, 2026-09-25:**
+red team passed; signed per his conditional order ("red team it, if
+good sign it").
+
 ## Evidence pointers
 
-All paths under `docs/lab/wave5/` (working copies in the lab; nothing
-here is pushed — see placement memo):
+All paths under `docs/lab/wave5/` on the `tnn-native-lab` branch
+(verified live 2026-09-25; see placement memo `wave6/doc-front/PLACEMENT.md`
+for the doc's own history):
 
 | Document | What it establishes |
 |---|---|

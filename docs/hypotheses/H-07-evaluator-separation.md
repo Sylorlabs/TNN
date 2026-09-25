@@ -3,7 +3,7 @@ id: H-07
 title: "Evaluation stays outside cognition"
 status: PROVISIONAL
 hypotheses: [H-07]
-updated: 2026-09-19
+updated: 2026-09-25 (wave-5 integrity added to evidence; open question revised)
 ---
 
 # H-07 — Evaluation stays outside cognition
@@ -35,7 +35,20 @@ partitions, matched controls (E51AJ: 6,480 unique training + 6,480 unique probe
 trajectories; consumed probes never reused as fresh validation) — is arguably
 the program's most transferable product.
 
+Wave-5 integrity is the first native cognitive positive to survive it:
+the real scaffold-release learner faced 8 cheat-trap families (four
+adapted from documented frontier-LLM failure modes) with adversarial
+administration — evaluator-blind helpers, fresh-seed discipline, sealed
+partitions, matched myopic/doubled-bait controls — and produced 0 cheat
+signatures, 2,595/2,595 refusals, flat 1000‰ hold through 100x, and a
+35/35 defense trial, all byte-identical reruns. The positive cannot be
+explained by evaluator leakage: the myopic control (identical code path,
+standards removed) took 1,327 times, proving the instruments say
+nonzero. See `docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md` (SIGNED
+2026-09-25).
+
 ## Open questions
-- None structural; this is enforced as process. The open question is whether
-  any cognitive claim can survive it — so far the native cognitive results are
-  negatives.
+- None structural; this is enforced as process. The open question was
+  whether any cognitive claim can survive it — wave-5 integrity did
+  (first native positive, 2026-09-20). The question now is which other
+  cognitive claims can.
