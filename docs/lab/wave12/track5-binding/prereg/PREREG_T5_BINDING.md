@@ -130,6 +130,24 @@ recall batteries.
 > `tr_t3_c`/`tr_t6_c` — flagged for Micah; they did not affect this run
 > (deterministic variants all passed). This amendment is flagged for Micah's
 > review/revert per program law.
+>
+> **Dated instrument-repair amendment 2026-09-25 (post-verdict, per Micah's
+> 2026-09-25 order "do the open bits"): the latent `tr_t3_c`/`tr_t6_c`
+> instances flagged above are now repaired with the identical deterministic
+> advance (`src/t5_traps.zag`, marked in-code). Full `t5_add` sweep: the only
+> other same-shape call on the hybrid arm is `tr_t2_c`, which is provably
+> benign — `t5_verify` never reads store state, so the refused add cannot
+> affect the scored path (documented, not changed). All other `t5_add` sites
+> are on plant-free arm builds, guarded, or on fresh stores. Post-fix audit
+> of the "did not affect this run" claim: 48/240 Y-variants per family were
+> mistargeted pre-fix (vacuous pass on planted true seeds; plant-revision on
+> planted false seeds) — scores were all 20/20 either way, but the test was
+> not what it claimed on those variants. All 36 btrap cells re-run with the
+> repaired instrument (each twice, byte-identical); every fresh log is
+> byte-identical to the committed evidence — no verdict number moves.
+> Integrity stays 1.0 for all arms; championship (B 0.9911 > C 0.9893 >
+> A 0.6552) and K-T3 firing hold post-fix. This amendment is flagged for
+> Micah's review/revert per program law.
 
 The prep 160-trap battery on applicable families (fresh harness per trap, lawful
 rep offset `v+rep*20`), plus positive controls per arm (instruments must fire):
