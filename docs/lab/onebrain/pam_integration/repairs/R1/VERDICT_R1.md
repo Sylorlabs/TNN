@@ -3,7 +3,18 @@
 **Prereg:** `PREREG_R1.md` (frozen 2026-09-24, committed `2e8a947c7fbc` on
 `sylorlabs/TNN` branch `tnn-native-lab`,
 `docs/lab/onebrain/pam_integration/repairs/R1/PREREG_R1.md`).
-**Status:** DRAFT — pending post-repair battery runs.
+**Status:** COMPLETE — all kill bars hold on corrected evidence.
+**Correction note:** this verdict SUPERSEDES the verdict committed as
+`2cf1ee7cc1df8e5c2eeda744ae9bcae2225fdc5e`. That commit's K5 claim was
+wrong: it accepted a one-line smoke-output delta
+(`OB_CHECK,ih_auth_deterministic` printing the HMAC tag instead of the
+frozen legacy FNV tag) as "intended". The 2026-09-25 00:09 UTC checkpoint
+explicitly required the smoke output to be **exactly byte-identical** to
+the frozen baseline, with only N1/N2/N3 red-team deltas permitted. The
+B7 printed fixture has now been restored to `sp_auth_make_legacy`, and
+the smoke output is byte-identical to the frozen baseline (K5 below).
+The Python HMAC cross-check remains as mechanism confirmation only — it
+never licensed an output delta.
 **Crew note:** this is the RESUME crew (prior crew killed by a daemon
 restart). Prior-crew partial state verified and reused where sane:
 `refs/prerepair/smoke_run1.out` SHA matches this crew's fresh pre-repair
@@ -32,9 +43,13 @@ the exact prereg values `0x4E415554/0x484B4559/0x9E3779B9` as i32
   key; check order unchanged (registered → nonce → tag → authority
   class); nonce consumed only on successful verification.
 - `sp_auth_make` renamed `sp_auth_make_legacy`, retained ONLY as the
-  red-team attacker oracle (K1). New entry points: `sp_auth_tag(g, …)`
-  (legitimate mint with claimed organ's key), `sp_auth_tag_key(key, …)`
-  (explicit-key attacker oracle, K4).
+  red-team attacker oracle (K1) and as the printed B7 compatibility
+  fixture (K5 — the frozen smoke line
+  `OB_CHECK,ih_auth_deterministic,-1251831065,-1251831065` is preserved
+  byte-for-byte). New entry points: `sp_auth_tag(g, …)` (legitimate
+  mint with claimed organ's key), `sp_auth_tag_key(key, …)`
+  (explicit-key attacker oracle, K4). No legitimate auth path calls the
+  legacy constructor.
 - SHA-256 vendoring: `R33_NATIVE_SHA256_V2.zag` copied into each
   `src/` dir with EXACTLY one line removed — the
   `@import("R33_NATIVE_IO_V1.zag")` (line 5). `diff` vs the toolchain
@@ -63,15 +78,24 @@ Built from a pristine copy of the untouched original tree
 ## 3. Kill-bar accounting
 
 **Post-repair battery SHAs (3× byte-identical each):**
-- smoke: `6d1cdd2bb7e832298d7c58916458d77058fe746c1bec92458342e33d542be0d6`
-  (OB_FAILURES,0) — differs from pre-repair in EXACTLY ONE line (see K5).
+- smoke: `6855928854e38255e7275a18c5b07c82675fe1bc0752a616ba9ca90ba2e6d2e0`
+  (OB_FAILURES,0) — **byte-identical to the pre-repair baseline**
+  (`cmp` clean on all three runs).
 - redteam: `3e5731a9048fc3300c3c5a29248650bb7c1cd26bc005f3c38baa65f46cb33e35`
   (RT_FAILURES,0) — K5 diff vs pre-repair: only N1/N2/N3 lines (35 diff
   lines, zero outside N1/N2/N3).
 - lh B-alone: `cc7e86ed4a00be36bb4f5a2aacc6456197281270b4eb40717ebb1ca017ea93e9`
   (OB_FAILURES,0) — byte-identical to pre-repair baseline.
 - lh integrated: `356b7873bf07942c6b2283ed087911d3bfa724cea1ab707fb1ccaf14821cec3b`
-  (OB_FAILURES,0) — byte-identical to pre-repair baseline.
+  (OB_FAILURES,0) — byte-identical to pre-repair baseline. (Build note:
+  the integrated binary is built from `ob_lh_int.zag`, which does not
+  contain the B7 fixture; the fixture correction touched only
+  `ob_test_integration.zag`. The binary was rebuilt from byte-identical
+  sources after the correction — same 422848-byte output as the
+  pre-correction build — and the 3/3 evidence from the pre-correction
+  build stands. A re-run with the rebuilt binary produced
+  byte-identical output through the s100l stream before being stopped
+  for system-load reasons; the committed evidence is the full 3/3.)
 
 - **K1** (forged requester_id + attacker-minted UNKEYED hash →
   REFUSED_UNAUTHENTICATED, fwd=0, rson=SP_R_UNAUTH,
@@ -93,21 +117,20 @@ Built from a pristine copy of the untouched original tree
   `sp_auth_tag_key` with SYN's key on overseer-claimed envelope →
   `rn_n2_forged_pin_badtag,3,3` (BAD_TAG at auth, never reaches class).
 - **K5** (legit-traffic verdicts byte-identical to §2 refs; intended
-  deltas only): **PASS** — smoke post-repair output differs from
-  pre-repair in EXACTLY ONE line —
-  `OB_CHECK,ih_auth_deterministic,-1251831065,-1251831065` →
-  `OB_CHECK,ih_auth_deterministic,-800455180,-800455180`.
-  This check mints the same envelope twice and asserts the two tags are
-  EQUAL (determinism); it prints the tag sample, which is definitionally
-  different because the repair replaces the FNV construction with
-  HMAC-SHA256-32. The assertion holds (OB_FAILURES,0); every verdict,
-  disposition, ledger row, and metric is otherwise byte-identical. This
-  is an intended delta of the same class as the enumerated N1/N2/N3
-  red-team expectation + finding-text deltas. Independent confirmation:
-  the sample tag was recomputed in Python (`hmac.new(FNV-derived
-  fixture key for org=5, msg=LE32(5,41,112,7,9)), sha256)[:4]` as LE i32
-  = `-800455180`) — byte-for-byte equal to the Zag binary's print.
-  This proves the built binary carries the correct preregistered
+  deltas only): **PASS** — the post-repair smoke output is
+  **byte-identical** to the frozen pre-repair baseline (`cmp` clean,
+  3/3 runs, SHA `68559288…` both sides). The B7 printed fixture
+  (`b_hashkat`, `ob_test_integration.zag`) was restored to
+  `sp_auth_make_legacy`, preserving the frozen line
+  `OB_CHECK,ih_auth_deterministic,-1251831065,-1251831065` exactly.
+  The earlier one-line HMAC sample delta was rejected per the 2026-09-25
+  00:09 UTC checkpoint and is NOT carried as an intended delta.
+  Mechanism confirmation (not an output license): the HMAC sample tag was
+  independently recomputed in Python
+  (`hmac.new(FNV-derived fixture key for org=5,
+  msg=LE32(5,41,112,7,9)), sha256)[:4]` as LE i32 = `-800455180`) —
+  byte-for-byte equal to what the Zag binary computed before the fixture
+  restore, proving the built binary carries the correct preregistered
   derivation constants and implements the full chain correctly.
   Red-team K5: 35 diff lines, all within N1/N2/N3; N4/N5/F1-F4/R1-R4
   byte-identical. LH K5: both suites byte-identical to pre-repair.
@@ -132,8 +155,19 @@ victim's key — the documented attestation boundary).
 ## 5. Evidence to commit
 
 `PREREG_R1.md` (committed `2e8a947c7fbc`); repaired sources
-(`sp_gate.zag` ×3, `ob_test_integration.zag`, `ob_test_redteam.zag`,
-`ob_lh_int.zag`, `corpus_probe.zag`, `nio_shim.zag` ×3, vendored
-`R33_NATIVE_SHA256_V2.zag` ×3); this verdict; run evidence
-(`refs/prerepair/` + post-repair run outputs + SHA-256s). Binaries and
-`.zagd` files NEVER committed.
+(`sp_gate.zag` ×3, `ob_test_integration.zag` ×2 incl. longhorizon copy,
+`ob_test_redteam.zag`, `ob_lh_int.zag`, `corpus_probe.zag`,
+`nio_shim.zag` ×3, vendored `R33_NATIVE_SHA256_V2.zag` ×3); this
+(corrected) verdict; run evidence (`refs/prerepair/` + post-repair run
+outputs + SHA-256s). Binaries and `.zagd` files NEVER committed.
+Superseding evidence commit: see §6.
+
+## 6. Commit record
+
+- Prereg (frozen, committed first): `2e8a947c7fbc761080eb186d8a2385c75327ce23`
+  (`docs/lab/onebrain/pam_integration/repairs/R1/PREREG_R1.md`).
+- Original (incorrect-K5) evidence bundle: `2cf1ee7cc1df8e5c2eeda744ae9bcae2225fdc5e`
+  — SUPERSEDED by the correction commit below. Do not cite its K5 claim.
+- Correction evidence bundle: `<correction-commit-sha>`
+  (`docs/lab/onebrain/pam_integration/repairs/R1/`, 3/3 smoke outputs
+  byte-identical to the frozen baseline, corrected verdict).
