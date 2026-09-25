@@ -1,5 +1,8 @@
 # RSI-8 follow-ups round — fix log (RUN_PREREG4)
 
+> Note: this file first landed under a mislabeled commit message (P1 text);
+> the content was always this fix log. This note records the correction.
+
 Prereg frozen: `5ec524ba3edfdcbdd8d4d8ce6a130824ab95a193`.
 
 ## Package 1 — proposer sign bug (src/proposer.zag)
