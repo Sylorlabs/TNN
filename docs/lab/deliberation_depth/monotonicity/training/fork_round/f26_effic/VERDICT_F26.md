@@ -107,4 +107,9 @@ Computed in-Zag in the trainer log AND independently in Python
 
 ## 7. Commit SHAs
 
-(to be filled after `commit_racefree.py` to `tnn-native-lab`)
+- `2a5db535fad332d3e931e113d1e5d8ecc543776b` — F26 EFFIC fork tree
+  (PROTOCOL.md, VERDICT_F26.md, trainer source + 7 byte-identical harness
+  modules, params, training logs ×2, stillborn table), branch
+  `tnn-native-lab`, repo `sylorlabs/TNN`, paths under
+  `docs/lab/deliberation_depth/monotonicity/training/fork_round/f26_effic/`.
+- (this section's fill-in committed as a follow-up amendment)
