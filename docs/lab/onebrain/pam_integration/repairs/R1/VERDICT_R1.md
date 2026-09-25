@@ -168,6 +168,6 @@ Superseding evidence commit: see §6.
   (`docs/lab/onebrain/pam_integration/repairs/R1/PREREG_R1.md`).
 - Original (incorrect-K5) evidence bundle: `2cf1ee7cc1df8e5c2eeda744ae9bcae2225fdc5e`
   — SUPERSEDED by the correction commit below. Do not cite its K5 claim.
-- Correction evidence bundle: `<correction-commit-sha>`
+- Correction evidence bundle: `f0c257656fc4d1763ab2a094426d50ab903788a6`
   (`docs/lab/onebrain/pam_integration/repairs/R1/`, 3/3 smoke outputs
   byte-identical to the frozen baseline, corrected verdict).
