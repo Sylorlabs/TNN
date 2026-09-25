@@ -1,0 +1,180 @@
+// policy.zag — F28 DEB evaluation driver (H5 fork round).
+//
+// Runs the FROZEN harness deliberation (byte-identical dlb_*.zag copies)
+// at a fixed depth per item, then applies the F28 DEB confidence head:
+//   release: M4 skeleton (release L_t iff L_t == L_1, else ABSTAIN)
+//   confidence: deb_conf (see deb.zag) over deliberation rounds 1..t_eff,
+//     t_eff = min(depth, st.rounds) — the M4 effective-depth convention.
+//   gate01 is accepted and IGNORED: F28 has no gate mechanism.
+//
+// Usage: policy <items.jsonl> <depth> <gate01> <results.tsv>
+//
+// Per-item TSV record: identical columns to mech.zag / f20 policy.zag:
+//   id \t depth \t t \t rounds \t consumed \t ne \t release \t correct
+//   \t conf \t leader_idx \t cert
+// cert = "deb-budget" on released cells, "leader-changed" on abstains.
+//
+// Pure Zag. Zero RNG. Deterministic. A/B byte-identical.
+// Per-item cross-depth state (budget_t) is reconstructed from the
+// deliberation margin history within the leg — no on-disk state, so the
+// per-leg driver is exact and stateless across legs.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+@import("deb.zag")
+
+// DEB confidence for one item. st/it arrive as pointers and all struct
+// field reads happen through the *DSt/*Item params (ZNC-004/010-safe;
+// the f20 pl_features pattern). nh>=1 guarded (batteries have nh>=2).
+fn pl_deb_conf(st:*DSt, it:*Item, teff:i32) i32 {
+    let nh:i32 = it.*.nh;
+    if(nh < 1){ nh = 1; }
+    return deb_conf(st.*.hist_m, teff, nh);
+}
+
+fn pl_cert(rcode:i32, res:*DOut) void {
+    if(rcode == 0){ dout_str(res, "leader-changed"); }
+    if(rcode == 1){ dout_str(res, "deb-budget"); }
+}
+
+fn pl_item_alloc(it:*Item) i32 {
+    it.*.hid = nio_alloc(16*8);
+    it.*.eid = nio_alloc(64*8);
+    it.*.evns = nio_alloc(64*4);
+    it.*.evna = nio_alloc(64*4);
+    it.*.sup = nio_alloc(64*16*8);
+    it.*.att = nio_alloc(64*16*8);
+    if(it.*.hid.len == 0 || it.*.eid.len == 0){ return -1; }
+    return 0;
+}
+fn pl_item_free(it:*Item) void {
+    nio_free(it.*.hid); nio_free(it.*.eid); nio_free(it.*.evns); nio_free(it.*.evna);
+    nio_free(it.*.sup); nio_free(it.*.att);
+}
+fn pl_st_alloc(st:*DSt, hcap:i32) i32 {
+    st.*.scores = nio_alloc(16*8);
+    st.*.alive = nio_alloc(16);
+    st.*.hist_l = nio_alloc(hcap*4);
+    st.*.hist_m = nio_alloc(hcap*8);
+    st.*.hist_c = nio_alloc(hcap*4);
+    st.*.hcap = hcap;
+    if(st.*.scores.len == 0 || st.*.alive.len == 0){ return -1; }
+    return 0;
+}
+fn pl_st_free(st:*DSt) void {
+    nio_free(st.*.scores); nio_free(st.*.alive);
+    nio_free(st.*.hist_l); nio_free(st.*.hist_m); nio_free(st.*.hist_c);
+}
+
+fn pl_run(items_path:[]u8, depth:i32, res_path:[]u8) i32 {
+    let ibuf:[]u8 = nio_alloc(4194304);
+    if(ibuf.len == 0){ return 102; }
+    let bn:i64 = dlb_read_file(items_path, ibuf);
+    if(bn < 0){ nio_free(ibuf); return 102; }
+    let blen:i32 = bn as i32;
+    let cfg:DCfg = DCfg{.mode:0,.shallow_rounds:depth,.deep_rounds:depth,.amin:3,.amax:64,.conf_thr:0,.stab_win:0,.eps:20,.elim_margin:900,.refute_thr:600,.evcap:64};
+    let it:Item = Item{.line:"",.id_off:-1,.id_len:0,.tt_off:-1,.tt_len:0,.gt_off:-1,.gt_len:0,.nh:0,.ne:0,.hid:"",.eid:"",.evns:"",.evna:"",.sup:"",.att:"",.maxh:16,.maxe:64,.maxl:16};
+    if(pl_item_alloc(&it) != 0){ nio_free(ibuf); return 102; }
+    let st:DSt = DSt{.scores:"",.alive:"",.hist_l:"",.hist_m:"",.hist_c:"",.rounds:0,.consumed:0,.leader:-1,.margin:0,.conf:0,.hcap:68};
+    if(pl_st_alloc(&st, 68) != 0){ pl_item_free(&it); nio_free(ibuf); return 102; }
+    let res:DOut = DOut{.buf:"",.n:0,.cap:0,.err:0};
+    let lgo:DOut = DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&res, 4194304) != 0){ return 102; }
+    if(dout_init(&lgo, 8388608) != 0){ return 102; }
+    let lg:LG = LG{.seq:0,.prev:"",.head:""};
+    if(lg_init(&lg) != 0){ return 102; }
+    let ok:i32 = 1;
+    let errs:i32 = 0;
+    let pos:i32 = 0;
+    while(pos < blen && ok == 1){
+        let e:i32 = pos;
+        while(e < blen && ibuf[e] != 10){ e = e + 1; }
+        let line:[]u8 = ibuf[pos..e];
+        if(line.len > 0 && line[line.len-1] == 13){ line = line[0..line.len-1]; }
+        if(line.len > 0 && line.len <= 65536){
+            let prc:i32 = dj_parse_item(&it, line, 16, 64, 16);
+            if(prc != 0){ errs = errs + 1; }
+            if(prc == 0){
+                let drc:i32 = dlb_run(&st, &it, &cfg, &lg, &lgo);
+                if(drc != 0){ ok = 0; }
+                if(drc == 0){
+                    let t:i32 = depth;
+                    if(st.rounds < t){ t = st.rounds; }
+                    let l1:i32 = au_get32(st.hist_l, 1);
+                    let lt:i32 = au_get32(st.hist_l, t);
+                    let rel:i32 = -1;
+                    let rconf:i32 = 0;
+                    let rcode:i32 = 0;
+                    if(lt == l1){
+                        rel = lt;
+                        rconf = pl_deb_conf(&st, &it, t);
+                        rcode = 1;
+                    }
+                    // emit (same columns as mech.zag)
+                    dout_str(&res, dj_id(&it));
+                    dout_byte(&res, 9);
+                    dout_i64(&res, depth as i64);
+                    dout_byte(&res, 9);
+                    dout_i64(&res, t as i64);
+                    dout_byte(&res, 9);
+                    dout_i64(&res, st.rounds as i64);
+                    dout_byte(&res, 9);
+                    dout_i64(&res, st.consumed as i64);
+                    dout_byte(&res, 9);
+                    dout_i64(&res, it.ne as i64);
+                    dout_byte(&res, 9);
+                    if(rel < 0){
+                        dout_str(&res, "ABSTAIN:");
+                        pl_cert(rcode, &res);
+                    }
+                    if(rel >= 0){ dout_str(&res, dj_hid(&it, rel)); }
+                    dout_byte(&res, 9);
+                    if(rel < 0){ dout_str(&res, "A"); }
+                    if(rel >= 0){
+                        if(dlb_streq(dj_hid(&it, rel), dj_gt(&it)) == 1){ dout_str(&res, "1"); }
+                        if(dlb_streq(dj_hid(&it, rel), dj_gt(&it)) != 1){ dout_str(&res, "0"); }
+                    }
+                    dout_byte(&res, 9);
+                    dout_i64(&res, rconf as i64);
+                    dout_byte(&res, 9);
+                    dout_i64(&res, au_get32(st.hist_l, t) as i64);
+                    dout_byte(&res, 9);
+                    pl_cert(rcode, &res);
+                    dout_line(&res);
+                    if(res.err != 0){ ok = 0; }
+                    if(lgo.err != 0){ ok = 0; }
+                }
+            }
+        }
+        pos = e + 1;
+    }
+    let wrc:i64 = 0;
+    if(ok == 1 && res.err == 0){
+        wrc = dlb_write_file(res_path, dout_bytes(&res), res.n);
+    }
+    nio_free(ibuf);
+    pl_item_free(&it);
+    pl_st_free(&st);
+    dout_free(&res);
+    dout_free(&lgo);
+    lg_free(&lg);
+    if(ok == 0 || wrc < 0){ return 103; }
+    return errs;
+}
+
+fn main() i32 {
+    if(_zag_argc() < 5){
+        _zag_println("usage: policy <items.jsonl> <depth> <gate01> <results.tsv>");
+        return 64;
+    }
+    let depth:i32 = dlb_atoi(_zag_arg(2));
+    let gate01:i32 = dlb_atoi(_zag_arg(3));
+    if(depth < 1 || depth > 64){ return 64; }
+    if(gate01 < 0 || gate01 > 1){ return 64; }
+    // gate01 accepted and ignored: F28 has no gate mechanism.
+    return pl_run(_zag_arg(1), depth, _zag_arg(4));
+}
