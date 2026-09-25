@@ -162,3 +162,38 @@ improving single moves at the Zag optimum (local optimum verified).
   collinear with b; the margin signal is destroyed per §3 kill-bar (c)
   interpretation (constancy evidence). The numeric w1 is an artifact of the
   collinearity, not a live margin signal.
+
+## 8. Batch eval driver (2026-09-25)
+
+- Implemented `src/f23_batch.zag`: one invocation over `leglist.tsv` (37 legs
+  in frozen order), per-item (M1,M4a) trailing-max retained across depth legs,
+  frozen M4 harness (dlb_run) + pl_features (copied from training/src/policy.zag),
+  F23 head on (f1',f4'), M4 release/correct/cert skeleton preserved exactly.
+- Compiled with pinned toolchain; binary tested on 1 leg then full 37-leg A/B.
+- Full battery: 37 legs A + 37 legs B, all 74 files byte-identical A/B.
+- Output: `results_f23/<battery>_m23_d<depth>_<AB>.tsv` (analyzer-compatible 11-col).
+- M4 reference TSVs copied from `mechanisms/results/` for B9 comparison.
+
+## 9. Eval results (2026-09-25)
+
+- Frozen analyzer: F23 V1=0, V2=0, Gviol=2 (redteam). M4: V1=0, V2=160, Gviol=14.
+- B9: 5240/5240 release+correct identity vs M4 (PASS).
+- Clamp attractor: 35/37 legs at 100% conf=1000 on released cells.
+- B-metrics: B1 PASS, B2 PASS, B3 FAIL (redteam Gviol=2), B4 PASS (1.000),
+  B4b PASS, B5 FAIL (0.000 separation), B6 PASS, B7 PASS (0.148),
+  B8 FAIL (ceiling/P G≡+1.000 fails nonvacuity; trap VOID), B9 PASS,
+  B12 recorded, B13 PASS, B3pi recorded.
+- NEC m9 deltas: V1 Δ0, V2 Δ0, Gviol Δ−4.
+
+## 10. Verdict: KILLED
+
+- Fork bar (a) FIRES: 35/37 legs at 100% conf=1000 (clamp attractor).
+- Fork bar (b) does NOT fire: F23 V1+V2=0 ≤ 160.
+- Fork bar (c) FIRES: f1'≡1000 on 99.98% cells; w1=1256 unidentifiable
+  from bias; absolute margin signal destroyed.
+- Additionally fails B3 (strict), B5, B8 (ceiling/P).
+- Failure mode FM-SELFNORM-001: self-normalization by trailing max destroys
+  the absolute f1 margin signal; fitted head saturates at conf=1000 clamp.
+- Confirms H5 hypothesis: absolute f1 margin is load-bearing for calibration.
+- Prereg SHA erratum: feature-SHA transcription (one hex digit); extant frozen
+  file used, reported in analysis/killbars.md.
