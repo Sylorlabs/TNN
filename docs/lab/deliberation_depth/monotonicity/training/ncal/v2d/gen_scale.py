@@ -11,7 +11,7 @@ rows = [l.rstrip("\n") for l in open(inp) if l.strip()]
 w = 2 if scale == 10 else 3
 tag = "s10" if scale == 10 else "s100"
 with open(outp, "w") as f:
-    for r in range(scale):
+    for r in range(1, scale+1):   # 1-based: matches committed results_scale_* convention (r01..r10, r001..r100)
         suf = f"#{tag}r{r:0{w}d}"
         for line in rows:
             c = line.split("\t")
