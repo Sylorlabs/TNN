@@ -37,3 +37,17 @@
 - Organ self-check (§3.5) on the 10 ref WAVs.
 - L battery: 3× runs of the 20-case loop, frozen scoring, Wilcoxon, L-R1 curve.
 - Dither spot check (§5.3), HF-reduction variant, SHA grep audit (§5.1).
+
+## DEVIATION D1 (2026-09-25, before any test render; cause documented)
+The organ self-check (10/10 F0 + 10/10 env organ-vs-scorer agreement) exposed
+a SHARED property of the frozen measurement definition, not a TNN bug: the
+normalized-autocorr peak over lags 36..551 cannot resolve F0 below ~125 Hz —
+both organ and scorer report the lag-36 edge (1225 Hz) for true 82/110/115/
+117/120 Hz tones (ref01, ref05), while 125 Hz+ resolves. With the sensor blind
+there, a closed-loop correction has no error gradient (it would diverge), so
+testing the LOOP below 125 Hz tests the sensor, which the self-check already
+characterized. Sealed case L01 (90 Hz) is replaced by 133 Hz (flat,
+qerr=0.0164, plan 130813 mHz; same selection rule, env cycle preserved
+7/7/6). Original manifest preserved in git history (commit 0b2c5d0bdbea).
+Battery target range is therefore [133, 1175] Hz within the prereg's
+[80, 1200] Hz. No test WAV existed when this amendment was sealed.
