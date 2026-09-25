@@ -157,3 +157,38 @@ Commits: acf7cedce (prereg), 1da140387 (sign-correction addendum),
 39707e077 (implementation and evidence). Nothing pushed to GitHub.
 Nothing written to LOOP_STATE.md. Nothing surfaced to Micah; the
 coordinator owns the judge queue, which is untouched.
+
+## Addendum: judge-ordered classification change (debate wave-20260924-1721pdt, 2026-09-25)
+
+Ordered by the debate judge (debate/JUDGE_RULING_1721.md, M2). The DISCARD
+outcome is unchanged; no bar was weakened. The recorded classification changes
+from "mechanism miss" to "detector mismatch / unfrozen correspondence;
+upward-fan hypothesis refuted for this D field; mechanism performed as
+frozen."
+
+Reason (frozen text, quoted literally): the prereg's fan-direction decision
+states "The fan has no fixed global opening direction; it is anchored
+per-pixel to the sunward ray." A mechanism-miss ruling requires aim; the
+frozen text disclaims fixed aim. The mechanism performed exactly as frozen:
+sun-anchored lift confirmed (2805 delta passers, 2609 pixels with nonzero dL,
+max |dL| 35 vs v2's 9, 2003 of 2609 = 76.8 percent within 200 px of the sun,
+clarity gate 28476/323997 = 87.9 per mille inside the frozen 50..150 band),
+while the frozen WEDGE detector measured the upward fan (all wedge points y <
+300) and the minima lay below the sun (lift band bbox x 125..1023, y
+308..458). The prereg froze a sector-agnostic mechanism, a sector-specific
+detector, and an unfalsified-at-freeze correspondence claim between them; the
+D-field belief that the minima would be sunward/upward was the author's
+prediction, refuted by the D field. The red-team's three locks were rejected
+on the frozen text: the no-re-interpretation clause bars re-interpretation to
+force a PASS (a classification change cannot force a pass under a
+DISCARD-only mapping); the novelty caveat pre-registered the outcome mapping,
+not the failure-mode classification; and binding the authorial "measures
+exactly the fan" claim while discounting the equally frozen "no fixed global
+opening direction" is selective.
+
+Terminal state downgraded: the directional-contrast idea is PAUSED pending a
+re-aimed prereg with a sector prior (the specified next step already present
+in the red-team note 3), not dead for lack of ideas. The staffing call (pause
+G1 internals; the frontier is PAMs v2 and b_alpha v9) stands as a staffing
+judgment, separated from the technical claim. The sign-correction addendum
+stands as a legitimate pre-implementation S10 internal-consistency repair.

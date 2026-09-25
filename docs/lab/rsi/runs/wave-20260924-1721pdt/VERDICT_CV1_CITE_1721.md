@@ -113,3 +113,57 @@ evidence with zero new confabulation surface at 1.73x cost.
 Commits: dad5ef955 (prereg), b1951de11 (seal), 91b7ee160 (impl,
 evidence), plus the scoring commit below (scoring transcripts, op
 streams, filled seal-open log, this verdict).
+
+## Addendum: judge-ordered traveling caveats (debate wave-20260924-1721pdt, 2026-09-25)
+
+Ordered by the debate judge (debate/JUDGE_RULING_1721.md, M1 rulings (i)
+through (iii)). This addendum changes no bar, no number, and no outcome.
+
+(a) Python-mirror lineage. The adopted implementation files impl/cv1c.zag and
+impl/gate_op.zag each carry a comment at line 1396 reading "(proven: 1/12 <
+2/12 in the Python mirror)", inherited byte-identical from the 1421pdt
+committed sources and originating in the 2026-09-23 cmp_scale work (commit
+b0441c692), whose tree contains a committed Python file and Python run logs.
+This wave's own work (prereg, probes, key, scoring, verdict) had no Python
+contact; the verdict's "No Python was invoked anywhere in this task" is true
+as wave-scoped. The contact predates the 0521pdt Python-anywhere rule and the
+09-24 literal restoration of the pure-Zag standard: grandfathered contact, not
+a void, and not a precedent for future adoption. Whether
+Python-mirror-developed logic may be adopted going forward is a red-line
+question reserved to Micah; until he rules, the loop may not adopt newly
+Python-mirror-developed logic. The comment sits in the answer-path morphology
+section, not the decline-citation rule under test, so it does not taint the
+B1-B4 evidence directly.
+
+(b) CVC-B5 rebuild sanity. CVC-B5's legs (17/17 INKB parity, 30/30 ADV
+declines) ran byte-identical inputs through a byte-identical binary and cannot
+fail by construction given determinism (CVC-B7, established independently).
+The B5 PASS stands; it carried no discriminating weight this wave. It is a
+rebuild sanity check, not evidence for the NEW_KNOWLEDGE_CLAIM. The ADOPT rests
+on B1-B4, B6, and B7. The prereg's "fresh" wording for these inputs means
+unsealed training inputs (never part of a sealed set), disclosed as
+byte-inherited from 1421pdt; future preregs will say "unsealed" to avoid the
+ambiguity.
+
+(c) Single-session authorship and self-attested separation. Every substantive
+artifact behind this ADOPT (probes, key, scoring, verdict) was authored inside
+a single worker session. CVC-B8 passes on its frozen text (attestation exists
+in the seal record, commit order held, static grep confirms zero sealed probe
+bytes in the candidate artifacts, and the implementation predates the sealed
+set), but the separation is self-attested. This ADOPT is on the record as
+ADOPT-ON-SELF-ATTESTED-SEPARATION under a single-session re-test of
+byte-inherited implementation. Future RE-CERT re-tests should rotate the probe
+author across worker sessions.
+
+(d) Battery scope. The paraphrase battery (P01-P10) is surface reorderings with
+full content-word overlap. Every probe was pre-screened past the frozen
+router's assertion, composition, resume, and correction paths; real turns are
+not pre-scrubbed. The empty-uncovered fallback and the atomic-verification
+fail-closed path fired on no sealed or ADV probe: they are adopted sight
+unseen.
+
+(e) Integration held. Baseline integration of the decline-citation rule is NOT
+authorized on this record alone. It is held until (1) the fallback and
+fail-closed paths are exercised on sealed probes and (2) Micah rules on the
+Python-mirror question in (a). The 1421pdt DISCARD is retracted as a
+measurement artifact.

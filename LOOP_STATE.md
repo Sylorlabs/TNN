@@ -8,6 +8,16 @@ branch with git show. This wave appends its verdicts below the restored history.
 MOTION4 FAIL K2 only, DEPTH-1, RSI Run 2 depth-8, MORG +0.0688, unphony BUILD 0, bytegen GAMMA-DISEASE repair,
 LI-HARDEN convergence) are treated as closed and are not re-litigated unless the red-team finds a genuine hole.
 
+[ANNOTATION 2026-09-25, debate wave-20260924-1721pdt judge M4-4: the "removed
+the loop's state file ... and the loop's wave run records" claim above is
+disproven. The 0521pdt section below (CORRECTION to the DIVERGENCE NOTE,
+2026-09-24) shows 19bb4d617 only adds FS-F2C eval files and removed nothing;
+the loop's wave commits were never on origin (the loop never pushes), so each
+wave's reset --hard to origin/tnn-native-lab dropped the previous wave's local
+commits from the working branch. The standing fix (merge origin instead of
+reset; per-wave archive branches) was adopted 2026-09-24. This note is kept
+for history with the correction.]
+
 ---
 
 ## Standing owner rules (2026-09-23)
@@ -1102,21 +1112,30 @@ worktrees plus znc mode normalization; staffing note for the next coordinator
 b_alpha v9). Note: origin/tnn-native-lab is now at 9d4f484bfe, 6 commits ahead
 of local; the merge is the next run's run-start step.
 
-## Wave 20260924-1721pdt verdicts (2026-09-24) [INCOMPLETE: cron timeout before debate]
+## Wave 20260924-1721pdt verdicts (2026-09-24; debate completed 2026-09-25)
 
 Wave HEAD at start: 53616213e (run-start merge of origin/tnn-native-lab,
 Micah's pam-rebuild round2 b3034x2 commits; merged cleanly, no conflicts).
 This wave's evidence commits are all local, none pushed. The scheduled run
 hit its execution timeout after all four workstream workers finished and
-committed their evidence, but BEFORE the red-team review of the G1 v3
-evidence and BEFORE the mandatory debate group could convene. The CV-1,
-fork battery, and tnn_chat evidence were red-team reviewed and confirmed;
-the G1 v3 verdict below is worker-reported and has NOT been independently
-red-teamed or debated. No verdict below was adopted into any live
-instrument; nothing was added to or removed from Micah's sealed judge
-queue; his five governance rulings are untouched; his frontier files under
-docs/lab/senses/pam-rebuild/ were not touched. No Python anywhere in wave
-work (static checks clean in every workstream). Zero em-dashes in wave docs.
+committed their evidence, but before the G1 v3 red-team review and the
+mandatory debate group. A finish-up run completed the wave: the G1 v3
+evidence got an independent red-team review (redteam/REDTEAM_G1_V3_1721.md,
+AGREE with DISCARD), and a full debate group (advocate, skeptic with the
+verbatim provenance probe, independent judge) ruled on all three motions;
+full ruling at docs/lab/rsi/runs/wave-20260924-1721pdt/debate/
+JUDGE_RULING_1721.md. During finish-up, origin moved twice; both merges
+(63156682c merging origin tip 60be56ba4, ead33399e merging newer origin tip
+14c883855) were clean, zero conflicts, no reset, no rebase; all wave
+commits and all origin commits are ancestors of the finish-up tip, and
+origin/tnn-native-lab at 14c883855 is fully merged. No verdict below was
+adopted into any live instrument; nothing was added to or removed from
+Micah's sealed judge queue; his five governance rulings are untouched; his
+frontier files under docs/lab/senses/pam-rebuild/ were not touched. No
+Python anywhere in wave work (static checks clean in every workstream; the
+one Python-mirror comment in the adopted CV-1 source is grandfathered
+pre-09-24 lineage, disclosed in the verdict addendum). Zero em-dashes in
+wave docs.
 
 1. CV-1 decline-citation fix re-test: ADOPT [RE-CERT] (red-team CONFIRMED).
 Fresh frozen prereg with amended F9 (dad5ef955): probes must carry "?" AND
@@ -1147,10 +1166,27 @@ ADOPT as broad citation-quality evidence. Author/implementer separation is
 an attestation under one worker session (moot here via byte-inheritance).
 Commits: dad5ef955 (prereg), b1951de11 (seal), 91b7ee160 (impl+evidence),
 de8616b5f (scoring+verdict). Commit-order self-check PASS, no
-UNVERIFIABLE ORDERING.
+UNVERIFIABLE ORDERING. Debate M1 (2026-09-25): UPHOLD ADOPT [RE-CERT] with
+recorded caveats. The frozen mapping admits exactly one outcome on an 8/8
+sweep and no bar was weakened. Caveats written into the verdict by
+judge-ordered addendum: (a) Python-mirror lineage disclosed and
+grandfathered (comment at impl/cv1c.zag and impl/gate_op.zag line 1396,
+from the 2026-09-23 cmp_scale work); whether Python-mirror-developed logic
+may be adopted going forward is a red-line question reserved to Micah;
+until he rules, the loop may not adopt newly Python-mirror-developed
+logic; (b) CVC-B5 PASS stands but carried no discriminating weight
+(rebuild sanity check; the ADOPT rests on B1-B4, B6, B7); the prereg's
+"fresh" means unsealed training inputs; (c) single-session authorship
+recorded as ADOPT-ON-SELF-ATTESTED-SEPARATION; future RE-CERT re-tests
+should rotate the probe author; (d) narrow paraphrase battery, sanitized
+input corridor, untested fallback and fail-closed paths. The 1421pdt
+DISCARD is retracted as a measurement artifact; baseline integration of
+the rule is HELD until the fallback and fail-closed paths are exercised
+on sealed probes and Micah rules on the Python-mirror question.
 
-2. Fork battery: PASS on all 23 tested forks [NEW, process confirmation]
-(red-team CONFIRMED). Full enumeration: 7 local branches (tnn-native-lab,
+2. Fork battery: PASS on all 24 tested forks effective [NEW, process confirmation]
+(red-team CONFIRMED on the original 23; the moved origin tip was tested separately
+in finish-up). Full enumeration: 7 local branches (tnn-native-lab,
 five wave archives, wave-debate-session-1-backup), origin/tnn-native-lab
 tested read-only at moved tip 75532a04c ("H5 SR-S9"; never checked out, no
 ref created), 5 other remote heads fetched into FETCH_HEAD only (no local
@@ -1166,8 +1202,14 @@ on extracted copies) and is a permanent documented fixture. Divergence
 correction: origin/tnn-native-lab did not merely move ahead; local and
 origin DIVERGED at ca2402b44 (41 local-only commits, 10 origin-only
 commits), so the pending merge is a genuine divergent merge, not a
-fast-forward; the results file's "behind" wording understates it. The merge
-is the next run's run-start step. Commit: 543fbfbf8.
+fast-forward; the results file's "behind" wording understates it. Finish-up
+completed the divergent merge (63156682c merging origin tip 60be56ba4,
+then ead33399e merging newer origin tip 14c883855; zero conflicts, no
+reset, no rebase; origin/tnn-native-lab at 14c883855 fully merged). The
+moved origin tip was tested separately in finish-up (pinned toolchain sha
+matched; B1, B2 rerun, B2 recompile identity, B3, NEG1, NEG2, probe all
+PASS; pure-Zag harness VERDICT=PASS), recording 24/24 effective. Commit:
+543fbfbf8.
 
 3. tnn_chat FIT on merged HEAD: FIT [NEW, process confirmation] (red-team
 CONFIRMED). Scoped literally to merge commit 53616213e, not merge review:
@@ -1177,10 +1219,15 @@ baseline parity; 10/10 KB5; 9/9 rerun pairs byte-identical; pinned znc
 498abcb5; kb.txt and gaz.txt match canonical shas. Plain-language caveat
 in the file: this certifies the 38-fact closed-book probe chain only; no
 runnable interactive TNN exists on this branch beyond the frozen probe
-instruments; nothing faked. Commit: 5b625c0be.
+instruments; nothing faked. Commit: 5b625c0be. Finish-up: post-merge FIT carried by
+byte-identity of the enumerated frozen chain (pinned znc blob 498abcb5,
+R33 SHA256 source, kb.txt, gaz.txt; extracted read-only from the archive
+branch, verified empty diff across both merges) plus established
+determinism (9/9 rerun identity on the certified run), per the new
+standing carry-over rule below; no fresh re-run was required.
 
-4. G1 SUNSHAFTS v3 (directional-contrast fan selection): DISCARD [NEW],
-worker-reported, NOT red-teamed, NOT debated. Phase 1: measured the actual
+4. G1 SUNSHAFTS v3 (directional-contrast fan selection): DISCARD [NEW]
+(debate UPHELD the outcome on 2026-09-25; classification CHANGED by the judge). Phase 1: measured the actual
 T distribution on the byte-identical rebuilt r8c baseline (n=325786,
 mean 569, std 92, skewness -0.376 left-skewed; 1.12% above the old 707 gate
 vs 6.68% predicted under normality; radial band means 447 near sun to 654
@@ -1204,23 +1251,56 @@ sun-anchored, 77% of 2609 lifted pixels within 200 px of the sun, max dL
 35 vs v2's 9 at 870 px away), but the delta > 0 predicate selected a band
 BELOW the sun (y 308..458), disjoint from the frozen upward wedge fan;
 the frozen mechanism was sector-agnostic and nothing preferred the upward
-sector the WEDGE set measures. Ruled a mechanism miss, not a freeze
-defect. No sealed pair prepared (correctly); nothing reaches his judge
-queue. The worker's staffing note: three waves spent on G1 internals; this
-is the honest terminal state for the line until a new design idea exists;
-the frontier remains PAMs v2 and b_alpha v9. Because the timeout hit
-before independent review, this DISCARD must be treated as provisional
-until a future wave red-teams the evidence and a debate group rules.
+sector the WEDGE set measures. Debate reclassification (judge M2):
+detector mismatch / unfrozen correspondence; upward-fan hypothesis refuted
+for this D field; mechanism performed as frozen. The red-team's three
+locks were rejected on the frozen text: the no-re-interpretation clause
+bars re-interpretation to force a PASS (a classification change cannot
+force a pass under a DISCARD-only mapping); the novelty caveat
+pre-registered the outcome mapping, not the failure-mode classification;
+binding the authorial "measures exactly the fan" claim while discounting
+the equally frozen "no fixed global opening direction" is selective. The
+directional-contrast idea is PAUSED pending a re-aimed prereg with a
+sector prior, not terminal-dead; the staffing call (pause G1 internals;
+the frontier is PAMs v2 and b_alpha v9) stands as a staffing judgment,
+separated from the technical claim. The sign-correction addendum stands as
+a legitimate pre-implementation S10 internal-consistency repair. No sealed
+pair prepared (correctly); nothing reaches his judge
+queue. The worker's staffing note stands as a staffing judgment (three waves spent
+on G1 internals; the frontier remains PAMs v2 and b_alpha v9), separated
+from the technical claim per the judge. The independent red-team review
+(redteam/REDTEAM_G1_V3_1721.md) agreed with DISCARD, no reclassification;
+the debate group then upheld DISCARD and changed the classification as
+above. Full transcript: debate/ADVOCATE_BRIEF_1721.md,
+debate/SKEPTIC_BRIEF_1721.md, debate/JUDGE_RULING_1721.md (skeptic's
+provenance probe on the record verbatim).
 
 Queued next: the five governance rulings still awaiting him (S7 strike,
 MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12
 queue); his blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12,
 S11-AUD, S13, S14, whirlpool-planform; unchanged, nothing added this wave);
-red-team review of the G1 v3 evidence plus the mandatory debate group over
-this wave's slate (deferred by the timeout); the pending divergent merge
-at ca2402b44 (41 local vs 10 origin-only commits) as the next run's
-run-start step, with post-merge FIT re-certification per the literal-scope
-rule; CV-1 citation work is closed on the ordered defects (do not cite the
-ADOPT as broad citation-quality evidence); G1 sunshafts stand down until a
-new design idea exists (sector prior or shaft-scale flank geometry under a
-fresh prereg).
+his ruling on the Python-mirror question (whether Python-mirror-developed
+logic may be adopted under the literal pure-Zag standard; until he rules,
+the loop may not adopt newly Python-mirror-developed logic); CV-1 fallback
+and fail-closed paths to be exercised on sealed probes before any baseline
+integration; G1 sunshafts stand down until a re-aimed prereg with a sector
+prior exists.
+
+New standing rules adopted by this wave's debate:
+- FIT carry-over precondition (M3, now standing): carry-over of a frozen
+FIT chain across a merge is valid ONLY when (1) the frozen chain is fully
+enumerated, (2) those inputs are extracted read-only from the archive
+branch rather than the merged tree, (3) the diff of the enumerated chain
+across the merge is verified empty, and (4) determinism is already
+established. Without all four, a fresh re-run is required; the rule must
+not become a blanket license to skip re-certs.
+- RE-CERT author rotation: future RE-CERT re-tests should rotate the probe
+author across worker sessions; ADOPT-ON-SELF-ATTESTED-SEPARATION is a
+named, visible precedent, not a silent one.
+- Prereg wording: unsealed training inputs must be described as "unsealed"
+rather than "fresh".
+
+Lock note: this wave's lock was still present at the cron timeout; the
+2321pdt wave's run-start removed it as stale (6.04h old) and created its
+own. This finish-up therefore removed no lock; the .wave_lock in the tree
+belongs to the active 2321pdt wave and was left untouched.
