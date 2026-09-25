@@ -1,0 +1,298 @@
+// nec_q1.zag — NEC Q1 adversarial variant driver.
+//
+// Reads a combined TSV (id, fam, depth, f1, f5, release, correct) in frozen
+// leg order, computes NEC confidence per released cell under a variant id,
+// writes output TSV (id, fam, depth, release, correct, conf_thousandths).
+//
+// Variant ids (argv[1], numeric):
+//   11 m11 reproduce (baseline; must match nec_v2 byte-identically)
+//   12 personal raw rate OUTRIGHT (no pessimistic min), keep ceiling
+//   13 m12 WITHOUT the per-item ceiling
+//   14 optimistic personal max(class, p_raw), keep ceiling
+//   15 m11 with Laplace prior p0=1.0 (K=2)
+//   16 m11 with halved bin widths (margin 75, consumed 125)
+//   17 m11 WITHOUT the per-item ceiling
+//   18 m11 with prior strength K=8 (p0=0.95)
+//   19 single global class (no f1/f5 binning) + personal min-cap + ceiling
+//   20 personal-only (no class ledger; d1 prior 0.95) + ceiling
+//   31 ORACLE-d1: m11, RT-M3-01 d1 conf forced to 1000 (diagnostic)
+//   32 ORACLE-full: m11, every released cell conf = GT*1000 (diagnostic)
+//
+// Pure Zag. Zero RNG. Deterministic. A/B/C byte-identical.
+//
+// Usage: nec_q1 <variant> <in.tsv> <out.tsv>
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+fn dout_init_dummy()DOut {
+    let d:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    return d;
+}
+fn nec_ledger_get(ld:[]u8, cls:i32, c:*i64, t:*i64)void {
+    c.*=au_get64(ld, cls*2);
+    t.*=au_get64(ld, cls*2+1);
+}
+fn nec_ledger_put(ld:[]u8, cls:i32, c:i64, t:i64)void {
+    au_put64(ld, cls*2, c);
+    au_put64(ld, cls*2+1, t);
+}
+
+// Item map: fixed 64-byte ID slots, parallel i64 conf slots.
+// Returns slot index or -1.
+fn nec_find(id:[]u8, slots:[]u8, n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let base:i32=i*64;
+        let sl:[]u8=slots[base..base+64];
+        let ok:i32=1;
+        if(sl.len<id.len+1){ok=0;}
+        if(ok==1){
+            let k:i32=0;
+            while(k<id.len){
+                if(sl[k]!=id[k]){ok=0;break;}
+                k=k+1;
+            }
+            if(ok==1 && sl[id.len]!=0){ok=0;}
+        }
+        if(ok==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn nec_store(id:[]u8, slots:[]u8, n:i32)void {
+    let base:i32=n*64;
+    let k:i32=0;
+    while(k<id.len && k<63){
+        slots[base+k]=id[k];
+        k=k+1;
+    }
+    slots[base+k]=0;
+}
+
+// id == "RT-M3-01" ? (byte-exact; avoids string-literal typing issues)
+fn id_is_m3(id:[]u8)i32 {
+    if(id.len!=8){return 0;}
+    if(id[0]!=82){return 0;}
+    if(id[1]!=84){return 0;}
+    if(id[2]!=45){return 0;}
+    if(id[3]!=77){return 0;}
+    if(id[4]!=51){return 0;}
+    if(id[5]!=45){return 0;}
+    if(id[6]!=48){return 0;}
+    if(id[7]!=49){return 0;}
+    return 1;
+}
+
+fn nec_run(in_path:[]u8, out_path:[]u8, variant:i32)i32 {
+    // ---- variant parameters ----
+    let p0num:i64=1900000;   // K * p0 * 1e6
+    let kden:i64=2;          // K
+    let mbw:i32=150;
+    let cbw:i32=250;
+    let single_cls:i32=0;    // 1 = single global class
+    let pmode:i32=1;         // 1=min-cap, 2=outright, 3=max
+    let use_ceil:i32=1;
+    let nopool:i32=0;        // 1 = no class ledger (personal-only)
+    let d1prior:i64=950000;  // millionths, used when nopool && tp==0
+    let oracle:i32=0;        // 0=none, 1=d1, 2=full
+    if(variant==12){pmode=2;}
+    else if(variant==13){pmode=2;use_ceil=0;}
+    else if(variant==14){pmode=3;}
+    else if(variant==15){p0num=2000000;}
+    else if(variant==16){mbw=75;cbw=125;}
+    else if(variant==17){use_ceil=0;}
+    else if(variant==18){p0num=7600000;kden=8;}
+    else if(variant==19){single_cls=1;}
+    else if(variant==20){nopool=1;pmode=2;}
+    else if(variant==31){oracle=1;}
+    else if(variant==32){oracle=2;}
+    else if(variant!=11){return 110;}
+
+    // Read input
+    let ibuf:[]u8=nio_alloc(4*1024*1024);
+    if(ibuf.len==0){return 101;}
+    let nr:i64=dlb_read_file(in_path, ibuf);
+    if(nr<0){nio_free(ibuf);return 102;}
+    let n:i32=nr as i32;
+
+    // Ledger: 35*16 = 560 bytes, zeroed by nio_alloc
+    let ld:[]u8=nio_alloc(35*16);
+    if(ld.len==0){nio_free(ibuf);return 103;}
+
+    // Item map: 1200 slots
+    let slots:[]u8=nio_alloc(1200*64);
+    if(slots.len==0){nio_free(ibuf);nio_free(ld);return 104;}
+    let confs:[]u8=nio_alloc(1200*8);
+    if(confs.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);return 105;}
+    let pcp:[]u8=nio_alloc(1200*8);
+    if(pcp.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);return 108;}
+    let ptp:[]u8=nio_alloc(1200*8);
+    if(ptp.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);nio_free(pcp);return 109;}
+    let zi:i32=0;
+    while(zi<1200){
+        au_put64(pcp, zi, 0);
+        au_put64(ptp, zi, 0);
+        au_put64(confs, zi, 0);
+        zi=zi+1;
+    }
+    let n_items:i32=0;
+
+    // Output
+    let res:DOut=dout_init_dummy();
+    if(dout_init(&res, 2*1024*1024)!=0){
+        nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);nio_free(pcp);nio_free(ptp);
+        return 106;
+    }
+
+    let pos:i32=0;
+    let ok:i32=1;
+    while(pos<n && ok==1){
+        let e:i32=pos;
+        while(e<n && ibuf[e]!=10){e=e+1;}
+        if(e>pos){
+            let c0s:i32=pos; let c0e:i32=pos;
+            let c1s:i32=0; let c1e:i32=0;
+            let c2s:i32=0; let c2e:i32=0;
+            let c3s:i32=0; let c3e:i32=0;
+            let c4s:i32=0; let c4e:i32=0;
+            let c5s:i32=0; let c5e:i32=0;
+            let c6s:i32=0; let c6e:i32=0;
+            let col:i32=0;
+            let k:i32=pos;
+            while(k<e){
+                if(ibuf[k]==9){
+                    if(col==0){c0e=k; c1s=k+1;}
+                    else if(col==1){c1e=k; c2s=k+1;}
+                    else if(col==2){c2e=k; c3s=k+1;}
+                    else if(col==3){c3e=k; c4s=k+1;}
+                    else if(col==4){c4e=k; c5s=k+1;}
+                    else if(col==5){c5e=k; c6s=k+1;}
+                    col=col+1;
+                }
+                k=k+1;
+            }
+            c6e=e;
+            if(col==6){
+                let id:[]u8=ibuf[c0s..c0e];
+                let fam:[]u8=ibuf[c1s..c1e];
+                let depth_s:[]u8=ibuf[c2s..c2e];
+                let f1:[]u8=ibuf[c3s..c3e];
+                let f5:[]u8=ibuf[c4s..c4e];
+                let rel_s:[]u8=ibuf[c5s..c5e];
+                let corr_s:[]u8=ibuf[c6s..c6e];
+                let f1v:i32=dlb_atoi(f1);
+                let f5v:i32=dlb_atoi(f5);
+                let rel:i32=dlb_atoi(rel_s);
+                let corr:i32=dlb_atoi(corr_s);
+                let depth:i32=dlb_atoi(depth_s);
+
+                let conf:i64=0;
+                if(rel==1){
+                    let cls:i32=0;
+                    if(single_cls==0){
+                        let mb:i32=f1v/mbw;
+                        if(mb>6){mb=6;}
+                        let cb:i32=f5v/cbw;
+                        if(cb>4){cb=4;}
+                        cls=mb*5+cb;
+                    }
+                    // item slot (needed for personal ledger + ceiling memory)
+                    let idx:i32=nec_find(id, slots, n_items);
+                    let is_new:i32=0;
+                    if(idx<0){
+                        if(n_items<1200){
+                            nec_store(id, slots, n_items);
+                            idx=n_items;
+                            n_items=n_items+1;
+                            is_new=1;
+                        } else { ok=0; }
+                    }
+                    if(ok==1){
+                        let tp:i64=au_get64(ptp, idx);
+                        let cp:i64=au_get64(pcp, idx);
+                        let p_raw:i64=0;
+                        if(tp>=1){p_raw=(cp*1000000)/tp;}
+
+                        // ---- base confidence (millionths) ----
+                        let base:i64=0;
+                        if(nopool==1){
+                            // m20: personal-only; d1 prior when no personal record
+                            if(tp>=1){base=p_raw;}
+                            else{base=d1prior;}
+                        } else {
+                            let c:i64=0; let t:i64=0;
+                            nec_ledger_get(ld, cls, &c, &t);
+                            base=(c*1000000+p0num)/(t+kden);
+                            if(tp>=1){
+                                if(pmode==1){ if(base>p_raw){base=p_raw;} }
+                                else if(pmode==2){ base=p_raw; }
+                                else { if(base<p_raw){base=p_raw;} }
+                            }
+                            // class ledger update (AFTER conf)
+                            t=t+1;
+                            if(corr==1){c=c+1;}
+                            nec_ledger_put(ld, cls, c, t);
+                        }
+
+                        // ---- oracle overrides (diagnostic) ----
+                        if(oracle==2){
+                            if(corr==1){base=1000000;} else {base=0;}
+                        } else if(oracle==1){
+                            if(depth==1 && id_is_m3(id)==1){base=1000000;}
+                        }
+
+                        // ---- per-item deliberation ceiling ----
+                        // (new items have no previous conf; ceiling does not apply)
+                        if(use_ceil==1 && oracle!=2 && is_new==0){
+                            let pc:i64=au_get64(confs, idx);
+                            if(base>pc){base=pc;}
+                        }
+                        au_put64(confs, idx, base);
+
+                        // ---- personal ledger update (AFTER conf) ----
+                        au_put64(ptp, idx, tp+1);
+                        if(corr==1){au_put64(pcp, idx, cp+1);}
+
+                        // output in thousandths
+                        conf=base/1000;
+                    }
+                }
+                // output: id, fam, depth, release, correct, conf
+                dout_str(&res, id); dout_byte(&res, 9);
+                dout_str(&res, fam); dout_byte(&res, 9);
+                dout_str(&res, depth_s); dout_byte(&res, 9);
+                dout_str(&res, rel_s); dout_byte(&res, 9);
+                dout_str(&res, corr_s); dout_byte(&res, 9);
+                dout_i64(&res, conf); dout_line(&res);
+                if(res.err!=0){ok=0;}
+            }
+        }
+        pos=e+1;
+    }
+
+    let wrc:i64=0;
+    if(ok==1 && res.err==0){wrc=dlb_write_file(out_path, dout_bytes(&res), res.n);}
+    nio_free(ibuf);
+    nio_free(ld);
+    nio_free(slots);
+    nio_free(confs);
+    nio_free(pcp);
+    nio_free(ptp);
+    dout_free(&res);
+    if(ok==0 || wrc<0){return 107;}
+    return 0;
+}
+
+fn main()i32 {
+    // NOTE: argc is 0 per ZNC-2026-09-21-007; read args unconditionally.
+    let a0:[]u8=_zag_arg(1);
+    let a1:[]u8=_zag_arg(2);
+    let a2:[]u8=_zag_arg(3);
+    if(a0.len==0 || a1.len==0 || a2.len==0){
+        _zag_println("usage: nec_q1 <variant> <in.tsv> <out.tsv>");
+        return 64;
+    }
+    let variant:i32=dlb_atoi(a0);
+    return nec_run(a1, a2, variant);
+}
