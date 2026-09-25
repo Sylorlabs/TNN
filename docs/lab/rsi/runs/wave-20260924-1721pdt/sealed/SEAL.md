@@ -47,6 +47,9 @@ all).
 
 ## Seal-open log
 
-(Left blank at seal time. To be filled ONLY at scoring time, with the
-scoring commit hash and the re-verified shas. Retroactive fill is a
-process defect.)
+Seal opened for scoring 2026-09-24 (after implementation commit
+91b7ee160): PROBES.md and KEY.md shas re-verified against the pins above
+at scoring time (both match); no implementation file changed after
+seal-open (implementation sources are sha256-identical to the 1421pdt
+committed sources; binaries built once, before scoring). Filled at scoring
+time in the scoring commit, not retroactively.
