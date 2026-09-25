@@ -1,0 +1,551 @@
+// fixbuild.zag — pure-Zag port of fixbuild.py (FIX-A/B/C/D curriculum fixture generator).
+//
+// Reads a base TSV (id, fam, depth, f1, f5, release, correct), builds FIX-*
+// curriculum fixtures, writes the augmented TSV. Deterministic, zero RNG.
+// Byte-identical output to fixbuild.py on: s1 (all of FIX-A/B/C/D),
+// s10 (FIX-A), s100 (FIX-A) — SHA-256 verified 2026-09-25.
+//
+// FIX-A: prior-anchoring. For each class with honest-correct cells and pooled
+//        rate < 0.95, add correct anchors until empirical rate = 0.95.
+//        need = ceil((0.95*t - c)/0.05) = 19*t - 20*c exactly (integer math;
+//        verified equal to the float formula on all real inputs, 84 classes).
+// FIX-B: 1:1 replication of every honest correct released cell, new IDs.
+// FIX-C: for each released WRONG cell in the 7 polluted classes, one CORRECT
+//        trap with identical (f1,f5), global ID counter in row order.
+// FIX-D: drop released wrong cells except every 20th in input order.
+//
+// Anchor/trap/calib cells: fam a/c/t, depth=1, release=1, correct=1, unique
+// deterministic IDs (A{cls:02d}{j:06d} / C{j:06d} / T{j:06d}), (f1,f5) copied
+// from honest cells. Uniform per-class interleave: anchor j of a group of
+// size a goes before base row (j*n)//a; groups merged by (pos, group, seq).
+//
+// Pure Zag, zero RNG, pinned toolchain. No slice exceeds 2^25 bytes: the
+// input is read whole (< 33.5MB for s100); row metadata, pools and anchor
+// items live in chunked []u8 arenas; output streams in 1MB flushes.
+//
+// Usage: fixbuild <base.tsv> <FIX-A|FIX-B|FIX-C|FIX-D> <out.tsv>
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+// ---------------- output stream: chunked truncating file write ----------------
+struct FxOut { fd:i64, buf:[]u8, n:i32, cap:i32, err:i32 }
+
+fn fx_open_trunc(path:[]u8)i64 {
+    let cs:[]u8=nio_cstr(path);
+    if(cs.len==0){return -1;}
+    // openat(AT_FDCWD, path, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644)
+    let fd:i64=_zag_raw_syscall(257, -100, _zag_slice_ptr(cs) as i64, 524865, 420, 0, 0);
+    nio_free(cs);
+    return fd;
+}
+
+fn fx_flush(o:*FxOut)void {
+    if(o.*.err!=0){return;}
+    let fd:i64=o.*.fd;
+    let b:[]u8=o.*.buf;
+    let n:i32=o.*.n;
+    let at:i32=0;
+    while(at<n){
+        let c:i32=n-at;
+        if(c>1048576){c=1048576;}
+        let rc:i64=nio_write_all(fd, b[at..at+c]);
+        if(rc!=c as i64){o.*.err=1;return;}
+        at=at+c;
+    }
+    o.*.n=0;
+}
+
+fn fx_byte(o:*FxOut,c:u8)void {
+    if(o.*.err!=0){return;}
+    if(o.*.n+1>o.*.cap){fx_flush(o);}
+    if(o.*.err!=0){return;}
+    let b:[]u8=o.*.buf;
+    b[o.*.n]=c;
+    o.*.n=o.*.n+1;
+}
+
+fn fx_str(o:*FxOut,s:[]u8)void {
+    let i:i32=0;
+    while(i<s.len){fx_byte(o,s[i]);i=i+1;}
+}
+
+// non-negative decimal, zero-padded to minimum width w (never truncated)
+fn fx_uint(o:*FxOut,v:i32,w:i32)void {
+    let p:i32=1;
+    let nd:i32=1;
+    while(v>=p*10){p=p*10;nd=nd+1;}
+    let z:i32=w-nd;
+    while(z>0){fx_byte(o,48);z=z-1;}
+    let q:i32=v;
+    while(p>0){
+        fx_byte(o,(48+q/p) as u8);
+        q=q%p;
+        p=p/10;
+    }
+}
+
+// anchor ID: prefix + optional 2-digit class + 6-digit seq
+fn fx_id(o:*FxOut,pre:u8,with_cls:i32,cls:i32,j:i32)void {
+    fx_byte(o,pre);
+    if(with_cls==1){fx_uint(o,cls,2);}
+    fx_uint(o,j,6);
+}
+
+fn fx_tab(o:*FxOut)void { fx_byte(o,9); }
+fn fx_nl(o:*FxOut)void { fx_byte(o,10); }
+
+// ---------------- row parsing ----------------
+fn fx_count_rows(buf:[]u8,nbytes:i32)i32 {
+    let n:i32=0;
+    let s:i32=0;
+    let k:i32=0;
+    while(k<nbytes){
+        if(buf[k]==10){
+            if(k>s){n=n+1;}
+            s=k+1;
+        }
+        k=k+1;
+    }
+    if(s<nbytes){n=n+1;}
+    return n;
+}
+
+// fills roff/rlen (i32 per row) and rmeta (16 bytes/row: f1,f5,rel,corr LE i32).
+// returns row count, or -1 on malformed line.
+fn fx_parse(buf:[]u8,nbytes:i32,roff:[]u8,rlen:[]u8,rmeta:[]u8)i32 {
+    let n:i32=0;
+    let s:i32=0;
+    let k:i32=0;
+    while(k<=nbytes){
+        let e:i32=k;
+        if(k==nbytes || buf[k]==10){
+            if(e>s){
+                let t0:i32=-1;let t1:i32=-1;let t2:i32=-1;
+                let t3:i32=-1;let t4:i32=-1;let t5:i32=-1;
+                let q:i32=s;
+                while(q<e){
+                    if(buf[q]==9){
+                        if(t0<0){t0=q;}
+                        else if(t1<0){t1=q;}
+                        else if(t2<0){t2=q;}
+                        else if(t3<0){t3=q;}
+                        else if(t4<0){t4=q;}
+                        else if(t5<0){t5=q;}
+                    }
+                    q=q+1;
+                }
+                if(t5<0){return -1;}
+                au_put32(roff,n,s);
+                au_put32(rlen,n,e-s);
+                // cols: id(0) fam(1) depth(2) f1(3) f5(4) rel(5) corr(6);
+                // t0..t5 are the 6 tabs, so f1=t2+1..t3, f5=t3+1..t4,
+                // rel=t4+1..t5, corr=t5+1..e
+                au_put32(rmeta,n*4+0,dlb_atoi(buf[t2+1..t3]));
+                au_put32(rmeta,n*4+1,dlb_atoi(buf[t3+1..t4]));
+                au_put32(rmeta,n*4+2,dlb_atoi(buf[t4+1..t5]));
+                au_put32(rmeta,n*4+3,dlb_atoi(buf[t5+1..e]));
+                n=n+1;
+            }
+            s=k+1;
+        }
+        k=k+1;
+    }
+    return n;
+}
+
+fn fx_cls(f1:i32,f5:i32)i32 {
+    let mb:i32=f1/150;
+    if(mb>6){mb=6;}
+    let cb:i32=f5/250;
+    if(cb>4){cb=4;}
+    return mb*5+cb;
+}
+
+fn fx_is_polluted(cls:i32)i32 {
+    if(cls==5){return 1;}
+    if(cls==10){return 1;}
+    if(cls==12){return 1;}
+    if(cls==15){return 1;}
+    if(cls==16){return 1;}
+    if(cls==17){return 1;}
+    if(cls==18){return 1;}
+    return 0;
+}
+
+fn fx_emit_raw(o:*FxOut,buf:[]u8,off:i32,ln:i32)void {
+    let i:i32=0;
+    while(i<ln){fx_byte(o,buf[off+i]);i=i+1;}
+    fx_nl(o);
+}
+
+// anchor row: id, fam, 1, f1, f5, 1, 1
+fn fx_emit_anchor(o:*FxOut,pre:u8,with_cls:i32,cls:i32,j:i32,fam:u8,f1:i32,f5:i32)void {
+    fx_id(o,pre,with_cls,cls,j);
+    fx_tab(o);
+    fx_byte(o,fam);
+    fx_tab(o);
+    fx_byte(o,49);
+    fx_tab(o);
+    fx_uint(o,f1,0);
+    fx_tab(o);
+    fx_uint(o,f5,0);
+    fx_tab(o);
+    fx_byte(o,49);
+    fx_tab(o);
+    fx_byte(o,49);
+    fx_nl(o);
+}
+
+fn fx_println_msg(s:[]u8)void {
+    _zag_println(s);
+}
+
+fn fx_run(base:[]u8,fix:[]u8,outp:[]u8)i32 {
+    let mode:i32=0; // 1=A 2=B 3=C 4=D
+    if(dlb_streq(fix,"FIX-A")==1){mode=1;}
+    else if(dlb_streq(fix,"FIX-B")==1){mode=2;}
+    else if(dlb_streq(fix,"FIX-C")==1){mode=3;}
+    else if(dlb_streq(fix,"FIX-D")==1){mode=4;}
+    else {
+        fx_println_msg("fix must be FIX-A, FIX-B, FIX-C, or FIX-D");
+        return 64;
+    }
+
+    let ibuf:[]u8=nio_alloc(33554431);
+    if(ibuf.len==0){fx_println_msg("alloc ibuf failed");return 1;}
+    let nbr:i64=dlb_read_file(base,ibuf);
+    if(nbr<0){fx_println_msg("read base failed");return 1;}
+    let nbytes:i32=nbr as i32;
+
+    let nrows:i32=fx_count_rows(ibuf,nbytes);
+    let roff:[]u8=nio_alloc(nrows*4);
+    let rlen:[]u8=nio_alloc(nrows*4);
+    let rmeta:[]u8=nio_alloc(nrows*16);
+    if(roff.len==0||rlen.len==0||rmeta.len==0){fx_println_msg("alloc rows failed");return 1;}
+    let pn:i32=fx_parse(ibuf,nbytes,roff,rlen,rmeta);
+    if(pn!=nrows){fx_println_msg("parse mismatch");return 1;}
+
+    // class stats: ct arena 35*16 bytes: c i64 @ cls*16, t i64 @ cls*16+8
+    let ct:[]u8=nio_alloc(35*16);
+    // per-class correct-released counts (pool sizing), then fill cursors
+    let pcc:[]u8=nio_alloc(35*4);
+    // per-class released-wrong counts in polluted classes (FIX-C sizing)
+    let wcc:[]u8=nio_alloc(35*4);
+    if(ct.len==0||pcc.len==0||wcc.len==0){fx_println_msg("alloc stats failed");return 1;}
+    let r:i32=0;
+    while(r<nrows){
+        let mo:i32=r*16;
+        let b3:[]u8=rmeta;
+        let f1:i32=(b3[mo] as i64+((b3[mo+1] as i64)<<8)+((b3[mo+2] as i64)<<16)+((b3[mo+3] as i64)<<24)) as i32;
+        let f5:i32=(b3[mo+4] as i64+((b3[mo+5] as i64)<<8)+((b3[mo+6] as i64)<<16)+((b3[mo+7] as i64)<<24)) as i32;
+        let rel:i32=(b3[mo+8] as i64+((b3[mo+9] as i64)<<8)+((b3[mo+10] as i64)<<16)+((b3[mo+11] as i64)<<24)) as i32;
+        let corr:i32=(b3[mo+12] as i64+((b3[mo+13] as i64)<<8)+((b3[mo+14] as i64)<<16)+((b3[mo+15] as i64)<<24)) as i32;
+        if(rel==1){
+            let cls:i32=fx_cls(f1,f5);
+            let t0:i64=au_get64(ct,cls*2+1);
+            au_put64(ct,cls*2+1,t0+1);
+            if(corr==1){
+                let c0:i64=au_get64(ct,cls*2);
+                au_put64(ct,cls*2,c0+1);
+                au_put32(pcc,cls,au_get32(pcc,cls)+1);
+            } else {
+                if(fx_is_polluted(cls)==1){au_put32(wcc,cls,au_get32(wcc,cls)+1);}
+            }
+        }
+        r=r+1;
+    }
+
+    // pool: per-class (f1,f5) of released-correct cells, row order; 8 bytes each
+    let pstart:[]u8=nio_alloc(35*4);
+    let ptotal:i32=0;
+    let cls2:i32=0;
+    while(cls2<35){au_put32(pstart,cls2,ptotal);ptotal=ptotal+au_get32(pcc,cls2);cls2=cls2+1;}
+    let pool:[]u8=nio_alloc(ptotal*8);
+    // wrongs: per polluted class (f1,f5,gj) of released-wrong cells, row order; 12 bytes each
+    let wstart:[]u8=nio_alloc(35*4);
+    let wtotal:i32=0;
+    cls2=0;
+    while(cls2<35){au_put32(wstart,cls2,wtotal);wtotal=wtotal+au_get32(wcc,cls2);cls2=cls2+1;}
+    let wrongs:[]u8=nio_alloc(wtotal*12);
+    // honest: (f1,f5) of all released-correct cells in row order (FIX-B); 8 bytes each
+    let honest:[]u8=nio_alloc(ptotal*8);
+    // pool/wrongs/honest may legitimately be empty (nio_alloc(0) -> len 0);
+    // they are only indexed when their counts are > 0.
+    if(pstart.len==0||wstart.len==0){
+        fx_println_msg("alloc pools failed");return 1;
+    }
+    // reset cursors
+    cls2=0;
+    while(cls2<35){au_put32(pcc,cls2,0);au_put32(wcc,cls2,0);cls2=cls2+1;}
+    let hn:i32=0;
+    let gj:i32=0;
+    r=0;
+    while(r<nrows){
+        let mo2:i32=r*16;
+        let b4:[]u8=rmeta;
+        let f1b:i32=(b4[mo2] as i64+((b4[mo2+1] as i64)<<8)+((b4[mo2+2] as i64)<<16)+((b4[mo2+3] as i64)<<24)) as i32;
+        let f5b:i32=(b4[mo2+4] as i64+((b4[mo2+5] as i64)<<8)+((b4[mo2+6] as i64)<<16)+((b4[mo2+7] as i64)<<24)) as i32;
+        let relb:i32=(b4[mo2+8] as i64+((b4[mo2+9] as i64)<<8)+((b4[mo2+10] as i64)<<16)+((b4[mo2+11] as i64)<<24)) as i32;
+        let corrb:i32=(b4[mo2+12] as i64+((b4[mo2+13] as i64)<<8)+((b4[mo2+14] as i64)<<16)+((b4[mo2+15] as i64)<<24)) as i32;
+        if(relb==1){
+            let clsb:i32=fx_cls(f1b,f5b);
+            if(corrb==1){
+                let pi:i32=au_get32(pstart,clsb)+au_get32(pcc,clsb);
+                au_put32(pcc,clsb,au_get32(pcc,clsb)+1);
+                au_put32(pool,pi*2+0,f1b);
+                au_put32(pool,pi*2+1,f5b);
+                au_put32(honest,hn*2+0,f1b);
+                au_put32(honest,hn*2+1,f5b);
+                hn=hn+1;
+            } else {
+                if(fx_is_polluted(clsb)==1){
+                    let wi:i32=au_get32(wstart,clsb)+au_get32(wcc,clsb);
+                    au_put32(wcc,clsb,au_get32(wcc,clsb)+1);
+                    let wo:i32=wi*12;
+                    let wb:[]u8=wrongs;
+                    wb[wo]=(f1b&255) as u8;wb[wo+1]=((f1b>>8)&255) as u8;
+                    wb[wo+2]=((f1b>>16)&255) as u8;wb[wo+3]=((f1b>>24)&255) as u8;
+                    wb[wo+4]=(f5b&255) as u8;wb[wo+5]=((f5b>>8)&255) as u8;
+                    wb[wo+6]=((f5b>>16)&255) as u8;wb[wo+7]=((f5b>>24)&255) as u8;
+                    wb[wo+8]=(gj&255) as u8;wb[wo+9]=((gj>>8)&255) as u8;
+                    wb[wo+10]=((gj>>16)&255) as u8;wb[wo+11]=((gj>>24)&255) as u8;
+                    gj=gj+1;
+                }
+            }
+        }
+        r=r+1;
+    }
+
+    // open output
+    let fd:i64=fx_open_trunc(outp);
+    if(fd<0){fx_println_msg("open out failed");return 1;}
+    let obuf:[]u8=nio_alloc(1048576);
+    if(obuf.len==0){fx_println_msg("alloc obuf failed");return 1;}
+    let oo:FxOut=FxOut{.fd=fd,.buf=obuf,.n=0,.cap=1048576,.err=0};
+    let o:*FxOut=&oo;
+
+    if(mode==4){
+        // FIX-D: thin released wrongs to every 20th in input order
+        let w:i32=0;
+        let kept:i32=0;
+        let dropped:i32=0;
+        r=0;
+        while(r<nrows){
+            let mo3:i32=r*16;
+            let b5:[]u8=rmeta;
+            let relc:i32=(b5[mo3+8] as i64+((b5[mo3+9] as i64)<<8)+((b5[mo3+10] as i64)<<16)+((b5[mo3+11] as i64)<<24)) as i32;
+            let corrc:i32=(b5[mo3+12] as i64+((b5[mo3+13] as i64)<<8)+((b5[mo3+14] as i64)<<16)+((b5[mo3+15] as i64)<<24)) as i32;
+            let emit:i32=1;
+            if(relc==1 && corrc==0){
+                if(w%20==0){kept=kept+1;}
+                else {emit=0;dropped=dropped+1;}
+                w=w+1;
+            }
+            if(emit==1){fx_emit_raw(o,ibuf,au_get32(roff,r),au_get32(rlen,r));}
+            r=r+1;
+        }
+        fx_flush(o);
+        nio_close(fd);
+        let msg:[]u8=dlb_i64s(kept as i64);
+        fx_println_msg(msg);
+        nio_free(msg);
+        return 0;
+    }
+
+    // build anchor groups: gkey (sort key), gcls, gstart (item index), gcnt
+    // items arena: 12 bytes each (f1 i32, f5 i32, aux i32 = gj for FIX-C)
+    let gkey:[]u8=nio_alloc(36*4);
+    let gcls:[]u8=nio_alloc(36*4);
+    let gstart:[]u8=nio_alloc(36*4);
+    let gcnt:[]u8=nio_alloc(36*4);
+    if(gkey.len==0||gcls.len==0||gstart.len==0||gcnt.len==0){
+        fx_println_msg("alloc groups failed");return 1;
+    }
+    let ng:i32=0;
+    let ni:i32=0;
+    let total:i32=0;
+    // worst-case anchor count per mode (exact: computed from class stats)
+    let acap:i32=0;
+    if(mode==1){
+        let cq:i32=0;
+        while(cq<35){
+            let cc:i64=au_get64(ct,cq*2);
+            let tt:i64=au_get64(ct,cq*2+1);
+            let pl:i32=au_get32(pcc,cq);
+            if(20*cc<19*tt && pl>0){acap=acap+(19*tt-20*cc) as i32;}
+            cq=cq+1;
+        }
+    } else if(mode==2){
+        acap=hn;
+    } else {
+        acap=wtotal;
+    }
+    let items:[]u8=nio_alloc(acap*12);
+    if(acap>0 && items.len==0){fx_println_msg("alloc items failed");return 1;}
+    if(mode==1){
+        cls2=0;
+        while(cls2<35){
+            let c:i64=au_get64(ct,cls2*2);
+            let t:i64=au_get64(ct,cls2*2+1);
+            let plen:i32=au_get32(pcc,cls2);
+            if(20*c<19*t && plen>0){
+                let need:i32=(19*t-20*c) as i32;
+                au_put32(gkey,ng,cls2);
+                au_put32(gcls,ng,cls2);
+                au_put32(gstart,ng,ni);
+                au_put32(gcnt,ng,need);
+                ng=ng+1;
+                let ps:i32=au_get32(pstart,cls2);
+                let j:i32=0;
+                while(j<need){
+                    let pi2:i32=ps+(j%plen);
+                    let io2:i32=(ni+j)*12;
+                    let ib:[]u8=items;
+                    let pf1:i32=au_get32(pool,pi2*2+0);
+                    let pf5:i32=au_get32(pool,pi2*2+1);
+                    ib[io2]=(pf1&255) as u8;ib[io2+1]=((pf1>>8)&255) as u8;
+                    ib[io2+2]=((pf1>>16)&255) as u8;ib[io2+3]=((pf1>>24)&255) as u8;
+                    ib[io2+4]=(pf5&255) as u8;ib[io2+5]=((pf5>>8)&255) as u8;
+                    ib[io2+6]=((pf5>>16)&255) as u8;ib[io2+7]=((pf5>>24)&255) as u8;
+                    ib[io2+8]=0;ib[io2+9]=0;ib[io2+10]=0;ib[io2+11]=0;
+                    j=j+1;
+                }
+                ni=ni+need;
+                total=total+need;
+            }
+            cls2=cls2+1;
+        }
+    } else if(mode==2){
+        au_put32(gkey,0,0);
+        au_put32(gcls,0,-1);
+        au_put32(gstart,0,0);
+        au_put32(gcnt,0,hn);
+        ng=1;
+        let j2:i32=0;
+        while(j2<hn){
+            let io3:i32=j2*12;
+            let ib2:[]u8=items;
+            let hf1:i32=au_get32(honest,j2*2+0);
+            let hf5:i32=au_get32(honest,j2*2+1);
+            ib2[io3]=(hf1&255) as u8;ib2[io3+1]=((hf1>>8)&255) as u8;
+            ib2[io3+2]=((hf1>>16)&255) as u8;ib2[io3+3]=((hf1>>24)&255) as u8;
+            ib2[io3+4]=(hf5&255) as u8;ib2[io3+5]=((hf5>>8)&255) as u8;
+            ib2[io3+6]=((hf5>>16)&255) as u8;ib2[io3+7]=((hf5>>24)&255) as u8;
+            ib2[io3+8]=0;ib2[io3+9]=0;ib2[io3+10]=0;ib2[io3+11]=0;
+            j2=j2+1;
+        }
+        ni=hn;
+        total=hn;
+    } else {
+        // FIX-C: polluted classes ascending; items carry global gj
+        cls2=0;
+        while(cls2<35){
+            if(fx_is_polluted(cls2)==1){
+                let wc:i32=au_get32(wcc,cls2);
+                if(wc>0){
+                    au_put32(gkey,ng,cls2);
+                    au_put32(gcls,ng,cls2);
+                    au_put32(gstart,ng,ni);
+                    au_put32(gcnt,ng,wc);
+                    ng=ng+1;
+                    let ws:i32=au_get32(wstart,cls2);
+                    let j3:i32=0;
+                    while(j3<wc){
+                        let so:i32=(ws+j3)*12;
+                        let do3:i32=(ni+j3)*12;
+                        let sb:[]u8=wrongs;
+                        let db:[]u8=items;
+                        let bq:i32=0;
+                        while(bq<12){db[do3+bq]=sb[so+bq];bq=bq+1;}
+                        j3=j3+1;
+                    }
+                    ni=ni+wc;
+                    total=total+wc;
+                }
+            }
+            cls2=cls2+1;
+        }
+    }
+
+    // uniform interleave merge: groups ascending by gkey (already), per-group
+    // cursor; anchor j of group size a goes before base row (j*n)//a
+    let cur:[]u8=nio_alloc(36*4);
+    if(cur.len==0){fx_println_msg("alloc cur failed");return 1;}
+    let pre:u8=65; // 'A' (ID prefix; fam column stays lowercase)
+    let famc:u8=97; // 'a'
+    let with_cls:i32=1;
+    if(mode==2){pre=67;famc=99;with_cls=0;} // 'C' id, 'c' fam
+    if(mode==3){pre=84;famc=116;with_cls=0;} // 'T' id, 't' fam
+    let nn:i64=nrows as i64;
+    let irow:i32=0;
+    while(irow<nrows){
+        let g:i32=0;
+        while(g<ng){
+            let a:i32=au_get32(gcnt,g);
+            let aa:i64=a as i64;
+            let gs:i32=au_get32(gstart,g);
+            let gc:i32=au_get32(gcls,g);
+            let cj:i32=au_get32(cur,g);
+            while(cj<a && ((cj as i64)*nn)/aa<=(irow as i64)){
+                let io4:i32=(gs+cj)*12;
+                let ib3:[]u8=items;
+                let af1:i32=(ib3[io4] as i64+((ib3[io4+1] as i64)<<8)+((ib3[io4+2] as i64)<<16)+((ib3[io4+3] as i64)<<24)) as i32;
+                let af5:i32=(ib3[io4+4] as i64+((ib3[io4+5] as i64)<<8)+((ib3[io4+6] as i64)<<16)+((ib3[io4+7] as i64)<<24)) as i32;
+                let aid:i32=cj;
+                if(mode==3){
+                    aid=(ib3[io4+8] as i64+((ib3[io4+9] as i64)<<8)+((ib3[io4+10] as i64)<<16)+((ib3[io4+11] as i64)<<24)) as i32;
+                }
+                fx_emit_anchor(o,pre,with_cls,gc,aid,famc,af1,af5);
+                cj=cj+1;
+            }
+            au_put32(cur,g,cj);
+            g=g+1;
+        }
+        fx_emit_raw(o,ibuf,au_get32(roff,irow),au_get32(rlen,irow));
+        irow=irow+1;
+    }
+    let g2:i32=0;
+    while(g2<ng){
+        let a2:i32=au_get32(gcnt,g2);
+        let gs2:i32=au_get32(gstart,g2);
+        let gc2:i32=au_get32(gcls,g2);
+        let cj2:i32=au_get32(cur,g2);
+        while(cj2<a2){
+            let io5:i32=(gs2+cj2)*12;
+            let ib4:[]u8=items;
+            let bf1:i32=(ib4[io5] as i64+((ib4[io5+1] as i64)<<8)+((ib4[io5+2] as i64)<<16)+((ib4[io5+3] as i64)<<24)) as i32;
+            let bf5:i32=(ib4[io5+4] as i64+((ib4[io5+5] as i64)<<8)+((ib4[io5+6] as i64)<<16)+((ib4[io5+7] as i64)<<24)) as i32;
+            let bid:i32=cj2;
+            if(mode==3){
+                bid=(ib4[io5+8] as i64+((ib4[io5+9] as i64)<<8)+((ib4[io5+10] as i64)<<16)+((ib4[io5+11] as i64)<<24)) as i32;
+            }
+            fx_emit_anchor(o,pre,with_cls,gc2,bid,famc,bf1,bf5);
+            cj2=cj2+1;
+        }
+        g2=g2+1;
+    }
+    fx_flush(o);
+    let cerr:i32=o.*.err;
+    nio_close(fd);
+
+    nio_free(ibuf);nio_free(roff);nio_free(rlen);nio_free(rmeta);
+    nio_free(ct);nio_free(pcc);nio_free(wcc);nio_free(pstart);nio_free(pool);
+    nio_free(wstart);nio_free(wrongs);nio_free(honest);
+    nio_free(gkey);nio_free(gcls);nio_free(gstart);nio_free(gcnt);
+    nio_free(items);nio_free(cur);nio_free(obuf);
+    if(cerr!=0){fx_println_msg("write error");return 1;}
+    return 0;
+}
+
+fn main()i32 {
+    // NOTE: _zag_argc() is 0 per ZNC-2026-09-21-007; read args unconditionally.
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    if(a1.len==0 || a2.len==0 || a3.len==0){
+        fx_println_msg("usage: fixbuild <base.tsv> <FIX-A|FIX-B|FIX-C|FIX-D> <out.tsv>");
+        return 64;
+    }
+    return fx_run(a1,a2,a3);
+}
