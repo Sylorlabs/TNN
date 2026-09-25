@@ -1,7 +1,9 @@
 # VERDICT_R2 — Remove arbitrary exhaustion caps
 
-**Status:** PASS — all frozen kill bars met. Staged 2026-09-25; NOT YET
-COMMITTED (an earlier draft of this file wrongly said "Committed 2026-09-25").
+**Status:** PASS — all frozen kill bars met. Committed 2026-09-25 as
+`bb80a0f888d1dfde2e2baf552f21c2b4eff0d5cb` on `sylorlabs/TNN`,
+branch `tnn-native-lab` (an earlier draft of this file wrongly claimed a
+commit before it happened; this status line records the real one).
 
 ## Frozen requirement (PREREG_R2.md)
 
