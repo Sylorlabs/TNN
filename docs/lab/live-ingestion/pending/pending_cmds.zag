@@ -1,0 +1,1026 @@
+// pending_cmds.zag — command layer for the live-ingestion PENDING track.
+// Companions: pending_track.zag (kpp_ library). Together with the fork base
+// instrument_kb.zag these form instrument_pending.zag.
+//
+// Commands:
+//   cmd_kbpend(src, sd)                    kbpend <claims.txt> <state>
+//   cmd_kbhold(onoff, sd)                  kbhold <on|off> <state>
+//   cmd_kbpendlist(sd)                     kbpendlist <state>
+//   cmd_kbcorroborate(sd, pseq, pagefile)  kbcorroborate <seq> <page> <state>
+//   cmd_kbtest(sd, pseq, result, proto)    kbtest <seq> PASS|FAIL <proto> <state>
+//   cmd_kbrefute(sd, pseq, evpage)         kbrefute <seq> <page> <state>
+//   kpp_hold_from_verdict(...)             hold intercept phase B (called
+//                                          exactly once from cmd_verdict
+//                                          when verdict_core returns 7)
+//
+// Frozen spec: PREREG_PENDING.md §§3-7. All stdout shapes follow the prereg.
+// Exit codes: 0 ok; 2 IO/usage error; 3 PARSE-gate all-or-nothing refusal.
+
+// ---- shared: DROP stoplist ----
+// Replicates the frozen verdict_core DROP pipeline: load_installed ->
+// dget(dt,dn,"DROP") -> lower_copy -> tokenize(minl=1, cap 128).
+// Caller provides: dt (>=64KB), dlow (>=4KB), dtb (128*8 bytes).
+fn kpc_load_drop(sd:[]u8,dt:[]u8,dp:*i32,dn:*i32,dlow:[]u8,dlowlen:*i32,dtb:[]u8,dtn:*i32)void {
+    load_installed(sd,dt,dp,dn);
+    let dv:[]u8=dget(dt,dn[0],"DROP");
+    let lc:[]u8=lower_copy(dv);
+    let n:i32=lc.len;
+    if(n>dlow.len){n=dlow.len;}
+    let c:i32=0;
+    while(c<n){dlow[c]=lc[c]; c=c+1;}
+    nio_free(lc);
+    dlowlen[0]=n;
+    dtn[0]=0;
+    tokenize(dlow[0..n],dtb,128,1,dtn);
+    return;
+}
+
+// ---- shared: PARSE gate (frozen + no-pipe) ----
+// t must be trimmed and non-empty. tt is a caller-reused 512*8 token table.
+// Returns 1 if the line passes, 0 if it fails.
+fn kpc_parse_ok(t:[]u8,tt:[]u8)i32 {
+    if(t.len>600){return 0;}
+    if(kpp_has_byte(t,124)==1){return 0;}
+    let low:[]u8=lower_copy(t);
+    let tn:i32=0;
+    tokenize(low,tt,512,2,&tn);
+    nio_free(low);
+    if(tn<4){return 0;}
+    return 1;
+}
+
+// ---- shared: KB token tables for kpp_bind_tables ----
+// Streams knowledge.txt once; for each KB|<seq>|<claim> line (cap 64,
+// matching the frozen kb_load visibility cap) builds content+digit token
+// tables. Caller arenas: kab (>=64*4096 bytes), kat (64*512), kan (64*4),
+// kdb (>=64*2048), kdt (64*256), kdn (64*4), ksq (64*4, actual KB seqs).
+// Returns kbn (may be 0 if no knowledge.txt), or -1 on IO error.
+fn kpc_kb_tables(sd:[]u8,dlow:[]u8,dlowlen:i32,dtb:[]u8,dtn:i32,
+    kab:[]u8,kapos:*i32,kat:[]u8,kan:[]u8,
+    kdb:[]u8,kdpos:*i32,kdt:[]u8,kdn:[]u8,ksq:[]u8)i32 {
+    kapos[0]=0;
+    kdpos[0]=0;
+    let kbn:i32=0;
+    let fd:i64=kpp_open_read(sd,"knowledge.txt");
+    if(fd<0){return 0;}
+    let chunk:[]u8=nio_alloc(16777216);
+    let carry:[]u8=nio_alloc(65536);
+    let line:[]u8=nio_alloc(65536);
+    let cn:i32=0;
+    let eof:i32=0;
+    let rc:i32=1;
+    while(eof==0 && rc==1 && kbn<64){
+        let nrd:i64=kpp_read_chunk(fd,chunk,16777216);
+        let nn:i32=0;
+        if(nrd<0){rc=0; break;}
+        if(nrd==0){eof=1;}else{nn=nrd as i32;}
+        let i:i32=0;
+        let ls:i32=0;
+        while(i<nn && rc==1 && kbn<64){
+            if(chunk[i]==10){
+                let llen:i32=cn+(i-ls);
+                if(llen<=line.len){
+                    let c:i32=0;
+                    while(c<cn){line[c]=carry[c]; c=c+1;}
+                    c=0;
+                    while(c<i-ls){line[cn+c]=chunk[ls+c]; c=c+1;}
+                    if(kpc_kb_line(line,llen,dlow,dlowlen,dtb,dtn,
+                        kab,kapos,kat,kan,kdb,kdpos,kdt,kdn,ksq,kbn)==1){
+                        kbn=kbn+1;
+                    }
+                }else{rc=0; break;}
+                cn=0;
+                ls=i+1;
+            }
+            i=i+1;
+        }
+        if(eof==1 && rc==1 && kbn<64){
+            let tllen:i32=cn+(nn-ls);
+            if(tllen>0 && tllen<=line.len){
+                let c2:i32=0;
+                while(c2<cn){line[c2]=carry[c2]; c2=c2+1;}
+                c2=0;
+                while(c2<nn-ls){line[cn+c2]=chunk[ls+c2]; c2=c2+1;}
+                if(kpc_kb_line(line,tllen,dlow,dlowlen,dtb,dtn,
+                    kab,kapos,kat,kan,kdb,kdpos,kdt,kdn,ksq,kbn)==1){
+                    kbn=kbn+1;
+                }
+            }else{if(tllen>line.len){rc=0;}}
+        }
+        if(eof==0 && rc==1){
+            let rem:i32=nn-ls;
+            if(cn+rem>carry.len){rc=0;}
+            else{
+                let c3:i32=0;
+                while(c3<rem){carry[cn+c3]=chunk[ls+c3]; c3=c3+1;}
+                cn=cn+rem;
+            }
+        }
+    }
+    nio_close(fd);
+    nio_free(chunk);
+    nio_free(carry);
+    nio_free(line);
+    if(rc==0){return -1;}
+    return kbn;
+}
+
+// Process one knowledge.txt line for kpc_kb_tables. Returns 1 if a KB claim
+// was tabled (kbn is the 0-based index to fill), 0 if the line is not a
+// KB| line.
+fn kpc_kb_line(line:[]u8,llen:i32,dlow:[]u8,dlowlen:i32,dtb:[]u8,dtn:i32,
+    kab:[]u8,kapos:*i32,kat:[]u8,kan:[]u8,
+    kdb:[]u8,kdpos:*i32,kdt:[]u8,kdn:[]u8,ksq:[]u8,kbn:i32)i32 {
+    if(llen<4){return 0;}
+    if(line[0]!=75 || line[1]!=66 || line[2]!=124){return 0;}
+    let p1:i32=3;
+    while(p1<llen && line[p1]!=124){p1=p1+1;}
+    if(p1>=llen){return 0;}
+    let sq:i32=atoi(line[3..p1]);
+    if(sq<=0){return 0;}
+    let cs:i32=p1+1;
+    let cl:i32=llen-cs;
+    if(cl<=0){return 0;}
+    let claim:[]u8=line[cs..cs+cl];
+    let kn:i32=0;
+    content_toks(claim,dlow[0..dlowlen],dtb,dtn,kab,kapos,
+        kat[kbn*512..kbn*512+512],64,&kn);
+    p32(kan,kbn*4,kn);
+    let kdn1:i32=0;
+    digit_toks(kab,kat[kbn*512..kbn*512+512],kn,kdb,kdpos,
+        kdt[kbn*256..kbn*256+256],&kdn1);
+    p32(kdn,kbn*4,kdn1);
+    p32(ksq,kbn*4,sq);
+    return 1;
+}
+
+// ---- kpc_max_seq_ever: max pending seq ever assigned ----
+// Scans pending.txt (active, mode 7) and resolutions.txt (resolved, mode 2)
+// and returns the maximum seq. New claims use max+1, so seqs are never
+// reused (frozen §6). Returns -1 on IO error.
+fn kpc_max_seq_ever(sd:[]u8)i32 {
+    let e1:[]u8=""; let e2:[]u8="";
+    let c1:i32=0; let m1:i32=0; let u1:i64=0;
+    if(kpp_stream_lines(sd,"pending.txt",7,e1,e2,&c1,&m1,&u1,0,0)==0){
+        return -1;
+    }
+    let r1:i32=0; let m2:i32=0; let u2:i64=0;
+    if(kpp_stream_lines(sd,"resolutions.txt",2,e1,e2,&r1,&m2,&u2,0,0)==0){
+        return -1;
+    }
+    if(m2>m1){return m2;}
+    return m1;
+}
+
+// ---- cmd_kbpend: deliberate entry route (frozen §4a) ----
+// kbpend <claims.txt> <state>. PARSE gate all-or-nothing (exit 3); per-line
+// DUPLICATE-KNOWN / OVER-BUDGET refuses (exit 0); accepted claims spilled
+// then committed with oldest-first shed (frozen §7).
+fn cmd_kbpend(src:[]u8,sd:[]u8)i32 {
+    let ok:i32=0;
+    let buf:[]u8=read_path(src,&ok);
+    if(ok==0){_zag_println("PENDING|ERROR|read-fail"); return 2;}
+    // Pass 1: PARSE gate, all-or-nothing.
+    let n:i32=0;
+    let pos:i32=0; let ls:i32=0; let ll:i32=0;
+    let tt:[]u8=nio_alloc(512*8);
+    while(next_line(buf,&pos,&ls,&ll)==1){
+        let ln:i32=ll;
+        if(ln>0 && buf[ls+ln-1]==13){ln=ln-1;}
+        let t:[]u8=trim(buf[ls..ls+ln]);
+        if(t.len==0){continue;}
+        n=n+1;
+        if(kpc_parse_ok(t,tt)==0){
+            _zag_print("PENDING|REJECT|line ");
+            _zag_print(i64s(n as i64));
+            _zag_println("|PARSE-GATE");
+            nio_free(tt);
+            nio_free(buf);
+            return 3;
+        }
+    }
+    nio_free(tt);
+    if(n==0){_zag_println("PENDING|ERROR|empty"); nio_free(buf); return 3;}
+    // Budget (lazy init; writes pending_init.log on first call).
+    let budget:i64=kpp_budget(sd);
+    if(budget<=0){
+        _zag_println("PENDING|ERROR|budget-init-fail");
+        nio_free(buf);
+        return 2;
+    }
+    // Scan existing pending.txt: ecount, emaxseq, eused, elens.
+    let maxe:i32=((budget/24) as i32)+1024;
+    let p1:[]u8=nio_alloc(maxe*4);
+    let p2:[]u8=nio_alloc(maxe*4);
+    let ecount:i32=0; let emaxseq:i32=0; let eused:i64=0;
+    let e1:[]u8=""; let e2:[]u8="";
+    if(kpp_stream_lines(sd,"pending.txt",1,p1,p2,&ecount,&emaxseq,&eused,maxe,0)==0){
+        _zag_println("PENDING|ERROR|pending-scan-fail");
+        nio_free(p1); nio_free(p2); nio_free(buf);
+        return 2;
+    }
+    // Global max seq (never reuse seqs, frozen §6).
+    let gmax:i32=kpc_max_seq_ever(sd);
+    if(gmax<0){
+        _zag_println("PENDING|ERROR|seq-scan-fail");
+        nio_free(p1); nio_free(p2); nio_free(buf);
+        return 2;
+    }
+    // DROP stoplist + KB tables (frozen §2).
+    let dt:[]u8=nio_alloc(65536);
+    let dp:i32=0; let dn:i32=0;
+    let dlow:[]u8=nio_alloc(4096);
+    let dlowlen:i32=0;
+    let dtb:[]u8=nio_alloc(128*8);
+    let dtn:i32=0;
+    kpc_load_drop(sd,dt,&dp,&dn,dlow,&dlowlen,dtb,&dtn);
+    let kab:[]u8=nio_alloc(64*4096);
+    let kapos:i32=0;
+    let kat:[]u8=nio_alloc(64*512);
+    let kan:[]u8=nio_alloc(64*4);
+    let kdb:[]u8=nio_alloc(64*2048);
+    let kdpos:i32=0;
+    let kdt:[]u8=nio_alloc(64*256);
+    let kdn:[]u8=nio_alloc(64*4);
+    let ksq:[]u8=nio_alloc(64*4);
+    let kbn:i32=kpc_kb_tables(sd,dlow,dlowlen,dtb,dtn,
+        kab,&kapos,kat,kan,kdb,&kdpos,kdt,kdn,ksq);
+    if(kbn<0){
+        _zag_println("PENDING|ERROR|kb-scan-fail");
+        nio_free(p1); nio_free(p2); nio_free(buf);
+        nio_free(dt); nio_free(dlow); nio_free(dtb);
+        nio_free(kab); nio_free(kat); nio_free(kan);
+        nio_free(kdb); nio_free(kdt); nio_free(kdn); nio_free(ksq);
+        return 2;
+    }
+    // Candidate-side reused arenas.
+    let sab:[]u8=nio_alloc(65536);
+    let st:[]u8=nio_alloc(64*8);
+    let sdb:[]u8=nio_alloc(16384);
+    let sdt:[]u8=nio_alloc(32*8);
+    // New-line lengths (for shed computation).
+    let newlens:[]u8=nio_alloc(n*4);
+    // Spill file (fresh).
+    let sroot:i64=0;
+    let fdw:i64=kpp_write_open(sd,"pending_spill.tmp",&sroot);
+    if(fdw<0){
+        _zag_println("PENDING|ERROR|spill-open-fail");
+        nio_free(p1); nio_free(p2); nio_free(buf);
+        nio_free(dt); nio_free(dlow); nio_free(dtb);
+        nio_free(kab); nio_free(kat); nio_free(kan);
+        nio_free(kdb); nio_free(kdt); nio_free(kdn); nio_free(ksq);
+        nio_free(sab); nio_free(st); nio_free(sdb); nio_free(sdt);
+        nio_free(newlens);
+        return 2;
+    }
+    // Pass 2: bind-check, format, stream to spill.
+    let nacc:i32=0;
+    let newbytes:i64=0;
+    let n2:i32=0;
+    let wrc:i32=1;
+    pos=0;
+    let lb:[]u8=nio_alloc(65536);
+    while(next_line(buf,&pos,&ls,&ll)==1 && wrc==1){
+        let ln2:i32=ll;
+        if(ln2>0 && buf[ls+ln2-1]==13){ln2=ln2-1;}
+        let t2:[]u8=trim(buf[ls..ls+ln2]);
+        if(t2.len==0){continue;}
+        n2=n2+1;
+        // Frozen §2 bind vs committed KB.
+        let sapos:i32=0; let sn:i32=0;
+        content_toks(t2,dlow[0..dlowlen],dtb,dtn,sab,&sapos,st,64,&sn);
+        let sdpos:i32=0; let sdn:i32=0;
+        digit_toks(sab,st,sn,sdb,&sdpos,sdt,&sdn);
+        let ag:i32=0; let ct:i32=0;
+        kpp_bind_tables(sab,st,sn,sdb,sdt,sdn,
+            kab,kat,kan,kdb,kdt,kdn,kbn,&ag,&ct);
+        if(ag>0){
+            _zag_print("PENDING|REJECT|line ");
+            _zag_print(i64s(n2 as i64));
+            _zag_println("|DUPLICATE-KNOWN");
+            continue;
+        }
+        // Provenance.
+        let prov:[]u8="DELIBERATE";
+        let provbuf:[]u8=nio_alloc(64);
+        let provlen:i32=10;
+        if(ct>0){
+            let kbseq:i32=g32(ksq,(ct-1)*4);
+            let pfx:[]u8="DELIBERATE:CONTRADICTS-KB:";
+            let c:i32=0;
+            while(c<pfx.len){provbuf[c]=pfx[c]; c=c+1;}
+            let sqs:[]u8=i64s(kbseq as i64);
+            let sqlen:i32=sqs.len;
+            c=0;
+            while(c<sqlen){provbuf[pfx.len+c]=sqs[c]; c=c+1;}
+            nio_free(sqs);
+            provlen=pfx.len+sqlen;
+            prov=provbuf[0..provlen];
+        }
+        let seq:i32=gmax+nacc+1;
+        let lbn:i32=0;
+        kpp_fmt_pending(lb,&lbn,seq,t2,prov);
+        nio_free(provbuf);
+        let cost:i64=lbn as i64;
+        if(cost>budget){
+            _zag_print("PENDING|REJECT|line ");
+            _zag_print(i64s(n2 as i64));
+            _zag_println("|OVER-BUDGET");
+            continue;
+        }
+        if(kpp_write_chunked(fdw,lb[0..lbn])<0){wrc=0; break;}
+        p32(newlens,nacc*4,lbn);
+        newbytes=newbytes+cost;
+        nacc=nacc+1;
+    }
+    nio_free(lb);
+    nio_close(fdw);
+    nio_close(sroot);
+    nio_free(buf);
+    nio_free(sab); nio_free(st); nio_free(sdb); nio_free(sdt);
+    nio_free(dt); nio_free(dlow); nio_free(dtb);
+    nio_free(kab); nio_free(kat); nio_free(kan);
+    nio_free(kdb); nio_free(kdt); nio_free(kdn); nio_free(ksq);
+    if(wrc==0){
+        _zag_println("PENDING|ERROR|spill-write-fail");
+        nio_free(p1); nio_free(p2); nio_free(newlens);
+        return 2;
+    }
+    if(nacc==0){
+        nio_free(p1); nio_free(p2); nio_free(newlens);
+        return 0;
+    }
+    // Shed computation: oldest-first over existing ++ new.
+    let total:i64=eused+newbytes;
+    let ke:i32=0;
+    let kn2:i32=0;
+    while(total>budget && (ke<ecount || kn2<nacc)){
+        if(ke<ecount){
+            total=total-(g32(p2,ke*4) as i64);
+            ke=ke+1;
+        }else{
+            total=total-(g32(newlens,kn2*4) as i64);
+            kn2=kn2+1;
+        }
+    }
+    nio_free(p1);
+    nio_free(p2);
+    // Max batch id for shed ledgering.
+    let mb1:i32=0; let mb2:i32=0; let mb3:i64=0;
+    let me1:[]u8=""; let me2:[]u8="";
+    if(kpp_stream_lines(sd,"resolutions.txt",2,me1,me2,&mb1,&mb2,&mb3,0,0)==0){
+        _zag_println("PENDING|ERROR|resolutions-scan-fail");
+        nio_free(newlens);
+        return 2;
+    }
+    // Trim shed new-lines from the spill (ledgered), then commit.
+    if(kn2>0){
+        if(kpc_trim_spill(sd,kn2,mb1+1)==0){
+            _zag_println("PENDING|ERROR|spill-trim-fail");
+            nio_free(newlens);
+            return 2;
+        }
+    }
+    nio_free(newlens);
+    if(kpp_commit_pending(sd,ke)==0){
+        _zag_println("PENDING|ERROR|commit-fail");
+        return 2;
+    }
+    // Success: PENDING|HELD|<seq> per stored claim.
+    let s:i32=gmax+kn2+1;
+    let send:i32=gmax+nacc;
+    while(s<=send){
+        _zag_print("PENDING|HELD|");
+        _zag_println(i64s(s as i64));
+        s=s+1;
+    }
+    return 0;
+}
+
+// ---- kpc_trim_spill: drop the oldest new-lines from the spill ----
+// Removes the first dropn PENDING| lines from pending_spill.tmp (in place,
+// via the open-read/unlink-recreate fd pattern), ledgering each as
+// SHED|<seq>|<claim> and RESOLVE|<seq>|SHED|SHED|BATCH|<batch>.
+// Returns 1 ok, 0 fail.
+fn kpc_trim_spill(sd:[]u8,dropn:i32,batch:i32)i32 {
+    let fdr:i64=kpp_open_read(sd,"pending_spill.tmp");
+    if(fdr<0){return 0;}
+    let sroot:i64=0;
+    let fdw:i64=kpp_write_open(sd,"pending_spill.tmp",&sroot);
+    if(fdw<0){nio_close(fdr); return 0;}
+    let chunk:[]u8=nio_alloc(16777216);
+    let carry:[]u8=nio_alloc(65536);
+    let line:[]u8=nio_alloc(65536);
+    let ob:[]u8=nio_alloc(1048576);
+    let obn:i32=0;
+    let shb:[]u8=nio_alloc(1048576);
+    let shn:i32=0;
+    let rsb:[]u8=nio_alloc(1048576);
+    let rsn:i32=0;
+    let tmp:[]u8=nio_alloc(65536);
+    let cn:i32=0;
+    let eof:i32=0;
+    let rc:i32=1;
+    let dropped:i32=0;
+    while(eof==0 && rc==1){
+        let nrd:i64=kpp_read_chunk(fdr,chunk,16777216);
+        let nn:i32=0;
+        if(nrd<0){rc=0; break;}
+        if(nrd==0){eof=1;}else{nn=nrd as i32;}
+        let i:i32=0;
+        let ls:i32=0;
+        while(i<nn && rc==1){
+            if(chunk[i]==10){
+                let llen:i32=cn+(i-ls);
+                if(llen<=line.len){
+                    let c:i32=0;
+                    while(c<cn){line[c]=carry[c]; c=c+1;}
+                    c=0;
+                    while(c<i-ls){line[cn+c]=chunk[ls+c]; c=c+1;}
+                    rc=kpc_trim_line(sd,line,llen,&dropped,dropn,batch,
+                        shb,&shn,rsb,&rsn,tmp,ob,&obn,fdw);
+                }else{rc=0; break;}
+                cn=0;
+                ls=i+1;
+            }
+            i=i+1;
+        }
+        if(eof==1 && rc==1){
+            let tllen:i32=cn+(nn-ls);
+            if(tllen>0){
+                if(tllen<=line.len){
+                    let c2:i32=0;
+                    while(c2<cn){line[c2]=carry[c2]; c2=c2+1;}
+                    c2=0;
+                    while(c2<nn-ls){line[cn+c2]=chunk[ls+c2]; c2=c2+1;}
+                    rc=kpc_trim_line(sd,line,tllen,&dropped,dropn,batch,
+                        shb,&shn,rsb,&rsn,tmp,ob,&obn,fdw);
+                }else{rc=0;}
+            }
+        }
+        if(eof==0 && rc==1){
+            let rem:i32=nn-ls;
+            if(cn+rem>carry.len){rc=0;}
+            else{
+                let c3:i32=0;
+                while(c3<rem){carry[cn+c3]=chunk[ls+c3]; c3=c3+1;}
+                cn=cn+rem;
+            }
+        }
+    }
+    nio_close(fdr);
+    if(rc==1 && obn>0){
+        if(kpp_write_chunked(fdw,ob[0..obn])<0){rc=0;}
+    }
+    nio_close(fdw);
+    nio_close(sroot);
+    if(rc==1 && shn>0){
+        if(kpp_append_lines(sd,"shed_ledger.txt",shb[0..shn],1)==0){rc=0;}
+    }
+    if(rc==1 && rsn>0){
+        if(kpp_append_lines(sd,"resolutions.txt",rsb[0..rsn],0)==0){rc=0;}
+    }
+    nio_free(chunk); nio_free(carry); nio_free(line);
+    nio_free(ob); nio_free(shb); nio_free(rsb); nio_free(tmp);
+    return rc;
+}
+
+// One line for kpc_trim_spill. Returns 1 ok, 0 fail. Ledger buffers are
+// flushed (appended) when low on room, always at line boundaries.
+fn kpc_trim_line(sd:[]u8,line:[]u8,llen:i32,dropped:*i32,dropn:i32,batch:i32,
+    shb:[]u8,shn:*i32,rsb:[]u8,rsn:*i32,tmp:[]u8,
+    ob:[]u8,obn:*i32,fdw:i64)i32 {
+    let ispend:i32=0;
+    if(llen>=9 && line[0]==80 && line[1]==69 && line[2]==78 &&
+       line[3]==68 && line[4]==73 && line[5]==78 && line[6]==71 &&
+       line[7]==124){ispend=1;}
+    if(ispend==1 && dropped[0]<dropn){
+        // Parse seq and claim from PENDING|<seq>|<claim>|<prov>.
+        let pb:i32=8;
+        while(pb<llen && line[pb]!=124){pb=pb+1;}
+        let sq:i32=atoi(line[8..pb]);
+        let pc:i32=pb+1;
+        while(pc<llen && line[pc]!=124){pc=pc+1;}
+        let cl:i32=pc-(pb+1);
+        if(sq>0 && cl>0){
+            let tbn:i32=0;
+            kpp_fmt_shed(tmp,&tbn,sq,line[pb+1..pb+1+cl]);
+            // Flush at line boundaries when low on room (a formatted line
+            // is <64KB; buffers are 1MB, so one line always fits empty).
+            if(shn[0]+tbn>shb.len){
+                if(kpp_append_lines(sd,"shed_ledger.txt",shb[0..shn[0]],1)==0){return 0;}
+                shn[0]=0;
+            }
+            let c:i32=0;
+            while(c<tbn){shb[shn[0]]=tmp[c]; shn[0]=shn[0]+1; c=c+1;}
+            tbn=0;
+            let bdet:[]u8=nio_alloc(32);
+            let bd:[]u8="BATCH|";
+            let bc:i32=0;
+            while(bc<bd.len){bdet[bc]=bd[bc]; bc=bc+1;}
+            let bs:[]u8=i64s(batch as i64);
+            bc=0;
+            while(bc<bs.len){bdet[6+bc]=bs[bc]; bc=bc+1;}
+            let bl0:i32=6+bs.len;
+            nio_free(bs);
+            let tgt:[]u8="SHED";
+            let knd:[]u8="SHED";
+            kpp_fmt_resolve(tmp,&tbn,sq,tgt,knd,bdet[0..bl0]);
+            nio_free(bdet);
+            if(rsn[0]+tbn>rsb.len){
+                if(kpp_append_lines(sd,"resolutions.txt",rsb[0..rsn[0]],0)==0){return 0;}
+                rsn[0]=0;
+            }
+            c=0;
+            while(c<tbn){rsb[rsn[0]]=tmp[c]; rsn[0]=rsn[0]+1; c=c+1;}
+        }
+        dropped[0]=dropped[0]+1;
+        return 1;
+    }
+    // Survivor: buffer for the rewritten spill.
+    let need:i32=llen+1;
+    if(obn[0]+need>ob.len){
+        if(kpp_write_chunked(fdw,ob[0..obn[0]])<0){return 0;}
+        obn[0]=0;
+    }
+    let c2:i32=0;
+    while(c2<llen){ob[obn[0]]=line[c2]; obn[0]=obn[0]+1; c2=c2+1;}
+    ob[obn[0]]=10; obn[0]=obn[0]+1;
+    return 1;
+}
+
+// ---- cmd_kbhold: deliberate hold policy (frozen §4b) ----
+// kbhold <on|off> <state>. Writes holdpolicy.txt as HOLD|ON|OFF.
+fn cmd_kbhold(onoff:[]u8,sd:[]u8)i32 {
+    let v:[]u8="";
+    if(nio_equal(onoff,"on")==1){v="ON";}
+    else{if(nio_equal(onoff,"off")==1){v="OFF";}}
+    if(v.len==0){
+        _zag_println("HOLD|ERROR|bad-arg");
+        return 2;
+    }
+    let line:[]u8=nio_alloc(16);
+    line[0]=72; line[1]=79; line[2]=76; line[3]=68; line[4]=124;
+    let c:i32=0;
+    while(c<v.len){line[5+c]=v[c]; c=c+1;}
+    line[5+v.len]=10;
+    let wr:i32=write_file(sd,"holdpolicy.txt",line[0..6+v.len]);
+    nio_free(line);
+    if(wr==0){
+        _zag_println("HOLD|ERROR|write-fail");
+        return 2;
+    }
+    _zag_print("HOLD|");
+    _zag_println(v);
+    return 0;
+}
+
+// ---- cmd_kbpendlist: inspect the pending partition ----
+fn cmd_kbpendlist(sd:[]u8)i32 {
+    let e1:[]u8="";
+    let e2:[]u8="";
+    let o1:i32=0; let o2:i32=0; let o3:i64=0;
+    if(kpp_stream_lines(sd,"pending.txt",5,e1,e2,&o1,&o2,&o3,0,0)==0){
+        _zag_println("PENDING|ERROR|read-fail");
+        return 2;
+    }
+    return 0;
+}
+
+// ---- shared: load a pending claim by seq (mode 6) ----
+// Returns 1 if found (claim in cbuf[0..*clen], prov in pbuf[0..*plen]),
+// 0 if not pending, -1 on IO error. Caller provides cbuf (>=64KB),
+// pbuf (>=4KB).
+fn kpc_load_pending(sd:[]u8,pseq:i32,cbuf:[]u8,pbuf:[]u8,clen:*i32,plen:*i32)i32 {
+    let o1:i32=0; let o2:i32=0; let o3:i64=0;
+    let e1:[]u8=""; let e2:[]u8="";
+    if(kpp_stream_lines(sd,"pending.txt",6,cbuf,pbuf,&o1,&o2,&o3,pseq,0)==0){
+        return -1;
+    }
+    if(o3==0){return 0;}
+    clen[0]=o1;
+    plen[0]=o2;
+    return 1;
+}
+
+// ---- shared: G3 best sentence of a parsed battery page ----
+// wire[0..wlen] is the frozen internal page wire from kpp_parse_battery_page.
+// Returns the best sentence (nio_alloc'd, caller frees), or "" on failure.
+fn kpc_page_best(wire:[]u8,wlen:i32,claim:[]u8)[]u8 {
+    let pa:[]u8=nio_alloc(4096);
+    let papos:i32=0;
+    let pt:[]u8=nio_alloc(64*8);
+    let ptt:[]u8=nio_alloc(64*8);
+    let st:[]u8=nio_alloc(512*12);
+    let np:i32=0;
+    let nst:i32=0;
+    let ha:[]u8=nio_alloc(256);
+    let hapos:i32=0;
+    let ht:[]u8=nio_alloc(64*8);
+    parse_pages(wire[0..wlen],&np,pa,&papos,pt,ptt,st,&nst,64,512,ha,&hapos,ht);
+    let best:[]u8="";
+    if(np>0){
+        let qlow:[]u8=normalize(claim);
+        let qt:[]u8=nio_alloc(512*8);
+        let qn:i32=0;
+        tokenize(qlow,qt,512,2,&qn);
+        best=best_for_page(wire[0..wlen],0,st,nst,qlow,qt,qn);
+        nio_free(qlow);
+        nio_free(qt);
+    }
+    nio_free(pa); nio_free(pt); nio_free(ptt); nio_free(st);
+    nio_free(ha); nio_free(ht);
+    return best;
+}
+
+// ---- shared: extract HELD host from provenance ----
+// If prov is "HELD:<host>", copies lowercased host to hbuf, sets *hlen,
+// returns 1. Otherwise returns 0 (DELIBERATE provenance: guard 4 vacuous).
+fn kpc_held_host(prov:[]u8,hbuf:[]u8,hlen:*i32)i32 {
+    hlen[0]=0;
+    let pfx:[]u8="HELD:";
+    if(prov.len<=pfx.len){return 0;}
+    let c:i32=0;
+    while(c<pfx.len){
+        if(prov[c]!=pfx[c]){return 0;}
+        c=c+1;
+    }
+    let n:i32=prov.len-pfx.len;
+    if(n>hbuf.len){n=hbuf.len;}
+    c=0;
+    while(c<n){
+        let ch:u8=prov[pfx.len+c];
+        if(ch>=65 && ch<=90){ch=((ch as i32)+32) as u8;}
+        hbuf[c]=ch;
+        c=c+1;
+    }
+    hlen[0]=n;
+    return 1;
+}
+
+// ---- cmd_kbcorroborate: corroboration -> verified true (frozen §5a) ----
+fn cmd_kbcorroborate(sd:[]u8,pseq:i32,pagefile:[]u8)i32 {
+    let cbuf:[]u8=nio_alloc(65536);
+    let pbuf:[]u8=nio_alloc(4096);
+    let clen:i32=0; let plen:i32=0;
+    let lr:i32=kpc_load_pending(sd,pseq,cbuf,pbuf,&clen,&plen);
+    if(lr==-1){
+        _zag_println("PENDING|ERROR|read-fail");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    if(lr==0){
+        _zag_println("PENDING|ERROR|not-pending");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    let claim:[]u8=cbuf[0..clen];
+    let prov:[]u8=pbuf[0..plen];
+    // Parse the evidence page.
+    let wire:[]u8=nio_alloc(1048576);
+    let wlen:i32=0;
+    let tbuf:[]u8=nio_alloc(4096);
+    let tlen:i32=0;
+    let hbuf:[]u8=nio_alloc(4096);
+    let hlen:i32=0;
+    let nsent:i32=0;
+    let pr:i32=kpp_parse_battery_page(pagefile,wire,&wlen,tbuf,&tlen,hbuf,&hlen,&nsent);
+    if(pr!=1){
+        _zag_print("PENDING|ERROR|page-parse-");
+        _zag_print(i64s(pr as i64));
+        _zag_println("");
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(wire); nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    // G3 best sentence + AGREE-bind (frozen §2).
+    let best:[]u8=kpc_page_best(wire,wlen,claim);
+    nio_free(wire);
+    if(best.len==0){
+        _zag_println("PENDING|ERROR|no-best-sentence");
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    let dt:[]u8=nio_alloc(65536);
+    let dp:i32=0; let dn:i32=0;
+    let dlow:[]u8=nio_alloc(4096);
+    let dlowlen:i32=0;
+    let dtb:[]u8=nio_alloc(128*8);
+    let dtn:i32=0;
+    kpc_load_drop(sd,dt,&dp,&dn,dlow,&dlowlen,dtb,&dtn);
+    let b:i32=0; let agree:i32=0; let contra:i32=0;
+    kpp_bind2(best,claim,dlow[0..dlowlen],dtb,dtn,&b,&agree,&contra);
+    if(agree!=1){
+        _zag_println("PENDING|ERROR|no-agree-bind");
+        nio_free(best);
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(tbuf); nio_free(hbuf);
+        nio_free(dt); nio_free(dlow); nio_free(dtb);
+        return 2;
+    }
+    // Host independence (guard 4). DELIBERATE provenance: vacuous.
+    let phb:[]u8=nio_alloc(4096);
+    let phl:i32=0;
+    if(kpc_held_host(prov,phb,&phl)==1){
+        if(phl==hlen && nio_equal(phb[0..phl],hbuf[0..hlen])==1){
+            _zag_println("PENDING|ERROR|same-host");
+            nio_free(phb); nio_free(best);
+            nio_free(cbuf); nio_free(pbuf);
+            nio_free(tbuf); nio_free(hbuf);
+            nio_free(dt); nio_free(dlow); nio_free(dtb);
+            return 2;
+        }
+    }
+    nio_free(phb);
+    // Pending-laundering guard (guard 5).
+    let lg:i32=kpp_no_pending_launder(sd,pseq,best,dlow[0..dlowlen],dtb,dtn);
+    nio_free(dt); nio_free(dlow); nio_free(dtb);
+    if(lg!=1){
+        if(lg==0){_zag_println("PENDING|ERROR|pending-derived");}
+        else{_zag_println("PENDING|ERROR|launder-scan-fail");}
+        nio_free(best);
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    // Promote: detail = <host>:<title>.
+    let det:[]u8=nio_alloc(hlen+1+tlen+1);
+    let dc:i32=0;
+    while(dc<hlen){det[dc]=hbuf[dc]; dc=dc+1;}
+    det[dc]=58; dc=dc+1;
+    let dc2:i32=0;
+    while(dc2<tlen){det[dc]=tbuf[dc2]; dc=dc+1; dc2=dc2+1;}
+    let kind:[]u8="CORROBORATED";
+    let okp:i32=kpp_promote(sd,pseq,claim,kind,det[0..dc]);
+    nio_free(det);
+    nio_free(best);
+    nio_free(cbuf); nio_free(pbuf);
+    nio_free(tbuf); nio_free(hbuf);
+    if(okp==0){
+        _zag_println("PENDING|ERROR|promote-fail");
+        return 2;
+    }
+    return 0;
+}
+
+// ---- cmd_kbtest: direct testing -> tested (frozen §5b) ----
+fn cmd_kbtest(sd:[]u8,pseq:i32,result:[]u8,proto:[]u8)i32 {
+    let ispass:i32=nio_equal(result,"PASS");
+    let isfail:i32=nio_equal(result,"FAIL");
+    if(ispass!=1 && isfail!=1){
+        _zag_println("PENDING|ERROR|bad-result");
+        return 2;
+    }
+    let pk:i32=kpp_proto_known(sd,proto);
+    if(pk!=1){
+        if(pk==0){_zag_println("PENDING|ERROR|unknown-proto");}
+        else{_zag_println("PENDING|ERROR|proto-scan-fail");}
+        return 2;
+    }
+    let cbuf:[]u8=nio_alloc(65536);
+    let pbuf:[]u8=nio_alloc(4096);
+    let clen:i32=0; let plen:i32=0;
+    let lr:i32=kpc_load_pending(sd,pseq,cbuf,pbuf,&clen,&plen);
+    if(lr==-1){
+        _zag_println("PENDING|ERROR|read-fail");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    if(lr==0){
+        _zag_println("PENDING|ERROR|not-pending");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    let claim:[]u8=cbuf[0..clen];
+    let ok:i32=0;
+    if(ispass==1){
+        let kind:[]u8="TESTED";
+        ok=kpp_promote(sd,pseq,claim,kind,proto);
+    }else{
+        let rpfx:[]u8="TEST-FAILED:";
+        let rbuf:[]u8=nio_alloc(rpfx.len+proto.len+1);
+        let rc:i32=0;
+        while(rc<rpfx.len){rbuf[rc]=rpfx[rc]; rc=rc+1;}
+        rc=0;
+        while(rc<proto.len){rbuf[rpfx.len+rc]=proto[rc]; rc=rc+1;}
+        let reason:[]u8=rbuf[0..rpfx.len+proto.len];
+        ok=kpp_demote(sd,pseq,claim,reason,proto);
+        nio_free(rbuf);
+    }
+    nio_free(cbuf); nio_free(pbuf);
+    if(ok==0){
+        _zag_println("PENDING|ERROR|resolve-fail");
+        return 2;
+    }
+    return 0;
+}
+
+// ---- cmd_kbrefute: contradiction -> verified false (frozen §5c) ----
+fn cmd_kbrefute(sd:[]u8,pseq:i32,evpage:[]u8)i32 {
+    let cbuf:[]u8=nio_alloc(65536);
+    let pbuf:[]u8=nio_alloc(4096);
+    let clen:i32=0; let plen:i32=0;
+    let lr:i32=kpc_load_pending(sd,pseq,cbuf,pbuf,&clen,&plen);
+    if(lr==-1){
+        _zag_println("PENDING|ERROR|read-fail");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    if(lr==0){
+        _zag_println("PENDING|ERROR|not-pending");
+        nio_free(cbuf); nio_free(pbuf);
+        return 2;
+    }
+    let claim:[]u8=cbuf[0..clen];
+    let wire:[]u8=nio_alloc(1048576);
+    let wlen:i32=0;
+    let tbuf:[]u8=nio_alloc(4096);
+    let tlen:i32=0;
+    let hbuf:[]u8=nio_alloc(4096);
+    let hlen:i32=0;
+    let nsent:i32=0;
+    let pr:i32=kpp_parse_battery_page(evpage,wire,&wlen,tbuf,&tlen,hbuf,&hlen,&nsent);
+    if(pr!=1){
+        _zag_print("PENDING|ERROR|page-parse-");
+        _zag_print(i64s(pr as i64));
+        _zag_println("");
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(wire); nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    let best:[]u8=kpc_page_best(wire,wlen,claim);
+    nio_free(wire);
+    if(best.len==0){
+        _zag_println("PENDING|ERROR|no-best-sentence");
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    let dt:[]u8=nio_alloc(65536);
+    let dp:i32=0; let dn:i32=0;
+    let dlow:[]u8=nio_alloc(4096);
+    let dlowlen:i32=0;
+    let dtb:[]u8=nio_alloc(128*8);
+    let dtn:i32=0;
+    kpc_load_drop(sd,dt,&dp,&dn,dlow,&dlowlen,dtb,&dtn);
+    let b:i32=0; let agree:i32=0; let contra:i32=0;
+    kpp_bind2(best,claim,dlow[0..dlowlen],dtb,dtn,&b,&agree,&contra);
+    nio_free(best);
+    nio_free(dt); nio_free(dlow); nio_free(dtb);
+    if(contra!=1){
+        _zag_println("PENDING|ERROR|no-contradict-bind");
+        nio_free(cbuf); nio_free(pbuf);
+        nio_free(tbuf); nio_free(hbuf);
+        return 2;
+    }
+    // reason = CONTRADICTED:<host>:<title>; detail = <host>:<title>.
+    let rpfx:[]u8="CONTRADICTED:";
+    let rbuf:[]u8=nio_alloc(rpfx.len+hlen+1+tlen+1);
+    let rc:i32=0;
+    while(rc<rpfx.len){rbuf[rc]=rpfx[rc]; rc=rc+1;}
+    rc=0;
+    while(rc<hlen){rbuf[rpfx.len+rc]=hbuf[rc]; rc=rc+1;}
+    rbuf[rpfx.len+hlen]=58;
+    rc=0;
+    while(rc<tlen){rbuf[rpfx.len+hlen+1+rc]=tbuf[rc]; rc=rc+1;}
+    let reason:[]u8=rbuf[0..rpfx.len+hlen+1+tlen];
+    let det:[]u8=nio_alloc(hlen+1+tlen+1);
+    let dc:i32=0;
+    while(dc<hlen){det[dc]=hbuf[dc]; dc=dc+1;}
+    det[dc]=58; dc=dc+1;
+    let dc2:i32=0;
+    while(dc2<tlen){det[dc]=tbuf[dc2]; dc=dc+1; dc2=dc2+1;}
+    nio_free(tbuf); nio_free(hbuf);
+    let okd:i32=kpp_demote(sd,pseq,claim,reason,det[0..dc]);
+    nio_free(rbuf); nio_free(det);
+    nio_free(cbuf); nio_free(pbuf);
+    if(okd==0){
+        _zag_println("PENDING|ERROR|demote-fail");
+        return 2;
+    }
+    return 0;
+}
+
+// ---- kpp_hold_from_verdict: hold intercept phase B (frozen §4b) ----
+// Called exactly once from cmd_verdict when verdict_core returns 7 (an
+// UNKNOWN-path install was diverted by the hold policy). Formats
+// PENDING|<seq>|<claim>|HELD:<host>, spills+commits with oldest-first shed,
+// prints HELD|<seq> + ANSWER|UNCHECKABLE. Returns 0 ok, 2 on error.
+// o_ans[0..o_ansn] = the staged would-be answer (winning cluster best
+// sentence); o_widx/o_wn = staged winning page indices; ha/ht = host table.
+fn kpp_hold_from_verdict(sd:[]u8,o_ans:[]u8,o_ansn:i32,o_widx:[]u8,o_wn:i32,ha:[]u8,ht:[]u8)i32 {
+    if(o_ansn<=0 || o_ansn>600){
+        _zag_println("HELD|ERROR|bad-claim");
+        return 2;
+    }
+    let claim:[]u8=o_ans[0..o_ansn];
+    if(kpp_has_byte(claim,124)==1){
+        _zag_println("HELD|ERROR|bad-claim");
+        return 2;
+    }
+    // Host of the first winning page (frozen §4b: corroborating page's host).
+    let pg:i32=0;
+    if(o_wn>0){pg=g32(o_widx,0);}
+    if(pg<0 || pg>=64){pg=0;}
+    let hoff:i32=g32(ht,pg*8);
+    let hln:i32=g32(ht,pg*8+4);
+    if(hoff<0 || hln<0 || hoff+hln>ha.len){hoff=0; hln=0;}
+    let hbuf:[]u8=nio_alloc(4096);
+    let hn:i32=hln;
+    if(hn>hbuf.len){hn=hbuf.len;}
+    let c:i32=0;
+    while(c<hn){
+        let ch:u8=ha[hoff+c];
+        if(ch>=65 && ch<=90){ch=((ch as i32)+32) as u8;}
+        hbuf[c]=ch;
+        c=c+1;
+    }
+    // Provenance: HELD:<host>.
+    let pfx:[]u8="HELD:";
+    let pbuf:[]u8=nio_alloc(pfx.len+hn+1);
+    c=0;
+    while(c<pfx.len){pbuf[c]=pfx[c]; c=c+1;}
+    c=0;
+    while(c<hn){pbuf[pfx.len+c]=hbuf[c]; c=c+1;}
+    nio_free(hbuf);
+    let prov:[]u8=pbuf[0..pfx.len+hn];
+    // Budget + existing scan.
+    let budget:i64=kpp_budget(sd);
+    if(budget<=0){
+        _zag_println("HELD|ERROR|budget-init-fail");
+        nio_free(pbuf);
+        return 2;
+    }
+    let maxe:i32=((budget/24) as i32)+1024;
+    let p1:[]u8=nio_alloc(maxe*4);
+    let p2:[]u8=nio_alloc(maxe*4);
+    let ecount:i32=0; let emaxseq:i32=0; let eused:i64=0;
+    let e1:[]u8=""; let e2:[]u8="";
+    if(kpp_stream_lines(sd,"pending.txt",1,p1,p2,&ecount,&emaxseq,&eused,maxe,0)==0){
+        _zag_println("HELD|ERROR|pending-scan-fail");
+        nio_free(pbuf); nio_free(p1); nio_free(p2);
+        return 2;
+    }
+    let gmax2:i32=kpc_max_seq_ever(sd);
+    if(gmax2<0){
+        _zag_println("HELD|ERROR|seq-scan-fail");
+        nio_free(pbuf); nio_free(p1); nio_free(p2);
+        return 2;
+    }
+    let seq:i32=gmax2+1;
+    let lb:[]u8=nio_alloc(65536);
+    let lbn:i32=0;
+    kpp_fmt_pending(lb,&lbn,seq,claim,prov);
+    nio_free(pbuf);
+    let cost:i64=lbn as i64;
+    if(cost>budget){
+        _zag_println("HELD|ERROR|over-budget");
+        nio_free(p1); nio_free(p2); nio_free(lb);
+        return 2;
+    }
+    let ke:i32=0;
+    while(eused+cost>budget && ke<ecount){
+        eused=eused-(g32(p2,ke*4) as i64);
+        ke=ke+1;
+    }
+    nio_free(p1); nio_free(p2);
+    // Spill + commit.
+    let sroot:i64=0;
+    let fdw:i64=kpp_write_open(sd,"pending_spill.tmp",&sroot);
+    if(fdw<0){
+        _zag_println("HELD|ERROR|spill-open-fail");
+        nio_free(lb);
+        return 2;
+    }
+    let wrc:i64=kpp_write_chunked(fdw,lb[0..lbn]);
+    nio_free(lb);
+    nio_close(fdw);
+    nio_close(sroot);
+    if(wrc<0){
+        _zag_println("HELD|ERROR|spill-write-fail");
+        return 2;
+    }
+    if(kpp_commit_pending(sd,ke)==0){
+        _zag_println("HELD|ERROR|commit-fail");
+        return 2;
+    }
+    _zag_print("HELD|");
+    _zag_println(i64s(seq as i64));
+    _zag_println("ANSWER|UNCHECKABLE");
+    return 0;
+}
+
+// ---- kpc_hold_on: read the deliberate hold policy (frozen §4b) ----
+// Returns 1 iff <sd>/holdpolicy.txt contains HOLD|ON. Absent or any other
+// content -> 0 (default OFF). Read only on the verdict path (main).
+fn kpc_hold_on(sd:[]u8)i32 {
+    let ok:i32=0;
+    let b:[]u8=read_file(sd,"holdpolicy.txt",&ok);
+    if(ok==0){return 0;}
+    let on:i32=0;
+    if(b.len>=7 && b[0]==72 && b[1]==79 && b[2]==76 && b[3]==68 &&
+       b[4]==124 && b[5]==79 && b[6]==78){on=1;}
+    nio_free(b);
+    return on;
+}
