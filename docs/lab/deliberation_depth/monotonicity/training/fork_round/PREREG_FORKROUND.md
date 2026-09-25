@@ -1,6 +1,7 @@
 # PREREG — H5 New-Fork Round: What Fixes Overconfidence with Depth?
 
-- **Status:** FROZEN v1 — coordinator sign-off 2026-09-25. No building or
+- **Status:** FROZEN v2 — coordinator sign-off 2026-09-25. v1 remains in
+  git history (`0566cc81`). v1→v2 changelog in §11. No building or
   measurement under this prereg until frozen. Any change after freezing
   requires version bump + note.
 - **Date:** 2026-09-25
@@ -45,7 +46,7 @@ survivors.
   implementation bug: stop, fix, re-run. Forks may NOT change the release
   rule; the battleground is the confidence head.
 - Training cells: `training/features/features.tsv` (5240 cells, SHA256
-  `4682190cfd504cb692df122a6b054d8fad65ef860707e6a92abfdf04e65e897d`),
+  `4682190cfd504cb692df122a6b054d8fad65ef860707e6a92abfdf04e65a897d`),
   heldout flags honored (odd P/O/D replicates never trained).
 - Harness modules in `training/src/` may be copied byte-identical
   (SHA-verified) into fork trees.
@@ -253,6 +254,30 @@ Observable-verification FIRST: F27 (leader history) and F29 (survivor
 hypothesis values) must verify their observables exist in the frozen
 inputs before building — missing = STILLBORN (reported, not killed).
 
+### §5b TRAIN-COORD defect repair (v2; coordinator-issued, see §11)
+
+TRAIN-COORD as specified in `ideas/native2_forks.md` ("vetoes applied to
+every candidate AND the final answer", all params init 0) is
+UNSATISFIABLE as written. Proof (F25 v1 run, committed evidence in
+`f25_dismin/VERDICT_F25.md`): from the zero init, any single ±50
+coordinate step yields |C(s)| ≤ 50 on every cell (|features| ≤ 1000),
+so training meanConfCorrect ≤ 0.05 < 0.55 and the V2 veto rejects EVERY
+first-step candidate — the trainer is analytically locked at init,
+data-independently. Applies identically to F24, F26, F27 (same trainer,
+same init). F25's v1 VOID stands as committed evidence of the defect;
+the fork mechanisms themselves were never tested.
+
+**Repaired TRAIN-COORD v2** (F24, F25, F26, F27 only): coordinate descent
+accepts candidates on strict L-reduction alone (±50, then ±8, then ±1
+refine; fixed order; 8 sweeps; init 0 — unchanged). Vetoes V1–V3 apply to
+the FINAL answer only: a final fitted head violating any veto is VOID
+(reported with evidence). This preserves the vetoes' evident intent —
+reject degenerate *solutions* (theater, clamp attractors, blanket
+underconfidence) — while making the stated objective (minimize squared
+calibration error) reachable. No kill bar is changed; no fork mechanism
+is changed. F24's stage-2 w9 grid keeps its per-candidate V3 veto (it
+starts from nonzero fitted base weights, so it is not locked).
+
 ## §6 Long-horizon legs (survivors only)
 
 Any fork clearing B1–B9+B13 on the 37-leg short battery advances to
@@ -284,10 +309,11 @@ twice → byte-identical params. No binaries or .zagd committed.
 ## §9 Deliverables
 
 `deliberation_depth/monotonicity/training/fork_round/`: this prereg
-(frozen v1), `ideas/` (four source files + raw transcripts),
+(frozen; v1 in git history, current v2), `ideas/` (four source files +
+raw transcripts),
 per-fork dirs `f20_usd/` … `f37_ifp/` (src, params, logs, results,
 analysis), `VERDICT.md` (final adjudication + updated taxonomy).
-Branch: `tnn-native-lab`. This frozen prereg is committed BEFORE any
+Branch: `tnn-native-lab`. The frozen prereg is committed BEFORE any
 fork's first build.
 
 ## §10 Adjudication
@@ -302,5 +328,17 @@ fork honestly. Fable's Q5 unsatisfiability thesis is adjudicated on the
 B3-vs-B3pi evidence and goes to Micah only as a question, never as a
 silent bar change.
 
+## §11 Changelog
+
+- **v1** (2026-09-25, commit `0566cc81`): initial freeze. 18 forks,
+  strict B3 default, amended B8, recorded B3pi.
+- **v2** (2026-09-25): (a) §5b TRAIN-COORD defect repair — v1's shared
+  trainer ("vetoes on every candidate", init 0) is provably unsatisfiable
+  (analytical lock proof + byte-identical empirical logs in
+  `f25_dismin/`, committed `8461c659`); vetoes now gate the final answer
+  only. No bar changed, no fork mechanism changed. F25's v1 VOID stands
+  as evidence; F24/F25/F26/F27 train under v2. (b) §2 features.tsv hash
+  typo fixed (`…e65e897d` → `…e65a897d`; file itself verified correct).
+
 ---
-*End of PREREG_FORKROUND.md FROZEN v1 — coordinator sign-off 2026-09-25.*
+*End of PREREG_FORKROUND.md FROZEN v2 — coordinator sign-off 2026-09-25.*
