@@ -1304,3 +1304,116 @@ Lock note: this wave's lock was still present at the cron timeout; the
 2321pdt wave's run-start removed it as stale (6.04h old) and created its
 own. This finish-up therefore removed no lock; the .wave_lock in the tree
 belongs to the active 2321pdt wave and was left untouched.
+
+## Wave 20260924-2321pdt verdicts (2026-09-24)
+
+Wave HEAD at start: ead33399e (run-start merge of origin/tnn-native-lab by
+the parent: 193 origin commits plus local wave commits, merged with
+--no-edit, zero conflicts, no reset, no rebase; the loop's 45 local wave
+commits preserved). STALE LOCK note: the prior wave's lock was 6.04h old
+and was removed by the parent at run start; this wave holds the lock and
+removes it at completion. Debate: advocate brief (f449c2b1c), skeptic
+report (b3ddb79c4), independent judge rulings (7a4650e2a); four motions
+M1-M4, no verdict overturned on rhetoric, two narrowings adopted on M1,
+one each on M2 and M3, and the contested M4 carryover question resolved by
+the judge with cited evidence. Skeptic's provenance probe verbatim in
+every motion; zero em-dashes. Transcript: docs/lab/rsi/runs/
+wave-20260924-2321pdt/debate/ (ADVOCATE_BRIEF.md, SKEPTIC_REPORT.md,
+JUDGE_RULINGS.md). Commit chain (all local, none pushed): 5c886fb1f
+(G1 v3 red-team), b03063b37 (forks), c4f006ea7 (chat fit), 0ba679b11
+(D-VID-1 V3 prereg freeze, committed alone), ca1d4a13a (breach
+disclosure), f449c2b1c (advocate), b3ddb79c4 (skeptic), 7a4650e2a
+(judge). Prereg commit-order self-check over this wave's commits: PASS,
+no UNVERIFIABLE ORDERING (the V3 prereg strictly precedes any
+implementation work; the voided implementation was never committed, so no
+candidate verdict rests on an unverifiable ordering).
+
+1. G1 SUNSHAFTS v3: CONFIRM DISCARD [NEW] (final). The 1721pdt provisional
+DISCARD is resolved: this wave's red-team independently recomputed every
+frozen bar from committed records (commit 5c886fb1f). Commit order PASS
+(prereg acf7cedce < addendum 1da140387 < impl 39707e077; S10 satisfied).
+KB1 PASS (3/3 byte-identical, 96f3a899); KB2 FAIL 1.0000 < 1.12; KB3 FAIL
+0.00 < 60.0; KB4-KB8 PASS (cost 2.10x <= 3x); validator V1-V6 PASS;
+tripwire 87.89 per mille. Killing evidence: independent byte-level BMP
+diff shows the lifted band (y 308..458) disjoint by construction from the
+wedge set (all kept wedge points y <= 264); 0 of 39 kept wedge points
+carry lift, so KB2/KB3 fail under any correct verifier. Baseline-first
+gate confirmed (e4f65557 byte-identical to the S14 sealed baseline). No
+Python contact in the G1 v3 run; zero CANNOT-CONFIRM items. Judge adopted
+both skeptic narrowings: KB2-KB8 are record-checks (verifier re-read, not
+re-run; future red-teams must re-run verifiers), and the tripwire bar is
+relabeled a runner sanity check (it lived only in run_g1v3.sh, never the
+frozen prereg). The line stands down until a genuinely new design idea
+exists, consistent with the 1421pdt judge's mechanism-redesign ruling, not
+an evasion. Nothing reaches his judge queue.
+
+2. Fork battery: CONFIRM [RE-CERT] 25/25 PASS. Evidence commit b03063b37.
+Full enumeration: 8 local refs, origin/tnn-native-lab tested read-only at
+run-start tip 14c883855 and at the mid-wave moved tip 787212443 ("NCAL v3b
+JOB2 results"; never re-merged), five other remote heads via FETCH_HEAD,
+seven forktest worktrees, three wave3 worktrees. Shell and pure-Zag
+harnesses agree on all 25; znc byte-identical 498abcb5 everywhere;
+NEG1/NEG2 discriminate on every fork; /tmp untouched; no Python anywhere.
+Judge adopted the skeptic's counting narrowing (verified from
+FORK_RESULTS_2321.md): 10 of 25 entries are static fixtures (7 forktest
+worktrees with unchanged SHAs plus 3 wave3 worktrees on the single SHA
+bd3097874); honest live count is 15. Precedent: future reports split live
+vs fixture counts, and the driver gains a closing origin-tip re-check.
+
+3. tnn_chat FIT: CONFIRM [RE-CERT] FIT on ead33399e. Evidence commit
+c4f006ea7. Decline binary rebuilt byte-identical to 20273a99, baseline to
+1ada2fae; 30/30 specific declines with 0 blanket refusals; 17/17 in-KB
+turns byte-identical to baseline; 10/10 KB5; 9/9 run-pairs byte-identical;
+all hashes match prior wave records. Precedent adopted: the literal-scope
+sentences ("not a candidate verdict and it is not merge review of the
+merged-in work"; "certifies the 38-fact closed-book probe chain only")
+travel verbatim with any future citation. Traveling caveats unchanged: no
+runnable interactive TNN exists on this branch beyond the frozen probe
+instruments; nothing faked.
+
+4. D-VID-1 V3 (geometry-churn video lever): implementation/evidence VOID;
+frozen prereg 0ba679b11 CERTIFIED prereg-only for future-wave carryover.
+Facts (committed): the worker froze a new prereg (0ba679b11) committed
+ALONE at 06:47:01 UTC, strictly before any implementation work; the
+prereg names a genuinely new mechanism (in-plane geometry churn,
+M4 R3 reopen condition (a): the coordinate-retargeting that V1/V2 used is
+not reused, and the bfade fade law is untouched), with the provenance
+header naming V1 DEAD [NEW] and V2 DEAD [VOID] in its component lineage.
+The worker then ran ONE python3 heredoc (~06:53 UTC) that inserted debug
+prints into a scratch byte-copy of the implementation outside the repo
+(the copy was deleted immediately after); no wave artifact was touched;
+full self-disclosure with the exact command line committed as ca1d4a13a
+(BREACH_DISCLOSURE.md); no cure attempted (S3 honored). Under the
+prospective 0521pdt M4 R1 Python-anywhere rule the judge CONFIRMED the
+void of the implementation/evidence phase: no verdict rendered on V3, no
+sealed pair, and the voided bytes (kept in dvid1_geomchurn/void/ with
+VOID_README.md for lineage disclosure per S2) are never reused or cited.
+Contested question resolved: the judge overruled the skeptic's
+decline-carryover and CERTIFIED 0ba679b11 for carryover. Decisive: the
+prereg is git-verifiably pre-breach (exactly one commit touches its path;
+Python never read or wrote it), it satisfies M4 R3(a) as a genuinely new
+mechanism (the skeptic concedes the mechanistic distinction), the heredoc
+debugged the implementation via a scratch copy and could not have
+informed formulas frozen before the breach, and the lineage is disclosed
+in full as the remedy. Declining carryover would force either a barred
+re-freeze or abandonment of a valid unjudged design. The lane reopens
+under 0ba679b11 itself: a future wave implements fresh from the prereg
+document, zero Python, frozen bars unchanged. Precedents recorded (no new
+standing rules): P1, pre-breach frozen preregs survive voiding; P2,
+carryover certification carries lineage disclosure with fresh-from-prereg
+implementation; P3, red-team record-checks labeled as such; P4, runner
+bars are sanity checks, not frozen bars; P5, fork counts split
+live/fixture with a closing tip re-check; P6, FIT scope sentences travel
+verbatim.
+
+Queued next: the five governance rulings still awaiting him (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12
+queue; untouched by this wave's debate); his blind verdicts on the sealed
+pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14, whirlpool-planform;
+unchanged, nothing added this wave); D-VID-1 V3 implementation under the
+certified prereg 0ba679b11 in a future wave (frozen bars unchanged, zero
+Python); fork battery driver with split live/fixture counts and a closing
+tip re-check; G1 sunshafts stand down until a genuinely new design idea;
+the pending origin/tnn-native-lab move (787212443, "NCAL v3b JOB2
+results") as the next run's run-start merge step, with post-merge FIT
+re-certification per the literal-scope rule.
