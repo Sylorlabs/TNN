@@ -13,9 +13,17 @@ to `toc_l.zag` with only the synonym-source replaced — see §6).
   - `synlearn.txt`: one line per installed relation:
     `w1|w2|rules|lids` — raw (unstemmed) words `w1<=w2` byte-wise,
     `rules` = `+`-joined installing rules (e.g. `R1+R2+R3`),
-    `lids` = `,`-joined evidence IDs (e.g. `LEARN-0001,LEARN-0002`).
+    `lids` = `,`-joined evidence IDs (e.g. `LEARN-0001,LEARN-0002`),
+    in first-seen (corpus) order.
     Lines sorted by `(w1,w2)`; byte-stable.
   - `synveto.txt`: one line per veto: `w1|w2|R4|lids`.
+- Internally, lids are kept in a per-relation linked list
+  (`lhead`/`ltail`/`lnext`), NOT a flat contiguous block: relations
+  interleave in global insertion order (e.g. R3 lids for relation A
+  arrive after relation B's DEF/SYN lids), so a `(start,count)` flat
+  layout silently misattributes lids. The list preserves insertion
+  order; emit walks the chain. (Bug found and fixed 2026-09-25: flat
+  `(start,count)` recorded wrong lids for R3 relations.)
 - `learn dump <dir>` prints every relation with its provenance.
   Before any learning run the dump is empty (0 relations) — audited.
 - K7 projection: 112 installed relations (50 <= 112 <= 200).
