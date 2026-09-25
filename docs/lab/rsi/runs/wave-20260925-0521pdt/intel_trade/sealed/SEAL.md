@@ -62,12 +62,17 @@ lowest-index covering fact: 11->2, 12->13, 13->24, 14->30, 15->22, 16->32,
 3->25, 4->2, 5->19, 6->1, 7->26, 8->27, 9->32, 10->22 (each target the
 lowest-index stemmed-covering fact). PASS.
 
-## Pinned hashes (filled at seal commit)
+## Pinned hashes (from the seal commit 63cef111d)
 
-PROBES.md sha256: (pinned in the seal commit)
-KEY.md sha256: (pinned in the seal commit)
+PROBES.md sha256: e9da732ceb2604f4a0e338f9223797d1670d0aa464239441560459e60bb5dd60
+KEY.md sha256: c94f9a2ce7c17d98db53c83e34395045992f1a645885a35ae4cc357dbed422fb
+Verified equal at scoring time (2026-09-25).
 
 ## Seal-open log
 
-The seal is opened at scoring time. Opened-by and opened-at are recorded
-here then, not retroactively.
+Opened: 2026-09-25, at scoring time, by the wave worker (implementer) to
+score the three frozen candidate transcripts with the pure-Zag scorer.
+The candidate binary never reads KEY.md (static: zero references; it
+reads only kb.txt and gaz.txt). The scorer is the only decision-bearing
+reader of the key, and it ran after the transcripts were frozen
+byte-identical across 3/3 runs.
