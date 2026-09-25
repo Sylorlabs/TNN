@@ -18,8 +18,9 @@ B9X-STRAT (per battery):
 
 B9X-GRAD (per battery):
   R_d = M4's released set at depth d (nested). G_1 = R_1.
-  G_{d'} = R_{d'} UNION first-half-by-id of (G_d - R_{d'}), i.e. each item M4
-  drops is retained for exactly one extra depth. Nested; superset of M4.
+  G_{d'} = R_{d'} UNION first-half-by-id of (R_d - R_{d'}), i.e. half of each
+  item-batch M4 drops is retained for exactly one extra depth. Nested;
+  superset of M4.
 
 Usage: gen_b9x2.py <ncal_dir>
 Writes into <ncal_dir>/q1/inputs/. Prints design statistics.
@@ -108,16 +109,14 @@ def main():
             if prev is not None:
                 assert s <= prev, f"STRAT not nested: {fam} d{d}"
             prev = s
-        # GRAD: retain half of each drop for one extra depth
+        # GRAD: retain half of each M4 drop for one extra depth
         g = set(rel[(fam, depths[0])])
         grad_rel[(fam, depths[0])] = set(g)
         for di in range(1, len(depths)):
             d, dp = depths[di - 1], depths[di]
-            r_next = rel[(fam, dp)]
-            newdrop = sorted(g - r_next)
-            keep = set(newdrop[:len(newdrop) // 2])
-            g = set(r_next) | keep
-            assert keep <= rel[(fam, d)], f"GRAD keep not from prior set: {fam}"
+            m4drop = sorted(rel[(fam, d)] - rel[(fam, dp)])
+            keep = set(m4drop[:len(m4drop) // 2])
+            g = set(rel[(fam, dp)]) | keep
             grad_rel[(fam, dp)] = set(g)
         # nestedness check for GRAD
         prev = None
