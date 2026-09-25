@@ -18,7 +18,7 @@
 | Pinned toolchain only | ✓ (`znc_linux_x86_64_abed8aa1`) |
 | Trainer A/B byte-identical binaries | ✓ |
 | Training ×2 → byte-identical params | ✓ (3,976-byte params, cmp clean) |
-| Evaluator A/B byte-identical binaries | ✓ (rebuilt from exact-rule sources) |
+| Evaluator A/B byte-identical binaries | ✓ (rebuilt from exact-rule sources; SHA-256 d5182f16958a0aecb53127d4d12905ff2cb5d290e35c130d5f36e00e47626ccd) |
 | Eval legs A/B byte-identical | ✓ (37/37 TSV pairs, cmp clean) |
 | []u8 arenas + LE accessors; no slice > 2^25 | ✓ |
 | No binaries / .zagd committed | ✓ |
@@ -58,8 +58,14 @@ nonvacuity, all-equal G with |G|>1e-6 fails — this is degenerate
 constant-confidence, not learned calibration. The B3 "pass" on honest families
 is vacuous.
 
-**B13 detail:** ceiling/O G ∈ [−0.494, −0.438], all < −0.100. Severe
+**B13 detail:** ceiling/O G ∈ [−0.494, −0.437], all < −0.100. Severe
 underconfidence on an all-correct family (acc=1.0, mean conf≈0.5).
+
+**Correction note (2026-09-25):** The first eval used stale binaries built
+before the exact-B4 correction (SHA d3d8d85c...). Rebuilt from current sources
+(SHA d5182f16...), re-ran the 37-leg battery. Six ceiling TSVs changed; all
+kill-bar outcomes identical. The committed results are from the correct
+binaries.
 
 ## 3. Why it failed (failure-mode 6)
 
