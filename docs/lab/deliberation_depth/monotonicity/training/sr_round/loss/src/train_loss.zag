@@ -1,0 +1,529 @@
+// train_loss.zag — SR ROUND arm LOSS trainer (PREREG_SR.md §8, FROZEN v1).
+//
+// Implements the LOSS intervention: v2's symmetric-calibration core
+// (C−Y)^2 is REPLACED by a proper-scoring log-loss core plus an explicit
+// anti-collapse variance term; v2's theater term (×4) is HELD CONSTANT.
+//   L = −[Y·ln(C/1000) + (1−Y)·ln(1−C/1000)]
+//       − (C−C̄)²/4000000
+//       + 4·[V2rise]·(C−Cprev)²
+//   C̄ = the epoch's mean released confidence over the current phase's
+//       released training cells, computed with EPOCH-START weights and
+//       FROZEN within the epoch (deterministic). Crew design choice,
+//       recorded in logs/BUILDLOG_LOSS.md.
+//   Cp = clamp(C,1,999): the log-loss core indexes the ln table on Cp
+//       (ln undefined at 0/1; LT[0]/LT[1000] pinned, never indexed).
+//
+// Integer gradient (frozen crew choice, recorded in build log):
+//   dL/dp = −Y·1000/Cp + (1−Y)·1000/(1000−Cp)   (p = C/1000)
+//   gradient cap: the denominator is clamp(Cp,100,900) [resp. 1000−Cp],
+//       so p∈[0.1,0.9] for the gradient — bounds single-cell steps to
+//       ≤125, inside v2's theater envelope (200). Mid-range parity:
+//       at Cp=500, f_i=1000 the core step is 25, identical to v2's
+//       symmetric core at (C=500,Y=1000).
+//   GS = 500000000 (5·10^8) frozen gradient scale.
+//   num_core_i = tdiv(GS·f_i·(Y==1 ? −1000 : 1000), 10^6·q)
+//   num_ac_i   = tdiv(GS·f_i·(C̄−C), 2·10^9)      (max |step| ≈ 6 —
+//       the frozen 0.25-vs-O(1) loss ratio is preserved in update space)
+//   num_th_i   = 8·rise·f_i                        (v2 theater, unchanged)
+//   w_i ← w_i − tdiv(num_core_i + num_ac_i + num_th_i, DIV2), DIV2=40000
+//   b   ← b   − tdiv(num_core_b + num_ac_b + num_th_b, DIV2)
+// Overflow: |GS·f_i·1000| = 5·10^14 < 2^63. ✓
+//
+// Loss telemetry per cell (millionths of nats):
+//   ll = (Y==1) ? −LT[Cp] : −LT[1000−Cp]      (LT from ln_table.zag)
+//   ac = −tdiv((C−C̄)², 4)                     (max −250000 = −0.25 nats)
+//   th = 4·rise²                               (v2 squared-thousandths units,
+//                                             separate column, not in loss)
+// loss (plateau) = ll + ac. μ-scale check (§14 item 4): mean|ac|/mean|ll|
+//   over 10× must lie in [1%,50%]; outside → STOP, prereg amendment needed.
+//
+// Everything else = v2 §5 verbatim: phases A→B→C, 2 epochs/phase/pass,
+// 1× = 6 epochs, 10× = 60, 100× = 600; DIV2=40000; anti-saturation clamp
+// w_i∈[−2000000,2000000]; G-batch b ← b − tdiv(Gdiff,4) on strict rises;
+// 8-input head; init w1=1000, w2..w8=0, b=0; field indexing (7+k) (v2 fix).
+//
+// 10× go/no-go (§8): (a) weights ≠ init; (b) epoch Var(C) never below
+// 40000 (thousandths²) after epoch 10 — anti-collapse live; (c)
+// meanConfCorrect ≥ 0.30.
+//
+// Usage: train_loss <features.tsv> <passes> <params_out.zag> <log_out.tsv>
+// Every log opens with the prereg SHA (§10 operational).
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+@import("ln_table.zag")
+
+fn tl_prereg_sha()[]u8 { return "f55d1dbbe1a609f69301ce8f537282a0372880b51fdec6b51d0f588b9fd96d30"; }
+
+fn tl_div2()i64 { return 40000; } // v2: upward steps representable
+fn tl_wlo()i64 { return -2000000; }
+fn tl_whi()i64 { return 2000000; }
+fn tl_gs()i64 { return 500000000; } // frozen gradient scale (build log)
+
+// truncation-toward-zero division for possibly-negative a, b>0
+fn tl_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn tl_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+
+// family name -> index 0..8 ; -1 unknown
+fn tl_famidx(fam:[]u8)i32 {
+    if(dlb_streq(fam,"admit")==1){return 0;}
+    if(dlb_streq(fam,"revoke")==1){return 1;}
+    if(dlb_streq(fam,"logic")==1){return 2;}
+    if(dlb_streq(fam,"cost")==1){return 3;}
+    if(dlb_streq(fam,"P")==1){return 4;}
+    if(dlb_streq(fam,"D")==1){return 5;}
+    if(dlb_streq(fam,"trap")==1){return 6;}
+    if(dlb_streq(fam,"O")==1){return 7;}
+    if(dlb_streq(fam,"redteam")==1){return 8;}
+    return -1;
+}
+fn tl_phase(fi:i32)i32 {
+    if(fi<0){return -1;}
+    if(fi<=3){return 0;}
+    if(fi<=5){return 1;}
+    return 2;
+}
+// depth value -> slot 0..6 ; -1 unknown
+fn tl_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+
+// confidence from weight arena w (8 i64 slots) and bias b, features f (8 i32)
+fn tl_conf(w:[]u8,b:i64,f:[]u8,nf:i32)i64 {
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<nf){
+        acc=acc+au_get64(w,k)*(au_get32(f,k) as i64);
+        k=k+1;
+    }
+    return tl_clamp(tl_tdiv(acc,1000)+b,0,1000);
+}
+
+// find tab positions: fills tabs[0..nft] with field end offsets
+fn tl_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+
+// parse the ln table chunks "v0,v1,..." into a []u8 arena of 1001 i32s
+fn tl_parse_chunk(tab:[]u8,base:i32,s:[]u8)i32 {
+    let j:i32=0;
+    let start:i32=0;
+    let i:i32=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==44){
+            au_put32(tab,base+j,dlb_atoi(s[start..i]));
+            j=j+1;
+            start=i+1;
+        }
+        i=i+1;
+    }
+    return j;
+}
+fn tl_parse_ln(tab:[]u8)void {
+    let c:i32=0;
+    while(c<11){
+        let base:i32=c*91;
+        if(c==0){base=base+tl_parse_chunk(tab,base,ln_chunk0());}
+        if(c==1){base=base+tl_parse_chunk(tab,base,ln_chunk1());}
+        if(c==2){base=base+tl_parse_chunk(tab,base,ln_chunk2());}
+        if(c==3){base=base+tl_parse_chunk(tab,base,ln_chunk3());}
+        if(c==4){base=base+tl_parse_chunk(tab,base,ln_chunk4());}
+        if(c==5){base=base+tl_parse_chunk(tab,base,ln_chunk5());}
+        if(c==6){base=base+tl_parse_chunk(tab,base,ln_chunk6());}
+        if(c==7){base=base+tl_parse_chunk(tab,base,ln_chunk7());}
+        if(c==8){base=base+tl_parse_chunk(tab,base,ln_chunk8());}
+        if(c==9){base=base+tl_parse_chunk(tab,base,ln_chunk9());}
+        if(c==10){base=base+tl_parse_chunk(tab,base,ln_chunk10());}
+        c=c+1;
+    }
+}
+
+fn tl_train(feat_path:[]u8,passes:i32,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    // cell storage: meta (8 i32/cell), feats (8 i32/cell), id off/len (2 i32)
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let idix:[]u8=nio_alloc((maxcells*2*4) as i64);
+    let idbuf:[]u8=nio_alloc(1048576);
+    if(meta.len==0||feats.len==0||idix.len==0||idbuf.len==0){return 102;}
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){return 102;}
+    // ln table arena: 1001 i32 entries
+    let lntab:[]u8=nio_alloc(1001*4);
+    if(lntab.len==0){return 102;}
+    tl_parse_ln(lntab);
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            tl_split(line,tabs);
+            // fields: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+            // V2 FIX (v1 bug): feats[k] is field (7+k), NOT (8+k).
+            let f1e:i32=au_get32(tabs,0);
+            let f2e:i32=au_get32(tabs,1);
+            let f3e:i32=au_get32(tabs,2);
+            let f4e:i32=au_get32(tabs,3);
+            let f5e:i32=au_get32(tabs,4);
+            let f6e:i32=au_get32(tabs,5);
+            let f7e:i32=au_get32(tabs,6);
+            let id:[]u8=line[0..f1e];
+            let fam:[]u8=line[f1e+1..f2e];
+            let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+            let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+            let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+            let c4:[]u8=line[f6e+1..f7e];
+            let fi:i32=tl_famidx(fam);
+            let ph:i32=tl_phase(fi);
+            if(heldout==1){ph=-1;}
+            let y:i32=-1; // 1 correct, 0 wrong, -1 abstain
+            if(rel4==1){
+                y=0;
+                if(c4.len==1 && c4[0]==49){y=1;}
+            }
+            let ci:i32=ncells;
+            au_put32(meta,ci*8+0,heldout);
+            au_put32(meta,ci*8+1,depth);
+            au_put32(meta,ci*8+2,rel4);
+            au_put32(meta,ci*8+3,y);
+            au_put32(meta,ci*8+4,fi);
+            au_put32(meta,ci*8+5,ph);
+            au_put32(meta,ci*8+6,-1); // prev_idx filled below
+            au_put32(meta,ci*8+7,dlb_atoi(line[f4e+1..f5e])); // t
+            let k:i32=0;
+            while(k<8){
+                let a:i32=au_get32(tabs,6+k);
+                let b2:i32=au_get32(tabs,7+k);
+                au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                k=k+1;
+            }
+            // id index: nearest previous cell with equal id -> prev chain
+            let pv:i32=-1;
+            let j:i32=ci-1;
+            while(j>=0 && pv<0){
+                let jo:i32=au_get32(idix,j*2+0);
+                let jl2:i32=au_get32(idix,j*2+1);
+                if(jl2==id.len && nio_equal(idbuf[jo..jo+jl2],id)==1){
+                    // nearest previous same-id cell with rel4=1
+                    let jj:i32=j;
+                    while(jj>=0){
+                        let ko:i32=au_get32(idix,jj*2+0);
+                        let kl:i32=au_get32(idix,jj*2+1);
+                        if(kl!=id.len || nio_equal(idbuf[ko..ko+kl],id)!=1){jj=-1;}
+                        if(jj>=0){
+                            if(au_get32(meta,jj*8+2)==1){pv=jj;jj=-1;}
+                            if(jj>=0){jj=jj-1;}
+                        }
+                    }
+                    j=-1;
+                }
+                if(pv<0){j=j-1;}
+            }
+            au_put32(meta,ci*8+6,pv);
+            au_put32(idix,ci*2+0,idn);
+            au_put32(idix,ci*2+1,id.len);
+            let q:i32=0;
+            while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+            idn=idn+id.len;
+            ncells=ncells+1;
+        }
+        pos=e+1;
+    }
+    // weights: w[8] i64, bias b
+    let w:[]u8=nio_alloc(8*8);
+    if(w.len==0){return 102;}
+    au_put64(w,0,1000); // w1=1000: start as M4-with-harness-confidence
+    let b:i64=0;
+    // G accumulators: 9 families x 7 depth slots x (sumC, n, ncorrect)
+    let gacc:[]u8=nio_alloc(9*7*3*8);
+    if(gacc.len==0){return 102;}
+    let lgo2:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo2,8388608)!=0){return 102;}
+    dout_str(&lgo2,"# prereg_sha=");
+    dout_str(&lgo2,tl_prereg_sha());
+    dout_str(&lgo2,"\n");
+    dout_str(&lgo2,"epoch\tphase\tloss\tv2\tgviol\tclampbind\tw1\tw2\tw3\tw4\tw5\tw6\tw7\tw8\tb\tmcC\tmcW\tmcA\tll\tac\tth\tvarc\tcbar\n");
+    let epoch:i32=0;
+    let p:i32=0;
+    while(p<passes){
+        let ph:i32=0;
+        while(ph<3){
+            let ep2:i32=0;
+            while(ep2<2){
+                // C̄: epoch's mean released confidence over this phase's
+                // released training cells, with EPOCH-START weights —
+                // frozen within the epoch (deterministic).
+                let cbsum:i64=0;
+                let cbn:i64=0;
+                let i0:i32=0;
+                while(i0<ncells){
+                    if(au_get32(meta,i0*8+5)==ph && au_get32(meta,i0*8+2)==1){
+                        let fb0:i32=i0*8;
+                        let a0:i64=0;
+                        let k0:i32=0;
+                        while(k0<8){
+                            a0=a0+au_get64(w,k0)*(au_get32(feats,fb0+k0) as i64);
+                            k0=k0+1;
+                        }
+                        cbsum=cbsum+tl_clamp(tl_tdiv(a0,1000)+b,0,1000);
+                        cbn=cbn+1;
+                    }
+                    i0=i0+1;
+                }
+                let cbar:i64=0;
+                if(cbn>0){cbar=cbsum/cbn;}
+                // online pass over training cells of this phase
+                let ll_sum:i64=0;
+                let ac_sum:i64=0;
+                let th_sum:i64=0;
+                let v2c:i32=0;
+                let i:i32=0;
+                while(i<ncells){
+                    if(au_get32(meta,i*8+5)==ph && au_get32(meta,i*8+2)==1){
+                        let fbase:i32=i*8;
+                        let y:i32=au_get32(meta,i*8+3);
+                        // conf with current weights
+                        let acc2:i64=0;
+                        let k:i32=0;
+                        while(k<8){
+                            acc2=acc2+au_get64(w,k)*(au_get32(feats,fbase+k) as i64);
+                            k=k+1;
+                        }
+                        let c:i64=tl_clamp(tl_tdiv(acc2,1000)+b,0,1000);
+                        let cp:i64=tl_clamp(c,1,999);
+                        // V2 theater term (unchanged): wrong->wrong rising chain
+                        let rise:i64=0;
+                        let pv:i32=au_get32(meta,i*8+6);
+                        if(pv>=0 && y==0 && au_get32(meta,pv*8+3)==0){
+                            let pbase:i32=pv*8;
+                            let pacc:i64=0;
+                            let k2:i32=0;
+                            while(k2<8){
+                                pacc=pacc+au_get64(w,k2)*(au_get32(feats,pbase+k2) as i64);
+                                k2=k2+1;
+                            }
+                            let cprev:i64=tl_clamp(tl_tdiv(pacc,1000)+b,0,1000);
+                            if(c>cprev){rise=c-cprev;v2c=v2c+1;}
+                        }
+                        // loss telemetry (millionths of nats; theater separate)
+                        let ll:i64=0;
+                        if(y==1){ll=-(au_get32(lntab,cp as i32) as i64);}
+                        if(y==0){ll=-(au_get32(lntab,(1000-cp) as i32) as i64);}
+                        let df:i64=c-cbar;
+                        let ac:i64=-tl_tdiv(df*df,4);
+                        ll_sum=ll_sum+ll;
+                        ac_sum=ac_sum+ac;
+                        th_sum=th_sum+4*rise*rise;
+                        // gradients
+                        // core: dL/dp with gradient cap p in [0.1,0.9]
+                        let qq:i64=cp;
+                        if(y==0){qq=1000-cp;}
+                        qq=tl_clamp(qq,100,900);
+                        let gs:i64=tl_gs();
+                        let k3:i32=0;
+                        while(k3<8){
+                            let fk:i64=au_get32(feats,fbase+k3) as i64;
+                            let sgn:i64=-1000;
+                            if(y==0){sgn=1000;}
+                            let numc:i64=tl_tdiv(gs*fk*sgn,1000000*qq);
+                            let numa:i64=tl_tdiv(gs*fk*(cbar-c),2000000000);
+                            let numt:i64=8*rise*fk;
+                            au_put64(w,k3,au_get64(w,k3)-tl_tdiv(numc+numa+numt,tl_div2()));
+                            k3=k3+1;
+                        }
+                        let sgnb:i64=-1000;
+                        if(y==0){sgnb=1000;}
+                        let ncb:i64=tl_tdiv(gs*1000*sgnb,1000000*qq);
+                        let nab:i64=tl_tdiv(gs*1000*(cbar-c),2000000000);
+                        let ntb:i64=8*rise*1000;
+                        b=b-tl_tdiv(ncb+nab+ntb,tl_div2());
+                    }
+                    i=i+1;
+                }
+                // G-batch: recompute G per training family/depth with frozen weights
+                let gi:i32=0;
+                while(gi<9*7*3){au_put64(gacc,gi,0);gi=gi+1;}
+                let i2:i32=0;
+                while(i2<ncells){
+                    if(au_get32(meta,i2*8+5)>=0 && au_get32(meta,i2*8+2)==1){
+                        let fi2:i32=au_get32(meta,i2*8+4);
+                        let ds:i32=tl_dslot(au_get32(meta,i2*8+1));
+                        if(fi2>=0 && ds>=0){
+                            let fbase2:i32=i2*8;
+                            let acc3:i64=0;
+                            let k4:i32=0;
+                            while(k4<8){
+                                acc3=acc3+au_get64(w,k4)*(au_get32(feats,fbase2+k4) as i64);
+                                k4=k4+1;
+                            }
+                            let c2:i64=tl_clamp(tl_tdiv(acc3,1000)+b,0,1000);
+                            let gx:i32=(fi2*7+ds)*3;
+                            au_put64(gacc,gx,au_get64(gacc,gx)+c2);
+                            au_put64(gacc,gx+1,au_get64(gacc,gx+1)+1);
+                            if(au_get32(meta,i2*8+3)==1){
+                                au_put64(gacc,gx+2,au_get64(gacc,gx+2)+1);
+                            }
+                        }
+                    }
+                    i2=i2+1;
+                }
+                let gviol:i32=0;
+                let fi3:i32=0;
+                while(fi3<9){
+                    let prev_g:i64=0;
+                    let have_prev:i32=0;
+                    let s:i32=0;
+                    while(s<7){
+                        let gx2:i32=(fi3*7+s)*3;
+                        let n2:i64=au_get64(gacc,gx2+1);
+                        if(n2>0){
+                            let gth:i64=au_get64(gacc,gx2)/n2-1000*au_get64(gacc,gx2+2)/n2;
+                            if(have_prev==1 && gth>prev_g){
+                                gviol=gviol+1;
+                                b=b-tl_tdiv(gth-prev_g,4);
+                            }
+                            prev_g=gth;
+                            have_prev=1;
+                        }
+                        s=s+1;
+                    }
+                    fi3=fi3+1;
+                }
+                // anti-saturation clamp (frozen guard) + count bindings
+                let bind:i32=0;
+                let k6:i32=0;
+                while(k6<8){
+                    let wv:i64=au_get64(w,k6);
+                    if(wv<tl_wlo()){au_put64(w,k6,tl_wlo());bind=bind+1;}
+                    if(wv>tl_whi()){au_put64(w,k6,tl_whi());bind=bind+1;}
+                    k6=k6+1;
+                }
+                // non-degeneracy telemetry + Var(C) over released training
+                // cells with epoch-end weights
+                let sc:i64=0;let nc:i64=0;let sw:i64=0;let nw:i64=0;
+                let sc2:i64=0;let nall:i64=0;
+                let i3:i32=0;
+                while(i3<ncells){
+                    if(au_get32(meta,i3*8+5)>=0 && au_get32(meta,i3*8+2)==1){
+                        let fbase3:i32=i3*8;
+                        let acc4:i64=0;
+                        let k7:i32=0;
+                        while(k7<8){
+                            acc4=acc4+au_get64(w,k7)*(au_get32(feats,fbase3+k7) as i64);
+                            k7=k7+1;
+                        }
+                        let c3:i64=tl_clamp(tl_tdiv(acc4,1000)+b,0,1000);
+                        sc2=sc2+c3*c3;
+                        nall=nall+1;
+                        if(au_get32(meta,i3*8+3)==1){sc=sc+c3;nc=nc+1;}
+                        if(au_get32(meta,i3*8+3)==0){sw=sw+c3;nw=nw+1;}
+                    }
+                    i3=i3+1;
+                }
+                let mcC:i64=0;let mcW:i64=0;let mcA:i64=0;
+                if(nc>0){mcC=sc/nc;}
+                if(nw>0){mcW=sw/nw;}
+                if(nc+nw>0){mcA=(sc+sw)/(nc+nw);}
+                let varc:i64=0;
+                if(nall>0){
+                    let m:i64=(sc+sw)/nall;
+                    varc=sc2/nall-m*m;
+                }
+                // log
+                dout_i64(&lgo2,epoch as i64);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,ph as i64);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,ll_sum+ac_sum);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,v2c as i64);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,gviol as i64);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,bind as i64);dout_byte(&lgo2,9);
+                let k5:i32=0;
+                while(k5<8){
+                    dout_i64(&lgo2,au_get64(w,k5));dout_byte(&lgo2,9);
+                    k5=k5+1;
+                }
+                dout_i64(&lgo2,b);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,mcC);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,mcW);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,mcA);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,ll_sum);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,ac_sum);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,th_sum);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,varc);dout_byte(&lgo2,9);
+                dout_i64(&lgo2,cbar);
+                dout_line(&lgo2);
+                epoch=epoch+1;
+                ep2=ep2+1;
+            }
+            ph=ph+1;
+        }
+        p=p+1;
+    }
+    // write params file
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,4096)!=0){return 102;}
+    dout_str(&po,"// loss_params — FROZEN arm-LOSS trained confidence-head weights\n");
+    dout_str(&po,"// Generated by train_loss.zag (PREREG_SR.md §8). Do not hand-edit.\n");
+    let k8:i32=0;
+    while(k8<8){
+        dout_str(&po,"fn mt_w");
+        dout_i64(&po,k8 as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,k8));
+        dout_str(&po,"; }\n");
+        k8=k8+1;
+    }
+    dout_str(&po,"fn mt_b()i64 { return ");
+    dout_i64(&po,b);
+    dout_str(&po,"; }\n");
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&lgo2),lgo2.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);nio_free(tabs);
+    nio_free(w);nio_free(gacc);nio_free(lntab);
+    dout_free(&lgo2);dout_free(&po);
+    if(wrc<0 || wrc2<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<5){
+        _zag_println("usage: train_loss <features.tsv> <passes> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    let passes:i32=dlb_atoi(_zag_arg(2));
+    if(passes<1 || passes>1000){return 64;}
+    return tl_train(_zag_arg(1),passes,_zag_arg(3),_zag_arg(4));
+}
