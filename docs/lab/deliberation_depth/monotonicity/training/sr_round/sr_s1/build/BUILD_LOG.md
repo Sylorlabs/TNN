@@ -144,3 +144,36 @@ must byte-match committed logs/log_11x_a.tsv.
 - 11× log opens with prereg SHA f55d1dbbe1a609f69301ce8f537282a0372880b51fdec6b51d0f588b9fd96d30.
 - Resume = deterministic-forward: passes=100 from frozen init (600 epochs,
   incl. the extension epochs by byte-identical reproduction).
+
+## 2026-09-24 ~17:38 PDT: 100× Stage 1 COMPLETE (passes=100, 600 epochs)
+
+Run: train_sr1 A/B (committed binaries, no rebuild), passes=100 from frozen
+init — deterministic-forward resume; rc=0 both (RC_A=0, RC_B=0).
+- A/B byte-identical: logs, params .zag, params .txt (cmp, all three).
+- Resume integrity: 100× log rows 0–65 byte-identical to committed
+  logs/log_11x_a.tsv (diff-clean) — the extension epochs reproduced exactly;
+  epoch-59 row = committed params_10x. Gate window epochs 60–64 unchanged
+  (w7 = 1833,1833,1833,3083,1833).
+- Logs open with prereg SHA f55d1dbbe1a609f69301ce8f537282a0372880b51fdec6b51d0f588b9fd96d30
+  and the mask-integers line.
+- Epoch-599 (Stage-1 end) weights: w1=416189, w2=−174847, w3=0, w4=0,
+  w5=386783, w6=0, w7=−75612, w8=611, b=−333764; mcC=912, mcW=190, mcA=853.
+  (Telemetry per B11 — not evidence. Note for the disconnect reading: w7
+  went strongly negative in the late Stage-1 regime; the crutch diagnostic
+  and the 37-leg eval adjudicate whether the mask was load-bearing.)
+
+## 2026-09-24 ~17:38 PDT: Stage-2 driver BUILT (train_sr2.zag, A/B)
+
+- Built in build/stage2_a, build/stage2_b from byte-identical src
+  (sha256 ec279b02c37ef6854ec6e275dbe2abea75407f69ae9c72bf6106bea6d1142c41
+  = committed blob). Pinned znc only; analyzer warnings (4, non-fatal —
+  same class as the train_sr1 build); rc=0 both.
+- A/B binaries cmp-identical: sha256
+  90bd98a0871bb71d15d9fe48f1b24fd4d2351899ad6a2d9906cfa1b8bcada2ff (179334 bytes each).
+- Re-audit vs §5b (this session, before build): mask code path ABSENT
+  (only descriptive comments mention it; update block is
+  num=2*err*fk+8*rise*fk on ALL k3 in 0..7); init from Stage-1 snapshot
+  txt (9 lines w1..w8,b); EXACTLY 2 epochs `while(ep2<2)`, ph=0 (Phase A
+  ep0+ep1), no pass loop, no phases B/C; G-batch v2 + clamp unchanged;
+  FREEZE then only writers (params .zag + .txt, log .tsv) — zero gradient
+  steps after. Log header carries prereg SHA, stage=2 mask=OFF, B10b note.
