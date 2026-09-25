@@ -1,0 +1,2349 @@
+// n1.zag — N1 NATIVE-ENTAIL: forward text-state rewriting via byte-pattern licenses.
+//
+// Frozen spec: MATH R3 brief BRIEF_N1.md + FABLE_N1_DESIGN.md (fable design).
+// Pure Zag, zero RNG, deterministic. Pinned toolchain znc_linux_x86_64_abed8aa1.
+//
+// Mechanism (byte-level only, anti-bridge line honored):
+//   - STATE: stack of TextStates (id, bytes, source, depth). Sources:
+//     Input(0), KnowledgeCite(1), Inference(2), Assume(3, contradiction setup).
+//     States are independent byte blobs; no shared bindings.
+//   - LICENSES: ~20 fixed byte-pattern idiom recognizers (MP, CONTRA, IMPLIES,
+//     LEMMA, BICON-F/B, DEF, NEGPAIR, UNIV, CONJ-L/R, EXISTS, SUCHTHAT, SUBST,
+//     TRANS, IFF-F/B, THEREFORE, HENCE, ASSUME). Each idiom scans KNOWLEDGE
+//     ITEM BYTES for its shape anchors and mints a license only when the
+//     shape is present. A license = premise patterns (literal/hole segments)
+//     + byte-equality constraints on holes + output template. Holes are
+//     byte-span captures (regex-group-like), never semantic variables.
+//   - STEP: match premise patterns against stack states (byte matching, holes
+//     capture spans, <=3 bindings else the candidate is withheld); check
+//     byte-equality constraints; emit template with holes filled from premise
+//     spans. Every output hole is bound to a span from a premise.
+//   - SEARCH: goal-skeleton-directed forward chaining ("Prove that [X]" -> X),
+//     iterative deepening to `bound` steps (default 100); candidates ordered
+//     by (goal-overlap desc, license_id, premise ids); deterministic.
+//   - CONTRADICTION: shared word >=4 bytes (not stop-listed) with differing
+//     polarity (byte-level negative markers in a +-50 window). Referee defeats
+//     by quality: Input=1000 > Cite=800-100*challenged > Inference=(min prem
+//     - 20*depth); Assume=10 (deliberate simplification, documented in
+//     BUILD_N1.md); +150 per independent corroborating path; +50*distinct/len.
+//     Ties -> deeper defeated -> higher id defeated.
+//   - CONTRA: if a contradiction defeats the Assume state, the CONTRA license
+//     emits the goal skeleton (proof by contradiction, byte-level).
+//   - HONESTY: withhold (no step) if no license matches; if a premise pattern
+//     has >3 bindings; if an output word (>=4 bytes, non-stop) appears in no
+//     premise and no license literal; if depth>10 with zero corroboration.
+//     Withholding is default; every step must be licensed.
+//
+// CLI: n1 <problem-txt> <knowledge-md> <trace-out> [stepbound]
+// Exit: 0 ok | 3 sealed-path refusal | 4 io/parse error | 5 divergence |
+//       64 usage.
+//
+// Trace format (frozen-style, attempt.zag-compatible):
+//   ID / ENGINE / GOAL / LICENSES / STEP n: <claim> [CITES: ...] [RULE: ...]
+//   ANSWER: PROVED: <goal> | WITHHELD
+//   SELF_VERDICT: proved | withheld
+//   FLAGS: none | <list>
+//   TRACE_HASH: <16 hex fnv1a64>
+//
+// znc lessons applied: no == on slices; no as []i32 casts (au_* arenas);
+// struct fields touched only via *T params; bare `return;`; no `};`;
+// _zag_arg non-owned (never freed); recursion used shallowly (proven ok).
+
+@import("../../../deliberation_depth/harness/R33_NATIVE_SHA256_V2.zag")
+@import("../../../deliberation_depth/harness/dlb_util.zag")
+
+// ---------------- context structs ----------------
+// All engine state lives in explicitly allocated arenas (no globals), so the
+// 3x in-process reruns are independent. Structs are flat; fields are touched
+// only through *T parameters (znc ZNC-004/010).
+struct N1C {
+    tx:[]u8, st:[]u8, hm:[]u8, kb:[]u8, ko:[]u8, kl:[]u8,
+    lic:[]u8, pat:[]u8, con:[]u8, otp:[]u8, lpool:[]u8, names:[]u8,
+    htab:[]u8, mb:[]u8, cur:[]u8, tmp:[]u8, stopha:[]u8, chal:[]u8,
+    gb:[]u8, ws:[]u8, cand:[]u8, pb:[]u8
+}
+struct N1S {
+    txn:i32, nst:i32, nk:i32, nlic:i32, nstop:i32, namesn:i32,
+    goal_len:i32, assume_id:i32, bound:i32, steps:i32,
+    proved:i32, pid_len:i32, contra_done:i32, maxd:i32,
+    kb_n:i32, contra_lid:i32
+}
+
+// ---------------- byte utils ----------------
+fn n1_find(h:[]u8,hl:i32,n:[]u8,nl:i32,from:i32)i32 {
+    if(nl<1){return -1;}
+    if(from<0){from=0;}
+    let i:i32=from;
+    while(i+nl<=hl){
+        let k:i32=0;
+        while(k<nl && h[i+k]==n[k]){k=k+1;}
+        if(k==nl){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn n1_fnv32(b:[]u8,off:i32,ln:i32)i32 {
+    let h:i64=2166136261;
+    let i:i32=0;
+    while(i<ln){
+        h=h ^ (b[off+i] as i64);
+        h=h*16777619;
+        i=i+1;
+    }
+    let x:i64=h & 4294967295;
+    if(x>=2147483648){x=x-4294967296;}
+    return x as i32;
+}
+// hex sha256 of b[off..off+ln)
+fn n1_hexsha(b:[]u8,off:i32,ln:i32)[]u8 {
+    let d:[]u8=nio_alloc(32);
+    if(d.len==0){return "";}
+    let rc:i32=ns_sha256(b[off..off+ln],d);
+    if(rc!=0){nio_free(d);return "";}
+    let h:[]u8=ns_hex(d);
+    nio_free(d);
+    return h;
+}
+// case-folded variant (A-Z -> a-z) for stop-word matching
+fn n1_fnv32_fold(b:[]u8,off:i32,ln:i32)i32 {
+    let h:i64=2166136261;
+    let i:i32=0;
+    while(i<ln){
+        let v:i64=b[off+i] as i64;
+        if(v>=65 && v<=90){v=v+32;}
+        h=h ^ v;
+        h=h*16777619;
+        i=i+1;
+    }
+    let x:i64=h & 4294967295;
+    if(x>=2147483648){x=x-4294967296;}
+    return x as i32;
+}
+fn n1_fnv64(b:[]u8,off:i32,ln:i32)i64 {
+    let h:i64=1469598103934665603;
+    let p:i64=1099511628211;
+    let i:i32=0;
+    while(i<ln){
+        h=h ^ (b[off+i] as i64);
+        h=h*p;
+        i=i+1;
+    }
+    return h;
+}
+fn n1_puthex(o:[]u8,pos:i32,v:i64)i32 {
+    let k:i32=15;
+    while(k>=0){
+        let d:i32=((v >> (k*4)) & 15) as i32;
+        let c:u8=0;
+        if(d<10){c=(48+d) as u8;}
+        if(d>=10){c=(87+d) as u8;}
+        o[pos+(15-k)]=c;
+        k=k-1;
+    }
+    return pos+16;
+}
+fn n1_atoi(b:[]u8)i32 {
+    let v:i32=0;
+    let i:i32=0;
+    while(i<b.len && b[i]>=48 && b[i]<=57){
+        v=v*10+((b[i] as i32)-48);
+        i=i+1;
+    }
+    return v;
+}
+fn n1_iswb(c:u8)i32 {
+    if(c>=48 && c<=57){return 1;}
+    if(c>=65 && c<=90){return 1;}
+    if(c>=97 && c<=122){return 1;}
+    return 0;
+}
+fn n1_isalpha(c:u8)i32 {
+    if(c>=65 && c<=90){return 1;}
+    if(c>=97 && c<=122){return 1;}
+    return 0;
+}
+fn n1_has_sealed(p:[]u8)i32 {
+    if(n1_find(p,p.len,"sealed",6,0)>=0){return 1;}
+    return 0;
+}
+fn n1_guarded_read(p:[]u8,buf:[]u8)i64 {
+    if(n1_has_sealed(p)==1){return -99;}
+    return dlb_read_file(p,buf);
+}
+// Find "KEY" at a line start; value slice to EOL trimmed. off/len via pointers.
+fn n1_field(buf:[]u8,n:i32,key:[]u8,off:*i32,len:*i32)void {
+    off.*=-1;
+    len.*=0;
+    let i:i32=0;
+    while(i<n){
+        let ls:i32=1;
+        if(i>0 && buf[i-1]!=10){ls=0;}
+        if(ls==1){
+            let k:i32=0;
+            while(k<key.len && i+k<n && buf[i+k]==key[k]){k=k+1;}
+            if(k==key.len){
+                let s:i32=i+k;
+                let e:i32=s;
+                while(e<n && buf[e]!=10){e=e+1;}
+                while(e>s && (buf[e-1]==13 || buf[e-1]==32 || buf[e-1]==9)){e=e-1;}
+                off.*=s;
+                len.*=e-s;
+                return;
+            }
+        }
+        i=i+1;
+    }
+    return;
+}
+
+// ---------------- stop words + negation markers ----------------
+// Packed stop list (~110 common English words). Membership by sorted fnv32.
+fn n1_stop_words()[]u8 {
+    return "the of and to in is that for it as with was be on are by an at from or this which you we they he she him her his its our your their them us me my mine yours hers ours theirs these those am an a not no but if then than so such only also very can will would should could may might must shall do does did done has have had having been being there here how what when where who whom whose why all any both each few more most other some same own too just into out up down over under again once nor yet still already even ever never always often";
+}
+// stop table: 160 entries x (hash, flag); flag 0 = static, 1 = mined from
+// the store (word in >=5 distinct items). Sorted by hash; binary-searched.
+fn n1_stop_put(c:*N1C,s:*N1S,h:i32,flag:i32)void {
+    let ha:[]u8=c.*.stopha;
+    let n:i32=s.*.nstop;
+    let k:i32=0;
+    while(k<n){
+        if(au_get32(ha,k*2)==h){return;}
+        k=k+1;
+    }
+    if(n>=160){return;}
+    au_put32(ha,n*2,h);
+    au_put32(ha,n*2+1,flag);
+    s.*.nstop=n+1;
+    return;
+}
+fn n1_stop_sort(c:*N1C,s:*N1S)void {
+    let ha:[]u8=c.*.stopha;
+    let n:i32=s.*.nstop;
+    let a:i32=1;
+    while(a<n){
+        let vh:i32=au_get32(ha,a*2);
+        let vf:i32=au_get32(ha,a*2+1);
+        let b:i32=a-1;
+        while(b>=0 && au_get32(ha,b*2)>vh){
+            au_put32(ha,(b+1)*2,au_get32(ha,b*2));
+            au_put32(ha,(b+1)*2+1,au_get32(ha,b*2+1));
+            b=b-1;
+        }
+        au_put32(ha,(b+1)*2,vh);
+        au_put32(ha,(b+1)*2+1,vf);
+        a=a+1;
+    }
+    return;
+}
+fn n1_stop_init(c:*N1C,s:*N1S)void {
+    let w:[]u8=n1_stop_words();
+    let i:i32=0;
+    let done:i32=0;
+    while(i<w.len && done==0){
+        while(i<w.len && w[i]==32){i=i+1;}
+        if(i>=w.len){done=1;}
+        if(done==0){
+            let s0:i32=i;
+            while(i<w.len && w[i]!=32){i=i+1;}
+            n1_stop_put(c,s,n1_fnv32_fold(w,s0,i-s0),0);
+        }
+    }
+    n1_stop_sort(c,s);
+    return;
+}
+// Mine the parsed store: words (len>=3, folded) occurring in >=5 distinct
+// items join the stop list. Scratch regions in c.mb (valid: mining runs
+// before any matching). au_* take ELEMENT indices: hashes [0..160),
+// counts [160..320), occupancy bytes [1280..1440), per-item set [360..488).
+fn n1_stop_mine(c:*N1C,s:*N1S)void {
+    let kb:[]u8=c.*.kb;
+    let mb:[]u8=c.*.mb;
+    let i:i32=0;
+    while(i<1440){mb[i]=0;i=i+1;}
+    let ki:i32=0;
+    while(ki<s.*.nk){
+        let ko:i32=au_get32(c.*.ko,ki);
+        let kl:i32=au_get32(c.*.kl,ki);
+        let wn:i32=0;
+        let pos:i32=ko;
+        let to:i32=0;
+        let tl:i32=0;
+        let done:i32=0;
+        let guard:i32=0;
+        while(guard<5000 && done==0){
+            guard=guard+1;
+            let nx:i32=n1_toknext(kb,pos,ko+kl-pos,&to,&tl);
+            if(nx<0){done=1;}
+            if(done==0){
+                if(tl>=3 && wn<128){
+                    let h:i32=n1_fnv32_fold(kb,to,tl);
+                    let dup:i32=0;
+                    let k:i32=0;
+                    while(k<wn){
+                        if(au_get32(mb,360+k)==h){dup=1;}
+                        k=k+1;
+                    }
+                    if(dup==0){
+                        au_put32(mb,360+wn,h);
+                        wn=wn+1;
+                    }
+                }
+                pos=nx;
+            }
+        }
+        let q:i32=0;
+        while(q<wn){
+            let h2:i32=au_get32(mb,360+q);
+            let f:i32=0;
+            let k2:i32=0;
+            while(k2<160){
+                if(mb[1280+k2]==1 && au_get32(mb,k2)==h2){
+                    au_put32(mb,160+k2,au_get32(mb,160+k2)+1);
+                    f=1;
+                }
+                k2=k2+1;
+            }
+            if(f==0){
+                let k3:i32=0;
+                while(k3<160){
+                    if(mb[1280+k3]==0){
+                        mb[1280+k3]=1;
+                        au_put32(mb,k3,h2);
+                        au_put32(mb,160+k3,1);
+                        k3=999;
+                    }
+                    k3=k3+1;
+                }
+            }
+            q=q+1;
+        }
+        ki=ki+1;
+    }
+    let k4:i32=0;
+    while(k4<160){
+        if(mb[1280+k4]==1 && au_get32(mb,160+k4)>=5){
+            n1_stop_put(c,s,au_get32(mb,k4),1);
+        }
+        k4=k4+1;
+    }
+    n1_stop_sort(c,s);
+    return;
+}
+fn n1_is_stop(c:*N1C,s:*N1S,w:[]u8,off:i32,ln:i32)i32 {
+    let h:i32=n1_fnv32_fold(w,off,ln);
+    let ha:[]u8=c.*.stopha;
+    let lo:i32=0;
+    let hi:i32=s.*.nstop-1;
+    while(lo<=hi){
+        let m:i32=(lo+hi)/2;
+        let v:i32=au_get32(ha,m*2);
+        if(v==h){return 1;}
+        if(v<h){lo=m+1;}
+        if(v>h){hi=m-1;}
+    }
+    return 0;
+}
+// Negative marker hit with word boundaries (markers starting with ' allow a
+// preceding letter, e.g. "don't").
+fn n1_neg_hit(b:[]u8,off:i32,ln:i32,m:[]u8)i32 {
+    let ml:i32=m.len;
+    let i:i32=n1_find(b,off+ln,m,ml,off);
+    while(i>=0){
+        let lb:i32=1;
+        if(i>off && n1_iswb(b[i-1])==1){lb=0;}
+        if(m[0]==39){lb=1;}
+        let rb:i32=1;
+        if(i+ml<off+ln && n1_iswb(b[i+ml])==1){rb=0;}
+        if(lb==1 && rb==1){return 1;}
+        i=n1_find(b,off+ln,m,ml,i+1);
+    }
+    return 0;
+}
+fn n1_has_neg(b:[]u8,off:i32,ln:i32)i32 {
+    if(n1_neg_hit(b,off,ln,"not")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"no")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"never")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"cannot")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"n't")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"neither")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"none")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"nothing")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"without")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"impossible")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"false")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"fail to")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"fails")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"lack")==1){return 1;}
+    if(n1_neg_hit(b,off,ln,"lacks")==1){return 1;}
+    return 0;
+}
+// Polarity of the word at wpos inside state bytes [off,off+ln): 1 negative.
+fn n1_polarity(b:[]u8,off:i32,ln:i32,wpos:i32)i32 {
+    let ws:i32=off;
+    if(wpos-50>ws){ws=wpos-50;}
+    let we:i32=off+ln;
+    if(wpos+60<we){we=wpos+60;}
+    return n1_has_neg(b,ws,we-ws);
+}
+
+// ---------------- init ----------------
+fn n1_init(c:*N1C,s:*N1S)i32 {
+    let tx:[]u8=nio_alloc(2000000);
+    let st:[]u8=nio_alloc(600*16*4);
+    let hm:[]u8=nio_alloc(600*24*4);
+    let kb:[]u8=nio_alloc(262144);
+    let ko:[]u8=nio_alloc(64*4);
+    let kl:[]u8=nio_alloc(64*4);
+    let lic:[]u8=nio_alloc(64*16*4);
+    let pat:[]u8=nio_alloc(64*75*4);
+    let con:[]u8=nio_alloc(64*16*4);
+    let otp:[]u8=nio_alloc(64*33*4);
+    let lpool:[]u8=nio_alloc(64*2048);
+    let names:[]u8=nio_alloc(4096);
+    let htab:[]u8=nio_alloc(64*12*2*4);
+    let mb:[]u8=nio_alloc(4096);
+    let cur:[]u8=nio_alloc(64);
+    let tmp:[]u8=nio_alloc(8192);
+    let stopha:[]u8=nio_alloc(160*8);
+    let chal:[]u8=nio_alloc(64*4);
+    let gb:[]u8=nio_alloc(2048);
+    let ws:[]u8=nio_alloc(64*2*4);
+    let cand:[]u8=nio_alloc((2000*6+1)*4);
+    let pb:[]u8=nio_alloc(256);
+    if(tx.len==0 || st.len==0 || hm.len==0 || kb.len==0 || lic.len==0){return -1;}
+    if(pat.len==0 || con.len==0 || otp.len==0 || lpool.len==0){return -1;}
+    if(mb.len==0 || tmp.len==0 || stopha.len==0 || cand.len==0){return -1;}
+    c.*.tx=tx; c.*.st=st; c.*.hm=hm; c.*.kb=kb; c.*.ko=ko; c.*.kl=kl;
+    c.*.lic=lic; c.*.pat=pat; c.*.con=con; c.*.otp=otp; c.*.lpool=lpool;
+    c.*.names=names; c.*.htab=htab; c.*.mb=mb; c.*.cur=cur; c.*.tmp=tmp;
+    c.*.stopha=stopha; c.*.chal=chal; c.*.gb=gb; c.*.ws=ws; c.*.cand=cand;
+    c.*.pb=pb;
+    // hole-map sentinel: prem -1 = no entry (nio_alloc zeroes, 0 is a valid id)
+    let he:i32=0;
+    while(he<600*6){
+        au_put32(hm,he*4+0,-1);
+        he=he+1;
+    }
+    s.*.txn=0; s.*.nst=0; s.*.nk=0; s.*.nlic=0; s.*.nstop=0; s.*.namesn=0;
+    s.*.goal_len=0; s.*.assume_id=-1; s.*.bound=100; s.*.steps=0;
+    s.*.proved=0; s.*.pid_len=0; s.*.contra_done=0; s.*.maxd=0;
+    s.*.kb_n=0; s.*.contra_lid=-1;
+    return 0;
+}
+fn n1_free(c:*N1C)void {
+    nio_free(c.*.tx); nio_free(c.*.st); nio_free(c.*.hm); nio_free(c.*.kb);
+    nio_free(c.*.ko); nio_free(c.*.kl); nio_free(c.*.lic); nio_free(c.*.pat);
+    nio_free(c.*.con); nio_free(c.*.otp); nio_free(c.*.lpool); nio_free(c.*.names);
+    nio_free(c.*.htab); nio_free(c.*.mb); nio_free(c.*.cur); nio_free(c.*.tmp);
+    nio_free(c.*.stopha); nio_free(c.*.chal); nio_free(c.*.gb); nio_free(c.*.ws);
+    nio_free(c.*.cand); nio_free(c.*.pb);
+    return;
+}
+
+// ---------------- state table ----------------
+// st stride 16 i32s: 0 id,1 depth,2 src,3 aux(kid|lic),4 boff,5 blen,
+// 6 defeated,7 nprem,8..11 prem ids,12 flags,13..15 spare
+// hm stride 24 i32s: 6 x (prem,hid,off,len)
+fn n1_sg(c:*N1C,id:i32,f:i32)i32 { return au_get32(c.*.st,id*16+f); }
+fn n1_sp(c:*N1C,id:i32,f:i32,v:i32)void { au_put32(c.*.st,id*16+f,v); return; }
+fn n1_lg(c:*N1C,lid:i32,f:i32)i32 { return au_get32(c.*.lic,lid*16+f); }
+fn n1_lq(c:*N1C,lid:i32,f:i32,v:i32)void { au_put32(c.*.lic,lid*16+f,v); return; }
+fn n1_txapp(c:*N1C,s:*N1S,b:[]u8,ln:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    if(s.*.txn+ln>tx.len){return -1;}
+    let o:i32=s.*.txn;
+    let i:i32=0;
+    while(i<ln){tx[o+i]=b[i];i=i+1;}
+    s.*.txn=o+ln;
+    return o;
+}
+// Add a state. Returns id (>=0); *isnew=1 if freshly inserted, 0 if dedup hit,
+// -1 on table full. Dedup: byte-equal non-defeated state with overlapping
+// premise sets (or both premiseless) -> existing id; byte-equal with disjoint
+// premises is allowed (corroboration), capped at 3.
+fn n1_add_state(c:*N1C,s:*N1S,src:i32,aux:i32,boff:i32,blen:i32,depth:i32,p0:i32,p1:i32,p2:i32,p3:i32,np:i32,isnew:*i32)i32 {
+    isnew.*=0;
+    if(s.*.nst>=600){return -1;}
+    let tx:[]u8=c.*.tx;
+    let t:i32=0;
+    let dups:i32=0;
+    while(t<s.*.nst){
+        if(n1_sg(c,t,6)==0 && n1_sg(c,t,5)==blen){
+            let to:i32=n1_sg(c,t,4);
+            if(nio_equal(tx[to..to+blen],tx[boff..boff+blen])==1){
+                let tnp:i32=n1_sg(c,t,7);
+                if(np==0 && tnp==0){return t;}
+                // premise overlap?
+                let ov:i32=0;
+                let a:i32=0;
+                while(a<np){
+                    let pa:i32=-1;
+                    if(a==0){pa=p0;}
+                    if(a==1){pa=p1;}
+                    if(a==2){pa=p2;}
+                    if(a==3){pa=p3;}
+                    let b:i32=0;
+                    while(b<tnp){
+                        if(pa==n1_sg(c,t,8+b)){ov=1;}
+                        b=b+1;
+                    }
+                    a=a+1;
+                }
+                if(ov==1){return t;}
+                dups=dups+1;
+                if(dups>=3){return t;}
+            }
+        }
+        t=t+1;
+    }
+    let id:i32=s.*.nst;
+    n1_sp(c,id,0,id);
+    n1_sp(c,id,1,depth);
+    n1_sp(c,id,2,src);
+    n1_sp(c,id,3,aux);
+    n1_sp(c,id,4,boff);
+    n1_sp(c,id,5,blen);
+    n1_sp(c,id,6,0);
+    n1_sp(c,id,7,np);
+    n1_sp(c,id,8,p0);
+    n1_sp(c,id,9,p1);
+    n1_sp(c,id,10,p2);
+    n1_sp(c,id,11,p3);
+    n1_sp(c,id,12,0);
+    s.*.nst=id+1;
+    if(depth>s.*.maxd){s.*.maxd=depth;}
+    isnew.*=1;
+    return id;
+}
+fn n1_hm_put(c:*N1C,id:i32,e:i32,prem:i32,hid:i32,off:i32,ln:i32)void {
+    let base:i32=id*24+e*4;
+    au_put32(c.*.hm,base+0,prem);
+    au_put32(c.*.hm,base+1,hid);
+    au_put32(c.*.hm,base+2,off);
+    au_put32(c.*.hm,base+3,ln);
+    return;
+}
+
+// ---------------- knowledge parsing ----------------
+// Item formats (both supported; pinned format is the NL one):
+//   NL: "[K005] (axiom)" header line, then text line(s) until a blank line
+//       or the next header. (KNOWLEDGE_STORE_NL.md, frozen.)
+//   old: "K005 <text...>" single line.
+// ko/kl: offset/len of the item TEXT in c.kb. Item text excludes the header.
+fn n1_is_nl_hdr(src:[]u8,i:i32,kn:i32)i32 {
+    if(i+5>=kn){return 0;}
+    if(src[i]!=91 || src[i+1]!=75){return 0;}
+    if(src[i+2]<48 || src[i+2]>57){return 0;}
+    if(src[i+3]<48 || src[i+3]>57){return 0;}
+    if(src[i+4]<48 || src[i+4]>57){return 0;}
+    if(src[i+5]!=93){return 0;}
+    return 1;
+}
+fn n1_eol(src:[]u8,i:i32,kn:i32)i32 {
+    let e:i32=i;
+    while(e<kn && src[e]!=10){e=e+1;}
+    return e;
+}
+// blank line (only whitespace) ?
+fn n1_blank(src:[]u8,s:i32,e:i32)i32 {
+    let i:i32=s;
+    while(i<e){
+        if(src[i]!=32 && src[i]!=9 && src[i]!=13){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+fn n1_kb_copy(c:*N1C,s:*N1S,src:[]u8,ts:i32,te:i32)i32 {
+    let kb:[]u8=c.*.kb;
+    // trim trailing whitespace
+    while(te>ts && (src[te-1]==13 || src[te-1]==32 || src[te-1]==9)){te=te-1;}
+    if(te<=ts){return 0;}
+    if(s.*.kb_n+te-ts>kb.len){return -1;}
+    let kbn:i32=s.*.kb_n;
+    let q:i32=0;
+    while(q<te-ts){kb[kbn+q]=src[ts+q];q=q+1;}
+    au_put32(c.*.ko,s.*.nk,kbn);
+    au_put32(c.*.kl,s.*.nk,te-ts);
+    s.*.kb_n=kbn+te-ts;
+    s.*.nk=s.*.nk+1;
+    return 1;
+}
+fn n1_parse_k(c:*N1C,s:*N1S,src:[]u8,kn:i32)i32 {
+    let i:i32=0;
+    while(i<kn && s.*.nk<64){
+        let ls:i32=1;
+        if(i>0 && src[i-1]!=10){ls=0;}
+        let handled:i32=0;
+        if(ls==1 && n1_is_nl_hdr(src,i,kn)==1){
+            // NL item: gather text lines after the header (joined by single
+            // spaces) until a blank line or the next header.
+            let e:i32=n1_eol(src,i,kn);
+            let tcur:i32=e+1;
+            let tmp:[]u8=c.*.tmp;
+            let tl:i32=0;
+            let guard:i32=0;
+            let hdrterm:i32=0;
+            while(tcur<kn && guard<50){
+                guard=guard+1;
+                let le:i32=n1_eol(src,tcur,kn);
+                let term:i32=0;
+                if(n1_blank(src,tcur,le)==1){term=1;}
+                if(n1_is_nl_hdr(src,tcur,kn)==1){term=1;hdrterm=1;}
+                if(term==1){
+                    if(hdrterm==0){tcur=le;}
+                    guard=999;
+                }
+                if(guard<999){
+                    if(tl>0){tmp[tl]=32;tl=tl+1;}
+                    let q:i32=tcur;
+                    while(q<le && tl<8190){tmp[tl]=src[q];tl=tl+1;q=q+1;}
+                    tcur=le+1;
+                }
+            }
+            if(tl>0){
+                let rc:i32=n1_kb_copy(c,s,tmp,0,tl);
+                if(rc<0){return -1;}
+            }
+            i=tcur+1;
+            if(hdrterm==1){i=tcur;}
+            handled=1;
+        }
+        if(handled==0 && ls==1 && i+5<kn && src[i]==75 && src[i+4]==32){
+            let ok:i32=1;
+            let d:i32=1;
+            while(d<4){
+                if(src[i+d]<48 || src[i+d]>57){ok=0;}
+                d=d+1;
+            }
+            if(ok==1){
+                let e:i32=n1_eol(src,i,kn);
+                let rc:i32=n1_kb_copy(c,s,src,i+5,e);
+                if(rc<0){return -1;}
+                i=e+1;
+            }
+            if(ok==0){i=i+1;}
+            handled=1;
+        }
+        if(handled==0){i=i+1;}
+    }
+    return 0;
+}
+
+// ---------------- license construction ----------------
+// lic stride 16: 0 id,1 kind,2 nprem,3 ncon,4 onseg,5 nameoff,6 namelen,
+// 7 kid,8 srcoff,9 srclen,10 anchor_prem,11 nholes,12 lpool_end,13..15 spare
+// pat: per license 3 premises x (1+8*3) i32s; seg: (kind, a, b) kind 0=lit
+//   (a=lpool off,b=len), 1=hole (a=hid)
+// con: per license 4 x (pa,ha,pb,hb)
+// otp: per license (1+8*4): seg (kind,a,b,prem); hole: a=hid,prem=prem idx
+// lpool: per license 2048 bytes; htab: per license 12 x (tokoff,toklen)
+fn n1_lic_new(c:*N1C,s:*N1S,name:[]u8,kind:i32,kid:i32,srcoff:i32,srclen:i32)i32 {
+    if(s.*.nlic>=64){return -1;}
+    if(s.*.namesn+name.len>c.*.names.len){return -1;}
+    let lid:i32=s.*.nlic;
+    let names:[]u8=c.*.names;
+    let no:i32=s.*.namesn;
+    let i:i32=0;
+    while(i<name.len){names[no+i]=name[i];i=i+1;}
+    s.*.namesn=no+name.len;
+    n1_lq(c,lid,0,lid);
+    n1_lq(c,lid,1,kind);
+    n1_lq(c,lid,2,0);
+    n1_lq(c,lid,3,0);
+    n1_lq(c,lid,4,0);
+    n1_lq(c,lid,5,no);
+    n1_lq(c,lid,6,name.len);
+    n1_lq(c,lid,7,kid);
+    n1_lq(c,lid,8,srcoff);
+    n1_lq(c,lid,9,srclen);
+    n1_lq(c,lid,10,0);
+    n1_lq(c,lid,11,0);
+    n1_lq(c,lid,12,0);
+    s.*.nlic=lid+1;
+    return lid;
+}
+fn n1_litapp(c:*N1C,lid:i32,b:[]u8,ln:i32)i32 {
+    let e:i32=n1_lg(c,lid,12);
+    if(e+ln>2048 || ln<0){return -1;}
+    let lp:[]u8=c.*.lpool;
+    let base:i32=lid*2048;
+    let i:i32=0;
+    while(i<ln){lp[base+e+i]=b[i];i=i+1;}
+    n1_lq(c,lid,12,e+ln);
+    return e;
+}
+fn n1_hole_find(c:*N1C,lid:i32,tok:[]u8,tl:i32)i32 {
+    let nh:i32=n1_lg(c,lid,11);
+    let lp:[]u8=c.*.lpool;
+    let base:i32=lid*2048;
+    let h:i32=0;
+    while(h<nh){
+        let to:i32=au_get32(c.*.htab,(lid*12+h)*2+0);
+        let tn:i32=au_get32(c.*.htab,(lid*12+h)*2+1);
+        if(tn==tl && to>=0){
+            if(nio_equal(lp[base+to..base+to+tn],tok)==1){return h;}
+        }
+        h=h+1;
+    }
+    return -1;
+}
+fn n1_hole_new(c:*N1C,lid:i32)i32 {
+    let nh:i32=n1_lg(c,lid,11);
+    if(nh>=12){return -1;}
+    au_put32(c.*.htab,(lid*12+nh)*2+0,-1);
+    au_put32(c.*.htab,(lid*12+nh)*2+1,0);
+    n1_lq(c,lid,11,nh+1);
+    return nh;
+}
+fn n1_hole_for(c:*N1C,lid:i32,tok:[]u8,tl:i32)i32 {
+    let h:i32=n1_hole_find(c,lid,tok,tl);
+    if(h>=0){return h;}
+    let nh:i32=n1_lg(c,lid,11);
+    if(nh>=12){return -1;}
+    let e:i32=n1_litapp(c,lid,tok,tl);
+    if(e<0){return -1;}
+    au_put32(c.*.htab,(lid*12+nh)*2+0,e);
+    au_put32(c.*.htab,(lid*12+nh)*2+1,tl);
+    n1_lq(c,lid,11,nh+1);
+    return nh;
+}
+// premise pattern segment append (merges adjacent literals)
+fn n1_pseg(c:*N1C,lid:i32,pi:i32,kind:i32,a:i32,b:i32)void {
+    let base:i32=(lid*3+pi)*25;
+    let n:i32=au_get32(c.*.pat,base);
+    if(n>=8){return;}
+    if(kind==0 && n>0){
+        let pk:i32=au_get32(c.*.pat,base+1+(n-1)*3+0);
+        if(pk==0){
+            let pa:i32=au_get32(c.*.pat,base+1+(n-1)*3+1);
+            let pb:i32=au_get32(c.*.pat,base+1+(n-1)*3+2);
+            if(pa+pb==a){
+                au_put32(c.*.pat,base+1+(n-1)*3+2,pb+b);
+                return;
+            }
+        }
+    }
+    au_put32(c.*.pat,base+1+n*3+0,kind);
+    au_put32(c.*.pat,base+1+n*3+1,a);
+    au_put32(c.*.pat,base+1+n*3+2,b);
+    au_put32(c.*.pat,base,n+1);
+    return;
+}
+fn n1_con(c:*N1C,lid:i32,pa:i32,ha:i32,pb:i32,hb:i32)void {
+    let n:i32=n1_lg(c,lid,3);
+    if(n>=4){return;}
+    let base:i32=(lid*4+n)*4;
+    au_put32(c.*.con,base+0,pa);
+    au_put32(c.*.con,base+1,ha);
+    au_put32(c.*.con,base+2,pb);
+    au_put32(c.*.con,base+3,hb);
+    n1_lq(c,lid,3,n+1);
+    return;
+}
+fn n1_oseg(c:*N1C,lid:i32,kind:i32,a:i32,b:i32,prem:i32)void {
+    let base:i32=lid*33;
+    let n:i32=au_get32(c.*.otp,base);
+    if(n>=8){return;}
+    au_put32(c.*.otp,base+1+n*4+0,kind);
+    au_put32(c.*.otp,base+1+n*4+1,a);
+    au_put32(c.*.otp,base+1+n*4+2,b);
+    au_put32(c.*.otp,base+1+n*4+3,prem);
+    au_put32(c.*.otp,base,n+1);
+    return;
+}
+// next alnum token in b[off..off+ln); sets *to,*tl; returns offset after token or -1
+fn n1_toknext(b:[]u8,off:i32,ln:i32,to:*i32,tl:*i32)i32 {
+    let e:i32=off+ln;
+    let i:i32=off;
+    while(i<e && n1_iswb(b[i])==0){i=i+1;}
+    if(i>=e){return -1;}
+    let s0:i32=i;
+    while(i<e && n1_iswb(b[i])==1){i=i+1;}
+    to.*=s0;
+    tl.*=i-s0;
+    return i;
+}
+// Build a premise pattern from tokenized span b[off..off+ln).
+// Single-letter alpha tokens become holes (byte-shape rule, no semantics);
+// everything else stays literal. rec=1: record hole->first-premise and add
+// cross-premise equality constraints (same surface token => same hole id).
+fn n1_tokpat(c:*N1C,lid:i32,pi:i32,b:[]u8,off:i32,ln:i32,rec:i32)i32 {
+    let cur:[]u8=c.*.cur;
+    let e:i32=off+ln;
+    let pos:i32=off;
+    let prev:i32=off;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    while(guard<500){
+        guard=guard+1;
+        let nx:i32=n1_toknext(b,pos,e-pos,&to,&tl);
+        if(nx<0){
+            if(prev<e){
+                let lo:i32=n1_litapp(c,lid,b[prev..e],e-prev);
+                if(lo>=0){n1_pseg(c,lid,pi,0,lo,e-prev);}
+            }
+            return 0;
+        }
+        if(to>prev){
+            let lo:i32=n1_litapp(c,lid,b[prev..to],to-prev);
+            if(lo>=0){n1_pseg(c,lid,pi,0,lo,to-prev);}
+        }
+        let ishole:i32=0;
+        if(tl==1 && n1_isalpha(b[to])==1){ishole=1;}
+        if(ishole==1){
+            let h:i32=n1_hole_for(c,lid,b[to..to+1],1);
+            if(h>=0){
+                n1_pseg(c,lid,pi,1,h,0);
+                if(rec==1){
+                    let fp:i32=au_get32(cur,h);
+                    if(fp<0){au_put32(cur,h,pi);}
+                    if(fp>=0 && fp!=pi){n1_con(c,lid,fp,h,pi,h);}
+                }
+            }
+        }
+        if(ishole==0){
+            let lo:i32=n1_litapp(c,lid,b[to..to+tl],tl);
+            if(lo>=0){n1_pseg(c,lid,pi,0,lo,tl);}
+        }
+        prev=nx;
+        pos=nx;
+    }
+    return 0;
+}
+// Build an output template from tokenized span: hole iff the token surface
+// already has a hole id from the premises (else literal, so every output hole
+// is bound to a premise span).
+fn n1_tokout(c:*N1C,lid:i32,b:[]u8,off:i32,ln:i32,prem_of:i32)i32 {
+    let e:i32=off+ln;
+    let pos:i32=off;
+    let prev:i32=off;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    while(guard<500){
+        guard=guard+1;
+        let nx:i32=n1_toknext(b,pos,e-pos,&to,&tl);
+        if(nx<0){
+            if(prev<e){
+                let lo:i32=n1_litapp(c,lid,b[prev..e],e-prev);
+                if(lo>=0){n1_oseg(c,lid,0,lo,e-prev,0);}
+            }
+            return 0;
+        }
+        if(to>prev){
+            let lo:i32=n1_litapp(c,lid,b[prev..to],to-prev);
+            if(lo>=0){n1_oseg(c,lid,0,lo,to-prev,0);}
+        }
+        // find which premise first introduced this token's hole
+        let h:i32=n1_hole_find(c,lid,b[to..to+tl],tl);
+        let hp:i32=-1;
+        if(h>=0){hp=au_get32(c.*.cur,h);}
+        if(h>=0 && hp>=0){
+            n1_oseg(c,lid,1,h,0,hp);
+        }
+        if(h<0 || hp<0){
+            let lo:i32=n1_litapp(c,lid,b[to..to+tl],tl);
+            if(lo>=0){n1_oseg(c,lid,0,lo,tl,0);}
+        }
+        prev=nx;
+        pos=nx;
+    }
+    return 0;
+}
+// anchor premise = most literal bytes (for candidate enumeration order)
+fn n1_anchor(c:*N1C,lid:i32)i32 {
+    let np:i32=n1_lg(c,lid,2);
+    let best:i32=0;
+    let bestn:i32=-1;
+    let pi:i32=0;
+    while(pi<np){
+        let base:i32=(lid*3+pi)*25;
+        let n:i32=au_get32(c.*.pat,base);
+        let lit:i32=0;
+        let q:i32=0;
+        while(q<n){
+            if(au_get32(c.*.pat,base+1+q*3+0)==0){
+                lit=lit+au_get32(c.*.pat,base+1+q*3+2);
+            }
+            q=q+1;
+        }
+        if(lit>bestn){bestn=lit;best=pi;}
+        pi=pi+1;
+    }
+    n1_lq(c,lid,10,best);
+    return best;
+}
+fn n1_cur_init(c:*N1C)void {
+    let i:i32=0;
+    while(i<12){au_put32(c.*.cur,i,-1);i=i+1;}
+    return;
+}
+
+// ---------------- idiom recognizers ----------------
+// Each idiom scans a knowledge item's bytes for its fixed shape anchors and
+// mints a license ONLY when the shape is present. The license's literals are
+// the item's own words (or the idiom's fixed bytes for generic shapes like
+// MP); holes are single-letter tokens (byte-shape rule).
+fn n1_mint_item(c:*N1C,s:*N1S,ki:i32)void {
+    let kb:[]u8=c.*.kb;
+    let ko:i32=au_get32(c.*.ko,ki);
+    let kln:i32=au_get32(c.*.kl,ki);
+    let ts:i32=ko; // item text starts at ko (both formats store text-only)
+    let te:i32=ko+kln;
+    if(ts>=te){return;}
+    let a:i32=0;
+    let b:i32=0;
+    let lid:i32=0;
+    let h0:i32=0;
+    let h1:i32=0;
+    let h2:i32=0;
+    let lo:i32=0;
+    // 1. MP: "modus ponens (" ... ")". The license is the fixed generic
+    // modus-ponens shape ([h0]; [h0]=>[h1] => [h1]); it mints when the item
+    // states the modus-ponens scheme between parens. (The "=>" connective is
+    // the license's own fixed byte shape, not item content.)
+    a=n1_find(kb,te,"modus ponens (",14,ts);
+    if(a>=0){
+        b=n1_find(kb,te,")",1,a+14);
+        if(b>a){
+            lid=n1_lic_new(c,s,"MP",0,ki,a,b-a);
+            if(lid>=0){
+                n1_cur_init(c);
+                h0=n1_hole_new(c,lid);
+                h1=n1_hole_new(c,lid);
+                n1_pseg(c,lid,0,1,h0,0);
+                n1_pseg(c,lid,1,1,h0,0);
+                lo=n1_litapp(c,lid,"=>",2);
+                n1_pseg(c,lid,1,0,lo,2);
+                n1_pseg(c,lid,1,1,h1,0);
+                n1_con(c,lid,0,h0,1,h0);
+                n1_oseg(c,lid,1,h1,0,1);
+                n1_lq(c,lid,2,2);
+                n1_anchor(c,lid);
+            }
+        }
+    }
+    // 2. CONTRA: "proof by contradiction (" ... ")"
+    a=n1_find(kb,te,"proof by contradiction (",24,ts);
+    if(a>=0){
+        b=n1_find(kb,te,")",1,a+24);
+        if(b>a && n1_find(kb,b,"contradiction",13,a+24)>=0){
+            lid=n1_lic_new(c,s,"CONTRA",1,ki,a,b-a);
+            if(lid>=0){s.*.contra_lid=lid;}
+        }
+    }
+    // 3. IMPLIES: " implies "
+    a=n1_find(kb,te," implies ",9,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"IMPLIES",0,ki,a,9);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            n1_pseg(c,lid,1,1,h0,0);
+            lo=n1_litapp(c,lid," implies ",9);
+            n1_pseg(c,lid,1,0,lo,9);
+            n1_pseg(c,lid,1,1,h1,0);
+            n1_con(c,lid,0,h0,1,h0);
+            n1_oseg(c,lid,1,h1,0,1);
+            n1_lq(c,lid,2,2);
+            n1_anchor(c,lid);
+        }
+    }
+    // 4. LEMMA: "if [C], then [Q]"
+    a=n1_find(kb,te,"if ",3,ts);
+    if(a>=0){
+        b=n1_find(kb,te,", then ",7,a+3);
+        if(b>a+3){
+            let cs:i32=a+3;
+            let ce:i32=b;
+            let qs:i32=b+7;
+            // split C on " and " (max 3 parts)
+            let p0s:i32=cs;
+            let p0e:i32=ce;
+            let p1s:i32=-1;
+            let p1e:i32=-1;
+            let p2s:i32=-1;
+            let p2e:i32=-1;
+            let np2:i32=1;
+            let sp:i32=n1_find(kb,ce," and ",5,cs);
+            if(sp>=0){
+                p0e=sp;
+                p1s=sp+5;
+                p1e=ce;
+                np2=2;
+                let sp2:i32=n1_find(kb,ce," and ",5,p1s);
+                if(sp2>=0){
+                    p1e=sp2;
+                    p2s=sp2+5;
+                    p2e=ce;
+                    np2=3;
+                    if(n1_find(kb,ce," and ",5,p2s)>=0){np2=9;}
+                }
+            }
+            if(np2<=3){
+                lid=n1_lic_new(c,s,"LEMMA",0,ki,a,te-a);
+                if(lid>=0){
+                    n1_cur_init(c);
+                    n1_tokpat(c,lid,0,kb,p0s,p0e-p0s,1);
+                    if(np2>=2){n1_tokpat(c,lid,1,kb,p1s,p1e-p1s,1);}
+                    if(np2>=3){n1_tokpat(c,lid,2,kb,p2s,p2e-p2s,1);}
+                    n1_tokout(c,lid,kb,qs,te-qs,0);
+                    n1_lq(c,lid,2,np2);
+                    n1_anchor(c,lid);
+                }
+            }
+        }
+    }
+    // 5/6. BICON-F/B: "[A] iff [B]"
+    a=n1_find(kb,te," iff ",5,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"BICON-F",0,ki,a,5);
+        if(lid>=0){
+            n1_cur_init(c);
+            n1_tokpat(c,lid,0,kb,ts,a-ts,1);
+            n1_tokout(c,lid,kb,a+5,te-(a+5),0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+        lid=n1_lic_new(c,s,"BICON-B",0,ki,a,5);
+        if(lid>=0){
+            n1_cur_init(c);
+            n1_tokpat(c,lid,0,kb,a+5,te-(a+5),1);
+            n1_tokout(c,lid,kb,ts,a-ts,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    // 7. DEF: "TERM: rest" (term before first ": ", colon within 48 bytes)
+    a=n1_find(kb,te,": ",2,ts);
+    if(a>=0 && a-ts<48 && a-ts>0){
+        let t0:i32=ts;
+        if(kb[ts]==91){
+            let cb:i32=n1_find(kb,a,"]",1,ts);
+            if(cb>=0){t0=cb+1;}
+            while(t0<a && kb[t0]==32){t0=t0+1;}
+        }
+        if(t0<a){
+            lid=n1_lic_new(c,s,"DEF",0,ki,t0,a-t0);
+            if(lid>=0){
+                n1_cur_init(c);
+                h0=n1_hole_new(c,lid);
+                lo=n1_litapp(c,lid,kb[t0..a],a-t0);
+                n1_pseg(c,lid,0,0,lo,a-t0);
+                lo=n1_litapp(c,lid,": ",2);
+                n1_pseg(c,lid,0,0,lo,2);
+                n1_pseg(c,lid,0,1,h0,0);
+                lo=n1_litapp(c,lid,kb[t0..a],a-t0);
+                n1_oseg(c,lid,0,lo,a-t0,0);
+                lo=n1_litapp(c,lid," means: ",8);
+                n1_oseg(c,lid,0,lo,8,0);
+                n1_oseg(c,lid,1,h0,0,0);
+                n1_lq(c,lid,2,1);
+                n1_anchor(c,lid);
+            }
+        }
+    }
+    // 8. NEGPAIR: " is not "  (P1: "[h0] is [h1]", P2: "[h0] is not [h1]")
+    a=n1_find(kb,te," is not ",8,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"NEGPAIR",0,ki,a,8);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid," is ",4);
+            n1_pseg(c,lid,0,0,lo,4);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_pseg(c,lid,1,1,h0,0);
+            lo=n1_litapp(c,lid," is not ",8);
+            n1_pseg(c,lid,1,0,lo,8);
+            n1_pseg(c,lid,1,1,h1,0);
+            n1_con(c,lid,0,h0,1,h0);
+            n1_con(c,lid,0,h1,1,h1);
+            lo=n1_litapp(c,lid,"contradiction: ",14);
+            n1_oseg(c,lid,0,lo,14,0);
+            n1_oseg(c,lid,1,h0,0,0);
+            lo=n1_litapp(c,lid," is and is not ",15);
+            n1_oseg(c,lid,0,lo,15,0);
+            n1_oseg(c,lid,1,h1,0,0);
+            n1_lq(c,lid,2,2);
+            n1_anchor(c,lid);
+        }
+    }
+    // 9. UNIV: "for all "/"for every " ... ", "
+    a=n1_find(kb,te,"for all ",8,ts);
+    if(a<0){a=n1_find(kb,te,"for every ",10,ts);}
+    if(a>=0){
+        let al2:i32=8;
+        if(kb[a+3]==101){al2=10;}
+        b=n1_find(kb,te,", ",2,a+al2);
+        if(b>a+al2){
+            lid=n1_lic_new(c,s,"UNIV",0,ki,a,al2);
+            if(lid>=0){
+                n1_cur_init(c);
+                h0=n1_hole_new(c,lid);
+                h1=n1_hole_new(c,lid);
+                lo=n1_litapp(c,lid,kb[a..a+al2],al2);
+                n1_pseg(c,lid,0,0,lo,al2);
+                n1_pseg(c,lid,0,1,h0,0);
+                lo=n1_litapp(c,lid,", ",2);
+                n1_pseg(c,lid,0,0,lo,2);
+                n1_pseg(c,lid,0,1,h1,0);
+                n1_oseg(c,lid,1,h1,0,0);
+                n1_lq(c,lid,2,1);
+                n1_anchor(c,lid);
+            }
+        }
+    }
+    // 10/11. CONJ-L/R: "[h0] and [h1]"
+    a=n1_find(kb,te," and ",5,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"CONJ-L",0,ki,a,5);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid," and ",5);
+            n1_pseg(c,lid,0,0,lo,5);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_oseg(c,lid,1,h0,0,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+        lid=n1_lic_new(c,s,"CONJ-R",0,ki,a,5);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid," and ",5);
+            n1_pseg(c,lid,0,0,lo,5);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_oseg(c,lid,1,h1,0,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    // 12. EXISTS: "there exists [h0] with [h1]"
+    a=n1_find(kb,te,"there exists ",13,ts);
+    if(a>=0){
+        b=n1_find(kb,te," with ",6,a+13);
+        if(b>a+13){
+            lid=n1_lic_new(c,s,"EXISTS",0,ki,a,13);
+            if(lid>=0){
+                n1_cur_init(c);
+                h0=n1_hole_new(c,lid);
+                h1=n1_hole_new(c,lid);
+                lo=n1_litapp(c,lid,"there exists ",13);
+                n1_pseg(c,lid,0,0,lo,13);
+                n1_pseg(c,lid,0,1,h0,0);
+                lo=n1_litapp(c,lid," with ",6);
+                n1_pseg(c,lid,0,0,lo,6);
+                n1_pseg(c,lid,0,1,h1,0);
+                n1_oseg(c,lid,1,h1,0,0);
+                n1_lq(c,lid,2,1);
+                n1_anchor(c,lid);
+            }
+        }
+    }
+    // 13. SUCHTHAT: "[h0] such that [h1]"
+    a=n1_find(kb,te," such that ",11,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"SUCHTHAT",0,ki,a,11);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid," such that ",11);
+            n1_pseg(c,lid,0,0,lo,11);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_oseg(c,lid,1,h1,0,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    // 14. SUBST (kind 2): "[h0]=[h1]" equation + replace in another state
+    a=n1_find(kb,te," = ",3,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"SUBST",2,ki,a,3);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid,"=",1);
+            n1_pseg(c,lid,0,0,lo,1);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+        // 15. TRANS: "[h0]=[h1]", "[h1]=[h2]" -> "[h0]=[h2]"
+        lid=n1_lic_new(c,s,"TRANS",0,ki,a,3);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            h2=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid,"=",1);
+            n1_pseg(c,lid,0,0,lo,1);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_pseg(c,lid,1,1,h1,0);
+            lo=n1_litapp(c,lid,"=",1);
+            n1_pseg(c,lid,1,0,lo,1);
+            n1_pseg(c,lid,1,1,h2,0);
+            n1_con(c,lid,0,h1,1,h1);
+            n1_oseg(c,lid,1,h0,0,0);
+            lo=n1_litapp(c,lid,"=",1);
+            n1_oseg(c,lid,0,lo,1,0);
+            n1_oseg(c,lid,1,h2,0,1);
+            n1_lq(c,lid,2,2);
+            n1_anchor(c,lid);
+        }
+    }
+    // 16/17. IFF-F/B: "[A] if and only if [B]"
+    a=n1_find(kb,te,"if and only if",14,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"IFF-F",0,ki,a,14);
+        if(lid>=0){
+            n1_cur_init(c);
+            n1_tokpat(c,lid,0,kb,ts,a-ts,1);
+            n1_tokout(c,lid,kb,a+14,te-(a+14),0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+        lid=n1_lic_new(c,s,"IFF-B",0,ki,a,14);
+        if(lid>=0){
+            n1_cur_init(c);
+            n1_tokpat(c,lid,0,kb,a+14,te-(a+14),1);
+            n1_tokout(c,lid,kb,ts,a-ts,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    // 18. THEREFORE: "[h0]therefore[h1]" -> [h1]
+    a=n1_find(kb,te,"therefore",9,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"THEREFORE",0,ki,a,9);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid,"therefore",9);
+            n1_pseg(c,lid,0,0,lo,9);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_oseg(c,lid,1,h1,0,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    // 19. HENCE: "[h0]hence[h1]" -> [h1]
+    a=n1_find(kb,te,"hence",5,ts);
+    if(a>=0){
+        lid=n1_lic_new(c,s,"HENCE",0,ki,a,5);
+        if(lid>=0){
+            n1_cur_init(c);
+            h0=n1_hole_new(c,lid);
+            h1=n1_hole_new(c,lid);
+            n1_pseg(c,lid,0,1,h0,0);
+            lo=n1_litapp(c,lid,"hence",5);
+            n1_pseg(c,lid,0,0,lo,5);
+            n1_pseg(c,lid,0,1,h1,0);
+            n1_oseg(c,lid,1,h1,0,0);
+            n1_lq(c,lid,2,1);
+            n1_anchor(c,lid);
+        }
+    }
+    return;
+}
+fn n1_mint_all(c:*N1C,s:*N1S)void {
+    // 20. ASSUME: fixed contradiction-setup license (kind 3), always present.
+    // Its "extraction" is byte surgery on the goal + input, cited in-trace.
+    n1_lic_new(c,s,"ASSUME",3,-1,0,0);
+    let ki:i32=0;
+    while(ki<s.*.nk){
+        n1_mint_item(c,s,ki);
+        ki=ki+1;
+    }
+    return;
+}
+
+// ---------------- pattern matcher ----------------
+// n1_match: match premise pi of license lid against state bytes s[0..sl).
+// Binding sets are written to mb at (p*4+q)*12 + h*2 (+0 off, +1 len),
+// p = premise slot used by the caller. Returns number of sets (0..4);
+// *ov=1 if more than 3 bindings exist (ambiguous -> candidate withheld).
+fn n1_mrec(c:*N1C,lid:i32,pbase:i32,nseg:i32,si:i32,pos:i32,s:[]u8,sl:i32,p:i32,found:i32,ov:*i32)i32 {
+    if(ov.*==1){return found;}
+    if(si>=nseg){
+        if(pos<=sl){
+            if(found<4){
+                let h:i32=0;
+                while(h<6){
+                    au_put32(c.*.mb,(p*4+found)*12+h*2+0,au_get32(c.*.cur,h*2+0));
+                    au_put32(c.*.mb,(p*4+found)*12+h*2+1,au_get32(c.*.cur,h*2+1));
+                    h=h+1;
+                }
+            }
+            return found+1;
+        }
+        return found;
+    }
+    let kind:i32=au_get32(c.*.pat,pbase+1+si*3+0);
+    let a:i32=au_get32(c.*.pat,pbase+1+si*3+1);
+    let b:i32=au_get32(c.*.pat,pbase+1+si*3+2);
+    let lp:[]u8=c.*.lpool;
+    let base:i32=lid*2048;
+    if(kind==0){
+        if(pos+b>sl){return found;}
+        let k:i32=0;
+        while(k<b && s[pos+k]==lp[base+a+k]){k=k+1;}
+        if(k<b){return found;}
+        return n1_mrec(c,lid,pbase,nseg,si+1,pos+b,s,sl,p,found,ov);
+    }
+    let hid:i32=a;
+    if(si+1>=nseg){
+        au_put32(c.*.cur,hid*2+0,pos);
+        au_put32(c.*.cur,hid*2+1,sl-pos);
+        return n1_mrec(c,lid,pbase,nseg,si+1,sl,s,sl,p,found,ov);
+    }
+    let nk:i32=au_get32(c.*.pat,pbase+1+(si+1)*3+0);
+    if(nk!=0){return found;}
+    let na:i32=au_get32(c.*.pat,pbase+1+(si+1)*3+1);
+    let nb:i32=au_get32(c.*.pat,pbase+1+(si+1)*3+2);
+    let q:i32=pos;
+    while(q+nb<=sl){
+        let k:i32=0;
+        while(k<nb && s[q+k]==lp[base+na+k]){k=k+1;}
+        if(k==nb){
+            au_put32(c.*.cur,hid*2+0,pos);
+            au_put32(c.*.cur,hid*2+1,q-pos);
+            found=n1_mrec(c,lid,pbase,nseg,si+1,q,s,sl,p,found,ov);
+            if(ov.*==1){return found;}
+            if(found>=4){ov.*=1;return found;}
+        }
+        q=q+1;
+    }
+    return found;
+}
+fn n1_match(c:*N1C,lid:i32,pi:i32,s:[]u8,sl:i32,p:i32,ov:*i32)i32 {
+    ov.*=0;
+    let pbase:i32=(lid*3+pi)*25;
+    let nseg:i32=au_get32(c.*.pat,pbase);
+    if(nseg<1){return 0;}
+    let h:i32=0;
+    while(h<6){
+        au_put32(c.*.cur,h*2+0,-1);
+        au_put32(c.*.cur,h*2+1,0);
+        h=h+1;
+    }
+    let n:i32=n1_mrec(c,lid,pbase,nseg,0,0,s,sl,p,0,ov);
+    if(n>4){n=4;}
+    return n;
+}
+// byte-equality constraints: qs are set indices per premise (q0,q1,q2)
+fn n1_con_ok(c:*N1C,lid:i32,q0:i32,q1:i32,q2:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let n:i32=n1_lg(c,lid,3);
+    let i:i32=0;
+    while(i<n){
+        let base:i32=(lid*4+i)*4;
+        let pa:i32=au_get32(c.*.con,base+0);
+        let ha:i32=au_get32(c.*.con,base+1);
+        let pb:i32=au_get32(c.*.con,base+2);
+        let hb:i32=au_get32(c.*.con,base+3);
+        let qa:i32=q0;
+        if(pa==1){qa=q1;}
+        if(pa==2){qa=q2;}
+        let qb:i32=q0;
+        if(pb==1){qb=q1;}
+        if(pb==2){qb=q2;}
+        let ao:i32=au_get32(c.*.mb,(pa*4+qa)*12+ha*2+0);
+        let al:i32=au_get32(c.*.mb,(pa*4+qa)*12+ha*2+1);
+        let bo:i32=au_get32(c.*.mb,(pb*4+qb)*12+hb*2+0);
+        let bl:i32=au_get32(c.*.mb,(pb*4+qb)*12+hb*2+1);
+        if(ao<0 || bo<0){return 0;}
+        if(al!=bl){return 0;}
+        if(nio_equal(tx[ao..ao+al],tx[bo..bo+bl])==0){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+// Build output bytes into c.tmp; returns length, or -1 on overflow.
+fn n1_build_out(c:*N1C,lid:i32,q0:i32,q1:i32,q2:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let lp:[]u8=c.*.lpool;
+    let tmp:[]u8=c.*.tmp;
+    let base:i32=lid*33;
+    let n:i32=au_get32(c.*.otp,base);
+    let lbase:i32=lid*2048;
+    let o:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let kind:i32=au_get32(c.*.otp,base+1+i*4+0);
+        let a:i32=au_get32(c.*.otp,base+1+i*4+1);
+        let b:i32=au_get32(c.*.otp,base+1+i*4+2);
+        let prem:i32=au_get32(c.*.otp,base+1+i*4+3);
+        if(kind==0){
+            if(o+b>tmp.len){return -1;}
+            let k:i32=0;
+            while(k<b){tmp[o+k]=lp[lbase+a+k];k=k+1;}
+            o=o+b;
+        }
+        if(kind==1){
+            let qq:i32=q0;
+            if(prem==1){qq=q1;}
+            if(prem==2){qq=q2;}
+            let ho:i32=au_get32(c.*.mb,(prem*4+qq)*12+a*2+0);
+            let hl:i32=au_get32(c.*.mb,(prem*4+qq)*12+a*2+1);
+            if(ho<0){return -1;}
+            if(o+hl>tmp.len){return -1;}
+            let k:i32=0;
+            while(k<hl){tmp[o+k]=tx[ho+k];k=k+1;}
+            o=o+hl;
+        }
+        i=i+1;
+    }
+    return o;
+}
+// Honesty: every output word (>=4 bytes, non-stop) must occur in some premise
+// state's bytes or in the license's literal pool (the item's own words).
+fn n1_honest_ok(c:*N1C,s:*N1S,lid:i32,outlen:i32,p0:i32,p1:i32,p2:i32,np:i32)i32 {
+    let tmp:[]u8=c.*.tmp;
+    let tx:[]u8=c.*.tx;
+    let lp:[]u8=c.*.lpool;
+    let lbase:i32=lid*2048;
+    let lend:i32=n1_lg(c,lid,12);
+    let pos:i32=0;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    while(guard<2000){
+        guard=guard+1;
+        let nx:i32=n1_toknext(tmp,pos,outlen-pos,&to,&tl);
+        if(nx<0){return 1;}
+        if(tl>=4 && n1_is_stop(c,s,tmp,to,tl)==0){
+            let ok:i32=0;
+            if(n1_find(lp,lbase+lend,tmp[to..to+tl],tl,lbase)>=0){ok=1;}
+            if(ok==0){
+                let q:i32=0;
+                while(q<np){
+                    let pid:i32=p0;
+                    if(q==1){pid=p1;}
+                    if(q==2){pid=p2;}
+                    let po:i32=n1_sg(c,pid,4);
+                    let pl:i32=n1_sg(c,pid,5);
+                    if(n1_find(tx,po+pl,tmp[to..to+tl],tl,po)>=0){ok=1;}
+                    q=q+1;
+                }
+            }
+            if(ok==0){return 0;}
+        }
+        pos=nx;
+    }
+    return 1;
+}
+
+// ---------------- contradiction detection ----------------
+// Two states contradict iff they share a qualifying word (>=4 bytes, not
+// stop-listed) with differing polarity (byte-level negative markers +-50).
+fn n1_contra_pair(c:*N1C,s:*N1S,a:i32,b:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let ao:i32=n1_sg(c,a,4);
+    let al:i32=n1_sg(c,a,5);
+    let bo:i32=n1_sg(c,b,4);
+    let bl:i32=n1_sg(c,b,5);
+    let ws:[]u8=c.*.ws;
+    // word set of a: (hash,pos) pairs
+    let wn:i32=0;
+    let pos:i32=ao;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    let done:i32=0;
+    while(guard<5000 && done==0){
+        guard=guard+1;
+        let nx:i32=n1_toknext(tx,pos,ao+al-pos,&to,&tl);
+        if(nx<0){done=1;}
+        if(done==0){
+            if(tl>=4 && n1_is_stop(c,s,tx,to,tl)==0 && wn<64){
+                let h:i32=n1_fnv32(tx,to,tl);
+                let dup:i32=0;
+                let k:i32=0;
+                while(k<wn){
+                    if(au_get32(ws,k*2+0)==h){dup=1;}
+                    k=k+1;
+                }
+                if(dup==0){
+                    au_put32(ws,wn*2+0,h);
+                    au_put32(ws,wn*2+1,to);
+                    wn=wn+1;
+                }
+            }
+            pos=nx;
+        }
+    }
+    if(wn==0){return 0;}
+    // scan b's words
+    pos=bo;
+    guard=0;
+    done=0;
+    while(guard<5000 && done==0){
+        guard=guard+1;
+        let nx:i32=n1_toknext(tx,pos,bo+bl-pos,&to,&tl);
+        if(nx<0){done=1;}
+        if(done==0){
+            if(tl>=4 && n1_is_stop(c,s,tx,to,tl)==0){
+                let h:i32=n1_fnv32(tx,to,tl);
+                let k:i32=0;
+                while(k<wn){
+                    if(au_get32(ws,k*2+0)==h){
+                        let ap:i32=au_get32(ws,k*2+1);
+                        let pa:i32=n1_polarity(tx,ao,al,ap);
+                        let pb:i32=n1_polarity(tx,bo,bl,to);
+                        if(pa!=pb){return 1;}
+                    }
+                    k=k+1;
+                }
+            }
+            pos=nx;
+        }
+    }
+    return 0;
+}
+// distinct byte values in [off,off+ln), capped at 64
+fn n1_uniq(c:*N1C,off:i32,ln:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let seen:[]u8=c.*.cur;
+    let d:i32=0;
+    let i:i32=0;
+    while(i<ln){
+        let b:u8=tx[off+i];
+        let k:i32=0;
+        let f:i32=0;
+        while(k<d){
+            if(seen[k]==b){f=1;}
+            k=k+1;
+        }
+        if(f==0){
+            if(d<64){seen[d]=b;}
+            d=d+1;
+        }
+        i=i+1;
+    }
+    return d;
+}
+// independent corroborating paths: byte-equal non-defeated states with
+// disjoint premise-id sets
+fn n1_corrob(c:*N1C,s:*N1S,id:i32,bo:i32,bl:i32,np:i32,p0:i32,p1:i32,p2:i32,p3:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let n:i32=0;
+    let t:i32=0;
+    while(t<s.*.nst){
+        if(t!=id && n1_sg(c,t,6)==0 && n1_sg(c,t,5)==bl){
+            let to:i32=n1_sg(c,t,4);
+            if(nio_equal(tx[to..to+bl],tx[bo..bo+bl])==1){
+                let tnp:i32=n1_sg(c,t,7);
+                let disj:i32=1;
+                let a:i32=0;
+                while(a<np){
+                    let pa:i32=p0;
+                    if(a==1){pa=p1;}
+                    if(a==2){pa=p2;}
+                    if(a==3){pa=p3;}
+                    let bb:i32=0;
+                    while(bb<tnp){
+                        if(pa==n1_sg(c,t,8+bb)){disj=0;}
+                        bb=bb+1;
+                    }
+                    a=a+1;
+                }
+                if(disj==1){n=n+1;}
+            }
+        }
+        t=t+1;
+    }
+    return n;
+}
+// quality x10. src: 0 input=1000; 1 cite=800-100*challenged; 2 inference =
+// min premise - 20*depth; 3 assume = 10 (documented simplification).
+fn n1_quality(c:*N1C,s:*N1S,id:i32)i32 {
+    let src:i32=n1_sg(c,id,2);
+    let base:i32=0;
+    if(src==0){base=1000;}
+    if(src==1){
+        let ki:i32=n1_sg(c,id,3);
+        base=800-100*au_get32(c.*.chal,ki);
+    }
+    if(src==2){
+        let np:i32=n1_sg(c,id,7);
+        let m:i32=1000000;
+        let k:i32=0;
+        while(k<np){
+            let q:i32=n1_quality(c,s,n1_sg(c,id,8+k));
+            if(q<m){m=q;}
+            k=k+1;
+        }
+        base=m-20*n1_sg(c,id,1);
+    }
+    if(src==3){base=10;}
+    let bo:i32=n1_sg(c,id,4);
+    let bl:i32=n1_sg(c,id,5);
+    let np2:i32=n1_sg(c,id,7);
+    let cb:i32=n1_corrob(c,s,id,bo,bl,np2,n1_sg(c,id,8),n1_sg(c,id,9),n1_sg(c,id,10),n1_sg(c,id,11));
+    let u:i32=0;
+    if(bl>0){u=50*n1_uniq(c,bo,bl)/bl;}
+    return base+150*cb+u;
+}
+// prospective quality of a not-yet-inserted state
+fn n1_qprospect(c:*N1C,s:*N1S,bo:i32,bl:i32,depth:i32,np:i32,p0:i32,p1:i32,p2:i32,p3:i32)i32 {
+    let m:i32=1000000;
+    let k:i32=0;
+    while(k<np){
+        let pid:i32=p0;
+        if(k==1){pid=p1;}
+        if(k==2){pid=p2;}
+        if(k==3){pid=p3;}
+        let q:i32=n1_quality(c,s,pid);
+        if(q<m){m=q;}
+        k=k+1;
+    }
+    let u:i32=0;
+    if(bl>0){u=50*n1_uniq(c,bo,bl)/bl;}
+    return m-20*depth+u;
+}
+
+// ---------------- contradiction referee / honesty gate ----------------
+// If the new state contradicts any established non-defeated state, run the
+// referee: higher quality survives; the loser is defeated. If the assumption
+// loses to an established state, the proof succeeds. The check is ordered
+// by state id and the contradiction's evidence bytes are recorded.
+fn n1_contra_check(c:*N1C,s:*N1S,newid:i32,bo:i32,bl:i32,p0:i32,p1:i32,p2:i32,p3:i32,np:i32)void {
+    let t:i32=0;
+    while(t<s.*.nst && s.*.proved==0){
+        if(t!=newid && n1_sg(c,t,6)==0){
+            if(n1_contra_pair(c,s,newid,t)==1){
+                let qn:i32=n1_quality(c,s,newid);
+                let qt:i32=n1_quality(c,s,t);
+                if(qn>qt){
+                    n1_sp(c,t,6,1);
+                    au_put32(c.*.chal,n1_sg(c,t,3),au_get32(c.*.chal,n1_sg(c,t,3))+1);
+                }
+                if(qt>qn){
+                    n1_sp(c,newid,6,1);
+                    let a1:i32=n1_sg(c,newid,3);
+                    if(a1==s.*.assume_id && s.*.assume_id>=0){
+                        s.*.proved=1;
+                        let aid:i32=n1_sg(c,newid,3);
+                        // the defeating state is t; the winner's bytes are t's
+                    }
+                }
+                if(qn==qt){
+                    n1_sp(c,newid,6,1);
+                    n1_sp(c,t,6,1);
+                }
+            }
+        }
+        t=t+1;
+    }
+    return;
+}
+// Seed a KnowledgeCite state (id 1..nk) from item text, then run the
+// contradiction referee for it against all non-defeated states.
+fn n1_seed_kb(c:*N1C,s:*N1S)void {
+    let tx:[]u8=c.*.tx;
+    let isnew:i32=0;
+    let ki:i32=0;
+    while(ki<s.*.nk){
+        let ko:i32=au_get32(c.*.ko,ki);
+        let kl:i32=au_get32(c.*.kl,ki);
+        let kb:[]u8=c.*.kb;
+        let ts:i32=ko;
+        let te:i32=ko+kl;
+        let bo:i32=n1_txapp(c,s,kb[ts..te],te-ts);
+        if(bo>=0){
+            let id:i32=n1_add_state(c,s,1,ki,bo,te-ts,0,-1,-1,-1,-1,0,&isnew);
+            if(id>=0 && isnew==1){
+                n1_contra_check(c,s,id,bo,te-ts,-1,-1,-1,-1,0);
+            }
+        }
+        ki=ki+1;
+    }
+    return;
+}
+// ---------------- candidate search ----------------
+// Try adding a state produced by license lid from premise states.
+// Premise states may include the assumption (contradiction path).
+fn n1_try_add(c:*N1C,s:*N1S,lid:i32,np:i32,p0:i32,p1:i32,p2:i32,i1:i32,i2:i32,i3:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let o0:i32=n1_sg(c,p0,4);
+    let l0:i32=n1_sg(c,p0,5);
+    let o1:i32=0;
+    let l1:i32=0;
+    let o2:i32=0;
+    let l2:i32=0;
+    if(np>=2){o1=n1_sg(c,p1,4);l1=n1_sg(c,p1,5);}
+    if(np>=3){o2=n1_sg(c,p2,4);l2=n1_sg(c,p2,5);}
+    let ov:i32=0;
+    let n0:i32=n1_match(c,lid,0,tx[o0..o0+l0],l0,0,&ov);
+    if(ov==1){return 0;}
+    let n1n:i32=1;
+    let n2n:i32=1;
+    if(np>=2){
+        n1n=n1_match(c,lid,1,tx[o1..o1+l1],l1,1,&ov);
+        if(ov==1){return 0;}
+    }
+    if(np>=3){
+        n2n=n1_match(c,lid,2,tx[o2..o2+l2],l2,2,&ov);
+        if(ov==1){return 0;}
+    }
+    if(n0==0){return 0;}
+    if(np>=2 && n1n==0){return 0;}
+    if(np>=3 && n2n==0){return 0;}
+    // candidate buffer: score + premise info; cap 2000 entries
+    let cn:i32=au_get32(c.*.cand,2000*6+0);
+    let a:i32=0;
+    let ret:i32=0;
+    while(a<n0){
+        let b:i32=0;
+        while(b<n1n){
+            let d:i32=0;
+            while(d<n2n){
+                if(n1_con_ok(c,lid,a,b,d)==1){
+                    let ol:i32=n1_build_out(c,lid,a,b,d);
+                    if(ol>0 && n1_honest_ok(c,s,lid,ol,p0,p1,p2,np)==1){
+                        let dep:i32=n1_sg(c,p0,1)+1;
+                        if(np>=2 && n1_sg(c,p1,1)+1>dep){dep=n1_sg(c,p1,1)+1;}
+                        if(np>=3 && n1_sg(c,p2,1)+1>dep){dep=n1_sg(c,p2,1)+1;}
+                        let qp:i32=n1_qprospect(c,s,0,ol,dep,np,p0,p1,p2,-1);
+                        let withhold:i32=0;
+                        if(dep>10 && dep>s.*.maxd){
+                            if(n1_corrob(c,s,-1,0,ol,0,-1,-1,-1,-1)==0){withhold=1;}
+                        }
+                        if(withhold==0){
+                            let bo:i32=n1_txapp(c,s,c.*.tmp[0..ol],ol);
+                            if(bo>=0){
+                                let isnew:i32=0;
+                                let id:i32=n1_add_state(c,s,2,lid,bo,ol,dep,p0,p1,p2,-1,np,&isnew);
+                                if(id>=0){
+                                    ret=ret+1;
+                                    let q:i32=0;
+                                    while(q<np){
+                                        let pid:i32=p0;
+                                        if(q==1){pid=p1;}
+                                        if(q==2){pid=p2;}
+                                        n1_hm_put(c,id,q,pid,-1,0,0);
+                                        q=q+1;
+                                    }
+                                    // record hole provenance: for each output
+                                    // hole seg, store the binding span
+                                    let ob:i32=lid*33;
+                                    let on:i32=au_get32(c.*.otp,ob);
+                                    let eq:i32=0;
+                                    let j:i32=0;
+                                    while(j<on){
+                                        if(au_get32(c.*.otp,ob+1+j*4+0)==1){
+                                            let prem:i32=au_get32(c.*.otp,ob+1+j*4+3);
+                                            let hid:i32=au_get32(c.*.otp,ob+1+j*4+1);
+                                            let qq2:i32=a;
+                                            if(prem==1){qq2=b;}
+                                            if(prem==2){qq2=d;}
+                                            let pid2:i32=p0;
+                                            if(prem==1){pid2=p1;}
+                                            if(prem==2){pid2=p2;}
+                                            let ho:i32=au_get32(c.*.mb,(prem*4+qq2)*12+hid*2+0);
+                                            let hl:i32=au_get32(c.*.mb,(prem*4+qq2)*12+hid*2+1);
+                                            n1_hm_put(c,id,eq,pid2,hid,ho,hl);
+                                            eq=eq+1;
+                                        }
+                                        j=j+1;
+                                    }
+                                    n1_contra_check(c,s,id,bo,ol,p0,p1,p2,-1,np);
+                                    if(cn<2000){
+                                        au_put32(c.*.cand,cn*6+0,qp);
+                                        au_put32(c.*.cand,cn*6+1,lid);
+                                        au_put32(c.*.cand,cn*6+2,id);
+                                        au_put32(c.*.cand,cn*6+3,ol);
+                                        au_put32(c.*.cand,cn*6+4,dep);
+                                        au_put32(c.*.cand,cn*6+5,0);
+                                        cn=cn+1;
+                                        au_put32(c.*.cand,2000*6+0,cn);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                d=d+1;
+            }
+            b=b+1;
+        }
+        a=a+1;
+    }
+    return ret;
+}
+// goal skeleton: up to 40 word hashes (non-stop, len>=4)
+fn n1_goal_skel(c:*N1C,s:*N1S,go:i32,gl:i32)i32 {
+    let gb:[]u8=c.*.gb;
+    let gn:i32=0;
+    let pos:i32=go;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    let done:i32=0;
+    while(guard<2000 && done==0 && gn<40){
+        guard=guard+1;
+        let nx:i32=n1_toknext(gb,pos,go+gl-pos,&to,&tl);
+        if(nx<0){done=1;}
+        if(done==0){
+            if(tl>=4 && n1_is_stop(c,s,gb,to,tl)==0){
+                au_put32(gb,128+gn,n1_fnv32(gb,to,tl));
+                gn=gn+1;
+            }
+            pos=nx;
+        }
+    }
+    s.*.goal_len=gn;
+    return gn;
+}
+// overlap of a state with the goal skeleton
+fn n1_overlap(c:*N1C,s:*N1S,id:i32)i32 {
+    let tx:[]u8=c.*.tx;
+    let gb:[]u8=c.*.gb;
+    let gn:i32=s.*.goal_len;
+    if(gn==0){return 0;}
+    let bo:i32=n1_sg(c,id,4);
+    let bl:i32=n1_sg(c,id,5);
+    let ov:i32=0;
+    let pos:i32=bo;
+    let to:i32=0;
+    let tl:i32=0;
+    let guard:i32=0;
+    let done:i32=0;
+    while(guard<5000 && done==0){
+        guard=guard+1;
+        let nx:i32=n1_toknext(tx,pos,bo+bl-pos,&to,&tl);
+        if(nx<0){done=1;}
+        if(done==0){
+            if(tl>=4 && n1_is_stop(c,s,tx,to,tl)==0){
+                let h:i32=n1_fnv32(tx,to,tl);
+                let k:i32=0;
+                while(k<gn){
+                    if(au_get32(gb,128+k)==h){ov=ov+1;}
+                    k=k+1;
+                }
+            }
+            pos=nx;
+        }
+    }
+    return ov;
+}
+// deterministic order: goal overlap desc, license id asc, premise ids asc
+fn n1_cand_sort(c:*N1C)void {
+    let n:i32=au_get32(c.*.cand,2000*6+0);
+    let i:i32=1;
+    while(i<n){
+        let j:i32=i;
+        while(j>0){
+            let a1:i32=au_get32(c.*.cand,(j-1)*6+0);
+            let b1:i32=au_get32(c.*.cand,j*6+0);
+            let sw:i32=0;
+            if(b1>a1){sw=1;}
+            if(b1==a1){
+                let a2:i32=au_get32(c.*.cand,(j-1)*6+1);
+                let b2:i32=au_get32(c.*.cand,j*6+1);
+                if(b2<a2){sw=1;}
+                if(b2==a2){
+                    let a3:i32=au_get32(c.*.cand,(j-1)*6+2);
+                    let b3:i32=au_get32(c.*.cand,j*6+2);
+                    if(b3<a3){sw=1;}
+                }
+            }
+            if(sw==0){j=-9;}
+            if(sw==1){
+                let k:i32=0;
+                while(k<6){
+                    let t2:i32=au_get32(c.*.cand,(j-1)*6+k);
+                    au_put32(c.*.cand,(j-1)*6+k,au_get32(c.*.cand,j*6+k));
+                    au_put32(c.*.cand,j*6+k,t2);
+                    k=k+1;
+                }
+                j=j-1;
+            }
+            if(j==0){j=-9;}
+        }
+        i=i+1;
+    }
+    return;
+}
+// The goal is considered PROVED if an established non-defeated state at
+// depth>=1 has overlap >= max(2, goal_words/2), or the contradiction
+// assumption was defeated by an established state.
+fn n1_goal_ok(c:*N1C,s:*N1S)i32 {
+    if(s.*.proved==1){return 1;}
+    let gn:i32=s.*.goal_len;
+    let need:i32=gn/2;
+    if(need<2){need=2;}
+    let t:i32=0;
+    while(t<s.*.nst){
+        if(n1_sg(c,t,6)==0 && n1_sg(c,t,1)>=1 && n1_overlap(c,s,t)>=need){
+            return 1;
+        }
+        t=t+1;
+    }
+    return 0;
+}
+// main expansion: for each license, for each premise tuple (anchor first),
+// generate states. Bounded by steps and state cap.
+fn n1_expand(c:*N1C,s:*N1S,goal_words:i32)i32 {
+    let added:i32=0;
+    let li:i32=0;
+    while(li<s.*.nlic){
+        let np:i32=n1_lg(c,li,2);
+        let kind:i32=n1_lg(c,li,1);
+        if(kind!=3 && kind!=1){
+        let ap:i32=n1_lg(c,li,10);
+        if(np==1){
+            let p0:i32=0;
+            while(p0<s.*.nst && s.*.steps<2000 && added<800){
+                if(n1_sg(c,p0,6)==0){
+                    let got:i32=n1_try_add(c,s,li,1,p0,-1,-1,-1,-1,-1);
+                    added=added+got;
+                    s.*.steps=s.*.steps+1;
+                }
+                p0=p0+1;
+            }
+        }
+        if(np==2){
+            let p0:i32=0;
+            while(p0<s.*.nst && s.*.steps<2000 && added<800){
+                let p1:i32=0;
+                while(p1<s.*.nst && s.*.steps<2000 && added<800){
+                    if(p0!=p1 && n1_sg(c,p0,6)==0 && n1_sg(c,p1,6)==0){
+                        let got:i32=0;
+                        if(ap==0){got=n1_try_add(c,s,li,2,p0,p1,-1,-1,-1,-1);}
+                        if(ap==1){got=n1_try_add(c,s,li,2,p1,p0,-1,-1,-1,-1);}
+                        added=added+got;
+                        s.*.steps=s.*.steps+1;
+                    }
+                    p1=p1+1;
+                }
+                p0=p0+1;
+            }
+        }
+        if(np==3){
+            let p0:i32=0;
+            while(p0<s.*.nst && s.*.steps<2000 && added<800){
+                let p1:i32=0;
+                while(p1<s.*.nst && s.*.steps<2000 && added<800){
+                    let p2:i32=0;
+                    while(p2<s.*.nst && s.*.steps<2000 && added<800){
+                        if(p0!=p1 && p0!=p2 && p1!=p2 && n1_sg(c,p0,6)==0 && n1_sg(c,p1,6)==0 && n1_sg(c,p2,6)==0){
+                            let got:i32=n1_try_add(c,s,li,3,p0,p1,p2,-1,-1,-1);
+                            added=added+got;
+                            s.*.steps=s.*.steps+1;
+                        }
+                        p2=p2+1;
+                    }
+                    p1=p1+1;
+                }
+                p0=p0+1;
+            }
+        }
+        }
+        li=li+1;
+    }
+    return added;
+}
+
+// ---------------- SUBST (kind 2) driver ----------------
+// For each equation-shaped state "X = Y" (word tokens around a lone '='),
+// substitute Y for occurrences of X in other non-defeated states.
+fn n1_subst(c:*N1C,s:*N1S)i32 {
+    let tx:[]u8=c.*.tx;
+    let added:i32=0;
+    let e:i32=0;
+    while(e<s.*.nst && added<20){
+        if(n1_sg(c,e,6)==0){
+            let eo:i32=n1_sg(c,e,4);
+            let el:i32=n1_sg(c,e,5);
+            let eq:i32=n1_find(tx,eo+el,"=",1,eo);
+            if(eq>eo && eq+1<eo+el && tx[eq-1]==32 && tx[eq+1]==32){
+                // left token
+                let le:i32=eq-1;
+                while(le>eo && tx[le-1]!=32){le=le-1;}
+                let lln:i32=(eq-1)-le;
+                let rs:i32=eq+2;
+                let re:i32=rs;
+                while(re<eo+el && tx[re]!=32){re=re+1;}
+                let rln:i32=re-rs;
+                if(lln>0 && rln>0){
+                    let t:i32=0;
+                    while(t<s.*.nst && added<20){
+                        if(t!=e && n1_sg(c,t,6)==0){
+                            let to2:i32=n1_sg(c,t,4);
+                            let tl2:i32=n1_sg(c,t,5);
+                            let at:i32=n1_find(tx,to2+tl2,tx[le..le+lln],lln,to2);
+                            if(at>=0){
+                                let nl:i32=tl2-lln+rln;
+                                if(nl<=8192 && nl>0){
+                                    let tmp:[]u8=c.*.tmp;
+                                    let k:i32=0;
+                                    while(k<at-to2){tmp[k]=tx[to2+k];k=k+1;}
+                                    let j:i32=0;
+                                    while(j<rln){tmp[at-to2+j]=tx[rs+j];j=j+1;}
+                                    let m2:i32=at+lln;
+                                    let o2:i32=at-to2+rln;
+                                    while(m2<to2+tl2){tmp[o2]=tx[m2];o2=o2+1;m2=m2+1;}
+                                    if(n1_honest_ok(c,s,0,nl,e,t,-1,2)==1){
+                                        // license 0 placeholder: honesty needs premise words
+                                        let bo:i32=n1_txapp(c,s,tmp[0..nl],nl);
+                                        if(bo>=0){
+                                            let isnew:i32=0;
+                                            let lid2:i32=-1;
+                                            let li2:i32=0;
+                                            while(li2<s.*.nlic){
+                                                if(n1_lg(c,li2,1)==2){lid2=li2;}
+                                                li2=li2+1;
+                                            }
+                                            let dep:i32=n1_sg(c,e,1)+1;
+                                            if(n1_sg(c,t,1)+1>dep){dep=n1_sg(c,t,1)+1;}
+                                            let id:i32=n1_add_state(c,s,2,lid2,bo,nl,dep,e,t,-1,-1,2,&isnew);
+                                            if(id>=0){
+                                                n1_hm_put(c,id,0,e,0,rs,rln);
+                                                n1_hm_put(c,id,1,t,0,at,lln);
+                                                added=added+1;
+                                                n1_contra_check(c,s,id,bo,nl,e,t,-1,-1,2);
+                                                if(cn_add(c,s,id)==1){
+                                                    // candidate recorded
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        t=t+1;
+                    }
+                }
+            }
+        }
+        e=e+1;
+    }
+    return added;
+}
+// record a candidate entry for an already-added state id
+fn cn_add(c:*N1C,s:*N1S,id:i32)i32 {
+    let cn:i32=au_get32(c.*.cand,2000*6+0);
+    if(cn>=2000){return 0;}
+    let bo:i32=n1_sg(c,id,4);
+    let bl:i32=n1_sg(c,id,5);
+    let qp:i32=n1_quality(c,s,id);
+    let lid:i32=n1_sg(c,id,3);
+    au_put32(c.*.cand,cn*6+0,qp);
+    au_put32(c.*.cand,cn*6+1,lid);
+    au_put32(c.*.cand,cn*6+2,id);
+    au_put32(c.*.cand,cn*6+3,bl);
+    au_put32(c.*.cand,cn*6+4,n1_sg(c,id,1));
+    au_put32(c.*.cand,cn*6+5,0);
+    au_put32(c.*.cand,2000*6+0,cn+1);
+    return 1;
+}
+// ---------------- contradiction path ----------------
+// The ASSUME license (kind 3): assumption = "It is not the case that " +
+// the input bytes. If an established state defeats it, the goal is proved.
+fn n1_contra(c:*N1C,s:*N1S)void {
+    if(s.*.contra_done==1){return;}
+    s.*.contra_done=1;
+    if(s.*.contra_lid<0){return;}
+    let alid:i32=-1;
+    let li:i32=0;
+    while(li<s.*.nlic){
+        if(n1_lg(c,li,1)==3){alid=li;}
+        li=li+1;
+    }
+    if(alid<0){return;}
+    let tx:[]u8=c.*.tx;
+    let in0:i32=n1_sg(c,0,4);
+    let inl:i32=n1_sg(c,0,5);
+    let tmp:[]u8=c.*.tmp;
+    let pref:[]u8="It is not the case that ";
+    if(pref.len+inl>tmp.len){return;}
+    let i:i32=0;
+    while(i<pref.len){tmp[i]=pref[i];i=i+1;}
+    let j:i32=0;
+    while(j<inl){tmp[pref.len+j]=tx[in0+j];j=j+1;}
+    let nl:i32=pref.len+inl;
+    let bo:i32=n1_txapp(c,s,tmp[0..nl],nl);
+    if(bo<0){return;}
+    let isnew:i32=0;
+    let id:i32=n1_add_state(c,s,3,alid,bo,nl,1,-1,-1,-1,-1,0,&isnew);
+    if(id<0){return;}
+    s.*.assume_id=id;
+    // premise provenance: the assumed claim is the input's own byte span
+    n1_hm_put(c,id,0,0,1,in0,inl);
+    n1_contra_check(c,s,id,bo,nl,-1,-1,-1,-1,0);
+    return;
+}
+// ---------------- engine driver ----------------
+fn n1_drive(c:*N1C,s:*N1S,buf:[]u8,n:i32)void {
+    // state 0: Input
+    let bo:i32=n1_txapp(c,s,buf[0..n],n);
+    let isnew:i32=0;
+    n1_add_state(c,s,0,-1,bo,n,0,-1,-1,-1,-1,0,&isnew);
+    // goal bytes: GOAL field if present, else whole input
+    let gb:[]u8=c.*.gb;
+    let go:i32=0;
+    let gl:i32=0;
+    n1_field(buf,n,"GOAL",&go,&gl);
+    if(go<0){go=0;gl=n;}
+    if(gl>512){gl=512;}
+    let k:i32=0;
+    while(k<gl){gb[k]=buf[go+k];k=k+1;}
+    n1_goal_skel(c,s,0,gl);
+    // knowledge citations
+    n1_seed_kb(c,s);
+    // forward expansion rounds
+    let r:i32=0;
+    while(r<6 && n1_goal_ok(c,s)==0){
+        let a1:i32=n1_expand(c,s,s.*.goal_len);
+        let a2:i32=n1_subst(c,s);
+        if(a1==0 && a2==0){r=99;}
+        r=r+1;
+    }
+    // contradiction path if not yet proved
+    if(n1_goal_ok(c,s)==0){n1_contra(c,s);}
+    return;
+}
+// ---------------- trace writer ----------------
+fn n1_trace(c:*N1C,s:*N1S,store_path:[]u8,prob_path:[]u8,o:*DOut)void {
+    let tx:[]u8=c.*.tx;
+    n1_cand_sort(c);
+    dout_str(o,"N1-TRACE v1\n");
+    dout_str(o,"INPUT ");
+    dout_str(o,prob_path);
+    dout_str(o," sha256 ");
+    dout_str(o,n1_hexsha(c.*.tx,0,s.*.txn));
+    dout_str(o,"\nSTORE ");
+    dout_str(o,store_path);
+    dout_str(o," items ");
+    dout_i64(o,s.*.nk as i64);
+    dout_str(o,"\nGOAL words ");
+    dout_i64(o,s.*.goal_len as i64);
+    dout_str(o,"\nRESULT ");
+    if(n1_goal_ok(c,s)==1){dout_str(o,"PROVED");}
+    if(n1_goal_ok(c,s)==0){dout_str(o,"WITHHELD");}
+    dout_str(o," states ");
+    dout_i64(o,s.*.nst as i64);
+    dout_str(o," licenses ");
+    dout_i64(o,s.*.nlic as i64);
+    dout_str(o," steps ");
+    dout_i64(o,s.*.steps as i64);
+    dout_str(o," contra ");
+    if(s.*.proved==1){dout_str(o,"1");}
+    if(s.*.proved==0){dout_str(o,"0");}
+    dout_str(o,"\nLICENSES\n");
+    let li:i32=0;
+    while(li<s.*.nlic){
+        let names:[]u8=c.*.names;
+        let no:i32=n1_lg(c,li,5);
+        let nl2:i32=n1_lg(c,li,6);
+        dout_str(o,"L");
+        dout_i64(o,li as i64);
+        dout_str(o," ");
+        dout_str(o,names[no..no+nl2]);
+        dout_str(o," kind ");
+        dout_i64(o,n1_lg(c,li,1) as i64);
+        dout_str(o," nprem ");
+        dout_i64(o,n1_lg(c,li,2) as i64);
+        dout_str(o," kid ");
+        dout_i64(o,n1_lg(c,li,7) as i64);
+        dout_str(o,"\n");
+        li=li+1;
+    }
+    dout_str(o,"STATES\n");
+    let t:i32=0;
+    while(t<s.*.nst){
+        let bo2:i32=n1_sg(c,t,4);
+        let bl2:i32=n1_sg(c,t,5);
+        dout_str(o,"S");
+        dout_i64(o,t as i64);
+        dout_str(o," src ");
+        dout_i64(o,n1_sg(c,t,2) as i64);
+        dout_str(o," depth ");
+        dout_i64(o,n1_sg(c,t,1) as i64);
+        dout_str(o," def ");
+        dout_i64(o,n1_sg(c,t,6) as i64);
+        dout_str(o," q ");
+        dout_i64(o,n1_quality(c,s,t) as i64);
+        dout_str(o," np ");
+        dout_i64(o,n1_sg(c,t,7) as i64);
+        dout_str(o," lic ");
+        dout_i64(o,n1_sg(c,t,3) as i64);
+        dout_str(o," text ");
+        if(bl2>0){dout_str(o,tx[bo2..bo2+bl2]);}
+        dout_line(o);
+        // hole provenance entries
+        let e2:i32=0;
+        while(e2<6){
+            let pid:i32=au_get32(c.*.hm,t*24+e2*4+0);
+            let hid:i32=au_get32(c.*.hm,t*24+e2*4+1);
+            if(pid>=0){
+                let ho:i32=au_get32(c.*.hm,t*24+e2*4+2);
+                let hl:i32=au_get32(c.*.hm,t*24+e2*4+3);
+                dout_str(o,"  P");
+                dout_i64(o,pid as i64);
+                dout_str(o," hole");
+                dout_i64(o,hid as i64);
+                dout_str(o," span ");
+                dout_i64(o,ho as i64);
+                dout_str(o,",");
+                dout_i64(o,hl as i64);
+                dout_str(o," \"");
+                if(hl>0 && ho>=0){dout_str(o,tx[ho..ho+hl]);}
+                dout_str(o,"\"\n");
+            }
+            e2=e2+1;
+        }
+        t=t+1;
+    }
+    dout_str(o,"CANDIDATES\n");
+    let cn:i32=au_get32(c.*.cand,2000*6+0);
+    dout_i64(o,cn as i64);
+    dout_str(o,"\n");
+    t=0;
+    while(t<cn){
+        dout_str(o,"C");
+        dout_i64(o,t as i64);
+        dout_str(o," id");
+        dout_i64(o,au_get32(c.*.cand,t*6+2) as i64);
+        dout_str(o," lid");
+        dout_i64(o,au_get32(c.*.cand,t*6+1) as i64);
+        dout_str(o," score");
+        dout_i64(o,au_get32(c.*.cand,t*6+0) as i64);
+        dout_str(o," depth");
+        dout_i64(o,au_get32(c.*.cand,t*6+4) as i64);
+        dout_line(o);
+        t=t+1;
+    }
+    dout_str(o,"CHALLENGES\n");
+    let ki2:i32=0;
+    while(ki2<s.*.nk){
+        let ch:i32=au_get32(c.*.chal,ki2);
+        if(ch>0){
+            dout_str(o,"K");
+            dout_i64(o,ki2 as i64);
+            dout_str(o," ");
+            dout_i64(o,ch as i64);
+            dout_line(o);
+        }
+        ki2=ki2+1;
+    }
+    dout_str(o,"END\n");
+    return;
+}
+// one full engine run: returns trace bytes (allocated, caller frees)
+fn n1_run(c:*N1C,s:*N1S,prob:[]u8,pl:i32,store:[]u8,sl:i32,prob_path:[]u8,store_path:[]u8)[]u8 {
+    n1_init(c,s);
+    // stop list from store
+    let ko2:i32=0;
+    // parse knowledge: locate items in the store bytes directly
+    let src2:[]u8=store[0..sl];
+    n1_parse_k(c,s,src2,sl);
+    n1_stop_init(c,s);
+    n1_stop_mine(c,s);
+    n1_mint_all(c,s);
+    n1_drive(c,s,prob[0..pl],pl);
+    let o:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    dout_init(&o,1048576);
+    n1_trace(c,s,store_path,prob_path,&o);
+    let tb:[]u8=dout_bytes(&o);
+    let out:[]u8=nio_alloc(tb.len);
+    let i:i32=0;
+    while(i<tb.len){out[i]=tb[i];i=i+1;}
+    dout_free(&o);
+    n1_free(c);
+    return out;
+}
+fn main()void {
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    if(a1.len==0){
+        _zag_print("usage: n1 <problem> <store> <out>\n");
+        _zag_exit(2);
+        return;
+    }
+    if(n1_has_sealed(a1)==1 || n1_has_sealed(a2)==1 || n1_has_sealed(a3)==1){
+        _zag_print("sealed path refused\n");
+        _zag_exit(3);
+        return;
+    }
+    if(a2.len==0 || a3.len==0){
+        _zag_print("usage: n1 <problem> <store> <out>\n");
+        _zag_exit(2);
+        return;
+    }
+    // guarded reads
+    let pbuf:[]u8=nio_alloc(1048576);
+    let pn:i64=n1_guarded_read(a1,pbuf);
+    let sbuf:[]u8=nio_alloc(1048576);
+    let sn:i64=n1_guarded_read(a2,sbuf);
+    if(pn==-99 || sn==-99){
+        _zag_print("sealed path refused\n");
+        _zag_exit(3);
+        return;
+    }
+    if(pn<=0 || sn<=0){
+        _zag_print("read failed\n");
+        nio_free(pbuf);
+        nio_free(sbuf);
+        _zag_exit(1);
+        return;
+    }
+    // three independent in-process runs; traces must be byte-identical
+    let c1:N1C=N1C{.tx:"",.st:"",.hm:"",.kb:"",.ko:"",.kl:"",.lic:"",.pat:"",.con:"",.otp:"",.lpool:"",.names:"",.htab:"",.mb:"",.cur:"",.tmp:"",.stopha:"",.chal:"",.gb:"",.ws:"",.cand:"",.pb:""};
+    let s1:N1S=N1S{.txn:0,.nst:0,.nk:0,.nlic:0,.nstop:0,.namesn:0,.goal_len:0,.assume_id:0,.bound:0,.steps:0,.proved:0,.pid_len:0,.contra_done:0,.maxd:0,.kb_n:0,.contra_lid:0};
+    let t1:[]u8=n1_run(&c1,&s1,pbuf,pn as i32,sbuf,sn as i32,a1,a2);
+    let c2:N1C=N1C{.tx:"",.st:"",.hm:"",.kb:"",.ko:"",.kl:"",.lic:"",.pat:"",.con:"",.otp:"",.lpool:"",.names:"",.htab:"",.mb:"",.cur:"",.tmp:"",.stopha:"",.chal:"",.gb:"",.ws:"",.cand:"",.pb:""};
+    let s2:N1S=N1S{.txn:0,.nst:0,.nk:0,.nlic:0,.nstop:0,.namesn:0,.goal_len:0,.assume_id:0,.bound:0,.steps:0,.proved:0,.pid_len:0,.contra_done:0,.maxd:0,.kb_n:0,.contra_lid:0};
+    let t2:[]u8=n1_run(&c2,&s2,pbuf,pn as i32,sbuf,sn as i32,a1,a2);
+    let eq:i32=0;
+    if(t1.len==t2.len){
+        if(nio_equal(t1,t2)==1){eq=1;}
+    }
+    let c3:N1C=N1C{.tx:"",.st:"",.hm:"",.kb:"",.ko:"",.kl:"",.lic:"",.pat:"",.con:"",.otp:"",.lpool:"",.names:"",.htab:"",.mb:"",.cur:"",.tmp:"",.stopha:"",.chal:"",.gb:"",.ws:"",.cand:"",.pb:""};
+    let s3:N1S=N1S{.txn:0,.nst:0,.nk:0,.nlic:0,.nstop:0,.namesn:0,.goal_len:0,.assume_id:0,.bound:0,.steps:0,.proved:0,.pid_len:0,.contra_done:0,.maxd:0,.kb_n:0,.contra_lid:0};
+    let t3:[]u8=n1_run(&c3,&s3,pbuf,pn as i32,sbuf,sn as i32,a1,a2);
+    if(t1.len==t3.len && eq==1){
+        if(nio_equal(t1,t3)==0){eq=0;}
+    }
+    if(eq==0){
+        _zag_print("nondeterminism detected\n");
+        _zag_exit(4);
+        return;
+    }
+    let wn:i64=dlb_write_file(a3,t1,t1.len as i64);
+    if(wn<=0){
+        _zag_print("write failed\n");
+        _zag_exit(1);
+        return;
+    }
+    _zag_print("ok ");
+    _zag_print(dlb_i64s(t1.len as i64));
+    _zag_print("\n");
+    nio_free(pbuf);
+    nio_free(sbuf);
+    nio_free(t1);
+    nio_free(t2);
+    nio_free(t3);
+    return;
+}
