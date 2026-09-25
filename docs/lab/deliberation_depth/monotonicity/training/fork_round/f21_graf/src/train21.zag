@@ -1,0 +1,319 @@
+// train21.zag — F21 GRAF: Per-Depth G-Anchored Fitter.
+//
+// Trains the UNCHANGED head C(s) = clamp((Σ w_i·f_i)/1000 + b, 0, 1000)
+// on a NEW objective (all fixed-point integer, i64):
+//   L = Σ_{rungs} n_r·G(r)² + λ·Σ_{cells}(c−y)² + μ·Σ_{items}Σ_{d} max(0, c_{d+1}−c_d)
+//   G(r) = trunc(1000·Σ_{rel@r}(c−y)/n_r), y ∈ {0,1000}
+// λ, μ frozen in params/FROZEN_HYPERPARAMS.md BEFORE the first training run.
+//
+// Optimizer: deterministic integer coordinate descent on the 9-parameter
+// lattice (w1..w8, b; thousandths). Sweep order w1..w8,b. Per param, try
+// +step then −step; accept the FIRST strict L decrease; move on.
+// Step phases: ±8 to full-sweep convergence, then ±1 refine to
+// full-sweep convergence. Zero RNG, fixed file order, fixed init.
+//
+// Usage: train21 <features.tsv> <params_out.zag> <moves_log.tsv>
+//
+// features.tsv cols: id \t family \t heldout \t depth \t t \t rel4
+//   \t correct4 \t f1..f8. Trains on heldout==0 && rel4==1 cells only.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("dlb_util.zag")
+
+fn g21_lam()i64 { return 1; } // frozen λ (FROZEN_HYPERPARAMS.md)
+fn g21_mu()i64 { return 4; }  // frozen μ (FROZEN_HYPERPARAMS.md)
+
+fn g21_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+
+// family name -> index 0..8 ; -1 unknown
+fn g21_famidx(fam:[]u8)i32 {
+    if(dlb_streq(fam,"admit")==1){return 0;}
+    if(dlb_streq(fam,"revoke")==1){return 1;}
+    if(dlb_streq(fam,"logic")==1){return 2;}
+    if(dlb_streq(fam,"cost")==1){return 3;}
+    if(dlb_streq(fam,"P")==1){return 4;}
+    if(dlb_streq(fam,"D")==1){return 5;}
+    if(dlb_streq(fam,"trap")==1){return 6;}
+    if(dlb_streq(fam,"O")==1){return 7;}
+    if(dlb_streq(fam,"redteam")==1){return 8;}
+    return -1;
+}
+// depth value -> slot 0..6 ; -1 unknown
+fn g21_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+
+// confidence from weight arena w (9 i64: w1..w8, b) — EXACT policy.zag pl_conf
+fn g21_conf(w:[]u8,feats:[]u8,fbase:i32)i64 {
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<8){
+        acc=acc+au_get64(w,k)*(au_get32(feats,fbase+k) as i64);
+        k=k+1;
+    }
+    return g21_clamp(acc/1000+au_get64(w,8),0,1000);
+}
+
+// full objective L over released training cells
+// meta: 6 i32/cell [reltr, fam, dslot, y1000, adj_prev, depth]
+// conf: ncells i64 scratch ; rsN/rsS: 63 i64 scratch
+fn g21_loss(w:[]u8,meta:[]u8,feats:[]u8,conf:[]u8,rsN:[]u8,rsS:[]u8,ncells:i32)i64 {
+    // 1. confidences for released training cells
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*6+0)==1){
+            au_put64(conf,i,g21_conf(w,feats,i*8));
+        }
+        i=i+1;
+    }
+    // 2. rung accumulators S=Σ(c−y), n
+    let r:i32=0;
+    while(r<63){au_put64(rsN,r,0);au_put64(rsS,r,0);r=r+1;}
+    let i2:i32=0;
+    while(i2<ncells){
+        if(au_get32(meta,i2*6+0)==1){
+            let rr:i32=au_get32(meta,i2*6+1)*7+au_get32(meta,i2*6+2);
+            au_put64(rsS,rr,au_get64(rsS,rr)+au_get64(conf,i2)-(au_get32(meta,i2*6+3) as i64));
+            au_put64(rsN,rr,au_get64(rsN,rr)+1);
+        }
+        i2=i2+1;
+    }
+    let L:i64=0;
+    // 3. Σ_r n_r·G(r)²
+    let r2:i32=0;
+    while(r2<63){
+        let n:i64=au_get64(rsN,r2);
+        if(n>0){
+            let S:i64=au_get64(rsS,r2);
+            let g:i64=(1000*S)/n;
+            L=L+n*g*g;
+        }
+        r2=r2+1;
+    }
+    // 4. λ·Σ(c−y)²
+    let i3:i32=0;
+    while(i3<ncells){
+        if(au_get32(meta,i3*6+0)==1){
+            let e:i64=au_get64(conf,i3)-(au_get32(meta,i3*6+3) as i64);
+            L=L+g21_lam()*e*e;
+        }
+        i3=i3+1;
+    }
+    // 5. μ·Σ max(0, c_d − c_prev) over per-item adjacent released cells
+    let i4:i32=0;
+    while(i4<ncells){
+        if(au_get32(meta,i4*6+0)==1){
+            let pv:i32=au_get32(meta,i4*6+4);
+            if(pv>=0){
+                let d:i64=au_get64(conf,i4)-au_get64(conf,pv);
+                if(d>0){L=L+g21_mu()*d;}
+            }
+        }
+        i4=i4+1;
+    }
+    return L;
+}
+
+// fill tab offsets: tabs[n] = end offset of field n
+fn g21_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+
+fn g21_train(feat_path:[]u8,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*6*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let idix:[]u8=nio_alloc((maxcells*2*4) as i64);
+    let idbuf:[]u8=nio_alloc(1048576);
+    let conf:[]u8=nio_alloc((maxcells*8) as i64);
+    let rsN:[]u8=nio_alloc(63*8);
+    let rsS:[]u8=nio_alloc(63*8);
+    let w:[]u8=nio_alloc(9*8);
+    if(meta.len==0||feats.len==0||idix.len==0||idbuf.len==0){return 102;}
+    if(conf.len==0||rsN.len==0||rsS.len==0||w.len==0){return 102;}
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){return 102;}
+    let ncells:i32=0;
+    let idn:i32=0;
+    let prev_ido:i32=-1;
+    let prev_idl:i32=0;
+    let run_prev_reltr:i32=-1; // prev released-training cell in current id run
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            g21_split(line,tabs);
+            // fields: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+            let f1e:i32=au_get32(tabs,0);
+            let f2e:i32=au_get32(tabs,1);
+            let f3e:i32=au_get32(tabs,2);
+            let f4e:i32=au_get32(tabs,3);
+            let f5e:i32=au_get32(tabs,4);
+            let f6e:i32=au_get32(tabs,5);
+            let f7e:i32=au_get32(tabs,6);
+            let id:[]u8=line[0..f1e];
+            let fam:[]u8=line[f1e+1..f2e];
+            let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+            let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+            let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+            let c4:[]u8=line[f6e+1..f7e];
+            let fi:i32=g21_famidx(fam);
+            let ds:i32=g21_dslot(depth);
+            if(fi<0 || ds<0){nio_free(fbuf);return 104;}
+            let reltr:i32=0;
+            let y1000:i32=0;
+            if(heldout==0 && rel4==1){
+                reltr=1;
+                if(c4.len==1 && c4[0]==49){y1000=1000;}
+            }
+            // id-run detection (frozen file: items contiguous, depths ascending)
+            let same_run:i32=0;
+            if(prev_ido>=0 && id.len==prev_idl && nio_equal(idbuf[prev_ido..prev_ido+prev_idl],id)==1){
+                same_run=1;
+            }
+            if(same_run==0){run_prev_reltr=-1;}
+            let ci:i32=ncells;
+            au_put32(meta,ci*6+0,reltr);
+            au_put32(meta,ci*6+1,fi);
+            au_put32(meta,ci*6+2,ds);
+            au_put32(meta,ci*6+3,y1000);
+            au_put32(meta,ci*6+4,-1);
+            au_put32(meta,ci*6+5,depth);
+            if(reltr==1){
+                au_put32(meta,ci*6+4,run_prev_reltr);
+                run_prev_reltr=ci;
+            }
+            let k:i32=0;
+            while(k<8){
+                let a:i32=au_get32(tabs,6+k);
+                let b2:i32=au_get32(tabs,7+k);
+                au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                k=k+1;
+            }
+            au_put32(idix,ci*2+0,idn);
+            au_put32(idix,ci*2+1,id.len);
+            let q:i32=0;
+            while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+            prev_ido=idn;
+            prev_idl=id.len;
+            idn=idn+id.len;
+            ncells=ncells+1;
+        }
+        pos=e+1;
+    }
+    // init: w1=1000, rest 0, b=0 (M4-harness-confidence start; recorded)
+    let j0:i32=0;
+    while(j0<9){au_put64(w,j0,0);j0=j0+1;}
+    au_put64(w,0,1000);
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo,8388608)!=0){return 102;}
+    dout_str(&lgo,"step\tparam\told\tnew\tL\n");
+    let L:i64=g21_loss(w,meta,feats,conf,rsN,rsS,ncells);
+    dout_i64(&lgo,0);dout_byte(&lgo,9);
+    dout_str(&lgo,"init");dout_byte(&lgo,9);
+    dout_i64(&lgo,0);dout_byte(&lgo,9);
+    dout_i64(&lgo,0);dout_byte(&lgo,9);
+    dout_i64(&lgo,L);dout_line(&lgo);
+    // coordinate descent: ±8 to convergence, then ±1 refine
+    let ph:i32=0;
+    while(ph<2){
+        let step:i64=8;
+        if(ph==1){step=1;}
+        let sweep:i32=0;
+        let done:i32=0;
+        while(done==0){
+            let accepted:i32=0;
+            let j:i32=0;
+            while(j<9){
+                let wj:i64=au_get64(w,j);
+                let moved:i32=0;
+                // try +step
+                au_put64(w,j,wj+step);
+                let Lp:i64=g21_loss(w,meta,feats,conf,rsN,rsS,ncells);
+                if(Lp<L){
+                    dout_i64(&lgo,step);dout_byte(&lgo,9);
+                    dout_i64(&lgo,j as i64);dout_byte(&lgo,9);
+                    dout_i64(&lgo,wj);dout_byte(&lgo,9);
+                    dout_i64(&lgo,wj+step);dout_byte(&lgo,9);
+                    dout_i64(&lgo,Lp);dout_line(&lgo);
+                    L=Lp;moved=1;accepted=1;
+                }
+                if(moved==0){
+                    // try −step
+                    au_put64(w,j,wj-step);
+                    let Lm:i64=g21_loss(w,meta,feats,conf,rsN,rsS,ncells);
+                    if(Lm<L){
+                        dout_i64(&lgo,0-step);dout_byte(&lgo,9);
+                        dout_i64(&lgo,j as i64);dout_byte(&lgo,9);
+                        dout_i64(&lgo,wj);dout_byte(&lgo,9);
+                        dout_i64(&lgo,wj-step);dout_byte(&lgo,9);
+                        dout_i64(&lgo,Lm);dout_line(&lgo);
+                        L=Lm;moved=1;accepted=1;
+                    }
+                }
+                if(moved==0){au_put64(w,j,wj);}
+                j=j+1;
+            }
+            sweep=sweep+1;
+            if(accepted==0){done=1;}
+        }
+        ph=ph+1;
+    }
+    // write params file
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,4096)!=0){return 102;}
+    dout_str(&po,"// mt21_params — F21 GRAF trained confidence-head weights\n");
+    dout_str(&po,"// Generated by train21.zag (PREREG_FORKROUND.md F21; λ=1, μ=4 frozen). Do not hand-edit.\n");
+    let k8:i32=0;
+    while(k8<8){
+        dout_str(&po,"fn mt_w");
+        dout_i64(&po,k8 as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,k8));
+        dout_str(&po,"; }\n");
+        k8=k8+1;
+    }
+    dout_str(&po,"fn mt_b()i64 { return ");
+    dout_i64(&po,au_get64(w,8));
+    dout_str(&po,"; }\n");
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&lgo),lgo.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);
+    nio_free(conf);nio_free(rsN);nio_free(rsS);nio_free(w);nio_free(tabs);
+    dout_free(&lgo);dout_free(&po);
+    if(wrc<0 || wrc2<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<4){
+        return 64;
+    }
+    return g21_train(_zag_arg(1),_zag_arg(2),_zag_arg(3));
+}
