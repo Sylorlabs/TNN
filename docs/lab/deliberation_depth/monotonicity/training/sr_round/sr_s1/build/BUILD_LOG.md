@@ -120,3 +120,27 @@ audit 2026-09-24 ~17:28 PDT. NOT compiled, NOT run — held pending the
 coordinator's gate ruling. B10b audit items (i)–(iii) and the crutch
 diagnostic (|Δw1|, w7 drift) plus held-out calibration will be executed
 if/when Stage 2 is green-lit.
+
+## 2026-09-24 ~17:35 PDT: COORDINATOR SECOND GATE RULING on §5b w7<0 (recorded verbatim)
+
+"Second gate ruling on §5b w7<0. FINDINGS: (1) The bar's premise is refuted by the frozen data itself — phase-local pin census (f7=1000, released, train): Phase A 1950 correct/0 wrong, Phase B 35/0, Phase C 0/5. grok's ~30-wrong-pin estimate was wrong; with 5 wrong pins confined to Phase C and ×10 boost on correct pins, w7's net drift is upward (+48/pass, crossing zero upward at pass 4). No Stage-1 continuation can clear w7<0 — this is structural to the data, not a transient. (2) The bar's intent, stated in §5b's own parenthetical '(separator moved)', IS satisfied: w7 is the most responsive channel (−830→+3083 range across passes), w5=+36811 theater-detached, w6≡0 all epochs, w3≡w4≡0, theater fired, mcC=0.884 non-degenerate. All mask behaviors verify. (3) The go/no-go exists to prevent burning 100× on a dead intervention; the intervention is demonstrably alive. (4) The arm's falsification clause applies to post-freeze eval, which has not been reached — no kill bar B1–B13 has been failed. RULING: the literal w7<0 gate is WAIVED via this recorded prereg note, premise-refutation documented above. The arm proceeds to 100× Stage 1 + Stage-2 disconnect + 37-leg eval. Kill bars B1–B13 and §11 adjudication are untouched and will kill the arm honestly if the mask design fails post-freeze. This ruling and its basis are presented to Micah at final adjudication for overrule."
+
+Crew note: this note does not change any code, constants, or curriculum —
+it adjudicates the gate criterion only. 100× Stage 1 (600 epochs) proceeds
+from frozen init via the verified deterministic-forward method; epochs 0–65
+must byte-match committed logs/log_11x_a.tsv.
+
+## Resume integrity check (2026-09-24 ~17:35 PDT, before the 100× run)
+
+- 7 committed blobs verified byte-identical against tnn-native-lab
+  (logs/log_11x_a.tsv, params/params_11x_a.zag.txt, src/train_sr1.zag,
+  src/train_sr2.zag, MASK_INTEGERS.md, work/KILLBAR_TABLE.txt,
+  analysis/GO_NOGO_EXT.md) — fetched via raw.githubusercontent and
+  sha256sum-compared.
+- mask_code_sha (fixed) de0825ec71bcb9294e0df4631e80f0962beec0d5ec99409314f8013d882a8635
+  — build/train_a/train_sr1.zag matches.
+- A/B binaries cmp-identical: 480a96a04860d8aeb0c5a5e3350a71b59a02c5933058ef10064ac6f7e9cf0809
+  (matches pinned value).
+- 11× log opens with prereg SHA f55d1dbbe1a609f69301ce8f537282a0372880b51fdec6b51d0f588b9fd96d30.
+- Resume = deterministic-forward: passes=100 from frozen init (600 epochs,
+  incl. the extension epochs by byte-identical reproduction).
