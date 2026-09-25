@@ -41,6 +41,46 @@ The v1 proof's load-bearing premise was **p0 < 1** ("d1 < 1.0"), unstated in its
 
 **B9 amendment:** The evidence does NOT meet the preregistered bar for amending B9 (no B9X holds B13). Whether B9 should be amended is **Micah's call**, but this crew recommends against on current evidence — the selection is load-bearing for the rises, yet every release redesign that clears them worsens underconfidence or breaks coverage.
 
+## B9X2 update — second release-redesign search (2026-09-25; Micah's B9 question)
+
+**Protocol:** `ADDENDUM_B9X2_2026-09-25.md` (committed `9118d6a1`, corrected `ae23cb5d`;
+both BEFORE any B9X2 input was generated or run). Two further B9X designs, m11
+confidence, 3× byte-identical A/B/C runs, full bar set, frozen analyzer. Runlog:
+`q1/RUNLOG_B9X2.md`. B13 gating uses the frozen definition (per (F,d), n_rel ≥ 8);
+both strict and unfiltered counts reported (round-1's table appears unfiltered —
+FIXED 13/15, DECORR 5/7 under strict/unfiltered; baseline m11 = 6 both ways;
+historical verdicts unchanged under either counting).
+
+**B9X-STRAT (mech 37)** — confidence-stratified nested release (per battery, deciles
+by m11 d1 conf, M4's counts): O Gviol **2→3** (the d4→d8 rise it targeted is gone —
+now a fall — but the strict 1e-12 bar catches tiny deeper rises: d8→d16 +0.004,
+d16→d32 +0.001, d32→d64 +0.003; battery-level stratification does not hold the
+family-level mix constant as counts shrink). B13 strict **held at 6** (same cells as
+m11 — the only B9X besides DECORR-strict not to worsen it). B6 **broken** (ceiling/D
+0.657 < 0.95 — reshuffling which items release breaks correctness-recall where M4's
+selection correlates with correctness). Fails prongs (a) and (c).
+
+**B9X-GRAD (mech 38)** — gradual phase-out (each M4-dropped batch half-kept one extra
+depth): O Gviol **2→3**. The rise FOLLOWS the drop wherever it happens: d4→d8 becomes
+a fall (−0.004, kept low-conf items overshoot), then d8→d16 rises +0.009 and d16→d32
+rises +0.019 (as large as the original) as the kept batches drop. The abruptness
+hypothesis is REFUTED — suddenness is not load-bearing; any below-mean cut at any
+step recreates the rise. B13 **6→15** (5 new ceiling/D cells, 3 new cost cells,
+deeper O cells — keeping low-conf items longer deepens underconfidence). Fails
+prongs (a) and (b). B6 held (1.000; superset by construction).
+
+**Hardened verdict:** No B9X design — across FOUR searched release redesigns
+{FIXED: freeze the cohort; DECORR: decorrelate the selection; STRAT: hold composition
+constant; GRAD: phase the cut gradually} — meets (a) O-rises cleared ∧ (b) B13 not
+worsened ∧ (c) no passing bar broken. FIXED is the only clearer and fails B13
+(6→13 strict). The v1 §4 joint-constraint note is confirmed empirically: on
+ceiling/O, B3 and B13 pull in opposite directions, and the strict 1e-12 rise bar
+means only a literally fixed cohort clears — any release rule that changes the set
+with depth re-creates the selection effect somewhere. **Recommendation: DO NOT amend
+B9.** The release rule stays frozen; the O-rise residual is a selection–confidence
+interaction to be addressed on the confidence side (cf. m20, which clears the rises
+in-class), not by redesigning release. Plain-language version: `B9_VERDICT_PLAIN.md`.
+
 ## Struck v1 claims
 1. The redteam residual is +0.522 (stale; measured +0.025). — STRUCK.
 2. "PROVEN: no §6-compliant in-class mechanism can clear the redteam d4→d8 rise." — **STRUCK** (m15 refutes).
