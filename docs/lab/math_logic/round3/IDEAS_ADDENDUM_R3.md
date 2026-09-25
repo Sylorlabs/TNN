@@ -1,13 +1,14 @@
-# IDEAS ADDENDUM — MATH R3 native engine specs (DRAFT — freezes with prereg)
+# IDEAS ADDENDUM — MATH R3 native engine specs (FROZEN)
 
 Four native architectures (reason DIRECTLY over raw utterance bytes; no
 NL→schema translation; byte-span operations only). Chosen for mechanism
 diversity: forward-rewrite (N1), backward-eliminative (N2), parallel
 shared-ledger (N3), analogical (N4). Fable designed N1 (full design doc:
-`/tmp/r3_fable_design.txt`, to be committed with the round); N2/N3/N4 are
-coordinator designs from the same constraint set. Grok-4.7 was unavailable
-(3 empty provider responses); diversity was constructed by mechanism sketch
-instead.
+`math_logic/round3/FABLE_N1_DESIGN.md`, committed with the round); N2/N3/N4
+are coordinator designs from the same constraint set. Grok-4.7 was
+unavailable (3 empty provider responses); diversity was constructed by
+mechanism sketch instead. Frozen with PREREG_MATH_R3.md (commit 01ffd095);
+no spec changes after this point without a prereg amendment.
 
 Anti-bridge line (all four): at NO point may the engine construct typed
 variables with scope, a well-formedness grammar distinguishing formulas from
