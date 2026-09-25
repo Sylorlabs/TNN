@@ -1,0 +1,510 @@
+// train_dismin2.zag — F25 DISMIN TRAIN-COORD v2 trainer.
+//
+// Implements PREREG_FORKROUND.md FROZEN v2 §5b (repaired TRAIN-COORD) for
+// native2_forks.md FORK 2 (DISMIN):
+//   - all params start at 0; fixed sweep order [bias, w1..w4];
+//     step sizes ±50, then ±8, then ±1 refine per param visit
+//     (+s first, then -s; first strict L-reduction accepted); box
+//     [-1000,1000]; 8 sweeps; deterministic.
+//   - objective: sum over training cells of (C - 1000*y)^2 (per head).
+//   - NO vetoes on candidates (accept on strict L-reduction alone).
+//     Veto stats are LOGGED per candidate as evidence but do not gate.
+//   - Vetoes V1–V3 gate the FINAL fitted head only: violating head = VOID.
+//   - Then the Delta grid: common D in {0,50,...,500} added to BOTH biases
+//     INSIDE the clamp (a_0+D, b_0+D), maximizing training B4 score subject
+//     to the V3 veto on the grid (strict-greater wins, ties -> smaller D).
+//   - Training-cells dump (id, family, depth, y, A, B, C with FINAL heads)
+//     for the per-head-vs-min B8-on-training analysis.
+//
+// Usage: train_dismin2 <features.tsv> <params_out.zag> <log_out.tsv> <cells_out.tsv>
+//
+// features.tsv cols: id \t family \t heldout \t depth \t t \t rel4
+//   \t correct4 \t f1..f8. Training cells: heldout=0 AND rel4=1.
+//
+// Pure Zag, zero RNG. []u8 arenas + LE accessors throughout.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+fn td_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn td_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+fn td_famidx(fam:[]u8)i32 {
+    if(dlb_streq(fam,"admit")==1){return 0;}
+    if(dlb_streq(fam,"revoke")==1){return 1;}
+    if(dlb_streq(fam,"logic")==1){return 2;}
+    if(dlb_streq(fam,"cost")==1){return 3;}
+    if(dlb_streq(fam,"trap")==1){return 4;}
+    if(dlb_streq(fam,"redteam")==1){return 5;}
+    if(dlb_streq(fam,"P")==1){return 6;}
+    if(dlb_streq(fam,"D")==1){return 7;}
+    if(dlb_streq(fam,"O")==1){return 8;}
+    return -1;
+}
+fn td_famname(fi:i32)[]u8 {
+    if(fi==0){return "admit";}
+    if(fi==1){return "revoke";}
+    if(fi==2){return "logic";}
+    if(fi==3){return "cost";}
+    if(fi==4){return "trap";}
+    if(fi==5){return "redteam";}
+    if(fi==6){return "P";}
+    if(fi==7){return "D";}
+    if(fi==8){return "O";}
+    return "?";
+}
+fn td_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+
+// head confidence for one cell.
+// p: 5xi64 arena [bias, w1..w4]; feats: ncells*8 i32 arena; fbase: 0 (A) or 4 (B).
+fn td_conf(p:[]u8,feats:[]u8,ci:i32,fbase:i32)i32 {
+    let acc:i64=au_get64(p,1)*(au_get32(feats,ci*8+fbase+0) as i64)
+             +au_get64(p,2)*(au_get32(feats,ci*8+fbase+1) as i64)
+             +au_get64(p,3)*(au_get32(feats,ci*8+fbase+2) as i64)
+             +au_get64(p,4)*(au_get32(feats,ci*8+fbase+3) as i64);
+    let c:i64=td_tdiv(acc,1000)+au_get64(p,0);
+    return td_clamp(c,0,1000) as i32;
+}
+
+// head confidence with an extra bias delta added INSIDE the clamp
+// (the Delta grid: "added to both a_0 and b_0").
+fn td_conf_d(p:[]u8,feats:[]u8,ci:i32,fbase:i32,delta:i64)i32 {
+    let acc:i64=au_get64(p,1)*(au_get32(feats,ci*8+fbase+0) as i64)
+             +au_get64(p,2)*(au_get32(feats,ci*8+fbase+1) as i64)
+             +au_get64(p,3)*(au_get32(feats,ci*8+fbase+2) as i64)
+             +au_get64(p,4)*(au_get32(feats,ci*8+fbase+3) as i64);
+    let c:i64=td_tdiv(acc,1000)+au_get64(p,0)+delta;
+    return td_clamp(c,0,1000) as i32;
+}
+
+// Evaluate candidate params: objective + veto statistics.
+// meta: ncells*4 i32 [fam, depth, y, prev]; vacc: 9*7*3 i64 scratch (zeroed here).
+fn td_eval(p:[]u8,feats:[]u8,meta:[]u8,ncells:i32,fbase:i32,vacc:[]u8,
+           obj:*i64,v12:*i64,mccn:*i64,mccd:*i64,v3bad:*i64)void {
+    let o:i64=0;
+    let t12:i64=0;
+    let mn:i64=0;
+    let md:i64=0;
+    let zi:i32=0;
+    while(zi<9*7*3){au_put64(vacc,zi,0);zi=zi+1;}
+    let i:i32=0;
+    while(i<ncells){
+        let y:i32=au_get32(meta,i*4+2);
+        let c:i64=td_conf(p,feats,i,fbase) as i64;
+        let yy:i64=0;
+        if(y==1){yy=1000;}
+        let e:i64=c-yy;
+        o=o+e*e;
+        if(y==1){mn=mn+c;md=md+1;}
+        let fi:i32=au_get32(meta,i*4+0);
+        let ds:i32=td_dslot(au_get32(meta,i*4+1));
+        if(fi>=0 && ds>=0){
+            let gx:i32=(fi*7+ds)*3;
+            au_put64(vacc,gx,au_get64(vacc,gx)+c);
+            au_put64(vacc,gx+1,au_get64(vacc,gx+1)+1);
+            if(y==1){au_put64(vacc,gx+2,au_get64(vacc,gx+2)+1);}
+        }
+        let pv:i32=au_get32(meta,i*4+3);
+        if(pv>=0){
+            let yp:i32=au_get32(meta,pv*4+2);
+            let cp:i64=td_conf(p,feats,pv,fbase) as i64;
+            if(yp==1 && y==0 && c>=cp){t12=t12+1;}
+            if(yp==0 && y==0 && c>cp){t12=t12+1;}
+        }
+        i=i+1;
+    }
+    let bad:i64=0;
+    let f2:i32=0;
+    while(f2<9){
+        let s:i32=0;
+        while(s<7){
+            let gx2:i32=(f2*7+s)*3;
+            let n2:i64=au_get64(vacc,gx2+1);
+            if(n2>=8){
+                let gth:i64=au_get64(vacc,gx2)-1000*au_get64(vacc,gx2+2);
+                if(gth<-80*n2){bad=1;}
+            }
+            s=s+1;
+        }
+        f2=f2+1;
+    }
+    obj.*=o;v12.*=t12;mccn.*=mn;mccd.*=md;v3bad.*=bad;
+}
+
+// Fit one head with TRAIN-COORD v2: accept on strict L-reduction alone.
+// Step sizes 50, then 8, then 1 per param visit (+s first, then -s).
+// Logs every candidate (veto stats logged, NOT gating).
+fn td_fit(tag:[]u8,fbase:i32,p:[]u8,feats:[]u8,meta:[]u8,ncells:i32,
+          vacc:[]u8,lgo:*DOut)void {
+    let k:i32=0;
+    while(k<5){au_put64(p,k,0);k=k+1;}
+    let obj:i64=0;let v12:i64=0;let mccn:i64=0;let mccd:i64=0;let v3bad:i64=0;
+    td_eval(p,feats,meta,ncells,fbase,vacc,&obj,&v12,&mccn,&mccd,&v3bad);
+    let best:i64=obj;
+    dout_str(lgo,tag);dout_str(lgo,"\tinit\tobj=");dout_i64(lgo,obj);
+    dout_str(lgo,"\tv12=");dout_i64(lgo,v12);
+    dout_str(lgo,"\tmccn=");dout_i64(lgo,mccn);
+    dout_str(lgo,"\tmccd=");dout_i64(lgo,mccd);
+    dout_str(lgo,"\tv3bad=");dout_i64(lgo,v3bad);dout_line(lgo);
+    let sw:i32=0;
+    while(sw<8){
+        let accsw:i32=0;
+        let pi:i32=0;
+        while(pi<5){
+            let si:i32=0;
+            while(si<3){
+                let ssize:i64=50;
+                if(si==1){ssize=8;}
+                if(si==2){ssize=1;}
+                let done:i32=0;
+                let sgi:i32=0;
+                while(sgi<2 && done==0){
+                    let step:i64=ssize;
+                    if(sgi==1){step=-ssize;}
+                    let cand:i64=au_get64(p,pi)+step;
+                    let insk:i32=0;
+                    if(cand>=-1000 && cand<=1000){insk=1;}
+                    if(insk==1){
+                        let old:i64=au_get64(p,pi);
+                        au_put64(p,pi,cand);
+                        let o2:i64=0;let t2:i64=0;let n2:i64=0;let d2:i64=0;let b2:i64=0;
+                        td_eval(p,feats,meta,ncells,fbase,vacc,&o2,&t2,&n2,&d2,&b2);
+                        let improved:i64=0;
+                        if(o2<best){improved=1;}
+                        dout_str(lgo,tag);dout_byte(lgo,9);
+                        dout_str(lgo,"sw");dout_i64(lgo,sw as i64);dout_byte(lgo,9);
+                        dout_str(lgo,"p");dout_i64(lgo,pi as i64);dout_byte(lgo,9);
+                        dout_str(lgo,"try");dout_i64(lgo,step);dout_byte(lgo,9);
+                        dout_str(lgo,"obj");dout_i64(lgo,o2);dout_byte(lgo,9);
+                        dout_str(lgo,"dobj");dout_i64(lgo,o2-best);dout_byte(lgo,9);
+                        dout_str(lgo,"v12");dout_i64(lgo,t2);dout_byte(lgo,9);
+                        dout_str(lgo,"v2ok");dout_i64(lgo,(d2>0 && n2>=550*d2) as i64);dout_byte(lgo,9);
+                        dout_str(lgo,"v3bad");dout_i64(lgo,b2);dout_byte(lgo,9);
+                        dout_str(lgo,"acc");dout_i64(lgo,improved);dout_line(lgo);
+                        if(improved==1){
+                            best=o2;accsw=accsw+1;done=1;
+                        }
+                        if(improved==0){au_put64(p,pi,old);}
+                    }
+                    if(insk==0){
+                        dout_str(lgo,tag);dout_byte(lgo,9);
+                        dout_str(lgo,"sw");dout_i64(lgo,sw as i64);dout_byte(lgo,9);
+                        dout_str(lgo,"p");dout_i64(lgo,pi as i64);dout_byte(lgo,9);
+                        dout_str(lgo,"box-skip");dout_i64(lgo,step);dout_line(lgo);
+                    }
+                    sgi=sgi+1;
+                }
+                si=si+1;
+            }
+            pi=pi+1;
+        }
+        dout_str(lgo,tag);dout_str(lgo,"\tsweep");dout_i64(lgo,sw as i64);
+        dout_str(lgo,"\taccepted=");dout_i64(lgo,accsw as i64);
+        dout_str(lgo,"\tbest=");dout_i64(lgo,best);dout_line(lgo);
+        sw=sw+1;
+    }
+    dout_str(lgo,tag);dout_str(lgo,"\tfinal");
+    let kf:i32=0;
+    while(kf<5){dout_str(lgo,"\tp");dout_i64(lgo,kf as i64);dout_str(lgo,"=");
+        dout_i64(lgo,au_get64(p,kf));kf=kf+1;}
+    dout_line(lgo);
+}
+
+// Final-veto check on a fitted head. Returns 0=PASS, 1=VOID. Logs the verdict.
+fn td_final_veto(tag:[]u8,fbase:i32,p:[]u8,feats:[]u8,meta:[]u8,ncells:i32,
+                 vacc:[]u8,lgo:*DOut)i32 {
+    let o:i64=0;let v12:i64=0;let mccn:i64=0;let mccd:i64=0;let v3bad:i64=0;
+    td_eval(p,feats,meta,ncells,fbase,vacc,&o,&v12,&mccn,&mccd,&v3bad);
+    let v2ok:i32=0;
+    if(mccd>0 && mccn>=550*mccd){v2ok=1;}
+    let void:i32=0;
+    if(v12>0){void=1;}
+    if(v2ok==0){void=1;}
+    if(v3bad==1){void=1;}
+    dout_str(lgo,tag);dout_str(lgo,"\tfinal-veto\tV1+V2=");
+    dout_i64(lgo,v12);dout_str(lgo,"\tmccn=");dout_i64(lgo,mccn);
+    dout_str(lgo,"\tmccd=");dout_i64(lgo,mccd);dout_str(lgo,"\tv2ok=");
+    dout_i64(lgo,v2ok as i64);dout_str(lgo,"\tv3bad=");dout_i64(lgo,v3bad);
+    dout_str(lgo,"\tverdict=");
+    if(void==1){dout_str(lgo,"VOID");}else{dout_str(lgo,"PASS");}
+    dout_line(lgo);
+    return void;
+}
+
+// Delta-grid evaluation: C = min(A_d, B_d) with delta added to both biases
+// INSIDE the clamp. score = sum C over correct cells.
+fn td_eval_min(pa:[]u8,pb:[]u8,delta:i64,feats:[]u8,meta:[]u8,ncells:i32,
+               vacc:[]u8,score:*i64,v3bad:*i64)void {
+    let sc:i64=0;
+    let zi:i32=0;
+    while(zi<9*7*3){au_put64(vacc,zi,0);zi=zi+1;}
+    let i:i32=0;
+    while(i<ncells){
+        let ca:i64=td_conf_d(pa,feats,i,0,delta) as i64;
+        let cb:i64=td_conf_d(pb,feats,i,4,delta) as i64;
+        let c:i64=ca;
+        if(cb<ca){c=cb;}
+        let y:i32=au_get32(meta,i*4+2);
+        if(y==1){sc=sc+c;}
+        let fi:i32=au_get32(meta,i*4+0);
+        let ds:i32=td_dslot(au_get32(meta,i*4+1));
+        if(fi>=0 && ds>=0){
+            let gx:i32=(fi*7+ds)*3;
+            au_put64(vacc,gx,au_get64(vacc,gx)+c);
+            au_put64(vacc,gx+1,au_get64(vacc,gx+1)+1);
+            if(y==1){au_put64(vacc,gx+2,au_get64(vacc,gx+2)+1);}
+        }
+        i=i+1;
+    }
+    let bad:i64=0;
+    let f2:i32=0;
+    while(f2<9){
+        let s:i32=0;
+        while(s<7){
+            let gx2:i32=(f2*7+s)*3;
+            let n2:i64=au_get64(vacc,gx2+1);
+            if(n2>=8){
+                let gth:i64=au_get64(vacc,gx2)-1000*au_get64(vacc,gx2+2);
+                if(gth<-80*n2){bad=1;}
+            }
+            s=s+1;
+        }
+        f2=f2+1;
+    }
+    score.*=sc;v3bad.*=bad;
+}
+
+fn td_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+
+fn td_train(feat_path:[]u8,params_path:[]u8,log_path:[]u8,cells_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*4*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let idix:[]u8=nio_alloc((maxcells*2*4) as i64);
+    let idbuf:[]u8=nio_alloc(1048576);
+    let tabs:[]u8=nio_alloc(17*4);
+    let vacc:[]u8=nio_alloc((9*7*3*8) as i64);
+    if(meta.len==0||feats.len==0||idix.len==0||idbuf.len==0||tabs.len==0||vacc.len==0){return 102;}
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo,4194304)!=0){return 102;}
+    dout_str(&lgo,"# train_dismin2 log — F25 DISMIN TRAIN-COORD v2 (PREREG_FORKROUND.md FROZEN v2 §5b)\n");
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            td_split(line,tabs);
+            let f1e:i32=au_get32(tabs,0);
+            let f2e:i32=au_get32(tabs,1);
+            let f3e:i32=au_get32(tabs,2);
+            let f4e:i32=au_get32(tabs,3);
+            let f5e:i32=au_get32(tabs,4);
+            let f6e:i32=au_get32(tabs,5);
+            let f7e:i32=au_get32(tabs,6);
+            let id:[]u8=line[0..f1e];
+            let fam:[]u8=line[f1e+1..f2e];
+            let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+            let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+            let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+            let c4:[]u8=line[f6e+1..f7e];
+            if(heldout==0 && rel4==1){
+                let fi:i32=td_famidx(fam);
+                let y:i32=0;
+                if(c4.len==1 && c4[0]==49){y=1;}
+                let ci:i32=ncells;
+                au_put32(meta,ci*4+0,fi);
+                au_put32(meta,ci*4+1,depth);
+                au_put32(meta,ci*4+2,y);
+                au_put32(meta,ci*4+3,-1);
+                let k:i32=0;
+                while(k<8){
+                    let a2:i32=au_get32(tabs,6+k);
+                    let b2:i32=au_get32(tabs,7+k);
+                    au_put32(feats,ci*8+k,dlb_atoi(line[a2+1..b2]));
+                    k=k+1;
+                }
+                // prev chain: nearest previous same-id training cell
+                let pv:i32=-1;
+                let j:i32=ci-1;
+                while(j>=0 && pv<0){
+                    let jo:i32=au_get32(idix,j*2+0);
+                    let jl:i32=au_get32(idix,j*2+1);
+                    if(jl==id.len && nio_equal(idbuf[jo..jo+jl],id)==1){pv=j;}
+                    if(pv<0){j=j-1;}
+                }
+                au_put32(meta,ci*4+3,pv);
+                au_put32(idix,ci*2+0,idn);
+                au_put32(idix,ci*2+1,id.len);
+                let q:i32=0;
+                while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+                idn=idn+id.len;
+                ncells=ncells+1;
+            }
+        }
+        pos=e+1;
+    }
+    dout_str(&lgo,"ncells_training_released=");dout_i64(&lgo,ncells as i64);dout_line(&lgo);
+    let pa:[]u8=nio_alloc(5*8);
+    let pb:[]u8=nio_alloc(5*8);
+    if(pa.len==0||pb.len==0){return 102;}
+    td_fit("A",0,pa,feats,meta,ncells,vacc,&lgo);
+    td_fit("B",4,pb,feats,meta,ncells,vacc,&lgo);
+    // Final vetoes (V1–V3 on the FINAL head only, per §5b)
+    let voidA:i32=td_final_veto("A",0,pa,feats,meta,ncells,vacc,&lgo);
+    let voidB:i32=td_final_veto("B",4,pb,feats,meta,ncells,vacc,&lgo);
+    // Delta grid (ascending, strict-greater wins, ties->smaller; V3 veto on grid)
+    dout_str(&lgo,"# delta grid (ascending, strict-greater wins, ties->smaller; delta inside clamp)\n");
+    let best_score:i64=-1;
+    let best_d:i32=0;
+    let d:i32=0;
+    while(d<=500){
+        let sc:i64=0;let bad:i64=0;
+        td_eval_min(pa,pb,d as i64,feats,meta,ncells,vacc,&sc,&bad);
+        dout_str(&lgo,"delta=");dout_i64(&lgo,d as i64);
+        dout_str(&lgo,"\tscore=");dout_i64(&lgo,sc);
+        dout_str(&lgo,"\tv3bad=");dout_i64(&lgo,bad);
+        let take:i64=0;
+        if(bad==0 && sc>best_score){take=1;}
+        if(take==1){best_score=sc;best_d=d;}
+        dout_str(&lgo,"\ttake=");dout_i64(&lgo,take);dout_line(&lgo);
+        d=d+50;
+    }
+    dout_str(&lgo,"delta_star=");dout_i64(&lgo,best_d as i64);
+    dout_str(&lgo,"\tscore=");dout_i64(&lgo,best_score);dout_line(&lgo);
+    // veto rate (liveness) with FINAL shifted heads
+    let nveto:i64=0;
+    let vi:i32=0;
+    while(vi<ncells){
+        let ca:i64=td_conf_d(pa,feats,vi,0,best_d as i64) as i64;
+        let cb:i64=td_conf_d(pb,feats,vi,4,best_d as i64) as i64;
+        let mn:i64=ca;
+        if(cb<ca){mn=cb;}
+        let mx:i64=ca;
+        if(cb>ca){mx=cb;}
+        if(mn<mx-50){nveto=nveto+1;}
+        vi=vi+1;
+    }
+    dout_str(&lgo,"veto_rate_training_final=");dout_i64(&lgo,nveto);
+    dout_str(&lgo,"/");dout_i64(&lgo,ncells as i64);dout_line(&lgo);
+    // checkpoint summary
+    let moved:i32=0;
+    let mi:i32=0;
+    while(mi<5){
+        if(au_get64(pa,mi)!=0){moved=1;}
+        if(au_get64(pb,mi)!=0){moved=1;}
+        mi=mi+1;
+    }
+    dout_str(&lgo,"checkpoint\tweights_moved=");dout_i64(&lgo,moved as i64);
+    dout_str(&lgo,"\tveto_rate_live=");dout_i64(&lgo,(nveto>0) as i64);
+    dout_str(&lgo,"\theadA_void=");dout_i64(&lgo,voidA as i64);
+    dout_str(&lgo,"\theadB_void=");dout_i64(&lgo,voidB as i64);dout_line(&lgo);
+    // write params file (FINAL shifted params)
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,4096)!=0){return 102;}
+    dout_str(&po,"// f25_params — F25 DISMIN v2 trained head params (FROZEN after training)\n");
+    dout_str(&po,"// Generated by train_dismin2.zag (PREREG_FORKROUND.md FROZEN v2 §5b). Do not hand-edit.\n");
+    dout_str(&po,"// a_0/b_0 include the Delta* bias shift (inside-clamp).\n");
+    let pi2:i32=0;
+    while(pi2<5){
+        let v:i64=au_get64(pa,pi2);
+        if(pi2==0){v=v+(best_d as i64);}
+        dout_str(&po,"fn f25_a");dout_i64(&po,pi2 as i64);
+        dout_str(&po,"()i64 { return ");dout_i64(&po,v);
+        dout_str(&po,"; }\n");
+        pi2=pi2+1;
+    }
+    pi2=0;
+    while(pi2<5){
+        let v2b:i64=au_get64(pb,pi2);
+        if(pi2==0){v2b=v2b+(best_d as i64);}
+        dout_str(&po,"fn f25_b");dout_i64(&po,pi2 as i64);
+        dout_str(&po,"()i64 { return ");dout_i64(&po,v2b);
+        dout_str(&po,"; }\n");
+        pi2=pi2+1;
+    }
+    dout_str(&po,"fn f25_a0_fit()i64 { return ");
+    dout_i64(&po,au_get64(pa,0));dout_str(&po,"; }\n");
+    dout_str(&po,"fn f25_b0_fit()i64 { return ");
+    dout_i64(&po,au_get64(pb,0));dout_str(&po,"; }\n");
+    dout_str(&po,"fn f25_delta()i64 { return ");
+    dout_i64(&po,best_d as i64);
+    dout_str(&po,"; }\n");
+    dout_str(&po,"fn f25_void()i64 { return ");
+    dout_i64(&po,(voidA+voidB) as i64);
+    dout_str(&po,"; }\n");
+    // write training-cells dump (FINAL shifted heads)
+    let co:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&co,1048576)!=0){return 102;}
+    dout_str(&co,"# id\tfamily\tdepth\ty\tA\tB\tC (FINAL shifted heads)\n");
+    let ci2:i32=0;
+    while(ci2<ncells){
+        let jo2:i32=au_get32(idix,ci2*2+0);
+        let jl2:i32=au_get32(idix,ci2*2+1);
+        dout_str(&co,idbuf[jo2..jo2+jl2]);dout_byte(&co,9);
+        dout_str(&co,td_famname(au_get32(meta,ci2*4+0)));dout_byte(&co,9);
+        dout_i64(&co,au_get32(meta,ci2*4+1) as i64);dout_byte(&co,9);
+        dout_i64(&co,au_get32(meta,ci2*4+2) as i64);dout_byte(&co,9);
+        let fa:i64=td_conf_d(pa,feats,ci2,0,best_d as i64) as i64;
+        let fb:i64=td_conf_d(pb,feats,ci2,4,best_d as i64) as i64;
+        let fc:i64=fa;
+        if(fb<fa){fc=fb;}
+        dout_i64(&co,fa);dout_byte(&co,9);
+        dout_i64(&co,fb);dout_byte(&co,9);
+        dout_i64(&co,fc);dout_line(&co);
+        ci2=ci2+1;
+    }
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&lgo),lgo.n);
+    let wrc3:i64=dlb_write_file(cells_path,dout_bytes(&co),co.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);
+    nio_free(tabs);nio_free(vacc);nio_free(pa);nio_free(pb);
+    dout_free(&lgo);dout_free(&po);dout_free(&co);
+    if(wrc<0 || wrc2<0 || wrc3<0){return 103;}
+    if(lgo.err!=0 || po.err!=0 || co.err!=0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    let a4:[]u8=_zag_arg(4);
+    if(a1.len==0 || a2.len==0 || a3.len==0 || a4.len==0){
+        _zag_println("usage: train_dismin2 <features.tsv> <params_out.zag> <log_out.tsv> <cells_out.tsv>");
+        return 64;
+    }
+    return td_train(a1,a2,a3,a4);
+}
