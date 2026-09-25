@@ -1,0 +1,168 @@
+// m1_sandbox.zag — M1 seccomp capability-sandbox launcher (FROZEN M1 mini-prereg §2).
+// Pure Zag, pinned toolchain. Usage:
+//   m1_sandbox --dump-filter   -> writes the 72-byte BPF filter to stdout, exits 0
+//   m1_sandbox <target-path>   -> installs sandbox, execve's target with empty env,
+//                                 argv = ["target"]. This process BECOMES the target.
+// Verdict is read from this process's exit/signal by the outer harness:
+//   exit 0        -> PASS
+//   SIGSYS (31)   -> FAIL (seccomp kill; killed syscall # unrecoverable post-mortem)
+//   SIGSEGV (11)  -> FAIL (rdtsc trap via PR_SET_TSC)
+//   anything else -> INCONCLUSIVE
+//
+// Sandbox (in order):
+//   1. prctl(PR_SET_NO_NEW_PRIVS, 1)              [prerequisite for unprivileged seccomp]
+//   2. prctl(PR_SET_TSC, PR_TSC_SIGSEGV)          [rdtsc raises SIGSEGV]
+//   3. prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
+//      filter: KILL_PROCESS on nr 318 (getrandom), 228 (clock_gettime),
+//              96 (gettimeofday); ALLOW everything else. Arch gate: x86-64 only.
+//   4. personality(query | ADDR_NO_RANDOMIZE)     [ASLR off for the target]
+//      NOTE: the mini-prereg text says personality(0xffffffff | ADDR_NO_RANDOMIZE);
+//      0xffffffff is the QUERY constant (verified: it returns the persona without
+//      changing it), so the launcher queries first, then sets (cur|ADDR_NO_RANDOMIZE).
+//   5. execve(path, ["target", NULL], [NULL])
+// Any prctl failure -> print + exit non-zero WITHOUT execve (fail closed).
+
+@import("R33_NATIVE_IO_V1.zag")
+
+fn put64(b:[]u8, off:i32, v:i64)void {
+    let i:i32=0;
+    while(i<8){
+        let sh:i64=(i*8) as i64;
+        let by:i64=(v>>sh)&255;
+        b[off+i]=by as u8;
+        i=i+1;
+    }
+    return;
+}
+
+fn bpf_emit(f:[]u8, i:i32, code:i64, jt:i64, jf:i64, k:i64)void {
+    let o:i32=i*8;
+    f[o]=(code&255) as u8;
+    let c1:i64=(code>>8)&255;
+    f[o+1]=c1 as u8;
+    f[o+2]=jt as u8;
+    f[o+3]=jf as u8;
+    f[o+4]=(k&255) as u8;
+    let k1:i64=(k>>8)&255;
+    f[o+5]=k1 as u8;
+    let k2:i64=(k>>16)&255;
+    f[o+6]=k2 as u8;
+    let k3:i64=(k>>24)&255;
+    f[o+7]=k3 as u8;
+    return;
+}
+
+// Build the 9-instruction filter (72 bytes) into f (must be len>=72).
+// 0: LD  W ABS [4]                  ; seccomp_data.arch
+// 1: JEQ K 3221225534 jt=1 jf=0     ; AUDIT_ARCH_X86_64? yes->3 no->2
+// 2: RET K KILL
+// 3: LD  W ABS [0]                  ; seccomp_data.nr
+// 4: JEQ K 318 jt=2 jf=0            ; getrandom? yes->7
+// 5: JEQ K 228 jt=1 jf=0            ; clock_gettime? yes->7
+// 6: JEQ K 96  jt=0 jf=1            ; gettimeofday? yes->7 no->8
+// 7: RET K KILL
+// 8: RET K ALLOW
+fn build_filter(f:[]u8)void {
+    let BPF_LD_ABS:i64=32;      // BPF_LD|BPF_W|BPF_ABS
+    let BPF_JEQ_K:i64=21;       // BPF_JMP|BPF_JEQ|BPF_K
+    let BPF_RET_K:i64=6;        // BPF_RET|BPF_K
+    let ARCH_X86_64:i64=3221225534;  // AUDIT_ARCH_X86_64
+    let KILL:i64=2147483648;    // SECCOMP_RET_KILL_PROCESS
+    let ALLOW:i64=2147418112;   // SECCOMP_RET_ALLOW
+    bpf_emit(f,0,BPF_LD_ABS,0,0,4);
+    bpf_emit(f,1,BPF_JEQ_K,1,0,ARCH_X86_64);
+    bpf_emit(f,2,BPF_RET_K,0,0,KILL);
+    bpf_emit(f,3,BPF_LD_ABS,0,0,0);
+    bpf_emit(f,4,BPF_JEQ_K,2,0,318);
+    bpf_emit(f,5,BPF_JEQ_K,1,0,228);
+    bpf_emit(f,6,BPF_JEQ_K,0,1,96);
+    bpf_emit(f,7,BPF_RET_K,0,0,KILL);
+    bpf_emit(f,8,BPF_RET_K,0,0,ALLOW);
+    return;
+}
+
+fn z_cstr(s:[]u8)[]u8 {
+    let b:[]u8=nio_alloc(s.len+1);
+    if(b.len!=s.len+1){return b;}
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i]; i=i+1;}
+    b[s.len]=0;
+    return b;
+}
+
+fn main()i32 {
+    let a1:[]u8=_zag_arg(1);
+    let df:[]u8="--dump-filter";
+    if(_zag_strcmp(a1,df)==1){
+        let f:[]u8=nio_alloc(72);
+        if(f.len!=72){return 9;}
+        build_filter(f);
+        _zag_print(f);
+        nio_free(f);
+        return 0;
+    }
+    if(a1.len==0){
+        _zag_println("usage: m1_sandbox [--dump-filter] <target-path>");
+        return 2;
+    }
+    // 1. no_new_privs (prerequisite for unprivileged SECCOMP_MODE_FILTER)
+    let r:i64=_zag_raw_syscall(157,38,1,0,0,0,0);
+    if(r!=0){
+        _zag_println("E: PR_SET_NO_NEW_PRIVS failed");
+        return 3;
+    }
+    // 2. PR_SET_TSC, PR_TSC_SIGSEGV
+    r=_zag_raw_syscall(157,26,2,0,0,0,0);
+    if(r!=0){
+        _zag_println("E: PR_SET_TSC failed");
+        return 3;
+    }
+    // 3. seccomp filter.
+    // FROZEN-TEXT DEVIATION (documented, not silent): the mini-prereg says
+    // prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog). On this VM the
+    // runtime has its own seccomp filter pre-installed (PR_GET_SECCOMP=2)
+    // and prctl(38,2,prog) returns EINVAL — verified via ctypes with correct
+    // argtypes, even for a trivial 1-instruction ALLOW filter. The underlying
+    // seccomp(2) syscall (nr 317, SECCOMP_SET_MODE_FILTER) installs the
+    // IDENTICAL filter bytes successfully (rc=0). prctl is a thin wrapper
+    // around the same kernel path; the filter program, kill semantics, and
+    // verdict procedure are unchanged. Filters stack: ours runs first
+    // (most-recent-first), then the runtime's.
+    let f:[]u8=nio_alloc(72);
+    if(f.len!=72){_zag_println("E: filter alloc"); return 3;}
+    build_filter(f);
+    let prog:[]u8=nio_alloc(16);
+    if(prog.len!=16){_zag_println("E: prog alloc"); return 3;}
+    prog[0]=9;
+    prog[1]=0;
+    put64(prog,8,_zag_slice_ptr(f) as i64);
+    r=_zag_raw_syscall(317,1,0,_zag_slice_ptr(prog) as i64,0,0,0);
+    if(r!=0){
+        _zag_println("E: seccomp(2) SET_MODE_FILTER failed");
+        return 3;
+    }
+    // 4. personality: query then set ADDR_NO_RANDOMIZE (262144)
+    // NOTE: 0xFFFFFFFF is the QUERY constant (verified on this VM: it returns
+    // the persona without changing it), computed via shift to stay in i64 range.
+    let q:i64=(1 as i64)<<32;
+    let qm:i64=q-1;
+    let cur:i64=_zag_raw_syscall(135,qm,0,0,0,0,0);
+    let setv:i64=cur|262144;
+    r=_zag_raw_syscall(135,setv,0,0,0,0,0);
+    if(r<0){
+        _zag_println("E: personality failed");
+        return 3;
+    }
+    // 5. execve(target, ["target", NULL], [NULL])
+    let path:[]u8=z_cstr(a1);
+    if(path.len!=a1.len+1){_zag_println("E: path alloc"); return 3;}
+    let an:[]u8=z_cstr("target");
+    let argv:[]u8=nio_alloc(16);
+    if(argv.len!=16){_zag_println("E: argv alloc"); return 3;}
+    put64(argv,0,_zag_slice_ptr(an) as i64);
+    let envp:[]u8=nio_alloc(8);
+    if(envp.len!=8){_zag_println("E: envp alloc"); return 3;}
+    r=_zag_raw_syscall(59,_zag_slice_ptr(path) as i64,_zag_slice_ptr(argv) as i64,_zag_slice_ptr(envp) as i64,0,0,0);
+    _zag_println("E: execve returned");
+    return 4;
+}
