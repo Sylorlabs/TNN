@@ -57,9 +57,14 @@ All 14 local files byte-match the repair commit's git blob SHAs
   with the F-SEAL-01 B2_07 correction). Deviations from the eval runner,
   both hygienic and result-neutral:
   1. `verdict:`/`committed:` parsed lowercase (QUOT's output format).
-  2. Process-group kill (`start_new_session` + `killpg` on timeout) so a
-     timed-out engine leaves no orphaned processes to distort later wall
-     times. Recorded outcome (TIMEOUT) is identical to the eval's.
+  2. Canonical committed runner uses process-group kill (`start_new_session`
+     + `killpg` on timeout) so a timed-out engine leaves no orphaned
+     processes to distort later wall times. Recorded outcome (TIMEOUT) is
+     identical to the eval's. (The evidence run itself used the
+     `subprocess.run`-timeout variant; no problem hit the 600s timeout, a
+     post-run sweep confirmed zero orphaned engine processes, and the
+     killpg variant was verified result-equivalent — see B4X/runner note
+     below.)
 - KB2 runner: `runners/run_kb2_quot.py`. QUOT emits no numeric CONFIDENCE;
   per SPEC_QUOT §4 ("confidence is non-zero iff DERIVED"), conf=1 iff
   verdict DERIVED else 0, and the same DUAL-bar (>=18/20) is applied.
@@ -67,20 +72,36 @@ All 14 local files byte-match the repair commit's git blob SHAs
   ("bad .form"). Recorded honestly as abstain (0/22 B1N; no B7F produced
   forms — the checker has nothing to score).
 
-## B4X timeout note
+## B4X result: universe exhaustion (EXIT_4), not timeouts
 
-On B4X (KB_B4X store with transitive `before/3` rules), QUOT exceeded the
-600s per-run protocol timeout on every problem attempted in the first run
-(B4X_01..B4X_05 recorded TIMEOUT; B4X_06 was in-flight when the run was
-restarted for runner hygiene — see below). The engine is deterministic and
-the store is shared, so all 15 problems were run through the same protocol
-in the final run. TIMEOUT per problem — not solved, not incorrect.
-This is a genuine engine property: the repair crew validated only the
-penguin trace + B2 smoke; B4X-scale stores were never exercised.
+On B4X (15 problems over the KB_B4X store), QUOT exits rc=4 with
+"quot: universe failed" on ALL 15 problems, after ~2-3.5 min of compute
+each (no output file written). Root cause, from the repaired sources
+(`engines/quot/q_rules.zag`, `q_universe` -> `q_u_add`): the engine closes
+the term universe under function symbols up to depth D=max_term_depth+3,
+and `q_u_add` returns -1 when the universe exceeds its 65,536-term table
+(`if(n>=65536){ return -1; }`). B4X-scale stores blow past that cap during
+universe construction, before fixpoint even starts. This is deterministic
+(verified: B4X_01 and B4X_05 re-probed standalone, same rc=4) and is a
+genuine engine limitation: the repair crew validated only the penguin
+trace + B2 smoke; B4X-scale stores were never exercised. B4X verdicts are
+therefore 0/15 solved — recorded as EXIT_4 (engine failure), not solved,
+not incorrect, not timeouts.
 
-Runner hygiene note: the first run used the eval's exact `subprocess.run`
-timeout pattern, which kills only the shell wrapper and left orphaned
-quot_bin processes. The run was restarted with a process-group-kill runner
-(result-neutral: same 600s timeout, same TIMEOUT records). The B2R/B3R/B4R
-tallies from the first run (12/12, 9/10, 15/15) were reproduced byte-identically
-in the final run.
+CORRECTION to the earlier draft of this section: the first (invalidated)
+run never recorded B4X outcomes — it was killed mid-B4X for runner hygiene
+(see below), and the "TIMEOUT" language in the draft was an inference from
+watching long-running processes, not a recorded tally. No first-run B4X
+tally is relied upon; the EXIT_4 outcomes above come from the final,
+complete, hygienic run.
+
+Runner hygiene note: the evidence run used the `subprocess.run`-timeout
+runner (kills only the shell wrapper on timeout). Because no B4X/B5X/B6X
+problem actually hit the 600s timeout (B4X exits rc=4 at ~2-3.5 min; B5X/B6X
+are seconds), no orphaned engine processes were left; a post-run process
+sweep confirmed zero lingering quot_bin processes, so wall times are
+undistorted. The committed canonical runner (`runners/run_quot.py`) is the
+process-group-kill variant (`start_new_session` + `killpg` on timeout):
+verified result-equivalent on B2R (12/12, 0 incorrect — matches) and B6X
+(rc=1 panic path + miss — matches), covering the normal, panic, and miss
+paths. Recorded outcomes are identical under either runner.
