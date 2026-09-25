@@ -1,0 +1,472 @@
+// f22_train.zag — F22 FORESHADOW per-leg deterministic trainer.
+//
+// Fits, per (family,depth) training leg with >=16 released training cells,
+// the 14 F22 params (w1..w8, b, w9, α,β,γ,δ) by deterministic integer
+// coordinate descent on the train.zag per-cell loss (summed over the leg).
+// Zero RNG: fixed file order, fixed inits, integer arithmetic.
+//
+// Head (trainer and policy share this exact integer sequence):
+//   f9 = clamp(1000 - tdiv(α(1000−f1)+β·f3+γ(1000−f6)+δ·f8, 1000), 0, 1000)
+//   C  = clamp(tdiv(Σ w_i·f_i,1000) + b − tdiv(w9·(1000−f9),1000), 0, 1000)
+// tdiv = truncation-toward-zero (codegen-independent).
+// w9,α,β,γ,δ projected to >=0 after every accepted move.
+//
+// Usage: f22_train <features.tsv> <params_out.zag> <log_out.tsv>
+// features.tsv cols: id \t family \t heldout \t depth \t t \t rel4
+//   \t correct4 \t f1..f8
+//
+// Family index: 0=admit 1=revoke 2=logic 3=trap 4=cost 5=redteam 6=D 7=O 8=P
+// (differs from train.zag's order; local to this file).
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+fn f22_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn f22_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+fn f22_famidx(fam:[]u8)i32 {
+    if(dlb_streq(fam,"admit")==1){return 0;}
+    if(dlb_streq(fam,"revoke")==1){return 1;}
+    if(dlb_streq(fam,"logic")==1){return 2;}
+    if(dlb_streq(fam,"trap")==1){return 3;}
+    if(dlb_streq(fam,"cost")==1){return 4;}
+    if(dlb_streq(fam,"redteam")==1){return 5;}
+    if(dlb_streq(fam,"D")==1){return 6;}
+    if(dlb_streq(fam,"O")==1){return 7;}
+    if(dlb_streq(fam,"P")==1){return 8;}
+    return -1;
+}
+fn f22_dslot(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+fn f22_step(si:i32)i64 {
+    if(si==0){return 512;}
+    if(si==1){return 128;}
+    if(si==2){return 32;}
+    if(si==3){return 8;}
+    if(si==4){return 2;}
+    return 1;
+}
+
+// F22 confidence for one cell. p: 14 i64 slots
+// (0..7 w1..w8, 8 b, 9 w9, 10 α, 11 β, 12 γ, 13 δ).
+// feats: arena of i32; fb = cell base index (cell*8).
+fn f22_cell_c(p:[]u8,feats:[]u8,fb:i32)i64 {
+    let f1:i64=au_get32(feats,fb+0) as i64;
+    let f3:i64=au_get32(feats,fb+2) as i64;
+    let f6:i64=au_get32(feats,fb+5) as i64;
+    let f8:i64=au_get32(feats,fb+7) as i64;
+    let h:i64=au_get64(p,10)*(1000-f1)+au_get64(p,11)*f3
+        +au_get64(p,12)*(1000-f6)+au_get64(p,13)*f8;
+    let f9:i64=f22_clamp(1000-f22_tdiv(h,1000),0,1000);
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<8){
+        acc=acc+au_get64(p,k)*(au_get32(feats,fb+k) as i64);
+        k=k+1;
+    }
+    let c:i64=f22_tdiv(acc,1000)+au_get64(p,8)
+        -f22_tdiv(au_get64(p,9)*(1000-f9),1000);
+    return f22_clamp(c,0,1000);
+}
+
+// Summed per-cell loss over a fit's cells (cix: i32 cell indices).
+fn f22_loss(p:[]u8,cix:[]u8,n:i32,meta:[]u8,feats:[]u8)i64 {
+    let L:i64=0;
+    let i:i32=0;
+    while(i<n){
+        let ci:i32=au_get32(cix,i);
+        let fb:i32=ci*8;
+        let y:i32=au_get32(meta,ci*8+3);
+        let yy:i64=0;
+        if(y==1){yy=1000;}
+        let c:i64=f22_cell_c(p,feats,fb);
+        let e:i64=c-yy;
+        L=L+e*e;
+        if(y==0){L=L+2*c*c;}
+        let pv:i32=au_get32(meta,ci*8+6);
+        if(pv>=0 && y==0 && au_get32(meta,pv*8+3)==0){
+            let cp:i64=f22_cell_c(p,feats,pv*8);
+            if(c>cp){
+                let r:i64=c-cp;
+                L=L+4*r*r;
+            }
+        }
+        i=i+1;
+    }
+    return L;
+}
+
+// Coordinate descent. p holds inits on entry, finals on exit.
+// Returns final loss.
+fn f22_descend(p:[]u8,cix:[]u8,n:i32,meta:[]u8,feats:[]u8)i64 {
+    let lcur:i64=f22_loss(p,cix,n,meta,feats);
+    let si:i32=0;
+    while(si<6){
+        let s:i64=f22_step(si);
+        let sw:i32=0;
+        while(sw<24){
+            let changed:i32=0;
+            let k:i32=0;
+            while(k<14){
+                let cur:i64=au_get64(p,k);
+                let cand:i64=cur+s;
+                if(k>=9 && cand<0){cand=0;}
+                au_put64(p,k,cand);
+                let ln:i64=f22_loss(p,cix,n,meta,feats);
+                if(ln<lcur){
+                    lcur=ln;
+                    changed=1;
+                }
+                if(ln>=lcur){
+                    cand=cur-s;
+                    if(k>=9 && cand<0){cand=0;}
+                    au_put64(p,k,cand);
+                    ln=f22_loss(p,cix,n,meta,feats);
+                    if(ln<lcur){
+                        lcur=ln;
+                        changed=1;
+                    }
+                    if(ln>=lcur){
+                        au_put64(p,k,cur);
+                    }
+                }
+                k=k+1;
+            }
+            if(changed==0){sw=99;}
+            sw=sw+1;
+        }
+        si=si+1;
+    }
+    return lcur;
+}
+
+fn f22_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+
+fn f22_train(feat_path:[]u8,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let idix:[]u8=nio_alloc((maxcells*2*4) as i64);
+    let idbuf:[]u8=nio_alloc(1048576);
+    if(meta.len==0||feats.len==0||idix.len==0||idbuf.len==0){return 102;}
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){return 102;}
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            f22_split(line,tabs);
+            let f1e:i32=au_get32(tabs,0);
+            let f2e:i32=au_get32(tabs,1);
+            let f3e:i32=au_get32(tabs,2);
+            let f4e:i32=au_get32(tabs,3);
+            let f5e:i32=au_get32(tabs,4);
+            let f6e:i32=au_get32(tabs,5);
+            let f7e:i32=au_get32(tabs,6);
+            let id:[]u8=line[0..f1e];
+            let fam:[]u8=line[f1e+1..f2e];
+            let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+            let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+            let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+            let c4:[]u8=line[f6e+1..f7e];
+            let fi:i32=f22_famidx(fam);
+            let ds:i32=f22_dslot(depth);
+            let y:i32=-1;
+            if(rel4==1){
+                y=0;
+                if(c4.len==1 && c4[0]==49){y=1;}
+            }
+            let ci:i32=ncells;
+            au_put32(meta,ci*8+0,heldout);
+            au_put32(meta,ci*8+1,ds);
+            au_put32(meta,ci*8+2,rel4);
+            au_put32(meta,ci*8+3,y);
+            au_put32(meta,ci*8+4,fi);
+            au_put32(meta,ci*8+5,-1); // prev_idx filled below
+            au_put32(meta,ci*8+6,0);
+            au_put32(meta,ci*8+7,0);
+            let k:i32=0;
+            while(k<8){
+                let a:i32=au_get32(tabs,6+k);
+                let b2:i32=au_get32(tabs,7+k);
+                au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                k=k+1;
+            }
+            // prev chain: nearest previous same-id cell with rel4=1
+            let pv:i32=-1;
+            let j:i32=ci-1;
+            while(j>=0 && pv<0){
+                let jo:i32=au_get32(idix,j*2+0);
+                let jl2:i32=au_get32(idix,j*2+1);
+                if(jl2==id.len && nio_equal(idbuf[jo..jo+jl2],id)==1){
+                    let jj:i32=j;
+                    while(jj>=0){
+                        let ko:i32=au_get32(idix,jj*2+0);
+                        let kl:i32=au_get32(idix,jj*2+1);
+                        if(kl!=id.len || nio_equal(idbuf[ko..ko+kl],id)!=1){jj=-1;}
+                        if(jj>=0){
+                            if(au_get32(meta,jj*8+2)==1){pv=jj;jj=-1;}
+                            if(jj>=0){jj=jj-1;}
+                        }
+                    }
+                    j=-1;
+                }
+                if(pv<0){j=j-1;}
+            }
+            au_put32(meta,ci*8+5,pv);
+            au_put32(idix,ci*2+0,idn);
+            au_put32(idix,ci*2+1,id.len);
+            let q:i32=0;
+            while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+            idn=idn+id.len;
+            ncells=ncells+1;
+        }
+        pos=e+1;
+    }
+    // ---- enumerate fits ----
+    // fit ids: direct (fam,ds) with >=16 training cells; then pooled per fam;
+    // then global. fit_kind 0=direct 1=pooled 2=global.
+    let maxfits:i32=80;
+    let fkind:[]u8=nio_alloc((maxfits*4) as i64);
+    let ffam:[]u8=nio_alloc((maxfits*4) as i64);
+    let fds:[]u8=nio_alloc((maxfits*4) as i64);
+    let fnc:[]u8=nio_alloc((maxfits*4) as i64);
+    let fpar:[]u8=nio_alloc((maxfits*14*8) as i64);
+    let floss0:[]u8=nio_alloc((maxfits*8) as i64);
+    let floss1:[]u8=nio_alloc((maxfits*8) as i64);
+    if(fkind.len==0||ffam.len==0||fds.len==0||fnc.len==0){return 102;}
+    if(fpar.len==0||floss0.len==0||floss1.len==0){return 102;}
+    let nfits:i32=0;
+    // training-cell predicate: heldout=0 && rel4=1 && fam>=0 && ds>=0
+    let fi2:i32=0;
+    while(fi2<9){
+        let ds2:i32=0;
+        while(ds2<7){
+            let c:i32=0;
+            let i:i32=0;
+            while(i<ncells){
+                if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1
+                    && au_get32(meta,i*8+4)==fi2 && au_get32(meta,i*8+1)==ds2){c=c+1;}
+                i=i+1;
+            }
+            if(c>=16){
+                au_put32(fkind,nfits,0);
+                au_put32(ffam,nfits,fi2);
+                au_put32(fds,nfits,ds2);
+                au_put32(fnc,nfits,c);
+                nfits=nfits+1;
+            }
+            ds2=ds2+1;
+        }
+        fi2=fi2+1;
+    }
+    let ndir:i32=nfits;
+    fi2=0;
+    while(fi2<9){
+        let c:i32=0;
+        let i:i32=0;
+        while(i<ncells){
+            if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1
+                && au_get32(meta,i*8+4)==fi2){c=c+1;}
+            i=i+1;
+        }
+        if(c>=16){
+            au_put32(fkind,nfits,1);
+            au_put32(ffam,nfits,fi2);
+            au_put32(fds,nfits,-1);
+            au_put32(fnc,nfits,c);
+            nfits=nfits+1;
+        }
+        fi2=fi2+1;
+    }
+    let cg:i32=0;
+    let i3:i32=0;
+    while(i3<ncells){
+        if(au_get32(meta,i3*8+0)==0 && au_get32(meta,i3*8+2)==1){cg=cg+1;}
+        i3=i3+1;
+    }
+    au_put32(fkind,nfits,2);
+    au_put32(ffam,nfits,-1);
+    au_put32(fds,nfits,-1);
+    au_put32(fnc,nfits,cg);
+    let fglobal:i32=nfits;
+    nfits=nfits+1;
+    // ---- fit each ----
+    let cix:[]u8=nio_alloc((maxcells*4) as i64);
+    let p:[]u8=nio_alloc(14*8);
+    if(cix.len==0||p.len==0){return 102;}
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo,65536)!=0){return 102;}
+    dout_str(&lgo,"fit\tkind\tfam\tds\tncells\tloss_init\tloss_final\tw1\tw2\tw3\tw4\tw5\tw6\tw7\tw8\tb\tw9\talpha\tbeta\tgamma\tdelta\n");
+    let f:i32=0;
+    while(f<nfits){
+        let kind:i32=au_get32(fkind,f);
+        let ff:i32=au_get32(ffam,f);
+        let fd:i32=au_get32(fds,f);
+        // gather cell indices
+        let n:i32=0;
+        let i4:i32=0;
+        while(i4<ncells){
+            let ok:i32=0;
+            if(au_get32(meta,i4*8+0)==0 && au_get32(meta,i4*8+2)==1){
+                if(kind==2){ok=1;}
+                if(kind==1 && au_get32(meta,i4*8+4)==ff){ok=1;}
+                if(kind==0 && au_get32(meta,i4*8+4)==ff && au_get32(meta,i4*8+1)==fd){ok=1;}
+            }
+            if(ok==1){
+                au_put32(cix,n,i4);
+                n=n+1;
+            }
+            i4=i4+1;
+        }
+        // inits: w1=1000, rest w=0, b=0, w9=250, α=β=γ=δ=250
+        au_put64(p,0,1000);
+        let k2:i32=1;
+        while(k2<9){au_put64(p,k2,0);k2=k2+1;}
+        au_put64(p,9,250);
+        au_put64(p,10,250);
+        au_put64(p,11,250);
+        au_put64(p,12,250);
+        au_put64(p,13,250);
+        let l0:i64=f22_loss(p,cix,n,meta,feats);
+        let l1:i64=f22_descend(p,cix,n,meta,feats);
+        // store
+        au_put64(floss0,f,l0);
+        au_put64(floss1,f,l1);
+        let k3:i32=0;
+        while(k3<14){au_put64(fpar,f*14+k3,au_get64(p,k3));k3=k3+1;}
+        // log row
+        dout_i64(&lgo,f as i64);dout_byte(&lgo,9);
+        dout_i64(&lgo,kind as i64);dout_byte(&lgo,9);
+        dout_i64(&lgo,ff as i64);dout_byte(&lgo,9);
+        dout_i64(&lgo,fd as i64);dout_byte(&lgo,9);
+        dout_i64(&lgo,n as i64);dout_byte(&lgo,9);
+        dout_i64(&lgo,l0);dout_byte(&lgo,9);
+        dout_i64(&lgo,l1);dout_byte(&lgo,9);
+        k3=0;
+        while(k3<14){
+            dout_i64(&lgo,au_get64(p,k3));
+            if(k3<13){dout_byte(&lgo,9);}
+            k3=k3+1;
+        }
+        dout_line(&lgo);
+        f=f+1;
+    }
+    // ---- resolve (fam 0..9, ds 0..6) -> fit, write params file ----
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,131072)!=0){return 102;}
+    dout_str(&po,"// f22_params.zag — FROZEN F22 foreshadow-head params\n");
+    dout_str(&po,"// Generated by f22_train.zag. Do not hand-edit.\n");
+    dout_str(&po,"// fam: 0=admit 1=revoke 2=logic 3=trap 4=cost 5=redteam 6=D 7=O 8=P 9=other\n");
+    dout_str(&po,"// ds: 0..6 = depth 1,2,4,8,16,32,64. slots: 0..7 w1..w8, 8 b, 9 w9,\n");
+    dout_str(&po,"// 10 alpha, 11 beta, 12 gamma, 13 delta.\n");
+    // param function names emitted below; values resolved per key via restab
+    // resolve table: restab[key] = fit id
+    let restab:[]u8=nio_alloc((10*7*4) as i64);
+    if(restab.len==0){return 102;}
+    let fam3:i32=0;
+    while(fam3<10){
+        let ds3:i32=0;
+        while(ds3<7){
+            let rf:i32=fglobal;
+            if(fam3<9){
+                // direct?
+                let g:i32=0;
+                let found:i32=0;
+                while(g<ndir){
+                    if(au_get32(ffam,g)==fam3 && au_get32(fds,g)==ds3){found=1;rf=g;}
+                    g=g+1;
+                }
+                if(found==0){
+                    // pooled for this fam?
+                    g=ndir;
+                    while(g<nfits){
+                        if(au_get32(fkind,g)==1 && au_get32(ffam,g)==fam3){found=1;rf=g;}
+                        g=g+1;
+                    }
+                }
+            }
+            au_put32(restab,fam3*7+ds3,rf);
+            ds3=ds3+1;
+        }
+        fam3=fam3+1;
+    }
+    // emit 14 functions
+    let pi:i32=0;
+    while(pi<14){
+        if(pi<8){
+            dout_str(&po,"fn f22_w");
+            dout_i64(&po,(pi+1) as i64);
+        }
+        if(pi==8){dout_str(&po,"fn f22_b");}
+        if(pi==9){dout_str(&po,"fn f22_w9");}
+        if(pi==10){dout_str(&po,"fn f22_al");}
+        if(pi==11){dout_str(&po,"fn f22_be");}
+        if(pi==12){dout_str(&po,"fn f22_ga");}
+        if(pi==13){dout_str(&po,"fn f22_de");}
+        dout_str(&po,"(fam:i32,ds:i32)i64 {\n");
+        dout_str(&po,"    let key:i32=fam*7+ds;\n");
+        let key3:i32=0;
+        while(key3<70){
+            let rf2:i32=au_get32(restab,key3);
+            dout_str(&po,"    if(key==");
+            dout_i64(&po,key3 as i64);
+            dout_str(&po,"){return ");
+            dout_i64(&po,au_get64(fpar,rf2*14+pi));
+            dout_str(&po,";}\n");
+            key3=key3+1;
+        }
+        dout_str(&po,"    return 0;\n}\n");
+        pi=pi+1;
+    }
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&lgo),lgo.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);nio_free(tabs);
+    nio_free(fkind);nio_free(ffam);nio_free(fds);nio_free(fnc);
+    nio_free(fpar);nio_free(floss0);nio_free(floss1);
+    nio_free(cix);nio_free(p);nio_free(restab);
+    dout_free(&lgo);dout_free(&po);
+    if(wrc<0 || wrc2<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<4){
+        _zag_println("usage: f22_train <features.tsv> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    return f22_train(_zag_arg(1),_zag_arg(2),_zag_arg(3));
+}
