@@ -1,0 +1,382 @@
+// policy_f32_batch.zag — F32 RSW batch eval driver.
+//
+// One invocation processes all 37 legs in fixed order (by depth, then
+// battery), retaining per-item cross-depth state (C*, Cprev, f5p, dp, f8p,
+// relprev, correctprev) via ID-keyed slots. Ledgers initialize from the
+// trained state file and update online (after label observation), exactly
+// as in training.
+//
+// For each (item, depth): compute F32 key from f1/f5, emit C via rsw_emit
+// from pre-update ledgers, output M4's release/correct with F32's C
+// (B9: release/correct identity vs M4 holds by construction), then update
+// ledgers online.
+//
+// Output: one analyzer-compatible TSV per leg:
+//   <outdir>/<battery>_m32_d<depth>_<AB>.tsv
+// cols: id depth t rounds consumed ne release correct conf leader_idx cert
+//
+// Usage: policy_f32_batch <state.tsv> <features_dir> <outdir> <AB>
+// Pure Zag. Zero RNG. Deterministic. A/B byte-identical (modulo AB tag).
+@import("R33_NATIVE_IO_V1.zag")
+@import("dlb_util.zag")
+@import("rsw.zag")
+
+fn pf_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+fn pf_fstart(tabs:[]u8,f:i32)i32 {
+    if(f==0){return 0;}
+    return au_get32(tabs,f-1)+1;
+}
+fn pf_fend(tabs:[]u8,f:i32)i32 { return au_get32(tabs,f); }
+
+// per-item slot: find by id, or allocate. slots: 64-byte id slots.
+// st: 8 i64 per slot: cstar,cprev,f5p,dp,f8p,relprev,correctprev,has
+fn pf_slot(id:[]u8,slots:[]u8,lens:[]u8,st:[]u8,nslots:i32,nused:*i32)i32 {
+    let i:i32=0;
+    while(i<nused.*){
+        if(au_get32(lens,i)==id.len){
+            let base:i32=i*64;
+            if(nio_equal(slots[base..base+id.len],id)==1){return i;}
+        }
+        i=i+1;
+    }
+    if(nused.*>=nslots){return -1;}
+    let s:i32=nused.*;
+    let base2:i32=s*64;
+    let k:i32=0;
+    while(k<id.len && k<64){slots[base2+k]=id[k];k=k+1;}
+    au_put32(lens,s,id.len);
+    let sb:i32=s*8;
+    au_put64(st,sb+0,0);
+    au_put64(st,sb+1,0);
+    au_put64(st,sb+2,0);
+    au_put64(st,sb+3,0);
+    au_put64(st,sb+4,0);
+    au_put64(st,sb+5,0);
+    au_put64(st,sb+6,0);
+    au_put64(st,sb+7,0);
+    nused.*=s+1;
+    return s;
+}
+
+// load trained state TSV into ledgers. Returns 0 on ok.
+fn pf_load_state(path:[]u8,cells:[]u8,trans:[]u8,regime:[]u8,ghist:[]u8,nswitch:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(1048576);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let tabs:[]u8=nio_alloc(10*4);
+    if(tabs.len==0){nio_free(fbuf);return 102;}
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0){
+            pf_split(line,tabs);
+            let kind:[]u8=line[pf_fstart(tabs,0)..pf_fend(tabs,0)];
+            if(dlb_streq(kind,"C")==1){
+                let r:i32=dlb_atoi(line[pf_fstart(tabs,1)..pf_fend(tabs,1)]);
+                let j:i32=dlb_atoi(line[pf_fstart(tabs,2)..pf_fend(tabs,2)]);
+                let n:i64=dlb_atoi(line[pf_fstart(tabs,3)..pf_fend(tabs,3)]) as i64;
+                let k:i64=dlb_atoi(line[pf_fstart(tabs,4)..pf_fend(tabs,4)]) as i64;
+                au_put64(cells,rsw_cidx(r,j,0),n);
+                au_put64(cells,rsw_cidx(r,j,1),k);
+            }
+            if(dlb_streq(kind,"T")==1){
+                let r:i32=dlb_atoi(line[pf_fstart(tabs,1)..pf_fend(tabs,1)]);
+                let j:i32=dlb_atoi(line[pf_fstart(tabs,2)..pf_fend(tabs,2)]);
+                let f:i32=0;
+                while(f<6){
+                    let v:i64=dlb_atoi(line[pf_fstart(tabs,3+f)..pf_fend(tabs,3+f)]) as i64;
+                    au_put64(trans,rsw_tidx(r,j,f),v);
+                    f=f+1;
+                }
+            }
+            if(dlb_streq(kind,"Z")==1){
+                let r:i32=dlb_atoi(line[pf_fstart(tabs,1)..pf_fend(tabs,1)]);
+                let rg:i64=dlb_atoi(line[pf_fstart(tabs,2)..pf_fend(tabs,2)]) as i64;
+                let ns:i64=dlb_atoi(line[pf_fstart(tabs,3)..pf_fend(tabs,3)]) as i64;
+                au_put64(regime,r,rg);
+                au_put64(nswitch,r,ns);
+                let g:i32=0;
+                while(g<3){
+                    let gv:i64=dlb_atoi(line[pf_fstart(tabs,4+g)..pf_fend(tabs,4+g)]) as i64;
+                    au_put64(ghist,r*3+g,gv);
+                    g=g+1;
+                }
+            }
+        }
+        pos=e+1;
+    }
+    nio_free(fbuf);
+    nio_free(tabs);
+    return 0;
+}
+
+// process one feature file, filtering by target depth, appending rows to res.
+// Updates ledgers online and per-item slots.
+fn pf_leg(feat_path:[]u8,target_depth:i32,res:*DOut,
+          cells:[]u8,trans:[]u8,regime:[]u8,ghist:[]u8,nswitch:[]u8,
+          slots:[]u8,lens:[]u8,ist:[]u8,nslots:i32,nused:*i32) i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){nio_free(fbuf);return 102;}
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0){
+            pf_split(line,tabs);
+            let depth:i32=dlb_atoi(line[pf_fstart(tabs,3)..pf_fend(tabs,3)]);
+            if(depth==target_depth){
+                let id:[]u8=line[pf_fstart(tabs,0)..pf_fend(tabs,0)];
+                let t:i32=dlb_atoi(line[pf_fstart(tabs,4)..pf_fend(tabs,4)]);
+                let rel:i32=dlb_atoi(line[pf_fstart(tabs,5)..pf_fend(tabs,5)]);
+                let correct_raw:[]u8=line[pf_fstart(tabs,6)..pf_fend(tabs,6)];
+                let correct:i32=-1;
+                if(dlb_streq(correct_raw,"1")==1){correct=1;}
+                if(dlb_streq(correct_raw,"0")==1){correct=0;}
+                let f1:i64=dlb_atoi(line[pf_fstart(tabs,7)..pf_fend(tabs,7)]) as i64;
+                let f3:i64=dlb_atoi(line[pf_fstart(tabs,9)..pf_fend(tabs,9)]) as i64;
+                let f5:i64=dlb_atoi(line[pf_fstart(tabs,11)..pf_fend(tabs,11)]) as i64;
+                let f8:i64=dlb_atoi(line[pf_fstart(tabs,14)..pf_fend(tabs,14)]) as i64;
+                let j:i32=rsw_dslot(depth);
+                if(j>=0){
+                    let s:i32=pf_slot(id,slots,lens,ist,nslots,nused);
+                    if(s<0){nio_free(fbuf);nio_free(tabs);return 103;}
+                    let sb:i32=s*8;
+                    let has:i64=au_get64(ist,sb+7);
+                    let first:i32=0;
+                    if(has==0){first=1;}
+                    let cstar:i64=au_get64(ist,sb+0);
+                    let cprev:i64=au_get64(ist,sb+1);
+                    let f5p:i64=au_get64(ist,sb+2);
+                    let dp:i64=au_get64(ist,sb+3);
+                    let f8p:i64=au_get64(ist,sb+4);
+                    let relprev:i64=au_get64(ist,sb+5);
+                    let correctprev:i64=au_get64(ist,sb+6);
+                    let m:i64=0; let yld:i64=0;
+                    let r:i32=rsw_key(f1,f5,f5p,depth,dp as i32,first,&m,&yld);
+                    let c:i32=rsw_emit(cells,trans,regime,r,j,first,&cstar,cprev,f3,f8,f8p);
+                    // output row (M4 release/correct identity; F32 conf)
+                    dout_str(res,id);
+                    dout_byte(res,9);
+                    dout_i64(res,depth as i64);
+                    dout_byte(res,9);
+                    dout_i64(res,t as i64);
+                    dout_byte(res,9);
+                    dout_i64(res,t as i64);
+                    dout_byte(res,9);
+                    dout_i64(res,0);
+                    dout_byte(res,9);
+                    dout_i64(res,0);
+                    dout_byte(res,9);
+                    if(rel==1){dout_str(res,"REL");}
+                    if(rel!=1){dout_str(res,"ABSTAIN:leader-changed");}
+                    dout_byte(res,9);
+                    if(correct==1){dout_str(res,"1");}
+                    if(correct==0){dout_str(res,"0");}
+                    if(correct<0){dout_str(res,"A");}
+                    dout_byte(res,9);
+                    dout_i64(res,c as i64);
+                    dout_byte(res,9);
+                    dout_i64(res,0);
+                    dout_byte(res,9);
+                    dout_str(res,"f32");
+                    dout_line(res);
+                    if(res.*.err!=0){nio_free(fbuf);nio_free(tabs);return 104;}
+                    // online update (after label observation), as in training
+                    let cnow:i32=0;
+                    if(correct==1){cnow=1;}
+                    if(rel==1){
+                        let ci:i32=rsw_cidx(r,j,0);
+                        au_put64(cells,ci,au_get64(cells,ci)+1);
+                        if(cnow==1){
+                            let ck:i32=rsw_cidx(r,j,1);
+                            au_put64(cells,ck,au_get64(cells,ck)+1);
+                        }
+                    }
+                    if(j>=1 && relprev==1){
+                        let ta:i32=rsw_tidx(r,j,2);
+                        au_put64(trans,ta,au_get64(trans,ta)+1);
+                        let ts:i32=rsw_tidx(r,j,3);
+                        au_put64(trans,ts,au_get64(trans,ts)+cprev);
+                        let tk:i32=rsw_tidx(r,j,4);
+                        au_put64(trans,tk,au_get64(trans,tk)+correctprev);
+                        if(rel==1){
+                            let tn:i32=rsw_tidx(r,j,0);
+                            au_put64(trans,tn,au_get64(trans,tn)+1);
+                            let tc:i32=rsw_tidx(r,j,1);
+                            au_put64(trans,tc,au_get64(trans,tc)+cprev);
+                            let ty:i32=rsw_tidx(r,j,5);
+                            au_put64(trans,ty,au_get64(trans,ty)+(cnow as i64));
+                        }
+                    }
+                    // regime update
+                    let reg0:i64=au_get64(regime,r);
+                    if(rsw_pooled_n(cells,r)>=32){
+                        let gamma:i64=rsw_gamma(cells,r);
+                        au_put64(ghist,r*3+0,au_get64(ghist,r*3+1));
+                        au_put64(ghist,r*3+1,au_get64(ghist,r*3+2));
+                        au_put64(ghist,r*3+2,gamma);
+                        if(reg0==0){
+                            let g0:i64=au_get64(ghist,r*3+0);
+                            let g1:i64=au_get64(ghist,r*3+1);
+                            let g2:i64=au_get64(ghist,r*3+2);
+                            if(gamma>=100 && g0>=0 && g1>=0 && g2>=0){
+                                au_put64(regime,r,1);
+                                au_put64(nswitch,r,au_get64(nswitch,r)+1);
+                            }
+                        }
+                        if(reg0==1 && gamma<=60){
+                            au_put64(regime,r,0);
+                            au_put64(nswitch,r,au_get64(nswitch,r)+1);
+                        }
+                    }
+                    // per-item state update
+                    au_put64(ist,sb+0,cstar);
+                    au_put64(ist,sb+1,c as i64);
+                    au_put64(ist,sb+2,f5);
+                    au_put64(ist,sb+3,depth as i64);
+                    au_put64(ist,sb+4,f8);
+                    au_put64(ist,sb+5,rel as i64);
+                    au_put64(ist,sb+6,cnow as i64);
+                    au_put64(ist,sb+7,1);
+                }
+            }
+        }
+        pos=e+1;
+    }
+    nio_free(fbuf);
+    nio_free(tabs);
+    return 0;
+}
+
+fn pf_write_tsv(outdir:[]u8,battery:[]u8,depth:i32,ab:[]u8,res:*DOut)i32 {
+    let path:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    if(dout_init(&path,512)!=0){return 102;}
+    dout_str(&path,outdir);
+    dout_byte(&path,47);
+    dout_str(&path,battery);
+    dout_str(&path,"_m32_d");
+    dout_i64(&path,depth as i64);
+    dout_str(&path,"_");
+    dout_str(&path,ab);
+    dout_str(&path,".tsv");
+    if(path.err!=0){return 102;}
+    let p:[]u8=dout_bytes(&path);
+    let fd:i64=dlb_write_file(p,res.*.buf,res.*.n);
+    if(fd<0){return 105;}
+    return 0;
+}
+
+fn main()i32 {
+    let state_path:[]u8=_zag_arg(1);
+    let feat_dir:[]u8=_zag_arg(2);
+    let outdir:[]u8=_zag_arg(3);
+    let ab:[]u8=_zag_arg(4);
+    if(state_path.len==0 || feat_dir.len==0 || outdir.len==0 || ab.len==0){return 99;}
+    // ledgers
+    let cells:[]u8=nio_alloc(210*8);
+    let trans:[]u8=nio_alloc(630*8);
+    let regime:[]u8=nio_alloc(15*8);
+    let ghist:[]u8=nio_alloc(45*8);
+    let nswitch:[]u8=nio_alloc(15*8);
+    if(cells.len==0 || trans.len==0){return 102;}
+    if(pf_load_state(state_path,cells,trans,regime,ghist,nswitch)!=0){return 106;}
+    // per-item slots (4096 items max)
+    let nslots:i32=4096;
+    let slots:[]u8=nio_alloc(nslots*64);
+    let lens:[]u8=nio_alloc(nslots*4);
+    let ist:[]u8=nio_alloc(nslots*8*8);
+    if(slots.len==0 || lens.len==0 || ist.len==0){return 102;}
+    au_zero(lens);
+    let nused:i32=0;
+    // 37 legs in fixed order: depths outer, batteries inner (as leglist.tsv)
+    let depths:[]u8=nio_alloc(7*4);
+    au_put32(depths,0,1);au_put32(depths,1,2);au_put32(depths,2,4);au_put32(depths,3,8);
+    au_put32(depths,4,16);au_put32(depths,5,32);au_put32(depths,6,64);
+    let di:i32=0;
+    while(di<7){
+        let d:i32=au_get32(depths,di);
+        // batteries admit,revoke,logic,trap,cost,redteam at d<=16; ceiling at all
+        let bi:i32=0;
+        while(bi<7){
+            let do_leg:i32=0;
+            let battery:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+            if(dout_init(&battery,32)!=0){return 102;}
+            if(bi==0){dout_str(&battery,"admit"); if(d<=16){do_leg=1;}}
+            if(bi==1){dout_str(&battery,"revoke"); if(d<=16){do_leg=1;}}
+            if(bi==2){dout_str(&battery,"logic"); if(d<=16){do_leg=1;}}
+            if(bi==3){dout_str(&battery,"trap"); if(d<=16){do_leg=1;}}
+            if(bi==4){dout_str(&battery,"cost"); if(d<=16){do_leg=1;}}
+            if(bi==5){dout_str(&battery,"redteam"); if(d<=16){do_leg=1;}}
+            if(bi==6){dout_str(&battery,"ceiling"); do_leg=1;}
+            if(do_leg==1 && battery.err==0){
+                let res:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+                if(dout_init(&res,8388608)!=0){return 102;}
+                if(bi<6){
+                    // <battery>_A.tsv or _B.tsv
+                    let fp:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+                    if(dout_init(&fp,512)!=0){return 102;}
+                    dout_str(&fp,feat_dir);
+                    dout_byte(&fp,47);
+                    dout_str(&fp,dout_bytes(&battery));
+                    dout_str(&fp,"_");
+                    dout_str(&fp,ab);
+                    dout_str(&fp,".tsv");
+                    if(fp.err==0){
+                        let rc:i32=pf_leg(dout_bytes(&fp),d,&res,cells,trans,regime,ghist,nswitch,
+                                         slots,lens,ist,nslots,&nused);
+                        if(rc!=0){return rc;}
+                    }
+                } else {
+                    // ceiling: 6 variants
+                    let v:i32=0;
+                    while(v<6){
+                        let fp:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+                        if(dout_init(&fp,512)!=0){return 102;}
+                        dout_str(&fp,feat_dir);
+                        dout_byte(&fp,47);
+                        if(v==0){dout_str(&fp,"ceilDev_");}
+                        if(v==1){dout_str(&fp,"ceilDod_");}
+                        if(v==2){dout_str(&fp,"ceilOev_");}
+                        if(v==3){dout_str(&fp,"ceilOod_");}
+                        if(v==4){dout_str(&fp,"ceilPev_");}
+                        if(v==5){dout_str(&fp,"ceilPod_");}
+                        dout_str(&fp,ab);
+                        dout_str(&fp,".tsv");
+                        if(fp.err==0){
+                            let rc:i32=pf_leg(dout_bytes(&fp),d,&res,cells,trans,regime,ghist,nswitch,
+                                             slots,lens,ist,nslots,&nused);
+                            if(rc!=0){return rc;}
+                        }
+                        v=v+1;
+                    }
+                }
+                let bbytes:[]u8=dout_bytes(&battery);
+                if(pf_write_tsv(outdir,bbytes,d,ab,&res)!=0){return 107;}
+            }
+            bi=bi+1;
+        }
+        di=di+1;
+    }
+    _zag_println("legs_done: 37");
+    return 0;
+}
