@@ -75,3 +75,48 @@ free deterministic telemetry. If w7<0 at epoch 60 (predicted ≈−715 from the
 −1250/epoch pull), the gate clears at the first extension epoch.
 No driver change, no new binary: the committed A/B binaries are reused
 (cmp-verified before the run).
+
+## 2026-09-24 ~17:30 PDT: gate-extension run COMPLETE — gate NOT cleared
+
+Run: passes=11 (66 epochs), A/B byte-identical, rc=0 both.
+- Determinism: 11× log rows 0–59 byte-identical to committed log_10x_a.tsv;
+  epoch-59 weight row = committed params_10x_a.txt. Extension epochs are
+  exactly what a resume-from-snapshot would produce.
+- Gate window epochs 60–64: w7 = 1833, 1833, 1833, 3083, 1833 — ALL ≥ 0.
+  (My build-log prediction of ≈−715 at epoch 60 was WRONG: actual +1833.)
+- RULING OUTCOME: w7≥0 after epoch 64 → STOP per the ruling. No 100× run.
+  No Stage-2 run. Full dynamics characterization in
+  analysis/GO_NOGO_EXT.md.
+- Headline finding: the −1250/epoch steps are PHASE-C-LOCAL, not secular.
+  Pin cells: Phase A 1950 correct/0 wrong, Phase B 35/0, Phase C 0/5
+  (frozen features.tsv). w7's feature IS the pin flag → Phase A/B correct
+  pins push w7 UP (×10 boost), Phase C wrong pins pull DOWN; net ≈ +48/pass.
+  Pass-end w7 crossed zero UPWARD at pass 4 (−629…−312 → +314…+583,
+  monotonic rise over 7 passes). The 10× cutoff caught the oscillation
+  trough. G-batch drags b → −27401, keeping correct pins underconfident
+  (mcC=0.884 — the diagnosis's C=1000-saturation premise is refuted), so the
+  upward driver STRENGTHENS with |b| while the 5-pin pull is constant: no
+  reversal mechanism; continued Stage 1 cannot clear w7<0. Bar-premise
+  failure (grok's ~30-wrong-pin estimate vs 5 in the frozen data), not a
+  mechanism failure — the bar's intent (separator live/responsive) is met.
+- Coordinator decision pending: (a) waive/clarify the literal bar via prereg
+  note → 100× + Stage 2; (b) kill SR-S1 at the gate; (c) amend Stage-1
+  design (not recommended without amendment). Crew holds until ruling.
+
+## Stage-2 driver: train_sr2.zag WRITTEN and §5b-verified, HELD (unbuilt/unrun)
+
+src/train_sr2.zag — SIGNAL_DISCONNECT per §5b: init from Stage-1 snapshot
+txt (9 lines w1..w8,b); mask code path ABSENT (audit: no 10*err boost, no
+theater-coeff-0, no pin firewall, no zeroed indices — only descriptive
+comments mention the mask); ordinary v2 update `num=2*err*fk+8*rise*fk`
+on ALL indices (theater everywhere, w1/w4/w6 unfrozen); G-batch, clamp,
+telemetry, DIV2=40000, tdiv unchanged v2; EXACTLY 2 epochs (Phase A
+ep0+ep1 — the §5b reading pinned in MASK_INTEGERS.md); then FREEZE with
+zero gradient steps after (only the params .zag + .txt and log writers
+run). Log header: prereg SHA first, stage=2 mask=OFF, init weights
+verbatim, B10b freeze note. Built from train_sr1.zag by copy + surgical
+edits (signature/init/header/update-block/loop/main); verified by grep
+audit 2026-09-24 ~17:28 PDT. NOT compiled, NOT run — held pending the
+coordinator's gate ruling. B10b audit items (i)–(iii) and the crutch
+diagnostic (|Δw1|, w7 drift) plus held-out calibration will be executed
+if/when Stage 2 is green-lit.
