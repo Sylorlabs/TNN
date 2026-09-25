@@ -1,0 +1,760 @@
+// train_f31.zag — F31 DDCL trainer (pure Zag, zero RNG).
+//
+// Stage A: coordinate descent fit of the base head
+//   B(s) = clamp((Σ_{i=1..8} w_i·f_i)/1000 + b, 0, 1000)
+// on squared calibration error Σ(B−1000·y)² over training released cells
+// (heldout=0, rel4=1, all depths). Inits (recorded in PROTOCOL.md BEFORE
+// training): w1..w8 = 0, b = 0. Steps ±50, then ±8, then ±1 refine; fixed
+// order w1..w8,b; first-improvement; accept on strict objective reduction;
+// 8 sweeps; integer arithmetic; truncation-toward-zero division; fixed file
+// order. Zero RNG.
+//
+// Stage B: single online ledger pass over the training stream in file order
+// with the frozen Stage-A head. Per depth-slot ds (0..6 for 1,2,4,8,16,32,64):
+//   off  = clamp(tdiv(G_t(ds)·damp, 1000), −200, 200)   (G_t in thousandths,
+//          from the CURRENT ledger, i.e. entries strictly before this cell)
+//   C    = clamp(B − off, 0, 1000)                      (emitted conf)
+// then the label is observed and (C, correct) is appended to ledger[ds]
+// (closed-loop recording per the ideas file; causal discipline).
+// damp meta-rule (global): sign-flip of G_t(ds) → damp = max(200, damp−50);
+// 100 consecutive non-flip appends → damp = min(800, damp+50). damp₀ = 200.
+//
+// Ledger storage: per-depth regions of 256-entry chunks (4 B/entry:
+// conf u16 LE @+0, correct u8 @+2), doubling on demand (the growth rule —
+// no architectural cap). Per-depth FIFO test cap 2048 (preregistered
+// experiment constant per frozen prereg §3; never binds here: max per-depth
+// training entries 940 < 2048).
+//
+// usage: train_f31 <features.tsv> <params_out.zag> <log_out.tsv>
+//
+// Conventions: []u8 arenas + LE accessors; no fn named zalloc;
+// no slice > 2^25 bytes; no bare {} blocks.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("dlb_util.zag")
+
+fn f3_tdiv(a:i64,b:i64)i64 {
+    if(b==0){return 0;}
+    let neg:i32=0;
+    let aa:i64=a;
+    let bb:i64=b;
+    if(aa<0){neg=1-neg;aa=0-aa;}
+    if(bb<0){neg=1-neg;bb=0-bb;}
+    let q:i64=aa/bb;
+    if(neg==1){q=0-q;}
+    return q;
+}
+
+fn f3_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+
+fn f3_max(a:i64,b:i64)i64 {
+    if(a>b){return a;}
+    return b;
+}
+
+fn f3_min(a:i64,b:i64)i64 {
+    if(a<b){return a;}
+    return b;
+}
+
+fn f3_famidx(fam:[]u8)i32 {
+    if(nio_equal(fam,"admit")==1){return 0;}
+    if(nio_equal(fam,"revoke")==1){return 1;}
+    if(nio_equal(fam,"logic")==1){return 2;}
+    if(nio_equal(fam,"cost")==1){return 3;}
+    if(nio_equal(fam,"trap")==1){return 4;}
+    if(nio_equal(fam,"redteam")==1){return 5;}
+    if(nio_equal(fam,"ceiling-P")==1){return 6;}
+    if(nio_equal(fam,"ceiling-D")==1){return 7;}
+    if(nio_equal(fam,"ceiling-O")==1){return 8;}
+    return -1;
+}
+
+fn f3_dslot(depth:i32)i32 {
+    if(depth==1){return 0;}
+    if(depth==2){return 1;}
+    if(depth==4){return 2;}
+    if(depth==8){return 3;}
+    if(depth==16){return 4;}
+    if(depth==32){return 5;}
+    if(depth==64){return 6;}
+    return -1;
+}
+
+fn f3_split(line:[]u8,tabs:[]u8)i32 {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+    return n;
+}
+
+// ---- Stage A: base head ----
+
+fn f3_bconf(w:[]u8,b:i64,feats:[]u8,ci:i32)i32 {
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<8){
+        acc=acc+au_get64(w,k)*(au_get32(feats,ci*8+k) as i64);
+        k=k+1;
+    }
+    let c:i64=f3_tdiv(acc,1000)+b;
+    return f3_clamp(c,0,1000) as i32;
+}
+
+fn f3_obj(w:[]u8,b:i64,meta:[]u8,feats:[]u8,clist:[]u8,nc:i32)i64 {
+    let o:i64=0;
+    let i:i32=0;
+    while(i<nc){
+        let ci:i32=au_get32(clist,i);
+        let c:i64=f3_bconf(w,b,feats,ci) as i64;
+        let y:i32=au_get32(meta,ci*8+3);
+        let yy:i64=0;
+        if(y==1){yy=1000;}
+        let e:i64=c-yy;
+        o=o+e*e;
+        i=i+1;
+    }
+    return o;
+}
+
+fn f3_pget(w:[]u8,b:i64,pi:i32)i64 {
+    if(pi<8){return au_get64(w,pi);}
+    return b;
+}
+
+fn f3_pset(w:[]u8,b:*i64,pi:i32,v:i64)void {
+    if(pi<8){au_put64(w,pi,v);return;}
+    b.*=v;
+    return;
+}
+
+fn f3_pbox(pi:i32,v:i64)i32 {
+    if(pi<8){
+        if(v>=-1000 && v<=1000){return 1;}
+        return 0;
+    }
+    if(v>=-100000 && v<=100000){return 1;}
+    return 0;
+}
+
+fn f3_probe(w:[]u8,b:*i64,pi:i32,delta:i64,meta:[]u8,feats:[]u8,clist:[]u8,nc:i32,cur:i64)i32 {
+    let pv:i64=f3_pget(w,b.*,pi);
+    let nv:i64=pv+delta;
+    if(f3_pbox(pi,nv)==0){return 0;}
+    f3_pset(w,b,pi,nv);
+    if(f3_obj(w,b.*,meta,feats,clist,nc)<cur){return 1;}
+    f3_pset(w,b,pi,pv);
+    return 0;
+}
+
+fn f3_logw(log:*DOut,w:[]u8,b:i64)void {
+    let k:i32=0;
+    while(k<8){
+        dout_i64(log,au_get64(w,k));
+        dout_byte(log,44);
+        k=k+1;
+    }
+    dout_str(log,"b=");
+    dout_i64(log,b);
+    return;
+}
+
+// coordinate descent: steps 50, 8, 1; 8 sweeps each; fixed order; strict reduction
+fn f3_coord(w:[]u8,b:*i64,meta:[]u8,feats:[]u8,clist:[]u8,nc:i32,log:*DOut)void {
+    let step:i64=50;
+    while(step>=1){
+        let sweep:i32=0;
+        while(sweep<8){
+            let moved:i32=0;
+            let pi:i32=0;
+            while(pi<9){
+                let cur:i64=f3_obj(w,b.*,meta,feats,clist,nc);
+                if(f3_probe(w,b,pi,step,meta,feats,clist,nc,cur)==1){
+                    moved=moved+1;
+                } else {
+                    if(f3_probe(w,b,pi,0-step,meta,feats,clist,nc,cur)==1){
+                        moved=moved+1;
+                    }
+                }
+                pi=pi+1;
+            }
+            dout_str(log,"sweep");
+            dout_byte(log,9);
+            dout_i64(log,step);
+            dout_byte(log,9);
+            dout_i64(log,sweep as i64);
+            dout_byte(log,9);
+            dout_str(log,"obj=");
+            dout_i64(log,f3_obj(w,b.*,meta,feats,clist,nc));
+            dout_byte(log,9);
+            dout_str(log,"moved=");
+            dout_i64(log,moved as i64);
+            dout_byte(log,9);
+            f3_logw(log,w,b.*);
+            dout_line(log);
+            if(moved==0){sweep=8;}
+            else {sweep=sweep+1;}
+        }
+        if(step==50){step=8;}
+        else {
+            if(step==8){step=1;}
+            else {step=0;}
+        }
+    }
+    return;
+}
+
+// ---- Stage-A vetoes on the fitted base head (final answer only) ----
+
+// theater V1+V2 over adjacent-depth same-id pairs (both training released)
+fn f3_theater(meta:[]u8,bcs:[]u8,ncells:i32)i32 {
+    let v:i32=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            let pv:i32=au_get32(meta,i*8+5);
+            if(pv>=0 && au_get32(meta,pv*8+0)==0 && au_get32(meta,pv*8+2)==1){
+                let y0:i32=au_get32(meta,pv*8+3);
+                let y1:i32=au_get32(meta,i*8+3);
+                let c0:i32=au_get32(bcs,pv);
+                let c1:i32=au_get32(bcs,i);
+                if(y0==1 && y1==0 && c1>=c0){v=v+1;}
+                if(y0==0 && y1==0 && c1>c0){v=v+1;}
+            }
+        }
+        i=i+1;
+    }
+    return v;
+}
+
+// V2 veto helper: sum of base conf over training released correct cells
+fn f3_mcc2(meta:[]u8,bcs:[]u8,ncells:i32,s:*i64,n:*i32)void {
+    let ss:i64=0;
+    let nn:i32=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1 && au_get32(meta,i*8+3)==1){
+            ss=ss+(au_get32(bcs,i) as i64);
+            nn=nn+1;
+        }
+        i=i+1;
+    }
+    s.*=ss;
+    n.*=nn;
+    return;
+}
+
+// V3 veto helper: 1 = pass (no (fam,depth) n>=8 with G < -0.080)
+fn f3_v3(meta:[]u8,bcs:[]u8,ncells:i32)i32 {
+    let gacc:[]u8=nio_alloc(9*7*3*8);
+    if(gacc.len==0){return -1;}
+    let gi:i32=0;
+    while(gi<9*7*3){au_put64(gacc,gi,0);gi=gi+1;}
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            let fi:i32=au_get32(meta,i*8+4);
+            let ds:i32=au_get32(meta,i*8+7);
+            if(fi>=0 && ds>=0){
+                let c:i64=au_get32(bcs,i) as i64;
+                let gx:i32=(fi*7+ds)*3;
+                au_put64(gacc,gx,au_get64(gacc,gx)+c);
+                au_put64(gacc,gx+1,au_get64(gacc,gx+1)+1);
+                if(au_get32(meta,i*8+3)==1){au_put64(gacc,gx+2,au_get64(gacc,gx+2)+1);}
+            }
+        }
+        i=i+1;
+    }
+    let ok:i32=1;
+    let f2:i32=0;
+    while(f2<9){
+        let s:i32=0;
+        while(s<7){
+            let gx:i32=(f2*7+s)*3;
+            let n:i64=au_get64(gacc,gx+1);
+            if(n>=8){
+                let S:i64=au_get64(gacc,gx);
+                let K:i64=au_get64(gacc,gx+2);
+                if(1000*(S-1000*K)+80*n<0){ok=0;}
+            }
+            s=s+1;
+        }
+        f2=f2+1;
+    }
+    nio_free(gacc);
+    return ok;
+}
+
+// ---- Stage B: per-depth empirical ledger ----
+//
+// Storage: one []u8 arena `estore` holding 7 per-depth regions; region ds
+// starts at byte offset ereg[ds*2+0] and holds cap ereg[ds*2+1] entries of
+// 4 bytes (conf u16 LE @+0, correct u8 @+2). Growth rule: when a region is
+// full, its capacity DOUBLES and all regions are relocated into a fresh
+// arena (copy preserves append order). No architectural cap.
+// Preregistered experiment constant: per-depth FIFO capacity 2048 — when a
+// region already holds 2048 live entries, the oldest is dropped (sums
+// decremented, memmove compaction). Inert on this training set.
+
+fn lg_entry_put(estore:[]u8,at:i32,conf:i32,y:i32)void {
+    estore[at]=(conf&255) as u8;
+    estore[at+1]=((conf>>8)&255) as u8;
+    estore[at+2]=y as u8;
+    estore[at+3]=0;
+    return;
+}
+
+fn lg_entry_get(estore:[]u8,at:i32,conf:*i32,y:*i32)void {
+    conf.*=(estore[at] as i32)+((estore[at+1] as i32)<<8);
+    y.*=estore[at+2] as i32;
+    return;
+}
+
+// double region ds's entry capacity; relocate all regions; free old arena.
+// On alloc failure marks cap -1 (append path then becomes a logged no-op).
+fn lg_grow(estore:[]u8,ereg:[]u8,lcnt:[]u8,ds:i32)[]u8 {
+    let total:i32=0;
+    let r:i32=0;
+    while(r<7){
+        let c:i32=au_get32(ereg,r*2+1);
+        if(r==ds){c=c*2;}
+        total=total+c*4;
+        r=r+1;
+    }
+    let nb:[]u8=nio_alloc(total);
+    if(nb.len==0){
+        au_put32(ereg,ds*2+1,-1);
+        return estore;
+    }
+    let off:i32=0;
+    r=0;
+    while(r<7){
+        let oc:i32=au_get32(ereg,r*2+1);
+        let nc2:i32=oc;
+        if(r==ds){nc2=oc*2;}
+        let nent:i32=au_get32(lcnt,r);
+        let src:i32=au_get32(ereg,r*2+0);
+        let k:i32=0;
+        while(k<nent*4){
+            nb[off+k]=estore[src+k];
+            k=k+1;
+        }
+        au_put32(ereg,r*2+0,off);
+        au_put32(ereg,r*2+1,nc2);
+        off=off+nc2*4;
+        r=r+1;
+    }
+    nio_free(estore);
+    return nb;
+}
+
+// append (conf, y) to ledger[ds]; returns the (possibly grown) estore arena
+fn lg_append(estore:[]u8,ereg:[]u8,lsum:[]u8,lcnt:[]u8,ds:i32,conf:i32,y:i32)[]u8 {
+    let cap:i32=au_get32(ereg,ds*2+1);
+    if(cap<0){return estore;}
+    let n:i32=au_get32(lcnt,ds);
+    if(n==2048){
+        // FIFO drop of oldest entry (preregistered test constant; inert here)
+        let ob:i32=au_get32(ereg,ds*2+0);
+        let dc:i32=0;
+        let dy:i32=0;
+        lg_entry_get(estore,ob,&dc,&dy);
+        au_put64(lsum,ds*2,au_get64(lsum,ds*2)-(dc as i64));
+        au_put64(lsum,ds*2+1,au_get64(lsum,ds*2+1)-(dy as i64));
+        let i:i32=0;
+        while(i<(n-1)*4){
+            estore[ob+i]=estore[ob+4+i];
+            i=i+1;
+        }
+        n=n-1;
+        au_put32(lcnt,ds,n);
+    }
+    let nb:[]u8=estore;
+    if(n==cap){
+        nb=lg_grow(estore,ereg,lcnt,ds);
+        cap=au_get32(ereg,ds*2+1);
+        if(cap<0){return nb;}
+    }
+    let ob2:i32=au_get32(ereg,ds*2+0);
+    lg_entry_put(nb,ob2+n*4,conf,y);
+    au_put64(lsum,ds*2,au_get64(lsum,ds*2)+(conf as i64));
+    au_put64(lsum,ds*2+1,au_get64(lsum,ds*2+1)+(y as i64));
+    au_put32(lcnt,ds,n+1);
+    return nb;
+}
+
+// G_t(ds) in thousandths from the current ledger (0 when empty)
+fn lg_gap(lsum:[]u8,lcnt:[]u8,ds:i32,gap:*i64)void {
+    let n:i32=au_get32(lcnt,ds);
+    if(n<=0){gap.*=0;return;}
+    let sc:i64=au_get64(lsum,ds*2);
+    let sk:i64=au_get64(lsum,ds*2+1);
+    gap.*=f3_tdiv(sc,n as i64)-f3_tdiv(sk*1000,n as i64);
+    return;
+}
+
+fn lg_offset(gap:i64,damp:i64)i64 {
+    return f3_clamp(f3_tdiv(gap*damp,1000),-200,200);
+}
+
+// ---- driver ----
+
+fn f3_train(tsv:[]u8,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 101;}
+    let flen:i64=dlb_read_file(tsv,fbuf);
+    if(flen<=0){return 102;}
+    let blen:i32=flen as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc(maxcells*8*4);
+    let feats:[]u8=nio_alloc(maxcells*8*4);
+    let idix:[]u8=nio_alloc(maxcells*2*4);
+    let idbuf:[]u8=nio_alloc(1048576);
+    let tabs:[]u8=nio_alloc(17*4);
+    if(meta.len==0 || feats.len==0 || idix.len==0 || idbuf.len==0 || tabs.len==0){return 103;}
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            let nsep:i32=f3_split(line,tabs);
+            if(nsep==14){
+                // fields: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+                let f1e:i32=au_get32(tabs,0);
+                let f2e:i32=au_get32(tabs,1);
+                let f3e:i32=au_get32(tabs,2);
+                let f4e:i32=au_get32(tabs,3);
+                let f5e:i32=au_get32(tabs,4);
+                let f6e:i32=au_get32(tabs,5);
+                let f7e:i32=au_get32(tabs,6);
+                let id:[]u8=line[0..f1e];
+                let fam:[]u8=line[f1e+1..f2e];
+                let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+                let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+                let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+                let c4:[]u8=line[f6e+1..f7e];
+                let y:i32=-1;
+                if(rel4==1){
+                    y=0;
+                    if(c4.len==1 && c4[0]==49){y=1;}
+                }
+                let ci:i32=ncells;
+                au_put32(meta,ci*8+0,heldout);
+                au_put32(meta,ci*8+1,depth);
+                au_put32(meta,ci*8+2,rel4);
+                au_put32(meta,ci*8+3,y);
+                au_put32(meta,ci*8+4,f3_famidx(fam));
+                au_put32(meta,ci*8+6,dlb_atoi(line[f4e+1..f5e]));
+                au_put32(meta,ci*8+7,f3_dslot(depth));
+                let k:i32=0;
+                while(k<8){
+                    let a:i32=au_get32(tabs,6+k);
+                    let b2:i32=au_get32(tabs,7+k);
+                    au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                    k=k+1;
+                }
+                let pv:i32=-1;
+                let j:i32=ci-1;
+                while(j>=0 && pv<0){
+                    let ko:i32=au_get32(idix,j*2+0);
+                    let kl:i32=au_get32(idix,j*2+1);
+                    if(kl==id.len && nio_equal(idbuf[ko..ko+kl],id)==1){pv=j;}
+                    j=j-1;
+                }
+                au_put32(meta,ci*8+5,pv);
+                au_put32(idix,ci*2+0,idn);
+                au_put32(idix,ci*2+1,id.len);
+                let q:i32=0;
+                while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+                idn=idn+id.len;
+                ncells=ncells+1;
+            }
+        }
+        pos=e+1;
+    }
+    // training cell list: heldout=0, rel4=1 (all depths)
+    let clist:[]u8=nio_alloc(maxcells*4);
+    if(clist.len==0){return 103;}
+    let ncl:i32=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            au_put32(clist,ncl,i);
+            ncl=ncl+1;
+        }
+        i=i+1;
+    }
+    let log:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&log,4194304)!=0){return 104;}
+    dout_str(&log,"# train_f31 cells=");
+    dout_i64(&log,ncells as i64);
+    dout_str(&log," train_released=");
+    dout_i64(&log,ncl as i64);
+    dout_str(&log," inits=w1..w8=0,b=0 steps=50,8,1 sweeps=8 damp0=200 testcap=2048/depth offset_causal=pre-update-damp");
+    dout_line(&log);
+    // Stage A: coordinate descent from the recorded zero init
+    let w:[]u8=nio_alloc(8*8);
+    if(w.len==0){return 103;}
+    let k2:i32=0;
+    while(k2<8){au_put64(w,k2,0);k2=k2+1;}
+    let b:i64=0;
+    f3_coord(w,&b,meta,feats,clist,ncl,&log);
+    dout_str(&log,"stageA");
+    dout_byte(&log,9);
+    dout_str(&log,"obj=");
+    dout_i64(&log,f3_obj(w,b,meta,feats,clist,ncl));
+    dout_byte(&log,9);
+    f3_logw(&log,w,b);
+    dout_line(&log);
+    // precompute base conf per cell for vetoes + Stage B
+    let bcs:[]u8=nio_alloc(maxcells*4);
+    if(bcs.len==0){return 103;}
+    i=0;
+    while(i<ncells){
+        au_put32(bcs,i,f3_bconf(w,b,feats,i));
+        i=i+1;
+    }
+    // Stage-A vetoes (final answer only)
+    let th:i32=f3_theater(meta,bcs,ncells);
+    let mss:i64=0;
+    let mnn:i32=0;
+    f3_mcc2(meta,bcs,ncells,&mss,&mnn);
+    let mcc_ok:i32=0;
+    if(mnn>0 && mss>=550*(mnn as i64)){mcc_ok=1;}
+    let v3r:i32=f3_v3(meta,bcs,ncells);
+    dout_str(&log,"veto");
+    dout_byte(&log,9);
+    dout_str(&log,"theater=");
+    dout_i64(&log,th as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"mcc_ok=");
+    dout_i64(&log,mcc_ok as i64);
+    dout_str(&log,"(sum=");
+    dout_i64(&log,mss);
+    dout_str(&log," n=");
+    dout_i64(&log,mnn as i64);
+    dout_str(&log,")");
+    dout_byte(&log,9);
+    dout_str(&log,"v3_ok=");
+    dout_i64(&log,v3r as i64);
+    dout_line(&log);
+    // Stage B: online ledger pass
+    let lsum:[]u8=nio_alloc(7*2*8);
+    let lcnt:[]u8=nio_alloc(7*4);
+    let lprev:[]u8=nio_alloc(7*4);
+    let ereg:[]u8=nio_alloc(7*2*4);
+    let estore:[]u8=nio_alloc(7*256*4);
+    if(lsum.len==0 || lcnt.len==0 || lprev.len==0 || ereg.len==0 || estore.len==0){return 103;}
+    let ds0:i32=0;
+    while(ds0<7){
+        au_put32(ereg,ds0*2+0,ds0*1024);
+        au_put32(ereg,ds0*2+1,256);
+        ds0=ds0+1;
+    }
+    let damp:i64=200;
+    let stable:i32=0;
+    let flips:i32=0;
+    let dampups:i32=0;
+    let dampdns:i32=0;
+    i=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            let ds:i32=au_get32(meta,i*8+7);
+            if(ds>=0){
+                let Bc:i32=au_get32(bcs,i);
+                let n:i32=au_get32(lcnt,ds);
+                let off:i64=0;
+                if(n>0){
+                    let gap:i64=0;
+                    lg_gap(lsum,lcnt,ds,&gap);
+                    off=lg_offset(gap,damp);
+                    let s:i32=0;
+                    if(gap>0){s=1;}
+                    if(gap<0){s=-1;}
+                    let ps:i32=au_get32(lprev,ds);
+                    if(s!=0 && ps!=0 && s!=ps){
+                        damp=f3_max(200,damp-50);
+                        stable=0;
+                        flips=flips+1;
+                        dampdns=dampdns+1;
+                        dout_str(&log,"damp");
+                        dout_byte(&log,9);
+                        dout_i64(&log,i as i64);
+                        dout_byte(&log,9);
+                        dout_str(&log,"flip ds=");
+                        dout_i64(&log,ds as i64);
+                        dout_byte(&log,9);
+                        dout_str(&log,"damp=");
+                        dout_i64(&log,damp);
+                        dout_line(&log);
+                    } else {
+                        stable=stable+1;
+                        if(stable>=100){
+                            damp=f3_min(800,damp+50);
+                            stable=0;
+                            dampups=dampups+1;
+                            dout_str(&log,"damp");
+                            dout_byte(&log,9);
+                            dout_i64(&log,i as i64);
+                            dout_byte(&log,9);
+                            dout_str(&log,"stable ds=");
+                            dout_i64(&log,ds as i64);
+                            dout_byte(&log,9);
+                            dout_str(&log,"damp=");
+                            dout_i64(&log,damp);
+                            dout_line(&log);
+                        }
+                    }
+                    if(s!=0){au_put32(lprev,ds,s);}
+                }
+                let Cc:i64=f3_clamp((Bc as i64)-off,0,1000);
+                let y:i32=au_get32(meta,i*8+3);
+                estore=lg_append(estore,ereg,lsum,lcnt,ds,Cc as i32,y);
+            }
+        }
+        i=i+1;
+    }
+    // final per-depth gaps + offsets (frozen for eval)
+    let offs:[]u8=nio_alloc(7*8);
+    if(offs.len==0){return 103;}
+    let ds1:i32=0;
+    while(ds1<7){
+        let gap:i64=0;
+        lg_gap(lsum,lcnt,ds1,&gap);
+        let of:i64=lg_offset(gap,damp);
+        au_put64(offs,ds1,of);
+        dout_str(&log,"depth");
+        dout_byte(&log,9);
+        dout_str(&log,"ds=");
+        dout_i64(&log,ds1 as i64);
+        dout_byte(&log,9);
+        dout_str(&log,"n=");
+        dout_i64(&log,au_get32(lcnt,ds1) as i64);
+        dout_byte(&log,9);
+        dout_str(&log,"sumC=");
+        dout_i64(&log,au_get64(lsum,ds1*2));
+        dout_byte(&log,9);
+        dout_str(&log,"sumK=");
+        dout_i64(&log,au_get64(lsum,ds1*2+1));
+        dout_byte(&log,9);
+        dout_str(&log,"G=");
+        dout_i64(&log,gap);
+        dout_byte(&log,9);
+        dout_str(&log,"off=");
+        dout_i64(&log,of);
+        dout_byte(&log,9);
+        dout_str(&log,"regcap=");
+        dout_i64(&log,au_get32(ereg,ds1*2+1) as i64);
+        dout_line(&log);
+        ds1=ds1+1;
+    }
+    dout_str(&log,"final");
+    dout_byte(&log,9);
+    dout_str(&log,"damp=");
+    dout_i64(&log,damp);
+    dout_byte(&log,9);
+    dout_str(&log,"flips=");
+    dout_i64(&log,flips as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"ups=");
+    dout_i64(&log,dampups as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"downs=");
+    dout_i64(&log,dampdns as i64);
+    dout_line(&log);
+    // checkpoint: §5 (weights != init; DDCL liveness)
+    let wnz:i32=0;
+    let k3:i32=0;
+    while(k3<8){
+        if(au_get64(w,k3)!=0){wnz=1;}
+        k3=k3+1;
+    }
+    if(b!=0){wnz=1;}
+    let lived:i32=0;
+    let offnz:i32=0;
+    ds1=0;
+    while(ds1<7){
+        if(au_get32(lcnt,ds1)>0){lived=lived+1;}
+        if(au_get64(offs,ds1)!=0){offnz=offnz+1;}
+        ds1=ds1+1;
+    }
+    let adapts:i32=flips+dampups;
+    let go:i32=0;
+    if(wnz==1 && lived==7 && offnz>=1 && adapts>=1 && th==0 && mcc_ok==1 && v3r==1){go=1;}
+    dout_str(&log,"checkpoint");
+    dout_byte(&log,9);
+    if(go==1){dout_str(&log,"GO");}
+    if(go==0){dout_str(&log,"VOID");}
+    dout_byte(&log,9);
+    dout_str(&log,"wnz=");
+    dout_i64(&log,wnz as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"livedepths=");
+    dout_i64(&log,lived as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"offnz=");
+    dout_i64(&log,offnz as i64);
+    dout_byte(&log,9);
+    dout_str(&log,"adapts=");
+    dout_i64(&log,adapts as i64);
+    dout_line(&log);
+    // write params
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,4096)!=0){return 104;}
+    dout_str(&po,"// f31_params.zag - F31 DDCL trained params\n");
+    dout_str(&po,"// Generated by train_f31.zag. Do not hand-edit.\n");
+    let k4:i32=0;
+    while(k4<8){
+        dout_str(&po,"fn f31_w");
+        dout_i64(&po,(k4+1) as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,k4));
+        dout_str(&po,"; }\n");
+        k4=k4+1;
+    }
+    dout_str(&po,"fn f31_b()i64 { return ");
+    dout_i64(&po,b);
+    dout_str(&po,"; }\n");
+    dout_str(&po,"fn f31_damp()i64 { return ");
+    dout_i64(&po,damp);
+    dout_str(&po,"; }\n");
+    let k5:i32=0;
+    while(k5<7){
+        dout_str(&po,"fn f31_off");
+        dout_i64(&po,k5 as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(offs,k5));
+        dout_str(&po,"; }\n");
+        k5=k5+1;
+    }
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&log),log.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);nio_free(tabs);
+    nio_free(clist);nio_free(w);nio_free(bcs);
+    nio_free(lsum);nio_free(lcnt);nio_free(lprev);nio_free(ereg);nio_free(estore);
+    nio_free(offs);
+    dout_free(&log);dout_free(&po);
+    if(wrc<0 || wrc2<0){return 105;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<4){
+        _zag_println("usage: train_f31 <features.tsv> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    return f3_train(_zag_arg(1),_zag_arg(2),_zag_arg(3));
+}
