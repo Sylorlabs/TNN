@@ -140,4 +140,5 @@ TMPDIR=~/workspace/tmp_commit for all commit tooling.
 - Evidence + verdict committed to tnn-native-lab branch under
   docs/lab/pam/round4/gov_lh/repairs/ via ~/workspace/commit_racefree.py
   (TMPDIR=~/workspace/tmp_commit). No binaries, .zagd, or .zag-cache committed.
-- Commit: <sha recorded at commit time>
+- Commit: de7da0f9c1bd924f5bdb244479960e0c72543d68 on tnn-native-lab
+  (parent bfbc758bf446), 128 files under docs/lab/pam/round4/gov_lh/repairs/
