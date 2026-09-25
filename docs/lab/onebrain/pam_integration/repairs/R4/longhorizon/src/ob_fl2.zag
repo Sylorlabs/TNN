@@ -1,0 +1,329 @@
+// ob_fl2.zag — ONE-BRAIN variant B: the FL2 (guided-learning) organ.
+//
+// The organ keeps LOCAL state (its own kv/quarantine stores, its own
+// decision flags, its own local event log) and communicates ONLY by
+// messages (see ob_common.zag envelope + OB_PROTOCOL.md). It never touches
+// a shared ledger.
+//
+// Decision logic is ported verbatim from gl_default's arm_gl
+// (gl_learner.zag): E14 calibration gate -> provisional-install INTENT,
+// E15 learner-fired disconnect, per-episode eliminative self-verification
+// with counterfactual sims, E48 promotion. Two deliberate deltas:
+//   (1) installs/revokes/promotions are emitted as M_* messages on the
+//       outbox instead of being applied to a shared audit/store; the
+//       arbiter routes them (PAM gate front door -> memory organ).
+//   (2) survivor selection uses F3's f3_survivor (the structurally repaired
+//       one per red-team R2: the failed action itself can never be selected
+//       as its own survivor), NOT the 99-sentinel inline default.
+//
+// Zero RNG. Byte-identical reruns required.
+@import("ob_common.zag")
+@import("ob_tn.zag")
+
+// ---- organ arena layout (all organ-local; one flat arena, no structs) ----
+const OBF_MKEY:i32=0;      // 128*4 main keys
+const OBF_MVAL:i32=512;    // 128*4 main vals
+const OBF_MFLAG:i32=1024;  // 128*4 main flags
+const OBF_QKEY:i32=1536;   // 64*4 quarantine keys
+const OBF_QVAL:i32=1792;
+const OBF_QFLAG:i32=2048;
+const OBF_SKEY:i32=2304;   // calibration scratch
+const OBF_SVAL:i32=2816;
+const OBF_SFLAG:i32=3328;
+const OBF_SQKEY:i32=3840;
+const OBF_SQVAL:i32=4352;
+const OBF_SQFLAG:i32=4608;
+const OBF_PKEY:i32=4864;   // pre-action snapshot (counterfactual base)
+const OBF_PVAL:i32=5376;
+const OBF_PFLAG:i32=5888;
+const OBF_PQKEY:i32=6400;
+const OBF_PQVAL:i32=6912;
+const OBF_PQFLAG:i32=7168;
+const OBF_WKEY:i32=7424;   // counterfactual working copies
+const OBF_WVAL:i32=7936;
+const OBF_WFLAG:i32=8448;
+const OBF_WQKEY:i32=8960;
+const OBF_WQVAL:i32=9472;
+const OBF_WQFLAG:i32=9728;
+const OBF_ST:i32=9984;     // 9 i32 state words
+const OBF_COMMITTED:i32=10020; // 1 byte: committed survivor (TN_UNCONNECTED=255 = none)
+const OBF_ARENA:i32=10032;
+
+const OBF_LOGCAP:i32=2048; // local event-log entries (16B each, tn_audit layout)
+const OBF_OUTCAP:i32=512;  // outbox messages (16B each)
+
+// state word indexes
+const STF_PROV:i32=0;      // provisional policy (-1 = none)
+const STF_CONNECTED:i32=1;
+const STF_HASRULE:i32=2;
+const STF_CAL:i32=3;
+const STF_FIRE:i32=4;      // disconnect step
+const STF_REVOKE:i32=5;    // revoke step
+const STF_RSEQ:i32=6;
+const STF_PERM:i32=7;
+const STF_BADEP:i32=8;
+
+fn obf_g(a:[]u8,w:i32)i32 { return ob_g32(a,OBF_ST+w*4); }
+fn obf_s(a:[]u8,w:i32,v:i32)void { ob_s32(a,OBF_ST+w*4,v); return; }
+
+fn obf_new()[]u8 {
+    let a:[]u8=ob_alloc(OBF_ARENA);
+    obf_s(a,STF_PROV,-1);
+    obf_s(a,STF_CONNECTED,1);
+    obf_s(a,STF_HASRULE,0);
+    obf_s(a,STF_CAL,0);
+    obf_s(a,STF_FIRE,-1);
+    obf_s(a,STF_REVOKE,-1);
+    obf_s(a,STF_RSEQ,0);
+    obf_s(a,STF_PERM,0);
+    obf_s(a,STF_BADEP,0);
+    a[OBF_COMMITTED]=TN_UNCONNECTED as u8;
+    return a;
+}
+
+// ---- verbatim from gl_learner.zag: gl_select ----
+// GL-SELECT-REGION-BEGIN (copied; no signal parameter, no accumulation)
+fn gl_select(provisional:i32,committed:[]u8)i32 {
+    if((committed[0] as i32)!=TN_UNCONNECTED){return committed[0] as i32;}
+    return provisional;
+}
+// GL-SELECT-REGION-END
+
+// ---- verbatim from gl_learner.zag: no-audit sim twins ----
+fn tn_sim_overwrite(skey:[]u8,sval:[]u8,sflag:[]u8,k:i32,v:i32)i32 {
+    let s:i32=tn_find_main(skey,TN_NMAIN,k);
+    if(s<0){return -1;}
+    tn_s32(sval,s*4,v);tn_s32(sflag,s*4,0);
+    return s;
+}
+
+fn tn_sim_rekey(skey:[]u8,sval:[]u8,sflag:[]u8,k:i32,v:i32,rk:i32)i32 {
+    let s:i32=tn_first_free(skey,TN_NMAIN);
+    if(s<0){return -1;}
+    tn_s32(skey,s*4,rk);tn_s32(sval,s*4,v);tn_s32(sflag,s*4,0);
+    return s;
+}
+
+// ---- verbatim from gl_learner.zag: the contradiction signal ----
+// Episodic verification path: computed per episode from the organ's own
+// observed world state, never stored, summed, or consulted across episodes.
+fn gl_contradict(k:i32,v_new:i32,v_old:i32,audit_active:i32,
+    mkey:[]u8,mval:[]u8,mflag:[]u8,qkey:[]u8,qval:[]u8,qflag:[]u8)i32 {
+    if(v_old!=-1){
+        if(tn_main_val(mkey,mval,TN_NMAIN,k)!=v_old){
+            if(tn_quar_has(qkey,qval,TN_NQUAR,k,v_old)==0){return -1;}
+        }
+    }
+    if(tn_main_has_rekeyed(mkey,mval,TN_NMAIN,v_new)==1){
+        if(audit_active==1){return -1;}
+        return 2;
+    }
+    if(tn_quar_has_flag(qkey,qval,qflag,TN_NQUAR,k,v_new)==1){
+        if(tn_main_val(mkey,mval,TN_NMAIN,k)==v_old){
+            if(tn_main_flag(mflag,TN_NMAIN,k,mkey)==1){return 1;}
+        }
+    }
+    return -1;
+}
+
+// ---- F3's f3_survivor, verbatim from
+// g8_fl2_variants/nevercontradicted/f3_lawcheck.zag (red-team R2 repair) ----
+// Lowest-index counterfactual survivor scoring >=+1, excluding act.
+fn f3_survivor(act:i32,sig0:i32,sig1:i32,sig2:i32)i32 {
+    if(act!=0 && sig0>=1){return 0;}
+    if(act!=1 && sig1>=1){return 1;}
+    if(act!=2 && sig2>=1){return 2;}
+    return -1;
+}
+
+// message emission into the organ outbox (16B envelope; order counter).
+fn obf_emit(out:[]u8,on:*i32,ord:*i32,ep:i32,mtype:i32,a1:i32,a2:i32)i32 {
+    let n:i32=on.*;
+    if(n<0 || n>=OBF_OUTCAP){return TN_AUDIT_FULL;}
+    let o:i32=ord.*;
+    ob_s32(out,n*16,(ep<<16)|o);
+    ob_s32(out,n*16+4,mtype);
+    ob_s32(out,n*16+8,a1);
+    ob_s32(out,n*16+12,a2);
+    on.*=n+1;ord.*=o+1;
+    return TN_OK;
+}
+
+// One episode of the FL2 organ. Emits intents on `out`; records its own
+// local event log in `log` (tn_audit layout, organ-local). Returns TN_OK
+// or a negative rc (recorded in STF_BADEP by the caller/test).
+fn obf_step(a:[]u8,ep:i32,stated:i32,teach_aux:i32,
+    log:[]u8,ln:*i32,out:[]u8,on:*i32,ord:*i32)i32 {
+    let mkey:[]u8=a[OBF_MKEY..OBF_MKEY+512];
+    let mval:[]u8=a[OBF_MVAL..OBF_MVAL+512];
+    let mflag:[]u8=a[OBF_MFLAG..OBF_MFLAG+512];
+    let qkey:[]u8=a[OBF_QKEY..OBF_QKEY+256];
+    let qval:[]u8=a[OBF_QVAL..OBF_QVAL+256];
+    let qflag:[]u8=a[OBF_QFLAG..OBF_QFLAG+256];
+    let skey:[]u8=a[OBF_SKEY..OBF_SKEY+512];
+    let sval:[]u8=a[OBF_SVAL..OBF_SVAL+512];
+    let sflag:[]u8=a[OBF_SFLAG..OBF_SFLAG+512];
+    let sqkey:[]u8=a[OBF_SQKEY..OBF_SQKEY+256];
+    let sqval:[]u8=a[OBF_SQVAL..OBF_SQVAL+256];
+    let sqflag:[]u8=a[OBF_SQFLAG..OBF_SQFLAG+256];
+    let pkey:[]u8=a[OBF_PKEY..OBF_PKEY+512];
+    let pval:[]u8=a[OBF_PVAL..OBF_PVAL+512];
+    let pflag:[]u8=a[OBF_PFLAG..OBF_PFLAG+512];
+    let pqkey:[]u8=a[OBF_PQKEY..OBF_PQKEY+256];
+    let pqval:[]u8=a[OBF_PQVAL..OBF_PQVAL+256];
+    let pqflag:[]u8=a[OBF_PQFLAG..OBF_PQFLAG+256];
+    let wkey:[]u8=a[OBF_WKEY..OBF_WKEY+512];
+    let wval:[]u8=a[OBF_WVAL..OBF_WVAL+512];
+    let wflag:[]u8=a[OBF_WFLAG..OBF_WFLAG+512];
+    let wqkey:[]u8=a[OBF_WQKEY..OBF_WQKEY+256];
+    let wqval:[]u8=a[OBF_WQVAL..OBF_WQVAL+256];
+    let wqflag:[]u8=a[OBF_WQFLAG..OBF_WQFLAG+256];
+    let committed:[]u8=a[OBF_COMMITTED..OBF_COMMITTED+1];
+
+    let rc:i32=TN_OK;
+    let etype:i32=0;let k:i32=0;let v:i32=0;let auth:i32=0;
+    tn_ep_info(ep,&etype,&k,&v,&auth);
+    if(etype==ET_PN){k=19+tn_pn_before(ep);}
+    let kind:i32=0;
+    if(etype==ET_TEACH){kind=1;}
+    if(etype==ET_CAL){kind=2;}
+    if(kind==0 && tn_is_contradiction(etype)==1){kind=3;}
+    if(kind==0){kind=4;}
+
+    // learner-initiated disconnect (own decision; emitted, not shared)
+    if(obf_g(a,STF_CONNECTED)==1 && obf_g(a,STF_PROV)>=0){
+        rc=tn_audit(log,ln,ep,TN_OP_DISCONNECT,0,0);
+        if(rc==TN_OK){rc=obf_emit(out,on,ord,ep,M_DISCONNECT,0,0);}
+        if(rc==TN_OK){obf_s(a,STF_CONNECTED,0);obf_s(a,STF_FIRE,ep);}
+    }
+    if(rc==TN_OK && kind==1){
+        rc=tn_audit(log,ln,ep,TN_OP_EPISODE,etype,-1);
+        if(rc==TN_OK){rc=tn_audit(log,ln,ep,TN_OP_TEACH,0,teach_aux);}
+        if(rc==TN_OK){obf_s(a,STF_HASRULE,1);}
+    }
+    if(rc==TN_OK && kind==2){
+        tn_copy(skey,mkey,TN_NMAIN*4);tn_copy(sval,mval,TN_NMAIN*4);tn_copy(sflag,mflag,TN_NMAIN*4);
+        tn_copy(sqkey,qkey,TN_NQUAR*4);tn_copy(sqval,qval,TN_NQUAR*4);tn_copy(sqflag,qflag,TN_NQUAR*4);
+        let v_old:i32=tn_main_val(mkey,mval,TN_NMAIN,k);
+        let ok:i32=0;
+        if(v!=v_old){
+            if(stated==ACT_CONTEST){
+                let qs:i32=tn_sim_contest(skey,sflag,sqkey,sqval,sqflag,TN_NQUAR,k,v);
+                if(qs>=0 && qs==tn_count_used(qkey,TN_NQUAR)){ok=1;}
+                if(ok==1 && tn_g32(sqkey,qs*4)!=k){ok=0;}
+                if(ok==1 && tn_g32(sqval,qs*4)!=v){ok=0;}
+                if(ok==1 && tn_g32(sqflag,qs*4)!=1){ok=0;}
+                if(ok==1 && tn_main_val(skey,sval,TN_NMAIN,k)!=v_old){ok=0;}
+                if(ok==1 && tn_main_flag(sflag,TN_NMAIN,k,skey)!=1){ok=0;}
+            } else {
+                let s:i32=tn_first_free(skey,TN_NMAIN);
+                if(s>=0){
+                    tn_s32(skey,s*4,TN_REKEY_BASE+800000+ep);
+                    tn_s32(sval,s*4,v);
+                    tn_s32(sflag,s*4,0);
+                    if(tn_main_has_rekeyed(skey,sval,TN_NMAIN,v)==1){ok=1;}
+                    if(ok==1 && tn_main_val(skey,sval,TN_NMAIN,k)!=v_old){ok=0;}
+                    if(ok==1 && tn_main_flag(sflag,TN_NMAIN,k,skey)!=0){ok=0;}
+                    if(ok==1 && tn_count_used(sqkey,TN_NQUAR)!=tn_count_used(qkey,TN_NQUAR)){ok=0;}
+                }
+            }
+        } else {
+            ok=tn_mem_eq(skey,mkey,TN_NMAIN*4);
+            if(ok==1){ok=tn_mem_eq(sval,mval,TN_NMAIN*4);}
+            if(ok==1){ok=tn_mem_eq(sflag,mflag,TN_NMAIN*4);}
+            if(ok==1){ok=tn_mem_eq(sqkey,qkey,TN_NQUAR*4);}
+            if(ok==1){ok=tn_mem_eq(sqval,qval,TN_NQUAR*4);}
+            if(ok==1){ok=tn_mem_eq(sqflag,qflag,TN_NQUAR*4);}
+        }
+        if(ok==1){obf_s(a,STF_CAL,obf_g(a,STF_CAL)+1);}
+        rc=tn_audit(log,ln,ep,TN_OP_EPISODE,etype,-1);
+        if(rc==TN_OK){rc=tn_audit(log,ln,ep,TN_OP_CALIBRATE,0,ok);}
+    }
+    if(rc==TN_OK && kind==3){
+        let v_old:i32=tn_main_val(mkey,mval,TN_NMAIN,k);
+        tn_copy(pkey,mkey,TN_NMAIN*4);tn_copy(pval,mval,TN_NMAIN*4);tn_copy(pflag,mflag,TN_NMAIN*4);
+        tn_copy(pqkey,qkey,TN_NQUAR*4);tn_copy(pqval,qval,TN_NQUAR*4);tn_copy(pqflag,qflag,TN_NQUAR*4);
+        rc=tn_audit(log,ln,ep,TN_OP_EPISODE,etype,-1);
+        let act:i32=gl_select(obf_g(a,STF_PROV),committed);
+        if(act<0){obf_s(a,STF_BADEP,1);}
+        if(rc==TN_OK && act==ACT_CONTEST){
+            if(auth!=0){rc=tn_audit(log,ln,ep,TN_OP_REFUSE,auth,1);}
+            if(rc==TN_OK){rc=tn_do_contest(mkey,mval,mflag,qkey,qval,qflag,TN_NQUAR,ep,log,ln,k,v);}
+        }
+        if(rc==TN_OK && act==ACT_REKEY){
+            if(auth!=0){rc=tn_audit(log,ln,ep,TN_OP_REFUSE,auth,2);}
+            if(rc==TN_OK){
+                rc=tn_do_insert(mkey,mval,mflag,TN_NMAIN,ep,log,ln,TN_REKEY_BASE+obf_g(a,STF_RSEQ),v,TN_OP_REKEY,k);
+                obf_s(a,STF_RSEQ,obf_g(a,STF_RSEQ)+1);
+            }
+        }
+        if(rc==TN_OK && act==ACT_OVERWRITE){
+            rc=tn_do_overwrite(mkey,mval,mflag,TN_NMAIN,ep,log,ln,k,v);
+        }
+        if(rc==TN_OK && obf_g(a,STF_PERM)==0 && ep>=15 && ep<=48){
+            let aa:i32=0;
+            if(ep>=29 && ep<=48){aa=1;}
+            let sig_live:i32=gl_contradict(k,v,v_old,aa,mkey,mval,mflag,qkey,qval,qflag);
+            let sig0:i32=99;let sig1:i32=99;let sig2:i32=99;
+            let p:i32=0;
+            while(p<3){
+                if(p!=act){
+                    tn_copy(wkey,pkey,TN_NMAIN*4);tn_copy(wval,pval,TN_NMAIN*4);tn_copy(wflag,pflag,TN_NMAIN*4);
+                    tn_copy(wqkey,pqkey,TN_NQUAR*4);tn_copy(wqval,pqval,TN_NQUAR*4);tn_copy(wqflag,pqflag,TN_NQUAR*4);
+                    let pr:i32=-2;
+                    if(p==ACT_OVERWRITE){pr=tn_sim_overwrite(wkey,wval,wflag,k,v);}
+                    if(p==ACT_CONTEST){pr=tn_sim_contest(wkey,wflag,wqkey,wqval,wqflag,TN_NQUAR,k,v);}
+                    if(p==ACT_REKEY){pr=tn_sim_rekey(wkey,wval,wflag,k,v,TN_REKEY_BASE+777777);}
+                    let sp:i32=-1;
+                    if(pr>=0){sp=gl_contradict(k,v,v_old,aa,wkey,wval,wflag,wqkey,wqval,wqflag);}
+                    if(p==0){sig0=sp;}
+                    if(p==1){sig1=sp;}
+                    if(p==2){sig2=sp;}
+                }
+                p=p+1;
+            }
+            if(sig_live==-1){
+                let surv:i32=f3_survivor(act,sig0,sig1,sig2);
+                if(surv>=0){
+                    let r2:i32=tn_audit(log,ln,ep,TN_OP_SCAFFOLD,act,-1);
+                    if(r2==TN_OK){r2=tn_audit(log,ln,ep,TN_OP_UNINSTALL_PROVISIONAL,0,act);}
+                    if(r2==TN_OK){r2=tn_audit(log,ln,ep,TN_OP_COMMIT,1,surv);}
+                    if(r2==TN_OK){r2=obf_emit(out,on,ord,ep,M_REVOKE,act,surv);}
+                    if(r2==TN_OK){r2=obf_emit(out,on,ord,ep,M_COMMIT,1,surv);}
+                    if(r2==TN_OK){
+                        obf_s(a,STF_PROV,-1);
+                        a[OBF_COMMITTED]=surv as u8;
+                        if(obf_g(a,STF_REVOKE)<0){obf_s(a,STF_REVOKE,ep);}
+                    }
+                    if(r2!=TN_OK){rc=r2;}
+                }
+            }
+        }
+    }
+    if(rc==TN_OK && kind==4){
+        rc=tn_audit(log,ln,ep,TN_OP_EPISODE,etype,-1);
+        if(rc==TN_OK){rc=tn_do_insert(mkey,mval,mflag,TN_NMAIN,ep,log,ln,k,v,TN_OP_INSERT,0);}
+    }
+    // E14: the deliberation gate — provisional install becomes an INTENT.
+    if(ep==14){
+        let l1_ok:i32=1;let l2_ok:i32=1;
+        if(obf_g(a,STF_HASRULE)==1 && obf_g(a,STF_CAL)==4 && l1_ok==1 && l2_ok==1){
+            let r2:i32=tn_audit(log,ln,ep,TN_OP_PINSTALL,0,stated);
+            if(r2==TN_OK){r2=obf_emit(out,on,ord,ep,M_PROPOSE_INSTALL,stated,ep);}
+            if(r2==TN_OK){obf_s(a,STF_PROV,stated);}
+            if(r2!=TN_OK){rc=r2;}
+        } else {
+            let r3:i32=tn_audit(log,ln,ep,TN_OP_WITHHOLD,0,obf_g(a,STF_CAL));
+            if(r3!=TN_OK){rc=r3;}
+        }
+    }
+    // E48: promote a never-revoked provisional install (emitted as intent).
+    if(ep==48 && obf_g(a,STF_REVOKE)<0 && obf_g(a,STF_PROV)>=0){
+        let r4:i32=tn_audit(log,ln,ep,TN_OP_PROMOTE,0,obf_g(a,STF_PROV));
+        if(r4==TN_OK){r4=obf_emit(out,on,ord,ep,M_PROMOTE,obf_g(a,STF_PROV),0);}
+        if(r4==TN_OK){obf_s(a,STF_PERM,1);}
+        if(r4!=TN_OK){rc=r4;}
+    }
+    if(rc!=TN_OK){obf_s(a,STF_BADEP,1);}
+    return rc;
+}
