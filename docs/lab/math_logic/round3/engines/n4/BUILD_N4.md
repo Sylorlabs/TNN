@@ -99,4 +99,4 @@ tripped on problem path", no output written. Same for sealed store path.
 
 Sources committed via `~/workspace/commit_racefree.py` to branch
 `tnn-native-lab` (binaries, `.zagd`, and `.zag-cache/` excluded).
-Commit: TBD
+Commit: `74787890596eb843e00c77e8e05d63bb6bde3dc0`
