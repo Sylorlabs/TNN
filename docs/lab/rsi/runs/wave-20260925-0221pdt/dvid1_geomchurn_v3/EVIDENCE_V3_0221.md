@@ -9,7 +9,9 @@ scripts, no heredocs, for build, verify, hashing, analysis, or scratch).
 ## Provenance
 
 - Certified prereg read-only from commit 0ba679b11:
-  docs/lab/rsi/runs/wave-20260924-2321pdt/dvid1_geomchurn_v3/PREREG_DVID1_V3_2321.md
+  docs/lab/rsi/runs/wave-20260924-2321pdt/dvid1_geomchurn/PREREG_DVID1_V3_2321.md
+  (committed path corrected per judge ruling wave-20260925-0221pdt; the
+  earlier draft cited dvid1_geomchurn_v3, which does not exist)
   (328 lines). The 2321pdt void directory was never opened or reused.
 - Baseline source docs/lab/imagination_discovery/vid/ocean.zag: not
   modified. Byte copy in baseline/ocean.zag matches source:
