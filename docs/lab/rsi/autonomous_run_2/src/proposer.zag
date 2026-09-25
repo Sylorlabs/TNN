@@ -1,0 +1,787 @@
+// proposer.zag -- RSI-2 proposer binary.
+// Concatenated AFTER tables_gen.zag (--for-proposer) and policy_engine.zag.inc.
+// Usage:
+//   proposer <deliberation-stdout> <kept-bc-1> ... <kept-bc-8>
+//            <champ-acc> <champ-wrong> <champ-cost> <proxy-gt-24> <round-tag>
+// kept-bc: bytecode string or "-" (empty).
+// Parses/validates the DELB_* block, translates POLICY text -> bytecode via
+// the embedded L1 (equivalent to translate_policy.py), runs V1/V2a/V2b/V3 +
+// the selection bar + prediction mechanical-consistency checks.
+// Emits PROPOSE <...> or INVALID/REJECTED. DELB_HALT/DELB_WEBQUERY pass through.
+// This file contains DSL vocabulary strings for parsing only; it never
+// contains a complete policy (no IF/trigger/THEN pairing in any literal).
+
+// ---------------- string utilities ----------------
+fn s_eq(a:[]u8,b:[]u8)i32 { return _zag_strcmp(a,b); }
+fn s_starts(s:[]u8,pre:[]u8)i32 {
+    if(s.len<pre.len){return 0;}
+    let k:i64=0;
+    while(k<pre.len){
+        if(s[k]!=pre[k]){return 0;}
+        k=k+1;
+    }
+    return 1;
+}
+fn s_find(s:[]u8,sub:[]u8)i64 {
+    if(sub.len==0){return 0;}
+    if(sub.len>s.len){return -1;}
+    let k:i64=0;
+    while(k+sub.len<=s.len){
+        let j:i64=0;
+        while(j<sub.len){
+            if(s[k+j]!=sub[j]){break;}
+            j=j+1;
+        }
+        if(j==sub.len){return k;}
+        k=k+1;
+    }
+    return -1;
+}
+// case-insensitive whole-token equality
+fn tok_eq_ci(a:[]u8,b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let k:i64=0;
+    while(k<a.len){
+        let x:u8=a[k];
+        let y:u8=b[k];
+        if(x>=65){if(x<=90){x=x+32;}}
+        if(y>=65){if(y<=90){y=y+32;}}
+        if(x!=y){return 0;}
+        k=k+1;
+    }
+    return 1;
+}
+fn is_tokchar(c:u8)i32 {
+    if(c>=48){if(c<=57){return 1;}}
+    if(c>=65){if(c<=90){return 1;}}
+    if(c>=97){if(c<=122){return 1;}}
+    if(c==95){return 1;}
+    return 0;
+}
+// 1 if tok occurs in text as a whole token (case-insensitive)
+fn has_token_ci(text:[]u8,tok:[]u8)i32 {
+    let k:i64=0;
+    while(k<text.len){
+        while(k<text.len){if(is_tokchar(text[k])==1){break;}k=k+1;}
+        if(k>=text.len){break;}
+        let e:i64=k;
+        while(e<text.len){if(is_tokchar(text[e])==0){break;}e=e+1;}
+        if(tok_eq_ci(text[k..e],tok)==1){return 1;}
+        k=e;
+    }
+    return 0;
+}
+// 1 if tok occurs in text as a whole token (case-sensitive)
+fn has_token_cs(text:[]u8,tok:[]u8)i32 {
+    let k:i64=0;
+    while(k<text.len){
+        while(k<text.len){if(is_tokchar(text[k])==1){break;}k=k+1;}
+        if(k>=text.len){break;}
+        let e:i64=k;
+        while(e<text.len){if(is_tokchar(text[e])==0){break;}e=e+1;}
+        if(s_eq(text[k..e],tok)==1){return 1;}
+        k=e;
+    }
+    return 0;
+}
+// 1 if any whole token is F1..F6 (case-sensitive)
+fn has_family_tok(text:[]u8)i32 {
+    let k:i64=0;
+    while(k<text.len){
+        while(k<text.len){if(is_tokchar(text[k])==1){break;}k=k+1;}
+        if(k>=text.len){break;}
+        let e:i64=k;
+        while(e<text.len){if(is_tokchar(text[e])==0){break;}e=e+1;}
+        if(e-k==2){
+            if(text[k]==70){
+                let d:u8=text[k+1];
+                if(d>=49){if(d<=54){return 1;}}
+            }
+        }
+        k=e;
+    }
+    return 0;
+}
+fn line_count(s:[]u8)i64 {
+    let n:i64=0;
+    let k:i64=0;
+    while(k<s.len){
+        if(s[k]==10){n=n+1;}
+        k=k+1;
+    }
+    if(s.len>0){if(s[s.len-1]!=10){n=n+1;}}
+    return n;
+}
+fn line_at(s:[]u8,idx:i64,os:*u8,oe:*u8)void {
+    let n:i64=0;
+    let k:i64=0;
+    let st:i64=0;
+    while(k<s.len){
+        if(s[k]==10){
+            if(n==idx){ap32(os,0,st as i32);ap32(oe,0,k as i32);return;}
+            n=n+1;
+            st=k+1;
+        }
+        k=k+1;
+    }
+    if(st<s.len){
+        if(n==idx){ap32(os,0,st as i32);ap32(oe,0,s.len as i32);return;}
+    }
+    ap32(os,0,-1);ap32(oe,0,-1);
+}
+
+// ---------------- L1: POLICY text -> bytecode ----------------
+// Atom ids: 1=pre_is 2=chan_present 3=chan_silent 4=sm_le 5=sm_ge 6=sm_eq
+//   7=dir_is 8=sn_ge 9=so_ge 10=caval_eq_vold 11=caval_eq_vnew
+//   12=post_is 13=psm_le 14=psm_ge 15=psm_eq
+// Action ids: 1=force_consult 2=block_consult 3=force_withhold
+//   4=force_install 5=recompute_only
+// Returns atom id (0=fail); param/out via pointers.
+// The oprm channel is a u8 slot carrying SIGNED params (stored mod-256);
+// oprm_get sign-extends on read so negative params round-trip exactly.
+fn oprm_get(oprm:*u8)i32 {
+    let v:i32=oprm[0] as i32;
+    if(v>127){v=v-256;}
+    return v;
+}
+fn parse_atom(s:[]u8,oprm:*u8,o_ok:*u8)i32 {
+    o_ok[0]=0;
+    // exact names
+    if(s_eq(s,"chan_present")==1){o_ok[0]=1;return 2;}
+    if(s_eq(s,"chan_silent")==1){o_ok[0]=1;return 3;}
+    if(s_eq(s,"caval_eq_vold")==1){o_ok[0]=1;return 10;}
+    if(s_eq(s,"caval_eq_vnew")==1){o_ok[0]=1;return 11;}
+    let n:i64=s.len;
+    // name(param) forms
+    let lp:i64=s_find(s,"(");
+    if(lp<0){return 0;}
+    if(s[n-1]!=41){return 0;}
+    let nm:[]u8=s[0..lp];
+    let inside:[]u8=s[lp+1..n-1];
+    if(s_eq(nm,"pre_is")==1){
+        if(s_eq(inside,"HOLD")==1){oprm[0]=0;o_ok[0]=1;return 1;}
+        if(s_eq(inside,"NEW")==1){oprm[0]=1;o_ok[0]=1;return 1;}
+        if(s_eq(inside,"OLD")==1){oprm[0]=2;o_ok[0]=1;return 1;}
+        return 0;
+    }
+    if(s_eq(nm,"post_is")==1){
+        if(s_eq(inside,"HOLD")==1){oprm[0]=0;o_ok[0]=1;return 12;}
+        if(s_eq(inside,"NEW")==1){oprm[0]=1;o_ok[0]=1;return 12;}
+        if(s_eq(inside,"OLD")==1){oprm[0]=2;o_ok[0]=1;return 12;}
+        return 0;
+    }
+    if(s_eq(nm,"dir_is")==1){
+        if(s_eq(inside,"TIE")==1){oprm[0]=0;o_ok[0]=1;return 7;}
+        if(s_eq(inside,"NEW_LEAD")==1){oprm[0]=1;o_ok[0]=1;return 7;}
+        if(s_eq(inside,"OLD_LEAD")==1){oprm[0]=2;o_ok[0]=1;return 7;}
+        return 0;
+    }
+    // integer params
+    let okb:*u8=_zag_malloc(1);
+    let pv:i32=parse_i32(inside,okb);
+    if(okb[0]==0){return 0;}
+    if(s_eq(nm,"sm_le")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 4;}
+    if(s_eq(nm,"sm_ge")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 5;}
+    if(s_eq(nm,"sm_eq")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 6;}
+    if(s_eq(nm,"psm_le")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 13;}
+    if(s_eq(nm,"psm_ge")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 14;}
+    if(s_eq(nm,"psm_eq")==1){if(pv<-6){return 0;}if(pv>6){return 0;}oprm[0]=pv;o_ok[0]=1;return 15;}
+    if(s_eq(nm,"sn_ge")==1){if(pv<-3){return 0;}if(pv>3){return 0;}oprm[0]=pv;o_ok[0]=1;return 8;}
+    if(s_eq(nm,"so_ge")==1){if(pv<-3){return 0;}if(pv>3){return 0;}oprm[0]=pv;o_ok[0]=1;return 9;}
+    return 0;
+}
+fn parse_action(s:[]u8,oprm:*u8,o_ok:*u8)i32 {
+    o_ok[0]=0;
+    if(s_eq(s,"force_consult")==1){o_ok[0]=1;return 1;}
+    if(s_eq(s,"block_consult")==1){o_ok[0]=1;return 2;}
+    if(s_eq(s,"force_withhold")==1){o_ok[0]=1;return 3;}
+    let n:i64=s.len;
+    let lp:i64=s_find(s,"(");
+    if(lp<0){return 0;}
+    if(s[n-1]!=41){return 0;}
+    let nm:[]u8=s[0..lp];
+    let inside:[]u8=s[lp+1..n-1];
+    if(s_eq(nm,"force_install")==1){
+        if(s_eq(inside,"NEW")==1){oprm[0]=1;o_ok[0]=1;return 4;}
+        if(s_eq(inside,"OLD")==1){oprm[0]=2;o_ok[0]=1;return 4;}
+        return 0;
+    }
+    if(s_eq(nm,"recompute_only")==1){
+        if(inside.len!=3){return 0;}
+        let k:i64=0;
+        while(k<3){
+            if(inside[k]!=48){if(inside[k]!=49){return 0;}}
+            k=k+1;
+        }
+        let m:i32=((inside[0] as i32)-48)*4+((inside[1] as i32)-48)*2+((inside[2] as i32)-48);
+        oprm[0]=m;
+        o_ok[0]=1;
+        return 5;
+    }
+    return 0;
+}
+// bytecode buffer append helpers (buf is *u8; pos is *u8 holding i32 at [0..4])
+fn bb_c(buf:*u8,pos:*u8,c:u8)void {
+    let p:i64=ag32(pos,0) as i64;
+    buf[p]=c;
+    ap32(pos,0,(p+1) as i32);
+}
+fn bb_s(buf:*u8,pos:*u8,s:[]u8)void {
+    let k:i64=0;
+    while(k<s.len){bb_c(buf,pos,s[k]);k=k+1;}
+}
+fn bb_i(buf:*u8,pos:*u8,v:i32)void {
+    if(v<0){bb_c(buf,pos,45);bb_i(buf,pos,0-v);return;}
+    if(v>=10){bb_i(buf,pos,v/10);}
+    bb_c(buf,pos,(48+(v%10)) as u8);
+}
+fn bb_len(pos:*u8)i64 { return ag32(pos,0) as i64; }
+// Translate validated policy lines -> bytecode. policy_s = the DSL text
+// (from "POLICY " line through "END" line, \n-separated).
+// Bytecode: rule(;rule)* ; rule = stage,atom(+atom)*,action.
+// Returns 0 ok (bytecode bytes in buf[0..bpos]), else error code.
+fn l1_translate(policy_s:[]u8,buf:*u8,bpos:*u8)i32 {
+    if(policy_s.len>2048){return 101;}
+    let nl:i64=line_count(policy_s);
+    if(nl<3){return 102;}
+    let os:*u8=_zag_malloc(8);
+    let oe:*u8=_zag_malloc(8);
+    line_at(policy_s,0,os,oe);
+    let l0:[]u8=policy_s[ag32(os,0) as i64..ag32(oe,0) as i64];
+    if(s_starts(l0,"POLICY ")!=1){return 103;}
+    let nm:[]u8=l0[7..];
+    if(nm.len==0){return 104;}
+    if(nm.len>32){return 104;}
+    let c0:u8=nm[0];
+    let okc:i32=0;
+    if(c0>=65){if(c0<=90){okc=1;}}
+    if(c0>=97){if(c0<=122){okc=1;}}
+    if(okc==0){return 104;}
+    let k:i64=1;
+    while(k<nm.len){
+        let cc:u8=nm[k];
+        if(is_tokchar(cc)==0){return 104;}
+        k=k+1;
+    }
+    line_at(policy_s,nl-1,os,oe);
+    if(s_eq(policy_s[ag32(os,0) as i64..ag32(oe,0) as i64],"END")!=1){return 105;}
+    let oprm:*u8=_zag_malloc(8);
+    let ook:*u8=_zag_malloc(8);
+    // first pass: validate all rules, record (stage, action) per rule
+    let rstage:*u8=_zag_malloc(8);
+    let ract:*u8=_zag_malloc(8);
+    let rapm:*u8=_zag_malloc(32);
+    let nrules:i64=nl-2;
+    if(nrules>8){return 115;}
+    let ri:i64=1;
+    while(ri<nl-1){
+        line_at(policy_s,ri,os,oe);
+        let ln:[]u8=policy_s[ag32(os,0) as i64..ag32(oe,0) as i64];
+        if(s_starts(ln,"RULE ")!=1){return 106;}
+        let p_if:i64=s_find(ln," IF ");
+        let p_then:i64=s_find(ln," THEN ");
+        if(p_if<0){return 107;}
+        if(p_then<0){return 107;}
+        if(p_then<p_if){return 107;}
+        let ns:[]u8=ln[5..p_if];
+        let okn:*u8=_zag_malloc(1);
+        let rn:i32=parse_i32(ns,okn);
+        if(okn[0]==0){return 108;}
+        if(rn!=ri){return 109;}
+        let act:[]u8=ln[p_then+6..];
+        if(act.len==0){return 110;}
+        let aid:i32=parse_action(act,oprm,ook);
+        if(ook[0]==0){return 111;}
+        let apv:i32=oprm_get(oprm);
+        let stage:i32=0;
+        if(aid==1){stage=1;}
+        if(aid==2){stage=1;}
+        if(aid==3){stage=2;}
+        if(aid==4){stage=2;}
+        if(aid==5){stage=4;}
+        // validate trigger atoms (stage legality) without emitting
+        let trig:[]u8=ln[p_if+4..p_then];
+        if(trig.len==0){return 110;}
+        let t0:i64=0;
+        let nacount:i32=0;
+        while(t0<=trig.len){
+            let te:i64=t0;
+            let fnd:i64=0;
+            while(te<trig.len){
+                if(te+5<=trig.len){
+                    if(s_eq(trig[te..te+5]," AND ")==1){fnd=1;break;}
+                }
+                te=te+1;
+            }
+            let atom_s:[]u8=trig[t0..te];
+            if(atom_s.len==0){return 112;}
+            let atid:i32=parse_atom(atom_s,oprm,ook);
+            if(ook[0]==0){return 113;}
+            if(atid>=12){if(stage!=2){return 114;}}
+            if(atid<=11){if(stage==2){return 114;}}
+            nacount=nacount+1;
+            if(fnd==0){break;}
+            t0=te+5;
+        }
+        if(nacount==0){return 112;}
+        rstage[ri-1]=stage as u8;
+        ract[ri-1]=aid as u8;
+        ap32(rapm,(ri-1)*4,apv);
+        ri=ri+1;
+    }
+    // second pass: emit bytecode
+    ap32(bpos,0,0);
+    ri=1;
+    while(ri<nl-1){
+        if(ri>1){bb_c(buf,bpos,59);}
+        line_at(policy_s,ri,os,oe);
+        let ln2:[]u8=policy_s[ag32(os,0) as i64..ag32(oe,0) as i64];
+        let p_if2:i64=s_find(ln2," IF ");
+        let p_then2:i64=s_find(ln2," THEN ");
+        let trig2:[]u8=ln2[p_if2+4..p_then2];
+        let stage2:i32=rstage[ri-1] as i32;
+        let aid2:i32=ract[ri-1] as i32;
+        let apv2:i32=ag32(rapm,(ri-1)*4);
+        bb_i(buf,bpos,stage2);
+        bb_c(buf,bpos,44);
+        let t0:i64=0;
+        let first:i32=1;
+        while(t0<=trig2.len){
+            let te:i64=t0;
+            let fnd:i64=0;
+            while(te<trig2.len){
+                if(te+5<=trig2.len){
+                    if(s_eq(trig2[te..te+5]," AND ")==1){fnd=1;break;}
+                }
+                te=te+1;
+            }
+            let atom_s:[]u8=trig2[t0..te];
+            let atid:i32=parse_atom(atom_s,oprm,ook);
+            let apvi:i32=oprm_get(oprm);
+            if(first==0){bb_c(buf,bpos,43);}
+            first=0;
+            bb_i(buf,bpos,atid);
+            if(atid!=2){if(atid!=3){if(atid!=10){if(atid!=11){
+                bb_c(buf,bpos,61);
+                bb_i(buf,bpos,apvi);
+            }}}}
+            if(fnd==0){break;}
+            t0=te+5;
+        }
+        bb_c(buf,bpos,44);
+        bb_i(buf,bpos,aid2);
+        if(aid2==4){bb_c(buf,bpos,61);bb_i(buf,bpos,apv2);}
+        if(aid2==5){bb_c(buf,bpos,61);bb_i(buf,bpos,apv2);}
+        ri=ri+1;
+    }
+    return 0;
+}
+
+// ---------------- deliberation block parser ----------------
+// Block format (frozen §2.2):
+//   DELB_START
+//   GAP ... (>=1, each starts with "GAP ")
+//   POLICY
+//   <DSL policy text: POLICY <name> ... END>
+//   ENDPOLICY
+//   ARGUMENT
+//   <free text>
+//   ENDARGUMENT
+//   PRED P-ACC <lo> <hi> P-WRONG <lo> <hi> P-COST <n> P-NOVEL 0
+//   TRACK <improvement|efficiency>
+//   DELB_END
+// Parsed offsets stored via pointer outs. Returns 0 ok else code.
+fn parse_delb(blk:[]u8,
+    o_g0:*u8,o_g1:*u8, o_p0:*u8,o_p1:*u8,
+    o_a0:*u8,o_a1:*u8, o_pred:*u8, o_trk:*u8)i32 {
+    let nl:i64=line_count(blk);
+    let os:*u8=_zag_malloc(8);
+    let oe:*u8=_zag_malloc(8);
+    line_at(blk,0,os,oe);
+    if(s_eq(blk[ag32(os,0) as i64..ag32(oe,0) as i64],"DELB_START")!=1){return 201;}
+    // GAP lines from 1 until "POLICY"
+    let i:i64=1;
+    let g0:i64=-1;
+    let g1:i64=-1;
+    while(i<nl){
+        line_at(blk,i,os,oe);
+        let ln:[]u8=blk[ag32(os,0) as i64..ag32(oe,0) as i64];
+        if(s_eq(ln,"POLICY")==1){break;}
+        if(s_starts(ln,"GAP ")!=1){return 202;}
+        if(g0<0){g0=i;}
+        g1=i;
+        i=i+1;
+    }
+    if(g0<0){return 203;}
+    if(i>=nl){return 204;}
+    // policy text: lines i+1 .. until "ENDPOLICY"
+    let p0:i64=i+1;
+    let p1:i64=-1;
+    i=i+1;
+    while(i<nl){
+        line_at(blk,i,os,oe);
+        if(s_eq(blk[ag32(os,0) as i64..ag32(oe,0) as i64],"ENDPOLICY")==1){p1=i-1;break;}
+        i=i+1;
+    }
+    if(p1<0){return 205;}
+    if(p1<p0){return 206;}
+    // ARGUMENT
+    i=i+1;
+    if(i>=nl){return 207;}
+    line_at(blk,i,os,oe);
+    if(s_eq(blk[ag32(os,0) as i64..ag32(oe,0) as i64],"ARGUMENT")!=1){return 208;}
+    let a0:i64=i+1;
+    let a1:i64=-1;
+    i=i+1;
+    while(i<nl){
+        line_at(blk,i,os,oe);
+        if(s_eq(blk[ag32(os,0) as i64..ag32(oe,0) as i64],"ENDARGUMENT")==1){a1=i-1;break;}
+        i=i+1;
+    }
+    if(a1<0){return 209;}
+    // PRED
+    i=i+1;
+    if(i>=nl){return 210;}
+    line_at(blk,i,os,oe);
+    let pl:[]u8=blk[ag32(os,0) as i64..ag32(oe,0) as i64];
+    if(s_starts(pl,"PRED ")!=1){return 211;}
+    ap32(o_pred,0,ag32(os,0));
+    ap32(o_pred,4,ag32(oe,0));
+    // TRACK
+    i=i+1;
+    if(i>=nl){return 212;}
+    line_at(blk,i,os,oe);
+    let tl:[]u8=blk[ag32(os,0) as i64..ag32(oe,0) as i64];
+    if(s_starts(tl,"TRACK ")!=1){return 213;}
+    ap32(o_trk,0,ag32(os,0));
+    ap32(o_trk,4,ag32(oe,0));
+    // DELB_END
+    i=i+1;
+    if(i>=nl){return 214;}
+    line_at(blk,i,os,oe);
+    if(s_eq(blk[ag32(os,0) as i64..ag32(oe,0) as i64],"DELB_END")!=1){return 215;}
+    ap32(o_g0,0,g0);ap32(o_g0,4,g1);
+    ap32(o_p0,0,p0);ap32(o_p0,4,p1);
+    ap32(o_a0,0,a0);ap32(o_a0,4,a1);
+    return 0;
+}
+// slice of lines [l0..l1] inclusive from blk
+fn lines_slice(blk:[]u8,l0:i64,l1:i64,os:*u8,oe:*u8)[]u8 {
+    line_at(blk,l0,os,oe);
+    let s:i64=ag32(os,0) as i64;
+    line_at(blk,l1,os,oe);
+    let e:i64=ag32(oe,0) as i64;
+    return blk[s..e];
+}
+
+// ---------------- main ----------------
+fn main()void {
+    let delb:[]u8=_zag_arg(1);
+    if(s_starts(delb,"DELB_HALT")==1){_zag_print(delb);return;}
+    if(s_starts(delb,"DELB_WEBQUERY")==1){_zag_print(delb);return;}
+    // argv 2..9: kept bytecodes; 10..12: champ acc/wrong/cost;
+    // 13: proxy gt; 14: round tag
+    let okb:*u8=_zag_malloc(1);
+    let champ_acc:i32=parse_i32(_zag_arg(10),okb);
+    let champ_wrong:i32=parse_i32(_zag_arg(11),okb);
+    let champ_cost:i32=parse_i32(_zag_arg(12),okb);
+    let pgt:[]u8=_zag_arg(13);
+    if(pgt.len!=24){
+        _zag_println("INVALID,reason=proxy-gt-len");
+        return;
+    }
+    let og0:*u8=_zag_malloc(8);
+    let og1:*u8=_zag_malloc(8);
+    let op0:*u8=_zag_malloc(8);
+    let op1:*u8=_zag_malloc(8);
+    let oa0:*u8=_zag_malloc(8);
+    let oa1:*u8=_zag_malloc(8);
+    let oprd:*u8=_zag_malloc(8);
+    let otrk:*u8=_zag_malloc(8);
+    let prc:i32=parse_delb(delb,og0,og1,op0,op1,oa0,oa1,oprd,otrk);
+    if(prc!=0){
+        _zag_print("INVALID,reason=delb-format,code=");
+        _zag_print(i64s(prc as i64));
+        _zag_println("");
+        return;
+    }
+    let os:*u8=_zag_malloc(8);
+    let oe:*u8=_zag_malloc(8);
+    // ---- policy text -> bytecode (embedded L1) ----
+    let policy_s:[]u8=lines_slice(delb,ag32(op0,0) as i64,ag32(op0,4) as i64,os,oe);
+    let buf:*u8=_zag_malloc(4096);
+    let bpos:*u8=_zag_malloc(8);
+    let trc:i32=l1_translate(policy_s,buf,bpos);
+    if(trc!=0){
+        _zag_print("INVALID,reason=policy-grammar,code=");
+        _zag_print(i64s(trc as i64));
+        _zag_println("");
+        return;
+    }
+    let bclen:i64=bb_len(bpos);
+    // ---- argument checks ----
+    let arg_s:[]u8=lines_slice(delb,ag32(oa0,0) as i64,ag32(oa0,4) as i64,os,oe);
+    // novel-battery clause: "novel" CI whole-token AND F1..F6 whole-token
+    if(has_token_ci(arg_s,"novel")!=1){
+        _zag_println("INVALID,reason=argument-no-novel");
+        return;
+    }
+    if(has_family_tok(arg_s)!=1){
+        _zag_println("INVALID,reason=argument-no-family");
+        return;
+    }
+    // engine-vocabulary token (>=1)
+    let vok:i32=0;
+    if(has_token_ci(arg_s,"chan_present")==1){vok=1;}
+    if(has_token_ci(arg_s,"chan_silent")==1){vok=1;}
+    if(has_token_ci(arg_s,"pre_is")==1){vok=1;}
+    if(has_token_ci(arg_s,"post_is")==1){vok=1;}
+    if(has_token_ci(arg_s,"sm_le")==1){vok=1;}
+    if(has_token_ci(arg_s,"sm_ge")==1){vok=1;}
+    if(has_token_ci(arg_s,"sm_eq")==1){vok=1;}
+    if(has_token_ci(arg_s,"psm_le")==1){vok=1;}
+    if(has_token_ci(arg_s,"psm_ge")==1){vok=1;}
+    if(has_token_ci(arg_s,"psm_eq")==1){vok=1;}
+    if(has_token_ci(arg_s,"dir_is")==1){vok=1;}
+    if(has_token_ci(arg_s,"sn_ge")==1){vok=1;}
+    if(has_token_ci(arg_s,"so_ge")==1){vok=1;}
+    if(has_token_ci(arg_s,"caval_eq_vold")==1){vok=1;}
+    if(has_token_ci(arg_s,"caval_eq_vnew")==1){vok=1;}
+    if(has_token_ci(arg_s,"force_consult")==1){vok=1;}
+    if(has_token_ci(arg_s,"block_consult")==1){vok=1;}
+    if(has_token_ci(arg_s,"force_withhold")==1){vok=1;}
+    if(has_token_ci(arg_s,"force_install")==1){vok=1;}
+    if(has_token_ci(arg_s,"recompute_only")==1){vok=1;}
+    if(has_token_ci(arg_s,"new_lead")==1){vok=1;}
+    if(has_token_ci(arg_s,"old_lead")==1){vok=1;}
+    if(has_token_ci(arg_s,"tie")==1){vok=1;}
+    if(has_token_ci(arg_s,"hold")==1){vok=1;}
+    if(has_token_cs(arg_s,"NEW_LEAD")==1){vok=1;}
+    if(has_token_cs(arg_s,"OLD_LEAD")==1){vok=1;}
+    if(has_token_cs(arg_s,"TIE")==1){vok=1;}
+    if(has_token_cs(arg_s,"HOLD")==1){vok=1;}
+    if(vok==0){
+        _zag_println("INVALID,reason=argument-no-vocab");
+        return;
+    }
+    // ---- GAP-FACTS: AF- citation ----
+    let gap_s:[]u8=lines_slice(delb,ag32(og0,0) as i64,ag32(og0,4) as i64,os,oe);
+    if(s_find(gap_s,"AF-")<0){
+        _zag_println("INVALID,reason=gap-no-afcite");
+        return;
+    }
+    // ---- PRED line ----
+    let pred_s:[]u8=delb[ag32(oprd,0) as i64..ag32(oprd,4) as i64];
+    let trk_s:[]u8=delb[ag32(otrk,0) as i64..ag32(otrk,4) as i64];
+    // PRED P-ACC <lo> <hi> P-WRONG <lo> <hi> P-COST <n> P-NOVEL 0
+    let pw:i64=s_find(pred_s,"P-WRONG ");
+    let pc:i64=s_find(pred_s,"P-COST ");
+    let pn:i64=s_find(pred_s,"P-NOVEL ");
+    if(pw<0){_zag_println("INVALID,reason=pred-format");return;}
+    if(pc<0){_zag_println("INVALID,reason=pred-format");return;}
+    if(pn<0){_zag_println("INVALID,reason=pred-format");return;}
+    if(s_starts(pred_s,"PRED P-ACC ")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    // tokenize the PRED line by spaces
+    // tokens: PRED P-ACC lo hi P-WRONG lo hi P-COST n P-NOVEL v
+    let toks:*u8=_zag_malloc(12*8);
+    let ntok:i32=0;
+    let tk:i64=0;
+    while(tk<pred_s.len){
+        while(tk<pred_s.len){if(pred_s[tk]!=32){break;}tk=tk+1;}
+        if(tk>=pred_s.len){break;}
+        let te2:i64=tk;
+        while(te2<pred_s.len){if(pred_s[te2]==32){break;}te2=te2+1;}
+        ap32(toks,ntok*8,tk as i32);
+        ap32(toks,ntok*8+4,te2 as i32);
+        ntok=ntok+1;
+        tk=te2;
+    }
+    if(ntok!=11){
+        _zag_println("INVALID,reason=pred-format");
+        return;
+    }
+    // token slices on demand via toks offsets
+    let a0:i32=ag32(toks,0);let b0:i32=ag32(toks,4);
+    let a1:i32=ag32(toks,8);let b1:i32=ag32(toks,12);
+    let a2:i32=ag32(toks,16);let b2:i32=ag32(toks,20);
+    let a3:i32=ag32(toks,24);let b3:i32=ag32(toks,28);
+    let a4:i32=ag32(toks,32);let b4:i32=ag32(toks,36);
+    let a5:i32=ag32(toks,40);let b5:i32=ag32(toks,44);
+    let a6:i32=ag32(toks,48);let b6:i32=ag32(toks,52);
+    let a7:i32=ag32(toks,56);let b7:i32=ag32(toks,60);
+    let a8:i32=ag32(toks,64);let b8:i32=ag32(toks,68);
+    let a9:i32=ag32(toks,72);let b9:i32=ag32(toks,76);
+    let a10:i32=ag32(toks,80);let b10:i32=ag32(toks,84);
+    let t0:[]u8=pred_s[a0 as i64..b0 as i64];
+    let t1:[]u8=pred_s[a1 as i64..b1 as i64];
+    let t2:[]u8=pred_s[a2 as i64..b2 as i64];
+    let t3:[]u8=pred_s[a3 as i64..b3 as i64];
+    let t4:[]u8=pred_s[a4 as i64..b4 as i64];
+    let t5:[]u8=pred_s[a5 as i64..b5 as i64];
+    let t6:[]u8=pred_s[a6 as i64..b6 as i64];
+    let t7:[]u8=pred_s[a7 as i64..b7 as i64];
+    let t8:[]u8=pred_s[a8 as i64..b8 as i64];
+    let t9:[]u8=pred_s[a9 as i64..b9 as i64];
+    let t10:[]u8=pred_s[a10 as i64..b10 as i64];
+    if(s_eq(t0,"PRED")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    if(s_eq(t1,"P-ACC")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    if(s_eq(t4,"P-WRONG")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    if(s_eq(t7,"P-COST")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    if(s_eq(t9,"P-NOVEL")!=1){_zag_println("INVALID,reason=pred-format");return;}
+    let acc_lo:i32=parse_i32(t2,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    let acc_hi:i32=parse_i32(t3,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    let wr_lo:i32=parse_i32(t5,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    let wr_hi:i32=parse_i32(t6,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    let pcost_p:i32=parse_i32(t8,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    let pnov:i32=parse_i32(t10,okb);
+    if(okb[0]==0){_zag_println("INVALID,reason=pred-format");return;}
+    if(acc_lo>acc_hi){_zag_println("INVALID,reason=pred-band");return;}
+    if(wr_lo>wr_hi){_zag_println("INVALID,reason=pred-band");return;}
+    if(pnov!=0){_zag_println("INVALID,reason=pnovel-nonzero");return;}
+    let is_eff:i32=0;
+    if(s_eq(trk_s,"TRACK improvement")==1){is_eff=0;}
+    else{
+        if(s_eq(trk_s,"TRACK efficiency")==1){is_eff=1;}
+        else{_zag_println("INVALID,reason=track");return;}
+    }
+    // ---- load champion (kept) and policy (kept+new) arenas ----
+    let champ:*u8=_zag_malloc(17412);
+    let pol:*u8=_zag_malloc(17412);
+    let cr:i32=0;
+    let pr:i32=0;
+    let kk:i32=2;
+    while(kk<=9){
+        let kbc:[]u8=_zag_arg(kk);
+        if(s_eq(kbc,"-")!=1){
+            let e1:i32=bc_parse(champ,kbc,cr);
+            if(e1!=0){_zag_println("INVALID,reason=kept-bytecode");return;}
+            cr=ag32(champ,0);
+            let e2:i32=bc_parse(pol,kbc,pr);
+            if(e2!=0){_zag_println("INVALID,reason=kept-bytecode");return;}
+            pr=ag32(pol,0);
+        }
+        kk=kk+1;
+    }
+    // new policy bytecode slice from buf
+    let newbc:[]u8=buf[0..bclen];
+    let e3:i32=bc_parse(pol,newbc,pr);
+    if(e3!=0){_zag_println("INVALID,reason=new-bytecode");return;}
+    pr=ag32(pol,0);
+    // ---- simulations ----
+    // V2a: b in {0,2}: champ WITHHOLD => pol WITHHOLD
+    let b:i32=0;
+    while(b<=2){
+        if(b==1){b=2;}
+        let i:i32=0;
+        while(i<24){
+            let cv:i32=dec_v(pol_decide(champ,b,i));
+            let pv:i32=dec_v(pol_decide(pol,b,i));
+            if(cv==0){if(pv!=0){
+                _zag_print("REJECTED,check=V2a,batt=");
+                _zag_print(i64s(b as i64));
+                _zag_print(",item=");
+                _zag_print(i64s((i+1) as i64));
+                _zag_println("");
+                return;
+            }}
+            i=i+1;
+        }
+        if(b==0){b=2;}else{b=3;}
+    }
+    // proxy acc/wrong + V2b novel diff + V3 improvement
+    // proxy gt digits from pgt (no copy needed)
+    let c_acc:i32=0;
+    let c_wr:i32=0;
+    let p_acc:i32=0;
+    let p_wr:i32=0;
+    let novel_diff:i32=0;
+    let improved:i32=0;
+    let pcost:i32=0;
+    let i2:i32=0;
+    while(i2<24){
+        let cd:i64=pol_decide(champ,1,i2);
+        let pd:i64=pol_decide(pol,1,i2);
+        let cv2:i32=dec_v(cd);
+        let pv2:i32=dec_v(pd);
+        let g:i32=(pgt[i2]-48) as i32;
+        if(cv2==g){c_acc=c_acc+1;}
+        if(cv2!=0){if(cv2!=g){c_wr=c_wr+1;}}
+        if(pv2==g){p_acc=p_acc+1;}
+        if(pv2!=0){if(pv2!=g){p_wr=p_wr+1;}}
+        if(pv2==g){if(cv2!=g){improved=improved+1;}}
+        pcost=pcost+(dec_o(pd) as i32);
+        let cnv:i32=dec_v(pol_decide(champ,2,i2));
+        let pnv:i32=dec_v(pol_decide(pol,2,i2));
+        if(cnv!=pnv){novel_diff=novel_diff+1;}
+        i2=i2+1;
+    }
+    if(novel_diff!=0){
+        _zag_print("REJECTED,check=V2b,diff=");
+        _zag_print(i64s(novel_diff as i64));
+        _zag_println("");
+        return;
+    }
+    if(improved<2){
+        _zag_print("REJECTED,check=V3,improved=");
+        _zag_print(i64s(improved as i64));
+        _zag_println("");
+        return;
+    }
+    let dacc:i32=p_acc-c_acc;
+    let dwrong:i32=p_wr-c_wr;
+    if(is_eff==1){
+        _zag_println("REJECTED,check=BAR,track=efficiency-unreachable");
+        return;
+    }
+    if(dacc<1){
+        _zag_print("REJECTED,check=BAR,dacc=");
+        _zag_print(i64s(dacc as i64));
+        _zag_println("");
+        return;
+    }
+    if(dwrong>0){
+        _zag_print("REJECTED,check=BAR,dwrong=");
+        _zag_print(i64s(dwrong as i64));
+        _zag_println("");
+        return;
+    }
+    // ---- prediction mechanical consistency ----
+    let pred_acc:i32=champ_acc+dacc;
+    if(pred_acc<acc_lo){_zag_println("INVALID,reason=pred-acc-low");return;}
+    if(pred_acc>acc_hi){_zag_println("INVALID,reason=pred-acc-high");return;}
+    let pred_wr:i32=champ_wrong+dwrong;
+    if(pred_wr<wr_lo){_zag_println("INVALID,reason=pred-wrong-low");return;}
+    if(pred_wr>wr_hi){_zag_println("INVALID,reason=pred-wrong-high");return;}
+    if(pcost!=pcost_p){
+        _zag_print("INVALID,reason=pred-cost,derived=");
+        _zag_print(i64s(pcost as i64));
+        _zag_println("");
+        return;
+    }
+    // ---- PROPOSE ----
+    _zag_println("PROPOSE");
+    _zag_print("BYTECODE=");
+    let bc_out:[]u8=buf[0..bclen];
+    _zag_print(bc_out);
+    _zag_println("");
+    _zag_println("V1=GRAMMAR-OK");
+    _zag_println("V2a=REAL-PASS,NOVEL-PASS");
+    _zag_println("V2b=NOVEL-DIFF-0");
+    _zag_print("V3=IMPROVED-");
+    _zag_print(i64s(improved as i64));
+    _zag_println("");
+    _zag_println("BAR=PASS");
+    _zag_print("DACC=");
+    _zag_print(i64s(dacc as i64));
+    _zag_print(" DWRONG=");
+    _zag_print(i64s(dwrong as i64));
+    _zag_print(" PCOST=");
+    _zag_print(i64s(pcost as i64));
+    _zag_println("");
+    return;
+}
