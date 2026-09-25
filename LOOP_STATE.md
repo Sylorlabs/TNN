@@ -1417,3 +1417,138 @@ tip re-check; G1 sunshafts stand down until a genuinely new design idea;
 the pending origin/tnn-native-lab move (787212443, "NCAL v3b JOB2
 results") as the next run's run-start merge step, with post-merge FIT
 re-certification per the literal-scope rule.
+
+---
+
+## Wave 20260925-0221pdt verdicts (2026-09-25)
+
+Run start: HEAD b4507fb22 (merge of origin tip 4050b1097, Micah's Math R2
+QUOT verdicts and AMBIG gallery; treated as CLOSED, not re-litigated).
+Debate transcript: docs/lab/rsi/runs/wave-20260925-0221pdt/debate/
+(ADVOCATE_BRIEF.md, SKEPTIC_REPORT.md, JUDGE_RULINGS.md). The skeptic's
+verbatim provenance probe ("What is the provenance of the artifacts under
+judgment, and what exactly is new versus inherited?") is present and
+answered per item. Commit chain (all local, none pushed): 5abab17a2
+(CV-1 fallback prereg, committed alone), 28865dc75 (CV-1 seal),
+575c96d28 (CV-1 measurement), 5c90fecc8 (fork battery), f2b8126ba (FIT),
+81e33f192 (D-VID-1 V3 impl plus evidence), 6e6488425 (debate),
+1039ee11f (judge-ordered prereg path citation correction). Prereg
+commit-order self-check over this wave's commits: PASS, no UNVERIFIABLE
+ORDERING (0ba679b11 prereg strictly precedes 81e33f192 implementation;
+5abab17a2 < 28865dc75 < 575c96d28 holds).
+
+1. D-VID-1 V3 (geometry-churn video lever): DEAD [NEW] (final). Fresh
+pure-Zag implementation under the carryover-certified prereg 0ba679b11
+(committed alone 06:47:01 UTC 09-24, pre-breach; voided 2321pdt
+implementation never committed and never reused; void/ never opened this
+wave). Judge UPHELD the coordinator's DEAD on cited evidence. G-LIVE
+PASS on all three sub-gates (novelty vs V1/V2 confirmed: no
+coordinate-retargeting of breakup sampling, no bfade law change).
+VKB1 PASS: 48/48 frames byte-identical across three independent renders
+(pure-Zag hashing, validated against sha256sum on samples). VKB2 FAIL
+(killing): T1-GC variant 572 pm vs baseline 572 pm, bar >= 1.30x
+(572000 >= 743600 false), ratio 1.000, all 47 per-pair flip rates
+identical. T2 PASS (859..1074 inside [50,1500]); T3 PASS (f0 1607 vs
+1608, f47 1543 vs 1543); VKB3 PASS (0 differing pixels outside the disc
+across all 48 frames); VKB4 PASS (1.036x); VKB5 PASS (pinned znc
+498abcb5, zero Python contact, baseline untouched); VKB6 artifact screen
+PASS (no strobing, banding, swimming, detached rings, frozen overlay, or
+CG-plastic look), with the caveat that the effect does not read as
+churning water at normal scale. Killing evidence: the frozen
+displacement amplitudes (about 36 world units max) are too small
+relative to foam feature scale and disc foam is saturated, so displaced
+sampling returns bit-identical foam for about 99 percent of disc pixels
+and the frame-to-frame mask flip rate is unchanged. Skeptic attack (a)
+(verifier defect explaining the 572/572 tie) REJECTED on cited evidence:
+T2 per-pair values differ between sequences (pair 4: 917 vs 916; pair
+12: 928 vs 927), T3 validates both paths independently, the T1
+validation gate passes (|572-580| = 8 <= 25), and the tie is physically
+explained by foam saturation (30 of 4780 sampled pixels differ; the
+churn disc projects to an about 13 px foreshortened sliver). Rule: DEAD,
+not UNVERIFIABLE. Skeptic attack (b) (2321pdt breach taint by
+association) REJECTED on git timestamps (prereg 06:47:01 UTC, breach
+about 06:55 UTC, implementation 10:21:13 UTC). No sealed pair prepared
+(correct per the frozen verdict mapping). Standing design lesson
+recorded: the frozen 204 px metric region was geometrically mismatched
+to the about 13 px sliver, so the 1.30x bar was unreachable by design;
+future video preregs must size the metric region to the projected
+footprint. The D-VID-1 lane stands down until a re-aimed prereg with a
+different mechanism exists. Nothing reaches his judge queue.
+
+2. Fork battery: CONFIRM [RE-CERT] 27/27 PASS. Evidence commit 5c90fecc8.
+Fresh enumeration: 27 entries (10 local refs, origin/tnn-native-lab at
+run-start tip 4050b1097 plus the explicit run-start entry, 5 remote
+heads via FETCH_HEAD, 7 forktest worktrees, 3 wave3 worktrees). Shell
+and pure-Zag harnesses agree on all 27; znc byte-identical 498abcb5
+everywhere; NEG1/NEG2 discriminate on every fork; zero CANNOT-CONFIRM;
+harness rebuilt byte-identical to last wave (a2e6284c5c...). Closing
+origin-tip re-check: origin/tnn-native-lab did not move during the run
+(closing tip 4050b1097 verbatim). Judge adopted the count-honesty
+correction: the reported "5 live" includes a duplicate entry (the
+run-start tip entry tests the same commit as origin/tnn-native-lab), so
+the honest count is 4 distinct live forks, 1 duplicate, 22 fixtures.
+Standing note: live counts must name duplicates explicitly.
+
+3. tnn_chat FIT: CONFIRM [RE-CERT] FIT on b4507fb22. Evidence commit
+f2b8126ba. Carry-over precondition (2) FAILED (the baseline instrument
+source is absent from the designated archive branch
+tnn-native-lab-wave-archive-wave-20260924-2321pdt; the 09-23 run dirs
+were pruned from that snapshot), so the standing rule required and the
+worker performed a FRESH RE-RUN of the full 38-fact closed-book probe
+chain. Results: 2/2 binaries byte-identical to frozen records (decline
+20273a99, baseline 1ada2fae); 30/30 specific declines, 0 blanket
+refusals; 17/17 in-KB turns byte-identical to baseline; 10/10 KB5; 9/9
+run-pairs byte-identical. The merge touched 115 files, all under
+docs/lab/ambig_1080p, docs/lab/math_logic, docs/lab/onebrain, disjoint
+from the chain (judge independently confirmed). The literal-scope
+sentences travel verbatim: this is not a candidate verdict and it is
+not merge review of the merged-in work; it certifies the 38-fact
+closed-book probe chain only. Standing note: freeze FIT instrument
+sources into a never-pruned authority path, since archive pruning broke
+precondition (2).
+
+4. CV-1 fallback and fail-closed paths: MEASUREMENT [NEW], numbers only,
+no adoption claim. Prereg frozen alone (5abab17a2), seal (28865dc75),
+measurement (575c96d28). Fresh sealed 24-probe set on the adopted
+1721pdt implementation (byte-inherited, binary rebuilt byte-identical):
+M1 honest resolutions 24/24 (A 8/8 truthful fallback firings, B1 4/4
+degenerate guard, B2 8/8 specific declines, D 4/4 verbatim answers); M2
+unflagged confabulations 0; M3 false coverage claims 0 (60 quoted
+decline words machine-checked KB-absent); M5 fail-closed log 0/24 atomic
+firings (pre-registered unreachable on the frozen KB; only silence
+measured); M6 determinism 2/2. The traveling caveat "the empty-uncovered
+truthful fallback is never exercised" is closed by direct sealed
+evidence (8/8 truthful firings). Judge rulings: M5 is barred from future
+verdict citations until fault-injection evidence exists; future sealed
+sets require structural (different-worker) author/implementer
+separation (this wave's separation is self-attested and disclosed).
+Baseline integration remains HELD pending Micah's Python-mirror ruling.
+No adoption language appears in the record.
+
+Skeptic Python disclosure: the skeptic used one read-only python3
+one-liner to character-check its own draft file for dashes; no wave
+evidence was read or written by Python, and the zero-dash result was
+re-confirmed with pure shell. Judge ruling: disclosure recorded, report
+stands, not tainted (the operative condition under M4 R1 is contact with
+a wave artifact; the 1121pdt M5 precedent applies). The report's "No
+Python was used at any step" sentence was corrected in the record before
+committing the transcript.
+
+Disclosure: the D-VID-1 red-team worker ran a failed /tmp scratch batch
+(ffmpeg slice strips for a VKB6 visualization follow-up; source crops
+missing, /tmp cleared). No findings change; frames remain durable in the
+run dir. Note for future waves: /tmp is ephemeral; keep visualization
+scratch in the run dir.
+
+Queued next: Micah's six pending governance rulings (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull,
+C12 queue, Python-mirror logic; untouched by this wave's debate); his
+blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD,
+S13, S14, whirlpool-planform; unchanged, nothing added this wave);
+Whirlpool surface-planform READY-FOR-JUDGE QUEUED-UNJUDGED (unchanged);
+CV-1 baseline integration held pending his Python-mirror ruling (the
+fallback measurement now stands as evidence awaiting that ruling);
+fork battery driver with split live/fixture counts plus duplicate
+naming and the closing tip re-check; G1 sunshafts stand down until a
+genuinely new design idea; D-VID-1 lane stands down until a re-aimed
+prereg with a different mechanism exists.
