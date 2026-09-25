@@ -55,3 +55,23 @@ index out of bounds at pi=len. Fixed to bound by params_path.len (pi<ppl).
 Training loop untouched. Rebuilt A/B.
 mask_code_sha (fixed) de0825ec71bcb9294e0df4631e80f0962beec0d5ec99409314f8013d882a8635
 train binary A/B  480a96a04860d8aeb0c5a5e3350a71b59a02c5933058ef10064ac6f7e9cf0809 (cmp identical)
+
+## 2026-09-24 ~17:24 PDT: COORDINATOR RULING on the 10× go/no-go (recorded verbatim)
+
+"I verified the raw log (log_10x_a.tsv): w7 = 3035→1785→535 across epochs 57–59, clean −1250/epoch steps matching the diagnosed 5-wrong-pin pull. grok's w7<0 point estimate assumed ~30 wrong pins; the frozen data has 1985 correct / 5 wrong, so the bar's premise was wrong while the bar's intent (separator channel live and responsive) is satisfied — w5=+32886 theater-detached, w6≡0, theater fired 29/60 epochs, mcC=0.884. RULING: bounded gate-extension — run up to 5 more Stage-1 epochs (60–64) from the epoch-60 snapshot; stop as soon as w7<0. If w7<0 within that window, the literal §5b go/no-go is satisfied and you proceed to 100× Stage 1 (600 epochs total incl. the extension epochs) then the Stage-2 disconnect. If w7≥0 after epoch 64, STOP and report back — the dynamics differ from the diagnosis. This ruling adjudicates a gate criterion only; kill bars B1–B13 and §11 are untouched."
+
+## Resume method: deterministic forward run (build note, not a prereg amendment)
+
+train_sr1.zag has NO params-resume path — it inits from the frozen v2 §4
+vector (w1=1000, rest 0, b=0) and is fully deterministic (zero RNG, fixed
+file order, fixed init, integer arithmetic; A/B byte-identical). Running
+passes=11 (66 epochs) from frozen init therefore reproduces the 10× run's
+epochs 0–59 byte-identically and extends with epochs 60–65 — EXACTLY what
+a resume-from-epoch-60-snapshot would produce, with zero changes to the
+frozen mask code (mask_code_sha unchanged). Verification: (i) 11× log rows
+0–59 byte-identical to committed log_10x_a.tsv; (ii) epoch-59 weight row =
+committed params_10x_a.txt. The gate reads epochs 60–64 only; epoch 65 is
+free deterministic telemetry. If w7<0 at epoch 60 (predicted ≈−715 from the
+−1250/epoch pull), the gate clears at the first extension epoch.
+No driver change, no new binary: the committed A/B binaries are reused
+(cmp-verified before the run).
