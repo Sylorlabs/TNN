@@ -1,0 +1,252 @@
+// f34_mech.zag — F34 LSTWBA shared controller (training + eval).
+//
+// Latched State Tax, Worst-Boundary Adversary. Per SPEC_RECORD.md (frozen
+// before first build). Pure Zag, zero RNG, all integer fixed-point.
+//
+// Controller state = ONE []u8 arena of i64 LE slots (495 slots). Layout:
+//   tax[7][15]   @   0 .. 104   (tax[d*15+r])
+//   r_n[15]      @ 105 .. 119   (depth-1 released ledger n per region)
+//   r_k[15]      @ 120 .. 134   (depth-1 released ledger k per region)
+//   g_n[15][7]   @ 135 .. 239   (released sums n)
+//   g_c[15][7]   @ 240 .. 344   (released sums sumC)
+//   g_y[15][7]   @ 345 .. 449   (released sums sumY)
+//   c_c[15]      @ 450 .. 464   (correct-mean sumC)
+//   c_n[15]      @ 465 .. 479   (correct-mean n)
+//   frz[15]      @ 480 .. 494   (B4-freeze bits)
+
+@import("dlb_util.zag")
+
+fn f34_nslots()i32 { return 495; }
+
+fn f34_o_tax(d:i64,r:i64)i32 { return (d*15+r) as i32; }
+fn f34_o_rn(r:i64)i32 { return (105+r) as i32; }
+fn f34_o_rk(r:i64)i32 { return (120+r) as i32; }
+fn f34_o_gn(r:i64,d:i64)i32 { return (135+r*7+d) as i32; }
+fn f34_o_gcx(r:i64,d:i64)i32 { return (240+r*7+d) as i32; }
+fn f34_o_gy(r:i64,d:i64)i32 { return (345+r*7+d) as i32; }
+fn f34_o_cc(r:i64)i32 { return (450+r) as i32; }
+fn f34_o_cn(r:i64)i32 { return (465+r) as i32; }
+fn f34_o_frz(r:i64)i32 { return (480+r) as i32; }
+
+// rho(k,n) = (k+1)*1000/(n+2); all operands non-negative.
+fn f34_rho(k:i64,n:i64)i64 { return (k+1)*1000/(n+2); }
+
+// Region r = m*3+yld from depth-1 features. m=min(4,f1/200),
+// yld=min(2,my/400), my=f5 clamped [0,1000].
+fn f34_region(f1:i64,f5:i64)i32 {
+    let m:i64=f1/200;
+    if(m>4){m=4;}
+    if(m<0){m=0;}
+    let my:i64=f5;
+    if(my<0){my=0;}
+    if(my>1000){my=1000;}
+    let yld:i64=my/400;
+    if(yld>2){yld=2;}
+    return (m*3+yld) as i32;
+}
+
+// depth -> d_idx; -1 on unknown depth (caller fails loud).
+fn f34_didx(depth:i64)i32 {
+    if(depth==1){return 0;}
+    if(depth==2){return 1;}
+    if(depth==4){return 2;}
+    if(depth==8){return 3;}
+    if(depth==16){return 4;}
+    if(depth==32){return 5;}
+    if(depth==64){return 6;}
+    return -1;
+}
+
+// Emit: C = clamp(C* - T[d][r] - pi, 1, 999), then the flip rule.
+// cprev/f3prev/f8prev are the previous depth's values for this item
+// (unused at d==0).
+fn f34_emit(a:[]u8,r:i32,d:i32,cstar:i64,f3:i64,f8:i64,f8d1:i64,f3prev:i64,f8prev:i64,cprev:i64)i64 {
+    let pi:i64=0;
+    if(f3>0){pi=50;}
+    let dt:i64=f8-f8d1;
+    if(dt>0){pi=pi+dt/8;}
+    if(pi>400){pi=400;}
+    let tax:i64=au_get64(a,f34_o_tax(d as i64,r as i64));
+    let c:i64=cstar-tax-pi;
+    if(c<1){c=1;}
+    if(c>999){c=999;}
+    if(d>0){
+        if(f3>f3prev || f8>f8prev){
+            let cap:i64=cprev-1;
+            if(c>cap){c=cap;}
+        }
+    }
+    return c;
+}
+
+// Per-region, per-depth g[d]; gprev = g[d-1] for carry-forward.
+fn f34_g(a:[]u8,r:i64,d:i64,gprev:i64)i64 {
+    let n:i64=au_get64(a,f34_o_gn(r,d));
+    if(n<8){
+        if(d==0){return 0;}
+        return gprev;
+    }
+    let sc:i64=au_get64(a,f34_o_gcx(r,d));
+    let sy:i64=au_get64(a,f34_o_gy(r,d));
+    return sc/n-(1000*sy)/n;
+}
+
+// Update after a released outcome is observed.
+// a: controller arena; r: latched region; d: d_idx; c: emitted C;
+// y: 1 correct else 0.
+// Out: chg=1 if any tax value changed. Returns 0.
+// NOTE: kill-bar (b) is a POST-HOC check after training settles (prereg §3);
+// it is NOT evaluated here. A freeze-blocked increment simply changes nothing.
+fn f34_update(a:[]u8,r:i32,d:i32,c:i64,y:i64,chg:*i64)i32 {
+    chg.*=0;
+    let rr:i64=r as i64;
+    let dd:i64=d as i64;
+    // 1. released running sums for (r,d)
+    let on:i32=f34_o_gn(rr,dd);
+    au_put64(a,on,au_get64(a,on)+1);
+    let oc:i32=f34_o_gcx(rr,dd);
+    au_put64(a,oc,au_get64(a,oc)+c);
+    let oy:i32=f34_o_gy(rr,dd);
+    au_put64(a,oy,au_get64(a,oy)+y);
+    // depth-1 released ledger
+    if(d==0){
+        let nn:i32=f34_o_rn(rr);
+        au_put64(a,nn,au_get64(a,nn)+1);
+        if(y==1){
+            let kk:i32=f34_o_rk(rr);
+            au_put64(a,kk,au_get64(a,kk)+1);
+        }
+    }
+    // 2. B4 guard BEFORE the tax step (latching; EXACT ideas-file rule:
+    //    freeze if the correct-mean confidence falls below 520 — no n gate)
+    if(y==1){
+        let cn:i32=f34_o_cn(rr);
+        let ncn:i64=au_get64(a,cn)+1;
+        au_put64(a,cn,ncn);
+        let cc:i32=f34_o_cc(rr);
+        au_put64(a,cc,au_get64(a,cc)+c);
+        let mean:i64=au_get64(a,cc)/ncn;
+        if(mean<520){
+            au_put64(a,f34_o_frz(rr),1);
+        }
+    }
+    // 3. g[0..6]
+    let g0:i64=f34_g(a,rr,0,0);
+    let g1:i64=f34_g(a,rr,1,g0);
+    let g2:i64=f34_g(a,rr,2,g1);
+    let g3:i64=f34_g(a,rr,3,g2);
+    let g4:i64=f34_g(a,rr,4,g3);
+    let g5:i64=f34_g(a,rr,5,g4);
+    let g6:i64=f34_g(a,rr,6,g5);
+    // d* = argmax_{d>=1}(g[d]-g[d-1]); ties to larger d (>=, upward scan)
+    let ds:i64=1;
+    let best:i64=g1-g0;
+    let q:i64=g2-g1;
+    if(q>=best){best=q;ds=2;}
+    q=g3-g2;
+    if(q>=best){best=q;ds=3;}
+    q=g4-g3;
+    if(q>=best){best=q;ds=4;}
+    q=g5-g4;
+    if(q>=best){best=q;ds=5;}
+    q=g6-g5;
+    if(q>=best){best=q;ds=6;}
+    let frozen:i64=au_get64(a,f34_o_frz(rr));
+    if(best>0){
+        if(frozen==0){
+            let td:i32=f34_o_tax(ds,rr);
+            au_put64(a,td,au_get64(a,td)+1);
+            // monotone repair upward: T[j] >= T[j-1] for j>=ds
+            let j:i64=ds;
+            while(j<7){
+                let tj:i32=f34_o_tax(j,rr);
+                let tm:i64=au_get64(a,f34_o_tax(j-1,rr));
+                if(au_get64(a,tj)<tm){au_put64(a,tj,tm);}
+                j=j+1;
+            }
+            chg.*=1;
+        }
+    }else{
+        // decrement path: most negative g over d=0..6, ties to larger d
+        let dm:i64=0;
+        let bneg:i64=g0;
+        if(g1<=bneg){bneg=g1;dm=1;}
+        if(g2<=bneg){bneg=g2;dm=2;}
+        if(g3<=bneg){bneg=g3;dm=3;}
+        if(g4<=bneg){bneg=g4;dm=4;}
+        if(g5<=bneg){bneg=g5;dm=5;}
+        if(g6<=bneg){bneg=g6;dm=6;}
+        if(bneg<-80){
+            let tm2:i32=f34_o_tax(dm,rr);
+            let tv:i64=au_get64(a,tm2);
+            if(tv>=1){
+                let okdec:i32=1;
+                if(dm>0){
+                    if(tv-1<au_get64(a,f34_o_tax(dm-1,rr))){okdec=0;}
+                }
+                if(okdec==1){
+                    au_put64(a,tm2,tv-1);
+                    chg.*=1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Post-hoc kill-bar (b) check, evaluated ONCE after training settles
+// (prereg §3 F34; ideas file §(d) Falsifier).
+// Returns 1 if any region has g[d]−g[d−1] > 0 on a cell with n ≥ 30
+// (d ≥ 1), else 0. g computed with the standard n≥8/carry rule.
+fn f34_killb_check(a:[]u8)i32 {
+    let r:i64=0;
+    while(r<15){
+        let gp:i64=f34_g(a,r,0,0);
+        let d:i64=1;
+        while(d<7){
+            let gd:i64=f34_g(a,r,d,gp);
+            let n:i64=au_get64(a,f34_o_gn(r,d));
+            if(gd-gp>0 && n>=30){return 1;}
+            gp=gd;
+            d=d+1;
+        }
+        r=r+1;
+    }
+    return 0;
+}
+
+// Serialize: 8 magic + 8 version + 495 i64 LE. Returns bytes written or -1.
+fn f34_save(a:[]u8,out:[]u8) i64 {
+    let need:i64=16+495*8;
+    if((out.len as i64)<need){return -1;}
+    out[0]=70;out[1]=51;out[2]=52;out[3]=80;out[4]=65;out[5]=82;out[6]=65;out[7]=77;
+    let k:i32=0;
+    while(k<8){out[8+k]=0;k=k+1;}
+    out[8]=1;
+    let s:i32=0;
+    while(s<495){
+        let v:i64=au_get64(a,s);
+        let o:i32=16+s*8;
+        let b:i32=0;
+        while(b<8){out[o+b]=((v>>(b*8))&255) as u8;b=b+1;}
+        s=s+1;
+    }
+    return need;
+}
+
+// Load; returns 0 ok, -1 bad magic/version/size.
+fn f34_load(a:[]u8,data:[]u8,n:i64)i32 {
+    if(n<16+495*8){return -1;}
+    if(data[0]!=70||data[1]!=51||data[2]!=52||data[3]!=80||data[4]!=65||data[5]!=82||data[6]!=65||data[7]!=77){return -1;}
+    if(data[8]!=1){return -1;}
+    let s:i32=0;
+    while(s<495){
+        let o:i32=16+s*8;
+        let x:i64=0;
+        let b:i32=7;
+        while(b>=0){x=(x<<8)+(data[o+b] as i64);b=b-1;}
+        au_put64(a,s,x);
+        s=s+1;
+    }
+    return 0;
+}
