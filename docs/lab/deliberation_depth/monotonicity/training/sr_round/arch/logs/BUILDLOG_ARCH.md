@@ -117,5 +117,24 @@ the arm's canonical build (below).
 - Params: params/arch_params_10x.zag (SHA-256
   ca701a09edf38edf1ff4e89466b3b8267f8bac9e8a0fd005923d7b708638101d).
 
-### 100× (600 epochs)
-(to be appended)
+### 100× (600 epochs), 2026-09-24 ~00:22 PDT
+- Binary: train_arch_A (same A/B byte-identical build), RC=0.
+- Log: logs/train_100x.tsv (SHA-256
+  e357b5f36085b55fd9891e82e0660c9d559d7a1ab4a4350fb8f10e6fa164c7a4);
+  first line = PREREG_SHA f55d1dbbe1a609f69301ce8f537282a0372880b51fdec6b51d0f588b9fd96d30.
+- Final-epoch weights: u=(121443,−6010,0,−7603,1033,172448,93606,6000),
+  c=−229433; v=(−721,−978,0,15,−28,1493,1536,2368), d=−898.
+  meanConfCorrect=0.654 / meanConfWrong=0.201 on released training cells.
+- TELEMETRY NOTE (not a kill bar): corr(s,|m−Y|) on training cells decayed
+  0.385 (10×) → −0.476 (100×); 577/600 epochs below 0.3. The §7 go/no-go
+  was the 10× checkpoint (PASSED at 0.385 — arm not void); at 100× the
+  spread head's LINEAR correlation with |m−Y| is negative. Characterized
+  in VERDICT_ARCH.md; adjudication is literal per §7/§10 (kill bars +
+  dead-spread check corr(m−s/2,m)>0.99 on eval).
+- Params: params/arch_params_100x.zag (SHA-256
+  42925ea87d9c637428b47005545552c3aefac40da7fbba07530a00e483c27a01).
+- Eval: policy_arch A/B byte-identical (SHA-256
+  1cd5f3e69d624aa1a1258f454e2e95e6c1e07851d4f5c2fd73d69a4714a62854),
+  37-leg matrix in results/ (mech tag m9), run_eval_arch.sh.
+- arch_params.zag in src/ is a BUILD INPUT (copy of the frozen params),
+  not committed — eval binaries embed it.

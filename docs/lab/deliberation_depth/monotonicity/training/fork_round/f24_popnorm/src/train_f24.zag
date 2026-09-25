@@ -1,0 +1,631 @@
+// train_f24.zag — F24 POPNORM trainer (pure Zag, zero RNG).
+//
+// Implements PREREG_FORKROUND.md FROZEN v2 §5b (Repaired TRAIN-COORD v2):
+//   - coordinate descent accepts candidates on strict L-reduction alone
+//     (probe order per param: +50,-50,+8,-8,+1,-1; fixed param order
+//     w1..w8,b; 8 sweeps max; init 0; boxes w_i∈[-1000,1000],
+//     b∈[-100000,100000]); first strict improvement accepted.
+//   - vetoes V1-V3 apply to the FINAL answer only: a final fitted head
+//     violating any veto -> VOID (reported with evidence, no stage 2).
+//   - stage-2 w9 grid keeps its per-candidate V3 veto.
+//
+// Head: C = clamp((sum_{i=1..8} w_i f_i)/1000 + b - (w9 f9)/1000, 0, 1000)
+// f9 = 1000*(N-R_d)/N (integer division) per (family,heldout,depth) group.
+// Training cells: heldout=0, rel4=1. Stage-1 objective: sum over depth-1
+// training released cells of (C-1000y)^2.
+//
+// usage: train_f24 <features.tsv> <params_out.zag> <log_out.tsv>
+//
+// v1 note: no v1 training run was completed (v1 is analytically
+// unsatisfiable per §5b/F25 proof: init 0 + per-candidate vetoes locks the
+// trainer data-independently; applies identically to these 9 params).
+// This binary trains under v2 only.
+//
+// Conventions: []u8 arenas + LE accessors; no fn named zalloc; no slice > 2^25.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+fn fz_tdiv(a:i64,b:i64)i64 {
+    if(b==0){return 0;}
+    let neg:i32=0;
+    let aa:i64=a;
+    let bb:i64=b;
+    if(aa<0){neg=1-neg;aa=0-aa;}
+    if(bb<0){neg=1-neg;bb=0-bb;}
+    let q:i64=aa/bb;
+    if(neg==1){q=0-q;}
+    return q;
+}
+
+fn fz_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+
+fn fz_famidx(fam:[]u8)i32 {
+    if(nio_equal(fam,"admit")==1){return 0;}
+    if(nio_equal(fam,"revoke")==1){return 1;}
+    if(nio_equal(fam,"logic")==1){return 2;}
+    if(nio_equal(fam,"cost")==1){return 3;}
+    if(nio_equal(fam,"trap")==1){return 4;}
+    if(nio_equal(fam,"redteam")==1){return 5;}
+    if(nio_equal(fam,"ceiling-P")==1){return 6;}
+    if(nio_equal(fam,"ceiling-D")==1){return 7;}
+    if(nio_equal(fam,"ceiling-O")==1){return 8;}
+    return -1;
+}
+
+fn fz_dslot(depth:i32)i32 {
+    if(depth==1){return 0;}
+    if(depth==2){return 1;}
+    if(depth==4){return 2;}
+    if(depth==8){return 3;}
+    if(depth==16){return 4;}
+    if(depth==32){return 5;}
+    if(depth==64){return 6;}
+    return -1;
+}
+
+// separator positions within a line (mirrors frozen tr_split)
+fn fz_split(line:[]u8,tabs:[]u8)i32 {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+    return n;
+}
+
+// confidence for cell ci
+fn fz_conf(w:[]u8,b:i64,feats:[]u8,ci:i32,w9:i64,f9:i64)i32 {
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<8){
+        acc=acc+au_get64(w,k)*(au_get32(feats,ci*8+k) as i64);
+        k=k+1;
+    }
+    let c:i64=fz_tdiv(acc,1000)+b-(w9*f9)/1000;
+    c=fz_clamp(c,0,1000);
+    return c as i32;
+}
+
+// stage-1 objective: sum over depth-1 training released cells of (C-1000y)^2
+fn fz_obj(w:[]u8,b:i64,meta:[]u8,feats:[]u8,s1list:[]u8,ns1:i32)i64 {
+    let o:i64=0;
+    let i:i32=0;
+    while(i<ns1){
+        let ci:i32=au_get32(s1list,i);
+        let c:i64=fz_conf(w,b,feats,ci,0,0) as i64;
+        let y:i32=au_get32(meta,ci*8+3);
+        let yy:i64=0;
+        if(y==1){yy=1000;}
+        let e:i64=c-yy;
+        o=o+e*e;
+        i=i+1;
+    }
+    return o;
+}
+
+// veto-V1+V2 theater count over training released cells (heldout=0).
+// pairs = adjacent-depth same-(family,id) rows, both rel4=1.
+fn fz_theater(w:[]u8,b:i64,meta:[]u8,feats:[]u8,ncells:i32)i32 {
+    let v:i32=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            let pv:i32=au_get32(meta,i*8+5);
+            if(pv>=0 && au_get32(meta,pv*8+2)==1){
+                let y0:i32=au_get32(meta,pv*8+3);
+                let y1:i32=au_get32(meta,i*8+3);
+                let c0:i64=fz_conf(w,b,feats,pv,0,0) as i64;
+                let c1:i64=fz_conf(w,b,feats,i,0,0) as i64;
+                if(y0==1 && y1==0 && c1>=c0){v=v+1;}
+                if(y0==0 && y1==0 && c1>c0){v=v+1;}
+            }
+        }
+        i=i+1;
+    }
+    return v;
+}
+
+// veto-V2 helper: sum of conf over depth-1 training correct cells + count
+fn fz_mcc(w:[]u8,b:i64,meta:[]u8,feats:[]u8,s1list:[]u8,ns1:i32,s:*i64,n:*i32)void {
+    let ss:i64=0;
+    let nn:i32=0;
+    let i:i32=0;
+    while(i<ns1){
+        let ci:i32=au_get32(s1list,i);
+        if(au_get32(meta,ci*8+3)==1){
+            ss=ss+(fz_conf(w,b,feats,ci,0,0) as i64);
+            nn=nn+1;
+        }
+        i=i+1;
+    }
+    s.*=ss;
+    n.*=nn;
+    return;
+}
+
+// fill G accumulators: 9 fam x 7 dslot x (sumC, n, K) i64
+fn fz_gfill(w:[]u8,b:i64,w9:i64,meta:[]u8,feats:[]u8,f9cell:[]u8,ncells:i32,gacc:[]u8)void {
+    let gi:i32=0;
+    while(gi<9*7*3){au_put64(gacc,gi,0);gi=gi+1;}
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            let fi:i32=au_get32(meta,i*8+4);
+            let ds:i32=au_get32(meta,i*8+7);
+            if(fi>=0 && ds>=0){
+                let c:i64=fz_conf(w,b,feats,i,w9,au_get32(f9cell,i) as i64) as i64;
+                let gx:i32=(fi*7+ds)*3;
+                au_put64(gacc,gx,au_get64(gacc,gx)+c);
+                au_put64(gacc,gx+1,au_get64(gacc,gx+1)+1);
+                if(au_get32(meta,i*8+3)==1){au_put64(gacc,gx+2,au_get64(gacc,gx+2)+1);}
+            }
+        }
+        i=i+1;
+    }
+    return;
+}
+
+// veto-V3: 1 = pass; 0 = fail (some training (fam,depth) n>=8 has G<-0.080)
+fn fz_v3(gacc:[]u8)i32 {
+    let fi:i32=0;
+    while(fi<9){
+        let s:i32=0;
+        while(s<7){
+            let gx:i32=(fi*7+s)*3;
+            let n:i64=au_get64(gacc,gx+1);
+            if(n>=8){
+                let S:i64=au_get64(gacc,gx);
+                let K:i64=au_get64(gacc,gx+2);
+                // G<-0.080  <=>  1000*(S-1000K)+80n < 0
+                if(1000*(S-1000*K)+80*n<0){return 0;}
+            }
+            s=s+1;
+        }
+        fi=fi+1;
+    }
+    return 1;
+}
+
+// final-answer vetoes (v2 §5b): 0=pass, else first failing veto code (1,2,3).
+// all three vetoes are always evaluated so the log carries full evidence.
+fn fz_vetoes(w:[]u8,b:i64,meta:[]u8,feats:[]u8,ncells:i32,s1list:[]u8,ns1:i32,gacc:[]u8,f9cell:[]u8,th:*i32,ss:*i64,nn:*i32,v3:*i32)i32 {
+    let tv:i32=fz_theater(w,b,meta,feats,ncells);
+    th.*=tv;
+    let s2:i64=0;
+    let n2:i32=0;
+    fz_mcc(w,b,meta,feats,s1list,ns1,&s2,&n2);
+    ss.*=s2;
+    nn.*=n2;
+    fz_gfill(w,b,0,meta,feats,f9cell,ncells,gacc);
+    let v3ok:i32=fz_v3(gacc);
+    v3.*=v3ok;
+    if(tv!=0){return 1;}
+    if(s2<550*(n2 as i64)){return 2;}
+    if(v3ok==0){return 3;}
+    return 0;
+}
+
+fn fz_pget(w:[]u8,b:i64,pi:i32)i64 {
+    if(pi<8){return au_get64(w,pi);}
+    return b;
+}
+
+fn fz_pset(w:[]u8,b:*i64,pi:i32,v:i64)void {
+    if(pi<8){au_put64(w,pi,v);return;}
+    b.*=v;
+    return;
+}
+
+fn fz_pbox(pi:i32,v:i64)i32 {
+    if(pi<8){
+        if(v>=-1000 && v<=1000){return 1;}
+        return 0;
+    }
+    if(v>=-100000 && v<=100000){return 1;}
+    return 0;
+}
+
+// probe deltas in v2 order: +50,-50,+8,-8,+1,-1
+fn fz_delta(di:i32)i64 {
+    if(di==0){return 50;}
+    if(di==1){return -50;}
+    if(di==2){return 8;}
+    if(di==3){return -8;}
+    if(di==4){return 1;}
+    return -1;
+}
+
+// one TRAIN-COORD v2 probe sequence for param pi; returns 1 if accepted
+fn fz_probe(w:[]u8,b:*i64,pi:i32,meta:[]u8,feats:[]u8,s1list:[]u8,ns1:i32,cur:i64)i32 {
+    let pv:i64=fz_pget(w,b.*,pi);
+    let di:i32=0;
+    while(di<6){
+        let nv:i64=pv+fz_delta(di);
+        if(fz_pbox(pi,nv)==1){
+            fz_pset(w,b,pi,nv);
+            let o2:i64=fz_obj(w,b.*,meta,feats,s1list,ns1);
+            if(o2<cur){return 1;}
+            fz_pset(w,b,pi,pv);
+        }
+        di=di+1;
+    }
+    return 0;
+}
+
+// TRAIN-COORD v2: 8 sweeps max, fixed order w1..w8,b, strict-L acceptance only
+fn fz_coord(w:[]u8,b:*i64,meta:[]u8,feats:[]u8,s1list:[]u8,ns1:i32,log:*DOut)void {
+    let sweep:i32=0;
+    while(sweep<8){
+        let moved:i32=0;
+        let pi:i32=0;
+        while(pi<9){
+            let cur:i64=fz_obj(w,b.*,meta,feats,s1list,ns1);
+            if(fz_probe(w,b,pi,meta,feats,s1list,ns1,cur)==1){moved=moved+1;}
+            pi=pi+1;
+        }
+        dout_str(log,"sweep\t");
+        dout_i64(log,sweep as i64);
+        dout_str(log,"\tobj\t");
+        dout_i64(log,fz_obj(w,b.*,meta,feats,s1list,ns1));
+        dout_str(log,"\tmoved\t");
+        dout_i64(log,moved as i64);
+        dout_str(log,"\tw\t");
+        let k:i32=0;
+        while(k<8){
+            dout_i64(log,au_get64(w,k));
+            dout_byte(log,44);
+            k=k+1;
+        }
+        dout_str(log,"\tb\t");
+        dout_i64(log,b.*);
+        dout_line(log);
+        if(moved==0){sweep=8;}
+        else {sweep=sweep+1;}
+    }
+    return;
+}
+
+// strict B3 violations on training legs from gacc
+fn fz_viol(gacc:[]u8)i32 {
+    let v:i32=0;
+    let fi:i32=0;
+    while(fi<9){
+        let s:i32=0;
+        while(s<6){
+            let g1:i32=(fi*7+s)*3;
+            let g2:i32=(fi*7+s+1)*3;
+            let n1:i64=au_get64(gacc,g1+1);
+            let n2:i64=au_get64(gacc,g2+1);
+            if(n1>0 && n2>0){
+                let S1:i64=au_get64(gacc,g1);
+                let K1:i64=au_get64(gacc,g1+2);
+                let S2:i64=au_get64(gacc,g2);
+                let K2:i64=au_get64(gacc,g2+2);
+                // G2>G1 <=> (S2-1000K2)*n1 > (S1-1000K1)*n2
+                if((S2-1000*K2)*n1>(S1-1000*K1)*n2){v=v+1;}
+            }
+            s=s+1;
+        }
+        fi=fi+1;
+    }
+    return v;
+}
+
+// tie-break: sum |G(d)-G(1)| over families, d>1, scaled by 1e6 (round-half-up)
+fn fz_tiebreak(gacc:[]u8)i64 {
+    let t:i64=0;
+    let fi:i32=0;
+    while(fi<9){
+        let g0:i32=(fi*7+0)*3;
+        let n0:i64=au_get64(gacc,g0+1);
+        if(n0>0){
+            let S0:i64=au_get64(gacc,g0);
+            let K0:i64=au_get64(gacc,g0+2);
+            let s:i32=1;
+            while(s<7){
+                let gx:i32=(fi*7+s)*3;
+                let n:i64=au_get64(gacc,gx+1);
+                if(n>0){
+                    let S:i64=au_get64(gacc,gx);
+                    let K:i64=au_get64(gacc,gx+2);
+                    let A:i64=(S-1000*K)*n0-(S0-1000*K0)*n;
+                    if(A<0){A=0-A;}
+                    t=t+(2*A*1000000+n*n0)/(2*n*n0);
+                }
+                s=s+1;
+            }
+        }
+        fi=fi+1;
+    }
+    return t;
+}
+
+// extra stage-2 veto: reject if any (fam,depth) n>=8 has G<-0.080.
+// also counts unscoped (n>=1) sub-floor cells for the log.
+fn fz_extra_veto(gacc:[]u8,unscoped:*i32)i32 {
+    let rej:i32=0;
+    let uc:i32=0;
+    let fi:i32=0;
+    while(fi<9){
+        let s:i32=0;
+        while(s<7){
+            let gx:i32=(fi*7+s)*3;
+            let n:i64=au_get64(gacc,gx+1);
+            if(n>=1){
+                let S:i64=au_get64(gacc,gx);
+                let K:i64=au_get64(gacc,gx+2);
+                if(1000*(S-1000*K)+80*n<0){
+                    uc=uc+1;
+                    if(n>=8){rej=1;}
+                }
+            }
+            s=s+1;
+        }
+        fi=fi+1;
+    }
+    unscoped.*=uc;
+    return rej;
+}
+
+fn fz_train(tsv:[]u8,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 101;}
+    let flen:i64=dlb_read_file(tsv,fbuf);
+    if(flen<=0){return 102;}
+    let blen:i32=flen as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc(maxcells*8*4);
+    let feats:[]u8=nio_alloc(maxcells*8*4);
+    let idix:[]u8=nio_alloc(maxcells*2*4);
+    let idbuf:[]u8=nio_alloc(1048576);
+    let tabs:[]u8=nio_alloc(17*4);
+    if(meta.len==0 || feats.len==0 || idix.len==0 || idbuf.len==0 || tabs.len==0){return 103;}
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            let nsep:i32=fz_split(line,tabs);
+            // 15 fields -> 14 separators
+            if(nsep==14){
+                // fields: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+                let f1e:i32=au_get32(tabs,0);
+                let f2e:i32=au_get32(tabs,1);
+                let f3e:i32=au_get32(tabs,2);
+                let f4e:i32=au_get32(tabs,3);
+                let f5e:i32=au_get32(tabs,4);
+                let f6e:i32=au_get32(tabs,5);
+                let f7e:i32=au_get32(tabs,6);
+                let id:[]u8=line[0..f1e];
+                let fam:[]u8=line[f1e+1..f2e];
+                let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+                let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+                let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+                let c4:[]u8=line[f6e+1..f7e];
+                let fi:i32=fz_famidx(fam);
+                let y:i32=-1;
+                if(rel4==1){
+                    y=0;
+                    if(c4.len==1 && c4[0]==49){y=1;}
+                }
+                let ci:i32=ncells;
+                au_put32(meta,ci*8+0,heldout);
+                au_put32(meta,ci*8+1,depth);
+                au_put32(meta,ci*8+2,rel4);
+                au_put32(meta,ci*8+3,y);
+                au_put32(meta,ci*8+4,fi);
+                au_put32(meta,ci*8+6,dlb_atoi(line[f4e+1..f5e])); // t
+                au_put32(meta,ci*8+7,fz_dslot(depth));
+                let k:i32=0;
+                while(k<8){
+                    let a:i32=au_get32(tabs,6+k);
+                    let b2:i32=au_get32(tabs,7+k);
+                    au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                    k=k+1;
+                }
+                // prev chain: nearest previous same-id cell (any rel4)
+                let pv:i32=-1;
+                let j:i32=ci-1;
+                while(j>=0 && pv<0){
+                    let ko:i32=au_get32(idix,j*2+0);
+                    let kl:i32=au_get32(idix,j*2+1);
+                    if(kl==id.len && nio_equal(idbuf[ko..ko+kl],id)==1){pv=j;}
+                    j=j-1;
+                }
+                au_put32(meta,ci*8+5,pv);
+                au_put32(idix,ci*2+0,idn);
+                au_put32(idix,ci*2+1,id.len);
+                let q:i32=0;
+                while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+                idn=idn+id.len;
+                ncells=ncells+1;
+            }
+        }
+        pos=e+1;
+    }
+    // stage-1 cell list: depth==1, heldout=0, rel4=1
+    let s1list:[]u8=nio_alloc(maxcells*4);
+    if(s1list.len==0){return 103;}
+    let ns1:i32=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*8+1)==1 && au_get32(meta,i*8+0)==0 && au_get32(meta,i*8+2)==1){
+            au_put32(s1list,ns1,i);
+            ns1=ns1+1;
+        }
+        i=i+1;
+    }
+    // f9 per (fam 9, heldout 2, dslot 7): N items, R released
+    let f9n:[]u8=nio_alloc(9*2*7*4);
+    let f9r:[]u8=nio_alloc(9*2*7*4);
+    let f9cell:[]u8=nio_alloc(maxcells*4);
+    if(f9n.len==0 || f9r.len==0 || f9cell.len==0){return 103;}
+    let gi2:i32=0;
+    while(gi2<9*2*7){au_put32(f9n,gi2,0);au_put32(f9r,gi2,0);gi2=gi2+1;}
+    i=0;
+    while(i<ncells){
+        let fi:i32=au_get32(meta,i*8+4);
+        let ho:i32=au_get32(meta,i*8+0);
+        let ds:i32=au_get32(meta,i*8+7);
+        if(fi>=0 && ds>=0){
+            let g:i32=(fi*2+ho)*7+ds;
+            au_put32(f9n,g,au_get32(f9n,g)+1);
+            if(au_get32(meta,i*8+2)==1){au_put32(f9r,g,au_get32(f9r,g)+1);}
+        }
+        i=i+1;
+    }
+    i=0;
+    while(i<ncells){
+        let fi:i32=au_get32(meta,i*8+4);
+        let ho:i32=au_get32(meta,i*8+0);
+        let ds:i32=au_get32(meta,i*8+7);
+        let f9:i32=0;
+        if(fi>=0 && ds>=0){
+            let g:i32=(fi*2+ho)*7+ds;
+            let N:i32=au_get32(f9n,g);
+            let R:i32=au_get32(f9r,g);
+            if(N>0){f9=(1000*(N-R))/N;}
+        }
+        au_put32(f9cell,i,f9);
+        i=i+1;
+    }
+    // weights + bias at zero init (frozen §4 / v2 §5b)
+    let w:[]u8=nio_alloc(8*8);
+    if(w.len==0){return 103;}
+    let k2:i32=0;
+    while(k2<8){au_put64(w,k2,0);k2=k2+1;}
+    let b:i64=0;
+    let gacc:[]u8=nio_alloc(9*7*3*8);
+    if(gacc.len==0){return 103;}
+    let log:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&log,4194304)!=0){return 104;}
+    dout_str(&log,"# train_f24 v2 cells=");
+    dout_i64(&log,ncells as i64);
+    dout_str(&log," s1cells=");
+    dout_i64(&log,ns1 as i64);
+    dout_str(&log," prereg=v2(3a2eef44) v1_lock=analytic(F25-proof-applies-identically;no-v1-run-completed)");
+    dout_line(&log);
+    // stage 1: TRAIN-COORD v2 (strict-L acceptance only)
+    fz_coord(w,&b,meta,feats,s1list,ns1,&log);
+    // final-answer vetoes V1-V3 (§5b): VOID if violated
+    let th:i32=0;
+    let ss:i64=0;
+    let nn:i32=0;
+    let v3ok:i32=0;
+    let veto:i32=fz_vetoes(w,b,meta,feats,ncells,s1list,ns1,gacc,f9cell,&th,&ss,&nn,&v3ok);
+    dout_str(&log,"final_veto\tcode\t");
+    dout_i64(&log,veto as i64);
+    dout_str(&log,"\ttheater\t");
+    dout_i64(&log,th as i64);
+    dout_str(&log,"\tmcc_sum\t");
+    dout_i64(&log,ss);
+    dout_str(&log,"\tmcc_n\t");
+    dout_i64(&log,nn as i64);
+    dout_str(&log,"\tv3ok\t");
+    dout_i64(&log,v3ok as i64);
+    dout_line(&log);
+    let w9:i64=0;
+    if(veto!=0){
+        dout_str(&log,"VOID\tstage1_final_head_violates_veto\t");
+        dout_i64(&log,veto as i64);
+        dout_line(&log);
+    } else {
+        // stage 2: w9 grid (per-candidate V3 veto)
+        fz_gfill(w,b,0,meta,feats,f9cell,ncells,gacc);
+        let best_viol:i32=fz_viol(gacc);
+        let best_tie:i64=fz_tiebreak(gacc);
+        let uc0:i32=0;
+        let v0:i32=fz_extra_veto(gacc,&uc0);
+        dout_str(&log,"grid\tw9\t0\tviol\t");
+        dout_i64(&log,best_viol as i64);
+        dout_str(&log,"\ttie\t");
+        dout_i64(&log,best_tie);
+        dout_str(&log,"\tveto\t");
+        dout_i64(&log,v0 as i64);
+        dout_str(&log,"\tunscoped\t");
+        dout_i64(&log,uc0 as i64);
+        dout_line(&log);
+        let w9c:i64=50;
+        while(w9c<=1000){
+            fz_gfill(w,b,w9c,meta,feats,f9cell,ncells,gacc);
+            let viol:i32=fz_viol(gacc);
+            let tie:i64=fz_tiebreak(gacc);
+            let uc:i32=0;
+            let vet:i32=fz_extra_veto(gacc,&uc);
+            dout_str(&log,"grid\tw9\t");
+            dout_i64(&log,w9c);
+            dout_str(&log,"\tviol\t");
+            dout_i64(&log,viol as i64);
+            dout_str(&log,"\ttie\t");
+            dout_i64(&log,tie);
+            dout_str(&log,"\tveto\t");
+            dout_i64(&log,vet as i64);
+            dout_str(&log,"\tunscoped\t");
+            dout_i64(&log,uc as i64);
+            dout_line(&log);
+            if(vet==0){
+                if(viol<best_viol || (viol==best_viol && tie<best_tie)){
+                    best_viol=viol;
+                    best_tie=tie;
+                    w9=w9c;
+                }
+            }
+            w9c=w9c+50;
+        }
+        dout_str(&log,"# selected w9=");
+        dout_i64(&log,w9);
+        dout_str(&log," viol=");
+        dout_i64(&log,best_viol as i64);
+        dout_str(&log," tie=");
+        dout_i64(&log,best_tie);
+        dout_line(&log);
+    }
+    // write params (fitted head, evidence either way)
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,4096)!=0){return 104;}
+    dout_str(&po,"// f24_params.zag - F24 POPNORM trained weights (v2)\n");
+    dout_str(&po,"// Generated by train_f24.zag. Do not hand-edit.\n");
+    let k3:i32=0;
+    while(k3<8){
+        dout_str(&po,"fn f24_w");
+        dout_i64(&po,(k3+1) as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,k3));
+        dout_str(&po,"; }\n");
+        k3=k3+1;
+    }
+    dout_str(&po,"fn f24_w9()i64 { return ");
+    dout_i64(&po,w9);
+    dout_str(&po,"; }\n");
+    dout_str(&po,"fn f24_b()i64 { return ");
+    dout_i64(&po,b);
+    dout_str(&po,"; }\n");
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&log),log.n);
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(idix);nio_free(idbuf);nio_free(tabs);
+    nio_free(s1list);nio_free(f9n);nio_free(f9r);nio_free(f9cell);
+    nio_free(w);nio_free(gacc);
+    dout_free(&log);dout_free(&po);
+    if(wrc<0 || wrc2<0){return 105;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<4){
+        _zag_println("usage: train_f24 <features.tsv> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    return fz_train(_zag_arg(1),_zag_arg(2),_zag_arg(3));
+}
