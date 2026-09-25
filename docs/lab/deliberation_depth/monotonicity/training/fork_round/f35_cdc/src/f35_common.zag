@@ -1,0 +1,247 @@
+// f35_common.zag — F35 CDC shared mechanism (pure Zag, zero RNG).
+//
+// Frozen spec: fork_round/f35_cdc/DESIGN.md (recorded 2026-09-24, before
+// first build). Authority: ideas/grok_forks.md Fork 5 (CDC), Fork 2 (SRS)
+// for the residual, Fork 1 (RSW) for `my`.
+//
+// Contents: integer helpers (tdiv truncates toward zero), my, L1,
+// argmin assignment (ties -> smaller j), rho, per-cluster SRS delta,
+// emit (C* + sum delta - pi, yield gate on cluster transitions,
+// flip/trauma -1 rule), TSV field splitting, battery mapping,
+// item slot-table helpers. Training-only ops (birth/merge/updates) live
+// in f35_train.zag; f35_policy.zag uses only the frozen path.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+// ---- integer helpers ----
+
+fn f35_abs(v:i64)i64 {
+    if(v<0){return -v;}
+    return v;
+}
+
+// Truncation-toward-zero division; b must be > 0. (Native `/` semantics
+// on negatives are not trusted; this is exact for all signs of a.)
+fn f35_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+
+fn f35_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+
+// ---- my: marginal yield (thousandths) ----
+// depth 1: my = f5. deeper: my = min(1000, max(0,f5-f5_prev)*1000/max(dF2,1)),
+// dF2 = (depth-d_prev)*1000/64, (f5_prev,d_prev) from item's previous
+// RELEASED cell (has_prev=0 at depth 1).
+fn f35_my(depth:i64,f5:i64,has_prev:i32,d_prev:i64,f5_prev:i64)i64 {
+    if(has_prev==0){return f5;}
+    let df2:i64=(depth-d_prev)*1000/64;
+    if(df2<1){df2=1;}
+    let num:i64=f5-f5_prev;
+    if(num<0){num=0;}
+    let my:i64=num*1000/df2;
+    if(my>1000){my=1000;}
+    return my;
+}
+
+// ---- L1 distance from x to prototype c ----
+// proto arena: 5 i64 per slot, slot c at (c*5+k).
+fn f35_l1(proto:[]u8,c:i32,x0:i64,x1:i64,x2:i64,x3:i64,x4:i64)i64 {
+    let d:i64=0;
+    d=d+f35_abs(x0-au_get64(proto,((c*5+0) as i64)));
+    d=d+f35_abs(x1-au_get64(proto,((c*5+1) as i64)));
+    d=d+f35_abs(x2-au_get64(proto,((c*5+2) as i64)));
+    d=d+f35_abs(x3-au_get64(proto,((c*5+3) as i64)));
+    d=d+f35_abs(x4-au_get64(proto,((c*5+4) as i64)));
+    return d;
+}
+
+// argmin cluster; ties -> smaller j. dist_out = its L1 distance.
+fn f35_assign(proto:[]u8,K:i32,x0:i64,x1:i64,x2:i64,x3:i64,x4:i64,dist_out:*i64)i32 {
+    let best:i32=0;
+    let bd:i64=f35_l1(proto,0,x0,x1,x2,x3,x4);
+    let j:i32=1;
+    while(j<K){
+        let d:i64=f35_l1(proto,j,x0,x1,x2,x3,x4);
+        if(d<bd){bd=d;best=j;}
+        j=j+1;
+    }
+    dist_out.*=bd;
+    return best;
+}
+
+// rho(k,n) = (k+1)*1000/(n+2): Laplace-smoothed rate, thousandths.
+fn f35_rho(k:i64,n:i64)i64 {
+    return (k+1)*1000/(n+2);
+}
+
+// depth -> d_idx = log2(depth); -1 on unexpected depth.
+fn f35_didx(d:i64)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+
+// delta_j(c): per-cluster SRS residual for schedule transition j (0..5).
+// tr arena: slot ((c*6)+j)*6 + s; s: 0 nstay, 1 sumCstay, 2 nall,
+// 3 sumCall, 4 kall, 5 kstay. Empty denominators -> 0 ("depth skipped").
+fn f35_delta(tr:[]u8,c:i32,j:i32)i64 {
+    let b:i64=(((c*6+j)*6) as i64);
+    let nstay:i64=au_get64(tr,b+0);
+    let nall:i64=au_get64(tr,b+2);
+    if(nstay==0 || nall==0){return 0;}
+    let sumCstay:i64=au_get64(tr,b+1);
+    let sumCall:i64=au_get64(tr,b+3);
+    let kstay:i64=au_get64(tr,b+5);
+    let kall:i64=au_get64(tr,b+4);
+    let e:i64=sumCstay/nstay-sumCall/nall;
+    let da:i64=kstay*1000/nstay-kall*1000/nall;
+    let dd:i64=da-e-3;
+    if(dd>40){return 40;}
+    if(dd<-40){return -40;}
+    return dd;
+}
+
+// Emit confidence for a released cell.
+// Cstar: item's depth-1 cluster base (stored per item). c: current cluster.
+// didx: log2(depth). tr: transition arena (frozen at eval).
+// f3,f8,f8d1: flip/trauma inputs (f8d1 = f8 at depth 1).
+// has_prev: 1 iff item has a previous RELEASED cell (0 at depth 1).
+// c_prev/C_prev/my_prev: per-item inference state. my: current my.
+fn f35_emit(Cstar:i64,c:i32,didx:i32,tr:[]u8,
+            f3:i64,f8:i64,f8d1:i64,
+            has_prev:i32,c_prev:i32,C_prev:i64,my:i64,my_prev:i64)i64 {
+    let dsum:i64=0;
+    let j:i32=1;
+    while(j<=didx){
+        dsum=dsum+f35_delta(tr,c,j-1);
+        j=j+1;
+    }
+    let flip:i32=0;
+    if(f3>0){flip=1;}
+    if(f8>f8d1){flip=1;}
+    let pi:i64=0;
+    if(flip==1){
+        pi=(f8-f8d1)/8;
+        if(f3>0){pi=pi+50;}
+        if(pi>400){pi=400;}
+    }
+    let ce:i64=f35_clamp(Cstar+dsum-pi,1,999);
+    if(has_prev==1){
+        // yield gate: on CLUSTER TRANSITIONS only.
+        if(c!=c_prev){
+            if(ce>C_prev){
+                if(my<=my_prev){ce=C_prev;}
+            }
+        }
+        // flip/trauma -1 rule, after the gate.
+        if(flip==1){
+            if(ce>C_prev-1){ce=C_prev-1;}
+        }
+        ce=f35_clamp(ce,1,999);
+    }
+    return ce;
+}
+
+// ---- TSV helpers ----
+
+// k-th tab-separated field of line (0-based); empty slice if missing.
+fn f35_field(line:[]u8,k:i32)[]u8 {
+    let n:i32=line.len;
+    let i:i32=0;
+    let f:i32=0;
+    let s:i32=0;
+    while(i<=n){
+        let done:i32=0;
+        if(i==n){done=1;}
+        if(done==0 && line[i]==9){done=1;}
+        if(done==1){
+            if(f==k){return line[s..i];}
+            f=f+1;
+            s=i+1;
+        }
+        i=i+1;
+    }
+    let empty:[]u8="";
+    return empty;
+}
+
+fn f35_atoi64(s:[]u8)i64 {
+    let v:i64=0;
+    let neg:i32=0;
+    let i:i32=0;
+    let nd:i32=0;
+    let stop:i32=0;
+    while(i<s.len && stop==0){
+        let ch:i32=s[i] as i32;
+        if(ch==45 && nd==0 && neg==0){neg=1;}
+        else {
+            if(ch<48 || ch>57){stop=1;}
+            else {
+                v=v*10+((ch-48) as i64);
+                nd=nd+1;
+            }
+        }
+        i=i+1;
+    }
+    if(neg==1){v=-v;}
+    return v;
+}
+
+// family -> battery index: 0 admit, 1 revoke, 2 logic, 3 trap, 4 cost,
+// 5 redteam, 6 ceiling (D/O/P); -1 unknown.
+fn f35_battery(fam:[]u8)i32 {
+    if(dlb_streq(fam,"admit")==1){return 0;}
+    if(dlb_streq(fam,"revoke")==1){return 1;}
+    if(dlb_streq(fam,"logic")==1){return 2;}
+    if(dlb_streq(fam,"trap")==1){return 3;}
+    if(dlb_streq(fam,"cost")==1){return 4;}
+    if(dlb_streq(fam,"redteam")==1){return 5;}
+    if(dlb_streq(fam,"D")==1){return 6;}
+    if(dlb_streq(fam,"O")==1){return 6;}
+    if(dlb_streq(fam,"P")==1){return 6;}
+    return -1;
+}
+
+// ---- item slot table (linear search; NITEMS slots) ----
+// Parallel arenas; all i64 slots; idbuf holds 64 bytes per slot.
+// Layout (slot i):
+//   idlen[i], idbuf[i*64..]
+//   cell state (previous cell): c_depth, c_rel, c_clu, c_C, c_cor
+//   released state (previous RELEASED cell): r_depth, r_clu, r_C, r_cor,
+//     r_f5, r_my, r_f8d1, r_Cstar
+// Returns slot index, or -1 if id unknown.
+fn f35_slot_find(id:[]u8,idlen:[]u8,idbuf:[]u8,nitems:i32)i32 {
+    let i:i32=0;
+    while(i<nitems){
+        let L:i64=au_get64(idlen,(i as i64));
+        if(L==(id.len as i64)){
+            let e:[]u8=idbuf[((i*64) as i32)..((i*64) as i32+(L as i32))];
+            if(dlb_streq(e,id)==1){return i;}
+        }
+        i=i+1;
+    }
+    return -1;
+}
+
+// Create slot for id at index nitems (caller bounds-checks). Returns index.
+fn f35_slot_new(id:[]u8,idlen:[]u8,idbuf:[]u8,nitems:i32)i32 {
+    au_put64(idlen,(nitems as i64),(id.len as i64));
+    let o:i32=nitems*64;
+    let k:i32=0;
+    while(k<id.len){
+        idbuf[o+k]=id[k];
+        k=k+1;
+    }
+    return nitems;
+}
