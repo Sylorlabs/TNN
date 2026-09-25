@@ -59,6 +59,12 @@ Coordinator: Track A subagent (D4 triple/predicate-level corroboration).
 **D4 KILLED** on K2 (predicted) and K3 (unpredicted regression).
 See `VERDICT_D4.md`.
 
-## Scale leg (K5) — appended on completion
+## Scale leg (K5) — completed 2026-09-24
 
-(leg1x: 32/64 install; leg100x_a/b: two full 6400-cluster runs)
+- leg1x (64 clusters): 32 install / 32 withhold.
+- leg100x_a (6400 clusters): 3200 install / 3200 withhold = exactly 100× 1×.
+- leg100x_b (6400 clusters): 3200 install / 3200 withhold; ledgers
+  byte-identical to leg100x_a (SHA-256 f904d7986e8706d3fa24632c2c6b3680358b534234b9af81de6b9219c9c958a9).
+- K5: PASS. (One service restart interrupted leg100x_b at 4197/6400 clusters;
+  resumed deterministically via resume_scale_b.py; final ledgers identical
+  to a fresh run by construction — same order, same per-cluster pipeline.)

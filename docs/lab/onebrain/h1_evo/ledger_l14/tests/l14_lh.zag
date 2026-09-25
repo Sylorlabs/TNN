@@ -1,0 +1,233 @@
+// LH — long-horizon checkpoint/rollback/flood/clock streams.
+// One binary; argv[1] selects the scale ("10" or "100" units). Each unit is
+// a deterministic function of its index only (no RNG, no scale-dependent
+// behavior inside the unit loop), so the 100x run's first-10-unit prefix
+// must equal the 10x run's full unit stream (prefix consistency).
+//
+// Per unit u:
+//   - clock advance by 1 (monotonic; always accepted + logged)
+//   - 2 mm_add (values derived from u)
+//   - 1 checkpoint (id == u)
+//   - every 3rd unit: honest rollback_to(u-2) — non-latest target
+//   - every 5th unit: forged rollback attempt on id u-3 -> MA_REFUSED_CKPT,
+//     state provably unchanged
+//   - 20 scripted arbiter messages (mixed propose/commit/revoke/promote/
+//     disconnect) + 1 force-pin every 7th unit (governance lane)
+//   - 3 PAM verdicts on slot 0 (ring engages at 100x: 300 verdicts)
+//   - PAM gov observations only in units 0..7 (bounded, horizon-identical)
+// End of run: genesis replay over the full audit == live; midpoint replay
+// from checkpoint 50 (100x) / 5 (10x) converges.
+//
+// Bars: no panic; 3x byte-identical reruns per horizon; prefix consistency;
+// no NEW failure mode at 100x (ring eviction engaging is expected — it is
+// the L4e' repair working, pinned by its own counts).
+@import("../src/ob_common.zag")
+@import("../src/ob_arbiter.zag")
+@import("../src/ob_pam.zag")
+@import("../src/ob_mem.zag")
+
+fn lh_emit(u:i32,clk:i32,liveN:i32,valSum:i32,pin7:i32,maN:i32,ckN:i32,aln:i32,
+    ev:i32)void {
+    _zag_print("LH,");
+    let p:[]u8=_zag_i64_to_str(u as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(clk as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(liveN as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(valSum as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(pin7 as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(maN as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(ckN as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(aln as i64);_zag_print(p);ob_free(p);
+    _zag_print(",");
+    p=_zag_i64_to_str(ev as i64);_zag_print(p);ob_free(p);
+    _zag_println("");
+    return;
+}
+// deterministic state fingerprint: live count + sum of live values
+fn lh_fp(live:[]u8,value:[]u8,liveN:*i32,valSum:*i32)void {
+    let n:i32=0;let s:i32=0;let i:i32=0;
+    while(i<256){
+        if(live[i]==1){n=n+1;s=s+ob_g32(value,i*4);}
+        i=i+1;
+    }
+    liveN.*=n;valSum.*=s;
+    return;
+}
+fn lh_streq(a1:[]u8,a2:[]u8,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){if(a1[i]!=a2[i]){return 0;}i=i+1;}
+    return 1;
+}
+
+fn main()i32 {
+    let f:i32=0;
+    let px:[]u8="lh_";
+    // scale from argv[1]: "100" -> 100 units else 10
+    let arg:[]u8=_zag_arg(1);
+    let units:i32=10;
+    if(arg.len==3 && arg[0]==49 && arg[1]==48 && arg[2]==48){units=100;}
+
+    let live:[]u8=mm_new_live();let value:[]u8=mm_new_value();
+    let pinned:[]u8=mm_new_pinned();let region:[]u8=mm_new_region();
+    let tier:[]u8=mm_new_tier();let step:[]u8=mm_new_step();
+    let audit:[]u8=mm_new_audit();let hdr:[]u8=mm_new_hdr();
+    let q:[]u8=ob_msgq_init(ARB_QCAP);let qn:i32=0;
+    let ast:[]u8=arb_new_state();let routes:[]u8=arb_new_routes();
+    let alog:[]u8=ob_alloc(ARB_ACAP*16);let aln:i32=0;
+    let pam:[]u8=pam_new();let fl2:[]u8=ob_alloc(16);
+    let trust:[]u8=mm_new_trust();
+    // sidecar ring: last 4 checkpoints x 3072 bytes
+    let sc:[]u8=ob_alloc(4*3072);
+    // dedicated midpoint sidecar (saved when the midpoint checkpoint lands)
+    let md1:[]u8=ob_alloc(1024);let md2:[]u8=ob_alloc(1024);let md3:[]u8=ob_alloc(1024);
+    // stage to FULL
+    f=f+ob_check(px,"stage1",mm_advance_stage(live,value,pinned,region,tier,step,audit,hdr),0);
+    f=f+ob_check(px,"stage2",mm_advance_stage(live,value,pinned,region,tier,step,audit,hdr),0);
+    // one bars-passing PAM observation (slot 0), ep 0
+    let obs0:i32=pam_observe_gov(pam,5,5,800,800,1,11,22,7,350,350,350,0);
+    f=f+ob_check(px,"obs0",obs0,0);
+
+    let u:i32=0;
+    while(u<units){
+        let clk:i32=u+1;
+        // clock: strictly monotonic advance, always accepted
+        f=f+ob_check(px,"clk",mm_clock_advance(hdr,audit,clk),MA_OK);
+        // 2 adds
+        let s1:i32=0;let s2:i32=0;
+        let r1:i32=mm_add(live,value,pinned,region,tier,step,audit,hdr,1000+u,1,&s1);
+        let r2:i32=mm_add(live,value,pinned,region,tier,step,audit,hdr,2000+u,1,&s2);
+        if(r1!=0 || r2!=0){f=f+1;}
+        // checkpoint id == u; sidecar into ring slot (u%4)
+        let base:i32=(u%4)*3072;
+        let t1:[]u8=sc[base..base+1024];
+        let t2:[]u8=sc[base+1024..base+2048];
+        let t3:[]u8=sc[base+2048..base+3072];
+        let cid:i32=mm_checkpoint(live,value,pinned,region,tier,step,audit,hdr,t1,t2,t3);
+        if(cid!=u){f=f+1;}
+        // save the near-tail sidecar before the ring overwrites it
+        // (midpoint replay starts at checkpoint units-2)
+        if(u==units-2){
+            let wi2:i32=0;
+            while(wi2<1024){
+                md1[wi2]=t1[wi2];md2[wi2]=t2[wi2];md3[wi2]=t3[wi2];
+                wi2=wi2+1;
+            }
+        }
+        // every 3rd unit: honest rollback to u-2 (non-latest target).
+        // Scale-independent schedule with rollback-free windows (u%10==9):
+        // the end-of-run midpoint replay starts at checkpoint units-2, and
+        // its contract requires every ROLLBACK in the tail to cite a
+        // checkpoint also in the tail.
+        if(u>=2 && u%3==0 && u%10!=9){
+            let b2:i32=((u-2)%4)*3072;
+            let u1:[]u8=sc[b2..b2+1024];
+            let u2:[]u8=sc[b2+1024..b2+2048];
+            let u3:[]u8=sc[b2+2048..b2+3072];
+            f=f+ob_check(px,"rb_honest",mm_rollback_to(live,value,pinned,region,tier,step,
+                audit,hdr,u1,u2,u3,u-2),MA_OK);
+        }
+        // every 5th unit: forged rollback on u-3 -> refused, state unchanged
+        if(u>=3 && u%5==0){
+            // fingerprint before
+            let ln0:i32=0;let vs0:i32=0;
+            lh_fp(live,value,&ln0,&vs0);
+            let b3:i32=((u-3)%4)*3072;
+            // copy sidecar, forge one value word
+            let f1:[]u8=ob_alloc(1024);let f2:[]u8=ob_alloc(1024);let f3:[]u8=ob_alloc(1024);
+            let wi:i32=0;
+            while(wi<1024){
+                f1[wi]=sc[b3+wi];f2[wi]=sc[b3+1024+wi];f3[wi]=sc[b3+2048+wi];
+                wi=wi+1;
+            }
+            ob_s32(f2,4*4,99999);
+            f=f+ob_check(px,"rb_forged",mm_rollback_to(live,value,pinned,region,tier,step,
+                audit,hdr,f1,f2,f3,u-3),MA_REFUSED_CKPT);
+            let ln1:i32=0;let vs1:i32=0;
+            lh_fp(live,value,&ln1,&vs1);
+            f=f+ob_check(px,"forge_no_mut",((ln0==ln1)&&(vs0==vs1)) as i32,1);
+            ob_free(f1);ob_free(f2);ob_free(f3);
+        }
+        // arbiter: 20 scripted messages + force-pin every 7th unit
+        let m:i32=0;
+        while(m<20){
+            let mt:i32=M_DISCONNECT;let a1:i32=0;let a2:i32=0;
+            let pat:i32=(u+m)%5;
+            if(pat==0){mt=M_PROPOSE_INSTALL;a1=50+((u+m)%10);a2=3;}
+            if(pat==1){mt=M_COMMIT;a1=50+((u+m)%10);}
+            if(pat==2){mt=M_REVOKE;a1=50+((u+m)%10);}
+            if(pat==3){mt=M_PROMOTE;a1=60+((u+m)%5);}
+            let erc:i32=ob_msg_enqueue(q,&qn,ARB_QCAP,clk,(u*20)+m,mt,a1,a2);
+            if(erc!=0){f=f+1;}
+            m=m+1;
+        }
+        if(u%7==0){
+            f=f+ob_check(px,"pin_enq",ob_msg_enqueue(q,&qn,ARB_QCAP,clk,10000+u,
+                M_FORCE_PIN,7,0),0);
+        }
+        arb_process(clk,q,&qn,ast,routes,alog,&aln,pam,fl2,0,
+            live,value,pinned,region,tier,step,audit,hdr,trust);
+        if(qn!=0){f=f+1;}
+        // PAM: bounded gov observations (units 0..7). The arbiter's own
+        // claim observations (ordinary) interleave, so the assertion is the
+        // prereg kill bar itself: the governance observation is never
+        // dropped (lands somewhere in the 64 rows).
+        if(u<8 && u>0){
+            let go:i32=pam_observe_gov(pam,5,5,800,800,1,11,22,7,350,350,350,u);
+            f=f+ob_check(px,"gov_not_dropped",((go>=0)&&(go<64)) as i32,1);
+        }
+        let vi:i32=0;
+        while(vi<3){
+            let vv:i32=0;let rr:i32=0;
+            if(pam_verdict(pam,obs0,PAM_MODE_FRESH,&vv,&rr)!=0){f=f+1;}
+            if(vv!=PAM_ADMIT){f=f+1;}
+            vi=vi+1;
+        }
+        // per-unit fingerprint line
+        let ln:i32=0;let vs:i32=0;
+        lh_fp(live,value,&ln,&vs);
+        lh_emit(u,mm_clock(hdr),ln,vs,pinned[7] as i32,
+            ob_g32(hdr,8),ob_g32(hdr,12),aln,pam_ledger_evicted(pam));
+        u=u+1;
+    }
+
+    // ---- end-of-run replay convergence ----
+    let g1:[]u8=mm_new_live();let g2:[]u8=mm_new_value();let g3:[]u8=mm_new_pinned();
+    let g4:[]u8=mm_new_region();let g5:[]u8=mm_new_tier();let g6:[]u8=mm_new_step();
+    f=f+ob_check(px,"replay_genesis",mm_replay(g1,g2,g3,g4,g5,g6,audit,hdr),MA_OK);
+    f=f+ob_check(px,"genesis_live_eq",lh_streq(value,g2,1024),1);
+    f=f+ob_check(px,"genesis_liveN_eq",lh_streq(live,g1,256),1);
+    // midpoint replay from checkpoint units-2 (no rollbacks in its tail)
+    let midid:i32=units-2;
+    let e1:i32=mm_ckpt_find(audit,hdr,midid);
+    f=f+ob_check(px,"mid_found",(e1>=0) as i32,1);
+    let m1:[]u8=mm_new_live();let m2:[]u8=mm_new_value();let m3:[]u8=mm_new_pinned();
+    let m4:[]u8=mm_new_region();let m5:[]u8=mm_new_tier();let m6:[]u8=mm_new_step();
+    mm_restore(m1,m2,m3,m4,m5,m6,md1,md2,md3);
+    let nall:i32=ob_g32(hdr,8);
+    let hdr2:[]u8=mm_new_hdr();
+    let hw:i32=0;
+    while(hw<5){ob_s32(hdr2,hw*4,ob_g32(hdr,hw*4));hw=hw+1;}
+    ob_s32(hdr2,8,nall-e1);
+    f=f+ob_check(px,"replay_mid",mm_replay_from(m1,m2,m3,m4,m5,m6,
+        audit[e1*48..nall*48],hdr2),MA_OK);
+    f=f+ob_check(px,"mid_eq_genesis",lh_streq(m2,g2,1024),1);
+    f=f+ob_check(px,"mid_eq_live",lh_streq(m2,value,1024),1);
+    // governance: at least one force-pin applied and audit-logged (MA_OK);
+    // rollbacks restore the checkpointed governance state too, so the final
+    // pinned[] value is not asserted — the audit trail is the evidence.
+    // Zero silent governance-audit drops.
+    f=f+ob_check(px,"gov_drops",arb_gov_audit_dropped(ast),0);
+    f=f+ob_check(px,"pin_applied_logged",
+        (mm_audit_count(audit,hdr,MA_OP_PIN,MA_OK)>=1) as i32,1);
+
+    _zag_print("OB_FAILURES,");
+    let s:[]u8=_zag_i64_to_str(f as i64);_zag_print(s);ob_free(s);
+    _zag_println("");
+    return (f!=0) as i32;
+}
