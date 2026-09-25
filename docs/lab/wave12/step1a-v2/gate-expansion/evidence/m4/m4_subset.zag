@@ -1,0 +1,1164 @@
+// m4_subset.zag — M4 determinism-by-construction subset compiler (checker).
+// Dialect version: M4-2026-09-25-v1. Pure Zag, pinned toolchain.
+// Usage: m4_subset <module.zag> <configdir>
+// Exit 0 = CERTIFY, 1 = REFUSE, 2 = usage/IO error.
+// Checks D1-D8 per M4_SUBSET_COMPILER.md (frozen 2026-09-25).
+// D1 banned tokens: from config m4_d1_tokens.txt (word match in code +
+//   substring match in string-literal contents + alias-table call uses).
+// D2: _zag_arg(idx) with idx outside committed whitelist, _zag_arg(0),
+//   non-literal index, or env tokens from m4_d2_env.txt.
+// D3: bare nio_alloc (word match).
+// D4: patterns from m4_d4_patterns.txt, ASCII-alnum boundaries
+//   (underscore counts as a boundary — committed pre-test).
+// D5: dialect_read/nio_open_root (arg 0), nio_open_child (arg 1) path args
+//   must be single string literals (after constant folding) present in
+//   the committed allowlist m4_d5_allowlist.txt.
+// D6: tokens from m4_d6_tokens.txt (word match in code + substring in
+//   literal contents + alias-table call uses).
+// D7: taint seeded by &x, _zag_arg(...), z_alloc_init(...); any
+//   `as i64/i32/u64/u32` cast whose operand mentions taint -> REFUSE.
+// D8: transitive @import closure; files whose SHA-256 is in the committed
+//   pinned list are exempt, everything else is checked under D1-D7.
+// String constant folder (§5.1): adjacent string literals joined by `+`
+//   are folded before stripping; D5 literal extraction and the D1/D6
+//   literal-content scans see the folded form.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------------- byte classes ----------------
+fn is_alnum_us(c:u8)i32 {
+    if(c>=48 && c<=57){return 1;}
+    if(c>=65 && c<=90){return 1;}
+    if(c>=97 && c<=122){return 1;}
+    if(c==95){return 1;}
+    return 0;
+}
+fn is_alnum(c:u8)i32 {
+    if(c>=48 && c<=57){return 1;}
+    if(c>=65 && c<=90){return 1;}
+    if(c>=97 && c<=122){return 1;}
+    return 0;
+}
+fn is_space(c:u8)i32 {
+    if(c==32 || c==9 || c==10 || c==13){return 1;}
+    return 0;
+}
+fn is_digit(c:u8)i32 {
+    if(c>=48 && c<=57){return 1;}
+    return 0;
+}
+fn is_istart(c:u8)i32 {
+    if(c>=65 && c<=90){return 1;}
+    if(c>=97 && c<=122){return 1;}
+    if(c==95){return 1;}
+    return 0;
+}
+fn is_ichar(c:u8)i32 {
+    if(is_istart(c)==1){return 1;}
+    if(is_digit(c)==1){return 1;}
+    return 0;
+}
+
+// ---------------- substring / word search ----------------
+fn find_sub(h:[]u8, from:i32, needle:[]u8)i32 {
+    if(needle.len==0 || h.len<needle.len){return -1;}
+    let i:i32=from;
+    if(i<0){i=0;}
+    while(i+needle.len<=h.len){
+        let k:i32=0;
+        while(k<needle.len && h[i+k]==needle[k]){k=k+1;}
+        if(k==needle.len){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+// word_at: strict identifier boundaries (alnum + underscore are word chars).
+fn word_at(h:[]u8, at:i32, word:[]u8)i32 {
+    if(at<0 || at+word.len>h.len){return 0;}
+    let k:i32=0;
+    while(k<word.len && h[at+k]==word[k]){k=k+1;}
+    if(k!=word.len){return 0;}
+    if(at>0 && is_alnum_us(h[at-1])==1){return 0;}
+    if(at+word.len<h.len && is_alnum_us(h[at+word.len])==1){return 0;}
+    return 1;
+}
+fn find_word(h:[]u8, from:i32, word:[]u8)i32 {
+    let i:i32=find_sub(h,from,word);
+    while(i>=0){
+        if(word_at(h,i,word)==1){return i;}
+        i=find_sub(h,i+1,word);
+    }
+    return -1;
+}
+// d4_at: ASCII-alphanumeric boundaries only (underscore IS a boundary).
+fn d4_at(h:[]u8, at:i32, pat:[]u8)i32 {
+    if(at<0 || at+pat.len>h.len){return 0;}
+    let k:i32=0;
+    while(k<pat.len && h[at+k]==pat[k]){k=k+1;}
+    if(k!=pat.len){return 0;}
+    if(at>0 && is_alnum(h[at-1])==1){return 0;}
+    if(at+pat.len<h.len && is_alnum(h[at+pat.len])==1){return 0;}
+    return 1;
+}
+fn find_d4(h:[]u8, from:i32, pat:[]u8)i32 {
+    let i:i32=find_sub(h,from,pat);
+    while(i>=0){
+        if(d4_at(h,i,pat)==1){return i;}
+        i=find_sub(h,i+1,pat);
+    }
+    return -1;
+}
+fn slice_eq(a:[]u8, b:[]u8)i32 {
+    if(a.len!=b.len){return 0;}
+    let i:i32=0;
+    while(i<a.len){if(a[i]!=b[i]){return 0;} i=i+1;}
+    return 1;
+}
+// list_has: exact line match of item in \n-separated list.
+fn list_has(list:[]u8, item:[]u8)i32 {
+    let i:i32=0;
+    while(i<=list.len){
+        let e:i32=i;
+        while(e<list.len && list[e]!=10){e=e+1;}
+        if(slice_eq(list[i..e],item)==1){return 1;}
+        i=e+1;
+    }
+    return 0;
+}
+// list_lines: count non-empty lines (for cert diagnostics).
+fn list_lines(list:[]u8)i32 {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<=list.len){
+        let e:i32=i;
+        while(e<list.len && list[e]!=10){e=e+1;}
+        if(e>i){n=n+1;}
+        i=e+1;
+    }
+    return n;
+}
+
+// ---------------- string builder (buf + len threading, no structs) ----------------
+fn sb_add(buf:[]u8, len:i32, s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len && len<buf.len){buf[len]=s[i]; len=len+1; i=i+1;}
+    return len;
+}
+fn sb_addc(buf:[]u8, len:i32, c:u8)i32 {
+    if(len<buf.len){buf[len]=c; len=len+1;}
+    return len;
+}
+fn sb_addi32(buf:[]u8, len:i32, v:i32)i32 {
+    if(v<0){len=sb_addc(buf,len,45); v=0-v;}
+    if(v==0){len=sb_addc(buf,len,48); return len;}
+    let tmp:[]u8=nio_alloc(12);
+    if(tmp.len!=12){return len;}
+    let n:i32=0;
+    let x:i32=v;
+    while(x>0){tmp[n]=(x%10+48) as u8; n=n+1; x=x/10;}
+    let k:i32=n-1;
+    while(k>=0){len=sb_addc(buf,len,tmp[k]); k=k-1;}
+    nio_free(tmp);
+    return len;
+}
+fn sb_addi64(buf:[]u8, len:i32, v:i64)i32 {
+    if(v<0){len=sb_addc(buf,len,45); v=0-v;}
+    if(v==0){len=sb_addc(buf,len,48); return len;}
+    let tmp:[]u8=nio_alloc(24);
+    if(tmp.len!=24){return len;}
+    let n:i32=0;
+    let x:i64=v;
+    while(x>0){tmp[n]=((x%10)+48) as u8; n=n+1; x=x/10;}
+    let k:i32=n-1;
+    while(k>=0){len=sb_addc(buf,len,tmp[k]); k=k-1;}
+    nio_free(tmp);
+    return len;
+}
+
+// ---------------- file IO (thincert-style, root-anchored) ----------------
+fn split_path(p:[]u8, dir:[]u8, name:[]u8)i64 {
+    let cut:i32=-1;
+    let i:i32=0;
+    while(i<p.len){if(p[i]==47){cut=i;} i=i+1;}
+    if(cut<0){
+        dir[0]=46;
+        if(p.len>name.len){return -12;}
+        let k:i32=0;
+        while(k<p.len){name[k]=p[k]; k=k+1;}
+        return 4294967296+(p.len as i64);
+    }
+    let k:i32=0;
+    while(k<cut){dir[k]=p[k]; k=k+1;}
+    let n:i32=p.len-cut-1;
+    k=0;
+    while(k<n){name[k]=p[cut+1+k]; k=k+1;}
+    return ((cut as i64)*4294967296)+(n as i64);
+}
+fn read_whole(p:[]u8, buf:[]u8)i64 {
+    let dir:[]u8=nio_alloc(4096);
+    let name:[]u8=nio_alloc(4096);
+    if(dir.len!=4096 || name.len!=4096){nio_free(dir); nio_free(name); return -11;}
+    let sp:i64=split_path(p,dir,name);
+    if(sp<0){nio_free(dir); nio_free(name); return -12;}
+    let dl:i32=(sp/4294967296) as i32;
+    let nl:i32=(sp%4294967296) as i32;
+    let root:i64=nio_open_root(dir[0..dl]);
+    if(root<0){nio_free(dir); nio_free(name); return -13;}
+    let fd:i64=nio_open_child(root,name[0..nl],0);
+    if(fd<0){nio_free(dir); nio_free(name); return -14;}
+    let n:i64=nio_read_exact(fd,buf,buf.len);
+    nio_close(fd);
+    nio_free(dir); nio_free(name);
+    return n;
+}
+fn sha_hex_of(data:[]u8)[]u8 {
+    let h:[]u8=nio_alloc(32);
+    if(h.len!=32){return "";}
+    if(ns_sha256(data,h)!=0){nio_free(h); return "";}
+    let hx:[]u8=ns_hex(h);
+    nio_free(h);
+    return hx;
+}
+fn line_of(src:[]u8, off:i32)i32 {
+    let n:i32=1;
+    let i:i32=0;
+    while(i<off && i<src.len){if(src[i]==10){n=n+1;} i=i+1;}
+    return n;
+}
+
+// ---------------- §5.1 string constant folder ----------------
+// fold_strings: merge adjacent string literals joined by `+`
+// (whitespace/newlines allowed between) into one literal. Offsets and line
+// numbers are preserved: the merged region is rewritten as one literal
+// followed by spaces, with original newlines kept. Returns bytes written.
+fn fold_strings(src:[]u8, n:i32, out:[]u8)i32 {
+    let i:i32=0;
+    let o:i32=0;
+    while(i<n){
+        if(src[i]!=34){out[o]=src[i]; o=o+1; i=i+1;}
+        else {
+            let ls:i32=i;
+            // find end of first literal
+            let le:i32=i+1;
+            while(le<n){
+                if(src[le]==92 && le+1<n){le=le+2;}
+                else { if(src[le]==34){le=le+1; break;} le=le+1; }
+            }
+            // extend over (ws)* + (ws)* "literal" runs
+            let run_end:i32=le;
+            let more:i32=1;
+            while(more==1){
+                more=0;
+                let q:i32=run_end;
+                while(q<n && is_space(src[q])==1){q=q+1;}
+                if(q<n && src[q]==43){
+                    q=q+1;
+                    while(q<n && is_space(src[q])==1){q=q+1;}
+                    if(q<n && src[q]==34){
+                        let e2:i32=q+1;
+                        while(e2<n){
+                            if(src[e2]==92 && e2+1<n){e2=e2+2;}
+                            else { if(src[e2]==34){e2=e2+1; break;} e2=e2+1; }
+                        }
+                        run_end=e2;
+                        more=1;
+                    }
+                }
+            }
+            // rewrite [ls, run_end) as one literal + space/\n padding
+            o=ls;
+            out[o]=34; o=o+1;
+            let k:i32=ls;
+            while(k<run_end){
+                if(src[k]==34){
+                    k=k+1;
+                    while(k<run_end && src[k]!=34){
+                        if(src[k]==92 && k+1<run_end){
+                            out[o]=src[k]; o=o+1;
+                            out[o]=src[k+1]; o=o+1;
+                            k=k+2;
+                        } else {
+                            if(src[k]==10){out[o]=10;} else {out[o]=src[k];}
+                            o=o+1; k=k+1;
+                        }
+                    }
+                    if(k<run_end){k=k+1;}
+                } else { k=k+1; }
+            }
+            out[o]=34; o=o+1;
+            let pad_end:i32=ls+(run_end-ls);
+            // padding byte j corresponds to original byte (o_start + j);
+            // o currently == ls + emitted_len, which matches that origin.
+            let r:i32=o;
+            while(o<pad_end){
+                if(src[r]==10){out[o]=10;} else {out[o]=32;}
+                o=o+1; r=r+1;
+            }
+            i=run_end;
+        }
+    }
+    return o;
+}
+
+// ---------------- strippers ----------------
+// strip_comments: blank // comments to end of line (keep \n).
+fn strip_comments(src:[]u8, n:i32, out:[]u8)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(src[i]==47 && i+1<n && src[i+1]==47){
+            out[i]=32; out[i+1]=32; i=i+2;
+            while(i<n && src[i]!=10){out[i]=32; i=i+1;}
+        } else {
+            // do not treat // inside strings as comments
+            if(src[i]==34){
+                out[i]=src[i]; i=i+1;
+                while(i<n){
+                    out[i]=src[i];
+                    if(src[i]==92 && i+1<n){i=i+1; out[i]=src[i];}
+                    else { if(src[i]==34){i=i+1; break;} }
+                    i=i+1;
+                }
+            } else { out[i]=src[i]; i=i+1; }
+        }
+    }
+    return n;
+}
+// strip_strings: blank string literals (keep \n), code gets spaces.
+fn strip_strings(src:[]u8, n:i32, out:[]u8)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(src[i]==34){
+            out[i]=32; i=i+1;
+            while(i<n){
+                if(src[i]==92 && i+1<n){out[i]=32; i=i+1; out[i]=32; i=i+1;}
+                else {
+                    if(src[i]==34){out[i]=32; i=i+1; break;}
+                    if(src[i]==10){out[i]=10;} else {out[i]=32;}
+                    i=i+1;
+                }
+            }
+        } else { out[i]=src[i]; i=i+1; }
+    }
+    return n;
+}
+// lit_scan: walk string literals in folded source; for each, check content.
+// what: 1 = D1 token substring, 6 = D6 token substring. Returns literal
+// start offset of first hit, else -1.
+fn lit_scan(folded:[]u8, n:i32, what:i32, tok:[]u8, toks:[]u8)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(folded[i]==34){
+            let ls:i32=i;
+            i=i+1;
+            let hit:i32=0;
+            while(i<n){
+                if(folded[i]==92 && i+1<n){i=i+2;}
+                else {
+                    if(folded[i]==34){break;}
+                    i=i+1;
+                }
+            }
+            let le:i32=i; // closing quote (or n)
+            if(what==1){
+                if(find_sub(folded[ls..le],0,tok)>=0){hit=1;}
+            } else {
+                // check each d6 token as substring of literal content
+                let li:i32=0;
+                while(li<=toks.len){
+                    let e:i32=li;
+                    while(e<toks.len && toks[e]!=10){e=e+1;}
+                    if(e>li && find_sub(folded[ls..le],0,toks[li..e])>=0){hit=1;}
+                    li=e+1;
+                }
+            }
+            if(hit==1){return ls;}
+            if(i<n){i=i+1;}
+        } else { i=i+1; }
+    }
+    return -1;
+}
+// ---------------- @import extraction (D8) ----------------
+// extract_imports: from comment-stripped (strings kept) source, collect
+// bare @import("path") targets into iarena (\n-separated). Returns count.
+fn extract_imports(nc:[]u8, n:i32, iarena:[]u8, ilen:i32)i32 {
+    let cnt:i32=0;
+    let pos:i32=find_word(nc,0,"@import");
+    // note: find_word with "@import": @ is not alnum_us; word_at checks
+    // neighbors — fine.
+    while(pos>=0){
+        let q:i32=pos+7;
+        while(q<n && is_space(nc[q])==1){q=q+1;}
+        if(q<n && nc[q]==40){
+            q=q+1;
+            while(q<n && is_space(nc[q])==1){q=q+1;}
+            if(q<n && nc[q]==34){
+                q=q+1;
+                let s:i32=q;
+                while(q<n && nc[q]!=34){
+                    if(nc[q]==92 && q+1<n){q=q+2;} else {q=q+1;}
+                }
+                let e:i32=q;
+                if(q<n){q=q+1;}
+                while(q<n && is_space(nc[q])==1){q=q+1;}
+                if(q<n && nc[q]==41){
+                    ilen=sb_add(iarena,ilen,nc[s..e]);
+                    ilen=sb_addc(iarena,ilen,10);
+                    cnt=cnt+1;
+                }
+            }
+        }
+        pos=find_word(nc,pos+1,"@import");
+    }
+    return cnt*65536+ilen;
+}
+// join_dir: dir + "/" + rel into out. Returns len.
+fn join_dir(dir:[]u8, rel:[]u8, out:[]u8)i32 {
+    let l:i32=0;
+    l=sb_add(out,l,dir);
+    l=sb_addc(out,l,47);
+    l=sb_add(out,l,rel);
+    return l;
+}
+// dir_of: directory part of path (no trailing /); "" if none.
+fn dir_of(p:[]u8, out:[]u8)i32 {
+    let cut:i32=-1;
+    let i:i32=0;
+    while(i<p.len){if(p[i]==47){cut=i;} i=i+1;}
+    if(cut<0){return 0;}
+    let k:i32=0;
+    while(k<cut){out[k]=p[k]; k=k+1;}
+    return cut;
+}
+
+// ---------------- alias table (§5.1) ----------------
+// alias_build: scan `let name = <token-or-alias>` lines; arena gets
+// "name\tTOKEN\n" lines. Two passes for chains. Returns new alen.
+fn alias_token(arena:[]u8, alen:i32, name:[]u8)[]u8 {
+    let i:i32=0;
+    while(i<alen){
+        let e:i32=i;
+        while(e<alen && arena[e]!=10){e=e+1;}
+        let t:i32=i;
+        while(t<e && arena[t]!=9){t=t+1;}
+        if(t<e && slice_eq(arena[i..t],name)==1){return arena[t+1..e];}
+        i=e+1;
+    }
+    return "";
+}
+fn is_banned_tok(tok:[]u8, d1toks:[]u8, d6toks:[]u8)i32 {
+    if(list_has(d1toks,tok)==1){return 1;}
+    if(list_has(d6toks,tok)==1){return 1;}
+    if(slice_eq(tok,"_zag_arg")==1){return 1;}
+    return 0;
+}
+fn alias_build_pass(code:[]u8, n:i32, arena:[]u8, alen:i32, d1toks:[]u8, d6toks:[]u8)i32 {
+    let pos:i32=find_word(code,0,"let");
+    while(pos>=0){
+        let q:i32=pos+3;
+        while(q<n && is_space(code[q])==1){q=q+1;}
+        let ns:i32=q;
+        while(q<n && is_ichar(code[q])==1){q=q+1;}
+        let ne:i32=q;
+        if(ne>ns){
+            while(q<n && is_space(code[q])==1){q=q+1;}
+            if(q<n && code[q]==58){
+                while(q<n && code[q]!=61 && code[q]!=10){q=q+1;}
+            }
+            if(q<n && code[q]==61 && (q+1>=n || code[q+1]!=61)){
+                q=q+1;
+                while(q<n && is_space(code[q])==1){q=q+1;}
+                let rs:i32=q;
+                while(q<n && is_ichar(code[q])==1){q=q+1;}
+                let re2:i32=q;
+                if(re2>rs){
+                    let rhs:[]u8=code[rs..re2];
+                    let tok:[]u8="";
+                    if(is_banned_tok(rhs,d1toks,d6toks)==1){tok=rhs;}
+                    else {tok=alias_token(arena,alen,rhs);}
+                    if(tok.len>0 && alias_token(arena,alen,code[ns..ne]).len==0){
+                        alen=sb_add(arena,alen,code[ns..ne]);
+                        alen=sb_addc(arena,alen,9);
+                        alen=sb_add(arena,alen,tok);
+                        alen=sb_addc(arena,alen,10);
+                    }
+                }
+            }
+        }
+        pos=find_word(code,pos+1,"let");
+    }
+    return alen;
+}
+// alias_use: earliest call-position use `name(` of any alias whose token is
+// in the given list. Returns offset or -1.
+fn alias_use(code:[]u8, n:i32, arena:[]u8, alen:i32, toks:[]u8)i32 {
+    let best:i32=-1;
+    let bi:i32=0;
+    while(bi<alen){
+        let e:i32=bi;
+        while(e<alen && arena[e]!=10){e=e+1;}
+        let t:i32=bi;
+        while(t<e && arena[t]!=9){t=t+1;}
+        if(t<e){
+            let nm:[]u8=arena[bi..t];
+            let tk:[]u8=arena[t+1..e];
+            if(list_has(toks,tk)==1){
+                let pos:i32=find_word(code,0,nm);
+                while(pos>=0){
+                    let q:i32=pos+nm.len;
+                    while(q<n && is_space(code[q])==1){q=q+1;}
+                    if(q<n && code[q]==40){
+                        if(best<0 || pos<best){best=pos;}
+                        break;
+                    }
+                    pos=find_word(code,pos+1,nm);
+                }
+            }
+        }
+        bi=e+1;
+    }
+    return best;
+}
+// pack: rule*2^48 + kind*2^32 + off ; -1 = clean
+fn pack_hit(rule:i32, kind:i32, off:i32)i64 {
+    return ((rule as i64)*281474976710656)+((kind as i64)*4294967296)+(off as i64);
+}
+fn hit_rule(v:i64)i32 { return (v/281474976710656) as i32; }
+fn hit_kind(v:i64)i32 { return ((v/4294967296)%65536) as i32; }
+fn hit_off(v:i64)i32 { return (v%4294967296) as i32; }
+
+// ---------------- D1 ----------------
+fn d1_check(code:[]u8, folded:[]u8, n:i32, d1toks:[]u8, d6toks:[]u8) i64 {
+    let best:i64=-1;
+    // word scan
+    let li:i32=0;
+    while(li<=d1toks.len){
+        let e:i32=li;
+        while(e<d1toks.len && d1toks[e]!=10){e=e+1;}
+        if(e>li){
+            let p:i32=find_word(code,0,d1toks[li..e]);
+            if(p>=0){
+                let v:i64=pack_hit(1,0,p);
+                if(best<0 || v<best){best=v;}
+            }
+        }
+        li=e+1;
+    }
+    // literal-content scan (post-fold, §5.1): each D1 token as substring
+    let lj:i32=0;
+    while(lj<=d1toks.len){
+        let e2:i32=lj;
+        while(e2<d1toks.len && d1toks[e2]!=10){e2=e2+1;}
+        if(e2>lj){
+            let lc:i32=lit_scan(folded,n,1,d1toks[lj..e2],d1toks);
+            if(lc>=0){
+                let v:i64=pack_hit(1,1,lc);
+                if(best<0 || v<best){best=v;}
+            }
+        }
+        lj=e2+1;
+    }
+    // alias call-position uses
+    let arena:[]u8=nio_alloc(65536);
+    if(arena.len==65536){
+        let alen:i32=alias_build_pass(code,n,arena,0,d1toks,d6toks);
+        alen=alias_build_pass(code,n,arena,alen,d1toks,d6toks);
+        let p2:i32=alias_use(code,n,arena,alen,d1toks);
+        if(p2>=0){
+            let v:i64=pack_hit(1,2,p2);
+            if(best<0 || v<best){best=v;}
+        }
+        nio_free(arena);
+    }
+    return best;
+}
+
+// ---------------- D2: argv / env ----------------
+// d2_parse_arg: at word offset `pos` of `_zag_arg` in code; parse the index.
+// Returns: -2 = not a call / unparsable, -3 = index not whitelisted,
+//          else the index value (>=0).
+fn d2_parse_arg(code:[]u8, n:i32, pos:i32, argv:[]u8)i32 {
+    let q:i32=pos+8;
+    while(q<n && is_space(code[q])==1){q=q+1;}
+    if(q>=n || code[q]!=40){return -2;}
+    q=q+1;
+    while(q<n && is_space(code[q])==1){q=q+1;}
+    let ds:i32=q;
+    while(q<n && is_digit(code[q])==1){q=q+1;}
+    if(q==ds){return -2;}
+    let de:i32=q;
+    while(q<n && is_space(code[q])==1){q=q+1;}
+    if(q>=n || code[q]!=41){return -2;}
+    if(list_has(argv,code[ds..de])==1){
+        let v:i32=0;
+        let k:i32=ds;
+        while(k<de){v=v*10+(code[k] as i32)-48; k=k+1;}
+        return v;
+    }
+    return -3;
+}
+fn d2_check(code:[]u8, n:i32, argv:[]u8, envtoks:[]u8, d1toks:[]u8, d6toks:[]u8)i64 {
+    let best:i64=-1;
+    let pos:i32=find_word(code,0,"_zag_arg");
+    while(pos>=0){
+        let r:i32=d2_parse_arg(code,n,pos,argv);
+        if(r==-2 || r==-3){
+            let v:i64=pack_hit(2,0,pos);
+            if(best<0 || v<best){best=v;}
+        }
+        pos=find_word(code,pos+1,"_zag_arg");
+    }
+    // env tokens
+    let li:i32=0;
+    while(li<=envtoks.len){
+        let e:i32=li;
+        while(e<envtoks.len && envtoks[e]!=10){e=e+1;}
+        if(e>li){
+            let p:i32=find_word(code,0,envtoks[li..e]);
+            if(p>=0){
+                let v:i64=pack_hit(2,1,p);
+                if(best<0 || v<best){best=v;}
+            }
+        }
+        li=e+1;
+    }
+    // alias call-position uses of _zag_arg
+    let arena:[]u8=nio_alloc(65536);
+    if(arena.len==65536){
+        let alen:i32=alias_build_pass(code,n,arena,0,d1toks,d6toks);
+        alen=alias_build_pass(code,n,arena,alen,d1toks,d6toks);
+        let za:[]u8="_zag_arg";
+        let p2:i32=alias_use(code,n,arena,alen,za);
+        if(p2>=0){
+            let v:i64=pack_hit(2,2,p2);
+            if(best<0 || v<best){best=v;}
+        }
+        nio_free(arena);
+    }
+    return best;
+}
+
+// ---------------- D3: bare nio_alloc ----------------
+fn d3_check(code:[]u8, n:i32)i64 {
+    let p:i32=find_word(code,0,"nio_alloc");
+    if(p>=0){return pack_hit(3,0,p);}
+    return -1;
+}
+
+// ---------------- D4: hash-iteration patterns ----------------
+fn d4_check(code:[]u8, n:i32, pats:[]u8)i64 {
+    let best:i64=-1;
+    let li:i32=0;
+    while(li<=pats.len){
+        let e:i32=li;
+        while(e<pats.len && pats[e]!=10){e=e+1;}
+        if(e>li){
+            let p:i32=find_d4(code,0,pats[li..e]);
+            if(p>=0){
+                let v:i64=pack_hit(4,0,p);
+                if(best<0 || v<best){best=v;}
+            }
+        }
+        li=e+1;
+    }
+    return best;
+}
+
+// ---------------- D5: pinned file IO ----------------
+// d5_arg_ok: check arg `argidx` of call at paren offset in folded source.
+// Returns 0 ok, 1 non-literal/parse-fail, 2 literal-not-allowlisted.
+fn d5_arg_ok(p:[]u8, n:i32, paren:i32, argidx:i32, allow:[]u8)i32 {
+    let r:i32=paren+1;
+    let a:i32=0;
+    let depth:i32=0;
+    let scanning:i32=1;
+    while(scanning==1){
+        while(r<n && is_space(p[r])==1){r=r+1;}
+        if(r>=n){return 1;}
+        if(a==argidx){scanning=0;}
+        else {
+            // skip one arg: to ',' or ')' at depth 0, respecting strings
+            let instr:i32=0;
+            let done:i32=0;
+            while(done==0 && r<n){
+                let c:u8=p[r];
+                if(instr==1){
+                    if(c==92){r=r+2;}
+                    else { if(c==34){instr=0;} r=r+1; }
+                } else {
+                    if(c==34){instr=1; r=r+1;}
+                    else {
+                        if(c==40){depth=depth+1; r=r+1;}
+                        else {
+                            if(c==41){
+                                if(depth==0){return 1;}
+                                depth=depth-1; r=r+1;
+                            } else {
+                                if(c==44 && depth==0){r=r+1; a=a+1; done=1;}
+                                else {r=r+1;}
+                            }
+                        }
+                    }
+                }
+            }
+            if(done==0){return 1;}
+        }
+    }
+    if(p[r]!=34){return 1;}
+    r=r+1;
+    let s:i32=r;
+    while(r<n && p[r]!=34){
+        if(p[r]==92){r=r+2;} else {r=r+1;}
+    }
+    let e:i32=r;
+    if(r<n){r=r+1;}
+    while(r<n && is_space(p[r])==1){r=r+1;}
+    if(r>=n){return 1;}
+    if(p[r]!=44 && p[r]!=41){return 1;}
+    if(list_has(allow,p[s..e])==1){return 0;}
+    return 2;
+}
+fn d5_check(code:[]u8, folded:[]u8, n:i32, allow:[]u8)i64 {
+    let best:i64=-1;
+    let fi:i32=0;
+    while(fi<3){
+        let fname:[]u8="dialect_read";
+        let argidx:i32=0;
+        if(fi==1){fname="nio_open_root";}
+        if(fi==2){fname="nio_open_child"; argidx=1;}
+        let pos:i32=find_word(code,0,fname);
+        while(pos>=0){
+            let q:i32=pos+fname.len;
+            while(q<n && is_space(code[q])==1){q=q+1;}
+            if(q<n && code[q]==40){
+                let rc:i32=d5_arg_ok(folded,n,q,argidx,allow);
+                if(rc!=0){
+                    let v:i64=pack_hit(5,rc-1,pos);
+                    if(best<0 || v<best){best=v;}
+                }
+            }
+            pos=find_word(code,pos+1,fname);
+        }
+        fi=fi+1;
+    }
+    return best;
+}
+
+// ---------------- D6: timing/entropy intrinsics ----------------
+fn d6_check(code:[]u8, folded:[]u8, n:i32, d6toks:[]u8, d1toks:[]u8)i64 {
+    let best:i64=-1;
+    let li:i32=0;
+    while(li<=d6toks.len){
+        let e:i32=li;
+        while(e<d6toks.len && d6toks[e]!=10){e=e+1;}
+        if(e>li){
+            let tok:[]u8=d6toks[li..e];
+            let p:i32=find_word(code,0,tok);
+            if(p>=0){
+                let v:i64=pack_hit(6,0,p);
+                if(best<0 || v<best){best=v;}
+            }
+            let lc:i32=lit_scan(folded,n,6,tok,d6toks);
+            if(lc>=0){
+                let v2:i64=pack_hit(6,1,lc);
+                if(best<0 || v2<best){best=v2;}
+            }
+        }
+        li=e+1;
+    }
+    let arena:[]u8=nio_alloc(65536);
+    if(arena.len==65536){
+        let alen:i32=alias_build_pass(code,n,arena,0,d1toks,d6toks);
+        alen=alias_build_pass(code,n,arena,alen,d1toks,d6toks);
+        let p2:i32=alias_use(code,n,arena,alen,d6toks);
+        if(p2>=0){
+            let v:i64=pack_hit(6,2,p2);
+            if(best<0 || v<best){best=v;}
+        }
+        nio_free(arena);
+    }
+    return best;
+}
+
+// ---------------- D7: taint-tracked address-exposing casts ----------------
+// seed_here: does segment contain a taint seed (&ident, _zag_arg(, z_alloc_init()?
+fn seed_here(seg:[]u8)i32 {
+    let i:i32=0;
+    while(i<seg.len){
+        if(seg[i]==38 && i+1<seg.len && is_istart(seg[i+1])==1){return 1;}
+        i=i+1;
+    }
+    if(find_word(seg,0,"_zag_arg")>=0){return 1;}
+    if(find_word(seg,0,"z_alloc_init")>=0){return 1;}
+    return 0;
+}
+fn taint_has(taint:[]u8, tlen:i32, name:[]u8)i32 {
+    return list_has(taint[0..tlen],name);
+}
+fn seg_mentions_taint(seg:[]u8, taint:[]u8, tlen:i32)i32 {
+    let i:i32=0;
+    while(i<tlen){
+        let e:i32=i;
+        while(e<tlen && taint[e]!=10){e=e+1;}
+        if(e>i && find_word(seg,0,taint[i..e])>=0){return 1;}
+        i=e+1;
+    }
+    return 0;
+}
+// parse_lhs: extract assignment target ident from a code line into out.
+// Returns ident length, 0 if none.
+fn parse_lhs(line:[]u8, out:[]u8)i32 {
+    let p:i32=0;
+    while(p<line.len && is_space(line[p])==1){p=p+1;}
+    if(p+3<=line.len && line[p]==108 && line[p+1]==101 && line[p+2]==116
+       && (p+3>=line.len || is_alnum_us(line[p+3])==0)){
+        p=p+3;
+        while(p<line.len && is_space(line[p])==1){p=p+1;}
+    }
+    let ns:i32=p;
+    while(p<line.len && is_ichar(line[p])==1){p=p+1;}
+    let ne:i32=p;
+    if(ne==ns){return 0;}
+    while(p<line.len && is_space(line[p])==1){p=p+1;}
+    if(p<line.len && line[p]==58){
+        while(p<line.len && line[p]!=61 && line[p]!=10){p=p+1;}
+    }
+    if(p>=line.len || line[p]!=61){return 0;}
+    if(p+1<line.len && line[p+1]==61){return 0;}
+    let k:i32=0;
+    while(ns+k<ne){out[k]=line[ns+k]; k=k+1;}
+    return ne-ns;
+}
+fn is_int_cast(tok:[]u8)i32 {
+    if(slice_eq(tok,"i64")==1){return 1;}
+    if(slice_eq(tok,"i32")==1){return 1;}
+    if(slice_eq(tok,"u64")==1){return 1;}
+    if(slice_eq(tok,"u32")==1){return 1;}
+    return 0;
+}
+fn d7_check(code:[]u8, n:i32)i64 {
+    let taint:[]u8=nio_alloc(65536);
+    if(taint.len!=65536){return -1;}
+    let tlen:i32=0;
+    let nm:[]u8=nio_alloc(256);
+    if(nm.len!=256){nio_free(taint); return -1;}
+    // pass 1: build taint set line by line
+    let ls:i32=0;
+    while(ls<n){
+        let le:i32=ls;
+        while(le<n && code[le]!=10){le=le+1;}
+        let nl:i32=parse_lhs(code[ls..le],nm);
+        if(nl>0){
+            let name:[]u8=nm[0..nl];
+            let tainted:i32=0;
+            if(seed_here(code[ls..le])==1){tainted=1;}
+            else {
+                if(seg_mentions_taint(code[ls..le],taint,tlen)==1){tainted=1;}
+            }
+            if(tainted==1 && taint_has(taint,tlen,name)==0){
+                tlen=sb_add(taint,tlen,name);
+                tlen=sb_addc(taint,tlen,10);
+            }
+        }
+        if(le<n){ls=le+1;} else {ls=le;}
+    }
+    // pass 2: find `as <inttype>` casts on tainted operands
+    let best:i64=-1;
+    let pos:i32=find_word(code,0,"as");
+    while(pos>=0){
+        let q:i32=pos+2;
+        while(q<n && is_space(code[q])==1){q=q+1;}
+        let ts:i32=q;
+        while(q<n && is_ichar(code[q])==1){q=q+1;}
+        if(q>ts && is_int_cast(code[ts..q])==1){
+            let bl:i32=pos;
+            while(bl>0 && code[bl-1]!=10){bl=bl-1;}
+            let seg:[]u8=code[bl..pos];
+            if(seed_here(seg)==1 || seg_mentions_taint(seg,taint,tlen)==1){
+                best=pack_hit(7,0,pos);
+                break;
+            }
+        }
+        pos=find_word(code,pos+1,"as");
+    }
+    nio_free(nm);
+    nio_free(taint);
+    return best;
+}
+
+// ---------------- hit detail ----------------
+fn rule_name(rule:i32, out:[]u8)i32 {
+    let l:i32=0;
+    if(rule==1){l=sb_add(out,l,"D1-no-raw-syscall");}
+    if(rule==2){l=sb_add(out,l,"D2-no-argvenv");}
+    if(rule==3){l=sb_add(out,l,"D3-no-bare-alloc");}
+    if(rule==4){l=sb_add(out,l,"D4-no-hash-iter");}
+    if(rule==5){l=sb_add(out,l,"D5-pinned-paths");}
+    if(rule==6){l=sb_add(out,l,"D6-no-time-entropy");}
+    if(rule==7){l=sb_add(out,l,"D7-no-addr-cast");}
+    return l;
+}
+// hit_detail: append human detail for a hit to sb.
+fn hit_detail(sb:[]u8, slen:i32, rule:i32, kind:i32, off:i32, code:[]u8, folded:[]u8, n:i32)i32 {
+    if(rule==1){
+        if(kind==0){
+            slen=sb_add(sb,slen,"token ");
+            let e:i32=off;
+            while(e<n && is_ichar(code[e])==1){e=e+1;}
+            slen=sb_add(sb,slen,code[off..e]);
+        }
+        if(kind==1){slen=sb_add(sb,slen,"banned token inside string literal");}
+        if(kind==2){
+            slen=sb_add(sb,slen,"alias call of ");
+            let e:i32=off;
+            while(e<n && is_ichar(code[e])==1){e=e+1;}
+            slen=sb_add(sb,slen,code[off..e]);
+        }
+    }
+    if(rule==2){
+        if(kind==0){slen=sb_add(sb,slen,"_zag_arg index outside whitelist {1,2,3,4} or unparsable");}
+        if(kind==1){
+            slen=sb_add(sb,slen,"env token ");
+            let e:i32=off;
+            while(e<n && is_ichar(code[e])==1){e=e+1;}
+            slen=sb_add(sb,slen,code[off..e]);
+        }
+        if(kind==2){slen=sb_add(sb,slen,"alias call of _zag_arg");}
+    }
+    if(rule==3){slen=sb_add(sb,slen,"bare nio_alloc");}
+    if(rule==4){
+        slen=sb_add(sb,slen,"pattern ");
+        let e:i32=off;
+        while(e<n && (is_alnum(code[e])==1 || code[e]==95)){e=e+1;}
+        slen=sb_add(sb,slen,code[off..e]);
+    }
+    if(rule==5){
+        if(kind==0){slen=sb_add(sb,slen,"non-literal or unparsable path argument");}
+        if(kind==1){
+            slen=sb_add(sb,slen,"path not in allowlist: ");
+            // re-extract literal at call: find first quote after off in folded
+            let q:i32=off;
+            while(q<n && folded[q]!=34){q=q+1;}
+            if(q<n){
+                q=q+1;
+                let s:i32=q;
+                while(q<n && folded[q]!=34){
+                    if(folded[q]==92){q=q+2;} else {q=q+1;}
+                }
+                slen=sb_add(sb,slen,folded[s..q]);
+            }
+        }
+    }
+    if(rule==6){
+        if(kind==0){
+            slen=sb_add(sb,slen,"intrinsic ");
+            let e:i32=off;
+            while(e<n && is_ichar(code[e])==1){e=e+1;}
+            slen=sb_add(sb,slen,code[off..e]);
+        }
+        if(kind==1){slen=sb_add(sb,slen,"intrinsic token inside string literal");}
+        if(kind==2){
+            slen=sb_add(sb,slen,"alias call of ");
+            let e:i32=off;
+            while(e<n && is_ichar(code[e])==1){e=e+1;}
+            slen=sb_add(sb,slen,code[off..e]);
+        }
+    }
+    if(rule==7){slen=sb_add(sb,slen,"cast of tainted (address-derived) expression");}
+    return slen;
+}
+
+// ---------------- D8 driver ----------------
+fn pret(status:i32, vlen:i32, slen:i32)i64 {
+    return ((status as i64)*281474976710656)+((vlen as i64)*16777216)+(slen as i64);
+}
+// process_file: check one file + its import closure (DFS).
+// Appends FILE lines (and HIT line on refusal) to sb.
+// Returns pret(status, vlen, slen); status 0=clean,1=refuse,2=io-error.
+fn process_file(path:[]u8, depth:i32, sb:[]u8, slen:i32,
+                 visited:[]u8, vlen:i32,
+                 d1toks:[]u8, envtoks:[]u8, argv:[]u8, d4pats:[]u8,
+                 allow:[]u8, d6toks:[]u8, pinned:[]u8) i64 {
+    if(depth>8){return pret(2,vlen,slen);}
+    if(list_has(visited[0..vlen],path)==1){return pret(0,vlen,slen);}
+    let raw:[]u8=nio_alloc(1048576);
+    if(raw.len!=1048576){return pret(2,vlen,slen);}
+    let rn:i64=read_whole(path,raw);
+    if(rn<0){nio_free(raw); return pret(2,vlen,slen);}
+    let n:i32=rn as i32;
+    let hx:[]u8=sha_hex_of(raw[0..n]);
+    if(hx.len==0){nio_free(raw); return pret(2,vlen,slen);}
+    // pinned?
+    let is_pinned:i32=0;
+    let pi:i32=0;
+    while(pi<=pinned.len){
+        let pe:i32=pi;
+        while(pe<pinned.len && pinned[pe]!=10){pe=pe+1;}
+        if(pe-pi>=64 && slice_eq(pinned[pi..pi+64],hx)==1){is_pinned=1;}
+        pi=pe+1;
+    }
+    slen=sb_add(sb,slen,"FILE ");
+    slen=sb_add(sb,slen,path);
+    slen=sb_addc(sb,slen,32);
+    slen=sb_add(sb,slen,hx);
+    if(is_pinned==1){slen=sb_add(sb,slen," PINNED\n");}
+    else {slen=sb_add(sb,slen," CHECKED\n");}
+    // mark visited (caller frees hx? ns_hex allocates via nio_alloc — free it)
+    let nvlen:i32=sb_add(visited,vlen,path);
+    nvlen=sb_addc(visited,nvlen,10);
+    if(is_pinned==1){nio_free(hx); nio_free(raw); return pret(0,nvlen,slen);}
+    let folded:[]u8=nio_alloc(1048576);
+    let nocom:[]u8=nio_alloc(1048576);
+    let code:[]u8=nio_alloc(1048576);
+    if(folded.len!=1048576 || nocom.len!=1048576 || code.len!=1048576){
+        nio_free(hx); nio_free(raw);
+        nio_free(folded); nio_free(nocom); nio_free(code);
+        return pret(2,nvlen,slen);
+    }
+    fold_strings(raw,n,folded);
+    strip_comments(folded,n,nocom);
+    strip_strings(nocom,n,code);
+    // content slices: never scan zero padding past n
+    let c0:[]u8=code[0..n];
+    let f0:[]u8=folded[0..n];
+    let m0:[]u8=nocom[0..n];
+    // D8: recurse into imports first (DFS). Return packs
+    // status*2^48 + vlen*2^24 + slen (append-only arenas).
+    let iarena:[]u8=nio_alloc(65536);
+    if(iarena.len!=65536){
+        nio_free(hx); nio_free(raw);
+        nio_free(folded); nio_free(nocom); nio_free(code);
+        return pret(2,nvlen,slen);
+    }
+    let pk:i64=extract_imports(m0,n,iarena,0);
+    let ilen:i32=(pk%65536) as i32;
+    let dir:[]u8=nio_alloc(4096);
+    let child:[]u8=nio_alloc(4096);
+    let vrun:i32=nvlen;
+    let stop:i32=0;
+    if(dir.len==4096 && child.len==4096){
+        let dl:i32=dir_of(path,dir);
+        let ipos:i32=0;
+        while(ipos<ilen && stop==0){
+            let ie:i32=ipos;
+            while(ie<ilen && iarena[ie]!=10){ie=ie+1;}
+            if(ie>ipos){
+                let cl:i32=0;
+                if(dl>0){cl=join_dir(dir[0..dl],iarena[ipos..ie],child);}
+                else {cl=sb_add(child,0,iarena[ipos..ie]);}
+                let rv:i64=process_file(child[0..cl],depth+1,sb,slen,visited,vrun,
+                    d1toks,envtoks,argv,d4pats,allow,d6toks,pinned);
+                stop=(rv/281474976710656) as i32;
+                vrun=((rv/16777216)%16777216) as i32;
+                slen=(rv%16777216) as i32;
+            }
+            ipos=ie+1;
+        }
+    }
+    nio_free(dir); nio_free(child); nio_free(iarena);
+    if(stop!=0){
+        nio_free(hx); nio_free(raw);
+        nio_free(folded); nio_free(nocom); nio_free(code);
+        return pret(stop,vrun,slen);
+    }
+    // D1..D7 on this file
+    let v:i64=d1_check(c0,f0,n,d1toks,d6toks);
+    if(v<0){v=d2_check(c0,n,argv,envtoks,d1toks,d6toks);}
+    if(v<0){v=d3_check(c0,n);}
+    if(v<0){v=d4_check(c0,n,d4pats);}
+    if(v<0){v=d5_check(c0,f0,n,allow);}
+    if(v<0){v=d6_check(c0,f0,n,d6toks,d1toks);}
+    if(v<0){v=d7_check(c0,n);}
+    if(v>=0){
+        let rule:i32=hit_rule(v);
+        let kind:i32=hit_kind(v);
+        let off:i32=hit_off(v);
+        slen=sb_add(sb,slen,"HIT ");
+        let rn2:[]u8=nio_alloc(64);
+        if(rn2.len==64){
+            let rl:i32=rule_name(rule,rn2);
+            slen=sb_add(sb,slen,rn2[0..rl]);
+            nio_free(rn2);
+        }
+        slen=sb_addc(sb,slen,32);
+        slen=sb_add(sb,slen,path);
+        slen=sb_addc(sb,slen,58);
+        slen=sb_addi32(sb,slen,line_of(f0,off));
+        slen=sb_addc(sb,slen,32);
+        slen=hit_detail(sb,slen,rule,kind,off,c0,f0,n);
+        slen=sb_addc(sb,slen,10);
+    }
+    nio_free(hx); nio_free(raw);
+    nio_free(folded); nio_free(nocom); nio_free(code);
+    if(v>=0){return pret(1,vrun,slen);}
+    return pret(0,vrun,slen);
+}
+
+// ---------------- main ----------------
+fn load_cfg(cfgdir:[]u8, name:[]u8, buf:[]u8)i32 {
+    let p:[]u8=nio_alloc(4096);
+    if(p.len!=4096){return -1;}
+    let l:i32=sb_add(p,0,cfgdir);
+    l=sb_addc(p,l,47);
+    l=sb_add(p,l,name);
+    let n:i64=read_whole(p[0..l],buf);
+    nio_free(p);
+    if(n<0){return -1;}
+    return n as i32;
+}
+fn main()i32 {
+    let mod:[]u8=_zag_arg(1);
+    let cfgdir:[]u8=_zag_arg(2);
+    if(mod.len==0 || cfgdir.len==0){
+        _zag_println("usage: m4_subset <module.zag> <configdir>");
+        return 2;
+    }
+    let d1toks:[]u8=nio_alloc(65536);
+    let envtoks:[]u8=nio_alloc(65536);
+    let argv:[]u8=nio_alloc(65536);
+    let d4pats:[]u8=nio_alloc(65536);
+    let allow:[]u8=nio_alloc(65536);
+    let d6toks:[]u8=nio_alloc(65536);
+    let pinned:[]u8=nio_alloc(65536);
+    if(d1toks.len!=65536 || envtoks.len!=65536 || argv.len!=65536 ||
+       d4pats.len!=65536 || allow.len!=65536 || d6toks.len!=65536 ||
+       pinned.len!=65536){return 2;}
+    let ok:i32=1;
+    let d1n:i32=load_cfg(cfgdir,"m4_d1_tokens.txt",d1toks);
+    let envn:i32=load_cfg(cfgdir,"m4_d2_env.txt",envtoks);
+    let argvn:i32=load_cfg(cfgdir,"m4_d2_argv.txt",argv);
+    let d4n:i32=load_cfg(cfgdir,"m4_d4_patterns.txt",d4pats);
+    let allown:i32=load_cfg(cfgdir,"m4_d5_allowlist.txt",allow);
+    let d6n:i32=load_cfg(cfgdir,"m4_d6_tokens.txt",d6toks);
+    let pinn:i32=load_cfg(cfgdir,"m4_pinned.txt",pinned);
+    if(d1n<0 || envn<0 || argvn<0 || d4n<0 || allown<0 || d6n<0 || pinn<0){ok=0;}
+    if(ok==0){
+        _zag_println("m4_subset: config load failed");
+        return 2;
+    }
+    let sb:[]u8=nio_alloc(1048576);
+    let visited:[]u8=nio_alloc(65536);
+    if(sb.len!=1048576 || visited.len!=65536){return 2;}
+    let slen:i32=0;
+    slen=sb_add(sb,slen,"M4-CERT-V1\nDIALECT M4-2026-09-25-v1\nMODULE ");
+    slen=sb_add(sb,slen,mod);
+    slen=sb_addc(sb,slen,10);
+    let rv:i64=process_file(mod,0,sb,slen,visited,0,
+        d1toks[0..d1n],envtoks[0..envn],argv[0..argvn],d4pats[0..d4n],
+        allow[0..allown],d6toks[0..d6n],pinned[0..pinn]);
+    let status:i32=(rv/281474976710656) as i32;
+    slen=(rv%16777216) as i32;
+    if(status==0){slen=sb_add(sb,slen,"VERDICT CERTIFY\n");}
+    else {
+        if(status==1){slen=sb_add(sb,slen,"VERDICT REFUSE\n");}
+        else {slen=sb_add(sb,slen,"VERDICT ERROR\n");}
+    }
+    slen=sb_add(sb,slen,"END\n");
+    _zag_print(sb[0..slen]);
+    nio_free(d1toks); nio_free(envtoks); nio_free(argv); nio_free(d4pats);
+    nio_free(allow); nio_free(d6toks); nio_free(pinned);
+    nio_free(sb); nio_free(visited);
+    if(status==0){return 0;}
+    if(status==1){return 1;}
+    return 2;
+}
