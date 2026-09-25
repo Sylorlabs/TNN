@@ -177,3 +177,40 @@ init — deterministic-forward resume; rc=0 both (RC_A=0, RC_B=0).
   ep0+ep1), no pass loop, no phases B/C; G-batch v2 + clamp unchanged;
   FREEZE then only writers (params .zag + .txt, log .tsv) — zero gradient
   steps after. Log header carries prereg SHA, stage=2 mask=OFF, B10b note.
+
+## 2026-09-24 ~17:40 PDT: Stage-2 SIGNAL_DISCONNECT COMPLETE — FREEZE
+
+Run: train_sr2 A/B from the Stage-1 snapshot (params_100x_a.zag.txt);
+rc=0 both. EXACTLY 2 ordinary v2 epochs (Phase A ep0+ep1), then FREEZE.
+A/B byte-identical (logs, params .zag, params .txt).
+- Log header: prereg SHA first, stage=2 mask=OFF, init weights verbatim =
+  Stage-1 snapshot (416189,-174847,0,0,386783,0,-75612,611,-333764),
+  B10b freeze note.
+- Epoch 0: w1=422572 w2=-174831 w3=0 w4=32 w5=388463 w6=11757 w7=-75262
+  w8=611 b=-323265; mcC=934; theater v2=0 (did NOT fire); gviol=18.
+- Epoch 1 (FROZEN): w1=427072 w2=-174815 w3=0 w4=64 w5=389795 w6=20957
+  w7=-75262 w8=611 b=-315596; mcC=939; v2=0; gviol=18; 0 clamp bindings.
+
+### B10b audit (PASS)
+(i) Mask code path absent: source audit (pre-build) — no 10*err boost, no
+    theater-coeff-0, no pin firewall, no zeroed indices; update block is the
+    byte-exact ordinary v2 rule on ALL indices. Stage-2 log header documents
+    mask=OFF with the ordinary update rule; the logged init weights =
+    snapshot, and w3/w4/w6 MOVED during Stage 2 (unfrozen — mask behavior
+    absent). (ii) Frozen params = post-Stage-2 snapshot: params txt 9 lines
+    == epoch-1 weight row, verified line-by-line. (iii) Zero gradient steps
+    after freeze: exactly 2 data rows; the loop ends and only the snapshot
+    writers run — structural, no flag needed.
+
+### Crutch diagnostic (reported, not a kill bar)
+Disconnect point → frozen: |Δw1| = |427072−416189| = 10883 (> 100 on the
+literal reading — 2.6% of |w1|, movement concentrated in Stage-2 epoch 0).
+w7: −75612 → −75262 → −75262: +350 toward 0 in epoch 0 (0.46% of |w7|),
+then flat — NOT a crutch-collapse toward zero; the separator channel
+survived disconnect essentially unchanged.
+|Δw6| = +20957 (0 → 11757 → 20957): the crush coordinate, held at 0 all of
+Stage 1, reattached the moment it was unfrozen — theater did NOT fire
+(v2=0 both epochs), so this is the calibration term pulling w6 in. Flagged
+telemetry for the eval reading (B2/B5/B13 adjudicate).
+mcC: 912 → 934 → 939 across disconnect — no collapse on training telemetry
+(B11: telemetry, not evidence).
