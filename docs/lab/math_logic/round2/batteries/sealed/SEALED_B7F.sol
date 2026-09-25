@@ -1,0 +1,25 @@
+# SEALED GRADER SOLUTIONS - MATH R2 EXTENDED BATTERIES
+# FOR GRADERS ONLY. The attempt harness must NEVER load this directory
+# (exit-3 sealed-path guard). Sealed BEFORE any engine runs.
+# Verdicts for the B7F formal analogs (19/20 are affirming-the-consequent
+# fallacies: faithful formalization must WITHHOLD).
+B7F_01: DERIVED
+B7F_02: DERIVED
+B7F_03: DERIVED
+B7F_04: DERIVED
+B7F_05: DERIVED
+B7F_06: DERIVED
+B7F_07: DERIVED
+B7F_08: DERIVED
+B7F_09: DERIVED
+B7F_10: DERIVED
+B7F_11: DERIVED
+B7F_12: DERIVED
+B7F_13: DERIVED
+B7F_14: DERIVED
+B7F_15: DERIVED
+B7F_16: DERIVED
+B7F_17: DERIVED
+B7F_18: DERIVED
+B7F_19: WITHHELD
+B7F_20: WITHHELD
