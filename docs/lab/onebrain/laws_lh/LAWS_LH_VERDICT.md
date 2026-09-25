@@ -88,3 +88,23 @@ A6 added 2026-09-24, before battery (distrust revoke-only design).
 5. **No regressions:** Laws are additive; organs byte-identical; Phase 1 results transfer.
 
 The laws do not degrade, destabilize, or interfere with organ composition at scale. They provide the proven safety properties (provenance, bounded deliberation, independence-aware corroboration, append-only revisions) without compromising the long-horizon stability of the underlying organs.
+
+---
+
+## Adoption — SIGNED: PROMOTED TO LAW
+
+**SIGNED — Micah Cooley, 2026-09-25.**
+
+Micah's order (verbatim): *"organ laws: 5/5 pass and long horizon pass promote and sign it."*
+
+- **Try-it verification:** 5/5 scenarios PASS, 3/3 byte-identical runs (run personally by
+  Muse, 2026-09-25): tampered messages refused pre-execution; revoke/pin collision
+  deliberated exactly 10 rounds and escalated; shared-root corroborators counted as one
+  source; one-byte revision-chain forgery detected at the correct index.
+- **Long-horizon verdict:** PASS — 37/37 matrix configs at s1/s10/s100, 3× byte-identical
+  reruns (111 runs), all 7 bundles, depth legs, 4 attack legs, offgov/indep legs;
+  laws batteries 3A–3F ALL GREEN (commit `8ef198dc`, 2026-09-24).
+- **Disposition:** The nine Fable composition laws are hereby PROMOTED TO LAW. This
+  section supersedes the "Adoption Recommendation" above (which recommended ADOPT
+  pending signature). The frozen preregs (`PREREG_LAWSLH.md`, `variant_b/LAWS_PREREG.md`)
+  are unchanged; their PENDING-adoption language is superseded by this signature.

@@ -5,7 +5,7 @@
 > integrity, felt intensity, strength, trust tiers, five-organ integration).
 > The current headline results are the wave-5 integrity finding,
 > [`docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md`](docs/lab/wave6/doc-front/INTEGRITY_HEADLINE.md)
-> (PROVISIONAL — wording pending sign-off), and the epistemic-wave
+> (SIGNED 2026-09-25 — Micah Cooley; red team passed), and the epistemic-wave
 > speech-act learning result,
 > [`docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md`](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md)
 > (PROVISIONAL). R27 at step 60,423 remains the
@@ -27,7 +27,7 @@ more learning stops helping.
 
 Read the [full speech-act learning result](docs/lab/prose-learning/epistemic_wave/speechact_exp/SPEECH_ACT_HEADLINE.md).
 
-## Current entry point — R33 research generation
+## Archive — R33 research generation (historical)
 
 **September 12 implementation update:** the native continuing-life workstream
 now has a shared observation, action/consequence, checkpoint, storage, and

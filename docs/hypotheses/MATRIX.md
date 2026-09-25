@@ -2,7 +2,7 @@
 id: MATRIX
 title: "Hypothesis x experiment evidence matrix"
 status: PROVISIONAL
-updated: 2026-09-19
+updated: 2026-09-25 (wave-5 integrity rows added; SIGNED per Micah Cooley 2026-09-25)
 ---
 
 # Hypothesis × Experiment Evidence Matrix
@@ -28,12 +28,16 @@ status vocabulary. Empty = no direct bearing claimed.
 | E51AJ (1.1M probes, 3 replicas) | | | | | Tradeoff: fewer wrong commits, less known reachability | Autonomy row: designer still supplies everything | Freshness: 6,480+6,480 unique trajectories; independent verification | **NEGATIVE**: failed endpoint retention + no-tradeoff rules | | 21 analysis + 11 verifier tests |
 | R33-B000 boundary audit | | | | | | | | | | **NEGATIVE** (helper): trace drops event at saturation; 5/5 defects confirmed |
 | R33 N13A/N14/N16 gates | | | | | | | | Consumed (do-not-rerun) | | 24,601-check pass (N13A) |
+| Wave-5 integrity (integ-1, deliberative-refusal, redteam-rt2, ledger-gating) | | | | | | | **Positive (native)**: 0 cheat signatures / 8 trap families, 2,595/2,595 temptations refused, defense 35/35 — the positive result survived evaluator separation | | | White-box ledger, exact replay, SHA-pinned reruns |
 
 ## Reading the matrix
 
-- **Shadow positives, native negatives.** The encouraging quantitative results
-  live in the reference runtime; native Zag results are valid negatives or
-  mixed diagnostics. The repo marks reference-only scores as non-promoting.
+- **Shadow positives, native negatives — with one native positive.**
+  The encouraging quantitative results live in the reference runtime;
+  native Zag results are valid negatives or mixed diagnostics, with the
+  exception of wave-5 integrity: the real learner's clean sheet is a
+  native positive that survived evaluator separation. The repo marks
+  reference-only scores as non-promoting.
 - **The abstention/resolution tradeoff** recurs across R31, E46, E48, E51AJ —
   nothing tested breaks it.
 - **Evaluator leakage is the default suspect**, and E45 is the working
@@ -41,5 +45,6 @@ status vocabulary. Empty = no direct bearing claimed.
 - **Aggregate gains hide pointwise damage** (E51AJ, E51AH) — the repo's
   standing rule generalizes from these cases.
 - The program's strongest product so far is **methodology** (H-07, H-09
-  process, freshness discipline); the cognitive hypotheses remain largely
-  unconfirmed, which the repo states about itself.
+  process, freshness discipline); wave-5 integrity is the first
+  confirmed native positive among the cognitive hypotheses, the rest
+  remain largely unconfirmed, which the repo states about itself.
