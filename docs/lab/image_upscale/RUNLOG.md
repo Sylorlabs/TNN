@@ -79,3 +79,34 @@ All times PDT, 2026-09-26. Toolchain pinned:
 - Gallery: ~/workspace/your_files/image_upscale_NEW/index.html
   (self-contained, data URIs, NEW-badged; full-frame TNN vs bicubic,
   label maps, trace excerpts, scoreboard).
+
+## Rectangle artifact investigation (2026-09-26, Micah: "weird rectangle sections")
+
+**Diagnosis.** Three mechanisms:
+1. shapes_render2x used nearest 2x2 replication: each atom pixel -> 4 identical
+   output pixels. Visible chunky grid ("Minecraft"). Stage named, pixel cause:
+   4 adjacent HR pixels get same deviation.
+2. Mixed regimes: textured SHAPES blocks adjacent to smooth bicubic NO-FIT
+   blocks; exact rectangular bounds visible. Worst: rejected (128,0) 64x64
+   -> output x=256..383 smooth rectangle.
+3. Neighbor atoms disagree at 2x boundaries: measured 2.9x the true seam step
+   at x=32 and x=64.
+
+Input is 2x2 box average (RMSE 0.31 vs GT box avg), not a point sample. Native
+edge audit (tl_edge_ok) rejected zero regions — removed as inadequate.
+
+**Fix applied.**
+- 50/50 blend of nearest and bilinear in shapes_render2x (deterministic int).
+- Boundary feathering (tl_feather_all): 4px 3/4-1/4, 1/2-1/2 cross-fade at
+  SHAPES/NO-FIT boundaries; KNOWN never overwritten; labeled CONSTRUCTED-SMOOTH.
+- Genuine reject preserved (NO-FIT -> bicubic, labeled CONSTRUCTED-NO-FIT).
+
+**Results.**
+- Before (nearest): 26.17 dB / 0.8252, visible rectangles.
+- After (blend+feather): 25.96 dB / 0.8140, rectangles gone.
+- Bicubic: 25.89 dB / 0.8157.
+- Seam ratios: 2.9x -> 0.5x (x=32), 2.9x -> 0.6x (x=64), 1.3x -> 0.7x (x=128),
+  1.3x -> 0.5x (x=256). All <1 (smoother than true).
+- Determinism: 2 runs byte-identical across 8 artifacts.
+- Gallery: ~/workspace/your_files/image_upscale_NEW/index.html (NEW-badged,
+  self-contained, before/after crops).

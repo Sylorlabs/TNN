@@ -17,10 +17,13 @@ was never given, from its own understanding — not a generic interpolator.
 3. TNN re-runs the full adaptive-layers deliberation (survey, affinity order,
    commit/revert bar G >= 9N) on the 256x92 observation.
 4. TNN constructs 512x184 from its COMMITTED layers:
-   - SHAPES: each region's atom exemplar drawn at 2x as 2x2 blocks
-     (nearest — the exemplar's content preserved exactly, no invented
-     sub-atom detail). Region pixel (ix,iy) -> value = mean + atom(iy*s+ix),
-     drawn as a 2x2 block.
+   - SHAPES: each region's atom exemplar drawn at 2x with 50/50 blend
+     of nearest-2x2 and bilinear interpolation of the deviation field
+     (deterministic integer arithmetic). Pure nearest preserves the exemplar
+     exactly but draws visible 2x2 pixel-grid rectangles (Micah 2026-09-26);
+     pure bilinear kills the grid but loses detail. The blend halves grid
+     contrast while keeping half the detail. Region boundaries are feathered
+     (4px cross-fade, labeled CONSTRUCTED-SMOOTH) to hide SHAPES/NO-FIT seams.
    - LINES: segments re-rasterized at doubled endpoints (same Bresenham
      arithmetic), segment mean values.
    - SMOOTH: planar leaves re-sampled at half-pixel offsets

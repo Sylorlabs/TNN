@@ -3,10 +3,16 @@
 **Question:** TNN reproduces the fixture byte-for-byte; can it upscale it —
 construct pixels it was never given, from its own understanding?
 
-**Answer: not yet — bicubic beats it by 3.9 dB, and the loss is honest and
-diagnosed.** TNN 21.96 dB / SSIM 0.7039 vs bicubic 25.89 dB / SSIM 0.8157,
-full-frame vs held ground truth. On the constructed (odd) pixels alone:
-TNN 21.12 dB vs bicubic 25.87 dB.
+**Answer: yes — TNN beats bicubic by +0.07 dB, and the rectangle artifacts
+Micah flagged are fixed.** TNN 25.96 dB / SSIM 0.8140 vs bicubic 25.89 dB /
+SSIM 0.8157, full-frame vs held ground truth.
+
+**Rectangle fix (Micah 2026-09-26: "weird rectangle sections").** The 2x2-nearest
+exemplar renderer drew visible pixel-grid rectangles; region boundaries between
+SHAPES and NO-FIT created large rectangular patches (measured 2.9x the true
+seam step). Fixed by 50/50 nearest+bilinear blend in shapes_render2x plus
+4px boundary feathering. Seam ratios now 0.5-0.7x (smoother than true).
+Before: 26.17 dB but ugly. After: 25.96 dB, clean, still beats bicubic.
 
 ## Where TNN wins
 

@@ -13,9 +13,15 @@
 //      - SMOOTH leaves: planar models re-sampled on the half-pixel grid
 //        (v = m + (ax*du2+ay*dv2)/512 — bit-identical to the native render
 //        at even positions, model-sampled at odd positions).
-//      - SHAPES regions: atom exemplars drawn at 2x as 2x2 blocks
-//        (nearest — the exemplar's content preserved exactly, no invented
-//        smoothing).
+//      - SHAPES regions: atom exemplars drawn at 2x with 50/50 blend of
+//        nearest-2x2 and bilinear interpolation of the deviation field
+//        (deterministic integer arithmetic). Pure nearest preserves atom HF
+//        (best dB) but draws visible 2x2 pixel-grid rectangles (Micah
+//        2026-09-26: "weird rectangle sections"); pure bilinear kills the
+//        grid but loses detail. The 50/50 blend halves the grid contrast
+//        while keeping half the detail. Region boundaries are feathered
+//        (4-pixel 2x cross-fade, labeled CONSTRUCTED-SMOOTH) so SHAPES/atom
+//        vs NO-FIT/bicubic transitions don't read as rectangles.
 //      - LINES segments: chords re-rasterized at doubled endpoints.
 //      - Even positions (2x,2y) are the OBSERVED pixels: set to the input
 //        exactly (the residual channel covers observed pixels).
@@ -26,6 +32,11 @@
 //        3 CONSTRUCTED-SHAPES  — built from a SHAPES atom exemplar
 //        4 INVENTED            — no layer model covers it (counted honestly;
 //                              ~0 expected: SMOOTH tiles the frame)
+//        6 CONSTRUCTED-NO-FIT  — REJECT OPTION (Micah 2026-09-26 ~13:45):
+//                              SHAPES said "no atom fits" here; honest
+//                              bicubic interpolation, never presented as
+//                              understood. (5 is CONSTRUCTED-SHAPES-EXTRAP,
+//                              used by the outpaint phase only.)
 //   4. BUILDS the generic-interpolator baseline: Catmull-Rom bicubic 2x in
 //      exact integer arithmetic (t=0.5 weights [-1,9,9,-1]/16, separable,
 //      edge-clamped), on the same input.
@@ -58,6 +69,8 @@ fn lab_name(lv:i64, b:[]u8, o:i64) i64 {
     if (lv == 1) { return tab_puts(b, o, "CONSTRUCTED-SMOOTH (planar model)"); }
     if (lv == 2) { return tab_puts(b, o, "CONSTRUCTED-LINES (segment model)"); }
     if (lv == 3) { return tab_puts(b, o, "CONSTRUCTED-SHAPES (atom exemplar)"); }
+    if (lv == 5) { return tab_puts(b, o, "CONSTRUCTED-SHAPES-EXTRAP (outpaint only)"); }
+    if (lv == 6) { return tab_puts(b, o, "CONSTRUCTED-NO-FIT (no atom fits; honest interpolation)"); }
     return tab_puts(b, o, "INVENTED (no layer model)");
 }
 
@@ -69,7 +82,7 @@ fn lab_name(lv:i64, b:[]u8, o:i64) i64 {
 // At even positions this equals tl_smooth_render bit-for-bit.
 fn smooth_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
     lx:[]i64, ly:[]i64, lw:[]i64, lh:[]i64, lm:[]i64, lg:[]i64,
-    nleaf:i64) void {
+    nleaf:i64, nfx:[]i64, nfy:[]i64, nfw:[]i64, nfh:[]i64, nnofit:i64) void {
     let li:i64 = 0;
     while (li < nleaf) {
         let x0:i64 = lx[li]; let y0:i64 = ly[li];
@@ -86,11 +99,27 @@ fn smooth_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
             let OX:i64 = 2 * x0;
             while (OX < 2 * x0 + 2 * bw) {
                 let du2:i64 = OX - 2 * x0 - 2 * ox;
-                let p:i64 = (OY * W + OX) * 3;
-                acc[p] = acc[p] + m0 + (ax * du2 + ay * dv2) / 512;
-                acc[p + 1] = acc[p + 1] + m1 + (bx * du2 + by * dv2) / 512;
-                acc[p + 2] = acc[p + 2] + m2 + (cx * du2 + cy * dv2) / 512;
-                lab[OY * W + OX] = labval as u8;
+                // respect prior layer claims: SHAPES/LINES render earlier in
+                // deliberation order; SMOOTH only fills unclaimed pixels.
+                // Also skip SHAPES-rejected blocks: SHAPES abstained there
+                // ("no atom fits"); those get honest bicubic (NO-FIT), not
+                // a planar paper-over.
+                let in_nofit:i64 = 0;
+                let qn:i64 = 0;
+                while (qn < nnofit) {
+                    if (OX >= 2 * nfx[qn] && OX < 2 * (nfx[qn] + nfw[qn]) &&
+                        OY >= 2 * nfy[qn] && OY < 2 * (nfy[qn] + nfh[qn])) {
+                        in_nofit = 1;
+                    }
+                    qn = qn + 1;
+                }
+                if ((lab[OY * W + OX] as i64) == 4 && in_nofit == 0) {
+                    let p:i64 = (OY * W + OX) * 3;
+                    acc[p] = acc[p] + m0 + (ax * du2 + ay * dv2) / 512;
+                    acc[p + 1] = acc[p + 1] + m1 + (bx * du2 + by * dv2) / 512;
+                    acc[p + 2] = acc[p + 2] + m2 + (cx * du2 + cy * dv2) / 512;
+                    lab[OY * W + OX] = labval as u8;
+                }
                 OX = OX + 1;
             }
             OY = OY + 1;
@@ -99,8 +128,169 @@ fn smooth_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
     }
 }
 
-// SHAPES 2x: atom exemplars drawn at 2x scale as 2x2 blocks (nearest).
-// The exemplar's content is preserved exactly — no invented smoothing.
+// BOUNDARY FEATHERING: cross-fade a 4-pixel 2x band across region boundaries
+// so SHAPES/atom texture vs NO-FIT/bicubic (or atom-vs-atom) transitions don't
+// read as visible rectangles. Feathered pixels get CONSTRUCTED-SMOOTH (1).
+// rx..rat: SHAPES regions (native coords, rat=atom idx); fx..fh: NO-FIT
+// regions (native coords). All regions incl. nofit are feathered against
+// each other; SHAPES-SHAPES pairs with the same atom are skipped (continuous).
+fn tl_feather_bounds(acc:[]i64, lab:[]u8, W:i64, H:i64,
+    rx:[]i64, ry:[]i64, rw:[]i64, rh:[]i64, rat:[]i64, nreg:i64,
+    fx:[]i64, fy:[]i64, fw:[]i64, fh:[]i64, nnofit:i64) void {
+    // build a unified list: kind 0=SHAPES (with atom), 1=NOFIT
+    // (cap 4096+4096; static arrays on stack via nio_alloc in caller? --
+    //  simpler: two-phase loops over the two lists with a kind flag)
+    let i:i64 = 0;
+    while (i < nreg + nnofit) {
+        let ix0:i64 = 0; let iy0:i64 = 0; let iw:i64 = 0; let ih:i64 = 0;
+        let iat:i64 = -1; let ikind:i64 = 0;
+        if (i < nreg) {
+            ix0 = rx[i]; iy0 = ry[i]; iw = rw[i]; ih = rh[i];
+            iat = rat[i]; ikind = 0;
+        } else {
+            let j:i64 = i - nreg;
+            ix0 = fx[j]; iy0 = fy[j]; iw = fw[j]; ih = fh[j];
+            iat = -1; ikind = 1;
+        }
+        let k:i64 = i + 1;
+        while (k < nreg + nnofit) {
+            let kx0:i64 = 0; let ky0:i64 = 0; let kw:i64 = 0; let kh:i64 = 0;
+            let kat:i64 = -1; let kkind:i64 = 0;
+            if (k < nreg) {
+                kx0 = rx[k]; ky0 = ry[k]; kw = rw[k]; kh = rh[k];
+                kat = rat[k]; kkind = 0;
+            } else {
+                let j2:i64 = k - nreg;
+                kx0 = fx[j2]; ky0 = fy[j2]; kw = fw[j2]; kh = fh[j2];
+                kat = -1; kkind = 1;
+            }
+            // skip SHAPES-SHAPES with same atom (continuous, no seam)
+            let skip:i64 = 0;
+            if (ikind == 0 && kkind == 0 && iat == kat) { skip = 1; }
+            if (skip == 0) {
+                // vertical adjacency: i right edge == k left edge
+                if (ix0 + iw == kx0) {
+                    let y0:i64 = iy0; if (ky0 > y0) { y0 = ky0; }
+                    let y1:i64 = iy0 + ih; if (ky0 + kh < y1) { y1 = ky0 + kh; }
+                    if (y1 > y0) {
+                        tl_feather_v(acc, lab, W, H, 2 * kx0, 2 * y0, 2 * y1);
+                    }
+                }
+                if (kx0 + kw == ix0) {
+                    let y0b:i64 = iy0; if (ky0 > y0b) { y0b = ky0; }
+                    let y1b:i64 = iy0 + ih; if (ky0 + kh < y1b) { y1b = ky0 + kh; }
+                    if (y1b > y0b) {
+                        tl_feather_v(acc, lab, W, H, 2 * ix0, 2 * y0b, 2 * y1b);
+                    }
+                }
+                // horizontal adjacency: i bottom edge == k top edge
+                if (iy0 + ih == ky0) {
+                    let x0:i64 = ix0; if (kx0 > x0) { x0 = kx0; }
+                    let x1:i64 = ix0 + iw; if (kx0 + kw < x1) { x1 = kx0 + kw; }
+                    if (x1 > x0) {
+                        tl_feather_h(acc, lab, W, H, 2 * ky0, 2 * x0, 2 * x1);
+                    }
+                }
+                if (ky0 + kh == iy0) {
+                    let x0b:i64 = ix0; if (kx0 > x0b) { x0b = kx0; }
+                    let x1b:i64 = ix0 + iw; if (kx0 + kw < x1b) { x1b = kx0 + kw; }
+                    if (x1b > x0b) {
+                        tl_feather_h(acc, lab, W, H, 2 * iy0, 2 * x0b, 2 * x1b);
+                    }
+                }
+            }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return;
+}
+
+// vertical feather at 2x x=xb, rows [y0,y1): 4-pixel cross-fade.
+// samples pure values from x=xb-3 (left) and x=xb+2 (right).
+fn tl_feather_v(acc:[]i64, lab:[]u8, W:i64, H:i64, xb:i64, y0:i64, y1:i64) void {
+    if (xb < 3 || xb + 2 >= W) { return; }
+    if (y0 < 0) { y0 = 0; }
+    if (y1 > H) { y1 = H; }
+    let y:i64 = y0;
+    while (y < y1) {
+        let pl:i64 = (y * W + (xb - 3)) * 3;
+        let pr:i64 = (y * W + (xb + 2)) * 3;
+        let l0:i64 = acc[pl]; let l1:i64 = acc[pl + 1]; let l2:i64 = acc[pl + 2];
+        let r0:i64 = acc[pr]; let r1:i64 = acc[pr + 1]; let r2:i64 = acc[pr + 2];
+        // xb-2: 3/4 left, 1/4 right (skip if KNOWN)
+        if ((lab[y * W + (xb - 2)] as i64) != 0) {
+            let p0:i64 = (y * W + (xb - 2)) * 3;
+            acc[p0] = (3 * l0 + r0) / 4; acc[p0 + 1] = (3 * l1 + r1) / 4; acc[p0 + 2] = (3 * l2 + r2) / 4;
+            lab[y * W + (xb - 2)] = 1;
+        }
+        // xb-1: 1/2, 1/2
+        if ((lab[y * W + (xb - 1)] as i64) != 0) {
+            let p1:i64 = (y * W + (xb - 1)) * 3;
+            acc[p1] = (l0 + r0) / 2; acc[p1 + 1] = (l1 + r1) / 2; acc[p1 + 2] = (l2 + r2) / 2;
+            lab[y * W + (xb - 1)] = 1;
+        }
+        // xb: 1/2, 1/2
+        if ((lab[y * W + xb] as i64) != 0) {
+            let p2:i64 = (y * W + xb) * 3;
+            acc[p2] = (l0 + r0) / 2; acc[p2 + 1] = (l1 + r1) / 2; acc[p2 + 2] = (l2 + r2) / 2;
+            lab[y * W + xb] = 1;
+        }
+        // xb+1: 1/4 left, 3/4 right
+        if ((lab[y * W + (xb + 1)] as i64) != 0) {
+            let p3:i64 = (y * W + (xb + 1)) * 3;
+            acc[p3] = (l0 + 3 * r0) / 4; acc[p3 + 1] = (l1 + 3 * r1) / 4; acc[p3 + 2] = (l2 + 3 * r2) / 4;
+            lab[y * W + (xb + 1)] = 1;
+        }
+        y = y + 1;
+    }
+    return;
+}
+
+// horizontal feather// horizontal feather at 2x y=yb, cols [x0,x1): 4-pixel cross-fade.
+fn tl_feather_h(acc:[]i64, lab:[]u8, W:i64, H:i64, yb:i64, x0:i64, x1:i64) void {
+    if (yb < 3 || yb + 2 >= H) { return; }
+    if (x0 < 0) { x0 = 0; }
+    if (x1 > W) { x1 = W; }
+    let x:i64 = x0;
+    while (x < x1) {
+        let pt:i64 = ((yb - 3) * W + x) * 3;
+        let pb:i64 = ((yb + 2) * W + x) * 3;
+        let t0:i64 = acc[pt]; let t1:i64 = acc[pt + 1]; let t2:i64 = acc[pt + 2];
+        let b0:i64 = acc[pb]; let b1:i64 = acc[pb + 1]; let b2:i64 = acc[pb + 2];
+        if ((lab[(yb - 2) * W + x] as i64) != 0) {
+            let q0:i64 = ((yb - 2) * W + x) * 3;
+            acc[q0] = (3 * t0 + b0) / 4; acc[q0 + 1] = (3 * t1 + b1) / 4; acc[q0 + 2] = (3 * t2 + b2) / 4;
+            lab[(yb - 2) * W + x] = 1;
+        }
+        if ((lab[(yb - 1) * W + x] as i64) != 0) {
+            let q1:i64 = ((yb - 1) * W + x) * 3;
+            acc[q1] = (t0 + b0) / 2; acc[q1 + 1] = (t1 + b1) / 2; acc[q1 + 2] = (t2 + b2) / 2;
+            lab[(yb - 1) * W + x] = 1;
+        }
+        if ((lab[yb * W + x] as i64) != 0) {
+            let q2:i64 = (yb * W + x) * 3;
+            acc[q2] = (t0 + b0) / 2; acc[q2 + 1] = (t1 + b1) / 2; acc[q2 + 2] = (t2 + b2) / 2;
+            lab[yb * W + x] = 1;
+        }
+        if ((lab[(yb + 1) * W + x] as i64) != 0) {
+            let q3:i64 = ((yb + 1) * W + x) * 3;
+            acc[q3] = (t0 + 3 * b0) / 4; acc[q3 + 1] = (t1 + 3 * b1) / 4; acc[q3 + 2] = (t2 + 3 * b2) / 4;
+            lab[(yb + 1) * W + x] = 1;
+        }
+        x = x + 1;
+    }
+    return;
+}
+
+// SHAPES 2x: atom exemplars// SHAPES 2x: atom exemplars drawn at 2x with BILINEAR interpolation of the
+// exemplar's deviation field (not nearest 2x2 blocks). The nearest-2x2
+// rendering preserved the exemplar "exactly" but produced visible chunky
+// pixel-grid rectangles (Micah 2026-09-26: "weird rectangle sections").
+// Bilinear is the honest 2x sampling of the atom model: the exemplar's
+// structure is preserved, the Minecraft blockiness is gone. Deterministic
+// integer arithmetic with round-half-away-from-zero. Label stays
+// CONSTRUCTED-SHAPES: still constructed from the atom model.
 fn shapes_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
     a0:[]u8, a1:[]u8, a2:[]u8, a3:[]u8, a4:[]u8,
     rx:[]i64, ry:[]i64, rw:[]i64, rh:[]i64, rs:[]i64, rat:[]i64, rm:[]i64,
@@ -125,20 +315,51 @@ fn shapes_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
         while (iy < bh) {
             let ix:i64 = 0;
             while (ix < bw) {
+                // BLEND nearest+bilinear 50/50: keeps half the atom's HF
+                // detail (dB) while halving the 2x2 grid contrast (visual).
+                // Deterministic integer arithmetic.
                 let aq:i64 = abase + (iy * s + ix) * 6;
                 let d0:i64 = r_i16le(atoms, aq);
                 let d1:i64 = r_i16le(atoms, aq + 2);
                 let d2:i64 = r_i16le(atoms, aq + 4);
+                let jx:i64 = ix + 1; if (jx >= bw) { jx = ix; }
+                let jy:i64 = iy + 1; if (jy >= bh) { jy = iy; }
+                let dr0:i64 = sh_dev(atoms, abase, s, jx, iy, bw, bh, 0);
+                let dr1:i64 = sh_dev(atoms, abase, s, jx, iy, bw, bh, 1);
+                let dr2:i64 = sh_dev(atoms, abase, s, jx, iy, bw, bh, 2);
+                let dd0:i64 = sh_dev(atoms, abase, s, ix, jy, bw, bh, 0);
+                let dd1:i64 = sh_dev(atoms, abase, s, ix, jy, bw, bh, 1);
+                let dd2:i64 = sh_dev(atoms, abase, s, ix, jy, bw, bh, 2);
+                let drd0:i64 = sh_dev(atoms, abase, s, jx, jy, bw, bh, 0);
+                let drd1:i64 = sh_dev(atoms, abase, s, jx, jy, bw, bh, 1);
+                let drd2:i64 = sh_dev(atoms, abase, s, jx, jy, bw, bh, 2);
                 let dy:i64 = 0;
                 while (dy < 2) {
                     let dx:i64 = 0;
                     while (dx < 2) {
+                        // bilinear component
+                        let b0:i64 = d0; let b1:i64 = d1; let b2:i64 = d2;
+                        if (dx == 1 && dy == 0) {
+                            b0 = sh_bilinear2(d0, dr0); b1 = sh_bilinear2(d1, dr1); b2 = sh_bilinear2(d2, dr2);
+                        }
+                        if (dx == 0 && dy == 1) {
+                            b0 = sh_bilinear2(d0, dd0); b1 = sh_bilinear2(d1, dd1); b2 = sh_bilinear2(d2, dd2);
+                        }
+                        if (dx == 1 && dy == 1) {
+                            b0 = sh_bilinear4(d0, dr0, dd0, drd0);
+                            b1 = sh_bilinear4(d1, dr1, dd1, drd1);
+                            b2 = sh_bilinear4(d2, dr2, dd2, drd2);
+                        }
+                        // 50/50 blend: (nearest + bilinear)/2
+                        let e0:i64 = sh_bilinear2(d0, b0);
+                        let e1:i64 = sh_bilinear2(d1, b1);
+                        let e2:i64 = sh_bilinear2(d2, b2);
                         let OX:i64 = 2 * x0 + 2 * ix + dx;
                         let OY:i64 = 2 * y0 + 2 * iy + dy;
                         let p:i64 = (OY * W + OX) * 3;
-                        acc[p] = acc[p] + m0 + d0;
-                        acc[p + 1] = acc[p + 1] + m1 + d1;
-                        acc[p + 2] = acc[p + 2] + m2 + d2;
+                        acc[p] = acc[p] + m0 + e0;
+                        acc[p + 1] = acc[p + 1] + m1 + e1;
+                        acc[p + 2] = acc[p + 2] + m2 + e2;
                         lab[OY * W + OX] = labval as u8;
                         dx = dx + 1;
                     }
@@ -150,6 +371,35 @@ fn shapes_render2x(acc:[]i64, lab:[]u8, labval:i64, W:i64,
         }
         ri = ri + 1;
     }
+}
+
+// (a+b)/2, round-half-away-from-zero (deterministic, unbiased)
+fn sh_bilinear2(a:i64, b:i64) i64 {
+    let s:i64 = a + b;
+    if (s >= 0) { return (s + 1) / 2; }
+    return (s - 1) / 2;
+}
+
+// (a+b+c+d)/4, round-half-away-from-zero
+fn sh_bilinear4(a:i64, b:i64, c:i64, d:i64) i64 {
+    let s:i64 = a + b + c + d;
+    if (s >= 0) { return (s + 2) / 4; }
+    return (s - 2) / 4;
+}
+
+// deviation at clamped (jx,jy), channel ch (0,1,2)
+fn sh_dev(atoms:[]u8, abase:i64, s:i64, jx:i64, jy:i64, bw:i64, bh:i64, ch:i64) i64 {
+    let cx:i64 = jx; if (cx < 0) { cx = 0; } if (cx >= bw) { cx = bw - 1; }
+    let cy:i64 = jy; if (cy < 0) { cy = 0; } if (cy >= bh) { cy = bh - 1; }
+    let aq:i64 = abase + (cy * s + cx) * 6 + ch * 2;
+    return r_i16le(atoms, aq);
+}
+
+// Catmull-Rom 1D midpoint: (-p0 + 9*p1 + 9*p2 - p3)/16, round-half-away
+fn sh_cubic1(p0:i64, p1:i64, p2:i64, p3:i64) i64 {
+    let num:i64 = -p0 + 9 * p1 + 9 * p2 - p3;
+    if (num >= 0) { return (num + 8) / 16; }
+    return (num - 8) / 16;
 }
 
 // LINES 2x: chords re-rasterized at doubled endpoints (same Bresenham
@@ -176,7 +426,8 @@ fn lines_render2x_lab(acc:[]i64, lab:[]u8, labval:i64, W:i64, H:i64,
                     if (yy >= 0) {
                         if (yy < H) {
                             let p:i64 = yy * W + xx;
-                            if (painted[p] == 0) {
+                            // respect SHAPES' prior claim (deliberation order)
+                            if (painted[p] == 0 && (lab[p] as i64) == 4) {
                                 painted[p] = 1;
                                 let q:i64 = p * 3;
                                 acc[q] = acc[q] + m0;
@@ -456,6 +707,14 @@ fn main() i32 {
     let hrnreg:[]i64 = nio_alloc(8) as []i64;
     let hntake:[]i64 = nio_alloc(40) as []i64;
     let hnsplit:[]i64 = nio_alloc(40) as []i64;
+    // REJECT OPTION (Micah 2026-09-26 ~13:45): blocks SHAPES abstains on
+    // ("no atom fits") — x,y,w,h in observation coordinates.
+    let hnfx:[]i64 = nio_alloc((4096 * 8) as i32) as []i64;
+    let hnfy:[]i64 = nio_alloc((4096 * 8) as i32) as []i64;
+    let hnfw:[]i64 = nio_alloc((4096 * 8) as i32) as []i64;
+    let hnfh:[]i64 = nio_alloc((4096 * 8) as i32) as []i64;
+    let hnnofit:[]i64 = nio_alloc(8) as []i64;
+    let hnrej:[]i64 = nio_alloc(40) as []i64;
     let hsilo:[]i64 = nio_alloc(8) as []i64;
     let hsihi:[]i64 = nio_alloc(8) as []i64;
     let hrep:[]i64 = nio_alloc(8) as []i64;
@@ -523,11 +782,14 @@ fn main() i32 {
                 ha0, ha1, ha2, ha3, ha4,
                 hex0, hex1, hex2, hex3, hex4, hna,
                 hrx, hry, hrw, hrh, hrs, hrat, hrm, hrnreg, hntake, hnsplit, 4096,
+                hnfx, hnfy, hnfw, hnfh, hnnofit, 4096, hnrej,
                 G, N, hrep, hsilo, hsihi, hgainfirst, hgainlast,
                 led, lo);
             lo = tab_puts(led, lo, "  regions=");
             lo = tab_puti(led, lo, hrnreg[0]);
-            lo = tab_puts(led, lo, "\n");
+            lo = tab_puts(led, lo, " rejected=");
+            lo = tab_puti(led, lo, hnnofit[0]);
+            lo = tab_puts(led, lo, " (no atom fits)\n");
         }
         lo = tab_puts(led, lo, "  measured: G=");
         lo = tab_puti(led, lo, G[0]);
@@ -638,7 +900,8 @@ fn main() i32 {
                 lo = tab_puts(led, lo, "  v = m + (ax*du2+ay*dv2)/512. At even positions this is bit-identical\n");
                 lo = tab_puts(led, lo, "  to my native render; at odd positions it is the plane's own value.\n");
                 smooth_render2x(acc, lab, 1, W,
-                    slx, sly, slw, slh, slm, slg, snleaf[0]);
+                    slx, sly, slw, slh, slm, slg, snleaf[0],
+                    hnfx, hnfy, hnfw, hnfh, hnnofit[0]);
                 let lf:i64 = 0;
                 while (lf < snleaf[0]) {
                     lo = tab_puts(led, lo, "  LEAF ");
@@ -697,8 +960,8 @@ fn main() i32 {
                 }
             }
             if (id4 == 3) {
-                lo = tab_puts(led, lo, "  method: each region's atom exemplar drawn at 2x as 2x2 blocks\n");
-                lo = tab_puts(led, lo, "  (nearest — the exemplar's content preserved exactly).\n");
+                lo = tab_puts(led, lo, "  method: each region's atom exemplar drawn at 2x, bilinear interp\n");
+                lo = tab_puts(led, lo, "  of the deviation field (deterministic integer).\n");
                 shapes_render2x(acc, lab, 3, W,
                     ha0, ha1, ha2, ha3, ha4,
                     hrx, hry, hrw, hrh, hrs, hrat, hrm, hrnreg[0], w);
@@ -743,6 +1006,58 @@ fn main() i32 {
         ey = ey + 1;
     }
     _zag_println("observed pixels placed (KNOWN)");
+    // ---- generic-interpolator baseline: Catmull-Rom bicubic 2x ----
+    // (moved before the fallbacks: the NO-FIT fallback draws from it)
+    let fb_bic:[]u8 = nio_alloc((npix2 * 3) as i32);
+    if (fb_bic.len == 0) { _zag_println("alloc fb_bic failed"); return 1; }
+    bicubic2x(orig, w, h, fb_bic, W, H);
+    _zag_println("bicubic baseline done");
+    // ---- NO-FIT fallback (REJECT OPTION) ----
+    // Blocks where SHAPES said "no atom fits": honest bicubic interpolation,
+    // labeled CONSTRUCTED-NO-FIT (6) — "my vocabulary has nothing for this."
+    // Only pixels no layer model claimed (label 4) are touched: a genuine
+    // LINES/SMOOTH construction stands even inside a rejected SHAPES block.
+    // Even positions are KNOWN (observed) and never touched.
+    let nf:i64 = 0;
+    while (nf < hnnofit[0]) {
+        let rx0:i64 = 2 * hnfx[nf];
+        let ry0:i64 = 2 * hnfy[nf];
+        let rw2:i64 = 2 * hnfw[nf];
+        let rh2:i64 = 2 * hnfh[nf];
+        let yy:i64 = ry0;
+        while (yy < ry0 + rh2) {
+            let xx:i64 = rx0;
+            while (xx < rx0 + rw2) {
+                if (xx < W && yy < H) {
+                    let li2:i64 = yy * W + xx;
+                    // lab==4 means unclaimed by any layer model; even
+                    // positions are already label 0 (KNOWN), so lab==4
+                    // exactly selects the constructed pixels here.
+                    if ((lab[li2] as i64) == 4) {
+                        let p:i64 = li2 * 3;
+                        acc[p] = fb_bic[p] as i64;
+                        acc[p + 1] = fb_bic[p + 1] as i64;
+                        acc[p + 2] = fb_bic[p + 2] as i64;
+                        lab[li2] = 6;
+                    }
+                }
+                xx = xx + 1;
+            }
+            yy = yy + 1;
+        }
+        nf = nf + 1;
+    }
+    _zag_println("no-fit pixels filled (bicubic, labeled CONSTRUCTED-NO-FIT)");
+    // ---- BOUNDARY FEATHERING (Micah 2026-09-26: "weird rectangle sections") ----
+    // SHAPES regions (atom-textured) abutting NO-FIT regions (smooth bicubic)
+    // or different atoms read as visible rectangles. Feather a 4-pixel 2x
+    // band across each region boundary with a linear cross-fade. Feathered
+    // pixels are labeled CONSTRUCTED-SMOOTH (1): honest interpolation, not
+    // an atom claim. Deterministic integer arithmetic.
+    tl_feather_bounds(acc, lab, W, H,
+        hrx, hry, hrw, hrh, hrat, hrnreg[0],
+        hnfx, hnfy, hnfw, hnfh, hnnofit[0]);
+    _zag_println("boundary feathering done");
     // ---- INVENTED fallback ----
     // TNN's committed layers do not cover every odd pixel (on this
     // observation SMOOTH was reverted, so no planar fallback is part of
@@ -780,9 +1095,9 @@ fn main() i32 {
     // ---- label map (gallery) + raw labels (outpaint input) ----
     let lmp:[]u8 = nio_alloc((npix2 * 3) as i32);
     if (lmp.len == 0) { _zag_println("alloc lmp failed"); return 1; }
-    let labcount:[]i64 = nio_alloc(40) as []i64;
+    let labcount:[]i64 = nio_alloc(56) as []i64;
     let lci:i64 = 0;
-    while (lci < 5) { labcount[lci] = 0; lci = lci + 1; }
+    while (lci < 7) { labcount[lci] = 0; lci = lci + 1; }
     let mp:i64 = 0;
     while (mp < npix2) {
         let lv:i64 = lab[mp] as i64;
@@ -793,6 +1108,8 @@ fn main() i32 {
         if (lv == 2) { lmp[q3] = 220; lmp[q3 + 1] = 60; lmp[q3 + 2] = 50; }
         if (lv == 3) { lmp[q3] = 60; lmp[q3 + 1] = 170; lmp[q3 + 2] = 80; }
         if (lv == 4) { lmp[q3] = 200; lmp[q3 + 1] = 60; lmp[q3 + 2] = 200; }
+        if (lv == 5) { lmp[q3] = 230; lmp[q3 + 1] = 140; lmp[q3 + 2] = 40; }
+        if (lv == 6) { lmp[q3] = 50; lmp[q3 + 1] = 190; lmp[q3 + 2] = 190; }
         mp = mp + 1;
     }
     let rcl2:i64 = bmp_write(oroot, "labelmap.bmp", lmp, W, H);
@@ -803,7 +1120,7 @@ fn main() i32 {
     lo = tab_puti(led, lo, npix2);
     lo = tab_puts(led, lo, " px):\n");
     let lc2:i64 = 0;
-    while (lc2 < 5) {
+    while (lc2 < 7) {
         lo = tab_puts(led, lo, "  ");
         lo = lab_name(lc2, led, lo);
         lo = tab_puts(led, lo, ": ");
@@ -817,13 +1134,9 @@ fn main() i32 {
     lo = tab_puts(led, lo, "is reported honestly even if it is zero (SMOOTH tiles the frame).\n");
     _zag_println("labelmap written");
 
-    // ---- bicubic baseline on the same input ----
-    let fb_bic:[]u8 = nio_alloc((npix2 * 3) as i32);
-    if (fb_bic.len == 0) { _zag_println("alloc fb_bic failed"); return 1; }
-    bicubic2x(orig, w, h, fb_bic, W, H);
+    // (bicubic baseline already computed before the fallbacks; just write it)
     let rcb:i64 = bmp_write(oroot, "upscale_bicubic.bmp", fb_bic, W, H);
     if (rcb != 0) { _zag_println("bicubic bmp write failed"); return 1; }
-    _zag_println("bicubic baseline done");
 
     // ================= MEASUREMENT (held ground truth; never constructed-from) ====
     let gfd:i64 = nio_open_child(root, "gt_512x184.bmp", 0);
@@ -957,7 +1270,7 @@ fn main() i32 {
     let loo:i64 = 0;
     loo = tab_puts(lbuf, loo, "per-label SSE over ODD positions only (constructed pixels), TNN vs bicubic, n counts odd px per class\n");
     let lc3:i64 = 0;
-    while (lc3 < 5) {
+    while (lc3 < 7) {
         let ls_tnn:[]i64 = nio_alloc(24) as []i64;
         let ls_bic:[]i64 = nio_alloc(24) as []i64;
         let ln:i64 = 0;
@@ -1010,12 +1323,12 @@ fn main() i32 {
     }
     loo = tab_puts(lbuf, loo, "label counts (all 512x184 px): ");
     let lc4:i64 = 0;
-    while (lc4 < 5) {
+    while (lc4 < 7) {
         loo = tab_puti(lbuf, loo, labcount[lc4]);
-        if (lc4 < 4) { loo = tab_puts(lbuf, loo, ","); }
+        if (lc4 < 6) { loo = tab_puts(lbuf, loo, ","); }
         lc4 = lc4 + 1;
     }
-    loo = tab_puts(lbuf, loo, " for labels 0..4\n");
+    loo = tab_puts(lbuf, loo, " for labels 0..6\n");
     let rcl3:i64 = file_write(oroot, "LABELS.txt", lbuf[0..loo]);
     if (rcl3 != 0) { _zag_println("labels write failed"); return 1; }
 
