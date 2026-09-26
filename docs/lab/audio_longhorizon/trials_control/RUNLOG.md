@@ -61,6 +61,32 @@ All times UTC, 2026-09-26. Workdir: `~/workspace/audio_longhorizon/trials_contro
   outputs deleted, relaunched correctly (ANOM-008).
 - loopfresh: wired, `targets/loopfresh20.txt` → `runs/loopfresh`.
 - All five launched 2026-09-26 ~04:56 UTC in parallel (2-core VM, heavy load).
+- **r4**: third COMPLETE 160-target wired run, launched 2026-09-26 ~09:30 UTC
+  post-reboot (binary SHA verified unchanged:
+  `0c01be7471f853176fa7d8ce677a3e5b78ab6dcf60ff927f568ae7b5e78eae09`),
+  → `runs/r4`. r2 died at 159/160 (ANOM-010) and does not satisfy the 3×
+  completed-rerun requirement; r4 replaces it.
+
+## Scorer corrections (2026-09-26, before final scoring)
+Frozen `src/scorer_ctrl.py` SHA
+`7a4c232a1b96aa1a9a2b52a5b843c35a3c604c7c3f246ea2898ab8421e726224`:
+(1) restored HITFN; (2) one-based axis bounds pitch [1,41), env [41,81),
+pros [81,121); (3) ERR ratio = aggregate sum(ERR3)/sum(ERR0) (the
+"mean_err_ratio" field name is a leftover; formula is the aggregate);
+(4) RC0 one-sided EXACT Fisher/hypergeometric (zero scorer RNG);
+(5) corrected equivalent bounds in `src/analyze.py`. The fresh loopfresh
+battery was first scored under the per-case-mean formula (0.951); rescored
+2026-09-26 under the corrected scorer: aggregate ratio 0.9649
+(`evidence/loopfresh_corrected.json`).
+
+## Byte-identity proof (r1≡r3; evidence/rerun_identity_r1r3.json)
+- Raw journal SHAs differ ONLY by embedded run-dir path segments
+  (`RENDERED runs/r1/...` vs `runs/r3/...`): r1
+  `00a26ce038043fd5c7caff3052c0c754691193dde5184ade71aa679387565d80`,
+  r3 `9116cd2c0bb0a115ac62e28f2180ac02b116835722587e49bfa0546fb300eb0e`.
+- Canonical journals (run-path normalized): identical, `5f8c19f9fb8de908…`.
+- WAV manifests (basename → SHA-256): 220/220 identical, zero mismatches.
+- r4 identity vs r1/r3: pending r4 completion.
 
 ## Prereg-noted deviations (all frozen before scored runs)
 1. MATCH renderer extension: the wired 5-action renderer cannot do continuous
@@ -74,3 +100,38 @@ All times UTC, 2026-09-26. Workdir: `~/workspace/audio_longhorizon/trials_contro
 
 ## Results
 - (pending run completion)
+
+## Waveform audit (analyzer-first, 2026-09-26)
+
+`src/waveaudit.py` (new): full analyzer-first battery over every render WAV —
+peak/DC/zero-crossing/clipping, spectral centroid, 50/60 Hz fundamental hum,
+HNR (cepstral), envelope stationarity (RMS thirds), spectral drift (centroid
+thirds), edge-click ratio (first/last 5 ms vs body), and agreement of measured
+descriptors with the journal's PLANNED values. Deterministic (numpy only).
+
+Results (`evidence/waveaudit_{r1,r3,r2,rc0,loopfresh}.json`):
+
+| Run | WAVs | Flags | Notes |
+|-----|------|-------|-------|
+| r1 | 220 | 27 | HUM50 13, HUM60 20, PLAN_F0_MISMATCH 23 |
+| r3 | 220 | 27 | identical to r1 (byte-identical renders) |
+| r2 | 218 | 27 | partial (159/160 targets) |
+| rc0 | 213 | 12 | HUM60 9, PLAN_F0_MISMATCH 3 |
+| loopfresh | 80 | 24 | HUM50 13, HUM60 17, PLAN_F0_MISMATCH 21 |
+
+- Zero CLIP / DC / EDGE_CLICK / LOW_HNR / NONSTAT_FLAT flags across all 951
+  renders. Max edge-click ratio 1.12 (threshold 12); max |DC| 3.9 (threshold
+  100); HNR ≥ 11.4 dB everywhere (mean ~20 dB).
+- The 50/60 Hz flags are FM-sideband artifacts of the wide-FM vibrato render
+  design, NOT mains: every flagged file has deep vibrato (vib_pm 493939–
+  500000, i.e. ±~50% FM deviation), and the renders are pure digital
+  synthesis with no mains/ADC path. First implementation used a harmonic-sum
+  hum detector which false-flagged 146/220 (sidebands land on 100/120/150/
+  180 Hz); corrected to fundamental-only.
+- PLAN_F0_MISMATCH: render-measured F0 differs >10% from journal-planned F0
+  (native rendering/hearing bias, ANOM-005). Envelope plan agreement 100%
+  in all runs.
+- Quirk found: in severed (rc0) loop targets, iter0 is severed (440 Hz) but
+  iter1+ corrections are wired (e.g. l121_iter1 planned 149578 mHz, vib
+  500000) — the sever flag does not propagate into the correction loop.
+  Benign for the RC0 guard (control axes only), noted for the record.

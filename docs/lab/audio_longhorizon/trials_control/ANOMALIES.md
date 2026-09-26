@@ -146,4 +146,31 @@ completed and flushed. Journals intact to last RENDERED.
 r1/r3 completed deterministically. (2) No evidence of OOM (no dmesg access).
 **DISPOSITION:** r1/r3 byte-identical proven (2×). r2 matches r1 on 159/160.
 rc0 has all 120 control targets (1–120); missing 155–160 are repeats,
-irrelevant for RC0. Reported honestly; determinism established.
+irrelevant for RC0. Reported honestly. 3× completed-rerun requirement is
+PENDING r4 (in progress); "determinism established" claims are amended until
+r4 lands.
+
+**ANOM-ID:** ANOM-011
+**DATE:** 2026-09-26
+**HORIZON:** §2b scorer sanity floor (prereg §2b: "scorer sanity floor ≥ 95%
+agreement to manifest labels on real material, else the battery is VOID")
+**OBSERVED:** The floor cannot be established. (1) `corpus/CLIP_MANIFEST.json`
+(359 entries) carries no independent pitch/envelope/prosody labels: labels
+are {noise_regime, donor, speaker, emotion, sentence, scene, transcription,
+...} only — verified by key audit 2026-09-26. Target "labels" in
+clip_measure.json are the frozen scorer's own measurements
+(SP.med_f0/SP.ans_env), so agreement would be circular. (2) The only
+independent F0 references are the 31 PTDB `.f0` tracks (lowf0 class), and
+they are unusable: voiced-flagged column medians range 77–3000 Hz for
+~90–150 Hz voices (column semantics unverifiable; `evidence/
+scorer_sanity_lowf0.json`). Those clips are <125 Hz anyway — outside the
+pitch axis selection (125–1200 Hz, lowf0 excluded).
+**EXPECTED:** ≥95% scorer/label agreement on real material for the actual
+battery targets.
+**CANDIDATES:** Corpus fixture limitation, not a trial defect — the sealed
+corpus was built without instrument labels.
+**DISPOSITION:** Recorded honestly. Per the prereg's own rule the §2b battery
+is VOID on the sanity-floor condition. The measured control numbers (pitch
+28/40, env 39/40, pros 29/40-void) stand as reported quantities but carry
+this battery-level caveat. RC0/RC1 guard results are unaffected (they test
+discriminative behavior, not label agreement).

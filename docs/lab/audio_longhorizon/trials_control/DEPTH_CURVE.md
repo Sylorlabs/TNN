@@ -41,6 +41,12 @@ Hit rate by 10-target depth band (r1, frozen scorer).
 The persistent history (recalled deltas) benefits repeated targets — the
 controller learns from experience within the session.
 
+Verified 2026-09-26 with the corrected scorer
+(`score_axis` TARGET-idx bounds 1–21 vs 141–161 on r1): both_hit=12,
+early_only=1, deep_only=3, neither=4. H1 = this phase's 40-target real sets;
+envelope/prosody have no repeat targets in this phase → no later checkpoint
+for those axes.
+
 ## Design notes
 
 - Single continuous session per run (r1/r3): depths 1–160, one target per

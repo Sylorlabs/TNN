@@ -93,14 +93,16 @@ def main():
         depth_curve[ax] = bands
     res['depth_curve'] = depth_curve
 
-    # ---- paired early-vs-deep pitch repeats (idx 0-19 vs 140-159) ----
+    # ---- paired early-vs-deep pitch repeats (TARGET idx 1-20 vs 141-160) ----
     j, d = R('r1', 'journal.txt'), R('r1')
-    early = score_axis(j, d, 'pitch', lo=0, hi=20)
-    ds = score_axis(j, d, 'pitch', lo=140, hi=160)
+    early = score_axis(j, d, 'pitch', lo=1, hi=21)
+    ds = score_axis(j, d, 'pitch', lo=141, hi=161)
     eh = set(early['hit_idx'])
     dh = set(ds['hit_idx'])
     res['paired_repeat'] = {
-        'early_hits': early['hits'], 'deep_hits': ds['hits'], 'n': 20,
+        'early_hits': early['hits'], 'early_n': early['n'],
+        'deep_hits': ds['hits'], 'deep_n': ds['n'],
+        'drift_pp': (ds['hit_rate'] - early['hit_rate']) * 100,
         'both_hit': len(eh & dh), 'early_only': len(eh - dh),
         'deep_only': len(dh - eh), 'neither': 20 - len(eh | dh),
     }

@@ -4,7 +4,7 @@
 
 | Criterion | Bar | Result | Verdict |
 |-----------|-----|--------|---------|
-| ERR(3)/ERR(0) | ≤ 0.80 | 0.951 | **FAIL** |
+| ERR(3)/ERR(0) | ≤ 0.80 | 0.965 | **FAIL** |
 | Wilcoxon p (one-sided) | < 0.01 | 0.275 | **FAIL** |
 | Strictly improve | ≥ 16/20 | 10/20 | **FAIL** |
 | Sign agreement | ≥ 80% | 76.5% | **FAIL** |
@@ -12,8 +12,14 @@
 | Sawtooth cases | (flag) | 6 | — |
 
 **§2c FRESH-STATE: FAIL.** The closed-loop correction does not reliably improve
-over open-loop. Mean ERR ratio 0.95 (near-zero net improvement); only 10/20
-cases strictly improve; 6 show sawtooth oscillation; 4 unstable.
+over open-loop. Aggregate ERR(3)/ERR(0) = 0.965 (near-zero net improvement);
+only 10/20 cases strictly improve; 6 show sawtooth oscillation; 4 unstable.
+
+NOTE: the ERR ratio here is the aggregate sum(ERR3)/sum(ERR0) per the
+corrected scorer (SHA 7a4c232a1b96aa1a9a2b52a5b843c35a3c604c7c3f246ea2898ab8421e726224),
+rescored 2026-09-26 after the formula correction (earlier draft reported
+0.951 from the per-case-mean implementation; the corrected 0.965 is WORSE,
+verdict unchanged: FAIL).
 
 ### Cause analysis (per-case ERR decomposition)
 
