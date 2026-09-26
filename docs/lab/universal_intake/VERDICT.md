@@ -14,7 +14,7 @@
 | WAV (PCM 8/16/24/32, float32/64, extensible) | ✅ BYTE-IDENTICAL | SHA-256: 17f57ff51f4e76ab24fba61000466433c8b9bb371ad31cfc1d794ff6d93a53e1 |
 | FLAC (mono 16/24-bit) | ✅ BYTE-IDENTICAL | Matches WAV SHA-256 exactly |
 | FLAC (stereo all assignments) | ✅ BYTE-IDENTICAL | 10 fixtures (assign 1/8/9/10, verbatim/fixed/wasted/const) match ffmpeg 0/88200; reruns byte-identical |
-| MP3 (Layer III) | ⚠️ HEADER ONLY | Frame headers parsed; full decode blocked |
+| MP3 (Layer III) | ⚠️ REFERENCE VALIDATED | Python oracle passes B1-B4 for CBR mono + Joint Stereo vs dr_mp3/ffmpeg; VBR blocked (reservoir bug); Zag B1 started |
 | MP4 container | ✅ PARSED | 8 samples extracted, NAL units validated |
 | H.264 (SPS) | ⚠️ PARAMS ONLY | 320×240 Baseline confirmed; slice decode blocked |
 | Progressive JPEG | ✅ SUPPORTED | T.81 Annex G: 0 coeff mismatches vs libjpeg; 3 sealed fixtures |
