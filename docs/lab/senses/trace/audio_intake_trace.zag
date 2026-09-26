@@ -1,0 +1,230 @@
+// audio_intake_trace.zag — TRACED audio intake driver (SENSE-TRACE v1).
+//
+// Runs TNN's canonical WAV intake with per-stage SHA-256 trace points:
+//   raw_read -> wav_parse -> head_samples_0_63 (fork) -> s16_extract -> held_pcm
+//
+// Intake idioms VERBATIM from docs/lab/audio_principles/crew_p/organ.zag
+// (origin/tnn-native-lab): chunk-aware RIFF walk, PCM16/mono/44100 gate,
+// get_s16 with CORRECT sign extension (v>=32768 -> v-65536; the f3_get32
+// unsigned trap is NOT present). This is the standing forward sense (crew-P
+// input organ); intake holds full 16-bit samples, loss enters only at the
+// descriptor stage by design.
+//
+// THE HEAD-SAMPLE STAGE (samples 0-63): the input-verdict white-box found that
+// hear() never stores samples 0..63 (L1 bug; a sibling worker is repairing it).
+// Stage 2 extracts + stores the 128 head bytes and checksums them, recording
+// stored=1. The repair's verification compares hear()'s emitted head checksum
+// against this driver's golden head checksum (see TRACELOG_FORMAT.md).
+//
+// argv: 1=in.wav 2=out.raw 3=trace.log 4=trace=on|off
+// out.raw = held samples as s16 LE bytes (nsamp*2). Byte-identical with
+// tracing on vs off (zero-impact proof in RUNLOG.md).
+// Pure Zag, zero RNG.
+@import("./sense_trace.zag")
+
+// ---- VERBATIM from crew_p/organ.zag (origin/tnn-native-lab) ----
+fn get_s16(b:[]u8, idx:i64) i64 {
+    let o:i64 = idx * 2;
+    let lo:i64 = (b[o] as i64) & 255;
+    let hi:i64 = (b[o + 1] as i64) & 255;
+    let v:i64 = lo | (hi << 8);
+    if (v >= 32768) { v = v - 65536; }
+    return v;
+}
+fn au_get_u32(b:[]u8, o:i64) i64 {
+    return ((b[o] as i64) & 255) | (((b[o + 1] as i64) & 255) << 8) | (((b[o + 2] as i64) & 255) << 16) | (((b[o + 3] as i64) & 255) << 24);
+}
+fn au_put64(a:[]u8, o:i64, v:i64) void {
+    let i:i64 = 0;
+    while (i < 8) {
+        a[o + i] = ((v >> (i * 8)) & 255) as u8;
+        i = i + 1;
+    }
+    return;
+}
+fn au_get64(a:[]u8, o:i64) i64 {
+    let v:i64 = 0;
+    let i:i64 = 0;
+    while (i < 8) {
+        v = v | (((a[o + i] as i64) & 255) << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+// VERBATIM wav_parse (renamed fns only). META2: [0]=dsamp, [8]=nsamp.
+fn wav_parse(b:[]u8, META2:[]u8) i64 {
+    if ((b.len as i64) < 44) { return 0; }
+    if (!(b[0] == 82 && b[1] == 73 && b[2] == 70 && b[3] == 70)) { return 0; }
+    if (!(b[8] == 87 && b[9] == 65 && b[10] == 86 && b[11] == 69)) { return 0; }
+    let off:i64 = 12;
+    let blen:i64 = b.len as i64;
+    let fmt_ok:i64 = 0;
+    let dsamp:i64 = -1;
+    let nsamp:i64 = 0;
+    while (off + 8 <= blen) {
+        let c0:i64 = b[off] as i64;
+        let c1:i64 = b[off + 1] as i64;
+        let c2:i64 = b[off + 2] as i64;
+        let c3:i64 = b[off + 3] as i64;
+        let sz:i64 = au_get_u32(b, off + 4);
+        if (c0 == 102 && c1 == 109 && c2 == 116 && c3 == 32) {
+            if (sz < 16) { return 0; }
+            let afmt:i64 = ((b[off + 8] as i64) & 255) | (((b[off + 9] as i64) & 255) << 8);
+            let ch:i64 = ((b[off + 10] as i64) & 255) | (((b[off + 11] as i64) & 255) << 8);
+            let sr:i64 = au_get_u32(b, off + 12);
+            let bits:i64 = ((b[off + 22] as i64) & 255) | (((b[off + 23] as i64) & 255) << 8);
+            if (afmt == 1 && ch == 1 && sr == 44100 && bits == 16) { fmt_ok = 1; }
+        }
+        if (c0 == 100 && c1 == 97 && c2 == 116 && c3 == 97) {
+            dsamp = (off + 8) / 2;
+            nsamp = sz / 2;
+        }
+        off = off + 8 + sz;
+    }
+    if (fmt_ok == 0 || dsamp < 0 || nsamp <= 0) { return 0; }
+    au_put64(META2, 0, dsamp);
+    au_put64(META2, 8, nsamp);
+    return 1;
+}
+// ---- END VERBATIM ----
+
+// file_write idiom (from image common.zag): O_WRONLY|O_CREAT|O_TRUNC
+fn au_file_write(root:i64, name:[]u8, data:[]u8) i64 {
+    let total:i64 = data.len;
+    let s:[]u8 = nio_cstr(name);
+    if (s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(257, root, _zag_slice_ptr(s) as i64, 657985, 420, 0, 0);
+    nio_free(s);
+    if (fd < 0) { return -2; }
+    let done:i64 = 0;
+    while (done < total) {
+        let n:i64 = total - done;
+        if (n > 1048576) { n = 1048576; }
+        let part:[]u8 = data[done..done + n];
+        let wr:i64 = nio_write_all(fd, part);
+        if (wr != n) { nio_close(fd); return -3; }
+        done = done + n;
+    }
+    nio_sync(fd);
+    nio_close(fd);
+    return 0;
+}
+
+// build "k=v,k=v" params into a small buffer; returns length
+fn au_params2(dst:[]u8, k1:[]u8, v1:i64, k2:[]u8, v2:i64) i64 {
+    let at:i64 = 0;
+    at = tr_cpy(dst, at, k1);
+    at = tr_cpy(dst, at, "=");
+    at = tr_i64(dst, at, v1);
+    at = tr_cpy(dst, at, ",");
+    at = tr_cpy(dst, at, k2);
+    at = tr_cpy(dst, at, "=");
+    at = tr_i64(dst, at, v2);
+    return at;
+}
+
+fn main() i32 {
+    let inname:[]u8 = _zag_arg(1);
+    let outname:[]u8 = _zag_arg(2);
+    let trname:[]u8 = _zag_arg(3);
+    let trflag:[]u8 = _zag_arg(4);
+    if (_zag_strcmp(inname, "") == 1) { _zag_println("need in.wav"); return 1; }
+    if (_zag_strcmp(outname, "") == 1) { _zag_println("need out.raw"); return 1; }
+    if (_zag_strcmp(trname, "") == 1) { _zag_println("need trace.log"); return 1; }
+    let ten:i64 = 0;
+    if (_zag_strcmp(trflag, "on") == 1) { ten = 1; }
+
+    let root:i64 = nio_open_root(".");
+    if (root < 0) { _zag_println("cannot open cwd root"); return 1; }
+
+    // ---- STAGE 0: raw_read ----
+    let fd:i64 = nio_open_child(root, inname, 0);
+    if (fd < 0) { _zag_println("cannot open input"); nio_close(root); return 1; }
+    if (nio_regular(fd) != 1) { _zag_println("input not regular"); nio_close(fd); nio_close(root); return 1; }
+    let fbuf:[]u8 = nio_alloc(8000000);
+    if (fbuf.len == 0) { _zag_println("alloc failed"); nio_close(fd); nio_close(root); return 1; }
+    let n:i64 = nio_read_exact(fd, fbuf, 7999999);
+    nio_close(fd);
+    if (n < 44) { _zag_println("short file"); nio_free(fbuf); nio_close(root); return 1; }
+    let raw:[]u8 = fbuf[0..n];
+    let raw_hex:[]u8 = tr_sha_hex(raw);
+
+    let tfd:i64 = tr_open(root, trname, ten);
+    tr_run(tfd, "audio", "WAV/PCM16/mono/44100", raw_hex, "ch=1,sr=44100,bits=16");
+    tr_stage(tfd, 0, "audio.raw_read", "-", raw_hex, 0, n, "origin=file");
+
+    // ---- STAGE 1: wav_parse (chunk-aware RIFF walk) ----
+    let META2:[]u8 = nio_alloc(16);
+    if (META2.len == 0) { _zag_println("alloc META2 failed"); return 1; }
+    if (wav_parse(raw, META2) == 0) { _zag_println("wav_parse failed"); tr_end(tfd, 1); tr_close(tfd); return 1; }
+    let dsamp:i64 = au_get64(META2, 0);
+    let nsamp:i64 = au_get64(META2, 8);
+    nio_free(META2);
+    let pstart:i64 = dsamp * 2;
+    let plen:i64 = nsamp * 2;
+    let payload:[]u8 = raw[pstart..pstart + plen];
+    let pay_hex:[]u8 = tr_sha_hex(payload);
+    let pb:[]u8 = nio_alloc(256);
+    let pl:i64 = au_params2(pb, "fmt_ok", 1, "dsamp", dsamp);
+    pl = tr_cpy(pb, pl, ",nsamp=");
+    pl = tr_i64(pb, pl, nsamp);
+    tr_stage(tfd, 1, "audio.wav_parse", raw_hex, pay_hex, n, plen, pb[0..pl]);
+    nio_free(pb);
+
+    // ---- STAGE 2: head_samples_0_63 (FORK — the traced head-sample stage) ----
+    // Stores samples 0..63 (128 bytes) into their own buffer and checksums the
+    // stored bytes. Golden head checksum lets the hear() repair verify it
+    // stores the true head instead of fabricating it.
+    let hn:i64 = 128;
+    if (plen < 128) { hn = plen; }
+    let head:[]u8 = nio_alloc(128);
+    if (head.len == 0) { _zag_println("alloc head failed"); return 1; }
+    let hi:i64 = 0;
+    while (hi < hn) { head[hi] = payload[hi]; hi = hi + 1; }
+    let head_in:[]u8 = payload[0..hn];
+    let head_in_hex:[]u8 = tr_sha_hex(head_in);
+    let head_out_hex:[]u8 = tr_sha_hex(head[0..hn]);
+    let hb:[]u8 = nio_alloc(256);
+    let hl:i64 = tr_cpy(hb, 0, "fork_of=audio.wav_parse,stored=1,n_head=64");
+    tr_stage(tfd, 2, "audio.head_samples_0_63", head_in_hex, head_out_hex, hn, hn, hb[0..hl]);
+    nio_free(hb);
+    nio_free(head_in_hex);
+    // (head_out_hex kept: it is the golden head checksum; freed after HELD)
+
+    // ---- STAGE 3: s16_extract (sign-extending conversion, get_s16 idiom) ----
+    let s16:[]u8 = nio_alloc((plen) as i32);
+    if (s16.len == 0) { _zag_println("alloc s16 failed"); return 1; }
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let v:i64 = get_s16(raw, dsamp + i);
+        s16[2 * i] = (v & 255) as u8;
+        s16[2 * i + 1] = ((v >> 8) & 255) as u8;
+        i = i + 1;
+    }
+    let s16_hex:[]u8 = tr_sha_hex(s16);
+    let sb:[]u8 = nio_alloc(256);
+    let sl:i64 = au_params2(sb, "nsamp", nsamp, "sign_extend", 1);
+    sl = tr_cpy(sb, sl, ",conv=get_s16");
+    tr_stage(tfd, 3, "audio.s16_extract", pay_hex, s16_hex, plen, plen, sb[0..sl]);
+    nio_free(sb);
+
+    // ---- STAGE 4: held_pcm (the held representation: full 16-bit samples) ----
+    tr_stage(tfd, 4, "audio.held_pcm", s16_hex, s16_hex, plen, plen, "identity");
+    tr_held(tfd, s16_hex, plen, "PCM16_samples_held_as_s16LE;_TNN_holds_full_16bit");
+    tr_end(tfd, 0);
+    tr_close(tfd);
+
+    // data path output (identical with tracing on vs off)
+    let wrc:i64 = au_file_write(root, outname, s16);
+    nio_close(root);
+    nio_free(fbuf);
+    nio_free(raw_hex);
+    nio_free(pay_hex);
+    nio_free(head);
+    nio_free(head_out_hex);
+    nio_free(s16);
+    nio_free(s16_hex);
+    if (wrc != 0) { _zag_println("write failed"); return 1; }
+    _zag_println("audio intake trace ok");
+    return 0;
+}
