@@ -16,7 +16,11 @@ pros 29/40). Evidence: `evidence/rerun_identity_r1r3r4.json`,
 |----------|-----------|----------|------------|----------------------|--------------|
 | Pitch    | 28/40     | 70.0%    | PASS       | p=1.9e-12 PASS       | 0.0% PASS    |
 | Envelope | 39/40     | 97.5%    | PASS       | p=6.1e-10 PASS       | 0.0% PASS    |
-| Prosody  | 29/40     | 72.5%    | **VOID**   | (pending)            | 27.5% **VOID** |
+| Prosody  | 29/40     | 72.5%    | **VOID**   | p=4.4e-13 PASS       | 27.5% **VOID** |
+
+**RC0 note (ANOM-012):** the sever flag does not propagate into the
+closed-loop correction iterations of L-targets (ITER 1–3 render wired).
+Benign for the guard — it scores only the once-rendered M-targets.
 
 **Prosody scorer VOID**: RC1 deranged hit rate 27.5% (11/40) exceeds the 25% bar.
 Per prereg, this voids the SCORER (not the trial). The 72.5% hit rate cannot be

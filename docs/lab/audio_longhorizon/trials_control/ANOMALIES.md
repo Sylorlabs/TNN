@@ -150,6 +150,27 @@ irrelevant for RC0. Reported honestly. 3× completed-rerun requirement is
 PENDING r4 (in progress); "determinism established" claims are amended until
 r4 lands.
 
+**ANOM-ID:** ANOM-012
+**DATE:** 2026-09-26
+**HORIZON:** RC0 sever flag vs L-target correction iterations
+**OBSERVED:** In `runs/rc0/journal.txt` (sever=1), L-targets 121–140 are
+severed only at ITER 0 (`ITER 0 PLANNED f0_mhz=440000 env=flat slope_db=5
+vib_pm=0 why=severed-default`, e.g. target 121 renders
+`l121_iter0.wav` at the severed default), but ITER 1–3 become WIRED:
+target 121 shows `ITER 1 PLANNED f0_mhz=149578 env=flat ... vib_pm=500000`
+(hear the heard ref at 150.1 Hz), ITER 2 at 138.965 Hz, ITER 3 at
+142.144 Hz. The sever flag does not propagate into the closed-loop
+correction iterations.
+**EXPECTED:** A fully severed RC0 loop battery would stay on the default
+plan through all iterations.
+**CANDIDATES:** Controller design gap — the sever branch applies only to
+the initial plan, not to the per-iteration correction path.
+**DISPOSITION:** BENIGN for the required RC0 guard: the guard scores only
+the M-target control axes (targets 1–120), which render once each and are
+fully severed (wired 28/39/29 vs severed 0/14/0; exact Fisher p
+1.9e-12/6.1e-10/4.4e-13). Logged so a future loop-null comparison is not
+run on rc0's L-targets without a sever-propagation fix.
+
 **ANOM-ID:** ANOM-011
 **DATE:** 2026-09-26
 **HORIZON:** §2b scorer sanity floor (prereg §2b: "scorer sanity floor ≥ 95%
