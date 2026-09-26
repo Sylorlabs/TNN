@@ -95,4 +95,6 @@ Pre-port vs port outputs are identical (WINDOWED mode; no signals emitted)
 
 ### Commit
 
-[commit SHA — to be filled]
+48aec0e9e5bc71bcb017e323a50e33ee8783654b on tnn-native-lab
+(docs/lab/strength-port/; 33 files: ported sources, merge scripts,
+battery/stress drivers, red-team driver + brief, VERDICT, evidence logs).
