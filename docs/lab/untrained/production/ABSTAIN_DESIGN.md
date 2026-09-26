@@ -28,6 +28,36 @@ survives.
   analysis-window quantization step of the 400 regular/irregular boundary.
 - **Conflict backstop**: mutually exclusive surviving claims (e.g., tonal
   AND few-tonal) trigger a conflict check; conflicts withhold.
+- **Rhythm period stability (A2)**: the full-clip envelope-autocorrelation
+  winner lag must be a *candidate* (local max, r>=300 milli, prominence>=80
+  -- the detector's own gates) in each third of the clip. Lags are quantized
+  to 20 ms windows, so a stable period lands on the same lag in every third;
+  a wandering period (e.g. 440->500->580 ms across thirds) fails candidacy
+  somewhere and the period is qualified as unstable/approximate, with
+  per-third periods reported. No new threshold: the tolerance IS the
+  candidate definition. A third must provide >=20 autocorrelation pairs at
+  the winner lag; fewer skips the check (single-period output preserved).
+- **Competing rhythms (A3)**: if stable, rescan for a candidate
+  incommensurate with the winner (not an integer multiple within +-1 lag,
+  the 20 ms quantization step). "Comparable" is defined by the detector's
+  own candidate gates (r>=300, prominence>=80; no new magnitude threshold).
+  The winner is "decisive" if (r_winner - r_comp) >= 80, the prominence gate
+  reused as the strength-resolution unit (a smaller gap is below the
+  detector's own ability to resolve strength differences). A decisive winner
+  coexisting with a comparable incommensurate candidate means two real
+  rhythms -> report both, withhold the single-period call. If ANY
+  incommensurate candidate is tied with the winner (gap < 80), the winner
+  itself is ambiguous and the check does not fire (preserves C3).
+- **Spectral harmonicity (A4)**: the autocorrelation pitch estimate is
+  validated against the aggregate DFT magnitude spectrum. At least one of
+  f0, 2*f0, 3*f0, ... (within the ~646 Hz DFT ceiling, bins 1..31) must carry
+  >=10% of the spectral peak energy. Provenance: the DFT uses a rectangular
+  window (worst sidelobe -13 dB = 5% in power); 10% is twice the worst
+  sidelobe, guarding against coherent leakage from multiple strong partials.
+  If none reaches 10%, the pitch is withheld as inharmonic (e.g. 211/359/547
+  Hz partials yielding a spurious 186 Hz difference-tone with only 4%
+  support). Missing-fundamental tones pass via harmonic support (e.g.
+  164.9 Hz validated by its 329.8/494.7 Hz harmonics at 100%/40%).
 
 ### Image
 - **Orientation vote margin**: the winning direction must clear the

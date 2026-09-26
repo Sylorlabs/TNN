@@ -39,8 +39,9 @@ The pre-repair analyzer scored on the old inputs: 23 MATCH / 8 MISS /
 - Tonality gates (55% voiced, 600 strength) and glide (8%) use fixed
   thresholds; borderline cases may flip without a withhold. The
   adversarial battery did not probe these boundaries.
-- Rhythm "two competing" detection relies on the autocorrelation winner;
-  a close second peak does not force abstention (A3 tests this).
+- Rhythm competing-detection: a tied incommensurate second peak (within
+  the 80-milli strength-resolution unit) leaves the winner ambiguous and
+  does not trigger the competing-rhythms report (C3 exercises this).
 - The curvature test requires a majority of cross-axis pixels; gentle
   bends (B5 dunes, 22%) still vote the global axis.
 - Video spatial direction conflict (different regions moving different
