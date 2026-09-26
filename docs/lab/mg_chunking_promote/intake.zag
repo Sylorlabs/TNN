@@ -1,0 +1,549 @@
+// intake.zag — TNN LIVE TEXT-INTAKE ORGAN (promoted 2026-09-26).
+//
+// Micah ruling 2026-09-26 ~09:49 PDT: promote the magnifying-glass chunking
+// fork as TNN's live text-intake path. intake(question, text) answers via
+// the deliberative chunker: TNN chooses HOW to chunk (CHAR / WORD /
+// WORD>CHAR / WORD?CHARSCAN), every choice recorded with a reason, zoom
+// trace emitted. The zoom trace IS the deliberation record (n5_zoom
+// precedent: mg_zoom(qid, parent, roff, rlen, depth, why)).
+//
+// LIVE-PATH CONTRACT:
+//   * The ONLY entry point is tnn_intake(...). It always emits the
+//     chunking choice + reason + zoom trace (the trace contract is never
+//     relaxed: no silent chunking).
+//   * The fixed arms (C/W/S) are RETIRED from the live path per Micah's
+//     ruling ("that's the arms' fault for failing when TNN got it right,
+//     so obviously don't use fixed arms that answered H"). They survive
+//     ONLY in negcontrol.zag as negative controls for tests. This file
+//     does not import them, does not call them, does not know them.
+//   * Zero RNG. Deterministic: byte-identical reruns.
+//
+// Promoted from the frozen fork docs/lab/mg_chunking (commit
+// 1de59c334aea10907cdc34545c7a3e97a868c6d2); deliberative machinery
+// renamed d_* -> tnn_*, behavior unchanged.
+@import("./R33_NATIVE_IO_V1.zag")
+
+// ---------- little-endian accessors over []u8 arenas ----------
+// (ZNC-2026-09-21-007: no `as []i32` casts; []u8 arenas + accessors)
+fn w_u32le(b:[]u8, o:i64, v:i64) void {
+    b[o]=(v & 255) as u8;
+    b[o+1]=((v >> 8) & 255) as u8;
+    b[o+2]=((v >> 16) & 255) as u8;
+    b[o+3]=((v >> 24) & 255) as u8;
+}
+fn r_u32le(b:[]u8, o:i64) i64 {
+    return (b[o] as i64)+((b[o+1] as i64) << 8)+((b[o+2] as i64) << 16)+((b[o+3] as i64) << 24);
+}
+fn w_i64le(b:[]u8, o:i64, v:i64) void {
+    let u:i64=v; let i:i64=0;
+    while (i<8) { b[o+i]=(u & 255) as u8; u=u >> 8; i=i+1; }
+}
+fn r_i64le(b:[]u8, o:i64) i64 {
+    let u:i64=0; let i:i64=7;
+    while (i>=0) { u=(u << 8)+(b[o+i] as i64); i=i-1; }
+    return u;
+}
+
+// ---------- output buffer ----------
+fn ob_raw(out:[]u8, at:i64, s:[]u8) i64 {
+    let i:i64=0;
+    while (i<s.len) { out[at+i]=s[i]; i=i+1; }
+    return at+s.len;
+}
+fn ob_i64(out:[]u8, at:i64, v:i64, scr:[]u8) i64 {
+    let x:i64=v;
+    if (x<0) { out[at]=45; at=at+1; x=0-x; }
+    let n:i64=0;
+    if (x==0) { scr[0]=48; n=1; }
+    while (x>0) { scr[n]=((x % 10)+48) as u8; x=x/10; n=n+1; }
+    let i:i64=n-1;
+    while (i>=0) { out[at]=scr[i]; at=at+1; i=i-1; }
+    return at;
+}
+fn ob_nl(out:[]u8, at:i64) i64 { out[at]=10; return at+1; }
+
+// ---------- byte-string helpers (znc has no break; flag idiom) ----------
+fn find_sub(h:[]u8, n:[]u8) i64 {
+    if (n.len==0) { return 0; }
+    if (n.len>h.len) { return -1; }
+    let i:i64=0; let hit:i64=-1;
+    while (i+n.len<=h.len) {
+        if (hit==-1) {
+            let j:i64=0; let ok:i64=1;
+            while (j<n.len) {
+                if (h[i+j]!=n[j]) { ok=0; j=n.len; }
+                else { j=j+1; }
+            }
+            if (ok==1) { hit=i; }
+        }
+        i=i+1;
+    }
+    return hit;
+}
+fn has_sub(h:[]u8, n:[]u8) i64 {
+    if (find_sub(h,n)>=0) { return 1; }
+    return 0;
+}
+fn has_byte(t:[]u8, c:u8) i64 {
+    let i:i64=0; let f:i64=0;
+    while (i<t.len) {
+        if (t[i]==c) { f=1; i=t.len; }
+        else { i=i+1; }
+    }
+    return f;
+}
+fn beq(a:[]u8, b:[]u8) i64 {
+    if (nio_equal(a,b)==1) { return 1; }
+    return 0;
+}
+fn parse_digits(s:[]u8, at:i64) i64 {
+    let v:i64=0; let i:i64=at; let go:i64=1;
+    while (i<s.len) {
+        if (go==1) {
+            let c:i64=s[i] as i64;
+            if (c>=48) {
+                if (c<=57) { v=v*10+(c-48); i=i+1; }
+                else { go=0; }
+            }
+            else { go=0; }
+        }
+        else { i=i+1; }
+    }
+    return v;
+}
+
+// ---------- chunk primitives ----------
+fn enum_words(t:[]u8, offs:[]u8, lens:[]u8) i64 {
+    let n:i64=0; let i:i64=0; let L:i64=t.len; let inword:i64=0; let s:i64=0;
+    while (i<L) {
+        if (t[i]==32) {
+            if (inword==1) {
+                w_u32le(offs,n*4,s); w_u32le(lens,n*4,i-s); n=n+1; inword=0;
+            }
+        }
+        else {
+            if (inword==0) { s=i; inword=1; }
+        }
+        i=i+1;
+    }
+    if (inword==1) { w_u32le(offs,n*4,s); w_u32le(lens,n*4,i-s); n=n+1; }
+    return n;
+}
+fn scan_count(t:[]u8, o:i64, ln:i64, target:u8) i64 {
+    let c:i64=0; let i:i64=o;
+    while (i<o+ln) { if (t[i]==target) { c=c+1; } i=i+1; }
+    return c;
+}
+fn count_words_bytes(t:[]u8) i64 {
+    let n:i64=0; let i:i64=0; let L:i64=t.len; let inword:i64=0;
+    while (i<L) {
+        if (t[i]==32) { inword=0; }
+        else {
+            if (inword==0) { n=n+1; inword=1; }
+        }
+        i=i+1;
+    }
+    return n;
+}
+fn find_word(t:[]u8, offs:[]u8, lens:[]u8, nw:i64, w:[]u8) i64 {
+    let k:i64=0; let hit:i64=-1;
+    while (k<nw) {
+        if (hit==-1) {
+            let o:i64=r_u32le(offs,k*4); let ln:i64=r_u32le(lens,k*4);
+            if (ln==w.len) {
+                let seg:[]u8=t[o..o+ln];
+                if (beq(seg,w)==1) { hit=k; }
+            }
+        }
+        k=k+1;
+    }
+    return hit;
+}
+fn reverse_into(t:[]u8, dst:[]u8) void {
+    let i:i64=0; let L:i64=t.len;
+    while (i<L) { dst[i]=t[L-1-i]; i=i+1; }
+}
+
+// ---------- question kinds ----------
+// 1 LETTER_COUNT, 2 POSITION_N, 3 REVERSE, 4 WORD_COUNT,
+// 5 LENGTH, 6 CONTAINS, 7 FIRST_WORD, 8 POS_FIRST, 9 POS_LAST
+fn classify(q:[]u8) i64 {
+    if (has_sub(q,"how many words in")==1) { return 4; }
+    if (has_sub(q,"how many letters in")==1) { return 5; }
+    if (has_sub(q,"'s in")==1) { return 1; }
+    if (has_sub(q,"backwards")==1) { return 3; }
+    if (has_sub(q,"first word of")==1) { return 7; }
+    if (has_sub(q,"contain ")==1) { return 6; }
+    if (has_sub(q,"first letter of")==1) { return 8; }
+    if (has_sub(q,"last letter of")==1) { return 9; }
+    if (has_sub(q,"letter of")==1) { return 2; }
+    return 0;
+}
+fn kind_name(k:i64) []u8 {
+    if (k==1) { return "LETTER_COUNT"; }
+    if (k==2) { return "POSITION"; }
+    if (k==3) { return "REVERSE"; }
+    if (k==4) { return "WORD_COUNT"; }
+    if (k==5) { return "LENGTH"; }
+    if (k==6) { return "CONTAINS"; }
+    if (k==7) { return "FIRST_WORD"; }
+    if (k==8) { return "POS_FIRST"; }
+    return "POS_LAST";
+}
+fn skind(k:i64) i64 {
+    if (k==1) { return 0; }
+    if (k==2) { return 1; }
+    if (k==8) { return 1; }
+    if (k==9) { return 1; }
+    if (k==3) { return 2; }
+    if (k==4) { return 3; }
+    if (k==5) { return 4; }
+    if (k==6) { return 5; }
+    return 6;
+}
+fn parse_target_letter(q:[]u8) u8 {
+    let p:i64=find_sub(q,"'s in");
+    return q[p-1];
+}
+fn parse_pos_n(q:[]u8) i64 {
+    let p:i64=find_sub(q,"the ");
+    return parse_digits(q,p+4);
+}
+fn parse_after(q:[]u8, marker:[]u8) []u8 {
+    let p:i64=find_sub(q,marker);
+    return q[p+marker.len..q.len];
+}
+fn parse_between(q:[]u8, a:[]u8, b:[]u8) []u8 {
+    let p:i64=find_sub(q,a); let p2:i64=find_sub(q,b);
+    return q[p+a.len..p2];
+}
+
+// ---------- magnifying-glass zoom (n5_zoom precedent) ----------
+// spans: parallel u32le arenas soff/slen. span 0 = whole text (per question).
+// mg_zoom addresses the sub-span [roff,roff+rlen) of parent span and logs
+// (qid, span, parent, off, len, depth, why) to the zoom ledger. why codes:
+// 1 count-letters-inside-word, 2 locate-target-word,
+// 3 index-character-inside-word, 4 substring-scan-at-character-scale,
+// 5 character-span.
+fn why_str(w:i64) []u8 {
+    if (w==1) { return "count-letters-inside-word"; }
+    if (w==2) { return "locate-target-word"; }
+    if (w==3) { return "index-character-inside-word"; }
+    if (w==4) { return "substring-scan-at-character-scale"; }
+    return "character-span";
+}
+fn mg_zoom(qid:i64, parent:i64, roff:i64, rlen:i64, depth:i64, why:i64,
+           soff:[]u8, slen:[]u8, nsp:*i64,
+           zlog:[]u8, zn:*i64,
+           out:[]u8, atp:*i64, scr:[]u8) i64 {
+    let a:i64=atp.*;
+    let po:i64=r_u32le(soff,parent*4);
+    let id:i64=nsp.*;
+    w_u32le(soff,id*4,po+roff); w_u32le(slen,id*4,rlen);
+    nsp.*=id+1;
+    let z:i64=zn.*;
+    let b:i64=z*28;
+    w_u32le(zlog,b,qid); w_u32le(zlog,b+4,id); w_u32le(zlog,b+8,parent);
+    w_u32le(zlog,b+12,po+roff); w_u32le(zlog,b+16,rlen);
+    w_u32le(zlog,b+20,depth); w_u32le(zlog,b+24,why);
+    zn.*=z+1;
+    a=ob_raw(out,a,"INTAKE zoom qid=");
+    a=ob_i64(out,a,qid,scr);
+    a=ob_raw(out,a," span=");
+    a=ob_i64(out,a,id,scr);
+    a=ob_raw(out,a," parent=");
+    a=ob_i64(out,a,parent,scr);
+    a=ob_raw(out,a," off=");
+    a=ob_i64(out,a,po+roff,scr);
+    a=ob_raw(out,a," len=");
+    a=ob_i64(out,a,rlen,scr);
+    a=ob_raw(out,a," depth=");
+    a=ob_i64(out,a,depth,scr);
+    a=ob_raw(out,a," why=");
+    a=ob_raw(out,a,why_str(why));
+    a=ob_nl(out,a);
+    atp.*=a;
+    return id;
+}
+
+// ---------- deliberative chunking choice ----------
+// chunk codes: 1 CHAR, 2 WORD, 3 WORD>CHAR, 4 WORD?CHARSCAN
+fn tnn_choose(kind:i64, t:[]u8) i64 {
+    if (kind==1) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==2) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==8) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==9) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==3) { return 1; }
+    if (kind==4) { return 2; }
+    if (kind==5) { return 1; }
+    if (kind==6) { return 4; }
+    return 2;
+}
+fn chunk_name(c:i64) []u8 {
+    if (c==1) { return "CHAR"; }
+    if (c==2) { return "WORD"; }
+    if (c==3) { return "WORD>CHAR"; }
+    return "WORD?CHARSCAN";
+}
+fn tnn_why(kind:i64, c:i64) []u8 {
+    if (c==1) {
+        if (kind==1) { return "letter question on a single token: character units; no coarser unit resolves letters"; }
+        if (kind==3) { return "reversal is a byte-order operation: character units"; }
+        if (kind==5) { return "length is a character count: character units"; }
+        return "positional index on a single token: character units directly";
+    }
+    if (c==2) {
+        if (kind==4) { return "word counting is a word-boundary operation: word units"; }
+        return "word-boundary operation: word units";
+    }
+    if (c==3) {
+        if (kind==1) { return "multi-token text: enumerate words at word scale, magnify to character units inside each word; letters live below word scale"; }
+        return "locate the named word at word scale, then magnify to character units for the index";
+    }
+    return "try word-boundary match first; magnify to a character span scan on miss";
+}
+
+// locate the span the question is about: whole text if the named target
+// equals it, else the named word inside it. returns span offset/len via
+// out params (o:*i64, l:*i64); magnifies with traced zooms.
+fn tnn_locate(qid:i64, q:[]u8, t:[]u8,
+            soff:[]u8, slen:[]u8, nsp:*i64, zlog:[]u8, zn:*i64,
+            woffs:[]u8, wlens:[]u8,
+            out:[]u8, atp:*i64, scr:[]u8,
+            oo:*i64, ll:*i64, maxd:*i64, nz:*i64, ops:*i64) i64 {
+    let tw:[]u8=parse_after(q,"of ");
+    if (beq(tw,t)==1) {
+        oo.*=0; ll.*=t.len; return 0;
+    }
+    let nw:i64=enum_words(t,woffs,wlens);
+    ops.*=ops.*+nw;
+    let k:i64=find_word(t,woffs,wlens,nw,tw);
+    if (k<0) { oo.*=0; ll.*=0; return -1; }
+    let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+    let sid:i64=mg_zoom(qid,0,wo,wl,1,2,soff,slen,nsp,zlog,zn,out,atp,scr);
+    nz.*=nz.*+1;
+    if (maxd.*<1) { maxd.*=1; }
+    oo.*=wo; ll.*=wl;
+    return sid;
+}
+
+
+// ---------- answer-line emitter (shared by arms) ----------
+// stats pack: bit0 correct, bit1 native, bit2 fallback,
+// bits8..39 ops, bits40..47 maxdepth, bits48..55 nzooms.
+fn pack_stats(correct:i64, native:i64, fb:i64, ops:i64, maxd:i64, nz:i64) i64 {
+    return correct+(native*2)+(fb*4)+(ops*256)+(maxd*1099511627776)+(nz*281474976710656);
+}
+fn emit_result(tag:[]u8, ans:[]u8, exp:[]u8, correct:i64, native:i64, fb:i64,
+               ops:i64, maxd:i64, nz:i64,
+               out:[]u8, atp:*i64, scr:[]u8) void {
+    let a:i64=atp.*;
+    a=ob_raw(out,a,tag);
+    a=ob_raw(out,a," ans=\"");
+    a=ob_raw(out,a,ans);
+    a=ob_raw(out,a,"\" exp=\"");
+    a=ob_raw(out,a,exp);
+    a=ob_raw(out,a,"\" correct=");
+    a=ob_i64(out,a,correct,scr);
+    a=ob_raw(out,a," native=");
+    a=ob_i64(out,a,native,scr);
+    a=ob_raw(out,a," fallback=");
+    a=ob_i64(out,a,fb,scr);
+    a=ob_raw(out,a," ops=");
+    a=ob_i64(out,a,ops,scr);
+    a=ob_raw(out,a," maxdepth=");
+    a=ob_i64(out,a,maxd,scr);
+    a=ob_raw(out,a," zooms=");
+    a=ob_i64(out,a,nz,scr);
+    a=ob_nl(out,a);
+    atp.*=a;
+    return;
+}
+
+// ---------- live intake: deliberative chunking ----------
+// tnn_intake is the ONLY live entry point. It never falls back:
+// it magnifies instead, and the zoom trace is the deliberation
+// record. native=1 always.
+// Never falls back: it magnifies instead. native=1 always.
+fn tnn_intake(qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+            out:[]u8, atp:*i64, scr:[]u8,
+            soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+            woffs:[]u8, wlens:[]u8, revbuf:[]u8, abuf:[]u8) i64 {
+    let c:i64=tnn_choose(kind,t);
+    w_u32le(soff,0,0); w_u32le(slen,0,t.len);
+    let nsp:i64=1;
+    let ops:i64=0; let maxd:i64=0; let nzooms:i64=0;
+    let a:i64=atp.*;
+    a=ob_raw(out,a,"INTAKE qid=");
+    a=ob_i64(out,a,qid,scr);
+    a=ob_raw(out,a," kind=");
+    a=ob_raw(out,a,kind_name(kind));
+    a=ob_raw(out,a," chunk=");
+    a=ob_raw(out,a,chunk_name(c));
+    a=ob_raw(out,a," why=\"");
+    a=ob_raw(out,a,tnn_why(kind,c));
+    a=ob_raw(out,a,"\"");
+    a=ob_nl(out,a);
+    atp.*=a;
+    let ans:[]u8=abuf[0..0];
+    let alen:i64=0;
+    if (kind==1) {
+        let tgt:u8=parse_target_letter(q);
+        if (c==1) {
+            let cnt:i64=scan_count(t,0,t.len,tgt);
+            ops=t.len;
+            alen=ob_i64(abuf,0,cnt,scr); ans=abuf[0..alen];
+        }
+        else {
+            let nw:i64=enum_words(t,woffs,wlens);
+            ops=nw;
+            let total:i64=0; let k:i64=0;
+            while (k<nw) {
+                let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+                let sid:i64=mg_zoom(qid,0,wo,wl,1,1,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1; maxd=1;
+                let so2:i64=r_u32le(soff,sid*4); let sl2:i64=r_u32le(slen,sid*4);
+                total=total+scan_count(t,so2,sl2,tgt);
+                ops=ops+wl;
+                k=k+1;
+            }
+            alen=ob_i64(abuf,0,total,scr); ans=abuf[0..alen];
+        }
+    }
+    if (kind==2) {
+        let oo:i64=0; let ll:i64=0;
+        let loc:i64=tnn_locate(qid,q,t,soff,slen,&nsp,zlog,zn,woffs,wlens,out,atp,scr,&oo,&ll,&maxd,&nzooms,&ops);
+        let n:i64=parse_pos_n(q);
+        let idx:i64=n-1;
+        if (loc<0) {
+            abuf[0]=63; alen=1; ans=abuf[0..alen];
+        }
+        else {
+            if (idx<0) { idx=0; }
+            if (idx>=ll) { idx=ll-1; }
+            if (c==1) {
+                abuf[0]=t[oo+idx]; alen=1; ans=abuf[0..alen];
+                ops=ops+idx+1;
+            }
+            else {
+                let sid2:i64=mg_zoom(qid,loc,idx,1,2,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1; maxd=2;
+                let so3:i64=r_u32le(soff,sid2*4);
+                abuf[0]=t[so3]; alen=1; ans=abuf[0..alen];
+                ops=ops+idx+1;
+            }
+        }
+    }
+    if (kind==8) {
+        let oo:i64=0; let ll:i64=0;
+        let loc:i64=tnn_locate(qid,q,t,soff,slen,&nsp,zlog,zn,woffs,wlens,out,atp,scr,&oo,&ll,&maxd,&nzooms,&ops);
+        if (loc<0) {
+            abuf[0]=63; alen=1; ans=abuf[0..alen];
+        }
+        else {
+            if (c==1) {
+                abuf[0]=t[oo]; alen=1; ans=abuf[0..alen]; ops=ops+1;
+            }
+            else {
+                let sid2:i64=mg_zoom(qid,loc,0,1,2,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1; maxd=2;
+                let so3:i64=r_u32le(soff,sid2*4);
+                abuf[0]=t[so3]; alen=1; ans=abuf[0..alen]; ops=ops+1;
+            }
+        }
+    }
+    if (kind==9) {
+        let oo:i64=0; let ll:i64=0;
+        let loc:i64=tnn_locate(qid,q,t,soff,slen,&nsp,zlog,zn,woffs,wlens,out,atp,scr,&oo,&ll,&maxd,&nzooms,&ops);
+        if (loc<0) {
+            abuf[0]=63; alen=1; ans=abuf[0..alen];
+        }
+        else {
+            if (c==1) {
+                abuf[0]=t[oo+ll-1]; alen=1; ans=abuf[0..alen]; ops=ops+ll;
+            }
+            else {
+                let sid2:i64=mg_zoom(qid,loc,ll-1,1,2,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1; maxd=2;
+                let so3:i64=r_u32le(soff,sid2*4);
+                abuf[0]=t[so3]; alen=1; ans=abuf[0..alen]; ops=ops+ll;
+            }
+        }
+    }
+    if (kind==3) {
+        reverse_into(t,revbuf);
+        ans=revbuf[0..t.len];
+        ops=t.len;
+    }
+    if (kind==4) {
+        let nw:i64=enum_words(t,woffs,wlens);
+        ops=nw;
+        alen=ob_i64(abuf,0,nw,scr); ans=abuf[0..alen];
+    }
+    if (kind==5) {
+        ops=t.len;
+        alen=ob_i64(abuf,0,t.len,scr); ans=abuf[0..alen];
+    }
+    if (kind==6) {
+        let needle:[]u8=parse_after(q,"contain ");
+        let nw:i64=enum_words(t,woffs,wlens);
+        ops=nw;
+        let k:i64=find_word(t,woffs,wlens,nw,needle);
+        if (k>=0) {
+            ans="yes";
+        }
+        else {
+            let sid:i64=mg_zoom(qid,0,0,t.len,1,4,soff,slen,&nsp,zlog,zn,out,atp,scr);
+            nzooms=nzooms+1; maxd=1;
+            let so2:i64=r_u32le(soff,sid*4); let sl2:i64=r_u32le(slen,sid*4);
+            let seg:[]u8=t[so2..so2+sl2];
+            ops=ops+sl2;
+            if (find_sub(seg,needle)>=0) { ans="yes"; }
+            else { ans="no"; }
+        }
+    }
+    if (kind==7) {
+        let nw:i64=enum_words(t,woffs,wlens);
+        ops=nw;
+        let wo:i64=r_u32le(woffs,0); let wl:i64=r_u32le(wlens,0);
+        ans=t[wo..wo+wl];
+    }
+    let correct:i64=beq(ans,exp);
+    emit_result("INTAKE",ans,exp,correct,1,0,ops,maxd,nzooms,out,atp,scr);
+    return pack_stats(correct,1,0,ops,maxd,nzooms);
+}
+
+// ---------- summary helpers (harness use) ----------
+// ---------- summary ----------
+fn summ_add(summ:[]u8, arm:i64, sk:i64, stats:i64) void {
+    let correct:i64=stats & 1;
+    let native:i64=(stats >> 1) & 1;
+    let ops:i64=(stats >> 8) & 4294967295;
+    let base:i64=((arm*7)+sk)*4*8;
+    w_i64le(summ,base,r_i64le(summ,base)+1);
+    w_i64le(summ,base+8,r_i64le(summ,base+8)+correct);
+    w_i64le(summ,base+16,r_i64le(summ,base+16)+native);
+    w_i64le(summ,base+24,r_i64le(summ,base+24)+ops);
+    return;
+}
+fn skind_name(sk:i64) []u8 {
+    if (sk==0) { return "LETTER_COUNT"; }
+    if (sk==1) { return "POSITION"; }
+    if (sk==2) { return "REVERSE"; }
+    if (sk==3) { return "WORD_COUNT"; }
+    if (sk==4) { return "LENGTH"; }
+    if (sk==5) { return "CONTAINS"; }
+    return "FIRST_WORD";
+}

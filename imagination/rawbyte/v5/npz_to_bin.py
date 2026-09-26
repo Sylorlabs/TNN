@@ -2,7 +2,7 @@
 """Convert v5g .npz model to Zag binary format for rb_longmem.zag.
 
 Format (all little-endian):
-  0:  magic 8 bytes: b'RBLMEMv5'
+  0:  magic 8 bytes: b'RBLMEMv6'
   8:  P u64, K u64, N u64, sr u64
   40: a[P] f64
   40+8P: proto[K] f64
@@ -12,6 +12,9 @@ Format (all little-endian):
   ...: frlen u64, eplen u64, EP[eplen] f64
   ...: pT u64, T0 f64, NBINS u64
   ...: plm[NBINS] f64, PMF[17] f64, boost f64
+  ...: head[P] i16  (L1 fix 2026-09-26: the TRUE first P PCM samples;
+                     v5 had no head section -- re-emit fabricated it)
+  ...: q[nr] i64   (score indices for samples P..n-1)
 """
 import struct, sys, numpy as np
 
@@ -27,7 +30,7 @@ def convert(npz_path, bin_path):
     m = load_npz(npz_path)
     P,K,N,sr = m['P'],m['K'],m['n'],m['sr']
     out = bytearray()
-    out += b'RBLMEMv5'
+    out += b'RBLMEMv6'
     out += struct.pack('<4Q', P, K, N, sr)
     out += struct.pack(f'<{P}d', *m['a'])
     out += struct.pack(f'<{K}d', *m['proto'])
@@ -47,7 +50,12 @@ def convert(npz_path, bin_path):
     PMF = m['PMF'] if len(m['PMF'])>0 else np.zeros(17)
     out += struct.pack('<17d', *PMF)
     out += struct.pack('<d', float(m.get('boost',1.0)))
-    # score q (for reemit): N u64 indices
+    # L1 fix: the true first-P PCM samples (int16 LE). Re-emit plays these
+    # verbatim for samples 0..P-1 instead of fabricating from prototypes.
+    head = np.asarray(m['head']).astype(np.int16)
+    assert len(head) == P, (len(head), P)
+    out += struct.pack(f'<{P}h', *head)
+    # score q (for reemit): nr u64 indices
     q = m['q'].astype(np.int64)
     out += struct.pack(f'<{len(q)}q', *q)
     open(bin_path,'wb').write(out)

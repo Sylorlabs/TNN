@@ -135,8 +135,14 @@ def hear(x, sr, K=64, P=64):
     frlen = max(1, sr // 100)
     nf = (nr + frlen - 1) // frlen
     EP = np.array([np.abs(nres[f*frlen:min((f+1)*frlen, nr)]).mean() for f in range(nf)])
+    # L1 FIX (2026-09-26): store the first P REAL PCM samples. Previously
+    # samples 0..P-1 were never quantized or stored, and re-emit fabricated
+    # them as proto[q[0..P-1]] -- indices fit to samples P..2P-1, a different
+    # signal region. On resonant LPC filters (cry gain 8.93) the wrong
+    # initial state rang into a false transient (peak 12442 -> 23834).
+    head = np.clip(np.round(x[:P]), -32768, 32767).astype(np.int16)
     m = dict(P=P, K=K, a=a, proto=proto, q=q, uni=uni, bg=bg, pT=pT,
-               T0=T0, NBINS=NBINS, plm=plm, PMF=PMF,
+               T0=T0, NBINS=NBINS, plm=plm, PMF=PMF, head=head,
                ob0=ob0, ob1=ob1, floorv=floorv,
                attackv=attackv, EP=EP, frlen=frlen, n=n, sr=sr)
     m['boost'] = calibrate_boost(m, x)
@@ -295,15 +301,24 @@ def reemit(m):
              and 1.5 < boost < 10.0)
     T0, NBINS, plm = m['T0'], m['NBINS'], m['plm']
     est = np.zeros(N); out = np.zeros(N)
+    # L1 FIX (2026-09-26): the true head samples 0..P-1, stored by hear().
+    # The old fabrication path (proto[q[0..P-1]] for i<P) is GONE -- there is
+    # no code path left that invents the head. The true sample already
+    # contains its harmonic part, so no plm is added for i<P.
+    head = m['head'].astype(np.float64)
     for i in range(N):
-        # re-emit must reconstruct the ORIGINAL residual: nres proto + plm
-        rv = proto[q[i-P]] if i >= P else proto[q[i]]
-        if use_h:
-            hbin = int(((i / T0) % 1.0) * NBINS) % NBINS
-            rv = rv + plm[hbin]
         if i < P:
-            ev = rv
+            ev = head[i]
         else:
+            # re-emit must reconstruct the ORIGINAL residual: nres proto + plm
+            rv = proto[q[i-P]]
+            if use_h:
+                # L2 FIX (2026-09-26): phase RELATIVE to the residual frame,
+                # matching hear()'s binning (arange(nr)/T0). The old absolute
+                # binning (i/T0) was a half-period off for cry (P=64,
+                # T0=127.49 -> 0.502-period shift) and is gone.
+                hbin = int((((i - P) / T0) % 1.0) * NBINS) % NBINS
+                rv = rv + plm[hbin]
             ev = np.dot(a, est[i-P:i][::-1]) + rv
         est[i] = ev
         out[i] = np.clip(round(ev), -32768, 32767)
@@ -316,6 +331,7 @@ def load(path):
     m = dict(np.load(path, allow_pickle=True))
     for k in ('q', 'uni', 'bg'):
         if k in m: m[k] = m[k].astype(np.int64)
+    if 'head' in m: m['head'] = m['head'].astype(np.int16)
     for k in ('P', 'K', 'pT', 'NBINS', 'ob0', 'ob1', 'frlen', 'n', 'sr'):
         m[k] = int(m[k])
     return m
