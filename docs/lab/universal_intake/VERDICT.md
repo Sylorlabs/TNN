@@ -13,7 +13,7 @@
 | JPEG baseline (4:2:0) | ✅ DECODED (honest lossy) | Y meandiff 0.3; RGB gap from chroma upsampling (replication vs smooth) |
 | WAV (PCM 8/16/24/32, float32/64, extensible) | ✅ BYTE-IDENTICAL | SHA-256: 17f57ff51f4e76ab24fba61000466433c8b9bb371ad31cfc1d794ff6d93a53e1 |
 | FLAC (mono 16/24-bit) | ✅ BYTE-IDENTICAL | Matches WAV SHA-256 exactly |
-| FLAC (stereo mid-side) | ❌ BUG | Mid-side decorrelation produces errors (known issue) |
+| FLAC (stereo all assignments) | ✅ BYTE-IDENTICAL | 10 fixtures (assign 1/8/9/10, verbatim/fixed/wasted/const) match ffmpeg 0/88200; reruns byte-identical |
 | MP3 (Layer III) | ⚠️ HEADER ONLY | Frame headers parsed; full decode blocked |
 | MP4 container | ✅ PARSED | 8 samples extracted, NAL units validated |
 | H.264 (SPS) | ⚠️ PARAMS ONLY | 320×240 Baseline confirmed; slice decode blocked |
@@ -81,8 +81,15 @@ WAV held:  17f57ff51f4e76ab24fba61000466433c8b9bb371ad31cfc1d794ff6d93a53e1
 ### H.264 baseline slice decode  
 **Blocker:** CAVLC residual decoding, intra 4×4/16×16 prediction (9+4 modes), inter P-frame motion compensation (sub-pixel interpolation), deblocking filter (boundary strength computation). Estimated ~2000 lines. SPS parses correctly (320×240 Baseline confirmed), MP4 container extracts NALs correctly.
 
-### FLAC stereo mid-side
-**Bug:** Mid-side decorrelation (ch_assign=10) produces incorrect samples. Mono (independent) works byte-identically. Root cause under investigation — likely LPC coefficient or residual handling specific to the +1-bit side channel.
+### FLAC stereo (RESOLVED 2026-09-26)
+**Status:** ✅ BYTE-IDENTICAL. All stereo channel assignments (1=independent, 8=left-side, 9=right-side, 10=mid-side) decode byte-identical to `ffmpeg -acodec pcm_s16le` across 10 deterministic fixtures (verbatim, fixed-order 2/3/4, wasted-bits, constant), 0/88200 differing samples, with byte-identical reruns. FFmpeg-generated LPC stereo also byte-identical. Mono 16/24-bit regress clean.
+
+**Root causes found (white-box):**
+1. **Legal `-1` treated as error:** `fr_takes()` returned `-1` on I/O error, but `-1` is a legal sample/warmup/coefficient/shift/residual/side-channel value. Any frame with a `-1` (common in side channel) aborted before decorrelation. Fixed with explicit status + output slice API.
+2. **Independent stereo rejected:** assignments 1-7 were skipped; correct is `fch = ch_assign + 1` for 0-7, validated against STREAMINFO channels.
+3. **Escape residuals mishandled (pre-existing):** the 5-bit escape field's `+1` was missing and the bit was mis-consumed, desyncing the stream. Fixed per FLAC spec (`rawbps = field + 1`).
+
+See `evidence/flac_stereo_2026-09-26.md` for the full proof table and SHAs.
 
 ### Progressive JPEG
 **Status:** Explicitly rejected by design (not baseline JPEG). Decoder returns error on Ss/Se/Ah/Al progressive markers.
