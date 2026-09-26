@@ -1,0 +1,499 @@
+// TNN universal intake: JPEG baseline decoder -> held image (pure Zag, no libs).
+// Supports: SOI/EOI, DQT (8-bit), DHT, SOF0 (baseline, 8-bit, 1..4 comps,
+// 4:2:0 / 4:4:4 / 4:2:2 / grayscale), SOS (single scan, no spectral/progressive),
+// APPn/COM/DRI skip, RSTn resync. Emits TNINIMG1 top-down RGB.
+// YCbCr->RGB in fixed point; 2-pass integer IDCT (deterministic).
+// usage: jpeg <in.jpg> <out.held>
+@import("./common.zag")
+
+// ---------- JPEG Huffman tree (canonical, MSB-first codes) ----------
+// Reuse common huff_build/huff_decode with MSB bit reader (mode 0).
+
+// ---------- scan bit reader with 0xFF stuffing ----------
+fn jpg_fill(buf: []u8, st: []i64, n: i64) i64 {
+    // st: [pos, bitbuf, nbits, mode=0, rstflag]
+    while (st[2] < n) {
+        if (st[0] >= (buf.len as i64)) { return 0; }
+        let b: i64 = (buf[st[0]] as i64) & 255;
+        st[0] = st[0] + 1;
+        if (b == 255) {
+            if (st[0] >= (buf.len as i64)) { return 0; }
+            let b2: i64 = (buf[st[0]] as i64) & 255;
+            st[0] = st[0] + 1;
+            if (b2 == 0) {
+                // stuffed zero -> data byte 0xFF
+                st[1] = (st[1] << 8) | 255;
+                st[2] = st[2] + 8;
+            } else if (b2 >= 208 && b2 <= 215) {
+                // RSTn: resync point; signal to caller
+                st[4] = b2;
+            } else if (b2 == 217) {
+                // EOI inside scan (should not happen mid-scan)
+                return 0;
+            } else {
+                return 0;
+            }
+        } else {
+            st[1] = (st[1] << 8) | b;
+            st[2] = st[2] + 8;
+        }
+    }
+    return 1;
+}
+fn jpg_peek(buf: []u8, st: []i64, n: i64) i64 {
+    if (n < 1 || n > 24) { return -1; }
+    if (jpg_fill(buf, st, n) == 0) { return -1; }
+    let sh: i64 = st[2] - n;
+    let mask: i64 = (1 << n) - 1;
+    return (st[1] >> sh) & mask;
+}
+fn jpg_take(buf: []u8, st: []i64, n: i64) i64 {
+    let v: i64 = jpg_peek(buf, st, n);
+    if (v < 0) { return -1; }
+    st[1] = st[1] & ((1 << (st[2] - n)) - 1);
+    st[2] = st[2] - n;
+    return v;
+}
+// JPEG extend: convert additional bits to signed value
+fn jpg_extend(v: i64, s: i64) i64 {
+    if (s == 0) { return 0; }
+    let vt: i64 = 1 << (s - 1);
+    if (v < vt) { return v - (1 << s) + 1; }
+    return v;
+}
+
+// ---------- integer IDCT ----------
+// T[x][u] = round(C(u)*cos((2x+1)*u*pi/16) * 4096), C(0)=1/sqrt2 else 1.
+// Stored as 64 i64 in row-major [x*8+u].
+fn idct_init(T: []i64) i64 {
+    // cos values via hardcoded table: cos(k*pi/16) for k=0..16, scaled by 2^20
+    // then T[x][u] = round(C(u) * cos((2x+1)*u*pi/16) * 4096)
+    // We compute cos((2x+1)*u) index = ((2x+1)*u) mod 32, using symmetry.
+    // cosLUT[i] = round(cos(i*pi/16) * 2^20) for i=0..16
+    let cosL: []i64 = nio_alloc_z64(17);
+    cosL[0] = 1048576;
+    cosL[1] = 1028428;
+    cosL[2] = 968758;
+    cosL[3] = 871859;
+    cosL[4] = 741455;
+    cosL[5] = 582558;
+    cosL[6] = 401273;
+    cosL[7] = 204557;
+    cosL[8] = 0;
+    cosL[9] = -204557;
+    cosL[10] = -401273;
+    cosL[11] = -582558;
+    cosL[12] = -741455;
+    cosL[13] = -871859;
+    cosL[14] = -968758;
+    cosL[15] = -1028428;
+    cosL[16] = -1048576;
+    let x: i64 = 0;
+    while (x < 8) {
+        let u: i64 = 0;
+        while (u < 8) {
+            let idx: i64 = (2 * x + 1) * u;   // 0..105
+            // cos(idx*pi/16): reduce mod 32 to [0..31], then fold to [0..16]
+            let m: i64 = idx % 32;
+            if (m < 0) { m = m + 32; }
+            let c: i64 = 0;
+            if (m <= 16) { c = cosL[m]; } else { c = cosL[32 - m]; }
+            // multiply by C(u): C(0)=1/sqrt2 -> scale by 2^20: 741455
+            // T = round(C(u)*cos * 4096) = round(c * C(u) * 4096 / 2^20)
+            let num: i64 = c * 4096;
+            if (u == 0) { num = (num * 741455) / 1048576; }
+            // round to nearest (num / 2^20)
+            let t: i64 = 0;
+            if (num >= 0) { t = (num + 524288) / 1048576; }
+            else { t = (num - 524288) / 1048576; }
+            T[x * 8 + u] = t;
+            u = u + 1;
+        }
+        x = x + 1;
+    }
+    return 0;
+}
+// 8x8 block F (dequantized, level-shifted after) -> out 8x8 pixels (level shifted +128, clamped)
+// T: idct table. tmp: 64 scratch.
+fn idct_block(F: []i64, T: []i64, tmp: []i64, out: []u8, outoff: i64) i64 {
+    // pass 1: rows (along u): G[x][v] = sum_u F[u][v]*T[x][u] / 4096
+    let x: i64 = 0;
+    while (x < 8) {
+        let v: i64 = 0;
+        while (v < 8) {
+            let s: i64 = 0;
+            let u: i64 = 0;
+            while (u < 8) {
+                s = s + F[u * 8 + v] * T[x * 8 + u];
+                u = u + 1;
+            }
+            // round(s / 4096)
+            if (s >= 0) { tmp[x * 8 + v] = (s + 2048) / 4096; }
+            else { tmp[x * 8 + v] = (s - 2048) / 4096; }
+            v = v + 1;
+        }
+        x = x + 1;
+    }
+    // pass 2: along v with 1/4: f[x][y] = sum_v G[x][v]*T[y][v] / 16384, then +128 clamp
+    x = 0;
+    while (x < 8) {
+        let y: i64 = 0;
+        while (y < 8) {
+            let s: i64 = 0;
+            let v: i64 = 0;
+            while (v < 8) {
+                s = s + tmp[x * 8 + v] * T[y * 8 + v];
+                v = v + 1;
+            }
+            let f: i64 = 0;
+            if (s >= 0) { f = (s + 8192) / 16384; }
+            else { f = (s - 8192) / 16384; }
+            f = f + 128;
+            if (f < 0) { f = 0; }
+            if (f > 255) { f = 255; }
+            out[outoff + x * 8 + y] = (f as u8) & 255;
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    return 0;
+}
+
+fn main() i32 {
+    let inp: []u8 = _zag_arg(1);
+    let outp: []u8 = _zag_arg(2);
+    let blob: []u8 = file_read_all(inp);
+    if ((blob.len as i64) == 0) { _zag_print("no input\n"); return 1; }
+    let flen: i64 = blob.len as i64;
+    // check SOI
+    if ((blob[0] as i64) != 255 || (blob[1] as i64) != 216) { _zag_print("not JPEG SOI\n"); return 1; }
+    // tables
+    let qt: []i64 = nio_alloc_z64(4 * 64);       // 4 quant tables
+    let qt_ok: []i64 = nio_alloc_z64(4);
+    let dc_tree: []i64 = nio_alloc_z64(4 * 2048); // 4 DC trees, 512 nodes each
+    let ac_tree: []i64 = nio_alloc_z64(4 * 2048); // 4 AC trees, 512 nodes each
+    let hscratch: []i64 = nio_alloc_z64(64);
+    let lens: []i64 = nio_alloc_z64(320);
+    // frame info
+    let img_w: i64 = 0; let img_h: i64 = 0; let ncomp: i64 = 0;
+    let cid: []i64 = nio_alloc_z64(4);
+    let hsamp: []i64 = nio_alloc_z64(4);
+    let vsamp: []i64 = nio_alloc_z64(4);
+    let cqt: []i64 = nio_alloc_z64(4);
+    // scan info
+    let scan_dt: []i64 = nio_alloc_z64(4);
+    let scan_at: []i64 = nio_alloc_z64(4);
+    let scan_start: i64 = 0; let scan_end: i64 = 0;
+    let pos: i64 = 2;
+    let saw_sos: i64 = 0;
+    while (pos < flen) {
+        if ((blob[pos] as i64) != 255) { _zag_print("marker sync lost\n"); return 1; }
+        let mk: i64 = (blob[pos + 1] as i64) & 255;
+        pos = pos + 2;
+        if (mk == 216) { continue; } // SOI (repeat)
+        if (mk == 217) { break; }    // EOI
+        if (mk >= 208 && mk <= 215) { continue; } // RSTn outside scan
+        if (mk == 1) { continue; }    // TEM
+        // all others have length
+        if (pos + 2 > flen) { _zag_print("trunc\n"); return 1; }
+        let seglen: i64 = rd_u16be(blob, pos);
+        if (seglen < 2 || pos + seglen > flen) { _zag_print("bad seglen\n"); return 1; }
+        let body: i64 = pos + 2;
+        let bend: i64 = pos + seglen;
+        if (mk == 219) {
+            // DQT
+            let q: i64 = body;
+            while (q < bend) {
+                let info: i64 = (blob[q] as i64) & 255; q = q + 1;
+                let pq: i64 = info >> 4; let tq: i64 = info & 15;
+                if (pq != 0 || tq > 3) { _zag_print("bad DQT\n"); return 1; }
+                let k: i64 = 0;
+                while (k < 64) {
+                    // zigzag order in file; store in natural order via zag_zig
+                    let zz: i64 = zag_zig(k);
+                    qt[tq * 64 + zz] = (blob[q] as i64) & 255;
+                    q = q + 1; k = k + 1;
+                }
+                qt_ok[tq] = 1;
+            }
+        } else if (mk == 192) {
+            // SOF0 baseline
+            let prec: i64 = (blob[body] as i64) & 255;
+            img_h = rd_u16be(blob, body + 1);
+            img_w = rd_u16be(blob, body + 3);
+            ncomp = (blob[body + 5] as i64) & 255;
+            if (prec != 8 || img_w <= 0 || img_h <= 0 || ncomp < 1 || ncomp > 4) { _zag_print("bad SOF0\n"); return 1; }
+            let c: i64 = 0;
+            while (c < ncomp) {
+                let o: i64 = body + 6 + c * 3;
+                cid[c] = (blob[o] as i64) & 255;
+                hsamp[c] = ((blob[o + 1] as i64) >> 4) & 15;
+                vsamp[c] = (blob[o + 1] as i64) & 15;
+                cqt[c] = (blob[o + 2] as i64) & 255;
+                if (hsamp[c] < 1 || hsamp[c] > 4 || vsamp[c] < 1 || vsamp[c] > 4) { _zag_print("bad samp\n"); return 1; }
+                c = c + 1;
+            }
+        } else if (mk == 196) {
+            // DHT
+            let q: i64 = body;
+            while (q < bend) {
+                let info: i64 = (blob[q] as i64) & 255; q = q + 1;
+                let tc: i64 = info >> 4; let th: i64 = info & 15;
+                if (th > 3 || (tc != 0 && tc != 1)) { _zag_print("bad DHT\n"); return 1; }
+                // 16 counts
+                let total: i64 = 0;
+                let l: i64 = 1;
+                while (l <= 16) { total = total + (((blob[q + l - 1] as i64) & 255)); l = l + 1; }
+                if (total > 256) { _zag_print("bad DHT total\n"); return 1; }
+                // build lens array: symbols in order get lengths 1..16
+                let li: i64 = 0;
+                while (li < 256) { lens[li] = 0; li = li + 1; }
+                let sym: i64 = 0;
+                l = 1;
+                let qo: i64 = q + 16;
+                while (l <= 16) {
+                    let cnt: i64 = (blob[q + l - 1] as i64) & 255;
+                    let k: i64 = 0;
+                    while (k < cnt) {
+                        if (qo >= bend) { _zag_print("DHT overrun\n"); return 1; }
+                        lens[(blob[qo] as i64) & 255] = l;
+                        qo = qo + 1; sym = sym + 1; k = k + 1;
+                    }
+                    l = l + 1;
+                }
+                q = qo;
+                // build into slot th
+                let tree: []i64 = dc_tree;
+                let base: i64 = 0;
+                if (tc == 1) { tree = ac_tree; }
+                // slice the slot: use offset arithmetic via a view
+                // (avoid slice-of-slice issues: pass base index)
+                // We emulate by building into a temp then copying.
+                let tmp_tree: []i64 = nio_alloc_z64(2048);
+                if (huff_build(lens, 256, tmp_tree, hscratch) < 0) { _zag_print("DHT build fail\n"); return 1; }
+                let cp: i64 = 0;
+                while (cp < 2048) { tree[th * 2048 + cp] = tmp_tree[cp]; cp = cp + 1; }
+            }
+        } else if (mk == 218) {
+            // SOS
+            let ns: i64 = (blob[body] as i64) & 255;
+            if (ns != ncomp || ns < 1 || ns > 4) { _zag_print("bad SOS ns\n"); return 1; }
+            let c: i64 = 0;
+            while (c < ns) {
+                let cs: i64 = (blob[body + 1 + c * 2] as i64) & 255;
+                let ta: i64 = (blob[body + 2 + c * 2] as i64) & 255;
+                // find comp index by id
+                let ci: i64 = -1;
+                let k: i64 = 0;
+                while (k < ncomp) { if (cid[k] == cs) { ci = k; } k = k + 1; }
+                if (ci < 0) { _zag_print("SOS unknown comp\n"); return 1; }
+                scan_dt[ci] = ta >> 4;
+                scan_at[ci] = ta & 15;
+                c = c + 1;
+            }
+            let ss: i64 = (blob[body + 1 + ns * 2] as i64) & 255;
+            let se: i64 = (blob[body + 2 + ns * 2] as i64) & 255;
+            let ah: i64 = ((blob[body + 3 + ns * 2] as i64) >> 4) & 15;
+            let al: i64 = (blob[body + 3 + ns * 2] as i64) & 15;
+            if (ss != 0 || se != 63 || ah != 0 || al != 0) { _zag_print("progressive unsupported\n"); return 1; }
+            scan_start = bend;
+            // scan runs to EOI (or next marker); find EOI 0xFFD9 not followed by 0x00
+            let e: i64 = scan_start;
+            scan_end = -1;
+            while (e + 1 < flen) {
+                if (((blob[e] as i64) & 255) == 255 && ((blob[e+1] as i64) & 255) == 217) { scan_end = e; break; }
+                // skip stuffed 0xFF00
+                if (((blob[e] as i64) & 255) == 255 && ((blob[e+1] as i64) & 255) == 0) { e = e + 2; continue; }
+                e = e + 1;
+            }
+            if (scan_end < 0) { _zag_print("no EOI\n"); return 1; }
+            saw_sos = 1;
+            break;
+        } else if (mk == 220) {
+            // DNL - ignore (we have dims)
+        }
+        // skip APPn, COM, DRI, etc.
+        pos = bend;
+    }
+    if (saw_sos == 0 || img_w == 0) { _zag_print("no scan\n"); return 1; }
+    // verify tables present
+    let c: i64 = 0;
+    while (c < ncomp) {
+        if (qt_ok[cqt[c]] == 0) { _zag_print("missing Q\n"); return 1; }
+        c = c + 1;
+    }
+    // MCU layout
+    let hmax: i64 = 1; let vmax: i64 = 1;
+    c = 0;
+    while (c < ncomp) {
+        if (hsamp[c] > hmax) { hmax = hsamp[c]; }
+        if (vsamp[c] > vmax) { vmax = vsamp[c]; }
+        c = c + 1;
+    }
+    let mcu_w: i64 = (img_w + hmax * 8 - 1) / (hmax * 8);
+    let mcu_h: i64 = (img_h + vmax * 8 - 1) / (vmax * 8);
+    // component planes (full-res for Y, subsampled stored then upsampled)
+    // plane stride: ceil to MCU grid
+    let pw: i64 = mcu_w * hmax * 8;
+    let ph: i64 = mcu_h * vmax * 8;
+    // allocate planes as []u8 via nio (chunked if huge)
+    let plane: []u8 = nio_alloc_z(pw * ph * ncomp);
+    // IDCT scratch
+    let T: []i64 = nio_alloc_z64(64);
+    idct_init(T);
+    let F: []i64 = nio_alloc_z64(64);
+    let tmp: []i64 = nio_alloc_z64(64);
+    let blk: []u8 = nio_alloc_z(64);
+    // bit reader over scan
+    let st: []i64 = nio_alloc_z64(8);
+    st[0] = 0; st[1] = 0; st[2] = 0; st[3] = 0; st[4] = 0;
+    let scanview: []u8 = blob[scan_start..scan_end];
+    // DC predictors
+    let dcpred: []i64 = nio_alloc_z64(4);
+    // decode MCUs
+    let mcu_n: i64 = mcu_w * mcu_h;
+    let m: i64 = 0;
+    while (m < mcu_n) {
+        let mx: i64 = m % mcu_w;
+        let my: i64 = m / mcu_w;
+        c = 0;
+        while (c < ncomp) {
+            let by: i64 = 0;
+            while (by < vsamp[c]) {
+                let bx: i64 = 0;
+                while (bx < hsamp[c]) {
+                    // select trees for this comp
+                    let dct: i64 = scan_dt[c]; let act: i64 = scan_at[c];
+                    // decode one 8x8 block into F (zigzag natural order)
+                    let k: i64 = 0;
+                    while (k < 64) { F[k] = 0; k = k + 1; }
+                    // DC
+                    // --- decode one 8x8 block into F (zigzag natural order) ---
+                    // DC symbol via slot tree
+                    let dcsym: i64 = jpg_huff(scanview, st, dc_tree, dct);
+                    if (dcsym < 0) { _zag_print("DC sym fail\n"); return 1; }
+                    let diff: i64 = 0;
+                    if (dcsym > 0) {
+                        let bits: i64 = jpg_take(scanview, st, dcsym);
+                        if (bits < 0) { _zag_print("DC bits fail\n"); return 1; }
+                        diff = jpg_extend(bits, dcsym);
+                    }
+                    dcpred[c] = dcpred[c] + diff;
+                    F[0] = dcpred[c] * qt[cqt[c] * 64 + 0];
+                    // AC
+                    let kk: i64 = 1;
+                    while (kk < 64) {
+                        let asym: i64 = jpg_huff(scanview, st, ac_tree, act);
+                        if (asym < 0) { _zag_print("AC sym fail\n"); return 1; }
+                        if (asym == 0) { break; } // EOB
+                        if (asym == 240) { kk = kk + 16; continue; } // ZRL
+                        let run: i64 = asym >> 4;
+                        let sz: i64 = asym & 15;
+                        kk = kk + run;
+                        if (kk >= 64 || sz > 10) { _zag_print("AC bad\n"); return 1; }
+                        let av: i64 = jpg_take(scanview, st, sz);
+                        if (av < 0) { _zag_print("AC bits fail\n"); return 1; }
+                        F[zag_zig(kk)] = jpg_extend(av, sz) * qt[cqt[c] * 64 + zag_zig(kk)];
+                        kk = kk + 1;
+                    }
+                    // IDCT -> blk
+                    idct_block(F, T, tmp, blk, 0);
+                    // store into plane at component location
+                    // comp plane dims: cw = mcu_w*hsamp[c]*8, ch = mcu_h*vsamp[c]*8
+                    let cw: i64 = mcu_w * hsamp[c] * 8;
+                    let px: i64 = (mx * hsamp[c] + bx) * 8;
+                    let py: i64 = (my * vsamp[c] + by) * 8;
+                    let po: i64 = (c * ph * pw) + py * cw + px;
+                    let yy: i64 = 0;
+                    while (yy < 8) {
+                        let xx: i64 = 0;
+                        while (xx < 8) {
+                            plane[po + yy * cw + xx] = blk[yy * 8 + xx];
+                            xx = xx + 1;
+                        }
+                        yy = yy + 1;
+                    }
+                    // RSTn check
+                    if (st[4] != 0) {
+                        // reset predictors at restart interval
+                        let r: i64 = 0;
+                        while (r < 4) { dcpred[r] = 0; r = r + 1; }
+                        st[4] = 0;
+                    }
+                    bx = bx + 1;
+                }
+                by = by + 1;
+            }
+            c = c + 1;
+        }
+        m = m + 1;
+    }
+    // ---- assemble RGB with upsampling ----
+    // comp 0 = Y (hmax x vmax sampling), others upsampled by replication
+    let rgb: []u8 = nio_alloc_z(img_w * img_h * 3);
+    // fixed-point YCbCr->RGB, scale 2^16
+    // R = Y + 1.402*(Cr-128); G = Y - 0.344136*(Cb-128) - 0.714136*(Cr-128); B = Y + 1.772*(Cb-128)
+    let y: i64 = 0;
+    while (y < img_h) {
+        let x: i64 = 0;
+        while (x < img_w) {
+            let Yv: i64 = 0; let Cbv: i64 = 128; let Crv: i64 = 128;
+            if (ncomp == 1) {
+                Yv = (plane[y * pw + x] as i64) & 255;
+            } else {
+                // Y at full res
+                Yv = (plane[y * pw + x] as i64) & 255;
+                // Cb,Cr upsampled by sampling-factor ratio (replication)
+                let cw1: i64 = mcu_w * hsamp[1] * 8;
+                let sx: i64 = x * hsamp[1] / hmax;
+                let sy: i64 = y * vsamp[1] / vmax;
+                Cbv = (plane[1 * ph * pw + sy * cw1 + sx] as i64) & 255;
+                let cw2: i64 = mcu_w * hsamp[2] * 8;
+                let sx2: i64 = x * hsamp[2] / hmax;
+                let sy2: i64 = y * vsamp[2] / vmax;
+                Crv = (plane[2 * ph * pw + sy2 * cw2 + sx2] as i64) & 255;
+            }
+            let r: i64 = 0; let g: i64 = 0; let b: i64 = 0;
+            if (ncomp == 1) {
+                r = Yv; g = Yv; b = Yv;
+            } else {
+                let cb: i64 = Cbv - 128; let cr: i64 = Crv - 128;
+                r = Yv + ((91881 * cr + 32768) >> 16);
+                g = Yv - ((22554 * cb + 32768) >> 16) - ((46802 * cr + 32768) >> 16);
+                b = Yv + ((116130 * cb + 32768) >> 16);
+            }
+            if (r < 0) { r = 0; } if (r > 255) { r = 255; }
+            if (g < 0) { g = 0; } if (g > 255) { g = 255; }
+            if (b < 0) { b = 0; } if (b > 255) { b = 255; }
+            let o: i64 = (y * img_w + x) * 3;
+            rgb[o] = (r as u8) & 255;
+            rgb[o + 1] = (g as u8) & 255;
+            rgb[o + 2] = (b as u8) & 255;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    emit_held_image(outp, img_w, img_h, rgb);
+    _zag_print("jpeg ok ");
+    let ws: []u8 = _zag_i64_to_str(img_w);
+    _zag_print(ws);
+    _zag_print("x");
+    let hs: []u8 = _zag_i64_to_str(img_h);
+    _zag_println(hs);
+    return 0;
+}
+
+// Huffman decode against slot `slot` in the flat tree array `base` (slot*1024).
+fn jpg_huff(buf: []u8, st: []i64, base: []i64, slot: i64) i64 {
+    let node: i64 = 0;
+    let b: i64 = slot * 2048;
+    while (1 == 1) {
+        let w: i64 = b + node * 4;
+        if (base[w + 3] == 1) { return base[w + 2]; }
+        let bit: i64 = jpg_take(buf, st, 1);
+        if (bit < 0) { return -1; }
+        if (bit == 0) { node = base[w]; } else { node = base[w + 1]; }
+        if (node < 0 || node >= 512) { return -1; }
+    }
+    return -1;
+}

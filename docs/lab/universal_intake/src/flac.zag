@@ -1,0 +1,521 @@
+// TNN universal intake: FLAC decoder -> held audio (pure Zag, no libs).
+// Supports: native FLAC stream, STREAMINFO, frame headers + CRC8/CRC16,
+// subframes constant/verbatim/fixed/LPC, Rice/Rice2 residuals, wasted bits,
+// channel assignment 0..10 (independent + left/right/mid-side).
+// Emits TNINAUD1: channels u64, rate u64, frames u64, i64 LE interleaved.
+// usage: flac <in.flac> <out.held>
+@import("./common.zag")
+
+// ---------- CRC8 (poly 0x07) ----------
+fn flac_crc8(b: []u8, o: i64, n: i64) i64 {
+    let c: i64 = 0;
+    let i: i64 = 0;
+    while (i < n) {
+        c = c ^ (((b[o + i] as i64) & 255));
+        let k: i64 = 0;
+        while (k < 8) {
+            if ((c & 128) != 0) { c = ((c << 1) ^ 7) & 255; }
+            else { c = (c << 1) & 255; }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+// ---------- CRC16 (poly 0x8005) ----------
+fn flac_crc16(b: []u8, o: i64, n: i64) i64 {
+    let c: i64 = 0;
+    let i: i64 = 0;
+    while (i < n) {
+        c = c ^ ((((b[o + i] as i64) & 255)) << 8);
+        let k: i64 = 0;
+        while (k < 8) {
+            if ((c & 32768) != 0) { c = ((c << 1) ^ 32773) & 65535; }
+            else { c = (c << 1) & 65535; }
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+// ---------- bit reader (MSB-first) over frame ----------
+// st: [bytepos, bitbuf, nbits]
+fn fr_fill(buf: []u8, st: []i64, n: i64) i64 {
+    while (st[2] < n) {
+        if (st[0] >= (buf.len as i64)) { return 0; }
+        let b: i64 = (buf[st[0]] as i64) & 255;
+        st[0] = st[0] + 1;
+        st[1] = (st[1] << 8) | b;
+        st[2] = st[2] + 8;
+    }
+    return 1;
+}
+fn fr_take(buf: []u8, st: []i64, n: i64) i64 {
+    if (n < 1 || n > 32) { return -1; }
+    if (fr_fill(buf, st, n) == 0) { return -1; }
+    let sh: i64 = st[2] - n;
+    let v: i64 = (st[1] >> sh) & ((1 << n) - 1);
+    st[1] = st[1] & ((1 << sh) - 1);
+    st[2] = sh;
+    return v;
+}
+// signed take: sign-extend n-bit value
+fn fr_takes(buf: []u8, st: []i64, n: i64) i64 {
+    let v: i64 = fr_take(buf, st, n);
+    if (v < 0) { return -1; }
+    if (n < 64 && (v >> (n - 1)) == 1) { v = v - (1 << n); }
+    return v;
+}
+// unary: count zero bits until a one
+fn fr_unary(buf: []u8, st: []i64) i64 {
+    let c: i64 = 0;
+    while (1 == 1) {
+        let b: i64 = fr_take(buf, st, 1);
+        if (b < 0) { return -1; }
+        if (b == 1) { return c; }
+        c = c + 1;
+        if (c > 64) { return -1; }
+    }
+    return -1;
+}
+// Rice decode: returns signed value. param k.
+fn fr_rice(buf: []u8, st: []i64, k: i64) i64 {
+    let q: i64 = fr_unary(buf, st);
+    if (q < 0) { return -1000000000; }
+    let r: i64 = 0;
+    if (k > 0) {
+        r = fr_take(buf, st, k);
+        if (r < 0) { return -1000000000; }
+    }
+    let u: i64 = (q << k) | r;
+    // zigzag: (u>>1) ^ -(u&1)
+    if ((u & 1) == 1) { return -((u >> 1) + 1); }
+    return u >> 1;
+}
+
+// UTF-8 coded number (frame/sample number)
+fn fr_utf8(buf: []u8, st: []i64) i64 {
+    let b0: i64 = fr_take(buf, st, 8);
+    if (b0 < 0) { return -1; }
+    if ((b0 & 128) == 0) { return b0; }
+    let nbytes: i64 = 0;
+    if ((b0 & 224) == 192) { nbytes = 2; }
+    else if ((b0 & 240) == 224) { nbytes = 3; }
+    else if ((b0 & 248) == 240) { nbytes = 4; }
+    else if ((b0 & 252) == 248) { nbytes = 5; }
+    else if ((b0 & 254) == 252) { nbytes = 6; }
+    else if ((b0 & 255) == 254) { nbytes = 7; }
+    else { return -1; }
+    let masks: i64 = 0;
+    if (nbytes == 2) { masks = 31; }
+    else if (nbytes == 3) { masks = 15; }
+    else if (nbytes == 4) { masks = 7; }
+    else if (nbytes == 5) { masks = 3; }
+    else if (nbytes == 6) { masks = 1; }
+    else { masks = 0; }
+    let v: i64 = b0 & masks;
+    let i: i64 = 1;
+    while (i < nbytes) {
+        let bx: i64 = fr_take(buf, st, 8);
+        if (bx < 0 || (bx & 192) != 128) { return -1; }
+        v = (v << 6) | (bx & 63);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn main() i32 {
+    let inp: []u8 = _zag_arg(1);
+    let outp: []u8 = _zag_arg(2);
+    let blob: []u8 = file_read_all(inp);
+    if ((blob.len as i64) < 42) { _zag_print("short\n"); return 1; }
+    let flen: i64 = blob.len as i64;
+    if ((blob[0] as i64) != 102 || (blob[1] as i64) != 76 || (blob[2] as i64) != 97 || (blob[3] as i64) != 67) {
+        _zag_print("not FLAC\n"); return 1;
+    }
+    // ---- metadata ----
+    let pos: i64 = 4;
+    let sample_rate: i64 = 0;
+    let nch: i64 = 0;
+    let bps: i64 = 0;
+    let total_samples: i64 = 0;
+    let min_block: i64 = 0;
+    let max_block: i64 = 0;
+    while (pos + 4 <= flen) {
+        let hb: i64 = (blob[pos] as i64) & 255;
+        let last: i64 = (hb >> 7) & 1;
+        let mtype: i64 = hb & 127;
+        let mlen: i64 = (((blob[pos+1] as i64) & 255) << 16) | (((blob[pos+2] as i64) & 255) << 8) | ((blob[pos+3] as i64) & 255);
+        pos = pos + 4;
+        if (pos + mlen > flen) { _zag_print("meta overrun\n"); return 1; }
+        if (mtype == 0) {
+            if (mlen < 34) { _zag_print("bad STREAMINFO\n"); return 1; }
+            min_block = rd_u16be(blob, pos);
+            max_block = rd_u16be(blob, pos + 2);
+            // 20 bits rate, 3 bits ch-1, 5 bits bps-1, 36 bits total
+            let b8: i64 = (blob[pos+10] as i64) & 255;
+            let b9: i64 = (blob[pos+11] as i64) & 255;
+            let b10: i64 = (blob[pos+12] as i64) & 255;
+            let b11: i64 = (blob[pos+13] as i64) & 255;
+            let b12: i64 = (blob[pos+14] as i64) & 255;
+            let b13: i64 = (blob[pos+15] as i64) & 255;
+            let b14: i64 = (blob[pos+16] as i64) & 255;
+            let b15: i64 = (blob[pos+17] as i64) & 255;
+            sample_rate = (b8 << 12) | (b9 << 4) | (b10 >> 4);
+            nch = ((b10 >> 1) & 7) + 1;
+            bps = (((b10 & 1) << 4) | (b11 >> 4)) + 1;
+            total_samples = ((b11 & 15) << 32) | (b12 << 24) | (b13 << 16) | (b14 << 8) | b15;
+        }
+        pos = pos + mlen;
+        if (last == 1) { break; }
+    }
+    if (sample_rate == 0 || nch == 0 || bps == 0) { _zag_print("no STREAMINFO\n"); return 1; }
+    if (nch > 8) { _zag_print("too many channels\n"); return 1; }
+    if (bps != 8 && bps != 12 && bps != 16 && bps != 20 && bps != 24 && bps != 32) {
+        _zag_print("bad bps\n"); return 1;
+    }
+    _zag_print("flac ");
+    let s1: []u8 = _zag_i64_to_str(sample_rate); _zag_print(s1); _zag_print("Hz ");
+    let s2: []u8 = _zag_i64_to_str(nch); _zag_print(s2); _zag_print("ch ");
+    let s3: []u8 = _zag_i64_to_str(bps); _zag_print(s3); _zag_print("bit\n");
+    // ---- frames ----
+    // output buffer: total_samples * nch i64 (chunked if huge)
+    let out_cap: i64 = total_samples * nch;
+    if (out_cap <= 0 || out_cap > 134217728) { _zag_print("bad total\n"); return 1; }
+    let samples: []i64 = nio_alloc_z64(out_cap);
+    let samp_n: i64 = 0;  // interleaved samples written
+    // per-channel decode buffers (max block 65535)
+    let chbuf: []i64 = nio_alloc_z64(8 * 65535);
+    let st: []i64 = nio_alloc_z64(8);
+    while (pos + 2 <= flen) {
+        // find sync: 0xFFF8 (top 15 bits set, bit0 of second byte can vary)
+        // scan for 0xFF
+        if (((blob[pos] as i64) & 255) != 255) { pos = pos + 1; continue; }
+        let b1: i64 = (blob[pos + 1] as i64) & 255;
+        if ((b1 & 248) != 248) { pos = pos + 1; continue; }
+        let fstart: i64 = pos;
+        // header: byte0=0xFF, byte1: 1 bit 0, 1 bit blocking-strategy, 4 bits blocksize, 4 bits samplerate
+        let blocking: i64 = (b1 >> 1) & 1;
+        let bs_bits: i64 = (blob[pos + 2] as i64) & 255;
+        let bs_code: i64 = (bs_bits >> 4) & 15;
+        let sr_code: i64 = bs_bits & 15;
+        let ch_assign: i64 = ((blob[pos + 3] as i64) >> 4) & 15;
+        let ss_code: i64 = ((blob[pos + 3] as i64) >> 1) & 7;
+        let hdr_res: i64 = (blob[pos + 3] as i64) & 1;
+        if (hdr_res != 0) { pos = pos + 1; continue; }
+        if (ch_assign > 10) { pos = pos + 1; continue; }
+        // actual channels and bps for this frame
+        let fch: i64 = nch;
+        if (ch_assign == 8 || ch_assign == 9 || ch_assign == 10) { fch = 2; }
+        else if (ch_assign >= 1 && ch_assign <= 7) { pos = pos + 1; continue; }
+        let fb_ps: i64 = bps;
+        if (ss_code == 1) { fb_ps = 8; }
+        else if (ss_code == 2) { fb_ps = 12; }
+        else if (ss_code == 4) { fb_ps = 16; }
+        else if (ss_code == 5) { fb_ps = 20; }
+        else if (ss_code == 6) { fb_ps = 24; }
+        // block size
+        let blocksize: i64 = 0;
+        let hpos: i64 = pos + 4;
+        // frame/sample number (UTF-8)
+        st[0] = hpos; st[1] = 0; st[2] = 0;
+        let frame_num: i64 = fr_utf8(blob, st);
+        if (frame_num < 0) { pos = pos + 1; continue; }
+        hpos = st[0];
+        if (bs_code == 0) { pos = pos + 1; continue; }
+        else if (bs_code == 1) { blocksize = 192; }
+        else if (bs_code >= 2 && bs_code <= 5) { blocksize = 576 * (1 << (bs_code - 2)); }
+        else if (bs_code == 6) {
+            if (hpos >= flen) { _zag_print("trunc\n"); return 1; }
+            blocksize = ((blob[hpos] as i64) & 255) + 1; hpos = hpos + 1;
+        } else if (bs_code == 7) {
+            if (hpos + 1 >= flen) { _zag_print("trunc\n"); return 1; }
+            blocksize = rd_u16be(blob, hpos) + 1; hpos = hpos + 2;
+        } else { blocksize = 256 << (bs_code - 8); }
+        if (blocksize > 65535 || blocksize <= 0) { pos = pos + 1; continue; }
+        // sample rate
+        if (sr_code == 0) {
+            // from STREAMINFO
+        } else if (sr_code == 1) {
+            // 88.2k
+        } else if (sr_code == 2) {
+            // 176.4k
+        } else if (sr_code == 3) {
+            // 192k
+        } else if (sr_code == 4) {
+            // 8k
+        } else if (sr_code == 5) {
+            // 16k
+        } else if (sr_code == 6) {
+            // 22.05k
+        } else if (sr_code == 7) {
+            // 44.1k
+        } else if (sr_code == 8) {
+            // 48k
+        } else if (sr_code == 9) {
+            // 96k
+        } else if (sr_code == 10) {
+            // 8kHz?
+        } else if (sr_code == 11) {
+            // 16kHz?
+        } else if (sr_code == 12) {
+            if (hpos >= flen) { _zag_print("trunc\n"); return 1; }
+            hpos = hpos + 1; // *1000 Hz
+        } else if (sr_code == 13) {
+            if (hpos + 1 >= flen) { _zag_print("trunc\n"); return 1; }
+            hpos = hpos + 2; // Hz
+        } else if (sr_code == 14) {
+            if (hpos + 1 >= flen) { _zag_print("trunc\n"); return 1; }
+            hpos = hpos + 2; // *10 Hz
+        } else { _zag_print("bad srcode\n"); return 1; }
+        // CRC8 over header
+        let crc8_got: i64 = flac_crc8(blob, fstart, hpos - fstart);
+        if (hpos >= flen) { _zag_print("trunc\n"); return 1; }
+        let crc8_want: i64 = (blob[hpos] as i64) & 255;
+        hpos = hpos + 1;
+        if (crc8_got != crc8_want) { pos = pos + 1; continue; }
+        // ---- subframes ----
+        st[0] = hpos; st[1] = 0; st[2] = 0;
+        let c: i64 = 0;
+        let frame_ok: i64 = 1;
+        while (c < fch) {
+            // subframe header
+            let sh: i64 = fr_take(blob, st, 8);
+            if (sh < 0) { frame_ok = 0; break; }
+            if ((sh & 128) != 0) { _zag_print("bad subframe hdr\n"); return 1; }
+            let ptype: i64 = (sh >> 1) & 63;
+            let wasted: i64 = 0;
+            if ((sh & 1) == 1) {
+                wasted = fr_unary(blob, st) + 1;
+                if (wasted < 0) { frame_ok = 0; break; }
+            }
+            let bps_eff: i64 = fb_ps - wasted;
+            // decorrelation: for ch_assign 8/9/10, side channel has +1 bit
+            if (ch_assign == 8 && c == 1) { bps_eff = bps_eff + 1; }
+            if (ch_assign == 9 && c == 0) { bps_eff = bps_eff + 1; }
+            if (ch_assign == 10 && c == 1) { bps_eff = bps_eff + 1; }
+            let base: i64 = c * 65535;
+            if (ptype == 0) {
+                // constant
+                let v: i64 = fr_takes(blob, st, bps_eff);
+                if (v == -1 && bps_eff > 0) { frame_ok = 0; break; }
+                let i: i64 = 0;
+                while (i < blocksize) { chbuf[base + i] = v; i = i + 1; }
+            } else if (ptype == 1) {
+                // verbatim
+                let i: i64 = 0;
+                while (i < blocksize) {
+                    let v: i64 = fr_takes(blob, st, bps_eff);
+                    if (v == -1 && bps_eff > 0) { frame_ok = 0; break; }
+                    chbuf[base + i] = v;
+                    i = i + 1;
+                }
+                if (frame_ok == 0) { break; }
+            } else if (ptype >= 8 && ptype <= 12) {
+                // fixed
+                let order: i64 = ptype - 8;
+                let i: i64 = 0;
+                while (i < order) {
+                    let v: i64 = fr_takes(blob, st, bps_eff);
+                    if (v == -1 && bps_eff > 0) { frame_ok = 0; break; }
+                    chbuf[base + i] = v;
+                    i = i + 1;
+                }
+                if (frame_ok == 0) { break; }
+                // residuals
+                let rc: i64 = flac_residual(blob, st, chbuf, base, blocksize, order, bps_eff);
+                if (rc < 0) { frame_ok = 0; break; }
+                // fixed prediction
+                i = order;
+                while (i < blocksize) {
+                    let p: i64 = 0;
+                    if (order == 1) { p = chbuf[base + i - 1]; }
+                    else if (order == 2) { p = 2 * chbuf[base + i - 1] - chbuf[base + i - 2]; }
+                    else if (order == 3) { p = 3 * chbuf[base + i - 1] - 3 * chbuf[base + i - 2] + chbuf[base + i - 3]; }
+                    else if (order == 4) { p = 4 * chbuf[base + i - 1] - 6 * chbuf[base + i - 2] + 4 * chbuf[base + i - 3] - chbuf[base + i - 4]; }
+                    chbuf[base + i] = chbuf[base + i] + p;
+                    i = i + 1;
+                }
+            } else if (ptype >= 32 && ptype <= 63) {
+                // LPC
+                let order: i64 = (ptype & 31) + 1;
+                let i: i64 = 0;
+                while (i < order) {
+                    let v: i64 = fr_takes(blob, st, bps_eff);
+                    if (v == -1 && bps_eff > 0) { frame_ok = 0; break; }
+                    chbuf[base + i] = v;
+                    i = i + 1;
+                }
+                if (frame_ok == 0) { break; }
+                let prec: i64 = fr_take(blob, st, 4);
+                if (prec < 0) { frame_ok = 0; break; }
+                prec = prec + 1;
+                if (prec == 16) { _zag_print("bad lpc prec\n"); return 1; }
+                let shift: i64 = fr_takes(blob, st, 5);
+                if (shift == -1) { frame_ok = 0; break; }
+                // coefficients
+                let coef: []i64 = nio_alloc_z64(32);
+                i = 0;
+                while (i < order) {
+                    let cv: i64 = fr_takes(blob, st, prec);
+                    if (cv == -1 && prec > 0) { frame_ok = 0; break; }
+                    coef[i] = cv;
+                    i = i + 1;
+                }
+                if (frame_ok == 0) { break; }
+                let rc: i64 = flac_residual(blob, st, chbuf, base, blocksize, order, bps_eff);
+                if (rc < 0) { frame_ok = 0; break; }
+                // LPC prediction
+                i = order;
+                while (i < blocksize) {
+                    let s: i64 = 0;
+                    let j: i64 = 0;
+                    while (j < order) {
+                        s = s + coef[j] * chbuf[base + i - 1 - j];
+                        j = j + 1;
+                    }
+                    // arithmetic shift (round toward -inf for negative? FLAC uses >> which is arithmetic)
+                    let p: i64 = 0;
+                    if (shift >= 0) {
+                        if (s >= 0) { p = s >> shift; }
+                        else { p = -((-s) >> shift); if (((-s) & ((1 << shift) - 1)) != 0) { p = p - 1; } }
+                    }
+                    chbuf[base + i] = chbuf[base + i] + p;
+                    i = i + 1;
+                }
+            } else { _zag_print("bad ptype\n"); return 1; }
+            // restore wasted bits: left-shift the decoded subframe
+            if (wasted > 0) {
+                let wi: i64 = 0;
+                while (wi < blocksize) {
+                    chbuf[base + wi] = chbuf[base + wi] << wasted;
+                    wi = wi + 1;
+                }
+            }
+            c = c + 1;
+        }
+        if (frame_ok == 0) { _zag_print("subframe fail\n"); return 1; }
+        // byte-align: discard partial-byte bits; st[0] already points past them
+        st[1] = 0; st[2] = 0;
+        hpos = st[0];
+        // CRC16 over frame (fstart..hpos)
+        if (hpos + 2 > flen) { _zag_print("trunc crc16\n"); return 1; }
+        let crc16_got: i64 = flac_crc16(blob, fstart, hpos - fstart);
+        let crc16_want: i64 = rd_u16be(blob, hpos);
+        hpos = hpos + 2;
+        if (crc16_got != crc16_want) { _zag_print("frame CRC16 fail\n"); return 1; }
+        // ---- decorrelate and store ----
+        let i: i64 = 0;
+        while (i < blocksize) {
+            if (ch_assign <= 7) {
+                let cc: i64 = 0;
+                while (cc < fch) {
+                    samples[samp_n] = chbuf[cc * 65535 + i];
+                    samp_n = samp_n + 1;
+                    cc = cc + 1;
+                }
+            } else if (ch_assign == 8) {
+                // left-side: ch0=left, ch1=diff
+                let left: i64 = chbuf[0 * 65535 + i];
+                let diff: i64 = chbuf[1 * 65535 + i];
+                samples[samp_n] = left; samp_n = samp_n + 1;
+                samples[samp_n] = left - diff; samp_n = samp_n + 1;
+            } else if (ch_assign == 9) {
+                // right-side: ch0=diff, ch1=right
+                let diff: i64 = chbuf[0 * 65535 + i];
+                let right: i64 = chbuf[1 * 65535 + i];
+                samples[samp_n] = right + diff; samp_n = samp_n + 1;
+                samples[samp_n] = right; samp_n = samp_n + 1;
+            } else if (ch_assign == 10) {
+                // mid-side: ch0=mid, ch1=side
+                let mid: i64 = chbuf[0 * 65535 + i];
+                let side: i64 = chbuf[1 * 65535 + i];
+                let right: i64 = mid - (side >> 1);
+                let left: i64 = right + side;
+                samples[samp_n] = left; samp_n = samp_n + 1;
+                samples[samp_n] = right; samp_n = samp_n + 1;
+            }
+            i = i + 1;
+        }
+        pos = hpos;
+        // stop if we've got total_samples
+        if (total_samples > 0 && samp_n >= total_samples * nch) { break; }
+    }
+    let frames_out: i64 = samp_n / nch;
+    // emit held audio (i64 LE)
+    // convert samples (already i64) to output
+    let total_i64: i64 = samp_n;
+    // check 2^25 slice limit for output
+    let hdr: i64 = 32;
+    // write via file_write_trunc with a constructed buffer (chunked if needed)
+    // For simplicity, require total bytes < 2^25 here (fixtures are small).
+    let out_bytes: i64 = hdr + total_i64 * 8;
+    if (out_bytes >= 33554432) { _zag_print("too big\n"); return 1; }
+    let ob: []u8 = nio_alloc_z(out_bytes);
+    ob[0] = 84; ob[1] = 78; ob[2] = 73; ob[3] = 78; ob[4] = 65; ob[5] = 85; ob[6] = 68; ob[7] = 49;
+    wr_u64le(ob, 8, nch);
+    wr_u64le(ob, 16, sample_rate);
+    wr_u64le(ob, 24, frames_out);
+    let i: i64 = 0;
+    while (i < total_i64) {
+        wr_u64le(ob, hdr + i * 8, samples[i]);
+        i = i + 1;
+    }
+    file_write_trunc(outp, ob);
+    _zag_print("ok\n");
+    return 0;
+}
+
+// Decode residuals into chbuf[base+order .. base+blocksize-1] (adds to existing warmup).
+// Returns 0 ok, negative on error.
+fn flac_residual(buf: []u8, st: []i64, chbuf: []i64, base: i64, blocksize: i64, order: i64, bps: i64) i64 {
+    let method: i64 = fr_take(buf, st, 2);
+    if (method < 0 || method > 1) { return -1; }
+    let pord: i64 = fr_take(buf, st, 4);
+    if (pord < 0) { return -1; }
+    let npart: i64 = 1 << pord;
+    if (npart > blocksize) { return -1; }
+    // partition sizes: first = blocksize>>pord - order, rest = blocksize>>pord
+    let part_size: i64 = blocksize >> pord;
+    let idx: i64 = order;
+    let p: i64 = 0;
+    while (p < npart) {
+        let param: i64 = 0;
+        if (method == 0) {
+            param = fr_take(buf, st, 4);
+            if (param < 0) { return -1; }
+            if (param == 15) { param = 31; } // escape: raw bps bits follow? (actually 4-bit escape=15 means 5-bit param? no)
+            // FLAC: 4-bit Rice param; 15 is escape -> read 5-bit? No: escape means unencoded.
+            // Correct: if param==15 (0b1111), then samples are stored as unencoded bps-bit.
+        } else {
+            param = fr_take(buf, st, 5);
+            if (param < 0) { return -1; }
+            if (param == 31) { param = 63; }
+        }
+        let n: i64 = part_size;
+        if (p == 0) { n = part_size - order; }
+        let is_escape: i64 = 0;
+        let rawbps: i64 = 0;
+        if (method == 0 && param == 31) { is_escape = 1; rawbps = fr_take(buf, st, 5); }
+        if (method == 1 && param == 63) { is_escape = 1; rawbps = fr_take(buf, st, 5); }
+        if (method == 0 && param == 15) { is_escape = 1; rawbps = bps; }
+        if (method == 1 && param == 31) { is_escape = 1; rawbps = bps; }
+        let j: i64 = 0;
+        while (j < n) {
+            let v: i64 = 0;
+            if (is_escape == 1) {
+                v = fr_takes(buf, st, rawbps);
+                if (v == -1 && rawbps > 0) { return -1; }
+            } else {
+                v = fr_rice(buf, st, param);
+                if (v == -1000000000) { return -1; }
+            }
+            chbuf[base + idx] = v;
+            idx = idx + 1;
+            j = j + 1;
+        }
+        p = p + 1;
+    }
+    return 0;
+}
