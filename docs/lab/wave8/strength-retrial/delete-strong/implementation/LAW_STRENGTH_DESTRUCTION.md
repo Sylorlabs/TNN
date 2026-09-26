@@ -32,6 +32,9 @@ ST_REFUSED_CONSUMED (121), distinct from underpayment (ST_REFUSED_EFFORT,
 109). Only fresh cites count toward the price. (This supersedes the earlier
 window-qualified wording; the F6 head-to-head on global single-use continues
 separately, but the delete path is closed regardless.)
+SUPERSEDED 2026-09-26 ~00:32 PDT (Micah: "adopt F6"): the F6 head-to-head is
+decided — G (global) is now law (see S-D6). S-D2's slot-scoped tombstoning is
+subsumed by S-D6's store-wide tombstoning wherever they conflict.
 
 ## LAW S-D3 — TNN self-determination over its strength machinery (design law)
 
@@ -125,6 +128,8 @@ slot stays consumed across ADD reuse of that slot; second destruction refused
 121), not "F6, out of scope". The F6 head-to-head (global single-use vs
 windowed) continues as a separate question; the delete path no longer depends
 on its outcome.
+SUPERSEDED 2026-09-26 ~00:32 PDT (Micah: "adopt F6"): the F6 head-to-head
+concluded — G is adopted as law; see S-D6.
 
 - **"HOLE 1" (`st_kill` destroys a 90-strength memory free): ~~NOT a mechanism
   hole~~ GENUINE HOLE, now removed.** ~~`st_kill` is the eviction class, free
@@ -145,12 +150,91 @@ on its outcome.
 
 ## What this law does NOT claim
 
-- F6 as a general question (global single-use cites vs windowed) remains under
-  separate test per Micah's 2026-09-25 order — but the DELETE path no longer
-  depends on it: S-D2's generation-scoped tombstoning closes hole 2 on the
-  delete path regardless (D13, D14).
+- F6 as a general question (global single-use cites vs windowed) ~~remains under
+  separate test per Micah's 2026-09-25 order~~ decided 2026-09-26 ~00:32 PDT
+  (Micah: "adopt F6") — G (global single-use cites) is now law; see S-D6.
+  S-D2's generation-scoped tombstoning on the delete path is subsumed by S-D6's
+  store-wide tombstoning. (D13, D14 still prove the delete path independently.)
 - The pristine R4 base copies still carry the 16-byte cite-buffer defect
   (kill→rollback→recite with >4 distinct cites panics); the fix lives in this
   stack only. Repairing the pristine base awaits Micah's word.
 - B2's designated-priority tier is adopted as the strength arm; the 95% bar and
   R1 30-vs-20 amendments remain open.
+
+---
+
+## LAW S-D6 — Amendment F6: global single-use cites (signed 2026-09-26)
+
+**ADOPTED by Micah Cooley 2026-09-26 ~00:32 PDT — "adopt F6".**
+
+A citation episode that paid for one successful destruction can never pay
+for another destruction — on any slot, in the whole store, forever. This is
+store-wide tombstoning: consumption is remembered at the store level, not
+per slot. It closes the cross-slot double-spend the F6 investigation found
+(the D4 hole): under per-slot tombstoning, episodes spent destroying slot A
+could be re-cited to destroy slot B for free. No overwrite, strengthen,
+weaken, trainer-declare, ADD, or slot reuse refreshes the consumed set. This
+supersedes the windowed single-use rule wherever they conflict.
+
+High-water destruction pricing stands unchanged (S-D1) — referenced here,
+not re-decided: a destruction costs `ceil(HW/25)` cites, where HW is the
+maximum strength the judgment held since its latest ADD/OVERWRITE. (The D2
+fix — pricing at high-water, not current strength, so weaken-then-destroy
+can't sneak a discount — ships with the same F6 test build.)
+
+The wedge is law-visible, never silent. The mechanism emits cite-lock audit
+signals:
+
+- `ST_OP_CITELOCK` (slot level): after a GLOBAL `121` priced-destruction
+  refusal, when the target slot is live and every cited episode in the
+  current effort window is consumed — the slot is locked against priced
+  destruction on its cited evidence.
+- `ST_OP_CITELOCK_SYS` (system level): when all user-capacity slots are
+  cite-locked — the terminal wedge.
+
+Both are audit-only: they change no return code, no state, no consumption,
+no effort window. The checker independently re-derives the lock predicate
+and REQUIRES the slot signal after every GLOBAL `121` on a truly
+cite-locked target. The lawful way back from a cite-lock is fresh episodes:
+genuinely new citations restore the destruction path; re-citing spent ones
+is refused 121.
+
+## ADOPTION record — F6 (2026-09-26)
+
+- **Adopted:** Micah Cooley, 2026-09-26 ~00:32 PDT — "adopt F6".
+- **Supersedes:** the windowed single-use rule (F4 window semantics, and
+  S-D2 as previously worded) wherever it conflicts with S-D6; supersede
+  markers left in place above.
+- **Evidence (F6 test build — NOT the delete-strong mainline):**
+  `~/workspace/strength-f6-wedgefix/` — F6_VERDICT.md (head-to-head:
+  windowed vs global vs hybrid; W out by measurement, H out by Micah's
+  2026-09-25 ruling, G compliant), FIX_WEDGE.md (D4 store-wide tombstone +
+  D2 high-water port + cite-lock signals), branch commits de7f59c91,
+  20497b8f0, 75b75d503; `~/workspace/strength-f6/wedge/` — TRACE_WEDGE.md,
+  RECOVERY_AUDIT.md. Measured: 8-shape attack battery A1–A8 closed under G;
+  fresh blind red team 20/20 held; honest long-horizon 386/386 and
+  3986/3986 with zero refusals (ledgers byte-identical across rules — with
+  fresh episodes arriving, G costs honest use nothing); W1–W7 wedge battery
+  fail=0, byte-identical ×2; pristine-vs-fixed byte-identical on all prior
+  shapes (no prior 121 became 0); four-fresh-episode recovery proven
+  (KILL → 0, ADD → 0; re-citing the recovered episodes → 121).
+- **Porting status:** this amendment is LAW TEXT plus the F6 test-build
+  evidence. Porting the D4 tombstone + D2 high-water fix onto the
+  delete-strong mainline is a separate crew's task — MAINLINE PORT IS
+  PENDING, not claimed here.
+
+### Explicitly OPEN (not decided by this amendment)
+
+1. **The price(0)=0 floor question.** A destruction can cost 0 cites after
+   an overwrite resets high-water (red-team D2: WEAK-to-0 then KILL with
+   zero cites). A separate fork experiment (running in parallel, NOT this
+   workstream) is testing destruction pricing variants including this
+   shape. S-D6 adopts G as measured; the floor question is reserved for
+   Micah after the fork evidence lands.
+2. **Tracked F6 risks (not blockers).** (a) Finite salient pools wedge
+   under slot reuse: ~3.5×P destructions, then slots clog permanently with
+   121-refused memories (ADD → FULL cascade). The deliberate-recycling fork
+   must prove wedge-freedom before its recycle op ships. (b) Honest-path
+   consumed-set lookup needs indexing before 100× legs — the global scan
+   cost grows with the ledger (measured ~16 min vs ~1 min at 10×; zero
+   behavioral difference, pure compute cost).
