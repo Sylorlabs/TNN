@@ -59,3 +59,23 @@ deliberation that places its own bindings through `tnn_bind_*`.
 Pure Zag, zero RNG. Every stage ran each battery twice with SHA-256 comparison;
 all pairs byte-identical. Evidence (outputs, build logs, sources, SHA256SUMS)
 under `evidence/stageA/`, `evidence/stageB/`, `evidence/stageC/`.
+
+## Panic hardening (2026-09-26, Micah follow-up)
+
+- **cand_span: REMOVED.** Proven unreachable: `policy_winner` returns only
+  {1,2,3,6,9,10}; candidates 7/8 (SPAN3/SPAN5) can never dispatch. Its
+  unguarded `t[0]`/`t[t.len-1]` (kinds 8/9) was a loaded gun in dead code.
+  Removal verified: 0 references remain; wall+production byte-identical.
+- **Degenerate sweep: 41/41 clean, zero panics** (two runs byte-identical,
+  SHA `42fcb2c5e9eb138dab2838c22dd57453024c095ba88704a33e23870dcf0387ed`).
+  Empty text × all 23 kinds, single-char, all-whitespace, past-end/0th/
+  negative positions, empty question, degenerate granularity.
+- **Hardened:** H1 (`cand_zoom` kind-7 uninitialized word-slot read),
+  H2 (`cand_word` kind-16 negative table index), H3 (same pattern, defensive),
+  H4 (`cand_word` kind-5 answered "-1" on empty text → now "0").
+- **Already clean:** W25 guard, `cand_enddirect` edge arms, `ws_locate`,
+  `rlocate_last`, `gran_split`, `reverse_into`, `enum_words`, `parse_digits`.
+- **Regression:** wall 26/26 and production 57/57, SHAs unchanged from
+  pre-harden goldens; telemetry 0 mismatches on all three batteries.
+- `battery3.zag` is now a permanent regression battery; `build.sh` runs all
+  three. Full detail: PREREG_DEGEN.md, RUNLOG.md.

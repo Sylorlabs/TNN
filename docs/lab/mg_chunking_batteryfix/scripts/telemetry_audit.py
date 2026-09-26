@@ -56,7 +56,7 @@ for path in sys.argv[1:]:
     cur_t = None; cur_qid = None
     bad = 0; total = 0
     for line in phys:
-        m = re.match(r'^[WQ] (\d+) (?:\[[A-Z]\] )?q="(.*)" t="(.*)" exp="(.*)"$', line.rstrip("\n"))
+        m = re.match(r'^[WQ] (\d+) (?:\[[A-Z0-9]+\] )?q="(.*)" t="(.*)" exp="(.*)"$', line.rstrip("\n"))
         if m:
             cur_qid, cur_t = m.group(1), m.group(3).encode()
             continue
