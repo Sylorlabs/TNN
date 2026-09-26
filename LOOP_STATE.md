@@ -1874,3 +1874,172 @@ reformulation; G1 sunshafts stand down until a genuinely new design
 idea; D-VID-1 lane stands down until a re-aimed prereg with a different
 mechanism exists; ST-1 stereo WAVs not queued for his ears (DEAD on
 pristine evidence).
+
+
+---
+
+## Wave 20260926-0821pdt verdicts (2026-09-26)
+
+Run start: HEAD 4328a8350 (the 0521pdt wave's own LOOP_STATE commit).
+No upstream merges landed since the 0521pdt wave's base d0076134d; the
+only intervening commits are the loop's own two (8564128c4 evidence
+batch, 4328a8350 LOOP_STATE update). Remote tip static at 6c3c7b69c.
+By deliberate coordinator choice this wave ran standing process
+confirmations and no new candidates: every candidate lane is stood
+down or gated (G1 sunshafts stand down pending a genuinely new design
+idea; D-VID-1 stands down pending a re-aimed prereg with a different
+mechanism; CV-P and COMP-2 adoption are barred pending his governance
+ruling 6 on Python-mirror logic; B1-class re-freezes require the P9
+bar reformulation first; ST-1 is DEAD on pristine evidence). Lane
+survey record (per P17): the coordinator checked docs/lab/rsi/ for new
+prereg drafts and design notes since 0521pdt (git log over
+docs/lab/rsi/, git status for uncommitted candidate material, find for
+new *prereg* files): none found. No preregs this wave, so the prereg
+commit-order self-check is vacuous (labeled vacuous per P17): no
+UNVERIFIABLE ORDERING. Debate transcript:
+docs/lab/rsi/debates/wave-20260926-0821pdt/ (ADVOCATE_BRIEF.md,
+SKEPTIC_REPORT.md, JUDGE_RULINGS.md, INDEX.md). The skeptic's verbatim
+provenance probe ("What is the provenance of the artifacts under
+judgment, and what exactly is new versus inherited?") appears once per
+item (4 occurrences, grep-verified); zero em-dashes in any wave doc
+(grep-verified by the coordinator). No verdict was overturned; the
+judge MODIFIED one draft verdict line on cited evidence.
+
+1. Fork battery: CONFIRM [RE-CERT] (judge MODIFIED the draft verdict
+line wording). Revised verdict line (P1/P8 mandatory elements, scope
+stamp included): Fork battery 0821pdt: CONFIRM [RE-CERT]: 36 named
+entries, 34 PASS, 2 extraction FAILs (pull/1/head 5802fec8,
+pull/2/head 4b76bb59f; no toolchain path in tree, non-TNN
+research-doc repos; still uncovered), 27 unique commits, 1 unique live
+commit (4328a8350d) under 2 live named entries, 34 fixtures, all
+duplicates named with SHAs (six duplicate groups; the 2 live entries
+test the same commit); znc pin 498abcb5 and probe sha 3b29aa06 on
+34/34; B2 bin 75b85d3c matches frozen; NEG1/NEG2 discriminate 34/34;
+harness rebuilt byte-identical a2e6284c from source f38d9154;
+/tmp-full incident: wt-wave3-trades and wt-wave3-senses re-run from
+scratch via read-only git show after space was freed, final verdicts
+rest on intact post-rerun artifacts with matched shas (P14); one no-op
+python3 -c disclosed, exact command and placement stated, touched no
+wave artifact: disclosed contact per P13/COMP-2, not a breach (P15);
+HEAD 4328a8350d static during run; closing ls-remote 6c3c7b69c
+identical to run start; the 34/36 headline travels only with the
+extraction-FAIL, duplicate, fixture, and incident caveats; certifies
+toolchain and extraction stability only, not the contents of merged
+commits. The debate group independently re-verified this session: HEAD
+4328a8350d, the znc pin prefix, the extraction-FAIL cause in both
+pull-head trees (no src/ directory, research documents only), and the
+FIT chain-path diffs. Incident rulings by the judge: (a) the /tmp-full
+incident does not undermine the 34/34 PASS claim (the two affected
+entries were discarded and re-run from source; final verdicts rest on
+intact post-rerun artifacts with re-verified pin/probe shas), but it
+travels as a load-bearing verdict-line caveat; (b) the accidental
+no-op python3 -c ("print('skip')", inside a shell verification
+one-liner, after the results file was written, touched no wave data,
+files, analysis, or tooling) is a disclosed contact, not a breach,
+under P13's letter and the COMP-2 distinction; the battery evidence
+stands, and the self-contradicting "zero Python ran" wording is
+corrected by P15. Zero Python touched wave artifacts (P15 attestation
+wording, with the disclosed contact above).
+
+2. tnn_chat FIT: CONFIRM [RE-CERT] on 4328a8350d without a fresh
+re-run (judge CONFIRMED; P12 applies on its simplest facts). 10/10
+chain inputs byte-exact to frozen shas (tnn_chat.zag c0776ad6,
+tnn_chat_decline.zag a87011fe, kb.txt 3ef27296, gaz.txt b75fd113, two
+R33 support sources, pinned znc 498abcb5, three probe fixtures kb1_out30
+936c35e1, kb2_inkb 730e2d24, kb5_nogame b60198b0); D1 durable authority
+path holds (all six files in docs/lab/rsi/fit_authority/, git status
+clean on every chain path); zero modifications, zero deletions, zero
+content changes to any frozen input across the two commits in
+d0076134d..4328a8350 (8564128c4 touched only two doc-only files:
+AUTHORITY_MANIFEST.md one-line attribution correction with sha rows
+untouched, README.md residual closure; 4328a8350 touches zero chain
+paths); determinism cited from the wave-20260925-1421pdt fresh re-run
+via the 0521pdt carry-over record (P16): 2/2 binary reproducibility
+(decline 20273a99, baseline 1ada2fae) and 9/9 rerun pairs
+byte-identical, KB1 30/30, KB2 17/17, KB5 10/10. Standing caveat: the
+three probe fixtures live under the pruneable prior-wave scratch path
+docs/lab/rsi/runs/wave-20260924-0521pdt/forks/scratch/fitchat0521/
+(the judge recorded relocation to a durable never-prune path as a
+coordinator directive; until done, the pruneable location is noted in
+every FIT evidence file). The literal-scope sentences travel verbatim:
+this is not a candidate verdict and it is not merge review of the
+merged-in work; it certifies the 38-fact closed-book probe chain only.
+Zero Python touched wave artifacts in the FIT work.
+
+3. Interactive TNN: CONFIRM [RE-CERT] (judge CONFIRMED), EXISTS for
+supervised red-team probe chats only. Negative finding first: zero
+source-level chat/REPL/interactive-loop entry points in src/zag/ or
+units/ on this tip (zero entry-point-signature matches; the single
+"repl" hit is a verified false positive; the d0076134d..HEAD delta
+adds no chat/repl-named file in src/ or units/). What exists is
+inherited and sha-verified: frozen baseline probe binary (1ada2fae,
+ELF 64-bit x86-64, runnable), frozen decline-gate binary (20273a99,
+ELF 64-bit x86-64, runnable), the pinned znc (498abcb5), and the
+frozen instrument sources matching the authority manifest. No probe
+chat was run this wave: availability only (file plus sha256sum), per
+the standing rule that a probe chat is needed only when the survey
+reveals change; the survey found no change, so no supervised probe
+run was scheduled (this is the coordinator's recorded answer to the
+judge's directive). The confabulation caveat travels and must survive
+every future rewording: tnn_chat emits unflagged confabulations on
+out-of-KB questions (e.g. "Paris is the capital of France" for
+capital of Italy). Zero Python touched wave artifacts in the survey
+work.
+
+4. No new candidates this wave: CONFIRM the coordinator's stand-down
+(judge CONFIRMED). Every candidate lane stood down or gated for a
+stated reason (G1 pending a new design idea, D-VID-1 pending a
+re-aimed prereg with a different mechanism, CV-P and COMP-2 barred
+pending Micah's governance ruling 6, B1-class pending the P9 bar
+reformulation, ST-1 DEAD on pristine evidence); no new prereg drafts
+or design ideas found in the lane survey (recorded above per P17); no
+preregs, so the prereg commit-order self-check is vacuous (labeled
+vacuous, not a pass): no UNVERIFIABLE ORDERING. The judge ruled the
+stand-down is discipline, not stagnation: advancing any adoption while
+his six governance rulings are open would gamble with his explicit
+boundaries. The scope stamps hold: the fork battery certifies
+toolchain and extraction stability only, the FIT certifies the
+38-fact probe chain only, and neither claims anything about frontier
+code.
+
+New precedents recorded by this wave's judge: (P14) integrity-incident
+protocol: compromised per-entry artifacts must be discarded and re-run
+from source via read-only extraction; final verdicts may rest only on
+post-incident artifacts with re-verified pin shas; sha readings taken
+during a flaky window must be re-taken; the incident travels as a
+load-bearing caveat in the verdict line. (P15) Python-contact
+attestation: any Python invocation in wave work must be disclosed with
+exact command, placement relative to artifact writes, and a no-contact
+showing; with a disclosed contact the attestation reads "zero Python
+touched wave artifacts," never the unqualified "zero Python ran";
+under P13 a no-contact invocation so disclosed remains a disclosed
+contact, not a breach. (P16) FIT determinism-by-citation must name the
+wave of the last fresh re-run and the citation path in the verdict
+line. (P17) "No new candidates" verdicts must cite the lane survey
+record (lanes checked, what was looked at); vacuous self-checks must
+be labeled vacuous, never folded into a passing narrative.
+
+Commit chain (all local, none pushed): <evidence commit>,
+<LOOP_STATE commit>. No verdict was overturned.
+
+Queued next: Micah's six pending governance rulings (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull,
+C12 queue, Python-mirror logic; untouched by this wave's debate); his
+blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12,
+S11-AUD, S13, S14, whirlpool-planform; unchanged, nothing added this
+wave); fork battery driver with split live/fixture counts plus
+duplicate naming, unique-commit count, and the closing tip re-check
+(P1, P8); pull-1/pull-2 remain untestable until their trees gain the
+pinned toolchain path; CV-P adoption still doubly gated
+(rotated-author re-test approximated; ruling 6 pending); COMP-2
+rotated-author re-test on a fresh sealed set plus ruling 6, with the
+stemmer-contingency (P11); prereg consistency check before
+implementation; B1-class re-freezes require the P9 bar reformulation;
+G1 sunshafts stand down until a genuinely new design idea; D-VID-1 lane
+stands down until a re-aimed prereg with a different mechanism exists;
+ST-1 stereo WAVs not queued for his ears (DEAD on pristine evidence).
+Coordinator directives from this wave's judge: relocate the KB1/KB2/KB5
+probe fixtures from docs/lab/rsi/runs/wave-20260924-0521pdt/forks/
+scratch/fitchat0521/ to a durable never-prune path (until then the
+pruneable location is noted in every FIT evidence file); tmpfs space
+check before the fork battery (the /tmp-full incident's process gap).
