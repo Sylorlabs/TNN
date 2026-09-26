@@ -1,0 +1,22 @@
+# EVIDENCE_MANIFEST.md — Strength trial round 4 (2026-09-25)
+
+## Binary SHAs (do NOT commit binaries — for verification only)
+a5d38def2ee96cffc684fafc2d749164e159fe84e67e060657e18c56e841d0ab  trial_bin_baseline
+c793d046b00fc203182453496f3d70114a2a2b349cff00353c9b57744299fa30  trial_bin_r4
+11dd4c708d94240a1db6914c8105cf96523ed2914aee5b8634aec2d6bc9e56ee  trial_bin_r4f2
+
+## Source SHAs
+b07f007a3d919c9a74966cafad1bc2db7c16a6d09e414b488a5fbdcbea302b63  strength_core.zag
+f17c974858752de671d3f7ebceb2fbdc2cef1dc9fdf4d9de68dfa2d06056b1d9  strength_checker.zag
+779ef40504c423c3371640123b9f054c8445b71c831144c62cec3d8be0fec17c  strength_learner.zag
+62a80af0430f210a4ae2eb4f6432038d490971be801f8ab0d0a1951bfd22ee60  strength_trial.zag
+
+## Key reports
+PROVISIONAL_ADOPTION_B.md
+R4_HARDENING_REPORT.md
+VERDICT_ROUND4.md
+capacity/CAPACITY_REPORT.md
+redteam_B/REDTEAM_B.md
+redteam_C/REDTEAM_C.md
+redteam_CP3/REDTEAM_CP3.md
+redteam_R4/REDTEAM_R4.md
