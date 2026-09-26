@@ -1,0 +1,1360 @@
+@import("../../toolchain/R33_NATIVE_IO_V1.zag")
+// rb.zag — RAW-BYTE audio engine (AUDIO RAW-BYTE pivot, 2026-09-25).
+// TNN's machinery emits and manipulates RAW 16-bit PCM bytes directly.
+// NO oscillator / partial / envelope / filter primitives anywhere in the
+// generative path. The mechanism, white-box:
+//   HEAR:  from raw bytes, TNN learns (1) LPC coefficients (order 64) via
+//          autocorrelation + Levinson-Durbin — how each byte follows the
+//          previous bytes; (2) a 64-prototype residual codebook via
+//          deterministic K-means (quantile init, no RNG) — the texture of
+//          surprises; (3) an order-2 Markov table over prototype indices —
+//          how surprises evolve; (4) the onset bigram + energy floor.
+//   RE-EMIT: e[n] = round(LPC_pred(e[n-1..n-P]) + proto[q[n]]) — bytes are
+//          recomputed through the predictor from the heard residual score.
+//   IMAGINE: the residual prototype sequence is chosen by TNN's own walk:
+//          argmax over learned transitions minus a deterministic
+//          visit-penalty (novelty ledger), seeded by the learned onset
+//          bigram, stopped by the learned energy floor (decay mode).
+//   SCENE: events are imagined into byte arenas and mixed by saturated
+//          integer addition — byte arithmetic only.
+// Pure Zag, zero RNG, byte-identical reruns.
+
+// ---------------- f64 helpers ----------------
+fn r_abs(x:f64) f64 {
+    if (x < 0.0) { return 0.0 - x; }
+    return x;
+}
+fn r_min(a:f64, b:f64) f64 {
+    if (a < b) { return a; }
+    return b;
+}
+fn r_max(a:f64, b:f64) f64 {
+    if (a > b) { return a; }
+    return b;
+}
+fn r_rint(x:f64) i64 {
+    if (x >= 0.0) { return (x + 0.5) as i64; }
+    return 0 - (((0.0 - x) + 0.5) as i64);
+}
+fn r_sqrt(x:f64) f64 {
+    if (x <= 0.0) { return 0.0; }
+    let r:f64 = x;
+    let i:i64 = 0;
+    while (i < 60) {
+        r = 0.5 * (r + x / r);
+        i = i + 1;
+    }
+    return r;
+}
+
+// ---------------- diagnostics: i64 -> decimal (owned; caller frees) ----------------
+fn rb_i64s(v:i64) []u8 {
+    let neg:i64 = 0;
+    let u:i64 = v;
+    if (v < 0) { neg = 1; u = 0 - v; }
+    let tmp:[]u8 = nio_alloc(24);
+    let nd:i64 = 0;
+    if (u == 0) {
+        tmp[0] = 48;
+        nd = 1;
+    } else {
+        while (u > 0) {
+            tmp[nd] = ((u % 10) + 48) as u8;
+            u = u / 10;
+            nd = nd + 1;
+        }
+    }
+    let total:i64 = nd + neg;
+    let out:[]u8 = nio_alloc((total + 1) as i32);
+    let p:i64 = 0;
+    if (neg == 1) {
+        out[0] = 45;
+        p = 1;
+    }
+    let i:i64 = 0;
+    while (i < nd) {
+        out[p + i] = tmp[nd - 1 - i];
+        i = i + 1;
+    }
+    nio_free(tmp);
+    return out;
+}
+
+// ---------------- LE accessors on []u8 arenas ----------------
+fn rb_put16(ar:[]u8, o:i64, v:i64) void {
+    ar[o] = (v & 255) as u8;
+    ar[o + 1] = ((v >> 8) & 255) as u8;
+    return;
+}
+fn rb_put32(ar:[]u8, o:i64, v:i64) void {
+    ar[o] = (v & 255) as u8;
+    ar[o + 1] = ((v >> 8) & 255) as u8;
+    ar[o + 2] = ((v >> 16) & 255) as u8;
+    ar[o + 3] = ((v >> 24) & 255) as u8;
+    return;
+}
+fn rb_put64(ar:[]u8, o:i64, v:i64) void {
+    rb_put32(ar, o, v & 4294967295);
+    rb_put32(ar, o + 4, (v >> 32) & 4294967295);
+    return;
+}
+fn rb_get16u(ar:[]u8, o:i64) i64 {
+    return (ar[o] as i64) + ((ar[o + 1] as i64) << 8);
+}
+fn rb_get32u(ar:[]u8, o:i64) i64 {
+    return (ar[o] as i64) + ((ar[o + 1] as i64) << 8) + ((ar[o + 2] as i64) << 16) + ((ar[o + 3] as i64) << 24);
+}
+// sign-extended i16 sample
+fn rb_s16(ar:[]u8, i:i64) i64 {
+    let v:i64 = rb_get16u(ar, i * 2);
+    if (v >= 32768) { v = v - 65536; }
+    return v;
+}
+fn rb_puts16(ar:[]u8, i:i64, v:i64) void {
+    let u:i64 = v;
+    if (u < 0) { u = u + 65536; }
+    rb_put16(ar, i * 2, u);
+    return;
+}
+// f64 <-> 8 LE bytes, bit-exact, via the probed []f64 reinterpret view
+fn rb_putf64(ar:[]u8, o:i64, x:f64) void {
+    let f:[]f64 = ar as []f64;
+    f[o / 8] = x;
+    return;
+}
+fn rb_getf64(ar:[]u8, o:i64) f64 {
+    let f:[]f64 = ar as []f64;
+    return f[o / 8];
+}
+
+// ---------------- NUL-terminated path (owned; caller frees) ----------------
+fn rb_cstr(s:[]u8) []u8 {
+    let b:[]u8 = nio_alloc((s.len + 1) as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) {
+        b[i] = s[i];
+        i = i + 1;
+    }
+    b[s.len] = 0;
+    return b;
+}
+
+// ---------------- WAV reader: returns sample-bytes arena (2*n), sets *n_out/*sr_out ----------------
+// *n_out < 0 on error: -1 open, -2 too big/empty, -3 not RIFF/WAVE,
+// -4 fmt problem (need PCM16 mono), -5 no data chunk.
+fn rb_read_wav(path:[]u8, n_out:*i64, sr_out:*i64) []u8 {
+    let empty:[]u8 = nio_alloc(1);
+    nio_free(empty);
+    let none:[]u8 = "";
+    n_out.* = -1;
+    sr_out.* = 0;
+    let cs:[]u8 = rb_cstr(path);
+    if (cs.len == 0) { return none; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 0, 0, 0, 0, 0);
+    nio_free(cs);
+    if (fd < 0) { return none; }
+    let size:i64 = _zag_raw_syscall(8, fd, 0, 2, 0, 0, 0);
+    _zag_raw_syscall(8, fd, 0, 0, 0, 0, 0);
+    if (size < 48 || size > 33000000) {
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        n_out.* = -2;
+        return none;
+    }
+    let raw:[]u8 = nio_alloc(size as i32);
+    if (raw.len == 0) {
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        n_out.* = -2;
+        return none;
+    }
+    let at:i64 = 0;
+    let ok:i64 = 1;
+    while (at < size) {
+        let n:i64 = _zag_raw_syscall(0, fd, (_zag_slice_ptr(raw) as i64) + at, size - at, 0, 0, 0);
+        if (n <= 0) { ok = 0; break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (ok == 0 || at != size) {
+        nio_free(raw);
+        n_out.* = -2;
+        return none;
+    }
+    if (raw[0] != 82 || raw[1] != 73 || raw[2] != 70 || raw[3] != 70 || raw[8] != 87 || raw[9] != 65 || raw[10] != 86 || raw[11] != 69) {
+        nio_free(raw);
+        n_out.* = -3;
+        return none;
+    }
+    let off:i64 = 12;
+    let sr:i64 = 0;
+    let nch:i64 = 0;
+    let bits:i64 = 0;
+    let afmt:i64 = 0;
+    let doff:i64 = -1;
+    let dlen:i64 = 0;
+    while (off + 8 <= size) {
+        let c0:i64 = raw[off] as i64;
+        let c1:i64 = raw[off + 1] as i64;
+        let c2:i64 = raw[off + 2] as i64;
+        let c3:i64 = raw[off + 3] as i64;
+        let sz:i64 = rb_get32u(raw, off + 4);
+        if (c0 == 102 && c1 == 109 && c2 == 116 && c3 == 32) {
+            afmt = rb_get16u(raw, off + 8);
+            nch = rb_get16u(raw, off + 10);
+            sr = rb_get32u(raw, off + 12);
+            bits = rb_get16u(raw, off + 22);
+        }
+        if (c0 == 100 && c1 == 97 && c2 == 116 && c3 == 97) {
+            doff = off + 8;
+            dlen = sz;
+        }
+        off = off + 8 + sz;
+    }
+    if (afmt != 1 || nch != 1 || bits != 16 || sr <= 0 || doff < 0 || dlen < 2) {
+        nio_free(raw);
+        n_out.* = -4;
+        if (doff < 0 || dlen < 2) { n_out.* = -5; }
+        return none;
+    }
+    if (doff + dlen > size) { dlen = size - doff; }
+    let nsamp:i64 = dlen / 2;
+    let out:[]u8 = nio_alloc((nsamp * 2) as i32);
+    if (out.len == 0) {
+        nio_free(raw);
+        n_out.* = -2;
+        return none;
+    }
+    let i:i64 = 0;
+    while (i < nsamp * 2) {
+        out[i] = raw[doff + i];
+        i = i + 1;
+    }
+    nio_free(raw);
+    n_out.* = nsamp;
+    sr_out.* = sr;
+    return out;
+}
+
+// ---------------- WAV writer: 16-bit PCM mono, O_WRONLY|O_CREAT|O_TRUNC ----------------
+// returns 0 ok, -1 path, -2 open, -3 write, -4 alloc
+fn rb_write_wav(path:[]u8, sbuf:[]u8, nsamp:i64, sr:i64) i64 {
+    let dlen:i64 = nsamp * 2;
+    let total:i64 = 44 + dlen;
+    let hdr:[]u8 = nio_alloc(44);
+    if (hdr.len == 0) { return -4; }
+    hdr[0] = 82; hdr[1] = 73; hdr[2] = 70; hdr[3] = 70;
+    rb_put32(hdr, 4, total - 8);
+    hdr[8] = 87; hdr[9] = 65; hdr[10] = 86; hdr[11] = 69;
+    hdr[12] = 102; hdr[13] = 109; hdr[14] = 116; hdr[15] = 32;
+    rb_put32(hdr, 16, 16);
+    rb_put16(hdr, 20, 1);
+    rb_put16(hdr, 22, 1);
+    rb_put32(hdr, 24, sr);
+    rb_put32(hdr, 28, sr * 2);
+    rb_put16(hdr, 32, 2);
+    rb_put16(hdr, 34, 16);
+    hdr[36] = 100; hdr[37] = 97; hdr[38] = 116; hdr[39] = 97;
+    rb_put32(hdr, 40, dlen);
+    let cs:[]u8 = rb_cstr(path);
+    if (cs.len == 0) {
+        nio_free(hdr);
+        return -1;
+    }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 577, 420, 0, 0, 0);
+    nio_free(cs);
+    if (fd < 0) {
+        nio_free(hdr);
+        return -2;
+    }
+    let rc:i64 = 0;
+    let w0:i64 = _zag_raw_syscall(1, fd, _zag_slice_ptr(hdr) as i64, 44, 0, 0, 0);
+    if (w0 != 44) { rc = -3; }
+    let at:i64 = 0;
+    while (rc == 0 && at < dlen) {
+        let chunk:i64 = dlen - at;
+        if (chunk > 1048576) { chunk = 1048576; }
+        let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(sbuf) as i64) + at, chunk, 0, 0, 0);
+        if (w <= 0) { rc = -3; break; }
+        at = at + w;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    nio_free(hdr);
+    return rc;
+}
+
+// 90th percentile of |PROTO| (pulse-prototype threshold)
+fn rb_pthresh(PROTO:[]f64, K:i64) f64 {
+    let tmp:[]f64 = nio_alloc((K * 8) as i32) as []f64;
+    let ti:i64 = 0;
+    while (ti < K) {
+        tmp[ti] = r_abs(PROTO[ti]);
+        ti = ti + 1;
+    }
+    let a2:i64 = 0;
+    while (a2 < K) {
+        let b2:i64 = a2 + 1;
+        while (b2 < K) {
+            if (tmp[b2] < tmp[a2]) {
+                let sw:f64 = tmp[a2];
+                tmp[a2] = tmp[b2];
+                tmp[b2] = sw;
+            }
+            b2 = b2 + 1;
+        }
+        a2 = a2 + 1;
+    }
+    let r:f64 = tmp[(K * 9) / 10];
+    nio_free(tmp);
+    return r;
+}
+
+// ---------------- HEAR: learn the raw-byte model ----------------
+// Model binary layout (all LE):
+//   0: 'R','B','M',1 | 8:P u64 | 16:K u64 | 24:N u64 | 32:sr u64
+//   40: a[0..P-1] f64 (LPC coeffs, a[k] multiplies x[n-1-k])
+//   40+8P: proto[0..K-1] f64 (residual prototypes)
+//   +8K: unigram[0..K-1] u64
+//   +8K: bigram[K*K*K] u64, index (p2*K+p1)*K+c
+//   +8K^3: q[0..N-P-1] u8 (heard residual score)
+//   end: ob0 u64, ob1 u64, floor f64, attack f64
+fn rb_hear(samp:[]u8, n:i64, sr:i64, model_path:[]u8) i64 {
+    let P:i64 = 64;
+    let K:i64 = 64;
+    if (n < P + 4096) { return -11; }
+    // 1. autocorrelation R[0..P]
+    let R:[]f64 = nio_alloc(((P + 1) * 8) as i32) as []f64;
+    let k:i64 = 0;
+    while (k <= P) {
+        let acc:f64 = 0.0;
+        let i:i64 = 0;
+        let lim:i64 = n - k;
+        while (i < lim) {
+            let xi:f64 = rb_s16(samp, i) as f64;
+            let xj:f64 = rb_s16(samp, i + k) as f64;
+            acc = acc + xi * xj;
+            i = i + 1;
+        }
+        R[k] = acc;
+        k = k + 1;
+    }
+    if (R[0] <= 0.0) { return -12; }
+    // 2. Levinson-Durbin -> a[0..P-1]
+    let A:[]f64 = nio_alloc((P * 8) as i32) as []f64;
+    let OLD:[]f64 = nio_alloc((P * 8) as i32) as []f64;
+    let E:f64 = R[0];
+    let i2:i64 = 0;
+    while (i2 < P) {
+        A[i2] = 0.0;
+        i2 = i2 + 1;
+    }
+    let m:i64 = 1;
+    while (m <= P) {
+        let acc:f64 = 0.0;
+        let j:i64 = 1;
+        while (j < m) {
+            acc = acc + A[j - 1] * R[m - j];
+            j = j + 1;
+        }
+        let kk:f64 = (R[m] - acc) / E;
+        if (r_abs(kk) >= 1.0) { return -17; }
+        A[m - 1] = kk;
+        // update MUST read pre-update coefficients: snapshot to OLD first
+        let c0:i64 = 0;
+        while (c0 < m - 1) {
+            OLD[c0] = A[c0];
+            c0 = c0 + 1;
+        }
+        j = 1;
+        while (j < m) {
+            A[j - 1] = OLD[j - 1] - kk * OLD[m - j - 1];
+            j = j + 1;
+        }
+        E = E * (1.0 - kk * kk);
+        if (E <= 0.0) { E = R[0] * 0.000001; }
+        m = m + 1;
+    }
+    // 3. residuals res[0..nr), nr = n-P
+    let nr:i64 = n - P;
+    let RES:[]f64 = nio_alloc((nr * 8) as i32) as []f64;
+    let i3:i64 = 0;
+    while (i3 < nr) {
+        let pred:f64 = 0.0;
+        let kk2:i64 = 0;
+        while (kk2 < P) {
+            pred = pred + A[kk2] * (rb_s16(samp, P + i3 - 1 - kk2) as f64);
+            kk2 = kk2 + 1;
+        }
+        RES[i3] = (rb_s16(samp, P + i3) as f64) - pred;
+        i3 = i3 + 1;
+    }
+    // 4. deterministic K-means on residuals; histogram-quantile init (no RNG)
+    let HB:i64 = 131073;
+    let hist:[]i64 = nio_alloc((HB * 8) as i32) as []i64;
+    let hb:i64 = 0;
+    while (hb < HB) {
+        hist[hb] = 0;
+        hb = hb + 1;
+    }
+    let qi:i64 = 0;
+    while (qi < nr) {
+        let qv:i64 = r_rint(RES[qi]);
+        if (qv < -65536) { qv = -65536; }
+        if (qv > 65536) { qv = 65536; }
+        hist[qv + 65536] = hist[qv + 65536] + 1;
+        qi = qi + 1;
+    }
+    let PROTO:[]f64 = nio_alloc((K * 8) as i32) as []f64;
+    let total:i64 = nr;
+    let acc2:i64 = 0;
+    let cj:i64 = 0;
+    let target:i64 = total / (2 * K);
+    hb = 0;
+    while (hb < HB) {
+        acc2 = acc2 + hist[hb];
+        while (cj < K && acc2 >= target) {
+            PROTO[cj] = (hb - 65536) as f64;
+            cj = cj + 1;
+            target = ((2 * cj + 1) * total) / (2 * K);
+        }
+        hb = hb + 1;
+    }
+    while (cj < K) {
+        PROTO[cj] = PROTO[K - 1];
+        cj = cj + 1;
+    }
+    let Q:[]i64 = nio_alloc((nr * 8) as i32) as []i64;
+    let SN:[]f64 = nio_alloc((K * 8) as i32) as []f64;
+    let CN:[]i64 = nio_alloc((K * 8) as i32) as []i64;
+    let it:i64 = 0;
+    let moved:i64 = 1;
+    while (it < 40 && moved == 1) {
+        moved = 0;
+        let s2:i64 = 0;
+        while (s2 < K) {
+            SN[s2] = 0.0;
+            CN[s2] = 0;
+            s2 = s2 + 1;
+        }
+        let a3:i64 = 0;
+        while (a3 < nr) {
+            let rv:f64 = RES[a3];
+            let best:i64 = 0;
+            let bd:f64 = r_abs(rv - PROTO[0]);
+            let c2:i64 = 1;
+            while (c2 < K) {
+                let dd:f64 = r_abs(rv - PROTO[c2]);
+                if (dd < bd) {
+                    bd = dd;
+                    best = c2;
+                }
+                c2 = c2 + 1;
+            }
+            if (Q[a3] != best) { moved = 1; }
+            Q[a3] = best;
+            SN[best] = SN[best] + rv;
+            CN[best] = CN[best] + 1;
+            a3 = a3 + 1;
+        }
+        let mx:f64 = 0.0;
+        let u2:i64 = 0;
+        while (u2 < K) {
+            if (CN[u2] > 0) {
+                let nm:f64 = SN[u2] / (CN[u2] as f64);
+                let dd2:f64 = r_abs(nm - PROTO[u2]);
+                if (dd2 > mx) { mx = dd2; }
+                PROTO[u2] = nm;
+            }
+            u2 = u2 + 1;
+        }
+        if (mx < 0.5) { moved = 0; }
+        it = it + 1;
+    }
+    // 5. unigram + order-2 bigram over Q
+    let UNI:[]i64 = nio_alloc((K * 8) as i32) as []i64;
+    let u3:i64 = 0;
+    while (u3 < K) {
+        UNI[u3] = 0;
+        u3 = u3 + 1;
+    }
+    let K3:i64 = K * K * K;
+    let BG:[]i64 = nio_alloc((K3 * 8) as i32) as []i64;
+    let b3:i64 = 0;
+    while (b3 < K3) {
+        BG[b3] = 0;
+        b3 = b3 + 1;
+    }
+    let t3:i64 = 0;
+    while (t3 < nr) {
+        UNI[Q[t3]] = UNI[Q[t3]] + 1;
+        if (t3 >= 2) {
+            let idx:i64 = (Q[t3 - 2] * K + Q[t3 - 1]) * K + Q[t3];
+            BG[idx] = BG[idx] + 1;
+        }
+        t3 = t3 + 1;
+    }
+    // 6. onset bigram: most frequent bigram in first 30 ms
+    let m0:i64 = (sr * 30) / 1000;
+    if (m0 > nr) { m0 = nr; }
+    if (m0 < 8) { m0 = 8; }
+    let OB:[]i64 = nio_alloc((K * K * 8) as i32) as []i64;
+    let o3:i64 = 0;
+    while (o3 < K * K) {
+        OB[o3] = 0;
+        o3 = o3 + 1;
+    }
+    let o4:i64 = 1;
+    while (o4 < m0) {
+        OB[Q[o4 - 1] * K + Q[o4]] = OB[Q[o4 - 1] * K + Q[o4]] + 1;
+        o4 = o4 + 1;
+    }
+    let ob0:i64 = 0;
+    let ob1:i64 = 0;
+    let obb:i64 = -1;
+    let o5:i64 = 0;
+    while (o5 < K * K) {
+        if (OB[o5] > obb) {
+            obb = OB[o5];
+            ob0 = o5 / K;
+            ob1 = o5 % K;
+        }
+        o5 = o5 + 1;
+    }
+    // 7. energy floor (last 100 ms mean|res|) and attack (first 30 ms)
+    let tail:i64 = (sr * 100) / 1000;
+    if (tail > nr) { tail = nr; }
+    let sfl:f64 = 0.0;
+    let f4:i64 = 0;
+    while (f4 < tail) {
+        sfl = sfl + r_abs(RES[nr - 1 - f4]);
+        f4 = f4 + 1;
+    }
+    let floorv:f64 = sfl / (tail as f64);
+    let sat:f64 = 0.0;
+    let a4:i64 = 0;
+    while (a4 < m0) {
+        sat = sat + r_abs(RES[a4]);
+        a4 = a4 + 1;
+    }
+    let attackv:f64 = sat / (m0 as f64);
+    // 7c. pitch period from residual autocorrelation (drives the pulse anchor
+    // in imagine). Data-driven: unpitched residuals yield T=0 (no anchor).
+    let rmean:f64 = 0.0;
+    let mi:i64 = 0;
+    while (mi < nr) {
+        rmean = rmean + RES[mi];
+        mi = mi + 1;
+    }
+    rmean = rmean / (nr as f64);
+    let ac0:f64 = 0.0;
+    mi = 0;
+    while (mi < nr) {
+        let dv:f64 = RES[mi] - rmean;
+        ac0 = ac0 + dv * dv;
+        mi = mi + 4;
+    }
+    let pT:i64 = 0;
+    let bestac:f64 = 0.15;
+    if (ac0 > 0.0 && nr > 900) {
+        let lag:i64 = 50;
+        while (lag <= 400) {
+            let acv:f64 = 0.0;
+            mi = 0;
+            while (mi + lag < nr) {
+                acv = acv + (RES[mi] - rmean) * (RES[mi + lag] - rmean);
+                mi = mi + 4;
+            }
+            let nac:f64 = acv / ac0;
+            if (nac > bestac) {
+                bestac = nac;
+                pT = lag;
+            }
+            lag = lag + 1;
+        }
+    }
+    // pulse prototype threshold: 90th percentile of |PROTO| (kept in model
+    // as a diagnostic; the phase histogram is the active pitch mechanism)
+    let pth:f64 = rb_pthresh(PROTO, K);
+    // 7d. phase histogram: prototype distribution per pitch-cycle phase.
+    // Captures WEAK distributed periodicity (the walk's 2-sample memory can't
+    // span a pitch period). pT=0 -> skipped.
+    let phn:i64 = 0;
+    if (pT > 0) {
+        phn = pT * K;
+    }
+    let PH:[]u8 = nio_alloc((phn * 8 + 8) as i32);
+    let phi:i64 = 0;
+    while (phi < phn) {
+        rb_put64(PH, phi * 8, 0);
+        phi = phi + 1;
+    }
+    if (pT > 0) {
+        let qi:i64 = 0;
+        while (qi < nr) {
+            let ph:i64 = qi % pT;
+            let idx:i64 = (ph * K + Q[qi]) * 8;
+            let cv:i64 = rb_get32u(PH, idx);
+            rb_put64(PH, idx, cv + 1);
+            qi = qi + 1;
+        }
+    }
+    // 7b. energy-trajectory prior: mean|res| per 10 ms frame (learned, not a synth envelope)
+    let frlen:i64 = sr / 100;
+    if (frlen < 1) { frlen = 1; }
+    let nframes:i64 = (nr + frlen - 1) / frlen;
+    let EP:[]f64 = nio_alloc((nframes * 8) as i32) as []f64;
+    let ff:i64 = 0;
+    while (ff < nframes) {
+        let s0:i64 = ff * frlen;
+        let s1:i64 = s0 + frlen;
+        if (s1 > nr) { s1 = nr; }
+        let se:f64 = 0.0;
+        let fe:i64 = s0;
+        while (fe < s1) {
+            se = se + r_abs(RES[fe]);
+            fe = fe + 1;
+        }
+        if (s1 > s0) {
+            EP[ff] = se / ((s1 - s0) as f64);
+        } else {
+            EP[ff] = 0.0;
+        }
+        ff = ff + 1;
+    }
+    // 8. serialize
+    // q region padded to a multiple of 8 so eoff is f64-view aligned
+    let qpad:i64 = ((nr + 7) / 8) * 8;
+    let moff:i64 = 40 + 8 * P + 8 * K + 8 * K + 8 * K3 + qpad + 32 + 8 + 8 * nframes + 16 + 8 * phn;
+    let M:[]u8 = nio_alloc(moff as i32);
+    if (M.len == 0) { return -13; }
+    M[0] = 82; M[1] = 66; M[2] = 77; M[3] = 4;
+    rb_put32(M, 4, 0);
+    rb_put64(M, 8, P);
+    rb_put64(M, 16, K);
+    rb_put64(M, 24, nr + P);
+    rb_put64(M, 32, sr);
+    let w4:i64 = 0;
+    while (w4 < P) {
+        rb_putf64(M, 40 + w4 * 8, A[w4]);
+        w4 = w4 + 1;
+    }
+    let poff:i64 = 40 + 8 * P;
+    w4 = 0;
+    while (w4 < K) {
+        rb_putf64(M, poff + w4 * 8, PROTO[w4]);
+        w4 = w4 + 1;
+    }
+    let uoff:i64 = poff + 8 * K;
+    w4 = 0;
+    while (w4 < K) {
+        rb_put64(M, uoff + w4 * 8, UNI[w4]);
+        w4 = w4 + 1;
+    }
+    let boff:i64 = uoff + 8 * K;
+    // bigram is large (2M u64 = 16MB copy); copy in one loop
+    w4 = 0;
+    while (w4 < K3) {
+        rb_put64(M, boff + w4 * 8, BG[w4]);
+        w4 = w4 + 1;
+    }
+    let qoff:i64 = boff + 8 * K3;
+    w4 = 0;
+    while (w4 < nr) {
+        M[qoff + w4] = (Q[w4] & 255) as u8;
+        w4 = w4 + 1;
+    }
+    w4 = nr;
+    while (w4 < qpad) {
+        M[qoff + w4] = 0;
+        w4 = w4 + 1;
+    }
+    // eoff must be 8-aligned for the f64 view; q already padded (zeroed)
+    let eoff:i64 = qoff + qpad;
+    rb_put64(M, eoff, ob0);
+    rb_put64(M, eoff + 8, ob1);
+    rb_putf64(M, eoff + 16, floorv);
+    rb_putf64(M, eoff + 24, attackv);
+    // energy-trajectory prior: nframes u64 then EP f64s, then pT u64, pth f64
+    let poff2:i64 = eoff + 32;
+    rb_put64(M, poff2, nframes);
+    w4 = 0;
+    while (w4 < nframes) {
+        rb_putf64(M, poff2 + 8 + w4 * 8, EP[w4]);
+        w4 = w4 + 1;
+    }
+    rb_put64(M, poff2 + 8 + 8 * nframes, pT);
+    rb_putf64(M, poff2 + 16 + 8 * nframes, pth);
+    // phase histogram (pT*K u64 counts, row-major by phase)
+    let phbase:i64 = poff2 + 24 + 8 * nframes;
+    w4 = 0;
+    while (w4 < phn * 8) {
+        M[phbase + w4] = PH[w4];
+        w4 = w4 + 1;
+    }
+    // write model file via raw path (models can exceed nio_write_all's 1MB cap)
+    let cs:[]u8 = rb_cstr(model_path);
+    if (cs.len == 0) {
+        nio_free(M);
+        return -14;
+    }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 577, 420, 0, 0, 0);
+    nio_free(cs);
+    if (fd < 0) {
+        nio_free(M);
+        return -15;
+    }
+    let at2:i64 = 0;
+    let wrc:i64 = 0;
+    while (at2 < moff) {
+        let chunk:i64 = moff - at2;
+        if (chunk > 1048576) { chunk = 1048576; }
+        let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(M) as i64) + at2, chunk, 0, 0, 0);
+        if (w <= 0) { wrc = -16; break; }
+        at2 = at2 + w;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    nio_free(M);
+    return wrc;
+}
+
+// ---------------- model load ----------------
+fn rb_read_file(path:[]u8, sz_out:*i64) []u8 {
+    let none:[]u8 = "";
+    sz_out.* = -1;
+    let cs:[]u8 = rb_cstr(path);
+    if (cs.len == 0) { return none; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 0, 0, 0, 0, 0);
+    nio_free(cs);
+    if (fd < 0) { return none; }
+    let size:i64 = _zag_raw_syscall(8, fd, 0, 2, 0, 0, 0);
+    _zag_raw_syscall(8, fd, 0, 0, 0, 0, 0);
+    if (size <= 0 || size > 60000000) {
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        sz_out.* = -2;
+        return none;
+    }
+    let out:[]u8 = nio_alloc(size as i32);
+    if (out.len == 0) {
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        sz_out.* = -2;
+        return none;
+    }
+    let at:i64 = 0;
+    let ok:i64 = 1;
+    while (at < size) {
+        let n:i64 = _zag_raw_syscall(0, fd, (_zag_slice_ptr(out) as i64) + at, size - at, 0, 0, 0);
+        if (n <= 0) { ok = 0; break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (ok == 0 || at != size) {
+        nio_free(out);
+        sz_out.* = -3;
+        return none;
+    }
+    sz_out.* = size;
+    return out;
+}
+// model field offsets; returns 0 ok, <0 bad
+fn rb_model_offs(m:[]u8, msz:i64, p:*i64, k:*i64, nn:*i64, sr:*i64, poff:*i64, uoff:*i64, boff:*i64, qoff:*i64, eoff:*i64, proff:*i64, nfr:*i64, pT:*i64, pth:*f64, phoff:*i64) i64 {
+    if (msz < 80) { return -21; }
+    if (m[0] != 82 || m[1] != 66 || m[2] != 77 || m[3] != 4) { return -22; }
+    let P:i64 = rb_get32u(m, 8);
+    let K:i64 = rb_get32u(m, 16);
+    let N:i64 = rb_get32u(m, 24);
+    let SR:i64 = rb_get32u(m, 32);
+    if (P != 64 || K != 64 || N < 4096 || SR != 44100) { return -23; }
+    let po:i64 = 40 + 8 * P;
+    let uo:i64 = po + 8 * K;
+    let bo:i64 = uo + 8 * K;
+    let qo:i64 = bo + 8 * K * K * K;
+    let qpad:i64 = (((N - P + 7) / 8) * 8);
+    let eo:i64 = qo + qpad;
+    let pro:i64 = eo + 32;
+    let nf:i64 = rb_get32u(m, pro);
+    if (nf < 1 || nf > 100000) { return -25; }
+    let pTv:i64 = rb_get32u(m, pro + 8 + 8 * nf);
+    if (pTv < 0 || pTv > 400) { return -26; }
+    let phn2:i64 = pTv * K;
+    if (pro + 8 + 8 * nf + 16 + 8 * phn2 != msz) { return -24; }
+    p.* = P; k.* = K; nn.* = N; sr.* = SR;
+    poff.* = po; uoff.* = uo; boff.* = bo; qoff.* = qo; eoff.* = eo;
+    proff.* = pro + 8; nfr.* = nf;
+    pT.* = pTv;
+    pth.* = rb_getf64(m, pro + 16 + 8 * nf);
+    phoff.* = pro + 24 + 8 * nf;
+    return 0;
+}
+
+// ---------------- RE-EMIT ----------------
+fn rb_reemit(model_path:[]u8, out_wav:[]u8) i64 {
+    let msz:i64 = 0;
+    let m:[]u8 = rb_read_file(model_path, &msz);
+    if (msz < 0) { return -31; }
+    let P:i64 = 0; let K:i64 = 0; let N:i64 = 0; let SR:i64 = 0;
+    let poff:i64 = 0; let uoff:i64 = 0; let boff:i64 = 0; let qoff:i64 = 0; let eoff:i64 = 0;
+    let proff:i64 = 0; let nfr:i64 = 0; let pT0:i64 = 0; let pth0:f64 = 0.0; let phoff0:i64 = 0;
+    let rc:i64 = rb_model_offs(m, msz, &P, &K, &N, &SR, &poff, &uoff, &boff, &qoff, &eoff, &proff, &nfr, &pT0, &pth0, &phoff0);
+    if (rc != 0) { return rc; }
+    let out:[]u8 = nio_alloc((N * 2) as i32);
+    if (out.len == 0) { return -32; }
+    // Linear (unclamped) predictor state: clamping inside the feedback loop
+    // latches the rail (found 2026-09-26: emission stuck at -32768, ZCR 0).
+    // The loop stays linear; clamp only at the byte-conversion boundary.
+    let EST:[]f64 = nio_alloc((N * 8) as i32) as []f64;
+    let i:i64 = 0;
+    while (i < P) {
+        let qi:i64 = m[qoff + i] as i64;
+        let ev:f64 = rb_getf64(m, poff + qi * 8);
+        EST[i] = ev;
+        let s:i64 = r_rint(ev);
+        if (s > 32767) { s = 32767; }
+        if (s < -32768) { s = -32768; }
+        rb_puts16(out, i, s);
+        i = i + 1;
+    }
+    while (i < N) {
+        let pred:f64 = 0.0;
+        let kk:i64 = 0;
+        while (kk < P) {
+            pred = pred + rb_getf64(m, 40 + kk * 8) * EST[i - 1 - kk];
+            kk = kk + 1;
+        }
+        let qi2:i64 = m[qoff + (i - P)] as i64;
+        let ev2:f64 = pred + rb_getf64(m, poff + qi2 * 8);
+        EST[i] = ev2;
+        let v:i64 = r_rint(ev2);
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        rb_puts16(out, i, v);
+        i = i + 1;
+    }
+    let wrc:i64 = rb_write_wav(out_wav, out, N, SR);
+    nio_free(out);
+    return wrc;
+}
+
+// ---------------- IMAGINE core: TNN's own residual walk ----------------
+fn rb_imagine_core(m:[]u8, msz:i64, dur_s:f64, mode:i64, n_out:*i64) []u8 {
+    let none:[]u8 = "";
+    n_out.* = -1;
+    let P:i64 = 0; let K:i64 = 0; let Nsrc:i64 = 0; let SR:i64 = 0;
+    let poff:i64 = 0; let uoff:i64 = 0; let boff:i64 = 0; let qoff:i64 = 0; let eoff:i64 = 0;
+    let proff:i64 = 0; let nfr:i64 = 0; let pT:i64 = 0; let pth:f64 = 0.0; let phoff:i64 = 0;
+    let rc:i64 = rb_model_offs(m, msz, &P, &K, &Nsrc, &SR, &poff, &uoff, &boff, &qoff, &eoff, &proff, &nfr, &pT, &pth, &phoff);
+    if (rc != 0) { return none; }
+    let frlen:i64 = SR / 100;
+    if (frlen < 1) { frlen = 1; }
+    let ob0:i64 = rb_get32u(m, eoff);
+    let ob1:i64 = rb_get32u(m, eoff + 8);
+    let floorv:f64 = rb_getf64(m, eoff + 16);
+    let attackv:f64 = rb_getf64(m, eoff + 24);
+    let N:i64 = r_rint(dur_s * (SR as f64));
+    if (N < 64) { N = 64; }
+    if (N > 44100 * 12) { N = 44100 * 12; }
+    let out:[]u8 = nio_alloc((N * 2) as i32);
+    if (out.len == 0) { return none; }
+    // Linear (unclamped) predictor state; clamp only at byte conversion.
+    let EST:[]f64 = nio_alloc((N * 8) as i32) as []f64;
+    let ez:i64 = 0;
+    while (ez < N) {
+        EST[ez] = 0.0;
+        ez = ez + 1;
+    }
+    let K3:i64 = K * K * K;
+    let V:[]i64 = nio_alloc((K3 * 8) as i32) as []i64;
+    let VU:[]i64 = nio_alloc((K * 8) as i32) as []i64;
+    let z3:i64 = 0;
+    while (z3 < K3) {
+        V[z3] = 0;
+        z3 = z3 + 1;
+    }
+    z3 = 0;
+    while (z3 < K) {
+        VU[z3] = 0;
+        z3 = z3 + 1;
+    }
+    // recent-residual ring for decay termination
+    let RW:i64 = 2048;
+    let ring:[]f64 = nio_alloc((RW * 8) as i32) as []f64;
+    z3 = 0;
+    while (z3 < RW) {
+        ring[z3] = 0.0;
+        z3 = z3 + 1;
+    }
+    let rsum:f64 = 0.0;
+    let rpos:i64 = 0;
+    let PEN:f64 = 1.0;
+    let prev2:i64 = ob0;
+    let prev1:i64 = ob1;
+    let stop:i64 = N;
+    let thresh:f64 = attackv * 0.03;
+    if (thresh < floorv * 2.0) { thresh = floorv * 2.0; }
+    if (thresh < 2.0) { thresh = 2.0; }
+    let ewalk:f64 = attackv;
+    if (ewalk < 1.0) { ewalk = 1.0; }
+    let i:i64 = 0;
+    while (i < N) {
+        // energy-trajectory prior: learned 10 ms mean|res| frames.
+        // (hold the last frame past the source length)
+        let fr:i64 = i / frlen;
+        if (fr >= nfr) { fr = nfr - 1; }
+        let epr:f64 = rb_getf64(m, proff + fr * 8);
+        let lo:f64 = epr * 0.2;
+        let hi:f64 = epr * 5.0;
+        if (hi < 1.0) { hi = 1.0; }
+        let usemask:i64 = 1;
+        if (epr < 1.0) { usemask = 0; }
+        // phase bias: weak periodic prior from the learned phase histogram.
+        // (replaces the hard pulse mask; pT=0 disables it)
+        let phbonus_on:i64 = 0;
+        let phphase:i64 = 0;
+        if (pT > 0) {
+            phbonus_on = 1;
+            phphase = i % pT;
+        }
+        // argmax_c (C - PEN*V), backoff to unigram.
+        // PEN scales with the row total so the novelty ledger can actually
+        // outweigh a dominant transition (fixed PEN=1 is negligible when the
+        // modal transition was seen thousands of times -> walk collapse).
+        let base:i64 = (prev2 * K + prev1) * K;
+        let rowsum:i64 = 0;
+        let cs:i64 = 0;
+        while (cs < K) {
+            rowsum = rowsum + rb_get32u(m, boff + (base + cs) * 8);
+            cs = cs + 1;
+        }
+        let peneff:f64 = (rowsum as f64) / (K as f64);
+        if (peneff < 1.0) { peneff = 1.0; }
+        let best:f64 = -1000000000000.0;
+        let bi:i64 = 0;
+        let have:i64 = 0;
+        let pass:i64 = 0;
+        while (pass < 3) {
+            let c:i64 = 0;
+            while (c < K) {
+                let okm:i64 = 1;
+                // fallback ladder: 0=energy mask, 1=unmasked (phase bonus always applies)
+                let aen:i64 = 1;
+                if (usemask == 1 && pass == 0) {
+                    let ap2:f64 = r_abs(rb_getf64(m, poff + c * 8));
+                    if (ap2 < lo || ap2 > hi) { aen = 0; }
+                }
+                if (aen == 0) { okm = 0; }
+                if (okm == 1) {
+                    let cc:i64 = rb_get32u(m, boff + (base + c) * 8);
+                    if (cc > 0) { have = 1; }
+                    let s:f64 = (cc as f64) - peneff * (V[base + c] as f64);
+                    if (phbonus_on == 1) {
+                        let phc:i64 = rb_get32u(m, phoff + (phphase * K + c) * 8);
+                        s = s + 10.0 * (phc as f64);
+                    }
+                    if (s > best) {
+                        best = s;
+                        bi = c;
+                    }
+                }
+                c = c + 1;
+            }
+            if (have == 0 && pass < 2) {
+                pass = pass + 1;
+                best = -1000000000000.0;
+                bi = 0;
+                have = 0;
+            } else {
+                pass = 3;
+            }
+        }
+        if (have == 0) {
+            let utot:i64 = 0;
+            c = 0;
+            while (c < K) {
+                utot = utot + rb_get32u(m, uoff + c * 8);
+                c = c + 1;
+            }
+            let penu:f64 = (utot as f64) / (K as f64);
+            if (penu < 1.0) { penu = 1.0; }
+            best = -1000000000000.0;
+            bi = 0;
+            c = 0;
+            while (c < K) {
+                let uu:i64 = rb_get32u(m, uoff + c * 8);
+                let s2:f64 = (uu as f64) - penu * (VU[c] as f64);
+                if (s2 > best) {
+                    best = s2;
+                    bi = c;
+                }
+                c = c + 1;
+            }
+            VU[bi] = VU[bi] + 1;
+        } else {
+            V[base + bi] = V[base + bi] + 1;
+        }
+        let rv0:f64 = rb_getf64(m, poff + bi * 8);
+        let a0:f64 = rv0;
+        if (a0 < 0.0) { a0 = 0.0 - a0; }
+        ewalk = 0.99 * ewalk + 0.01 * a0;
+        // gain the walked excitation to the learned energy trajectory.
+        // silence frames (epr<1): force near-zero so decay termination fires.
+        let g:f64 = 1.0;
+        if (epr < 1.0) {
+            g = 0.02;
+        } else {
+            if (ewalk > 0.5) {
+                g = epr / ewalk;
+                if (g > 8.0) { g = 8.0; }
+                if (g < 0.125) { g = 0.125; }
+            }
+        }
+        let rv:f64 = rv0 * g;
+        let pred:f64 = 0.0;
+        let kk:i64 = 0;
+        while (kk < P) {
+            let h:i64 = i - 1 - kk;
+            let xv:f64 = 0.0;
+            if (h >= 0) { xv = EST[h]; }
+            pred = pred + rb_getf64(m, 40 + kk * 8) * xv;
+            kk = kk + 1;
+        }
+        let ev:f64 = pred + rv;
+        EST[i] = ev;
+        let v:i64 = r_rint(ev);
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        rb_puts16(out, i, v);
+        // termination bookkeeping (decay mode)
+        let ar2:f64 = rv;
+        if (ar2 < 0.0) { ar2 = 0.0 - ar2; }
+        rsum = rsum - ring[rpos] + ar2;
+        ring[rpos] = ar2;
+        rpos = rpos + 1;
+        if (rpos >= RW) { rpos = 0; }
+        if (mode == 0 && i > SR / 10 && i >= RW) {
+            if (rsum / (RW as f64) < thresh) {
+                stop = i + 1;
+                break;
+            }
+        }
+        prev2 = prev1;
+        prev1 = bi;
+        i = i + 1;
+    }
+    n_out.* = stop;
+    return out;
+}
+
+fn rb_imagine(model_path:[]u8, dur_s:f64, mode:i64, out_wav:[]u8) i64 {
+    let msz:i64 = 0;
+    let m:[]u8 = rb_read_file(model_path, &msz);
+    if (msz < 0) { return -41; }
+    let n:i64 = 0;
+    let out:[]u8 = rb_imagine_core(m, msz, dur_s, mode, &n);
+    if (n < 0) { return -42; }
+    let wrc:i64 = rb_write_wav(out_wav, out, n, 44100);
+    nio_free(out);
+    return wrc;
+}
+
+// ---------------- SCENE: event timeline -> raw byte blocks -> saturated mix ----------------
+// spec line: "<model_path> <start_s> <dur_s> <mode>"
+fn rb_parse_f64(s:[]u8) f64 {
+    let neg:i64 = 0;
+    let p:i64 = 0;
+    if (p < s.len && s[p] == 45) {
+        neg = 1;
+        p = p + 1;
+    }
+    let ip:f64 = 0.0;
+    while (p < s.len && s[p] >= 48 && s[p] <= 57) {
+        ip = ip * 10.0 + ((s[p] as i64) - 48) as f64;
+        p = p + 1;
+    }
+    let fp:f64 = 0.0;
+    let div:f64 = 1.0;
+    if (p < s.len && s[p] == 46) {
+        p = p + 1;
+        while (p < s.len && s[p] >= 48 && s[p] <= 57) {
+            fp = fp * 10.0 + ((s[p] as i64) - 48) as f64;
+            div = div * 10.0;
+            p = p + 1;
+        }
+    }
+    let v:f64 = ip + fp / div;
+    if (neg == 1) { v = 0.0 - v; }
+    return v;
+}
+fn rb_scene(spec_path:[]u8, out_wav:[]u8) i64 {
+    let ssz:i64 = 0;
+    let spec:[]u8 = rb_read_file(spec_path, &ssz);
+    if (ssz < 0) { return -51; }
+    // first pass: find total length
+    let total:i64 = 0;
+    let p:i64 = 0;
+    while (p < ssz) {
+        // skip blanks/comments
+        while (p < ssz && (spec[p] == 10 || spec[p] == 13 || spec[p] == 32)) { p = p + 1; }
+        if (p < ssz && spec[p] == 35) {
+            while (p < ssz && spec[p] != 10) { p = p + 1; }
+        }
+        if (p >= ssz) { break; }
+        // tokens: model start dur mode
+        let t0:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t1:i64 = p;
+        while (p < ssz && spec[p] == 32) { p = p + 1; }
+        let t2s:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t2e:i64 = p;
+        while (p < ssz && spec[p] == 32) { p = p + 1; }
+        let t3s:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t3e:i64 = p;
+        while (p < ssz && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        if (t2e > t2s && t3e > t3s) {
+            let st:[]u8 = nio_alloc(((t2e - t2s) + 1) as i32);
+            let du:[]u8 = nio_alloc(((t3e - t3s) + 1) as i32);
+            let q:i64 = 0;
+            while (q < t2e - t2s) {
+                st[q] = spec[t2s + q];
+                q = q + 1;
+            }
+            q = 0;
+            while (q < t3e - t3s) {
+                du[q] = spec[t3s + q];
+                q = q + 1;
+            }
+            let startv:f64 = rb_parse_f64(st);
+            let durv:f64 = rb_parse_f64(du);
+            nio_free(st);
+            nio_free(du);
+            let end:i64 = r_rint(startv * 44100.0) + r_rint(durv * 44100.0);
+            if (end > total) { total = end; }
+        }
+    }
+    if (total < 64) { total = 64; }
+    if (total > 44100 * 30) { total = 44100 * 30; }
+    let out:[]u8 = nio_alloc((total * 2) as i32);
+    if (out.len == 0) { return -52; }
+    let z:i64 = 0;
+    while (z < total * 2) {
+        out[z] = 0;
+        z = z + 1;
+    }
+    // second pass: render + mix
+    p = 0;
+    while (p < ssz) {
+        while (p < ssz && (spec[p] == 10 || spec[p] == 13 || spec[p] == 32)) { p = p + 1; }
+        if (p < ssz && spec[p] == 35) {
+            while (p < ssz && spec[p] != 10) { p = p + 1; }
+        }
+        if (p >= ssz) { break; }
+        let t0:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t1:i64 = p;
+        while (p < ssz && spec[p] == 32) { p = p + 1; }
+        let t2s:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t2e:i64 = p;
+        while (p < ssz && spec[p] == 32) { p = p + 1; }
+        let t3s:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t3e:i64 = p;
+        while (p < ssz && spec[p] == 32) { p = p + 1; }
+        let t4s:i64 = p;
+        while (p < ssz && spec[p] != 32 && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        let t4e:i64 = p;
+        while (p < ssz && spec[p] != 10 && spec[p] != 13) { p = p + 1; }
+        if (t4e > t4s) {
+            let mp:[]u8 = nio_alloc(((t1 - t0) + 1) as i32);
+            let st:[]u8 = nio_alloc(((t2e - t2s) + 1) as i32);
+            let du:[]u8 = nio_alloc(((t3e - t3s) + 1) as i32);
+            let md:[]u8 = nio_alloc(((t4e - t4s) + 1) as i32);
+            let q:i64 = 0;
+            while (q < t1 - t0) {
+                mp[q] = spec[t0 + q];
+                q = q + 1;
+            }
+            q = 0;
+            while (q < t2e - t2s) {
+                st[q] = spec[t2s + q];
+                q = q + 1;
+            }
+            q = 0;
+            while (q < t3e - t3s) {
+                du[q] = spec[t3s + q];
+                q = q + 1;
+            }
+            q = 0;
+            while (q < t4e - t4s) {
+                md[q] = spec[t4s + q];
+                q = q + 1;
+            }
+            let startv:f64 = rb_parse_f64(st);
+            let durv:f64 = rb_parse_f64(du);
+            let modev:i64 = rb_parse_f64(md) as i64;
+            nio_free(st);
+            nio_free(du);
+            nio_free(md);
+            let msz2:i64 = 0;
+            let mm:[]u8 = rb_read_file(mp, &msz2);
+            nio_free(mp);
+            if (msz2 > 0) {
+                let en:i64 = 0;
+                let ev:[]u8 = rb_imagine_core(mm, msz2, durv, modev, &en);
+                nio_free(mm);
+                if (en > 0) {
+                    let off2:i64 = r_rint(startv * 44100.0);
+                    let e2:i64 = 0;
+                    while (e2 < en && off2 + e2 < total) {
+                        let s:i64 = rb_s16(out, off2 + e2) + rb_s16(ev, e2);
+                        if (s > 32767) { s = 32767; }
+                        if (s < -32768) { s = -32768; }
+                        rb_puts16(out, off2 + e2, s);
+                        e2 = e2 + 1;
+                    }
+                    nio_free(ev);
+                }
+            }
+        }
+    }
+    let wrc:i64 = rb_write_wav(out_wav, out, total, 44100);
+    nio_free(out);
+    return wrc;
+}
+
+// ---------------- hear from file ----------------
+fn rb_hear_file(wav_path:[]u8, model_path:[]u8) i64 {
+    let n:i64 = 0;
+    let sr:i64 = 0;
+    let samp:[]u8 = rb_read_wav(wav_path, &n, &sr);
+    if (n < 0) { return -60 + n; }
+    if (sr != 44100) {
+        nio_free(samp);
+        return -70;
+    }
+    let rc:i64 = rb_hear(samp, n, sr, model_path);
+    nio_free(samp);
+    return rc;
+}
+
+// ---------------- selftest: fixture -> hear -> reemit x2 -> byte-compare + corr ----------------
+fn rb_selftest() i64 {
+    // deterministic pitched-decay fixture (integer arithmetic only)
+    let N:i64 = 22050;
+    let SR:i64 = 44100;
+    let fx:[]u8 = nio_alloc((N * 2) as i32);
+    if (fx.len == 0) { return -81; }
+    let prev:i64 = 9000;
+    rb_puts16(fx, 0, prev);
+    let i:i64 = 1;
+    while (i < N) {
+        let v:i64 = prev - prev / 16;
+        if (i % 147 == 0) { v = v + 6000; }
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        rb_puts16(fx, i, v);
+        prev = v;
+        i = i + 1;
+    }
+    let mpath:[]u8 = "/home/hatch/workspace/rawbyte/runs/selftest.model";
+    let hrc:i64 = rb_hear(fx, N, SR, mpath);
+    if (hrc != 0) {
+        nio_free(fx);
+        return -82;
+    }
+    let w1:[]u8 = "/home/hatch/workspace/rawbyte/runs/selftest_r1.wav";
+    let w2:[]u8 = "/home/hatch/workspace/rawbyte/runs/selftest_r2.wav";
+    let r1:i64 = rb_reemit(mpath, w1);
+    let r2:i64 = rb_reemit(mpath, w2);
+    if (r1 != 0 || r2 != 0) {
+        nio_free(fx);
+        return -83;
+    }
+    // byte-compare r1 vs r2 (determinism)
+    let s1:i64 = 0;
+    let s2:i64 = 0;
+    let b1:[]u8 = rb_read_file(w1, &s1);
+    let b2:[]u8 = rb_read_file(w2, &s2);
+    if (s1 != s2 || s1 <= 0) {
+        nio_free(fx);
+        return -84;
+    }
+    let det:i64 = 1;
+    let j:i64 = 0;
+    while (j < s1) {
+        if (b1[j] != b2[j]) {
+            det = 0;
+            break;
+        }
+        j = j + 1;
+    }
+    // correlation fixture vs reemit (skip WAV header: 44 bytes)
+    let n1:i64 = 0;
+    let sr1:i64 = 0;
+    let rsamp:[]u8 = rb_read_wav(w1, &n1, &sr1);
+    let corr:i64 = -999999;
+    if (n1 == N && sr1 == 44100) {
+        let mx:f64 = 0.0;
+        let my:f64 = 0.0;
+        let c2:i64 = 0;
+        while (c2 < N) {
+            mx = mx + (rb_s16(fx, c2) as f64);
+            my = my + (rb_s16(rsamp, c2) as f64);
+            c2 = c2 + 1;
+        }
+        mx = mx / (N as f64);
+        my = my / (N as f64);
+        let sxy:f64 = 0.0;
+        let sxx:f64 = 0.0;
+        let syy:f64 = 0.0;
+        c2 = 0;
+        while (c2 < N) {
+            let dx:f64 = (rb_s16(fx, c2) as f64) - mx;
+            let dy:f64 = (rb_s16(rsamp, c2) as f64) - my;
+            sxy = sxy + dx * dy;
+            sxx = sxx + dx * dx;
+            syy = syy + dy * dy;
+            c2 = c2 + 1;
+        }
+        let cc:f64 = sxy / r_sqrt(sxx * syy);
+        corr = r_rint(cc * 10000.0);
+    }
+    nio_free(fx);
+    // imagine smoke: 0.5 s decay from the fixture model
+    let w3:[]u8 = "/home/hatch/workspace/rawbyte/runs/selftest_im.wav";
+    let imrc:i64 = rb_imagine(mpath, 0.5, 0, w3);
+    // report: det flag in high bits, corr in low
+    // print via main; encode as det*100000 + (corr+10000)
+    let code:i64 = det * 100000 + (corr + 20000);
+    if (imrc != 0) { code = code - 1000000000; }
+    return code;
+}
+
+// ---------------- main ----------------
+fn rb_dispatch() i64 {
+    let cmd:[]u8 = _zag_arg(1);
+    if (_zag_strcmp(cmd, "hear") == 1) {
+        return rb_hear_file(_zag_arg(2), _zag_arg(3));
+    }
+    if (_zag_strcmp(cmd, "reemit") == 1) {
+        return rb_reemit(_zag_arg(2), _zag_arg(3));
+    }
+    if (_zag_strcmp(cmd, "imagine") == 1) {
+        let dur:f64 = rb_parse_f64(_zag_arg(3));
+        let mode:i64 = rb_parse_f64(_zag_arg(4)) as i64;
+        return rb_imagine(_zag_arg(2), dur, mode, _zag_arg(5));
+    }
+    if (_zag_strcmp(cmd, "scene") == 1) {
+        return rb_scene(_zag_arg(2), _zag_arg(3));
+    }
+    if (_zag_strcmp(cmd, "selftest") == 1) {
+        return rb_selftest();
+    }
+    return -98;
+}
+fn main() i32 {
+    let rc:i64 = rb_dispatch();
+    let s:[]u8 = rb_i64s(rc);
+    _zag_print(s);
+    nio_free(s);
+    return 0;
+}
