@@ -41,6 +41,34 @@
   as in the no-layers fork. Full ingest is CPU-heavy; the lab VM was heavily
   loaded during the run (~9% CPU share), so wall time was long.
 
+## Free-lunch hunt (2026-09-26 ~10:55 PDT, Micah order)
+
+- Preregistered the bar (bytes down, zero cost anywhere: identical PSNR/
+  SSIM/residual share, byte-identical renders + reruns x2) in RUNLOG_FL.md
+  BEFORE implementing; measured every candidate against the baseline
+  knowmap in Python first.
+- The firing census: 5,310 of 5,600 SHAPES atoms never fire (72/39/96/83
+  fire at scales 32/16/8/4). Farthest-point builds for coverage; take/split
+  only takes what regions need.
+- Kept L1: writer-side prune of unfired atoms (deterministic compaction +
+  usage renumber; deliberation untouched) — 1,270,512 B saved, renders
+  byte-identical.
+- Kept L2: residual section recoded (u32-first + u16 gap positions, i8
+  deltas with range-checked mode flags; magic TNNKTLM1 -> TNNKTLM2) —
+  70,250 B saved, residual bit-exact vs baseline, closure byte-identical.
+- Killed: atom i16->i8 (values span [-168,185]); rejected: exemplar-drop
+  (2.3 KB, provenance worth more), usage-mean i16->i8 (2 KB, churn),
+  cross-scale sharing (redesign, not provably free), SMOOTH recode (~10 KB,
+  complexity). Trade identified-but-rejected: dropping 58 once-fired atoms
+  (~11 KB for -0.2 dB).
+- Result: knowmap 1,963,911 -> 623,149 B (68.3% smaller); 43.43 dB /
+  0.9937 SSIM / 8.2% residual all identical; understanding render SHA-256
+  unchanged (a8341747...); fl1/fl2 reruns byte-identical.
+- Byte-accounting: SMOOTH 25,298 B -> 22.54 dB; +SHAPES -> 42.84 dB
+  (+20.30; the 280 single-fire exemplar atoms carry ~20 dB — mechanistic
+  memorization, all load-bearing); +LINES 672 B -> 43.43 dB (+0.59).
+  Full report: FREELUNCH.md.
+
 ## Adaptive-split arm (no-layers)
 
 - Investigated per the task ("if cheap"). Finding: NOT cheap. The no-layers
