@@ -1,0 +1,137 @@
+--- /home/hatch/workspace/strength-f1f2f4/f4/strength_core.zag	2026-09-26 02:11:29.672602361 +0000
++++ /home/hatch/workspace/strength-f1f2f4/f4/f4b/strength_core.zag	2026-09-26 02:21:40.073225063 +0000
+@@ -49,6 +49,7 @@
+ const ST_REFUSED_AUTHORITY:i32=118;
+ const ST_REFUSED_NOTEXPIRED:i32=119;
+ const ST_REFUSED_BADOP:i32=120;
++const ST_REFUSED_CONSUMED:i32=121;
+ 
+ const ST_STAGE_NONE:i32=0;
+ const ST_STAGE_ADD:i32=1;
+@@ -334,8 +335,22 @@
+     while(i<upto){
+         if(st_aw(s,i,0)==ST_OP_EVIDENCE && st_aw(s,i,1)==slot && st_aw(s,i,4)==ST_OK){
+             let cite:i32=st_aw(s,i,2);
+-            let seen:i32=0;let k:i32=0;
+-            while(k<n){if(st_i32_get(out,k*4)==cite){seen=1;break;}k=k+1;}
++            // F4b bufferless fix (2026-09-26): the old seen-scan re-read the
++            // 16-byte `out` buffer for k<n, but only 4 slots are ever written.
++            // With >4 distinct cites in the effort window (a second cite round
++            // after kill->rollback accumulates 8) the read ran past the buffer
++            // and the binary panicked ("slice index out of bounds") -- on the
++            // PRISTINE core, not caused by the F4b edits (bisection 2026-09-26:
++            // pristine + probe reproduces; first crew's miscompile theory
++            // retracted). Distinctness is now decided against the ledger itself
++            // (exact on every input), the 4-write cap stays, the returned
++            // distinct count is unchanged on all non-panicking inputs.
++            let seen:i32=0;let k:i32=after_idx+1;
++            while(k<i){
++                if(st_aw(s,k,0)==ST_OP_EVIDENCE && st_aw(s,k,1)==slot &&
++                   st_aw(s,k,4)==ST_OK && st_aw(s,k,2)==cite){seen=1;break;}
++                k=k+1;
++            }
+             if(seen==0){
+                 if(n<4){st_i32_set(out,n*4,cite);}
+                 n=n+1;
+@@ -345,6 +360,53 @@
+     }
+     return n;
+ }
++// F4 FIX (F4b cite-consumption, 2026-09-25): a cite_ep is CONSUMED iff it
++// sits in the effort window of an OK destruction (KILL_EVIDENCED or
++// OVERWRITE) on the same slot with index in (after_idx, upto). Derived
++// from the ledger itself -- no new state, no new entries -- so the checker
++// recomputes the identical predicate from its own copy of the ledger.
++// Destructions at or before after_idx cannot have consumed a cite newer
++// than after_idx, which bounds the scan.
++fn st_cite_consumed(s:*StStore,slot:i32,cite_ep:i32,after_idx:i32,upto:i32)i32 {
++    let d:i32=after_idx+1;
++    while(d<upto){
++        let op:i32=st_aw(s,d,0);
++        if((op==ST_OP_KILL_EVIDENCED || op==ST_OP_OVERWRITE) &&
++           st_aw(s,d,1)==slot && st_aw(s,d,4)==ST_OK){
++            let dlss:i32=st_last_strength_idx(s,slot,d);
++            let i:i32=dlss+1;
++            while(i<d){
++                if(st_aw(s,i,0)==ST_OP_EVIDENCE && st_aw(s,i,1)==slot &&
++                   st_aw(s,i,4)==ST_OK && st_aw(s,i,2)==cite_ep){return 1;}
++                i=i+1;
++            }
++        }
++        d=d+1;
++    }
++    return 0;
++}
++// Count distinct OK EVIDENCE cite_eps for slot in (after_idx, upto) that
++// were consumed by an earlier destruction. Pure Zag, no indexed narrow
++// casts (uses st_aw); effort windows are small (bounded by the cite rate),
++// so the O(W^2) distinctness scan needs no buffer and no cap.
++fn st_count_spent_cites(s:*StStore,slot:i32,after_idx:i32,upto:i32)i32 {
++    let n:i32=0;
++    let i:i32=after_idx+1;
++    while(i<upto){
++        if(st_aw(s,i,0)==ST_OP_EVIDENCE && st_aw(s,i,1)==slot && st_aw(s,i,4)==ST_OK){
++            let cite:i32=st_aw(s,i,2);
++            let seen:i32=0;let k:i32=after_idx+1;
++            while(k<i){
++                if(st_aw(s,k,0)==ST_OP_EVIDENCE && st_aw(s,k,1)==slot &&
++                   st_aw(s,k,4)==ST_OK && st_aw(s,k,2)==cite){seen=1;break;}
++                k=k+1;
++            }
++            if(seen==0 && st_cite_consumed(s,slot,cite,after_idx,upto)==1){n=n+1;}
++        }
++        i=i+1;
++    }
++    return n;
++}
+ 
+ // ---- ops ----
+ 
+@@ -468,12 +530,21 @@
+     let lss:i32=st_last_strength_idx(s,slot,s.*.audit_n);
+     if(lss<0){return ST_REFUSED_EFFORT;}
+     let buf:[]u8=nio_alloc(16);
+-    let cnt:i32=st_collect_cites(s,slot,lss,s.*.audit_n,buf);
++    let total:i32=st_collect_cites(s,slot,lss,s.*.audit_n,buf);
+     nio_free(buf);
++    // F4b: cites spent paying for an earlier destruction on this slot are
++    // consumed and cannot pay again -- only FRESH cites count toward the
++    // price. A destruction after a kill->rollback must bring new episodes,
++    // not the pre-kill ones (round-4 finding F4).
++    let spent:i32=st_count_spent_cites(s,slot,lss,s.*.audit_n);
++    let cnt:i32=total-spent;
+     if(baseline==1){
+         if(cnt<1){return ST_REFUSED_EFFORT;}
+     } else {
+-        if(cnt!=need){return ST_REFUSED_EFFORT;}
++        if(cnt!=need){
++            if(spent>0){return ST_REFUSED_CONSUMED;}
++            return ST_REFUSED_EFFORT;
++        }
+     }
+     // at least one OK JUSTIFY for this slot after lss, clocked before this op
+     let i:i32=lss+1;let found:i32=0;
+@@ -545,11 +616,18 @@
+     else if(s.*.region[slot]==ST_REGION_CORE as u8){rc=ST_REFUSED_CORE;}
+     else {
+         let lss:i32=st_last_strength_idx(s,slot,s.*.audit_n);
+-        let buf:[]u8=nio_alloc(16);
+-        let n:i32=st_collect_cites(s,slot,lss,s.*.audit_n,buf);
+-        let k:i32=0;let dup:i32=0;
+-        while(k<n){if(st_i32_get(buf,k*4)==cite_ep){dup=1;break;}k=k+1;}
+-        nio_free(buf);
++        // F4b bufferless fix (2026-09-26): dup-scan the ledger directly. The old
++        // code re-read the 16-byte buffer for k<n with only 4 slots written --
++        // >4 distinct cites in the effort window (second cite round after
++        // kill->rollback) panicked with "slice index out of bounds" on the
++        // pristine core (bisection 2026-09-26; not an F4b miscompile). The
++        // direct scan is exactly the dup predicate on all non-panicking inputs.
++        let k:i32=lss+1;let dup:i32=0;
++        while(k<s.*.audit_n){
++            if(st_aw(s,k,0)==ST_OP_EVIDENCE && st_aw(s,k,1)==slot &&
++               st_aw(s,k,4)==ST_OK && st_aw(s,k,2)==cite_ep){dup=1;break;}
++            k=k+1;
++        }
+         if(dup==1){rc=ST_REFUSED_DUPCITE;}
+     }
+     let arc:i32=st_audit_append(s,ST_OP_EVIDENCE,slot,cite_ep,code,rc,
