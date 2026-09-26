@@ -110,6 +110,7 @@ Rejection was a format barrier; Micah's "no format barrier" direction requires s
 basic RSTn handling; 4:2:0 uses inherited nearest-neighbor chroma replication.
 
 See `evidence/progressive_jpeg_2026-09-26.md` for the full proof table, SHAs, and honest Pillow comparison.
+Implementation commit: `1498e3208`.
 
 ## Audio Samples 0..63 Retention
 Verified for WAV: all PCM variants retain samples 0..63 exactly (ndiff=0 in oracle comparison).

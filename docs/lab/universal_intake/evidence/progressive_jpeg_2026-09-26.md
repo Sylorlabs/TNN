@@ -118,4 +118,4 @@ This SUPPORT verdict stands unless:
 
 ## Commit
 
-Implementation commit SHA: (to be filled at commit time)
+Implementation commit SHA: `1498e3208` (tnn-native-lab)
