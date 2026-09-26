@@ -1,0 +1,18 @@
+# CHECKSUMS — new videos set 2 (SHA-256)
+
+## Deliverables (~/workspace/your_files/imagination_video_new/)
+141591da32dcecd0c9a17bb3e6d9473e92da990ff80c150344c8cb2959c0a202  /home/hatch/workspace/your_files/imagination_video_new/nvid3.avi
+452da269758a3a6c2d694d0f8ffecd8a6053906aaa3bf605da2f7fa5138332f0  /home/hatch/workspace/your_files/imagination_video_new/nvid3.mp4
+eaaba694fd8a0e20e694d972716016ec3036616928974f08391a330efe00bf83  /home/hatch/workspace/your_files/imagination_video_new/nvid3.wav
+f6f91e9109aac2776efcf7b9036c74c6a2ce531a82f5e22fc94861ce50b22074  /home/hatch/workspace/your_files/imagination_video_new/nvid4.avi
+54f20c49f99172503154c28a922aac68b70ec15b460bbb4873dfbf032c8347d2  /home/hatch/workspace/your_files/imagination_video_new/nvid4.mp4
+ffc92ee0934adb11e0b6ff86224ed604067f17b54c210b6e717577fed35953e9  /home/hatch/workspace/your_files/imagination_video_new/nvid4.wav
+25ad834f111bfc0e3da1fe5d5f85d295aa7b5c166359633904942adc1137f1f5  /home/hatch/workspace/your_files/imagination_video_new/nvid5.avi
+26662d4c77c22534622259ac2d848b0d84c76012bdee27632ca69ede831a0b53  /home/hatch/workspace/your_files/imagination_video_new/nvid5.mp4
+13347452a5e421f7dd24d41392368cd380107ba6116e6f3ddb1dfc9ee9c1157e  /home/hatch/workspace/your_files/imagination_video_new/nvid5.wav
+ac6f0630af530e6307327282181399c7e60e320433b1ba6fdcb38935beebe6e1  /home/hatch/workspace/your_files/imagination_video_new/nvid6.avi
+d9f293b6aac222be49738b98a4bd630c1eacea21264120afe1249763774c55eb  /home/hatch/workspace/your_files/imagination_video_new/nvid6.mp4
+01da7ca833e2126d4c4bcffd824116472c6d301d68cc360caa9509169adc6a89  /home/hatch/workspace/your_files/imagination_video_new/nvid6.wav
+
+## Source (committed)
+8d79b2594a9db3187a04e7e34800ed956412943b7c27f4317671a2fd1b80b170  /home/hatch/workspace/tnn-lab/imagination/src/field.zag
