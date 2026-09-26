@@ -1744,8 +1744,10 @@ double-written. Zero Python ran in any of this wave's three lane
 workers (each attested explicitly); the 0221pdt python3-heredoc breach
 was disclosed, not repeated.
 
-Commit chain (all local, none pushed): <commit ids filled at commit
-time>. No verdict was overturned.
+Commit chain (all local, none pushed): 8564128c4 (wave evidence batch:
+fork battery, FIT carry-over, interactive TNN survey, debate transcript,
+0221pdt backfill evidence, fit_authority doc fixes), plus this
+LOOP_STATE.md update commit. No verdict was overturned.
 
 Queued next: Micah's six pending governance rulings (S7 strike,
 MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull,
