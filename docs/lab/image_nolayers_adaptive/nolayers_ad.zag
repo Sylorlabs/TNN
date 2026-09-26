@@ -1,0 +1,986 @@
+// nolayers_ad.zag — ONE vocabulary, ONE deliberative pass. No layers. No grid.
+//
+// (image_nolayers_adaptive; Micah order 2026-09-26 ~09:54 PDT:
+// "yes I want the rigid grid gone for no layers, for a real result.")
+//
+// Child of the image_nolayers fork: identical vocabulary, survey, residual,
+// render paths and knowmap format — the ONLY change is the deliberation:
+// regions are content-delimited rectangles (CART split positions), not a
+// rigid nested dyadic grid. See DESIGN.md.
+//
+// TNN's single knowledge claim about the image:
+//   "I looked at region R and saw an instance of the shape I saw at
+//    exemplar E; its mean color is (r,g,b)."
+// There are no separate structure / edge / texture stages, no handed
+// layer boundaries, no separate vocabularies. One pool of shape atoms,
+// one recursive deliberation, one selection criterion (gain per byte).
+//
+// Mechanism:
+//   SURVEY: TNN measures, per scale, the energy left if every block were
+//     flat at its mean — it looks at the image before organizing.
+//   VOCABULARY: shape atoms = exemplar patches (mean-subtracted) at
+//     scales {64,32,16,8,4}, selected by ONE farthest-point deliberation
+//     per scale over the union of candidate blocks. Atom 0 of every
+//     scale is the NULL shape ("flat at its mean"). Selection converges
+//     on marginal explained-energy tau_s = 9 * 3 * s^2 (per-value 9,
+//     the precedent of v2's never-triggered T_TEX=1728 on 8x8) — a
+//     precision parameter, never a motif-count cap.
+//   ASSIGNMENT (the single deliberation): nested block grids. Each
+//     region either TAKES its best same-scale atom (+ free per-region
+//     mean) or SPLITS into four children. The decision is gain-per-byte
+//     against the flat-mean baseline, exact integer cross-multiplication,
+//     ties -> TAKE (coarser wins). Floor at 4x4 (must take). Every
+//     decision is TNN's own organization of the knowledge — the scale
+//     map this produces is where TNN itself chose to look closely.
+//   RENDER: pixel = clamp(atom_shape + region_mean). Two white-box
+//     paths: A (ingest, per-pixel via region-id map) and B (emit,
+//     per-region stamping). They must agree byte-identically.
+//   RESIDUAL: the honest error channel (see common_nl.zag), excluded
+//     from understanding metrics, exactly as in the layered pipeline.
+//
+// Zero RNG. Deterministic: lowest-index tie-breaks everywhere, canonical
+// block order, explicit initialization.
+@import("./common_nl.zag")
+
+// scale table: si 0..4 -> 64,32,16,8,4
+fn s_of(si:i64) i64 {
+    if (si == 0) { return 64; }
+    if (si == 1) { return 32; }
+    if (si == 2) { return 16; }
+    if (si == 3) { return 8; }
+    return 4;
+}
+
+// convergence threshold per scale: 9 per value (3*s*s values)
+fn tau_of(si:i64) i64 {
+    let s:i64 = s_of(si);
+    return 9 * 3 * s * s;
+}
+
+// Mean-subtracted i16 patch of rect (x0,y0,bw,bh).
+// mean[0..2] out (i64); sub = bw*bh*3 i16 (caller-sized >= bw*bh*6 bytes);
+// e0[0] = SSD of the rect from its own mean (the flat-block energy).
+fn block_patch_sub(pix:[]u8, w:i64, x0:i64, y0:i64, bw:i64, bh:i64,
+    mean:[]i64, sub:[]u8, e0:[]i64) void {
+    let sr:i64 = 0; let sg:i64 = 0; let sb:i64 = 0;
+    let yy:i64 = 0;
+    while (yy < bh) {
+        let xx:i64 = 0;
+        while (xx < bw) {
+            let p:i64 = ((y0 + yy) * w + (x0 + xx)) * 3;
+            sr = sr + (pix[p] as i64);
+            sg = sg + (pix[p + 1] as i64);
+            sb = sb + (pix[p + 2] as i64);
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    let n:i64 = bw * bh;
+    mean[0] = sr / n; mean[1] = sg / n; mean[2] = sb / n;
+    let e:i64 = 0;
+    let yy2:i64 = 0;
+    while (yy2 < bh) {
+        let xx2:i64 = 0;
+        while (xx2 < bw) {
+            let p2:i64 = ((y0 + yy2) * w + (x0 + xx2)) * 3;
+            let q:i64 = (yy2 * bw + xx2) * 6;
+            let d0:i64 = (pix[p2] as i64) - mean[0];
+            let d1:i64 = (pix[p2 + 1] as i64) - mean[1];
+            let d2:i64 = (pix[p2 + 2] as i64) - mean[2];
+            w_i16le(sub, q, d0);
+            w_i16le(sub, q + 2, d1);
+            w_i16le(sub, q + 4, d2);
+            e = e + d0 * d0 + d1 * d1 + d2 * d2;
+            xx2 = xx2 + 1;
+        }
+        yy2 = yy2 + 1;
+    }
+    e0[0] = e;
+}
+
+// ---------------- SURVEY ----------------
+// TNN looks at the image before organizing: per scale, the total energy
+// that would remain if every block were flat at its own mean. out[si].
+// Also writes the whole-image energy vs its global mean into out[5].
+fn survey(pix:[]u8, w:i64, h:i64, out:[]i64) void {
+    let gsr:i64 = 0; let gsg:i64 = 0; let gsb:i64 = 0;
+    let npix:i64 = w * h;
+    let pi:i64 = 0;
+    while (pi < npix) {
+        gsr = gsr + (pix[pi * 3] as i64);
+        gsg = gsg + (pix[pi * 3 + 1] as i64);
+        gsb = gsb + (pix[pi * 3 + 2] as i64);
+        pi = pi + 1;
+    }
+    let gmr:i64 = gsr / npix; let gmg:i64 = gsg / npix; let gmb:i64 = gsb / npix;
+    let etot:i64 = 0;
+    pi = 0;
+    while (pi < npix) {
+        let dr:i64 = (pix[pi * 3] as i64) - gmr;
+        let dg:i64 = (pix[pi * 3 + 1] as i64) - gmg;
+        let db:i64 = (pix[pi * 3 + 2] as i64) - gmb;
+        etot = etot + dr * dr + dg * dg + db * db;
+        pi = pi + 1;
+    }
+    out[5] = etot;
+    let si:i64 = 0;
+    while (si < 5) {
+        let s:i64 = s_of(si);
+        let nc:i64 = (w + s - 1) / s;
+        let nr:i64 = (h + s - 1) / s;
+        let tot:i64 = 0;
+        let mean:[]i64 = nio_alloc(24) as []i64;
+        let e0a:[]i64 = nio_alloc(8) as []i64;
+        let sub:[]u8 = nio_alloc((s * s * 6) as i32);
+        let bi:i64 = 0;
+        while (bi < nc * nr) {
+            let bx:i64 = bi % nc;
+            let by:i64 = bi / nc;
+            let x0:i64 = bx * s;
+            let y0:i64 = by * s;
+            let bw:i64 = s;
+            if (x0 + bw > w) { bw = w - x0; }
+            let bh:i64 = s;
+            if (y0 + bh > h) { bh = h - y0; }
+            block_patch_sub(pix, w, x0, y0, bw, bh, mean, sub, e0a);
+            tot = tot + e0a[0];
+            bi = bi + 1;
+        }
+        out[si] = tot;
+        nio_free(mean);
+        nio_free(e0a);
+        nio_free(sub);
+        si = si + 1;
+    }
+}
+
+// ---------------- ONE farthest-point vocabulary per scale ----------------
+// bdet: nb*s*s*3 i16 values (mean-subtracted), block-major; bval[bi] =
+// valid value count; cand/ncand = full-block candidate indices.
+// atoms: cap*s*s*3*2 bytes out; aex[0] = -1 (NULL shape); agains[na] =
+// the min-distance that earned atom na its place (agains[0] = 0).
+// tau: stop when the best new atom is within tau of the set.
+// gains[0] = last adopted gain, gains[1] = first adopted gain.
+// Returns na (>= 1). cap is data-derived (<= candidate count).
+fn fp_atoms(bdet:[]u8, bval:[]i64, s:i64, nb:i64, cand:[]i64, ncand:i64,
+    atoms:[]u8, aex:[]i64, agains:[]i64, cap:i64, tau:i64, gains:[]i64) i64 {
+    let nv:i64 = s * s * 3;
+    let mbytes:i64 = nv * 2;
+    let zk:i64 = 0;
+    while (zk < nv) { w_i16le(atoms, zk * 2, 0); zk = zk + 1; }
+    aex[0] = -1;
+    agains[0] = 0;
+    let na:i64 = 1;
+    gains[0] = 0;
+    gains[1] = 0;
+    if (ncand == 0) { return 1; }
+    let energy:[]i64 = nio_alloc((ncand * 8) as i32) as []i64;
+    if (energy.len == 0) { return -1; }
+    let mind:[]i64 = nio_alloc((ncand * 8) as i32) as []i64;
+    if (mind.len == 0) { return -1; }
+    let ci:i64 = 0;
+    while (ci < ncand) {
+        let bi:i64 = cand[ci];
+        let e:i64 = 0;
+        let k:i64 = 0;
+        while (k < bval[bi]) {
+            let v:i64 = r_i16le(bdet, bi * mbytes + k * 2);
+            e = e + v * v;
+            k = k + 1;
+        }
+        energy[ci] = e;
+        mind[ci] = e;
+        ci = ci + 1;
+    }
+    let best:i64 = 0;
+    let bk:i64 = 1;
+    while (bk < ncand) {
+        if (energy[bk] > energy[best]) { best = bk; }
+        bk = bk + 1;
+    }
+    gains[1] = energy[best];
+    // sel_gain = the min-distance that selected `best` (its marginal gain).
+    // For the first atom this is its energy = distance from the NULL shape.
+    let sel_gain:i64 = energy[best];
+    let go:i64 = 1;
+    while (go == 1) {
+        let exbi:i64 = cand[best];
+        aex[na] = exbi;
+        agains[na] = sel_gain;
+        let k2:i64 = 0;
+        while (k2 < nv) {
+            w_i16le(atoms, na * mbytes + k2 * 2, r_i16le(bdet, exbi * mbytes + k2 * 2));
+            k2 = k2 + 1;
+        }
+        na = na + 1;
+        let nbest:i64 = 0;
+        let nbestd:i64 = -1;
+        let ck:i64 = 0;
+        while (ck < ncand) {
+            let dd:i64 = 0;
+            let k3:i64 = 0;
+            let cb:i64 = cand[ck] * mbytes;
+            let eb:i64 = exbi * mbytes;
+            let nvv:i64 = bval[cand[ck]];
+            while (k3 < nvv) {
+                let dv:i64 = r_i16le(bdet, cb + k3 * 2) - r_i16le(bdet, eb + k3 * 2);
+                dd = dd + dv * dv;
+                k3 = k3 + 1;
+            }
+            if (dd < mind[ck]) { mind[ck] = dd; }
+            if (mind[ck] > nbestd) { nbestd = mind[ck]; nbest = ck; }
+            ck = ck + 1;
+        }
+        gains[0] = nbestd;
+        sel_gain = nbestd;
+        if (na >= cap) { go = 0; }
+        if (nbestd < tau) { go = 0; }
+        best = nbest;
+    }
+    nio_free(energy);
+    nio_free(mind);
+    return na;
+}
+
+// ---------------- THE single deliberation: take or split (ADAPTIVE) ----------------
+// (image_nolayers_adaptive; Micah order 2026-09-26 ~09:54 PDT: kill the rigid grid.)
+//
+// Regions are RECTANGLES (x0,y0,bw,bh) — there is no grid at any level; the
+// entry region is the whole image. A region either TAKES the vocabulary
+// (tiled at fit scale, one atom + free mean per tile) or SPLITS at a
+// content-chosen binary cut. The cut position is deliberated by the CART
+// rule: among all valid pixel cut positions, the one minimizing
+// E_flat(child1)+E_flat(child2) — i.e. maximizing the energy explained by
+// two means vs one, in the same flat-baseline currency this fork uses for
+// take/split and vocabulary decisions. No thresholds, no tuned constants.
+// TAKE vs SPLIT: gain-per-byte, exact integer cross-multiplication,
+// ties -> TAKE. Floor: a region with no valid cut, or no energy-reducing
+// cut, MUST take (a split two means cannot explain better than one is
+// pruned — this is also what keeps flat regions from recursing to the
+// floor). Invariant: min(bw,bh) >= 4 (cuts keep >= 4 px on the cut axis;
+// the other axis is the parent's, already >= 4).
+// Appends final TILE records (x,y,s,atom,r,g,b) to rx..rb, nreg[0].
+// out[0] = optimal error, out[1] = optimal cost (bytes).
+// led/lo: deliberation trace ledger (every cut position recorded).
+// ntake[si] counts takes by fit-scale index (0..4 = 64/32/16/8/4);
+// nsplit[0] counts splits.
+//
+// KNOWN LIMITATION (recorded, not hidden): the CART position rule sees
+// MEAN boundaries, not texture-only boundaries (same mean, different
+// pattern — e.g. two textures side by side). Such a region takes at fit
+// scale with per-tile atoms (a coarser fallback), and the residual — the
+// honest error channel — catches what atoms miss. The error-map analysis
+// in VERDICT.md quantifies this.
+
+// fit scale for a rectangle: largest atom scale <= min(bw,bh)
+fn fit_scale(bw:i64, bh:i64) i64 {
+    let m:i64 = bw;
+    if (bh < m) { m = bh; }
+    if (m >= 64) { return 64; }
+    if (m >= 32) { return 32; }
+    if (m >= 16) { return 16; }
+    if (m >= 8) { return 8; }
+    return 4;
+}
+fn fit_si(s:i64) i64 {
+    if (s == 64) { return 0; }
+    if (s == 32) { return 1; }
+    if (s == 16) { return 2; }
+    if (s == 8) { return 3; }
+    return 4;
+}
+
+// E0 of the segment [a,b): per-channel (sum, sum2) prefix sums in
+// psx/psx2 (each (len+1)*3 i64); n = segment pixel count.
+// Integer form identical to block_patch_sub: mean = sx/n (int div),
+// e = sum2 - 2*mean*sum + n*mean*mean.
+fn seg_e0(psx:[]i64, psx2:[]i64, a:i64, b:i64, n:i64) i64 {
+    let e:i64 = 0;
+    let ch:i64 = 0;
+    while (ch < 3) {
+        let sx:i64 = psx[b * 3 + ch] - psx[a * 3 + ch];
+        let sx2:i64 = psx2[b * 3 + ch] - psx2[a * 3 + ch];
+        let mean:i64 = sx / n;
+        e = e + sx2 - 2 * mean * sx + n * mean * mean;
+        ch = ch + 1;
+    }
+    return e;
+}
+
+// build per-column (sum,sum2) prefix sums over the rect; out via psx/psx2
+// ((bw+1)*3 i64 each, caller-allocated)
+fn col_prefix(pix:[]u8, w:i64, x0:i64, y0:i64, bw:i64, bh:i64,
+    psx:[]i64, psx2:[]i64) void {
+    // prefix-sum base: uninitialized heap is NOT reliably zeroed
+    psx[0] = 0; psx[1] = 0; psx[2] = 0;
+    psx2[0] = 0; psx2[1] = 0; psx2[2] = 0;
+    let c:i64 = 0;
+    while (c < bw) {
+        let s0:i64 = 0; let s1:i64 = 0; let s2:i64 = 0;
+        let q0:i64 = 0; let q1:i64 = 0; let q2:i64 = 0;
+        let yy:i64 = 0;
+        while (yy < bh) {
+            let p:i64 = ((y0 + yy) * w + (x0 + c)) * 3;
+            let v0:i64 = pix[p] as i64;
+            let v1:i64 = pix[p + 1] as i64;
+            let v2:i64 = pix[p + 2] as i64;
+            s0 = s0 + v0; s1 = s1 + v1; s2 = s2 + v2;
+            q0 = q0 + v0 * v0; q1 = q1 + v1 * v1; q2 = q2 + v2 * v2;
+            yy = yy + 1;
+        }
+        psx[(c + 1) * 3] = psx[c * 3] + s0;
+        psx[(c + 1) * 3 + 1] = psx[c * 3 + 1] + s1;
+        psx[(c + 1) * 3 + 2] = psx[c * 3 + 2] + s2;
+        psx2[(c + 1) * 3] = psx2[c * 3] + q0;
+        psx2[(c + 1) * 3 + 1] = psx2[c * 3 + 1] + q1;
+        psx2[(c + 1) * 3 + 2] = psx2[c * 3 + 2] + q2;
+        c = c + 1;
+    }
+}
+
+// build per-row (sum,sum2) prefix sums over the rect; out via psx/psx2
+// ((bh+1)*3 i64 each, caller-allocated)
+fn row_prefix(pix:[]u8, w:i64, x0:i64, y0:i64, bw:i64, bh:i64,
+    psx:[]i64, psx2:[]i64) void {
+    // prefix-sum base: uninitialized heap is NOT reliably zeroed
+    psx[0] = 0; psx[1] = 0; psx[2] = 0;
+    psx2[0] = 0; psx2[1] = 0; psx2[2] = 0;
+    let r:i64 = 0;
+    while (r < bh) {
+        let s0:i64 = 0; let s1:i64 = 0; let s2:i64 = 0;
+        let q0:i64 = 0; let q1:i64 = 0; let q2:i64 = 0;
+        let xx:i64 = 0;
+        while (xx < bw) {
+            let p:i64 = ((y0 + r) * w + (x0 + xx)) * 3;
+            let v0:i64 = pix[p] as i64;
+            let v1:i64 = pix[p + 1] as i64;
+            let v2:i64 = pix[p + 2] as i64;
+            s0 = s0 + v0; s1 = s1 + v1; s2 = s2 + v2;
+            q0 = q0 + v0 * v0; q1 = q1 + v1 * v1; q2 = q2 + v2 * v2;
+            xx = xx + 1;
+        }
+        psx[(r + 1) * 3] = psx[r * 3] + s0;
+        psx[(r + 1) * 3 + 1] = psx[r * 3 + 1] + s1;
+        psx[(r + 1) * 3 + 2] = psx[r * 3 + 2] + s2;
+        psx2[(r + 1) * 3] = psx2[r * 3] + q0;
+        psx2[(r + 1) * 3 + 1] = psx2[r * 3 + 1] + q1;
+        psx2[(r + 1) * 3 + 2] = psx2[r * 3 + 2] + q2;
+        r = r + 1;
+    }
+}
+
+// CART split position for rect (x0,y0,bw,bh).
+// out[0] = axis (0 vertical, 1 horizontal, -1 = no energy-reducing cut);
+// out[1] = cut position (x-offset for vertical, y-offset for horizontal);
+// out[2] = E0(rect); out[3] = E0(c1)+E0(c2) at the chosen cut.
+// Candidate cuts: every pixel position with >= 4 px on each side (the
+// vocabulary floor). Tie-break (canonical): strictly-less-than scan,
+// vertical axis first, lowest position first.
+fn cart_cut(pix:[]u8, w:i64, x0:i64, y0:i64, bw:i64, bh:i64, out:[]i64) void {
+    out[0] = -1;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    let psx:[]i64 = nio_alloc(((bw + 1) * 24) as i32) as []i64;
+    let psx2:[]i64 = nio_alloc(((bw + 1) * 24) as i32) as []i64;
+    if (psx.len == 0) { return; }
+    if (psx2.len == 0) { nio_free(psx); return; }
+    col_prefix(pix, w, x0, y0, bw, bh, psx, psx2);
+    let e0:i64 = seg_e0(psx, psx2, 0, bw, bw * bh);
+    out[2] = e0;
+    let best_e:i64 = e0;
+    let best_ax:i64 = -1;
+    let best_p:i64 = 0;
+    if (bw >= 8) {
+        let vc:i64 = 4;
+        while (vc <= bw - 4) {
+            let et:i64 = seg_e0(psx, psx2, 0, vc, vc * bh)
+                + seg_e0(psx, psx2, vc, bw, (bw - vc) * bh);
+            if (et < best_e) { best_e = et; best_ax = 0; best_p = vc; }
+            vc = vc + 1;
+        }
+    }
+    nio_free(psx);
+    nio_free(psx2);
+    if (bh >= 8) {
+        let qx:[]i64 = nio_alloc(((bh + 1) * 24) as i32) as []i64;
+        let qx2:[]i64 = nio_alloc(((bh + 1) * 24) as i32) as []i64;
+        if (qx.len == 0) {
+            out[0] = best_ax; out[1] = best_p; out[3] = best_e;
+            return;
+        }
+        if (qx2.len == 0) {
+            nio_free(qx);
+            out[0] = best_ax; out[1] = best_p; out[3] = best_e;
+            return;
+        }
+        row_prefix(pix, w, x0, y0, bw, bh, qx, qx2);
+        let hr:i64 = 4;
+        while (hr <= bh - 4) {
+            let et2:i64 = seg_e0(qx, qx2, 0, hr, hr * bw)
+                + seg_e0(qx, qx2, hr, bh, (bh - hr) * bw);
+            if (et2 < best_e) { best_e = et2; best_ax = 1; best_p = hr; }
+            hr = hr + 1;
+        }
+        nio_free(qx);
+        nio_free(qx2);
+    }
+    out[0] = best_ax;
+    out[1] = best_p;
+    out[3] = best_e;
+    return;
+}
+
+// trace ledger helpers (moved here from the driver so the deliberation
+// itself can record every cut position)
+fn tab_puts(b:[]u8, o:i64, s:[]u8) i64 {
+    let i:i64 = 0;
+    while (i < s.len) { b[o + i] = s[i]; i = i + 1; }
+    return o + s.len;
+}
+fn tab_puti(b:[]u8, o:i64, v:i64) i64 {
+    if (v < 0) { b[o] = 45; o = o + 1; v = 0 - v; }
+    let t:[]u8 = _zag_i64_to_str(v);
+    let i:i64 = 0;
+    while (i < t.len) { b[o + i] = t[i]; i = i + 1; }
+    return o + t.len;
+}
+
+// write the ntm tile records for rect (x0,y0,bw,bh) at scale s from the
+// evaluated per-tile atoms/means; nreg[0] advanced.
+fn materialize_tiles(x0:i64, y0:i64, bw:i64, bh:i64, s:i64,
+    t_at:[]i64, t_mr:[]i64, t_mg:[]i64, t_mb:[]i64, ntm:i64,
+    rx:[]i64, ry:[]i64, rs:[]i64, rat:[]i64, rr:[]i64, rg:[]i64, rb:[]i64,
+    nreg:[]i64) void {
+    let ntx:i64 = (bw + s - 1) / s;
+    let ti:i64 = 0;
+    while (ti < ntm) {
+        let tx:i64 = x0 + (ti % ntx) * s;
+        let ty:i64 = y0 + (ti / ntx) * s;
+        let ri:i64 = nreg[0];
+        rx[ri] = tx; ry[ri] = ty; rs[ri] = s; rat[ri] = t_at[ti];
+        rr[ri] = t_mr[ti]; rg[ri] = t_mg[ti]; rb[ri] = t_mb[ti];
+        nreg[0] = ri + 1;
+        ti = ti + 1;
+    }
+    return;
+}
+
+fn deliberate_rect(x0:i64, y0:i64, bw:i64, bh:i64,
+    pix:[]u8, w:i64, h:i64,
+    a0:[]u8, na0:i64, a1:[]u8, na1:i64, a2:[]u8, na2:i64,
+    a3:[]u8, na3:i64, a4:[]u8, na4:i64,
+    rx:[]i64, ry:[]i64, rs:[]i64, rat:[]i64, rr:[]i64, rg:[]i64, rb:[]i64,
+    nreg:[]i64, ntake:[]i64, nsplit:[]i64,
+    led:[]u8, lo:[]i64, out:[]i64) void {
+    let s:i64 = fit_scale(bw, bh);
+    let fsi:i64 = fit_si(s);
+    let atoms:[]u8 = a0;
+    let na:i64 = na0;
+    if (fsi == 1) { atoms = a1; na = na1; }
+    if (fsi == 2) { atoms = a2; na = na2; }
+    if (fsi == 3) { atoms = a3; na = na3; }
+    if (fsi == 4) { atoms = a4; na = na4; }
+    let mb:i64 = s * s * 3 * 2;
+    // CART cut first: every split position is content-determined.
+    let cut:[]i64 = nio_alloc(32) as []i64;
+    cart_cut(pix, w, x0, y0, bw, bh, cut);
+    let ax:i64 = cut[0];
+    let cpos:i64 = cut[1];
+    let e0:i64 = cut[2];
+    let ecut:i64 = cut[3];
+    nio_free(cut);
+    let lp:i64 = lo[0];
+    lp = tab_puts(led, lp, "RECT x0=");
+    lp = tab_puti(led, lp, x0);
+    lp = tab_puts(led, lp, " y0=");
+    lp = tab_puti(led, lp, y0);
+    lp = tab_puts(led, lp, " bw=");
+    lp = tab_puti(led, lp, bw);
+    lp = tab_puts(led, lp, " bh=");
+    lp = tab_puti(led, lp, bh);
+    lp = tab_puts(led, lp, " cut=");
+    if (ax == 0) {
+        lp = tab_puts(led, lp, "V");
+        lp = tab_puti(led, lp, cpos);
+    }
+    if (ax == 1) {
+        lp = tab_puts(led, lp, "H");
+        lp = tab_puti(led, lp, cpos);
+    }
+    if (ax == -1) { lp = tab_puts(led, lp, "none"); }
+    lp = tab_puts(led, lp, " E0=");
+    lp = tab_puti(led, lp, e0);
+    lp = tab_puts(led, lp, " Ecut=");
+    lp = tab_puti(led, lp, ecut);
+    if (bw > s or bh > s) {
+        // STRUCTURAL (DESIGN.md amendment 2026-09-26): a take matches ONE
+        // vocabulary atom. A rect bigger than its fit-scale atom has
+        // unfinished structure and MUST subdivide via the CART rule;
+        // otherwise the tiled take aggregates N tiles into one greedy
+        // gain-per-byte decision and collapses to coarse takes.
+        if (ax == -1) {
+            // floor: no valid / no energy-reducing cut -> tiled take.
+    let ntx:i64 = (bw + s - 1) / s;
+    let nty:i64 = (bh + s - 1) / s;
+    let ntm:i64 = ntx * nty;
+    let t_at:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mr:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mg:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mb:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    if (t_at.len == 0) { return; }
+    if (t_mb.len == 0) {
+        nio_free(t_at); nio_free(t_mr); nio_free(t_mg);
+        return;
+    }
+    let ea:i64 = 0;
+    let mean:[]i64 = nio_alloc(24) as []i64;
+    let e0a:[]i64 = nio_alloc(8) as []i64;
+    let sub:[]u8 = nio_alloc((s * s * 6) as i32);
+    let ti:i64 = 0;
+    while (ti < ntm) {
+        let tx:i64 = x0 + (ti % ntx) * s;
+        let ty:i64 = y0 + (ti / ntx) * s;
+        let tbw:i64 = s;
+        if (tx + tbw > x0 + bw) { tbw = x0 + bw - tx; }
+        let tbh:i64 = s;
+        if (ty + tbh > y0 + bh) { tbh = y0 + bh - ty; }
+        block_patch_sub(pix, w, tx, ty, tbw, tbh, mean, sub, e0a);
+        let ed:i64 = e0a[0];
+        let bata:i64 = 0;
+        let a:i64 = 1;
+        while (a < na) {
+            let abase:i64 = a * mb;
+            let dd:i64 = 0;
+            let iy:i64 = 0;
+            while (iy < tbh) {
+                let ix:i64 = 0;
+                while (ix < tbw) {
+                    let q:i64 = (iy * tbw + ix) * 6;
+                    let aq:i64 = abase + (iy * s + ix) * 6;
+                    let dv0:i64 = r_i16le(sub, q) - r_i16le(atoms, aq);
+                    let dv1:i64 = r_i16le(sub, q + 2) - r_i16le(atoms, aq + 2);
+                    let dv2:i64 = r_i16le(sub, q + 4) - r_i16le(atoms, aq + 4);
+                    dd = dd + dv0 * dv0 + dv1 * dv1 + dv2 * dv2;
+                    ix = ix + 1;
+                }
+                iy = iy + 1;
+            }
+            if (dd < ed) { ed = dd; bata = a; }
+            a = a + 1;
+        }
+        t_at[ti] = bata;
+        t_mr[ti] = mean[0];
+        t_mg[ti] = mean[1];
+        t_mb[ti] = mean[2];
+        ea = ea + ed;
+        ti = ti + 1;
+    }
+    nio_free(mean);
+    nio_free(e0a);
+    nio_free(sub);
+    let ca:i64 = ntm * 10;
+            materialize_tiles(x0, y0, bw, bh, s,
+                t_at, t_mr, t_mg, t_mb, ntm,
+                rx, ry, rs, rat, rr, rg, rb, nreg);
+            ntake[fsi] = ntake[fsi] + 1;
+            out[0] = ea;
+            out[1] = ca;
+            lp = tab_puts(led, lp, " => TAKE(nocut)
+");
+            lo[0] = lp;
+            nio_free(t_at); nio_free(t_mr); nio_free(t_mg); nio_free(t_mb);
+            return;
+        }
+        lp = tab_puts(led, lp, " => SPLIT(forced)\n");
+        lo[0] = lp;
+        nsplit[fsi] = nsplit[fsi] + 1;
+        let cout:[]i64 = nio_alloc(16) as []i64;
+        if (ax == 0) {
+            deliberate_rect(x0, y0, cpos, bh,
+                pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout);
+            let e1:i64 = cout[0];
+            let c1:i64 = cout[1];
+            deliberate_rect(x0 + cpos, y0, bw - cpos, bh,
+                pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout);
+            let e2:i64 = cout[0];
+            let c2:i64 = cout[1];
+            out[0] = e1 + e2;
+            out[1] = c1 + c2;
+        } else {
+            deliberate_rect(x0, y0, bw, cpos,
+                pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout);
+            let e1:i64 = cout[0];
+            let c1:i64 = cout[1];
+            deliberate_rect(x0, y0 + cpos, bw, bh - cpos,
+                pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout);
+            let e2:i64 = cout[0];
+            let c2:i64 = cout[1];
+            out[0] = e1 + e2;
+            out[1] = c1 + c2;
+        }
+        nio_free(cout);
+        return;
+    }
+    // Atom-sized rect (bw<=s and bh<=s): inherited take-vs-split by exact
+    // gain-per-byte, the same currency the rigid fork uses per block.
+    let ntx:i64 = (bw + s - 1) / s;
+    let nty:i64 = (bh + s - 1) / s;
+    let ntm:i64 = ntx * nty;
+    let t_at:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mr:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mg:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    let t_mb:[]i64 = nio_alloc((ntm * 8) as i32) as []i64;
+    if (t_at.len == 0) { return; }
+    if (t_mb.len == 0) {
+        nio_free(t_at); nio_free(t_mr); nio_free(t_mg);
+        return;
+    }
+    let ea:i64 = 0;
+    let mean:[]i64 = nio_alloc(24) as []i64;
+    let e0a:[]i64 = nio_alloc(8) as []i64;
+    let sub:[]u8 = nio_alloc((s * s * 6) as i32);
+    let ti:i64 = 0;
+    while (ti < ntm) {
+        let tx:i64 = x0 + (ti % ntx) * s;
+        let ty:i64 = y0 + (ti / ntx) * s;
+        let tbw:i64 = s;
+        if (tx + tbw > x0 + bw) { tbw = x0 + bw - tx; }
+        let tbh:i64 = s;
+        if (ty + tbh > y0 + bh) { tbh = y0 + bh - ty; }
+        block_patch_sub(pix, w, tx, ty, tbw, tbh, mean, sub, e0a);
+        let ed:i64 = e0a[0];
+        let bata:i64 = 0;
+        let a:i64 = 1;
+        while (a < na) {
+            let abase:i64 = a * mb;
+            let dd:i64 = 0;
+            let iy:i64 = 0;
+            while (iy < tbh) {
+                let ix:i64 = 0;
+                while (ix < tbw) {
+                    let q:i64 = (iy * tbw + ix) * 6;
+                    let aq:i64 = abase + (iy * s + ix) * 6;
+                    let dv0:i64 = r_i16le(sub, q) - r_i16le(atoms, aq);
+                    let dv1:i64 = r_i16le(sub, q + 2) - r_i16le(atoms, aq + 2);
+                    let dv2:i64 = r_i16le(sub, q + 4) - r_i16le(atoms, aq + 4);
+                    dd = dd + dv0 * dv0 + dv1 * dv1 + dv2 * dv2;
+                    ix = ix + 1;
+                }
+                iy = iy + 1;
+            }
+            if (dd < ed) { ed = dd; bata = a; }
+            a = a + 1;
+        }
+        t_at[ti] = bata;
+        t_mr[ti] = mean[0];
+        t_mg[ti] = mean[1];
+        t_mb[ti] = mean[2];
+        ea = ea + ed;
+        ti = ti + 1;
+    }
+    nio_free(mean);
+    nio_free(e0a);
+    nio_free(sub);
+    let ca:i64 = ntm * 10;
+    lp = tab_puts(led, lp, " take(ea=");
+    lp = tab_puti(led, lp, ea);
+    lp = tab_puts(led, lp, ",ca=");
+    lp = tab_puti(led, lp, ca);
+    lp = tab_puts(led, lp, ")");
+    if (ax != -1) {
+        lp = tab_puts(led, lp, "\n");
+        lo[0] = lp;
+    }
+    if (ax == -1) {
+        materialize_tiles(x0, y0, bw, bh, s,
+            t_at, t_mr, t_mg, t_mb, ntm,
+            rx, ry, rs, rat, rr, rg, rb, nreg);
+        ntake[fsi] = ntake[fsi] + 1;
+        out[0] = ea;
+        out[1] = ca;
+        lp = tab_puts(led, lp, " => TAKE(nocut)\n");
+        lo[0] = lp;
+        nio_free(t_at); nio_free(t_mr); nio_free(t_mg); nio_free(t_mb);
+        return;
+    }
+    let nreg0:i64 = nreg[0];
+    let cout2:[]i64 = nio_alloc(16) as []i64;
+    if (ax == 0) {
+        deliberate_rect(x0, y0, cpos, bh,
+            pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout2);
+        let e1:i64 = cout2[0];
+        let c1:i64 = cout2[1];
+        deliberate_rect(x0 + cpos, y0, bw - cpos, bh,
+            pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout2);
+        let e2:i64 = cout2[0];
+        let c2:i64 = cout2[1];
+        let es:i64 = e1 + e2;
+        let cs:i64 = c1 + c2;
+        let gt:i64 = (e0 - ea) * cs;
+        let gs:i64 = (e0 - es) * ca;
+        lp = tab_puts(led, lp, "DECIDE x0=");
+        lp = tab_puti(led, lp, x0);
+        lp = tab_puts(led, lp, " y0=");
+        lp = tab_puti(led, lp, y0);
+        lp = tab_puts(led, lp, " bw=");
+        lp = tab_puti(led, lp, bw);
+        lp = tab_puts(led, lp, " bh=");
+        lp = tab_puti(led, lp, bh);
+        lp = tab_puts(led, lp, " split(es=");
+        lp = tab_puti(led, lp, es);
+        lp = tab_puts(led, lp, ",cs=");
+        lp = tab_puti(led, lp, cs);
+        lp = tab_puts(led, lp, ")");
+        if (gt >= gs) {
+            nreg[0] = nreg0;
+            materialize_tiles(x0, y0, bw, bh, s,
+                t_at, t_mr, t_mg, t_mb, ntm,
+                rx, ry, rs, rat, rr, rg, rb, nreg);
+            ntake[fsi] = ntake[fsi] + 1;
+            out[0] = ea;
+            out[1] = ca;
+            lp = tab_puts(led, lp, " => TAKE\n");
+            lo[0] = lp;
+        } else {
+            nsplit[fsi] = nsplit[fsi] + 1;
+            out[0] = es;
+            out[1] = cs;
+            lp = tab_puts(led, lp, " => SPLIT\n");
+            lo[0] = lp;
+        }
+    } else {
+        deliberate_rect(x0, y0, bw, cpos,
+            pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout2);
+        let e1:i64 = cout2[0];
+        let c1:i64 = cout2[1];
+        deliberate_rect(x0, y0 + cpos, bw, bh - cpos,
+            pix, w, h, a0, na0, a1, na1, a2, na2, a3, na3, a4, na4, rx, ry, rs, rat, rr, rg, rb, nreg, ntake, nsplit, led, lo, cout2);
+        let e2:i64 = cout2[0];
+        let c2:i64 = cout2[1];
+        let es:i64 = e1 + e2;
+        let cs:i64 = c1 + c2;
+        let gt:i64 = (e0 - ea) * cs;
+        let gs:i64 = (e0 - es) * ca;
+        lp = tab_puts(led, lp, "DECIDE x0=");
+        lp = tab_puti(led, lp, x0);
+        lp = tab_puts(led, lp, " y0=");
+        lp = tab_puti(led, lp, y0);
+        lp = tab_puts(led, lp, " bw=");
+        lp = tab_puti(led, lp, bw);
+        lp = tab_puts(led, lp, " bh=");
+        lp = tab_puti(led, lp, bh);
+        lp = tab_puts(led, lp, " split(es=");
+        lp = tab_puti(led, lp, es);
+        lp = tab_puts(led, lp, ",cs=");
+        lp = tab_puti(led, lp, cs);
+        lp = tab_puts(led, lp, ")");
+        if (gt >= gs) {
+            nreg[0] = nreg0;
+            materialize_tiles(x0, y0, bw, bh, s,
+                t_at, t_mr, t_mg, t_mb, ntm,
+                rx, ry, rs, rat, rr, rg, rb, nreg);
+            ntake[fsi] = ntake[fsi] + 1;
+            out[0] = ea;
+            out[1] = ca;
+            lp = tab_puts(led, lp, " => TAKE\n");
+            lo[0] = lp;
+        } else {
+            nsplit[fsi] = nsplit[fsi] + 1;
+            out[0] = es;
+            out[1] = cs;
+            lp = tab_puts(led, lp, " => SPLIT\n");
+            lo[0] = lp;
+        }
+    }
+    nio_free(cout2);
+    nio_free(t_at); nio_free(t_mr); nio_free(t_mg); nio_free(t_mb);
+}
+
+fn nl_eval_inplace(fb:[]u8, w:i64, h:i64, rid:[]i64,
+    a0:[]u8, a1:[]u8, a2:[]u8, a3:[]u8, a4:[]u8,
+    rx:[]i64, ry:[]i64, rs:[]i64, rat:[]i64, rr:[]i64, rg:[]i64, rb:[]i64,
+    nreg:i64) void {
+    let y:i64 = 0;
+    while (y < h) {
+        let x:i64 = 0;
+        while (x < w) {
+            let ri:i64 = rid[y * w + x];
+            let s:i64 = rs[ri];
+            let at:i64 = rat[ri];
+            let atoms:[]u8 = a0;
+            if (s == 32) { atoms = a1; }
+            if (s == 16) { atoms = a2; }
+            if (s == 8) { atoms = a3; }
+            if (s == 4) { atoms = a4; }
+            let mb:i64 = s * s * 3 * 2;
+            let lx:i64 = x - rx[ri];
+            let ly:i64 = y - ry[ri];
+            let aq:i64 = at * mb + (ly * s + lx) * 6;
+            let p:i64 = (y * w + x) * 3;
+            fb[p] = clamp8(rr[ri] + r_i16le(atoms, aq)) as u8;
+            fb[p + 1] = clamp8(rg[ri] + r_i16le(atoms, aq + 2)) as u8;
+            fb[p + 2] = clamp8(rb[ri] + r_i16le(atoms, aq + 4)) as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// ---------------- path B (emit): per-region stamping ----------------
+fn nl_stamp_regions(fb:[]u8, w:i64, h:i64,
+    a0:[]u8, a1:[]u8, a2:[]u8, a3:[]u8, a4:[]u8,
+    rx:[]i64, ry:[]i64, rs:[]i64, rat:[]i64, rr:[]i64, rg:[]i64, rb:[]i64,
+    nreg:i64) void {
+    let ri:i64 = 0;
+    while (ri < nreg) {
+        let x0:i64 = rx[ri];
+        let y0:i64 = ry[ri];
+        let s:i64 = rs[ri];
+        let at:i64 = rat[ri];
+        let atoms:[]u8 = a0;
+        if (s == 32) { atoms = a1; }
+        if (s == 16) { atoms = a2; }
+        if (s == 8) { atoms = a3; }
+        if (s == 4) { atoms = a4; }
+        let mb:i64 = s * s * 3 * 2;
+        let abase:i64 = at * mb;
+        let bw:i64 = s;
+        if (x0 + bw > w) { bw = w - x0; }
+        let bh:i64 = s;
+        if (y0 + bh > h) { bh = h - y0; }
+        let iy:i64 = 0;
+        while (iy < bh) {
+            let ix:i64 = 0;
+            while (ix < bw) {
+                let aq:i64 = abase + (iy * s + ix) * 6;
+                let p:i64 = ((y0 + iy) * w + (x0 + ix)) * 3;
+                fb[p] = clamp8(rr[ri] + r_i16le(atoms, aq)) as u8;
+                fb[p + 1] = clamp8(rg[ri] + r_i16le(atoms, aq + 2)) as u8;
+                fb[p + 2] = clamp8(rb[ri] + r_i16le(atoms, aq + 4)) as u8;
+                ix = ix + 1;
+            }
+            iy = iy + 1;
+        }
+        ri = ri + 1;
+    }
+}
+
+// ---------------- canonical no-layers knowledge-map writer ----------------
+// Format "TNNKNLM1":
+//   magic[8]="TNNKNLM1" u64 w u64 h
+//   u64 nscales(=5); per scale: u64 B; u64 na; na*(B*B*3 x i16); na*u64 exemplar
+//   u64 nreg; nreg * (u16 x, u16 y, u8 s, u16 atom, u8 r, u8 g, u8 b) = 10 bytes
+//   u64 nr; nr * (u64 pos + 3 x i16 dr,dg,db)
+fn kmapnl_write(root:i64, name:[]u8, w:i64, h:i64,
+    a0:[]u8, na0:i64, ex0:[]i64,
+    a1:[]u8, na1:i64, ex1:[]i64,
+    a2:[]u8, na2:i64, ex2:[]i64,
+    a3:[]u8, na3:i64, ex3:[]i64,
+    a4:[]u8, na4:i64, ex4:[]i64,
+    nreg:i64, rx:[]i64, ry:[]i64, rs:[]i64, rat:[]i64,
+    rr:[]i64, rg:[]i64, rb:[]i64,
+    nr:i64, rpos:[]i64, rdelta:[]u8) i64 {
+    let n0:i64 = 64 * 64 * 3; let n1:i64 = 32 * 32 * 3;
+    let n2:i64 = 16 * 16 * 3; let n3:i64 = 8 * 8 * 3; let n4:i64 = 4 * 4 * 3;
+    let total:i64 = 8 + 8 + 8 + 8
+        + 8 + 8 + na0 * (n0 * 2 + 8)
+        + 8 + 8 + na1 * (n1 * 2 + 8)
+        + 8 + 8 + na2 * (n2 * 2 + 8)
+        + 8 + 8 + na3 * (n3 * 2 + 8)
+        + 8 + 8 + na4 * (n4 * 2 + 8)
+        + 8 + nreg * 10
+        + 8 + nr * (8 + 6);
+    let buf:[]u8 = nio_alloc(total as i32);
+    if (buf.len == 0) { return -11; }
+    buf[0] = 84; buf[1] = 78; buf[2] = 78; buf[3] = 75;
+    buf[4] = 78; buf[5] = 76; buf[6] = 77; buf[7] = 49;
+    let o:i64 = 8;
+    w_u64le(buf, o, w); o = o + 8;
+    w_u64le(buf, o, h); o = o + 8;
+    w_u64le(buf, o, 5); o = o + 8;
+    w_u64le(buf, o, 64); o = o + 8;
+    w_u64le(buf, o, na0); o = o + 8;
+    let i:i64 = 0;
+    while (i < na0) {
+        let j:i64 = 0;
+        while (j < n0) {
+            w_i16le(buf, o, r_i16le(a0, i * n0 * 2 + j * 2));
+            o = o + 2; j = j + 1;
+        }
+        w_u64le(buf, o, ex0[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, 32); o = o + 8;
+    w_u64le(buf, o, na1); o = o + 8;
+    i = 0;
+    while (i < na1) {
+        let j2:i64 = 0;
+        while (j2 < n1) {
+            w_i16le(buf, o, r_i16le(a1, i * n1 * 2 + j2 * 2));
+            o = o + 2; j2 = j2 + 1;
+        }
+        w_u64le(buf, o, ex1[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, 16); o = o + 8;
+    w_u64le(buf, o, na2); o = o + 8;
+    i = 0;
+    while (i < na2) {
+        let j3:i64 = 0;
+        while (j3 < n2) {
+            w_i16le(buf, o, r_i16le(a2, i * n2 * 2 + j3 * 2));
+            o = o + 2; j3 = j3 + 1;
+        }
+        w_u64le(buf, o, ex2[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, 8); o = o + 8;
+    w_u64le(buf, o, na3); o = o + 8;
+    i = 0;
+    while (i < na3) {
+        let j4:i64 = 0;
+        while (j4 < n3) {
+            w_i16le(buf, o, r_i16le(a3, i * n3 * 2 + j4 * 2));
+            o = o + 2; j4 = j4 + 1;
+        }
+        w_u64le(buf, o, ex3[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, 4); o = o + 8;
+    w_u64le(buf, o, na4); o = o + 8;
+    i = 0;
+    while (i < na4) {
+        let j5:i64 = 0;
+        while (j5 < n4) {
+            w_i16le(buf, o, r_i16le(a4, i * n4 * 2 + j5 * 2));
+            o = o + 2; j5 = j5 + 1;
+        }
+        w_u64le(buf, o, ex4[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, nreg); o = o + 8;
+    i = 0;
+    while (i < nreg) {
+        w_u16le(buf, o, rx[i]); o = o + 2;
+        w_u16le(buf, o, ry[i]); o = o + 2;
+        buf[o] = rs[i] as u8; o = o + 1;
+        w_u16le(buf, o, rat[i]); o = o + 2;
+        buf[o] = rr[i] as u8; o = o + 1;
+        buf[o] = rg[i] as u8; o = o + 1;
+        buf[o] = rb[i] as u8; o = o + 1;
+        i = i + 1;
+    }
+    w_u64le(buf, o, nr); o = o + 8;
+    i = 0;
+    while (i < nr) {
+        w_u64le(buf, o, rpos[i]); o = o + 8;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6)); o = o + 2;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6 + 2)); o = o + 2;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6 + 4)); o = o + 2;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(root, name, buf);
+    nio_free(buf);
+    return rc;
+}
