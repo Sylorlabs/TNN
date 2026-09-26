@@ -72,6 +72,10 @@
 //
 // Consequence: recycle→delete can never be cheaper than deleting the old
 // judgment directly. The boundary is airtight in the cheap direction.
+//   - P3 interaction (clarified 2026-09-26, blind red-team A10): C-P3
+//     protection expiry also expires the lien — recycle→wait→delete costs
+//     exactly what direct→wait→delete costs (no exploitable asymmetry), but
+//     the old judgment's debt does not outlive the new judgment's protection.
 
 // ── §5. Old citations ──────────────────────────────────────────────────
 // - Episodes already consumed by destruction stay consumed (tombstoned);
