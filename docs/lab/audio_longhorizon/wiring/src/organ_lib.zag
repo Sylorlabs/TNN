@@ -1,0 +1,745 @@
+// AUDIO INPUT ORGAN — Crew P (Perception), audio principles program.
+// Pure Zag. RIFF/WAV 16-bit PCM mono 44100Hz ingest + feature extraction.
+// Usage: organ <qid> <wavA> [wavB]
+//   qid: pitchrel:NNN | pitchabs:NNN | env:NNN | rhy:NNN | hf:NNN | pr4:NNN | pr5:NNN
+// Answers on stdout: A/B | 0..23 | flat/rise/decay | 3-bit string. "ERR" on bad input.
+// Design frozen in FROZEN_ORGAN.md. Toolchain: znc_linux_x86_64_abed8aa1.
+// znc workarounds applied: []u8 arenas + explicit LE accessors only (no as []i32/u32/u16,
+// no as []f64 — both miscompile/panic); no slice > 2^25 bytes; _zag_arg read
+// unconditionally; never nio_free(_zag_arg()).
+
+// ---------------- helpers ----------------
+fn cstr(s: []u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let p: *u8 = _zag_malloc((s.len + 1) as i64) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b: []u8 = p[0..(s.len + 1)];
+    let i: i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn file_read(path: []u8, cap: i64) []u8 {
+    let cs: []u8 = cstr(path);
+    if (cs.len == 0) { return ""; }
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 0, 0, 0, 0, 0);
+    _zag_free(_zag_slice_ptr(cs));
+    if (fd < 0) { return ""; }
+    let p: *u8 = _zag_malloc(cap) as *u8;
+    if (p == null as *u8) { _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0); return ""; }
+    let at: i64 = 0;
+    while (at < cap) {
+        let n: i64 = _zag_raw_syscall(0, fd, (p as i64) + at, cap - at, 0, 0, 0);
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    let b: []u8 = p[0..at];
+    return b;
+}
+
+// sample idx -> signed 16-bit (idx counts samples, byte offset = idx*2)
+fn get_s16(b: []u8, idx: i64) i64 {
+    let o: i64 = idx * 2;
+    let lo: i64 = (b[o] as i64) & 255;
+    let hi: i64 = (b[o + 1] as i64) & 255;
+    let v: i64 = lo | (hi << 8);
+    if (v >= 32768) { v = v - 65536; }
+    return v;
+}
+
+fn get_u32(b: []u8, o: i64) i64 {
+    return ((b[o] as i64) & 255) | (((b[o + 1] as i64) & 255) << 8) | (((b[o + 2] as i64) & 255) << 16) | (((b[o + 3] as i64) & 255) << 24);
+}
+
+// signed 32-bit LE accessor (ZNC-007 workaround: never as []i32)
+fn get32s(a: []u8, o: i64) i64 {
+    let v: i64 = get_u32(a, o);
+    if (v >= 2147483648) { v = v - 4294967296; }
+    return v;
+}
+
+fn put32(a: []u8, o: i64, v: i64) void {
+    a[o] = (v & 255) as u8;
+    a[o + 1] = ((v >> 8) & 255) as u8;
+    a[o + 2] = ((v >> 16) & 255) as u8;
+    a[o + 3] = ((v >> 24) & 255) as u8;
+    return;
+}
+
+fn get64(a: []u8, o: i64) i64 {
+    let v: i64 = 0;
+    let i: i64 = 0;
+    while (i < 8) {
+        v = v | (((a[o + i] as i64) & 255) << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn put64(a: []u8, o: i64, v: i64) void {
+    let i: i64 = 0;
+    while (i < 8) {
+        a[o + i] = ((v >> (i * 8)) & 255) as u8;
+        i = i + 1;
+    }
+    return;
+}
+
+fn streq(a: []u8, b: []u8) i64 {
+    if (a.len != b.len) { return 0; }
+    let i: i64 = 0;
+    while (i < a.len) {
+        if (a[i] != b[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// strip trailing newline from _zag_i64_to_str (helper-print quirk)
+fn i64s(v: i64) []u8 {
+    let s: []u8 = _zag_i64_to_str(v);
+    let n: i64 = s.len as i64;
+    if (n > 0 && s[n - 1] == 10) { return s[0..(n - 1)]; }
+    return s;
+}
+
+// sample accessor with zero-pad outside [0, nsamp); ds0 = data start sample index
+fn samp(b: []u8, ds0: i64, i: i64, nsamp: i64) i64 {
+    if (i < 0 || i >= nsamp) { return 0; }
+    return get_s16(b, ds0 + i);
+}
+
+// ---------------- math ----------------
+fn fcosr(x: f64) f64 {
+    let x2: f64 = x * x;
+    let x4: f64 = x2 * x2;
+    let x6: f64 = x4 * x2;
+    let x8: f64 = x4 * x4;
+    let x10: f64 = x8 * x2;
+    return 1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0 - x10 / 3628800.0;
+}
+
+fn cosr(x: f64) f64 {
+    let r: f64 = x;
+    while (r < 0.0) { r = r + 6.283185307179586; }
+    while (r >= 6.283185307179586) { r = r - 6.283185307179586; }
+    if (r > 3.141592653589793) {
+        r = 6.283185307179586 - r;
+    }
+    if (r > 1.5707963267948966) {
+        return -fcosr(3.141592653589793 - r);
+    }
+    return fcosr(r);
+}
+
+// ln via range reduction + atanh series; x<=0 -> large negative sentinel
+fn lnx(x: f64) f64 {
+    if (x <= 0.0) { return -10000000000.0; }
+    let e: i64 = 0;
+    let m: f64 = x;
+    while (m >= 2.0) { m = m * 0.5; e = e + 1; }
+    while (m < 1.0) { m = m * 2.0; e = e - 1; }
+    let y: f64 = (m - 1.0) / (m + 1.0);
+    let y2: f64 = y * y;
+    let term: f64 = y;
+    let s: f64 = y;
+    let k: i64 = 1;
+    while (k < 25) {
+        term = term * y2;
+        s = s + term / ((2 * k + 1) as f64);
+        k = k + 1;
+    }
+    return 2.0 * s + (e as f64) * 0.6931471805599453;
+}
+
+fn log10x(x: f64) f64 {
+    return lnx(x) / 2.302585092994046;
+}
+
+// ---------------- tables ----------------
+// H: Hann 2048, scale 2^16 (i32). H512: Hann 512, scale 2^16.
+// TWC/TWS: cos/sin(2*pi*t/512), scale 2^20 (i32).
+fn build_tables(H: []u8, H512: []u8, TWC: []u8, TWS: []u8) void {
+    let i: i64 = 0;
+    while (i < 2048) {
+        let c: f64 = cosr(6.283185307179586 * (i as f64) / 2047.0);
+        put32(H, i * 4, ((0.5 - 0.5 * c) * 65536.0 + 0.5) as i64);
+        i = i + 1;
+    }
+    let j: i64 = 0;
+    while (j < 512) {
+        let c2: f64 = cosr(6.283185307179586 * (j as f64) / 511.0);
+        put32(H512, j * 4, ((0.5 - 0.5 * c2) * 65536.0 + 0.5) as i64);
+        let a: f64 = 6.283185307179586 * (j as f64) / 512.0;
+        put32(TWC, j * 4, (cosr(a) * 1048576.0 + 0.5) as i64);
+        // sin via cos(a - pi/2)
+        put32(TWS, j * 4, (cosr(a - 1.5707963267948966) * 1048576.0 + 0.5) as i64);
+        j = j + 1;
+    }
+    return;
+}
+
+// ---------------- WAV parse ----------------
+// META2: [0]=data start sample index (byte_off/2), [1]=nsamp. Returns 1 ok / 0 fail.
+fn wav_parse(b: []u8, META2: []u8) i64 {
+    if ((b.len as i64) < 44) { return 0; }
+    if (!(b[0] == 82 && b[1] == 73 && b[2] == 70 && b[3] == 70)) { return 0; } // RIFF
+    if (!(b[8] == 87 && b[9] == 65 && b[10] == 86 && b[11] == 69)) { return 0; } // WAVE
+    let off: i64 = 12;
+    let blen: i64 = b.len as i64;
+    let fmt_ok: i64 = 0;
+    let dsamp: i64 = -1;
+    let nsamp: i64 = 0;
+    while (off + 8 <= blen) {
+        let c0: i64 = b[off] as i64;
+        let c1: i64 = b[off + 1] as i64;
+        let c2: i64 = b[off + 2] as i64;
+        let c3: i64 = b[off + 3] as i64;
+        let sz: i64 = get_u32(b, off + 4);
+        if (c0 == 102 && c1 == 109 && c2 == 116 && c3 == 32) { // "fmt "
+            if (sz < 16) { return 0; }
+            let afmt: i64 = ((b[off + 8] as i64) & 255) | (((b[off + 9] as i64) & 255) << 8);
+            let ch: i64 = ((b[off + 10] as i64) & 255) | (((b[off + 11] as i64) & 255) << 8);
+            let sr: i64 = get_u32(b, off + 12);
+            let bits: i64 = ((b[off + 22] as i64) & 255) | (((b[off + 23] as i64) & 255) << 8);
+            if (afmt == 1 && ch == 1 && sr == 44100 && bits == 16) { fmt_ok = 1; }
+        }
+        if (c0 == 100 && c1 == 97 && c2 == 116 && c3 == 97) { // "data"
+            dsamp = (off + 8) / 2;
+            nsamp = sz / 2;
+        }
+        off = off + 8 + sz;
+    }
+    if (fmt_ok == 0 || dsamp < 0 || nsamp <= 0) { return 0; }
+    put64(META2, 0, dsamp);
+    put64(META2, 8, nsamp);
+    return 1;
+}
+
+// YIN cumulative-mean-normalized difference at one lag.
+// RL holds unnormalized r[1..551] as i64; d[j] = 2*(r0 - r[j]).
+fn dp_at(RL: []u8, r0: i64, lag: i64) f64 {
+    let run: f64 = 0.0;
+    let j: i64 = 1;
+    while (j <= lag) {
+        run = run + (2.0 * ((r0 - get64(RL, (j - 1) * 8)) as f64));
+        j = j + 1;
+    }
+    let dlag: f64 = 2.0 * ((r0 - get64(RL, (lag - 1) * 8)) as f64);
+    return dlag / (run / (lag as f64));
+}
+
+// autocorrelation sum at one lag over windowed frame XW (i32 LE, inlined loads)
+fn acorr_at(XW: []u8, lag: i64) i64 {
+    let s: i64 = 0;
+    let n: i64 = 0;
+    let lim: i64 = 2048 - lag;
+    while (n < lim) {
+        let o1: i64 = n * 4;
+        let v1: i64 = ((XW[o1] as i64) & 255) | (((XW[o1 + 1] as i64) & 255) << 8) | (((XW[o1 + 2] as i64) & 255) << 16) | (((XW[o1 + 3] as i64) & 255) << 24);
+        if (v1 >= 2147483648) { v1 = v1 - 4294967296; }
+        let o2: i64 = (n + lag) * 4;
+        let v2: i64 = ((XW[o2] as i64) & 255) | (((XW[o2 + 1] as i64) & 255) << 8) | (((XW[o2 + 2] as i64) & 255) << 16) | (((XW[o2 + 3] as i64) & 255) << 24);
+        if (v2 >= 2147483648) { v2 = v2 - 4294967296; }
+        s = s + v1 * v2;
+        n = n + 1;
+    }
+    return s;
+}
+
+// ---------------- analyze ----------------
+// FR: nfr_max x 10 i64 fields @80B stride: 0 rms_mdb, 8 f0_mhz, 16 r_1e6, 24 voiced,
+//     32 zcr, 40 hf_mdb, 48 b0_mdb, 56 b1_mdb, 64 b2_mdb, 72 b3_mdb
+// META: [0]=nfr, [1]=nonset. Returns nfr, or -1 on bad input.
+fn analyze(path: []u8, FR: []u8, XW: []u8, DW: []u8, ON: []u8, META: []u8, H: []u8, H512: []u8, TWC: []u8, TWS: []u8, RL: []u8) i64 {
+    let b: []u8 = file_read(path, 6000000);
+    if ((b.len as i64) < 44) { return -1; }
+    let META2: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    if (wav_parse(b, META2) == 0) { return -1; }
+    let ds0: i64 = get64(META2, 0);
+    let nsamp: i64 = get64(META2, 8);
+    if (nsamp < 64) { return -1; }
+    let nfr: i64 = 1;
+    if (nsamp >= 2048) { nfr = (nsamp - 2048) / 1024 + 1; }
+    let f: i64 = 0;
+    while (f < nfr) {
+        let s: i64 = f * 1024;
+        // pass 1: mean, mean-square (unwindowed), for RMS dBFS
+        let sum: i64 = 0;
+        let sum2: i64 = 0;
+        let n: i64 = 0;
+        while (n < 2048) {
+            let x: i64 = samp(b, ds0, s + n, nsamp);
+            sum = sum + x;
+            sum2 = sum2 + x * x;
+            n = n + 1;
+        }
+        let mean: i64 = sum / 2048;
+        let ms: f64 = (sum2 as f64) / 2048.0;
+        let rms_db: f64 = 10.0 * log10x(ms / 1073741824.0 + 0.000000000001);
+        let fo: i64 = f * 80;
+        put64(FR, fo, (rms_db * 1000.0) as i64);
+        // pass 2: windowed frame (i32, scale 1: ((x-mean)*hann)>>16), ZCR
+        let zcr: i64 = 0;
+        let lastsign: i64 = 0;
+        let m2: i64 = 0;
+        while (m2 < 2048) {
+            let xc: i64 = samp(b, ds0, s + m2, nsamp) - mean;
+            put32(XW, m2 * 4, (xc * get32s(H, m2 * 4)) >> 16);
+            let cs2: i64 = 0;
+            if (xc > 0) { cs2 = 1; }
+            if (xc < 0) { cs2 = -1; }
+            if (cs2 != 0 && lastsign != 0 && cs2 != lastsign) { zcr = zcr + 1; }
+            if (cs2 != 0) { lastsign = cs2; }
+            m2 = m2 + 1;
+        }
+        put64(FR, fo + 32, zcr);
+        // F0: normalized autocorrelation r[lag] for lags 1..551; the period
+        // is selected by YIN cumulative-mean normalization of
+        // d[lag] = 2*(r0 - r[lag]) (first dip below 0.10, then local min).
+        let r0: i64 = acorr_at(XW, 0);
+        let lag: i64 = 1;
+        while (lag <= 551) {
+            put64(RL, (lag - 1) * 8, acorr_at(XW, lag));
+            lag = lag + 1;
+        }
+        let run: f64 = 0.0;
+        let j: i64 = 1;
+        while (j <= 35) {
+            run = run + (2.0 * ((r0 - get64(RL, (j - 1) * 8)) as f64));
+            j = j + 1;
+        }
+        let sel: i64 = -1;
+        let sel_dp: f64 = 0.0;
+        let gmin: f64 = 1000000.0;
+        let gmin_lag: i64 = 36;
+        let lag2: i64 = 36;
+        while (lag2 <= 551) {
+            let dlag: f64 = 2.0 * ((r0 - get64(RL, (lag2 - 1) * 8)) as f64);
+            run = run + dlag;
+            let dp: f64 = dlag / (run / (lag2 as f64));
+            if (dp < gmin) { gmin = dp; gmin_lag = lag2; }
+            if (sel == -1 && dp < 0.1) {
+                sel = lag2;
+                sel_dp = dp;
+            } else if (sel != -1) {
+                if (dp < sel_dp) { sel = lag2; sel_dp = dp; }
+                else { lag2 = 552; }
+            }
+            lag2 = lag2 + 1;
+        }
+        if (sel == -1) { sel = gmin_lag; sel_dp = gmin; }
+        let rn: f64 = 0.0;
+        let f0hz: f64 = 0.0;
+        if (r0 > 0) {
+            rn = (get64(RL, (sel - 1) * 8) as f64) / (r0 as f64);
+            let lagf: f64 = sel as f64;
+            if (sel > 36 && sel < 551) {
+                let a2: f64 = dp_at(RL, r0, sel - 1);
+                let b2: f64 = sel_dp;
+                let c2: f64 = dp_at(RL, r0, sel + 1);
+                let den: f64 = a2 - 2.0 * b2 + c2;
+                let ab: f64 = den;
+                if (ab < 0.0) { ab = -ab; }
+                if (ab > 0.000001) {
+                    lagf = (sel as f64) + 0.5 * (a2 - c2) / den;
+                }
+            }
+            f0hz = 44100.0 / lagf;
+        }
+        put64(FR, fo + 8, (f0hz * 1000.0 + 0.5) as i64);
+        put64(FR, fo + 16, (rn * 1000000.0 + 0.5) as i64);
+        let voiced: i64 = 0;
+        if (rn >= 0.40 && rms_db > -50.0) { voiced = 1; }
+        put64(FR, fo + 24, voiced);
+        // band decomposition: decimate-by-4 (prefilter [1,2,1]/4) -> 512 -> naive DFT N=512
+        let dm: i64 = 0;
+        while (dm < 512) {
+            let si: i64 = s + dm * 4;
+            let x0: i64 = samp(b, ds0, si - 1, nsamp);
+            let x1: i64 = samp(b, ds0, si, nsamp);
+            let x2: i64 = samp(b, ds0, si + 1, nsamp);
+            let d: i64 = x0 + 2 * x1 + x2;
+            put32(DW, dm * 4, (d * get32s(H512, dm * 4)) >> 16);
+            dm = dm + 1;
+        }
+        let bs0: f64 = 0.0;
+        let bs1: f64 = 0.0;
+        let bs2: f64 = 0.0;
+        let bs3: f64 = 0.0;
+        let kk: i64 = 0;
+        while (kk <= 256) {
+            let re: f64 = 0.0;
+            let im: f64 = 0.0;
+            let nn: i64 = 0;
+            while (nn < 512) {
+                let t: i64 = (kk * nn) & 511;
+                let to: i64 = t * 4;
+                let cwi: i64 = ((TWC[to] as i64) & 255) | (((TWC[to + 1] as i64) & 255) << 8) | (((TWC[to + 2] as i64) & 255) << 16) | (((TWC[to + 3] as i64) & 255) << 24);
+                if (cwi >= 2147483648) { cwi = cwi - 4294967296; }
+                let cw: f64 = (cwi as f64) * 0.00000095367431640625;
+                let swi: i64 = ((TWS[to] as i64) & 255) | (((TWS[to + 1] as i64) & 255) << 8) | (((TWS[to + 2] as i64) & 255) << 16) | (((TWS[to + 3] as i64) & 255) << 24);
+                if (swi >= 2147483648) { swi = swi - 4294967296; }
+                let sw: f64 = (swi as f64) * 0.00000095367431640625;
+                let wo: i64 = nn * 4;
+                let wv: i64 = ((DW[wo] as i64) & 255) | (((DW[wo + 1] as i64) & 255) << 8) | (((DW[wo + 2] as i64) & 255) << 16) | (((DW[wo + 3] as i64) & 255) << 24);
+                if (wv >= 2147483648) { wv = wv - 4294967296; }
+                let w: f64 = wv as f64;
+                re = re + w * cw;
+                im = im - w * sw;
+                nn = nn + 1;
+            }
+            let pwr: f64 = re * re + im * im;
+            let band: i64 = kk >> 6;
+            if (band > 3) { band = 3; }
+            if (band == 0) { bs0 = bs0 + pwr; }
+            if (band == 1) { bs1 = bs1 + pwr; }
+            if (band == 2) { bs2 = bs2 + pwr; }
+            if (band == 3) { bs3 = bs3 + pwr; }
+            kk = kk + 1;
+        }
+        put64(FR, fo + 48, (10.0 * log10x(bs0 + 0.000000000001) * 1000.0) as i64);
+        put64(FR, fo + 56, (10.0 * log10x(bs1 + 0.000000000001) * 1000.0) as i64);
+        put64(FR, fo + 64, (10.0 * log10x(bs2 + 0.000000000001) * 1000.0) as i64);
+        put64(FR, fo + 72, (10.0 * log10x(bs3 + 0.000000000001) * 1000.0) as i64);
+        // high band 5.5..16 kHz (peak ~11 kHz): y[n] = x[n]-x[n-2], energy ratio
+        let ehp: i64 = 0;
+        let etot: i64 = 0;
+        let n3: i64 = 0;
+        while (n3 < 2048) {
+            let xa: i64 = samp(b, ds0, s + n3, nsamp);
+            let xb: i64 = samp(b, ds0, s + n3 - 2, nsamp);
+            let yd: i64 = xa - xb;
+            ehp = ehp + yd * yd;
+            etot = etot + xa * xa;
+            n3 = n3 + 1;
+        }
+        let hfr: f64 = (ehp as f64) / ((etot as f64) + 1.0) + 0.000000000001;
+        put64(FR, fo + 40, (10.0 * log10x(hfr) * 1000.0) as i64);
+        f = f + 1;
+    }
+    // onsets: frame-to-frame RMS-derivative threshold crossing
+    let nonset: i64 = 0;
+    let last_on: i64 = -1000000;
+    let f2: i64 = 1;
+    while (f2 < nfr) {
+        let rise: i64 = get64(FR, f2 * 80) - get64(FR, (f2 - 1) * 80);
+        let tms: i64 = (f2 + 1) * 1024 * 1000 / 44100;
+        if (rise > 6000 && get64(FR, f2 * 80) > -50000 && tms - last_on > 80) {
+            put64(ON, nonset * 8, tms);
+            nonset = nonset + 1;
+            last_on = tms;
+        }
+        f2 = f2 + 1;
+    }
+    put64(META, 0, nfr);
+    put64(META, 8, nonset);
+    return nfr;
+}
+
+// ---------------- aggregation ----------------
+fn isort(a: []u8, n: i64) void {
+    let i: i64 = 1;
+    while (i < n) {
+        let key: i64 = get64(a, i * 8);
+        let j: i64 = i - 1;
+        while (j >= 0) {
+            if (get64(a, j * 8) <= key) { break; }
+            put64(a, (j + 1) * 8, get64(a, j * 8));
+            j = j - 1;
+        }
+        put64(a, (j + 1) * 8, key);
+        i = i + 1;
+    }
+    return;
+}
+
+// median voiced f0 (mHz); 0 if no voiced frame
+fn med_f0(FR: []u8, nfr: i64, SORT: []u8) i64 {
+    let c: i64 = 0;
+    let f: i64 = 0;
+    while (f < nfr) {
+        if (get64(FR, f * 80 + 24) == 1) {
+            put64(SORT, c * 8, get64(FR, f * 80 + 8));
+            c = c + 1;
+        }
+        f = f + 1;
+    }
+    if (c == 0) { return 0; }
+    isort(SORT, c);
+    return get64(SORT, (c / 2) * 8);
+}
+
+// median of a per-frame field (byte offset off) over all frames
+fn med_field(FR: []u8, nfr: i64, SORT: []u8, off: i64) i64 {
+    let f: i64 = 0;
+    while (f < nfr) {
+        put64(SORT, f * 8, get64(FR, f * 80 + off));
+        f = f + 1;
+    }
+    if (nfr == 0) { return 0; }
+    isort(SORT, nfr);
+    return get64(SORT, (nfr / 2) * 8);
+}
+
+// envelope class: 0 flat, 1 rise, 2 decay (thirds of rms_mdb, +-4 dB gate)
+fn env_class(FR: []u8, nfr: i64) i64 {
+    let n1: i64 = nfr / 3;
+    let n2: i64 = 2 * nfr / 3;
+    if (n1 <= 0 || nfr - n2 <= 0) { return 0; }
+    let s1: i64 = 0;
+    let f: i64 = 0;
+    while (f < n1) { s1 = s1 + get64(FR, f * 80); f = f + 1; }
+    let s3: i64 = 0;
+    let g: i64 = n2;
+    while (g < nfr) { s3 = s3 + get64(FR, g * 80); g = g + 1; }
+    let d: i64 = s3 / (nfr - n2) - s1 / n1;
+    if (d > 4000) { return 1; }
+    if (d < -4000) { return 2; }
+    return 0;
+}
+
+// rhythm asymmetry: median over adjacent IOI pairs of max/min x1000; 1000 if <4 onsets
+fn rhy_asym(ON: []u8, nonset: i64, SORT: []u8) i64 {
+    if (nonset < 4) { return 1000; }
+    let c: i64 = 0;
+    let i: i64 = 0;
+    while (i < nonset - 2) {
+        let i1: i64 = get64(ON, (i + 1) * 8) - get64(ON, i * 8);
+        let i2: i64 = get64(ON, (i + 2) * 8) - get64(ON, (i + 1) * 8);
+        if (i1 < 1) { i1 = 1; }
+        if (i2 < 1) { i2 = 1; }
+        let r: i64 = 1000;
+        if (i1 >= i2) { r = i1 * 1000 / i2; } else { r = i2 * 1000 / i1; }
+        put64(SORT, c * 8, r);
+        c = c + 1;
+        i = i + 1;
+    }
+    isort(SORT, c);
+    return get64(SORT, (c / 2) * 8);
+}
+
+// pr4 bits: bit2 = frac_static>=0.15, bit1 = hnr in [0.7,12], bit0 = prosody in [0.003,0.25]
+fn pr4_bits(FR: []u8, nfr: i64, SORT: []u8) i64 {
+    // frac_static: voiced frames within 5% of local (+-15) median f0
+    let nstatic: i64 = 0;
+    let f: i64 = 0;
+    while (f < nfr) {
+        let a: i64 = f - 15;
+        if (a < 0) { a = 0; }
+        let b: i64 = f + 15;
+        if (b >= nfr) { b = nfr - 1; }
+        let c: i64 = 0;
+        let g: i64 = a;
+        while (g <= b) {
+            put64(SORT, c * 8, get64(FR, g * 80 + 8));
+            c = c + 1;
+            g = g + 1;
+        }
+        isort(SORT, c);
+        let lmed: i64 = get64(SORT, (c / 2) * 8);
+        if (get64(FR, f * 80 + 24) == 1 && lmed > 0) {
+            let df: i64 = get64(FR, f * 80 + 8) - lmed;
+            if (df < 0) { df = -df; }
+            if (df * 20 <= lmed) { nstatic = nstatic + 1; }
+        }
+        f = f + 1;
+    }
+    let frac: f64 = (nstatic as f64) / (nfr as f64);
+    // hnr: median over voiced of 10*log10(r/(1-r))
+    let ch: i64 = 0;
+    let h2: i64 = 0;
+    while (h2 < nfr) {
+        if (get64(FR, h2 * 80 + 24) == 1) {
+            let r: f64 = (get64(FR, h2 * 80 + 16) as f64) / 1000000.0;
+            if (r < 0.000001) { r = 0.000001; }
+            if (r > 0.999999) { r = 0.999999; }
+            let hv: f64 = 10.0 * log10x(r / (1.0 - r));
+            put64(SORT, ch * 8, (hv * 1000.0) as i64);
+            ch = ch + 1;
+        }
+        h2 = h2 + 1;
+    }
+    let hnr: f64 = -99.0;
+    if (ch > 0) {
+        isort(SORT, ch);
+        hnr = (get64(SORT, (ch / 2) * 8) as f64) / 1000.0;
+    }
+    // prosody: per voiced-run f0 std/mean, run-length weighted mean
+    let pwsum: f64 = 0.0;
+    let pws: f64 = 0.0;
+    let r0: i64 = 0;
+    while (r0 < nfr) {
+        if (get64(FR, r0 * 80 + 24) == 1) {
+            let r1: i64 = r0;
+            while (r1 < nfr && get64(FR, r1 * 80 + 24) == 1) { r1 = r1 + 1; }
+            let rlen: i64 = r1 - r0;
+            if (rlen >= 5) {
+                let sa: i64 = r0;
+                let sb: i64 = r1;
+                if (rlen > 6) { sa = r0 + 2; sb = r1 - 2; }
+                // copy seg to SORT, median-3 filter into SORT[2048..]
+                let L: i64 = sb - sa;
+                let q: i64 = 0;
+                while (q < L) {
+                    put64(SORT, q * 8, get64(FR, (sa + q) * 80 + 8));
+                    q = q + 1;
+                }
+                if (L >= 3) {
+                    let w: i64 = 0;
+                    while (w < L) {
+                        let v0: i64 = get64(SORT, w * 8);
+                        let v1: i64 = v0;
+                        let v2: i64 = v0;
+                        if (w > 0) { v1 = get64(SORT, (w - 1) * 8); }
+                        if (w < L - 1) { v2 = get64(SORT, (w + 1) * 8); }
+                        // median of 3
+                        let mn: i64 = v0;
+                        let mx: i64 = v0;
+                        if (v1 < mn) { mn = v1; }
+                        if (v2 < mn) { mn = v2; }
+                        if (v1 > mx) { mx = v1; }
+                        if (v2 > mx) { mx = v2; }
+                        let md: i64 = v0 + v1 + v2 - mn - mx;
+                        put64(SORT, 16384 + w * 8, md);
+                        w = w + 1;
+                    }
+                    let e: i64 = 0;
+                    while (e < L) {
+                        put64(SORT, e * 8, get64(SORT, 16384 + e * 8));
+                        e = e + 1;
+                    }
+                }
+                let sf: f64 = 0.0;
+                let sf2: f64 = 0.0;
+                let z: i64 = 0;
+                while (z < L) {
+                    let fv: f64 = (get64(SORT, z * 8) as f64) / 1000.0;
+                    sf = sf + fv;
+                    sf2 = sf2 + fv * fv;
+                    z = z + 1;
+                }
+                let mn2: f64 = sf / (L as f64);
+                let vr: f64 = sf2 / (L as f64) - mn2 * mn2;
+                if (vr < 0.0) { vr = 0.0; }
+                // std via Newton sqrt
+                let sd: f64 = 0.0;
+                if (vr > 0.0) {
+                    sd = vr;
+                    let it: i64 = 0;
+                    while (it < 40) {
+                        sd = 0.5 * (sd + vr / sd);
+                        it = it + 1;
+                    }
+                }
+                let pr: f64 = 0.0;
+                if (mn2 > 0.0) { pr = sd / mn2; }
+                pwsum = pwsum + pr * (rlen as f64);
+                pws = pws + (rlen as f64);
+            }
+            r0 = r1;
+        } else {
+            r0 = r0 + 1;
+        }
+    }
+    let pros: f64 = 0.0;
+    if (pws > 0.0) { pros = pwsum / pws; }
+    let bits: i64 = 0;
+    if (frac >= 0.15) { bits = bits + 4; }
+    if (hnr >= 0.7 && hnr <= 12.0) { bits = bits + 2; }
+    if (pros >= 0.003 && pros <= 0.25) { bits = bits + 1; }
+    return bits;
+}
+
+// ---------------- main ----------------
+fn organ_standalone_main_unused() i32 {
+    let qid: []u8 = _zag_arg(1);
+    let pathA: []u8 = _zag_arg(2);
+    let pathB: []u8 = _zag_arg(3);
+    // split qid at ':'
+    let ci: i64 = 0;
+    while (ci < qid.len && qid[ci] != 58) { ci = ci + 1; }
+    if (ci >= qid.len) {
+        _zag_print("ERR\n");
+        return 1;
+    }
+    let typ: []u8 = qid[0..ci];
+    // arenas
+    let FR: []u8 = (_zag_malloc(208000) as *u8)[0..208000];
+    let XW: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let DW: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let ON: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let META: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let SORT: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let H: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let H512: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWC: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWS: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let RL: []u8 = (_zag_malloc(4408) as *u8)[0..4408];
+    build_tables(H, H512, TWC, TWS);
+    let is_rel: i64 = streq(typ, "pitchrel");
+    let is_abs: i64 = streq(typ, "pitchabs");
+    let is_env: i64 = streq(typ, "env");
+    let is_rhy: i64 = streq(typ, "rhy");
+    let is_hf: i64 = streq(typ, "hf");
+    let is_pr4: i64 = streq(typ, "pr4");
+    let is_pr5: i64 = streq(typ, "pr5");
+    if (is_rel == 0 && is_abs == 0 && is_env == 0 && is_rhy == 0 && is_hf == 0 && is_pr4 == 0 && is_pr5 == 0) {
+        _zag_print("ERR\n");
+        return 1;
+    }
+    let nfrA: i64 = analyze(pathA, FR, XW, DW, ON, META, H, H512, TWC, TWS, RL);
+    if (nfrA < 0) {
+        _zag_print("ERR\n");
+        return 1;
+    }
+    let nonsetA: i64 = get64(META, 8);
+    if (is_abs == 1) {
+        let f0m: i64 = med_f0(FR, nfrA, SORT);
+        let idx: i64 = 0;
+        if (f0m > 0) {
+            let v: f64 = 12.0 * lnx((f0m as f64) / 110000.0) / 0.6931471805599453;
+            idx = (v + 0.5) as i64;
+            if (idx < 0) { idx = 0; }
+            if (idx > 23) { idx = 23; }
+        }
+        _zag_print(i64s(idx));
+        _zag_print("\n");
+        return 0;
+    }
+    if (is_env == 1) {
+        let ec: i64 = env_class(FR, nfrA);
+        if (ec == 1) { _zag_print("rise\n"); }
+        if (ec == 2) { _zag_print("decay\n"); }
+        if (ec == 0) { _zag_print("flat\n"); }
+        return 0;
+    }
+    if (is_pr4 == 1) {
+        let bits: i64 = pr4_bits(FR, nfrA, SORT);
+        if (bits >= 4) { _zag_print("1"); } else { _zag_print("0"); }
+        if (bits == 2 || bits == 3 || bits == 6 || bits == 7) { _zag_print("1"); } else { _zag_print("0"); }
+        if (bits == 1 || bits == 3 || bits == 5 || bits == 7) { _zag_print("1"); } else { _zag_print("0"); }
+        _zag_print("\n");
+        return 0;
+    }
+    // two-file questions: capture A's scalar BEFORE analyzing B (B reuses arenas)
+    let sca: i64 = 0;
+    if (is_rel == 1 || is_pr5 == 1) { sca = med_f0(FR, nfrA, SORT); }
+    if (is_rhy == 1) { sca = rhy_asym(ON, nonsetA, SORT); }
+    if (is_hf == 1) { sca = med_field(FR, nfrA, SORT, 40); }
+    let nfrB: i64 = analyze(pathB, FR, XW, DW, ON, META, H, H512, TWC, TWS, RL);
+    if (nfrB < 0) {
+        _zag_print("ERR\n");
+        return 1;
+    }
+    let nonsetB: i64 = get64(META, 8);
+    let scb: i64 = 0;
+    if (is_rel == 1 || is_pr5 == 1) { scb = med_f0(FR, nfrB, SORT); }
+    if (is_rhy == 1) { scb = rhy_asym(ON, nonsetB, SORT); }
+    if (is_hf == 1) { scb = med_field(FR, nfrB, SORT, 40); }
+    // tie breaks to A (lowest index), per zero-RNG rule
+    if (sca >= scb) { _zag_print("A\n"); } else { _zag_print("B\n"); }
+    return 0;
+}
