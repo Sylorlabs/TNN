@@ -62,6 +62,10 @@ agreement 88% vs 77%), but still misses all improvement bars. The history
 helps the sign agreement (recalled deltas guide corrections) but does not
 rescue the fundamental reliability issue.
 
+Deep-state ERR ratio is the same aggregate sum(ERR3)/sum(ERR0) as fresh
+(`evidence/loop_deep_r1_corrected.json`); scored 2026-09-26 with the
+corrected scorer.
+
 ## Overall §2c
 
 **FAIL** on both fresh and deep state. The closed-loop correction, as

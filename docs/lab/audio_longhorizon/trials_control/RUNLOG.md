@@ -86,7 +86,8 @@ battery was first scored under the per-case-mean formula (0.951); rescored
   r3 `9116cd2c0bb0a115ac62e28f2180ac02b116835722587e49bfa0546fb300eb0e`.
 - Canonical journals (run-path normalized): identical, `5f8c19f9fb8de908…`.
 - WAV manifests (basename → SHA-256): 220/220 identical, zero mismatches.
-- r4 identity vs r1/r3: pending r4 completion.
+- r4 identity vs r1/r3: CONFIRMED byte-identical 2026-09-26 (canonical
+  journal + 220/220 WAV SHAs; evidence/rerun_identity_r1r3r4.json).
 
 ## Prereg-noted deviations (all frozen before scored runs)
 1. MATCH renderer extension: the wired 5-action renderer cannot do continuous
@@ -109,17 +110,18 @@ HNR (cepstral), envelope stationarity (RMS thirds), spectral drift (centroid
 thirds), edge-click ratio (first/last 5 ms vs body), and agreement of measured
 descriptors with the journal's PLANNED values. Deterministic (numpy only).
 
-Results (`evidence/waveaudit_{r1,r3,r2,rc0,loopfresh}.json`):
+Results (`evidence/waveaudit_{r1,r3,r4,r2,rc0,loopfresh}.json`):
 
 | Run | WAVs | Flags | Notes |
 |-----|------|-------|-------|
 | r1 | 220 | 27 | HUM50 13, HUM60 20, PLAN_F0_MISMATCH 23 |
 | r3 | 220 | 27 | identical to r1 (byte-identical renders) |
+| r4 | 220 | 27 | identical to r1/r3 (byte-identical renders) |
 | r2 | 218 | 27 | partial (159/160 targets) |
 | rc0 | 213 | 12 | HUM60 9, PLAN_F0_MISMATCH 3 |
 | loopfresh | 80 | 24 | HUM50 13, HUM60 17, PLAN_F0_MISMATCH 21 |
 
-- Zero CLIP / DC / EDGE_CLICK / LOW_HNR / NONSTAT_FLAT flags across all 951
+- Zero CLIP / DC / EDGE_CLICK / LOW_HNR / NONSTAT_FLAT flags across all 1171
   renders. Max edge-click ratio 1.12 (threshold 12); max |DC| 3.9 (threshold
   100); HNR ≥ 11.4 dB everywhere (mean ~20 dB).
 - The 50/60 Hz flags are FM-sideband artifacts of the wide-FM vibrato render

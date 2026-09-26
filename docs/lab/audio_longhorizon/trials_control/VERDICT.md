@@ -46,8 +46,11 @@ open-loop on either fresh or deep state.
   220/220 WAVs by SHA-256). See evidence/rerun_identity_r1r3.json.
 - r2: 159/160 targets complete before the VM reboot (ANOM-010); partial,
   does NOT count as a completed rerun.
-- r4: third complete 160-target run in progress (launched post-reboot,
-  2026-09-26). 3× byte-identity claim is PENDING r4 completion.
+- r4: 160/160, 220 WAVs, exit 0 (completed 2026-09-26). Canonical journal
+  identical to r1 (`5f8c19f9fb8de908...`); 220/220 WAVs byte-identical to
+  r1 (zero mismatches); control axes re-score identically (28/39/29).
+  Evidence: evidence/rerun_identity_r1r3r4.json, runs/r4/journal.txt.
+- 3× byte-identity: **CONFIRMED** (r1, r3, r4).
 - Zero RNG in the native trial path (pure Zag).
 
 ## B-F1 bearing (prosody: planner vs loop)

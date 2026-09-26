@@ -4,13 +4,23 @@
 
 **Determinism status 2026-09-26:** r1≡r3 proven byte-identical (160/160).
 r2 died at 159/160 (VM reboot) and does not count as a completed rerun.
-r4 (third complete run) in progress; the 3× requirement is PENDING.
+r4 (third complete run) COMPLETE 2026-09-26: exit 0, 160 targets, 220 WAVs,
+canonical journal identical to r1 (`5f8c19f9fb8de908...`), 220/220 WAVs
+byte-identical to r1 (zero mismatches). 3× byte-identity: CONFIRMED.
+r4 scores the control axes identically to r1 (pitch 28/40, env 39/40,
+pros 29/40). Evidence: `evidence/rerun_identity_r1r3r4.json`,
+`evidence/waveaudit_r4.json` (27 flagged — same counts as r1/r3),
+`runs/r4/journal.txt`.
 
 | Axis     | Hits / 40 | Hit rate | Bar (≥70%) | RC0 p (wired>severed) | RC1 deranged |
 |----------|-----------|----------|------------|----------------------|--------------|
 | Pitch    | 28/40     | 70.0%    | PASS       | p=1.9e-12 PASS       | 0.0% PASS    |
 | Envelope | 39/40     | 97.5%    | PASS       | p=6.1e-10 PASS       | 0.0% PASS    |
-| Prosody  | 29/40     | 72.5%    | **VOID**   | (pending)            | 27.5% **VOID** |
+| Prosody  | 29/40     | 72.5%    | **VOID**   | p=4.4e-13 PASS       | 27.5% **VOID** |
+
+**RC0 note (ANOM-012):** the sever flag does not propagate into the
+closed-loop correction iterations of L-targets (ITER 1–3 render wired).
+Benign for the guard — it scores only the once-rendered M-targets.
 
 **Prosody scorer VOID**: RC1 deranged hit rate 27.5% (11/40) exceeds the 25% bar.
 Per prereg, this voids the SCORER (not the trial). The 72.5% hit rate cannot be
