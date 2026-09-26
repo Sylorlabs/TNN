@@ -86,3 +86,47 @@ reservoir save/restore logic produces incorrect data.
 The VBR fixture cannot be used to validate the Zag B1 until the Python
 reference reservoir bug is fixed. Per the binding rule: **VBR B1 is the
 scoped blocker**. CBR and JS are fully validated and can proceed.
+
+## 2026-09-26 ~21:00 PDT: Zag B1 Implementation Session
+
+**Goal**: Port Python oracle B1 to pure Zag, validate stage by stage.
+
+**Work done**:
+1. Generated `zag/mp3tab64.zag` from Python tables (gen_tab64.py)
+   - Integer tables as byte strings
+   - f64 tables as f32 bit patterns widened via f32_to_f64
+2. Implemented `zag/mp3dec.zag` (B1 draft):
+   - Dec struct with 15 slice fields + 2 scalars (256 bytes)
+   - Bit reader (bs_get_bits), Huffman cached reader (hr_*)
+   - Side info parsing (read_side_info)
+   - Scalefactor decoding (decode_scalefactors) with SCFSI persistence
+   - Huffman/requantization (huffman) with pow43 table
+   - Reservoir (511 bytes) with frame reconstruction
+   - B1 hex dump mode
+3. Probed Zag capabilities:
+   - []f64 allocation/indexing: OK
+   - f64/i64 bit reinterpretation: OK
+   - Table lookups match Python: OK
+4. Fixed bugs:
+   - `layer3gr_limit`: removed incorrect `*8` (part_23_length already in bits)
+   - Bare `{...}` blocks: removed (illegal in Zag)
+   - Duplicate variable definitions: fixed
+5. Validation:
+   - Frame 0, Granule 0: 576/576 exact f64 bit pattern match vs Python
+   - Granule 1+: outputs zeros (BUG)
+   - Frame 2+: panics "slice index out of bounds" (BUG)
+
+**Toolchain issues encountered**:
+- `--run` does not pass argv; must build binary and run directly
+- Compiler optimizes out `_zag_print` with unused results; use file writes for debug
+- Bare blocks `{...}` rejected (E0204); factor into helpers
+- Build cache: use `znc clean-cache` after source edits
+
+**Files**:
+- `~/workspace/decoder_land/mp3/zag/mp3dec.zag` (active)
+- `~/workspace/decoder_land/mp3/zag/mp3tab64.zag` (generated)
+- `~/workspace/decoder_land/mp3/zag/common.zag` (support)
+- `~/workspace/decoder_land/mp3/zag/gen_tab64.py` (generator)
+
+**Next**: Debug granule 1+ zero output; likely bitstream position tracking bug in
+decode_scalefactors or huffman hr_init. Then implement B2/B3/B4.

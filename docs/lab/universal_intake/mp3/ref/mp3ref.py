@@ -34,7 +34,7 @@ G_PAN = np.array(T['g_pan'], dtype=np.float64)
 
 BITRATE_TAB = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
 SR_TAB = [44100, 48000, 32000]
-MAX_BITRESERVOIR_BYTES = 512
+MAX_BITRESERVOIR_BYTES = 511  # dr_mp3: DRMP3_MAX_BITRESERVOIR_BYTES = 511
 MAX_SCFI = 44
 
 
@@ -670,6 +670,10 @@ class MP3Ref:
         self.data = open(path, 'rb').read()
         self.reserv_buf = bytearray()
         self.reserv = 0
+        # ist_pos persists across granules AND frames (dr_mp3: drmp3dec.ist_pos),
+        # so granule-1 scfsi reuse reads granule-0's scalefactors. Must NOT be
+        # re-zeroed per granule (that was the VBR B1 bug: zeros reused instead).
+        self.ist_pos = [[0] * 40 for _ in range(2)]
         self.overlap = [np.zeros(9 * 32, dtype=np.float64) for _ in range(2)]
         self.qmf_state = np.zeros(15 * 64, dtype=np.float64)
         self.lins = np.zeros(34 * 64, dtype=np.float64)
@@ -738,12 +742,11 @@ class MP3Ref:
         granule_pcm = []
         for igr in range(2):
             grbuf = [np.zeros(576, dtype=np.float64) for _ in range(nch)]
-            ist_pos = [[0] * 40 for _ in range(nch)]
             scfs = []
             for ch in range(nch):
                 gr = gr_info[igr * nch + ch]
                 layer3gr_limit = mbs.pos + gr['part_23_length']
-                scf, iscf = decode_scalefactors(hdr, ist_pos[ch], mbs, gr)
+                scf, iscf = decode_scalefactors(hdr, self.ist_pos[ch], mbs, gr)
                 scfs.append(scf)
                 hr = HuffReader(mbs.buf, mbs.pos)
                 symbols = []
@@ -754,7 +757,7 @@ class MP3Ref:
                 b1f_scf.append(iscf)
             stacked = np.concatenate(grbuf)  # [ch0 576][ch1 576]
             if (hdr[3] & 0x10) != 0:
-                intensity_stereo(stacked, ist_pos[1], gr_info[igr * nch], hdr)
+                intensity_stereo(stacked, self.ist_pos[1], gr_info[igr * nch], hdr)
             elif (hdr[3] & 0xE0) == 0x60:
                 midside_stereo(stacked, 576)
             for ch in range(nch):

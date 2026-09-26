@@ -135,3 +135,52 @@ specific reservoir condition.
 
 The Zag implementation is started but not complete. The validated Python
 reference serves as the oracle for future Zag B1-B4 validation.
+
+## 2026-09-26: Python Oracle Repair (SCFSI Persistence Bug)
+
+**Root cause**: The reported VBR "reservoir bug" was actually an SCFSI persistence bug.
+Python initialized `ist_pos = [[0] * 40 for _ in range(nch)]` inside the granule loop,
+causing granule 1 to reuse zeros when SCFSI requested granule-0 scalefactors. dr_mp3
+retains `ist_pos` in decoder state across granules and frames.
+
+**Fixes** (working copy `harvest/ref/mp3ref.py`):
+- Added persistent `self.ist_pos = [[0] * 40 for _ in range(2)]`
+- Removed per-granule `ist_pos` initialization
+- Routed scalefactor and intensity-stereo operations through `self.ist_pos`
+- Changed `MAX_BITRESERVOIR_BYTES` from 512 to 511 (matches dr_mp3)
+
+**Validation** (2026-09-26, sequential dr_mp3 stage dumps):
+| Fixture | Granules/channels | Worst B1 diff | Failures at 1e-6 |
+|---|---|---|---|
+| CBR mono | 120 | 2.12e-08 | 0 |
+| VBR mono | 120 | 2.9e-08 | 0 |
+| Joint stereo | 240 | 2.9e-08 | 0 |
+
+VBR PCM vs ffmpeg: lag 2257 samples, max 1.0 LSB, mean 0.0083 LSB.
+
+## 2026-09-26: Zag B1 Draft (Partial)
+
+**Location**: `~/workspace/decoder_land/mp3/zag/mp3dec.zag`
+
+**Implemented**:
+- MSB-first bit reader, cached Huffman bit reader
+- MPEG-1 side info parsing (mono/stereo)
+- Persistent SCFSI state (`d.*.istpos`)
+- Scalefactor decoding with f64 gains (exact f32→f64 widening)
+- Huffman decoding with 32 tables, requantization via pow43
+- Reservoir handling (511-byte limit)
+- B1 hex dump (f64 bit patterns as 16-char hex)
+
+**Validated**:
+- Table lookups: `pow43[17]`, `expfrac[0]`, `tab_get`, `tabindex_get` match Python
+- f64 bit reinterpretation: 1.0 → 4607182418800017408, -0.5 → -4620693217682128896
+- Frame 0, Granule 0 (CBR mono): 576/576 f64 bit patterns match Python exactly
+
+**Open issues**:
+- Granule 1+ outputs zeros (bug in bitstream position tracking between granules)
+- Panics on frame 2+ with "slice index out of bounds"
+- Fixed `layer3gr_limit` units bug (was `*8`, now correct per Python `mbs.pos + part_23_length`)
+- B2/B3/B4 not implemented
+- Stereo (intensity, MS), short-block reorder, alias reduction, IMDCT, synthesis not implemented
+
+**Verdict**: OPEN. B1 not fully validated.
