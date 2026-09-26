@@ -1,0 +1,505 @@
+
+// ================= FUSION ORGAN (STEP 3) =================
+// Extends the composer organ with part-level segmentation, part correspondence,
+// and realism adaptation (background/seam blend, lighting, shadow).
+// All strategies below are GENERIC operators (percentiles, motion statistics,
+// morphology); every threshold value TNN actually uses is MEASURED from the
+// two memories and recorded in the trace. "Head" is an operational proxy:
+// the upper high-texture part of the motion subject (bunny) / the dark
+// high-drift part of the dark quintile (pig). The trace says this plainly.
+// Design note (honest): the programmer supplies the generic strategy and
+// operator language; TNN owns every measured selection and parameter.
+// The verdict must judge whether the result is believable fusion or a
+// softened segment composite, and name the exact mechanical boundary.
+
+// ---------- small helpers ----------
+// gray plane from RGB
+fn seg_gray(px:[]u8, gray:[]u8, N:i64) void {
+    let p:i64 = 0;
+    while (p < N) {
+        let o:i64 = p * 3;
+        gray[p] = (((px[o] as i64) + (px[o + 1] as i64) + (px[o + 2] as i64)) / 3) as u8;
+        p = p + 1;
+    }
+}
+// per-pixel motion energy: sum over frames of |gray(f+1)-gray(f)| (x4 fixed)
+fn seg_motion_E(st:[]u8, E:[]u8, W:i64, H:i64, nf:i64) i64 {
+    let N:i64 = W * H;
+    let p:i64 = 0;
+    while (p < N) { h_put64(E, p * 8, 0); p = p + 1; }
+    let g0:[]u8 = nio_alloc(N as i32);
+    let g1:[]u8 = nio_alloc(N as i32);
+    let fr:[]u8 = nio_alloc(230400);
+    if (recall_frame(st, 0, fr) != 0) { return -1; }
+    seg_gray(fr, g0, N);
+    let f:i64 = 1;
+    while (f < nf) {
+        if (recall_frame(st, f, fr) != 0) { return -2; }
+        seg_gray(fr, g1, N);
+        let q:i64 = 0;
+        while (q < N) {
+            let d:i64 = (g1[q] as i64) - (g0[q] as i64);
+            if (d < 0) { d = 0 - d; }
+            h_put64(E, q * 8, h_get64(E, q * 8) + d * 4);
+            g0[q] = g1[q];
+            q = q + 1;
+        }
+        f = f + 1;
+    }
+    nio_free(g0);
+    nio_free(g1);
+    nio_free(fr);
+    return 0;
+}
+// per-pixel gradient texture (x4 fixed), 0..1020
+fn seg_texture(gray:[]u8, tex:[]u8, W:i64, H:i64) void {
+    let y:i64 = 0;
+    while (y < H) {
+        let x:i64 = 0;
+        while (x < W) {
+            let xm:i64 = x - 1;
+            if (xm < 0) { xm = 0; }
+            let xp:i64 = x + 1;
+            if (xp >= W) { xp = W - 1; }
+            let ym:i64 = y - 1;
+            if (ym < 0) { ym = 0; }
+            let yp:i64 = y + 1;
+            if (yp >= H) { yp = H - 1; }
+            let gx:i64 = (gray[y * W + xp] as i64) - (gray[y * W + xm] as i64);
+            if (gx < 0) { gx = 0 - gx; }
+            let gy:i64 = (gray[yp * W + x] as i64) - (gray[ym * W + x] as i64);
+            if (gy < 0) { gy = 0 - gy; }
+            h_put64(tex, (y * W + x) * 8, (gx + gy) * 4);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+// histogram of E/4 into 1024 bins (E x4 fixed -> bin = E/4)
+fn seg_histE(E:[]u8, N:i64, hist:[]u8) void {
+    let i:i64 = 0;
+    while (i < 1024) { h_put64(hist, i * 8, 0); i = i + 1; }
+    let p:i64 = 0;
+    while (p < N) {
+        let b:i64 = h_get64(E, p * 8) / 4;
+        if (b > 1023) { b = 1023; }
+        h_put64(hist, b * 8, h_get64(hist, b * 8) + 1);
+        p = p + 1;
+    }
+}
+// percentile of a binned histogram: smallest bin b with cum*100 >= q*total
+fn seg_pct_bin(hist:[]u8, nbins:i64, total:i64, q:i64) i64 {
+    let cum:i64 = 0;
+    let b:i64 = 0;
+    while (b < nbins) {
+        cum = cum + h_get64(hist, b * 8);
+        if (cum * 100 >= q * total) { return b; }
+        b = b + 1;
+    }
+    return nbins - 1;
+}
+// percentile of gray plane (0..255)
+fn seg_gray_pct(gray:[]u8, N:i64, q:i64) i64 {
+    let hist:[]u8 = nio_alloc(2048);
+    let i:i64 = 0;
+    while (i < 256) { h_put64(hist, i * 8, 0); i = i + 1; }
+    let p:i64 = 0;
+    while (p < N) {
+        let g:i64 = gray[p] as i64;
+        h_put64(hist, g * 8, h_get64(hist, g * 8) + 1);
+        p = p + 1;
+    }
+    let r:i64 = seg_pct_bin(hist, 256, N, q);
+    nio_free(hist);
+    return r;
+}
+// threshold gray plane: below=1 -> mask = gray < thr ; below=0 -> gray >= thr
+fn seg_thresh(gray:[]u8, mask:[]u8, N:i64, thr:i64, below:i64) void {
+    let p:i64 = 0;
+    while (p < N) {
+        let g:i64 = gray[p] as i64;
+        if (below == 1) {
+            if (g < thr) { mask[p] = 1; } else { mask[p] = 0; }
+        } else {
+            if (g >= thr) { mask[p] = 1; } else { mask[p] = 0; }
+        }
+        p = p + 1;
+    }
+}
+// 3x3 morphology: op=0 erode, op=1 dilate
+fn seg_morph3(mask:[]u8, tmp:[]u8, W:i64, H:i64, op:i64) void {
+    let y:i64 = 0;
+    while (y < H) {
+        let x:i64 = 0;
+        while (x < W) {
+            let v:i64 = 0;
+            if (op == 1) {
+                // dilate: any neighbor set
+                let dy:i64 = -1;
+                while (dy <= 1) {
+                    let dx:i64 = -1;
+                    while (dx <= 1) {
+                        let xx:i64 = x + dx;
+                        let yy:i64 = y + dy;
+                        if (xx >= 0) {
+                            if (xx < W) {
+                                if (yy >= 0) {
+                                    if (yy < H) {
+                                        if (mask[yy * W + xx] != 0) { v = 1; }
+                                    }
+                                }
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+            } else {
+                // erode: all neighbors set
+                v = 1;
+                let dy:i64 = -1;
+                while (dy <= 1) {
+                    let dx:i64 = -1;
+                    while (dx <= 1) {
+                        let xx:i64 = x + dx;
+                        let yy:i64 = y + dy;
+                        if (xx >= 0) {
+                            if (xx < W) {
+                                if (yy >= 0) {
+                                    if (yy < H) {
+                                        if (mask[yy * W + xx] == 0) { v = 0; }
+                                    } else { v = 0; }
+                                } else { v = 0; }
+                            } else { v = 0; }
+                        } else { v = 0; }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+            }
+            tmp[y * W + x] = v as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let p:i64 = 0;
+    while (p < W * H) { mask[p] = tmp[p]; p = p + 1; }
+}
+// opening = erode x iters then dilate x iters (in place)
+fn seg_open(mask:[]u8, tmp:[]u8, W:i64, H:i64, iters:i64) void {
+    let k:i64 = 0;
+    while (k < iters) { seg_morph3(mask, tmp, W, H, 0); k = k + 1; }
+    k = 0;
+    while (k < iters) { seg_morph3(mask, tmp, W, H, 1); k = k + 1; }
+}
+// fill holes: flood background from border through zeros, invert
+fn seg_fill_holes(mask:[]u8, W:i64, H:i64) void {
+    let N:i64 = W * H;
+    let seen:[]u8 = nio_alloc(N as i32);
+    let stack:[]u8 = nio_alloc((N * 8) as i32);
+    let p:i64 = 0;
+    while (p < N) { seen[p] = 0; p = p + 1; }
+    let sp:i64 = 0;
+    // seed border zeros
+    let x:i64 = 0;
+    while (x < W) {
+        if (mask[x] == 0) { h_put64(stack, sp * 8, x); sp = sp + 1; }
+        let b:i64 = (H - 1) * W + x;
+        if (mask[b] == 0) { h_put64(stack, sp * 8, b); sp = sp + 1; }
+        x = x + 1;
+    }
+    let y:i64 = 1;
+    while (y < H - 1) {
+        let l:i64 = y * W;
+        if (mask[l] == 0) { h_put64(stack, sp * 8, l); sp = sp + 1; }
+        let r:i64 = y * W + W - 1;
+        if (mask[r] == 0) { h_put64(stack, sp * 8, r); sp = sp + 1; }
+        y = y + 1;
+    }
+    while (sp > 0) {
+        sp = sp - 1;
+        let q:i64 = h_get64(stack, sp * 8);
+        if (seen[q] != 0) { continue; }
+        seen[q] = 1;
+        let qx:i64 = q % W;
+        let qy:i64 = q / W;
+        if (qx > 0) {
+            let n0:i64 = q - 1;
+            if (mask[n0] == 0) { if (seen[n0] == 0) { h_put64(stack, sp * 8, n0); sp = sp + 1; } }
+        }
+        if (qx < W - 1) {
+            let n1:i64 = q + 1;
+            if (mask[n1] == 0) { if (seen[n1] == 0) { h_put64(stack, sp * 8, n1); sp = sp + 1; } }
+        }
+        if (qy > 0) {
+            let n2:i64 = q - W;
+            if (mask[n2] == 0) { if (seen[n2] == 0) { h_put64(stack, sp * 8, n2); sp = sp + 1; } }
+        }
+        if (qy < H - 1) {
+            let n3:i64 = q + W;
+            if (mask[n3] == 0) { if (seen[n3] == 0) { h_put64(stack, sp * 8, n3); sp = sp + 1; } }
+        }
+    }
+    // zeros not reached from border are holes -> set
+    p = 0;
+    while (p < N) {
+        if (mask[p] == 0) {
+            if (seen[p] == 0) { mask[p] = 1; }
+        }
+        p = p + 1;
+    }
+    nio_free(seen);
+    nio_free(stack);
+}
+// connected components (4-connectivity) on binary mask -> lab (i64 per px).
+// returns component count. labels 1..n.
+fn seg_label(mask:[]u8, lab:[]u8, W:i64, H:i64) i64 {
+    let N:i64 = W * H;
+    let p:i64 = 0;
+    while (p < N) { h_put64(lab, p * 8, 0); p = p + 1; }
+    let stack:[]u8 = nio_alloc((N * 8) as i32);
+    let nc:i64 = 0;
+    p = 0;
+    while (p < N) {
+        if (mask[p] != 0) {
+            if (h_get64(lab, p * 8) == 0) {
+                nc = nc + 1;
+                let sp:i64 = 0;
+                h_put64(stack, 0, p);
+                sp = 1;
+                h_put64(lab, p * 8, nc);
+                while (sp > 0) {
+                    sp = sp - 1;
+                    let q:i64 = h_get64(stack, sp * 8);
+                    let qx:i64 = q % W;
+                    let qy:i64 = q / W;
+                    if (qx > 0) {
+                        let n0:i64 = q - 1;
+                        if (mask[n0] != 0) { if (h_get64(lab, n0 * 8) == 0) { h_put64(lab, n0 * 8, nc); h_put64(stack, sp * 8, n0); sp = sp + 1; } }
+                    }
+                    if (qx < W - 1) {
+                        let n1:i64 = q + 1;
+                        if (mask[n1] != 0) { if (h_get64(lab, n1 * 8) == 0) { h_put64(lab, n1 * 8, nc); h_put64(stack, sp * 8, n1); sp = sp + 1; } }
+                    }
+                    if (qy > 0) {
+                        let n2:i64 = q - W;
+                        if (mask[n2] != 0) { if (h_get64(lab, n2 * 8) == 0) { h_put64(lab, n2 * 8, nc); h_put64(stack, sp * 8, n2); sp = sp + 1; } }
+                    }
+                    if (qy < H - 1) {
+                        let n3:i64 = q + W;
+                        if (mask[n3] != 0) { if (h_get64(lab, n3 * 8) == 0) { h_put64(lab, n3 * 8, nc); h_put64(stack, sp * 8, n3); sp = sp + 1; } }
+                    }
+                }
+            }
+        }
+        p = p + 1;
+    }
+    nio_free(stack);
+    return nc;
+}
+// stats for one component id -> out[10]: area,x0,y0,x1,y1,cx,cy,mean_gray,mean_E,mean_tex
+// returns area (0 if id invalid)
+fn seg_comp_stats(lab:[]u8, ncomp:i64, id:i64, gray:[]u8, E:[]u8, tex:[]u8, W:i64, H:i64, out:[]u8) i64 {
+    if (id <= 0 || id > ncomp) { return 0; }
+    let N:i64 = W * H;
+    let area:i64 = 0;
+    let x0:i64 = W;
+    let y0:i64 = H;
+    let x1:i64 = -1;
+    let y1:i64 = -1;
+    let sx:i64 = 0;
+    let sy:i64 = 0;
+    let sg:i64 = 0;
+    let se:i64 = 0;
+    let st:i64 = 0;
+    let p:i64 = 0;
+    while (p < N) {
+        if (h_get64(lab, p * 8) == id) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            area = area + 1;
+            sx = sx + x;
+            sy = sy + y;
+            sg = sg + (gray[p] as i64);
+            se = se + h_get64(E, p * 8);
+            st = st + h_get64(tex, p * 8);
+            if (x < x0) { x0 = x; }
+            if (x > x1) { x1 = x; }
+            if (y < y0) { y0 = y; }
+            if (y > y1) { y1 = y; }
+        }
+        p = p + 1;
+    }
+    if (area == 0) { return 0; }
+    h_put64(out, 0, area);
+    h_put64(out, 8, x0);
+    h_put64(out, 16, y0);
+    h_put64(out, 24, x1);
+    h_put64(out, 32, y1);
+    h_put64(out, 40, sx / area);
+    h_put64(out, 48, sy / area);
+    h_put64(out, 56, sg / area);
+    h_put64(out, 64, se / area);
+    h_put64(out, 72, st / area);
+    return area;
+}
+// largest component id (0 if none)
+fn seg_largest_id(lab:[]u8, ncomp:i64, W:i64, H:i64) i64 {
+    if (ncomp <= 0) { return 0; }
+    let cnt:[]u8 = nio_alloc(((ncomp + 1) * 8) as i32);
+    let i:i64 = 0;
+    while (i <= ncomp) { h_put64(cnt, i * 8, 0); i = i + 1; }
+    let N:i64 = W * H;
+    let p:i64 = 0;
+    while (p < N) {
+        let id:i64 = h_get64(lab, p * 8);
+        if (id > 0) { h_put64(cnt, id * 8, h_get64(cnt, id * 8) + 1); }
+        p = p + 1;
+    }
+    let best:i64 = 0;
+    let ba:i64 = 0;
+    i = 1;
+    while (i <= ncomp) {
+        let a:i64 = h_get64(cnt, i * 8);
+        if (a > ba) { ba = a; best = i; }
+        i = i + 1;
+    }
+    nio_free(cnt);
+    return best;
+}
+// neck-line: within subject mask bbox, per-row motion mass; find the row of
+// minimum motion between the two strongest separated peaks.
+// returns neck row, or -1 if no two valid peaks.
+fn seg_neck(E:[]u8, mask:[]u8, W:i64, H:i64, x0:i64, x1:i64, y0:i64, y1:i64) i64 {
+    let rows:[]u8 = nio_alloc((H * 8) as i32);
+    let y:i64 = 0;
+    while (y < H) { h_put64(rows, y * 8, 0); y = y + 1; }
+    y = y0;
+    while (y <= y1) {
+        let acc:i64 = 0;
+        let x:i64 = x0;
+        while (x <= x1) {
+            let p:i64 = y * W + x;
+            if (mask[p] != 0) { acc = acc + h_get64(E, p * 8); }
+            x = x + 1;
+        }
+        h_put64(rows, y * 8, acc);
+        y = y + 1;
+    }
+    // top half peak, bottom half peak
+    let mid:i64 = (y0 + y1) / 2;
+    let p1:i64 = -1;
+    let v1:i64 = 0;
+    y = y0;
+    while (y <= mid) {
+        let v:i64 = h_get64(rows, y * 8);
+        if (v > v1) { v1 = v; p1 = y; }
+        y = y + 1;
+    }
+    let p2:i64 = -1;
+    let v2:i64 = 0;
+    y = mid + 1;
+    while (y <= y1) {
+        let v:i64 = h_get64(rows, y * 8);
+        if (v > v2) { v2 = v; p2 = y; }
+        y = y + 1;
+    }
+    nio_free(rows);
+    if (p1 < 0 || p2 < 0) { return -1; }
+    if (v1 <= 0 || v2 <= 0) { return -1; }
+    if (p2 - p1 < 6) { return -1; }
+    // min-motion row strictly between peaks
+    let rows2:[]u8 = nio_alloc((H * 8) as i32);
+    y = 0;
+    while (y < H) { h_put64(rows2, y * 8, 0); y = y + 1; }
+    y = y0;
+    while (y <= y1) {
+        let acc:i64 = 0;
+        let x:i64 = x0;
+        while (x <= x1) {
+            let p:i64 = y * W + x;
+            if (mask[p] != 0) { acc = acc + h_get64(E, p * 8); }
+            x = x + 1;
+        }
+        h_put64(rows2, y * 8, acc);
+        y = y + 1;
+    }
+    let best:i64 = -1;
+    let bv:i64 = 9223372036854775807;
+    y = p1 + 1;
+    while (y < p2) {
+        let v:i64 = h_get64(rows2, y * 8);
+        if (v < bv) { bv = v; best = y; }
+        y = y + 1;
+    }
+    nio_free(rows2);
+    return best;
+}
+// track dark (below=1) / bright (below=0) centroid per frame inside ROI.
+// out: nf x (cx,cy) i64 pairs; (-1,-1) if none.
+fn seg_track(st:[]u8, thr:i64, x0:i64, y0:i64, x1:i64, y1:i64, W:i64, H:i64, nf:i64, out:[]u8) i64 {
+    let fr:[]u8 = nio_alloc(230400);
+    let g:[]u8 = nio_alloc((W * H) as i32);
+    let below:i64 = 1;
+    // caller encodes bright by passing thr negative? No: keep two entry shapes via sign of thr param is ugly.
+    // convention: thr >= 0 -> dark (gray < thr); thr < 0 -> bright (gray >= -thr)
+    let t:i64 = thr;
+    if (thr < 0) { below = 0; t = 0 - thr; }
+    let f:i64 = 0;
+    while (f < nf) {
+        if (recall_frame(st, f, fr) != 0) { return -1; }
+        seg_gray(fr, g, W * H);
+        let sx:i64 = 0;
+        let sy:i64 = 0;
+        let c:i64 = 0;
+        let y:i64 = y0;
+        while (y <= y1) {
+            let x:i64 = x0;
+            while (x <= x1) {
+                let gv:i64 = g[y * W + x] as i64;
+                let hit:i64 = 0;
+                if (below == 1) { if (gv < t) { hit = 1; } } else { if (gv >= t) { hit = 1; } }
+                if (hit == 1) { sx = sx + x; sy = sy + y; c = c + 1; }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        if (c > 0) {
+            h_put64(out, f * 16, sx / c);
+            h_put64(out, f * 16 + 8, sy / c);
+        } else {
+            h_put64(out, f * 16, -1);
+            h_put64(out, f * 16 + 8, -1);
+        }
+        f = f + 1;
+    }
+    nio_free(fr);
+    nio_free(g);
+    return 0;
+}
+// drift range of track relative to frame ref: out[2] = (dx,dy) max-min over valid
+fn seg_drift_range(trk:[]u8, nf:i64, ref:i64, out:[]u8) void {
+    let mnx:i64 = 9223372036854775807;
+    let mxx:i64 = -9223372036854775807;
+    let mny:i64 = 9223372036854775807;
+    let mxy:i64 = -9223372036854775807;
+    let f:i64 = 0;
+    while (f < nf) {
+        let cx:i64 = h_get64(trk, f * 16);
+        let cy:i64 = h_get64(trk, f * 16 + 8);
+        if (cx >= 0) {
+            if (cx < mnx) { mnx = cx; }
+            if (cx > mxx) { mxx = cx; }
+            if (cy < mny) { mny = cy; }
+            if (cy > mxy) { mxy = cy; }
+        }
+        f = f + 1;
+    }
+    if (mxx < mnx) {
+        h_put64(out, 0, -1);
+        h_put64(out, 8, -1);
+    } else {
+        h_put64(out, 0, mxx - mnx);
+        h_put64(out, 8, mxy - mny);
+    }
+}
