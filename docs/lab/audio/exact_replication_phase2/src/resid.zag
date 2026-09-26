@@ -1,0 +1,426 @@
+// resid.zag — v6 residualizer (hear-side exactness layer).
+// Reads: v5 model bin (RB-LMEMv5) + the ORIGINAL wav.
+// Writes: v6 model bin = v5 bytes + exactness extension + footer.
+// The extension carries the lossless residual channel (image-v3 pattern):
+//   true seeds x[0..P-1], per-period harmonic amplitudes, and the full
+//   f64 noise residual nres[j] = res[j] - plm*amp (or res[j] when the
+//   reconciled gate refuses the harmonic).
+// The gate decision (1.5 < boost < 10.0) is made ONCE here and stored as
+// use_h_stored; the emitter obeys it (reconciles hear/reemit gate #9).
+// Pure Zag, zero RNG, deterministic.
+// argv: 1=v5model.bin 2=original.wav 3=out_v6model.bin
+@import("../../work/toolchain/R33_NATIVE_IO_V1.zag")
+
+fn r_abs(x:f64) f64 {
+    if (x < 0.0) { return 0.0 - x; }
+    return x;
+}
+fn r_rint(x:f64) i64 {
+    if (x >= 0.0) { return (x + 0.5) as i64; }
+    return 0 - (((0.0 - x) + 0.5) as i64);
+}
+fn r_sqrt(x:f64) f64 {
+    if (x <= 0.0) { return 0.0; }
+    let g:f64 = x;
+    if (g < 1.0) { g = 1.0; }
+    let i:i64 = 0;
+    while (i < 60) {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    return g;
+}
+fn d_cstr(s:[]u8) []u8 {
+    let b:[]u8 = nio_alloc((s.len + 1) as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn d_get64(m:[]u8, o:i64) i64 {
+    let b0:i64 = m[o] as i64;
+    let b1:i64 = m[o+1] as i64;
+    let b2:i64 = m[o+2] as i64;
+    let b3:i64 = m[o+3] as i64;
+    let b4:i64 = m[o+4] as i64;
+    let b5:i64 = m[o+5] as i64;
+    let b6:i64 = m[o+6] as i64;
+    let b7:i64 = m[o+7] as i64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn d_getf64(m:[]u8, o:i64) f64 {
+    let f:[]f64 = m as []f64;
+    return f[o / 8];
+}
+fn d_put64(m:[]u8, o:i64, v:i64) void {
+    m[o] = (v & 255) as u8;
+    m[o+1] = ((v >> 8) & 255) as u8;
+    m[o+2] = ((v >> 16) & 255) as u8;
+    m[o+3] = ((v >> 24) & 255) as u8;
+    m[o+4] = ((v >> 32) & 255) as u8;
+    m[o+5] = ((v >> 40) & 255) as u8;
+    m[o+6] = ((v >> 48) & 255) as u8;
+    m[o+7] = ((v >> 56) & 255) as u8;
+    return;
+}
+fn d_putf64(m:[]u8, o:i64, v:f64) void {
+    let f:[]f64 = m as []f64;
+    f[o / 8] = v;
+    return;
+}
+fn read_all(path:[]u8) []u8 {
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(path) as i64, 0, 0, 0, 0, 0);
+    if (fd < 0) { let e:[]u8 = nio_alloc(1); return e; }
+    let msz:i64 = _zag_raw_syscall(8, fd, 0, 2, 0, 0, 0);
+    _zag_raw_syscall(8, fd, 0, 0, 0, 0, 0);
+    let m:[]u8 = nio_alloc(msz as i32);
+    let at:i64 = 0;
+    while (at < msz) {
+        let n:i64 = _zag_raw_syscall(0, fd, (_zag_slice_ptr(m) as i64) + at, msz - at, 0, 0, 0);
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return m;
+}
+fn write_all(path:[]u8, d:[]u8) i64 {
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(path) as i64, 577, 420, 0, 0, 0);
+    if (fd < 0) { return -1; }
+    let at:i64 = 0;
+    let len:i64 = d.len as i64;
+    while (at < len) {
+        let chunk:i64 = len - at;
+        if (chunk > 1048576) { chunk = 1048576; }
+        let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(d) as i64) + at, chunk, 0, 0, 0);
+        if (w <= 0) { break; }
+        at = at + w;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (at < len) { return -2; }
+    return 0;
+}
+// minimal WAV reader: mono int16 -> f64 samples
+fn read_wav_f64(path:[]u8, nout:[]i64) []f64 {
+    let d:[]u8 = read_all(path);
+    let n:i64 = 0;
+    if (d.len > 44) {
+        let off:i64 = 12;
+        while (off + 8 < d.len) {
+            if (d[off] == 100 and d[off+1] == 97 and d[off+2] == 116 and d[off+3] == 97) {
+                let sz:i64 = (d[off+4] as i64) | ((d[off+5] as i64) << 8) | ((d[off+6] as i64) << 16) | ((d[off+7] as i64) << 24);
+                n = sz / 2;
+                let x:[]f64 = nio_alloc((n*8) as i32) as []f64;
+                let i:i64 = 0;
+                while (i < n) {
+                    let v:i64 = (d[off+8+2*i] as i64) | ((d[off+8+2*i+1] as i64) << 8);
+                    if (v >= 32768) { v = v - 65536; }
+                    x[i] = v as f64;
+                    i = i + 1;
+                }
+                nout[0] = n;
+                nio_free(d);
+                return x;
+            }
+            let sz2:i64 = (d[off+4] as i64) | ((d[off+5] as i64) << 8) | ((d[off+6] as i64) << 16) | ((d[off+7] as i64) << 24);
+            off = off + 8 + sz2;
+        }
+    }
+    nout[0] = 0;
+    let e:[]f64 = nio_alloc(8) as []f64;
+    nio_free(d);
+    return e;
+}
+fn lb_puts(lb:[]u8, p:i64, s:[]u8) i64 {
+    let i:i64 = 0;
+    while (i < s.len) { lb[p+i] = s[i]; i = i + 1; }
+    return p + i;
+}
+fn lb_putc(lb:[]u8, p:i64, c:i64) i64 {
+    lb[p] = c as u8;
+    return p + 1;
+}
+fn lb_puti(lb:[]u8, p:i64, v:i64) i64 {
+    if (v < 0) { p = lb_putc(lb, p, 45); v = 0 - v; }
+    if (v == 0) { return lb_putc(lb, p, 48); }
+    let digs:[]u8 = nio_alloc(24);
+    let nd:i64 = 0;
+    let t:i64 = v;
+    while (t > 0) { digs[nd] = ((t % 10) + 48) as u8; nd = nd + 1; t = t / 10; }
+    let i:i64 = nd - 1;
+    while (i >= 0) { lb[p] = digs[i]; p = p + 1; i = i - 1; }
+    nio_free(digs);
+    return p;
+}
+fn lb_putf(lb:[]u8, p:i64, v:f64) i64 {
+    let x:f64 = v;
+    if (x < 0.0) { p = lb_putc(lb, p, 45); x = 0.0 - x; }
+    if (x < 0.0000005) { x = 0.0; }
+    let ip:i64 = x as i64;
+    let frac:i64 = (((x - (ip as f64)) * 1000000.0) + 0.5) as i64;
+    if (frac >= 1000000) { ip = ip + 1; frac = 0; }
+    p = lb_puti(lb, p, ip);
+    p = lb_putc(lb, p, 46);
+    let d:i64 = 100000;
+    while (d >= 1) {
+        let dg:i64 = frac / d;
+        p = lb_putc(lb, p, 48 + dg);
+        frac = frac - dg * d;
+        d = d / 10;
+    }
+    return p;
+}
+fn lb_emit(lb:[]u8, p:i64) void {
+    lb[p] = 10;
+    let s:[]u8 = nio_alloc((p + 1) as i32);
+    let i:i64 = 0;
+    while (i <= p) { s[i] = lb[i]; i = i + 1; }
+    _zag_print(s);
+    nio_free(s);
+    return;
+}
+// harmonic bin on hear's grid: ((j/T0) % 1) * NBINS % NBINS
+fn harm_bin(j:i64, T0:f64, NBINS:i64) i64 {
+    let ph:f64 = (j as f64) / T0;
+    let iph:i64 = ph as i64;
+    let frac:f64 = ph - (iph as f64);
+    return ((frac * (NBINS as f64)) as i64) % NBINS;
+}
+
+fn main() void {
+    let lb:[]u8 = nio_alloc(4096);
+    let mpath:[]u8 = d_cstr(_zag_arg(1));
+    let wpath:[]u8 = d_cstr(_zag_arg(2));
+    let opath:[]u8 = d_cstr(_zag_arg(3));
+    let m:[]u8 = read_all(mpath);
+    let msz:i64 = m.len as i64;
+    // verify v5 magic
+    if (msz < 40 or m[0] != 82 or m[1] != 66 or m[2] != 76 or m[3] != 77 or m[4] != 69 or m[5] != 77 or m[6] != 118 or m[7] != 53) {
+        let p:i64 = 0;
+        p = lb_puts(lb, p, "RESID bad v5 magic");
+        lb_emit(lb, p);
+        return;
+    }
+    let P:i64 = d_get64(m, 8);
+    let K:i64 = d_get64(m, 16);
+    let a_off:i64 = 40;
+    let proto_off:i64 = a_off + 8*P;
+    let bg_off:i64 = proto_off + 8*K;
+    let tail:i64 = bg_off + 8*K*K*K;
+    let eplen:i64 = d_get64(m, tail+40);
+    let EP_off:i64 = tail+48;
+    let pT:i64 = d_get64(m, EP_off+8*eplen);
+    let T0:f64 = d_getf64(m, EP_off+8*eplen+8);
+    let NBINS:i64 = d_get64(m, EP_off+8*eplen+16);
+    let plm_off:i64 = EP_off+8*eplen+24;
+    let PMF_off:i64 = plm_off+8*NBINS;
+    let boost:f64 = d_getf64(m, PMF_off+8*17);
+    let q_off:i64 = PMF_off + 144;
+    // read wav
+    let n1:[]i64 = nio_alloc(8) as []i64;
+    let x:[]f64 = read_wav_f64(wpath, n1);
+    let n:i64 = n1[0];
+    if (n <= P) {
+        let p:i64 = 0;
+        p = lb_puts(lb, p, "RESID wav too short n=");
+        p = lb_puti(lb, p, n);
+        lb_emit(lb, p);
+        return;
+    }
+    let nr:i64 = n - P;
+    // sanity: q section length matches
+    let q_len:i64 = (msz - q_off) / 8;
+    // reconciled gate: ONE decision, stored; emitter obeys (fixes #9)
+    let use_h:i64 = 0;
+    if (pT > 0 and T0 > 0.0 and NBINS > 0 and boost > 1.5 and boost < 10.0) { use_h = 1; }
+    // true residual via analysis filter (same op order as the emitter's pred)
+    let res:[]f64 = nio_alloc((nr*8) as i32) as []f64;
+    let j:i64 = 0;
+    while (j < nr) {
+        let acc:f64 = 0.0;
+        let k:i64 = 0;
+        while (k < P) {
+            acc = acc + d_getf64(m, a_off + k*8) * x[P+j-1-k];
+            k = k + 1;
+        }
+        res[j] = x[P+j] - acc;
+        j = j + 1;
+    }
+    // per-period harmonic amplitude (LS fit; the harmonic improvement for #6)
+    let nper:i64 = 0;
+    let amp:[]f64 = nio_alloc(8) as []f64;
+    if (use_h == 1) {
+        nper = (nr + pT - 1) / pT;
+        nio_free(amp);
+        amp = nio_alloc((nper*8) as i32) as []f64;
+        let per:i64 = 0;
+        while (per < nper) {
+            let num:f64 = 0.0;
+            let den:f64 = 0.0;
+            let s:i64 = 0;
+            while (s < pT) {
+                let jj:i64 = per*pT + s;
+                if (jj >= nr) { break; }
+                let hb:i64 = harm_bin(jj, T0, NBINS);
+                let pv:f64 = d_getf64(m, plm_off + hb*8);
+                num = num + res[jj]*pv;
+                den = den + pv*pv;
+                s = s + 1;
+            }
+            if (den > 0.000000000001) {
+                amp[per] = num / den;
+            } else {
+                amp[per] = 1.0;
+            }
+            per = per + 1;
+        }
+    }
+    // r2 with amplitude-aware harmonic (diagnostic for the improvement)
+    let mr:f64 = 0.0;
+    j = 0;
+    while (j < nr) { mr = mr + res[j]; j = j + 1; }
+    mr = mr / (nr as f64);
+    let vr:f64 = 0.0;
+    let vn:f64 = 0.0;
+    j = 0;
+    while (j < nr) {
+        let d:f64 = res[j]-mr;
+        vr = vr + d*d;
+        let h:f64 = 0.0;
+        if (use_h == 1) {
+            let hb:i64 = harm_bin(j, T0, NBINS);
+            let per:i64 = j / pT;
+            if (per >= nper) { per = nper - 1; }
+            h = d_getf64(m, plm_off + hb*8) * amp[per];
+        }
+        let e:f64 = res[j] - h;
+        vn = vn + e*e;
+        j = j + 1;
+    }
+    vr = vr / (nr as f64);
+    // noise residual channel
+    let nres:[]f64 = nio_alloc((nr*8) as i32) as []f64;
+    j = 0;
+    while (j < nr) {
+        let h:f64 = 0.0;
+        if (use_h == 1) {
+            let hb:i64 = harm_bin(j, T0, NBINS);
+            let per:i64 = j / pT;
+            if (per >= nper) { per = nper - 1; }
+            h = d_getf64(m, plm_off + hb*8) * amp[per];
+        }
+        nres[j] = res[j] - h;
+        j = j + 1;
+    }
+    // report
+    let p:i64 = 0;
+    p = lb_puts(lb, p, "RESID n=");
+    p = lb_puti(lb, p, n);
+    p = lb_puts(lb, p, " nr=");
+    p = lb_puti(lb, p, nr);
+    p = lb_puts(lb, p, " q_len=");
+    p = lb_puti(lb, p, q_len);
+    p = lb_puts(lb, p, " use_h=");
+    p = lb_puti(lb, p, use_h);
+    p = lb_puts(lb, p, " boost=");
+    p = lb_putf(lb, p, boost);
+    p = lb_puts(lb, p, " nper=");
+    p = lb_puti(lb, p, nper);
+    lb_emit(lb, p);
+    p = 0;
+    p = lb_puts(lb, p, "RESID res_rms=");
+    p = lb_putf(lb, p, r_sqrt(vr));
+    p = lb_puts(lb, p, " nres_rms=");
+    p = lb_putf(lb, p, r_sqrt(vn/(nr as f64)));
+    p = lb_puts(lb, p, " r2_harm_amp=");
+    p = lb_putf(lb, p, 1.0 - (vn/(nr as f64))/vr);
+    lb_emit(lb, p);
+    if (use_h == 1 and nper > 0) {
+        let am:f64 = 0.0;
+        let per:i64 = 0;
+        while (per < nper) { am = am + amp[per]; per = per + 1; }
+        am = am / (nper as f64);
+        let av:f64 = 0.0;
+        per = 0;
+        while (per < nper) { let d:f64 = amp[per]-am; av = av + d*d; per = per + 1; }
+        p = 0;
+        p = lb_puts(lb, p, "RESID amp_mean=");
+        p = lb_putf(lb, p, am);
+        p = lb_puts(lb, p, " amp_cv=");
+        p = lb_putf(lb, p, r_sqrt(av/(nper as f64))/r_abs(am));
+        lb_emit(lb, p);
+    }
+    // ---- write v6: v5 bytes + extension + footer ----
+    // The extension also carries the WAV header (all bytes up to and including
+    // the 'data' tag+size), so the emitter reproduces the exact container
+    // (e.g. LIST chunks) — byte identity is on the whole file, not just PCM.
+    let wraw:[]u8 = read_all(wpath);
+    let wsz:i64 = wraw.len as i64;
+    let data_off:i64 = 12;
+    while (data_off + 8 < wsz) {
+        if (wraw[data_off] == 100 and wraw[data_off+1] == 97 and wraw[data_off+2] == 116 and wraw[data_off+3] == 97) { break; }
+        let csz:i64 = (wraw[data_off+4] as i64) | ((wraw[data_off+5] as i64) << 8) | ((wraw[data_off+6] as i64) << 16) | ((wraw[data_off+7] as i64) << 24);
+        data_off = data_off + 8 + csz;
+    }
+    let hdr_len:i64 = data_off + 8;
+    if (hdr_len > wsz) { hdr_len = 44; }
+    let ext_start:i64 = q_off + 8*nr;
+    let amp_off:i64 = ext_start + 24;
+    let seeds_off:i64 = amp_off + 8*nper;
+    let nres_off:i64 = seeds_off + 8*P;
+    let hdr_off:i64 = nres_off + 8*nr;
+    let total:i64 = hdr_off + 8 + hdr_len + 16;
+    let out:[]u8 = nio_alloc(total as i32);
+    // copy v5 prefix
+    let ci:i64 = 0;
+    while (ci < ext_start) {
+        out[ci] = m[ci];
+        ci = ci + 1;
+    }
+    d_put64(out, ext_start, n);
+    d_put64(out, ext_start+8, use_h);
+    d_put64(out, ext_start+16, nper);
+    let ai:i64 = 0;
+    while (ai < nper) {
+        d_putf64(out, amp_off + 8*ai, amp[ai]);
+        ai = ai + 1;
+    }
+    let si:i64 = 0;
+    while (si < P) {
+        d_put64(out, seeds_off + 8*si, x[si] as i64);
+        si = si + 1;
+    }
+    j = 0;
+    while (j < nr) {
+        d_putf64(out, nres_off + 8*j, nres[j]);
+        j = j + 1;
+    }
+    // wav header (container bytes for full-file identity)
+    d_put64(out, hdr_off, hdr_len);
+    let hi:i64 = 0;
+    while (hi < hdr_len) {
+        out[hdr_off+8+hi] = wraw[hi];
+        hi = hi + 1;
+    }
+    d_put64(out, total-16, n);
+    // magic 'V6EXACT!'
+    out[total-8] = 86;
+    out[total-7] = 54;
+    out[total-6] = 69;
+    out[total-5] = 88;
+    out[total-4] = 65;
+    out[total-3] = 67;
+    out[total-2] = 84;
+    out[total-1] = 33;
+    let wr:i64 = write_all(opath, out);
+    p = 0;
+    p = lb_puts(lb, p, "RESID wrote v6 bytes=");
+    p = lb_puti(lb, p, total);
+    p = lb_puts(lb, p, " rc=");
+    p = lb_puti(lb, p, wr);
+    lb_emit(lb, p);
+    nio_free(out);
+    nio_free(res); nio_free(nres); nio_free(amp); nio_free(n1);
+    nio_free(m); nio_free(mpath); nio_free(wpath); nio_free(opath); nio_free(lb);
+    return;
+}
