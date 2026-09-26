@@ -67,8 +67,14 @@ Changes from v1:
 - All within 5%. Consistent +1.6–2.2% sharp bias (synthetic-specific; not
   corrected to avoid overfitting calibration).
 
-**Real (31-clip, fast_probe):** IN PROGRESS (1/31 clips as of 2026-09-26 06:30 UTC).
-Interim clip 000: N=66, C=57, W=47, headline **0.7121** (vs v1 0.0354).
+**Real (31-clip, fast_probe):** COMPLETE (2026-09-26 07:31 UTC).
+N=1,836 inband voiced frames, C=1,543 confident (coverage 84.0%), W=1,306.
+Headline **within5/N = 0.7113** (bar 0.90). within5/C = 0.8464.
+Voiced miss rate 16.0% (293/1836); unvoiced false-voice 7.2% (312/4317).
+Per-band W/N: b1 0.5782 (n=147), b2 0.7131 (n=596), b3 0.7283 (n=1093).
+Minimum confident truth: b1 62.2 Hz, b2 80.1 Hz, b3 100.0 Hz.
+Confidently-wrong (non-octave): 2+2+2=6; octave errors: 1 (b3).
+Jitter |d_est-d_ref|/mean: median 0.0123, p90 0.0481 (n=1271).
 All 9 misses at voicing boundaries. 10 err>5% are temporal smearing (estimator
 lags rapid F0 falls), not outliers.
 

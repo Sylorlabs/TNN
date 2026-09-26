@@ -108,3 +108,10 @@ Original 3×31 sequential run killed (load avg 24 on 2 cores → 15+ hr).
 Revised: 3× determinism on clips 000/001/002 (9 runs, proves binary
 determinism) + 1× full 31-clip pass (headline number). The 31-clip headline
 inherits determinism from the proven binary (pure Zag, zero RNG).
+
+## 2026-09-26 07:31 UTC — v2 31-clip run COMPLETE
+
+All 31 clips (fast_probe, single pass). Final: N=1836, C=1543, W=1306,
+headline within5/N = 0.7113 (bar 0.90). Per-band: b1 0.5782, b2 0.7131,
+b3 0.7283. Confidently-wrong non-octave: 6; octave: 1. Jitter median 0.0123.
+Confirms F0-BLINDSPOT-OPEN (below FIXED bar, structural ceiling as predicted).
