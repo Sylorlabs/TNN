@@ -1,0 +1,287 @@
+// ==================== V4C: pose normalization (measured landmarks) ====================
+// TNN aligns the donor head to the recipient slot from MEASURED landmarks:
+// mask centroids, principal axes (eigenvectors via closed form, no trig),
+// and axis lengths. It tries similarity vs anisotropic scaling, selects by
+// warped-mask IoU with an extreme-stretch veto. The 180-degree axis flip is
+// resolved by the snout-inside-slot test. All in the plan language
+// (translation / rotation / scale), all traced by the orchestrator.
+
+fn v4_isqrt(x:i64) i64 {
+    if (x <= 0) { return 0; }
+    let r:i64 = x;
+    let q:i64 = 0;
+    while (q < 60) {
+        let nr:i64 = (r + x / r) / 2;
+        if (nr >= r) { break; }
+        r = nr;
+        q = q + 1;
+    }
+    return r;
+}
+
+// Moments of a 0/1 mask. out (10 qwords): n, cx, cy (x1024), cxx, cyy,
+// cxy (x1024, centered), x0, y0, x1, y1.
+fn v4_moments(mask:[]u8, W:i64, H:i64, out:[]u8) void {
+    let N:i64 = W * H;
+    let n:i64 = 0;
+    let sx:i64 = 0;
+    let sy:i64 = 0;
+    let x0:i64 = W;
+    let y0:i64 = H;
+    let x1:i64 = -1;
+    let y1:i64 = -1;
+    let p:i64 = 0;
+    while (p < N) {
+        if (mask[p] != 0) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            n = n + 1;
+            sx = sx + x;
+            sy = sy + y;
+            if (x < x0) { x0 = x; }
+            if (x > x1) { x1 = x; }
+            if (y < y0) { y0 = y; }
+            if (y > y1) { y1 = y; }
+        }
+        p = p + 1;
+    }
+    h_put64(out, 0, n);
+    h_put64(out, 48, x0);
+    h_put64(out, 56, y0);
+    h_put64(out, 64, x1);
+    h_put64(out, 72, y1);
+    if (n == 0) {
+        h_put64(out, 8, 0);
+        h_put64(out, 16, 0);
+        h_put64(out, 24, 0);
+        h_put64(out, 32, 0);
+        h_put64(out, 40, 0);
+        return;
+    }
+    let cx:i64 = sx * 1024 / n;
+    let cy:i64 = sy * 1024 / n;
+    h_put64(out, 8, cx);
+    h_put64(out, 16, cy);
+    let sxx:i64 = 0;
+    let syy:i64 = 0;
+    let sxy:i64 = 0;
+    p = 0;
+    while (p < N) {
+        if (mask[p] != 0) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            let dx:i64 = x * 1024 - cx;
+            let dy:i64 = y * 1024 - cy;
+            sxx = sxx + dx * dx / 1024;
+            syy = syy + dy * dy / 1024;
+            sxy = sxy + dx * dy / 1024;
+        }
+        p = p + 1;
+    }
+    // sxx is x(1024^2); cxx x1024 = sxx / (n*1024)
+    h_put64(out, 24, sxx / (n * 1024));
+    h_put64(out, 32, syy / (n * 1024));
+    h_put64(out, 40, sxy / (n * 1024));
+}
+
+// Principal eigenvector of [[cxx,cxy],[cxy,cyy]] (all x1024).
+// out[32]: vx, vy (x1024 unit), lam1, lam2 (x1024, lam1>=lam2).
+fn v4_eigenvec(cxx:i64, cxy:i64, cyy:i64, out:[]u8) void {
+    let tr:i64 = cxx + cyy;
+    let det:i64 = (cxx * cyy - cxy * cxy) / 1024;
+    let disc:i64 = tr * tr / 1024 - 4 * det;
+    if (disc < 0) { disc = 0; }
+    let sq:i64 = v4_isqrt(disc * 1024);
+    let lam1:i64 = (tr + sq) / 2;
+    let lam2:i64 = (tr - sq) / 2;
+    let vx:i64 = cxy;
+    let vy:i64 = lam1 - cxx;
+    // The axis is undirected; fix a canonical sign for determinism:
+    // vx>0, or (vx==0 and vy>0). The 180-degree flip is tried explicitly
+    // by the caller via the snout-inside-slot test.
+    if (vx == 0 && vy == 0) {
+        if (cxx >= cyy) { vx = 1024; vy = 0; } else { vx = 0; vy = 1024; }
+    } else {
+        // canonical: first nonzero of (vx,vy) positive... use: vx>0 or (vx==0 and vy>0)
+        if (vx < 0 || (vx == 0 && vy < 0)) { vx = 0 - vx; vy = 0 - vy; }
+    }
+    let ln:i64 = v4_isqrt(vx * vx + vy * vy);
+    if (ln > 0) {
+        vx = vx * 1024 / ln;
+        vy = vy * 1024 / ln;
+    } else {
+        vx = 1024;
+        vy = 0;
+    }
+    h_put64(out, 0, vx);
+    h_put64(out, 8, vy);
+    h_put64(out, 16, lam1);
+    h_put64(out, 24, lam2);
+}
+
+// Inverse affine slot->donor. A = s1*(us x ud) + s2*(usp x udp) (x1024).
+// Ainv = adj(A)/det, x1024. out[40]: Ainv00,Ainv01,Ainv10,Ainv11,det(x1024),rc.
+// rc=0 ok; rc=1 degenerate (det too small).
+fn v4_ainv(usx:i64, usy:i64, udx:i64, udy:i64, s1:i64, s2:i64, out:[]u8) void {
+    let uspx:i64 = 0 - usy;
+    let uspy:i64 = usx;
+    let udpx:i64 = 0 - udy;
+    let udpy:i64 = udx;
+    let t1x:i64 = s1 * usx / 1024;
+    let t1y:i64 = s1 * usy / 1024;
+    let t2x:i64 = s2 * uspx / 1024;
+    let t2y:i64 = s2 * uspy / 1024;
+    let A00:i64 = (t1x * udx + t2x * udpx) / 1024;
+    let A01:i64 = (t1x * udy + t2x * udpy) / 1024;
+    let A10:i64 = (t1y * udx + t2y * udpx) / 1024;
+    let A11:i64 = (t1y * udy + t2y * udpy) / 1024;
+    let det:i64 = (A00 * A11 - A01 * A10) / 1024;
+    h_put64(out, 32, det);
+    if (det > -10 && det < 10) {
+        h_put64(out, 36, 1);
+        return;
+    }
+    // adj = [[A11,-A01],[-A10,A00]]; Ainv = adj*1024/det
+    h_put64(out, 0, A11 * 1024 / det);
+    h_put64(out, 8, (0 - A01) * 1024 / det);
+    h_put64(out, 16, (0 - A10) * 1024 / det);
+    h_put64(out, 24, A00 * 1024 / det);
+    h_put64(out, 36, 0);
+}
+
+// Warp the donor (stable frame + head mask) into the slot bbox.
+// For each slot-bbox pixel q: p = dc + Ainv*(q - sc); bilinear sample.
+// out_px: w*h*3 RGB; out_m: w*h mask (nearest). w=sx1-sx0+1, h=sy1-sy0+1.
+fn v4_warp(sdonor:[]u8, donor_mask:[]u8, W:i64, H:i64, Ainv:[]u8, dcx1024:i64, dcy1024:i64, scx:i64, scy:i64, sx0:i64, sy0:i64, sx1:i64, sy1:i64, out_px:[]u8, out_m:[]u8) void {
+    let a00:i64 = h_get64(Ainv, 0);
+    let a01:i64 = h_get64(Ainv, 8);
+    let a10:i64 = h_get64(Ainv, 16);
+    let a11:i64 = h_get64(Ainv, 24);
+    let qy:i64 = sy0;
+    while (qy <= sy1) {
+        let qx:i64 = sx0;
+        while (qx <= sx1) {
+            let rx:i64 = qx - scx;
+            let ry:i64 = qy - scy;
+            let px1024:i64 = dcx1024 + a00 * rx + a01 * ry;
+            let py1024:i64 = dcy1024 + a10 * rx + a11 * ry;
+            let oi:i64 = ((qy - sy0) * (sx1 - sx0 + 1) + (qx - sx0));
+            out_m[oi] = 0;
+            if (px1024 >= 0 && py1024 >= 0 && px1024 < (W * 1024) && py1024 < (H * 1024)) {
+                let x0:i64 = px1024 / 1024;
+                let y0:i64 = py1024 / 1024;
+                let fx:i64 = px1024 - x0 * 1024;
+                let fy:i64 = py1024 - y0 * 1024;
+                let x1:i64 = x0 + 1;
+                let y1:i64 = y0 + 1;
+                if (x1 >= W) { x1 = W - 1; }
+                if (y1 >= H) { y1 = H - 1; }
+                let c:i64 = 0;
+                while (c < 3) {
+                    let v00:i64 = sdonor[(y0 * W + x0) * 3 + c] as i64;
+                    let v10:i64 = sdonor[(y0 * W + x1) * 3 + c] as i64;
+                    let v01:i64 = sdonor[(y1 * W + x0) * 3 + c] as i64;
+                    let v11:i64 = sdonor[(y1 * W + x1) * 3 + c] as i64;
+                    let v:i64 = (v00 * (1024 - fx) * (1024 - fy) + v10 * fx * (1024 - fy) + v01 * (1024 - fx) * fy + v11 * fx * fy) / 1048576;
+                    out_px[oi * 3 + c] = v as u8;
+                    c = c + 1;
+                }
+                out_m[oi] = donor_mask[y0 * W + x0];
+            } else {
+                let c2:i64 = 0;
+                while (c2 < 3) { out_px[oi * 3 + c2] = 0; c2 = c2 + 1; }
+            }
+            qx = qx + 1;
+        }
+        qy = qy + 1;
+    }
+}
+
+// Recipient slot: motion subject split by neck-line; head part above.
+// out_m: N-byte slot mask. mo: 80-byte moments. info[32]: neck, subj_area,
+// head_area, ethr. Returns 0 or negative.
+fn v4_slot(st:[]u8, W:i64, H:i64, nf:i64, out_m:[]u8, mo:[]u8, info:[]u8) i64 {
+    let N:i64 = W * H;
+    let E:[]u8 = nio_alloc(614400);
+    if (seg_motion_E(st, E, W, H, nf) != 0) { return -710; }
+    let hist:[]u8 = nio_alloc(8192);
+    seg_histE(E, N, hist);
+    let eb:i64 = seg_pct_bin(hist, 1024, N, 85);
+    nio_free(hist);
+    let ethr:i64 = eb * 4;
+    let subj:[]u8 = nio_alloc(76800);
+    let p:i64 = 0;
+    while (p < N) {
+        if (h_get64(E, p * 8) > ethr) { subj[p] = 1; } else { subj[p] = 0; }
+        p = p + 1;
+    }
+    nio_free(E);
+    let tmp:[]u8 = nio_alloc(76800);
+    seg_open(subj, tmp, W, H, 3);
+    seg_fill_holes(subj, W, H);
+    nio_free(tmp);
+    let lab:[]u8 = nio_alloc(614400);
+    let nl:i64 = seg_label(subj, lab, W, H);
+    let sid:i64 = seg_largest_id(lab, nl, W, H);
+    if (sid <= 0) { return -711; }
+    // bbox of subject
+    let x0:i64 = W;
+    let y0:i64 = H;
+    let x1:i64 = -1;
+    let y1:i64 = -1;
+    p = 0;
+    while (p < N) {
+        if (h_get64(lab, p * 8) == sid) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            if (x < x0) { x0 = x; }
+            if (x > x1) { x1 = x; }
+            if (y < y0) { y0 = y; }
+            if (y > y1) { y1 = y; }
+        }
+        p = p + 1;
+    }
+    nio_free(lab);
+    // neck-line from motion (needs E again? seg_neck takes E and mask)
+    // Recompute E is wasteful; instead reuse: we freed E. Recompute quickly.
+    // (seg_motion_E is ~2M ops; acceptable.)
+    let E2:[]u8 = nio_alloc(614400);
+    if (seg_motion_E(st, E2, W, H, nf) != 0) { return -712; }
+    let neck:i64 = seg_neck(E2, subj, W, H, x0, x1, y0, y1);
+    nio_free(E2);
+    if (neck < 0) { neck = (y0 + y1) / 2; }
+    // head part = subject pixels above neck
+    let ha:i64 = 0;
+    p = 0;
+    while (p < N) {
+        out_m[p] = 0;
+        if (subj[p] != 0) {
+            let y:i64 = p / W;
+            if (y < neck) { out_m[p] = 1; ha = ha + 1; }
+        }
+        p = p + 1;
+    }
+    nio_free(subj);
+    if (ha < 500) { return -713; }
+    v4_moments(out_m, W, H, mo);
+    h_put64(info, 0, neck);
+    h_put64(info, 8, ethr);
+    h_put64(info, 16, ha);
+    return 0;
+}
+// Forward affine A = s1*(us x ud) + s2*(usp x udp), x1024.
+// Used for warping single points donor->slot (flip test).
+fn v4_abuild(usx:i64, usy:i64, udx:i64, udy:i64, s1:i64, s2:i64, out:[]u8) void {
+    let uspx:i64 = 0 - usy;
+    let uspy:i64 = usx;
+    let udpx:i64 = 0 - udy;
+    let udpy:i64 = udx;
+    let t1x:i64 = s1 * usx / 1024;
+    let t1y:i64 = s1 * usy / 1024;
+    let t2x:i64 = s2 * uspx / 1024;
+    let t2y:i64 = s2 * uspy / 1024;
+    h_put64(out, 0, (t1x * udx + t2x * udpx) / 1024);
+    h_put64(out, 8, (t1x * udy + t2x * udpy) / 1024);
+    h_put64(out, 16, (t1y * udx + t2y * udpx) / 1024);
+    h_put64(out, 24, (t1y * udy + t2y * udpy) / 1024);
+}
