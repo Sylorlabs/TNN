@@ -48,12 +48,13 @@ Missed: the TWO-burst grouping (102 shredded 20 ms triggers, no grouping);
 low-frequency dominance understated (band_low 0.513 vs 0.55 sentence threshold).
 Hallucinated: 100 ms rhythm (H1).
 
-### A2 bell buoy — 1 MATCH / 5 MISS / 1 PARTIAL / 1 weak / 1 HALLUCINATION
-Matched only "no glide". Missed: ~10 s group regularity (IOI dominated by
-intra-strike triggers), double-strike structure, high partials to 8 kHz
-(250 Hz DFT bins too coarse), the water bed, and the true bell/water layer
-split (reported "tonal bed with transients" — inverted). Hallucinated: 100 ms
-rhythm (H2). Boundary: 0.5 s env-autocorr maxlag cannot see 10 s periods.
+### A2 bell buoy — 0 MATCH / 5 MISS / 2 PARTIAL / 1 WEAK MISS / 1 HALLUCINATION
+Partially matched: "no glide" (strike-group ~10 s period missed — 0.5 s
+env-autocorr maxlag cannot see it). Missed: ~10 s group regularity (IOI
+dominated by intra-strike triggers), double-strike structure, high partials to
+8 kHz (250 Hz DFT bins too coarse), the water bed, and the true bell/water
+layer split (reported "tonal bed with transients" — inverted). "Sustained"
+overstates decaying strikes (weak). Hallucinated: 100 ms rhythm (H2).
 
 ### A3 crickets — 2 MATCH / 3 MISS / 1 HALLUCINATION
 Matched: 3.3 Hz chirp rhythm (human est. ~3-5/s), no glide. Missed: true band
@@ -62,7 +63,7 @@ aliasing — honest boundary); harmonic traces; fade in/out framing.
 Hallucinated: separate transient-event layer (H3) — the layer-separation
 boundary: one AM process counted as two layers.
 
-### I1 frost — 1 MATCH / 3 MISS / 1 HALLUCINATION
+### I1 frost — 1 MATCH / 4 MISS / 1 HALLUCINATION
 Matched: no dominant edge orientation. Missed: dendritic branching (no shape
 concepts), dark background, monochrome/high contrast (withheld). Hallucinated:
 "smooth, little fine detail" (H4) — analysis-scale boundary.
@@ -71,7 +72,7 @@ concepts), dark background, monochrome/high contrast (withheld). Hallucinated:
 Matched: vivid varied color (coarse). Missed: curvature (no curve concepts),
 river, buildings, detail. Hallucinated: "smooth" (H5) — same scale boundary.
 
-### V1 waves — 2 MATCH / 3 MISS / 1 weak
+### V1 waves — 1 MATCH / 3 MISS / 1 PARTIAL / 1 WEAK MISS
 Matched: no cuts/one shot; direction withheld (as the human did). Missed: the
 static railing bars, the water band, and the actual water motion (block matcher
 finds no consistent vectors in churning texture: mean 0.52 px/frame). Weak miss:
