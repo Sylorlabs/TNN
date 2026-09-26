@@ -16,7 +16,19 @@ A pure-Zag fork combining three parent ideas:
 
 - **"Take matches ONE vocabulary atom"**: Enforced throughout. Oversized rectangles subdivide; one TAKE = one atom. (Parent 2's critical regression was one TAKE aggregating many coarse atoms → 21.42 dB. Fixed.)
 - **Coarsest sufficient scale**: The repetition probe selects the scale set. Zoom is lazy — finer vocabularies are built only for candidate regions, from those regions' full blocks.
-- **No arbitrary limits**: Micah's standing law. Pending-list capacities are derived from fixture dimensions (dcap=16384 covers the 512×187 worst case; documented, not a design limit).
+- **No arbitrary limits**: Micah's standing law. All working capacities are
+  dimension-derived with a stated proof, never fixture constants
+  (polish 2026-09-26): the SHAPES-ZOOM pending banks `dcap = w*h+1`
+  (banks hold image partitions into take-rects, each >= 1 px); the
+  candidate scratch bank `scap = s_of(0)^2+1` (one candidate <= the
+  coarsest scale); region/leaf/segment/walk capacities `w*h+1`
+  (regions, CART leaves, segments, and walks are all disjoint
+  >=1-px records); Bresenham chord buffers `w+h+1` (|dx|+|dy|+1 pixels).
+  Every guard is provably dead on every input; they remain as
+  defense-in-depth. Verified: post-polish runs are byte-identical to the
+  pre-polish official runs (no old capacity ever bound on the fixture).
+  Residual: the 4MB input-file staging buffer and 4MB trace buffer are
+  still fixed (I/O and logging, not decision machinery).
 - **Zero RNG**: All decisions deterministic given state. Two byte-identical official runs required.
 
 ## What was NOT done

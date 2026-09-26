@@ -32,5 +32,22 @@ The NEW fork wins on all four metrics. The win is a free lunch: better quality A
 2. **Fixed-block SHAPES + zoom**: The vocabulary matches the block geometry. Zoom refines only where needed (79/96 blocks), avoiding parent 1's uniform 4-scale cost and parent 3's fixed-grid waste.
 3. **Honest LINES**: Only 27 segments because the first two layers already explained the structure. Parent 1 needed 48; the better SMOOTH+SHAPES leaves less for LINES.
 
-## Parent 1 byte-count discrepancy (standing note)
-Parent 1's verdict reports 1,963,911 bytes; its task text reports 1,958,486 bytes (5,425-byte difference). This fork reports 636,451 bytes (the `knowmap.bin` file size). The comparison uses the verdict's 1,963,911 figure. The discrepancy is noted, not resolved.
+## Parent 1 byte-count discrepancy — RESOLVED
+Parent 1's verdict figure **1,963,911 bytes is correct**. Evidence:
+parent 1's `run/knowmap.bin` and `run2/knowmap.bin` are both exactly
+1,963,911 bytes; `run/metrics.json` records `"kb": 1963911`; RUNLOG.md,
+VERDICT.md, FREELUNCH.md, and RUNLOG_FL.md all state 1,963,911. The
+1,958,486 figure from the task text appears in no artifact on disk and
+matches no run — an erroneous brief number. The comparison stands:
+**636,451 vs 1,963,911**.
+
+## Polish verdict (2026-09-26): capacities dimension-derived, bars held
+All working capacities converted from fixture-derived/round constants to
+proven dimension-derived bounds (`dcap=w*h+1`, `scap=s_of(0)^2+1`,
+region/leaf/segment/walk caps `=w*h+1`, Bresenham `=w+h+1`; proofs in
+code). Two fresh post-polish runs are byte-identical to the pre-polish
+official runs and to each other; exact closure kept (renderA SHA =
+sealed fixture SHA); metrics unchanged at **46.35 dB / 0.9955**.
+Diagonal staircasing closed by measurement: diagonal-edge neighborhoods
+score 45.04 dB vs 43.81 dB axis-aligned (diagonal is the better-handled
+class) — oriented atoms would buy nothing; the zoom covers it.
