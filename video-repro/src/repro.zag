@@ -1,0 +1,437 @@
+// repro.zag — TNN native video reproduction mechanism.
+// Pure Zag. Zero RNG anywhere in any path. Deterministic: reruns byte-identical.
+//
+// What this IS (honest design note):
+//   A minimal deliberate-memory substrate: memories are records with
+//   provenance (frame_id, row_id, episode), committed deliberately at
+//   ingestion and recovered by deliberate recall — a content-addressed
+//   scan over the store keyed on (frame,row), NOT a pointer memcpy.
+//   What it is NOT: no strength dynamics (fidelity test, not strength test),
+//   no semantic encoding in the verbatim path.
+// Two native conditions:
+//   verbatim — full-resolution row memories (tests: does the machinery
+//              preserve detail end to end?)
+//   encoded  — ingestion deliberately stores a 2x2-downsampled memory
+//              (160x120); recall upsamples nearest-neighbor. The ONLY loss
+//              is the documented ingest encoding (knowledge), so the
+//              white-box traces can prove knowledge-vs-machinery attribution.
+// The byte-copy control lives OUTSIDE this binary (plain cp) — this binary
+// never takes a byte-copy shortcut; recall always routes through mem_recall.
+//
+// Usage (build from this file's directory as cwd):
+//   repro selftest
+//   repro ingest  verbatim|encoded <srcdir> <workdir>
+//   repro recall  verbatim|encoded <workdir> <outdir>
+@import("../../tnn-lab/toolchain/R33_NATIVE_IO_V1.zag")
+
+// ---------------- u64 LE helpers ( []u8 arenas only; never as []i32 ) ------
+fn h_put64(b:[]u8, o:i64, v:i64) void {
+    b[o] = (v & 255) as u8;
+    b[o + 1] = ((v >> 8) & 255) as u8;
+    b[o + 2] = ((v >> 16) & 255) as u8;
+    b[o + 3] = ((v >> 24) & 255) as u8;
+    b[o + 4] = ((v >> 32) & 255) as u8;
+    b[o + 5] = ((v >> 40) & 255) as u8;
+    b[o + 6] = ((v >> 48) & 255) as u8;
+    b[o + 7] = ((v >> 56) & 255) as u8;
+}
+fn h_get64(b:[]u8, o:i64) i64 {
+    let v:i64 = (b[o] as i64) + (b[o + 1] as i64) * 256;
+    v = v + (b[o + 2] as i64) * 65536 + (b[o + 3] as i64) * 16777216;
+    v = v + (b[o + 4] as i64) * 4294967296 + (b[o + 5] as i64) * 1099511627776;
+    v = v + (b[o + 6] as i64) * 281474976710656 + (b[o + 7] as i64) * 72057594037927936;
+    return v;
+}
+// ---------------- FNV-1a 64 ----------------
+fn fnv(b:[]u8, o:i64, n:i64) i64 {
+    let h:i64 = -3750763034362895579;
+    let i:i64 = 0;
+    while (i < n) {
+        h = h ^ (b[o + i] as i64);
+        h = h * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+fn put_hex(b:[]u8, o:i64, v:i64) void {
+    let sh:i64 = 60;
+    let k:i64 = 0;
+    while (k < 16) {
+        let nb:i64 = (v >> sh) & 15;
+        if (nb < 10) { b[o + k] = (48 + nb) as u8; } else { b[o + k] = (87 + nb) as u8; }
+        sh = sh - 4;
+        k = k + 1;
+    }
+}
+// ---------------- filenames ----------------
+fn mk_frame_name(out:[]u8, f:i64) void {
+    out[0] = 102; out[1] = 114; out[2] = 97; out[3] = 109; out[4] = 101; out[5] = 95;
+    out[6] = (48 + (f / 10)) as u8;
+    out[7] = (48 + (f % 10)) as u8;
+    out[8] = 46; out[9] = 112; out[10] = 112; out[11] = 109;
+}
+fn mk_store_name(out:[]u8, enc:i64) void {
+    // "store_verbatim.bin" (18) or "store_encoded.bin" (17)
+    out[0] = 115; out[1] = 116; out[2] = 111; out[3] = 114; out[4] = 101; out[5] = 95;
+    let p:i64 = 6;
+    if (enc == 0) {
+        out[6] = 118; out[7] = 101; out[8] = 114; out[9] = 98; out[10] = 97;
+        out[11] = 116; out[12] = 105; out[13] = 109; p = 14;
+    } else {
+        out[6] = 101; out[7] = 110; out[8] = 99; out[9] = 111; out[10] = 100;
+        out[11] = 101; out[12] = 100; p = 13;
+    }
+    out[p] = 46; out[p + 1] = 98; out[p + 2] = 105; out[p + 3] = 110;
+}
+fn mk_trace_name(out:[]u8, is_ingest:i64, enc:i64) void {
+    // "trace_ingest_verbatim.txt" (25) / "trace_recall_encoded.txt" (22) etc.
+    out[0] = 116; out[1] = 114; out[2] = 97; out[3] = 99; out[4] = 101; out[5] = 95;
+    let p:i64 = 6;
+    if (is_ingest == 1) {
+        out[6] = 105; out[7] = 110; out[8] = 103; out[9] = 101; out[10] = 115; out[11] = 116;
+        p = 12;
+    } else {
+        out[6] = 114; out[7] = 101; out[8] = 99; out[9] = 97; out[10] = 108; out[11] = 108;
+        p = 12;
+    }
+    out[p] = 95; p = p + 1;
+    if (enc == 0) {
+        out[p] = 118; out[p + 1] = 101; out[p + 2] = 114; out[p + 3] = 98;
+        out[p + 4] = 97; out[p + 5] = 116; out[p + 6] = 105; out[p + 7] = 109; p = p + 8;
+    } else {
+        out[p] = 101; out[p + 1] = 110; out[p + 2] = 99; out[p + 3] = 111;
+        out[p + 4] = 100; out[p + 5] = 101; out[p + 6] = 100; p = p + 7;
+    }
+    out[p] = 46; out[p + 1] = 116; out[p + 2] = 120; out[p + 3] = 116;
+}
+fn name_len_frame() i64 { return 12; }
+fn name_len_store(enc:i64) i64 {
+    if (enc == 0) { return 18; }
+    return 17;
+}
+fn name_len_trace(is_ingest:i64, enc:i64) i64 {
+    if (enc == 0) { return 25; }
+    return 24;
+}
+// ---------------- PPM I/O ----------------
+fn read_ppm(root:i64, name:[]u8, nlen:i64, px:[]u8) i64 {
+    let fd:i64 = nio_open_child(root, name[0..nlen], 0);
+    if (fd < 0) { return -1; }
+    let buf:[]u8 = nio_alloc(240000);
+    if (buf.len == 0) { nio_close(fd); return -2; }
+    let n:i64 = nio_read_exact(fd, buf, 240000);
+    nio_close(fd);
+    if (n < 0) { nio_free(buf); return -3; }
+    if (buf[0] != 80 || buf[1] != 54 || buf[2] != 10) { nio_free(buf); return -4; }
+    let p:i64 = 3;
+    let w:i64 = 0;
+    while (buf[p] != 32) { w = w * 10 + ((buf[p] as i64) - 48); p = p + 1; }
+    p = p + 1;
+    let h:i64 = 0;
+    while (buf[p] != 10) { h = h * 10 + ((buf[p] as i64) - 48); p = p + 1; }
+    p = p + 1;
+    let mv:i64 = 0;
+    while (buf[p] != 10) { mv = mv * 10 + ((buf[p] as i64) - 48); p = p + 1; }
+    p = p + 1;
+    if (w != 320 || h != 240 || mv != 255) { nio_free(buf); return -5; }
+    if (n != p + 230400) { nio_free(buf); return -6; }
+    let i:i64 = 0;
+    while (i < 230400) { px[i] = buf[p + i]; i = i + 1; }
+    nio_free(buf);
+    return 0;
+}
+fn ppm_header(b:[]u8, o:i64) void {
+    b[o] = 80; b[o + 1] = 54; b[o + 2] = 10; b[o + 3] = 51; b[o + 4] = 50;
+    b[o + 5] = 48; b[o + 6] = 32; b[o + 7] = 50; b[o + 8] = 52; b[o + 9] = 48;
+    b[o + 10] = 10; b[o + 11] = 50; b[o + 12] = 53; b[o + 13] = 53; b[o + 14] = 10;
+}
+fn write_buf(root:i64, name:[]u8, nlen:i64, b:[]u8, n:i64) i64 {
+    let fd:i64 = nio_open_child(root, name[0..nlen], 1);
+    if (fd < 0) { return -1; }
+    let done:i64 = 0;
+    while (done < n) {
+        let c:i64 = n - done;
+        if (c > 1048576) { c = 1048576; }
+        let part:[]u8 = b[done..done + c];
+        let wr:i64 = nio_write_all(fd, part);
+        if (wr != c) { nio_close(fd); return -2; }
+        done = done + c;
+    }
+    nio_sync(fd);
+    nio_close(fd);
+    return 0;
+}
+// ---------------- deliberate memory substrate ----------------
+// arena: [0..8) nslots u64, [8..16) rows u64, [16..24) plen u64, [24..32) episode u64
+// headers: 32B/slot: frame, row, episode, payload_off ; then payloads
+fn mem_add(st:[]u8, f:i64, r:i64, ep:i64, payload:[]u8, po:i64, plen:i64) i64 {
+    let rows:i64 = h_get64(st, 8);
+    let ns:i64 = h_get64(st, 0);
+    let slot:i64 = f * rows + r;
+    let ho:i64 = 32 + slot * 32;
+    h_put64(st, ho, f);
+    h_put64(st, ho + 8, r);
+    h_put64(st, ho + 16, ep);
+    let q:i64 = 32 + ns * 32 + slot * plen;
+    h_put64(st, ho + 24, q);
+    let i:i64 = 0;
+    while (i < plen) { st[q + i] = payload[po + i]; i = i + 1; }
+    return slot;
+}
+// deliberate recall: content-addressed scan on the (frame,row) provenance key
+fn mem_recall(st:[]u8, f:i64, r:i64, out:[]u8, oo:i64) i64 {
+    let ns:i64 = h_get64(st, 0);
+    let plen:i64 = h_get64(st, 16);
+    let s:i64 = 0;
+    while (s < ns) {
+        let ho:i64 = 32 + s * 32;
+        let sf:i64 = h_get64(st, ho);
+        let sr:i64 = h_get64(st, ho + 8);
+        if (sf == f) {
+            if (sr == r) {
+                let q:i64 = h_get64(st, ho + 24);
+                let i:i64 = 0;
+                while (i < plen) { out[oo + i] = st[q + i]; i = i + 1; }
+                return 1;
+            }
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+// ---------------- encoded-path resamplers (deterministic) ----------------
+fn downsample(px:[]u8, ds:[]u8) void {
+    let y:i64 = 0;
+    while (y < 120) {
+        let x:i64 = 0;
+        while (x < 160) {
+            let c:i64 = 0;
+            while (c < 3) {
+                let o00:i64 = ((y * 2) * 320 + x * 2) * 3 + c;
+                let o01:i64 = ((y * 2) * 320 + x * 2 + 1) * 3 + c;
+                let o10:i64 = ((y * 2 + 1) * 320 + x * 2) * 3 + c;
+                let o11:i64 = ((y * 2 + 1) * 320 + x * 2 + 1) * 3 + c;
+                let m:i64 = ((px[o00] as i64) + (px[o01] as i64) + (px[o10] as i64) + (px[o11] as i64)) / 4;
+                ds[(y * 160 + x) * 3 + c] = m as u8;
+                c = c + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+fn upsample(ds:[]u8, px:[]u8) void {
+    let y:i64 = 0;
+    while (y < 240) {
+        let x:i64 = 0;
+        while (x < 320) {
+            let sy:i64 = y / 2;
+            let sx:i64 = x / 2;
+            let c:i64 = 0;
+            while (c < 3) {
+                px[(y * 320 + x) * 3 + c] = ds[(sy * 160 + sx) * 3 + c];
+                c = c + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+// ---------------- trace lines (52 bytes each) ----------------
+fn tr_ingest_line(tr:[]u8, o:i64, f:i64, hi:i64, hs:i64) i64 {
+    tr[o] = 73; tr[o + 1] = 78; tr[o + 2] = 71; tr[o + 3] = 69; tr[o + 4] = 83; tr[o + 5] = 84; tr[o + 6] = 32;
+    tr[o + 7] = 102; tr[o + 8] = 61;
+    tr[o + 9] = (48 + (f / 10)) as u8; tr[o + 10] = (48 + (f % 10)) as u8;
+    tr[o + 11] = 32; tr[o + 12] = 72; tr[o + 13] = 73; tr[o + 14] = 61;
+    put_hex(tr, o + 15, hi);
+    tr[o + 31] = 32; tr[o + 32] = 72; tr[o + 33] = 83; tr[o + 34] = 61;
+    put_hex(tr, o + 35, hs);
+    tr[o + 51] = 10;
+    return o + 52;
+}
+fn tr_recall_line(tr:[]u8, o:i64, f:i64, hr:i64, he:i64) i64 {
+    tr[o] = 82; tr[o + 1] = 69; tr[o + 2] = 67; tr[o + 3] = 65; tr[o + 4] = 76; tr[o + 5] = 76; tr[o + 6] = 32;
+    tr[o + 7] = 102; tr[o + 8] = 61;
+    tr[o + 9] = (48 + (f / 10)) as u8; tr[o + 10] = (48 + (f % 10)) as u8;
+    tr[o + 11] = 32; tr[o + 12] = 72; tr[o + 13] = 82; tr[o + 14] = 61;
+    put_hex(tr, o + 15, hr);
+    tr[o + 31] = 32; tr[o + 32] = 72; tr[o + 33] = 69; tr[o + 34] = 61;
+    put_hex(tr, o + 35, he);
+    tr[o + 51] = 10;
+    return o + 52;
+}
+// ---------------- ingest ----------------
+fn do_ingest(src:[]u8, work:[]u8, enc:i64) i64 {
+    let rows:i64 = 240;
+    let plen:i64 = 960;
+    if (enc == 1) { rows = 120; plen = 480; }
+    let ns:i64 = 24 * rows;
+    let stsz:i64 = 32 + ns * 32 + ns * plen;
+    let st:[]u8 = nio_alloc(stsz as i32);
+    if (st.len == 0) { return -50; }
+    h_put64(st, 0, ns);
+    h_put64(st, 8, rows);
+    h_put64(st, 16, plen);
+    h_put64(st, 24, 1);
+    let sroot:i64 = nio_open_root(src);
+    if (sroot < 0) { nio_free(st); return -51; }
+    let wroot:i64 = nio_open_root(work);
+    if (wroot < 0) { nio_close(sroot); nio_free(st); return -52; }
+    let px:[]u8 = nio_alloc(230400);
+    let ds:[]u8 = nio_alloc(57600);
+    let nm:[]u8 = nio_alloc(16);
+    let tr:[]u8 = nio_alloc(2048);
+    let to:i64 = 0;
+    let f:i64 = 0;
+    while (f < 24) {
+        mk_frame_name(nm, f);
+        let rc:i64 = read_ppm(sroot, nm, name_len_frame(), px);
+        if (rc != 0) { nio_close(sroot); nio_close(wroot); return -60 - f; }
+        let hi:i64 = fnv(px, 0, 230400);
+        let hs:i64 = 0;
+        if (enc == 0) {
+            let r:i64 = 0;
+            while (r < 240) {
+                mem_add(st, f, r, 1, px, r * 960, 960);
+                r = r + 1;
+            }
+            let q0:i64 = 32 + ns * 32 + (f * 240) * 960;
+            hs = fnv(st, q0, 230400);
+        } else {
+            downsample(px, ds);
+            let r:i64 = 0;
+            while (r < 120) {
+                mem_add(st, f, r, 1, ds, r * 480, 480);
+                r = r + 1;
+            }
+            let q0:i64 = 32 + ns * 32 + (f * 120) * 480;
+            hs = fnv(st, q0, 57600);
+        }
+        to = tr_ingest_line(tr, to, f, hi, hs);
+        f = f + 1;
+    }
+    let snm:[]u8 = nio_alloc(24);
+    mk_store_name(snm, enc);
+    let wrc:i64 = write_buf(wroot, snm, name_len_store(enc), st, stsz);
+    if (wrc != 0) { nio_close(sroot); nio_close(wroot); return -70; }
+    let tnm:[]u8 = nio_alloc(32);
+    mk_trace_name(tnm, 1, enc);
+    let trc:i64 = write_buf(wroot, tnm, name_len_trace(1, enc), tr, to);
+    nio_close(sroot);
+    nio_close(wroot);
+    nio_free(st); nio_free(px); nio_free(ds); nio_free(nm); nio_free(tr);
+    nio_free(snm); nio_free(tnm);
+    if (trc != 0) { return -71; }
+    return 0;
+}
+// ---------------- recall ----------------
+fn do_recall(work:[]u8, outd:[]u8, enc:i64) i64 {
+    let rows:i64 = 240;
+    let plen:i64 = 960;
+    if (enc == 1) { rows = 120; plen = 480; }
+    let ns:i64 = 24 * rows;
+    let stsz:i64 = 32 + ns * 32 + ns * plen;
+    let wroot:i64 = nio_open_root(work);
+    if (wroot < 0) { return -80; }
+    let oroot:i64 = nio_open_root(outd);
+    if (oroot < 0) { nio_close(wroot); return -81; }
+    let st:[]u8 = nio_alloc(stsz as i32);
+    if (st.len == 0) { nio_close(wroot); nio_close(oroot); return -82; }
+    let snm:[]u8 = nio_alloc(24);
+    mk_store_name(snm, enc);
+    let sfd:i64 = nio_open_child(wroot, snm[0..name_len_store(enc)], 0);
+    if (sfd < 0) { nio_close(wroot); nio_close(oroot); return -83; }
+    let n:i64 = nio_read_exact(sfd, st, stsz as i32);
+    nio_close(sfd);
+    if (n != stsz) { nio_close(wroot); nio_close(oroot); return -84; }
+    if (h_get64(st, 0) != ns) { nio_close(wroot); nio_close(oroot); return -85; }
+    let px:[]u8 = nio_alloc(230400);
+    let ds:[]u8 = nio_alloc(57600);
+    let wb:[]u8 = nio_alloc(230415);
+    ppm_header(wb, 0);
+    let fnm:[]u8 = nio_alloc(16);
+    let tr:[]u8 = nio_alloc(2048);
+    let to:i64 = 0;
+    let f:i64 = 0;
+    while (f < 24) {
+        let hr:i64 = 0;
+        if (enc == 0) {
+            let r:i64 = 0;
+            while (r < 240) {
+                if (mem_recall(st, f, r, px, r * 960) != 1) { nio_close(wroot); nio_close(oroot); return -90 - f; }
+                r = r + 1;
+            }
+            hr = fnv(px, 0, 230400);
+            let i:i64 = 0;
+            while (i < 230400) { wb[15 + i] = px[i]; i = i + 1; }
+        } else {
+            let r:i64 = 0;
+            while (r < 120) {
+                if (mem_recall(st, f, r, ds, r * 480) != 1) { nio_close(wroot); nio_close(oroot); return -90 - f; }
+                r = r + 1;
+            }
+            hr = fnv(ds, 0, 57600);
+            upsample(ds, px);
+            let i:i64 = 0;
+            while (i < 230400) { wb[15 + i] = px[i]; i = i + 1; }
+        }
+        let he:i64 = fnv(wb, 0, 230415);
+        to = tr_recall_line(tr, to, f, hr, he);
+        mk_frame_name(fnm, f);
+        let wrc:i64 = write_buf(oroot, fnm, name_len_frame(), wb, 230415);
+        if (wrc != 0) { nio_close(wroot); nio_close(oroot); return -95 - f; }
+        f = f + 1;
+    }
+    let tnm:[]u8 = nio_alloc(32);
+    mk_trace_name(tnm, 0, enc);
+    let trc:i64 = write_buf(wroot, tnm, name_len_trace(0, enc), tr, to);
+    nio_close(wroot);
+    nio_close(oroot);
+    nio_free(st); nio_free(px); nio_free(ds); nio_free(wb); nio_free(fnm);
+    nio_free(tr); nio_free(snm); nio_free(tnm);
+    if (trc != 0) { return -96; }
+    return 0;
+}
+// ---------------- selftest ----------------
+fn selftest() i32 {
+    let t:[]u8 = nio_alloc(3);
+    t[0] = 97; t[1] = 98; t[2] = 99;
+    let h:i64 = fnv(t, 0, 3);
+    _zag_print("fnv_abc=");
+    _zag_println(_zag_i64_to_str(h));
+    let hx:[]u8 = nio_alloc(16);
+    put_hex(hx, 0, -1);
+    _zag_print("hex_m1=");
+    _zag_println(hx);
+    let hx2:[]u8 = nio_alloc(16);
+    put_hex(hx2, 0, h);
+    _zag_print("hex_abc=");
+    _zag_println(hx2);
+    nio_free(t); nio_free(hx); nio_free(hx2);
+    return 0;
+}
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if (_zag_strcmp(a1, "selftest") == 1) { return selftest(); }
+    let a2:[]u8 = _zag_arg(2);
+    let a3:[]u8 = _zag_arg(3);
+    let a4:[]u8 = _zag_arg(4);
+    let enc:i64 = 0;
+    if (_zag_strcmp(a2, "encoded") == 1) { enc = 1; }
+    if (_zag_strcmp(a1, "ingest") == 1) {
+        let rc:i64 = do_ingest(a3, a4, enc);
+        _zag_print("ingest_rc=");
+        _zag_println(_zag_i64_to_str(rc));
+        if (rc == 0) { return 0; }
+        return 1;
+    }
+    if (_zag_strcmp(a1, "recall") == 1) {
+        let rc:i64 = do_recall(a3, a4, enc);
+        _zag_print("recall_rc=");
+        _zag_println(_zag_i64_to_str(rc));
+        if (rc == 0) { return 0; }
+        return 1;
+    }
+    _zag_println("usage: repro selftest | ingest|recall verbatim|encoded <dir> <dir>");
+    return 99;
+}
