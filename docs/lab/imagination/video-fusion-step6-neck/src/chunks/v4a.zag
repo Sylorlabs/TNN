@@ -1,0 +1,616 @@
+// ==================== V4A: stabilized alignment + donor anatomy ====================
+// TNN deliberates its own stabilization from measured shake (not assumed):
+// per-pair global translation via half-res quadrant block matching on the
+// stillest quadrant (background-dominated by measurement). Residual shake is
+// measured; if stabilization does not reduce it, TNN falls back to
+// unstabilized (all traced by the orchestrator).
+//
+// The donor head is segmented by ANATOMY, not by a fixed dark-segment bbox:
+//   facing  = away from the adjacent white body (measured per frame)
+//   snout   = argmax projection of the dark mask along facing
+//   neck    = width-profile constriction behind the skull (prominence >= 1.3)
+//   head    = snout-connected dark region in front of the neck cut,
+//             minus the motion-distinct leg (stabilized-motion leg split)
+// All tables live in []u8 LE arenas (ZNC-2026-09-21-007: never as []i32).
+
+fn v4_half_gray(px:[]u8, hg:[]u8) void {
+    let y:i64 = 0;
+    while (y < 120) {
+        let x:i64 = 0;
+        while (x < 160) {
+            let s:i64 = 0;
+            let dy:i64 = 0;
+            while (dy < 2) {
+                let dx:i64 = 0;
+                while (dx < 2) {
+                    let o:i64 = ((y * 2 + dy) * 320 + x * 2 + dx) * 3;
+                    s = s + (px[o] as i64) + (px[o + 1] as i64) + (px[o + 2] as i64);
+                    dx = dx + 1;
+                }
+                dy = dy + 1;
+            }
+            hg[y * 160 + x] = (s / 12) as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// mean |h0-h1| over half-res quadrant q (0=TL,1=TR,2=BL,3=BR; each 80x60)
+fn v4_quad_energy(h0:[]u8, h1:[]u8, q:i64) i64 {
+    let x0:i64 = 0;
+    let y0:i64 = 0;
+    if (q == 1) { x0 = 80; }
+    if (q == 2) { y0 = 60; }
+    if (q == 3) { x0 = 80; y0 = 60; }
+    let s:i64 = 0;
+    let y:i64 = 0;
+    while (y < 60) {
+        let x:i64 = 0;
+        while (x < 80) {
+            let d:i64 = (h0[(y0 + y) * 160 + x0 + x] as i64) - (h1[(y0 + y) * 160 + x0 + x] as i64);
+            if (d < 0) { d = 0 - d; }
+            s = s + d;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return s / 4800;
+}
+
+// Block-match quadrant q between h0 and h1, search R=8 half-px.
+// out[16]: dx,dy (half-px) minimizing |h0[y,x]-h1[y+dy,x+dx]| over the
+// interior 44x64 window (so the shifted window never leaves the quadrant).
+fn v4_quad_shift(h0:[]u8, h1:[]u8, q:i64, out:[]u8) void {
+    let x0:i64 = 0;
+    let y0:i64 = 0;
+    if (q == 1) { x0 = 80; }
+    if (q == 2) { y0 = 60; }
+    if (q == 3) { x0 = 80; y0 = 60; }
+    let bdx:i64 = 0;
+    let bdy:i64 = 0;
+    let bs:i64 = -1;
+    let dy:i64 = -8;
+    while (dy <= 8) {
+        let dx:i64 = -8;
+        while (dx <= 8) {
+            let s:i64 = 0;
+            let y:i64 = 8;
+            while (y < 52) {
+                let x:i64 = 8;
+                while (x < 72) {
+                    let a:i64 = h0[(y0 + y) * 160 + x0 + x] as i64;
+                    let b:i64 = h1[(y0 + y + dy) * 160 + x0 + x + dx] as i64;
+                    let d:i64 = a - b;
+                    if (d < 0) { d = 0 - d; }
+                    s = s + d;
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            if (bs < 0 || s < bs) { bs = s; bdx = dx; bdy = dy; }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    h_put64(out, 0, bdx);
+    h_put64(out, 8, bdy);
+}
+
+// Measure per-pair camera translation. shifts[(nf-1)*16]: dx,dy FULL-res px
+// (half-px shift * 2). dbg[(nf-1)*16]: stillest quadrant, its energy.
+// Convention: (dx,dy) minimizes |h_f - h_{f+1} shifted by (dx,dy)|, i.e. the
+// translation that aligns frame f+1 onto frame f.
+fn v4_shake(st:[]u8, nf:i64, shifts:[]u8, dbg:[]u8) i64 {
+    let h0:[]u8 = nio_alloc(19200);
+    let h1:[]u8 = nio_alloc(19200);
+    let fr:[]u8 = nio_alloc(230400);
+    let sh:[]u8 = nio_alloc(16);
+    if (recall_frame(st, 0, fr) != 0) { return -700; }
+    v4_half_gray(fr, h0);
+    let f:i64 = 0;
+    let i:i64 = 0;
+    while (f < nf - 1) {
+        if (recall_frame(st, f + 1, fr) != 0) { return -701; }
+        v4_half_gray(fr, h1);
+        let bq:i64 = 0;
+        let be:i64 = -1;
+        let q:i64 = 0;
+        while (q < 4) {
+            let e:i64 = v4_quad_energy(h0, h1, q);
+            if (be < 0 || e < be) { be = e; bq = q; }
+            q = q + 1;
+        }
+        v4_quad_shift(h0, h1, bq, sh);
+        h_put64(shifts, f * 16, h_get64(sh, 0) * 2);
+        h_put64(shifts, f * 16 + 8, h_get64(sh, 8) * 2);
+        h_put64(dbg, f * 16, bq);
+        h_put64(dbg, f * 16 + 8, be);
+        i = 0;
+        while (i < 19200) { h0[i] = h1[i]; i = i + 1; }
+        f = f + 1;
+    }
+    nio_free(h0);
+    nio_free(h1);
+    nio_free(fr);
+    nio_free(sh);
+    return 0;
+}
+
+// Cumulative shift: cum[f] = total translation aligning frame f onto frame 0.
+fn v4_cumul(shifts:[]u8, nf:i64, cum:[]u8) void {
+    h_put64(cum, 0, 0);
+    h_put64(cum, 8, 0);
+    let f:i64 = 0;
+    while (f < nf - 1) {
+        h_put64(cum, (f + 1) * 16, h_get64(cum, f * 16) + h_get64(shifts, f * 16));
+        h_put64(cum, (f + 1) * 16 + 8, h_get64(cum, f * 16 + 8) + h_get64(shifts, f * 16 + 8));
+        f = f + 1;
+    }
+}
+
+// Stabilized frame f into out (RGB): out[y,x] = in[clamp(y+cy),clamp(x+cx)]
+// with (cx,cy)=cum[f]; i.e. the image is shifted by -cum[f] so camera motion
+// is cancelled and the pig's own motion remains. Edge-replicated.
+fn v4_stable_frame(st:[]u8, f:i64, cum:[]u8, W:i64, H:i64, out:[]u8) i64 {
+    let fr:[]u8 = nio_alloc(230400);
+    if (recall_frame(st, f, fr) != 0) { nio_free(fr); return -702; }
+    let cx:i64 = h_get64(cum, f * 16);
+    let cy:i64 = h_get64(cum, f * 16 + 8);
+    let y:i64 = 0;
+    while (y < H) {
+        let sy:i64 = y + cy;
+        if (sy < 0) { sy = 0; }
+        if (sy >= H) { sy = H - 1; }
+        let x:i64 = 0;
+        while (x < W) {
+            let sx:i64 = x + cx;
+            if (sx < 0) { sx = 0; }
+            if (sx >= W) { sx = W - 1; }
+            let o:i64 = (y * W + x) * 3;
+            let so:i64 = (sy * W + sx) * 3;
+            out[o] = fr[so];
+            out[o + 1] = fr[so + 1];
+            out[o + 2] = fr[so + 2];
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    nio_free(fr);
+    return 0;
+}
+
+// Stabilized motion energy: sum over pairs of |stable(f+1)-stable(f)|, x4
+// fixed (same units as seg_motion_E). Camera shake is cancelled; what
+// remains is the subject's own motion.
+fn v4_stable_E(st:[]u8, cum:[]u8, E:[]u8, W:i64, H:i64, nf:i64) i64 {
+    let N:i64 = W * H;
+    let g0:[]u8 = nio_alloc(76800);
+    let g1:[]u8 = nio_alloc(76800);
+    let s0:[]u8 = nio_alloc(230400);
+    let s1:[]u8 = nio_alloc(230400);
+    let p:i64 = 0;
+    while (p < N) { h_put64(E, p * 8, 0); p = p + 1; }
+    if (v4_stable_frame(st, 0, cum, W, H, s0) != 0) { return -703; }
+    seg_gray(s0, g0, N);
+    let f:i64 = 0;
+    let q:i64 = 0;
+    while (f < nf - 1) {
+        if (v4_stable_frame(st, f + 1, cum, W, H, s1) != 0) { return -704; }
+        seg_gray(s1, g1, N);
+        q = 0;
+        while (q < N) {
+            let d:i64 = (g1[q] as i64) - (g0[q] as i64);
+            if (d < 0) { d = 0 - d; }
+            h_put64(E, q * 8, h_get64(E, q * 8) + d * 4);
+            g0[q] = g1[q];
+            q = q + 1;
+        }
+        let t:[]u8 = s0;
+        s0 = s1;
+        s1 = t;
+        f = f + 1;
+    }
+    nio_free(g0);
+    nio_free(g1);
+    nio_free(s0);
+    nio_free(s1);
+    return 0;
+}
+
+// Dark/white largest components of stable frame f.
+// dm/wm: N-byte 0/1 masks. dst arena (10 qwords each):
+//   dst[0..9]:  dark area,x0,y0,x1,y1,cx,cy,mean_gray,td(thr),valid
+//   dst[10..19]: white area,x0,y0,x1,y1,cx,cy,mean_gray,tw(thr),valid
+// valid=1 iff area >= 500 and bbox touches no frame edge (not clipped).
+fn v4_dw_one(st:[]u8, f:i64, cum:[]u8, W:i64, H:i64, dm:[]u8, wm:[]u8, dst:[]u8) i64 {
+    let N:i64 = W * H;
+    let sf:[]u8 = nio_alloc(230400);
+    if (v4_stable_frame(st, f, cum, W, H, sf) != 0) { nio_free(sf); return -705; }
+    let gr:[]u8 = nio_alloc(76800);
+    seg_gray(sf, gr, N);
+    let td:i64 = seg_gray_pct(gr, N, 20);
+    let tw:i64 = seg_gray_pct(gr, N, 80);
+    let tmp:[]u8 = nio_alloc(76800);
+    let lab:[]u8 = nio_alloc(614400);
+    let ez:[]u8 = nio_alloc(614400);
+    let cs:[]u8 = nio_alloc(80);
+    let p:i64 = 0;
+    while (p < N) { h_put64(ez, p * 8, 0); p = p + 1; }
+    // dark
+    seg_thresh(gr, tmp, N, td, 1);
+    seg_open(tmp, dm, W, H, 2);
+    seg_fill_holes(dm, W, H);
+    let nd:i64 = seg_label(dm, lab, W, H);
+    let did:i64 = seg_largest_id(lab, nd, W, H);
+    let dv:i64 = 0;
+    if (did > 0) {
+        if (seg_comp_stats(lab, nd, did, gr, ez, ez, W, H, cs) != 0) {
+            let da:i64 = h_get64(cs, 0);
+            p = 0;
+            while (p < N) { if (h_get64(lab, p * 8) == did) { dm[p] = 1; } else { dm[p] = 0; } p = p + 1; }
+            dv = 0;
+            if (da >= 500) {
+                dv = 1;
+                if (h_get64(cs, 8) <= 0 || h_get64(cs, 16) <= 0 || h_get64(cs, 24) >= W - 1 || h_get64(cs, 32) >= H - 1) { dv = 0; }
+            }
+            h_put64(dst, 0, da);
+            h_put64(dst, 8, h_get64(cs, 8));
+            h_put64(dst, 16, h_get64(cs, 16));
+            h_put64(dst, 24, h_get64(cs, 24));
+            h_put64(dst, 32, h_get64(cs, 32));
+            h_put64(dst, 40, h_get64(cs, 40));
+            h_put64(dst, 48, h_get64(cs, 48));
+            h_put64(dst, 56, h_get64(cs, 56));
+            h_put64(dst, 64, td);
+            h_put64(dst, 72, dv);
+        }
+    }
+    if (dv == 0) {
+        p = 0;
+        while (p < N) { dm[p] = 0; p = p + 1; }
+        let k:i64 = 0;
+        while (k < 10) { h_put64(dst, k * 8, 0); k = k + 1; }
+    }
+    // white
+    seg_thresh(gr, tmp, N, tw, 0);
+    seg_open(tmp, wm, W, H, 2);
+    seg_fill_holes(wm, W, H);
+    let nw:i64 = seg_label(wm, lab, W, H);
+    let wid:i64 = seg_largest_id(lab, nw, W, H);
+    let wv:i64 = 0;
+    if (wid > 0) {
+        if (seg_comp_stats(lab, nw, wid, gr, ez, ez, W, H, cs) != 0) {
+            let wa:i64 = h_get64(cs, 0);
+            p = 0;
+            while (p < N) { if (h_get64(lab, p * 8) == wid) { wm[p] = 1; } else { wm[p] = 0; } p = p + 1; }
+            wv = 0;
+            if (wa >= 500) {
+                wv = 1;
+                if (h_get64(cs, 8) <= 0 || h_get64(cs, 16) <= 0 || h_get64(cs, 24) >= W - 1 || h_get64(cs, 32) >= H - 1) { wv = 0; }
+            }
+            h_put64(dst, 80, wa);
+            h_put64(dst, 88, h_get64(cs, 8));
+            h_put64(dst, 96, h_get64(cs, 16));
+            h_put64(dst, 104, h_get64(cs, 24));
+            h_put64(dst, 112, h_get64(cs, 32));
+            h_put64(dst, 120, h_get64(cs, 40));
+            h_put64(dst, 128, h_get64(cs, 48));
+            h_put64(dst, 136, h_get64(cs, 56));
+            h_put64(dst, 144, tw);
+            h_put64(dst, 152, wv);
+        }
+    }
+    if (wv == 0) {
+        p = 0;
+        while (p < N) { wm[p] = 0; p = p + 1; }
+        let k2:i64 = 0;
+        while (k2 < 10) { h_put64(dst, (10 + k2) * 8, 0); k2 = k2 + 1; }
+    }
+    nio_free(sf);
+    nio_free(gr);
+    nio_free(tmp);
+    nio_free(lab);
+    nio_free(ez);
+    nio_free(cs);
+    return 0;
+}
+
+// Facing: unit vector (x1024) pointing from the white-body centroid to the
+// dark centroid (the head end is away from the body). out[16]: fx, fy.
+// Returns 0, or -1 if either part invalid.
+fn v4_facing(dst:[]u8, out:[]u8) i64 {
+    if (h_get64(dst, 72) == 0 || h_get64(dst, 152) == 0) { return -1; }
+    let dx:i64 = h_get64(dst, 40) - h_get64(dst, 120);
+    let dy:i64 = h_get64(dst, 48) - h_get64(dst, 128);
+    // isqrt via integer Newton
+    let l2:i64 = dx * dx + dy * dy;
+    if (l2 <= 0) { return -1; }
+    let r:i64 = l2;
+    let q:i64 = 0;
+    while (q < 40) {
+        let nr:i64 = (r + l2 / r) / 2;
+        if (nr >= r) { break; }
+        r = nr;
+        q = q + 1;
+    }
+    // hmm: Newton from r=l2 converges downward; guard r>0
+    if (r <= 0) { return -1; }
+    h_put64(out, 0, dx * 1024 / r);
+    h_put64(out, 8, dy * 1024 / r);
+    return 0;
+}
+
+// Snout: dark-mask pixel maximizing projection along facing (foremost point).
+// Ties broken by (min y, min x): deterministic. out[24]: sx, sy, spro(x1024).
+fn v4_snout(dm:[]u8, fx:i64, fy:i64, W:i64, H:i64, out:[]u8) void {
+    let N:i64 = W * H;
+    let have:i64 = 0;
+    let bs:i64 = 0;
+    let bx:i64 = 0;
+    let by:i64 = 0;
+    let p:i64 = 0;
+    while (p < N) {
+        if (dm[p] != 0) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            let s:i64 = x * fx + y * fy;
+            if (have == 0 || s > bs || (s == bs && (y < by || (y == by && x < bx)))) {
+                have = 1;
+                bs = s;
+                bx = x;
+                by = y;
+            }
+        }
+        p = p + 1;
+    }
+    h_put64(out, 0, bx);
+    h_put64(out, 8, by);
+    h_put64(out, 16, bs);
+}
+
+// Width-profile neck detection along the facing axis from the snout.
+// out (8 qwords): rc(0=found,1=none), d_neck, d_skull, skull_w, neck_w,
+//                 prominence x1024, d_max, facing_len_px.
+// The neck is the first local width minimum BEHIND the skull (global max)
+// with skull/neck prominence >= 1.3. Deliberative standard, traced.
+fn v4_neckcut(dm:[]u8, sx:i64, sy:i64, fx:i64, fy:i64, W:i64, H:i64, out:[]u8) void {
+    let N:i64 = W * H;
+    let px:i64 = 0 - fy;
+    let py:i64 = fx;
+    let cnt:[]u8 = nio_alloc(1024);
+    let tmn:[]u8 = nio_alloc(1024);
+    let tmx:[]u8 = nio_alloc(1024);
+    let wid:[]u8 = nio_alloc(1024);
+    let b:i64 = 0;
+    while (b < 128) {
+        h_put64(cnt, b * 8, 0);
+        h_put64(wid, b * 8, -1);
+        b = b + 1;
+    }
+    let dmax:i64 = 0;
+    let p:i64 = 0;
+    while (p < N) {
+        if (dm[p] != 0) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            let dx:i64 = x - sx;
+            let dy:i64 = y - sy;
+            let bd:i64 = 0 - (dx * fx + dy * fy) / 1024;
+            if (bd < 0) { bd = 0; }
+            let t:i64 = (dx * px + dy * py) / 1024;
+            let bin:i64 = bd / 4;
+            if (bin > 127) { bin = 127; }
+            if (bd > dmax) { dmax = bd; }
+            let c:i64 = h_get64(cnt, bin * 8);
+            if (c == 0) {
+                h_put64(tmn, bin * 8, t);
+                h_put64(tmx, bin * 8, t);
+            } else {
+                if (t < h_get64(tmn, bin * 8)) { h_put64(tmn, bin * 8, t); }
+                if (t > h_get64(tmx, bin * 8)) { h_put64(tmx, bin * 8, t); }
+            }
+            h_put64(cnt, bin * 8, c + 1);
+        }
+        p = p + 1;
+    }
+    b = 0;
+    while (b < 128) {
+        if (h_get64(cnt, b * 8) >= 8) {
+            h_put64(wid, b * 8, h_get64(tmx, b * 8) - h_get64(tmn, b * 8));
+        }
+        b = b + 1;
+    }
+    let sk:i64 = -1;
+    let skw:i64 = 0;
+    b = 0;
+    while (b < 128) {
+        let w:i64 = h_get64(wid, b * 8);
+        if (w > skw) { skw = w; sk = b; }
+        b = b + 1;
+    }
+    h_put64(out, 0, 1);
+    h_put64(out, 8, -1);
+    h_put64(out, 16, -1);
+    h_put64(out, 24, 0);
+    h_put64(out, 32, 0);
+    h_put64(out, 40, 0);
+    h_put64(out, 48, dmax);
+    h_put64(out, 56, 0);
+    if (sk >= 0) {
+        h_put64(out, 16, sk * 4 + 2);
+        h_put64(out, 24, skw);
+        b = sk + 1;
+        while (b < 127) {
+            let w0:i64 = h_get64(wid, b * 8);
+            if (w0 > 0 && h_get64(cnt, b * 8) >= 5) {
+                let wl:i64 = h_get64(wid, (b - 1) * 8);
+                let wr:i64 = h_get64(wid, (b + 1) * 8);
+                let ismin:i64 = 1;
+                if (wl >= 0 && w0 > wl) { ismin = 0; }
+                if (wr >= 0 && w0 > wr) { ismin = 0; }
+                if (ismin == 1 && skw * 1024 / w0 >= 1331) {
+                    h_put64(out, 0, 0);
+                    h_put64(out, 8, b * 4 + 2);
+                    h_put64(out, 32, w0);
+                    h_put64(out, 40, skw * 1024 / w0);
+                    b = 127;
+                }
+            }
+            b = b + 1;
+        }
+    }
+    nio_free(cnt);
+    nio_free(tmn);
+    nio_free(tmx);
+    nio_free(wid);
+}
+
+// Head region: snout-connected dark pixels with bd <= d_cut, minus the
+// motion-distinct leg. Leg split: a connected high-motion component not
+// containing the snout, with bbox aspect >= 2.5 and area >= 200, is a limb.
+// out_mask: N bytes. out (10 qwords): area,x0,y0,x1,y1,legsplit(0=none,
+// 1=split,2=head-invalid),leg_area,snout_E(x4),leg_thresh(x4).
+fn v4_head_region(dm:[]u8, Es:[]u8, sx:i64, sy:i64, fx:i64, fy:i64, d_cut:i64, noise:i64, W:i64, H:i64, out_mask:[]u8, out:[]u8) void {
+    let N:i64 = W * H;
+    let front:[]u8 = nio_alloc(76800);
+    let p:i64 = 0;
+    while (p < N) {
+        front[p] = 0;
+        if (dm[p] != 0) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            let bd:i64 = 0 - ((x - sx) * fx + (y - sy) * fy) / 1024;
+            if (bd <= d_cut) { front[p] = 1; }
+        }
+        p = p + 1;
+    }
+    let lab:[]u8 = nio_alloc(614400);
+    seg_label(front, lab, W, H);
+    let sp:i64 = sy * W + sx;
+    let sid:i64 = 0;
+    if (sp >= 0 && sp < N) { sid = h_get64(lab, sp * 8); }
+    let head0:[]u8 = nio_alloc(76800);
+    p = 0;
+    while (p < N) {
+        if (sid > 0 && h_get64(lab, p * 8) == sid) { head0[p] = 1; } else { head0[p] = 0; }
+        p = p + 1;
+    }
+    nio_free(lab);
+    nio_free(front);
+    let snE:i64 = 0;
+    if (sp >= 0 && sp < N) { snE = h_get64(Es, sp * 8); }
+    let lthr:i64 = snE * 3 / 2;
+    let lthr2:i64 = snE + 3 * noise;
+    if (lthr2 > lthr) { lthr = lthr2; }
+    let leg:[]u8 = nio_alloc(76800);
+    p = 0;
+    while (p < N) {
+        leg[p] = 0;
+        if (head0[p] != 0 && h_get64(Es, p * 8) > lthr) { leg[p] = 1; }
+        p = p + 1;
+    }
+    let leglab:[]u8 = nio_alloc(614400);
+    let nl:i64 = seg_label(leg, leglab, W, H);
+    let snleg:i64 = 0;
+    if (sp >= 0 && sp < N) { snleg = h_get64(leglab, sp * 8); }
+    // per-component bbox for leg components
+    let larea:[]u8 = nio_alloc(2048);
+    let lbx0:[]u8 = nio_alloc(2048);
+    let lby0:[]u8 = nio_alloc(2048);
+    let lbx1:[]u8 = nio_alloc(2048);
+    let lby1:[]u8 = nio_alloc(2048);
+    let c:i64 = 0;
+    while (c <= nl && c < 256) {
+        h_put64(larea, c * 8, 0);
+        h_put64(lbx0, c * 8, W);
+        h_put64(lby0, c * 8, H);
+        h_put64(lbx1, c * 8, -1);
+        h_put64(lby1, c * 8, -1);
+        c = c + 1;
+    }
+    p = 0;
+    while (p < N) {
+        let lid:i64 = h_get64(leglab, p * 8);
+        if (lid > 0 && lid < 256) {
+            let x:i64 = p % W;
+            let y:i64 = p / W;
+            h_put64(larea, lid * 8, h_get64(larea, lid * 8) + 1);
+            if (x < h_get64(lbx0, lid * 8)) { h_put64(lbx0, lid * 8, x); }
+            if (x > h_get64(lbx1, lid * 8)) { h_put64(lbx1, lid * 8, x); }
+            if (y < h_get64(lby0, lid * 8)) { h_put64(lby0, lid * 8, y); }
+            if (y > h_get64(lby1, lid * 8)) { h_put64(lby1, lid * 8, y); }
+        }
+        p = p + 1;
+    }
+    // which leg components are limbs? (not snout's, aspect>=2.5, area>=200)
+    let islimb:[]u8 = nio_alloc(2048);
+    c = 0;
+    while (c <= nl && c < 256) {
+        h_put64(islimb, c * 8, 0);
+        if (c > 0 && c != snleg) {
+            let a:i64 = h_get64(larea, c * 8);
+            if (a >= 200) {
+                let w:i64 = h_get64(lbx1, c * 8) - h_get64(lbx0, c * 8) + 1;
+                let h:i64 = h_get64(lby1, c * 8) - h_get64(lby0, c * 8) + 1;
+                let big:i64 = w;
+                let sml:i64 = h;
+                if (h > w) { big = h; sml = w; }
+                if (sml > 0 && big * 10 / sml >= 25) { h_put64(islimb, c * 8, 1); }
+            }
+        }
+        c = c + 1;
+    }
+    let area:i64 = 0;
+    let x0:i64 = W;
+    let y0:i64 = H;
+    let x1:i64 = -1;
+    let y1:i64 = -1;
+    let legrem:i64 = 0;
+    let split:i64 = 0;
+    p = 0;
+    while (p < N) {
+        out_mask[p] = 0;
+        if (head0[p] != 0) {
+            let lid2:i64 = h_get64(leglab, p * 8);
+            if (lid2 > 0 && lid2 < 256 && h_get64(islimb, lid2 * 8) == 1) {
+                legrem = legrem + 1;
+                split = 1;
+            } else {
+                out_mask[p] = 1;
+                area = area + 1;
+                let x2:i64 = p % W;
+                let y2:i64 = p / W;
+                if (x2 < x0) { x0 = x2; }
+                if (x2 > x1) { x1 = x2; }
+                if (y2 < y0) { y0 = y2; }
+                if (y2 > y1) { y1 = y2; }
+            }
+        }
+        p = p + 1;
+    }
+    // head must still contain the snout and be >= 500 px
+    let valid:i64 = 1;
+    if (sp < 0 || sp >= N || out_mask[sp] == 0) { valid = 0; }
+    if (area < 500) { valid = 0; }
+    if (valid == 0) { split = 2; }
+    h_put64(out, 0, area);
+    h_put64(out, 8, x0);
+    h_put64(out, 16, y0);
+    h_put64(out, 24, x1);
+    h_put64(out, 32, y1);
+    h_put64(out, 40, split);
+    h_put64(out, 48, legrem);
+    h_put64(out, 56, snE);
+    h_put64(out, 64, lthr);
+    h_put64(out, 72, valid);
+    nio_free(head0);
+    nio_free(leg);
+    nio_free(leglab);
+    nio_free(larea);
+    nio_free(lbx0);
+    nio_free(lby0);
+    nio_free(lbx1);
+    nio_free(lby1);
+    nio_free(islimb);
+}
