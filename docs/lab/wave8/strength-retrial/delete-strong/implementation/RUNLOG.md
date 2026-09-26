@@ -86,3 +86,49 @@
 - r4val/del_attack.zag: 4b581dd7bf8cf25a0ed5872f457dd3dd12a2d079baff3309fa37e74eec1b519d
 
 ## Status: COMPLETE — no commit (coordinator commits).
+
+## 2026-09-26 ~07:05 UTC — HOLEFIX regression (Micah ruling 2026-09-25 ~21:47 PDT)
+
+**Scope:** HOLE 1 (st_kill removed from TNN reach; trainer-only, priced, audited)
++ HOLE 2 (generation-scoped cite tombstoning). Full re-run from final sources.
+
+**Sources (sha256):**
+- strength_core.zag: d93d882dabc343fc8702cef577ff7258c53c7910ad6b311316d0375b52c524dc
+- strength_checker.zag: 6dd22c53aadaa3e3101edeafcb5aefffde7f222462566fdd63cc13649abcc273
+- strength_learner.zag: f1d3b0a657be42fc2eff9a6461c9ff6ff720d9442c91d554a62e6e0b136117ca
+- strength_trial.zag: a69fa634d99bee3eb7cc3ad2001838020d34f655a6769b4e407f33eb03477c2f
+- r4val/trial/strength_core.zag: c3e5913e1a3c8ad77037970b4ae20a8b3b5dcb943d88779437340f517cebc8fc (+5-arg st_overwrite_direct test hook)
+- r4val/trial/strength_checker.zag: 6dd22c53aadaa3e3101edeafcb5aefffde7f222462566fdd63cc13649abcc273
+- r4val/del_attack.zag: 8228fe9950744b9a02b571326310d502f131f35f282ff7d67c5c36cd763040f0
+- r4val/f4_attacks.zag: 172f44d0fbd1f46c2bd71e99813852773304bf86ff0ce53380f275836fc1ae79
+
+**Attack batteries (all 2× byte-identical, all cf=0):**
+- del_attack: D1–D11 unchanged; D12 (tnn_kill→113, trainer kill priced 105/109/0)
+  PASS; D13 (slot-reuse recite → second destroy 121) PASS; D14 (rollback+weaken
+  recite → 121) PASS.
+- f1_attack (F1A–F1F), f2_attack (all), f4_attacks (FA_V1 rewritten: tnn kill
+  113, rollback 108; FA_V1B unchanged) — all PASS.
+- r4_overwrite a/b/c — all PASS.
+
+**Honest regression (all 2× byte-identical):**
+- 36/36 S1 cells r1==r2. C/C-P3 cells byte-identical to pre-holefix baseline
+  (never used st_kill). B/B1/B2 differ as designed: DROPS 0→470 (S1), 4682
+  (S10), 46802 (S100); ST_INVALID 1 where contradictions occur (refused kill
+  flagged). Zero CL_CHECK mismatches on any honest trail.
+- S10 spots (B JI 0, B VUP 2) 2× identical. S100 spots (B JI 0, B VUP 2) 2×
+  identical.
+- Gates B, C, C-P3, B2: 2× identical, all ST_GATE f=0. Gate B proves:
+  TNN-role kill→113; trainer kill at KILL stage→105; trainer kill at FULL
+  0 cites→109; trainer kill 4 cites+justify→0.
+
+**Blind red team:** claims 1–6 HOLD (no TNN kill path; priced destruction;
+stage gate; cite single-use; no discount; checker). Claim-7 initial findings
+(H1–H5) VOID — coordinator's brief had wrong arg order for
+st_force_pin/st_force_unpin/st_trainer_declare. Focused re-test with corrected
+signatures: Claim 7 HOLDS (TNN-role →113, 12/12 combos; unpin needs pinning
+trainer's credentials or master role; pinned slots →112 on all destroy ops).
+Verdicts: ~/workspace/strength-redteam2/REDTEAM2_VERDICT.md (claims 1–6),
+~/workspace/strength-redteam2/REDTEAM2_CLAIM7_RETEST.md (claim 7).
+
+**Evidence:** logs/hf/ (attacks, gates, s1/, s10s100/).
+**Status:** COMPLETE — ready to commit to tnn-native-lab (never main).

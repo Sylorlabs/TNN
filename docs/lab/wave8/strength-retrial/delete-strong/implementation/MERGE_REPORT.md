@@ -161,3 +161,59 @@ Logs under `~/workspace/strength-delete/logs/`.
 - F6 (global vs windowed cite consumption) stays a separate workstream.
 - Pristine-base cite-buffer repair is Micah's call (fixed in this merge).
 - R1 30-vs-20 and 95%-bar amendments remain his word.
+
+---
+
+## 10. HOLEFIX 2026-09-26 (Micah ruling 2026-09-25 ~21:47 PDT — supersedes §4/§8 items below)
+
+**HOLE 1 — `st_kill` REMOVED from TNN's reachable op set.** The free eviction
+is dead. `st_kill(slot, role, trainer)`: role<TRAINER → 113 (audited, no
+destruction); trainer role → high-water erase price via `st_kill_effort_check`
+(S-D1/S-D2), audited with role+trainer. No free destruction alias remains for
+anyone. The honest learner's B/B1/B2 eviction + contradiction-kill call sites
+now pass ST_ROLE_TNN explicitly → refused 113 (audited). The checker flags any
+successful ST_OP_KILL with role<TRAINER as a bad kill. §4's "TNN
+self-determination: all destruction ops are TNN-role" is void for `st_kill`;
+§8 item 3's law text is superseded by S-D5 (see LAW_STRENGTH_DESTRUCTION.md).
+
+**HOLE 2 — generation-scoped cite tombstoning (delete means delete).**
+`st_cite_consumed` now scans the slot's FULL ledger history (not just the
+current strength-write window) and includes ST_OP_KILL in the priced set: a
+cite that paid for a destruction stays tombstoned across ADD reuse of the
+slot. Second destruction re-citing spent episodes → 121. The weaken-detach
+(D14 shape) no longer resurrects cites. §4's "at most one destruction per
+window" is widened to per-slot-history.
+
+**Honest-regression consequence (measured, not guessed):** C/C-P3 S1 cells
+byte-identical to baseline (never used `st_kill`); B/B1/B2 go DROPS 0→470
+(eviction refused, drops counted) and ST_INVALID 1 where contradictions occur
+(contradiction-kill refused). The checker is fully clean on all honest trails
+(no CL_CHECK mismatch) — INVALID comes only from the refused-kill flag, the
+honest cost of the removal. Deliberate memory recycling is a separate fork
+(`~/workspace/strength-recycle/`), never mixed into delete.
+
+**New attack cases (all PASS, 2× byte-identical, cf=0):**
+- D12: TNN-role `st_kill` → 113, slot stays live; trainer-role at KILL stage
+  (90-strength) → 105; at FULL 0 cites → 109; 4 cites+justify → 0, dead.
+- D13: destroy (271–274) → ADD reuses slot → re-cite 271–274 accepted (fresh
+  window, no 111) → second destroy → **121**.
+- D14: delete → rollback → weaken → re-cite SAME eps → delete → **121**.
+- FA_V1 (rewritten): TNN kill → 113 (live), rollback → 108, evidenced kill
+  (first paid destruction) → 0. The free-kill→rollback shape is dead by law.
+
+**Determinism:** all 6 attack drivers ×2, r4_overwrite a/b/c ×2, 4 gates ×2,
+36 S1 cells ×2, S10/S100 spots ×2 — every r1/r2 pair byte-identical.
+Evidence: `logs/hf/`.
+
+**Blind red-team verdicts (2026-09-26):**
+- Full 7-claim blind red team (`~/workspace/strength-redteam2/REDTEAM2_VERDICT.md`):
+  claims 1–6 HOLD (no TNN kill path; priced destruction; stage gate; cite
+  single-use 121; no discount via lowering; checker clean). Claim-7 findings
+  (H1–H5) are VOID — artifacts of an incorrect API brief (wrong argument
+  order for st_force_pin/st_force_unpin/st_trainer_declare, given by the
+  coordinator, not the mechanism).
+- Focused Claim-7 re-test with corrected signatures
+  (`~/workspace/strength-redteam2/REDTEAM2_CLAIM7_RETEST.md`): **HOLDS**.
+  TNN-role force_pin/force_unpin/trainer_declare → 113 (12/12 combos, no
+  effect); unpin requires pinning trainer's credentials or master role (2/3);
+  all destruction ops refuse force-pinned slots with 112; no silent no-ops.
