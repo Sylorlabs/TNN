@@ -81,4 +81,4 @@ as the decision.
 Committed to `tnn-native-lab`: r11_alien.zag, VERDICT.md, ROUND11_REPORT.md,
 plus 256px verdict-evidence renders. Binary (r11_alien, r11_alien_rerun),
 `.zag-cache/`, and scratch build trees excluded per repo content standard.
-Commit SHA: `<TBD>`
+Commit SHA: `93f67659acf6d241ca7c57008590969a2682fa45` (tnn-native-lab head, verified)
