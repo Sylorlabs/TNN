@@ -7,6 +7,23 @@ the emitter reads the knowmap ONLY, never the original.
 **Bar:** `cmp` on the WAV files — same PCM bytes, infinite PSNR. Run twice,
 prove byte-identical determinism.
 
+**Intake repair integration (2026-09-26 ~10:28 PDT):** This build now starts
+from the REPAIRED intake (tnn-native-lab @ 9f11a0bc3a92,
+`docs/lab/audio_intake/REPAIR_HEAD64.md`). The white-box root cause was that
+`hear()` computed LPC residuals only for samples 64..n−1, leaving the model
+with no head; both re-emit paths papered over it with `proto[q[0..63]]`
+(indices fit to samples 64..127, a different region). Two fixes:
+- **L1 (head fix):** `hear()` stores first P real PCM samples int16-exact;
+  fabrication branch deleted. Magic RBLMEMv5→RBLMEMv6.
+- **L2 (plm binning):** re-emit bins `((i−P)/T0)` matching `hear()`'s
+  convention (re-emit-side only).
+Phase-2 `resid.zag`, `reemit6.zag`, and `rb_longmem6.zag` were updated to
+parse the RBLMEMv6 layout (`head[P]` i16 between `boost` and `q`;
+`q_off = PMF_off + 144 + 2*P`) and to accept (not refuse) the v6 magic.
+The residual channel is unchanged: it still closes the gap from the
+repaired intake's semantic ceiling (cry corr 0.99827, err 136 LSB RMS)
+to byte-identity.
+
 ## What was built
 
 Three pure-Zag binaries (pinned toolchain
@@ -14,9 +31,14 @@ Three pure-Zag binaries (pinned toolchain
 
 | Binary | Source | Role |
 |---|---|---|
-| `resid` | `phase2/src/resid.zag` | Hear-side: v5 model + original WAV → **v6 knowmap** (v5 knowledge + exactness extension) |
+| `resid` | `phase2/src/resid.zag` | Hear-side: RBLMEMv6 model + original WAV → **v6 knowmap** (v6 knowledge + exactness extension) |
 | `reemit6` | `phase2/src/reemit6.zag` | Emitter: reads ONLY the v6 knowmap. Mode 10 = exact, Mode 11 = semantic ceiling |
 | `rb_longmem6` | `phase2/src/rb_longmem6.zag` | Legacy imagine (mode 0) + legacy re-emit (mode 9), v6-aware, gate-reconciled |
+
+All three parse the RBLMEMv6 intake layout (repaired 2026-09-26): the
+`head[P]` int16 section sits between `boost` and `q`
+(`q_off = PMF_off + 144 + 2*P`). `resid` accepts the `RBLMEMv6` magic
+and refuses v5 (matching the intake's own safety behavior).
 
 ## The four mandated fixes (from DIAGNOSIS.md)
 
@@ -69,7 +91,7 @@ Three pure-Zag binaries (pinned toolchain
 | 8 | `use_h_stored` (i64): the single gate decision |
 | 16 | `nper` (i64): number of periods |
 | 24 | `amp[nper]` (f64): per-period harmonic amplitudes |
-| 24+8·nper | `seeds[P]` (f64): true first P PCM samples |
+| 24+8·nper | `seeds[P]` (i64): true first P PCM samples (int16-exact, stored as i64) |
 | 24+8·nper+8·P | `nres[n-P]` (f64): full noise residual |
 | 24+8·nper+8·P+8·(n-P) | `hdr_len` (i64): WAV header byte count |
 | +8 | `header[hdr_len]` (bytes): the full WAV container header (all bytes up to and including the `data` tag+size — preserves LIST and other non-PCM chunks, so `cmp` on the whole file passes, not just the PCM) |
@@ -80,7 +102,7 @@ The v5 section is untouched → v6 files remain readable by legacy mode 9
 emitter reproduces the exact container without ever reading the original —
 `resid` (which sees the original) stores it; `reemit6` (which doesn't) replays it.
 
-## Results — the four proxy fixtures
+## Results — the four proxy fixtures (repaired RBLMEMv6 intake)
 
 | Clip | Mode 10 (exact) | Mode 10 run2 | Determinism | Mode 11 semantic RMS (LSB) | Mode 11 corr |
 |---|---|---|---|---|---|
@@ -91,11 +113,12 @@ emitter reproduces the exact container without ever reading the original —
 
 - Mode 10: `cmp fixture.wav exact.wav` → identical on all 4. Two independent
   runs → `cmp` identical (deterministic).
-- Mode 11 (knowledge only, all interface fixes, raw plm): reproduces the V5
-  ceiling exactly (40.5 / 97.9 / 136.0 / 109.8 LSB RMS).
+- Mode 11 (knowledge only, all interface fixes, raw plm): reproduces the
+  repaired-intake ceiling (40.5 / 97.9 / 136.0 / 109.8 LSB RMS — matches the
+  intake repair's own verification numbers).
 - Cry harmonic: `use_h=1`, 129 periods, amp mean 0.99, r2 0.096.
 
-## Results — sealed corpus (359 clips, SEAL_MANIFEST-verified)
+## Results — sealed corpus (359 clips, SEAL_MANIFEST-verified, repaired intake)
 
 **359/359 byte-identical** (`cmp` PASS on the full WAV file, including headers).
 **359/359 deterministic** (two independent mode-10 runs `cmp`-identical).
@@ -115,8 +138,9 @@ emitter reproduces the exact container without ever reading the original —
 - Semantic (mode 11) RMS ranges 11–1092 LSB across the corpus; correlation
   0.976–0.999. The knowledge gap varies by class and clip; the closure layer
   closes it to zero in every case.
-- Per-clip evidence: `results/corpus_results.csv` (seal SHA, byte-identity,
-  determinism, semantic RMS/corr, stored gate decision).
+- Per-clip evidence: `results/corpus_results.csv` (seal_match flag, byte-identity,
+  determinism, semantic RMS/corr, stored gate decision; the full SHA-256 per
+  clip is in the run's `results.jsonl`).
 
 ## Analyzer-first evidence
 
