@@ -88,6 +88,18 @@ frames), not a hardcoded conclusion. It is a first-class result of this fork.
    its own lineage's output.
 3. The "fixes it" condition for H1-KILLED was not tested (requires working render loop).
 
+## Update 2026-09-26 ~21:10 UTC — H1 KILLED
+The render loop is repaired (`forkb.zag`: op 8 REMOVE_GRAFT + the perfected
+`h1d_judge` wired into the loop as the pass condition). The closed loop now:
+R1 judges the inherited render STICKER (area=3993, face_below=1786);
+R2 deliberates (defects=94, 5 candidates) and SELECTED REMOVE_GRAFT on computed
+predicted gain (1024); re-perceives its own render as ONE_ANIMAL; R3 PASS.
+Repair battery: 24/24 ONE_ANIMAL on the fixed frames; external h1d battery
+confirms 24/24 ONE_ANIMAL fixed, 24/24 control; negative control passes with
+zero rounds; byte-identical reruns; selftest 7/7. Full verdict:
+`H1D_VERDICT_RERENDER_REPAIR.md`; trace: `h1d_teach_r3_trace.txt`;
+gallery: `H1D_RERENDER_REPAIR_GALLERY.html`.
+
 ## Files
 - Verdict: `~/workspace/forkB-scratch/h1d_out/h1d_verdict.txt`
 - Source: `~/workspace/forkB-scratch/src/forkb.zag` (`h1d_main`, `h1d_perceive`, `h1d_judge`)
