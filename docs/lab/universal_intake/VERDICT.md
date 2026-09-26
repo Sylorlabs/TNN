@@ -17,7 +17,7 @@
 | MP3 (Layer III) | ⚠️ HEADER ONLY | Frame headers parsed; full decode blocked |
 | MP4 container | ✅ PARSED | 8 samples extracted, NAL units validated |
 | H.264 (SPS) | ⚠️ PARAMS ONLY | 320×240 Baseline confirmed; slice decode blocked |
-| Progressive JPEG | ❌ REJECTED | Explicitly unsupported (not baseline) |
+| Progressive JPEG | ✅ SUPPORTED | T.81 Annex G: 0 coeff mismatches vs libjpeg; 3 sealed fixtures |
 
 ## Byte-Identity Proofs
 
@@ -92,7 +92,24 @@ WAV held:  17f57ff51f4e76ab24fba61000466433c8b9bb371ad31cfc1d794ff6d93a53e1
 See `evidence/flac_stereo_2026-09-26.md` for the full proof table and SHAs.
 
 ### Progressive JPEG
-**Status:** Explicitly rejected by design (not baseline JPEG). Decoder returns error on Ss/Se/Ah/Al progressive markers.
+**Status:** SUPPORTED (2026-09-26). T.81 Annex G implemented in pure Zag: SOF2, multi-scan SOS,
+spectral selection + successive approximation (DC first/refine, AC first/refine), EOB runs,
+per-scan Huffman tables, deferred IDCT from full-frame coefficient buffer.
+
+**Proof:** 0 coefficient mismatches vs libjpeg-turbo 2.1.5 on 3 fixtures (4:4:4, 4:2:0, grayscale);
+Zag RGB within IDCT rounding of proven prototype (maxdiff ≤4); byte-identical reruns;
+baseline regression byte-identical.
+
+**Cost:** ~400 new Zag lines (`src/prog_scan.zag` + `src/jpeg.zag` mods); 0.92–1.84 MB coefficient
+buffer for 320×240 fixtures.
+
+**Prevalence:** 7% historical (Data Center Knowledge); 19/19 current image-service samples progressive.
+Rejection was a format barrier; Micah's "no format barrier" direction requires support.
+
+**Limitations:** Coefficient buffer not yet chunked (2^25 slice ceiling for very large images);
+basic RSTn handling; 4:2:0 uses inherited nearest-neighbor chroma replication.
+
+See `evidence/progressive_jpeg_2026-09-26.md` for the full proof table, SHAs, and honest Pillow comparison.
 
 ## Audio Samples 0..63 Retention
 Verified for WAV: all PCM variants retain samples 0..63 exactly (ndiff=0 in oracle comparison).

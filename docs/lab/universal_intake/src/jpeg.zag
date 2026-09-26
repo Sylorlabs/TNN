@@ -1,10 +1,11 @@
-// TNN universal intake: JPEG baseline decoder -> held image (pure Zag, no libs).
-// Supports: SOI/EOI, DQT (8-bit), DHT, SOF0 (baseline, 8-bit, 1..4 comps,
-// 4:2:0 / 4:4:4 / 4:2:2 / grayscale), SOS (single scan, no spectral/progressive),
+// TNN universal intake: JPEG baseline + progressive decoder -> held image (pure Zag, no libs).
+// Supports: SOI/EOI, DQT (8-bit), DHT, SOF0 (baseline) / SOF2 (progressive, T.81 Annex G),
+// 8-bit, 1..4 comps, 4:2:0 / 4:4:4 / 4:2:2 / grayscale, SOS (single or multiple scans),
 // APPn/COM/DRI skip, RSTn resync. Emits TNINIMG1 top-down RGB.
 // YCbCr->RGB in fixed point; 2-pass integer IDCT (deterministic).
 // usage: jpeg <in.jpg> <out.held>
 @import("./common.zag")
+@import("./prog_scan.zag")
 
 // ---------- JPEG Huffman tree (canonical, MSB-first codes) ----------
 // Reuse common huff_build/huff_decode with MSB bit reader (mode 0).
@@ -184,6 +185,16 @@ fn main() i32 {
     let scan_dt: []i64 = nio_alloc_z64(4);
     let scan_at: []i64 = nio_alloc_z64(4);
     let scan_start: i64 = 0; let scan_end: i64 = 0;
+    // progressive state (T.81 Annex G)
+    let is_prog: i64 = 0;
+    let coef: []i64 = nio_alloc_z64(1); // full-frame quantized coeffs (grows at SOF)
+    let cbase: []i64 = nio_alloc_z64(4); // per-comp base offset in coef
+    let nblk: []i64 = nio_alloc_z64(4);  // per-comp block count
+    let pred: []i64 = nio_alloc_z64(4);  // DC predictors
+    let prog_mcu_w: i64 = 0; let prog_mcu_h: i64 = 0;
+    // bit reader state (allocated early for progressive multi-scan decode)
+    let st: []i64 = nio_alloc_z64(8);
+    st[0] = 0; st[1] = 0; st[2] = 0; st[3] = 0; st[4] = 0;
     let pos: i64 = 2;
     let saw_sos: i64 = 0;
     while (pos < flen) {
@@ -216,13 +227,14 @@ fn main() i32 {
                 }
                 qt_ok[tq] = 1;
             }
-        } else if (mk == 192) {
-            // SOF0 baseline
+        } else if (mk == 192 || mk == 194) {
+            // SOF0 baseline / SOF2 progressive (T.81 Annex G)
+            if (mk == 194) { is_prog = 1; }
             let prec: i64 = (blob[body] as i64) & 255;
             img_h = rd_u16be(blob, body + 1);
             img_w = rd_u16be(blob, body + 3);
             ncomp = (blob[body + 5] as i64) & 255;
-            if (prec != 8 || img_w <= 0 || img_h <= 0 || ncomp < 1 || ncomp > 4) { _zag_print("bad SOF0\n"); return 1; }
+            if (prec != 8 || img_w <= 0 || img_h <= 0 || ncomp < 1 || ncomp > 4) { _zag_print("bad SOF\n"); return 1; }
             let c: i64 = 0;
             while (c < ncomp) {
                 let o: i64 = body + 6 + c * 3;
@@ -232,6 +244,30 @@ fn main() i32 {
                 cqt[c] = (blob[o + 2] as i64) & 255;
                 if (hsamp[c] < 1 || hsamp[c] > 4 || vsamp[c] < 1 || vsamp[c] > 4) { _zag_print("bad samp\n"); return 1; }
                 c = c + 1;
+            }
+            if (is_prog == 1) {
+                // allocate full-frame coefficient buffer (64 i64 per block)
+                let hmax: i64 = hsamp[0]; let vmax: i64 = vsamp[0];
+                let cc: i64 = 1;
+                while (cc < ncomp) {
+                    if (hsamp[cc] > hmax) { hmax = hsamp[cc]; }
+                    if (vsamp[cc] > vmax) { vmax = vsamp[cc]; }
+                    cc = cc + 1;
+                }
+                prog_mcu_w = (img_w + 8 * hmax - 1) / (8 * hmax);
+                prog_mcu_h = (img_h + 8 * vmax - 1) / (8 * vmax);
+                let total: i64 = 0;
+                let c2: i64 = 0;
+                while (c2 < ncomp) {
+                    let bw: i64 = prog_mcu_w * hsamp[c2];
+                    let bh: i64 = prog_mcu_h * vsamp[c2];
+                    nblk[c2] = bw * bh;
+                    cbase[c2] = total * 64;
+                    total = total + nblk[c2];
+                    c2 = c2 + 1;
+                }
+                coef = nio_alloc_z64(total * 64);
+                pred[0] = 0; pred[1] = 0; pred[2] = 0; pred[3] = 0;
             }
         } else if (mk == 196) {
             // DHT
@@ -277,7 +313,10 @@ fn main() i32 {
         } else if (mk == 218) {
             // SOS
             let ns: i64 = (blob[body] as i64) & 255;
-            if (ns != ncomp || ns < 1 || ns > 4) { _zag_print("bad SOS ns\n"); return 1; }
+            let sci: []i64 = nio_alloc_z64(4);
+            let std: []i64 = nio_alloc_z64(4);
+            let sta: []i64 = nio_alloc_z64(4);
+            if (ns < 1 || ns > 4) { _zag_print("bad SOS ns\n"); return 1; }
             let c: i64 = 0;
             while (c < ns) {
                 let cs: i64 = (blob[body + 1 + c * 2] as i64) & 255;
@@ -287,6 +326,9 @@ fn main() i32 {
                 let k: i64 = 0;
                 while (k < ncomp) { if (cid[k] == cs) { ci = k; } k = k + 1; }
                 if (ci < 0) { _zag_print("SOS unknown comp\n"); return 1; }
+                sci[c] = ci;
+                std[c] = ta >> 4;
+                sta[c] = ta & 15;
                 scan_dt[ci] = ta >> 4;
                 scan_at[ci] = ta & 15;
                 c = c + 1;
@@ -295,6 +337,58 @@ fn main() i32 {
             let se: i64 = (blob[body + 2 + ns * 2] as i64) & 255;
             let ah: i64 = ((blob[body + 3 + ns * 2] as i64) >> 4) & 15;
             let al: i64 = (blob[body + 3 + ns * 2] as i64) & 15;
+            if (is_prog == 1) {
+                // Progressive: validate scan, decode immediately, continue to next marker.
+                if (ss > se || se > 63 || ah > 13 || al > 13) { _zag_print("bad prog params\n"); return 1; }
+                if (ss == 0 && se == 0) {
+                    // DC scan: 1..4 comps (interleaved or not)
+                } else {
+                    // AC scan: single comp, Ss>=1
+                    if (ns != 1) { _zag_print("AC scan ns!=1\n"); return 1; }
+                    if (ss < 1) { _zag_print("AC ss<1\n"); return 1; }
+                }
+                // find scan end: next marker (0xFF not followed by 0x00/0xFF)
+                scan_start = bend;
+                let e: i64 = scan_start;
+                scan_end = -1;
+                while (e + 1 < flen) {
+                    let b0: i64 = (blob[e] as i64) & 255;
+                    let b1: i64 = (blob[e + 1] as i64) & 255;
+                    if (b0 == 255 && b1 != 0 && b1 != 255) { scan_end = e; break; }
+                    if (b0 == 255 && b1 == 0) { e = e + 2; continue; }
+                    e = e + 1;
+                }
+                if (scan_end < 0) { _zag_print("no scan end\n"); return 1; }
+                // decode scan into coefficient buffer
+                let scanview: []u8 = blob[scan_start..scan_end];
+                st[0] = 0; st[1] = 0; st[2] = 0; st[3] = 0; st[4] = 0;
+                let rc: i64 = -1;
+                if (ss == 0 && se == 0) {
+                    if (ah == 0) {
+                        rc = jpg_scan_dc_first(scanview, st, dc_tree, coef, cbase, nblk, pred,
+                                              sci, std, ns, hsamp, vsamp, prog_mcu_w, prog_mcu_h, al);
+                    } else {
+                        rc = jpg_scan_dc_refine(scanview, st, coef, cbase, nblk,
+                                               sci, ns, hsamp, vsamp, prog_mcu_w, prog_mcu_h, al);
+                    }
+                } else {
+                    let ci0: i64 = sci[0];
+                    let ta0: i64 = sta[0];
+                    if (ah == 0) {
+                        rc = jpg_scan_ac_first(scanview, st, ac_tree, coef, cbase, nblk,
+                                              ci0, ta0, ss, se, al);
+                    } else {
+                        rc = jpg_scan_ac_refine(scanview, st, ac_tree, coef, cbase, nblk,
+                                               ci0, ta0, ss, se, al);
+                    }
+                }
+                if (rc < 0) { _zag_print("scan decode failed\n"); return 1; }
+                saw_sos = 1;
+                pos = scan_end;
+                continue;
+            }
+            // Baseline: single scan, Ss=0,Se=63,Ah=0,Al=0
+            if (ns != ncomp) { _zag_print("bad SOS ns\n"); return 1; }
             if (ss != 0 || se != 63 || ah != 0 || al != 0) { _zag_print("progressive unsupported\n"); return 1; }
             scan_start = bend;
             // scan runs to EOI (or next marker); find EOI 0xFFD9 not followed by 0x00
@@ -344,13 +438,13 @@ fn main() i32 {
     let F: []i64 = nio_alloc_z64(64);
     let tmp: []i64 = nio_alloc_z64(64);
     let blk: []u8 = nio_alloc_z(64);
-    // bit reader over scan
-    let st: []i64 = nio_alloc_z64(8);
+    // bit reader over scan (st allocated before parse loop; reset for baseline scan)
     st[0] = 0; st[1] = 0; st[2] = 0; st[3] = 0; st[4] = 0;
     let scanview: []u8 = blob[scan_start..scan_end];
     // DC predictors
     let dcpred: []i64 = nio_alloc_z64(4);
-    // decode MCUs
+    if (is_prog == 0) {
+    // decode MCUs (baseline: entropy decode + IDCT interleaved)
     let mcu_n: i64 = mcu_w * mcu_h;
     let m: i64 = 0;
     while (m < mcu_n) {
@@ -427,6 +521,41 @@ fn main() i32 {
             c = c + 1;
         }
         m = m + 1;
+    }
+    } else {
+    // Progressive: dequantize + IDCT from full-frame coefficient buffer.
+    // All scans already decoded into coef[cbase[c] + bi*64 + k] (natural order).
+    let pc: i64 = 0;
+    while (pc < ncomp) {
+        let bw: i64 = mcu_w * hsamp[pc];
+        let cw: i64 = bw * 8;
+        let bi: i64 = 0;
+        while (bi < nblk[pc]) {
+            let bx: i64 = bi % bw;
+            let by: i64 = bi / bw;
+            // dequantize block into F
+            let kk: i64 = 0;
+            while (kk < 64) {
+                F[kk] = coef[cbase[pc] + bi * 64 + kk] * qt[cqt[pc] * 64 + kk];
+                kk = kk + 1;
+            }
+            idct_block(F, T, tmp, blk, 0);
+            let px: i64 = bx * 8;
+            let py: i64 = by * 8;
+            let po: i64 = (pc * ph * pw) + py * cw + px;
+            let yy: i64 = 0;
+            while (yy < 8) {
+                let xx: i64 = 0;
+                while (xx < 8) {
+                    plane[po + yy * cw + xx] = blk[yy * 8 + xx];
+                    xx = xx + 1;
+                }
+                yy = yy + 1;
+            }
+            bi = bi + 1;
+        }
+        pc = pc + 1;
+    }
     }
     // ---- assemble RGB with upsampling ----
     // comp 0 = Y (hmax x vmax sampling), others upsampled by replication
