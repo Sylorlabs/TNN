@@ -2072,3 +2072,173 @@ Run start: HEAD 02ee5ae59 (parent merge of origin/tnn-native-lab tip 94625817c i
 Coordinator disclosure: the coordinator ran one read-only python3 heredoc to extract quoted text from the committed judge ruling file while drafting this section. It read one file and wrote nothing; no wave artifact was created, modified, or analyzed with it; the extraction was cross-checked with grep afterward. Disclosed per P15 as a no-contact contact (read-only, no artifact write); the wave evidence commits above are unaffected. The coordinator will not use this shortcut again.
 
 Queued next: Micah's six pending governance rulings (S7 strike, MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12 queue, Python-mirror logic; untouched by this wave's debate); his blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14, whirlpool-planform; unchanged, nothing added this wave); DP-1 sealed blind A/B pair build (coded files, sealed mapping) before it reaches his ears, carrying the provenance header quoted verbatim, the S11-AUD overlap quoted verbatim, and LISTENING_DP1.md; fork battery spot re-run (one live, one fixture, one extraction FAIL, fixed parser) before the next wave cites the 1121pdt results; origin tips 006dfe02 and 7c19065e as next-wave live pickup entries; fork battery driver with split live/fixture counts plus duplicate naming, unique-commit count, and the closing tip re-check (P1, P8); pull-1/pull-2 remain untestable until their trees gain the pinned toolchain path; CV-P adoption still doubly gated (rotated-author re-test approximated; ruling 6 pending); COMP-2 rotated-author re-test on a fresh sealed set plus ruling 6, with the stemmer-contingency (P11); prereg consistency check before implementation; B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand down until a genuinely new design idea; D-VID-1 lane stands down until a re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not queued for his ears (DEAD on pristine evidence).
+
+
+---
+
+## Wave 20260926-1421pdt verdicts (2026-09-26)
+
+Run start: HEAD b6f96edaf (executor merge of origin/tnn-native-lab tip
+f67e98933 into local; roughly 60 upstream commits integrated cleanly, zero
+conflicts, all local wave commits preserved; Micah's merged-in work
+(RECTANGLE FIX f67e98933, H.264 CAVLC Python reference, MP3 oracle VBR,
+Fusion Fork B H1d rerender-loop repair, pig-front teach-and-rerun,
+AUDIO SEMANTIC-GROWTH phase 3, ORIENTATION.md 3a31cc183) treated as CLOSED
+and not re-litigated). By deliberate coordinator choice this wave ran the
+1121pdt judge's standing process confirmations plus the DP-1 sealed-pair
+queue-prep deliverable, and no new candidates. Debate transcript:
+docs/lab/rsi/runs/wave-20260926-1421pdt/debate/ (ADVOCATE_BRIEF.md,
+SKEPTIC_REPORT.md, JUDGE_RULINGS.md). The skeptic's verbatim provenance
+probe ("What is the provenance of the artifacts under judgment, and what
+exactly is new versus inherited?") appears once per motion (verified 6
+occurrences across both briefs); zero em-dashes in any wave-authored doc
+(the frozen znc tool output embedded in per-entry harness evidence carries
+the compiler's own punctuation; disclosed caveat per S9, never edited).
+No verdict was overturned; the judge MODIFIED one draft disposition on
+cited evidence (M6: DP-1 pair construction certified but the blind protocol
+found defective as packaged). Prereg commit-order self-check: vacuous
+this wave (no preregs), labeled vacuous per P17: no UNVERIFIABLE ORDERING.
+Commit chain (all local, none pushed): <evidence batch commit>,
+<LOOP_STATE commit>. His six governance rulings and his sealed-pair
+verdicts are untouched by this wave's debate; nothing was added to or
+removed from his judge queue.
+
+Final verdict lines, quoted verbatim from the judge:
+
+M1: "CONFIRM the 1121pdt fork-battery verdicts (spot re-run, fixed sed
+parser from the first run): live entry 02ee5ae59d PASS confirmed (harness
+exit 0, VERDICT=PASS, znc sha256
+498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef, probe
+sha256 3b29aa066126b263765986ca6f5b6e8e60113135198d2bea431be53a6518f919,
+B2 bin sha256
+75b85d3cec684f6a156f4c01169551369e4b0e040b56ec1fd24749876eddffa2, probe
+stdout R32_ZNC_PROBE_OK); fixture entry bd3097874 PASS confirmed on the
+same evidence values; pull/1/head 5802fec8 extraction FAIL confirmed
+(fatal: path 'src/tools/toolchain/znc_linux_x86_64_abed8aa1' exists on
+disk, but not in '5802fec8401f28b4036b0dd5ebb23905610cab57', identical
+verbatim cause). Scope: the three sampled 1121pdt verdicts are confirmed;
+the current wave's verdicts are covered by the full 1421 battery in M2."
+
+M2: "CONFIRM fork battery [RE-CERT] wave-20260926-1421pdt: 40 named
+entries, 38 PASS, 2 extraction FAIL (origin pull/1/head 5802fec8, origin
+pull/2/head 4b76bb59f; both trees lack the pinned toolchain path, identical
+cause to the 1121pdt, 0821pdt, and 0521pdt waves, still uncovered by this
+battery, fourth wave); 32 unique commits, 5 unique live commits (b6f96edaf,
+746ff60ba, f67e98933, 006dfe02, 7c19065e), 6 live vs 34 fixture, all
+duplicates named explicitly with SHAs per P8; uniform pins on all 38 PASS
+entries (znc 498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef;
+probe source
+3b29aa066126b263765986ca6f5b6e8e60113135198d2bea431be53a6518f919; B2
+recompile bin
+75b85d3cec684f6a156f4c01169551369e4b0e040b56ec1fd24749876eddffa2); NEG1
+discriminates 38/38, NEG2 discriminates 38/38; harness rebuilt from frozen
+source f38d9154eecb2a6e7a1682c1f6850da80aba7fbe6d73e5e6f4b31aac3f719738 to
+byte-identical
+a2e6284c5c45cfd65c7e0f974497512f4603f39bdac5bffdcefcdba0f9f4ef66; zero
+Python. Scope stamp: toolchain and extraction stability only, not the
+contents of the merged commits. Closing origin tip f67e98933 static at
+start and close. CAVEATS: cite '38/40' only with the duplicate/fixture
+split; the two pull heads remain uncovered (instrument limit, not
+regression); P14: per-entry evidence lives uncommitted in /tmp/fb1421/E and
+must be committed or archived before /tmp is reclaimed."
+
+M3: "CONFIRM tnn_chat FIT [RE-CERT] on b6f96edaf8d3e7d422aa0f81db9abc91810671c6.
+'This is not a candidate verdict and it is not merge review of the
+merged-in work; it certifies the 38-fact closed-book probe chain only.'
+10/10 chain inputs byte-exact against frozen shas. Zero modifications, zero
+deletions, zero content changes, and no mode changes to any frozen chain
+input across the 60-commit merge range 746ff60ba..b6f96edaf (origin-side
+supplementary check: pinned znc blob 611b7f0c215385b7d3073bbebbf6078224c70b4c
+byte-identical in both parents and the merge; the 100644 vs 100755 mode-only
+difference is not a content change). Determinism cited, not re-run, per P12:
+wave-20260925-1421pdt fresh re-run, evidence commit 9692f5d1d, path
+docs/lab/rsi/runs/wave-20260925-1421pdt/chat_fit/FIT_1421.md (2/2 binary
+reproducibility, 9/9 run-pairs byte-identical, KB1 30/30, KB2 17/17, KB5
+10/10). 'These instruments certify the 38-fact closed-book probe chain
+only.'"
+
+M4: "CONFIRM interactive TNN [RE-CERT]: negative on source-level entry
+points only. No chat/REPL/interactive-loop entry point in src/zag/ or
+units/ on b6f96edaf (the single grep hit is the 'repl' substring inside
+'replay'/'replication' in
+units/teachers/learner/forcepin/PINS_RDTDT_BRIEF.md; entry-point signature
+grep returned zero files); the 60-commit merge range 746ff60ba..b6f96edaf
+added zero chat/repl-named files and zero commits touching src/ or units/;
+origin commit 3a31cc183 adds only docs/lab/ORIENTATION.md (68 lines), no
+interactive surface. Runnable probe surface verified by sha only, no
+execution: baseline probe binary
+1ada2fae63ddd63d37f06705459c0d8b1d9c8dffc859af25949221bf5895749c,
+decline-gate probe binary
+20273a99215680b5e3e42bbdbbfed105c7109d15ba189c903cf0d88db54418e7, frozen
+instruments and pinned znc 498abcb5 all byte-identical to the authority
+manifest. No probe chat was run; the survey revealed no change. Caveat
+travels: tnn_chat emits unflagged confabulations on out-of-KB questions, so
+this surface is for supervised red-team probe chats only, never a candidate
+for adoption."
+
+M5: "CONFIRM the no-new-candidates stand-down for wave-20260926-1421pdt.
+P17 lane survey (window 2026-09-26 08:21 to 14:21 PDT, five independent
+sweeps): no new prereg drafts, no new design ideas, no re-aimed preregs
+since the 0821pdt wave. G1 STAND DOWN; D-VID-1 STAND DOWN; CV-P STAND DOWN
+(barred pending his governance ruling 6, no rotated-author re-test);
+COMP-2 STAND DOWN (ruling 6 open, no rotated-author re-test, P11
+stemmer-contingency unresolved); B1-class STAND DOWN (P9 reformulation not
+found); ST-1 DEAD on pristine evidence. Merge-range mechanism-like material
+is his own frontier work, treated as CLOSED. The only in-window
+candidate-adjacent build is the judge-required DP-1 sealed blind pair
+(queue-readiness, not a new mechanism). Prereg commit-order self-check:
+vacuous this wave, labeled vacuous per P17. His six governance rulings
+remain open and untouched."
+
+M6: "DP-1 SEALED BLIND PAIR: construction certified; blind protocol
+DEFECTIVE as packaged. Pair WAVs byte-identical to certified renders
+(pair_RGLaA4.wav a32ff18e8a359963152a090aa96ee16a32461dbf9632b9510e6bba4bdd224f7c,
+baseline; pair_41tIYv.wav
+994f9402f387889dfe331afa51d0dab866b00ee873a5dfa3cd5a52123bd3c771,
+variant); coded filenames carry no labels; codes from /dev/urandom; zero
+Python; provenance header quoted verbatim from DP1_DOSSIER_1121.md section
+1; S11-AUD overlap quoted verbatim. DEFECT: the brief's 'The pair' table
+maps each coded filename to its sha256, and the provenance header carries
+RENDER_SHA 994f9402f387889dfe331afa51d0dab866b00ee873a5dfa3cd5a52123bd3c771,
+so the blind mapping is recoverable from the brief alone; the brief's
+'carries no assignment' claim is false when read whole. REPAIR (completes
+this wave): strip the per-file sha-to-filename assignment from the
+judge-facing brief; keep the certification assertion that one file matches
+RENDER_SHA and one matches the baseline sha without saying which; the
+per-file assignment stays only in SEALED_MAPPING_DP1.md; no re-coding
+required. QUEUE DISPOSITION: DP-1 stays HELD this wave; the agenda's
+HELD-until-pair condition is not met by a valid blind until the repair
+lands. After repair, the pair meets the 1121pdt judge's three conditions
+(provenance header verbatim, S11-AUD overlap verbatim, LISTENING_DP1.md as
+listening instructions). Presentation to Micah is a future-wave queue
+decision and the parent agent's call, not this wave's."
+
+New standing precedent recorded by this wave's judge: (P18) sealed blind
+protocol: a judge-facing brief must contain no per-file identifier linking
+a coded filename to a condition or certified sha; any brief that does
+voids the seal. Judge-ordered repair applied this wave (commit below): the
+per-file sha table is removed from JUDGE_BRIEF_DP1.md; the certification
+assertion (one file matches RENDER_SHA, one matches the baseline sha,
+unstated which) remains; the per-file assignment lives only in
+SEALED_MAPPING_DP1.md. P14 closure: the 43 per-entry fork-evidence dirs
+were archived from /tmp/fb1421/E into
+docs/lab/rsi/runs/wave-20260926-1421pdt/forks/evidence/ and committed.
+
+Queued next: Micah's six pending governance rulings (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull,
+C12 queue, Python-mirror logic; untouched by this wave's debate); his
+blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD,
+S13, S14, whirlpool-planform; unchanged, nothing added this wave); DP-1
+presentation to his ears is a future-wave queue decision and the parent
+agent's call (the repaired blind pair with the verbatim provenance header,
+the verbatim S11-AUD overlap, and LISTENING_DP1.md is ready); fork battery
+driver with split live/fixture counts plus duplicate naming, unique-commit
+count, and the closing tip re-check (P1, P8); pull-1/pull-2 remain
+untestable until their trees gain the pinned toolchain path; CV-P
+adoption still doubly gated (rotated-author re-test approximated; ruling
+6 pending); COMP-2 rotated-author re-test on a fresh sealed set plus
+ruling 6, with the stemmer-contingency (P11); prereg consistency check
+before implementation; B1-class re-freezes require the P9 bar reformulation;
+G1 sunshafts stand down until a genuinely new design idea; D-VID-1 lane
+stands down until a re-aimed prereg with a different mechanism exists;
+ST-1 stereo WAVs not queued for his ears (DEAD on pristine evidence).
