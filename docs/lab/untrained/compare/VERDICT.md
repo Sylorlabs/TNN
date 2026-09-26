@@ -1,3 +1,14 @@
+> **STATUS: EXPLORATORY — INVALID FOR THE CONFIRMATORY BAR.**
+> This verdict records the 2026-09-26 exploratory run. A checkpoint review
+> found the analyzer was repaired AFTER exposure to the real inputs (the RIFF
+> LIST-chunk fix, the isort_copy fix, and the dynamic-range zero-poisoning
+> fix were all triggered by real-input results, and the same inputs were
+> rerun afterward), violating the required freeze-before-real-runs separation.
+> The committed smoke fixture `smoke/loudclick.wav` was RNG-generated, and
+> the novelty audit was methodologically invalid. The five hallucinations
+> below remain valuable diagnostics, but this verdict is NOT binding.
+> The binding confirmatory verdict is in `c2/compare/VERDICT.md`.
+
 # VERDICT — Workstream B: Untrained Structural Analysis of Novel Inputs
 
 Date: 2026-09-26. Analyzer: `tnn/uanalyze.zag` (pure Zag, zero RNG, deterministic).
@@ -125,3 +136,4 @@ finds no consistent vectors in churning texture: mean 0.52 px/frame). Weak miss:
 
 All six inputs run twice with the frozen binary: byte-identical outputs
 (6/6). Zero RNG in the analyzer; no wall-clock or address-dependent output.
+

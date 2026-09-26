@@ -68,7 +68,9 @@ channel, excluded from understanding metrics, exactly as in the prior forks.
 ## White-box verification
 
 Same contract as the prior forks: `tlemit` reads ONLY `knowmap.bin`
-(`TNNKTLM1` magic), re-renders each committed layer with the *same* shared
+(`TNNKTLM2` magic as of the 2026-09-26 free-lunch hunt — pruned SHAPES
+vocabularies + recoded residual section; was `TNNKTLM1`), re-renders each
+committed layer with the *same* shared
 render functions ingest used, clamps to `renderB_understanding.bmp`, applies
 residual deltas to `renderB.bmp`. Understanding metrics (PSNR/SSIM) are
 computed pre-residual; `renderA.bmp` must equal the sealed fixture exactly.
