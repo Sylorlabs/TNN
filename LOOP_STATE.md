@@ -1609,6 +1609,163 @@ Queued next: Micah's six pending governance rulings (S7 strike, MD-SSD-1 keep-wi
 
 ---
 
+## Wave 20260926-0221pdt verdicts (2026-09-26): INCOMPLETE, no verdict tag
+
+Run record: this wave ran its fork battery only and ended without the
+mandatory debate, without a LOOP_STATE.md update, and with its results
+left untracked. This section backfills the record so the wave is not
+silent. Its evidence (docs/lab/rsi/runs/wave-20260926-0221pdt/forks/
+FORK_RESULTS_0221.md) is committed by wave-20260926-0521pdt as
+superseded historical evidence, carrying zero lineage weight into any
+future verdict.
+
+Battery numbers (self-reported, superseded): 35 enumerated entries,
+33 PASS, 2 extraction FAILs (origin-pull-1-head and origin-pull-2-head:
+the pinned znc path and the probe path do not exist in those trees;
+their trees are non-TNN research-doc repos, no src/ dir). Local HEAD
+aaabb0b89 static during the run; origin/tnn-native-lab moved 6ba3b28d2
+to 1c3f9571 and the live tip 1c3f9571 was tested directly; closing
+read-only ls-remote identical to run start. The 1721pdt anomaly commit
+bf69a6f38 and cc3b63d1a verified ancestors of aaabb0b89.
+
+Disclosure (self-caught): the battery worker ran one `python3` heredoc
+to patch its driver text. Classified by the 0521pdt debate as a red-line
+breach disclosure against that wave's driver evidence (new precedent
+P13: a Python touch of wave tooling records a breach against that
+wave's evidence; the wave is superseded by a fresh zero-Python re-run
+and its numbers travel only as superseded self-report). It is not the
+COMP-2 no-contact case and not void-on-sight (which covers
+pre-authorized tooling).
+
+No candidates, no debate, no judge rulings, no Micah-facing verdicts
+this wave. Nothing is tagged [NEW], [RE-CERT], [STACK], or [VOID] for
+it. His six pending governance rulings and his sealed blind verdicts
+are unchanged by this wave.
+
+---
+
+## Wave 20260926-0521pdt verdicts (2026-09-26)
+
+Run start: HEAD d0076134d (scheduler merge of origin/tnn-native-lab tip
+6c3c7b69c; roughly 116 upstream commits integrated cleanly, zero
+conflicts; local wave commits preserved; his merged-in work is treated
+as CLOSED and not re-litigated). By deliberate coordinator choice this
+wave ran standing process confirmations and no new candidates: every
+candidate lane is currently stood down or gated (G1 sunshafts stand
+down pending a genuinely new design idea; D-VID-1 stands down pending a
+re-aimed prereg with a different mechanism; CV-P and COMP-2 adoption are
+barred pending his ruling 6 on Python-mirror logic; B1-class re-freezes
+require the P9 bar reformulation first; ST-1 is DEAD on pristine
+evidence). No preregs this wave, so the prereg commit-order self-check
+is vacuous: no UNVERIFIABLE ORDERING. Debate transcript:
+docs/lab/rsi/debates/wave-20260926-0521pdt/ (ADVOCATE_BRIEF.md,
+SKEPTIC_REPORT.md, JUDGE_RULINGS.md, INDEX.md). The skeptic's verbatim
+provenance probe ("What is the provenance of the artifacts under
+judgment, and what exactly is new versus inherited?") appears once per
+item (verified 5 occurrences); zero em-dashes in any wave doc
+(grep-verified by the coordinator). No verdict was overturned; the
+judge MODIFIED one draft verdict line on cited evidence.
+
+1. Fork battery: CONFIRM [RE-CERT] (judge MODIFIED the draft). 35 named
+entries, 33 PASS, 2 extraction FAILs (pull/1/head 5802fec8,
+pull/2/head 4b76bb59f; both missing the pinned znc path and probe path;
+non-TNN research-doc repos, no src/ dir). 27 unique commits, 2 unique
+live commits (d0076134d, 6c3c7b69c) tested at their own tips; 3 live
+named entries, 32 fixtures, every duplicate named with its SHA; znc pin
+498abcb5... on 33/33; probe sha 3b29aa06 on 33/33; B2 bin sha 75b85d3c
+matches the frozen 2321pdt value; NEG1/NEG2 discriminate on 33/33;
+pure-Zag harness rebuilt byte-identical to a2e6284c from source sha
+f38d9154; zero Python attested. Local HEAD static during the run
+(d0076134d at start and end); origin tip tested live at 6c3c7b69c;
+closing read-only ls-remote identical to run start (6c3c7b69c), so no
+untested new tip exists for next-wave pickup. The modification: transit
+claims for 1c3f9571, aaabb0b89, 58dd10ae8, bf69a6f38, cc3b63d1a are
+re-anchored to this wave's own merge-base ancestry verification of the
+directly tested tips; the "0221pdt-tested" premise is struck as
+evidentiary (that wave's battery is superseded per P13) and remains only
+as a superseded historical note. The 33/35 headline travels only with
+the extraction-FAIL and duplicate caveats; the toolchain-stability scope
+stamp is mandatory per P1/P8.
+
+2. tnn_chat FIT: CONFIRM [RE-CERT] on d0076134d without a fresh re-run
+(judge CONFIRMED unmodified). 10/10 chain inputs byte-exact to frozen
+shas (both fit_authority .zag sources, kb.txt, gaz.txt, the two R33
+support sources, the pinned znc, all three probe fixtures); D1 durable
+path holds (all four sources present at matching shas in the tracked
+authority dir); the three merges in 9526cdb5c..d0076134d (cc3b63d1a,
+aaabb0b89, d0076134d) carry zero modifications, zero deletions, and zero
+content changes to any frozen input (the debate group independently
+re-verified all six parent-to-merge diffs: only sha-verified D1 freeze
+additions plus one mode-only znc change, 100644 to 100755, blob
+611b7f0c2... identical on both sides); determinism cited from certified
+evidence (2/2 binary reproducibility, 9/9 rerun pairs byte-identical,
+KB1 30/30, KB2 17/17, KB5 10/10, output hashes identical). New precedent
+P12: precondition (3) is content-empty; the qualification is recorded
+openly, not buried. The literal-scope sentences travel verbatim: this
+is not a candidate verdict and it is not merge review of the merged-in
+work; it certifies the 38-fact closed-book probe chain only.
+
+3. Interactive TNN: CONFIRM [RE-CERT], EXISTS for supervised red-team
+probe chats only (judge CONFIRMED). Baseline probe binary 1ada2fae and
+decline-gate binary 20273a99 both ELF x86-64 and runnable; authority
+sources match manifest shas; zero entry-point-signature matches in
+src/zag/ or units/ (no source-level chat/REPL entry point on this tip;
+no new one added upstream). No probe chat was run this wave (availability
+only, file plus sha256sum). The confabulation caveat travels: tnn_chat
+emits unflagged confabulations on out-of-KB questions (e.g. "Paris is
+the capital of France" for capital of Italy).
+
+4. Backfill of wave-20260926-0221pdt: CONFIRMED as INCOMPLETE, no
+verdict tag (judge CONFIRMED). The python3-heredoc driver patch is a
+red-line breach disclosure against that wave's driver evidence; its
+battery numbers travel as superseded self-report with zero lineage
+weight; this wave's fresh zero-Python re-run supersedes them. New
+precedent P13 records the breach and supersession rule.
+
+5. Documentation maintenance (judge CONFIRMED, not a verdict, no tag):
+the fit_authority README's stale residual note is fixed (kb.txt and
+gaz.txt were frozen in commit bf69a6f38); AUTHORITY_MANIFEST.md's
+attribution parenthetical corrected to bf69a6f38. Frozen inputs
+untouched.
+
+New precedents recorded by this wave's judge: (P12) FIT precondition (3)
+is content-empty: the qualification is recorded openly, not buried; a
+coordinator may still order a literal re-run at discretion, but the
+evidence does not require it. (P13) a Python touch of wave tooling
+records a red-line breach against that wave's evidence; the wave's
+numbers are superseded by a fresh zero-Python re-run and travel only as
+superseded self-report.
+
+Disclosures: the fork battery worker observed two tracked files under
+docs/lab/rsi/fit_authority/ being modified by the concurrent FIT worker
+during its run; both modifications are committed by this wave (README
+residual fix, manifest commit-nit fix). Nothing was lost or
+double-written. Zero Python ran in any of this wave's three lane
+workers (each attested explicitly); the 0221pdt python3-heredoc breach
+was disclosed, not repeated.
+
+Commit chain (all local, none pushed): <commit ids filled at commit
+time>. No verdict was overturned.
+
+Queued next: Micah's six pending governance rulings (S7 strike,
+MD-SSD-1 keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull,
+C12 queue, Python-mirror logic; untouched by this wave's debate); his
+blind verdicts on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD,
+S13, S14, whirlpool-planform; unchanged, nothing added this wave); fork
+battery driver with split live/fixture counts plus duplicate naming,
+unique-commit count, and the closing tip re-check (P1, P8); CV-P
+adoption still doubly gated (rotated-author re-test approximated;
+ruling 6 pending); COMP-2 rotated-author re-test on a fresh sealed set
+plus ruling 6, with the stemmer-contingency (P11); prereg consistency
+check before implementation; B1-class re-freezes require the P9 bar
+reformulation; G1 sunshafts stand down until a genuinely new design
+idea; D-VID-1 lane stands down until a re-aimed prereg with a different
+mechanism exists; ST-1 stereo WAVs not queued for his ears (DEAD on
+pristine evidence).
+
+
+---
+
 ## Wave 20260925-1421pdt verdicts (2026-09-25)
 
 Run start: HEAD 9526cdb5c (parent merge of origin/tnn-native-lab tip

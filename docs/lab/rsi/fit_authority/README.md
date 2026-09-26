@@ -32,11 +32,10 @@ inherited byte-identical sources; they are never edited post-hoc.
 
 The remaining FIT chain inputs are: the two R33 support sources (under
 docs/lab/bytegen/authority_law/dialogue/), the canonical kb.txt and
-gaz.txt, the pinned znc (src/tools/toolchain/znc_linux_x86_64_abed8aa1,
+gaz.txt (frozen in this directory, see AUTHORITY_MANIFEST.md), the pinned znc
+(src/tools/toolchain/znc_linux_x86_64_abed8aa1,
 sha256 498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef),
-and the three probe fixtures. Residual: kb.txt and gaz.txt are not yet
-in a named authority path; a future wave may extend this directory or an
-equivalent to cover them.
+and the three probe fixtures. No residuals remain in the chain.
 
 ## Scope
 
