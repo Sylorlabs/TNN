@@ -84,3 +84,18 @@ day invent its own structure.
 - `build.sh` — repo-relative build + verification.
 - `evidence/WALL1.out`, `evidence/WALL2.out` — the two byte-identical runs (W25 panic included).
 - `SHA_MANIFEST.md` — checksums.
+
+## Addendum 2026-09-26 — W25 panic fixed, wall re-measured
+
+The W25 deterministic panic (`t[-1]` on empty text) was fixed in the
+production intake (`docs/lab/mg_chunking_promote/intake.zag`: `cand_zoom_19`
+kind-2/8/9 now guard `loc<0 || ll==0` and answer `'?'` like a miss; 3-line
+diff, 57Q production battery byte-identical pre/post). The pre-fix panic run
+is preserved as `evidence/WALL0_PREFIX_PANIC.out` (+ `.err`).
+
+Re-measurement through the fixed intake: **14/26 correct, 0 panics** (rc=0),
+W25 now `ans="?" exp="?" correct=1 native=1`, reruns byte-identical
+(`evidence/WALL1.out`, `evidence/WALL2.out`). The wall's substance is
+unchanged: the 12 remaining misses are the parser-vocabulary and
+addressing/nesting failures documented above — the fix only closed the
+robustness hole.

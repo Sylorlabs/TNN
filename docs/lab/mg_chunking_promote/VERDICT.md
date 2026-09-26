@@ -71,3 +71,21 @@ never-seen questions.
 - `evidence/RUN_LIVE1.out`, `evidence/RUN_LIVE2.out` — the two byte-identical runs.
 - `SHA_MANIFEST.md` — checksums.
 - `gen_phase1.py` — Phase-1 generator (kept for history; v2 battery assembled by script, see provenance).
+
+## Addendum 2026-09-26 — degenerate-input panic fix (W25)
+
+The next-wall battery exposed a deterministic panic in the production intake:
+empty text on a whole-text position question (kind 2/8/9) hit `cand_zoom_19`
+with a zero-length located span and indexed an empty slice (`t[-1]` /
+`t[0]`). Root cause: `zoom_locate` returns `loc=0` (not `<0`) for the
+whole-text shortcut even when `ll==0`, and the kind-2/8/9 branches only
+guarded `loc<0`. Fix (in `hand_c2.zag`, `intake.zag` regenerated via
+`assemble.py`, diff = exactly 3 lines): `if (loc<0 || ll==0)` answers `'?'`
+like a miss — the same degenerate-answer pattern the kind-12 path already
+used. No behavior change on any valid input: the 57Q production battery is
+byte-identical pre/post fix (RUN_LIVE1 == RUN_LIVE2, 57/57/57/0).
+
+New regression: `regress_degen.zag` + `build_regress.sh` — empty text across
+all six position kinds (2, 8, 9, 12, 14, 15, W25 verbatim as D0):
+6/6 correct, 6/6 native, 0 fallbacks, rc=0, byte-identical reruns
+(`evidence/DEGEN1.out`, `evidence/DEGEN2.out`).
