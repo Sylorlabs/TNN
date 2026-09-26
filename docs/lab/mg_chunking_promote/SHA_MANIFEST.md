@@ -1,0 +1,12 @@
+# SHA-256 manifest — magnifying-glass promotion (Phase 1)
+# generated 2026-09-26; run ./build.sh to reproduce evidence
+
+821e6042f2ef3674f2b7fb2975e1bc7f7e8e4e1989288df5bef88dff327b9101  intake.zag
+16c9d35faebfcc38eeb3eb65571ec4ad8b1c45646d617121b11fa55562050c74  negcontrol.zag
+517657bd088a1ef6b84703b80fddf06eac5b5c3d130c51ba8086bb6158426ee5  battery1.zag
+edc442f966ce69538bc1cc11b3e23331a5c17ca129412b65be90b26ed37ecab0  gen_phase1.py
+4ef02ab20cabffe93d7954a69adbeaadd0ffbc0024caa9f9917edc088f6645fe  build.sh
+e6379ddb0b05d95b5ba2e8454ef8cc6bc74d054cfa44175c379296641e9f61d8  R33_NATIVE_IO_V1.zag
+94f6d10d7ab94980dc6096c0a1d4672c9e88ea922f66ca237653d9bb0191d4b3  VERDICT.md
+50c2180d9f46edd337ee8e87c3efe2ddaa2b756919c999b189d604c8d6c745e4  evidence/RUN_R1.out
+50c2180d9f46edd337ee8e87c3efe2ddaa2b756919c999b189d604c8d6c745e4  evidence/RUN_R2.out
