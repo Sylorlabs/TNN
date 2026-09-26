@@ -1,33 +1,73 @@
-# Magnifying-glass chunker — PROMOTION VERDICT (Phase 1, 2026-09-26)
+# Magnifying-glass chunker — PROMOTION VERDICT (Phase 1+2, 2026-09-26)
 
-Plain-English verdict: **the magnifying-glass chunker is promoted into live intake.**
-The frozen fork's deliberative arm (24/24 correct, 24/24 native, 0 fallbacks) was renamed
-into the live entry point `tnn_intake(...)`. The three failed fixed arms (C/W/S) were
-removed from production entirely — they survive only in `negcontrol.zag` as explicit
-retired negative controls, proving the fork's finding that fixed chunking fails.
+Plain-English verdict: **the learned chunking policy is promoted into live intake.**
+The frozen learned policy (derived from 9 chunkers x 57 questions: 57/57 correct,
+57/57 native, 0 fallbacks) replaced the hand-authored Phase-1 rule table as the
+live entry point `tnn_intake(...)`. The fixed C/W/S arms remain retired — they
+survive only in `negcontrol.zag` as negative controls, untouched by this change.
 
-## Bars (live intake, 24-question battery)
+## What changed (Phase 1 v1 -> Phase 2 v2)
 
-| Bar | Live | Frozen fork D |
+| | Phase 1 (v1) | Phase 2 (v2, this commit) |
 |---|---|---|
-| Correct | **24 / 24** | 24 / 24 |
-| Native (no fallback) | **24 / 24** | 24 / 24 |
-| Fallbacks | **0** | 0 |
-| Zoomed (multi-scale) answers | 12 | — |
+| Policy source | hand-authored deliberative D rules | frozen learned policy table (measured, 57Q x 9 chunkers) |
+| Classifier | kinds 1-9, original vocabulary | extended classifier, kinds 0-17 + text-shape addressing |
+| Zoom machinery | hand-written | frozen learned zoom/addressing (word locate -> char magnify) |
+| Fixed C/W/S arms | absent from production | absent from production (unchanged) |
+| Candidates in production | 1 (D) | 9 (all measured candidates, dispatcher picks only the frozen winner) |
 
-RUN_R1.out SHA-256: `50c2180d9f46edd337ee8e87c3efe2ddaa2b756919c999b189d604c8d6c745e4`
-(byte-identical rerun RUN_R2; delete/rebuild/rerun reproduced RUN_R1 exactly).
+`intake.zag` v2: classifies the question, detects text shape, looks up the frozen
+measured winner for that (kind, shape) class, executes ONLY that winner, and emits
+the derived reason plus all zoom traces. Empty measured classes explicitly default
+to candidate 3 (the deliberative magnifier) and say so in the trace.
 
-## The q22 trap (kept working)
+## Regression gate (the bar Micah set: anything breaks, it doesn't ship)
 
-"What is the 2nd letter of fox" over "the quick brown fox": live intake locates `fox`,
-zooms to the word, then indexes its 2nd character → `o`. The retired fixed C/S arms answer
-`h` (indexing the whole text); the fixed W arm reached `o` only through fallback. The live
-trace shows `WORD>CHAR` with the two zooms.
+| Gate | Result |
+|---|---:|
+| Production questions | 57 |
+| Correct | **57 / 57** |
+| Native (no fallback) | **57 / 57** |
+| Fallbacks | **0** |
+| Choice lines carrying a derived reason | 57 / 57 |
+| Rerun | byte-identical |
+| Rebuild-from-source rerun | byte-identical |
+
+RUN_LIVE1.out / RUN_LIVE2.out SHA-256:
+`0a34116398fcd22b313c785c1d1037d712a444f18b3925ce49ac29316a41d268`
+
+Pure Zag. Zero RNG. Deterministic.
+
+## The q22 trap (still held through production)
+
+"What is the 2nd letter of fox" over "the quick brown fox" -> `o`. The live trace
+shows `WORD>CHAR`: locate `fox` at word scale, zoom to its 2nd character.
+
+## Provenance (how intake.zag v2 was built)
+
+Assembled from the frozen learned fork `docs/lab/mg_chunking_learned/` (byte-identical
+copies of `base.zag`, `hand_a.zag`, `hand_b.zag`, `hand_c1/2/3.zag` verified against
+origin on 2026-09-26) plus the frozen measured policy table from `derive.zag`
+(RUN_D1.out SHA-256 `45780575...eadcb`, 57/57 correct, 57/57 native, 0 fallbacks).
+Selection law: most correct -> most native -> fewest ops -> coarser chunking -> lower
+candidate id. No policy value was invented or tuned during assembly.
+
+## Honest boundary
+
+This is a measured policy derivation, not unconstrained runtime invention: the
+policy was derived over a finite 57-question authored battery and a finite
+9-candidate set, and the parser/classifier remains hand-designed. What shipped is
+the *measured winner per class*, executed natively. See the next-wall verdict
+(`../mg_chunking_nextwall/VERDICT.md`) for where the frozen policy breaks on
+never-seen questions.
 
 ## Files
 
-- `intake.zag` — live public entry point `tnn_intake(...)`; fork machinery renamed `d_*` → `tnn_*`; fixed C/W/S absent; every choice and zoom traced.
-- `negcontrol.zag` — retired fixed arms as negative controls only (`nc_c_answer`, `nc_w_answer`, `nc_s_answer`).
-- `battery1.zag` / `gen_phase1.py` / `build.sh` — battery, generator, build.
-- `evidence/RUN_R1.out`, `evidence/RUN_R2.out` — the two byte-identical runs.
+- `intake.zag` — live entry point `tnn_intake(...)` with the frozen learned policy.
+- `battery1.zag` — 57-question production regression driver (extracts the frozen
+  questions from the learned `derive.zag` and runs them through production).
+- `negcontrol.zag` — UNCHANGED; retired fixed C/W/S arms as negative controls.
+- `build.sh` — repo-relative build + full verification (gates 57/57/57/0).
+- `evidence/RUN_LIVE1.out`, `evidence/RUN_LIVE2.out` — the two byte-identical runs.
+- `SHA_MANIFEST.md` — checksums.
+- `gen_phase1.py` — Phase-1 generator (kept for history; v2 battery assembled by script, see provenance).

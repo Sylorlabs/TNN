@@ -1,12 +1,15 @@
-# SHA-256 manifest — magnifying-glass promotion (Phase 1)
-# generated 2026-09-26; run ./build.sh to reproduce evidence
+# SHA-256 manifest — production intake v2 (learned policy), 2026-09-26
 
-821e6042f2ef3674f2b7fb2975e1bc7f7e8e4e1989288df5bef88dff327b9101  intake.zag
-16c9d35faebfcc38eeb3eb65571ec4ad8b1c45646d617121b11fa55562050c74  negcontrol.zag
-517657bd088a1ef6b84703b80fddf06eac5b5c3d130c51ba8086bb6158426ee5  battery1.zag
-edc442f966ce69538bc1cc11b3e23331a5c17ca129412b65be90b26ed37ecab0  gen_phase1.py
-4ef02ab20cabffe93d7954a69adbeaadd0ffbc0024caa9f9917edc088f6645fe  build.sh
-e6379ddb0b05d95b5ba2e8454ef8cc6bc74d054cfa44175c379296641e9f61d8  R33_NATIVE_IO_V1.zag
-94f6d10d7ab94980dc6096c0a1d4672c9e88ea922f66ca237653d9bb0191d4b3  VERDICT.md
-50c2180d9f46edd337ee8e87c3efe2ddaa2b756919c999b189d604c8d6c745e4  evidence/RUN_R1.out
-50c2180d9f46edd337ee8e87c3efe2ddaa2b756919c999b189d604c8d6c745e4  evidence/RUN_R2.out
+Unchanged upstream files (not re-listed): R33_NATIVE_IO_V1.zag, negcontrol.zag,
+gen_phase1.py.
+
+```
+e5094ff39a3db75add4bb5066c4c1387a8d71f8746c31eccea7b073b0032ca33  intake.zag
+ffabd23b525769dd21c35d9762633ca75412ecb476969749aff46f880091a5c6  battery1.zag
+9b322d077ad93af0b448ce6af9e0ec829c30b3b5ed6c8e248b1ed3b04cf1e8ee  build.sh
+b6a5c617afa8186b3788af00bd72148d768b9f741ae9496ac4e3cadf1c1618f8  VERDICT.md
+0a34116398fcd22b313c785c1d1037d712a444f18b3925ce49ac29316a41d268  evidence/RUN_LIVE1.out
+0a34116398fcd22b313c785c1d1037d712a444f18b3925ce49ac29316a41d268  evidence/RUN_LIVE2.out
+```
+
+Regression: 57/57 correct, 57/57 native, 0 fallbacks; reruns byte-identical.
