@@ -1,0 +1,680 @@
+// ctrl_main.zag — Phase B2b control + closed-loop on real targets (PREREG_LH §2b/§2c).
+// Pure Zag, zero RNG. Links organ_lib.zag (frozen organ DSP) + f0low.zag (guard).
+//
+// A pure-Zag control/closed-loop harness: the system hears a reference WAV
+// through the embedded frozen organ (descriptors produced and consumed INSIDE
+// this binary — no measured sidecar crosses a process boundary), journals its
+// reasoning natively, and renders a parameterized MATCH attempt with a minimal
+// extension of the wiring's 5-action vocabulary (documented deviation:
+// MATCH renders pitch+envelope+prosody continuously; the frozen QUERY/CONTINUE/
+// NOTE_NEW/RECALL/ATTEND vocabulary cannot render envelope or prosody at all).
+//
+// Modes:
+//   ctrl cal <depth_pm> <f0_mhz> <out.wav>
+//       render a vibrato calibration tone, hear it back, print HEARD.
+//   ctrl match <ref.wav> <out.wav> [sever]
+//       open-loop match render. sever=1 -> default render (RC0 null arm).
+//   ctrl loop <ref.wav> <outdir> [sever]
+//       3-iteration closed loop; writes iter0..3.wav, journals every step.
+//   ctrl batch <targets.txt> <outdir> <gain> [sever]
+//       sequential targets (lines: "M <wav>" | "L <wav>") with persistent
+//       in-memory history (16-entry ring, like session_run's HIST). gain =
+//       frozen calibration constant: cv_permille heard per unit vibrato depth,
+//       scaled: vib_pm = cv_pm * 1000000 / gain.
+//
+// Boundary: only WAV paths (+ mode/gain/sever harness controls) cross into
+// the binary. Descriptors never leave it. Python scores committed WAVs offline.
+
+fn parse_i64(s: []u8) i64 {
+    let n: i64 = s.len as i64;
+    if (n == 0) { return 0; }
+    let neg: i64 = 0;
+    let i: i64 = 0;
+    if (s[0] == 45) {
+        neg = 1;
+        i = 1;
+    }
+    let v: i64 = 0;
+    while (i < n) {
+        let c: i64 = s[i] as i64;
+        if (c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (neg == 1) { v = 0 - v; }
+    return v;
+}
+
+fn starts_with(line: []u8, pre: []u8) i64 {
+    if ((line.len as i64) < (pre.len as i64)) { return 0; }
+    let i: i64 = 0;
+    while (i < (pre.len as i64)) {
+        if (line[i] != pre[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn first_word(s: []u8) []u8 {
+    let n: i64 = s.len as i64;
+    let j: i64 = 0;
+    while (j < n && s[j] != 32 && s[j] != 10 && s[j] != 13) { j = j + 1; }
+    return s[0..j];
+}
+
+// pad3: zero-padded 3-digit decimal of v (v>=0, v<1000)
+fn pad3(v: i64) []u8 {
+    let b: []u8 = (_zag_malloc(4) as *u8)[0..4];
+    b[0] = (48 + v / 100) as u8;
+    b[1] = (48 + (v / 10) % 10) as u8;
+    b[2] = (48 + v % 10) as u8;
+    b[3] = 0;
+    return b[0..3];
+}
+
+// 10^x via e^{x ln10}, Taylor 40 terms (deterministic)
+fn exp10(x: f64) f64 {
+    let y: f64 = x * 2.302585092994046;
+    let term: f64 = 1.0;
+    let acc: f64 = 1.0;
+    let k: i64 = 1;
+    while (k <= 40) {
+        term = term * y / (k as f64);
+        acc = acc + term;
+        k = k + 1;
+    }
+    return acc;
+}
+
+fn newt_sqrt(v: f64) f64 {
+    if (v <= 0.0) { return 0.0; }
+    let s: f64 = v;
+    let it: i64 = 0;
+    while (it < 40) {
+        s = 0.5 * (s + v / s);
+        it = it + 1;
+    }
+    return s;
+}
+
+// ---------------- descriptor hearing (frozen organ + guard, internal) ----
+// D arena: 8 i64 fields @8B: f0_mhz, voiced_frac_pm, env, rms_mdb, cv_pm,
+// nfr, sr, heard_ok.
+fn hear(path: []u8, D: []u8) i64 {
+    let FR: []u8 = (_zag_malloc(208000) as *u8)[0..208000];
+    let XW: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let DW: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let ON: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let META: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let SORT: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let H: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let H512: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWC: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWS: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let RL: []u8 = (_zag_malloc(4408) as *u8)[0..4408];
+    let LRL: []u8 = (_zag_malloc(12288) as *u8)[0..12288];
+    let LRES: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GRES: []u8 = (_zag_malloc(24) as *u8)[0..24];
+    let META2: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GF0: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    let GV: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    build_tables(H, H512, TWC, TWS);
+    let nfr: i64 = analyze(path, FR, XW, DW, ON, META, H, H512, TWC, TWS, RL);
+    if (nfr < 0) { return -1; }
+    let b: []u8 = file_read(path, 6000000);
+    if (wav_parse(b, META2) == 0) { return -1; }
+    let ds0: i64 = get64(META2, 0);
+    let nsamp: i64 = get64(META2, 8);
+    let f: i64 = 0;
+    while (f < nfr) {
+        let s: i64 = f * 1024;
+        guard_frame(b, ds0, nsamp, s, 44100, get64(FR, f * 80 + 8), get64(FR, f * 80 + 24), get64(FR, f * 80), 0, LRL, LRES, GRES);
+        put64(GF0, f * 8, get64(GRES, 0));
+        put64(GV, f * 8, get64(GRES, 8));
+        f = f + 1;
+    }
+    let f0: i64 = guarded_med_f0(GF0, GV, nfr, SORT);
+    let vf: i64 = guarded_voiced_frac(GV, nfr);
+    let env: i64 = env_class(FR, nfr);
+    let rms: i64 = med_field(FR, nfr, SORT, 0);
+    // native prosody CV: ROBUST std/mean of guard-voiced frame f0 (per-mille)
+    // median-3 filter kills isolated octave-jump frames; f0=0 excluded
+    // (0 is the estimator's "no estimate" flag, not a measurement).
+    // Frozen to match scorer_ctrl.py cv_robust.
+    let c: i64 = 0;
+    let g: i64 = 0;
+    while (g < nfr) {
+        if (get64(GV, g * 8) == 1) {
+            let gf0v: i64 = get64(GF0, g * 8);
+            if (gf0v > 0) {
+                put64(SORT, c * 8, gf0v);
+                c = c + 1;
+            }
+        }
+        g = g + 1;
+    }
+    let cvpm: i64 = 0;
+    if (c >= 7) {
+        // median-3 into SORT upper half (4096*8 offset)
+        let q: i64 = 0;
+        while (q < c) {
+            let qa: i64 = q; if (q > 0) { qa = q - 1; }
+            let qc: i64 = q; if (q < c - 1) { qc = q + 1; }
+            let a0: i64 = get64(SORT, qa * 8);
+            let b0: i64 = get64(SORT, q * 8);
+            let c0: i64 = get64(SORT, qc * 8);
+            let m3v: i64 = b0;
+            if ((a0 <= b0 && b0 <= c0) || (c0 <= b0 && b0 <= a0)) { m3v = b0; }
+            else {
+                if ((b0 <= a0 && a0 <= c0) || (c0 <= a0 && a0 <= b0)) { m3v = a0; }
+                else { m3v = c0; }
+            }
+            put64(SORT, 16384 + q * 8, m3v);
+            q = q + 1;
+        }
+        let sum: i64 = 0;
+        let z: i64 = 0;
+        while (z < c) { sum = sum + get64(SORT, 16384 + z * 8); z = z + 1; }
+        let mean: i64 = sum / c;
+        if (mean > 0) {
+            let sf2: f64 = 0.0;
+            let w: i64 = 0;
+            while (w < c) {
+                let dv: f64 = (get64(SORT, 16384 + w * 8) - mean) as f64;
+                sf2 = sf2 + dv * dv;
+                w = w + 1;
+            }
+            let sd: f64 = newt_sqrt(sf2 / (c as f64));
+            cvpm = ((sd * 1000.0 / (mean as f64)) + 0.5) as i64;
+        }
+    }
+    put64(D, 0, f0);
+    put64(D, 8, vf);
+    put64(D, 16, env);
+    put64(D, 24, rms);
+    put64(D, 32, cvpm);
+    put64(D, 40, nfr);
+    put64(D, 48, 44100);
+    put64(D, 56, 1);
+    return 0;
+}
+
+fn print_env_name(e: i64) void {
+    if (e == 1) { _zag_print("rise"); }
+    if (e == 2) { _zag_print("decay"); }
+    if (e == 0) { _zag_print("flat"); }
+    return;
+}
+
+fn print_heard(tag: []u8, D: []u8) void {
+    _zag_print(tag);
+    _zag_print(" f0_mhz=");
+    _zag_print(i64s(get64(D, 0)));
+    _zag_print(" voiced_frac_pm=");
+    _zag_print(i64s(get64(D, 8)));
+    _zag_print(" env=");
+    print_env_name(get64(D, 16));
+    _zag_print(" cv_pm=");
+    _zag_print(i64s(get64(D, 32)));
+    _zag_print(" rms_mdb=");
+    _zag_print(i64s(get64(D, 24)));
+    _zag_print(" nfr=");
+    _zag_print(i64s(get64(D, 40)));
+    _zag_print("\n");
+    return;
+}
+
+// ---------------- parameterized MATCH renderer ----------------
+// Renders 2.0 s PCM16 mono 44100 Hz:
+//   sine at f0_mhz (phase accumulation), vibrato depth vib_pm (per-million,
+//   5 Hz sine FM), envelope: 0 flat / 1 rise / 2 decay with slope_db S:
+//   rise: -2S..0 dB linear-in-dB ramp; decay: 0..-2S dB; 10 ms fades.
+fn render_match(path: []u8, f0_mhz: i64, env: i64, slope_db: i64, vib_pm: i64) i64 {
+    let dur: i64 = 88200;
+    let data: []u8 = (_zag_malloc(dur * 2) as *u8)[0..(dur * 2)];
+    let i: i64 = 0;
+    while (i < dur * 2) { data[i] = 0; i = i + 1; }
+    let pi: f64 = 3.141592653589793;
+    let sr: f64 = 44100.0;
+    let f0: f64 = (f0_mhz as f64) / 1000.0;
+    if (f0 < 1.0) { f0 = 440.0; }
+    let vib: f64 = (vib_pm as f64) / 1000000.0;
+    if (vib < 0.0) { vib = 0.0; }
+    if (vib > 0.5) { vib = 0.5; }
+    let S: f64 = slope_db as f64;
+    // per-sample linear-in-dB multiplier k: rise k>1, decay k<1, flat k=1
+    let k: f64 = 1.0;
+    let amp: f64 = 1.0;
+    if (env == 1) {
+        k = exp10(S / (10.0 * (dur as f64)));
+        amp = exp10(0.0 - S / 10.0);
+    }
+    if (env == 2) {
+        k = exp10(0.0 - S / (10.0 * (dur as f64)));
+        amp = 1.0;
+    }
+    let phase: f64 = 0.0;
+    let n: i64 = 0;
+    while (n < dur) {
+        let t: f64 = (n as f64) / sr;
+        let fm: f64 = vib * cosr(2.0 * pi * 5.0 * t - pi / 2.0);
+        let finst: f64 = f0 * (1.0 + fm);
+        phase = phase + 2.0 * pi * finst / sr;
+        let s: f64 = 0.25 * cosr(phase - pi / 2.0);
+        s = s * amp;
+        amp = amp * k;
+        let fade: f64 = 1.0;
+        if (n < 441) { fade = (n as f64) / 441.0; }
+        if (n > dur - 441) { fade = ((dur - n) as f64) / 441.0; }
+        s = s * fade;
+        let v: i64 = (s * 32767.0) as i64;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        let uv: i64 = v;
+        if (uv < 0) { uv = uv + 65536; }
+        data[n * 2] = (uv & 255) as u8;
+        data[n * 2 + 1] = ((uv / 256) & 255) as u8;
+        n = n + 1;
+    }
+    let cs: []u8 = cstr(path);
+    if (cs.len == 0) { return -1; }
+    let hdr: []u8 = (_zag_malloc(44) as *u8)[0..44];
+    hdr[0] = 82; hdr[1] = 73; hdr[2] = 70; hdr[3] = 70;
+    put32(hdr, 4, 36 + dur * 2);
+    hdr[8] = 87; hdr[9] = 65; hdr[10] = 86; hdr[11] = 69;
+    hdr[12] = 102; hdr[13] = 109; hdr[14] = 116; hdr[15] = 32;
+    put32(hdr, 16, 16);
+    hdr[20] = 1; hdr[21] = 0;
+    hdr[22] = 1; hdr[23] = 0;
+    put32(hdr, 24, 44100);
+    put32(hdr, 28, 88200);
+    hdr[32] = 2; hdr[33] = 0;
+    hdr[34] = 16; hdr[35] = 0;
+    hdr[36] = 100; hdr[37] = 97; hdr[38] = 116; hdr[39] = 97;
+    put32(hdr, 40, dur * 2);
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 420, 0, 0, 0);
+    if (fd < 0) { return -2; }
+    let w1: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(hdr) as i64), 44, 0, 0, 0);
+    let w2: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(data) as i64), dur * 2, 0, 0, 0);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (w1 != 44 || w2 != dur * 2) { return -3; }
+    return 0;
+}
+
+// path = outdir + "/" + stem + ".wav"
+fn out_path(outdir: []u8, stem: []u8) []u8 {
+    let od: i64 = outdir.len as i64;
+    let sl: i64 = stem.len as i64;
+    let pl: i64 = od + 1 + sl + 4;
+    let path: []u8 = (_zag_malloc(pl + 1) as *u8)[0..(pl + 1)];
+    let a: i64 = 0;
+    while (a < od) { path[a] = outdir[a]; a = a + 1; }
+    path[od] = 47;
+    let b: i64 = 0;
+    while (b < sl) { path[od + 1 + b] = stem[b]; b = b + 1; }
+    path[od + 1 + sl] = 46;
+    path[od + 2 + sl] = 119;
+    path[od + 3 + sl] = 97;
+    path[od + 4 + sl] = 118;
+    path[pl] = 0;
+    return path[0..pl];
+}
+
+fn stem3(pre: []u8, idx: i64) []u8 {
+    // pre + zero-padded idx, e.g. "m" + "007"
+    let p3: []u8 = pad3(idx);
+    let pl: i64 = pre.len as i64;
+    let s: []u8 = (_zag_malloc(pl + 3 + 1) as *u8)[0..(pl + 4)];
+    let a: i64 = 0;
+    while (a < pl) { s[a] = pre[a]; a = a + 1; }
+    s[pl] = p3[0]; s[pl + 1] = p3[1]; s[pl + 2] = p3[2]; s[pl + 3] = 0;
+    return s[0..(pl + 3)];
+}
+
+// ---------------- history ring (persistent deliberation state) --------
+fn hist_store(HIST: []u8, pos: i64, f0h: i64, rmsh: i64, envh: i64, cvh: i64, frender: i64, vib: i64, slope: i64, turn: i64, kind: i64) void {
+    let o: i64 = pos * 80;
+    put64(HIST, o, f0h);
+    put64(HIST, o + 8, rmsh);
+    put64(HIST, o + 16, envh);
+    put64(HIST, o + 24, cvh);
+    put64(HIST, o + 32, frender);
+    put64(HIST, o + 40, vib);
+    put64(HIST, o + 48, slope);
+    put64(HIST, o + 56, turn);
+    put64(HIST, o + 64, kind);
+    put64(HIST, o + 72, 1);
+    return;
+}
+
+// nearest history entry: df0/4000 + drms/1000 + 60 if env differs; thr 25
+fn hist_consult(HIST: []u8, hcount: i64, f0h: i64, rmsh: i64, envh: i64) i64 {
+    let best: i64 = 1000000000;
+    let besti: i64 = -1;
+    let e: i64 = 0;
+    let nv: i64 = hcount;
+    if (nv > 16) { nv = 16; }
+    while (e < nv) {
+        let o: i64 = e * 80;
+        if (get64(HIST, o + 72) == 1) {
+            let df0: i64 = f0h - get64(HIST, o);
+            if (df0 < 0) { df0 = 0 - df0; }
+            let drms: i64 = rmsh - get64(HIST, o + 8);
+            if (drms < 0) { drms = 0 - drms; }
+            let dd: i64 = df0 / 4000 + drms / 1000;
+            if (get64(HIST, o + 16) != envh) { dd = dd + 60; }
+            if (dd < best) {
+                best = dd;
+                besti = e;
+            }
+        }
+        e = e + 1;
+    }
+    if (best < 25) { return besti; }
+    return -1;
+}
+
+fn clamp_f0(f: i64) i64 {
+    if (f < 60000) { return 60000; }
+    if (f > 2000000) { return 2000000; }
+    return f;
+}
+
+// ------------------------------- main --------------------------------
+fn main() i32 {
+    let mode: []u8 = _zag_arg(1);
+    if (streq(mode, "cal") == 1) {
+        // cal <depth_pm> <f0_mhz> <out.wav> [env]
+        let dpm: i64 = parse_i64(_zag_arg(2));
+        let fmhz: i64 = parse_i64(_zag_arg(3));
+        let out: []u8 = _zag_arg(4);
+        let cenv: i64 = parse_i64(_zag_arg(5));
+        if (render_match(out, fmhz, cenv, 5, dpm) != 0) {
+            _zag_print("ERR cal render failed\n");
+            return 1;
+        }
+        let D: []u8 = (_zag_malloc(64) as *u8)[0..64];
+        if (hear(out, D) != 0) {
+            _zag_print("ERR cal hear failed\n");
+            return 1;
+        }
+        _zag_print("CAL depth_pm=");
+        _zag_print(i64s(dpm));
+        _zag_print(" f0_mhz=");
+        _zag_print(i64s(fmhz));
+        _zag_print(" env=");
+        _zag_print(i64s(cenv));
+        _zag_print("\n");
+        print_heard("CALHEARD", D);
+        return 0;
+    }
+    if (streq(mode, "match") == 1 || streq(mode, "loop") == 1 || streq(mode, "batch") == 1) {
+        let is_batch: i64 = streq(mode, "batch");
+        let is_loop: i64 = streq(mode, "loop");
+        let gain: i64 = 0;
+        let sever: i64 = 0;
+        let refpath: []u8 = "";
+        let outp: []u8 = "";
+        let batchpath: []u8 = "";
+        if (is_batch == 1) {
+            // batch <targets.txt> <outdir> <gain> [sever]
+            batchpath = _zag_arg(2);
+            outp = _zag_arg(3);
+            gain = parse_i64(_zag_arg(4));
+            if (streq(_zag_arg(5), "sever") == 1) { sever = 1; }
+        } else if (is_loop == 1) {
+            // loop <ref.wav> <outdir> [sever]
+            refpath = _zag_arg(2);
+            outp = _zag_arg(3);
+            gain = parse_i64(_zag_arg(4));
+            if (streq(_zag_arg(5), "sever") == 1) { sever = 1; }
+        } else {
+            // match <ref.wav> <out.wav> <gain> [sever]
+            refpath = _zag_arg(2);
+            outp = _zag_arg(3);
+            gain = parse_i64(_zag_arg(4));
+            if (streq(_zag_arg(5), "sever") == 1) { sever = 1; }
+        }
+        _zag_print("CTRL mode=");
+        _zag_print(mode);
+        _zag_print(" sever=");
+        _zag_print(i64s(sever));
+        _zag_print(" gain=");
+        _zag_print(i64s(gain));
+        _zag_print("\n");
+        let HIST: []u8 = (_zag_malloc(1280) as *u8)[0..1280];
+        let i: i64 = 0;
+        while (i < 1280) { HIST[i] = 0; i = i + 1; }
+        let hcount: i64 = 0;
+        let hpos: i64 = 0;
+        // build target list
+        let TL: []u8 = (_zag_malloc(200000) as *u8)[0..200000];
+        let tn: i64 = 0;
+        if (is_batch == 1) {
+            let tb: []u8 = file_read(batchpath, 1048576);
+            if ((tb.len as i64) == 0) {
+                _zag_print("ERR cannot read targets file\n");
+                return 1;
+            }
+            let n: i64 = tb.len as i64;
+            let p: i64 = 0;
+            while (p < n) {
+                let q: i64 = p;
+                while (q < n && tb[q] != 10) { q = q + 1; }
+                let line: []u8 = tb[p..q];
+                if ((line.len as i64) > 2 && line[0] != 35) {
+                    // kind = line[0] ('M'/'L'), path = rest after space
+                    let k: i64 = 2;
+                    while (k < (line.len as i64) && line[k] == 32) { k = k + 1; }
+                    put64(TL, tn * 16, line[0] as i64);
+                    // store path bytes into TL string area
+                    let base: i64 = 4096 + tn * 512;
+                    let r: i64 = 0;
+                    while (k + r < (line.len as i64) && r < 500) {
+                        TL[base + r] = line[k + r];
+                        r = r + 1;
+                    }
+                    TL[base + r] = 0;
+                    put64(TL, tn * 16 + 8, base);
+                    tn = tn + 1;
+                }
+                p = q + 1;
+            }
+        } else {
+            put64(TL, 0, 77);
+            if (is_loop == 1) { put64(TL, 0, 76); }
+            let base: i64 = 4096;
+            let r: i64 = 0;
+            while (r < (refpath.len as i64) && r < 500) {
+                TL[base + r] = refpath[r];
+                r = r + 1;
+            }
+            TL[base + r] = 0;
+            put64(TL, 8, base);
+            tn = 1;
+        }
+        let D: []u8 = (_zag_malloc(64) as *u8)[0..64];
+        let DR: []u8 = (_zag_malloc(64) as *u8)[0..64];
+        let ti: i64 = 0;
+        let nmatch: i64 = 0;
+        let nloop: i64 = 0;
+        while (ti < tn) {
+            let kind: i64 = get64(TL, ti * 16);
+            let pbase: i64 = get64(TL, ti * 16 + 8);
+            let plen: i64 = 0;
+            while (TL[pbase + plen] != 0) { plen = plen + 1; }
+            let rp: []u8 = TL[pbase..(pbase + plen)];
+            let depth: i64 = ti + 1;
+            _zag_print("TARGET ");
+            _zag_print(i64s(depth));
+            _zag_print(" depth=");
+            _zag_print(i64s(depth));
+            _zag_print(" kind=");
+            if (kind == 76) { _zag_print("L"); } else { _zag_print("M"); }
+            _zag_print(" ref=");
+            _zag_print(rp);
+            _zag_print("\n");
+            if (hear(rp, D) != 0) {
+                _zag_print("ERR hear failed\n");
+                return 1;
+            }
+            print_heard("HEARD", D);
+            let f0h: i64 = get64(D, 0);
+            let rmsh: i64 = get64(D, 24);
+            let envh: i64 = get64(D, 16);
+            let cvh: i64 = get64(D, 32);
+            let ci: i64 = hist_consult(HIST, hcount, f0h, rmsh, envh);
+            let cturn: i64 = -1;
+            let cdelta: i64 = 0;
+            if (ci >= 0) {
+                cturn = get64(HIST, ci * 80 + 56);
+                cdelta = get64(HIST, ci * 80 + 32) - get64(HIST, ci * 80);
+            }
+            _zag_print("CONSULTED hist_turn=");
+            _zag_print(i64s(cturn));
+            _zag_print(" delta_reused_mhz=");
+            _zag_print(i64s(cdelta));
+            _zag_print("\n");
+            // plan the open-loop match render
+            let fr: i64 = 440000;
+            let envr: i64 = 0;
+            let slope: i64 = 5;
+            let vib: i64 = 0;
+            let why: []u8 = "severed-default";
+            if (sever == 0) {
+                if (f0h > 0) { fr = clamp_f0(f0h); }
+                if (ci >= 0) { fr = clamp_f0(f0h + cdelta); }
+                envr = envh;
+                if (gain > 0) {
+                    vib = cvh * 1000000 / gain;
+                    if (vib > 500000) { vib = 500000; }
+                    if (vib < 0) { vib = 0; }
+                }
+                if (ci >= 0) { why = "heard-f0+recalled-delta"; } else { why = "heard-f0"; }
+            }
+            _zag_print("PLANNED f0_mhz=");
+            _zag_print(i64s(fr));
+            _zag_print(" env=");
+            print_env_name(envr);
+            _zag_print(" slope_db=");
+            _zag_print(i64s(slope));
+            _zag_print(" vib_pm=");
+            _zag_print(i64s(vib));
+            _zag_print(" why=");
+            _zag_print(why);
+            _zag_print("\n");
+            if (kind == 77) {
+                // ---- MATCH ----
+                let stem: []u8 = stem3("m", depth);
+                let op: []u8 = out_path(outp, stem);
+                if (is_batch == 0) { op = outp; }
+                if (render_match(op, fr, envr, slope, vib) != 0) {
+                    _zag_print("ERR render failed\n");
+                    return 1;
+                }
+                _zag_print("RENDERED ");
+                _zag_print(op);
+                _zag_print("\n");
+                hist_store(HIST, hpos, f0h, rmsh, envh, cvh, fr, vib, slope, depth, 0);
+                hpos = hpos + 1;
+                if (hpos >= 16) { hpos = 0; }
+                hcount = hcount + 1;
+                nmatch = nmatch + 1;
+            } else {
+                // ---- LOOP: iter0 render, then hear->deviate->replan x3 ----
+                let it: i64 = 0;
+                let fcur: i64 = fr;
+                let vibcur: i64 = vib;
+                let slopecur: i64 = slope;
+                while (it <= 3) {
+                    _zag_print("ITER ");
+                    _zag_print(i64s(it));
+                    _zag_print(" PLANNED f0_mhz=");
+                    _zag_print(i64s(fcur));
+                    _zag_print(" env=");
+                    print_env_name(envr);
+                    _zag_print(" slope_db=");
+                    _zag_print(i64s(slopecur));
+                    _zag_print(" vib_pm=");
+                    _zag_print(i64s(vibcur));
+                    _zag_print("\n");
+                    let stem2: []u8 = stem3("l", depth);
+                    // append "_iter<it>"
+                    let s2l: i64 = stem2.len as i64;
+                    let nm2: []u8 = (_zag_malloc(s2l + 7) as *u8)[0..(s2l + 7)];
+                    let a2: i64 = 0;
+                    while (a2 < s2l) { nm2[a2] = stem2[a2]; a2 = a2 + 1; }
+                    nm2[s2l] = 95; nm2[s2l + 1] = 105; nm2[s2l + 2] = 116;
+                    nm2[s2l + 3] = 101; nm2[s2l + 4] = 114;
+                    nm2[s2l + 5] = (48 + it) as u8; nm2[s2l + 6] = 0;
+                    let op2: []u8 = out_path(outp, nm2[0..(s2l + 6)]);
+                    if (is_batch == 0) {
+                        // single-loop mode: outp is a dir too
+                        op2 = out_path(outp, nm2[0..(s2l + 6)]);
+                    }
+                    if (render_match(op2, fcur, envr, slopecur, vibcur) != 0) {
+                        _zag_print("ERR render failed\n");
+                        return 1;
+                    }
+                    _zag_print("ITER ");
+                    _zag_print(i64s(it));
+                    _zag_print(" RENDERED ");
+                    _zag_print(op2);
+                    _zag_print("\n");
+                    if (it < 3) {
+                        // hear own render, measure deviation natively, re-plan
+                        if (hear(op2, DR) != 0) {
+                            _zag_print("ERR hear render failed\n");
+                            return 1;
+                        }
+                        let tag2: []u8 = "ITERHEARD";
+                        _zag_print("ITER ");
+                        _zag_print(i64s(it + 1));
+                        _zag_print(" ");
+                        print_heard(tag2, DR);
+                        let df0: i64 = f0h - get64(DR, 0);
+                        let envok: i64 = 0;
+                        if (get64(DR, 16) == envh) { envok = 1; }
+                        let dcv: i64 = cvh - get64(DR, 32);
+                        _zag_print("ITER ");
+                        _zag_print(i64s(it + 1));
+                        _zag_print(" DEVIATION df0_mhz=");
+                        _zag_print(i64s(df0));
+                        _zag_print(" env_ok=");
+                        _zag_print(i64s(envok));
+                        _zag_print(" dcv_pm=");
+                        _zag_print(i64s(dcv));
+                        _zag_print("\n");
+                        fcur = clamp_f0(fcur + df0);
+                        if (envok == 0) {
+                            slopecur = slopecur + 3;
+                            if (slopecur > 12) { slopecur = 12; }
+                        }
+                        if (gain > 0) {
+                            vibcur = vibcur + dcv * 1000000 / gain;
+                            if (vibcur > 500000) { vibcur = 500000; }
+                            if (vibcur < 0) { vibcur = 0; }
+                        }
+                    }
+                    it = it + 1;
+                }
+                hist_store(HIST, hpos, f0h, rmsh, envh, cvh, fcur, vibcur, slopecur, depth, 1);
+                hpos = hpos + 1;
+                if (hpos >= 16) { hpos = 0; }
+                hcount = hcount + 1;
+                nloop = nloop + 1;
+            }
+            ti = ti + 1;
+        }
+        _zag_print("SUMMARY match=");
+        _zag_print(i64s(nmatch));
+        _zag_print(" loop=");
+        _zag_print(i64s(nloop));
+        _zag_print(" targets=");
+        _zag_print(i64s(tn));
+        _zag_print("\nCTRL_DONE\n");
+        return 0;
+    }
+    _zag_print("ERR usage: ctrl cal|match|loop|batch ...\n");
+    return 1;
+}
