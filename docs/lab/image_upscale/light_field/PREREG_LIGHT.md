@@ -1,4 +1,4 @@
-# PREREG — LIGHT-FIELD: scene illumination as a construction operator
+# PREREG: LIGHT-FIELD - scene illumination as a construction operator
 
 Wave: wave-20260927-0221pdt (sensory headspace worker).
 Written 2026-09-27 BEFORE any implementation or run. Frozen.
