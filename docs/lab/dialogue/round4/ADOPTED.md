@@ -28,6 +28,16 @@ standing dialogue machinery. Future dialogue work builds on
 
 ## Evidence at adoption
 
+Build measured: `docs/lab/dialogue/round4/dialogue.zag` (the adopted cascade).
+Battery: `docs/lab/dialogue/round4/battery.txt` (38 probes). These scores are
+scoped to that build — the deliberation fork
+(`docs/lab/dialogue/deliberation/deliberate.zag`,
+frozen `deliberation/build/deliberate_frozen_r4.zag`) was NOT measured here;
+scale-rot M2 later scored the frozen fork build 27/33 on the same battery,
+the 6 gaps being withhold-behavior items from the fork's missing G6/G7 gates
+(see the fork-divergence repair record). Do not cite 38/38 for the fork build
+until the repair re-proves it.
+
 | Battery | Result |
 |---|---|
 | Round 4 | 38/38 |
