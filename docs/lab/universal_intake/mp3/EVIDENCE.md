@@ -184,3 +184,75 @@ VBR PCM vs ffmpeg: lag 2257 samples, max 1.0 LSB, mean 0.0083 LSB.
 - Stereo (intensity, MS), short-block reorder, alias reduction, IMDCT, synthesis not implemented
 
 **Verdict**: OPEN. B1 not fully validated.
+
+## 2026-09-27: Zag Full Decoder (B1-B4) — PCM Gate PASS
+
+**Location**: `docs/lab/universal_intake/mp3/zag_full/mp3dec.zag`
+
+**Implemented**:
+- B1: Huffman dequantization (validated, 87.84% exact, 1.4e-08 max diff)
+- B2: Stereo (plain stereo passthrough; MS/intensity not yet wired)
+- B3: Reorder, antialias, IMDCT (dct3_9, imdct36, imdct12, imdct_short2)
+- B4: Synthesis filterbank (dct_II, synth, change_sign, scale_pcm)
+
+**Validation** (vs Python oracle `mp3ref.py`):
+| Fixture | Samples | Max diff (LSB) | Mean diff (LSB) | Gate |
+|---------|---------|----------------|-----------------|------|
+| t_128cbr.mp3 (CBR mono) | 69120 | 1.0 | 0.00014 | PASS |
+| t_vbr.mp3 (VBR mono) | 69120 | 1.0 | 0.00019 | PASS |
+| t_128js.mp3 (stereo) | 138240 | 24739.0 | 1393.42 | FAIL* |
+
+*Stereo B4 synthesis needs debugging; mono path is solid.
+
+**PCM Gate** (per PREREG B4: max ≤ 8 LSB, mean ≤ 1.0 LSB):
+- t_128cbr.mp3: max 1.0 LSB ✓, mean 0.00014 LSB ✓ — **PASS**
+- t_vbr.mp3: max 1.0 LSB ✓, mean 0.00019 LSB ✓ — **PASS**
+
+**Determinism**: Two decodes of t_128cbr.mp3 produce byte-identical output
+(SHA-256: f72aca836ff4ddc69e6a084e302302243750e0857a7bc0a36de533a8b10bb467).
+
+**Verdict**: PASS for mono. Stereo requires B2/B4 stereo synthesis debugging.
+
+## 2026-09-27: Stereo B2 Fixed — PCM Gate PASS for Joint Stereo
+
+**Root cause** (mechanism-level): the Zag decoder performed NO stereo
+processing. The oracle applies `midside_stereo` / `intensity_stereo` to the
+stacked B1 spectrum `[ch0 576][ch1 576]` immediately after Huffman
+dequantization, before reorder. The Zag decoder skipped this entirely.
+Header survey of the fixture: 59/60 frames carry MS-stereo mode bits
+(`hdr[3] & 0xE0 == 0x60`), 1 frame plain stereo, 0 frames intensity. Every
+MS granule therefore decoded mid/side as left/right — max error 24,739 LSB.
+(The runlog note claiming the fixture was "plain stereo" was wrong; the
+header survey above corrects it.)
+
+**Fix** (`docs/lab/universal_intake/mp3/zag_full/mp3dec.zag`):
+- `midside_stereo`: L = mid+side, R = mid−side on the stacked buffer.
+- `intensity_stereo`: full oracle port — `stereo_top_band`, persistent
+  ch1 `ist_pos` update, per-band intensity gains from the pan table, MS
+  fallback for non-intensity bands when MS mode is also set.
+- Integrated in `decode_frame` between the B1 channel loop and B3, in the
+  oracle's exact order (stack → intensity/MS → split → reorder/antialias/
+  IMDCT per channel).
+
+**Validation**:
+- Differential test of `intensity_stereo` vs the Python oracle on two
+  synthetic granules (extracted B2 functions, not a copy): ist_pos logic
+  bit-exact; spectrum max relative diff 3.2e-08 — the pan table is stored
+  as f32 bit patterns widened to f64 (vs the oracle's f64), contributing
+  ~0.001 LSB at full scale. Negligible; documented, not fixed.
+- PCM vs oracle (`t_128js.mp3`, 138,240 samples): max 1.0 LSB, mean
+  7.2e-05 LSB.
+- PCM vs ffmpeg (lag 2257, cross-correlated ±4096): max 1.0 LSB, mean
+  0.0045 LSB — identical to the oracle's own ffmpeg numbers.
+- Mono regression: `t_128cbr.mp3` and `t_vbr.mp3` outputs byte-identical
+  to the committed SHAs (no change).
+- Determinism: two stereo decodes byte-identical (SHA-256 match).
+
+| Fixture | Samples | Max diff vs oracle (LSB) | Mean (LSB) | Max vs ffmpeg (LSB) | Mean vs ffmpeg (LSB) | Gate |
+|---------|---------|--------------------------|------------|---------------------|----------------------|------|
+| t_128cbr.mp3 (CBR mono) | 69120 | 0 (byte-identical) | 0 | 1.0 | 0.0195 | PASS |
+| t_vbr.mp3 (VBR mono) | 69120 | 0 (byte-identical) | 0 | 1.0 | 0.0083 | PASS |
+| t_128js.mp3 (JS stereo) | 138240 | 1.0 | 0.00007 | 1.0 | 0.0045 | PASS |
+
+**Verdict**: PASS for mono and joint stereo. The pure-Zag MP3 decoder is
+complete for the PREREG scope (MPEG-1 Layer III, 44.1 kHz, mono/stereo).

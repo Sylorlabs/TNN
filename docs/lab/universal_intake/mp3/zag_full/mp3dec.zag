@@ -1,0 +1,1335 @@
+// mp3dec.zag - Pure-Zag MPEG-1 Layer III decoder (f64 signal path).
+// Usage: mp3dec <in.mp3> <out.pcm>
+//   Output: raw PCM16 little-endian, 44100 Hz (mono/stereo per input).
+@import("./common.zag")
+@import("./mp3tab64.zag")
+
+struct Dec {
+    reserv: []u8,
+    reserv_n: i64,
+    istpos: []i64,
+    overlap: []f64,
+    qmf: []f64,
+    lins: []f64,
+    pow43: []f64,
+    expfrac: []f64,
+    aa: []f64,
+    twid9: []f64,
+    twid3: []f64,
+    mdctwin: []f64,
+    sec: []f64,
+    win: []f64,
+    pan: []f64,
+    sfbtab: []i64,
+    nch: i64,
+}
+
+fn zalloc8(n: i64) []u8 {
+    let raw: *u8 = _zag_malloc(n) as *u8;
+    let s: []u8 = raw[0..n];
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0; i = i + 1; }
+    return s;
+}
+fn zalloc64(n: i64) []i64 {
+    let raw: *u8 = _zag_malloc(n * 8) as *u8;
+    let s: []i64 = raw[0..n*8] as []i64;
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0; i = i + 1; }
+    return s;
+}
+fn zallocf(n: i64) []f64 {
+    let raw: *u8 = _zag_malloc(n * 8) as *u8;
+    let s: []f64 = raw[0..n*8] as []f64;
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0.0; i = i + 1; }
+    return s;
+}
+
+fn dec_init() *Dec {
+    let raw: *u8 = _zag_malloc(320) as *u8;
+    let d: *Dec = raw as *Dec;
+    d.*.reserv = zalloc8(511);
+    d.*.reserv_n = 0;
+    d.*.istpos = zalloc64(80);
+    d.*.overlap = zallocf(576);
+    d.*.qmf = zallocf(960);
+    d.*.lins = zallocf(2176);
+    d.*.pow43 = load_f64tab(t_pow43b(), 145);
+    d.*.expfrac = load_f64tab(t_expfracb(), 4);
+    d.*.aa = load_f64tab(t_aab(), 16);
+    d.*.twid9 = load_f64tab(t_twid9b(), 18);
+    d.*.twid3 = load_f64tab(t_twid3b(), 6);
+    d.*.mdctwin = load_f64tab(t_mdctwinb(), 36);
+    d.*.sec = load_f64tab_f64(t_secb(), 24);
+    d.*.win = load_f64tab(t_winb(), 240);
+    d.*.pan = load_f64tab(t_panb(), 14);
+    d.*.sfbtab = zalloc64(160);
+    d.*.nch = 0;
+    return d;
+}
+
+// ---------- bit reader (MSB-first) ----------
+// st: []i64 len 2: [pos, limit]; buf separate.
+fn bs_get_bits(buf: []u8, st: []i64, n: i64) i64 {
+    let pos: i64 = st[0];
+    let limit: i64 = st[1];
+    let p: i64 = pos >> 3;
+    let s: i64 = pos & 7;
+    st[0] = pos + n;
+    if (st[0] > limit) { return 0; }
+    let shl: i64 = n + s;
+    let nxt: i64 = 0;
+    if (p < buf.len) { nxt = (buf[p] as i64) & 255; }
+    nxt = nxt & (255 >> s);
+    p = p + 1;
+    let cache: i64 = 0;
+    while (true) {
+        shl = shl - 8;
+        if (shl <= 0) { break; }
+        cache = cache | (nxt << shl);
+        nxt = 0;
+        if (p < buf.len) { nxt = (buf[p] as i64) & 255; }
+        p = p + 1;
+    }
+    return cache | (nxt >> (0 - shl));
+}
+
+// ---------- HuffReader ----------
+// st: []i64 len 4: [cache, next_ptr, sh, buf_len]
+fn hr_init(buf: []u8, st: []i64, pos: i64) void {
+    let p: i64 = pos >> 3;
+    let b0: i64 = 0; let b1: i64 = 0; let b2: i64 = 0; let b3: i64 = 0;
+    if (p < buf.len) { b0 = (buf[p] as i64) & 255; }
+    if (p + 1 < buf.len) { b1 = (buf[p + 1] as i64) & 255; }
+    if (p + 2 < buf.len) { b2 = (buf[p + 2] as i64) & 255; }
+    if (p + 3 < buf.len) { b3 = (buf[p + 3] as i64) & 255; }
+    let cache: i64 = (((b0 * 256 + b1) * 256 + b2) * 256 + b3);
+    let s: i64 = pos & 7;
+    cache = (cache << s) & 4294967295;
+    st[0] = cache;
+    st[1] = p + 4;
+    st[2] = s - 8;
+    st[3] = buf.len;
+    return;
+}
+fn hr_peek(st: []i64, n: i64) i64 {
+    return (st[0] >> (32 - n)) & ((1 << n) - 1);
+}
+fn hr_flush(st: []i64, n: i64) void {
+    st[0] = (st[0] << n) & 4294967295;
+    st[2] = st[2] + n;
+    return;
+}
+fn hr_check(buf: []u8, st: []i64) void {
+    while (st[2] >= 0) {
+        let byte: i64 = 0;
+        if (st[1] < st[3]) { byte = (buf[st[1]] as i64) & 255; }
+        st[1] = st[1] + 1;
+        st[0] = (st[0] | ((byte << st[2]) & 4294967295)) & 4294967295;
+        st[2] = st[2] - 8;
+    }
+    return;
+}
+
+// ---------- side info ----------
+// gr_info flat: stride 22 per (granule,ch), max 4 entries
+fn gr_get(gri: []i64, g: i64, f: i64) i64 { return gri[g * 22 + f]; }
+fn gr_set(gri: []i64, g: i64, f: i64, v: i64) void { gri[g * 22 + f] = v; return; }
+
+// Fills gri (88 i64s). hout[0]=mono, hout[1]=sr_idx, hout[2]=nch.
+// Returns main_data_begin.
+fn read_side_info(d: *Dec, buf: []u8, st: []i64, hdr: []u8, gri: []i64, hout: []i64) i64 {
+    let mono: i64 = 0;
+    if ((hdr[3] & 192) == 192) { mono = 1; }
+    // sr_idx/my_sr exactly as the Python oracle (mp3ref.py read_side_info):
+    // the scalefactor-band tables are indexed by a combined version+rate index,
+    // NOT by the raw 2-bit sr field. Using the raw sr field selects the wrong
+    // band widths (e.g. row 0 instead of row 5 for MPEG-1 44.1 kHz).
+    let sr: i64 = (hdr[2] >> 2) & 3;
+    let my_sr: i64 = sr + (((hdr[1] >> 3) & 1) + ((hdr[1] >> 4) & 1)) * 3;
+    let sr_idx: i64 = my_sr;
+    if (my_sr != 0) { sr_idx = my_sr - 1; }
+    let nch: i64 = 1;
+    if (mono == 0) { nch = 2; }
+    d.*.nch = nch;
+    hout[0] = mono; hout[1] = sr_idx; hout[2] = nch; hout[3] = my_sr;
+    let sfb: []i64 = d.*.sfbtab;
+    let gr_count: i64 = 2 * nch;
+    let main_data_begin: i64 = bs_get_bits(buf, st, 9);
+    // scfsi: single running variable exactly as Python oracle (mp3ref.py read_side_info).
+    // The oracle does: if mono: scfsi <<= 4 at loop start; scfsi &= 0x0F0F for
+    // block_type==2 BEFORE extraction; gi['scfsi']=(scfsi>>12)&15; scfsi <<= 4 at end.
+    // (Previous Zag used two variables scfsi_all/scfsi which lost a shift for g>=1,
+    // forcing scfsi=0 and breaking scalefactor reuse.)
+    let scfsi: i64 = bs_get_bits(buf, st, 7 + gr_count);
+    let g: i64 = 0;
+    let sfa: i64 = 0;
+    while (g < gr_count) {
+        if (mono == 1) { scfsi = scfsi << 4; }
+        gr_set(gri, g, 0, bs_get_bits(buf, st, 12));  // part_23_length
+        gr_set(gri, g, 1, bs_get_bits(buf, st, 9));   // big_values
+        gr_set(gri, g, 2, bs_get_bits(buf, st, 8));   // global_gain
+        gr_set(gri, g, 3, bs_get_bits(buf, st, 4));   // scalefac_compress
+        let ws: i64 = bs_get_bits(buf, st, 1);
+        let block_type: i64 = 0;
+        let mixed: i64 = 0;
+        if (ws == 1) {
+            block_type = bs_get_bits(buf, st, 2);
+            mixed = bs_get_bits(buf, st, 1);
+            // Oracle: if block_type == 2: scfsi &= 0x0F0F (on running var, BEFORE extraction)
+            if (block_type == 2) { scfsi = scfsi & 0x0F0F; }
+            // window_switching: only 2x5 table bits; tsel[2] = 0 (matches oracle)
+            gr_set(gri, g, 6, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 7, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 8, 0);
+            gr_set(gri, g, 9, bs_get_bits(buf, st, 3));
+            gr_set(gri, g, 10, bs_get_bits(buf, st, 3));
+            gr_set(gri, g, 11, bs_get_bits(buf, st, 3));
+            // switched: region_count = [7, 255, 255] (oracle); block_type 2 uses hardcoded 7/8 in huffman
+            gr_set(gri, g, 12, 7);
+            gr_set(gri, g, 13, 255);
+        } else {
+            gr_set(gri, g, 6, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 7, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 8, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 12, bs_get_bits(buf, st, 4));
+            gr_set(gri, g, 13, bs_get_bits(buf, st, 3));
+        }
+        gr_set(gri, g, 4, block_type);
+        gr_set(gri, g, 5, mixed);
+        gr_set(gri, g, 14, bs_get_bits(buf, st, 1));  // preflag
+        gr_set(gri, g, 15, bs_get_bits(buf, st, 1));  // scalefac_scale
+        gr_set(gri, g, 16, bs_get_bits(buf, st, 1));  // count1_table
+        // scfsi extraction AFTER block_type handling (oracle order).
+        // For block_type==2 the running scfsi was already masked above.
+        gr_set(gri, g, 17, (scfsi >> 12) & 15);       // scfsi
+        scfsi = scfsi << 4;
+        let n_long: i64 = 0; let n_short: i64 = 0;
+        let taboff: i64 = sfa;
+        if (block_type == 2) {
+            // (scfsi already masked via scfsi &= 0x0F0F above, before extraction)
+            if (mixed == 1) {
+                let k: i64 = 0;
+                while (k < 39) {
+                    let w: i64 = mixed_row_get(sr_idx, k);
+                    sfb[sfa] = w; sfa = sfa + 1;
+                    if (w == 0) { break; }
+                    k = k + 1;
+                }
+                n_long = 8; n_short = 30;
+            } else {
+                let k: i64 = 0;
+                while (k < 40) {
+                    let w: i64 = scf_short_get(sr_idx * 40 + k);
+                    sfb[sfa] = w; sfa = sfa + 1;
+                    if (w == 0) { break; }
+                    k = k + 1;
+                }
+                n_short = 39;
+            }
+        } else {
+            let k: i64 = 0;
+            while (k < 23) {
+                let w: i64 = scf_long_get(sr_idx * 23 + k);
+                sfb[sfa] = w; sfa = sfa + 1;
+                if (w == 0) { break; }
+                k = k + 1;
+            }
+            n_long = 22;
+        }
+        gr_set(gri, g, 18, n_long);
+        gr_set(gri, g, 19, n_short);
+        gr_set(gri, g, 20, taboff);
+        gr_set(gri, g, 21, sfa - taboff);
+        g = g + 1;
+    }
+    return main_data_begin;
+}
+
+// ---------- scalefactors ----------
+fn ldexp_q2(d: *Dec, y: f64, exp_q2: i64) f64 {
+    let eq: i64 = exp_q2;
+    let yy: f64 = y;
+    while (true) {
+        let e: i64 = eq;
+        if (e > 120) { e = 120; }
+        // (1 << 30 >> (e >> 2)) as integer; e>=0 here
+        let sh: i64 = 30 - (e >> 2);
+        let p2: i64 = 0;
+        if (sh >= 0) { p2 = 1 << sh; }
+        yy = yy * (d.*.expfrac[e & 3] * (p2 as f64));
+        eq = eq - e;
+        if (eq <= 0) { break; }
+    }
+    return yy;
+}
+
+// Decodes into scf_out[40] (f64) and iscf_out[40] (i64).
+// istpos: persistent per-channel [40] (d.*.istpos + ch*40).
+fn decode_scalefactors(d: *Dec, buf: []u8, st: []i64, gri: []i64, g: i64,
+                       istpos: []i64, scf_out: []f64, iscf_out: []i64,
+                       hdr3: i64) void {
+    let n_long: i64 = gr_get(gri, g, 18);
+    let n_short: i64 = gr_get(gri, g, 19);
+    let idx: i64 = 0;
+    if (n_short != 0) { idx = idx + 1; }
+    if (n_long == 0) { idx = idx + 1; }
+    let part: i64 = scfc_get(gr_get(gri, g, 3));
+    let scf_size0: i64 = (part >> 2) & 255;
+    let scf_size2: i64 = part & 3;
+    let scfsi: i64 = gr_get(gri, g, 17);
+    let ip: i64 = 0; let sp: i64 = 0;
+    let i: i64 = 0;
+    while (i < 4) {
+        let cnt: i64 = scf_part_get(idx * 28 + i);
+        if (cnt == 0) { break; }
+        let bits: i64 = scf_size0;
+        if (i >= 2) { bits = scf_size2; }
+        if ((scfsi & 8) != 0) {
+            let k: i64 = 0;
+            while (k < cnt) { iscf_out[sp + k] = istpos[ip + k]; k = k + 1; }
+        } else {
+            if (bits == 0) {
+                let k: i64 = 0;
+                while (k < cnt) { iscf_out[sp + k] = 0; istpos[ip + k] = 0; k = k + 1; }
+            } else {
+                let max_scf: i64 = -1;
+                if (scfsi < 0) { max_scf = (1 << bits) - 1; }
+                let k: i64 = 0;
+                while (k < cnt) {
+                    let s: i64 = bs_get_bits(buf, st, bits);
+                    if (s == max_scf) { istpos[ip + k] = -1; } else { istpos[ip + k] = s; }
+                    iscf_out[sp + k] = s;
+                    k = k + 1;
+                }
+            }
+        }
+        ip = ip + cnt; sp = sp + cnt;
+        scfsi = scfsi * 2;
+        i = i + 1;
+    }
+    if (n_short != 0) {
+        let sh: i64 = 3 - (gr_get(gri, g, 15) + 1);
+        let sg0: i64 = gr_get(gri, g, 9);
+        let sg1: i64 = gr_get(gri, g, 10);
+        let sg2: i64 = gr_get(gri, g, 11);
+        let j: i64 = 0;
+        while (j < n_short) {
+            iscf_out[n_long + j + 0] = iscf_out[n_long + j + 0] + (sg0 << sh);
+            iscf_out[n_long + j + 1] = iscf_out[n_long + j + 1] + (sg1 << sh);
+            iscf_out[n_long + j + 2] = iscf_out[n_long + j + 2] + (sg2 << sh);
+            j = j + 3;
+        }
+    } else {
+        if (gr_get(gri, g, 14) != 0) {  // preflag
+            let j: i64 = 0;
+            while (j < 10) { iscf_out[11 + j] = iscf_out[11 + j] + preamp_get(j); j = j + 1; }
+        }
+    }
+    let scf_shift: i64 = gr_get(gri, g, 15) + 1;
+    let is_ms: i64 = 0;
+    if ((hdr3 & 224) == 96) { is_ms = 1; }
+    let gain_exp: i64 = gr_get(gri, g, 2) - 4 - 210 - (is_ms * 2);
+    let gain: f64 = ldexp_q2(d, 2048.0, 44 - gain_exp);
+    let n_scf: i64 = n_long + n_short;
+    let j2: i64 = 0;
+    while (j2 < n_scf) {
+        scf_out[j2] = ldexp_q2(d, gain, iscf_out[j2] << scf_shift);
+        j2 = j2 + 1;
+    }
+    // zero the rest
+    while (j2 < 40) { scf_out[j2] = 0.0; j2 = j2 + 1; }
+    return;
+}
+
+// ---------- Huffman ----------
+fn pow_43_z(d: *Dec, x: i64) f64 {
+    if (x < 129) { return d.*.pow43[16 + x]; }
+    let mult: f64 = 256.0;
+    let xx: i64 = x;
+    if (x < 1024) { mult = 16.0; xx = x << 3; }
+    let sign: i64 = (2 * xx) & 64;
+    let frac: f64 = ((xx & 63) - sign) as f64 / (((xx & -64) + sign) as f64);
+    let base: f64 = d.*.pow43[16 + ((xx + sign) >> 6)];
+    let poly: f64 = 1.0 + frac * ((4.0 / 3.0) + frac * (2.0 / 9.0));
+    return base * poly * mult;
+}
+
+// dst: []f64 len 576. gri/g as before. scf: []f64. hr_st: []i64 len 4.
+// region_count: for non-ws, gri[12],gri[13]; for ws block_type 2: [8? no...]
+// Python: region_count = [7,255,255] default, [8,...] for short, [r0,r1,255] else.
+fn huffman(d: *Dec, dst: []f64, buf: []u8, hr_st: []i64, gri: []i64, g: i64,
+           scf: []f64, layer3gr_limit: i64, sfb: []i64, sfb_off: i64) void {
+    let sfb_i: i64 = sfb_off;
+    let scf_i: i64 = 0;
+    let big_val_cnt: i64 = gr_get(gri, g, 1);
+    let one: f64 = 0.0;
+    let ireg: i64 = 0;
+    let di: i64 = 0;
+    let block_type: i64 = gr_get(gri, g, 4);
+    while (big_val_cnt > 0) {
+        let tab_num: i64 = gr_get(gri, g, 6 + ireg);
+        // Python region_count: [7,255,255] default; [r0,r1,255] if not block_type 2;
+        // if block_type==2 and not mixed: [8,255,255]
+        let sfb_cnt: i64 = 255;
+        if (block_type == 2) {
+            if (ireg == 0) {
+                sfb_cnt = 7;
+                if (gr_get(gri, g, 5) == 0) { sfb_cnt = 8; }
+            }
+        } else {
+            if (ireg == 0) { sfb_cnt = gr_get(gri, g, 12); }
+            else if (ireg == 1) { sfb_cnt = gr_get(gri, g, 13); }
+        }
+        ireg = ireg + 1;
+        let cb_base: i64 = tabindex_get(tab_num);
+        let linbits: i64 = linbits_get(tab_num);
+        while (true) {
+            let npairs: i64 = sfb[sfb_i] / 2;
+            sfb_i = sfb_i + 1;
+            let pairs_to_decode: i64 = npairs;
+            if (pairs_to_decode > big_val_cnt) { pairs_to_decode = big_val_cnt; }
+            one = scf[scf_i]; scf_i = scf_i + 1;
+            let pi: i64 = 0;
+            while (pi < pairs_to_decode) {
+                let w: i64 = 5;
+                let leaf: i64 = tab_get(cb_base + hr_peek(hr_st, w));
+                while (leaf < 0) {
+                    hr_flush(hr_st, w);
+                    w = leaf & 7;
+                    leaf = tab_get(cb_base + hr_peek(hr_st, w) - (leaf >> 3));
+                }
+                hr_flush(hr_st, leaf >> 8);
+                let j: i64 = 0;
+                while (j < 2) {
+                    let lsb: i64 = leaf & 15;
+                    let orig_lsb: i64 = lsb;
+                    if (linbits != 0 and lsb == 15) {
+                        lsb = lsb + hr_peek(hr_st, linbits);
+                        hr_flush(hr_st, linbits);
+                        hr_check(buf, hr_st);
+                        let sign: f64 = 1.0;
+                        if ((hr_st[0] & 2147483648) != 0) { sign = -1.0; }
+                        dst[di] = one * pow_43_z(d, lsb) * sign;
+                    } else {
+                        let sbit: i64 = (hr_st[0] >> 31) & 1;
+                        dst[di] = d.*.pow43[16 + lsb - 16 * sbit] * one;
+                    }
+                    if (orig_lsb != 0) { hr_flush(hr_st, 1); }
+                    leaf = leaf >> 4;
+                    di = di + 1;
+                    j = j + 1;
+                }
+                hr_check(buf, hr_st);
+                pi = pi + 1;
+            }
+            big_val_cnt = big_val_cnt - npairs;
+            sfb_cnt = sfb_cnt - 1;
+            if (!(big_val_cnt > 0 and sfb_cnt >= 0)) { break; }
+        }
+    }
+    // count1
+    let use33: i64 = gr_get(gri, g, 16);
+    let np_: i64 = 1 - big_val_cnt;
+    while (true) {
+        let leaf2: i64 = 0;
+        if (use33 != 0) { leaf2 = tab33_get(hr_peek(hr_st, 4)); }
+        else { leaf2 = tab32_get(hr_peek(hr_st, 4)); }
+        if ((leaf2 & 8) == 0) {
+            let idx2: i64 = (leaf2 >> 3) + (((hr_st[0] << 4) & 4294967295) >> (32 - (leaf2 & 3)));
+            if (use33 != 0) { leaf2 = tab33_get(idx2); }
+            else { leaf2 = tab32_get(idx2); }
+        }
+        hr_flush(hr_st, leaf2 & 7);
+        // bspos check
+        let bspos: i64 = hr_st[1] * 8 - 24 + hr_st[2];
+        if (bspos > layer3gr_limit) { break; }
+        let half: i64 = 0;
+        while (half < 2) {
+            np_ = np_ - 1;
+            if (np_ == 0) {
+                np_ = sfb[sfb_i] / 2;
+                sfb_i = sfb_i + 1;
+                if (np_ == 0) { hr_check(buf, hr_st); return; }
+                one = scf[scf_i]; scf_i = scf_i + 1;
+            }
+            let s: i64 = 0;
+            while (s < 2) {
+                let idx_s: i64 = half * 2 + s;
+                if ((leaf2 & (128 >> idx_s)) != 0) {
+                    let sign: f64 = 1.0;
+                    if ((hr_st[0] & 2147483648) != 0) { sign = -1.0; }
+                    dst[di + idx_s] = sign * one;
+                    hr_flush(hr_st, 1);
+                } else {
+                    dst[di + idx_s] = 0.0;
+                }
+                s = s + 1;
+            }
+            half = half + 1;
+        }
+        di = di + 4;
+        hr_check(buf, hr_st);
+    }
+    return;
+}
+
+// ---------- B3: reorder / antialias / IMDCT (port of mp3ref.py B3 stage) ----------
+// grbuf: []f64 len 576 (one channel). overlap: []f64 len 288, persists across
+// granules (Dec.overlap is 576 = 2 channels x 288; callers pass per-channel slices).
+// Tables come from d (Dec): aa[16] (G_AA 2x8), twid9[18], twid3[6], mdctwin[36] (2x18).
+
+fn reorder(grbuf: []f64, n_long_bands: i64, sfbtab: []i64, n_long_sfb: i64) void {
+    let base: i64 = n_long_bands * 18;
+    let n: i64 = 576 - base;
+    let src: []f64 = zallocf(n);
+    let dst: []f64 = zallocf(n);
+    let k: i64 = 0;
+    while (k < n) { src[k] = grbuf[base + k]; k = k + 1; }
+    let si: i64 = n_long_sfb;
+    let sp: i64 = 0;
+    let dp: i64 = 0;
+    while (true) {
+        let ln: i64 = sfbtab[si];
+        if (ln == 0) { break; }
+        let i: i64 = 0;
+        while (i < ln) {
+            dst[dp] = src[sp + i];
+            dst[dp + 1] = src[sp + i + ln];
+            dst[dp + 2] = src[sp + i + 2 * ln];
+            dp = dp + 3;
+            i = i + 1;
+        }
+        sp = sp + 3 * ln;
+        si = si + 3;
+    }
+    let w: i64 = 0;
+    while (w < dp) { grbuf[base + w] = dst[w]; w = w + 1; }
+    return;
+}
+
+fn antialias(d: *Dec, grbuf: []f64, nbands: i64) void {
+    let b: i64 = 0;
+    while (b < nbands) {
+        let base: i64 = b * 18;
+        let i: i64 = 0;
+        while (i < 8) {
+            let u: f64 = grbuf[base + 18 + i];
+            let dn: f64 = grbuf[base + 17 - i];
+            let c0: f64 = d.*.aa[i];
+            let c1: f64 = d.*.aa[8 + i];
+            grbuf[base + 18 + i] = u * c0 - dn * c1;
+            grbuf[base + 17 - i] = u * c1 + dn * c0;
+            i = i + 1;
+        }
+        b = b + 1;
+    }
+    return;
+}
+
+// In-place 9-point DCT-III. The oracle copies y then transforms and the caller
+// reassigns the temp, so in-place is exactly equivalent.
+fn dct3_9(y: []f64) void {
+    let s0: f64 = y[0]; let s2: f64 = y[2]; let s4: f64 = y[4];
+    let s6: f64 = y[6]; let s8: f64 = y[8];
+    let t0: f64 = s0 + s6 * 0.5;
+    s0 = s0 - s6;
+    let t4: f64 = (s4 + s2) * 0.93969262;
+    let t2: f64 = (s8 + s2) * 0.76604444;
+    s6 = (s4 - s8) * 0.17364818;
+    s4 = s4 + s8 - s2;
+    s2 = s0 - s4 * 0.5;
+    y[4] = s4 + s0;
+    s8 = t0 - t2 + s6;
+    s0 = t0 - t4 + t2;
+    s4 = t0 + t4 - s6;
+    let s1: f64 = y[1]; let s3: f64 = y[3];
+    let s5: f64 = y[5]; let s7: f64 = y[7];
+    s3 = s3 * 0.86602540;
+    t0 = (s5 + s1) * 0.98480775;
+    t4 = (s5 - s7) * 0.34202014;
+    t2 = (s1 + s7) * 0.64278761;
+    s1 = (s1 - s5 - s7) * 0.86602540;
+    s5 = t0 - s3 - t2;
+    s7 = t4 - s3 - t0;
+    s3 = t4 + s3 - t2;
+    y[0] = s4 - s7;
+    y[1] = s2 + s1;
+    y[2] = s0 - s3;
+    y[3] = s8 + s5;
+    y[5] = s8 - s5;
+    y[6] = s0 + s3;
+    y[7] = s2 - s1;
+    y[8] = s4 + s7;
+    return;
+}
+
+fn imdct36(d: *Dec, grbuf: []f64, overlap: []f64, window: []f64, nbands: i64) void {
+    let j: i64 = 0;
+    while (j < nbands) {
+        let gb: i64 = j * 18;
+        let ob: i64 = j * 9;
+        let co: []f64 = zallocf(9);
+        let si: []f64 = zallocf(9);
+        co[0] = 0.0 - grbuf[gb];
+        si[0] = grbuf[gb + 17];
+        let i: i64 = 0;
+        while (i < 4) {
+            let a1: f64 = grbuf[gb + 4 * i + 1];
+            let a2: f64 = grbuf[gb + 4 * i + 2];
+            let a3: f64 = grbuf[gb + 4 * i + 3];
+            let a4: f64 = grbuf[gb + 4 * i + 4];
+            si[8 - 2 * i] = a1 - a2;
+            co[1 + 2 * i] = a1 + a2;
+            si[7 - 2 * i] = a4 - a3;
+            co[2 + 2 * i] = 0.0 - (a3 + a4);
+            i = i + 1;
+        }
+        dct3_9(co);
+        dct3_9(si);
+        si[1] = 0.0 - si[1]; si[3] = 0.0 - si[3];
+        si[5] = 0.0 - si[5]; si[7] = 0.0 - si[7];
+        let k: i64 = 0;
+        while (k < 9) {
+            let ovl: f64 = overlap[ob + k];
+            let sm: f64 = co[k] * d.*.twid9[9 + k] + si[k] * d.*.twid9[k];
+            overlap[ob + k] = co[k] * d.*.twid9[k] - si[k] * d.*.twid9[9 + k];
+            grbuf[gb + k] = ovl * window[k] - sm * window[9 + k];
+            grbuf[gb + 17 - k] = ovl * window[9 + k] + sm * window[k];
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+    return;
+}
+
+fn idct3(x0: f64, x1: f64, x2: f64) []f64 {
+    let m1: f64 = x1 * 0.86602540;
+    let a1: f64 = x0 - x2 * 0.5;
+    let out: []f64 = zallocf(3);
+    out[0] = a1 + m1;
+    out[1] = x0 + x2;
+    out[2] = a1 - m1;
+    return out;
+}
+
+fn imdct12(d: *Dec, x: []f64, dst: []f64, overlap: []f64) void {
+    let co: []f64 = idct3(0.0 - x[0], x[6] + x[3], x[12] + x[9]);
+    let si: []f64 = idct3(x[15], x[12] - x[9], x[6] - x[3]);
+    si[1] = 0.0 - si[1];
+    let i: i64 = 0;
+    while (i < 3) {
+        let ovl: f64 = overlap[i];
+        let sm: f64 = co[i] * d.*.twid3[3 + i] + si[i] * d.*.twid3[i];
+        overlap[i] = co[i] * d.*.twid3[i] - si[i] * d.*.twid3[3 + i];
+        dst[i] = ovl * d.*.twid3[2 - i] - sm * d.*.twid3[5 - i];
+        dst[5 - i] = ovl * d.*.twid3[5 - i] + sm * d.*.twid3[2 - i];
+        i = i + 1;
+    }
+    return;
+}
+
+fn imdct_short2(d: *Dec, grbuf: []f64, overlap: []f64, nbands: i64) void {
+    let b: i64 = 0;
+    while (b < nbands) {
+        let gb: i64 = b * 18;
+        let ob: i64 = b * 9;
+        let tmp: []f64 = zallocf(18);
+        let o: []f64 = zallocf(3);
+        let dst1: []f64 = zallocf(6);
+        let dst2: []f64 = zallocf(6);
+        let dst3: []f64 = zallocf(6);
+        let k: i64 = 0;
+        while (k < 18) { tmp[k] = grbuf[gb + k]; k = k + 1; }
+        k = 0;
+        while (k < 3) { o[k] = overlap[ob + 6 + k]; k = k + 1; }
+        // The C code passes the same overlap+ob+6 pointer to all three calls;
+        // each imdct12 updates it in place. Replicate sequentially via o.
+        imdct12(d, tmp, dst1, o);
+        imdct12(d, tmp[1..18], dst2, o);
+        imdct12(d, tmp[2..18], dst3, o);
+        k = 0;
+        while (k < 6) { grbuf[gb + k] = overlap[ob + k]; k = k + 1; }
+        k = 0;
+        while (k < 6) { grbuf[gb + 6 + k] = dst1[k]; k = k + 1; }
+        k = 0;
+        while (k < 6) { grbuf[gb + 12 + k] = dst2[k]; k = k + 1; }
+        k = 0;
+        while (k < 6) { overlap[ob + k] = dst3[k]; k = k + 1; }
+        k = 0;
+        while (k < 3) { overlap[ob + 6 + k] = o[k]; k = k + 1; }
+        b = b + 1;
+    }
+    return;
+}
+
+fn imdct_gr(d: *Dec, grbuf: []f64, overlap: []f64, block_type: i64, n_long_bands: i64) void {
+    let mw: []f64 = d.*.mdctwin;
+    if (n_long_bands > 0) {
+        imdct36(d, grbuf, overlap, mw[0..18], n_long_bands);
+        imdct_gr_off(d, grbuf[n_long_bands * 18..576], overlap[n_long_bands * 9..288],
+                     block_type, n_long_bands);
+        return;
+    }
+    if (block_type == 2) {
+        imdct_short2(d, grbuf, overlap, 32);
+    } else {
+        if (block_type == 3) { imdct36(d, grbuf, overlap, mw[18..36], 32); }
+        else { imdct36(d, grbuf, overlap, mw[0..18], 32); }
+    }
+    return;
+}
+
+fn imdct_gr_off(d: *Dec, grbuf: []f64, overlap: []f64, block_type: i64, n_long_bands: i64) void {
+    let mw: []f64 = d.*.mdctwin;
+    let nb: i64 = 32 - n_long_bands;
+    if (block_type == 2) {
+        imdct_short2(d, grbuf, overlap, nb);
+    } else {
+        if (block_type == 3) { imdct36(d, grbuf, overlap, mw[18..36], nb); }
+        else { imdct36(d, grbuf, overlap, mw[0..18], nb); }
+    }
+    return;
+}
+
+// ---------- B2: stereo (port of mp3ref.py midside_stereo + intensity_stereo) ----------
+// Operates on the stacked B1 spectrum [ch0 576][ch1 576], before reorder.
+// midside_stereo: L = mid+side, R = mid-side.
+fn midside_stereo(stacked: []f64) void {
+    let i: i64 = 0;
+    while (i < 576) {
+        let a: f64 = stacked[i];
+        let b: f64 = stacked[576 + i];
+        stacked[i] = a + b;
+        stacked[576 + i] = a - b;
+        i = i + 1;
+    }
+    return;
+}
+
+// stereo_top_band: highest nonzero band per block (0..2). Oracle stereo_top_band.
+// right: ch1 spectrum slice (576). sfb: table, sfb_off: granule offset. mb: [3] out.
+fn stereo_top_band(right: []f64, sfb: []i64, sfb_off: i64, nbands: i64, mb: []i64) void {
+    mb[0] = -1; mb[1] = -1; mb[2] = -1;
+    let off: i64 = 0;
+    let i: i64 = 0;
+    while (i < nbands) {
+        let ln: i64 = sfb[sfb_off + i];
+        let k: i64 = 0;
+        while (k < ln) {
+            if (right[off + k] != 0.0 || right[off + k + 1] != 0.0) {
+                mb[i % 3] = i;
+                break;
+            }
+            k = k + 2;
+        }
+        off = off + ln;
+        i = i + 1;
+    }
+    return;
+}
+
+// intensity_stereo: oracle intensity_stereo. stacked modified in place.
+// istp: ch1's persistent ist_pos[40] (updated). g0: ch0 gr index in gri.
+// sfb/sfb_off: ch0 scalefactor-band widths. pan: 14 f64 (d.*.pan).
+// is_ms: 1 if (hdr[3]&0xE0)==0x60.
+fn intensity_stereo(stacked: []f64, istp: []i64, gri: []i64, g0: i64, sfb: []i64, sfb_off: i64, pan: []f64, is_ms: i64) void {
+    let n_long: i64 = gr_get(gri, g0, 18);
+    let n_short: i64 = gr_get(gri, g0, 19);
+    let n_sfb: i64 = n_long + n_short;
+    let max_blocks: i64 = 1;
+    if (n_short != 0) { max_blocks = 3; }
+    let mb: []i64 = zalloc64(3);
+    stereo_top_band(stacked[576..1152], sfb, sfb_off, n_sfb, mb);
+    if (n_long != 0) {
+        let m: i64 = mb[0];
+        if (mb[1] > m) { m = mb[1]; }
+        if (mb[2] > m) { m = mb[2]; }
+        mb[0] = m; mb[1] = m; mb[2] = m;
+    }
+    let i: i64 = 0;
+    while (i < max_blocks) {
+        let itop: i64 = n_sfb - max_blocks + i;
+        let prev: i64 = itop - max_blocks;
+        if (mb[i] >= prev) { istp[itop] = 3; } else { istp[itop] = istp[prev]; }
+        i = i + 1;
+    }
+    // stereo_process: sfb widths are zero-terminated (written with terminator in read_side_info)
+    let off: i64 = 0;
+    let j: i64 = 0;
+    while (true) {
+        let w: i64 = sfb[sfb_off + j];
+        if (w == 0) { break; }
+        let ipos: i64 = istp[j];
+        let ln: i64 = w;
+        if (j > mb[j % 3] && ipos < 7) {
+            let s: f64 = 1.0;
+            if (is_ms == 1) { s = 1.41421356; }
+            let kl: f64 = pan[2 * ipos] * s;
+            let kr: f64 = pan[2 * ipos + 1] * s;
+            let k: i64 = 0;
+            while (k < ln) {
+                let l: f64 = stacked[off + k];
+                stacked[576 + off + k] = l * kr;
+                stacked[off + k] = l * kl;
+                k = k + 1;
+            }
+        } else {
+            if (is_ms == 1) {
+                let k2: i64 = 0;
+                while (k2 < ln) {
+                    let l2: f64 = stacked[off + k2];
+                    let r2: f64 = stacked[576 + off + k2];
+                    stacked[off + k2] = l2 + r2;
+                    stacked[576 + off + k2] = l2 - r2;
+                    k2 = k2 + 1;
+                }
+            }
+        }
+        off = off + ln;
+        j = j + 1;
+    }
+    return;
+}
+
+// ---------- frame decode ----------
+// Find next frame sync at or after off. Returns offset or -1.
+fn find_sync(data: []u8, off: i64) i64 {
+    let i: i64 = off;
+    while (i + 1 < data.len) {
+        if (((data[i] as i64) & 255) == 255 and ((data[i+1] as i64) & 224) == 224) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// Decode one frame at off. Returns next frame offset or -1.
+// If dump_b1: writes hex f64 bit patterns of dequant to out.
+fn decode_frame(d: *Dec, data: []u8, off: i64, dump_b1: i64, out: []u8, out_at: *i64) i64 {
+    // header: 4 bytes at off
+    let h0: i64 = (data[off] as i64) & 255;
+    let h1: i64 = (data[off+1] as i64) & 255;
+    let h2: i64 = (data[off+2] as i64) & 255;
+    let h3: i64 = (data[off+3] as i64) & 255;
+    let hdr: []u8 = zalloc8(4);
+    hdr[0] = h0 as u8; hdr[1] = h1 as u8; hdr[2] = h2 as u8; hdr[3] = h3 as u8;
+    // frame length: MPEG-1 Layer III
+    let brate_idx: i64 = (h2 >> 4) & 15;
+    let sr_idx: i64 = (h2 >> 2) & 3;
+    let padding: i64 = (h2 >> 1) & 1;
+    // bitrate table MPEG-1 L3 (kbps)
+    let brate: i64 = 0;
+    if (brate_idx == 1) { brate = 32; } else if (brate_idx == 2) { brate = 40; }
+    else if (brate_idx == 3) { brate = 48; } else if (brate_idx == 4) { brate = 56; }
+    else if (brate_idx == 5) { brate = 64; } else if (brate_idx == 6) { brate = 80; }
+    else if (brate_idx == 7) { brate = 96; } else if (brate_idx == 8) { brate = 112; }
+    else if (brate_idx == 9) { brate = 128; } else if (brate_idx == 10) { brate = 160; }
+    else if (brate_idx == 11) { brate = 192; } else if (brate_idx == 12) { brate = 224; }
+    else if (brate_idx == 13) { brate = 256; } else if (brate_idx == 14) { brate = 320; }
+    let sr: i64 = 44100;
+    if (sr_idx == 1) { sr = 48000; } else if (sr_idx == 2) { sr = 32000; }
+    let frame_len: i64 = (144 * brate * 1000) / sr + padding;
+    // side info
+    let mono: i64 = 0;
+    if ((h3 & 192) == 192) { mono = 1; }
+    let side_len: i64 = 32;
+    if (mono == 1) { side_len = 17; }
+    let gri: []i64 = zalloc64(88);
+    let hout: []i64 = zalloc64(4);
+    let sst: []i64 = zalloc64(2);
+    sst[0] = (off + 4) * 8;
+    sst[1] = (off + 4 + side_len) * 8;
+    let mdb: i64 = read_side_info(d, data, sst, hdr, gri, hout);
+    let nch: i64 = hout[2];
+    // reservoir: build main data buffer
+    // bytes_have = min(reserv_n, mdb); copy from reserv_buf
+    let bytes_have: i64 = d.*.reserv_n;
+    if (bytes_have > mdb) { bytes_have = mdb; }
+    let frame_bytes: i64 = frame_len - 4 - side_len;
+    let mdbuf: []u8 = zalloc8(bytes_have + frame_bytes + 4);
+    let rsv: []u8 = d.*.reserv;
+    let roff: i64 = d.*.reserv_n - bytes_have;
+    let i: i64 = 0;
+    while (i < bytes_have) { mdbuf[i] = rsv[roff + i]; i = i + 1; }
+    i = 0;
+    while (i < frame_bytes) { mdbuf[bytes_have + i] = data[off + 4 + side_len + i]; i = i + 1; }
+    let total: i64 = bytes_have + frame_bytes;
+    // per granule (reservoir saved after loop)
+    let mst: []i64 = zalloc64(2);
+    mst[0] = 0; mst[1] = total * 8;
+    // PCM output: per-frame buffer for B4 synthesis (i64 samples)
+    // For dump_b1==0 (PCM mode), accumulate 16-bit samples into out as bytes.
+    let igr: i64 = 0;
+    while (igr < 2) {
+        // B1 grbufs per channel (persist for B2/B3 after ch loop)
+        let gb0: []f64 = zallocf(576);
+        let gb1: []f64 = zallocf(576);
+        let ch: i64 = 0;
+        while (ch < nch) {
+            let g: i64 = igr * nch + ch;
+            let layer3gr_limit: i64 = mst[0] + gr_get(gri, g, 0);
+            let scf: []f64 = zallocf(40);
+            let iscf: []i64 = zalloc64(40);
+            let istp: []i64 = zalloc64(40);
+            // istpos slice: d.*.istpos[ch*40 .. ch*40+40]
+            let dip: []i64 = d.*.istpos;
+            let k: i64 = 0;
+            while (k < 40) { istp[k] = dip[ch * 40 + k]; k = k + 1; }
+                        decode_scalefactors(d, mdbuf, mst, gri, g, istp, scf, iscf, h3);
+            k = 0;
+            while (k < 40) { dip[ch * 40 + k] = istp[k]; k = k + 1; }
+            let hr_st: []i64 = zalloc64(4);
+            hr_init(mdbuf, hr_st, mst[0]);
+            // B1 output goes to per-channel grbuf (gb0/gb1) for B2/B3/B4 use.
+            // For dump modes, dst aliases the channel grbuf.
+            let dst: []f64 = gb0;
+            if (ch == 1) { dst = gb1; }
+            let sfb_off: i64 = gr_get(gri, g, 20);
+            let sfb: []i64 = d.*.sfbtab;
+                        huffman(d, dst, mdbuf, hr_st, gri, g, scf, layer3gr_limit, sfb, sfb_off);
+            mst[0] = layer3gr_limit;
+            ch = ch + 1;
+        }
+        // B2/B3/B4: only in PCM mode (dump_b1==0). Dump modes preserve B1-only behavior.
+        if (dump_b1 == 0) {
+            // B2 stereo: on the stacked B1 spectrum, before reorder (oracle order).
+            // hdr[3]: bit 0x10 = intensity stereo, bits 0xE0==0x60 = MS stereo.
+            if (nch == 2) {
+                let st2: []f64 = zallocf(1152);
+                let ci: i64 = 0;
+                while (ci < 576) { st2[ci] = gb0[ci]; st2[576 + ci] = gb1[ci]; ci = ci + 1; }
+                if ((h3 & 16) != 0) {
+                    // intensity stereo: ch1 persistent ist_pos, ch0 gr info
+                    let dipb: []i64 = d.*.istpos;
+                    let istp1: []i64 = zalloc64(40);
+                    let q: i64 = 0;
+                    while (q < 40) { istp1[q] = dipb[40 + q]; q = q + 1; }
+                    let is_ms: i64 = 0;
+                    if ((h3 & 224) == 96) { is_ms = 1; }
+                    let g0: i64 = igr * nch;
+                    intensity_stereo(st2, istp1, gri, g0, d.*.sfbtab, gr_get(gri, g0, 20), d.*.pan, is_ms);
+                    q = 0;
+                    while (q < 40) { dipb[40 + q] = istp1[q]; q = q + 1; }
+                } else {
+                    if ((h3 & 224) == 96) { midside_stereo(st2); }
+                }
+                ci = 0;
+                while (ci < 576) { gb0[ci] = st2[ci]; gb1[ci] = st2[576 + ci]; ci = ci + 1; }
+            }
+            // B3+B4 per channel
+            let ch2: i64 = 0;
+            while (ch2 < nch) {
+                let g2: i64 = igr * nch + ch2;
+                let gb: []f64 = gb0;
+                if (ch2 == 1) { gb = gb1; }
+                let block_type: i64 = gr_get(gri, g2, 4);
+                let mixed: i64 = gr_get(gri, g2, 5);
+                let n_long_sfb: i64 = gr_get(gri, g2, 18);
+                let n_short_sfb: i64 = gr_get(gri, g2, 19);
+                let sfb_off2: i64 = gr_get(gri, g2, 20);
+                let sfb2: []i64 = d.*.sfbtab;
+                // n_long_bands for reorder: (2 if mixed else 0)
+                let n_long_bands: i64 = 0;
+                if (mixed == 1) { n_long_bands = 2; }
+                if (n_short_sfb != 0) {
+                    reorder(gb, n_long_bands, sfb2[sfb_off2..], n_long_sfb);
+                }
+                // antialias: nbands = 31 for long, (n_long_bands - 1) for short?
+                // Oracle: aa_bands = n_long_bands - 1 if n_short_sfb else 31
+                let aa_bands: i64 = 31;
+                if (n_short_sfb != 0) { aa_bands = n_long_bands - 1; }
+                if (aa_bands < 0) { aa_bands = 0; }
+                antialias(d, gb, aa_bands);
+                // IMDCT: overlap slice per channel from d.*.overlap
+                // d.*.overlap is 576 f64; ch0 uses [0..288], ch1 uses [288..576]
+                let ov: []f64 = d.*.overlap;
+                let ov_ch: []f64 = ov[0..288];
+                if (ch2 == 1) { ov_ch = ov[288..576]; }
+                imdct_gr(d, gb, ov_ch, block_type, n_long_bands);
+                // change_sign: negate odd bands (oracle does this after IMDCT)
+                change_sign(gb, 0);
+                ch2 = ch2 + 1;
+            }
+            // B4: synthesis -> PCM
+            if (nch == 1) {
+                let pcm_buf: []i64 = zalloc64(576);
+                synth_granule(d, d.*.qmf, gb0, 1, pcm_buf, 0, d.*.lins);
+                // append PCM16 LE bytes to out (576 samples per granule)
+                let pi: i64 = 0;
+                while (pi < 576) {
+                    let s: i64 = pcm_buf[pi];
+                    if (s > 32767) { s = 32767; }
+                    if (s < -32768) { s = -32768; }
+                    let oo: i64 = out_at.*;
+                    let su: i64 = s & 65535;
+                    out[oo] = (su & 255) as u8;
+                    out[oo + 1] = ((su >> 8) & 255) as u8;
+                    out_at.* = oo + 2;
+                    pi = pi + 1;
+                }
+            } else {
+                // stereo: stack gb0+gb1, synth with nch=2
+                let stacked: []f64 = zallocf(1152);
+                let si: i64 = 0;
+                while (si < 576) { stacked[si] = gb0[si]; si = si + 1; }
+                si = 0;
+                while (si < 576) { stacked[576 + si] = gb1[si]; si = si + 1; }
+                let pcm_buf: []i64 = zalloc64(1152);
+                synth_granule(d, d.*.qmf, stacked, 2, pcm_buf, 0, d.*.lins);
+                // output: 576 frames, interleaved LRLR (2 samples per frame)
+                let pi: i64 = 0;
+                while (pi < 1152) {
+                    let s: i64 = pcm_buf[pi];
+                    if (s > 32767) { s = 32767; }
+                    if (s < -32768) { s = -32768; }
+                    let oo: i64 = out_at.*;
+                    let su: i64 = s & 65535;
+                    out[oo] = (su & 255) as u8;
+                    out[oo + 1] = ((su >> 8) & 255) as u8;
+                    out_at.* = oo + 2;
+                    pi = pi + 1;
+                }
+            }
+        }
+        igr = igr + 1;
+    }
+    // reservoir: save unread bytes after decoding.
+    // The oracle (validated against ffmpeg) saves from layer3gr_limit (the granule's
+    // declared length, skipping stuffing bits), NOT from the actual huffman end.
+    // mst[0] holds the last granule's layer3gr_limit after the loop.
+    let pos_b: i64 = (mst[0] + 7) / 8;
+    if (pos_b < 0) { pos_b = 0; }
+    if (pos_b > total) { pos_b = total; }
+    let remains: i64 = total - pos_b;
+    if (remains > 511) {
+        pos_b = pos_b + remains - 511;
+        remains = 511;
+    }
+    let rsv2: []u8 = d.*.reserv;
+    let rk: i64 = 0;
+    while (rk < remains) { rsv2[rk] = mdbuf[pos_b + rk]; rk = rk + 1; }
+    d.*.reserv_n = remains;
+    return off + frame_len;
+}
+
+fn f64_to_bits(x: f64) i64 {
+    let raw: *u8 = _zag_malloc(8) as *u8;
+    let fa: []f64 = raw[0..8] as []f64;
+    let ia: []i64 = raw[0..8] as []i64;
+    fa[0] = x;
+    return ia[0];
+}
+
+fn i64_to_hex(v: i64) []u8 {
+    let s: []u8 = zalloc8(16);
+    let i: i64 = 0;
+    while (i < 16) {
+        let nib: i64 = (v >> ((15 - i) * 4)) & 15;
+        if (nib < 10) { s[i] = (48 + nib) as u8; } else { s[i] = (87 + nib) as u8; }
+        i = i + 1;
+    }
+    return s;
+}
+
+// ---------- B4: synthesis filterbank (port of mp3ref.py B4: synth_granule + helpers) ----------
+// change_sign: negate odd-indexed samples of each 18-sample block (oracle line 503).
+// Called per channel on the 576-sample IMDCT output, before dct_II.
+// base: channel offset into grbuf.
+fn change_sign(grbuf: []f64, base: i64) void {
+    let b: i64 = 0;
+    while (b < 32) {
+        let bs: i64 = base + (b + 1) * 18;
+        let j: i64 = 1;
+        while (j < 18) {
+            grbuf[bs + j] = 0.0 - grbuf[bs + j];
+            j = j + 2;
+        }
+        b = b + 2;
+    }
+    return;
+}
+
+// scale_pcm: clamp to i16 range with round-half-up (oracle line 523).
+// NOTE: (sample + 0.5) as i64 truncates toward zero, matching Python int().
+fn scale_pcm(sample: f64) i64 {
+    if (sample >= 32766.5) { return 32767; }
+    if (sample <= -32767.5) { return -32768; }
+    let s: i64 = (sample + 0.5) as i64;
+    if (s < 0) { s = s - 1; }
+    return s;
+}
+
+// dct_II: 32-point DCT-II over the subband samples (oracle line 534).
+// grbuf: channel buffer at grbuf[base..base+576]; n=18.
+// NOTE: the oracle's `if k > n - 3 ... else ...` write-back branches are
+// byte-identical bodies; collapsed to a single path here.
+fn dct_II(d: *Dec, grbuf: []f64, base: i64, n: i64) void {
+    let sec: []f64 = d.*.sec;
+    let k: i64 = 0;
+    while (k < n) {
+        let t: []f64 = zallocf(32);
+        let y: i64 = base + k;
+        let i: i64 = 0;
+        while (i < 8) {
+            let x0: f64 = grbuf[y + i * 18];
+            let x1: f64 = grbuf[y + (15 - i) * 18];
+            let x2: f64 = grbuf[y + (16 + i) * 18];
+            let x3: f64 = grbuf[y + (31 - i) * 18];
+            let t0: f64 = x0 + x3;
+            let t1: f64 = x1 + x2;
+            let t2: f64 = (x1 - x2) * sec[3 * i];
+            let t3: f64 = (x0 - x3) * sec[3 * i + 1];
+            t[i] = t0 + t1;
+            t[8 + i] = (t0 - t1) * sec[3 * i + 2];
+            t[16 + i] = t3 + t2;
+            t[24 + i] = (t3 - t2) * sec[3 * i + 2];
+            i = i + 1;
+        }
+        i = 0;
+        while (i < 4) {
+            let r: i64 = i * 8;
+            let x0: f64 = t[r];
+            let x1: f64 = t[r + 1];
+            let x2: f64 = t[r + 2];
+            let x3: f64 = t[r + 3];
+            let x4: f64 = t[r + 4];
+            let x5: f64 = t[r + 5];
+            let x6: f64 = t[r + 6];
+            let x7: f64 = t[r + 7];
+            let xt: f64 = x0 - x7;
+            x0 = x0 + x7;
+            x7 = x1 - x6;
+            x1 = x1 + x6;
+            x6 = x2 - x5;
+            x2 = x2 + x5;
+            x5 = x3 - x4;
+            x3 = x3 + x4;
+            x4 = x0 - x3;
+            x0 = x0 + x3;
+            x3 = x1 - x2;
+            x1 = x1 + x2;
+            t[r] = x0 + x1;
+            t[r + 4] = (x0 - x1) * 0.70710677;
+            x5 = x5 + x6;
+            x6 = (x6 + x7) * 0.70710677;
+            x7 = x7 + xt;
+            x3 = (x3 + x4) * 0.70710677;
+            x5 = x5 - x7 * 0.198912367;
+            x7 = x7 + x5 * 0.382683432;
+            x5 = x5 - x7 * 0.198912367;
+            x0 = xt - x6;
+            xt = xt + x6;
+            t[r + 1] = (xt + x7) * 0.50979561;
+            t[r + 2] = (x4 + x3) * 0.54119611;
+            t[r + 3] = (x0 - x5) * 0.60134488;
+            t[r + 5] = (x0 + x5) * 0.89997619;
+            t[r + 6] = (x4 - x3) * 1.30656302;
+            t[r + 7] = (xt - x7) * 2.56291556;
+            i = i + 1;
+        }
+        i = 0;
+        while (i < 7) {
+            let s: f64 = t[24 + i] + t[24 + i + 1];
+            grbuf[y + i * 72] = t[i];
+            grbuf[y + i * 72 + 18] = t[16 + i] + s;
+            grbuf[y + i * 72 + 36] = t[8 + i] + t[8 + i + 1];
+            grbuf[y + i * 72 + 54] = t[16 + i + 1] + s;
+            i = i + 1;
+        }
+        grbuf[y + 504] = t[7];
+        grbuf[y + 522] = t[23] + t[31];
+        grbuf[y + 540] = t[15];
+        grbuf[y + 558] = t[31];
+        k = k + 1;
+    }
+    return;
+}
+
+// synth_pair: the two 16-sample QMF output pairs (oracle line 591).
+fn synth_pair(dstl: []i64, pcm_off: i64, nch: i64, z: []f64, zb: i64) void {
+    let a: f64 = (z[zb + 896] - z[zb]) * 29.0 + (z[zb + 64] + z[zb + 832]) * 213.0 + (z[zb + 768] - z[zb + 128]) * 459.0 + (z[zb + 192] + z[zb + 704]) * 2037.0 + (z[zb + 640] - z[zb + 256]) * 5153.0 + (z[zb + 320] + z[zb + 576]) * 6574.0 + (z[zb + 512] - z[zb + 384]) * 37489.0 + z[zb + 448] * 75038.0;
+    dstl[pcm_off] = scale_pcm(a);
+    let zb2: i64 = zb + 2;
+    a = z[zb2 + 896] * 104.0 + z[zb2 + 768] * 1567.0 + z[zb2 + 640] * 9727.0 + z[zb2 + 512] * 64019.0 + z[zb2 + 384] * (0.0 - 9975.0) + z[zb2 + 256] * (0.0 - 45.0) + z[zb2 + 128] * 146.0 + z[zb2] * (0.0 - 5.0);
+    dstl[pcm_off + 16 * nch] = scale_pcm(a);
+    return;
+}
+
+// synth: one 64-sample QMF synthesis step for the xl/xr channel pair (oracle line 604).
+// grbuf holds the stacked channels; xl reads at xloff, xr at xroff.
+// Write order of the dstl pairs is load-bearing for nch==1 (later write wins).
+fn synth(d: *Dec, grbuf: []f64, xloff: i64, xroff: i64, dstl: []i64, dst_off: i64, nch: i64, lins: []f64, lb: i64) void {
+    let w: []f64 = d.*.win;
+    let ZB: i64 = lb + 960;
+    lins[ZB + 60] = grbuf[xloff + 288];
+    lins[ZB + 61] = grbuf[xroff + 288];
+    lins[ZB + 62] = grbuf[xloff];
+    lins[ZB + 63] = grbuf[xroff];
+    lins[ZB + 124] = grbuf[xloff + 289];
+    lins[ZB + 125] = grbuf[xroff + 289];
+    lins[ZB + 126] = grbuf[xloff + 1];
+    lins[ZB + 127] = grbuf[xroff + 1];
+    let dstr_off: i64 = dst_off + (nch - 1);
+    synth_pair(dstl, dstr_off, nch, lins, lb + 61);
+    synth_pair(dstl, dstr_off + 32 * nch, nch, lins, lb + 125);
+    synth_pair(dstl, dst_off, nch, lins, lb + 60);
+    synth_pair(dstl, dst_off + 32 * nch, nch, lins, lb + 124);
+    let wi: i64 = 0;
+    let i: i64 = 14;
+    while (i >= 0) {
+        let b4: i64 = ZB + 4 * i;
+        lins[b4] = grbuf[xloff + 18 * (31 - i)];
+        lins[b4 + 1] = grbuf[xroff + 18 * (31 - i)];
+        lins[b4 + 2] = grbuf[xloff + 1 + 18 * (31 - i)];
+        lins[b4 + 3] = grbuf[xroff + 1 + 18 * (31 - i)];
+        lins[b4 + 64] = grbuf[xloff + 1 + 18 * (1 + i)];
+        lins[b4 + 65] = grbuf[xroff + 1 + 18 * (1 + i)];
+        lins[b4 - 62] = grbuf[xloff + 18 * (1 + i)];
+        lins[b4 - 61] = grbuf[xroff + 18 * (1 + i)];
+        let a0: f64 = 0.0;
+        let a1: f64 = 0.0;
+        let a2: f64 = 0.0;
+        let a3: f64 = 0.0;
+        let b0: f64 = 0.0;
+        let b1: f64 = 0.0;
+        let b2: f64 = 0.0;
+        let b3: f64 = 0.0;
+        let k: i64 = 0;
+        while (k < 8) {
+            let w0: f64 = w[wi];
+            let w1: f64 = w[wi + 1];
+            wi = wi + 2;
+            let vzb: i64 = b4 - k * 64;
+            let vyb: i64 = b4 - (15 - k) * 64;
+            let vz0: f64 = lins[vzb];
+            let vz1: f64 = lins[vzb + 1];
+            let vz2: f64 = lins[vzb + 2];
+            let vz3: f64 = lins[vzb + 3];
+            let vy0: f64 = lins[vyb];
+            let vy1: f64 = lins[vyb + 1];
+            let vy2: f64 = lins[vyb + 2];
+            let vy3: f64 = lins[vyb + 3];
+            if (k == 0) {
+                b0 = vz0 * w1 + vy0 * w0;
+                b1 = vz1 * w1 + vy1 * w0;
+                b2 = vz2 * w1 + vy2 * w0;
+                b3 = vz3 * w1 + vy3 * w0;
+                a0 = vz0 * w0 - vy0 * w1;
+                a1 = vz1 * w0 - vy1 * w1;
+                a2 = vz2 * w0 - vy2 * w1;
+                a3 = vz3 * w0 - vy3 * w1;
+            } else if ((k % 2) == 1) {
+                b0 = b0 + vz0 * w1 + vy0 * w0;
+                b1 = b1 + vz1 * w1 + vy1 * w0;
+                b2 = b2 + vz2 * w1 + vy2 * w0;
+                b3 = b3 + vz3 * w1 + vy3 * w0;
+                a0 = a0 + vy0 * w1 - vz0 * w0;
+                a1 = a1 + vy1 * w1 - vz1 * w0;
+                a2 = a2 + vy2 * w1 - vz2 * w0;
+                a3 = a3 + vy3 * w1 - vz3 * w0;
+            } else {
+                b0 = b0 + vz0 * w1 + vy0 * w0;
+                b1 = b1 + vz1 * w1 + vy1 * w0;
+                b2 = b2 + vz2 * w1 + vy2 * w0;
+                b3 = b3 + vz3 * w1 + vy3 * w0;
+                a0 = a0 + vz0 * w0 - vy0 * w1;
+                a1 = a1 + vz1 * w0 - vy1 * w1;
+                a2 = a2 + vz2 * w0 - vy2 * w1;
+                a3 = a3 + vz3 * w0 - vy3 * w1;
+            }
+            k = k + 1;
+        }
+        dstl[dstr_off + (15 - i) * nch] = scale_pcm(a1);
+        dstl[dstr_off + (17 + i) * nch] = scale_pcm(b1);
+        dstl[dst_off + (15 - i) * nch] = scale_pcm(a0);
+        dstl[dst_off + (17 + i) * nch] = scale_pcm(b0);
+        dstl[dstr_off + (47 - i) * nch] = scale_pcm(a3);
+        dstl[dstr_off + (49 + i) * nch] = scale_pcm(b3);
+        dstl[dst_off + (47 - i) * nch] = scale_pcm(a2);
+        dstl[dst_off + (49 + i) * nch] = scale_pcm(b2);
+        i = i - 1;
+    }
+    return;
+}
+
+// synth_granule: full B4 stage for one granule (oracle line 652).
+// qmf: persistent 15*64 state; lins: 34*64 scratch; grbuf: stacked
+// [ch0 576][ch1 576] IMDCT output with change_sign applied; pcm: i64 output.
+// Produces 576 PCM samples per channel, interleaved with stride nch.
+fn synth_granule(d: *Dec, qmf: []f64, grbuf: []f64, nch: i64, pcm: []i64, pcm_off: i64, lins: []f64) void {
+    let i: i64 = 0;
+    while (i < nch) {
+        dct_II(d, grbuf, i * 576, 18);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 960) {
+        lins[i] = qmf[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < 18) {
+        let xloff: i64 = i;
+        let xroff: i64 = i;
+        if (nch > 1) { xroff = i + 576; }
+        synth(d, grbuf, xloff, xroff, pcm, pcm_off + 32 * nch * i, nch, lins, i * 64);
+        i = i + 2;
+    }
+    i = 0;
+    if (nch == 1) {
+        while (i < 960) {
+            qmf[i] = lins[1152 + i];
+            i = i + 2;
+        }
+    } else {
+        while (i < 960) {
+            qmf[i] = lins[1152 + i];
+            i = i + 1;
+        }
+    }
+    return;
+}
+
+// ---------- main ----------
+fn main() i32 {
+    let inpath: []u8 = _zag_arg(1);
+    let outpath: []u8 = _zag_arg(2);
+    let mode_s: []u8 = _zag_arg(3);
+    let dump_b1: i64 = 0;
+    // (debug dump modes removed for final build; PCM mode only)
+    if (inpath.len == 0 or outpath.len == 0) { return 1; }
+    let d: *Dec = dec_init();
+//     let f_dbg: i64 = file_write_trunc(cstr("/tmp/dbg_marker"), "D1"); if (f_dbg < 0) { return 99; }
+    let data: []u8 = file_read_all(inpath);
+//     let f_dbg2: i64 = file_write_trunc(cstr("/tmp/dbg_marker"), "D2"); if (f_dbg2 < 0) { return 99; }
+    if (data.len == 0) { return 2; }
+    let out: []u8 = zalloc8(20000000);
+    let out_at: i64 = 0;
+    let out_at_p: *i64 = &out_at;
+    let off: i64 = find_sync(data, 0);
+    let fi: i64 = 0;
+    while (off >= 0 and fi < 200) {
+        off = decode_frame(d, data, off, dump_b1, out, out_at_p);
+        if (off < 0) { break; }
+        // check next sync
+        off = find_sync(data, off);
+        fi = fi + 1;
+    }
+    // write out[0..out_at]
+    let cs: []u8 = cstr(outpath);
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 420, 0, 0, 0);
+    // 577 = O_WRONLY|O_CREAT|O_TRUNC
+    if (fd >= 0) {
+        let woff: i64 = 0;
+        while (woff < out_at) {
+            let n: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(out) as i64) + woff, out_at - woff, 0, 0, 0);
+            if (n <= 0) { break; }
+            woff = woff + n;
+        }
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    }
+    return 0;
+}

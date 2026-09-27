@@ -130,3 +130,57 @@ scoped blocker**. CBR and JS are fully validated and can proceed.
 
 **Next**: Debug granule 1+ zero output; likely bitstream position tracking bug in
 decode_scalefactors or huffman hr_init. Then implement B2/B3/B4.
+
+## 2026-09-27: Zag Full Decoder Integration
+
+### Objective
+Integrate B2/B3/B4 into the pure-Zag MP3 decoder and validate PCM output
+against the Python oracle per the frozen PREREG B4 kill bars.
+
+### Method
+1. Ported B3 (reorder, antialias, IMDCT) from `mp3ref.py` to Zag
+   - `reorder`, `antialias`, `dct3_9`, `imdct36`, `idct3`, `imdct12`,
+     `imdct_short2`, `imdct_gr`, `imdct_gr_off`
+2. Ported B4 (synthesis filterbank) from `mp3ref.py` to Zag
+   - `change_sign`, `scale_pcm`, `dct_II`, `synth_pair`, `synth`, `synth_granule`
+3. Integrated into `decode_frame`:
+   - Per-granule: B1 (huffman) → B3 (reorder/antialias/IMDCT/change_sign) → B4 (synth)
+   - PCM16 LE output appended to output buffer
+4. Validated against oracle PCM for all three fixtures
+5. Verified byte-identical reruns (SHA-256 match)
+
+### Results
+- **t_128cbr.mp3**: 69,120 samples, max 1.0 LSB, mean 0.00014 LSB — PASS
+- **t_vbr.mp3**: 69,120 samples, max 1.0 LSB, mean 0.00019 LSB — PASS
+- **t_128js.mp3**: Stereo B4 synthesis mismatch (max 24739 LSB) — FAIL, needs debug
+- **Determinism**: Two runs byte-identical (SHA-256 match) — PASS
+
+### Notes
+- B2 stereo (MS/intensity) not implemented; t_128js.mp3 is plain stereo (no MS/intensity),
+  so B2 is a no-op for this fixture. The failure is in B4 stereo synthesis.
+- Mono path is fully validated and deterministic.
+- Debug dump modes (1-6) removed for final build; PCM mode only.
+
+## 2026-09-27: Stereo B2 Debug Session
+
+### Diagnosis
+- Reproduced: Zag vs oracle on `t_128js.mp3` → max 24,739 LSB, mean 1,393 LSB
+  (matches the committed evidence exactly).
+- Header survey: 59/60 frames MS stereo (`hdr[3] & 0xE0 == 0x60`), 1 plain,
+  0 intensity. The "plain stereo, B2 is a no-op" runlog note was wrong.
+- Oracle order: stereo processing on the stacked B1 spectrum BEFORE reorder;
+  Zag did none. First large diffs at PCM sample 4517 (right channel).
+
+### Fix
+Ported `midside_stereo` + `intensity_stereo` (with `stereo_top_band` and the
+persistent ch1 `ist_pos` update) to pure Zag, inserted between the B1 channel
+loop and B3 in `decode_frame`, in the oracle's exact order. 124 insertions,
+1 deletion.
+
+### Validation
+- Stereo PCM vs oracle: max 1.0 LSB, mean 7.2e-05 LSB (was 24739 / 1393).
+- Stereo PCM vs ffmpeg (lag 2257): max 1.0 LSB, mean 0.0045 LSB.
+- `intensity_stereo` differential test vs oracle (2 synthetic granules):
+  ist_pos bit-exact; spectrum max rel diff 3.2e-08 (f32 pan table precision).
+- Mono outputs byte-identical to committed SHAs; stereo deterministic
+  (two runs, SHA-256 match).
