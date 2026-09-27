@@ -2462,3 +2462,93 @@ B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand
 down until a genuinely new design idea; D-VID-1 lane stands down until a
 re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
 queued for his ears (DEAD on pristine evidence).
+
+## Wave 20260926-2321pdt verdicts (2026-09-26, Micah-frontier implementation wave)
+
+Posture: Micah's own frozen preregs (Experiment 1 invent-to-survive
+3ac39fc14, Experiment 2 one-brain dispatch 1ab40adce) arrived on origin
+minutes before this wave and were implemented by the loop rather than
+inventing loop-authored candidates. Debate transcript:
+docs/lab/rsi/runs/wave-20260926-2321pdt/debate/DEBATE_2321.md (skeptic's
+provenance probe present verbatim). Implementation evidence commit:
+74565859f. Prereg commit-order self-check: PASS, substantive [NEW]
+(3ac39fc14 and 1ab40adce are both ancestors of 74565859f and strictly
+precede every loop implementation commit; recorded as a real pass, not
+vacuous, since loop commits implement the preregs).
+
+1. EXP1 invent-to-survive: H1 KILLED on K1, narrowed record, nothing
+adopted [NEW]. Medians over 12 world variants, all 60 runs executed
+twice, byte-identical (SHA-256 ba4677cc...): P=600, Z=89, R=600,
+I-survive=574, I-invent=574. K1 fires (574 <= 600). C1 PASS (P=600 >=
+480, run not void), C2 PASS (89 < 150), C3 PASS (forage, ward-turtle,
+lamp-farm all 600 >= 360), K2 PASS (574 > 89), K3 PASS. K4 kills the
+invention claim independently (schemas plus authored scoring judged
+trivial recombination). K5 incomplete: implementer authored the strategy
+machinery, so no independent blind auditor exists yet; K5 cannot be
+self-certified. A1/A2 not triggered (no winning variant to ablate).
+Recorded as killed in this world configuration only: R=600 ceiling
+effect (R camps the stationary home mote; the world leaves no headroom
+for invention), so the H1 question is not settled pending a retuned
+world. Breach recorded: the implementing worker used Python twice (line
+count of world.zag; rewrite of mote velocities in variants.zag), so this
+wave cannot be certified pure-Zag compliant; the breach does not taint
+the kill arithmetic (I was given a stronger representation and still
+lost). This is an honest negative result, not a tuning failure. Queued:
+EXP1 world retune (remove stationary-mote ceiling, literal
+primitive-action I arm, pure Zag) then re-test.
+
+2. EXP2 one-brain dispatch: adopted as EXPERIMENTAL RECORD ONLY under
+docs/lab/onebrain/, wire-in explicitly deferred [NEW]. The debate
+narrowed the claim to the tested structure: within this machinery the
+shared channel is the causal carrier of the gain. Evidence (fresh
+10-problem holdout frozen 2026-09-27T06:42:47Z, sha256 edab14df..., first
+run was the confirmatory measurement after the team honestly discarded a
+dev battery iterated with outcome knowledge): K1 PASS, one-brain 10/10 vs
+single-deliberation baseline 0/10 vs shared-writes-off ablation 0/10
+(conjunctive bar satisfied); K2 PASS, poison 6/6 with clean
+private-ledger control; K3 PASS, scaffold removal forks 10/10 with zero
+fan_out calls in the driver; K4 PASS with caveat (traces changed 3/3,
+verdict distributions differ from independent branches, but on 2/3
+problems the attack-lens branch independently reached the shared verdict,
+so verdict-level evidence is partial); K5 PASS (3x byte-identical);
+K6 PASS (no RNG by grep audit). Caveats entered verbatim: the
+attack-lens branch alone scores 10/10; the holdout covers one ambiguity
+structure (early-mislead/late-refutation) by construction; no frozen
+subsystem regression battery was run, which is why wire-in toward
+standing deliberation machinery is deferred. Queued: broader holdouts,
+K4 hardening, regression sweep before any wire-in.
+
+3. Fork battery: [RE-CERT] toolchain stability, 41 entries: 38 PASS, 2
+extraction FAIL (expected: pull/1 and pull/2 trees lack the toolchain
+path, six waves running), 1 CONFIRM under P20 scope stamp (rh-main at
+27a4271f, commit object still absent locally after the pre-wave fetch;
+coverage gap, not a failure). Queued item resolved: rh-tnn-native-lab-tip-start
+at d9ddc556 now testable and passes. Uniform evidence 38/38: znc pin
+498abcb5, probe 3b29aa0661, B2 bin 75b85d3, B1 run 5dfe3c16, NEG1 E0002,
+NEG2 char-1 diff, tree probe R32_ZNC_PROBE_OK. Report:
+docs/lab/rsi/runs/wave-20260926-2321pdt/forks/FORK_RESULTS_2321.md;
+evidence archived under forks/evidence/.
+
+4. Interactive TNN: EXISTS and unchanged [RE-CERT]. No new chat/REPL
+entry points in merge range 5ba241235..377c36fd9. tnn_chat.zag still at
+docs/lab/rsi/fit_authority/tnn_chat.zag; built binary
+tnn_chat_wave20260923_0834pdt unchanged (sha prefix 1ada2fae63dd matches
+frozen pin). Fit for supervised red-team probe chats only, with the
+documented confabulation failure class.
+
+5. His six governance rulings (S7 strike, MD-SSD-1 keep-with-UNVERIFIABLE
+vs re-freeze, S11 image pull, S11-AUD pull, C12 queue, Python-mirror
+logic adoption): STILL OPEN AND UNTOUCHED. Not decided, not relitigated.
+
+New standing note from this wave's judge: a wave cannot be certified
+pure-Zag compliant when a worker used Python even for a minor step; the
+breach is recorded prospectively and flagged as context for his still-open
+Python governance ruling.
+
+Queued next: his six pending rulings (untouched); his blind verdicts on
+the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14,
+whirlpool-planform; unchanged); EXP1 retune and re-test (ceiling, literal
+primitive-action I, pure Zag); EXP2 broader holdouts plus K4 hardening
+plus regression sweep before wire-in; rh-main coverage gap and the
+pull-head extraction FAILs persist; prereg consistency check before any
+future implementation.
