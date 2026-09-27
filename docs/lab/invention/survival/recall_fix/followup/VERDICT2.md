@@ -40,7 +40,7 @@ shifts are the first D1 shifts that actually bite.
 | D4 RELAY (unseen) | 87–93% on 6/6 shifted | shared, unmodified |
 | D_wrongKB (false content) | 81% | shared, unmodified |
 | D1 new shifts, committed agent | **0%** (D≈R or worse) | **module never wired in** |
-| D1 combine-tax, exploratory wiring | full (600 ticks) | shared, unmodified |
+| D1 new shifts, correctly-wired module (D1 repair) | **0%** (4/4) — D≡R bit-for-bit; module provably never engages | shared, unmodified |
 
 Home-regime parity holds everywhere (D/R = 1.000, no >10% regression).
 
@@ -113,3 +113,31 @@ untenable; (c) the variant-count framing — restated as unique worlds (D2: 2 in
 4. A second-opinion question on the K1 denominator legitimacy was filed to the z.ai
    relay (`recall-harm-q1`); the answer will be amended into this verdict if it changes
    anything. The new D1/D4 evidence largely answers it already.
+
+## Correction (2026-09-27, D1 repair worker)
+
+The table above originally credited the exploratory D1 wiring with "full (600 ticks)"
+recovery on combine-tax (from GENERALIZATION2 §C). That result **did not survive
+correct wiring** and has been struck:
+
+- The D1 repair worker hardened the exploratory adapter (two adapter bugs fixed
+  adapter-side; the module was never modified, SHA-256 re-verified) and re-ran the
+  full 5-arm × 10-variant × 2-rerun matrix.
+- The exploratory's c0 recovery depended on a sticky pseudo-action-resolution bug
+  that altered the pre-distrust sampling trajectory (proven divergence from R at
+  tick 31 with zero distrusts fired) — not on the module working as designed.
+- Correctly wired, D≡R **bit-for-bit** on all four new shifts: 0% closure, zero
+  distrust-EVALs anywhere. The module's 10-sample speed limit is now confirmed on
+  **4/4** new D1 shifts, not just storm-trap (combine-tax samples the lethal
+  heuristic 5–6× before death; storm-trap samples it once).
+- On home variants the module engages correctly without regressing: 6/6 home pass,
+  with a scale-correct true-positive distrust on h4 (EAT) recovering 600/600.
+- Documentation discrepancy: GENERALIZATION2 §C's table lists the exploratory Dmod
+  at 164/144 ticks on d1_d0/d1, but the committed exploratory source deterministically
+  produces 33/35 (matching its own footnote, "died at the same point as R"). The
+  164/144 values are irreproducible from the committed source — treat as stale.
+
+The mechanism-generality claim is therefore bounded and cleaner: the module repairs
+stale content **where the agent survives long enough to accumulate ~10 samples**
+(D2, D3, D4, home regimes); on fast-lethal shifts it provably reduces to R — it does
+no harm itself, but it cannot repair either. Evidence: `followup/d1_repair/D1_REPAIR.md`.
