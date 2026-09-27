@@ -4,7 +4,36 @@ Toolchain (pinned): `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1
 All temp material under `~/workspace/tmp_commit` (`TMPDIR` set; unique `cl_*` prefixes).
 Disk checked before heavy runs (`df -h ~`: 100 GB total, 2.8 GB free on 2026-09-27 — tight but sufficient; no heavy regenerable writes kept).
 
-## Build
+## v2 repair build & runs (2026-09-27)
+
+Fixes: §7(c) entailment (`prov_select`), `disc_gate` verification tightening,
+occupied-count consolidation scan (`psm_slow_occupied`). See RESULTS.md D9–D11.
+
+| Step | Command | Result |
+|---|---|---|
+| Battery v2 | `znc battery.zag -o ~/workspace/tmp_commit/cl_repair/battery_v2` (cwd=`build/`, imports resolve relative to cwd) | exit 0; ~36 ignored-return warnings (A0102, reviewed) |
+| Scorer v2 | `znc scorer.zag -o ~/workspace/tmp_commit/cl_repair/scorer_v2` | exit 0 (scorer.zag unchanged from v1) |
+
+Battery output SHA-256 (v2, all legs): `5404a16551f74acd409ce77bfa54d76e3a26d7ca6d938ecc748e3f151ec22a22`
+
+| Leg | Command | SHA-256 | Match |
+|---|---|---|---|
+| 1 normal | `battery_v2 full <fixtures>` | `5404a165…22a22` | — |
+| 2 normal | `battery_v2 full <fixtures>` | `5404a165…22a22` | ✅ byte-identical |
+| 3 `env -i` | `env -i battery_v2 full <fixtures>` | `5404a165…22a22` | ✅ byte-identical |
+| 4 padded env | `env -i FOO=bar BAZ=qux PADDING=x×1000 battery_v2 full <fixtures>` | `5404a165…22a22` | ✅ byte-identical |
+| 5 different cwd | `cd ~/workspace/tmp_commit/cl_repair/cwd && battery_v2 full <fixtures>` | `5404a165…22a22` | ✅ byte-identical |
+
+`scorer_v2 <v2-output> <fixtures>` → `SCORE  phase1=6  phase3=12  phase4=3  conseq=2`
+
+Key v2 run facts:
+- `PROV  PV-1  EP-P1-A1  0`, `PROV  PV-2  EP-P2-E1  12`, `PROV  PV-3  EP-P1-C1  6` — all `chain=1 live=1 valuematch=1 entail=1`.
+- `CONS_EVAL`/`CONS`: 6 promotions in pass 1 (dense 0,1,3,4,6,7), 6 in pass 2 (dense 9,10,12,13,15,16); `BREG PROM` ×12; all `rc=0`.
+- `SUMMARY  18  18  18  39  12`.
+- ANS/ANS4/CONSEQ lines byte-identical to v1 (retrieval unchanged).
+- Independent checks: Python rescore `6/12/3/2` (matches Zag scorer); paraphrase leakage clean (max 333/1000); bridge hardcode audit clean (zero concept/item strings in `bridge.zag`/`battery.zag`/`psm.zag`); PREREG.md/REDTEAM.md hashes unchanged.
+
+## v1 build & runs (preserved)
 
 | Step | Command | Result |
 |---|---|---|

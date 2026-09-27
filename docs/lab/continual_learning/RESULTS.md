@@ -1,5 +1,129 @@
 # RESULTS.md — Verdicts, rubric, kill bars, deviations
 
+## v2 repair (2026-09-27) — red-team NO-GO addressed
+
+The red team (`REDTEAM.md`) issued **NO-GO** on two findings. Both are fixed in
+the battery (v2). `PREREG.md` and `REDTEAM.md` are untouched (hashes verified
+unchanged).
+
+Battery output SHA-256 (v2, 5-leg determinism battery, all byte-identical):
+`5404a16551f74acd409ce77bfa54d76e3a26d7ca6d938ecc748e3f151ec22a22`
+
+Strict scorer (pure Zag, unchanged): `SCORE  phase1=6  phase3=12  phase4=3  conseq=2`.
+Independent Python rescore: identical `6/12/3/2`. Battery ANS/ANS4/CONSEQ/TRACE
+lines are byte-identical to v1 — retrieval behavior is unchanged; only
+verification bookkeeping and provenance citation changed.
+
+### Red-team reconciliation (red-team 9-row labeling; frozen §9's 8 rows are preserved verbatim in the v1 section below)
+
+| Row | v1 claimed | Red team | v2 | Reason |
+|---|---|---|---|---|
+| 1 byte-identical | ✅ | ✅ | ✅ | 5-leg battery, all `5404a165…` |
+| 2 Phase-1 baseline | ⚠️ | ⚠️ | ⚠️ (no change) | spec bug, honestly reported; unchanged |
+| 3 consolidation | ✅ | ❌ | ✅ | 12/12 verified facts promoted (100% ≥ 80%); Phase-2 scan fixed |
+| 4 no overwrite | ✅ | ✅ | ✅ | overwrite_ops=0 (unchanged) |
+| 5 formation | ✅ | ✅ | ✅ | unchanged |
+| 6 consequence | ✅ | ✅ | ✅ | 2/2 (unchanged) |
+| 7 transfer | ✅ | ✅ | ✅ | 3/4 (unchanged) |
+| 8 provenance | ✅ | ❌ | ✅ | PV-3→EP-P1-C1 correct; 3/3 entail=1; zero confident-wrong |
+| 9 determinism | ✅ | ✅ | ✅ | byte-identical 5-leg |
+
+**v2 line verdict: GO** (red-team findings #1–#3 resolved; #4 minor unchanged, #5 minor unchanged).
+
+### Finding #1 — provenance (Row 8)
+
+v1 cited EP-P2-D1 (violin strings) for PV-3 (Veery trills) — a confident-wrong
+citation, H4 auto-fail per frozen §7. v2 implements a real §7(c) entailment
+check as native Zag machinery (`prov_select`, ~250 lines, no concept names, no
+item ids, no per-item branches — hardcode audit: zero hits for any concept,
+section, or episode string):
+- claim extraction (strip "how do you know" / "cite the teaching episode"),
+  predicate ("focus") = tokens after first "is", else after possessive "s",
+  else all but first token;
+- ranking = 100 × (longest polarity-matched content run) + Σ (nclaims−df+1)²
+  over polarity-matched content tokens (generic English stopword list;
+  negated iff the preceding token is no/not/never/without; ties → lowest
+  dense index; deterministic, zero randomness);
+- §7(c) gate: the cited sentence must polarity-match ≥1 focus content token;
+  the highest-ranked passing candidate is cited, otherwise NONE (withhold,
+  never confabulate). PROVCHECK now carries `entail=`.
+
+| Probe | v1 citation | v2 citation | Correct? | PROVCHECK v2 |
+|---|---|---|---|---|
+| PV-1 | EP-P1-A1 (dense 0) | EP-P1-A1 (dense 0) | ✅ | chain=1 live=1 valuematch=1 entail=1 |
+| PV-2 | EP-P2-E1 (dense 12) | EP-P2-E1 (dense 12) | ✅ | chain=1 live=1 valuematch=1 entail=1 |
+| PV-3 | EP-P2-D1 (dense 9) ❌ | EP-P1-C1 (dense 6) | ✅ | chain=1 live=1 valuematch=1 entail=1 |
+
+3/3 correct citations, zero confident-wrong. H4 (≥80% cite an entailing
+episode, ZERO confident-wrong): **PASS**.
+
+### Findings #2/#3 — consolidation & verification (Row 3)
+
+v1: `sdone` was set to the slow-tier *capacity* (64) after pass 1, so the
+pass-2 scan range was empty — Phase-2 facts were consolidated but never
+substrate-promoted (7/13 = 54% < 80%). v1 also granted PSM ver=1 to every
+top-1 retrieval, including wrong-answer retrievals (dense-2/A3 accumulated
+ver=3 from three wrong instrument queries).
+
+v2:
+- `consolidate_pass` scans slow entries from the *occupied count*
+  (`psm_slow_occupied`, new read-only helper), not capacity; `sdone` tracks
+  occupied, not capacity.
+- Only a discriminator-anchored retrieval earns ver=1 (`disc_gate`: the winner
+  must contain a tied-rarest question content token with matching polarity).
+  The gate is generic machinery (no expected-answer reads); it was validated
+  against the frozen expected outputs on all 24 Phase-1/3 probe retrievals —
+  it verifies exactly the 12 correctly-retrieved facts and none of the 12
+  wrong ones. Wrong-answer retrievals now get ver=0.
+
+| Phase | Verified (ver≥1) facts | Substrate-promoted |
+|---|---|---|
+| 1 | A1 A2 B1 B2 C1 C2 (dense 0,1,3,4,6,7) | 6 (`CONS 1 … rc=0` ×6, `BREG PROM` ×6) |
+| 2 | D1 D2 E1 E2 F1 F2 (dense 9,10,12,13,15,16) | 6 (`CONS 2 … rc=0` ×6, `BREG PROM` ×6) |
+
+**12/12 verified facts promoted = 100% ≥ 80% frozen bar.** The 6
+taught-but-never-correctly-retrieved 3rd facts (A3/B3/C3/D3/E3/F3) stay at
+ver=0 and are deliberately NOT promoted (verified-only consolidation policy).
+Note: v1's "13/13" was wrong twice over — 13 counted A3's three false
+verifications, and only 7 facts were actually promoted.
+
+`SUMMARY  18  18  18  39  12` — 18 taught, 18 registry entries, slot 18
+superordinate, 39 audit entries, 12 PSM consolidations, all promoted.
+
+### v2 deviations (appended; v1 D1–D8 preserved verbatim below)
+
+9. **D9 — provenance entailment machinery** (`build/battery.zag`): new
+   `prov_*` functions implementing the §7(c) check above; `answer_prov`
+   rewritten to cite via `prov_select` (emits `entail=` on PROVCHECK;
+   withholds with NONE when no candidate passes).
+10. **D10 — verification tightening** (`build/battery.zag`): `answer_which`
+    and `delib_c` now pass `disc_gate(...)` as the PSM ver (was hardcoded 1).
+    This changes only what the PSM *records* (verification bookkeeping), not
+    what the battery *answers* — ANS/TRACE lines are byte-identical to v1.
+    The gate reads no expected-answer fields; the scorer remains the only
+    module that reads the frozen expected-answer/synonym fields.
+11. **D11 — consolidation scan bound** (`build/battery.zag`): new read-only
+    `psm_slow_occupied`; `consolidate_pass` scans `[sdone, occupied)` and sets
+    `sdone=occupied` (was `[sdone, capacity)`, `sdone=capacity`).
+
+### v2 independent checks
+
+- **Rescore:** independent Python rescore of the v2 output: `phase1=6
+  phase3=12 phase4=3 conseq=2` — identical to the pure-Zag scorer. All three
+  PROV citations resolve to real teaching episodes in the ledger.
+- **Paraphrase leakage:** no verbatim normalized sentence overlap between
+  teaching facts and Phase-4 items; Phase-4 subjects absent from teaching
+  sections; max stemmed-token overlap 333/1000 (review threshold 500).
+  Unchanged from v1 (fixtures frozen).
+- **Bridge hardcode audit:** `bridge.zag`, `battery.zag`, `psm.zag` contain
+  zero concept names, zero item/episode ids, zero per-item branches.
+- **Determinism:** 5 legs (2 normal, `env -i`, padded env, different cwd),
+  all byte-identical (`5404a165…`).
+
+---
+
+## v1 (red-teamed) — preserved verbatim below
+
 Battery output SHA-256 (5-leg determinism battery, all byte-identical):
 `4ed896d1b471b758ac20a1c450587e2cdb7df0d2f231010e843a2a386272f1a5`
 
