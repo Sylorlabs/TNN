@@ -2242,3 +2242,96 @@ before implementation; B1-class re-freezes require the P9 bar reformulation;
 G1 sunshafts stand down until a genuinely new design idea; D-VID-1 lane
 stands down until a re-aimed prereg with a different mechanism exists;
 ST-1 stereo WAVs not queued for his ears (DEAD on pristine evidence).
+
+## wave-20260926-1721pdt (2026-09-26 17:21 PDT; stand-down wave, debated)
+
+Run-start HEAD: 45d449a56 (merge of origin/tnn-native-lab tip 39bf8d5d4
+into local a222f8f17; clean, no conflicts; merge performed by the run
+executor before wave start). Wave lock written by the run executor; no
+STALE LOCK condition. Run dir: docs/lab/rsi/runs/wave-20260926-1721pdt/
+(survey/, forks/ + forks/evidence/, interactive/, debate/).
+
+Merge-range material is Micah's own frontier work, treated as CLOSED:
+28ec31ab0 (audio de-synth: measured-timbre renderer), c094d7770 and
+39bf8d5d4 (upscale concept probe C1-C4, teach then re-probe PASS, concept
+HELD). Noted, not claimed, not re-certified. The loop ran no candidates
+this wave.
+
+M1: "CONFIRM the fork battery for wave-20260926-1721pdt. [RE-CERT]
+Evidence: docs/lab/rsi/runs/wave-20260926-1721pdt/forks/FORK_RESULTS_1721.md.
+39 named entries (31 unique commits), 37 PASS with uniform byte-identical
+evidence (znc sha 498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef,
+probe sha 3b29aa066126b263765986ca6f5b6e8e60113135198d2bea431be53a6518f919,
+B2 bin sha 75b85d3cec684f6a156f4c01169551369e4b0e040b56ec1fd24749876eddffa2,
+E0002 on NEG1, char-1 NEG2 diff, R32_ZNC_PROBE_OK). 2 extraction FAILs
+(rh-pull-1-head at 5802fec8, rh-pull-2-head at 4b76bb59; trees lack the
+pinned toolchain path; fifth wave on the identical cause). Spot re-run of
+three 1421pdt entries confirmed with the fixed sed parser before citing.
+Live/fixture/duplicate split 4/35 with all duplicates named explicitly
+with SHAs; 3 unique live commits. Closing origin tip re-check: 39bf8d5d4
+at start and close, no mid-wave move; local HEAD unchanged. The
+39/4/3 versus 1421pdt 40/6/5 coverage delta was named, not shrugged
+(minted precedent P19, below). Certified scope: toolchain and extraction
+stability only."
+
+M2: "CONFIRM the interactive-TNN survey. [RE-CERT] Evidence:
+docs/lab/rsi/runs/wave-20260926-1721pdt/interactive/INTERACTIVE_1721.md.
+Zero new chat/REPL entry points across the 135-commit merge range
+(28ec31ab0..45d449a56); the only grep hit is the known false positive on
+'repl' inside 'replay'/'replication'; the wave delta touched zero files
+under src/ or units/. All three frozen pins match by sha256: baseline
+probe 1ada2fae63ddd63d37f06705459c0d8b1d9c8dffc859af25949221bf5895749c,
+decline-gate probe 20273a99215680b5e3e42bbdbbfed105c7109d15ba189c903cf0d88db54418e7,
+pinned znc 498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef.
+Caveat travels: docs/lab/rsi/fit_authority/SHA256SUMS does not exist; the
+pins live in fit_authority/README.md and are stable across waves (record
+defect, not evidence defect). No interactive TNN exists for adoption;
+tnn_chat remains supervised red-team probe-chat material only."
+
+M3: "CONFIRM the no-new-candidates stand-down for wave-20260926-1721pdt.
+[RE-CERT] Evidence:
+docs/lab/rsi/runs/wave-20260926-1721pdt/survey/LANE_SURVEY_1721.md. Window
+2026-09-26 14:21 to 17:21 PDT across five independent signals: zero new
+prereg drafts, zero design ideas, zero re-aimed preregs (name-status grep
+for prereg|design: zero hits; only one docs/lab/rsi commit in window, the
+1421pdt evidence batch; 27 uncommitted untracked entries are all old
+bin/frame/binary residue, no drafts). G1 STAND DOWN; D-VID-1 STAND DOWN;
+CV-P barred pending his governance ruling 6 with no rotated-author re-test;
+COMP-2 ruling 6 open with P11 stemmer-contingency unresolved; B1-class
+P9 reformulation not found; ST-1 DEAD on pristine evidence. The only
+mechanism-like loop work in the merge range is 18ad30fe3/02d1dcb31 (DP-1
+doppler flyby prereg plus implementation, 2026-09-25, already known).
+DP-1 stays queue-HELD [RE-CERT]; the repaired sealed blind pair (P18
+repair applied 1421pdt) is ready, and presenting it to his ears is a
+future-wave queue decision owed a named wave. His six governance rulings
+remain open and untouched by this debate."
+
+M4: "Prereg commit-order self-check: VACUOUS this wave, labeled vacuous
+per P17. [VACUOUS] No loop candidate commits exist this wave, so there is
+no prereg/impl ordering to check. Recorded as null, not as a pass."
+
+New standing precedent minted by this wave's judge: (P19) coverage delta
+accounting: when a wave's fork battery reports fewer named or live entries
+than the prior wave, the wave report must name the cause of the delta
+before the motion can be CONFIRM'd. P14 closure: the 42 per-entry
+fork-evidence dirs were archived from /tmp/fb1721/E into
+docs/lab/rsi/runs/wave-20260926-1721pdt/forks/evidence/ and committed.
+
+Queued next: his six pending governance rulings (S7 strike, MD-SSD-1
+keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12 queue,
+Python-mirror logic; untouched by this wave's debate); his blind verdicts
+on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14,
+whirlpool-planform; unchanged, nothing added this wave); DP-1
+presentation to his ears is a future-wave queue decision (the repaired
+blind pair with the verbatim provenance header, the verbatim S11-AUD
+overlap, and LISTENING_DP1.md is ready); fork battery driver with split
+live/fixture counts plus duplicate naming, unique-commit count, and the
+closing tip re-check (P1, P8, P19); pull-1/pull-2 remain untestable until
+their trees gain the pinned toolchain path; CV-P adoption still doubly
+gated (rotated-author re-test approximated; ruling 6 pending); COMP-2
+rotated-author re-test on a fresh sealed set plus ruling 6, with the
+stemmer-contingency (P11); prereg consistency check before implementation;
+B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand
+down until a genuinely new design idea; D-VID-1 lane stands down until a
+re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
+queued for his ears (DEAD on pristine evidence).
