@@ -31,7 +31,7 @@ judgments.
 | 100x determinism (2 runs) | n/a (crashed) | byte-identical SHA `4dfa50b0…` |
 | 1x output vs official | — | byte-identical SHA `c22c908e…` |
 | Key arena used after 900 dialogues | would-be 806 KB (crash at 73) | 820 bytes of 65,536 |
-| Response fingerprint memory | 128 KB fixed buffer | O(1): 648 bytes streaming state |
+| Response fingerprint memory | 128 KB fixed buffer | O(1): 652 bytes streaming state |
 | Allocator perturbation (`MALLOC_PERTURB_=165`) | — | byte-identical output |
 
 ## Root cause 1: key arena never reset
@@ -65,7 +65,8 @@ cliff.
 with an incremental SHA-256 running in pure Zag (`sh_init` / `sh_update` /
 `sh_compress` / `sh_final`). The compression loop mirrors the vendored R33
 one-shot implementation exactly; constant strings are copied verbatim. Memory
-is O(1) — 648 bytes of hash state regardless of run length. The final digest
+is O(1) — 652 bytes of hash state (sh_h 64 + sh_k 512 + sh_b 64 + sh_n 8 +
+sh_c 4) regardless of run length, plus a separate one-byte newline slice. The final digest
 is bit-for-bit the same SHA-256 of the same byte stream, so the `DIGEST` line
 is unchanged.
 
