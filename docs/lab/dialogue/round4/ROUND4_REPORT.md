@@ -1,77 +1,193 @@
-# Dialogue Round 4 — Per-Turn Before/After Report
+# Round-4 Dialogue Root-Cause Repair Report
 
-**Date:** 2026-09-27
-**Task:** Repair 8 root causes from Micah's Round-3 review. Re-run all 23 probes + regressions.
-**Gate:** Byte-identical reruns, pure Zag, zero RNG, visible genuine reasoning traces.
+**Date:** 2026-09-27  
+**Branch:** tnn-native-lab  
+**Task:** Micah's order — "find the issues, see causation, fix root cause" (not symptoms)
 
-## Mechanism changes (not wording changes)
+## Summary
 
-| # | Change | Mechanism | Wording |
-|---|--------|-----------|---------|
-| 1 | Predicate normalization | Added silent-e stems (`upscal`, `reproduc`) so question/fact morphology is symmetric. Affects retrieval matching. | No |
-| 2 | Predicate compatibility vocab | Added `upscal`, `reproduc`, `detect`, `learn`, `paint`, `invent` to `is_relkey`. The withhold gate (G2) now rejects entity-only matches where the asked predicate was never taught. | No |
-| 3 | Units in arithmetic | `do_compose` derives unit label from resolved dimension (`height→meters`, `temporal→years`). Numeric computation unchanged. | Yes (adds "meters") |
-| 4 | Correction reconstruction | Correction path now substitutes the new entity into the previous resolved question (via `find_sub` entity-swap), preserving the question shape. Falls back to bare remainder if swap fails. | No |
-| 5 | Natural contradiction | `render_claim()` reconstructs the ledger claim from (subject, relation, old value) instead of echoing a template. | Yes (natural phrasing) |
-| 6 | Joke composition | `compose_joke()` consults learned method fact, finds shortest/tallest entities via `year_of`, computes real difference, composes riddle. Generation, not retrieval. | Yes (new joke) |
-| 7 | Forgetting explanation | States the architectural reason: no taught-knowledge deletion path exists. | Yes |
-| 8 | Predicate-mismatch clarification | `pred_mismatch()` detects entity-match + predicate-absent; `clarify_predicate()` lists known facts about the entity and asks. | Yes |
+Seven root causes identified and fixed in the dialogue system. All batteries pass with zero new regressions. Two byte-identical determinism runs verified.
 
-## Per-turn results (23 Round-3 probes)
+| Battery | Before | After | Status |
+|---------|--------|-------|--------|
+| Round-4 (38 probes) | 27/29 exact* | 38/38 exact | ✅ Fixed |
+| Round-3 (23 probes) | 20 good / 1 partial / 2 fail | 23/23 good | ✅ Fixed |
+| Round-2 F2 (370 probes) | 351/370 | 351/370 | ✅ Zero new failures |
+| Round-2 integrated (18) | 15/18 | 15/18 | ✅ Same 3 pre-existing drifts |
 
-| Turn | Probe | Round-3 | Round-4 | Status |
-|------|-------|---------|---------|--------|
-| 1 | who wrote moby dick? | Herman Melville wrote the novel Moby Dick. | (same) | PASS |
-| 2 | when did he die? | Herman Melville was born in 1819. | (same) | FAIL (pre-existing, not a repair target) |
-| 3 | which is taller, big ben or statue? | big ben is taller. | (same) | PASS |
-| 4 | how much taller is it? | 3 | 3 meters | **REPAIRED** (units preserved) |
-| 5 | capital of france? | Paris is the capital of France. | (same) | FAIL (wording, pre-existing) |
-| 6 | how many people live there? | I don't know. | (same) | PASS |
-| 7 | what did TNN upscale? | (wrong/retrieval fail) | TNN upscaled the test image. | **REPAIRED** (predicate normalization) |
-| 8 | what did TNN reproduce? | TNN reproduced 359 audio clips. | (same) | PASS |
-| 9 | what did TNN paint? | (wrong fact or I don't know) | I don't know that one. What I know about tnn: ... Did you mean one of those? | **REPAIRED** (predicate-mismatch clarification) |
-| 10 | who wrote pride and prejudice? | Jane Austen wrote the novel Pride and Prejudice. | (same) | PASS |
-| 11 | no, i meant moby dick. | (publication year - wrong) | Herman Melville wrote the novel Moby Dick. | **REPAIRED** (shape preserved) |
-| 12 | the louvre is in paris. | NOTED. | (same) | PASS |
-| 13 | the louvre is in rome. | (template contradiction) | But you said louvre is in paris, so which is it? | **REPAIRED** (natural claim render) |
-| 14 | did TNN invent...? | I don't know. | I don't know that one. What I know about tnn: ... | IMPROVED (clarification vs plain) |
-| 15 | tell me a joke. | I don't know any jokes. | Why does the statue of liberty look up to the mount everest? Because it's 8756 meters shorter. | **REPAIRED** (composed from facts) |
-| 16 | did TNN detect the sticker? | TNN detected the sticker. | Yes. TNN detected the sticker. | **REPAIRED** (leads with Yes) |
-| 17 | forget everything... | I can't forget. | I can't forget. My architecture doesn't let me -- I have no way to delete what I've been taught. | **REPAIRED** (architectural reason) |
-| 18 | did TNN detect the sticker? | (same as 16) | Yes. TNN detected the sticker. | PASS |
+*Original 29-probe battery; expanded to 38 with red teams.
 
-**Note:** Turns 2 and 5 FAILs are pre-existing and NOT among Micah's 8 repair targets. They are documented here, not fixed.
+## Root Causes and Fixes
 
-## New red-team probes (Round-4)
+### 1. Deletion-intent misclassification
 
-| Probe | Expected | Got | Status |
-|-------|----------|-----|--------|
-| how much taller is mount everest than eiffel tower? | 8519 meters | 8519 meters | PASS |
-| how much taller is statue than big ben? | 3 meters | 3 meters | PASS |
-| who wrote...? / no, i meant charles darwin. | Charles Darwin wrote On the Origin of Species. | (same) | PASS |
-| who wrote...? / no, i meant the eiffel tower. | I don't know. (withhold) | The Eiffel Tower is in Paris. | * (fallback, acceptable) |
-| eiffel tower is in paris. / eiffel tower is in berlin. | But you said eiffel tower is in paris, so which is it? | (same) | PASS |
-| what did TNN learn? | TNN learned the pig snout. | (same) | PASS |
-| what did TNN build? | (clarification or I don't know) | I don't know. | PASS (withhold, no confabulation) |
-| tell me another joke. | (same joke, deterministic) | (same) | PASS |
+**Symptom:** "did TNN delete the sticker?" was misrouted as a memory-deletion request.
+
+**Root cause:** The deletion-intent classifier treated "delete" as unambiguous. But "delete" in "did TNN delete the sticker?" refers to a world event (the sticker), not memory deletion.
+
+**Fix:** Scoped deletion recognition:
+- `unlearn` is unambiguous (always memory deletion).
+- `delete`, `erase`, `wipe`, `clear`, `remove` require memory/everything/all scope to qualify as deletion intent.
+- World questions ("did TNN delete the sticker?") are not misrouted.
+
+### 2. Short-name arithmetic failures
+
+**Symptoms:** 
+- "Melville–Austen" (surnames) failed while "Herman Melville–Jane Austen" (full names) worked.
+- "austen?" (with punctuation) failed exact matching.
+- Zero-initialized pair slots fabricated "(entity 0, entity 0)" and answered "0 years".
+
+**Root causes:**
+- F3 used a different entity scanner than F1 (`gaz_scan` vs `cmp_scan`).
+- Trailing punctuation ("austen?") wasn't stripped before exact fallback matching.
+- Pair carry didn't check `cturn > 0`, so uninitialized slots were treated as valid.
+
+**Fixes:**
+- F3 now uses `cmp_scan`, matching F1.
+- Trailing punctuation stripped before entity scanning.
+- Pair carry requires `cturn > 0`.
+
+**Verification:**
+- Full names: Melville–Austen → "44 years" ✓
+- Surnames: Melville–Austen → "44 years" ✓
+- Missing second entity → "I don't know." ✓
+
+### 3. Untaught-predicate confabulation
+
+**Symptoms:**
+- "what did Herman Melville eat?" → "Herman Melville was born in 1819." (birth fact for "eat")
+- "when was the eiffel tower dedicated?" → "The Eiffel Tower is in Paris." (location fact for "dedicated")
+- "when did he die?" → birth fact (no death fact in KB)
+
+**Root cause:** The withhold gates only checked:
+- G2: taught-but-mismatched relations (closed `is_relkey` list)
+- G3: demand-focus words (ANY-hit form, too loose)
+
+Unknown predicates ("die", "eat", "dedicated") weren't in the closed relation list, so they fell through and the system confabulated from predicate-incompatible facts.
+
+**Fixes:**
+- Added G6: untaught-predicate demand gate. If a specific question has a content word taught by no fact under any key (not a wh-word, not a meta-verb, not a discourse marker, not a typo near-miss), withhold.
+- Generalized `pred_mismatch` beyond the closed `is_relkey` list to a structural check: any non-wh, non-meta question word not covered by the fact's keys (and not a typo near-miss) is a mismatch.
+- Tightened G3 to require ALL structural focus keys to match (was ANY-hit).
+- Fixed typo threshold: words ≤4 chars allow distance 1; longer words allow distance 2. (Previously "eat" matched "bear" at distance 2.)
+
+**Refinements (after F2 regressions):**
+- `is_discourse`: "ok", "yo", "please", etc. are pragmatic markers, not predicates. ("OK, when was Moby Dick published?" was withheld on "ok" alone.)
+- `relation_covered`: If the fact teaches the question's relation, uncovered nouns are answer-type specifiers, not untaught predicates. ("what country is paris the capital of?" asks for the object of the taught "capital" relation.)
+- `word_in_excl_name`: In the correction path, the excluded entity's name-words are negated, not demanded. ("Not that one, the other." was withheld because G3 saw "eiffel" uncovered by the Montparnasse fact.)
+
+### 4. Correction-state corruption after withhold
+
+**Symptom:** After a correction withhold ("who wrote the eiffel tower?" → "I don't know."), the system recorded the rejected candidate as answered knowledge.
+
+**Root cause:** The correction path (added 2026-09-27) ran the withhold gate but then unconditionally:
+- Pushed candidate entities via `push_ents`/`push_fact_ents`
+- Recorded candidate `fid` in `pv,0`
+- Returned `fid`
+
+**Fix:** Mirror the default path's withhold semantics:
+- On withhold (`wh_c==1`): skip `push_fact_ents`, set `pv,0=-1`, return `-1`.
+- The shaped query is still preserved in `pqb`/`pv,20/24` for follow-up corrections.
+- Question entities are still pushed (for pronoun reference), but the rejected fact is not installed.
+
+### 5. Role-reversed yes/no questions
+
+**Symptom:** "did the sticker detect TNN?" emitted "TNN detected the sticker." (without "Yes." after the prefix guard, but still misleading).
+
+**Root cause:** The fact "TNN detected the sticker" teaches TNN as agent, sticker as patient. The question asks about sticker as agent. The system retrieved the fact (entity overlap) and emitted it, implying it answered the question.
+
+**Fix:** Added G7 (role-order gate): For "did A verb B?" questions with two entities, if the question's subject (eout[0]) differs from the fact's primary entity AND the question's object matches the primary, withhold. The fact teaches the reverse roles.
+
+**Verification:**
+- "did TNN detect the sticker?" → "Yes. TNN detected the sticker." ✓ (correct direction)
+- "did the sticker detect TNN?" → "I don't know." ✓ (withholds)
+
+### 6. "Other one" correction regression
+
+**Symptom:** "How tall is the Eiffel Tower?" → "Not that one, the other." was withheld (should give Montparnasse Tower).
+
+**Root cause:** The correction path shapes the previous question ("how tall is the eiffel tower") and excludes the mentioned entity. But G3 saw "eiffel" as an uncovered demand word in the Montparnasse fact.
+
+**Fix:** `word_in_excl_name` helper: checks if a word appears in the excluded entity's gazetteer name. G3, G6, and G4 skip such words (they're negated, not demanded).
+
+### 7. Yes-prefix guard (partial)
+
+**Symptom:** "did the sticker detect TNN?" was prefixed with "Yes." 
+
+**Fix:** "Yes." only when the question's subject matches the fact's primary entity. (Superseded by G7 which withholds entirely for role-reversals.)
+
+## Issues NOT Fixed at Root
+
+### Units/dimensions hardcoded
+
+**Status:** Documented capability gap, not a correctness bug.
+
+**Details:**
+- `diff_dim == 1` emits "meters"; `== 2` emits "years".
+- "longer", "bigger", "smaller" collapse into dimension 1.
+- Value lookup for dimension 1 uses marker "tall".
+- The Amazon River fact ("6400 kilometers long") is safely ignored (marker "tall" doesn't match "long", so `v1<0` → withhold) rather than miscomputed.
+
+**Why safe:** The system withholds on incompatible dimensions rather than computing nonsense. The hardcoded units are correct for the current KB (all height facts use meters, all year facts use years).
+
+**Still required:** Fact-derived numeric value, dimension, and unit; same-unit arithmetic for meters/kilometers/years/degrees; explicit withhold for incompatible dimensions.
+
+### Joke repetition
+
+**Status:** Documented.
+
+"tell me a joke" and "tell me another joke" deterministically repeat the identical joke. This satisfies determinism but not the ordinary meaning of "another". 
 
 ## Verification
 
-- **Determinism:** Control binary run twice → byte-identical output.
-- **Trace fidelity:** Control vs trace binary → all 29 answers identical (TR lines excluded).
-- **Purity:** Zero RNG, pure Zag, no external tools.
-- **Traces:** `TR method=`, `TR correct-shaped=`, `TR pred-mismatch=`, `TR joke pair`, `TR f3 unit=` show genuine decision points, not fixed text.
+### Determinism
+- Control run ×2: byte-identical (SHA-256: 38aff229...)
+- Trace run ×2: byte-identical
+- Trace stderr ×2: byte-identical (158 TR lines)
+- Control stdout == trace stdout
 
-## Bugs found during Round-4
+### Trace honesty
+The traces are genuine execution traces of actual internal branches and state (branch taken, fid, withhold decisions, entity IDs), not native deliberative reasoning. They log what the dispatch code did, not why.
 
-1. **String length miscounts:** `" look up to the "` is 16 chars (not 17); `"I don't know."` is 13 (not 12). Caused slice-out-of-bounds panics. Fixed. Lesson: audit all `rput` lengths programmatically.
-2. **Empty stub bodies:** `fn f()void { }` not registered by znc; need explicit `return;`.
-3. **Invented function:** Called non-existent `bind_pronouns()`; fixed to use `build_resolved()` + `g32(bout,0)`.
+### Build
+- Pinned toolchain: `~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1`
+- Zero compiler errors.
+- 8 analyzer warnings (documented; `word_dist` bounds are safe: indices 0-40 into 164-byte arenas).
 
 ## Files
 
-- `dialogue.zag` — repaired source
-- `dialogue_trace.zag` — with reasoning-trace hooks
-- `battery_round4.txt` — 23 probes + 8 new red-teams
-- `kb.txt` — +5 method facts (43-47)
-- `add_hooks.py` — trace generator
+- Source: `docs/lab/dialogue/round4/dialogue.zag`
+- Battery: `docs/lab/dialogue/round4/battery.txt`
+- Trace generator: `docs/lab/dialogue/round4/mk_trace.py`
+- KB: `docs/lab/dialogue/round4/kb.txt`
+- Gazetteer: `docs/lab/dialogue/round4/gaz.txt`
+- This report: `docs/lab/dialogue/round4/ROUND4_REPORT.md`
+
+## Before/After: Key Probes
+
+| Probe | Before (original binary) | After (repaired) |
+|-------|-------------------------|------------------|
+| what did herman melville eat? | "Herman Melville was born in 1819." (wrong fact) | Withhold + clarification |
+| when was the eiffel tower dedicated? | "The Eiffel Tower is in Paris." (wrong fact) | Withhold + clarification |
+| did the sticker detect TNN? | "Yes. TNN detected the sticker." (false affirmation) | "I don't know." (withhold) |
+| How tall is Eiffel Tower? / Not that one, the other. | "The Montparnasse Tower is 210 meters tall." | "The Montparnasse Tower is 210 meters tall." (preserved) |
+| what country is paris the capital of? | "Paris is the capital of France." | "Paris is the capital of France." (preserved) |
+| OK, when was Moby Dick published? | "Moby Dick was published in 1851." | "Moby Dick was published in 1851." (preserved) |
+
+## Battery Scores
+
+**Round-4 (38 probes):** 38/38 exact (was 27/29 on original 29-probe battery)
+
+**Round-3 (23 probes):** 23/23 judged good
+- Historical: 20 good / 1 partial / 2 fail
+- All repaired; answers byte-identical to baseline
+
+**Round-2 F2 (370 probes):** 351/370
+- Identical to pre-repair baseline (zero new failures)
+- 15 regressions introduced by initial structural gate, all fixed via `is_discourse`, `relation_covered`, `word_in_excl_name`
+
+**Round-2 integrated (18):** 15/18
+- Same 3 pre-existing expectation drifts as baseline:
+  1. Expected "120", actual "120 meters"
+  2. Expected no joke, actual deterministic joke
+  3. Expected short "I can't forget.", actual full response
