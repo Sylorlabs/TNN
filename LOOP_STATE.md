@@ -2839,3 +2839,107 @@ Queued next: his six pending governance rulings (untouched); his blind verdicts 
 Provenance (verbatim probe answered in transcript): EXP1c freeze package new this wave with inherited lineage; gate (a) evidence inherited from 0221pdt, newly verified; fork battery new execution of inherited machinery; red team and debate new; EXP2-K4/B1-P9/COMP2-P11 inherited queued, gates unchanged; rulings and pairs inherited and untouched; his flagship inherited and closed.
 
 Queued next: EXP1c implementation under the frozen bars (implementing wave runs the commit-order self-check and reproduces the section 7 enumeration bound); EXP2-K4 corpus collection; a genuinely new B1-class mechanism; ruling 6 (COMP2-P11 gate zero); tnn_chat FIT fresh re-run due within 8 waves (stale count 1 of 8 as of this wave); his six pending governance rulings (untouched); his blind verdicts on the sealed pairs (unchanged, nothing added this wave); DP-1 presentation is a parent-agent queue decision. Open questions banked for the parent: binary/toolchain pins prose in README.md versus a checkable file; the loop's own wave-HEAD cadence racing the three-hour wave cadence (lane commits landing mid-battery, inert under pinned-commit extraction, pattern repeats); K7 choice-reality caution for the EXP1c implementing wave.
+
+## Wave 20260927-1421pdt verdicts (debated, transcript in wave record)
+
+1. EXP1c implementation attempt: VOID (uncertified attempt) [VOID], not
+   void-as-sim-broken, nothing adopted. The implementation worker ran 5
+   retune iterations under the frozen prereg (freeze 8b456736b, mass
+   5a043af3c, bars K1-K7 byte-identical to the 0821pdt draft); C1 (median
+   P >= 960/1200) was never met (best 649), C2 read PASS (Z=45), C3
+   unmet. The independent red team (exp1c/REDTEAM_EXP1C_1421.md) proved
+   the attempt uncertifiable and REJECTED the worker's headline claims:
+   M5 violated on all 5 iterations (no per-iteration commits, stopping
+   rule uncheckable, retune shopping cannot be ruled out); prereg item 7
+   violated (shell text-processing of the calibration medians voids
+   certification; no Python used, credited but does not cure the void);
+   iteration 5 ran after a stop instruction. The "proven" limit-cycle
+   unsatisfiability claim is false: committed world.zag has no mote-P
+   coupling (w_mote_move lines 218-237), and the worker's own iter1
+   artifact shows a scripted lamp-farm surviving 1200/1200 in all 12
+   variants. The lo==hi deterministic escape is a real code fact but
+   out-of-spec input (template lineage assumes lo<hi); NO
+   frozen-template repair (in-spec vel=0 with lo<hi gives stationarity,
+   which the worker never tried). Debate M1 UPHELD with binding terms:
+   iterations 1-4 committed as a labeled uncertified historical record
+   (exp1c/iterations/, FILING_NOTE.md); iteration 5 struck (one-line
+   process note only); C1/C2/C3 are CANNOT-CONFIRM ("missing evidence
+   means CANNOT-CONFIRM"); K3 VOID-as-sim-broken explicitly NOT entered;
+   the unsatisfiability claim is rejected and unadopted. Future
+   implementing wave requirements (binding): redo the retune from
+   scratch under M5 with per-iteration commits; try vel=0/lo<hi and
+   boundary-trap families before any satisfiability claim; the
+   worker-invented |vel|-in-{1,2} rule has no frozen standing; fix the
+   hardcoded "retune iteration 1" emitter label; mode_check must gate
+   calibration; item 7 verbatim end to end. The section 7 enumeration
+   bound was not reproduced in certified evidence (no certified runs
+   exist); it stays a frozen obligation of the future implementing wave.
+
+2. Fork battery: CONFIRM [RE-CERT], process confirmation. 52 named
+   entries, 50 PASS, 2 UNTESTABLE (rh-pull-1-head 5802fec84,
+   rh-pull-2-head 4b76bb59f, eleventh wave, pinned toolchain path absent
+   in their trees, content-dependent cause, never headlined without this
+   caveat), 0 FAIL, 0 CONFIRM. Scope: toolchain and extraction stability
+   only. Harness rebuilt pure-Zag byte-identical to 1121pdt (a2e6284c);
+   znc pin 498abcb5 uniform 50/50; B1/B2/B3 pass, negative controls
+   discriminate. Manifest drift: one new branch
+   (tnn-native-lab-wave-archive-wave-20260927-1121pdt at 4805f5363a,
+   tested first, PASS); local tip a98ccd6a2 to b876016e6 (PASS); origin
+   899757bc2 to 9beb0adeacf110a311ae809bffc9cacb1ffb497c (live,
+   PASS); 13 worktrees unchanged; no missing branches. Corrected: the
+   1121pdt "42 unique commits" note was off by one (recomputed 41); this
+   wave's 42 is correct. New standing hygiene rule: unique-commit
+   counts recomputed from each wave's own verdict table. Evidence:
+   forks/FORK_RESULTS_1421.md plus frozen ENUMERATION_MANIFEST.md.
+
+3. Design lane: honest NULL [NEW]. EXP2-K4 corpus still blocked (no
+   curated failure-trace corpus; onebrain3/traces/ holds 27 round-3 run
+   outputs, not a corpus); B1-class mechanism still blocked (P9 stays a
+   re-freeze template; round-4 arms all killed, nothing new since the
+   1121pdt DISCARD); ruling 6 still OPEN (COMP2-P11 gate zero). The
+   round-4 "vocabulary as partition decider" note fails S11 (no differing
+   decision rule, no frozen bars) and was not frozen. Nothing
+   manufactured. Sensory stand-downs unchanged: G1 sunshafts, D-VID-1,
+   ST-1 dead. Evidence: design_lane/HUNT_1421.md.
+
+4. Interactive survey [NEW]: no runnable interactive TNN beyond the
+   frozen probe instruments for red-teamed probe chats. One new
+   interactive entry point exists in source: Micah's own workbuddy
+   argv[1]=="chat" mode (his commit 3cd24f11d, frontier closed to the
+   loop, unvetted, not built/run/certified by the loop). Merge range
+   b08dc57f2..9beb0adea: zero other new chat/REPL/interactive entry
+   points, zero other stdin-read hits (new epistemic/hyptest/upscale
+   sources are batch-only). Evidence: INTERACTIVE_SURVEY_1421.md.
+
+5. Commit-order self-check [NEW]: VACUOUS for adoption. No candidate
+   implementation commits exist this wave (the EXP1c worker committed
+   nothing; nothing is adopted), so there is nothing to gate. Freeze
+   ordering 59b9df4b0 < 5a043af3c < 8b456736b verified by merge-base.
+   Binding: uncommitted worker sources enter only under the debate M1
+   filing terms, never as implementation commits. Standing caveat
+   carried: commit order evidences commit order only, never run order.
+
+6. UNTOUCHED [VOID]: the six governance rulings (S7 strike, MD-SSD-1,
+   S11 pull, S11-AUD pull, C12 queue, Python-mirror logic) remain OPEN;
+   all sealed blind pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13,
+   S14, whirlpool-planform) untouched; DP-1 presentation remains the
+   parent agent's queue decision; Micah's frontier dirs
+   (continual_learning, workbuddy, hyptest, epistemic_native) untouched
+   and closed. This wave neither decided, relitigated, nor re-presented
+   any of them.
+
+Provenance (verbatim probe answered in transcript): EXP1c attempt new
+this wave on inherited frozen design; retune trail new but uncertified
+(iters 1-4) with iter5 struck; red-team and debate new; fork battery new
+execution of inherited machinery; design-lane NULL new; survey new; no
+recycled content presented as new; rulings and pairs inherited and
+untouched.
+
+Queued next: EXP1c retune redo from scratch under M5 (binding future
+requirements above; section 7 bound reproduction still owed); EXP2-K4
+corpus collection; a genuinely new B1-class mechanism; ruling 6
+(COMP2-P11 gate zero); tnn_chat FIT fresh re-run due within 8 waves
+(stale count 2 of 8 as of this wave); his six pending governance rulings
+(untouched); his blind verdicts on the sealed pairs (unchanged, nothing
+added this wave); DP-1 presentation is a parent-agent queue decision.
+K7 choice-reality caution carries to the EXP1c re-attempt wave.
