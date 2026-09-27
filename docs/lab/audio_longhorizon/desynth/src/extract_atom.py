@@ -4,22 +4,29 @@
 An atom = (harmonic stack, per-period amplitude, texture, transients),
 ALL measured from the source audio. No synthesis.
 
-Atom binary format (little-endian):
+Atom binary format v2 (little-endian):
   u32 magic 'ATOM' (0x4D4F5441)
-  u32 version (1)
+  u32 version (2)
   f64 T0            : measured pitch period (samples)
   i64 NBINS         : harmonic shape length
   f64 harm[NBINS]   : period-averaged harmonic waveform (measured)
-  i64 P             : LP order
-  f64 lp[P]         : LP coefficients (measured via autocorrelation)
   i64 K             : texture prototype count
   i64 TEXLEN        : texture prototype length (samples)
-  f64 tex[K*TEXLEN] : measured residual texture prototypes
+  f64 tex[K*TEXLEN] : measured residual texture prototypes (real source
+                      segments, spectrally shaped to harmonic domain),
+                      normalized to 0.15 x harmonic RMS (chosen perceptual
+                      mix; see HONEST NOTE in code — the residual does not
+                      isolate a measurable texture ratio)
   i64 NAMP          : amplitude trajectory length (periods)
   f64 amp_traj[NAMP]: measured per-period RMS amplitude
   i64 NIMP          : transient count
   i64 imp_pos[NIMP] : transient positions (samples, relative to atom start)
   f64 imp_amp[NIMP] : transient amplitudes (measured residual peaks)
+
+v1 carried 16 LP coefficients measured from the harmonic waveform. They were
+REMOVED in v2: the direct measured harmonic waveform already contains the
+source's spectral coloration, so filtering it through the LPC would color it
+twice. No renderer ever applied them (both skipped the LP block).
 """
 import sys, struct, wave
 import numpy as np
@@ -107,31 +114,6 @@ def estimate_f0_autocorr(x, sr, fmin=60, fmax=600):
             return sr / T0r, best_i
     return 0, 0
 
-def lpc_coeffs(x, P):
-    """Measured LP coefficients via autocorrelation (Levinson-Durbin)."""
-    x = x - np.mean(x)
-    n = len(x)
-    R = np.zeros(P + 1)
-    for k in range(P + 1):
-        R[k] = np.sum(x[:n-k] * x[k:])
-    if R[0] < 1e-12:
-        return np.zeros(P)
-    a = np.zeros(P + 1)
-    e = R[0]
-    a[0] = 1.0
-    for i in range(1, P + 1):
-        acc = 0.0
-        for j in range(1, i):
-            acc += a[j] * R[i - j]
-        k = (R[i] - acc) / (e + 1e-12)
-        a[i] = k
-        for j in range(1, i):
-            a[j] = a[j] - k * a[i - j]
-        e = e * (1 - k * k)
-    # Return as synthesis coefficients: y[n] = s[n] - sum_{k=1..P} a[k]*y[n-k]
-    # We store -a[1..P] so render does y = s + sum(lp[k]*y[n-1-k])
-    return -a[1:]
-
 def main():
     in_wav, out_atom = sys.argv[1], sys.argv[2]
     sr, x = read_wav(in_wav)
@@ -209,11 +191,6 @@ def main():
                 res[j] -= contrib[b] * (1.0 / max(1, int(round(T0 / NBINS)) + 1))
         pos += T0
 
-    # LP coefficients from the harmonic (measured spectral coloration)
-    P = 16
-    lp = lpc_coeffs(harm, P)
-    print(f"LP order {P}, a[0]={lp[0]:.4f}", flush=True)
-
     # Texture: K prototypes from the residual (measured segments)
     # Take segments with median energy (not the loudest = transients, not silence)
     TEXLEN = 256
@@ -240,18 +217,13 @@ def main():
         T = np.fft.rfft(tex_resid[k] * np.hanning(TEXLEN))
         T_shaped = T * (H / (np.mean(H) + 1e-12))
         tex[k] = np.fft.irfft(T_shaped, TEXLEN)
-    tex_rms = np.sqrt(np.mean(tex**2))
-    harm_rms = np.sqrt(np.mean(harm**2))
-    if tex_rms > 1e-9:
-        tex = tex * (harm_rms / tex_rms) * 0.3
-    print(f"texture: K={K} TEXLEN={TEXLEN} (waveform-domain, spectrally shaped)", flush=True)
-
-    # Transients: strongest residual peaks (measured), min separation T0/2
+    # Transients: strongest residual peaks (measured), min separation T0/2.
+    # Detected BEFORE texture normalization so the transient neighborhoods
+    # can be excluded from the measured texture level.
     NIMP = 12
     min_sep = int(T0 / 2)
     peaks = []
     ares = np.abs(res)
-    # Simple peak picking
     for i in range(1, len(ares) - 1):
         if ares[i] > ares[i-1] and ares[i] >= ares[i+1] and ares[i] > np.mean(ares) * 3:
             peaks.append((ares[i], i))
@@ -263,19 +235,36 @@ def main():
             imp_amp.append(res[i])  # signed, measured
         if len(imp_pos) >= NIMP:
             break
+    # Texture level: HONEST NOTE — the period-synchronous residual does NOT
+    # isolate the texture (residual RMS exceeds the source due to harmonic
+    # leakage; measured "ratios" are 29-244x, nonsensical). A source-measured
+    # texture ratio is not obtainable from this decomposition. The prototypes
+    # themselves are real source audio (measured segments); their LEVEL is a
+    # chosen perceptual mix parameter, not a measured source ratio.
+    # v1 used 0.3 (extractor) x 0.5 (renderer) = 0.15 effective. v2 preserves
+    # the validated 0.15 effective level with the mix at unity in the renderer
+    # (removing the 0.5 magic number from the render path).
+    MIX_LEVEL = 0.15  # chosen perceptual texture mix (see note above)
+    harm_rms = float(np.sqrt(np.mean(harm**2)))
+    tex_rms = float(np.sqrt(np.mean(tex**2)))
+    if tex_rms > 1e-9:
+        tex = tex * (harm_rms / tex_rms) * MIX_LEVEL
+    print(f"texture: K={K} TEXLEN={TEXLEN} harm_rms={harm_rms:.6f} mix_level={MIX_LEVEL} (chosen, see note)", flush=True)
+    print(f"transients: NIMP={len(imp_pos)}", flush=True)
+
     # Relative positions (fraction of atom), amplitudes
     imp_pos = np.array(imp_pos, dtype=np.int64)
     imp_amp = np.array(imp_amp)
-    print(f"transients: NIMP={len(imp_pos)}", flush=True)
 
-    # Write atom
+    # Write atom (format v2: LP coefficients REMOVED — the harmonic waveform
+    # is already the measured spectral coloration; filtering it again through
+    # the LPC would color it twice. v2 = magic, version, T0, NBINS, harm,
+    # K, TEXLEN, tex, NAMP, amp_traj, NIMP, imp_pos, imp_amp.)
     with open(out_atom, 'wb') as f:
-        f.write(struct.pack('<II', 0x4D4F5441, 1))
+        f.write(struct.pack('<II', 0x4D4F5441, 2))
         f.write(struct.pack('<d', T0))
         f.write(struct.pack('<q', NBINS))
         f.write(struct.pack('<%dd' % NBINS, *harm))
-        f.write(struct.pack('<q', P))
-        f.write(struct.pack('<%dd' % P, *lp))
         f.write(struct.pack('<qq', K, TEXLEN))
         f.write(struct.pack('<%dd' % (K*TEXLEN), *tex.flatten()))
         f.write(struct.pack('<q', nper))
@@ -283,7 +272,7 @@ def main():
         f.write(struct.pack('<q', len(imp_pos)))
         f.write(struct.pack('<%dq' % len(imp_pos), *imp_pos))
         f.write(struct.pack('<%dd' % len(imp_amp), *imp_amp))
-    print(f"wrote {out_atom}", flush=True)
+    print(f"wrote {out_atom} (v2, mix_level={MIX_LEVEL})", flush=True)
 
 if __name__ == '__main__':
     main()

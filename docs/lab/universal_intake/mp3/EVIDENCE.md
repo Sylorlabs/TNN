@@ -184,3 +184,139 @@ VBR PCM vs ffmpeg: lag 2257 samples, max 1.0 LSB, mean 0.0083 LSB.
 - Stereo (intensity, MS), short-block reorder, alias reduction, IMDCT, synthesis not implemented
 
 **Verdict**: OPEN. B1 not fully validated.
+
+## 2026-09-27: Zag Full Decoder (B1-B4) — PCM Gate PASS
+
+**Location**: `docs/lab/universal_intake/mp3/zag_full/mp3dec.zag`
+
+**Implemented**:
+- B1: Huffman dequantization (validated, 87.84% exact, 1.4e-08 max diff)
+- B2: Stereo (plain stereo passthrough; MS/intensity not yet wired)
+- B3: Reorder, antialias, IMDCT (dct3_9, imdct36, imdct12, imdct_short2)
+- B4: Synthesis filterbank (dct_II, synth, change_sign, scale_pcm)
+
+**Validation** (vs Python oracle `mp3ref.py`):
+| Fixture | Samples | Max diff (LSB) | Mean diff (LSB) | Gate |
+|---------|---------|----------------|-----------------|------|
+| t_128cbr.mp3 (CBR mono) | 69120 | 1.0 | 0.00014 | PASS |
+| t_vbr.mp3 (VBR mono) | 69120 | 1.0 | 0.00019 | PASS |
+| t_128js.mp3 (stereo) | 138240 | 24739.0 | 1393.42 | FAIL* |
+
+*Stereo B4 synthesis needs debugging; mono path is solid.
+
+**PCM Gate** (per PREREG B4: max ≤ 8 LSB, mean ≤ 1.0 LSB):
+- t_128cbr.mp3: max 1.0 LSB ✓, mean 0.00014 LSB ✓ — **PASS**
+- t_vbr.mp3: max 1.0 LSB ✓, mean 0.00019 LSB ✓ — **PASS**
+
+**Determinism**: Two decodes of t_128cbr.mp3 produce byte-identical output
+(SHA-256: f72aca836ff4ddc69e6a084e302302243750e0857a7bc0a36de533a8b10bb467).
+
+**Verdict**: PASS for mono. Stereo requires B2/B4 stereo synthesis debugging.
+
+## 2026-09-27: Stereo B2 Fixed — PCM Gate PASS for Joint Stereo
+
+**Root cause** (mechanism-level): the Zag decoder performed NO stereo
+processing. The oracle applies `midside_stereo` / `intensity_stereo` to the
+stacked B1 spectrum `[ch0 576][ch1 576]` immediately after Huffman
+dequantization, before reorder. The Zag decoder skipped this entirely.
+Header survey of the fixture: 59/60 frames carry MS-stereo mode bits
+(`hdr[3] & 0xE0 == 0x60`), 1 frame plain stereo, 0 frames intensity. Every
+MS granule therefore decoded mid/side as left/right — max error 24,739 LSB.
+(The runlog note claiming the fixture was "plain stereo" was wrong; the
+header survey above corrects it.)
+
+**Fix** (`docs/lab/universal_intake/mp3/zag_full/mp3dec.zag`):
+- `midside_stereo`: L = mid+side, R = mid−side on the stacked buffer.
+- `intensity_stereo`: full oracle port — `stereo_top_band`, persistent
+  ch1 `ist_pos` update, per-band intensity gains from the pan table, MS
+  fallback for non-intensity bands when MS mode is also set.
+- Integrated in `decode_frame` between the B1 channel loop and B3, in the
+  oracle's exact order (stack → intensity/MS → split → reorder/antialias/
+  IMDCT per channel).
+
+**Validation**:
+- Differential test of `intensity_stereo` vs the Python oracle on two
+  synthetic granules (extracted B2 functions, not a copy): ist_pos logic
+  bit-exact; spectrum max relative diff 3.2e-08 — the pan table is stored
+  as f32 bit patterns widened to f64 (vs the oracle's f64), contributing
+  ~0.001 LSB at full scale. Negligible; documented, not fixed.
+- PCM vs oracle (`t_128js.mp3`, 138,240 samples): max 1.0 LSB, mean
+  7.2e-05 LSB.
+- PCM vs ffmpeg (lag 2257, cross-correlated ±4096): max 1.0 LSB, mean
+  0.0045 LSB — identical to the oracle's own ffmpeg numbers.
+- Mono regression: `t_128cbr.mp3` and `t_vbr.mp3` outputs byte-identical
+  to the committed SHAs (no change).
+- Determinism: two stereo decodes byte-identical (SHA-256 match).
+
+| Fixture | Samples | Max diff vs oracle (LSB) | Mean (LSB) | Max vs ffmpeg (LSB) | Mean vs ffmpeg (LSB) | Gate |
+|---------|---------|--------------------------|------------|---------------------|----------------------|------|
+| t_128cbr.mp3 (CBR mono) | 69120 | 0 (byte-identical) | 0 | 1.0 | 0.0195 | PASS |
+| t_vbr.mp3 (VBR mono) | 69120 | 0 (byte-identical) | 0 | 1.0 | 0.0083 | PASS |
+| t_128js.mp3 (JS stereo) | 138240 | 1.0 | 0.00007 | 1.0 | 0.0045 | PASS |
+
+**Verdict**: PASS for mono and joint stereo. The pure-Zag MP3 decoder is
+complete for the PREREG scope (MPEG-1 Layer III, 44.1 kHz, mono/stereo).
+
+## 2026-09-27: Fable design review + fixes (Micah order: ask Fable, involve TNN)
+
+Fable (claude-fable-5.1) reviewed the full 1335-line `zag_full/mp3dec.zag` as
+design reviewer. Verdict saved alongside this evidence. Key points:
+
+**Architecture**: 1335-line monolith (bitstream parsing, arithmetic decoding,
+signal processing share one `Dec` struct — no stage isolation for unit tests);
+the stacked `[ch0 576][ch1 576]` spectrum buffer is copied 3x per frame
+(`gb0/gb1` -> `st2` -> back -> `stacked` for synth); f64-throughout is
+defensible for a reference decoder but every per-granule `zallocf` is never
+freed (fine for the CLI, a real leak if this becomes a library).
+
+**Confirmed negligible**: f32->f64 pan-table widening (3.2e-08 relative; gains
+multiply the spectrum once, no feedback — safe). 1.0 LSB max error is PCM
+rounding (`scale_pcm` away-from-zero); cannot exceed 8 LSB on valid input.
+
+**Lurking risks named**: (1) intensity-stereo path tested only on synthetic
+granules — the fixture has 0 intensity frames (`stereo_top_band` step-2 scan,
+`ist_pos`/scfsi interaction untested on real encoder output); (2) `sfbtab`
+160-entry allocation fits exactly 4 short-block granule-channels x 40 with
+zero margin; (3) out-of-scope inputs (MPEG-2, free format) fail silently.
+
+### Fix 1: missing build inputs (coordinator verification)
+
+`zag_full/` contained only `mp3dec.zag`, but it `@import`s `./common.zag` and
+`./mp3tab64.zag` — neither was ever committed. A fresh checkout failed with
+`@import cannot read 'common.zag'`: the "complete" decoder was unbuildable
+from the repo. Committed the exact build inputs the stereo crew used
+(`mp3stereo/` workdir copies; `mp3dec.zag` byte-identical) plus `BUILD.md`.
+Clean repo-only build reproduces all three fixture SHAs (CBR matches the
+committed EVIDENCE SHA; 2/2 deterministic runs each).
+
+### Fix 2: free-format/reserved bitrate guard (Fable's #1 field bug)
+
+`brate_idx` 0 (free format) / 15 (reserved) left `brate=0`, so
+`frame_len = padding` (0/1) and `frame_bytes` went negative. Measured
+behavior of the old binary on a synthetic free-format header:
+- Frame 1 corrupted: `zag runtime: invalid negative allocation size`, exit 1.
+- Frame 30 corrupted (real frame walk): `panic: slice index out of bounds`,
+  exit 1, **no output file at all**. One bad header killed the whole decode.
+
+Fix (`mp3dec.zag`): `decode_frame` returns -2 on `brate_idx` 0/15; `main`
+skips one byte and resynchronizes. Out-of-scope per PREREG; now fails safe.
+- t_128cbr/t_vbr/t_128js: byte-identical to reference SHAs, 2/2 deterministic.
+- Synthetic bad frame 1: new binary skips it; remaining 59 frames
+  bit-identical to the valid decode's frames 2-60.
+- Synthetic bad frame 30: frames 1-29 bit-identical; clean resync; plausible
+  full-scale audio after the skip (reservoir gap is inherent to skipping).
+
+### Fuzz validation (Fable's suggested test)
+
+30-mutation schedule, fully explicit and zero-RNG (no `random` module, no seed):
+frame headers of t_128cbr parsed deterministically (sync 0xFFE, MPEG-1 Layer
+III); payload region of each frame = bytes [start+4, start+frame_len); 30
+offsets evenly spaced across the concatenated payload space; mutation k =
+byte XOR (0xFF, 0x01, 0x80)[k mod 3]. Result: **0/30 crashes** (exit 0,
+valid output each time). The Huffman walker terminates safely on corrupt
+bits, as Fable predicted. Schedule script: `~/workspace/mp3_fuzz2/fuzz_explicit.py`
+(each run logs the literal (offset, old, new) triples).
+
+**Not changed** (documented, out of scope or accepted): intensity-stereo
+real-data coverage, sfbtab tight fit, monolith structure, per-granule
+allocations, MPEG-2/free-format silent handling beyond the crash guard.
