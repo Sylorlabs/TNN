@@ -1,0 +1,443 @@
+// opfill.zag — general image operators, module 2: EDIT-FILL unit.
+// Crew C (2026-09-27): generalize TNN's image capability.
+//
+// op_edit_fill: given an input image (px, w*h*3 i64 RGB) and a mask rect,
+// fill the masked region from the LEARNED vocabulary — never procedural:
+//   Tier 1: each masked 8x8 cell's SURROUNDING CONTEXT (the unmasked ring
+//     of a 16x16 window centered on the cell) is matched against the
+//     S=32 atoms' 16x16 keys through the matcher unit's discipline
+//     (m_ring_match: key-SSD best-wins, bar cfg[1]/value). The fill is the
+//     measured ring mean + the learned atom deviation (key recentered on
+//     its ring mean). Label 7 = CONSTRUCTED-EDIT-FILL.
+//   Tier 2 (ring has <24 unmasked px): the nearest fully-unmasked 8x8
+//     neighbor cell is matched via m_shapes_match at S=16; the fill is the
+//     measured cell-context mean + the learned atom deviation.
+//   Tier 3 (degenerate): the measured global unmasked mean.
+//     Label 8 = CONSTRUCTED-EDIT-NOFIT (mean fill, honestly labeled).
+// No procedural texture synthesis anywhere: every fill pixel is a measured
+// mean plus a measured atom deviation, or a measured mean alone.
+//
+// The mask rect comes from the driver (TNN-proposed from the goal string).
+@import("./opgen.zag")
+
+// m_ring_match: discipline-selected atom match over ARBITRARY pixel
+// positions (the surrounding-context ring).
+// (wox,woy): window origin in image coords; (wx[],wy[]): n window-relative
+// context coords. (mr,mg,mb): measured ring mean; e: ring energy vs mean.
+// (vkb_si,K,ks): the key table and key size (keys must cover all positions).
+// mout[0]=best atom, mout[1..3]=best atom's key mean over the ring.
+// Returns gain (e - sse_best); -99 if the discipline is not implemented.
+fn m_ring_match(px:[]i64, w:i64, wox:i64, woy:i64,
+    wx:[]i64, wy:[]i64, n:i64, mr:i64, mg:i64, mb:i64, e:i64,
+    vkb_si:i64, K:i64, ks:i64, vbuf:[]u8, cfg:[]i64, mout:[]i64) i64 {
+    let disc:i64 = cfg[0];
+    if (disc != 0) { mout[0] = 0; return -99; }
+    let kmb:i64 = ks * ks * 3 * 2;
+    // discipline 0: key-SSD best-wins over the given positions.
+    // atom 0 is the NULL atom: sse = e, gain 0.
+    let best:i64 = 0;
+    let bsse:i64 = e;
+    let bkr:i64 = 0; let bkg:i64 = 0; let bkb:i64 = 0;
+    let ai:i64 = 1;
+    while (ai < K) {
+        let kr:i64 = 0; let kg:i64 = 0; let kb:i64 = 0;
+        let pi:i64 = 0;
+        while (pi < n) {
+            let q:i64 = vkb_si + ai * kmb + (wy[pi] * ks + wx[pi]) * 6;
+            kr = kr + r_i16le(vbuf, q);
+            kg = kg + r_i16le(vbuf, q + 2);
+            kb = kb + r_i16le(vbuf, q + 4);
+            pi = pi + 1;
+        }
+        kr = kr / n; kg = kg / n; kb = kb / n;
+        let sse:i64 = 0;
+        pi = 0;
+        while (pi < n) {
+            let p:i64 = ((woy + wy[pi]) * w + (wox + wx[pi])) * 3;
+            let q2:i64 = vkb_si + ai * kmb + (wy[pi] * ks + wx[pi]) * 6;
+            let d0:i64 = (px[p] - mr) - (r_i16le(vbuf, q2) - kr);
+            let d1:i64 = (px[p + 1] - mg) - (r_i16le(vbuf, q2 + 2) - kg);
+            let d2:i64 = (px[p + 2] - mb) - (r_i16le(vbuf, q2 + 4) - kb);
+            sse = sse + d0 * d0 + d1 * d1 + d2 * d2;
+            pi = pi + 1;
+        }
+        if (sse < bsse) {
+            bsse = sse; best = ai;
+            bkr = kr; bkg = kg; bkb = kb;
+        }
+        ai = ai + 1;
+    }
+    mout[0] = best;
+    mout[1] = bkr; mout[2] = bkg; mout[3] = bkb;
+    return e - bsse;
+}
+
+// inside-mask test (mask rect: mx,my,mw,mh)
+fn ef_masked(x:i64, y:i64, mx:i64, my:i64, mw:i64, mh:i64) i64 {
+    if (x < mx) { return 0; }
+    if (x >= mx + mw) { return 0; }
+    if (y < my) { return 0; }
+    if (y >= my + mh) { return 0; }
+    return 1;
+}
+
+// op_edit_fill: fill the mask rect from the learned vocabulary.
+// px: w*h*3 i64 RGB (observed, never modified). out: w*h*3 u8 (the result).
+// lab: w*h u8 (0=kept observed, 7=CONSTRUCTED-EDIT-FILL,
+// 8=CONSTRUCTED-EDIT-NOFIT). trace/tout: deliberation text.
+// Returns 0 ok, nonzero on failure.
+fn op_edit_fill(px:[]i64, w:i64, h:i64, mx:i64, my:i64, mw:i64, mh:i64,
+    vS:[]i64, vK:[]i64, vab:[]i64, vkb:[]i64, vbuf:[]u8, cfg:[]i64,
+    out:[]u8, lab:[]u8,
+    trace:[]u8, to:i64, tout:[]i64) i64 {
+    to = op_puts(trace, to, "EDIT-FILL unit: mask (");
+    to = op_puti(trace, to, mx);
+    to = op_puts(trace, to, ",");
+    to = op_puti(trace, to, my);
+    to = op_puts(trace, to, ") ");
+    to = op_puti(trace, to, mw);
+    to = op_puts(trace, to, "x");
+    to = op_puti(trace, to, mh);
+    to = op_puts(trace, to, " on ");
+    to = op_puti(trace, to, w);
+    to = op_puts(trace, to, "x");
+    to = op_puti(trace, to, h);
+    to = op_puts(trace, to, "; matcher discipline ");
+    to = op_puti(trace, to, cfg[0]);
+    to = op_puts(trace, to, ", bar ");
+    to = op_puti(trace, to, cfg[1]);
+    to = op_puts(trace, to, "/value\n");
+    if (cfg[0] != 0) {
+        to = op_puts(trace, to, "REFUSED: matcher discipline not implemented\n");
+        tout[0] = to;
+        return 7;
+    }
+    if (mw < 8) { tout[0] = to; return 1; }
+    if (mh < 8) { tout[0] = to; return 1; }
+    if (mx < 0) { tout[0] = to; return 1; }
+    if (my < 0) { tout[0] = to; return 1; }
+    if (mx + mw > w) { tout[0] = to; return 1; }
+    if (my + mh > h) { tout[0] = to; return 1; }
+    if (w < 16) { tout[0] = to; return 1; }
+    if (h < 16) { tout[0] = to; return 1; }
+    // the mask must not cover (almost) everything: TNN needs context
+    if (mw * mh * 10 >= w * h * 9) {
+        to = op_puts(trace, to, "REFUSED: mask covers >=90% of the frame; no context\n");
+        tout[0] = to;
+        return 2;
+    }
+    // out = observed copy; lab = 0 (kept)
+    let npix:i64 = w * h;
+    let i:i64 = 0;
+    while (i < npix) {
+        let q:i64 = i * 3;
+        let v0:i64 = px[q]; if (v0 < 0) { v0 = 0; } if (v0 > 255) { v0 = 255; }
+        let v1:i64 = px[q + 1]; if (v1 < 0) { v1 = 0; } if (v1 > 255) { v1 = 255; }
+        let v2:i64 = px[q + 2]; if (v2 < 0) { v2 = 0; } if (v2 > 255) { v2 = 255; }
+        out[q] = v0 as u8; out[q + 1] = v1 as u8; out[q + 2] = v2 as u8;
+        lab[i] = 0;
+        i = i + 1;
+    }
+    // measured global unmasked mean (tier-3 fallback)
+    let gmr:i64 = 0; let gmg:i64 = 0; let gmb:i64 = 0; let gn:i64 = 0;
+    let gy:i64 = 0;
+    while (gy < h) {
+        let gx:i64 = 0;
+        while (gx < w) {
+            if (ef_masked(gx, gy, mx, my, mw, mh) == 0) {
+                let q2:i64 = (gy * w + gx) * 3;
+                gmr = gmr + px[q2]; gmg = gmg + px[q2 + 1]; gmb = gmb + px[q2 + 2];
+                gn = gn + 1;
+            }
+            gx = gx + 1;
+        }
+        gy = gy + 1;
+    }
+    if (gn == 0) { tout[0] = to; return 3; }
+    gmr = gmr / gn; gmg = gmg / gn; gmb = gmb / gn;
+
+    let wx:[]i64 = nio_alloc(2048) as []i64;
+    let wy:[]i64 = nio_alloc(2048) as []i64;
+    let mout:[]i64 = nio_alloc(32) as []i64;
+    let mscratch:[]i64 = nio_alloc(8) as []i64;
+    if (wx.len == 0) { tout[0] = to; return 4; }
+    // S=32 scale for tier-1 (16x16 keys cover the 16x16 window)
+    let vkb32:i64 = vkb[1];
+    let K32:i64 = vK[1];
+    let ks:i64 = 16;
+
+    let ncells:i64 = 0;
+    let nt1:i64 = 0; let nt1take:i64 = 0;
+    let nt2:i64 = 0; let nt2take:i64 = 0;
+    let nt3:i64 = 0;
+    let cy:i64 = my;
+    while (cy < my + mh) {
+        let cx:i64 = mx;
+        while (cx < mx + mw) {
+            ncells = ncells + 1;
+            // 16x16 window centered on the cell, clamped to the frame
+            let wx0:i64 = cx - 4;
+            let wy0:i64 = cy - 4;
+            if (wx0 < 0) { wx0 = 0; }
+            if (wy0 < 0) { wy0 = 0; }
+            if (wx0 + 16 > w) { wx0 = w - 16; }
+            if (wy0 + 16 > h) { wy0 = h - 16; }
+            let ox:i64 = cx - wx0;
+            let oy:i64 = cy - wy0;
+            // ring = window pixels outside the cell and outside the mask
+            let n:i64 = 0;
+            let iy:i64 = 0;
+            while (iy < 16) {
+                let ix:i64 = 0;
+                while (ix < 16) {
+                    let in_cell:i64 = 0;
+                    if (ix >= ox) { if (ix < ox + 8) { if (iy >= oy) { if (iy < oy + 8) { in_cell = 1; } } } }
+                    if (in_cell == 0) {
+                        if (ef_masked(wx0 + ix, wy0 + iy, mx, my, mw, mh) == 0) {
+                            if (n < 256) {
+                                wx[n] = ix; wy[n] = iy;
+                                n = n + 1;
+                            }
+                        }
+                    }
+                    ix = ix + 1;
+                }
+                iy = iy + 1;
+            }
+            // measured ring mean + energy (even when n < 24; used by tier 2)
+            let rmr:i64 = 0; let rmg:i64 = 0; let rmb:i64 = 0;
+            let pi:i64 = 0;
+            while (pi < n) {
+                let q3:i64 = ((wy0 + wy[pi]) * w + (wx0 + wx[pi])) * 3;
+                rmr = rmr + px[q3]; rmg = rmg + px[q3 + 1]; rmb = rmb + px[q3 + 2];
+                pi = pi + 1;
+            }
+            if (n > 0) { rmr = rmr / n; rmg = rmg / n; rmb = rmb / n; }
+            let e:i64 = 0;
+            pi = 0;
+            while (pi < n) {
+                let q4:i64 = ((wy0 + wy[pi]) * w + (wx0 + wx[pi])) * 3;
+                let d0:i64 = px[q4] - rmr;
+                let d1:i64 = px[q4 + 1] - rmg;
+                let d2:i64 = px[q4 + 2] - rmb;
+                e = e + d0 * d0 + d1 * d1 + d2 * d2;
+                pi = pi + 1;
+            }
+            let tier:i64 = 3;
+            let atom:i64 = 0;
+            let gain:i64 = 0;
+            let fillr:i64 = gmr; let fillg:i64 = gmg; let fillb:i64 = gmb;
+            let use_atom:i64 = 0;
+            let akr:i64 = 0; let akg:i64 = 0; let akb:i64 = 0;
+            if (n >= 24) {
+                // TIER 1: match the surrounding ring against S=32 keys
+                tier = 1;
+                nt1 = nt1 + 1;
+                gain = m_ring_match(px, w, wx0, wy0, wx, wy, n,
+                    rmr, rmg, rmb, e, vkb32, K32, ks, vbuf, cfg, mout);
+                atom = mout[0];
+                akr = mout[1]; akg = mout[2]; akb = mout[3];
+                let bar:i64 = cfg[1] * n * 3;
+                if (gain >= bar) {
+                    use_atom = 1;
+                    nt1take = nt1take + 1;
+                    fillr = rmr; fillg = rmg; fillb = rmb;
+                } else {
+                    fillr = rmr; fillg = rmg; fillb = rmb;
+                }
+            } else {
+                // TIER 2: nearest fully-unmasked 8x8 neighbor cell
+                tier = 2;
+                nt2 = nt2 + 1;
+                let ccx:i64 = -1; let ccy:i64 = -1;
+                let r:i64 = 1;
+                while (r <= 64) {
+                    let dy:i64 = 0 - r;
+                    let found:i64 = 0;
+                    while (dy <= r) {
+                        let dx:i64 = 0 - r;
+                        while (dx <= r) {
+                            let ring_pos:i64 = 0;
+                            if (dx == 0 - r) { ring_pos = 1; }
+                            if (dx == r) { ring_pos = 1; }
+                            if (dy == 0 - r) { ring_pos = 1; }
+                            if (dy == r) { ring_pos = 1; }
+                            if (ring_pos == 1) {
+                                let tx:i64 = cx + dx * 8;
+                                let ty:i64 = cy + dy * 8;
+                                if (tx >= 0) { if (ty >= 0) {
+                                    if (tx + 8 <= w) { if (ty + 8 <= h) {
+                                        // fully unmasked?
+                                        let hits:i64 = 0;
+                                        if (tx < mx + mw) { if (tx + 8 > mx) {
+                                            if (ty < my + mh) { if (ty + 8 > my) { hits = 1; } } } }
+                                        if (hits == 0) {
+                                            ccx = tx; ccy = ty; found = 1;
+                                        }
+                                    } }
+                                } }
+                            }
+                            if (found == 1) { dx = r + 1; dy = r + 1; }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    if (found == 1) { r = 65; }
+                    r = r + 1;
+                }
+                if (ccx >= 0) {
+                    // measured neighbor-cell mean + energy
+                    let nmr:i64 = 0; let nmg:i64 = 0; let nmb:i64 = 0;
+                    let ny:i64 = 0;
+                    while (ny < 8) {
+                        let nx:i64 = 0;
+                        while (nx < 8) {
+                            let q5:i64 = ((ccy + ny) * w + (ccx + nx)) * 3;
+                            nmr = nmr + px[q5]; nmg = nmg + px[q5 + 1]; nmb = nmb + px[q5 + 2];
+                            nx = nx + 1;
+                        }
+                        ny = ny + 1;
+                    }
+                    nmr = nmr / 64; nmg = nmg / 64; nmb = nmb / 64;
+                    let ne:i64 = 0;
+                    ny = 0;
+                    while (ny < 8) {
+                        let nx2:i64 = 0;
+                        while (nx2 < 8) {
+                            let q6:i64 = ((ccy + ny) * w + (ccx + nx2)) * 3;
+                            let dd0:i64 = px[q6] - nmr;
+                            let dd1:i64 = px[q6 + 1] - nmg;
+                            let dd2:i64 = px[q6 + 2] - nmb;
+                            ne = ne + dd0 * dd0 + dd1 * dd1 + dd2 * dd2;
+                            nx2 = nx2 + 1;
+                        }
+                        ny = ny + 1;
+                    }
+                    gain = m_shapes_match(px, w, h, ccx, ccy, 8, 8,
+                        nmr, nmg, nmb, ne,
+                        vS, vK, vab, vkb, vbuf, 2, cfg, mscratch);
+                    atom = mscratch[0];
+                    let bar2:i64 = cfg[1] * 192;
+                    if (gain >= bar2) {
+                        use_atom = 1;
+                        nt2take = nt2take + 1;
+                    }
+                    if (n > 0) { fillr = rmr; fillg = rmg; fillb = rmb; }
+                } else {
+                    tier = 3;
+                    nt3 = nt3 + 1;
+                }
+            }
+            // write the cell's masked pixels
+            let dy2:i64 = 0;
+            while (dy2 < 8) {
+                let dx2:i64 = 0;
+                while (dx2 < 8) {
+                    let ix2:i64 = cx + dx2;
+                    let iy2:i64 = cy + dy2;
+                    if (ef_masked(ix2, iy2, mx, my, mw, mh) == 1) {
+                        let q7:i64 = (iy2 * w + ix2) * 3;
+                        if (use_atom == 1) {
+                            // measured context mean + learned atom deviation
+                            let qk:i64 = 0;
+                            if (tier == 1) {
+                                qk = vkb32 + atom * (ks * ks * 3 * 2)
+                                    + ((oy + dy2) * ks + (ox + dx2)) * 6;
+                            } else {
+                                let s16:i64 = vS[2] / 2;
+                                qk = vkb[2] + atom * (s16 * s16 * 3 * 2)
+                                    + (dy2 * s16 + dx2) * 6;
+                            }
+                            let v0:i64 = fillr + (r_i16le(vbuf, qk) - akr);
+                            let v1:i64 = fillg + (r_i16le(vbuf, qk + 2) - akg);
+                            let v2:i64 = fillb + (r_i16le(vbuf, qk + 4) - akb);
+                            if (v0 < 0) { v0 = 0; } if (v0 > 255) { v0 = 255; }
+                            if (v1 < 0) { v1 = 0; } if (v1 > 255) { v1 = 255; }
+                            if (v2 < 0) { v2 = 0; } if (v2 > 255) { v2 = 255; }
+                            out[q7] = v0 as u8;
+                            out[q7 + 1] = v1 as u8;
+                            out[q7 + 2] = v2 as u8;
+                            lab[iy2 * w + ix2] = 7;
+                        } else {
+                            out[q7] = fillr as u8;
+                            out[q7 + 1] = fillg as u8;
+                            out[q7 + 2] = fillb as u8;
+                            lab[iy2 * w + ix2] = 8;
+                        }
+                    }
+                    dx2 = dx2 + 1;
+                }
+                dy2 = dy2 + 1;
+            }
+            // per-cell trace: first 16 cells + every tier-2/3 cell
+            if (ncells <= 16) {
+                to = op_puts(trace, to, "cell (");
+                to = op_puti(trace, to, cx);
+                to = op_puts(trace, to, ",");
+                to = op_puti(trace, to, cy);
+                to = op_puts(trace, to, ") tier=");
+                to = op_puti(trace, to, tier);
+                to = op_puts(trace, to, " ringpx=");
+                to = op_puti(trace, to, n);
+                to = op_puts(trace, to, " atom=");
+                to = op_puti(trace, to, atom);
+                to = op_puts(trace, to, " gain=");
+                to = op_puti(trace, to, gain);
+                to = op_puts(trace, to, " use_atom=");
+                to = op_puti(trace, to, use_atom);
+                to = op_puts(trace, to, "\n");
+            } else {
+                if (tier != 1) {
+                    to = op_puts(trace, to, "cell (");
+                    to = op_puti(trace, to, cx);
+                    to = op_puts(trace, to, ",");
+                    to = op_puti(trace, to, cy);
+                    to = op_puts(trace, to, ") tier=");
+                    to = op_puti(trace, to, tier);
+                    to = op_puts(trace, to, " ringpx=");
+                    to = op_puti(trace, to, n);
+                    to = op_puts(trace, to, " atom=");
+                    to = op_puti(trace, to, atom);
+                    to = op_puts(trace, to, " gain=");
+                    to = op_puti(trace, to, gain);
+                    to = op_puts(trace, to, "\n");
+                }
+            }
+            cx = cx + 8;
+        }
+        cy = cy + 8;
+    }
+    to = op_puts(trace, to, "cells=");
+    to = op_puti(trace, to, ncells);
+    to = op_puts(trace, to, " tier1=");
+    to = op_puti(trace, to, nt1);
+    to = op_puts(trace, to, " (atom-taken ");
+    to = op_puti(trace, to, nt1take);
+    to = op_puts(trace, to, ") tier2=");
+    to = op_puti(trace, to, nt2);
+    to = op_puts(trace, to, " (atom-taken ");
+    to = op_puti(trace, to, nt2take);
+    to = op_puts(trace, to, ") tier3=");
+    to = op_puti(trace, to, nt3);
+    to = op_puts(trace, to, "\nEDIT-FILL done\n");
+    // label census
+    let lc0:i64 = 0; let lc7:i64 = 0; let lc8:i64 = 0;
+    let pli:i64 = 0;
+    while (pli < npix) {
+        let L:i64 = lab[pli] as i64;
+        if (L == 0) { lc0 = lc0 + 1; }
+        if (L == 7) { lc7 = lc7 + 1; }
+        if (L == 8) { lc8 = lc8 + 1; }
+        pli = pli + 1;
+    }
+    to = op_puts(trace, to, "labels: 0(kept)=");
+    to = op_puti(trace, to, lc0);
+    to = op_puts(trace, to, " 7(fill)=");
+    to = op_puti(trace, to, lc7);
+    to = op_puts(trace, to, " 8(mean)=");
+    to = op_puti(trace, to, lc8);
+    to = op_puts(trace, to, "\n");
+    tout[0] = to;
+    nio_free(wx); nio_free(wy); nio_free(mout); nio_free(mscratch);
+    return 0;
+}
