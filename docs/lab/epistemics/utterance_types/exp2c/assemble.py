@@ -185,6 +185,8 @@ MODES = [
     ("ab-a-rev", "cal_ab_rev.txt", 0),
     ("vol-a", "cal_vol.txt", 0),
     ("vol-b", "cal_vol.txt", 1),
+    ("vol2-a", "cal_vol2.txt", 0),
+    ("vol2-b", "cal_vol2.txt", 1),
     ("de-a", "cal_de.txt", 0),
     ("de-b", "cal_de.txt", 1),
 ]
@@ -196,8 +198,10 @@ CALL = ("rc2c=run_2c(root,\"%s\",%d,\n"
         "        wstarts,wends,name_buf,&nlen,scores,\n"
         "        abuf,&acount,acap,&ep);")
 dispatch = ("    // ---------- Phase 2c: sincere-discourse calibration (EXPERIMENTAL) ----------\n"
-            "    au(abuf,&acount,acap,17,0,0,21,0,0);\n"
             "    let mode:[]u8=arg_copy(2);\n"
+            "    // Empty/missing mode: exact frozen path (Stage-0 gate).\n"
+            "    if(mode.len>0){\n"
+            "    au(abuf,&acount,acap,17,0,0,21,0,0);\n"
             "    _zag_print(\"2CMODE|\");\n"
             "    _zag_print(mode);\n"
             "    _zag_print(\"\\n\");\n"
@@ -282,6 +286,7 @@ SCORING = r'''
         checkn("2c_sinc_lk_",t3,lk93,1,&fails);
         t3=t3+1;
     }
+    } // end if(mode.len>0) for 2c dispatch+scoring
 
 '''
 src = src.replace(anchor3, dispatch + SCORING + anchor3, 1)
@@ -290,6 +295,7 @@ src = src.replace(anchor3, dispatch + SCORING + anchor3, 1)
 anchor4 = "    // (ix) negative control:"
 assert src.count(anchor4) == 1
 MDUMP = r'''
+    if(mode.len>0){
     // MDUMP: every learned marker with status (observability for exp2c
     // mechanism analysis; read-only). Format:
     // MDUMP|concept+1|field|status|support|bytes  (field 0=UTT 1=CTX 2=SPK;
@@ -318,6 +324,7 @@ MDUMP = r'''
         }
         qk=qk+1;
     }
+    } // end if(mode.len>0) for MDUMP
 
 '''
 src = src.replace(anchor4, MDUMP + anchor4, 1)
