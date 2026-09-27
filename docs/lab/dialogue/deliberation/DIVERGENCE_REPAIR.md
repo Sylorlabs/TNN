@@ -83,11 +83,64 @@ See `probe_gaps.txt` for the full record. Three probes absent from every existin
 
 None against the assigned bars. The Round-2 F2 battery has 15 failures and the integrated battery 3, all documented above as inherited or adopted-reference-identical; the explicit no-regression floors are met.
 
+## Amendment compliance — measurement integrity (2026-09-27)
+
+The following addresses the independent approach-skeptic review's four measurement-integrity requirements. They are binding.
+
+### 1. Per-probe recount with stated no-output policy
+
+**No-output policy (explicit):** Every probe in the R4 battery has an exact expected output. A probe that emits no A-line does NOT match its expected output: **NO OUTPUT = FAIL**. A probe whose A-line differs by even one byte from the E-line is FAIL. There is no partial credit and no don't-care.
+
+**Method:** An independent external scorer (`scorer.py`, not the binary's internal T-lines) parses `battery.txt` for the 38 (U,E) pairs in order, parses the run output for the 38 A-lines in order, and requires exact equality. Both the pre-repair and post-repair runs emitted all 38 A-lines (zero silent probes).
+
+**Per-probe table:** See `R4_PER_PROBE.md` for all 38 probes with verbatim utterance, expected output, post-repair answer, pre-repair answer, and PASS/FAIL under the same scorer.
+
+**Score reconciliation (one scorer):**
+
+| Number | What it is | Honest? |
+|---|---|---|
+| 28/33 | v1's score on the 33 probes its internal harness actually scored | Yes, for those 33 |
+| 28/38 | v1's strict score on all 38 probes (5 unscored NOVEL=1 probes = FAIL per no-output policy) | **Yes — this is the honest v1 number** |
+| 33/38 | v1's claimed score (5 unscored probes counted as passes without evidence) | **No — not reproducible from the table** |
+| 33/38 | Pre-repair fork on the 38-probe battery, independent scorer (this recount) | Yes — 5 real failures, all with emitted A-lines |
+| 38/38 | Post-repair build, independent scorer (this recount) | **Yes — all 38 A-lines match exactly** |
+
+A number a verifier cannot reproduce from the per-probe table is not a score. The 38/38 reported here is reproducible: run `scorer.py` on `battery.txt` and `r4_run1.out`.
+
+### 2. Same-scorer pre vs post with failure-direction classification
+
+Both builds were scored by the same independent scorer. Pre-repair: 33/38. Post-repair: 38/38.
+
+| Probe | Utterance | Pre-repair A | Direction |
+|---|---|---|---|
+| R4-01 p2 | when did he die? | I don't know. | (a) safe withhold — withholds, wrong template (expected clarify) |
+| R4-03 p4 | no, i meant the eiffel tower. | The Eiffel Tower is in Paris. | **(b) unsafe assertion — P0** (emits a fact; expected "I don't know.") |
+| R4-06 p1 | when was the eiffel tower dedicated? | I don't know. | (a) safe withhold — withholds, wrong template (expected clarify) |
+| R4-06 p3 | what did herman melville eat? | I don't know. | (a) safe withhold — withholds, wrong template (expected clarify) |
+| R4-09 p2 | Not that one, the other. | Herman Melville wrote the novel Moby Dick. | **(b) unsafe assertion — P0** (confident wrong fact; expected Montparnasse Tower) |
+
+Zero (c) silent/no-output failures in either run.
+
+**Regression check:** The repair fixed all 5 pre-repair failures and introduced zero new failures. It did NOT introduce retrieval failures where withhold failures stood — the two unsafe assertions were pre-existing in the pre-repair fork (not introduced by the port), and both are fixed. Cause and effect are not inverted.
+
+### 3. Unsafe-direction severity
+
+The two (b) unsafe failures are **P0 severity** regardless of count:
+- **R4-03 p4:** a correction ("no, i meant the eiffel tower.") that should withhold ("I don't know.") instead emitted "The Eiffel Tower is in Paris." — a confident assertion from a withhold-centric module.
+- **R4-09 p2:** "Not that one, the other." should retrieve "The Montparnasse Tower is 210 meters tall." but emitted "Herman Melville wrote the novel Moby Dick." — a confident wrong fact.
+
+They are filed here as unsafe assertions, not under any label that erases the safe/unsafe distinction. Both are fixed in the post-repair build (verified by the per-probe table).
+
+### 4. Zero TBDs, no unilateral bar change
+
+Every residual failure has a root cause above. The bar remains 38/38 and 8/8. No bar change is claimed or made. The post-repair build meets all bars with zero failures on R4, so there are no TBDs.
+
 ## Files committed
 
 - `docs/lab/dialogue/deliberation/deliberate.zag` — repaired source (212,223 bytes)
 - `docs/lab/dialogue/deliberation/build/deliberate_frozen_r4repair2.zag` — frozen copy
 - `docs/lab/dialogue/deliberation/probe_gaps.txt` — fresh neuter-flip probes
 - `docs/lab/dialogue/deliberation/DIVERGENCE_REPAIR.md` — this report
+- `docs/lab/dialogue/deliberation/R4_PER_PROBE.md` — per-probe recount table (38 probes)
 
 No binaries, `.zagd` files, caches, or doubled paths are included.
