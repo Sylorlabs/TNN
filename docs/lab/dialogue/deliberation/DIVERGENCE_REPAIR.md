@@ -1,225 +1,93 @@
-# Deliberation Fork-Divergence Repair Report
+# Deliberation Fork-Divergence Repair Report — Round 2
 
 **Date:** 2026-09-27  
 **Branch:** `tnn-native-lab`  
 **Task:** Repair `deliberate.zag` to incorporate all adopted round-4 dialogue behavior while preserving the ledger architecture (readings GEN → facts GEN → actions GEN → ELIM → ARGMAX).
 
-## Summary
+**Provenance:** This is the second repair round. The first repair (commits `6e69b86b3`, `82bfa629e`) reached 33/38 on the adopted round-4 battery. An independent red team issued NO-GO on the report commit `c3f2261d6`. This round addresses the red-team findings and reaches the full proof bar.
 
-The deliberation fork (`deliberate.zag`) has been repaired to incorporate adopted round-4 dialogue behaviors as causal ledger gates and actions. The repair preserves the 25-row ledger architecture and the GEN → ELIM → ARGMAX pipeline.
+**True characterization:** The remaining divergences were **gate-policy integration gaps** — repaired gates (G3, G6, clarify/withhold) that existed in the source but were not wired into the full deliberation policy (e.g., clarify considering only gate 2, correction falling back to a stale literal). They were not entity-retrieval edge cases.
 
-**Proof battery results:**
-- Adopted round-4 battery (`round4/battery.txt`, 38 probes): **33/38** (baseline: 32/38)
-- Round-3 answer-stream equivalence: **23/23** (byte-identical)
-- Heldout (`deliberation/heldout.txt`): **20/20**
-- Generality probes: **6/8** (baseline: 2/8)
+## Proof battery results
 
-The 5 remaining round-4 failures are documented below with causal analysis. All are entity-resolution edge cases, not gate-mechanism failures.
+Every battery was run twice; the two outputs were byte-identical. SHA-256 of the output is recorded.
 
-## Divergences Repaired
+| Battery | Score | Output SHA-256 | Bar |
+|---|---:|---|---|
+| Adopted round-4 (`round4/battery.txt`, 38 probes) | **38/38** | `61810b656f3691621f0fe927745eb25c3f0ef9dfd9a6a44eb6a2019182462272` | 38/38 met |
+| Generality (8 probes vs adopted `gen_ref.out`) | **8/8** | `64f0e7d10f73ff8f36bebccb95caaf9e7551378f172010f32c594b645b8d3f7b` | 8/8 met |
+| Round-3 answer-stream equivalence (23 probes) | **23/23** exact A-lines | `d8a9f004ab1032349a7fac6c691a6a6ec51d79c7542b6a3a01f9e1f37a3d8340` | 23/23 met |
+| Heldout (`deliberation/heldout.txt`, 20 probes) | **20/20** | `96937cd04a6b72f9d73bb9711f64d05b6c2e1820042aa7cba3741ff7191b47dd` | 20/20 met |
+| Round-2 F2 withhold battery (370 probes) | **355/370** | `b60971207af64035db84461c3bf85551726f54f195fc84e83a658202cc98af04` | no regression (floor 351/370) |
+| Round-2 integrated battery (18 probes) | **15/18** | byte-identical runs; SHA recorded in manifest | matches adopted reference |
 
-### 1. G6 Untaught-Predicate Gate (NEW)
+All six bars met. No bar missed: this is a GO.
 
-**Adopted behavior:** A specific question whose content word is taught by no fact under any key (not a wh-word, not a meta-communicative verb, not a discourse marker, not a typo near-miss) demands a predicate the KB never taught. Example: "when did he die?" — "die" is not taught for Melville.
+### Round-2 F2 detail (355/370)
 
-**Deliberation divergence:** Absent. The gate did not exist.
+Failures: `101, 121, 141, 274, 279, 284, 289, 294, 299, 304, 309, 314, 319, 324, 329`.
 
-**Repair:** Added G6 to `withhold_check_gate` (gate ID 6). The gate:
-- Fires only for specific questions (`is_specific==1`)
-- Stands down when `relation_covered==1` (the fact teaches the question's relation; uncovered nouns are then answer-type specifiers, not untaught predicates)
-- Skips wh-words, meta-verbs, discourse markers, excluded-entity name words, covered keys, and typo near-misses
+- Probes 101/121/141 (ellipsis) are inherited from the pre-repair fork, unchanged.
+- Probes 274–329 are the adopted round-4 reference's own known-miss region.
+- The pre-repair fork failed 23 probes; this repair fixed 8 of them and introduced zero new failures.
+- The adopted round-4 reference scores 351/370 on this battery with a different 19-failure set; the no-regression floor (351/370) is exceeded.
 
-**Causal justification:** Adopted round-4 `dialogue.zag` lines 2785-2805. The `relation_covered` refinement prevents false positives on "what country is X the capital of?" where "country" is uncovered but the relation "capital of" is taught.
+### Round-2 integrated detail (15/18)
 
-### 2. G7 Reversed Role-Order Gate (NEW)
+The three misses are exactly the adopted reference's three legacy drifts (verified identical):
+- Probe 6: expected `120`, actual `120 meters`
+- Probe 14: expected no-joke response, actual composed joke
+- Probe 18: expected short forget refusal, actual architectural explanation
 
-**Adopted behavior:** "did A verb B?" asks about A as the agent. If the question names two entities with A as subject but the fact's primary entity is B, the fact teaches reverse roles — withhold rather than emit a misleading fact. Example: "did the sticker detect TNN?" vs taught "TNN detected the sticker."
+### Generality adopted answers matched (8/8)
 
-**Deliberation divergence:** Absent.
+1. `1000 meters`
+2. `4500 kilograms`
+3. `45 degrees celsius`
+4. `90 minutes`
+5. `1690 meters`
+6. `8519 meters`
+7. `84 years`
+8. Honest elephant/sauna incompatibility clarification
 
-**Repair:** Added G7 to `withhold_check_gate` (gate ID 7). The gate:
-- Fires only for "did "-prefixed questions
-- Compares question subject (eout[0], position-ordered) against fact primary entity
-- Returns 7 when `qsubj != fprimary && qobj == fprimary`
+## The ten behavior changes vs the pre-repair fork
 
-**Causal justification:** Adopted round-4 `dialogue.zag` lines 2777-2783. Preserves distinct ledger gate ID 7.
+Verified by programmatic function-level diff of `deliberate.zag` against the pre-repair source. Only the listed functions changed; no other answer-stream changes exist.
 
-### 3. G3 Structural Focus Tightening
+1. **Correction `use_prev` fallback generalized** (`gen_correction`): any zero-entity correction reuses the previous resolved query shape, not just the literal "the other one".
+2. **Correction second fallback** (`gen_correction` + new `qfocus_span`): reshapes the previous query by replacing its focus span with the correction remainder (e.g., "who wrote hamlet?" + "no, i meant the eiffel tower." → "who wrote the eiffel tower").
+3. **Clarify gate set** (`gen_clarify`): considers withhold gates {2,3,6}, not just gate 2.
+4. **Withhold gate set** (`gen_withhold`): considers gates {2,3,6}, not just gate 2.
+5. **`pred_mismatch` pronoun allowance**: rejects only `ne4==0 && bn==0`; a bound pronoun (`bn>0`) may carry the clarification.
+6. **Clarify/withhold `wpe` from bound pronoun**: when `ne4==0 && bn>0`, the withhold/clarify entity comes from the bound pronoun buffer.
+7. **`diff_dim` "heavier"**: "how much heavier is X than Y?" recognized as a quantity-difference dimension (kilograms).
+8. **`diff_dim` "hotter"**: "how much hotter is X than Y?" recognized as a quantity-difference dimension (degrees celsius).
+9. **`grab_num_left` space skip**: skips spaces before reading a quantity, enabling text like "100 centimeters".
+10. **`pron_class` "there" removal**: the pre-repair fork bound "there" as a class-3 pronoun; the adopted round-4 reference does not. Binding it over-enabled predicate clarification against a previously mentioned entity (observed: identical salience `[17:1, 19:1]`, fork produced `bn=1` vs reference `bn=0` for "how many people live there?", flipping the adopted "I don't know." into a clarification). Removed.
 
-**Adopted behavior:** EVERY demand word must be covered by the fact's keys or be a typo near-miss. The old ANY-hit form let uncovered demand words through when a sibling matched.
+## Fresh behavioral neuter flips
 
-**Deliberation divergence:** G3 used ANY-hit: if any demand word matched, the gate passed.
+See `probe_gaps.txt` for the full record. Three probes absent from every existing battery, each isolating one repaired mechanism:
 
-**Repair:** Tightened G3 in `withhold_check_gate` to ALL-demand coverage. Also added `word_in_excl_name` skip for excluded-entity name words (negated, not demanded).
+1. **G3 ALL semantics** — "when was big ben dedicated?": pre-repair "I don't know." → repaired informative clarify with Big Ben's taught facts. G3 demands EVERY demand word be covered; "dedicat" is untaught for Big Ben, so the gate fires and the clarify path engages.
+2. **F3 surname-only resolution** — "how much older is darwin than curie?": entities resolve via `cmp_scan` over the punctuation-stripped tail (instrumented: `ne_d=2`). The old `gaz_scan` path failed single names outright.
+3. **Correction after withhold** — "who wrote dune?" → "no, i meant the martian.": pre-repair "The Martian was published in 2011." (wrong fact) → repaired "Andy Weir wrote The Martian." (matches adopted reference).
 
-**Causal justification:** Adopted round-4 `dialogue.zag` G3 implementation. Example: "when was the eiffel tower dedicated?" — old code retrieved fact 18 via "eiffel"+"tower" even though "dedicat" is untaught.
+## Architecture preserved
 
-### 4. Scoped Deletion
+- The 25-row GEN → ELIM → ARGMAX ledger is intact (verified: `gen_readings` emits 12 rows, `gen_fact_cands` 7, `gen_action_cands` 6; ELIM and ARGMAX unchanged).
+- `docs/lab/epistemic_native/` does not import `deliberate.zag` (verified by grep; no dependency regression).
+- Pure Zag, deterministic, zero RNG. No per-item hardcodes; all mechanisms are broad.
 
-**Adopted behavior:** "delete"/"erase"/"wipe"/"clear"/"remove" require memory scope ("delete my memory", "erase everything"); bare "delete it" is not a memory operation. "unlearn" is unconditional.
+## Remaining misses
 
-**Deliberation divergence:** Only "forget"/"forgot"/"forgotten" handled. "delete my memory" was not recognized as a forget-request.
+None against the assigned bars. The Round-2 F2 battery has 15 failures and the integrated battery 3, all documented above as inherited or adopted-reference-identical; the explicit no-regression floors are met.
 
-**Repair:** Extended `utter_type` with `utter_del_scope` check. The reading HID 6 remains the causal classification source.
+## Files committed
 
-**Causal justification:** Adopted round-4 `dialogue.zag` `utter_del_scope` function. Preserves ledger architecture: reading rows are the sole utterance classifier.
+- `docs/lab/dialogue/deliberation/deliberate.zag` — repaired source (212,223 bytes)
+- `docs/lab/dialogue/deliberation/build/deliberate_frozen_r4repair2.zag` — frozen copy
+- `docs/lab/dialogue/deliberation/probe_gaps.txt` — fresh neuter-flip probes
+- `docs/lab/dialogue/deliberation/DIVERGENCE_REPAIR.md` — this report
 
-### 5. Taught Units (Generalization)
-
-**Adopted behavior:** Quantities carry taught units from facts. "how much taller" answers with the fact's unit ("meters", "kilograms", "degrees celsius"), not hardcoded strings. Unit incompatibility is honest ("I don't know" when units differ).
-
-**Deliberation divergence:** Hardcoded "meters"/"years". No unit metadata. Joke always said "meters shorter."
-
-**Repair:**
-- Added `extract_unit` to `kb_install`: stores unit offset/length at fact row +32/+36
-- Replaced `year_of`/`ent_year_val` with `qty_fx`/`ent_year_fx` + `answer_diff` + `question_unit`
-- Joke uses fact-taught units (both facts must agree)
-
-**Causal justification:** Adopted round-4 `dialogue.zag` unit machinery. Enables 8/8 generality probes (vs 2/8 baseline).
-
-### 6. Unified Entity Behavior (F3 Arithmetic)
-
-**Adopted behavior:** F3 arithmetic uses `cmp_scan` (full names or distinctive single words), strips trailing punctuation, requires `cturn>0` before carried-pair use.
-
-**Deliberation divergence:** Used `gaz_scan` (failed single names like "melville"). No punctuation stripping ("austen?" failed). Used `cturn<0` (allowed phantom pair from zero-state).
-
-**Repair:** Updated `do_compose` F3 section:
-- `gaz_scan` → `cmp_scan` with punctuation-stripped tail
-- `cturn<0` → `cturn<=0`
-- `year_of`/`ent_year_val` → `qty_fx`/`ent_year_fx` + `answer_diff`
-
-**Causal justification:** Adopted round-4 `dialogue.zag` F3 implementation. Preserves `cv` and `pvl` instrumentation for ledger.
-
-### 7. Correction-State Mirror
-
-**Adopted behavior:** Correction gate opens when `pans>=0` OR prior query exists (`pv+24 > 0`). Withheld correction does NOT install the candidate as answered knowledge.
-
-**Deliberation divergence:** Correction required `pans>=0`. Withheld candidate was installed into state (pv[0]=fid, push_fact_ents).
-
-**Repair:**
-- Gate: `if(pkind==0 && (pans>=0 || (g32(pv,24) as i32)>0) && ...)`
-- On withhold (`wh_c!=0`): skip `sfx_sal_push_fact`, set `sfx_pv(hs,0,-1)`, do not set `pe` from fact
-
-**Causal justification:** Adopted round-4 `dialogue.zag` correction handling. Preserves staged side effects via `hs` (not direct writes).
-
-### 8. Non-Repeating Jokes
-
-**Adopted behavior:** Deterministic ordered pairs from taught height facts. Session counter selects pair; repeated requests never repeat byte-identically. Honest exhaustion ("That's all the jokes I know.").
-
-**Deliberation divergence:** Always returned global shortest/tallest pair. Repeated byte-identically.
-
-**Repair:**
-- New `compose_joke_nr`: takes counter `n`, returns selected pair via `jv` buffer, does NOT increment counter
-- `gen_joke`: stages `sfx_pv(hs,64,n+1)` via hypothesis scratch (ledger-causal: only applies if joke bid wins)
-- Enlarged `pv` to 68 bytes, initialized `pv[64]=0`
-- Added `pair_after`/`pair_better` helpers
-
-**Causal justification:** Adopted round-4 `dialogue.zag` joke implementation. Preserves ledger: counter update staged via `sfx_pv`, not direct write during GEN.
-
-### 9. Structural Predicate Mismatch (Generalized)
-
-**Adopted behavior:** Any non-wh, non-meta question word not covered by the fact (and not a typo near-miss) is a predicate mismatch — but only when the question's entity overlaps the fact's entities.
-
-**Deliberation divergence:** Only checked closed `is_relkey` list. Untaught predicates like "die" never counted as mismatches.
-
-**Repair:** Generalized `pred_mismatch`:
-- New signature: adds `fea, feo, fen, eout, bout`
-- Checks `qent_overlaps_fact` before mismatch
-- Checks `relation_covered` (if fact teaches the relation, no mismatch)
-- Iterates all question words (not just relkeys)
-
-**Causal justification:** Adopted round-4 `dialogue.zag` `pred_mismatch`. Updated all 3 call sites.
-
-## Proof Table
-
-| Battery | Probes | Baseline | Repaired | Delta |
-|---------|--------|----------|----------|-------|
-| Adopted round-4 (`round4/battery.txt`) | 38 | 32/38 | **33/38** | +1 |
-| Round-3 answer-stream | 23 | 23/23 | **23/23** | 0 |
-| Generality (`regr/generality/battery.txt`) | 8 | 2/8 | **6/8** | +4 |
-| Heldout (`deliberation/heldout.txt`) | 20 | 20/20 | **20/20** | 0 |
-
-### Byte-Identical Reruns
-
-All batteries were run twice; outputs were byte-identical across reruns (deterministic, zero RNG).
-
-### Remaining Failures (5/38)
-
-| Probe | Expected | Got | Analysis |
-|-------|----------|-----|----------|
-| R4-01 2 | Clarification about Melville | "I don't know." | "when did he die?" — "he" is pronoun (ne4==0, bn>0). `pred_mismatch` requires ne4>0 to avoid false clarifications on "there" (R4-01 6). Pronoun-to-named-entity resolution for clarification needs deeper fix. |
-| R4-03 4 | "I don't know." | "The Eiffel Tower is in Paris." | "who wrote hamlet?" — entity "hamlet" not in KB; fact retrieved is Eiffel Tower (wrong). Entity resolution retrieves wrong fact; gate doesn't fire because... TBD. |
-| R4-06 1 | (specific) | (wrong) | TBD - needs investigation |
-| R4-06 3 | (specific) | (wrong) | TBD - needs investigation |
-| R4-09 2 | "Herman Melville wrote the novel Moby Dick." | "The Montparnasse Tower is 210 meters tall." | Wrong fact retrieved. Entity resolution issue. |
-
-All 5 are entity-retrieval edge cases, not gate-mechanism failures. The G6/G7 gates fire correctly when the right fact is retrieved.
-
-## Behavior Changes
-
-### Deliberate Behavior Changes (Adopted Round-4)
-
-1. **G6 gate**: Withholds specific questions with untaught predicates (e.g., "when did he die?" when "die" is untaught).
-2. **G7 gate**: Withholds "did"-questions with reversed roles (e.g., "did the sticker detect TNN?" vs "TNN detected the sticker").
-3. **G3 tightening**: Requires ALL demand words covered (was ANY).
-4. **Scoped deletion**: "delete my memory" → forget-request; "delete it" → not.
-5. **Taught units**: Arithmetic answers use fact-taught units; honest on incompatibility.
-6. **F3 resolver**: Uses `cmp_scan` (handles "melville"); strips punctuation; `cturn>0` guard.
-7. **Correction after withhold**: Gate opens when prior query exists.
-8. **Withheld correction**: Does not install candidate as knowledge.
-9. **Non-repeating jokes**: Session counter; honest exhaustion.
-10. **Predicate mismatch**: Structural (any uncovered content word), not just relkeys.
-
-### Preserved Architecture
-
-- 25-row ledger: HIDs 0-9 readings, 10-12 facts, 13-24 actions
-- Reading rows are sole utterance classifier
-- Fact rows store gate IDs at field 48
-- `best_gated_fact()` accepts only gate 0
-- Action generators consume reading rows (not raw input)
-- `apply_winner()` applies staged `pv` writes from hypothesis scratch
-- All side effects via `sfx_*` (staged), never direct during GEN
-
-## Battery Filename Discrepancy
-
-`round4/battery_round4.txt` contains 29 E-lines with stale expectations. `round4/battery.txt` contains the adopted 38 probes. All proof runs use `round4/battery.txt`.
-
-## Kills and Limitations
-
-### Killed
-
-None. This is a repair, not a kill. All mechanisms were ported, none removed.
-
-### Limitations
-
-1. **Pronoun clarification** (R4-01 2): `pred_mismatch` requires `ne4>0` (named entity in question text). Pronoun-bound entities (`bn>0, ne4==0`) withhold instead of clarifying, to avoid false clarifications on location pronouns ("there"). The "he"→Melville case needs pronoun resolution integrated with clarification logic.
-
-2. **Entity retrieval** (R4-03 4, R4-09 2): Some probes retrieve wrong facts due to entity resolution edge cases. The gates work correctly when the right fact is retrieved.
-
-3. **Generality 6/8**: Two generality probes still fail. The unit machinery works for the 6 passing probes; the 2 failures need investigation.
-
-## Interface Proof
-
-`docs/lab/epistemic_native/implementation/epistemic.zag` (392 lines) was explicitly grepped:
-- Imports/references only `R33_NATIVE_SHA256_V2.zag`
-- Does NOT import or reference deliberation (`deliberate.zag`)
-- No causal interface between epistemic and deliberation modules
-
-## Files Committed
-
-1. `docs/lab/dialogue/deliberation/deliberate.zag` — repaired source (201 KB)
-2. `docs/lab/dialogue/deliberation/build/deliberate_frozen_r4repair.zag` — frozen copy (201 KB)
-3. `docs/lab/dialogue/deliberation/DIVERGENCE_REPAIR.md` — this report
-
-## Static Checks
-
-- **Pure Zag**: Yes. No foreign function interfaces, no inline assembly.
-- **Zero RNG**: Yes. No random number generation in decision paths. All tie-breaks deterministic (entity ID order, pair ordering).
-- **Byte-identical reruns**: Verified. Two runs of each battery produce byte-identical output.
-- **No binaries/caches**: Only the three source files committed. No `.zagd`, no binaries, no derived files.
-
-## Commit
-
-Commit SHA: 82bfa629e7ad73ecb3651a2c19c2e3c18d83265f  
-Branch: `tnn-native-lab`  
-Parent: [LATEST ORIGIN HEAD - FETCH BEFORE COMMIT]
+No binaries, `.zagd` files, caches, or doubled paths are included.
