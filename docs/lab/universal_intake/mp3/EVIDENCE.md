@@ -308,9 +308,14 @@ skips one byte and resynchronizes. Out-of-scope per PREREG; now fails safe.
 
 ### Fuzz validation (Fable's suggested test)
 
-30 deterministic single/multi-byte mutations in a frame's Huffman payload
-region: **0/30 crashes** (exit 0, valid-length output each time). The Huffman
-walker terminates safely on corrupt bits, as Fable predicted.
+30-mutation schedule, fully explicit and zero-RNG (no `random` module, no seed):
+frame headers of t_128cbr parsed deterministically (sync 0xFFE, MPEG-1 Layer
+III); payload region of each frame = bytes [start+4, start+frame_len); 30
+offsets evenly spaced across the concatenated payload space; mutation k =
+byte XOR (0xFF, 0x01, 0x80)[k mod 3]. Result: **0/30 crashes** (exit 0,
+valid output each time). The Huffman walker terminates safely on corrupt
+bits, as Fable predicted. Schedule script: `~/workspace/mp3_fuzz2/fuzz_explicit.py`
+(each run logs the literal (offset, old, new) triples).
 
 **Not changed** (documented, out of scope or accepted): intensity-stereo
 real-data coverage, sfbtab tight fit, monolith structure, per-granule
