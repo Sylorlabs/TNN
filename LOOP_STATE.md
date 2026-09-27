@@ -2797,3 +2797,23 @@ re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
 queued for his ears (DEAD on pristine evidence); tnn_chat FIT fresh re-run
 is now due within 8 waves per the new standing rule (stale count at 11);
 fit_authority/SHA256SUMS repair assigned.
+
+## Wave 20260927-0821pdt verdicts (debated, transcript 07d22a39a)
+
+1. CONFIRM FIT behavioral battery [NEW] (tag narrowed from RE-CERT by the judge: 11-wave citation staleness cleared by fresh execution; stale count resets to 0): KB1 30/30 specific declines, 0 blanket refusals (3 runs); KB2 17/17 and KB5 10/10 answered, 0 declines, byte-identical baseline parity (6/6); binary rebuilds byte-identical to frozen pins; 15/15 run-pairs byte-identical; output hashes match prior records; entry-point scan over ecbe9b5b7..80c40a7af shows zero new interactive entry points and zero stdin-read hits in 188 new .zag sources. Zero drops vs the 20260925-1421pdt baseline. Evidence be5bb24c8. Carry-over: confabulation caveat travels; D1 never-pruned authority path holds every chain input read-only.
+
+2. CONFIRM fit_authority/SHA256SUMS record-defect repair [NEW]: nine authority-file shas verified against pins before writing; sha256sum -c returns all nine OK. Scope stamp: binary and toolchain pins remain prose in README.md (re-verified fresh by the rebuild this wave); R33 sources and candidate work out of scope. Evidence be5bb24c8.
+
+3. CONFIRM fork battery [RE-CERT]: 50 named entries, 48 PASS, 2 UNTESTABLE (rh-pull-1/2, pinned toolchain path absent, unchanged cause nine waves running), 0 FAIL, 0 CONFIRM (toolchain and extraction-stability scope only). Manifest drift: one new branch (tnn-native-lab-wave-archive-20260927-0521pdt, PASS); no missing branches; all worktree SHAs and remote tips unchanged. Evidence db4d57187.
+
+4. QUEUE prereg drafts (no verdict, designed-not-adopted): EXP1c (new K7 choice-reality bar, >= 0.50 learned-credit choice else VOID); EXP2-K4 (spec-blind curator, KH1-KH4 with joint-timing ablation, anti-guarantee that items are not constrained to lens failures); B1-P9 (KB4a'/KB4b'/KB6'/KB0' reformulation, prospective only, B1 BOUNCE DISCARD never re-scored); COMP2-P11 (gate zero frozen: no implementation until his ruling 6; two-leg stemmer plan; ADOPT mapping stays VOID). Design commit 59b9df4b0 (annotated 09bfaae63) strictly precedes any future implementation commits. Zero evidentiary weight until frozen at a future wave.
+
+5. VACUOUS prereg commit-order self-check: no loop candidate implementation commits this wave; nothing to gate. Standing caveat: commit order evidences commit order only, never run order.
+
+6. UNTOUCHED [VOID]: the six governance rulings (S7 strike, MD-SSD-1, S11 pull, S11-AUD pull, C12 queue, Python-mirror logic) remain OPEN; all sealed blind pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14, whirlpool-planform) untouched; DP-1 presentation remains the parent agent's queue decision. This wave neither decided, relitigated, nor re-presented any of them.
+
+7. Interactive TNN: holds (narrowed wording): tnn_chat runnable, 15 live runs this wave with binaries byte-identical to frozen pins; no fake; entry-point scan explicit over merge range ecbe9b5b7..80c40a7af. No runnable interactive TNN beyond the frozen probe instruments.
+
+Provenance (verbatim probe answered in transcript): FIT is new execution on an inherited frozen chain; SHA256SUMS is a new file with inherited pins; fork battery is new execution of inherited machinery; preregs are new designs with inherited lineage, unfrozen; rulings and pairs inherited and untouched.
+
+Queued next: his six pending governance rulings (untouched); his blind verdicts on the sealed pairs (unchanged, nothing added this wave); DP-1 presentation is a parent-agent queue decision; CV-P adoption still doubly gated (ruling 6 pending); the four prereg drafts await their freeze-time gates (EXP1c corrections, EXP2 corpus, B1 new mechanism, COMP-2 ruling 6); tnn_chat FIT fresh re-run due again within 8 waves (stale count 0 as of this wave). Open questions banked for the parent: pull-head UNTESTABLEs as a queued coverage item after nine waves; binary/toolchain pins out of README prose into a checkable file; wave-HEAD cadence racing the three-hour wave cadence under pinned-commit extraction.
