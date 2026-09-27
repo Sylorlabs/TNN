@@ -148,3 +148,12 @@ token. Deliberately dropped: `X <expected>` echoes (on flip probes the battery
 E-line is the NEW answer containing the flipped token — including it would pass
 the token check spuriously), `RESULT`/`DIGEST` summaries, headers. grade.py
 was NOT modified.
+
+---
+
+## Ruling note — Micah 2026-09-26 ~19:48 PDT
+
+Criterion (c) readability dropped per Micah's ruling: stick to TNN native
+reasoning — readability is not a criterion; the bar is that TNN can answer a
+user in their native tongue. Final: **NAT wins 2–0** on (a) accuracy +
+(b) faithfulness. All measured scores above are unchanged.

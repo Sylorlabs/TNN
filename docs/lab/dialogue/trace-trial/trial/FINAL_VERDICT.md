@@ -157,3 +157,20 @@ exactly what criterion (c) will judge.
    deliberation machinery (hypothesis set + elimination + ledger) *before*
    more instrumentation. English prose is the better *display language* for
    such traces when they exist; this trial shows why on the evidence above.
+
+---
+
+## 8. Ruling addendum — Micah 2026-09-26 ~19:48 PDT
+
+Micah ruled: **stick to TNN native reasoning; readability is NOT a criterion.**
+The bar is that TNN can answer a user in their native tongue.
+
+Consequences for this trial:
+
+- Criterion (c) (readability — the pending blinded-pairs judgment from §6) is
+  DROPPED. `trial/BLINDED_PAIRS.md` and `trial/KEY.md` remain on file as
+  evidence but are no longer scored.
+- **Final result: NAT wins 2–0** on the frozen criteria (a) accuracy + (b)
+  faithfulness. No measured number in this document is altered by this ruling.
+- Standing program direction: TNN-native reasoning. Native-tongue answering
+  is the bar; trace readability is not.
