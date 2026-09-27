@@ -2683,3 +2683,117 @@ artifacts from now on; EXP2 needs grounding in real deliberation failures
 and K4 hardening against the rescuer lens (b2); frozen enumeration
 manifest for the fork battery; rh-main is now testable; pull-1/pull-2
 remain untestable until their trees gain the pinned toolchain path.
+
+---
+
+## Wave 20260927-0521pdt verdicts (2026-09-27, stand-down wave, debated)
+
+Posture: parent executor merged origin/tnn-native-lab as ecbe9b5b7 (9 new
+remote commits, no conflicts) before wave start; wave lock written by the
+parent; all local wave commits preserved. This wave ran three survey
+workers (fork battery, lane survey, interactive survey) and a full
+advocate/skeptic/judge debate group, and no new candidates. Debate
+transcript: docs/lab/rsi/debates/wave-20260927-0521pdt/
+(ADVOCATE_BRIEF.md, SKEPTIC_REPORT.md, JUDGE_RULINGS.md, DEBATE_0521.md).
+The skeptic's verbatim provenance probe ("What is the provenance of the
+artifacts under judgment, and what exactly is new versus inherited?")
+appears verbatim in all three debate files. Zero em-dashes in any
+wave-authored doc (grep-verified). The judge upheld six of the skeptic's
+seven attacks and rejected one (attack 5) on cited evidence. His six
+governance rulings and his sealed-pair verdicts are untouched by this
+debate. Final verdict lines, quoted verbatim from the judge:
+
+1. CONFIRM fork battery [RE-CERT]: 39 unique commits across 49 named
+entries; 47 PASS, 2 extraction FAIL (expected, non-TNN research-doc
+trees, unchanged cause eight waves running), 0 CONFIRM. Scope: toolchain
+and extraction stability only on the tested pinned commits, not the
+contents of the merged commits.
+
+2. STAND-DOWN on fresh scan: no new mechanism this wave. 23 commits in the
+02:21 to 05:21 PDT window: 9 Micah-frontier (CLOSED) plus 14 loop, of
+which 13 are the closed 0221pdt workstreams (EXP1b invention claim DEAD,
+LIGHT-FIELD KILLED clean, EXP2 narrowed with wire-in off the table) and 1
+is the wave record with LOOP_STATE verdicts. 0 new prereg drafts, 0
+re-aimed preregs, 0 new design documents, 0 lane-directory touches, 37
+untracked residue entries with no drafts. Untouched queued blockers: EXP1c
+compositional-choice design, EXP2 grounding in real deliberation failures
+plus rescuer-lens K4 hardening, enumeration manifest committed, B1-class P9
+bar reformulation, COMP-2 ruling 6 plus P11 stemmer-contingency. Six lanes
+hold prior standing; six governance rulings stay open.
+
+3. CONFIRM interactive TNN pins and entry-point scan (fresh): no new
+chat/REPL/interactive entry points in merge range 463b115b6..ecbe9b5b7;
+frozen pins all match. FIT behavioral battery (KB1 30/30, KB2 17/17, KB5
+10/10) CARRIED BY CITATION [RE-CERT by citation]: last executed
+wave-20260925-1421pdt (evidence 9692f5d1d), 11 waves stale. Standing
+rule: re-run mandated at least every 8 waves. Record defect:
+docs/lab/rsi/fit_authority/SHA256SUMS does not exist; pins live in
+fit_authority/README.md; repair is assigned.
+
+4. VACUOUS prereg commit-order self-check: no loop candidate commits this
+wave, nothing to gate. Standing caveat: the check evidences commit order
+only, never run order; sub-minute margins on this repo's clocks are weak
+evidence; "pre-run, no scores seen" must be asserted, not reported as a
+finding.
+
+5. UNTOUCHED [VOID]: the six governance rulings (S7 strike, MD-SSD-1, S11
+pull, S11-AUD pull, C12 queue, Python-mirror logic) remain OPEN; the sealed
+blind pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14,
+whirlpool-planform) were not touched. This wave neither decided,
+relitigated, nor re-presented any of them.
+
+6. Queue-HELD: DP-1 repaired sealed blind pair ready per the 09-26 dossier
+(DP1_DOSSIER_1121.md, queue-HELD since the 1121pdt/1421pdt rulings), not
+freshly verified this wave. Presentation to his ears is the parent agent's
+queue decision, not this wave's.
+
+7. OPEN until committed: the enumeration manifest artifact exists in
+docs/lab/rsi/runs/wave-20260927-0521pdt/forks/ENUMERATION_MANIFEST.md but
+is uncommitted, so the queued process item is NOT cleared. It will be
+committed with this wave's record. The fork worker's verdict 1 records the
+artifact's content; this item records the item's status.
+
+Morning merge-range material (his frontier work, treated as CLOSED and not
+re-litigated): 73411bdef determinism sweep (docs/lab/determinism/SWEEP.md:
+zero nondeterminism found across all adopted mechanisms; 4
+battery/document hygiene work orders recorded for the owning lines), 7aa40ac0d
+upscale round 3 final honest all-arm kill, 7aad68fad audio round 3
+independent red-team report REDTEAM_R3.md plus SHA256SUMS manifest
+correction (round-3 evidence holds on every technical claim; "trap still
+holds" REFUTED; V-D directional rule is an existence proof, not a validated
+fix), ae965e697 deliberation repair round 2 measurement-integrity
+amendment, 945b061b4 deliberation fork-divergence repair round 2 (38/38 R4).
+The wave produced no fixes for his hygiene work orders (his lines' work).
+
+New standing process additions minted by this wave's judge: stdin-read
+backstop grep for the interactive procedure; the survey window must cover
+the run-start merge (or a scope stamp covers conflicted-merge review);
+surveys must explicitly account for merged upstream ranges each wave;
+tnn_chat FIT re-run at least every 8 waves plus the SHA256SUMS
+record-defect repair assigned.
+
+P14 closure: the 49 per-entry fork-evidence dirs were archived from the
+fork worker's staging into
+docs/lab/rsi/runs/wave-20260927-0521pdt/forks/evidence/ and committed with
+this wave's record. The frozen enumeration manifest
+(ENUMERATION_MANIFEST.md, 49 entries with ref, sha, live/fixture
+classification) is committed with this wave's record, clearing the queued
+process item. Zero Python touched by any worker this wave (zero-Python
+attestation in FORK_RESULTS_0521.md).
+
+Queued next: his six pending governance rulings (untouched); his blind
+verdicts on the sealed pairs (unchanged, nothing added this wave); DP-1
+presentation to his ears is a parent-agent queue decision (the repaired
+blind pair with the verbatim provenance header, the verbatim S11-AUD
+overlap, and LISTENING_DP1.md is ready); fork battery driver per P1, P8,
+P19, P20 with the committed enumeration manifest as the frozen baseline;
+pull-1/pull-2 remain untestable until their trees gain the pinned toolchain
+path; CV-P adoption still doubly gated (ruling 6 pending); COMP-2
+rotated-author re-test on a fresh sealed set plus ruling 6, with the
+stemmer-contingency (P11); prereg consistency check before implementation;
+B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand
+down until a genuinely new design idea; D-VID-1 lane stands down until a
+re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
+queued for his ears (DEAD on pristine evidence); tnn_chat FIT fresh re-run
+is now due within 8 waves per the new standing rule (stale count at 11);
+fit_authority/SHA256SUMS repair assigned.
