@@ -16,7 +16,9 @@ def main(path):
         assert ln.startswith("e "), ln
         _, seq, jf, jg, wh, hh = ln.split()
         seq, jf, jg, wh = int(seq), int(jf), int(jg), int(wh)
-        h = hashlib.sha256(h + seq.to_bytes(4, "big") + bytes([jf, jg, wh])).digest()
+        # The Zag writer folds judgment codes through their LOW bytes only
+        # (hbin[36]=(jf&255), hbin[37]=(jg&255)); mask here to match.
+        h = hashlib.sha256(h + seq.to_bytes(4, "big") + bytes([jf & 0xFF, jg & 0xFF, wh])).digest()
         assert h.hex() == hh, "chain break at seq %d" % seq
         count += 1
     else:
