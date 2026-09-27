@@ -3,8 +3,8 @@
 Traces go to fd 2 via raw syscall; stdout (answers) must stay byte-identical."""
 import sys
 
-SRC = "/home/hatch/workspace/tnnchat4/dialogue.zag"
-DST = "/home/hatch/workspace/tnnchat4/dialogue_trace.zag"
+SRC = "/home/hatch/workspace/dialogue_r4fix/docs/lab/dialogue/round4/dialogue.zag"
+DST = "/home/hatch/workspace/dialogue_r4fix/docs/lab/dialogue/round4/dialogue_trace.zag"
 
 HELPERS = '''fn tr(s:[]u8)void {
     _zag_raw_syscall(1,2,(_zag_slice_ptr(s) as i64),(s.len as i64),0,0,0);
