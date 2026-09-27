@@ -38,3 +38,31 @@ Python↔Zag cross-validation: 0 mismatches on 1,200 pairs.
 - The reference gate (id 0) withholds iff naive(F) != naive(G). On R2P, every
   F is verified fooled and every G verified clean, so the reference withholds
   1200/1200 (100%).
+
+## G1 registration — candidate id 2 (selfpam-fact-gate), 2026-09-27
+
+Under self-PAM prereg amendments 2026-09-27-A (registration) and 2026-09-27-B
+(verifier low-byte masking). Build: pinned znc
+(`498abcb5…7e58ef`) → `sense_bin` `1db54a68…fca74`, reproduced byte-identically
+from the committed sources. Corpus: 1,200/1,200 `.pair` SHAs verified OK
+against the frozen `MANIFEST.r2p.sha256`.
+
+| Run | Gate | Pairs | Withheld | Overlap | Ledger final |
+|-----|------|-------|----------|---------|--------------|
+| selfpam r1 | selfpam-fact-gate (2) | 1200/1200, 0 err | 1099 (91.58%) | 0 | 644c61f0…45905 |
+| selfpam r2 | selfpam-fact-gate (2) | 1200/1200, 0 err | 1099 (91.58%) | 0 | 644c61f0…45905 |
+| selfpam r3 | selfpam-fact-gate (2) | 1200/1200, 0 err | 1099 (91.58%) | 0 | 644c61f0…45905 |
+
+r1/r2/r3 reports byte-identical; ledgers byte-identical. All 3 hash chains
+verified by the patched `mirror/verify_ledger.py` (masks judgment codes
+`& 0xFF` exactly as the Zag writer does). B5 PASS (91.58% ≥ 90%), overlap
+kill check PASS (0), B1 PASS (0 errors), B6 PASS.
+
+Regression on the same corpus: id 0 report+ledger byte-identical to the
+committed `admission_report_reference_r1/r2/r3.txt` + `ledger_reference_r1/r2/r3.txt`;
+id 1 report+ledger byte-identical to `admission_report_broken.txt` +
+`ledger_broken.txt`; both chains re-verified (masking is a no-op for ids 0/1).
+
+Scope: registration acceptance only (PREREG §5.5 — not CELL-A). §8 blockers
+remain open; DEMO_ONLY scope unchanged. Full record:
+`evidence/BUILD_RECORD_G1_ID2.md`.
