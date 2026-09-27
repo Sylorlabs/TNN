@@ -99,3 +99,52 @@ inputs, category-shift traps, operator neutering (especially ATOM at
 this verdict is queued for the overnight relay. If C3 survives red team,
 round 3 ships a genuine broad win: the first TNN-deliberated construction
 operator in the upscale line.
+
+## Red team result (2026-09-27): C3 KILLED
+
+Full report: `redteam_c3/REDTEAM_REPORT.md` (committed alongside). The
+independent red team reproduced every claimed number (baseline 11/11
+within 0.005 dB; C3 exact; operator census 85.75/10.65/3.60%) — the
+numbers were real. It then killed the mechanism:
+
+- **Category-shift traps (the kill):** on analytical GTs, C3 loses
+  catastrophically to bicubic wherever a sharp edge crosses a block:
+  diagonal binary step −5.46 dB, binary circle −6.54 dB, gradient+step
+  −7.04 dB. Mechanism: the plane gate licenses a plane when it explains
+  ≥50% of block variance — an 8×8 block straddling a sharp diagonal edge
+  passes (2·residual/e = 0.667) and C3 renders a false ramp. The trace
+  records `edge=289` (28.9% strong-edge pixels) yet still claims
+  `plane_resid_le_e_half` with `pok=1`: the distinguishing evidence is
+  measured and then ignored by the frozen rule.
+- **Close-call perturbation (supporting):** 1.4% of regions sit within
+  10% of the gate boundary; on the 12 closest, ±1–2 LSB perturbations
+  flipped the operator in 8/12 with output jumps of 91–195 gray levels
+  (50–95× amplification of the input change). The trace records no
+  margin — nothing warns a decision was a coin flip.
+- **Operator neutering (supporting):** ATOM→MEAN max |Δ| = 0.03 dB —
+  ATOM is functionally decorative (3.6% of regions, ≈0.015 dB mean).
+  PLANE→MEAN −1.04 dB mean (PLANE render load-bearing). MEAN→PLANE
+  +0.12 dB on 5/11 (gate conservative).
+
+These are structural, not fixable without changing the frozen
+deliberation rule — which would be post-result tuning (void). The
+kill stands on the prereg's own terms.
+
+## Round 3 final: HONEST ALL-ARM KILL
+
+| arm | outcome |
+|---|---|
+| C1 fit-licensed construction | DEAD — fails BAR 1 single-image floor (building −0.36 dB) |
+| C2 lineage-vouched cascade | VOID — provenance not in the VOC2 binary |
+| C3 TNN-deliberated operator choice | KILLED by red team — plane gate ignores its own edge evidence; boundary flips amplify 50–95×; ATOM decorative |
+
+Mechanism lessons for any round 4: (1) variance-explained is not a
+model-correctness criterion — a plane can explain 50%+ of an edge
+block's variance and still be the wrong construction; (2) a deliberation
+trace that records evidence but cannot act on it (edge density measured,
+ignored) is instrumentation, not deliberation; (3) near-boundary
+decisions need recorded margins — silent coin flips are a defect class;
+(4) the round's deepest signal: the biggest gains came from NOT stamping
+learned atoms (C1 reverting to lines+means, C3's measured plane) — the
+learned vocabulary may be the binding problem, not the operator around
+it. No post-result tuning was performed; the round is closed as killed.
