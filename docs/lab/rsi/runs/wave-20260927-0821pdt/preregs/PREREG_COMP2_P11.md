@@ -5,7 +5,7 @@ Status: DRAFT. This document is not frozen. It becomes frozen only when a
 future wave adopts it as its prereg freeze commit. Until then, numbers may
 change by redraft only, never by post-freeze edit.
 Freeze commit: PENDING (to be recorded at freeze time).
-Prereg design commit (lane 3, this wave): PENDING.
+Prereg design commit (lane 3, this wave): 59b9df4b0b45ffef23704ad971ae9029e14d7126.
 
 ## 1. Provenance header (machine-checkable)
 
