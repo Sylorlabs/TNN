@@ -60,3 +60,26 @@ or regression is made.
 
 H1 (invention beats recall) is KILLED by K1.
 The experiment itself is not void (C1, C2, C3 pass; K3 pass).
+
+## CORRECTION (2026-09-27, independent red-team review, wave-20260927-0221pdt)
+
+The wave-20260926-2321pdt reimplementation of the world (commit 74565859f,
+whose code produced the medians and SHA-256 ba4677cc reported above)
+contained a physics bug: the hi-side mote reflection was algebraically the
+identity (hi - (hi - pos) = pos), so moving motes escaped to infinity on
+first hi-side contact. Only the stationary mote (at P's home, velocity 0,
+never touching the bounce code) remained edible. The published world was
+degenerate: a single stationary food source.
+
+The original EXP1 commit (19f97c6cb) had correct bounce; the bug was
+introduced in the 2321-wave reimplementation. K1's KILL verdict
+(I-survive 574 <= R 600) is arithmetically valid within the degenerate
+world and its direction is unchanged. But the world did not implement its
+specified physics (PREREG section 3: "Motes: M=6 energy packets with
+fixed velocities, bouncing at the ends"), R's 600 is "camp the single
+stationary mote" (an artifact: with correct bounce the earlier iteration
+had R at only 160), and C3's three distinct strategies are not credible
+when all reduce to camping one stationary mote.
+
+EXP1 remains DISCARDED (per PREREG_EXP1b). This note stands as the
+correction to its published record.

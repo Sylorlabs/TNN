@@ -39,7 +39,10 @@ Sketch: same as v1. Trivial.
 
 Largest margin. v5 has a dense cluster (4 motes in 20..23). R chases
 futilely and starves (125). I's WAITs conserve energy; H1 triggers often
-enough to sustain. I never builds anything.
+enough to sustain. Correction (2026-09-27, independent red-team review):
+I does build a LAMP here (crystal+mote COMBINE, then DROP/placed). It is
+an emergent enumeration accident, never selected or exploited, and
+causally inert per the clean ablation (drop 0 ticks).
 
 Sketch: same as v1. Trivial.
 

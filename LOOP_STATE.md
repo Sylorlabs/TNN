@@ -2552,3 +2552,134 @@ primitive-action I, pure Zag); EXP2 broader holdouts plus K4 hardening
 plus regression sweep before wire-in; rh-main coverage gap and the
 pull-head extraction FAILs persist; prereg consistency check before any
 future implementation.
+
+## Wave 20260927-0221pdt verdicts (2026-09-27, merge plus three experiment branches)
+
+Posture: parent executor merged origin/tnn-native-lab (52 commits ahead) as
+af657c8e5 with 18 add/add conflicts in docs/lab/invention/survival/
+resolved keeping both sides (local tested version at canonical path, origin
+parallel-wave lineage preserved as *.origin-wave.* with provenance headers).
+No Micah frontier files involved. A pre-merge stash was verified fully
+redundant and dropped. Three experiment branches (exp1, exp2, sensory) ran
+concurrent workers and merged cleanly. Prereg commit-order self-check: PASS
+on all three (prereg strictly precedes implementation on each). Debate
+transcript: docs/lab/rsi/debates/wave-20260927-0221pdt/DEBATE_0221.md
+(skeptic's provenance probe present verbatim). The judge overturned or
+narrowed two proposed verdicts on cited evidence.
+
+1. EXP1b retune: invention claim DEAD [NEW]; "complete, honest negative"
+certification WITHHELD. K1 passes on arithmetic (I-survive median 380 vs R
+median 376, margin 3.5 to 4 ticks, about 0.6 percent of the 600-tick
+horizon), K2/K3/C1/C2/C3 pass, K4 kills (trivial recombination: every A1
+step is a taught heuristic or a random primitive token), K6 kills (clean
+ablation: drop 0 ticks in all 12 variants). K5 moved from INCOMPLETE to
+AUDITED/NOT FIRED by the independent red-team reviewer. The judge withheld
+full certification on three sustained objections: the recorded K1 PASS
+depends on a void-safety reflex added during implementation, absent from
+frozen M2 (reviewer counterfactual: without it, I median 102 with 9/12
+void deaths, so the frozen prereg as written would have killed H1 at K1);
+the retune stopping rule is unverifiable (no artifacts from retunes 1 and
+2; retune 2 was discarded on R median 128, which is not a gate); the
+first-committed evidence was factually wrong in places. Red-team-mandated
+corrections are committed with this wave: A2_ABLATION.md rewrite (actual
+implemented test, void-reflex dropout confound, clean-ablation numbers),
+correction of the false "never builds" claims (I builds a LAMP in 6/12
+variants and places it in 5/12; emergent enumeration accidents, causally
+inert), heuristic label fixes in NOVELTY_AUDIT.md, the reflex-dependency
+record (9/12 counterfactual), the retune-2 verifiability note, the missing
+WAVE_NOTES_EXP1B.md, and a bounce-bug correction appended to EXP1's
+BAR_RESULTS.md (the identity-reflection bug was introduced in the
+wave-20260926-2321pdt reimplementation 74565859f, not the original EXP1
+commit; EXP1's published medians describe that degenerate world; K1's KILL
+verdict direction is unchanged). Determinism: two full 60-run outputs
+byte-identical, SHA-256 cb6f42af00bac4d99527b48f9039ac9878b77a79daa20fac348fd3f9ace1e11a,
+third-party reproduced by the reviewer with a fresh compile. Forward:
+future retunes must commit each iteration's artifacts; future invention
+tests need a shrunk plan space, a longer horizon, or a decaying B0, since
+B0 dominates the full 600-tick budget and the machinery never selects
+anything. Commits: prereg 7e0326d2c, implementation 938d188cb, evidence
+1010a63c3.
+
+2. EXP2 follow-up: adopted as FIDELITY SELF-CHECK record, NARROWED [NEW].
+The judge rejected the "strengthened experimental record" framing. S2
+(synergy): one-brain 10/10 vs single-deliberation baseline 0/10 vs
+shared-writes-off ablation 0/10, b1-alone 0/10. S3 (slow-burn): one-brain
+10/10 vs baseline 0/10 vs ablation 0/10, b2-alone 10/10 (load-bearing
+caveat). K1, K2, K3, K5, K6 upheld with byte-identical independent
+reproductions; original holdout continuity 10/10, 0/10, 0/10 matches the
+adopted record. K4-hardened: PASS on S2 (decisive), PASS-by-letter on S3
+with material caveat (the rescuer lens b2 alone reaches the shared
+verdict, so the shared channel is sufficient but not necessary; b2 is an
+uncontrolled rival). Mandatory ledger annotations (recorded in
+docs/lab/onebrain/WAVE0221_JUDGE_NOTE.md): design circularity (S2/S3
+authored from the mechanism spec; 8/8 prereg predictions confirmed is
+fidelity evidence, not discovery; the hardened bar could not fail by
+construction); ablation impurity (mode 1 differs in reconciliation cadence
+and evidence coverage, not only shared writes); regression sweep (877
+items, zero flips, zero regressions) tests the no-fork path at ceiling on
+4 of 5 batteries (0/750 forked; only trap exercises the fork); trap gain
+is one mechanism instance across 5 near-duplicate Wason items; holdouts
+are synthetic mechanism probes ungrounded in real deliberation failures.
+Wire-in stays off the table. Commits: prereg 06e28f088, freeze plus
+implementation 32eadf722, evidence a2a36e657.
+
+3. Sensory LIGHT-FIELD: KILLED clean by frozen bars [NEW]. BAR1 FAIL (mean
+delta -1.266 dB; sealed -1.853 dB, skycrop -0.678 dB), BAR2 FAIL
+(checkerboard 2328 to 7028 on sealed, 719 to 1869 on skycrop, roughly 3x
+worse), BAR3 PASS (0.97x runtime), determinism PASS (all four runs
+byte-identical), BAR0 PASS (scorer reproduces committed baseline to
+0.004 dB). Independent red-team pass: no metric gaming, no
+knowledge-vs-architecture confound, visual artifacts confirmed by human
+inspection agreeing with the metrics. No sealed pair fabricated, no judge
+brief produced. Lesson recorded: a global illumination estimate is only
+useful as a region-relative correction or a shrinkage target, never as an
+additive absolute offset on a correct local mean. Amendment 1 (pre-run
+skycrop resize to 512x184) did not ride the kill: the sealed image was
+untouched by it and the baseline was re-verified on the amended battery.
+Commits: prereg 4a937d994, amendment c6b8190f3, implementation aa76f9b8d,
+evidence c368b8e1f.
+
+4. Fork battery: [RE-CERT] toolchain and extraction stability at pinned
+commits. 48 named entries: 46 PASS, 2 extraction FAIL (pull-1/pull-2,
+expected: trees lack the toolchain path, seven waves running), 0 CONFIRM.
+The rh-main coverage gap from last wave is CLOSED (commit object fetched
+read-only, full battery passes). Uniform evidence 46/46 (znc pin
+498abcb5, probe 3b29aa06, B1 run 5dfe3c16, B2 bin 75b85d3c, NEG1 E0002,
+NEG2 char-1 diff, tree probe R32_ZNC_PROBE_OK). Scope stamp: pinned
+commits only, not concurrent reality. Two harness-created refs (rh-main,
+rh-tnn-native-lab-live-tip) were disclosed and reconciled. Forward: frozen
+enumeration manifest next wave. Report:
+docs/lab/rsi/runs/wave-20260927-0221pdt/forks/FORK_RESULTS_0221.md.
+
+5. Interactive TNN: [RE-CERT] EXISTS and unchanged. No new chat/REPL entry
+points in merge range 377c36fd9..af657c8e5. tnn_chat.zag present; built
+binary sha256 prefix 1ada2fae63dd matches the frozen pin. Fit for
+supervised red-team probe chats only, with the documented confabulation
+failure class.
+
+6. Six governance rulings (S7 strike, MD-SSD-1, S11 pull, S11-AUD pull,
+C12 queue, Python-mirror logic) and sealed blind pairs (R9, C1, C2v3,
+S11-IMG, C12, S11-AUD, S13, S14, whirlpool-planform): UNTOUCHED [VOID].
+No ruling rendered on any of them.
+
+7. Pure-Zag compliance: FAILURE certified for this wave on the EXP1 and
+EXP2 branches [NEW]. Two disclosed incidents: the EXP2 worker ran
+python3 analysis summaries before the prereg commit; the EXP1b worker made
+one incidental Python edit of a /tmp debug probe. Both red-team reviewers
+verified that no frozen artifact's bytes were touched and all committed
+evidence reproduces byte-identically from the pinned Zag toolchain, which
+is why the evidence verdicts stand as evidence. The judge denied the
+advocate's request to refine the standing note ("no Python may touch the
+frozen record") as beyond the judge's authority: no debate may narrow a
+red line, and the question is reserved to Micah via the pending sixth
+governance ruling. Sensory and fork-battery workstreams are unaffected
+(zero Python).
+
+Queued next: his six pending governance rulings (untouched); his blind
+verdicts on the sealed pairs (unchanged, nothing added this wave); EXP1c
+or a future wave with a real compositional-choice design (shrunk plan
+space, longer horizon, or decaying B0); retune iterations must commit
+artifacts from now on; EXP2 needs grounding in real deliberation failures
+and K4 hardening against the rescuer lens (b2); frozen enumeration
+manifest for the fork battery; rh-main is now testable; pull-1/pull-2
+remain untestable until their trees gain the pinned toolchain path.

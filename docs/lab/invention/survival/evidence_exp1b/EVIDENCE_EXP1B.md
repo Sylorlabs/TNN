@@ -64,6 +64,12 @@ respawn != home/start, 2 deep motes past void. Verified by CHECK_OK.
 Retune history (within frozen M1 rules):
 - Retune 1: wide ranges, |v|=2. Failed: chase futile, P median 409 < 480.
 - Retune 2: narrow ranges, |v|=1. Failed: parity problem, R median 128.
+  Gate-status note (2026-09-27, independent red-team review): retune 2's
+  C1/C3 numbers are undocumented and no artifacts survive from retunes 1
+  or 2, so the stopping-rule claim (retune until C1/C3 passage, not K1)
+  is unverifiable; K1-shopping cannot be ruled out. Retune 3's regime
+  (clusters adjacent to home) favors I's WAIT thrift, which is the
+  observed margin mechanism.
 - Retune 3: clusters adjacent to home. Passed C1/C3. R median 376.
 
 World bounce bugfix: world.zag hi-side reflection was algebraically the
@@ -78,13 +84,21 @@ required to implement M1's bounce specification.
 Novelty bonus B0=40 (survive) / 80 (invent). Myopic credit (mean energy
 delta). Deterministic lowest-index tiebreak. Taught safety reflexes:
 storm flee, energy emergency, mote-on-cell eat, void avoidance (added
-during implementation; R and P both avoid void; without it I died to void
-falls in 7/12 variants).
+during implementation; R and P both avoid void; the independent red-team
+reviewer verified the counterfactual: without this reflex I's median
+drops to 102 with 9/12 void deaths, so the recorded K1 PASS depends on
+a reflex that is absent from the frozen M2 text, which lists exactly two
+taught reflexes).
 
 I explores len-1 (7 plans), len-2 (49 plans), and ~160 of 343 len-3 plans
-in 600 ticks. It never reaches len-4. The only 2-item COMBINE in reach is
-(T,T,C) at len-3 index ~269, which is never tried (exploration stops at
-~160). I therefore never executes a successful 2-item composition.
+in 600 ticks. It never reaches len-4. Correction (2026-09-27, independent
+red-team review): I builds a LAMP (crystal+mote COMBINE) in 6/12 variants
+and DROPs/places it in 5/12 (v2, v5, v7, v8, v11). These are emergent
+accidents of the fixed plan enumeration (a "C" token executing while two
+items happen to be held), never selected or exploited, and causally inert
+per the clean ablation (drop 0 ticks in all 12 variants). They are not
+agent-level composition, but the earlier claim that I never executes a
+successful 2-item composition was false.
 
 ## Why K1 passed (and why it does not show invention)
 
