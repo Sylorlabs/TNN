@@ -2335,3 +2335,130 @@ B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand
 down until a genuinely new design idea; D-VID-1 lane stands down until a
 re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
 queued for his ears (DEAD on pristine evidence).
+
+## wave-20260926-2021pdt (2026-09-26 20:21 PDT; stand-down wave, debated)
+
+Run-start HEAD: fe1b5e2c0 (merge of origin/tnn-native-lab tip 75267f9df
+into local 45d449a56; clean, no conflicts; merge performed by the run
+executor before wave start). Wave lock written by the run executor; no
+STALE LOCK condition. Run dir: docs/lab/rsi/runs/wave-20260926-2021pdt/
+(survey/, forks/ + forks/evidence/, interactive/, debate/).
+
+Merge-range material is Micah's own frontier work, treated as CLOSED:
+75267f9df (dialogue round-4 root-cause repairs follow-up), f6e630ef5
+(MP3 zero-RNG fuzz, 0/30 crashes), 4ed1a4b23 (MP3 self-diagnosis
+diagnostician-v2), b5ec75e9d (trace trial readability ruling),
+9cc616724 (reasoning traces, NAT wins 2-0), bc8c5586c and c8599659e
+(MP3 Fable design review), 88980f802 (MP3 build inputs), 4f782c40d,
+c136004b2 and 8c73c34ea (audio de-synth atom rebuild), 5a76d07f8
+(dialogue round-4 repairs), 380e1ff2d (upscale honest loss documented),
+a01f5aa11 (MP3 stereo B2 joint-stereo PCM gate PASS), 9d70369ac
+(diagnostician v2 retrained from raw evidence), 1f74010ce
+(TNN-on-placement 22px native deliberation). Full range
+45d449a56..fe1b5e2c0. Noted, not claimed, not re-certified. The loop
+ran no candidates this wave.
+
+M1: "CONFIRM the fork battery for wave-20260926-2021pdt. [RE-CERT]
+Evidence: docs/lab/rsi/runs/wave-20260926-2021pdt/forks/FORK_RESULTS_2021.md.
+40 named entries (33 unique commits), 36 PASS, 4 extraction FAIL.
+Uniform byte-identical evidence on 38/38 tested runs (znc sha
+498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef,
+probe sha 3b29aa066126b263765986ca6f5b6e8e60113135198d2bea431be53a6518f919,
+B2 bin sha 75b85d3cec684f6a156f4c01169551369e4b0e040b56ec1fd24749876eddffa2,
+NEG1 E0002 38/38, NEG2 char-1 diff 38/38, probe R32_ZNC_PROBE_OK 38/38).
+3/3 testable live entries PASS; 29 of 33 unique commits tested. Spot
+re-run of three 1721pdt entries confirmed before citing. Live/fixture
+split 5/35. Extraction FAILs: origin pull/1/head at 5802fec8 and origin
+pull/2/head at 4b76bb59 (trees lack the pinned toolchain path, identical
+cause six waves running); rh-tnn-native-lab-tip-start at d9ddc556 and
+rh-main at 27a4271f (commits absent from the local object store,
+untestable under the no-fetch frozen procedure; recorded as a coverage
+gap, not failures, per minted P20). Harness provenance: pure-Zag
+fork_battery.zag extracted from tnn-native-lab-wave-archive-20260923-2321pdt
+(sha f38d9154eecb2a6e7a1682c1f6850da80aba7fbe6d73e5e6f4b31aac3f719738),
+rebuilt with the pinned znc (verified before use), built binary
+a2e6284c5c45cfd65c7e0f974497512f4603f39bdac5bffdcefcdba0f9f4ef66
+byte-identical to prior waves. A mid-run driver bug (xargs split
+name/ref pairs) was caught before any citation; all 34 bogus evidence
+dirs were deleted and the batch reran cleanly (minted P21). The closing
+origin-tip re-check showed tnn-native-lab and main tips unchanged during
+the run and local HEAD unchanged at fe1b5e2c0. P19 delta accounting:
+39/31/4 vs 40/33/5 (named/unique/live): +1 newly enumerated local
+archive branch tnn-native-lab-wave-archive-wave-20260926-1721pdt, +1
+rh-main tip moved 0ab8ed6b to 27a4271f, minus 1 reclassified fixture;
+FAIL 2 to 4 from the two absent-locally remote tips. Certified scope:
+toolchain and extraction stability only, on tested entries; the judge
+ruled the scope stamp travels with the verdict."
+
+M2: "CONFIRM the interactive-TNN survey. [RE-CERT] Evidence:
+docs/lab/rsi/runs/wave-20260926-2021pdt/interactive/INTERACTIVE_2021.md.
+Zero new chat/REPL entry points across the 19-commit merge range
+(45d449a56..fe1b5e2c0); layered scans found nothing: added-file name
+scan zero matches, range-diff content hits are prior-wave survey prose
+only, git diff --stat over src and units empty, tip grep of src/zag plus
+units for word-boundary chat/repl zero genuine hits. docs/lab/dialogue/round4/dialogue.zag
+(commit 75267f9df) is a batch prose-learning trial with argv/file I/O and
+no interactive loop; excluded as an entry point. All three frozen pins
+match by sha256: baseline probe
+1ada2fae63ddd63d37f06705459c0d8b1d9c8dffc859af25949221bf5895749c,
+decline-gate probe
+20273a99215680b5e3e42bbdbbfed105c7109d15ba189c903cf0d88db54418e7,
+pinned znc
+498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef.
+Caveat travels: docs/lab/rsi/fit_authority/SHA256SUMS does not exist; the
+pins live in fit_authority/README.md and are stable across waves (record
+defect, not evidence defect). No interactive TNN exists for adoption;
+tnn_chat remains supervised red-team probe-chat material only."
+
+M3: "CONFIRM the no-new-candidates stand-down for wave-20260926-2021pdt.
+[RE-CERT] Evidence:
+docs/lab/rsi/runs/wave-20260926-2021pdt/survey/LANE_SURVEY_2021.md. Window
+2026-09-26 17:21 to 20:21 PDT across five independent signals: zero new
+prereg drafts, zero design ideas, zero re-aimed preregs (per-file prereg
+scan plus diff-filter=M: zero modifications anywhere; the one whole-repo
+prereg|design filename addition is his own trace-trial PREREG.md, CLOSED;
+the 8 deletions are his de-synth doubled-path cleanup, CLOSED). Zero
+loop-authored mechanism commits (16 of 19 range commits are his frontier,
+3 are loop process commits). 37 untracked entries all classified as old
+binary/frame/bin residue or his-frontier fixture material; zero drafts,
+zero preregs, zero design notes. All six stand-down lanes unchanged (G1,
+D-VID-1, CV-P barred pending ruling 6, COMP-2 ruling 6 plus P11 open,
+B1-class no P9 reformulation, ST-1 DEAD). His six governance rulings
+remain open and untouched by this debate."
+
+M4: "Prereg commit-order self-check: VACUOUS this wave, labeled vacuous
+per P17. [VACUOUS] No loop candidate commits exist this wave, so there is
+no prereg/impl ordering to check. Recorded as null, not as a pass. The
+judge recorded a taxonomy note: the [NEW]/[RE-CERT]/[STACK]/[VOID] tags
+apply to artifacts under judgment, and M4 judges no artifact."
+
+New standing precedents minted by this wave's judge: (P20) untestable
+live remote tips under the no-fetch frozen procedure allow CONFIRM only
+under an explicit scope stamp, with the gap recorded as a coverage gap
+rather than as failures; (P21) a mid-run driver bug caught before any
+citation, with all bogus evidence dirs deleted and a clean rerun verified
+against the corrected run log, does not void the battery verdict. P14
+closure: the 43 per-entry fork-evidence dirs (40 entries plus 3 spot
+re-runs) were archived from /tmp/fb2021/E into
+docs/lab/rsi/runs/wave-20260926-2021pdt/forks/evidence/ and committed.
+
+Queued next: his six pending governance rulings (S7 strike, MD-SSD-1
+keep-with-UNVERIFIABLE vs re-freeze, S11 pull, S11-AUD pull, C12 queue,
+Python-mirror logic; untouched by this wave's debate); his blind verdicts
+on the sealed pairs (R9, C1, C2v3, S11-IMG, C12, S11-AUD, S13, S14,
+whirlpool-planform; unchanged, nothing added this wave); DP-1
+presentation to his ears is a future-wave queue decision (the repaired
+blind pair with the verbatim provenance header, the verbatim S11-AUD
+overlap, and LISTENING_DP1.md is ready); fork battery driver with split
+live/fixture counts plus duplicate naming, unique-commit count, and the
+closing tip re-check (P1, P8, P19, P20); next wave should fetch before
+enumeration so rh-tnn-native-lab-tip-start at d9ddc556 and rh-main at
+27a4271f are testable; pull-1/pull-2 remain untestable until their trees
+gain the pinned toolchain path; CV-P adoption still doubly gated
+(rotated-author re-test approximated; ruling 6 pending); COMP-2
+rotated-author re-test on a fresh sealed set plus ruling 6, with the
+stemmer-contingency (P11); prereg consistency check before implementation;
+B1-class re-freezes require the P9 bar reformulation; G1 sunshafts stand
+down until a genuinely new design idea; D-VID-1 lane stands down until a
+re-aimed prereg with a different mechanism exists; ST-1 stereo WAVs not
+queued for his ears (DEAD on pristine evidence).
