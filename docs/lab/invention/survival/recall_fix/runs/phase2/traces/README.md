@@ -111,3 +111,39 @@ Build with the pinned znc (`toolchain/bin/znc_linux_x86_64_abed8aa1`) from
 the `src/` directory; run per `src/run_phase2.py` D2/D3 sections
 (variant path, variant name, rerun, `kb/home_d2.txt` / `kb/home_d3.txt`).
 The experiment is deterministic: reruns are SHA-256-verified byte-identical.
+
+---
+
+## Errata (2026-09-27, follow-up audit)
+
+Independent forensics (see `followup/audit/TRACE_AUDIT2.md`) and an independent
+six-family red team (`followup/redteam/REDTEAM2.md`) established three corrections
+to the record above. The TSV evidence itself is intact and bound to the committed
+scores (160/160 files hash-verified; the unmodified phase-2 agents rebuild and
+re-run byte-identically on all 40 D2/D3 runs; 0 VERDICT/trace mismatches in
+24,000 replayed decisions), but the documentation overclaims in three places:
+
+1. **`trace_emit.zag` was never committed.** No commit in the repository history
+   contains it, so the "Emitter neutrality" proof (§2 above) and the Reproduction
+   section are not executable from the repo as written. The traces remain
+   audit-grade (their content was verified independently), but the emitter's
+   write-only neutrality cannot be re-verified until the emitter is re-derived
+   and committed or the traces are regenerated with a committed emitter.
+
+2. **The implemented evaluator is one check, not three.** The committed
+   `recall_delib.zag` gates the action only on the effect-expectation distrust
+   predicate (`N>=10 && 2*sum < claimed*N`). The precondition EVAL is stored in
+   the trace but never read by any decision function; the conflict EVAL is
+   vacuous by construction (recall takes the first priority-order match, so
+   `none → PASS` on all 24,000 lines). Both lines are genuine computed evidence
+   of regime shift (1,200 precondition FAILs, concentrated in shifted runs), but
+   they are not deliberation steps — only the effect-expectation line is
+   decision-causal. PREREG2 §2's three-check description was silently narrowed
+   in the implementation.
+
+3. **The D1 D-agent does not use the shared module.** `agent_d_d1.zag` implements
+   its own "highest-priority matching heuristic whose static precondition passes"
+   loop and never imports `recall_delib.zag`, contrary to PREREG2 §3 ("ALL THREE
+   domain agents import it"). Its EVAL line prints the KB claim and is decorative.
+   The trace audit and all bar results in this file cover D2/D3 only; the
+   committed D1 repair claim has been killed (see `followup/VERDICT2.md`).
