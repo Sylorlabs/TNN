@@ -1,0 +1,145 @@
+// driver.zag — Track B naive learner: harness-compatible driver.
+//
+// Drives the §L deliberation core (delib.zag) over §P proposal wires
+// (pcodec.zag) and emits harness-compatible tape records:
+//
+//   Tape framing (harness §5, little-endian):
+//     u32 len (= 2 + 8 + body.len), u16 event_type, u64 tick, body[..]
+//
+//   DELIB (event 5): u64 hyp, u8 kind, u8 ev_n, u64 ev[ev_n], u64 pre_digest
+//     (18 + ev_n*8 bytes; pre_digest is the pre-step state digest)
+//   DECISION (event 6): u64 pseq, u8 verdict, u16 reason,
+//     u64 rstart, u64 rend, u64 lidx, u64 post_digest (43 bytes)
+//
+// Event codes are the harness's (TST-1 frozen §4 owns the codes:
+// EV_DELIB=5, EV_DECISION=6). UNIFIED 2026-09-21: the driver previously
+// emitted DELIB=4/DECISION=5; remapped to the harness codes as a
+// compatibility fix (the harness owns the TST-1 format).
+//
+// A driver tape is framing-compatible with TST-1: pipeline glue may
+// prepend the session's CONFIG/HEADER/STIMULUS records to make it a
+// full TST-1 tape parseable by the harness's rtape_parse.
+//
+// The driver is a library (no main). Test mains live in tests/.
+// Determinism: no RNG, no wallclock. The tape tick is a logical counter.
+//
+// Wiring notes (OPERATIONALIZATION.md §D):
+//   - Each dlb_consider call resets the per-proposal step trace (st_n=0),
+//     so the driver emits exactly the steps of the current proposal.
+//   - The DECISION lidx points at the ledger entry written by dlb_apply
+//     (dec_lidx); 0xFFFF... when no ledger entry exists.
+//   - pre_digest for DELIB step i is st_pre[i] (digest before the step);
+//     post_digest for DECISION is dec_post (digest after apply).
+//   - Verdict/reason codes are the §L V_* / R_* integers from delib.zag.
+
+@import("delib.zag")
+@import("pcodec.zag")
+@import("R33_NATIVE_IO_V1.zag")
+
+const TAPE_CAP:i64 = 1048576
+
+// TST-1 event codes (harness-owned, frozen §4): the driver emits these.
+const EV_DELIB:i64 = 5
+const EV_DECISION:i64 = 6
+
+struct Tape {
+    buf:[]u8,
+    len:i64,
+    seq:i64,
+}
+
+fn tape_new() *Tape {
+    // Tape: 1 field (buf:[]u8) = 16 + 2*8 = 32 bytes; 64 for headroom.
+    let t:*Tape = _zag_malloc(64) as *Tape
+    t[0].buf = nio_alloc(TAPE_CAP as i32)
+    t[0].len = 0
+    t[0].seq = 0
+    return t
+}
+
+fn tape_free(t:*Tape) void {
+    nio_free(t[0].buf)
+}
+
+// tape_emit: frame one record. Returns 0 on ok, -1 when full.
+fn tape_emit(t:*Tape, ev_type:i64, body:[]u8) i64 {
+    let need:i64 = 4 + 2 + 8 + body.len
+    if (t[0].len + need > TAPE_CAP) { return -1 }
+    let buf:[]u8 = t[0].buf
+    let at:i64 = t[0].len
+    p_set32(buf, at, 2 + 8 + body.len)
+    p_set16(buf, at + 4, ev_type)
+    p_set64(buf, at + 6, t[0].seq)
+    let i:i64 = 0
+    while (i < body.len) { buf[at + 14 + i] = body[i]; i = i + 1 }
+    t[0].len = at + need
+    t[0].seq = t[0].seq + 1
+    return 0
+}
+
+// tape_write: dump the tape buffer to a file under root dir fd.
+fn tape_write(t:*Tape, root:i64, name:[]u8) i64 {
+    let fd:i64 = nio_open_child(root, name, 1)
+    if (fd < 0) { return -1 }
+    let r:i64 = nio_write_all(fd, t[0].buf[0..t[0].len])
+    nio_close(fd)
+    return r
+}
+
+// drv_delib_records: emit one DELIB record per deliberation step of the
+// current proposal. Steps were recorded by dlb_step_begin/dl b_step_ev.
+fn drv_delib_records(d:*DLB, t:*Tape) i64 {
+    let n:i64 = dlb_steps_n(d)
+    let i:i64 = 0
+    while (i < n) {
+        let oh:i64 = 0
+        let ok:i64 = 0
+        let oc:i64 = 0
+        let op:i64 = 0
+        dlb_step_get(d, i, &oh, &ok, &oc, &op)
+        let body:[]u8 = nio_alloc((18 + oc * 8) as i32)
+        p_set64(body, 0, oh)
+        body[8] = (ok & 0xFF) as u8
+        body[9] = (oc & 0xFF) as u8
+        let j:i64 = 0
+        while (j < oc) {
+            p_set64(body, 10 + j * 8, dlb_step_evget(d, i, j))
+            j = j + 1
+        }
+        p_set64(body, 10 + oc * 8, op)
+        let r:i64 = tape_emit(t, EV_DELIB, body)
+        nio_free(body)
+        if (r != 0) { return -1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// drv_decision_record: emit the DECISION record for the current proposal
+// from the dec_* fields written by dlb_apply.
+fn drv_decision_record(d:*DLB, t:*Tape) i64 {
+    let body:[]u8 = nio_alloc(43)
+    p_set64(body, 0, d[0].dec_seq)
+    body[8] = (d[0].dec_verdict & 0xFF) as u8
+    p_set16(body, 9, d[0].dec_reason)
+    p_set64(body, 11, d[0].dec_rs)
+    p_set64(body, 19, d[0].dec_re)
+    p_set64(body, 27, d[0].dec_lidx)
+    p_set64(body, 35, d[0].dec_post)
+    let r:i64 = tape_emit(t, EV_DECISION, body)
+    nio_free(body)
+    return r
+}
+
+// drv_consider_wire: decode one §P wire, deliberate, emit DELIB+DECISION.
+// Returns the p_decode rc (nonzero = ingress problem, nothing emitted),
+// or -2 on tape full.
+fn drv_consider_wire(d:*DLB, t:*Tape, wire:[]u8) i64 {
+    let p:*Prop = p_new()
+    let rc:i64 = p_decode(wire, d[0].stim_len, p)
+    if (rc != 0) { return rc }
+    dlb_consider(d, p, wire, 0, 0)
+    if (drv_delib_records(d, t) != 0) { return -2 }
+    if (drv_decision_record(d, t) != 0) { return -2 }
+    return 0
+}

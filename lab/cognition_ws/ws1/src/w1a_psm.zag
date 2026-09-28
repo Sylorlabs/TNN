@@ -1,0 +1,358 @@
+// ProtectedSkillMemory — native deliberate-consolidation core (r27-consolidation).
+//
+// Structural skill items (id, op, param): id is the cue signature (the R27
+// Trace-cue analogue), (op,param) a symbolic op-sequence over opcodes
+// FILTER_GT/MAP_MUL/FILTER_LT/MAP_ADD/SORT_DESC. No score tables, no rewards,
+// no RL, no RNG anywhere: every tie breaks by lowest index.
+//
+// fast tier: working candidates with evidence tallies (ver, ctxmask, unv, age)
+// slow tier: protected consolidated skills (first-verified-wins per id)
+// history: append-only audit of deliberate ops (the R27 `history` analogue)
+//
+// mode=1 DELIBERATE: event-driven ops on the touched candidate —
+//   CONSOLIDATE when ver>=V_MIN across >=CTX_MIN distinct verified contexts
+//   CONDEMN   when never-verified and discredited (unv>=UNV_DISCARD, age>=AGE_DISCARD)
+//   PREEMPT   deliberate victim choice when fast is full (most-discredited
+//             never-verified tombstone), REVIVE if a condemned form verifies.
+// mode=0 AUTOMATIC (harness-style baseline): timer scan every 10 episodes,
+//   promote on raw exposure (ver+unv)>=S_MIN; last-wins slow overwrite;
+//   lowest-confidence slow eviction; no condemn, no preemption.
+//
+// Learner-core isolation: this file imports nothing and references no
+// world/curriculum/truth symbols. Verified by grep in run_trial.sh.
+//
+// Fast slot fields (stride 9): used(0 free,1 candidate,2 condemned),
+//   id, op, param, ver, ctxmask, unv, age, prom(0 unpromoted,1 promoted,2 settled)
+// Slow slot fields (stride 5): used, id, op, param, conf
+// History fields (stride 4): op, id, reason, step
+
+const FF_USED:i32=0;
+const FF_ID:i32=1;
+const FF_OP:i32=2;
+const FF_PARAM:i32=3;
+const FF_VER:i32=4;
+const FF_CTX:i32=5;
+const FF_UNV:i32=6;
+const FF_AGE:i32=7;
+const FF_PROM:i32=8;
+const FF_STRIDE:i32=9;
+
+const FS_USED:i32=0;
+const FS_ID:i32=1;
+const FS_OP:i32=2;
+const FS_PARAM:i32=3;
+const FS_CONF:i32=4;
+const FS_STRIDE:i32=5;
+
+const FH_OP:i32=0;
+const FH_ID:i32=1;
+const FH_REASON:i32=2;
+const FH_STEP:i32=3;
+const FH_STRIDE:i32=4;
+
+const HOP_CONSOLIDATE:i32=1;
+const HOP_DISCARD:i32=2;
+const HOP_REVIVE:i32=3;
+
+const HR_CORROBORATED:i32=1;
+const HR_UNVERIFIED:i32=2;
+const HR_PREEMPTED:i32=3;
+const HR_CONFLICT_KEEP:i32=4;
+const HR_SLOW_FULL:i32=5;
+const HR_AUTO:i32=6;
+const HR_AUTO_EVICT:i32=7;
+const HR_AUTO_OVERWRITE:i32=8;
+const HR_REVIVED:i32=9;
+
+const V_MIN:i32=6;
+const CTX_MIN:i32=2;
+const S_MIN:i32=6;
+const UNV_DISCARD:i32=8;
+const AGE_DISCARD:i32=8;
+const AUTO_SCAN_EVERY:i32=10;
+
+// WS1-A white-box counters (additive only; semantics unchanged):
+// c_age = fast-tier age-scan slot visits (per observe); c_find = match-scan
+// slot visits; c_scan = periodic auto-pass slot visits (fast scans +
+// per-candidate slow scans); c_overwrite = last-wins slow overwrites;
+// c_evict = lowest-conf slow evictions.
+struct Psm {
+    mode:i32, step:i32, nf:i32, ns:i32, nh:i32,
+    n_consol:i32, n_condemn:i32, n_preempt:i32, n_revive:i32,
+    dropped:i32, n_slow_evict:i32, hist_n:i32, hist_full:i32,
+    fast:[]u8, slow:[]u8, hist:[]u8,
+    c_age:i64, c_find:i64, c_scan:i64, c_overwrite:i64, c_evict:i64
+}
+
+fn pget(b:[]u8, at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+fn pset(b:[]u8, at:i32, v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+fn fget(p:*Psm, fi:i32, f:i32)i32 { return pget(p.*.fast, fi*FF_STRIDE*4+f*4); }
+fn fset(p:*Psm, fi:i32, f:i32, v:i32)void { pset(p.*.fast, fi*FF_STRIDE*4+f*4, v); }
+fn sget(p:*Psm, si:i32, f:i32)i32 { return pget(p.*.slow, si*FS_STRIDE*4+f*4); }
+fn sset(p:*Psm, si:i32, f:i32, v:i32)void { pset(p.*.slow, si*FS_STRIDE*4+f*4, v); }
+
+fn popcnt(x:i32)i32 {
+    let c:i32=0; let m:i32=x;
+    while(m!=0){ c=c+(m&1); m=m>>1; }
+    return c;
+}
+
+fn psm_init(mode:i32, nf:i32, ns:i32, nh:i32)Psm {
+    let fb:[]u8=(0 as *u8)[0..0];
+    let sb:[]u8=(0 as *u8)[0..0];
+    let hb:[]u8=(0 as *u8)[0..0];
+    let pf:*u8=_zag_malloc(nf*FF_STRIDE*4) as *u8;
+    let ps:*u8=_zag_malloc(ns*FS_STRIDE*4) as *u8;
+    let ph:*u8=_zag_malloc(nh*FH_STRIDE*4) as *u8;
+    if(pf!=null as *u8){ fb=pf[0..nf*FF_STRIDE*4]; }
+    if(ps!=null as *u8){ sb=ps[0..ns*FS_STRIDE*4]; }
+    if(ph!=null as *u8){ hb=ph[0..nh*FH_STRIDE*4]; }
+    let i:i32=0;
+    while(i<nf*FF_STRIDE*4){ fb[i]=0; i=i+1; }
+    i=0;
+    while(i<ns*FS_STRIDE*4){ sb[i]=0; i=i+1; }
+    i=0;
+    while(i<nh*FH_STRIDE*4){ hb[i]=0; i=i+1; }
+    return Psm{.mode=mode,.step=0,.nf=nf,.ns=ns,.nh=nh,
+        .n_consol=0,.n_condemn=0,.n_preempt=0,.n_revive=0,
+        .dropped=0,.n_slow_evict=0,.hist_n=0,.hist_full=0,
+        .fast=fb,.slow=sb,.hist=hb,
+        .c_age=0,.c_find=0,.c_scan=0,.c_overwrite=0,.c_evict=0};
+}
+
+fn psm_hist(p:*Psm, op:i32, id:i32, reason:i32)void {
+    if(p.*.hist_n>=p.*.nh){ p.*.hist_full=1; return; }
+    let at:i32=p.*.hist_n*FH_STRIDE*4;
+    pset(p.*.hist, at+FH_OP*4, op);
+    pset(p.*.hist, at+FH_ID*4, id);
+    pset(p.*.hist, at+FH_REASON*4, reason);
+    pset(p.*.hist, at+FH_STEP*4, p.*.step);
+    p.*.hist_n=p.*.hist_n+1;
+}
+
+// Deliberate CONSOLIDATE: fast candidate -> protected slow tier.
+fn psm_consolidate(p:*Psm, fi:i32)void {
+    let id:i32=fget(p,fi,FF_ID);
+    let op:i32=fget(p,fi,FF_OP);
+    let param:i32=fget(p,fi,FF_PARAM);
+    let ver:i32=fget(p,fi,FF_VER);
+    let bits:i32=popcnt(fget(p,fi,FF_CTX));
+    let conf:i32=ver*40+bits*120;
+    if(conf>1000){ conf=1000; }
+    let si:i32=0; let found:i32=-1; let free:i32=-1;
+    while(si<p.*.ns){
+        if(sget(p,si,FS_USED)==1 && sget(p,si,FS_ID)==id){ found=si; }
+        if(sget(p,si,FS_USED)==0 && free<0){ free=si; }
+        si=si+1;
+    }
+    if(found>=0){
+        if(sget(p,found,FS_OP)==op && sget(p,found,FS_PARAM)==param){
+            if(conf>sget(p,found,FS_CONF)){ sset(p,found,FS_CONF,conf); }
+            psm_hist(p,HOP_CONSOLIDATE,id,HR_CORROBORATED);
+            fset(p,fi,FF_PROM,1); p.*.n_consol=p.*.n_consol+1;
+        } else {
+            // A different op already holds this id in slow: deliberate
+            // first-verified-wins. Settle the candidate; do not retry.
+            psm_hist(p,HOP_CONSOLIDATE,id,HR_CONFLICT_KEEP);
+            fset(p,fi,FF_PROM,2);
+        }
+        return;
+    }
+    if(free<0){
+        // Slow is full and this arm never evicts deliberately: defer, settle.
+        psm_hist(p,HOP_CONSOLIDATE,id,HR_SLOW_FULL);
+        fset(p,fi,FF_PROM,2);
+        return;
+    }
+    sset(p,free,FS_USED,1); sset(p,free,FS_ID,id);
+    sset(p,free,FS_OP,op); sset(p,free,FS_PARAM,param);
+    sset(p,free,FS_CONF,conf);
+    psm_hist(p,HOP_CONSOLIDATE,id,HR_CORROBORATED);
+    fset(p,fi,FF_PROM,1); p.*.n_consol=p.*.n_consol+1;
+}
+
+// Deliberate CONDEMN: retire a discredited never-verified candidate.
+// The slot becomes a tombstone: it keeps its signature and its discredit
+// (unv), stays matchable, and is reusable under PREEMPT.
+fn psm_condemn(p:*Psm, fi:i32, reason:i32)void {
+    fset(p,fi,FF_USED,2);
+    p.*.n_condemn=p.*.n_condemn+1;
+    psm_hist(p,HOP_DISCARD,fget(p,fi,FF_ID),reason);
+}
+
+// Automatic (harness-style) consolidation: raw exposure, no corroboration.
+fn psm_auto_consolidate(p:*Psm, fi:i32)void {
+    let id:i32=fget(p,fi,FF_ID);
+    let op:i32=fget(p,fi,FF_OP);
+    let param:i32=fget(p,fi,FF_PARAM);
+    let conf:i32=(fget(p,fi,FF_VER)+fget(p,fi,FF_UNV))*25;
+    if(conf>1000){ conf=1000; }
+    let si:i32=0; let found:i32=-1; let free:i32=-1;
+    let evict:i32=-1; let evict_conf:i32=2000000000;
+    while(si<p.*.ns){
+        p.*.c_scan=p.*.c_scan+1;
+        if(sget(p,si,FS_USED)==1 && sget(p,si,FS_ID)==id){ found=si; }
+        if(sget(p,si,FS_USED)==0 && free<0){ free=si; }
+        if(sget(p,si,FS_USED)==1 && sget(p,si,FS_CONF)<evict_conf){ evict=si; evict_conf=sget(p,si,FS_CONF); }
+        si=si+1;
+    }
+    if(found>=0){
+        // last-wins: the automatic arm overwrites whatever was there.
+        sset(p,found,FS_OP,op); sset(p,found,FS_PARAM,param);
+        sset(p,found,FS_CONF,conf);
+        p.*.c_overwrite=p.*.c_overwrite+1;
+        psm_hist(p,HOP_CONSOLIDATE,id,HR_AUTO_OVERWRITE);
+    } else if(free>=0){
+        sset(p,free,FS_USED,1); sset(p,free,FS_ID,id);
+        sset(p,free,FS_OP,op); sset(p,free,FS_PARAM,param);
+        sset(p,free,FS_CONF,conf);
+        psm_hist(p,HOP_CONSOLIDATE,id,HR_AUTO);
+    } else {
+        sset(p,evict,FS_ID,id); sset(p,evict,FS_OP,op);
+        sset(p,evict,FS_PARAM,param); sset(p,evict,FS_CONF,conf);
+        p.*.n_slow_evict=p.*.n_slow_evict+1;
+        p.*.c_evict=p.*.c_evict+1;
+        psm_hist(p,HOP_CONSOLIDATE,id,HR_AUTO_EVICT);
+    }
+    fset(p,fi,FF_PROM,1); p.*.n_consol=p.*.n_consol+1;
+}
+
+fn psm_auto_pass(p:*Psm)void {
+    let fi:i32=0;
+    while(fi<p.*.nf){
+        p.*.c_scan=p.*.c_scan+1;
+        if(fget(p,fi,FF_USED)==1 && fget(p,fi,FF_PROM)==0 &&
+           fget(p,fi,FF_VER)+fget(p,fi,FF_UNV)>=S_MIN){
+            psm_auto_consolidate(p,fi);
+        }
+        fi=fi+1;
+    }
+}
+
+// One world observation. Returns 0, or 1 if the observation was dropped
+// (fast tier full with no condemned tombstone to preempt).
+fn psm_observe(p:*Psm, id:i32, op:i32, param:i32, ctx:i32, ver:i32)i32 {
+    p.*.step=p.*.step+1;
+    let fi:i32=0;
+    while(fi<p.*.nf){
+        p.*.c_age=p.*.c_age+1;
+        if(fget(p,fi,FF_USED)!=0){ fset(p,fi,FF_AGE,fget(p,fi,FF_AGE)+1); }
+        fi=fi+1;
+    }
+    let match:i32=-1; let free:i32=-1; let victim:i32=-1; let victim_unv:i32=-1;
+    fi=0;
+    while(fi<p.*.nf){
+        p.*.c_find=p.*.c_find+1;
+        let u:i32=fget(p,fi,FF_USED);
+        if(u!=0 && fget(p,fi,FF_ID)==id && fget(p,fi,FF_OP)==op && fget(p,fi,FF_PARAM)==param){
+            match=fi; fi=p.*.nf;
+        } else {
+            if(u==0 && free<0){ free=fi; }
+            if(u==2 && fget(p,fi,FF_UNV)>victim_unv){ victim=fi; victim_unv=fget(p,fi,FF_UNV); }
+            fi=fi+1;
+        }
+    }
+    if(match<0){
+        if(free>=0){
+            fi=free;
+            fset(p,fi,FF_USED,1); fset(p,fi,FF_ID,id);
+            fset(p,fi,FF_OP,op); fset(p,fi,FF_PARAM,param);
+            fset(p,fi,FF_VER,0); fset(p,fi,FF_CTX,0);
+            fset(p,fi,FF_UNV,0); fset(p,fi,FF_AGE,0); fset(p,fi,FF_PROM,0);
+        } else if(victim>=0){
+            // Deliberate PREEMPT: evict the most-discredited never-verified
+            // tombstone to make room. Audited.
+            psm_hist(p,HOP_DISCARD,fget(p,victim,FF_ID),HR_PREEMPTED);
+            p.*.n_preempt=p.*.n_preempt+1;
+            fi=victim;
+            fset(p,fi,FF_USED,1); fset(p,fi,FF_ID,id);
+            fset(p,fi,FF_OP,op); fset(p,fi,FF_PARAM,param);
+            fset(p,fi,FF_VER,0); fset(p,fi,FF_CTX,0);
+            fset(p,fi,FF_UNV,0); fset(p,fi,FF_AGE,0); fset(p,fi,FF_PROM,0);
+        } else {
+            p.*.dropped=p.*.dropped+1;
+            return 1;
+        }
+    } else {
+        fi=match;
+    }
+    if(ver==1){
+        fset(p,fi,FF_VER,fget(p,fi,FF_VER)+1);
+        fset(p,fi,FF_CTX,fget(p,fi,FF_CTX)|(1<<ctx));
+        if(fget(p,fi,FF_USED)==2){
+            // A condemned form verified after all: revive. Audited.
+            fset(p,fi,FF_USED,1);
+            p.*.n_revive=p.*.n_revive+1;
+            psm_hist(p,HOP_REVIVE,fget(p,fi,FF_ID),HR_REVIVED);
+        }
+    } else {
+        fset(p,fi,FF_UNV,fget(p,fi,FF_UNV)+1);
+    }
+    if(p.*.mode==1){
+        // Deliberate: event-driven checks on the touched candidate only.
+        // No timers, no scans.
+        if(fget(p,fi,FF_USED)==1 && fget(p,fi,FF_PROM)==0){
+            if(fget(p,fi,FF_VER)>=V_MIN && popcnt(fget(p,fi,FF_CTX))>=CTX_MIN){
+                psm_consolidate(p,fi);
+            } else if(fget(p,fi,FF_VER)==0 && fget(p,fi,FF_UNV)>=UNV_DISCARD &&
+                      fget(p,fi,FF_AGE)>=AGE_DISCARD){
+                psm_condemn(p,fi,HR_UNVERIFIED);
+            }
+        }
+    } else {
+        if(p.*.step%AUTO_SCAN_EVERY==0){ psm_auto_pass(p); }
+    }
+    return 0;
+}
+
+// Probe the frozen slow tier: highest-confidence skill with this id answers.
+// Ties keep the lowest index (deterministic). Returns 1 if answered.
+fn psm_probe(p:*Psm, id:i32, op_out:*i32, param_out:*i32)i32 {
+    let best:i32=-1; let best_conf:i32=-1; let si:i32=0;
+    while(si<p.*.ns){
+        if(sget(p,si,FS_USED)==1 && sget(p,si,FS_ID)==id && sget(p,si,FS_CONF)>best_conf){
+            best=si; best_conf=sget(p,si,FS_CONF);
+        }
+        si=si+1;
+    }
+    if(best<0){ return 0; }
+    op_out.*=sget(p,best,FS_OP); param_out.*=sget(p,best,FS_PARAM);
+    return 1;
+}
+
+// Slow-tier slot accessor for the (blind) evaluator.
+fn psm_slow_get(p:*Psm, si:i32, id:*i32, op:*i32, param:*i32, conf:*i32)i32 {
+    if(si<0 || si>=p.*.ns){ return 0; }
+    let u:i32=sget(p,si,FS_USED);
+    if(u==0){ return 0; }
+    id.*=sget(p,si,FS_ID); op.*=sget(p,si,FS_OP);
+    param.*=sget(p,si,FS_PARAM); conf.*=sget(p,si,FS_CONF);
+    return 1;
+}
+
+fn psm_hist_get(p:*Psm, hi:i32, op:*i32, id:*i32, reason:*i32, step:*i32)i32 {
+    if(hi<0 || hi>=p.*.hist_n){ return 0; }
+    let at:i32=hi*FH_STRIDE*4;
+    op.*=pget(p.*.hist,at+FH_OP*4); id.*=pget(p.*.hist,at+FH_ID*4);
+    reason.*=pget(p.*.hist,at+FH_REASON*4); step.*=pget(p.*.hist,at+FH_STEP*4);
+    return 1;
+}
+
+// Deterministic digest of the slow tier (for the determinism gate).
+fn psm_digest(p:*Psm)i64 {
+    let h:i64=146959; let si:i32=0;
+    while(si<p.*.ns){
+        if(sget(p,si,FS_USED)==1){
+            let x:i64=(sget(p,si,FS_ID) as i64)*131+(sget(p,si,FS_OP) as i64)*17+
+                       (sget(p,si,FS_PARAM) as i64)*7+(sget(p,si,FS_CONF) as i64);
+            h=(h*31+x)%1000000007;
+        }
+        si=si+1;
+    }
+    return h;
+}

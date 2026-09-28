@@ -1,0 +1,16 @@
+# PROSEV3 RV2 log digests (2026-09-24)
+# All logs byte-identical within source across reps (deterministic)
+
+## CHAL-P1 deviationectomy (5 reps each, 20 logs)
+3c5b6acbcefbaf7d4acef0b3ac9cdf628f7662d193f5a8861b52077d61cb8054  runs/devectomy/champ_grok_rep1.log
+45aba3f8cf13ccecb7632b2696be634a9f0e8b4b45d2a34c6ce98fffd721a8f3  runs/devectomy/champ_muse-native_rep1.log
+b0a974684ab36cce74a04cc0bdbd935de5fc10b11c85c160e996500244c74c7f  runs/devectomy/champ_sol_rep1.log
+8e889b97623db3c2ba78c8d0c4a28d462d02674d76b2e85f7397e1ab6b42f874  runs/devectomy/champ_step_rep1.log
+
+## QUOTE-FIX (3 reps sol, 1 rep others)
+3c5b6acbcefbaf7d4acef0b3ac9cdf628f7662d193f5a8861b52077d61cb8054  runs/quotefix/qf2_grok_rep1.log
+45aba3f8cf13ccecb7632b2696be634a9f0e8b4b45d2a34c6ce98fffd721a8f3  runs/quotefix/qf2_muse-native_rep1.log
+ac181523efd85802f9520383a2d2f2d478ea36c7e8110ac16d33d50bd66b61b0  runs/quotefix/qf2_sol_rep1.log
+8e889b97623db3c2ba78c8d0c4a28d462d02674d76b2e85f7397e1ab6b42f874  runs/quotefix/qf2_step_rep1.log
+ac181523efd85802f9520383a2d2f2d478ea36c7e8110ac16d33d50bd66b61b0  runs/quotefix/qf2_sol_rep2.log
+ac181523efd85802f9520383a2d2f2d478ea36c7e8110ac16d33d50bd66b61b0  runs/quotefix/qf2_sol_rep3.log

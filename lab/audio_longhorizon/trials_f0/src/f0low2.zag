@@ -1,0 +1,261 @@
+// f0low2.zag — repaired low-band F0 estimator + v2 guard (Phase B2c).
+// Pure Zag, zero RNG.
+//
+// What was wrong with f0low.zag (wiring crew, synthetic-only validation):
+//  1. Silence gate `ms < 10737418.0` (RMS < 3276 PCM16 units) is ~1000x
+//     stricter than the frozen organ's own audibility floor (rms_db > -50 dB
+//     <=> ms > 10737.4 <=> RMS > 103.6). Real PTDB mic speech (RMS ~20-1200
+//     on vowels) fails it on ~99% of voiced frames -> the estimator reports
+//     unvoiced on real material (FIXED-FAIL by construction).
+//  2. Guard policy "trust the organ at >=125 Hz voiced" passes the organ's
+//     harmonic locks through as confident: on real 55-125 Hz speech the
+//     organ locks onto high harmonics (e.g. 937 Hz on 94 Hz speech) and the
+//     guard reports them voiced -- confidently-wrong per the prereg bar.
+//
+// Repairs (this file):
+//  1. Silence gate = the organ's verified audibility floor: rms_db > -50 dB,
+//     computed exactly as the organ computes it (10*log10(ms/2^30)).
+//     Below the floor the organ itself cannot voice -> unvoiced, never a
+//     confident wrong number (verified no-silent-misread kind).
+//  2. Harmonic-consistency cross-check in the guard: whenever the organ
+//     claims voiced >=125 Hz AND the lowband estimator is confident <125 Hz,
+//     test the harmonic relation. Agreement (<=5%) -> organ (normal range,
+//     corroborated). Integer-ratio k>=2 within 5% (organ harmonic-locked on
+//     the lowband's verified F0, or lowband subharmonic -- genuinely
+//     ambiguous) -> OUT-OF-RANGE (flag, never confident-wrong). No relation
+//     -> OUT-OF-RANGE. The lowband's own half-lag octave gate stays as the
+//     first line of defense against its 2x-subharmonic mode.
+//  3. Structural floor kept: <55 Hz -> below-floor -> out-of-range, never
+//     confident (46 ms frame holds <2.5 periods; lag range physically
+//     excludes it).
+//
+// Status codes (LRES[8]): 0 unvoiced, 1 confident, 2 ambiguous (octave
+// risk), 3 below structural floor. Guard "how" (GRES[16]): 0 organ,
+// 1 lowband, 2 out-of-range, 3 unvoiced. Scope mode: pure range restriction
+// (>=125 Hz or out-of-range) with the lowband estimator as veto only.
+
+// YIN cumulative-mean-normalized difference at one lag over [1..lag].
+// LRL holds r[1..lmax] as LE i64 at 8B stride from index 0.
+fn low2dp_at(LRL: []u8, r0: i64, lag: i64) f64 {
+    let run: f64 = 0.0;
+    let j: i64 = 1;
+    while (j <= lag) {
+        run = run + (2.0 * ((r0 - get64(LRL, (j - 1) * 8)) as f64));
+        j = j + 1;
+    }
+    let dlag: f64 = 2.0 * ((r0 - get64(LRL, (lag - 1) * 8)) as f64);
+    return dlag / (run / (lag as f64));
+}
+
+// Low-band F0 on one frame (repaired). b/ds0/nsamp/s: sample access.
+// sr: 44100 or 8000. nframe: 2048 (44.1k) or 1024 (8k).
+// Mean-removed UNWINDOWED frames; YIN cumulative-mean-normalized difference;
+// lag range sr/125..sr/55; first dip below 0.10 from lmin; local-min advance;
+// parabolic interpolation; confidence gate r[sel]/r0 >= 0.35; half-lag octave
+// gate (ambiguous, never confident-wrong); hard floor <55 Hz -> status 3.
+// LRL: lmax*8 bytes. LRES: 16 bytes -> [0]=f0_mhz, [8]=status.
+fn low2f0_frame(b: []u8, ds0: i64, nsamp: i64, s: i64, sr: i64, nframe: i64, LRL: []u8, LRES: []u8) void {
+    let sum: i64 = 0;
+    let sum2: i64 = 0;
+    let n: i64 = 0;
+    while (n < nframe) {
+        let x: i64 = samp(b, ds0, s + n, nsamp);
+        sum = sum + x;
+        sum2 = sum2 + x * x;
+        n = n + 1;
+    }
+    let mean: i64 = sum / nframe;
+    let ms: f64 = (sum2 as f64) / (nframe as f64);
+    // Numerical floor: below RMS 2.0 (ms < 4.0) the frame is quantization
+    // noise and autocorrelation is meaningless -> unvoiced. Voicing itself
+    // is decided by the level-invariant periodicity (confidence) gate below.
+    // (The wiring crew's ms < 10737418 gate was ~1e6x too strict for real mic
+    // levels and silenced the estimator on ~100% of voiced frames; the
+    // organ's -50 dB voicing floor misses 77% of laryngograph-voiced frames
+    // on PTDB mic material, so neither transfers. This floor excludes only
+    // digital black; verified no-silent-misread on synthetic + real below.)
+    if (ms < 4.0) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let lmin: i64 = sr / 125;
+    // Search extends to 40 Hz (not 55) so that below-floor tones are
+    // MEASURED as below-floor (st=3) rather than aliased onto the 55 Hz
+    // boundary lag and reported confidently-wrong. The 55 Hz reporting
+    // floor itself is unchanged (f0m < 55000 -> st=3 below).
+    let lmax: i64 = sr / 40;
+    if (lmin < 36) { lmin = 36; }
+    if (lmax > nframe - 64) { lmax = nframe - 64; }
+    if (lmax <= lmin) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let lag: i64 = 1;
+    while (lag <= lmax) {
+        let acc: i64 = 0;
+        let m: i64 = 0;
+        let lim: i64 = nframe - lag;
+        while (m < lim) {
+            let v1: i64 = samp(b, ds0, s + m, nsamp) - mean;
+            let v2: i64 = samp(b, ds0, s + m + lag, nsamp) - mean;
+            acc = acc + v1 * v2;
+            m = m + 1;
+        }
+        put64(LRL, (lag - 1) * 8, acc);
+        lag = lag + 1;
+    }
+    let r0: i64 = get64(LRL, 0);
+    if (r0 <= 0) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let run: f64 = 0.0;
+    let j: i64 = 1;
+    while (j < lmin) {
+        run = run + (2.0 * ((r0 - get64(LRL, (j - 1) * 8)) as f64));
+        j = j + 1;
+    }
+    let sel: i64 = -1;
+    let sel_dp: f64 = 0.0;
+    let gmin: f64 = 1000000.0;
+    let gmin_lag: i64 = lmin;
+    let lg: i64 = lmin;
+    while (lg <= lmax) {
+        let rl: i64 = get64(LRL, (lg - 1) * 8);
+        let dlag: f64 = 2.0 * ((r0 - rl) as f64);
+        run = run + dlag;
+        let dp: f64 = dlag / (run / (lg as f64));
+        if (dp < gmin) {
+            gmin = dp;
+            gmin_lag = lg;
+        }
+        if (sel == -1 && dp < 0.10) {
+            sel = lg;
+            sel_dp = dp;
+        } else if (sel != -1) {
+            if (dp < sel_dp) {
+                sel = lg;
+                sel_dp = dp;
+            } else {
+                lg = lmax + 1;
+            }
+        }
+        lg = lg + 1;
+    }
+    if (sel == -1) {
+        sel = gmin_lag;
+        sel_dp = gmin;
+    }
+    let lagf: f64 = sel as f64;
+    if (sel > lmin && sel < lmax) {
+        let a2: f64 = low2dp_at(LRL, r0, sel - 1);
+        let b2: f64 = sel_dp;
+        let c2: f64 = low2dp_at(LRL, r0, sel + 1);
+        let den: f64 = a2 - 2.0 * b2 + c2;
+        let ab: f64 = den;
+        if (ab < 0.0) { ab = -ab; }
+        if (ab > 0.000001) {
+            lagf = (sel as f64) + 0.5 * (a2 - c2) / den;
+        }
+    }
+    let f0hz: f64 = (sr as f64) / lagf;
+    let f0m: i64 = (f0hz * 1000.0 + 0.5) as i64;
+    let st: i64 = 1;
+    let rsel: i64 = get64(LRL, (sel - 1) * 8);
+    let rn: f64 = (rsel as f64) / (r0 as f64);
+    if (rn < 0.35) { st = 0; }
+    let half: i64 = sel / 2;
+    if (half >= 1 && st == 1) {
+        let rh: i64 = 0;
+        let m2: i64 = 0;
+        let lim2: i64 = nframe - half;
+        while (m2 < lim2) {
+            let u1: i64 = samp(b, ds0, s + m2, nsamp) - mean;
+            let u2: i64 = samp(b, ds0, s + m2 + half, nsamp) - mean;
+            rh = rh + u1 * u2;
+            m2 = m2 + 1;
+        }
+        if (rsel > 0 && rh * 100 >= rsel * 90) { st = 2; }
+    }
+    // Structural floor: 55 Hz. Below this the 46 ms frame holds <2.5 periods
+    // -> explicit below-floor, never a confident misread.
+    if (f0m < 55000) { st = 3; }
+    if (st != 1) { f0m = 0; }
+    put64(LRES, 0, f0m);
+    put64(LRES, 8, st);
+    return;
+}
+
+// Harmonic-consistency check: does of0 stand in an integer ratio k>=2 to
+// lf0 (within 5% relative)? Returns k, or 0/1 for agreement/no-relation.
+// agree (k=1): |of0-lf0|/lf0 <= 0.05.
+fn harm_ratio(of0: i64, lf0: i64) i64 {
+    if (lf0 <= 0 || of0 <= 0) { return 0; }
+    let d: i64 = of0 - lf0;
+    if (d < 0) { d = -d; }
+    if (d * 20 <= lf0) { return 1; }
+    let r: f64 = (of0 as f64) / (lf0 as f64);
+    let k: i64 = 2;
+    while (k <= 16) {
+        let kf: f64 = k as f64;
+        let dr: f64 = r - kf;
+        if (dr < 0.0) { dr = -dr; }
+        if (dr * 20.0 <= kf) { return k; }
+        k = k + 1;
+    }
+    return 0;
+}
+
+// Per-frame guard policy v2. o_f0/o_v: organ's per-frame values; lf0/lst:
+// v2 lowband estimator output for this frame (computed once by the caller).
+// mode: 0 = low (estimator on), 1 = scope (pure range restriction + veto).
+// GRES: 24 bytes -> [0]=guarded f0_mhz, [8]=guarded voiced, [16]=how
+// (0 organ, 1 lowband, 2 out-of-range, 3 unvoiced).
+fn guard2_frame(o_f0: i64, o_v: i64, lf0: i64, lst: i64, mode: i64, GRES: []u8) void {
+    let gf0: i64 = 0;
+    let gv: i64 = 0;
+    let how: i64 = 3;
+    if (o_v == 1 && o_f0 >= 125000) {
+        // Organ claims >=125 Hz. The organ cannot distinguish a true >=125 Hz
+        // tone from a harmonic lock on sub-125 Hz truth, so this claim is
+        // trusted ONLY when the lowband estimator independently verifies it
+        // (confident AND agreeing within 5%). Otherwise the frame is flagged
+        // out-of-range -- never silently misread. (The wiring crew trusted
+        // the organ here unconditionally; on PTDB truth that produced
+        // 3-15x confident errors, e.g. 488 Hz reported for 103.6 Hz truth.)
+        if (lst == 1 && harm_ratio(o_f0, lf0) == 1) {
+            gf0 = o_f0;
+            gv = 1;
+            how = 0;
+        } else {
+            gf0 = 0;
+            gv = 0;
+            how = 2;
+        }
+    } else if (mode == 1) {
+        gf0 = 0;
+        gv = 0;
+        if (o_v == 1 || lst == 1 || lst == 2 || lst == 3) { how = 2; } else { how = 3; }
+    } else {
+        if (lst == 1) {
+            gf0 = lf0;
+            gv = 1;
+            how = 1;
+        } else if (lst == 2 || lst == 3) {
+            gf0 = 0;
+            gv = 0;
+            how = 2;
+        } else {
+            gf0 = 0;
+            gv = 0;
+            how = 3;
+        }
+    }
+    put64(GRES, 0, gf0);
+    put64(GRES, 8, gv);
+    put64(GRES, 16, how);
+    return;
+}

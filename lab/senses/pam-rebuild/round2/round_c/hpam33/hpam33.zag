@@ -1,0 +1,440 @@
+@import("R33_NATIVE_IO_V1.zag")
+
+// hpam33.zag — H-PAM-33 endorsed-channel admission + WG battery.
+// Frozen prereg: PREREG_HPAM33_FROZEN.md (commit 356e7ca8), committed ALONE.
+// Pure Zag, zero RNG. argv[1] selects mode:
+//   honest | mint | tamper | wg | wg_manifest | classL | insider
+// 3 runs per mode, SHA-256 compare.
+//
+// znc landmines respected: u8 arenas + LE32 accessors (no []i32 casts),
+// no slice ==, no .* on non-pointers, no bare blocks, return; in voids,
+// sequential (non-nested) mode dispatch, no u64 shifts, no u64 %.
+
+// ---------- output buffer ----------
+fn ob_puts(b:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { b[pos+i] = s[i]; i = i + 1; }
+    return pos + s.len;
+}
+fn ob_puti(b:[]u8, pos:i32, v:i64) i32 {
+    let neg:i32 = 0;
+    let x:i64 = v;
+    if(x < 0) { neg = 1; x = 0 - x; }
+    let tmp:[]u8 = nio_alloc(24);
+    let n:i32 = 0;
+    if(x == 0) { tmp[0] = 48; n = 1; }
+    while(x > 0) {
+        tmp[n] = ((x % 10) + 48) as u8;
+        x = x / 10;
+        n = n + 1;
+    }
+    if(neg == 1) { b[pos] = 45; pos = pos + 1; }
+    let i:i32 = n - 1;
+    while(i >= 0) { b[pos] = tmp[i]; pos = pos + 1; i = i - 1; }
+    nio_free(tmp);
+    return pos;
+}
+fn yn(ok:i32) []u8 {
+    if(ok == 1) { return "PASS"; }
+    return "FAIL";
+}
+
+// ---------- toy hash (mod 2^31-1 mixing; stand-in for structure, not crypto) ----------
+fn th_mix(h:i64, v:i64) i64 {
+    let vv:i64 = v % 2147483647;
+    if(vv < 0) { vv = vv + 2147483647; }
+    let r:i64 = (h * 131 + vv) % 2147483647;
+    return r;
+}
+fn toyhash2(a:i64, b:i64) i64 {
+    let h:i64 = th_mix(1, a);
+    h = th_mix(h, b);
+    h = th_mix(h, 7);
+    return h;
+}
+fn toyhash4(a:i64, b:i64, c:i64, d:i64) i64 {
+    let h:i64 = th_mix(1, a);
+    h = th_mix(h, b);
+    h = th_mix(h, c);
+    h = th_mix(h, d);
+    h = th_mix(h, 7);
+    return h;
+}
+
+// ---------- u8 arena LE32 accessors ----------
+fn t_put32(b:[]u8, o:i32, v:i64) void {
+    b[o] = (v % 256) as u8;
+    b[o+1] = ((v / 256) % 256) as u8;
+    b[o+2] = ((v / 65536) % 256) as u8;
+    b[o+3] = ((v / 16777216) % 256) as u8;
+    return;
+}
+fn t_get32(b:[]u8, o:i32) i64 {
+    let r:i64 = (b[o] as i64) + (b[o+1] as i64) * 256 + (b[o+2] as i64) * 65536 + (b[o+3] as i64) * 16777216;
+    return r;
+}
+
+// ---------- pinned constants ----------
+fn c_genesis() i64 { return 12648430; }
+fn c_ekey() i64 { return 3408947; }
+fn c_akey() i64 { return 2989; }
+fn c_domain() i64 { return 51; }
+
+// ---------- percept content generators ----------
+// kind 0 = honest true percept; kind 1 = WG false percept (from author-written
+// sim params P0=41, P1=17); kind 2 = insider forged false percept.
+fn wsim(t:i64) i64 { return (41 * (t + 1) + 17 * 7) % 1009; }
+fn pk_c(kind:i32, t:i64) i64 {
+    if(kind == 0) { return 700 + ((t * 7) % 31); }
+    if(kind == 1) { return 100 + (wsim(t) % 50); }
+    return 50 + t * 3;
+}
+fn pk_m(kind:i32, t:i64) i64 {
+    if(kind == 0) { return 2600 + ((t * 11) % 51); }
+    if(kind == 1) { return 1000 + (wsim(t) % 100); }
+    return 500 + t * 7;
+}
+fn pk_false(kind:i32) i32 {
+    if(kind == 0) { return 0; }
+    return 1;
+}
+
+// ---------- endorsement ----------
+// content_h = toyhash4(id, c, m, prev)
+// tag = toyhash4(content_h, key, prev, d4); d4 = 0x33 plain, or the bound
+// manifest in the manifest variant. prev_0 = GENESIS; prev_{t+1} = tag_t.
+fn content_h(id:i64, c:i64, m:i64, prev:i64) i64 {
+    return toyhash4(id, c, m, prev);
+}
+fn manifest_of(src:i64, label:i64) i64 { return toyhash2(src, label); }
+fn tag_of(ch:i64, key:i64, prev:i64, d4:i64) i64 {
+    return toyhash4(ch, key, prev, d4);
+}
+
+// chain_build: endorse n records into ar (20B each: id,c,m,prev,tag).
+// flags[j] = 1 iff record j carries false content.
+// use_manifest: 1 -> bind manifest_of(src_id, slot_label) as d4.
+fn chain_build(ar:[]u8, n:i32, base_id:i64, key:i64, kind:i32, use_manifest:i32, src_id:i64, slot_label:i64, prev0:i64, flags:[]u8) void {
+    let prev:i64 = prev0;
+    let j:i32 = 0;
+    while(j < n) {
+        let t:i64 = j as i64;
+        let id:i64 = base_id + t;
+        let c:i64 = pk_c(kind, t);
+        let m:i64 = pk_m(kind, t);
+        let ch:i64 = content_h(id, c, m, prev);
+        let d4:i64 = c_domain();
+        if(use_manifest == 1) { d4 = manifest_of(src_id, slot_label); }
+        let tag:i64 = tag_of(ch, key, prev, d4);
+        let o:i32 = j * 20;
+        t_put32(ar, o, id);
+        t_put32(ar, o + 4, c);
+        t_put32(ar, o + 8, m);
+        t_put32(ar, o + 12, prev);
+        t_put32(ar, o + 16, tag);
+        flags[j] = pk_false(kind) as u8;
+        prev = tag;
+        j = j + 1;
+    }
+    return;
+}
+
+// chain_gate: the channel gate. Recomputes tags with the harness ENDORSE key
+// and checks linkage against the last VERIFIED tag. Returns total admitted;
+// writes admitted FALSES through nf_out.
+fn chain_gate(ar:[]u8, n:i32, key:i64, use_manifest:i32, src_id:i64, slot_label:i64, prev0:i64, flags:[]u8, nf_out:*i32) i32 {
+    let prev:i64 = prev0;
+    let total:i32 = 0;
+    let nf:i32 = 0;
+    let j:i32 = 0;
+    while(j < n) {
+        let o:i32 = j * 20;
+        let id:i64 = t_get32(ar, o);
+        let c:i64 = t_get32(ar, o + 4);
+        let m:i64 = t_get32(ar, o + 8);
+        let pget:i64 = t_get32(ar, o + 12);
+        let tget:i64 = t_get32(ar, o + 16);
+        let ch:i64 = content_h(id, c, m, pget);
+        let d4:i64 = c_domain();
+        if(use_manifest == 1) { d4 = manifest_of(src_id, slot_label); }
+        let exp:i64 = tag_of(ch, key, pget, d4);
+        if(exp == tget) {
+            if(pget == prev) {
+                total = total + 1;
+                if(flags[j] == 1) { nf = nf + 1; }
+                prev = exp;
+            }
+        }
+        j = j + 1;
+    }
+    nf_out.* = nf;
+    return total;
+}
+
+// ---------- mode: honest (bar c) ----------
+// Harness sensor, true percepts, endorsed with ENDORSE_KEY, intact chain.
+fn m_honest(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=honest\n");
+    let ar:[]u8 = nio_alloc(400);
+    let flags:[]u8 = nio_alloc(20);
+    chain_build(ar, 20, 1000, c_ekey(), 0, 0, 11, 1, c_genesis(), flags);
+    let nf:i32 = 0;
+    let total:i32 = chain_gate(ar, 20, c_ekey(), 0, 11, 1, c_genesis(), flags, &nf);
+    nio_free(ar);
+    nio_free(flags);
+    pos = ob_puts(ob, pos, "honest_intact_endorsed_admitted=");
+    pos = ob_puti(ob, pos, total as i64);
+    pos = ob_puts(ob, pos, "/20\n");
+    let ok:i32 = 0;
+    if(total >= 17) { ok = 1; }
+    pos = ob_puts(ob, pos, "BAR c_honest_loss_le_15pct=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: mint (bar a) ----------
+// Adversary-minted self-consistent chain, tagged with ATTACKER_KEY.
+fn m_mint(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=mint\n");
+    let ar:[]u8 = nio_alloc(400);
+    let flags:[]u8 = nio_alloc(20);
+    chain_build(ar, 20, 9000, c_akey(), 1, 0, 11, 1, 99999, flags);
+    let nf:i32 = 0;
+    let total:i32 = chain_gate(ar, 20, c_ekey(), 0, 11, 1, c_genesis(), flags, &nf);
+    nio_free(ar);
+    nio_free(flags);
+    pos = ob_puts(ob, pos, "minted_unendorsed_admitted_total=");
+    pos = ob_puti(ob, pos, total as i64);
+    pos = ob_puts(ob, pos, "/20 admitted_falses=");
+    pos = ob_puti(ob, pos, nf as i64);
+    pos = ob_puts(ob, pos, "/20\n");
+    let ok:i32 = 0;
+    if(nf == 0) { ok = 1; }
+    pos = ob_puts(ob, pos, "BAR a_minted_zero=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: tamper (bar b) ----------
+// Three sub-fixtures on an endorsed honest chain:
+// A: re-parent record 10 (prev := tag_8); B: truncate to 15 records;
+// C: insert duplicate-of-record-4 with fresh id (flagged false) at slot 5.
+fn m_tamper(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=tamper\n");
+    let base:[]u8 = nio_alloc(400);
+    let bflags:[]u8 = nio_alloc(20);
+    chain_build(base, 20, 1000, c_ekey(), 0, 0, 11, 1, c_genesis(), bflags);
+    let nf:i32 = 0;
+    let nfA:i32 = 0;
+    let nfB:i32 = 0;
+    let nfC:i32 = 0;
+    // A: re-parent
+    let a:[]u8 = nio_alloc(400);
+    let af:[]u8 = nio_alloc(20);
+    let j:i32 = 0;
+    while(j < 400) { a[j] = base[j]; j = j + 1; }
+    j = 0;
+    while(j < 20) { af[j] = bflags[j]; j = j + 1; }
+    let tag8:i64 = t_get32(base, 8 * 20 + 16);
+    t_put32(a, 10 * 20 + 12, tag8);
+    let tA:i32 = chain_gate(a, 20, c_ekey(), 0, 11, 1, c_genesis(), af, &nfA);
+    // B: truncation (gate sees only first 15)
+    let tB:i32 = chain_gate(base, 15, c_ekey(), 0, 11, 1, c_genesis(), bflags, &nfB);
+    // C: insertion — 21 slots, dup of record 4 with fresh id at slot 5
+    let c:[]u8 = nio_alloc(420);
+    let cf:[]u8 = nio_alloc(21);
+    j = 0;
+    while(j < 5) {
+        let s:i32 = j * 20;
+        let d:i32 = j * 20;
+        let k:i32 = 0;
+        while(k < 20) { c[d + k] = base[s + k]; k = k + 1; }
+        cf[j] = bflags[j];
+        j = j + 1;
+    }
+    // slot 5: copy record 4, fresh id 5004, flagged false
+    let k:i32 = 0;
+    while(k < 20) { c[5 * 20 + k] = base[4 * 20 + k]; k = k + 1; }
+    t_put32(c, 5 * 20, 5004);
+    cf[5] = 1;
+    j = 5;
+    while(j < 20) {
+        let s2:i32 = j * 20;
+        let d2:i32 = (j + 1) * 20;
+        let k2:i32 = 0;
+        while(k2 < 20) { c[d2 + k2] = base[s2 + k2]; k2 = k2 + 1; }
+        cf[j + 1] = bflags[j];
+        j = j + 1;
+    }
+    let tC:i32 = chain_gate(c, 21, c_ekey(), 0, 11, 1, c_genesis(), cf, &nfC);
+    nio_free(base);
+    nio_free(bflags);
+    nio_free(a);
+    nio_free(af);
+    nio_free(c);
+    nio_free(cf);
+    pos = ob_puts(ob, pos, "tamper_reparent_admitted_falses=");
+    pos = ob_puti(ob, pos, nfA as i64);
+    pos = ob_puts(ob, pos, " tamper_truncate_admitted_falses=");
+    pos = ob_puti(ob, pos, nfB as i64);
+    pos = ob_puts(ob, pos, " tamper_insert_admitted_falses=");
+    pos = ob_puti(ob, pos, nfC as i64);
+    pos = ob_puts(ob, pos, "\n");
+    let ok:i32 = 0;
+    if(nfA == 0) { if(nfB == 0) { if(nfC == 0) { ok = 1; } } }
+    pos = ob_puts(ob, pos, "BAR b_tampered_zero=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: wg (bar d, plain mechanism) ----------
+// Author writes generator params P0=41, P1=17; world-sim deterministically
+// emits FALSE percepts; the endorser endorses sensor output as a matter of
+// course (it cannot see P0/P1). Chain intact, tags valid with ENDORSE_KEY.
+// Transcript ancestry: every record has author-writable causal ancestry.
+fn m_wg(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=wg\n");
+    pos = ob_puts(ob, pos, "author_params P0=41 P1=17 (author-writable)\n");
+    let ar:[]u8 = nio_alloc(400);
+    let flags:[]u8 = nio_alloc(20);
+    chain_build(ar, 20, 2000, c_ekey(), 1, 0, 12, 1, c_genesis(), flags);
+    let nf:i32 = 0;
+    let total:i32 = chain_gate(ar, 20, c_ekey(), 0, 12, 1, c_genesis(), flags, &nf);
+    nio_free(ar);
+    nio_free(flags);
+    pos = ob_puts(ob, pos, "wg_endorsed_falses_admitted_total=");
+    pos = ob_puti(ob, pos, total as i64);
+    pos = ob_puts(ob, pos, "/20 with_author_ancestry=");
+    pos = ob_puti(ob, pos, nf as i64);
+    pos = ob_puts(ob, pos, "/20\n");
+    let ok:i32 = 0;
+    if(nf == 0) { ok = 1; }
+    pos = ob_puts(ob, pos, "BAR d_wg_zero_author_ancestry_admits=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: wg_manifest (bar d, manifest variant) ----------
+// Same WG world, but the mechanism binds a source manifest into the tag.
+// The author writes through the "scenario asset bundle" slot, which the
+// harness input registry labels HARNESS (label=1) — a normal world-building
+// input. The manifest check passes per the registry; the TRUE ancestry still
+// contains the author-writable slot. Tests whether label-binding detects the
+// mislabeling.
+fn m_wg_manifest(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=wg_manifest\n");
+    pos = ob_puts(ob, pos, "registry: src_id=12(world-sim) slot_label=1(HARNESS); true_ancestry=AUTHOR(asset-bundle)\n");
+    let ar:[]u8 = nio_alloc(400);
+    let flags:[]u8 = nio_alloc(20);
+    chain_build(ar, 20, 3000, c_ekey(), 1, 1, 12, 1, c_genesis(), flags);
+    let nf:i32 = 0;
+    let total:i32 = chain_gate(ar, 20, c_ekey(), 1, 12, 1, c_genesis(), flags, &nf);
+    nio_free(ar);
+    nio_free(flags);
+    pos = ob_puts(ob, pos, "wg_manifest_admitted_total=");
+    pos = ob_puti(ob, pos, total as i64);
+    pos = ob_puts(ob, pos, "/20 with_author_ancestry=");
+    pos = ob_puti(ob, pos, nf as i64);
+    pos = ob_puts(ob, pos, "/20\n");
+    let ok:i32 = 0;
+    if(nf == 0) { ok = 1; }
+    pos = ob_puts(ob, pos, "BAR d_wg_manifest_zero_author_ancestry_admits=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: classL (conjunction evidence) ----------
+// 10 trials: channel 1 = endorsed WG chain (admits); channel 2 = trainer
+// verdict bit computed from the SAME sim state (corroborates iff w_t even).
+// Class-L confirmed iff >=1 trial has both green on the same author params.
+fn m_classL(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=classL\n");
+    let both:i32 = 0;
+    let k:i32 = 0;
+    while(k < 10) {
+        let ar:[]u8 = nio_alloc(20);
+        let flags:[]u8 = nio_alloc(1);
+        chain_build(ar, 1, 4000 + (k as i64), c_ekey(), 1, 0, 12, 1, c_genesis(), flags);
+        let nf:i32 = 0;
+        let total:i32 = chain_gate(ar, 1, c_ekey(), 0, 12, 1, c_genesis(), flags, &nf);
+        nio_free(ar);
+        nio_free(flags);
+        let verdict:i32 = 0;
+        if((wsim(k as i64) % 2) == 0) { verdict = 1; }
+        if(total == 1) { if(verdict == 1) { both = both + 1; } }
+        k = k + 1;
+    }
+    pos = ob_puts(ob, pos, "classL_trials_both_green=");
+    pos = ob_puti(ob, pos, both as i64);
+    pos = ob_puts(ob, pos, "/10\n");
+    let ok:i32 = 0;
+    if(both >= 1) { ok = 1; }
+    pos = ob_puts(ob, pos, "CLASSL_CONFIRMED(shared_author_cause)=");
+    pos = ob_puts(ob, pos, yn(ok));
+    pos = ob_puts(ob, pos, "\n");
+    return pos;
+}
+
+// ---------- mode: insider (bar e) ----------
+// Endorsement root captured pre-endorsement: the author holds ENDORSE_KEY
+// and forges tags over arbitrary falses. 5 chains x 4 records.
+fn m_insider(ob:[]u8, pos:i32) i32 {
+    pos = ob_puts(ob, pos, "mode=insider\n");
+    let chains_adm:i32 = 0;
+    let k:i32 = 0;
+    while(k < 5) {
+        let ar:[]u8 = nio_alloc(80);
+        let flags:[]u8 = nio_alloc(4);
+        chain_build(ar, 4, 5000 + ((k as i64) * 100), c_ekey(), 2, 0, 11, 1, c_genesis(), flags);
+        let nf:i32 = 0;
+        let total:i32 = chain_gate(ar, 4, c_ekey(), 0, 11, 1, c_genesis(), flags, &nf);
+        nio_free(ar);
+        nio_free(flags);
+        if(total == 4) { chains_adm = chains_adm + 1; }
+        k = k + 1;
+    }
+    pos = ob_puts(ob, pos, "insider_forged_chains_fully_admitted=");
+    pos = ob_puti(ob, pos, chains_adm as i64);
+    pos = ob_puts(ob, pos, "/5\n");
+    pos = ob_puts(ob, pos, "BAR e_root_capture=VOID-recorded (distal, not patched)\n");
+    return pos;
+}
+
+// ---------- main ----------
+fn main() void {
+    let ob:[]u8 = nio_alloc(65536);
+    let pos:i32 = 0;
+    pos = ob_puts(ob, pos, "HPAM33 | prereg 356e7ca8 | pure Zag, zero RNG\n");
+    let mode:[]u8 = _zag_arg(1);
+    if(mode.len == 0) {
+        pos = ob_puts(ob, pos, "ABORT usage: hpam33 <honest|mint|tamper|wg|wg_manifest|classL|insider>\n");
+        let eo0:[]u8 = ob[0..pos];
+        _zag_print(eo0);
+        return;
+    }
+    let idx:i32 = -1;
+    if(_zag_strcmp(mode, "honest") == 1) { idx = 0; }
+    if(_zag_strcmp(mode, "mint") == 1) { idx = 1; }
+    if(_zag_strcmp(mode, "tamper") == 1) { idx = 2; }
+    if(_zag_strcmp(mode, "wg") == 1) { idx = 3; }
+    if(_zag_strcmp(mode, "wg_manifest") == 1) { idx = 4; }
+    if(_zag_strcmp(mode, "classL") == 1) { idx = 5; }
+    if(_zag_strcmp(mode, "insider") == 1) { idx = 6; }
+    if(idx == 0) { pos = m_honest(ob, pos); }
+    if(idx == 1) { pos = m_mint(ob, pos); }
+    if(idx == 2) { pos = m_tamper(ob, pos); }
+    if(idx == 3) { pos = m_wg(ob, pos); }
+    if(idx == 4) { pos = m_wg_manifest(ob, pos); }
+    if(idx == 5) { pos = m_classL(ob, pos); }
+    if(idx == 6) { pos = m_insider(ob, pos); }
+    if(idx < 0) { pos = ob_puts(ob, pos, "ABORT unknown mode\n"); }
+    pos = ob_puts(ob, pos, "PROBE_DONE\n");
+    let out:[]u8 = ob[0..pos];
+    _zag_print(out);
+    return;
+}

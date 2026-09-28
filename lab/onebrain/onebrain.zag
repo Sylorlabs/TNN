@@ -1,0 +1,542 @@
+// onebrain.zag : Experiment 2 machinery: one-brain sub-deliberation dispatch.
+//
+// Question (Micah): can TNN itself dispatch multiple parallel
+// sub-deliberations FROM THE SAME BRAIN sharing one ledger/state?
+//
+// Design (per PREREG.md):
+//   GEN (probe) -> FORK? -> fan-out (K branches, deterministic round-robin
+//   sub-passes, ONE shared ledger) -> single ARGMAX over the shared ledger.
+// "Parallel" = deterministically interleaved sub-passes with shared state.
+// Zero RNG, no threads, byte-identical reruns.
+//
+// The four genuineness requirements and where they live:
+//   (1) TNN's own decision: ob_fork_decide computes the fork flag from LEDGER
+//       state (alive count, score margin) inside ob_deliberate. The driver
+//       only loops problems and calls ob_deliberate; no driver-level if/loop
+//       decides fan-out.
+//   (2) One shared ledger: in mode 0 every branch reads/writes the same
+//       scores/alive/used/valid arrays. Exactly one ledger exists during fan-out.
+//   (3) Causal cross-talk: branches read shared alive/scores/used/valid when
+//       selecting evidence and when reconciling; a branch's elimination or
+//       refutation is instantly visible to the others (proven by poison test).
+//   (4) Single reintegrated verdict: one ob_argmax over the shared ledger.
+//
+// Branch lenses (fixed, deterministic, differ only in evidence selection):
+//   b0 confirmer   : lowest-index valid unconsumed evidence (payload order)
+//   b1 cross-exam  : strongest attack on the current leader first
+//   b2 rescuer     : strongest support for the current runner-up first
+// All other rules (consume, eliminate, refute) are identical across branches.
+// Each fan-out round: every branch selects+consumes into the shared scores,
+// then ONE joint reconciliation (ELIMINATE + XEXAM + TEST) on the shared ledger.
+//
+// FROZEN MACHINERY PARAMS (per prereg; not tuned post-freeze):
+const OB_PROBE_N:i32 = 2;    // evidence items consumed in the GEN probe phase
+const OB_FORK_THR:i32 = 350; // fork iff >=2 readings alive and margin < thr
+const OB_ROUNDS:i32 = 3;     // fan-out rounds (each = K sub-passes + reconcile)
+const OB_BRANCHES:i32 = 3;   // sub-deliberations
+const OB_ELIM:i32 = 600;     // shared elimination margin (thousandths)
+const OB_REFUTE:i32 = 650;   // decisive-attack refutation threshold
+const OB_MAXH:i32 = 16;
+const OB_MAXE:i32 = 64;
+
+@import("../deliberation_depth/harness/R33_NATIVE_IO_V1.zag")
+@import("../deliberation_depth/harness/R33_NATIVE_SHA256_V2.zag")
+@import("../deliberation_depth/harness/dlb_util.zag")
+@import("../deliberation_depth/harness/dlb_json.zag")
+@import("../deliberation_depth/harness/dlb_ledger.zag")
+
+// ---- state ----
+struct OBSt {
+    scores:[]u8,   // OB_MAXH*8, i64 thousandths (shared ledger)
+    alive:[]u8,    // OB_MAXH bytes (shared ledger)
+    used:[]u8,     // OB_MAXE bytes, consumed flags (shared ledger)
+    valid:[]u8,    // OB_MAXE bytes, validity flags (shared ledger)
+    consumed:i32, rounds:i32, forked:i32,
+    verdict:i32, conf:i32,
+    // ablation scratch: one private ledger per branch
+    b_scores:[]u8, b_alive:[]u8, b_used:[]u8, b_valid:[]u8,
+    b_verdict:[]u8, // 3*i32 verdicts of the private branch runs (ablation)
+    // per-branch consumption sequences (for causal-test inspection)
+    seq:[]u8,      // 3*16 i32
+    seq_n:[]u8,    // 3 i32
+    // trace counters
+    t_consume:i32, t_elim:i32, t_xexam:i32, t_test:i32,
+}
+struct OBPoison { at_round:i32, kind:i32, target:i32, branch:i32 }
+// kind: 0 none, 1 invalidate evidence valid[target]=0, 2 eliminate alive[target]=0.
+// at_round: -1 never; -2 right after the fork decision (pre-fanout);
+//           >=0 after that fan-out round's reconciliation.
+// branch: in ablation mode, which private ledger to poison (0..2).
+
+fn ob_alloc(st:*OBSt)i32 {
+    st.*.scores=nio_alloc(OB_MAXH*8);
+    st.*.alive=nio_alloc(OB_MAXH);
+    st.*.used=nio_alloc(OB_MAXE);
+    st.*.valid=nio_alloc(OB_MAXE);
+    st.*.b_scores=nio_alloc(3*OB_MAXH*8);
+    st.*.b_alive=nio_alloc(3*OB_MAXH);
+    st.*.b_used=nio_alloc(3*OB_MAXE);
+    st.*.b_valid=nio_alloc(3*OB_MAXE);
+    st.*.b_verdict=nio_alloc(3*4);
+    st.*.seq=nio_alloc(3*16*4);
+    st.*.seq_n=nio_alloc(3*4);
+    if(st.*.scores.len==0 || st.*.alive.len==0 || st.*.b_scores.len==0){return -1;}
+    return 0;
+}
+fn ob_free(st:*OBSt)void {
+    nio_free(st.*.scores);nio_free(st.*.alive);nio_free(st.*.used);nio_free(st.*.valid);
+    nio_free(st.*.b_scores);nio_free(st.*.b_alive);nio_free(st.*.b_used);nio_free(st.*.b_valid);
+    nio_free(st.*.b_verdict);nio_free(st.*.seq);nio_free(st.*.seq_n);
+}
+// branch b's private ledger views (ablation)
+fn ob_bs(st:*OBSt,b:i32)[]u8 { let a:[]u8=st.*.b_scores;return a[b*OB_MAXH*8..(b+1)*OB_MAXH*8]; }
+fn ob_ba(st:*OBSt,b:i32)[]u8 { let a:[]u8=st.*.b_alive;return a[b*OB_MAXH..(b+1)*OB_MAXH]; }
+fn ob_bu(st:*OBSt,b:i32)[]u8 { let a:[]u8=st.*.b_used;return a[b*OB_MAXE..(b+1)*OB_MAXE]; }
+fn ob_bv(st:*OBSt,b:i32)[]u8 { let a:[]u8=st.*.b_valid;return a[b*OB_MAXE..(b+1)*OB_MAXE]; }
+fn ob_seq(st:*OBSt,b:i32)[]u8 { let a:[]u8=st.*.seq;return a[b*16*4..(b+1)*16*4]; }
+fn ob_seqn(st:*OBSt,b:i32)i32 { let a:[]u8=st.*.seq_n;return au_get32(a,b); }
+fn ob_seq_push(st:*OBSt,b:i32,e:i32)void {
+    let n:i32=ob_seqn(st,b);
+    if(n<16){
+        let s:[]u8=ob_seq(st,b);
+        au_put32(s,n,e);
+        let a:[]u8=st.*.seq_n;
+        au_put32(a,b,n+1);
+    }
+}
+
+// ---- ledger primitives ----
+// leader index (ties -> lowest); margin via out param (leader score if sole).
+fn ob_leader(scores:[]u8, alive:[]u8, nh:i32, margin:*i64)i32 {
+    let best:i32=-1;let bs:i64=0;let ss:i64=0;let have:i32=0;let have2:i32=0;
+    let i:i32=0;
+    while(i<nh){
+        if(alive[i]==1){
+            let sc:i64=au_get64(scores,i);
+            if(have==0){have=1;best=i;bs=sc;}
+            if(have==1 && sc>bs){
+                if(best!=i){have2=1;ss=bs;}
+                best=i;bs=sc;
+            }
+            if(have==1 && sc<=bs && i!=best){
+                if(have2==0){have2=1;ss=sc;}
+                if(have2==1 && sc>ss){ss=sc;}
+            }
+        }
+        i=i+1;
+    }
+    if(have2==1){margin.*=bs-ss;}
+    if(have2==0){margin.*=bs;}
+    return best;
+}
+fn ob_runnerup(scores:[]u8, alive:[]u8, nh:i32, leader:i32)i32 {
+    let second:i32=-1;let ss:i64=0;let have:i32=0;
+    let i:i32=0;
+    while(i<nh){
+        if(alive[i]==1 && i!=leader){
+            let sc:i64=au_get64(scores,i);
+            if(have==0){have=1;second=i;ss=sc;}
+            if(have==1 && sc>ss){second=i;ss=sc;}
+        }
+        i=i+1;
+    }
+    return second;
+}
+fn ob_nalive(alive:[]u8, nh:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<nh){if(alive[i]==1){n=n+1;}i=i+1;}
+    return n;
+}
+// Consume evidence e: supports add / attacks subtract, only for alive hyps.
+fn ob_consume(it:*Item, scores:[]u8, alive:[]u8, used:[]u8, e:i32)void {
+    let k:i32=0;let ns:i32=dj_sup_n(it,e);
+    while(k<ns){
+        let h:i32=dj_sup_h(it,e,k);let w:i32=dj_sup_w(it,e,k);
+        if(alive[h]==1){au_put64(scores,h,au_get64(scores,h)+(w as i64));}
+        k=k+1;
+    }
+    k=0;let na:i32=dj_att_n(it,e);
+    while(k<na){
+        let h:i32=dj_att_h(it,e,k);let w:i32=dj_att_w(it,e,k);
+        if(alive[h]==1){au_put64(scores,h,au_get64(scores,h)-(w as i64));}
+        k=k+1;
+    }
+    used[e]=1;
+}
+// Joint reconciliation on one ledger: ELIMINATE, XEXAM (refute leader),
+// TEST (refute runner-up). Returns eliminations performed. Logs steps.
+// The last surviving reading is never eliminated (explicit, documented).
+fn ob_reconcile(it:*Item, scores:[]u8, alive:[]u8, used:[]u8,
+                lg:*LG, lgo:*DOut, iid:[]u8, round:i32, tag:[]u8, st:*OBSt)i32 {
+    let nh:i32=it.*.nh;
+    let td:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&td,512)!=0){return -1;}
+    let nelim:i32=0;
+    let m:i64=0;
+    let leader:i32=ob_leader(scores,alive,nh,&m);
+    // ELIMINATE: drop alive hypotheses trailing the leader by >= OB_ELIM
+    let bs:i64=au_get64(scores,leader);
+    let h:i32=0;
+    while(h<nh){
+        if(alive[h]==1 && h!=leader){
+            let d:i64=bs-au_get64(scores,h);
+            if(d>=OB_ELIM as i64){
+                alive[h]=0;nelim=nelim+1;
+                td.n=0;td.err=0;
+                dout_str(&td,"tag=");dout_str(&td,tag);
+                dout_str(&td," h=");dout_str(&td,dj_hid(it,h));
+                dout_str(&td," d=");dout_i64(&td,d);
+                let rc:i32=lg_step(lg,lgo,iid,round,"ELIMINATE",dout_bytes(&td));
+                if(rc!=0){dout_free(&td);return -2;}
+            }
+        }
+        h=h+1;
+    }
+    // XEXAM: refute the leader if consumed evidence decisively attacks it
+    leader=ob_leader(scores,alive,nh,&m);
+    if(ob_nalive(alive,nh)>1){
+        let e:i32=0;let hit:i32=0;let hw:i32=0;
+        while(e<it.*.ne && hit==0){
+            if(used[e]==1){
+                let k:i32=0;let na:i32=dj_att_n(it,e);
+                while(k<na && hit==0){
+                    if(dj_att_h(it,e,k)==leader && dj_att_w(it,e,k)>=OB_REFUTE){
+                        hit=1;hw=dj_att_w(it,e,k);
+                    }
+                    k=k+1;
+                }
+            }
+            e=e+1;
+        }
+        if(hit==1){
+            alive[leader]=0;nelim=nelim+1;
+            st.*.t_xexam=st.*.t_xexam+1;
+            td.n=0;td.err=0;
+            dout_str(&td,"tag=");dout_str(&td,tag);
+            dout_str(&td," leader=");dout_str(&td,dj_hid(it,leader));
+            dout_str(&td," w=");dout_i64(&td,hw as i64);
+            let rc:i32=lg_step(lg,lgo,iid,round,"XEXAM",dout_bytes(&td));
+            if(rc!=0){dout_free(&td);return -3;}
+        }
+    }
+    // TEST: refute the runner-up the same way
+    leader=ob_leader(scores,alive,nh,&m);
+    let second:i32=ob_runnerup(scores,alive,nh,leader);
+    if(second>=0 && ob_nalive(alive,nh)>1){
+        let e:i32=0;let hit:i32=0;let hw:i32=0;
+        while(e<it.*.ne && hit==0){
+            if(used[e]==1){
+                let k:i32=0;let na:i32=dj_att_n(it,e);
+                while(k<na && hit==0){
+                    if(dj_att_h(it,e,k)==second && dj_att_w(it,e,k)>=OB_REFUTE){
+                        hit=1;hw=dj_att_w(it,e,k);
+                    }
+                    k=k+1;
+                }
+            }
+            e=e+1;
+        }
+        td.n=0;td.err=0;
+        dout_str(&td,"tag=");dout_str(&td,tag);
+        dout_str(&td," h=");dout_str(&td,dj_hid(it,second));
+        if(hit==1){
+            alive[second]=0;nelim=nelim+1;
+            st.*.t_test=st.*.t_test+1;
+            dout_str(&td," refuted w=");dout_i64(&td,hw as i64);
+        }
+        if(hit==0){dout_str(&td," holds");}
+        let rc:i32=lg_step(lg,lgo,iid,round,"TEST",dout_bytes(&td));
+        if(rc!=0){dout_free(&td);return -4;}
+    }
+    st.*.t_elim=st.*.t_elim+nelim;
+    dout_free(&td);
+    return nelim;
+}
+
+// Branch evidence selection on one ledger. Returns evidence idx or -1.
+fn ob_select(it:*Item, scores:[]u8, alive:[]u8, used:[]u8, valid:[]u8, branch:i32)i32 {
+    let nh:i32=it.*.nh;let ne:i32=it.*.ne;
+    let m:i64=0;
+    if(branch==1){
+        // cross-examiner: strongest attack on the current leader
+        let leader:i32=ob_leader(scores,alive,nh,&m);
+        let best:i32=-1;let bw:i32=-1;
+        let e:i32=0;
+        while(e<ne){
+            if(used[e]==0 && valid[e]==1){
+                let k:i32=0;let na:i32=dj_att_n(it,e);
+                while(k<na){
+                    if(dj_att_h(it,e,k)==leader){
+                        let w:i32=dj_att_w(it,e,k);
+                        if(w>bw){bw=w;best=e;}
+                    }
+                    k=k+1;
+                }
+            }
+            e=e+1;
+        }
+        if(best>=0){return best;}
+    }
+    if(branch==2){
+        // rescuer: strongest support for the current runner-up
+        let leader:i32=ob_leader(scores,alive,nh,&m);
+        let ru:i32=ob_runnerup(scores,alive,nh,leader);
+        if(ru>=0){
+            let best:i32=-1;let bw:i32=-1;
+            let e:i32=0;
+            while(e<ne){
+                if(used[e]==0 && valid[e]==1){
+                    let k:i32=0;let ns:i32=dj_sup_n(it,e);
+                    while(k<ns){
+                        if(dj_sup_h(it,e,k)==ru){
+                            let w:i32=dj_sup_w(it,e,k);
+                            if(w>bw){bw=w;best=e;}
+                        }
+                        k=k+1;
+                    }
+                }
+                e=e+1;
+            }
+            if(best>=0){return best;}
+        }
+    }
+    // b0, or fallback: lowest-index valid unconsumed evidence (payload order)
+    let e:i32=0;
+    while(e<ne){
+        if(used[e]==0 && valid[e]==1){return e;}
+        e=e+1;
+    }
+    return -1;
+}
+
+// Ledger-driven fork decision. Called inside ob_deliberate; no driver input.
+// fork = (>=2 readings alive) AND (leader margin < OB_FORK_THR) AND (evidence remains).
+fn ob_fork_decide(it:*Item, scores:[]u8, alive:[]u8, consumed:i32)i32 {
+    if(it.*.nh<2){return 0;}
+    if(consumed>=it.*.ne){return 0;}
+    let m:i64=0;
+    let leader:i32=ob_leader(scores,alive,it.*.nh,&m);
+    if(leader<0){return 0;}
+    if(ob_nalive(alive,it.*.nh)<2){return 0;}
+    if(m<OB_FORK_THR as i64){return 1;}
+    return 0;
+}
+
+fn ob_argmax(scores:[]u8, alive:[]u8, nh:i32)i32 {
+    let m:i64=0;
+    return ob_leader(scores,alive,nh,&m);
+}
+
+// Apply a poison write to one ledger (shared or one private copy).
+fn ob_poison_apply(it:*Item, scores:[]u8, alive:[]u8, used:[]u8, valid:[]u8,
+                   pz:*OBPoison, lg:*LG, lgo:*DOut, iid:[]u8, round:i32)i32 {
+    let td:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&td,256)!=0){return -1;}
+    if(pz.*.kind==1){
+        let t:i32=pz.*.target;
+        if(t>=0 && t<it.*.ne){valid[t]=0;}
+        dout_str(&td,"kind=invalidate_evidence target=");
+        dout_str(&td,dj_eid(it,t));
+        let rc:i32=lg_step(lg,lgo,iid,round,"POISON",dout_bytes(&td));
+        dout_free(&td);
+        if(rc!=0){return -2;}
+        return 0;
+    }
+    if(pz.*.kind==2){
+        let t:i32=pz.*.target;
+        // last-survivor protection also holds for poison: never void the ledger
+        if(t>=0 && t<it.*.nh && ob_nalive(alive,it.*.nh)>1){alive[t]=0;}
+        dout_str(&td,"kind=eliminate_hyp target=");
+        dout_str(&td,dj_hid(it,t));
+        let rc:i32=lg_step(lg,lgo,iid,round,"POISON",dout_bytes(&td));
+        dout_free(&td);
+        if(rc!=0){return -3;}
+        return 0;
+    }
+    dout_free(&td);
+    return 0;
+}
+
+// Full one-brain deliberation on one problem.
+// mode 0 = one-brain (one shared ledger); mode 1 = ablation (private copies).
+// Sets st.verdict / st.conf / st.forked. Returns 0 on success.
+fn ob_deliberate(it:*Item, st:*OBSt, lg:*LG, lgo:*DOut, mode:i32, pz:*OBPoison)i32 {
+    let nh:i32=it.*.nh;let ne:i32=it.*.ne;
+    let iid:[]u8=dj_id(it);
+    let scores:[]u8=st.*.scores;let alive:[]u8=st.*.alive;
+    let used:[]u8=st.*.used;let valid:[]u8=st.*.valid;
+    au_zero(scores);au_zero(alive);au_zero(used);au_zero(st.*.seq);au_zero(st.*.seq_n);
+    let i:i32=0;
+    while(i<nh){alive[i]=1;i=i+1;}
+    i=0;
+    while(i<ne){valid[i]=1;i=i+1;}
+    st.*.consumed=0;st.*.rounds=0;st.*.forked=0;
+    st.*.verdict=-1;st.*.conf=0;
+    st.*.t_consume=0;st.*.t_elim=0;st.*.t_xexam=0;st.*.t_test=0;
+    au_zero(st.*.b_verdict);
+    let td:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&td,512)!=0){return -1;}
+    td.n=0;td.err=0;
+    dout_str(&td,"nh=");dout_i64(&td,nh as i64);
+    dout_str(&td," ne=");dout_i64(&td,ne as i64);
+    dout_str(&td," mode=");dout_i64(&td,mode as i64);
+    let rc:i32=lg_step(lg,lgo,iid,0,"BEGIN",dout_bytes(&td));
+    if(rc!=0){dout_free(&td);return rc;}
+    // ---- GEN probe: first OB_PROBE_N valid evidence, scoring only ----
+    let pk:i32=0;
+    while(pk<OB_PROBE_N && st.*.consumed<ne){
+        let e:i32=ob_select(it,scores,alive,used,valid,0);
+        if(e<0){break;}
+        ob_consume(it,scores,alive,used,e);
+        st.*.consumed=st.*.consumed+1;
+        st.*.t_consume=st.*.t_consume+1;
+        td.n=0;td.err=0;
+        dout_str(&td,"e=");dout_str(&td,dj_eid(it,e));
+        rc=lg_step(lg,lgo,iid,0,"PROBE_EV",dout_bytes(&td));
+        if(rc!=0){dout_free(&td);return rc;}
+        pk=pk+1;
+    }
+    // ---- ledger-driven fork decision (inside the machinery) ----
+    let fork:i32=ob_fork_decide(it,scores,alive,st.*.consumed);
+    st.*.forked=fork;
+    let m:i64=0;
+    let lead0:i32=ob_leader(scores,alive,nh,&m);
+    td.n=0;td.err=0;
+    dout_str(&td,"fork=");dout_i64(&td,fork as i64);
+    dout_str(&td," margin=");dout_i64(&td,m);
+    dout_str(&td," nalive=");dout_i64(&td,ob_nalive(alive,nh) as i64);
+    dout_str(&td," leader=");dout_str(&td,dj_hid(it,lead0));
+    rc=lg_step(lg,lgo,iid,0,"FORK",dout_bytes(&td));
+    if(rc!=0){dout_free(&td);return rc;}
+    if(fork==0){
+        // ---- no fork: single continuation, payload order ----
+        let r:i32=0;
+        while(r<ne){
+            let e:i32=ob_select(it,scores,alive,used,valid,0);
+            if(e<0){break;}
+            ob_consume(it,scores,alive,used,e);
+            st.*.consumed=st.*.consumed+1;
+            st.*.t_consume=st.*.t_consume+1;
+            td.n=0;td.err=0;
+            dout_str(&td,"e=");dout_str(&td,dj_eid(it,e));
+            rc=lg_step(lg,lgo,iid,r+1,"CONSUME",dout_bytes(&td));
+            if(rc!=0){dout_free(&td);return rc;}
+            let rr:i32=ob_reconcile(it,scores,alive,used,lg,lgo,iid,r+1,"single",st);
+            if(rr<0){dout_free(&td);return rr;}
+            r=r+1;
+        }
+        st.*.rounds=r;
+    }
+    if(fork==1){
+        // ---- fan-out ----
+        let b:i32=0;
+        if(mode==1){
+            // ablation: copy the shared probe state into 3 private ledgers
+            while(b<OB_BRANCHES){
+                let bs:[]u8=ob_bs(st,b);let ba:[]u8=ob_ba(st,b);
+                let bu:[]u8=ob_bu(st,b);let bv:[]u8=ob_bv(st,b);
+                let k:i32=0;
+                while(k<OB_MAXH*8){bs[k]=scores[k];k=k+1;}
+                k=0;
+                while(k<OB_MAXH){ba[k]=alive[k];k=k+1;}
+                k=0;
+                while(k<OB_MAXE){bu[k]=used[k];bv[k]=valid[k];k=k+1;}
+                b=b+1;
+            }
+        }
+        // pre-fanout poison (at_round=-2): applied after the fork decision,
+        // before the first sub-pass round (causal tests only)
+        if(pz.*.kind!=0 && pz.*.at_round==-2){
+            if(mode==0){
+                rc=ob_poison_apply(it,scores,alive,used,valid,pz,lg,lgo,iid,0);
+                if(rc!=0){dout_free(&td);return rc;}
+            }
+            if(mode==1){
+                let pb:i32=pz.*.branch;
+                if(pb<0){pb=0;}
+                if(pb>2){pb=2;}
+                rc=ob_poison_apply(it,ob_bs(st,pb),ob_ba(st,pb),ob_bu(st,pb),ob_bv(st,pb),
+                                   pz,lg,lgo,iid,0);
+                if(rc!=0){dout_free(&td);return rc;}
+            }
+        }
+        let r:i32=0;
+        while(r<OB_ROUNDS){
+            b=0;
+            while(b<OB_BRANCHES){
+                let sc:[]u8=scores;let al:[]u8=alive;let us:[]u8=used;let va:[]u8=valid;
+                if(mode==1){sc=ob_bs(st,b);al=ob_ba(st,b);us=ob_bu(st,b);va=ob_bv(st,b);}
+                let e:i32=ob_select(it,sc,al,us,va,b);
+                if(e>=0){
+                    ob_consume(it,sc,al,us,e);
+                    st.*.consumed=st.*.consumed+1;
+                    st.*.t_consume=st.*.t_consume+1;
+                    ob_seq_push(st,b,e);
+                    td.n=0;td.err=0;
+                    dout_str(&td,"b=");dout_i64(&td,b as i64);
+                    dout_str(&td," e=");dout_str(&td,dj_eid(it,e));
+                    if(mode==1){dout_str(&td," private=1");}
+                    rc=lg_step(lg,lgo,iid,r+1,"CONSUME",dout_bytes(&td));
+                    if(rc!=0){dout_free(&td);return rc;}
+                }
+                if(mode==1){
+                    // ablation: each branch reconciles its own private ledger
+                    let rr:i32=ob_reconcile(it,sc,al,us,lg,lgo,iid,r+1,"abl",st);
+                    if(rr<0){dout_free(&td);return rr;}
+                }
+                b=b+1;
+            }
+            if(mode==0){
+                // one-brain: ONE joint reconciliation on the shared ledger
+                let rr:i32=ob_reconcile(it,scores,alive,used,lg,lgo,iid,r+1,"shared",st);
+                if(rr<0){dout_free(&td);return rr;}
+            }
+            // poison injection between sub-pass rounds (causal tests only)
+            if(pz.*.kind!=0 && pz.*.at_round==r){
+                if(mode==0){
+                    rc=ob_poison_apply(it,scores,alive,used,valid,pz,lg,lgo,iid,r+1);
+                    if(rc!=0){dout_free(&td);return rc;}
+                }
+                if(mode==1){
+                    let pb:i32=pz.*.branch;
+                    if(pb<0){pb=0;}
+                    if(pb>2){pb=2;}
+                    rc=ob_poison_apply(it,ob_bs(st,pb),ob_ba(st,pb),ob_bu(st,pb),ob_bv(st,pb),
+                                       pz,lg,lgo,iid,r+1);
+                    if(rc!=0){dout_free(&td);return rc;}
+                }
+            }
+            r=r+1;
+        }
+        st.*.rounds=r;
+        if(mode==1){
+            b=0;
+            while(b<OB_BRANCHES){
+                let bv2:i32=ob_argmax(ob_bs(st,b),ob_ba(st,b),nh);
+                au_put32(st.*.b_verdict,b,bv2);
+                b=b+1;
+            }
+        }
+    }
+    // ---- single reintegrated verdict: one ARGMAX over the shared ledger ----
+    // (ablation: ARGMAX over branch-0's private ledger : the designated single ledger)
+    let vs:[]u8=scores;let va2:[]u8=alive;
+    if(mode==1 && fork==1){vs=ob_bs(st,0);va2=ob_ba(st,0);}
+    let v:i32=ob_argmax(vs,va2,nh);
+    st.*.verdict=v;
+    let cm:i64=0;
+    ob_leader(vs,va2,nh,&cm);
+    st.*.conf=cm as i32;
+    td.n=0;td.err=0;
+    dout_str(&td,"verdict=");dout_str(&td,dj_hid(it,v));
+    dout_str(&td," conf=");dout_i64(&td,cm);
+    dout_str(&td," forked=");dout_i64(&td,fork as i64);
+    dout_str(&td," rounds=");dout_i64(&td,st.*.rounds as i64);
+    dout_str(&td," consumed=");dout_i64(&td,st.*.consumed as i64);
+    dout_str(&td," t_consume=");dout_i64(&td,st.*.t_consume as i64);
+    dout_str(&td," t_elim=");dout_i64(&td,st.*.t_elim as i64);
+    rc=lg_step(lg,lgo,iid,st.*.rounds,"VERDICT",dout_bytes(&td));
+    dout_free(&td);
+    if(rc!=0){return rc;}
+    return 0;
+}
