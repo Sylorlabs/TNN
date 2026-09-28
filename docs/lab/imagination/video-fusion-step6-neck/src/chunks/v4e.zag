@@ -1,0 +1,1127 @@
+// ==================== V4E: FUSE_HEAD merge pipeline ====================
+// stabilize -> per-frame anatomical heads -> pose-normalized warp (measured
+// landmarks, TNN-selected similarity/anisotropic + flip) -> photometric
+// transfer (TNN-deliberated from candidates) -> per-frame synthesis with
+// live donor appearance (per-frame pose, not frozen frame 12).
+
+// Residual check: mean |frame diff| before vs after stabilization, summed
+// over 3 sample pairs. out[16]: before_sum, after_sum.
+fn v4_stab_residual(std_:[]u8, cum:[]u8, W:i64, H:i64, out:[]u8) i64 {
+    let N:i64 = W * H;
+    let fa:[]u8 = nio_alloc(230400);
+    let fb:[]u8 = nio_alloc(230400);
+    let ga:[]u8 = nio_alloc(76800 as i32);
+    let gb:[]u8 = nio_alloc(76800 as i32);
+    let sa:[]u8 = nio_alloc(230400);
+    let sb:[]u8 = nio_alloc(230400);
+    let rb:i64 = 0;
+    let ra:i64 = 0;
+    let pr:i64 = 0;
+    while (pr < 3) {
+        let p0:i64 = 0;
+        if (pr == 1) { p0 = 11; }
+        if (pr == 2) { p0 = 22; }
+        if (recall_frame(std_, p0, fa) != 0) { return -771; }
+        if (recall_frame(std_, p0 + 1, fb) != 0) { return -772; }
+        seg_gray(fa, ga, N);
+        seg_gray(fb, gb, N);
+        let d:i64 = 0;
+        let p:i64 = 0;
+        while (p < N) {
+            let dd:i64 = (gb[p] as i64) - (ga[p] as i64);
+            if (dd < 0) { dd = 0 - dd; }
+            d = d + dd;
+            p = p + 1;
+        }
+        rb = rb + d / N;
+        if (v4_stable_frame(std_, p0, cum, W, H, sa) != 0) { return -773; }
+        if (v4_stable_frame(std_, p0 + 1, cum, W, H, sb) != 0) { return -774; }
+        seg_gray(sa, ga, N);
+        seg_gray(sb, gb, N);
+        d = 0;
+        p = 0;
+        while (p < N) {
+            let dd2:i64 = (gb[p] as i64) - (ga[p] as i64);
+            if (dd2 < 0) { dd2 = 0 - dd2; }
+            d = d + dd2;
+            p = p + 1;
+        }
+        ra = ra + d / N;
+        pr = pr + 1;
+    }
+    h_put64(out, 0, rb);
+    h_put64(out, 8, ra);
+    nio_free(fa);
+    nio_free(fb);
+    nio_free(ga);
+    nio_free(gb);
+    nio_free(sa);
+    nio_free(sb);
+    return 0;
+}
+
+// One frame's anatomical head (dark-component axis, no white reference).
+// Tries both axis directions; picks the one with a valid neck constriction.
+// lmf: 128-byte landmark record. Returns 1 (valid), negative (failure code).
+fn v4_anatomy_frame(std_:[]u8, f:i64, cum:[]u8, Es:[]u8, noise:i64, W:i64, H:i64, dm:[]u8, wm:[]u8, dst:[]u8, fvec:[]u8, sn:[]u8, nk:[]u8, hmask:[]u8, hs:[]u8, mo:[]u8, ev:[]u8, lmf:[]u8) i64 {
+    // Zero the full 16-qword landmark record up front: uninitialized heap
+    // is not reliably zeroed, and the caller copies/reads all 16 fields.
+    let lz:i64 = 0;
+    while (lz < 16) { h_put64(lmf, lz * 8, 0); lz = lz + 1; }
+    if (v4_dw_one(std_, f, cum, W, H, dm, wm, dst) != 0) { return -780; }
+    if (h_get64(dst, 72) == 0) { return -781; }
+    v4_moments(dm, W, H, mo);
+    if (h_get64(mo, 0) < 2000) { return -786; }
+    v4_eigenvec(h_get64(mo, 24), h_get64(mo, 40), h_get64(mo, 32), ev);
+    // Facing is 180-degree ambiguous. TNN tries BOTH axis directions and
+    // picks the one with the stronger measured neck constriction (prominence).
+    // The snout must be the front of the animal; the neck must constrict
+    // behind it. A direction with no neck (rc=1) cannot defend a head.
+    let dir:i64 = 0;
+    let best_prom:i64 = -1;
+    let best_fx:i64 = 0;
+    let best_fy:i64 = 0;
+    let best_snx:i64 = 0;
+    let best_sny:i64 = 0;
+    let best_dneck:i64 = 50;
+    while (dir < 2) {
+        let tfx:i64 = h_get64(ev, 0);
+        let tfy:i64 = h_get64(ev, 8);
+        if (dir == 1) { tfx = 0 - tfx; tfy = 0 - tfy; }
+        v4_snout(dm, tfx, tfy, W, H, sn);
+        v4_neckcut(dm, h_get64(sn, 0), h_get64(sn, 8), tfx, tfy, W, H, nk);
+        if (h_get64(nk, 0) == 0) {
+            let pr:i64 = h_get64(nk, 40);
+            if (pr > best_prom) {
+                best_prom = pr;
+                best_fx = tfx;
+                best_fy = tfy;
+                best_snx = h_get64(sn, 0);
+                best_sny = h_get64(sn, 8);
+                best_dneck = h_get64(nk, 8);
+            }
+        }
+        dir = dir + 1;
+    }
+    if (best_prom < 0) { return -785; }
+    let ux:i64 = best_fx;
+    let uy:i64 = best_fy;
+    // Head region bounded by the MEASURED neck cut (not a fixed 50px):
+    // the head is the dark part on the snout side of the neck constriction.
+    v4_head_region(dm, Es, best_snx, best_sny, ux, uy, best_dneck, noise, W, H, hmask, hs);
+    h_put64(lmf, 0, h_get64(hs, 72));
+    if (h_get64(hs, 72) == 0) { return -785; }
+    h_put64(lmf, 8, h_get64(hs, 0));
+    v4_snout(hmask, ux, uy, W, H, sn);
+    v4_moments(hmask, W, H, mo);
+    if (h_get64(mo, 0) < 500) { return -786; }
+    v4_eigenvec(h_get64(mo, 24), h_get64(mo, 40), h_get64(mo, 32), ev);
+    // Landmark record (16 qwords), the contract v4_merge reads:
+    // 0=valid 8=area 16=dcx(x1024) 24=dcy(x1024) 32=ax_x 40=ax_y
+    // 48=lam1 56=lam2 64=snout_x(px, head) 72=snout_y(px, head)
+    // 80=d_neck(px, measured) 88=facing_x(x1024, picked) 96=facing_y(x1024)
+    // 104=dark_snout_x(px) 112=dark_snout_y(px). Neck point (donor frame):
+    // (104,112) - 80*(88,96)/1024.
+    h_put64(lmf, 16, h_get64(mo, 8));
+    h_put64(lmf, 24, h_get64(mo, 16));
+    h_put64(lmf, 32, h_get64(ev, 0));
+    h_put64(lmf, 40, h_get64(ev, 8));
+    h_put64(lmf, 48, h_get64(ev, 16));
+    h_put64(lmf, 56, h_get64(ev, 24));
+    h_put64(lmf, 64, h_get64(sn, 0));
+    h_put64(lmf, 72, h_get64(sn, 8));
+    h_put64(lmf, 80, best_dneck);
+    h_put64(lmf, 88, best_fx);
+    h_put64(lmf, 96, best_fy);
+    h_put64(lmf, 104, best_snx);
+    h_put64(lmf, 112, best_sny);
+    return 1;
+}
+
+// Feather: alpha = box blur of mask, radius r (0..255).
+fn v4_feather(mask:[]u8, w:i64, h:i64, r:i64, alpha:[]u8) void {
+    let tmp:[]u8 = nio_alloc((w * h * 8) as i32);
+    let y:i64 = 0;
+    while (y < h) {
+        let x:i64 = 0;
+        while (x < w) {
+            let s:i64 = 0;
+            let c:i64 = 0;
+            let k:i64 = 0 - r;
+            while (k <= r) {
+                let xx:i64 = x + k;
+                if (xx < 0) { xx = 0; }
+                if (xx >= w) { xx = w - 1; }
+                if (mask[y * w + xx] != 0) { s = s + 255; }
+                c = c + 1;
+                k = k + 1;
+            }
+            h_put64(tmp, (y * w + x) * 8, s / c);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    y = 0;
+    while (y < h) {
+        let x2:i64 = 0;
+        while (x2 < w) {
+            let s2:i64 = 0;
+            let c2:i64 = 0;
+            let k2:i64 = 0 - r;
+            while (k2 <= r) {
+                let yy:i64 = y + k2;
+                if (yy < 0) { yy = 0; }
+                if (yy >= h) { yy = h - 1; }
+                s2 = s2 + h_get64(tmp, (yy * w + x2) * 8);
+                c2 = c2 + 1;
+                k2 = k2 + 1;
+            }
+            alpha[y * w + x2] = (s2 / c2) as u8;
+            x2 = x2 + 1;
+        }
+        y = y + 1;
+    }
+    nio_free(tmp);
+}
+
+// Composite the graft (bbox RGB + alpha) onto the frame with a vertical
+// light-tilt (k x1024: scene top-minus-bottom over mean) and return.
+fn v4_composite(fr:[]u8, W:i64, graft:[]u8, alpha:[]u8, sx0:i64, sy0:i64, sw:i64, sh:i64, tiltk:i64) void {
+    let y:i64 = 0;
+    while (y < sh) {
+        // tilt factor x1024: 1024 + k*(0.5 - y/sh)
+        let tf:i64 = 1024 + tiltk / 2 - tiltk * y / sh;
+        if (tf < 256) { tf = 256; }
+        if (tf > 4096) { tf = 4096; }
+        let x:i64 = 0;
+        while (x < sw) {
+            let a:i64 = alpha[y * sw + x] as i64;
+            if (a > 0) {
+                let gx:i64 = sx0 + x;
+                let gy:i64 = sy0 + y;
+                if (gx >= 0 && gx < W && gy >= 0 && gy < 240) {
+                    let o:i64 = (gy * W + gx) * 3;
+                    let go:i64 = (y * sw + x) * 3;
+                    let c:i64 = 0;
+                    while (c < 3) {
+                        let gv:i64 = (graft[go + c] as i64) * tf / 1024;
+                        if (gv > 255) { gv = 255; }
+                        let fv:i64 = fr[o + c] as i64;
+                        fr[o + c] = ((gv * a + fv * (255 - a)) / 255) as u8;
+                        c = c + 1;
+                    }
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// Soft contact shadow below the graft bbox.
+fn v4_shadow(fr:[]u8, W:i64, H:i64, sx0:i64, sy0:i64, sx1:i64, sy1:i64, strength:i64) void {
+    if (strength <= 0) { return; }
+    let y:i64 = sy1 + 1;
+    while (y <= sy1 + 18 && y < H) {
+        let fall:i64 = 255 - (y - sy1) * 255 / 19;
+        let x:i64 = sx0;
+        while (x <= sx1 && x < W) {
+            if (x >= 0 && y >= 0) {
+                let o:i64 = (y * W + x) * 3;
+                let dk:i64 = strength * fall / 255;
+                let c:i64 = 0;
+                while (c < 3) {
+                    let v:i64 = fr[o + c] as i64;
+                    v = v - v * dk / 256;
+                    if (v < 0) { v = 0; }
+                    fr[o + c] = v as u8;
+                    c = c + 1;
+                }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+fn v4_merge(std_:[]u8, str_:[]u8, lab0s:[]u8, lab1s:[]u8, donor_is_0:i64, oroot:i64, W:i64, H:i64, nf:i64, tr:[]u8, to:i64) i64 {
+    let N:i64 = W * H;
+    // ---------- STABILIZE ----------
+    to = tr_str(tr, to, "--- STABILIZE (TNN deliberates its own stabilization) ---\n");
+    let shifts:[]u8 = nio_alloc(368 as i32);
+    let sdbg:[]u8 = nio_alloc(368 as i32);
+    if (v4_shake(std_, nf, shifts, sdbg) != 0) { return -770; }
+    let cum:[]u8 = nio_alloc(384 as i32);
+    v4_cumul(shifts, nf, cum);
+    let smax:i64 = 0;
+    let f:i64 = 0;
+    while (f < nf) {
+        let ax:i64 = h_get64(cum, f * 16);
+        if (ax < 0) { ax = 0 - ax; }
+        let ay:i64 = h_get64(cum, f * 16 + 8);
+        if (ay < 0) { ay = 0 - ay; }
+        if (ax > smax) { smax = ax; }
+        if (ay > smax) { smax = ay; }
+        f = f + 1;
+    }
+    let res:[]u8 = nio_alloc(16 as i32);
+    if (v4_stab_residual(std_, cum, W, H, res) != 0) { return -775; }
+    let rb:i64 = h_get64(res, 0) / 3;
+    let ra:i64 = h_get64(res, 8) / 3;
+    nio_free(res);
+    let use_stab:i64 = 1;
+    if (smax < 3) { use_stab = 0; }
+    if (use_stab == 1 && ra >= rb) { use_stab = 0; }
+    if (use_stab == 0) {
+        f = 0;
+        while (f < nf) { h_put64(cum, f * 16, 0); h_put64(cum, f * 16 + 8, 0); f = f + 1; }
+    }
+    to = tr_str(tr, to, " shake_max_px=");
+    to = tr_i64(tr, to, smax);
+    to = tr_str(tr, to, " residual_before=");
+    to = tr_i64(tr, to, rb);
+    to = tr_str(tr, to, " residual_after=");
+    to = tr_i64(tr, to, ra);
+    to = tr_str(tr, to, " use_stab=");
+    to = tr_i64(tr, to, use_stab);
+    to = tr_nl(tr, to);
+    nio_free(shifts);
+    nio_free(sdbg);
+    // ---------- STABILIZED MOTION + NOISE ----------
+    let Es:[]u8 = nio_alloc(614400 as i32);
+    if (v4_stable_E(std_, cum, Es, W, H, nf) != 0) { return -776; }
+    let histE:[]u8 = nio_alloc(8192 as i32);
+    seg_histE(Es, N, histE);
+    let noise:i64 = seg_pct_bin(histE, 1024, N, 50) * 4;
+    nio_free(histE);
+    to = tr_str(tr, to, " motion_noise_x4=");
+    to = tr_i64(tr, to, noise);
+    to = tr_nl(tr, to);
+    // ---------- PER-FRAME ANATOMY ----------
+    to = tr_str(tr, to, "--- ANATOMY (per-frame snout-anchored head) ---\n");
+    let heads:[]u8 = nio_alloc(1843200 as i32);
+    let lm:[]u8 = nio_alloc(3072 as i32);
+    let lmi:i64 = 0;
+    while (lmi < 3072) { lm[lmi] = 0; lmi = lmi + 1; }
+    let dm:[]u8 = nio_alloc(76800 as i32);
+    let wm:[]u8 = nio_alloc(76800 as i32);
+    let dst:[]u8 = nio_alloc(160 as i32);
+    let fvec:[]u8 = nio_alloc(16 as i32);
+    let sn:[]u8 = nio_alloc(24 as i32);
+    let nk:[]u8 = nio_alloc(64 as i32);
+    let hmask:[]u8 = nio_alloc(76800 as i32);
+    let hs:[]u8 = nio_alloc(80 as i32);
+    let mo:[]u8 = nio_alloc(80 as i32);
+    let ev:[]u8 = nio_alloc(32 as i32);
+    let nvalid:i64 = 0;
+    f = 0;
+    while (f < nf) {
+        let lmf:[]u8 = nio_alloc(128 as i32);
+        let vr:i64 = v4_anatomy_frame(std_, f, cum, Es, noise, W, H, dm, wm, dst, fvec, sn, nk, hmask, hs, mo, ev, lmf);
+        
+        if (vr < 0 && vr > -790) {
+            // specific anatomy failure; trace it for f=0,12,23
+            if (f == 0 || f == 12 || f == 23) {
+                to = tr_str(tr, to, " f=");
+                to = tr_i64(tr, to, f);
+                to = tr_str(tr, to, " anatomy_fail=");
+                to = tr_i64(tr, to, vr);
+                to = tr_nl(tr, to);
+            }
+            vr = 0;
+        }
+        if (vr < 0) { return -777; }
+        if (vr == 1) {
+            nvalid = nvalid + 1;
+            // copy lmf fields to lm using h_put64 (safe)
+            let co:i64 = 0;
+            while (co < 16) {
+                h_put64(lm, f * 128 + co * 8, h_get64(lmf, co * 8));
+                co = co + 1;
+            }
+            // store the per-frame head mask for warp/render (N == 76800)
+            let hp:i64 = 0;
+            while (hp < N) {
+                heads[f * 76800 + hp] = hmask[hp];
+                hp = hp + 1;
+            }
+        }
+        nio_free(lmf);
+        if (f == 0 || f == 12 || f == 23) {
+            to = tr_str(tr, to, " f=");
+            to = tr_i64(tr, to, f);
+            to = tr_str(tr, to, " valid=");
+            to = tr_i64(tr, to, vr);
+            to = tr_nl(tr, to);
+        }
+        f = f + 1;
+    }
+    to = tr_str(tr, to, " valid_frames=");
+    to = tr_i64(tr, to, nvalid);
+    to = tr_str(tr, to, "/24\n");
+    if (nvalid == 0) {
+        to = tr_str(tr, to, "RESULT: FUSE_REFUSED\nreason: no valid head split on any frame (mechanical proof: snout-anchored neck-constriction + motion leg-split found no stable part).\n");
+        return 0 - to - 1000000;
+    }
+    nio_free(dm);
+    nio_free(wm);
+    nio_free(dst);
+    nio_free(fvec);
+    nio_free(sn);
+    nio_free(nk);
+    nio_free(hmask);
+    nio_free(hs);
+    nio_free(mo);
+    nio_free(ev);
+    // ---------- CROSS-FRAME VALIDATION ----------
+    // median area of valid frames; drop outliers outside [0.4, 2.5]x median.
+    let areas:[]u8 = nio_alloc(192 as i32);
+    let na:i64 = 0;
+    f = 0;
+    while (f < nf) {
+        if (h_get64(lm, f * 128) == 1) {
+            h_put64(areas, na * 8, h_get64(lm, f * 128 + 8));
+            na = na + 1;
+        }
+        f = f + 1;
+    }
+    // bubble sort areas[0..na)
+    let si:i64 = 0;
+    while (si < na) {
+        let sj2:i64 = si + 1;
+        while (sj2 < na) {
+            if (h_get64(areas, sj2 * 8) < h_get64(areas, si * 8)) {
+                let t:i64 = h_get64(areas, si * 8);
+                h_put64(areas, si * 8, h_get64(areas, sj2 * 8));
+                h_put64(areas, sj2 * 8, t);
+            }
+            sj2 = sj2 + 1;
+        }
+        si = si + 1;
+    }
+    let med:i64 = h_get64(areas, (na / 2) * 8);
+    nio_free(areas);
+    let lo:i64 = med * 4 / 10;
+    let hi:i64 = med * 25 / 10;
+    to = tr_str(tr, to, " area_median=");
+    to = tr_i64(tr, to, med);
+    to = tr_str(tr, to, " keep=[");
+    to = tr_i64(tr, to, lo);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, hi);
+    to = tr_str(tr, to, "]\n");
+    f = 0;
+    while (f < nf) {
+        if (h_get64(lm, f * 128) == 1) {
+            let a:i64 = h_get64(lm, f * 128 + 8);
+            if (a < lo || a > hi) {
+                h_put64(lm, f * 128, 0);
+                nvalid = nvalid - 1;
+                to = tr_str(tr, to, " drop f=");
+                to = tr_i64(tr, to, f);
+                to = tr_str(tr, to, " area_outlier\n");
+            }
+        }
+        f = f + 1;
+    }
+    // snout jump > 40px (manhattan) from previous valid -> drop
+    let prev:i64 = -1;
+    f = 0;
+    while (f < nf) {
+        if (h_get64(lm, f * 128) == 1) {
+            if (prev >= 0) {
+                let jx:i64 = h_get64(lm, f * 128 + 64) - h_get64(lm, prev * 128 + 64);
+                if (jx < 0) { jx = 0 - jx; }
+                let jy:i64 = h_get64(lm, f * 128 + 72) - h_get64(lm, prev * 128 + 72);
+                if (jy < 0) { jy = 0 - jy; }
+                if (jx + jy > 40) {
+                    h_put64(lm, f * 128, 0);
+                    nvalid = nvalid - 1;
+                    to = tr_str(tr, to, " drop f=");
+                    to = tr_i64(tr, to, f);
+                    to = tr_str(tr, to, " snout_jump\n");
+                } else {
+                    prev = f;
+                }
+            } else {
+                prev = f;
+            }
+        }
+        f = f + 1;
+    }
+    to = tr_str(tr, to, " valid_after_gates=");
+    to = tr_i64(tr, to, nvalid);
+    to = tr_nl(tr, to);
+    if (nvalid == 0) {
+        to = tr_str(tr, to, "RESULT: FUSE_REFUSED\nreason: head failed cross-frame stability gates (no stable part).\n");
+        return 0 - to - 1000000;
+    }
+    // nearest-valid map
+    let nmap:[]u8 = nio_alloc(192 as i32);
+    f = 0;
+    while (f < nf) {
+        if (h_get64(lm, f * 128) == 1) {
+            h_put64(nmap, f * 8, f);
+        } else {
+            let d:i64 = 1;
+            let found:i64 = -1;
+            while (d < nf) {
+                if (f - d >= 0 && h_get64(lm, (f - d) * 128) == 1) { found = f - d; break; }
+                if (f + d < nf && h_get64(lm, (f + d) * 128) == 1) { found = f + d; break; }
+                d = d + 1;
+            }
+            h_put64(nmap, f * 8, found);
+        }
+        f = f + 1;
+    }
+    // ref frame: 12 or nearest valid
+    let rf:i64 = 12;
+    if (h_get64(lm, 12 * 128) != 1) { rf = h_get64(nmap, 12 * 8); }
+    to = tr_str(tr, to, " ref_frame=");
+    to = tr_i64(tr, to, rf);
+    to = tr_nl(tr, to);
+    nio_free(Es);
+    // ---------- SLOT (recipient head) ----------
+    to = tr_str(tr, to, "--- SLOT (recipient head region) ---\n");
+    let slotm:[]u8 = nio_alloc(76800 as i32);
+    let slotmo:[]u8 = nio_alloc(80 as i32);
+    let slotinfo:[]u8 = nio_alloc(40 as i32);
+    if (v4_slot(str_, W, H, nf, slotm, slotmo, slotinfo) != 0) {
+        to = tr_str(tr, to, "RESULT: FUSE_REFUSED\nreason: recipient slot not measurable.\n");
+        return 0 - to - 1000000;
+    }
+    let sev:[]u8 = nio_alloc(32 as i32);
+    v4_eigenvec(h_get64(slotmo, 24), h_get64(slotmo, 40), h_get64(slotmo, 32), sev);
+    let scx:i64 = h_get64(slotmo, 8);
+    let scy:i64 = h_get64(slotmo, 16);
+    let usx:i64 = h_get64(sev, 0);
+    let usy:i64 = h_get64(sev, 8);
+    let Ls1:i64 = v4_isqrt(h_get64(sev, 16) * 1024);
+    let Ls2:i64 = v4_isqrt(h_get64(sev, 24) * 1024);
+    let sx0:i64 = h_get64(slotmo, 48);
+    let sy0:i64 = h_get64(slotmo, 56);
+    let sx1:i64 = h_get64(slotmo, 64);
+    let sy1:i64 = h_get64(slotmo, 72);
+    to = tr_str(tr, to, " slot bbox=(");
+    to = tr_i64(tr, to, sx0);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, sy0);
+    to = tr_str(tr, to, ")-(");
+    to = tr_i64(tr, to, sx1);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, sy1);
+    to = tr_str(tr, to, ") neck=");
+    to = tr_i64(tr, to, h_get64(slotinfo, 0));
+    to = tr_str(tr, to, " neck_x=");
+    to = tr_i64(tr, to, h_get64(slotinfo, 24));
+    to = tr_nl(tr, to);
+    nio_free(sev);
+    // Recipient neck point (step 6): (neck_x, neck_line) — the constriction
+    // center on the measured neck-line row. The donor's neck attaches here.
+    let rneck:i64 = h_get64(slotinfo, 0);
+    let rneckx:i64 = h_get64(slotinfo, 24);
+    nio_free(slotinfo);
+    // donor ref landmarks
+    let dcx:i64 = h_get64(lm, rf * 128 + 16);
+    let dcy:i64 = h_get64(lm, rf * 128 + 24);
+    let udx:i64 = h_get64(lm, rf * 128 + 32);
+    let udy:i64 = h_get64(lm, rf * 128 + 40);
+    let Ld1:i64 = v4_isqrt(h_get64(lm, rf * 128 + 48) * 1024);
+    let Ld2:i64 = v4_isqrt(h_get64(lm, rf * 128 + 56) * 1024);
+    if (Ld1 <= 0) { Ld1 = 1; }
+    if (Ld2 <= 0) { Ld2 = 1; }
+    if (Ls1 <= 0) { Ls1 = 1; }
+    if (Ls2 <= 0) { Ls2 = 1; }
+    let s_sim:i64 = Ls1 * 1024 / Ld1;
+    let s1a:i64 = Ls1 * 1024 / Ld1;
+    let s2a:i64 = Ls2 * 1024 / Ld2;
+    to = tr_str(tr, to, " pose: donor_c=(");
+    to = tr_i64(tr, to, dcx / 1024);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, dcy / 1024);
+    to = tr_str(tr, to, ") slot_c=(");
+    to = tr_i64(tr, to, scx / 1024);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, scy / 1024);
+    to = tr_str(tr, to, ") s_sim_x1024=");
+    to = tr_i64(tr, to, s_sim);
+    to = tr_str(tr, to, " s_aniso=(");
+    to = tr_i64(tr, to, s1a);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, s2a);
+    to = tr_str(tr, to, ")\n");
+    // ---------- NECK ANCHOR (step 6) ----------
+    // The head ATTACHES at the neck: the donor's measured neck-cut point
+    // (snout - d_neck * facing, from lmf 104/112 - 80 * 88/96) maps onto the
+    // recipient's neck point (rneckx, rneck). The warp is neck-anchored, not
+    // centroid-anchored: the neck joint is the anatomical attachment.
+    let dnx1024:i64 = h_get64(lm, rf * 128 + 104) * 1024 - h_get64(lm, rf * 128 + 80) * h_get64(lm, rf * 128 + 88);
+    let dny1024:i64 = h_get64(lm, rf * 128 + 112) * 1024 - h_get64(lm, rf * 128 + 80) * h_get64(lm, rf * 128 + 96);
+    to = tr_str(tr, to, " neck_anchor: donor_neck=(");
+    to = tr_i64(tr, to, dnx1024 / 1024);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, dny1024 / 1024);
+    to = tr_str(tr, to, ") [snout=(");
+    to = tr_i64(tr, to, h_get64(lm, rf * 128 + 104));
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, h_get64(lm, rf * 128 + 112));
+    to = tr_str(tr, to, ") d_neck=");
+    to = tr_i64(tr, to, h_get64(lm, rf * 128 + 80));
+    to = tr_str(tr, to, "]\n -> recip_neck=(");
+    to = tr_i64(tr, to, rneckx);
+    to = tr_str(tr, to, ",");
+    to = tr_i64(tr, to, rneck);
+    to = tr_str(tr, to, ") [neck-line row, constriction center x]\n");
+    to = tr_str(tr, to, " attach_reason: the head is bounded by snout (front) and neck (back); the neck joint is where a head joins a body. Centroid-on-face sat it on the forehead; neck-on-neckline attaches it.\n");
+    // ---------- FLIP TEST (head-side, step 6 corrected) ----------
+    // A swapped head must lie on the HEAD side of the recipient's neck line
+    // (above it, where the recipient's head was) — not hang below the neck.
+    // A 180-degree flip inverts dorsal-ventral too, so "snout above neck" is
+    // also "dorsal up": verified from the donor's ear (dorsal landmark,
+    // up-left of the head axis in the donor frame). flip=0 maps the ear
+    // up-right (dorsal-up, upright); flip=1 maps it down-left (dorsal-down,
+    // upside-down). Step 5's "snout below = upright" rule was backwards: it
+    // selected the upside-down flip. Corrected for the neck anchor.
+    // The snout-inside-slot check is kept as evidence; head-side decides.
+    let ab:[]u8 = nio_alloc(32 as i32);
+    let rsx:i64 = h_get64(lm, rf * 128 + 64);
+    let rsy:i64 = h_get64(lm, rf * 128 + 72);
+    // snout offset from the donor NECK (not the centroid): the flip test is
+    // neck-anchored, like the warp. Recipient anchor in x1024 for the mapping.
+    let ox:i64 = rsx * 1024 - dnx1024;
+    let oy:i64 = rsy * 1024 - dny1024;
+    let rnx1024:i64 = rneckx * 1024;
+    let rny1024:i64 = rneck * 1024;
+    let flip:i64 = 0;
+    let in0:i64 = 0;
+    let in1:i64 = 0;
+    let qy0:i64 = 0;
+    let qy1:i64 = 0;
+    let fl:i64 = 0;
+    while (fl < 2) {
+        let fux:i64 = udx;
+        let fuy:i64 = udy;
+        if (fl == 1) { fux = 0 - udx; fuy = 0 - udy; }
+        v4_abuild(usx, usy, fux, fuy, s_sim, s_sim, ab);
+        let qx:i64 = (rnx1024 + (h_get64(ab, 0) * ox + h_get64(ab, 8) * oy) / 1024) / 1024;
+        let qy:i64 = (rny1024 + (h_get64(ab, 16) * ox + h_get64(ab, 24) * oy) / 1024) / 1024;
+        let inside:i64 = 0;
+        if (qx >= sx0 - 5 && qx <= sx1 + 5 && qy >= sy0 - 5 && qy <= sy1 + 5) { inside = 1; }
+        if (fl == 0) { in0 = inside; qy0 = qy; } else { in1 = inside; qy1 = qy; }
+        to = tr_str(tr, to, " flip=");
+        to = tr_i64(tr, to, fl);
+        to = tr_str(tr, to, " snout->(");
+        to = tr_i64(tr, to, qx);
+        to = tr_str(tr, to, ",");
+        to = tr_i64(tr, to, qy);
+        to = tr_str(tr, to, ") inside=");
+        to = tr_i64(tr, to, inside);
+        to = tr_str(tr, to, " headside=");
+        if (qy < rneck) { to = tr_i64(tr, to, 1); } else { to = tr_i64(tr, to, 0); }
+        to = tr_nl(tr, to);
+        fl = fl + 1;
+    }
+    nio_free(ab);
+    // Head-side decides: snout above the NECK line (rneck), on the head side
+    // where the swapped head belongs. The warped neck point lands on
+    // (rneckx,rneck) because the warp is neck-anchored (step 6).
+    let up0:i64 = 0;
+    if (qy0 < rneck) { up0 = 1; }
+    let up1:i64 = 0;
+    if (qy1 < rneck) { up1 = 1; }
+    if (up0 == 1 && up1 == 0) { flip = 0; }
+    if (up0 == 0 && up1 == 1) { flip = 1; }
+    if (up0 == up1) {
+        // tie: fall back to snout-inside
+        if (in0 == 1 && in1 == 0) { flip = 0; }
+        if (in0 == 0 && in1 == 1) { flip = 1; }
+    }
+    // if still tied, flip=0 (traced)
+    to = tr_str(tr, to, " flip_selected=");
+    to = tr_i64(tr, to, flip);
+    to = tr_str(tr, to, " (in0=");
+    to = tr_i64(tr, to, in0);
+    to = tr_str(tr, to, " in1=");
+    to = tr_i64(tr, to, in1);
+    to = tr_str(tr, to, ")\n");
+    let fudx:i64 = udx;
+    let fudy:i64 = udy;
+    if (flip == 1) { fudx = 0 - udx; fudy = 0 - udy; }
+    // ---------- MODE TEST (similarity vs anisotropic vs cover) ----------
+    // Warp canvas = slot bbox expanded by 32 (room for the 1.5x cover scale).
+    let wx0:i64 = sx0 - 32;
+    if (wx0 < 0) { wx0 = 0; }
+    let wy0:i64 = sy0 - 32;
+    if (wy0 < 0) { wy0 = 0; }
+    let wx1:i64 = sx1 + 32;
+    if (wx1 >= W) { wx1 = W - 1; }
+    let wy1:i64 = sy1 + 32;
+    if (wy1 >= H) { wy1 = H - 1; }
+    let cw:i64 = wx1 - wx0 + 1;
+    let ch:i64 = wy1 - wy0 + 1;
+    let sdr:[]u8 = nio_alloc(230400 as i32);
+    if (v4_stable_frame(std_, rf, cum, W, H, sdr) != 0) { return -778; }
+    let hmrf:[]u8 = heads[rf * 76800..rf * 76800 + 76800];
+    let ainv:[]u8 = nio_alloc(48 as i32); // 48: v4_ainv writes rc at byte 40
+    let wpx:[]u8 = nio_alloc((cw * ch * 3) as i32);
+    let wm:[]u8 = nio_alloc((cw * ch) as i32);
+    // slot mask on canvas
+    let smb:[]u8 = nio_alloc((cw * ch) as i32);
+    let yy:i64 = 0;
+    while (yy < ch) {
+        let xx:i64 = 0;
+        while (xx < cw) {
+            smb[yy * cw + xx] = slotm[(wy0 + yy) * W + (wx0 + xx)];
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    let best_iou:i64 = -1;
+    let best_cov:i64 = -1;
+    let mode:i64 = 0;
+    // slot area for coverage (head-swap goal: the donor head must COVER the slot)
+    let area_slot:i64 = 0;
+    let pp0:i64 = 0;
+    while (pp0 < cw * ch) {
+        if (smb[pp0] != 0) { area_slot = area_slot + 1; }
+        pp0 = pp0 + 1;
+    }
+    let md:i64 = 0;
+    while (md < 3) {
+        let ms1:i64 = s_sim;
+        let ms2:i64 = s_sim;
+        if (md == 1) { ms1 = s1a; ms2 = s2a; }
+        // md=2 "cover": 1.5x the similarity scale, so the donor head covers
+        // the recipient head (swap, not blend). TNN measures the coverage.
+        if (md == 2) { ms1 = s_sim * 1536 / 1024; ms2 = ms1; }
+        v4_ainv(usx, usy, fudx, fudy, ms1, ms2, ainv);
+        if (h_get64(ainv, 40) == 0) {
+            v4_warp(sdr, hmrf, W, H, ainv, dnx1024, dny1024, rneckx, rneck, wx0, wy0, wx1, wy1, wpx, wm);
+            // IoU(wm, smb) and coverage(wm over smb)
+            let inter:i64 = 0;
+            let union:i64 = 0;
+            let pp:i64 = 0;
+            while (pp < cw * ch) {
+                let a1:i64 = 0;
+                if (wm[pp] != 0) { a1 = 1; }
+                let b1:i64 = 0;
+                if (smb[pp] != 0) { b1 = 1; }
+                if (a1 == 1 && b1 == 1) { inter = inter + 1; }
+                if (a1 == 1 || b1 == 1) { union = union + 1; }
+                pp = pp + 1;
+            }
+            let iou:i64 = 0;
+            if (union > 0) { iou = inter * 1024 / union; }
+            let cov:i64 = 0;
+            if (area_slot > 0) { cov = inter * 1024 / area_slot; }
+            to = tr_str(tr, to, " mode=");
+            if (md == 0) { to = tr_str(tr, to, "similarity"); } else { if (md == 1) { to = tr_str(tr, to, "anisotropic"); } else { to = tr_str(tr, to, "cover"); } }
+            to = tr_str(tr, to, " iou_x1024=");
+            to = tr_i64(tr, to, iou);
+            to = tr_str(tr, to, " cov_x1024=");
+            to = tr_i64(tr, to, cov);
+            to = tr_nl(tr, to);
+            // Head-swap selects by COVERAGE (cover the recipient head), not IoU.
+            if (cov > best_cov || (cov == best_cov && iou > best_iou)) { best_cov = cov; best_iou = iou; mode = md; }
+        } else {
+            to = tr_str(tr, to, " mode=");
+            if (md == 0) { to = tr_str(tr, to, "similarity"); } else { if (md == 1) { to = tr_str(tr, to, "anisotropic"); } else { to = tr_str(tr, to, "cover"); } }
+            to = tr_str(tr, to, " degenerate_skipped\n");
+        }
+        md = md + 1;
+    }
+    // stretch veto: anisotropic with aspect > 2.0 -> similarity
+    // (cover is similarity, so the veto only applies to mode 1)
+    if (mode == 1) {
+        let big:i64 = s1a;
+        let sml:i64 = s2a;
+        if (s2a > s1a) { big = s2a; sml = s1a; }
+        if (sml > 0 && big * 1024 / sml > 2048) {
+            mode = 0;
+            to = tr_str(tr, to, " stretch_veto: anisotropic aspect>2.0 -> similarity\n");
+        }
+    }
+    to = tr_str(tr, to, " mode_selected=");
+    if (mode == 0) { to = tr_str(tr, to, "similarity"); } else { if (mode == 1) { to = tr_str(tr, to, "anisotropic"); } else { to = tr_str(tr, to, "cover"); } }
+    to = tr_str(tr, to, " cov_x1024=");
+    to = tr_i64(tr, to, best_cov);
+    to = tr_nl(tr, to);
+    let fs1:i64 = s_sim;
+    let fs2:i64 = s_sim;
+    if (mode == 1) { fs1 = s1a; fs2 = s2a; }
+    if (mode == 2) { fs1 = s_sim * 1536 / 1024; fs2 = fs1; }
+    nio_free(sdr);
+    nio_free(ainv);
+    // wpx/wm now hold the ref warped head (from the last mode test = anisotropic).
+    // Re-warp with the SELECTED mode for a clean deliberation input.
+    let ainv2:[]u8 = nio_alloc(48 as i32); // 48: v4_ainv writes rc at byte 40
+    v4_ainv(usx, usy, fudx, fudy, fs1, fs2, ainv2);
+    let sdr2:[]u8 = nio_alloc(230400 as i32);
+    if (v4_stable_frame(std_, rf, cum, W, H, sdr2) != 0) { return -779; }
+    v4_warp(sdr2, hmrf, W, H, ainv2, dnx1024, dny1024, rneckx, rneck, wx0, wy0, wx1, wy1, wpx, wm);
+    nio_free(sdr2);
+    nio_free(ainv2);
+    // ---------- PHOTOMETRIC DELIBERATION ----------
+    to = tr_str(tr, to, "--- PHOTOMETRIC (TNN deliberates the transfer) ---\n");
+    let bout:[]u8 = nio_alloc(24 as i32);
+    if (v4_bright_ref(std_, rf, cum, W, H, bout) != 0) { return -781; }
+    let Ld:i64 = h_get64(bout, 0);
+    let Ldvalid:i64 = h_get64(bout, 8);
+    nio_free(bout);
+    // recipient ref frame + canvas
+    let rrf:[]u8 = nio_alloc(230400 as i32);
+    if (recall_frame(str_, 12, rrf) != 0) { return -782; }
+    let rpx:[]u8 = nio_alloc((cw * ch * 3) as i32);
+    yy = 0;
+    while (yy < ch) {
+        let xx2:i64 = 0;
+        while (xx2 < cw) {
+            let so:i64 = ((wy0 + yy) * W + (wx0 + xx2)) * 3;
+            let do2:i64 = (yy * cw + xx2) * 3;
+            rpx[do2] = rrf[so];
+            rpx[do2 + 1] = rrf[so + 1];
+            rpx[do2 + 2] = rrf[so + 2];
+            xx2 = xx2 + 1;
+        }
+        yy = yy + 1;
+    }
+    // Lr: 90th pct luminance within the slot mask (full frame)
+    let rhist:[]u8 = nio_alloc(2048 as i32);
+    v4_lum_hist(rrf, slotm, W, H, rhist);
+    let rtot:i64 = 0;
+    let ri:i64 = 0;
+    while (ri < 256) { rtot = rtot + h_get64(rhist, ri * 8); ri = ri + 1; }
+    let rcum:i64 = 0;
+    let Lr:i64 = 0;
+    ri = 0;
+    while (ri < 256) {
+        rcum = rcum + h_get64(rhist, ri * 8);
+        if (rtot > 0 && rcum * 100 >= 90 * rtot) { Lr = ri; break; }
+        ri = ri + 1;
+    }
+    nio_free(rhist);
+    let Iratio:i64 = 1024;
+    if (Ld > 0) { Iratio = Lr * 1024 / Ld; }
+    to = tr_str(tr, to, " donor_white_Ld=");
+    to = tr_i64(tr, to, Ld);
+    to = tr_str(tr, to, " (valid=");
+    to = tr_i64(tr, to, Ldvalid);
+    to = tr_str(tr, to, ") slot_Lr90=");
+    to = tr_i64(tr, to, Lr);
+    to = tr_str(tr, to, " I_x1024=");
+    to = tr_i64(tr, to, Iratio);
+    to = tr_nl(tr, to);
+    // histograms + quantile LUT
+    let dhist:[]u8 = nio_alloc(2048 as i32);
+    let shist:[]u8 = nio_alloc(2048 as i32);
+    v4_lum_hist(wpx, wm, cw, ch, dhist);
+    v4_lum_hist(rpx, smb, cw, ch, shist);
+    let lut:[]u8 = nio_alloc(256 as i32);
+    v4_quant_lut(dhist, shist, lut);
+    nio_free(dhist);
+    nio_free(shist);
+    let lutmono:i64 = v4_lut_monotonic(lut);
+    // candidates
+    let tpx:[]u8 = nio_alloc((cw * ch * 3) as i32);
+    let cand_names:[]u8 = nio_alloc(64 as i32);
+    // (names traced literally below)
+    let best_seam:i64 = 0 - 1;
+    let best_tx:i64 = -1;
+    let best_gain:i64 = 0;
+    // Identity outranks blend: select by texture preservation (tex), not seam.
+    // A low seam bought by remapping the material (black->pink) is a different
+    // animal, not a better transfer. Seam breaks ties.
+    let best_tex:i64 = 0 - 1;
+    let tn:i64 = 0;
+    while (tn < 4) {
+        let kind:i64 = 0;
+        let gain:i64 = 3072;
+        if (tn == 0) {
+            gain = 3072;
+            v4_gain_apply(wpx, wm, cw, ch, gain, tpx);
+        }
+        if (tn == 1) {
+            gain = Iratio;
+            v4_gain_apply(wpx, wm, cw, ch, gain, tpx);
+        }
+        if (tn == 2) {
+            gain = Iratio * 2;
+            v4_gain_apply(wpx, wm, cw, ch, gain, tpx);
+        }
+        if (tn == 3) {
+            kind = 1;
+            v4_quant_apply(wpx, wm, cw, ch, lut, tpx);
+        }
+        let tex:i64 = v4_tex_corr(wpx, tpx, wm, cw, ch);
+        let chroma:i64 = v4_chroma_drift(wpx, tpx, wm, cw, ch);
+        let seam:i64 = v4_seam(tpx, wm, rpx, cw, ch);
+        let clip:i64 = v4_clip_frac(tpx, wm, cw, ch);
+        let mono:i64 = 1;
+        if (tn == 3) { mono = lutmono; }
+        let gate:i64 = 0;
+        if (mono == 1 && tex >= 717 && chroma <= 102) { gate = 1; }
+        to = tr_str(tr, to, " T");
+        to = tr_i64(tr, to, tn + 1);
+        if (tn == 0) { to = tr_str(tr, to, "=gain3.0"); }
+        if (tn == 1) { to = tr_str(tr, to, "=gainI"); }
+        if (tn == 2) { to = tr_str(tr, to, "=gain2I"); }
+        if (tn == 3) { to = tr_str(tr, to, "=quantile"); }
+        to = tr_str(tr, to, " tex_x1024=");
+        to = tr_i64(tr, to, tex);
+        to = tr_str(tr, to, " chroma_x1024=");
+        to = tr_i64(tr, to, chroma);
+        to = tr_str(tr, to, " seam=");
+        to = tr_i64(tr, to, seam);
+        to = tr_str(tr, to, " clip_x1024=");
+        to = tr_i64(tr, to, clip);
+        to = tr_str(tr, to, " mono=");
+        to = tr_i64(tr, to, mono);
+        to = tr_str(tr, to, " gate=");
+        to = tr_i64(tr, to, gate);
+        to = tr_nl(tr, to);
+        if (gate == 1) {
+            if (best_tex < 0 || tex > best_tex || (tex == best_tex && seam < best_seam)) {
+                best_tex = tex;
+                best_seam = seam;
+                best_tx = kind;
+                best_gain = gain;
+            }
+        }
+        // stash per-candidate tex for fallback
+        h_put64(cand_names, tn * 16, tex);
+        h_put64(cand_names, tn * 16 + 8, seam);
+        tn = tn + 1;
+    }
+    // (cand_names freed after the fallback read below; it was a use-after-free before.)
+    if (best_tx < 0) {
+        // fallback: quantile (rank-preserving by construction, so it can
+        // never fail the texture/monotonicity gates the way gains could).
+        best_tx = 1;
+        best_gain = 0;
+        best_seam = h_get64(cand_names, 3 * 16 + 8);
+        to = tr_str(tr, to, " FALLBACK: no candidate passed identity gates; using quantile (rank-preserving by construction)\n");
+    }
+    nio_free(cand_names);
+    to = tr_str(tr, to, " transfer_selected: kind=");
+    to = tr_i64(tr, to, best_tx);
+    if (best_tx == 0) {
+        to = tr_str(tr, to, " gain_x1024=");
+        to = tr_i64(tr, to, best_gain);
+    } else {
+        to = tr_str(tr, to, " quantile_lut");
+    }
+    to = tr_str(tr, to, " tex_x1024=");
+    to = tr_i64(tr, to, best_tex);
+    to = tr_str(tr, to, " seam=");
+    to = tr_i64(tr, to, best_seam);
+    to = tr_nl(tr, to);
+    // NOTE: the albedo move is large because the donor is black and the slot
+    // is white (material difference, not an illumination error). Identity is
+    // carried by rank + local contrast + chromaticity, which the gates verify.
+    nio_free(tpx);
+    nio_free(wpx);
+    nio_free(wm);
+    nio_free(smb);
+    nio_free(rpx);
+    // ---------- RENDER ----------
+    to = tr_str(tr, to, "--- SYNTHESIZE (24 frames, live donor pose) ---\n");
+    // bg stats for light tilt + shadow (recipient ref)
+    let Er:[]u8 = nio_alloc(614400 as i32);
+    if (seg_motion_E(str_, Er, W, H, nf) != 0) { return -783; }
+    let histEr:[]u8 = nio_alloc(8192 as i32);
+    seg_histE(Er, N, histEr);
+    let emedr:i64 = seg_pct_bin(histEr, 1024, N, 50) * 4;
+    nio_free(histEr);
+    let bgst:[]u8 = nio_alloc(32 as i32);
+    adapt_bg_stats(rrf, Er, emedr, W, H, bgst);
+    nio_free(Er);
+    let bgtop:i64 = h_get64(bgst, 0);
+    let bgbot:i64 = h_get64(bgst, 8);
+    let bgall:i64 = h_get64(bgst, 16);
+    let bgq25:i64 = h_get64(bgst, 24);
+    let tiltk:i64 = 0;
+    if (bgall > 0) { tiltk = (bgtop - bgbot) * 1024 / bgall; }
+    let contrast:i64 = 0;
+    if (bgall > 0) { contrast = (bgall - bgq25) * 100 / bgall; }
+    let shstrength:i64 = contrast * 256 / 100 / 3;
+    if (shstrength > 64) { shstrength = 64; }
+    if (shstrength < 0) { shstrength = 0; }
+    nio_free(bgst);
+    nio_free(rrf);
+    to = tr_str(tr, to, " tiltk_x1024=");
+    to = tr_i64(tr, to, tiltk);
+    to = tr_str(tr, to, " shadow_x256=");
+    to = tr_i64(tr, to, shstrength);
+    to = tr_nl(tr, to);
+    // per-frame render buffers
+    let sdf:[]u8 = nio_alloc(230400 as i32);
+    let gwpx:[]u8 = nio_alloc((cw * ch * 3) as i32);
+    let gwm:[]u8 = nio_alloc((cw * ch) as i32);
+    let gpx:[]u8 = nio_alloc((cw * ch * 3) as i32);
+    let alpha:[]u8 = nio_alloc((cw * ch) as i32);
+    let fr:[]u8 = nio_alloc(230400 as i32);
+    let nm:[]u8 = nio_alloc(16 as i32);
+    let wa:[]u8 = nio_alloc(48 as i32); // 48: v4_ainv writes rc at byte 40
+    f = 0;
+    while (f < nf) {
+        let df:i64 = h_get64(nmap, f * 8);
+        // per-frame donor landmarks -> warp
+        // per-frame donor NECK point (x1024): snout - d_neck * facing.
+        // The head attaches at the neck on every rendered frame (step 6).
+        let fdnx:i64 = h_get64(lm, df * 128 + 104) * 1024 - h_get64(lm, df * 128 + 80) * h_get64(lm, df * 128 + 88);
+        let fdny:i64 = h_get64(lm, df * 128 + 112) * 1024 - h_get64(lm, df * 128 + 80) * h_get64(lm, df * 128 + 96);
+        let fudx:i64 = h_get64(lm, df * 128 + 32);
+        let fudy:i64 = h_get64(lm, df * 128 + 40);
+        if (flip == 1) { fudx = 0 - fudx; fudy = 0 - fudy; }
+        let fLd1:i64 = v4_isqrt(h_get64(lm, df * 128 + 48) * 1024);
+        let fLd2:i64 = v4_isqrt(h_get64(lm, df * 128 + 56) * 1024);
+        if (fLd1 <= 0) { fLd1 = 1; }
+        if (fLd2 <= 0) { fLd2 = 1; }
+        let fs1f:i64 = Ls1 * 1024 / fLd1;
+        let fs2f:i64 = fs1f;
+        if (mode == 1) { fs2f = Ls2 * 1024 / fLd2; }
+        if (mode == 2) { fs1f = fs1f * 1536 / 1024; fs2f = fs1f; }
+        v4_ainv(usx, usy, fudx, fudy, fs1f, fs2f, wa);
+        if (h_get64(wa, 40) != 0) { return -784; }
+        if (v4_stable_frame(std_, f, cum, W, H, sdf) != 0) { return -785 - f; }
+        let hmdf:[]u8 = heads[df * 76800..df * 76800 + 76800];
+        v4_warp(sdf, hmdf, W, H, wa, fdnx, fdny, rneckx, rneck, wx0, wy0, wx1, wy1, gwpx, gwm);
+        if (best_tx == 0) {
+            v4_gain_apply(gwpx, gwm, cw, ch, best_gain, gpx);
+        } else {
+            v4_quant_apply(gwpx, gwm, cw, ch, lut, gpx);
+        }
+        v4_feather(gwm, cw, ch, 4, alpha);
+        if (recall_frame(str_, f, fr) != 0) { return -790 - f; }
+        v4_composite(fr, W, gpx, alpha, wx0, wy0, cw, ch, tiltk);
+        v4_shadow(fr, W, H, wx0, wy0, wx1, wy1, shstrength);
+        let nl:i64 = mk_frame_name(nm, f);
+        if (write_ppm(oroot, nm[0..nl], fr, W, H) != 0) { return -795 - f; }
+        if (f == 0 || f == 12 || f == 23) {
+            to = tr_str(tr, to, " f=");
+            to = tr_i64(tr, to, f);
+            to = tr_str(tr, to, " donor_f=");
+            to = tr_i64(tr, to, df);
+            to = tr_str(tr, to, " H_F=");
+            to = tr_hex(tr, to, fnv(fr, 0, N * 3));
+            to = tr_nl(tr, to);
+        }
+        f = f + 1;
+    }
+    to = tr_str(tr, to, "RESULT: FUSION_COMPLETE plan=FUSE_HEAD transfer_kind=");
+    to = tr_i64(tr, to, best_tx);
+    to = tr_str(tr, to, " valid_frames=");
+    to = tr_i64(tr, to, nvalid);
+    to = tr_nl(tr, to);
+    nio_free(slotm);
+    nio_free(slotmo);
+    nio_free(heads);
+    nio_free(lm);
+    nio_free(nmap);
+    nio_free(cum);
+    nio_free(lut);
+    nio_free(sdf);
+    nio_free(gwpx);
+    nio_free(gwm);
+    nio_free(gpx);
+    nio_free(alpha);
+    nio_free(fr);
+    nio_free(nm);
+    nio_free(wa);
+    return to;
+}
+
+// Diagnostic: dump donor anatomy for one frame (my eyes, not TNN's deliberation).
+// Writes stab.ppm, dark.ppm, head.ppm into outd. Returns 0 or negative.
+fn do_dumpanat(work:[]u8, fstr:[]u8, outd:[]u8) i64 {
+    let st:[]u8 = load_store_full(work);
+    if (st.len == 0) { return -900; }
+    let W:i64 = h_get64(st, 32);
+    let H:i64 = h_get64(st, 40);
+    let nf:i64 = h_get64(st, 48);
+    let N:i64 = W * H;
+    let f:i64 = 0;
+    let mi:i64 = 0;
+    while (mi < fstr.len) {
+        let d:i64 = (fstr[mi] as i64) - 48;
+        if (d >= 0 && d <= 9) { f = f * 10 + d; }
+        mi = mi + 1;
+    }
+    if (f < 0 || f >= nf) { return -901; }
+    ensure_dir(outd);
+    let oroot:i64 = nio_open_root(outd);
+    if (oroot < 0) { return -902; }
+    let shifts:[]u8 = nio_alloc(368);
+    let sdbg:[]u8 = nio_alloc(368);
+    if (v4_shake(st, nf, shifts, sdbg) != 0) { return -903; }
+    let cum:[]u8 = nio_alloc(384);
+    v4_cumul(shifts, nf, cum);
+    let Es:[]u8 = nio_alloc(614400);
+    if (v4_stable_E(st, cum, Es, W, H, nf) != 0) { return -904; }
+    let histE:[]u8 = nio_alloc(8192);
+    seg_histE(Es, N, histE);
+    let noise:i64 = seg_pct_bin(histE, 1024, N, 50) * 4;
+    let dm:[]u8 = nio_alloc(76800);
+    let wm:[]u8 = nio_alloc(76800);
+    let dst:[]u8 = nio_alloc(160);
+    let fvec:[]u8 = nio_alloc(16);
+    let sn:[]u8 = nio_alloc(24);
+    let nk:[]u8 = nio_alloc(64);
+    let hmask:[]u8 = nio_alloc(76800);
+    let hs:[]u8 = nio_alloc(80);
+    let mo:[]u8 = nio_alloc(80);
+    let ev:[]u8 = nio_alloc(32);
+    let lmf:[]u8 = nio_alloc(128);
+    let vr:i64 = v4_anatomy_frame(st, f, cum, Es, noise, W, H, dm, wm, dst, fvec, sn, nk, hmask, hs, mo, ev, lmf);
+    // stabilized frame
+    let sf:[]u8 = nio_alloc(230400);
+    if (v4_stable_frame(st, f, cum, W, H, sf) != 0) { return -905; }
+    let nm:[]u8 = nio_alloc(16);
+    let nl:i64 = mk_frame_name(nm, 90);
+    if (write_ppm(oroot, nm[0..nl], sf, W, H) != 0) { return -906; }
+    // masks as RGB
+    let rgb:[]u8 = nio_alloc(230400);
+    let p:i64 = 0;
+    while (p < N) {
+        let v:i64 = 0;
+        if (dm[p] != 0) { v = 255; }
+        rgb[p * 3] = v as u8; rgb[p * 3 + 1] = v as u8; rgb[p * 3 + 2] = v as u8;
+        p = p + 1;
+    }
+    nl = mk_frame_name(nm, 91);
+    if (write_ppm(oroot, nm[0..nl], rgb, W, H) != 0) { return -907; }
+    p = 0;
+    while (p < N) {
+        let v2:i64 = 0;
+        if (hmask[p] != 0) { v2 = 255; }
+        rgb[p * 3] = v2 as u8; rgb[p * 3 + 1] = v2 as u8; rgb[p * 3 + 2] = v2 as u8;
+        p = p + 1;
+    }
+    nl = mk_frame_name(nm, 92);
+    if (write_ppm(oroot, nm[0..nl], rgb, W, H) != 0) { return -908; }
+    nio_close(oroot);
+    _zag_print("dumpanat vr=");
+    _zag_println(_zag_i64_to_str(vr));
+    _zag_print(" snout=");
+    _zag_print(_zag_i64_to_str(h_get64(lmf, 64)));
+    _zag_print(",");
+    _zag_println(_zag_i64_to_str(h_get64(lmf, 72)));
+    _zag_print(" donor_c=");
+    _zag_print(_zag_i64_to_str(h_get64(lmf, 16) / 1024));
+    _zag_print(",");
+    _zag_println(_zag_i64_to_str(h_get64(lmf, 24) / 1024));
+    _zag_print(" area=");
+    _zag_println(_zag_i64_to_str(h_get64(lmf, 8)));
+    _zag_print(" neckcut rc=");
+    _zag_print(_zag_i64_to_str(h_get64(nk, 0)));
+    _zag_print(" d_neck=");
+    _zag_print(_zag_i64_to_str(h_get64(nk, 8)));
+    _zag_print(" d_skull=");
+    _zag_print(_zag_i64_to_str(h_get64(nk, 16)));
+    _zag_print(" skull_w=");
+    _zag_print(_zag_i64_to_str(h_get64(nk, 24)));
+    _zag_print(" neck_w=");
+    _zag_print(_zag_i64_to_str(h_get64(nk, 32)));
+    _zag_print(" prom_x1024=");
+    _zag_println(_zag_i64_to_str(h_get64(nk, 40)));
+    return 0;
+}

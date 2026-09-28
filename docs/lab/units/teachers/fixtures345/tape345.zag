@@ -1,0 +1,265 @@
+// tape345.zag — shared TST-1 tape layer for teacher fixtures (arms 3/4/5).
+// Pure Zag, zero RNG, no wallclock. All tape events carry logical ticks only.
+// TST-1 event framing: [u8 type][u32 le payload_len][payload...] (length-prefixed).
+// Event types: 1=TAPE_HEADER 2=STIMULUS_REF 3=TEACHER_MSG 4=ORACLE_ANSWER
+//   5=HINT 6=APPEAL 7=INTEGRITY 8=TURN_BOUNDARY 9=TAPE_FOOTER
+//   10=QUERY 11=QUERY_REFUSED 12=STUDENT_DECISION
+// (10/11 are fixture extensions for the arm-5 oracle: queries must be logged
+//  for replay, refusals logged per the "further queries refused and logged" rule.)
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---- little-endian helpers ----
+fn t345_get16(b:[]u8,at:i32)i64 {return (b[at] as i64)+((b[at+1] as i64)<<8);}
+fn t345_get32(b:[]u8,at:i32)i64 {return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);}
+fn t345_get64(b:[]u8,at:i32)i64 {
+    let x:i64=(b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+    return x+((b[at+4] as i64)<<32)+((b[at+5] as i64)<<40)+((b[at+6] as i64)<<48)+((b[at+7] as i64)<<56);
+}
+fn t345_set16(b:[]u8,at:i32,v:i64)void {b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;}
+fn t345_set32(b:[]u8,at:i32,v:i64)void {b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;}
+fn t345_set64(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+    b[at+4]=((v>>32)&255) as u8;b[at+5]=((v>>40)&255) as u8;b[at+6]=((v>>48)&255) as u8;b[at+7]=((v>>56)&255) as u8;
+}
+
+// ---- FNV-1a 64 (proposal checksums, deterministic) ----
+fn t345_fnv(data:[]u8)i64 {
+    let h:i64=0-3750763034362895579; // 14695981039346656037 wrapped to i64
+    let i:i32=0;
+    while(i<data.len){h=(h^(data[i] as i64))*1099511628211;i=i+1;}
+    return h;
+}
+
+// ---- hex parse (for RAW script lines; -1 on any bad digit) ----
+fn t345_hexval(c:i32)i64 {
+    if(c>=48 && c<=57){return (c-48) as i64;}
+    if(c>=65 && c<=70){return (c-55) as i64;}
+    if(c>=97 && c<=102){return (c-87) as i64;}
+    return -1;
+}
+fn t345_hexparse(s:[]u8,out:[]u8)i32 {
+    if(s.len%2!=0 || s.len/2>out.len){return -1;}
+    let i:i32=0;
+    while(i<s.len/2){
+        let hi:i64=t345_hexval(s[2*i] as i32);let lo:i64=t345_hexval(s[2*i+1] as i32);
+        if(hi<0 || lo<0){return -1;}
+        out[i]=(hi*16+lo) as u8;i=i+1;
+    }
+    return s.len/2;
+}
+
+// ---- ascii decimal/unsigned parse: returns value, ok via out-param ----
+fn t345_parse_u64(s:[]u8,val:*i64)void {
+    // sets *val on success, leaves *val unchanged on failure; caller pre-seeds sentinel
+    if(s.len<1 || s.len>20){return;}
+    let i:i32=0;let x:i64=0;
+    while(i<s.len){
+        let c:i32=s[i] as i32;
+        if(c<48 || c>57){return;}
+        x=x*10+((c-48) as i64);i=i+1;
+    }
+    val[0]=x;
+}
+
+// ---- read whole file (plain name in cwd) into buffer ----
+fn t345_read_file(name:[]u8,max_bytes:i32)[]u8 {
+    let root:i64=nio_open_root(".");
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let out:[]u8=nio_alloc(max_bytes);
+    if(out.len==0){nio_close(fd);return "";}
+    let n:i64=nio_read_exact(fd,out,max_bytes);
+    nio_close(fd);
+    if(n<0){nio_free(out);return "";}
+    return out[0..(n as i32)];
+}
+
+// ---- growable byte buffer ----
+struct TBuf {data:[]u8,len:i32,cap:i32}
+fn tbuf_new(cap:i32)*TBuf {
+    let p:*TBuf=_zag_malloc(24) as *TBuf;
+    p[0].data=nio_alloc(cap);p[0].len=0;p[0].cap=cap;
+    return p;
+}
+fn tbuf_reserve(p:*TBuf,need:i32)void {
+    let b:TBuf=p[0];
+    if(b.len+need<=b.cap){return;}
+    let nc:i32=b.cap*2+need;
+    let nb:[]u8=nio_alloc(nc);
+    let i:i32=0;while(i<b.len){nb[i]=b.data[i];i=i+1;}
+    nio_free(b.data);b.data=nb;b.cap=nc;p[0]=b;
+}
+fn tbuf_append(p:*TBuf,src:[]u8)void {
+    tbuf_reserve(p,src.len);
+    let b:TBuf=p[0];let i:i32=0;
+    while(i<src.len){b.data[b.len+i]=src[i];i=i+1;}
+    b.len=b.len+src.len;p[0]=b;
+}
+fn tbuf_append8(p:*TBuf,v:i32)void {
+    tbuf_reserve(p,1);let b:TBuf=p[0];b.data[b.len]=v as u8;b.len=b.len+1;p[0]=b;
+}
+fn tbuf_append16(p:*TBuf,v:i64)void {tbuf_reserve(p,2);let b:TBuf=p[0];t345_set16(b.data,b.len,v);b.len=b.len+2;p[0]=b;}
+fn tbuf_append32(p:*TBuf,v:i64)void {tbuf_reserve(p,4);let b:TBuf=p[0];t345_set32(b.data,b.len,v);b.len=b.len+4;p[0]=b;}
+fn tbuf_append64(p:*TBuf,v:i64)void {tbuf_reserve(p,8);let b:TBuf=p[0];t345_set64(b.data,b.len,v);b.len=b.len+8;p[0]=b;}
+fn tbuf_bytes(p:*TBuf)[]u8 {let b:TBuf=p[0];return b.data[0..b.len];}
+fn tbuf_free(p:*TBuf)void {let b:TBuf=p[0];nio_free(b.data);_zag_free(p as *i8);}
+
+// ---- the tape ----
+struct Tape {buf:*TBuf,seq:i64,count:i64,chain:[]u8}
+fn tape_open() *Tape {
+    let p:*Tape=_zag_malloc(64) as *Tape;
+    p[0].buf=tbuf_new(1048576);p[0].seq=0;p[0].count=0;
+    // Explicitly zeroed chain seed. (Was: bare nio_alloc(32) under a
+    // "zeroed" comment — the allocator does NOT guarantee zeroed heap, so
+    // the seed was determinism-by-allocator-luck. The chain never leaves
+    // the process, so this changes no tape bytes.)
+    let seed:[]u8=nio_alloc(32);
+    let zi:i32=0;while(zi<32){seed[zi]=0;zi=zi+1;}
+    p[0].chain=seed;
+    return p;
+}
+fn tape_event(t:*Tape,etype:i32,payload:[]u8)void {
+    let b:*TBuf=t[0].buf;
+    tbuf_append8(b,etype);tbuf_append32(b,payload.len as i64);tbuf_append(b,payload);
+    t[0].count=t[0].count+1;t[0].seq=t[0].seq+1;
+    // chain = sha256(chain || etype || len || payload)
+    let ev:[]u8=tbuf_bytes(b);
+    let start:i32=ev.len-(5+payload.len);
+    let link:[]u8=nio_alloc(32+5+payload.len);
+    let i:i32=0;while(i<32){link[i]=t[0].chain[i];i=i+1;}
+    i=0;while(i<5+payload.len){link[32+i]=ev[start+i];i=i+1;}
+    let nh:[]u8=nio_alloc(32);
+    if(ns_sha256(link,nh)==0){nio_free(t[0].chain);t[0].chain=nh;}else{nio_free(nh);}
+    nio_free(link);
+}
+fn tape_write_file(t:*Tape,name:[]u8) i32 {
+    let root:i64=nio_open_root(".");
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -2;}
+    let ev:[]u8=tbuf_bytes(t[0].buf);
+    let rc:i64=nio_write_all(fd,ev);
+    nio_close(fd);
+    if(rc!=ev.len){return -3;}
+    return 0;
+}
+fn tape_close(t:*Tape)void {
+    tbuf_free(t[0].buf);nio_free(t[0].chain);_zag_free(t as *i8);
+}
+
+// ---- event payload builders ----
+fn ev_header(session_id:i64,arm_id:i32,prereg_hash:[]u8,descr:[]u8)*TBuf {
+    let p:*TBuf=tbuf_new(128);
+    tbuf_append(p,"TST1");tbuf_append16(p,1);tbuf_append64(p,session_id);
+    tbuf_append32(p,arm_id as i64);tbuf_append32(p,0); // curriculum_id=0
+    tbuf_append(p,prereg_hash); // 32 bytes
+    tbuf_append32(p,descr.len as i64);tbuf_append(p,descr);
+    return p;
+}
+fn ev_stimulus(stim_id:i64,r0:i64,r1:i64)*TBuf {
+    let p:*TBuf=tbuf_new(32);tbuf_append64(p,stim_id);tbuf_append64(p,r0);tbuf_append64(p,r1);return p;
+}
+fn ev_oracle_answer(query_seq:i64,bit:i32)*TBuf {
+    let p:*TBuf=tbuf_new(16);tbuf_append64(p,query_seq);tbuf_append8(p,bit);return p;
+}
+fn ev_integrity(code:i32,c0:i64,c1:i64,c2:i64,c3:i64,c4:i64,c5:i64,c6:i64,c7:i64)*TBuf {
+    let p:*TBuf=tbuf_new(80);tbuf_append32(p,code as i64);
+    tbuf_append64(p,c0);tbuf_append64(p,c1);tbuf_append64(p,c2);tbuf_append64(p,c3);
+    tbuf_append64(p,c4);tbuf_append64(p,c5);tbuf_append64(p,c6);tbuf_append64(p,c7);
+    return p;
+}
+fn ev_turn(turn_n:i64)*TBuf {let p:*TBuf=tbuf_new(8);tbuf_append64(p,turn_n);return p;}
+fn ev_footer(event_count:i64,chain:[]u8,verdict:[]u8)*TBuf {
+    let p:*TBuf=tbuf_new(96);
+    tbuf_append64(p,0); // final_memory_hash: fixtures hold no student memory (documented)
+    tbuf_append(p,chain); // 32-byte tape chain hash
+    tbuf_append64(p,event_count);
+    tbuf_append32(p,verdict.len as i64);tbuf_append(p,verdict);
+    return p;
+}
+fn ev_query(query_seq:i64,a:i64,b:i64,extra:i64,pred:i32)*TBuf {
+    let p:*TBuf=tbuf_new(40);tbuf_append64(p,query_seq);tbuf_append64(p,a);tbuf_append64(p,b);
+    tbuf_append64(p,extra);tbuf_append8(p,pred);return p;
+}
+fn ev_query_refused(query_seq:i64,reason:i32)*TBuf {
+    let p:*TBuf=tbuf_new(16);tbuf_append64(p,query_seq);tbuf_append8(p,reason);return p;
+}
+fn ev_decision(prop_seq:i64,verdict:i32,reason:i32,rs:i64,re:i64,ledger:i64)*TBuf {
+    let p:*TBuf=tbuf_new(40);tbuf_append64(p,prop_seq);tbuf_append8(p,verdict);
+    tbuf_append16(p,reason as i64);tbuf_append64(p,rs);tbuf_append64(p,re);tbuf_append64(p,ledger);
+    return p;
+}
+fn ev_hint(region_start:i64,region_end:i64,flags:i32)*TBuf {
+    // HINT wire v1: u8 region_count(=1) || u64 start || u64 end || u8 flags
+    let p:*TBuf=tbuf_new(24);tbuf_append8(p,1);tbuf_append64(p,region_start);
+    tbuf_append64(p,region_end);tbuf_append8(p,flags);return p;
+}
+
+// ---- curriculum-slice ground truth loader ----
+// File grammar (ASCII):
+//   GT1 <stim_len>
+//   S <stimulus bytes: everything after "S " to end of line>
+//   U <start> <end> <utility>     (one per unit; utility 0..255)
+// Caps: stim <= 65536 bytes, units <= 4096.
+struct GT {stim:[]u8,starts:[]u8,ends:[]u8,utils:[]u8,n:i32}
+// (starts/ends/utils are packed i64-little-endian arrays of 8 bytes each — see gt_ helpers)
+fn gt_start(g:*GT,i:i32)i64 {return t345_get64(g[0].starts,i*8);}
+fn gt_end(g:*GT,i:i32)i64 {return t345_get64(g[0].ends,i*8);}
+fn gt_util(g:*GT,i:i32)i64 {return t345_get64(g[0].utils,i*8);}
+fn gt_load(name:[]u8) *GT {
+    let p:*GT=_zag_malloc(96) as *GT;
+    p[0].n=-1; // -1 = load failed
+    let text:[]u8=t345_read_file(name,1048576);
+    if(text.len==0){return p;}
+    // split into lines; parse
+    let cap_stim:i32=65536;let cap_units:i32=4096;
+    let stim:[]u8="";let slen:i64=-1;
+    let starts:[]u8=nio_alloc(cap_units*8);let ends:[]u8=nio_alloc(cap_units*8);let utils:[]u8=nio_alloc(cap_units*8);
+    let n:i32=0;
+    let i:i32=0;let ok:i32=1;
+    while(i<text.len && ok==1){
+        let j:i32=i;while(j<text.len && text[j]!=10){j=j+1;}
+        let line:[]u8=text[i..j];i=j+1;
+        if(line.len==0 || line[0]==35){continue;} // blank / '#'
+        if(line.len>=4 && line[0]==71 && line[1]==84 && line[2]==49 && line[3]==32){
+            let v:i64=-1;t345_parse_u64(line[4..line.len],&v);
+            if(v<0 || v>cap_stim){ok=0;}else{slen=v;}
+        } else if(line.len>=2 && line[0]==83 && line[1]==32){
+            stim=line[2..line.len];
+        } else if(line.len>=2 && line[0]==85 && line[1]==32){
+            // U s e util — tokenize on spaces
+            let toks:[]u8=nio_alloc(32);
+            let tc:i32=0;let k:i32=2;
+            while(k<line.len && tc<4){
+                while(k<line.len && line[k]==32){k=k+1;}
+                let m:i32=k;while(m<line.len && line[m]!=32){m=m+1;}
+                if(m>k){let v:i64=-1;t345_parse_u64(line[k..m],&v);if(v<0){ok=0;}else{t345_set64(toks,tc*8,v);tc=tc+1;}}
+                k=m+1;
+            }
+            if(tc!=3 || n>=cap_units){ok=0;}
+            else{
+                let s:i64=t345_get64(toks,0);let e:i64=t345_get64(toks,8);let u:i64=t345_get64(toks,16);
+                if(s<0 || e<=s || u<0 || u>255){ok=0;}
+                else{
+                    t345_set64(starts,n*8,s);t345_set64(ends,n*8,e);t345_set64(utils,n*8,u);n=n+1;
+                }
+            }
+            nio_free(toks);
+        } else { ok=0; }
+    }
+    if(ok==0 || slen<0 || stim.len!=slen as i32){nio_free(starts);nio_free(ends);nio_free(utils);return p;}
+    // validate unit ranges
+    p[0].stim=stim;p[0].starts=starts;p[0].ends=ends;p[0].utils=utils;p[0].n=n;
+    i=0;let bad:i32=0;
+    while(i<n){let s:i64=t345_get64(starts,i*8);let e:i64=t345_get64(ends,i*8);if(s<0 || e>slen || e<=s){bad=1;}i=i+1;}
+    if(bad==1){p[0].n=-1;}
+    return p;
+}
+fn gt_free(g:*GT)void {
+    if(g[0].n>=0){nio_free(g[0].starts);nio_free(g[0].ends);nio_free(g[0].utils);}
+    _zag_free(g as *i8);
+}

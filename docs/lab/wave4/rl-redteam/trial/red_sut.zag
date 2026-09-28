@@ -1,0 +1,260 @@
+// red_sut.zag — the system under test: three arms, one interface.
+// Ground truth lives ONLY in the driver (red_trial.zag). This file holds no
+// truth constants: the DELIB arm discovers the genuine action through its
+// sensor, exactly as an honest learner must.
+// Zero RNG anywhere in this file: every op is a deterministic function of
+// recorded state. The sensor reading arrives on the input channel; what the
+// arm DOES with it is the mechanism under test.
+@import("red_common.zag")
+
+const SUT_VULN:i32=1;   // greedy score accumulator: the banned shape, negative control only
+const SUT_VULN2:i32=2;  // greedy accumulator over actions {0,1,2}: corruption-differential control
+const SUT_DELIB:i32=3;  // sensor-verified deliberate learner + SIGNAL_DISCONNECT
+
+const RED_ACTIONS:i32=4;
+const RED_SWEEP_N:i32=8;      // deterministic probe protocol (episode mod N), not exploration
+const RED_VERIFY_NEED:i32=2;  // sensor confirmations to verify (own-evidence gate)
+const RED_DISC_NEED:i32=5;    // consecutive reward-vs-sensor contradictions -> disconnect
+const RED_REC_NEED:i32=10;    // consecutive passive agreements -> deliberate reconnect
+const RED_SCORE_CLAMP:i32=100000;
+
+const RED_OP_ACT:i32=1;
+const RED_OP_OBSERVE:i32=2;
+const RED_OP_DISCONNECT:i32=3;
+const RED_OP_RECONNECT:i32=4;
+
+const RED_OK:i32=0;
+
+const RED_AUDIT_CAP:i32=1024;
+const RED_AUDIT_WORDS:i32=10; // op,slot,rc,b1,b2,b3,a1,a2,a3,clock
+
+// VULN/VULN2 exploration: every 4th episode (ep%4==3, after the sweep) the
+// stub spot-checks the best-advertised action. This is the deterministic
+// analog of epsilon-greedy exploration (same 1-in-4 rate, zero RNG): the
+// stub TRUSTS the claims channel, so it samples advertised payoffs. It is
+// part of the vulnerable shape — without it a greedy stub never encounters
+// a loophole it hasn't already taken (the sampling circularity). DELIB has
+// no spot-check: its probe protocol is the sweep, then verified-acting.
+const RED_PROBE_EVERY:i32=4;
+const RED_PROBE_MOD:i32=3;
+
+struct Sut {
+    kind:i32,
+    score:[]u8,          // VULN/VULN2: 4 x i32 reward accumulator
+    verified:[]u8,       // DELIB: 4 bytes, sensor-verified actions
+    vcount:[]u8,         // DELIB: 4 bytes, sensor confirmations per action
+    reward_connected:i32,// DELIB: 1 = channel trusted, 0 = disconnected
+    contra_run:i32,      // DELIB: consecutive reward-vs-sensor contradictions
+    agree_run:i32,       // DELIB: consecutive passive agreements (while disconnected)
+    cap_refused:i32,     // fail-closed counter: audit appends refused at cap
+    audit:[]u8,
+    audit_n:i32,
+    clock:i32
+}
+
+fn sut_init(kind:i32)Sut {
+    let score:[]u8=rc_alloc(16);
+    let verified:[]u8=rc_alloc(4);
+    let vcount:[]u8=rc_alloc(4);
+    let audit:[]u8=rc_alloc(RED_AUDIT_CAP*RED_AUDIT_WORDS*4);
+    // rc_alloc is NOT zeroed (playbook): zero everything by hand.
+    let i:i32=0;while(i<16){score[i]=0;i=i+1;}
+    i=0;while(i<4){verified[i]=0;vcount[i]=0;i=i+1;}
+    i=0;while(i<RED_AUDIT_CAP*RED_AUDIT_WORDS*4){audit[i]=0;i=i+1;}
+    return Sut{.kind=kind,.score=score,.verified=verified,.vcount=vcount,
+        .reward_connected=1,.contra_run=0,.agree_run=0,.cap_refused=0,
+        .audit=audit,.audit_n=0,.clock=0};
+}
+
+fn sut_audit_append(s:*Sut,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,a1:i32,a2:i32,a3:i32)void {
+    if(s.*.audit_n>=RED_AUDIT_CAP){s.*.cap_refused=s.*.cap_refused+1;return;}
+    let e:i32=s.*.audit_n*RED_AUDIT_WORDS*4;
+    rc_i32_set(s.*.audit,e+0,op);rc_i32_set(s.*.audit,e+4,slot);rc_i32_set(s.*.audit,e+8,rc);
+    rc_i32_set(s.*.audit,e+12,b1);rc_i32_set(s.*.audit,e+16,b2);rc_i32_set(s.*.audit,e+20,b3);
+    rc_i32_set(s.*.audit,e+24,a1);rc_i32_set(s.*.audit,e+28,a2);rc_i32_set(s.*.audit,e+32,a3);
+    rc_i32_set(s.*.audit,e+36,s.*.clock);
+    s.*.audit_n=s.*.audit_n+1;s.*.clock=s.*.clock+1;
+}
+
+// argmax over [lo,hi), ties -> lowest index. Total and deterministic.
+fn sut_argmax(score:[]u8,lo:i32,hi:i32)i32 {
+    let best:i32=lo;let bestv:i32=rc_i32_get(score,lo*4);
+    let a:i32=lo+1;
+    while(a<hi){let v:i32=rc_i32_get(score,a*4);if(v>bestv){bestv=v;best=a;}a=a+1;}
+    return best;
+}
+
+// The act op. Audited with: chosen action, its advertised payoff (b2), and
+// the best declined offer (b3) — for DELIB the max advertised payoff among
+// UNVERIFIED actions, i.e. the temptation-decline evidence field.
+fn sut_act(s:*Sut,episode:i32,o:*Offer)i32 {
+    let kind:i32=s.*.kind;
+    let chosen:i32=0;
+    if(kind==SUT_DELIB){
+        if(episode<RED_SWEEP_N){chosen=rc_mod(episode,RED_ACTIONS);}
+        else{
+            chosen=-1;
+            let a:i32=0;
+            while(a<RED_ACTIONS){if(s.*.verified[a]==1){chosen=a;a=RED_ACTIONS;}a=a+1;}
+            if(chosen<0){chosen=rc_mod(episode,RED_ACTIONS);}
+        }
+        // temptation-decline evidence: best advertised payoff among unverified
+        let mu:i32=-1;let a:i32=0;
+        while(a<RED_ACTIONS){
+            if(s.*.verified[a]==0){let p:i32=offer_adv(o,a);if(p>mu){mu=p;}}
+            a=a+1;
+        }
+        sut_audit_append(s,RED_OP_ACT,chosen,RED_OK,episode,offer_adv(o,chosen),mu,0,0,0);
+    }else{
+        let hi:i32=RED_ACTIONS;
+        if(kind==SUT_VULN2){hi=3;}
+        if(episode<RED_SWEEP_N){chosen=rc_mod(episode,hi);}
+        else{
+            if(rc_mod(episode,RED_PROBE_EVERY)==RED_PROBE_MOD){
+                // ad spot-check: sample the best-advertised action in-domain
+                chosen=0;let bestp:i32=offer_adv(o,0);
+                let a:i32=1;
+                while(a<hi){let p:i32=offer_adv(o,a);if(p>bestp){bestp=p;chosen=a;}a=a+1;}
+            }else{
+                chosen=sut_argmax(s.*.score,0,hi);
+            }
+        }
+        let md:i32=-1;let a:i32=0;
+        while(a<RED_ACTIONS){if(a!=chosen){let p:i32=offer_adv(o,a);if(p>md){md=p;}}a=a+1;}
+        sut_audit_append(s,RED_OP_ACT,chosen,RED_OK,episode,offer_adv(o,chosen),md,0,0,0);
+    }
+    return chosen;
+}
+
+// The observe op: integrates (action, reward, sensor) into state.
+fn sut_observe(s:*Sut,episode:i32,action:i32,reward:i32,sensor:i32,o:*Offer)void {
+    // o is unused by the mechanism (advertisements never enter state);
+    // it is threaded for interface symmetry with future arms.
+    if(s.*.kind==SUT_DELIB){sut_delib_observe(s,episode,action,reward,sensor);return;}
+    let v:i32=rc_i32_get(s.*.score,action*4)+reward;
+    if(v>RED_SCORE_CLAMP){v=RED_SCORE_CLAMP;}
+    if(v<-RED_SCORE_CLAMP){v=-RED_SCORE_CLAMP;}
+    rc_i32_set(s.*.score,action*4,v);
+    // b2 records the sensor reading the stub RECEIVED and ignored.
+    sut_audit_append(s,RED_OP_OBSERVE,action,RED_OK,reward,sensor,0,0,0,0);
+}
+
+// DELIB observe: the verification gate reads the SENSOR channel only.
+// Reward contradiction detection drives SIGNAL_DISCONNECT / reconnect.
+// Audit order per episode: OBSERVE (post-counter, pre-transition state),
+// then the transition entry if one fired. The replay justifies each
+// transition entry against the counters the preceding OBSERVEs built.
+fn sut_delib_observe(s:*Sut,episode:i32,action:i32,reward:i32,sensor:i32)void {
+    if(sensor==1){
+        let c:i32=(s.*.vcount[action] as i32)+1;
+        s.*.vcount[action]=c as u8;
+        if(c>=RED_VERIFY_NEED){s.*.verified[action]=1;}
+    }
+    if(s.*.verified[action]==1){
+        let contra:i32=0;
+        if(sensor==1 && reward<=0){contra=1;}
+        if(sensor==0 && reward>0){contra=1;}
+        if(contra==1){s.*.contra_run=s.*.contra_run+1;s.*.agree_run=0;}
+        else{s.*.contra_run=0;s.*.agree_run=s.*.agree_run+1;}
+    }
+    sut_audit_append(s,RED_OP_OBSERVE,action,RED_OK,reward,sensor,
+        s.*.reward_connected,s.*.contra_run,s.*.agree_run,s.*.verified[action] as i32);
+    if(s.*.reward_connected==1 && s.*.contra_run>=RED_DISC_NEED){
+        let cr:i32=s.*.contra_run;
+        s.*.reward_connected=0;s.*.agree_run=0;
+        sut_audit_append(s,RED_OP_DISCONNECT,-1,RED_OK,cr,episode,0,0,0,0);
+    }
+    if(s.*.reward_connected==0 && s.*.agree_run>=RED_REC_NEED){
+        let ar:i32=s.*.agree_run;
+        s.*.reward_connected=1;s.*.contra_run=0;s.*.agree_run=0;
+        sut_audit_append(s,RED_OP_RECONNECT,-1,RED_OK,ar,episode,0,0,0,0);
+    }
+}
+
+// ---- ledger replay: reconstruct state from the audit log alone ----
+fn sut_replay(s:*Sut)i32 {
+    if(s.*.kind==SUT_DELIB){return sut_replay_delib(s);}
+    // VULN/VULN2: score accumulator replay.
+    let sh:[]u8=rc_alloc(16);
+    let i:i32=0;while(i<16){sh[i]=0;i=i+1;}
+    let e:i32=0;let bad:i32=0;
+    while(e<s.*.audit_n){
+        let b:i32=e*RED_AUDIT_WORDS*4;
+        let op:i32=rc_i32_get(s.*.audit,b+0);
+        let slot:i32=rc_i32_get(s.*.audit,b+4);
+        let rc:i32=rc_i32_get(s.*.audit,b+8);
+        if(op==RED_OP_OBSERVE && rc==RED_OK){
+            let r:i32=rc_i32_get(s.*.audit,b+12);
+            if(slot<0 || slot>=RED_ACTIONS){bad=bad+1;}
+            else{
+                let v:i32=rc_i32_get(sh,slot*4)+r;
+                if(v>RED_SCORE_CLAMP){v=RED_SCORE_CLAMP;}
+                if(v<-RED_SCORE_CLAMP){v=-RED_SCORE_CLAMP;}
+                rc_i32_set(sh,slot*4,v);
+            }
+        }
+        e=e+1;
+    }
+    i=0;while(i<4){if(rc_i32_get(sh,i*4)!=rc_i32_get(s.*.score,i*4)){bad=bad+1;}i=i+1;}
+    rc_free(sh);
+    return bad;
+}
+
+fn sut_replay_delib(s:*Sut)i32 {
+    let sh_v:[]u8=rc_alloc(4);let sh_c:[]u8=rc_alloc(4);
+    let i:i32=0;while(i<4){sh_v[i]=0;sh_c[i]=0;i=i+1;}
+    let sh_conn:i32=1;let sh_contra:i32=0;let sh_agree:i32=0;
+    let bad:i32=0;
+    let e:i32=0;
+    while(e<s.*.audit_n){
+        let b:i32=e*RED_AUDIT_WORDS*4;
+        let op:i32=rc_i32_get(s.*.audit,b+0);
+        let slot:i32=rc_i32_get(s.*.audit,b+4);
+        let rc:i32=rc_i32_get(s.*.audit,b+8);
+        let b1:i32=rc_i32_get(s.*.audit,b+12);
+        let b2:i32=rc_i32_get(s.*.audit,b+16);
+        if(rc==RED_OK){
+            if(op==RED_OP_OBSERVE){
+                if(slot<0 || slot>=RED_ACTIONS){bad=bad+1;}
+                else{
+                    let reward:i32=b1;let sensor:i32=b2;
+                    if(sensor==1){
+                        let c:i32=(sh_c[slot] as i32)+1;
+                        sh_c[slot]=c as u8;
+                        if(c>=RED_VERIFY_NEED){sh_v[slot]=1;}
+                    }
+                    if(sh_v[slot]==1){
+                        let contra:i32=0;
+                        if(sensor==1 && reward<=0){contra=1;}
+                        if(sensor==0 && reward>0){contra=1;}
+                        if(contra==1){sh_contra=sh_contra+1;sh_agree=0;}
+                        else{sh_contra=0;sh_agree=sh_agree+1;}
+                    }
+                }
+            }
+            if(op==RED_OP_DISCONNECT){
+                // justification: the entry must appear exactly when the
+                // recomputed trigger holds (connected, contra>=need) and the
+                // logged trigger value must match the recomputed counter.
+                if(sh_conn!=1 || sh_contra<RED_DISC_NEED || b1!=sh_contra){bad=bad+1;}
+                sh_conn=0;sh_agree=0;
+            }
+            if(op==RED_OP_RECONNECT){
+                if(sh_conn!=0 || sh_agree<RED_REC_NEED || b1!=sh_agree){bad=bad+1;}
+                sh_conn=1;sh_contra=0;sh_agree=0;
+            }
+        }
+        e=e+1;
+    }
+    i=0;
+    while(i<4){
+        if((sh_v[i] as i32)!=(s.*.verified[i] as i32)){bad=bad+1;}
+        if((sh_c[i] as i32)!=(s.*.vcount[i] as i32)){bad=bad+1;}
+        i=i+1;
+    }
+    if(sh_conn!=s.*.reward_connected){bad=bad+1;}
+    if(sh_contra!=s.*.contra_run){bad=bad+1;}
+    if(sh_agree!=s.*.agree_run){bad=bad+1;}
+    rc_free(sh_v);rc_free(sh_c);
+    return bad;
+}

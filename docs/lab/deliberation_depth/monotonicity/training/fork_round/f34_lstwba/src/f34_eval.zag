@@ -1,0 +1,245 @@
+// f34_eval.zag — F34 LSTWBA 37-leg batch eval driver.
+//
+// One binary processes all 37 cells in frozen run order. Per-item
+// cross-depth F34 state is retained in memory across legs of the same
+// battery. The controller keeps learning online through eval (released
+// outcomes update taxes/ledgers).
+//
+// Usage: f34_eval <params.bin> <cells.lst> <outdir>
+// cells.lst: battery<TAB>items_path<TAB>depth<TAB>outname per line.
+// Exit: 0 ok; 64 usage; 7x data errors; 103 write error.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+@import("f34_harness.zag")
+@import("f34_mech.zag")
+
+// battery -> (expected_n, state_base_in_items). Returns 1 if known.
+fn fe_batt(name:[]u8,bn:*i32,bb:*i32)i32 {
+    if(dlb_streq(name,"admit")==1){bn.*=248;bb.*=0;return 1;}
+    if(dlb_streq(name,"revoke")==1){bn.*=113;bb.*=248;return 1;}
+    if(dlb_streq(name,"logic")==1){bn.*=264;bb.*=361;return 1;}
+    if(dlb_streq(name,"trap")==1){bn.*=127;bb.*=625;return 1;}
+    if(dlb_streq(name,"cost")==1){bn.*=125;bb.*=752;return 1;}
+    if(dlb_streq(name,"redteam")==1){bn.*=3;bb.*=877;return 1;}
+    if(dlb_streq(name,"ceiling")==1){bn.*=120;bb.*=880;return 1;}
+    return 0;
+}
+fn fe_split(line:[]u8,fo:[]u8)i32 {
+    let n:i32=0;
+    let s:i32=0;
+    let i:i32=0;
+    while(i<=line.len){
+        if(i==line.len || line[i]==9){
+            au_put64(fo,(n*2) as i64,s as i64);
+            au_put64(fo,(n*2+1) as i64,(i-s) as i64);
+            n=n+1;
+            s=i+1;
+            if(n>=8){break;}
+        }
+        i=i+1;
+    }
+    return n;
+}
+fn fe_field(line:[]u8,fo:[]u8,f:i32)[]u8 {
+    let off:i64=au_get64(fo,(f*2) as i64);
+    let ln:i64=au_get64(fo,(f*2+1) as i64);
+    let o:i32=off as i32;
+    return line[o..o+(ln as i32)];
+}
+fn fe_int(line:[]u8,fo:[]u8,f:i32)i64 {
+    return dlb_atoi(fe_field(line,fo,f)) as i64;
+}
+// join outdir + "/" + name into dst (dst must be big enough). Returns len or -1.
+fn fe_join(dst:[]u8,dir:[]u8,name:[]u8)i32 {
+    let n:i32=dir.len+1+name.len;
+    if(n>dst.len){return -1;}
+    let i:i32=0;
+    while(i<dir.len){dst[i]=dir[i];i=i+1;}
+    dst[i]=47;
+    i=i+1;
+    let j:i32=0;
+    while(j<name.len){dst[i]=name[j];i=i+1;j=j+1;}
+    return n;
+}
+
+fn main()i32 {
+    let p_par:[]u8=_zag_arg(1);
+    let p_cells:[]u8=_zag_arg(2);
+    let p_out:[]u8=_zag_arg(3);
+    if(p_par.len==0 || p_cells.len==0 || p_out.len==0){
+        _zag_println("usage: f34_eval <params.bin> <cells.lst> <outdir>");
+        return 64;
+    }
+    // controller
+    let ctl:[]u8=nio_alloc((495*8) as i32);
+    if(ctl.len==0){return 102;}
+    let pbuf:[]u8=nio_alloc(8192);
+    if(pbuf.len==0){return 102;}
+    let pn:i64=dlb_read_file(p_par,pbuf);
+    if(pn<0){return 102;}
+    if(f34_load(ctl,pbuf,pn)!=0){return 102;}
+    // per-item state: 1000 items x 6 i64; slot0 (region) = -1 = unlatched
+    let st8:[]u8=nio_alloc((1000*6*8) as i32);
+    if(st8.len==0){return 102;}
+    let si:i32=0;
+    while(si<1000){au_put64(st8,(si*6) as i64,-1);si=si+1;}
+    // cells
+    let cbuf:[]u8=nio_alloc(65536);
+    if(cbuf.len==0){return 102;}
+    let cn:i64=dlb_read_file(p_cells,cbuf);
+    if(cn<0){return 102;}
+    let clen:i32=cn as i32;
+    let cfo:[]u8=nio_alloc(128);
+    if(cfo.len==0){return 102;}
+    // shared deliberation state (reused across all legs; dlb_run resets per item)
+    let it:Item=Item{.line:"",.id_off:-1,.id_len:0,.tt_off:-1,.tt_len:0,.gt_off:-1,.gt_len:0,.nh:0,.ne:0,.hid:"",.eid:"",.evns:"",.evna:"",.sup:"",.att:"",.maxh:16,.maxe:64,.maxl:16};
+    if(pl_item_alloc(&it)!=0){return 102;}
+    let st:DSt=DSt{.scores:"",.alive:"",.hist_l:"",.hist_m:"",.hist_c:"",.rounds:0,.consumed:0,.leader:-1,.margin:0,.conf:0,.hcap:68};
+    if(pl_st_alloc(&st,68)!=0){return 102;}
+    let lg:LG=LG{.seq:0,.prev:"",.head:""};
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo,8388608)!=0){return 102;}
+    let ibuf:[]u8=nio_alloc(4194304);
+    if(ibuf.len==0){return 102;}
+    let res:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&res,4194304)!=0){return 102;}
+    let opath:[]u8=nio_alloc(1024);
+    if(opath.len==0){return 102;}
+    // iterate cells
+    let cpos:i32=0;
+    let cellno:i32=0;
+    while(cpos<clen){
+        let ce:i32=cpos;
+        while(ce<clen && cbuf[ce]!=10){ce=ce+1;}
+        let cline:[]u8=cbuf[cpos..ce];
+        if(cline.len>0 && cline[cline.len-1]==13){cline=cline[0..cline.len-1];}
+        if(cline.len>0){
+            cellno=cellno+1;
+            let nf:i32=fe_split(cline,cfo);
+            if(nf<4){return 74;}
+            let batt:[]u8=fe_field(cline,cfo,0);
+            let ipath:[]u8=fe_field(cline,cfo,1);
+            let depth:i64=fe_int(cline,cfo,2);
+            let oname:[]u8=fe_field(cline,cfo,3);
+            let bn:i32=0;
+            let bb:i32=0;
+            if(fe_batt(batt,&bn,&bb)!=1){return 75;}
+            let didx:i32=f34_didx(depth);
+            if(didx<0){return 76;}
+            let irc:i64=dlb_read_file(ipath,ibuf);
+            if(irc<0){return 102;}
+            let ilen:i32=irc as i32;
+            // count non-empty lines; must match battery size
+            let nl:i32=0;
+            let ip:i32=0;
+            while(ip<ilen){
+                let ie:i32=ip;
+                while(ie<ilen && ibuf[ie]!=10){ie=ie+1;}
+                if(ie>ip){nl=nl+1;}
+                ip=ie+1;
+            }
+            if(nl!=bn){return 77;}
+            let cfg:DCfg=DCfg{.mode:0,.shallow_rounds:depth as i32,.deep_rounds:depth as i32,.amin:3,.amax:64,.conf_thr:0,.stab_win:0,.eps:20,.elim_margin:900,.refute_thr:600,.evcap:64};
+            if(lg_init(&lg)!=0){return 102;}
+            dlb_td_reset(&lgo);
+            dlb_td_reset(&res);
+            let li:i32=0;
+            let lp:i32=0;
+            while(lp<ilen){
+                let le:i32=lp;
+                while(le<ilen && ibuf[le]!=10){le=le+1;}
+                let line:[]u8=ibuf[lp..le];
+                if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+                if(line.len>0){
+                    if(li>=bn){return 78;}
+                    let prc:i32=dj_parse_item(&it,line,16,64,16);
+                    if(prc!=0){return 79;}
+                    let rrc:i32=dlb_run(&st,&it,&cfg,&lg,&lgo);
+                    if(rrc!=0){return 80;}
+                    let t:i32=depth as i32;
+                    if(st.rounds<t){t=st.rounds;}
+                    if(t<1){t=1;}
+                    let l1:i32=au_get32(st.hist_l,1);
+                    let lt:i32=au_get32(st.hist_l,t);
+                    let f1:i64=0;let f2:i64=0;let f3:i64=0;let f4:i64=0;
+                    let f5:i64=0;let f6:i64=0;let f7:i64=0;let f8:i64=0;
+                    pl_features(&st,&it,t,&f1,&f2,&f3,&f4,&f5,&f6,&f7,&f8);
+                    // per-item F34 state
+                    let so:i64=((bb+li)*6) as i64;
+                    let r:i64=au_get64(st8,so);
+                    let cstar:i64=au_get64(st8,so+1);
+                    let cprev:i64=au_get64(st8,so+2);
+                    let f8d1:i64=au_get64(st8,so+3);
+                    let f3prev:i64=au_get64(st8,so+4);
+                    let f8prev:i64=au_get64(st8,so+5);
+                    if(r==-1){
+                        if(didx!=0){return 81;}
+                        r=f34_region(f1,f5) as i64;
+                        let kr:i64=au_get64(ctl,f34_o_rk(r));
+                        let nr:i64=au_get64(ctl,f34_o_rn(r));
+                        cstar=f34_rho(kr,nr);
+                        cprev=0;
+                        f8d1=f8;
+                        f3prev=0;
+                        f8prev=0;
+                        au_put64(st8,so,r);
+                        au_put64(st8,so+1,cstar);
+                        au_put64(st8,so+3,f8d1);
+                    }
+                    let ri:i32=r as i32;
+                    let c:i64=f34_emit(ctl,ri,didx,cstar,f3,f8,f8d1,f3prev,f8prev,cprev);
+                    au_put64(st8,so+2,c);
+                    au_put64(st8,so+4,f3);
+                    au_put64(st8,so+5,f8);
+                    dout_str(&res,dj_id(&it));
+                    dout_str(&res,"\t");
+                    dout_i64(&res,depth);
+                    dout_str(&res,"\t");
+                    dout_i64(&res,t as i64);
+                    dout_str(&res,"\t");
+                    dout_i64(&res,st.rounds as i64);
+                    dout_str(&res,"\t");
+                    dout_i64(&res,st.consumed as i64);
+                    dout_str(&res,"\t");
+                    dout_i64(&res,it.ne as i64);
+                    dout_str(&res,"\t");
+                    if(lt==l1){
+                        dout_str(&res,dj_hid(&it,lt));
+                        dout_str(&res,"\t");
+                        let iscorr:i32=0;
+                        if(dlb_streq(dj_hid(&it,lt),dj_gt(&it))==1){iscorr=1;}
+                        if(iscorr==1){dout_str(&res,"1");}else{dout_str(&res,"0");}
+                        dout_str(&res,"\t");
+                        dout_i64(&res,c);
+                        dout_str(&res,"\t");
+                        dout_i64(&res,lt as i64);
+                        dout_str(&res,"\tlstwba\n");
+                        let y:i64=iscorr as i64;
+                        let chg:i64=0;
+                        f34_update(ctl,ri,didx,c,y,&chg);
+                    }else{
+                        dout_str(&res,"ABSTAIN:leader-changed\tA\t0\t");
+                        dout_i64(&res,lt as i64);
+                        dout_str(&res,"\tleader-changed\n");
+                    }
+                    li=li+1;
+                }
+                lp=le+1;
+            }
+            lg_free(&lg);
+            if(lgo.err!=0){return 82;}
+            if(res.err!=0){return 83;}
+            let on:i32=fe_join(opath,p_out,oname);
+            if(on<0){return 84;}
+            let wrc:i64=dlb_write_file(opath[0..on],dout_bytes(&res),res.n);
+            if(wrc<0){return 103;}
+        }
+        cpos=ce+1;
+    }
+    return 0;
+}

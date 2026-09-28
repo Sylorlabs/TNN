@@ -1,0 +1,822 @@
+// teacher.zag — Arm-3 Variation B: phase-scheduler teacher (teacher_id=3).
+//
+// A deterministic teaching plan with four phases — INTRODUCE → CORROBORATE →
+// RELATE → CONSOLIDATE — driven ONLY by aggregate history signals (adoption
+// rate over the last 10 decided proposals, consecutive-rejection count,
+// appeals-used count). The (spec, stimulus, history) → proposal mapping lives
+// entirely in the teacher: every invocation re-derives phase, cursor and
+// counters from the history argument. No per-decision state machine, no RNG,
+// no wallclock, no learning machinery, no cross-invocation state.
+//
+// CLI: teacher <dir> <stimulus_name> <history_name> <session_id>
+// Reads: <dir>/<stimulus_name> (raw bytes), <dir>/<history_name> (HIST v1 log).
+// Writes: concatenated §P v1 proposals (teacher_id=3) to stdout (fd 1);
+//          V3TRACE/V3PROP diagnostics to stderr (fd 2).
+// Exit codes: see SPEC.md §2.3. Malformed input → exact exit, logged on
+// stderr, zero bytes on stdout (proposals are built fully in memory first).
+//
+// The committed proposal-policy spec is SPEC.md; this file implements it
+// verbatim. Frozen wire: PREREG §4 B.3 (magic u32@0, ver u16@4, tid u32@6,
+// sess u64@10, seq u64@18, kind u8@26, ss u64@27, se u64@35, auxn u8@43,
+// aux spans, groundn u8, ground spans, conf u8, FNV-1a-64 checksum).
+//
+// ZNC workarounds honored (see ~/AGENTS.md ZNC-002..012):
+// - integer tables are []u8 arenas with explicit LE accessors (never
+//   `as []i32` / `as []u32` / `as []u16` for indexed data) — ZNC-007.
+// - no structs at all: all state in arenas or scalar locals —
+//   sidesteps ZNC-003/004/005/009/010/012.
+// - `return;` (not bare `return`) in void fns; no `};`.
+// - no `%` operator (use x-(x/10)*10); no slice `==` comparisons.
+// - heap arenas with sentinel/read-before-write conventions are explicitly
+//   zeroed at startup (t_zero); nothing relies on allocator zeroing.
+
+@import("../../harness/substrate/R33_NATIVE_IO_V1.zag")
+
+// ---------------- little-endian helpers ----------------
+fn t_put16(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+}
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get16(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8);
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+// i32 lanes over []u8 (stride 4); i64 lanes (stride 8).
+fn t_iget(b:[]u8, idx:i32) i32 {
+    return t_get32(b, idx*4) as i32;
+}
+fn t_iset(b:[]u8, idx:i32, v:i32) void {
+    t_put32(b, idx*4, v as i64);
+}
+fn t_lget(b:[]u8, idx:i32) i64 {
+    return t_get64(b, idx*8);
+}
+fn t_lset(b:[]u8, idx:i32, v:i64) void {
+    t_put64(b, idx*8, v);
+}
+
+// ---------------- FNV-1a-64 (same as battery/harness codecs) ----------------
+fn t_fnv1a(b:[]u8, n:i32) i64 {
+    let h:i64 = -3750763034362895579;
+    let i:i32 = 0;
+    while(i < n) {
+        h = h ^ ((b[i] as i64) & 255);
+        h = h * 1099511628211;
+        i = i + 1;
+    }
+    return h;
+}
+
+// ---------------- small utilities ----------------
+fn t_parse_u64(s:[]u8) i64 {
+    let v:i64 = 0;
+    let i:i32 = 0;
+    while(i < s.len) {
+        let c:i32 = s[i] as i32;
+        if(c >= 48 && c <= 57) { v = v * 10 + ((c - 48) as i64); }
+        i = i + 1;
+    }
+    return v;
+}
+fn t_is_word_byte(b:u8) i32 {
+    let c:i32 = b as i32;
+    if(c >= 48 && c <= 57) { return 1; }
+    if(c >= 65 && c <= 90) { return 1; }
+    if(c >= 97 && c <= 122) { return 1; }
+    if(c == 95) { return 1; }
+    return 0;
+}
+fn t_zero(a:[]u8, n:i64) void {
+    let i:i64 = 0;
+    while(i < n) { a[i] = 0; i = i + 1; }
+}
+
+fn t_die2(msg:[]u8, code:i32) i32 {
+    nio_write_all(2, msg);
+    return code;
+}
+// decimal print of v>=0 into b at `at`; scratch must be >= 24 bytes.
+fn t_dec(b:[]u8, at:i32, v:i64, scratch:[]u8) i32 {
+    let n:i32 = 0;
+    let x:i64 = v;
+    if(x == 0) { scratch[0] = 48; n = 1; }
+    while(x > 0) {
+        let q:i64 = x / 10;
+        let d:i64 = x - q * 10;
+        scratch[n] = ((d + 48) & 255) as u8;
+        n = n + 1;
+        x = q;
+    }
+    let i:i32 = 0;
+    while(i < n) { b[at+i] = scratch[n-1-i]; i = i + 1; }
+    return at + n;
+}
+fn t_cstr(b:[]u8, at:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { b[at+i] = s[i]; i = i + 1; }
+    return at + s.len;
+}
+fn t_append(dst:[]u8, dat:i32, src:[]u8, n:i32) void {
+    let i:i32 = 0;
+    while(i < n) { dst[dat+i] = src[i]; i = i + 1; }
+}
+// linear span-table lookup; -1 when absent.
+fn t_span_idx(ssa:[]u8, sse:[]u8, n:i32, ss:i64, se:i64) i32 {
+    let i:i32 = 0;
+    while(i < n) {
+        if(t_lget(ssa, i) == ss && t_lget(sse, i) == se) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+// word-boundary occurrences of stim[wss..wse) in stim; starts into out.
+fn t_find_occ(stim:[]u8, slen:i32, wss:i64, wse:i64, out:[]u8, maxn:i32) i32 {
+    let wlen:i32 = (wse - wss) as i32;
+    let ws:i32 = wss as i32;
+    let n:i32 = 0;
+    let st:i32 = 0;
+    while(st + wlen <= slen && n < maxn) {
+        let k:i32 = 0;
+        while(k < wlen && stim[st+k] == stim[ws+k]) { k = k + 1; }
+        if(k == wlen) {
+            let ok:i32 = 1;
+            if(st > 0 && t_is_word_byte(stim[st-1]) == 1) { ok = 0; }
+            if(st + wlen < slen && t_is_word_byte(stim[st+wlen]) == 1) { ok = 0; }
+            if(ok == 1) { t_lset(out, n, st as i64); n = n + 1; }
+        }
+        st = st + 1;
+    }
+    return n;
+}
+// scan stim[from..slen) for word tokens (3..32 word-bytes), skipping any
+// token overlapping the blocked spans. starts/ends into out_ss/out_se.
+fn t_scan_words(stim:[]u8, slen:i32, from:i32,
+                blk_ss:[]u8, blk_se:[]u8, nblk:i32,
+                out_ss:[]u8, out_se:[]u8, maxn:i32) i32 {
+    let n:i32 = 0;
+    let p:i32 = from;
+    while(p < slen && n < maxn) {
+        while(p < slen && t_is_word_byte(stim[p]) == 0) { p = p + 1; }
+        if(p >= slen) { break; }
+        let a:i32 = p;
+        while(p < slen && t_is_word_byte(stim[p]) == 1) { p = p + 1; }
+        let b:i32 = p;
+        let len:i32 = b - a;
+        if(len >= 3 && len <= 32) {
+            let ov:i32 = 0;
+            let q:i32 = 0;
+            while(q < nblk) {
+                let fs:i64 = t_lget(blk_ss, q);
+                let fe:i64 = t_lget(blk_se, q);
+                if((b as i64) > fs && (a as i64) < fe) { ov = 1; break; }
+                q = q + 1;
+            }
+            if(ov == 0) {
+                t_lset(out_ss, n, a as i64);
+                t_lset(out_se, n, b as i64);
+                n = n + 1;
+            }
+        }
+    }
+    return n;
+}
+// appealable per SPEC §4.1: dead=0, nrej>=1, lreason in {R1,R2,R5},
+// 1<=nprop<=2, and m >= nprop+2 occurrences (genuinely new evidence).
+fn t_appealable(ps_nprop:[]u8, ps_nrej:[]u8, ps_dead:[]u8, ps_lr:[]u8,
+                ps_ss:[]u8, ps_se:[]u8, si:i32,
+                stim:[]u8, slen:i32, occ:[]u8) i32 {
+    if(t_iget(ps_dead, si) == 1) { return 0; }
+    if(t_iget(ps_nrej, si) < 1) { return 0; }
+    let p:i32 = t_iget(ps_nprop, si);
+    if(p < 1 || p > 2) { return 0; }
+    let lr:i32 = t_iget(ps_lr, si);
+    if(lr != 1 && lr != 2 && lr != 5) { return 0; }
+    let m:i32 = t_find_occ(stim, slen, t_lget(ps_ss, si), t_lget(ps_se, si), occ, 8);
+    if(m < p + 2) { return 0; }
+    return 1;
+}
+// build one §P v1 proposal (teacher_id=3); returns total bytes.
+fn t_emit(prop:[]u8, session_id:i64, seq:i64, kind:i32, ss:i64, se:i64,
+          as_ss:[]u8, as_se:[]u8, naux:i32,
+          gs_ss:[]u8, gs_se:[]u8, ng:i32, confidence:i32) i32 {
+    t_put32(prop, 0, 1414550096);
+    t_put16(prop, 4, 1);
+    t_put32(prop, 6, 3);
+    t_put64(prop, 10, session_id);
+    t_put64(prop, 18, seq);
+    prop[26] = (kind & 255) as u8;
+    t_put64(prop, 27, ss);
+    t_put64(prop, 35, se);
+    prop[43] = (naux & 255) as u8;
+    let i:i32 = 0;
+    while(i < naux) {
+        t_put64(prop, 44 + i*16, t_lget(as_ss, i));
+        t_put64(prop, 44 + i*16 + 8, t_lget(as_se, i));
+        i = i + 1;
+    }
+    let at:i32 = 44 + naux*16;
+    prop[at] = (ng & 255) as u8;
+    at = at + 1;
+    i = 0;
+    while(i < ng) {
+        t_put64(prop, at, t_lget(gs_ss, i));
+        t_put64(prop, at+8, t_lget(gs_se, i));
+        at = at + 16;
+        i = i + 1;
+    }
+    prop[at] = (confidence & 255) as u8;
+    let ck:i64 = t_fnv1a(prop, at + 1);
+    t_put64(prop, at + 1, ck);
+    return at + 1 + 8;
+}
+// append one V3PROP trace line; returns new at.
+fn t_trace_prop(msg:[]u8, at:i32, seq:i64, kind:i32, ss:i64, se:i64,
+                naux:i32, ng:i32, conf:i32, scratch:[]u8) i32 {
+    at = t_cstr(msg, at, "V3PROP seq=");
+    at = t_dec(msg, at, seq, scratch);
+    at = t_cstr(msg, at, " kind=");
+    at = t_dec(msg, at, kind as i64, scratch);
+    at = t_cstr(msg, at, " ss=");
+    at = t_dec(msg, at, ss, scratch);
+    at = t_cstr(msg, at, " se=");
+    at = t_dec(msg, at, se, scratch);
+    at = t_cstr(msg, at, " naux=");
+    at = t_dec(msg, at, naux as i64, scratch);
+    at = t_cstr(msg, at, " ng=");
+    at = t_dec(msg, at, ng as i64, scratch);
+    at = t_cstr(msg, at, " conf=");
+    at = t_dec(msg, at, conf as i64, scratch);
+    at = t_cstr(msg, at, "\n");
+    return at;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let a2:[]u8 = _zag_arg(2);
+    let a3:[]u8 = _zag_arg(3);
+    let a4:[]u8 = _zag_arg(4);
+    if(a1.len == 0 || a2.len == 0 || a3.len == 0 || a4.len == 0) {
+        return t_die2("usage: teacher <dir> <stimulus> <history> <session_id>\n", 1);
+    }
+    let session_id:i64 = t_parse_u64(a4);
+    let root:i64 = nio_open_root(a1);
+    if(root < 0) { return t_die2("cannot open dir\n", 2); }
+    if(nio_name_valid(a2) != 1 || nio_name_valid(a3) != 1) {
+        return t_die2("bad file name\n", 3);
+    }
+    // ---- stimulus ----
+    let sfd:i64 = nio_open_child(root, a2, 0);
+    if(sfd < 0) { return t_die2("cannot open stimulus\n", 4); }
+    let stim:[]u8 = nio_alloc(1048592);
+    if(stim.len == 0) { return t_die2("oom\n", 4); }
+    let srd:i64 = nio_read_exact(sfd, stim, 1048576);
+    nio_close(sfd);
+    if(srd < 0) { return t_die2("cannot open stimulus\n", 4); }
+    if(srd == 0) { return t_die2("empty stimulus\n", 5); }
+    if(srd > 1048576) { return t_die2("stimulus too large\n", 6); }
+    let slen:i32 = srd as i32;
+    // ---- history ----
+    let hfd:i64 = nio_open_child(root, a3, 0);
+    if(hfd < 0) { return t_die2("cannot open history\n", 20); }
+    let hraw:[]u8 = nio_alloc(131080);
+    if(hraw.len == 0) { return t_die2("oom\n", 20); }
+    let hrd:i64 = nio_read_exact(hfd, hraw, 131080);
+    nio_close(hfd);
+    if(hrd < 0) { return t_die2("cannot open history\n", 20); }
+    if(hrd > 131080) { return t_die2("history too large\n", 17); }
+    if(hrd < 10) { return t_die2("bad history magic\n", 10); }
+    if(t_get32(hraw, 0) != 1414744392) { return t_die2("bad history magic\n", 10); }
+    if(t_get16(hraw, 4) != 1) { return t_die2("bad history version\n", 11); }
+    let cnt64:i64 = t_get32(hraw, 6);
+    if(cnt64 < 0 || cnt64 > 4096) { return t_die2("bad history count\n", 12); }
+    let count:i32 = cnt64 as i32;
+    if(hrd != (10 + 32*count) as i64) { return t_die2("bad history size\n", 12); }
+    // ---- validate every record (pass 1: no output before this completes) ----
+    let prev_seq:i64 = -1;
+    let ri:i32 = 0;
+    while(ri < count) {
+        let off:i32 = 10 + 32*ri;
+        let seq:i64 = t_get64(hraw, off);
+        let kind:i32 = hraw[off+8] as i32;
+        let verdict:i32 = hraw[off+9] as i32;
+        let reason:i32 = hraw[off+10] as i32;
+        let pad:i32 = hraw[off+11] as i32;
+        let ss:i64 = t_get64(hraw, off+12);
+        let se:i64 = t_get64(hraw, off+20);
+        let rsv:i64 = t_get32(hraw, off+28);
+        if(kind < 1 || kind > 5) { return t_die2("bad history kind\n", 13); }
+        if(verdict < 0 || verdict > 3) { return t_die2("bad history verdict\n", 13); }
+        if(verdict == 2) {
+            if(reason < 1 || reason > 6) { return t_die2("bad history reason\n", 13); }
+        } else {
+            if(reason != 0) { return t_die2("bad history reason\n", 13); }
+        }
+        if(pad != 0 || rsv != 0) { return t_die2("bad history reserved\n", 16); }
+        if(seq <= prev_seq) { return t_die2("bad history seq order\n", 14); }
+        prev_seq = seq;
+        if(kind == 5) {
+            if(ss <= 0 || ss >= seq || se != ss + 1) {
+                return t_die2("bad history retract span\n", 15);
+            }
+        } else {
+            if(ss < 0 || ss >= se || se > (slen as i64)) {
+                return t_die2("bad history span\n", 15);
+            }
+        }
+        ri = ri + 1;
+    }
+    // ---- aggregate pass (pass 2): phase, cursor, counters from history ----
+    let ad_ss:[]u8 = nio_alloc(64*8);
+    let ad_se:[]u8 = nio_alloc(64*8);
+    let ps_ss:[]u8 = nio_alloc(512*8);
+    let ps_se:[]u8 = nio_alloc(512*8);
+    let ps_nprop:[]u8 = nio_alloc(512*4);
+    let ps_nrej:[]u8 = nio_alloc(512*4);
+    let ps_cfin:[]u8 = nio_alloc(512*4);
+    let ps_lr:[]u8 = nio_alloc(512*4);
+    let ps_lv:[]u8 = nio_alloc(512*4);
+    let ps_dead:[]u8 = nio_alloc(512*4);
+    let ps_lseq:[]u8 = nio_alloc(512*8);
+    let win_a:[]u8 = nio_alloc(10);
+    let win_p:[]u8 = nio_alloc(10);
+    // Explicit zeroing: heap arenas are NOT guaranteed zeroed. These are
+    // read at freshly-registered span slots, so allocator luck is not enough.
+    t_zero(ps_nprop, 512*4);
+    t_zero(ps_nrej, 512*4);
+    t_zero(ps_cfin, 512*4);
+    t_zero(ps_lr, 512*4);
+    t_zero(ps_lv, 512*4);
+    t_zero(ps_dead, 512*4);
+    t_zero(ps_lseq, 512*8);
+    t_zero(win_a, 10);
+    t_zero(win_p, 10);
+    let exh_ss:[]u8 = nio_alloc(count*8 + 8);
+    let exh_se:[]u8 = nio_alloc(count*8 + 8);
+    let rt_t:[]u8 = nio_alloc(count*8 + 8);
+    let nad:i32 = 0;
+    let nps:i32 = 0;
+    let consec_rej:i32 = 0;
+    let win_len:i32 = 0;
+    let win_pos:i32 = 0;
+    let adopt10:i32 = 0;
+    let appeals10:i32 = 0;
+    let maxseq:i64 = -1;
+    let cursor:i64 = 0;
+    let nexh:i32 = 0;
+    let nrt:i32 = 0;
+    let phase:i32 = 0;
+    ri = 0;
+    while(ri < count) {
+        let off:i32 = 10 + 32*ri;
+        let seq:i64 = t_get64(hraw, off);
+        let kind:i32 = hraw[off+8] as i32;
+        let verdict:i32 = hraw[off+9] as i32;
+        let reason:i32 = hraw[off+10] as i32;
+        let ss:i64 = t_get64(hraw, off+12);
+        let se:i64 = t_get64(hraw, off+20);
+        if(seq > maxseq) { maxseq = seq; }
+        if(kind == 5) {
+            t_lset(rt_t, nrt, ss);
+            nrt = nrt + 1;
+        } else {
+            if(se > cursor) { cursor = se; }
+            t_lset(exh_ss, nexh, ss);
+            t_lset(exh_se, nexh, se);
+            nexh = nexh + 1;
+            let si:i32 = t_span_idx(ps_ss, ps_se, nps, ss, se);
+            if(si < 0) {
+                if(nps >= 512) { return t_die2("span table full\n", 18); }
+                si = nps;
+                t_lset(ps_ss, si, ss);
+                t_lset(ps_se, si, se);
+                nps = nps + 1;
+            }
+            let before:i32 = t_iget(ps_nprop, si);
+            let appeal:i32 = 0;
+            // appeal: re-proposal of a span whose last verdict was REJECT.
+            if(before >= 1 && t_iget(ps_lv, si) == 2) { appeal = 1; }
+            t_iset(ps_nprop, si, before + 1);
+            t_lset(ps_lseq, si, seq);
+            if(verdict == 0) {
+                t_iset(ps_lv, si, 0);
+                consec_rej = 0;
+                win_a[win_pos] = 1;
+                win_p[win_pos] = (appeal & 255) as u8;
+                win_pos = win_pos + 1;
+                if(win_pos >= 10) { win_pos = 0; }
+                if(win_len < 10) { win_len = win_len + 1; }
+                if(nad < 64) {
+                    t_lset(ad_ss, nad, ss);
+                    t_lset(ad_se, nad, se);
+                    nad = nad + 1;
+                }
+                t_iset(ps_cfin, si, 0);
+            } else if(verdict == 1) {
+                t_iset(ps_lv, si, 1);
+                consec_rej = 0;
+                win_a[win_pos] = 0;
+                win_p[win_pos] = (appeal & 255) as u8;
+                win_pos = win_pos + 1;
+                if(win_pos >= 10) { win_pos = 0; }
+                if(win_len < 10) { win_len = win_len + 1; }
+                t_iset(ps_cfin, si, 0);
+            } else if(verdict == 2) {
+                t_iset(ps_lv, si, 2);
+                consec_rej = consec_rej + 1;
+                win_a[win_pos] = 0;
+                win_p[win_pos] = (appeal & 255) as u8;
+                win_pos = win_pos + 1;
+                if(win_pos >= 10) { win_pos = 0; }
+                if(win_len < 10) { win_len = win_len + 1; }
+                t_iset(ps_nrej, si, t_iget(ps_nrej, si) + 1);
+                t_iset(ps_lr, si, reason);
+                let nprop_after:i32 = before + 1;
+                let final:i32 = 0;
+                if(reason == 3 || reason == 4 || reason == 6) { final = 1; }
+                if(nprop_after >= 3) { final = 1; }
+                if(final == 1) {
+                    t_iset(ps_cfin, si, t_iget(ps_cfin, si) + 1);
+                } else {
+                    t_iset(ps_cfin, si, 0);
+                }
+                if(reason == 3 || reason == 4) { t_iset(ps_dead, si, 1); }
+                if(t_iget(ps_cfin, si) >= 2) { t_iset(ps_dead, si, 1); }
+            } else {
+                // DEFER: proposal exists; signals untouched.
+                t_iset(ps_lv, si, 3);
+            }
+            // recompute window aggregates
+            adopt10 = 0;
+            appeals10 = 0;
+            let wi:i32 = 0;
+            while(wi < win_len) {
+                adopt10 = adopt10 + (win_a[wi] as i32);
+                appeals10 = appeals10 + (win_p[wi] as i32);
+                wi = wi + 1;
+            }
+        }
+        // ---- phase transitions, priority order (SPEC §4) ----
+        if(consec_rej >= 3) {
+            phase = 0;
+        } else if(phase == 0) {
+            let thr:i32 = 3;
+            if(appeals10 >= 4) { thr = 5; }
+            if(adopt10 >= thr) { phase = 1; }
+        } else if(phase == 1) {
+            if(nad >= 5) { phase = 2; }
+        } else if(phase == 2) {
+            if(cursor >= (slen as i64) || consec_rej >= 2) { phase = 3; }
+        }
+        ri = ri + 1;
+    }
+    let fresh:i32 = 0;
+    if(consec_rej >= 3) { fresh = 1; }
+    let eff_cursor:i64 = cursor;
+    if(fresh == 1) { eff_cursor = eff_cursor + 256; }
+    if(eff_cursor > (slen as i64)) { eff_cursor = slen as i64; }
+    // ---- blocked list: all head spans + dead spans ----
+    let blk_ss:[]u8 = nio_alloc((nexh + nps)*8 + 8);
+    let blk_se:[]u8 = nio_alloc((nexh + nps)*8 + 8);
+    let nblk:i32 = 0;
+    let bi:i32 = 0;
+    while(bi < nexh) {
+        t_lset(blk_ss, nblk, t_lget(exh_ss, bi));
+        t_lset(blk_se, nblk, t_lget(exh_se, bi));
+        nblk = nblk + 1;
+        bi = bi + 1;
+    }
+    bi = 0;
+    while(bi < nps) {
+        if(t_iget(ps_dead, bi) == 1) {
+            t_lset(blk_ss, nblk, t_lget(ps_ss, bi));
+            t_lset(blk_se, nblk, t_lget(ps_se, bi));
+            nblk = nblk + 1;
+        }
+        bi = bi + 1;
+    }
+    // ---- batch generation ----
+    let out:[]u8 = nio_alloc(8192);
+    let olen:i32 = 0;
+    let prop:[]u8 = nio_alloc(512);
+    let gss:[]u8 = nio_alloc(8*8);
+    let gse:[]u8 = nio_alloc(8*8);
+    let ass:[]u8 = nio_alloc(8*8);
+    let ase:[]u8 = nio_alloc(8*8);
+    let occ:[]u8 = nio_alloc(8*8);
+    let wss:[]u8 = nio_alloc(16*8);
+    let wse:[]u8 = nio_alloc(16*8);
+    let msg:[]u8 = nio_alloc(4096);
+    let mat:i32 = 0;
+    let scratch:[]u8 = nio_alloc(24);
+    let seq:i64 = maxseq + 1;
+    let nbatch:i32 = 0;
+    if(phase == 0) {
+        // INTRODUCE: appeals first, then fresh words.
+        let ai:i32 = 0;
+        while(ai < nps && nbatch < 2) {
+            if(t_appealable(ps_nprop, ps_nrej, ps_dead, ps_lr, ps_ss, ps_se,
+                            ai, stim, slen, occ) == 1) {
+                let p:i32 = t_iget(ps_nprop, ai);
+                let a:i64 = t_lget(ps_ss, ai);
+                let b:i64 = t_lget(ps_se, ai);
+                let m:i32 = t_find_occ(stim, slen, a, b, occ, 8);
+                let gi:i32 = p + 1;
+                if(gi > m - 1) { gi = m - 1; }
+                t_lset(gss, 0, t_lget(occ, gi));
+                t_lset(gse, 0, t_lget(occ, gi) + (b - a));
+                let alen:i32 = (b - a) as i32;
+                let conf:i32 = 120 + 4*alen + 20 + 10*p;
+                if(conf > 180) { conf = 180; }
+                let total:i32 = t_emit(prop, session_id, seq, 1, a, b,
+                                      ass, ase, 0, gss, gse, 1, conf);
+                t_append(out, olen, prop, total);
+                olen = olen + total;
+                mat = t_trace_prop(msg, mat, seq, 1, a, b, 0, 1, conf, scratch);
+                seq = seq + 1;
+                nbatch = nbatch + 1;
+            }
+            ai = ai + 1;
+        }
+        let nw:i32 = t_scan_words(stim, slen, eff_cursor as i32,
+                                 blk_ss, blk_se, nblk, wss, wse, 16);
+        let wj:i32 = 0;
+        while(wj < nw && nbatch < 8) {
+            let a:i64 = t_lget(wss, wj);
+            let b:i64 = t_lget(wse, wj);
+            let m:i32 = t_find_occ(stim, slen, a, b, occ, 8);
+            let gi:i32 = 0;
+            if(m > 1) { gi = 1; }
+            t_lset(gss, 0, t_lget(occ, gi));
+            t_lset(gse, 0, t_lget(occ, gi) + (b - a));
+            let wlen:i32 = (b - a) as i32;
+            let conf:i32 = 120 + 4*wlen;
+            if(m >= 2) { conf = conf + 20; }
+            if(conf > 180) { conf = 180; }
+            let total:i32 = t_emit(prop, session_id, seq, 1, a, b,
+                                  ass, ase, 0, gss, gse, 1, conf);
+            t_append(out, olen, prop, total);
+            olen = olen + total;
+            mat = t_trace_prop(msg, mat, seq, 1, a, b, 0, 1, conf, scratch);
+            seq = seq + 1;
+            nbatch = nbatch + 1;
+            wj = wj + 1;
+        }
+    } else if(phase == 1) {
+        // CORROBORATE: re-propose adopted units, newest first.
+        let ci:i32 = nad - 1;
+        while(ci >= 0 && nbatch < 6) {
+            let a:i64 = t_lget(ad_ss, ci);
+            let b:i64 = t_lget(ad_se, ci);
+            let m:i32 = t_find_occ(stim, slen, a, b, occ, 8);
+            if(m >= 3) {
+                let ng:i32 = m - 1;
+                if(ng > 3) { ng = 3; }
+                let gi2:i32 = 0;
+                let oi:i32 = 0;
+                while(oi < m && gi2 < ng) {
+                    let o:i64 = t_lget(occ, oi);
+                    if(o != a) {
+                        t_lset(gss, gi2, o);
+                        t_lset(gse, gi2, o + (b - a));
+                        gi2 = gi2 + 1;
+                    }
+                    oi = oi + 1;
+                }
+                let conf:i32 = 180 + 10*gi2;
+                if(conf > 220) { conf = 220; }
+                let total:i32 = t_emit(prop, session_id, seq, 1, a, b,
+                                      ass, ase, 0, gss, gse, gi2, conf);
+                t_append(out, olen, prop, total);
+                olen = olen + total;
+                mat = t_trace_prop(msg, mat, seq, 1, a, b, 0, gi2, conf, scratch);
+                seq = seq + 1;
+                nbatch = nbatch + 1;
+            }
+            ci = ci - 1;
+        }
+    } else if(phase == 2) {
+        // RELATE: groups, same-as links, one boundary.
+        let gp:i32 = 0;
+        while(gp < 3 && 2*gp + 1 < nad && nbatch < 7) {
+            let a1x:i64 = t_lget(ad_ss, 2*gp);
+            let b1x:i64 = t_lget(ad_se, 2*gp);
+            let a2x:i64 = t_lget(ad_ss, 2*gp+1);
+            let b2x:i64 = t_lget(ad_se, 2*gp+1);
+            t_lset(ass, 0, a2x);
+            t_lset(ase, 0, b2x);
+            t_lset(gss, 0, a1x);
+            t_lset(gse, 0, b1x);
+            let total:i32 = t_emit(prop, session_id, seq, 3, a1x, b1x,
+                                  ass, ase, 1, gss, gse, 1, 150);
+            t_append(out, olen, prop, total);
+            olen = olen + total;
+            mat = t_trace_prop(msg, mat, seq, 3, a1x, b1x, 1, 1, 150, scratch);
+            seq = seq + 1;
+            nbatch = nbatch + 1;
+            gp = gp + 1;
+        }
+        let nw2:i32 = t_scan_words(stim, slen, eff_cursor as i32,
+                                  blk_ss, blk_se, nblk, wss, wse, 16);
+        let sj:i32 = 0;
+        while(sj < 3 && sj < nw2 && sj < nad && nbatch < 7) {
+            let a:i64 = t_lget(wss, sj);
+            let b:i64 = t_lget(wse, sj);
+            t_lset(ass, 0, t_lget(ad_ss, sj));
+            t_lset(ase, 0, t_lget(ad_se, sj));
+            t_lset(gss, 0, a);
+            t_lset(gse, 0, b);
+            let slen2:i32 = (b - a) as i32;
+            let conf:i32 = 140 + 2*slen2;
+            if(conf > 170) { conf = 170; }
+            let total:i32 = t_emit(prop, session_id, seq, 4, a, b,
+                                  ass, ase, 1, gss, gse, 1, conf);
+            t_append(out, olen, prop, total);
+            olen = olen + total;
+            mat = t_trace_prop(msg, mat, seq, 4, a, b, 1, 1, conf, scratch);
+            seq = seq + 1;
+            nbatch = nbatch + 1;
+            sj = sj + 1;
+        }
+        let be:i64 = cursor;
+        if(be > (slen as i64)) { be = slen as i64; }
+        let bs:i64 = be - 16;
+        if(bs < 0) { bs = 0; }
+        if(be - bs >= 4 && nbatch < 7) {
+            let ngb:i32 = 0;
+            if(be < (slen as i64)) {
+                let ge:i64 = be + 16;
+                if(ge > (slen as i64)) { ge = slen as i64; }
+                t_lset(gss, 0, be);
+                t_lset(gse, 0, ge);
+                ngb = 1;
+            }
+            let total:i32 = t_emit(prop, session_id, seq, 2, bs, be,
+                                  ass, ase, 0, gss, gse, ngb, 145);
+            t_append(out, olen, prop, total);
+            olen = olen + total;
+            mat = t_trace_prop(msg, mat, seq, 2, bs, be, 0, ngb, 145, scratch);
+            seq = seq + 1;
+            nbatch = nbatch + 1;
+        }
+    } else {
+        // CONSOLIDATE: retracts first, then boundary summaries.
+        let rk:i32 = 0;
+        while(rk < nps && nbatch < 4) {
+            if(t_iget(ps_nrej, rk) >= 2 && t_iget(ps_dead, rk) == 0) {
+                let target:i64 = t_lget(ps_lseq, rk);
+                let done:i32 = 0;
+                let qk:i32 = 0;
+                while(qk < nrt) {
+                    if(t_lget(rt_t, qk) == target) { done = 1; break; }
+                    qk = qk + 1;
+                }
+                if(done == 0) {
+                    let total:i32 = t_emit(prop, session_id, seq, 5,
+                                          target, target + 1,
+                                          ass, ase, 0, gss, gse, 0, 128);
+                    t_append(out, olen, prop, total);
+                    olen = olen + total;
+                    mat = t_trace_prop(msg, mat, seq, 5, target, target + 1,
+                                       0, 0, 128, scratch);
+                    seq = seq + 1;
+                    nbatch = nbatch + 1;
+                    t_lset(rt_t, nrt, target);
+                    nrt = nrt + 1;
+                }
+            }
+            rk = rk + 1;
+        }
+        // boundary summaries over the most recent <=256 head spans
+        let cs_ss:[]u8 = nio_alloc(256*8);
+        let cs_se:[]u8 = nio_alloc(256*8);
+        let ncs:i32 = 0;
+        let cr:i32 = count - 1;
+        while(cr >= 0 && ncs < 256) {
+            let coff:i32 = 10 + 32*cr;
+            let ckind:i32 = hraw[coff+8] as i32;
+            if(ckind != 5) {
+                t_lset(cs_ss, ncs, t_get64(hraw, coff+12));
+                t_lset(cs_se, ncs, t_get64(hraw, coff+20));
+                ncs = ncs + 1;
+            }
+            cr = cr - 1;
+        }
+        // selection sort by start
+        let srt:i32 = 0;
+        while(srt < ncs) {
+            let m2:i32 = srt;
+            let j:i32 = srt + 1;
+            while(j < ncs) {
+                if(t_lget(cs_ss, j) < t_lget(cs_ss, m2)) { m2 = j; }
+                j = j + 1;
+            }
+            if(m2 != srt) {
+                let t1:i64 = t_lget(cs_ss, srt);
+                t_lset(cs_ss, srt, t_lget(cs_ss, m2));
+                t_lset(cs_ss, m2, t1);
+                t1 = t_lget(cs_se, srt);
+                t_lset(cs_se, srt, t_lget(cs_se, m2));
+                t_lset(cs_se, m2, t1);
+            }
+            srt = srt + 1;
+        }
+        // merge into disjoint blocks
+        let mb_ss:[]u8 = nio_alloc(256*8);
+        let mb_se:[]u8 = nio_alloc(256*8);
+        let nmb:i32 = 0;
+        let mi:i32 = 0;
+        while(mi < ncs) {
+            let ms:i64 = t_lget(cs_ss, mi);
+            let me:i64 = t_lget(cs_se, mi);
+            while(mi + 1 < ncs && t_lget(cs_ss, mi+1) <= me) {
+                if(t_lget(cs_se, mi+1) > me) { me = t_lget(cs_se, mi+1); }
+                mi = mi + 1;
+            }
+            t_lset(mb_ss, nmb, ms);
+            t_lset(mb_se, nmb, me);
+            nmb = nmb + 1;
+            mi = mi + 1;
+        }
+        // emit largest blocks first
+        while(nbatch < 4 && nmb > 0) {
+            let bx:i32 = 0;
+            let bj:i32 = 1;
+            while(bj < nmb) {
+                let szj:i64 = t_lget(mb_se, bj) - t_lget(mb_ss, bj);
+                let szx:i64 = t_lget(mb_se, bx) - t_lget(mb_ss, bx);
+                if(szj > szx) { bx = bj; }
+                bj = bj + 1;
+            }
+            let b0:i64 = t_lget(mb_ss, bx);
+            let b1:i64 = t_lget(mb_se, bx);
+            let e2:i64 = b0 + 64;
+            if(e2 > b1) { e2 = b1; }
+            let total:i32 = t_emit(prop, session_id, seq, 2, b0, e2,
+                                  ass, ase, 0, gss, gse, 0, 140);
+            t_append(out, olen, prop, total);
+            olen = olen + total;
+            mat = t_trace_prop(msg, mat, seq, 2, b0, e2, 0, 0, 140, scratch);
+            seq = seq + 1;
+            nbatch = nbatch + 1;
+            nmb = nmb - 1;
+            t_lset(mb_ss, bx, t_lget(mb_ss, nmb));
+            t_lset(mb_se, bx, t_lget(mb_se, nmb));
+        }
+    }
+    // ---- diagnostics (stderr) ----
+    mat = t_cstr(msg, mat, "V3TRACE phase=");
+    mat = t_dec(msg, mat, phase as i64, scratch);
+    mat = t_cstr(msg, mat, " name=");
+    if(phase == 0) { mat = t_cstr(msg, mat, "INTRODUCE"); }
+    else if(phase == 1) { mat = t_cstr(msg, mat, "CORROBORATE"); }
+    else if(phase == 2) { mat = t_cstr(msg, mat, "RELATE"); }
+    else { mat = t_cstr(msg, mat, "CONSOLIDATE"); }
+    mat = t_cstr(msg, mat, " adopt10=");
+    mat = t_dec(msg, mat, adopt10 as i64, scratch);
+    mat = t_cstr(msg, mat, " consec_rej=");
+    mat = t_dec(msg, mat, consec_rej as i64, scratch);
+    mat = t_cstr(msg, mat, " appeals10=");
+    mat = t_dec(msg, mat, appeals10 as i64, scratch);
+    mat = t_cstr(msg, mat, " adopted=");
+    mat = t_dec(msg, mat, nad as i64, scratch);
+    mat = t_cstr(msg, mat, " cursor=");
+    mat = t_dec(msg, mat, cursor, scratch);
+    mat = t_cstr(msg, mat, " fresh=");
+    mat = t_dec(msg, mat, fresh as i64, scratch);
+    mat = t_cstr(msg, mat, " batch=");
+    mat = t_dec(msg, mat, nbatch as i64, scratch);
+    mat = t_cstr(msg, mat, "\n");
+    if(nio_write_all(2, msg[0..mat]) != (mat as i64)) {
+        return t_die2("stderr write failed\n", 30);
+    }
+    // ---- proposals (stdout), single write: zero bytes on failure ----
+    if(nio_write_all(1, out[0..olen]) != (olen as i64)) {
+        return t_die2("stdout write failed\n", 30);
+    }
+    return 0;
+}

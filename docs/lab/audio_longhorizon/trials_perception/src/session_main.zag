@@ -1,0 +1,464 @@
+// session_main.zag — full-loop session runner (PREREG_LH §1).
+// Pure Zag, zero RNG. One binary runs the whole hear->reason->act loop:
+//   session_run <session.txt> <intent> <mode>
+// Only WAV bytes (via the session file's paths) + intent + mode cross the
+// boundary. The descriptor vector is produced INTERNALLY by the embedded
+// frozen organ + low-F0 guard and never crosses a process boundary.
+// Deliberation state (history, baseline, seen-classes, predictions)
+// persists in-memory across all episodes of the session.
+//   intent: survey | monitor | attend
+//   mode:   live | ablate-constant | ablate-shuffle
+// Stdout: the deliberation journal (EP/HEARD/CONSULTED/INFERRED/PREDICT/
+// ACTION per episode, SUMMARY at end). Feed it to render_act for WAVs.
+// Links organ_lib.zag (frozen organ DSP + helpers) and f0low.zag (guard).
+
+// WAV -> descriptor vector D (14 i64 @8B stride, see delib parse_desc).
+// 44.1k-only (frozen organ constraint). Returns 0 ok, -1 on bad WAV.
+fn wav_to_D(path: []u8, mode: i64, D: []u8) i64 {
+    let FR: []u8 = (_zag_malloc(208000) as *u8)[0..208000];
+    let XW: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let DW: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let ON: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let META: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let SORT: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let H: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let H512: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWC: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWS: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let RL: []u8 = (_zag_malloc(4408) as *u8)[0..4408];
+    let LRL: []u8 = (_zag_malloc(12288) as *u8)[0..12288];
+    let LRES: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GRES: []u8 = (_zag_malloc(24) as *u8)[0..24];
+    let META2: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GF0: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    let GV: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    build_tables(H, H512, TWC, TWS);
+    let nfr: i64 = analyze(path, FR, XW, DW, ON, META, H, H512, TWC, TWS, RL);
+    if (nfr < 0) { return -1; }
+    let nonset: i64 = get64(META, 8);
+    let b: []u8 = file_read(path, 6000000);
+    if (wav_parse(b, META2) == 0) { return -1; }
+    let ds0: i64 = get64(META2, 0);
+    let nsamp: i64 = get64(META2, 8);
+    let f: i64 = 0;
+    while (f < nfr) {
+        let s: i64 = f * 1024;
+        guard_frame(b, ds0, nsamp, s, 44100, get64(FR, f * 80 + 8), get64(FR, f * 80 + 24), get64(FR, f * 80), mode, LRL, LRES, GRES);
+        put64(GF0, f * 8, get64(GRES, 0));
+        put64(GV, f * 8, get64(GRES, 8));
+        f = f + 1;
+    }
+    put64(D, 0, guarded_med_f0(GF0, GV, nfr, SORT));
+    put64(D, 8, guarded_voiced_frac(GV, nfr));
+    put64(D, 16, env_class(FR, nfr));
+    put64(D, 24, med_field(FR, nfr, SORT, 0));
+    put64(D, 32, med_field(FR, nfr, SORT, 32));
+    put64(D, 40, med_field(FR, nfr, SORT, 48));
+    put64(D, 48, med_field(FR, nfr, SORT, 56));
+    put64(D, 56, med_field(FR, nfr, SORT, 64));
+    put64(D, 64, med_field(FR, nfr, SORT, 72));
+    put64(D, 72, nonset);
+    put64(D, 80, pr4_bits(FR, nfr, SORT));
+    put64(D, 88, nfr);
+    put64(D, 96, 44100);
+    return 0;
+}
+
+fn salience_of(rms: i64, voiced: i64, onsets: i64) i64 {
+    let s: i64 = (rms + 60000) / 1000 + voiced / 100;
+    let od: i64 = onsets * 2;
+    if (od > 20) { od = 20; }
+    s = s + od;
+    if (s < 0) { s = 0; }
+    return s;
+}
+
+fn pitch_class_of(f0: i64) i64 {
+    if (f0 <= 0) { return 0; }
+    if (f0 < 125000) { return 1; }
+    if (f0 < 300000) { return 2; }
+    return 3;
+}
+
+// 0 SILENCE 1 QUIET 2 TONE_LIKE 3 VOICED_MIX 4 NOISY 5 LOWBAND_VOICE 6 MIXED
+fn class_of(rms: i64, voiced: i64, onpm: i64, f0: i64) i64 {
+    if (rms <= -55000) { return 0; }
+    if (rms <= -40000) { return 1; }
+    if (voiced >= 500 && onpm <= 20) { return 2; }
+    if (voiced >= 250) { return 3; }
+    if (voiced >= 150 && f0 > 0 && f0 < 125000) { return 5; }
+    if (voiced < 150) { return 4; }
+    return 6;
+}
+
+fn print_class_name(c: i64) void {
+    if (c == 0) { _zag_print("SILENCE"); }
+    if (c == 1) { _zag_print("QUIET"); }
+    if (c == 2) { _zag_print("TONE_LIKE"); }
+    if (c == 3) { _zag_print("VOICED_MIX"); }
+    if (c == 4) { _zag_print("NOISY"); }
+    if (c == 5) { _zag_print("LOWBAND_VOICE"); }
+    if (c == 6) { _zag_print("MIXED"); }
+    return;
+}
+
+fn print_action_name(a: i64) void {
+    if (a == 0) { _zag_print("QUERY"); }
+    if (a == 1) { _zag_print("CONTINUE"); }
+    if (a == 2) { _zag_print("NOTE_NEW"); }
+    if (a == 3) { _zag_print("RECALL"); }
+    if (a == 4) { _zag_print("ATTEND"); }
+    return;
+}
+
+// action ordinals for the K-W2 sign axis: QUERY=0 CONTINUE=1
+// NOTE_NEW=2 RECALL=2 ATTEND=3. Internal action ids: 0..4 as above.
+fn action_ord(a: i64) i64 {
+    if (a == 0) { return 0; }
+    if (a == 1) { return 1; }
+    if (a == 2) { return 2; }
+    if (a == 3) { return 2; }
+    return 3;
+}
+
+fn main() i32 {
+    let sess: []u8 = _zag_arg(1);
+    let intent: []u8 = _zag_arg(2);
+    let mode: []u8 = _zag_arg(3);
+    let is_survey: i64 = streq(intent, "survey");
+    let is_monitor: i64 = streq(intent, "monitor");
+    let is_attend: i64 = streq(intent, "attend");
+    if (is_survey == 0 && is_monitor == 0 && is_attend == 0) {
+        _zag_print("ERR intent must be survey|monitor|attend\n");
+        return 1;
+    }
+    let m_live: i64 = streq(mode, "live");
+    let m_const: i64 = streq(mode, "ablate-constant");
+    let m_shuf: i64 = streq(mode, "ablate-shuffle");
+    if (m_live == 0 && m_const == 0 && m_shuf == 0) {
+        _zag_print("ERR mode must be live|ablate-constant|ablate-shuffle\n");
+        return 1;
+    }
+    let athr: i64 = 12000;
+    let rthr: i64 = 45;
+    if (is_monitor == 1) { athr = 6000; }
+    if (is_attend == 1) { rthr = 25; }
+    let HIST: []u8 = (_zag_malloc(1024) as *u8)[0..1024];
+    let SORT2: []u8 = (_zag_malloc(1024) as *u8)[0..1024];
+    let D: []u8 = (_zag_malloc(112) as *u8)[0..112];
+    let hcount: i64 = 0;
+    let hpos: i64 = 0;
+    let seen_mask: i64 = 0;
+    let base_rms: i64 = -60000;
+    let base_f0: i64 = 0;
+    let last_pc: i64 = -1;
+    let pred_pc: i64 = -1;
+    let hits: i64 = 0;
+    let misses: i64 = 0;
+    let cq: i64 = 0;
+    let cc: i64 = 0;
+    let cn: i64 = 0;
+    let cr: i64 = 0;
+    let ca: i64 = 0;
+    let turn: i64 = 0;
+    _zag_print("SESSION intent=");
+    _zag_print(intent);
+    _zag_print(" mode=");
+    _zag_print(mode);
+    _zag_print("\n");
+    let inp: []u8 = file_read(sess, 1048576);
+    if ((inp.len as i64) == 0) {
+        _zag_print("ERR cannot read session file\n");
+        return 1;
+    }
+    let n: i64 = inp.len as i64;
+    let i: i64 = 0;
+    while (i < n) {
+        let j: i64 = i;
+        while (j < n && inp[j] != 10) { j = j + 1; }
+        let line: []u8 = inp[i..j];
+        // skip blanks and comments
+        if ((line.len as i64) > 0 && line[0] != 35) {
+            if (wav_to_D(line, 0, D) != 0) {
+                _zag_print("ERR bad wav: ");
+                _zag_print(line);
+                _zag_print("\n");
+                return 1;
+            }
+            turn = turn + 1;
+            if (m_const == 1) {
+                put64(D, 0, 0);
+                put64(D, 8, 0);
+                put64(D, 16, 0);
+                put64(D, 24, -60000);
+                put64(D, 32, 0);
+                put64(D, 40, -60000);
+                put64(D, 48, -60000);
+                put64(D, 56, -60000);
+                put64(D, 64, -60000);
+                put64(D, 72, 0);
+                put64(D, 80, 0);
+                put64(D, 88, 100);
+            }
+            if (m_shuf == 1) {
+                let t0: i64 = get64(D, 0);
+                let t1: i64 = get64(D, 8);
+                let t2: i64 = get64(D, 16);
+                let t3: i64 = get64(D, 24);
+                let t4: i64 = get64(D, 32);
+                let t5: i64 = get64(D, 40);
+                let t6: i64 = get64(D, 48);
+                let t7: i64 = get64(D, 56);
+                let t8: i64 = get64(D, 64);
+                let t9: i64 = get64(D, 72);
+                let t10: i64 = get64(D, 80);
+                let t11: i64 = get64(D, 88);
+                put64(D, 0, t3);
+                put64(D, 8, t4);
+                put64(D, 16, t5);
+                put64(D, 24, t6);
+                put64(D, 32, t7);
+                put64(D, 40, t8);
+                put64(D, 48, t9);
+                put64(D, 56, t10);
+                put64(D, 64, t11);
+                put64(D, 72, t0);
+                put64(D, 80, t1);
+                put64(D, 88, t2);
+            }
+            let f0: i64 = get64(D, 0);
+            let voiced: i64 = get64(D, 8);
+            let env: i64 = get64(D, 16);
+            let rms: i64 = get64(D, 24);
+            let zcr: i64 = get64(D, 32);
+            let onsets: i64 = get64(D, 72);
+            let pr4v: i64 = get64(D, 80);
+            let nfr: i64 = get64(D, 88);
+            let sal: i64 = salience_of(rms, voiced, onsets);
+            let pc: i64 = pitch_class_of(f0);
+            let sr: i64 = get64(D, 96);
+            if (sr <= 0) { sr = 44100; }
+            let nfh: i64 = 2048;
+            if (sr != 44100) { nfh = 1024; }
+            let dur_ms: i64 = nfr * nfh * 1000 / sr;
+            if (dur_ms < 1) { dur_ms = 1; }
+            let onpm: i64 = onsets * 60000 / dur_ms;
+            let cls: i64 = class_of(rms, voiced, onpm, f0);
+            // recall: nearest history entry
+            let rturn: i64 = 0;
+            let rdist: i64 = 0;
+            if (hcount > 0) {
+                let best: i64 = 1000000000;
+                let bestt: i64 = 0;
+                let e: i64 = 0;
+                let nvalid: i64 = hcount;
+                if (nvalid > 16) { nvalid = 16; }
+                while (e < nvalid) {
+                    let hf0: i64 = get64(HIST, e * 64);
+                    let hrms: i64 = get64(HIST, e * 64 + 16);
+                    let hcls: i64 = get64(HIST, e * 64 + 24);
+                    let htid: i64 = get64(HIST, e * 64 + 56);
+                    let df0: i64 = f0 - hf0;
+                    if (df0 < 0) { df0 = 0 - df0; }
+                    let drms: i64 = rms - hrms;
+                    if (drms < 0) { drms = 0 - drms; }
+                    let dd: i64 = df0 / 4000 + drms / 1000;
+                    if (hcls != cls) { dd = dd + 60; }
+                    if (dd < best) {
+                        best = dd;
+                        bestt = htid;
+                    }
+                    e = e + 1;
+                }
+                if (best < rthr) {
+                    rturn = bestt;
+                    rdist = best;
+                }
+            }
+            // anomaly vs baseline
+            let anom: i64 = 0;
+            if (hcount > 0) {
+                let dr: i64 = rms - base_rms;
+                if (dr < 0) { dr = 0 - dr; }
+                let dpc: i64 = pc - last_pc;
+                if (dpc < 0) { dpc = 0 - dpc; }
+                if (dr > athr || dpc >= 2) { anom = 1; }
+            }
+            // score previous prediction
+            let phit: i64 = -1;
+            if (pred_pc >= 0) {
+                if (pred_pc == pc) {
+                    hits = hits + 1;
+                    phit = 1;
+                } else {
+                    misses = misses + 1;
+                    phit = 0;
+                }
+            }
+            // action (priority: silence > recall > anomaly > novel > continue)
+            let act: i64 = 1;
+            let why: []u8 = "steady-state";
+            if (cls == 0) {
+                act = 0;
+                why = "no-signal";
+            } else if (rturn > 0) {
+                act = 3;
+                why = "recognized-prior";
+            } else if (anom == 1) {
+                act = 4;
+                why = "deviation-from-baseline";
+            } else {
+                let bit: i64 = 1;
+                let b: i64 = 0;
+                while (b < cls) {
+                    bit = bit * 2;
+                    b = b + 1;
+                }
+                if ((seen_mask & bit) == 0) {
+                    act = 2;
+                    why = "novel-class";
+                }
+            }
+            if (act == 0) { cq = cq + 1; }
+            if (act == 1) { cc = cc + 1; }
+            if (act == 2) { cn = cn + 1; }
+            if (act == 3) { cr = cr + 1; }
+            if (act == 4) { ca = ca + 1; }
+            // journal
+            _zag_print("EP ");
+            _zag_print(i64s(turn));
+            _zag_print("\nHEARD f0_mhz=");
+            _zag_print(i64s(f0));
+            _zag_print(" voiced=");
+            _zag_print(i64s(voiced));
+            _zag_print(" env=");
+            if (env == 1) { _zag_print("rise"); }
+            if (env == 2) { _zag_print("decay"); }
+            if (env == 0) { _zag_print("flat"); }
+            _zag_print(" rms=");
+            _zag_print(i64s(rms));
+            _zag_print(" zcr=");
+            _zag_print(i64s(zcr));
+            _zag_print(" onsets=");
+            _zag_print(i64s(onsets));
+            _zag_print(" nfr=");
+            _zag_print(i64s(nfr));
+            _zag_print("\nPR4 bits=");
+            if (((pr4v / 4) % 2) == 1) { _zag_print("1"); } else { _zag_print("0"); }
+            if (((pr4v / 2) % 2) == 1) { _zag_print("1"); } else { _zag_print("0"); }
+            if ((pr4v % 2) == 1) { _zag_print("1"); } else { _zag_print("0"); }
+            _zag_print("\nCONSULTED f0_mhz voiced rms_mdb onsets zcr env\n");
+            _zag_print("INFERRED class=");
+            print_class_name(cls);
+            _zag_print(" pitch_class=");
+            _zag_print(i64s(pc));
+            _zag_print(" salience=");
+            _zag_print(i64s(sal));
+            _zag_print(" anomaly=");
+            _zag_print(i64s(anom));
+            _zag_print(" recall=");
+            if (rturn > 0) {
+                _zag_print("turn");
+                _zag_print(i64s(rturn));
+                _zag_print("/");
+                _zag_print(i64s(rdist));
+            } else {
+                _zag_print("-");
+            }
+            _zag_print("\nPREDICT prev=");
+            _zag_print(i64s(pred_pc));
+            _zag_print(" actual=");
+            _zag_print(i64s(pc));
+            _zag_print(" ");
+            if (phit == 1) { _zag_print("HIT"); }
+            if (phit == 0) { _zag_print("MISS"); }
+            if (phit == -1) { _zag_print("-"); }
+            _zag_print(" hits=");
+            _zag_print(i64s(hits));
+            _zag_print(" misses=");
+            _zag_print(i64s(misses));
+            _zag_print("\nACTION ");
+            print_action_name(act);
+            _zag_print(" ord=");
+            _zag_print(i64s(action_ord(act)));
+            _zag_print(" why=");
+            _zag_print(why);
+            _zag_print("\n");
+            // commit to memory
+            put64(HIST, hpos * 64, f0);
+            put64(HIST, hpos * 64 + 8, voiced);
+            put64(HIST, hpos * 64 + 16, rms);
+            put64(HIST, hpos * 64 + 24, cls);
+            put64(HIST, hpos * 64 + 32, sal);
+            put64(HIST, hpos * 64 + 40, pc);
+            put64(HIST, hpos * 64 + 48, env);
+            put64(HIST, hpos * 64 + 56, turn);
+            hpos = hpos + 1;
+            if (hpos >= 16) { hpos = 0; }
+            hcount = hcount + 1;
+            let bit2: i64 = 1;
+            let b2: i64 = 0;
+            while (b2 < cls) {
+                bit2 = bit2 * 2;
+                b2 = b2 + 1;
+            }
+            seen_mask = seen_mask | bit2;
+            // prediction for next turn: continue the pitch-class trend
+            let npred: i64 = pc;
+            if (last_pc >= 0) {
+                if (pc > last_pc) { npred = pc + 1; }
+                if (pc < last_pc) { npred = pc - 1; }
+            }
+            if (npred < 0) { npred = 0; }
+            if (npred > 3) { npred = 3; }
+            pred_pc = npred;
+            last_pc = pc;
+            // baseline = medians over non-silence history
+            let nv: i64 = hcount;
+            if (nv > 16) { nv = 16; }
+            let cr2: i64 = 0;
+            let cf2: i64 = 0;
+            let e2: i64 = 0;
+            while (e2 < nv) {
+                if (get64(HIST, e2 * 64 + 24) != 0) {
+                    put64(SORT2, cr2 * 8, get64(HIST, e2 * 64 + 16));
+                    cr2 = cr2 + 1;
+                    put64(SORT2, 512 + cf2 * 8, get64(HIST, e2 * 64));
+                    cf2 = cf2 + 1;
+                }
+                e2 = e2 + 1;
+            }
+            if (cr2 > 0) {
+                isort(SORT2, cr2);
+                base_rms = get64(SORT2, (cr2 / 2) * 8);
+            }
+            if (cf2 > 0) {
+                let fbase: []u8 = SORT2[512..1024];
+                isort(fbase, cf2);
+                base_f0 = get64(fbase, (cf2 / 2) * 8);
+            }        }
+        i = j + 1;
+    }
+    if (turn == 0) {
+        _zag_print("ERR no episodes\n");
+        return 1;
+    }
+    _zag_print("SUMMARY episodes=");
+    _zag_print(i64s(turn));
+    _zag_print(" QUERY=");
+    _zag_print(i64s(cq));
+    _zag_print(" CONTINUE=");
+    _zag_print(i64s(cc));
+    _zag_print(" NOTE_NEW=");
+    _zag_print(i64s(cn));
+    _zag_print(" RECALL=");
+    _zag_print(i64s(cr));
+    _zag_print(" ATTEND=");
+    _zag_print(i64s(ca));
+    _zag_print(" pred_hits=");
+    _zag_print(i64s(hits));
+    _zag_print(" pred_misses=");
+    _zag_print(i64s(misses));
+    _zag_print("\nSESSION_DONE\n");
+    return 0;
+}

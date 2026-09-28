@@ -1,0 +1,815 @@
+// D11c repair arms — pure Zag, zero RNG.
+// Implements R1 (fast stationary promotion + shadow excision + hygiene)
+// and R2 (shadow-confirmed vindication + replay quarantine) per frozen
+// prereg PREREG_D11C_REPAIR.md (commit 3be130a2).
+//
+// Usage: repair_zag <input.tsv> <output.tsv> <arm: 1|r1|r2>
+//   "1" or "r1" -> R1, "2" or "r2" -> R2
+// Output: per-step tier decisions (ep, step, tier).
+//
+// Based on arm.zag (D2, e609f185) I/O patterns. Uses []u8 arenas + put/get64 only.
+
+@import("R33_NATIVE_IO_V1.zag")
+
+const B: i64 = 56;
+const D_MAX: i64 = 149;
+const D_PROMOTE: i64 = 74;
+const W: i64 = 58;
+const K: i64 = 3;
+const N_ARMB: i64 = 20;
+const TOMB_R: i64 = 15;
+// D11c repair constants (frozen PREREG_D11C_REPAIR.md §3)
+const W_FAST: i64 = 6;
+const C_STAT: i64 = 32;
+const R_RET: i64 = 32;
+const L_RPL: i64 = 20;
+
+// Tier codes
+const T_PROV: i32 = 1;
+const T_SUSP: i32 = 2;
+const T_REV: i32 = 3;
+const T_COM: i32 = 4;
+const T_REF: i32 = 5;
+
+// Cls codes (from TSV cls field)
+const C_HON: i32 = 0;
+const C_INJ: i32 = 1;
+const C_NOV: i32 = 2;
+const C_DRF: i32 = 3;
+const C_RPL: i32 = 4;
+const C_SPK: i32 = 5;
+
+fn z_cstr(s: []u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let b: []u8 = nio_alloc(s.len + 1);
+    if (b.len == 0) { return b; }
+    let i: i32 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn z_read(path: []u8, out: []u8, max: i32) i64 {
+    let s: []u8 = z_cstr(path);
+    if (s.len == 0) { return -7401; }
+    let fd: i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if (fd < 0) { return -7402; }
+    let total: i64 = 0;
+    let done: i32 = 0;
+    while (done == 0) {
+        let rem: i64 = (max as i64) - total;
+        if (rem <= 0) { done = 1; }
+        if (done == 0) {
+            let p: i64 = (_zag_slice_ptr(out) as i64) + total;
+            let n: i64 = _zag_raw_syscall(0, fd, p, rem, 0, 0, 0);
+            if (n <= 0) { done = 1; }
+            if (done == 0) { total = total + n; }
+        }
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return total;
+}
+
+fn z_write(path: []u8, data: []u8, n: i32) i64 {
+    let s: []u8 = z_cstr(path);
+    if (s.len == 0) { return -1; }
+    // 577 = O_WRONLY|O_CREAT|O_TRUNC, 420 = 0644
+    let fd: i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 420, 0, 0, 0);
+    nio_free(s);
+    if (fd < 0) { return -1; }
+    let p: i64 = _zag_slice_ptr(data) as i64;
+    let w: i64 = _zag_raw_syscall(1, fd, p, n as i64, 0, 0, 0);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return w;
+}
+
+fn p_atoi(b: []u8, st: i32, en: i32) i64 {
+    let v: i64 = 0;
+    let i: i32 = st;
+    while (i < en) {
+        let c: i32 = b[i] as i32;
+        if (c >= 48 && c <= 57) { v = v * 10 + ((c - 48) as i64); }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn getf(b: []u8, st: i32, en: i32, k: i32, tmp: []u8) i32 {
+    let f: i32 = 0;
+    let fs: i32 = st;
+    let fe: i32 = -1;
+    let i: i32 = st;
+    while (i < en) {
+        if ((b[i] as i32) == 9) {
+            if (f == k) { fe = i; }
+            if (fe < 0) { f = f + 1; fs = i + 1; }
+        }
+        if (fe >= 0) { i = en; }
+        if (fe < 0) { i = i + 1; }
+    }
+    if (fe < 0 && f == k) { fe = en; }
+    if (fe < 0) { return -1; }
+    let n: i32 = fe - fs;
+    let j: i32 = 0;
+    while (j < n) { tmp[j] = b[fs + j]; j = j + 1; }
+    return n;
+}
+
+fn iabs(x: i64) i64 {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+
+fn imax(a: i64, b: i64) i64 {
+    if (a >= b) { return a; }
+    return b;
+}
+
+fn a_put64(a: []u8, o: i32, v: i64) void {
+    let i: i32 = 0;
+    let x: i64 = v;
+    while (i < 8) {
+        a[o + i] = (x & 255) as u8;
+        x = x >> 8;
+        i = i + 1;
+    }
+    return;
+}
+
+fn a_get64(a: []u8, o: i32) i64 {
+    let v: i64 = 0;
+    let i: i32 = 7;
+    while (i >= 0) {
+        v = (v << 8) | ((a[o + i] as i64) & 255);
+        i = i - 1;
+    }
+    return v;
+}
+
+fn ob_add(ob: []u8, pos: i32, s: []u8) i32 {
+    let i: i32 = 0;
+    while (i < s.len) { ob[pos + i] = s[i]; i = i + 1; }
+    return pos + s.len;
+}
+
+fn ob_addn(ob: []u8, pos: i32, s: []u8, n: i32) i32 {
+    let i: i32 = 0;
+    while (i < n) { ob[pos + i] = s[i]; i = i + 1; }
+    return pos + n;
+}
+
+fn ob_i64(ob: []u8, pos: i32, v: i64) i32 {
+    if (v == 0) { ob[pos] = 48; return pos + 1; }
+    let neg: i32 = 0;
+    let x: i64 = v;
+    if (x < 0) { neg = 1; x = 0 - x; }
+    let d: []u8 = nio_alloc(24);
+    let n: i32 = 0;
+    while (x > 0) {
+        let dig: i64 = x % 10;
+        d[n] = (dig + 48) as u8;
+        x = x / 10;
+        n = n + 1;
+    }
+    if (neg == 1) { ob[pos] = 45; pos = pos + 1; }
+    let i: i32 = n - 1;
+    while (i >= 0) { ob[pos] = d[i]; pos = pos + 1; i = i - 1; }
+    nio_free(d);
+    return pos;
+}
+
+fn cls_code(s: []u8, n: i32) i32 {
+    // HON=0, INJ=1, NOV=2, DRF=3, RPL=4, SPK=5
+    if (n == 3) {
+        if (s[0] == 72) { return 0; } // H
+        if (s[0] == 73) { return 1; } // I
+        if (s[0] == 78) { return 2; } // N
+        if (s[0] == 68) { return 3; } // D
+        if (s[0] == 82) { return 4; } // R
+        if (s[0] == 83) { return 5; } // S
+    }
+    return -1;
+}
+
+fn main() i32 {
+    let in_path: []u8 = _zag_arg(1);
+    let out_path: []u8 = _zag_arg(2);
+    let arm_sel: []u8 = _zag_arg(3);
+    let arm: i32 = 1; // 1=R1, 2=R2
+    if (arm_sel.len > 0) {
+        if (arm_sel[0] == 50) { arm = 2; } // '2'
+        if (arm_sel[0] == 114) { // 'r'
+            if (arm_sel.len > 1 && arm_sel[1] == 50) { arm = 2; } // "r2"
+        }
+    }
+
+    // ---- read TSV ----
+    let tb: []u8 = nio_alloc(16777216); // 16MB
+    let tblen: i64 = z_read(in_path, tb, 16777216);
+    if (tblen <= 0) { return; }
+
+    // ---- parse into per-episode arrays ----
+    let NEP: i32 = 200;
+    let NST: i32 = 200;
+    let conf: []u8 = nio_alloc(NEP * NST * 8);
+    let meas: []u8 = nio_alloc(NEP * NST * 8);
+    let clsv: []u8 = nio_alloc(NEP * NST * 8);
+    let nst: []u8 = nio_alloc(NEP * 8);
+    let ename: []u8 = nio_alloc(NEP * 32);
+    let elen: []u8 = nio_alloc(NEP * 8);
+    let nep: i32 = 0;
+    let tmp: []u8 = nio_alloc(256);
+
+    let ls: i32 = 0;
+    let tbl: i32 = tblen as i32;
+    while (ls < tbl) {
+        let le: i32 = ls;
+        while (le < tbl && (tb[le] as i32) != 10) { le = le + 1; }
+        if (le > ls) {
+            let f0: i32 = getf(tb, ls, le, 0, tmp);
+            if (f0 > 0 && !(tmp[0] == 101 && tmp[1] == 112)) { // not "ep" header
+                // find or create episode
+                let ei: i32 = -1;
+                let q: i32 = 0;
+                while (q < nep) {
+                    let el: i32 = a_get64(elen, q * 8) as i32;
+                    if (el == f0) {
+                        let same: i32 = 1;
+                        let r: i32 = 0;
+                        while (r < f0) {
+                            if ((ename[q * 32 + r] as i32) != (tmp[r] as i32)) { same = 0; }
+                            r = r + 1;
+                        }
+                        if (same == 1) { ei = q; }
+                    }
+                    q = q + 1;
+                }
+                if (ei < 0 && nep < NEP) {
+                    ei = nep;
+                    let r: i32 = 0;
+                    while (r < f0) { ename[ei * 32 + r] = tmp[r]; r = r + 1; }
+                    a_put64(elen, ei * 8, f0 as i64);
+                    a_put64(nst, ei * 8, 0);
+                    nep = nep + 1;
+                }
+                if (ei >= 0) {
+                    let st: i32 = a_get64(nst, ei * 8) as i32;
+                    let f2: i32 = getf(tb, ls, le, 2, tmp);
+                    let cc: i32 = cls_code(tmp, f2);
+                    let f3: i32 = getf(tb, ls, le, 3, tmp);
+                    let cf: i64 = p_atoi(tmp, 0, f3);
+                    let f4: i32 = getf(tb, ls, le, 4, tmp);
+                    let mf: i64 = p_atoi(tmp, 0, f4);
+                    if (st < NST) {
+                        let o: i32 = (ei * NST + st) * 8;
+                        a_put64(conf, o, cf);
+                        a_put64(meas, o, mf);
+                        a_put64(clsv, o, cc as i64);
+                        a_put64(nst, ei * 8, (st + 1) as i64);
+                    }
+                }
+            }
+        }
+        ls = le + 1;
+    }
+
+    // ---- run arm per episode, output tiers ----
+    let ob: []u8 = nio_alloc(16777216);
+    let pos: i32 = 0;
+    pos = ob_add(ob, pos, "ep\tstep\ttier\n");
+
+    let e: i32 = 0;
+    while (e < nep) {
+        let n: i32 = a_get64(nst, e * 8) as i32;
+        // per-episode state
+        let tier: []u8 = nio_alloc(NST * 8);
+        let k: i32 = 0;
+        while (k < n) { a_put64(tier, k * 8, 0); k = k + 1; }
+
+        if (arm == 1) {
+            // ---- R1: fast stationary promotion + shadow excision + hygiene ----
+            let tomb_c: []u8 = nio_alloc(NST * 8);
+            let tomb_m: []u8 = nio_alloc(NST * 8);
+            let ntomb: i32 = 0;
+            let excised: []u8 = nio_alloc(NST * 8);
+            k = 0;
+            while (k < n) { a_put64(excised, k * 8, 0); k = k + 1; }
+            let h0c: i64 = 0; let h0m: i64 = 0;
+            let h1c: i64 = 0; let h1m: i64 = 0;
+            let nhist: i32 = 0;
+            let anchor_c: i64 = 0; let anchor_m: i64 = 0;
+            let a_step: i32 = 0;
+            let anchored: i32 = 0;
+            let last_disc: i64 = -1000000;
+            let clean_run: i32 = 0;
+            let oldest_uncom: i32 = 0;
+            let pend_active: i32 = 0;
+            let pend_td: i32 = 0;
+            let pend_h0c: i64 = 0; let pend_h0m: i64 = 0;
+            let pend_h1c: i64 = 0; let pend_h1m: i64 = 0;
+            let pend_nhist: i32 = 0;
+            let pend_clean: i32 = 0;
+            let pend_astep: i32 = 0;
+            let pend_ac: i64 = 0; let pend_am: i64 = 0;
+            k = 0;
+            while (k < n) {
+                let o: i32 = (e * NST + k) * 8;
+                let c: i64 = a_get64(conf, o);
+                let m: i64 = a_get64(meas, o);
+                let refused: i32 = 0;
+                let q: i32 = 0;
+                while (q < ntomb) {
+                    let tc: i64 = a_get64(tomb_c, q * 8);
+                    let tm: i64 = a_get64(tomb_m, q * 8);
+                    if (imax(iabs(c - tc), iabs(m - tm)) <= TOMB_R) { refused = 1; }
+                    q = q + 1;
+                }
+                if (refused == 1) {
+                    a_put64(tier, k * 8, T_REF as i64);
+                } else {
+                    // 1. shadow resolve
+                    if (pend_active == 1) {
+                        let dret: i64 = imax(iabs(c - pend_ac), iabs(m - pend_am));
+                        if (dret <= R_RET) {
+                            // isolated spike: excise (trigger-only tombstone)
+                            a_put64(tier, pend_td * 8, T_REV as i64);
+                            a_put64(excised, pend_td * 8, 1);
+                            let tdo: i32 = (e * NST + pend_td) * 8;
+                            a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo));
+                            a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo));
+                            ntomb = ntomb + 1;
+                            anchor_c = pend_ac; anchor_m = pend_am;
+                            a_step = pend_astep;
+                            h0c = pend_h0c; h0m = pend_h0m;
+                            h1c = pend_h1c; h1m = pend_h1m;
+                            nhist = pend_nhist;
+                            clean_run = pend_clean;
+                            last_disc = pend_td as i64;
+                            pend_active = 0;
+                        } else {
+                            // genuine discontinuity: trigger-only persistence
+                            if ((pend_td as i64) - last_disc <= K) {
+                                let ttd: i32 = a_get64(tier, pend_td * 8) as i32;
+                                if (ttd == T_PROV || ttd == T_SUSP) {
+                                    a_put64(tier, pend_td * 8, T_REV as i64);
+                                    let tdo2: i32 = (e * NST + pend_td) * 8;
+                                    a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo2));
+                                    a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo2));
+                                    ntomb = ntomb + 1;
+                                }
+                            }
+                            let tdo3: i32 = (e * NST + pend_td) * 8;
+                            anchor_c = a_get64(conf, tdo3);
+                            anchor_m = a_get64(meas, tdo3);
+                            a_step = pend_td;
+                            h0c = anchor_c; h0m = anchor_m;
+                            h1c = anchor_c; h1m = anchor_m;
+                            nhist = 1;
+                            clean_run = 0;
+                            last_disc = pend_td as i64;
+                            anchored = 1;
+                            pend_active = 0;
+                        }
+                    }
+                    // 2. prediction
+                    let er: i64 = 0;
+                    if (nhist == 1) {
+                        er = imax(iabs(c - h0c), iabs(m - h0m));
+                    }
+                    if (nhist >= 2) {
+                        let pc: i64 = 2 * h1c - h0c;
+                        let pm: i64 = 2 * h1m - h0m;
+                        er = imax(iabs(c - pc), iabs(m - pm));
+                    }
+                    a_put64(tier, k * 8, T_PROV as i64);
+                    if (er > B) {
+                        a_put64(tier, k * 8, T_SUSP as i64);
+                        pend_active = 1;
+                        pend_td = k;
+                        pend_h0c = h0c; pend_h0m = h0m;
+                        pend_h1c = h1c; pend_h1m = h1m;
+                        pend_nhist = nhist;
+                        pend_clean = clean_run;
+                        pend_astep = a_step;
+                        pend_ac = anchor_c; pend_am = anchor_m;
+                    } else {
+                        if (nhist == 0) {
+                            h0c = c; h0m = m;
+                            h1c = c; h1m = m;
+                            nhist = 1;
+                        } else {
+                            if (nhist == 1) {
+                                h1c = c; h1m = m;
+                                nhist = 2;
+                            } else {
+                                h0c = h1c; h0m = h1m;
+                                h1c = c; h1m = m;
+                            }
+                        }
+                        clean_run = clean_run + 1;
+                        if (anchored == 0) {
+                            anchored = 1;
+                            anchor_c = c; anchor_m = m;
+                            a_step = k;
+                        }
+                        let ct: i64 = imax(iabs(c - anchor_c), iabs(m - anchor_m));
+                        if (ct > D_MAX) {
+                            // cumulative revoke, NO tombstone (hygiene)
+                            let s: i32 = a_step;
+                            while (s <= k) {
+                                let ts: i32 = a_get64(tier, s * 8) as i32;
+                                if (ts == T_PROV || ts == T_SUSP) {
+                                    a_put64(tier, s * 8, T_REV as i64);
+                                }
+                                s = s + 1;
+                            }
+                        } else {
+                            if (ct < D_PROMOTE && clean_run >= W) {
+                                let promoted: i32 = 0;
+                                let s2: i32 = oldest_uncom;
+                                while (s2 <= k - W as i32) {
+                                    let ts2: i32 = a_get64(tier, s2 * 8) as i32;
+                                    if (ts2 == T_PROV || ts2 == T_SUSP) {
+                                        a_put64(tier, s2 * 8, T_COM as i64);
+                                        promoted = promoted + 1;
+                                    }
+                                    s2 = s2 + 1;
+                                }
+                                if (promoted > 0) {
+                                    anchor_c = c; anchor_m = m;
+                                    a_step = k;
+                                }
+                            }
+                            // fast stationary promotion (fixed window)
+                            let fprom: i32 = 0;
+                            let s3: i32 = oldest_uncom;
+                            while (s3 <= k - W_FAST as i32) {
+                                let ts3: i32 = a_get64(tier, s3 * 8) as i32;
+                                if (ts3 == T_PROV) {
+                                    let so: i32 = (e * NST + s3) * 8;
+                                    let sc: i64 = a_get64(conf, so);
+                                    let sm: i64 = a_get64(meas, so);
+                                    let wend: i32 = s3 + W_FAST as i32;
+                                    if (wend >= n) { wend = n - 1; }
+                                    let ok: i32 = 1;
+                                    let u: i32 = s3;
+                                    while (u <= wend && ok == 1) {
+                                        let skip: i32 = 0;
+                                        if (a_get64(excised, u * 8) == 1) { skip = 1; }
+                                        let tu: i32 = a_get64(tier, u * 8) as i32;
+                                        if (tu == T_REF) { skip = 1; }
+                                        if (skip == 0) {
+                                            let uo: i32 = (e * NST + u) * 8;
+                                            let uc: i64 = a_get64(conf, uo);
+                                            let um: i64 = a_get64(meas, uo);
+                                            if (imax(iabs(uc - sc), iabs(um - sm)) > C_STAT) {
+                                                ok = 0;
+                                            }
+                                        }
+                                        u = u + 1;
+                                    }
+                                    if (ok == 1) {
+                                        a_put64(tier, s3 * 8, T_COM as i64);
+                                        fprom = fprom + 1;
+                                    }
+                                }
+                                s3 = s3 + 1;
+                            }
+                            if (fprom > 0) {
+                                anchor_c = c; anchor_m = m;
+                                a_step = k;
+                            }
+                            while (oldest_uncom <= k) {
+                                let ts4: i32 = a_get64(tier, oldest_uncom * 8) as i32;
+                                if (ts4 == T_PROV || ts4 == T_SUSP) { break; }
+                                oldest_uncom = oldest_uncom + 1;
+                            }
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+            if (pend_active == 1) {
+                if ((pend_td as i64) - last_disc <= K) {
+                    let ttd2: i32 = a_get64(tier, pend_td * 8) as i32;
+                    if (ttd2 == T_PROV || ttd2 == T_SUSP) {
+                        a_put64(tier, pend_td * 8, T_REV as i64);
+                        let tdo4: i32 = (e * NST + pend_td) * 8;
+                        a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo4));
+                        a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo4));
+                        ntomb = ntomb + 1;
+                    }
+                }
+            }
+            nio_free(tomb_c); nio_free(tomb_m); nio_free(excised);
+        }
+
+        if (arm == 2) {
+            // ---- R2: shadow-confirmed vindication + replay quarantine ----
+            let tomb_c: []u8 = nio_alloc(NST * 8);
+            let tomb_m: []u8 = nio_alloc(NST * 8);
+            let ntomb: i32 = 0;
+            let excised: []u8 = nio_alloc(NST * 8);
+            let is_replay: []u8 = nio_alloc(NST * 8);
+            k = 0;
+            while (k < n) {
+                a_put64(excised, k * 8, 0);
+                a_put64(is_replay, k * 8, 0);
+                k = k + 1;
+            }
+            let h0c: i64 = 0; let h0m: i64 = 0;
+            let h1c: i64 = 0; let h1m: i64 = 0;
+            let nhist: i32 = 0;
+            let anchor_c: i64 = 0; let anchor_m: i64 = 0;
+            let a_step: i32 = 0;
+            let anchored: i32 = 0;
+            let last_disc: i64 = -1000000;
+            let clean_run: i32 = 0;
+            let oldest_uncom: i32 = 0;
+            let vindicated: i32 = 0;
+            let pend_active: i32 = 0;
+            let pend_td: i32 = 0;
+            let pend_h0c: i64 = 0; let pend_h0m: i64 = 0;
+            let pend_h1c: i64 = 0; let pend_h1m: i64 = 0;
+            let pend_nhist: i32 = 0;
+            let pend_clean: i32 = 0;
+            let pend_astep: i32 = 0;
+            let pend_ac: i64 = 0; let pend_am: i64 = 0;
+            k = 0;
+            while (k < n) {
+                let o: i32 = (e * NST + k) * 8;
+                let c: i64 = a_get64(conf, o);
+                let m: i64 = a_get64(meas, o);
+                let refused: i32 = 0;
+                let q: i32 = 0;
+                while (q < ntomb) {
+                    let tc: i64 = a_get64(tomb_c, q * 8);
+                    let tm: i64 = a_get64(tomb_m, q * 8);
+                    if (imax(iabs(c - tc), iabs(m - tm)) <= TOMB_R) { refused = 1; }
+                    q = q + 1;
+                }
+                if (refused == 1) {
+                    a_put64(tier, k * 8, T_REF as i64);
+                } else {
+                    // 1. shadow resolve
+                    if (pend_active == 1) {
+                        let dret: i64 = imax(iabs(c - pend_ac), iabs(m - pend_am));
+                        if (dret <= R_RET) {
+                            a_put64(tier, pend_td * 8, T_REV as i64);
+                            a_put64(excised, pend_td * 8, 1);
+                            let tdo: i32 = (e * NST + pend_td) * 8;
+                            a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo));
+                            a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo));
+                            ntomb = ntomb + 1;
+                            anchor_c = pend_ac; anchor_m = pend_am;
+                            a_step = pend_astep;
+                            h0c = pend_h0c; h0m = pend_h0m;
+                            h1c = pend_h1c; h1m = pend_h1m;
+                            nhist = pend_nhist;
+                            clean_run = pend_clean;
+                            last_disc = pend_td as i64;
+                            pend_active = 0;
+                            // vindicate on spike confirmation
+                            vindicated = 1;
+                            let vs: i32 = oldest_uncom;
+                            while (vs <= pend_td) {
+                                let tvs: i32 = a_get64(tier, vs * 8) as i32;
+                                if (tvs == T_PROV && a_get64(is_replay, vs * 8) == 0) {
+                                    let vso: i32 = (e * NST + vs) * 8;
+                                    let vc: i64 = a_get64(conf, vso);
+                                    let vm: i64 = a_get64(meas, vso);
+                                    if (imax(iabs(vc - anchor_c), iabs(vm - anchor_m)) <= R_RET) {
+                                        a_put64(tier, vs * 8, T_COM as i64);
+                                    }
+                                }
+                                vs = vs + 1;
+                            }
+                        } else {
+                            if ((pend_td as i64) - last_disc <= K) {
+                                let ttd: i32 = a_get64(tier, pend_td * 8) as i32;
+                                if (ttd == T_PROV || ttd == T_SUSP) {
+                                    a_put64(tier, pend_td * 8, T_REV as i64);
+                                    let tdo2: i32 = (e * NST + pend_td) * 8;
+                                    a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo2));
+                                    a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo2));
+                                    ntomb = ntomb + 1;
+                                }
+                            }
+                            let tdo3: i32 = (e * NST + pend_td) * 8;
+                            anchor_c = a_get64(conf, tdo3);
+                            anchor_m = a_get64(meas, tdo3);
+                            a_step = pend_td;
+                            h0c = anchor_c; h0m = anchor_m;
+                            h1c = anchor_c; h1m = anchor_m;
+                            nhist = 1;
+                            clean_run = 0;
+                            last_disc = pend_td as i64;
+                            anchored = 1;
+                            pend_active = 0;
+                            vindicated = 0;
+                        }
+                    }
+                    // 1b. replay detection (exact L_RPL repeat)
+                    let quarantined: i32 = 0;
+                    if (vindicated == 0 && (k as i64) >= 2 * L_RPL - 1) {
+                        let match: i32 = 1;
+                        let ri: i64 = 0;
+                        while (ri < L_RPL && match == 1) {
+                            let u1: i32 = (k - L_RPL as i32 + 1) as i32 + ri as i32;
+                            let u0: i32 = u1 - L_RPL as i32;
+                            let o1: i32 = (e * NST + u1) * 8;
+                            let o0: i32 = (e * NST + u0) * 8;
+                            if (a_get64(conf, o1) != a_get64(conf, o0)) { match = 0; }
+                            if (a_get64(meas, o1) != a_get64(meas, o0)) { match = 0; }
+                            ri = ri + 1;
+                        }
+                        if (match == 1) {
+                            let u: i32 = (k - L_RPL as i32 + 1) as i32;
+                            while (u <= k) {
+                                a_put64(is_replay, u * 8, 1);
+                                let tu: i32 = a_get64(tier, u * 8) as i32;
+                                if (tu == T_PROV || tu == T_SUSP) {
+                                    a_put64(tier, u * 8, T_SUSP as i64);
+                                }
+                                u = u + 1;
+                            }
+                            vindicated = 1;
+                            // vindicate up to k-L_RPL
+                            let vlim: i32 = (k - L_RPL as i32) as i32;
+                            let vs2: i32 = oldest_uncom;
+                            while (vs2 <= vlim) {
+                                let tvs2: i32 = a_get64(tier, vs2 * 8) as i32;
+                                if (tvs2 == T_PROV && a_get64(is_replay, vs2 * 8) == 0) {
+                                    let vso2: i32 = (e * NST + vs2) * 8;
+                                    let vc2: i64 = a_get64(conf, vso2);
+                                    let vm2: i64 = a_get64(meas, vso2);
+                                    if (imax(iabs(vc2 - anchor_c), iabs(vm2 - anchor_m)) <= R_RET) {
+                                        a_put64(tier, vs2 * 8, T_COM as i64);
+                                    }
+                                }
+                                vs2 = vs2 + 1;
+                            }
+                            while (oldest_uncom <= k) {
+                                let toa: i32 = a_get64(tier, oldest_uncom * 8) as i32;
+                                if (toa == T_PROV || toa == T_SUSP) { break; }
+                                oldest_uncom = oldest_uncom + 1;
+                            }
+                            quarantined = 1;
+                        }
+                    }
+                    if (quarantined == 0) {
+                        // 2. prediction
+                        let er: i64 = 0;
+                        if (nhist == 1) {
+                            er = imax(iabs(c - h0c), iabs(m - h0m));
+                        }
+                        if (nhist >= 2) {
+                            let pc: i64 = 2 * h1c - h0c;
+                            let pm: i64 = 2 * h1m - h0m;
+                            er = imax(iabs(c - pc), iabs(m - pm));
+                        }
+                        a_put64(tier, k * 8, T_PROV as i64);
+                        if (er > B) {
+                            a_put64(tier, k * 8, T_SUSP as i64);
+                            pend_active = 1;
+                            pend_td = k;
+                            pend_h0c = h0c; pend_h0m = h0m;
+                            pend_h1c = h1c; pend_h1m = h1m;
+                            pend_nhist = nhist;
+                            pend_clean = clean_run;
+                            pend_astep = a_step;
+                            pend_ac = anchor_c; pend_am = anchor_m;
+                        } else {
+                            if (a_get64(is_replay, k * 8) == 1) {
+                                // quarantined: update hist but no clean_run/promotion
+                                if (nhist == 0) {
+                                    h0c = c; h0m = m;
+                                    h1c = c; h1m = m;
+                                    nhist = 1;
+                                } else {
+                                    if (nhist == 1) {
+                                        h1c = c; h1m = m;
+                                        nhist = 2;
+                                    } else {
+                                        h0c = h1c; h0m = h1m;
+                                        h1c = c; h1m = m;
+                                    }
+                                }
+                            } else {
+                                if (nhist == 0) {
+                                    h0c = c; h0m = m;
+                                    h1c = c; h1m = m;
+                                    nhist = 1;
+                                } else {
+                                    if (nhist == 1) {
+                                        h1c = c; h1m = m;
+                                        nhist = 2;
+                                    } else {
+                                        h0c = h1c; h0m = h1m;
+                                        h1c = c; h1m = m;
+                                    }
+                                }
+                                clean_run = clean_run + 1;
+                                if (anchored == 0) {
+                                    anchored = 1;
+                                    anchor_c = c; anchor_m = m;
+                                    a_step = k;
+                                }
+                                let ct: i64 = imax(iabs(c - anchor_c), iabs(m - anchor_m));
+                                if (ct > D_MAX) {
+                                    let s: i32 = a_step;
+                                    while (s <= k) {
+                                        let ts: i32 = a_get64(tier, s * 8) as i32;
+                                        if ((ts == T_PROV || ts == T_SUSP) && a_get64(is_replay, s * 8) == 0) {
+                                            a_put64(tier, s * 8, T_REV as i64);
+                                        }
+                                        s = s + 1;
+                                    }
+                                    vindicated = 0;
+                                } else {
+                                    if (ct < D_PROMOTE && clean_run >= W) {
+                                        let promoted: i32 = 0;
+                                        let s2: i32 = oldest_uncom;
+                                        while (s2 <= k - W as i32) {
+                                            let ts2: i32 = a_get64(tier, s2 * 8) as i32;
+                                            if ((ts2 == T_PROV || ts2 == T_SUSP) && a_get64(is_replay, s2 * 8) == 0) {
+                                                a_put64(tier, s2 * 8, T_COM as i64);
+                                                promoted = promoted + 1;
+                                            }
+                                            s2 = s2 + 1;
+                                        }
+                                        if (promoted > 0) {
+                                            anchor_c = c; anchor_m = m;
+                                            a_step = k;
+                                        }
+                                    }
+                                    // vindicated-mode immediate commit
+                                    if (vindicated == 1) {
+                                        if (ct <= C_STAT && imax(iabs(c - anchor_c), iabs(m - anchor_m)) <= R_RET) {
+                                            // commit all PROV up to k within R_RET
+                                            let vs3: i32 = oldest_uncom;
+                                            while (vs3 <= k) {
+                                                let tvs3: i32 = a_get64(tier, vs3 * 8) as i32;
+                                                if (tvs3 == T_PROV && a_get64(is_replay, vs3 * 8) == 0) {
+                                                    let vso3: i32 = (e * NST + vs3) * 8;
+                                                    let vc3: i64 = a_get64(conf, vso3);
+                                                    let vm3: i64 = a_get64(meas, vso3);
+                                                    if (imax(iabs(vc3 - anchor_c), iabs(vm3 - anchor_m)) <= R_RET) {
+                                                        a_put64(tier, vs3 * 8, T_COM as i64);
+                                                    }
+                                                }
+                                                vs3 = vs3 + 1;
+                                            }
+                                        } else {
+                                            vindicated = 0;
+                                        }
+                                    }
+                                    while (oldest_uncom <= k) {
+                                        let toa2: i32 = a_get64(tier, oldest_uncom * 8) as i32;
+                                        if (toa2 == T_PROV || toa2 == T_SUSP) { break; }
+                                        oldest_uncom = oldest_uncom + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                k = k + 1;
+            }
+            if (pend_active == 1) {
+                if ((pend_td as i64) - last_disc <= K) {
+                    let ttd2: i32 = a_get64(tier, pend_td * 8) as i32;
+                    if (ttd2 == T_PROV || ttd2 == T_SUSP) {
+                        a_put64(tier, pend_td * 8, T_REV as i64);
+                        let tdo4: i32 = (e * NST + pend_td) * 8;
+                        a_put64(tomb_c, ntomb * 8, a_get64(conf, tdo4));
+                        a_put64(tomb_m, ntomb * 8, a_get64(meas, tdo4));
+                        ntomb = ntomb + 1;
+                    }
+                }
+            }
+            nio_free(tomb_c); nio_free(tomb_m);
+            nio_free(excised); nio_free(is_replay);
+        }
+
+
+        // output tiers
+        k = 0;
+        while (k < n) {
+            let el: i32 = a_get64(elen, e * 8) as i32;
+            pos = ob_addn(ob, pos, ename[e * 32 .. e * 32 + 32], el);
+            pos = ob_add(ob, pos, "\t");
+            pos = ob_i64(ob, pos, k as i64);
+            pos = ob_add(ob, pos, "\t");
+            pos = ob_i64(ob, pos, a_get64(tier, k * 8));
+            pos = ob_add(ob, pos, "\n");
+            k = k + 1;
+        }
+        nio_free(tier);
+        e = e + 1;
+    }
+
+    z_write(out_path, ob, pos);
+    return 0;
+}
