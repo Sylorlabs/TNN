@@ -3038,3 +3038,13 @@ Partial work committed before the failure: ef418824b (fork battery lane records:
 Blocking: the descendant lanes (design, interactive survey, candidate, debate) never resolved. The wave lock was left behind by the failed run and has been removed by the parent agent so the next wave is not blocked. Nothing was pushed. The next scheduled wave proceeds normally; if this failure mode recurs, it becomes a pattern to escalate.
 
 Standing state unchanged: EXP1c attempt-5 retune remains unauthorized pending Micah's Q1/Q2 rulings; the six governance rulings remain OPEN; all sealed blind pairs untouched; DP-1 presentation remains the parent agent's queue decision.
+
+## Wave 20260928-0821pdt: INCOMPLETE (runtime failure, second consecutive, no debate, no verdicts)
+
+The scheduled run failed before completing with the identical error as the 0521pdt run: "failed while waiting for descendant subagents before resolution: follow-up has no durable chat owner." Two consecutive identical runtime failures after nine straight successes. This is a scheduler-runtime defect pattern, not a wave verdict. No debate was held, no verdicts were rendered.
+
+Partial work committed before the failure: none. The 0821pdt run committed zero commits and left no new files (only its stale wave lock, now removed by the parent agent). The 0521pdt fork-lane evidence (ef418824b) remains carried forward.
+
+Blocking: the failure occurs while the worker waits for descendant (depth-2) subagents. The wave procedure's coordinator-fanout structure is unchanged since the nine successful runs, so this is not a procedure regression; it is a runtime routing defect ("follow-up has no durable chat owner"). The parent agent is diagnosing whether nested subagent resolution currently works from this chat before authorizing a manual rerun.
+
+Standing state unchanged: EXP1c attempt-5 retune remains unauthorized pending Micah's Q1/Q2 rulings; the six governance rulings remain OPEN; all sealed blind pairs untouched; DP-1 presentation remains the parent agent's queue decision. Nothing was pushed.
