@@ -1,5 +1,12 @@
 # G1 registration — self-PAM candidate gate id 2
 
+> 2026-09-27 NOTE (fix1): id 2's measurement changed to
+> `span_seq(evidence)/8` (order-sensitive) and experimental ids 3
+> (`selfpam-sum-gate`, legacy `span_sum/8`) and 4 (`selfpam-fnv-gate`,
+> FNV-1a exact) were added — see
+> `../amendments/AMENDMENT_2026-09-27_G1_FIX1.md` (DRAFT). The `span_sum/8`
+> description below records the amendment-A registration, not current code.
+
 Registers the self-PAM composition as a candidate gate behind the R2-3
 admission instrument (`round2/forks/R2-3/src/sense.zag`), per TECH_BRIEF §3.1
 step 3 and PREREG §3.2.
