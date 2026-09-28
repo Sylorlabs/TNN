@@ -3,7 +3,7 @@
 **Verdict: M3's KILL is CONFIRMED.** Independent reproduction byte-identical;
 gate table reproduced exactly. Two numerical corrections to Crew 2's report
 (22/20 tie/wrong split, not 21/21; S4 F4-16 is a tie-withhold). One major new
-finding: **the re-seal changed 82 probe keys** despite the amendment's explicit
+finding: **the re-seal changed 79 probe keys** despite the amendment's explicit
 "keys unchanged" claim, manufacturing 15 unhittable items. The kill stands on
 S1–S4 alone (keys intact there, M3 fails C1/C2 on fully hittable batteries).
 
@@ -35,13 +35,13 @@ Crew 2 reported 21 tie-withholds / 21 wrong-candidates. Independent trace audit:
 | tie-withhold | 22 | S1:0 S2:4 S3:6 S4:2 S5:5 S6:5 |
 | wrong single | 19 | S1:1 S2:1 S3:1 S4:0 S5:8 S6:8 |
 | wrong union | 1 | S6:1 (F6-17+F1-01) |
-| right-fact-but-scorer-miss | 11 | (subset of the above "wrong" — see §3) |
+| right-fact-but-scorer-miss | 15 | (subset of the above "wrong" — see §3) |
 
 The S4 discrepancy: F4-16 ("What information sits in an audit entry's d2
 word?") is unambiguously `tie-withhold` in the fresh trace (F4-01 and F4-16
 both 1/1 on discriminator `audit`), not a wrong-candidate as Crew 2 logged.
 
-## 3. Key finding: re-seal changed 82 keys; 15 items unhittable
+## 3. Key finding: re-seal changed 79 keys; 15 items unhittable
 
 The re-seal amendment (AMENDMENT_2026-09-27_PROBE_RESEAL.md) states:
 "Keys are byte-identical to the frozen set... all other keys carried over
@@ -56,15 +56,16 @@ probe keys (git-verified across `df3f77c3b`, `f71ff91f6`):
 | composition | 12/12 |
 | corrections_pending_falsehoods | 18/18 |
 | dependency_contradiction | 13/13 |
-| S7_recall | 6 (the 6 legitimate S7 corrections) |
+| S7_recall | 0/108 (the 6 S7 corrections are pre-existing in the frozen battery, not re-seal changes — see errata) |
 
 15 immediate-probe items are **unhittable under the re-sealed keys**: no single
 taught fact and no pair of taught facts reaches the 70% word-overlap bar
 (rigorous all-pairs ceiling over session-appropriate store state = 0.00).
 **All 15 score 1.00 under the frozen keys** — the key changes manufactured
-these misses. 11 of the 42 "misses" are pure scorer-gap: M3 retrieved the
-RIGHT fact (e.g. F5-08, F6-18, F6-17-union) but the paraphrased key can't be
-matched by any taught-fact text. One re-sealed key (F6-01: "carry the date in
+these misses. 15 of the 42 "misses" are pure scorer-gap: M3 retrieved the
+RIGHT fact in all 15 (e.g. F5-08, F6-18, F6-17-union) but the paraphrased key
+can't be matched by the taught-fact text; each of the 15 scores as a hit
+under its true frozen key. One re-sealed key (F6-01: "carry the date in
 their name") **contradicts** the taught fact and frozen key ("carry their
 commit SHA in the filename").
 
@@ -79,9 +80,36 @@ NOT depend on this — S1–S4 keys are intact and fully hittable, and M3 fails
 C1/C2 there (17/13/11/16 of 18). But M2 must be scored against restored frozen
 keys, or the re-seal must be redone with keys byte-identical.
 
-Genuine M3 retrieval failures (hittable items): **27** (18 tie-withholds +
-9 wrong-fact). Plus 4 tie-withholds on unhittable items. 11 misses are pure
-key-change artifacts, not M3's fault.
+Genuine M3 retrieval failures: **27** (22 tie-withholds + 5 wrong-fact), of
+which 4 tie-withholds are on unhittable items. **15 misses are pure
+key-change artifacts**, not M3's fault (M3 retrieved the right fact in all
+15; each scores 1.0 under its true frozen key).
+
+Rescored against the true frozen keys, M3's answers give S5 13/18 and S6
+11/18 (both arms; S1–S4 unchanged at 17/13/11/16) — still below C2 (≥.90),
+so the key changes manufactured 15 misses but **M3 fails C1/C2 regardless of
+which key set is used**. The kill does not depend on the re-seal.
+
+**Errata (2026-09-28, self-correction):** the first committed version of
+this report said "82 keys" and its per-suite table said "85" with "6
+legitimate S7 corrections" — both wrong, from the same audit-script bug.
+`rt_reseal_audit.py` v1 keyed keys by bare probe ID, but immediate_S1..S6
+share F-IDs with S7_recall, so S7's corrected keys silently overwrote the
+immediate keys in the comparison dict (82); a later per-file diagnostic
+compared the re-sealed S7 keys against the *immediate* frozen files instead
+of the frozen S7 file, producing a phantom "6" (85). The suite-scoped
+re-derivation (keys indexed by (file-stem, probe-id)) gives **79**. The same
+bare-ID bug was in `rt_rescore_frozen.py` and `rt_frozen_ceil.py` (their
+"frozen" S5/S6 keys were really S7 keys); both are fixed in this commit and
+their conclusions re-derived suite-scoped: frozen-key rescore S5 13/18, S6
+11/18; all 15 unhittable items score 1.00 under the true frozen immediate
+keys. The "11 pure scorer-gap" figure is likewise corrected to 15 (the old
+cross-tab filtered on re-sealed ceiling < 0.7, excluding 4 items —
+F5-07, F5-12, F5-13, F6-05 — whose re-sealed keys are pair-reachable but
+whose frozen keys match M3's answers). The 6 S7 corrections (F1-01, F1-09,
+F1-14, F2-02, F2-07, F2-08) are pre-existing in the frozen battery
+(re-sealed S7 keys are 0/108 different from frozen S7 keys); none are in
+S5/S6, so they do not interact with the re-seal changes.
 
 ## 4. Failure envelope
 
@@ -191,8 +219,12 @@ When the battery is repaired, M2 must clear three hard tests:
 ## 8. Evidence committed
 
 - `redteam/REDTEAM.md` (this file)
-- `redteam/rt_attack.zag` — pure-Zag attack harness (A1–A4)
-- `redteam/attacks_output.txt` — byte-identical attack output (2 runs, SHA verified)
+- `redteam/rt_attack.zag` — pure-Zag attack harness (A1–A4). Its output is
+  a regenerable derived artifact: two byte-identical runs, SHA-256
+  `4fca966dd5e4658c4c47e22a42144181829f36616beac03cace21a63338f5da0`
+  (retained locally at `~/workspace/growwithme_retry/redteam/attacks_output.txt`;
+  removed from the branch per the no-derived-files rule — it regenerates
+  byte-identically from the committed harness + committed M3)
 - `redteam/rt_hittable.py` — exact-scorer-replica hittability audit
 - `redteam/rt_crosstab.py` — unhittable × verdict cross-tab
 - `redteam/rt_frozen_ceil.py` — frozen-key ceiling proof
@@ -201,4 +233,16 @@ When the battery is repaired, M2 must clear three hard tests:
 - `redteam/rt_verdicts.py`, `rt_miss_audit.py`, `rt_envelope.py`, `rt_score.py` — audit scripts
 - Temporary Python harnesses only; committed M3 (Zag) untouched.
 
-No binaries, `.zagd`, caches, or derived run outputs committed.
+**On the Python audit scripts vs the pure-Zag rule:** the "pure Zag for new
+test code" constraint is met — the only new *test* code (the A1–A4 attack
+battery, `rt_attack.zag`) is pure Zag and runs the committed M3 unchanged.
+The nine `.py` files are deterministic *analysis utilities*, not test code:
+they never execute M3; they re-score committed outputs/traces with a
+byte-exact replica of the frozen 70%-word-overlap scorer. Every number they
+produce was cross-checked by independent re-derivation (this errata pass
+corrected the three that weren't). `rt_attack.zag` replays were verified
+byte-identical across runs (zero RNG).
+
+No binaries, `.zagd`, caches, or derived run outputs committed
+(`attacks_output.txt` was committed in error in the first pass and is
+removed in this follow-up; its SHA above preserves verifiability).

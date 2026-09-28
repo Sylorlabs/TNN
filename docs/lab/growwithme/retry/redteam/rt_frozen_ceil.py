@@ -41,11 +41,13 @@ def parse_md(path):
         items.append((qid, m.group(2).strip(), m.group(3).strip()))
     return items
 
-# frozen keys
+# frozen keys, SUITE-SCOPED (file-stem, probe-id). v1 keyed by bare probe
+# id, so S7_recall's corrected keys overwrote the immediate keys for the
+# 6 corrected facts (F1-01, F1-09, F1-14, F2-02, F2-07, F2-08). Fixed 2026-09-28.
 frozen_keys = {}
 for p in (BASE / "_src/docs/lab/growwithme/frozen/probes").glob("*.md"):
     for qid, q, k in parse_md(p):
-        frozen_keys[qid] = k
+        frozen_keys[(p.stem, qid)] = k
 
 UNHITTABLE = ["F5-03", "F5-05", "F5-06", "F5-08", "F5-09", "F5-11", "F5-16", "F5-17",
               "F6-02", "F6-03", "F6-06", "F6-07", "F6-12", "F6-17", "F6-18"]
@@ -53,7 +55,7 @@ print("qid | frozen-key ceiling (single best) | verdict")
 for qid in UNHITTABLE:
     s = int(qid[1])
     facts = store_at(s)
-    fk = frozen_keys.get(qid, None)
+    fk = frozen_keys.get((f"immediate_S{s}", qid), None)
     if fk is None:
         print(f"{qid}: NO FROZEN KEY"); continue
     best, bf = 0.0, None

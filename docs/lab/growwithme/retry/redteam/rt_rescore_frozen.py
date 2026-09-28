@@ -33,12 +33,17 @@ def parse_md(path):
         items.append((qid, m.group(2).strip(), m.group(3).strip()))
     return items
 
-frozen_keys, resealed_keys = {}, {}
+# Suite-scoped frozen keys: (file-stem, probe-id) -> key. v1 keyed by bare
+# probe id; immediate_S1..S6 share F-IDs with S7_recall, so S7's corrected
+# keys overwrote the immediate keys (S5/S6 "frozen" scores were really S7
+# scores). Fixed 2026-09-28.
+frozen_keys = {}
 for p in (BASE / "_src/docs/lab/growwithme/frozen/probes").glob("*.md"):
-    for qid, q, k in parse_md(p): frozen_keys[qid] = k
+    for qid, q, k in parse_md(p): frozen_keys[(p.stem, qid)] = k
+resealed_keys = {}
 for p in (BASE / "probes_resealed").glob("*.md"):
     if p.name == "MANIFEST.md": continue
-    for qid, q, k in parse_md(p): resealed_keys[qid] = k
+    for qid, q, k in parse_md(p): resealed_keys[(p.stem, qid)] = k
 
 print("arm session | resealed-key score (as reported) | frozen-key score (uncontaminated)")
 for arm, d in [("D", "D_rt1"), ("N", "N_rt1")]:
@@ -46,6 +51,6 @@ for arm, d in [("D", "D_rt1"), ("N", "N_rt1")]:
         items = parse_md(BASE / f"probes_resealed/immediate_S{s}.md")
         anss = [l[5:].strip() for l in (RT / "repro" / d / f"probe_immediate_S{s}.txt").read_text().splitlines()
                 if l.startswith("A || ")]
-        rs = sum(score_answer(a, resealed_keys[q]) for (q, _, _), a in zip(items, anss))
-        fs = sum(score_answer(a, frozen_keys[q]) for (q, _, _), a in zip(items, anss))
+        rs = sum(score_answer(a, resealed_keys[(f"immediate_S{s}", q)]) for (q, _, _), a in zip(items, anss))
+        fs = sum(score_answer(a, frozen_keys[(f"immediate_S{s}", q)]) for (q, _, _), a in zip(items, anss))
         print(f"{arm} S{s}: {rs:.0f}/18 ({rs/18:.3f}) | {fs:.0f}/18 ({fs/18:.3f})")
