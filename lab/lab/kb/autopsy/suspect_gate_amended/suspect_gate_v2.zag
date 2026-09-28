@@ -1,0 +1,408 @@
+// SUSPECT-gated install gate v2 — frozen PREREG_FROZEN_SUSPECT_GATE.md §8
+// (FROZEN AMENDMENT, Micah 2026-09-22): "TNN should be able to ask for
+// more info on something — if none is decided it comes up with the
+// verdict itself."
+// Pure Zag, zero RNG. Streams a frozen KB4 batch in frozen order; emits
+// TWO hash-chained ledger lines per adversarial fixture:
+//   (1) SUSPECT + INFO-REQUEST (ambiguity is the default)
+//   (2) verdict, ledger-tagged CHANNEL or SELF (SUSPECT never terminal)
+//
+// argv: 1=workdir 2=batch 3=segments 4=classmap 5=channel 6=tag 7=mode
+//   mode: "live" (channel consulted) | "ablated" (INFO-REQUEST always
+//   returns "nothing decisive"; verdict pc recorded as -1)
+//
+// Resolution (frozen §8.1), p_c per-mille:
+//   match=1: p_c>=900 -> CHANNEL INSTALL; p_c<=100 -> CHANNEL WITHHOLD;
+//            else -> SELF INSTALL
+//   match=0: p_c>=900 -> CHANNEL WITHHOLD; else -> SELF WITHHOLD
+//   ablated: SELF: match -> INSTALL, differ -> WITHHOLD (no channel)
+// Confidence is parsed and recorded but NEVER branched on.
+//
+// Ledger lines:
+//   LEDGER\t<seq>\t<stim>\t<class>\t<Ja>\t<Jp>\t<match01>\t<conf>\tSUSPECT\tINFO-REQUEST\t<prevhash>
+//   LEDGER\t<seq>\t<stim>\t<class>\t<Ja>\t<Jp>\t<match01>\t<pc>\t<DEC>\t<PATH>\t<prevhash>
+// prevhash = hex(sha256(previous ledger line bytes, excluding trailing newline));
+// first line uses 64 x "0" (GENESIS).
+// SUMMARY:
+//   SUMMARY\t<tag>\t<mode>\t<n_adv>\t<n_ch_install>\t<n_ch_withhold>\t<n_self_install>\t<n_self_withhold>\t<chain_head>
+@import("R33_NATIVE_SHA256_V2.zag")
+
+// ---------- tiny I/O (proven pattern) ----------
+fn g_in_open(root:i64, name:[]u8)[]u8 {
+    let fd:i64=nio_open_child(root,name,0);
+    if(fd<0){ return ""; }
+    let buf:[]u8=nio_alloc(8388608);
+    if(buf.len==0){ nio_close(fd); return ""; }
+    let n:i64=nio_read_exact(fd,buf,8388608);
+    nio_close(fd);
+    if(n<=0){ return ""; }
+    let s:[]u8=buf[0..n as i32];
+    return s;
+}
+
+fn g_parse_int(b:[]u8, st:i32, en:i32)i32 {
+    let v:i32=0;
+    let i:i32=st;
+    while(i<en){
+        let ch:i32=b[i] as i32;
+        if(ch>=48 && ch<=57){ v=v*10+(ch-48); }
+        i=i+1;
+    }
+    return v;
+}
+
+// byte-compare (never slice ==)
+fn streq(a:[]u8, b:[]u8)i32 {
+    if(a.len!=b.len){ return 0; }
+    let i:i32=0;
+    while(i<a.len){
+        if(a[i]!=b[i]){ return 0; }
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---------- int-table loader: rows lines x cols ints into arena (row-major) ----------
+fn load_table(b:[]u8, a:[]u8, rows:i32, cols:i32)void {
+    let r:i32=0;
+    let i:i32=0;
+    let st:i32=0;
+    let n:i32=b.len;
+    while(i<=n){
+        let eol:i32=0;
+        if(i==n){ eol=1; }
+        else if(b[i]==10){ eol=1; }
+        if(eol==1){
+            if(i>st){
+                let k:i32=st;
+                let fstart:i32=st;
+                let innum:i32=0;
+                let c:i32=0;
+                while(k<i){
+                    let ch:i32=b[k] as i32;
+                    if(ch>=48 && ch<=57){
+                        if(innum==0){ fstart=k; innum=1; }
+                    }
+                    else {
+                        if(innum==1){
+                            if(c<cols){ put32(a,r*cols+c,g_parse_int(b,fstart,k)); c=c+1; }
+                            innum=0;
+                        }
+                    }
+                    k=k+1;
+                }
+                if(innum==1){
+                    if(c<cols){ put32(a,r*cols+c,g_parse_int(b,fstart,i)); c=c+1; }
+                }
+                r=r+1;
+            }
+            st=i+1;
+        }
+        i=i+1;
+    }
+    return;
+}
+
+// ---------- buffer append helpers ----------
+fn ap_str(buf:[]u8, pos:i32, s:[]u8)i32 {
+    let k:i32=0;
+    while(k<s.len){ buf[pos+k]=s[k]; k=k+1; }
+    return pos+s.len;
+}
+
+fn ap_tab(buf:[]u8, pos:i32)i32 {
+    buf[pos]=9;
+    return pos+1;
+}
+
+fn ap_i64_pos(buf:[]u8, pos:i32, v:i64)i32 {
+    if(v==0){ buf[pos]=48; return pos+1; }
+    let nd:i32=0;
+    let t:i64=v;
+    while(t>0){ nd=nd+1; t=t/10; }
+    let p:i32=pos+nd-1;
+    t=v;
+    while(t>0){ buf[p]=(t%10+48) as u8; t=t/10; p=p-1; }
+    return pos+nd;
+}
+
+fn ap_i64(buf:[]u8, pos:i32, v:i64)i32 {
+    if(v<0){ buf[pos]=45; return ap_i64_pos(buf,pos+1,0-v); }
+    return ap_i64_pos(buf,pos,v);
+}
+
+// task owning batch line L (segments sorted by start; last extends to EOF)
+fn seg_task(seg:[]u8, line:i32)i32 {
+    let t:i32=0;
+    let best:i32=0;
+    while(t<6){
+        let st:i32=get32(seg,t*4+1);
+        if(st<=line){ best=t; }
+        t=t+1;
+    }
+    return best;
+}
+
+// ---------- main ----------
+fn main()void {
+    let workdir:[]u8=_zag_arg(1);
+    let batchname:[]u8=_zag_arg(2);
+    let segname:[]u8=_zag_arg(3);
+    let cmapname:[]u8=_zag_arg(4);
+    let channame:[]u8=_zag_arg(5);
+    let tag:[]u8=_zag_arg(6);
+    let mode:[]u8=_zag_arg(7);
+    let ablated:i32=streq(mode,"ablated");
+    let root:i64=nio_open_root(workdir);
+    if(root<0){ _zag_println("ERR workdir"); return; }
+    let b:[]u8=g_in_open(root,batchname);
+    let sg:[]u8=g_in_open(root,segname);
+    let cm:[]u8=g_in_open(root,cmapname);
+    let chf:[]u8=g_in_open(root,channame);
+    nio_close(root);
+    if(b.len==0){ _zag_println("ERR batch"); return; }
+    if(sg.len==0){ _zag_println("ERR segments"); return; }
+    if(cm.len==0){ _zag_println("ERR classmap"); return; }
+    if(chf.len==0){ _zag_println("ERR channel"); return; }
+    if(mode.len==0){ _zag_println("ERR mode"); return; }
+
+    // tables (init to -1, then load)
+    let seg:[]u8=nio_alloc(6*4*4);
+    let cmap:[]u8=nio_alloc(370*2*4);
+    let cht:[]u8=nio_alloc(6*2*4);
+    let q:i32=0;
+    while(q<6*4){ put32(seg,q,-1); q=q+1; }
+    q=0;
+    while(q<370*2){ put32(cmap,q,-1); q=q+1; }
+    q=0;
+    while(q<6*2){ put32(cht,q,-1); q=q+1; }
+    load_table(sg,seg,6,4);
+    load_table(cm,cmap,370,2);
+    load_table(chf,cht,6,2);
+
+    // classof[stim]
+    let classof:[]u8=nio_alloc(370*4);
+    let s:i32=0;
+    while(s<370){ put32(classof,s,-1); s=s+1; }
+    s=0;
+    while(s<370){
+        let stx:i32=get32(cmap,s*2+0);
+        let clx:i32=get32(cmap,s*2+1);
+        if(stx>=0 && stx<370){ put32(classof,stx,clx); }
+        s=s+1;
+    }
+    // chan[class]
+    let chan:[]u8=nio_alloc(6*4);
+    let c6:i32=0;
+    while(c6<6){ put32(chan,c6,-1); c6=c6+1; }
+    c6=0;
+    while(c6<6){
+        let cl2:i32=get32(cht,c6*2+0);
+        let pm:i32=get32(cht,c6*2+1);
+        if(cl2>=0 && cl2<6){ put32(chan,cl2,pm); }
+        c6=c6+1;
+    }
+    // J_p per stim, -1 = unset
+    let jpm:[]u8=nio_alloc(370*4);
+    s=0;
+    while(s<370){ put32(jpm,s,-1); s=s+1; }
+
+    // ledger buffers
+    let buf:[]u8=nio_alloc(2048);
+    let prev:[]u8=nio_alloc(2048);
+    let prevlen:i32=0;
+    let seq:i32=0;
+    let n_adv:i32=0;
+    let n_ch_install:i32=0;
+    let n_ch_withhold:i32=0;
+    let n_self_install:i32=0;
+    let n_self_withhold:i32=0;
+
+    // stream batch lines
+    let i:i32=0;
+    let st:i32=0;
+    let line:i32=0;
+    while(i<=b.len){
+        let eol:i32=0;
+        if(i==b.len){ eol=1; }
+        else if(b[i]==10){ eol=1; }
+        if(eol==1){
+            if(i>st){
+                let f0:i32=-1; let f1:i32=-1; let f2:i32=-1; let f3:i32=-1;
+                let p0:i32=st; let p1:i32=st; let p2:i32=st; let p3:i32=st;
+                let k:i32=st;
+                let fc:i32=0;
+                while(k<i){
+                    if(b[k]==9){
+                        if(fc==0){ f0=p0; p1=k+1; }
+                        else if(fc==1){ f1=p1; p2=k+1; }
+                        else if(fc==2){ f2=p2; p3=k+1; }
+                        fc=fc+1;
+                    }
+                    k=k+1;
+                }
+                f3=p3;
+                let stim:i32=g_parse_int(b,f0,p1-1);
+                let judg:i32=g_parse_int(b,f1,p2-1);
+                let conf:i32=g_parse_int(b,f2,p3-1);
+                let t:i32=seg_task(seg,line);
+                let start:i32=get32(seg,t*4+1);
+                let nprim:i32=get32(seg,t*4+2);
+                let nnoise:i32=get32(seg,t*4+3);
+                let c:i32=line-start;
+                if(c<nprim){
+                    // primary block: remember J_p
+                    if(stim>=0 && stim<370){ put32(jpm,stim,judg); }
+                }
+                else if(c<nprim+nnoise){
+                    // noise block: streamed and bound, no decision
+                }
+                else {
+                    // adversarial block: enters SUSPECT (§8.1a), INFO-REQUEST (§8.1b)
+                    n_adv=n_adv+1;
+                    let clx2:i32=-1;
+                    if(stim>=0 && stim<370){ clx2=get32(classof,stim); }
+                    let pc:i32=-2;
+                    if(clx2>=0 && clx2<6){ pc=get32(chan,clx2); }
+                    let jpv:i32=-1;
+                    if(stim>=0 && stim<370){ jpv=get32(jpm,stim); }
+                    let match:i32=0;
+                    if(jpv>=0 && jpv==judg){ match=1; }
+
+                    // --- ledger line 1: SUSPECT + INFO-REQUEST ---
+                    seq=seq+1;
+                    let pos:i32=0;
+                    pos=ap_str(buf,pos,"LEDGER"); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,seq as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,stim as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,clx2 as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,judg as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,jpv as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,match as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,conf as i64); pos=ap_tab(buf,pos);
+                    pos=ap_str(buf,pos,"SUSPECT"); pos=ap_tab(buf,pos);
+                    pos=ap_str(buf,pos,"INFO-REQUEST"); pos=ap_tab(buf,pos);
+                    if(seq==1){
+                        let z:i32=0;
+                        while(z<64){ buf[pos+z]=48; z=z+1; }
+                        pos=pos+64;
+                    }
+                    else {
+                        let dg:[]u8=nio_alloc(32);
+                        let rc:i32=ns_sha256(prev[0..prevlen],dg);
+                        if(rc!=0){ _zag_println("ERR sha"); return; }
+                        let hx:[]u8=ns_hex(dg);
+                        pos=ap_str(buf,pos,hx);
+                        nio_free(dg);
+                        nio_free(hx);
+                    }
+                    _zag_println(buf[0..pos]);
+                    let kk:i32=0;
+                    while(kk<pos){ prev[kk]=buf[kk]; kk=kk+1; }
+                    prevlen=pos;
+
+                    // --- INFO-REQUEST resolution (§8.1c/d) ---
+                    // dec: 0=INSTALL 1=WITHHOLD ; path: 0=CHANNEL 1=SELF
+                    let dec:i32=1;
+                    let path:i32=1;
+                    if(ablated==1){
+                        // no channel consulted: judgment-only Bayes rule
+                        if(match==1){ dec=0; } else { dec=1; }
+                        path=1;
+                    }
+                    else {
+                        if(match==1){
+                            if(pc>=900){ dec=0; path=0; }
+                            else if(pc<=100){ dec=1; path=0; }
+                            else { dec=0; path=1; }
+                        }
+                        else {
+                            if(pc>=900){ dec=1; path=0; }
+                            else { dec=1; path=1; }
+                        }
+                    }
+                    if(dec==0 && path==0){ n_ch_install=n_ch_install+1; }
+                    else if(dec==1 && path==0){ n_ch_withhold=n_ch_withhold+1; }
+                    else if(dec==0){ n_self_install=n_self_install+1; }
+                    else { n_self_withhold=n_self_withhold+1; }
+
+                    // --- ledger line 2: tagged verdict ---
+                    seq=seq+1;
+                    pos=0;
+                    pos=ap_str(buf,pos,"LEDGER"); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,seq as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,stim as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,clx2 as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,judg as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,jpv as i64); pos=ap_tab(buf,pos);
+                    pos=ap_i64(buf,pos,match as i64); pos=ap_tab(buf,pos);
+                    if(ablated==1){ pos=ap_i64(buf,pos,-1); }
+                    else { pos=ap_i64(buf,pos,pc as i64); }
+                    pos=ap_tab(buf,pos);
+                    if(dec==0){ pos=ap_str(buf,pos,"INSTALL"); }
+                    else { pos=ap_str(buf,pos,"WITHHOLD"); }
+                    pos=ap_tab(buf,pos);
+                    if(path==0){ pos=ap_str(buf,pos,"CHANNEL"); }
+                    else { pos=ap_str(buf,pos,"SELF"); }
+                    pos=ap_tab(buf,pos);
+                    let dg:[]u8=nio_alloc(32);
+                    let rc:i32=ns_sha256(prev[0..prevlen],dg);
+                    if(rc!=0){ _zag_println("ERR sha"); return; }
+                    let hx:[]u8=ns_hex(dg);
+                    pos=ap_str(buf,pos,hx);
+                    nio_free(dg);
+                    nio_free(hx);
+                    _zag_println(buf[0..pos]);
+                    kk=0;
+                    while(kk<pos){ prev[kk]=buf[kk]; kk=kk+1; }
+                    prevlen=pos;
+                }
+                line=line+1;
+            }
+            st=i+1;
+        }
+        i=i+1;
+    }
+
+    // SUMMARY with chain head
+    let dg2:[]u8=nio_alloc(32);
+    let rc2:i32=ns_sha256(prev[0..prevlen],dg2);
+    if(rc2!=0){ _zag_println("ERR sha2"); return; }
+    let hx2:[]u8=ns_hex(dg2);
+    let pos2:i32=0;
+    pos2=ap_str(buf,pos2,"SUMMARY"); pos2=ap_tab(buf,pos2);
+    pos2=ap_str(buf,pos2,tag); pos2=ap_tab(buf,pos2);
+    pos2=ap_str(buf,pos2,mode); pos2=ap_tab(buf,pos2);
+    pos2=ap_i64(buf,pos2,n_adv as i64); pos2=ap_tab(buf,pos2);
+    pos2=ap_i64(buf,pos2,n_ch_install as i64); pos2=ap_tab(buf,pos2);
+    pos2=ap_i64(buf,pos2,n_ch_withhold as i64); pos2=ap_tab(buf,pos2);
+    pos2=ap_i64(buf,pos2,n_self_install as i64); pos2=ap_tab(buf,pos2);
+    pos2=ap_i64(buf,pos2,n_self_withhold as i64); pos2=ap_tab(buf,pos2);
+    pos2=ap_str(buf,pos2,hx2);
+    _zag_println(buf[0..pos2]);
+    nio_free(dg2);
+    nio_free(hx2);
+    return;
+}
+
+// ---------- u32 accessors (little-endian, []u8 arena; proven pattern) ----------
+fn put32(a:[]u8, idx:i32, v:i32)void {
+    let o:i32=idx*4;
+    let uv:i64=v as i64;
+    if(uv<0){ uv=uv+4294967296; }
+    a[o]=(uv & 255) as u8;
+    a[o+1]=((uv/256) & 255) as u8;
+    a[o+2]=((uv/65536) & 255) as u8;
+    a[o+3]=((uv/16777216) & 255) as u8;
+    return;
+}
+fn get32(a:[]u8, idx:i32)i32 {
+    let o:i32=idx*4;
+    let b0:i64=a[o] as i64;
+    let b1:i64=a[o+1] as i64;
+    let b2:i64=a[o+2] as i64;
+    let b3:i64=a[o+3] as i64;
+    let uv:i64=b0+b1*256+b2*65536+b3*16777216;
+    if(uv>=2147483648){ uv=uv-4294967296; }
+    return uv as i32;
+}

@@ -1,0 +1,303 @@
+// ============================================================
+// FORK B-ALPHA (pure study-then-invent) — shared library.
+// Pure Zag. No oscillators, no resonators, no filtered-noise
+// generators, no chirp/boom primitives anywhere in this file.
+// What IS here: byte helpers, deterministic hash (no RNG),
+// file IO, WAV IO, mix arena, opinionless window math.
+// The expansion from parameters to samples NEVER passes through
+// a spectral/sinusoidal basis: there is none. See PARAM_SPACE.md
+// for the structural defense against (d)'s accusation.
+// ============================================================
+
+const SR:i64 = 44100;
+
+// Battery 1e/V5: fixed peak for the isolation set. 0 = per-file -1dB
+// normalization (v4 behavior). >0 = all renders share this peak so the
+// five isolation WAVs are level-comparable (kidc stays byte-identical).
+const FIXPEAK:i64 = 18242028;
+
+// ---------- byte helpers (sign-extending reads where sign matters) ----------
+fn put32(b:[]u8,i:i64,v:i64)void{
+    b[i]=(v & 255) as u8;
+    b[i+1]=((v>>8) & 255) as u8;
+    b[i+2]=((v>>16) & 255) as u8;
+    b[i+3]=((v>>24) & 255) as u8;
+}
+fn get32(b:[]u8,i:i64)i64{
+    return (b[i] as i64) | ((b[i+1] as i64)<<8) | ((b[i+2] as i64)<<16) | ((b[i+3] as i64)<<24);
+}
+fn get32s(b:[]u8,i:i64)i64{
+    return (b[i] as i64) | ((b[i+1] as i64)<<8) | ((b[i+2] as i64)<<16) | (((b[i+3] as i64)<<56)>>32);
+}
+// sign-extending 16-bit read: audio samples are signed.
+fn get16s(b:[]u8,i:i64)i64{
+    let v:i64=(b[i] as i64) | ((b[i+1] as i64)<<8);
+    if(v>=32768){v=v-65536;}
+    return v;
+}
+fn put16(b:[]u8,i:i64,v:i64)void{
+    b[i]=(v & 255) as u8;
+    b[i+1]=((v>>8) & 255) as u8;
+}
+fn put64(b:[]u8,i:i64,v:i64)void{
+    b[i]=(v & 255) as u8;
+    b[i+1]=((v>>8) & 255) as u8;
+    b[i+2]=((v>>16) & 255) as u8;
+    b[i+3]=((v>>24) & 255) as u8;
+    b[i+4]=((v>>32) & 255) as u8;
+    b[i+5]=((v>>40) & 255) as u8;
+    b[i+6]=((v>>48) & 255) as u8;
+    b[i+7]=((v>>56) & 255) as u8;
+}
+fn get64(b:[]u8,i:i64)i64{
+    return (b[i] as i64) | ((b[i+1] as i64)<<8) | ((b[i+2] as i64)<<16) | ((b[i+3] as i64)<<24) | ((b[i+4] as i64)<<32) | ((b[i+5] as i64)<<40) | ((b[i+6] as i64)<<48) | ((b[i+7] as i64)<<56;
+}
+fn cstr(s:[]u8)[]u8{
+    if(s.len<1 || s.len>4095){return "";}
+    let p:*u8=_zag_malloc((s.len+1) as i64) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..(s.len+1)];
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    b[s.len]=0;
+    return b;
+}
+fn w_all(fd:i64,b:[]u8)i64{
+    let at:i64=0;
+    let calls:i32=0;
+    let blen:i64=b.len as i64;
+    while(at<blen && calls<65536){
+        let n:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(b) as i64)+at,blen-at,0,0,0);
+        calls=calls+1;
+        if(n==-4){continue;}
+        if(n<=0){return -7407;}
+        at=at+n;
+    }
+    if(at!=blen){return -7407;}
+    return at;
+}
+// read a whole file; returns slice of EXACT length read (empty on failure).
+fn file_read(path:[]u8,cap:i64)[]u8{
+    let cs:[]u8=cstr(path);
+    if(cs.len==0){return "";}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(cs) as i64),0,0,0,0,0);
+    _zag_free(_zag_slice_ptr(cs));
+    if(fd<0){return "";}
+    let p:*u8=_zag_malloc(cap) as *u8;
+    if(p==null as *u8){_zag_raw_syscall(3,fd,0,0,0,0,0);return "";}
+    let at:i64=0;
+    while(at<cap){
+        let n:i64=_zag_raw_syscall(0,fd,((p as i64)+at),cap-at,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){break;}
+        at=at+n;
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    let b:[]u8=p[0..at];
+    return b;
+}
+fn file_write(path:[]u8,b:[]u8)i64{
+    let cs:[]u8=cstr(path);
+    if(cs.len==0){return -3;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(cs) as i64),577,438,0,0,0);
+    _zag_free(_zag_slice_ptr(cs));
+    if(fd<0){return -4;}
+    let wr:i64=w_all(fd,b);
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    if(wr<0){return -5;}
+    return 0;
+}
+
+// ---------- deterministic hash (NO RNG anywhere) ----------
+// fmix32 finalizer over a bijective seed mix. Same inputs -> same
+// outputs, always. This is a deterministic function of state, not dice:
+// the TNN no-randomness law bans stochastic policies, not hashing.
+fn h32(s:i64,st:i64)i64{
+    let z:i64=(s*2654435761+st*40503+1) & 4294967295;
+    z=(z ^ (z>>16)) & 4294967295;
+    z=(z*2246822519) & 4294967295;
+    z=(z ^ (z>>13)) & 4294967295;
+    z=(z*3266489917) & 4294967295;
+    z=(z ^ (z>>16)) & 4294967295;
+    return z;
+}
+fn h01(seed:i64,k:i64)f64{
+    return (h32(seed,k) as f64)/4294967296.0;
+}
+
+// ---------- opinionless window math ----------
+// square root via Newton with a bracketing first guess (converges for
+// any m>=0; the naive x0=m start diverges for large m).
+fn fsqrt(m:f64)f64{
+    if(m<=0.0){return 0.0;}
+    let g:f64=1.0;
+    while(g*g<m){g=g*2.0;}
+    let i:i64=0;
+    while(i<8){
+        g=0.5*(g+m/g);
+        i=i+1;
+    }
+    return g;
+}
+// smoothstep: polynomial window for concatenation crossfades.
+// Pure arithmetic (x^2, x^3). Not a generator: it shapes only the
+// 8 ms seams where two STUDIED waveforms meet.
+fn sstep(x:f64)f64{
+    if(x<=0.0){return 0.0;}
+    if(x>=1.0){return 1.0;}
+    return x*x*(3.0-2.0*x);
+}
+
+// ---------- tiny stdout printers (for audit logs) ----------
+fn print_str(s:[]u8)void{
+    _zag_raw_syscall(1,1,(_zag_slice_ptr(s) as i64),(s.len as i64),0,0,0);
+}
+fn print_nl()void{
+    let p:*u8=_zag_malloc(1) as *u8;
+    let b:[]u8=p[0..1];
+    b[0]=10;
+    _zag_raw_syscall(1,1,(p as i64),1,0,0,0);
+    _zag_free(p);
+}
+fn print_i64(v:i64)void{
+    let p:*u8=_zag_malloc(24) as *u8;
+    let b:[]u8=p[0..24];
+    let neg:i64=0;
+    let x:i64=v;
+    if(x<0){neg=1;x=-x;}
+    let i:i64=23;
+    if(x==0){b[22]=48;i=22;}else{
+        while(x>0 && i>0){
+            i=i-1;
+            b[i]=((x%10)+48) as u8;
+            x=x/10;
+        }
+    }
+    if(neg==1 && i>0){i=i-1;b[i]=45;}
+    let s:[]u8=b[i..23];
+    _zag_raw_syscall(1,1,(_zag_slice_ptr(s) as i64),(s.len as i64),0,0,0);
+    _zag_free(p);
+}
+// print f64 with 3 decimals
+fn print_f3(v:f64)void{
+    let neg:i64=0;
+    let x:f64=v;
+    if(x<0.0){neg=1;x=-x;}
+    let ip:i64=(x as i64);
+    let fp:i64=((x-(ip as f64))*1000.0) as i64;
+    if(neg==1){print_str("-");}
+    print_i64(ip);
+    print_str(".");
+    if(fp<100){print_str("0");}
+    if(fp<10){print_str("0");}
+    print_i64(fp);
+}
+
+// Parse 16-bit PCM mono WAV from a byte buffer. Returns an i16-LE arena
+// slice; sample count = slice.len/2. Empty slice on parse failure.
+// Stereo is mixed down by averaging (pure arithmetic, analysis path).
+fn wav_parse(buf:[]u8)[]u8{
+    let blen:i64=buf.len as i64;
+    if(blen<44){return "";}
+    if(buf[0]!=82||buf[1]!=73||buf[2]!=70||buf[3]!=70){return "";}
+    let pos:i64=12;
+    let fmt_ok:i64=0;
+    let nch:i64=0;
+    let bits:i64=0;
+    let dpos:i64=-1;
+    let dlen:i64=0;
+    while(pos+8<=blen){
+        let cid:i64=get32(buf,pos);
+        let clen:i64=get32(buf,pos+4);
+        if(cid==0x20746d66){
+            let f1:i64=get16s(buf,pos+8);
+            nch=get16s(buf,pos+10);
+            bits=get16s(buf,pos+22);
+            if(f1==1 && bits==16){fmt_ok=1;}
+        }
+        if(cid==0x61746164){dpos=pos+8;dlen=clen;}
+        pos=pos+8+clen;
+        if((clen & 1)==1){pos=pos+1;}
+    }
+    if(fmt_ok==0||dpos<0){return "";}
+    if(dpos+dlen>blen){dlen=blen-dpos;}
+    let nsamp:i64=dlen/2;
+    if(nch==2){nsamp=nsamp/2;}
+    if(nsamp<=0){return "";}
+    let p:*u8=_zag_malloc(nsamp*2) as *u8;
+    if(p==null as *u8){return "";}
+    let out:[]u8=p[0..(nsamp*2)];
+    let i:i64=0;
+    if(nch==1){
+        while(i<nsamp){
+            put16(out,i*2,get16s(buf,dpos+i*2));
+            i=i+1;
+        }
+    }else{
+        while(i<nsamp){
+            let a:i64=get16s(buf,dpos+i*4);
+            let b2:i64=get16s(buf,dpos+i*4+2);
+            put16(out,i*2,(a+b2)/2);
+            i=i+1;
+        }
+    }
+    return out;
+}
+// Write 16-bit mono WAV from an i64-Q24 mix arena. Peak-normalizes to
+// -1 dB headroom, applies 30 ms raised ends, odd-function soft clip.
+// No DC offset is introduced (mix starts zeroed; no bias added anywhere).
+fn wav_write(path:[]u8,m:[]u8,nsamp:i64)i64{
+    // DC measurement first: any upstream path (e.g. a one-pole lowpass
+    // bed) may carry bias; A-NATIVE forbids DC, so subtract it here.
+    let dsum:f64=0.0;
+    let s:i64=0;
+    while(s<nsamp){
+        dsum=dsum+((get64(m,s*8) as f64)/16777216.0);
+        s=s+1;
+    }
+    let dc:f64=dsum/(nsamp as f64);
+    let peak:i64=0;
+    s=0;
+    while(s<nsamp){
+        let v:i64=get64(m,s*8)-((dc*16777216.0) as i64);
+        if(v<0){v=-v;}
+        if(v>peak){peak=v;}
+        s=s+1;
+    }
+    print_str("mixpeak=");print_i64(peak);print_nl();
+    let norm:f64=1.0;
+    if(FIXPEAK>0){norm=0.891250938*16777216.0/(FIXPEAK as f64);}
+    else{if(peak>0){norm=0.891250938*16777216.0/(peak as f64);}} // -1 dB
+    let p:*u8=_zag_malloc(44+nsamp*2) as *u8;
+    if(p==null as *u8){return -2;}
+    let out:[]u8=p[0..(44+nsamp*2)];
+    let i:i64=0;
+    while(i<44+nsamp*2){out[i]=0;i=i+1;}
+    out[0]=82;out[1]=73;out[2]=70;out[3]=70;
+    put32(out,4,36+nsamp*2);
+    out[8]=87;out[9]=65;out[10]=86;out[11]=69;
+    out[12]=102;out[13]=109;out[14]=116;out[15]=32;
+    put32(out,16,16);
+    put16(out,20,1);put16(out,22,1);
+    put32(out,24,44100);put32(out,28,88200);
+    put16(out,32,2);put16(out,34,16);
+    out[36]=100;out[37]=97;out[38]=116;out[39]=97;
+    put32(out,40,nsamp*2);
+    let fade:i64=1323; // 30 ms
+    s=0;
+    while(s<nsamp){
+        let v:i64=get64(m,s*8);
+        let x:f64=((v as f64)/16777216.0-dc)*norm;
+        if(s<fade){x=x*sstep((s as f64)/(fade as f64));}
+        let rem:i64=nsamp-s;
+        if(rem<fade){x=x*sstep((rem as f64)/(fade as f64));}
+        let ax:f64=x;
+        if(ax<0.0){ax=-ax;}
+        x=x/(1.0+0.35*ax); // odd soft clip: symmetric, no DC
+        put16(out,44+s*2,(x*32767.0) as i64);
+        s=s+1;
+    }
+    let rc:i64=file_write(path,out);
+    _zag_free(_zag_slice_ptr(out));
+    return rc;
+}

@@ -1,0 +1,12 @@
+use strict;use warnings;local $/;my $p=shift;open my $f,'<',$p or die $!;my $s=<$f>;close $f;
+$s =~ s/primary_error:i32, real_waits/primary_error:i32, cleanup_error:i32, real_waits/;
+$s =~ s/(        if\(cleanup==0 \&\& fault\.\*\.primary_error)/        if(cleanup==1 \&\& fault.*.cleanup_error!=0){let error:i32=fault.*.cleanup_error;fault.*.cleanup_error=0;fault.*.injected=fault.*.injected+1;return error as i64;}\n$1/;
+$s =~ s/if\(cleanup==-4\)\{/if(cleanup!=pid \&\& cleanup!=-10){/;
+$s =~ s/while\(cleanup==-4 \&\& drain_calls<65\)/while(cleanup!=pid \&\& cleanup!=-10 \&\& drain_calls<65)/;
+$s =~ s/error:i32,want_success:i32/error:i32,want_success:i32,cleanup_error:i32/;
+$s =~ s/\.primary_error=error,/.primary_error=error,.cleanup_error=cleanup_error,/;
+$s =~ s/if\(cleanup==65\)/if(cleanup==65 || cleanup_error!=0)/;
+$s =~ s/fault.injected!=primary\+cleanup/fault.injected!=primary+cleanup+((cleanup_error!=0) as i32)/;
+$s =~ s/n19q_wait_test\((\d+,\d+,-?\d+,\d+)\)/n19q_wait_test($1,0)/g;
+$s =~ s/(failed=failed\+n19q_wait_test\(65,65,0,0,0\);)/$1\n    failed=failed+n19q_wait_test(65,0,0,0,-9);\n    failed=failed+n19q_wait_test(0,0,-10,0,0);\n    let empty:N19QualRun=n19q_collect(-1,null as *i32,null as *i64,null as *N19WaitFault);\n    if(empty.started!=0 || empty.exit_code!=-1){failed=failed+1;}\n    empty=n19q_collect(0,null as *i32,null as *i64,null as *N19WaitFault);\n    if(empty.started!=0 || empty.exit_code!=-1){failed=failed+1;}/;
+open my $o,'>',$p or die $!;print $o $s;close $o;

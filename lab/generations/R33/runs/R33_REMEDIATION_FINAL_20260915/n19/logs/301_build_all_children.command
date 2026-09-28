@@ -1,0 +1,1 @@
+/Users/Shared/micah/Documents/zag/znc /Users/Shared/micah/Documents/TNN/TNN/Research/R33_REMEDIATION_FINAL_20260915/n19/sources/lane_c_all_children.zag --target macos-arm64 --no-zagd --no-analyze --no-foreground-cache -o /Users/Shared/micah/Documents/TNN/TNN/Research/R33_REMEDIATION_FINAL_20260915/n19/bin/lane_c_all_children 

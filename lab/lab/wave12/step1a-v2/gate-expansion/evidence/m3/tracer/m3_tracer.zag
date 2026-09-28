@@ -1,0 +1,535 @@
+// m3_tracer.zag — M3 decision-trace tracer (FROZEN mini-prereg M3_TRACE_EQUIVALENCE.md).
+// Source-level instrumentation runtime: region-classified reads, branch events,
+// external-input events, output events, byte-cell taint propagation.
+//
+// No mutable globals (strict Zag): context is 4 slices threaded through every
+// call: tr (trace bytes), num (numeric arena []i64), meta (init/taint bytes),
+// path (fd path strings). All values non-negative i64 unless noted.
+//
+// Region codes: 1=INIT-HEAP 2=UNINIT-HEAP 3=STACK 4=STATIC 5=ENV 6=CLOCK
+// Event wire format (one per line):
+//   B <site> <taken> <taint>
+//   R <site> <region> <nbytes> <taint>
+//   X <site> <fd> <nbytes> <path|->
+//   O <site> <nbytes> <taint>
+// Footer: C <site> <hits> lines, then END <nevents>
+
+// num[] arena layout (i64 slots; the []i64 view keeps the byte length as its
+// element count, so only slots 0..719 are valid — indexing uses x8 scaling)
+fn m3_raw_alloc(n:i32)[]u8 {
+    if(n<1){ return ""; }
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..n];
+    return b;
+}
+fn m3_num_new()[]i64 {
+    // Success <=> result len == 5760 (the cast keeps the BYTE length as the
+    // element count on this pinned toolchain; slots 0..719 are the valid ones).
+    let raw:[]u8=m3_raw_alloc(8*720);
+    let n:[]i64=raw as []i64;
+    if(raw.len==5760){
+        let i:i64=0;
+        while(i<720){ n[i]=0; i=i+1; }
+    }
+    return n;
+}
+fn m3_num_ok(n:[]i64)i32 {
+    if(n.len==5760){ return 1; }
+    return 0;
+}
+// scalar slots in num[]
+// 704 RT_COUNT  705 FD_COUNT  706 TRACE_FD  707 LAST_REGION  708 LAST_TAINT
+// 709 NEVENTS   710 TR_LEN    711 META_USED  712 PATH_USED
+
+fn m3_tr_new()[]u8 {
+    let p:*u8=_zag_malloc(4194304) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..4194304];
+    return b;
+}
+fn m3_meta_new()[]u8 {
+    let p:*u8=_zag_malloc(1048576) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..1048576];
+    let i:i32=0;
+    while(i<1048576){ b[i]=0; i=i+1; }
+    return b;
+}
+fn m3_path_new()[]u8 {
+    let p:*u8=_zag_malloc(4096) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..4096];
+    return b;
+}
+
+// ---------- raw (untraced) fd IO for the trace file itself ----------
+fn m3_raw_write_all(fd:i64, b:[]u8, n:i32)i64 {
+    let at:i64=0;
+    let calls:i32=0;
+    while(at<n && calls<4096){
+        let w:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(b) as i64)+at,(n as i64)-at,0,0,0);
+        calls=calls+1;
+        if(w==-4){ continue; }
+        if(w<=0){ return -1; }
+        at=at+w;
+    }
+    if(at!=n){ return -1; }
+    return at;
+}
+
+// ---------- trace buffer append ----------
+fn m3_tr_reserve(tr:[]u8, num:[]i64, need:i64)void {
+    let len:i64=num[710];
+    if(len+need>4194304){
+        let fd:i64=num[706];
+        if(fd>=0){ m3_raw_write_all(fd,tr,len as i32); }
+        num[710]=0;
+    }
+    return;
+}
+fn m3_tr_byte(tr:[]u8, num:[]i64, b:i64)void {
+    m3_tr_reserve(tr,num,1);
+    let len:i64=num[710];
+    tr[len as i32]=(b&255) as u8;
+    num[710]=len+1;
+    return;
+}
+fn m3_tr_str(tr:[]u8, num:[]i64, s:[]u8)void {
+    let i:i32=0;
+    while(i<s.len){ m3_tr_byte(tr,num,s[i] as i64); i=i+1; }
+    return;
+}
+fn m3_tr_i64(tr:[]u8, num:[]i64, v:i64)void {
+    if(v<0){ m3_tr_byte(tr,num,45); m3_tr_i64(tr,num,0-v); return; }
+    if(v>=10){ m3_tr_i64(tr,num,v/10); }
+    m3_tr_byte(tr,num,48+(v%10));
+    return;
+}
+fn m3_tr_sp(tr:[]u8, num:[]i64)void { m3_tr_byte(tr,num,32); return; }
+fn m3_tr_nl(tr:[]u8, num:[]i64)void { m3_tr_byte(tr,num,10); return; }
+
+// ---------- event emitters ----------
+fn m3_cov_hit(num:[]i64, site:i64)void {
+    if(site>=0 && site<256){ num[256+site]=num[256+site]+1; }
+    return;
+}
+fn m3_emit_branch(tr:[]u8, num:[]i64, site:i64, taken:i64, taint:i64)void {
+    m3_tr_str(tr,num,"B "); m3_tr_i64(tr,num,site); m3_tr_sp(tr,num);
+    m3_tr_i64(tr,num,taken); m3_tr_sp(tr,num); m3_tr_i64(tr,num,taint&1); m3_tr_nl(tr,num);
+    m3_cov_hit(num,site);
+    num[709]=num[709]+1;
+    return;
+}
+fn m3_emit_read(tr:[]u8, num:[]i64, site:i64, region:i64, nbytes:i64, taint:i64)void {
+    m3_tr_str(tr,num,"R "); m3_tr_i64(tr,num,site); m3_tr_sp(tr,num);
+    m3_tr_i64(tr,num,region); m3_tr_sp(tr,num); m3_tr_i64(tr,num,nbytes); m3_tr_sp(tr,num);
+    m3_tr_i64(tr,num,taint&1); m3_tr_nl(tr,num);
+    m3_cov_hit(num,site);
+    num[709]=num[709]+1;
+    return;
+}
+fn m3_emit_ext(tr:[]u8, num:[]i64, path:[]u8, site:i64, fd:i64, nbytes:i64, pstr:[]u8)void {
+    m3_tr_str(tr,num,"X "); m3_tr_i64(tr,num,site); m3_tr_sp(tr,num);
+    m3_tr_i64(tr,num,fd); m3_tr_sp(tr,num); m3_tr_i64(tr,num,nbytes); m3_tr_sp(tr,num);
+    if(pstr.len==0){ m3_tr_byte(tr,num,45); } else { m3_tr_str(tr,num,pstr); }
+    m3_tr_nl(tr,num);
+    m3_cov_hit(num,site);
+    num[709]=num[709]+1;
+    return;
+}
+fn m3_emit_out(tr:[]u8, num:[]i64, site:i64, nbytes:i64, taint:i64)void {
+    m3_tr_str(tr,num,"O "); m3_tr_i64(tr,num,site); m3_tr_sp(tr,num);
+    m3_tr_i64(tr,num,nbytes); m3_tr_sp(tr,num); m3_tr_i64(tr,num,taint&1); m3_tr_nl(tr,num);
+    m3_cov_hit(num,site);
+    num[709]=num[709]+1;
+    return;
+}
+
+// ---------- region table ----------
+// RT slots 0..63 in num[]: BASE 0..63, LEN 64..127, KIND 128..191 (1=live heap),
+// MOFF 192..255 (meta byte offset). meta holds 2 bytes per tracked byte:
+// meta[2*k]=init(0/1), meta[2*k+1]=taint(0/1).
+fn m3_rt_find(num:[]i64, addr:i64)i64 {
+    let c:i64=num[704];
+    let i:i64=0;
+    while(i<c){
+        if(num[128+i]==1){
+            let b:i64=num[0+i];
+            let l:i64=num[64+i];
+            if(addr>=b && addr<b+l){ return i; }
+        }
+        i=i+1;
+    }
+    return -1;
+}
+fn m3_alloc(tr:[]u8, num:[]i64, meta:[]u8, n:i32)[]u8 {
+    if(n<1 || n>1000000){ return ""; }
+    let c:i64=num[704];
+    if(c>=64){ return ""; }
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..n];
+    let need:i64=(n as i64)*2;
+    let mu:i64=num[711];
+    if(mu+need>1048576){ _zag_free(_zag_slice_ptr(b)); return ""; }
+    // NOTE: data bytes intentionally NOT zeroed — uninit reads are the signal.
+    let k:i64=0;
+    while(k<need){ meta[(mu+k) as i32]=0; k=k+1; }
+    num[0+c]=_zag_slice_ptr(b) as i64;
+    num[64+c]=n as i64;
+    num[128+c]=1;
+    num[192+c]=mu;
+    num[704]=c+1;
+    num[711]=mu+need;
+    return b;
+}
+fn m3_free(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8)void {
+    if(b.len<1){ return; }
+    let idx:i64=m3_rt_find(num,_zag_slice_ptr(b) as i64);
+    if(idx>=0){ num[128+idx]=-1; }
+    _zag_free(_zag_slice_ptr(b));
+    return;
+}
+// byte-cell state accessors
+fn m3_cell_init(meta:[]u8, num:[]i64, idx:i64, off:i64)i64 {
+    let mo:i64=num[192+idx];
+    return meta[(mo+off*2) as i32] as i64;
+}
+fn m3_cell_taint(meta:[]u8, num:[]i64, idx:i64, off:i64)i64 {
+    let mo:i64=num[192+idx];
+    return meta[(mo+off*2+1) as i32] as i64;
+}
+fn m3_cell_set(meta:[]u8, num:[]i64, idx:i64, off:i64, init:i64, taint:i64)void {
+    let mo:i64=num[192+idx];
+    meta[(mo+off*2) as i32]=(init&1) as u8;
+    meta[(mo+off*2+1) as i32]=(taint&1) as u8;
+    return;
+}
+
+// ---------- instrumented reads/writes ----------
+fn m3_r8(tr:[]u8, num:[]i64, meta:[]u8, site:i64, b:[]u8, i:i32)u8 {
+    let region:i64=0;
+    let taint:i64=0;
+    let v:u8=0;
+    if(i>=0 && i<b.len){
+        let addr:i64=(_zag_slice_ptr(b) as i64)+(i as i64);
+        let idx:i64=m3_rt_find(num,addr);
+        if(idx>=0){
+            let init:i64=m3_cell_init(meta,num,idx,i as i64);
+            taint=m3_cell_taint(meta,num,idx,i as i64);
+            if(init==1){ region=1; } else { region=2; }
+            v=b[i];
+        } else {
+            region=0;
+        }
+    } else {
+        region=0;
+    }
+    num[707]=region;
+    num[708]=taint;
+    m3_emit_read(tr,num,site,region,1,taint);
+    return v;
+}
+fn m3_w8(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8, i:i32, v:u8, taint:i64)void {
+    if(i<0 || i>=b.len){ return; }
+    b[i]=v;
+    let idx:i64=m3_rt_find(num,(_zag_slice_ptr(b) as i64)+(i as i64));
+    if(idx>=0){ m3_cell_set(meta,num,idx,i as i64,1,taint); }
+    return;
+}
+fn m3_fill(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8, off:i32, n:i32, v:u8, taint:i64)void {
+    let k:i32=0;
+    while(k<n){ m3_w8(tr,num,meta,b,off+k,v,taint); k=k+1; }
+    return;
+}
+fn m3_mark_init(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8, off:i32, n:i32)void {
+    let k:i32=0;
+    while(k<n){
+        let idx:i64=m3_rt_find(num,(_zag_slice_ptr(b) as i64)+((off+k) as i64));
+        if(idx>=0){
+            let t:i64=m3_cell_taint(meta,num,idx,(off+k) as i64);
+            m3_cell_set(meta,num,idx,(off+k) as i64,1,t);
+        }
+        k=k+1;
+    }
+    return;
+}
+fn m3_taint_of(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8, off:i32, n:i32)i64 {
+    let acc:i64=0;
+    let k:i32=0;
+    while(k<n){
+        let idx:i64=m3_rt_find(num,(_zag_slice_ptr(b) as i64)+((off+k) as i64));
+        if(idx>=0){ acc=acc|m3_cell_taint(meta,num,idx,(off+k) as i64); }
+        k=k+1;
+    }
+    return acc;
+}
+fn m3_taint_range(tr:[]u8, num:[]i64, meta:[]u8, b:[]u8, off:i32, n:i32)void {
+    let k:i32=0;
+    while(k<n){
+        let idx:i64=m3_rt_find(num,(_zag_slice_ptr(b) as i64)+((off+k) as i64));
+        if(idx>=0){
+            let iv:i64=m3_cell_init(meta,num,idx,(off+k) as i64);
+            m3_cell_set(meta,num,idx,(off+k) as i64,iv,1);
+        }
+        k=k+1;
+    }
+    return;
+}
+fn m3_memcpy(tr:[]u8, num:[]i64, meta:[]u8, dst:[]u8, doff:i32, src:[]u8, soff:i32, n:i32)void {
+    let k:i32=0;
+    while(k<n){
+        let sv:u8=0;
+        let si:i64=1;
+        let st:i64=0;
+        if(soff+k>=0 && soff+k<src.len){
+            sv=src[soff+k];
+            let sidx:i64=m3_rt_find(num,(_zag_slice_ptr(src) as i64)+((soff+k) as i64));
+            if(sidx>=0){ si=m3_cell_init(meta,num,sidx,(soff+k) as i64); st=m3_cell_taint(meta,num,sidx,(soff+k) as i64); }
+        }
+        if(doff+k>=0 && doff+k<dst.len){
+            dst[doff+k]=sv;
+            let didx:i64=m3_rt_find(num,(_zag_slice_ptr(dst) as i64)+((doff+k) as i64));
+            if(didx>=0){ m3_cell_set(meta,num,didx,(doff+k) as i64,si,st); }
+        }
+        k=k+1;
+    }
+    return;
+}
+fn m3_last_region(num:[]i64)i64 { return num[707]; }
+fn m3_last_taint(num:[]i64)i64 { return num[708]; }
+
+// ---------- branches ----------
+fn m3_branch(tr:[]u8, num:[]i64, site:i64, taken:i64, taint:i64)void {
+    let t:i64=0;
+    if(taken!=0){ t=1; }
+    m3_emit_branch(tr,num,site,t,taint);
+    return;
+}
+
+// ---------- cstr helper (untracked scratch) ----------
+fn m3_cstr(s:[]u8)[]u8 {
+    if(s.len<1 || s.len>4095){ return ""; }
+    let p:*u8=_zag_malloc(s.len+1) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..(s.len+1)];
+    let i:i32=0;
+    while(i<s.len){ b[i]=s[i]; i=i+1; }
+    b[s.len]=0;
+    return b;
+}
+fn m3_cstr_free(b:[]u8)void {
+    if(b.len>0){ _zag_free(_zag_slice_ptr(b)); }
+    return;
+}
+fn m3_streq(a:[]u8, b:[]u8)i32 {
+    if(a.len!=b.len){ return 0; }
+    let i:i32=0;
+    while(i<a.len){ if(a[i]!=b[i]){ return 0; } i=i+1; }
+    return 1;
+}
+
+// ---------- fd -> path table (FD_NUM 512..575, FD_POFF 576..639, FD_PLEN 640..703) ----------
+fn m3_fd_path_store(num:[]i64, path:[]u8, fd:i64, p:[]u8)void {
+    let c:i64=num[705];
+    if(c>=64 || fd<0){ return; }
+    let pu:i64=num[712];
+    let n:i64=p.len as i64;
+    if(n>512){ n=512; }
+    if(pu+n>4096){ return; }
+    let k:i64=0;
+    while(k<n){ path[(pu+k) as i32]=p[k as i32]; k=k+1; }
+    num[512+c]=fd;
+    num[576+c]=pu;
+    num[640+c]=n;
+    num[705]=c+1;
+    num[712]=pu+n;
+    return;
+}
+fn m3_fd_path_find(num:[]i64, path:[]u8, fd:i64, out:[]u8)[]u8 {
+    let c:i64=num[705];
+    let i:i64=0;
+    while(i<c){
+        if(num[512+i]==fd){
+            let off:i64=num[576+i];
+            let n:i64=num[640+i];
+            let k:i64=0;
+            while(k<n && k<out.len){ out[k as i32]=path[(off+k) as i32]; k=k+1; }
+            return out[0..(k as i32)];
+        }
+        i=i+1;
+    }
+    return "";
+}
+fn m3_fd_drop(num:[]i64, fd:i64)void {
+    let c:i64=num[705];
+    let i:i64=0;
+    while(i<c){
+        if(num[512+i]==fd){ num[512+i]=-1; }
+        i=i+1;
+    }
+    return;
+}
+
+// ---------- classified syscall gates ----------
+fn m3_open(tr:[]u8, num:[]i64, path:[]u8, site:i64, p:[]u8, flags:i64)i64 {
+    let cs:[]u8=m3_cstr(p);
+    if(cs.len==0){ return -7401; }
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,flags,0,0,0,0);
+    m3_cstr_free(cs);
+    m3_fd_path_store(num,path,fd,p);
+    let plen:i64=p.len as i64;
+    if(plen>512){ plen=512; }
+    m3_emit_ext(tr,num,path,site,fd,0,p[0..(plen as i32)]);
+    return fd;
+}
+fn m3_path_new_small(num:[]i64, path:[]u8, fd:i64)[]u8 {
+    // resolve stored path for the emit; static scratch reused per call
+    let c:i64=num[705];
+    let i:i64=0;
+    while(i<c){
+        if(num[512+i]==fd){
+            let off:i64=num[576+i];
+            let n:i64=num[640+i];
+            return path[(off as i32)..((off+n) as i32)];
+        }
+        i=i+1;
+    }
+    return "";
+}
+fn m3_read(tr:[]u8, num:[]i64, meta:[]u8, path:[]u8, site:i64, fd:i64, b:[]u8, off:i32, n:i32)i64 {
+    if(fd<0 || off<0 || n<1 || off+n>b.len){ return -7401; }
+    let r:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(b) as i64)+(off as i64),n as i64,0,0,0);
+    let pb:[]u8=m3_path_new_small(num,path,fd);
+    let rn:i64=r;
+    if(rn<0){ rn=0; }
+    m3_emit_ext(tr,num,path,site,fd,rn,pb);
+    // environment taint: bytes from /proc/self/environ are ENV-derived
+    if(r>0 && pb.len>0){
+        let envp:[]u8="/proc/self/environ";
+        if(m3_streq(pb,envp)==1){ m3_taint_range(tr,num,meta,b,off,r as i32); }
+    }
+    if(r>0){ m3_mark_init(tr,num,meta,b,off,r as i32); }
+    return r;
+}
+fn m3_close(tr:[]u8, num:[]i64, fd:i64)i64 {
+    if(fd<0){ return -1; }
+    m3_fd_drop(num,fd);
+    return _zag_raw_syscall(3,fd,0,0,0,0,0);
+}
+fn m3_getrandom(tr:[]u8, num:[]i64, meta:[]u8, site:i64, b:[]u8, off:i32, n:i32)i64 {
+    if(off<0 || n<1 || off+n>b.len){ return -7401; }
+    let r:i64=_zag_raw_syscall(318,(_zag_slice_ptr(b) as i64)+(off as i64),n as i64,0,0,0,0);
+    if(r>0){
+        m3_emit_read(tr,num,site,6,r,1);
+        m3_taint_range(tr,num,meta,b,off,r as i32);
+        m3_mark_init(tr,num,meta,b,off,r as i32);
+    } else {
+        m3_emit_read(tr,num,site,6,0,0);
+    }
+    return r;
+}
+fn m3_clock_gettime(tr:[]u8, num:[]i64, meta:[]u8, site:i64, b:[]u8, off:i32)i64 {
+    if(off<0 || off+16>b.len){ return -7401; }
+    let r:i64=_zag_raw_syscall(228,1,(_zag_slice_ptr(b) as i64)+(off as i64),0,0,0,0);
+    m3_emit_read(tr,num,site,6,16,0);
+    if(r==0){
+        m3_mark_init(tr,num,meta,b,off,16);
+        m3_taint_range(tr,num,meta,b,off,16);
+    }
+    return r;
+}
+fn m3_write_out(tr:[]u8, num:[]i64, site:i64, fd:i64, b:[]u8, off:i32, n:i32, taint:i64)i64 {
+    if(fd<0 || off<0 || n<0 || off+n>b.len){ return -7401; }
+    let w:i64=m3_raw_write_all(fd,b[off..(off+n)],n);
+    let wn:i64=w;
+    if(wn<0){ wn=0; }
+    m3_emit_out(tr,num,site,wn,taint);
+    return w;
+}
+fn m3_argv_read(tr:[]u8, num:[]i64, meta:[]u8, site:i64, idx:i64, b:[]u8, maxn:i32)i64 {
+    let a:[]u8=_zag_arg(idx);
+    let n:i64=a.len as i64;
+    if(n>(maxn as i64)){ n=maxn as i64; }
+    if(n>(b.len as i64)){ n=b.len as i64; }
+    let k:i64=0;
+    while(k<n){ m3_w8(tr,num,meta,b,k as i32,a[k as i32],1); k=k+1; }
+    m3_emit_read(tr,num,site,5,n,1);
+    return n;
+}
+// read 8 bytes of a pointer value from the stack (real STACK-region read).
+// Address-of only works on struct locals on this toolchain, hence the wrapper.
+struct M3I64 { v:i64 }
+fn m3_stack_probe(tr:[]u8, num:[]i64, site:i64, w:M3I64)i64 {
+    let lw:M3I64=w;
+    let pw:*M3I64=&lw;
+    let rv:i64=pw.*.v;
+    m3_emit_read(tr,num,site,3,8,0);
+    return rv;
+}
+
+// ---------- trace lifecycle (untraced raw IO) ----------
+fn m3_trace_begin(tr:[]u8, num:[]i64, p:[]u8) i32 {
+    let cs:[]u8=m3_cstr(p);
+    if(cs.len==0){ return -1; }
+    let fd:i64=_zag_raw_syscall(2,_zag_slice_ptr(cs) as i64,577,420,0,0,0);
+    m3_cstr_free(cs);
+    num[706]=fd;
+    num[710]=0;
+    if(fd<0){ return -1; }
+    return 0;
+}
+fn m3_trace_end(tr:[]u8, num:[]i64)i32 {
+    let s:i64=0;
+    while(s<256){
+        let h:i64=num[256+s];
+        if(h>0){
+            m3_tr_str(tr,num,"C "); m3_tr_i64(tr,num,s); m3_tr_sp(tr,num);
+            m3_tr_i64(tr,num,h); m3_tr_nl(tr,num);
+        }
+        s=s+1;
+    }
+    m3_tr_str(tr,num,"END "); m3_tr_i64(tr,num,num[709]); m3_tr_nl(tr,num);
+    let fd:i64=num[706];
+    let rc:i32=0;
+    if(fd>=0){
+        let len:i64=num[710];
+        if(m3_raw_write_all(fd,tr,len as i32)<0){ rc=-1; }
+        _zag_raw_syscall(3,fd,0,0,0,0,0);
+    } else { rc=-1; }
+    return rc;
+}
+// deterministic heap dirting (raw malloc only, untracked) — mirrors replay predirty
+fn m3_predirty()void {
+    let j:i32=0;
+    while(j<40){
+        let size:i32=64*(1+((j*13)%48));
+        let p:*u8=_zag_malloc(size) as *u8;
+        if(p!=null as *u8){
+            let b:[]u8=p[0..size];
+            let k:i32=0;
+            while(k<size){ b[k]=(((j*17+k*5)&255) as u8); k=k+1; }
+            if(j%3==0){ _zag_free(_zag_slice_ptr(b)); }
+        }
+        j=j+1;
+    }
+    return;
+}
+
+// ---------- instrumented constant initialization ----------
+// Copies static bytes into a tracked buffer: one R event, region STATIC.
+// This is the ONLY sanctioned way for modules to ingest literals —
+// a raw literal index would be an uninstrumented read (method bug).
+fn m3_const_init(tr:[]u8, num:[]i64, meta:[]u8, site:i64, dst:[]u8, src:[]u8)i32 {
+    if(dst.len<src.len){ return -1; }
+    let k:i32=0;
+    while(k<src.len){
+        dst[k]=src[k];
+        let idx:i64=m3_rt_find(num,(_zag_slice_ptr(dst) as i64)+(k as i64));
+        if(idx>=0){ m3_cell_set(meta,num,idx,k as i64,1,0); }
+        k=k+1;
+    }
+    m3_emit_read(tr,num,site,4,src.len as i64,0);
+    return 0;
+}

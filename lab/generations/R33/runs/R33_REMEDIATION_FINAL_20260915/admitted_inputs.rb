@@ -1,0 +1,4 @@
+require 'json';require 'open3';require 'digest'
+r='/Users/Shared/micah/Documents/TNN/TNN';d=File.realpath(__dir__)
+a=JSON.parse(File.read(r+'/Research/R33_FINAL_INTEGRATION_20260915T2145Z/v91_fresh/RECORD.json'))['files'];File.write(d+'/ADMITTED_INPUTS.sha256',a.map{|v|"#{v['sha256']}  #{v['path']}\n"}.join)
+args=['shasum','-a','256','-c',d+'/ADMITTED_INPUTS.sha256'];o,e,s=Open3.capture3(*args,chdir:r);File.write(d+'/admitted_inputs.stdout',o);File.write(d+'/admitted_inputs.stderr',e);File.write(d+'/admitted_inputs.command.json',JSON.pretty_generate({argv:args,cwd:r,exit:s.exitstatus,signal:s.termsig,stdout_sha256:Digest::SHA256.hexdigest(o),stderr_sha256:Digest::SHA256.hexdigest(e),scope:'Fresh custody only; no missing-input or inference closure'}));puts "#{a.size} admitted pins, exit#{s.exitstatus}";exit(s.exitstatus)

@@ -1,0 +1,185 @@
+// lg.zag — ledger-gating: il_check as the commit gate for the
+// hypothesis-state substrate.
+//
+// Imports the UNMODIFIED wave-4 checker (il_core.zag) and the UNMODIFIED
+// wave-3 substrate (hss.zag); byte-identity of both is verified by the
+// runner. New code here is only the wiring: the gated claim path.
+//
+// Claim-path contract (preregistered in PREREG.md):
+//   A hypothesis may commit ONLY when il_check passes on its evidence
+//   chain. A failed check BLOCKS the commit and routes to an audited
+//   HOLD (never a silent drop).
+//
+// Evidence-chain mapping (item Q = the problem id; claim = "slot s is
+// the sole surviving hypothesis for Q"):
+//   hss_observe(index,bit)      -> OBSERVE(Q, index*2+bit)  (audited, uncited)
+//   rival slot r refuted         -> REFUTE(Q, r)             (cited: first two)
+//   sole survivor s emerges      -> HYP(Q, s)                (cited)
+//   gate runs the check         -> VERIFY(Q, s)             (cited)
+//   gate states the claim       -> CLAIM(Q, s, [ref_a,ref_b,hyp,ver])
+//
+// The claim cites the ELIMINATION RECORD, not the raw readings (raw
+// readings stay in the ledger, audited but uncited). This mirrors
+// wave-4 S6: the eliminative route passes il_check rule 6 via cited
+// REFUTEs, with the HYP/VERIFY as the judgment side.
+//
+// No RNG. No scores. No thresholds. Deterministic given state.
+@import("hss.zag")
+@import("il_core.zag")
+
+// Gate verdict / HOLD-aux base: a blocked commit reports 1000+v where v
+// is the il_check verdict (IL_LIE_CITED..IL_CHEAT_NOSHAPE -> 1101..1106).
+// Ordinary HOLD keeps aux = active count (small), so gate blocks are
+// distinguishable in the audit.
+const LG_HOLD_AUX_BASE:i32=1000;
+const LG_BLOCKED_BASE:i32=1000;
+// Chain construction failed (ledger full): fail closed, no commit.
+const LG_HOLD_NOCHAIN:i32=1999;
+// vout sentinels (no il_check ran).
+const LG_NOCHECK:i32=-7;  // delegated: not exactly one survivor
+const LG_NOCHAIN:i32=-8;  // chain could not be constructed
+
+fn lg_num(x:i32)void {
+    let s:[]u8=_zag_i64_to_str(x as i64);
+    _zag_print(s);
+    hss_free(s);
+}
+
+// Non-negative modulo (m > 0). Zag has no % in the proven subset; this is
+// exact integer arithmetic, deterministic.
+fn lg_mod(a:i32,m:i32)i32 {
+    let r:i32=a;
+    while(r>=m){r=r-m;}
+    return r;
+}
+
+// Count active slots; sole slot index via *sole (-1 if not exactly one).
+fn lg_survivor(active:[]u8,capacity:i32,sole:*i32)i32 {
+    let n:i32=0;
+    let s:i32=-1;
+    let i:i32=0;
+    while(i<capacity){if(active[i]!=0){n=n+1;s=i;}i=i+1;}
+    if(sole!=null as *i32){sole.*=s;}
+    return n;
+}
+
+// Audit a gate-block HOLD for il verdict v (aux = 1000+v).
+// The commit is NOT performed by this function; the caller must not
+// call hss_commit on the blocked path.
+fn lg_block(step:i32,abuf:[]u8,acount:*i32,verdict:i32)i32 {
+    return hss_audit(abuf,acount,step,HSS_OP_HOLD,0,LG_HOLD_AUX_BASE+verdict);
+}
+
+// Lower check boundary: append a CLAIM with driver/adversary-chosen
+// provenance and run il_check on it. The claim index (or -1) via *cip.
+// Used by the honest gate (after it builds HYP/VERIFY) and by cheat
+// probes (adversary controls the chain).
+fn lg_claim_and_check(il:*IlLedger,item:i32,val:i32,
+    p0:i32,p1:i32,p2:i32,p3:i32,cip:*i32)i32 {
+    let ci:i32=il_claim(il,item,val,p0,p1,p2,p3);
+    if(cip!=null as *i32){cip.*=ci;}
+    if(ci==IL_AUDIT_FULL){return IL_AUDIT_FULL;}
+    return il_check(il,ci);
+}
+
+// THE GATE: the system's only commit op.
+//
+// Returns:
+//   s >= 0  committed to slot s (gate passed, hss_commit ran)
+//   -1      delegated HOLD: no active hypotheses
+//   -2      delegated HOLD: several active (non-uniqueness)
+//   1000+v  BLOCKED: il_check returned v; HOLD audited (aux=1000+v);
+//           hss_commit NOT called; *committed untouched
+//   1999    chain construction failed (ledger full): fail closed, HOLD
+//           audited (aux=1999), no commit
+//   <0      HSS_* arg/audit error (fail closed, no commit)
+// *vout: the il_check verdict when a check ran (IL_OK=0 or 101..106),
+//   LG_NOCHECK(-7) when delegated without a sole survivor,
+//   LG_NOCHAIN(-8) when the chain could not be constructed.
+// *hyp_p/*ver_p/*ci_p: the appended chain indices (-1 when not built).
+fn lg_attempt_commit(active:[]u8,capacity:i32,committed:*i32,step:i32,
+    abuf:[]u8,acount:*i32,il:*IlLedger,item:i32,ref_a:i32,ref_b:i32,
+    vout:*i32,hyp_p:*i32,ver_p:*i32,ci_p:*i32)i32 {
+    if(capacity<1 || committed==null as *i32){return HSS_BAD;}
+    if(active.len<capacity){return HSS_BAD;}
+    let sole:i32=-1;
+    let n:i32=lg_survivor(active,capacity,&sole);
+    if(n!=1){
+        // No claim exists: ordinary substrate HOLD path, unchanged.
+        // The gate has nothing to check.
+        if(vout!=null as *i32){vout.*=LG_NOCHECK;}
+        if(hyp_p!=null as *i32){hyp_p.*=-1;}
+        if(ver_p!=null as *i32){ver_p.*=-1;}
+        if(ci_p!=null as *i32){ci_p.*=-1;}
+        return hss_commit(active,capacity,committed,step,abuf,acount);
+    }
+    let s:i32=sole;
+    // Build the evidence chain: deliberate hypothesis, deliberate
+    // verification (the sole-survivor check itself), then the claim.
+    let hi:i32=il_hyp(il,item,s);
+    let vi:i32=il_verify(il,item,s);
+    let ci:i32=-1;
+    if(hi>=0 && vi>=0){
+        ci=il_claim(il,item,s,ref_a,ref_b,hi,vi);
+    }
+    if(hyp_p!=null as *i32){hyp_p.*=hi;}
+    if(ver_p!=null as *i32){ver_p.*=vi;}
+    if(ci_p!=null as *i32){ci_p.*=ci;}
+    if(ci<0){
+        // Fail closed: the chain could not be constructed, so no
+        // checkable claim exists. No commit; audited HOLD.
+        let r0:i32=hss_audit(abuf,acount,step,HSS_OP_HOLD,0,LG_HOLD_NOCHAIN);
+        if(vout!=null as *i32){vout.*=LG_NOCHAIN;}
+        if(r0!=HSS_OK){return r0;}
+        return LG_HOLD_NOCHAIN;
+    }
+    let v:i32=il_check(il,ci);
+    if(vout!=null as *i32){vout.*=v;}
+    if(v==IL_OK){
+        return hss_commit(active,capacity,committed,step,abuf,acount);
+    }
+    // BLOCKED: the evidence chain failed il_check. hss_commit is NOT
+    // called, *committed is untouched, and exactly one HOLD is audited
+    // naming the violated rule. Never a silent drop.
+    let r1:i32=hss_audit(abuf,acount,step,HSS_OP_HOLD,0,LG_HOLD_AUX_BASE+v);
+    if(r1!=HSS_OK){return r1;}
+    return LG_BLOCKED_BASE+v;
+}
+
+// Count gate-block HOLDs in an HSS audit (aux >= 1000 marks the gate).
+fn lg_count_gateholds(abuf:[]u8,n:i32)i32 {
+    let c:i32=0;
+    let i:i32=0;
+    while(i<n){
+        if(hss_u32_get(abuf,i*16+4)==HSS_OP_HOLD &&
+           hss_u32_get(abuf,i*16+12)>=LG_HOLD_AUX_BASE){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+// LG_LEDGER dump: the claim entry then each cited entry that exists.
+// Used to adjudicate every gate block from the ledger.
+fn lg_entry_line(sp:*IlLedger,idx:i32)void {
+    _zag_print("LG_LEDGER,");
+    lg_num(idx);_zag_print(",");
+    lg_num(il_entry_op(sp,idx));_zag_print(",");
+    lg_num(il_entry_item(sp,idx));_zag_print(",");
+    lg_num(il_entry_val(sp,idx));_zag_print(",");
+    lg_num(il_entry_prov(sp,idx,0));_zag_print(",");
+    lg_num(il_entry_prov(sp,idx,1));_zag_print(",");
+    lg_num(il_entry_prov(sp,idx,2));_zag_print(",");
+    lg_num(il_entry_prov(sp,idx,3));
+    _zag_println("");
+}
+
+fn lg_ledger_dump(sp:*IlLedger,claim_idx:i32)void {
+    if(claim_idx<0){return;}
+    lg_entry_line(sp,claim_idx);
+    let k:i32=0;
+    while(k<IL_MAXPROV){
+        let p:i32=il_entry_prov(sp,claim_idx,k);
+        if(p>=0 && p<sp.*.head){lg_entry_line(sp,p);}
+        k=k+1;
+    }
+}

@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import argparse,json,random
+from pathlib import Path
+import numpy as np, torch
+import torch.nn as nn, torch.nn.functional as F
+import sys
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph/experiments')
+import speech_r28 as s
+import speech_ctc_r28 as c
+
+torch.set_num_threads(2)
+
+def iso_dataset(seed,n_each=60,motifs=12):
+    bases={e:s.base_template(seed,e) for e in range(motifs)};r=np.random.default_rng(seed+555);rows=[]
+    for e in range(motifs):
+      for _ in range(n_each):
+        x=s.vary(bases[e],r,hard=True).astype(np.float32)
+        x += .12*np.sin(np.linspace(0,3*np.pi,len(x))).astype(np.float32)+r.normal(0,.08,len(x)).astype(np.float32)
+        x=(x-x.mean())/(x.std()+1e-6);rows.append((x,e+1))
+    r.shuffle(rows);return rows
+
+def iso_batches(rows,bs,rng):
+    idx=np.arange(len(rows));rng.shuffle(idx)
+    for st in range(0,len(rows),bs):
+      ids=idx[st:st+bs];rr=[rows[int(i)] for i in ids];L=max(len(a) for a,_ in rr);x=np.zeros((len(rr),L),np.float32);lens=[];ys=[]
+      for j,(a,y) in enumerate(rr):x[j,:len(a)]=a;lens.append(len(a));ys.append(y)
+      yield torch.from_numpy(x),torch.tensor(lens),torch.tensor(ys)
+
+def seq_batches(rows,bs,rng):
+    idx=np.arange(len(rows));rng.shuffle(idx)
+    for st in range(0,len(rows),bs):
+      ids=idx[st:st+bs];rr=[rows[int(i)] for i in ids];L=max(len(a) for a,_ in rr);x=np.zeros((len(rr),L),np.float32);lens=[];ys=[]
+      for j,(a,y) in enumerate(rr):x[j,:len(a)]=a;lens.append(len(a));ys.extend(y.tolist())
+      yield torch.from_numpy(x),torch.tensor(lens),torch.tensor(ys),torch.full((len(rr),),4,dtype=torch.long)
+
+def eval_seq(model,rows): return c.evaluate(model,rows)
+
+def run(seed,n_each=60,train_n=500,pre_epochs=6,ctc_epochs=12,blank_bias=-1.0):
+  torch.manual_seed(seed%100000);np.random.seed(seed%2**32);random.seed(seed)
+  iso=iso_dataset(seed,n_each);train=c.make_dataset(seed,train_n,True,sample_seed=seed+777);val=c.make_dataset(seed,120,True,sample_seed=seed+100000);test=c.make_dataset(seed,180,True,sample_seed=seed+200000)
+  model=c.AcousticPAM();opt=torch.optim.AdamW(model.parameters(),lr=2e-3,weight_decay=1e-4);rng=np.random.default_rng(seed+12);pre=[]
+  for ep in range(pre_epochs):
+    model.train();ls=[];ok=tot=0
+    for x,lens,y in iso_batches(iso,64,rng):
+      opt.zero_grad();logits,ol=model(x,lens)
+      mask=torch.arange(logits.shape[1])[None,:] < ol[:,None]
+      pooled=(logits*mask[:,:,None]).sum(1)/ol[:,None]
+      loss=F.cross_entropy(pooled,y);loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),2.);opt.step();ls.append(float(loss.detach()));ok+=int((pooled.argmax(1)==y).sum());tot+=len(y)
+    pre.append({'epoch':ep+1,'loss':float(np.mean(ls)),'acc':ok/tot})
+  with torch.no_grad(): model.out.bias[0]=blank_bias
+  opt=torch.optim.AdamW(model.parameters(),lr=1.2e-3,weight_decay=1e-4);ctc=nn.CTCLoss(blank=0,zero_infinity=True);hist=[];best=None;bestsc=-1
+  for ep in range(ctc_epochs):
+    model.train();ls=[]
+    for x,lens,y,yl in seq_batches(train,32,rng):
+      opt.zero_grad();logits,ol=model(x,lens);loss=ctc(F.log_softmax(logits,2).transpose(0,1),y,ol,yl);loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),2.);opt.step();ls.append(float(loss.detach()))
+    va,vex=eval_seq(model,val);sc=va+.25*vex;hist.append({'epoch':ep+1,'loss':float(np.mean(ls)),'val_acc':va,'val_exact':vex})
+    if sc>bestsc:bestsc=sc;best={k:v.detach().clone() for k,v in model.state_dict().items()}
+  model.load_state_dict(best);ta,te=eval_seq(model,test)
+  # decode blank stats
+  rr=test[:32];L=max(len(a) for a,_ in rr);x=np.zeros((len(rr),L),np.float32);lens=[]
+  for j,(a,y) in enumerate(rr):x[j,:len(a)]=a;lens.append(len(a))
+  with torch.no_grad():logits,ol=model(torch.from_numpy(x),torch.tensor(lens));blank=float(logits.softmax(-1)[:,:,0].mean());lensdec=[len(z) for z in c.greedy(logits,ol)]
+  return {'seed':seed,'pretrain':pre,'ctc_history':hist,'best_val_score':bestsc,'test_accuracy':ta,'test_exact':te,'blank_prob':blank,'decoded_len_mean':float(np.mean(lensdec))}
+
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--seed',type=int,required=True);ap.add_argument('--out',required=True);ap.add_argument('--n-each',type=int,default=60);ap.add_argument('--train-n',type=int,default=500);ap.add_argument('--pre-epochs',type=int,default=6);ap.add_argument('--ctc-epochs',type=int,default=12);ap.add_argument('--blank-bias',type=float,default=-1.0);a=ap.parse_args();o=run(a.seed,a.n_each,a.train_n,a.pre_epochs,a.ctc_epochs,a.blank_bias);Path(a.out).write_text(json.dumps(o,indent=2));print(json.dumps({k:v for k,v in o.items() if k not in ('pretrain','ctc_history')},indent=2))

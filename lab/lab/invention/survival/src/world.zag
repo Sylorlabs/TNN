@@ -1,0 +1,524 @@
+// world.zag — TIDELOCK sim core for Experiment 1 (invent-to-survive).
+// Frozen prereg: docs/lab/invention/survival/PREREG.md (frozen 2026-09-27).
+// Deterministic. No RNG anywhere in this file. Imported by agent_*.zag.
+//
+// RECIPE TABLE (hidden from all agents; lives ONLY in this file, never in kb.txt):
+//   crystal(0) + mote(1)   -> LAMP(2)    placed: attracts motes within 4 cells,
+//                                          1 cell/tick toward it, same side of void only
+//   crystal(0) + crystal(0)-> WARD(3)    placed: shelter cell — no basal cost, storm-immune
+//   mote(1)    + mote(1)   -> SURGE(4)   inventory item: EAT consumes it -> +40 E,
+//                                          basal cost 2 for the next 10 ticks
+//   SURGE(4)   + crystal(0)-> PLANK(5)   SECOND-ORDER. inventory: stepping into a void
+//                                          cell consumes it and makes that cell safe forever
+//   LAMP(2)    + crystal(0)-> BEACON(6)  SECOND-ORDER. placed: attracts motes within
+//                                          8 cells, 2 cells/tick, same side; also shelter
+// Crystal budget to build every item: 1+2+0+1+2 = 6 > 4 available (prereg scarcity).
+// Any other pair -> COMBINE is a no-op (items kept, tick still passes).
+//
+// Action codes: 0=LEFT 1=RIGHT 2=EAT 3=TAKE 4=DROP 5=COMBINE 6=WAIT
+// COMBINE always uses the two lowest-filled inventory slots (documented, deterministic).
+
+// ---------------- prelude ----------------
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn z_free(b:[]u8)void {
+  if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+}
+// i64 -> decimal string without trailing newline (leak-free helper pattern)
+fn i64s(v:i64)[]u8 {
+  let s:[]u8=_zag_i64_to_str(v);
+  if(s.len>1 && s[s.len-1]==10){return s[0..s.len-1];}
+  return s;
+}
+fn parse_i64(s:[]u8)i64 {
+  let neg:i64=0;let i:i32=0;let v:i64=0;
+  if(s.len>0 && s[0]==45){neg=1;i=1;}
+  while(i<s.len){
+    let c:[]u8=s[i..i+1];
+    if(c[0]>=48 && c[0]<=57){v=v*10+((c[0] as i64)-48);}
+    i=i+1;
+  }
+  if(neg==1){return 0-v;}
+  return v;
+}
+// i64 slot accessors over a []u8 arena (little-endian, two's complement)
+fn p_put(w:[]u8,idx:i32,v:i64)void {
+  let o:i32=idx*8;let i:i32=0;
+  while(i<8){w[o+i]=(v & 255) as u8;v=v>>8;i=i+1;}
+}
+fn p_get(w:[]u8,idx:i32)i64 {
+  let o:i32=idx*8;let v:i64=0;let i:i32=7;
+  while(i>=0){v=v*256+(w[o+i] as i64);i=i-1;}
+  return v;
+}
+// read a whole file (<=4096 bytes) via raw syscalls; "" on failure
+fn read_file(path:[]u8)[]u8 {
+  let n:i32=path.len;
+  let c:[]u8=z_alloc(n+1);
+  if(c.len==0){return "";}
+  let i:i32=0;
+  while(i<n){c[i]=path[i];i=i+1;}
+  let fd:i64=_zag_raw_syscall(257,-100,_zag_slice_ptr(c) as i64,0,0,0,0);
+  z_free(c);
+  if(fd<0){return "";}
+  let buf:[]u8=z_alloc(4096);
+  if(buf.len==0){_zag_raw_syscall(3,fd,0,0,0,0,0);return "";}
+  let total:i32=0;let done:i32=0;
+  while(done==0){
+    let r:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(total as i64),(4096-total) as i64,0,0,0);
+    if(r<=0){done=1;}
+    else {
+      total=total+(r as i32);
+      if(total>=4096){done=1;}
+    }
+  }
+  _zag_raw_syscall(3,fd,0,0,0,0,0);
+  return buf[0..total];
+}
+// parse ints from text: skip '#' comments and blank lines; one int per line expected
+// (tolerates extra whitespace). Returns count; values stored as i64 slots in out.
+fn parse_ints(data:[]u8,out:[]u8)i32 {
+  let cnt:i32=0;let i:i32=0;let n:i32=data.len;
+  while(i<n){
+    if(data[i]==35){while(i<n && data[i]!=10){i=i+1;}}
+    else if((data[i]>=48 && data[i]<=57) || data[i]==45){
+      let neg:i64=0;let v:i64=0;
+      if(data[i]==45){neg=1;i=i+1;}
+      while(i<n && data[i]>=48 && data[i]<=57){v=v*10+((data[i] as i64)-48);i=i+1;}
+      if(neg==1){v=0-v;}
+      p_put(out,cnt,v);cnt=cnt+1;
+    }
+    else {i=i+1;}
+  }
+  return cnt;
+}
+
+// ---------------- world state ----------------
+// Slot layout (i64 slots in one arena):
+// 0 tick | 1 pos | 2 energy | 3 surge_timer | 4 alive | 5 cause(0 - 1 starve 2 void)
+// 6 void_a | 7 void_b | 8 st0 | 9 st1 | 10 st2
+// motes: 8 motes x 4 slots at 20+4k: pos vel dormant respawn   (k=0..5 near, 6..7 deep)
+// crystals: cells 60..63, taken flags 64..67
+// inventory item codes 70..73 (-1 empty). codes: 0 crystal 1 mote 2 LAMP 3 WARD 4 SURGE 5 PLANK 6 BEACON
+// placed: count at 80; up to 12 items x 3 slots at 81+3k: type cell spare
+// planked flags: 120 void_a safe, 121 void_b safe
+// stats: 122 n_eat 123 n_take 124 n_combine 125 n_drop 126 n_moves
+// loose items: 24 cells x 4 slots at 130+cell*4+k (-1 empty). DROP of a non-placeable
+//   item leaves it loose on the cell; TAKE can pick it back up (LIFO).
+fn world_new()[]u8 { return z_alloc(256*8); }
+
+// loose-item helpers: slot base 130 + cell*4 + k
+fn loose_push(w:[]u8,cell:i64,code:i64)i64 {
+  let k:i32=0;
+  while(k<4){
+    if(p_get(w,130+(cell as i32)*4+k)==-1){p_put(w,130+(cell as i32)*4+k,code);return 1;}
+    k=k+1;
+  }
+  return 0;
+}
+// pop top (highest occupied) loose item at cell -> code or -1
+fn loose_pop(w:[]u8,cell:i64)i64 {
+  let k:i32=3;
+  while(k>=0){
+    let c:i64=p_get(w,130+(cell as i32)*4+k);
+    if(c!=-1){p_put(w,130+(cell as i32)*4+k,-1);return c;}
+    k=k-1;
+  }
+  return -1;
+}
+
+fn inv_count(w:[]u8)i64 {
+  let c:i64=0;let s:i32=0;
+  while(s<4){if(p_get(w,70+s)!=-1){c=c+1;}s=s+1;}
+  return c;
+}
+fn has_item(w:[]u8,code:i64)i64 {
+  let s:i32=0;
+  while(s<4){if(p_get(w,70+s)==code){return 1;}s=s+1;}
+  return 0;
+}
+// lowest-filled slot holding code, or -1
+fn item_slot(w:[]u8,code:i64)i64 {
+  let s:i32=0;
+  while(s<4){if(p_get(w,70+s)==code){return s as i64;}s=s+1;}
+  return -1;
+}
+fn consume_item(w:[]u8,code:i64)i64 {
+  let s:i64=item_slot(w,code);
+  if(s<0){return 0;}
+  p_put(w,70+(s as i32),-1);
+  return 1;
+}
+fn add_item(w:[]u8,code:i64)i64 {
+  let s:i32=0;
+  while(s<4){
+    if(p_get(w,70+s)==-1){p_put(w,70+s,code);return 1;}
+    s=s+1;
+  }
+  return 0;
+}
+// two lowest occupied slots -> s1,s2 packed as s1*4+s2, or -1
+fn lowest_two(w:[]u8)i64 {
+  let s1:i64=-1;let s2:i64=-1;let s:i32=0;
+  while(s<4){
+    if(p_get(w,70+s)!=-1){
+      if(s1<0){s1=s as i64;}
+      else if(s2<0){s2=s as i64;}
+    }
+    s=s+1;
+  }
+  if(s2<0){return -1;}
+  return s1*4+s2;
+}
+// hidden recipe table: unordered pair -> result code, or -1
+fn recipe(a:i64,b:i64)i64 {
+  let x:i64=a;let y:i64=b;
+  if(x>y){x=b;y=a;}
+  if(x==0 && y==0){return 3;}  // crystal+crystal -> WARD
+  if(x==0 && y==1){return 2;}  // crystal+mote    -> LAMP
+  if(x==0 && y==4){return 5;}  // SURGE+crystal   -> PLANK (second-order)
+  if(x==0 && y==2){return 6;}  // LAMP+crystal    -> BEACON (second-order)
+  if(x==1 && y==1){return 4;}  // mote+mote       -> SURGE
+  return -1;
+}
+fn placed_add(w:[]u8,typ:i64,cell:i64)i64 {
+  let c:i64=p_get(w,80);
+  if(c>=12){return 0;}
+  p_put(w,81+(c as i32)*3,typ);
+  p_put(w,81+(c as i32)*3+1,cell);
+  p_put(w,80,c+1);
+  return 1;
+}
+// is agent sheltered (on WARD or BEACON cell)?
+fn sheltered(w:[]u8)i64 {
+  let pos:i64=p_get(w,1);let c:i64=p_get(w,80);let k:i32=0;
+  while((k as i64)<c){
+    let typ:i64=p_get(w,81+k*3);let cell:i64=p_get(w,81+k*3+1);
+    if((typ==3 || typ==6) && cell==pos){return 1;}
+    k=k+1;
+  }
+  return 0;
+}
+fn storm_active(w:[]u8,t:i64)i64 {
+  let s0:i64=p_get(w,8);let s1:i64=p_get(w,9);let s2:i64=p_get(w,10);
+  if((t>=s0 && t<s0+30) || (t>=s1 && t<s1+30) || (t>=s2 && t<s2+30)){return 1;}
+  return 0;
+}
+// storm starts within H ticks (or is active now)
+fn storm_threat(w:[]u8,h:i64)i64 {
+  let t:i64=p_get(w,0);
+  if(storm_active(w,t)==1){return 1;}
+  let s0:i64=p_get(w,8);let s1:i64=p_get(w,9);let s2:i64=p_get(w,10);
+  if((s0>t && s0-t<=h) || (s1>t && s1-t<=h) || (s2>t && s2-t<=h)){return 1;}
+  return 0;
+}
+fn in_zone(pos:i64)i64 {
+  if(pos>=6 && pos<=17){return 1;}
+  return 0;
+}
+// nearest active mote on the same side as pos; returns mote index or -1
+fn nearest_mote(w:[]u8,pos:i64,maxd:i64)i64 {
+  let va:i64=p_get(w,6);let vb:i64=p_get(w,7);
+  let best:i64=-1;let bestd:i64=999;let k:i32=0;
+  while(k<8){
+    let mp:i64=p_get(w,20+k*4);let dor:i64=p_get(w,20+k*4+2);
+    if(dor==0){
+      let sameside:i64=0;
+      if(pos<va && mp<va){sameside=1;}
+      if(pos>vb && mp>vb){sameside=1;}
+      if(sameside==1){
+        let d:i64=mp-pos;if(d<0){d=0-d;}
+        if(d<bestd && d<=maxd){bestd=d;best=k as i64;}
+      }
+    }
+    k=k+1;
+  }
+  return best;
+}
+// active mote exactly at pos -> index or -1
+fn mote_at(w:[]u8,pos:i64)i64 {
+  let k:i32=0;
+  while(k<8){
+    if(p_get(w,20+k*4)==pos && p_get(w,20+k*4+2)==0){return k as i64;}
+    k=k+1;
+  }
+  return -1;
+}
+// untaken crystal at pos -> index or -1
+fn crystal_at(w:[]u8,pos:i64)i64 {
+  let k:i32=0;
+  while(k<4){
+    if(p_get(w,60+k)==pos && p_get(w,64+k)==0){return k as i64;}
+    k=k+1;
+  }
+  return -1;
+}
+
+// variant file -> world. Returns 0 ok, 1 file error, 2 bad param count.
+fn world_init(w:[]u8,path:[]u8)i32 {
+  let data:[]u8=read_file(path);
+  if(data.len==0){return 1;}
+  let ints:[]u8=z_alloc(64*8);
+  let n:i32=parse_ints(data,ints);
+  z_free(data);
+  if(n!=33){z_free(ints);return 2;}
+  p_put(w,0,0);
+  p_put(w,1,p_get(ints,1));
+  p_put(w,2,100);
+  p_put(w,3,0);
+  p_put(w,4,1);
+  p_put(w,5,0);
+  p_put(w,6,p_get(ints,0));p_put(w,7,p_get(ints,0)+1);
+  p_put(w,8,p_get(ints,2));p_put(w,9,p_get(ints,3));p_put(w,10,p_get(ints,4));
+  let k:i32=0;
+  while(k<4){p_put(w,60+k,p_get(ints,5+k));p_put(w,64+k,0);k=k+1;}
+  k=0;
+  while(k<6){
+    p_put(w,20+k*4,p_get(ints,9+k*3));p_put(w,20+k*4+1,p_get(ints,10+k*3));
+    p_put(w,20+k*4+2,0);p_put(w,20+k*4+3,p_get(ints,11+k*3));
+    k=k+1;
+  }
+  k=0;
+  while(k<2){
+    p_put(w,20+(6+k)*4,p_get(ints,27+k*3));p_put(w,20+(6+k)*4+1,p_get(ints,28+k*3));
+    p_put(w,20+(6+k)*4+2,0);p_put(w,20+(6+k)*4+3,p_get(ints,29+k*3));
+    k=k+1;
+  }
+  k=0;
+  while(k<4){p_put(w,70+k,-1);k=k+1;}
+  p_put(w,80,0);
+  p_put(w,120,0);p_put(w,121,0);
+  p_put(w,122,0);p_put(w,123,0);p_put(w,124,0);p_put(w,125,0);p_put(w,126,0);
+  let lc2:i32=0;
+  while(lc2<96){p_put(w,130+lc2,-1);lc2=lc2+1;}
+  z_free(ints);
+  return 0;
+}
+
+// one tick. Returns 1 if the agent died this tick, else 0.
+fn step(w:[]u8,a:i64)i32 {
+  if(p_get(w,4)==0){return 1;}
+  let t:i64=p_get(w,0);
+  let pos:i64=p_get(w,1);
+  let e:i64=p_get(w,2);
+  let va:i64=p_get(w,6);let vb:i64=p_get(w,7);
+  // ---- agent action ----
+  if(a==0 || a==1){
+    let tgt:i64=pos;
+    if(a==0){tgt=pos-1;if(tgt<0){tgt=0;}}
+    else {tgt=pos+1;if(tgt>23){tgt=23;}}
+    if(tgt!=pos){
+      if(tgt==va || tgt==vb){
+        let pk:i64=120;if(tgt==vb){pk=121;}
+        if(p_get(w,pk as i32)==1){p_put(w,1,tgt);}
+        else if(consume_item(w,5)==1){p_put(w,pk as i32,1);p_put(w,1,tgt);}
+        else {p_put(w,4,0);p_put(w,5,2);}
+      }
+      else {p_put(w,1,tgt);}
+      p_put(w,126,p_get(w,126)+1);
+    }
+    pos=p_get(w,1);
+  }
+  else if(a==2){
+    // EAT: motes on cell first, else consume a SURGE from inventory
+    let ate:i64=0;let k:i32=0;
+    while(k<8){
+      if(p_get(w,20+k*4)==pos && p_get(w,20+k*4+2)==0){
+        p_put(w,20+k*4+2,20);ate=ate+1;
+      }
+      k=k+1;
+    }
+    if(ate>0){
+      e=e+30*ate;if(e>200){e=200;}
+      p_put(w,2,e);p_put(w,122,p_get(w,122)+ate);
+    }
+    else if(consume_item(w,4)==1){
+      e=e+40;if(e>200){e=200;}
+      p_put(w,2,e);p_put(w,3,10);
+      p_put(w,122,p_get(w,122)+1);
+    }
+  }
+  else if(a==3){
+    // TAKE priority: fixed crystal > active mote > loose item (LIFO)
+    let ci:i64=crystal_at(w,pos);
+    if(ci>=0 && inv_count(w)<4){
+      p_put(w,64+(ci as i32),1);
+      add_item(w,0);
+      p_put(w,123,p_get(w,123)+1);
+    }
+    else {
+      let mi:i64=mote_at(w,pos);
+      if(mi>=0 && inv_count(w)<4){
+        p_put(w,20+(mi as i32)*4+2,20);
+        add_item(w,1);
+        p_put(w,123,p_get(w,123)+1);
+      }
+      else if(inv_count(w)<4){
+        let lc:i64=loose_pop(w,pos);
+        if(lc>=0){
+          add_item(w,lc);
+          p_put(w,123,p_get(w,123)+1);
+        }
+      }
+    }
+  }
+  else if(a==4){
+    // DROP: lowest occupied slot. LAMP/WARD/BEACON are placed on the cell;
+    // other items go loose on the cell (re-TAKEable); lost only if cell is full.
+    let s:i32=0;let done:i32=0;
+    while(s<4 && done==0){
+      let it:i64=p_get(w,70+s);
+      if(it!=-1){
+        p_put(w,70+s,-1);
+        if(it==2 || it==3 || it==6){placed_add(w,it,pos);}
+        else {loose_push(w,pos,it);}
+        p_put(w,125,p_get(w,125)+1);
+        done=1;
+      }
+      s=s+1;
+    }
+  }
+  else if(a==5){
+    let pr:i64=lowest_two(w);
+    if(pr>=0){
+      let s1:i32=(pr/4) as i32;let s2:i32=(pr%4) as i32;
+      let r:i64=recipe(p_get(w,70+s1),p_get(w,70+s2));
+      if(r>=0){
+        p_put(w,70+s1,r);p_put(w,70+s2,-1);
+        p_put(w,124,p_get(w,124)+1);
+      }
+    }
+  }
+  // ---- placed-item attraction (before drift) ----
+  let nc:i64=p_get(w,80);let pi:i32=0;
+  while((pi as i64)<nc){
+    let typ:i64=p_get(w,81+pi*3);let cell:i64=p_get(w,81+pi*3+1);
+    let rad:i64=0;let pull:i64=0;
+    if(typ==2){rad=4;pull=1;}
+    if(typ==6){rad=8;pull=2;}
+    if(pull>0){
+      let k:i32=0;
+      while(k<8){
+        if(p_get(w,20+k*4+2)==0){
+          let mp:i64=p_get(w,20+k*4);
+          let d:i64=mp-cell;if(d<0){d=0-d;}
+          let sameside:i64=0;
+          if(cell<va && mp<va){sameside=1;}
+          if(cell>vb && mp>vb){sameside=1;}
+          if(sameside==1 && d<=rad && d>0){
+            if(mp<cell){mp=mp+pull;if(mp>cell){mp=cell;}}
+            else {mp=mp-pull;if(mp<cell){mp=cell;}}
+            // clamp to region
+            if(cell<va){if(mp<0){mp=0;}if(mp>va-1){mp=va-1;}}
+            else {if(mp<vb+1){mp=vb+1;}if(mp>23){mp=23;}}
+            p_put(w,20+k*4,mp);
+          }
+        }
+        k=k+1;
+      }
+    }
+    pi=pi+1;
+  }
+  // ---- mote drift + bounce ----
+  // Region follows the mote's CURRENT side (position-based): a mote that
+  // respawns beyond the void stays beyond the void (exile is one-way).
+  let k2:i32=0;
+  while(k2<8){
+    if(p_get(w,20+k2*4+2)==0){
+      let mp2:i64=p_get(w,20+k2*4);let vv:i64=p_get(w,20+k2*4+1);
+      let lo:i64=0;let hi:i64=23;
+      if(mp2<va){hi=va-1;}
+      else if(mp2>vb){lo=vb+1;}
+      else {
+        // on a void cell should not happen; push to nearer side
+        if(mp2==va){mp2=va-1;vv=0-vv;}
+        else {mp2=vb+1;vv=0-vv;}
+        if(mp2<va){hi=va-1;}else{lo=vb+1;}
+      }
+      mp2=mp2+vv;
+      if(mp2<lo){mp2=lo+(lo-mp2);vv=0-vv;}
+      if(mp2>hi){mp2=hi-(mp2-hi);vv=0-vv;}
+      p_put(w,20+k2*4,mp2);p_put(w,20+k2*4+1,vv);
+    }
+    else {
+      let dd:i64=p_get(w,20+k2*4+2)-1;
+      p_put(w,20+k2*4+2,dd);
+      if(dd==0){p_put(w,20+k2*4,p_get(w,20+k2*4+3));}
+    }
+    k2=k2+1;
+  }
+  // ---- costs ----
+  if(p_get(w,4)==1){
+    let sh:i64=sheltered(w);
+    let basal:i64=1;
+    if(sh==1){basal=0;}
+    else if(p_get(w,3)>0){basal=2;}
+    e=p_get(w,2)-basal;
+    if(storm_active(w,t)==1 && in_zone(pos)==1 && sh==0){e=e-4;}
+    p_put(w,2,e);
+    if(p_get(w,3)>0){p_put(w,3,p_get(w,3)-1);}
+    if(e<=0){p_put(w,4,0);p_put(w,5,1);}
+  }
+  p_put(w,0,t+1);
+  if(p_get(w,4)==0){return 1;}
+  return 0;
+}
+
+// ---------------- shared recall policy (Arm R; also I's reflex; also ablation) ----------------
+// Pure single-step taught heuristics (condition -> action), priority order.
+fn r_policy(w:[]u8)i64 {
+  let t:i64=p_get(w,0);let pos:i64=p_get(w,1);let e:i64=p_get(w,2);
+  // 1. storm: if threat within 20 and in zone -> leave toward nearest safe edge
+  if(storm_threat(w,20)==1 && in_zone(pos)==1){
+    if(pos<=11){return 0;}
+    return 1;
+  }
+  // 2. on a mote cell: eat it (or take it if rich and space)
+  if(mote_at(w,pos)>=0){
+    if(e>120 && inv_count(w)<4){return 3;}
+    return 2;
+  }
+  // 3. low energy: step toward nearest mote within 3
+  if(e<40){
+    let m:i64=nearest_mote(w,pos,3);
+    if(m>=0){
+      let mp:i64=p_get(w,20+(m as i32)*4);
+      if(mp<pos){return 0;}
+      return 1;
+    }
+    return 6;
+  }
+  // 4. on a crystal with space: take it
+  if(crystal_at(w,pos)>=0 && inv_count(w)<4){return 3;}
+  // 5. two items, safe, energy ok: may try combine
+  if(inv_count(w)>=2 && storm_threat(w,20)==0 && e>=50){return 5;}
+  return 6;
+}
+
+// ---------------- shared reporting ----------------
+// RESULT <arm> <variant> <rerun> <ticks> <cause> <finalE> <nEat> <nTake> <nComb> <nDrop> <nMoves>
+// TRACE <action chars>
+fn emit_result(w:[]u8,arm:[]u8,variant:i64,rerun:i64,trace:[]u8,ntrace:i32)void {
+  _zag_print("RESULT ");
+  _zag_print(arm);_zag_print(" ");
+  _zag_print(i64s(variant));_zag_print(" ");
+  _zag_print(i64s(rerun));_zag_print(" ");
+  _zag_print(i64s(p_get(w,0)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,5)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,2)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,122)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,123)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,124)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,125)));_zag_print(" ");
+  _zag_print(i64s(p_get(w,126)));
+  _zag_print("\nTRACE ");
+  _zag_print(trace[0..ntrace]);
+  _zag_print("\n");
+}

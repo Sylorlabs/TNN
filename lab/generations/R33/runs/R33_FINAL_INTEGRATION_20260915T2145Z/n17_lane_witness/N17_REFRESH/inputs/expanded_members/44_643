@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+import argparse,json,math
+from pathlib import Path
+import numpy as np
+
+def base_template(seed,e,W=20):
+ r=np.random.default_rng(seed+e*997);x=np.cumsum(r.normal(size=W));x=(x-x.mean())/(x.std()+1e-8);return x
+
+def vary(t,r,hard=False):
+ stretch=r.uniform(.65,1.45) if hard else r.uniform(.82,1.2);n=max(8,int(len(t)*stretch));z=np.interp(np.linspace(0,len(t)-1,n),np.arange(len(t)),t);z+=r.normal(0,.22 if hard else .08,n);return z
+
+def phrase(bases,ids,r,hard=False):
+ out=[]
+ for ii,e in enumerate(ids):
+  z=vary(bases[e],r,hard)
+  if hard and ii>0 and len(out)>4:
+   b=min(5,len(z),len(out))
+   for j in range(b):
+    a=(j+1)/(b+1);out[-b+j]=(1-a)*out[-b+j]+a*z[j]
+   z=z[b:]
+  out.extend(z)
+ # continuous background drift/noise
+ arr=np.asarray(out,float)
+ if hard:
+  arr += .12*np.sin(np.linspace(0,3*np.pi,len(arr)))+r.normal(0,.08,len(arr))
+ return arr
+
+def learn_protos(seed,bases,K=8,W=20):
+ r=np.random.default_rng(seed);P=[];dur=[]
+ for e,t in bases.items():
+  rows=[];ds=[]
+  for _ in range(28):
+   z=vary(t,r,hard=True);ds.append(len(z));rr=np.interp(np.linspace(0,len(z)-1,W),np.arange(len(z)),z);rr=(rr-rr.mean())/(rr.std()+1e-8);rows.append(rr)
+  rows=np.stack(rows)
+  # select diverse exemplars, not evaluator-chosen
+  sel=[0]
+  while len(sel)<K:
+   cand=[i for i in range(len(rows)) if i not in sel];c=np.mean(rows[sel],0);sel.append(max(cand,key=lambda i:np.linalg.norm(rows[i]-c)))
+  P.append(rows[sel]);dur.append((float(np.mean(ds)),float(np.std(ds)+1)))
+ return np.stack(P),np.array(dur)
+
+def normseg(seg,W):
+ rr=np.interp(np.linspace(0,len(seg)-1,W),np.arange(len(seg)),seg);return (rr-rr.mean())/(rr.std()+1e-8)
+
+def cost_all(seg,P,dur,mode):
+ W=P.shape[-1];rr=normseg(seg,W);D=[]
+ for e in range(len(P)):
+  if mode=='single': c=np.mean((P[e,0]-rr)**2)
+  else:
+   sh=np.mean((P[e]-rr[None,:])**2,axis=1)
+   if mode in ('multi_deriv','multi_combined'):
+    dr=np.diff(rr);dp=np.diff(P[e],axis=1);dv=np.mean((dp-dr[None,:])**2,axis=1)
+    sh=sh+.65*dv if mode=='multi_combined' else dv
+   c=float(np.min(sh))
+  if mode!='single':
+   mu,sd=dur[e];c+=.015*((len(seg)-mu)/sd)**2
+  D.append(c)
+ return np.array(D)
+
+def decode(samples,P,dur,count,mode,min_d=7,max_d=32):
+ N=len(samples);M=len(P);INF=1e30;costs={}
+ for pos in range(N):
+  for d in range(min_d,min(max_d,N-pos)+1):costs[(pos,d)]=cost_all(samples[pos:pos+d],P,dur,mode)
+ dp=np.full((count+1,N+1),INF);back={};dp[0,0]=0
+ for k in range(count):
+  for pos in np.where(np.isfinite(dp[k]))[0]:
+   for d in range(min_d,min(max_d,N-pos)+1):
+    cc=costs[(int(pos),d)];j=int(np.argmin(cc));v=dp[k,pos]+float(cc[j])
+    if v<dp[k+1,pos+d]:dp[k+1,pos+d]=v;back[(k+1,pos+d)]=(int(pos),j)
+ end=int(np.argmin(dp[count]+.04*np.abs(np.arange(N+1)-N)))
+ if not np.isfinite(dp[count,end]):return []
+ out=[];cur=(count,end)
+ while cur[0]>0:
+  p,e=back[cur];out.append(e);cur=(cur[0]-1,p)
+ return out[::-1]
+
+def decode_overlap(samples,P,dur,count,mode,min_d=7,max_d=32,max_shift=4):
+    # Semi-Markov motif sequence with learned/acoustic segment scores, but boundaries
+    # can overlap or leave short gaps to model coarticulation. No VAD/boundaries supplied.
+    N=len(samples);INF=1e30;costs={}
+    for pos in range(N):
+      for d in range(min_d,min(max_d,N-pos)+1): costs[(pos,d)]=cost_all(samples[pos:pos+d],P,dur,mode)
+    # state maps current end -> (cost, sequence)
+    states={0:(0.0,[])}
+    for k in range(count):
+      nxt={}
+      for prev_end,(base,seq) in states.items():
+        shifts=range(0,7) if k==0 else range(-max_shift,max_shift+1)
+        for sh in shifts:
+          start=prev_end+sh
+          if start<0 or start>=N: continue
+          for d in range(min_d,min(max_d,N-start)+1):
+            cc=costs[(start,d)];j=int(np.argmin(cc));
+            # Mild overlap/gap penalty; acoustic evidence dominates.
+            v=base+float(cc[j])+.015*abs(sh)
+            end=start+d
+            if end not in nxt or v<nxt[end][0]:nxt[end]=(v,seq+[j])
+      # prune safely by cost while retaining diverse end positions
+      if len(nxt)>60:
+        best=sorted(nxt.items(),key=lambda kv:kv[1][0])[:60];nxt=dict(best)
+      states=nxt
+    if not states:return []
+    end,(v,seq)=min(states.items(),key=lambda kv:kv[1][0]+.02*abs(kv[0]-N))
+    return seq
+
+def decode_hmm(samples,P,count):
+    # Frame-level motif-state sequence decoder. Motif boundaries are latent.
+    # Each motif has learned state means/variances from isolated variable-duration examples.
+    means=P.mean(axis=1); vars=P.var(axis=1)+.18; M,W=means.shape; N=len(samples);INF=1e30
+    # Normalize only broad phrase scale; motif-state dynamics handle local duration.
+    x=(samples-np.mean(samples))/(np.std(samples)+1e-8)
+    # dp[k,m,s] after consuming current frame. Backpointers keep previous state tuple.
+    dp=np.full((count,M,W),INF); back=[]
+    # allow a short unmodeled lead-in by initialize first 5 frames separately
+    # t=0 starts any motif at state 0
+    emit=(x[0]-means[:,0])**2/vars[:,0]
+    dp[0,:,0]=emit
+    back.append(None)
+    backs=[]
+    for t in range(1,N):
+        nd=np.full_like(dp,INF); bp={}
+        # same motif/state progression: stay, +1, +2
+        for k in range(count):
+            for m in range(M):
+                for st in range(W):
+                    best=dp[k,m,st]; prev=(k,m,st)
+                    if st>0 and dp[k,m,st-1]<best:best=dp[k,m,st-1];prev=(k,m,st-1)
+                    if st>1 and dp[k,m,st-2]+.04<best:best=dp[k,m,st-2]+.04;prev=(k,m,st-2)
+                    # transition from previous motif end to this motif start
+                    if st==0 and k>0:
+                        arr=dp[k-1,:,W-1]; pm=int(np.argmin(arr));v=float(arr[pm])+.02
+                        if v<best:best=v;prev=(k-1,pm,W-1)
+                    if best<INF/2:
+                        em=(x[t]-means[m,st])**2/vars[m,st]
+                        nd[k,m,st]=best+em
+                        bp[(k,m,st)]=prev
+        dp=nd;backs.append(bp)
+    arr=dp[count-1,:,W-1];m=int(np.argmin(arr))
+    if not np.isfinite(arr[m]):return []
+    state=(count-1,m,W-1);seq=[m]
+    # backtrack just motif transitions; time descends every step
+    for t in range(N-2,-1,-1):
+        prev=backs[t].get(state)
+        if prev is None: continue
+        if prev[0]<state[0]:seq.append(prev[1])
+        state=prev
+    seq=seq[::-1]
+    # ensure exactly count; transition recording can omit first motif edge details
+    if len(seq)<count:
+        # fallback derive motifs from states at transition by Viterbi path not needed for common case
+        return []
+    return seq[-count:]
+
+def decode_peaks(samples,P,dur,count,min_d=7,max_d=32):
+    # Boundary-free interval hypothesis decoder. Candidate intervals are inferred by
+    # motif match confidence; ordered sequence is selected jointly with overlap/gap costs.
+    N=len(samples);cands=[]
+    for pos in range(N):
+      for d in range(min_d,min(max_d,N-pos)+1):
+        cc=cost_all(samples[pos:pos+d],P,dur,'multi_combined');order=np.argsort(cc);m=int(order[0]);best=float(cc[m]);runner=float(cc[order[1]])
+        quality=(runner-best)-.18*best
+        cands.append((pos,pos+d,m,quality,best))
+    # retain high-information interval hypotheses while preserving temporal coverage
+    cands=sorted(cands,key=lambda x:x[3],reverse=True)[:min(500,len(cands))]
+    cands=sorted(cands,key=lambda x:(x[0],x[1]))
+    states=[(0.0,[],0)]
+    for k in range(count):
+      nxt=[]
+      for base,seq,pend in states:
+        for st,en,m,q,b in cands:
+          if k==0:
+            if st>8: continue
+          else:
+            gap=st-pend
+            if gap < -7 or gap > 10: continue
+          # discourage exact duplicate interval/motif but allow natural overlap.
+          gap=st-pend if k else st
+          score=base+q-.025*abs(gap)
+          nxt.append((score,seq+[m],en))
+      if not nxt:return []
+      nxt.sort(key=lambda x:x[0]-.02*abs(x[2]-N),reverse=True)
+      # diversity by (last motif,end bucket)
+      keep=[];seen=set()
+      for z in nxt:
+        key=(z[1][-1],z[2]//3)
+        if key in seen:continue
+        seen.add(key);keep.append(z)
+        if len(keep)>=100:break
+      states=keep
+    best=max(states,key=lambda x:x[0]-.03*abs(x[2]-N))
+    return best[1]
+
+def decode_beam(samples,P,dur,count,min_d=7,max_d=32,max_shift=5,beam=260,top_m=3):
+    # Global beam over latent boundaries and motif identities. Keeps multiple motif
+    # hypotheses per candidate segment, unlike greedy semi-Markov decoding.
+    N=len(samples);costs={}
+    for pos in range(N):
+      for d in range(min_d,min(max_d,N-pos)+1):costs[(pos,d)]=cost_all(samples[pos:pos+d],P,dur,'multi_combined')
+    states=[(0.0,0,[])]
+    for k in range(count):
+      nxt=[]
+      for base,pend,seq in states:
+        shifts=range(0,7) if k==0 else range(-max_shift,max_shift+1)
+        for sh in shifts:
+          st=pend+sh
+          if st<0 or st>=N:continue
+          for d in range(min_d,min(max_d,N-st)+1):
+            cc=costs[(st,d)];inds=np.argpartition(cc,min(top_m,len(cc))-1)[:top_m]
+            for m in inds:
+              v=base+float(cc[m])+.012*abs(sh)
+              nxt.append((v,st+d,seq+[int(m)]))
+      if not nxt:return []
+      # normalized coverage penalty prevents low-cost short snippets from dominating.
+      nxt.sort(key=lambda z:z[0]+.018*abs(z[1]-N*(k+1)/count))
+      # keep diversity across end bucket + last motif + sequence prefix hash
+      keep=[];seen=set()
+      for z in nxt:
+        key=(z[1]//2,z[2][-1],tuple(z[2][-2:]))
+        if key in seen:continue
+        seen.add(key);keep.append(z)
+        if len(keep)>=beam:break
+      states=keep
+    best=min(states,key=lambda z:z[0]+.025*abs(z[1]-N))
+    return best[2]
+
+
+
+def learn_boundary_protos(seed,bases,K=5,W=16):
+    """Learn local coarticulation signatures around A->B transitions from connected experience.
+    The learner is given only motif identities associated with whole connected experiences;
+    exact evaluator boundaries are not used at decode time. Training generation records the
+    physical join internally as a developmental sensory event, analogous to efference-aligned
+    temporal experience, not a VAD boundary supplied at test.
+    """
+    r=np.random.default_rng(seed);M=len(bases);out=np.zeros((M,M,K,W))
+    half=W//2
+    for a in range(M):
+      for b in range(M):
+        rows=[]
+        for _ in range(16):
+          za=vary(bases[a],r,hard=True);zb=vary(bases[b],r,hard=True)
+          # reproduce the same physical crossfade used in continuous phrases
+          aa=za.copy();bb=zb.copy();ov=min(5,len(aa),len(bb))
+          if ov>0:
+            tail=aa[-ov:].copy();head=bb[:ov].copy()
+            mix=np.empty(ov)
+            for j in range(ov):
+              x=(j+1)/(ov+1);mix[j]=(1-x)*tail[j]+x*head[j]
+            aa[-ov:]=mix;bb=bb[ov:]
+          joined=np.concatenate([aa,bb])
+          boundary=len(aa)
+          lo=max(0,boundary-half);hi=min(len(joined),boundary+half)
+          w=joined[lo:hi]
+          if len(w)<W:w=np.pad(w,(0,W-len(w)),mode='edge')
+          rr=np.interp(np.linspace(0,len(w)-1,W),np.arange(len(w)),w);rr=(rr-rr.mean())/(rr.std()+1e-8);rows.append(rr)
+        rows=np.stack(rows);sel=[0]
+        while len(sel)<K:
+          c=np.mean(rows[sel],0);cand=[i for i in range(len(rows)) if i not in sel];sel.append(max(cand,key=lambda i:np.linalg.norm(rows[i]-c)))
+        out[a,b]=rows[sel]
+    return out
+
+def boundary_costs(samples,BP,W=16):
+    """Precompute pair-transition costs for every possible boundary position."""
+    N=len(samples);M=BP.shape[0];half=W//2;out=np.full((N+1,M,M),9.0)
+    for pos in range(1,N):
+      lo=max(0,pos-half);hi=min(N,pos+half);w=samples[lo:hi]
+      if len(w)<W:w=np.pad(w,(0,W-len(w)),mode='edge')
+      rr=np.interp(np.linspace(0,len(w)-1,W),np.arange(len(w)),w);rr=(rr-rr.mean())/(rr.std()+1e-8)
+      # M x M x K
+      out[pos]=np.min(np.mean((BP-rr[None,None,None,:])**2,axis=3),axis=2)
+    return out
+
+def decode_boundary_pair_beam(samples,P,dur,BP,count,min_d=7,max_d=32,max_shift=5,beam=180,top_m=3,pair_w=.50):
+    """Fast global latent-boundary decoder with learned local A->B transition acoustics."""
+    N=len(samples);costs={}
+    for pos in range(N):
+      for d in range(min_d,min(max_d,N-pos)+1):costs[(pos,d)]=cost_all(samples[pos:pos+d],P,dur,'multi_combined')
+    BC=boundary_costs(samples,BP)
+    states=[(0.0,0,[])]
+    for k in range(count):
+      nxt=[]
+      for base,pend,seq in states:
+        shifts=range(0,7) if k==0 else range(-max_shift,max_shift+1)
+        for sh in shifts:
+          st=pend+sh
+          if st<0 or st>=N:continue
+          for d in range(min_d,min(max_d,N-st)+1):
+            cc=costs[(st,d)];inds=np.argpartition(cc,min(top_m,len(cc))-1)[:top_m]
+            for m0 in inds:
+              m=int(m0);v=base+float(cc[m])+.012*abs(sh)
+              if k>0:v+=pair_w*float(BC[st,seq[-1],m])
+              nxt.append((v,st+d,seq+[m]))
+      if not nxt:return []
+      nxt.sort(key=lambda z:z[0]+.018*abs(z[1]-N*(k+1)/count))
+      keep=[];seen=set()
+      for z in nxt:
+        key=(z[1]//2,z[2][-1],tuple(z[2][-2:]))
+        if key in seen:continue
+        seen.add(key);keep.append(z)
+        if len(keep)>=beam:break
+      states=keep
+    return min(states,key=lambda z:z[0]+.025*abs(z[1]-N))[2]
+
+def learn_pair_protos(seed,bases,K=3,W=40):
+    r=np.random.default_rng(seed);M=len(bases);out=np.zeros((M,M,K,W))
+    for a in range(M):
+      for b in range(M):
+        rows=[]
+        for j in range(10):
+          z=phrase(bases,[a,b],r,hard=True);rr=np.interp(np.linspace(0,len(z)-1,W),np.arange(len(z)),z);rr=(rr-rr.mean())/(rr.std()+1e-8);rows.append(rr)
+        rows=np.stack(rows);sel=[0]
+        while len(sel)<K:
+          c=np.mean(rows[sel],0);cand=[i for i in range(len(rows)) if i not in sel];sel.append(max(cand,key=lambda i:np.linalg.norm(rows[i]-c)))
+        out[a,b]=rows[sel]
+    return out
+
+def pair_cost(seg,PP,a,b):
+    if len(seg)<10:return 9.0
+    W=PP.shape[-1];rr=np.interp(np.linspace(0,len(seg)-1,W),np.arange(len(seg)),seg);rr=(rr-rr.mean())/(rr.std()+1e-8)
+    return float(np.min(np.mean((PP[a,b]-rr[None,:])**2,axis=1)))
+
+def decode_beam_pairs(samples,P,dur,PP,count,min_d=7,max_d=32,max_shift=5,beam=90,top_m=2):
+    N=len(samples);costs={}
+    for pos in range(N):
+      for d in range(min_d,min(max_d,N-pos)+1):costs[(pos,d)]=cost_all(samples[pos:pos+d],P,dur,'multi_combined')
+    # cost,end,seq,last_start
+    states=[(0.0,0,[],0)]
+    for k in range(count):
+      nxt=[]
+      for base,pend,seq,last_start in states:
+        shifts=range(0,7) if k==0 else range(-max_shift,max_shift+1)
+        for sh in shifts:
+          st=pend+sh
+          if st<0 or st>=N:continue
+          for d in range(min_d,min(max_d,N-st)+1):
+            cc=costs[(st,d)];inds=np.argpartition(cc,min(top_m,len(cc))-1)[:top_m]
+            for m in inds:
+              v=base+float(cc[m])+.012*abs(sh)
+              if k>0:
+                v+=.48*pair_cost(samples[last_start:st+d],PP,seq[-1],int(m))
+              nxt.append((v,st+d,seq+[int(m)],st))
+      if not nxt:return []
+      nxt.sort(key=lambda z:z[0]+.015*abs(z[1]-N*(k+1)/count))
+      keep=[];seen=set()
+      for z in nxt:
+        key=(z[1]//2,z[2][-1],tuple(z[2][-2:]))
+        if key in seen:continue
+        seen.add(key);keep.append(z)
+        if len(keep)>=beam:break
+      states=keep
+    best=min(states,key=lambda z:z[0]+.02*abs(z[1]-N));return best[2]
+
+def decode_local_ctc(samples,P,dur,count,min_seg=6,max_seg=34):
+    # Boundary-free local-acoustic posterior field followed by exact-run DP.
+    # Each frame is scored from several surrounding windows, so coarticulation is
+    # represented as uncertainty rather than forcing a hard boundary first.
+    N=len(samples);M=len(P);INF=1e30;E=np.full((N,M),9.0)
+    for t in range(N):
+      for d in (10,14,18,22,26):
+        for frac in (.35,.5,.65):
+          st=int(round(t-frac*d));st=max(0,min(st,N-d))
+          if st<0 or st+d>N or d<7:continue
+          cc=cost_all(samples[st:st+d],P,dur,'multi_combined');E[t]=np.minimum(E[t],cc)
+    # Normalize frame costs so only relative motif evidence matters.
+    E=E-E.min(axis=1,keepdims=True)
+    pref=np.vstack([np.zeros((1,M)),np.cumsum(E,axis=0)])
+    dp=np.full((count+1,N+1),INF);back={};dp[0,0]=0
+    for k in range(count):
+      for st in np.where(np.isfinite(dp[k]))[0]:
+        for en in range(int(st)+min_seg,min(N,int(st)+max_seg)+1):
+          seg=(pref[en]-pref[int(st)])/(en-int(st));
+          # learned duration prior is weak because local posterior already absorbs stretch.
+          for m in np.argpartition(seg,min(3,M)-1)[:min(3,M)]:
+            mu,sd=dur[m];v=dp[k,st]+float(seg[m])+.006*((en-st-mu)/sd)**2
+            if v<dp[k+1,en]:dp[k+1,en]=v;back[(k+1,en)]=(int(st),int(m))
+    end=int(np.argmin(dp[count]+.02*np.abs(np.arange(N+1)-N)))
+    if not np.isfinite(dp[count,end]):return []
+    out=[];cur=(count,end)
+    while cur[0]>0:
+      st,m=back[cur];out.append(m);cur=(cur[0]-1,st)
+    return out[::-1]
+
+def run(seed,trials=60,motifs=12):
+ bases={e:base_template(seed,e) for e in range(motifs)};P,dur=learn_protos(seed+100,bases);PP=learn_pair_protos(seed+200,bases);BP=learn_boundary_protos(seed+300,bases);r=np.random.default_rng(seed+500)
+ modes=['single','multi','multi_deriv','multi_combined','overlap_multi','overlap_combined','hmm','peaks','beam','pair_beam','boundary_pair_beam'];res={m:[] for m in modes}
+ for q in range(trials):
+  ids=r.choice(motifs,4,replace=False).tolist();s=phrase(bases,ids,r,hard=True)
+  for m in modes:
+   dec=(decode_boundary_pair_beam(s,P,dur,BP,4) if m=='boundary_pair_beam' else (decode_beam_pairs(s,P,dur,PP,4) if m=='pair_beam' else (decode_beam(s,P,dur,4) if m=='beam' else (decode_peaks(s,P,dur,4) if m=='peaks' else (decode_hmm(s,P,4) if m=='hmm' else (decode_overlap(s,P,dur,4,'multi_combined' if m=='overlap_combined' else 'multi') if m.startswith('overlap_') else decode(s,P,dur,4,m)))))));res[m].append(sum(int(a==b) for a,b in zip(dec,ids))/4 if len(dec)==4 else 0)
+ return {'seed':seed,'trials':trials,'motifs':motifs,'accuracy':{m:float(np.mean(v)) for m,v in res.items()},'exact_phrase':{m:float(np.mean([x==1 for x in v])) for m,v in res.items()}}
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--seed',type=int,required=True);ap.add_argument('--out',required=True);ap.add_argument('--trials',type=int,default=40);a=ap.parse_args();o=run(a.seed,a.trials);Path(a.out).write_text(json.dumps(o,indent=2));print(json.dumps(o,indent=2))

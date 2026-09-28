@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,heapq
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.linear_model import LogisticRegression,SGDClassifier,Ridge
+from sklearn.ensemble import RandomForestClassifier
+
+ACTIONS=['HOT_EXACT','COLD_EXACT','STRUCTURED','DISCARD'];COST=np.array([4.0,2.5,1.0,0.0])
+POLICIES=['EXACT_ALL','STRUCTURED_ALL','LRU','RANDOM','PRIVILEGED_HEURISTIC_CONTROL','LEARNED_LINEAR','LEARNED_RF','ONLINE_CONTEXTUAL','RECURRENT_USE','FOUNDRY_POLICY']
+
+def feat(r):return np.array([1,r['novelty'],r['causal'],r['contradiction'],r['source'],r['recurrence'],r['retrieval'],r['uncertainty']],float)
+def sufficient(a,q):return a in (0,1) if q==0 else a in (0,1,2)
+def make_episode(rng,i):
+ v={k:float(rng.beta(2,2)) for k in ['novelty','causal','contradiction','source','recurrence','retrieval','uncertainty']}
+ logits=np.array([1.8*v['novelty']+1.6*v['contradiction']+.9*v['source']-.8*v['recurrence']-1.4,1.4*v['causal']+1.1*v['recurrence']+.7*v['uncertainty']-.7,1.4*v['source']+1.4*v['contradiction']-.8,1.5*v['causal']+1*v['retrieval']-.9])
+ p=np.exp(logits-logits.max());p/=p.sum();q=int(rng.choice(4,p=p));delay=int(rng.integers(20,320));importance=float(.4+1.9*v['causal']+1.5*v['contradiction']+1.3*v['novelty']+.5*v['source'])
+ return {**v,'q':q,'delay':delay,'importance':importance,'id':i}
+
+def expected_action_score(pp,importance,retrieval,pressure):
+ # success probabilities by action given future query distribution, minus real storage pressure.
+ succ=np.array([1.,1.,1.-pp[0],0.]);hotbonus=np.array([.12*retrieval,.025*retrieval,0,0]);price=(.035+.30*pressure)*COST
+ return importance*succ+hotbonus-price
+
+class LearnedPolicy:
+ def __init__(self,name,dev,seed):
+  self.name=name;self.rng=np.random.default_rng(seed);X=np.stack([feat(r) for r in dev]);y=np.array([r['q'] for r in dev]);imp=np.array([r['importance'] for r in dev])
+  self.imp=Ridge(alpha=1).fit(X,imp)
+  if name=='LEARNED_LINEAR':self.clf=LogisticRegression(max_iter=350,class_weight='balanced').fit(X,y)
+  elif name=='LEARNED_RF':self.clf=RandomForestClassifier(n_estimators=36,max_depth=9,min_samples_leaf=5,random_state=seed,class_weight='balanced',n_jobs=1).fit(X,y)
+  elif name=='ONLINE_CONTEXTUAL':
+   self.clf=SGDClassifier(loss='log_loss',alpha=.0007,random_state=seed);classes=np.arange(4)
+   # sequential apprenticeship: q labels become available only after their simulated delay.
+   pending=defaultdict(list)
+   for t,r in enumerate(dev):
+    pending[t+r['delay']].append(r)
+    for rr in pending.get(t,[]):self.clf.partial_fit(feat(rr).reshape(1,-1),np.array([rr['q']]),classes=classes)
+   # warm missing classes if needed
+   for q in classes:self.clf.partial_fit(X[q:q+1],np.array([y[q]]),classes=classes)
+  elif name=='RECURRENT_USE':
+   # online use estimator with exponentially decayed context features learned from sequential consequences.
+   ctx=np.zeros(7);XX=[];YY=[]
+   for r in dev:
+    base=feat(r);XX.append(np.concatenate([base,ctx]));YY.append(r['q']);one=np.zeros(7);one[r['q']%4]=1;one[4]=r['importance'];one[5]=r['delay']/320;one[6]=r['retrieval'];ctx=.92*ctx+.08*one
+   self.ctx=np.zeros(7);self.clf=LogisticRegression(max_iter=300,class_weight='balanced').fit(np.stack(XX),np.array(YY))
+  elif name=='FOUNDRY_POLICY':
+   # whole-policy evolutionary search on dev outcomes, not hand-authored importance thresholds.
+   self.W=self.evolve(dev,seed)
+  else:raise ValueError(name)
+ def evolve(self,dev,seed):
+  rng=np.random.default_rng(seed);X=np.stack([feat(r) for r in dev]);q=np.array([r['q'] for r in dev]);imp=np.array([r['importance'] for r in dev]);retr=np.array([r['retrieval'] for r in dev])
+  pop=[rng.normal(0,.4,(4,X.shape[1])) for _ in range(20)]
+  def score(W):
+   logits=X@W.T;a=np.argmax(logits,1);ok=np.array([sufficient(int(aa),int(qq)) for aa,qq in zip(a,q)],float);return float(np.mean(imp*(2*ok-1)-.12*COST[a]+.05*retr*(a==0)))
+  for _ in range(32):
+   vals=np.array([score(w) for w in pop]);elite=[pop[i] for i in np.argsort(vals)[-6:]];new=elite[:]
+   while len(new)<20:
+    w=elite[int(rng.integers(len(elite)))].copy();w+=rng.normal(0,.12,w.shape);new.append(w)
+   pop=new
+  vals=np.array([score(w) for w in pop]);return pop[int(np.argmax(vals))]
+ def probs(self,r):
+  f=feat(r)
+  if self.name=='RECURRENT_USE':
+   x=np.concatenate([f,self.ctx]);p=self.clf.predict_proba(x.reshape(1,-1))[0]
+  elif self.name=='FOUNDRY_POLICY':
+   s=self.W@f;s-=s.max();p=np.exp(np.clip(s,-30,30));p/=p.sum();return None,p
+  else:p=self.clf.predict_proba(f.reshape(1,-1))[0]
+  pp=np.zeros(4);pp[self.clf.classes_.astype(int)]=p;return pp,None
+ def choose(self,r,pressure):
+  if self.name=='FOUNDRY_POLICY':
+   _,ap=self.probs(r);a=int(np.argmax(ap));value=float(np.max(ap));return a,value
+  pp,_=self.probs(r);importance=max(.15,float(self.imp.predict(feat(r).reshape(1,-1))[0]));s=expected_action_score(pp,importance,r['retrieval'],pressure);a=int(np.argmax(s));
+  if self.name=='RECURRENT_USE':
+   one=np.zeros(7);one[r['q']%4]=1;one[4]=r['importance'];one[5]=r['delay']/320;one[6]=r['retrieval'];self.ctx=.92*self.ctx+.08*one
+  return a,float(s[a])
+ def value_density(self,r,a,pressure):
+  if COST[a]<=0:return -1e9
+  if self.name=='FOUNDRY_POLICY':return float((self.W@feat(r))[a]/COST[a])
+  pp,_=self.probs(r);importance=max(.15,float(self.imp.predict(feat(r).reshape(1,-1))[0]));s=expected_action_score(pp,importance,r['retrieval'],pressure);return float(s[a]/COST[a])
+
+def fixed_choose(name,r,i,rng):
+ if name=='EXACT_ALL':return 0
+ if name=='STRUCTURED_ALL':return 2
+ if name=='LRU':return 0 if i%5==0 else 2
+ if name=='RANDOM':return int(rng.choice(4,p=[.18,.26,.46,.10]))
+ # privileged *control* deliberately sees human-designed latent structure; never promotable.
+ s=1.7*r['novelty']+2*r['causal']+2.4*r['contradiction']+1.4*r['source']+.9*r['uncertainty']-.8*r['recurrence']
+ return 0 if s>4.7 else 1 if s>3.3 else 2 if s>1.25 else 3
+
+def simulate(name,seed,dev,n=1100,budget=760):
+ rng=np.random.default_rng(seed);pol=LearnedPolicy(name,dev,seed) if name.startswith('LEARNED_') or name in ('ONLINE_CONTEXTUAL','RECURRENT_USE','FOUNDRY_POLICY') else None
+ entries={};used=0.;queries=defaultdict(list);episodes=[];by=defaultdict(list);storage=[];evict=0
+ for i in range(n):
+  r=make_episode(rng,i);episodes.append(r);pressure=min(1.,used/budget)
+  a,val=pol.choose(r,pressure) if pol else (fixed_choose(name,r,i,rng),0)
+  density=(val/(COST[a]+.1)) if pol and COST[a]>0 else (0.0 if pol else None)
+  entries[i]={'a':a,'r':r,'last':i,'density':density};used+=COST[a];queries[i+r['delay']].append(i)
+  while used>budget:
+   cand=[(eid,e) for eid,e in entries.items() if COST[e['a']]>0]
+   if not cand:break
+   if pol:
+    # Cached insertion-time learned value density: no future labels and no expensive rescoring loop.
+    eid,e=min(cand,key=lambda z:z[1]['density'])
+   else:eid,e=min(cand,key=lambda z:z[1]['last'])
+   used-=COST[e['a']];del entries[eid];evict+=1
+  for eid in queries.get(i,[]):
+   rr=episodes[eid];e=entries.get(eid);ok=e is not None and sufficient(e['a'],rr['q']);by[rr['q']].append(bool(ok));
+   if e:e['last']=i
+  storage.append(used)
+ for t in range(n,n+330):
+  for eid in queries.get(t,[]):
+   rr=episodes[eid];e=entries.get(eid);by[rr['q']].append(bool(e is not None and sufficient(e['a'],rr['q'])))
+ allv=[x for v in by.values() for x in v]
+ return {'policy':name,'seed':seed,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(storage)),'evictions':evict}
+
+def run(out,seeds=8,dev_n=2600,seed_offset=0):
+ rows=[]
+ for local in range(seeds):
+  si=seed_offset+local
+  dr=np.random.default_rng(281000+si);dev=[make_episode(dr,i) for i in range(dev_n)]
+  for p in POLICIES:rows.append(simulate(p,282000+si+abs(hash(p))%9000,dev))
+  print('seed',si,'done',flush=True)
+ g=defaultdict(list)
+ for r in rows:g[r['policy']].append(r)
+ s=[]
+ for p,rs in g.items():
+  z={'policy':p,'n':len(rs)}
+  for k in ['overall','exact','semantic','source','procedure','mean_storage','evictions']:
+   v=np.array([r[k] for r in rs],float);z[k]=float(v.mean());z[k+'_sd']=float(v.std())
+  z['utility']=.38*z['exact']+.19*z['semantic']+.19*z['source']+.24*z['procedure']-.0001*z['mean_storage'];s.append(z)
+ s=sorted(s,key=lambda x:x['utility'],reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','dev_history':dev_n,'rows':rows,'summary':s},indent=2));print(json.dumps(s,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--out',required=True);ap.add_argument('--seeds',type=int,default=8);ap.add_argument('--dev-n',type=int,default=2600);ap.add_argument('--seed-offset',type=int,default=0);a=ap.parse_args();run(a.out,a.seeds,a.dev_n,a.seed_offset)

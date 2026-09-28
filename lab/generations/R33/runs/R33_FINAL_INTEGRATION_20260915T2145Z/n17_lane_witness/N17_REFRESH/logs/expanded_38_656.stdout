@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse, json, sys
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+OLD=Path('/mnt/data/tnn-r27-factorial-master/experiments')
+sys.path.insert(0,str(OLD))
+from entity_factorial import make_world,candidate_pool,select_training,render,core_signature
+
+GRAPH_ARCHS=[
+ 'G_STATIC','G_TEMPORAL','G_MULTIVIEW','G_UNCERTAINTY','G_PREDICTIVE',
+ 'G_ACTIVE','G_ASSOC','G_PARTICLE','G_BLACKBOARD','G_ALL'
+]
+NOGRAPH_ARCHS=[
+ 'AE_PURE','AE_TEMPORAL','AE_PREDICTIVE','AE_RELIABILITY','AE_ACTIVE',
+ 'AE_TEMP_PRED','AE_TEMP_REL','AE_PRED_REL','AE_TEMP_PRED_REL','AEIF_FULL',
+ 'SLOT_NG','PARTICLE_NG','FIELD_NG','BLACKBOARD_NG','PROCESS_NG','FOUNDRY_HYBRID_NG'
+]
+ARCHS=GRAPH_ARCHS+NOGRAPH_ARCHS
+MODES=['RANDOM_PASSIVE','BALANCED_DIVERSE','ADAPTIVE_MASTER','LEARNED_TEACHER','CONTRASTIVE','ACTIVE_SELF','MASTER_WITHDRAWAL']
+CONDS=['viewpoint','scale_light','noise','occlusion55','occlusion85','gap_same','near_twin_return','true_switch','switch_occluded','long_gap_switch','crossing','compound','confident_corruption','ambiguous_mix']
+
+
+def sm(z,temp=1.0):
+ z=np.asarray(z,float)/max(temp,1e-6);z-=z.max();e=np.exp(np.clip(z,-60,60));return e/(e.sum()+1e-12)
+
+class IdentityModel:
+ def __init__(self,arch):self.arch=arch
+ def fit(self,views,world,seed):
+  self.world=world;self.seed=seed;self.views=[np.stack(v) for v in views];self.n=len(views)
+  self.cent=np.stack([v.mean(0) for v in self.views]);self.mem=np.concatenate(self.views);self.my=np.concatenate([np.full(len(v),i,int) for i,v in enumerate(self.views)])
+  self.sub=[]
+  for v in self.views:
+   c=v.mean(0);z=v-c
+   try:_,_,vt=np.linalg.svd(z,full_matrices=False);b=vt[:min(5,len(vt))]
+   except:b=np.zeros((1,v.shape[1]))
+   self.sub.append((c,b))
+  # development-only reliability learner: normal evidence + deceptive high-confidence mixtures/corruptions.
+  X=[];Y=[];rng=np.random.default_rng(seed+919)
+  dev_ents=range(min(self.n,6))
+  kinds=['clean','hard_permute','scale_light','noise','occlude30','occlude55','compound']
+  for e in dev_ents:
+   for j in range(7):
+    k=kinds[j%len(kinds)];x,v=render(world.bases[e],k,rng);s=core_signature(x,v);p=self.appearance(s);pred=int(np.argmax(p));X.append(self.rel_features(s,p));Y.append(int(pred==e))
+   # teach reliability that a confident mixture can be unsafe without giving corruption label as input.
+   t=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%self.n
+   for j in range(2):
+    alpha=rng.uniform(.35,.65);raw=alpha*world.bases[e]+(1-alpha)*world.bases[t]+rng.normal(0,.03,len(world.bases[e]));s=core_signature(raw[rng.permutation(len(raw))]);p=self.appearance(s);pred=int(np.argmax(p));X.append(self.rel_features(s,p));Y.append(int(pred==e))
+  YY=np.asarray(Y);XX=np.asarray(X);self.rel_constant=None
+  if len(np.unique(YY))<2:
+   # Explicit undertrained calibration state: do not crash or invent confidence.
+   self.rel=None;self.rel_constant=float(YY[0]);self.th=.75
+  else:
+   self.rel=LogisticRegression(C=.7,max_iter=250,class_weight='balanced').fit(XX,YY)
+   probs=self.rel.predict_proba(XX)[:,1]
+   # threshold optimized on development only for downstream trust vs caution.
+   best=(-1,.5)
+   for th in np.linspace(.25,.9,40):
+    false_trust=np.mean([(pr>=th and y==0) for pr,y in zip(probs,Y)])
+    true_trust=np.mean([(pr>=th and y==1) for pr,y in zip(probs,Y)])
+    score=true_trust-1.8*false_trust
+    if score>best[0]:best=(score,float(th))
+   self.th=best[1]
+  self.reset();return self
+ def reset(self):
+  self.current=-1;self.hyp=np.ones(getattr(self,'n',1))/max(getattr(self,'n',1),1);self.field=self.hyp.copy();self.last=None;self.extra=0
+ def dview(self,x):return np.array([np.min(np.linalg.norm(v-x,axis=1)) for v in self.views])
+ def dcent(self,x):return np.linalg.norm(self.cent-x,axis=1)
+ def dsub(self,x):
+  out=[]
+  for c,b in self.sub:
+   z=x-c;pr=b.T@(b@z);out.append(np.linalg.norm(z-pr))
+  return np.asarray(out)
+ def assoc(self,x):
+  d=np.linalg.norm(self.mem-x,axis=1);k=min(11,len(d));ii=np.argpartition(d,k-1)[:k];w=1/(d[ii]+.04);s=np.zeros(self.n)
+  for idx,ww in zip(ii,w):s[self.my[idx]]+=ww
+  return s/(s.sum()+1e-12)
+ def appearance(self,x):
+  pv=sm(-self.dview(x),max(np.median(self.dview(x))*.28,.045));pc=sm(-self.dcent(x),max(np.median(self.dcent(x))*.28,.05));pp=sm(-self.dsub(x),max(np.median(self.dsub(x))*.28,.045));pa=self.assoc(x)
+  if self.arch in ('G_STATIC','G_TEMPORAL'):return pc
+  if self.arch in ('G_MULTIVIEW','G_UNCERTAINTY','G_ACTIVE','G_PARTICLE'):return pv
+  if self.arch=='G_PREDICTIVE':return pp
+  if self.arch=='G_ASSOC':return pa
+  if self.arch in ('G_BLACKBOARD','G_ALL'):return .38*pa+.32*pv+.18*pp+.12*pc
+  if self.arch in ('AE_PURE','AE_TEMPORAL','AE_RELIABILITY','AE_ACTIVE','AE_TEMP_REL'):return pa
+  if self.arch in ('AE_PREDICTIVE','AE_TEMP_PRED','AE_PRED_REL','AE_TEMP_PRED_REL'):return .62*pa+.38*pp
+  if self.arch=='AEIF_FULL':return .48*pa+.25*pv+.27*pp
+  if self.arch=='SLOT_NG':return .52*pv+.48*pc
+  if self.arch=='PARTICLE_NG':return .68*pa+.32*pv
+  if self.arch=='FIELD_NG':return .55*pa+.45*pc
+  if self.arch=='BLACKBOARD_NG':return .4*pa+.25*pv+.2*pp+.15*pc
+  if self.arch=='PROCESS_NG':return .48*pp+.37*pa+.15*pv
+  if self.arch=='FOUNDRY_HYBRID_NG':return .46*pa+.3*pp+.24*pv
+  raise ValueError(self.arch)
+ def rel_features(self,x,p):
+  s=np.sort(p);margin=float(s[-1]-s[-2]);ent=float(-np.sum(p*np.log(p+1e-12))/np.log(max(self.n,2)));quality=float(x[28]) if len(x)>28 else 1.0
+  # route disagreement is available internally and catches some overconfident failures.
+  pa=self.assoc(x);pv=sm(-self.dview(x),max(np.median(self.dview(x))*.28,.045));pp=sm(-self.dsub(x),max(np.median(self.dsub(x))*.28,.045))
+  agree=float(int(np.argmax(pa)==np.argmax(pv))+int(np.argmax(pa)==np.argmax(pp))+int(np.argmax(pv)==np.argmax(pp)))/3.0
+  spread=float(np.linalg.norm(pa-pv)+np.linalg.norm(pa-pp)+np.linalg.norm(pv-pp))/3.0
+  return [margin,float(np.max(p)),1-ent,quality,agree,spread]
+ def reliability(self,x,p):
+  if self.rel is None:return float(self.rel_constant)
+  return float(self.rel.predict_proba(np.asarray([self.rel_features(x,p)]))[0,1])
+ def uses_rel(self):return ('REL' in self.arch or self.arch in ('AE_RELIABILITY','AE_ACTIVE','AEIF_FULL','G_ACTIVE','G_ALL','FOUNDRY_HYBRID_NG','BLACKBOARD_NG','PROCESS_NG'))
+ def uses_temporal(self):return self.arch in ('G_TEMPORAL','G_UNCERTAINTY','G_PARTICLE','G_ALL','AE_TEMPORAL','AE_TEMP_PRED','AE_TEMP_REL','AE_TEMP_PRED_REL','AEIF_FULL','PARTICLE_NG','FIELD_NG','BLACKBOARD_NG','PROCESS_NG','FOUNDRY_HYBRID_NG')
+ def uses_graph(self):return self.arch.startswith('G_')
+ def active(self):return self.arch in ('G_ACTIVE','G_ALL','AE_ACTIVE','AEIF_FULL','FOUNDRY_HYBRID_NG')
+ def observe(self,x):
+  if x is None:
+   if self.uses_temporal() and self.current>=0:return self.current,.5,0.0
+   return -1,0,0
+  p=self.appearance(x);raw=int(np.argmax(p));rel=self.reliability(x,p);top=np.argsort(p)[-2:][::-1]
+  # no-graph hypothesis distribution is based on episode support; graph controls add stronger continuity bias.
+  if self.uses_temporal():
+   continuity=.88 if self.uses_graph() else .60
+   if self.current>=0:
+    prior=np.ones(self.n)*(1-continuity)/max(self.n-1,1);prior[self.current]=continuity
+    if self.uses_rel() and rel>=self.th:prior=np.ones(self.n)/self.n
+    post=p*prior;post/=post.sum()+1e-12
+    self.hyp=.15*self.hyp+.85*post;self.hyp/=self.hyp.sum()+1e-12
+    cand=int(np.argmax(self.hyp))
+   else:self.hyp=p.copy();cand=raw
+  else:cand=raw
+  if self.current<0:pred=cand
+  elif self.uses_rel():pred=cand if rel>=self.th else self.current
+  elif self.uses_temporal():pred=cand
+  else:pred=raw
+  # Graph-all intentionally retains graph continuity; no-graph foundry can abandon previous identity faster.
+  if self.arch=='G_ALL' and self.current>=0 and rel<.86:pred=self.current
+  self.current=pred;self.last=x.copy();return pred,float(p[pred] if pred>=0 else 0),rel
+ def wants_extra(self,x,pred,rel):
+  if not self.active():return False
+  # learned reliability plus multi-route disagreement; no fixed confidence-only trigger.
+  p=self.appearance(x);f=self.rel_features(x,p);return rel<self.th or f[4]<.66 or f[5]>.42
+
+
+def hard_obs(world,e,kind,rng):
+ x,v=render(world.bases[e],kind,rng);return core_signature(x,v)
+
+def adversarial_signature(model,world,target,rng,tries=8):
+ # Black-box challenge: search transformations/mixes for high model confidence but wrong appearance choice.
+ best=None
+ twins=[i for i in range(model.n) if i!=target]
+ for _ in range(tries):
+  t=int(rng.choice(twins));a=rng.uniform(.05,.95);raw=a*world.bases[target]+(1-a)*world.bases[t]+rng.normal(0,rng.uniform(.01,.3),len(world.bases[target]));raw=raw[rng.permutation(len(raw))];s=core_signature(raw);p=model.appearance(s);pred=int(np.argmax(p));conf=float(np.max(p))
+  if pred!=target and (best is None or conf>best[0]):best=(conf,s)
+ if best:return best[1]
+ return hard_obs(world,target,'compound',rng)
+
+def run_trial(model,world,e,cond,seed):
+ rng=np.random.default_rng(seed);model.reset();model.observe(hard_obs(world,e,'clean',rng));target=e;extras=0
+ def o(ent,kind):
+  nonlocal extras
+  s=hard_obs(world,ent,kind,rng);pred,conf,rel=model.observe(s)
+  if model.wants_extra(s,pred,rel):
+   extras+=1
+   # Active evidence selection chooses a fresh, high-information view. In later integrated test, action/sibling are also options.
+   s2=hard_obs(world,ent,'hard_permute',rng);pred,conf,rel=model.observe(s2)
+  return pred,rel
+ if cond=='viewpoint':pred,rel=o(e,'hard_permute')
+ elif cond=='scale_light':pred,rel=o(e,'scale_light')
+ elif cond=='noise':pred,rel=o(e,'noise')
+ elif cond=='occlusion55':pred,rel=o(e,'occlude55')
+ elif cond=='occlusion85':
+  x=world.bases[e].copy();v=np.ones(len(x),bool);idx=rng.choice(len(x),int(.85*len(x)),replace=False);v[idx]=False;x[idx]=0;s=core_signature(x,v);pred,_,rel=model.observe(s)
+  if model.wants_extra(s,pred,rel):extras+=1;pred,rel=o(e,'hard_permute')
+ elif cond=='gap_same':
+  for _ in range(8):model.observe(None)
+  pred,rel=o(e,'compound')
+ elif cond=='near_twin_return':
+  t=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;o(t,'hard_permute');pred,rel=o(e,'hard_permute')
+ elif cond=='true_switch':
+  target=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;pred,rel=o(target,'hard_permute')
+ elif cond=='switch_occluded':
+  target=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;pred,rel=o(target,'occlude55')
+ elif cond=='long_gap_switch':
+  for _ in range(12):model.observe(None)
+  target=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;pred,rel=o(target,'hard_permute')
+ elif cond=='crossing':
+  t=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;raw=.5*world.bases[e]+.5*world.bases[t]+rng.normal(0,.08,len(world.bases[e]));model.observe(core_signature(raw[rng.permutation(len(raw))]));pred,rel=o(e,'hard_permute')
+ elif cond=='compound':pred,rel=o(e,'compound')
+ elif cond=='confident_corruption':
+  s=adversarial_signature(model,world,e,rng);pred,_,rel=model.observe(s)
+  if model.wants_extra(s,pred,rel):extras+=1;pred,rel=o(e,'hard_permute')
+ elif cond=='ambiguous_mix':
+  t=world.twin_of[e] if world.twin_of[e]>=0 else (e+1)%model.n;raw=.5*world.bases[e]+.5*world.bases[t]+rng.normal(0,.03,len(world.bases[e]));s=core_signature(raw[rng.permutation(len(raw))]);p=model.appearance(s);margin=float(np.sort(p)[-1]-np.sort(p)[-2]);pred,_,rel=model.observe(s)
+  # ambiguous success is calibrated uncertainty or correct after active inspection.
+  if model.active() and model.wants_extra(s,pred,rel):extras+=1;pred,rel=o(e,'hard_permute');ok=int(pred==e)
+  else:ok=int(margin<.12)
+  return ok,extras,rel
+ else:raise ValueError(cond)
+ return int(pred==target),extras,rel
+
+def evaluate(model,world,seed,n=8):
+ by=defaultdict(list);extra=[];rel=[]
+ for ci,c in enumerate(CONDS):
+  for j in range(n):
+   e=(seed+ci*5+j*7)%model.n;ok,x,r=run_trial(model,world,e,c,seed*100000+ci*1000+j);by[c].append(ok);extra.append(x);rel.append(r)
+ d={k:float(np.mean(v)) for k,v in by.items()};d['overall']=float(np.mean([z for v in by.values() for z in v]));d['balanced_floor']=min(d['viewpoint'],d['true_switch'],d['switch_occluded'],d['occlusion85'],d['confident_corruption'],d['ambiguous_mix']);d['extra_rate']=float(np.mean(extra));d['mean_rel']=float(np.mean(rel));return d
+
+def run(out,seeds=4,seed_base=280100,dose=64,n_trials=2,modes=None):
+ if modes is None: modes=MODES
+ rows=[]
+ for si in range(seeds):
+  seed=seed_base+si;world=make_world(seed);pool=candidate_pool(world,seed)
+  for mode in modes:
+   views=select_training(world,pool,mode,dose,seed+777)
+   for arch in ARCHS:
+    m=IdentityModel(arch).fit(views,world,seed+hash(arch)%5000);met=evaluate(m,world,seed+913,n=n_trials);rows.append({'seed':seed,'arch':arch,'training':mode,'dose':dose,'rel_threshold':m.th,**met})
+  print('seed',seed,'done',flush=True)
+ groups=defaultdict(list)
+ for r in rows:groups[(r['arch'],r['training'])].append(r)
+ summary=[]
+ for (a,t),rs in groups.items():
+  z={'arch':a,'training':t,'n':len(rs)}
+  for k in ['overall','balanced_floor','viewpoint','true_switch','switch_occluded','occlusion85','long_gap_switch','confident_corruption','ambiguous_mix','extra_rate']:
+   z[k]=float(np.mean([r[k] for r in rs]));z[k+'_sd']=float(np.std([r[k] for r in rs]))
+  summary.append(z)
+ fixed=sorted([x for x in summary if x['training']=='BALANCED_DIVERSE'],key=lambda x:(x['balanced_floor'],x['overall']),reverse=True)
+ allbest=sorted(summary,key=lambda x:(x['balanced_floor'],x['overall']),reverse=True)
+ payload={'status':'REFERENCE_ONLY_NOT_NATIVE','architectures':ARCHS,'graph_architectures':GRAPH_ARCHS,'nograph_architectures':NOGRAPH_ARCHS,'training_modes':modes,'conditions':CONDS,'rows':rows,'summary':summary,'matched_balanced_ranking':fixed,'all_ranking':allbest}
+ Path(out).write_text(json.dumps(payload,indent=2));print(json.dumps({'matched_top':fixed[:10],'overall_top':allbest[:8]},indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();ap.add_argument('--out',required=True);ap.add_argument('--seeds',type=int,default=4);ap.add_argument('--seed-base',type=int,default=280100);ap.add_argument('--dose',type=int,default=64);ap.add_argument('--n-trials',type=int,default=2);ap.add_argument('--mode',action='append');a=ap.parse_args();run(a.out,a.seeds,a.seed_base,a.dose,a.n_trials,a.mode)

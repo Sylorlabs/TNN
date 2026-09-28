@@ -1,0 +1,2820 @@
+// ============================================================
+// field.zag — FIELD-TRACK imagination (pure Zag, zero RNG, MODELSS).
+//
+// A scene is a CONTINUOUS FIELD, not an element list:
+//   VISUAL:     24x24 grid, 4 channels/cell (r,g,b 0..255, rough 0..1000)
+//   AUDIO:      48 time-frames x 48 semitone bins, energy 0..1000/cell
+//               (bin b -> 110*2^(b/12) Hz; frame = 62.5 ms @8kHz)
+//   STRUCTURAL: 24x24 heightfield, height 0..1000/cell
+//
+// Scenes are CONSTRUCTED by field strokes (recorded: op + 7 params,
+// max 64/scene), EDITED by further strokes, QUERIED by sampling.
+// Rasterization is eager, integer, deterministic. No RNG anywhere:
+// texture comes from a deterministic coordinate hash.
+//
+// Commands: f3 all | f3dump all | f3novel | f3probe | f3wav <dir>
+// ============================================================
+@import("../../../../toolchain/R33_NATIVE_IO_V1.zag")
+@import("sin_lut.zag")
+
+// sin_lut.zag needs these two names (same impl as imagine.zag).
+fn j2_put16(b:[]u8, i:i64, v:i64) void {
+    b[i * 2] = (v & 255) as u8;
+    b[i * 2 + 1] = ((v >> 8) & 255) as u8;
+}
+fn j2_get16(b:[]u8, i:i64) i64 {
+    let v:i64 = (b[i * 2] as i64) + (b[i * 2 + 1] as i64) * 256;
+    if (v >= 32768) { v = v - 65536; }
+    return v;
+}
+fn j2_put32f(b:[]u8, i:i64, v:i64) void {
+    let at:i64 = i * 4;
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn j2_get32f(b:[]u8, i:i64) i64 {
+    let at:i64 = i * 4;
+    return (b[at] as i64) + (b[at+1] as i64) * 256 + (b[at+2] as i64) * 65536 + (b[at+3] as i64) * 16777216;
+}
+
+// ---------------- word-arena accessors ----------------
+fn f3_put32(ar:[]u8, w:i64, v:i64) void {
+    let at:i64 = w * 4;
+    ar[at] = (v & 255) as u8;
+    ar[at+1] = ((v >> 8) & 255) as u8;
+    ar[at+2] = ((v >> 16) & 255) as u8;
+    ar[at+3] = ((v >> 24) & 255) as u8;
+}
+fn f3_get32(ar:[]u8, w:i64) i64 {
+    let at:i64 = w * 4;
+    return (ar[at] as i64) + (ar[at+1] as i64) * 256 + (ar[at+2] as i64) * 65536 + (ar[at+3] as i64) * 16777216;
+}
+// signed variant: sign-extends bit 31 (f3_get32 is unsigned 0..2^32-1).
+// REQUIRED when interpreting mix samples (peak/abs/scale); the synth's own
+// accumulation is mod-2^32 and stays correct with the unsigned read.
+fn f3_get32s(ar:[]u8, w:i64) i64 {
+    let v:i64 = f3_get32(ar, w);
+    if (v >= 2147483648) { v = v - 4294967296; }
+    return v;
+}
+fn f3_n(ar:[]u8) i64 { return f3_get32(ar, 0); }
+fn f3_type(ar:[]u8) i64 { return f3_get32(ar, 1); }
+fn f3_frames(ar:[]u8) i64 { return f3_get32(ar, 2); }
+fn f3_gb() i64 { return 579; } // grid base word: 3 + 64*9
+
+fn f3_zero(ar:[]u8, w0:i64, w1:i64) void {
+    let w:i64 = w0;
+    while (w < w1) { f3_put32(ar, w, 0); w = w + 1; }
+}
+fn f3_vnew(ar:[]u8) void {
+    f3_zero(ar, 0, 579 + 4608);
+    f3_put32(ar, 1, 1);
+}
+fn f3_anew(ar:[]u8) void {
+    f3_zero(ar, 0, 579 + 4608);
+    f3_put32(ar, 1, 2);
+}
+fn f3_snew(ar:[]u8) void {
+    f3_zero(ar, 0, 579 + 576);
+    f3_put32(ar, 1, 3);
+}
+
+// ---------------- stroke recording ----------------
+// op: V 1=fill 2=vgrad 3=hgrad 4=blotch 5=band 6=rect 7=dither
+//     A 11=tone 12=sweep 13=noise 14=harm
+//     S 21=mbase 22=mbox 23=mdome
+fn f3_stroke(ar:[]u8, op:i64, p1:i64, p2:i64, p3:i64, p4:i64, p5:i64, p6:i64, p7:i64, p8:i64) i64 {
+    let n:i64 = f3_n(ar);
+    if (n >= 64) { return -1; }
+    let b:i64 = 3 + n * 9;
+    f3_put32(ar, b, op);
+    f3_put32(ar, b + 1, p1);
+    f3_put32(ar, b + 2, p2);
+    f3_put32(ar, b + 3, p3);
+    f3_put32(ar, b + 4, p4);
+    f3_put32(ar, b + 5, p5);
+    f3_put32(ar, b + 6, p6);
+    f3_put32(ar, b + 7, p7);
+    f3_put32(ar, b + 8, p8);
+    f3_put32(ar, 0, n + 1);
+    return n;
+}
+fn f3_sop(ar:[]u8, i:i64) i64 { return f3_get32(ar, 3 + i * 9); }
+fn f3_spar(ar:[]u8, i:i64, s:i64) i64 { return f3_get32(ar, 3 + i * 9 + s); }
+
+// ---------------- grid cell access ----------------
+fn f3_vcell(ar:[]u8, x:i64, y:i64, ch:i64) i64 {
+    return f3_get32(ar, 579 + (y * 24 + x) * 4 + ch);
+}
+fn f3_vcellput(ar:[]u8, x:i64, y:i64, ch:i64, v:i64) void {
+    f3_put32(ar, 579 + (y * 24 + x) * 4 + ch, v);
+}
+fn f3_acell(ar:[]u8, t:i64, b:i64) i64 {
+    return f3_get32(ar, 579 + (t * 48 + b) * 2);
+}
+fn f3_acellput(ar:[]u8, t:i64, b:i64, v:i64) void {
+    f3_put32(ar, 579 + (t * 48 + b) * 2, v);
+}
+fn f3_abri(ar:[]u8, t:i64, b:i64) i64 {
+    return f3_get32(ar, 579 + (t * 48 + b) * 2 + 1);
+}
+fn f3_abriput(ar:[]u8, t:i64, b:i64, v:i64) void {
+    f3_put32(ar, 579 + (t * 48 + b) * 2 + 1, v);
+}
+fn f3_amax(ar:[]u8, t:i64, b:i64, e:i64, br:i64) void {
+    if (e > f3_acell(ar, t, b)) { f3_acellput(ar, t, b, e); }
+    if (br > f3_abri(ar, t, b)) { f3_abriput(ar, t, b, br); }
+}
+fn f3_scell(ar:[]u8, x:i64, y:i64) i64 {
+    return f3_get32(ar, 579 + y * 24 + x);
+}
+fn f3_scellput(ar:[]u8, x:i64, y:i64, v:i64) void {
+    f3_put32(ar, 579 + y * 24 + x, v);
+}
+fn f3_c24(c:i64) i64 {
+    // 0..1000 coord -> 0..23 cell
+    let v:i64 = c * 24 / 1000;
+    if (v < 0) { v = 0; }
+    if (v > 23) { v = 23; }
+    return v;
+}
+fn f3_clamp255(v:i64) i64 {
+    if (v < 0) { return 0; }
+    if (v > 255) { return 255; }
+    return v;
+}
+fn f3_blend(old:i64, new:i64, a:i64) i64 {
+    // a: 0..1000
+    return old + (new - old) * a / 1000;
+}
+
+// ---------------- VISUAL strokes ----------------
+fn f3_fill(ar:[]u8, r:i64, g:i64, b:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 1, r, g, b, 0, 0, 0, 0, 0);
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            f3_vcellput(ar, x, y, 0, r);
+            f3_vcellput(ar, x, y, 1, g);
+            f3_vcellput(ar, x, y, 2, b);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return rc;
+}
+fn f3_vgrad(ar:[]u8, r1:i64, g1:i64, b1:i64, r2:i64, g2:i64, b2:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 2, r1, g1, b1, r2, g2, b2, 0, 0);
+    let y:i64 = 0;
+    while (y < 24) {
+        let r:i64 = r1 + (r2 - r1) * y / 23;
+        let g:i64 = g1 + (g2 - g1) * y / 23;
+        let b:i64 = b1 + (b2 - b1) * y / 23;
+        let x:i64 = 0;
+        while (x < 24) {
+            f3_vcellput(ar, x, y, 0, r);
+            f3_vcellput(ar, x, y, 1, g);
+            f3_vcellput(ar, x, y, 2, b);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return rc;
+}
+fn f3_hgrad(ar:[]u8, r1:i64, g1:i64, b1:i64, r2:i64, g2:i64, b2:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 3, r1, g1, b1, r2, g2, b2, 0, 0);
+    let x:i64 = 0;
+    while (x < 24) {
+        let r:i64 = r1 + (r2 - r1) * x / 23;
+        let g:i64 = g1 + (g2 - g1) * x / 23;
+        let b:i64 = b1 + (b2 - b1) * x / 23;
+        let y:i64 = 0;
+        while (y < 24) {
+            f3_vcellput(ar, x, y, 0, r);
+            f3_vcellput(ar, x, y, 1, g);
+            f3_vcellput(ar, x, y, 2, b);
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    return rc;
+}
+fn f3_blotch(ar:[]u8, x:i64, y:i64, rad:i64, r:i64, g:i64, b:i64, fall:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 4, x, y, rad, r, g, b, fall, 0);
+    let r2:i64 = rad * rad;
+    if (r2 < 1) { r2 = 1; }
+    let x0:i64 = f3_c24(x - rad);
+    let x1:i64 = f3_c24(x + rad);
+    let y0:i64 = f3_c24(y - rad);
+    let y1:i64 = f3_c24(y + rad);
+    let cy:i64 = y0;
+    while (cy <= y1) {
+        let py:i64 = cy * 1000 / 24 + 20;
+        let cx:i64 = x0;
+        while (cx <= x1) {
+            let px:i64 = cx * 1000 / 24 + 20;
+            let dx:i64 = px - x;
+            let dy:i64 = py - y;
+            let d2:i64 = dx * dx + dy * dy;
+            if (d2 < r2) {
+                let a:i64 = fall * (r2 - d2) / r2;
+                f3_vcellput(ar, cx, cy, 0, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 0), r, a)));
+                f3_vcellput(ar, cx, cy, 1, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 1), g, a)));
+                f3_vcellput(ar, cx, cy, 2, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 2), b, a)));
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    return rc;
+}
+fn f3_band(ar:[]u8, x0:i64, y0:i64, x1:i64, y1:i64, w:i64, r:i64, g:i64, b:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 5, x0, y0, x1, y1, w, r, g, b);
+    let hw:i64 = w / 2;
+    if (hw < 1) { hw = 1; }
+    let hw2:i64 = hw * hw;
+    let dx:i64 = x1 - x0;
+    let dy:i64 = y1 - y0;
+    let len2:i64 = dx * dx + dy * dy;
+    if (len2 < 1) { len2 = 1; }
+    let bx0:i64 = f3_c24(x0 - hw);
+    if (f3_c24(x1 - hw) < bx0) { bx0 = f3_c24(x1 - hw); }
+    let bx1:i64 = f3_c24(x0 + hw);
+    if (f3_c24(x1 + hw) > bx1) { bx1 = f3_c24(x1 + hw); }
+    let by0:i64 = f3_c24(y0 - hw);
+    if (f3_c24(y1 - hw) < by0) { by0 = f3_c24(y1 - hw); }
+    let by1:i64 = f3_c24(y0 + hw);
+    if (f3_c24(y1 + hw) > by1) { by1 = f3_c24(y1 + hw); }
+    let cy:i64 = by0;
+    while (cy <= by1) {
+        let py:i64 = cy * 1000 / 24 + 20;
+        let cx:i64 = bx0;
+        while (cx <= bx1) {
+            let px:i64 = cx * 1000 / 24 + 20;
+            let t:i64 = ((px - x0) * dx + (py - y0) * dy) * 1000 / len2;
+            if (t < 0) { t = 0; }
+            if (t > 1000) { t = 1000; }
+            let qx:i64 = x0 + dx * t / 1000;
+            let qy:i64 = y0 + dy * t / 1000;
+            let ddx:i64 = px - qx;
+            let ddy:i64 = py - qy;
+            let d2:i64 = ddx * ddx + ddy * ddy;
+            if (d2 < hw2) {
+                let a:i64 = 1000 - 1000 * d2 / hw2;
+                f3_vcellput(ar, cx, cy, 0, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 0), r, a)));
+                f3_vcellput(ar, cx, cy, 1, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 1), g, a)));
+                f3_vcellput(ar, cx, cy, 2, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 2), b, a)));
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    return rc;
+}
+fn f3_rect(ar:[]u8, x0:i64, y0:i64, x1:i64, y1:i64, r:i64, g:i64, b:i64, soft:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 6, x0, y0, x1, y1, r, g, b, soft);
+    let s2:i64 = soft * soft;
+    if (s2 < 1) { s2 = 1; }
+    let cx0:i64 = f3_c24(x0 - soft);
+    let cx1:i64 = f3_c24(x1 + soft);
+    let cy0:i64 = f3_c24(y0 - soft);
+    let cy1:i64 = f3_c24(y1 + soft);
+    let cy:i64 = cy0;
+    while (cy <= cy1) {
+        let py:i64 = cy * 1000 / 24 + 20;
+        let cx:i64 = cx0;
+        while (cx <= cx1) {
+            let px:i64 = cx * 1000 / 24 + 20;
+            let a:i64 = 0;
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) {
+                a = 1000;
+            } else {
+                let ox:i64 = 0;
+                if (px < x0) { ox = x0 - px; }
+                if (px > x1) { ox = px - x1; }
+                let oy:i64 = 0;
+                if (py < y0) { oy = y0 - py; }
+                if (py > y1) { oy = py - y1; }
+                let d2:i64 = ox * ox + oy * oy;
+                if (d2 < s2) { a = 1000 - 1000 * d2 / s2; }
+            }
+            if (a > 0) {
+                f3_vcellput(ar, cx, cy, 0, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 0), r, a)));
+                f3_vcellput(ar, cx, cy, 1, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 1), g, a)));
+                f3_vcellput(ar, cx, cy, 2, f3_clamp255(f3_blend(f3_vcell(ar, cx, cy, 2), b, a)));
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    return rc;
+}
+fn f3_hash2(x:i64, y:i64, seed:i64) i64 {
+    let h:i64 = (x * 374761393 + y * 668265263 + seed * 974634211) & 9223372036854775807;
+    h = h ^ (h >> 13);
+    h = h * 1274126177 & 9223372036854775807;
+    h = h ^ (h >> 16);
+    return h % 1001;
+}
+fn f3_dither(ar:[]u8, seed:i64, amt:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 7, seed, amt, 0, 0, 0, 0, 0, 0);
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            let v:i64 = (f3_hash2(x, y, seed) - 500) * amt / 500;
+            f3_vcellput(ar, x, y, 0, f3_clamp255(f3_vcell(ar, x, y, 0) + v));
+            f3_vcellput(ar, x, y, 1, f3_clamp255(f3_vcell(ar, x, y, 1) + v));
+            f3_vcellput(ar, x, y, 2, f3_clamp255(f3_vcell(ar, x, y, 2) + v));
+            let rg:i64 = f3_vcell(ar, x, y, 3) + v / 4;
+            if (rg < 0) { rg = 0; }
+            if (rg > 1000) { rg = 1000; }
+            f3_vcellput(ar, x, y, 3, rg);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return rc;
+}
+
+// ---------------- AUDIO strokes (48 frames x 48 semitone bins) ----------------
+fn f3_a_use(ar:[]u8, t1:i64) void {
+    let f:i64 = t1 + 1;
+    if (f > f3_frames(ar)) { f3_put32(ar, 2, f); }
+}
+fn f3_tone(ar:[]u8, fbin:i64, t0:i64, t1:i64, e:i64, atk:i64, dec:i64, br:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 11, fbin, t0, t1, e, atk, dec, br, 0);
+    if (fbin < 0 || fbin > 47) { return rc; }
+    f3_a_use(ar, t1);
+    let t:i64 = t0;
+    while (t <= t1) {
+        let ev:i64 = e;
+        if (atk > 0 && t < t0 + atk) { ev = e * (t - t0) / atk; }
+        if (dec > 0 && t > t1 - dec) {
+            let ev2:i64 = e * (t1 - t) / dec;
+            if (ev2 < ev) { ev = ev2; }
+        }
+        f3_amax(ar, t, fbin, ev, br);
+        t = t + 1;
+    }
+    return rc;
+}
+fn f3_sweep(ar:[]u8, f0:i64, f1:i64, t0:i64, t1:i64, e:i64, br:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 12, f0, f1, t0, t1, e, br, 0, 0);
+    f3_a_use(ar, t1);
+    let den:i64 = t1 - t0;
+    if (den < 1) { den = 1; }
+    let t:i64 = t0;
+    while (t <= t1) {
+        let fb:i64 = f0 + (f1 - f0) * (t - t0) / den;
+        let db:i64 = -1;
+        while (db <= 1) {
+            let b:i64 = fb + db;
+            if (b >= 0 && b < 48) { f3_amax(ar, t, b, e, br); }
+            db = db + 1;
+        }
+        t = t + 1;
+    }
+    return rc;
+}
+fn f3_noise(ar:[]u8, t0:i64, t1:i64, e:i64, br:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 13, t0, t1, e, br, 0, 0, 0, 0);
+    f3_a_use(ar, t1);
+    let t:i64 = t0;
+    while (t <= t1) {
+        let b:i64 = 0;
+        while (b < 48) {
+            f3_amax(ar, t, b, e, br);
+            b = b + 1;
+        }
+        t = t + 1;
+    }
+    return rc;
+}
+fn f3_harm(ar:[]u8, fbin:i64, t0:i64, t1:i64, e:i64, atk:i64, dec:i64, br:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 14, fbin, t0, t1, e, atk, dec, br, 0);
+    // tone + 2nd + 3rd harmonic via direct cell writes (no extra strokes)
+    f3_a_use(ar, t1);
+    let parts:i64 = 0;
+    while (parts < 3) {
+        let b:i64 = fbin;
+        let pe:i64 = e;
+        if (parts == 1) { b = fbin + 12; pe = e * 6 / 10; }
+        if (parts == 2) { b = fbin + 19; pe = e * 4 / 10; }
+        if (b >= 0 && b < 48) {
+            let t:i64 = t0;
+            while (t <= t1) {
+                let ev:i64 = pe;
+                if (atk > 0 && t < t0 + atk) { ev = pe * (t - t0) / atk; }
+                if (dec > 0 && t > t1 - dec) {
+                    let ev2:i64 = pe * (t1 - t) / dec;
+                    if (ev2 < ev) { ev = ev2; }
+                }
+                f3_amax(ar, t, b, ev, br);
+                t = t + 1;
+            }
+        }
+        parts = parts + 1;
+    }
+    return rc;
+}
+
+// ---------------- STRUCTURAL strokes (24x24 heightfield) ----------------
+fn f3_mbase(ar:[]u8, h:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 21, h, 0, 0, 0, 0, 0, 0, 0);
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            f3_scellput(ar, x, y, h);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return rc;
+}
+fn f3_mbox(ar:[]u8, x0:i64, y0:i64, x1:i64, y1:i64, h:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 22, x0, y0, x1, y1, h, 0, 0, 0);
+    let cy:i64 = f3_c24(y0);
+    while (cy <= f3_c24(y1)) {
+        let cx:i64 = f3_c24(x0);
+        while (cx <= f3_c24(x1)) {
+            let old:i64 = f3_scell(ar, cx, cy);
+            if (h > old) { f3_scellput(ar, cx, cy, h); }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    return rc;
+}
+fn f3_mdome(ar:[]u8, x:i64, y:i64, rad:i64, h:i64) i64 {
+    let rc:i64 = f3_stroke(ar, 23, x, y, rad, h, 0, 0, 0, 0);
+    let r2:i64 = rad * rad;
+    if (r2 < 1) { r2 = 1; }
+    let cy:i64 = f3_c24(y - rad);
+    while (cy <= f3_c24(y + rad)) {
+        let py:i64 = cy * 1000 / 24 + 20;
+        let cx:i64 = f3_c24(x - rad);
+        while (cx <= f3_c24(x + rad)) {
+            let px:i64 = cx * 1000 / 24 + 20;
+            let dx:i64 = px - x;
+            let dy:i64 = py - y;
+            let d2:i64 = dx * dx + dy * dy;
+            if (d2 < r2) {
+                let nh:i64 = h * (r2 - d2) / r2;
+                let old:i64 = f3_scell(ar, cx, cy);
+                if (nh > old) { f3_scellput(ar, cx, cy, nh); }
+            }
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    return rc;
+}
+
+// ---------------- QUERIES ----------------
+fn f3_vsample(ar:[]u8, x:i64, y:i64, ch:i64) i64 {
+    return f3_vcell(ar, f3_c24(x), f3_c24(y), ch);
+}
+fn f3_vmean(ar:[]u8, ch:i64) i64 {
+    let s:i64 = 0;
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            s = s + f3_vcell(ar, x, y, ch);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return s / 576;
+}
+fn f3_vpeak(ar:[]u8, ch:i64, ox:*i64, oy:*i64) i64 {
+    let best:i64 = -1;
+    let bx:i64 = 0;
+    let by:i64 = 0;
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            let v:i64 = f3_vcell(ar, x, y, ch);
+            if (v > best) { best = v; bx = x; by = y; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    ox.* = bx;
+    oy.* = by;
+    return best;
+}
+fn f3_apeak(ar:[]u8, ot:*i64, ob:*i64) i64 {
+    let best:i64 = -1;
+    let bt:i64 = 0;
+    let bb:i64 = 0;
+    let t:i64 = 0;
+    while (t < 48) {
+        let b:i64 = 0;
+        while (b < 48) {
+            let v:i64 = f3_acell(ar, t, b);
+            if (v > best) { best = v; bt = t; bb = b; }
+            b = b + 1;
+        }
+        t = t + 1;
+    }
+    ot.* = bt;
+    ob.* = bb;
+    return best;
+}
+fn f3_aenergy(ar:[]u8) i64 {
+    let s:i64 = 0;
+    let t:i64 = 0;
+    while (t < 48) {
+        let b:i64 = 0;
+        while (b < 48) {
+            s = s + f3_acell(ar, t, b);
+            b = b + 1;
+        }
+        t = t + 1;
+    }
+    return s;
+}
+fn f3_sheight(ar:[]u8, x:i64, y:i64) i64 {
+    return f3_scell(ar, f3_c24(x), f3_c24(y));
+}
+fn f3_speak(ar:[]u8, ox:*i64, oy:*i64) i64 {
+    let best:i64 = -1;
+    let bx:i64 = 0;
+    let by:i64 = 0;
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            let v:i64 = f3_scell(ar, x, y);
+            if (v > best) { best = v; bx = x; by = y; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    ox.* = bx;
+    oy.* = by;
+    return best;
+}
+
+// ---------------- BRIEF builders (same brief texts as v1/v2) ----------------
+fn f3_gen_v1(ar:[]u8) void {
+    // V1: bakery logo "Crumb & Craft" — grain motif, warm palette,
+    // <=4 motif groups (element cap is substrate-N/A; strokes stay minimal).
+    f3_vnew(ar);
+    f3_vgrad(ar, 250, 230, 200, 200, 150, 100);
+    f3_blotch(ar, 500, 500, 300, 235, 200, 150, 500);
+    f3_band(ar, 380, 640, 430, 420, 60, 170, 120, 60);
+    f3_band(ar, 620, 640, 570, 420, 60, 170, 120, 60);
+    f3_rect(ar, 290, 335, 710, 425, 120, 80, 50, 30);
+    f3_dither(ar, 7, 60);
+}
+fn f3_gen_v2(ar:[]u8) void {
+    // V2: jazz-night poster — night feel, date/venue text zones,
+    // cool palette + one warm accent.
+    f3_vnew(ar);
+    f3_vgrad(ar, 16, 24, 64, 48, 40, 96);
+    f3_blotch(ar, 800, 180, 120, 240, 200, 120, 800);
+    f3_band(ar, 300, 620, 420, 260, 90, 200, 150, 80);
+    f3_rect(ar, 240, 750, 760, 830, 230, 235, 245, 20);
+    f3_rect(ar, 240, 850, 760, 930, 230, 235, 245, 20);
+    f3_dither(ar, 21, 90);
+}
+fn f3_gen_a1(ar:[]u8) void {
+    // A1: 4-note shop-door chime — rising contour, ends stable (last longest).
+    // bins: C4=15 E4=19 G4=22 C5=27.
+    f3_anew(ar);
+    f3_tone(ar, 15, 0, 5, 800, 1, 2, 500);
+    f3_tone(ar, 19, 6, 11, 800, 1, 2, 500);
+    f3_tone(ar, 22, 12, 17, 800, 1, 2, 500);
+    f3_tone(ar, 27, 18, 29, 850, 1, 4, 500);
+    f3_harm(ar, 3, 0, 29, 250, 2, 6, 200);
+}
+fn f3_gen_a2(ar:[]u8) void {
+    // A2: 3-note kiosk error buzz — attention-getting, tense (m2 + tritone).
+    // bins: 220Hz=12, 233Hz=13 (m2), 311Hz=18 (tritone above 220).
+    f3_anew(ar);
+    f3_tone(ar, 12, 0, 5, 950, 0, 1, 700);
+    f3_tone(ar, 13, 6, 11, 950, 0, 1, 700);
+    f3_tone(ar, 18, 12, 21, 1000, 0, 2, 700);
+    f3_noise(ar, 0, 21, 300, 300);
+}
+fn f3_gen_s1(ar:[]u8) void {
+    // S1: five blocks on a shelf — largest at bottom, no overhang.
+    // Heightfield: nested footprints, strictly increasing height.
+    f3_snew(ar);
+    f3_mbase(ar, 0);
+    f3_mbox(ar, 350, 350, 650, 650, 140);
+    f3_mbox(ar, 380, 380, 620, 620, 255);
+    f3_mbox(ar, 410, 410, 590, 590, 345);
+    f3_mbox(ar, 435, 435, 565, 565, 413);
+    f3_mbox(ar, 455, 455, 545, 545, 461);
+}
+fn f3_gen_s2(ar:[]u8) void {
+    // S2: four stones in a garden square — asymmetric, one dominant, airy.
+    f3_snew(ar);
+    f3_mbase(ar, 0);
+    f3_mdome(ar, 300, 350, 130, 700);
+    f3_mdome(ar, 700, 300, 70, 380);
+    f3_mdome(ar, 650, 700, 55, 300);
+    f3_mdome(ar, 250, 720, 50, 260);
+}
+
+// ---------------- NOVEL builders (same 6 prompts as v2 M2) ----------------
+fn f3_novel(ar:[]u8, n:i64) void {
+    if (n == 1) {
+        // glass staircase underwater at dusk
+        f3_vnew(ar);
+        f3_vgrad(ar, 200, 140, 90, 30, 60, 110);
+        let s:i64 = 0;
+        while (s < 5) {
+            f3_blotch(ar, 300 + s * 90, 700 - s * 80, 70, 190, 215, 235, 700);
+            s = s + 1;
+        }
+        f3_band(ar, 120, 300, 420, 700, 40, 235, 245, 255);
+        f3_dither(ar, 99, 120);
+        return;
+    }
+    if (n == 2) {
+        // brass band in a library, zero gravity
+        f3_vnew(ar);
+        f3_fill(ar, 40, 30, 25);
+        let b:i64 = 0;
+        while (b < 4) {
+            f3_rect(ar, 80 + b * 220, 100, 200 + b * 220, 500, 110, 70, 40, 15);
+            b = b + 1;
+        }
+        let f:i64 = 0;
+        while (f < 4) {
+            f3_blotch(ar, 200 + f * 180, 700 - f * 60, 45, 200, 150, 80, 900);
+            f = f + 1;
+        }
+        f3_dither(ar, 55, 70);
+        return;
+    }
+    if (n == 3) {
+        // thunderstorm inside a honey cathedral
+        f3_vnew(ar);
+        f3_vgrad(ar, 40, 40, 60, 20, 20, 30);
+        f3_rect(ar, 350, 450, 650, 900, 220, 170, 60, 25);
+        f3_band(ar, 500, 450, 500, 230, 120, 235, 185, 70);
+        f3_band(ar, 700, 80, 680, 420, 25, 245, 245, 255);
+        f3_blotch(ar, 500, 600, 200, 240, 200, 120, 400);
+        return;
+    }
+    if (n == 4) {
+        // robot drinking tea on a glacier at sunrise
+        f3_vnew(ar);
+        f3_vgrad(ar, 255, 180, 120, 200, 160, 180);
+        f3_rect(ar, 0, 500, 1000, 1000, 200, 225, 245, 40);
+        f3_blotch(ar, 485, 620, 90, 150, 160, 175, 900);
+        f3_blotch(ar, 620, 640, 25, 200, 120, 60, 900);
+        f3_band(ar, 100, 900, 700, 880, 50, 210, 230, 250);
+        return;
+    }
+    if (n == 5) {
+        // thunderstorm with a distant church bell (bins: bell 660Hz=31, 880Hz=36)
+        f3_anew(ar);
+        f3_noise(ar, 0, 40, 500, 400);
+        f3_tone(ar, 31, 8, 20, 420, 1, 8, 500);
+        f3_tone(ar, 36, 16, 28, 380, 1, 8, 500);
+        f3_tone(ar, 31, 24, 36, 320, 1, 8, 500);
+        f3_harm(ar, 19, 8, 36, 200, 2, 10, 300);
+        return;
+    }
+    if (n == 7) { f3_gen_song(ar); return; }
+    if (n == 8) { f3_gen_unheard(ar); return; }
+    // n == 6: music-box lullaby with rain
+    f3_anew(ar);
+    f3_tone(ar, 39, 0, 4, 480, 1, 3, 350);
+    f3_tone(ar, 41, 5, 9, 470, 1, 3, 350);
+    f3_tone(ar, 43, 10, 14, 480, 1, 3, 350);
+    f3_tone(ar, 46, 15, 23, 460, 1, 5, 350);
+    let r:i64 = 0;
+    while (r < 8) {
+        f3_sweep(ar, 44, 36, 2 + r * 4, 3 + r * 4, 200, 200);
+        r = r + 1;
+    }
+}
+
+fn f3_build(ar:[]u8, brief:i64) void {
+    if (brief == 1) { f3_gen_v1(ar); return; }
+    if (brief == 2) { f3_gen_v2(ar); return; }
+    if (brief == 3) { f3_gen_a1(ar); return; }
+    if (brief == 4) { f3_gen_a2(ar); return; }
+    if (brief == 5) { f3_gen_s1(ar); return; }
+    if (brief == 6) { f3_gen_s2(ar); return; }
+    if (brief == 17) { f3_gen_song(ar); return; }
+    if (brief == 18) { f3_gen_unheard(ar); return; }
+    if (brief == 21) { f3_gen_g1(ar); return; }
+    if (brief == 22) { f3_gen_g2(ar); return; }
+    if (brief == 23) { f3_gen_g3(ar); return; }
+    if (brief == 24) { f3_gen_g4(ar); return; }
+    if (brief == 25) { f3_gen_g5(ar); return; }
+    if (brief == 26) { f3_gen_g6(ar); return; }
+    f3_novel(ar, brief - 10);
+}
+
+// ---------------- probes ----------------
+fn f3_probe(ar:[]u8, brief:i64, q:i64) i64 {
+    if (q == 0) { return f3_n(ar); }
+    if (q == 1) {
+        let c:i64 = 0;
+        let i:i64 = 0;
+        while (i < f3_n(ar)) {
+            let op:i64 = f3_sop(ar, i);
+            if (brief == 1 || brief == 2) {
+                if (op == 4 || op == 5) { c = c + 1; }
+            } else if (brief == 3 || brief == 4) {
+                if (op == 11) { c = c + 1; }
+            } else if (brief == 5) {
+                if (op == 22) { c = c + 1; }
+            } else {
+                if (op == 23) { c = c + 1; }
+            }
+            i = i + 1;
+        }
+        return c;
+    }
+    // q == 2: field summary query
+    let t:i64 = f3_type(ar);
+    if (t == 1) { return f3_vmean(ar, 0) + f3_vmean(ar, 1) + f3_vmean(ar, 2); }
+    if (t == 2) { return f3_aenergy(ar); }
+    let ox:i64 = 0;
+    let oy:i64 = 0;
+    return f3_speak(ar, &ox, &oy);
+}
+
+// ---------------- dump ----------------
+fn f3_cksum(ar:[]u8, gw:i64) i64 {
+    let h:i64 = -3750763034362895579;
+    let w:i64 = 0;
+    while (w < gw) {
+        h = h ^ f3_get32(ar, 579 + w);
+        h = h * 1099511628211;
+        w = w + 1;
+    }
+    return h;
+}
+fn f3_dump(ar:[]u8, scene:i64) void {
+    let n:i64 = f3_n(ar);
+    let t:i64 = f3_type(ar);
+    let i:i64 = 0;
+    while (i < n) {
+        _zag_print("F3 ");
+        _zag_print(_zag_i64_to_str(scene));
+        _zag_print(" ");
+        _zag_print(_zag_i64_to_str(i));
+        let w:i64 = 0;
+        while (w < 9) {
+            _zag_print(" ");
+            _zag_print(_zag_i64_to_str(f3_get32(ar, 3 + i * 9 + w)));
+            w = w + 1;
+        }
+        _zag_println("");
+        i = i + 1;
+    }
+    let gw:i64 = 2304;
+    if (t == 2) { gw = 4608; }
+    if (t == 3) { gw = 576; }
+    _zag_print("F3H ");
+    _zag_print(_zag_i64_to_str(scene));
+    _zag_print(" type=");
+    _zag_print(_zag_i64_to_str(t));
+    _zag_print(" strokes=");
+    _zag_print(_zag_i64_to_str(n));
+    _zag_print(" cksum=");
+    _zag_println(_zag_i64_to_str(f3_cksum(ar, gw)));
+    // grid rows
+    if (t == 1) {
+        let y:i64 = 0;
+        while (y < 24) {
+            _zag_print("F3G ");
+            _zag_print(_zag_i64_to_str(scene));
+            _zag_print(" ");
+            _zag_print(_zag_i64_to_str(y));
+            let x:i64 = 0;
+            while (x < 24) {
+                let ch:i64 = 0;
+                while (ch < 4) {
+                    _zag_print(" ");
+                    _zag_print(_zag_i64_to_str(f3_vcell(ar, x, y, ch)));
+                    ch = ch + 1;
+                }
+                x = x + 1;
+            }
+            _zag_println("");
+            y = y + 1;
+        }
+    }
+    if (t == 2) {
+        let fr:i64 = 0;
+        while (fr < 48) {
+            _zag_print("F3G ");
+            _zag_print(_zag_i64_to_str(scene));
+            _zag_print(" ");
+            _zag_print(_zag_i64_to_str(fr));
+            let b:i64 = 0;
+            while (b < 48) {
+                _zag_print(" ");
+                _zag_print(_zag_i64_to_str(f3_acell(ar, fr, b)));
+                _zag_print(" ");
+                _zag_print(_zag_i64_to_str(f3_abri(ar, fr, b)));
+                b = b + 1;
+            }
+            _zag_println("");
+            fr = fr + 1;
+        }
+    }
+    if (t == 3) {
+        let y2:i64 = 0;
+        while (y2 < 24) {
+            _zag_print("F3G ");
+            _zag_print(_zag_i64_to_str(scene));
+            _zag_print(" ");
+            _zag_print(_zag_i64_to_str(y2));
+            let x2:i64 = 0;
+            while (x2 < 24) {
+                _zag_print(" ");
+                _zag_print(_zag_i64_to_str(f3_scell(ar, x2, y2)));
+                x2 = x2 + 1;
+            }
+            _zag_println("");
+            y2 = y2 + 1;
+        }
+    }
+}
+
+// ---------------- WAV emission (audio field -> PCM) ----------------
+fn f3_wavname(which:i64) []u8 {
+    if (which == 0) { return "f3a1.wav"; }
+    if (which == 1) { return "f3a2.wav"; }
+    if (which == 2) { return "f3n5.wav"; }
+    if (which == 3) { return "f3n6.wav"; }
+    if (which == 4) { return "f3song.wav"; }
+    if (which == 5) { return "f3unheard.wav"; }
+    if (which == 6) { return "f3vid1.wav"; }
+    if (which == 7) { return "f3vid2.wav"; }
+    if (which == 8) { return "f3mood_happy.wav"; }
+    if (which == 9) { return "f3mood_scary.wav"; }
+    if (which == 10) { return "f3mood_calm.wav"; }
+    if (which == 20) { return "f3proofA.wav"; }
+    if (which == 21) { return "f3proofB.wav"; }
+    if (which == 22) { return "f3proofAh.wav"; }
+    if (which == 23) { return "f3proofBh.wav"; }
+    return "f3song_hifi.wav";
+}
+fn f3_zcstr(s:[]u8) []u8 {
+    if (s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0 as u8;
+    return b;
+}
+fn f3_open_root_z(path:[]u8) i64 {
+    let s:[]u8 = f3_zcstr(path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 720896, 0, 0, 0, 0);
+    nio_free(s);
+    return fd;
+}
+fn f3_open_child_z(root:i64, name:[]u8, create:i32) i64 {
+    if (root < 0 || nio_name_valid(name) != 1) { return -7401; }
+    let s:[]u8 = f3_zcstr(name);
+    let fd:i64 = _zag_raw_syscall(257, root, _zag_slice_ptr(s) as i64, 657602, 384, 0, 0);
+    nio_free(s);
+    return fd;
+}
+fn f3_write_wav(dir:[]u8, which:i64, data:[]u8) i64 {
+    let root:i64 = f3_open_root_z(dir);
+    if (root < 0) { return -1; }
+    let fd:i64 = f3_open_child_z(root, f3_wavname(which), 1);
+    nio_close(root);
+    if (fd < 0) { return -2; }
+    let w:i64 = nio_write_all(fd, data);
+    nio_close(fd);
+    if (w != data.len) { return -3; }
+    return 0;
+}
+fn f3_wav_header_sr(data:[]u8, nsamp:i64, sr:i64) void {
+    let dl:i64 = nsamp * 2;
+    data[0] = 82 as u8; data[1] = 73 as u8; data[2] = 70 as u8; data[3] = 70 as u8;
+    f3_put32(data, 1, 36 + dl);
+    data[8] = 87 as u8; data[9] = 65 as u8; data[10] = 86 as u8; data[11] = 69 as u8;
+    data[12] = 102 as u8; data[13] = 109 as u8; data[14] = 116 as u8; data[15] = 32 as u8;
+    f3_put32(data, 4, 16);
+    j2_put16(data, 10, 1);
+    j2_put16(data, 11, 1);
+    f3_put32(data, 6, sr);
+    f3_put32(data, 7, sr * 2);
+    j2_put16(data, 16, 2);
+    j2_put16(data, 17, 16);
+    data[36] = 100 as u8; data[37] = 97 as u8; data[38] = 116 as u8; data[39] = 97 as u8;
+    f3_put32(data, 10, dl);
+}
+fn f3_wav_header(data:[]u8, nsamp:i64) void {
+    f3_wav_header_sr(data, nsamp, 8000);
+}
+fn f3_synth_total(ar:[]u8) i64 {
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    let total:i64 = frames * 500 + 2400;
+    if (total > 200000) { total = 200000; }
+    if (total < 8000) { total = 8000; }
+    return total;
+}
+// native additive synth core: imagined spectrum -> i32 sample mix (caller frees).
+// shared by the WAV and AVI emitters so both ship TNN-synthesized audio.
+fn f3_synth(ar:[]u8, lut:[]u8, total:i64) []u8 {
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    // per-bin phase increments (fp8 LUT units) + Nyquist max-harmonic
+    let fbb:[]u8 = nio_alloc(192);
+    if (fbb.len == 0) { return ""; }
+    let mhb:[]u8 = nio_alloc(192);
+    if (mhb.len == 0) { nio_free(fbb); return ""; }
+    let f16:i64 = 7208960;
+    let b:i64 = 0;
+    while (b < 48) {
+        f3_put32(fbb, b, f16 * 8192 / 1000 / 65536);
+        let hz:i64 = f16 / 65536;
+        let mh:i64 = 1;
+        if (hz > 0) { mh = 4000 / hz; }
+        if (mh < 1) { mh = 1; }
+        if (mh > 8) { mh = 8; }
+        f3_put32(mhb, b, mh);
+        f16 = f16 * 1117040 / 1048576;
+        b = b + 1;
+    }
+    // brightness table: 11 levels x 8 harmonics, w = 1000 / h^d, d = 4 - q*3/10
+    let btab:[]u8 = nio_alloc(352);
+    if (btab.len == 0) { nio_free(fbb); nio_free(mhb); return ""; }
+    let q:i64 = 0;
+    while (q < 11) {
+        let d:i64 = 4 - q * 3 / 10;
+        let h:i64 = 1;
+        while (h <= 8) {
+            let pw:i64 = 1;
+            let di:i64 = 0;
+            while (di < d) { pw = pw * h; di = di + 1; }
+            f3_put32(btab, q * 8 + h - 1, 1000 / pw);
+            h = h + 1;
+        }
+        q = q + 1;
+    }
+    // phases: 48 bins x 8 harmonics
+    let ph:[]u8 = nio_alloc(1536);
+    if (ph.len == 0) { nio_free(fbb); nio_free(mhb); nio_free(btab); return ""; }
+    let z:i64 = 0;
+    while (z < 384) { f3_put32(ph, z, 0); z = z + 1; }
+    let mix:[]u8 = nio_alloc((total * 4) as i32);
+    if (mix.len == 0) { nio_free(fbb); nio_free(mhb); nio_free(btab); nio_free(ph); return ""; }
+    let z2:i64 = 0;
+    while (z2 < total) { f3_put32(mix, z2, 0); z2 = z2 + 1; }
+    // accumulate: imagined spectrum per cell -> harmonic stack
+    let t:i64 = 0;
+    while (t < frames) {
+        let base:i64 = t * 500;
+        let bb:i64 = 0;
+        while (bb < 48) {
+            let e:i64 = f3_acell(ar, t, bb);
+            if (e > 0) {
+                let bq:i64 = f3_abri(ar, t, bb) / 100;
+                if (bq > 10) { bq = 10; }
+                let inc:i64 = f3_get32(fbb, bb);
+                let mh2:i64 = f3_get32(mhb, bb);
+                let h2:i64 = 1;
+                while (h2 <= mh2) {
+                    let w:i64 = f3_get32(btab, bq * 8 + h2 - 1);
+                    if (w > 0) {
+                        let pha:i64 = f3_get32(ph, bb * 8 + h2 - 1);
+                        let step:i64 = h2 * inc;
+                        let ew:i64 = e * 28 * w / 1000;
+                        let s:i64 = 0;
+                        while (s < 500) {
+                            let idx:i64 = (pha / 256) & 255;
+                            let cur:i64 = f3_get32(mix, base + s);
+                            f3_put32(mix, base + s, cur + j2_get16(lut, idx) * ew / 32767);
+                            pha = pha + step;
+                            s = s + 1;
+                        }
+                        f3_put32(ph, bb * 8 + h2 - 1, pha);
+                    }
+                    h2 = h2 + 1;
+                }
+            }
+            bb = bb + 1;
+        }
+        t = t + 1;
+    }
+    nio_free(fbb);
+    nio_free(mhb);
+    nio_free(btab);
+    nio_free(ph);
+    return mix;
+}
+fn f3_emit_wav(ar:[]u8, dir:[]u8, which:i64, lut:[]u8) i64 {
+    let total:i64 = f3_synth_total(ar);
+    let mix:[]u8 = f3_synth(ar, lut, total);
+    if (mix.len == 0) { return -10; }
+    // GAMMA REPAIR 2026-09-24: output-derived peak normalizer deleted.
+    // Plan-pure gain = 1: the mix already carries the plan's staged levels
+    // (per-voice ew = e*28*w/1000). Only the fixed +/-32767 rails remain;
+    // they are constant bounds, not output-derived scaling.
+    let pcm:[]u8 = nio_alloc((44 + total * 2) as i32);
+    if (pcm.len == 0) { nio_free(mix); return -11; }
+    let s2:i64 = 0;
+    while (s2 < total) {
+        let v:i64 = f3_get32(mix, s2);
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        j2_put16(pcm, 22 + s2, v);
+        s2 = s2 + 1;
+    }
+    nio_free(mix);
+    f3_wav_header(pcm, total);
+    let rc:i64 = f3_write_wav(dir, which, pcm);
+    nio_free(pcm);
+    return rc;
+}
+// ---------------- HI-FI synth (Phase 1: 44100 Hz, per-sample envelopes, headroom) ----------------
+// Same imagined field -> PCM contract as f3_synth, but: 44100 Hz / 2756 samples per
+// frame (62.494 ms; field grid unchanged), energy LINEARLY INTERPOLATED per sample
+// between adjacent frames (kills the 16 Hz frame-step zipper that read as harshness),
+// sub-unit fixed-point phase (idx=(pha>>16)&255, <0.5 cent detune), Nyquist cap at
+// 22050 Hz, emitted at plan-pure gain 1 (GAMMA REPAIR 2026-09-24: the old
+// output-derived peak normalizer is deleted); levels are staged by the synth
+// itself so clipping is impossible by construction.
+// Legacy 8 kHz f3_synth is untouched (AVI path depends on it).
+fn f3_hifi_spf() i64 { return 2756; }
+fn f3_hifi_tail() i64 { return 5512; }
+fn f3_synth_total_hifi(ar:[]u8) i64 {
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    let total:i64 = frames * f3_hifi_spf() + f3_hifi_tail();
+    if (total > 500000) { total = 500000; }
+    if (total < 44100) { total = 44100; }
+    return total;
+}
+fn f3_synth_hifi(ar:[]u8, lut:[]u8, total:i64) []u8 {
+    let SR:i64 = 44100;
+    let SPF:i64 = f3_hifi_spf();
+    let TAIL:i64 = f3_hifi_tail();
+    let frames:i64 = f3_frames(ar);
+    if (frames < 1) { frames = 1; }
+    if (frames > 48) { frames = 48; }
+    // per-bin fp16 freq + Nyquist max-harmonic at 22050
+    let fbb:[]u8 = nio_alloc(192);
+    if (fbb.len == 0) { return ""; }
+    let mhb:[]u8 = nio_alloc(192);
+    if (mhb.len == 0) { nio_free(fbb); return ""; }
+    let f16:i64 = 7208960;
+    let b:i64 = 0;
+    while (b < 48) {
+        f3_put32(fbb, b, f16);
+        let hz:i64 = f16 / 65536;
+        let mh:i64 = 1;
+        if (hz > 0) { mh = 22050 / hz; }
+        if (mh < 1) { mh = 1; }
+        if (mh > 8) { mh = 8; }
+        f3_put32(mhb, b, mh);
+        // tuning: exact 2^(1/12) per bin (contract: bin b -> 110*2^(b/12) Hz).
+        // (Legacy 8 kHz f3_synth uses 1117040 = 9.5 cents/semitone sharp,
+        // compounding — a tuning bug, left untouched there for AVI determinism.)
+        f16 = f16 * 1110928 / 1048576;
+        b = b + 1;
+    }
+    // brightness table: 11 levels x 8 harmonics, w = 1000 / h^d, d = 4 - q*3/10
+    let btab:[]u8 = nio_alloc(352);
+    if (btab.len == 0) { nio_free(fbb); nio_free(mhb); return ""; }
+    let q:i64 = 0;
+    while (q < 11) {
+        let d:i64 = 4 - q * 3 / 10;
+        let h:i64 = 1;
+        while (h <= 8) {
+            let pw:i64 = 1;
+            let di:i64 = 0;
+            while (di < d) { pw = pw * h; di = di + 1; }
+            f3_put32(btab, q * 8 + h - 1, 1000 / pw);
+            h = h + 1;
+        }
+        q = q + 1;
+    }
+    let mix:[]u8 = nio_alloc((total * 4) as i32);
+    if (mix.len == 0) { nio_free(fbb); nio_free(mhb); nio_free(btab); return ""; }
+    let z2:i64 = 0;
+    while (z2 < total) { f3_put32(mix, z2, 0); z2 = z2 + 1; }
+    // voice loop: bin x harmonic. Phase is per-voice local (deterministic);
+    // energy is interpolated per sample between frame energies (no zipper).
+    let bb:i64 = 0;
+    while (bb < 48) {
+        let h2:i64 = 1;
+        while (h2 <= f3_get32(mhb, bb)) {
+            let inc:i64 = f3_get32(fbb, bb) * h2 * 256 / SR;
+            let pha:i64 = 0;
+            let t:i64 = 0;
+            while (t < frames) {
+                let e0:i64 = f3_acell(ar, t, bb);
+                let e1:i64 = 0;
+                if (t + 1 < frames) { e1 = f3_acell(ar, t + 1, bb); }
+                let bq:i64 = f3_abri(ar, t, bb) / 100;
+                if (bq > 10) { bq = 10; }
+                if (bq < 0) { bq = 0; }
+                let w:i64 = f3_get32(btab, bq * 8 + h2 - 1);
+                let nsp:i64 = SPF;
+                if (t == frames - 1) { nsp = SPF + TAIL; }
+                let base:i64 = t * SPF;
+                if ((e0 > 0 || e1 > 0) && w > 0) {
+                    let s:i64 = 0;
+                    while (s < nsp) {
+                        let es:i64 = (e0 * (nsp - s) + e1 * s) / nsp;
+                        let ew:i64 = es * 28 * w / 1000;
+                        let idx:i64 = (pha >> 16) & 255;
+                        let cur:i64 = f3_get32(mix, base + s);
+                        f3_put32(mix, base + s, cur + j2_get16(lut, idx) * ew / 32767);
+                        pha = pha + inc;
+                        s = s + 1;
+                    }
+                } else {
+                    pha = pha + inc * nsp;
+                }
+                t = t + 1;
+            }
+            h2 = h2 + 1;
+        }
+        bb = bb + 1;
+    }
+    nio_free(fbb);
+    nio_free(mhb);
+    nio_free(btab);
+    return mix;
+}
+fn f3_emit_wav_hifi(ar:[]u8, dir:[]u8, which:i64, lut:[]u8) i64 {
+    let total:i64 = f3_synth_total_hifi(ar);
+    let mix:[]u8 = f3_synth_hifi(ar, lut, total);
+    if (mix.len == 0) { return -10; }
+    // CREW GAMMA control (revert): OLD output-derived peak normalizer
+    // restored in f3_emit_wav_hifi: peak scan + v = v*24000/peak (always).
+    let pk2:i64 = 0;
+    let q2:i64 = 0;
+    while (q2 < total) {
+        let vv:i64 = f3_get32s(mix, q2);
+        if (vv < 0) { vv = -vv; }
+        if (vv > pk2) { pk2 = vv; }
+        q2 = q2 + 1;
+    }
+    if (pk2 < 1) { pk2 = 1; }
+    let pcm:[]u8 = nio_alloc((44 + total * 2) as i32);
+    if (pcm.len == 0) { nio_free(mix); return -11; }
+    let s2:i64 = 0;
+    while (s2 < total) {
+        let v:i64 = f3_get32s(mix, s2);
+        v = v * 24000 / pk2;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        j2_put16(pcm, 22 + s2, v);
+        s2 = s2 + 1;
+    }
+    nio_free(mix);
+    f3_wav_header_sr(pcm, total, 44100);
+    let rc:i64 = f3_write_wav(dir, which, pcm);
+    nio_free(pcm);
+    return rc;
+}
+
+// ---------------- native image + video emission (pure TNN: no external renderers) ----------------
+// Every gallery image, video frame, and soundtrack below is laid down byte by byte
+// by this Zag code. Python exists only as a test/verification harness.
+fn f3_put32b(buf:[]u8, off:i64, v:i64) void {
+    buf[off] = (v & 255) as u8;
+    buf[off + 1] = ((v >> 8) & 255) as u8;
+    buf[off + 2] = ((v >> 16) & 255) as u8;
+    buf[off + 3] = ((v >> 24) & 255) as u8;
+}
+fn f3_put16b(buf:[]u8, off:i64, v:i64) void {
+    buf[off] = (v & 255) as u8;
+    buf[off + 1] = ((v >> 8) & 255) as u8;
+}
+fn f3_write_all(fd:i64, data:[]u8) i64 {
+    // nio_write_all caps at 1MB; AVI files are ~4.2MB, so loop the raw syscall.
+    let at:i64 = 0;
+    let calls:i64 = 0;
+    while (at < data.len && calls < 65536) {
+        let n:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(data) as i64) + at, (data.len as i64) - at, 0, 0, 0);
+        calls = calls + 1;
+        if (n == -4) { continue; }
+        if (n <= 0) { return -7407; }
+        at = at + n;
+    }
+    if (at != data.len) { return -7407; }
+    return at;
+}
+fn f3_write_named(dir:[]u8, name:[]u8, data:[]u8) i64 {
+    let root:i64 = f3_open_root_z(dir);
+    if (root < 0) { return -1; }
+    let fd:i64 = f3_open_child_z(root, name, 1);
+    nio_close(root);
+    if (fd < 0) { return -2; }
+    let w:i64 = f3_write_all(fd, data);
+    nio_close(fd);
+    if (w != data.len) { return -3; }
+    return 0;
+}
+// integer bilinear: 24x24 visual field -> W*H*3 RGB, top-down
+fn f3_raster_visual(ar:[]u8, px:[]u8, W:i64, H:i64) void {
+    let oy:i64 = 0;
+    while (oy < H) {
+        let gy:i64 = oy * 23 * 256 / (H - 1);
+        let y0:i64 = gy >> 8;
+        let ty:i64 = gy & 255;
+        let y1:i64 = y0 + 1;
+        if (y1 > 23) { y1 = 23; }
+        let ox:i64 = 0;
+        while (ox < W) {
+            let gx:i64 = ox * 23 * 256 / (W - 1);
+            let x0:i64 = gx >> 8;
+            let tx:i64 = gx & 255;
+            let x1:i64 = x0 + 1;
+            if (x1 > 23) { x1 = 23; }
+            let ch:i64 = 0;
+            while (ch < 3) {
+                let c00:i64 = f3_vcell(ar, x0, y0, ch);
+                let c10:i64 = f3_vcell(ar, x1, y0, ch);
+                let c01:i64 = f3_vcell(ar, x0, y1, ch);
+                let c11:i64 = f3_vcell(ar, x1, y1, ch);
+                let v:i64 = (c00 * (256 - tx) * (256 - ty) + c10 * tx * (256 - ty) + c01 * (256 - tx) * ty + c11 * tx * ty) >> 16;
+                px[(oy * W + ox) * 3 + ch] = f3_clamp255(v) as u8;
+                ch = ch + 1;
+            }
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+}
+// heat ramp for imagined-audio spectrograms: energy 0..1000 -> RGB
+fn f3_heat(e:i64, ch:i64) i64 {
+    if (e < 0) { e = 0; }
+    if (e > 1000) { e = 1000; }
+    if (ch == 0) {
+        if (e <= 333) { return e * 60 / 333; }
+        if (e <= 666) { return 60 + (e - 333) * 140 / 333; }
+        return 200 + (e - 666) * 55 / 334;
+    }
+    if (ch == 1) {
+        if (e <= 333) { return e * 120 / 333; }
+        if (e <= 666) { return 120 + (e - 333) * 100 / 333; }
+        return 220 + (e - 666) * 35 / 334;
+    }
+    if (e <= 333) { return 80 + e * 175 / 333; }
+    if (e <= 666) { return 255 - (e - 333) * 120 / 333; }
+    return 135 + (e - 666) * 120 / 334;
+}
+// 48x48 audio energy grid -> W*H*3 heat image, top-down
+fn f3_raster_spec(ar:[]u8, px:[]u8, W:i64, H:i64) void {
+    let oy:i64 = 0;
+    while (oy < H) {
+        let t:i64 = oy * 48 / H;
+        if (t > 47) { t = 47; }
+        let ox:i64 = 0;
+        while (ox < W) {
+            let b:i64 = ox * 48 / W;
+            if (b > 47) { b = 47; }
+            let e:i64 = f3_acell(ar, t, b);
+            let ch:i64 = 0;
+            while (ch < 3) {
+                px[(oy * W + ox) * 3 + ch] = f3_clamp255(f3_heat(e, ch)) as u8;
+                ch = ch + 1;
+            }
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+}
+// 24x24 structural heightfield -> W*H*3 hillshaded relief, top-down
+fn f3_raster_relief(ar:[]u8, px:[]u8, W:i64, H:i64) void {
+    let oy:i64 = 0;
+    while (oy < H) {
+        let gy:i64 = oy * 23 * 256 / (H - 1);
+        let y0:i64 = gy >> 8;
+        let ty:i64 = gy & 255;
+        let y1:i64 = y0 + 1;
+        if (y1 > 23) { y1 = 23; }
+        let yu:i64 = y0 - 1;
+        if (yu < 0) { yu = 0; }
+        let yd:i64 = y0 + 1;
+        if (yd > 23) { yd = 23; }
+        let ox:i64 = 0;
+        while (ox < W) {
+            let gx:i64 = ox * 23 * 256 / (W - 1);
+            let x0:i64 = gx >> 8;
+            let tx:i64 = gx & 255;
+            let x1:i64 = x0 + 1;
+            if (x1 > 23) { x1 = 23; }
+            let h00:i64 = f3_scell(ar, x0, y0);
+            let h10:i64 = f3_scell(ar, x1, y0);
+            let h01:i64 = f3_scell(ar, x0, y1);
+            let h11:i64 = f3_scell(ar, x1, y1);
+            let h:i64 = (h00 * (256 - tx) * (256 - ty) + h10 * tx * (256 - ty) + h01 * (256 - tx) * ty + h11 * tx * ty) >> 16;
+            let xl:i64 = x0 - 1;
+            if (xl < 0) { xl = 0; }
+            let xr:i64 = x0 + 1;
+            if (xr > 23) { xr = 23; }
+            let dx:i64 = f3_scell(ar, xl, y0) - f3_scell(ar, xr, y0);
+            let dy:i64 = f3_scell(ar, x0, yu) - f3_scell(ar, x0, yd);
+            let g:i64 = f3_clamp255(60 + h * 150 / 1000 + (dx + dy) / 6);
+            px[(oy * W + ox) * 3] = g as u8;
+            px[(oy * W + ox) * 3 + 1] = g as u8;
+            px[(oy * W + ox) * 3 + 2] = g as u8;
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+}
+fn f3_bmpname(which:i64) []u8 {
+    if (which == 0) { return "f3b1.bmp"; }
+    if (which == 1) { return "f3b2.bmp"; }
+    if (which == 2) { return "f3b3.bmp"; }
+    if (which == 3) { return "f3b4.bmp"; }
+    if (which == 4) { return "f3b5.bmp"; }
+    if (which == 5) { return "f3b6.bmp"; }
+    if (which == 6) { return "f3n11.bmp"; }
+    if (which == 7) { return "f3n12.bmp"; }
+    if (which == 8) { return "f3n13.bmp"; }
+    if (which == 9) { return "f3n14.bmp"; }
+    if (which == 10) { return "f3n15.bmp"; }
+    if (which == 11) { return "f3n16.bmp"; }
+    if (which == 12) { return "f3n17.bmp"; }
+    return "f3n18.bmp";
+}
+// briefs 1..6 -> BMP 0..5; novels 11..18 -> BMP 6..13
+fn f3_bmp_scene(which:i64) i64 {
+    if (which < 6) { return which + 1; }
+    return which + 5;
+}
+fn f3_emit_bmp(ar:[]u8, dir:[]u8, which:i64) i64 {
+    let W:i64 = 240;
+    let H:i64 = 240;
+    let px:[]u8 = nio_alloc((W * H * 3) as i32);
+    if (px.len == 0) { return -10; }
+    let ty:i64 = f3_type(ar);
+    if (ty == 1) { f3_raster_visual(ar, px, W, H); }
+    else if (ty == 2) { f3_raster_spec(ar, px, W, H); }
+    else { f3_raster_relief(ar, px, W, H); }
+    let rowbytes:i64 = W * 3;
+    let imgsz:i64 = rowbytes * H;
+    let bmp:[]u8 = nio_alloc((54 + imgsz) as i32);
+    if (bmp.len == 0) { nio_free(px); return -11; }
+    bmp[0] = 66 as u8; bmp[1] = 77 as u8;
+    f3_put32b(bmp, 2, 54 + imgsz);
+    f3_put32b(bmp, 6, 0);
+    f3_put32b(bmp, 10, 54);
+    f3_put32b(bmp, 14, 40);
+    f3_put32b(bmp, 18, W);
+    f3_put32b(bmp, 22, H);
+    f3_put16b(bmp, 26, 1);
+    f3_put16b(bmp, 28, 24);
+    f3_put32b(bmp, 30, 0);
+    f3_put32b(bmp, 34, imgsz);
+    f3_put32b(bmp, 38, 0);
+    f3_put32b(bmp, 42, 0);
+    f3_put32b(bmp, 46, 0);
+    f3_put32b(bmp, 50, 0);
+    // bottom-up BGR rows
+    let r:i64 = 0;
+    while (r < H) {
+        let srow:i64 = r * rowbytes;
+        let drow:i64 = 54 + (H - 1 - r) * rowbytes;
+        let c:i64 = 0;
+        while (c < W) {
+            bmp[drow + c * 3] = px[srow + c * 3 + 2];
+            bmp[drow + c * 3 + 1] = px[srow + c * 3 + 1];
+            bmp[drow + c * 3 + 2] = px[srow + c * 3];
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    nio_free(px);
+    let rc:i64 = f3_write_named(dir, f3_bmpname(which), bmp);
+    nio_free(bmp);
+    return rc;
+}
+// interpolate the 4 imagined keyframes into a 24-frame @8fps field sequence
+fn f3_vidfield(v:i64, fr:i64, far:[]u8) void {
+    let a:i64 = fr / 8;
+    if (a > 2) { a = 2; }
+    let b:i64 = a + 1;
+    let t8:i64 = fr - a * 8;
+    let A:[]u8 = nio_alloc(24576);
+    let B:[]u8 = nio_alloc(24576);
+    f3_video_key(v, a, A);
+    f3_video_key(v, b, B);
+    f3_vnew(far);
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            let ch:i64 = 0;
+            while (ch < 3) {
+                let va:i64 = f3_vcell(A, x, y, ch);
+                let vb:i64 = f3_vcell(B, x, y, ch);
+                f3_vcellput(far, x, y, ch, va + (vb - va) * t8 / 8);
+                ch = ch + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    nio_free(A);
+    nio_free(B);
+}
+fn f3_aviname(v:i64) []u8 {
+    if (v == 1) { return "f3vid1.avi"; }
+    return "f3vid2.avi";
+}
+// G-SERIES video field: 4 imagined keyframes spread over NF frames with
+// ORGANIC per-cell transition timing (red-team fix for the linear-crossfade
+// tell). Each cell leads/lags by +-2 eighths deterministically; endpoints
+// still land exactly on key 0 / key 3. Legacy f3_vidfield untouched.
+fn f3_vidfield_g(v:i64, fr:i64, NF:i64, far:[]u8) void {
+    let pos8:i64 = fr * 24 / (NF - 1);
+    let kk:i64 = pos8 / 8;
+    let e:i64 = pos8 % 8;
+    if (kk > 2) { kk = 2; e = 8; }
+    let A:[]u8 = nio_alloc(24576);
+    let B:[]u8 = nio_alloc(24576);
+    f3_video_key(v, kk, A);
+    f3_video_key(v, kk + 1, B);
+    f3_vnew(far);
+    let y:i64 = 0;
+    while (y < 24) {
+        let x:i64 = 0;
+        while (x < 24) {
+            let off:i64 = f3_hash2(x, y, 4242) % 5 - 2;
+            let e2:i64 = e + off;
+            if (e2 < 0) { e2 = 0; }
+            if (e2 > 8) { e2 = 8; }
+            let ch:i64 = 0;
+            while (ch < 3) {
+                let va:i64 = f3_vcell(A, x, y, ch);
+                let vb:i64 = f3_vcell(B, x, y, ch);
+                f3_vcellput(far, x, y, ch, va + (vb - va) * e2 / 8);
+                ch = ch + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    nio_free(A);
+    nio_free(B);
+}
+// native AVI writer: uncompressed 24-bit RGB + 16-bit PCM in one RIFF container.
+// All header bytes, frame pixels, and audio samples are laid down by this function.
+fn f3_emit_avi(v:i64, dir:[]u8, lut:[]u8) i64 {
+    let W:i64 = 240;
+    let H:i64 = 240;
+    let NF:i64 = 24;
+    let FPS:i64 = 8;
+    let SR:i64 = 8000;
+    let rowbytes:i64 = W * 3;
+    let framesz:i64 = rowbytes * H;
+    // imagined soundtrack, same native synth as the WAV path
+    let aar:[]u8 = nio_alloc(24576);
+    f3_video_audio(v, aar);
+    let total:i64 = f3_synth_total(aar);
+    let mix:[]u8 = f3_synth(aar, lut, total);
+    nio_free(aar);
+    if (mix.len == 0) { return -10; }
+    // GAMMA REPAIR 2026-09-24: output-derived peak normalizer deleted.
+    // Plan-pure gain = 1: the mix already carries the plan's staged levels.
+    // Only the fixed +/-32767 rails remain (constant bounds, not scaling).
+    let pcm:[]u8 = nio_alloc((total * 2) as i32);
+    if (pcm.len == 0) { nio_free(mix); return -11; }
+    let s2:i64 = 0;
+    while (s2 < total) {
+        let vv:i64 = f3_get32(mix, s2);
+        if (vv > 32767) { vv = 32767; }
+        if (vv < -32768) { vv = -32768; }
+        j2_put16(pcm, s2, vv);
+        s2 = s2 + 1;
+    }
+    nio_free(mix);
+    // interleave plan: audio samples per video frame
+    let apf:i64 = total / NF;
+    let last_asz:i64 = (total - (NF - 1) * apf) * 2;
+    let movi_sz:i64 = (NF - 1) * (16 + framesz + apf * 2) + (16 + framesz + last_asz);
+    let filesz:i64 = 24 + 300 + movi_sz + 8 + 16 * NF * 2;
+    let avi:[]u8 = nio_alloc(filesz as i32);
+    if (avi.len == 0) { nio_free(pcm); return -12; }
+    let o:i64 = 0;
+    avi[o] = 82 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 70 as u8; avi[o + 3] = 70 as u8; o = o + 4;
+    f3_put32b(avi, o, filesz - 8); o = o + 4;
+    avi[o] = 65 as u8; avi[o + 1] = 86 as u8; avi[o + 2] = 73 as u8; avi[o + 3] = 32 as u8; o = o + 4;
+    // LIST hdrl (size field 292)
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 292); o = o + 4;
+    avi[o] = 104 as u8; avi[o + 1] = 100 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    // avih
+    avi[o] = 97 as u8; avi[o + 1] = 118 as u8; avi[o + 2] = 105 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    f3_put32b(avi, o, 1000000 / FPS); o = o + 4;
+    f3_put32b(avi, o, (framesz + apf * 2) * FPS); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 16); o = o + 4;
+    f3_put32b(avi, o, NF); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 2); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, W); o = o + 4;
+    f3_put32b(avi, o, H); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    // LIST strl: video
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 116); o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    avi[o] = 118 as u8; avi[o + 1] = 105 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 115 as u8; o = o + 4;
+    avi[o] = 68 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 66 as u8; avi[o + 3] = 32 as u8; o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 1); o = o + 4;
+    f3_put32b(avi, o, FPS); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, NF); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, 4294967295); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, W); o = o + 2;
+    f3_put16b(avi, o, H); o = o + 2;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 102 as u8; o = o + 4;
+    f3_put32b(avi, o, 40); o = o + 4;
+    f3_put32b(avi, o, 40); o = o + 4;
+    f3_put32b(avi, o, W); o = o + 4;
+    f3_put32b(avi, o, H); o = o + 4;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put16b(avi, o, 24); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    // LIST strl: audio
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 92); o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    avi[o] = 97 as u8; avi[o + 1] = 117 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 115 as u8; o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 1); o = o + 4;
+    f3_put32b(avi, o, SR); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, total); o = o + 4;
+    f3_put32b(avi, o, apf * 2); o = o + 4;
+    f3_put32b(avi, o, 4294967295); o = o + 4;
+    f3_put32b(avi, o, 2); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 102 as u8; o = o + 4;
+    f3_put32b(avi, o, 16); o = o + 4;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put32b(avi, o, SR); o = o + 4;
+    f3_put32b(avi, o, SR * 2); o = o + 4;
+    f3_put16b(avi, o, 2); o = o + 2;
+    f3_put16b(avi, o, 16); o = o + 2;
+    // LIST movi
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, movi_sz + 4); o = o + 4;
+    avi[o] = 109 as u8; avi[o + 1] = 111 as u8; avi[o + 2] = 118 as u8; avi[o + 3] = 105 as u8; o = o + 4;
+    let movi0:i64 = o;
+    // chunk index tables: id, flags, offset, size (48 entries each)
+    let ci:[]u8 = nio_alloc(192);
+    let cf:[]u8 = nio_alloc(192);
+    let co:[]u8 = nio_alloc(192);
+    let cs:[]u8 = nio_alloc(192);
+    let far:[]u8 = nio_alloc(24576);
+    let px:[]u8 = nio_alloc((framesz) as i32);
+    let fr:i64 = 0;
+    while (fr < NF) {
+        // video frame: interpolated field -> raster -> bottom-up BGR chunk
+        f3_vidfield(v, fr, far);
+        f3_raster_visual(far, px, W, H);
+        f3_put32(ci, fr * 2, 1667510320);
+        f3_put32(cf, fr * 2, 16);
+        f3_put32(co, fr * 2, o - movi0);
+        f3_put32(cs, fr * 2, framesz);
+        avi[o] = 48 as u8; avi[o + 1] = 48 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 99 as u8; o = o + 4;
+        f3_put32b(avi, o, framesz); o = o + 4;
+        let r:i64 = 0;
+        while (r < H) {
+            let srow:i64 = (H - 1 - r) * rowbytes;
+            let c:i64 = 0;
+            while (c < W) {
+                avi[o] = px[srow + c * 3 + 2]; o = o + 1;
+                avi[o] = px[srow + c * 3 + 1]; o = o + 1;
+                avi[o] = px[srow + c * 3]; o = o + 1;
+                c = c + 1;
+            }
+            r = r + 1;
+        }
+        // audio chunk for this frame
+        let asz:i64 = apf * 2;
+        if (fr == NF - 1) { asz = last_asz; }
+        f3_put32(ci, fr * 2 + 1, 1651978544);
+        f3_put32(cf, fr * 2 + 1, 0);
+        f3_put32(co, fr * 2 + 1, o - movi0);
+        f3_put32(cs, fr * 2 + 1, asz);
+        avi[o] = 48 as u8; avi[o + 1] = 49 as u8; avi[o + 2] = 119 as u8; avi[o + 3] = 98 as u8; o = o + 4;
+        f3_put32b(avi, o, asz); o = o + 4;
+        let ab:i64 = 0;
+        let aoff:i64 = fr * apf * 2;
+        while (ab < asz) {
+            avi[o] = pcm[aoff + ab]; o = o + 1;
+            ab = ab + 1;
+        }
+        fr = fr + 1;
+    }
+    nio_free(far);
+    nio_free(px);
+    nio_free(pcm);
+    // idx1
+    avi[o] = 105 as u8; avi[o + 1] = 100 as u8; avi[o + 2] = 120 as u8; avi[o + 3] = 49 as u8; o = o + 4;
+    f3_put32b(avi, o, 16 * NF * 2); o = o + 4;
+    let e:i64 = 0;
+    while (e < NF * 2) {
+        f3_put32b(avi, o, f3_get32(ci, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(cf, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(co, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(cs, e)); o = o + 4;
+        e = e + 1;
+    }
+    nio_free(ci);
+    nio_free(cf);
+    nio_free(co);
+    nio_free(cs);
+    let rc:i64 = f3_write_named(dir, f3_aviname(v), avi);
+    nio_free(avi);
+    return rc;
+}
+
+fn f3_gaviname(v:i64) []u8 {
+    if (v == 1) { return "f3gvid1.avi"; }
+    return "f3gvid2.avi";
+}
+// ---------------- G-SERIES video subjects (Goal-A V-T4/V-T5/V-T6) ----------------
+// Persistent foreground subjects with eased velocity profiles, articulation,
+// and scene integration (occlusion + position-triggered lighting). All subject
+// state is closed-form integer arithmetic on fr (no RNG, byte-identical reruns).
+// v1 glacier sunrise: a bird crosses left->right, swoops behind a foreground
+// ice ridge, lands on the far ridge as dawn breaks. v2 night harbor: a lit
+// boat crosses left->right, hesitates past a foreground piling, wake and lamp
+// glow coupled to its speed. Legacy f3_emit_avi untouched.
+
+// asymmetric ease: faster accel than decel (never a symmetric bezier)
+fn f3_ease_v1(u:i64) i64 {
+    if (u <= 300) { return 250 * u * u / 90000; }
+    if (u <= 700) { return 250 + 550 * (u - 300) / 400; }
+    let t:i64 = 1000 - u;
+    return 1000 - 200 * t * t / 90000;
+}
+// slow accel, long cruise, gentle decel
+fn f3_ease_v2(u:i64) i64 {
+    if (u <= 400) { return 300 * u * u / 160000; }
+    if (u <= 800) { return 300 + 550 * (u - 400) / 400; }
+    let t:i64 = 1000 - u;
+    return 1000 - 150 * t * t / 40000;
+}
+// journey 0..1000: hold(fr 0-5) -> move(6..NF-5) -> settle(NF-4..35)
+fn f3_subj_s(v:i64, fr:i64, NF:i64) i64 {
+    if (fr <= 5) { return 0; }
+    if (fr >= NF - 4) { return 1000; }
+    let u:i64 = (fr - 6) * 1000 / (NF - 11);
+    if (v == 1) { return f3_ease_v1(u); }
+    return f3_ease_v2(u);
+}
+// ---- v1 bird ----
+fn f3_bird_sx(fr:i64, NF:i64) i64 {
+    return 140 + f3_subj_s(1, fr, NF) * 720 / 1000;
+}
+fn f3_bird_sy(fr:i64, NF:i64, sx:i64) i64 {
+    let sy:i64 = 310;
+    let s:i64 = f3_subj_s(1, fr, NF);
+    let fold:i64 = 0;
+    if (s > 900) { fold = (s - 900) * 1000 / 100; }
+    if (fold <= 500) {
+        if (fr % 4 < 2) { sy = sy - 22; } else { sy = sy + 18; }
+    }
+    // position-triggered swoop as the bird nears the ice ridge
+    if (sx > 430 && sx < 670) {
+        let d:i64 = 550 - sx;
+        if (d < 0) { d = 0 - d; }
+        sy = sy + 70 * (120 - d) / 120;
+    }
+    // position-triggered landing descent onto the far ridge
+    if (s > 900) { sy = sy + (s - 900) * 55 / 100; }
+    return sy;
+}
+fn f3_draw_bird(ar:[]u8, sx:i64, sy:i64, fr:i64, s:i64) void {
+    // wingtip targets: upstroke vs downstroke (articulation, not a rigid template)
+    let tx:i64 = 345; let ty:i64 = 145;
+    if (fr % 4 < 2) { tx = 355; ty = -190; }
+    // wings fold as the bird lands (position-triggered, continuous blend)
+    let fold:i64 = 0;
+    if (s > 900) { fold = (s - 900) * 1000 / 100; }
+    tx = tx + (135 - tx) * fold / 1000;
+    ty = ty + (80 - ty) * fold / 1000;
+    // pre-dawn the bird catches dim light (grey); against bright dawn it is a
+    // true silhouette. Position-triggered tone, continuous in s.
+    let tone:i64 = 30;
+    if (s < 400) { tone = 90 - s * 60 / 400; }
+    let tr:i64 = tone; let tg:i64 = tone + 4; let tb:i64 = tone + 28;
+    f3_band(ar, sx - 32, sy - 18, sx - tx, sy + ty, 80, tr, tg, tb);
+    f3_band(ar, sx + 32, sy - 18, sx + tx, sy + ty, 80, tr, tg, tb);
+    f3_blotch(ar, sx, sy, 100, tr, tg, tb, 750);
+    f3_blotch(ar, sx + 82, sy - 34, 43, tr, tg, tb, 800);
+    f3_band(ar, sx + 110, sy - 36, sx + 142, sy - 28, 20, 205, 165, 95);
+    f3_band(ar, sx - 70, sy + 16, sx - 200, sy + 55, 54, tr, tg, tb);
+}
+fn f3_bird_scene(ar:[]u8, fr:i64, NF:i64) void {
+    let s:i64 = f3_subj_s(1, fr, NF);
+    let sx:i64 = f3_bird_sx(fr, NF);
+    let sy:i64 = f3_bird_sy(fr, NF, sx);
+    // lighting response, position-triggered: dawn strengthens as the bird crosses
+    f3_blotch(ar, 500, 640, 300, 255, 205, 140, 120 + s * 450 / 1000);
+    f3_blotch(ar, 500, 150, 720, 255, 190, 130, 40 + s * 100 / 1000);
+    // landing ridge (background element, drawn before the bird)
+    f3_rect(ar, 770, 500, 950, 1000, 70, 85, 120, 30);
+    f3_rect(ar, 800, 460, 920, 505, 80, 96, 132, 25);
+    f3_rect(ar, 830, 445, 890, 468, 215, 222, 238, 18);
+    f3_draw_bird(ar, sx, sy, fr, s);
+    // foreground ice ridge (occluder, drawn after the bird): dark dawn mass
+    // with a warm rim on the sun side; the bird passes behind it
+    f3_rect(ar, 490, 380, 610, 1000, 64, 78, 112, 30);
+    f3_rect(ar, 455, 470, 500, 1000, 58, 72, 105, 28);
+    f3_rect(ar, 520, 320, 580, 390, 72, 88, 125, 22);
+    f3_rect(ar, 528, 305, 572, 330, 200, 210, 230, 15);
+    f3_band(ar, 492, 400, 492, 900, 26, 235, 170, 120);
+}
+// ---- v2 boat ----
+fn f3_boat_bx(fr:i64, NF:i64) i64 {
+    let s:i64 = f3_subj_s(2, fr, NF);
+    let bx:i64 = 120 + s * 760 / 1000;
+    // position-triggered hesitation as the boat nears the piling
+    let hx:i64 = bx - 535;
+    if (hx < 0) { hx = 0 - hx; }
+    if (hx < 130) { bx = bx - 70 * (130 - hx) / 130; }
+    return bx;
+}
+fn f3_boat_scene(ar:[]u8, fr:i64, NF:i64) void {
+    // night water + faint lane shimmer + dim distant city reflections
+    f3_rect(ar, 0, 620, 1000, 1000, 10, 16, 34, 30);
+    f3_band(ar, 0, 700, 1000, 700, 10, 16, 24, 48);
+    f3_band(ar, 0, 810, 1000, 810, 10, 14, 22, 44);
+    f3_band(ar, 0, 915, 1000, 915, 12, 18, 28, 52);
+    f3_band(ar, 180, 625, 180, 830, 34, 70, 52, 34);
+    f3_band(ar, 500, 625, 500, 790, 30, 66, 48, 32);
+    f3_band(ar, 820, 625, 820, 850, 36, 72, 54, 36);
+    // eased x, speed from closed-form finite difference, roll from triangle on fr
+    let bx:i64 = f3_boat_bx(fr, NF);
+    let px:i64 = bx;
+    if (fr > 0) { px = f3_boat_bx(fr - 1, NF); }
+    let vel:i64 = bx - px;
+    let m2:i64 = fr % 12;
+    if (m2 > 6) { m2 = 12 - m2; }
+    let by:i64 = 760 + 8 * (m2 - 3) / 3;
+    let pitch:i64 = vel / 2;
+    // reflection follows the boat (scene coupling)
+    f3_band(ar, bx - 34, by + 28, bx + 34, by + 250, 78, 110, 78, 46);
+    f3_band(ar, bx - 12, by + 28, bx + 12, by + 250, 30, 185, 140, 85);
+    // lamp wash on water, brighter with speed (lighting response)
+    f3_blotch(ar, bx, by + 40, 220, 235, 190, 130, 90 + vel * 5);
+    // wake trails behind, length grows with speed (articulation)
+    let wl:i64 = 95 + vel * 8;
+    f3_band(ar, bx - 145, by + 8, bx - 145 - wl, by + 30, 34, 42, 58, 86);
+    f3_band(ar, bx - 145, by + 8, bx - 145 - wl * 3 / 4, by - 28, 26, 38, 52, 80);
+    f3_blotch(ar, bx + 163, by + 10, 44, 70, 92, 125, 120 + vel * 8);
+    // hull with bow lifting under speed, deck-light strip, cabin, warm window,
+    // mast lamp + halo
+    f3_band(ar, bx - 160, by + 8, bx + 160, by - 10 - pitch, 58, 28, 30, 42);
+    f3_band(ar, bx - 150, by - 12 - pitch, bx + 150, by - 22 - pitch, 14, 220, 170, 110);
+    f3_rect(ar, bx - 55, by - 85, bx + 55, by - 16, 28, 30, 42, 16);
+    f3_rect(ar, bx - 34, by - 73, bx + 36, by - 34, 235, 185, 115, 10);
+    f3_band(ar, bx + 10, by - 82, bx + 10, by - 128, 12, 18, 20, 30);
+    f3_blotch(ar, bx + 10, by - 142, 150, 255, 215, 150, 200 + vel * 8);
+    f3_blotch(ar, bx + 10, by - 142, 50, 255, 240, 200, 900);
+    // foreground pilings: the boat passes BEHIND them (occlusion)
+    f3_rect(ar, 500, 380, 570, 1000, 15, 13, 20, 18);
+    f3_rect(ar, 488, 358, 582, 392, 23, 19, 28, 14);
+    f3_rect(ar, 648, 520, 686, 1000, 13, 12, 18, 16);
+}
+// background morph + subject overlay; f3_vidfield_g kept for other paths
+fn f3_vidsubject_g(v:i64, fr:i64, NF:i64, far:[]u8) void {
+    f3_vidfield_g(v, fr, NF, far);
+    if (v == 1) { f3_bird_scene(far, fr, NF); return; }
+    f3_boat_scene(far, fr, NF);
+}
+// G-SERIES AVI writer: 480x480, per-frame pixel grain, 44.1kHz hi-fi audio.
+// Legacy f3_emit_avi is untouched (byte-identical preserved).
+fn f3_emit_avi_g(v:i64, dir:[]u8, lut:[]u8) i64 {
+    let W:i64 = 480;
+    let H:i64 = 480;
+    let NF:i64 = 36;
+    let FPS:i64 = 12;
+    let SR:i64 = 44100;
+    let rowbytes:i64 = W * 3;
+    let framesz:i64 = rowbytes * H;
+    // imagined soundtrack, same native synth as the WAV path
+    let aar:[]u8 = nio_alloc(24576);
+    f3_video_audio(v, aar);
+    let total:i64 = f3_synth_total_hifi(aar);
+    let mix:[]u8 = f3_synth_hifi(aar, lut, total);
+    nio_free(aar);
+    if (mix.len == 0) { return -10; }
+    // GAMMA REPAIR 2026-09-24: output-derived peak normalizer deleted
+    // (was: v = v*24000/peak). Plan-pure gain = 1; the fixed clamps below
+    // are constant safety rails, not output-derived scaling.
+    let pcm:[]u8 = nio_alloc((total * 2) as i32);
+    if (pcm.len == 0) { nio_free(mix); return -11; }
+    let s2:i64 = 0;
+    while (s2 < total) {
+        let vv:i64 = f3_get32s(mix, s2);
+        if (vv > 32767) { vv = 32767; }
+        if (vv < -32768) { vv = -32768; }
+        j2_put16(pcm, s2, vv);
+        s2 = s2 + 1;
+    }
+    nio_free(mix);
+    // interleave plan: audio samples per video frame
+    let apf:i64 = total / NF;
+    let last_asz:i64 = (total - (NF - 1) * apf) * 2;
+    let movi_sz:i64 = (NF - 1) * (16 + framesz + apf * 2) + (16 + framesz + last_asz);
+    let filesz:i64 = 24 + 300 + movi_sz + 8 + 16 * NF * 2;
+    let avi:[]u8 = nio_alloc(filesz as i32);
+    if (avi.len == 0) { nio_free(pcm); return -12; }
+    let o:i64 = 0;
+    avi[o] = 82 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 70 as u8; avi[o + 3] = 70 as u8; o = o + 4;
+    f3_put32b(avi, o, filesz - 8); o = o + 4;
+    avi[o] = 65 as u8; avi[o + 1] = 86 as u8; avi[o + 2] = 73 as u8; avi[o + 3] = 32 as u8; o = o + 4;
+    // LIST hdrl (size field 292)
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 292); o = o + 4;
+    avi[o] = 104 as u8; avi[o + 1] = 100 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    // avih
+    avi[o] = 97 as u8; avi[o + 1] = 118 as u8; avi[o + 2] = 105 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    f3_put32b(avi, o, 1000000 / FPS); o = o + 4;
+    f3_put32b(avi, o, (framesz + apf * 2) * FPS); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 16); o = o + 4;
+    f3_put32b(avi, o, NF); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 2); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, W); o = o + 4;
+    f3_put32b(avi, o, H); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    // LIST strl: video
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 116); o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    avi[o] = 118 as u8; avi[o + 1] = 105 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 115 as u8; o = o + 4;
+    avi[o] = 68 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 66 as u8; avi[o + 3] = 32 as u8; o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 1); o = o + 4;
+    f3_put32b(avi, o, FPS); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, NF); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, 4294967295); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, W); o = o + 2;
+    f3_put16b(avi, o, H); o = o + 2;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 102 as u8; o = o + 4;
+    f3_put32b(avi, o, 40); o = o + 4;
+    f3_put32b(avi, o, 40); o = o + 4;
+    f3_put32b(avi, o, W); o = o + 4;
+    f3_put32b(avi, o, H); o = o + 4;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put16b(avi, o, 24); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, framesz); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    // LIST strl: audio
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, 92); o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 108 as u8; o = o + 4;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 104 as u8; o = o + 4;
+    f3_put32b(avi, o, 56); o = o + 4;
+    avi[o] = 97 as u8; avi[o + 1] = 117 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 115 as u8; o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, 1); o = o + 4;
+    f3_put32b(avi, o, SR); o = o + 4;
+    f3_put32b(avi, o, 0); o = o + 4;
+    f3_put32b(avi, o, total); o = o + 4;
+    f3_put32b(avi, o, apf * 2); o = o + 4;
+    f3_put32b(avi, o, 4294967295); o = o + 4;
+    f3_put32b(avi, o, 2); o = o + 4;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    f3_put16b(avi, o, 0); o = o + 2;
+    avi[o] = 115 as u8; avi[o + 1] = 116 as u8; avi[o + 2] = 114 as u8; avi[o + 3] = 102 as u8; o = o + 4;
+    f3_put32b(avi, o, 16); o = o + 4;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put16b(avi, o, 1); o = o + 2;
+    f3_put32b(avi, o, SR); o = o + 4;
+    f3_put32b(avi, o, SR * 2); o = o + 4;
+    f3_put16b(avi, o, 2); o = o + 2;
+    f3_put16b(avi, o, 16); o = o + 2;
+    // LIST movi
+    avi[o] = 76 as u8; avi[o + 1] = 73 as u8; avi[o + 2] = 83 as u8; avi[o + 3] = 84 as u8; o = o + 4;
+    f3_put32b(avi, o, movi_sz + 4); o = o + 4;
+    avi[o] = 109 as u8; avi[o + 1] = 111 as u8; avi[o + 2] = 118 as u8; avi[o + 3] = 105 as u8; o = o + 4;
+    let movi0:i64 = o;
+    // chunk index tables: id, flags, offset, size (2 entries per frame)
+    let ci:[]u8 = nio_alloc((NF * 8) as i32);
+    let cf:[]u8 = nio_alloc((NF * 8) as i32);
+    let co:[]u8 = nio_alloc((NF * 8) as i32);
+    let cs:[]u8 = nio_alloc((NF * 8) as i32);
+    let far:[]u8 = nio_alloc(24576);
+    let px:[]u8 = nio_alloc((framesz) as i32);
+    let fr:i64 = 0;
+    while (fr < NF) {
+        // video frame: morph background + subject overlay -> raster -> bottom-up BGR chunk
+        // grain seed is a CONSTANT (not fr): the temporal grain is frozen so that
+        // frame-to-frame change is spatially coherent subject/scene motion,
+        // not whole-frame shimmer. (V-T5)
+        f3_vidsubject_g(v, fr, NF, far);
+        f3_raster_g(far, px, W, H, 200 + v, 7, 12);
+        f3_put32(ci, fr * 2, 1667510320);
+        f3_put32(cf, fr * 2, 16);
+        f3_put32(co, fr * 2, o - movi0);
+        f3_put32(cs, fr * 2, framesz);
+        avi[o] = 48 as u8; avi[o + 1] = 48 as u8; avi[o + 2] = 100 as u8; avi[o + 3] = 99 as u8; o = o + 4;
+        f3_put32b(avi, o, framesz); o = o + 4;
+        let r:i64 = 0;
+        while (r < H) {
+            let srow:i64 = (H - 1 - r) * rowbytes;
+            let c:i64 = 0;
+            while (c < W) {
+                avi[o] = px[srow + c * 3 + 2]; o = o + 1;
+                avi[o] = px[srow + c * 3 + 1]; o = o + 1;
+                avi[o] = px[srow + c * 3]; o = o + 1;
+                c = c + 1;
+            }
+            r = r + 1;
+        }
+        // audio chunk for this frame
+        let asz:i64 = apf * 2;
+        if (fr == NF - 1) { asz = last_asz; }
+        f3_put32(ci, fr * 2 + 1, 1651978544);
+        f3_put32(cf, fr * 2 + 1, 0);
+        f3_put32(co, fr * 2 + 1, o - movi0);
+        f3_put32(cs, fr * 2 + 1, asz);
+        avi[o] = 48 as u8; avi[o + 1] = 49 as u8; avi[o + 2] = 119 as u8; avi[o + 3] = 98 as u8; o = o + 4;
+        f3_put32b(avi, o, asz); o = o + 4;
+        let ab:i64 = 0;
+        let aoff:i64 = fr * apf * 2;
+        while (ab < asz) {
+            avi[o] = pcm[aoff + ab]; o = o + 1;
+            ab = ab + 1;
+        }
+        fr = fr + 1;
+    }
+    nio_free(far);
+    nio_free(px);
+    nio_free(pcm);
+    // idx1
+    avi[o] = 105 as u8; avi[o + 1] = 100 as u8; avi[o + 2] = 120 as u8; avi[o + 3] = 49 as u8; o = o + 4;
+    f3_put32b(avi, o, 16 * NF * 2); o = o + 4;
+    let e:i64 = 0;
+    while (e < NF * 2) {
+        f3_put32b(avi, o, f3_get32(ci, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(cf, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(co, e)); o = o + 4;
+        f3_put32b(avi, o, f3_get32(cs, e)); o = o + 4;
+        e = e + 1;
+    }
+    nio_free(ci);
+    nio_free(cf);
+    nio_free(co);
+    nio_free(cs);
+    let rc:i64 = f3_write_named(dir, f3_gaviname(v), avi);
+    nio_free(avi);
+    return rc;
+}
+
+// ---------------- N17: an entire short song (generative composition) ----------------
+fn f3_gen_song(ar:[]u8) void {
+    // 3 s miniature at 120bpm: melody + bass + pad + kick + hats, all field strokes.
+    // bins: C4=15 G3=10 F4=20 G4=22 C5=27 D5=29 E5=31 G5=34 A5=36
+    f3_anew(ar);
+    f3_tone(ar, 27, 0, 3, 700, 1, 2, 600);
+    f3_tone(ar, 29, 4, 7, 700, 1, 2, 600);
+    f3_tone(ar, 31, 8, 11, 700, 1, 2, 600);
+    f3_tone(ar, 34, 12, 15, 700, 1, 2, 600);
+    f3_tone(ar, 36, 16, 19, 700, 1, 2, 600);
+    f3_tone(ar, 34, 20, 23, 700, 1, 2, 600);
+    f3_tone(ar, 31, 24, 27, 700, 1, 2, 600);
+    f3_tone(ar, 29, 28, 31, 700, 1, 2, 600);
+    f3_tone(ar, 27, 32, 39, 750, 1, 4, 600);
+    f3_tone(ar, 15, 0, 7, 600, 1, 2, 250);
+    f3_tone(ar, 20, 8, 15, 600, 1, 2, 250);
+    f3_tone(ar, 22, 16, 23, 600, 1, 2, 250);
+    f3_tone(ar, 15, 24, 39, 620, 1, 4, 250);
+    f3_harm(ar, 15, 0, 39, 200, 4, 6, 400);
+    let k:i64 = 0;
+    while (k < 5) {
+        f3_tone(ar, 3, k * 8, k * 8 + 1, 900, 0, 1, 100);
+        f3_noise(ar, 4 + k * 8, 4 + k * 8, 250, 0);
+        k = k + 1;
+    }
+}
+
+// ---------------- N18: a sound you have never heard ----------------
+fn f3_gen_unheard(ar:[]u8) void {
+    // inharmonic partial stack + crossing sweeps + noise wash + alien pulse.
+    f3_anew(ar);
+    f3_tone(ar, 20, 0, 47, 500, 8, 8, 800);
+    f3_tone(ar, 26, 0, 47, 400, 8, 8, 800);
+    f3_tone(ar, 33, 0, 47, 350, 8, 8, 800);
+    f3_sweep(ar, 10, 40, 0, 20, 400, 700);
+    f3_sweep(ar, 44, 12, 24, 44, 400, 700);
+    f3_noise(ar, 0, 47, 180, 500);
+    f3_tone(ar, 8, 10, 12, 800, 0, 1, 900);
+    f3_tone(ar, 8, 26, 28, 800, 0, 1, 900);
+    f3_tone(ar, 8, 42, 44, 800, 0, 1, 900);
+}
+
+// ---------------- MOOD-1: intent-labeled pieces (see MOOD-PREREG.md, frozen before composing) ----------------
+// mood: 0=HAPPY, 1=SCARY, 2=CALM. Bins: bin b = 110*2^(b/12) Hz. C3=3 G3=10 C4=15 E4=19 G4=22 C5=27 D5=29 E5=31 G5=34 A5=36 C6=39
+fn f3_gen_mood(ar:[]u8, mood:i64) void {
+    f3_anew(ar);
+    if (mood == 0) {
+        // HAPPY: C major pentatonic, brisk 2-frame notes, high register, bright, kick+hats.
+        f3_tone(ar, 27, 0, 1, 700, 1, 1, 850);
+        f3_tone(ar, 29, 2, 3, 700, 1, 1, 850);
+        f3_tone(ar, 31, 4, 5, 700, 1, 1, 850);
+        f3_tone(ar, 34, 6, 7, 700, 1, 1, 850);
+        f3_tone(ar, 36, 8, 9, 750, 1, 1, 900);
+        f3_tone(ar, 34, 10, 11, 700, 1, 1, 850);
+        f3_tone(ar, 31, 12, 13, 700, 1, 1, 850);
+        f3_tone(ar, 29, 14, 15, 700, 1, 1, 850);
+        f3_tone(ar, 31, 16, 17, 700, 1, 1, 850);
+        f3_tone(ar, 34, 18, 19, 700, 1, 1, 850);
+        f3_tone(ar, 36, 20, 21, 750, 1, 1, 900);
+        f3_tone(ar, 39, 22, 23, 800, 1, 1, 900);
+        f3_tone(ar, 36, 24, 27, 800, 1, 2, 900);
+        f3_tone(ar, 34, 28, 29, 700, 1, 1, 850);
+        f3_tone(ar, 31, 30, 31, 700, 1, 1, 850);
+        f3_tone(ar, 29, 32, 33, 700, 1, 1, 850);
+        f3_tone(ar, 27, 34, 39, 750, 1, 3, 850);
+        f3_tone(ar, 3, 0, 7, 550, 1, 2, 400);
+        f3_tone(ar, 8, 8, 15, 550, 1, 2, 400);
+        f3_tone(ar, 10, 16, 23, 550, 1, 2, 400);
+        f3_tone(ar, 3, 24, 31, 550, 1, 2, 400);
+        f3_tone(ar, 10, 32, 35, 550, 1, 2, 400);
+        f3_tone(ar, 3, 36, 39, 600, 1, 3, 400);
+        let k:i64 = 0;
+        while (k < 6) {
+            f3_tone(ar, 3, k * 8, k * 8 + 1, 900, 0, 1, 200);
+            f3_noise(ar, k * 8 + 4, k * 8 + 4, 220, 800);
+            k = k + 1;
+        }
+        return;
+    }
+    if (mood == 1) {
+        // SCARY: low minor-2nd cluster drones, tritone, slow descending sweeps,
+        // sparse irregular low thumps, thin high whine, noise unease bed.
+        f3_tone(ar, 3, 0, 47, 500, 8, 8, 400);
+        f3_tone(ar, 4, 0, 47, 500, 10, 8, 400);
+        f3_tone(ar, 9, 0, 47, 350, 10, 10, 350);
+        f3_sweep(ar, 30, 12, 4, 20, 400, 400);
+        f3_sweep(ar, 24, 8, 26, 42, 350, 350);
+        f3_tone(ar, 1, 6, 7, 900, 0, 1, 300);
+        f3_tone(ar, 2, 23, 24, 900, 0, 1, 300);
+        f3_tone(ar, 1, 40, 41, 900, 0, 1, 300);
+        f3_tone(ar, 42, 10, 38, 150, 12, 12, 700);
+        f3_noise(ar, 0, 47, 120, 300);
+        return;
+    }
+    // CALM: open 5ths/octaves pad, slow soft arpeggio, no percussion.
+    f3_harm(ar, 15, 0, 47, 250, 6, 6, 450);
+    f3_harm(ar, 22, 0, 47, 200, 8, 8, 400);
+    f3_harm(ar, 27, 8, 47, 150, 8, 8, 400);
+    f3_tone(ar, 15, 0, 7, 400, 4, 4, 450);
+    f3_tone(ar, 19, 8, 15, 400, 4, 4, 450);
+    f3_tone(ar, 22, 16, 23, 400, 4, 4, 450);
+    f3_tone(ar, 27, 24, 31, 450, 4, 4, 450);
+    f3_tone(ar, 31, 32, 39, 400, 4, 4, 450);
+    f3_tone(ar, 34, 16, 31, 180, 8, 8, 450);
+}
+
+// ---------------- VIDEO: image sequence + audio, imagined together ----------------
+fn f3_video_key(v:i64, k:i64, ar:[]u8) void {
+    f3_vnew(ar);
+    if (v == 1) {
+        // glacier sunrise
+        if (k == 0) {
+            f3_vgrad(ar, 40, 50, 90, 60, 70, 110);
+            f3_blotch(ar, 500, 800, 200, 120, 140, 180, 300);
+            f3_dither(ar, 5, 40);
+            return;
+        }
+        if (k == 1) {
+            f3_vgrad(ar, 120, 90, 110, 80, 90, 130);
+            f3_blotch(ar, 500, 300, 150, 200, 130, 110, 500);
+            f3_rect(ar, 0, 600, 1000, 1000, 150, 170, 200, 40);
+            f3_dither(ar, 5, 40);
+            return;
+        }
+        if (k == 2) {
+            f3_vgrad(ar, 255, 180, 120, 200, 160, 180);
+            f3_rect(ar, 0, 500, 1000, 1000, 200, 225, 245, 40);
+            f3_blotch(ar, 485, 620, 90, 150, 160, 175, 900);
+            f3_blotch(ar, 620, 640, 25, 200, 120, 60, 900);
+            return;
+        }
+        f3_vgrad(ar, 180, 210, 240, 220, 235, 250);
+        f3_rect(ar, 0, 500, 1000, 1000, 210, 230, 250, 40);
+        f3_blotch(ar, 485, 620, 90, 150, 160, 175, 900);
+        f3_band(ar, 100, 900, 700, 880, 50, 210, 230, 250);
+        return;
+    }
+    // v == 2: city of bells at night
+    if (k == 0) {
+        f3_fill(ar, 20, 24, 40);
+        f3_rect(ar, 100, 100, 300, 700, 40, 36, 60, 15);
+        f3_rect(ar, 700, 150, 900, 750, 40, 36, 60, 15);
+        f3_dither(ar, 9, 50);
+        return;
+    }
+    if (k == 1) {
+        f3_fill(ar, 20, 24, 40);
+        f3_rect(ar, 100, 100, 300, 700, 40, 36, 60, 15);
+        f3_rect(ar, 700, 150, 900, 750, 40, 36, 60, 15);
+        f3_blotch(ar, 200, 400, 80, 240, 200, 120, 600);
+        f3_dither(ar, 9, 50);
+        return;
+    }
+    if (k == 2) {
+        f3_fill(ar, 22, 26, 44);
+        f3_rect(ar, 100, 100, 300, 700, 44, 40, 66, 15);
+        f3_rect(ar, 700, 150, 900, 750, 44, 40, 66, 15);
+        f3_blotch(ar, 200, 400, 80, 240, 200, 120, 600);
+        f3_blotch(ar, 800, 450, 90, 240, 200, 120, 600);
+        f3_blotch(ar, 500, 300, 60, 250, 220, 150, 700);
+        f3_dither(ar, 9, 50);
+        return;
+    }
+    f3_fill(ar, 16, 18, 32);
+    f3_rect(ar, 100, 100, 300, 700, 30, 28, 48, 15);
+    f3_rect(ar, 700, 150, 900, 750, 30, 28, 48, 15);
+    f3_blotch(ar, 200, 400, 60, 200, 170, 110, 400);
+    f3_dither(ar, 9, 50);
+}
+fn f3_video_audio(v:i64, ar:[]u8) void {
+    f3_anew(ar);
+    if (v == 1) {
+        f3_noise(ar, 0, 47, 200, 400);
+        f3_tone(ar, 15, 0, 11, 400, 4, 4, 500);
+        f3_tone(ar, 19, 12, 23, 400, 4, 4, 500);
+        f3_tone(ar, 22, 24, 35, 400, 4, 4, 500);
+        f3_tone(ar, 27, 36, 47, 450, 4, 6, 500);
+        f3_harm(ar, 7, 0, 47, 150, 8, 8, 300);
+        return;
+    }
+    f3_tone(ar, 31, 4, 10, 500, 1, 5, 600);
+    f3_tone(ar, 36, 12, 18, 400, 1, 5, 600);
+    f3_tone(ar, 31, 20, 26, 500, 1, 5, 600);
+    f3_tone(ar, 36, 28, 34, 400, 1, 5, 600);
+    f3_tone(ar, 31, 36, 42, 450, 1, 6, 600);
+    f3_noise(ar, 0, 47, 150, 300);
+    f3_harm(ar, 7, 0, 47, 120, 6, 10, 250);
+}
+
+// ---------------- G-SERIES (goal-A quality ladder) ----------------
+// G-series: 480x480, asymmetric-by-design compositions, pixel-level
+// deterministic grain at raster time. Existing 14 scenes stay frozen.
+// briefs 21..26 -> f3g1.bmp .. f3g6.bmp
+// V3 grain model (red-team driven): persistent low-frequency component +
+// changing high-frequency component (temporally correlated, not independent
+// shimmer), monochromatic, amplitude growing in shadows like film.
+// v selects the persistent pattern, fr the temporal one (fr=0 for stills).
+fn f3_raster_g(ar:[]u8, px:[]u8, W:i64, H:i64, v:i64, fr:i64, gamt:i64) void {
+    let oy:i64 = 0;
+    while (oy < H) {
+        let gy:i64 = oy * 23 * 256 / (H - 1);
+        let y0:i64 = gy >> 8;
+        let ty:i64 = gy & 255;
+        let y1:i64 = y0 + 1;
+        if (y1 > 23) { y1 = 23; }
+        let ox:i64 = 0;
+        while (ox < W) {
+            let gx:i64 = ox * 23 * 256 / (W - 1);
+            let x0:i64 = gx >> 8;
+            let tx:i64 = gx & 255;
+            let x1:i64 = x0 + 1;
+            if (x1 > 23) { x1 = 23; }
+            let r:i64 = 0; let g:i64 = 0; let b:i64 = 0;
+            let ch:i64 = 0;
+            while (ch < 3) {
+                let c00:i64 = f3_vcell(ar, x0, y0, ch);
+                let c10:i64 = f3_vcell(ar, x1, y0, ch);
+                let c01:i64 = f3_vcell(ar, x0, y1, ch);
+                let c11:i64 = f3_vcell(ar, x1, y1, ch);
+                let cv:i64 = (c00 * (256 - tx) * (256 - ty) + c10 * tx * (256 - ty) + c01 * (256 - tx) * ty + c11 * tx * ty) >> 16;
+                if (ch == 0) { r = cv; }
+                if (ch == 1) { g = cv; }
+                if (ch == 2) { b = cv; }
+                ch = ch + 1;
+            }
+            let luma:i64 = (r * 77 + g * 150 + b * 29) >> 8;
+            let gp:i64 = (f3_hash2(ox, oy, 900 + v) - 500) * gamt / 1000;
+            let gt:i64 = (f3_hash2(ox, oy, fr * 131 + v * 7 + 17) - 500) * gamt / 1000;
+            let gr:i64 = (gp + gt) * (384 - luma) / 256;
+            px[(oy * W + ox) * 3] = f3_clamp255(r + gr) as u8;
+            px[(oy * W + ox) * 3 + 1] = f3_clamp255(g + gr) as u8;
+            px[(oy * W + ox) * 3 + 2] = f3_clamp255(b + gr) as u8;
+            ox = ox + 1;
+        }
+        oy = oy + 1;
+    }
+}
+fn f3_gen_g1(ar:[]u8) void {
+    // ember coast: night water, low tilted horizon, fire cluster off-center right
+    // V5b: the haze band is broken into two segments with a gap where the
+    // fire glow sits, so the fire reads as breaking through distant lit haze.
+    // Each segment tapers toward the fire; the pair is offset and tilted
+    // asymmetrically. Haze is drawn before the fire (fire in front).
+    f3_vnew(ar);
+    f3_vgrad(ar, 12, 18, 38, 30, 44, 80);
+    f3_band(ar, 55, 660, 420, 630, 24, 86, 106, 142);
+    f3_blotch(ar, 480, 622, 110, 24, 36, 62, 480);
+    f3_band(ar, 840, 604, 980, 590, 18, 92, 110, 140);
+    f3_blotch(ar, 828, 600, 100, 26, 38, 66, 420);
+    f3_blotch(ar, 680, 560, 130, 235, 140, 60, 500);
+    f3_blotch(ar, 760, 590, 60, 250, 190, 110, 700);
+    f3_blotch(ar, 600, 600, 45, 220, 120, 70, 800);
+    f3_band(ar, 620, 640, 700, 950, 56, 200, 120, 60);
+    f3_rect(ar, 600, 770, 720, 810, 14, 22, 44, 24);
+    f3_band(ar, 810, 660, 840, 900, 22, 185, 125, 65);
+    f3_dither(ar, 211, 10);
+}
+fn f3_gen_g2(ar:[]u8) void {
+    // greenhouse at night: dark green, asymmetric mullions, one warm lamp
+    // V3: middle mullion broken out of alignment + faded, cool secondary glow
+    f3_vnew(ar);
+    f3_vgrad(ar, 8, 30, 22, 24, 66, 48);
+    f3_rect(ar, 120, 80, 190, 900, 30, 70, 52, 20);
+    f3_rect(ar, 470, 150, 520, 700, 26, 62, 46, 20);
+    f3_blotch(ar, 495, 830, 220, 16, 48, 35, 420);
+    f3_blotch(ar, 300, 500, 260, 40, 70, 110, 260);
+    f3_rect(ar, 760, 60, 830, 880, 34, 76, 56, 20);
+    // V5: irregular lamp glow — two overlapping offset lobes (non-circular),
+    // an offset scatter blotch, hot core kept; a foreground mullion bar
+    // drawn AFTER the glow occludes its left edge (lamp sits behind the frame).
+    f3_blotch(ar, 586, 308, 86, 238, 198, 128, 560);
+    f3_blotch(ar, 626, 340, 70, 230, 188, 120, 520);
+    f3_blotch(ar, 676, 388, 46, 235, 186, 120, 360);
+    f3_blotch(ar, 604, 322, 26, 255, 242, 205, 880);
+    f3_rect(ar, 560, 120, 596, 640, 10, 32, 22, 12);
+    f3_band(ar, 80, 880, 920, 760, 18, 60, 110, 80);
+    f3_dither(ar, 212, 10);
+}
+fn f3_gen_g3(ar:[]u8) void {
+    // paper storm: warm paper, diagonal ink bands, single red accent
+    f3_vnew(ar);
+    f3_vgrad(ar, 238, 234, 226, 214, 208, 198);
+    f3_blotch(ar, 300, 600, 200, 168, 162, 154, 300);
+    f3_band(ar, 80, 120, 900, 420, 96, 52, 50, 58);
+    f3_band(ar, 150, 700, 800, 910, 80, 70, 68, 76);
+    f3_rect(ar, 800, 895, 860, 930, 70, 68, 76, 14);
+    f3_blotch(ar, 695, 335, 55, 190, 44, 38, 750);
+    f3_dither(ar, 213, 14);
+}
+fn f3_gen_g4(ar:[]u8) void {
+    // harbor lights: black-blue water, scattered warm lights + reflections
+    f3_vnew(ar);
+    f3_vgrad(ar, 6, 12, 30, 18, 30, 62);
+    f3_band(ar, 40, 620, 960, 660, 50, 30, 52, 92);
+    // V3: four lights, one occluded, reflections: one connected, one broken glint
+    f3_blotch(ar, 180, 540, 26, 250, 200, 130, 900);
+    f3_blotch(ar, 420, 500, 18, 250, 210, 150, 900);
+    f3_blotch(ar, 655, 555, 32, 245, 190, 120, 850);
+    f3_rect(ar, 625, 480, 685, 555, 8, 14, 32, 16);
+    f3_blotch(ar, 830, 505, 15, 250, 215, 160, 900);
+    f3_band(ar, 170, 620, 190, 900, 22, 200, 150, 90);
+    f3_rect(ar, 720, 700, 742, 770, 190, 140, 95, 14);
+    f3_rect(ar, 748, 790, 762, 840, 175, 130, 90, 14);
+    f3_dither(ar, 214, 8);
+}
+fn f3_gen_g5(ar:[]u8) void {
+    // clay field: terracotta gradient, large soft dome off-center, long shadow
+    f3_vnew(ar);
+    f3_vgrad(ar, 168, 110, 78, 122, 78, 58);
+    f3_blotch(ar, 360, 420, 260, 196, 138, 100, 350);
+    f3_blotch(ar, 700, 640, 130, 150, 100, 74, 500);
+    f3_band(ar, 60, 800, 940, 860, 70, 96, 62, 46);
+    // V3: tonal irregularities crossing the dome and shadow (material behavior)
+    f3_blotch(ar, 250, 350, 320, 178, 118, 84, 260);
+    f3_blotch(ar, 750, 620, 280, 158, 104, 74, 240);
+    f3_blotch(ar, 520, 480, 200, 188, 128, 92, 220);
+    // V4: genuine asymmetric tonal mass (cloud-shadow / uneven kiln firing).
+    // Two overlapping deep-umber lobes darken the left field; one pale lobe
+    // lifts the upper right. Breaks the gradient-driven raw mirror
+    // correlation AND the "empty by default" weakness. Deterministic,
+    // material, clay-plausible.
+    f3_blotch(ar, 170, 430, 400, 104, 62, 44, 520);
+    f3_blotch(ar, 300, 650, 300, 116, 70, 50, 430);
+    f3_blotch(ar, 790, 360, 330, 198, 134, 98, 380);
+    f3_dither(ar, 215, 10);
+}
+fn f3_gen_g6(ar:[]u8) void {
+    // signal garden: dark ground, six uneven light-bars, two glows
+    f3_vnew(ar);
+    f3_fill(ar, 14, 16, 26);
+    // V3: varied widths, green occludes amber, teal desaturated into ground
+    f3_rect(ar, 80, 300, 124, 920, 90, 140, 200, 12);
+    f3_rect(ar, 190, 520, 220, 920, 200, 90, 120, 12);
+    f3_rect(ar, 300, 420, 326, 920, 220, 170, 80, 12);
+    f3_rect(ar, 310, 180, 374, 920, 70, 180, 140, 12);
+    f3_rect(ar, 460, 260, 500, 920, 140, 110, 220, 12);
+    f3_rect(ar, 600, 560, 620, 920, 60, 70, 90, 12);
+    f3_blotch(ar, 120, 280, 50, 120, 170, 230, 700);
+    f3_dither(ar, 216, 8);
+}
+fn f3_gbmpname(which:i64) []u8 {
+    if (which == 0) { return "f3g1.bmp"; }
+    if (which == 1) { return "f3g2.bmp"; }
+    if (which == 2) { return "f3g3.bmp"; }
+    if (which == 3) { return "f3g4.bmp"; }
+    if (which == 4) { return "f3g5.bmp"; }
+    return "f3g6.bmp";
+}
+fn f3_emit_bmp_g(ar:[]u8, dir:[]u8, which:i64) i64 {
+    let W:i64 = 480;
+    let H:i64 = 480;
+    let px:[]u8 = nio_alloc((W * H * 3) as i32);
+    if (px.len == 0) { return -10; }
+    f3_raster_g(ar, px, W, H, 100 + which, 0, 14);
+    let rowbytes:i64 = W * 3;
+    let imgsz:i64 = rowbytes * H;
+    let bmp:[]u8 = nio_alloc((54 + imgsz) as i32);
+    if (bmp.len == 0) { nio_free(px); return -11; }
+    bmp[0] = 66 as u8; bmp[1] = 77 as u8;
+    f3_put32b(bmp, 2, 54 + imgsz);
+    f3_put32b(bmp, 6, 0);
+    f3_put32b(bmp, 10, 54);
+    f3_put32b(bmp, 14, 40);
+    f3_put32b(bmp, 18, W);
+    f3_put32b(bmp, 22, H);
+    f3_put16b(bmp, 26, 1);
+    f3_put16b(bmp, 28, 24);
+    f3_put32b(bmp, 30, 0);
+    f3_put32b(bmp, 34, imgsz);
+    f3_put32b(bmp, 38, 0);
+    f3_put32b(bmp, 42, 0);
+    f3_put32b(bmp, 46, 0);
+    f3_put32b(bmp, 50, 0);
+    // bottom-up BGR rows
+    let r:i64 = 0;
+    while (r < H) {
+        let srow:i64 = r * rowbytes;
+        let drow:i64 = 54 + (H - 1 - r) * rowbytes;
+        let c:i64 = 0;
+        while (c < W) {
+            bmp[drow + c * 3] = px[srow + c * 3 + 2];
+            bmp[drow + c * 3 + 1] = px[srow + c * 3 + 1];
+            bmp[drow + c * 3 + 2] = px[srow + c * 3];
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    nio_free(px);
+    let rc:i64 = f3_write_named(dir, f3_gbmpname(which), bmp);
+    nio_free(bmp);
+    return rc;
+}
+
+// ---------------- main ----------------
+
+// ============ CREW GAMMA experiment scaffolding (not emitter behavior) ============
+// f3_mixpeak: unclipped max|mix| of the hifi synth for one field (diagnostic).
+fn f3_mixpeak(ar:[]u8, lut:[]u8) i64 {
+    let total:i64 = f3_synth_total_hifi(ar);
+    let mix:[]u8 = f3_synth_hifi(ar, lut, total);
+    if (mix.len == 0) { return -1; }
+    let pk:i64 = 0;
+    let s:i64 = 0;
+    while (s < total) {
+        let v:i64 = f3_get32s(mix, s);
+        if (v < 0) { v = -v; }
+        if (v > pk) { pk = v; }
+        s = s + 1;
+    }
+    nio_free(mix);
+    return pk;
+}
+// f3_mixdump_one: write raw s32 LE pre-emit mix to outdir/name (mix-level identity).
+fn f3_mixdump_one(ar:[]u8, dir:[]u8, name:[]u8, lut:[]u8) i64 {
+    let total:i64 = f3_synth_total_hifi(ar);
+    let mix:[]u8 = f3_synth_hifi(ar, lut, total);
+    if (mix.len == 0) { return -10; }
+    let root:i64 = f3_open_root_z(dir);
+    if (root < 0) { nio_free(mix); return -1; }
+    let fd:i64 = f3_open_child_z(root, name, 1);
+    nio_close(root);
+    if (fd < 0) { nio_free(mix); return -2; }
+    let w:i64 = nio_write_all(fd, mix);
+    nio_close(fd);
+    nio_free(mix);
+    if (w != total * 4) { return -3; }
+    return 0;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let a2:[]u8 = _zag_arg(2);
+    if (_zag_strcmp(a1, "f3") == 1 || _zag_strcmp(a1, "f3dump") == 1) {
+        let dump:i32 = 0;
+        if (_zag_strcmp(a1, "f3dump") == 1) { dump = 1; }
+        if (_zag_strcmp(a2, "all") != 1) {
+            _zag_println("error=f3-needs-all");
+            return 1;
+        }
+        let b:i64 = 1;
+        while (b <= 6) {
+            let ar:[]u8 = nio_alloc(24576);
+            f3_build(ar, b);
+            if (dump == 1) { f3_dump(ar, b); }
+            _zag_print("F3 ");
+            _zag_print(_zag_i64_to_str(b));
+            _zag_print(" type=");
+            _zag_print(_zag_i64_to_str(f3_type(ar)));
+            _zag_print(" strokes=");
+            _zag_println(_zag_i64_to_str(f3_n(ar)));
+            nio_free(ar);
+            b = b + 1;
+        }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3novel") == 1) {
+        let n:i64 = 11;
+        while (n <= 18) {
+            let ar:[]u8 = nio_alloc(24576);
+            f3_build(ar, n);
+            f3_dump(ar, n);
+            _zag_print("F3N ");
+            _zag_print(_zag_i64_to_str(n));
+            _zag_print(" type=");
+            _zag_print(_zag_i64_to_str(f3_type(ar)));
+            _zag_print(" strokes=");
+            _zag_println(_zag_i64_to_str(f3_n(ar)));
+            nio_free(ar);
+            n = n + 1;
+        }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3probe") == 1) {
+        let b2:i64 = 1;
+        while (b2 <= 6) {
+            let ar:[]u8 = nio_alloc(24576);
+            f3_build(ar, b2);
+            _zag_print("P3 ");
+            _zag_print(_zag_i64_to_str(b2));
+            _zag_print(" q0=");
+            _zag_print(_zag_i64_to_str(f3_probe(ar, b2, 0)));
+            _zag_print(" q1=");
+            _zag_print(_zag_i64_to_str(f3_probe(ar, b2, 1)));
+            _zag_print(" q2=");
+            _zag_println(_zag_i64_to_str(f3_probe(ar, b2, 2)));
+            nio_free(ar);
+            b2 = b2 + 1;
+        }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3wav") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3wav-needs-outdir");
+            return 1;
+        }
+        let lut:[]u8 = nio_alloc(512);
+        j2_sin_init(lut);
+        let ar4:[]u8 = nio_alloc(24576);
+        f3_build(ar4, 3);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 0, lut)));
+        f3_build(ar4, 4);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 1, lut)));
+        f3_build(ar4, 15);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 2, lut)));
+        f3_build(ar4, 16);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 3, lut)));
+        f3_build(ar4, 17);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 4, lut)));
+        f3_build(ar4, 18);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar4, a2, 5, lut)));
+        nio_free(ar4);
+        nio_free(lut);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3video") == 1) {
+        let v:i64 = 1;
+        while (v <= 2) {
+            let k:i64 = 0;
+            while (k < 4) {
+                let ar5:[]u8 = nio_alloc(24576);
+                f3_video_key(v, k, ar5);
+                let sc:i64 = 100 + v * 10 + k;
+                f3_dump(ar5, sc);
+                _zag_print("F3V ");
+                _zag_print(_zag_i64_to_str(v));
+                _zag_print(" k=");
+                _zag_print(_zag_i64_to_str(k));
+                _zag_print(" scene=");
+                _zag_print(_zag_i64_to_str(sc));
+                _zag_print(" strokes=");
+                _zag_println(_zag_i64_to_str(f3_n(ar5)));
+                nio_free(ar5);
+                k = k + 1;
+            }
+            let ar6:[]u8 = nio_alloc(24576);
+            f3_video_audio(v, ar6);
+            let sc2:i64 = 109 + v * 10;
+            f3_dump(ar6, sc2);
+            _zag_print("F3V ");
+            _zag_print(_zag_i64_to_str(v));
+            _zag_print(" audio scene=");
+            _zag_print(_zag_i64_to_str(sc2));
+            _zag_print(" strokes=");
+            _zag_println(_zag_i64_to_str(f3_n(ar6)));
+            nio_free(ar6);
+            v = v + 1;
+        }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3vidwav") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3vidwav-needs-outdir");
+            return 1;
+        }
+        let lut2:[]u8 = nio_alloc(512);
+        j2_sin_init(lut2);
+        let ar7:[]u8 = nio_alloc(24576);
+        f3_video_audio(1, ar7);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar7, a2, 6, lut2)));
+        f3_video_audio(2, ar7);
+        _zag_print("WAV rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(ar7, a2, 7, lut2)));
+        nio_free(ar7);
+        nio_free(lut2);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3bmp") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3bmp-needs-outdir");
+            return 1;
+        }
+        let w:i64 = 0;
+        while (w < 14) {
+            let arb:[]u8 = nio_alloc(24576);
+            f3_build(arb, f3_bmp_scene(w));
+            _zag_print("BMP rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_bmp(arb, a2, w)));
+            nio_free(arb);
+            w = w + 1;
+        }
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3mood") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3mood-needs-outdir");
+            return 1;
+        }
+        let lut4:[]u8 = nio_alloc(512);
+        j2_sin_init(lut4);
+        let arm:[]u8 = nio_alloc(24576);
+        let md:i64 = 0;
+        while (md < 3) {
+            f3_gen_mood(arm, md);
+            _zag_print("MOOD ");
+            _zag_print(_zag_i64_to_str(md));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_wav(arm, a2, 8 + md, lut4)));
+            md = md + 1;
+        }
+        nio_free(arm);
+        nio_free(lut4);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3hifi") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3hifi-needs-outdir");
+            return 1;
+        }
+        let lut5:[]u8 = nio_alloc(512);
+        j2_sin_init(lut5);
+        let ah:[]u8 = nio_alloc(24576);
+        f3_build(ah, 17);
+        _zag_print("HIFI song rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(ah, a2, 11, lut5)));
+        let md:i64 = 0;
+        while (md < 3) {
+            f3_gen_mood(ah, md);
+            _zag_print("HIFI mood ");
+            _zag_print(_zag_i64_to_str(md));
+            _zag_print(" rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(ah, a2, 8 + md, lut5)));
+            md = md + 1;
+        }
+        nio_free(ah);
+        nio_free(lut5);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3avi") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3avi-needs-outdir");
+            return 1;
+        }
+        let lut3:[]u8 = nio_alloc(512);
+        j2_sin_init(lut3);
+        _zag_print("AVI1 rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_avi(1, a2, lut3)));
+        _zag_print("AVI2 rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_avi(2, a2, lut3)));
+        nio_free(lut3);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3gavi") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3gavi-needs-outdir");
+            return 1;
+        }
+        let lut6:[]u8 = nio_alloc(512);
+        j2_sin_init(lut6);
+        _zag_print("GAVI1 rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_avi_g(1, a2, lut6)));
+        _zag_print("GAVI2 rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_avi_g(2, a2, lut6)));
+        nio_free(lut6);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3gbmp") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3gbmp-needs-outdir");
+            return 1;
+        }
+        let w:i64 = 0;
+        while (w < 6) {
+            let arg:[]u8 = nio_alloc(24576);
+            f3_build(arg, 21 + w);
+            _zag_print("GBMP rc=");
+            _zag_println(_zag_i64_to_str(f3_emit_bmp_g(arg, a2, w)));
+            nio_free(arg);
+            w = w + 1;
+        }
+        return 0;
+    }
+    // PROOF SCAFFOLDING (gamma repair, 2026-09-24): not emitter behavior.
+    // Builds song field A and field B = A + one extra loud frame, emits both
+    // through f3_emit_wav and f3_emit_wav_hifi. Post-hoc check (Python):
+    // PCM prefix bytes (samples before the appended frame) of B must equal
+    // those of A under plan-pure gain; under the old output-derived
+    // normalizer they differ because the loud tail rescales the whole file.
+    if (_zag_strcmp(a1, "f3gammaproof") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3gammaproof-needs-outdir");
+            return 1;
+        }
+        let lutp:[]u8 = nio_alloc(512);
+        j2_sin_init(lutp);
+        let fa:[]u8 = nio_alloc(24576);
+        f3_build(fa, 17);
+        let fr:i64 = f3_frames(fa);
+        let fb:[]u8 = nio_alloc(24576);
+        let cw:i64 = 0;
+        while (cw < 6144) { f3_put32(fb, cw, f3_get32(fa, cw)); cw = cw + 1; }
+        f3_put32(fb, 2, fr + 1);
+        let bb2:i64 = 0;
+        while (bb2 < 48) {
+            f3_acellput(fb, fr, bb2, 2000);
+            f3_abriput(fb, fr, bb2, 1000);
+            bb2 = bb2 + 1;
+        }
+        _zag_print("PROOFA wav rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(fa, a2, 20, lutp)));
+        _zag_print("PROOFB wav rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav(fb, a2, 21, lutp)));
+        _zag_print("PROOFA hifi rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(fa, a2, 22, lutp)));
+        _zag_print("PROOFB hifi rc=");
+        _zag_println(_zag_i64_to_str(f3_emit_wav_hifi(fb, a2, 23, lutp)));
+        nio_free(fa);
+        nio_free(fb);
+        nio_free(lutp);
+        return 0;
+    }
+
+    // CREW GAMMA diagnostics (experiment scaffolding, not emitter behavior):
+    // f3mixpeak prints the unclipped mix peak per hifi fixture;
+    // f3mixdump writes raw s32 pre-emit mixes (mix-level identity checks).
+    if (_zag_strcmp(a1, "f3mixpeak") == 1) {
+        let lutd:[]u8 = nio_alloc(512);
+        j2_sin_init(lutd);
+        let ahd:[]u8 = nio_alloc(24576);
+        f3_build(ahd, 17);
+        _zag_print("MIXPEAK song ");
+        _zag_println(_zag_i64_to_str(f3_mixpeak(ahd, lutd)));
+        let md2:i64 = 0;
+        while (md2 < 3) {
+            f3_gen_mood(ahd, md2);
+            _zag_print("MIXPEAK mood ");
+            _zag_print(_zag_i64_to_str(md2));
+            _zag_print(" ");
+            _zag_println(_zag_i64_to_str(f3_mixpeak(ahd, lutd)));
+            md2 = md2 + 1;
+        }
+        nio_free(ahd);
+        nio_free(lutd);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "f3mixdump") == 1) {
+        if (a2.len == 0) {
+            _zag_println("error=f3mixdump-needs-outdir");
+            return 1;
+        }
+        let lute:[]u8 = nio_alloc(512);
+        j2_sin_init(lute);
+        let ahe:[]u8 = nio_alloc(24576);
+        f3_build(ahe, 17);
+        _zag_print("MIXDUMP song rc=");
+        _zag_println(_zag_i64_to_str(f3_mixdump_one(ahe, a2, "mix_song.s32", lute)));
+        let md3:i64 = 0;
+        while (md3 < 3) {
+            f3_gen_mood(ahe, md3);
+            _zag_print("MIXDUMP mood ");
+            _zag_print(_zag_i64_to_str(md3));
+            _zag_print(" rc=");
+            let nm:[]u8 = "mix_mood0.s32";
+            if (md3 == 1) { nm = "mix_mood1.s32"; }
+            if (md3 == 2) { nm = "mix_mood2.s32"; }
+            _zag_println(_zag_i64_to_str(f3_mixdump_one(ahe, a2, nm, lute)));
+            md3 = md3 + 1;
+        }
+        nio_free(ahe);
+        nio_free(lute);
+        return 0;
+    }
+    _zag_println("error=unknown-cmd");
+    return 1;
+}
+// ============================================================

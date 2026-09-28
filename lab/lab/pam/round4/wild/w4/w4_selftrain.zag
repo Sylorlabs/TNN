@@ -1,0 +1,278 @@
+// w4_selftrain.zag — W4 SELF-TRAINING PAM (frozen PREREG_W4.md + PREREG_AMEND1.md)
+// Pure Zag, zero RNG. Usage: w4_selftrain <tape>
+// Online tighten-only CT learner. Start CT=700 (PREREG_M1_BAR §7 baseline,
+// MT=0 ST=1 AT=1 frozen). Training stream: 12 W rows (tape order), then 9 P
+// pairs (pairid 0..8). Revision on confirmed miss: CT := min(c+1, CT+64).
+// Epochs (<=3) until zero-revision epoch. Emits miss/rev log + final metrics.
+@import("R33_NATIVE_IO_V1.zag")
+
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    if(s.len > 0 && s[s.len - 1] == 10) { return s[0..s.len - 1]; }
+    return s;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { ob[pos] = s[i]; pos = pos + 1; i = i + 1; }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn field(line:[]u8, llen:i32, which:i32, out:[]u8) i32 {
+    let fi:i32 = 0; let st:i32 = 0; let i:i32 = 0;
+    while(i <= llen) {
+        let c:u8 = 10;
+        if(i < llen) { c = line[i]; }
+        if(c == 124 || i == llen) {
+            if(fi == which) {
+                let n:i32 = i - st;
+                if(n > out.len) { n = out.len; }
+                let k:i32 = 0;
+                while(k < n) { out[k] = line[st + k]; k = k + 1; }
+                return n;
+            }
+            fi = fi + 1; st = i + 1;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+fn atoi(b:[]u8, n:i32) i64 {
+    let v:i64 = 0; let neg:i64 = 1; let i:i32 = 0;
+    if(n > 0 && b[0] == 45) { neg = -1; i = 1; }
+    while(i < n) {
+        let c:i64 = b[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48); i = i + 1;
+    }
+    return v * neg;
+}
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+// revision attempt: returns new CT, sets *did=1 if a revision happened
+fn try_rev(ct:i64, c:i64, ob:[]u8, pos:*i32, kind:[]u8, idv:i64,
+           nmiss:*i64, nrev:*i64, ncap:*i64, mono_bad:*i64) i64 {
+    if(c < ct) { return ct; } // blocked: not a miss
+    nmiss.* = nmiss.* + 1;
+    let p:i32 = pos.*;
+    p = ob_add(ob, p, "MISS|"); p = ob_add(ob, p, kind); p = ob_add(ob, p, "|");
+    p = ob_add(ob, p, i64s(idv)); p = ob_add(ob, p, "|"); p = ob_add(ob, p, i64s(c));
+    p = ob_add(ob, p, "\n");
+    let want:i64 = c + 1;
+    let cap:i64 = ct + 64;
+    let nct:i64 = want;
+    let caphit:i64 = 0;
+    if(nct > cap) { nct = cap; caphit = 1; }
+    if(nct < ct) { mono_bad.* = 1; }
+    if(nct - ct > 64) { mono_bad.* = 1; }
+    p = ob_add(ob, p, "REV|"); p = ob_add(ob, p, i64s(ct)); p = ob_add(ob, p, "|");
+    p = ob_add(ob, p, i64s(nct)); p = ob_add(ob, p, "|");
+    p = ob_add(ob, p, i64s(nct - ct)); p = ob_add(ob, p, "|");
+    p = ob_add(ob, p, i64s(caphit)); p = ob_add(ob, p, "\n");
+    pos.* = p;
+    nrev.* = nrev.* + 1;
+    ncap.* = ncap.* + caphit;
+    return nct;
+}
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if(a1.len == 0) { return 1; }
+    let fmax:i32 = 8388608;
+    let fb:[]u8 = nio_alloc(fmax);
+    if(fb.len == 0) { return 1; }
+    let n:i64 = z_read(a1, fb, fmax);
+    if(n < 0) { return 1; }
+    let nl:i64 = n;
+    // tape parse: W confs (tape order), P pairs, C confs
+    let wconf:[]u8 = nio_alloc(12 * 8);
+    let wmrg:[]u8 = nio_alloc(12 * 8);
+    let pc0:[]u8 = nio_alloc(9 * 8); let pm0:[]u8 = nio_alloc(9 * 8);
+    let pc1:[]u8 = nio_alloc(9 * 8); let pm1:[]u8 = nio_alloc(9 * 8);
+    let cconf:[]u8 = nio_alloc(1102 * 8);
+    let nw:i64 = 0; let nc:i64 = 0;
+    let pseen:[]u8 = nio_alloc(9);
+    let fnum:[]u8 = nio_alloc(64);
+    // LE helpers inlined via t_put64/t_get64
+    let p:i64 = 0;
+    while(p < nl) {
+        let le:i64 = p;
+        while(le < nl && fb[le as i32] != 10) { le = le + 1; }
+        let llen:i32 = (le - p) as i32;
+        if(llen > 0 && llen < 4000) {
+            let line:[]u8 = fb[p as i32 .. (p + llen as i64) as i32];
+            let kc:u8 = line[0];
+            if(kc == 87) { // W|conf|mrgF|1|1
+                let nf:i32 = field(line, llen, 1, fnum);
+                let conf:i64 = atoi(fnum, nf);
+                nf = field(line, llen, 2, fnum);
+                let mrg:i64 = atoi(fnum, nf);
+                put64(wconf, (nw as i32) * 8, conf);
+                put64(wmrg, (nw as i32) * 8, mrg);
+                nw = nw + 1;
+            }
+            if(kc == 80) { // P|pairid|conf|mrgF|1|1
+                let nf:i32 = field(line, llen, 1, fnum);
+                let pid:i64 = atoi(fnum, nf);
+                nf = field(line, llen, 2, fnum);
+                let conf:i64 = atoi(fnum, nf);
+                nf = field(line, llen, 3, fnum);
+                let mrg:i64 = atoi(fnum, nf);
+                let pi:i32 = pid as i32;
+                if(pseen[pi] == 0) {
+                    put64(pc0, pi * 8, conf); put64(pm0, pi * 8, mrg);
+                    pseen[pi] = 1;
+                } else {
+                    put64(pc1, pi * 8, conf); put64(pm1, pi * 8, mrg);
+                }
+            }
+            if(kc == 67) { // C|conf|mrgF|strong|agree
+                let nf:i32 = field(line, llen, 1, fnum);
+                put64(cconf, (nc as i32) * 8, atoi(fnum, nf));
+                nc = nc + 1;
+            }
+        }
+        p = le + 1;
+    }
+    let ob:[]u8 = nio_alloc(1048576);
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "W4_SELFTRAIN", "frozen=PREREG_W4.md+PREREG_AMEND1.md");
+    pos = ob_kv(ob, pos, "tape_rows_W", i64s(nw));
+    pos = ob_kv(ob, pos, "tape_rows_C", i64s(nc));
+    // training epochs
+    let ct:i64 = 700;
+    let nmiss:i64 = 0; let nrev:i64 = 0; let ncap:i64 = 0; let mono_bad:i64 = 0;
+    let ep:i64 = 0; let converged:i64 = 0;
+    let e1ct:i64 = 0;
+    while(ep < 3) {
+        let revs_ep:i64 = 0;
+        let r0:i64 = nrev;
+        // W stream, tape order
+        let i:i64 = 0;
+        while(i < nw) {
+            let c:i64 = get64(wconf, (i as i32) * 8);
+            let nct:i64 = try_rev(ct, c, ob, &pos, "W", i,
+                                  &nmiss, &nrev, &ncap, &mono_bad);
+            ct = nct;
+            i = i + 1;
+        }
+        // P pairs, pairid 0..8; pair miss iff BOTH pass -> weaker conf
+        let q:i64 = 0;
+        while(q < 9) {
+            let c0:i64 = get64(pc0, (q as i32) * 8);
+            let c1:i64 = get64(pc1, (q as i32) * 8);
+            let weak:i64 = c0;
+            if(c1 < weak) { weak = c1; }
+            let nct:i64 = try_rev(ct, weak, ob, &pos, "P", q,
+                                  &nmiss, &nrev, &ncap, &mono_bad);
+            ct = nct;
+            q = q + 1;
+        }
+        revs_ep = nrev - r0;
+        pos = ob_kv(ob, pos, "EPOCH", i64s(ep + 1));
+        pos = ob_add(ob, pos, "epoch_revs=");
+        pos = ob_add(ob, pos, i64s(revs_ep));
+        pos = ob_add(ob, pos, "|ct_end=");
+        pos = ob_add(ob, pos, i64s(ct));
+        pos = ob_add(ob, pos, "\n");
+        if(ep == 0) { e1ct = ct; }
+        if(revs_ep == 0) { converged = 1; break; }
+        ep = ep + 1;
+    }
+    // final metrics
+    let cad:i64 = 0;
+    let i2:i64 = 0;
+    while(i2 < nc) {
+        if(get64(cconf, (i2 as i32) * 8) >= ct) { cad = cad + 1; }
+        i2 = i2 + 1;
+    }
+    let wad:i64 = 0;
+    let i3:i64 = 0;
+    while(i3 < nw) {
+        if(get64(wconf, (i3 as i32) * 8) >= ct) { wad = wad + 1; }
+        i3 = i3 + 1;
+    }
+    let q2:i64 = 0;
+    while(q2 < 9) {
+        let c0:i64 = get64(pc0, (q2 as i32) * 8);
+        let c1:i64 = get64(pc1, (q2 as i32) * 8);
+        if(c0 >= ct && c1 >= ct) { wad = wad + 1; }
+        q2 = q2 + 1;
+    }
+    // D-W4-1: margin-inflated wrong set (mrgF x10), W4 bar vs M1 bar
+    let w4w:i64 = 0; let w4p:i64 = 0; let m1w:i64 = 0; let m1p:i64 = 0;
+    let i4:i64 = 0;
+    while(i4 < nw) {
+        let c:i64 = get64(wconf, (i4 as i32) * 8);
+        let m:i64 = get64(wmrg, (i4 as i32) * 8) * 10;
+        if(c >= ct) { w4w = w4w + 1; }
+        if(c >= 705 && m >= 3588) { m1w = m1w + 1; }
+        i4 = i4 + 1;
+    }
+    let q3:i64 = 0;
+    while(q3 < 9) {
+        let c0:i64 = get64(pc0, (q3 as i32) * 8);
+        let m0:i64 = get64(pm0, (q3 as i32) * 8) * 10;
+        let c1:i64 = get64(pc1, (q3 as i32) * 8);
+        let m1:i64 = get64(pm1, (q3 as i32) * 8) * 10;
+        if(c0 >= ct && c1 >= ct) { w4p = w4p + 1; }
+        if(c0 >= 705 && m0 >= 3588 && c1 >= 705 && m1 >= 3588) { m1p = m1p + 1; }
+        q3 = q3 + 1;
+    }
+    pos = ob_kv(ob, pos, "FINAL_CT", i64s(ct));
+    pos = ob_kv(ob, pos, "converged", i64s(converged));
+    pos = ob_kv(ob, pos, "correct_admit", i64s(cad));
+    pos = ob_kv(ob, pos, "correct_denom", i64s(1102));
+    pos = ob_kv(ob, pos, "wrong_admit", i64s(wad));
+    pos = ob_kv(ob, pos, "misses", i64s(nmiss));
+    pos = ob_kv(ob, pos, "revisions", i64s(nrev));
+    pos = ob_kv(ob, pos, "cap_hits", i64s(ncap));
+    pos = ob_kv(ob, pos, "epoch1_ct", i64s(e1ct));
+    pos = ob_kv(ob, pos, "d_w4_1_w4bar_W", i64s(w4w));
+    pos = ob_kv(ob, pos, "d_w4_1_w4bar_P", i64s(w4p));
+    pos = ob_kv(ob, pos, "d_w4_1_m1bar_W", i64s(m1w));
+    pos = ob_kv(ob, pos, "d_w4_1_m1bar_P", i64s(m1p));
+    // kill-bar self-checks (scorer re-verifies independently)
+    let kb_t:i64 = 0;
+    if(nmiss != nrev) { kb_t = 1; }
+    let kb_conv:i64 = 0;
+    if(ct != 841 || cad != 433 || converged == 0) { kb_conv = 1; }
+    pos = ob_kv(ob, pos, "kb_w4_t", i64s(kb_t));
+    pos = ob_kv(ob, pos, "kb_w4_mono", i64s(mono_bad));
+    pos = ob_kv(ob, pos, "kb_w4_conv", i64s(kb_conv));
+    _zag_print(ob[0..pos]);
+    return 0;
+}
+fn put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8; b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8; b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8; b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8; b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8) | ((b[at+2] as i64) << 16)
+         | ((b[at+3] as i64) << 24) | ((b[at+4] as i64) << 32)
+         | ((b[at+5] as i64) << 40) | ((b[at+6] as i64) << 48)
+         | ((b[at+7] as i64) << 56);
+}

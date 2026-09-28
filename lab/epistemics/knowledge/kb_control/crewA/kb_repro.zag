@@ -1,0 +1,468 @@
+// kb_repro.zag — minimal pure-Zag reproducer for the 1GB-ingest blob defects.
+// D1: igb_append never counts inter-chunk zero-padding in total.
+// D2: ig_revise reconstructs bb.used = btotal % CHUNK (padding-blind).
+//
+// The blob-writer formulas below are VERBATIM from
+// knowledge/ingest_1gb/build/ingest.zag (igb_append rollover/total logic,
+// ig_revise tail-state reconstruction, and the
+// [1B kind][4B id LE][2B klen BE][4B tlen BE][key][text] record layout).
+// Only the geometry is shrunk: CHUNK=4096 (vs 33488896). Chunk size changes
+// padding magnitudes, never the formulas.
+//
+// Geometry: N=100 records, key=8B, text=90B -> RECLEN=109.
+// 37 records/chunk, 63B zero-padding per rollover.
+//   chunk 0: ids 0..36 | chunk 1: ids 37..73 | chunk 2: ids 74..99 (2834 B)
+// btotal after ingest = 10900. Buggy bb.used = 10900 % 4096 = 2708.
+// True tail usage = 2834. Undercount = 126 (== accumulated padding).
+// Revising id=5 writes a 219B record at [2708,2927), clobbering the last
+// 126 real data bytes [2708,2834) incl. record 99's header at 2725.
+//
+// Zero RNG. No timestamps. Deterministic given the (fixed) inputs.
+
+const CHUNK:i64 = 4096;
+const NREC:i32 = 100;
+const KLEN:i32 = 8;
+const TLEN:i32 = 90;
+const RECLEN:i32 = 109;
+const REVISE_ID:i32 = 5;
+const NEWTLEN:i32 = 200;
+
+// ---------- alloc + LE accessors ----------
+fn z_alloc(n:i32)[]u8 {
+    if(n<1){let e:[]u8="";return e;}
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    if((p as i64)==0){let e2:[]u8="";return e2;}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn s32(b:[]u8,o:i32,v:i32)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+}
+fn g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|(((b[o+1] as i32)&255)<<8);
+    v=v|(((b[o+2] as i32)&255)<<16);
+    v=v|(((b[o+3] as i32)&255)<<24);
+    return v;
+}
+fn as64(b:[]u8,o:i32,v:i64)void {
+    b[o]=(v&255) as u8;
+    b[o+1]=((v>>8)&255) as u8;
+    b[o+2]=((v>>16)&255) as u8;
+    b[o+3]=((v>>24)&255) as u8;
+    b[o+4]=((v>>32)&255) as u8;
+    b[o+5]=((v>>40)&255) as u8;
+    b[o+6]=((v>>48)&255) as u8;
+    b[o+7]=((v>>56)&255) as u8;
+}
+fn ag64(b:[]u8,o:i32)i64 {
+    let v:i64=0;
+    v=v|((b[o] as i64)&255);
+    v=v|(((b[o+1] as i64)&255)<<8);
+    v=v|(((b[o+2] as i64)&255)<<16);
+    v=v|(((b[o+3] as i64)&255)<<24);
+    v=v|(((b[o+4] as i64)&255)<<32);
+    v=v|(((b[o+5] as i64)&255)<<40);
+    v=v|(((b[o+6] as i64)&255)<<48);
+    v=v|(((b[o+7] as i64)&255)<<56);
+    return v;
+}
+// i64 -> decimal, no trailing newline
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){
+        if(s[s.len-1]==10){return s[0..s.len-1];}
+    }
+    return s;
+}
+fn pr(s:[]u8)void {_zag_print(s);}
+fn prln(s:[]u8)void {_zag_println(s);}
+fn ab_str(line:[]u8,lp:*i32,s:[]u8)void {
+    let i:i32=0;
+    let p:i32=lp.*;
+    while(i<s.len){line[p]=s[i];p=p+1;i=i+1;}
+    lp.*=p;
+}
+fn ab_i64(line:[]u8,lp:*i32,v:i64)void {
+    ab_str(line,lp,i64s(v));
+}
+fn emit(line:[]u8,lp:i32)void {prln(line[0..lp]);}
+
+// ---------- file IO (same syscalls as build/ingest.zag) ----------
+fn z_cstr(s:[]u8)[]u8 {
+    let n:i32=s.len;
+    let b:[]u8=z_alloc(n+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<n){b[i]=s[i];i=i+1;}
+    b[n]=0;
+    return b;
+}
+fn f_open_rdonly(path:[]u8)i64 {
+    let c:[]u8=z_cstr(path);
+    if(c.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),0,0,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn f_open_write(path:[]u8)i64 {
+    let c:[]u8=z_cstr(path);
+    if(c.len==0){return -1;}
+    // O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0644
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),577,420,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn f_close(fd:i64)void {_zag_raw_syscall(3,fd,0,0,0,0,0);}
+fn f_read_into(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<0){return -1;}
+        if(n==0){break;}
+        at=at+(n as i32);
+    }
+    return at;
+}
+fn f_write_all(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return 0;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(1,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<=0){return -1;}
+        at=at+(n as i32);
+    }
+    return 0;
+}
+fn chunk_name(idx:i32)[]u8 {
+    // "chunk_" + 6 digits + ".dat"
+    let nm:[]u8=z_alloc(16);
+    nm[0]=99;nm[1]=104;nm[2]=117;nm[3]=110;nm[4]=107;nm[5]=95;
+    let d:i32=100000;
+    let p:i32=6;
+    while(d>=1){
+        nm[p]=((idx/d)%10+48) as u8;
+        p=p+1;
+        d=d/10;
+    }
+    nm[12]=46;nm[13]=100;nm[14]=97;nm[15]=116;
+    return nm;
+}
+fn read_full_chunk(idx:i32,buf:[]u8)i32 {
+    let nm:[]u8=chunk_name(idx);
+    let fd:i64=f_open_rdonly(nm);
+    if(fd<0){return -1;}
+    let got:i32=f_read_into(fd,buf);
+    f_close(fd);
+    return got;
+}
+fn write_full_chunk(idx:i32,buf:[]u8)i32 {
+    let nm:[]u8=chunk_name(idx);
+    let fd:i64=f_open_write(nm);
+    if(fd<0){return -1;}
+    let rc:i32=f_write_all(fd,buf);
+    f_close(fd);
+    return rc;
+}
+
+// ---------- record layout ----------
+// [1B kind][4B id LE][2B klen BE][4B tlen BE][key][text]
+fn make_key(id:i32,key:[]u8)void {
+    key[0]=107;
+    let d:i32=1000000;
+    let p:i32=1;
+    while(d>=1){
+        key[p]=((id/d)%10+48) as u8;
+        p=p+1;
+        d=d/10;
+    }
+}
+fn make_text(id:i32,text:[]u8)void {
+    let j:i32=0;
+    while(j<text.len){
+        text[j]=(((id*7+j*13)%26)+97) as u8;
+        j=j+1;
+    }
+}
+fn write_rec(cur:[]u8,at:i32,kind:i32,id:i32,key:[]u8,text:[]u8)void {
+    cur[at]=(kind&255) as u8;
+    s32(cur,at+1,id);
+    cur[at+5]=((key.len>>8)&255) as u8;
+    cur[at+6]=(key.len&255) as u8;
+    s32(cur,at+7,text.len);
+    let i:i32=0;
+    while(i<key.len){cur[at+11+i]=key[i];i=i+1;}
+    i=0;
+    while(i<text.len){cur[at+11+key.len+i]=text[i];i=i+1;}
+}
+fn parse_hdr(buf:[]u8,off:i32,kind_out:*i32,id_out:*i32,klen_out:*i32,tlen_out:*i32)i32 {
+    if(off>=buf.len){return 0;}
+    if(off+11>buf.len){
+        let p:i32=off;
+        while(p<buf.len){
+            if((buf[p] as i32)!=0){return -1;}
+            p=p+1;
+        }
+        return 0;
+    }
+    let kind:i32=(buf[off] as i32)&255;
+    if(kind==0){return 0;}
+    kind_out.*=kind;
+    id_out.*=g32(buf,off+1);
+    let kl:i32=(((buf[off+5] as i32)&255)<<8)|((buf[off+6] as i32)&255);
+    let tl:i32=g32(buf,off+7);
+    klen_out.*=kl;
+    tlen_out.*=tl;
+    return 11+kl+tl;
+}
+fn rec_ok(buf:[]u8,at:i32,id:i32,key:[]u8,text:[]u8)i32 {
+    let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+    let rl:i32=parse_hdr(buf,at,&ko,&oid,&kl,&tl);
+    if(rl!=(11+key.len+text.len)){return 0;}
+    if(oid!=id){return 0;}
+    if(kl!=key.len||tl!=text.len){return 0;}
+    let i:i32=0;
+    while(i<key.len){if(buf[at+11+i]!=key[i]){return 0;}i=i+1;}
+    i=0;
+    while(i<text.len){if(buf[at+11+key.len+i]!=text[i]){return 0;}i=i+1;}
+    return 1;
+}
+
+fn main()void {
+    let line:[]u8=z_alloc(256);
+    let lp:i32=0;
+    ab_str(line,&lp,"KB-REPRO geometry CHUNK=");
+    ab_i64(line,&lp,CHUNK);
+    ab_str(line,&lp," N=");
+    ab_i64(line,&lp,NREC as i64);
+    ab_str(line,&lp," KLEN=");
+    ab_i64(line,&lp,KLEN as i64);
+    ab_str(line,&lp," TLEN=");
+    ab_i64(line,&lp,TLEN as i64);
+    ab_str(line,&lp," RECLEN=");
+    ab_i64(line,&lp,RECLEN as i64);
+    emit(line,lp);
+
+    // ---- phase 1: ingest with the VERBATIM igb_append formulas ----
+    let cur:[]u8=z_alloc(CHUNK as i32);
+    let used:i32=0;
+    let total:i64=0;
+    let nchunk:i32=0;
+    let recs:i64=0;
+    let offs:[]u8=z_alloc(NREC*8);
+    let key:[]u8=z_alloc(KLEN);
+    let text:[]u8=z_alloc(TLEN);
+    let id:i32=0;
+    while(id<NREC){
+        make_key(id,key);
+        make_text(id,text);
+        let reclen:i32=11+key.len+text.len;
+        if((used as i64)+(reclen as i64)>CHUNK){
+            // pad remainder with zeros, flush full chunk (verbatim)
+            let p:i32=used;
+            while(p<cur.len){cur[p]=0;p=p+1;}
+            if(write_full_chunk(nchunk,cur)!=0){prln("flush failed");return;}
+            nchunk=nchunk+1;
+            used=0;
+        }
+        let off:i64=total;                 // D1: verbatim (padding never counted)
+        write_rec(cur,used,1,id,key,text);
+        used=used+reclen;
+        total=off+(reclen as i64);         // D1: verbatim buggy line
+        recs=recs+1;
+        as64(offs,id*8,off);
+        id=id+1;
+    }
+    let final_used:i32=used;
+    // finish: pad final chunk, flush (verbatim igb_finish)
+    let pf:i32=used;
+    while(pf<cur.len){cur[pf]=0;pf=pf+1;}
+    if(write_full_chunk(nchunk,cur)!=0){prln("finish failed");return;}
+    nchunk=nchunk+1;
+
+    lp=0;
+    ab_str(line,&lp,"ingest nfiles=");
+    ab_i64(line,&lp,nchunk as i64);
+    ab_str(line,&lp," total=");
+    ab_i64(line,&lp,total);
+    ab_str(line,&lp," recs=");
+    ab_i64(line,&lp,recs);
+    ab_str(line,&lp," pad_per_rollover=");
+    ab_i64(line,&lp,CHUNK-((CHUNK/RECLEN as i64)*(RECLEN as i64)));
+    emit(line,lp);
+
+    // ---- phase 2: offset census at RECORDED offsets (D1) ----
+    let per_chunk:i32=(CHUNK/RECLEN as i64) as i32;  // 37
+    let chk:[]u8=z_alloc(CHUNK as i32);
+    let wrong_pre:i32=0;
+    let wrong_post:i32=0;
+    id=0;
+    while(id<NREC){
+        let off:i64=ag64(offs,id*8);
+        let ci:i32=(off/CHUNK) as i32;
+        let ino:i32=(off%CHUNK) as i32;
+        if(read_full_chunk(ci,chk)!=(CHUNK as i32)){prln("census read failed");return;}
+        let ko:i32=0; let oid:i32=0; let kl:i32=0; let tl:i32=0;
+        let rl:i32=parse_hdr(chk,ino,&ko,&oid,&kl,&tl);
+        let ok:i32=0;
+        if(rl>0){if(oid==id){ok=1;}}
+        if(ok==0){
+            if(id<per_chunk){wrong_pre=wrong_pre+1;}else{wrong_post=wrong_post+1;}
+        }
+        id=id+1;
+    }
+    lp=0;
+    ab_str(line,&lp,"census wrong_pre=");
+    ab_i64(line,&lp,wrong_pre as i64);
+    ab_str(line,&lp,"/");
+    ab_i64(line,&lp,per_chunk as i64);
+    ab_str(line,&lp," wrong_post=");
+    ab_i64(line,&lp,wrong_post as i64);
+    ab_str(line,&lp,"/");
+    ab_i64(line,&lp,(NREC-per_chunk) as i64);
+    emit(line,lp);
+
+    // ---- phase 3: geometric walk at TRUE offsets (sindex-style) ----
+    let expect:i32=0;
+    let walk_bad:i32=0;
+    let ci2:i32=0;
+    while(ci2<nchunk){
+        if(read_full_chunk(ci2,chk)!=(CHUNK as i32)){prln("walk read failed");return;}
+        let o2:i32=0;
+        while(1){
+            let ko2:i32=0; let oid2:i32=0; let kl2:i32=0; let tl2:i32=0;
+            let rl2:i32=parse_hdr(chk,o2,&ko2,&oid2,&kl2,&tl2);
+            if(rl2==0){break;}
+            if(rl2<0){walk_bad=1;break;}
+            make_key(expect,key);
+            make_text(expect,text);
+            if(rec_ok(chk,o2,expect,key,text)!=1){walk_bad=1;break;}
+            expect=expect+1;
+            o2=o2+rl2;
+        }
+        if(walk_bad==1){break;}
+        ci2=ci2+1;
+    }
+    lp=0;
+    ab_str(line,&lp,"walk_true_geometry parsed=");
+    ab_i64(line,&lp,expect as i64);
+    ab_str(line,&lp,"/");
+    ab_i64(line,&lp,NREC as i64);
+    ab_str(line,&lp," bad=");
+    ab_i64(line,&lp,walk_bad as i64);
+    emit(line,lp);
+
+    // ---- phase 4: revise a PRE-BOUNDARY slot (id=5), verbatim ig_revise tail ----
+    let last:i32=nchunk-1;
+    let before:[]u8=z_alloc(CHUNK as i32);
+    if(read_full_chunk(last,before)!=(CHUNK as i32)){prln("before read failed");return;}
+    let rcur:[]u8=z_alloc(CHUNK as i32);
+    if(read_full_chunk(last,rcur)!=(CHUNK as i32)){prln("rcur read failed");return;}
+    let rused:i32=(total%CHUNK) as i32;   // D2: verbatim buggy reconstruction
+    let rused_true:i32=final_used;
+    make_key(REVISE_ID,key);
+    let nt:[]u8=z_alloc(NEWTLEN);
+    let q:i32=0;
+    while(q<NEWTLEN){nt[q]=82;q=q+1;}
+    let rreclen:i32=11+key.len+nt.len;
+    write_rec(rcur,rused,1,REVISE_ID,key,nt);
+    if(write_full_chunk(last,rcur)!=0){prln("revise rewrite failed");return;}
+    let new_off_recorded:i64=total;
+    total=total+(rreclen as i64);
+    lp=0;
+    ab_str(line,&lp,"revise id=");
+    ab_i64(line,&lp,REVISE_ID as i64);
+    ab_str(line,&lp," rc=0 rused_buggy=");
+    ab_i64(line,&lp,rused as i64);
+    ab_str(line,&lp," rused_true=");
+    ab_i64(line,&lp,rused_true as i64);
+    ab_str(line,&lp," undercount=");
+    ab_i64(line,&lp,(rused_true-rused) as i64);
+    ab_str(line,&lp," new_off_recorded=");
+    ab_i64(line,&lp,new_off_recorded);
+    emit(line,lp);
+
+    // H3/G2 mirror: revise of a POST-boundary id via its recorded offset fails closed
+    let gid:i32=50;
+    let goff:i64=ag64(offs,gid*8);
+    let gci:i32=(goff/CHUNK) as i32;
+    let gino:i32=(goff%CHUNK) as i32;
+    if(read_full_chunk(gci,chk)!=(CHUNK as i32)){prln("g2 read failed");return;}
+    let gko:i32=0; let goid:i32=0; let gkl:i32=0; let gtl:i32=0;
+    let grl:i32=parse_hdr(chk,gino,&gko,&goid,&gkl,&gtl);
+    lp=0;
+    ab_str(line,&lp,"revise id=50 via recorded offset: ");
+    if(grl>0 && goid==gid){ab_str(line,&lp,"UNEXPECTEDLY PARSED");}
+    else{ab_str(line,&lp,"REFUSED id_mismatch (fail closed)");}
+    emit(line,lp);
+
+    // ---- phase 5: post-revise verification ----
+    let after:[]u8=z_alloc(CHUNK as i32);
+    if(read_full_chunk(last,after)!=(CHUNK as i32)){prln("after read failed");return;}
+    // revised record itself parses at its (wrong) position
+    make_key(REVISE_ID,key);
+    let rok:i32=rec_ok(after,rused,REVISE_ID,key,nt);
+    lp=0;
+    ab_str(line,&lp,"verify id=5 new text at true_off=");
+    ab_i64(line,&lp,(last as i64)*CHUNK+(rused as i64));
+    if(rok==1){ab_str(line,&lp," OK");}else{ab_str(line,&lp," BROKEN");}
+    emit(line,lp);
+    // tail fact id=99 at its TRUE offset
+    let tail_at:i32=(NREC-1-(per_chunk*2))*RECLEN;  // (99-74)*109 = 2725
+    make_key(NREC-1,key);
+    make_text(NREC-1,text);
+    let tok:i32=rec_ok(after,tail_at,NREC-1,key,text);
+    lp=0;
+    ab_str(line,&lp,"verify id=99 at true_off=");
+    ab_i64(line,&lp,(last as i64)*CHUNK+(tail_at as i64));
+    if(tok==1){ab_str(line,&lp," intact");}else{ab_str(line,&lp," MISSING (header destroyed)");}
+    emit(line,lp);
+    // byte diff of the final chunk over the real-data region
+    let first:i64=-1;
+    let lastd:i64=-1;
+    let cnt:i64=0;
+    let d:i32=0;
+    while(d<final_used){
+        if(before[d]!=after[d]){
+            if(first<0){first=d as i64;}
+            lastd=d as i64;
+            cnt=cnt+1;
+        }
+        d=d+1;
+    }
+    lp=0;
+    ab_str(line,&lp,"clobber first=");
+    ab_i64(line,&lp,first);
+    ab_str(line,&lp," last=");
+    ab_i64(line,&lp,lastd);
+    ab_str(line,&lp," count=");
+    ab_i64(line,&lp,cnt);
+    emit(line,lp);
+
+    // neighbor just before the clobber span: id=98's tail is ALSO damaged
+    // (the 126-early write starts inside record 98: [2708,2725) = 17 bytes)
+    make_key(NREC-2,key);
+    make_text(NREC-2,text);
+    let nok:i32=rec_ok(after,tail_at-RECLEN,NREC-2,key,text);
+    lp=0;
+    ab_str(line,&lp,"verify id=98 tail damaged: ");
+    if(nok==1){ab_str(line,&lp,"NO (unexpected)");}else{ab_str(line,&lp,"yes (17 text bytes)");}
+    emit(line,lp);
+
+    lp=0;
+    ab_str(line,&lp,"verdict D1=");
+    if(wrong_pre==0 && wrong_post==(NREC-per_chunk)){ab_str(line,&lp,"REPRODUCED");}else{ab_str(line,&lp,"NOT-REPRODUCED");}
+    ab_str(line,&lp," D2=");
+    if(tok==0 && first==2708 && lastd==2833){ab_str(line,&lp,"REPRODUCED");}else{ab_str(line,&lp,"NOT-REPRODUCED");}
+    emit(line,lp);
+    return;
+}

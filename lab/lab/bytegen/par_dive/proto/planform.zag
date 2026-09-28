@@ -1,0 +1,425 @@
+// planform.zag — §4 plan-formation parallelism prototype (PAR_DIVE prereg).
+// Models the two formation patterns found in the lab:
+//   SEARCH   — imagination/src/imagine.zag::ig_gen_a1 (65536 candidates, each
+//              scored by pure ig_taste_audio, global argmax with strict->
+//              first-wins) and imagination/design/screens.zag::v1_winner
+//              (224 candidates, pure score_candidate, strict-> argmax).
+//   CONSTRUCT— imagination/src/imagine.zag::j2_gen_a1 (each j2_place a pure
+//              function of brief+mode), dialogue.zag::do_compose slot fills
+//              (independent fact lookups), vid/ocean.zag::o_scene (pure f(frame)).
+// Formation paths:
+//   seq      — single in-order scan 0..N-1, strict-> argmax, events slot 0..E-1
+//   shard    — strided scan i=s,s+S,... (one of S shards), local best with
+//              (score desc, idx asc) tiebreak; prints BEST idx score
+//   assemble — order-free reduce of S shard bests, events emitted in REVERSE
+//              slot order E-1..0 (proves emission order is irrelevant)
+//   render   — deterministic synth from a plan file (formation/render split)
+// Byte-identical plans across seq/assemble(/scrambled assemble) prove plan
+// formation is order-free, i.e. parallelizable. Pure Zag, zero RNG.
+// Pinned toolchain: ~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1
+
+// self-contained allocator (mirrors substrate nio_alloc semantics)
+fn z_alloc(n:i64) []u8 {
+    if (n < 1 || n > 33554432) { return ""; }
+    let p:*u8 = _zag_malloc(n as i32) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..(n as i32)];
+    let i:i64 = 0;
+    while (i < n) { b[i] = 0 as u8; i = i + 1; }
+    return b;
+}
+fn z_free(b:[]u8) void {
+    if (b.len > 0) { _zag_free(_zag_slice_ptr(b)); }
+}
+fn p32(b:[]u8, w:i64, v:i64) void {
+    let at:i64 = w * 4;
+    b[at] = (v & 255) as u8;
+    b[at + 1] = ((v >> 8) & 255) as u8;
+    b[at + 2] = ((v >> 16) & 255) as u8;
+    b[at + 3] = ((v >> 24) & 255) as u8;
+}
+fn g32(b:[]u8, w:i64) i64 {
+    let at:i64 = w * 4;
+    return (b[at] as i64) | ((b[at + 1] as i64) << 8) | ((b[at + 2] as i64) << 16) | ((b[at + 3] as i64) << 24);
+}
+fn g32s(b:[]u8, w:i64) i64 {
+    let v:i64 = g32(b, w);
+    if (v >= 2147483648) { return v - 4294967296; }
+    return v;
+}
+fn pf_abs(x:i64) i64 {
+    if (x < 0) { return 0 - x; }
+    return x;
+}
+fn pf_min(a:i64, b:i64) i64 {
+    if (a < b) { return a; }
+    return b;
+}
+fn pf_max(a:i64, b:i64) i64 {
+    if (a > b) { return a; }
+    return b;
+}
+fn z_cstr(dst:[]u8, s:[]u8) void {
+    let i:i64 = 0;
+    while (i < s.len) { dst[i] = s[i]; i = i + 1; }
+    dst[i] = 0 as u8;
+}
+fn s_atoi(s:[]u8) i64 {
+    let neg:i64 = 0;
+    let v:i64 = 0;
+    let i:i64 = 0;
+    while (i < s.len) {
+        let c:i64 = s[i] as i64;
+        if (c == 45) { neg = 1; }
+        if (c >= 48 && c <= 57) { v = v * 10 + (c - 48); }
+        i = i + 1;
+    }
+    if (neg == 1) { return 0 - v; }
+    return v;
+}
+fn f_open_w(path:[]u8) i64 {
+    let buf:[]u8 = z_alloc(path.len + 1);
+    if (buf.len == 0) { return -1; }
+    z_cstr(buf, path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(buf) as i64, 577, 420, 0, 0, 0);
+    z_free(buf);
+    return fd;
+}
+fn f_open_r(path:[]u8) i64 {
+    let buf:[]u8 = z_alloc(path.len + 1);
+    if (buf.len == 0) { return -1; }
+    z_cstr(buf, path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(buf) as i64, 0, 0, 0, 0, 0);
+    z_free(buf);
+    return fd;
+}
+fn f_write_all(fd:i64, b:[]u8) i64 {
+    let o:i64 = 0;
+    while (o < b.len) {
+        let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(b) as i64) + o, b.len - o, 0, 0, 0);
+        if (w <= 0) { return -1; }
+        o = o + w;
+    }
+    return 0;
+}
+fn f_read_all(fd:i64, b:[]u8, n:i64) i64 {
+    let o:i64 = 0;
+    while (o < n) {
+        let r:i64 = _zag_raw_syscall(0, fd, (_zag_slice_ptr(b) as i64) + o, n - o, 0, 0, 0);
+        if (r <= 0) { return o; }
+        o = o + r;
+    }
+    return o;
+}
+
+// ---------- candidate model (mirrors theme_candidate digit packing + ig_a1) ----------
+fn pf_freq(d:i64) i64 {
+    if (d == 0) { return 262; }
+    if (d == 1) { return 294; }
+    if (d == 2) { return 330; }
+    if (d == 3) { return 349; }
+    if (d == 4) { return 392; }
+    if (d == 5) { return 440; }
+    if (d == 6) { return 494; }
+    return 523;
+}
+fn cand_p(idx:i64, k:i64) i64 {
+    if (k == 0) { return idx % 8; }
+    if (k == 1) { return (idx / 8) % 8; }
+    if (k == 2) { return (idx / 64) % 8; }
+    return (idx / 512) % 8;
+}
+fn cand_u(idx:i64, k:i64) i64 {
+    let q:i64 = idx / 4096;
+    if (k == 0) { return q % 2; }
+    if (k == 1) { return (q / 2) % 2; }
+    if (k == 2) { return (q / 4) % 2; }
+    return (q / 8) % 2;
+}
+fn cons_pair(lo:i64, hi:i64) i64 {
+    // mirrors ig_taste_audio machine-branch ratio tests
+    if (2000 * pf_abs(hi * 1 - lo * 2) <= 15 * (hi * 1 + lo * 2)) { return 1; }
+    if (2000 * pf_abs(hi * 2 - lo * 3) <= 15 * (hi * 2 + lo * 3)) { return 1; }
+    if (2000 * pf_abs(hi * 3 - lo * 4) <= 15 * (hi * 3 + lo * 4)) { return 1; }
+    if (2000 * pf_abs(hi * 4 - lo * 5) <= 15 * (hi * 4 + lo * 5)) { return 1; }
+    return 0;
+}
+fn spec_score(p0:i64, p1:i64, p2:i64, p3:i64, u0:i64, u1:i64) i64 {
+    // image-like aesthetic term (mirrors score_candidate structure):
+    // virtual 12-cell spec derived purely from candidate digits.
+    let sp:i64 = 4;
+    if (u0 == 1) { sp = 8; }
+    let tot:i64 = 0;
+    let ok:i64 = 0;
+    let k:i64 = 0;
+    while (k < 12) {
+        let pk:i64 = p0;
+        if (k % 4 == 1) { pk = p1; }
+        if (k % 4 == 2) { pk = p2; }
+        if (k % 4 == 3) { pk = p3; }
+        let v:i64 = (pk * 37 + k * 13 + u1 * 91) % 256;
+        tot = tot + 1;
+        if (v % sp == 0) { ok = ok + 1; }
+        k = k + 1;
+    }
+    let s_reg:i64 = ok * 100 / tot;
+    // alignment: O(12^2) shared-x hits (mirrors score_candidate)
+    let ali:i64 = 0;
+    let i:i64 = 0;
+    while (i < 12) {
+        let xi:i64 = (i * 53 + p0 * 17 + p1 * 11) % 360;
+        let j:i64 = 0;
+        while (j < 12) {
+            let xj:i64 = (j * 53 + p0 * 17 + p1 * 11) % 360;
+            if (j != i && xj == xi) { ali = ali + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let s_ali:i64 = ali * 100 / 132;
+    // economy: fewer distinct digit values better
+    let ncol:i64 = 4 + (p0 + p1 + p2 + p3) % 3;
+    let s_econ:i64 = 120 - 12 * ncol;
+    return s_reg + s_ali + s_econ;
+}
+fn score_candidate(idx:i64) i64 {
+    let p0:i64 = cand_p(idx, 0);
+    let p1:i64 = cand_p(idx, 1);
+    let p2:i64 = cand_p(idx, 2);
+    let p3:i64 = cand_p(idx, 3);
+    let f0:i64 = pf_freq(p0);
+    let f1:i64 = pf_freq(p1);
+    let f2:i64 = pf_freq(p2);
+    let f3:i64 = pf_freq(p3);
+    // anchor filter (mirrors ig_gen_a1: v3 == last, last = pf(7) = 523)
+    if (f3 != 523) { return -1; }
+    // monotonicity filter (mirrors ig_gen_a1)
+    if (f1 < f0) { return -1; }
+    if (f2 < f1) { return -1; }
+    if (f3 < f2) { return -1; }
+    if (f3 <= f0) { return -1; }
+    // consonance over all 6 pairs (mirrors ig_taste_audio)
+    let cp:i64 = 0;
+    cp = cp + cons_pair(pf_min(f0, f1), pf_max(f0, f1));
+    cp = cp + cons_pair(pf_min(f0, f2), pf_max(f0, f2));
+    cp = cp + cons_pair(pf_min(f0, f3), pf_max(f0, f3));
+    cp = cp + cons_pair(pf_min(f1, f2), pf_max(f1, f2));
+    cp = cp + cons_pair(pf_min(f1, f3), pf_max(f1, f3));
+    cp = cp + cons_pair(pf_min(f2, f3), pf_max(f2, f3));
+    let conso:i64 = 500 * cp / 6;
+    // duration regularity (mirrors ig_taste_audio reg term)
+    let d0:i64 = 250;
+    let d1:i64 = 250;
+    let d2:i64 = 250;
+    let d3:i64 = 250;
+    if (cand_u(idx, 0) == 1) { d0 = 500; }
+    if (cand_u(idx, 1) == 1) { d1 = 500; }
+    if (cand_u(idx, 2) == 1) { d2 = 500; }
+    if (cand_u(idx, 3) == 1) { d3 = 500; }
+    let alleq:i64 = 1;
+    if (d1 != d0) { alleq = 0; }
+    if (d2 != d0) { alleq = 0; }
+    if (d3 != d0) { alleq = 0; }
+    let mean:i64 = (d0 + d1 + d2 + d3) / 4;
+    let within:i64 = 1;
+    if (pf_abs(d0 - mean) * 10 > mean) { within = 0; }
+    if (pf_abs(d1 - mean) * 10 > mean) { within = 0; }
+    if (pf_abs(d2 - mean) * 10 > mean) { within = 0; }
+    if (pf_abs(d3 - mean) * 10 > mean) { within = 0; }
+    let reg:i64 = 0;
+    if (alleq == 1) { reg = 500; }
+    if (alleq == 0 && within == 1) { reg = 250; }
+    let spec:i64 = spec_score(p0, p1, p2, p3, cand_u(idx, 0), cand_u(idx, 1));
+    return conso + reg + spec;
+}
+
+// ---------- search: sequential vs sharded ----------
+fn best_seq(o_idx:*i64, o_sc:*i64) void {
+    let bi:i64 = 0;
+    let bs:i64 = -1;
+    let i:i64 = 0;
+    while (i < 65536) {
+        let sc:i64 = score_candidate(i);
+        if (sc > bs) { bs = sc; bi = i; }
+        i = i + 1;
+    }
+    o_idx.* = bi;
+    o_sc.* = bs;
+}
+fn best_shard(s:i64, S:i64, o_idx:*i64, o_sc:*i64) void {
+    let bi:i64 = -1;
+    let bs:i64 = -1;
+    let i:i64 = s;
+    while (i < 65536) {
+        let sc:i64 = score_candidate(i);
+        if (sc > bs) { bs = sc; bi = i; }
+        if (sc == bs && bi >= 0 && i < bi) { bi = i; }
+        i = i + S;
+    }
+    o_idx.* = bi;
+    o_sc.* = bs;
+}
+
+// ---------- plan: each event a pure function of (winner, slot) ----------
+// Mirrors: j2_gen_a1 events (pure f(brief,mode)), plan_v1.txt motif
+// recurrence (slots 16..23 restate slots 0..7), o_scene(f) per-frame params.
+fn emit_event(plan:[]u8, widx:i64, slot:i64) void {
+    let base:i64 = 8 + slot * 8;
+    // motif recurrence: slots 16..23 mirror 0..7 (like plan_v1.txt MOTIF-A)
+    let k:i64 = slot;
+    if (slot >= 16 && slot < 24) { k = slot - 16; }
+    let kk:i64 = k % 4;
+    let freq:i64 = pf_freq(cand_p(widx, kk));
+    let dur:i64 = 250;
+    if (cand_u(widx, kk) == 1) { dur = 500; }
+    p32(plan, base, slot);
+    p32(plan, base + 1, freq);
+    p32(plan, base + 2, dur);
+    p32(plan, base + 3, 700 - k * 10);
+    p32(plan, base + 4, 6 - (k % 3));
+    p32(plan, base + 5, 0);
+    p32(plan, base + 6, 55);
+    p32(plan, base + 7, 15 - (k % 5));
+}
+fn plan_header(plan:[]u8, widx:i64, wsc:i64) void {
+    p32(plan, 0, 1347174742); // 'PFOR'
+    p32(plan, 1, 65536);
+    p32(plan, 2, 32);
+    p32(plan, 3, widx);
+    p32(plan, 4, wsc);
+    p32(plan, 5, 0);
+    p32(plan, 6, 0);
+    p32(plan, 7, 0);
+}
+fn emit_plan_forward(plan:[]u8, widx:i64, wsc:i64) void {
+    plan_header(plan, widx, wsc);
+    let s:i64 = 0;
+    while (s < 32) { emit_event(plan, widx, s); s = s + 1; }
+}
+fn emit_plan_reverse(plan:[]u8, widx:i64, wsc:i64) void {
+    plan_header(plan, widx, wsc);
+    let s:i64 = 31;
+    while (s >= 0) { emit_event(plan, widx, s); s = s - 1; }
+}
+
+// ---------- deterministic render from plan (formation/render split) ----------
+fn render_plan(plan:[]u8, out:[]u8) void {
+    let SR:i64 = 8000;
+    let NS:i64 = 64000;
+    let t:i64 = 0;
+    while (t < NS) {
+        let acc:i64 = 0;
+        let e:i64 = 0;
+        while (e < 32) {
+            let base:i64 = 8 + e * 8;
+            let slot:i64 = g32s(plan, base);
+            let freq:i64 = g32s(plan, base + 1);
+            let dur:i64 = g32s(plan, base + 2);
+            let amp:i64 = g32s(plan, base + 3);
+            let t0:i64 = slot * 200;
+            let tms:i64 = t * 1000 / SR;
+            if (tms >= t0 && tms < t0 + dur) {
+                let ph:i64 = ((tms - t0) * freq) % 1000;
+                let tri:i64 = ph;
+                if (tri > 500) { tri = 1000 - tri; }
+                acc = acc + amp * tri / 500;
+            }
+            e = e + 1;
+        }
+        if (acc > 32767) { acc = 32767; }
+        if (acc < -32768) { acc = -32768; }
+        out[t * 2] = (acc & 255) as u8;
+        out[t * 2 + 1] = ((acc >> 8) & 255) as u8;
+        t = t + 1;
+    }
+}
+
+fn print_best(tag:[]u8, idx:i64, sc:i64) void {
+    _zag_print(tag);
+    _zag_print(_zag_i64_to_str(idx));
+    _zag_print(" ");
+    _zag_println(_zag_i64_to_str(sc));
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if (_zag_strcmp(a1, "seq") == 1) {
+        let out:[]u8 = _zag_arg(2);
+        let widx:i64 = 0;
+        let wsc:i64 = 0;
+        best_seq(&widx, &wsc);
+        let plan:[]u8 = z_alloc(1056);
+        if (plan.len == 0) { return 10; }
+        emit_plan_forward(plan, widx, wsc);
+        let fd:i64 = f_open_w(out);
+        if (fd < 0) { return 11; }
+        let rc:i64 = f_write_all(fd, plan);
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        z_free(plan);
+        if (rc != 0) { return 12; }
+        print_best("WINNER ", widx, wsc);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "shard") == 1) {
+        let s:i64 = s_atoi(_zag_arg(2));
+        let S:i64 = s_atoi(_zag_arg(3));
+        let widx:i64 = 0;
+        let wsc:i64 = 0;
+        best_shard(s, S, &widx, &wsc);
+        print_best("BEST ", widx, wsc);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "assemble") == 1) {
+        let S:i64 = s_atoi(_zag_arg(2));
+        let gbi:i64 = -1;
+        let gbs:i64 = -1;
+        let k:i64 = 0;
+        while (k < S) {
+            let pi:i64 = s_atoi(_zag_arg(3 + k * 2));
+            let ps:i64 = s_atoi(_zag_arg(4 + k * 2));
+            if (pi >= 0) {
+                if (ps > gbs) { gbs = ps; gbi = pi; }
+                if (ps == gbs && pi < gbi) { gbi = pi; }
+            }
+            k = k + 1;
+        }
+        let out:[]u8 = _zag_arg(3 + S * 2);
+        let plan:[]u8 = z_alloc(1056);
+        if (plan.len == 0) { return 10; }
+        // REVERSE slot order: proves emission order is irrelevant
+        emit_plan_reverse(plan, gbi, gbs);
+        let fd:i64 = f_open_w(out);
+        if (fd < 0) { return 11; }
+        let rc:i64 = f_write_all(fd, plan);
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        z_free(plan);
+        if (rc != 0) { return 12; }
+        print_best("WINNER ", gbi, gbs);
+        return 0;
+    }
+    if (_zag_strcmp(a1, "render") == 1) {
+        let pin:[]u8 = _zag_arg(2);
+        let pout:[]u8 = _zag_arg(3);
+        let plan:[]u8 = z_alloc(1056);
+        if (plan.len == 0) { return 10; }
+        let fd:i64 = f_open_r(pin);
+        if (fd < 0) { return 11; }
+        let nr:i64 = f_read_all(fd, plan, 1056);
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+        if (nr != 1056) { return 13; }
+        let out:[]u8 = z_alloc(128000);
+        if (out.len == 0) { return 10; }
+        render_plan(plan, out);
+        let fd2:i64 = f_open_w(pout);
+        if (fd2 < 0) { return 11; }
+        let rc:i64 = f_write_all(fd2, out);
+        _zag_raw_syscall(3, fd2, 0, 0, 0, 0, 0);
+        z_free(plan);
+        z_free(out);
+        if (rc != 0) { return 12; }
+        _zag_println("RENDER ok");
+        return 0;
+    }
+    _zag_println("usage: planform seq <out> | shard <s> <S> | assemble <S> <i0> <s0> ... <out> | render <plan> <out>");
+    return 1;
+}

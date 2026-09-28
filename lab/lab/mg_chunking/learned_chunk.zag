@@ -1,0 +1,1611 @@
+// learned_chunk.zag - TNN-native learned chunking policy (pure Zag, zero RNG)
+// Fork segments (helpers, classify, mg_zoom, s_answer, summ_*) are VERBATIM from
+// mg_chunk.zag. c_answer/w_answer appear as s1_answer/s2_answer with only a tag
+// parameter added (bodies byte-identical). Parts A-D are new.
+
+// mg_chunk.zag — MAGNIFYING-GLASS CHUNKING fork for TNN text handling.
+// (Micah order 2026-09-26 ~09:27 PDT: "for magnifying glass it should also
+//  work for TNN — say user asks how many r's in strawberry or something
+//  else specific, TNN chooses its chunking and adapts it")
+//
+// A chunking organ in pure Zag: given (question, text) TNN deliberatively
+// chooses HOW to chunk the text — characters, words, variable scales,
+// zoom in/out — with every choice recorded and reasoned. No fixed
+// tokenizer, no fixed chunk size, no baked-in units.
+//
+// The zoom machinery follows the n5_zoom precedent (traced sub-span
+// addressing, deliberative depth): mg_zoom(qid, parent, roff, rlen, depth,
+// why) addresses a sub-span of the text and logs it to the zoom ledger.
+//
+// Four arms over the same 24-question battery of sub-word traps:
+//   D = deliberative magnifying-glass chunking (chooses per question)
+//   C = fixed character chunks (every byte a chunk)
+//   W = fixed word chunks (space-delimited)
+//   S = fixed 4-byte spans
+// Fixed arms may inspect bytes inside a chunk only as a recorded FALLBACK
+// (the tokenizer escape hatch); native=0 marks those answers. The
+// deliberative arm never falls back: it magnifies instead, and the zoom
+// trace is the deliberation record.
+//
+// Zero RNG. Deterministic. Byte-identical reruns.
+@import("./R33_NATIVE_IO_V1.zag")
+
+// ---------- little-endian accessors over []u8 arenas ----------
+// (ZNC-2026-09-21-007: no `as []i32` casts; []u8 arenas + accessors)
+fn w_u32le(b:[]u8, o:i64, v:i64) void {
+    b[o]=(v & 255) as u8;
+    b[o+1]=((v >> 8) & 255) as u8;
+    b[o+2]=((v >> 16) & 255) as u8;
+    b[o+3]=((v >> 24) & 255) as u8;
+}
+fn r_u32le(b:[]u8, o:i64) i64 {
+    return (b[o] as i64)+((b[o+1] as i64) << 8)+((b[o+2] as i64) << 16)+((b[o+3] as i64) << 24);
+}
+fn w_i64le(b:[]u8, o:i64, v:i64) void {
+    let u:i64=v; let i:i64=0;
+    while (i<8) { b[o+i]=(u & 255) as u8; u=u >> 8; i=i+1; }
+}
+fn r_i64le(b:[]u8, o:i64) i64 {
+    let u:i64=0; let i:i64=7;
+    while (i>=0) { u=(u << 8)+(b[o+i] as i64); i=i-1; }
+    return u;
+}
+
+// ---------- output buffer ----------
+fn ob_raw(out:[]u8, at:i64, s:[]u8) i64 {
+    let i:i64=0;
+    while (i<s.len) { out[at+i]=s[i]; i=i+1; }
+    return at+s.len;
+}
+fn ob_i64(out:[]u8, at:i64, v:i64, scr:[]u8) i64 {
+    let x:i64=v;
+    if (x<0) { out[at]=45; at=at+1; x=0-x; }
+    let n:i64=0;
+    if (x==0) { scr[0]=48; n=1; }
+    while (x>0) { scr[n]=((x % 10)+48) as u8; x=x/10; n=n+1; }
+    let i:i64=n-1;
+    while (i>=0) { out[at]=scr[i]; at=at+1; i=i-1; }
+    return at;
+}
+fn ob_nl(out:[]u8, at:i64) i64 { out[at]=10; return at+1; }
+
+// ---------- byte-string helpers (znc has no break; flag idiom) ----------
+fn find_sub(h:[]u8, n:[]u8) i64 {
+    if (n.len==0) { return 0; }
+    if (n.len>h.len) { return -1; }
+    let i:i64=0; let hit:i64=-1;
+    while (i+n.len<=h.len) {
+        if (hit==-1) {
+            let j:i64=0; let ok:i64=1;
+            while (j<n.len) {
+                if (h[i+j]!=n[j]) { ok=0; j=n.len; }
+                else { j=j+1; }
+            }
+            if (ok==1) { hit=i; }
+        }
+        i=i+1;
+    }
+    return hit;
+}
+fn has_sub(h:[]u8, n:[]u8) i64 {
+    if (find_sub(h,n)>=0) { return 1; }
+    return 0;
+}
+fn has_byte(t:[]u8, c:u8) i64 {
+    let i:i64=0; let f:i64=0;
+    while (i<t.len) {
+        if (t[i]==c) { f=1; i=t.len; }
+        else { i=i+1; }
+    }
+    return f;
+}
+fn beq(a:[]u8, b:[]u8) i64 {
+    if (nio_equal(a,b)==1) { return 1; }
+    return 0;
+}
+fn parse_digits(s:[]u8, at:i64) i64 {
+    let v:i64=0; let i:i64=at; let go:i64=1;
+    while (i<s.len) {
+        if (go==1) {
+            let c:i64=s[i] as i64;
+            if (c>=48) {
+                if (c<=57) { v=v*10+(c-48); i=i+1; }
+                else { go=0; }
+            }
+            else { go=0; }
+        }
+        else { i=i+1; }
+    }
+    return v;
+}
+
+// ---------- chunk primitives ----------
+fn enum_words(t:[]u8, offs:[]u8, lens:[]u8) i64 {
+    let n:i64=0; let i:i64=0; let L:i64=t.len; let inword:i64=0; let s:i64=0;
+    while (i<L) {
+        if (t[i]==32) {
+            if (inword==1) {
+                w_u32le(offs,n*4,s); w_u32le(lens,n*4,i-s); n=n+1; inword=0;
+            }
+        }
+        else {
+            if (inword==0) { s=i; inword=1; }
+        }
+        i=i+1;
+    }
+    if (inword==1) { w_u32le(offs,n*4,s); w_u32le(lens,n*4,i-s); n=n+1; }
+    return n;
+}
+fn scan_count(t:[]u8, o:i64, ln:i64, target:u8) i64 {
+    let c:i64=0; let i:i64=o;
+    while (i<o+ln) { if (t[i]==target) { c=c+1; } i=i+1; }
+    return c;
+}
+fn count_words_bytes(t:[]u8) i64 {
+    let n:i64=0; let i:i64=0; let L:i64=t.len; let inword:i64=0;
+    while (i<L) {
+        if (t[i]==32) { inword=0; }
+        else {
+            if (inword==0) { n=n+1; inword=1; }
+        }
+        i=i+1;
+    }
+    return n;
+}
+fn find_word(t:[]u8, offs:[]u8, lens:[]u8, nw:i64, w:[]u8) i64 {
+    let k:i64=0; let hit:i64=-1;
+    while (k<nw) {
+        if (hit==-1) {
+            let o:i64=r_u32le(offs,k*4); let ln:i64=r_u32le(lens,k*4);
+            if (ln==w.len) {
+                let seg:[]u8=t[o..o+ln];
+                if (beq(seg,w)==1) { hit=k; }
+            }
+        }
+        k=k+1;
+    }
+    return hit;
+}
+fn reverse_into(t:[]u8, dst:[]u8) void {
+    let i:i64=0; let L:i64=t.len;
+    while (i<L) { dst[i]=t[L-1-i]; i=i+1; }
+}
+
+// ---------- question kinds ----------
+// 1 LETTER_COUNT, 2 POSITION_N, 3 REVERSE, 4 WORD_COUNT,
+// 5 LENGTH, 6 CONTAINS, 7 FIRST_WORD, 8 POS_FIRST, 9 POS_LAST
+fn classify(q:[]u8) i64 {
+    if (has_sub(q,"how many words in")==1) { return 4; }
+    if (has_sub(q,"how many letters in")==1) { return 5; }
+    if (has_sub(q,"'s in")==1) { return 1; }
+    if (has_sub(q,"backwards")==1) { return 3; }
+    if (has_sub(q,"first word of")==1) { return 7; }
+    if (has_sub(q,"contain ")==1) { return 6; }
+    if (has_sub(q,"first letter of")==1) { return 8; }
+    if (has_sub(q,"last letter of")==1) { return 9; }
+    if (has_sub(q,"letter of")==1) { return 2; }
+    return 0;
+}
+fn kind_name(k:i64) []u8 {
+    if (k==1) { return "LETTER_COUNT"; }
+    if (k==2) { return "POSITION"; }
+    if (k==3) { return "REVERSE"; }
+    if (k==4) { return "WORD_COUNT"; }
+    if (k==5) { return "LENGTH"; }
+    if (k==6) { return "CONTAINS"; }
+    if (k==7) { return "FIRST_WORD"; }
+    if (k==8) { return "POS_FIRST"; }
+    return "POS_LAST";
+}
+fn skind(k:i64) i64 {
+    if (k==1) { return 0; }
+    if (k==2) { return 1; }
+    if (k==8) { return 1; }
+    if (k==9) { return 1; }
+    if (k==3) { return 2; }
+    if (k==4) { return 3; }
+    if (k==5) { return 4; }
+    if (k==6) { return 5; }
+    return 6;
+}
+fn parse_target_letter(q:[]u8) u8 {
+    let p:i64=find_sub(q,"'s in");
+    return q[p-1];
+}
+fn parse_pos_n(q:[]u8) i64 {
+    let p:i64=find_sub(q,"the ");
+    return parse_digits(q,p+4);
+}
+fn parse_after(q:[]u8, marker:[]u8) []u8 {
+    let p:i64=find_sub(q,marker);
+    return q[p+marker.len..q.len];
+}
+fn parse_between(q:[]u8, a:[]u8, b:[]u8) []u8 {
+    let p:i64=find_sub(q,a); let p2:i64=find_sub(q,b);
+    return q[p+a.len..p2];
+}
+
+// ---------- magnifying-glass zoom (n5_zoom precedent) ----------
+// spans: parallel u32le arenas soff/slen. span 0 = whole text (per question).
+// mg_zoom addresses the sub-span [roff,roff+rlen) of parent span and logs
+// (qid, span, parent, off, len, depth, why) to the zoom ledger. why codes:
+// 1 count-letters-inside-word, 2 locate-target-word,
+// 3 index-character-inside-word, 4 substring-scan-at-character-scale,
+// 5 character-span.
+fn why_str(w:i64) []u8 {
+    if (w==1) { return "count-letters-inside-word"; }
+    if (w==2) { return "locate-target-word"; }
+    if (w==3) { return "index-character-inside-word"; }
+    if (w==4) { return "substring-scan-at-character-scale"; }
+    return "character-span";
+}
+fn mg_zoom(qid:i64, parent:i64, roff:i64, rlen:i64, depth:i64, why:i64,
+           soff:[]u8, slen:[]u8, nsp:*i64,
+           zlog:[]u8, zn:*i64,
+           out:[]u8, atp:*i64, scr:[]u8) i64 {
+    let a:i64=atp.*;
+    let po:i64=r_u32le(soff,parent*4);
+    let id:i64=nsp.*;
+    w_u32le(soff,id*4,po+roff); w_u32le(slen,id*4,rlen);
+    nsp.*=id+1;
+    let z:i64=zn.*;
+    let b:i64=z*28;
+    w_u32le(zlog,b,qid); w_u32le(zlog,b+4,id); w_u32le(zlog,b+8,parent);
+    w_u32le(zlog,b+12,po+roff); w_u32le(zlog,b+16,rlen);
+    w_u32le(zlog,b+20,depth); w_u32le(zlog,b+24,why);
+    zn.*=z+1;
+    a=ob_raw(out,a,"D zoom qid=");
+    a=ob_i64(out,a,qid,scr);
+    a=ob_raw(out,a," span=");
+    a=ob_i64(out,a,id,scr);
+    a=ob_raw(out,a," parent=");
+    a=ob_i64(out,a,parent,scr);
+    a=ob_raw(out,a," off=");
+    a=ob_i64(out,a,po+roff,scr);
+    a=ob_raw(out,a," len=");
+    a=ob_i64(out,a,rlen,scr);
+    a=ob_raw(out,a," depth=");
+    a=ob_i64(out,a,depth,scr);
+    a=ob_raw(out,a," why=");
+    a=ob_raw(out,a,why_str(why));
+    a=ob_nl(out,a);
+    atp.*=a;
+    return id;
+}
+
+// ---------- deliberative chunking choice ----------
+// chunk codes: 1 CHAR, 2 WORD, 3 WORD>CHAR, 4 WORD?CHARSCAN
+fn d_choose(kind:i64, t:[]u8) i64 {
+    if (kind==1) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==2) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==8) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==9) {
+        if (has_byte(t,32)==1) { return 3; }
+        return 1;
+    }
+    if (kind==3) { return 1; }
+    if (kind==4) { return 2; }
+    if (kind==5) { return 1; }
+    if (kind==6) { return 4; }
+    return 2;
+}
+fn chunk_name(c:i64) []u8 {
+    if (c==1) { return "CHAR"; }
+    if (c==2) { return "WORD"; }
+    if (c==3) { return "WORD>CHAR"; }
+    return "WORD?CHARSCAN";
+}
+fn d_why(kind:i64, c:i64) []u8 {
+    if (c==1) {
+        if (kind==1) { return "letter question on a single token: character units; no coarser unit resolves letters"; }
+        if (kind==3) { return "reversal is a byte-order operation: character units"; }
+        if (kind==5) { return "length is a character count: character units"; }
+        return "positional index on a single token: character units directly";
+    }
+    if (c==2) {
+        if (kind==4) { return "word counting is a word-boundary operation: word units"; }
+        return "word-boundary operation: word units";
+    }
+    if (c==3) {
+        if (kind==1) { return "multi-token text: enumerate words at word scale, magnify to character units inside each word; letters live below word scale"; }
+        return "locate the named word at word scale, then magnify to character units for the index";
+    }
+    return "try word-boundary match first; magnify to a character span scan on miss";
+}
+
+// locate the span the question is about: whole text if the named target
+// equals it, else the named word inside it. returns span offset/len via
+// out params (o:*i64, l:*i64); magnifies with traced zooms.
+
+// ---------- fixed arm C as candidate K1: CHAR chunks (verbatim body) ----------
+fn s1_answer(tag:[]u8, qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+            out:[]u8, atp:*i64, scr:[]u8,
+             soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+             woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+             revbuf:[]u8, abuf:[]u8) i64 {
+    let ops:i64=0;
+    let ans:[]u8=abuf[0..0];
+    let alen:i64=0;
+    if (kind==1) {
+        let cnt:i64=scan_count(t,0,t.len,parse_target_letter(q));
+        ops=t.len;
+        alen=ob_i64(abuf,0,cnt,scr); ans=abuf[0..alen];
+    }
+    if (kind==2) {
+        let n:i64=parse_pos_n(q);
+        ops=n;
+        if (n>=1) {
+            if (n<=t.len) {
+                abuf[0]=t[n-1]; alen=1; ans=abuf[0..alen];
+            }
+            else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+        }
+        else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+    }
+    if (kind==8) {
+        abuf[0]=t[0]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==9) {
+        abuf[0]=t[t.len-1]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==3) {
+        reverse_into(t,revbuf);
+        ans=revbuf[0..t.len];
+        ops=t.len;
+    }
+    if (kind==4) {
+        let n:i64=count_words_bytes(t);
+        ops=t.len;
+        alen=ob_i64(abuf,0,n,scr); ans=abuf[0..alen];
+    }
+    if (kind==5) {
+        ops=t.len;
+        alen=ob_i64(abuf,0,t.len,scr); ans=abuf[0..alen];
+    }
+    if (kind==6) {
+        let p:i64=find_sub(t,parse_after(q,"contain "));
+        ops=t.len;
+        if (p>=0) { ans="yes"; }
+        else { ans="no"; }
+    }
+    if (kind==7) {
+        let e:i64=t.len; let i:i64=0; let stop:i64=0;
+        while (i<t.len) {
+            if (stop==0) {
+                if (t[i]==32) { e=i; stop=1; }
+            }
+            i=i+1;
+        }
+        ans=t[0..e]; ops=e;
+    }
+    let correct:i64=beq(ans,exp);
+    emit_result(tag,ans,exp,correct,1,0,ops,0,0,out,atp,scr);
+    return pack_stats(correct,1,0,ops,0,0);
+}
+
+// ---------- fixed arm W as candidate K2: WORD chunks (verbatim body) ----------
+fn s2_answer(tag:[]u8, qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+            out:[]u8, atp:*i64, scr:[]u8,
+             soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+             woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+             revbuf:[]u8, abuf:[]u8) i64 {
+    let nw:i64=enum_words(t,woffs,wlens);
+    let ops:i64=0; let fb:i64=0;
+    let ans:[]u8=abuf[0..0];
+    let alen:i64=0;
+    if (kind==1) {
+        fb=1;
+        let tgt:u8=parse_target_letter(q);
+        let total:i64=0; let k:i64=0;
+        while (k<nw) {
+            let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+            total=total+scan_count(t,wo,wl,tgt);
+            k=k+1;
+        }
+        ops=nw+t.len;
+        alen=ob_i64(abuf,0,total,scr); ans=abuf[0..alen];
+    }
+    if (kind==2) {
+        fb=1;
+        let tw:[]u8=parse_after(q,"of ");
+        let wo:i64=0; let wl:i64=t.len; let okw:i64=1;
+        if (beq(tw,t)==0) {
+            let k:i64=find_word(t,woffs,wlens,nw,tw);
+            if (k<0) { okw=0; }
+            else { wo=r_u32le(woffs,k*4); wl=r_u32le(wlens,k*4); }
+        }
+        let n:i64=parse_pos_n(q);
+        ops=nw+n;
+        if (okw==0) { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+        else {
+            if (n>=1) {
+                if (n<=wl) {
+                    abuf[0]=t[wo+n-1]; alen=1; ans=abuf[0..alen];
+                }
+                else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+            }
+            else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+        }
+    }
+    if (kind==8) {
+        fb=1;
+        let wo:i64=r_u32le(woffs,0);
+        abuf[0]=t[wo]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==9) {
+        fb=1;
+        let k:i64=nw-1;
+        let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+        abuf[0]=t[wo+wl-1]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==3) {
+        fb=1;
+        let i:i64=0;
+        while (i<t.len) { revbuf[i]=t[i]; i=i+1; }
+        let k:i64=0;
+        while (k<nw) {
+            let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+            let j:i64=0;
+            while (j<wl) { revbuf[wo+j]=t[wo+wl-1-j]; j=j+1; }
+            k=k+1;
+        }
+        ans=revbuf[0..t.len];
+        ops=nw+t.len;
+    }
+    if (kind==4) {
+        ops=nw;
+        alen=ob_i64(abuf,0,nw,scr); ans=abuf[0..alen];
+    }
+    if (kind==5) {
+        let total:i64=0; let k:i64=0;
+        while (k<nw) { total=total+r_u32le(wlens,k*4); k=k+1; }
+        ops=nw;
+        alen=ob_i64(abuf,0,total+nw-1,scr); ans=abuf[0..alen];
+    }
+    if (kind==6) {
+        let needle:[]u8=parse_after(q,"contain ");
+        let k:i64=find_word(t,woffs,wlens,nw,needle);
+        if (k>=0) {
+            ops=nw; ans="yes";
+        }
+        else {
+            fb=1;
+            ops=nw+t.len;
+            if (find_sub(t,needle)>=0) { ans="yes"; }
+            else { ans="no"; }
+        }
+    }
+    if (kind==7) {
+        let wo:i64=r_u32le(woffs,0); let wl:i64=r_u32le(wlens,0);
+        ans=t[wo..wo+wl]; ops=1;
+    }
+    let correct:i64=beq(ans,exp);
+    let native:i64=1;
+    if (fb==1) { native=0; }
+    emit_result(tag,ans,exp,correct,native,fb,ops,0,0,out,atp,scr);
+    return pack_stats(correct,native,fb,ops,0,0);
+}
+
+// ---------- fixed arm S (verbatim): retired, negative control only ----------
+fn s_answer(qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+            out:[]u8, atp:*i64, scr:[]u8, abuf:[]u8, revbuf:[]u8) i64 {
+    let nspans:i64=(t.len+3)/4;
+    let ops:i64=0; let fb:i64=0;
+    let ans:[]u8=abuf[0..0];
+    let alen:i64=0;
+    if (kind==1) {
+        fb=1;
+        let tgt:u8=parse_target_letter(q);
+        let total:i64=0; let s:i64=0;
+        while (s<nspans) {
+            let so:i64=s*4; let sl:i64=4;
+            if (so+sl>t.len) { sl=t.len-so; }
+            total=total+scan_count(t,so,sl,tgt);
+            s=s+1;
+        }
+        ops=nspans+t.len;
+        alen=ob_i64(abuf,0,total,scr); ans=abuf[0..alen];
+    }
+    if (kind==2) {
+        fb=1;
+        let n:i64=parse_pos_n(q);
+        ops=2;
+        if (n>=1) {
+            if (n<=t.len) {
+                abuf[0]=t[n-1]; alen=1; ans=abuf[0..alen];
+            }
+            else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+        }
+        else { abuf[0]=63; alen=1; ans=abuf[0..alen]; }
+    }
+    if (kind==8) {
+        fb=1; abuf[0]=t[0]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==9) {
+        fb=1; abuf[0]=t[t.len-1]; alen=1; ans=abuf[0..alen]; ops=1;
+    }
+    if (kind==3) {
+        fb=1;
+        reverse_into(t,revbuf);
+        ans=revbuf[0..t.len];
+        ops=nspans+t.len;
+    }
+    if (kind==4) {
+        fb=1;
+        let n:i64=count_words_bytes(t);
+        ops=nspans+t.len;
+        alen=ob_i64(abuf,0,n,scr); ans=abuf[0..alen];
+    }
+    if (kind==5) {
+        ops=nspans;
+        alen=ob_i64(abuf,0,t.len,scr); ans=abuf[0..alen];
+    }
+    if (kind==6) {
+        fb=1;
+        let p:i64=find_sub(t,parse_after(q,"contain "));
+        ops=nspans+t.len;
+        if (p>=0) { ans="yes"; }
+        else { ans="no"; }
+    }
+    if (kind==7) {
+        fb=1;
+        let e:i64=t.len; let i:i64=0; let stop:i64=0;
+        while (i<t.len) {
+            if (stop==0) {
+                if (t[i]==32) { e=i; stop=1; }
+            }
+            i=i+1;
+        }
+        ans=t[0..e]; ops=nspans+e;
+    }
+    let correct:i64=beq(ans,exp);
+    let native:i64=1;
+    if (fb==1) { native=0; }
+    emit_result("S",ans,exp,correct,native,fb,ops,0,0,out,atp,scr);
+    return pack_stats(correct,native,fb,ops,0,0);
+}
+
+fn pack_stats(correct:i64, native:i64, fb:i64, ops:i64, maxd:i64, nz:i64) i64 {
+    return correct+(native*2)+(fb*4)+(ops*256)+(maxd*1099511627776)+(nz*281474976710656);
+}
+
+fn emit_result(tag:[]u8, ans:[]u8, exp:[]u8, correct:i64, native:i64, fb:i64,
+               ops:i64, maxd:i64, nz:i64,
+               out:[]u8, atp:*i64, scr:[]u8) void {
+    let a:i64=atp.*;
+    a=ob_raw(out,a,tag);
+    a=ob_raw(out,a," ans=\"");
+    a=ob_raw(out,a,ans);
+    a=ob_raw(out,a,"\" exp=\"");
+    a=ob_raw(out,a,exp);
+    a=ob_raw(out,a,"\" correct=");
+    a=ob_i64(out,a,correct,scr);
+    a=ob_raw(out,a," native=");
+    a=ob_i64(out,a,native,scr);
+    a=ob_raw(out,a," fallback=");
+    a=ob_i64(out,a,fb,scr);
+    a=ob_raw(out,a," ops=");
+    a=ob_i64(out,a,ops,scr);
+    a=ob_raw(out,a," maxdepth=");
+    a=ob_i64(out,a,maxd,scr);
+    a=ob_raw(out,a," zooms=");
+    a=ob_i64(out,a,nz,scr);
+    a=ob_nl(out,a);
+    atp.*=a;
+    return;
+}
+
+fn summ_add(summ:[]u8, arm:i64, sk:i64, stats:i64) void {
+    let correct:i64=stats & 1;
+    let native:i64=(stats >> 1) & 1;
+    let ops:i64=(stats >> 8) & 4294967295;
+    let base:i64=((arm*7)+sk)*4*8;
+    w_i64le(summ,base,r_i64le(summ,base)+1);
+    w_i64le(summ,base+8,r_i64le(summ,base+8)+correct);
+    w_i64le(summ,base+16,r_i64le(summ,base+16)+native);
+    w_i64le(summ,base+24,r_i64le(summ,base+24)+ops);
+    return;
+}
+
+fn skind_name(sk:i64) []u8 {
+    if (sk==0) { return "LETTER_COUNT"; }
+    if (sk==1) { return "POSITION"; }
+    if (sk==2) { return "REVERSE"; }
+    if (sk==3) { return "WORD_COUNT"; }
+    if (sk==4) { return "LENGTH"; }
+    if (sk==5) { return "CONTAINS"; }
+    return "FIRST_WORD";
+}
+
+// ---------- PART A: context features, ordinals, sentences (NEW, pure Zag) ----------
+// The fork's classify()/kind_name()/skind() are used FROZEN and verbatim.
+// learn_classify() extends them with genuinely new structure (kinds 12/13)
+// for questions the fork returns 0 for, and disambiguates nested composites
+// by their head. The fork's classify() itself is never modified.
+//   12 SENT_WORD    e.g. "what is the 2nd word of the 3rd sentence"
+//   13 SENT_COUNT   e.g. "how many words in the 2nd sentence"
+// Context for learning: ctx = kind*100 + shape*10 + sub, where
+//   shape: 0 single token, 1 multi-token, 2 multi-sentence
+//   sub:   0 question addresses the whole text (kind 6: needle is a whole word,
+//          so word-scale addressing suffices),
+//          1 question names a literal sub-span (kind 6: needle is a substring,
+//          so word-scale addressing falls back),
+//          2 question names an ordinal/unlocatable reference
+// (ctx < 1400; the ledger is sized for 1400 * 4 candidates.)
+
+// Extended classifier: fork's classify() verbatim first; new structure only
+// for what the fork cannot name.
+fn learn_classify(q:[]u8) i64 {
+    if (has_sub(q,"last letter of the ")==1) { return 9; }
+    if (has_sub(q,"first letter of the ")==1) { return 8; }
+    if (has_sub(q,"how many words in the ")==1) {
+        if (has_sub(q," sentence")==1) { return 13; }
+    }
+    let k:i64=classify(q);
+    if (k!=0) { return k; }
+    if (has_sub(q," word of")==1) { return 12; }
+    return 0;
+}
+fn lkind_name(k:i64) []u8 {
+    if (k==12) { return "SENT_WORD"; }
+    if (k==13) { return "SENT_COUNT"; }
+    return kind_name(k);
+}
+// parse an ordinal token at byte position at: first/1st..fifth/5th -> 1..5 else 0
+fn parse_ordinal_at(q:[]u8, at:i64) i64 {
+    if (at<0) { return 0; }
+    if (at>=q.len) { return 0; }
+    let e:i64=at;
+    while (e<q.len) {
+        if (q[e]==32) { break; }
+        e=e+1;
+    }
+    return parse_ordinal_token(q[at..e]);
+}
+fn parse_ordinal_token(tok:[]u8) i64 {
+    if (beq(tok,"first")==1) { return 1; }
+    if (beq(tok,"1st")==1) { return 1; }
+    if (beq(tok,"second")==1) { return 2; }
+    if (beq(tok,"2nd")==1) { return 2; }
+    if (beq(tok,"third")==1) { return 3; }
+    if (beq(tok,"3rd")==1) { return 3; }
+    if (beq(tok,"fourth")==1) { return 4; }
+    if (beq(tok,"4th")==1) { return 4; }
+    if (beq(tok,"fifth")==1) { return 5; }
+    if (beq(tok,"5th")==1) { return 5; }
+    let v:i64=0; let i:i64=0; let go:i64=1;
+    while (i<tok.len) {
+        if (go==1) {
+            let c:i64=tok[i] as i64;
+            if (c>=48) {
+                if (c<=57) { v=v*10+(c-48); i=i+1; }
+                else { go=0; }
+            }
+            else { go=0; }
+        }
+        if (go==0) { i=i+1; }
+    }
+    if (v>=1) {
+        if (v<=9) { return v; }
+    }
+    return 0;
+}
+// ordinal token immediately before byte position endpos
+// (e.g. "2nd" in "... the 2nd sentence")
+fn ordinal_before(q:[]u8, endpos:i64) i64 {
+    if (endpos<=0) { return 0; }
+    let e:i64=endpos-1;
+    while (e>=0) {
+        if (q[e]==32) { break; }
+        e=e-1;
+    }
+    return parse_ordinal_token(q[e+1..endpos]);
+}
+// "the <ordinal> word ..." target?
+fn is_ord_word_token(tok:[]u8) i64 {
+    if (tok.len<5) { return 0; }
+    if (tok[0]==116) {
+        if (tok[1]==104) {
+            if (tok[2]==101) {
+                if (tok[3]==32) { return 1; }
+            }
+        }
+    }
+    return 0;
+}
+fn is_ordinal_word_target(tw:[]u8) i64 {
+    if (is_ord_word_token(tw)==0) { return 0; }
+    let e:i64=4;
+    while (e<tw.len) {
+        if (tw[e]==32) { break; }
+        e=e+1;
+    }
+    if (parse_ordinal_token(tw[4..e])>0) { return 1; }
+    return 0;
+}
+// sentence enumeration: sentences end at ". " or a trailing "."
+// fills soffs2/slens2 (u32le), returns count
+fn enum_sentences(t:[]u8, soffs:[]u8, slens:[]u8) i64 {
+    let n:i64=0; let s:i64=0; let i:i64=0;
+    while (i<t.len) {
+        if (t[i]==46) {
+            let end:i64=i+1;
+            if (end<t.len) {
+                if (t[end]==32) {
+                    w_u32le(soffs,n*4,s); w_u32le(slens,n*4,end-s);
+                    n=n+1; s=end+1; i=end+1;
+                }
+                else { i=i+1; }
+            }
+            else {
+                w_u32le(soffs,n*4,s); w_u32le(slens,n*4,end-s);
+                n=n+1; s=end; i=end;
+            }
+        }
+        else { i=i+1; }
+    }
+    if (s<t.len) {
+        w_u32le(soffs,n*4,s); w_u32le(slens,n*4,t.len-s);
+        n=n+1;
+    }
+    return n;
+}
+// word enumeration inside an arbitrary span [so,so+sl)
+fn enum_words_span(t:[]u8, so:i64, sl:i64, offs:[]u8, lens:[]u8) i64 {
+    let n:i64=0; let i:i64=so; let end:i64=so+sl;
+    let ws:i64=-1;
+    while (i<end) {
+        if (t[i]==32) {
+            if (ws>=0) {
+                w_u32le(offs,n*4,ws); w_u32le(lens,n*4,i-ws);
+                n=n+1; ws=-1;
+            }
+        }
+        else {
+            if (ws<0) { ws=i; }
+        }
+        i=i+1;
+    }
+    if (ws>=0) {
+        w_u32le(offs,n*4,ws); w_u32le(lens,n*4,end-ws);
+        n=n+1;
+    }
+    return n;
+}
+// wno-th word (1-based) inside span [so,so+sl); sets wo/wl, returns 1 or 0
+fn word_in_span(t:[]u8, so:i64, sl:i64, wno:i64, wo:*i64, wl:*i64) i64 {
+    if (wno<1) { return 0; }
+    let n:i64=0; let i:i64=so; let end:i64=so+sl;
+    let ws:i64=-1;
+    while (i<end) {
+        if (t[i]==32) {
+            if (ws>=0) {
+                n=n+1;
+                if (n==wno) { wo.*=ws; wl.*=i-ws; return 1; }
+                ws=-1;
+            }
+        }
+        else {
+            if (ws<0) { ws=i; }
+        }
+        i=i+1;
+    }
+    if (ws>=0) {
+        n=n+1;
+        if (n==wno) { wo.*=ws; wl.*=end-ws; return 1; }
+    }
+    return 0;
+}
+fn count_words_span(t:[]u8, so:i64, sl:i64) i64 {
+    let n:i64=0; let i:i64=so; let end:i64=so+sl;
+    let in_w:i64=0;
+    while (i<end) {
+        if (t[i]==32) { in_w=0; }
+        else {
+            if (in_w==0) { n=n+1; in_w=1; }
+        }
+        i=i+1;
+    }
+    return n;
+}
+// text shape: 0 single token, 1 multi-token, 2 multi-sentence
+fn text_shape(t:[]u8) i64 {
+    if (find_sub(t,". ")>=0) { return 2; }
+    if (t.len>0) {
+        if (t[t.len-1]==46) { return 2; }
+    }
+    if (find_sub(t," ")>=0) { return 1; }
+    return 0;
+}
+// whole-word hit? (bounded by spaces/edges) - structural context feature:
+// it predicts whether word-scale addressing suffices for a CONTAINS needle.
+fn is_whole_word(t:[]u8, w:[]u8) i64 {
+    if (w.len==0) { return 0; }
+    if (w.len>t.len) { return 0; }
+    let i:i64=0;
+    while (i+w.len<=t.len) {
+        if (beq(t[i..i+w.len],w)==1) {
+            let lb:i64=1;
+            if (i>0) { if (t[i-1]!=32) { lb=0; } }
+            let rb:i64=1;
+            if (i+w.len<t.len) { if (t[i+w.len]!=32) { rb=0; } }
+            if (lb==1) {
+                if (rb==1) { return 1; }
+            }
+        }
+        i=i+1;
+    }
+    return 0;
+}
+// does the question name a sub-span (vs the whole text)?
+// 0 whole text / word-scope, 1 literal sub-span / substring-scope,
+// 2 ordinal/unlocatable reference
+fn qnames_subspan(kind:i64, q:[]u8, t:[]u8) i64 {
+    if (kind==1) {
+        let tw:[]u8=parse_after(q,"'s in ");
+        if (beq(tw,t)==1) { return 0; }
+        return 1;
+    }
+    if (kind==2) {
+        let tw:[]u8=parse_after(q,"of ");
+        if (beq(tw,t)==1) { return 0; }
+        if (is_ordinal_word_target(tw)==1) { return 2; }
+        return 1;
+    }
+    if (kind==3) {
+        let tg:[]u8=parse_between(q,"spell "," backwards");
+        if (beq(tg,t)==1) { return 0; }
+        if (is_ordinal_word_target(tg)==1) { return 2; }
+        return 1;
+    }
+    if (kind==6) {
+        let needle:[]u8=parse_after(q,"contain ");
+        let p:i64=find_sub(q,"does the ");
+        if (p==0) {
+            if (parse_ordinal_at(q,9)>0) { return 2; }
+            if (is_whole_word(t,needle)==1) { return 0; }
+            return 1;
+        }
+        if (is_whole_word(t,needle)==1) { return 0; }
+        return 1;
+    }
+    if (kind==12) { return 2; }
+    if (kind==13) { return 2; }
+    return 0;
+}
+
+
+// ---------- PART B: candidate strategies K3 (WORD>CHAR) and K4 (WORD?CHARSCAN) ----------
+// s3_locate: address the span the question is about with traced zooms.
+// Handles: whole text, literal sub-span (word or phrase), ordinal word
+// ("the Nth word [of the Mth sentence] [of <text>]"), ordinal sentence.
+// Returns span id (0 = whole text) or -1; sets oo/ll/maxd/nz; adds word-scan ops.
+// why codes 6 (locate-target-sentence) and 7 (locate-ordinal-word) extend the
+// fork's 1..5; the numeric code is unambiguous in the zoom ledger (the fork's
+// frozen why_str label renders 6/7 as "character-span" - documented here).
+fn s3_locate(qid:i64, kind:i64, q:[]u8, t:[]u8,
+             soff:[]u8, slen:[]u8, nsp:*i64, zlog:[]u8, zn:*i64,
+             woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+             out:[]u8, atp:*i64, scr:[]u8,
+             oo:*i64, ll:*i64, maxd:*i64, nz:*i64, ops:*i64) i64 {
+    // kinds 12/13: the Nth sentence of a multi-sentence text
+    // (no "sentence" in q -> whole-text scope; word selection/count in answer)
+    if (kind==12) {
+        let sp:i64=find_sub(q," sentence");
+        if (sp<0) { oo.*=0; ll.*=t.len; return 0; }
+        let sno:i64=ordinal_before(q,sp);
+        let ns2:i64=enum_sentences(t,soffs2,slens2);
+        ops.*=ops.*+t.len;
+        if (sno<1) { return -1; }
+        if (sno>ns2) { return -1; }
+        let so:i64=r_u32le(soffs2,(sno-1)*4); let sl:i64=r_u32le(slens2,(sno-1)*4);
+        let sid:i64=mg_zoom(qid,0,so,sl,1,6,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        oo.*=so; ll.*=sl;
+        return sid;
+    }
+    if (kind==13) {
+        let sp:i64=find_sub(q," sentence");
+        if (sp<0) { oo.*=0; ll.*=t.len; return 0; }
+        let sno:i64=ordinal_before(q,sp);
+        let ns2:i64=enum_sentences(t,soffs2,slens2);
+        ops.*=ops.*+t.len;
+        if (sno<1) { return -1; }
+        if (sno>ns2) { return -1; }
+        let so:i64=r_u32le(soffs2,(sno-1)*4); let sl:i64=r_u32le(slens2,(sno-1)*4);
+        let sid:i64=mg_zoom(qid,0,so,sl,1,6,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        oo.*=so; ll.*=sl;
+        return sid;
+    }
+    if (kind==3) {
+        let tg:[]u8=parse_between(q,"spell "," backwards");
+        if (beq(tg,t)==1) { oo.*=0; ll.*=t.len; return 0; }
+        if (is_ordinal_word_target(tg)==1) {
+            let wno:i64=parse_ordinal_at(tg,4);
+            ops.*=ops.*+count_words_span(t,0,t.len);
+            let wo:i64=0; let wl:i64=0;
+            if (word_in_span(t,0,t.len,wno,&wo,&wl)==0) { return -1; }
+            let sid:i64=mg_zoom(qid,0,wo,wl,1,7,soff,slen,nsp,zlog,zn,out,atp,scr);
+            nz.*=nz.*+1; maxd.*=1;
+            oo.*=wo; ll.*=wl;
+            return sid;
+        }
+        return -1;
+    }
+    if (kind==6) {
+        let p:i64=find_sub(q,"does the ");
+        if (p==0) {
+            let wno:i64=parse_ordinal_at(q,9);
+            if (wno>0) {
+                ops.*=ops.*+count_words_span(t,0,t.len);
+                let wo:i64=0; let wl:i64=0;
+                if (word_in_span(t,0,t.len,wno,&wo,&wl)==0) { return -1; }
+                let sid:i64=mg_zoom(qid,0,wo,wl,1,7,soff,slen,nsp,zlog,zn,out,atp,scr);
+                nz.*=nz.*+1; maxd.*=1;
+                oo.*=wo; ll.*=wl;
+                return sid;
+            }
+        }
+        oo.*=0; ll.*=t.len; return 0;
+    }
+    if (kind==4) { oo.*=0; ll.*=t.len; return 0; }
+    if (kind==5) { oo.*=0; ll.*=t.len; return 0; }
+    if (kind==7) { oo.*=0; ll.*=t.len; return 0; }
+    // kinds 1,2,8,9: the target after "of " ("in " for kind 1) - whole text,
+    // nested ordinal ("the Nth word of the Mth sentence"), bare ordinal word
+    // ("the Nth word" optionally "of <text>"), or a literal sub-span.
+    let tw:[]u8=parse_after(q,"of ");
+    if (kind==1) {
+        tw=parse_after(q,"'s in ");
+    }
+    if (beq(tw,t)==1) { oo.*=0; ll.*=t.len; return 0; }
+    let ps:i64=find_sub(tw,"of the ");
+    if (ps>=0) {
+        // nested: the Nth word of the Mth sentence
+        let wno:i64=parse_ordinal_at(tw,4);
+        if (wno<1) { return -1; }
+        let sno:i64=parse_ordinal_at(tw,ps+7);
+        let ns2:i64=enum_sentences(t,soffs2,slens2);
+        ops.*=ops.*+t.len;
+        if (sno<1) { return -1; }
+        if (sno>ns2) { return -1; }
+        let so:i64=r_u32le(soffs2,(sno-1)*4); let sl:i64=r_u32le(slens2,(sno-1)*4);
+        let sid:i64=mg_zoom(qid,0,so,sl,1,6,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        ops.*=ops.*+count_words_span(t,so,sl);
+        let wo:i64=0; let wl:i64=0;
+        if (word_in_span(t,so,sl,wno,&wo,&wl)==0) { return -1; }
+        let sid2:i64=mg_zoom(qid,sid,wo-so,wl,2,7,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=2;
+        oo.*=wo; ll.*=wl;
+        return sid2;
+    }
+    if (is_ordinal_word_target(tw)==1) {
+        let wno:i64=parse_ordinal_at(tw,4);
+        let po:i64=find_sub(tw," of ");
+        if (po>=0) {
+            let tx2:[]u8=tw[po+4..tw.len];
+            if (beq(tx2,t)==0) { return -1; }
+        }
+        ops.*=ops.*+count_words_span(t,0,t.len);
+        let wo:i64=0; let wl:i64=0;
+        if (word_in_span(t,0,t.len,wno,&wo,&wl)==0) { return -1; }
+        let sid:i64=mg_zoom(qid,0,wo,wl,1,7,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        oo.*=wo; ll.*=wl;
+        return sid;
+    }
+    // literal sub-span: whole-word hit first, else substring
+    let nw:i64=enum_words(t,woffs,wlens);
+    ops.*=ops.*+nw;
+    let k:i64=find_word(t,woffs,wlens,nw,tw);
+    if (k>=0) {
+        let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+        let sid:i64=mg_zoom(qid,0,wo,wl,1,2,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        oo.*=wo; ll.*=wl;
+        return sid;
+    }
+    let fp:i64=find_sub(t,tw);
+    if (fp>=0) {
+        let sid:i64=mg_zoom(qid,0,fp,tw.len,1,2,soff,slen,nsp,zlog,zn,out,atp,scr);
+        nz.*=nz.*+1; maxd.*=1;
+        oo.*=fp; ll.*=tw.len;
+        return sid;
+    }
+    return -1;
+}
+
+// strategy K3: WORD>CHAR - locate with traced zooms, operate at char scale.
+// Never falls back: native=1 always.
+fn s3_answer(tag:[]u8, qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+             out:[]u8, atp:*i64, scr:[]u8,
+             soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+             woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+             revbuf:[]u8, abuf:[]u8) i64 {
+    w_u32le(soff,0,0); w_u32le(slen,0,t.len);
+    let nsp:i64=1;
+    let ops:i64=0; let maxd:i64=0; let nzooms:i64=0;
+    let a:i64=atp.*;
+    a=ob_raw(out,a,tag);
+    a=ob_raw(out,a," qid=");
+    a=ob_i64(out,a,qid,scr);
+    a=ob_raw(out,a," kind=");
+    a=ob_raw(out,a,lkind_name(kind));
+    a=ob_raw(out,a," chunk=WORD>CHAR");
+    a=ob_nl(out,a);
+    atp.*=a;
+    let oo:i64=0; let ll:i64=0;
+    let loc:i64=s3_locate(qid,kind,q,t,soff,slen,&nsp,zlog,zn,woffs,wlens,soffs2,slens2,out,atp,scr,&oo,&ll,&maxd,&nzooms,&ops);
+    let ans:[]u8=abuf[0..0];
+    let alen:i64=0;
+    if (loc<0) {
+        abuf[0]=63; alen=1; ans=abuf[0..alen];
+    }
+    if (loc>=0) {
+        let ld:i64=maxd;
+        if (kind==1) {
+            let tgt:u8=parse_target_letter(q);
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            let total:i64=0; let k:i64=0;
+            while (k<nw) {
+                let wo:i64=r_u32le(woffs,k*4); let wl:i64=r_u32le(wlens,k*4);
+                let sid:i64=mg_zoom(qid,loc,wo-oo,wl,ld+1,1,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1;
+                if (maxd<ld+1) { maxd=ld+1; }
+                let so2:i64=r_u32le(soff,sid*4); let sl2:i64=r_u32le(slen,sid*4);
+                total=total+scan_count(t,so2,sl2,tgt);
+                ops=ops+wl;
+                k=k+1;
+            }
+            alen=ob_i64(abuf,0,total,scr); ans=abuf[0..alen];
+        }
+        if (kind==2) {
+            let n:i64=parse_pos_n(q);
+            let idx:i64=n-1;
+            if (idx<0) { idx=0; }
+            if (idx>=ll) { idx=ll-1; }
+            let sid:i64=mg_zoom(qid,loc,idx,1,ld+1,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+            nzooms=nzooms+1;
+            if (maxd<ld+1) { maxd=ld+1; }
+            let so3:i64=r_u32le(soff,sid*4);
+            abuf[0]=t[so3]; alen=1; ans=abuf[0..alen];
+            ops=ops+idx+1;
+        }
+        if (kind==8) {
+            let sid:i64=mg_zoom(qid,loc,0,1,ld+1,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+            nzooms=nzooms+1;
+            if (maxd<ld+1) { maxd=ld+1; }
+            let so3:i64=r_u32le(soff,sid*4);
+            abuf[0]=t[so3]; alen=1; ans=abuf[0..alen];
+            ops=ops+1;
+        }
+        if (kind==9) {
+            let sid:i64=mg_zoom(qid,loc,ll-1,1,ld+1,3,soff,slen,&nsp,zlog,zn,out,atp,scr);
+            nzooms=nzooms+1;
+            if (maxd<ld+1) { maxd=ld+1; }
+            let so3:i64=r_u32le(soff,sid*4);
+            abuf[0]=t[so3]; alen=1; ans=abuf[0..alen];
+            ops=ops+ll;
+        }
+        if (kind==3) {
+            let i:i64=0;
+            while (i<ll) { revbuf[i]=t[oo+ll-1-i]; i=i+1; }
+            ans=revbuf[0..ll];
+            ops=ops+ll;
+        }
+        if (kind==4) {
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            alen=ob_i64(abuf,0,nw,scr); ans=abuf[0..alen];
+        }
+        if (kind==5) {
+            ops=ops+ll;
+            alen=ob_i64(abuf,0,ll,scr); ans=abuf[0..alen];
+        }
+        if (kind==6) {
+            let needle:[]u8=parse_after(q,"contain ");
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            let k:i64=find_word(t,woffs,wlens,nw,needle);
+            if (k>=0) {
+                ans="yes";
+            }
+            else {
+                let sid:i64=mg_zoom(qid,loc,0,ll,ld+1,4,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1;
+                if (maxd<ld+1) { maxd=ld+1; }
+                let so2:i64=r_u32le(soff,sid*4); let sl2:i64=r_u32le(slen,sid*4);
+                let seg:[]u8=t[so2..so2+sl2];
+                ops=ops+sl2;
+                if (find_sub(seg,needle)>=0) { ans="yes"; }
+                else { ans="no"; }
+            }
+        }
+        if (kind==7) {
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            let wo:i64=r_u32le(woffs,0); let wl:i64=r_u32le(wlens,0);
+            ans=t[wo..wo+wl];
+        }
+        if (kind==12) {
+            let wno:i64=ordinal_before(q,find_sub(q," word"));
+            let wo:i64=0; let wl:i64=0;
+            ops=ops+count_words_span(t,oo,ll);
+            if (word_in_span(t,oo,ll,wno,&wo,&wl)==1) {
+                ans=t[wo..wo+wl];
+            }
+            else {
+                abuf[0]=63; alen=1; ans=abuf[0..alen];
+            }
+        }
+        if (kind==13) {
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            alen=ob_i64(abuf,0,nw,scr); ans=abuf[0..alen];
+        }
+    }
+    let correct:i64=beq(ans,exp);
+    emit_result(tag,ans,exp,correct,1,0,ops,maxd,nzooms,out,atp,scr);
+    return pack_stats(correct,1,0,ops,maxd,nzooms);
+}
+
+// ---------- strategy K4: WORD?CHARSCAN ----------
+// word-boundary try first, magnify to a character-span scan on miss (kind 6);
+// operationally identical to K3 on every other kind (measured tie).
+fn s4_answer(tag:[]u8, qid:i64, kind:i64, q:[]u8, t:[]u8, exp:[]u8,
+             out:[]u8, atp:*i64, scr:[]u8,
+             soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+             woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+             revbuf:[]u8, abuf:[]u8) i64 {
+    if (kind==6) {
+        w_u32le(soff,0,0); w_u32le(slen,0,t.len);
+        let nsp:i64=1;
+        let ops:i64=0; let maxd:i64=0; let nzooms:i64=0;
+        let a:i64=atp.*;
+        a=ob_raw(out,a,tag);
+        a=ob_raw(out,a," qid=");
+        a=ob_i64(out,a,qid,scr);
+        a=ob_raw(out,a," kind=");
+        a=ob_raw(out,a,lkind_name(kind));
+        a=ob_raw(out,a," chunk=WORD?CHARSCAN");
+        a=ob_nl(out,a);
+        atp.*=a;
+        let oo:i64=0; let ll:i64=0;
+        let loc:i64=s3_locate(qid,kind,q,t,soff,slen,&nsp,zlog,zn,woffs,wlens,soffs2,slens2,out,atp,scr,&oo,&ll,&maxd,&nzooms,&ops);
+        let ans:[]u8=abuf[0..0];
+        if (loc<0) {
+            abuf[0]=63; ans=abuf[0..1];
+        }
+        if (loc>=0) {
+            let ld:i64=maxd;
+            let needle:[]u8=parse_after(q,"contain ");
+            let nw:i64=enum_words_span(t,oo,ll,woffs,wlens);
+            ops=ops+nw;
+            let k:i64=find_word(t,woffs,wlens,nw,needle);
+            if (k>=0) {
+                ans="yes";
+            }
+            else {
+                let sid:i64=mg_zoom(qid,loc,0,ll,ld+1,4,soff,slen,&nsp,zlog,zn,out,atp,scr);
+                nzooms=nzooms+1;
+                if (maxd<ld+1) { maxd=ld+1; }
+                let so2:i64=r_u32le(soff,sid*4); let sl2:i64=r_u32le(slen,sid*4);
+                let seg:[]u8=t[so2..so2+sl2];
+                ops=ops+sl2;
+                if (find_sub(seg,needle)>=0) { ans="yes"; }
+                else { ans="no"; }
+            }
+        }
+        let correct:i64=beq(ans,exp);
+        emit_result(tag,ans,exp,correct,1,0,ops,maxd,nzooms,out,atp,scr);
+        return pack_stats(correct,1,0,ops,maxd,nzooms);
+    }
+    return s3_answer(tag,qid,kind,q,t,exp,out,atp,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+}
+
+
+// ---------- PART C: deterministic learning machinery (NEW, pure Zag) ----------
+// Experience ledger: per (ctx, cand) -> trials, correct, native, ops.
+// ctx = kind*100 + shape*10 + sub (max 1322 < 1400).
+// cell base = (ctx*4 + (cand-1)) * 32; fields +0 trials +8 correct +16 native +24 ops.
+fn exp_add(ledger:[]u8, ctx:i64, cand:i64, correct:i64, native:i64, ops:i64) void {
+    let base:i64=(ctx*4+(cand-1))*32;
+    w_i64le(ledger,base,r_i64le(ledger,base)+1);
+    w_i64le(ledger,base+8,r_i64le(ledger,base+8)+correct);
+    w_i64le(ledger,base+16,r_i64le(ledger,base+16)+native);
+    w_i64le(ledger,base+24,r_i64le(ledger,base+24)+ops);
+    return;
+}
+// FIXED GAIN (chosen before eval, never tuned to traps):
+//   score = 1000*correct + 100*native - ops
+// Correctness dominates, nativeness (no fallback) second, ops (efficiency) third.
+// Ties -> lower chunk code (fixed deterministic rule).
+fn cand_score(ledger:[]u8, ctx:i64, cand:i64) i64 {
+    let base:i64=(ctx*4+(cand-1))*32;
+    let cr:i64=r_i64le(ledger,base+8);
+    let na:i64=r_i64le(ledger,base+16);
+    let op:i64=r_i64le(ledger,base+24);
+    return cr*1000+na*100-op;
+}
+fn freeze_policy(ledger:[]u8, pol:[]u8, out:[]u8, atp:*i64, scr:[]u8) void {
+    let a:i64=atp.*;
+    a=ob_raw(out,a,"# POLICY (learned: ctx -> chunk; scores K1..K4)");
+    a=ob_nl(out,a);
+    atp.*=a;
+    let ctx:i64=0;
+    while (ctx<1400) {
+        let t0:i64=r_i64le(ledger,(ctx*4)*32);
+        if (t0>0) {
+            let best:i64=1;
+            let bs:i64=cand_score(ledger,ctx,1);
+            let c:i64=2;
+            while (c<=4) {
+                let s:i64=cand_score(ledger,ctx,c);
+                if (s>bs) { bs=s; best=c; }
+                c=c+1;
+            }
+            pol[ctx]=best as u8;
+            let kk:i64=ctx/100;
+            let sh:i64=(ctx/10)-(kk*10);
+            let sb:i64=ctx-(ctx/10)*10;
+            a=atp.*;
+            a=ob_raw(out,a,"POL ctx=");
+            a=ob_i64(out,a,ctx,scr);
+            a=ob_raw(out,a," kind=");
+            a=ob_raw(out,a,lkind_name(kk));
+            a=ob_raw(out,a," shape=");
+            a=ob_i64(out,a,sh,scr);
+            a=ob_raw(out,a," sub=");
+            a=ob_i64(out,a,sb,scr);
+            a=ob_raw(out,a," -> K");
+            a=ob_i64(out,a,best,scr);
+            a=ob_raw(out,a," scores=[");
+            a=ob_i64(out,a,cand_score(ledger,ctx,1),scr);
+            a=ob_raw(out,a,",");
+            a=ob_i64(out,a,cand_score(ledger,ctx,2),scr);
+            a=ob_raw(out,a,",");
+            a=ob_i64(out,a,cand_score(ledger,ctx,3),scr);
+            a=ob_raw(out,a,",");
+            a=ob_i64(out,a,cand_score(ledger,ctx,4),scr);
+            a=ob_raw(out,a,"] trials=");
+            a=ob_i64(out,a,t0,scr);
+            a=ob_nl(out,a);
+            atp.*=a;
+        }
+        ctx=ctx+1;
+    }
+    return;
+}
+// training: fixed round-robin exploration, cand = ((round+qid) % 4)+1.
+// No RNG: every (question, round) maps to exactly one candidate; each
+// training question tries all 4 candidates exactly once across 4 rounds.
+fn train_q(qid:i64, q:[]u8, t:[]u8, exp:[]u8, round:i64, ledger:[]u8,
+           out:[]u8, atp:*i64, scr:[]u8,
+           soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+           woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+           revbuf:[]u8, abuf:[]u8) void {
+    let kind:i64=learn_classify(q);
+    let ctx:i64=kind*100+text_shape(t)*10+qnames_subspan(kind,q,t);
+    let cand:i64=((round+qid) % 4)+1;
+    let av:i64=atp.*;
+    let st:i64=0;
+    if (cand==1) { st=s1_answer("T1",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==2) { st=s2_answer("T2",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==3) { st=s3_answer("T3",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==4) { st=s4_answer("T4",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    let correct:i64=st & 1;
+    let native:i64=(st >> 1) & 1;
+    let ops:i64=(st >> 8) & 4294967295;
+    exp_add(ledger,ctx,cand,correct,native,ops);
+    av=ob_raw(out,av,"TRAIN r=");
+    av=ob_i64(out,av,round,scr);
+    av=ob_raw(out,av," qid=");
+    av=ob_i64(out,av,qid,scr);
+    av=ob_raw(out,av," ctx=");
+    av=ob_i64(out,av,ctx,scr);
+    av=ob_raw(out,av," cand=K");
+    av=ob_i64(out,av,cand,scr);
+    av=ob_raw(out,av," correct=");
+    av=ob_i64(out,av,correct,scr);
+    av=ob_raw(out,av," native=");
+    av=ob_i64(out,av,native,scr);
+    av=ob_raw(out,av," ops=");
+    av=ob_i64(out,av,ops,scr);
+    av=ob_nl(out,av);
+    atp.*=av;
+    return;
+}
+// evaluation with the FROZEN learned policy (unseen ctx -> default K3:
+// magnify; address-then-char is correct-by-construction on every kind).
+fn eval_q(qid:i64, q:[]u8, t:[]u8, exp:[]u8, pol:[]u8, summ:[]u8,
+          out:[]u8, atp:*i64, scr:[]u8,
+          soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+          woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+          revbuf:[]u8, abuf:[]u8) void {
+    let kind:i64=learn_classify(q);
+    let ctx:i64=kind*100+text_shape(t)*10+qnames_subspan(kind,q,t);
+    let cand:i64=pol[ctx] as i64;
+    let def:i64=0;
+    if (cand==0) { cand=3; def=1; }
+    let av:i64=atp.*;
+    av=ob_raw(out,av,"EVAL qid=");
+    av=ob_i64(out,av,qid,scr);
+    av=ob_raw(out,av," ctx=");
+    av=ob_i64(out,av,ctx,scr);
+    av=ob_raw(out,av," policy=K");
+    av=ob_i64(out,av,cand,scr);
+    if (def==1) {
+        av=ob_raw(out,av," (default-unseen-ctx)");
+    }
+    av=ob_nl(out,av);
+    let st:i64=0;
+    if (cand==1) { st=s1_answer("K1",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==2) { st=s2_answer("K2",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==3) { st=s3_answer("K3",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    if (cand==4) { st=s4_answer("K4",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf); }
+    summ_add(summ,0,skind(kind),st);
+    atp.*=av;
+    return;
+}
+// retired-arm negative controls on the eval battery (verbatim fork strategies)
+fn ctrl_q(qid:i64, q:[]u8, t:[]u8, exp:[]u8, summ:[]u8,
+          out:[]u8, atp:*i64, scr:[]u8,
+          soff:[]u8, slen:[]u8, zlog:[]u8, zn:*i64,
+          woffs:[]u8, wlens:[]u8, soffs2:[]u8, slens2:[]u8,
+          revbuf:[]u8, abuf:[]u8) void {
+    let kind:i64=learn_classify(q);
+    let sk:i64=skind(kind);
+    let av:i64=atp.*;
+    let st:i64=s1_answer("C",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    summ_add(summ,1,sk,st);
+    st=s2_answer("W",qid,kind,q,t,exp,out,&av,scr,soff,slen,zlog,zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    summ_add(summ,2,sk,st);
+    st=s_answer(qid,kind,q,t,exp,out,&av,scr,abuf,revbuf);
+    summ_add(summ,3,sk,st);
+    atp.*=av;
+    return;
+}
+
+
+fn main() i32 {
+    let out:[]u8=nio_alloc(524288);
+    if (out.len==0) { return 1; }
+    let scr:[]u8=nio_alloc(32);
+    let soff:[]u8=nio_alloc(1024); let slen:[]u8=nio_alloc(1024);
+    let zlog:[]u8=nio_alloc(65536);
+    let woffs:[]u8=nio_alloc(256); let wlens:[]u8=nio_alloc(256);
+    let soffs2:[]u8=nio_alloc(256); let slens2:[]u8=nio_alloc(256);
+    let revbuf:[]u8=nio_alloc(256); let abuf:[]u8=nio_alloc(64);
+    let ledger:[]u8=nio_alloc(179200);
+    let pol:[]u8=nio_alloc(1400);
+    let summL:[]u8=nio_alloc(896);
+    let summC:[]u8=nio_alloc(896);
+    let zi:i64=0;
+    while (zi<179200) { ledger[zi]=0; zi=zi+1; }
+    zi=0;
+    while (zi<1400) { pol[zi]=0; zi=zi+1; }
+    zi=0;
+    while (zi<896) { summL[zi]=0; zi=zi+1; }
+    zi=0;
+    while (zi<896) { summC[zi]=0; zi=zi+1; }
+    let at:i64=0;
+    at=ob_raw(out,at,"# MG-LEARN-RUN v1 pure-zag zero-rng");
+    at=ob_nl(out,at);
+    let zn:i64=0;
+    let s4t:[]u8="first sentence here. second words work. third line ok. and final text.";
+    // ---------- TRAIN: the fork's 24 questions, 4 deterministic rounds ----------
+    let r:i64=0;
+    while (r<4) {
+        at=ob_raw(out,at,"# TRAIN-ROUND ");
+        at=ob_i64(out,at,r,scr);
+        at=ob_nl(out,at);
+        train_q(0,"how many r's in strawberry","strawberry","3",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(1,"how many s's in Mississippi","Mississippi","4",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(2,"how many l's in hello world","hello world","3",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(3,"how many e's in cheese","cheese","3",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(4,"how many a's in abracadabra","abracadabra","5",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(5,"what is the 3rd letter of strawberry","strawberry","r",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(6,"what is the 1st letter of Mississippi","Mississippi","M",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(7,"what is the 10th letter of strawberry","strawberry","y",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(8,"spell strawberry backwards","strawberry","yrrebwarts",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(9,"spell abc backwards","abc","cba",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(10,"how many words in the quick brown fox","the quick brown fox","4",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(11,"how many words in hello","hello","1",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(12,"how many letters in strawberry","strawberry","10",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(13,"how many letters in ab","ab","2",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(14,"does the quick brown fox contain quick","the quick brown fox","yes",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(15,"what is the first word of the quick brown fox","the quick brown fox","the",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(16,"what is the last letter of Mississippi","Mississippi","i",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(17,"what is the first letter of hello world","hello world","h",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(18,"how many S's in Mississippi","Mississippi","0",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(19,"how many o's in bookkeeper","bookkeeper","2",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(20,"how many e's in the cheese wheel","the cheese wheel","6",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(21,"does strawberry contain raw","strawberry","yes",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(22,"what is the 2nd letter of fox","the quick brown fox","o",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        train_q(23,"how many r's in the strawberry patch","the strawberry patch","3",r,ledger,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+        r=r+1;
+    }
+    // ---------- FREEZE ----------
+    freeze_policy(ledger,pol,out,&at,scr);
+    // ---------- EVAL: 24 old + 12 new traps, frozen policy ----------
+    at=ob_raw(out,at,"# EVAL-LEARNED");
+    at=ob_nl(out,at);
+    eval_q(0,"how many r's in strawberry","strawberry","3",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(1,"how many s's in Mississippi","Mississippi","4",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(2,"how many l's in hello world","hello world","3",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(3,"how many e's in cheese","cheese","3",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(4,"how many a's in abracadabra","abracadabra","5",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(5,"what is the 3rd letter of strawberry","strawberry","r",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(6,"what is the 1st letter of Mississippi","Mississippi","M",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(7,"what is the 10th letter of strawberry","strawberry","y",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(8,"spell strawberry backwards","strawberry","yrrebwarts",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(9,"spell abc backwards","abc","cba",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(10,"how many words in the quick brown fox","the quick brown fox","4",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(11,"how many words in hello","hello","1",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(12,"how many letters in strawberry","strawberry","10",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(13,"how many letters in ab","ab","2",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(14,"does the quick brown fox contain quick","the quick brown fox","yes",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(15,"what is the first word of the quick brown fox","the quick brown fox","the",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(16,"what is the last letter of Mississippi","Mississippi","i",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(17,"what is the first letter of hello world","hello world","h",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(18,"how many S's in Mississippi","Mississippi","0",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(19,"how many o's in bookkeeper","bookkeeper","2",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(20,"how many e's in the cheese wheel","the cheese wheel","6",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(21,"does strawberry contain raw","strawberry","yes",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(22,"what is the 2nd letter of fox","the quick brown fox","o",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(23,"how many r's in the strawberry patch","the strawberry patch","3",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(24,"what is the 3rd letter of the 2nd word of the 4th sentence",s4t,"n",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(25,"what is the 2nd word of the 3rd sentence",s4t,"line",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(26,"how many e's in second words work",s4t,"1",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(27,"what is the 5th letter of the 2nd word","the quick brown fox","k",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(28,"does the 3rd word contain own","the quick brown fox","yes",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(29,"what is the last letter of the first word of hello world","hello world","o",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(30,"how many r's in red strawberry","red strawberry river","4",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(31,"what is the 2nd letter of the 1st word","the quick brown fox","h",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(32,"how many words in the 2nd sentence",s4t,"3",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(33,"spell the 2nd word backwards","the quick brown fox","kciuq",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(34,"does Mississippi contain issi","Mississippi","yes",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    eval_q(35,"what is the 4th letter of Mississippi","Mississippi","s",pol,summL,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    // ---------- EVAL: retired-arm negative controls ----------
+    at=ob_raw(out,at,"# EVAL-CONTROLS (retired C/W/S, negative controls only)");
+    at=ob_nl(out,at);
+    ctrl_q(0,"how many r's in strawberry","strawberry","3",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(1,"how many s's in Mississippi","Mississippi","4",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(2,"how many l's in hello world","hello world","3",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(3,"how many e's in cheese","cheese","3",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(4,"how many a's in abracadabra","abracadabra","5",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(5,"what is the 3rd letter of strawberry","strawberry","r",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(6,"what is the 1st letter of Mississippi","Mississippi","M",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(7,"what is the 10th letter of strawberry","strawberry","y",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(8,"spell strawberry backwards","strawberry","yrrebwarts",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(9,"spell abc backwards","abc","cba",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(10,"how many words in the quick brown fox","the quick brown fox","4",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(11,"how many words in hello","hello","1",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(12,"how many letters in strawberry","strawberry","10",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(13,"how many letters in ab","ab","2",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(14,"does the quick brown fox contain quick","the quick brown fox","yes",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(15,"what is the first word of the quick brown fox","the quick brown fox","the",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(16,"what is the last letter of Mississippi","Mississippi","i",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(17,"what is the first letter of hello world","hello world","h",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(18,"how many S's in Mississippi","Mississippi","0",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(19,"how many o's in bookkeeper","bookkeeper","2",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(20,"how many e's in the cheese wheel","the cheese wheel","6",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(21,"does strawberry contain raw","strawberry","yes",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(22,"what is the 2nd letter of fox","the quick brown fox","o",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(23,"how many r's in the strawberry patch","the strawberry patch","3",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(24,"what is the 3rd letter of the 2nd word of the 4th sentence",s4t,"n",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(25,"what is the 2nd word of the 3rd sentence",s4t,"line",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(26,"how many e's in second words work",s4t,"1",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(27,"what is the 5th letter of the 2nd word","the quick brown fox","k",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(28,"does the 3rd word contain own","the quick brown fox","yes",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(29,"what is the last letter of the first word of hello world","hello world","o",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(30,"how many r's in red strawberry","red strawberry river","4",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(31,"what is the 2nd letter of the 1st word","the quick brown fox","h",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(32,"how many words in the 2nd sentence",s4t,"3",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(33,"spell the 2nd word backwards","the quick brown fox","kciuq",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(34,"does Mississippi contain issi","Mississippi","yes",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    ctrl_q(35,"what is the 4th letter of Mississippi","Mississippi","s",summC,out,&at,scr,soff,slen,zlog,&zn,woffs,wlens,soffs2,slens2,revbuf,abuf);
+    // ---------- summaries ----------
+    at=ob_raw(out,at,"# SUMMARY_LEARNED kind n correct native ops_total");
+    at=ob_nl(out,at);
+    let sk:i64=0;
+    while (sk<7) {
+        let base:i64=sk*4*8;
+        at=ob_raw(out,at,"L ");
+        at=ob_raw(out,at,skind_name(sk));
+        at=ob_raw(out,at," n=");
+        at=ob_i64(out,at,r_i64le(summL,base),scr);
+        at=ob_raw(out,at," correct=");
+        at=ob_i64(out,at,r_i64le(summL,base+8),scr);
+        at=ob_raw(out,at," native=");
+        at=ob_i64(out,at,r_i64le(summL,base+16),scr);
+        at=ob_raw(out,at," ops=");
+        at=ob_i64(out,at,r_i64le(summL,base+24),scr);
+        at=ob_nl(out,at);
+        sk=sk+1;
+    }
+    at=ob_raw(out,at,"# SUMMARY_CONTROLS arm kind n correct native ops_total");
+    at=ob_nl(out,at);
+    let arm:i64=1;
+    while (arm<4) {
+        sk=0;
+        while (sk<7) {
+            let base:i64=((arm*7)+sk)*4*8;
+            if (arm==1) { at=ob_raw(out,at,"C "); }
+            if (arm==2) { at=ob_raw(out,at,"W "); }
+            if (arm==3) { at=ob_raw(out,at,"S "); }
+            at=ob_raw(out,at,skind_name(sk));
+            at=ob_raw(out,at," n=");
+            at=ob_i64(out,at,r_i64le(summC,base),scr);
+            at=ob_raw(out,at," correct=");
+            at=ob_i64(out,at,r_i64le(summC,base+8),scr);
+            at=ob_raw(out,at," native=");
+            at=ob_i64(out,at,r_i64le(summC,base+16),scr);
+            at=ob_raw(out,at," ops=");
+            at=ob_i64(out,at,r_i64le(summC,base+24),scr);
+            at=ob_nl(out,at);
+            sk=sk+1;
+        }
+        arm=arm+1;
+    }
+    // ---------- learned totals + PASS/FAIL ----------
+    let tq:i64=0; let tc:i64=0; let tn2:i64=0; let tops:i64=0;
+    sk=0;
+    while (sk<7) {
+        let base:i64=sk*4*8;
+        tq=tq+r_i64le(summL,base);
+        tc=tc+r_i64le(summL,base+8);
+        tn2=tn2+r_i64le(summL,base+16);
+        tops=tops+r_i64le(summL,base+24);
+        sk=sk+1;
+    }
+    // native==tq means zero fallbacks: K1/K3/K4 never fall back, and the
+    // learned policy only selects K2 on contexts where K2 recorded no fallback.
+    at=ob_raw(out,at,"# LEARNED_TOTALS n=");
+    at=ob_i64(out,at,tq,scr);
+    at=ob_raw(out,at," correct=");
+    at=ob_i64(out,at,tc,scr);
+    at=ob_raw(out,at," native=");
+    at=ob_i64(out,at,tn2,scr);
+    at=ob_raw(out,at," ops=");
+    at=ob_i64(out,at,tops,scr);
+    at=ob_nl(out,at);
+    let pass:i64=0;
+    if (tq==36) {
+        if (tc==36) {
+            if (tn2==36) {
+                pass=1;
+            }
+        }
+    }
+    if (pass==1) {
+        at=ob_raw(out,at,"# LEARNED_RESULT PASS");
+        at=ob_nl(out,at);
+    }
+    if (pass==0) {
+        at=ob_raw(out,at,"# LEARNED_RESULT FAIL");
+        at=ob_nl(out,at);
+    }
+    at=ob_raw(out,at,"# ZOOMS_TOTAL ");
+    at=ob_i64(out,at,zn,scr);
+    at=ob_nl(out,at);
+    at=ob_raw(out,at,"# END");
+    at=ob_nl(out,at);
+    let used:[]u8=out[0..at];
+    let w:i64=nio_write_all(1,used);
+    if (w!=at) { return 1; }
+    return 0;
+}
+

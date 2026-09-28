@@ -1,0 +1,376 @@
+// w13f_lease.zag — W13 GOV-LH CONTROL: frozen PREREG_W13.md rule, dynamic sizing.
+// (PREREG_W13_GOVLH.md §3 "Control F".) Pure Zag, zero RNG.
+// Usage: w13f_lease <stream>
+// Stream rows: lease_id|kind|channel|tag|conf|mrgF|strong|agree
+// Deltas vs frozen w13_lease.zag (SEMANTICS-PRESERVING, for 10x/100x scale):
+//  - lease table as 10 parallel []u8 LE-i32 arenas (no as []i32 casts);
+//  - stream read in 8MB chunks with spill (no >2^25 slice); two-pass sizing
+//    (pass 1: line count + max tag; pass 2: parse into arenas);
+//  - partner linking for ANY tag seen twice (genuine pairs AND colluding
+//    false pairs); unique tags never link;
+//  - snapshot expires via O(1) identity (prereg §5):
+//      snapexp(si) = exp[si] - 10*[renewed[si] && lastchk[si] >= snap_time]
+//    (frozen semantics: refresh-before-scan captures renewals with
+//    lastchk < snap_time);
+//  - dynamic counts (no hardcoded 10050/10000/50); output flushed in <2^25
+//    chunks via repeated _zag_print.
+// Renewal rule (frozen): renew iff partner po>=0 with chp!=cho,
+// |gp-go|<=3, gp<=snap_time, t < snapexp(po).
+// Emits: header, G| grant lines, C| check lines, L| per-lease finals, SUMMARY.
+// Deterministic; 2x runs must be byte-identical.
+@import("R33_NATIVE_IO_V1.zag")
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    if(s.len > 0 && s[s.len - 1] == 10) { return s[0..s.len - 1]; }
+    return s;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { ob[pos] = s[i]; pos = pos + 1; i = i + 1; }
+    return pos;
+}
+fn pfield(line:[]u8, llen:i32, which:i32, out:[]u8) i32 {
+    let fi:i32 = 0; let st:i32 = 0; let i:i32 = 0;
+    while(i <= llen) {
+        let c:u8 = 10;
+        if(i < llen) { c = line[i]; }
+        if(c == 124 || i == llen) {
+            if(fi == which) {
+                let n:i32 = i - st;
+                if(n > out.len) { n = out.len; }
+                let k:i32 = 0;
+                while(k < n) { out[k] = line[st + k]; k = k + 1; }
+                return n;
+            }
+            fi = fi + 1; st = i + 1;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+fn atoi(b:[]u8, n:i32) i64 {
+    let v:i64 = 0; let neg:i64 = 1; let i:i32 = 0;
+    if(n > 0 && b[0] == 45) { neg = -1; i = 1; }
+    while(i < n) {
+        let c:i64 = b[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48); i = i + 1;
+    }
+    return v * neg;
+}
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn f_open(path:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -1; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    return fd;
+}
+fn f_read(fd:i64, buf:[]u8, max:i32) i64 {
+    return _zag_raw_syscall(0, fd, _zag_slice_ptr(buf) as i64, max as i64, 0, 0, 0);
+}
+fn f_close(fd:i64) i64 {
+    return _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+}
+fn sx32(v:i64) i64 {
+    if(v >= 2147483648) { return v - 4294967296; }
+    return v;
+}
+// parallel lease arenas: a_id,a_kind,a_chan,a_tag,a_grant,a_exp,a_ren,a_chk,
+// a_last,a_stale (each nlease*4 bytes, LE i32)
+fn aget(a:[]u8, i:i64) i64 {
+    let b:i64 = i * 4;
+    return sx32((a[b] as i64) | ((a[b + 1] as i64) << 8)
+         | ((a[b + 2] as i64) << 16) | ((a[b + 3] as i64) << 24));
+}
+fn aput(a:[]u8, i:i64, v:i64) void {
+    let b:i64 = i * 4;
+    a[b] = (v & 255) as u8; a[b + 1] = ((v >> 8) & 255) as u8;
+    a[b + 2] = ((v >> 16) & 255) as u8; a[b + 3] = ((v >> 24) & 255) as u8;
+}
+fn iabs(v:i64) i64 {
+    if(v < 0) { return -v; }
+    return v;
+}
+fn emit_grant(ob:[]u8, pos:i32, lid:i64, kind:i64, gr:i64, ex:i64) i32 {
+    pos = ob_add(ob, pos, "G|");
+    pos = ob_add(ob, pos, i64s(lid));
+    pos = ob_add(ob, pos, "|");
+    if(kind == 0) { pos = ob_add(ob, pos, "G"); } else { pos = ob_add(ob, pos, "F"); }
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(gr));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(ex));
+    pos = ob_add(ob, pos, "|");
+    if(kind == 0) { pos = ob_add(ob, pos, "GATE"); } else { pos = ob_add(ob, pos, "BYPASS_GRANT"); }
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn emit_check(ob:[]u8, pos:i32, lid:i64, t:i64, st:i64, ren:i64) i32 {
+    pos = ob_add(ob, pos, "C|");
+    pos = ob_add(ob, pos, i64s(lid));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(t));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(st));
+    pos = ob_add(ob, pos, "|");
+    if(ren == 1) { pos = ob_add(ob, pos, "RENEW"); } else { pos = ob_add(ob, pos, "EXPIRE"); }
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn emit_final(ob:[]u8, pos:i32, a_id:[]u8, a_kind:[]u8, a_grant:[]u8, a_exp:[]u8,
+              a_ren:[]u8, a_last:[]u8, a_stale:[]u8, o:i64) i32 {
+    pos = ob_add(ob, pos, "L|");
+    pos = ob_add(ob, pos, i64s(aget(a_id, o)));
+    pos = ob_add(ob, pos, "|");
+    if(aget(a_kind, o) == 0) { pos = ob_add(ob, pos, "G"); } else { pos = ob_add(ob, pos, "F"); }
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(aget(a_grant, o)));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(aget(a_exp, o)));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(aget(a_ren, o)));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(aget(a_last, o)));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(aget(a_stale, o)));
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn ob_flush(ob:[]u8, pos:i32) i32 {
+    if(pos > 0) { _zag_print(ob[0..pos]); }
+    return 0;
+}
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if(a1.len == 0) { return 1; }
+    let DUR:i64 = 10;
+    let LAG:i64 = 3;
+    let BUDGET:i64 = 64;
+    let WIN:i64 = 3;
+    let CT:i64 = 705;
+    let MT:i64 = 3588;
+    let CHMAX:i32 = 8388608;
+    let LBMAX:i32 = 2048;
+    let chunk:[]u8 = nio_alloc(CHMAX);
+    let lbuf:[]u8 = nio_alloc(LBMAX);
+    let fld:[]u8 = nio_alloc(64);
+    let ob:[]u8 = nio_alloc(32000000);
+    if(chunk.len == 0 || lbuf.len == 0 || fld.len == 0 || ob.len == 0) { return 1; }
+    // pass 1: count lines, max tag
+    let fd:i64 = f_open(a1);
+    if(fd < 0) { return 1; }
+    let nlines:i64 = 0;
+    let maxtag:i64 = 0;
+    let lbn:i32 = 0;
+    let more:i64 = 1;
+    while(more == 1) {
+        let n:i64 = f_read(fd, chunk, CHMAX);
+        if(n <= 0) { more = 0; }
+        else {
+            let i:i64 = 0;
+            while(i < n) {
+                let c:u8 = chunk[i as i32];
+                if(c == 10) {
+                    if(lbn > 0) {
+                        nlines = nlines + 1;
+                        let nf:i32 = pfield(lbuf, lbn, 3, fld);
+                        if(nf > 0) {
+                            let tg:i64 = atoi(fld, nf);
+                            if(tg > maxtag) { maxtag = tg; }
+                        }
+                    }
+                    lbn = 0;
+                } else {
+                    if(lbn >= LBMAX) { return 17; }
+                    lbuf[lbn] = c; lbn = lbn + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    f_close(fd);
+    if(nlines < 1) { return 1; }
+    // allocate arenas
+    let cap:i64 = nlines;
+    let a_id:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_kind:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_chan:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_tag:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_grant:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_exp:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_ren:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_chk:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_last:[]u8 = nio_alloc((cap * 4) as i32);
+    let a_stale:[]u8 = nio_alloc((cap * 4) as i32);
+    let partner:[]u8 = nio_alloc((cap * 4) as i32);
+    let firstseen:[]u8 = nio_alloc(((maxtag + 1) * 4) as i32);
+    if(a_id.len == 0 || a_kind.len == 0 || a_chan.len == 0 || a_tag.len == 0
+       || a_grant.len == 0 || a_exp.len == 0 || a_ren.len == 0
+       || a_chk.len == 0 || a_last.len == 0 || a_stale.len == 0
+       || partner.len == 0 || firstseen.len == 0) { return 1; }
+    let i2:i64 = 0;
+    while(i2 < cap) { aput(partner, i2, -1); i2 = i2 + 1; }
+    i2 = 0;
+    while(i2 <= maxtag) { aput(firstseen, i2, -1); i2 = i2 + 1; }
+    let pos:i32 = 0;
+    pos = ob_add(ob, pos, "W13F_LEASE|govlh=PREREG_W13_GOVLH.md|dur=10|lag=3|budget=64|win=3\n");
+    // pass 2: parse + grant
+    fd = f_open(a1);
+    if(fd < 0) { return 1; }
+    let nlease:i64 = 0;
+    let ng:i64 = 0;
+    let nf:i64 = 0;
+    lbn = 0;
+    more = 1;
+    while(more == 1) {
+        let n:i64 = f_read(fd, chunk, CHMAX);
+        if(n <= 0) { more = 0; }
+        else {
+            let i:i64 = 0;
+            while(i < n) {
+                let c:u8 = chunk[i as i32];
+                if(c == 10) {
+                    if(lbn > 0 && lbn < LBMAX && nlease < cap) {
+                        let ok:i64 = 1;
+                        let f0:i64 = 0; let f2:i64 = 0; let f3:i64 = 0;
+                        let f4:i64 = 0; let f5:i64 = 0;
+                        let kch:i64 = 0;
+                        let nfld:i32 = pfield(lbuf, lbn, 0, fld);
+                        if(nfld <= 0) { ok = 0; } else { f0 = atoi(fld, nfld); }
+                        nfld = pfield(lbuf, lbn, 1, fld);
+                        if(nfld <= 0) { ok = 0; } else {
+                            if(fld[0] == 71) { kch = 0; }
+                            else { if(fld[0] == 70) { kch = 1; } else { ok = 0; } }
+                        }
+                        nfld = pfield(lbuf, lbn, 2, fld);
+                        if(nfld <= 0) { ok = 0; } else { f2 = atoi(fld, nfld); }
+                        nfld = pfield(lbuf, lbn, 3, fld);
+                        if(nfld <= 0) { ok = 0; } else { f3 = atoi(fld, nfld); }
+                        nfld = pfield(lbuf, lbn, 4, fld);
+                        if(nfld <= 0) { ok = 0; } else { f4 = atoi(fld, nfld); }
+                        nfld = pfield(lbuf, lbn, 5, fld);
+                        if(nfld <= 0) { ok = 0; } else { f5 = atoi(fld, nfld); }
+                        if(ok == 0) { return 11; }
+                        if(kch == 0) {
+                            if(f4 < CT || f5 < MT) { return 12; }
+                            ng = ng + 1;
+                        } else {
+                            nf = nf + 1;
+                        }
+                        if(f3 < 0 || f3 > maxtag) { return 13; }
+                        let fs:i64 = aget(firstseen, f3);
+                        if(fs == -1) { aput(firstseen, f3, nlease); }
+                        else {
+                            if(fs == -2) { return 14; }
+                            aput(partner, nlease, fs);
+                            aput(partner, fs, nlease);
+                            aput(firstseen, f3, -2);
+                        }
+                        aput(a_id, nlease, f0);
+                        aput(a_kind, nlease, kch);
+                        aput(a_chan, nlease, f2);
+                        aput(a_tag, nlease, f3);
+                        aput(a_grant, nlease, nlease);
+                        aput(a_exp, nlease, nlease + DUR);
+                        aput(a_ren, nlease, 0);
+                        aput(a_chk, nlease, 0);
+                        aput(a_last, nlease, -1);
+                        aput(a_stale, nlease, -1);
+                        pos = emit_grant(ob, pos, f0, kch, nlease, nlease + DUR);
+                        if(pos > 31000000) { pos = ob_flush(ob, pos); }
+                        nlease = nlease + 1;
+                    }
+                    lbn = 0;
+                } else {
+                    if(lbn >= LBMAX) { return 17; }
+                    lbuf[lbn] = c; lbn = lbn + 1;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    f_close(fd);
+    if(nlease != nlines) { return 15; }
+    // scanner step loop (logical time = event index)
+    let snap_time:i64 = -1;
+    let due_ptr:i64 = 0;
+    let t:i64 = 0;
+    let max_work:i64 = 0;
+    let n_renew_g:i64 = 0;
+    let n_renew_f:i64 = 0;
+    while(t < nlease || due_ptr < nlease) {
+        if(t > nlease + 100) { return 16; }
+        if(t % LAG == 0) { snap_time = t; }
+        while(due_ptr < nlease && aget(a_chk, due_ptr) == 1) { due_ptr = due_ptr + 1; }
+        let work:i64 = 0;
+        while(work < BUDGET && due_ptr < nlease && aget(a_chk, due_ptr) == 0
+              && aget(a_exp, due_ptr) <= t) {
+            let o:i64 = due_ptr;
+            let po:i64 = aget(partner, o);
+            let cor:i64 = 0;
+            if(po >= 0) {
+                let chp:i64 = aget(a_chan, po);
+                let cho:i64 = aget(a_chan, o);
+                let gp:i64 = aget(a_grant, po);
+                let go:i64 = aget(a_grant, o);
+                if(chp != cho && iabs(gp - go) <= WIN && gp <= snap_time) {
+                    let se:i64 = aget(a_exp, po);
+                    if(aget(a_ren, po) == 1 && aget(a_last, po) >= snap_time) {
+                        se = se - DUR;
+                    }
+                    if(t < se) { cor = 1; }
+                }
+            }
+            aput(a_chk, o, 1);
+            aput(a_last, o, t);
+            aput(a_stale, o, t - snap_time);
+            if(cor == 1) {
+                aput(a_ren, o, 1);
+                aput(a_exp, o, aget(a_exp, o) + DUR);
+                if(aget(a_kind, o) == 0) { n_renew_g = n_renew_g + 1; }
+                else { n_renew_f = n_renew_f + 1; }
+            }
+            pos = emit_check(ob, pos, aget(a_id, o), t, t - snap_time, cor);
+            if(pos > 31000000) { pos = ob_flush(ob, pos); }
+            work = work + 1;
+            due_ptr = due_ptr + 1;
+        }
+        if(work > max_work) { max_work = work; }
+        t = t + 1;
+    }
+    // per-lease finals
+    let o2:i64 = 0;
+    while(o2 < nlease) {
+        pos = emit_final(ob, pos, a_id, a_kind, a_grant, a_exp, a_ren, a_last,
+                         a_stale, o2);
+        if(pos > 31000000) { pos = ob_flush(ob, pos); }
+        o2 = o2 + 1;
+    }
+    pos = ob_add(ob, pos, "SUMMARY|n=");
+    pos = ob_add(ob, pos, i64s(nlease));
+    pos = ob_add(ob, pos, "|g_renew=");
+    pos = ob_add(ob, pos, i64s(n_renew_g));
+    pos = ob_add(ob, pos, "|f_renew=");
+    pos = ob_add(ob, pos, i64s(n_renew_f));
+    pos = ob_add(ob, pos, "|max_work=");
+    pos = ob_add(ob, pos, i64s(max_work));
+    pos = ob_add(ob, pos, "|t_end=");
+    pos = ob_add(ob, pos, i64s(t));
+    pos = ob_add(ob, pos, "\n");
+    pos = ob_add(ob, pos, "COUNTS|g=");
+    pos = ob_add(ob, pos, i64s(ng));
+    pos = ob_add(ob, pos, "|f=");
+    pos = ob_add(ob, pos, i64s(nf));
+    pos = ob_add(ob, pos, "\n");
+    pos = ob_flush(ob, pos);
+    return 0;
+}

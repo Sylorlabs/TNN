@@ -1,0 +1,280 @@
+// f0low.zag — low-band F0 estimator + verified range guard (wiring layer).
+// Pure Zag. Complements the frozen organ (organ_lib.zag, byte-identical fns).
+//
+// Measured fact (PREREG_LH §4): the frozen organ's YIN F0 (lags 36..551,
+// nominal 80..1200 Hz) cannot resolve below ~125 Hz on real material.
+// P's finding: plain autocorr argmax provably fails 80..112 Hz under the
+// 2048-sample Hann window — the true long-lag peak is window-attenuated
+// below short-lag harmonic correlation. This file therefore works on
+// MEAN-REMOVED UNWINDOWED frames (no Hann attenuation by construction).
+//
+// Two paths, selectable at runtime:
+//   (a) lowf0_frame: long-lag autocorr + YIN cumulative-mean normalization
+//       over lags sr/125..sr/55 (55..125 Hz), parabolic interpolation,
+//       octave gate (strong half-lag correlation => ambiguous), confidence
+//       gate (r[sel]/r0 >= 0.35). Never returns confident below 55 Hz.
+//   (b) guard_frame: per-frame policy. Trust the organ at >=125 Hz voiced;
+//       below that (or unvoiced-but-loud) consult lowf0_frame; anything not
+//       confidently resolved is flagged OUT_OF_RANGE (f0=0, never a
+//       confident wrong number). Mode "scope" skips the estimator: pure
+//       range restriction (>=125 Hz or out-of-range).
+//
+// Status codes (LRES[8]): 0 unvoiced, 1 confident, 2 ambiguous (octave
+// risk => out-of-range), 3 below structural floor (=> out-of-range).
+// Guard "how" codes (GRES[16]): 0 organ, 1 lowband, 2 out-of-range,
+// 3 unvoiced.
+
+// Chunk-aware WAV parse accepting PCM16 mono at 8000 or 44100 Hz.
+// META3: [0]=data start sample index, [8]=nsamp, [16]=sr. Returns 1/0.
+fn wav_parse_any(b: []u8, META3: []u8) i64 {
+    if ((b.len as i64) < 44) { return 0; }
+    if (!(b[0] == 82 && b[1] == 73 && b[2] == 70 && b[3] == 70)) { return 0; }
+    if (!(b[8] == 87 && b[9] == 65 && b[10] == 86 && b[11] == 69)) { return 0; }
+    let off: i64 = 12;
+    let blen: i64 = b.len as i64;
+    let fmt_ok: i64 = 0;
+    let srx: i64 = 0;
+    let dsamp: i64 = -1;
+    let nsamp: i64 = 0;
+    while (off + 8 <= blen) {
+        let c0: i64 = b[off] as i64;
+        let c1: i64 = b[off + 1] as i64;
+        let c2: i64 = b[off + 2] as i64;
+        let c3: i64 = b[off + 3] as i64;
+        let sz: i64 = get_u32(b, off + 4);
+        if (c0 == 102 && c1 == 109 && c2 == 116 && c3 == 32) {
+            if (sz < 16) { return 0; }
+            let afmt: i64 = ((b[off + 8] as i64) & 255) | (((b[off + 9] as i64) & 255) << 8);
+            let ch: i64 = ((b[off + 10] as i64) & 255) | (((b[off + 11] as i64) & 255) << 8);
+            let s2: i64 = get_u32(b, off + 12);
+            let bits: i64 = ((b[off + 22] as i64) & 255) | (((b[off + 23] as i64) & 255) << 8);
+            if (afmt == 1 && ch == 1 && bits == 16 && (s2 == 44100 || s2 == 8000)) {
+                fmt_ok = 1;
+                srx = s2;
+            }
+        }
+        if (c0 == 100 && c1 == 97 && c2 == 116 && c3 == 97) {
+            dsamp = (off + 8) / 2;
+            nsamp = sz / 2;
+        }
+        off = off + 8 + sz;
+    }
+    if (fmt_ok == 0 || dsamp < 0 || nsamp <= 0) { return 0; }
+    put64(META3, 0, dsamp);
+    put64(META3, 8, nsamp);
+    put64(META3, 16, srx);
+    return 1;
+}
+
+// YIN cumulative-mean-normalized difference at one lag over [1..lag].
+// LRL holds r[1..lmax] as LE i64 at 8B stride from index 0.
+fn lowdp_at(LRL: []u8, r0: i64, lag: i64) f64 {
+    let run: f64 = 0.0;
+    let j: i64 = 1;
+    while (j <= lag) {
+        run = run + (2.0 * ((r0 - get64(LRL, (j - 1) * 8)) as f64));
+        j = j + 1;
+    }
+    let dlag: f64 = 2.0 * ((r0 - get64(LRL, (lag - 1) * 8)) as f64);
+    return dlag / (run / (lag as f64));
+}
+
+// Low-band F0 on one frame. b/ds0/nsamp/s: sample access (organ's samp).
+// sr: 44100 or 8000. nframe: 2048 (44.1k) or 1024 (8k).
+// Mirrors the organ's proven YIN structure exactly (pre-roll 1..lmin-1,
+// first dip below 0.10 from lmin, local-min advance, parabolic interp),
+// but on MEAN-REMOVED UNWINDOWED frames (no Hann attenuation — P's
+// finding) with the lag range extended to sr/55 (55 Hz).
+// LRL: lmax*8 bytes. LRES: 16 bytes -> [0]=f0_mhz, [8]=status.
+fn lowf0_frame(b: []u8, ds0: i64, nsamp: i64, s: i64, sr: i64, nframe: i64, LRL: []u8, LRES: []u8) void {
+    let sum: i64 = 0;
+    let sum2: i64 = 0;
+    let n: i64 = 0;
+    while (n < nframe) {
+        let x: i64 = samp(b, ds0, s + n, nsamp);
+        sum = sum + x;
+        sum2 = sum2 + x * x;
+        n = n + 1;
+    }
+    let mean: i64 = sum / nframe;
+    let ms: f64 = (sum2 as f64) / (nframe as f64);
+    if (ms < 10737418.0) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let lmin: i64 = sr / 125;
+    let lmax: i64 = sr / 55;
+    if (lmin < 36) { lmin = 36; }
+    if (lmax > nframe - 64) { lmax = nframe - 64; }
+    if (lmax <= lmin) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let lag: i64 = 1;
+    while (lag <= lmax) {
+        let acc: i64 = 0;
+        let m: i64 = 0;
+        let lim: i64 = nframe - lag;
+        while (m < lim) {
+            let v1: i64 = samp(b, ds0, s + m, nsamp) - mean;
+            let v2: i64 = samp(b, ds0, s + m + lag, nsamp) - mean;
+            acc = acc + v1 * v2;
+            m = m + 1;
+        }
+        put64(LRL, (lag - 1) * 8, acc);
+        lag = lag + 1;
+    }
+    let r0: i64 = get64(LRL, 0);
+    if (r0 <= 0) {
+        put64(LRES, 0, 0);
+        put64(LRES, 8, 0);
+        return;
+    }
+    let run: f64 = 0.0;
+    let j: i64 = 1;
+    while (j < lmin) {
+        run = run + (2.0 * ((r0 - get64(LRL, (j - 1) * 8)) as f64));
+        j = j + 1;
+    }
+    let sel: i64 = -1;
+    let sel_dp: f64 = 0.0;
+    let gmin: f64 = 1000000.0;
+    let gmin_lag: i64 = lmin;
+    let lg: i64 = lmin;
+    while (lg <= lmax) {
+        let rl: i64 = get64(LRL, (lg - 1) * 8);
+        let dlag: f64 = 2.0 * ((r0 - rl) as f64);
+        run = run + dlag;
+        let dp: f64 = dlag / (run / (lg as f64));
+        if (dp < gmin) {
+            gmin = dp;
+            gmin_lag = lg;
+        }
+        if (sel == -1 && dp < 0.10) {
+            sel = lg;
+            sel_dp = dp;
+        } else if (sel != -1) {
+            if (dp < sel_dp) {
+                sel = lg;
+                sel_dp = dp;
+            } else {
+                lg = lmax + 1;
+            }
+        }
+        lg = lg + 1;
+    }
+    if (sel == -1) {
+        sel = gmin_lag;
+        sel_dp = gmin;
+    }
+    let lagf: f64 = sel as f64;
+    if (sel > lmin && sel < lmax) {
+        let a2: f64 = lowdp_at(LRL, r0, sel - 1);
+        let b2: f64 = sel_dp;
+        let c2: f64 = lowdp_at(LRL, r0, sel + 1);
+        let den: f64 = a2 - 2.0 * b2 + c2;
+        let ab: f64 = den;
+        if (ab < 0.0) { ab = -ab; }
+        if (ab > 0.000001) {
+            lagf = (sel as f64) + 0.5 * (a2 - c2) / den;
+        }
+    }
+    let f0hz: f64 = (sr as f64) / lagf;
+    let f0m: i64 = (f0hz * 1000.0 + 0.5) as i64;
+    let st: i64 = 1;
+    let rsel: i64 = get64(LRL, (sel - 1) * 8);
+    let rn: f64 = (rsel as f64) / (r0 as f64);
+    if (rn < 0.35) { st = 0; }
+    let half: i64 = sel / 2;
+    if (half >= 1 && st == 1) {
+        let rh: i64 = 0;
+        let m2: i64 = 0;
+        let lim2: i64 = nframe - half;
+        while (m2 < lim2) {
+            let u1: i64 = samp(b, ds0, s + m2, nsamp) - mean;
+            let u2: i64 = samp(b, ds0, s + m2 + half, nsamp) - mean;
+            rh = rh + u1 * u2;
+            m2 = m2 + 1;
+        }
+        if (rsel > 0 && rh * 100 >= rsel * 90) { st = 2; }
+    }
+    // Validated floor: 55 Hz. Below this the 46 ms frame holds <2.5 periods
+    // and per-frame error exceeds the 5% bar (measured 70.6% within 5% at
+    // 40 Hz on synthetic harmonic tones) -> explicit below-floor, never
+    // a confident misread. Satisfies prereg "floor <= 65 Hz".
+    if (f0m < 55000) { st = 3; }
+    if (st != 1) { f0m = 0; }
+    put64(LRES, 0, f0m);
+    put64(LRES, 8, st);
+    return;
+}
+
+// Per-frame guard policy. o_f0/o_v/o_rms: organ's per-frame values.
+// mode: 0 = low (estimator on), 1 = scope (pure range restriction).
+// GRES: 24 bytes -> [0]=guarded f0_mhz, [8]=guarded voiced, [16]=how
+// (0 organ, 1 lowband, 2 out-of-range, 3 unvoiced).
+fn guard_frame(b: []u8, ds0: i64, nsamp: i64, s: i64, sr: i64, o_f0: i64, o_v: i64, o_rms: i64, mode: i64, LRL: []u8, LRES: []u8, GRES: []u8) void {
+    let gf0: i64 = 0;
+    let gv: i64 = 0;
+    let how: i64 = 3;
+    if (o_v == 1 && o_f0 >= 125000) {
+        gf0 = o_f0;
+        gv = 1;
+        how = 0;
+    } else if (mode == 1) {
+        gf0 = 0;
+        gv = 0;
+        if (o_v == 1) { how = 2; } else { how = 3; }
+    } else {
+        let nframe: i64 = 2048;
+        if (sr == 8000) { nframe = 1024; }
+        lowf0_frame(b, ds0, nsamp, s, sr, nframe, LRL, LRES);
+        let lf0: i64 = get64(LRES, 0);
+        let lst: i64 = get64(LRES, 8);
+        if (lst == 1) {
+            gf0 = lf0;
+            gv = 1;
+            how = 1;
+        } else if (lst == 2 || lst == 3) {
+            gf0 = 0;
+            gv = 0;
+            how = 2;
+        } else {
+            gf0 = 0;
+            gv = 0;
+            how = 3;
+        }
+    }
+    put64(GRES, 0, gf0);
+    put64(GRES, 8, gv);
+    put64(GRES, 16, how);
+    return;
+}
+
+fn guarded_med_f0(GF0: []u8, GV: []u8, nfr: i64, SORT: []u8) i64 {
+    let c: i64 = 0;
+    let f: i64 = 0;
+    while (f < nfr) {
+        if (get64(GV, f * 8) == 1) {
+            put64(SORT, c * 8, get64(GF0, f * 8));
+            c = c + 1;
+        }
+        f = f + 1;
+    }
+    if (c == 0) { return 0; }
+    isort(SORT, c);
+    return get64(SORT, (c / 2) * 8);
+}
+
+fn guarded_voiced_frac(GV: []u8, nfr: i64) i64 {
+    if (nfr <= 0) { return 0; }
+    let c: i64 = 0;
+    let f: i64 = 0;
+    while (f < nfr) {
+        if (get64(GV, f * 8) == 1) { c = c + 1; }
+        f = f + 1;
+    }
+    return c * 1000 / nfr;
+}

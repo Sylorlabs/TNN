@@ -1,0 +1,334 @@
+// ================= NO-BRIDGES COMPOSER: nb1 — measurement instruments =================
+// The programmer supplies NEUTRAL instruments here: per-pixel measurement fields,
+// histograms, peak/valley measurement, percentiles, knee finding, spatial
+// structuredness. No segmentation decisions live in this file. Every number the
+// invention organ uses downstream is measured by these instruments from the
+// memory's own bytes.
+//
+// Field kinds:
+//   0 = GRAY   (u8 per pixel, 0..255)
+//   1 = TEX    (i64 x4 gradient magnitude, 0..2040)
+//   2 = MOTION (i64 x4 motion energy over the sequence)
+//   3 = VAR    (i64 4x4-block variance, 0..65025)
+//
+// Field record (per field, 12 i64s = 96 bytes):
+//   [0] min [1] max [2] mean [3] npeaks [4] valley_depth_x1e4 [5] valley_level
+//   [6] structuredness_x1e4 [7] divisibility [8] median_level [9] q1_level
+//   [10] q3_level [11] knee_level
+
+fn nb_fval(fkind:i64, F:[]u8, p:i64) i64 {
+    if (fkind == 0) { return (F[p] as i64); }
+    return h_get64(F, p * 8);
+}
+
+fn nb_fname(tr:[]u8, o:i64, fkind:i64) i64 {
+    if (fkind == 0) { return tr_str(tr, o, "GRAY"); }
+    if (fkind == 1) { return tr_str(tr, o, "TEX"); }
+    if (fkind == 2) { return tr_str(tr, o, "MOTION"); }
+    return tr_str(tr, o, "VAR");
+}
+
+// 4x4 block variance, nearest-neighbor upsampled to full frame; i64 arena
+fn nb_var_field(gray:[]u8, V:[]u8, W:i64, H:i64) void {
+    let bw:i64 = W / 4;
+    let bh:i64 = H / 4;
+    let by:i64 = 0;
+    while (by < bh) {
+        let bx:i64 = 0;
+        while (bx < bw) {
+            let s:i64 = 0;
+            let s2:i64 = 0;
+            let dy:i64 = 0;
+            while (dy < 4) {
+                let dx:i64 = 0;
+                while (dx < 4) {
+                    let v:i64 = (gray[(by * 4 + dy) * W + bx * 4 + dx]) as i64;
+                    s = s + v;
+                    s2 = s2 + v * v;
+                    dx = dx + 1;
+                }
+                dy = dy + 1;
+            }
+            let m:i64 = s / 16;
+            let vr:i64 = s2 / 16 - m * m;
+            if (vr < 0) { vr = 0; }
+            let yy:i64 = 0;
+            while (yy < 4) {
+                let xx:i64 = 0;
+                while (xx < 4) {
+                    h_put64(V, ((by * 4 + yy) * W + bx * 4 + xx) * 8, vr);
+                    xx = xx + 1;
+                }
+                yy = yy + 1;
+            }
+            bx = bx + 1;
+        }
+        by = by + 1;
+    }
+}
+
+// 32-bin histogram of field values over observed [min,max]; hist = 32 i64;
+// mm = 2 i64 (min,max out)
+fn nb_hist(F:[]u8, fkind:i64, N:i64, hist:[]u8, mm:[]u8) void {
+    let mn:i64 = 9223372036854775807;
+    let mx:i64 = -9223372036854775807;
+    let p:i64 = 0;
+    while (p < N) {
+        let v:i64 = nb_fval(fkind, F, p);
+        if (v < mn) { mn = v; }
+        if (v > mx) { mx = v; }
+        p = p + 1;
+    }
+    h_put64(mm, 0, mn);
+    h_put64(mm, 8, mx);
+    let i:i64 = 0;
+    while (i < 32) { h_put64(hist, i * 8, 0); i = i + 1; }
+    let span:i64 = mx - mn + 1;
+    p = 0;
+    while (p < N) {
+        let v:i64 = nb_fval(fkind, F, p);
+        let b:i64 = (v - mn) * 32 / span;
+        if (b > 31) { b = 31; }
+        if (b < 0) { b = 0; }
+        h_put64(hist, b * 8, h_get64(hist, b * 8) + 1);
+        p = p + 1;
+    }
+}
+
+// percentile from a 32-bin histogram: smallest bin with cum*100 >= q*total,
+// mapped back to field units
+fn nb_hist_pct(hist:[]u8, total:i64, q:i64, mn:i64, mx:i64) i64 {
+    let cum:i64 = 0;
+    let ans:i64 = -1;
+    let b:i64 = 0;
+    while (b < 32) {
+        cum = cum + h_get64(hist, b * 8);
+        if (ans < 0) {
+            if (cum * 100 >= q * total) { ans = b; }
+        }
+        b = b + 1;
+    }
+    if (ans < 0) { ans = 31; }
+    let span:i64 = mx - mn + 1;
+    return mn + ans * span / 32;
+}
+
+// modality: peaks = local maxima over +-2 with count >= total/128
+// (the noise floor is uniform-expectation/4, derived from the histogram itself).
+// out: 8 i64: [0] npeaks [1] p1bin [2] p1cnt [3] p2bin [4] p2cnt
+//              [5] valleybin [6] valley_depth_x1e4 [7] reserved
+fn nb_modality(hist:[]u8, total:i64, out:[]u8) void {
+    let i:i64 = 0;
+    while (i < 8) { h_put64(out, i * 8, 0); i = i + 1; }
+    let floor:i64 = total / 128;
+    let pb:[]u8 = nio_alloc(64);
+    let pc:[]u8 = nio_alloc(64);
+    let np:i64 = 0;
+    let b:i64 = 0;
+    while (b < 32) {
+        let c:i64 = h_get64(hist, b * 8);
+        if (c >= floor) {
+            let ok:i64 = 1;
+            let d:i64 = 1;
+            while (d <= 2) {
+                if (b - d >= 0) {
+                    if (h_get64(hist, (b - d) * 8) > c) { ok = 0; }
+                }
+                if (b + d < 32) {
+                    if (h_get64(hist, (b + d) * 8) > c) { ok = 0; }
+                }
+                d = d + 1;
+            }
+            if (ok == 1) {
+                if (np < 8) {
+                    h_put64(pb, np * 8, b);
+                    h_put64(pc, np * 8, c);
+                    np = np + 1;
+                }
+            }
+        }
+        b = b + 1;
+    }
+    h_put64(out, 0, np);
+    let p1b:i64 = -1;
+    let p1c:i64 = -1;
+    let p2b:i64 = -1;
+    let p2c:i64 = -1;
+    i = 0;
+    while (i < np) {
+        let cb:i64 = h_get64(pb, i * 8);
+        let cc:i64 = h_get64(pc, i * 8);
+        if (cc > p1c) {
+            p2b = p1b;
+            p2c = p1c;
+            p1b = cb;
+            p1c = cc;
+        } else {
+            if (cc > p2c) {
+                p2b = cb;
+                p2c = cc;
+            }
+        }
+        i = i + 1;
+    }
+    nio_free(pb);
+    nio_free(pc);
+    h_put64(out, 8, p1b);
+    h_put64(out, 16, p1c);
+    h_put64(out, 24, p2b);
+    h_put64(out, 32, p2c);
+    if (np >= 2) {
+        let lo:i64 = p1b;
+        let hi:i64 = p2b;
+        if (lo > hi) {
+            let t:i64 = lo;
+            lo = hi;
+            hi = t;
+        }
+        let vb:i64 = lo + 1;
+        let vc:i64 = 9223372036854775807;
+        let k:i64 = lo + 1;
+        while (k < hi) {
+            let c:i64 = h_get64(hist, k * 8);
+            if (c < vc) {
+                vc = c;
+                vb = k;
+            }
+            k = k + 1;
+        }
+        h_put64(out, 40, vb);
+        let pm:i64 = p1c;
+        if (p2c < pm) { pm = p2c; }
+        let depth:i64 = 0;
+        if (pm > 0) {
+            depth = (pm - vc) * 10000 / pm;
+            if (depth < 0) { depth = 0; }
+        }
+        h_put64(out, 48, depth);
+    } else {
+        h_put64(out, 40, -1);
+        h_put64(out, 48, 0);
+    }
+}
+
+// knee: max |slope change| of the cumulative histogram, b in 2..30;
+// returned in field units
+fn nb_knee(hist:[]u8, mn:i64, mx:i64) i64 {
+    let cum:[]u8 = nio_alloc(256);
+    let acc:i64 = 0;
+    let b:i64 = 0;
+    while (b < 32) {
+        acc = acc + h_get64(hist, b * 8);
+        h_put64(cum, b * 8, acc);
+        b = b + 1;
+    }
+    let best:i64 = 16;
+    let bv:i64 = -1;
+    b = 2;
+    while (b <= 30) {
+        let s1:i64 = h_get64(cum, b * 8) - h_get64(cum, (b - 1) * 8);
+        let s0:i64 = h_get64(cum, (b - 1) * 8) - h_get64(cum, (b - 2) * 8);
+        let curv:i64 = s1 - s0;
+        if (curv < 0) { curv = 0 - curv; }
+        if (curv > bv) {
+            bv = curv;
+            best = b;
+        }
+        b = b + 1;
+    }
+    nio_free(cum);
+    let span:i64 = mx - mn + 1;
+    return mn + best * span / 32;
+}
+
+// structuredness: top-decile mask (v >= p90) -> 4-connected labeling ->
+// largest-component share x10000. Clustered fields score high; speckle low.
+fn nb_structured(F:[]u8, fkind:i64, N:i64, W:i64, H:i64, lvl90:i64, mask:[]u8, lab:[]u8) i64 {
+    let p:i64 = 0;
+    let top:i64 = 0;
+    while (p < N) {
+        if (nb_fval(fkind, F, p) >= lvl90) {
+            mask[p] = 1;
+            top = top + 1;
+        } else {
+            mask[p] = 0;
+        }
+        p = p + 1;
+    }
+    if (top == 0) { return 0; }
+    let nc:i64 = seg_label(mask, lab, W, H);
+    if (nc <= 0) { return 0; }
+    // single-pass component histogram (the per-component full-frame rescan
+    // this replaces was O(nc*N) and dominated runtime on speckly fields)
+    let ch:[]u8 = nio_alloc(((nc + 1) * 8) as i32);
+    let i:i64 = 0;
+    while (i <= nc) { h_put64(ch, i * 8, 0); i = i + 1; }
+    p = 0;
+    while (p < N) {
+        let cid:i64 = h_get64(lab, p * 8);
+        h_put64(ch, cid * 8, h_get64(ch, cid * 8) + 1);
+        p = p + 1;
+    }
+    let big:i64 = 0;
+    let id:i64 = 1;
+    while (id <= nc) {
+        let c:i64 = h_get64(ch, id * 8);
+        if (c > big) { big = c; }
+        id = id + 1;
+    }
+    nio_free(ch);
+    return big * 10000 / top;
+}
+
+// full measurement pass for one memory's middle frame.
+// fields: F0=gray(u8), F1=tex(i64 x4), F2=E(i64 x4, prebuilt), F3=var(i64)
+// frec = 4 x 12 i64 field records. scratch: hist(32 i64), mm(2 i64), mod(8 i64),
+// mask(N u8), lab(N*8).
+fn nb_measure(E:[]u8, gray12:[]u8, W:i64, H:i64, N:i64, F1:[]u8, F3:[]u8, frec:[]u8, hist:[]u8, mm:[]u8, mod:[]u8, mask:[]u8, lab:[]u8) void {
+    seg_texture(gray12, F1, W, H);
+    nb_var_field(gray12, F3, W, H);
+    let f:i64 = 0;
+    while (f < 4) {
+        let F:[]u8 = gray12;
+        if (f == 1) { F = F1; }
+        if (f == 2) { F = E; }
+        if (f == 3) { F = F3; }
+        nb_hist(F, f, N, hist, mm);
+        let mn:i64 = h_get64(mm, 0);
+        let mx:i64 = h_get64(mm, 8);
+        let mean:i64 = 0;
+        let p:i64 = 0;
+        while (p < N) {
+            mean = mean + nb_fval(f, F, p);
+            p = p + 1;
+        }
+        mean = mean / N;
+        nb_modality(hist, N, mod);
+        let npk:i64 = h_get64(mod, 0);
+        let vb:i64 = h_get64(mod, 40);
+        let depth:i64 = h_get64(mod, 48);
+        let span:i64 = mx - mn + 1;
+        let vlevel:i64 = -1;
+        if (vb >= 0) { vlevel = mn + vb * span / 32; }
+        let med:i64 = nb_hist_pct(hist, N, 50, mn, mx);
+        let q1:i64 = nb_hist_pct(hist, N, 25, mn, mx);
+        let q3:i64 = nb_hist_pct(hist, N, 75, mn, mx);
+        let knee:i64 = nb_knee(hist, mn, mx);
+        let p90:i64 = nb_hist_pct(hist, N, 90, mn, mx);
+        let stru:i64 = nb_structured(F, f, N, W, H, p90, mask, lab);
+        let bo:i64 = f * 96;
+        h_put64(frec, bo, mn);
+        h_put64(frec, bo + 8, mx);
+        h_put64(frec, bo + 16, mean);
+        h_put64(frec, bo + 24, npk);
+        h_put64(frec, bo + 32, depth);
+        h_put64(frec, bo + 40, vlevel);
+        h_put64(frec, bo + 48, stru);
+        h_put64(frec, bo + 56, depth * stru / 10000);
+        h_put64(frec, bo + 64, med);
+        h_put64(frec, bo + 72, q1);
+        h_put64(frec, bo + 80, q3);
+        h_put64(frec, bo + 88, knee);
+        f = f + 1;
+    }
+}

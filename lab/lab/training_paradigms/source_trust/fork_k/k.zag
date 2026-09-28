@@ -1,0 +1,263 @@
+// k.zag — Fork K: explicit scalar trust per source (knob control baseline).
+//
+// Implements frozen BUILD_SPEC_K.md. Pure Zag. Zero randomness in any
+// decision path. Deterministic given state; byte-identical reruns.
+//
+// Frozen numbers (fixed-point i64, units of 1/1000):
+//   t0=500, d_up=+50, d_down=-150, theta_admit=600, theta_reject=250,
+//   clamp [0,1000].
+//
+// Interfaces:
+//   k_new() -> KHist
+//   k_decide(src,key,val,h) -> i32   // 0=INSTALL 1=WITHHOLD 2=REJECT (SAY)
+//   k_world(key,val,h)               // driver calls on WORLD episodes
+//   k_warrant(h) -> []u8             // warrant of the last k_decide
+
+// ---- frozen parameters ----
+const K_T0:i64=500;
+const K_DUP:i64=50;
+const K_DDOWN:i64=150;
+const K_THETA_ADMIT:i64=600;
+const K_THETA_REJECT:i64=250;
+const K_MAX_SRC:i32=256;
+const K_MAX_KEYS:i32=8192;
+const K_CL_PER:i32=8;
+
+// krec layout (8 words per key):
+//   0 open, 1 first_val, 2 first_src, 3 nsame, 4 contested, 5 settled,
+//   6 world_val, 7 nclaimants
+struct KHist {
+    trust: []i64,
+    krec: []i64,
+    cl: []i64,
+    lw: []i64,
+    wbuf: []u8
+}
+
+// ---- allocation (self-contained; no imports, no name collisions) ----
+fn k_alloc(n:i32) []u8 {
+    if(n<1 || n>33554432){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn k_free(b:[]u8) void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+    return;
+}
+
+fn z_alloc64(n:i32) []i64 {
+    let raw:[]u8=k_alloc(n*8);
+    let i:i32=0;
+    while(i<n*8){raw[i]=0;i=i+1;}
+    return (raw as []i64)[0..n];
+}
+
+fn k_new() KHist {
+    let tr:[]i64=z_alloc64(K_MAX_SRC);
+    let kr:[]i64=z_alloc64(K_MAX_KEYS*8);
+    let cl:[]i64=z_alloc64(K_MAX_KEYS*K_CL_PER*2);
+    let lw:[]i64=z_alloc64(8);
+    let wb:[]u8=k_alloc(256);
+    let i:i32=0;
+    while(i<256){wb[i]=0;i=i+1;}
+    i=0;
+    while(i<K_MAX_SRC){tr[i]=K_T0;i=i+1;}
+    let h:KHist=KHist{.trust=tr,.krec=kr,.cl=cl,.lw=lw,.wbuf=wb};
+    return h;
+}
+
+fn k_bump(h:*KHist, src:i32, delta:i64) i64 {
+    let tr:[]i64=h.*.trust;
+    let v:i64=tr[src]+delta;
+    if(v<0){v=0;}
+    if(v>1000){v=1000;}
+    tr[src]=v;
+    return v;
+}
+
+fn k_trustof(h:*KHist, src:i32) i64 {
+    let tr:[]i64=h.*.trust;
+    return tr[src];
+}
+
+// ---- warrant recorder ----
+fn k_wappend(h:*KHist, pos:i32, s:[]u8) i32 {
+    let wb:[]u8=h.*.wbuf;
+    let i:i32=0;
+    while(i<s.len){
+        if(pos<256){wb[pos]=s[i];pos=pos+1;}
+        i=i+1;
+    }
+    return pos;
+}
+
+fn k_wi64(h:*KHist, pos:i32, v:i64) i32 {
+    let wb:[]u8=h.*.wbuf;
+    let neg:i32=0;
+    let x:i64=v;
+    if(x<0){neg=1;x=0-x;}
+    let tmp:[]u8=k_alloc(24);
+    let n:i32=0;
+    if(x==0){tmp[0]=48;n=1;}
+    while(x>0){tmp[n]=((x%10)+48) as u8;n=n+1;x=x/10;}
+    if(neg==1){
+        if(pos<256){wb[pos]=45;pos=pos+1;}
+    }
+    let j:i32=n-1;
+    while(j>=0){
+        if(pos<256){wb[pos]=tmp[j];pos=pos+1;}
+        j=j-1;
+    }
+    k_free(tmp);
+    return pos;
+}
+
+// rule codes: 1=SETTLED_CONFLICT 2=CONTESTED 3=CORROBORATED 4=TRUST 7=BAD_INPUT
+fn k_wrec(h:*KHist, verdict:i32, src:i32, key:i32, val:i32, trust:i64, rule:i32) void {
+    let p:i32=0;
+    p=k_wappend(h,p,"V=");p=k_wi64(h,p,verdict as i64);
+    p=k_wappend(h,p,";src=");p=k_wi64(h,p,src as i64);
+    p=k_wappend(h,p,";key=");p=k_wi64(h,p,key as i64);
+    p=k_wappend(h,p,";val=");p=k_wi64(h,p,val as i64);
+    p=k_wappend(h,p,";t=");p=k_wi64(h,p,trust);
+    p=k_wappend(h,p,";rule=");
+    if(rule==1){p=k_wappend(h,p,"SETTLED_CONFLICT");}
+    if(rule==2){p=k_wappend(h,p,"CONTESTED");}
+    if(rule==3){p=k_wappend(h,p,"CORROBORATED");}
+    if(rule==4){p=k_wappend(h,p,"TRUST");}
+    if(rule==7){p=k_wappend(h,p,"BAD_INPUT");}
+    let lw:[]i64=h.*.lw;
+    lw[0]=verdict as i64;lw[1]=src as i64;lw[2]=key as i64;
+    lw[3]=val as i64;lw[4]=trust;lw[5]=rule as i64;lw[7]=p as i64;
+    return;
+}
+
+fn k_warrant(h:*KHist) []u8 {
+    let wb:[]u8=h.*.wbuf;
+    let lw:[]i64=h.*.lw;
+    let n:i32=lw[7] as i32;
+    if(n<0){n=0;}
+    if(n>256){n=256;}
+    return wb[0..n];
+}
+
+// ---- trust-rule verdict (spec rule 4) ----
+fn k_trust_verdict(h:*KHist, src:i32, key:i32, val:i32, t:i64) i32 {
+    if(t>=K_THETA_ADMIT){k_wrec(h,0,src,key,val,t,4);return 0;}
+    if(t<=K_THETA_REJECT){k_wrec(h,2,src,key,val,t,4);return 2;}
+    k_wrec(h,1,src,key,val,t,4);
+    return 1;
+}
+
+// ---- the frozen decide: SAY episodes only ----
+fn k_decide(src:i32, key:i32, val:i32, h:*KHist) i32 {
+    let tr:[]i64=h.*.trust;
+    let kr:[]i64=h.*.krec;
+    let cl:[]i64=h.*.cl;
+    if(src<0 || src>=K_MAX_SRC || key<0){
+        k_wrec(h,1,src,key,val,-1,7);
+        return 1;
+    }
+    let k:i32=key % K_MAX_KEYS;
+    let base:i32=k*8;
+    let t:i64=tr[src];
+    // spec rule 1: WORLD-settled key
+    if(kr[base+5]==1){
+        if(val==(kr[base+6] as i32)){
+            // restating settled truth: repetition, no trust move
+            return k_trust_verdict(h,src,k,val,t);
+        }
+        t=k_bump(h,src,0-K_DDOWN);
+        k_wrec(h,2,src,k,val,t,1);
+        return 2;
+    }
+    // classify the claim against this key's record
+    let cbase:i32=k*K_CL_PER*2;
+    let ncl:i32=kr[base+7] as i32;
+    let seen:i32=0;
+    let cval:i32=0;
+    let i:i32=0;
+    while(i<ncl){
+        if(cl[cbase+i*2]==(src as i64)){seen=1;cval=cl[cbase+i*2+1] as i32;}
+        i=i+1;
+    }
+    if(seen==0){
+        if(ncl<K_CL_PER){
+            cl[cbase+ncl*2]=src as i64;
+            cl[cbase+ncl*2+1]=val as i64;
+            kr[base+7]=(ncl+1) as i64;
+        }
+        if(kr[base]==0){
+            // first claim on this key: open it, verdict by trust alone
+            kr[base]=1;
+            kr[base+1]=val as i64;
+            kr[base+2]=src as i64;
+            kr[base+3]=1;
+            return k_trust_verdict(h,src,k,val,t);
+        }
+        if(val==(kr[base+1] as i32)){
+            if(kr[base+4]==0){
+                // corroboration event: reward the whole same-val coalition
+                kr[base+3]=kr[base+3]+1;
+                let nn:i32=kr[base+7] as i32;
+                let j:i32=0;
+                while(j<nn){
+                    if(cl[cbase+j*2+1]==kr[base+1]){
+                        let cs:i32=cl[cbase+j*2] as i32;
+                        k_bump(h,cs,K_DUP);
+                    }
+                    j=j+1;
+                }
+                t=tr[src];
+            }
+        } else {
+            // contradicted: mark contested, no trust move (liar unidentified)
+            kr[base+4]=1;
+        }
+        // verdict order: contested (2) before corroborated (3) before trust (4)
+        if(kr[base+4]==1){k_wrec(h,1,src,k,val,t,2);return 1;}
+        if(kr[base+3]>=2){k_wrec(h,0,src,k,val,t,3);return 0;}
+        return k_trust_verdict(h,src,k,val,t);
+    }
+    // repeat by the same source
+    if(cval!=val){
+        // self-contradiction contests the key; no trust move
+        kr[base+4]=1;
+    }
+    if(kr[base+4]==1){k_wrec(h,1,src,k,val,t,2);return 1;}
+    if(kr[base+3]>=2){k_wrec(h,0,src,k,val,t,3);return 0;}
+    return k_trust_verdict(h,src,k,val,t);
+}
+
+// ---- WORLD-episode ingest (driver routes WORLD episodes here) ----
+// WORLD-agree: +d_up to every claimant whose val matches.
+// WORLD-disagree: -d_down to every claimant whose val conflicts.
+// Settles the key either way.
+fn k_world(key:i32, val:i32, h:*KHist) void {
+    if(key<0){return;}
+    let k:i32=key % K_MAX_KEYS;
+    let kr:[]i64=h.*.krec;
+    let cl:[]i64=h.*.cl;
+    let base:i32=k*8;
+    if(kr[base]==1){
+        let cbase:i32=k*K_CL_PER*2;
+        let n:i32=kr[base+7] as i32;
+        let i:i32=0;
+        while(i<n){
+            let cs:i32=cl[cbase+i*2] as i32;
+            if(cl[cbase+i*2+1]==(val as i64)){
+                k_bump(h,cs,K_DUP);
+            } else {
+                k_bump(h,cs,0-K_DDOWN);
+            }
+            i=i+1;
+        }
+    }
+    kr[base+5]=1;
+    kr[base+6]=val as i64;
+    return;
+}
