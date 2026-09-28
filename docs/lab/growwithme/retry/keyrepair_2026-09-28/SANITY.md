@@ -46,3 +46,21 @@ scorer artifacts).
 
 The repaired battery is clean and staged: re-sealed questions, frozen keys,
 frozen scorer, deterministic rebuild. M2 may now be evaluated against it.
+
+## Miss characterization (from the independent rebuild crew's run)
+
+27 misses per arm (of 108 immediate probes); miss lists identical between D
+and N. Almost all misses are "Withheld" deliberation refusals; the only
+genuine wrong answers are S1 F1-01-Q, S2 F2-02-Q, S3 F3-14-Q, S6 F6-14-Q
+and F6-15-Q (one each). This is the M3 baseline M2 must beat: genuine
+wrong answers on paraphrased demand-word probes, plus a large withhold
+mass the prereg's kill criterion (b) pins as the floor.
+
+## Rebuild ergonomics notes (for future rebuilders of this package)
+
+1. The committed package tree contains no `build/` dir (git does not track
+   empty dirs) — `znc runner.zag -o build/runner --no-zagd` fails with
+   "failed to write executable" until `mkdir -p build/`.
+2. `runner.zag`'s `mkpath` is a single non-recursive `mkdir("runs/D_run1")`
+   that fails silently when `runs/` does not exist — first runs exit 0 but
+   write nothing; `mkdir -p runs` first. Neither is a source defect.
