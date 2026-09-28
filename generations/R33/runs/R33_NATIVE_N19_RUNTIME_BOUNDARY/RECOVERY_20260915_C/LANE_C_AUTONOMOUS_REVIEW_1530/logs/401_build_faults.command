@@ -1,0 +1,1 @@
+/Users/Shared/micah/Documents/zag/znc Research/R33_NATIVE_N19_RUNTIME_BOUNDARY/RECOVERY_20260915_C/LANE_C_AUTONOMOUS_REVIEW_1530/sources/c_independent_faults.zag --target macos-arm64 --no-zagd --no-analyze --no-foreground-cache -o Research/R33_NATIVE_N19_RUNTIME_BOUNDARY/RECOVERY_20260915_C/LANE_C_AUTONOMOUS_REVIEW_1530/bin/c_faults 

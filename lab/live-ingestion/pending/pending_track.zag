@@ -1,0 +1,1180 @@
+// ================= PENDING TRACK: provisional-knowledge partition ===
+// Frozen prereg: docs/lab/knowledge/web_guides/live_ingest/pending/PREREG_PENDING.md
+// (frozen commit 22695f27b8132bab69ed3d753c4cee81b1b7a3d8).
+// This section is APPENDED to the frozen Track-B instrument; every function
+// below is new (kpp_ prefix / cmd_kb* commands). The verdict/recall path
+// (kb_load lineage, verdict_core, cmd_verdict) is untouched except for a
+// hold_on flag threaded through verdict_core/cmd_verdict/main (see the fork
+// script); with hold OFF the verdict path is byte-identical to the frozen
+// instrument (kill bar P7).
+//
+// Store files in <sd>/ — disjoint names, disjoint line prefixes (§3):
+//   knowledge.txt    KB|<seq>|<claim>              (installed; read by recall)
+//   pending.txt      PENDING|<seq>|<claim>|<provenance>
+//   rejections.txt   REJ|<seq>|<claim>|<reason>     (append-only)
+//   resolutions.txt  RESOLVE|<pseq>|<KB|REJ|SHED>|<kind>|<detail> (append-only)
+//   shed_ledger.txt  SHED|<seq>|<claim>             (append-only)
+//   holdpolicy.txt   HOLD|ON  |  HOLD|OFF           (default OFF when absent)
+//   pending_init.log MEMAVAILABLE_KB|<n> / PENDING_BUDGET_BYTES|<n>
+// Provenance (§4): DELIBERATE | DELIBERATE:CONTRADICTS-KB:<kb-seq> | HELD:<host>
+// Kind (§3, byte-distinguishable): CORROBORATED | TESTED | CONTRADICTED | SHED
+//
+// Structural separation (§3): NOTHING in the verdict/recall read path opens
+// pending.txt or references the PENDING| prefix. The §4b hold intercept is
+// DECIDED in verdict_core (returns 7 with the would-be answer staged in
+// o_ans/o_widx) but the pending append lives in kpp_hold_from_verdict, called
+// exactly once from cmd_verdict. Grep evidence is committed in BUILDLOG.md.
+//
+// Scale: the §7 byte budget can exceed the 1MB read_file cap and the 2^25
+// znc slice ceiling, so all pending-store IO below is chunked streaming
+// (16MB chunks, 64KB line carry). No single slice exceeds 2^25 bytes.
+//
+// Zero RNG: no rng/rand/random/srand anywhere in this section (P6 evidence:
+// grep -rniE 'rng|rand\(|random|srand' returns 0 hits).
+//
+// ---- resolutions of prereg ambiguities (frozen text quoted in BUILDLOG.md) ----
+// A1 (§4b "the exact point where the frozen driver would INSTALL a claim from
+//     the UNKNOWN path"): the frozen verdict path has three UNKNOWN-path
+//     positive-answer branches (MULTIHOP rc=1, blind rc=1, G4 nsrc>=minsrc).
+//     The intercept fires at all three; KB|CORROBORATED and
+//     GATE|KB_CONTRADICTION never fire it.
+// A2 (§4b "HELD:<host>"): with several corroborating pages, the host of the
+//     first winning page (o_widx[0]) is recorded.
+// A3 (§4b held claim text): the winning cluster's best sentence — the exact
+//     bytes the frozen driver would have emitted as ANSWER|.
+// A4 (verdict_core is shared): the intercept fires only on the `verdict`
+//     command path (main reads holdpolicy.txt; calib/teach callers pass 0).
+// A5 (§4a DUPLICATE-KNOWN): per-line skip with an explicit
+//     PENDING|REJECT|line N|DUPLICATE-KNOWN stdout line; other claims still
+//     held; exit 0. Only the PARSE gate is all-or-nothing (exit 3).
+// A6 (§5a guard 4 for DELIBERATE provenance): vacuous pass — a deliberate
+//     claim has no originating page host to differ from.
+// A7 (§5a "TITLE: distinct"): enforced via host-difference (guard 4) and the
+//     pending-derived guard (guard 5); the instrument records no originating
+//     page title for HELD claims, so no title comparison is possible.
+// A8 (§7 init): lazy, on the first pending-store WRITE (kbpend accepted line
+//     or hold intercept); an existing pending_init.log wins (frozen budget
+//     for the state dir — required for P6 byte-identical passes).
+// A9 (stdout shapes not frozen by the prereg): PENDING|PROMOTED|<pseq>|<kbseq>,
+//     PENDING|DEMOTED|<pseq>|<rseq>, PENDING|ERROR|<reason>, HOLD|ON|OFF,
+//     kbpendlist prints verbatim PENDING| lines, shed batch ids BATCH|<n>.
+// A10 (§4b held claim with '|'\newline): refused, never stored
+//     (PENDING|ERROR|bad-claim + ANSWER|UNCHECKABLE) — the §3 line-format
+//     invariant applies to every PENDING| writer.
+// A11 (kbpend empty input): PENDING|ERROR|empty, exit 3 (mirrors kbcommit).
+// A12 (testproto.txt location): <sd>/testproto.txt (command takes <state>).
+// A13 (over-budget single line in kbpend): that line refused with
+//     PENDING|REJECT|line N|OVER-BUDGET, other lines still processed, exit 0;
+//     sheds performed before the refusal stand (literal §7 order).
+
+// ---- small helpers ----
+fn kpp_has_byte(s:[]u8,b:u8)i32 {
+    let i:i32=0;
+    while(i<s.len){
+        if(s[i]==b){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn kpp_digits(v:i32)i32 {
+    if(v<10){return 1;}
+    if(v<100){return 2;}
+    if(v<1000){return 3;}
+    if(v<10000){return 4;}
+    if(v<100000){return 5;}
+    if(v<1000000){return 6;}
+    if(v<10000000){return 7;}
+    if(v<100000000){return 8;}
+    if(v<1000000000){return 9;}
+    return 10;
+}
+
+// ---- chunked file IO ----
+// open <sd>/<name> read-only; returns fd or -1 (missing -> -1, not an error)
+fn kpp_open_read(sd:[]u8,name:[]u8)i64 {
+    let root:i64=nio_open_root(sd);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    return fd;
+}
+
+// split a path at the last '/' (mirrors read_path); open read-only
+fn kpp_open_path_read(path:[]u8)i64 {
+    let k:i32=path.len-1;
+    while(k>=0 && path[k]!=47){k=k-1;}
+    let dir:[]u8=".";
+    let name:[]u8=path;
+    if(k>=0){
+        if(k==0){dir="/";}else{dir=path[0..k];}
+        name=path[k+1..path.len];
+    }
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    return fd;
+}
+
+// unlink + exclusive create <sd>/<name> for writing; sets root[0]; fd or -1
+fn kpp_write_open(sd:[]u8,name:[]u8,root:*i64)i64 {
+    let r:i64=nio_open_root(sd);
+    if(r<0){return -1;}
+    nio_unlink_child(r,name);
+    let fd:i64=nio_open_child(r,name,1);
+    if(fd<0){nio_close(r); return -1;}
+    root[0]=r;
+    return fd;
+}
+
+// ---- IO primitive fixes (2026-09-24): the original code misused
+// nio_read_exact (whole-file atomic read: rewinds and returns size) as a
+// positional chunked reader, which never terminates on non-empty files,
+// and passed >1MB buffers to nio_write_all (hard 1MB limit -> -7401).
+// kpp_read_chunk: single positional read(2), no seek. Returns bytes read,
+// 0 at EOF, negative on error. kpp_write_chunked: splits into <=1MB
+// nio_write_all calls. All looped IO below uses these two.
+fn kpp_read_chunk(fd:i64,buf:[]u8,maxn:i32)i64 {
+    if(fd<0 || maxn<0 || maxn>buf.len){return -7401;}
+    if(maxn==0){return 0;}
+    if(nio_regular(fd)!=1){return -7401;}
+    let ptr:i64=_zag_slice_ptr(buf) as i64;
+    let n:i64=-4;
+    let tries:i32=0;
+    while(n==-4 && tries<10){
+        n=_zag_raw_syscall(0,fd,ptr,(maxn as i64),0,0,0);
+        tries=tries+1;
+    }
+    return n;
+}
+
+fn kpp_write_chunked(fd:i64,buf:[]u8)i64 {
+    if(fd<0){return -7401;}
+    let off:i32=0;
+    while(off<buf.len){
+        let n:i32=buf.len-off;
+        if(n>1048576){n=1048576;}
+        let w:i64=nio_write_all(fd,buf[off..off+n]);
+        if(w<0){return w;}
+        off=off+n;
+    }
+    return buf.len as i64;
+}
+
+// ---- generic streaming line reader ----
+// mode 1: pending scan   (p1=seqtab,p2=lentab,s1=cap; o1=n,o2=maxseq,o3=used)
+// mode 2: resolve scan   (o1=maxbatch,o2=maxseq)
+// mode 3: rej/shed maxseq (o2=maxseq; lines REJ| or SHED|)
+// mode 4: kb maxseq      (o2=maxseq; lines KB|)
+// mode 5: print lines    (kbpendlist)
+// mode 6: find pending seq (s1=pseq; p1=cbuf,p2=pbuf; o1=clen,o2=plen,o3=found)
+// mode 9: proto known    (p1=proto-id; o1=found)
+// Returns 1 ok, 0 on IO/format error (line > 64KB, table full).
+fn kpp_stream_handle(mode:i32,line:[]u8,llen:i32,
+    p1:[]u8,p2:[]u8,o1:*i32,o2:*i32,o3:*i64,s1:i32,s2:i32)i32 {
+    if(mode==1){
+        if(llen<9){return 1;}
+        if(line[0]==80 && line[1]==69 && line[2]==78 && line[3]==68 &&
+           line[4]==73 && line[5]==78 && line[6]==71 && line[7]==124){
+            let sq:i32=atoi(line[8..llen]);
+            if(sq<=0){return 1;}
+            if(o1[0]>=s1){return 0;}
+            p32(p1,o1[0]*4,sq);
+            p32(p2,o1[0]*4,llen+1);
+            o1[0]=o1[0]+1;
+            o3[0]=o3[0]+((llen+1) as i64);
+            if(sq>o2[0]){o2[0]=sq;}
+        }
+        return 1;
+    }
+    if(mode==2){
+        // RESOLVE|<pseq>|<target>|<kind>|<detail>
+        if(llen<9){return 1;}
+        if(line[0]==82 && line[1]==69 && line[2]==83 && line[3]==79 &&
+           line[4]==76 && line[5]==86 && line[6]==69 && line[7]==124){
+            let f1e:i32=8;
+            while(f1e<llen && line[f1e]!=124){f1e=f1e+1;}
+            let sq:i32=atoi(line[8..f1e]);
+            if(sq>o2[0]){o2[0]=sq;}
+            // pipe positions for kind/detail
+            let pp:[]u8=nio_alloc(24);
+            let np2:i32=0;
+            let q:i32=0;
+            while(q<llen && np2<6){
+                if(line[q]==124){p32(pp,np2*4,q); np2=np2+1;}
+                q=q+1;
+            }
+            if(np2>=4){
+                let k3s:i32=g32(pp,2*4)+1;
+                let k3e:i32=g32(pp,3*4);
+                if(k3e-k3s==4 && line[k3s]==83 && line[k3s+1]==72 &&
+                   line[k3s+2]==69 && line[k3s+3]==68){
+                    let d4s:i32=g32(pp,3*4)+1;
+                    if(llen-d4s>6 && line[d4s]==66 && line[d4s+1]==65 &&
+                       line[d4s+2]==84 && line[d4s+3]==67 && line[d4s+4]==72 &&
+                       line[d4s+5]==124){
+                        let bn:i32=atoi(line[d4s+6..llen]);
+                        if(bn>o1[0]){o1[0]=bn;}
+                    }
+                }
+            }
+            nio_free(pp);
+        }
+        return 1;
+    }
+    if(mode==3){
+        // REJ|<seq>|... or SHED|<seq>|...
+        if(llen<6){return 1;}
+        let isrej:i32=0;
+        if(line[0]==82 && line[1]==69 && line[2]==74 && line[3]==124){isrej=1;}
+        if(line[0]==83 && line[1]==72 && line[2]==69 && line[3]==68 && line[4]==124){isrej=1;}
+        if(isrej==1){
+            let st:i32=4;
+            if(line[0]==83){st=5;}
+            let sq:i32=atoi(line[st..llen]);
+            if(sq>o2[0]){o2[0]=sq;}
+        }
+        return 1;
+    }
+    if(mode==4){
+        if(llen<5){return 1;}
+        if(line[0]==75 && line[1]==66 && line[2]==124){
+            let sq:i32=atoi(line[3..llen]);
+            if(sq>o2[0]){o2[0]=sq;}
+        }
+        return 1;
+    }
+    if(mode==5){
+        _zag_println(line[0..llen]);
+        return 1;
+    }
+    if(mode==6){
+        if(o3[0]==1){return 1;}
+        if(llen<9){return 1;}
+        if(line[0]==80 && line[1]==69 && line[2]==78 && line[3]==68 &&
+           line[4]==73 && line[5]==78 && line[6]==71 && line[7]==124){
+            let pb:i32=8;
+            while(pb<llen && line[pb]!=124){pb=pb+1;}
+            let sq:i32=atoi(line[8..pb]);
+            if(sq==s1){
+                let pc:i32=pb+1;
+                while(pc<llen && line[pc]!=124){pc=pc+1;}
+                let cl:i32=pc-(pb+1);
+                let pl:i32=llen-(pc+1);
+                if(pl<0){pl=0;}
+                if(cl>p1.len || pl>p2.len){return 0;}
+                let c:i32=0;
+                while(c<cl){p1[c]=line[pb+1+c]; c=c+1;}
+                c=0;
+                while(c<pl){p2[c]=line[pc+1+c]; c=c+1;}
+                o1[0]=cl;
+                o2[0]=pl;
+                o3[0]=1;
+            }
+        }
+        return 1;
+    }
+    if(mode==9){
+        if(o1[0]==1){return 1;}
+        if(llen<7){return 1;}
+        if(line[0]==80 && line[1]==82 && line[2]==79 && line[3]==84 &&
+           line[4]==79 && line[5]==124){
+            let pe:i32=6;
+            while(pe<llen && line[pe]!=124){pe=pe+1;}
+            if(nio_equal(line[6..pe],p1)==1){o1[0]=1;}
+        }
+        return 1;
+    }
+    if(mode==7){
+        // Max PENDING seq only (no array writes). For kpc_max_seq_ever.
+        if(llen<9){return 1;}
+        if(line[0]==80 && line[1]==69 && line[2]==78 && line[3]==68 &&
+           line[4]==73 && line[5]==78 && line[6]==71 && line[7]==124){
+            let sq:i32=atoi(line[8..llen]);
+            if(sq>o2[0]){o2[0]=sq;}
+        }
+        return 1;
+    }
+    return 1;
+}
+
+fn kpp_stream_lines(sd:[]u8,name:[]u8,mode:i32,
+    p1:[]u8,p2:[]u8,o1:*i32,o2:*i32,o3:*i64,s1:i32,s2:i32)i32 {
+    o1[0]=0; o2[0]=0; o3[0]=0;
+    let fd:i64=kpp_open_read(sd,name);
+    if(fd<0){return 1;}
+    let rc:i32=1;
+    let chunk:[]u8=nio_alloc(16777216);
+    let carry:[]u8=nio_alloc(65536);
+    let line:[]u8=nio_alloc(65536);
+    let cn:i32=0;
+    let eof:i32=0;
+    while(eof==0 && rc==1){
+        let nrd:i64=kpp_read_chunk(fd,chunk,16777216);
+        let nn:i32=0;
+        if(nrd<0){rc=0; break;}
+        if(nrd==0){eof=1;}else{nn=nrd as i32;}
+        let i:i32=0;
+        let ls:i32=0;
+        while(i<nn && rc==1){
+            if(chunk[i]==10){
+                let llen:i32=cn+(i-ls);
+                if(llen>line.len){rc=0; break;}
+                let c:i32=0;
+                while(c<cn){line[c]=carry[c]; c=c+1;}
+                c=0;
+                while(c<i-ls){line[cn+c]=chunk[ls+c]; c=c+1;}
+                rc=kpp_stream_handle(mode,line,llen,p1,p2,o1,o2,o3,s1,s2);
+                cn=0;
+                ls=i+1;
+            }
+            i=i+1;
+        }
+        if(eof==1 && rc==1){
+            let tllen:i32=cn+(nn-ls);
+            if(tllen>0){
+                if(tllen>line.len){rc=0;}
+                else{
+                    let c2:i32=0;
+                    while(c2<cn){line[c2]=carry[c2]; c2=c2+1;}
+                    c2=0;
+                    while(c2<nn-ls){line[cn+c2]=chunk[ls+c2]; c2=c2+1;}
+                    rc=kpp_stream_handle(mode,line,tllen,p1,p2,o1,o2,o3,s1,s2);
+                }
+            }
+        }
+        if(eof==0 && rc==1){
+            let rem:i32=nn-ls;
+            if(cn+rem>carry.len){rc=0;}
+            else{
+                let c3:i32=0;
+                while(c3<rem){carry[cn+c3]=chunk[ls+c3]; c3=c3+1;}
+                cn=cn+rem;
+            }
+        }
+    }
+    nio_close(fd);
+    nio_free(chunk);
+    nio_free(carry);
+    nio_free(line);
+    return rc;
+}
+
+// ---- §7 capacity: init measurement and budget ----
+// Lazy init: first call per state dir measures /proc/meminfo MemAvailable,
+// derives budget = floor(MemAvailable_bytes/64), and writes pending_init.log.
+// A later committed pending_init.log wins (frozen budget). Returns budget
+// bytes, or -1 on failure (no meminfo, parse failure, write failure).
+// ---- kpp_read_proc: sequential read of a /proc-style file ----
+// /proc files are not regular files (nio_read_exact refuses them) and do not
+// support seek-to-size. This reads sequentially via raw read(2) until EOF.
+// Returns the bytes (nio_alloc'd, caller frees), or "" on failure.
+fn kpp_read_proc(dir:[]u8,name:[]u8)[]u8 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let buf:[]u8=nio_alloc(65536);
+    if(buf.len==0){nio_close(fd); return "";}
+    let at:i32=0;
+    let ok:i32=1;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+at,
+            (buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<0){ok=0; break;}
+        if(n==0){break;}
+        at=at+(n as i32);
+    }
+    nio_close(fd);
+    if(ok==0){nio_free(buf); return "";}
+    return buf[0..at];
+}
+
+fn kpp_budget(sd:[]u8)i64 {
+    let ok:i32=0;
+    let buf:[]u8=read_file(sd,"pending_init.log",&ok);
+    if(ok==1){
+        let key:[]u8="PENDING_BUDGET_BYTES|";
+        let pos:i32=0; let ls:i32=0; let ll:i32=0;
+        let v:i64=-1;
+        while(next_line(buf,&pos,&ls,&ll)==1){
+            let ln:i32=ll;
+            if(ln>0 && buf[ls+ln-1]==13){ln=ln-1;}
+            if(ln>key.len && bsub_eq(buf,ls,key,0,key.len)==1){
+                v=first_int(buf[ls+key.len..ls+ln]);
+                break;
+            }
+        }
+        nio_free(buf);
+        if(v>0){return v;}
+        return -1;
+    }
+    let mok:[]u8=kpp_read_proc("/proc","meminfo");
+    if(mok.len==0){return -1;}
+    let mem:[]u8=mok;
+    let mpos:i32=0; let mls:i32=0; let mll:i32=0;
+    let kb:i64=-1;
+    while(next_line(mem,&mpos,&mls,&mll)==1){
+        let mln:i32=mll;
+        if(mln>0 && mem[mls+mln-1]==13){mln=mln-1;}
+        if(mln>13 && bsub_eq(mem,mls,"MemAvailable:",0,13)==1){
+            kb=first_int(mem[mls+13..mls+mln]);
+            break;
+        }
+    }
+    nio_free(mem);
+    if(kb<=0){return -1;}
+    let budget:i64=(kb*1024)/64;
+    if(budget<=0){return -1;}
+    let l1:[]u8="MEMAVAILABLE_KB|";
+    let l2:[]u8="PENDING_BUDGET_BYTES|";
+    let sk:[]u8=i64s(kb);
+    let sb:[]u8=i64s(budget);
+    let lg:[]u8=nio_alloc(l1.len+sk.len+1+l2.len+sb.len+1+1);
+    let w:i32=0;
+    let c:i32=0;
+    while(c<l1.len){lg[w]=l1[c]; w=w+1; c=c+1;}
+    c=0;
+    while(c<sk.len){lg[w]=sk[c]; w=w+1; c=c+1;}
+    lg[w]=10; w=w+1;
+    c=0;
+    while(c<l2.len){lg[w]=l2[c]; w=w+1; c=c+1;}
+    c=0;
+    while(c<sb.len){lg[w]=sb[c]; w=w+1; c=c+1;}
+    lg[w]=10; w=w+1;
+    nio_free(sk);
+    nio_free(sb);
+    let wr:i32=write_file(sd,"pending_init.log",lg[0..w]);
+    nio_free(lg);
+    if(wr==0){return -1;}
+    return budget;
+}
+
+// ---- frozen §2 bind math, shared core ----
+// (s*) = sentence/query side, (k*) = committed/claim side. Token tables are
+// precomputed by the caller; no allocation inside. Semantics are exactly the
+// frozen kb_prior §2 gates: bind <=> 3*overlap(s,k) >= 2*|s|; agree <=>
+// bind && fullcov(overlap(k,s)>=|k|) && digits-equal; contra <=> bind &&
+// !agree && candidate has >=1 digit && !digits-equal.
+fn kpp_bind_core(sab:[]u8,st:[]u8,sn:i32,sdb:[]u8,sdt:[]u8,sdn:i32,
+    kab:[]u8,kt:[]u8,kn:i32,kdb:[]u8,kdt:[]u8,kdn:i32,
+    o_bind:*i32,o_agree:*i32,o_contra:*i32)void {
+    o_bind[0]=0; o_agree[0]=0; o_contra[0]=0;
+    let sh_ck:i32=overlap(sab,st,sn,kab,kt,kn);
+    if(sn>0 && 3*sh_ck>=2*sn){
+        o_bind[0]=1;
+        let sh_kc:i32=overlap(kab,kt,kn,sab,st,sn);
+        let deq:i32=digits_eq(sdb,sdt,sdn,kdb,kdt,kdn);
+        if(sh_kc>=kn && deq==1){o_agree[0]=1;}
+        else{
+            if(sdn>=1 && deq==0){o_contra[0]=1;}
+        }
+    }
+    return;
+}
+
+// allocating single-shot wrapper (corroborate/refute; NOT for hot loops)
+fn kpp_bind2(sent:[]u8,claim:[]u8,dropb:[]u8,dropt:[]u8,dropn:i32,
+    o_bind:*i32,o_agree:*i32,o_contra:*i32)void {
+    let sab:[]u8=nio_alloc(65536);
+    let sapos:i32=0;
+    let st:[]u8=nio_alloc(64*8);
+    let sn:i32=0;
+    content_toks(sent,dropb,dropt,dropn,sab,&sapos,st,64,&sn);
+    let sdb:[]u8=nio_alloc(16384);
+    let sdpos:i32=0;
+    let sdt:[]u8=nio_alloc(32*8);
+    let sdn:i32=0;
+    digit_toks(sab,st,sn,sdb,&sdpos,sdt,&sdn);
+    let cab:[]u8=nio_alloc(65536);
+    let capos:i32=0;
+    let ct:[]u8=nio_alloc(64*8);
+    let cn2:i32=0;
+    content_toks(claim,dropb,dropt,dropn,cab,&capos,ct,64,&cn2);
+    let cdb:[]u8=nio_alloc(16384);
+    let cdpos:i32=0;
+    let cdt:[]u8=nio_alloc(32*8);
+    let cdn:i32=0;
+    digit_toks(cab,ct,cn2,cdb,&cdpos,cdt,&cdn);
+    kpp_bind_core(sab,st,sn,sdb,sdt,sdn,cab,ct,cn2,cdb,cdt,cdn,
+        o_bind,o_agree,o_contra);
+    nio_free(sab); nio_free(st); nio_free(sdb); nio_free(sdt);
+    nio_free(cab); nio_free(ct); nio_free(cdb); nio_free(cdt);
+    return;
+}
+
+// hot-loop bind against the whole KB (precomputed kab/kat/kan/kdb/kdt/kdn,
+// kbn claims). First AGREE wins; else first CONTRADICT. Returns 1-based
+// KB seqs (kb_prior convention).
+fn kpp_bind_tables(sab:[]u8,st:[]u8,sn:i32,sdb:[]u8,sdt:[]u8,sdn:i32,
+    kab:[]u8,kat:[]u8,kan:[]u8,kdb:[]u8,kdt:[]u8,kdn:[]u8,kbn:i32,
+    o_agree:*i32,o_contra:*i32)void {
+    o_agree[0]=0; o_contra[0]=0;
+    let k:i32=0;
+    while(k<kbn && k<64){
+        let kn2:i32=g32(kan,k*4);
+        let kdn2:i32=g32(kdn,k*4);
+        let b:i32=0; let a:i32=0; let c:i32=0;
+        kpp_bind_core(sab,st,sn,sdb,sdt,sdn,
+            kab,kat[k*512..k*512+512],kn2,kdb,kdt[k*256..k*256+256],kdn2,
+            &b,&a,&c);
+        if(a==1){o_agree[0]=k+1; return;}
+        if(c==1 && o_contra[0]==0){o_contra[0]=k+1;}
+        k=k+1;
+    }
+    return;
+}
+
+// ---- battery-page parser (raw TITLE:/HOST:/sentence fixture format) ----
+// Builds frozen internal page wire: P|p0|<title>\nH|<host>\nS|<s>\n...
+// so parse_pages/best_for_page run the frozen pipeline unchanged.
+// Returns 1 ok; 0 read-fail; 2 no-title; 3 no-host; 4 no-sentences.
+fn kpp_parse_battery_page(path:[]u8,wire:[]u8,o_wirelen:*i32,
+    tbuf:[]u8,o_tlen:*i32,hbuf:[]u8,o_hlen:*i32,o_nsent:*i32)i32 {
+    o_wirelen[0]=0; o_tlen[0]=0; o_hlen[0]=0; o_nsent[0]=0;
+    let ok:i32=0;
+    let buf:[]u8=read_path(path,&ok);
+    if(ok==0){return 0;}
+    let pos:i32=0; let ls:i32=0; let ll:i32=0;
+    let tlen:i32=0; let hlen:i32=0;
+    while(next_line(buf,&pos,&ls,&ll)==1){
+        let ln:i32=ll;
+        if(ln>0 && buf[ls+ln-1]==13){ln=ln-1;}
+        if(ln>=6 && bsub_eq(buf,ls,"TITLE:",0,6)==1 && tlen==0){
+            let a:i32=ls+6; let b2:i32=ls+ln;
+            while(a<b2 && (buf[a]==32||buf[a]==9)){a=a+1;}
+            while(b2>a && (buf[b2-1]==32||buf[b2-1]==9)){b2=b2-1;}
+            tlen=b2-a;
+            if(tlen>tbuf.len){tlen=tbuf.len;}
+            let c:i32=0;
+            while(c<tlen){tbuf[c]=buf[a+c]; c=c+1;}
+        }
+        if(ln>=5 && bsub_eq(buf,ls,"HOST:",0,5)==1 && hlen==0){
+            let a2:i32=ls+5; let b3:i32=ls+ln;
+            while(a2<b3 && (buf[a2]==32||buf[a2]==9)){a2=a2+1;}
+            while(b3>a2 && (buf[b3-1]==32||buf[b3-1]==9)){b3=b3-1;}
+            hlen=b3-a2;
+            if(hlen>hbuf.len){hlen=hbuf.len;}
+            let c2:i32=0;
+            while(c2<hlen){
+                let ch:u8=buf[a2+c2];
+                if(ch>=65 && ch<=90){ch=((ch as i32)+32) as u8;}
+                hbuf[c2]=ch; c2=c2+1;
+            }
+        }
+    }
+    if(tlen==0){nio_free(buf); return 2;}
+    if(hlen==0){nio_free(buf); return 3;}
+    let w:i32=0;
+    wire[w]=80; wire[w+1]=124; wire[w+2]=112; wire[w+3]=48; wire[w+4]=124; w=w+5;
+    let c3:i32=0;
+    while(c3<tlen){wire[w]=tbuf[c3]; w=w+1; c3=c3+1;}
+    wire[w]=10; w=w+1;
+    wire[w]=72; wire[w+1]=124; w=w+2;
+    c3=0;
+    while(c3<hlen){wire[w]=hbuf[c3]; w=w+1; c3=c3+1;}
+    wire[w]=10; w=w+1;
+    pos=0; let nsent:i32=0;
+    while(next_line(buf,&pos,&ls,&ll)==1){
+        let ln2:i32=ll;
+        if(ln2>0 && buf[ls+ln2-1]==13){ln2=ln2-1;}
+        let a3:i32=ls; let b4:i32=ls+ln2;
+        while(a3<b4 && (buf[a3]==32||buf[a3]==9)){a3=a3+1;}
+        while(b4>a3 && (buf[b4-1]==32||buf[b4-1]==9)){b4=b4-1;}
+        if(b4<=a3){continue;}
+        let ishead:i32=0;
+        if(b4-a3>=6 && bsub_eq(buf,a3,"TITLE:",0,6)==1 &&
+           (b4-a3==6 || buf[a3+6]==32 || buf[a3+6]==9)){ishead=1;}
+        if(b4-a3>=5 && bsub_eq(buf,a3,"HOST:",0,5)==1 &&
+           (b4-a3==5 || buf[a3+5]==32 || buf[a3+5]==9)){ishead=1;}
+        if(ishead==1){continue;}
+        let sl:i32=b4-a3;
+        if(w+2+sl+1>wire.len){break;}
+        wire[w]=83; wire[w+1]=124; w=w+2;
+        let c4:i32=0;
+        while(c4<sl){wire[w]=buf[a3+c4]; w=w+1; c4=c4+1;}
+        wire[w]=10; w=w+1;
+        nsent=nsent+1;
+    }
+    nio_free(buf);
+    if(nsent==0){return 4;}
+    o_wirelen[0]=w; o_tlen[0]=tlen; o_hlen[0]=hlen; o_nsent[0]=nsent;
+    return 1;
+}
+
+// ---- line formatters (callers guarantee out capacity) ----
+fn kpp_fmt_pending(out:[]u8,pos:*i32,seq:i32,claim:[]u8,prov:[]u8)void {
+    let p:i32=pos[0];
+    out[p]=80; out[p+1]=69; out[p+2]=78; out[p+3]=68; out[p+4]=73;
+    out[p+5]=78; out[p+6]=71; out[p+7]=124; p=p+8;
+    let sq:[]u8=i64s(seq as i64);
+    let c:i32=0;
+    while(c<sq.len){out[p]=sq[c]; p=p+1; c=c+1;}
+    nio_free(sq);
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<claim.len){out[p]=claim[c]; p=p+1; c=c+1;}
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<prov.len){out[p]=prov[c]; p=p+1; c=c+1;}
+    out[p]=10; p=p+1;
+    pos[0]=p;
+    return;
+}
+
+fn kpp_fmt_kb(out:[]u8,pos:*i32,seq:i32,claim:[]u8)void {
+    let p:i32=pos[0];
+    out[p]=75; out[p+1]=66; out[p+2]=124; p=p+3;
+    let sq:[]u8=i64s(seq as i64);
+    let c:i32=0;
+    while(c<sq.len){out[p]=sq[c]; p=p+1; c=c+1;}
+    nio_free(sq);
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<claim.len){out[p]=claim[c]; p=p+1; c=c+1;}
+    out[p]=10; p=p+1;
+    pos[0]=p;
+    return;
+}
+
+fn kpp_fmt_shed(out:[]u8,pos:*i32,seq:i32,claim:[]u8)void {
+    let p:i32=pos[0];
+    out[p]=83; out[p+1]=72; out[p+2]=69; out[p+3]=68; out[p+4]=124; p=p+5;
+    let sq:[]u8=i64s(seq as i64);
+    let c:i32=0;
+    while(c<sq.len){out[p]=sq[c]; p=p+1; c=c+1;}
+    nio_free(sq);
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<claim.len){out[p]=claim[c]; p=p+1; c=c+1;}
+    out[p]=10; p=p+1;
+    pos[0]=p;
+    return;
+}
+
+fn kpp_fmt_resolve(out:[]u8,pos:*i32,pseq:i32,target:[]u8,kind:[]u8,detail:[]u8)void {
+    // RESOLVE|<pseq>|<target>|<kind>|<detail>\n
+    let p:i32=pos[0];
+    out[p]=82; out[p+1]=69; out[p+2]=83; out[p+3]=79; out[p+4]=76;
+    out[p+5]=86; out[p+6]=69; out[p+7]=124; p=p+8;
+    let sq:[]u8=i64s(pseq as i64);
+    let c:i32=0;
+    while(c<sq.len){out[p]=sq[c]; p=p+1; c=c+1;}
+    nio_free(sq);
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<target.len){out[p]=target[c]; p=p+1; c=c+1;}
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<kind.len){out[p]=kind[c]; p=p+1; c=c+1;}
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<detail.len){out[p]=detail[c]; p=p+1; c=c+1;}
+    out[p]=10; p=p+1;
+    pos[0]=p;
+    return;
+}
+
+fn kpp_fmt_rej(out:[]u8,pos:*i32,seq:i32,claim:[]u8,reason:[]u8)void {
+    let p:i32=pos[0];
+    out[p]=82; out[p+1]=69; out[p+2]=74; out[p+3]=124; p=p+4;
+    let sq:[]u8=i64s(seq as i64);
+    let c:i32=0;
+    while(c<sq.len){out[p]=sq[c]; p=p+1; c=c+1;}
+    nio_free(sq);
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<claim.len){out[p]=claim[c]; p=p+1; c=c+1;}
+    out[p]=124; p=p+1;
+    c=0;
+    while(c<reason.len){out[p]=reason[c]; p=p+1; c=c+1;}
+    out[p]=10; p=p+1;
+    pos[0]=p;
+    return;
+}
+
+// ---- append-only streaming writer (preserves existing content, ensures
+// trailing newline when ensurenl=1) ----
+fn kpp_append_lines(sd:[]u8,name:[]u8,data:[]u8,ensurenl:i32)i32 {
+    let root:i64=nio_open_root(sd);
+    if(root<0){return 0;}
+    let fdr:i64=nio_open_child(root,name,0);
+    nio_unlink_child(root,name);
+    let fdw:i64=nio_open_child(root,name,1);
+    if(fdw<0){
+        if(fdr>=0){nio_close(fdr);}
+        nio_close(root);
+        return 0;
+    }
+    let rc:i32=1;
+    let chunk:[]u8=nio_alloc(16777216);
+    let lastb:i32=10;
+    let anydata:i32=0;
+    if(fdr>=0){
+        while(1==1){
+            let nrd:i64=kpp_read_chunk(fdr,chunk,16777216);
+            if(nrd<0){rc=0; break;}
+            if(nrd==0){break;}
+            let nn:i32=nrd as i32;
+            if(kpp_write_chunked(fdw,chunk[0..nn])<0){rc=0; break;}
+            lastb=chunk[nn-1] as i32;
+            anydata=1;
+        }
+        nio_close(fdr);
+    }
+    if(rc==1 && ensurenl==1 && anydata==1 && lastb!=10){
+        let nl:[]u8="\n";
+        if(nio_write_all(fdw,nl)<0){rc=0;}
+    }
+    let off:i32=0;
+    while(rc==1 && off<data.len){
+        let n2:i32=data.len-off;
+        if(n2>16777216){n2=16777216;}
+        if(kpp_write_chunked(fdw,data[off..off+n2])<0){rc=0; break;}
+        off=off+n2;
+    }
+    nio_close(fdw);
+    nio_close(root);
+    nio_free(chunk);
+    return rc;
+}
+
+// ---- pending.txt rewrite (resolve drop-one / shed prefix drop) ----
+// mode 0: drop the single PENDING| line with seq==dropseq (resolve path).
+// mode 1: drop the first dropcount PENDING| lines (oldest-first shed), ledger
+//   each in shed_ledger.txt + resolutions.txt (batch id BATCH|<batch>), then
+//   append pending_spill.tmp after the surviving old content.
+// Returns 1 ok / 0 fail.
+fn kpp_rewrite_pending(sd:[]u8,mode:i32,dropseq:i32,dropcount:i32,batch:i32)i32 {
+    let root:i64=nio_open_root(sd);
+    if(root<0){return 0;}
+    let rc:i32=1;
+    let fdw_s:i64=-1;
+    let fdw_r:i64=-1;
+    if(mode==1 && dropcount>0){
+        // open append-streams for the two ledgers (copy old content first)
+        let fdr_s:i64=nio_open_child(root,"shed_ledger.txt",0);
+        nio_unlink_child(root,"shed_ledger.txt");
+        fdw_s=nio_open_child(root,"shed_ledger.txt",1);
+        if(fdw_s<0){rc=0;}
+        let fdr_r:i64=nio_open_child(root,"resolutions.txt",0);
+        nio_unlink_child(root,"resolutions.txt");
+        fdw_r=nio_open_child(root,"resolutions.txt",1);
+        if(fdw_r<0){rc=0;}
+        let cp:[]u8=nio_alloc(16777216);
+        if(rc==1 && fdr_s>=0){
+            while(1==1){
+                let nrd:i64=kpp_read_chunk(fdr_s,cp,16777216);
+                if(nrd<0){rc=0; break;}
+                if(nrd==0){break;}
+                if(kpp_write_chunked(fdw_s,cp[0..(nrd as i32)])<0){rc=0; break;}
+            }
+        }
+        if(rc==1 && fdr_r>=0){
+            while(1==1){
+                let nrd2:i64=kpp_read_chunk(fdr_r,cp,16777216);
+                if(nrd2<0){rc=0; break;}
+                if(nrd2==0){break;}
+                if(kpp_write_chunked(fdw_r,cp[0..(nrd2 as i32)])<0){rc=0; break;}
+            }
+        }
+        if(fdr_s>=0){nio_close(fdr_s);}
+        if(fdr_r>=0){nio_close(fdr_r);}
+        nio_free(cp);
+    }
+    let fdr:i64=nio_open_child(root,"pending.txt",0);
+    nio_unlink_child(root,"pending.txt");
+    let fdw:i64=nio_open_child(root,"pending.txt",1);
+    if(fdw<0){rc=0;}
+    let chunk:[]u8=nio_alloc(16777216);
+    let carry:[]u8=nio_alloc(65536);
+    let line:[]u8=nio_alloc(65536);
+    let ob:[]u8=nio_alloc(1048576);
+    let obn:i32=0;
+    let tmp:[]u8=nio_alloc(65536);
+    let cn:i32=0;
+    let idx:i32=0;
+    let eof:i32=0;
+    if(rc==1 && fdr>=0){
+        while(eof==0 && rc==1){
+            let nrd:i64=kpp_read_chunk(fdr,chunk,16777216);
+            let nn:i32=0;
+            if(nrd<0){rc=0; break;}
+            if(nrd==0){eof=1;}else{nn=nrd as i32;}
+            let i:i32=0; let ls:i32=0;
+            while(i<nn && rc==1){
+                if(chunk[i]==10){
+                    let llen:i32=cn+(i-ls);
+                    if(llen>line.len){rc=0; break;}
+                    let c:i32=0;
+                    while(c<cn){line[c]=carry[c]; c=c+1;}
+                    c=0;
+                    while(c<i-ls){line[cn+c]=chunk[ls+c]; c=c+1;}
+                    // per-line decision
+                    let ispend:i32=0;
+                    let sq:i32=0;
+                    if(llen>=9 && line[0]==80 && line[1]==69 && line[2]==78 &&
+                       line[3]==68 && line[4]==73 && line[5]==78 && line[6]==71 &&
+                       line[7]==124){
+                        ispend=1;
+                        sq=atoi(line[8..llen]);
+                    }
+                    let dropme:i32=0;
+                    if(ispend==1){
+                        if(mode==0 && sq==dropseq){dropme=1;}
+                        if(mode==1 && idx<dropcount){dropme=1;}
+                    }
+                    if(dropme==1 && mode==1){
+                        // SHED|<seq>|<claim> + RESOLVE|<seq>|SHED|SHED|BATCH|<batch>
+                        let pb:i32=8;
+                        while(pb<llen && line[pb]!=124){pb=pb+1;}
+                        let pc:i32=pb+1;
+                        while(pc<llen && line[pc]!=124){pc=pc+1;}
+                        let cl:i32=pc-(pb+1);
+                        let tbn:i32=0;
+                        kpp_fmt_shed(tmp,&tbn,sq,line[pb+1..pb+1+cl]);
+                        if(nio_write_all(fdw_s,tmp[0..tbn])<0){rc=0; break;}
+                        tbn=0;
+                        let bdet:[]u8=nio_alloc(32);
+                        let bd:[]u8="BATCH|";
+                        let bc:i32=0;
+                        while(bc<bd.len){bdet[bc]=bd[bc]; bc=bc+1;}
+                        let bs:[]u8=i64s(batch as i64);
+                        bc=0;
+                        while(bc<bs.len){bdet[6+bc]=bs[bc]; bc=bc+1;}
+                        let bl0:i32=6+bs.len;
+                        nio_free(bs);
+                        let tgt:[]u8="SHED";
+                        let knd:[]u8="SHED";
+                        kpp_fmt_resolve(tmp,&tbn,sq,tgt,knd,bdet[0..bl0]);
+                        nio_free(bdet);
+                        if(nio_write_all(fdw_r,tmp[0..tbn])<0){rc=0; break;}
+                    }
+                    if(dropme==0){
+                        let need:i32=llen+1;
+                        if(obn+need>ob.len){
+                            if(nio_write_all(fdw,ob[0..obn])<0){rc=0; break;}
+                            obn=0;
+                        }
+                        c=0;
+                        while(c<llen){ob[obn]=line[c]; obn=obn+1; c=c+1;}
+                        ob[obn]=10; obn=obn+1;
+                    }
+                    if(ispend==1){idx=idx+1;}
+                    cn=0; ls=i+1;
+                }
+                i=i+1;
+            }
+            if(eof==1 && rc==1){
+                let tllen:i32=cn+(nn-ls);
+                if(tllen>0){
+                    if(tllen>line.len){rc=0;}
+                    else{
+                        let c2:i32=0;
+                        while(c2<cn){line[c2]=carry[c2]; c2=c2+1;}
+                        c2=0;
+                        while(c2<nn-ls){line[cn+c2]=chunk[ls+c2]; c2=c2+1;}
+                        // tail line: same decision logic
+                        let ispend2:i32=0;
+                        let sq2:i32=0;
+                        if(tllen>=9 && line[0]==80 && line[1]==69 && line[2]==78 &&
+                           line[3]==68 && line[4]==73 && line[5]==78 && line[6]==71 &&
+                           line[7]==124){
+                            ispend2=1;
+                            sq2=atoi(line[8..tllen]);
+                        }
+                        let dropme2:i32=0;
+                        if(ispend2==1){
+                            if(mode==0 && sq2==dropseq){dropme2=1;}
+                            if(mode==1 && idx<dropcount){dropme2=1;}
+                        }
+                        if(dropme2==1 && mode==1){
+                            let pb2:i32=8;
+                            while(pb2<tllen && line[pb2]!=124){pb2=pb2+1;}
+                            let pc2:i32=pb2+1;
+                            while(pc2<tllen && line[pc2]!=124){pc2=pc2+1;}
+                            let cl2:i32=pc2-(pb2+1);
+                            let tbn2:i32=0;
+                            kpp_fmt_shed(tmp,&tbn2,sq2,line[pb2+1..pb2+1+cl2]);
+                            if(nio_write_all(fdw_s,tmp[0..tbn2])<0){rc=0;}
+                            tbn2=0;
+                            let bdet2:[]u8=nio_alloc(32);
+                            let bd2:[]u8="BATCH|";
+                            let bc2:i32=0;
+                            while(bc2<bd2.len){bdet2[bc2]=bd2[bc2]; bc2=bc2+1;}
+                            let bs2:[]u8=i64s(batch as i64);
+                            bc2=0;
+                            while(bc2<bs2.len){bdet2[6+bc2]=bs2[bc2]; bc2=bc2+1;}
+                            let bl2:i32=6+bs2.len;
+                            nio_free(bs2);
+                            let tgt2:[]u8="SHED";
+                            let knd2:[]u8="SHED";
+                            kpp_fmt_resolve(tmp,&tbn2,sq2,tgt2,knd2,bdet2[0..bl2]);
+                            nio_free(bdet2);
+                            if(nio_write_all(fdw_r,tmp[0..tbn2])<0){rc=0;}
+                        }
+                        if(dropme2==0 && rc==1){
+                            let need2:i32=tllen+1;
+                            if(obn+need2>ob.len){
+                                if(nio_write_all(fdw,ob[0..obn])<0){rc=0;}
+                                else{obn=0;}
+                            }
+                            if(rc==1){
+                                let c3:i32=0;
+                                while(c3<tllen){ob[obn]=line[c3]; obn=obn+1; c3=c3+1;}
+                                ob[obn]=10; obn=obn+1;
+                            }
+                        }
+                    }
+                }
+            }
+            if(eof==0 && rc==1){
+                let rem:i32=nn-ls;
+                if(cn+rem>carry.len){rc=0;}
+                else{
+                    let c4:i32=0;
+                    while(c4<rem){carry[cn+c4]=chunk[ls+c4]; c4=c4+1;}
+                    cn=cn+rem;
+                }
+            }
+        }
+    }
+    if(fdr>=0){nio_close(fdr);}
+    // mode 1: append spill file (raw chunk copy)
+    if(rc==1 && mode==1){
+        let fds:i64=nio_open_child(root,"pending_spill.tmp",0);
+        if(fds>=0){
+            while(1==1){
+                let nrd:i64=kpp_read_chunk(fds,chunk,16777216);
+                if(nrd<0){rc=0; break;}
+                if(nrd==0){break;}
+                let nn2:i32=nrd as i32;
+                let off:i32=0;
+                while(off<nn2 && rc==1){
+                    let space:i32=ob.len-obn;
+                    let take:i32=nn2-off;
+                    if(take>space){take=space;}
+                    let c5:i32=0;
+                    while(c5<take){ob[obn]=chunk[off+c5]; obn=obn+1; c5=c5+1;}
+                    off=off+take;
+                    if(obn>=ob.len){
+                        if(nio_write_all(fdw,ob[0..obn])<0){rc=0; break;}
+                        obn=0;
+                    }
+                }
+            }
+            nio_close(fds);
+        }
+    }
+    if(obn>0 && rc==1){
+        if(nio_write_all(fdw,ob[0..obn])<0){rc=0;}
+    }
+    if(fdw>=0){nio_close(fdw);}
+    if(fdw_s>=0){nio_close(fdw_s);}
+    if(fdw_r>=0){nio_close(fdw_r);}
+    if(mode==1){nio_unlink_child(root,"pending_spill.tmp");}
+    nio_close(root);
+    nio_free(chunk); nio_free(carry); nio_free(line);
+    nio_free(ob); nio_free(tmp);
+    return rc;
+}
+
+// ---- spill + commit (kbpend / hold intercept phase B) ----
+// shedcount = number of oldest lines to shed; batch id = max batch + 1.
+// Appends pending_spill.tmp after survivors; ledgers sheds.
+fn kpp_commit_pending(sd:[]u8,shedcount:i32)i32 {
+    let b1:i32=0; let b2:i32=0; let b3:i64=0;
+    let e1:[]u8=""; let e2:[]u8="";
+    if(kpp_stream_lines(sd,"resolutions.txt",2,e1,e2,&b1,&b2,&b3,0,0)==0){return 0;}
+    return kpp_rewrite_pending(sd,1,0,shedcount,b1+1);
+}
+
+// ---- promote / demote ----
+// Promote a pending claim to the KB (kind CORROBORATED|TESTED) or demote it
+// to rejections.txt (kind CONTRADICTED). KB seq = max existing KB seq + 1
+// (continuity across the 64-record kb_load cap); REJ seq = max + 1.
+fn kpp_promote(sd:[]u8,pseq:i32,claim:[]u8,kind:[]u8,detail:[]u8)i32 {
+    let e1:[]u8=""; let e2:[]u8="";
+    let km:i32=0; let kx:i64=0; let ki:i32=0;
+    if(kpp_stream_lines(sd,"knowledge.txt",4,e1,e2,&ki,&km,&kx,0,0)==0){return 0;}
+    let kbseq:i32=km+1;
+    let lb:[]u8=nio_alloc(claim.len+64);
+    let lbn:i32=0;
+    kpp_fmt_kb(lb,&lbn,kbseq,claim);
+    if(kpp_append_lines(sd,"knowledge.txt",lb[0..lbn],1)==0){nio_free(lb); return 0;}
+    nio_free(lb);
+    if(kpp_rewrite_pending(sd,0,pseq,0,0)==0){return 0;}
+    let rb:[]u8=nio_alloc(detail.len+64);
+    let rbn:i32=0;
+    let tgt:[]u8="KB";
+    kpp_fmt_resolve(rb,&rbn,pseq,tgt,kind,detail);
+    if(kpp_append_lines(sd,"resolutions.txt",rb[0..rbn],0)==0){nio_free(rb); return 0;}
+    nio_free(rb);
+    _zag_print("PENDING|PROMOTED|");
+    let a:[]u8=i64s(pseq as i64);
+    _zag_print(a);
+    _zag_print("|");
+    let b:[]u8=i64s(kbseq as i64);
+    _zag_println(b);
+    nio_free(a); nio_free(b);
+    return 1;
+}
+
+fn kpp_demote(sd:[]u8,pseq:i32,claim:[]u8,reason:[]u8,detail:[]u8)i32 {
+    let e1:[]u8=""; let e2:[]u8="";
+    let rm:i32=0; let rx:i64=0; let ri:i32=0;
+    if(kpp_stream_lines(sd,"rejections.txt",3,e1,e2,&ri,&rm,&rx,0,0)==0){return 0;}
+    let rseq:i32=rm+1;
+    let lb:[]u8=nio_alloc(claim.len+reason.len+64);
+    let lbn:i32=0;
+    kpp_fmt_rej(lb,&lbn,rseq,claim,reason);
+    if(kpp_append_lines(sd,"rejections.txt",lb[0..lbn],0)==0){nio_free(lb); return 0;}
+    nio_free(lb);
+    if(kpp_rewrite_pending(sd,0,pseq,0,0)==0){return 0;}
+    let rb:[]u8=nio_alloc(detail.len+64);
+    let rbn:i32=0;
+    let tgt:[]u8="REJ";
+    let knd:[]u8="CONTRADICTED";
+    kpp_fmt_resolve(rb,&rbn,pseq,tgt,knd,detail);
+    if(kpp_append_lines(sd,"resolutions.txt",rb[0..rbn],0)==0){nio_free(rb); return 0;}
+    nio_free(rb);
+    _zag_print("PENDING|DEMOTED|");
+    let a:[]u8=i64s(pseq as i64);
+    _zag_print(a);
+    _zag_print("|");
+    let b:[]u8=i64s(rseq as i64);
+    _zag_println(b);
+    nio_free(a); nio_free(b);
+    return 1;
+}
+
+// ---- pending-derived corroboration guard (§5a guard 5) ----
+// Returns 1 if clean (no AGREE-bind to any other pending claim),
+// 0 if laundered, -1 on scan error. Own streaming loop: per-line bind with
+// caller-reused arenas and early exit.
+fn kpp_no_pending_launder(sd:[]u8,pseq:i32,best:[]u8,
+    dropb:[]u8,dropt:[]u8,dropn:i32)i32 {
+    // precompute best-sentence side once
+    let sab:[]u8=nio_alloc(65536);
+    let sapos:i32=0;
+    let st:[]u8=nio_alloc(64*8);
+    let sn:i32=0;
+    content_toks(best,dropb,dropt,dropn,sab,&sapos,st,64,&sn);
+    let sdb:[]u8=nio_alloc(16384);
+    let sdpos:i32=0;
+    let sdt:[]u8=nio_alloc(32*8);
+    let sdn:i32=0;
+    digit_toks(sab,st,sn,sdb,&sdpos,sdt,&sdn);
+    let cab:[]u8=nio_alloc(65536);
+    let ct:[]u8=nio_alloc(64*8);
+    let cdb:[]u8=nio_alloc(16384);
+    let cdt:[]u8=nio_alloc(32*8);
+    let fd:i64=kpp_open_read(sd,"pending.txt");
+    if(fd<0){
+        nio_free(sab); nio_free(st); nio_free(sdb); nio_free(sdt);
+        nio_free(cab); nio_free(ct); nio_free(cdb); nio_free(cdt);
+        return 1;
+    }
+    let res:i32=1;
+    let chunk:[]u8=nio_alloc(16777216);
+    let carry:[]u8=nio_alloc(65536);
+    let line:[]u8=nio_alloc(65536);
+    let cn:i32=0;
+    let eof:i32=0;
+    while(eof==0 && res==1){
+        let nrd:i64=kpp_read_chunk(fd,chunk,16777216);
+        let nn:i32=0;
+        if(nrd<0){res=-1; break;}
+        if(nrd==0){eof=1;}else{nn=nrd as i32;}
+        let i:i32=0; let ls:i32=0;
+        while(i<nn && res==1){
+            if(chunk[i]==10){
+                let llen:i32=cn+(i-ls);
+                if(llen>line.len){res=-1; break;}
+                let c:i32=0;
+                while(c<cn){line[c]=carry[c]; c=c+1;}
+                c=0;
+                while(c<i-ls){line[cn+c]=chunk[ls+c]; c=c+1;}
+                if(llen>=9 && line[0]==80 && line[1]==69 && line[2]==78 &&
+                   line[3]==68 && line[4]==73 && line[5]==78 && line[6]==71 &&
+                   line[7]==124){
+                    let pb:i32=8;
+                    while(pb<llen && line[pb]!=124){pb=pb+1;}
+                    let sq:i32=atoi(line[8..pb]);
+                    if(sq!=pseq && sq>0){
+                        let pc:i32=pb+1;
+                        while(pc<llen && line[pc]!=124){pc=pc+1;}
+                        let claim:[]u8=line[pb+1..pc];
+                        let capos:i32=0; let cn2:i32=0;
+                        content_toks(claim,dropb,dropt,dropn,cab,&capos,ct,64,&cn2);
+                        let cdpos:i32=0; let cdn:i32=0;
+                        digit_toks(cab,ct,cn2,cdb,&cdpos,cdt,&cdn);
+                        let b:i32=0; let a:i32=0; let cc:i32=0;
+                        kpp_bind_core(sab,st,sn,sdb,sdt,sdn,
+                            cab,ct,cn2,cdb,cdt,cdn,&b,&a,&cc);
+                        if(a==1){res=0; break;}
+                    }
+                }
+                cn=0; ls=i+1;
+            }
+            i=i+1;
+        }
+        if(eof==1 && res==1){
+            let tllen:i32=cn+(nn-ls);
+            if(tllen>0){
+                if(tllen>line.len){res=-1;}
+                else{
+                    let c2:i32=0;
+                    while(c2<cn){line[c2]=carry[c2]; c2=c2+1;}
+                    c2=0;
+                    while(c2<nn-ls){line[cn+c2]=chunk[ls+c2]; c2=c2+1;}
+                    if(tllen>=9 && line[0]==80 && line[1]==69 && line[2]==78 &&
+                       line[3]==68 && line[4]==73 && line[5]==78 && line[6]==71 &&
+                       line[7]==124){
+                        let pb2:i32=8;
+                        while(pb2<tllen && line[pb2]!=124){pb2=pb2+1;}
+                        let sq2:i32=atoi(line[8..pb2]);
+                        if(sq2!=pseq && sq2>0){
+                            let pc2:i32=pb2+1;
+                            while(pc2<tllen && line[pc2]!=124){pc2=pc2+1;}
+                            let claim2:[]u8=line[pb2+1..pc2];
+                            let capos2:i32=0; let cn3:i32=0;
+                            content_toks(claim2,dropb,dropt,dropn,cab,&capos2,ct,64,&cn3);
+                            let cdpos2:i32=0; let cdn2:i32=0;
+                            digit_toks(cab,ct,cn3,cdb,&cdpos2,cdt,&cdn2);
+                            let b2:i32=0; let a2:i32=0; let cc2:i32=0;
+                            kpp_bind_core(sab,st,sn,sdb,sdt,sdn,
+                                cab,ct,cn3,cdb,cdt,cdn2,&b2,&a2,&cc2);
+                            if(a2==1){res=0;}
+                        }
+                    }
+                }
+            }
+        }
+        if(eof==0 && res==1){
+            let rem:i32=nn-ls;
+            if(cn+rem>carry.len){res=-1;}
+            else{
+                let c3:i32=0;
+                while(c3<rem){carry[cn+c3]=chunk[ls+c3]; c3=c3+1;}
+                cn=cn+rem;
+            }
+        }
+    }
+    nio_close(fd);
+    nio_free(chunk); nio_free(carry); nio_free(line);
+    nio_free(sab); nio_free(st); nio_free(sdb); nio_free(sdt);
+    nio_free(cab); nio_free(ct); nio_free(cdb); nio_free(cdt);
+    return res;
+}
+
+// ---- proto registry check ----
+fn kpp_proto_known(sd:[]u8,pid:[]u8)i32 {
+    let o1:i32=0; let o2:i32=0; let o3:i64=0;
+    let e2:[]u8="";
+    if(kpp_stream_lines(sd,"testproto.txt",9,pid,e2,&o1,&o2,&o3,0,0)==0){return -1;}
+    return o1;
+}

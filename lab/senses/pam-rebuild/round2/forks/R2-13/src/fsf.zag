@@ -1,0 +1,1464 @@
+// fsf.zag — R2-13 FS-F "Signature-Ceiling Falsifier" (PURE ZAG, zero RNG).
+//
+// Two-sided relational-signature contract on REBUILT attack-aware features,
+// plus explicit attack-feature clauses for the design families (TMB-2, SHP-1;
+// MOT-1 is the documented null probe). Reads frozen R2FX containers; per trial
+// only the F (formation) span is ever shown to the pipeline.
+//
+// Modes (argv[5]): "stage1"  -> emit feat= line (refined features, enrollment)
+//                  "stage1c" -> emit feat= line (coarse features, enrollment)
+//                  "full"    -> ledger record: two-sided + attack clauses
+//                  "noclause"-> ledger record: two-sided, no clauses (diagnostic)
+//                  "coarse"  -> ledger record: G3-form one-sided on coarse feats
+// Default: "full".
+//
+// Usage: fsf <fixture.r2fx> <task> <truthfile> <prevchain> [mode]
+// Emits a hash-chained ledger record (or feat= line) on stdout.
+//
+// Tables: @import("tables.zag") provides EX_N/FB_N/EX_get/ex_fill/FB_get/fb_fill/
+// ex_build()/fb_build(). For stage-1 builds use tables_stub.zag (EX_N=0,FB_N=0).
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("tables.zag")
+@import("bank.zag")
+
+// ---------------- little-endian accessors -----------------------------------
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    return;
+}
+fn t_get32u(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_get32s(b:[]u8, at:i32) i64 {
+    let v:i64 = t_get32u(b, at);
+    if(v >= 2147483648) { return v - 4294967296; }
+    return v;
+}
+fn t_geti16(b:[]u8, at:i32) i64 {
+    let v:i64 = (b[at] as i64) | ((b[at+1] as i64) << 8);
+    if(v >= 32768) { return v - 65536; }
+    return v;
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    t_put32(b, at, v & 4294967295);
+    t_put32(b, at+4, (v >> 32) & 4294967295);
+    return;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return t_get32u(b, at) | (t_get32u(b, at+4) << 32);
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn imin(a:i64, b:i64) i64 {
+    if(a < b) { return a; }
+    return b;
+}
+fn imax(a:i64, b:i64) i64 {
+    if(a > b) { return a; }
+    return b;
+}
+fn iclamp(v:i64, lo:i64, hi:i64) i64 {
+    if(v < lo) { return lo; }
+    if(v > hi) { return hi; }
+    return v;
+}
+fn op_add(op:[]u8, n:i64) void {
+    t_put64(op, 0, t_get64(op, 0) + n);
+    return;
+}
+
+// ---------------- stdout line builder ---------------------------------------
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn ob_kint(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    return ob_kv(ob, pos, k, _zag_i64_to_str(v));
+}
+fn fail(task:[]u8, reason:[]u8, prev:[]u8) i32 {
+    let ob:[]u8 = nio_alloc(512);
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "approach", "R2-13");
+    pos = ob_kv(ob, pos, "task", task);
+    pos = ob_kv(ob, pos, "error", reason);
+    pos = ob_kv(ob, pos, "prev", prev);
+    let ch:[]u8 = nio_alloc(32);
+    ns_sha256(ob[0..pos], ch);
+    pos = ob_kv(ob, pos, "chain", ns_hex(ch));
+    nio_write_all(1, ob[0..pos]);
+    nio_free(ob);
+    nio_free(ch);
+    return 1;
+}
+
+// ---------------- file IO ----------------------------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+
+// ---------------- sine (Taylor, same pattern as Approach A / G3 / R2-2) -----
+fn ng_sin1024(p:i64) i64 {
+    let q:i64 = (p >> 30) & 3;
+    let fr:i64 = p & 1073741823;
+    let x:i64 = (fr * 1608) >> 30;
+    let xx:i64 = x;
+    if(q == 1 || q == 3) { xx = 1608 - x; }
+    let x2:i64 = xx * xx;
+    let term:i64 = xx;
+    let sum:i64 = xx;
+    let k:i64 = 1;
+    while(k <= 7) {
+        term = 0 - term * x2 / ((2 * k) * (2 * k + 1) * 1048576);
+        sum = sum + term;
+        k = k + 1;
+    }
+    if(q >= 2) { return 0 - sum; }
+    return sum;
+}
+
+// ---------------- class strings ------------------------------------------------
+fn cls_str(task:i32, c:i32) []u8 {
+    if(task == 0) {
+        if(c == 0) { return "SAME"; }
+        return "DIFFERENT";
+    }
+    if(task == 1) {
+        if(c == 0) { return "SAME_SURFACE"; }
+        return "DIFFERENT";
+    }
+    if(task == 2) {
+        if(c == 0) { return "CIRCLE"; }
+        if(c == 1) { return "SQUARE"; }
+        return "TRIANGLE";
+    }
+    if(task == 3) {
+        if(c == 0) { return "SAME"; }
+        if(c == 1) { return "HIGHER"; }
+        return "LOWER";
+    }
+    if(task == 4) {
+        if(c == 0) { return "PURE"; }
+        if(c == 1) { return "DARK"; }
+        if(c == 2) { return "RICH"; }
+        return "BRIGHT";
+    }
+    if(c == 0) { return "N"; }
+    if(c == 1) { return "NE"; }
+    if(c == 2) { return "E"; }
+    if(c == 3) { return "SE"; }
+    if(c == 4) { return "S"; }
+    if(c == 5) { return "SW"; }
+    if(c == 6) { return "W"; }
+    if(c == 7) { return "NW"; }
+    return "STILL";
+}
+fn task_id(task:[]u8) i32 {
+    if(_zag_strcmp(task, "colordisc") == 1) { return 0; }
+    if(_zag_strcmp(task, "colorconst") == 1) { return 1; }
+    if(_zag_strcmp(task, "shapetrans") == 1) { return 2; }
+    if(_zag_strcmp(task, "pitchdisc") == 1) { return 3; }
+    if(_zag_strcmp(task, "timbredisc") == 1) { return 4; }
+    if(_zag_strcmp(task, "motiondir") == 1) { return 5; }
+    return -1;
+}
+// family names for the ledger (frozen taxonomy; family 0 = normal)
+fn fam_name(task:i32, fam:i32) []u8 {
+    if(fam == 0) { return "normal"; }
+    if(task == 0) {
+        if(fam == 1) { return "R2A-COL-1"; }
+        if(fam == 2) { return "R2A-COL-2"; }
+        return "R2A-COL-3";
+    }
+    if(task == 1) {
+        if(fam == 1) { return "R2A-CCN-1"; }
+        return "R2A-CCN-2";
+    }
+    if(task == 2) {
+        if(fam == 1) { return "R2A-SHP-1"; }
+        if(fam == 2) { return "R2A-SHP-2"; }
+        return "R2A-SHP-3";
+    }
+    if(task == 3) {
+        if(fam == 1) { return "R2A-PTC-1"; }
+        if(fam == 2) { return "R2A-PTC-2"; }
+        return "R2A-PTC-3";
+    }
+    if(task == 4) {
+        if(fam == 1) { return "R2A-TMB-1"; }
+        if(fam == 2) { return "R2A-TMB-2"; }
+        return "R2A-TMB-3";
+    }
+    if(fam == 1) { return "R2A-MOT-1"; }
+    if(fam == 2) { return "R2A-MOT-2"; }
+    return "R2A-MOT-3";
+}
+// number of meaningful feature dims per task (stride in tables is 8)
+fn task_dims(task:i32) i32 {
+    if(task == 0) { return 4; }
+    if(task == 1) { return 7; }
+    if(task == 2) { return 8; }
+    if(task == 3) { return 4; }
+    if(task == 4) { return 7; }
+    return 7;
+}
+
+// ---------------- T0 colordisc (refined) --------------------------------------
+// F = patchA (32x32 RGB) + patchB (32x32 RGB), raw, 6144 B.
+// f0 chromaticity distance A-vs-B (milli)
+// f1 luminance distance (milli)
+// f2 min over 4 horizontal strips of A of strip-vs-B chromaticity (ramp-robust)
+// f3 spread of strip distances
+fn fe_t0(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let sa:[]u8 = nio_alloc(3*4);
+    let sb:[]u8 = nio_alloc(3*4);
+    let st:[]u8 = nio_alloc(4*3*4);
+    let i:i32 = 0;
+    while(i < 3*4) { sa[i] = 0; sb[i] = 0; i = i + 1; }
+    i = 0;
+    while(i < 4*3*4) { st[i] = 0; i = i + 1; }
+    let p:i32 = 0;
+    while(p < 1024) {
+        let y:i32 = p / 32;
+        let o:i32 = p*3;
+        let r:i64 = f[o] as i64;
+        let g:i64 = f[o+1] as i64;
+        let b:i64 = f[o+2] as i64;
+        t_put32(sa, 0, t_get32u(sa, 0) + r);
+        t_put32(sa, 4, t_get32u(sa, 4) + g);
+        t_put32(sa, 8, t_get32u(sa, 8) + b);
+        let s:i32 = (y >> 3)*3;
+        t_put32(st, s*4, t_get32u(st, s*4) + r);
+        t_put32(st, (s+1)*4, t_get32u(st, (s+1)*4) + g);
+        t_put32(st, (s+2)*4, t_get32u(st, (s+2)*4) + b);
+        let o2:i32 = 3072 + p*3;
+        t_put32(sb, 0, t_get32u(sb, 0) + (f[o2] as i64));
+        t_put32(sb, 4, t_get32u(sb, 4) + (f[o2+1] as i64));
+        t_put32(sb, 8, t_get32u(sb, 8) + (f[o2+2] as i64));
+        p = p + 1;
+    }
+    op_add(op, 2048);
+    let ta:i64 = t_get32u(sa, 0) + t_get32u(sa, 4) + t_get32u(sa, 8);
+    let tb:i64 = t_get32u(sb, 0) + t_get32u(sb, 4) + t_get32u(sb, 8);
+    if(ta < 1) { ta = 1; }
+    if(tb < 1) { tb = 1; }
+    let cra:i64 = 1000*t_get32u(sa, 0)/ta;
+    let cga:i64 = 1000*t_get32u(sa, 4)/ta;
+    let crb:i64 = 1000*t_get32u(sb, 0)/tb;
+    let cgb:i64 = 1000*t_get32u(sb, 4)/tb;
+    let f0:i64 = (iabs(cra-crb) + iabs(cga-cgb))/2;
+    let la:i64 = ta/(3*1024);
+    let lb:i64 = tb/(3*1024);
+    let f1:i64 = 1000*iabs(la-lb)/255;
+    let dmin:i64 = 1000000;
+    let dmax:i64 = 0;
+    let s2:i32 = 0;
+    while(s2 < 4) {
+        let sr:i64 = t_get32u(st, (s2*3)*4);
+        let sg:i64 = t_get32u(st, (s2*3+1)*4);
+        let sbb:i64 = t_get32u(st, (s2*3+2)*4);
+        let tot:i64 = sr + sg + sbb;
+        if(tot < 1) { tot = 1; }
+        let d:i64 = (iabs(1000*sr/tot-crb) + iabs(1000*sg/tot-cgb))/2;
+        if(d < dmin) { dmin = d; }
+        if(d > dmax) { dmax = d; }
+        s2 = s2 + 1;
+    }
+    t_put32(feat, 0, f0);
+    t_put32(feat, 4, f1);
+    t_put32(feat, 8, dmin);
+    t_put32(feat, 12, dmax - dmin);
+    nio_free(sa); nio_free(sb); nio_free(st);
+    return 0;
+}
+
+// ---------------- T1 colorconst (refined) -------------------------------------
+// F = viewA (48x48 RGB) + viewB (48x48 RGB), raw, 13824 B.
+// Per-quadrant (24x24) white-patch normalized appearance.
+// f0..f2 normalized A appearance (r,g,b milli); f3..f5 |A-B|; f6 asymmetry.
+fn fe_t1(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let mx:[]u8 = nio_alloc(8*3*4);
+    let sm:[]u8 = nio_alloc(8*3*4);
+    let i:i32 = 0;
+    while(i < 8*3*4) { mx[i] = 0; sm[i] = 0; i = i + 1; }
+    let p:i32 = 0;
+    while(p < 2304) {
+        let y:i32 = p / 48;
+        let x:i32 = p % 48;
+        let q0:i32 = (y/24)*2 + (x/24);
+        let o:i32 = p*3;
+        let r:i64 = f[o] as i64;
+        let g:i64 = f[o+1] as i64;
+        let b:i64 = f[o+2] as i64;
+        let s0:i32 = q0*3;
+        if(r > t_get32u(mx, s0*4)) { t_put32(mx, s0*4, r); }
+        if(g > t_get32u(mx, (s0+1)*4)) { t_put32(mx, (s0+1)*4, g); }
+        if(b > t_get32u(mx, (s0+2)*4)) { t_put32(mx, (s0+2)*4, b); }
+        t_put32(sm, s0*4, t_get32u(sm, s0*4) + r);
+        t_put32(sm, (s0+1)*4, t_get32u(sm, (s0+1)*4) + g);
+        t_put32(sm, (s0+2)*4, t_get32u(sm, (s0+2)*4) + b);
+        let o2:i32 = 6912 + p*3;
+        let r2:i64 = f[o2] as i64;
+        let g2:i64 = f[o2+1] as i64;
+        let b2:i64 = f[o2+2] as i64;
+        let s1:i32 = (q0+4)*3;
+        if(r2 > t_get32u(mx, s1*4)) { t_put32(mx, s1*4, r2); }
+        if(g2 > t_get32u(mx, (s1+1)*4)) { t_put32(mx, (s1+1)*4, g2); }
+        if(b2 > t_get32u(mx, (s1+2)*4)) { t_put32(mx, (s1+2)*4, b2); }
+        t_put32(sm, s1*4, t_get32u(sm, s1*4) + r2);
+        t_put32(sm, (s1+1)*4, t_get32u(sm, (s1+1)*4) + g2);
+        t_put32(sm, (s1+2)*4, t_get32u(sm, (s1+2)*4) + b2);
+        p = p + 1;
+    }
+    op_add(op, 4608);
+    let nm:[]u8 = nio_alloc(8*3*4);
+    let q:i32 = 0;
+    while(q < 8) {
+        let c:i32 = 0;
+        while(c < 3) {
+            let m:i64 = t_get32u(mx, (q*3+c)*4);
+            if(m < 1) { m = 1; }
+            t_put32(nm, (q*3+c)*4, 1000*t_get32u(sm, (q*3+c)*4)/(576*m));
+            c = c + 1;
+        }
+        q = q + 1;
+    }
+    let c:i32 = 0;
+    while(c < 3) {
+        let na:i64 = (t_get32u(nm, c*4) + t_get32u(nm, (3+c)*4))/2;
+        let nb:i64 = (t_get32u(nm, (12+c)*4) + t_get32u(nm, (15+c)*4))/2;
+        t_put32(feat, c*4, na);
+        t_put32(feat, (3+c)*4, iabs(na-nb));
+        c = c + 1;
+    }
+    let asym:i64 = 0;
+    let pp:i32 = 0;
+    while(pp < 2) {
+        let a:i64 = 0;
+        let cc:i32 = 0;
+        while(cc < 3) {
+            a = a + iabs(t_get32u(mx, (pp*12+cc)*4) - t_get32u(mx, (pp*12+6+cc)*4));
+            cc = cc + 1;
+        }
+        if(a > asym) { asym = a; }
+        pp = pp + 1;
+    }
+    t_put32(feat, 24, 1000*asym/765);
+    nio_free(mx); nio_free(sm); nio_free(nm);
+    return 0;
+}
+
+// ---------------- T2 shapetrans (refined, attack-aware) -----------------------
+// F = 96x96 u8 grayscale, 9216 B. Bright = v > 160 (frozen).
+// Bar detection: contiguous >=8-row dark band splitting bright rows.
+// Visible set: bar -> bright px outside the bar band; else largest component.
+// f0 bar flag; f1 circularity; f2 radial variance; f3 corners; f4 area frac;
+// f5 components; f6 bar-row position; f7 hidden fraction.
+fn fe_t2(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let w:i32 = 96;
+    let h:i32 = 96;
+    let n:i32 = 9216;
+    let mask:[]u8 = nio_alloc(n);
+    let rowc:[]u8 = nio_alloc(h*4);
+    let i:i32 = 0;
+    while(i < n) { mask[i] = 0; i = i + 1; }
+    i = 0;
+    while(i < h*4) { rowc[i] = 0; i = i + 1; }
+    let nall:i64 = 0;
+    let y:i32 = 0;
+    while(y < h) {
+        let x:i32 = 0;
+        while(x < w) {
+            let v:i64 = f[y*w+x] as i64;
+            if(v > 160) {
+                mask[y*w+x] = 1;
+                nall = nall + 1;
+                t_put32(rowc, y*4, t_get32u(rowc, y*4) + 1);
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    op_add(op, n as i64);
+    let maxc:i64 = 0;
+    y = 0;
+    while(y < h) {
+        let c:i64 = t_get32u(rowc, y*4);
+        if(c > maxc) { maxc = c; }
+        y = y + 1;
+    }
+    let bar:i32 = 0;
+    let by0:i32 = 0;
+    let by1:i32 = -1;
+    if(maxc >= 20) {
+        let th:i64 = maxc/2;
+        y = 0;
+        while(y < h) {
+            if(t_get32u(rowc, y*4) < th) {
+                let z:i32 = y;
+                while(z < h && t_get32u(rowc, z*4) < th) { z = z + 1; }
+                if(z - y >= 8) {
+                    let above:i32 = 0;
+                    let yy:i32 = 0;
+                    while(yy < y) {
+                        if(t_get32u(rowc, yy*4) >= th) { above = 1; }
+                        yy = yy + 1;
+                    }
+                    let below:i32 = 0;
+                    yy = z;
+                    while(yy < h) {
+                        if(t_get32u(rowc, yy*4) >= th) { below = 1; }
+                        yy = yy + 1;
+                    }
+                    if(above == 1 && below == 1) {
+                        bar = 1; by0 = y; by1 = z - 1;
+                    }
+                }
+                y = z;
+            } else {
+                y = y + 1;
+            }
+        }
+    }
+    // connected components (4-connected) on the bright mask
+    let lab:[]u8 = nio_alloc(n*4);
+    i = 0;
+    while(i < n*4) { lab[i] = 0; i = i + 1; }
+    let stack:[]u8 = nio_alloc(n*4);
+    i = 0;
+    while(i < n*4) { stack[i] = 0; i = i + 1; }
+    let csize:[]u8 = nio_alloc(1024*4);
+    i = 0;
+    while(i < 1024*4) { csize[i] = 0; i = i + 1; }
+    let ncomp:i32 = 0;
+    let p:i32 = 0;
+    while(p < n) {
+        if(mask[p] == 1 && t_get32u(lab, p*4) == 0) {
+            ncomp = ncomp + 1;
+            let cid:i32 = ncomp;
+            if(cid > 1024) { cid = 1024; }
+            let sp:i32 = 0;
+            t_put32(stack, 0, p as i64);
+            sp = 1;
+            while(sp > 0) {
+                sp = sp - 1;
+                let q:i32 = t_get32u(stack, sp*4) as i32;
+                if(t_get32u(lab, q*4) == 0) {
+                    t_put32(lab, q*4, cid as i64);
+                    t_put32(csize, (cid-1)*4, t_get32u(csize, (cid-1)*4) + 1);
+                    let qx:i32 = q % w;
+                    let qy:i32 = q / w;
+                    if(qx > 0) {
+                        let r:i32 = q - 1;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qx < w-1) {
+                        let r:i32 = q + 1;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qy > 0) {
+                        let r:i32 = q - w;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qy < h-1) {
+                        let r:i32 = q + w;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                }
+            }
+        }
+        p = p + 1;
+    }
+    op_add(op, n as i64);
+    let big:i32 = 1;
+    let bigsz:i64 = 0;
+    let c:i32 = 1;
+    while(c <= ncomp && c <= 1024) {
+        let s:i64 = t_get32u(csize, (c-1)*4);
+        if(s > bigsz) { bigsz = s; big = c; }
+        c = c + 1;
+    }
+    let sx:i64 = 0;
+    let sy:i64 = 0;
+    let nv:i64 = 0;
+    p = 0;
+    while(p < n) {
+        let vis:i32 = 0;
+        if(mask[p] == 1) {
+            if(bar == 1) {
+                let py:i32 = p / w;
+                if(py < by0 || py > by1) { vis = 1; }
+            } else {
+                if(t_get32u(lab, p*4) == big as i64) { vis = 1; }
+            }
+        }
+        if(vis == 1) {
+            sx = sx + (p % w) as i64;
+            sy = sy + (p / w) as i64;
+            nv = nv + 1;
+        }
+        p = p + 1;
+    }
+    if(nv < 16) {
+        nio_free(mask); nio_free(rowc); nio_free(lab); nio_free(stack); nio_free(csize);
+        return -1;
+    }
+    let cx64:i64 = 64*sx/nv;
+    let cy64:i64 = 64*sy/nv;
+    let dir:[]u8 = nio_alloc(24*8);
+    t_put32(dir, 0, 64); t_put32(dir, 4, 0);
+    t_put32(dir, 8, 62); t_put32(dir, 12, 17);
+    t_put32(dir, 16, 55); t_put32(dir, 20, 32);
+    t_put32(dir, 24, 45); t_put32(dir, 28, 45);
+    t_put32(dir, 32, 32); t_put32(dir, 36, 55);
+    t_put32(dir, 40, 17); t_put32(dir, 44, 62);
+    t_put32(dir, 48, 0); t_put32(dir, 52, 64);
+    t_put32(dir, 56, -17); t_put32(dir, 60, 62);
+    t_put32(dir, 64, -32); t_put32(dir, 68, 55);
+    t_put32(dir, 72, -45); t_put32(dir, 76, 45);
+    t_put32(dir, 80, -55); t_put32(dir, 84, 32);
+    t_put32(dir, 88, -62); t_put32(dir, 92, 17);
+    t_put32(dir, 96, -64); t_put32(dir, 100, 0);
+    t_put32(dir, 104, -62); t_put32(dir, 108, -17);
+    t_put32(dir, 112, -55); t_put32(dir, 116, -32);
+    t_put32(dir, 120, -45); t_put32(dir, 124, -45);
+    t_put32(dir, 128, -32); t_put32(dir, 132, -55);
+    t_put32(dir, 136, -17); t_put32(dir, 140, -62);
+    t_put32(dir, 144, 0); t_put32(dir, 148, -64);
+    t_put32(dir, 152, 17); t_put32(dir, 156, -62);
+    t_put32(dir, 160, 32); t_put32(dir, 164, -55);
+    t_put32(dir, 168, 45); t_put32(dir, 172, -45);
+    t_put32(dir, 176, 55); t_put32(dir, 180, -32);
+    t_put32(dir, 184, 62); t_put32(dir, 188, -17);
+    let rad:[]u8 = nio_alloc(24*4);
+    let nvld:i32 = 0;
+    let rmax:i64 = 0;
+    let rsum:i64 = 0;
+    let a:i32 = 0;
+    while(a < 24) {
+        let dx:i64 = t_get32s(dir, a*8);
+        let dy:i64 = t_get32s(dir, a*8+4);
+        let rad_a:i64 = -1;
+        let st:i64 = 1;
+        let mdone:i32 = 0;
+        while(st <= 96*64 && mdone == 0) {
+            let px64:i64 = cx64 + dx*st;
+            let py64:i64 = cy64 + dy*st;
+            if(px64 < 0 || px64 >= (w*64) as i64 || py64 < 0 || py64 >= (h*64) as i64) {
+                mdone = 1;
+            } else {
+                let xx:i32 = (px64/64) as i32;
+                let yy:i32 = (py64/64) as i32;
+                if(bar == 1 && yy >= by0 && yy <= by1) {
+                    // bar band is excluded from the visible set: the ray
+                    // passes through transparently (occlusion-robust profile)
+                    st = st + 1;
+                } else {
+                    let qq:i32 = yy*w + xx;
+                    if(mask[qq] == 0) {
+                        mdone = 1;
+                    } else {
+                        if(bar == 0 && t_get32u(lab, qq*4) != big as i64) {
+                            mdone = 1;
+                        } else {
+                            rad_a = st;
+                            st = st + 1;
+                        }
+                    }
+                }
+            }
+        }
+        if(rad_a >= 4) {
+            t_put32(rad, nvld*4, rad_a);
+            nvld = nvld + 1;
+            rsum = rsum + rad_a;
+            if(rad_a > rmax) { rmax = rad_a; }
+        }
+        a = a + 1;
+        op_add(op, st);
+    }
+    if(nvld < 6 || rmax <= 0) {
+        nio_free(mask); nio_free(rowc); nio_free(lab); nio_free(stack);
+        nio_free(csize); nio_free(dir); nio_free(rad);
+        return -1;
+    }
+    let mean:i64 = rsum/nvld as i64;
+    if(mean < 1) { mean = 1; }
+    let var:i64 = 0;
+    let k:i32 = 0;
+    while(k < nvld) {
+        let d:i64 = t_get32u(rad, k*4) - mean;
+        var = var + d*d;
+        k = k + 1;
+    }
+    let var1000:i64 = 1000*var/(nvld as i64 * mean * mean);
+    let corners:i32 = 0;
+    k = 0;
+    while(k < nvld) {
+        let ra:i64 = t_get32u(rad, k*4);
+        let rb:i64 = t_get32u(rad, ((k+nvld-1)%nvld)*4);
+        let rc:i64 = t_get32u(rad, ((k+1)%nvld)*4);
+        if(ra - rb > mean/8 && ra - rc > mean/8) { corners = corners + 1; }
+        k = k + 1;
+    }
+    let circ:i64 = 1000000*nv/(3141*rmax*rmax);
+    circ = iclamp(circ, 0, 1000);
+    let hidden:i64 = 0;
+    if(nall > 0) { hidden = 1000*(nall-nv)/nall; }
+    t_put32(feat, 0, (bar*1000) as i64);
+    t_put32(feat, 4, circ);
+    t_put32(feat, 8, iclamp(var1000, 0, 1000));
+    t_put32(feat, 12, imin(1000, (corners*250) as i64));
+    t_put32(feat, 16, 1000*nv/(w*h) as i64);
+    t_put32(feat, 20, imin(1000, (ncomp*100) as i64));
+    t_put32(feat, 24, (by0*1000/h) as i64);
+    t_put32(feat, 28, hidden);
+    nio_free(mask); nio_free(rowc); nio_free(lab); nio_free(stack);
+    nio_free(csize); nio_free(dir); nio_free(rad);
+    return 0;
+}
+
+// ---------------- audio helpers (same integer algorithms as R2-2) ---------------
+fn est_f0m(buf:[]u8, off:i32, cnt:i32, op:[]u8) i64 {
+    let first:i64 = -1;
+    let last:i64 = -1;
+    let k:i64 = 0;
+    let i:i32 = 1;
+    while(i < cnt) {
+        let v0:i64 = t_geti16(buf, off + (i - 1) * 2);
+        let v1:i64 = t_geti16(buf, off + i * 2);
+        if(v0 < 0 && v1 >= 0) {
+            let pos:i64 = ((i - 1) as i64) * 64 + ((-v0) * 64) / (v1 - v0);
+            if(first < 0) { first = pos; }
+            last = pos;
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    op_add(op, cnt as i64);
+    if(k < 2 || last <= first) { return -1; }
+    return 1024000000 * (k - 1) / (last - first);
+}
+fn harm_e(buf:[]u8, off:i32, cnt:i32, fm:i64, h:i32, op:[]u8) i64 {
+    let re:i64 = 0;
+    let im:i64 = 0;
+    let i:i32 = 0;
+    while(i < cnt) {
+        let s:i64 = t_geti16(buf, off + i * 2);
+        let cyc:i64 = ((i as i64) * (h as i64) * fm) % 16000000;
+        let p:i64 = cyc * 4294967296 / 16000000;
+        re = re + s * ng_sin1024(p) / 1024;
+        im = im + s * ng_sin1024((p + 1073741824) & 4294967295) / 1024;
+        i = i + 1;
+    }
+    op_add(op, (2 * cnt) as i64);
+    let rs:i64 = re / 256;
+    let ms:i64 = im / 256;
+    return rs * rs + ms * ms;
+}
+fn harm_sum(buf:[]u8, off:i32, cnt:i32, fm:i64, op:[]u8) i64 {
+    let s:i64 = 0;
+    let h:i32 = 1;
+    while(h <= 6) {
+        s = s + harm_e(buf, off, cnt, fm, h, op);
+        h = h + 1;
+    }
+    return s;
+}
+
+// ---------------- T3 pitchdisc (refined) --------------------------------------
+// F = 32000 int16 LE. toneA samples [0,14400), toneB [16000,30400).
+// f0 endpoint ratio (truth = endpoint ratio); f1 start ratio; f2/f3 glides.
+fn fe_t3(smp:[]u8, feat:[]u8, op:[]u8) i32 {
+    let fas:i64 = est_f0m(smp, 400*2, 1280, op);
+    let fae:i64 = est_f0m(smp, 12720*2, 1280, op);
+    let fbs:i64 = est_f0m(smp, 16400*2, 1280, op);
+    let fbe:i64 = est_f0m(smp, 29120*2, 1280, op);
+    if(fas <= 0 || fae <= 0 || fbs <= 0 || fbe <= 0) { return -1; }
+    let r_end:i64 = 1000*fbe/fae/2;
+    let r_start:i64 = 1000*fbs/fas/2;
+    let gl_a:i64 = 1000*iabs(fae - fas)/fas;
+    let gl_b:i64 = 1000*iabs(fbe - fbs)/fbs;
+    t_put32(feat, 0, iclamp(r_end, 0, 1000));
+    t_put32(feat, 4, iclamp(r_start, 0, 1000));
+    t_put32(feat, 8, iclamp(gl_a, 0, 1000));
+    t_put32(feat, 12, iclamp(gl_b, 0, 1000));
+    return 0;
+}
+
+// ---------------- T4 timbredisc (refined, attack-aware) -----------------------
+// F = 32000 int16 LE, 2 s tone @440 Hz. Sieve window samples [800,12800).
+// f0..f2 power ratios p2,p3,p4 = 1000*e_h/e_1
+// f3 template margin (milli); f4 template-class id (the truth space);
+// f5 boost-band attack flag; f6 octave-correction flag.
+fn tmb_tmpl(t2:i64, t3:i64) i32 {
+    // TMB_TMPL (power ratios x1000): PURE(0,0) DARK(78,6) RICH(640,384) BRIGHT(1960,2560)
+    let d0:i64 = t2*t2 + t3*t3;
+    let d1:i64 = (t2-78)*(t2-78) + (t3-6)*(t3-6);
+    let d2:i64 = (t2-640)*(t2-640) + (t3-384)*(t3-384);
+    let d3:i64 = (t2-1960)*(t2-1960) + (t3-2560)*(t3-2560);
+    let best:i32 = 0;
+    let bd:i64 = d0;
+    if(d1 < bd) { bd = d1; best = 1; }
+    if(d2 < bd) { bd = d2; best = 2; }
+    if(d3 < bd) { bd = d3; best = 3; }
+    return best;
+}
+fn fe_t4(smp:[]u8, feat:[]u8, op:[]u8) i32 {
+    let zc:i64 = est_f0m(smp, 400*2, 12000, op);
+    if(zc <= 0) { return -1; }
+    let best:i64 = zc;
+    let bests:i64 = harm_sum(smp, 400*2, 12000, zc, op);
+    let c2:i64 = zc/2;
+    if(c2 > 0) {
+        let s2:i64 = harm_sum(smp, 400*2, 12000, c2, op);
+        if(s2 > bests + bests/2) { bests = s2; best = c2; }
+    }
+    let c3:i64 = zc/3;
+    if(c3 > 0) {
+        let s3:i64 = harm_sum(smp, 400*2, 12000, c3, op);
+        if(s3 > bests + bests/2) { bests = s3; best = c3; }
+    }
+    let c4:i64 = zc/4;
+    if(c4 > 0) {
+        let s4:i64 = harm_sum(smp, 400*2, 12000, c4, op);
+        if(s4 > bests + bests/2) { bests = s4; best = c4; }
+    }
+    let e1:i64 = harm_e(smp, 400*2, 12000, best, 1, op);
+    if(e1 < 1) { e1 = 1; }
+    let p2:i64 = iclamp(1000*harm_e(smp, 400*2, 12000, best, 2, op)/e1, 0, 1000);
+    let p3:i64 = iclamp(1000*harm_e(smp, 400*2, 12000, best, 3, op)/e1, 0, 1000);
+    let p4:i64 = iclamp(1000*harm_e(smp, 400*2, 12000, best, 4, op)/e1, 0, 1000);
+    let tcls:i32 = tmb_tmpl(p2, p3);
+    // f3 (frozen): |centroid_hz - nearest TMB bin boundary|, boundaries {520,950,1550}
+    let wsum:i64 = 0;
+    let esum:i64 = 0;
+    let hh:i32 = 1;
+    while(hh <= 6) {
+        let ee:i64 = harm_e(smp, 400*2, 12000, best, hh, op);
+        wsum = wsum + (hh as i64)*ee;
+        esum = esum + ee;
+        hh = hh + 1;
+    }
+    if(esum < 1) { esum = 1; }
+    let cent:i64 = 440*wsum/esum;
+    let bdist:i64 = iabs(cent - 520);
+    let d950:i64 = iabs(cent - 950);
+    let d1550:i64 = iabs(cent - 1550);
+    if(d950 < bdist) { bdist = d950; }
+    if(d1550 < bdist) { bdist = d1550; }
+    let boost:i64 = 0;
+    if(p2 >= 300 && p2 <= 470 && p3 >= 90 && p3 <= 160) { boost = 1000; }
+    t_put32(feat, 0, p2);
+    t_put32(feat, 4, p3);
+    t_put32(feat, 8, p4);
+    t_put32(feat, 12, bdist);
+    t_put32(feat, 16, tcls as i64);
+    t_put32(feat, 20, boost);
+    let conf:i64 = 0;
+    if(best != zc) { conf = 1000; }
+    t_put32(feat, 24, conf);
+    return 0;
+}
+
+// ---------------- T5 motiondir (refined) --------------------------------------
+// F = 50 frames of 32x32 u8, 51200 B. 8 sampled frames (0,7,...,49).
+// f0 dx, f1 dy (milli); f2 reversal-seam marker; f3 minority; f4 magnitude;
+// f5 still flag; f6 frame0-vs-frame49 mean delta.
+fn ds16(px:[]u8, base:i32, out:[]u8, op:[]u8) void {
+    let cy:i32 = 0;
+    while(cy < 16) {
+        let cx:i32 = 0;
+        while(cx < 16) {
+            let s:i64 = 0;
+            let yy:i32 = 0;
+            while(yy < 2) {
+                let xx:i32 = 0;
+                while(xx < 2) {
+                    s = s + px[base + ((cy*2+yy)*32 + cx*2+xx)] as i64;
+                    xx = xx + 1;
+                }
+                yy = yy + 1;
+            }
+            out[cy*16+cx] = (s/4) as u8;
+            cx = cx + 1;
+        }
+        cy = cy + 1;
+    }
+    op_add(op, 1024);
+    return;
+}
+fn bm16(a:[]u8, b:[]u8, rng:i32, op:[]u8, out:[]u8) void {
+    let bdx:i32 = 0;
+    let bdy:i32 = 0;
+    let bsad:i64 = 9223372036854775807;
+    let dy:i32 = 0 - rng;
+    while(dy <= rng) {
+        let dx:i32 = 0 - rng;
+        while(dx <= rng) {
+            let sad:i64 = 0;
+            let cy:i32 = 0;
+            while(cy < 16) {
+                let cx:i32 = 0;
+                while(cx < 16) {
+                    let sx:i32 = cx + dx;
+                    let sy:i32 = cy + dy;
+                    if(sx >= 0 && sx < 16 && sy >= 0 && sy < 16) {
+                        sad = sad + iabs((a[cy*16+cx] as i64) - (b[sy*16+sx] as i64));
+                    }
+                    cx = cx + 1;
+                }
+                cy = cy + 1;
+            }
+            if(sad < bsad) { bsad = sad; bdx = dx; bdy = dy; }
+            dx = dx + 1;
+        }
+        dy = dy + 1;
+    }
+    t_put32(out, 0, bdx as i64);
+    t_put32(out, 4, bdy as i64);
+    op_add(op, ((2*rng+1)*(2*rng+1)*256) as i64);
+    return;
+}
+fn dir_class(dx:i64, dy:i64) i32 {
+    if(dx == 0 && dy == 0) { return 8; }
+    let ax:i64 = iabs(dx);
+    let ay:i64 = iabs(dy);
+    if(ax >= 2*ay) {
+        if(dx > 0) { return 2; }
+        return 6;
+    }
+    if(ay >= 2*ax) {
+        if(dy > 0) { return 4; }
+        return 0;
+    }
+    if(dx > 0 && dy < 0) { return 1; }
+    if(dx > 0 && dy > 0) { return 3; }
+    if(dx < 0 && dy > 0) { return 5; }
+    return 7;
+}
+fn fe_t5(frames:[]u8, feat:[]u8, op:[]u8) i32 {
+    let ds:[]u8 = nio_alloc(8*256);
+    let fi:i32 = 0;
+    while(fi < 8) {
+        ds16(frames, fi*7*1024, ds[fi*256..fi*256+256], op);
+        fi = fi + 1;
+    }
+    let mv:[]u8 = nio_alloc(8);
+    bm16(ds[0..256], ds[7*256..7*256+256], 2, op, mv);
+    let gdx:i64 = t_get32s(mv, 0)*2;
+    let gdy:i64 = t_get32s(mv, 4)*2;
+    let votes:[]u8 = nio_alloc(9*4);
+    let vi:i32 = 0;
+    while(vi < 9*4) { votes[vi] = 0; vi = vi + 1; }
+    let pmeans:[]u8 = nio_alloc(8*4);
+    let p:i32 = 0;
+    while(p < 7) {
+        let s:i64 = 0;
+        let k:i32 = 0;
+        while(k < 256) { s = s + ds[p*256+k] as i64; k = k + 1; }
+        t_put32(pmeans, p*4, s/256);
+        bm16(ds[p*256..p*256+256], ds[(p+1)*256..(p+1)*256+256], 2, op, mv);
+        let c:i32 = dir_class(t_get32s(mv, 0), t_get32s(mv, 4));
+        t_put32(votes, c*4, t_get32u(votes, c*4) + 1);
+        p = p + 1;
+    }
+    let s8:i64 = 0;
+    let k2:i32 = 0;
+    while(k2 < 256) { s8 = s8 + ds[7*256+k2] as i64; k2 = k2 + 1; }
+    t_put32(pmeans, 7*4, s8/256);
+    let maj:i32 = 0;
+    let majc:i64 = 0;
+    let c2:i32 = 0;
+    while(c2 < 9) {
+        let v:i64 = t_get32u(votes, c2*4);
+        if(v > majc) { majc = v; maj = c2; }
+        c2 = c2 + 1;
+    }
+    let zerosteps:i32 = t_get32u(votes, 8*4) as i32;
+    let reversal:i64 = 0;
+    if(zerosteps == 1 && majc >= 5 && maj != 8) { reversal = 1000; }
+    if(reversal == 1000) { gdx = 0 - gdx; gdy = 0 - gdy; }
+    let still:i64 = 0;
+    if(maj == 8) { still = 1000; }
+    let md:i64 = 1000*iabs(t_get32u(pmeans, 0) - t_get32u(pmeans, 7*4))/255;
+    t_put32(feat, 0, iclamp(1000*gdx/32, -1000, 1000));
+    t_put32(feat, 4, iclamp(1000*gdy/32, -1000, 1000));
+    t_put32(feat, 8, reversal);
+    t_put32(feat, 12, 1000*(7-majc)/7);
+    let mag:i64 = 1000*gdx/32;
+    let mag2:i64 = 1000*gdy/32;
+    let msum:i64 = mag*mag + mag2*mag2;
+    let mroot:i64 = 0;
+    let rr:i64 = msum;
+    if(rr > 0) {
+        let yy2:i64 = (rr + 1)/2;
+        while(yy2 < rr) { rr = yy2; yy2 = (rr + msum/rr)/2; }
+        mroot = rr;
+    }
+    t_put32(feat, 16, iclamp(mroot, 0, 1000));
+    t_put32(feat, 20, still);
+    t_put32(feat, 24, md);
+    nio_free(ds); nio_free(mv); nio_free(votes); nio_free(pmeans);
+    return 0;
+}
+
+// ---------------- coarse features (G3-form, for the one-sided ablation) -------
+// t0: 4-bit/channel bin SAME/DIFF flags
+// t1: normalized-bin SAME/DIFF flag
+// t2: classbin (TRI/SQU/CIR from 1000*area/(pi*Rmax^2) @526/819), area_bin,
+//     rmax_bin, cx_bin, cy_bin — standalone, NOT bar-aware (honest G3 baseline)
+// t3: f0-ratio 10-cent-bin label
+// t4: centroid bin class via TMB_BINS
+// t5: octant id of global displacement
+fn cf_t0(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let sa:[]u8 = nio_alloc(3*4);
+    let sb:[]u8 = nio_alloc(3*4);
+    let i:i32 = 0;
+    while(i < 3*4) { sa[i] = 0; sb[i] = 0; i = i + 1; }
+    let p:i32 = 0;
+    while(p < 1024) {
+        let o:i32 = p*3;
+        t_put32(sa, 0, t_get32u(sa, 0) + (f[o] as i64));
+        t_put32(sa, 4, t_get32u(sa, 4) + (f[o+1] as i64));
+        t_put32(sa, 8, t_get32u(sa, 8) + (f[o+2] as i64));
+        let o2:i32 = 3072 + p*3;
+        t_put32(sb, 0, t_get32u(sb, 0) + (f[o2] as i64));
+        t_put32(sb, 4, t_get32u(sb, 4) + (f[o2+1] as i64));
+        t_put32(sb, 8, t_get32u(sb, 8) + (f[o2+2] as i64));
+        p = p + 1;
+    }
+    op_add(op, 2048);
+    let same:i64 = 1000;
+    let c:i32 = 0;
+    while(c < 3) {
+        let ba:i64 = t_get32u(sa, c*4)/1024/16;
+        let bb:i64 = t_get32u(sb, c*4)/1024/16;
+        if(ba != bb) { same = 0; }
+        c = c + 1;
+    }
+    let la:i64 = (t_get32u(sa, 0) + t_get32u(sa, 4) + t_get32u(sa, 8))/(3*1024)/16;
+    let lb:i64 = (t_get32u(sb, 0) + t_get32u(sb, 4) + t_get32u(sb, 8))/(3*1024)/16;
+    let lsame:i64 = 0;
+    if(la == lb) { lsame = 1000; }
+    t_put32(feat, 0, same);
+    t_put32(feat, 4, lsame);
+    nio_free(sa); nio_free(sb);
+    return 0;
+}
+fn cf_t1(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let mx:[]u8 = nio_alloc(8*3*4);
+    let sm:[]u8 = nio_alloc(8*3*4);
+    let i:i32 = 0;
+    while(i < 8*3*4) { mx[i] = 0; sm[i] = 0; i = i + 1; }
+    let p:i32 = 0;
+    while(p < 2304) {
+        let y:i32 = p / 48;
+        let x:i32 = p % 48;
+        let q0:i32 = (y/24)*2 + (x/24);
+        let o:i32 = p*3;
+        let s0:i32 = q0*3;
+        let r:i64 = f[o] as i64;
+        let g:i64 = f[o+1] as i64;
+        let b:i64 = f[o+2] as i64;
+        if(r > t_get32u(mx, s0*4)) { t_put32(mx, s0*4, r); }
+        if(g > t_get32u(mx, (s0+1)*4)) { t_put32(mx, (s0+1)*4, g); }
+        if(b > t_get32u(mx, (s0+2)*4)) { t_put32(mx, (s0+2)*4, b); }
+        t_put32(sm, s0*4, t_get32u(sm, s0*4) + r);
+        t_put32(sm, (s0+1)*4, t_get32u(sm, (s0+1)*4) + g);
+        t_put32(sm, (s0+2)*4, t_get32u(sm, (s0+2)*4) + b);
+        let o2:i32 = 6912 + p*3;
+        let s1:i32 = (q0+4)*3;
+        let r2:i64 = f[o2] as i64;
+        let g2:i64 = f[o2+1] as i64;
+        let b2:i64 = f[o2+2] as i64;
+        if(r2 > t_get32u(mx, s1*4)) { t_put32(mx, s1*4, r2); }
+        if(g2 > t_get32u(mx, (s1+1)*4)) { t_put32(mx, (s1+1)*4, g2); }
+        if(b2 > t_get32u(mx, (s1+2)*4)) { t_put32(mx, (s1+2)*4, b2); }
+        t_put32(sm, s1*4, t_get32u(sm, s1*4) + r2);
+        t_put32(sm, (s1+1)*4, t_get32u(sm, (s1+1)*4) + g2);
+        t_put32(sm, (s1+2)*4, t_get32u(sm, (s1+2)*4) + b2);
+        p = p + 1;
+    }
+    op_add(op, 4608);
+    let same:i64 = 1000;
+    let c:i32 = 0;
+    while(c < 3) {
+        let na:i64 = 0;
+        let nb:i64 = 0;
+        let q:i32 = 0;
+        while(q < 4) {
+            let m:i64 = t_get32u(mx, (q*3+c)*4);
+            if(m < 1) { m = 1; }
+            na = na + 1000*t_get32u(sm, (q*3+c)*4)/(576*m);
+            let m2:i64 = t_get32u(mx, ((q+4)*3+c)*4);
+            if(m2 < 1) { m2 = 1; }
+            nb = nb + 1000*t_get32u(sm, ((q+4)*3+c)*4)/(576*m2);
+            q = q + 1;
+        }
+        if(na/4/125 != nb/4/125) { same = 0; }
+        c = c + 1;
+    }
+    t_put32(feat, 0, same);
+    nio_free(mx); nio_free(sm);
+    return 0;
+}
+// standalone coarse shape pass: largest bright (v>160) component, no bar logic
+fn cf_shape_stat(f:[]u8, op:[]u8, out:[]u8) i32 {
+    let w:i32 = 96;
+    let n:i32 = 9216;
+    let mask:[]u8 = nio_alloc(n);
+    let i:i32 = 0;
+    while(i < n) {
+        if((f[i] as i64) > 160) { mask[i] = 1; } else { mask[i] = 0; }
+        i = i + 1;
+    }
+    op_add(op, n as i64);
+    let lab:[]u8 = nio_alloc(n*4);
+    i = 0;
+    while(i < n*4) { lab[i] = 0; i = i + 1; }
+    let stack:[]u8 = nio_alloc(n*4);
+    i = 0;
+    while(i < n*4) { stack[i] = 0; i = i + 1; }
+    let ncomp:i32 = 0;
+    let bigsz:i64 = 0;
+    let big:i32 = 0;
+    let p:i32 = 0;
+    while(p < n) {
+        if(mask[p] == 1 && t_get32u(lab, p*4) == 0) {
+            ncomp = ncomp + 1;
+            let cid:i32 = ncomp;
+            let sz:i64 = 0;
+            t_put32(stack, 0, p as i64);
+            let sp:i32 = 1;
+            while(sp > 0) {
+                sp = sp - 1;
+                let q:i32 = t_get32u(stack, sp*4) as i32;
+                if(t_get32u(lab, q*4) == 0) {
+                    t_put32(lab, q*4, cid as i64);
+                    sz = sz + 1;
+                    let qx:i32 = q % w;
+                    let qy:i32 = q / w;
+                    if(qx > 0) {
+                        let r:i32 = q - 1;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qx < w-1) {
+                        let r:i32 = q + 1;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qy > 0) {
+                        let r:i32 = q - w;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                    if(qy < w-1) {
+                        let r:i32 = q + w;
+                        if(mask[r] == 1 && t_get32u(lab, r*4) == 0) {
+                            t_put32(stack, sp*4, r as i64); sp = sp + 1;
+                        }
+                    }
+                }
+            }
+            if(sz > bigsz) { bigsz = sz; big = cid; }
+        }
+        p = p + 1;
+    }
+    op_add(op, n as i64);
+    if(bigsz < 16) {
+        nio_free(mask); nio_free(lab); nio_free(stack);
+        return -1;
+    }
+    let sx:i64 = 0;
+    let sy:i64 = 0;
+    p = 0;
+    while(p < n) {
+        if(t_get32u(lab, p*4) == big as i64) {
+            sx = sx + (p % w) as i64;
+            sy = sy + (p / w) as i64;
+        }
+        p = p + 1;
+    }
+    let cx:i64 = sx/bigsz;
+    let cy:i64 = sy/bigsz;
+    let rmax2:i64 = 0;
+    p = 0;
+    while(p < n) {
+        if(t_get32u(lab, p*4) == big as i64) {
+            let dx:i64 = (p % w) as i64 - cx;
+            let dy:i64 = (p / w) as i64 - cy;
+            let d2:i64 = dx*dx + dy*dy;
+            if(d2 > rmax2) { rmax2 = d2; }
+        }
+        p = p + 1;
+    }
+    let rmax:i64 = 1;
+    if(rmax2 > 0) {
+        let yy:i64 = (rmax2 + 1)/2;
+        let rr:i64 = rmax2;
+        while(yy < rr) { rr = yy; yy = (rr + rmax2/rr)/2; }
+        rmax = rr;
+    }
+    t_put64(out, 0, bigsz);
+    t_put64(out, 8, cx);
+    t_put64(out, 16, cy);
+    t_put64(out, 24, rmax);
+    nio_free(mask); nio_free(lab); nio_free(stack);
+    return 0;
+}
+fn cf_t2(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let st:[]u8 = nio_alloc(32);
+    let i:i32 = 0;
+    while(i < 32) { st[i] = 0; i = i + 1; }
+    let rc:i64 = cf_shape_stat(f, op, st);
+    if(rc != 0) { nio_free(st); return rc as i32; }
+    let area:i64 = t_get64(st, 0);
+    let cx:i64 = t_get64(st, 8);
+    let cy:i64 = t_get64(st, 16);
+    let rmax:i64 = t_get64(st, 24);
+    // circ = 1000*area/(pi*rmax^2), scaled x1000 for the @526/819 thresholds
+    let circ:i64 = 1000000000*area/(3141*rmax*rmax);
+    let classbin:i64 = 2;
+    if(circ >= 819000) { classbin = 0; } else if(circ >= 526000) { classbin = 1; }
+    t_put32(feat, 0, classbin);
+    t_put32(feat, 4, area/256);
+    t_put32(feat, 8, rmax/4);
+    t_put32(feat, 12, cx/8);
+    t_put32(feat, 16, cy/8);
+    nio_free(st);
+    return 0;
+}
+fn cf_t3(f:[]u8, feat:[]u8, op:[]u8) i32 {
+    let tmp:[]u8 = nio_alloc(32);
+    let i:i32 = 0;
+    while(i < 32) { tmp[i] = 0; i = i + 1; }
+    let rc:i64 = fe_t3(f, tmp, op);
+    if(rc != 0) { nio_free(tmp); return rc as i32; }
+    let r:i64 = t_get32s(tmp, 0);
+    // 10-cent-bin label: bin edges at +/-5,+/-15,... cents from 500 (milli ratio)
+    let lab:i64 = 7;
+    if(r < 482) { lab = -7; } else if(r < 484) { lab = -6; } else if(r < 487) { lab = -5; } else if(r < 490) { lab = -4; } else if(r < 493) { lab = -3; } else if(r < 496) { lab = -2; } else if(r < 499) { lab = -1; } else if(r < 501) { lab = 0; } else if(r < 504) { lab = 1; } else if(r < 507) { lab = 2; } else if(r < 510) { lab = 3; } else if(r < 513) { lab = 4; } else if(r < 516) { lab = 5; } else if(r < 519) { lab = 6; }
+    t_put32(feat, 0, lab);
+    nio_free(tmp);
+    return 0;
+}
+fn cf_t4(smp:[]u8, feat:[]u8, op:[]u8) i32 {
+    let zc:i64 = est_f0m(smp, 400*2, 12000, op);
+    if(zc <= 0) { return -1; }
+    let best:i64 = zc;
+    let bests:i64 = harm_sum(smp, 400*2, 12000, zc, op);
+    let c2:i64 = zc/2;
+    if(c2 > 0) {
+        let s2:i64 = harm_sum(smp, 400*2, 12000, c2, op);
+        if(s2 > bests + bests/2) { bests = s2; best = c2; }
+    }
+    let e1:i64 = harm_e(smp, 400*2, 12000, best, 1, op);
+    if(e1 < 1) { e1 = 1; }
+    let wsum:i64 = 0;
+    let esum:i64 = 0;
+    let h:i32 = 1;
+    while(h <= 6) {
+        let e:i64 = harm_e(smp, 400*2, 12000, best, h, op);
+        wsum = wsum + (h as i64)*e;
+        esum = esum + e;
+        h = h + 1;
+    }
+    if(esum < 1) { esum = 1; }
+    let cent:i64 = 440*wsum/esum;
+    let c:i32 = 3;
+    if(cent <= 520) { c = 0; } else if(cent <= 950) { c = 1; } else if(cent <= 1550) { c = 2; }
+    t_put32(feat, 0, c as i64);
+    return 0;
+}
+fn cf_t5(frames:[]u8, feat:[]u8, op:[]u8) i32 {
+    let tmp:[]u8 = nio_alloc(32);
+    let i:i32 = 0;
+    while(i < 32) { tmp[i] = 0; i = i + 1; }
+    let rc:i64 = fe_t5(frames, tmp, op);
+    if(rc != 0) { nio_free(tmp); return rc; }
+    let dx:i64 = t_get32s(tmp, 0);
+    let dy:i64 = t_get32s(tmp, 4);
+    t_put32(feat, 0, dir_class(dx/32, dy/32) as i64);
+    nio_free(tmp);
+    return 0;
+}
+
+// ---------------- two-sided contract ------------------------------------------
+// Returns via out[]u8 (i64 words): dt, df, margin, bestclass, install.
+// FULL: dt + 150 < df (frozen margin, R2-2's form), plus attack clauses
+//       (t2 bar, t4 boost-band).
+// NOCLAUSE: same two-sided rule without clauses.
+// COARSE: one-sided dt < 300 on coarse features.
+fn contract(feat:[]u8, task:i32, mode:i32, out:[]u8) void {
+    let nd:i32 = task_dims(task);
+    let exa:[]u8 = nio_alloc(EX_N*EX_RECW*4);
+    ex_build(exa, EX_N);
+    let fba:[]u8 = nio_alloc(FB_N*10*4);
+    fb_build(fba, FB_N);
+    let dt:i64 = 9223372036854775807;
+    let bestc:i32 = -1;
+    let e:i32 = 0;
+    while(e < EX_N) {
+        let base:i32 = e*10*4;
+        if(t_get32s(exa, base) == task as i64) {
+            let d:i64 = 0;
+            let k:i32 = 0;
+            while(k < nd) {
+                let df0:i64 = t_get32s(feat, k*4) - t_get32s(exa, base+8+k*4);
+                d = d + df0*df0/1000;
+                k = k + 1;
+            }
+            if(d < dt) {
+                dt = d;
+                bestc = t_get32s(exa, base+4) as i32;
+            }
+        }
+        e = e + 1;
+    }
+    let df:i64 = 9223372036854775807;
+    if(mode != 2) {
+        let j:i32 = 0;
+        while(j < FB_N) {
+            let base:i32 = j*10*4;
+            if(t_get32s(fba, base) == task as i64) {
+                let d:i64 = 0;
+                let k:i32 = 0;
+                while(k < nd) {
+                    let df0:i64 = t_get32s(feat, k*4) - t_get32s(fba, base+8+k*4);
+                    d = d + df0*df0/1000;
+                    k = k + 1;
+                }
+                if(d < df) { df = d; }
+            }
+            j = j + 1;
+        }
+    }
+    nio_free(exa);
+    nio_free(fba);
+    let install:i64 = 0;
+    if(bestc >= 0) {
+        if(mode == 2) {
+            if(dt < 300) { install = 1; }
+        } else {
+            if(dt + 150 < df) {
+                install = 1;
+                if(mode == 0) {
+                    if(task == 2 && t_get32s(feat, 0) == 1000) {
+                        if(dt >= 250) { install = 0; }
+                    }
+                    if(task == 4 && t_get32s(feat, 20) == 1000) {
+                        let tcls:i64 = t_get32s(feat, 16);
+                        if(tcls != bestc as i64 || dt >= 400) { install = 0; }
+                    }
+                }
+            }
+        }
+    }
+    t_put64(out, 0, dt);
+    t_put64(out, 8, df);
+    t_put64(out, 16, df - dt);
+    t_put64(out, 24, bestc as i64);
+    t_put64(out, 32, install);
+    return;
+}
+
+// ---------------- main ---------------------------------------------------------
+fn main() i32 {
+    let fixpath:[]u8 = _zag_arg(1);
+    let task:[]u8 = _zag_arg(2);
+    let truthpath:[]u8 = _zag_arg(3);
+    let prev:[]u8 = _zag_arg(4);
+    let modes:[]u8 = _zag_arg(5);
+    let tid:i32 = task_id(task);
+    if(tid < 0) { return fail(task, "bad task", prev); }
+    let mode:i32 = 0;
+    let coarse:i32 = 0;
+    let stage1:i32 = 0;
+    if(_zag_strcmp(modes, "stage1") == 1) { stage1 = 1; } else if(_zag_strcmp(modes, "stage1c") == 1) { stage1 = 1; coarse = 1; } else if(_zag_strcmp(modes, "noclause") == 1) { mode = 1; } else if(_zag_strcmp(modes, "coarse") == 1) { mode = 2; coarse = 1; } else if(_zag_strcmp(modes, "") == 1) { mode = 0; } else if(_zag_strcmp(modes, "full") != 1) { return fail(task, "bad mode", prev); }
+    // read container (max 256 KB)
+    let buf:[]u8 = nio_alloc(262144);
+    let n:i64 = z_read(fixpath, buf, 262144);
+    if(n < 64) { return fail(task, "read failed", prev); }
+    let magic:i64 = t_get32u(buf, 0);
+    if(magic != 1379026520) { return fail(task, "bad magic", prev); }
+    let fam:i32 = t_get32u(buf, 12) as i32;
+    let f_off:i32 = t_get32u(buf, 16) as i32;
+    let f_len:i32 = t_get32u(buf, 20) as i32;
+    if(f_off != 32 || f_off + f_len > n as i32) { return fail(task, "bad F span", prev); }
+    let op:[]u8 = nio_alloc(8);
+    let oo:i32 = 0;
+    while(oo < 8) { op[oo] = 0; oo = oo + 1; }
+    let feat:[]u8 = nio_alloc(32);
+    let fi2:i32 = 0;
+    while(fi2 < 32) { feat[fi2] = 0; fi2 = fi2 + 1; }
+    let gok:i32 = 0;
+    if(tid == 0) {
+        if(f_len != 6144) { return fail(task, "bad F len", prev); }
+        if(coarse == 1) { gok = cf_t0(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t0(buf[f_off..f_off+f_len], feat, op); }
+    }
+    if(tid == 1) {
+        if(f_len != 13824) { return fail(task, "bad F len", prev); }
+        if(coarse == 1) { gok = cf_t1(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t1(buf[f_off..f_off+f_len], feat, op); }
+    }
+    if(tid == 2) {
+        if(f_len != 9216) { return fail(task, "bad F len", prev); }
+        if(coarse == 1) { gok = cf_t2(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t2(buf[f_off..f_off+f_len], feat, op); }
+    }
+    if(tid == 3 || tid == 4) {
+        if(f_len != 64000) { return fail(task, "bad F len", prev); }
+        if(tid == 3) {
+            if(coarse == 1) { gok = cf_t3(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t3(buf[f_off..f_off+f_len], feat, op); }
+        } else {
+            if(coarse == 1) { gok = cf_t4(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t4(buf[f_off..f_off+f_len], feat, op); }
+        }
+    }
+    if(tid == 5) {
+        if(f_len != 51200) { return fail(task, "bad F len", prev); }
+        if(coarse == 1) { gok = cf_t5(buf[f_off..f_off+f_len], feat, op); } else { gok = fe_t5(buf[f_off..f_off+f_len], feat, op); }
+    }
+    if(gok != 0) {
+        nio_free(buf); nio_free(op); nio_free(feat);
+        return fail(task, "feature failure", prev);
+    }
+    let bytes:i64 = t_get64(op, 0);
+    // truth
+    let tb:[]u8 = nio_alloc(64);
+    let tn:i64 = z_read(truthpath, tb, 64);
+    let truth:[]u8 = "UNKNOWN";
+    if(tn > 6) {
+        if(tb[0] == 116 && tb[1] == 114 && tb[2] == 117 && tb[3] == 116 && tb[4] == 104 && tb[5] == 61) {
+            truth = tb[6..tn-1];
+        }
+    }
+    if(stage1 == 1) {
+        // emit feat= line for enrollment: 8 csv i32
+        let ob:[]u8 = nio_alloc(256);
+        let pos:i32 = 0;
+        pos = ob_add(ob, pos, "feat=");
+        let k:i32 = 0;
+        while(k < 8) {
+            if(k > 0) { pos = ob_add(ob, pos, ","); }
+            pos = ob_add(ob, pos, _zag_i64_to_str(t_get32s(feat, k*4)));
+            k = k + 1;
+        }
+        pos = ob_add(ob, pos, "\n");
+        nio_write_all(1, ob[0..pos]);
+        nio_free(ob); nio_free(buf); nio_free(op); nio_free(feat); nio_free(tb);
+        return 0;
+    }
+    let out:[]u8 = nio_alloc(5*8);
+    contract(feat, tid, mode, out);
+    let dt:i64 = t_get64(out, 0);
+    let df:i64 = t_get64(out, 8);
+    let margin:i64 = t_get64(out, 16);
+    let bestc:i64 = t_get64(out, 24);
+    let install:i64 = t_get64(out, 32);
+    let cls:[]u8 = "GRAPHFAIL";
+    if(bestc >= 0) { cls = cls_str(tid, bestc as i32); }
+    let insts:[]u8 = "0";
+    if(install == 1) { insts = "1"; }
+    // feat csv
+    let fcsv:[]u8 = nio_alloc(128);
+    let fpos:i32 = 0;
+    let k2:i32 = 0;
+    while(k2 < 8) {
+        if(k2 > 0) { fpos = ob_add(fcsv, fpos, ","); }
+        fpos = ob_add(fcsv, fpos, _zag_i64_to_str(t_get32s(feat, k2*4)));
+        k2 = k2 + 1;
+    }
+    let fnm:[]u8 = fam_name(tid, fam);
+    let ob:[]u8 = nio_alloc(2048);
+    let pos:i32 = 0;
+    pos = ob_kv(ob, pos, "approach", "R2-13");
+    pos = ob_kv(ob, pos, "mode", modes);
+    pos = ob_kv(ob, pos, "task", task);
+    pos = ob_kv(ob, pos, "family", fnm);
+    pos = ob_kint(ob, pos, "family_id", fam as i64);
+    pos = ob_kv(ob, pos, "truth", truth);
+    pos = ob_kv(ob, pos, "class", cls);
+    pos = ob_kv(ob, pos, "install", insts);
+    pos = ob_kint(ob, pos, "d_true", dt);
+    pos = ob_kint(ob, pos, "d_false", df);
+    pos = ob_kint(ob, pos, "margin", margin);
+    pos = ob_kv(ob, pos, "feat", fcsv[0..fpos]);
+    pos = ob_kint(ob, pos, "bank_n", FB_N);
+    pos = ob_kint(ob, pos, "ops", bytes);
+    pos = ob_kint(ob, pos, "bytes", (n + tn) as i64);
+    // chain: prev|task|truth|class|install|dt|df|feats|mode|family
+    let msg:[]u8 = nio_alloc(512);
+    let mp:i32 = 0;
+    mp = ob_add(msg, mp, prev);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, task);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, truth);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, cls);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, insts);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, _zag_i64_to_str(dt));
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, _zag_i64_to_str(df));
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, fcsv[0..fpos]);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, modes);
+    mp = ob_add(msg, mp, "|");
+    mp = ob_add(msg, mp, fnm);
+    let ch:[]u8 = nio_alloc(32);
+    ns_sha256(msg[0..mp], ch);
+    pos = ob_kv(ob, pos, "chain", ns_hex(ch));
+    nio_write_all(1, ob[0..pos]);
+    nio_free(ob); nio_free(msg); nio_free(ch); nio_free(buf); nio_free(op);
+    nio_free(feat); nio_free(tb); nio_free(out); nio_free(fcsv);
+    return 0;
+}

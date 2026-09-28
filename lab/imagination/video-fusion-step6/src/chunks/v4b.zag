@@ -1,0 +1,343 @@
+// ==================== V4B: identity-preserving photometric transfer ====================
+// TNN's deliberation: the donor is BLACK and the slot is WHITE. The 6x gap is
+// mostly ALBEDO (material), not illumination (the bright-reference ratio is
+// only ~1.2x). So TNN does NOT do a blind 6x gain. It proposes candidates,
+// checks white-box identity gates (monotonicity, texture correlation,
+// chroma preservation), and selects by seam. Identity = rank + local
+// contrast + chromaticity, NOT absolute albedo (the merge instruction forces
+// the albedo to adapt; a white pig head is still a pig head).
+//
+// Candidates:
+//   T1: linear gain 3.0 (step-3's clamp, baseline for comparison)
+//   T2: linear gain I (illumination ratio, the honest lighting correction)
+//   T3: linear gain 2I (deliberate over-correction probe)
+//   T4: quantile luminance remap (nonlinear, rank-preserving, full adaptation)
+// All scale RGB uniformly -> chromaticity (r/g, b/g) is preserved by construction.
+
+// Bright reference: mean luminance of the largest bright (>=80th pct)
+// component of a (possibly stabilized) frame. For the donor this is the
+// white body in the donor's light.
+fn v4_bright_ref(st:[]u8, f:i64, cum:[]u8, W:i64, H:i64, out:[]u8) i64 {
+    let N:i64 = W * H;
+    let dm:[]u8 = nio_alloc(76800);
+    let wm:[]u8 = nio_alloc(76800);
+    let dst:[]u8 = nio_alloc(160);
+    if (v4_dw_one(st, f, cum, W, H, dm, wm, dst) != 0) { return -720; }
+    h_put64(out, 0, h_get64(dst, 136));
+    h_put64(out, 8, h_get64(dst, 152));
+    h_put64(out, 16, h_get64(dst, 144));
+    nio_free(dm);
+    nio_free(wm);
+    nio_free(dst);
+    return 0;
+}
+
+// 256-bin luminance histogram of masked pixels. hist: 256 qwords.
+fn v4_lum_hist(px:[]u8, mask:[]u8, w:i64, h:i64, hist:[]u8) void {
+    let i:i64 = 0;
+    while (i < 256) { h_put64(hist, i * 8, 0); i = i + 1; }
+    let p:i64 = 0;
+    let n:i64 = w * h;
+    while (p < n) {
+        if (mask[p] != 0) {
+            let r:i64 = px[p * 3] as i64;
+            let g:i64 = px[p * 3 + 1] as i64;
+            let b:i64 = px[p * 3 + 2] as i64;
+            let l:i64 = (r * 299 + g * 587 + b * 114) / 1000;
+            h_put64(hist, l * 8, h_get64(hist, l * 8) + 1);
+        }
+        p = p + 1;
+    }
+}
+
+// Quantile LUT: donor CDF -> slot CDF. lut[256] bytes. Monotonic by construction.
+fn v4_quant_lut(dhist:[]u8, shist:[]u8, lut:[]u8) void {
+    let dc:[]u8 = nio_alloc(2048);
+    let sc:[]u8 = nio_alloc(2048);
+    let s:i64 = 0;
+    let i:i64 = 0;
+    while (i < 256) {
+        s = s + h_get64(dhist, i * 8);
+        h_put64(dc, i * 8, s);
+        i = i + 1;
+    }
+    s = 0;
+    i = 0;
+    while (i < 256) {
+        s = s + h_get64(shist, i * 8);
+        h_put64(sc, i * 8, s);
+        i = i + 1;
+    }
+    let dt:i64 = h_get64(dc, 255 * 8);
+    let st:i64 = h_get64(sc, 255 * 8);
+    i = 0;
+    while (i < 256) {
+        let want:i64 = 0;
+        if (dt > 0) { want = h_get64(dc, i * 8) * st; }
+        let sl:i64 = 0;
+        while (sl < 256) {
+            if (dt <= 0 || h_get64(sc, sl * 8) * dt >= want) { break; }
+            sl = sl + 1;
+        }
+        if (sl > 255) { sl = 255; }
+        lut[i] = sl as u8;
+        i = i + 1;
+    }
+    nio_free(dc);
+    nio_free(sc);
+}
+
+// 1 iff lut is non-decreasing (monotonicity gate).
+fn v4_lut_monotonic(lut:[]u8) i64 {
+    let i:i64 = 1;
+    while (i < 256) {
+        if ((lut[i] as i64) < (lut[i - 1] as i64)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Linear gain apply: out = clamp(px * gain/1024), masked pixels only.
+fn v4_gain_apply(px:[]u8, mask:[]u8, w:i64, h:i64, gain:i64, out:[]u8) void {
+    let p:i64 = 0;
+    let n:i64 = w * h;
+    while (p < n) {
+        let c:i64 = 0;
+        while (c < 3) {
+            let v:i64 = px[p * 3 + c] as i64;
+            if (mask[p] != 0) {
+                v = v * gain / 1024;
+                if (v > 255) { v = 255; }
+            }
+            out[p * 3 + c] = v as u8;
+            c = c + 1;
+        }
+        p = p + 1;
+    }
+}
+
+// Quantile apply: lum' = lut[lum]; out = px * lum'/lum (chromaticity preserved).
+// If lum==0, out = (lum',lum',lum') (achromatic lift, still monotonic).
+fn v4_quant_apply(px:[]u8, mask:[]u8, w:i64, h:i64, lut:[]u8, out:[]u8) void {
+    let p:i64 = 0;
+    let n:i64 = w * h;
+    while (p < n) {
+        let r:i64 = px[p * 3] as i64;
+        let g:i64 = px[p * 3 + 1] as i64;
+        let b:i64 = px[p * 3 + 2] as i64;
+        if (mask[p] != 0) {
+            let l:i64 = (r * 299 + g * 587 + b * 114) / 1000;
+            let lp:i64 = lut[l] as i64;
+            if (l > 0) {
+                r = r * lp / l;
+                g = g * lp / l;
+                b = b * lp / l;
+                if (r > 255) { r = 255; }
+                if (g > 255) { g = 255; }
+                if (b > 255) { b = 255; }
+            } else {
+                r = lp;
+                g = lp;
+                b = lp;
+            }
+        }
+        out[p * 3] = r as u8;
+        out[p * 3 + 1] = g as u8;
+        out[p * 3 + 2] = b as u8;
+        p = p + 1;
+    }
+}
+
+// Gradient-magnitude Pearson correlation (x1024) between a and b over the
+// mask eroded by 1px (boundary-safe). Identity gate: texture preserved.
+fn v4_tex_corr(a:[]u8, b:[]u8, mask:[]u8, w:i64, h:i64) i64 {
+    let n:i64 = 0;
+    let sa:i64 = 0;
+    let sb:i64 = 0;
+    // first pass: means (eroded mask)
+    let y:i64 = 1;
+    while (y < h - 1) {
+        let x:i64 = 1;
+        while (x < w - 1) {
+            let p:i64 = y * w + x;
+            if (mask[p] != 0 && mask[p - 1] != 0 && mask[p + 1] != 0 && mask[p - w] != 0 && mask[p + w] != 0) {
+                let ar:i64 = a[p * 3] as i64;
+                let ag:i64 = a[p * 3 + 1] as i64;
+                let ab:i64 = a[p * 3 + 2] as i64;
+                let br:i64 = b[p * 3] as i64;
+                let bg:i64 = b[p * 3 + 1] as i64;
+                let bb:i64 = b[p * 3 + 2] as i64;
+                let al:i64 = (ar * 299 + ag * 587 + ab * 114) / 1000;
+                let bl:i64 = (br * 299 + bg * 587 + bb * 114) / 1000;
+                // gradient magnitude via right/down neighbors (masked)
+                let p2:i64 = p + 1;
+                let p3:i64 = p + w;
+                let ar2:i64 = a[p2 * 3] as i64;
+                let ag2:i64 = a[p2 * 3 + 1] as i64;
+                let ab2:i64 = a[p2 * 3 + 2] as i64;
+                let ar3:i64 = a[p3 * 3] as i64;
+                let ag3:i64 = a[p3 * 3 + 1] as i64;
+                let ab3:i64 = a[p3 * 3 + 2] as i64;
+                let al2:i64 = (ar2 * 299 + ag2 * 587 + ab2 * 114) / 1000;
+                let al3:i64 = (ar3 * 299 + ag3 * 587 + ab3 * 114) / 1000;
+                let ga:i64 = al2 - al;
+                if (ga < 0) { ga = 0 - ga; }
+                let ga2:i64 = al3 - al;
+                if (ga2 < 0) { ga2 = 0 - ga2; }
+                ga = ga + ga2;
+                let br2:i64 = b[p2 * 3] as i64;
+                let bg2:i64 = b[p2 * 3 + 1] as i64;
+                let bb2:i64 = b[p2 * 3 + 2] as i64;
+                let br3:i64 = b[p3 * 3] as i64;
+                let bg3:i64 = b[p3 * 3 + 1] as i64;
+                let bb3:i64 = b[p3 * 3 + 2] as i64;
+                let bl2:i64 = (br2 * 299 + bg2 * 587 + bb2 * 114) / 1000;
+                let bl3:i64 = (br3 * 299 + bg3 * 587 + bb3 * 114) / 1000;
+                let gb:i64 = bl2 - bl;
+                if (gb < 0) { gb = 0 - gb; }
+                let gb2:i64 = bl3 - bl;
+                if (gb2 < 0) { gb2 = 0 - gb2; }
+                gb = gb + gb2;
+                sa = sa + ga;
+                sb = sb + gb;
+                n = n + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (n < 50) { return 0; }
+    let ma:i64 = sa / n;
+    let mb:i64 = sb / n;
+    // second pass: cov and variances. Recompute gradients (memory over code).
+    let cov:i64 = 0;
+    let va:i64 = 0;
+    let vb:i64 = 0;
+    y = 1;
+    while (y < h - 1) {
+        let x:i64 = 1;
+        while (x < w - 1) {
+            let p:i64 = y * w + x;
+            if (mask[p] != 0 && mask[p - 1] != 0 && mask[p + 1] != 0 && mask[p - w] != 0 && mask[p + w] != 0) {
+                let ar:i64 = a[p * 3] as i64;
+                let ag:i64 = a[p * 3 + 1] as i64;
+                let ab:i64 = a[p * 3 + 2] as i64;
+                let al:i64 = (ar * 299 + ag * 587 + ab * 114) / 1000;
+                let br:i64 = b[p * 3] as i64;
+                let bg:i64 = b[p * 3 + 1] as i64;
+                let bb:i64 = b[p * 3 + 2] as i64;
+                let bl:i64 = (br * 299 + bg * 587 + bb * 114) / 1000;
+                let p2:i64 = p + 1;
+                let p3:i64 = p + w;
+                let al2:i64 = ((a[p2 * 3] as i64) * 299 + (a[p2 * 3 + 1] as i64) * 587 + (a[p2 * 3 + 2] as i64) * 114) / 1000;
+                let al3:i64 = ((a[p3 * 3] as i64) * 299 + (a[p3 * 3 + 1] as i64) * 587 + (a[p3 * 3 + 2] as i64) * 114) / 1000;
+                let ga:i64 = al2 - al;
+                if (ga < 0) { ga = 0 - ga; }
+                let t:i64 = al3 - al;
+                if (t < 0) { t = 0 - t; }
+                ga = ga + t;
+                let bl2:i64 = ((b[p2 * 3] as i64) * 299 + (b[p2 * 3 + 1] as i64) * 587 + (b[p2 * 3 + 2] as i64) * 114) / 1000;
+                let bl3:i64 = ((b[p3 * 3] as i64) * 299 + (b[p3 * 3 + 1] as i64) * 587 + (b[p3 * 3 + 2] as i64) * 114) / 1000;
+                let gb:i64 = bl2 - bl;
+                if (gb < 0) { gb = 0 - gb; }
+                t = bl3 - bl;
+                if (t < 0) { t = 0 - t; }
+                gb = gb + t;
+                let da:i64 = ga - ma;
+                let db:i64 = gb - mb;
+                cov = cov + da * db;
+                va = va + da * da;
+                vb = vb + db * db;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (va <= 0 || vb <= 0) { return 0; }
+    let denom:i64 = v4_isqrt(va * vb / n);
+    if (denom <= 0) { return 0; }
+    // r = (cov/n) / (sqrt(va/n)*sqrt(vb/n)) = cov / sqrt(va*vb)
+    // x1024: r = cov*1024 / sqrt(va*vb)
+    let sq:i64 = v4_isqrt(va * vb);
+    if (sq <= 0) { return 0; }
+    return cov * 1024 / sq;
+}
+
+// Chroma drift: mean |d(r/g)| + |d(b/g)| (x1024) between a and b over mask.
+// Both candidates scale RGB uniformly, so this should be ~0 by construction.
+fn v4_chroma_drift(a:[]u8, b:[]u8, mask:[]u8, w:i64, h:i64) i64 {
+    let n:i64 = 0;
+    let s:i64 = 0;
+    let p:i64 = 0;
+    let nn:i64 = w * h;
+    while (p < nn) {
+        if (mask[p] != 0) {
+            let ar:i64 = a[p * 3] as i64;
+            let ag:i64 = a[p * 3 + 1] as i64;
+            let ab:i64 = a[p * 3 + 2] as i64;
+            let br:i64 = b[p * 3] as i64;
+            let bg:i64 = b[p * 3 + 1] as i64;
+            let bb:i64 = b[p * 3 + 2] as i64;
+            if (ag > 4 && bg > 4) {
+                let d1:i64 = ar * 1024 / ag - br * 1024 / bg;
+                let d2:i64 = ab * 1024 / ag - bb * 1024 / bg;
+                if (d1 < 0) { d1 = 0 - d1; }
+                if (d2 < 0) { d2 = 0 - d2; }
+                s = s + d1 + d2;
+                n = n + 1;
+            }
+        }
+        p = p + 1;
+    }
+    if (n == 0) { return 0; }
+    return s / n;
+}
+
+// Seam: mean |graft - recipient| (gray) over boundary pixels
+// (mask=1 with a 4-neighbor mask=0). Same units as step-3's seam.
+fn v4_seam(graft:[]u8, mask:[]u8, recip:[]u8, w:i64, h:i64) i64 {
+    let n:i64 = 0;
+    let s:i64 = 0;
+    let y:i64 = 1;
+    while (y < h - 1) {
+        let x:i64 = 1;
+        while (x < w - 1) {
+            let p:i64 = y * w + x;
+            if (mask[p] != 0 && (mask[p - 1] == 0 || mask[p + 1] == 0 || mask[p - w] == 0 || mask[p + w] == 0)) {
+                let gr:i64 = graft[p * 3] as i64;
+                let gg:i64 = graft[p * 3 + 1] as i64;
+                let gb:i64 = graft[p * 3 + 2] as i64;
+                let gl:i64 = (gr * 299 + gg * 587 + gb * 114) / 1000;
+                let rr:i64 = recip[p * 3] as i64;
+                let rg:i64 = recip[p * 3 + 1] as i64;
+                let rb:i64 = recip[p * 3 + 2] as i64;
+                let rl:i64 = (rr * 299 + rg * 587 + rb * 114) / 1000;
+                let d:i64 = gl - rl;
+                if (d < 0) { d = 0 - d; }
+                s = s + d;
+                n = n + 1;
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (n == 0) { return 999999; }
+    return s / n;
+}
+
+// Fraction (x1024) of masked pixels with any channel at 255 (clipped).
+fn v4_clip_frac(px:[]u8, mask:[]u8, w:i64, h:i64) i64 {
+    let n:i64 = 0;
+    let c:i64 = 0;
+    let p:i64 = 0;
+    let nn:i64 = w * h;
+    while (p < nn) {
+        if (mask[p] != 0) {
+            n = n + 1;
+            if ((px[p * 3] as i64) == 255 || (px[p * 3 + 1] as i64) == 255 || (px[p * 3 + 2] as i64) == 255) { c = c + 1; }
+        }
+        p = p + 1;
+    }
+    if (n == 0) { return 0; }
+    return c * 1024 / n;
+}

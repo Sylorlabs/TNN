@@ -1,0 +1,637 @@
+// mp3dec.zag - Pure-Zag MPEG-1 Layer III decoder (f64 signal path).
+// Usage: mp3dec <in.mp3> <out.pcm> [dumpmode]
+//   dumpmode: 0=PCM16 (default), 1=dump B1 dequant as hex f64 bit patterns
+@import("./common.zag")
+@import("./mp3tab64.zag")
+
+struct Dec {
+    reserv: []u8,
+    reserv_n: i64,
+    istpos: []i64,
+    overlap: []f64,
+    qmf: []f64,
+    lins: []f64,
+    pow43: []f64,
+    expfrac: []f64,
+    aa: []f64,
+    twid9: []f64,
+    twid3: []f64,
+    mdctwin: []f64,
+    sec: []f64,
+    win: []f64,
+    pan: []f64,
+    sfbtab: []i64,
+    nch: i64,
+}
+
+fn zalloc8(n: i64) []u8 {
+    let raw: *u8 = _zag_malloc(n) as *u8;
+    let s: []u8 = raw[0..n];
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0; i = i + 1; }
+    return s;
+}
+fn zalloc64(n: i64) []i64 {
+    let raw: *u8 = _zag_malloc(n * 8) as *u8;
+    let s: []i64 = raw[0..n*8] as []i64;
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0; i = i + 1; }
+    return s;
+}
+fn zallocf(n: i64) []f64 {
+    let raw: *u8 = _zag_malloc(n * 8) as *u8;
+    let s: []f64 = raw[0..n*8] as []f64;
+    let i: i64 = 0;
+    while (i < n) { s[i] = 0.0; i = i + 1; }
+    return s;
+}
+
+fn dec_init() *Dec {
+    let raw: *u8 = _zag_malloc(256) as *u8;
+    let d: *Dec = raw as *Dec;
+    d.*.reserv = zalloc8(511);
+    d.*.reserv_n = 0;
+    d.*.istpos = zalloc64(80);
+    d.*.overlap = zallocf(576);
+    d.*.qmf = zallocf(960);
+    d.*.lins = zallocf(2176);
+    d.*.pow43 = load_f64tab(t_pow43b(), 145);
+    d.*.expfrac = load_f64tab(t_expfracb(), 4);
+    d.*.aa = load_f64tab(t_aab(), 16);
+    d.*.twid9 = load_f64tab(t_twid9b(), 18);
+    d.*.twid3 = load_f64tab(t_twid3b(), 6);
+    d.*.mdctwin = load_f64tab(t_mdctwinb(), 36);
+    d.*.sec = load_f64tab(t_secb(), 24);
+    d.*.win = load_f64tab(t_winb(), 240);
+    d.*.pan = load_f64tab(t_panb(), 14);
+    d.*.sfbtab = zalloc64(160);
+    d.*.nch = 0;
+    return d;
+}
+
+// ---------- bit reader (MSB-first) ----------
+// st: []i64 len 2: [pos, limit]; buf separate.
+fn bs_get_bits(buf: []u8, st: []i64, n: i64) i64 {
+    let pos: i64 = st[0];
+    let limit: i64 = st[1];
+    let p: i64 = pos >> 3;
+    let s: i64 = pos & 7;
+    st[0] = pos + n;
+    if (st[0] > limit) { return 0; }
+    let shl: i64 = n + s;
+    let nxt: i64 = 0;
+    if (p < buf.len) { nxt = (buf[p] as i64) & 255; }
+    nxt = nxt & (255 >> s);
+    p = p + 1;
+    let cache: i64 = 0;
+    while (true) {
+        shl = shl - 8;
+        if (shl <= 0) { break; }
+        cache = cache | (nxt << shl);
+        nxt = 0;
+        if (p < buf.len) { nxt = (buf[p] as i64) & 255; }
+        p = p + 1;
+    }
+    return cache | (nxt >> (0 - shl));
+}
+
+// ---------- HuffReader ----------
+// st: []i64 len 4: [cache, next_ptr, sh, buf_len]
+fn hr_init(buf: []u8, st: []i64, pos: i64) void {
+    let p: i64 = pos >> 3;
+    let b0: i64 = 0; let b1: i64 = 0; let b2: i64 = 0; let b3: i64 = 0;
+    if (p < buf.len) { b0 = (buf[p] as i64) & 255; }
+    if (p + 1 < buf.len) { b1 = (buf[p + 1] as i64) & 255; }
+    if (p + 2 < buf.len) { b2 = (buf[p + 2] as i64) & 255; }
+    if (p + 3 < buf.len) { b3 = (buf[p + 3] as i64) & 255; }
+    let cache: i64 = (((b0 * 256 + b1) * 256 + b2) * 256 + b3);
+    let s: i64 = pos & 7;
+    cache = (cache << s) & 4294967295;
+    st[0] = cache;
+    st[1] = p + 4;
+    st[2] = s - 8;
+    st[3] = buf.len;
+    return;
+}
+fn hr_peek(st: []i64, n: i64) i64 {
+    return (st[0] >> (32 - n)) & ((1 << n) - 1);
+}
+fn hr_flush(st: []i64, n: i64) void {
+    st[0] = (st[0] << n) & 4294967295;
+    st[2] = st[2] + n;
+    return;
+}
+fn hr_check(buf: []u8, st: []i64) void {
+    while (st[2] >= 0) {
+        let byte: i64 = 0;
+        if (st[1] < st[3]) { byte = (buf[st[1]] as i64) & 255; }
+        st[1] = st[1] + 1;
+        st[0] = (st[0] | ((byte << st[2]) & 4294967295)) & 4294967295;
+        st[2] = st[2] - 8;
+    }
+    return;
+}
+
+// ---------- side info ----------
+// gr_info flat: stride 22 per (granule,ch), max 4 entries
+fn gr_get(gri: []i64, g: i64, f: i64) i64 { return gri[g * 22 + f]; }
+fn gr_set(gri: []i64, g: i64, f: i64, v: i64) void { gri[g * 22 + f] = v; return; }
+
+// Fills gri (88 i64s). hout[0]=mono, hout[1]=sr_idx, hout[2]=nch.
+// Returns main_data_begin.
+fn read_side_info(d: *Dec, buf: []u8, st: []i64, hdr: []u8, gri: []i64, hout: []i64) i64 {
+    let mono: i64 = 0;
+    if ((hdr[3] & 192) == 192) { mono = 1; }
+    let sr_idx: i64 = (hdr[2] >> 2) & 3;
+    let nch: i64 = 1;
+    if (mono == 0) { nch = 2; }
+    d.*.nch = nch;
+    hout[0] = mono; hout[1] = sr_idx; hout[2] = nch;
+    let sfb: []i64 = d.*.sfbtab;
+    let gr_count: i64 = 2 * nch;
+    let main_data_begin: i64 = bs_get_bits(buf, st, 9);
+    let scfsi_all: i64 = bs_get_bits(buf, st, 7 + gr_count);
+    let g: i64 = 0;
+    let sfa: i64 = 0;
+    while (g < gr_count) {
+        let scfsi: i64 = scfsi_all;
+        if (mono == 1) { scfsi = scfsi << 4; }
+        gr_set(gri, g, 0, bs_get_bits(buf, st, 12));  // part_23_length
+        gr_set(gri, g, 1, bs_get_bits(buf, st, 9));   // big_values
+        gr_set(gri, g, 2, bs_get_bits(buf, st, 8));   // global_gain
+        gr_set(gri, g, 3, bs_get_bits(buf, st, 4));   // scalefac_compress
+        let ws: i64 = bs_get_bits(buf, st, 1);
+        let block_type: i64 = 0;
+        let mixed: i64 = 0;
+        if (ws == 1) {
+            block_type = bs_get_bits(buf, st, 2);
+            mixed = bs_get_bits(buf, st, 1);
+            gr_set(gri, g, 6, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 7, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 8, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 9, bs_get_bits(buf, st, 3));
+            gr_set(gri, g, 10, bs_get_bits(buf, st, 3));
+            gr_set(gri, g, 11, bs_get_bits(buf, st, 3));
+        } else {
+            gr_set(gri, g, 6, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 7, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 8, bs_get_bits(buf, st, 5));
+            gr_set(gri, g, 12, bs_get_bits(buf, st, 4));
+            gr_set(gri, g, 13, bs_get_bits(buf, st, 3));
+        }
+        gr_set(gri, g, 4, block_type);
+        gr_set(gri, g, 5, mixed);
+        gr_set(gri, g, 14, bs_get_bits(buf, st, 1));  // preflag
+        gr_set(gri, g, 15, bs_get_bits(buf, st, 1));  // scalefac_scale
+        gr_set(gri, g, 16, bs_get_bits(buf, st, 1));  // count1_table
+        gr_set(gri, g, 17, (scfsi >> 12) & 15);       // scfsi
+        scfsi_all = scfsi_all << 4;
+        let n_long: i64 = 0; let n_short: i64 = 0;
+        let taboff: i64 = sfa;
+        if (block_type == 2) {
+            gr_set(gri, g, 17, 0);  // Python: scfsi &= 0x0F0F kills bits 12-15
+            if (mixed == 1) {
+                let k: i64 = 0;
+                while (k < 39) {
+                    let w: i64 = mixed_row_get(sr_idx, k);
+                    sfb[sfa] = w; sfa = sfa + 1;
+                    if (w == 0) { break; }
+                    k = k + 1;
+                }
+                n_long = 8; n_short = 30;
+            } else {
+                let k: i64 = 0;
+                while (k < 40) {
+                    let w: i64 = scf_short_get(sr_idx * 40 + k);
+                    sfb[sfa] = w; sfa = sfa + 1;
+                    if (w == 0) { break; }
+                    k = k + 1;
+                }
+                n_short = 39;
+            }
+        } else {
+            let k: i64 = 0;
+            while (k < 23) {
+                let w: i64 = scf_long_get(sr_idx * 23 + k);
+                sfb[sfa] = w; sfa = sfa + 1;
+                if (w == 0) { break; }
+                k = k + 1;
+            }
+            n_long = 22;
+        }
+        gr_set(gri, g, 18, n_long);
+        gr_set(gri, g, 19, n_short);
+        gr_set(gri, g, 20, taboff);
+        gr_set(gri, g, 21, sfa - taboff);
+        g = g + 1;
+    }
+    return main_data_begin;
+}
+
+// ---------- scalefactors ----------
+fn ldexp_q2(d: *Dec, y: f64, exp_q2: i64) f64 {
+    let eq: i64 = exp_q2;
+    let yy: f64 = y;
+    while (true) {
+        let e: i64 = eq;
+        if (e > 120) { e = 120; }
+        // (1 << 30 >> (e >> 2)) as integer; e>=0 here
+        let sh: i64 = 30 - (e >> 2);
+        let p2: i64 = 0;
+        if (sh >= 0) { p2 = 1 << sh; }
+        yy = yy * (d.*.expfrac[e & 3] * (p2 as f64));
+        eq = eq - e;
+        if (eq <= 0) { break; }
+    }
+    return yy;
+}
+
+// Decodes into scf_out[40] (f64) and iscf_out[40] (i64).
+// istpos: persistent per-channel [40] (d.*.istpos + ch*40).
+fn decode_scalefactors(d: *Dec, buf: []u8, st: []i64, gri: []i64, g: i64,
+                       istpos: []i64, scf_out: []f64, iscf_out: []i64,
+                       hdr3: i64) void {
+    let n_long: i64 = gr_get(gri, g, 18);
+    let n_short: i64 = gr_get(gri, g, 19);
+    let idx: i64 = 0;
+    if (n_short != 0) { idx = idx + 1; }
+    if (n_long == 0) { idx = idx + 1; }
+    let part: i64 = scfc_get(gr_get(gri, g, 3));
+    let scf_size0: i64 = (part >> 2) & 255;
+    let scf_size2: i64 = part & 3;
+    let scfsi: i64 = gr_get(gri, g, 17);
+    let ip: i64 = 0; let sp: i64 = 0;
+    let i: i64 = 0;
+    while (i < 4) {
+        let cnt: i64 = scf_part_get(idx * 28 + i);
+        if (cnt == 0) { break; }
+        let bits: i64 = scf_size0;
+        if (i >= 2) { bits = scf_size2; }
+        if ((scfsi & 8) != 0) {
+            let k: i64 = 0;
+            while (k < cnt) { iscf_out[sp + k] = istpos[ip + k]; k = k + 1; }
+        } else {
+            if (bits == 0) {
+                let k: i64 = 0;
+                while (k < cnt) { iscf_out[sp + k] = 0; istpos[ip + k] = 0; k = k + 1; }
+            } else {
+                let max_scf: i64 = -1;
+                if (scfsi < 0) { max_scf = (1 << bits) - 1; }
+                let k: i64 = 0;
+                while (k < cnt) {
+                    let s: i64 = bs_get_bits(buf, st, bits);
+                    if (s == max_scf) { istpos[ip + k] = -1; } else { istpos[ip + k] = s; }
+                    iscf_out[sp + k] = s;
+                    k = k + 1;
+                }
+            }
+        }
+        ip = ip + cnt; sp = sp + cnt;
+        scfsi = scfsi * 2;
+        i = i + 1;
+    }
+    if (n_short != 0) {
+        let sh: i64 = 3 - (gr_get(gri, g, 15) + 1);
+        let sg0: i64 = gr_get(gri, g, 9);
+        let sg1: i64 = gr_get(gri, g, 10);
+        let sg2: i64 = gr_get(gri, g, 11);
+        let j: i64 = 0;
+        while (j < n_short) {
+            iscf_out[n_long + j + 0] = iscf_out[n_long + j + 0] + (sg0 << sh);
+            iscf_out[n_long + j + 1] = iscf_out[n_long + j + 1] + (sg1 << sh);
+            iscf_out[n_long + j + 2] = iscf_out[n_long + j + 2] + (sg2 << sh);
+            j = j + 3;
+        }
+    } else {
+        if (gr_get(gri, g, 14) != 0) {  // preflag
+            let j: i64 = 0;
+            while (j < 10) { iscf_out[11 + j] = iscf_out[11 + j] + preamp_get(j); j = j + 1; }
+        }
+    }
+    let scf_shift: i64 = gr_get(gri, g, 15) + 1;
+    let is_ms: i64 = 0;
+    if ((hdr3 & 224) == 96) { is_ms = 1; }
+    let gain_exp: i64 = gr_get(gri, g, 2) - 4 - 210 - (is_ms * 2);
+    let gain: f64 = ldexp_q2(d, 2048.0, 44 - gain_exp);
+    let n_scf: i64 = n_long + n_short;
+    let j2: i64 = 0;
+    while (j2 < n_scf) {
+        scf_out[j2] = ldexp_q2(d, gain, iscf_out[j2] << scf_shift);
+        j2 = j2 + 1;
+    }
+    // zero the rest
+    while (j2 < 40) { scf_out[j2] = 0.0; j2 = j2 + 1; }
+    return;
+}
+
+// ---------- Huffman ----------
+fn pow_43_z(d: *Dec, x: i64) f64 {
+    if (x < 129) { return d.*.pow43[16 + x]; }
+    let mult: f64 = 256.0;
+    let xx: i64 = x;
+    if (x < 1024) { mult = 16.0; xx = x << 3; }
+    let sign: i64 = (2 * xx) & 64;
+    let frac: f64 = ((xx & 63) - sign) as f64 / (((xx & -64) + sign) as f64);
+    let base: f64 = d.*.pow43[16 + ((xx + sign) >> 6)];
+    let poly: f64 = 1.0 + frac * ((4.0 / 3.0) + frac * (2.0 / 9.0));
+    return base * poly * mult;
+}
+
+// dst: []f64 len 576. gri/g as before. scf: []f64. hr_st: []i64 len 4.
+// region_count: for non-ws, gri[12],gri[13]; for ws block_type 2: [8? no...]
+// Python: region_count = [7,255,255] default, [8,...] for short, [r0,r1,255] else.
+fn huffman(d: *Dec, dst: []f64, buf: []u8, hr_st: []i64, gri: []i64, g: i64,
+           scf: []f64, layer3gr_limit: i64, sfb: []i64, sfb_off: i64) void {
+    let sfb_i: i64 = sfb_off;
+    let scf_i: i64 = 0;
+    let big_val_cnt: i64 = gr_get(gri, g, 1);
+    let one: f64 = 0.0;
+    let ireg: i64 = 0;
+    let di: i64 = 0;
+    let block_type: i64 = gr_get(gri, g, 4);
+    while (big_val_cnt > 0) {
+        let tab_num: i64 = gr_get(gri, g, 6 + ireg);
+        // Python region_count: [7,255,255] default; [r0,r1,255] if not block_type 2;
+        // if block_type==2 and not mixed: [8,255,255]
+        let sfb_cnt: i64 = 255;
+        if (block_type == 2) {
+            if (ireg == 0) {
+                sfb_cnt = 7;
+                if (gr_get(gri, g, 5) == 0) { sfb_cnt = 8; }
+            }
+        } else {
+            if (ireg == 0) { sfb_cnt = gr_get(gri, g, 12); }
+            else if (ireg == 1) { sfb_cnt = gr_get(gri, g, 13); }
+        }
+        ireg = ireg + 1;
+        let cb_base: i64 = tabindex_get(tab_num);
+        let linbits: i64 = linbits_get(tab_num);
+        while (true) {
+            let npairs: i64 = sfb[sfb_i] / 2;
+            sfb_i = sfb_i + 1;
+            let pairs_to_decode: i64 = npairs;
+            if (pairs_to_decode > big_val_cnt) { pairs_to_decode = big_val_cnt; }
+            one = scf[scf_i]; scf_i = scf_i + 1;
+            let pi: i64 = 0;
+            while (pi < pairs_to_decode) {
+                let w: i64 = 5;
+                let leaf: i64 = tab_get(cb_base + hr_peek(hr_st, w));
+                while (leaf < 0) {
+                    hr_flush(hr_st, w);
+                    w = leaf & 7;
+                    leaf = tab_get(cb_base + hr_peek(hr_st, w) - (leaf >> 3));
+                }
+                hr_flush(hr_st, leaf >> 8);
+                let j: i64 = 0;
+                while (j < 2) {
+                    let lsb: i64 = leaf & 15;
+                    let orig_lsb: i64 = lsb;
+                    if (linbits != 0 and lsb == 15) {
+                        lsb = lsb + hr_peek(hr_st, linbits);
+                        hr_flush(hr_st, linbits);
+                        hr_check(buf, hr_st);
+                        let sign: f64 = 1.0;
+                        if ((hr_st[0] & 2147483648) != 0) { sign = -1.0; }
+                        dst[di] = one * pow_43_z(d, lsb) * sign;
+                    } else {
+                        let sbit: i64 = (hr_st[0] >> 31) & 1;
+                        dst[di] = d.*.pow43[16 + lsb - 16 * sbit] * one;
+                    }
+                    if (orig_lsb != 0) { hr_flush(hr_st, 1); }
+                    leaf = leaf >> 4;
+                    di = di + 1;
+                    j = j + 1;
+                }
+                hr_check(buf, hr_st);
+                pi = pi + 1;
+            }
+            big_val_cnt = big_val_cnt - npairs;
+            sfb_cnt = sfb_cnt - 1;
+            if (!(big_val_cnt > 0 and sfb_cnt >= 0)) { break; }
+        }
+    }
+    // count1
+    let use33: i64 = gr_get(gri, g, 16);
+    let np_: i64 = 1 - big_val_cnt;
+    while (true) {
+        let leaf2: i64 = 0;
+        if (use33 != 0) { leaf2 = tab33_get(hr_peek(hr_st, 4)); }
+        else { leaf2 = tab32_get(hr_peek(hr_st, 4)); }
+        if ((leaf2 & 8) == 0) {
+            let idx2: i64 = (leaf2 >> 3) + (((hr_st[0] << 4) & 4294967295) >> (32 - (leaf2 & 3)));
+            if (use33 != 0) { leaf2 = tab33_get(idx2); }
+            else { leaf2 = tab32_get(idx2); }
+        }
+        hr_flush(hr_st, leaf2 & 7);
+        // bspos check
+        let bspos: i64 = hr_st[1] * 8 - 24 + hr_st[2];
+        if (bspos > layer3gr_limit) { break; }
+        let half: i64 = 0;
+        while (half < 2) {
+            np_ = np_ - 1;
+            if (np_ == 0) {
+                np_ = sfb[sfb_i] / 2;
+                sfb_i = sfb_i + 1;
+                if (np_ == 0) { hr_check(buf, hr_st); return; }
+                one = scf[scf_i]; scf_i = scf_i + 1;
+            }
+            let s: i64 = 0;
+            while (s < 2) {
+                let idx_s: i64 = half * 2 + s;
+                if ((leaf2 & (128 >> idx_s)) != 0) {
+                    let sign: f64 = 1.0;
+                    if ((hr_st[0] & 2147483648) != 0) { sign = -1.0; }
+                    dst[di + idx_s] = sign * one;
+                    hr_flush(hr_st, 1);
+                } else {
+                    dst[di + idx_s] = 0.0;
+                }
+                s = s + 1;
+            }
+            half = half + 1;
+        }
+        di = di + 4;
+        hr_check(buf, hr_st);
+    }
+    return;
+}
+
+// ---------- frame decode ----------
+// Find next frame sync at or after off. Returns offset or -1.
+fn find_sync(data: []u8, off: i64) i64 {
+    let i: i64 = off;
+    while (i + 1 < data.len) {
+        if (((data[i] as i64) & 255) == 255 and ((data[i+1] as i64) & 224) == 224) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// Decode one frame at off. Returns next frame offset or -1.
+// If dump_b1: writes hex f64 bit patterns of dequant to out.
+fn decode_frame(d: *Dec, data: []u8, off: i64, dump_b1: i64, out: []u8, out_at: *i64) i64 {
+    let dfm: i64 = file_write_trunc(cstr("/tmp/dbg_df"), "ENTER");
+    if (dfm < 0) { return -99; }
+    // header: 4 bytes at off
+    let h0: i64 = (data[off] as i64) & 255;
+    let h1: i64 = (data[off+1] as i64) & 255;
+    let h2: i64 = (data[off+2] as i64) & 255;
+    let h3: i64 = (data[off+3] as i64) & 255;
+    let hdr: []u8 = zalloc8(4);
+    hdr[0] = h0 as u8; hdr[1] = h1 as u8; hdr[2] = h2 as u8; hdr[3] = h3 as u8;
+    // frame length: MPEG-1 Layer III
+    let brate_idx: i64 = (h2 >> 4) & 15;
+    let sr_idx: i64 = (h2 >> 2) & 3;
+    let padding: i64 = (h2 >> 1) & 1;
+    // bitrate table MPEG-1 L3 (kbps)
+    let brate: i64 = 0;
+    if (brate_idx == 1) { brate = 32; } else if (brate_idx == 2) { brate = 40; }
+    else if (brate_idx == 3) { brate = 48; } else if (brate_idx == 4) { brate = 56; }
+    else if (brate_idx == 5) { brate = 64; } else if (brate_idx == 6) { brate = 80; }
+    else if (brate_idx == 7) { brate = 96; } else if (brate_idx == 8) { brate = 112; }
+    else if (brate_idx == 9) { brate = 128; } else if (brate_idx == 10) { brate = 160; }
+    else if (brate_idx == 11) { brate = 192; } else if (brate_idx == 12) { brate = 224; }
+    else if (brate_idx == 13) { brate = 256; } else if (brate_idx == 14) { brate = 320; }
+    let sr: i64 = 44100;
+    if (sr_idx == 1) { sr = 48000; } else if (sr_idx == 2) { sr = 32000; }
+    let frame_len: i64 = (144 * brate * 1000) / sr + padding;
+    // side info
+    let mono: i64 = 0;
+    if ((h3 & 192) == 192) { mono = 1; }
+    let side_len: i64 = 32;
+    if (mono == 1) { side_len = 17; }
+    let gri: []i64 = zalloc64(88);
+    let hout: []i64 = zalloc64(4);
+    let sst: []i64 = zalloc64(2);
+    sst[0] = (off + 4) * 8;
+    sst[1] = (off + 4 + side_len) * 8;
+    let mdb: i64 = read_side_info(d, data, sst, hdr, gri, hout);
+    let nch: i64 = hout[2];
+    // reservoir: build main data buffer
+    // bytes_have = min(reserv_n, mdb); copy from reserv_buf
+    let bytes_have: i64 = d.*.reserv_n;
+    if (bytes_have > mdb) { bytes_have = mdb; }
+    let frame_bytes: i64 = frame_len - 4 - side_len;
+    let mdbuf: []u8 = zalloc8(bytes_have + frame_bytes + 4);
+    let rsv: []u8 = d.*.reserv;
+    let roff: i64 = d.*.reserv_n - bytes_have;
+    let i: i64 = 0;
+    while (i < bytes_have) { mdbuf[i] = rsv[roff + i]; i = i + 1; }
+    i = 0;
+    while (i < frame_bytes) { mdbuf[bytes_have + i] = data[off + 4 + side_len + i]; i = i + 1; }
+    // save reservoir for next frame: last up to 511 bytes of mdbuf
+    let total: i64 = bytes_have + frame_bytes;
+    let keep: i64 = total;
+    if (keep > 511) { keep = 511; }
+    let koff: i64 = total - keep;
+    i = 0;
+    while (i < keep) { rsv[i] = mdbuf[koff + i]; i = i + 1; }
+    d.*.reserv_n = keep;
+    // per granule
+    let mst: []i64 = zalloc64(2);
+    mst[0] = 0; mst[1] = total * 8;
+    let igr: i64 = 0;
+    while (igr < 2) {
+        let ch: i64 = 0;
+        while (ch < nch) {
+            let g: i64 = igr * nch + ch;
+            let layer3gr_limit: i64 = mst[0] + gr_get(gri, g, 0);
+            let scf: []f64 = zallocf(40);
+            let iscf: []i64 = zalloc64(40);
+            let istp: []i64 = zalloc64(40);
+            // istpos slice: d.*.istpos[ch*40 .. ch*40+40]
+            let dip: []i64 = d.*.istpos;
+            let k: i64 = 0;
+            while (k < 40) { istp[k] = dip[ch * 40 + k]; k = k + 1; }
+                        decode_scalefactors(d, mdbuf, mst, gri, g, istp, scf, iscf, h3);
+            k = 0;
+            while (k < 40) { dip[ch * 40 + k] = istp[k]; k = k + 1; }
+            let hr_st: []i64 = zalloc64(4);
+            hr_init(mdbuf, hr_st, mst[0]);
+            let dst: []f64 = zallocf(576);
+            let sfb_off: i64 = gr_get(gri, g, 20);
+            let sfb: []i64 = d.*.sfbtab;
+                        huffman(d, dst, mdbuf, hr_st, gri, g, scf, layer3gr_limit, sfb, sfb_off);
+            mst[0] = layer3gr_limit;
+            if (dump_b1 == 1) {
+                // write 576 hex f64 bit patterns
+                let v: i64 = 0;
+                while (v < 576) {
+                    let bits: i64 = f64_to_bits(dst[v]);
+                    let hs: []u8 = i64_to_hex(bits);
+                    let oo: i64 = out_at.*;
+                    let q: i64 = 0;
+                    while (q < 16) { out[oo + q] = hs[q]; q = q + 1; }
+                    out[oo + 16] = 10;
+                    out_at.* = oo + 17;
+                    v = v + 1;
+                }
+            }
+            ch = ch + 1;
+        }
+        igr = igr + 1;
+    }
+    return off + frame_len;
+}
+
+fn f64_to_bits(x: f64) i64 {
+    let raw: *u8 = _zag_malloc(8) as *u8;
+    let fa: []f64 = raw[0..8] as []f64;
+    let ia: []i64 = raw[0..8] as []i64;
+    fa[0] = x;
+    return ia[0];
+}
+
+fn i64_to_hex(v: i64) []u8 {
+    let s: []u8 = zalloc8(16);
+    let i: i64 = 0;
+    while (i < 16) {
+        let nib: i64 = (v >> ((15 - i) * 4)) & 15;
+        if (nib < 10) { s[i] = (48 + nib) as u8; } else { s[i] = (87 + nib) as u8; }
+        i = i + 1;
+    }
+    return s;
+}
+
+// ---------- main ----------
+fn main() i32 {
+    let inpath: []u8 = _zag_arg(1);
+    let outpath: []u8 = _zag_arg(2);
+    let mode_s: []u8 = _zag_arg(3);
+    let dump_b1: i64 = 0;
+    if (mode_s.len > 0 and mode_s[0] == 49) { dump_b1 = 1; }
+    if (inpath.len == 0 or outpath.len == 0) { return 1; }
+    let d: *Dec = dec_init();
+//     let f_dbg: i64 = file_write_trunc(cstr("/tmp/dbg_marker"), "D1"); if (f_dbg < 0) { return 99; }
+    let data: []u8 = file_read_all(inpath);
+//     let f_dbg2: i64 = file_write_trunc(cstr("/tmp/dbg_marker"), "D2"); if (f_dbg2 < 0) { return 99; }
+    if (data.len == 0) { return 2; }
+    let out: []u8 = zalloc8(20000000);
+    let out_at: i64 = 0;
+    let out_at_p: *i64 = &out_at;
+    let off: i64 = find_sync(data, 0);
+    let fi: i64 = 0;
+    while (off >= 0 and fi < 200) {
+        off = decode_frame(d, data, off, dump_b1, out, out_at_p);
+        if (off < 0) { break; }
+        // check next sync
+        off = find_sync(data, off);
+        fi = fi + 1;
+    }
+    // write out[0..out_at]
+    let cs: []u8 = cstr(outpath);
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 420, 0, 0, 0);
+    // 577 = O_WRONLY|O_CREAT|O_TRUNC
+    if (fd >= 0) {
+        let woff: i64 = 0;
+        while (woff < out_at) {
+            let n: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(out) as i64) + woff, out_at - woff, 0, 0, 0);
+            if (n <= 0) { break; }
+            woff = woff + n;
+        }
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    }
+    return 0;
+}

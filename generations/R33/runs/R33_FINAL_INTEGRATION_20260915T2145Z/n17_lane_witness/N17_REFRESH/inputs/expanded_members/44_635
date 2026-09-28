@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,sys
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.linear_model import LogisticRegression,Ridge
+from sklearn.ensemble import RandomForestClassifier,ExtraTreesRegressor
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph')
+from experiments_memory_v3 import make_episode,feat,sufficient,COST,fixed_choose
+
+POLICIES=['PRIVILEGED_HEURISTIC_STATIC','HEURISTIC_LRU_WITHIN_TIER','HEURISTIC_TNN_OVERRIDE_LINEAR','HEURISTIC_TNN_OVERRIDE_RF','HEURISTIC_TNN_MUTATED','LRU_CONTROL','LEARNED_HIER_RF_CONTROL']
+
+# local utility is not evaluator score; it is delayed retention value available to the learner after consequences arrive.
+def realized_local_utility(action,r,pressure):
+    ok=1.0 if sufficient(action,r['q']) else 0.0
+    hot=.12*r['retrieval'] if action==0 else .025*r['retrieval'] if action==1 else 0.0
+    price=(.035+.30*pressure)*COST[action]
+    return r['importance']*ok+hot-price
+
+def heuristic_score(r):
+    return 1.7*r['novelty']+2*r['causal']+2.4*r['contradiction']+1.4*r['source']+.9*r['uncertainty']-.8*r['recurrence']
+
+def heuristic_action(r):
+    s=heuristic_score(r); return 0 if s>4.7 else 1 if s>3.3 else 2 if s>1.25 else 3
+
+class ResidualController:
+    def __init__(self,kind,dev,seed):
+        self.kind=kind
+        X=np.stack([feat(r) for r in dev]); q=np.array([r['q'] for r in dev]); imp=np.array([r['importance'] for r in dev])
+        if kind=='LINEAR':
+            self.q=LogisticRegression(max_iter=500,C=.7,class_weight='balanced').fit(X,q); self.imp=Ridge(alpha=1.0).fit(X,imp)
+        else:
+            self.q=RandomForestClassifier(n_estimators=96,max_depth=12,min_samples_leaf=5,max_features=.85,class_weight='balanced',random_state=seed,n_jobs=1).fit(X,q)
+            self.imp=ExtraTreesRegressor(n_estimators=96,max_depth=12,min_samples_leaf=4,max_features=.9,random_state=seed,n_jobs=1).fit(X,imp)
+    def choose(self,r,pressure):
+        h=heuristic_action(r); x=feat(r).reshape(1,-1); pp=np.zeros(4); p=self.q.predict_proba(x)[0]; pp[self.q.classes_.astype(int)]=p
+        imp=max(.08,float(self.imp.predict(x)[0]));
+        scores=[]
+        for a in range(4):
+            succ=1.0 if a in (0,1) else (1.0-pp[0] if a==2 else 0.0)
+            hot=.12*r['retrieval'] if a==0 else .025*r['retrieval'] if a==1 else 0.0
+            scores.append(imp*succ+hot-(.035+.30*pressure)*COST[a])
+        best=int(np.argmax(scores)); gain=scores[best]-scores[h]
+        # conservative learned override: birth heuristic remains default unless learned evidence is strong.
+        confidence=float(np.max(pp))
+        if gain>.18 and confidence>.46: a=best; overridden=True
+        else: a=h; overridden=False
+        # protection value: default heuristic evidence + learned future value. No evaluator label available here.
+        protect=.48*heuristic_score(r)+.52*max(scores)
+        return a,protect,overridden
+
+class MutatedHeuristic:
+    def __init__(self,dev,seed):
+        rng=np.random.default_rng(seed); X=np.stack([feat(r) for r in dev]);
+        # genes: weights over seven non-constant features + 3 ordered thresholds
+        base=np.array([1.7,2.0,2.4,1.4,-.8,0.0,.9, 1.25,3.3,4.7])
+        pop=[base.copy()]+[base+rng.normal(0,.35,len(base)) for _ in range(27)]
+        def act(g,r):
+            v=np.array([r['novelty'],r['causal'],r['contradiction'],r['source'],r['recurrence'],r['retrieval'],r['uncertainty']]);s=float(g[:7]@v);t=np.sort(g[7:]);return 0 if s>t[2] else 1 if s>t[1] else 2 if s>t[0] else 3
+        def score(g):
+            vals=[]
+            for i,r in enumerate(dev[-2200:]):
+                pressure=((i*37)%100)/100; a=act(g,r); vals.append(realized_local_utility(a,r,pressure))
+            return float(np.mean(vals))
+        for _ in range(24):
+            vals=np.array([score(g) for g in pop]); elite=[pop[i] for i in np.argsort(vals)[-7:]]; new=elite[:]
+            while len(new)<28:
+                g=elite[int(rng.integers(len(elite)))].copy()+rng.normal(0,.12,len(base));new.append(g)
+            pop=new
+        vals=np.array([score(g) for g in pop]); self.g=pop[int(np.argmax(vals))]
+    def choose(self,r,pressure):
+        v=np.array([r['novelty'],r['causal'],r['contradiction'],r['source'],r['recurrence'],r['retrieval'],r['uncertainty']]);s=float(self.g[:7]@v);t=np.sort(self.g[7:]);a=0 if s>t[2] else 1 if s>t[1] else 2 if s>t[0] else 3
+        return a,s,True
+
+def simulate(name,seed,dev,n=1500,budget=760):
+    rng=np.random.default_rng(seed)
+    ctrl=None
+    if name=='HEURISTIC_TNN_OVERRIDE_LINEAR':ctrl=ResidualController('LINEAR',dev,seed)
+    elif name=='HEURISTIC_TNN_OVERRIDE_RF':ctrl=ResidualController('RF',dev,seed)
+    elif name=='HEURISTIC_TNN_MUTATED':ctrl=MutatedHeuristic(dev,seed)
+    entries={};used=0.;queries=defaultdict(list);episodes=[];by=defaultdict(list);storage=[];evict=0;overrides=0
+    for i in range(n):
+        r=make_episode(rng,i);episodes.append(r);pressure=min(1.,used/budget)
+        if ctrl:
+            a,protect,ov=ctrl.choose(r,pressure);overrides+=int(ov)
+        elif name in ('PRIVILEGED_HEURISTIC_STATIC','HEURISTIC_LRU_WITHIN_TIER'):
+            a=heuristic_action(r);protect=heuristic_score(r);ov=False
+        elif name=='LRU_CONTROL':
+            a=0 if i%5==0 else 2;protect=0.;ov=False
+        else: # prior learned hierarchical RF control is approximated via an RF residual without heuristic default
+            rc=ResidualController('RF',dev,seed+99) if i==0 else None
+            if i==0: simulate._tmp=rc
+            a,protect,ov=simulate._tmp.choose(r,pressure); overrides+=int(ov)
+        entries[i]={'a':a,'r':r,'last':i,'protect':protect,'tier':a}; used+=COST[a]; queries[i+r['delay']].append(i)
+        while used>budget:
+            cand=[(eid,e) for eid,e in entries.items() if COST[e['a']]>0]
+            if not cand: break
+            if name in ('PRIVILEGED_HEURISTIC_STATIC','LRU_CONTROL'):
+                # static controls use plain LRU eviction as in prior benchmark
+                eid,e=min(cand,key=lambda z:z[1]['last'])
+            elif name=='HEURISTIC_LRU_WITHIN_TIER':
+                # TNN/default tier protects higher-value storage classes; LRU only within the least-protected tier.
+                worst=max(e['a'] for _,e in cand); pool=[z for z in cand if z[1]['a']==worst]; eid,e=min(pool,key=lambda z:z[1]['last'])
+            else:
+                # TNN-controlled protection is primary; recency only breaks near-ties.
+                minp=min(e['protect'] for _,e in cand); pool=[z for z in cand if z[1]['protect']<=minp+.05]; eid,e=min(pool,key=lambda z:z[1]['last'])
+            used-=COST[e['a']];del entries[eid];evict+=1
+        for eid in queries.get(i,[]):
+            rr=episodes[eid];e=entries.get(eid);by[rr['q']].append(bool(e is not None and sufficient(e['a'],rr['q'])))
+            if e:e['last']=i
+        storage.append(used)
+    for t in range(n,n+340):
+        for eid in queries.get(t,[]):
+            rr=episodes[eid];e=entries.get(eid);by[rr['q']].append(bool(e is not None and sufficient(e['a'],rr['q'])))
+    allv=[x for v in by.values() for x in v]
+    return {'policy':name,'seed':seed,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(storage)),'evictions':evict,'override_fraction':overrides/n}
+
+def run_seed(si,out,dev_n=5000):
+    dr=np.random.default_rng(390000+si);dev=[make_episode(dr,i) for i in range(dev_n)];rows=[]
+    for pi,p in enumerate(POLICIES):
+        rows.append(simulate(p,391000+si*101+pi*997,dev));print(si,p,'done',flush=True)
+    Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','seed_index':si,'dev_history':dev_n,'rows':rows},indent=2))
+
+def combine(files,out):
+    rows=[]
+    for f in files: rows+=json.loads(Path(f).read_text())['rows']
+    summary=[]
+    for p in POLICIES:
+        rr=[r for r in rows if r['policy']==p];z={'policy':p,'n':len(rr)}
+        for k in ['overall','exact','semantic','source','procedure','mean_storage','evictions','override_fraction']:
+            z[k]=float(np.mean([r[k] for r in rr]))
+        z['utility']=.38*z['exact']+.19*z['semantic']+.19*z['source']+.24*z['procedure']-.0001*z['mean_storage'];summary.append(z)
+    summary.sort(key=lambda x:x['utility'],reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','rows':rows,'summary':summary},indent=2));print(json.dumps(summary,indent=2))
+
+if __name__=='__main__':
+    ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='cmd',required=True);a=sp.add_parser('seed');a.add_argument('--index',type=int,required=True);a.add_argument('--out',required=True);a.add_argument('--dev-n',type=int,default=5000);b=sp.add_parser('combine');b.add_argument('--out',required=True);b.add_argument('files',nargs='+');x=ap.parse_args();run_seed(x.index,x.out,x.dev_n) if x.cmd=='seed' else combine(x.files,x.out)

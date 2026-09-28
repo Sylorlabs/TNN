@@ -1,0 +1,2 @@
+use strict;use warnings;local $/;my $p=shift;open my $f,'<',$p or die $!;my $s=<$f>;close $f;open my $h,'<','/tmp/n19_extra_invariants.zag' or die $!;my $htext=<$h>;close $h;
+$s =~ s/fn main\(\)i32 \{/$htext . "fn main()i32 {\n    if(_zag_argc()==2 \&\& _zag_strcmp(_zag_arg(1),\"case-extra-invariants\")==1){return n19_case_extra_invariants();}"/e or die 'main';open my $o,'>',$p or die $!;print $o $s;close $o;

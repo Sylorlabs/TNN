@@ -1,0 +1,455 @@
+// match.zag — frozen synonym-learning mechanism code (PREREG_WS2L.md §2, MECHANISM.md).
+// Extracted UNCHANGED from learn.zag 2026-09-25 (PREREG_SYNINT_LIVE.md §7):
+// all non-main functions (matchers, tables, union-find, propose, output).
+// Imported by learn.zag (batch CLI) and live.zag (deliberate loop).
+// Pure Zag. Deterministic. Zero RNG.
+@import("lib.zag")
+@import("syn_mem.zag")
+
+// ---------- helpers copied from frozen toc_b2.zag (byte-identical) ----------
+fn contains(h:[]u8,nd:[]u8)i32 {
+    if(nd.len==0 || nd.len>h.len){return 0;}
+    let i:i32=0;
+    while(i+nd.len<=h.len){
+        let k:i32=0;let eq:i32=1;
+        while(k<nd.len){if(h[i+k]!=nd[k]){eq=0;}k=k+1;}
+        if(eq==1){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+fn fa_f(fa:[]u8,ln:[]u8,fi:i32)[]u8 {
+    let o:i32=u32get(fa,4+fi*8) as i32;let l:i32=u32get(fa,4+fi*8+4) as i32;
+    return ln[o..o+l];
+}
+// frozen WS2-B stemmer (byte-identical semantics)
+fn stem(t:[]u8)[]u8 {
+    let n:i32=t.len;
+    if(n>4 && t[n-3]==105 && t[n-2]==110 && t[n-1]==103 && n-3>=3){return t[0..n-3];}
+    if(n>3 && t[n-2]==101 && t[n-1]==100 && n-2>=3){return t[0..n-2];}
+    if(n>4 && t[n-2]==101 && t[n-1]==115 && n-2>=3){return t[0..n-2];}
+    if(n>3 && t[n-1]==115 && t[n-2]!=115 && n-1>=3){return t[0..n-1];}
+    return t;
+}
+
+// ---------- pool + handles ----------
+// pool_copy: copy slice s into pool (growing it); returns 8-byte handle (off:u32,len:u32)
+fn pool_copy(s:[]u8,ppool:*[]u8,pooln:*i32)[]u8 {
+    grow_to(ppool,pooln.*+s.len);
+    let pool:[]u8=ppool.*;
+    let p:i32=pooln.*;
+    let i:i32=0;
+    while(i<s.len){ pool[p+i]=s[i]; i=i+1; }
+    pooln.*=p+s.len;
+    let h:[]u8=nio_alloc(8);
+    u32put(h,0,p as i64); u32put(h,4,s.len as i64);
+    return h;
+}
+fn h_off(h:[]u8)i32 { return u32get(h,0) as i32; }
+fn h_len(h:[]u8)i32 { return u32get(h,4) as i32; }
+fn lower1(c:u8)u8 {
+    if(c>=65&&c<=90){return c+32;}
+    return c;
+}
+// pool_word: copy word slice s[off..off+len] lowercased into pool (growing it); returns handle
+fn pool_word(s:[]u8,off:i32,len:i32,ppool:*[]u8,pooln:*i32)[]u8 {
+    grow_to(ppool,pooln.*+len);
+    let pool:[]u8=ppool.*;
+    let p:i32=pooln.*;
+    let i:i32=0;
+    while(i<len){ pool[p+i]=lower1(s[off+i]); i=i+1; }
+    pooln.*=p+len;
+    let h:[]u8=nio_alloc(8);
+    u32put(h,0,p as i64); u32put(h,4,len as i64);
+    return h;
+}
+// tokenize s into pool-resident lowercase words; fills wo/wl (u32 arenas, grown); returns count
+fn tokenize_words(s:[]u8,pwo:*[]u8,pwl:*[]u8,ppool:*[]u8,pooln:*i32)i32 {
+    let n:i32=s.len; let i:i32=0; let wc:i32=0;
+    let done:i32=0;
+    while(done==0){
+        while(i<n&&is_alnum(s[i] as i32)==0){i=i+1;}
+        if(i>=n){done=1;}
+        if(done==0){
+            let st:i32=i;
+            while(i<n&&is_alnum(s[i] as i32)==1){i=i+1;}
+            grow_to(pwo,(wc+1)*4); grow_to(pwl,(wc+1)*4);
+            let wo:[]u8=pwo.*; let wl:[]u8=pwl.*;
+            let h:[]u8=pool_word(s,st,i-st,ppool,pooln);
+            u32put(wo,wc*4,h_off(h) as i64); u32put(wl,wc*4,h_len(h) as i64);
+            wc=wc+1;
+        }
+    }
+    return wc;
+}
+fn weq(pool:[]u8,o1:i32,l1:i32,o2:i32,l2:i32)i32 {
+    if(l1!=l2){return 0;}
+    let i:i32=0;
+    while(i<l1){ if(pool[o1+i]!=pool[o2+i]){return 0;} i=i+1; }
+    return 1;
+}
+fn weq_lit(pool:[]u8,off:i32,len:i32,lit:[]u8)i32 {
+    if(len!=lit.len){return 0;}
+    let i:i32=0;
+    while(i<len){ if(pool[off+i]!=lit[i]){return 0;} i=i+1; }
+    return 1;
+}
+fn wcmp(pool:[]u8,o1:i32,l1:i32,o2:i32,l2:i32)i32 {
+    let m:i32=l1; if(l2<m){m=l2;}
+    let i:i32=0;
+    while(i<m){
+        let a:u8=pool[o1+i]; let b:u8=pool[o2+i];
+        if(a!=b){ if(a<b){return -1;} return 1; }
+        i=i+1;
+    }
+    if(l1==l2){return 0;}
+    if(l1<l2){return -1;}
+    return 1;
+}
+// comma-split s: arena [n:u32][(off:u32,len:u32)...], offsets relative to s
+fn csplit(s:[]u8)[]u8 {
+    let n:i32=s.len;
+    let cnt:i32=1; let i:i32=0;
+    while(i<n){ if(s[i]==44){cnt=cnt+1;} i=i+1; }
+    let out:[]u8=nio_alloc(cnt*8+8);
+    u32put(out,0,cnt as i64);
+    let k:i32=0; let st:i32=0; i=0;
+    while(i<=n){
+        if(i==n||s[i]==44){
+            u32put(out,8+k*8,st as i64); u32put(out,8+k*8+4,(i-st) as i64);
+            k=k+1; st=i+1;
+        }
+        i=i+1;
+    }
+    return out;
+}
+fn zero32(a:[]u8,n:i32)void {
+    let i:i32=0;
+    while(i<n){ u32put(a,i*4,0); i=i+1; }
+    return;
+}
+
+// ---------- elastic arenas ----------
+// grow_to: ensure pdst.* has room for min_len bytes; doubles (content+offsets
+// preserved, so every stored offset stays valid). Callers pass &local and
+// their local is updated through the pointer.
+fn grow_to(pdst:*[]u8,min_len:i32)void {
+    let cur:[]u8=pdst.*;
+    if(min_len<=cur.len){return;}
+    let nl:i32=cur.len*2;
+    if(nl<min_len){nl=min_len;}
+    if(nl>33554432){nl=33554432;}
+    let n:[]u8=nio_alloc(nl);
+    let i:i32=0;
+    while(i<cur.len){n[i]=cur[i];i=i+1;}
+    pdst.*=n;
+    return;
+}
+// grow_to_fill: like grow_to, but new u32 slots are set to fill (sentinel
+// init for tables that need it: lhead/ltail=-1, counts=0).
+fn grow_to_fill(pdst:*[]u8,min_len:i32,fill:i64)void {
+    let cur:[]u8=pdst.*;
+    if(min_len<=cur.len){return;}
+    let nl:i32=cur.len*2;
+    if(nl<min_len){nl=min_len;}
+    if(nl>33554432){nl=33554432;}
+    let n:[]u8=nio_alloc(nl);
+    let i:i32=0;
+    while(i<cur.len){n[i]=cur[i];i=i+1;}
+    let k:i32=cur.len/4;
+    while(k*4<nl){u32put(n,k*4,fill);k=k+1;}
+    pdst.*=n;
+    return;
+}
+
+// ---------- relation table (pool-resident raw words) ----------
+fn rel_find(r1o:[]u8,r1l:[]u8,r2o:[]u8,r2l:[]u8,nr:i32,pool:[]u8,
+            o1:i32,l1:i32,o2:i32,l2:i32)i32 {
+    let i:i32=0;
+    while(i<nr){
+        let a:i32=u32get(r1o,i*4) as i32; let b:i32=u32get(r1l,i*4) as i32;
+        let c:i32=u32get(r2o,i*4) as i32; let d:i32=u32get(r2l,i*4) as i32;
+        if(l1==b&&l2==d&&weq(pool,a,b,o1,l1)==1&&weq(pool,c,d,o2,l2)==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn rel_add(pr1o:*[]u8,pr1l:*[]u8,pr2o:*[]u8,pr2l:*[]u8,prrules:*[]u8,nr:*i32,
+           ppool:*[]u8,o1:i32,l1:i32,o2:i32,l2:i32,mask:i32)i32 {
+    let pool:[]u8=ppool.*;
+    let a:i32=o1; let b:i32=l1; let c:i32=o2; let d:i32=l2;
+    if(wcmp(pool,a,b,c,d)>0){ a=o2; b=l2; c=o1; d=l1; }
+    let nrv:i32=nr.*;
+    let idx:i32=rel_find(pr1o.*,pr1l.*,pr2o.*,pr2l.*,nrv,pool,a,b,c,d);
+    if(idx>=0){
+        let rules:[]u8=prrules.*;
+        let m:i32=u32get(rules,idx*4) as i32;
+        u32put(rules,idx*4,(m|mask) as i64);
+        return idx;
+    }
+    let k:i32=nr.*;
+    grow_to(pr1o,(k+1)*4); grow_to(pr1l,(k+1)*4); grow_to(pr2o,(k+1)*4);
+    grow_to(pr2l,(k+1)*4); grow_to(prrules,(k+1)*4);
+    let r1o:[]u8=pr1o.*; let r1l:[]u8=pr1l.*;
+    let r2o:[]u8=pr2o.*; let r2l:[]u8=pr2l.*; let rules:[]u8=prrules.*;
+    u32put(r1o,k*4,a as i64); u32put(r1l,k*4,b as i64);
+    u32put(r2o,k*4,c as i64); u32put(r2l,k*4,d as i64);
+    u32put(rules,k*4,mask as i64);
+    nr.*=k+1;
+    return k;
+}
+// lid lists (pool-resident), deduped per relation; all tables grow on demand
+fn lid_add(plo:*[]u8,pll:*[]u8,plhead:*[]u8,pltail:*[]u8,plnext:*[]u8,pln:*[]u8,nl:*i32,ridx:i32,lido:i32,lidl:i32,ppool:*[]u8)void {
+    grow_to_fill(plhead,(ridx+1)*4,4294967295);
+    grow_to_fill(pltail,(ridx+1)*4,4294967295);
+    grow_to_fill(pln,(ridx+1)*4,0);
+    let pool:[]u8=ppool.*;
+    let lo:[]u8=plo.*; let ll:[]u8=pll.*;
+    let lhead:[]u8=plhead.*; let ltail:[]u8=pltail.*;
+    let lnext:[]u8=plnext.*; let ln:[]u8=pln.*;
+    let e:i32=u32get(lhead,ridx*4) as i32;
+    while(e>=0){
+        let a:i32=u32get(lo,e*4) as i32; let b:i32=u32get(ll,e*4) as i32;
+        if(weq(pool,a,b,lido,lidl)==1){return;}
+        e=u32get(lnext,e*4) as i32;
+    }
+    let k:i32=nl.*;
+    grow_to(plo,(k+1)*4); grow_to(pll,(k+1)*4); grow_to(plnext,(k+1)*4);
+    lo=plo.*; ll=pll.*; lnext=plnext.*;
+    u32put(lo,k*4,lido as i64); u32put(ll,k*4,lidl as i64);
+    u32put(lnext,k*4,4294967295);
+    if((u32get(lhead,ridx*4) as i32)<0){
+        u32put(lhead,ridx*4,k as i64);
+    }else{
+        let t:i32=u32get(ltail,ridx*4) as i32;
+        u32put(lnext,t*4,k as i64);
+    }
+    u32put(ltail,ridx*4,k as i64);
+    u32put(ln,ridx*4,((u32get(ln,ridx*4) as i32)+1) as i64);
+    nl.*=k+1;
+    return;
+}
+// veto table
+fn veto_find(v1o:[]u8,v1l:[]u8,v2o:[]u8,v2l:[]u8,nv:i32,pool:[]u8,
+             o1:i32,l1:i32,o2:i32,l2:i32)i32 {
+    let i:i32=0;
+    while(i<nv){
+        let a:i32=u32get(v1o,i*4) as i32; let b:i32=u32get(v1l,i*4) as i32;
+        let c:i32=u32get(v2o,i*4) as i32; let d:i32=u32get(v2l,i*4) as i32;
+        if(weq(pool,a,b,o1,l1)==1&&weq(pool,c,d,o2,l2)==1){return i;}
+        if(weq(pool,a,b,o2,l2)==1&&weq(pool,c,d,o1,l1)==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn veto_add(pv1o:*[]u8,pv1l:*[]u8,pv2o:*[]u8,pv2l:*[]u8,pvlido:*[]u8,pvlidl:*[]u8,nv:*i32,
+            ppool:*[]u8,o1:i32,l1:i32,o2:i32,l2:i32,lido:i32,lidl:i32)void {
+    let pool:[]u8=ppool.*;
+    let nvv:i32=nv.*;
+    if(veto_find(pv1o.*,pv1l.*,pv2o.*,pv2l.*,nvv,pool,o1,l1,o2,l2)>=0){return;}
+    let k:i32=nv.*;
+    grow_to(pv1o,(k+1)*4); grow_to(pv1l,(k+1)*4); grow_to(pv2o,(k+1)*4);
+    grow_to(pv2l,(k+1)*4); grow_to(pvlido,(k+1)*4); grow_to(pvlidl,(k+1)*4);
+    let v1o:[]u8=pv1o.*; let v1l:[]u8=pv1l.*;
+    let v2o:[]u8=pv2o.*; let v2l:[]u8=pv2l.*;
+    let vlido:[]u8=pvlido.*; let vlidl:[]u8=pvlidl.*;
+    u32put(v1o,k*4,o1 as i64); u32put(v1l,k*4,l1 as i64);
+    u32put(v2o,k*4,o2 as i64); u32put(v2l,k*4,l2 as i64);
+    u32put(vlido,k*4,lido as i64); u32put(vlidl,k*4,lidl as i64);
+    nv.*=k+1;
+    return;
+}
+fn vetoed(v1o:[]u8,v1l:[]u8,v2o:[]u8,v2l:[]u8,nv:i32,pool:[]u8,sa:[]u8,sb:[]u8)i32 {
+    let i:i32=0;
+    while(i<nv){
+        let a0:i32=u32get(v1o,i*4) as i32; let al:i32=u32get(v1l,i*4) as i32;
+        let b0:i32=u32get(v2o,i*4) as i32; let bl:i32=u32get(v2l,i*4) as i32;
+        let va:[]u8=stem(pool[a0..a0+al]); let vb:[]u8=stem(pool[b0..b0+bl]);
+        if((bytes_eq(va,sa)==1&&bytes_eq(vb,sb)==1)||(bytes_eq(va,sb)==1&&bytes_eq(vb,sa)==1)){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+
+// ---------- surface matchers (MECHANISM.md §2); words pool-resident ----------
+// returns 20-byte handle: ok:u32 x_off:u32 x_len:u32 y_off:u32 y_len:u32
+fn match_r1(pool:[]u8,wo:[]u8,wl:[]u8,n:i32)[]u8 {
+    let out:[]u8=nio_alloc(20);
+    u32put(out,0,0);
+    if(n==5){
+        let o0:i32=u32get(wo,0) as i32; let l0:i32=u32get(wl,0) as i32;
+        let o1:i32=u32get(wo,4) as i32; let l1:i32=u32get(wl,4) as i32;
+        let o2:i32=u32get(wo,8) as i32; let l2:i32=u32get(wl,8) as i32;
+        let o3:i32=u32get(wo,12) as i32; let l3:i32=u32get(wl,12) as i32;
+        let o4:i32=u32get(wo,16) as i32; let l4:i32=u32get(wl,16) as i32;
+        if((weq_lit(pool,o0,l0,"a")==1||weq_lit(pool,o0,l0,"an")==1)
+        &&weq_lit(pool,o2,l2,"is")==1
+        &&(weq_lit(pool,o3,l3,"a")==1||weq_lit(pool,o3,l3,"an")==1)){
+            u32put(out,0,1);
+            u32put(out,4,o1 as i64); u32put(out,8,l1 as i64);
+            u32put(out,12,o4 as i64); u32put(out,16,l4 as i64);
+        }
+    }
+    if(n==6){
+        let o0:i32=u32get(wo,0) as i32; let l0:i32=u32get(wl,0) as i32;
+        let o1:i32=u32get(wo,4) as i32; let l1:i32=u32get(wl,4) as i32;
+        let o2:i32=u32get(wo,8) as i32; let l2:i32=u32get(wl,8) as i32;
+        let o3:i32=u32get(wo,12) as i32; let l3:i32=u32get(wl,12) as i32;
+        let o4:i32=u32get(wo,16) as i32; let l4:i32=u32get(wl,16) as i32;
+        let o5:i32=u32get(wo,20) as i32; let l5:i32=u32get(wl,20) as i32;
+        if(weq_lit(pool,o1,l1,"is")==1&&weq_lit(pool,o2,l2,"a")==1
+        &&weq_lit(pool,o3,l3,"kind")==1&&weq_lit(pool,o4,l4,"of")==1){
+            u32put(out,0,1);
+            u32put(out,4,o0 as i64); u32put(out,8,l0 as i64);
+            u32put(out,12,o5 as i64); u32put(out,16,l5 as i64);
+        }
+    }
+    return out;
+}
+fn match_r2(pool:[]u8,wo:[]u8,wl:[]u8,n:i32)[]u8 {
+    let out:[]u8=nio_alloc(20);
+    u32put(out,0,0);
+    if(n==5){
+        let o0:i32=u32get(wo,0) as i32; let l0:i32=u32get(wl,0) as i32;
+        let o1:i32=u32get(wo,4) as i32; let l1:i32=u32get(wl,4) as i32;
+        let o2:i32=u32get(wo,8) as i32; let l2:i32=u32get(wl,8) as i32;
+        let o3:i32=u32get(wo,12) as i32; let l3:i32=u32get(wl,12) as i32;
+        let o4:i32=u32get(wo,16) as i32; let l4:i32=u32get(wl,16) as i32;
+        // X and Y are synonyms.
+        if(weq_lit(pool,o1,l1,"and")==1&&weq_lit(pool,o3,l3,"are")==1
+        &&weq_lit(pool,o4,l4,"synonyms")==1){
+            u32put(out,0,1);
+            u32put(out,4,o0 as i64); u32put(out,8,l0 as i64);
+            u32put(out,12,o2 as i64); u32put(out,16,l2 as i64);
+        }
+    }
+    return out;
+}
+fn match_r4(pool:[]u8,wo:[]u8,wl:[]u8,n:i32)[]u8 {
+    let out:[]u8=nio_alloc(20);
+    u32put(out,0,0);
+    if(n==6){
+        let o0:i32=u32get(wo,0) as i32; let l0:i32=u32get(wl,0) as i32;
+        let o1:i32=u32get(wo,4) as i32; let l1:i32=u32get(wl,4) as i32;
+        let o2:i32=u32get(wo,8) as i32; let l2:i32=u32get(wl,8) as i32;
+        let o3:i32=u32get(wo,12) as i32; let l3:i32=u32get(wl,12) as i32;
+        let o4:i32=u32get(wo,16) as i32; let l4:i32=u32get(wl,16) as i32;
+        let o5:i32=u32get(wo,20) as i32; let l5:i32=u32get(wl,20) as i32;
+        if((weq_lit(pool,o0,l0,"a")==1||weq_lit(pool,o0,l0,"an")==1)
+        &&weq_lit(pool,o2,l2,"is")==1&&weq_lit(pool,o3,l3,"not")==1
+        &&(weq_lit(pool,o4,l4,"a")==1||weq_lit(pool,o4,l4,"an")==1)){
+            u32put(out,0,1);
+            u32put(out,4,o1 as i64); u32put(out,8,l1 as i64);
+            u32put(out,12,o5 as i64); u32put(out,16,l5 as i64);
+        }
+    }
+    if(n==4){
+        let o0:i32=u32get(wo,0) as i32; let l0:i32=u32get(wl,0) as i32;
+        let o1:i32=u32get(wo,4) as i32; let l1:i32=u32get(wl,4) as i32;
+        let o2:i32=u32get(wo,8) as i32; let l2:i32=u32get(wl,8) as i32;
+        let o3:i32=u32get(wo,12) as i32; let l3:i32=u32get(wl,12) as i32;
+        if(weq_lit(pool,o1,l1,"is")==1&&weq_lit(pool,o2,l2,"not")==1){
+            u32put(out,0,1);
+            u32put(out,4,o0 as i64); u32put(out,8,l0 as i64);
+            u32put(out,12,o3 as i64); u32put(out,16,l3 as i64);
+        }
+    }
+    return out;
+}
+
+// ---------- output ----------
+fn rules_str(mask:i32)[]u8 {
+    let b:[]u8=nio_alloc(16); let p:i32=0;
+    if((mask&1)==1){ b[0]=82; b[1]=49; p=2; }
+    if((mask&2)==2){ if(p>0){b[p]=43;p=p+1;} b[p]=82; b[p+1]=50; p=p+2; }
+    if((mask&4)==4){ if(p>0){b[p]=43;p=p+1;} b[p]=82; b[p+1]=51; p=p+2; }
+    return b[0..p];
+}
+fn emit(pdst:*[]u8,dp:*i32,s:[]u8)void {
+    grow_to(pdst,dp.*+s.len);
+    let dst:[]u8=pdst.*;
+    let p:i32=dp.*; let i:i32=0;
+    while(i<s.len){ dst[p+i]=s[i]; i=i+1; }
+    dp.*=p+s.len;
+    return;
+}
+fn emit_pool(pdst:*[]u8,dp:*i32,pool:[]u8,off:i32,len:i32)void {
+    grow_to(pdst,dp.*+len);
+    let dst:[]u8=pdst.*;
+    let p:i32=dp.*; let i:i32=0;
+    while(i<len){ dst[p+i]=pool[off+i]; i=i+1; }
+    dp.*=p+len;
+    return;
+}
+// selection sort of ord[0..n) by relation key (w1,w2)
+fn sort_rels(ord:[]u8,o1:[]u8,ol:[]u8,o2:[]u8,ol2:[]u8,n:i32,pool:[]u8)void {
+    let i:i32=0;
+    while(i<n){
+        let m:i32=i; let j:i32=i+1;
+        while(j<n){
+            let ia:i32=u32get(ord,m*4) as i32; let ib:i32=u32get(ord,j*4) as i32;
+            let c1:i32=wcmp(pool,u32get(o1,ia*4) as i32,u32get(ol,ia*4) as i32,
+                                  u32get(o1,ib*4) as i32,u32get(ol,ib*4) as i32);
+            if(c1>0){m=j;}
+            if(c1==0){
+                let c2:i32=wcmp(pool,u32get(o2,ia*4) as i32,u32get(ol2,ia*4) as i32,
+                                      u32get(o2,ib*4) as i32,u32get(ol2,ib*4) as i32);
+                if(c2>0){m=j;}
+            }
+            j=j+1;
+        }
+        let t:i32=u32get(ord,i*4) as i32;
+        u32put(ord,i*4,u32get(ord,m*4)); u32put(ord,m*4,t as i64);
+        i=i+1;
+    }
+    return;
+}
+// union-find over stem indices (tables grow on demand)
+fn uf_add(pso:*[]u8,psl:*[]u8,ppar:*[]u8,ns:*i32,ppool:*[]u8,off:i32,len:i32)i32 {
+    let pool:[]u8=ppool.*;
+    let i:i32=0;
+    while(i<ns.*){
+        if(weq(pool,u32get(pso.*,i*4) as i32,u32get(psl.*,i*4) as i32,off,len)==1){return i;}
+        i=i+1;
+    }
+    let k:i32=ns.*;
+    grow_to(pso,(k+1)*4); grow_to(psl,(k+1)*4); grow_to(ppar,(k+1)*4);
+    let so:[]u8=pso.*; let sl:[]u8=psl.*; let par:[]u8=ppar.*;
+    u32put(so,k*4,off as i64); u32put(sl,k*4,len as i64);
+    u32put(par,k*4,k as i64);
+    ns.*=k+1;
+    return k;
+}
+fn uf_find(par:[]u8,x:i32)i32 {
+    let r:i32=x;
+    let guard:i32=0;
+    while(u32get(par,r*4) as i32!=r&&guard<10000){
+        r=u32get(par,r*4) as i32; guard=guard+1;
+    }
+    return r;
+}
+fn uf_union(par:[]u8,a:i32,b:i32)void {
+    let ra:i32=uf_find(par,a); let rb:i32=uf_find(par,b);
+    if(ra!=rb){ u32put(par,rb*4,ra as i64); }
+    return;
+}
+
+// propose one positive pair (raw pool words); applies veto, installs
+fn propose(pr1o:*[]u8,pr1l:*[]u8,pr2o:*[]u8,pr2l:*[]u8,prrules:*[]u8,nr:*i32,
+           plo:*[]u8,pll:*[]u8,plhead:*[]u8,pltail:*[]u8,plnext:*[]u8,pln:*[]u8,nl:*i32,
+           pv1o:*[]u8,pv1l:*[]u8,pv2o:*[]u8,pv2l:*[]u8,nv:i32,
+           ppool:*[]u8,xa:i32,xb:i32,ya:i32,yb:i32,mask:i32,
+           lido:i32,lidl:i32,supp:*i32)void {
+    let pool:[]u8=ppool.*;
+    let sx:[]u8=stem(pool[xa..xa+xb]);
+    let sy:[]u8=stem(pool[ya..ya+yb]);
+    if(bytes_eq(sx,sy)==1){return;}
+    if(vetoed(pv1o.*,pv1l.*,pv2o.*,pv2l.*,nv,pool,sx,sy)>=0){
+        supp.*=supp.*+1;
+        return;
+    }
+    let idx:i32=rel_add(pr1o,pr1l,pr2o,pr2l,prrules,nr,ppool,xa,xb,ya,yb,mask);
+    lid_add(plo,pll,plhead,pltail,plnext,pln,nl,idx,lido,lidl,ppool);
+    return;
+}
+

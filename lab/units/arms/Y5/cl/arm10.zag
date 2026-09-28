@@ -1,0 +1,2317 @@
+// y5 — Arm Y5: CROSS-STREAM CHUNKS (non-contiguous spans, one ID).
+// CHUNKED-CORPUS BUILD (runs 1x and 10x). Derived from cl/arm.zag (1x frozen
+// impl, evidence-approved 2026-09-21) by mechanical transformation only:
+// every file/corpus buffer, the audit ledger, the LINK probe table, the M7
+// C' buffer, and the M8 store image are chunked so no slice exceeds 2^25
+// bytes (znc toolchain wall). Logical semantics are unchanged; 1x
+// byte-equivalence against the approved evidence is proven in
+// evidence/battery_1x_chunked/ before any 10x leg counts. Pure Zag, zero RNG.
+// A chunk = (ID, [span1..spanN]), spans ordered by (corpus, offset).
+// Deliberate LINK consolidation binds definition-use-like span sets:
+// first-content-token grouping, groups of 2..8 spans, budget 2048 LINKs per
+// pass, members tombstoned (KILL reason=2, never reused), kill cascades are
+// atomic (one KILL entry kills the whole span set, never half of it).
+// ID arm: recall takes a serial unit ID and resolves it through the
+// persistent ID->storage mapping (the row table + probe remap field).
+// One binary; argv[1] selects the trial mode (see ARM_INTERFACE.md §3).
+// Pure Zag, zero RNG in any decision path, byte-identical reruns.
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+
+const Y5_CHUNK:i32=256;
+const Y5_C_PROSE:i32=1;
+const Y5_C_CODE:i32=2;
+const Y5_C_T1P:i32=3;
+const Y5_C_T1C:i32=4;
+const Y5_C_T2P:i32=5;
+const Y5_C_T2C:i32=6;
+const Y5_C_T3:i32=7;
+const Y5_C_FRESH:i32=8;
+const Y5_C_CP:i32=9;      // m7-derived C' (documented extension of the registry)
+const Y5_M3_CAP:i32=4000;      // C_M3: harness-fixed M3 store capacity (slots)
+const Y5_M3_V:i32=1000;        // valuable set size
+const Y5_M3_FRESH1:i32=3000;   // phase-1 fresh ingests
+const Y5_M3_KILL:i32=3000;     // phase-2 kills
+const Y5_M3_FRESH2:i32=4000;   // phase-3 ingests at capacity
+const Y5_M4_N:i32=200;         // defect units per corpus
+const Y5_M7_LOOKUPS:i32=5000;
+const Y5_LINK_MIN:i32=2;       // min group size for a LINK
+const Y5_LINK_MAX:i32=8;       // max group size for a LINK
+const Y5_LINK_BUDGET:i32=2048;
+// ---- 10x scale: 2^25-byte slice wall (znc toolchain constraint) ----
+// No slice may exceed 33,554,432 bytes. Corpora, the audit ledger, the LINK
+// probe table, and the M8 store image are chunked; access goes through the
+// Cb (chunked buffer) and ledger-chunk helpers below. Chunking preserves
+// logical semantics byte-for-byte (proven by 1x rerun equivalence).
+const CB_SHIFT:i32=25;
+const CB_SIZE:i32=33554432;
+const CB_MASK:i32=33554431;
+const CB_NCMAX:i32=6;
+const LED_SHIFT:i32=19;          // ledger entries per chunk = 2^19 (2^25/64)
+const LED_EPC:i32=524288;
+const LED_MASK:i32=524287;
+const LINK_TS_MAX:i32=524288;   // y_link_pass tent entries cap (16MB) // max LINKs created per consolidation pass
+const Y5_TOK_MAX:i32=24;       // first-token bytes kept for grouping
+
+// row fields (10 u32 = 40 bytes per serial)
+const R_OFF:i32=0;
+const R_LEN:i32=4;
+const R_CORPUS:i32=8;
+const R_FLAGS:i32=12;
+const R_SPAN_FIRST:i32=16;  // LINK: first span triple in pool
+const R_SPAN_COUNT:i32=20;  // LINK: member span count (base: 1)
+const R_FWD:i32=24;         // absorbed base -> LINK serial, else -1
+const R_REMAP:i32=28;       // swap-probe remap target (default: own serial)
+const R_DEFKIND:i32=32;     // recorded content defect kind (0 none,1 prose-xor,2 code-rename)
+const R_SHIFT:i32=36;       // recorded boundary shift (i32)
+
+// flags bits
+const F_OCC:i32=1;
+const F_LIVE:i32=2;
+const F_PIN:i32=4;
+const F_WEAK:i32=8;
+const F_SHIFT:i32=16;
+const F_PATCH:i32=32;
+const F_LINK:i32=64;
+const F_CONS:i32=128;   // considered by a consolidation pass
+
+// ledger opcodes (frozen namespace, ARM_INTERFACE.md §6)
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_PROMOTE:i32=5;
+const OP_REVISE:i32=6;
+const OP_REFUSE:i32=8;
+const OP_EVICT:i32=9;
+const OP_TDB:i32=16;   // TRAINER_DEFECT_BOUNDARY
+const OP_TDC:i32=17;   // TRAINER_DEFECT_CONTENT
+const OP_TMV:i32=18;   // TRAINER_MARK_VALUABLE
+const OP_TSP:i32=19;   // TRAINER_SWAP_PROBE (0x13)
+
+// kill reason codes (d1 of KILL_UNIT)
+const KR_EXPLICIT:i32=1;
+const KR_LINK_ABSORB:i32=2;
+
+// refuse reason codes (d1 of REFUSE)
+const RR_FULL:i32=101;
+const RR_MISSING:i32=102;
+const RR_PROBE_FAIL:i32=104;
+
+// ---- little-endian u32/i32 packing on []u8 (playbook idiom) ----
+fn uget(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn uput(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v & 255) as u8;b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;b[at+3]=((v>>24) & 255) as u8;
+}
+fn iget(b:[]u8,at:i32)i32 { return uget(b,at) as i32; }
+fn iput(b:[]u8,at:i32,v:i32)void { uput(b,at,v as i64); }
+
+struct Y5 {
+    cap:i32,            // max serials (rows)
+    rows:[]u8,          // cap * 40 bytes
+    pool:[]u8,          // pool_cap * 12 bytes: span triples (corpus,off,len)
+    pool_cap:i32,
+    pool_n:i32,
+    liveq:[]u8,         // liveq_cap * 4: insertion-order queue of serials
+    liveq_cap:i32,
+    liveq_n:i32,
+    liveq_head:i32,
+    nlive:i32,
+    next_serial:i32,
+    live_cap:i32,       // live-unit limit (4000 in M3, huge elsewhere)
+    cbase:[]u8,         // 10 * 4: first serial per grid corpus, -1 unset
+    led:[]u8,           // ledger bytes (chunk 0)
+    led1:[]u8,         // ledger overflow chunks 1..5 (each <= 2^25 bytes)
+    led2:[]u8,
+    led3:[]u8,
+    led4:[]u8,
+    led5:[]u8,
+    led_n:i32,          // entries appended
+    led_cap:i32,        // byte capacity
+    trace:[]u8,         // alloc trace text
+    trace_n:i32,
+    trace_cap:i32,
+}
+
+// ---- allocator wrappers with trace (addresses never logged) ----
+fn halloc(s:*Y5,n:i32)[]u8 {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(n as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=65;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    return nio_alloc(n);
+}
+fn hfree(s:*Y5,b:[]u8)void {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(b.len as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=70;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    nio_free(b);
+}
+
+fn y_init(s:*Y5,cap:i32,led_entries:i32,liveq_cap:i32,live_cap:i32,pool_cap:i32)void {
+    s.*.cap=cap;s.*.nlive=0;s.*.next_serial=0;
+    s.*.live_cap=live_cap;
+    s.*.trace_cap=65536;s.*.trace=nio_alloc(65536);s.*.trace_n=0;
+    s.*.rows=halloc(s,cap*40);
+    let r:[]u8=s.*.rows;
+    let i:i32=0;while(i<cap*40){r[i]=0;i=i+1;}
+    s.*.pool_cap=pool_cap;s.*.pool_n=0;
+    s.*.pool=halloc(s,pool_cap*12);
+    s.*.liveq_cap=liveq_cap;s.*.liveq_n=0;s.*.liveq_head=0;
+    s.*.liveq=halloc(s,liveq_cap*4);
+    s.*.cbase=halloc(s,40);
+    let cb:[]u8=s.*.cbase;
+    i=0;while(i<10){iput(cb,i*4,-1);i=i+1;}
+    s.*.led_cap=led_entries*64;s.*.led_n=0;
+    s.*.led1="";s.*.led2="";s.*.led3="";s.*.led4="";s.*.led5="";
+    let lrem:i32=s.*.led_cap;
+    let lc0:i32=lrem;if(lc0>33554432){lc0=33554432;}
+    s.*.led=halloc(s,lc0);lrem=lrem-lc0;
+    if(lrem>0){let lc1:i32=lrem;if(lc1>33554432){lc1=33554432;}s.*.led1=halloc(s,lc1);lrem=lrem-lc1;}
+    if(lrem>0){let lc2:i32=lrem;if(lc2>33554432){lc2=33554432;}s.*.led2=halloc(s,lc2);lrem=lrem-lc2;}
+    if(lrem>0){let lc3:i32=lrem;if(lc3>33554432){lc3=33554432;}s.*.led3=halloc(s,lc3);lrem=lrem-lc3;}
+    if(lrem>0){let lc4:i32=lrem;if(lc4>33554432){lc4=33554432;}s.*.led4=halloc(s,lc4);lrem=lrem-lc4;}
+    if(lrem>0){let lc5:i32=lrem;if(lc5>33554432){lc5=33554432;}s.*.led5=halloc(s,lc5);lrem=lrem-lc5;}
+}
+fn y_new(cap:i32,led_entries:i32,liveq_cap:i32,live_cap:i32,pool_cap:i32) Y5 {
+    let s:Y5=Y5{.cap=0,.rows="",.pool="",.pool_cap=0,.pool_n=0,.liveq="",
+        .liveq_cap=0,.liveq_n=0,.liveq_head=0,.nlive=0,.next_serial=0,.live_cap=0,
+        .cbase="",.led="",.led1="",.led2="",.led3="",.led4="",.led5="",
+        .led_n=0,.led_cap=0,.trace="",.trace_n=0,.trace_cap=0};
+    y_init(&s,cap,led_entries,liveq_cap,live_cap,pool_cap);
+    return s;
+}
+// release the store's own allocations (logged F lines via hfree)
+fn y_free(s:*Y5) void {
+    hfree(s,s.*.rows);hfree(s,s.*.pool);hfree(s,s.*.liveq);
+    hfree(s,s.*.cbase);hfree(s,s.*.led);
+    if(s.*.led1.len>0){hfree(s,s.*.led1);}
+    if(s.*.led2.len>0){hfree(s,s.*.led2);}
+    if(s.*.led3.len>0){hfree(s,s.*.led3);}
+    if(s.*.led4.len>0){hfree(s,s.*.led4);}
+    if(s.*.led5.len>0){hfree(s,s.*.led5);}
+    nio_free(s.*.trace);
+}
+
+// ---- ledger ----
+fn y_led(s:*Y5,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+         a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)void {
+    let e0:i32=s.*.led_n;
+    let at:i32=e0*64;
+    if(at+64>s.*.led_cap){return;} // LEDGER-BOUND: scored on what completed
+    let l:[]u8=led_sel(s,e0>>19);
+    let aw:i32=(e0 & 524287)*64;
+    iput(l,aw,op);iput(l,aw+4,slot);iput(l,aw+8,rc);
+    iput(l,aw+12,b1);iput(l,aw+16,b2);iput(l,aw+20,b3);iput(l,aw+24,b4);iput(l,aw+28,b5);
+    iput(l,aw+32,a1);iput(l,aw+36,a2);iput(l,aw+40,a3);iput(l,aw+44,a4);iput(l,aw+48,a5);
+    iput(l,aw+52,1);iput(l,aw+56,d1);iput(l,aw+60,d2);
+    s.*.led_n=e0+1;
+}
+
+// ---- row access (rows aliased to a local per the large-struct rule) ----
+fn rget(s:*Y5,serial:i32,field:i32) i32 {
+    let r:[]u8=s.*.rows;
+    return iget(r,serial*40+field);
+}
+fn rput(s:*Y5,serial:i32,field:i32,v:i32) void {
+    let r:[]u8=s.*.rows;
+    iput(r,serial*40+field,v);
+}
+fn rflag(s:*Y5,serial:i32) i32 { return rget(s,serial,R_FLAGS); }
+
+// ---- core ops ----
+// resolve a requested serial to its live unit (follows link-absorption)
+fn y_resolve(s:*Y5,serial:i32) i32 {
+    if(serial<0 || serial>=s.*.next_serial){return -1;}
+    let f:i32=rflag(s,serial);
+    if((f & F_OCC)==0){return -1;}
+    if((f & F_LINK)!=0){
+        if((f & F_LIVE)!=0){return serial;}
+        return -1;
+    }
+    if((f & F_LIVE)!=0){return serial;}
+    let fw:i32=rget(s,serial,R_FWD);
+    if(fw>=0){
+        let ff:i32=rflag(s,fw);
+        if((ff & F_LIVE)!=0){return fw;}
+    }
+    return -1;
+}
+fn y_evict_oldest_unpinned(s:*Y5) i32 {
+    // FIFO eviction of the oldest live unpinned unit (LINK units evict as one
+    // atomic span set). Returns evicted serial or -1.
+    let lq:[]u8=s.*.liveq;
+    while(s.*.liveq_head<s.*.liveq_n){
+        let sr:i32=iget(lq,s.*.liveq_head*4);
+        s.*.liveq_head=s.*.liveq_head+1;
+        let f:i32=rflag(s,sr);
+        if((f & F_LIVE)!=0 && (f & F_PIN)==0){
+            rput(s,sr,R_FLAGS,f & (0-1-F_LIVE));
+            s.*.nlive=s.*.nlive-1;
+            y_led(s,OP_EVICT,sr,0,0,0,0,0,sr,0,0,0,0,0,1,0);
+            return sr;
+        }
+    }
+    return -1;
+}
+fn y_new_unit(s:*Y5,corpus:i32,off:i32,len:i32) i32 {
+    // allocate a fresh serial; evict-or-refuse at live capacity.
+    // Returns serial or -1 on loud refusal.
+    if(s.*.nlive>=s.*.live_cap){
+        if(y_evict_oldest_unpinned(s)<0){
+            y_led(s,OP_REFUSE,-1,1,off,0,len,corpus,-1,0,0,0,0,0,RR_FULL,0);
+            return -1;
+        }
+    }
+    let sr:i32=s.*.next_serial;
+    if(sr>=s.*.cap){
+        y_led(s,OP_REFUSE,-1,1,off,0,len,corpus,-1,0,0,0,0,0,RR_FULL,0);
+        return -1;
+    }
+    s.*.next_serial=sr+1;
+    rput(s,sr,R_OFF,off);rput(s,sr,R_LEN,len);rput(s,sr,R_CORPUS,corpus);
+    rput(s,sr,R_FLAGS,F_OCC | F_LIVE);
+    rput(s,sr,R_SPAN_FIRST,0);rput(s,sr,R_SPAN_COUNT,1);
+    rput(s,sr,R_FWD,-1);rput(s,sr,R_REMAP,sr);
+    rput(s,sr,R_DEFKIND,0);rput(s,sr,R_SHIFT,0);
+    let lq:[]u8=s.*.liveq;
+    iput(lq,s.*.liveq_n*4,sr);s.*.liveq_n=s.*.liveq_n+1;
+    s.*.nlive=s.*.nlive+1;
+    y_led(s,OP_ADD,sr,0,off,0,len,corpus,sr,0,0,0,0,0,sr,0);
+    return sr;
+}
+// ingest one grid span; idempotent on re-ingest (dedup: same span -> same ID).
+// Grid serials are reserved up front (base+idx), NOT allocated per call.
+fn y_ingest_grid(s:*Y5,corpus:i32,idx:i32,buflen:i32,pin_k:i32,pin_total:i32) i32 {
+    let cb:[]u8=s.*.cbase;
+    let base:i32=iget(cb,corpus*4);
+    if(base<0){
+        let n:i32=(buflen+Y5_CHUNK-1)/Y5_CHUNK;
+        base=s.*.next_serial;
+        if(base+n>s.*.cap){
+            y_led(s,OP_REFUSE,-1,1,idx*Y5_CHUNK,0,0,corpus,-1,0,0,0,0,0,RR_FULL,0);
+            return -1;
+        }
+        iput(cb,corpus*4,base);
+        s.*.next_serial=base+n;
+    }
+    let sr:i32=base+idx;
+    let off:i32=idx*Y5_CHUNK;
+    let len:i32=buflen-off;
+    if(len>Y5_CHUNK){len=Y5_CHUNK;}
+    if(len<0){len=0;}
+    let f:i32=rflag(s,sr);
+    if((f & F_OCC)!=0){
+        if((f & F_LIVE)!=0){return sr;} // dedup hit: same span, same ID
+        // Tombstoned (link-absorbed or killed). Catalog: members are
+        // tombstoned and NEVER reused. Two cases:
+        // (a) forward target is a LIVE LINK -> the span is already live via
+        //     the LINK: pure dedup hit, no ledger entry, same ID back.
+        // (b) otherwise (dead LINK or plain dead) -> allocate a FRESH serial
+        //     for this span (audited ADD); the old serial is never reused.
+        // This keeps the atomicity invariant: no live span ever points at a
+        // dead LINK.
+        let fw:i32=rget(s,sr,R_FWD);
+        if(fw>=0 && (rflag(s,fw) & (F_LINK | F_LIVE))==(F_LINK | F_LIVE)){
+            return sr;
+        }
+        return y_new_unit(s,corpus,off,len);
+    }
+    if(s.*.nlive>=s.*.live_cap){
+        if(y_evict_oldest_unpinned(s)<0){
+            y_led(s,OP_REFUSE,-1,1,off,0,len,corpus,-1,0,0,0,0,0,RR_FULL,0);
+            return -1;
+        }
+    }
+    rput(s,sr,R_OFF,off);rput(s,sr,R_LEN,len);rput(s,sr,R_CORPUS,corpus);
+    rput(s,sr,R_FLAGS,F_OCC | F_LIVE);
+    rput(s,sr,R_SPAN_FIRST,0);rput(s,sr,R_SPAN_COUNT,1);
+    rput(s,sr,R_FWD,-1);rput(s,sr,R_REMAP,sr);
+    rput(s,sr,R_DEFKIND,0);rput(s,sr,R_SHIFT,0);
+    let lq:[]u8=s.*.liveq;
+    iput(lq,s.*.liveq_n*4,sr);s.*.liveq_n=s.*.liveq_n+1;
+    s.*.nlive=s.*.nlive+1;
+    y_led(s,OP_ADD,sr,0,off,0,len,corpus,sr,0,0,0,0,0,sr,0);
+    if(pin_k>0 && sr%pin_k==0 && sr/pin_k<pin_total){
+        y_pin(s,sr);
+    }
+    return sr;
+}
+// ingest one fresh (churn) unit; returns serial or -1
+fn y_ingest_fresh(s:*Y5,corpus:i32,off:i32,len:i32) i32 {
+    return y_new_unit(s,corpus,off,len);
+}
+// copy one span's bytes from the concatenated buffer, applying a shift
+fn span_copy(cb:*Cb,rbase:[]u8,rlen:[]u8,corpus:i32,off:i32,len:i32,
+             shift:i32,out:[]u8,out_at:i32) i32 {
+    let bo:i32=iget(rbase,corpus*4);
+    let bl:i32=iget(rlen,corpus*4);
+    let so:i32=off+shift;
+    if(so<0){so=0;}
+    let l:i32=len;
+    // corpus-relative bound: so/len address within THIS corpus (length bl).
+    // (bo only locates the copy source inside the concatenated buffer.)
+    if(so+l>bl){l=bl-so;}
+    if(l<=0){return 0;}
+    cb_copy(cb,bo+so,out,out_at,l);
+    return l;
+}
+// regenerate a content-defect patch over one span (kind 1: prose xor every 7th
+// byte; kind 2: code identifier rename). The patch is a fixed function of the
+// source bytes, so recording the kind is equivalent to storing the bytes.
+fn span_patch(cb:*Cb,rbase:[]u8,rlen:[]u8,corpus:i32,off:i32,len:i32,
+              shift:i32,kind:i32,out:[]u8,out_at:i32) i32 {
+    let n:i32=span_copy(cb,rbase,rlen,corpus,off,len,shift,out,out_at);
+    if(kind==1){
+        let i:i32=0;
+        while(i<n){
+            if(i%7==0){out[out_at+i]=(out[out_at+i] as i32 ^ 255) as u8;}
+            i=i+1;
+        }
+    }
+    if(kind==2){
+        let p0:[]u8="sqlite3";let r0:[]u8="sqlite4";
+        let p1:[]u8="SQLITE";let r1:[]u8="SQLITF";
+        let p2:[]u8="Vdbe";let r2:[]u8="Vdbf";
+        let p3:[]u8="Mem";let r3:[]u8="Mfm";
+        let p4:[]u8="pBt";let r4:[]u8="pBu";
+        let k:i32=0;
+        while(k<5){
+            let pat:[]u8=p0;let rep:[]u8=r0;
+            if(k==1){pat=p1;rep=r1;}
+            if(k==2){pat=p2;rep=r2;}
+            if(k==3){pat=p3;rep=r3;}
+            if(k==4){pat=p4;rep=r4;}
+            let pl:i32=pat.len;
+            let pos:i32=0;
+            while(pos+pl<=n){
+                let m:i32=1;let q:i32=0;
+                while(q<pl){if(out[out_at+pos+q]!=pat[q]){m=0;break;}q=q+1;}
+                if(m==1){q=0;while(q<pl){out[out_at+pos+q]=rep[q];q=q+1;}pos=pos+pl;}
+                else{pos=pos+1;}
+            }
+            k=k+1;
+        }
+    }
+    return n;
+}
+// recall a unit's bytes through the ID->storage mapping (honors the probe
+// remap). LINK units return all spans concatenated in span-set order.
+// Returns total bytes or -1 on loud failure.
+fn y_recall(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,serial:i32,out:[]u8) i32 {
+    if(serial<0 || serial>=s.*.next_serial){return -1;}
+    // resolve through link-absorption first (member -> live LINK), then
+    // consult the ID remap layer (swap probe). Both are genuine ID-layer
+    // resolutions, in that order.
+    let rs:i32=y_resolve(s,serial);
+    if(rs<0){return -1;}
+    let sr:i32=rget(s,rs,R_REMAP); // the ID layer is genuinely consulted
+    let f:i32=rflag(s,sr);
+    if((f & F_LIVE)==0){return -1;}
+    let shift:i32=rget(s,sr,R_SHIFT);
+    let dk:i32=rget(s,sr,R_DEFKIND);
+    let total:i32=0;
+    if((f & F_LINK)!=0){
+        let p:[]u8=s.*.pool;
+        let sf:i32=rget(s,sr,R_SPAN_FIRST);
+        let sc:i32=rget(s,sr,R_SPAN_COUNT);
+        let k:i32=0;
+        while(k<sc){
+            let c:i32=iget(p,(sf+k)*12);
+            let o:i32=iget(p,(sf+k)*12+4);
+            let l:i32=iget(p,(sf+k)*12+8);
+            if((f & F_PATCH)!=0){total=total+span_patch(cb,rbase,rlen,c,o,l,shift,dk,out,total);}
+            else{total=total+span_copy(cb,rbase,rlen,c,o,l,shift,out,total);}
+            k=k+1;
+        }
+    }else{
+        let c:i32=rget(s,sr,R_CORPUS);
+        let o:i32=rget(s,sr,R_OFF);
+        let l:i32=rget(s,sr,R_LEN);
+        if((f & F_PATCH)!=0){total=span_patch(cb,rbase,rlen,c,o,l,shift,dk,out,0);}
+        else{total=span_copy(cb,rbase,rlen,c,o,l,shift,out,0);}
+    }
+    return total;
+}
+fn y_kill(s:*Y5,serial:i32,reason:i32) i32 {
+    // kill cascades atomically: killing any span of a LINK unit kills the
+    // whole span set with ONE audit entry. Never half-kills.
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return -1;}
+    let f:i32=rflag(s,t);
+    rput(s,t,R_FLAGS,f & (0-1-F_LIVE));
+    s.*.nlive=s.*.nlive-1;
+    y_led(s,OP_KILL,t,0,0,0,0,0,serial,0,0,0,0,0,reason,0);
+    return 0;
+}
+fn y_pin(s:*Y5,serial:i32) i32 {
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return -1;}
+    rput(s,t,R_FLAGS,rflag(s,t) | F_PIN);
+    y_led(s,OP_PIN,t,0,0,0,0,0,serial,0,0,0,0,0,1,0);
+    return 0;
+}
+fn y_weaken(s:*Y5,serial:i32,seq:i32) i32 {
+    // documented policy: weaken is processed as a management annotation
+    // (sets WEAKENED flag, audited). It never changes stored bytes.
+    let t:i32=y_resolve(s,serial);
+    if(t<0){
+        y_led(s,OP_REFUSE,-1,1,0,0,0,0,serial,0,0,0,0,0,RR_MISSING,0);
+        return -1;
+    }
+    rput(s,t,R_FLAGS,rflag(s,t) | F_WEAK);
+    y_led(s,OP_WEAKEN,t,0,0,0,0,0,serial,0,0,0,0,0,seq,0);
+    return 0;
+}
+fn y_mark_valuable(s:*Y5,serial:i32) i32 {
+    y_led(s,OP_TMV,-1,0,0,0,0,0,serial,0,0,0,0,0,1,0);
+    return y_pin(s,serial); // Y5's marking mechanism: pin
+}
+fn y_defect_boundary(s:*Y5,serial:i32,delta:i32) i32 {
+    // EXTERNAL trainer op: shift the unit's recorded span(s). For a LINK unit
+    // the shift applies to every span in the set (documented).
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return -1;}
+    rput(s,t,R_SHIFT,delta);
+    rput(s,t,R_FLAGS,rflag(s,t) | F_SHIFT);
+    y_led(s,OP_TDB,t,0,0,0,0,0,serial,0,0,0,0,0,delta,0);
+    return 0;
+}
+fn y_defect_content(s:*Y5,serial:i32,kind:i32,clen:i32) i32 {
+    // EXTERNAL trainer op: record a byte patch the recall path must apply.
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return -1;}
+    rput(s,t,R_DEFKIND,kind);
+    rput(s,t,R_FLAGS,rflag(s,t) | F_PATCH);
+    y_led(s,OP_TDC,t,0,0,0,0,0,serial,0,0,0,0,0,clen,0);
+    return 0;
+}
+fn y_revise(s:*Y5,serial:i32) i32 {
+    // deliberate repair: drop recorded shift/patch (same ID + REVISE entry =
+    // lineage; kill+re-add does not count).
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return -1;}
+    let f:i32=rflag(s,t);
+    if((f & (F_SHIFT | F_PATCH))==0){return 0;}
+    let old_off:i32=rget(s,t,R_OFF)+rget(s,t,R_SHIFT);
+    rput(s,t,R_SHIFT,0);
+    rput(s,t,R_DEFKIND,0);
+    rput(s,t,R_FLAGS,f & (0-1-F_SHIFT-F_PATCH));
+    let new_off:i32=rget(s,t,R_OFF);
+    y_led(s,OP_REVISE,t,0,rget(s,t,R_OFF),0,rget(s,t,R_LEN),
+          rget(s,t,R_CORPUS),serial,0,0,0,0,0,old_off,new_off);
+    return 1;
+}
+
+// ---- LINK consolidation (the Y5 mechanism) ----
+// Groups live, not-yet-considered base units by first content token.
+// A group of Y5_LINK_MIN..Y5_LINK_MAX spans becomes one LINK unit with the
+// spans ordered by (corpus, offset); members are tombstoned (never reused).
+// Budget: Y5_LINK_BUDGET LINKs per pass, groups in first-member serial order.
+fn tok_extract(cb:*Cb,rbase:[]u8,rlen:[]u8,corpus:i32,off:i32,len:i32,
+               tok:[]u8) i32 {
+    let bo:i32=iget(rbase,corpus*4);
+    let bl:i32=iget(rlen,corpus*4);
+    let l:i32=len;
+    if(off+l>bl){l=bl-off;}
+    if(l<=0){return 0;}
+    let p:i32=0;
+    while(p<l){
+        let b:i32=cb_get(cb,bo+off+p) as i32;
+        if(b!=32 && b!=9 && b!=10 && b!=13){break;}
+        p=p+1;
+    }
+    let n:i32=0;
+    while(p<l && n<Y5_TOK_MAX){
+        let b:i32=cb_get(cb,bo+off+p) as i32;
+        if(b==32 || b==9 || b==10 || b==13){break;}
+        tok[n]=b as u8;n=n+1;p=p+1;
+    }
+    return n;
+}
+fn tok_hash(tok:[]u8,n:i32) i64 {
+    let h:i64=2166136261;
+    let i:i32=0;
+    while(i<n){
+        h=(h ^ (tok[i] as i64))*16777619;
+        h=h & 4294967295;
+        i=i+1;
+    }
+    return h;
+}
+fn tok_equal(a:[]u8,an:i32,b:[]u8,bn:i32) i32 {
+    if(an!=bn){return 0;}
+    let i:i32=0;
+    while(i<an){if(a[i]!=b[i]){return 0;}i=i+1;}
+    return 1;
+}
+fn y_link_pass(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8) i32 {
+    // returns LINK units created
+    let nsr:i32=s.*.next_serial;
+    // count candidates
+    let ncand:i32=0;
+    let x:i32=0;
+    while(x<nsr){
+        let f:i32=rflag(s,x);
+        if((f & F_OCC)!=0 && (f & F_LIVE)!=0 && (f & F_LINK)==0 && (f & F_CONS)==0){
+            ncand=ncand+1;
+        }
+        x=x+1;
+    }
+    if(ncand==0){return 0;}
+    let ts:i32=1024;
+    while(ts<ncand*2){ts=ts*2;}
+    if(ts>524288){ts=524288;} // 10x: tent chunk cap; grouping is ts-invariant
+    // table entry: toklen@0, tokbytes@4..28, head@28
+    let tent:[]u8=halloc(s,ts*32);
+    let ti:i32=0;while(ti<ts){iput(tent,ti*32+28,-1);ti=ti+1;}
+    let mnext:[]u8=halloc(s,s.*.cap*4);
+    ti=0;while(ti<s.*.cap){iput(mnext,ti*4,-1);ti=ti+1;}
+    let tok:[]u8=halloc(s,Y5_TOK_MAX);
+    // insert in serial order
+    x=0;
+    while(x<nsr){
+        let f:i32=rflag(s,x);
+        if((f & F_OCC)!=0 && (f & F_LIVE)!=0 && (f & F_LINK)==0 && (f & F_CONS)==0){
+            let tn:i32=tok_extract(cb,rbase,rlen,rget(s,x,R_CORPUS),
+                                   rget(s,x,R_OFF),rget(s,x,R_LEN),tok);
+            if(tn>0){
+                let h:i64=tok_hash(tok,tn);
+                let slot:i64=h % (ts as i64);
+                if(slot<0){slot=slot+(ts as i64);}
+                let done:i32=0;
+                let pg:i64=0;
+                while(done==0){
+                    pg=pg+1;
+                    if(pg>(ts as i64)*4){_zag_println("FATAL,link-table-full");return 0;}
+                    let hd:i32=iget(tent,(slot as i32)*32+28);
+                    if(hd<0){
+                        iput(tent,(slot as i32)*32,tn);
+                        let q:i32=0;while(q<tn){tent[(slot as i32)*32+4+q]=tok[q];q=q+1;}
+                        iput(tent,(slot as i32)*32+28,x);
+                        done=1;
+                    }else{
+                        let eln:i32=iget(tent,(slot as i32)*32);
+                        let same:i32=1;
+                        if(eln!=tn){same=0;}
+                        else{
+                            let q2:i32=0;
+                            while(q2<tn){
+                                if(tent[(slot as i32)*32+4+q2]!=tok[q2]){same=0;break;}
+                                q2=q2+1;
+                            }
+                        }
+                        if(same==1){
+                            let tail:i32=hd;
+                            while(iget(mnext,tail*4)>=0){tail=iget(mnext,tail*4);}
+                            iput(mnext,tail*4,x);
+                            done=1;
+                        }else{
+                            slot=slot+1;
+                            if(slot>=(ts as i64)){slot=0;}
+                        }
+                    }
+                }
+            }
+        }
+        x=x+1;
+    }
+    // process groups in first-member serial order
+    let budget:i32=Y5_LINK_BUDGET;
+    let created:i32=0;
+    x=0;
+    while(x<nsr && budget>0){
+        let f:i32=rflag(s,x);
+        if((f & F_OCC)!=0 && (f & F_LIVE)!=0 && (f & F_LINK)==0 && (f & F_CONS)==0){
+            let tn:i32=tok_extract(cb,rbase,rlen,rget(s,x,R_CORPUS),
+                                   rget(s,x,R_OFF),rget(s,x,R_LEN),tok);
+            if(tn>0){
+                let h:i64=tok_hash(tok,tn);
+                let slot:i64=h % (ts as i64);
+                if(slot<0){slot=slot+(ts as i64);}
+                let hd:i32=-2;
+                let done2:i32=0;
+                let pg2:i64=0;
+                while(done2==0){
+                    pg2=pg2+1;
+                    if(pg2>(ts as i64)*4){_zag_println("FATAL,link-table-full");return 0;}
+                    hd=iget(tent,(slot as i32)*32+28);
+                    if(hd<0){done2=1;}
+                    else{
+                        let eln:i32=iget(tent,(slot as i32)*32);
+                        let same:i32=1;
+                        if(eln!=tn){same=0;}
+                        else{
+                            let q3:i32=0;
+                            while(q3<tn){
+                                if(tent[(slot as i32)*32+4+q3]!=tok[q3]){same=0;break;}
+                                q3=q3+1;
+                            }
+                        }
+                        if(same==1){done2=1;}
+                        else{
+                            slot=slot+1;
+                            if(slot>=(ts as i64)){slot=0;}
+                        }
+                    }
+                }
+                if(hd==x){
+                    // group head: count members
+                    let m:i32=0;
+                    let cur:i32=hd;
+                    while(cur>=0){m=m+1;cur=iget(mnext,cur*4);}
+                    if(m>=Y5_LINK_MIN && m<=Y5_LINK_MAX){
+                        // collect + sort spans by (corpus, off)
+                        let mc:[]u8=halloc(s,8*4);
+                        let mo:[]u8=halloc(s,8*4);
+                        let ml:[]u8=halloc(s,8*4);
+                        cur=hd;let q2:i32=0;
+                        while(cur>=0 && q2<8){
+                            iput(mc,q2*4,rget(s,cur,R_CORPUS));
+                            iput(mo,q2*4,rget(s,cur,R_OFF));
+                            iput(ml,q2*4,rget(s,cur,R_LEN));
+                            q2=q2+1;cur=iget(mnext,cur*4);
+                        }
+                        let a3:i32=1;
+                        while(a3<m){
+                            let b3:i32=a3;
+                            while(b3>0){
+                                let c0:i32=iget(mc,(b3-1)*4);let o0:i32=iget(mo,(b3-1)*4);
+                                let c1:i32=iget(mc,b3*4);let o1:i32=iget(mo,b3*4);
+                                if(c1<c0 || (c1==c0 && o1<o0)){
+                                    iput(mc,(b3-1)*4,c1);iput(mo,(b3-1)*4,o1);
+                                    let t3:i32=iget(ml,(b3-1)*4);
+                                    iput(ml,(b3-1)*4,iget(ml,b3*4));iput(ml,b3*4,t3);
+                                    iput(mc,b3*4,c0);iput(mo,b3*4,o0);
+                                    b3=b3-1;
+                                }else{break;}
+                            }
+                            a3=a3+1;
+                        }
+                        // create the LINK unit
+                        if(s.*.next_serial<s.*.cap && s.*.pool_n+m<=s.*.pool_cap){
+                            let L:i32=s.*.next_serial;
+                            s.*.next_serial=L+1;
+                            let p:[]u8=s.*.pool;
+                            let sf:i32=s.*.pool_n;
+                            let tot:i32=0;
+                            let pin_any:i32=0;let weak_any:i32=0;
+                            q2=0;
+                            while(q2<m){
+                                iput(p,(sf+q2)*12,iget(mc,q2*4));
+                                iput(p,(sf+q2)*12+4,iget(mo,q2*4));
+                                iput(p,(sf+q2)*12+8,iget(ml,q2*4));
+                                tot=tot+iget(ml,q2*4);
+                                q2=q2+1;
+                            }
+                            s.*.pool_n=sf+m;
+                            // tombstone members (never reused); pin inherits
+                            cur=hd;
+                            while(cur>=0){
+                                let mf:i32=rflag(s,cur);
+                                if((mf & F_PIN)!=0){pin_any=1;}
+                                if((mf & F_WEAK)!=0){weak_any=1;}
+                                rput(s,cur,R_FLAGS,mf & (0-1-F_LIVE));
+                                rput(s,cur,R_FWD,L);
+                                s.*.nlive=s.*.nlive-1;
+                                y_led(s,OP_KILL,cur,0,0,0,0,0,cur,0,0,0,0,0,KR_LINK_ABSORB,0);
+                                cur=iget(mnext,cur*4);
+                            }
+                            let lf:i32=F_OCC | F_LIVE | F_LINK;
+                            if(pin_any==1){lf=lf | F_PIN;}
+                            if(weak_any==1){lf=lf | F_WEAK;}
+                            rput(s,L,R_OFF,iget(mo,0*4));rput(s,L,R_LEN,tot);
+                            rput(s,L,R_CORPUS,iget(mc,0*4));rput(s,L,R_FLAGS,lf);
+                            rput(s,L,R_SPAN_FIRST,sf);rput(s,L,R_SPAN_COUNT,m);
+                            rput(s,L,R_FWD,-1);rput(s,L,R_REMAP,L);
+                            rput(s,L,R_DEFKIND,0);rput(s,L,R_SHIFT,0);
+                            let lq:[]u8=s.*.liveq;
+                            iput(lq,s.*.liveq_n*4,L);s.*.liveq_n=s.*.liveq_n+1;
+                            s.*.nlive=s.*.nlive+1;
+                            y_led(s,OP_ADD,L,0,iget(mo,0*4),0,tot,iget(mc,0*4),L,
+                                  0,0,0,0,0,L,lf);
+                            created=created+1;
+                            budget=budget-1;
+                        }
+                        hfree(s,mc);hfree(s,mo);hfree(s,ml);
+                    }
+                }
+            }
+        }
+        x=x+1;
+    }
+    // mark all candidates considered
+    x=0;
+    while(x<nsr){
+        let f:i32=rflag(s,x);
+        if((f & F_OCC)!=0 && (f & F_LIVE)!=0 && (f & F_LINK)==0 && (f & F_CONS)==0){
+            rput(s,x,R_FLAGS,f | F_CONS);
+        }
+        x=x+1;
+    }
+    hfree(s,tent);hfree(s,mnext);hfree(s,tok);
+    return created;
+}
+// ---- live-unit list (serial order) ----
+fn p_i64(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+fn y_livelist(s:*Y5,out:[]u8) i32 {
+    let lq:[]u8=s.*.liveq;
+    let n:i32=0;
+    let i:i32=0;
+    while(i<s.*.liveq_n){
+        let sr:i32=iget(lq,i*4);
+        if((rflag(s,sr) & F_LIVE)!=0){iput(out,n*4,sr);n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+// count live units (scan; robust against counter drift)
+fn y_count_live(s:*Y5) i32 {
+    let c:i32=0;
+    let sr:i32=0;
+    while(sr<s.*.next_serial){
+        if((rflag(s,sr) & (F_OCC | F_LIVE))==(F_OCC | F_LIVE)){c=c+1;}
+        sr=sr+1;
+    }
+    return c;
+}
+// count live LINK units (binding-kill degradation metric)
+fn y_count_links(s:*Y5) i32 {    let c:i32=0;
+    let sr:i32=0;
+    while(sr<s.*.next_serial){
+        let f:i32=rflag(s,sr);
+        if((f & (F_OCC | F_LIVE | F_LINK))==(F_OCC | F_LIVE | F_LINK)){c=c+1;}
+        sr=sr+1;
+    }
+    return c;
+}
+// atomicity sweep: count live NON-link spans whose forward target is dead.
+// Binding kill, second clause: any nonzero count = atomicity broken.
+fn y_audit_atomicity(s:*Y5) i32 {
+    let bad:i32=0;
+    let sr:i32=0;
+    while(sr<s.*.next_serial){
+        let f:i32=rflag(s,sr);
+        if((f & (F_OCC | F_LIVE))==(F_OCC | F_LIVE) && (f & F_LINK)==0){
+            let fw:i32=rget(s,sr,R_FWD);
+            if(fw>=0 && (rflag(s,fw) & F_LIVE)==0){bad=bad+1;}
+        }
+        sr=sr+1;
+    }
+    return bad;
+}
+// ---- M1 swap probe (A15 proposed schedule, provisional) ----
+// Patch the ID table so recall(T) resolves to the next live unit U;
+// the arm must return U's content (genuinely, via the remap field) or fail loudly.
+fn y_probe_one(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,live:[]u8,nlive:i32,
+               T:i32,probe_idx:i32,tmp:[]u8) i32 {
+    // returns 0 on verified remap, 1 on failure (loud)
+    let p:i32=0;
+    while(p<nlive){if(iget(live,p*4)==T){break;}p=p+1;}
+    if(p>=nlive){return 1;}
+    let U:i32=iget(live,((p+1)%nlive)*4);
+    rput(s,T,R_REMAP,U);
+    y_led(s,OP_TSP,T,0,0,0,0,0,T,0,0,0,0,0,probe_idx,U);
+    let rl:i32=y_recall(s,cb,rbase,rlen,T,tmp);
+    rput(s,T,R_REMAP,T); // restore
+    if(rl<0){return 1;}
+    // expected: U's span bytes concatenated (U carries no defects in M1/M8)
+    let uf:i32=rflag(s,U);
+    let exp:i32=0;
+    let ok:i32=1;
+    if((uf & F_LINK)!=0){
+        let pl:[]u8=s.*.pool;
+        let sf:i32=rget(s,U,R_SPAN_FIRST);
+        let sc:i32=rget(s,U,R_SPAN_COUNT);
+        let k:i32=0;
+        while(k<sc){
+            let c:i32=iget(pl,(sf+k)*12);
+            let o:i32=iget(pl,(sf+k)*12+4);
+            let l:i32=iget(pl,(sf+k)*12+8);
+            let bo:i32=iget(rbase,c*4);
+            let j:i32=0;
+            while(j<l){
+                if(exp+j>=rl || tmp[exp+j]!=cb_get(cb,bo+o+j)){ok=0;break;}
+                j=j+1;
+            }
+            if(ok==0){break;}
+            exp=exp+l;k=k+1;
+        }
+        if(exp!=rl){ok=0;}
+    }else{
+        let c:i32=rget(s,U,R_CORPUS);
+        let o:i32=rget(s,U,R_OFF);
+        let l:i32=rget(s,U,R_LEN);
+        let bo:i32=iget(rbase,c*4);
+        if(rl!=l){ok=0;}
+        else{
+            let j:i32=0;
+            while(j<l){if(tmp[j]!=cb_get(cb,bo+o+j)){ok=0;break;}j=j+1;}
+        }
+    }
+    _zag_print("PROBE,");p_i64(probe_idx as i64);_zag_print(",");
+    p_i64(T as i64);_zag_print(",");p_i64(U as i64);_zag_print(",");
+    if(ok==1){_zag_println("PASS");}else{_zag_println("FAIL");}
+    if(ok==0){
+        y_led(s,OP_REFUSE,-1,1,0,0,0,0,T,0,0,0,0,0,RR_PROBE_FAIL,0);
+        return 1;
+    }
+    return 0;
+}
+// ---- file IO ----
+fn read_file(dir:[]u8,name:[]u8) []u8 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let sz:i64=nio_seek(fd,0,2);
+    if(sz<=0 || sz>33554432){nio_close(fd);return "";}
+    let buf:[]u8=nio_alloc(sz as i32);
+    if(buf.len!=(sz as i32)){nio_close(fd);return "";}
+    let nr:i64=nio_read_exact(fd,buf,sz as i32);
+    nio_close(fd);
+    if(nr!=sz){nio_free(buf);return "";}
+    return buf;
+}
+fn file_size(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);
+    nio_close(fd);
+    return sz;
+}
+fn write_file(dir:[]u8,name:[]u8,data:[]u8) i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let at:i32=0;
+    while(at<data.len){
+        let n:i32=data.len-at;
+        if(n>1048576){n=1048576;}
+        let w:i64=nio_write_all(fd,data[at..at+n]);
+        if(w!=(n as i64)){nio_close(fd);return -1;}
+        at=at+n;
+    }
+    nio_close(fd);
+    return 0;
+}
+
+// ---- JSON emission (schema metrics-v1) ----
+fn j_begin(mode:[]u8)void {
+    _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"y5\",\"round\":\"");
+    if(j_isscale10(mode)==1){_zag_print("r10\",\"scale\":\"10x");}
+    else{_zag_print("r1\",\"scale\":\"1x");}
+    _zag_print("\",\"mode\":\"");
+    _zag_print(mode);
+    _zag_print("\",\"fields\":{");
+}
+fn j_sep(f:*i32)void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_end()void { _zag_print("}}");_zag_println(""); }
+fn p_dec1(tenths:i64)void {
+    if(tenths<0){_zag_print("-");tenths=0-tenths;}
+    let ip:i64=tenths/10;let fp:i64=tenths-(ip*10);
+    let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+    _zag_print(".");
+    let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+fn jf_dec1(f:*i32,key:[]u8,tenths:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec1(tenths);
+}
+fn jf_int(f:*i32,key:[]u8,v:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s);
+}
+fn jf_str(f:*i32,key:[]u8,v:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+fn jf_bool(f:*i32,key:[]u8,v:i32)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    if(v==1){_zag_print("true");}else{_zag_print("false");}
+}
+fn jf_null(f:*i32,key:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":null");
+}
+
+// ---- shared trial helpers ----
+fn nunits_of(buflen:i32) i32 { return (buflen+Y5_CHUNK-1)/Y5_CHUNK; }
+fn unit_len(idx:i32,buflen:i32) i32 {
+    let off:i32=idx*Y5_CHUNK;let l:i32=buflen-off;
+    if(l>Y5_CHUNK){l=Y5_CHUNK;} if(l<0){l=0;} return l;
+}
+// ingest a whole corpus buffer through the deliberate add path; returns units
+fn ingest_all(s:*Y5,corpus:i32,buflen:i32,pin_k:i32,pin_total:i32) i32 {
+    let n:i32=nunits_of(buflen);
+    let i:i32=0;
+    while(i<n){
+        y_ingest_grid(s,corpus,i,buflen,pin_k,pin_total);
+        i=i+1;
+    }
+    return n;
+}
+// ---- chunked corpus buffer (Cb) and chunked ledger access ----
+// Every chunk is <= 2^25 bytes. File-data chunks use raw nio_alloc (untraced,
+// exactly like the old read_file buffers); derived buffers use halloc (traced,
+// exactly like the old concatenated cbufs). cb.total equals the old file
+// length, and (corpus,off) byte addressing is unchanged.
+struct Cb {
+    nc:i32,
+    total:i32,
+    c0:[]u8,c1:[]u8,c2:[]u8,c3:[]u8,c4:[]u8,c5:[]u8,
+}
+fn cb_sel(cb:*Cb,i:i32) []u8 {
+    if(i==0){let a:[]u8=cb.*.c0;return a;}
+    if(i==1){let a:[]u8=cb.*.c1;return a;}
+    if(i==2){let a:[]u8=cb.*.c2;return a;}
+    if(i==3){let a:[]u8=cb.*.c3;return a;}
+    if(i==4){let a:[]u8=cb.*.c4;return a;}
+    let a:[]u8=cb.*.c5;return a;
+}
+fn cb_add(cb:*Cb,data:[]u8) i32 {
+    let i:i32=cb.*.nc;
+    if(i>=6){return -1;}
+    if(i==0){cb.*.c0=data;}
+    else{if(i==1){cb.*.c1=data;}
+    else{if(i==2){cb.*.c2=data;}
+    else{if(i==3){cb.*.c3=data;}
+    else{if(i==4){cb.*.c4=data;}
+    else{cb.*.c5=data;}}}}}
+    cb.*.nc=i+1;
+    cb.*.total=cb.*.total+data.len;
+    return 0;
+}
+// raw pread: seek to off, read exactly n bytes (n <= 2^25). 0 ok, -1 short.
+fn nio_read_at(fd:i64,off:i64,buf:[]u8,n:i32) i32 {
+    if(nio_seek(fd,off,0)!=off){return -1;}
+    let base:i64=_zag_slice_ptr(buf) as i64;
+    let got:i32=0;
+    let calls:i32=0;
+    while(got<n && calls<4096){
+        let r:i64=_zag_raw_syscall(0,fd,base+(got as i64),(n-got) as i64,0,0,0);
+        calls=calls+1;
+        if(r==-4){continue;}
+        if(r<=0){break;}
+        got=got+(r as i32);
+    }
+    if(got!=n){return -1;}
+    return 0;
+}
+// load one file as a chunked Cb (untraced raw allocs, like read_file).
+// 0 ok, -1 on missing/empty/oversize.
+fn cb_load_file(cb:*Cb,dir:[]u8,name:[]u8) i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);
+    if(sz<=0 || sz>201326592){nio_close(fd);return -1;}
+    let total:i32=sz as i32;
+    let done:i32=0;
+    while(done<total){
+        let n:i32=total-done;
+        if(n>33554432){n=33554432;}
+        let ch:[]u8=nio_alloc(n);
+        let rr:i32=nio_read_at(fd,done as i64,ch,n);
+        if(rr!=0){nio_free(ch);nio_close(fd);return -1;}
+        if(cb_add(cb,ch)<0){nio_free(ch);nio_close(fd);return -1;}
+        done=done+n;
+    }
+    nio_close(fd);
+    return 0;
+}
+fn cb_get(cb:*Cb,at:i32) u8 {
+    let base:i32=0;
+    let i:i32=0;
+    while(i<cb.*.nc){
+        let c:[]u8=cb_sel(cb,i);
+        if(at<base+c.len){return c[at-base];}
+        base=base+c.len;
+        i=i+1;
+    }
+    return 0;
+}
+fn cb_put(cb:*Cb,at:i32,b:u8) void {
+    let base:i32=0;
+    let i:i32=0;
+    while(i<cb.*.nc){
+        let c:[]u8=cb_sel(cb,i);
+        if(at<base+c.len){c[at-base]=b;return;}
+        base=base+c.len;
+        i=i+1;
+    }
+}
+// copy n bytes of the logical buffer at src into dst[dat..]
+fn cb_copy(cb:*Cb,src:i32,dst:[]u8,dat:i32,n:i32) void {
+    let done:i32=0;
+    while(done<n){
+        dst[dat+done]=cb_get(cb,src+done);
+        done=done+1;
+    }
+}
+// duplicate a Cb through traced hallocs (M7's C' buffer)
+fn cb_copy_from(s:*Y5,dst:*Cb,src:*Cb) i32 {
+    let i:i32=0;
+    while(i<src.*.nc){
+        let sc:[]u8=cb_sel(src,i);
+        let dc:[]u8=halloc(s,sc.len);
+        let k:i32=0;
+        while(k<sc.len){dc[k]=sc[k];k=k+1;}
+        if(cb_add(dst,dc)<0){hfree(s,dc);return -1;}
+        i=i+1;
+    }
+    return 0;
+}
+// ---- chunked audit ledger ----
+fn led_sel(s:*Y5,ci:i32) []u8 {
+    if(ci==0){let l:[]u8=s.*.led;return l;}
+    if(ci==1){let l:[]u8=s.*.led1;return l;}
+    if(ci==2){let l:[]u8=s.*.led2;return l;}
+    if(ci==3){let l:[]u8=s.*.led3;return l;}
+    if(ci==4){let l:[]u8=s.*.led4;return l;}
+    let l:[]u8=s.*.led5;return l;
+}
+fn led_op(s:*Y5,e:i32) i32 {
+    let l:[]u8=led_sel(s,e>>19);
+    return iget(l,(e & 524287)*64);
+}
+// copy n bytes of the logical ledger stream at cs into dst
+fn led_piece(s:*Y5,cs:i32,dst:[]u8,n:i32) void {
+    let done:i32=0;
+    while(done<n){
+        let at:i32=cs+done;
+        let l:[]u8=led_sel(s,at>>25);
+        let lo:i32=at & 33554431;
+        let avail:i32=l.len-lo;
+        let want:i32=n-done;
+        if(want>avail){want=avail;}
+        let k:i32=0;
+        while(k<want){dst[done+k]=l[lo+k];k=k+1;}
+        done=done+want;
+    }
+}
+// ledger stream hash: direct (1x-identical) when it fits one chunk,
+// Merkle-over-1MB-pieces otherwise (10x).
+fn ledger_hash(s:*Y5,out:[]u8) void {
+    let total:i32=s.*.led_n*64;
+    if(total<=33554432){
+        let l0:[]u8=s.*.led;
+        ns_sha256(l0[0..total],out);
+        return;
+    }
+    let nch:i32=(total+1048575)/1048576;
+    let chain:[]u8=nio_alloc(nch*32);
+    let scratch:[]u8=nio_alloc(1048576);
+    let ci:i32=0;
+    while(ci<nch){
+        let cs:i32=ci*1048576;
+        let cn:i32=total-cs;
+        if(cn>1048576){cn=1048576;}
+        led_piece(s,cs,scratch,cn);
+        ns_sha256(scratch[0..cn],chain[ci*32..ci*32+32]);
+        ci=ci+1;
+    }
+    ns_sha256(chain,out);
+    nio_free(chain);
+    nio_free(scratch);
+}
+// write the logical ledger stream to dir/name in 1MB pieces
+fn write_ledger(s:*Y5,dir:[]u8,name:[]u8) i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let total:i32=s.*.led_n*64;
+    let done:i32=0;
+    while(done<total){
+        let l:[]u8=led_sel(s,done>>25);
+        let lo:i32=done & 33554431;
+        let avail:i32=l.len-lo;
+        let want:i32=total-done;
+        if(want>avail){want=avail;}
+        let wdone:i32=0;
+        while(wdone<want){
+            let n:i32=want-wdone;
+            if(n>1048576){n=1048576;}
+            let w:i64=nio_write_all(fd,l[lo+wdone..lo+wdone+n]);
+            if(w!=(n as i64)){nio_close(fd);return -1;}
+            wdone=wdone+n;
+        }
+        done=done+want;
+    }
+    nio_close(fd);
+    return 0;
+}
+// copy n bytes of the logical M8 store image (rows|pool|liveq|cbase) at cs
+fn img_piece(s:*Y5,r0:i32,r1:i32,r2:i32,cs:i32,dst:[]u8,n:i32) void {
+    let rows:[]u8=s.*.rows;
+    let pool:[]u8=s.*.pool;
+    let lq:[]u8=s.*.liveq;
+    let cbase:[]u8=s.*.cbase;
+    let b1:i32=r0;let b2:i32=r0+r1;let b3:i32=r0+r1+r2;
+    let done:i32=0;
+    while(done<n){
+        let at:i32=cs+done;
+        let src:[]u8=rows;let soff:i32=at;let send:i32=b1;
+        if(at>=b1){
+            src=pool;soff=at-b1;send=b2;
+            if(at>=b2){
+                src=lq;soff=at-b2;send=b3;
+                if(at>=b3){src=cbase;soff=at-b3;send=b3+40;}
+            }
+        }
+        let want:i32=send-at;
+        let remn:i32=n-done;
+        if(want>remn){want=remn;}
+        let k:i32=0;
+        while(k<want){dst[done+k]=src[soff+k];k=k+1;}
+        done=done+want;
+    }
+}
+// fill a materialized store image (1x path); returns bytes written
+fn img_fill(s:*Y5,img:[]u8) i32 {
+    let rows:[]u8=s.*.rows;
+    let pool:[]u8=s.*.pool;
+    let lq:[]u8=s.*.liveq;
+    let cbase:[]u8=s.*.cbase;
+    let at:i32=0;
+    at=img_append(img,at,rows,s.*.cap*40);
+    at=img_append(img,at,pool,s.*.pool_cap*12);
+    at=img_append(img,at,lq,s.*.liveq_cap*4);
+    at=img_append(img,at,cbase,40);
+    return at;
+}
+fn j_isscale10(mode:[]u8) i32 {
+    let i:i32=0;
+    while(i+3<mode.len){
+        if(mode[i]==45 && mode[i+1]==49 && mode[i+2]==48 && mode[i+3]==120){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn reg_set(rbase:[]u8,rlen:[]u8,corpus:i32,base:i32,len:i32) void {
+    iput(rbase,corpus*4,base);iput(rlen,corpus*4,len);
+}
+// expected content bytes of a unit (per span, shift applied): -1 on mismatch
+fn unit_content_ok(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,serial:i32,out:[]u8,
+                   rl:i32) i32 {
+    let f:i32=rflag(s,serial);
+    let shift:i32=rget(s,serial,R_SHIFT);
+    let exp:i32=0;
+    if((f & F_LINK)!=0){
+        let p:[]u8=s.*.pool;
+        let sf:i32=rget(s,serial,R_SPAN_FIRST);
+        let sc:i32=rget(s,serial,R_SPAN_COUNT);
+        let k:i32=0;
+        while(k<sc){
+            let c:i32=iget(p,(sf+k)*12);
+            let o:i32=iget(p,(sf+k)*12+4);
+            let l:i32=iget(p,(sf+k)*12+8);
+            let bo:i32=iget(rbase,c*4);
+            let bl:i32=iget(rlen,c*4);
+            let so:i32=o+shift;
+            if(so<0){so=0;}
+            let ll:i32=l;
+            if(so+ll>bl){ll=bl-so;}
+            if(exp+ll>rl){return 0;}
+            let j:i32=0;
+            while(j<ll){if(out[exp+j]!=cb_get(cb,bo+so+j)){return 0;}j=j+1;}
+            exp=exp+ll;k=k+1;
+        }
+        if(exp!=rl){return 0;}
+    }else{
+        let c:i32=rget(s,serial,R_CORPUS);
+        let o:i32=rget(s,serial,R_OFF);
+        let l:i32=rget(s,serial,R_LEN);
+        let bo:i32=iget(rbase,c*4);
+        let bl:i32=iget(rlen,c*4);
+        let so:i32=o+shift;
+        if(so<0){so=0;}
+        let ll:i32=l;
+        if(so+ll>bo+bl){ll=bo+bl-so;}
+        if(rl!=ll){return 0;}
+        let j:i32=0;
+        while(j<ll){if(out[j]!=cb_get(cb,bo+so+j)){return 0;}j=j+1;}
+    }
+    return 1;
+}
+// boundary check: base units must match the grid span; LINK units must carry
+// no recorded shift (their span set is immutable by construction)
+fn unit_boundary_ok(s:*Y5,corpus:i32,serial:i32,buflen:i32) i32 {
+    let f:i32=rflag(s,serial);
+    if((f & F_SHIFT)!=0){return 0;}
+    if((f & F_LINK)!=0){return 1;}
+    let cb:[]u8=s.*.cbase;
+    let idx:i32=serial-iget(cb,corpus*4);
+    let off:i32=idx*Y5_CHUNK;
+    let len:i32=unit_len(idx,buflen);
+    if(rget(s,serial,R_OFF)==off && rget(s,serial,R_LEN)==len
+       && rget(s,serial,R_CORPUS)==corpus){return 1;}
+    return 0;
+}
+// full M1 probe over the live units of given corpora, with the N=64 swap probe
+// interleaved (A15 proposed schedule). Sets id_probe to PASS / FAIL (side channel).
+fn probe_all(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,live:[]u8,nlive:i32,
+             corps:[]u8,ncorps:i32,bout:[]u8,cok:*i32,bok:*i32,
+             id_probe:*i32,do_probe:i32) i32 {
+    // returns 1 if a probe failed loudly (caller aborts)
+    let ok:i32=0;let bo:i32=0;
+    let P:i32=(nlive+63)/64;
+    if(P<1){P=1;}
+    let probes:i32=0;
+    let pok:i32=1;
+    let i:i32=0;
+    while(i<nlive){
+        let T:i32=iget(live,i*4);
+        if(do_probe==1 && i%P==0 && probes<64){
+            if(y_probe_one(s,cb,rbase,rlen,live,nlive,T,probes,bout)!=0){
+                _zag_println("M1,FATAL,swap-probe-failed");
+                return 1;
+            }
+            probes=probes+1;
+        }
+        let rl:i32=y_recall(s,cb,rbase,rlen,T,bout);
+        if(rl>=0 && unit_content_ok(s,cb,rbase,rlen,T,bout,rl)==1){ok=ok+1;}
+        // boundary: attribute the unit to its first corpus
+        let c0:i32=rget(s,T,R_CORPUS);
+        let bl:i32=iget(rlen,c0*4);
+        if(unit_boundary_ok(s,c0,T,bl)==1){bo=bo+1;}
+        i=i+1;
+    }
+    if(nlive>0){cok.*=ok*1000/nlive;bok.*=bo*1000/nlive;}else{cok.*=0;bok.*=0;}
+    if(do_probe==1){
+        if(pok==1 && probes==64){id_probe.*=1;}else{id_probe.*=0;}
+    }
+    return 0;
+}
+// probe every grid unit of one corpus (by serial range); counts in thousandths
+fn probe_reg(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,corpus:i32,
+             bout:[]u8,cok:*i32,bok:*i32) void {
+    let cb_reg:[]u8=s.*.cbase;
+    let base:i32=iget(cb_reg,corpus*4);
+    let bl:i32=iget(rlen,corpus*4);
+    let n:i32=nunits_of(bl);
+    let ok:i32=0;let bo:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let t:i32=y_resolve(s,base+i);
+        if(t>=0){
+            let rl:i32=y_recall(s,cb,rbase,rlen,t,bout);
+            if(rl>=0 && unit_content_ok(s,cb,rbase,rlen,t,bout,rl)==1){ok=ok+1;}
+            if(unit_boundary_ok(s,corpus,t,bl)==1){bo=bo+1;}
+        }
+        i=i+1;
+    }
+    cok.*=ok*1000/n;bok.*=bo*1000/n;
+}
+
+// ---- M1: single-corpus recall (+ LINK consolidation + swap probe) ----
+fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,fname)<0){_zag_println("M1,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(cb.total);
+    let s:Y5=y_new(n+4096,8*n+8192,2*n+4096,1000000000,n+4096);
+    let bout:[]u8=halloc(&s,8192);
+    let live:[]u8=halloc(&s,(n+4096)*4);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,corpus,0,cb.total);
+    ingest_all(&s,corpus,cb.total,0,0);
+    let links:i32=y_link_pass(&s,&cb,rbase,rlen);
+    let corps:[]u8=halloc(&s,4);
+    iput(corps,0,corpus);
+    let nlive:i32=y_livelist(&s,live);
+    let cok:i32=0;let bok:i32=0;let idp:i32=0;
+    if(probe_all(&s,&cb,rbase,rlen,live,nlive,corps,1,bout,&cok,&bok,&idp,1)!=0){return;}
+    let ips:[]u8="PASS";
+    if(idp==0){ips="FAIL (side channel)";}
+    _zag_print("M1,");
+    _zag_print(fname);_zag_print(",");
+    p_dec1(cok as i64);_zag_print(",");p_dec1(bok as i64);
+    _zag_print(",");p_i64(nlive as i64);_zag_print(",");
+    p_i64(links as i64);_zag_print(",");_zag_println(ips);
+    let f:i32=0;
+    j_begin(jmode);
+    jf_dec1(&f,"m1_recall_tenths",cok as i64);
+    jf_dec1(&f,"m1_boundary_tenths",bok as i64);
+    jf_int(&f,"m1_units",nlive as i64);
+    jf_str(&f,"m1_corpus",keyp);
+    jf_str(&f,"m1_id_probe",ips);
+    j_end();
+    hfree(&s,bout);hfree(&s,live);hfree(&s,rbase);hfree(&s,rlen);hfree(&s,corps);
+}
+
+// ---- M2: tiered curriculum ----
+fn t_m2(cdir:[]u8,fname:[]u8,corpus:i32,tier:[]u8,do_m9:i32) void {
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,fname)<0){_zag_println("M2,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(cb.total);
+    let s:Y5=y_new(n+4096,8*n+8192,2*n+4096,1000000000,n+4096);
+    let bout:[]u8=halloc(&s,8192);
+    let live:[]u8=halloc(&s,(n+4096)*4);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,corpus,0,cb.total);
+    let corps:[]u8=halloc(&s,4);
+    iput(corps,0,corpus);
+    // episode 0 probe on empty store
+    let cok:i32=0;let bok:i32=0;let idp:i32=0;
+    let nlive:i32=y_livelist(&s,live);
+    probe_all(&s,&cb,rbase,rlen,live,nlive,corps,1,bout,&cok,&bok,&idp,0);
+    let r0:i64=cok as i64;
+    let rs:[]u8=halloc(&s,51*4);
+    iput(rs,0,cok);
+    let e:i32=1;let consec:i32=0;let etc:i32=50;let nep:i32=1;
+    let rc:i32=cok;let bc:i32=bok;
+    while(e<=50){
+        ingest_all(&s,corpus,cb.total,0,0);
+        y_link_pass(&s,&cb,rbase,rlen);
+        nlive=y_livelist(&s,live);
+        probe_all(&s,&cb,rbase,rlen,live,nlive,corps,1,bout,&cok,&bok,&idp,0);
+        iput(rs,e*4,cok);
+        nep=e+1;
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;rc=cok;bc=bok;break;}
+        rc=cok;bc=bok;
+        e=e+1;
+    }
+    let censored:i32=0;
+    if(etc>=50){censored=1;}
+    _zag_print("M2,");_zag_print(tier);_zag_print(",");
+    p_i64(etc as i64);_zag_print(",");
+    p_i64(censored as i64);_zag_print(",");
+    p_dec1(r0);_zag_println("");
+    let f:i32=0;
+    j_begin(tier);
+    jf_int(&f,"m2_episodes",etc as i64);
+    jf_bool(&f,"m2_censored",censored);
+    jf_dec1(&f,"m2_ep0_recall_tenths",r0);
+    jf_dec1(&f,"m2_final_recall_tenths",rc as i64);
+    jf_dec1(&f,"m2_final_boundary_tenths",bc as i64);
+    if(do_m9==1){
+        let npts:i32=nep;
+        let takeoff:i32=npts;
+        let e2:i32=0;
+        while(e2<npts){
+            if(iget(rs,e2*4)>=500){takeoff=e2;break;}
+            e2=e2+1;
+        }
+        let steep:i64=0;
+        e2=1;
+        while(e2<npts){
+            let jmp:i64=(iget(rs,e2*4)-iget(rs,(e2-1)*4)) as i64;
+            if(jmp>steep){steep=jmp;}
+            e2=e2+1;
+        }
+        let etc_idx:i32=etc;
+        if(etc_idx>=npts){etc_idx=npts-1;}
+        let to_idx:i32=takeoff;
+        if(to_idx>=npts){to_idx=npts-1;}
+        let late:i64=(iget(rs,etc_idx*4)-iget(rs,to_idx*4)) as i64;
+        let shape:[]u8="other";
+        if(steep>=400 && late<=150){shape="fast-then-flat";}
+        else{
+            if(takeoff>=3 && steep>=400){shape="slow-then-sudden";}
+            else{
+                if(steep<400){shape="gradual";}
+            }
+        }
+        jf_str(&f,"m9_shape",shape);
+        jf_int(&f,"m9_takeoff_ep",takeoff as i64);
+        jf_dec1(&f,"m9_steepness_tenths",steep);
+        jf_dec1(&f,"m9_late_gain_tenths",late);
+        j_end();
+        _zag_print("M9,");_zag_print(tier);_zag_print(",");
+        _zag_print(shape);_zag_println("");
+    }
+    if(do_m9==0){
+        j_end();
+    }
+    hfree(&s,bout);hfree(&s,live);hfree(&s,rbase);hfree(&s,rlen);
+    hfree(&s,corps);hfree(&s,rs);
+}
+
+// ---- M3: strength trial ----
+fn t_m3(cdir:[]u8) void {
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,"prose.bin")<0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let plen:i32=cb.total;
+    if(cb_load_file(&cb,cdir,"code.bin")<0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let clen:i32=cb.total-plen;
+    if(cb_load_file(&cb,cdir,"churn_fresh.bin")<0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let flen:i32=cb.total-plen-clen;
+    let nun_p:i32=nunits_of(plen);let nun_c:i32=nunits_of(clen);
+    let total:i32=nun_p+nun_c;
+    let k:i32=total/Y5_M3_V;
+    if(k<1){k=1;}
+    let cap:i32=total+12000;
+    let s:Y5=y_new(cap,262144,total+16384,Y5_M3_CAP,cap);
+    let bout:[]u8=halloc(&s,8192);
+    let live:[]u8=halloc(&s,cap*4);
+    // registry: prose@0, code@plen, fresh@plen+clen (concatenated, b64 pattern)
+    // 1x trace equivalence: dummy cbufs halloc (original had it traced); never indexed so 10x size is safe
+    let cb_total:i32=plen+clen+flen;
+    let cbufs:[]u8=halloc(&s,cb_total);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,Y5_C_PROSE,0,plen);
+    reg_set(rbase,rlen,Y5_C_CODE,plen,clen);
+    reg_set(rbase,rlen,Y5_C_FRESH,plen+clen,flen);
+    // V: ingest both corpora; valuable = every 58th grid span in ingest order.
+    // Valuable spans are PINNED AT INGEST TIME: the M3 live cap (4000) means
+    // eviction starts during ingest, and an unpinned valuable would be evicted
+    // before the pin loop below could protect it. Pinning at ingest is the
+    // honest "trainer designates valuable" semantics.
+    let vser:[]u8=halloc(&s,1000*4);
+    let vcid:[]u8=halloc(&s,1000*4);
+    let voff:[]u8=halloc(&s,1000*4);
+    let vc:i32=0;
+    let ii2:i32=0;
+    while(ii2<nun_p){
+        let sr0:i32=y_ingest_grid(&s,Y5_C_PROSE,ii2,plen,0,0);
+        if(sr0>=0 && ii2%58==0 && vc<1000){
+            iput(vser,vc*4,sr0);iput(vcid,vc*4,Y5_C_PROSE);
+            iput(voff,vc*4,ii2*Y5_CHUNK);y_pin(&s,sr0);vc=vc+1;
+        }
+        ii2=ii2+1;
+    }
+    y_link_pass(&s,&cb,rbase,rlen);
+    let jj2:i32=0;
+    while(jj2<nun_c){
+        let sr1:i32=y_ingest_grid(&s,Y5_C_CODE,jj2,clen,0,0);
+        if(sr1>=0 && jj2%58==0 && vc<1000){
+            iput(vser,vc*4,sr1);iput(vcid,vc*4,Y5_C_CODE);
+            iput(voff,vc*4,jj2*Y5_CHUNK);y_pin(&s,sr1);vc=vc+1;
+        }
+        jj2=jj2+1;
+    }
+    y_link_pass(&s,&cb,rbase,rlen);
+    let fresh_base:i32=s.next_serial;
+    // phase 1: 3000 fresh ingests (64B units, no consolidation: churn phase)
+    let f:i32=0;
+    while(f<Y5_M3_FRESH1){
+        y_ingest_fresh(&s,Y5_C_FRESH,f*64,64);
+        f=f+1;
+    }
+    let n_p1:i32=s.led_n;
+    // phase 2: 3000 fresh-only kills
+    f=0;
+    while(f<Y5_M3_KILL){
+        y_kill(&s,fresh_base+f,KR_EXPLICIT);
+        f=f+1;
+    }
+    // weaken probe: 50 weaken ops on every 20th valuable (documented policy)
+    let w:i32=0;let w_ok:i32=0;
+    while(w<50){
+        if(y_weaken(&s,iget(vser,(w*20)*4),w+1)==0){w_ok=w_ok+1;}
+        w=w+1;
+    }
+    // phase 3: 4000 ingests at capacity, evict-oldest-unpinned as needed
+    f=Y5_M3_FRESH1;
+    while(f<Y5_M3_FRESH1+Y5_M3_FRESH2){
+        y_ingest_fresh(&s,Y5_C_FRESH,f*64,64);
+        f=f+1;
+    }
+    // metrics: V survival via forward resolution (absorbed members recall
+    // through their LINK unit; the span must still be present and byte-exact).
+    // The v-th valuable is span-order position v*58: prose if < nun_p.
+    let surv_ok:i32=0;
+    let v:i32=0;
+    while(v<vc){
+        let g:i32=iget(vser,v*4);
+        let cid:i32=iget(vcid,v*4);
+        let off:i32=iget(voff,v*4);
+        let t:i32=y_resolve(&s,g);
+        if(t>=0){
+            let rl:i32=y_recall(&s,&cb,rbase,rlen,t,bout);
+            if(rl>=0){
+                let tf:i32=rflag(&s,t);
+                let bo:i32=iget(rbase,cid*4);
+                let good:i32=0;
+                if((tf & F_LINK)!=0){
+                    let p2:[]u8=s.pool;
+                    let sf2:i32=rget(&s,t,R_SPAN_FIRST);
+                    let sc2:i32=rget(&s,t,R_SPAN_COUNT);
+                    let kk2:i32=0;let at3:i32=0;
+                    while(kk2<sc2){
+                        let cc2:i32=iget(p2,(sf2+kk2)*12);
+                        let oo2:i32=iget(p2,(sf2+kk2)*12+4);
+                        let ll2:i32=iget(p2,(sf2+kk2)*12+8);
+                        if(cc2==cid && oo2==off){
+                            good=1;
+                            let q:i32=0;
+                            while(q<ll2){
+                                if(at3+q>=rl || bout[at3+q]!=cb_get(&cb,bo+off+q)){good=0;break;}
+                                q=q+1;
+                            }
+                        }
+                        at3=at3+ll2;kk2=kk2+1;
+                    }
+                }else{
+                    if(rget(&s,t,R_CORPUS)==cid && rget(&s,t,R_OFF)==off){
+                        let ll3:i32=rget(&s,t,R_LEN);
+                        if(rl==ll3){
+                            good=1;
+                            let q2:i32=0;
+                            while(q2<ll3){
+                                if(bout[q2]!=cb_get(&cb,bo+off+q2)){good=0;break;}
+                                q2=q2+1;
+                            }
+                        }
+                    }
+                }
+                if(good==1){surv_ok=surv_ok+1;}
+            }
+        }
+        v=v+1;
+    }
+    let surv:i64=(surv_ok as i64)*1000/(vc as i64);
+    // fresh sample: last 500 ingested (f=6500..6999)
+    let fs_ok:i32=0;
+    f=Y5_M3_FRESH1+Y5_M3_FRESH2-500;
+    while(f<Y5_M3_FRESH1+Y5_M3_FRESH2){
+        let sr:i32=fresh_base+f;
+        let rl:i32=y_recall(&s,&cb,rbase,rlen,sr,bout);
+        if(rl==64){
+            let bo:i32=iget(rbase,Y5_C_FRESH*4);
+            let off:i32=f*64;
+            let good:i32=1;let q:i32=0;
+            while(q<64){if(bout[q]!=cb_get(&cb,bo+off+q)){good=0;break;}q=q+1;}
+            if(good==1){fs_ok=fs_ok+1;}
+        }
+        f=f+1;
+    }
+    let fresht:i64=(fs_ok as i64)*1000/500;
+    // liveness: management ops in ledger entries [n_p1, led_n)
+    let mgmt:i32=0;let le:i32=n_p1;
+    while(le<s.led_n){
+        let op:i32=led_op(&s,le);
+        if(op==OP_ADD || op==OP_KILL || op==OP_PIN || op==OP_WEAKEN ||
+           op==OP_PROMOTE || op==OP_EVICT || op==OP_REFUSE){mgmt=mgmt+1;}
+        le=le+1;
+    }
+    let freeze:i32=0;
+    if(surv>=900 && fresht<800){freeze=1;}
+    if(mgmt<700){freeze=1;}
+    if(w_ok<50){freeze=1;}
+    let fz:[]u8="CLEAR";
+    if(freeze==1){fz="FROZEN-UNDER-PRESSURE";}
+    _zag_print("M3,");
+    p_dec1(surv);_zag_print(",");p_dec1(fresht);_zag_print(",");
+    p_i64(mgmt as i64);_zag_print(",");p_i64(w_ok as i64);_zag_print(",");
+    _zag_println(fz);
+    let ff:i32=0;
+    j_begin("m3-1x");
+    jf_dec1(&ff,"m3_survival_tenths",surv);
+    jf_dec1(&ff,"m3_fresh_recall_tenths",fresht);
+    jf_int(&ff,"m3_mgmt_entries",mgmt as i64);
+    jf_int(&ff,"m3_weaken_handled",w_ok as i64);
+    jf_str(&ff,"m3_freeze",fz);
+    jf_int(&ff,"m3_valuable",vc as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,live);hfree(&s,cbufs);hfree(&s,rbase);hfree(&s,rlen);
+    hfree(&s,vser);hfree(&s,vcid);hfree(&s,voff);
+}
+
+// ---- M4: defect revision ----
+fn unit_verified(s:*Y5,cb:*Cb,rbase:[]u8,rlen:[]u8,corpus:i32,buflen:i32,
+                 serial:i32,bout:[]u8) i32 {
+    let t:i32=y_resolve(s,serial);
+    if(t<0){return 0;}
+    let f:i32=rflag(s,t);
+    if((f & F_LIVE)==0){return 0;}
+    if((f & (F_SHIFT | F_PATCH))!=0){return 0;}
+    let rl:i32=y_recall(s,cb,rbase,rlen,t,bout);
+    if(rl<0){return 0;}
+    if(unit_content_ok(s,cb,rbase,rlen,t,bout,rl)==0){return 0;}
+    if(unit_boundary_ok(s,corpus,t,buflen)==0){return 0;}
+    return 1;
+}
+fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8) void {
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,fname)<0){_zag_println("M4,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(cb.total);
+    let cap:i32=n+4096;
+    let s:Y5=y_new(cap,8*n+8192,2*n+4096,1000000000,n+4096);
+    let bout:[]u8=halloc(&s,8192);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,corpus,0,cb.total);
+    ingest_all(&s,corpus,cb.total,0,0);
+    y_link_pass(&s,&cb,rbase,rlen);
+    // ---- binding kill, clause 1: LINK degradation in the revision curriculum.
+    // Count live LINK units before defect planting; any LINK that dies or
+    // breaks apart during revision counts as degraded. >20% -> KILLED.
+    let links_before:i32=y_count_links(&s);
+    let cbb:[]u8=s.cbase;
+    let base:i32=iget(cbb,corpus*4);
+    let d_ser:[]u8=halloc(&s,Y5_M4_N*4);
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    // plant: 100 boundary (j<100), 100 content (j>=100)
+    let j:i32=0;
+    while(j<Y5_M4_N){
+        let idx:i32=j*n/Y5_M4_N;
+        let sr:i32=base+idx;
+        iput(d_ser,j*4,sr);
+        if(j<100){
+            y_defect_boundary(&s,sr,iget(cyc,(j%12)*4));
+        }else{
+            let kind:i32=1;
+            if(is_code==1){kind=2;}
+            // content length = unit's total span bytes
+            let t:i32=y_resolve(&s,sr);
+            let cl:i32=0;
+            if(t>=0){
+                let tf:i32=rflag(&s,t);
+                if((tf & F_LINK)!=0){
+                    let p:[]u8=s.pool;
+                    let sf:i32=rget(&s,t,R_SPAN_FIRST);
+                    let sc:i32=rget(&s,t,R_SPAN_COUNT);
+                    let kk:i32=0;
+                    while(kk<sc){cl=cl+iget(p,(sf+kk)*12+8);kk=kk+1;}
+                }else{cl=rget(&s,t,R_LEN);}
+            }
+            y_defect_content(&s,sr,kind,cl);
+        }
+        j=j+1;
+    }
+    // revision episodes (max 20 passes over the 200 units)
+    let rep_b:i32=0;let rep_c:i32=0;
+    let ep:i32=1;
+    while(ep<=20){
+        j=0;
+        while(j<Y5_M4_N){
+            y_revise(&s,iget(d_ser,j*4));
+            j=j+1;
+        }
+        rep_b=0;rep_c=0;
+        j=0;
+        while(j<100){
+            rep_b=rep_b+unit_verified(&s,&cb,rbase,rlen,corpus,cb.total,iget(d_ser,j*4),bout);
+            j=j+1;
+        }
+        j=100;
+        while(j<Y5_M4_N){
+            rep_c=rep_c+unit_verified(&s,&cb,rbase,rlen,corpus,cb.total,iget(d_ser,j*4),bout);
+            j=j+1;
+        }
+        if(rep_b+rep_c>=Y5_M4_N){break;}
+        ep=ep+1;
+    }
+    // classify kills
+    let killed:i32=0;
+    j=0;
+    while(j<Y5_M4_N){
+        if(y_resolve(&s,iget(d_ser,j*4))<0){killed=killed+1;}
+        j=j+1;
+    }
+    // binding kill clause 1: LINK degradation through the revision curriculum
+    let links_after:i32=y_count_links(&s);
+    let deg_t:i64=0;
+    if(links_before>0){
+        deg_t=((links_before-links_after) as i64)*1000/(links_before as i64);
+    }
+    if(deg_t<0){deg_t=0;}
+    // binding kill clause 2: atomicity sweep (must be zero)
+    let atom_bad:i32=y_audit_atomicity(&s);
+    let rev_bt:i64=(rep_b as i64)*1000/100;
+    let rev_ct:i64=(rep_c as i64)*1000/100;
+    let kill_t:i64=(killed as i64)*1000/(Y5_M4_N as i64);
+    let ksub:i32=0;
+    if(kill_t>500 && (rev_bt<800 || rev_ct<800)){ksub=1;}
+    _zag_print("M4,");_zag_print(keyp);_zag_print(",");
+    p_dec1(rev_bt);_zag_print(",");p_dec1(rev_ct);_zag_print(",");
+    p_dec1(kill_t);_zag_print(",");p_i64(ksub as i64);_zag_print(",");
+    p_dec1(deg_t);_zag_print(",");p_i64(atom_bad as i64);_zag_println("");
+    let f:i32=0;
+    j_begin(keyp);
+    jf_dec1(&f,"m4_rev_boundary_tenths",rev_bt);
+    jf_dec1(&f,"m4_rev_content_tenths",rev_ct);
+    jf_dec1(&f,"m4_kill_rate_tenths",kill_t);
+    jf_bool(&f,"m4_killsub",ksub);
+    jf_int(&f,"m4_episodes",ep as i64);
+    jf_dec1(&f,"m4_link_degradation_tenths",deg_t);
+    jf_int(&f,"m4_atomicity_violations",atom_bad as i64);
+    jf_int(&f,"m4_links_before",links_before as i64);
+    jf_int(&f,"m4_links_after",links_after as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,rbase);hfree(&s,rlen);
+    hfree(&s,d_ser);hfree(&s,cyc);
+}
+
+// ---- M5: cost trial (memory per source byte, audit entries per KB) ----
+// Y5 is an ID->span-set INDEX over external corpora: span bytes live in the
+// world (corpus files), not in the arm. The retained state is the row table,
+// span pool, live queue, and the append-only audit ledger. Corpus buffers are
+// freed after ingest+consolidation (no recall happens in this mode), so
+// m5_corpus_buffer_bytes = 0 by architecture, not by trick.
+fn t_m5(cdir:[]u8,is10:i32) void {
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,"prose.bin")<0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let plen:i32=cb.total;
+    if(cb_load_file(&cb,cdir,"code.bin")<0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let clen:i32=cb.total-plen;
+    let nun_p:i32=nunits_of(plen);let nun_c:i32=nunits_of(clen);
+    let total:i32=nun_p+nun_c;
+    let cap:i32=total+12000;
+    let le:i32=300000;
+    if(is10==1){le=1000000;}
+    let s:Y5=y_new(cap,le,2*total+8192,1000000000,total+8192);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,Y5_C_PROSE,0,plen);
+    reg_set(rbase,rlen,Y5_C_CODE,plen,clen);
+    ingest_all(&s,Y5_C_PROSE,plen,0,0);
+    y_link_pass(&s,&cb,rbase,rlen);
+    ingest_all(&s,Y5_C_CODE,clen,0,0);
+    y_link_pass(&s,&cb,rbase,rlen);
+    let units:i32=y_count_live(&s);
+    let src:i64=(plen+clen) as i64;
+    let slot_bytes:i64=(cap as i64)*40;
+    let led_bytes:i64=(s.led_n as i64)*64;
+    // release the world bytes: the index does not retain them
+    let fi2:i32=0;
+    while(fi2<cb.nc){let fc:[]u8=cb_sel(&cb,fi2);nio_free(fc);fi2=fi2+1;}
+    _zag_print("M5,units,");p_i64(units as i64);_zag_println("");
+    let f:i32=0;
+    if(is10==1){j_begin("m5-10x");}else{j_begin("m5-1x");}
+    jf_int(&f,"m5_units_learned",units as i64);
+    jf_int(&f,"m5_source_bytes_learned",src);
+    jf_int(&f,"m5_slot_table_bytes",slot_bytes);
+    jf_int(&f,"m5_ledger_bytes",led_bytes);
+    jf_int(&f,"m5_ledger_entries",s.led_n as i64);
+    jf_int(&f,"m5_corpus_buffer_bytes",0);
+    j_end();
+    hfree(&s,rbase);hfree(&s,rlen);
+    y_free(&s);
+}
+// ---- M5 baseline: same empty store, touched, then busy-spin so the
+// harness RSS sampler observes the peak. Measurement scaffolding.
+fn t_m5_baseline(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let code:[]u8=read_file(cdir,"code.bin");
+    if(prose.len==0 || code.len==0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let nun_p:i32=nunits_of(prose.len);let nun_c:i32=nunits_of(code.len);
+    let total:i32=nun_p+nun_c;
+    let cap:i32=total+12000;
+    let s:Y5=y_new(cap,300000,2*total+8192,1000000000,total+8192);
+    // touch every row so the pages are resident (same as a used store)
+    let r:i32=0;
+    while(r<cap){rput(&s,r,R_FLAGS,0);r=r+1;}
+    let f:i32=0;
+    j_begin("m5-baseline");
+    jf_str(&f,"m5_baseline","empty-store");
+    j_end();
+    // busy-spin: keep the process alive for the /proc VmHWM sampler
+    let spin:i64=0;
+    while(spin<100000000){spin=spin+1;}
+    _zag_print("M5,BASELINE,");p_i64(spin);_zag_println("");
+    y_free(&s);
+}
+
+// ---- M6: transfer (harness protocol; b64 mirror) ----
+// dir 0 = prose->code, 1 = code->prose.
+// Train on tier-1 to the M2 criterion, in-domain revision, then transfer:
+// ingest the other stream (policy frozen), probe transfer recall/boundary,
+// transfer revision. tax = mean(in-domain - transfer) over rec/bnd/rev.
+// Y5's LINK pass runs after each ingest, so cross-stream LINKs form naturally
+// during transfer (the anti-silo mechanism); the binding kill is scored in M4.
+fn t_m6(cdir:[]u8,dir:i32,is10:i32) void {
+    let tname:[]u8="t1_prose.bin";let tcid:i32=Y5_C_T1P;
+    let yname:[]u8="code.bin";let ycid:i32=Y5_C_CODE;
+    let dkey:[]u8="m6-p2c-1x";let dtag:[]u8="p2c";
+    if(dir==1){
+        tname="t1_code.bin";tcid=Y5_C_T1C;yname="prose.bin";ycid=Y5_C_PROSE;
+        dkey="m6-c2p-1x";dtag="c2p";
+    }
+    if(is10==1){
+        if(dir==1){dkey="m6-c2p-10x";}else{dkey="m6-p2c-10x";}
+    }
+    let cb_t:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    let cb_y:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb_t,cdir,tname)<0 || cb_load_file(&cb_y,cdir,yname)<0){_zag_println("M6,FATAL,empty-corpus");return;}
+    let nt:i32=nunits_of(cb_t.total);let ny:i32=nunits_of(cb_y.total);
+    let cap:i32=nt+ny+12000;
+    let le6:i32=300000;
+    if(is10==1){le6=600000;}
+    let s:Y5=y_new(cap,le6,2*cap,1000000000,cap);
+    let bout:[]u8=halloc(&s,8192);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,tcid,0,cb_t.total);
+    reg_set(rbase,rlen,ycid,0,cb_y.total);
+    // train on tier-1 to the M2 criterion
+    let cok:i32=0;let bok:i32=0;
+    let e:i32=1;let consec:i32=0;let etc:i32=50;
+    while(e<=50){
+        ingest_all(&s,tcid,cb_t.total,0,0);
+        y_link_pass(&s,&cb_t,rbase,rlen);
+        probe_reg(&s,&cb_t,rbase,rlen,tcid,bout,&cok,&bok);
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;break;}
+        e=e+1;
+    }
+    let rec_d:i64=cok as i64;let bnd_d:i64=bok as i64;
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    let cb:[]u8=s.cbase;
+    let tbase:i32=iget(cb,tcid*4);
+    // in-domain revision: 100 boundary defects on train units
+    let j:i32=0;
+    while(j<100){
+        y_defect_boundary(&s,tbase+j*nt/100,iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){
+        y_revise(&s,tbase+j*nt/100);
+        j=j+1;
+    }
+    let rev_d:i32=0;
+    j=0;
+    while(j<100){
+        rev_d=rev_d+unit_verified(&s,&cb_t,rbase,rlen,tcid,cb_t.total,tbase+j*nt/100,bout);
+        j=j+1;
+    }
+    let rev_dt:i64=(rev_d as i64)*10;
+    // transfer: face the new domain (ingest allowed, policy frozen)
+    ingest_all(&s,ycid,cb_y.total,0,0);
+    y_link_pass(&s,&cb_y,rbase,rlen);
+    let ybase:i32=iget(cb,ycid*4);
+    let rec_t:i32=0;let bnd_t:i32=0;
+    probe_reg(&s,&cb_y,rbase,rlen,ycid,bout,&rec_t,&bnd_t);
+    // transfer revision
+    j=0;
+    while(j<100){
+        y_defect_boundary(&s,ybase+j*ny/100,iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){
+        y_revise(&s,ybase+j*ny/100);
+        j=j+1;
+    }
+    let rev_t:i32=0;
+    j=0;
+    while(j<100){
+        rev_t=rev_t+unit_verified(&s,&cb_y,rbase,rlen,ycid,cb_y.total,ybase+j*ny/100,bout);
+        j=j+1;
+    }
+    let rev_tt:i64=(rev_t as i64)*10;
+    let tax:i64=((rec_d-(rec_t as i64))+((bnd_d-(bnd_t as i64)))+(rev_dt-rev_tt))/3;
+    _zag_print("M6,");_zag_print(dtag);_zag_print(",");
+    p_dec1(rec_t as i64);_zag_print(",");p_dec1(bnd_t as i64);_zag_print(",");
+    p_dec1(rev_tt);_zag_print(",");p_dec1(tax);_zag_println("");
+    let f:i32=0;
+    j_begin(dkey);
+    jf_dec1(&f,"rec_tenths",rec_t as i64);
+    jf_dec1(&f,"bnd_tenths",bnd_t as i64);
+    jf_dec1(&f,"rev_tenths",rev_tt);
+    jf_dec1(&f,"tax_tenths",tax);
+    j_end();
+    hfree(&s,bout);hfree(&s,rbase);hfree(&s,rlen);hfree(&s,cyc);
+    y_free(&s);
+}
+
+// ---- M7: ID-arm cache rig (ARM_INTERFACE.md §9; A7/A8 PROVISIONAL) ----
+// Ingest C (prose); ingest C again (round 1); ingest C' = C with deterministic
+// every-100th-unit first-byte XOR 0xFF (round 2). Lookup schedule: 5000
+// lookups, (l*37)%nunits, split 1666/1667/1667 across the three rounds.
+// A7/A8: the C' edit and lookup schedule are NOT frozen by the prereg; this
+// implements the harness validator's procedure literally, marked
+// PROVISIONAL-PENDING-FREEZE. Bars: hit >= 90%, reuse >= 1.5, dedup >= 0.4.
+fn t_m7(cdir:[]u8,is10:i32) void {
+    let cb1:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb1,cdir,"prose.bin")<0){_zag_println("M7,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(cb1.total);
+    let cap:i32=n+12000;
+    let le7:i32=200000;
+    if(is10==1){le7=1000000;}
+    let s:Y5=y_new(cap,le7,2*n+8192,1000000000,n+8192);
+    let bout:[]u8=halloc(&s,65536);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,Y5_C_PROSE,0,cb1.total);
+    // C' buffer: prose with every-100th 256B unit's first byte XOR 0xFF
+    let cb2:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_copy_from(&s,&cb2,&cb1)<0){_zag_println("M7,FATAL,cp-copy");return;}
+    let u100:i32=0;
+    while(u100<n){
+        if(u100%100==0){
+            let off:i32=u100*Y5_CHUNK;
+            cb_put(&cb2,off,(cb_get(&cb2,off) as i32 ^ 255) as u8);
+        }
+        u100=u100+1;
+    }
+    let rbase2:[]u8=halloc(&s,40);let rlen2:[]u8=halloc(&s,40);
+    reg_set(rbase2,rlen2,Y5_C_PROSE,0,cb1.total);
+    let idrefs:i64=0; // ID references: ingest resolutions + recall resolutions
+    let hits:i64=0;let lookups:i64=0;let reread:i64=0;
+    // round 0: ingest C + consolidate
+    ingest_all(&s,Y5_C_PROSE,cb1.total,0,0);
+    idrefs=idrefs+(n as i64);
+    y_link_pass(&s,&cb1,rbase,rlen);
+    let l:i32=0;
+    while(l<1666){
+        let idx:i32=(l*37)%n;
+        let sr:i32=y_ingest_grid(&s,Y5_C_PROSE,idx,cb1.total,0,0);
+        idrefs=idrefs+1;
+        let rl:i32=y_recall(&s,&cb1,rbase,rlen,sr,bout);
+        idrefs=idrefs+1;lookups=lookups+1;
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        l=l+1;
+    }
+    // round 1: ingest C again (dedup: same IDs)
+    ingest_all(&s,Y5_C_PROSE,cb1.total,0,0);
+    idrefs=idrefs+(n as i64);
+    y_link_pass(&s,&cb1,rbase,rlen);
+    l=1666;
+    while(l<1666+1667){
+        let idx:i32=(l*37)%n;
+        let sr:i32=y_ingest_grid(&s,Y5_C_PROSE,idx,cb1.total,0,0);
+        idrefs=idrefs+1;
+        let rl:i32=y_recall(&s,&cb1,rbase,rlen,sr,bout);
+        idrefs=idrefs+1;lookups=lookups+1;
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        l=l+1;
+    }
+    // round 2: ingest C' (same positional IDs, edited content)
+    ingest_all_cp(&s,&cb2,cb2.total);
+    idrefs=idrefs+(n as i64);
+    y_link_pass(&s,&cb2,rbase2,rlen2);
+    l=1666+1667;
+    while(l<5000){
+        let idx:i32=(l*37)%n;
+        let sr:i32=y_ingest_grid(&s,Y5_C_PROSE,idx,cb1.total,0,0);
+        idrefs=idrefs+1;
+        let rl:i32=y_recall(&s,&cb2,rbase2,rlen2,sr,bout);
+        idrefs=idrefs+1;lookups=lookups+1;
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        l=l+1;
+    }
+    let distinct:i32=y_count_live(&s);
+    let hit_t:i64=(hits*1000)/lookups;
+    // reuse = ID references / distinct live IDs, in tenths (24.5 -> 245)
+    let reuse_t:i64=(idrefs*10)/(distinct as i64);
+    // dedup = 1 - distinct stored / total ingested (rounds 1-2); in tenths of %
+    let dedup_t:i64=1000-((distinct as i64)*1000)/((2*n) as i64);
+    _zag_print("M7,hit,");p_dec1(hit_t);_zag_print(",reuse,");
+    p_dec1(reuse_t);_zag_print(",dedup,");p_dec1(dedup_t);_zag_println("");
+    let f:i32=0;
+    if(is10==1){j_begin("m7-10x");}else{j_begin("m7-1x");}
+    jf_dec1(&f,"m7_hit_rate_tenths",hit_t);
+    jf_dec1(&f,"m7_reuse_rate_tenths",reuse_t);
+    jf_int(&f,"m7_dedup_savings_bytes",dedup_t);
+    jf_str(&f,"m7_na_reason","ID-arm: provisional A7/A8 schedule");
+    jf_int(&f,"m7_reread_bytes",reread);
+    j_end();
+    hfree(&s,bout);hfree(&s,rbase);hfree(&s,rlen);
+    let fi7:i32=0;
+    while(fi7<cb2.nc){let fc7:[]u8=cb_sel(&cb2,fi7);hfree(&s,fc7);fi7=fi7+1;}
+    hfree(&s,rbase2);hfree(&s,rlen2);
+    y_free(&s);
+}
+// ingest from an explicit buffer (for M7's C' round)
+fn ingest_all_cp(s:*Y5,cb:*Cb,blen:i32) void {
+    let n:i32=nunits_of(blen);
+    let i:i32=0;
+    while(i<n){
+        y_ingest_grid(s,Y5_C_PROSE,i,blen,0,0);
+        i=i+1;
+    }
+}
+// ---- M8: determinism gate (m8-1x) ----
+// Runs the M1 (prose+code) + M3 op sequence on ONE large-capacity instance
+// (A17 combined-instance reading) and writes the §7 artifacts to argv[3].
+// Perturbation (argv[4]): clean | frag | aslr | starve | freelist.
+// frag: 256 raw allocs sizes (i*37)%4096+16, free every 3rd, before init.
+// aslr: one raw 1,234,567-byte pad held for the run. Both bypass the alloc
+// trace (raw nio_alloc). starve: in-arm no-op (runner LD_PRELOADs the shim).
+// freelist: no-op for Y5 (placement is a pure function of grid ID; A11).
+fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8,is10:i32) void {
+    // ---- perturbations (before init, raw allocs bypass the trace) ----
+    let aslr_pad:[]u8=nio_alloc(0);
+    if(_zag_strcmp(pert,"frag")==1){
+        let i:i32=0;
+        while(i<256){
+            let sz:i32=(i*37)%4096+16;
+            let b:[]u8=nio_alloc(sz);
+            if(i%3==0){nio_free(b);}
+            i=i+1;
+        }
+    }
+    if(_zag_strcmp(pert,"aslr")==1){
+        aslr_pad=nio_alloc(1234567);
+    }
+    // ---- corpora ----
+    let cb:Cb=Cb{.nc=0,.total=0,.c0="",.c1="",.c2="",.c3="",.c4="",.c5=""};
+    if(cb_load_file(&cb,cdir,"prose.bin")<0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let plen:i32=cb.total;
+    if(cb_load_file(&cb,cdir,"code.bin")<0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let clen:i32=cb.total-plen;
+    if(cb_load_file(&cb,cdir,"churn_fresh.bin")<0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let flen:i32=cb.total-plen-clen;
+    let nun_p:i32=nunits_of(plen);let nun_c:i32=nunits_of(clen);
+    let total:i32=nun_p+nun_c;
+    let cap:i32=total+20000;
+    // large-capacity instance (A17): no eviction pressure in the gate
+    let le8:i32=400000;
+    if(is10==1){le8=1000000;}
+    let s:Y5=y_new(cap,le8,2*cap+16384,1000000000,cap);
+    let bout:[]u8=halloc(&s,8192);
+    let live:[]u8=halloc(&s,cap*4);
+    // 1x trace equivalence: dummy cbufs halloc (original had it traced); never indexed so 10x size is safe
+    let cb_total8:i32=plen+clen+flen;
+    let cbufs:[]u8=halloc(&s,cb_total8);
+    let rbase:[]u8=halloc(&s,40);let rlen:[]u8=halloc(&s,40);
+    reg_set(rbase,rlen,Y5_C_PROSE,0,plen);
+    reg_set(rbase,rlen,Y5_C_CODE,plen,clen);
+    reg_set(rbase,rlen,Y5_C_FRESH,plen+clen,flen);
+    let corps:[]u8=halloc(&s,8);
+    iput(corps,0,Y5_C_PROSE);iput(corps,1,Y5_C_CODE);
+    // ---- M1 sequence: ingest both, consolidate, probe ----
+    ingest_all(&s,Y5_C_PROSE,plen,0,0);
+    y_link_pass(&s,&cb,rbase,rlen);
+    ingest_all(&s,Y5_C_CODE,clen,0,0);
+    y_link_pass(&s,&cb,rbase,rlen);
+    let nlive:i32=y_livelist(&s,live);
+    let cok:i32=0;let bok:i32=0;let idp:i32=0;
+    probe_all(&s,&cb,rbase,rlen,live,nlive,corps,2,bout,&cok,&bok,&idp,0);
+    let m1p:i64=(cok as i64)*1000/((nun_p+nun_c) as i64);
+    // ---- M3 sequence: valuable pin, fresh churn, kills, weaken ----
+    let vser:[]u8=halloc(&s,1000*4);
+    let vc:i32=0;
+    let ii:i32=0;
+    while(ii<nun_p){
+        let sr:i32=y_ingest_grid(&s,Y5_C_PROSE,ii,plen,0,0);
+        if(sr>=0 && ii%58==0 && vc<1000){iput(vser,vc*4,sr);y_pin(&s,sr);vc=vc+1;}
+        ii=ii+1;
+    }
+    let jj:i32=0;
+    while(jj<nun_c){
+        let sr:i32=y_ingest_grid(&s,Y5_C_CODE,jj,clen,0,0);
+        if(sr>=0 && jj%58==0 && vc<1000){iput(vser,vc*4,sr);y_pin(&s,sr);vc=vc+1;}
+        jj=jj+1;
+    }
+    let fb:i32=s.next_serial;
+    let f:i32=0;
+    while(f<7000){
+        y_ingest_fresh(&s,Y5_C_FRESH,f*64,64);
+        f=f+1;
+    }
+    f=0;
+    while(f<3000){
+        y_kill(&s,fb+f,KR_EXPLICIT);
+        f=f+1;
+    }
+    let w:i32=0;
+    while(w<50){
+        y_weaken(&s,iget(vser,(w*20)*4),w+1);
+        w=w+1;
+    }
+    // atomicity sweep (binding kill clause 2)
+    let atom_bad:i32=y_audit_atomicity(&s);
+    // ---- artifacts (§7) ----
+    // store image: rows + pool + liveq + cbase (persistent slot region)
+    let imglen:i32=s.cap*40+s.pool_cap*12+s.liveq_cap*4+40;
+    let nch:i32=(imglen+1048575)/1048576;
+    let ci:i32=0;
+    if(imglen<=33554432){
+        // 1x path: materialize the image (byte-identical to the frozen 1x build)
+        let img:[]u8=halloc(&s,imglen);
+        img_fill(&s,img);
+        let chain_in:[]u8=halloc(&s,nch*32);
+        ci=0;
+        while(ci<nch){
+            let cs:i32=ci*1048576;let cn:i32=imglen-cs;
+            if(cn>1048576){cn=1048576;}
+            ns_sha256(img[cs..cs+cn],chain_in[ci*32..ci*32+32]);
+            ci=ci+1;
+        }
+        let chl:[]u8=halloc(&s,nch*80);
+        let cho:i32=0;
+        ci=0;
+        while(ci<nch){
+            let hx:[]u8=ns_hex(chain_in[ci*32..ci*32+32]);
+            let tag:[]u8=_zag_i64_to_str(ci as i64);
+            chl[cho]=99;chl[cho+1]=104;chl[cho+2]=117;chl[cho+3]=110;chl[cho+4]=107;cho=cho+5;
+            let a2:i32=0;while(a2<tag.len){chl[cho]=tag[a2];cho=cho+1;a2=a2+1;}
+            chl[cho]=32;cho=cho+1;
+            let b2:i32=0;while(b2<hx.len){chl[cho]=hx[b2];cho=cho+1;b2=b2+1;}
+            chl[cho]=10;cho=cho+1;
+            nio_free(hx);nio_free(tag);
+            ci=ci+1;
+        }
+        write_file(outdir,"store_hashes.txt",chl[0..cho]);
+        let chain:[]u8=halloc(&s,32);
+        ns_sha256(chain_in,chain);
+        write_hex_line(outdir,"store_chain.txt","chain",chain);
+    }else{
+        // 10x path: stream the logical image in 1MB pieces (never > 2^25)
+        let chain_in:[]u8=halloc(&s,nch*32);
+        let scratch:[]u8=nio_alloc(1048576);
+        let r0:i32=s.cap*40;let r1:i32=s.pool_cap*12;let r2:i32=s.liveq_cap*4;
+        ci=0;
+        while(ci<nch){
+            let cs:i32=ci*1048576;let cn:i32=imglen-cs;
+            if(cn>1048576){cn=1048576;}
+            img_piece(&s,r0,r1,r2,cs,scratch,cn);
+            ns_sha256(scratch[0..cn],chain_in[ci*32..ci*32+32]);
+            ci=ci+1;
+        }
+        nio_free(scratch);
+        let chl:[]u8=halloc(&s,nch*80);
+        let cho:i32=0;
+        ci=0;
+        while(ci<nch){
+            let hx:[]u8=ns_hex(chain_in[ci*32..ci*32+32]);
+            let tag:[]u8=_zag_i64_to_str(ci as i64);
+            chl[cho]=99;chl[cho+1]=104;chl[cho+2]=117;chl[cho+3]=110;chl[cho+4]=107;cho=cho+5;
+            let a2:i32=0;while(a2<tag.len){chl[cho]=tag[a2];cho=cho+1;a2=a2+1;}
+            chl[cho]=32;cho=cho+1;
+            let b2:i32=0;while(b2<hx.len){chl[cho]=hx[b2];cho=cho+1;b2=b2+1;}
+            chl[cho]=10;cho=cho+1;
+            nio_free(hx);nio_free(tag);
+            ci=ci+1;
+        }
+        write_file(outdir,"store_hashes.txt",chl[0..cho]);
+        let chain:[]u8=halloc(&s,32);
+        ns_sha256(chain_in,chain);
+        write_hex_line(outdir,"store_chain.txt","chain",chain);
+    }
+    write_ledger(&s,outdir,"ledger.bin");
+    let lhash:[]u8=halloc(&s,32);
+    ledger_hash(&s,lhash);
+    write_hex_line(outdir,"ledger_chain.txt","chain",lhash);
+    write_file(outdir,"alloc_trace.txt",s.trace[0..s.trace_n]);
+    // stdout stays perturbation-agnostic (m8_compare requires identical)
+    _zag_print("M8,");p_dec1(m1p);_zag_print(",");
+    p_i64(s.led_n as i64);_zag_print(",");p_i64(atom_bad as i64);
+    _zag_println("");
+    hfree(&s,bout);hfree(&s,live);hfree(&s,cbufs);hfree(&s,rbase);
+    hfree(&s,rlen);hfree(&s,corps);hfree(&s,vser);
+    hfree(&s,lhash);
+    if(aslr_pad.len>0){nio_free(aslr_pad);}
+    y_free(&s);
+    // frag survivors: freed by OS at exit
+}
+// append src[0..n] into dst at at; returns new at
+fn img_append(dst:[]u8,at:i32,src:[]u8,n:i32) i32 {
+    let i:i32=0;
+    while(i<n){dst[at+i]=src[i];i=i+1;}
+    return at+n;
+}
+// write "<tag> <hex>\n" to dir/name
+fn write_hex_line(dir:[]u8,name:[]u8,tag:[]u8,hash:[]u8) void {
+    let hx:[]u8=ns_hex(hash);
+    let line:[]u8=nio_alloc(tag.len+1+hx.len+1);
+    let o:i32=0;
+    let i:i32=0;while(i<tag.len){line[o]=tag[i];o=o+1;i=i+1;}
+    line[o]=32;o=o+1;
+    i=0;while(i<hx.len){line[o]=hx[i];o=o+1;i=i+1;}
+    line[o]=10;o=o+1;
+    write_file(dir,name,line[0..o]);
+    nio_free(hx);nio_free(line);
+}
+
+// ---- main dispatch ----
+// Mode names match run_battery.sh legs exactly.
+fn usage() void {
+    _zag_println("usage: y5_arm <mode> <corpusdir> [outdir] [perturbation]");
+    _zag_println("modes: m1-1x-prose m1-1x-code m2-t1-prose m2-t1-code m2-t2-prose m2-t2-code m2-t3-1x m3-1x m4-1x-prose m4-1x-code m5-1x m5-baseline m6-p2c-1x m6-c2p-1x m7-1x m8-1x");
+    _zag_println("10x: m1-10x-prose m1-10x-code m2-10x-t1-prose m2-10x-t1-code m2-10x-t2-prose m2-10x-t2-code m2-10x-t3 m3-10x m4-10x-prose m4-10x-code m5-10x m6-p2c-10x m6-c2p-10x m7-10x m8-10x");
+}
+fn main() i32 {
+    let mode:[]u8=_zag_arg(1);
+    let cdir:[]u8=_zag_arg(2);
+    if(_zag_strcmp(mode,"m1-10x-prose")==1){t_m1(cdir,"prose.bin",Y5_C_PROSE,"prose","m1-10x-prose");return 0;}
+    if(_zag_strcmp(mode,"m1-10x-code")==1){t_m1(cdir,"code.bin",Y5_C_CODE,"code","m1-10x-code");return 0;}
+    if(_zag_strcmp(mode,"m2-10x-t1-prose")==1){t_m2(cdir,"t1_prose.bin",Y5_C_T1P,"m2-10x-t1-prose",0);return 0;}
+    if(_zag_strcmp(mode,"m2-10x-t1-code")==1){t_m2(cdir,"t1_code.bin",Y5_C_T1C,"m2-10x-t1-code",0);return 0;}
+    if(_zag_strcmp(mode,"m2-10x-t2-prose")==1){t_m2(cdir,"t2_prose.bin",Y5_C_T2P,"m2-10x-t2-prose",0);return 0;}
+    if(_zag_strcmp(mode,"m2-10x-t2-code")==1){t_m2(cdir,"t2_code.bin",Y5_C_T2C,"m2-10x-t2-code",0);return 0;}
+    if(_zag_strcmp(mode,"m2-10x-t3")==1){t_m2(cdir,"t3.bin",Y5_C_T3,"m2-10x-t3",0);return 0;}
+    if(_zag_strcmp(mode,"m3-10x")==1){t_m3(cdir);return 0;}
+    if(_zag_strcmp(mode,"m4-10x-prose")==1){t_m4(cdir,"prose.bin",Y5_C_PROSE,0,"m4-10x-prose");return 0;}
+    if(_zag_strcmp(mode,"m4-10x-code")==1){t_m4(cdir,"code.bin",Y5_C_CODE,1,"m4-10x-code");return 0;}
+    if(_zag_strcmp(mode,"m5-10x")==1){t_m5(cdir,1);return 0;}
+    if(_zag_strcmp(mode,"m6-p2c-10x")==1){t_m6(cdir,0,1);return 0;}
+    if(_zag_strcmp(mode,"m6-c2p-10x")==1){t_m6(cdir,1,1);return 0;}
+    if(_zag_strcmp(mode,"m7-10x")==1){t_m7(cdir,1);return 0;}
+    if(_zag_strcmp(mode,"m8-10x")==1){
+        let o:[]u8=_zag_arg(3);
+        let p:[]u8=_zag_arg(4);
+        t_m8(cdir,o,p,1);return 0;
+    }
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){t_m1(cdir,"prose.bin",Y5_C_PROSE,"prose","m1-1x-prose");}
+    else{
+        if(_zag_strcmp(mode,"m1-1x-code")==1){t_m1(cdir,"code.bin",Y5_C_CODE,"code","m1-1x-code");}
+        else{
+            if(_zag_strcmp(mode,"m2-t1-prose")==1){t_m2(cdir,"t1_prose.bin",Y5_C_T1P,"m2-t1-prose",0);}
+            else{
+                if(_zag_strcmp(mode,"m2-t1-code")==1){t_m2(cdir,"t1_code.bin",Y5_C_T1C,"m2-t1-code",0);}
+                else{
+                    if(_zag_strcmp(mode,"m2-t2-prose")==1){t_m2(cdir,"t2_prose.bin",Y5_C_T2P,"m2-t2-prose",0);}
+                    else{
+                        if(_zag_strcmp(mode,"m2-t2-code")==1){t_m2(cdir,"t2_code.bin",Y5_C_T2C,"m2-t2-code",0);}
+                        else{
+                            if(_zag_strcmp(mode,"m2-t3-1x")==1){t_m2(cdir,"t3.bin",Y5_C_T3,"m2-t3-1x",0);}
+                            else{
+                                if(_zag_strcmp(mode,"m3-1x")==1){t_m3(cdir);}
+                                else{
+                                    if(_zag_strcmp(mode,"m4-1x-prose")==1){t_m4(cdir,"prose.bin",Y5_C_PROSE,0,"m4-1x-prose");}
+                                    else{
+                                        if(_zag_strcmp(mode,"m4-1x-code")==1){t_m4(cdir,"code.bin",Y5_C_CODE,1,"m4-1x-code");}
+                                        else{
+                                            if(_zag_strcmp(mode,"m5-1x")==1){t_m5(cdir,0);}
+                                            else{
+                                                if(_zag_strcmp(mode,"m5-baseline")==1){t_m5_baseline(cdir);}
+                                                else{
+                                                    if(_zag_strcmp(mode,"m6-p2c-1x")==1){t_m6(cdir,0,0);}
+                                                    else{
+                                                        if(_zag_strcmp(mode,"m6-c2p-1x")==1){t_m6(cdir,1,0);}
+                                                        else{
+                                                            if(_zag_strcmp(mode,"m7-1x")==1){t_m7(cdir,0);}
+                                                            else{
+                                                                if(_zag_strcmp(mode,"m8-1x")==1){
+                                                                    let o:[]u8=_zag_arg(3);
+                                                                    let p:[]u8=_zag_arg(4);
+                                                                    t_m8(cdir,o,p,0);
+                                                                }else{usage();return 1;}
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
