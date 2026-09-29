@@ -101,6 +101,17 @@ invented. The X-R1 downgrade's core point stands and is now explicit:
 policy content is researcher-supplied; what the learner contributes is
 rule structure, threshold compilation, and auditable provenance.
 
+## Governance note
+
+Commit hygiene: the implementation, result doc, and raw evidence were
+swept into a concurrent agent's commit (`28266d158`, "PREREG H-SEG2
+FROZEN") via a broad `git add`. Content is byte-identical to what this
+task produced (verified by blob md5), and the frozen commit order holds:
+prereg `fb7ea5d56` is a strict ancestor of `28266d158`. No other agent's
+files were touched by this task; `router2_learn.zag` and all adversary
+files are unmodified. This follow-up commit carries the correct H-ROUTER3
+label for the record.
+
 ## Lineage
 
 - H-ROUTER (authored predicates, SURVIVES): baseline; threshold probes now
