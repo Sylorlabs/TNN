@@ -261,6 +261,16 @@ Two of four attacks met kill criteria.
 
 **Commits:** prereg fb7ea5d56; implementation via 28266d158 (sweep, content verified); label a27390d29.
 
+**H-ROUTER3 RED TEAM DOWNGRADE (2026-09-29):** X-R3-2 succeeds.
+
+**Merger evasion:** The diagnostic only detects cross-family mark-merging. Single-family gaming (confined to s0=1) gets zero diagnostics. Worse: the threshold compiler GENERALIZES the gamed marks, emitting [s0=1&s1>=2]->CAUS_LEARN from gamed entries. Traceability holds, detection does not.
+
+**Narrowed:** The mark-merger diagnostic is a cross-family detector, not a general gaming detector. The paper should state explicitly that traceability is not detection.
+
+**Also noted:** The repair's robustness to contradictions depends on an inherited contest mechanism not mentioned in the result doc.
+
+**Commits:** red team prereg b6afe8c8c; amend 162ada9c2; result 6f5f81c5d.
+
 ---
 
 ### 2.7 Unified Learner (unified_learn.zag)
