@@ -239,23 +239,39 @@ The mechanism meets criteria 1-11. It fails criterion 12 (revision after counter
 
 ### 2.7 Unified Learner (unified_learn.zag)
 
-**Classification:** Bounded L2 integration
+**Classification:** KILLED by red team (2026-09-29). Was bounded L2 integration.
 
-**What it does:** One Zag process, unlabeled stream, no reset. Combines structure-inferred routing, direct procedure learning, bridge fallback, causal learning, and queries in a single continuing learner.
+**What it did:** One Zag process, unlabeled stream, no reset. Combined structure-inferred routing, direct procedure learning, bridge fallback, causal learning, and queries in a single continuing learner.
 
-**Validated evidence:**
+**Previously validated (now superseded by kill):**
 
 - 9/9 PASS.
 - First run scored 8/9 because uniform-length evidence selected constant 2; adding varied-length evidence forced n-1. Mechanism unchanged; both runs documented.
-- **H-STRESS:** 16 interleaved learning events (4 simple procedures, 4 conditional bridge procedures, 4 store-fill procedures, 2 causal-fill episodes, ambiguity and over-full probes) in one process. Initial run KILLED at 14/17 on slot-0. H-DIAG recharacterized the failure as discovery-time overfitting (3-K stored, not retention corruption). H-GENBIAS repaired at the source. Re-run SURVIVES 17/17. Graceful degradation validated (honest -1 returns, no crashes, no cross-store corruption).
+- H-STRESS: 16 interleaved learning events in one process. Initial run KILLED at 14/17 on slot-0. H-DIAG recharacterized as discovery-time overfitting. H-GENBIAS repaired at source. Re-run SURVIVES 17/17.
 
-**Boundaries:**
+**THE KILL (H-UNIFIED Red Team, 2026-09-29):**
 
-- F-LEAK bug confirmed and now fixed (see 2.4).
-- No procedure-intent retrieval (queries apply all slots). H-INTENT (see 2.8) addresses this but is not yet ported.
-- Causal path is simplified; full contest/split/merge not yet ported (NQ9, in progress).
+U-A2 (compositional interference): The red team learned genuine causal episodes through the frozen router, verified cpredict(1,0,0) -> s1=0 (the frozen K-U3 answer). Then fed interfering item "1,0,0>9,9;1,0,0>9,9". The frozen router returned CAUS_LEARN. The causal store marked rule R1 CONFLICTED and learned spurious R2 (IF s0==1 AND a==0 THEN s1:=9). Re-check: cpredict(1,0,0) now yields s1=9. Previously verified knowledge was REPLACED, not just lost.
 
-**Commits:** prereg d652fdaee; result f5dd7cdc7; H-STRESS prereg 12dda2060, initial result 8cd6d8cf0 (KILLED 14/17), diagnosis prereg cf50b7442 result a448f834a, repair prereg 71e9d3b97 result 0763c13d8.
+The red team scoped honestly: the causal learner in isolation behaved as designed (contradictory evidence -> conflict -> revise; validated under H-CAUSAL). The defect is compositional: the unlabeled demultiplexer is format-only, formats collide, and the causal revision policy assumes all items are evidence about one system.
+
+**Three downgrades:**
+
+- U-A1: Router taxonomy holes. Digit-string procedures ("321>123;654>456") unroutable. Some items silently committed to CAUS_LEARN with no ambiguity signal.
+- U-A3: Bridge trigger misfire. "ff>ff" fails pextract, vetoing direct discovery for the whole item. Bridge fired spurious-but-equivalent conditional (both branches reverse). Wastes 2 slots + 1 rule.
+- U-A4: Query ambiguity exhibited. "abc" with reverse + broadcast stored -> 2 conflicting outputs, no ranking. Concrete exhibit of the known gap (H-INTENT port addresses this).
+
+**U-A5 PASS:** Source audit clean. No hardcoded answers.
+
+**Disposition:** H-UNIFIED KILLED. Repair in progress at the composition layer (router ambiguity signal or coherence-gated revision). The 9/9 and 17/17 results stand as historical evidence of what the mechanism could do; the general no-interference property does not hold.
+
+**Boundaries (pre-kill):**
+
+- F-LEAK bug confirmed and fixed.
+- No procedure-intent retrieval (H-INTENT port in progress).
+- Causal path simplified; full contest/split/merge port in progress (NQ9).
+
+**Commits:** prereg d652fdaee; result f5dd7cdc7; H-STRESS prereg 12dda2060, initial 8cd6d8cf0 (KILLED 14/17), diagnosis cf50b7442/a448f834a, repair 71e9d3b97/0763c13d8; adversary prereg 1498235e7, result 383c05aeb.
 
 ---
 
@@ -582,7 +598,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
 | Learned router v2 | Bounded L2 | Predicates learned; features authored; equality-only |
-| Unified learner | Bounded L2 | 9/9; stress 17/17; intent/causal ports pending |
+| Unified learner | KILLED | Compositional interference: verified knowledge replaced by colliding-format item |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
 | Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
