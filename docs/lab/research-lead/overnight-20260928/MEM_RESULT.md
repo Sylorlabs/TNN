@@ -3,7 +3,8 @@
 **Date:** 2026-09-29
 **Prereg:** PREREG_MEM.md (commit 304918d7b, frozen before implementation)
 **Implementation:** mem_learn.zag (pure Zag, no Python)
-**Verdict:** H-MEM SURVIVES (6/6 bars)
+**Verdict:** H-MEM SURVIVES WITH DOWNGRADE (6/6 bars pass as written;
+independent adversary narrowed the interpretation, 2026-09-29)
 
 ## What was built
 
@@ -108,9 +109,75 @@ gathered by generic counters; the selection is data-driven and revisable
   eviction layer is new and standalone. No changes were made to the unified
   learner.
 
-## Red team
+## Red team (independent adversary, completed 2026-09-29)
 
-Independent adversary review pending (to be appended). Self-checks done:
-commit order valid (prereg 304918d7b precedes implementation), pure Zag
-(no Python in source, build, or verification; determinism checked with
-shell cmp), no frozen bar altered after execution.
+Adversary prereg: `ef71f58f2` (M-A1..M-A6, frozen before any attack ran).
+Adversary evidence and verdict: `f020e94f4`
+(`mem_adv.zag`, `MEM_ADV_RAW_OUTPUT.txt`, `MEM_ADVERSARY.md`).
+Pure Zag throughout; no Python.
+
+**Verdict: H-MEM SURVIVES WITH DOWNGRADE.** All six frozen bars verify as
+written and governance is clean, so the hypothesis is not killed. The
+interpretation is narrowed (see below).
+
+Per-attack results:
+
+- M-A1 (hot newcomer): NO-KILL on the kill criterion, DOWNGRADE on
+  re-selection. The kill (hot newcomer evicted while a colder proc survives)
+  is unreachable by construction: a policy victimizing a proc with h window
+  hits costs exactly h, so strict argmin can never evict the window-hottest
+  proc. Empirically confirmed: LFU victimized a hot newcomer (cost 5) but
+  argmin overruled it and selected LRU (cost 0); the newcomer survived. This
+  is evidence FOR the mechanism. Downgrade: post-first-pressure events are
+  degenerate newcomer churn (multi-way cost ties at 0, unqueried newcomer
+  evicted), making "re-selection on every pressure event" substantively
+  vacuous.
+- M-A2 (trace staleness): NO-KILL. 800 ancient queries changed nothing:
+  selection identical to the 8-query baseline. The windowed cost is robust to
+  arbitrary ancient history. Caveat: victim stats printed in the trace are
+  lifetime (an evicted proc showed "uses=100", all ancient), so the K-M2
+  display conflates lifetime with recent.
+- M-A3 (degenerate agreement): DOWNGRADE. 7 of the 8 builder pressure events
+  show victim agreement and/or winner-cost ties decided by the authored
+  tie-break. Only Stream A event 0 was a strict, non-degenerate,
+  experience-driven selection.
+- M-A4 (independent recomputation): NO-KILL on bars, with a RECORD
+  CORRECTION (see below). All frozen arithmetic verified from source.
+- M-A5 (governance): PASS. Prereg `304918d7b` is an ancestor of
+  implementation `75842e367`. No Python anywhere. Independent rebuild from
+  committed source: two fresh runs byte-identical via cmp, and fresh output
+  byte-identical to committed MEM_RAW_OUTPUT.txt.
+- M-A6a (window fragility): DOWNGRADE. Both streams' selections vary with the
+  authored window size (Stream B: win10->LFU, win20->LRU, win40->LRU,
+  win86->LFU; Stream A: win10->LRU, win20->LFU, win68->LFU). Window=20 is
+  load-bearing for the K-M5 narrative.
+- M-A6b (held-out future): DOWNGRADE of "effective". On held-out futures
+  after Stream A's strict LFU win: trend continuation -> selected LFU
+  tied-best (0 misses); regime flip (evicted proc5 queried x20) -> selected
+  LFU strictly worst of the menu (20 misses vs 0 for all others). The bars
+  measure the proxy (recent-window cost), never the goal (future misses);
+  the proxy-goal link rests on an assumed stationarity rationale, not a
+  demonstration.
+
+### Record correction (M-A4)
+
+The prereg's "Winner: LRU, strictly" for Stream B is inaccurate: RANDOM also
+scored cost 0 at event 0 (victim slot3), so LRU won by the disclosed
+tie-break, not strictly. No frozen bar breaks as written (K-M1b asserts the
+LRU selection and slot3 victim, both true), but the headline Stream B result
+must henceforth be cited as "LRU selected by tie-break over RANDOM (both
+cost 0)".
+
+### Narrowed claim the evidence supports
+
+Argmin over replay costs selects LFU (strictly, once: Stream A event 0) and
+LRU (by tie-break over RANDOM: Stream B event 0) on two authored streams
+with the authored window=20. Selection is not hardcoded, provably protects
+window-hot procs, is robust to ancient history, and is deterministic and
+independently reproducible. What is NOT supported: "developed an effective
+memory strategy" in general (held-out regime flip defeats it), or
+substantive "re-selection on every pressure event" (degenerate after event
+0). The window size is load-bearing and authored.
+
+Classification stands: bounded L2 experience-driven policy selection,
+explicitly not L3 and not policy-form invention.
