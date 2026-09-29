@@ -410,19 +410,29 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 
 ### 2.11 Memory Strategy / H-MEM (mem_learn.zag)
 
-**Classification:** Bounded L2 (result reported by builder; adversary running)
+**Classification:** SURVIVES WITH DOWNGRADE. Bounded L2 experience-driven policy selection (narrowed).
 
-**What it does:** Tests whether TNN can invent its own memory management strategy under pressure. 8-slot store, two different streams.
+**What it does:** Tests whether TNN can develop its own memory management strategy under store pressure. 8-slot store, menu of 5 candidate eviction policies (LFU, LRU, FIFO, LIFO, RANDOM), selection by replaying query trace.
 
-**Interim result (builder committed, adversary in progress):**
+**Builder result (6/6 frozen bars PASS):**
 
-- Prereg 304918d7b (frozen K-M1 through K-M5, before implementation).
-- Implementation 75842e367.
-- Stream A induces LFU (least-frequently-used) eviction policy.
-- Stream B induces LRU (least-recently-used) eviction policy.
-- The learner selects different policies for different access patterns.
+- Stream A → LFU selected (victim slot5/proc5, cost 1 < FIFO 3).
+- Stream B → LRU selected (victim slot3/proc3, cost 0 < FIFO 10).
+- Same code selects different policies on different streams.
 
-**Status:** Builder complete. Independent adversary currently running. Final verdict pending.
+**THE ADVERSARY DOWNGRADE:**
+
+- M-A1: Post-event-0 "re-selection" is degenerate newcomer churn.
+- M-A3: 7 of 8 pressure events are ties/agreements resolved by tie-break. Only Stream A event 0 was strict experience-driven selection.
+- M-A4 (record correction): Stream B "LRU strictly" was wrong. RANDOM also cost 0; LRU won by tie-break.
+- M-A6a: Window=20 is load-bearing (authored).
+- M-A6b: Held-out regime flip makes selected LFU strictly worst of menu. Bars measure proxy, never goal.
+
+**Honest narrowed claim:** Argmin over replay costs selects LFU (strictly, once) and LRU (by tie-break over RANDOM) on two authored streams with authored window=20. Not hardcoded. Protects window-hot procs. Robust to ancient history. Deterministic and independently reproducible.
+
+**Not:** Policy-form invention. Not L3.
+
+**Commits:** prereg 304918d7b; implementation 75842e367; adversary prereg ef71f58f2, verdict f020e94f4; correction 09408bf98.
 
 ---
 
