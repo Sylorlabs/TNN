@@ -842,7 +842,7 @@ No mechanism has achieved L3.
 - NQ8: Answered by H-FDCR2. Complete.
 - NQ9: Answered by H-CAUSAL-UNIFIED (28/28, DOWNGRADED by red team). H-CAUSAL-UNIFIED2 SURVIVES (5/5, DOWNGRADED by red team). H-CAUSAL-UNIFIED3 SURVIVES (6/6 + 28/28, red team SURVIVES all 4 attacks, SUPERSEDED by H-CAUSAL-UNIFIED4). H-CAUSAL-UNIFIED4 SURVIVES (16/16 builder battery, DOWNGRADED by red team). Repair in progress.
 - Procedure revision v2: H-REVISE2 SURVIVES. Red team in progress.
-- Synthetic language: H-SYNLANG KILLED. H-SEG KILLED (2/3, shared-substring). H-SEG2 SURVIVES (5/5, DOWNGRADED by red team). H-SEG3 SURVIVES (9/9, red team SURVIVES all 4 attacks). H-SEG4 SURVIVES (13/13, red team SURVIVES all 4 attacks; H1-T count corrected to 2^29, SUPERSEDED by H-SEG5). H-SEG5 SURVIVES (5/5; off-route-clamp hole closed by induction proof). Red team in progress.
+- Synthetic language: H-SYNLANG KILLED. H-SEG KILLED (2/3, shared-substring). H-SEG2 SURVIVES (5/5, DOWNGRADED by red team). H-SEG3 SURVIVES (9/9, red team SURVIVES all 4 attacks). H-SEG4 SURVIVES (13/13, red team SURVIVES all 4 attacks; H1-T count corrected to 2^29, SUPERSEDED by H-SEG5). H-SEG5 SURVIVES (5/5; off-route-clamp hole closed by induction proof; red team SURVIVES all 4 attacks). Frontier in progress.
 
 **H-SEG KILLED (2/3):** First empirical segmentation test. SEG-LEX (statistical chunk-lexicon learner) killed by shared-substring limitation.
 
