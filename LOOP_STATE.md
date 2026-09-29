@@ -3854,3 +3854,108 @@ overlapping-block claim stays unproven (red-team flag, narrowed);
 the descendant-subagent runtime failure killed four waves this week
 and this wave ran inline with no nested subagents; zero origin
 commits this window.
+
+## Wave 20260929-1421pdt verdicts
+
+Wave pin: d18f7f68d (wave-20260929-1121pdt INCOMPLETE tip). This wave ran
+INLINE with no nested subagents: the descendant-subagent runtime failure
+mode ("follow-up has no durable chat owner") killed three waves this week
+(20260928-1121pdt, 20260928-1421pdt, 20260929-1121pdt), and the 0821pdt
+inline precedent completed cleanly. Deviation documented in the wave
+record. Debate: debate/ADVOCATE_1421.md, debate/SKEPTIC_1421.md,
+debate/JUDGE_1421.md under docs/lab/rsi/runs/wave-20260929-1421pdt/
+(6 motions M1-M6; skeptic's provenance probe answered verbatim in every
+motion). No verdict overturned on rhetoric; the skeptic's attacks sustained
+as narrowing caveats. No frozen bar weakened; zero Python; no em-dashes in
+wave documentation.
+
+1. H-CAUSAL2 (independent causal arc) [NEW]: ADOPT as SURVIVES (bounded,
+L2 structural learning, not L3). The 1121pdt wave record's "separate
+commits" claim is FALSE against the commit record (every causal2 file
+first appears in the single commit d18f7f68d): recorded UNVERIFIABLE
+ORDERING for 1121pdt, claim struck (red-team F1). S8 remedy applied this
+wave: prereg text re-frozen byte-identical and committed alone
+(55fece368), then the full battery re-run under it with the pinned znc
+(498abcb5). The world regenerated all six frozen observation logs
+byte-identically; learner and baselines reproduced all 18 evidence outputs
+byte-identically (cmp-verified). All eight frozen kill bars PASS on the
+re-run evidence, independently recomputed: K2-1 P-B2a (2,1,0) and P-B2b
+(0,0,0); K2-2 P-A2 (0,1,0) by rule while B-memorize withholds, plus P-B2c
+(0,0,1) by rule on an unseen lamp value; K2-3 P-C2a (1,1,0), P-C2b
+(1,1,1), P-C2c (0,0,0) with the full provenance chain (AMBIGUOUS {s1,s2}
+seq11, REFUTE s2 seq12, SPLIT on s1, CONTEST with WITHHOLD at C1w,
+RESOLVE seq15, loser SUPERSEDED "valid only before seq 12", SPLIT on s2,
+MERGE seq17); K2-4 P-B1 WITHHOLD under ambiguity; K2-5 learner correct on
+P-B2a where B-unconditional predicts (1,1,0), correct-or-honest on all 15
+scored probes; K2-6 6/6 reruns byte-identical; K2-7 zero task-word hits in
+learn2.zag and byte-identical (fbd9427d) to the first arc's learner, so
+authorship separation holds by construction; K2-8 explicit REFUTE of the
+lamp candidate retained with provenance. Mandatory traveling caveats: the
+S8 re-freeze establishes ordering for the re-run evidence commit, not for
+the original 1121pdt source authorship (authorship separation rests on
+K2-7 by-construction); P-B2a is answered by exact-episode recall of seq12
+while the rule-application evidence is P-A2 and P-B2c (F5 narrowing);
+bounded scope (3 variables, hand-fed phases, single binary condition);
+contest threshold fixed at 2 vs 1, noisy data untested. Classification L2,
+explicitly not L3, per the prereg's own disclaimer. Commits: prereg
+55fece368, evidence 12c566a75, debate plus records f55405f4d.
+
+2. Fork battery [NEW]: CONFIRM as a process confirmation (toolchain and
+extraction stability only). Fresh 71-entry run, driver exit 0: 69 PASS, 0
+FAIL, 2 UNTESTABLE (rh-pull-1-head, rh-pull-2-head, the known non-TNN
+research-doc trees). Uniform on all 69 tested: znc pin 498abcb5 (0 pin
+divergence); probe sha 3b29aa06; b1/b2/b3 PASS, b1_cmp/b2_bin_cmp PASS;
+NEG1 E0002 69/69; NEG2 char-1 discrimination 69/69; probe_run_stdout
+R32_ZNC_PROBE_OK 69/69; harness_verdict_pass_count 1 on 69/69. LIVE
+entries (2): arch-wave-20260929-1121pdt at d18f7f68d (newly enumerated
+archive, created this wave to pin the 1121pdt partial-evidence tip),
+local-tnn-native-lab at d18f7f68d (run-start tip). The 1121pdt battery
+(69 entries) was debate-confirmed on its intact inherited evidence as a
+re-tally (67 PASS / 0 FAIL / 2 UNTESTABLE) with the missing-debate process
+gap recorded; the fresh run supersedes it for process-confirmation
+purposes. Remote: zero new refs (origin/tnn-native-lab bedf8b4a, HEAD
+27a4271f, all pins unchanged).
+
+3. Interactive survey [NEW]: NONE new. Zero .zag files added or modified
+in d18f7f68d..55fece368. The frozen probe instruments remain the only
+chat-capable instruments. tnn_chat FIT staleness 1 of 8 (fresh re-run at
+0821pdt; due at 8 of 8).
+
+4. pi_rev2 lane [NEW]: NO-EVIDENCE. The 1121pdt pi_rev2 directory is
+empty; the worker delivered nothing before the runtime death. No verdict
+possible; not a kill, not a pass. Debate M5 banks the commitment: the next
+wave's design lane freezes the procedure-invention v2 revision prereg
+(targeting L3 criterion 12) as its first act. The standing queue (procedure
+revision/counterexample) is explicitly re-affirmed.
+
+5. Commit-order self-check [NEW]: VALID under S8. Prereg freeze 55fece368
+strictly precedes the re-run evidence commit 12c566a75; red-team and
+debate follow. Recorded distinction: the check passes for the
+evidence-run commit; the implementation sources' first commit (d18f7f68d)
+precedes the re-freeze, and authorship separation for those sources rests
+on K2-7 by-construction. No candidate adopted on 1121pdt ordering.
+
+6. Design lane [NEW]: no new mechanism this wave (slot spent completing
+1121pdt). Queue re-affirmed: (1) pi_rev2 prereg freeze next wave, first
+act; (2) H-EXP2 (hidden-law execution, second-author adversarial pair);
+(3) H-ROUTER2 (NQ2); (4) NQ4/NQ5 banked to Micah. Sensory NULL
+(stand-downs hold); intelligence trades HELD.
+
+Provenance (verbatim probe answered in every debate motion): H-CAUSAL2
+prereg text, sources, logs, and probes inherited from 1121pdt; new this
+wave are the re-freeze commit, the re-run evidence (byte-identical
+reproductions), the red-team review, debate records, and the wave record.
+Fork battery 1421pdt evidence new; 1121pdt battery evidence inherited.
+Interactive survey new. pi_rev2: nothing exists. All HELD statuses,
+rulings, banked questions, governance items, sealed pairs, DP-1, salt
+dispositions, and frontier dirs remain inherited and untouched.
+
+Queued next: pi_rev2 prereg freeze (next wave, first design-lane act);
+H-EXP2; H-ROUTER2; NQ4/NQ5 banked to Micah; tnn_chat FIT due at 8 of 8
+(staleness 1 of 8); his six pending governance rulings (untouched); his
+blind verdicts on the sealed pairs (unchanged, nothing added this wave);
+DP-1 presentation is a parent-agent queue decision; Q1/Q2 banked. The
+_zag_malloc overlapping-block claim stays unproven (red-team flag,
+narrowed). The descendant-subagent runtime failure killed three waves this
+week; this wave's inline run completed cleanly. Zero origin commits this
+window.

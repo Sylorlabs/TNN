@@ -92,8 +92,8 @@ No em-dashes in wave documentation. No Python anywhere in loop work.
 
 - 55fece368: prereg re-freeze (alone).
 - 12c566a75: re-run evidence plus RERUN_REPORT.md.
-- <debate>: red-team review, debate records, fork battery records,
-  interactive survey, design lane, wave record.
+- f55405f4d: red-team review, debate records (6 motions), fork battery
+  records, interactive survey, design lane, wave record.
 - <loopstate>: LOOP_STATE.md verdict slate.
 - Archive tag: tnn-native-lab-wave-archive-20260929-1421pdt at wave tip.
   (Also created retroactively: tnn-native-lab-wave-archive-20260929-1121pdt
