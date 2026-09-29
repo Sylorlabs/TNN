@@ -277,7 +277,7 @@ Two of four attacks met kill criteria.
 
 **Red team downgrade:** X-R4-1 succeeds. Task-swap evasion: two mark changes preserve learn-task counts in both families, so both diagnostics stay silent. Corruption amplified to unobserved s1=5. The manifest honestly attributes the corrupted rules — traceability holds, detection does not. Repaired by H-ROUTER5.
 
-**H-ROUTER5 SURVIVES (all frozen kill bars):** X-R4-1 repaired by task-family consistency diagnostic (`audit_task_family`). Query vs learn family marks must be consistent within curriculum. SWAP → tfam=3; honest → tfam=0. Reference-free swap detection is impossible (disclosed); this is a within-curriculum consistency check, not a correctness oracle. Red team in progress.
+**H-ROUTER5 SURVIVES (all frozen kill bars, DOWNGRADED by red team):** X-R4-1 repaired by task-family consistency diagnostic (`audit_task_family`). Query vs learn family marks must be consistent within curriculum. SWAP → tfam=3; honest → tfam=0. Reference-free swap detection is impossible (disclosed); this is a within-curriculum consistency check, not a correctness oracle. Red team downgrade: anchor pollution silences the check; summary overstates. Repair in progress.
 
 ---
 
