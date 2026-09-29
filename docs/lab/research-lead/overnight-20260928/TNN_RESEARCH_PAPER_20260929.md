@@ -782,7 +782,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
 | Learned router v2 | DOWNGRADED | Supervised compiler, not policy discoverer; diverges on nseg≥5 |
-| Unified learner | REPAIRED (H-UNIFIED7, 22/22; H-UNIFIED6 DOWNGRADED by red team, SUPERSEDED by H-UNIFIED7; H-UNIFIED5 red team SURVIVES all 4 attacks; H-UNIFIED7 red team SURVIVES 3/4 with 1 boundary) | Programmatic parse flag; defense-in-depth shape gates; stream cannot reach revise; digit-magnitude overflow covered by -2 MAGNITUDE_OVERFLOW; zero-padding boundary documented |
+| Unified learner | REPAIRED (H-UNIFIED8, 23/23; H-UNIFIED7 red team SURVIVES 3/4 with 1 boundary, SUPERSEDED by H-UNIFIED8; H-UNIFIED6 DOWNGRADED by red team, SUPERSEDED by H-UNIFIED7; H-UNIFIED5 red team SURVIVES all 4 attacks) | Programmatic parse flag; defense-in-depth shape gates; stream cannot reach revise; digit-magnitude overflow covered by -2 MAGNITUDE_OVERFLOW; significant-digit counting |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
 | Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
