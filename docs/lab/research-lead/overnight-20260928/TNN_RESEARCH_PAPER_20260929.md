@@ -249,6 +249,18 @@ Two of four attacks met kill criteria.
 
 **Commits:** prereg 635787932; result 313b840ed; red team prereg 48ed09d9c, result b449bed2c.
 
+**H-ROUTER3 SURVIVES (4/4):** Genuine repair of both H-ROUTER2 kills.
+
+**Threshold compilation (X-R3):** Detects clean-boundary pattern and compiles [s0=1&s1>=2]->PROC_LEARN etc. 10/10 on nseg=5-9 matching H-ROUTER's authored predicate. The 8 consumed equality entries marked COMPACTED (white-box audit trail).
+
+**Mark-dependence manifest + consistency audits (X-R1):** Every compiled rule lists supporting curriculum marks. Replay 18/18 on both honest and gamed runs. Mark-merger diagnostic fires on gamed curriculum (task spans multiple s0-families). Gamed run flagged, not silently accepted.
+
+**Results:** All 4 frozen kill bars PASS. 16/16 original suite identical. 3 runs byte-identical.
+
+**Classification:** Bounded L2+ structural learning with threshold vocabulary enrichment. NOT L3: features authored, marks supplied, threshold preference researcher-chosen. The learner contributes rule structure, threshold compilation, and auditable provenance, not policy content.
+
+**Commits:** prereg fb7ea5d56; implementation via 28266d158 (sweep, content verified); label a27390d29.
+
 ---
 
 ### 2.7 Unified Learner (unified_learn.zag)
