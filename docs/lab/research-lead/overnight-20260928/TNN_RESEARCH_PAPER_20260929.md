@@ -746,7 +746,19 @@ No mechanism has achieved L3.
 
 - NQ1: Causal v2 (conjunctions, inequalities, delayed effects). In progress.
 - NQ2: Answered by H-ROUTER2 (downgraded). Repair in progress.
-- NQ3: Answered by H-EXP2 (downgraded to state selection). Reachability in progress.
+- NQ3: Answered by H-EXP2 (downgraded to state selection). H-EXP3 SURVIVES (reachability awareness). Red team in progress.
+
+**H-EXP3 SURVIVES (4/4):** Reachability-aware experiment selection. Addresses both H-EXP2 downgrades.
+
+**X-A1 (reachability):** New compute_controllable() scans the learner's own episodes: a variable is controllable iff it ever changed as an action outcome. Every ranked pick carries an explicit reachability flag. S1 top pick (0,0,1)|2 flagged: NEEDS-EXTERNAL-SETUP (requires lamp==1, 0 changes observed, not action-controllable). No pick silently recommended as runnable. Conservative: never-observed-changing = uncontrollable.
+
+**X-A2 (ranking):** Output explicitly scopes ranking as heuristic ("informativeness NOT validated"). Added verified safety property: every emitted state re-checked via pred_under (3/3, 2/2). Theoretical justification: in 2-candidate case, any discriminating state yields identical information (1 bit), so ndiff cannot mean "more informative."
+
+**Results:** All 4 frozen kill bars PASS. All H-EXP2 bars still pass. 3/3 byte-identical per fixture.
+
+**Classification:** Bounded L2 infrastructure repair. Setup planning (action sequences) remains out of scope. Reachability awareness, not planning. Not L3.
+
+**Commits:** prereg 6a4bb29ba; implementation f8299c388.
 - NQ4: Answered by H-FLEAKFIX. Complete.
 - NQ5: Answered (retire, don't patch). Complete.
 - NQ6: Answered by H-INTENT (downgraded). Repair in progress.
