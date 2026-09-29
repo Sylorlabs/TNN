@@ -579,7 +579,19 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **X-RV4 PASS:** No byte-value literals in diagnose(), P1 from discover() only, no bypass. No spoofing.
 
-**Revised:** Bounded single-revision mechanism. Chained revision, causal diagnosis, and robust withhold remain open.
+**H-REVISE3 SURVIVES (45/45):** All three H-REVISE2 failure classes repaired.
+
+**F-RV1 (chained revision):** Version store now appendable (4 slots). vs_revise appends, never overwrites. Dispatch most-recent-first. After R2, both R1 and R2 verify PASS.
+
+**F-RV2 (diagnosis gaming):** Diagnosis scores ALL discriminating positions: +1 output-relevance, +1 program-consistency. The 'q' fixture now diagnoses (1,113) not (0,120). Held-out 2/2 PASS.
+
+**F-RV3 (spurious UNRESOLVABLE):** Bounds-respecting length guard. Short inputs vacuous at p, not vetoing. Diagnosis returns (2,120), not -1.
+
+**Results:** All 5 frozen kill bars PASS. 2 runs byte-identical.
+
+**Classification:** Bounded L2+ revision. L3 criterion 12 now holds for chained single-condition revisions under stated scoring assumption. Conjunctions untested.
+
+**Commits:** prereg 54790d0d2; implementation 377080fc7.
 
 **Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
