@@ -353,7 +353,17 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 
 **X-IU4 PASS:** Port faithful. No hardcoding.
 
-**Revised:** Bounded L2 integration infrastructure with narrowed reliability claims. The 20/20 frozen checks stand. WITHHOLD does not mean "genuinely ambiguous" (verdict is learn-order dependent). Winner is not always best-supported.
+**H-INTENT-UNIFIED2 SURVIVES (5/5 repair bars, 35/35 total):** IU4-ADV downgrade repaired.
+
+**X-IU1 CLOSED (recency bypass):** learn_seq excluded from decision score (still recorded for provenance). Ambiguity guard uses only query-informative signals: top-two qscore tie → WITHHOLD AMBIGUOUS.
+
+**X-IU2 CLOSED (condition dominance):** New em term (exact training-input match). qscore = em*40000 + cf*20000 + lm*10000. Verbatim training beats heuristic. Query "xqw" → "wqx" (not "xxx").
+
+**X-IU3 SCOPED:** len_match retained as weakest signal (frozen T1a/T1b require it). Documented boundary: reflects training-length coincidence, not competence.
+
+**Results:** 10/10 + 20/20 regressions PASS. 3/3 deterministic.
+
+**Commits:** prereg a6ffebe24; implementation 2b55c5e7d.
 
 **Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749; unified port prereg d959ff51f, implementation e27edbaf3; red team prereg 2c25b011d, result 4d471f519.
 
