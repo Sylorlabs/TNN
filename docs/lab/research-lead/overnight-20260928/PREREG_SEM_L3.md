@@ -172,3 +172,28 @@ single experiment available: it attacks the largest measured gap with a
 falsifiable L3 design, reuses the sealed-corpus methodology, and a clean kill
 (H-SEM-0 survives) is as informative as a pass — it would pinpoint the exact
 architectural limitation blocking semantic invention.
+
+---
+
+## Amendment A1 (2026-09-28, pre-implementation — transparent)
+
+**Defect:** §4 as frozen ("surfaces mixed randomly per fact") implied each
+underlying fact is taught once. This yields disjoint signatures for true
+surface pairs (different facts share no relational contexts), so the §3
+unifier's Jaccard overlap would always be 0 and could never fire. The protocol
+was unimplementable as written.
+
+**Fix:** The generator teaches redundantly — each underlying fact appears 2–3
+times with different surface variants. This supplies overlapping-signature
+evidence; the learner still induces WHICH surfaces pair (never told). Near-miss
+distinguishing facts use unique surfaces (no redundant teaching across the
+near-miss boundary). Generator must guarantee ≥4 shared (relation, object)
+contexts per true pair.
+
+**Justification:** Providing distributional evidence is not teaching the
+answer, just as ensuring a classification dataset is separable is not labeling
+it. The L3 claim (learner-invented groupings) is unaffected.
+
+**Also:** P-PARA split into P-PARA-COMB (30, novel combinations of known
+surfaces) and P-PARA-NOVEL (30, novel surfaces with descriptive context
+clause); aggregate SEM-K1 unchanged.
