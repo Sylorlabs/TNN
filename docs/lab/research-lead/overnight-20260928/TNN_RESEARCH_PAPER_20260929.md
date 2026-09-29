@@ -599,29 +599,17 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **X-RV4 PASS:** No byte-value literals in diagnose(), P1 from discover() only, no bypass. No spoofing.
 
-**H-REVISE3 SURVIVES (45/45):** All three H-REVISE2 failure classes repaired.
+**H-REVISE4 SURVIVES (52/52):** Both H-REVISE3 downgrades repaired.
 
-**F-RV1 (chained revision):** Version store now appendable (4 slots). vs_revise appends, never overwrites. Dispatch most-recent-first. After R2, both R1 and R2 verify PASS.
+**R1 (tie gaming):** When multiple candidates tie at top score, returns AMBIGUOUS (-2) and withholds. Does not guess by lowest position. Honest about indistinguishability.
 
-**F-RV2 (diagnosis gaming):** Diagnosis scores ALL discriminating positions: +1 output-relevance, +1 program-consistency. The 'q' fixture now diagnoses (1,113) not (0,120). Held-out 2/2 PASS.
+**R2 (silent drop):** Full store emits explicit VS3FULL warning, returns -1. REFUSE-WITH-WARNING. Never silently dropped.
 
-**F-RV3 (spurious UNRESOLVABLE):** Bounds-respecting length guard. Short inputs vacuous at p, not vetoing. Diagnosis returns (2,120), not -1.
+**Results:** All 45/45 H-REVISE3 behaviors preserved (52/52 total with 7 new). 3/3 deterministic.
 
-**Results:** All 5 frozen kill bars PASS. 2 runs byte-identical.
+**Classification:** Bounded L2+ revision. AMBIGUOUS reports tie but doesn't resolve it. Capacity remains 4 (explicit).
 
-**Classification:** Bounded L2+ revision. L3 criterion 12 now holds for chained single-condition revisions under stated scoring assumption. Conjunctions untested.
-
-**Commits:** prereg 54790d0d2; implementation 377080fc7.
-
-**H-REVISE3 RED TEAM DOWNGRADE (2026-09-29):** Two attacks succeed.
-
-**X-RV3-1:** Scoring gaming. The exact "most attackable" fixture works. Incidental scores same as causal (both 2). Tie-break picks incidental (0,120) not causal (2,121). Both held-out fail. Heuristic bounded, not causal guarantee.
-
-**X-RV3-3:** Slot exhaustion. 5th revision silently dropped. Query returns wrong. No eviction policy, no error. Design gap for continuing learner.
-
-**Revised:** Bounded L2+ with scored heuristic (not causal identification) and 4-slot limit (silent on exhaustion). The three repaired classes stand.
-
-**Commits:** red team prereg 53c5a5732; result 7bd8a7dc2.
+**Commits:** prereg 926618d69; implementation e88ce0f20.
 
 **Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
