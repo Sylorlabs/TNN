@@ -802,7 +802,7 @@ No mechanism has achieved L3.
 
 - NQ1: Causal v2 (conjunctions, inequalities, delayed effects). H-CAUSALV SURVIVES (8/8, bounded L2). Red team in progress.
 - NQ2: Answered by H-ROUTER2 (downgraded). Repair in progress.
-- NQ3: Answered by H-EXP2 (downgraded to state selection). H-EXP3 SURVIVES (4/4, DOWNGRADED by red team). H-EXP4 SURVIVES (4/4, red team SURVIVES). Frontier in progress.
+- NQ3: Answered by H-EXP2 (downgraded to state selection). H-EXP3 SURVIVES (4/4, DOWNGRADED by red team). H-EXP4 SURVIVES (4/4, red team SURVIVES). H-EXP5 SURVIVES (6/6). Red team in progress.
 
 **H-EXP3 SURVIVES (4/4):** Reachability-aware experiment selection. Addresses both H-EXP2 downgrades.
 
