@@ -557,9 +557,19 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **Implication for procedure discovery:** The 11/12 assessment now has a path to 12/12 for the bounded case. The original architecture cannot revise (proven). The versioned architecture can. This does not retroactively change the original 11/12 verdict; it provides a new mechanism that satisfies the missing criterion.
 
-**Governance:** Prereg 3f582bb46 and amendment 66e84347d both precede implementation. One test-harness accounting bug found and fixed (17/18 -> 18/18); mechanism correct in both runs. Pure Zag. No Python.
+**THE RED TEAM DOWNGRADE (2026-09-29):** H-REVISE2 DOWNGRADED. Three of four attacks succeed. Frozen K-RV1..K-RV5 not retroactively altered (single revision works as claimed). Source audit finds no spoofing.
 
-**Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8 (sibling sweep, content verified).
+**X-RV1 (F-RV1): Chained revision fails.** After R1 (xab→xxx diagnosed, P1 versioned), a second revision R2 (yzb→yyy) caused vs_revise to overwrite the single condition slot and P1 slot. R1 case now FAILS. The "version store" is a single conditional slot, not a version memory.
+
+**X-RV2 (F-RV2): Diagnosis gaming.** With hidden true rule "broadcast input[1] iff input contains 'q'", counterexample (xqc→qqq) diagnosed as (0,120), the incidental lowest position, ignoring causally relevant 'q' at pos 1. Held-out 0/2. Diagnosis is lowest-position discrimination, not causal.
+
+**X-RV3 (F-RV3): Spurious UNRESOLVABLE.** With mixed-length passing set, counterexample (abx→aaa) was DETECTed but diagnose returned -1 because length guard lets one short input veto position 2 for all. A bounds-respecting reference finds valid feature (2,120). Withhold misfires.
+
+**X-RV4 PASS:** No byte-value literals in diagnose(), P1 from discover() only, no bypass. No spoofing.
+
+**Revised:** Bounded single-revision mechanism. Chained revision, causal diagnosis, and robust withhold remain open.
+
+**Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
 ---
 
