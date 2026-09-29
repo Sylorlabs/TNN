@@ -782,7 +782,7 @@ No mechanism has achieved L3.
 - H-EXP2 red team: Complete (downgraded).
 - H-UNIFIED repair: H-UNIFIED2 SURVIVES. Red team in progress.
 - H-ROUTER2 red team: Complete (downgraded). Repair in progress.
-- FDCR MERGE/SPLIT: H-FDCR3 SURVIVES. Integration in progress.
+- FDCR MERGE/SPLIT: H-FDCR3 SURVIVES. H-FDCR-UNIFIED SURVIVES (23/23). Red team in progress.
 - H-INTENT-UNIFIED red team: Complete (downgraded). Repair in progress.
 
 **The strongest remaining blocker:** No mechanism has achieved L3. Procedure discovery at 11/12 is the closest, blocked by the proven impossibility of revision in its architecture. H-REVISE2 attempts a new architecture. Experiment construction (beyond selection) is the next frontier after H-EXP2.
