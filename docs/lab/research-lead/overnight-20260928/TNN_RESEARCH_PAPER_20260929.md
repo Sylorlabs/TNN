@@ -508,6 +508,33 @@ The proof shows: a counterexample requires P(k,3)=0 while training requires P(k,
 
 **Commits:** red team prereg 66f4c324e; result 4293d6e30.
 
+### 3.6 H-SYNLANG KILLED (Synthetic Language)
+
+**Claim:** TNN mechanisms could learn a synthetic language from exposure.
+
+**Result:** KILLED by design flaw revealing architectural gap. Not a mechanism failure.
+
+**What happened:** Designed minimal synthetic language (10 words, grammar [size][color][shape], compositional semantics). Tested on FDCR with pre-segmented features. All 3 probes failed kill bars (0/2, 0/1, determinism PASS).
+
+**Key findings:**
+
+1. FDCR behaved correctly. The WITHHOLDs were right answers under sibling conflict. The sib marker proved genuine inference. Not a mechanism failure.
+
+2. Design flaw: Atomic object IDs (obj1, obj2...) cannot support compositional generalization. The semantic space isn't compositional.
+
+3. **Fundamental gap:** The test supplied word boundaries and slot assignments. No TNN mechanism learns segmentation from raw sequences:
+   - Procedure learner: extract_seq requires output chars in input; learns positions, not meanings.
+   - Causal learner: fixed 3-variable states, no sequence handling.
+   - FDCR: pre-segmented triples only.
+
+4. Procedure learner cannot map "red block" to "obj1" because 'o' not in input (VACUOUS). It's a string transducer, not a semantic mapper.
+
+**Interpretation:** Current TNN handles pre-segmented features but cannot learn language from raw sequential exposure. The segmentation step is entirely researcher-supplied. This documents a fundamental architectural gap, not a bug.
+
+**Next:** H-SEG (segmentation learning) in progress.
+
+**Commits:** prereg 2d8d53dee; result ffe2407a8.
+
 ---
 
 ## 4. What Is NOT Validated
@@ -636,9 +663,11 @@ No mechanism has achieved L3.
 - NQ8: Answered by H-FDCR2. Complete.
 - NQ9: Causal integration into unified. In progress.
 - Procedure revision v2 (new architecture). In progress.
-- Synthetic language. In progress.
+- Synthetic language: H-SYNLANG KILLED (see 3.6). Segmentation frontier in progress.
 - H-EXP2 red team. In progress.
-- H-UNIFIED red team. In progress.
+- H-UNIFIED repair (compositional interference). In progress.
+- H-ROUTER2 red team. In progress.
+- FDCR MERGE/SPLIT repair. In progress.
 
 **The strongest remaining blocker:** No mechanism has achieved L3. Procedure discovery at 11/12 is the closest, blocked by the proven impossibility of revision in its architecture. H-REVISE2 attempts a new architecture. Experiment construction (beyond selection) is the next frontier after H-EXP2.
 
