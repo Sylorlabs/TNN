@@ -121,6 +121,7 @@ unified substrate that future invention mechanisms will build on.
 ## Commit lineage
 
 H-UNIFIED6 implementation + raw output + this result doc committed
-locally as commit <hash> on branch tnn-native-lab. Parent chain
-verified to include prereg commit 7f535c115 as a strict ancestor.
-Independent red team not yet spawned; scheduled by the coordinator.
+locally as commit ad82aba60b454e3773f99ef27e1c70c6583a1b3d on branch
+tnn-native-lab. Parent chain verified to include prereg commit 7f535c115
+as a strict ancestor. Independent red team not yet spawned; scheduled
+by the coordinator.
