@@ -631,7 +631,8 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **Red team downgrade:** X-RV4-1 succeeds. Unique wrong top confidently misattributes when true condition byte absent from expected output while incidental byte present. No tie required. The "scored heuristic" is one binary signal counted twice (every candidate scores 0 or 2, never 1). The "near-tie" limit describes an impossible event. Repaired by H-REVISE5.
 
-**H-REVISE5 SURVIVES (62/62, DOWNGRADED by red team):** Honest single-signal (scores 0/1, degeneracy gone) + corroboration gate (requires second counterexample, else -3 UNCORROBORATED). X-RV4-1 replay: wrong top proposed honestly, corroboration fails, withheld, vcount 0. Red team downgrade: correlated second counterexample counted as confirmation; condition (b) redundant. Repair in progress.
+**H-REVISE5 SURVIVES (62/62, DOWNGRADED by red team, SUPERSEDED by H-REVISE6):** Honest single-signal (scores 0/1, degeneracy gone) + corroboration gate (requires second counterexample, else -3 UNCORROBORATED). X-RV4-1 replay: wrong top proposed honestly, corroboration fails, withheld, vcount 0. Red team downgrade: correlated second counterexample counted as confirmation; condition (b) redundant. Repaired by H-REVISE6.
+**H-REVISE6 SURVIVES (66/66):** Honestly three-condition gate ((a) fires, (b) full revision predicts fail2, (c) P0 mispredicts); each with independent failure path. X-RV5-2 closed. X-RV5-1 documented as fundamental underdetermination limit (adversarially correlated fail2 undetectable by any observation-only gate); "X-RV4-1 class is closed" NOT reinstated. Red team in progress.
 
 **Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
