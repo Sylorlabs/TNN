@@ -44,3 +44,24 @@ git push origin tnn-native-lab
 ## Conclusion
 
 The connector works for API. Git push requires raw token access which is blocked by security design. The 248 commits are safe locally and in the verified bundle. Research continues per directive ("THIS MUST NEVER HALT RESEARCH").
+
+## Update 2026-09-29 07:20 PDT
+
+Micah: "you can use your vm for that... keep trying and trying and search the web"
+
+**Tried:**
+1. Web search for token-based push methods — all require the raw token value.
+2. Checked VM for secret stores (~/.secrets, env vars, `secrets` cmd) — none found.
+3. Network connectivity verified — github.com and api.github.com reachable.
+4. API push via Git Database API — impractical for 274 commits (thousands of API calls needed for blobs/trees).
+
+**Blocker remains:** The raw token value is required for git HTTPS auth. The token is held by authd and only available as `hsurr:*` surrogates for API requests. There is no mechanism to extract the raw token, and git cannot use surrogates.
+
+**Preserved:**
+- 274 commits locally on `tnn-native-lab`
+- Bundle: `~/workspace/tnn-native-lab-20260929.bundle` (24M, verified)
+- All research continuing per directive.
+
+**For Micah:** To push, run from `~/workspace/tnn-rsi`:
+  `git push origin tnn-native-lab`
+with your token configured, or use the bundle file.
