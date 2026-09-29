@@ -219,12 +219,17 @@ NOT MET.
 1. Prereg committed alone before any attack code, build, or
    run (98c6dfc6e).
 2. Pure Zag throughout. Zero Python at any stage.
-3. Only three adversary-owned files staged/committed
-   (PREREG_FDCR_UNIFIED4_ADV.md already committed;
-   fdcr_unified4_adv.zag, FDCR_UNIFIED4_ADV_RAW.txt,
-   FDCR_UNIFIED4_ADV_RESULT.md in this commit).
-   Pathspec-restricted staging. No other worker's files
-   touched. No binaries committed (builds in /tmp/fu4adv).
+3. Adversary-owned files: PREREG_FDCR_UNIFIED4_ADV.md
+   (98c6dfc6e), fdcr_unified4_adv.zag,
+   FDCR_UNIFIED4_ADV_RAW.txt, FDCR_UNIFIED4_ADV_RESULT.md
+   (c9e672975). Pathspec-restricted staging was used for the
+   add, but the commit itself (no pathspec) also swept
+   `rv6_adversary/PREREG_RV6_ADV.md`, the H-REVISE6 red-team
+   prereg, which another worker had already staged. I did not
+   author, modify, or intend to include it; it is byte-intact
+   as staged by its owner. Lineage note for the paper and
+   canonical state: that file belongs to the H-REVISE6 red
+   team, not to this report.
 4. No em dashes in loop documentation.
 5. The T2b counterfactual correction is disclosed above; the
    in-harness assertion was correct as written and is
