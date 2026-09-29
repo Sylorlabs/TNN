@@ -161,13 +161,15 @@ The mechanism meets criteria 1-11. It fails criterion 12 (revision after counter
 - **H-INFER (inference repair):** Most-specific evidence now outranks less-specific conflicting evidence. Disambiguation probe passes. No regression on K5/K2/K4/K3/mini-world/context tests.
 - **H-FDCR2 (held-out probes):** 6/6 genuine held-out inference probes PASS. Fresh vocabulary with zero overlap with training fixtures. Step-0 direct lookup provably misses (grep verified). Ablation (sibling inference gated off) destroys the advantage (0/4). Byte-identical reruns.
 
-**Boundaries (Red-team downgrades, 2 of 3 still open):**
+**Boundaries (Red-team downgrades, all 3 now CLOSED):**
 
 1. **CLOSED by H-FDCR2:** Original K5/K2/K4 probes queried taught facts, confounded by Step-0 direct lookup. Replaced with genuine held-out probes.
-2. **OPEN:** MERGE is incomplete across different parents.
-3. **OPEN:** SPLIT fires spuriously in some fixtures.
+2. **CLOSED by H-FDCR3:** MERGE was incomplete across different parents. Root cause: SPLIT created duplicates faster than MERGE cleaned them; FORM linked to first valid parent not most specific. Fixed with parent re-linking.
+3. **CLOSED by H-FDCR3:** SPLIT fired spuriously on missing data (not contradiction). Fixed with applicability gate: SPLIT fires only if every member has at least one fact for the relation.
 
-**Commits:** prereg 6db93a784; red team e300bd9cb, 9d03a1afb; H-INFER prereg 276709293, result 4abfdf7d0; H-FDCR2 prereg d41e316f5, result 7a01ec4ff.
+**H-FDCR3 SURVIVES (5/5):** Zero identical-intent pairs across parents. No spurious SPLITs. 6/6 held-out probes still PASS. K2 still splits correctly. Byte-identical across 3 runs.
+
+**Commits:** prereg 6db93a784; red team e300bd9cb, 9d03a1afb; H-INFER prereg 276709293, result 4abfdf7d0; H-FDCR2 prereg d41e316f5, result 7a01ec4ff; H-FDCR3 prereg 706fe7095, result 747eebcd3.
 
 **Governance note:** FDCR files were accidentally swept into a concurrent "Bridge prereg" commit (17d5de9f7). The prereg still preceded implementation, but commit hygiene was poor. Documented.
 
