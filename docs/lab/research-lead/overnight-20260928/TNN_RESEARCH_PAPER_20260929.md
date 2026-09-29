@@ -366,15 +366,19 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 - **K-E3 (anti-hardcoding):** (a) No pick-state literals in invention code; enumeration via vmax(). (b) Null fixture (no ambiguity) produces honest NO AMBIGUITY abstention. (c) Mirror fixture (lamp is true blocker, temp is confounder) picks (0,0,0) with action 2, a different answer, refuting hardcoding.
 - **K-E4:** 3/3 runs byte-identical per fixture.
 
-**Notable finding:** The learner re-invented the researcher's own experiment. The original H-CAUSAL run hand-supplied Phase B2's discriminating episode. The invention independently derived exactly that experiment from the Phase-B ambiguous state. Checked against true world dynamics: correct hypothesis favored.
+**THE RED TEAM (2026-09-29):** H-EXP2 SURVIVES all frozen bars, with two DOWNGRADED claims.
 
-**Boundaries:**
+**X-A1 (unreachable pick): CONFIRMED BOUNDARY.** S1's top pick (0,0,1)|2 requires lamp==1, but lamp never changes in any episode (0→0 or 1→1; zero lamp-changing transitions). The mechanism selects a discriminating state but plans no way to reach it. Honest description: "discriminating-state selection," not "experiment invention."
 
-- Hypothesis vocabulary, candidate set, and enumeration space are authored.
-- Setup planning (how to reach the discriminating state) is out of scope.
-- This is experiment selection, not construction (no new actions or variables invented).
+**X-A2 (ranking game): PASSED but confirms critique.** Rank [1] (2,0,0)|2 also scores ndiff=2; index tie-break is pure enumeration order. "Top-ranked = most informative" is unsupported; ranking is an unvalidated disagreement-count proxy.
 
-**Commits:** prereg 5584811a4; result 9c6bf4f6e.
+**X-A3 (pair generality): ATTACK FAILED.** X-A3v2 passed exactly as predicted. Invention is generic over pairs and actions by construction.
+
+**X-A4 (source audit): PASSED.** No hardcoding. Fixed 3×2×2 enumeration confirmed as disclosed scope.
+
+**Revised:** Bounded L2 discriminating-state selection (narrowed from "experiment invention"). Reachability planning and ranking validation remain open.
+
+**Commits:** prereg 5584811a4; result 9c6bf4f6e; red team prereg 0c6d62b9c, amendment 5b0d3cf36, result a3e9d2966.
 
 ---
 
