@@ -277,7 +277,21 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 
 **U-A5 PASS:** Source audit clean. No hardcoded answers.
 
-**Disposition:** H-UNIFIED KILLED. Repair in progress at the composition layer (router ambiguity signal or coherence-gated revision). The 9/9 and 17/17 results stand as historical evidence of what the mechanism could do; the general no-interference property does not hold.
+**Disposition:** H-UNIFIED KILLED. **REPAIRED by H-UNIFIED2 (see below).**
+
+**H-UNIFIED2 SURVIVES (12/12):** Compositional repair at the composition layer.
+
+**Repair 1 (U-A2 kill): coherence-gated causal revision.** New caus_coherent() checks each incoming episode against ACTIVE rules. Coherent episodes commit via clearn unchanged; contradictory episodes are QUARANTINED (traced, 0 committed, no rule touched). The unlabeled stream is now append/corroborate-only for verified causal knowledge. Attack replay: interfering item routes CAUS_LEARN, 0 committed, 2 quarantined, cpredict still returns correct answers.
+
+**Repair 2 (U-A1): explicit AMBIGUOUS route code (5).** Int-pair lessons and bare digit-string queries signal AMBIGUOUS instead of silently withholding.
+
+**Repair 3 (U-A3): subset direct discovery.** bridge_learn Step 2 now attempts pdiscover_direct on the extractable subset. Unextractable pairs reported WITHHELD; no spurious bridge fires.
+
+**Results:** All 6 frozen kill bars PASS. 9/9 original checks unchanged. 3/3 runs byte-identical.
+
+**Honest boundary:** The coherence gate sacrifices autonomous causal revision through the unlabeled stream. A genuinely-correct unlabeled revision is now quarantined too. Corrections need the explicit revision channel (H-REVISE2). Bounded L2 integration repair, not L3.
+
+**Commits:** prereg d652fdaee; result f5dd7cdc7; adversary prereg 1498235e7, result 383c05aeb; repair prereg bfd5bcb13, result 0eb7677fe.
 
 **Boundaries (pre-kill):**
 
@@ -670,7 +684,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
 | Learned router v2 | DOWNGRADED | Supervised compiler, not policy discoverer; diverges on nseg≥5 |
-| Unified learner | KILLED | Compositional interference: verified knowledge replaced by colliding-format item |
+| Unified learner | REPAIRED (H-UNIFIED2) | U-A2 kill fixed via coherence gate; bounded L2 |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
 | Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
