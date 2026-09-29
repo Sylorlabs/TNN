@@ -460,15 +460,15 @@ The prereg (dd5f2f77e, line 66) FROZE training datum ("xy"->"yy"). The implement
 
 ---
 
-### 3.3 H-REVISE KILLED by Mathematical Proof
+### 3.3 H-REVISE KILLED by Mathematical Proof (then sidestepped by H-REVISE2)
 
-**Claim:** The procedure discovery mechanism could revise its program after a counterexample.
+**Original claim:** The procedure discovery mechanism could revise its program after a counterexample.
 
-**Result:** KILLED with proof.
+**Original result:** KILLED with proof.
 
 The proof shows: a counterexample requires P(k,3)=0 while training requires P(k,3)=2 for identical (k,n). No function P(k,n)->index can satisfy both. The contradiction is fundamental to the architecture, not a bug.
 
-**Five revision capabilities all ABSENT:**
+**Five revision capabilities all ABSENT (in original architecture):**
 
 1. Detection (recognizing a counterexample as such).
 2. Diagnosis (identifying what went wrong).
@@ -476,9 +476,34 @@ The proof shows: a counterexample requires P(k,3)=0 while training requires P(k,
 4. Revision operators (transforming the program).
 5. Procedure memory (retaining both old and new).
 
-**Implication:** Procedure discovery is at 11/12 L3 criteria. Criterion 12 is not just unmet but impossible for this architecture. A new architecture is needed for revision (see H-REVISE2, Section 5).
+**THE SIDESTEP: H-REVISE2 SURVIVES (18/18)**
 
-**Commits:** prereg 2d720d9bc; result c7bfaeba1.
+A new architecture sidesteps the proof by changing the premise. Instead of contesting the proof, H-REVISE2 uses versioned conditional dispatch so the single-function premise never holds.
+
+**Mechanism:**
+
+- **Monitor loop:** P0 stays deployed; every new observation checked against prediction. Mismatch raises autonomous DETECT event (no human trigger). Supplies detection.
+- **Diagnosis:** On detection, scans input positions for lowest position where counterexample's byte differs from every passing input's byte. Values from data; no byte literals in diagnosis code.
+- **Versioned revision:** P0 preserved. P1 discovered from counterexample subset with same N-first discovery. Version store holds both plus dispatch condition: IF input[pos]==val THEN P1 ELSE P0. Revised signature is (k,n,input)->index.
+- **Honest withhold:** If no discriminating feature exists (same input, contradictory output), emits UNRESOLVABLE and leaves P0 and store untouched.
+
+**Results:**
+
+- Phase A: P0 = [N C1 SUB] (n-1) from 3 broadcast-last pairs.
+- Phase B: ("jkl"->"lll") matches; ("xab"->"xxx") DETECTED (P0 predicted "bbb").
+- Phase C: DIAGNOSE pos=0 val=120 ('x').
+- Phase D: P1 = [N N SUB] (constant 0); versioned IF input[0]==120 THEN P1 ELSE P0.
+- Phase E: 5/5 VERIFY PASS (all old + new cases).
+- Phase F: ("abc"->"aaa") -> UNRESOLVABLE; P0 intact; store unchanged.
+- All 5 frozen kill bars PASS. 2 runs byte-identical.
+
+**Classification:** Bounded L2+ revision. **L3 criterion 12 (revisable after counterexample) is satisfied for the bounded case tested:** single binary content condition, affine sub-programs. Not general revision (multi-condition, relational, chained revisions untested). Complementary to the Bridge (fallback at learning time vs self-correction at use time).
+
+**Implication for procedure discovery:** The 11/12 assessment now has a path to 12/12 for the bounded case. The original architecture cannot revise (proven). The versioned architecture can. This does not retroactively change the original 11/12 verdict; it provides a new mechanism that satisfies the missing criterion.
+
+**Governance:** Prereg 3f582bb46 and amendment 66e84347d both precede implementation. One test-harness accounting bug found and fixed (17/18 -> 18/18); mechanism correct in both runs. Pure Zag. No Python.
+
+**Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8 (sibling sweep, content verified).
 
 ---
 
@@ -632,7 +657,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | Generality bias | KILLED (general) | Specific fix stands; general claim dead |
 | COMPOSE | KILLED | Redundant |
 | Content-conditional | VOID | Prereg violated |
-| H-REVISE | KILLED | Proven impossible |
+| H-REVISE | KILLED then sidestepped | Original: proven impossible. H-REVISE2: versioned dispatch satisfies criterion 12 (bounded) |
 
 No mechanism has achieved L3.
 
