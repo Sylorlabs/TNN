@@ -838,7 +838,7 @@ No mechanism has achieved L3.
 - NQ4: Answered by H-FLEAKFIX. Complete.
 - NQ5: Answered (retire, don't patch). Complete.
 - NQ6: Answered by H-INTENT (downgraded). H-INTENT-UNIFIED2 SURVIVES (5/5, DOWNGRADED). H-INTENT-UNIFIED3 SURVIVES (8/8, 38/38, DOWNGRADED by red team, SUPERSEDED by H-INTENT-UNIFIED4). H-INTENT-UNIFIED4 SURVIVES (3/3, DOWNGRADED by red team, SUPERSEDED by H-INTENT-UNIFIED5). H-INTENT-UNIFIED5 SURVIVES (DOWNGRADED by red team). Repair in progress.
-- NQ7: H-MEM builder complete; H-MEM2 SURVIVES (5/5, DOWNGRADED by red team). H-MEM3 SURVIVES (5/5, DOWNGRADED by red team, SUPERSEDED by H-MEM4). H-MEM4 SURVIVES (5/5, DOWNGRADED by red team). Repair in progress.
+- NQ7: H-MEM builder complete; H-MEM2 SURVIVES (5/5, DOWNGRADED by red team). H-MEM3 SURVIVES (5/5, DOWNGRADED by red team, SUPERSEDED by H-MEM4). H-MEM4 SURVIVES (5/5, DOWNGRADED by red team, SUPERSEDED by H-MEM5). H-MEM5 SURVIVES (4/4). Red team in progress.
 - NQ8: Answered by H-FDCR2. Complete.
 - NQ9: Answered by H-CAUSAL-UNIFIED (28/28, DOWNGRADED by red team). H-CAUSAL-UNIFIED2 SURVIVES (5/5, DOWNGRADED by red team). H-CAUSAL-UNIFIED3 SURVIVES (6/6 + 28/28, red team SURVIVES all 4 attacks, SUPERSEDED by H-CAUSAL-UNIFIED4). H-CAUSAL-UNIFIED4 SURVIVES (16/16 builder battery, DOWNGRADED by red team, SUPERSEDED by H-CAUSAL-UNIFIED5). H-CAUSAL-UNIFIED5 SURVIVES. Red team in progress.
 - Procedure revision v2: H-REVISE2 SURVIVES. Red team in progress.
