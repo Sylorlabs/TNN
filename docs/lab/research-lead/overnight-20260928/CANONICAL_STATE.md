@@ -1,11 +1,11 @@
 # Canonical Scientific State: TNN Native Lab
 
-**Date:** 2026-09-29 07:44 PDT
+**Date:** 2026-09-29 07:56 PDT
 **Branch:** tnn-native-lab
-**Author:** Canonical State Updater (subagent)
+**Author:** Canonical State Updater v2 (subagent)
 **Status:** This document is the authoritative summary of validated mechanisms,
-boundaries, and open questions as of this timestamp. It supersedes the 07:30
-PDT version (commit a66de28cf) and all informal summaries. It does not
+boundaries, and open questions as of this timestamp. It supersedes the 07:44
+PDT version (commit 00b5b473d) and all informal summaries. It does not
 supersede preregistered verdicts; it cites them.
 
 **Style note:** This document contains no em dashes, per loop documentation rules.
@@ -42,10 +42,20 @@ position k to input position via an affine function of k and n.
   identical (k,n). No function P(k,n)->index can satisfy both. Five revision
   capabilities all ABSENT (detection, diagnosis, conditional representation,
   revision operators, procedure memory).
+- Generality gap (discovered via H-STRESS, diagnosed by H-DIAG, repaired by
+  H-GENBIAS; see 1.8): with uniform-length training, fixed-order enumeration
+  returns the first fitting program, which is often length-specific. Uniform
+  n=4 reverse training yielded ADD(C1, SUB(C2, K)) = 3-K (correct on n=4,
+  invalid index on n=5) instead of n-1-k. Same overfit mode as the CC-A3
+  adversary's 2-K finding. Repaired on the frontier with N-first two-pass
+  search order. Other discovery copies (proc_learn.zag, bridge_learn.zag,
+  route_learn.zag, integ_learn.zag, proc_cond.zag) still carry the old
+  single-pass search and should be patched or retired.
 
 **Commits:** prereg 6cd2e95a7; v1 fb6ab328a; Family X prereg 6caa37ed6,
 training 8fa0fe2a3, result 850b79ddb; RT2 6e88f3003; H-REVISE prereg 2d720d9bc,
-result c7bfaeba1.
+result c7bfaeba1; H-DIAG prereg cf50b7442, result a448f834a; H-GENBIAS prereg
+71e9d3b97, result 0763c13d8.
 
 ### 1.2 Causal Learning (causal_learn.zag)
 
@@ -139,7 +149,7 @@ Supports hierarchy, delayed split, delayed merge, overlap.
    unified (C2/C65, C3/C66 in F-A2).
 3. Spurious SPLITs: reason=2 children with no contradiction (C7/C8 in F-A2;
    C3-C6 in K5).
-- COMPOSE operator: implemented and KILLED on utility (see 1.8). The
+- COMPOSE operator: implemented and KILLED on utility (see 2.1). The
   inference-side gap that motivated COMPOSE is now repaired by H-INFER.
 - Governance: implementation+fixtures+results landed in ONE commit (17d5de9f7);
   results report claim of separate commits is FALSE (Adversary finding).
@@ -263,8 +273,113 @@ evidence fix (9/9); both runs are documented in UNIFIED_RESULT.md.
 - Procedure queries report all slots/rules; intent selection out of scope.
 - Integration infrastructure, not L3 evidence. Each component was
   independently validated and red-teamed; this tests their composition.
+- Discovery components now carry the H-GENBIAS N-first bias (see 1.8).
+  Stress-tested under store pressure (see 1.9).
 
-**Commits:** prereg d652fdaee; result f5dd7cdc7.
+**Commits:** prereg d652fdaee; result f5dd7cdc7; generality-bias port
+0763c13d8.
+
+### 1.8 Generality Bias Repair (H-GENBIAS)
+
+**Classification: Bounded L2+ mechanism repair (not L3 evidence)**
+
+**What it does:** Gives procedure discovery a search-order generality bias.
+The discovery search previously enumerated the 1055 programs in fixed
+syntactic order and returned the first fitter. It now runs two passes over
+the same enumeration: Pass 1 considers only programs referencing N
+(type 1); Pass 2 falls back to the original behavior. No program semantics
+changed, no programs added or removed, enumeration itself untouched.
+
+**Why it was needed:** H-STRESS KILLED on slot-0 retention; H-DIAG
+recharacterized the failure as discovery-time overfitting (see 1.9).
+Uniform n=4 reverse training yielded 3-K instead of n-1-k. The N-first
+bias prefers length-general programs (N references generalize across
+lengths; small constants do not).
+
+**Validated evidence:**
+- 4/4 kill bars K-G1..K-G4 PASS.
+- K-G1: uniform n=4 training now yields SUB(N, ADD(K, C1)) = n-1-k
+  (verified program bytes); generalizes to lengths 2,3,4,5,6,7 (5/5);
+  "hello"->"olleh".
+- K-G2: no regression. Mixed reverse, broadcast-last, broadcast-first,
+  identity all still work (4/4).
+- K-G3: H-STRESS re-run scores 17/17; H-STRESS SURVIVES (was KILLED
+  14/17). Slot-0 retention confirmed (slot0_ok=1).
+- K-G4: byte-identical across 3 runs (md5-verified).
+- CONTROL: old single-pass discovery reproduces the exact diagnosed bug
+  (3-K bytes) in-harness, validating the test setup.
+- H-UNIFIED re-verified with the fix: 9/9, H-UNIFIED SURVIVES (no
+  regression from the bias change on the mixed-length frontier test).
+- Ported to unified_learn.zag (frontier) and stress_learn.zag (K-G3
+  re-run); the two discovery sections verified diff-identical after
+  patching.
+
+**Boundaries (disclosed in result):**
+- The bias is a search-order preference, not a generality proof. A
+  pathological N-using fitter that does not generalize could still be
+  selected first; none observed (the affine 1055-program space makes this
+  rare, but it is not ruled out).
+- Other discovery copies in the repo (proc_learn.zag, bridge_learn.zag,
+  route_learn.zag, integ_learn.zag, proc_cond.zag) still carry the old
+  single-pass search. They should be patched or retired; the frontier is
+  fixed.
+- F-LEAK (bridge-full slot waste) untouched; separate known bug.
+
+**Commits:** prereg 71e9d3b97; result 0763c13d8.
+
+### 1.9 Unified Learner Stress Test (H-STRESS)
+
+**Classification: Bounded L2 integration validation (survives after repair)**
+
+**What it does:** Runs the unified learner through a 16-event pressure
+sequence in one process: 4 simple procedures, 4 conditional procedures
+(bridge rules), 4 fill procedures to exhaust the 16-slot proc store, 2
+causal-fill episodes to exhaust the 16-rule causal store, ambiguity
+probes, and over-full probes. Tests no-crash, graceful exhaustion,
+retention, and non-interference under pressure.
+
+**Trajectory (preserved with lineage):**
+
+1. **Initial run: KILLED (14/17).** K-S1 PASS (16 events, no crash).
+   K-S2 FAIL, K-S3 FAIL, K-S4 FAIL, all via slot0_ok=0: slot 0 (reverse,
+   learned in E1) no longer mapped "hello"->"olleh" after the pressure
+   sequence. Bridge rules, causal rules, and slots 1-15 intact.
+   Committed as 8cd6d8cf0. STRESS_RESULT.md preserves this verdict.
+
+2. **Diagnosis: H-DIAG (K-D1..K-D3 PASS).** Byte-level trace proved slot-0
+   bytes NEVER change across the sequence: no overwrite, no eviction, no
+   bridge interference. Decoding revealed the stored program was
+   ADD(C1, SUB(C2, K)) = **3-K**, not n-1-k: a length-specific overfit
+   from uniform n=4 training, producing an invalid index at k=4 for n=5
+   ("hello"). Root cause: discovery-time overfitting, NOT retention
+   corruption. H1 (overwrite), H2 (index confusion), H3 (eviction), H4
+   (bridge interference) all REFUTED. The same overfit mode the CC-A3
+   adversary found (2-K). Committed as a448f834a.
+
+3. **Repair: H-GENBIAS (see 1.8).** N-first two-pass search order.
+
+4. **Re-run: SURVIVES (17/17).** With the bias ported into
+   stress_learn.zag, all four kill bars pass: no crash, honest -1 on
+   exhaustion, slot0_ok=1 (reverse retained), bridge/causal intact,
+   ambiguity withholds. Evidence in STRESS_GENBIAS_RAW.txt (3 runs
+   byte-identical, md5 48766a0f1779d034e0b0d77094e39ed8), committed as
+   0763c13d8. STRESS_RESULT.md was intentionally left at its original
+   KILLED verdict to preserve the kill lineage; the reversal is documented
+   here and in GENBIAS_RESULT.md.
+
+**Findings carried forward:**
+- F-LEAK (predicted in the H-STRESS prereg, confirmed): E9 wasted 2 proc
+  slots (12->14) when bridge_learn failed on a full bridge store. The
+  return -1 path does not release already-stored subset procedures.
+  Documented as a finding, not a kill. Still open; repair is future work.
+- Graceful degradation validated: honest -1 on store exhaustion, no
+  crashes, no cross-store corruption, ambiguity withholds correctly.
+- The generality gap (uniform-length overfit) is closed for tested cases
+  by H-GENBIAS. Mixed-length training was masking it in H-UNIFIED.
+
+**Commits:** H-STRESS prereg 12dda2060; H-STRESS result 8cd6d8cf0;
+H-DIAG prereg cf50b7442, result a448f834a; H-GENBIAS prereg 71e9d3b97,
+result 0763c13d8.
 
 ---
 
@@ -393,9 +508,16 @@ adversary report 0ca84f3f4; determinism fix 9810e2bfd.
    other. H-UNIFIED composes them in one stream but they remain separate
    stores.
 
-7. **No stress test of the unified learner.** H-UNIFIED used a handful of
-   tasks. Behavior under store pressure (10+ interleaved tasks), slot
-   exhaustion, and bridge-rule accumulation is untested.
+7. **Unified-learner stress test: DONE (SURVIVES after repair).** H-STRESS
+   ran 16 interleaved learning events (4 simple procedures, 4 conditional
+   bridge procedures, 4 store-fill procedures, 2 causal-fill episodes,
+   ambiguity and over-full probes) in one process. Initial run KILLED
+   (14/17) on slot-0 retention; H-DIAG recharacterized the failure as
+   discovery-time overfitting (3-K, not retention corruption); H-GENBIAS
+   repaired it at the source; re-run SURVIVES 17/17. Graceful degradation
+   validated (honest -1, no crashes, no cross-store corruption). Open:
+   F-LEAK (bridge-full slot waste on failed splits) is a confirmed but
+   unrepaired memory-management bug.
 
 8. **No active experiment invention.** The fourth frontier (TNN invents
    discriminating experiments) has not been attempted.
@@ -403,10 +525,10 @@ adversary report 0ca84f3f4; determinism fix 9810e2bfd.
 9. **No memory strategy invention.** The fifth frontier (learner-controlled
    memory policy) has not been attempted.
 
-10. **Push to GitHub.** Blocked by token security boundary. 301 commits
+10. **Push to GitHub.** Blocked by token security boundary. 308 commits
     local. Bundle preserved at
-    ~/workspace/tnn-native-lab-20260929-v4.bundle (25M, verified
-    "is okay", HEAD f5dd7cdc7). API connector works; git cannot access
+    ~/workspace/tnn-native-lab-20260929-v5.bundle (25M, git bundle verify
+    "is okay"). API connector works; git cannot access
     the token.
 
 ---
@@ -416,13 +538,16 @@ adversary report 0ca84f3f4; determinism fix 9810e2bfd.
 | Mechanism | Level | Basis |
 |-----------|-------|-------|
 | SEM (Jaccard) | L2 | Flat clustering; hierarchy/split/overlap FAIL |
-| Procedure discovery | Bounded L2+ | 11/12 criteria; discovery via search; no revision |
+| Procedure discovery | Bounded L2+ | 11/12 criteria; discovery via search; no revision; generality gap found and repaired (H-GENBIAS) on frontier |
 | Causal learning | Bounded L2 | 14/14 probes; narrow authored vocabulary |
 | Integration v1 | Bounded L2 | Coexistence; explicit routing; superseded by 1.6/1.7 |
 | FDCR | L2 (adequacy) | Hierarchy/split/overlap form; inference repaired (H-INFER); 3 red-team downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional revision; B-A6b fixed; cleared for integration |
 | Learned router | Bounded L2 | Structure-inferred routing; authored predicates; no intent retrieval |
-| Unified learner | Bounded L2 | Unlabeled learn-route-revise loop; composes validated components |
+| Unified learner | Bounded L2 | Unlabeled learn-route-revise loop; stress-tested 17/17 after repair |
+| Generality bias (H-GENBIAS) | Bounded L2+ repair | N-first search order; uniform-length overfit fixed; control reproduces bug |
+| Stress test (H-STRESS) | Bounded L2 | 17/17 under store pressure; F-LEAK confirmed open |
+| Diagnosis (H-DIAG) | Method | Overfitting recharacterized (3-K); four corruption hypotheses refuted |
 | COMPOSE | KILLED | Union composition redundant (redundancy theorem) |
 | Content-conditional (H-CC) | VOID / exploratory | Prereg violated; position-0/equality-only; silent overfitting |
 
@@ -459,32 +584,13 @@ routing predicates are authored, not learned.
 
 #### NQ1: Can the unified learner survive store pressure and interference?
 
-**Why it matters (information gain: HIGH):**
-H-UNIFIED was tested with a handful of tasks. A continuing learner must
-handle dozens of interleaved procedures, bridge rules, and causal rules
-without forgetting, misrouting, or slot exhaustion. The B-A6b bug showed
-that resource exhaustion is a real failure mode; the fix was verified on
-one attack, not on sustained pressure. If the unified learner degrades
-gracefully (honest WITHHOLD on exhaustion) it is integration-ready. If it
-fails silently or catastrophically, we have mapped the next architectural
-boundary.
-
-**L3 relevance: MEDIUM.** Robustness is engineering, not invention. But no
-L3 claim about a continuing learner is credible without it.
-
-**Integration leverage: VERY HIGH.** This is the prerequisite for the full
-continuing-life gauntlet. Every subsequent integration experiment assumes
-the unified learner holds up.
-
-**Concrete approach:**
-1. Preregister H-STRESS: 12+ interleaved tasks (6 procedures incl. 2
-   conditional, 4 causal rules, mixed queries) in one stream, one process.
-2. Freeze kill bars: all previously-learned capabilities queryable at the
-   end (no forgetting); ambiguous/overflowing items WITHHOLD honestly
-   (no silent corruption); bridge-rule count bounded and reported;
-   byte-identical determinism.
-3. Red-team for: slot-exhaustion honesty, bridge-rule interference with
-   direct procedures, causal-store overflow behavior.
+**ANSWERED.** H-STRESS executed the planned 16-event pressure sequence.
+Initial run KILLED (14/17) on slot-0 retention; H-DIAG recharacterized the
+failure as discovery-time overfitting (3-K vs n-1-k, not retention
+corruption); H-GENBIAS repaired it with N-first search order; re-run
+SURVIVES 17/17. Graceful degradation validated (honest -1, no crashes, no
+cross-store corruption). Remaining open finding: F-LEAK (bridge-full slot
+waste on failed splits) is confirmed but unrepaired.
 
 #### NQ2: Can routing predicates be learned from experience rather than authored?
 
@@ -550,6 +656,37 @@ episode).
    hypothesis representation supports the required counterfactual
    reasoning.
 
+### New next questions (from the H-STRESS arc)
+
+#### NQ4: Can F-LEAK be repaired?
+
+**Why it matters:** Confirmed in H-STRESS (predicted in prereg): when
+bridge_learn fails on a full bridge store, the return -1 path does not
+release the already-stored subset procedures (E9 wasted 2 proc slots,
+12->14). Under sustained pressure this leaks slots silently. The B-A6b
+fix made failed split *attempts* free; F-LEAK is the remaining waste on
+the bridge-full failure path.
+
+**Concrete approach:** Preregister H-FLEAKFIX: track subset slots
+allocated during bridge candidate evaluation and release them on the
+failure return path. Kill bars: the 15-distractor B-A6b attack with a
+full bridge store wastes 0 slots; original bridge 7/7 and H-STRESS
+17/17 still pass; byte-identical determinism.
+
+#### NQ5: Patch or retire the remaining single-pass discovery copies.
+
+**Why it matters:** The H-GENBIAS fix is ported only to unified_learn.zag
+(frontier) and stress_learn.zag. The copies in proc_learn.zag,
+bridge_learn.zag, route_learn.zag, integ_learn.zag, and proc_cond.zag
+still carry the old single-pass search and will reproduce the 3-K
+overfit on uniform-length training. Any future work built on those
+copies inherits the generality gap.
+
+**Concrete approach:** Mechanical port of the two-pass change (it is a
+search-order wrapper, no semantics change), verified by re-running each
+copy's committed test suite. Retire copies that no longer serve a
+purpose; document which file is the canonical discovery implementation.
+
 ---
 
 ## 6. Provenance and Governance Notes
@@ -563,10 +700,16 @@ episode).
 - Prereg commit ordering verified throughout: every prereg cited above
   strictly precedes its implementation commit (276709293<4abfdf7d0,
   d6e4eb485<05a00279d, d652fdaee<f5dd7cdc7, 271ec362b<8fc591047,
-  c22c29e4e<974a9ca13). The H-CC violation was training-data
+  c22c29e4e<974a9ca13, 12dda2060<8cd6d8cf0, cf50b7442<a448f834a,
+  71e9d3b97<0763c13d8). The H-CC violation was training-data
   substitution within the implementation step, not commit misordering;
   K-CC2 is VOID (not INVALID as a measurement; the exploratory result
-  stands as exploratory).
+  stands as exploratory). The H-STRESS arc is fully ordered:
+  prereg 12dda2060, result 8cd6d8cf0 (KILLED), diagnosis prereg
+  cf50b7442, diagnosis a448f834a, fix prereg 71e9d3b97, fix+rerun
+  0763c13d8 (SURVIVES 17/17). STRESS_RESULT.md intentionally retains its
+  original KILLED verdict as kill lineage; the reversal is documented in
+  GENBIAS_RESULT.md (STRESS_GENBIAS_RAW.txt) and here.
 - Claim corrections applied: "L3 validated (7/9)", "first credible L3",
   and "CORE L3 MECHANISM VALIDATED" annotated as RETRACTED/SUPERSEDED
   (prior audit). No "bounded L3" wording survives for procedure v1.
@@ -575,16 +718,22 @@ episode).
 - Family pre-naming conflict (REVERSE in design doc) flagged and resolved:
   reverse results are mechanism validation; Family X (Adversary-assigned)
   provides the true invention test.
-- Push blocked; all commits local (301 ahead of origin/tnn-native-lab).
-  Bundle preserved at ~/workspace/tnn-native-lab-20260929-v4.bundle
-  (25M, git bundle verify "is okay", HEAD f5dd7cdc7).
+- Push blocked; all commits local (308 ahead of origin/tnn-native-lab).
+  Bundle preserved at ~/workspace/tnn-native-lab-20260929-v5.bundle
+  (25M, git bundle verify "is okay").
 - Concurrent-agent commit hygiene: FDCR files landed in a "Bridge prereg"
   commit (17d5de9f7); content verified correct, prereg order intact,
   misattribution noted.
 
 ---
 
-## 7. Open Questions (Beyond the Top 3)
+## 7. Open Questions (Beyond the Top 5)
+
+- F-LEAK: bridge-full slot waste on failed splits (confirmed in H-STRESS,
+  unrepaired; see NQ4).
+- Remaining single-pass discovery copies: patch or retire proc_learn.zag,
+  bridge_learn.zag, route_learn.zag, integ_learn.zag, proc_cond.zag
+  (see NQ5).
 
 - Procedure intent retrieval for queries (documented gap in H-ROUTER/H-UNIFIED).
 - FDCR MERGE incompleteness and spurious SPLITs: repair or scope (red-team
