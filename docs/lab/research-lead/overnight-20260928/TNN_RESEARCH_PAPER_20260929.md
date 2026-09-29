@@ -261,7 +261,7 @@ Two of four attacks met kill criteria.
 
 **Commits:** prereg fb7ea5d56; implementation via 28266d158 (sweep, content verified); label a27390d29.
 
-**H-ROUTER4 SURVIVES (6/6, DOWNGRADED by red team):** H-ROUTER3 downgrade repaired.
+**H-ROUTER4 SURVIVES (6/6, DOWNGRADED by red team, SUPERSEDED by H-ROUTER5):** H-ROUTER3 downgrade repaired.
 
 **R1 (single-family anomaly):** New diagnostic emits SINGLE-FAMILY-ANOMALY when one family has learn marks and other has zero. Catches the X-R3-2 mark-suppression pattern. Silent on honest.
 
@@ -275,7 +275,9 @@ Two of four attacks met kill criteria.
 
 **Commits:** prereg caa884962; implementation a6fe8f60c.
 
-**Red team downgrade:** X-R4-1 succeeds. Task-swap evasion: two mark changes preserve learn-task counts in both families, so both diagnostics stay silent. Corruption amplified to unobserved s1=5. The manifest honestly attributes the corrupted rules — traceability holds, detection does not. Repair in progress.
+**Red team downgrade:** X-R4-1 succeeds. Task-swap evasion: two mark changes preserve learn-task counts in both families, so both diagnostics stay silent. Corruption amplified to unobserved s1=5. The manifest honestly attributes the corrupted rules — traceability holds, detection does not. Repaired by H-ROUTER5.
+
+**H-ROUTER5 SURVIVES (all frozen kill bars):** X-R4-1 repaired by task-family consistency diagnostic (`audit_task_family`). Query vs learn family marks must be consistent within curriculum. SWAP → tfam=3; honest → tfam=0. Reference-free swap detection is impossible (disclosed); this is a within-curriculum consistency check, not a correctness oracle. Red team in progress.
 
 ---
 
