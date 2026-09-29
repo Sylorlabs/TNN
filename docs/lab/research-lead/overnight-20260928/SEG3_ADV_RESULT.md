@@ -59,11 +59,22 @@ less severe than stated.
 Fixture H1: corpus "xab" x2, "yab" x2, "zabab" x2, "wabab" x2; test
 "ab" x 30 (60 chars). "ab" count 8 fully covered -> 0; "abab"
 count 4 fully covered -> 0; no positive chunk matches the test.
-True number of optimal tilings: ways(2k) = ways(2k-2) + ways(2k-4),
-ways(60) = Fib(31) = 1346269.
+True number of optimal tilings: 2^29 = 536870912. [SUPERSEDED
+correction 2026-09-29: the original text here read "ways(2k) =
+ways(2k-2) + ways(2k-4), ways(60) = Fib(31) = 1346269". That analysis
+counted only the zero-score chunks "ab" and "abab" and missed "aba",
+"ba", and "bab", which match the test and participate in optimal
+tilings (the H1 lexicon has five zero-score chunks, and the committed
+H1-T candidates themselves use the missed chunks). The reference DP
+(validated: 770/770 exact agreement with the clamped DP wherever the
+clamp never fires) gives T = 2^(k-1) for "ab" x k at k = 1..30.
+Lineage: SEG4_ADV_RESULT.md "Correction" section, via H-SEG5 R2.
+The saturation conclusion is unchanged (536870912 > 999); only the
+cited true count was wrong.]
 
 - Exit 0, no hang, no crash.
-- SCORE 0, NOPT 999 (cap saturation; true count 1346269),
+- SCORE 0, NOPT 999 (cap saturation; true count 536870912 [SUPERSEDED,
+  was 1346269]),
   VERDICT AMBIGUOUS-TIED, NCAND 5.
 - All 5 enumerated candidates independently re-scored (string
   parsing path: chunk uscore summation, -20 per single char) to

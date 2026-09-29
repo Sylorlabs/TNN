@@ -23,7 +23,9 @@ documented as informational:
 2. **NOPT 999 cap honesty.** On heavy-tie inputs the optimal-path
    count saturates at 999 and prints as a plain "NOPT 999",
    indistinguishable from a genuine count of exactly 999. The
-   red-team H1 fixture ("ab" x 30, true count Fib(31) = 1346269)
+   red-team H1 fixture ("ab" x 30, true count 2^29 = 536870912
+   [SUPERSEDED correction 2026-09-29, was Fib(31) = 1346269;
+   lineage: SEG4_ADV_RESULT.md "Correction" section, via H-SEG5 R2])
    saturates it.
 
 ## Hypothesis H-SEG4
@@ -104,7 +106,9 @@ ADV-1 table; test = "xabcd" x 12000 (60000 chars).
 Corpus id 4 (H1); test = "ab" x 30 (60 chars).
 **Expected:** exit 0, VERDICT AMBIGUOUS, the NOPT field prints
 exactly "999+" (saturation label), NCAND 5. Per SEG3-ADV the true
-count is Fib(31) = 1346269 and all 5 enumerated candidates re-score
+count is 2^29 = 536870912 [SUPERSEDED correction 2026-09-29, was
+Fib(31) = 1346269; lineage: SEG4_ADV_RESULT.md "Correction" section,
+via H-SEG5 R2] and all 5 enumerated candidates re-score
 to the best score 0.
 
 ### Regression: all H-SEG3 frozen checks (K-SG4-4)
