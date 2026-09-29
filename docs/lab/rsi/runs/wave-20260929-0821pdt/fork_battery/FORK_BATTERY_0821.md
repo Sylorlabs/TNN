@@ -11,14 +11,14 @@ on both copies), harness binary sha256 a2e6284c5c45cfd65c7e0f974497512f4603f39bd
 re-verified byte-identical to the frozen instrument (re-verified, not rebuilt from
 source this wave). Scratch: ~/workspace/fb0821pdt/E/ (67 per-entry RESULT.txt files; driver exit 0).
 
-Counts: 67 named entries, 65 PASS, 0 FAIL, 2 UNTESTABLE. 52 unique commits
+Counts: 67 named entries, 65 PASS, 0 FAIL, 2 UNTESTABLE. 54 unique commits
 recomputed from this wave's own table per the standing hygiene rule.
 LIVE entries (2): arch-wave-20260929-0521pdt at 2e9326e6 (newly enumerated archive),
 local-tnn-native-lab at d24eda8b (run-start tip). FIXTURE: 65, including the
 renamed local-0521pdt-tip at d2fdf1225 (was LIVE at 0521pdt; rename declared in
 ENUMERATION_MANIFEST_0821.md) and the former LIVE entry arch-wave-20260929-0221pdt
 at d2fdf1225 (moved to fixture, name kept).
-Duplicate groups (11): bd309787 (wt-forktest-tnn-native-lab, wt-wave3-probe,
+Duplicate groups (10): bd309787 (wt-forktest-tnn-native-lab, wt-wave3-probe,
 wt-wave3-senses, wt-wave3-trades); 99143222 (rh-reorg-phase-0-1, wt-forktest-reorg,
 rh-pull-3-head); f875b341 (rh-wg-freeze, wt-forktest-wg-freeze); d2fdf122
 (arch-wave-20260929-0221pdt, local-0521pdt-tip); c368b8e1 (exp-sensory,

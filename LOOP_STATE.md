@@ -3741,3 +3741,116 @@ descendant-subagent runtime failure has killed four waves this week (0521pdt,
 subagents per the parent's direction; the overnight SEM-L3 session's K12 Python
 self-disclosure travels as its own disclosure, not wave evidence; zero origin
 commits this window.
+
+## Wave 20260929-0821pdt verdicts
+
+Wave pin: d24eda8bdc34dee54aace6451b193754e96784ab (run-start tip; includes the
+morning research-lead session: H-INFER/H-ROUTER/H-UNIFIED SURVIVE, H-COMPOSE
+KILLED, H-CC VOID, H-DIAG recharacterization, H-GENBIAS SURVIVES 4/4, H-STRESS
+17/17 SURVIVES). This wave ran inline with no nested subagents (descendant
+runtime flaky this week). Debate: debate/ADVOCATE_0821.md,
+debate/SKEPTIC_0821.md, debate/JUDGE_0821.md under
+docs/lab/rsi/runs/wave-20260929-0821pdt/. Provenance probe answered verbatim
+in every motion. No verdict overturned on rhetoric; no frozen bar weakened;
+zero Python. No em-dashes in any wave documentation.
+
+1. H-EXP (discriminating-experiment invention, NQ3) [NEW]: ADOPT as a
+bounded capability with narrowed classification ("bounded
+discriminating-sequence selection; world contact not demonstrated").
+Prereg aed88c8f2 (K-E1..K-E5) strictly precedes implementation e2b6d5b04
+(commit-order VALID); one transparent pre-execution amendment c06a23cfb
+(HYP name lines added to fixtures, pair semantics unchanged, recorded
+as a hygiene demerit). All five kill bars PASS: P1 SELECT [4,2]
+(lamp_on, pressurize), CHECKED 32, DIFFVAR pressure, PRED1 0 0 1 vs
+PRED2 0 1 1; P2 exact WITHHOLD, zero SELECT, exit 0; P3 SELECT [0,4],
+CHECKED 10, DIFFVAR lamp; byte-identical reruns; renamed-copy filename
+independence; zero hypothesis names in code (red-team grep). Red team:
+SURVIVES bounded, explicitly NOT L3 (hypotheses supplied as data,
+authored vocabulary and length bound, enumerate-and-select, no
+revision machinery). Zero regressions: no existing file modified.
+Skeptic's sustained limits banked: no world contact yet (H-EXP2
+queued), same-author pairs (second-author adversarial pair queued),
+three pairs only.
+
+2. Fork battery [NEW]: CONFIRM as a process confirmation (toolchain and
+extraction stability only). Full fresh run, driver exit 0: 67 named
+entries, 65 PASS, 0 FAIL, 2 UNTESTABLE (rh-pull-1-head 5802fec8,
+rh-pull-2-head 4b76bb59, non-TNN research-doc trees, git show exit
+128, twenty-two waves running). 54 unique commits; 10 duplicate SHA
+groups. LIVE entries both PASS at their pins (arch-wave-20260929-
+0521pdt 2e9326e6, local-tnn-native-lab d24eda8b). znc pin 498abcb5
+uniform 65/65 (0 pin divergence); probe sha 3b29aa06; b1/b2/b3 PASS,
+b1_cmp/b2_bin_cmp PASS; NEG1 E0002 65/65; NEG2 char-1 discrimination
+65/65; probe_run_stdout R32_ZNC_PROBE_OK 65/65; harness_verdict_pass_count
+1 on 65/65. Harness binary sha256 a2e6284c re-verified byte-identical
+to the frozen instrument (re-verified, not rebuilt). Two setup
+anomalies caught by checks before any verdict and fully repaired: the
+HARNESS path pointed at a nonexistent nested path (pin check failed
+with exit 11, corrected, full re-run); the mechanical sed renamed two
+fixture entry names causing a collision (restored, the two missing
+entries run individually with the identical frozen driver, both
+PASS). Remote: zero new refs (origin/tnn-native-lab bedf8b4a, HEAD
+27a4271f, all pins unchanged). Scope stamp: not evidence that the
+tip's contents are good; no transitive claim about the morning
+session's sims or verdicts rides this verdict.
+
+3. tnn_chat FIT [NEW]: FRESH re-run PASS on d24eda8bd (was DUE at 8 of
+8 staleness). All 10 chain pins verified before use; both binaries
+rebuild byte-identical (decline 20273a99, baseline 1ada2fae). KB1
+30/30 specific declines (26+4), 0 blanket refusals, output
+a2ca4dd7 on 3/3 runs; KB2 17/17 answered, e05fb4ec on 3/3 runs each
+binary; KB5 10/10 answered, 4f1603aa on 3/3 runs each binary; 9/9
+rerun pairs byte-identical; 2/2 decline/baseline parity identical;
+all 15 runs exit 0, stderr empty. Staleness resets to 0 of 8. No new
+chat/REPL/interactive entry points in the merge range d2fdf1225..
+d24eda8bd (17 new .zag files, all batch instruments with file-path
+args; src/ and units/ untouched).
+
+4. Design lane [NEW]: H-EXP is the new-mechanism output (see 1).
+Sensory NULL (stand-downs hold: G1, D-VID-1, ST-1 dead; E3 rejected;
+WHIRLPOOL closed; S12/S12b dead; no sealed pair touched).
+Intelligence trades HELD (no new expensive candidate). B1-class
+NULL (P9 stays a re-freeze template). EXP2-K4/COMP2-P11/ruling 6
+unchanged (HELD/banked). Nothing manufactured.
+
+5. Interactive survey [NEW]: NONE new. 17 new .zag files in range are
+all batch research instruments; zero stdin chat loops; the frozen
+probe instruments remain the only chat-capable instruments,
+certified by (3).
+
+6. Commit-order self-check [NEW]: VALID. Prereg aed88c8f2 strictly
+precedes implementation e2b6d5b04/3ae98a9c9; amendment c06a23cfb
+precedes all executions; evidence and battery commits follow. No
+candidate UNVERIFIABLE ORDERING. Permanent caveat travels: commit
+order evidences commit order only.
+
+7. UNTOUCHED [VOID]: the six governance rulings, the H-C kill
+recommendation, EXP2-K4 redesign-or-retire, Q1, Q2, all sealed blind
+pairs, DP-1, the salt dispositions, and Micah's frontier dirs
+(surveyed read-only) remain untouched. NQ4 (F-LEAK repair) and NQ5
+(single-pass copy patch/retire) require modifying his frontier
+implementation files and are banked to his queue, not taken by this
+wave.
+
+Provenance (verbatim probe answered in every debate motion): H-EXP
+prereg, fixtures, implementation, evidence, and red-team report are
+new this wave; the fork battery execution, FIT re-run execution,
+surveys, and debate records are new this wave; driver, harness,
+fixture SHAs, negative controls, FIT instruments, and expected
+hashes are inherited frozen. All HELD statuses, rulings, banked
+questions, governance items, sealed pairs, DP-1, salt dispositions,
+and frontier dirs are inherited and untouched. FIT staleness reset
+from 8 of 8 to 0 of 8 by the fresh re-run.
+
+Queued next: H-EXP2 (execute a selected experiment against a hidden
+law; second-author adversarial hypothesis pair; more pairs);
+H-ROUTER2 (NQ2, learned routing predicates); NQ4/NQ5 banked to
+Micah's queue (touch his frontier files); tnn_chat FIT due again at
+8 of 8 (staleness 0 of 8); his six pending governance rulings
+(untouched); his blind verdicts on the sealed pairs (unchanged,
+nothing added this wave); DP-1 presentation is a parent-agent queue
+decision; Q1/Q2 banked. Open questions banked: the _zag_malloc
+overlapping-block claim stays unproven (red-team flag, narrowed);
+the descendant-subagent runtime failure killed four waves this week
+and this wave ran inline with no nested subagents; zero origin
+commits this window.
