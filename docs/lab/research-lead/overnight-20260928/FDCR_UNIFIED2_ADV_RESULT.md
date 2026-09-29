@@ -244,4 +244,16 @@ membership. No L3 is claimed or affected.
 - Raw evidence run 2: `FDCR_UNIFIED2_ADV_RAW2.txt`
 - This report: `FDCR_UNIFIED2_ADV_RESULT.md`
 
-All paths under `docs/lab/research-lead/overnight-20260928/`.
+## 9. Post-report governance note (commit sweep)
+
+After this report was written, a concurrent worker (H-SEG3-ADV red
+team) committed the staged adversary files inside its own commit
+`c3aaac6b3` ("PREREG H-SEG3-ADV FROZEN") via broad staging. All five
+evidence files (`fdcr_unified2_adv.zag`, `fdcr_unified2_adv2.zag`,
+`FDCR_UNIFIED2_ADV_RAW.txt`, `FDCR_UNIFIED2_ADV_RAW2.txt`,
+`FDCR_UNIFIED2_ADV_RESULT.md`) are present in `c3aaac6b3`,
+byte-identical to the adversary's working copies (verified with
+`git diff HEAD`). The prereg (`d05e7b9e5`) strictly precedes the
+evidence commit, so prereg ordering is preserved; the commit message
+is mislabeled, which is a hygiene issue, not a prereg violation.
+This addendum documents the sweep so the lineage stays traceable.
