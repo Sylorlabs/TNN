@@ -299,9 +299,11 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 - Empty store withholds.
 - 3 runs byte-identical.
 
-**Boundary:** Not yet ported into unified_learn.zag query handler. Standalone validation only. Port in progress (see Section 5).
+**Boundary:** Ported into unified_learn.zag as H-INTENT-UNIFIED (see below). Standalone validation complete.
 
-**Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749.
+**H-INTENT-UNIFIED SURVIVES (20/20):** Intent retrieval ported into the unified learner without breaking 9/9. Query "hello" after learning reverse + bridge is genuinely ambiguous (scores 0 vs 1, gap=1 < 2), so the learner now withholds instead of spraying four outputs. All 10 H-INTENT checks pass inside the unified process. 3 runs byte-identical.
+
+**Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749; unified port prereg d959ff51f, implementation e27edbaf3.
 
 ---
 
