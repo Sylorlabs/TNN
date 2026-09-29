@@ -766,7 +766,19 @@ No mechanism has achieved L3.
 - NQ8: Answered by H-FDCR2. Complete.
 - NQ9: Answered by H-CAUSAL-UNIFIED (28/28). Red team in progress.
 - Procedure revision v2: H-REVISE2 SURVIVES. Red team in progress.
-- Synthetic language: H-SYNLANG KILLED. Segmentation (H-SEG) in progress.
+- Synthetic language: H-SYNLANG KILLED. H-SEG KILLED (2/3, shared-substring). H-SEG2 in progress.
+
+**H-SEG KILLED (2/3):** First empirical segmentation test. SEG-LEX (statistical chunk-lexicon learner) killed by shared-substring limitation.
+
+**K-SEG1 FAIL:** Training on bigredcube, biggreenball, smallredball, smallgreencube; test smallgreenball segmented as small|green|b|all (score 136), not small|green|ball (132). Chunk "all" (count 4: twice in "small", twice in "ball", score 36) outscored true word "ball" (count 2, score 32). Pure frequency-weighted chunking rewards shared substrings without charging for fragmentation.
+
+**K-SEG2 PASS:** Symmetric fixture; test abcde yields AMBIGUOUS with exactly two tied candidates (ab|cde and abc|de). First demonstration of segmentation ambiguity detection.
+
+**K-SEG3 PASS:** Deterministic.
+
+**Exploratory:** Fallback penalty of -20 repairs to small|green|ball while preserving AMBIGUOUS. Motivates H-SEG2.
+
+**Commits:** prereg 615935452; implementation 3c7477d74.
 - H-EXP2 red team: Complete (downgraded).
 - H-UNIFIED repair: H-UNIFIED2 SURVIVES. Red team in progress.
 - H-ROUTER2 red team: Complete (downgraded). Repair in progress.
