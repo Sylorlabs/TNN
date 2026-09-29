@@ -25,13 +25,19 @@ tiny-fixture scope), but it lacks hierarchy, revisability, composition, and scal
    - Form hierarchical abstractions (K5 FAIL)
    - Split concepts on contradictory evidence (K2 FAIL)
    - Represent partial overlap (K4 FAIL)
-   - Scale beyond tiny fixtures (K12 FAIL: crash at 50 entities)
+   It CAN:
+   - Resist interference from 200 unrelated facts (K9 PASS)
+   - Scale to 50 entities after buffer fix (K12 FIXED)
 
 3. **Concepts do not beat nearest-match.** Phase 4: H-USE killed. The "concepts"
    are functionally equivalent to structural similarity lookup (caching, not reasoning).
 
 4. **Phase-1 corrections stand.** H-C INVALID, H-B VOID, H-A RETRACTED, H2 SUPERSEDED
    (L1), text-approx DEFECTIVE, ingestion L0. All from commit 907e954dc.
+
+5. **Scaling bug fixed.** K12 crash (slice out of bounds at 50 entities) repaired by
+   increasing buffers 64→512, 128→1024. Generic fix, not fixture patch. v3 regression
+   8/8 preserved.
 
 ## BOUNDED
 
