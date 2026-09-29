@@ -218,22 +218,34 @@ The mechanism meets criteria 1-11. It fails criterion 12 (revision after counter
 
 ### 2.6 Learned Routing v2 / H-ROUTER2 (router2_learn.zag)
 
-**Classification:** Bounded L2 structural learning (not L3)
+**Classification:** DOWNGRADED by red team (2026-09-29). Was bounded L2 structural learning.
 
 **What it does:** Makes routing predicates LEARNED from experience, not authored. Copies the causal learner's SPLIT machinery. Trains on an 18-item marked curriculum (input-structure features mapped to task codes), then applies induced rules to unmarked inputs.
 
-**Validated evidence:**
+**Previously validated (now narrowed):**
 
-- **K-R2A (inspectability):** PASS. Hypothesis dump shows 11 ACTIVE entries as readable rules (e.g., s0=1&s1=2 maps to PROC_LEARN, s0=1&s1=1 maps to WITHHOLD, s2=1 maps to PROC_QUERY, plus unconditional WITHHOLD fallback). The induction trace shows the machinery chose split order via its unique-candidate test.
-- **K-R2B (suite match):** 16/16. All 10 H-ROUTER suite items route identically to authored predicates, plus 6 novel surface strings.
-- **K-R2C (novel withhold):** 4/4. Feature-novel inputs all WITHHOLD via induced fallback. No confident misrouting.
-- **K-R2D (determinism):** PASS. 3 runs byte-identical.
+- K-R2A (inspectability): PASS. 11 ACTIVE entries as readable rules.
+- K-R2B (suite match): 16/16 within curriculum range.
+- K-R2C (novel withhold): 4/4 honest WITHHOLD.
+- K-R2D (determinism): PASS. 3 runs byte-identical.
 
-**Honest boundary (predicted in prereg, confirmed):** The equality-only vocabulary induces per-value rules, not general thresholds. Three separate rules for nseg=2/3/4 instead of one nseg>=2 rule. Novel nseg values honestly WITHHOLD rather than route. This concretely motivates vocabulary enrichment as the next frontier.
+**THE DOWNGRADE (H-ROUTER2 Red Team, 2026-09-29):**
 
-**Classification note:** The routing policy moved from researcher to learner, but features are authored, task codes are supplied as marks, and SPLIT is pre-existing machinery. Bounded L2, not L3.
+Two of four attacks met kill criteria.
 
-**Commits:** prereg 635787932; result 313b840ed.
+**X-R1 (Curriculum gaming): KILL.** Built variant curriculum with consistently-wrong marks (str>str multi-seg → CAUS_LEARN instead of PROC_LEARN). Learner accepted all 18 gamed episodes with zero diagnostics, induced wrong rules, routed novel inputs to wrong task. The routing "knowledge" is fully determined by researcher-supplied marks. The learner is a supervised compiler, not a policy discoverer.
+
+**X-R3 (Threshold divergence): KILL.** 6/6 divergence confirmed. H-ROUTER's authored predicate is nseg>=2 → PROC_LEARN (threshold). H-ROUTER2 induces per-value equality rules and WITHHOLDS on nseg=5,6,7,8,9 — everywhere H-ROUTER would route to LEARN. The claim "matching the authored H-ROUTER decisions" is FALSE outside the curriculum range.
+
+**X-R2 (Boundary collisions): PASS.** No confident misrouting.
+
+**X-R4 (Source audit): PASS.** 11 rules genuinely from SPLIT machinery. No hardcoding.
+
+**Revised classification:** Bounded L2 supervised rule induction (narrowed). What stands: white-box induction via SPLIT, deterministic, honest on boundaries, 16/16 within curriculum range. What falls: (1) policy content is researcher-supplied via marks; (2) threshold not recovered, diverges on nseg≥5.
+
+**Governance disclosure:** Red team used Python once for a single text replacement in a harness file (not experimental pipeline). Disclosed in report.
+
+**Commits:** prereg 635787932; result 313b840ed; red team prereg 48ed09d9c, result b449bed2c.
 
 ---
 
@@ -651,7 +663,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | Causal learning | Bounded L2 | 14/14 probes; narrow authored vocabulary |
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
-| Learned router v2 | Bounded L2 | Predicates learned; features authored; equality-only |
+| Learned router v2 | DOWNGRADED | Supervised compiler, not policy discoverer; diverges on nseg≥5 |
 | Unified learner | KILLED | Compositional interference: verified knowledge replaced by colliding-format item |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
