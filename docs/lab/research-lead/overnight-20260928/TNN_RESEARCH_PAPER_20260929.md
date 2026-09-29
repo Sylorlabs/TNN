@@ -603,6 +603,16 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **Commits:** prereg 54790d0d2; implementation 377080fc7.
 
+**H-REVISE3 RED TEAM DOWNGRADE (2026-09-29):** Two attacks succeed.
+
+**X-RV3-1:** Scoring gaming. The exact "most attackable" fixture works. Incidental scores same as causal (both 2). Tie-break picks incidental (0,120) not causal (2,121). Both held-out fail. Heuristic bounded, not causal guarantee.
+
+**X-RV3-3:** Slot exhaustion. 5th revision silently dropped. Query returns wrong. No eviction policy, no error. Design gap for continuing learner.
+
+**Revised:** Bounded L2+ with scored heuristic (not causal identification) and 4-slot limit (silent on exhaustion). The three repaired classes stand.
+
+**Commits:** red team prereg 53c5a5732; result 7bd8a7dc2.
+
 **Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
 ---
