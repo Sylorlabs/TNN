@@ -780,7 +780,7 @@ No mechanism has achieved L3.
 
 - NQ1: Causal v2 (conjunctions, inequalities, delayed effects). In progress.
 - NQ2: Answered by H-ROUTER2 (downgraded). Repair in progress.
-- NQ3: Answered by H-EXP2 (downgraded to state selection). H-EXP3 SURVIVES (reachability awareness). Red team in progress.
+- NQ3: Answered by H-EXP2 (downgraded to state selection). H-EXP3 SURVIVES (4/4, DOWNGRADED by red team). Repair in progress.
 
 **H-EXP3 SURVIVES (4/4):** Reachability-aware experiment selection. Addresses both H-EXP2 downgrades.
 
@@ -793,6 +793,16 @@ No mechanism has achieved L3.
 **Classification:** Bounded L2 infrastructure repair. Setup planning (action sequences) remains out of scope. Reachability awareness, not planning. Not L3.
 
 **Commits:** prereg 6a4bb29ba; implementation f8299c388.
+
+**H-EXP3 RED TEAM DOWNGRADE (2026-09-29):** Two attacks succeed.
+
+**X-E3-1(b):** AGENT-SETUP-ABLE overclaim. The learner computes per-variable change counts but doesn't know which action changes which variable, whether specific values are achievable, or whether the state combination is reachable. Positive label unverified as clearance. Negative direction (NEEDS-EXTERNAL-SETUP) is sound.
+
+**X-E3-2:** Safety check tautological. Re-runs identical deterministic function on identical inputs. Can never fail. Dead code. Verifies determinism, not discrimination.
+
+**Revised:** Bounded L2 with reliable hazard flagging (unverified positive clearance) and honestly-labeled heuristic ranking (tautological re-verification). Not L3. Both H-EXP2 downgrades remain ADDRESSED in honest core.
+
+**Commits:** red team prereg fbea971e4; result a21a5465f.
 - NQ4: Answered by H-FLEAKFIX. Complete.
 - NQ5: Answered (retire, don't patch). Complete.
 - NQ6: Answered by H-INTENT (downgraded). Repair in progress.
