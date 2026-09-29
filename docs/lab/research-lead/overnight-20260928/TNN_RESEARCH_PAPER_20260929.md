@@ -329,9 +329,21 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 
 **Boundary:** Ported into unified_learn.zag as H-INTENT-UNIFIED (see below). Standalone validation complete.
 
-**H-INTENT-UNIFIED SURVIVES (20/20):** Intent retrieval ported into the unified learner without breaking 9/9. Query "hello" after learning reverse + bridge is genuinely ambiguous (scores 0 vs 1, gap=1 < 2), so the learner now withholds instead of spraying four outputs. All 10 H-INTENT checks pass inside the unified process. 3 runs byte-identical.
+**H-INTENT-UNIFIED SURVIVES (20/20), DOWNGRADED by red team (2026-09-29):** Intent retrieval ported into the unified learner without breaking 9/9. Query "hello" after learning reverse + bridge is genuinely ambiguous (scores 0 vs 1, gap=1 < 2), so the learner now withholds instead of spraying four outputs. All 10 H-INTENT checks pass inside the unified process. 3 runs byte-identical.
 
-**Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749; unified port prereg d959ff51f, implementation e27edbaf3.
+**THE DOWNGRADE (IU4-ADV):**
+
+**X-IU1 SUCCESS:** Recency bypass of ambiguity guard. Identical competitors with identical training flip from WITHHOLD to confident pick purely from learn-order interleaving (scores 10000 vs 10003, gap 3). The seq difference carries zero query-relevant information. Contradicts the builder's own gap-rule rationale ("the learner does not guess silently").
+
+**X-IU2 SUCCESS:** cond_fire dominance over exact training evidence. Query "xqw" was verbatim in D's training, but bridge won (20001 vs 10000) because cond_fire=1. The 20000-point heuristic overrides explicit training evidence. No exact-match signal exists.
+
+**X-IU3 BOUNDARY:** len_match term has no causal link to procedure competence but dominates selection.
+
+**X-IU4 PASS:** Port faithful. No hardcoding.
+
+**Revised:** Bounded L2 integration infrastructure with narrowed reliability claims. The 20/20 frozen checks stand. WITHHOLD does not mean "genuinely ambiguous" (verdict is learn-order dependent). Winner is not always best-supported.
+
+**Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749; unified port prereg d959ff51f, implementation e27edbaf3; red team prereg 2c25b011d, result 4d471f519.
 
 ---
 
