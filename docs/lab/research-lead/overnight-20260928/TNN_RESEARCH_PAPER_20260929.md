@@ -377,6 +377,16 @@ The red team scoped honestly: the causal learner in isolation behaved as designe
 
 **Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749; unified port prereg d959ff51f, implementation e27edbaf3; red team prereg 2c25b011d, result 4d471f519.
 
+**H-INTENT-UNIFIED2 RED TEAM DOWNGRADE (2026-09-29):** 2 findings.
+
+**X-IU2-1 (em collision):** When both proc and bridge have verbatim evidence for same input, conflict resolved silently by cond_fire heuristic. The em term only protects when heuristic side has no verbatim. "X-IU2 CLOSED" must be scoped: closed for heuristic-vs-verbatim, open for verbatim-vs-verbatim.
+
+**X-IU2-3 (16-cap):** 17th training pair silently dropped, no warning. Genuine evidence loses to heuristic.
+
+**X-IU2-3b (latent crash):** Pre-existing bug in bridge_learn. s1idx/s2idx fixed 64 bytes but can overflow → panic. Dates to H-UNIFIED.
+
+**Commits:** red team prereg 130109b6b; result d9d1d9cca.
+
 ---
 
 ### 2.9 Generality Bias Repair / H-GENBIAS
