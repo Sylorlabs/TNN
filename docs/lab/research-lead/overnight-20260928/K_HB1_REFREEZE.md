@@ -1,12 +1,12 @@
-# K-HB-1 Re-freeze — Principled Bar for H-B DELTA
+# K-HB-1 Re-freeze - Principled Bar for H-B DELTA
 
 **Date:** 2026-09-28 (overnight research session)
 **Status:** FROZEN (this commit). Judgment of pre-existing measurements against
-this bar follows immediately below — the measurements are not re-run (they are
+this bar follows immediately below - the measurements are not re-run (they are
 deterministic and byte-identical); only the bar is new.
 **Why:** The original K-HB-1 first appeared in the results commit (VOID as a
 preregistered verdict). This bar is derived from H-B's design documents, which
-predate the results. It is set post-observation but NOT fit to observation —
+predate the results. It is set post-observation but NOT fit to observation -
 the derivation is transparent and the numbers below are justified from the
 mechanism, not from 119/120.
 
@@ -19,7 +19,7 @@ H-B DELTA (`docs/lab/composition/combiner_arch/hypo_b/BUILD.md`, committed
    per-slot provenance enumeration, mixed-radix ambiguity enumeration, exact
    integer affine fitting (Cramer's rule, exact divisibility required),
    byte-exact training verification before acceptance. An exact-search
-   mechanism does not guess — it finds the program or withholds.
+   mechanism does not guess - it finds the program or withholds.
    → **Bar clause (a): zero wrong emissions** (confident incorrect predictions)
    on any probe. A single wrong emission falsifies the exact-search claim.
 
@@ -36,7 +36,7 @@ H-B DELTA (`docs/lab/composition/combiner_arch/hypo_b/BUILD.md`, committed
    structural withhold codes (UNDERDET, NO_LENGTH_RULE, AMBIGUOUS, NO_PROGRAM,
    OOB, NO_CLAUSE). Withholds are first-class, but each must be justifiable as
    out-of-taught-distribution. Composition (P1) chains induced programs on
-   intermediates the learner never saw in teaching — degenerate intermediates
+   intermediates the learner never saw in teaching - degenerate intermediates
    (e.g., length-1) are legitimately outside the induced program's domain.
    → **Bar clause (c): P1 = 100% correct-or-withhold**, with every withhold
    individually documented as out-of-distribution. Zero wrong emissions (per

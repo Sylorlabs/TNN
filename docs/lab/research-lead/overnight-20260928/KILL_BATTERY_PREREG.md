@@ -119,14 +119,14 @@ with density.
 
 ## Implementation Priority (by information gain)
 
-1. K5 (Hierarchy) — directly tests L3 vs L2+
-2. K2 (Delayed divergence) — tests revisability
-3. K4 (Partial overlap) — tests representational richness
-4. K8 (Composition) — tests usefulness for thinking
-5. K1 (Collision) — tests shallowness
-6. K9 (Interference) — tests robustness
-7. K12 (Scaling) — tests practicality
-8. K11 (Threshold brittleness) — tests principledness
+1. K5 (Hierarchy) - directly tests L3 vs L2+
+2. K2 (Delayed divergence) - tests revisability
+3. K4 (Partial overlap) - tests representational richness
+4. K8 (Composition) - tests usefulness for thinking
+5. K1 (Collision) - tests shallowness
+6. K9 (Interference) - tests robustness
+7. K12 (Scaling) - tests practicality
+8. K11 (Threshold brittleness) - tests principledness
 
 K3, K6, K7, K10 are low-information (expected to pass or redundant).
 

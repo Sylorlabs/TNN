@@ -25,7 +25,7 @@ All match reported results. Reproduction CONFIRMED.
 
 ## Criterion Audit
 
-### C1: Structure not enumerated beforehand — PASS
+### C1: Structure not enumerated beforehand - PASS
 
 **Definition:** The final learned concept nodes must not appear as literals in source.
 **Evidence:** mini_learn.zag contains no hardcoded surface pairs. UNIFY output shows
@@ -34,7 +34,7 @@ discovered pairs (norpal~squeezer, etc.) that emerge from data.
 **Limitation:** The ALGORITHM (Jaccard + threshold) is human-authored. Only the
 SPECIFIC groupings are learner-discovered.
 
-### C2: Created after experience — PASS
+### C2: Created after experience - PASS
 
 **Definition:** Nodes must emerge from teaching data, not initialization.
 **Evidence:** parent[] initialized to identity (parent[i]=i). Unifications occur
@@ -42,7 +42,7 @@ only after T facts are processed. Empty input → no unifications.
 **Mechanism:** Incremental signature building, pairwise Jaccard check.
 **Limitation:** None identified.
 
-### C3: Inspectable persistent state — PASS
+### C3: Inspectable persistent state - PASS
 
 **Definition:** The invented structure must exist in observable state.
 **Evidence:** UNIFY lines print discovered nodes. parent[] array holds equivalence
@@ -51,7 +51,7 @@ classes. In mini_stream.zag, state persists across interleaved T/Q stream.
 **Limitation:** In batch mini_learn, state is per-run (not cross-process persistent).
 mini_stream demonstrates in-process persistence.
 
-### C4: Causal trace — PASS
+### C4: Causal trace - PASS
 
 **Definition:** Must be able to explain WHY a specific node was created.
 **Evidence:** Output includes "jacc 2/4" showing the similarity score. Distinguishing
@@ -59,7 +59,7 @@ check is explicit in source (same R, different O blocks unification).
 **Mechanism:** Jaccard >= 0.5 AND no distinguishing triple.
 **Limitation:** Trace is at the algorithmic level, not a "reason" in cognitive terms.
 
-### C5: Ablation reduces capability — PASS
+### C5: Ablation reduces capability - PASS
 
 **Definition:** Removing the invented structure must hurt performance on unseen cases.
 **Evidence:** mini_learn_nounify.zag (unification disabled): P-PARA 3/3 → 0/3.
@@ -67,7 +67,7 @@ P-NEAR unchanged (5/5), showing the drop is specific to concept-dependent probes
 **Mechanism:** Without parent[] merges, probe lookup finds no (member,R) facts.
 **Limitation:** Ablation is coarse (all-or-nothing). Per-concept ablation not tested.
 
-### C6: Generalizes to unseen instances — PASS
+### C6: Generalizes to unseen instances - PASS
 
 **Definition:** Must answer probes using (S,R) combinations never taught.
 **Evidence:** Probe (squeezer, sqz_heat, ?) → velx. Teaching contains (norpal, sqz_heat, velx)
@@ -75,7 +75,7 @@ but NOT (squeezer, sqz_heat, *). Correct answer requires norpal~squeezer concept
 **Mechanism:** Concept-mediated lookup: resolve S to concept, search member facts.
 **Limitation:** "Unseen" is within the same fixture distribution. No out-of-distribution test.
 
-### C7: Reused later — PASS
+### C7: Reused later - PASS
 
 **Definition:** Invented structure must be applied to cases beyond its creation context.
 **Evidence:** Transfer test: novel surface norpal2 (2 examples) unified with E1 concept.
@@ -84,7 +84,7 @@ mini_stream: concept formed at fact 4, used at query 7.
 **Mechanism:** New surfaces with overlapping signatures merge into existing concepts.
 **Limitation:** Reuse is within the same relational vocabulary. No cross-domain reuse.
 
-### C8: Transfers to surface-different problem — PASS (with caveat)
+### C8: Transfers to surface-different problem - PASS (with caveat)
 
 **Definition:** Must work when surface forms change but deeper structure preserved.
 **Evidence:** RT-1: all relations/objects renamed to arbitrary tokens (r1, o1, r2, o2...).
@@ -96,7 +96,7 @@ the relational vocabulary size, arity, or introduce distractors. Previous sessio
 marked this as pending; audit finds the RT-1 evidence satisfies the criterion as stated,
 but notes the limitation.
 
-### C9: Simpler explanations attacked — PARTIAL
+### C9: Simpler explanations attacked - PARTIAL
 
 **Definition:** Must meaningfully test alternatives: signature hashing, equivalence-class
 formation, deterministic clustering, memorization, template matching, hand-designed

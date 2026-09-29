@@ -1,7 +1,14 @@
 # SEM-L3 Minimal v3: L3 Concept Invention Demonstrated
 
+> **SUPERSEDED (2026-09-29, governance audit).** The "CORE L3 MECHANISM VALIDATED"
+> claim in this document is superseded. Independent kill battery (K2/K4/K5/K12)
+> showed the mechanism is monotonic flat Jaccard clustering (L2+), not L3
+> representational invention. See KILL_BATTERY_VERDICT.md and MORNING_REPORT.md.
+> The 8/8 experimental result itself reproduces and remains valid as L2+ evidence;
+> only the L3 classification is withdrawn.
+
 **Date:** 2026-09-29 ~02:30 PDT
-**Status:** CORE L3 MECHANISM VALIDATED (minimal scale)
+**Status:** ~~CORE L3 MECHANISM VALIDATED (minimal scale)~~ SUPERSEDED - reclassified L2+
 **Implementation:** Pure Zag, deterministic, no Python
 
 ## What was built
@@ -61,7 +68,7 @@ Withhold if not found or ambiguous.
 8. **Memorization attacks:** NOT YET TESTED. Requires RT-8.
 9. **Independent red-team survival:** NOT YET. Requires Phase 4.
 
-**Verdict:** 6/9 L3 criteria satisfied. Core invention mechanism validated.
+**Verdict:** 6/9 L3 criteria satisfied. Core invention mechanism validated. [SUPERSEDED 2026-09-29: reclassified L2+, see header]
 Remaining 3 require further testing.
 
 ## Design Iterations (v1 -> v3)

@@ -17,7 +17,7 @@
 
 **Gap:** Neither learner implements disk persistence for incremental state.
 - Batch: Can "recover" by re-reading world file, but this is not "persistent learner
-  state" — it's re-learning from scratch.
+  state" - it's re-learning from scratch.
 - Streaming: Has in-memory incremental state, but no serialization.
 
 **What would be needed:**

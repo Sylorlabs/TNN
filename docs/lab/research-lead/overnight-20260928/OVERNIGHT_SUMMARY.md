@@ -1,5 +1,11 @@
 # Overnight Research Session Summary: 2026-09-28 to 2026-09-29
 
+> **RETRACTED IN PART (2026-09-29, governance audit).** The "L3 validated (7/9)"
+> and "FIRST CREDIBLE L3" claims in this document are RETRACTED. Independent
+> kill battery showed the SEM-L3 mechanism is L2+ clustering, not L3 invention.
+> See KILL_BATTERY_VERDICT.md and MORNING_REPORT.md. Phase-1 corrections in this
+> document remain valid.
+
 **Session:** Autonomous skeptical research lead for Sylorlabs/TNN
 **Duration:** ~22:00 PDT 09-28 to ~07:30 PDT 09-29 (overnight)
 **Branch:** tnn-native-lab
@@ -64,7 +70,7 @@ Seven independent verifiers inspected prior claims. Results:
 
 ## Phase 7: Continuing Learner PoC (COMPLETED)
 
-**Built:** `mini_stream.zag` — streaming concept learner.
+**Built:** `mini_stream.zag` - streaming concept learner.
 - Processes interleaved T/Q lines, no reset.
 - Incremental unification, persistent concepts.
 - **Score:** 5/5 on test stream (including in-stream transfer and near-miss rejection).
@@ -77,7 +83,7 @@ Seven independent verifiers inspected prior claims. Results:
 - Ingestion: L0 (deterministic storage, 3/250 QA)
 - H2/Memory: L1 (taught parameters, hand-coded planning)
 - H-B: L1+ (parameter induction in pre-enumerated schema)
-- **SEM-L3 minimal: L3 (7/9 criteria) — FIRST CREDIBLE L3 IN TNN PROGRAM**
+- **SEM-L3 minimal: L3 (7/9 criteria) - FIRST CREDIBLE L3 IN TNN PROGRAM** [RETRACTED 2026-09-29: reclassified L2+, see header]
 - Streaming: Continuing learner PoC functional
 
 **Failed:**

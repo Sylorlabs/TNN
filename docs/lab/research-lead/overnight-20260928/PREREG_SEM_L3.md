@@ -1,4 +1,4 @@
-# PREREG: SEM-L3 — Learner-Invented Concept Unification from Experience
+# PREREG: SEM-L3 - Learner-Invented Concept Unification from Experience
 
 **Status:** FROZEN (committed before any implementation)
 **Date:** 2026-09-28 (overnight research session)
@@ -15,7 +15,7 @@ white-box, causal, revisable, and transfers?
 literal-retrieval floor on paraphrase-heavy probes. Semantic gain requires
 hand-supplied equivalence tables (L0) or taught derivation edges (L1).
 
-**H-SEM-1 (candidate — consequence-anchored unification):** A learner equipped
+**H-SEM-1 (candidate - consequence-anchored unification):** A learner equipped
 with a generic unification mechanism will create concept nodes unifying surfaces
 that systematically license the same predictions, achieving paraphrase and
 composition performance far above the literal floor, while correctly refusing to
@@ -23,7 +23,7 @@ unify near-misses. The concept nodes are learner-created (L3): the specific
 groupings are not enumerated in source, arise after experience, are visible in
 white-box state, and their removal causally degrades performance.
 
-**H-SEM-2 (alternative — relational-role equivalence):** Unification based on
+**H-SEM-2 (alternative - relational-role equivalence):** Unification based on
 identical relational roles (same relations to same relata, ignoring outcomes)
 suffices. If H-SEM-1 and H-SEM-2 both pass, the discriminating test is the
 distinguishing-consequence probe: H-SEM-1 refuses unification when a
@@ -33,8 +33,8 @@ H-SEM-2 unifies anyway (and should fail that probe).
 ## 2. Why it matters
 
 Large-scale ingestion proved TNN can store 9M facts (L0) but cannot use them
-(3/250 audited; retrieval is keyword IR). Semantic competence — understanding
-that different surfaces refer to the same concept — is the largest measured gap
+(3/250 audited; retrieval is keyword IR). Semantic competence - understanding
+that different surfaces refer to the same concept - is the largest measured gap
 between TNN and LLM-style systems, and the likeliest reason a rational user
 would still prefer an LLM. This experiment tests whether TNN can close that gap
 by invention (L3) rather than by importing embeddings (forbidden) or hand-coded
@@ -81,11 +81,11 @@ it fails.
 ## 5. Sealed evaluation
 
 Probe classes (all surfaces disjoint from teaching surfaces where applicable):
-- **P-PARA** (60): paraphrase queries — same underlying fact, novel surface
+- **P-PARA** (60): paraphrase queries - same underlying fact, novel surface
   combination. Literal retrieval scores ~0 by construction.
-- **P-NEAR** (40): near-miss — similar surface, different entity. Correct =
+- **P-NEAR** (40): near-miss - similar surface, different entity. Correct =
   WITHHOLD or correct distinct answer (no false unification).
-- **P-SHIFT** (30): meaning shift — same words, different relational role.
+- **P-SHIFT** (30): meaning shift - same words, different relational role.
   Correct = not conflated.
 - **P-COMP** (40): 2-hop composition with novel surface combinations
   (norpal→glim→vellum chains). No teaching fact contains the full chain.
@@ -131,7 +131,7 @@ Per-class accuracy (no averaging into one number). Plus:
   (else nodes aren't causal).
 - **SEM-K5:** P-TRANSFER ≥ 70% with ≤5 examples/surface (C-LITERAL needs
   full reteaching by construction).
-- **SEM-K6:** determinism — 3 runs byte-identical including allocator
+- **SEM-K6:** determinism - 3 runs byte-identical including allocator
   perturbation.
 - **Verdict rule:** H-SEM-1 ADOPTED iff K1–K6 all pass. Any single bar fails →
   H-SEM-1 KILLED (record which bar, preserve evidence). H-SEM-0 survives iff
@@ -148,7 +148,7 @@ synonym table.
 **Would NOT establish:** general language understanding; that the mechanism
 scales to 9M facts (separate experiment); that TNN "understands" in any
 philosophical sense; that the unification criterion itself was invented (the
-criterion is generic machinery — the L3 claim is on the invented nodes, as
+criterion is generic machinery - the L3 claim is on the invented nodes, as
 preregistered).
 
 ## 11. Likely failure modes
@@ -161,7 +161,7 @@ preregistered).
 - The unifier discovers the generator's surface-template pattern rather than
   semantics (e.g., "surfaces sharing a prefix unify"). Red team must test
   with template-breaking surfaces.
-- Composition fails for lack of multi-hop inference, not unification —
+- Composition fails for lack of multi-hop inference, not unification -
   P-COMP would then fail while P-PARA passes, implicating inference, not
   concepts. (Diagnose, don't patch the probes.)
 
@@ -170,12 +170,12 @@ preregistered).
 **RUN NOW** as the night's primary L3 experiment. It is the highest-information
 single experiment available: it attacks the largest measured gap with a
 falsifiable L3 design, reuses the sealed-corpus methodology, and a clean kill
-(H-SEM-0 survives) is as informative as a pass — it would pinpoint the exact
+(H-SEM-0 survives) is as informative as a pass - it would pinpoint the exact
 architectural limitation blocking semantic invention.
 
 ---
 
-## Amendment A1 (2026-09-28, pre-implementation — transparent)
+## Amendment A1 (2026-09-28, pre-implementation - transparent)
 
 **Defect:** §4 as frozen ("surfaces mixed randomly per fact") implied each
 underlying fact is taught once. This yields disjoint signatures for true
@@ -183,7 +183,7 @@ surface pairs (different facts share no relational contexts), so the §3
 unifier's Jaccard overlap would always be 0 and could never fire. The protocol
 was unimplementable as written.
 
-**Fix:** The generator teaches redundantly — each underlying fact appears 2–3
+**Fix:** The generator teaches redundantly - each underlying fact appears 2–3
 times with different surface variants. This supplies overlapping-signature
 evidence; the learner still induces WHICH surfaces pair (never told). Near-miss
 distinguishing facts use unique surfaces (no redundant teaching across the

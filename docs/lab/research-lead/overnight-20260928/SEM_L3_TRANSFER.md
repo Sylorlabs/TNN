@@ -1,5 +1,10 @@
 # SEM-L3 Minimal v3: Transfer Test (L3 Criterion #7)
 
+> **SUPERSEDED (2026-09-29, governance audit).** The "Updated L3 Score: 7/9" in this
+> document is superseded. The parent L3 claim was withdrawn after the kill battery
+> (see KILL_BATTERY_VERDICT.md). The transfer observation (novel surface joins
+> concept, probe correct) reproduces and remains valid as L2+ evidence.
+
 **Date:** 2026-09-29 ~03:45 PDT
 
 ## Test
@@ -23,7 +28,7 @@ These align with E1 concept (norpal/squeezer) which uses sqz_emit->glimx, sqz_gl
 
 **Score:** 2/2
 
-## L3 Criterion #7: Transfer/Reuse — SATISFIED
+## L3 Criterion #7: Transfer/Reuse - SATISFIED
 
 The learner reused the invented E1 concept for a novel surface with only 2 examples.
 The concept was not pre-enumerated; it was invented from prior experience and

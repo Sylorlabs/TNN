@@ -1,4 +1,4 @@
-# Phase-1 Scientific Record — Overnight Research Session 2026-09-28
+# Phase-1 Scientific Record - Overnight Research Session 2026-09-28
 
 **Authority:** Autonomous research lead, acting under Micah's overnight mandate.
 **Method:** Five independent inspectors produced evidence reports
@@ -11,12 +11,12 @@ This document is the canonical correction. Original verdict documents are NOT
 rewritten; they are annotated with pointers here. Archival evidence is preserved.
 
 **Markers used:** INVALID (verdict cannot stand), RETRACTED (claim withdrawn),
-SUPERSEDED (replaced by a better classification), VOID (verdict-grade null —
+SUPERSEDED (replaced by a better classification), VOID (verdict-grade null -
 measurements stand, judgment did not exist), DEFECTIVE (do not execute as is).
 
 ---
 
-## 1. Combiner salt battery (57d055b) — governance INVALID
+## 1. Combiner salt battery (57d055b) - governance INVALID
 
 ### 1a. H-C kill: INVALID
 
@@ -27,14 +27,14 @@ measurements stand, judgment did not exist), DEFECTIVE (do not execute as is).
   limitation, **not a bar**" (`BUILD.md:144-146`), and the chaining audit
   records r7 W5 withhold as **correct** behavior.
 - The salt commit (`57d055b`, 2026-09-27 19:24:28 PDT) redefines K-HC4 as
-  "minimum capability includes swap-first-last" (`TESTING.md:141`) — a phrase
-  occurring nowhere else in the committed record — and kills H-C for the
+  "minimum capability includes swap-first-last" (`TESTING.md:141`) - a phrase
+  occurring nowhere else in the committed record - and kills H-C for the
   previously-accepted withhold.
 - The referenced `hyp/hypo_c/HYPOTHESIS.md` was never committed; no other
   frozen definition exists to appeal to.
 - **Correction:** the H-C kill is INVALID. H-C's status reverts to **SURVIVES**
   under its frozen bar (K-HC4 = "learn the D1 six"). The salt measurements for
-  H-C (48/48 P0, 118/120 P1, 4/8 P3) are preserved as **exploratory data** —
+  H-C (48/48 P0, 118/120 P1, 4/8 P3) are preserved as **exploratory data** -
   the salt battery had no frozen bars and cannot render verdicts.
 - **Rule violated:** "Never retroactively alter a kill bar to save or kill an
   architecture." This instance altered a bar to kill.
@@ -45,7 +45,7 @@ measurements stand, judgment did not exist), DEFECTIVE (do not execute as is).
   (`git log -S "K-HB-1"` returns exactly one commit). No prereg existed.
 - The bar (118/120 P1; 47/48 P0) sits exactly one point below the observed
   scores (119/120; 48/48). The cited "HYPOTHESIS.md §2.1/§3" exists on no branch.
-- **Correction:** H-B's measurements STAND (48/48 P0, 119/120 P1, 8/8 P3 —
+- **Correction:** H-B's measurements STAND (48/48 P0, 119/120 P1, 8/8 P3 -
   deterministic, byte-identical, committed raw scores), but the "SURVIVES"
   verdict is VOID: there was no frozen bar to survive. A principled bar must be
   frozen (justified from H-B's own design standards, NOT fit to 119/120) and
@@ -58,11 +58,11 @@ measurements stand, judgment did not exist), DEFECTIVE (do not execute as is).
 
 - The 5 wrong emissions on Eaff are real (committed raw rows).
 - **RETRACTED:** TESTING.md's causal diagnosis. The Eaff teaching arm carried
-  0/12 uppercasing signal — the salt maps all 12 r4 teaching first bytes outside
+  0/12 uppercasing signal - the salt maps all 12 r4 teaching first bytes outside
   a–z, so H-A **correctly** learned identity from signal-free teaching
   (`ha.zag` BYIDENT-first verification). This is an uncalibrated arm, not a
   proven mechanism boundary. (Refinement: TESTING.md's "outside a–z" failure
-  description is contradicted by the raw bytes `0x79,0x70,0x70,0x67,0x67` —
+  description is contradicted by the raw bytes `0x79,0x70,0x70,0x67,0x67` -
   the failures are on in-alphabet bytes under salted teaching.)
 - **Required:** a calibrated re-run (salt preserving the uppercasing signal in
   teaching) under a bar frozen BEFORE results.
@@ -77,7 +77,7 @@ strictly earlier than the results commit.** Verifiers must check this by
 
 ---
 
-## 2. H2 taught-physics world model (7979a55) — SUPERSEDED classification
+## 2. H2 taught-physics world model (7979a55) - SUPERSEDED classification
 
 The "learned world model" framing is SUPERSEDED by the L0–L3 classification:
 
@@ -87,20 +87,20 @@ The "learned world model" framing is SUPERSEDED by the L0–L3 classification:
   nothing from practice."
 - **What was hand-coded (neither taught nor learned):** all M1–M15 dynamics in
   `model_step`; the 64-tick planner (8 candidates, hand-coded base policy and
-  tie-break — BUILD.md's "9 candidates" is wrong, confirmed in `h2.zag`).
+  tie-break - BUILD.md's "9 candidates" is wrong, confirmed in `h2.zag`).
 - **"0 mismatches over 32,912 ticks"** measures copy fidelity to the
   evaluator's own `d2bin`, not learned physics.
 - **The central thesis (P2 composition 22–24/24) never ran.** No P2 evidence
   files exist.
 - **Governance:** all 7 committed validation scripts are Python (violates the
-  literal pure-Zag red line); `wp_compare.py` hard-codes dead workdir paths —
+  literal pure-Zag red line); `wp_compare.py` hard-codes dead workdir paths -
   the wrong-physics evidence is not reproducible from the repo.
 - **Standing value:** L1 infrastructure (taught table causally drives a
-  hand-coded planner — the wrong-physics traces do diverge 63–72%, so the
+  hand-coded planner - the wrong-physics traces do diverge 63–72%, so the
   planner genuinely reads the table). Usable as a planning substrate; NOT
   evidence that TNN learns world models.
 
-## 3. Memory control (7abf194) — BOUNDED, with disclosures
+## 3. Memory control (7abf194) - BOUNDED, with disclosures
 
 Prereg discipline confirmed (prereg `066553ad4` is the direct parent commit).
 The BOUNDED verdict stands with these mandatory disclosures:
@@ -109,10 +109,10 @@ The BOUNDED verdict stands with these mandatory disclosures:
   strengths installed into persistent memory. The protocol, 6-bit situation
   vocabulary, failure→lesson attribution table, and strengthening schedule are
   authored. The run triggers installation; it does not discover the policy.
-- **DISCLOSED:** `GEN:always_protocol` ("deliberate insight") never fired —
+- **DISCLOSED:** `GEN:always_protocol` ("deliberate insight") never fired -
   trigger needs ≥3 diverse failures; actual was 1. No such lesson exists in
   final memory. The verdict's "deliberate" framing overclaims.
-- **DISCLOSED:** the ablation is confounded — `operate_nv` forces TRUST_HINT
+- **DISCLOSED:** the ablation is confounded - `operate_nv` forces TRUST_HINT
   AND skips verification (plus READBACK/NCONFIRM). It does not isolate
   verification. A clean single-factor ablation is still owed.
 - **DISCLOSED:** `REUSE_TABLE` (prereg-specified 3×) is unimplemented.
@@ -122,45 +122,45 @@ The BOUNDED verdict stands with these mandatory disclosures:
   honest prereg and hard negative controls (NEG 148/323 collateral). Usable
   infrastructure for the continuing-learner program.
 
-## 4. Text-approx prereg/seal/builder — DEFECTIVE, do not execute
+## 4. Text-approx prereg/seal/builder - DEFECTIVE, do not execute
 
 - Commit ordering is formally clean (prereg < seal < builder).
 - The corpus itself is good (credible labels, exact class counts, zero
   dev/sealed leakage, no sealed evaluation has run).
-- **DEFECTIVE — do not execute as frozen:**
+- **DEFECTIVE - do not execute as frozen:**
   1. `ta1_gate` is a universal-WITHHOLD stub; `ta3_gate` does not exist.
   2. `ta1_derive.zag` does not implement PREREG_TA.md §5 (byte-level vs
      token-level affix stripping; whole-episode negation refusal vs mid-span
      negation-multiset; case-folding where case-sensitive specified).
-  3. H-TA3 has no admission rule — §6 lists only withhold triggers; building
+  3. H-TA3 has no admission rule - §6 lists only withhold triggers; building
      the gate requires inventing semantics the freeze forbids.
   4. KB-TA-1..4 thresholds are the builder crew's self-ratified "reconstructed
      bids," citing `HYPOTHESES_TA.md`, which was never committed (the
      "committed with the build package" claim sits in PREREG_TA.md:11-12 at the
      prereg commit itself).
-  5. The prereg cites "the reference Python implementation in `generators/`" —
+  5. The prereg cites "the reference Python implementation in `generators/`" -
      the generators were never committed, so the seal's "fresh rebuild
      byte-identical (11/11)" is unreproducible, and a Python mirror is baked
      into the frozen spec (governance ruling 6 territory).
-  6. H-TA2 (the inference-step hypothesis — the load-bearing question for
+  6. H-TA2 (the inference-step hypothesis - the load-bearing question for
      replacing LLM systems) is deferred; the head-to-head as designed tests
      which withhold-gate is safer, not semantic inference.
-- **Repair plan (not this night's primary):** amend the prereg openly —
+- **Repair plan (not this night's primary):** amend the prereg openly -
   admission semantics for H-TA3, real threshold provenance, §5-conformant
-  derive, committed generators or a struck rebuild claim — then re-freeze and
+  derive, committed generators or a struck rebuild claim - then re-freeze and
   build. The corpus is worth saving.
 
-## 5. Large knowledge ingestion — L0 established, integration FAILED
+## 5. Large knowledge ingestion - L0 established, integration FAILED
 
 - **Established:** 9,030,226 facts taught deterministically (merge SHA
   `af10db8b…`, teach ×2 byte-identical). Storage (blobs, sparse index, lessons,
   revise/delete) is solved infrastructure.
 - **FAILED:** downstream audited QA 3/250 vs curated baseline 14/250
   (delta −11, `DRYRUN_REPORT.md:117/121/125/133`). Retrieval is keyword-count
-  IR (Aho-Corasick over question words, max word overlap) — no synonyms, no
+  IR (Aho-Corasick over question words, max word overlap) - no synonyms, no
   paraphrase, no inference. This explains 3/250 exactly.
 - **Bright spot preserved:** 3 probes genuinely correct where the baseline was
-  wrong (K-078, K-092, K-160) — the only real knowledge-gain evidence.
+  wrong (K-078, K-092, K-160) - the only real knowledge-gain evidence.
 - **Standing direction:** finishing Wikipedia ingestion before building semantic
   retrieval is backwards. The frozen 250-probe battery is the A/B floor for any
   retrieval prototype. (Phase-2 SEM-L3 is the first such prototype.)

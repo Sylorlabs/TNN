@@ -16,17 +16,17 @@ narrow scope, but it is not representational invention.
 
 ## What to Read
 
-1. `MORNING_REPORT.md` — 17 questions answered, ESTABLISHED/BOUNDED/KILLED/OPEN.
-2. `KILL_BATTERY_VERDICT.md` — Why H-KILL survives, L2+ classification.
-3. `SESSION_LOG.md` — Full session timeline.
-4. `NEXT_FRONTIER_DESIGN.md` — Procedure invention design (string reversal).
+1. `MORNING_REPORT.md` - 17 questions answered, ESTABLISHED/BOUNDED/KILLED/OPEN.
+2. `KILL_BATTERY_VERDICT.md` - Why H-KILL survives, L2+ classification.
+3. `SESSION_LOG.md` - Full session timeline.
+4. `NEXT_FRONTIER_DESIGN.md` - Procedure invention design (string reversal).
 
 ## Key Files
 
-- `sem_l3/mini_learn.zag` — Fixed (scaling buffers 64→512). v3: 8/8.
-- `sem_l3/proc_invent.zag` — Scaffold (primitives only, composer TODO).
-- `PHASE1_AUDIT.md` — 8/9 criteria, C9 FAIL.
-- `K*.md` — Kill battery results (K2, K4, K5 FAIL; K9 PASS; K10 NOT IMPL; K12 FIXED).
+- `sem_l3/mini_learn.zag` - Fixed (scaling buffers 64→512). v3: 8/8.
+- `sem_l3/proc_invent.zag` - Scaffold (primitives only, composer TODO).
+- `PHASE1_AUDIT.md` - 8/9 criteria, C9 FAIL.
+- `K*.md` - Kill battery results (K2, K4, K5 FAIL; K9 PASS; K10 NOT IMPL; K12 FIXED).
 
 ## Decisions Needed
 

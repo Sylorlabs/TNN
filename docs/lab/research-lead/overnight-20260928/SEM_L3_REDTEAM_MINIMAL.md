@@ -3,7 +3,7 @@
 **Date:** 2026-09-29 ~03:15 PDT
 **Target:** mini_learn.zag (v3 world)
 
-## RT-1: Template Break — PASS
+## RT-1: Template Break - PASS
 
 **Attack:** Rename all relations and objects to arbitrary tokens (r1, o1, r2, o2...).
 Preserve the STRUCTURE (which surfaces share which pairs), destroy name meaning.
@@ -11,7 +11,7 @@ Preserve the STRUCTURE (which surfaces share which pairs), destroy name meaning.
 **Result:** Learner still unifies 4/4 true pairs, rejects 2/2 near-misses, scores 8/8.
 **Verdict:** PASS. Learner uses structural equivalence, not template matching.
 
-## RT-8: Memorization — PASS
+## RT-8: Memorization - PASS
 
 **Attack:** Near-miss entities (norpaline, vellux) share surface prefixes and relations
 with true entities. If learner memorizes surface similarity, it will falsely unify.
@@ -19,7 +19,7 @@ with true entities. If learner memorizes surface similarity, it will falsely uni
 **Result:** 0/2 false unifications. P-NEAR 5/5 (correct withholds + distinct recall).
 **Verdict:** PASS. Distinguishing check (same R, different O) blocks false unification.
 
-## RT-7: Source Inspection — PASS (by construction)
+## RT-7: Source Inspection - PASS (by construction)
 
 **Attack:** Check if probe answers leak into teaching (entity IDs, answer keys).
 

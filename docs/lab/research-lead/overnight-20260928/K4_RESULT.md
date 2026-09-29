@@ -5,8 +5,8 @@
 
 ## Setup
 
-B1: (r1,o1), (r2,o2), (r3,o3), (r5,o5) — 4 pairs
-B2: (r1,o1), (r2,o2), (r4,o4), (r6,o6) — 4 pairs
+B1: (r1,o1), (r2,o2), (r3,o3), (r5,o5) - 4 pairs
+B2: (r1,o1), (r2,o2), (r4,o4), (r6,o6) - 4 pairs
 Shared: 2, Jaccard = 2/6 = 0.33 (< 0.5 threshold)
 
 ## Results

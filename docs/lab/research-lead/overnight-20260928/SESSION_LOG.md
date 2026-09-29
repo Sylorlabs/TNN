@@ -46,20 +46,20 @@ Preregistered K1-K12. Completed high-priority tests:
 
 ## Commits (14 new)
 
-1. 0b6b591ad — Phase 1 audit
-2. f6721ff79 — Kill battery prereg
-3. b7ef9c635 — K5, K2 FAIL
-4. fded44631 — Kill battery verdict (L2+)
-5. 5183d9ab0 — Phase 4 prereg
-6. 315a6716e — Phase 4 result (H-USE killed)
-7. 042a7d56e — K12 FAIL + Python violation
-8. e66ed1065 — Morning report
-9. 33f8839de — K12 scaling fix
-10. e7370deaf — K9 PASS
-11. ab16d3c57 — Report update + frontier design
-12. c73816b7b — Procedure scaffold
-13. 570c52de3 — K10 NOT IMPLEMENTED
-14. 7992a6ce1 — Preserve source files
+1. 0b6b591ad - Phase 1 audit
+2. f6721ff79 - Kill battery prereg
+3. b7ef9c635 - K5, K2 FAIL
+4. fded44631 - Kill battery verdict (L2+)
+5. 5183d9ab0 - Phase 4 prereg
+6. 315a6716e - Phase 4 result (H-USE killed)
+7. 042a7d56e - K12 FAIL + Python violation
+8. e66ed1065 - Morning report
+9. 33f8839de - K12 scaling fix
+10. e7370deaf - K9 PASS
+11. ab16d3c57 - Report update + frontier design
+12. c73816b7b - Procedure scaffold
+13. 570c52de3 - K10 NOT IMPLEMENTED
+14. 7992a6ce1 - Preserve source files
 
 ## Push Status
 
