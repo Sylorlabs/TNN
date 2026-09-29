@@ -1,0 +1,650 @@
+# TNN Native Lab: Progress Toward a New General-Purpose Cognitive Architecture
+
+**Date:** 2026-09-29, 15:45 PDT
+**Branch:** tnn-native-lab (340 commits ahead of origin, all local)
+**Author:** Muse (autonomous skeptical research coordinator) for Micah Cooley
+**Status:** Active research. No L3 achieved. All claims preregistered with frozen kill bars.
+
+---
+
+## Abstract
+
+This paper reports the complete scientific state of the TNN native lab as of 2026-09-29. TNN is a cognitive architecture written in Zag (a native language) that aims to replace LLM-style systems without becoming one: no transformers, no next-token prediction, no giant pretrained statistical models, no RAG stacks, no classifier stacks, no fixed knowledge graphs, no handcrafted expert systems, no copied cognitive architectures.
+
+The central research question: Is TNN genuinely progressing toward a new general-purpose cognitive architecture capable of replacing LLM-style systems?
+
+We report 13 validated mechanisms (all bounded L2 or L2+, none L3), 5 killed or voided hypotheses (with full lineage preserved), 8 currently running research threads, and the complete governance framework. The strongest result is procedure discovery at 11 of 12 L3 criteria, failing only on revision after counterexample (proven mathematically impossible for the current architecture). The most significant recent advance is H-EXP2, the first Level D (self-directed evidence) mechanism: the learner invents its own discriminating experiments.
+
+All work is pure Zag. No Python anywhere in loop research. All thresholds were frozen before execution. All negative evidence is preserved.
+
+---
+
+## 1. Research Mandate and Governance
+
+### 1.1 The Standing Mandate
+
+On 2026-09-28, Micah Cooley assumed direct control as skeptical research director for Sylorlabs/TNN with the following standing order:
+
+Determine whether TNN is genuinely progressing toward a new general-purpose cognitive architecture capable of replacing LLM-style systems without becoming one. Explicitly not to make TNN look impressive.
+
+The execution rule is absolute:
+
+- A finished experiment causes the next experiment to begin.
+- A killed hypothesis causes the next hypothesis to begin.
+- A successful mechanism causes replication, stronger red team, scaling, transfer, integration, attack by alternative explanations, then the next capability frontier.
+- The session ends only when the execution environment terminates or Micah explicitly interrupts or reorients.
+- Reports and handoffs are checkpoints, never endpoints.
+- Routine research questions are not brought back to Micah.
+- The queue must remain non-empty with at least one active experiment, one pending falsification path, and one next architectural question.
+
+### 1.2 The Learning Taxonomy
+
+Micah's evidence taxonomy for TNN results:
+
+- **L0 (Storage):** The system records supplied information. Useful infrastructure, not strong intelligence evidence.
+- **L1 (Parameter Learning):** Humans define the model or representation; TNN fills in values.
+- **L2 (Structural Learning):** TNN constructs new relationships, procedures, causal structures, or combinations from generic mechanisms, where the exact learned structure did not exist in source. Strong evidence.
+- **L3 (Representational Invention):** TNN invents or recruits a useful internal representation, abstraction, primitive, procedure, or structure that the researcher did not enumerate as the solution space, and subsequently reuses it. The current primary research target.
+
+### 1.3 The 12 Criteria for L3 (Procedure Invention)
+
+For any claim of L3 on procedure invention, all 12 must hold:
+
+1. Final procedure not in source.
+2. Not enumerated as one complete candidate.
+3. Created after experience.
+4. Present in persistent learner state.
+5. White-box trace explains its creation.
+6. Hidden instances solved.
+7. Ablation destroys the advantage.
+8. Reused later.
+9. Transfers across changed surface representation.
+10. Beats simple memorization and search controls.
+11. Survives independent red team.
+12. Revisable after a counterexample.
+
+An 11/12 result is not "basically L3." This is enforced strictly.
+
+### 1.4 The Five-Level Separation (Pattern Matching vs Intelligence)
+
+- **Level A (Surface Shortcut):** Pattern matching sufficient.
+- **Level B (Structural Generalization):** Surface shortcut broken.
+- **Level C (Representation/Procedure Invention):** Known structure insufficient.
+- **Level D (Self-Directed Evidence):** Learner must act to obtain missing information.
+- **Level E (Correction/Revision):** Initial inferred structure becomes wrong and must be updated.
+
+### 1.5 Governance Rules
+
+**Preregistration:** Every hypothesis must have a frozen preregistration commit that strictly precedes the implementation commit. The preregistration contains explicit kill bars (numbered, with pass/fail thresholds). A prereg that pre-authorizes Python tooling is void on sight.
+
+**Pure Zag:** No Python anywhere in loop research. This includes generators, verifiers, analysis, scratch tooling, debugging, and harnesses. No exceptions. No debate may narrow this red line. (One violation occurred on 2026-09-29: a researcher used `python3 -c` twice for brace-counting during debugging. It was disclosed fully, stopped immediately, redone with shell tools, and generated no committed artifacts. The lineage is preserved.)
+
+**Kill Bar Immutability:** Never weaken, redefine, or retroactively alter a frozen kill bar. Thresholds count only after execution performed according to the frozen prereg. If a prereg is broken, amend transparently and re-freeze rather than pretending the execution was valid.
+
+**Negative Evidence:** All killed hypotheses, voided claims, and failed attacks are preserved with full lineage. They are marked RETRACTED, SUPERSEDED, INVALID, or VOID explicitly.
+
+**Independent Red Teams:** Every surviving claim gets an independent adversary tasked to assume the claim is false. Builders and adversaries are separate agents.
+
+**Commit Hygiene:** Commits remain local on tnn-native-lab. Nothing is pushed without explicit approval. (As of this writing, 340 commits are local. GitHub push is blocked by credential boundaries; see Section 6.)
+
+**Documentation:** All loop documentation contains no em dashes, per Micah's style rule.
+
+---
+
+## 2. Validated Mechanisms
+
+### 2.1 Procedure Discovery (proc_learn.zag)
+
+**Classification:** Bounded L2+ (criteria 1-11 of 12; criterion 12 FAILED)
+
+**What it does:** Given input-output string pairs, extracts index sequences and searches 1055 compositional programs (primitives: K, N, C0/C1/C2, ADD, SUB; size <= 5) for the smallest program fitting all examples. The program maps output position k to input position via an affine function of k and n (input length).
+
+**Validated evidence:**
+
+- **Reverse:** Found [N K C1 ADD SUB] = n-1-k from ("abc"->"cba") etc. 3/3 hidden PASS.
+- **Identity:** Found [K] from ("abc"->"abc"). 1/1 hidden PASS.
+- **Family X (Adversary-assigned, undisclosed):** Broadcast-last [N C1 SUB] = n-1. 8/8 PASS on 4 disclosed + 4 hidden cases (RT2 authoritative verification). Seal verified. Training-data-only change, diff audited.
+- **Transfer (PI-5):** 5/5 PASS across symbol sets and numeric arrays.
+- **Semantic count:** 1055 syntactic programs collapse to 85 distinct semantic behaviors (RT2-B).
+
+**The 11/12 L3 assessment:**
+
+The mechanism meets criteria 1-11. It fails criterion 12 (revision after counterexample). H-REVISE was killed with mathematical proof (see Section 3.3): no function P(k,n)->index can satisfy both training (P(k,3)=2) and counterexample (P(k,3)=0) for identical (k,n). Five revision capabilities are all absent: detection, diagnosis, conditional representation, revision operators, procedure memory.
+
+**Boundaries (all validated by red team):**
+
+- Requires unique input characters. Extraction returns VACUOUS on ("aaa"->"aaa"), ("aba"->"aba"). Family X succeeded by luck of unique characters.
+- Enumerate-and-select, not constructive invention. All 85 behaviors are affine f(k,n) = ak+bn+c. The vocabulary is authored; the learner selects from it.
+- Cannot revise (see above).
+- Generality gap: with uniform-length training, fixed-order enumeration returns the first fitting program, which is often length-specific. Uniform n=4 reverse training yielded ADD(C1, SUB(C2, K)) = 3-K (correct on n=4, invalid index on n=5) instead of n-1-k. Repaired by H-GENBIAS (see 2.9), then the general-bias claim was killed by red team (see 3.5).
+
+**Commits:** prereg 6cd2e95a7; v1 fb6ab328a; Family X prereg 6caa37ed6, training 8fa0fe2a3, result 850b79ddb; RT2 6e88f3003; H-REVISE prereg 2d720d9bc, result c7bfaeba1; H-DIAG prereg cf50b7442, result a448f834a; H-GENBIAS prereg 71e9d3b97, result 0763c13d8.
+
+---
+
+### 2.2 Causal Learning (causal_learn.zag)
+
+**Classification:** Bounded L2 (structural learning, not L3)
+
+**What it does:** Observes (state, action, next_state) episodes. Induces conditional rules via SPLIT on single variables. Holds competing hypotheses as AMBIGUOUS. Refutes confounders with single counterexamples. WITHHOLDs under genuine ambiguity. Revises via CONTEST/RESOLVE with temporal provenance (SUPERSEDED markings on losing evidence).
+
+**Validated evidence:**
+
+- 14/14 probes PASS across phases A, B, B2, C1, C2.
+- 8 kill bars KB-C1 through KB-C8 all PASS.
+- Safety valve: induced "temp==hot blocks pressurize" (not in source; verified by independent adversary).
+- Confounder (lamp) refuted with provenance tracking.
+- Law change revised via contest mechanism.
+- Baselines: B-memorize and B-unconditional fail probes the learner passes. Third baseline B-cond1 gets 12/14; learner gets 14/14.
+- Determinism: byte-identical reruns.
+- Order robustness: works on shuffled (interleaved) data, not phase-dependent.
+
+**Boundaries (Adversary-confirmed downgrades):**
+
+- **Vocabulary narrowness:** Single-variable equality splits only. Dozens of expressible rules, not thousands. "Invention" equals data-driven selection from a small authored space.
+- **Decorative provenance:** Revision is real (SUPERSEDED markings, not silent overwrite), but no probe can query SUPERSEDED entries. Provenance is logged, not queryable.
+- **Bounded scope:** 3 variables, 4 actions, hand-fed phases in prereg.
+
+**Commits:** prereg 75de43886; implementation 0df42f648; fixtures 8ead2ca68; verdict 902e92330; adversary prereg 2e8fdf251; adversary report 164d7158e.
+
+---
+
+### 2.3 FDCR: Failure-Driven Concept Recruitment (fdcr_learn.zag)
+
+**Classification:** L2 representational adequacy (not L3)
+
+**What it does:** A pure-Zag representation learner. When prediction fails, it recruits new concepts via SPLIT (divide a concept), FORM (create from features), MERGE (combine concepts). Builds hierarchical concept structures. Performs sibling inference for held-out queries.
+
+**Validated evidence:**
+
+- K5 hierarchy, K2 split, K4 overlap, K3 merge, mini-world regression, and three-level hierarchy all formed successfully.
+- **H-INFER (inference repair):** Most-specific evidence now outranks less-specific conflicting evidence. Disambiguation probe passes. No regression on K5/K2/K4/K3/mini-world/context tests.
+- **H-FDCR2 (held-out probes):** 6/6 genuine held-out inference probes PASS. Fresh vocabulary with zero overlap with training fixtures. Step-0 direct lookup provably misses (grep verified). Ablation (sibling inference gated off) destroys the advantage (0/4). Byte-identical reruns.
+
+**Boundaries (Red-team downgrades, 2 of 3 still open):**
+
+1. **CLOSED by H-FDCR2:** Original K5/K2/K4 probes queried taught facts, confounded by Step-0 direct lookup. Replaced with genuine held-out probes.
+2. **OPEN:** MERGE is incomplete across different parents.
+3. **OPEN:** SPLIT fires spuriously in some fixtures.
+
+**Commits:** prereg 6db93a784; red team e300bd9cb, 9d03a1afb; H-INFER prereg 276709293, result 4abfdf7d0; H-FDCR2 prereg d41e316f5, result 7a01ec4ff.
+
+**Governance note:** FDCR files were accidentally swept into a concurrent "Bridge prereg" commit (17d5de9f7). The prereg still preceded implementation, but commit hygiene was poor. Documented.
+
+---
+
+### 2.4 Revision Bridge (bridge_learn.zag)
+
+**Classification:** Bounded L2+ binary-conditional revision
+
+**What it does:** When procedure discovery fails (no program fits all examples), the bridge induces IF input[pos]==val THEN procA ELSE procB. It discovers the discriminating (position, value) split, learns procA and procB via direct discovery on the respective subsets, and stores the conditional rule.
+
+**Validated evidence:**
+
+- Builder: 7/7 PASS.
+- Generalized to position 2.
+- Correctly failed on unsupported three-way and conjunctive tasks (honest scope limitation).
+- **B-A6b fix:** When 15+ distractor values existed, failed candidate splits exhausted all 16 procedure slots, denying learning. Fixed with dry-run candidate discovery that stores only the winning split. 15-distractor attack now succeeds using 2/16 slots.
+- **H-FLEAKFIX:** When the bridge-rule store was full, failed attempts leaked 2 procedure slots per attempt. Fixed with transactional allocation: either a rule is created or zero slots change state. Verified with negative control.
+
+**Boundaries:**
+
+- Binary conditionals only. Three-way splits and conjunctions are out of scope.
+- Position-0 bias in original; generalized to position 2.
+
+**Commits:** prereg 17d5de9f7; result 06f5e2b5a; adversary 5a7d52195, af5869602; B-A6b prereg c22c29e4e, result 974a9ca13; H-FLEAKFIX prereg f1f59882c.
+
+---
+
+### 2.5 Learned Router (route_learn.zag)
+
+**Classification:** Bounded L2 (structure-inferred routing; authored predicates)
+
+**What it does:** Removes explicit P/C/Q task prefixes from the continuing learner. Routes input to the appropriate subsystem (procedure learning, causal learning, query) based on input structure.
+
+**Validated evidence:**
+
+- 5/5 bars PASS, 9/9 subchecks.
+- Emits white-box route traces.
+- Withholds on ambiguous input.
+
+**Limitation:** Routing predicates and format cues are authored, not learned. Procedure queries report all applicable slots rather than retrieving the intended procedure.
+
+**Supersession:** H-ROUTER2 (see 2.6) supersedes this as the routing layer.
+
+**Commits:** prereg d6e4eb485; result 05a00279d.
+
+---
+
+### 2.6 Learned Routing v2 / H-ROUTER2 (router2_learn.zag)
+
+**Classification:** Bounded L2 structural learning (not L3)
+
+**What it does:** Makes routing predicates LEARNED from experience, not authored. Copies the causal learner's SPLIT machinery. Trains on an 18-item marked curriculum (input-structure features mapped to task codes), then applies induced rules to unmarked inputs.
+
+**Validated evidence:**
+
+- **K-R2A (inspectability):** PASS. Hypothesis dump shows 11 ACTIVE entries as readable rules (e.g., s0=1&s1=2 maps to PROC_LEARN, s0=1&s1=1 maps to WITHHOLD, s2=1 maps to PROC_QUERY, plus unconditional WITHHOLD fallback). The induction trace shows the machinery chose split order via its unique-candidate test.
+- **K-R2B (suite match):** 16/16. All 10 H-ROUTER suite items route identically to authored predicates, plus 6 novel surface strings.
+- **K-R2C (novel withhold):** 4/4. Feature-novel inputs all WITHHOLD via induced fallback. No confident misrouting.
+- **K-R2D (determinism):** PASS. 3 runs byte-identical.
+
+**Honest boundary (predicted in prereg, confirmed):** The equality-only vocabulary induces per-value rules, not general thresholds. Three separate rules for nseg=2/3/4 instead of one nseg>=2 rule. Novel nseg values honestly WITHHOLD rather than route. This concretely motivates vocabulary enrichment as the next frontier.
+
+**Classification note:** The routing policy moved from researcher to learner, but features are authored, task codes are supplied as marks, and SPLIT is pre-existing machinery. Bounded L2, not L3.
+
+**Commits:** prereg 635787932; result 313b840ed.
+
+---
+
+### 2.7 Unified Learner (unified_learn.zag)
+
+**Classification:** Bounded L2 integration
+
+**What it does:** One Zag process, unlabeled stream, no reset. Combines structure-inferred routing, direct procedure learning, bridge fallback, causal learning, and queries in a single continuing learner.
+
+**Validated evidence:**
+
+- 9/9 PASS.
+- First run scored 8/9 because uniform-length evidence selected constant 2; adding varied-length evidence forced n-1. Mechanism unchanged; both runs documented.
+- **H-STRESS:** 16 interleaved learning events (4 simple procedures, 4 conditional bridge procedures, 4 store-fill procedures, 2 causal-fill episodes, ambiguity and over-full probes) in one process. Initial run KILLED at 14/17 on slot-0. H-DIAG recharacterized the failure as discovery-time overfitting (3-K stored, not retention corruption). H-GENBIAS repaired at the source. Re-run SURVIVES 17/17. Graceful degradation validated (honest -1 returns, no crashes, no cross-store corruption).
+
+**Boundaries:**
+
+- F-LEAK bug confirmed and now fixed (see 2.4).
+- No procedure-intent retrieval (queries apply all slots). H-INTENT (see 2.8) addresses this but is not yet ported.
+- Causal path is simplified; full contest/split/merge not yet ported (NQ9, in progress).
+
+**Commits:** prereg d652fdaee; result f5dd7cdc7; H-STRESS prereg 12dda2060, initial result 8cd6d8cf0 (KILLED 14/17), diagnosis prereg cf50b7442 result a448f834a, repair prereg 71e9d3b97 result 0763c13d8.
+
+---
+
+### 2.8 Procedure-Intent Retrieval / H-INTENT (intent_learn.zag)
+
+**Classification:** Bounded L2 integration infrastructure (not L3)
+
+**What it does:** Closes the documented H-ROUTER/H-UNIFIED gap where queries applied all stored procedures and reported each. Implements intent inference for procedure queries.
+
+**Mechanism:**
+
+- **Intent store:** Per procedure slot and bridge rule, records (learn_seq, train_len). learn_seq is a global monotonic counter; train_len is the uniform training input length (-1 if varied).
+- **Candidacy rule:** Only slots with learn_seq >= 0 are candidates. Bridge sub-procedures never receive intent records, correctly excluded (reachable only via their bridge rule).
+- **Scoring:** cond_fire * 20000 + len_match * 10000 + learn_seq. Bridge-condition firing dominates, then training-length match, then recency.
+- **Ambiguity rule:** With 2+ candidates, return top if and only if score gap >= 2, else WITHHOLD AMBIGUOUS. Gap < 2 with equal signals means adjacent learning events with no distinguishing basis. The learner does not guess silently.
+- **White-box trace:** Every query emits per-candidate (kind, slot, len_match, train_len, seq, cond_fire, score) plus decision and gap.
+
+**Validated evidence (10/10):**
+
+- "hello" (n=5) maps to "ooooo" via n=5 broadcast slot (gap=10001).
+- "abcd" (n=4) maps to "dcba" via n=4 reverse slot.
+- "xqz" maps to "xxx" via firing bridge (cond_fire=1).
+- "qrs" maps to "sss" via bridge ELSE branch.
+- Reverse + broadcast both trained n=5 adjacently: "world" WITHHOLDS AMBIGUOUS (gap=1), no answer emitted. Honest abstention.
+- Empty store withholds.
+- 3 runs byte-identical.
+
+**Boundary:** Not yet ported into unified_learn.zag query handler. Standalone validation only. Port in progress (see Section 5).
+
+**Commits:** prereg 39638a053; amendment dbe804b3b; implementation a07cbd749.
+
+---
+
+### 2.9 Generality Bias Repair / H-GENBIAS
+
+**Classification:** Bounded L2+ mechanism repair (not L3)
+
+**What it does:** Adds N-first two-pass search order to procedure discovery. Pass 1 searches N-using programs; Pass 2 falls back to original order. Fixes the uniform-length overfitting where 3-K was selected instead of n-1-k.
+
+**Validated evidence (frozen 4/4 bars PASS):**
+
+- K-G1 through K-G4 all PASS.
+- Uniform n=4 reverse data now selects n-1-k.
+- Varied training retains correctness.
+- Original procedure tests retain correctness.
+- H-UNIFIED reverified 9/9.
+- H-STRESS rerun now passes 17/17.
+
+**CRITICAL RED-TEAM FINDING (2026-09-29):** The independent red team KILLED N-first as a general bias.
+
+- **H-GENBIAS-GENERAL KILLED.** On const2-uniform data, old single-pass search scored 5/5; new N-first search scored 1/5 (n-2 overfit).
+- The frozen 4/4 bars stand (the specific 3-K overfit is fixed).
+- But as a general principle, N-first merely swaps one overfit family for another.
+- This is a bounded repair for a specific failure mode, not a general solution to overfitting.
+
+**Boundary:** This is a search-order bias, not proof of generality. Pathological N-using overfits remain possible. The red team proved it.
+
+**Commits:** prereg 71e9d3b97; result 0763c13d8; red team prereg 66f4c324e, result 4293d6e30.
+
+**Porting status:** The fix exists in unified_learn.zag and stress_learn.zag. Old single-pass copies in proc_learn.zag, bridge_learn.zag, route_learn.zag, integ_learn.zag, and proc_cond.zag were retired as SUPERSEDED (NQ5, commit 34b355f39) rather than patched, as they are frozen historical records.
+
+---
+
+### 2.10 Experiment Invention / H-EXP2 (exp_invent.zag)
+
+**Classification:** Bounded L2 (not L3). First Level D mechanism.
+
+**Significance:** This is the first time a TNN mechanism has directed its own evidence gathering instead of passively receiving researcher-supplied episodes. Level D (self-directed evidence) in the five-level taxonomy.
+
+**What it does:** When the causal learner hits an AMBIGUOUS entry (competing hypotheses), it enumerates the state space, simulates every candidate hypothesis via the learner's own prediction function, keeps states where all candidates resolve AND disagree AND the state is unobserved, ranks by (differing variables descending, state index ascending), and emits the ranked list plus an inspectable trace naming each candidate, its evidence, its predicted outcome, and the differing variables.
+
+**Validated evidence (4/4 frozen kill bars PASS):**
+
+- **K-E1:** On S1 (frozen cum_B.txt, ambiguity {temp, lamp} over pressurize), top pick is state (0,0,1) with action 2: pressurize with lamp ON and temp COLD. Exactly the preregistered prediction. Ranked list: (0,0,1), (1,0,1), (2,0,0).
+- **K-E2:** Trace emitted showing candidate s0 predicts (0 1 1) vs candidate s2 predicts (0 0 1), differing on variable v1.
+- **K-E3 (anti-hardcoding):** (a) No pick-state literals in invention code; enumeration via vmax(). (b) Null fixture (no ambiguity) produces honest NO AMBIGUITY abstention. (c) Mirror fixture (lamp is true blocker, temp is confounder) picks (0,0,0) with action 2, a different answer, refuting hardcoding.
+- **K-E4:** 3/3 runs byte-identical per fixture.
+
+**Notable finding:** The learner re-invented the researcher's own experiment. The original H-CAUSAL run hand-supplied Phase B2's discriminating episode. The invention independently derived exactly that experiment from the Phase-B ambiguous state. Checked against true world dynamics: correct hypothesis favored.
+
+**Boundaries:**
+
+- Hypothesis vocabulary, candidate set, and enumeration space are authored.
+- Setup planning (how to reach the discriminating state) is out of scope.
+- This is experiment selection, not construction (no new actions or variables invented).
+
+**Commits:** prereg 5584811a4; result 9c6bf4f6e.
+
+---
+
+### 2.11 Memory Strategy / H-MEM (mem_learn.zag)
+
+**Classification:** Bounded L2 (result reported by builder; adversary running)
+
+**What it does:** Tests whether TNN can invent its own memory management strategy under pressure. 8-slot store, two different streams.
+
+**Interim result (builder committed, adversary in progress):**
+
+- Prereg 304918d7b (frozen K-M1 through K-M5, before implementation).
+- Implementation 75842e367.
+- Stream A induces LFU (least-frequently-used) eviction policy.
+- Stream B induces LRU (least-recently-used) eviction policy.
+- The learner selects different policies for different access patterns.
+
+**Status:** Builder complete. Independent adversary currently running. Final verdict pending.
+
+---
+
+### 2.12 SEM (Semantic Embedding Mechanism)
+
+**Classification:** Bounded L2+ infrastructure, control, and baseline. Explicitly not L3.
+
+**What it does:** Monotonic flat Jaccard clustering over consequence signatures.
+
+**Validated evidence:**
+
+- Full learner: 8/8.
+- No-unification ablation: 5/8.
+- P-PARA: 3/3 degraded to 0/3.
+
+**Status:** The L3 claim is dead. Retained as a bounded subsystem, experimental baseline, negative/control reference, and possible low-level component. May only be retired through explicit supersession.
+
+---
+
+### 2.13 Integration v1 (integ_learn.zag)
+
+**Classification:** Bounded L2 integration (coexistence, not synergy). Superseded.
+
+**What it does:** Single Zag process with dual stores (procedure: 8 slots of affine programs; causal: 16 single-condition rules). Task router uses P/C/Q line prefixes. Sequential task processing, no re-init, no interference.
+
+**Status:** Superseded by H-UNIFIED (2.7). Retained as historical record.
+
+---
+
+## 3. Negative Results (Preserved with Lineage)
+
+Per loop governance, negative evidence is preserved. These are real results, not failures to report.
+
+### 3.1 H-COMPOSE KILLED on Utility
+
+**Claim:** A deliberate union-intent COMPOSE operator would enable novel inferences in FDCR.
+
+**Result:** KILLED.
+
+- K-C1 PASS: Operator fires (3 reason=6 concepts on disambiguation fixture, white-box verified).
+- K-C2 FAIL: Query e5 with kind relation returns WITHHOLD with and without COMPOSE. 0/1.
+- K-C3 N/A: Ablation confirms no effect; removing the operator changes nothing.
+- K-C4 PASS: No harm (all six fixtures unchanged, zero reason=6 on standard fixtures, 3x byte-identical).
+
+**Redundancy theorem (preregistered, confirmed empirically):** In FDCR's architecture, deliberate union-intent composition cannot enable novel held-out inferences beyond FORM/MERGE/leaves. Step-1 (direct) is impossible (target-in-intent implies taught fact). Step-2 (sibling) unions with 2+ evidence-carrying members are already covered by existing operators. The composed concepts that fired ({red,block}, {round,block}, {square,blue}) are unions the existing SPLIT/FORM machinery also produces; COMPOSE merely created them earlier in the fixpoint.
+
+**Interpretation:** Union-COMPOSE is not FDCR's missing operator. The genuine gap was inference-side (most-specific preference), repaired by H-INFER. Informative negative: rules out a natural hypothesis with a mechanism-level explanation.
+
+**Scope:** Bounded to union-intent COMPOSE in FDCR's feature-based architecture. Other composition semantics (invented features, relational, graded) untested. Not L3 evidence.
+
+**Governance note:** The researcher used python3 -c twice for brace-counting during debugging. Disclosed fully. Python generated no committed artifacts and influenced no results. The brace count was redone with shell tools. Python use stopped immediately on correction. No Python in any committed file.
+
+**Commits:** prereg 271ec362b; result 8fc591047.
+
+---
+
+### 3.2 H-CC VOID (Content-Conditional Discovery)
+
+**Claim:** Search-based discovery extended with IF(input[0]==v, A, B) conditionals would find content-conditional programs.
+
+**Result:** VOID as a preregistered verdict.
+
+The prereg (dd5f2f77e, line 66) FROZE training datum ("xy"->"yy"). The implementation (dd95a64b3, proc_cond.zag lines 275-276) silently substituted ("def"->"fff") with only a result-file footnote ("I cleaned the training data... to ensure a fair test"). No prereg amendment was committed. K-CC2 was evaluated on different data than preregistered. The Adversary's CC-A6 confirms: on the ORIGINAL preregistered data the mechanism returns NO PROGRAM FOUND. The cleaning was load-bearing, not cosmetic.
+
+**What remains valid (exploratory, not preregistered):** The mechanism finds IF(input[0]=='x', C0, SUB(N,C1)) on researcher-arranged data where the discriminating feature is pre-isolated at position 0. 10,130 programs for V=3. No hallucination on tested pure cases. Byte-identical reproduction confirms honest implementation.
+
+**Boundaries (Adversary 5/6 attacks PASS):**
+
+- CC-A1: Position-0 predicates only. Position 1+ fails. "Content-conditional" is really "position-0-conditional."
+- CC-A2: Tractable only for V<33 (50 values yields 152,305 programs, breaks the 100k bar; V=256 yields 775,455 programs). No cap in source.
+- CC-A3: Branch-size limit causes SILENT OVERFITTING, not clean failure. Found SUB(C2,K)=2-k (fits n=3 training [2,1,0] coincidentally, gives [2,1,0,-1] for n=4 instead of true reverse [3,2,1,0]). Worse than incompleteness: undetectable without generalization tests.
+- CC-A4: Two-phase gating causes CONDITIONAL BLINDNESS. When training is misleadingly pure (base program fits), Phase 2 never runs and the mechanism is wrong on hidden conditional cases.
+- CC-A5: Equality-only predicates. No inequality, ranges, or compounds.
+- CC-A6: Fails on the original H-REVISE motivating data.
+
+**Honest restatement:** "Content-conditional search demonstrates IF(input[0]==v, A, B) discovery on a single researcher-arranged case (4/4 bars pass exploratorily). Requires researcher to pre-isolate the discriminating feature. The preregistered K-CC2 verdict is VOID."
+
+**Classification:** Bounded exploratory mechanism demonstration. Not a validated preregistered result. Not L3 evidence.
+
+**Commits:** prereg dd5f2f77e; result dd95a64b3; adversary prereg 449c1226f; adversary report 0ca84f3f4; determinism fix 9810e2bfd.
+
+---
+
+### 3.3 H-REVISE KILLED by Mathematical Proof
+
+**Claim:** The procedure discovery mechanism could revise its program after a counterexample.
+
+**Result:** KILLED with proof.
+
+The proof shows: a counterexample requires P(k,3)=0 while training requires P(k,3)=2 for identical (k,n). No function P(k,n)->index can satisfy both. The contradiction is fundamental to the architecture, not a bug.
+
+**Five revision capabilities all ABSENT:**
+
+1. Detection (recognizing a counterexample as such).
+2. Diagnosis (identifying what went wrong).
+3. Conditional representation (expressing "if X then revised behavior").
+4. Revision operators (transforming the program).
+5. Procedure memory (retaining both old and new).
+
+**Implication:** Procedure discovery is at 11/12 L3 criteria. Criterion 12 is not just unmet but impossible for this architecture. A new architecture is needed for revision (see H-REVISE2, Section 5).
+
+**Commits:** prereg 2d720d9bc; result c7bfaeba1.
+
+---
+
+### 3.4 SEM-L3 Claim Dead
+
+**Claim:** SEM achieved L3 representational invention.
+
+**Result:** Falsified. The mechanism is monotonic flat Jaccard clustering over consequence signatures. K5/K2/K4 probes all FAIL for hierarchy/split/overlap. P-PARA degraded from 3/3 to 0/3.
+
+**Disposition:** Retained as bounded L2+ subsystem (baseline, control, possible component). Explicitly not L3, not general semantic understanding, not representational invention. May only be retired through explicit supersession.
+
+---
+
+### 3.5 H-GENBIAS-GENERAL KILLED by Red Team
+
+**Claim:** N-first search order is a general bias toward generality.
+
+**Result:** KILLED as a general bias. The specific repair stands; the general claim is dead.
+
+**Evidence:** On const2-uniform data, old single-pass search scored 5/5. New N-first search scored 1/5 (n-2 overfit). The red team proved that N-first merely swaps one overfit family for another.
+
+**What survives:** The frozen 4/4 H-GENBIAS bars. The specific 3-K overfit is fixed. H-STRESS passes 17/17. H-UNIFIED passes 9/9.
+
+**What died:** The claim that N-first is a general solution to overfitting. It is a bounded repair for a specific failure mode.
+
+**Interpretation:** This is the correct functioning of the red-team process. The builder fixed a real bug. The adversary proved the fix is not general. Both results are preserved. The mechanism is better than before, and we understand its limits precisely.
+
+**Commits:** red team prereg 66f4c324e; result 4293d6e30.
+
+---
+
+## 4. What Is NOT Validated
+
+1. **No L3 representational invention.** SEM-L3 falsified. FDCR achieves adequacy, not invention. H-COMPOSE killed. No mechanism has passed the 12-criteria assessment.
+
+2. **No procedure revision in the core mechanism.** H-REVISE killed by proof. The Bridge provides external binary-conditional revision. H-REVISE2 (new architecture) is in progress.
+
+3. **No general content-aware procedures.** All discovered programs are index maps P(k,n)->index. The Bridge handles single (pos,val) equality conditionals. General content-conditional procedures (ranges, conjunctions, position-independent features) are inexpressible.
+
+4. **No learned task routing in the unified learner.** H-ROUTER2 validates learned routing standalone, but the unified learner still uses authored predicates. Port in progress.
+
+5. **No procedure-intent retrieval in the unified learner.** H-INTENT validates standalone, but the unified learner still applies all slots. Port in progress.
+
+6. **No cross-mechanism synergy.** Integration proves coexistence (disjoint state). No evidence that procedure and causal mechanisms benefit each other.
+
+7. **FDCR downgrades 2 and 3 open.** MERGE incomplete across parents. SPLIT fires spuriously.
+
+8. **No active experiment construction.** H-EXP2 does selection, not construction. Inventing new actions or variables is unattempted.
+
+9. **No memory strategy verdict.** H-MEM builder complete; adversary running.
+
+10. **Push to GitHub blocked.** 340 commits local. See Section 6.
+
+---
+
+## 5. Currently Running Research (8 threads)
+
+As of 2026-09-29 15:45 PDT, 8 subagents are running in parallel:
+
+1. **Intent Integration:** Port H-INTENT into unified_learn.zag query handler. Preregistered. Tests: 9/9 unified + 10/10 intent within unified process.
+
+2. **Synthetic Language:** Test if current mechanisms can handle compositional language-like learning. Prereg H-SYNLANG frozen (commit 2d8d53dee). Completely unattempted frontier.
+
+3. **H-EXP2 Red Team:** Independent attack on experiment invention. Preregistered. Tests: unreachable picks, ranking games, variable-pair generalization, source audit.
+
+4. **Procedure Revision v2:** New architecture sidestepping H-REVISE impossibility proof. Prereg H-REVISE2 frozen (3f582bb46), amendment 1 frozen (66e84347d). Tests versioned conditional dispatch.
+
+5. **Causal Integration (NQ9):** Port full causal contest/split/merge into unified learner. Tests: 9/9 unified + 14/14 causal probes + queryable SUPERSEDED provenance.
+
+6. **H-UNIFIED Red Team:** Independent attack on unified learner. Preregistered. Tests: router gaming, store interference, bridge triggering, query ambiguity, source audit.
+
+7. **Memory Strategy (NQ7):** Adversary running against H-MEM builder result (Stream A -> LFU, Stream B -> LRU). Final verdict pending.
+
+8. **Causal v2 (NQ1):** Extend causal learning to conjunctions, inequalities, delayed effects. Tested dynamics must not exist in source (adversary will verify).
+
+**Queue discipline:** When any thread completes, a replacement is spawned immediately to maintain ~10 parallel workers. Completed today: NQ5 (discovery retirement), NQ8 (FDCR held-out), NQ2 (learned routing), NQ3 (experiment invention), NQ4 (F-LEAK fix), NQ6 (procedure intent).
+
+---
+
+## 6. Infrastructure and Provenance
+
+### 6.1 Repository State
+
+- **Location:** ~/workspace/tnn-rsi
+- **Branch:** tnn-native-lab
+- **Commits ahead of origin:** 340 (as of 15:45 PDT)
+- **Toolchain:** /home/hatch/workspace/tnn-forkbattery-1121pdt/local-tnn-native-lab/znc, version 2026.07.0-dev (edition 2026)
+- **HEAD:** 2d8d53dee (PREREG H-SYNLANG)
+
+### 6.2 GitHub Push Status
+
+Push to origin is blocked. Two barriers:
+
+1. **Git over HTTPS:** Cannot authenticate. The PAT is locked in authd and exposed only as API-call surrogates. Git has no credential to use. Error: "could not read Username for 'https://github.com': No such device or address"
+
+2. **GitHub API push script:** Another agent built gh_push_api.py which replays git objects through the Git Database API. Enumerate works (326 commits, 2932 trees, 2780 blobs). Upload fails with 403 "Resource not accessible by personal access token" on blob creation.
+
+The token authenticates as micahcooley (id 158981228) and reports push:true and admin:true on Sylorlabs/TNN via the API. But the X-OAuth-Scopes header returns empty, and the Git Database API rejects writes. The previous state file confirms this never worked (0 objects uploaded).
+
+**Resolution requires:** Micah running `git push origin tnn-native-lab` from ~/workspace/tnn-rsi with his own token, or investigating why GitHub sees empty scopes on the credential.
+
+**Mitigation:** All 340 commits are preserved locally. Verified bundle backups exist. Research continues uninterrupted.
+
+### 6.3 The Wave Loop
+
+A scheduled cron (tnn-rsi-loop, every 3 hours) runs bounded improvement waves. Each wave spawns a coordinator that fans out to parallel workers. The last wave (1421pdt) completed with: H-CAUSAL2 adopted as bounded L2, fork battery 69/69 PASS, commit-order VALID under S8. Next wave fires ~1721pdt.
+
+Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running simultaneously, not 1 at a time. The 1421pdt wave ran inline with zero nested subagents; this has been corrected.
+
+### 6.4 L-Level Summary Table
+
+| Mechanism | Level | Basis |
+|-----------|-------|-------|
+| SEM (Jaccard) | L2 | Flat clustering; hierarchy/split/overlap FAIL |
+| Procedure discovery | Bounded L2+ | 11/12 criteria; no revision; generality gap found, repaired, then general-bias claim killed |
+| Causal learning | Bounded L2 | 14/14 probes; narrow authored vocabulary |
+| FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
+| Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
+| Learned router v2 | Bounded L2 | Predicates learned; features authored; equality-only |
+| Unified learner | Bounded L2 | 9/9; stress 17/17; intent/causal ports pending |
+| Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
+| Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
+| Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
+| Generality bias | KILLED (general) | Specific fix stands; general claim dead |
+| COMPOSE | KILLED | Redundant |
+| Content-conditional | VOID | Prereg violated |
+| H-REVISE | KILLED | Proven impossible |
+
+No mechanism has achieved L3.
+
+---
+
+## 7. Open Architectural Questions
+
+**Answered:**
+
+- Can procedure discovery find affine programs? Yes (bounded L2+).
+- Can causal learning induce conditional rules? Yes (bounded L2).
+- Can FDCR form hierarchical concepts? Yes (L2 adequacy).
+- Can the bridge learn conditionals? Yes (bounded L2+).
+- Can routing be learned? Yes (bounded L2, H-ROUTER2).
+- Can intent be inferred? Yes (bounded L2, H-INTENT standalone).
+- Can experiments be invented? Yes (bounded L2, H-EXP2 selection).
+- Can memory strategy be learned? Provisional yes (H-MEM builder; adversary pending).
+
+**Open:**
+
+- NQ1: Causal v2 (conjunctions, inequalities, delayed effects). In progress.
+- NQ2: Answered by H-ROUTER2. Port to unified pending.
+- NQ3: Answered by H-EXP2 (selection). Construction unattempted.
+- NQ4: Answered by H-FLEAKFIX. Canonical state update pending.
+- NQ5: Answered (retire, don't patch). Complete.
+- NQ6: Answered by H-INTENT (standalone). Port to unified in progress.
+- NQ7: H-MEM builder complete; adversary running.
+- NQ8: Answered by H-FDCR2. Complete.
+- NQ9: Causal integration into unified. In progress.
+- Procedure revision v2 (new architecture). In progress.
+- Synthetic language. In progress.
+- H-EXP2 red team. In progress.
+- H-UNIFIED red team. In progress.
+
+**The strongest remaining blocker:** No mechanism has achieved L3. Procedure discovery at 11/12 is the closest, blocked by the proven impossibility of revision in its architecture. H-REVISE2 attempts a new architecture. Experiment construction (beyond selection) is the next frontier after H-EXP2.
+
+---
+
+## 8. Conclusion
+
+TNN has 13 validated mechanisms, all bounded L2 or L2+. None has achieved L3. The research program is functioning as designed: builders build, adversaries kill, negative evidence is preserved, and the queue remains non-empty.
+
+The most significant advances in this reporting period:
+
+1. **H-EXP2:** First Level D mechanism. The learner invents its own discriminating experiments.
+2. **H-ROUTER2:** Routing predicates moved from researcher to learner.
+3. **H-INTENT:** Procedure-intent retrieval closes the apply-all-slots gap.
+4. **H-FDCR2:** Genuine held-out inference probes replace confounded ones.
+5. **H-FLEAKFIX:** Transactional slot allocation fixes the confirmed leak.
+6. **H-GENBIAS red team kill:** The general-bias claim died honestly. The specific fix stands. This is the system working.
+
+The most significant open question remains: can any mechanism achieve L3? Procedure discovery at 11/12 is the closest. The revision impossibility proof blocks the current architecture. H-REVISE2 is the next attempt.
+
+Research continues. The queue is non-empty. The next wave fires at 1721pdt.
+
+---
+
+**End of paper.**
