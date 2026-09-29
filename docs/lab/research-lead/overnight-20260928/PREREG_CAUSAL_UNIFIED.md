@@ -37,11 +37,18 @@ silent-replacement failure into explicit contest plus withhold.
 ## Design
 
 **New file:** `unified_causal.zag`, based on the COMMITTED
-`unified_learn.zag` at HEAD (not the working tree, which carries
-uncommitted H-INTENT changes from a sibling agent; this experiment must
-not corrupt in-flight work). If H-CAUSAL-UNIFIED survives, it becomes the
-new canonical unified file; otherwise it is preserved as a negative
-result and the original file is untouched.
+`unified_learn.zag` at HEAD (commit e27edbaf3, which includes the H-INTENT
+port; 1497 lines; Part A 10 unified tests + Part B 10 intent tests = 20
+tests). A separate file avoids any conflict with sibling agents' working
+trees. If H-CAUSAL-UNIFIED survives, it becomes the new canonical unified
+file; otherwise it is preserved as a negative result and the original
+file is untouched.
+
+*Amendment note (2026-09-29, before any implementation): the original
+draft of this prereg described the base as the pre-intent 1092-line file
+with 9 tests. The H-INTENT work has since been committed (e27edbaf3), so
+the base is the 1497-line intent-inclusive file with 20 tests. K-CU1 is
+corrected accordingly. No implementation existed at amendment time.*
 
 **Port:** The causal_learn.zag machinery functions (episodes, entries,
 effects_over, split_attempt, amb_update, contests, merge_pass,
@@ -80,8 +87,12 @@ probe on the full path.
 
 ## Frozen kill bars
 
-**K-CU1:** All 9 frozen H-UNIFIED tests (K-U1, K-U2a, K-U2b, K-U2c, K-U3,
-K-U4a, K-U4b, K-U5, K-A) PASS unchanged in unified_causal.zag.
+**K-CU1:** All 20 tests in unified_learn.zag at HEAD pass unchanged in
+unified_causal.zag: Part A (K-U1, K-U2a, K-U2b, K-U2c, K-U3, K-U4a
+intent-adapted, K-U4a2, K-U4b, K-U5, K-A) and Part B (B-T1, B-T1a, B-T1b,
+B-T2, B-T2a, B-T2b, B-T3, B-T3b, B-T3c, plus the B-T3 intent_winner check:
+10 intent battery tests). The original 9 frozen H-UNIFIED bars are
+preserved inside this set (K-U4a is intent-adapted per e27edbaf3).
 
 **K-CU2:** All 14 H-CAUSAL probes PASS within the unified process, fed
 incrementally, with these exact expected outputs (from RESULTS_CAUSAL.md):
@@ -111,10 +122,10 @@ failed (U-A2 kill).
 ## What success looks like
 
 unified_causal.zag compiles under the pinned znc, the binary prints
-12/12 (9 original + K-CU1 + K-CU2 + K-CU3 as counted tests; K-CU5 is
-folded into the CU test section), K-CU4 holds by byte comparison, and the
-trace shows SPLIT/CONTEST/RESOLVE/MERGE/SUPERSEDE lines from the ported
-machinery operating inside the unified process.
+37/37 (20 preserved Part A + Part B tests, 14 H-CAUSAL probes, K-CU3
+history check, 2 K-CU5 interference checks), K-CU4 holds by byte
+comparison, and the trace shows SPLIT/CONTEST/RESOLVE/MERGE/SUPERSEDE
+lines from the ported machinery operating inside the unified process.
 
 ## What failure looks like
 
