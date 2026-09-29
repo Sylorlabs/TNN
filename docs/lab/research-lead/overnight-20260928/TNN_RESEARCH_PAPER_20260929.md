@@ -261,15 +261,19 @@ Two of four attacks met kill criteria.
 
 **Commits:** prereg fb7ea5d56; implementation via 28266d158 (sweep, content verified); label a27390d29.
 
-**H-ROUTER3 RED TEAM DOWNGRADE (2026-09-29):** X-R3-2 succeeds.
+**H-ROUTER4 SURVIVES (6/6):** H-ROUTER3 downgrade repaired.
 
-**Merger evasion:** The diagnostic only detects cross-family mark-merging. Single-family gaming (confined to s0=1) gets zero diagnostics. Worse: the threshold compiler GENERALIZES the gamed marks, emitting [s0=1&s1>=2]->CAUS_LEARN from gamed entries. Traceability holds, detection does not.
+**R1 (single-family anomaly):** New diagnostic emits SINGLE-FAMILY-ANOMALY when one family has learn marks and other has zero. Catches the X-R3-2 mark-suppression pattern. Silent on honest.
 
-**Narrowed:** The mark-merger diagnostic is a cross-family detector, not a general gaming detector. The paper should state explicitly that traceability is not detection.
+**R2 (generalization warning):** Every compiled threshold emits warning that amplification is not validated. Makes the "worse than silent acceptance" explicit.
 
-**Also noted:** The repair's robustness to contradictions depends on an inherited contest mechanism not mentioned in the result doc.
+**R3 (documentation):** Explicitly states: merger is cross-family only; traceability is not detection; robustness depends on inherited contest mechanism.
 
-**Commits:** red team prereg b6afe8c8c; amend 162ada9c2; result 6f5f81c5d.
+**Results:** All 6/6 frozen bars PASS. 3/3 deterministic.
+
+**Classification:** Bounded L2+, not L3. H-ROUTER4 supersedes H-ROUTER3.
+
+**Commits:** prereg caa884962; implementation a6fe8f60c.
 
 ---
 
