@@ -3514,3 +3514,115 @@ wave ran inline with no nested subagents per the parent's direction;
 the overnight SEM-L3 session's K12 Python self-disclosure travels as
 its own disclosure, not wave evidence; zero origin commits this
 window.
+
+## Wave 20260929-0221pdt verdicts
+
+Wave pin: a014dc1d96d0935f4e4d53888b3e488e3ce1f459 (2 commits since 2321pdt, both
+2321pdt wave records). Inline, no nested subagents (2021pdt/2321pdt precedent).
+Debate: debate/ADVOCATE_0221.md, debate/SKEPTIC_0221.md, debate/JUDGE_0221.md under
+docs/lab/rsi/runs/wave-20260929-0221pdt/. Provenance probe answered verbatim in
+every motion. No verdict overturned on rhetoric; no frozen bar weakened; zero
+adoptions; zero Python.
+
+1. Fork battery [NEW]: CONFIRM as a process confirmation (toolchain and
+extraction stability only). Full fresh run, driver exit 0: 63 named entries,
+61 PASS, 0 FAIL, 2 UNTESTABLE (rh-pull-1-head 5802fec8, rh-pull-2-head 4b76bb59,
+non-TNN research-doc trees, git show exit 128, twenty waves running). 51 unique
+commits; 9 duplicate SHA groups. LIVE entries both PASS at a014dc1d9
+(arch-wave-20260928-2321pdt, local-tnn-native-lab). znc pin 498abcb5 uniform
+61/61; probe sha 3b29aa06; b1/b2/b3 PASS, b1_cmp/b2_bin_cmp PASS; NEG1 E0002
+61/61; NEG2 char-1 discrimination 61/61; probe_run_stdout R32_ZNC_PROBE_OK
+61/61. Harness binary sha256 a2e6284c re-verified byte-identical to the frozen
+instrument (re-verified, not rebuilt). Recorded gaps: batch_0221.log carries no
+driver trace; verdicts rest on the 63 per-entry RESULT.txt files under
+~/workspace/fb0221pdt/E/. Scope stamp: not evidence that the tip's contents are
+good; no transitive claim about the overnight SEM-L3 session's sims or verdicts
+rides this verdict. Zero new remote refs (ls-remote: origin/tnn-native-lab
+bedf8b4a, HEAD 27a4271f, all pins unchanged). The 1721pdt probe-loss FAIL stays
+closed (repair 37d1d3cab is an ancestor of the pin). Ref-listing anomaly
+recorded in ENUMERATION_MANIFEST_0221.md: a short archive ref name appeared in
+ref listings at run start but never resolved and vanished; the resolving
+archive ref is tnn-native-lab-wave-archive-wave-20260928-2321pdt at a014dc1d9;
+listing anomaly, not evidence.
+
+2. Design lane [NEW]: EXP2-K4 corpus HELD (expiry question banked to Micah at
+2321pdt, on his queue five waves unanswered, flagged as stagnation not progress,
+not re-asked); B1-class mechanism NULL (docs/lab/invention/ unchanged in the
+range; zero mechanism hits; the one B1-pattern filename is a D1 worlds data
+file for the survival experiment; P9 stays a re-freeze template; the 1121pdt
+DISCARD stands); COMP2-P11 HELD (ruling 6 still OPEN; tree-wide grep at the pin
+completed with only historical hits, no new ruling-6 text; a grep is not a
+semantic audit, recorded as a method limit; in a 2-commit wave-record-only range
+the gate check is nearly tautological); intelligence trades HELD (no genuinely
+new expensive capability with a real mechanism; no knob proposed); sensory NULL
+(standing stand-downs hold: G1, D-VID-1, ST-1 dead; E3 rejected; WHIRLPOOL
+geometric avenue closed; S12/S12b dead). Nothing manufactured. The overnight
+session's prereg files are its own frozen governance, surveyed read-only and
+not re-litigated; its K12 Python self-disclosure travels as its own disclosure,
+not wave evidence.
+
+3. Interactive survey [NEW]: NONE loop-owned. Range fab33cb4c..a014dc1d9: zero
+.zag files added; the range changed only 2321pdt wave records. Range-only
+signature hits are the words "Interactive" and "REPLs" in the 2321pdt survey
+prose (false positives from documentation). Frozen batch probes remain the only
+loop-owned chat instruments, batch-only. Lexical survey only; never evidence
+that interactive TNN is impossible (recorded method limit).
+
+4. EXP1c attempt-5 stand-down [NEW]: recorded and honored with the search form
+stated (2321pdt judge's order satisfied): git log --grep="exp1c" -i zero hits;
+range diff name-only filtered "exp1c" zero hits; filtered "attempt" zero hits.
+Q1 and Q2 stay banked and are not re-asked. Compliance is procedure, not
+achievement.
+
+5. Commit-order self-check [NEW]: VALID, VACUOUS for adoption. Candidate set
+empty (zero adoptions, zero preregs). Permanent caveat travels: commit order
+evidences commit order only, never run order and never content identity.
+
+6. tnn_chat FIT [NEW]: not re-run; staleness advances to 6 of 8 (last fresh
+re-run at 2021pdt, 0 of 8; 2321pdt 5 of 8; this verdict-bearing wave advances
+one step). Due at 8 of 8 (two verdict-bearing waves hence). FIT chain inputs
+verified untouched in the range. The 8-wave cadence is a standing rule the loop
+may not unilaterally change. The next FIT re-run must state its due wave name
+in the record (2321pdt judge's order, restated).
+
+7. UNTOUCHED [VOID]: the six governance rulings (S7 strike, MD-SSD-1, S11 pull,
+S11-AUD pull, C12 queue, Python-mirror logic) remain OPEN; the H-C kill
+recommendation (seventh item), EXP2-K4 redesign-or-retire (eighth), Q1 (ninth),
+Q2 (tenth) stay banked; all sealed blind pairs (R9, C1, C2v3, S11-IMG, C12,
+S11-AUD, S13, S14, whirlpool-planform) untouched; DP-1 presentation remains the
+parent agent's queue decision; Micah's frontier dirs untouched beyond read-only
+survey. Salt-battery dispositions are banked positions, not re-litigated (H-C
+kill INVALID, reverts to SURVIVES under frozen bar "learn the D1 six" with salt
+measurements as exploratory data; H-B survives VOID pending a principled frozen
+bar; H-A kill stands on the 5 wrong emissions, diagnosis retracted, calibrated
+re-run needed). Queue-fragmentation is a real cost, kept qualitative (ten banked
+items; no number exists to attach).
+
+Provenance (verbatim probe answered in every debate motion): the fork battery
+execution is new this wave (fresh 63-entry run, new batch_0221.sh with the
+2321pdt archive and the run-start tip as LIVE entries, evidence under
+~/workspace/fb0221pdt/E/); driver, harness instrument, fixture SHAs, and
+negative-control fixtures are inherited frozen. Design-lane NULLs and HELDs,
+interactive NONE, stand-down re-verification, and commit-order result are new
+this wave over a fresh 2-commit survey range; all HELD statuses, rulings,
+banked questions, governance items, sealed pairs, DP-1, salt dispositions, and
+frontier dirs are inherited and untouched. FIT staleness arithmetic advanced one
+verdict-bearing step from the inherited 5 of 8.
+
+Queued next: Micah's Q1 (exploration/exploitation redesign as a new design
+direction) and Q2 (K7-bar attainability or re-specification), both banked; the
+H-C kill recommendation (strike the kill or re-run under the original frozen
+bar); EXP2-K4 redesign-or-retire (governance blocker, expiry question on his
+queue five waves); a genuinely new B1-class mechanism; ruling 6 (COMP2-P11 gate
+zero); tnn_chat FIT due at 8 of 8 (staleness 6 of 8); his six pending governance
+rulings (untouched); his blind verdicts on the sealed pairs (unchanged, nothing
+added this wave); DP-1 presentation is a parent-agent queue decision. Open
+questions banked: the _zag_malloc overlapping-block claim is unproven and its
+corruption attribution unestablished (red-team flag, narrowed:
+allocator-overlap confirmed on one probe, deterministic); the
+descendant-subagent runtime failure has killed four waves this week (0521pdt,
+0821pdt, 1121pdt partially, 1421pdt) and this wave ran inline with no nested
+subagents per the parent's direction; the overnight SEM-L3 session's K12 Python
+self-disclosure travels as its own disclosure, not wave evidence; the transient
+ref-listing anomaly is recorded in the wave manifest; zero origin commits this
+window.
