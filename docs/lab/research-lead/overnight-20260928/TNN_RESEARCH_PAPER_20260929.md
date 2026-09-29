@@ -725,20 +725,21 @@ No mechanism has achieved L3.
 **Open:**
 
 - NQ1: Causal v2 (conjunctions, inequalities, delayed effects). In progress.
-- NQ2: Answered by H-ROUTER2. Port to unified pending.
-- NQ3: Answered by H-EXP2 (selection). Construction unattempted.
-- NQ4: Answered by H-FLEAKFIX. Canonical state update pending.
+- NQ2: Answered by H-ROUTER2 (downgraded). Repair in progress.
+- NQ3: Answered by H-EXP2 (downgraded to state selection). Reachability in progress.
+- NQ4: Answered by H-FLEAKFIX. Complete.
 - NQ5: Answered (retire, don't patch). Complete.
-- NQ6: Answered by H-INTENT (standalone). Port to unified in progress.
+- NQ6: Answered by H-INTENT (downgraded). Repair in progress.
 - NQ7: H-MEM builder complete; adversary running.
 - NQ8: Answered by H-FDCR2. Complete.
-- NQ9: Causal integration into unified. In progress.
-- Procedure revision v2 (new architecture). In progress.
-- Synthetic language: H-SYNLANG KILLED (see 3.6). Segmentation frontier in progress.
-- H-EXP2 red team. In progress.
-- H-UNIFIED repair (compositional interference). In progress.
-- H-ROUTER2 red team. In progress.
-- FDCR MERGE/SPLIT repair. In progress.
+- NQ9: Answered by H-CAUSAL-UNIFIED (28/28). Red team in progress.
+- Procedure revision v2: H-REVISE2 SURVIVES. Red team in progress.
+- Synthetic language: H-SYNLANG KILLED. Segmentation (H-SEG) in progress.
+- H-EXP2 red team: Complete (downgraded).
+- H-UNIFIED repair: H-UNIFIED2 SURVIVES. Red team in progress.
+- H-ROUTER2 red team: Complete (downgraded). Repair in progress.
+- FDCR MERGE/SPLIT: H-FDCR3 SURVIVES. Integration in progress.
+- H-INTENT-UNIFIED red team: Complete (downgraded). Repair in progress.
 
 **The strongest remaining blocker:** No mechanism has achieved L3. Procedure discovery at 11/12 is the closest, blocked by the proven impossibility of revision in its architecture. H-REVISE2 attempts a new architecture. Experiment construction (beyond selection) is the next frontier after H-EXP2.
 
