@@ -780,7 +780,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
 | Learned router v2 | DOWNGRADED | Supervised compiler, not policy discoverer; diverges on nseg≥5 |
-| Unified learner | REPAIRED (H-UNIFIED5, 17/17) | Hardened parser; explicit capacity; stream cannot reach revise |
+| Unified learner | REPAIRED (H-UNIFIED5, 17/17, red team SURVIVES all 4 attacks) | Hardened parser; explicit capacity; stream cannot reach revise |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
 | Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
