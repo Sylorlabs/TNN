@@ -226,8 +226,17 @@ dashes in this document.
 
 ## Commit lineage
 
-- Prereg: 4021d99eb (frozen before any attack code).
-- This report, revise4_adv.zag, REVISE4_ADV_RAW.txt: committed
-  together in the adversary result commit (see git log).
+- Prereg: 4021d99eb (frozen before any attack code; dedicated commit,
+  single file).
 - Target source: revise4.zag as committed (mechanism lines 1-421
   byte-identical in the attack harness, verified with cmp).
+- CORRECTION (2026-09-29, post-commit): this report, revise4_adv.zag,
+  and REVISE4_ADV_RAW.txt were staged by the author and then swept
+  into commit c6f92446f ("PREREG H-ROUTER4 red team FROZEN") by a
+  concurrent worker's broad-pathspec commit before the author's own
+  result commit could land. The file contents are byte-identical to
+  the author's intent (verified: committed blobs match the worktree).
+  The c6f92446f message does not describe these files; this is the
+  known shared-tree sweep hygiene issue, recorded here, not hidden.
+  The original draft text below ("committed together in the
+  adversary result commit") is SUPERSEDED by this correction.
