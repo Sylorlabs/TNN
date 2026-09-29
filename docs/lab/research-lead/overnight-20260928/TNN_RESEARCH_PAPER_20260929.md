@@ -836,7 +836,7 @@ No mechanism has achieved L3.
 - NQ6: Answered by H-INTENT (downgraded). H-INTENT-UNIFIED2 SURVIVES (5/5, DOWNGRADED). H-INTENT-UNIFIED3 SURVIVES (8/8, 38/38, DOWNGRADED by red team). Repair in progress.
 - NQ7: H-MEM builder complete; H-MEM2 SURVIVES (5/5, DOWNGRADED by red team). H-MEM3 SURVIVES (5/5). Red team in progress.
 - NQ8: Answered by H-FDCR2. Complete.
-- NQ9: Answered by H-CAUSAL-UNIFIED (28/28, DOWNGRADED by red team). H-CAUSAL-UNIFIED2 SURVIVES (5/5, DOWNGRADED by red team). H-CAUSAL-UNIFIED3 SURVIVES (6/6 + 28/28). Red team in progress.
+- NQ9: Answered by H-CAUSAL-UNIFIED (28/28, DOWNGRADED by red team). H-CAUSAL-UNIFIED2 SURVIVES (5/5, DOWNGRADED by red team). H-CAUSAL-UNIFIED3 SURVIVES (6/6 + 28/28, red team SURVIVES all 4 attacks). Frontier in progress.
 - Procedure revision v2: H-REVISE2 SURVIVES. Red team in progress.
 - Synthetic language: H-SYNLANG KILLED. H-SEG KILLED (2/3, shared-substring). H-SEG2 SURVIVES (5/5, DOWNGRADED by red team). H-SEG3 SURVIVES (9/9, red team SURVIVES all 4 attacks). H-SEG4 SURVIVES (13/13). Red team in progress.
 
