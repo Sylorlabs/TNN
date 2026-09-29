@@ -615,7 +615,7 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **X-RV4 PASS:** No byte-value literals in diagnose(), P1 from discover() only, no bypass. No spoofing.
 
-**H-REVISE4 SURVIVES (52/52, DOWNGRADED by red team):** Both H-REVISE3 downgrades repaired.
+**H-REVISE4 SURVIVES (52/52, DOWNGRADED by red team, SUPERSEDED by H-REVISE5):** Both H-REVISE3 downgrades repaired.
 
 **R1 (tie gaming):** When multiple candidates tie at top score, returns AMBIGUOUS (-2) and withholds. Does not guess by lowest position. Honest about indistinguishability.
 
@@ -627,7 +627,9 @@ A new architecture sidesteps the proof by changing the premise. Instead of conte
 
 **Commits:** prereg 926618d69; implementation e88ce0f20.
 
-**Red team downgrade:** X-RV4-1 succeeds. Unique wrong top confidently misattributes when true condition byte absent from expected output while incidental byte present. No tie required. The "scored heuristic" is one binary signal counted twice (every candidate scores 0 or 2, never 1). The "near-tie" limit describes an impossible event. Repair in progress.
+**Red team downgrade:** X-RV4-1 succeeds. Unique wrong top confidently misattributes when true condition byte absent from expected output while incidental byte present. No tie required. The "scored heuristic" is one binary signal counted twice (every candidate scores 0 or 2, never 1). The "near-tie" limit describes an impossible event. Repaired by H-REVISE5.
+
+**H-REVISE5 SURVIVES (62/62):** Honest single-signal (scores 0/1, degeneracy gone) + corroboration gate (requires second counterexample, else -3 UNCORROBORATED). X-RV4-1 replay: wrong top proposed honestly, corroboration fails, withheld, vcount 0. Red team in progress.
 
 **Commits:** prereg 3f582bb46; amendment 66e84347d; implementation via ffe2407a8; red team prereg 1bbadf544, amendment (swept into 0eb7677fe), result e8f6b8203.
 
