@@ -1,5 +1,12 @@
 # H-C Trace Anti-Unification — BUILDER-C Build Report (hypo_c)
 
+> **AMENDMENT 2026-09-28 (Phase-1 scientific record, overnight research lead):**
+> H-C's status is SURVIVES under its frozen bar K-HC4 = "learn the D1 six"
+> (this document, section 6). The salt-battery "kill" (57d055b) is INVALID —
+> rendered under a post-hoc redefinition of K-HC4. Canonical correction:
+> `docs/lab/research-lead/overnight-20260928/PHASE1_SCIENTIFIC_RECORD.md`.
+> Original text below is unaltered.
+
 **Task**: Implement the H-C (hypothesizer C) trace anti-unification learner in pure Zag,
 exactly per `~/workspace/composition_combiner_arch/hyp/hypo_c/HYPOTHESIS.md` and
 `~/workspace/composition_combiner_arch/LINE_BRIEF.md`.

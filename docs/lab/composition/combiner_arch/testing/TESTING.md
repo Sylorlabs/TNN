@@ -4,6 +4,17 @@
 **Tester:** TESTER-1 (combiner-architecture)
 **Question:** Does each architecture learn the rule, or memorize the manifold?
 
+> **AMENDMENT 2026-09-28 (Phase-1 scientific record, overnight research lead):**
+> The verdicts in this document are INVALID/VOID as preregistered outcomes.
+> K-HA-8, K-HB-1, and the applied form of K-HC4 each first appear in the
+> results commit itself (no frozen bars existed before results); K-HC4 was
+> redefined post-hoc to include swap-first-last, an item explicitly documented
+> as "not a bar" at the H-C implementation commit (a95e0d50c); H-A's kill
+> diagnosis is retracted (uncalibrated teaching arm, 0/12 uppercasing signal).
+> Measurements are preserved as exploratory data. Canonical correction:
+> `docs/lab/research-lead/overnight-20260928/PHASE1_SCIENTIFIC_RECORD.md`.
+> This amendment does not alter the original text below.
+
 ## 1. Architectures under test
 
 | ID | Name | Mechanism | Binary SHA-256 |
