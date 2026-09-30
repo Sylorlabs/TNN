@@ -1088,6 +1088,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DEVANG-H1: BUILD-FAIL (4c753a9db).** 13/20 (worse than baseline 16/20, H4 14/20). T1: 0/3. Thrash 35 (vs H4 0). Candidate explosion, myopic gain insufficient, negator undiscovered. All review predictions materialized. K4 FAIL. Recommendation: architecture review, not H2.
 
+**Q4 Adv2: DESIGN-COMPLETE (808ed196d).** F-RECFOLD: 2,295 instances, 5 ops. R1 flat k-fold, R2 nested fold. Battery: easy/med/hard (6-way parity, zero marginal). Materially different from F-PARCOND (5 points). Sealed protocol S1. Zero Python.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
