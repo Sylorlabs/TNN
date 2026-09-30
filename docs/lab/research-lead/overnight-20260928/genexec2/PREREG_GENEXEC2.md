@@ -54,6 +54,15 @@ task-specific heuristics); candidates are ordered by a fixed op
 priority to ensure determinism. The *success criterion* (exact match)
 is unchanged.
 
+## 0e. Amendment A5 (2026-09-30, before implementation commit)
+
+A4 is REVERTED. The implementation uses beam search (as in the original
+prereg plus A3's MAE tie-breaking), not DFS. Justification: DFS was
+not implemented; the committed implementation uses beam search. A4 is
+void. The beam search parameters are: width 100, max_len 12 (P1) / 10
+(P2), ordering by (exact desc, mae asc, len asc, prog asc). This
+amendment restores prereg-implementation alignment.
+
 Beam search scoring is clarified: the *success criterion* is exact-match
 count (a program is a solution iff it matches all train episodes). For
 *beam selection* (which candidates to retain), candidates are ordered
