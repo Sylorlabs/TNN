@@ -943,6 +943,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **P7 Integration: INTEGRATION-PROTOTYPED (9844fb753).** Full P7 lifecycle (discover → verify → apply → retire) executes inside one persistent learner run across 8 sequential domains. Schema re-fittable (obj 4→2→0→6→0→4, form persists). OPS_P7=27 < OPS_FRESH=32. Gate rejects mixed domains, retires after 2 consecutive failures. Bounded L1/L2 (researcher-supplied schema form), not L3.
 
+**Integration Step E: STEP-E-COMPLETE (6e4b5a59e).** Gap G3 closed. FDCR FORM/MERGE ported to merged curriculum, operating on continuing workspace W (not scratch). S3-FDCR-CONCEPTS 4: 4 concepts accumulated from morphemes during S1/S2. DEVINT1 S1-S11 intact, DEVINT2 byte-identical. All 7 kill bars PASS.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
