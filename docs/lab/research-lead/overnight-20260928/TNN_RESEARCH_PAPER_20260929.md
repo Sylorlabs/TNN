@@ -1044,6 +1044,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Form Inventor: INVENTOR-TESTED (1b8e032c4).** R1-R6 machinery: residual diagnosis, generic expression-tree pool, construction, novelty gating, promotion, refit, honest failure. All 14 predictions matched. G/H/K invented form 3 (cost 54). **C0 scope:** Bounded L2, not L3 (dedicated branches). Advances: diagnosis, construction, persistent form, revision, refusal.
 
+**F3 Phase 1: PHASE1-TESTED (720bb095e).** DNF rule sets, 7-item persistent state, OP-PROBE, OP-PROP. R-A: 3 exps (bar ≤4), goal reached. R-B: 1 exp (bar ≤3), goal reached. Plans match F2 exactly. All decision code reads effects[] only (C0-A direction).
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
