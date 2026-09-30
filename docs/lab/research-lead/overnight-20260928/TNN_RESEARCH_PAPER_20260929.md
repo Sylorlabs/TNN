@@ -1094,6 +1094,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Revised: REVISED (a0cb66e15).** 5 valid (weakened): correct 7-op, reuse 0 IVs, C0-C first data point, C0-D pairing, IVs necessary. 6 weakened: "discovered" falls (tax+luck), IV decorative, "minimal" false, evidence underdetermined, C0-C narrowed, C0-D thin. Revival R1-R4 defined. Honest: bounded L2.
 
+**Pilot Design: DESIGN-COMPLETE (d83d53075).** H-NEW-3: 5 experiences (vocab, concept, procedure, conflict, reuse). Floors F-E1..F-CAP. Arm B control (5 fresh processes). Falsifiers F-INTERFERE..F-PYTHON. D1 disclosed, partitioned (not unified). Honest: no L3 claim.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
