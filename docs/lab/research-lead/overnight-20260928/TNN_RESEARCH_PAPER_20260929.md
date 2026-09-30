@@ -1022,6 +1022,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Goal Revise: REVISE-TESTED (cb2a6fdbc).** Changed layout: 1 bump at added wall, revised, goal reached +3 actions vs control. Detection YES, revision YES, recovery YES. **Asymmetry:** cannot unlearn walls (removed walls stay marked). No false-wall→free mechanism.
 
+**Q4 Reproduction: REPRODUCED (121b6d5aa).** F-PARCOND reproduces exactly from committed source. 3/3 byte-identical, md5 matches. Promotion step 4 complete. One Python violation disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
