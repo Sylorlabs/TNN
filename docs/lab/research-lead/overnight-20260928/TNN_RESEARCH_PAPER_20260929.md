@@ -1026,6 +1026,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Discovery Implications: ANALYZED (bee0f840d).** A's flaw: greedy cannot cross valleys. B: idea safe, base at risk. C: same flaw family, C-F1/F3 at high risk. D: unaffected, highest survival predicted. Five requirements for successful discovery specified.
 
+**Active Verification: ACTIVE-TESTED (1c92aa353).** A1: bounded re-observation (1/episode). A2: compositional cross-check via superseded mappings. V6 shows full cycle (lie→SUSPECT→hedge+observe→cleared). No degeneration. Verification attack arc complete: attack→passive→active.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
