@@ -921,4 +921,6 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES (Difference-Driven Experiment Synthesis): BUILD-PASS (56db8d606).** Successor to H-CAUSALEXP-CONSTRUCT. Derives experiments from symbolic hypothesis difference (arrival-time analysis), not enumeration. 9/9 converge (Worlds A-E). Plans_built=8 (exactly 1 per config). World C length 6 (no bound). World D OZ plan (variable choice). World E NO-PLAN, 0 executions (honesty). All K-NX1..K-NX8 PASS. Strong L2 (guided generation), NOT L3. Researcher owns: vocabulary, format, algorithm, schemas. Learner authors: intervention, variable, length, sequence.
 
+**DDES Adversary: ATTACK-SUCCEEDS (e40bdfc9b).** K1 (hidden enumeration): FAILS (zero enumeration claim stands). K2 (sealed soundness): SUCCEEDS. World F (0-delay rule) causes silent wrong convergence: DDES eliminates the TRUE hypothesis at t*=0 because predictor mismatches execution (propagation fires on W ticks only). BUILD-PASS stands (no frozen world had t*=0), but promotion blocked until repaired. K3 confirms L2 ceiling (researcher-authored guidance).
+
 **End of paper.**
