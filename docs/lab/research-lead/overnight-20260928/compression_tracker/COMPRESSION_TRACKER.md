@@ -115,6 +115,79 @@ and 4 test harnesses. Integration recovers roughly this much.
 5. Fresh freeze-challenge rerun on the integrated build (Micah's
    priority 5): does 1/9 improve without source edits?
 
+## Snapshot update: TNN-1 and MUL-1 (2026-09-30)
+
+Appended 2026-09-30 by the Compression Tracker Updater. Historical rows
+above are untouched.
+
+| Generation | Lines (note) | Self-tests | Freeze worlds | Learned structures | Modes | Bridges | Handlers | Sem cases | R_test (per 100 lines) | R_world |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| TNN-1 (0323b97d5) | 1088 total source (cognition classification pending) | 35/35 (15 CLA-2 + 6 ACT compact + 10 COMP-1 + 2 CAM-1 + 1 DEVINT compact + 1 XCAP) | not run | inherits CLA-2/COMP-1/ACT structures; plan-to-guide cross-capability edge in XCAP | 0 | 0 | 0 | 0 | 3.22 | pending |
+| MUL-1 (fbf14f73a) | 563 total source (cognition classification pending) | 5/5 P-MUL | not run | 4-cell MUL PROC (learner-constructed via 4297 rejected trials) | 0 | 0 | 0 | 0 | 0.89 | pending |
+
+Notes:
+- TNN-1 line count is 1088 measured via wc on tnn1.zag. The build
+  report states 1090; both are under the 1200-line F-INT1 ceiling.
+  Cognition-line classification per MEASUREMENT_PROCEDURE.md is an open
+  item (see below). R_test uses total source lines until classified.
+- TNN-1 carries a compact 6-test ACT battery (A1-A6, directional bid),
+  not the standalone ACT 24/24 suite. The integration prereg target row
+  above specified "ACT 24"; the builder delivered 6 compact tests. This
+  deviation is recorded, not hidden. The 35-test total is 15+6+10+2+1+1.
+- MUL-1 line count is 563 measured via wc on mul1.zag. The 5 P-MUL
+  tests are construction tests (learner builds MUL from ADD/EQ/branch),
+  not capability checks, so R_test is not comparable to capability
+  batteries. Listed for completeness.
+- Inquiry build (396ecafa4, 936-line inquiry.zag, 115 cognition lines
+  claimed) is PROCESS-FAIL per the Worker Toolchain Guard: the builder
+  self-disclosed one python3 invocation (text-patching a /tmp scratch
+  copy, deleted without execution). No scientific standing until a clean
+  re-freeze lands. Not counted in any ratio.
+
+## Trajectory reading update (2026-09-30, post-integration)
+
+1. **Lines:** first genuine compression. Pre-integration total ~1555
+   cognition lines (1255 measured + ~300 COMP-1 estimate) across four
+   separate builds. TNN-1 is 1088 total source lines in one binary,
+   roughly 30 percent smaller, while passing 35 tests spanning five
+   formerly separate capability families plus one cross-capability
+   interaction test. Cognition-line classification is still pending, so
+   this is a source-line comparison, not yet a cognition-line one.
+2. **One-System metrics:** still zero. TNN-1 reports 0 modes, 0 bridges,
+   0 handlers, 0 semantic cases. The CAM-1 eval_body menu is deleted,
+   not ported. MUL-1 adds no arithmetic op to the core. The red teams
+   (TNN-1, MUL-1, COMP-1) are in flight to verify these zeros
+   independently.
+3. **Learner-created structure:** positive and deepening. TNN-1 inherits
+   the CLA-2/COMP-1/ACT structure inventory and adds a demonstrated
+   cross-capability edge (query-miss plan becomes action guide through
+   shared edges). MUL-1 adds a learner-constructed 4-cell executable
+   procedure that beat the prereg's 6-cell sketch by discovering
+   zero-init made INITs unnecessary. The learner is now building
+   executable structure the researcher sketched less efficiently.
+4. **Capability:** TNN-1 passes 35/35 in one process, byte-identical 3x.
+   MUL-1 passes 5/5 P-MUL with oracle audit (correct not first, 72
+   genuine rejections, shuffled rerun re-promotes). Cross-comparable
+   capability (freeze worlds, then FW1-FW9) remains pending for every
+   system including TNN-1. This is still the largest evidence gap.
+   Micah's priority 5 (freeze rerun on the consolidated core) is the
+   next canonical measurement.
+
+## Open measurement items (updated 2026-09-30)
+
+Prior items 1-5 remain open. Additions:
+
+6. Formal cognition-line classification of tnn1.zag (1088 lines) per
+   MEASUREMENT_PROCEDURE.md, to make the 1555-to-TNN-1 comparison a
+   cognition-line comparison.
+7. Formal cognition-line classification of mul1.zag (563 lines).
+8. R_test recomputation for TNN-1 after item 6.
+9. Sealed FW1-FW9 run on TNN-1: worlds passed, R_fw (the canonical
+   number the integration was built to report).
+10. Inquiry clean re-freeze: if it lands, add its row (115 claimed
+    cognition lines, 300-line budget) and note the PROCESS-FAIL
+    predecessor.
+
 ## Update protocol
 
 - Append a new snapshot row after every builder landing, integration
