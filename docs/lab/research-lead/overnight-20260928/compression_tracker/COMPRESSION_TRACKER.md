@@ -198,3 +198,95 @@ Prior items 1-5 remain open. Additions:
   correction above does.
 - Commit this file with the owned path only, explicit pathspecs,
   contaminated-paper zero-diff verified.
+
+## Snapshot update: cognition-line basis (2026-09-30, round 2)
+
+Appended 2026-09-30 by the Compression Tracker Updater (round 2).
+Historical rows above are untouched.
+
+| Generation | Cognition lines | Self-tests | Freeze worlds | Learned structures | Modes | Bridges | Handlers | Sem cases | R_test (per 100 cognition lines) | R_world |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| TNN-1 (0323b97d5, remeasured 6c40f4238) | 641 (53 functions) | 35/35 (ACT portion is 6-test compact, not full 24) | not run | GROUP, MAP, PLAN, STEP, COMB, COEFF node types as learner-authored structures | 0 | 0 | 0 | 0 | 5.46 | pending |
+| Inquiry-1 clean re-freeze (18ed3331c) | 149 | 12 bars pass (P-INQ1..P-INQ5a/b/c, A1, A2, C1-C3) | not run | UNCERTAINTY and GUIDE nodes created by learner-side pieces (161/162 traces) | 0 | 0 | 0 | 0 | n/a (construction battery, not unit tests) | pending |
+
+Notes:
+- TNN-1 cognition breakdown per MEASUREMENT_PROCEDURE.md: 99 generic
+  substrate (workspace primitives + EXECUTE ISA) + 102 retention/eviction
+  + 144 teach/query/act path + 284 plan synthesis/composition + 12 init
+  = 641. Excluded: INFRA 23, ACCESSOR 55, DRIVER 331 (35 tests + runner),
+  38 non-function lines. 641 + 23 + 55 + 331 + 38 = 1088 total source.
+- The cognition figure replaces the source-line R_test (3.22/100) with
+  5.46/100. Open items 6-8 from the prior list are resolved by this
+  remeasurement.
+- **Process note on the remeasurement wave:** the remeasurement worker
+  invoked python3 once for arithmetic sums (11th Python incident to
+  date). All sums were re-verified via awk-only computation and the
+  committed numbers are the awk-verified ones. Per the literal Worker
+  Toolchain Guard the wave is PROCESS-FAIL. Micah decides whether the
+  awk-verified measurement stands or a fully clean re-do is required.
+  The figures above carry that caveat.
+- Inquiry-1 clean re-freeze (935-line inquire.zag, 149 cognition lines
+  under the 300-line bound) passes all frozen bars with 3/3 byte-identical
+  runs and zero Python (restricted safebin PATH). It supersedes the
+  PROCESS-FAIL predecessor (396ecafa4); both remain on record. Inquiry
+  is a separate binary, not yet integrated into TNN-1.
+
+## Trajectory reading update (2026-09-30, cognition-line basis)
+
+1. **Lines: the compression story strengthens.** On the source-line
+   basis the prior reading said 1555 -> 1088 (about 30% smaller). On
+   the cognition-line basis: the measured separate sum 1255 (CLA-2 685
+   + CAM-1 408 + ACT 162) -> 641 is a 49% reduction; with the COMP-1
+   ~300 estimate included (1555 -> 641) it is about 59%. Against the
+   frozen core: 586 -> 641, a 55-line (+9.4%) increase. Those 55 lines
+   buy: the unified structural workspace (CLA-2 port), the ACT
+   action-selection path, COMP-1 plan synthesis and composition, the
+   CAM-1 verify/contradict port, and the DEVINT curriculum driver.
+   Five capability families for 9.4% more cognition lines than the
+   frozen core.
+2. **R_test on cognition basis.** TNN-1: 5.46/100. For reference on the
+   same basis: ACT standalone 14.81/100 (24 tests / 162 lines), CLA-2
+   2.19, CAM-1 1.47. ACT carries no workspace substrate of its own (it
+   borrows the learner workspace), so its density is not directly
+   comparable. TNN-1 carries the full substrate plus four capability
+   ports. R_test remains provisional; test batteries differ.
+3. **XCAP claim correction.** The F-INT4 disposition (86518edc4) narrowed
+   the cross-capability claim: no MAP-to-guide registration mechanism
+   exists in TNN-1. The honest claim is "contradiction demotes both
+   query standing and action bid through shared edges on a MAP node";
+   the prior reading's "query-miss plan becomes action guide" is
+   corrected to this. F-INT4 the falsifier does not trigger (shared
+   workspace is genuine); K5 is partially satisfied. Level 1
+   strengthening (use the real MAP node, supported by the binary) is
+   in flight.
+4. **ACT coverage gap.** The coverage scout (4b36f0c1e) found TNN-1's
+   6-test ACT battery covers only 3 of 16 standalone checks; 11 are
+   uncovered (state-varying emission, decoy no-bleed, no-hallucination,
+   retention negative half). The integration prereg required 24/24 with
+   no test changes, so K4's P-INT2 is not literally satisfied. A
+   remediation prereg is in flight. This does not change the
+   cognition-line count (tests are driver lines, excluded from
+   cognition), but it qualifies the 35/35 claim: the ACT portion is a
+   6-test compact.
+5. **Inquiry standing restored.** The clean re-freeze gives inquiry
+   scientific standing after the PROCESS-FAIL predecessor. Uncertainty
+   reification and guide construction both originate from learner state
+   (Pieces A/B, process ids 161/162), with zero researcher-authored
+   curiosity subsystem and zero domain/content branches (K-INQ2
+   triple-verified).
+6. **Largest evidence gap unchanged.** No freeze worlds and no sealed
+   FW1-FW9 have run on TNN-1. R_world and R_fw are still pending for
+   every system. Micah's priority 5 (freeze rerun on the consolidated
+   core) remains the next canonical measurement; it is blocked on the
+   five governance flags presented for Micah's rulings.
+
+## Open measurement items (updated 2026-09-30, round 2)
+
+- Items 6-8: resolved by 6c40f4238, subject to Micah's decision on the
+  awk-verified numbers given the wave's PROCESS-FAIL.
+- Item 10: inquiry re-freeze row added above (149 cognition lines).
+- Still open: item 1 (COMP-1 cognition remeasurement to replace the
+  ~300 estimate), item 7 (mul1.zag classification), item 9 (sealed
+  FW1-FW9 on TNN-1, blocked on freeze governance), item 5 (fresh freeze
+  rerun, blocked on Micah's five flags).
+
