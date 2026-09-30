@@ -17,27 +17,38 @@ pure Zag after this prereg is committed.
 
 F-PARCOND D depends only on bits 0..2 (x1,x2,x3): 8 input combos, 256
 possible boolean behaviors. The beam dedups candidates by 64-bit truth
-signature (sigtab), so it can never hold more than 256 behaviorally
-distinct candidates relevant to this family. "Discovery" is program
-synthesis by enumerative search in a tiny space. The 3860 trace events
-are mostly re-derivation of behaviorally equivalent expressions.
+signature (sigtab). The sharp test is therefore behavior enumeration:
+score each of the 256 3-bit behaviors (as 64-bit signatures constant
+across bits 3..5) directly on the evidence. This is the lower bound on
+search cost for any procedure that tests behaviors against the evidence.
 
 Test A1a (ENUM-32): replicate Phase 1 evidence exactly (8 passive with
-seed 123456789 + 24 disagreement IVs, identical beam+IV procedure),
-then score blind BFS-enumerated signatures (by op depth, no beam, no
-guidance) on that evidence. Report: depth of first candidate with full
-evidence score AND true 64/64, cumulative distinct signatures explored.
-Compare against the beam's 3868 nodes.
+seed 123456789 + 24 disagreement IVs via the identical beam+IV
+procedure), then score all 256 behaviors on that evidence. Report: top
+evidence score, number of behaviors tied at the top, whether the true
+D behavior is the unique top scorer. Compare 256 behavior evaluations
+against the beam's 3868 node constructions.
 
-Test A1b (ENUM-8): same BFS, scored on the 8 passive samples only.
-Report whether the (evidence-score, depth) winner has true 64/64.
+Test A1b (ENUM-8): same 256 behaviors, scored on the 8 passive samples
+only. Report the true accuracy of the first (lowest-index) top scorer.
 
-Predictions: P-A1a: BFS finds a fully-correct signature at depth <= 3
-with < 1000 cumulative distinct signatures (vs beam 3868 nodes).
-P-A1b: the passive-only winner does NOT have true 64/64 (the biased
-passive set, 6/8 samples with bit5 == output, admits a spurious or
-wrong small winner). P-A1b favors the learner; if it fails, the attack
-is even stronger.
+Predictions: P-A1a: the true behavior is the UNIQUE top evidence-scorer
+on E-learner32 (given full 8/8 combo coverage), so any procedure that
+enumerates 256 behaviors identifies D with 256 evaluations vs the
+beam's 3868 node constructions. P-A1b: on E-passive8 the top scorer is
+NOT unique or NOT the true behavior (the biased passive set, 6/8
+samples with bit5 == output, admits a spurious small winner), showing
+the interventions were epistemically necessary. P-A1b favors the
+learner; if it fails (passive alone identifies D), the attack is even
+stronger.
+
+Honesty note (preregistered): the 256-behavior enumeration uses the
+knowledge that only 3 bits matter, which the beam did not have (its
+terminals span 6 bits plus constants, and the passive set contains a
+spurious bit5 correlate). A1a is therefore a lower bound on search
+cost, not a fair competitor. Its value is locating where the real
+difficulty lay: discovering the irrelevance of x4,x5,x6 under a
+spurious correlate, which the evidence (via interventions) resolved.
 
 ### A2. Disagreement-driven interventions are decorative at this budget.
 
@@ -99,17 +110,17 @@ generality.
 
 One program, altexp.zag, pure Zag, fixed seeds, deterministic. main runs:
 
-1. ENUM: BFS signature enumeration to depth 6 max. Signature = 64-bit
-   truth table over x in 0..63 (same convention as term_sig/node_pred).
-   Level 0 = 8 terminals (bit projections x0..x5, const 0, const 1).
-   Level d+1 = {NOT s : s in level d} union {s op t : s in level d,
-   t in union levels <= d}, op in {AND,OR,XOR}, dedup by (lo,hi).
-   Score each new signature on three evidence sets: E-canonical (8 obs,
-   one per (x1,x2,x3) combo), E-learner32 (replicated Phase-1 32 obs),
-   E-passive8 (replicated 8 passive). For each set report: depth of
-   first signature with full evidence score and true 64/64; cumulative
-   distinct signatures explored to that point; (score, depth)-winner's
-   true accuracy.
+1. ENUM: for each of the 256 3-bit behaviors b (0..255), build the
+   64-bit signature (bit c of b replicated across all x with (x&7)==c,
+   same convention as term_sig/node_pred) and score it on three
+   evidence sets: E-canonical (8 obs, one per (x1,x2,x3) combo,
+   x = 0..7), E-learner32 (replicated Phase-1 32 obs: 8 passive seed
+   123456789 + 24 disagreement IVs via copied beam+IV machinery),
+   E-passive8 (replicated 8 passive). For each set report: top
+   evidence score, number of behaviors tied at the top, whether the
+   true D behavior (bits sealed(5,c) for c=0..7) is the unique top
+   scorer, and the true /64 accuracy of the first top-scoring
+   behavior.
 2. RANDIV: phase1 copy with random IV selection. Report BEST and TRUE
    lines in the phase1 format.
 3. FULLMEM: replicated 32-obs evidence, D table over 8 combos, report
@@ -133,10 +144,11 @@ zero em dash bytes.
 
 ## Falsifiers of my attack predictions
 
-- FP-A1a: BFS needs >= 1000 signatures or depth > 3 to identify the
-  target on E-learner32. (Weakens A1.)
-- FP-A1b: passive-only BFS winner has true 64/64. (Strengthens attack:
-  even the IVs were unnecessary.)
+- FP-A1a: the true behavior is NOT the unique top evidence-scorer on
+  E-learner32 (ties exist). (Weakens A1: identification needs the
+  beam's tie-breaking, not just behavior enumeration.)
+- FP-A1b: passive-only top scorer has true 64/64 (passive alone
+  identifies D). (Strengthens attack: even the IVs were unnecessary.)
 - FP-A2: RANDIV fails to reach true 64/64 in 24 rounds. (IV policy does
   real work; A2 dies.)
 - FP-A3: FULLMEM < 64/64. (Reuse gap is real; A3 dies.)
