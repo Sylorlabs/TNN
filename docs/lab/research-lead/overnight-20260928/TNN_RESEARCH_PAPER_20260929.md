@@ -990,6 +990,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Machine-Native Stress: BUILD-PASS.** 13,040 claims. 50/50 provenance, 500 contested, 40/40 corrections, 10/10 withdrawals, 100/100 no-forgetting. Persistence byte-identical. Baselines dominated. Governance anomalies disclosed (mixed prereg commit, misleading message). No human claim.
 
+**DEVANG4: BUILD-FAIL (d9ebbfe6d).** 16/20, NEG 0/3 persists. Diagnosis: "grn" never lexiconized, "not" blocked at 31%, "red" mis-grounded by NEG episodes, chicken-and-egg fragmentation. Merge pass and negator-aware grounding didn't fix. One Python violation disclosed. Triggering segmentation architecture review, not DEVANG5.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
