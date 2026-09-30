@@ -976,6 +976,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Generic Attack: ATTACK-COMPLETE (f1022ca71).** Both simpler-explanation attacks SUCCEED. C4: DEVINT1 integration contributes nothing; honest description is "incremental triple store plus on-demand 2-hop lookup." C8: arena items don't test gap detection; always-observe scores same but emits 72 vs 7 requests. Gap detection has value under budget. OOD bounds confirmed. Neither mechanism killed; both sharpened. Score 0.691 unaffected.
 
+**Substrate Extension: EXTENSION-TESTED (9ebd48258).** 4 concepts + 12 bigrams + 4 procedures + causal episodes coexist. 214 facts, no interference. S9 eviction is MECHANISM GAP. Representational hosting, not mechanism derivation.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
