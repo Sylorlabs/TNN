@@ -469,3 +469,213 @@ assumption load-bearing (C55)
 - C63 PAPER-DERIVED-COMPLETE (draft 6425f5a55): SUPERSEDED. A 34-claim
   evidence-first draft, superseded by v1 (94c30752f) and v2
   (89cf970ee). Not evidence; recorded for provenance.
+
+## 9. Post-ledger verdicts (fourth append; 2026-09-30; ledger appendix
+C64-C74)
+
+Appended to CLAIM_LEDGER.md after the C54-C63 append. No C01-C63
+entry was modified. L3 achieved anywhere: still zero.
+
+### 9.1 L3B v2 adversary: bounded; run-1 honest FAIL (C64)
+
+- C64 L3B-V2-ADV-BOUNDED (prereg 42538c6b6, addendum 252440aa4, impl
+  5be03c94f): SURVIVES as bounded L2 (boundary confirmed by
+  adversary). Run 1 FAIL was the adversary's own hand-derivation
+  error, honestly recorded. Run 2 BOUNDED: depth-3 n^4 and
+  constant-outside-range n+12 both honest no-growth with provable
+  menu-edge traces; 8-version churn/revisit succeeds. Two
+  limitations documented (silent first-match on ambiguous probes; no
+  archive-exhaustion discipline, 9th version panics). The 205-program
+  constructor is confirmed as a finite menu with a fixed archive; per
+  the lane ruling it will not be expanded. The two limitations are
+  addressed in C68.
+
+### 9.2 Causal edit invention: learner-authored delay extension
+(C65); generality broken by adversary (C71)
+
+- C65 CAUSAL-EDITINVENT-PASS (prereg 811fc06c9, impl 4c233f82a):
+  SURVIVES as bounded L2+ with learner-authored edit vocabulary. Old
+  edit vocabulary provably insufficient (0/78); the learner derived
+  the residual arrival pattern, identified delay_max as binding via
+  generic diagnose-and-relax (max_rules -> 3: 0/220; delay -> 3:
+  13/171), and constructed EXTEND-DELAY by computing dmax+1. The
+  edit persisted; 3/3 byte-identical. No new modes, bridges,
+  handlers, or semantic cases. Honest ceiling: L2+, not L3.
+- C71 EDITINVENT-ADV-BREAKS (SCOPE-COLLAPSE) (prereg d71be66dc,
+  attack 16c7665bd, results df270dc82): ADVERSARY-BREAKS (generality
+  claim broken; C65 not retracted). The declared scope {max_rules,
+  delay_max} was never two-dimensional: under min-arrival semantics
+  a 3rd rule can only lower arrival times, so the max_rules arm was
+  dead code (220/220 3-rule graphs have signatures inside the old
+  15-signature set; binding=max_rules unreachable in every
+  reachable trace; the ambiguous branch unreachable too). The one
+  demonstrated self-revision (EXTEND-DELAY) traveled the only
+  diagnostic path the machinery could ever take. Revised ceiling for
+  the editinvent line: "learner-authored delay-domain extension in
+  one law-change family; diagnose-and-relax is provably
+  delay-specific, not parameter-generic." For the L3-revision
+  program, general revision-machinery revision remains unproven.
+
+### 9.3 L3C v2 adversary round 2: survives this round (C66)
+
+- C66 L3C-V2-ADV2-SURVIVES-THIS-ROUND (prereg c3fc2b964, results
+  593cc5906): SURVIVES as bounded L2, this round only. Simultaneous
+  sibling-edge refinements serialize without record loss; the
+  mixed-output guard fired correctly; depth-4 refinement composed;
+  RACE 6/6; MIXED 6/6. No dropped records, double builds,
+  misrouting, or silent misresolution. The remaining structural
+  blind spot is disjunction, now closed by C73.
+
+### 9.4 Learner-dev P12: PROCESS-FAIL (C67)
+
+- C67 LEARNER-DEV-P12-PROCESS-FAIL (prereg 980981716, impl
+  fd8757ba9): PROCESS-FAIL, not a clean pass. Technical findings
+  preserved as reported: P12 integrated the position-contingent
+  OpScope learner; P1-P11 byte-identical; P12 3/3; one 32,768-byte
+  lifetime; +1,168 source lines; an independent 8,400-byte OpScope
+  slice (architectural debt). The worker disclosed a python3
+  invocation for the F3 literal audit; under the literal pure-Zag
+  rule, disclosure does not cure use, so the previously reported
+  LEARNER-DEV-PASS is governance-invalidated. The compression
+  successor (learner_compress/) is the architecturally relevant
+  path; a clean rebuild of the same composed subsystem architecture
+  is not worthwhile under the one-system rule.
+
+### 9.5 L3B v2 robustness: ambiguity and archive discipline (C68)
+
+- C68 L3B-V2-ROBUST-PASS (prereg 92c73aeca, impl 41b87007a):
+  SURVIVES as bounded L2. The two C64 limitations are fixed
+  generically: explicit ambiguity records with a most-recent policy
+  (no silent first-match, 3/3); archive-full refusal with a
+  learner-observable signal (no panic, 3/3, exit 0). The 205-program
+  grammar region is sha256-identical to v2; the interpreter region
+  is identical. Zero new semantic cases, modes, bridges, or
+  handlers; ~+110 source lines. Ceiling unchanged: bounded L2
+  (finite menu); the incremental-construction redesign remains a
+  separate program per the lane ruling.
+
+### 9.6 OpScope behavioral validation: PASS; gate lineage closed
+(C69)
+
+- C69 OPSCOPE-BEHAV-PASS (prereg 82e0e94fd, amendments 428c00e23,
+  54c943702, impl e8be2d5ef): SURVIVES as bounded L2. The final
+  allowed cross-context validation: all frozen predictions matched,
+  3/3 byte-identical per family. B3 overcomes the Position-0 Lemma
+  blindness behaviorally ("not" installs via STRICT with posmask=0,
+  TEST_ACC 20/20). Net -39 source lines (six count bars replaced by
+  one generic behavioral check): architectural compression. The
+  gate lineage is CLOSED per the lane ruling; no further gate is
+  permitted. The standing question points at type-based semantic
+  routing (scope bound to learned word types, not positions) as the
+  deeper redesign, to be justified under the one-system rule.
+
+### 9.7 L3A trace clean rebuild: BUILD-PASS (C70)
+
+- C70 L3A-TRACE-CLEAN-BUILD-PASS (preregs 05898699e, 444617dd4,
+  439dd54c5, impl e16cc0391): BUILD-PASS only (steps 1-3 of the
+  11-step pipeline), not an L3 claim. Clean-room rebuild with zero
+  Python anywhere reproduces all five frozen bars 3/3
+  byte-identical; C0-A audit A1-A7 all PASS on the new
+  implementation. 884 source lines; zero new semantic cases; the
+  invented operator's semantics lives entirely in learner state.
+  Independent red team (T-ADV) remains PENDING. This supersedes the
+  exploratory technical findings of C60 with a clean process.
+
+### 9.8 Hypothesis D v3: selection schedule necessary and
+sufficient (C72)
+
+- C72 HYPD-V3-PASS (prereg 3847065e2, impl e7149e452): SURVIVES as
+  bounded L2 per the prereg; no L3 claim. Fix 1 (deterministic
+  four-source parent schedule, SEL_MODE=1) and Fix 2 (carried
+  programs banded into a seed pool never entering the archive,
+  CARRY_MODE=1) implemented. v3-both T3 parity SOLVE 3/3
+  byte-identical (556,548 evals, 14-op solution, held-out 31/39);
+  CARRY_BLOCK_CHECK clean (niche 17570 natively generated,
+  carried_match=0). Key finding: Fix 1 is NECESSARY and SUFFICIENT
+  for T3 SOLVE; the selection-only ablation also solved T3
+  (165,976 evals, 39/39 held-out) despite R5 poisoning; the
+  carry-only ablation failed. ~180 source lines; 0 hardcoded
+  semantic cases; 0 bridges/handlers. Governance note (process
+  blemish, prereg document only): the frozen PREREG_HYPD_V3.md line
+  142 and NAMECHECK.md contain em-dashes (a writing error, now
+  immutable under the freeze); the result document is dash-clean.
+  The verdict stands; the blemish is recorded on the prereg
+  document, not the result.
+
+### 9.9 L3C v3: disjunction blind spot closed without an OR case
+(C73)
+
+- C73 L3C-V3-PASS (prereg 3124d2e9a, impl 3bfa0947c): SURVIVES as
+  bounded L2. Candidate A (alternative-cover dispatch) from the
+  frozen disjunction design: the F2 disjunction truth family
+  (previously 3 HONEST_FAILs) now builds a correct two-edge cover
+  dispatch (DISP with 2 labeled edges (f1==1),(f2==9) to TERM(0),
+  default to TERM(2)) with 4/4 truth eval, using only the
+  interpreter's pre-existing union semantics. The interpreter diff
+  is EMPTY. The memorization world produced no spurious cover (the
+  per-element EVID_MIN=2 bar fired); the ambiguity world withheld
+  with k=2; F1/F3 regression exact. 3/3 byte-identical. +269
+  cognition source lines; 0 new semantic cases/modes/bridges/
+  handlers; 0 interpreter lines changed. The new machinery is the
+  general learning operation of cover-set composition, not
+  disjunction-specific. Disclosed prereg analysis miss on P4 (the
+  prediction forgot disc2 runs before disc_cover; the mechanism was
+  correct); the bar was not moved. A genuine
+  minimality-vs-memorization cover-path test remains untested,
+  left for a follow-up builder under a fresh prereg.
+
+### 9.10 Governance note: v3 paper audit process-invalidated (not a
+numbered claim)
+
+The v3 clean paper (c4855a65b) was built with zero Python (clean).
+Its governance audit (b5a200ba0, claiming PAPER-GOVERNANCE-V3-PASS)
+disclosed a single python3 heredoc invocation for read-only regex
+extraction (re-verified with grep/git afterward; no artifact, no
+logic adopted). Under the literal pure-Zag rule, any Python
+invocation is a process failure; disclosure does not cure use. The
+audit's PASS label is therefore process-invalidated and is NOT
+ledgered as a clean governance-pass claim, consistent with the C60
+and C67 rulings. The audit's technical findings (all 63 claims
+present, 173 cited hashes resolve, no defects found) were
+re-verified without Python and stand as reported. This is the
+third Python process incident this cycle (C60 L3A-trace, C67 P12,
+and this audit), a pattern worth noting: all three were
+diagnostic/inspection conveniences, none affected a committed
+artifact's logic, and all three were disclosed. The literal rule
+applies regardless.
+
+### 9.11 Governance: fork-battery wave 81/83 PASS (unnumbered
+governance claim)
+
+FORKBATTERY-81/83-PASS (manifest fe20cb7fe, results fe8485d7e):
+GOVERNANCE-PASS. This is a governance instrument, not a numbered
+C-claim. 83 named entries: 81 PASS, 0 FAIL, 2 UNTESTABLE (the
+expected non-TNN trees rh-pull-1-head and rh-pull-2-head, pinned
+toolchain absent). The consistency gate now runs PRE-RUN (A1+A2) as
+well as post-run (A1-A4), all PASS. Archive immutability 41/41
+clean. Negative controls discriminate on all 81 PASS entries.
+Harness byte-identical to the frozen instrument. Governance
+improvement note: the worker recommends adding an A0 uniqueness
+assertion to the pre-run gate (duplicate entry names would collide).
+
+### 9.12 Learner compression: OpScope slice eliminated (C74)
+
+- C74 COMPRESSION-PASS (prereg 08a0c0ac4, impl 5722ff3a8):
+  SURVIVES as bounded L2 (ceiling inherited). The 8,400-byte bespoke
+  OpScope slice is deleted from the continuing learner; operator
+  discovery now runs entirely on learner-owned structures (episodes
+  as DDES ledger experience entries e7/e8/e9; the oprec as a
+  stress-store fact under generic learn()/eviction; tallies as
+  transient derivation). All five frozen prediction groups hold 3/3
+  byte-identical. Source delta: net +0 lines (2380 = 2380,
+  neutral). Net persistent bespoke bytes: -8,400. Zero new modes,
+  bridges, handlers, or semantic cases. The standing question is
+  answered: no new general operation was needed; the closest
+  missing piece is a first-class append/replay
+  experience-sequence accessor on the ledger (an API nicety, not a
+  capability gap). Succession: this supersedes the P12
+  architectural debt recorded in C67 (the slice is gone); C67's
+  PROCESS-FAIL standing is unchanged (the process failure is not
+  cured, only the debt is resolved). Architectural compression
+  achieved: one learner-owned structural workspace, as the
+  one-system rule requires.
