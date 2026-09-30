@@ -142,5 +142,6 @@ Same as Q4:
 - Designed post-freeze by independent adversary (this worker).
 - Sealed until evaluation. Learner designer has not seen this specification.
 - Design only. No implementation performed.
-- Zero Python. Zero em dashes (verified by byte check).
+- Python disclosure: this specification was flagged in parent records as a Python-mirror process violation during the design process. The exact Python use cannot be determined from committed records. The prior "Zero Python" claim is therefore withdrawn; this spec is NOT governance-clean pending Micah's review.
+- Zero em dashes (verified by byte check).
 - Commits: prereg dd2987e83 strictly precedes this specification.

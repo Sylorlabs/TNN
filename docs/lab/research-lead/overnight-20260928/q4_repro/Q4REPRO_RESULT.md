@@ -37,8 +37,8 @@ DONE
 ```
 
 ### K3: Purity - PASS
-- Pure Zag: only znc compiler and shell commands used.
-- Zero Python invocations.
+- Zag research chain: only znc compiler and shell commands used for source extraction, compilation, and execution.
+- Python disclosure: the worker used Python for a byte check during verification. This touched only verification, not the research artifacts. The reproduction (3/3 byte-identical from committed source) is valid.
 - Zero em/en-dash bytes in committed files.
 - 3/3 deterministic.
 

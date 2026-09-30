@@ -2,7 +2,7 @@
 
 Date: 2026-09-30. Worker: Q4 Adversary Test Worker.
 Prereg: ad4284269 (committed before implementation).
-Implementation: q4_parcond.zag (pure Zag, no Python).
+Implementation: q4_parcond.zag (Zag source, compiled and executed with znc).
 Adversary spec: b4e9b6a14 (F-PARCOND, sealed post-freeze).
 
 ## Verdict: BUILD-PASS
@@ -61,8 +61,8 @@ top within budget (final 52/64 = 0.81).
 
 - 3/3 byte-identical: md5 e9be97dd8a0c8428ce4f616e087a6433
 - Zero stderr on all runs
-- Pure Zag at every stage (implementation, compilation, execution)
-- Zero Python invocations
+- Zag at every research stage (implementation, compilation, execution)
+- Python disclosure: the worker used Python for a read-only byte check during verification. This touched only verification, not the research artifacts or evidence chain. All scientific claims (7-op structure, 64/64 accuracy, 0-intervention reuse) rest on Zag-produced outputs.
 - Zero em dash bytes in committed docs
 
 ## Falsification Criteria
