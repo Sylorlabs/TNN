@@ -1070,6 +1070,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Frontier W2: GENERATED (1d72eac51).** 18 questions scored. Top: FQ6 (continuing learner, 32), FQ1/FQ2/FQ12 (29). 6 hypotheses (2 unconventional: learner-written preregs, amnesia probe). Highest info: H-NEW-1 (C0INTEG Phase A). Sequencing defined.
 
+**Python Audit: AUDIT-COMPLETE (1127c3117).** 11 violations catalogued. 8 peripheral (no logic impact). 2 doc integrity failures (Q4 F-PARCOND and repro claim "Zero Python" falsely). 1 unresolved (adversary design). No mirror-developed logic adopted. 6th ruling not triggered.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
