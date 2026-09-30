@@ -949,6 +949,11 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F2 Memorization Control: MEMORIZATION-TESTED (5d0fd8c9e).** F2 beats memorizer 2-0. Memorizer failed World A despite having all transitions (delay dynamics non-Markovian in observed state); couldn't formulate plan on World B. F2's causal model does load-bearing work. Simpler-learner threat addressed for goal-achievement. Scope: goal bars only, not convergence.
 
+**Arena Adapter Audit: AUDIT-COMPLETE.** Honest breakdown per sections 6/23:
+- Generic-mechanism score: **0.691 (47/68)**. C4 composition and C8 inquiry are GENERIC-CAPABILITY.
+- Adapter-inflated score: 0.779 (53/68). C6 conflict ("pair storage") and C9 discrim ("format parsing") are ARENA-ADAPTER, not cognitive progress.
+- Clean canonical remains 0.573. Research claims use 0.691. Gaps: genuine conflict handling (source reliability/belief revision) and genuine causal inference (DDES not integrated).
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
