@@ -1014,6 +1014,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Hypothesis A: FALSIFIED (21d838921).** A-F1 fires. T0 and T2 FAIL (predicted SOLVE). Core flaw: residual complexity not monotonically reducible; greedy cannot traverse worse intermediates. B, C, D remain.
 
+**F3 Design: COMPLETE (68aa2f6e8).** DNF rule sets (per-rule refutation), 4 growth operators (PROP/VAR/GROW/SPLIT), adaptive delay horizon, learned action effects, provisional convergence + calibrated doubt. 5 gaps addressed. Stronger bounded L2, not L3. Next: F4 latent-variable invention.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
