@@ -954,6 +954,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 - Adapter-inflated score: 0.779 (53/68). C6 conflict ("pair storage") and C9 discrim ("format parsing") are ARENA-ADAPTER, not cognitive progress.
 - Clean canonical remains 0.573. Research claims use 0.691. Gaps: genuine conflict handling (source reliability/belief revision) and genuine causal inference (DDES not integrated).
 
+**Continuing Learner Extended: LEARNER-EXTENDED (179b4a950).** Both P7 retirement triggers verified in live runs (consecutive-rejection and accuracy-ledger). Second schema kind (default+exception) discovered, superseded kind-1, applied at 4/4. Two schema kinds in one persistent run, no resets. OPS_P7=28 < OPS_FRESH=32. Bounded L1/L2, not L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
