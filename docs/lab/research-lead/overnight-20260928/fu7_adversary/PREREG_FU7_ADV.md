@@ -180,6 +180,52 @@ capacity" under R3 clear+re-record cycles.
 This amendment changes attack fixtures only. No kill bar and no
 downgrade criterion is weakened. The pilot raw is preserved.
 
+## AMENDMENT 2 (2026-09-29, post-Amendment-1-run, transparent)
+
+The Amendment 1 B2a+B2b run (3/3 byte-identical, md5
+`a38a8b087febfd2cecd722e0a2cf3c1e` x3, preserved) drove a merge, but
+in the WRONG DIRECTION for the DOWNGRADE criterion. The raw shows
+`CONCEPT-MERGE 0 into 1`: pet(0) merged INTO animal(1), because the
+last-extended concept is the merge survivor (`con_merge_check(W,ci)`
+calls `con_merge_into(W, ci, c2)`). Pet's 8 members moved into
+animal (1 member, cap 8); the 8th pet member (s8) was merge-overflow
+re-recorded via `noadd_record` -> `noadd_drop_record`. s8 was never
+dropped before, so overflow=65 in that run counts 65 genuinely
+distinct subjects: legitimate, NOT a double count. The run's
+in-Zag "CONFIRMED" line was a misinterpretation (it checked only
+the counter, not which subject was re-recorded). Per the VOID rule,
+that B2b is VOID for the DOWNGRADE criterion (wrong subject
+re-recorded), not a finding.
+
+Corrected fixtures (B2a/B2b order swapped so the ANIMAL concept is
+absorbed and e1 is the merge-overflow victim):
+
+- B2a: `T e1 | is_a | pet`. e1 is an animal member, so this extends
+  animal's feature set to {"is_a=animal","is_a=pet"}. Pet still has
+  nfeat=1, so no merge fires. Require `con_nfeat(W2,1)==2`,
+  total=128, ov=64, ov2=0. If animal's feature set does not grow
+  to 2, the attack is VOID.
+- B2b: `T s1 | is_a | animal`. s1 is a pet member, so this extends
+  pet's feature set to {"is_a=pet","is_a=animal"}. Set-identity
+  with animal fires `con_merge_check(pet)` ->
+  `con_merge_into(pet, animal)`: "CONCEPT-MERGE 1 into 0".
+  Animal's sole member e1 moves into pet; pet holds 8 members
+  (full), so e1 is recorded via `noadd_record` -> NOADD table
+  full -> `noadd_drop_record`, re-naming e1 into its freed
+  overflow slot. Require total=129, `vote_lost(e1)==1` (e1 is the
+  re-recorded subject), `vote_lost(s8)==0` (no bystander victim),
+  and the raw output to contain `CONCEPT-MERGE 1 into 0` between
+  the B2b marker and the result line (path + direction
+  confirmation). If the merge does not fire in this direction,
+  the attack is VOID.
+
+DOWNGRADE criterion (unchanged): overflow==65 after B2b. Only 64
+distinct subjects were ever overflow-named (e1..e64); e1 would be
+counted twice, falsifying the frozen R1 claim "NOADD_DROP_OVERFLOW
+now genuinely counts distinct subjects dropped beyond the 64-name
+capacity" under R3 clear+re-record cycles. The Amendment 1 run raw
+is preserved as `FU7_ADV_RAW_AMEND1.txt`.
+
 ## Governance
 
 - This prereg is committed alone BEFORE any attack code exists.
