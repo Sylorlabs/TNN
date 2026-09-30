@@ -945,6 +945,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Integration Step E: STEP-E-COMPLETE (6e4b5a59e).** Gap G3 closed. FDCR FORM/MERGE ported to merged curriculum, operating on continuing workspace W (not scratch). S3-FDCR-CONCEPTS 4: 4 concepts accumulated from morphemes during S1/S2. DEVINT1 S1-S11 intact, DEVINT2 byte-identical. All 7 kill bars PASS.
 
+**DDES Red Team 2: ATTACK-SUCCEEDS (b19e0e594).** Sealed 4-variable World H exposes generality bound: frozen `synthesize_plan` uses `obs = 4 - v_star`, valid only for 3-variable worlds. On 4 variables, plan contains no observation action. All 3-variable results stand. DDES synthesis is 3-variable-specific, not generic.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
