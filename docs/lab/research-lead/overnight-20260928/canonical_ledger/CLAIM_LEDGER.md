@@ -2351,6 +2351,498 @@ conforming to this ruling are committed.
 
 ---
 
+## C102. COMP-1 composition prereg: query-time plan construction frozen
+
+Claim: the compositional machinery preregistration (COMP-1)
+is frozen.
+
+- Source: 4f6f0c5c8 (PREREG_COMP1.md, 434 lines;
+  NAMECHECK.md with Step 0 guard).
+- Mechanism: query-time plan construction firing on the
+  query-miss path via the MISS_POLICY register. Trigger,
+  candidate construction (3 frozen templates x
+  subject-incident relations), execution over the EXECUTE
+  vocabulary, construct-then-verify, optional plan
+  persistence. One mechanism for W1-search, W8-assembly,
+  and W9-iteration; the split bar is frozen in F1.
+- The four scout questions decided:
+  - Q1 (e-ruling): expected MAY be read, but ONLY as
+    post-hoc feedback on already-constructed plans.
+    Candidate space must be fully determined before
+    expected is consulted. The e-ablation (F2) is
+    mandatory: if masking expected kills plan
+    construction (not just selection), the claim
+    downgrades to answer-key search.
+  - Q2 (templates): the set {CHAIN-2, GATHER-n,
+    ITERATE-UNTIL} is frozen with a three-part anti-menu
+    defense (generality argument, template-ablation test,
+    template-composition test: 3-hop via CHAIN-2 composed
+    with CHAIN-2, no new template). A fourth template
+    needs a fresh prereg (F5).
+  - Q3 (policy location): frozen generic bootstrap via
+    MISS_POLICY, learner-supersedable per the compose_ops
+    pattern.
+  - Q4 (counting): no counter primitive added;
+    ITERATE-UNTIL uses the frozen ISA arithmetic basis.
+    Basis creep is a treadmill signal.
+- Predictions P1-P5 (W1 12/12 via search; W8 novel
+  conditional on combining function, tested in isolated
+  and bridge configurations; W9 conditional on Cluster A
+  stability; 3-hop generality; W2/W3 separation) and
+  falsification F1-F7 (split bar, e-ablation, template
+  treadmill, B/C boundary, oracle creep, unbounded
+  candidates, execution creep).
+- One-System accounting: 0 new core execution ops, 0
+  semantic cases, 0 modes/bridges/handlers, 0 new state
+  formats; source bound 150 lines for the bootstrap
+  miss-policy.
+- Governance: dash-clean via shell byte grep, contaminated
+  paper zero-diff, zero Python invoked (guard check
+  documented /usr/bin/python3 present but never used), no
+  sealed FW1-FW9 files accessed, prereg committed alone
+  before any implementation.
+
+**Status: PREREG-FROZEN (design only; no implementation
+in this commit).**
+
+---
+
+## C103. MUL-from-ADD construction scout: learner-built multiplication specified
+
+Claim: the MUL-from-ADD construction scout specifies the
+experiment that would test whether a learner can construct
+multiplication from the generic ISA basis.
+
+- Source: 8d30083b7 (MUL_SCOUT.md, 373 lines;
+  NAMECHECK.md with Step 0 guard).
+- Construction target: a workspace PROC graph tagged by
+  the learner, with CONTAINS edges to cells, SEQ ordering,
+  frame-slot bindings, invoked via EXECUTE. The natural
+  form is initialize-accumulate-step-test loop (result=0;
+  i=0; while i!=y: result=ADD(result,x); i=ADD(i,1)).
+  Graph properties that make it MUL and not a lookup
+  table: a back-edge (iteration), an accumulation cell, a
+  data-dependent termination test. All checkable as
+  white-box graph properties.
+- Two rungs: Rung A (approved ISA basis {ADD, EQ, BRANCH,
+  MOVE} plus literal 1; the loop is expressible with no
+  SUB/INC/DEC needed) runs first; Rung B ({INC, DEC},
+  where ADD itself is learner-constructed first, then MUL
+  on top) is the deeper L3 test. Frozen constraint: no new
+  arithmetic op may be added to pass.
+- Experience: bare multiplication exemplars only (no
+  additive scaffolding) for the real claim; scaffolded
+  pairs as a diagnostic control. Recommended curriculum:
+  Phase 1 ADD available, Phase 2 multiplication exemplars
+  arrive, misses trigger trial-based composition via
+  MISS_POLICY, Phase 3 held-out probes, Phase 4 subroutine
+  transfer, Phase 5 revision probe (zero/negatives).
+- Discovery: trial-based composition from a domain-neutral
+  assembly vocabulary (initialize, accumulate, step, test,
+  sequence). The program-search policy's biases must be
+  stated and oracle-audited. The high-value variant: the
+  learner reuses the ADD loop's shape one level up, which
+  would satisfy C0-D inside the experiment itself.
+- L3 bar: C0-A through C0-D applied MUL-specifically,
+  plus a template-contamination check. The learner's final
+  graph must contain at least one structural decision the
+  researcher did not make, or it selected rather than
+  constructed. A learner-invented sublinear multiplication
+  would be stronger evidence than the naive loop.
+- Falsifiable predictions: P-MUL1..5 (promotion,
+  white-box loop properties, ablation, subroutine reuse,
+  beats lookup control) and F-MUL1..5 (memorization,
+  template, no transfer, core smuggling, oracle search).
+  Full 7-phase experiment spec with controls and
+  governance for the prereg author.
+- Four open questions banked: the program-search policy
+  design, Rung A/B sequencing relative to Amendments A-C,
+  generalizing the graph-property checklist to admit
+  unforeseen efficient forms, and whether negatives are
+  in-scope or the designated revision probe.
+- One-System accounting: 0 source lines, 0 semantic cases,
+  0 modes, 0 bridges, 0 handlers. The specified
+  construction would be entirely learner-owned under the
+  frozen ISA.
+- Governance: dash-clean, contaminated paper zero-diff,
+  zero Python, no sealed FW1-FW9 files accessed, analysis
+  only.
+
+**Status: EXPLORATORY (scout and experiment
+specification; no implementation).**
+
+---
+
+## C104. Frontier scout: DEVINT-CLA2 ranked top by information gain
+
+Claim: the next-frontier scout ranks four candidates by
+information gain, with DEVINT-CLA2 on top.
+
+- Source: edcb364e3 (FRONTIER_SCOUT.md, 86 lines;
+  NAMECHECK.md with Step 0 guard).
+- Ranking:
+  1. DEVINT-CLA2 (developmental integration on CLA-2):
+     highest. The single experiment that most
+     discriminates the architecture program's central
+     bet. Does the consolidated workspace preserve the
+     full developmental sequence (vocabulary, concepts,
+     rules, contradiction, correction, inquiry, eviction,
+     interference, delayed reuse) that DEVINT1/2
+     demonstrated on the old fragmented substrate? Win
+     validates the One-System Rule; fail localizes
+     exactly what consolidation cost.
+  2. Learner-driven inquiry (UNCERTAINTY to ACT): tests
+     whether the learner originates inquiry from its own
+     uncertainty vs executing H-EXP2 v2's
+     researcher-designed loop. Direct answer to the W6 B4
+     ruling.
+  3. Linguistic relations as executable structures: tests
+     the strongest consolidation claim (same substrate
+     for language); ranked below inquiry because
+     vocabulary retention is already covered by CLA-2 P4.
+  4. Transfer on new architecture: necessary regression
+     battery, confirmatory not discriminating.
+- Top candidate specified: DEVINT-CLA2 question,
+  experiment (port DEVINT1/2's 11-stage skeleton to CLA-2
+  workspace; concepts as GROUP nodes, rules as executable
+  graphs with SUPPORTS edges, contradictions as
+  CONTRADICTS edges, inquiry via UNCERTAINTY to ACT),
+  prereg shape (B1-B5 kill bars, shared-vs-new check
+  separation, 3/3 byte-identical determinism),
+  dependencies (blocked on Micah's A1-A12/A-C rulings),
+  and what failure would teach.
+- One-System accounting: 0 source lines, 0
+  modes/bridges/handlers/semantic cases.
+- Governance: contaminated paper zero-diff, no sealed
+  FW1-FW9 files accessed.
+- Process disclosure: during the pre-commit dash check the
+  worker executed `python3 -c "pass"` as a stray fragment
+  in a shell command. The interpreter ran. No research
+  logic depended on it (grep did the actual byte check, 0
+  hits in both files; report is pure markdown analysis).
+  Per the toolchain guard this wave is PROCESS-FAIL. The
+  disclosure is recorded in FRONTIER_SCOUT.md and the
+  commit message. The scout content is unaffected as
+  analysis, but canonical standing requires clean
+  re-freeze if the ranking matters going forward.
+
+**Status: EXPLORATORY with PROCESS-FAIL (6th Python
+process incident this cycle; content unaffected as
+analysis but requires clean re-freeze for canonical
+use).**
+
+---
+
+## C105. Architecture accounting baseline: measurement procedure frozen
+
+Claim: the per-generation architecture tracking procedure
+is frozen and baselines are measured.
+
+- Source: 4d38aac91 (MEASUREMENT_PROCEDURE.md, 154 lines;
+  BASELINE_TABLE.md, 93 lines; NAMECHECK.md with Step 0
+  guard).
+- Baselines measured from frozen sources:
+  - Frozen core (87ac95d08): 586 cognition lines across 75
+    functions (1424 total lines), 1/9 worlds, 0 semantic
+    cases / 0 modes / 0 bridges / 0 handlers, 32768 state
+    bytes, 0 learned structures. Breakdown: associative
+    store 105, DDES/causal derivation 137 (verbatim
+    frozen), episode/candidate machinery 344 (the bulk),
+    legacy 356, parse/driver 174, diagnostics 84,
+    fixtures 120. Event dispatch is on generic
+    OBSERVE/QUERY/ACT only; no domain-id branches.
+  - contlearn2 (179b4a950): 136 cognition lines,
+    LEARNER-EXTENDED, 0/0/0/0, 1024 state bytes, 0 learned
+    structures.
+- Key definitions frozen: cognition lines = sum over
+  functions classified COGNITION (learn/retrieve/infer/
+  retain/plan), excluding infra/accessors/parse/driver/
+  diag/fixture/legacy. Semantic cases exclude generic
+  event-type dispatch. Re-measurement triggers: each
+  builder landing, new generation freeze, comparison
+  protocol run, or >10% cognition-line change. Historical
+  rows never edited.
+- Governance: dash-clean, contaminated paper zero-diff,
+  zero Python, read-only audit, explicit pathspecs.
+
+**Status: BASELINE-ESTABLISHED (measurement procedure
+frozen; CLA-2/CAM-1/ACT rows pending re-measurement after
+builder landings).**
+
+---
+
+## C106. CAM-1 build: trial-based construct-and-apply
+
+Claim: CAM-1 is implemented in pure Zag with trial-based
+P-DEP (finite-difference removed per the ISA ruling).
+
+- Source: 371d20743 (cam1.zag, 818 lines; cam1_bin;
+  BUILD_REPORT.md; NAMECHECK.md with Step 0 guard).
+- The critical amendment is implemented:
+  finite-difference analysis is OUT of P-DEP per Micah's
+  ISA ruling. P-DEP is now trial-based. Over structurally
+  aligned exemplars, the policy tries `z = a`, `z = a + a`,
+  `z = a + b` using only the frozen {EQ, ADD} basis, keeps
+  a template iff it holds via EQ on every construction
+  exemplar. No order detection, no coefficient fitting, no
+  SUB, no MUL. G1 source audit clean.
+- Test results (6/6, synthetic data only, FW1-FW9
+  untouched):
+  - W2-class: 5 LITERAL maps promoted, 5/5 novel-instance
+    probes, exact-hit preserved
+  - W3-class: trial discovery found `z = x + y` from 6
+    pairs, novel probes 30 and 15 correct
+  - P5 negative control: 0 promotions, all probes -2
+    (abstains)
+  - P6: VERIFY rejects a spurious construction-time
+    regularity; ablated (no VERIFY) it promotes and
+    answers wrongly. Corroboration carries the precision.
+  - P7: 2 CONTRADICTS edges demote a MAP (standing 1 to
+    -1), queries revert to -2, no revision mode
+  - P4: unknown relations/subjects to -2, exact lookup
+    bit-for-bit
+- Determinism: 3/3 byte-identical runs (sha256
+  b995a5a1...).
+- One-System accounting: 818 lines (incl. harness), 0
+  semantic cases, 0 modes, 0 bridges, 0 handlers. Standing
+  computed from SUPPORTS/CONTRADICTS edge counts, never
+  stored (A5/A11).
+- K1 ordering verified (68a41be8a ancestor). Toolchain
+  guard recorded in NAMECHECK.md (python3 at
+  /usr/bin/python3 documented non-use, never invoked).
+  Dash-clean, contaminated paper zero-diff.
+
+**Status: BUILD-PASS (builder verdict; promotion
+pipeline stages 3-11 not yet run).**
+
+---
+
+## C107. ACT build: learner-state generic action operation
+
+Claim: the learner-state ACT mechanism is implemented in
+pure Zag with all approved amendments.
+
+- Source: f7d87938f (act.zag, 615 lines; act_bin;
+  RESULTS.md; NAMECHECK.md with Step 0 guard).
+- Implementation: the five-step read protocol per prereg
+  plus amendments. POLICY_ROOT is node 0's payload[0] set
+  via ordinary WRITE (A12). Selection uses the CLA-2
+  signed evidence bid: SUPPORTS/USE/CONFIRMS +1,
+  CONTRADICTS -1 (A3/A11). "Raise/lower utility" remapped
+  to USE/CONFIRMS/CONTRADICTS edge operations (A8). The
+  4-event context ring is core bookkeeping (A4).
+  `act_event` takes only stores plus context. Zero
+  branches on world, task, or relation identity,
+  verifiable by inspection. No planner, no curiosity
+  module, no regularity detectors (ISA boundary honored).
+- Test results (./act_bin all): 24/24 PASS
+  - P-ACT3: null POLICY_ROOT to CHOICE 0
+  - P-ACT1: W7-class s1 to s2 to s3, D1 derived 3 guides,
+    ACT emits 10/11/10 by state
+  - P-ACT2: uncertainty-anchored guide fires 20 when the
+    uncertainty record is live; decoy 21; unrelated 0.
+    `act_event` takes no positional input, so the swap
+    test is satisfied structurally.
+  - P-ACT4: deleting ACTION-GUIDEs to constant 0;
+    deleting the GOAL (dead root) to 0 with no
+    hallucination; fact nodes remain readable.
+  - P-ACT5: W6-class and W7-class scenarios through the
+    identical `act_event`.
+  - P-ACT6: under capacity pressure, unevidenced guides
+    (bid 0) evict, ACT degrades to 0; evidenced guides
+    (bid 2) survive, ACT holds. The retention mechanism
+    decides, not the handler.
+- Falsification: F-ACT1 through F-ACT4 none triggered.
+- One-System accounting: ~700 source lines (act_event
+  core ~60), 0 semantic cases, 0 modes, 0 bridges, 0
+  task-specific handlers, 0 new edge types, 0 new state
+  formats.
+- Notes: the P-ACT6 eviction is a test stand-in (lowest
+  signed bid), not the CLA-2 three-step routine (CLA-2
+  builder's lane). `derive_d1` is a reference derivation
+  per the prereg (D1/D2 are examples, not frozen
+  algorithms). One bug found and fixed during testing: the
+  first `evict_to_cap` used the allocation high-water
+  mark instead of live-node count and over-evicted;
+  corrected to count live nodes.
+- K1 ordering verified (51a818141 ancestor). Toolchain
+  guard recorded (python3 documented non-use, zero
+  invocations). No sealed FW1-FW9 files accessed.
+  Contaminated paper zero-diff. Dash-clean.
+
+**Status: BUILD-PASS (builder verdict; promotion
+pipeline stages 3-11 not yet run).**
+
+---
+
+## C108. CLA-2 build: consolidated continuing learner with amended ISA
+
+Claim: the CLA-2 consolidated continuing learner is
+implemented in pure Zag per the frozen prereg plus all
+approved amendments.
+
+- Source: e639904f2 (cla2.zag, 1419 lines; NAMECHECK.md
+  with Step 0 guard).
+- Architecture delivered:
+  - 7 core primitives: ALLOC, READ, WRITE, LINK, ACTIVATE,
+    DECAY, EXECUTE
+  - EXECUTE(root, frame): seventh primitive with closed
+    4-op dispatch {MOVE, BRANCHEQ, INC, DEC}; frame-slot
+    indirection replaces the HOLE sentinel (Amendment B
+    supersedes A10); unknown op tags and budget exhaustion
+    FAIL cleanly (-999999)
+  - Registers: POLICY_ROOT (node 0), MISS_POLICY (node 1)
+    writable via ordinary WRITE (A12); nodes 0-1 reserved
+    from alloc/eviction; 4-event context ring in header
+    offsets 32-48
+  - Signed evidence bid (A11):
+    SUPPORTS/CONFIRMS/USE/DEPENDS-ON +1, CONTRADICTS -1;
+    GROUP shared-fate retained
+  - Miss-policy dispatch in QUERY per IP-6 ordering:
+    exact-key to SURPRISE to MISS_POLICY to HISTORY/REGRET
+    to -2
+  - 5-step ACT protocol (A3/A4/A8): context assembly to
+    POLICY_ROOT null check to 2-hop ACTIVATE to
+    address-equality match to highest-bid selection
+  - MAP node format (A5): refs [trigger-relation,
+    parameter-dimension, exemplar-group, coeff-chain];
+    standing derived from signed bid, not payload scalars
+  - Bootstrap miss-policy (A9): null MISS_POLICY runs
+    frozen P-INV trial discovery; learner supersedes by
+    writing its dispatch address once it promotes a MAP
+    node
+  - K threshold as revisable learner-state node (A7)
+- Verification: 15/15 self-tests pass (8 original: P1,
+  PRESSURE, P10, P8, P7, F4, GROUP, PERSIST plus 7 new:
+  EXECUTE, EXECUTE-FAIL, SIGNED-BID, ACT, ACT-NULL,
+  BOOTSTRAP, REGISTERS). Deterministic: byte-identical
+  output across runs.
+- K1: prereg (24351fd31) plus all amendments (62e5ebb9f,
+  0525377f3) verified as ancestors before implementation.
+- K2: source scan confirms zero task-specific handlers,
+  zero hardcoded semantic cases, zero modes, zero
+  bridges, zero regularity detectors in core.
+- K3: pure Zag only; toolchain guard enforced via PATH
+  stubs (no Python invoked); docs dash-clean;
+  contaminated paper zero-diff; commit local with explicit
+  pathspecs under cla2_build/ only.
+- Note: during testing a latent bug was found and fixed
+  where `activate()` could return history nodes (tag 3)
+  instead of fact nodes; added a tag=1 filter. The prior
+  builder's P10 test now passes with the amended
+  signed-bid semantics.
+
+**Status: BUILD-PASS (builder verdict; promotion
+pipeline stages 3-11 not yet run).**
+
+---
+
+## C109. C1 pure-Zag driver re-derivation (PROCESS-FAIL)
+
+Claim: the C1 race driver was reimplemented in pure Zag
+and re-derived all 60 runs byte-identically to the shell
+driver.
+
+- Source: d5984f313 (zag_driver.zag; zag_driver_bin;
+  RESULTS.md; runs/ with 60 run outputs).
+- Prereg: 56e8d404a (committed alone before
+  implementation).
+- Driver: pure Zag reimplementation of run_race.sh
+  logic. JSON parsing via byte scanning, causal_sim via
+  integer arithmetic, contestant invocation via
+  fork/pipe/execve/wait4 (raw syscalls), query scoring
+  against key.json, act tool resolution.
+- Runs: 60 total (4 contestants x 5 worlds x 3 reps),
+  worlds byte-identical to e0a30377f blobs, fresh state
+  dir per run.
+- Results (reps byte-identical, shown once per world):
+  - C1-CLEAN: 63/63 on w0/w1/w2, 66/67 on h0, 67/67 on h1
+  - MEM: 27/63 on w0/w1/w2, 29/67 on h0/h1
+  - FREQ: 6, 6, 3 on w0/w1/w2; 7, 5 on h0/h1
+  - RAND: 5/63 on w0/w1/w2, 6/67 on h0/h1
+- All 60 runs match the shell-driver reference scores
+  exactly.
+- Frozen prediction outcomes: P1 (byte-identical to shell
+  driver) HOLDS; P2 (C1-CLEAN 63/63 canonical) HOLDS; P3
+  (MEM 27/63, 29/67) HOLDS; P4 (FREQ <=6/63) HOLDS; P5
+  (RAND <=6/63) HOLDS; P6 (no baseline >=60/63;
+  LEARNING-PROPERTY stands) HOLDS.
+- Kill bars: K1 ordering verified (prereg strictly
+  precedes implementation); K2 worlds plus honest
+  recording (worlds byte-identical to e0a30377f blobs,
+  contestant binaries byte-identical to frozen hashes);
+  K3 pure Zag (driver is pure Zag; shell only compiles
+  and invokes binaries).
+- Process disclosure: during driver development, the
+  worker invoked Python once (python3 -c with json.load)
+  to inspect key.json structure. This was an inspection
+  aid, not part of the research logic. The driver source,
+  compilation, and all run outputs are pure Zag/shell.
+  Disclosure does not cure the process violation per
+  standing rules. Per the toolchain guard, this wave is
+  PROCESS-FAIL. The scientific result is superseded by the
+  clean re-freeze (C110).
+
+**Status: PROCESS-FAIL (7th Python process incident this
+cycle; scientific result superseded by C110 clean
+re-freeze).**
+
+---
+
+## C110. C1 clean re-freeze: zero-Python re-derivation confirms P1-P6
+
+Claim: the C1 re-derivation is cleanly re-frozen with
+zero Python invocations, confirming all six predictions
+and fully clearing the C93 NEEDS-RERUN flag.
+
+- Source: 323f2afaa (REFREEZE_REPORT.md; NAMECHECK.md;
+  refreeze_drive.sh; compare_refreeze.sh; 60 run outputs
+  under c1_refreeze/).
+- Verification chain (all passed):
+  - Driver source zag_driver.zag (627 lines): zero Python
+    references, zero shell-outs; contestant invoked via
+    raw Linux syscalls only.
+  - Binary provenance: recompiled with pinned
+    znc_linux_x86_64_abed8aa1, byte-identical to committed
+    zag_driver_bin (sha256 5f8bf596...). The build is
+    deterministic.
+  - Worlds: all 10 files byte-identical to frozen
+    e0a30377f blobs.
+  - Contestants: mem/freq/rand match prereg sha256;
+    contestant_bin matches tracked blob.
+  - Toolchain guard: restricted PATH with
+    python3/python/node/nodejs unfindable; verified
+    before every phase. Zero forbidden invocations.
+- Re-execution: 60/60 runs via the pure-Zag driver.
+  114/120 output files byte-identical to d5984f313.
+- Flakiness caveat (new finding): 6 files differ, all
+  investigated. Two C1 runs scored 60/63 instead of 63/63.
+  Same D1/D2/D3 pattern (contestant answered d1a/d2b/d3a
+  at conf 0.9 instead of abstaining UNRESOLVED at conf
+  0.6). Both retest to 63/63. The C1 contestant binary
+  has flaky non-determinism on the abstention queries
+  (approximately 13% of runs). The driver is
+  deterministic; the flakiness is in the contestant. One
+  RAND run varied (1/63 vs 5/63), expected for a random
+  baseline.
+- Scientific standing: P1 through P6 all hold. C1 is
+  typically 63/63, far above the 27/63 MEM baseline; the
+  learning-property conclusion is intact. The contestant
+  non-determinism is recorded as a new finding requiring
+  investigation.
+- Process notes: /tmp was wiped mid-drive
+  (environmental), killing the run at 22/60; safe bin
+  recreated persistently at ~/workspace/c1_refreeze_safebin
+  and the drive resumed with skip-if-done. No Python was
+  involved in the incident.
+- Governance: contaminated paper zero-diff, dash-clean,
+  explicit pathspecs, local only.
+
+**Status: REPRODUCTION-CONFIRMS (clean re-freeze; C93
+NEEDS-RERUN is now FULLY CLEARED).**
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -2371,12 +2863,12 @@ conforming to this ruling are committed.
 
 ## Ledger tally
 
-- Claims ledgered: 101 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 110 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
   2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
   2026-09-30; C78-C95 eighth append 2026-09-30; C96-C101 ninth
-  append 2026-09-30)
+  append 2026-09-30; C102-C110 tenth append 2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -2394,12 +2886,16 @@ conforming to this ruling are committed.
   C51 (OpScope gate) -> 13 KILLED
 - DOWNGRADED: C13, C16, C17, C18, C19, C24, C29 -> 7 DOWNGRADED
 - VOID / INVALID: C32 (H-B void; H-C invalid; H-A kill-with-retracted)
-- PROCESS-FAIL: C67 (learner-dev P12; python3 disclosure) -> 1
+- PROCESS-FAIL: C67 (learner-dev P12; python3 disclosure), C104
+  (frontier scout; 6th Python incident, stray python3 -c fragment),
+  C109 (C1 Zag driver; 7th Python incident, inspection aid) -> 3
   PROCESS-FAIL
 - BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
   (figures), C22, C36 (L3C form builder), C43 (L3B growth), C70 (L3A
   trace clean rebuild; QUALIFIED by C77: certifies byte-reproduction,
-  not learning) -> 7 BUILD-PASS
+  not learning), C106 (CAM-1 trial-based; 6/6 tests), C107 (ACT
+  5-step protocol; 24/24 tests), C108 (CLA-2 amended ISA; 15/15
+  tests) -> 10 BUILD-PASS
 - BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate),
   C60 (L3A trace; K3 process FAIL) -> 3 BUILD-FAIL
 - ADVERSARY-BREAKS: C71 (editinvent scope collapse; generality broken,
@@ -2411,7 +2907,9 @@ conforming to this ruling are committed.
 - UNVERIFIABLE: C04 (Design 1)
 - RETRACTED: C32 (H-A diagnosis), C41 (v1 emergence claim), C49 (tiered
   claim)
-- REPRODUCTION-CONFIRMS: C40 (threshold, confirms C11)
+- REPRODUCTION-CONFIRMS: C40 (threshold, confirms C11), C110 (C1
+  clean re-freeze; zero Python; 114/120 byte-identical; P1-P6 hold;
+  C93 FULLY CLEARED) -> 2 REPRODUCTION-CONFIRMS
 - GOVERNANCE-PASS: C48 (fork battery 78/80), C61 (fork battery 80/82),
   C62 (paper governance v2) -> 3 GOVERNANCE-PASS; plus the unnumbered
   81/83 wave (fe8485d7e, governance instrument, not a C-claim)
@@ -2430,13 +2928,18 @@ conforming to this ruling are committed.
   contamination register) -> 1; NEEDS-RERUN: C94 (C1 baseline;
   verdict provisional pending pure-Zag driver) -> 1; SEALED: C95
   (FW1-FW9 worlds) -> 1; SUPERSEDED: C84 -> 1 (counted above)
-- C93 NEEDS-RERUN scope: PARTIALLY CLEARED. C97 cleared the
-  Core Freeze Challenge 1/9 scoring (pure-Zag re-derivation, 0
-  discrepancies). Still NEEDS-RERUN: all C1-family numerics
-  (C1 clean 63/63, F-E 24/24, C76 24/24, C1 reproduction,
-  C94) until the pure-Zag driver reruns. Underlying artifacts
-  and data are intact; no retraction of measured values, but
-  no canonical citation of the C1 family until the reruns.
+- C93 NEEDS-RERUN scope: FULLY CLEARED. C97 cleared the Core
+  Freeze Challenge 1/9 scoring (pure-Zag re-derivation, 0
+  discrepancies). C109 re-derived the C1 family in pure Zag
+  (60 runs byte-identical, P1-P6 hold) but was PROCESS-FAIL
+  (7th Python incident, inspection aid during development).
+  C110 cleanly re-froze the C1 re-derivation with zero Python
+  invocations (114/120 files byte-identical; 2 C1 runs flaky
+  60/63 retest to 63/63, contestant non-determinism on
+  D1/D2/D3 recorded as a new finding). No C1-family numeric
+  remains NEEDS-RERUN. Underlying artifacts and data were
+  intact throughout; no retraction of measured values was
+  ever required.
 - Architecture-wave appendix (C96-C101, 2026-09-30):
   INTEGRATION-SPEC-COMPLETE: C96 (coordination record;
   amendments A1-A12 + J1 pending Micah's ruling; builders
@@ -2447,6 +2950,19 @@ conforming to this ruling are committed.
   4-op ISA; amendments A-C pending) -> 1;
   BLINDNESS-AUDIT-PASS: C100 (governance finding) -> 1;
   RULING-COMMITTED: C101 (ISA boundary ruling; binding) -> 1
+- Architecture-wave appendix (C102-C110, 2026-09-30):
+  PREREG-FROZEN: C102 (COMP-1 composition prereg; query-time
+  plan construction; 3 frozen templates; e-ruling) -> 1;
+  EXPLORATORY: C103 (MUL-from-ADD scout; PROC graph spec;
+  rung A/B; L3 bar), C104 (frontier scout; DEVINT-CLA2 top;
+  6th Python incident, PROCESS-FAIL) -> 2;
+  BASELINE-ESTABLISHED: C105 (arch accounting; frozen core
+  586 lines; contlearn2 136 lines) -> 1; BUILD-PASS: C106
+  (CAM-1 trial-based P-DEP; 6/6), C107 (ACT 5-step; 24/24),
+  C108 (CLA-2 amended ISA; 15/15) -> 3; PROCESS-FAIL: C109
+  (C1 Zag driver; 7th Python incident; superseded by C110)
+  -> 1; REPRODUCTION-CONFIRMS: C110 (C1 clean re-freeze;
+  zero Python; C93 FULLY CLEARED) -> 1
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).

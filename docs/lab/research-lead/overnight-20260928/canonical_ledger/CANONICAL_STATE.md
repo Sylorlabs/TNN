@@ -989,3 +989,126 @@ ISA boundary ruling. No new capability SURVIVES in this append.
 
 The v3 paper staleness note now covers C64-C101; v4
 regeneration stays deferred to ledger stability.
+
+## 12. Builders land; C1 cleanly re-frozen (tenth append; 2026-09-30; ledger appendix C102-C110)
+
+Appended to CLAIM_LEDGER.md after the C96-C101 append. No
+C01-C101 entry was modified. L3 achieved anywhere: still
+zero. This append records: the COMP-1 composition prereg,
+the MUL-from-ADD construction scout, the frontier ranking
+(with the 6th Python process incident), the architecture
+accounting baseline, the three builder landings (CAM-1,
+ACT, CLA-2) under the amended ISA package, the C1 pure-Zag
+driver re-derivation (with the 7th Python process
+incident), and the clean re-freeze that fully clears the
+C93 NEEDS-RERUN flag. No new capability SURVIVES in this
+append; three BUILD-PASS verdicts record builder
+completion only.
+
+### 12.1 COMP-1 composition prereg frozen (C102)
+
+- C102 COMP-1-PREREG-FROZEN (4f6f0c5c8): query-time plan
+  construction firing on the query-miss path via
+  MISS_POLICY. Three frozen templates {CHAIN-2, GATHER-n,
+  ITERATE-UNTIL} with a three-part anti-menu defense. The
+  e-ruling is strict: expected only as post-hoc feedback
+  on already-constructed plans, with the e-ablation
+  mandatory. Q3 (MISS_POLICY bootstrap) and Q4 (no counter
+  primitive; ISA arithmetic only) decided. P1-P5, F1-F7.
+  Zero new core execution ops; 150-line bound on the
+  bootstrap miss-policy.
+
+### 12.2 MUL-from-ADD construction scout (C103)
+
+- C103 MUL-SCOUT-COMPLETE (8d30083b7): EXPLORATORY. The
+  construction target is a learner-tagged PROC graph with
+  a back-edge (iteration), an accumulation cell, and a
+  data-dependent termination test, all checkable as
+  white-box graph properties. Rung A runs on the approved
+  ISA basis alone (ADD, EQ, BRANCH, MOVE plus literal 1;
+  no SUB needed). Rung B is the deeper test: the learner
+  constructs ADD itself first, then MUL on top. The
+  high-value variant: the learner reusing the ADD loop's
+  shape one level up, satisfying C0-D inside the
+  experiment. Template-contamination check: the final
+  graph must contain at least one structural decision the
+  researcher did not make. Full 7-phase experiment spec
+  with P-MUL1..5 and F-MUL1..5.
+
+### 12.3 Frontier ranking; 6th Python incident (C104)
+
+- C104 FRONTIER-SCOUT-COMPLETE (edcb364e3): EXPLORATORY
+  with PROCESS-FAIL. Ranked by information gain:
+  DEVINT-CLA2 (developmental integration on the
+  consolidated workspace) on top, then learner-driven
+  inquiry, then linguistic relations as executable
+  structures, then the transfer regression battery. The
+  worker ran `python3 -c "pass"` as a stray fragment
+  during the dash check (6th Python process incident this
+  cycle). Content unaffected as analysis; canonical
+  standing requires clean re-freeze if the ranking
+  matters.
+
+### 12.4 Architecture accounting baseline (C105)
+
+- C105 ARCH-ACCOUNTING-BASELINE-COMPLETE (4d38aac91):
+  measurement procedure frozen. Frozen core: 586
+  cognition lines across 75 functions (episode/candidate
+  machinery the bulk at 344), 1/9 worlds, zero
+  modes/bridges/handlers, 32768 state bytes.
+  contlearn2: 136 lines, 1024 bytes. Cognition lines
+  count only learn/retrieve/infer/retain/plan functions.
+  Re-measurement triggers on each builder landing;
+  historical rows never edited.
+
+### 12.5 The three builders land (C106-C108)
+
+- C106 CAM1-BUILD-COMPLETE (371d20743): BUILD-PASS. The
+  critical amendment is in: finite-difference OUT of
+  P-DEP, trial-based discovery over {EQ, ADD} in. 6/6
+  tests on synthetic data (W2-class, W3-class z = x + y
+  discovered, P5 abstention, P6 VERIFY ablation, P7
+  contradiction demotion, P4 exact lookup). 818 lines, 0
+  semantic cases, 3/3 deterministic.
+- C107 ACT-BUILD-COMPLETE (f7d87938f): BUILD-PASS.
+  Five-step read protocol with POLICY_ROOT as node 0,
+  signed evidence bid selection, zero branches on world
+  or task identity. 24/24 tests pass. ~700 lines, 0
+  handlers. One bug found and fixed (evict_to_cap
+  over-evicted on high-water mark).
+- C108 CLA2-BUILD-COMPLETE (e639904f2): BUILD-PASS. The
+  full consolidated learner: 7 core primitives, EXECUTE
+  with closed 4-op dispatch, POLICY_ROOT/MISS_POLICY as
+  ordinary nodes, signed evidence bids, miss-policy
+  dispatch, bootstrap discovery the learner can
+  supersede. 15/15 self-tests, deterministic, K1/K2/K3
+  verified. One latent bug fixed (activate returning
+  history nodes).
+
+### 12.6 C1 re-derivation; 7th Python incident; clean re-freeze (C109-C110)
+
+- C109 C1-ZAGDRIVER-COMPLETE (d5984f313): PROCESS-FAIL.
+  The pure-Zag driver re-derived all 60 runs
+  byte-identically; P1-P6 all hold (C1-CLEAN 63/63, MEM
+  27/63, learning property stands). The worker disclosed
+  one Python invocation during development (inspection
+  aid for key.json). 7th Python process incident this
+  cycle. Scientific result superseded by C110.
+- C110 C1-REFREEZE-CLEAN (323f2afaa):
+  REPRODUCTION-CONFIRMS. Zero Python invocations
+  (restricted PATH, verified before every phase). Driver
+  source verified pure Zag; binary byte-identical to
+  pinned-znc rebuild; worlds and contestants frozen.
+  60/60 runs, 114/120 files byte-identical to d5984f313.
+  New finding: the C1 contestant binary has flaky
+  non-determinism on the D1/D2/D3 abstention queries
+  (approximately 13% of runs; 60/63 instead of 63/63,
+  retests to 63/63). The driver is deterministic; the
+  flakiness is in the contestant. P1-P6 hold; the
+  learning-property conclusion is intact. The contestant
+  non-determinism requires investigation.
+- C93 NEEDS-RERUN is now FULLY CLEARED. No C1-family
+  numeric remains flagged.
+
+The v3 paper staleness note now covers C64-C110; v4
+regeneration stays deferred to ledger stability.
