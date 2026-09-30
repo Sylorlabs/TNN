@@ -4,6 +4,21 @@ Date: 2026-09-30.
 Status: FROZEN. Committed before any implementation, build, or run.
 Lane: highest-priority frontier (F1). Clean lineage; the voided genexec_proto wave is not used.
 
+## 0. Amendment A1 (2026-09-30, before any implementation)
+
+The P1/P2 op sets are restricted to arithmetic/stack operations only:
+{PUSH, IN0, IN1, ADD, SUB, MUL, DIV, MOD, NEG, DUP, DROP, SWAP, OVER}.
+LT, EQ, GT are REMOVED from P1/P2. They remain available ONLY in the
+P3 probe family.
+
+Justification: With compare ops in P1, |x| is computable straight-line
+via a sign trick (x * (1 - 2*(x<0)), ~10 ops), which would let P1 solve
+T1 and prevent P3 (conditional assembly) from ever running. Removing
+compare ops from P1 makes straight-line |x| impossible (the input sign
+cannot be reified without comparison), so T1 genuinely exercises P3.
+This is a modular design choice (arithmetic in P1, conditionals in P3),
+not a task-specific restriction. T3 (parity) still works via MOD.
+
 ## 1. Objective
 
 Build the first L3 candidate under the refined mandatory Criterion 0
@@ -65,9 +80,9 @@ lexicographic byte order). No randomness.
 
 Phase P1 (straight-line beam search):
   Beam over ops {PUSH, IN0, IN1, ADD, SUB, MUL, DIV, MOD, NEG, DUP,
-  DROP, SWAP, OVER, LT, EQ, GT}. No jumps, no CALL. Max length 12.
-  Beam width 200. Score is exact-match count on train episodes.
-  Returns best program.
+  DROP, SWAP, OVER} (see Amendment A1; no compare, no jumps, no CALL).
+  Max length 12. Beam width 200. Score is exact-match count on train
+  episodes. Returns best program.
 
 Phase P2 (library call composition):
   If lib is non-empty, beam over P1 ops plus {CALL f for f in lib}.
