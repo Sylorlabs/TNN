@@ -919,4 +919,6 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F2 Autonomous Scientist: BUILD-FAIL (4ebde580a).** Generic learner with primitive actions derives rules from passive traces, constructs experiments via iterative-deepening base-B composition (depths 1-6, pure simulation), executes once, eliminates, plans under survivors. World A: 6 hypotheses -> constructed [SD,W,OZ] and [SD,W,W,OY] -> goal achieved. Random 0/20. World B: 2 hypotheses -> constructed [SX,SK,W,W,OY] -> goal achieved. Random 1/20 (K-AS5 FAIL). The frozen bar caught a weak goal instance (transient Y=1 too easy), not a broken loop. Honest BUILD-FAIL. L2 structural learning, not L3. No seed-shopping. Follow-up: re-freeze with harder goal.
 
+**DDES (Difference-Driven Experiment Synthesis): BUILD-PASS (56db8d606).** Successor to H-CAUSALEXP-CONSTRUCT. Derives experiments from symbolic hypothesis difference (arrival-time analysis), not enumeration. 9/9 converge (Worlds A-E). Plans_built=8 (exactly 1 per config). World C length 6 (no bound). World D OZ plan (variable choice). World E NO-PLAN, 0 executions (honesty). All K-NX1..K-NX8 PASS. Strong L2 (guided generation), NOT L3. Researcher owns: vocabulary, format, algorithm, schemas. Learner authors: intervention, variable, length, sequence.
+
 **End of paper.**
