@@ -902,3 +902,90 @@ analysis, prereg, design, audit, or evaluator-asset records.
 
 The v3 paper staleness note now covers C64-C95; v4 regeneration
 stays deferred to ledger stability.
+
+## 11. Post-ledger verdicts (ninth append; 2026-09-30; ledger appendix C96-C101)
+
+Appended to CLAIM_LEDGER.md after the C78-C95 append. No C01-C95
+entry was modified. L3 achieved anywhere: still zero. This
+append records: the integration incompatibilities found before
+implementation, the pure-Zag freeze rescore that clears the C93
+scoring flag, the composition scout, the EXECUTE placement
+resolution, the FW blindness audit, and Micah's protected-core
+ISA boundary ruling. No new capability SURVIVES in this append.
+
+### 11.1 Integration spec: builders paused for amendments (C96)
+
+- C96 INTEGRATION-SPEC-COMPLETE (62e5ebb9f): coordination
+  record. Twelve incompatibilities across the CLA-2, CAM-1,
+  ACT, and compose-ops specs; amendment checklist A1-A12 plus
+  flagged judgment J1 for Micah. Builders (CLA-2, CAM-1, ACT)
+  paused until the amendments are ruled on. The critical
+  finding is INCOMPAT-6: CAM-1's finite-difference PROPOSE vs
+  the {EQ, ADD} trial-based basis, a genuine allocation-of-
+  intelligence question.
+
+### 11.2 Freeze rescore clears the C93 scoring flag (C97)
+
+- C97 FREEZE-RESCORE-COMPLETE (5325ffed8): the Core Freeze
+  Challenge 1/9 verdict is re-derived in pure Zag with zero
+  discrepancies (stricter than the shell scorer; count
+  mismatches exit instead of silently mis-pairing). The C93
+  NEEDS-RERUN flag is cleared for the freeze scoring only.
+  The C1-family driver rerun remains pending; the C93 scope
+  note is updated to PARTIALLY CLEARED.
+
+### 11.3 Composition scout (C98)
+
+- C98 COMPOSITION-SCOUT-COMPLETE (cd7a3dd28): EXPLORATORY.
+  One execution core (EXECUTE vocabulary), three discovery
+  problems. W1 probes test search, not learned composition
+  (relation 599 has no consistent meaning across probes).
+  W1 belongs in Cluster C, not B. The gap is the plan
+  constructor, not the executor. Falsifiable prereg specified
+  (P1-P5, F1-F5). Fifth Python process incident this cycle
+  disclosed and recorded.
+
+### 11.4 EXECUTE placement resolved (C99)
+
+- C99 EXECUTE-PLACEMENT-RESOLVED (1fc77503b): analysis.
+  EXECUTE belongs in the protected core as a seventh
+  primitive over a 4-op ISA {MOVE, BRANCHEQ, INC, DEC};
+  the regress argument justifies the fixed point, and the
+  minimal fixed point is derived entry-by-entry. {INC, DEC}
+  beats {ADD}: MUL-from-ADD needs a decrementable counter,
+  and INC/DEC forces the learner to construct ADD. APPLY is
+  EXECUTE. Amendments A-C pending Micah's approval.
+
+### 11.5 FW blindness audit (C100)
+
+- C100 BLINDNESS-AUDIT-PASS (6f0eae9f2): governance finding.
+  No substrate builder accessed the sealed FW1-FW9 worlds;
+  the only repo-wide reference is the ledger's own C95 seal
+  record. Evaluator blindness holds; monitoring procedure
+  established.
+
+### 11.6 ISA boundary ruling (C101)
+
+- C101 ISA-BOUNDARY-RULING (0525377f3): Micah's ruling,
+  binding. The protected core may contain a SMALL, FROZEN,
+  domain-neutral computational basis comparable to an ISA
+  (ALLOC, READ, WRITE, LINK, COPY, COMPARE/EQ, ADD, BRANCH,
+  APPLY/EXECUTE, generic state/register operations). No core
+  operation may encode a target-domain regularity detector
+  (FIND_POLYNOMIAL_ORDER, DETECT_NEGATION, BUILD_CAUSAL_RULE,
+  LEARN_PROCEDURE, FIND_THRESHOLD, MAKE_CONDITIONAL, or
+  equivalents). Finite-difference regularity detection is out
+  of CAM-1 core intelligence; trial/compositional discovery
+  using learner-created structures is the approved route. No
+  MUL for FW3; the learner must construct it. The coordinator
+  package (10 core ops, MISS_POLICY, POLICY_ROOT, trial-based
+  P-DEP, edge-derived standing, zero modes/bridges/handlers)
+  is approved with this boundary. Worker toolchain guard
+  instituted as a process-system fix: allowed toolchain
+  verification before each worker, forbidden interpreters
+  removed from PATH where possible, any scientific wave
+  invoking a prohibited language is automatically
+  PROCESS-FAIL.
+
+The v3 paper staleness note now covers C64-C101; v4
+regeneration stays deferred to ledger stability.

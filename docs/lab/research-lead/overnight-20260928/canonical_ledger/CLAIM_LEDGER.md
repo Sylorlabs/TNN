@@ -2078,6 +2078,279 @@ cognition source lines; 0 new semantic cases/modes/bridges/handlers.
 
 ---
 
+## C96. Integration spec: CLA-2 + CAM-1 + ACT + compose-ops compatibility
+
+Claim: the four frozen specs (CLA-2, CAM-1, ACT, compose-ops)
+have 12 documented incompatibilities; a 12-item amendment
+checklist (A1-A12) plus one flagged judgment (J1) is specified
+for Micah's ruling; builders must not implement against the
+unamended preregs (INTEGRATION-SPEC-COMPLETE; coordination only).
+
+- Source: 62e5ebb9f (INTEGRATION_SPEC.md, 713 lines; NAMECHECK.md).
+- IP-1/IP-2/IP-3 clean: all four specs agree on the
+  (type_tag, ref[4], payload[4]) node format; CLA-2's edge
+  vocabulary covers everything CAM-1 and ACT need (zero new
+  edge types); CAM-1's MAP group refs map onto CLA-2's
+  GROUP/MEMBER convention.
+- Most critical incompatibility (INCOMPAT-2): compose-ops
+  requires a learner-registered miss-policy consulted on QUERY
+  miss; CLA-2's event loop has a fixed miss rule with no
+  dispatch point. Without this, CAM-1's APPLY-on-miss has no
+  invocation path at all. Fix: a MISS_POLICY register
+  paralleling ACT's POLICY_ROOT.
+- Deepest incompatibility (INCOMPAT-6): CAM-1's PROPOSE uses
+  finite-difference analysis (needs SUBTRACTION); the
+  compose-ops basis is frozen at {EQ, ADD} with trial-based
+  discovery. These are genuinely different allocations of
+  intelligence. Options: (a) re-specify P-DEP as trial-based
+  learner policy, or (b) approve finite-difference core
+  routines explicitly.
+- J1 (flagged for Micah): the {EQ, ADD} basis is
+  researcher-authored capability; whether it passes the
+  One-System Rule is his call.
+- Recommended package: 10 core ops, MISS_POLICY + POLICY_ROOT
+  + context ring, trial-based P-DEP, edge-derived standing.
+  Under it the core gains 4 ops, 3 registers, 1 sentinel;
+  zero new modes/bridges/handlers/edge types/state formats.
+- Builder monitoring: no builder had started implementing at
+  the time of the spec; no divergence flagged.
+
+**Status: INTEGRATION-SPEC-COMPLETE (coordination record;
+amendments A1-A12 + J1 pending Micah's ruling).** Not a
+capability claim.
+
+Architecture: 0 source lines (analysis only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C97. Pure-Zag freeze rescore: 1/9 confirmed, 0 discrepancies
+
+Claim: the Core Freeze Challenge scoring was reimplemented in
+pure Zag and all nine world scores re-derived from the frozen
+artifacts with zero discrepancies; the 1/9 verdict stands on a
+pure-Zag foundation (FREEZE-RESCORE-COMPLETE).
+
+- Source: 5325ffed8 (rescore.zag, 403 lines; compiled with the
+  pinned znc_linux_x86_64_abed8aa1; RESCORE_REPORT.md; 16
+  per-probe derivation outputs).
+- Two Zag modes replace the shell/awk logic. `score`
+  replicates score_probes.sh exactly (QUERY/ANSWER lockstep,
+  OK/MISS/ORDER-MISMATCH, SCORE) plus explicit segment
+  scoring and an optional key filter for sub-scores. `grade7`
+  implements the W7 frozen grader from the design doc;
+  transition model parsed from the world's own OBSERVE lines;
+  no hardcoded transition semantics.
+- Re-derived vs reported (all match): W1 10/12 + ret 10/10;
+  W2 0/8; W3 0/10; W4 1/6, 2/6, 3/6; W5 1/2, 4/6; W6
+  treatment 1/5 (vault 0/3), control 0/5; W7 0/4; W8 0/5 +
+  0/4; W9 0/28 + 0/31. Zero ORDER-MISMATCH lines across 17
+  derivations. Determinism verified byte-identical (sha256).
+  W1 passes its frozen bars; W2-W9 fail; 1/9 WORLD-PASS
+  confirmed.
+- Stricter than the shell: count mismatches exit 2 instead of
+  silently mis-pairing (never triggered).
+- Frozen artifacts read-only (never modified). AGENTS.md slice
+  lesson honored (u8-backed arrays).
+
+**Status: RESCORE-COMPLETE (governance remediation).** This
+clears the C93 NEEDS-RERUN flag on the Core Freeze Challenge
+1/9 scoring only. The C1-family driver rerun (C93 item B) is
+a separate rerun, not done here.
+
+Architecture: scorer is tooling, not cognition; 0 new
+cognition source lines; 0 new semantic cases/modes/bridges/handlers.
+
+---
+
+## C98. Compositional machinery scout: one execution problem, three discovery problems
+
+Claim: the three Cluster C manifestations share one execution
+core expressible in the EXECUTE vocabulary (no new core
+execution ops needed); the missing problem is the plan
+constructor, not the executor; W1 probes test search, not
+learned composition (COMPOSITION-SCOUT-COMPLETE; scout only).
+
+- Source: cd7a3dd28 (COMPOSITION_SCOUT.md, ~16KB; NAMECHECK.md).
+- All three manifestations (W1 two-hop, W8 word composition,
+  W9 traversal) run through multi-fact query plans expressible
+  in the unified_structures EXECUTE vocabulary. The discovery
+  problems differ: W1 needs query-time search over relation
+  pairs; W8 needs induction of the combining function plus
+  generic assembly; W9-depth needs hypothesizing iteration
+  itself as an operation.
+- Sharp W1 finding: probe relation 599 has no consistent
+  meaning across the two probes (501-then-502 vs
+  501-then-501). No persistent learned rule can cover both;
+  only per-query search works. W1's probes test search, not
+  learned composition; a world-design observation for future
+  batteries.
+- Cluster boundary: W1 belongs in Cluster C, not B. Keep B
+  and C separate; W8-novel is the documented B+C bridge case;
+  W9-depth sits at the boundary.
+- Survey: no existing mechanism constructs compositional query
+  plans. The frozen core does exact-key lookup only. The
+  compose-ops APPLY is a plan executor for persistent
+  structures; the gap is the plan constructor. CAM-1 explicitly
+  scopes out Cluster C.
+- Falsifiable prereg specified with P1-P5 and F1-F5,
+  including F2 (the e-ablation: if removing access to the
+  query's expected value kills composition, the capability is
+  answer-key search and the claim downgrades).
+- Process incident (disclosed): the worker ran `python3 -c
+  "pass"` out of habit during the dash check; no research
+  logic depended on it. Per the literal rule this is a
+  process failure; disclosure does not cure it. This is the
+  fifth Python process incident this cycle.
+
+**Status: EXPLORATORY (scout; process incident recorded).**
+
+Architecture: 0 source lines (scout only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C99. EXECUTE placement resolved: seventh primitive with 4-op ISA
+
+Claim: EXECUTE belongs in the protected core as a seventh
+primitive, but far smaller than either source doc proposed:
+EXECUTE(root, frame) over a closed 4-op ISA {MOVE, BRANCHEQ,
+INC, DEC} with step budget, single frame, terminal-cell halt,
+output via root ref[0] (EXECUTE-PLACEMENT-RESOLVED; analysis
+only, amendments A-C pending approval).
+
+- Source: 1fc77503b (EXECUTE_PLACEMENT.md, 382 lines;
+  NAMECHECK.md).
+- Regress argument: the op_tag-to-action mapping cannot live
+  in learner state without infinite regress; executing a
+  handler subgraph requires interpreting it, which requires
+  the mapping. The fixed point must be frozen code. Hiding it
+  in event-loop code (multi-event stepping) is more machinery
+  by honest accounting, not less. A seventh primitive is
+  justified; the question is only its size.
+- Minimal fixed point derived entry-by-entry: BIND/EMIT/
+  LINK-READ collapse to WRITE/READ conventions; COPY becomes
+  a learner library procedure; COMPARE+BRANCH fuse into
+  BRANCHEQ (no flag register). The payload boundary refutes
+  zero-arithmetic: W3's i32 payloads cannot be converted to
+  any structured representation with only equality+branching.
+- Rung 1 ({INC, DEC}) beats rung 2 ({ADD}): MUL-from-ADD
+  needs a decrementable counter anyway, so {ADD} alone is
+  insufficient, and INC/DEC forces the learner to construct
+  ADD, which is the L3-flavored outcome the program wants.
+- APPLY is EXECUTE: the compose-ops four collapse; APPLY is
+  EXECUTE's calling convention, COPY is learner-level,
+  CORROBORATE is learner-level (EXECUTE + BRANCHEQ + WRITE),
+  PROMOTE stays in the retention lane. Frame-slot indirection
+  replaces the HOLE sentinel.
+- Falsifiable criteria F-A through F-J (table minimality,
+  arithmetic rung, placement, APPLY distinctness, oracle
+  audit O1-O3, budget load-bearingness, re-entrancy,
+  frame-vs-HOLE, ACT chaining, fused-vs-split branch).
+- Prereg amendments A-C specified (to CLA-2 section (a),
+  COMPOSE_OPS sections 2.2/2.3/8, UNIFIED_STRUCTURES section
+  2). No implementation authorized; amendments await Micah's
+  approval.
+
+**Status: PLACEMENT-RESOLVED (analysis; amendments pending).**
+Not a capability claim.
+
+Architecture: 0 source lines (analysis only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C100. FW blindness audit: PASS, no builder access
+
+Claim: no substrate builder accessed the sealed FW1-FW9
+worlds; evaluator blindness holds (BLINDNESS-AUDIT-COMPLETE).
+
+- Source: 6f0eae9f2 (BLINDNESS_AUDIT.md, 138 lines;
+  NAMECHECK.md; committed in the same commit as the ROUTER7
+  disposition files; provenance noted).
+- Repo-wide filename grep found exactly one hit outside
+  freeze_worlds_v2/: canonical_ledger/CLAIM_LEDGER.md line
+  2062, inside claim C95, documenting the seal event itself.
+  Expected governance bookkeeping; no sealed values, ids,
+  triples, or responder logic.
+- No builder file references any sealed filename. The three
+  paused builders (CLA-2, CAM-1, ACT) were monitored for
+  divergence before pausing; none had accessed sealed content.
+- Monitoring procedure established for ongoing blindness.
+
+**Status: BLINDNESS-AUDIT-PASS (governance finding).**
+
+Architecture: 0 source lines (audit only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C101. ISA boundary ruling: {EQ,ADD} approved; no regularity detectors in core
+
+Claim: Micah's 2026-09-30 protected-core ISA boundary ruling
+(ISA-BOUNDARY-RULING).
+
+- Source: 0525377f3 (ISA_BOUNDARY_RULING.md, 93 lines).
+- Ruling: the protected core may contain a SMALL, FROZEN,
+  domain-neutral computational basis comparable to an ISA.
+  Allowed class: ALLOC, READ, WRITE, LINK, COPY,
+  COMPARE/EQ, basic arithmetic such as ADD, BRANCH,
+  APPLY/EXECUTE, generic state/register operations. These
+  are machinery, not intelligence; they do not tell TNN what
+  to think.
+- Forbidden as protected semantic operations:
+  FIND_POLYNOMIAL_ORDER, DETECT_NEGATION, BUILD_CAUSAL_RULE,
+  LEARN_PROCEDURE, FIND_THRESHOLD, MAKE_CONDITIONAL, or
+  benchmark/domain equivalents. Those already contain
+  cognitive solutions.
+- Frozen rule: no core operation may encode a target-domain
+  regularity detector. If CAM needs subtraction/differences,
+  the learner must construct the required computation using
+  generic primitives unless a lower-level primitive is
+  justified as truly domain-neutral.
+- Consequences adopted: (1) finite-difference regularity
+  detection removed from CAM-1 core intelligence; trial/
+  compositional discovery using learner-created structures
+  instead; (2) no MUL added merely because FW3 requires
+  multiplication; test whether the learner can construct and
+  persist it from the generic basis (L3-ish evidence);
+  (3) freeze the core computational basis deliberately; do
+  not grow it one benchmark at a time. SUB acceptable as
+  ISA-level arithmetic but the same freeze applies.
+- Coordinator package approved with the boundary: the 10
+  generic core operations, MISS_POLICY, POLICY_ROOT, generic
+  sentinel/state machinery, trial-based P-DEP, edge-derived
+  standing, zero modes/bridges/handlers.
+- Architecture goal restated: a tiny general machine for
+  cognition whose intelligence is increasingly in what it
+  builds, not in how many cognitive subsystems humans wrote.
+- Governance addition: the repeated accidental Python
+  violations are now a process-system problem. Worker
+  startup guard required: verify allowed toolchain, remove
+  forbidden interpreters from the worker PATH where
+  technically possible, pure Zag for computational research,
+  any scientific wave invoking a prohibited language is
+  automatically PROCESS-FAIL and must be cleanly re-frozen
+  if its result matters.
+- Procedure and causal rule remain on the path toward being
+  the SAME executable graph type with different evidence/
+  lifecycle edges, not separate engines.
+- FW1-FW9 approved as sealed evaluator assets; construct-
+  and-apply approved as a major frontier; ACT approved as
+  learner-state-driven generic action selection; CLA-1/CLA-2
+  primary over contlearn2 unless the discriminating
+  comparison says otherwise.
+
+**Status: RULING-COMMITTED (Micah's architecture ruling;
+binding on all subsequent builder work).**
+
+Architecture: 0 source lines (ruling document); 0 new
+semantic cases/modes/bridges/handlers. Builders (CLA-2,
+CAM-1, ACT) remain paused until prereg amendments
+conforming to this ruling are committed.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -2098,11 +2371,12 @@ cognition source lines; 0 new semantic cases/modes/bridges/handlers.
 
 ## Ledger tally
 
-- Claims ledgered: 95 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 101 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
   2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
-  2026-09-30; C78-C95 eighth append 2026-09-30)
+  2026-09-30; C78-C95 eighth append 2026-09-30; C96-C101 ninth
+  append 2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -2156,13 +2430,23 @@ cognition source lines; 0 new semantic cases/modes/bridges/handlers.
   contamination register) -> 1; NEEDS-RERUN: C94 (C1 baseline;
   verdict provisional pending pure-Zag driver) -> 1; SEALED: C95
   (FW1-FW9 worlds) -> 1; SUPERSEDED: C84 -> 1 (counted above)
-- C93 NEEDS-RERUN scope: the Core Freeze Challenge 1/9 scoring and
-  all C1-family numerics (C1 clean 63/63, F-E 24/24, C76 24/24, C1
-  reproduction, C94) are contaminated in their driver/scorer logic
-  (shell-as-research-program) until independently re-derived in
-  pure Zag. Underlying artifacts and data are intact; no
-  retraction of measured values, but no canonical citation until
-  the reruns.
+- C93 NEEDS-RERUN scope: PARTIALLY CLEARED. C97 cleared the
+  Core Freeze Challenge 1/9 scoring (pure-Zag re-derivation, 0
+  discrepancies). Still NEEDS-RERUN: all C1-family numerics
+  (C1 clean 63/63, F-E 24/24, C76 24/24, C1 reproduction,
+  C94) until the pure-Zag driver reruns. Underlying artifacts
+  and data are intact; no retraction of measured values, but
+  no canonical citation of the C1 family until the reruns.
+- Architecture-wave appendix (C96-C101, 2026-09-30):
+  INTEGRATION-SPEC-COMPLETE: C96 (coordination record;
+  amendments A1-A12 + J1 pending Micah's ruling; builders
+  paused) -> 1; RESCORE-COMPLETE: C97 (freeze 1/9 confirmed
+  in pure Zag; clears C93 item A) -> 1; EXPLORATORY: C98
+  (composition scout; 5th Python process incident recorded)
+  -> 1; PLACEMENT-RESOLVED: C99 (EXECUTE seventh primitive,
+  4-op ISA; amendments A-C pending) -> 1;
+  BLINDNESS-AUDIT-PASS: C100 (governance finding) -> 1;
+  RULING-COMMITTED: C101 (ISA boundary ruling; binding) -> 1
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
