@@ -1150,6 +1150,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Valley Q1: ANALYSIS-COMPLETE (62541d87e).** Recommendation: (a) Valley stays on full GENEXEC2. Family K needs DIV/MOD/EQ. Rework (b) is redesign, not edit. v2 ablation rationale doesn't transfer.
 
+**Bridge Fix: FIX-DESIGN-COMPLETE (791388384).** Root cause: VERIFY strike discards buffer (n=0). Fix: D1-D3 episode-persistent buffer. Inventor fires on 40-point global evidence. Predicted T-ADV5 ACCEPTABLE.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
