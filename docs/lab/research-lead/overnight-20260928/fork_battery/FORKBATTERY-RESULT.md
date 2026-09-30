@@ -1,32 +1,32 @@
 # FORKBATTERY-RESULT.md
 
-Run: fork-battery 2026-09-30 (parent task: Fork Battery Worker).
-Verdict: FORKBATTERY-78/80 PASS.
+Run: fork-battery 2026-09-30, wave-20260930-0732pdt (parent task: Fork
+Battery Wave Worker, with archive immutability check).
+Verdict: FORKBATTERY-79/81 PASS.
 
 Execution: full fresh run pinned to run-start commit
-955106ae5fb7b8e62a9ed6273c3048a5a2f8f156, driver batch_fbt.sh
-(mechanical derivation of frozen batch_0221.sh; pure shell, git,
+14a92a69da61cb83eaab3cbfec5a356eb552466c, driver batch_0732pdt.sh
+(mechanical derivation of batch_fbt.sh; pure shell, git,
 sha256sum; zero Python), run_one.sh byte-identical to the frozen
 instrument (sha256
 4c2fadfc104548fb9c8a13c417e90d96991637030734851dd6ca4471a037e978).
-Scratch: ~/workspace/fb0930_forkbatt/E/ (80 per-entry RESULT.txt files).
+Scratch: ~/workspace/fb0930_0732pdt/E/ (81 per-entry RESULT.txt files).
 BATCH-EXIT=0.
 
-Counts: 80 named entries, 78 PASS, 0 FAIL, 2 UNTESTABLE.
-LIVE entries (3), all PASS:
-- arch-wave-20260930-0221pdt at 697d4f308 (newly enumerated archive)
-- arch-wave-20260929-1721pdt-tip2 at dff8c2005 (moved archive branch tip;
-  branch moved forward since 0221pdt, descendant of the enumerated pin)
-- local-tnn-native-lab at 955106ae5 (run-start tip)
-FIXTURE: 77, including the renamed local-20260930-0221pdt-tip at 1f681e87b
-(was LIVE at 0221pdt) and arch-wave-20260929-1721pdt at 7c11ac5af (old pin
-of the moved branch).
+Counts: 81 named entries, 79 PASS, 0 FAIL, 2 UNTESTABLE.
+LIVE entries (1), all PASS:
+- local-tnn-native-lab at 14a92a69d (run-start tip)
+FIXTURE: 80, including the renamed local-20260930-0732pdt-tip at
+955106ae5 (was LIVE in the prior wave), arch-wave-20260930-0221pdt at
+697d4f308 and arch-wave-20260929-1721pdt-tip2 at dff8c2005 (both LIVE in
+the prior wave, rotated to fixture), and arch-wave-20260929-1721pdt at
+7c11ac5af (old pin of the moved branch).
 
-Uniform evidence on all 78 PASS: znc pin 498abcb5 (0 pin divergence);
-probe sha 3b29aa06 (0 divergence); b1/b2/b3 PASS;
-harness_verdict_pass_count 1 on 78/78;
-driver neg1_ok=PASS (E0002 hit, compile and check both fail) on 78/78;
-driver neg2_ok=PASS (compiles, runs, stdout differs at char 1) on 78/78.
+Uniform evidence on all 79 PASS: znc pin 498abcb5 (0 pin divergence);
+probe sha 3b29aa06 (0 divergence); b1/b2/b3 PASS; b1_cmp PASS;
+b2_bin_cmp PASS; harness_verdict_pass_count 1 on 79/79;
+driver neg1_ok=PASS (E0002 hit, compile and check both fail) on 79/79;
+driver neg2_ok=PASS (compiles, runs, stdout differs at char 1) on 79/79.
 Negative controls discriminate on every tested fork.
 
 UNTESTABLEs (2, expected, unchanged): rh-pull-1-head at 5802fec8 and
@@ -44,11 +44,18 @@ BYTE-IDENTICAL to the frozen instrument ~/workspace/fb1421/fork_battery.
 Remote: read-only git ls-remote this run shows zero new refs
 (origin/tnn-native-lab bedf8b4aa unchanged; HEAD/main 27a4271f; fs-gr1,
 r2-7, reorg/phase-0-1, wg-freeze, pull/1, pull/2, pull/3 heads all at
-their 0221pdt pins). Stale refs/remotes/rh-* carried as fixtures.
+their prior pins). Stale refs/remotes/rh-* carried as fixtures.
+
+Archive-branch immutability check (new this wave): all 41
+tnn-native-lab-wave-archive-* branch tips compared against their
+previously enumerated pins from the prior wave's driver table. Result:
+41/41 match, ZERO movement. tnn-native-lab-wave-archive-20260929-1721pdt
+remains at dff8c2005 (no further movement since the prior wave's
+repointing finding).
 
 Per-entry results: branch name, commit SHA, and verdict are recorded in
-each ~/workspace/fb0930_forkbatt/E/<entry>/RESULT.txt file; the ref field
-pins the exact commit tested. The full per-entry tally (78 PASS / 2
+each ~/workspace/fb0930_0732pdt/E/<entry>/RESULT.txt file; the ref field
+pins the exact commit tested. The full per-entry tally (79 PASS / 2
 UNTESTABLE) was taken from those files; zero FAILs, so no "what broke"
 entries to report.
 
@@ -57,10 +64,14 @@ claims about any branch's research quality. The battery certifies that
 the pinned toolchain extracts and runs uniformly across every enumerated
 fork. Divergence detector, not capability evaluator.
 
-Finding for the loop: archive branch tnn-native-lab-wave-archive-20260929-1721pdt
-was repointed (reflog "branch: Created from HEAD") from its enumerated pin
-7c11ac5af to dff8c2005, a descendant carrying additional wave-1721pdt record
-commits. Benign, but archive branches are supposed to be immutable; the
-loop should re-create rather than move archive branch pointers.
+Governance note: during this wave, a `git commit --amend` intended for
+the worker's own enumeration commit landed on the C1 law-revert worker's
+freeze commit instead (that worker had committed on top 9 seconds
+earlier). The original C1 commit was 418b7bc89 (recoverable via reflog);
+the amended commit is fd31db230, which contains all of the C1 worker's
+files plus this worker's enumeration count correction (80 to 81
+entries). No content was lost; no history was rewritten after the fact.
+Loop lesson: never use `git commit --amend` on the shared branch; always
+use a new commit.
 
 No em-dashes in this documentation.
