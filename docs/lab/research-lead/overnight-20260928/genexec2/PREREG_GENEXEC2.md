@@ -19,6 +19,28 @@ cannot be reified without comparison), so T1 genuinely exercises P3.
 This is a modular design choice (arithmetic in P1, conditionals in P3),
 not a task-specific restriction. T3 (parity) still works via MOD.
 
+## 0b. Amendment A2 (2026-09-30, before any implementation)
+
+T4 is changed from y=16x+15 to y=||x|-2| (nested absolute value),
+x in -6..6 (13 train episodes).
+
+Justification: 16x+15 is affine, so P1 can find a short straight-line
+program ([IN0, PUSH 8, MUL, PUSH 4, MUL, PUSH 1, SUB], 9 ops), which
+means the CALL-based solution is merely shorter, not required. The
+ablation (K-D2) would not destroy correctness. By contrast, ||x|-2|
+has three kinks (at x=-2, 0, 2) and requires conditional logic that P1
+cannot express (no compare ops) and P3 cannot assemble (single probe
+handles at most one kink). It is solvable only via P2 with two nested
+CALLs to ABS: [IN0, CALL ABS, PUSH 2, SUB, CALL ABS]. This makes the
+library provably load-bearing for T4, strengthening C0-D.
+
+T4 now tests repeated (nested) application of the same invented
+fragment. T5 (|x|+|x-2|) tests hierarchical composition (two CALLs
+combined with ADD). Both require ABS from T1.
+
+K-D1 is updated: T4's program must contain >= 2 CALLs to ABS (not STEP).
+T5's program must contain >= 2 CALLs to ABS (unchanged).
+
 ## 1. Objective
 
 Build the first L3 candidate under the refined mandatory Criterion 0
@@ -136,10 +158,12 @@ names or families. Tasks run in fixed order; lib persists across tasks.
   via [IN0, PUSH 3, MOD].
 - T3: y = 1 if (a+b) even else 0, a,b in 0..4 (25 train). Relational.
   Expected: P1 solves (must relate both inputs).
-- T4: y = 16x+15, x in 0..4 (5 train). Repeated. Expected: P1 finds a
-  straight-line solution; P2 finds [IN0, CALL STEP x4] which is shorter;
-  learner selects P2. The program must contain at least 2 CALLs to STEP.
-  This tests repeated application structure, not just length.
+- T4: y = ||x|-2|, x in -6..6 (13 train). Repeated (nested).
+  Expected: P1 fails (no compare; three kinks); P3 fails (single probe
+  cannot handle three kinks); P2 solves via two nested CALLs to ABS:
+  [IN0, CALL ABS, PUSH 2, SUB, CALL ABS]. The program must contain at
+  least 2 CALLs to ABS. This tests repeated application structure.
+  Without the library, T4 is unsolvable.
 - T5: y = |x| + |x-2|, x in -4..8 (13 train). Hierarchical composition.
   Expected: P2 solves via CALL ABS twice within an ADD. The program
   must contain at least 2 CALLs to ABS. Tests reuse of T1's invention.
@@ -184,7 +208,7 @@ C0-C (multiple unforeseen forms; partial this wave):
 
 C0-D (cognitive reuse):
 - K-D1 (reuse constructed): T4's program contains >= 2 CALLs to the
-  STEP fragment; T5's program contains >= 2 CALLs to the ABS fragment.
+  ABS fragment; T5's program contains >= 2 CALLs to the ABS fragment.
   PASS if both hold (verified from committed program dumps).
 - K-D2 (ablation): with CALL disabled (lib present but CALL ops
   removed from P2), re-run T4 and T5. Both must FAIL to reach exact
