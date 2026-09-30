@@ -1106,6 +1106,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F-RECFOLD Prereg: PREREG-COMPLETE (efbc9ad9e).** 317 lines. B1 amended (≥4/5 seeds, addresses luck). B2/B3/B4 frozen. Falsifiers F-SEAL..F5. Seed 770404483 (SHA committed). Independent draw. Coverage logging. Tax disclosed. Python violation (discarded seed) disclosed.
 
+**Review Framework: PREPARED (78a87dc3d).** 284 lines. R0-R4 process. Three senses: expressiveness, discoverability, discrimination. Verdicts: OK, BATTERY-WRONG, REPRESENTATION-WRONG. 7 alternatives. Forbidden: C3/D2/B2 keeping GENEXEC2 form. Python no-op disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
