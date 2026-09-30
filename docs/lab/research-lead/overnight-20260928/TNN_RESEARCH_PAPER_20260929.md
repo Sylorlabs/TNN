@@ -1010,6 +1010,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Adversary: ADVERSARY-DESIGNED (b4e9b6a14).** F-PARCOND: IF X1 THEN (X2 XOR X3) ELSE (X2 AND X3). 6 ops. Context-dependent operation; selects between computations, not variables. One Python violation disclosed.
 
+**Hypothesis Population: POP-TESTED (e150624a9).** 2200 hypotheses, 205k updates in 0.8-1.0s (228k/sec). SQLite: Zag 5x faster, 25x smaller; SQL wins concision. Bounded engineering, not TNN-unique. Tautology dominance and precision-vs-frequency findings. Governance incident disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
