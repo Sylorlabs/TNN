@@ -721,7 +721,29 @@ triples return sentinel -2, not echo). C1 CONFOUNDED for
 W6-treatment and W9. This is the challenge-level instrument
 verdict (FREEZE-CHALLENGE-COMPLETE), not a learner trophy.
 
-The v3 clean paper is now stale for C64-C75 (its derivation rule
+The v3 clean paper is now stale for C64-C76 (its derivation rule
 pins it to the 63-claim freeze 236a63a5a0). A v4 regeneration
 should wait for ledger stability; the v3 audit stands as a
 historical audit against 236a63a5a0.
+
+### 9.15 Smallest-consistent-k revision: causal lever confirmed (C76)
+
+- C76 SMALLK-REVISION-CONFIRMED (prereg 22e2554b8, freeze
+  13efc8f86, results 92ab7a270): SURVIVES as bounded L2 (revision
+  validation, not a new capability claim). The sealed F-E family
+  (6e03b2fa5) confirmed the periodic-demo key ambiguity as a
+  systematic failure mode (24/24 R1 APPLICATION misses): the
+  rotation class's largest-match-k tie-break yields k=3 for a
+  period-2 demo against k=1 for normal demos, collapses the class,
+  and falls back. Swapping the tie-break to smallest-consistent-k
+  (one line modified at contestant.zag line 807, zero lines added)
+  converts all 24 misses to hits; all frozen predictions hold
+  (P-SK1 through P-SK5), with the H0 reversal-ambiguity baseline
+  unchanged. The diag UNCLASSIFIED artifact is a stale-model
+  classification issue, not a contestant failure; ground truth
+  confirms 24/24 correct. This is a revision experiment under the
+  standing execution rule (a finished experiment causes the next to
+  begin; a located failure mode causes the fix to be tested): the
+  failure was a tie-break policy, not an architectural limitation.
+  Architecture delta: 1 line modified, 0 added; 0 new semantic
+  cases/modes/bridges/handlers.

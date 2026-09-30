@@ -1483,6 +1483,50 @@ Architecture: 0 new source lines (finding on the frozen binary);
 
 ---
 
+## C76. Smallest-consistent-k revision: the F-E miss mechanism converts to hits on a one-line tie-break change
+
+Claim: the periodic-demo key ambiguity confirmed by the sealed F-E
+family is caused specifically by the rotation class's largest-match-k
+tie-break, and swapping to smallest-consistent-k converts every miss
+to a hit.
+
+- Source: prereg 22e2554b8 (FROZEN; committed alone before any
+  implementation), freeze 13efc8f86 (variant source+binary; one line
+  changed), results 92ab7a270 (24 runs, 8 worlds x 3 reps, committed
+  alone). The 8 sealed F-E worlds were reused byte-identical from
+  6e03b2fa5 (sha256 verified; not regenerated).
+- Finding: the one-line change at `contestant.zag` line 807,
+  BEFORE `if(streq(rs,dout)==1){found=k;}` (largest-match-k:
+  overwrites on every match), AFTER
+  `if(streq(rs,dout)==1 && found<0){found=k;}`
+  (smallest-consistent-k: keeps the first match). For period-2 demos
+  under true key k=1 (for example "ahah"->"haha"), both k=1 and k=3
+  match; the revised tie-break selects k=1. The rotation class now
+  finds consistency across demos (1 vs 1, instead of 3 vs 1), does
+  not collapse, and the query hits via the rotation class.
+- Results against frozen predictions: P-SK1 24/24 R1 hits (PASS;
+  FE-FAMILY baseline was 24/24 APPLICATION misses); P-SK2 24/24 R2
+  hits (PASS); P-SK3 24/24 R3 hits (PASS); P-SK4 H0
+  reversal-ambiguity unchanged, no regressions (PASS); P-SK5 D1/D2
+  clean, 0 failures across 24 runs (PASS). The diag's
+  UNCLASSIFIED label on R1 is a classification artifact of the
+  diag's stale internal model (it predicts the old largest-k
+  output); ground-truth scores against key.json confirm 24/24
+  correct.
+- This validates the causal lever identified by the F-E family.
+  It is a revision experiment (not a new capability): it
+  demonstrates the failure mode was a tie-break policy, not an
+  architectural limitation.
+
+**Status: SURVIVES as bounded L2 (revision validation, not a new
+capability claim).** The prediction held exactly; the change is
+minimal and isolated; no new cognitive machinery was added.
+
+Architecture: 1 line modified, 0 lines added; 0 new semantic
+cases/modes/bridges/handlers. Bounded L2 ceiling.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -1503,10 +1547,10 @@ Architecture: 0 new source lines (finding on the frozen binary);
 
 ## Ledger tally
 
-- Claims ledgered: 75 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 76 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
-  2026-09-30)
+  2026-09-30; C76 sixth append 2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -1516,8 +1560,9 @@ Architecture: 0 new source lines (finding on the frozen binary);
   adversary round), C64 (L3B v2 adversary bounded), C65 (causal
   editinvent), C66 (L3C v2 adversary round 2), C68 (L3B v2 robust),
   C69 (OpScope behavioral validation), C72 (HypD v3), C73 (L3C v3),
-  C74 (learner compression), C75 (eviction tie-breaker pathology)
-  -> 33 SURVIVES (all bounded L2 or L2+, none L3)
+  C74 (learner compression), C75 (eviction tie-breaker pathology),
+  C76 (smallest-consistent-k revision)
+  -> 34 SURVIVES (all bounded L2 or L2+, none L3)
 - KILLED: C01 (generic reading), C02, C05, C07, C09, C10, C12, C14, C31,
   C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C),
   C51 (OpScope gate) -> 13 KILLED
