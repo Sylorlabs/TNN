@@ -1076,6 +1076,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Hypothesis D: D-TESTED (e2ee0964e).** T0 SOLVE, T1 SOLVE, T2 SOLVE, T3 FAIL, T4 FAIL, T5 FAIL. **Major finding:** abs is straight-line solvable via MOD trick; review's "straight-line limit" wrong. T1/T4/T5 discrimination broken. K4 FAIL (Python used).
 
+**Substrate: SUBSTRATE-DOCUMENTED (3d37e96fe).** 297 lines. S9 (slots) + S10 (bytes). Interaction contract (7 points): ordering, root freshness, shared header, stacked preservation, byte accounting, failure sharing, shared assumption. 8 limits. Next: S11 dedup, tick review, graded importance.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
