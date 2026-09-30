@@ -1098,6 +1098,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Commit Audit: AUDIT-COMPLETE (93591793d).** 12 commits: 6 mixed (paper sweeping), 1 false "(alone)" retracted, 1 swept (verified), 1 binary deletion (annotated). Zero prereg inversions. Nothing voided. Pattern: paper-log commits; standing order prevents recurrence.
 
+**F3 Phase 3: BUILD-FAIL (57836684b).** T-CONJ PASS (OP-GROW forms 2-lit conjunction, 8 exps, drills pass). T-NEG BLOCKED (world missing main(), seal prevents fix). K4 FAIL (Python byte check). Recommendation: transparent amendment, re-freeze, test T-NEG.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
