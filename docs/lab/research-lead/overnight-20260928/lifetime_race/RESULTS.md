@@ -9,6 +9,11 @@ Status: TNN contestant complete. Serious LLM baseline PENDING.
   (amended once: one-line hypothesis-weight update fix, see commit
   `8f18ca6a1`; original frozen hash
   `b4c390e5800c23a7a2a971f3a72ef37d74a5e51b82f1b5d2ffd0431c9d57a749`)
+- Contestant binary (built from amended source, znc 2026.07.0-dev):
+  sha256 `8c7ccf308b46e193defeba137c701076cb5b7f7bed28f0393c314bf8bcaa48e4`,
+  139117 bytes. Note: the original frozen binary (147523 bytes) was
+  removed before its hash was recorded; this is a V2 deviation,
+  documented below.
 - World generator: `race_world_gen.zag` (pure Zag, xorshift64)
 - Seeds: 8 bytes per world from /dev/urandom, installed blind.
   Only sha256 hashes were viewed:
