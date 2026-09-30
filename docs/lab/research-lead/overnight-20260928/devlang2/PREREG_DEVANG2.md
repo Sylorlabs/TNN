@@ -49,10 +49,10 @@ Learner W buffer:
 - 2704..2720: nlex (i32 at 2704), padding to 2720
 - 2720..4256: lexicon 64 x 24B (16 str, len at +16, count at +20)
 - 4256..6304: ground 64 x 8 x i32 (2048 bytes)
-- 6304..6560: neg_viol[64] i32, neg_tot[64] i32 (512 bytes)
-- 6560..6816: cmp_ok[64] i32, cmp_tot[64] i32 (512 bytes)
-- 6816..6880: k1 snapshot (10 x i32 hit flags, 40 bytes), padding
-Total: 6880 bytes.
+- 6304..6816: neg_viol[64] i32, neg_tot[64] i32 (512 bytes)
+- 6816..7328: cmp_ok[64] i32, cmp_tot[64] i32 (512 bytes)
+- 7328..7392: k1 snapshot (16 x i32, 64 bytes)
+Total: 7392 bytes.
 
 Lexicon entry li: base=2720+li*24. String bytes 0..15, len at 16,
 count (i32) at 20. Invariant: 0 <= len <= 16.
