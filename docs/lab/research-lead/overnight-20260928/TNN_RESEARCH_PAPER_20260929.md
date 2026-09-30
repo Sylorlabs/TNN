@@ -1062,6 +1062,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Goal Architecture: ARCH-DOCUMENTED (3f00d4226).** 330 lines. Four phases: AUTOGOAL → GOALREVISE → WALL_REMOVE design → WALLREMOVE impl. Unified loop: HYPOTHESIZE → PLAN → ACT → FAILURE → REVISE → RETRY → GOAL. 11 limitations. Open seam: doubt-in-planning integration.
 
+**S10: BUILD-PASS (54851fd3f).** String pool GC implemented. F1-F6 all pass. 500 duplicates → 3 strings. Query temps reclaimed. Overflow handled. Latent OOB bug fixed. Substrate S9+S10 complete.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
