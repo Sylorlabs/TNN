@@ -863,6 +863,10 @@ No mechanism has achieved L3.
 
 **The strongest remaining blocker:** No mechanism has achieved L3. Procedure discovery at 11/12 is the closest, blocked by the proven impossibility of revision in its architecture. H-REVISE2 attempts a new architecture. Experiment construction (beyond selection) is the next frontier after H-EXP2.
 
+### Developmental integration (2026-09-30, new lane)
+
+**DEVINT2: BUILD-PASS (6/6 frozen bars).** One persistent continuing learner in a single Zag program, single process, single main(). No task prefixes, no resets, no recompilation. Two twin rule stores on identical episode sequences (capacity 36 each): STORE-C evicts by cognitive consequence (importance = 10*(correct-wrong) + 5*dependents - 8*contradictions + 1; age does not enter) and STORE-R evicts least-recently-used. Key result: under memory pressure (30 never-queried junk rules flooded), STORE-C preserved 8/8 predictively-useful-but-stale rules while STORE-R kept all 30 junk and forgot all 8 useful ones (0/8), including recently corrected knowledge. Corrections are local (2/2 revised, 0/12 collateral). Delayed reuse 8/8 with zero re-teaching after 96 unrelated episodes. 3/3 byte-identical. Builder verdict only; not SURVIVES.
+
 ---
 
 ## 8. Conclusion
