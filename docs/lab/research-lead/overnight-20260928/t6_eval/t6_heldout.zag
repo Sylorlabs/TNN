@@ -1,0 +1,307 @@
+// genexec2p.zag -- GENEXEC2-P: polynomial VM variant of the frozen GENEXEC2.
+// Pure Zag. No Python anywhere.
+//
+// Build variant of the frozen GENEXEC2 interpreter
+// (docs/lab/research-lead/overnight-20260928/genexec2/genexec2.zag at
+// commit 8d5f58b89). The ONLY changes from the frozen source are:
+//   (a) dispatch branches for opcodes 6=DIV, 7=MOD, 13=LT, 14=EQ, 15=GT
+//       are replaced with PVM_TRAP branches (emit marker, break);
+//   (b) new validator fn pvm_valid (section "pvm validator");
+//   (c) main() replaced with the conformance suite (PREREG_GENEXEC2P.md).
+// Every kept opcode has byte-identical dispatch code and frozen semantics.
+// See PREREG_GENEXEC2P.md for the frozen spec and kill bars.
+//
+// Op encoding (op:i32, arg:i32), UNCHANGED:
+//   0=PUSH k, 1=IN0, 2=IN1, 3=ADD, 4=SUB, 5=MUL, [6=DIV ABLATED],
+//   [7=MOD ABLATED], 8=NEG, 9=DUP, 10=DROP, 11=SWAP, 12=OVER,
+//   [13=LT ABLATED], [14=EQ ABLATED], [15=GT ABLATED],
+//   16=JZ addr, 17=JNZ addr, 18=JMP addr, 19=CALL f, 20=RET
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ program representation ============
+// A program is a []u8: bytes 0..3 = len (i32), then len * 8 bytes of
+// (op:i32 at +0, arg:i32 at +4).
+fn prog_len(p:[]u8)i32 { return get32(p, 0); }
+fn prog_set_len(p:[]u8, l:i32)void { set32(p, 0, l); return; }
+fn prog_op(p:[]u8, i:i32)i32 { return get32(p, 4+i*8); }
+fn prog_arg(p:[]u8, i:i32)i32 { return get32(p, 4+i*8+4); }
+fn prog_set(p:[]u8, i:i32, op:i32, arg:i32)void {
+  set32(p, 4+i*8, op); set32(p, 4+i*8+4, arg); return;
+}
+fn prog_new(maxlen:i32)[]u8 {
+  let p:[]u8=z_alloc(4+maxlen*8);
+  set32(p, 0, 0);
+  return p;
+}
+fn prog_copy(dst:[]u8, src:[]u8)void {
+  let l:i32=prog_len(src);
+  prog_set_len(dst, l);
+  let i:i32=0;
+  while(i<l){ prog_set(dst, i, prog_op(src,i), prog_arg(src,i)); i=i+1; }
+  return;
+}
+fn prog_append(p:[]u8, op:i32, arg:i32)void {
+  let l:i32=prog_len(p);
+  prog_set(p, l, op, arg);
+  prog_set_len(p, l+1);
+  return;
+}
+// Lexicographic compare for tie-breaking: -1, 0, 1.
+fn prog_cmp(a:[]u8, b:[]u8)i32 {
+  let la:i32=prog_len(a); let lb:i32=prog_len(b);
+  let n:i32=la; if(lb<n){n=lb;}
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=prog_op(a,i); let ob:i32=prog_op(b,i);
+    if(oa<ob){return -1;} if(oa>ob){return 1;}
+    let aa:i32=prog_arg(a,i); let ab:i32=prog_arg(b,i);
+    if(aa<ab){return -1;} if(aa>ab){return 1;}
+    i=i+1;
+  }
+  if(la<lb){return -1;} if(la>lb){return 1;}
+  return 0;
+}
+
+// ============ VM ============
+// lib_ops: []u8 of size nlib*4 holding pointers? No, Zag can't easily do
+// arrays of slices. Instead: lib is a flat []u8 where each fragment is
+// stored as (len:i32, then len*8 bytes). lib_idx[f] gives byte offset.
+// We pass lib_buf and lib_idx and nlib.
+fn mod_nonneg(a:i32, b:i32)i32 {
+  let r:i32=a - (a/b)*b;
+  if(r<0){ r=r+b; }
+  return r;
+}
+// Run program p (len pl) with inputs. Returns top of stack or 0.
+// lib_buf/lib_idx/nlib give the fragment library for CALL.
+// stack: []u8 of 256*4 bytes (caller-provided). rs: []u8 of 64*8 (caller-provided).
+fn vm_run(p:[]u8, pl:i32, in0:i32, in1:i32,
+           lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+           stack:[]u8, rs:[]u8)i32 {
+  let sp:i32=0;
+  // return stack: each entry 8 bytes (prog_id:i32, pc:i32)
+  // prog_id: -1 = main program p; else fragment index.
+  let rsp:i32=0;
+  let cur_is_main:i32=1;
+  let cur_frag:i32=-1;
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<10000){
+    let clen:i32=pl;
+    if(cur_is_main==0){ clen=get32(lib_buf, get32(lib_idx, cur_frag*4)); }
+    if(pc<0 || pc>=clen){
+      // end of current program: return or halt
+      if(cur_is_main==1){ break; }
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+      steps=steps+1;
+      continue;
+    }
+    let op:i32=0; let arg:i32=0;
+    if(cur_is_main==1){
+      op=prog_op(p, pc); arg=prog_arg(p, pc);
+    } else {
+      let base:i32=get32(lib_idx, cur_frag*4);
+      op=get32(lib_buf, base+4+pc*8); arg=get32(lib_buf, base+4+pc*8+4);
+    }
+    pc=pc+1; steps=steps+1;
+    if(op==0){ // PUSH
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){ // IN0
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){ // IN1
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==3){ // ADD
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){ // SUB
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){ // MUL
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){ // DIV: ABLATED in GENEXEC2-P (see PREREG_GENEXEC2P.md)
+      emit("PVM_TRAP op=6 DIV\n"); break;
+    } else if(op==7){ // MOD: ABLATED in GENEXEC2-P (see PREREG_GENEXEC2P.md)
+      emit("PVM_TRAP op=7 MOD\n"); break;
+    } else if(op==8){ // NEG
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){ // DUP
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){ // DROP
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){ // SWAP
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){ // OVER
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){ // LT: ABLATED in GENEXEC2-P (see PREREG_GENEXEC2P.md)
+      emit("PVM_TRAP op=13 LT\n"); break;
+    } else if(op==14){ // EQ: ABLATED in GENEXEC2-P (see PREREG_GENEXEC2P.md)
+      emit("PVM_TRAP op=14 EQ\n"); break;
+    } else if(op==15){ // GT: ABLATED in GENEXEC2-P (see PREREG_GENEXEC2P.md)
+      emit("PVM_TRAP op=15 GT\n"); break;
+    } else if(op==16){ // JZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){ // JNZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){ // JMP
+      pc=arg;
+    } else if(op==19){ // CALL
+      if(arg>=0 && arg<nlib && rsp<64){
+        let rid:i32=-1;
+        if(cur_is_main==0){ rid=cur_frag; }
+        set32(rs, rsp*8, rid); set32(rs, rsp*8+4, pc); rsp=rsp+1;
+        cur_is_main=0; cur_frag=arg; pc=0;
+      }
+    } else if(op==20){ // RET
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+    }
+  }
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+
+// ============ pvm validator ============
+// GENEXEC2-P static validator: 1 iff the program's pl opcodes contain
+// none of the ablated opcodes {6=DIV, 7=MOD, 13=LT, 14=EQ, 15=GT}.
+fn pvm_valid(p:[]u8, pl:i32)i32 {
+  let i:i32=0;
+  while(i<pl){
+    let op:i32=prog_op(p, i);
+    if(op==6 || op==7 || op==13 || op==14 || op==15){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// ============ T6 post-report held-out checker (evaluator harness) ============
+// Reveals held-out episodes ONLY after all hypotheses reported on T6.
+// Exhibited programs transcribed verbatim from the T6 run outputs:
+//   C2: empty program (RESULT t=6 BUDGET len=0, PROG empty).
+//   D:  BEST_PROG [IN0 IN1 ADD]; best-trace [IN1 PUSH:-1 IN0 MUL SUB ADD ADD NEG NEG].
+fn ep(ea:[]u8, eb:[]u8, et:[]u8, i:i32, a:i32, b:i32, t:i32)void {
+  set32(ea, i*4, a); set32(eb, i*4, b); set32(et, i*4, t);
+  return;
+}
+fn smug_scan(p:[]u8, pl:i32)i32 {
+  let i:i32=0;
+  while(i<pl){
+    let op:i32=prog_op(p, i);
+    if(op==6 || op==7 || op==13 || op==14 || op==15){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+fn jump_scan(p:[]u8, pl:i32)i32 {
+  let i:i32=0;
+  while(i<pl){
+    let op:i32=prog_op(p, i);
+    if(op==16 || op==17 || op==18){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+fn check(name:[]u8, p:[]u8, pl:i32,
+         ea:[]u8, eb:[]u8, et:[]u8,
+         lib_buf:[]u8, lib_idx:[]u8, stack:[]u8, rs:[]u8)void {
+  emit(name); emit("\n");
+  emit("  PVM_VALID="); e64(pvm_valid(p, pl)); emit("\n");
+  emit("  OPS="); e64(pl); emit("\n");
+  emit("  FSMUG_ABLATED_OP="); e64(smug_scan(p, pl)); emit("\n");
+  emit("  HAS_JUMP="); e64(jump_scan(p, pl)); emit("\n");
+  let tr:i32=0;
+  let i:i32=0;
+  while(i<12){
+    let o:i32=vm_run(p, pl, get32(ea,i*4), get32(eb,i*4), lib_buf, lib_idx, 0, stack, rs);
+    if(o==get32(et,i*4)){ tr=tr+1; }
+    i=i+1;
+  }
+  emit("  TRAIN="); e64(tr); emit("/12\n");
+  let h:i32=0;
+  i=12;
+  while(i<22){
+    let o:i32=vm_run(p, pl, get32(ea,i*4), get32(eb,i*4), lib_buf, lib_idx, 0, stack, rs);
+    if(o==get32(et,i*4)){ h=h+1; }
+    i=i+1;
+  }
+  emit("  HELDOUT="); e64(h); emit("/10\n");
+  return;
+}
+fn main()void {
+  emit("T6 HELDOUT CHECK (post-report revelation)\n");
+  let lib_buf:[]u8=z_alloc(4096);
+  let lib_idx:[]u8=z_alloc(8*4);
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let ea:[]u8=z_alloc(22*4);
+  let eb:[]u8=z_alloc(22*4);
+  let et:[]u8=z_alloc(22*4);
+  // Train (sealed spec section 3).
+  ep(ea,eb,et,0,-2,-2,4); ep(ea,eb,et,1,0,0,0); ep(ea,eb,et,2,1,1,1);
+  ep(ea,eb,et,3,3,3,9); ep(ea,eb,et,4,2,2,4); ep(ea,eb,et,5,-2,1,-1);
+  ep(ea,eb,et,6,1,-2,-1); ep(ea,eb,et,7,0,3,3); ep(ea,eb,et,8,3,0,3);
+  ep(ea,eb,et,9,-1,-2,-3); ep(ea,eb,et,10,2,-1,1); ep(ea,eb,et,11,-3,1,-2);
+  // Held-out (sealed spec section 3). Revealed only now.
+  ep(ea,eb,et,12,-4,-4,16); ep(ea,eb,et,13,4,4,16); ep(ea,eb,et,14,-1,-1,1);
+  ep(ea,eb,et,15,-4,2,-2); ep(ea,eb,et,16,2,-4,-2); ep(ea,eb,et,17,4,-3,1);
+  ep(ea,eb,et,18,-3,4,1); ep(ea,eb,et,19,1,2,3); ep(ea,eb,et,20,-2,-3,-5);
+  ep(ea,eb,et,21,3,-1,2);
+  // C2 exhibited: empty program.
+  let pc2:[]u8=prog_new(16);
+  prog_set_len(pc2, 0);
+  check("C2_EXHIBITED_EMPTY", pc2, 0, ea, eb, et, lib_buf, lib_idx, stack, rs);
+  // D exhibited: BEST_PROG [IN0 IN1 ADD].
+  let pd1:[]u8=prog_new(16);
+  prog_set(pd1, 0, 1, 0); prog_set(pd1, 1, 2, 0); prog_set(pd1, 2, 3, 0);
+  prog_set_len(pd1, 3);
+  check("D_EXHIBITED_BESTPROG", pd1, 3, ea, eb, et, lib_buf, lib_idx, stack, rs);
+  // D best-trace: [IN1 PUSH:-1 IN0 MUL SUB ADD ADD NEG NEG].
+  let pd2:[]u8=prog_new(16);
+  prog_set(pd2, 0, 2, 0); prog_set(pd2, 1, 0, -1); prog_set(pd2, 2, 1, 0);
+  prog_set(pd2, 3, 5, 0); prog_set(pd2, 4, 4, 0); prog_set(pd2, 5, 3, 0);
+  prog_set(pd2, 6, 3, 0); prog_set(pd2, 7, 8, 0); prog_set(pd2, 8, 8, 0);
+  prog_set_len(pd2, 9);
+  check("D_EXHIBITED_BESTTRACE", pd2, 9, ea, eb, et, lib_buf, lib_idx, stack, rs);
+  // Sealed exhibited target (11 ops) as reference.
+  let pt:[]u8=prog_new(16);
+  prog_set(pt, 0, 1, 0); prog_set(pt, 1, 2, 0); prog_set(pt, 2, 4, 0);
+  prog_set(pt, 3, 17, 8); prog_set(pt, 4, 1, 0); prog_set(pt, 5, 2, 0);
+  prog_set(pt, 6, 5, 0); prog_set(pt, 7, 18, 11); prog_set(pt, 8, 1, 0);
+  prog_set(pt, 9, 2, 0); prog_set(pt, 10, 3, 0);
+  prog_set_len(pt, 11);
+  check("SEALED_TARGET_REF", pt, 11, ea, eb, et, lib_buf, lib_idx, stack, rs);
+  emit("DONE\n");
+  return;
+}
