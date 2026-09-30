@@ -978,6 +978,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Substrate Extension: EXTENSION-TESTED (9ebd48258).** 4 concepts + 12 bigrams + 4 procedures + causal episodes coexist. 214 facts, no interference. S9 eviction is MECHANISM GAP. Representational hosting, not mechanism derivation.
 
+**F2 Ablation: ABLATION-TESTED (1f3a9511c).** Experiment loop load-bearing for World B, not World A (observational equivalence). Disagreement targeting strongly load-bearing (random burns budget). Context machinery load-bearing. ADV1: FOOLED=1 (fails confidently). ADV2: MISSED=1 (cannot propose beyond passive correlations). Enumerate-then-select boundary confirmed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
