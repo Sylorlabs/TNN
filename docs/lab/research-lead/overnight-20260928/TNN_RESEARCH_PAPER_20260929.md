@@ -974,6 +974,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Design: Q4-DESIGNED (b8484775c).** Full protocol for learner-constructed explanatory variables (causal Stage 2, L3 path). 6 observables, sealed hidden cause, 5 families (CONJ/XOR/THRESH/MUX/NEST), composition language {AND,OR,NOT,XOR} max 7 nodes, beam-32 incremental growth with trace, 24 interventions, Phase 2 reuse via atomic terminals. Falsification F1-F5 frozen. C0-B risk explicitly noted.
 
+**Generic Attack: ATTACK-COMPLETE (f1022ca71).** Both simpler-explanation attacks SUCCEED. C4: DEVINT1 integration contributes nothing; honest description is "incremental triple store plus on-demand 2-hop lookup." C8: arena items don't test gap detection; always-observe scores same but emits 72 vs 7 requests. Gap detection has value under budget. OOD bounds confirmed. Neither mechanism killed; both sharpened. Score 0.691 unaffected.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
