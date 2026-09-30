@@ -923,6 +923,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Adversary: ATTACK-SUCCEEDS (e40bdfc9b).** K1 (hidden enumeration): FAILS (zero enumeration claim stands). K2 (sealed soundness): SUCCEEDS. World F (0-delay rule) causes silent wrong convergence: DDES eliminates the TRUE hypothesis at t*=0 because predictor mismatches execution (propagation fires on W ticks only). BUILD-PASS stands (no frozen world had t*=0), but promotion blocked until repaired. K3 confirms L2 ceiling (researcher-authored guidance).
 
+**DDES Repair: REPAIR-PASS (17c97a2cd).** t*=0 soundness hole closed via eff_waits(t*)=max(t*,1). World F now converges correctly (true h0 survives). Worlds A-E byte-identical to frozen (no regression). All K-R1..K-R5 PASS. Promotion blocker cleared. Still strong L2, NOT L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
