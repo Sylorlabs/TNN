@@ -1116,6 +1116,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Revival Plan: PLANNED (290f0d061).** 325 lines. R1 (multi-seed, ≥4/5), R2-proof (analytic bound) + R2-form (after F-RECFOLD), R3 (Arms 1-2, ratio ≤0.5), R4 (12 seeds, P-DIS vs P-RAND). Phase A (now): R4, R3, R2-proof. Phase B: R1. Phase C: R2-form. Verdict conjunctive. Scope: discovery only, not L3.
 
+**OP-RECRUIT v2: BUILD-PASS (67a2c7e42).** R-V1 (ABS recruited), T-NOFIRE, T-SELF (10x faster), T-ARITY2 (hierarchical), T-RETIRE all PASS. T-ADV PENDING. Fixed A7-A10 (soundness, jumps, transaction, oscillation). Bounded L2, not L3.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
