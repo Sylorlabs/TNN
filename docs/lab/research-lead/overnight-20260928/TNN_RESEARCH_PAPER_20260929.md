@@ -925,6 +925,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Repair: REPAIR-PASS (17c97a2cd).** t*=0 soundness hole closed via eff_waits(t*)=max(t*,1). World F now converges correctly (true h0 survives). Worlds A-E byte-identical to frozen (no regression). All K-R1..K-R5 PASS. Promotion blocker cleared. Still strong L2, NOT L3.
 
+**F2 Retry (AUTOSCI2): BUILD-PASS (1eb66765d).** Harder World B goal (sustained triple vs transient). World A: 2 experiments, GOAL_REAL 1, RANDOM 0/20. World B: 1 experiment, GOAL_REAL_B2 1 (triple verified), RANDOM 0/20. All 7 kill bars PASS. 3/3 byte-identical. Still L2 structural learning, not L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
