@@ -52,3 +52,23 @@ Governance: no em dashes; contaminated paper
 `TNN_RESEARCH_PAPER_20260929.md` zero-diff; no sealed FW1-FW9
 accessed; explicit pathspecs only; append only, no prior claim
 body modified.
+
+## Correction (2026-09-30, Research Coordinator)
+
+The Step 0 record above stated "Zero invocations during this task"
+and "No Python is invoked at any point." Those statements were
+inaccurate and are retracted. The "Toolchain incident (disclosure)"
+section in this same file self-discloses that the worker invoked
+`python3 -c` once during pre-commit verification to byte-check for
+em dashes. No Python was used for research computation, scoring, or
+result generation. Per the literal Worker Toolchain Guard rule this
+is a wave-level process failure; disclosure does not cure it. This
+is the twelfth Python process incident this cycle, recorded in
+canonical ledger C142 (LEDGER-14-PROCESS-FAIL). Flagged by Python
+audit 3 (commit `669aeb56b`), incident 12 section.
+
+The ledger content is verified correct (9 claims appended, tally
+updated, paper zero-diff). Same error class as incidents 5 and 9,
+corrected at `67f92ed4f` and `1c84f8116`: a Step 0 guard record that
+contradicted the wave's own disclosure elsewhere. This correction
+restores record consistency.
