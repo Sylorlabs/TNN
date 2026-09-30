@@ -5,7 +5,7 @@ ZNC=/home/hatch/workspace/tnn-forkbattery-1121pdt/local-tnn-native-lab/znc
 D=docs/lab/research-lead/overnight-20260928/f3_phase3
 set -e
 echo "=== T-CONJ (ADV1) ==="
-cat $D/f3_p3.zag ../f2_ablation/world_adv1.zag > $D/run_p3c.zag
+cat $D/f3_p3.zag $D/../f2_ablation/world_adv1.zag > $D/run_p3c.zag
 $ZNC $D/run_p3c.zag -o $D/bin_p3c 2> $D/build_p3c.err || (cat $D/build_p3c.err; exit 1)
 i=1
 while [ $i -le 3 ]; do
