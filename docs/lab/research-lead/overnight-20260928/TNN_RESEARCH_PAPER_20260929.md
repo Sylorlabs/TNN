@@ -1146,6 +1146,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **T-NEG: TNEG-PASS (41ed1ef9a).** 6-step protocol. All P-*-N PASS. 3/3 identical. K4-clean. Phase 3 revised to BUILD-PASS.
 
+**F-RECFOLD K4: VIOLATION CONFIRMED.** `/tmp/patch_sealed.py` authored during wave (169 bytes, 06:23:37 UTC). Report's "Zero Python" claim false. Authoring = violation per literal rule. Clean rerun required.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
