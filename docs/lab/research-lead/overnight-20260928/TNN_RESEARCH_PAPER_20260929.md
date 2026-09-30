@@ -1012,6 +1012,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Hypothesis Population: POP-TESTED (e150624a9).** 2200 hypotheses, 205k updates in 0.8-1.0s (228k/sec). SQLite: Zag 5x faster, 25x smaller; SQL wins concision. Bounded engineering, not TNN-unique. Tautology dominance and precision-vs-frequency findings. Governance incident disclosed.
 
+**Hypothesis A: FALSIFIED (21d838921).** A-F1 fires. T0 and T2 FAIL (predicted SOLVE). Core flaw: residual complexity not monotonically reducible; greedy cannot traverse worse intermediates. B, C, D remain.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
