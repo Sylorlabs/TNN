@@ -4045,3 +4045,66 @@ parent-agent queue decision; Q1/Q2 banked. The _zag_malloc
 overlapping-block claim stays unproven (red-team flag, narrowed). The
 descendant-subagent runtime failure killed three waves this week; this
 wave's inline run completed cleanly. Zero origin commits this window.
+
+---
+
+## Wave 20260929-2321pdt (completed 2026-09-30 ~06:40 UTC; inline, no
+subagents, deliberate per the documented runtime-failure precedent)
+
+1. H-PI-REV2 implementation [NEW]: BUILD-PASS (bounded revising
+mechanism). proc_revise2.zag committed at 847a8f10f under frozen prereg
+7c11ac5af (commit-order self-check VALID: prereg strictly precedes
+implementation). All seven frozen kill bars pass on committed evidence:
+P0-P7+P9 18/18 checks PASS, 3/3 byte-identical (9718685f); single P8
+adversary F2 execution (byte i, implementer-declared rule) PASS on first
+execution with zero 'i' char literals and zero F2 instance string
+literals post-disclosure; R cell 8/8 after P6 and after P8; rollback
+restores v1 behavior. Discovery enumeration ported byte-verbatim from
+the frozen v1 source (cmp-verified). Debate held (advocate, skeptic,
+judge): verdict CONFIRM with S1-S5 sustained as live kill vectors for
+the pipeline and the K-RV2-5 vacuous-pair quirk pinned to the verdict
+line. Judge-amended queue: independent adversary first (byte of their
+choosing, plus a non-first-letter world), then independent reproduction.
+No promotion; the L3 criterion-12 claim and Criterion 0 stay open.
+
+2. Fork battery [RE-CERT]: CONFIRM (process confirmation only). Fresh
+75-entry run at run-start pin fed72668, driver exit 0: 73 PASS, 0 FAIL,
+2 UNTESTABLE (rh-pull-1-head, rh-pull-2-head; the known non-TNN
+research-doc trees). LIVE entries (2): arch-wave-20260929-1721pdt at
+7c11ac5af (newly enumerated archive), local-tnn-native-lab at fed72668
+(run-start tip). Uniform on all 73 tested: znc pin 498abcb5 (0 pin
+divergence); probe sha 3b29aa06 (0 divergence); NEG1 E0002 73/73; NEG2
+char-1 discrimination 73/73. Duplicate-SHA group named:
+{arch-wave-20260929-1721pdt, local-1721pdt-tip} at 7c11ac5af. Two stale
+RESULT.txt files from yesterday's wave-20260928-2321pdt were found in
+the scratch tree (same scratch name fb2321pdt) and excluded from the
+tally. Remote: zero new refs (origin/tnn-native-lab bedf8b4a unchanged).
+
+3. Interactive survey [NEW]: NONE new. 166 new or modified .zag files
+in 7c11ac5af..HEAD are the parallel writer's research instruments;
+zero chat-pattern hits. The frozen probe instruments remain the only
+chat-capable instruments. tnn_chat FIT staleness 3 of 8 (due at 8 of 8).
+
+4. Process notes [NEW]: stale git index.lock from the parallel writer's
+crashed commit blocked the first implementation commit attempt; removed
+and retried cleanly; no evidentiary consequence. Zero Python in wave
+work. No em-dashes in wave documentation. No frozen bar weakened.
+
+Provenance (verbatim probe answered in every debate motion): prereg text
+inherited from 1721pdt; implementation, binary, evidence, and audits new
+this wave; H-REVISE fixture set, Family X training set, RT2-A regression
+pairs, 1421pdt M5 banked commitment, reorientation directives inherited.
+Fork battery 2321pdt evidence new; 1721pdt battery evidence inherited.
+Interactive survey new. Debate records new. All HELD statuses, rulings,
+banked questions, governance items, sealed pairs, DP-1, salt
+dispositions, and frontier dirs remain inherited and untouched.
+
+Queued next: independent adversary family for H-PI-REV2 (byte of their
+choosing, plus a non-first-letter world); then independent reproduction
+from committed source; then the memorization baseline and
+alternative-explanation attack; H-EXP2; H-ROUTER2; NQ4/NQ5 banked to
+Micah; tnn_chat FIT due at 8 of 8 (staleness 3 of 8); his six pending
+governance rulings (untouched); his blind verdicts on the sealed pairs
+(unchanged, nothing added this wave); DP-1 presentation is a
+parent-agent queue decision; Q1/Q2 banked. Zero origin commits this
+window.
