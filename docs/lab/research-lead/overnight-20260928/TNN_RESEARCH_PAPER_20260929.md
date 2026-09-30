@@ -65,7 +65,19 @@ For any claim of L3 on procedure invention, all 12 must hold:
 
 An 11/12 result is not "basically L3." This is enforced strictly.
 
-### 1.4 The Five-Level Separation (Pattern Matching vs Intelligence)
+### 1.4 Refined Mandatory L3 Criterion 0 (2026-09-29)
+
+After REPEXPAND-1 and H-PROCLANG1 were both downgraded to L2+ by independent adversaries (both supplied the semantic form in researcher code; the learner supplied parameters), Micah refined the mandatory gate into four conjunctive requirements. A representation/procedure invention claim must satisfy all four. Adding more researcher-authored semantic cases (SUB, DIV, PARITY, 2-threshold COND) in response to a downgrade is explicitly forbidden as recreating the treadmill at the L3 frontier.
+
+**C0-A: Runtime-defined semantics.** The semantics of the new cognitive object must reside in learner-created persistent state. The source must contain only generic execution/construction machinery. Forbidden pattern: a switch on node type with researcher-written semantics per case (COUPLED -> researcher code, COND -> researcher code). Source-audit kill bar: an independent adversary must be able to search source and ask "Where are the semantics of the alleged invented object implemented?" If the answer is "in this dedicated switch branch/function written before training," the L3 claim is killed. The correct answer is "in learner state; the source contains only generic execution/construction machinery."
+
+**C0-B: Open structural form.** The learner must not choose one complete answer from a finite researcher-enumerated solution family. Variable-sized/growing structures are required. Generic construction/edit operations are allowed. The exact final topology/program/representation must emerge incrementally, not be selected as a complete candidate.
+
+**C0-C: Multiple unforeseen forms.** Freeze the mechanism. Then expose it to several sealed worlds requiring materially different representations. The same construction machinery must produce different useful structures without source edits. At least one evaluation family should be designed by an independent adversary after the mechanism is frozen. Functional test descriptions (conditional, repeated/recursive, relational coupling, periodic, hierarchical composition) guide test generation; they must NOT be implemented as dedicated cases in the learner. The builder should not know the final sealed instances.
+
+**C0-D: Cognitive reuse.** The invented structure must become a reusable cognitive object that subsequently improves at least one of: transfer, prediction, procedure learning, causal inference, memory, planning, sample efficiency. Existence alone is insufficient.
+
+### 1.5 The Five-Level Separation (Pattern Matching vs Intelligence)
 
 - **Level A (Surface Shortcut):** Pattern matching sufficient.
 - **Level B (Structural Generalization):** Surface shortcut broken.
