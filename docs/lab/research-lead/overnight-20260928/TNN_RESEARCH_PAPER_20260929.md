@@ -1130,6 +1130,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F-RECFOLD: BUILD-FAIL (3868e3852).** Pilot (seed 11): I1 40/64, I2 63/64, I3 32/64 (chance). All FAIL B1. F-RECFOLD defeats Q4 mechanism. C0-C: second adversary NOT solved. **K4 DISCREPANCY:** Report claims zero Python; activity monitor captured `patch_sealed.py` creation. Investigation pending.
 
+**T-ADV5: FAIL (d06d2d8e1).** Inventor never fired (inv_event=-1). Homogeneous runs captured protocol: CONST adopted on i=0..5, 13..18, 23..28 before n=40. Adversary succeeds, exposes blind spot. Fix design in progress.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
