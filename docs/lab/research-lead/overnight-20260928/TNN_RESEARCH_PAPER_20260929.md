@@ -929,6 +929,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Arena Inquiry: BUILD-PASS (7/7).** C8 0→1.000 (4/4). Total 0.676→0.735 (50/68). Added gap detection (observe request on unknown) and observe_result learning. No regression. Honest scope: single observe per fact; no multi-step planning. Still 0 on causal, procedure, transfer, goal, language.
 
+**DEVANG2: BUILD-FAIL (153e2af8e).** Implementation runs (no crashes). Fixes: lexicon overflow, memory overlap, K1 timing. But K1 3/10 (need 8/10), sub-bars 3/7 (need 4/7). Root cause: bigram DP segmentation fails (zero counts at t=0 → defaults to single segments). Design flaw, not implementation bug.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
