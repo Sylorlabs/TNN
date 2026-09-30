@@ -992,6 +992,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DEVANG4: BUILD-FAIL (d9ebbfe6d).** 16/20, NEG 0/3 persists. Diagnosis: "grn" never lexiconized, "not" blocked at 31%, "red" mis-grounded by NEG episodes, chicken-and-egg fragmentation. Merge pass and negator-aware grounding didn't fix. One Python violation disclosed. Triggering segmentation architecture review, not DEVANG5.
 
+**Program Discovery Review: COMPLETE (18be93c3e).** Representation NOT wrong; defect is in discovery machinery. Four hypotheses: A residual-driven, B fragment induction, C counterexample growth, D MAP-Elites control. Battery: 7 tasks, frozen VM, 1M evals/300s. Next: battery prereg.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
