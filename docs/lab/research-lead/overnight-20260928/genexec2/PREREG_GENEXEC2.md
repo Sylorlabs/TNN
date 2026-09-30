@@ -41,6 +41,20 @@ combined with ADD). Both require ABS from T1.
 K-D1 is updated: T4's program must contain >= 2 CALLs to ABS (not STEP).
 T5's program must contain >= 2 CALLs to ABS (unchanged).
 
+## 0c. Amendment A3 (2026-09-30, before final implementation run)
+
+Beam search scoring is clarified: the *success criterion* is exact-match
+count (a program is a solution iff it matches all train episodes). For
+*beam selection* (which candidates to retain), candidates are ordered
+lexicographically by (exact_match_count desc, total_absolute_error asc,
+program_length asc, program_bytes asc). The total_absolute_error term
+provides gradient in the sparse-reward regime where many prefixes have
+zero exact matches; it does not change the definition of a solution.
+
+Beam width is increased from 200 to 500 to retain more diverse prefixes
+through the sparse early depths. Max lengths unchanged (12 for P1,
+10 for P2).
+
 ## 1. Objective
 
 Build the first L3 candidate under the refined mandatory Criterion 0
