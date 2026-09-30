@@ -1040,6 +1040,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Verification Arch: ARCH-DOCUMENTED (8446517e7).** Unified 381-line spec: 5-stage pipeline (detection→recording→hedging→prioritization→active investigation). Interfaces defined. 11 limitations documented. Explicitly NOT C0 (researcher-designed infrastructure).
 
+**Substrate S9: SCALE-TESTED (83b78a781).** Fact eviction/GC: per-slot metadata (pin/tick/hits), compaction (keep last triple), scored eviction. 500/500 learns accepted (vs 256/500 control). Important 150/150 preserved. String pool GC remains as next gap.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
