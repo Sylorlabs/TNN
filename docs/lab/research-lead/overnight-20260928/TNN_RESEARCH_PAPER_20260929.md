@@ -1092,6 +1092,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **L3 Bridge: BRIDGE-TESTED (ebdc4fd3e).** Recipes removed, 4 generic operators added. G/H/K/T-ADV4 adopted. T-ADV4 built novel 7-node form. C0-A M1-M4 pass. K4 PASS (pure Zag). Honest: C0-C needs independent adversary, C0-D needs reuse.
 
+**Q4 Revised: REVISED (a0cb66e15).** 5 valid (weakened): correct 7-op, reuse 0 IVs, C0-C first data point, C0-D pairing, IVs necessary. 6 weakened: "discovered" falls (tax+luck), IV decorative, "minimal" false, evidence underdetermined, C0-C narrowed, C0-D thin. Revival R1-R4 defined. Honest: bounded L2.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
