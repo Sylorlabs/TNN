@@ -2843,6 +2843,373 @@ NEEDS-RERUN is now FULLY CLEARED).**
 
 ---
 
+## C111. CAM-1 red team: bounded-L2 template matcher, not a discovery engine
+
+Claim: the independent CAM-1 red team audit finds
+three attack successes against the C106 builder claims.
+CAM-1 survives as bounded L2; compositional discovery
+belongs to COMP-1.
+
+- Source: 7f0ce2d97 (CAM1_REDTEAM_REPORT.md with line
+  citations; NAMECHECK.md with Step 0 guard). Read-only
+  audit; implementation not modified.
+- Per-vector results:
+  - Anti-oracle: ATTACK-SUCCESS (partial). P-DEP as built
+    is menu selection, not composition. `propose()` tries
+    four researcher-composed templates {LITERAL, COPY_A,
+    DBL_A, ADD_AB} in fixed priority, each tested
+    independently via EQ on all construction subjects.
+    The priority ordering does not fabricate answers,
+    but the discovery ceiling is the researcher's menu:
+    `z = x*y` or `z = 2x+3y` are undiscoverable by
+    construction. This inverts the prereg's own anti-menu
+    argument. B_COPY_B and B_DBL_B are dead code (defined,
+    never used).
+  - Criterion-0: ATTACK-SUCCESS. MAP semantics live in
+    `eval_body()`'s four-way pre-training dispatch (lines
+    417-428). The learner stores only an index into a
+    researcher-defined semantic table. Per C0-A, no L3
+    reading survives. The builder's "0 semantic cases"
+    claim is false; the accurate count is 4 semantic
+    cases, 0 modes, 0 bridges, 0 handlers.
+  - Finite-difference residue: ATTACK-PASS. Genuinely
+    removed. No diff/order/coef/fit in code, no
+    subtraction, no MUL/DIV in the cognitive path. ISA
+    boundary honored.
+  - VERIFY honesty: ATTACK-SUCCESS (partial). The
+    train/test split is real (P6 demonstrates rejection
+    of a spurious construction-time regularity), but
+    standing is circular: `promote()` writes SUPPORTS
+    edges from the same held-back facts used for
+    verification, so standing re-encodes the verification
+    outcome with no post-promotion independent
+    corroboration. The split is caller convention, not
+    mechanism-enforced.
+  - K1/K2/K3: K1 PASS (prereg, integration spec, ISA
+    ruling all verified ancestors). K3 PASS (pure Zag,
+    zero Python). K2 MIXED (modes/bridges/handlers clean;
+    semantic-case claim inaccurate).
+- Recommended ledger posture: CAM-1 survives as bounded
+  L2, not L3. Genuine compositional discovery belongs to
+  COMP-1 (C102 prereg frozen).
+- Governance: zero Python invoked in this audit;
+  contaminated paper untouched; implementation not
+  modified.
+
+**Status: ADVERSARY-BREAKS (C106's L3-adjacent reading;
+C106 not retracted as BUILD-PASS; posture downgraded to
+bounded L2).**
+
+---
+
+## C112. ACT red team: bid directionality diverges from CLA-2 spec
+
+Claim: the independent ACT red team audit confirms all
+24 builder tests and passes four of five vectors. One
+ATTACK-SUCCESS on a spec-compliance gap: ACT's evidence
+bid counts edges bidirectionally while the integration
+spec's CLA-2 reference counts only incoming edges.
+
+- Source: 73d06a6d4 (ACT_REDTEAM_REPORT.md; NAMECHECK.md
+  with Step 0 guard). Read-only audit; zero Python; no
+  sealed FW files accessed; contaminated paper
+  untouched.
+- All 24 builder tests re-run and confirmed PASS
+  (`./act_bin all` gives ALL-PASS).
+- Per-vector results:
+  - Genericity: ATTACK-PASS (with caveat). `act_event`
+    takes only stores plus context; all 8 branches are
+    structural (null/liveness/address-equality/
+    numeric-compare). Type tags T_GOAL through T_SESSION
+    are defined but never checked in `act_event` or
+    `activate`. The core genuinely does not interpret
+    tags. Caveat: `nbr()` hardcodes node-0 exclusion from
+    traversal, a structural special case in the
+    activation path.
+  - POLICY_ROOT: ATTACK-PASS (with caveat). `polset`/
+    `polget` use ordinary `nset`/`nget` on node 0, per
+    A12. Caveat: nodes 0/1 are protected by three
+    scattered hardcoded address checks rather than a
+    unified register-protection mechanism. The
+    defined-but-unused E_PROTECT edge type suggests the
+    intended abstraction was never wired in.
+  - Evidence bid: ATTACK-SUCCESS (spec divergence).
+    ACT's `bid()` counts edges in both directions
+    (source OR target). CLA-2's `evcount()`, cited by
+    integration spec A3 as the reference, counts only
+    incoming edges (target == node). The spec says "ACT
+    reuses the same function"; it does not. Impact: a
+    guide with outgoing SUPPORTS edges to consequence
+    nodes (prereg section 2(d)'s explicit design) scores
+    +1 under ACT but 0 under CLA-2. Current tests do not
+    exercise this (all test evidence is incoming), so
+    BUILD-COMPLETE stands, but the spec-compliance gap
+    is real and should be resolved by aligning
+    directionality or amending the spec.
+  - Uncertainty: ATTACK-PASS. Zero tag checks anywhere
+    in the ACT path. The P-ACT2 uncertainty behavior is
+    fully emergent from address-equality wiring. No
+    curiosity module, no uncertainty bonus, no drive
+    term in source.
+  - K1/K2/K3: PASS. K1: prereg 51a818141 verified as
+    ancestor of f7d87938f. K2: zero world/task/relation
+    branches, zero modes/bridges/handlers. K3: pure Zag
+    (sole "python" match is a comment saying "No
+    Python").
+- Recommendations: (1) bid alignment (medium): decide
+  directional (match CLA-2) vs bidirectional (amend spec
+  with rationale); (2) register protection (low):
+  consider unifying the three hardcoded address checks
+  if more registers are added.
+
+**Status: ADVERSARY-QUALIFIED (C107 BUILD-PASS stands;
+spec divergence recorded; alignment decision pending).**
+
+---
+
+## C113. CLA-2 red team: 4/5 vectors pass; committed binary found stale
+
+Claim: the independent CLA-2 red team audit passes
+four of five attack vectors. The fifth is a process
+finding: the working-directory `cla2_bin` was stale
+(built from pre-fix source). The source is sound; the
+binary artifact did not demonstrate the claims.
+
+- Source: bd7a3f440 (REDTEAM_REPORT.md; NAMECHECK.md
+  with Step 0 stub-PATH guard, zero Python). Read-only
+  audit; implementation untouched.
+- Per-vector results:
+  - Hidden researcher policy: ATTACK-PASS.
+    `bootstrap_miss` is fully generic: no relation
+    names, world IDs, or task types; P-INV is order-0
+    equality, composable from generic EQ, not a
+    forbidden detector (source scan: zero forbidden-op
+    hits). MISS_POLICY supersession hook exists and is
+    learner-writable. Observations: (O1) the K node
+    (tag 903, value 3) is never revised by any code
+    path, so "revisable" is aspirational; (O2) the
+    bootstrap inflates new MAP standing via self-loop
+    SUPPORTS edges, a documented convention but not
+    genuine evidence.
+  - Semantic cases: ATTACK-PASS. Zero domain string
+    literals in core, zero switch/match on domain
+    concepts, zero world/task/relation-identity
+    branches. Tag comparisons 101-104 exist only in
+    the EXECUTE dispatch.
+  - EXECUTE ISA sandbox: ATTACK-PASS. The 4-op table is
+    closed: unknown tags fail cleanly (-999999),
+    1000-step budget enforced, MOVE/INC/DEC validate
+    dst >= 1000, learner graphs cannot invoke
+    non-EXECUTE primitives. Observation: only one
+    adversarial case is tested (tag 999); budget
+    exhaustion and dst validation are
+    code-inspection-only. Recommend adding those tests
+    in a hardening pass.
+  - Standing derivation: ATTACK-PASS. `map_standing(m)`
+    equals `bid(W,m)`, computed live from edge counts
+    on every call, never stored. No utility/confidence
+    scalars anywhere. Signed bid is content-free;
+    GROUP shared fate is edge-structural.
+  - K1/K2/K3: K1 verified (all four: prereg 24351fd31,
+    A1-A12 62e5ebb9f, ISA ruling 0525377f3, EXECUTE
+    1fc77503b, all confirmed as ancestors of the build).
+    K2: zero handlers/cases/bridges/detectors confirmed;
+    "zero modes" qualified: the HAGG header field is a
+    prereg-authorized (P7) test-only aggregation switch,
+    default 0, learner-unwritable, invariance verified.
+    K3 process issue (see below).
+- Finding F1 (ATTACK-SUCCESS, process-level): the
+  working-directory `cla2_bin` was stale (75 KB,
+  built 18:25 from pre-fix source) and reported 7/8
+  with P10 FAIL. A fresh pinned-compiler build from
+  the committed source (117 KB) passes 15/15. Root
+  cause: the builder fixed a genuine bug (activate()
+  returning tag-3 history nodes; the tag==1 filter is
+  legitimate, test unchanged) but left a stale binary
+  in the working directory. The scientific claims hold
+  for the source; the binary artifact did not
+  demonstrate them. Remediated by C114.
+- Governance: dash-clean, contaminated paper zero-diff,
+  explicit pathspecs, no sealed FW files accessed, no
+  Python invoked.
+
+**Status: ADVERSARY-QUALIFIED (source claims hold; F1
+process finding remediated by C114).**
+
+---
+
+## C114. CLA-2 binary rebuilt: fresh 15/15 from committed source
+
+Claim: the stale CLA-2 binary (C113 Finding F1) is
+rebuilt from the committed source with the pinned
+compiler, passes 15/15, and is committed. Source
+unmodified.
+
+- Source: ad7d3ac1c (fresh cla2_bin, 116799 bytes;
+  sha256 74c125c7356cdb5285f4f67a94530e70a7d5cc38948d03b6e
+  47542fdb371f26d; NAMECHECK.md with guard check and
+  rebuild verification).
+- What was done: the stale working-directory binary
+  (75,449 bytes, sha256 52df50f5..., built from pre-fix
+  source, reported 7/8 with P10 FAIL) was rebuilt from
+  the committed cla2.zag using pinned
+  znc_linux_x86_64_abed8aa1. Fresh binary matches the
+  red team's size expectation exactly. Verified:
+  SELF-TESTS PASSED: 15/15 (all 8 original plus 7
+  amendment tests). The stale binary was never actually
+  committed to git (commit e639904f2 contained only
+  NAMECHECK.md and cla2.zag); the red team found it in
+  the working directory. The fresh binary is now
+  committed.
+- Source (cla2.zag) untouched. No sealed FW1-FW9 files
+  accessed. Contaminated paper zero-diff. No Python.
+  Explicit pathspecs (binary plus NAMECHECK only).
+
+**Status: REMEDIATION-COMPLETE (C113 Finding F1
+closed).**
+
+---
+
+## C115. C1 flakiness investigation: harness resume bug, not contestant
+
+Claim: the "C1 contestant flakiness" finding in C110 is
+reclassified. It is a harness resume bug, not
+contestant non-determinism. The contestant is
+deterministic given fresh state. P2 and P6 stand
+without caveat.
+
+- Source: e98a976a0 (FLAKINESS_REPORT.md; NAMECHECK.md
+  with Step 0 guard, restricted PATH, zero Python).
+  Read-only investigation; demonstration runs in /tmp
+  (cleaned up); no sealed FW files accessed;
+  contaminated paper zero-diff.
+- Root cause chain:
+  1. The Zag driver does mkdir(state) but never clears
+     pre-existing state (zag_driver.zag lines 350-352).
+  2. The resume script skips based on costs.txt
+     (written at end) but does not clear partial state/
+     directories.
+  3. The /tmp wipe killed the drive at 22/60 runs. On
+     resume, c1_w1_r3 and c1_w2_r1 had partial state
+     but no costs.txt, so they re-ran on stale state.
+  4. Every turn was ingested twice, so all hypothesis
+     weights were exactly 2x (d1a 8 vs 4, facts 62 vs
+     32, vocab 12 vs 6).
+  5. Doubled weights pushed D1/D2/D3 across the
+     abstention threshold (|w1-w2| > 1 in ans_yn),
+     flipping UNRESOLVED (conf 0.6) to committed
+     answers (conf 0.9).
+- Reproduction: the driver run twice on w1. Fresh dir
+  gives 63/63 with normal weights; immediate re-run on
+  the same dir (no clearing) gives 58/63 with the exact
+  flaky signature (2x weights, 62 facts, D1=d1a/D2=d2b/
+  D3=d3a).
+- Scientific impact: none. 13/15 re-freeze runs were
+  63/63; the prior wave was 15/15. The "~13%
+  flakiness" estimate in C110 is withdrawn.
+- Recommendations: (1) fix the resume script (rm -rf
+  the output dir before re-running, or the driver
+  should refuse non-empty state dirs); no contestant
+  change needed; (2) quarantine: re-run the two
+  affected runs on fresh state dirs (expected 63/63);
+  (3) the ledger reclassifies the C110 flakiness note
+  as a harness resume bug; C93 clearance stands.
+
+**Status: INVESTIGATION-COMPLETE (C110 flakiness
+reclassified; P2/P6 stand without caveat).**
+
+---
+
+## C116. Architecture accounting re-measurement: 1255 vs 586 lines
+
+Claim: the three implementations re-measured per the
+frozen procedure sum to 1255 cognition lines against
+the frozen core's 586. The prereg projection of
+net-negative vs mechanism sum does not hold for
+separate implementations. Modes, bridges, handlers,
+and semantic cases hold at zero across all three;
+learned structures are now nonzero where both
+baselines were zero.
+
+- Source: 73b0be40e (REMEASURE_REPORT.md with full
+  analysis and per-generation detail; NAMECHECK.md
+  with Step 0 guard; arch_accounting/BASELINE_TABLE.md
+  pending rows filled, historical rows untouched).
+- Measured cognition lines (per MEASUREMENT_PROCEDURE.md,
+  function-by-function classification):
+  - CLA-2 (e639904f2): 685 (101 functions; INFRA 107,
+    ACCESSOR 84, COGNITION 685, DRIVER 525)
+  - CAM-1 (371d20743): 408 (63 functions; INFRA 62,
+    ACCESSOR 57, COGNITION 408, DRIVER 266)
+  - ACT (f7d87938f): 162 (68 functions; INFRA 64,
+    ACCESSOR 30, COGNITION 162, FIXTURE 69,
+    DRIVER 268)
+  - Sum: 1255 vs frozen core 586. Each builder wrote a
+    full stack with roughly 404 lines of duplicated
+    workspace machinery (allocators, accessors, byte
+    helpers). The real test awaits the integrated
+    one-system implementation on sealed FW1-FW9.
+- What is holding: semantic cases 0, modes 0, bridges
+  0, handlers 0 across all three (verified by source
+  inspection; the one "bridge" hit is a comment saying
+  "Zero bridges"; hardcoded ids are test assertions,
+  not cognition-path branches).
+- What is positive: learned structures are now nonzero
+  where both baselines were zero. CLA-2: 3 (GROUP
+  nodes, MAP nodes, edge-derived standing). CAM-1: 1
+  (MAP nodes with trial-discovered bodies). ACT: 2
+  (POLICY_ROOT convention, ACTION-GUIDEs).
+- State bytes: CLA-2 16384 (half the frozen core),
+  CAM-1 344080, ACT 33816. Separate stores pending
+  integration.
+- Trajectory verdict: currently negative on lines
+  (more machinery, not less), holding at zero on
+  modes/bridges/handlers/semantic cases, positive on
+  learner-created structure. The consolidation
+  delivered structural capability but not yet code
+  compression. That requires the integration step.
+- Governance: dash-clean, contaminated paper zero-diff,
+  no Python invoked, no sealed FW1-FW9 accessed,
+  explicit pathspecs.
+
+**Status: BASELINE-UPDATED (trajectory negative on
+lines; integration step required).**
+
+---
+
+## C117. Bundle v13: verified backup
+
+Claim: fresh verified git bundle backup of
+tnn-native-lab, superseding v12.
+
+- Source: 73b5bfbfc (METADATA.md; NAMECHECK.md with
+  Step 0 guard).
+- Bundle: ~/workspace/tnn-native-lab-20260930-v13.bundle.
+  Size: 2.0G. HEAD backed up:
+  ad7d3ac1cb9896891dd8603d26ead8f6117a20e7. SHA-256:
+  32de7f1648744422532b391f108eb3d76636958b544ce860aede0d84d8685cf4.
+  `git bundle verify`: PASS ("is okay", "The bundle
+  records a complete history.", 69 refs via --all).
+- Supersedes v12 (HEAD cc87d6f09). Commits since v12
+  include: pure-Zag freeze rescore, composition scout
+  plus COMP-1 prereg, EXECUTE placement, FW blindness
+  audit, integration spec A1-A12, the ISA boundary
+  ruling, ledger C96-C110 (C93 fully cleared), CLA-2/
+  CAM-1/ACT builds, C1 driver plus clean re-freeze, MUL
+  scout, frontier scout, arch accounting baseline plus
+  re-measurement, and all three red team audits.
+- Toolchain guard: restricted safebin at
+  ~/workspace/bundle_v13_safebin (git, sha256sum,
+  coreutils only); which python3 python returns nothing
+  under the restricted PATH. Zero forbidden interpreter
+  invocations across the entire wave.
+- Contaminated paper zero-diff. No .git/index.lock
+  encountered. No push made.
+
+**Status: BACKUP-VERIFIED.**
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -2863,12 +3230,13 @@ NEEDS-RERUN is now FULLY CLEARED).**
 
 ## Ledger tally
 
-- Claims ledgered: 110 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 117 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
   2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
   2026-09-30; C78-C95 eighth append 2026-09-30; C96-C101 ninth
-  append 2026-09-30; C102-C110 tenth append 2026-09-30)
+  append 2026-09-30; C102-C110 tenth append 2026-09-30; C111-C117
+  eleventh append 2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -2900,8 +3268,24 @@ NEEDS-RERUN is now FULLY CLEARED).**
   C60 (L3A trace; K3 process FAIL) -> 3 BUILD-FAIL
 - ADVERSARY-BREAKS: C71 (editinvent scope collapse; generality broken,
   C65 not retracted), C77 (L3A-trace red team; BUILD-PASS verdict
-  fragile to tie-break, C70 not retracted, qualified) -> 2
-  ADVERSARY-BREAKS
+  fragile to tie-break, C70 not retracted, qualified), C111 (CAM-1
+  red team; menu selection not composition, C0-A semantics in
+  eval_body, standing circular; C106 posture downgraded to bounded
+  L2, C106 not retracted as BUILD-PASS) -> 3 ADVERSARY-BREAKS
+- ADVERSARY-QUALIFIED: C112 (ACT red team; bid directionality
+  diverges from CLA-2 spec; alignment decision pending; C107
+  BUILD-PASS stands), C113 (CLA-2 red team; 4/5 vectors pass; F1
+  stale binary remediated by C114) -> 2 ADVERSARY-QUALIFIED
+- REMEDIATION-COMPLETE: C114 (CLA-2 binary rebuilt; fresh 15/15;
+  C113 F1 closed) -> 1 REMEDIATION-COMPLETE
+- INVESTIGATION-COMPLETE: C115 (C1 flakiness reclassified as
+  harness resume bug; P2/P6 stand; C110 note amended) -> 1
+  INVESTIGATION-COMPLETE
+- BASELINE-UPDATED: C116 (arch re-measurement; 1255 vs 586 lines;
+  trajectory negative on lines; integration step required) -> 1
+  BASELINE-UPDATED
+- BACKUP-VERIFIED: C117 (bundle v13; 2.0G; 69 refs) -> 1
+  BACKUP-VERIFIED
 - EXPLORATORY: old C1 wave (superseded by C03), C52 (HypD v2 review);
   C60 technical findings (superseded by the C70 clean rebuild)
 - UNVERIFIABLE: C04 (Design 1)
@@ -2963,6 +3347,27 @@ NEEDS-RERUN is now FULLY CLEARED).**
   (C1 Zag driver; 7th Python incident; superseded by C110)
   -> 1; REPRODUCTION-CONFIRMS: C110 (C1 clean re-freeze;
   zero Python; C93 FULLY CLEARED) -> 1
+- Architecture-wave appendix (C111-C117, 2026-09-30):
+  ADVERSARY-BREAKS: C111 (CAM-1 red team; bounded-L2
+  posture; compositional discovery belongs to COMP-1)
+  -> 1; ADVERSARY-QUALIFIED: C112 (ACT red team; bid
+  directionality divergence; alignment pending), C113
+  (CLA-2 red team; F1 stale binary) -> 2;
+  REMEDIATION-COMPLETE: C114 (CLA-2 binary rebuilt;
+  15/15) -> 1; INVESTIGATION-COMPLETE: C115 (C1
+  flakiness is a harness resume bug; contestant
+  deterministic) -> 1; BASELINE-UPDATED: C116 (arch
+  re-measurement; 1255 vs 586 lines) -> 1;
+  BACKUP-VERIFIED: C117 (bundle v13) -> 1
+- C106 posture update: BUILD-PASS stands, but the
+  L3-adjacent reading is broken by C111. CAM-1 survives
+  as bounded L2 only. No L3 anywhere: still zero.
+- C110 flakiness note amended by C115: the "contestant
+  non-determinism" finding is reclassified as a harness
+  resume bug (stale state/ doubled all weights on two
+  resumed runs). The contestant is deterministic given
+  fresh state. P2 and P6 stand without caveat. C93
+  clearance unaffected.
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).

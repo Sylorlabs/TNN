@@ -1112,3 +1112,132 @@ completion only.
 
 The v3 paper staleness note now covers C64-C110; v4
 regeneration stays deferred to ledger stability.
+
+## 13. Red teams break CAM-1's L3 reading; flakiness reclassified; re-measurement lands (eleventh append; 2026-09-30; ledger appendix C111-C117)
+
+Appended to CLAIM_LEDGER.md after the C102-C110 append. No
+C01-C110 entry was modified. L3 achieved anywhere: still
+zero. This append records: the three independent red team
+audits (CAM-1 broken to bounded L2; ACT qualified on a
+bid-directionality spec divergence; CLA-2's source
+claims hold with a stale-binary process finding), the
+CLA-2 binary rebuild that remediates that finding, the
+C1 flakiness investigation (harness resume bug, not
+contestant non-determinism), the architecture accounting
+re-measurement (1255 vs 586 lines; integration step
+required), and the verified bundle v13 backup. No new
+capability SURVIVES in this append; one ADVERSARY-BREAKS,
+two ADVERSARY-QUALIFIED, one REMEDIATION-COMPLETE, one
+INVESTIGATION-COMPLETE, one BASELINE-UPDATED, one
+BACKUP-VERIFIED.
+
+### 13.1 CAM-1 red team: bounded-L2 posture (C111)
+
+- C111 CAM1-REDTEAM-COMPLETE (7f0ce2d97):
+  ADVERSARY-BREAKS. Three attack successes: P-DEP is
+  menu selection over four researcher-composed
+  templates (z = x*y undiscoverable by construction);
+  MAP semantics live in eval_body's four-way dispatch
+  (the learner stores an index into a
+  researcher-defined table; the builder's "0 semantic
+  cases" claim is false, accurate count 4); standing is
+  circular (promote writes SUPPORTS edges from the same
+  held-back facts used for verification). Finite
+  difference genuinely removed (ISA boundary holds);
+  K1/K3 pass. Recommended posture: CAM-1 survives as
+  bounded L2; genuine compositional discovery belongs
+  to COMP-1. C106 BUILD-PASS stands as a builder
+  verdict; its L3-adjacent reading is broken.
+
+### 13.2 ACT red team: bid divergence recorded (C112)
+
+- C112 ACT-REDTEAM-COMPLETE (73d06a6d4):
+  ADVERSARY-QUALIFIED. All 24 builder tests re-run and
+  confirmed PASS. Four of five vectors pass:
+  genericity (no tag checks in the ACT path; the
+  uncertainty behavior is fully emergent), POLICY_ROOT
+  (ordinary WRITE/READ on node 0), uncertainty, K1/K2/
+  K3. One ATTACK-SUCCESS: ACT's bid() counts edges
+  bidirectionally while the integration spec's CLA-2
+  reference (evcount) counts only incoming edges. The
+  spec says "ACT reuses the same function"; it does
+  not. Tests do not exercise the difference (all test
+  evidence is incoming), so BUILD-COMPLETE stands, but
+  the alignment decision is pending: directional
+  (match CLA-2) vs bidirectional (amend spec with
+  rationale). Two low caveats: nbr() hardcodes node-0
+  exclusion; three scattered hardcoded register
+  protections instead of a unified mechanism.
+
+### 13.3 CLA-2 red team: source holds; stale binary (C113)
+
+- C113 CLA2-REDTEAM-COMPLETE (bd7a3f440):
+  ADVERSARY-QUALIFIED. Four of five vectors pass:
+  bootstrap_miss is fully generic (no relation names,
+  no forbidden ops); zero semantic cases; EXECUTE ISA
+  sandbox closed; standing computed live from edge
+  counts, never stored; K1 verified across all four
+  frozen inputs. Two observations: the K node is never
+  revised by any code path ("revisable" aspirational);
+  the bootstrap inflates MAP standing via self-loop
+  SUPPORTS edges. Finding F1 (process-level
+  ATTACK-SUCCESS): the working-directory cla2_bin was
+  stale (pre-fix source, 7/8 with P10 FAIL). A fresh
+  pinned-compiler build from committed source passes
+  15/15. Remediated by C114.
+
+### 13.4 CLA-2 binary rebuilt (C114)
+
+- C114 CLA2-BINARY-REBUILT (ad7d3ac1c):
+  REMEDIATION-COMPLETE. Fresh build from committed
+  cla2.zag: 116799 bytes (matches red team size
+  expectation), sha256 recorded, SELF-TESTS PASSED:
+  15/15. Source untouched. The stale binary was never
+  in git; the fresh one is now committed. C113 F1
+  closed.
+
+### 13.5 C1 flakiness: harness resume bug (C115)
+
+- C115 C1-FLAKINESS-INVESTIGATED (e98a976a0):
+  INVESTIGATION-COMPLETE. The C110 "contestant
+  non-determinism" finding is reclassified. Root
+  cause: the Zag driver mkdirs state but never clears
+  it; the resume script skips on costs.txt without
+  clearing partial state/ dirs. The /tmp wipe killed
+  the drive at 22/60; on resume two runs re-ran on
+  stale state, ingesting every turn twice (weights
+  exactly 2x), which pushed D1/D2/D3 across the
+  abstention threshold. Reproduced cleanly: fresh dir
+  63/63, re-run on same dir 58/63 with the exact
+  flaky signature. The contestant is deterministic
+  given fresh state; the C110 "~13% flakiness"
+  estimate is withdrawn. P2 and P6 stand without
+  caveat. Fix belongs in the resume script, not the
+  contestant. C93 clearance unaffected.
+
+### 13.6 Architecture re-measurement (C116)
+
+- C116 ARCH-REMEASURE-COMPLETE (73b0be40e):
+  BASELINE-UPDATED. Per the frozen procedure: CLA-2
+  685, CAM-1 408, ACT 162 cognition lines, sum 1255
+  vs frozen core 586. The prereg projection of
+  net-negative does not hold for separate
+  implementations (roughly 404 lines of duplicated
+  workspace machinery per builder). Holding at zero:
+  semantic cases, modes, bridges, handlers across all
+  three. Positive: learned structures now nonzero
+  where both baselines were zero (CLA-2: 3, CAM-1: 1,
+  ACT: 2). Trajectory: negative on lines, holding at
+  zero on architectural smells, positive on
+  learner-created structure. Code compression
+  requires the integration step.
+
+### 13.7 Bundle v13 verified (C117)
+
+- C117 BUNDLE-V13-COMPLETE (73b5bfbfc):
+  BACKUP-VERIFIED. 2.0G, HEAD ad7d3ac1cb98,
+  SHA-256 32de7f16..., complete history across 69
+  refs. Supersedes v12.
+
+The v3 paper staleness note now covers C64-C117; v4
+regeneration stays deferred to ledger stability.
