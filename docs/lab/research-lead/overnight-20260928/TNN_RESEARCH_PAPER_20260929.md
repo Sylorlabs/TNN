@@ -1058,6 +1058,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **L3 Bridge: DESIGN-COMPLETE (e4f8642fc).** Removes diagnose() enum, build_tree() recipes, node_count(sig). Implements: residual-facts interface, 4 generic operators, change-point generation, greedy MDL search. C0-A audit M1-M4 frozen. Feasible; risks disclosed.
 
+**C0 Integration: DESIGN-COMPLETE (9aa1fb0b5).** Q4 beam + v2 recruitment. Menu grows at runtime. Three-phase: discover (base) → consolidate (recruit) → discover (grown). Worked example: MAJ3 recruited, D2 in 2 nodes vs 6. Honest ceiling: stronger bounded L2, not L3. Only architecture with all four C0 in one trace.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
