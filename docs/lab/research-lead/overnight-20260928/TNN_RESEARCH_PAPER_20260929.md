@@ -1202,6 +1202,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **T-ADV5 Re-eval: TADV5-ACCEPTABLE (83c02efff).** Fix works. Inventor fired (n=40). HONESTFAIL cost 68≤108. Exposes greedy myopia (EQ +1 vs LT 0). One C0-C data point.
 
+**Phase B Design: PHASEB-DESIGN-COMPLETE (2571d52c1).** 379 lines. Arms A-GROWN/A-CTRL/A-ABLATE. Metrics M1-M6 (≥4/5). Tests I2/I4/I5. Targets C0-D. Bounded L2.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
