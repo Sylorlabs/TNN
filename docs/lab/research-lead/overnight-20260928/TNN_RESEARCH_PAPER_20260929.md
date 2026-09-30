@@ -1008,6 +1008,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Verification Build: BUILD-PASS (a07f9b9a6).** Per-slot metadata, contradiction detection, T1-T4 doubt triggers, source-priority revision. V1-V5 DETECT=yes where attack got silence. V2: teacher value kept, lie marked UNCONFIRMED. No false positives. Active verification (A1/A2) not yet built.
 
+**Q4 Adversary: ADVERSARY-DESIGNED (b4e9b6a14).** F-PARCOND: IF X1 THEN (X2 XOR X3) ELSE (X2 AND X3). 6 ops. Context-dependent operation; selects between computations, not variables. One Python violation disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
