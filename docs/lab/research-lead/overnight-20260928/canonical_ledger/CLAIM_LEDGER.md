@@ -3210,6 +3210,366 @@ tnn-native-lab, superseding v12.
 
 ---
 
+## C118. COMP-1 compositional machinery built (BUILD-PASS)
+
+Claim: pure-Zag implementation of the COMP-1 compositional
+machinery per the frozen prereg (C102).
+
+- Source: 170e39424 (comp1.zag 879 lines; comp1_bin compiled
+  with pinned znc abed8aa1; NAMECHECK.md Step 0 guard;
+  BUILD_REPORT.md).
+- Implementation: workspace with CLA-2 40-byte node layout,
+  teach/lookup, three frozen plan templates (CHAIN-2,
+  GATHER-n, ITERATE-UNTIL), generic step executor, bootstrap
+  miss-policy, composition constructors.
+- Tests: 10/10 pass, byte-identical across 3 runs. P1
+  two-hop, F2 e-ablation, P2 GATHER (plus GATHER-decline
+  control), P3 grandparent and depth via ITERATE counter,
+  P4 three-hop via plan-structure composition (template
+  marker 4 = COMPOSED, not a fourth template), P5
+  separation, plus both template ablations (disabling
+  ITERATE kills depth but not two-hop; disabling CHAIN-2
+  kills two-hop).
+- E-ruling is structural: mp_build/mp_build_compose do not
+  take expected as input. F2 verified byte-identical
+  construction traces across unmasked/masked runs while
+  expected changes only selection.
+- Note: bootstrap miss-policy is 157 source lines vs the
+  prereg's 150 projection. This is a projection variance,
+  not a kill bar breach; documented honestly in
+  BUILD_REPORT.md and in the source comments.
+- K1: prereg 4f6f0c5c8 verified ancestor of 170e39424
+  (git merge-base --is-ancestor). K2: zero handlers,
+  semantic cases, modes, bridges, new core ops; exactly 3
+  templates; candidates from subject-incident relations
+  only. K3: pure Zag; shell only for znc/binary/git; Step
+  0 guard recorded (python stubbed to exit 127).
+- No em dashes. Contaminated paper zero-diff. Sealed
+  FW1-FW9 never touched.
+
+**Status: BUILD-PASS** (builder verdict only; the 11-stage
+promotion pipeline has not run).
+
+---
+
+## C119. DEVINT-CLA2 developmental integration built (BUILD-PASS)
+
+Claim: pure-Zag implementation of the 11-stage developmental
+integration sequence on the CLA-2 workspace per the frozen
+prereg at f24063bcb.
+
+- Source: 35f9500b2 (devint_cla2.zag 1212 lines;
+  devint_cla2_bin compiled with pinned znc abed8aa1;
+  NAMECHECK.md Step 0 guard; BUILD_REPORT.md).
+- Implementation: one continuing process handling
+  segmentation (S1-S2), concept formation as GROUP nodes
+  (S3), learned rules as executable graphs (S4-S6),
+  contradiction via CONTRADICTS with retrievable history
+  (S7, S9), inquiry resolving uncertainty (S8), memory
+  pressure with GROUP protection (S10), and delayed reuse
+  with zero re-teaching (S11). No process resets between
+  stages.
+- Tests: all 11 stages pass with exact frozen numbers.
+  S2 6/6 segmentations exact; S3 4 GROUPs, 0 spurious; S4
+  12 bigram edges; S5 5 ACTIVE rules; S6 5/5 procedure;
+  S7 contradictions recorded; S8 inquiry resolved; S9
+  demotion with history; S10 eviction with GROUP
+  protection; S11 17/17 recognition, 3/3 procedure reuse.
+- Kill bars: B1 persistence PASS (one process, STATE-CONT
+  after every stage, no unexplained emptying); B2 stage
+  function PASS (all exact frozen numbers); B3 blindness
+  PASS (source inspection: feed_episode takes only episode
+  bytes, no stage/task/mode parameters); B4 interference
+  PASS (distractors with novel morphemes; 17/17
+  recognition; rules queryable); B5 delayed reuse PASS
+  (zero re-teaching S10 to S11).
+- Determinism: 3/3 byte-identical, exit 0, zero stderr
+  bytes.
+- Builder caught and fixed two genuine bugs during
+  construction: S3 initially produced 16 GROUPs (lexicon
+  included boundary-spanning substrings; fixed by
+  counting segmenter outputs); S11 segmentation failed
+  after S10 eviction because node 2 (PROTECT anchor) was
+  itself evicted (fixed by making evict_one skip nodes
+  0-2). Both fixed before commit.
+- K1: prereg f24063bcb verified ancestor of 35f9500b2
+  (git merge-base --is-ancestor). Toolchain guard Step 0
+  recorded (/usr/bin/python3 present as unremovable
+  system binary, documented non-use, zero invocations).
+- Per the 11-stage promotion pipeline this is BUILD-PASS
+  only; no SURVIVES or L3 claim is made.
+
+**Status: BUILD-PASS** (builder verdict only; the 11-stage
+promotion pipeline has not run).
+
+---
+
+## C120. Integration scout: one-system architecture spec (EXPLORATORY)
+
+Claim: analysis-only scout specifying how CLA-2, CAM-1, ACT,
+and COMP-1 integrate into one system.
+
+- Source: c0e99a601 (INTEGRATION_SCOUT.md ~15.8KB;
+  NAMECHECK.md Step 0 guard).
+- Duplication inventory: about 475 lines of workspace
+  machinery written 4 times across the implementations
+  (byte accessors, node/edge accessors in 4 different
+  spellings, allocators, linkers, teach/query paths,
+  activation in 2 versions, evidence bid in 3 versions,
+  4 test harnesses).
+- Format decision: CLA-2 wins. 40-byte nodes, 16-byte
+  edges, 12 edge types (superset of all others), EXECUTE
+  with closed 4-op ISA, POLICY_ROOT/MISS_POLICY
+  registers, and it already contains the 5-step ACT
+  protocol plus MAP nodes.
+- CAM-1's menu is deleted, not ported (per the C111
+  red-team finding of bounded-L2 menu selection).
+  eval_body's 4-way dispatch does not survive. What
+  ports: verify (train/test split), promote, contradict.
+  The propose step becomes COMP-1's plan construction.
+- Unified event flow specified: one teach path, one
+  query path with miss-policy dispatch (exact-key, then
+  MISS_POLICY, then plan construction over 3 templates,
+  then verify, then promote as MAP, then -2), one
+  5-step ACT protocol. A plan built for a query miss
+  can later be selected by ACT as an action guide
+  through the same edges.
+- Projected line count: about 1100 cognition lines vs
+  1555 across the four separate implementations (about
+  455 lines of duplication recovered). Honest note: this
+  does not approach the 586 frozen-core baseline,
+  because the capability exceeds the frozen core. The
+  real metric is one binary passing all three test
+  suites (15+24+10), which no single existing binary
+  does.
+- Integration prereg shape specified: K1-K5 kill bars
+  (including a hard 1200-line ceiling and a source-scan
+  ban on the CAM-1 menu reappearing), F-INT1 through
+  F-INT4 falsification (line count, cross-suite
+  regression, template smuggling, cross-capability
+  integration test), plus 4 open questions for the
+  prereg author (bid directionality, expected in live
+  mode, retention unification, node budget).
+- Toolchain guard: zero Python invocations. Dash-clean.
+  Contaminated paper zero-diff. Sealed FW1-FW9 not
+  accessed. One transient .git/index.lock; waited and
+  retried per the no-remove rule.
+
+**Status: EXPLORATORY** (analysis only; no implementation).
+
+---
+
+## C121. Inquiry scout: learner-driven inquiry specification (EXPLORATORY)
+
+Claim: analysis-only scout specifying the learner-driven
+inquiry gap and a discriminating experiment.
+
+- Source: b4853a9f7 (INQUIRY_SCOUT.md 421 lines;
+  NAMECHECK.md Step 0 guard).
+- The gap, precisely specified: the ACT read path (Piece
+  C) is built and red-teamed, but two learner-side
+  pieces behind it are missing. Piece A (uncertainty
+  reification): no learner-side process creates
+  UNCERTAINTY nodes from -2 admissions; test scaffolding
+  (mk_uncert) does it. Piece B (inquiry guide
+  construction): no learner-side process performs the D2
+  derivation (write an ACTION-GUIDE anchored at a live
+  UNCERTAINTY node); scaffolding does it. Both must be
+  generic-primitive workspace processes, not core code,
+  or K-ACT2 fails.
+- H-EXP2 v2 contrast: H-EXP2 v2 is researcher-specified
+  probe scoring (ndiff DESC) over a researcher-enumerated
+  hypothesis family and probe space. The learner
+  optimizes within a researcher frame. This frontier
+  asks whether the learner can originate the inquiry
+  frame from its own uncertainty, with no scoring rule
+  in source. Complementary, not competitive; the
+  experiment is designed so H-EXP2-style machinery
+  cannot pass alone.
+- Four-phase discriminating experiment: Phase 1 tests
+  uncertainty reification with origin audits and
+  ablation. Phase 2 tests guide construction on
+  researcher-unmapped uncertainties. Phase 3 runs the
+  W6 B4 attribution test end-to-end (swap test,
+  uncertainty reduction, no pre-play). Phase 4 is
+  novel-domain transfer on a new uncertainty type with
+  zero researcher mapping, the L3-flavored test. Three
+  controls calibrate (scaffolding baseline, null policy,
+  random guides).
+- Prereg shape: P-INQ1 through P-INQ5 (reification
+  counts, construction latency, attribution correlation,
+  functionality rate, transfer) and F-INQ1 through
+  F-INQ5, with kill bars K-INQ1 through K-INQ4.
+  Failure localizations specified per phase (Phase 1
+  fail means -2 is a workspace dead end; Phase 4 fail
+  with Phase 3 pass means a bounded-L2 menu outcome).
+- Recommended order: Phases 1-3 standalone, then Phase
+  4, then DEVINT-CLA2 S8 integration.
+- Toolchain guard: zero Python (analysis-only wave).
+  Dash-clean. Contaminated paper zero-diff. Sealed
+  FW1-FW9 never accessed (W6 referenced only via
+  published analysis). No implementation, no source
+  modifications.
+
+**Status: EXPLORATORY** (analysis only; no implementation).
+
+---
+
+## C122. ACT bid directionality aligned (REMEDIATION-COMPLETE)
+
+Claim: implementation of the C112 red-team finding. ACT
+bid() now counts incoming evidence edges only, matching
+CLA-2 evcount(); integration spec A3 ("ACT reuses the
+same function") is now true.
+
+- Source: 75a9b0e04 (act.zag 2-line change; act_bin
+  rebuilt with pinned znc abed8aa1; NAMECHECK.md Step 0
+  guard in act_bid_fix/).
+- The divergence (confirmed by source inspection):
+  ACT bid() counted edges where the node was source OR
+  target (bidirectional); CLA-2 evcount() counts only
+  incoming (target == node). Spec A3 said "ACT reuses
+  the same function"; it did not.
+- The fix: removed the outgoing-edge branch (if(f==a)),
+  removed the now-unused source binding, updated the
+  comment. bid() now counts incoming evidence edges
+  only.
+- Rationale (from 5257ac268 analysis, option a): the
+  bid is defined (A11) as a signed count over evidence
+  edge types. An outgoing SUPPORTS edge from guide G to
+  outcome O is G's claim about the world, not evidence
+  for G. Counting outgoing edges conflates a node's
+  claims with its credibility: a guide making ten
+  predictions, all wrong, would outbid a guide making
+  one confirmed prediction. That inverts the meaning of
+  "evidence bid." Consequence edges (prereg 2(d)'s
+  guide to outcome SUPPORTS edges) are the guide's
+  predictive content; whether those predictions are
+  right is recorded directionally: correct goes to
+  incoming CONFIRMS (+1), wrong to incoming CONTRADICTS
+  (-1). Counting the predictions themselves rewards
+  verbosity, not accuracy.
+- Options rejected: (b) amend the spec for bidirectional
+  (redefines "evidence bid" as "embeddedness," breaks
+  A3's architectural compression, requires re-justifying
+  every downstream bid use; no test or prereg prediction
+  requires it); (c) hybrid (adds an unfrozen rule and a
+  new threshold; rejected as unprincipled complexity).
+- Verification: rebuilt with pinned znc (build success,
+  warnings only, pre-existing A0102 class, none
+  introduced). ./act_bin all: 24/24 PASS, 0 FAIL,
+  byte-identical across 3 runs. No test changes needed
+  (all test evidence was incoming).
+- Diff confirms only the bid() function was touched; no
+  other source lines changed.
+- Toolchain guard: /usr/bin/python3 present as system
+  binary, documented non-use, zero Python invocations.
+  No sealed FW1-FW9 files accessed. Contaminated paper
+  zero-diff. Dash-clean.
+
+**Status: REMEDIATION-COMPLETE** (C112 bid divergence
+closed).
+
+---
+
+## C123. Toolchain guard audit (EXPLORATORY)
+
+Claim: read-only audit of all 7 Python process incidents
+this cycle, assessing whether the guard is working.
+
+- Source: e0a842962 (GUARD_AUDIT_REPORT.md 160 lines;
+  NAMECHECK.md Step 0 guard). Shell/git only; zero
+  Python invoked in the audit itself.
+- The 7 incidents catalogued: (1) C55 OpScope, python3
+  heredoc during setup, placeholder only, disclosed,
+  NON-CANONICAL-OK; (2) L3A trace original build,
+  python3 heredoc patched /tmp file during debugging,
+  K3 FAIL, superseded by C70; (3) C67 learner-dev P12,
+  python3 for F3 literal audit, PROCESS-FAIL,
+  governance-invalidated; (4) C77 L3A red team, python3
+  to insert text into probe file, file deleted and
+  redone with awk, no Python content remains,
+  disclosed in detail; (5) composition scout (cd7a3dd28),
+  python3 -c "pass" stray fragment during dash check,
+  PROCESS-FAIL, record problem (committed NAMECHECK.md
+  falsely stated "No Python invoked," contradicting
+  ledger C98); (6) frontier scout (edcb364e3),
+  python3 -c "pass" stray fragment during dash check,
+  exemplary disclosure, PROCESS-FAIL; (7) C1 driver
+  (d5984f313), python3 -c with json.load to inspect
+  key.json, inspection aid only, PROCESS-FAIL,
+  superseded by C110 clean re-freeze.
+- Key findings: all 7 were process-level, none
+  scientific. No incident involved Python implementing
+  research logic, scoring, or analysis. Four were
+  accidental shell fragments or setup aids. The guard
+  is working: zero incidents since formalization in
+  0525377f3. Recent workers actively prevent invocation
+  (C1 refreeze built a safe-bin excluding python;
+  CLA-2 builder created BLOCKED stub scripts), not
+  just document non-use. Self-disclosure culture is
+  strong: 6 of 7 disclosed by the workers themselves.
+  The PROCESS-FAIL consequence is applied, not evaded.
+  Remediation path works: incident 7 was cleanly
+  re-frozen (C110, zero Python).
+- Recommendations: (1) fix incident 5's record (the
+  composition scout NAMECHECK.md contradicts the
+  ledger; amend it to acknowledge the invocation);
+  (2) codify restricted-PATH/stub-scripts as mandatory
+  Step 0 (currently voluntary but effective); (3) watch
+  the python3 -c "pass" pattern (3 incidents share this
+  stray-fragment signature; add a pre-execution shell
+  review step to the spawn template).
+- No structural strengthening required; the guard is
+  sufficient.
+- Recommendation 1 has since been actioned: record
+  correction 67f92ed4f amended the composition scout
+  NAMECHECK.md to acknowledge the 5th Python incident,
+  retracting the false "No Python invoked" statement,
+  aligned with ledger C98. The content is otherwise
+  preserved.
+- Toolchain guard: zero Python in this audit.
+  Contaminated paper zero-diff. Explicit pathspecs.
+
+**Status: EXPLORATORY** (audit; no policy change made).
+
+---
+
+## C124. STATUS doc wave: process-fail per Micah's ruling (PROCESS-FAIL)
+
+Claim: the status consolidation document wave is
+PROCESS-FAIL per Micah's absolute ruling.
+
+- Source: 6e4a9479f (STATUS.md 248 lines, human-readable
+  snapshot of the architecture wave;
+  status_consolidation/NAMECHECK.md with Step 0 guard and
+  process disclosure).
+- The incident: during the dash check the worker used
+  python3 -c for a mechanical character replacement
+  (em dash to colon in four section headers of the
+  documentation). This was text editing on
+  documentation, not research logic or analysis; no
+  scientific claim was produced via Python. The worker
+  self-disclosed in NAMECHECK.md as a process incident
+  per the literal rule.
+- Micah's ruling: the absolute ban applies. This
+  documentation wave is PROCESS-FAIL
+  (process-contaminated). It does NOT contaminate
+  unrelated scientific experiments whose research logic
+  remained pure Zag. The guard is kept absolute; no
+  new prompt changes are required. The STATUS.md
+  document stands as an artifact but carries the
+  process-fail flag for its wave.
+- This claim records the ruling and the scoping: the
+  contamination is confined to the documentation wave
+  that invoked Python. No scientific result is
+  affected.
+
+**Status: PROCESS-FAIL** (documentation wave only, per
+Micah's ruling; does not contaminate unrelated science).
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -3230,13 +3590,14 @@ tnn-native-lab, superseding v12.
 
 ## Ledger tally
 
-- Claims ledgered: 117 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 124 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
   2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
   2026-09-30; C78-C95 eighth append 2026-09-30; C96-C101 ninth
   append 2026-09-30; C102-C110 tenth append 2026-09-30; C111-C117
-  eleventh append 2026-09-30)
+  eleventh append 2026-09-30; C118-C124 twelfth append
+  2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -3256,14 +3617,18 @@ tnn-native-lab, superseding v12.
 - VOID / INVALID: C32 (H-B void; H-C invalid; H-A kill-with-retracted)
 - PROCESS-FAIL: C67 (learner-dev P12; python3 disclosure), C104
   (frontier scout; 6th Python incident, stray python3 -c fragment),
-  C109 (C1 Zag driver; 7th Python incident, inspection aid) -> 3
+  C109 (C1 Zag driver; 7th Python incident, inspection aid), C124
+  (STATUS doc wave; 8th Python incident, mechanical character
+  replacement in documentation; per Micah's ruling, documentation
+  wave only, does not contaminate unrelated science) -> 4
   PROCESS-FAIL
 - BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
   (figures), C22, C36 (L3C form builder), C43 (L3B growth), C70 (L3A
   trace clean rebuild; QUALIFIED by C77: certifies byte-reproduction,
   not learning), C106 (CAM-1 trial-based; 6/6 tests), C107 (ACT
   5-step protocol; 24/24 tests), C108 (CLA-2 amended ISA; 15/15
-  tests) -> 10 BUILD-PASS
+  tests), C118 (COMP-1 composition; 10/10 tests), C119
+  (DEVINT-CLA2; 11 stages) -> 12 BUILD-PASS
 - BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate),
   C60 (L3A trace; K3 process FAIL) -> 3 BUILD-FAIL
 - ADVERSARY-BREAKS: C71 (editinvent scope collapse; generality broken,
@@ -3277,7 +3642,8 @@ tnn-native-lab, superseding v12.
   BUILD-PASS stands), C113 (CLA-2 red team; 4/5 vectors pass; F1
   stale binary remediated by C114) -> 2 ADVERSARY-QUALIFIED
 - REMEDIATION-COMPLETE: C114 (CLA-2 binary rebuilt; fresh 15/15;
-  C113 F1 closed) -> 1 REMEDIATION-COMPLETE
+  C113 F1 closed), C122 (ACT bid aligned to incoming-only;
+  C112 divergence closed) -> 2 REMEDIATION-COMPLETE
 - INVESTIGATION-COMPLETE: C115 (C1 flakiness reclassified as
   harness resume bug; P2/P6 stand; C110 note amended) -> 1
   INVESTIGATION-COMPLETE
@@ -3359,6 +3725,18 @@ tnn-native-lab, superseding v12.
   deterministic) -> 1; BASELINE-UPDATED: C116 (arch
   re-measurement; 1255 vs 586 lines) -> 1;
   BACKUP-VERIFIED: C117 (bundle v13) -> 1
+- Architecture-wave appendix (C118-C124, 2026-09-30):
+  BUILD-PASS: C118 (COMP-1 composition; 10/10 tests;
+  K1-K3 hold), C119 (DEVINT-CLA2 11-stage; B1-B5 hold;
+  3/3 byte-identical) -> 2; EXPLORATORY: C120
+  (integration scout; one-system spec; CLA-2 format
+  wins; ~1100-line projection), C121 (inquiry scout;
+  learner-driven inquiry gap specified), C123 (guard
+  audit; 7 incidents catalogued; guard working) -> 3;
+  REMEDIATION-COMPLETE: C122 (ACT bid aligned;
+  C112 closed) -> 1; PROCESS-FAIL: C124 (STATUS doc
+  wave; 8th Python incident; documentation wave only
+  per Micah's ruling) -> 1
 - C106 posture update: BUILD-PASS stands, but the
   L3-adjacent reading is broken by C111. CAM-1 survives
   as bounded L2 only. No L3 anywhere: still zero.

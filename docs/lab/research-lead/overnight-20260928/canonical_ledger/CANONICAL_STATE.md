@@ -1239,5 +1239,105 @@ BACKUP-VERIFIED.
   SHA-256 32de7f16..., complete history across 69
   refs. Supersedes v12.
 
-The v3 paper staleness note now covers C64-C117; v4
+## 14. Builders land on composition and developmental integration; inquiry gap specified; guard audited (twelfth append; 2026-09-30; ledger appendix C118-C124)
+
+### 14.1 COMP-1 compositional machinery built (C118)
+
+- C118 COMP1-BUILD-COMPLETE (170e39424): BUILD-PASS.
+  879-line pure-Zag implementation per frozen prereg
+  C102 (K1 verified: 4f6f0c5c8 ancestor of 170e39424).
+  10/10 tests pass, byte-identical across 3 runs. The
+  e-ruling is structural: mp_build/mp_build_compose do
+  not take expected as input; F2 verified byte-identical
+  construction traces with expected masked/unmasked.
+  P4 three-hop works via plan-structure composition
+  (template marker 4 = COMPOSED), not a fourth template.
+  K2/K3 hold. Bootstrap miss-policy 157 lines vs 150
+  projection: projection variance, not a kill bar.
+
+### 14.2 DEVINT-CLA2 developmental integration built (C119)
+
+- C119 DEVINT-CLA2-BUILD-PASS (35f9500b2): BUILD-PASS.
+  1212-line pure-Zag implementation per frozen prereg at
+  f24063bcb (K1 verified). One continuing process, no
+  resets: segmentation, GROUP-node concept formation,
+  learned rules, contradiction with retrievable history,
+  inquiry, demotion, memory pressure with GROUP
+  protection, delayed reuse with zero re-teaching. All
+  11 stages pass with exact frozen numbers; B1-B5 all
+  PASS; 3/3 byte-identical determinism. The builder
+  caught and fixed two genuine bugs during construction
+  (boundary-spanning substrings inflating the lexicon;
+  the PROTECT anchor node 2 evicted by the eviction
+  routine). Per the pipeline this is BUILD-PASS only;
+  no SURVIVES or L3 claim.
+
+### 14.3 Integration scout: one-system spec (C120)
+
+- C120 INTEGRATION-SCOUT-COMPLETE (c0e99a601):
+  EXPLORATORY. Duplication inventory: about 475 lines
+  of workspace machinery written 4 times across the
+  implementations. CLA-2's workspace format wins
+  (40-byte nodes, 16-byte edges, 12 edge types; already
+  contains the ACT protocol and MAP nodes). CAM-1's
+  eval_body menu is deleted, not ported (per C111).
+  Unified event flow: one teach path, one query path
+  with miss-policy dispatch, one ACT protocol.
+  Projected about 1100 cognition lines vs 1555 across
+  four separate builds. Integration prereg shape
+  specified with K1-K5 (hard 1200-line ceiling,
+  source-scan ban on the CAM-1 menu) and F-INT1
+  through F-INT4.
+
+### 14.4 Inquiry scout: the remaining illusion (C121)
+
+- C121 INQUIRY-SCOUT-COMPLETE (b4853a9f7): EXPLORATORY.
+  ACT can read learner state to choose an action, but
+  the learner does not yet create the uncertainty
+  structures or derive the action guides; test
+  scaffolding does those parts. Two missing pieces:
+  Piece A (uncertainty reification from -2 admissions)
+  and Piece B (inquiry guide construction via D2
+  derivation); both must be generic-primitive
+  workspace processes. Four-phase discriminating
+  experiment specified; Phase 4 is novel-domain
+  transfer with zero researcher mapping (L3-flavored).
+
+### 14.5 ACT bid aligned; guard audited (C122-C123)
+
+- C122 ACT-BID-ALIGNED (75a9b0e04):
+  REMEDIATION-COMPLETE. ACT bid() now counts incoming
+  evidence edges only, matching CLA-2 evcount(); spec
+  A3 ("ACT reuses the same function") is now true.
+  Rationale: an outgoing SUPPORTS edge is a guide's
+  claim about the world, not evidence for the guide.
+  Source diff limited to bid(); 24/24 tests pass,
+  byte-identical 3x, no test changes. C112 closed.
+- C123 GUARD-AUDIT-COMPLETE (e0a842962): EXPLORATORY.
+  All 7 Python incidents were process-level, none
+  scientific. Zero incidents since guard formalization.
+  Workers now actively prevent invocation (restricted
+  PATHs, stub scripts). 6 of 7 self-disclosed.
+  Recommendation 1 (fix the composition scout
+  NAMECHECK record) has since been actioned by record
+  correction 67f92ed4f.
+
+### 14.6 STATUS doc wave process-fail (C124)
+
+- C124 STATUS-DOC-PROCESS-FAIL (6e4a9479f):
+  PROCESS-FAIL. Per Micah's ruling: the worker invoked
+  python3 -c for a mechanical character replacement
+  (em dash to colon in four documentation section
+  headers). The absolute ban applies; this
+  documentation wave is process-contaminated. It does
+  NOT contaminate unrelated scientific experiments
+  whose research logic remained pure Zag. The guard
+  is kept absolute; no new prompt changes required.
+  The STATUS.md artifact stands with the process-fail
+  flag on its wave.
+
+No new SURVIVES. L3 achieved anywhere: still zero.
+The ledger stands at 124 claims.
+
+The v3 paper staleness note now covers C64-C124; v4
 regeneration stays deferred to ledger stability.
