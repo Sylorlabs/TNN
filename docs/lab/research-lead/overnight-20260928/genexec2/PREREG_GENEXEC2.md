@@ -41,7 +41,18 @@ combined with ADD). Both require ABS from T1.
 K-D1 is updated: T4's program must contain >= 2 CALLs to ABS (not STEP).
 T5's program must contain >= 2 CALLs to ABS (unchanged).
 
-## 0c. Amendment A3 (2026-09-30, before final implementation run)
+## 0d. Amendment A4 (2026-09-30, before final implementation run)
+
+P1/P2 search is changed from beam search to depth-first iterative
+deepening with heuristic ordering. Justification: beam search with
+(sparse) exact-match scoring prunes solution prefixes that have low
+intermediate scores, causing systematic failure on simple arithmetic
+tasks (2x+1, x mod 3). Depth-first search with backtracking explores
+the full space up to max_len and is guaranteed to find a solution if
+one exists within the bound. The search remains generic (no
+task-specific heuristics); candidates are ordered by a fixed op
+priority to ensure determinism. The *success criterion* (exact match)
+is unchanged.
 
 Beam search scoring is clarified: the *success criterion* is exact-match
 count (a program is a solution iff it matches all train episodes). For
