@@ -1114,6 +1114,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **T-ADV5 Design: DESIGN-COMPLETE (c36e61d3f).** Deceptive step (1,0,1 pattern). Optimal 5 nodes, 0 EQs. Differences: deceptive landscape, inverted exception (10-block), non-monotonic. Bars: STRONG/ACCEPTABLE/FAIL. K4 violation (Python byte check) disclosed.
 
+**Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
