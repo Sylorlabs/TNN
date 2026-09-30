@@ -1336,8 +1336,89 @@ BACKUP-VERIFIED.
   The STATUS.md artifact stands with the process-fail
   flag on its wave.
 
-No new SURVIVES. L3 achieved anywhere: still zero.
-The ledger stands at 124 claims.
+## 15. Integration lands; MUL constructed; inquiry needs re-freeze (thirteenth append; 2026-09-30; ledger appendix C125-C133)
 
-The v3 paper staleness note now covers C64-C124; v4
+### 15.1 Integration prereg frozen; TNN-1 one-system build (C125, C127)
+
+- C125 INTEGRATION-PREREG-FROZEN (7fc7148ac):
+  PREREG-FROZEN. The 480-line one-system TNN-1
+  specification: unified CLA-2-format workspace,
+  exact port/delete lists, K1-K5 with the hard
+  1200-line ceiling (F-INT1), F-INT1 through F-INT6
+  (including the trench-coat test F-INT4), P-INT1
+  through P-INT7. Micah's pending EXECUTE ruling
+  noted as inherited, not canonized.
+- C127 TNN-1-BUILD-COMPLETE (0323b97d5): BUILD-PASS.
+  One binary, 1088 source lines (under the 1200-line
+  ceiling), 35/35 tests pass: CLA-2 15/15, ACT
+  directional bid 6/6, COMP-1 10/10, CAM-1 ported
+  P6/P7 2/2, DEVINT-CLA2 compact curriculum 1/1, XCAP
+  cross-capability 1/1. 3/3 byte-identical. Zero new
+  ops/modes/bridges/handlers. CAM-1 menu deleted, not
+  ported. First genuine compression: ~1555 lines
+  across four builds to 1088 in one binary.
+
+### 15.2 MUL-1 Rung A: learner constructs multiplication (C128)
+
+- C128 MUL1-RUNG-A-BUILD-COMPLETE (fbf14f73a):
+  BUILD-PASS. After 4,297 incorrect candidates, the
+  learner promoted a 4-cell PROC [ACCUM_RX STEP_C
+  TEST_CY GOTO(0)]: a genuine repeated-addition loop,
+  more efficient than the prereg's 6-cell sketch
+  (zero-initialized slots make INITs unnecessary).
+  5/5 P-MUL pass including the (13,17)->221 scaling
+  probe; oracle audit (trial 4298, 72 genuine
+  rejections, shuffled rerun 12/12); 3/3
+  byte-identical. No new arithmetic op in source.
+  Restricted safebin PATH, python3 ABSENT.
+
+### 15.3 Inquiry prereg frozen; build wave process-fail (C126, C129)
+
+- C126 INQUIRY-PREREG-FROZEN (04ac028fb):
+  PREREG-FROZEN. Pieces A (uncertainty reification)
+  and B (guide construction) as learner-side workspace
+  processes; 4 phases; K-INQ1 through K-INQ4 with the
+  300-line bound; F-INQ1 through F-INQ5; controls
+  C1-C3.
+- C129 INQUIRY-BUILD-PROCESS-FAIL (396ecafa4):
+  PROCESS-FAIL. The builder completed all frozen bars
+  (115 lines, all P-INQ pass) but self-disclosed one
+  python3 invocation (9th incident). Per the guard,
+  the wave is PROCESS-FAIL. Bars recorded for the
+  clean re-freeze to reproduce, not as adopted
+  results. A clean re-freeze worker is in flight.
+
+### 15.4 DEVINT-CLA2 red team qualifies the build (C130)
+
+- C130 DEVINT-CLA2-REDTEAM (a5ccb100d):
+  ADVERSARY-QUALIFIED. 4 ATTACK-SUCCESS vectors:
+  unseen-domain form_groups coupling, 10x-interference
+  evidence cascade, GROUP protection conditional on
+  hardcoded anchor, contradiction handling partial
+  (SPLIT never attempted, retention blind to
+  demotion). Strongest finding: S6 "procedure
+  learning" does not learn from examples; the pairing
+  is harness-supplied. C119 BUILD-PASS stands (B1-B5
+  literally hold), but 6 prereg elements were not
+  implemented as specified. M2/F4 claims corrected
+  per the red team.
+
+### 15.5 Remediations and infrastructure (C131, C132, C133)
+
+- C131 C1-HARNESS-FIXED (fac9875b0):
+  REMEDIATION-COMPLETE. Resume now clears stale state;
+  old bug reproduced (32->62 facts), fix verified
+  63/63 identical to fresh. C115 closed.
+- C132 COMPRESSION-TRACKER-ESTABLISHED (f46a89e99):
+  EXPLORATORY. R_test/R_world/R_fw defined; 4-system
+  total corrected to ~1555 cognition lines.
+- C133 RECORD-CORRECTED (67f92ed4f):
+  REMEDIATION-COMPLETE. Composition scout NAMECHECK
+  retraction aligned with C98; resolves guard audit
+  recommendation 1.
+
+No new SURVIVES. L3 achieved anywhere: still zero.
+The ledger stands at 133 claims.
+
+The v3 paper staleness note now covers C64-C133; v4
 regeneration stays deferred to ledger stability.
