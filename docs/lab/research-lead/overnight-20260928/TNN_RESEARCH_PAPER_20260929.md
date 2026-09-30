@@ -1028,6 +1028,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Active Verification: ACTIVE-TESTED (1c92aa353).** A1: bounded re-observation (1/episode). A2: compositional cross-check via superseded mappings. V6 shows full cycle (lie→SUSPECT→hedge+observe→cleared). No degeneration. Verification attack arc complete: attack→passive→active.
 
+**Wall Removal: DESIGN-COMPLETE (5daf15951).** CTSVR: T1 trigger (bump while transferred), gen/wgen tags, re-verify phase probes stale walls. Cost bounded (≤ stale count). Falsifiers F1-F5 frozen.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
