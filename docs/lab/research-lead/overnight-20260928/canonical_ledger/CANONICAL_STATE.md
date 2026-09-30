@@ -154,8 +154,13 @@ superiority evidence.
 7. Continuing learner integration: vocabulary, concepts, procedures,
    conflicting evidence, active inquiry, causal learning, memory pressure,
    interference, corrections, and delayed reuse in one process with no
-   resets, task labels, or recompilation.
+   resets, task labels, or recompilation. P11 law-change-and-revert now
+   SURVIVES as bounded L2 in the same lifetime (C57); P12
+   developmental-language integration is in flight.
 8. Developmental language: after DEVANG2 BUILD-FAIL and H-SEG2 downgrade.
+   OpScope negation is position-contingent L2 (C55); position-general
+   negation is killed. Cross-context behavioral validation is in
+   flight.
 9. LLM baseline: PENDING (no credentials or spending authorized).
 10. Six governance rulings awaiting Micah's decision (see section 4).
 
@@ -358,3 +363,109 @@ Open question 8: the tak-displacement family is in flight.
   D-v3 is in flight with both fixes as kill bars.
 
 Open question 1 unchanged: zero.
+
+## 8. Post-ledger verdicts (third append; 2026-09-30; ledger appendix
+C54-C63)
+
+Appended to CLAIM_LEDGER.md after the C50-C53 append. No C01-C53
+entry was modified. L3 achieved anywhere: still zero.
+
+### 8.1 Causal lane: learner-constructed graphs survive change and
+revert (C54)
+
+- C54 CAUSAL-REVERT-PASS (prereg c09afd95e, amendment ab68dd121, impl
+  da0cd17b6): SURVIVES as bounded L2+. R1 REVISE: W0 -> k=2 -> W1 ->
+  k=2 -> W2=W0 in 2 intervention rounds; R1 REBUILD takes 3 rounds;
+  R2 permanent-change control shows no false snapback; FROZEN controls
+  show the failure-to-revise pathology. 41/41 checks, 3/3
+  byte-identical. The edit vocabulary (change-delay / add-rule /
+  remove-rule) remains researcher-supplied; the learner-authored-edit
+  frontier is in flight (causal_editinvent/).
+
+Per the standing ONE-SYSTEM RULE, the revise machinery is
+experimental evidence, not final architecture; it is not canonized.
+
+### 8.2 Developmental language: displacement proves the position
+assumption load-bearing (C55)
+
+- C55 OPSCOPE-DISPLACEMENT-LOAD-BEARING (prereg ae9c3f13e, sealed
+  54d3e3ca9): SURVIVES as bounded L2+ boundary-mapping evidence. The
+  true negator at position 0 cannot install (cs==cb at every check; no
+  operator; probes 0/3; 17/20 no-operator accuracy). The earlier OpScope
+  result is position-contingent L2; any position-general reading is
+  killed. Governance caveat travels: the worker disclosed one
+  inadvertent python3 heredoc invocation during setup (placeholder
+  only, no artifact); purity is not asserted fully clean for this
+  lane. No further admission-gate lineage per the lane ruling.
+
+### 8.3 Constructor-level redesign: L3B v2 (C56)
+
+- C56 L3B-V2-PASS (prereg 05620eaa2, addendum 197e2547a, impl
+  7a1d3265d): SURVIVES as bounded L2. The learner assembles
+  MUL(VAR,VAR) from a generic 205-program grammar through
+  CREATE/CONNECT; the fixed rel_of analyzer was removed, not widened.
+  Hidden 3/3 on the square family. The constructor remains a finite
+  menu under adversarial scrutiny (l3b_v2_adv2/ in flight); per the
+  lane ruling it will not be expanded (redesign toward incrementally
+  constructed executable state instead).
+
+### 8.4 Continuing learner: law change and revert in one lifetime
+(C57)
+
+- C57 LEARNER-REVERT-PASS (prereg daf4f015d, impl dc20745db):
+  SURVIVES as bounded L2. P1-P10 byte-identical to the C53 state; P11
+  adapts through change and revert in 4 total rounds (h0/1, h1/2,
+  h0/1); STATIC reproduces the C1 pathology; the re-derived law
+  persists through a 20-item pressure wave. One 32,768-byte state, no
+  reset, pure Zag. P12 (developmental-language integration) is in
+  flight under learner_dev/.
+
+### 8.5 Threshold boundary map; Tier-2 retired (C58)
+
+- C58 THRESHOLD-BOUNDARY-MAP-COMPLETE (prereg 2eaa1f122, impl
+  ab9a3ccfd): SURVIVES as bounded L2 boundary-mapping evidence. Both
+  frozen predictions were wrong in opposite informative directions:
+  Tier-1 floods the beam under crowding (evidence-perfect 16/16 CONDs
+  scoring 9600 remove the terminals), while Tier-2 is unreachable when
+  needed. Tier-2 ambitions for this lineage are permanently retired;
+  the cond_disc2/ redesign (protected track for composite
+  discriminative conditions) is in flight. Open question 3: the
+  threshold mechanism stands as a Tier-1 recalibration with a boundary
+  map; Tier-2b on the old substrate is closed.
+
+### 8.6 L3C v2 adversary: survives this round (C59)
+
+- C59 L3C-V2-ADV-SURVIVES-THIS-ROUND (prereg 2c0e52739, results
+  8b82a836a): SURVIVES as bounded L2, this round only. Depth-3
+  refinement 4/4; disjunction is an honest permanent by-design blind
+  spot of disc2 (3 honest failures, no silent misresolution);
+  default-edge repointing 5/5. One disclosed wording mismatch (prereg
+  F2 scoring described as 2/4 vs the implementation's 4/4
+  withhold-signature view); mechanism-facing facts unchanged. Round 2
+  (l3c_v2_adv2/) in flight.
+
+### 8.7 L3A trace: BUILD-FAIL on process (C60)
+
+- C60 L3A-TRACE-BUILD-FAIL (prereg 05898699e, impl a6fbee865):
+  BUILD-FAIL. The worker's result doc claims BUILD-PASS with strong
+  technical results (invention, reuse, C0-A A1-A7), but the worker used
+  a python3 heredoc on /tmp scratch during diagnostics; disclosure
+  does not cure use under the literal pure-Zag rule, so K3 FAILS.
+  Technical findings are exploratory only; a clean rebuild is in
+  progress. No L3 or C0-A credit is canonical.
+
+### 8.8 Governance: fork battery and paper audit (C61, C62)
+
+- C61 FORKBATTERY-80/82 PASS (manifest a3d7a9ed3, results 801736ec4):
+  GOVERNANCE-PASS. 80 PASS, 0 FAIL, 2 UNTESTABLE (expected); the
+  consistency gate is now permanent infrastructure.
+- C62 PAPER-GOVERNANCE-V2-PASS (audit d66466101): GOVERNANCE-PASS. The
+  v2 clean paper is faithful to the 53-claim freeze; all 166 cited
+  commits resolve. The paper is now stale for post-freeze verdicts; it
+  stands only as a record against 8837d2ee0.
+
+### 8.9 Paper artifact superseded (C63)
+
+- C63 PAPER-DERIVED-COMPLETE (draft 6425f5a55): SUPERSEDED. A 34-claim
+  evidence-first draft, superseded by v1 (94c30752f) and v2
+  (89cf970ee). Not evidence; recorded for provenance.

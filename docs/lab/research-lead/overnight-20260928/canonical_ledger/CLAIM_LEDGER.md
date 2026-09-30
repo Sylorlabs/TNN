@@ -892,6 +892,233 @@ learner (P11 episode), pure composition from frozen parts.
 
 ---
 
+## C54. Causal revert with learner-constructed graphs
+
+Claim: learner-constructed causal graphs survive law change and revert.
+
+- Prereg: c09afd95e (frozen alone, before implementation)
+- Transparent amendment: ab68dd121 (corrected R2 REBUILD frozen
+  prediction: E1p yields 3 classes, not 1; committed before
+  implementation)
+- Implementation + evidence: da0cd17b6 (CAUSAL-REVERT-PASS). R1
+  REVISE: W0 -> k=2 -> W1 -> k=2 -> W2=W0, total 2 intervention
+  rounds. R1 REBUILD reaches identical winners but takes 3 rounds and
+  reconstructs afresh. R2 permanent-change control: W2=W1 and W2!=W0,
+  so there is no false snapback. FROZEN controls show the intended
+  failure-to-revise pathology. 41/41 frozen checks pass; 3/3
+  byte-identical. Pure Zag.
+
+**Status: SURVIVES as bounded L2+.** The honest ceiling is bounded
+L2+, not L3: the change-delay / add-rule / remove-rule edit vocabulary
+is still researcher-supplied. Replacement in flight: causal_editinvent/
+(the learner must derive its own edit type from prediction failures,
+with an old-vocabulary impossibility proof).
+
+Architecture: experiment-level revise machinery with
+researcher-supplied edit vocabulary; experimental evidence only. Per
+the ONE-SYSTEM RULE, revise mode is not canonized as final
+architecture.
+
+## C55. OpScope displacement: position assumption load-bearing
+
+Claim: the earlier OpScope operator result depends on the word
+occupying position 1.
+
+- Prereg: ae9c3f13e (PREREG-DISPLACEMENT; frozen alone, before sealed
+  work)
+- Sealed results: 54d3e3ca9 (OPSCOPE-DISPLACEMENT-LOAD-BEARING). The
+  true negator at utterance position 0 cannot install: cs==cb at every
+  check; no operator installs; negation probes 0/3; overall
+  no-operator accuracy 17/20. The positional assumption is
+  load-bearing: the earlier OpScope result is position-contingent L2,
+  not position-general negation learning. 3/3 byte-identical.
+
+**Status: SURVIVES as bounded L2+ boundary-mapping evidence.** The
+result kills any position-general reading of OpScope negation (C38
+remains valid only within its position-1 battery). Replacement in
+flight: opscope_behav/ (cross-context behavioral validation before
+operator installation).
+
+Governance note (preserved verbatim): the worker disclosed one
+inadvertent python3 heredoc invocation during setup (placeholder only,
+no artifact). Disclosure does not cure use per the literal pure-Zag
+rule; the caveat travels with this entry. Purity is not asserted as
+fully clean for this lane.
+
+Architecture: attack battery; no new mechanism, no new gates. Per the
+lane ruling, no further admission-gate lineage.
+
+## C56. L3B constructor v2
+
+Claim: constructor-level redesign moves L3B toward learner-assembled
+programs.
+
+- Prereg: 05620eaa2 (frozen alone, before implementation)
+- Pre-implementation addendum: 197e2547a (arithmetic correction
+  P-B2c SWITCH 3/6 -> 2/6; committed before implementation)
+- Implementation + evidence: 7a1d3265d (L3B-V2-PASS). Generic
+  205-program grammar (VAR, constants 0..8, ADD/MUL/SUB, depth <=2);
+  winning programs assembled through generic CREATE/CONNECT; the fixed
+  rel_of analyzer removed rather than widened; version archive recalls
+  old structures through node-id-preserving dispatch. Square A2: the
+  learner assembled MUL(VAR,VAR), hidden 3/3. Alternating B2: Creates=2,
+  dispatches=2, SWITCH 2/6, FINAL 1/2 (first post-flip episode
+  unpredictable without task labels, disclosed). 3/3 byte-identical.
+  Pure Zag.
+
+**Status: SURVIVES as bounded L2.** Ceiling is bounded L2; C0-C beyond
+the two frozen families untested. Independent adversary in flight:
+l3b_v2_adv2/ (depth-3 requirements, constants outside 0..8, ambiguous
+dispatch, long churn, archive eviction).
+
+Architecture: the constructor redesign replaces the removed rel_of
+analyzer with generic CREATE/CONNECT ops; no new hardcoded semantic
+case added for square vs alternating. The 205-entry constructor
+remains a finite menu under adversarial scrutiny; per the lane ruling
+it is not to be expanded to 500 or 5,000 entries (redesign toward
+incrementally constructed executable state instead).
+
+## C57. Continuing-learner law-change-and-revert in one lifetime
+
+Claim: one continuing learner survives a law change and revert inside
+one unbroken lifetime.
+
+- Prereg: daf4f015d (PREREG-P11; frozen alone, before implementation)
+- Implementation + evidence: dc20745db (LEARNER-REVERT-PASS). P1-P10
+  byte-identical to d1305bd43 (C53). P11: ADAPT re-derives h0 in 1
+  round, h1 in 2 rounds, h0 in 1 round, total 4; STATIC reproduces the
+  C1 pathology (permanent retirement causes h0 misresolution after the
+  change); the re-derived law persisted as facts 910/911/912 through a
+  20-item pressure wave; P11 causal 3/3, foundation 8/8, corrections
+  2/2. One 32,768-byte state, no reset, pure Zag, 3/3 byte-identical.
+
+**Status: SURVIVES as bounded L2.** One continuing learner now covers
+law change and revert in one lifetime. Replacement in flight:
+learner_dev/ (P12 integrates developmental-language/negation learning
+into the same lifetime, P1-P11 byte-identical, position restriction
+explicit).
+
+Architecture: extends the single integrated state from C53; no new
+subsystem state formats.
+
+## C58. Threshold boundary map
+
+Claim: the conditional-threshold boundary is mapped; Tier-2 ambitions
+for this lineage are retired.
+
+- Prereg: 2eaa1f122 (THRESHOLD-BOUNDARY-PREREG-FROZEN; frozen alone,
+  before implementation)
+- Implementation + evidence: ab9a3ccfd
+  (THRESHOLD-BOUNDARY-MAP-COMPLETE). Both frozen predictions were wrong
+  in opposite informative directions. A2: even a 15/16-target-predictive
+  composite condition was culled; Tier-1 constructs evidence-perfect
+  16/16 CONDs scoring 9600, floods the beam, and removes the condition
+  and arm terminals; Tier-2 fires only when redundant and is
+  unreachable when needed. B2: with only non-equivalent distractors,
+  the mechanism found the true D term, 64/64, HAS_D=1; Tier-1 reuse
+  under crowding is robust. 3/3 byte-identical. Pure Zag.
+
+**Status: SURVIVES as bounded L2 boundary-mapping evidence.** Final
+boundary: permanently retire Tier-2 ambitions for this lineage; do not
+build Tier-2b on the old substrate. New mechanism in flight:
+cond_disc2/ (protected track for composite discriminative conditions,
+with A1, A2, B2 frozen as kill bars).
+
+Architecture: deletion recorded (Tier-2 lineage retired); per the lane
+ruling, no growing COND library of researcher-authored cases.
+
+## C59. L3C v2 independent adversary: survives this round
+
+Claim: the L3C v2 construction survives the frozen adversary round.
+
+- Prereg: 2c0e52739 (L3C-V2-ADV-PREREG-FROZEN; frozen alone, before
+  the attack)
+- Results: 8b82a836a (L3C-V2-ADV-SURVIVES-THIS-ROUND). F1 depth-3
+  successive refinement: D1->D2->D3 composed correctly, 4/4. F2
+  disjunction blind spot: exactly three honest failures, no build and
+  no silent misresolution; OR remains a permanent by-design blind spot
+  of disc2. F3 default-edge refinement: the previously untested
+  repointing path worked, 5/5. 3/3 byte-identical. Pure Zag.
+
+**Status: SURVIVES as bounded L2, this round only.** One disclosed
+wording mismatch: the prereg described F2 base-rate scoring as 2/4
+while the implementation reported the equivalent withhold signature
+4/4 under a different scoring view; mechanism-facing facts and verdict
+unchanged. Round-2 adversary in flight: l3c_v2_adv2/ (simultaneous
+sibling-edge refinement races; mixed outputs after a D1->D2->D3
+chain).
+
+Architecture: adversary round; no new mechanism.
+
+## C60. L3A trace invention: K3 process FAIL
+
+Claim: stored-trace operator invention with C0-A audit.
+
+- Prereg: 05898699e (frozen alone, before implementation)
+- Implementation + evidence: a6fbee865. The worker's result doc labels
+  itself L3A-TRACE-BUILD-PASS: technical results strong (invention and
+  reuse demonstrated, C0-A audit A1-A7 pass, all 5 frozen bars, 3/3
+  deterministic).
+
+**Status: BUILD-FAIL on K3 process grounds.** The worker used a
+python3 heredoc to patch a /tmp scratch file during diagnostic
+debugging. Disclosure does not cure use per the literal pure-Zag rule,
+so K3 FAILS: the committed result doc's K3 PASS with a
+disclosed-incident caveat is overridden. Technical findings
+(invention, reuse, C0-A PASS) are preserved as exploratory only, not
+canonical evidence. A clean rebuild is in progress.
+
+Architecture: experimental trace-invention builder; no architecture
+canonized.
+
+## C61. Fork battery wave (2026-09-30, 0750pdt)
+
+Claim: the frozen fork battery discriminates across all branches/forks.
+
+- Enumeration manifest: a3d7a9ed3 (82 entries, 1 LIVE; committed before
+  the run)
+- Results: 801736ec4 (FORKBATTERY-80/82 PASS). 80 PASS, 0 FAIL, 2
+  UNTESTABLE (expected non-TNN trees). The automated
+  manifest/driver/result consistency gate passed and is now permanent
+  infrastructure. Harness byte-identical; archive immutability 41/41
+  clean.
+
+**Status: GOVERNANCE-PASS.** Fork-battery coverage holds on the
+0750pdt wave.
+
+Architecture: governance instrument; no cognition source.
+
+## C62. Paper governance audit v2
+
+Claim: the v2 clean paper is faithful to the 53-claim ledger freeze.
+
+- Audit: d66466101 (PAPER-GOVERNANCE-V2-PASS; stage 11 second cycle).
+  K1: all 53 claims checked, labels match, tally matches ledger. K2:
+  166 cited hashes resolve, 20/20 subjects match. K3: shell+git only,
+  dash-clean, contaminated paper untouched. Two observations logged,
+  no blocking flags.
+
+**Status: GOVERNANCE-PASS.** The v2 paper (89cf970ee) is verified
+faithful to the 53-claim freeze at 8837d2ee0. Note: verdicts C54-C63
+landed after that freeze, so the paper is already stale for current
+research; it remains a valid internal record only against that
+freeze.
+
+Architecture: governance audit; no cognition source.
+
+## C63. Evidence-first paper draft (34 claims)
+
+Claim: none. Paper artifact only.
+
+- Draft: 6425f5a55 (PAPER-DRAFTED). Derived top-down from the claim
+  ledger (34 claims) with zero citations to the contaminated paper.
+
+**Status: SUPERSEDED, not evidence.** Superseded by the v1 clean paper
+(94c30752f) and the v2 clean paper (89cf970ee). Recorded for
+provenance only; nothing in it may be cited as evidence.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -912,13 +1139,16 @@ learner (P11 episode), pure composition from frozen parts.
 
 ## Ledger tally
 
-- Claims ledgered: 53 (C01-C34 frozen at 714178dd9; C35-C53 appended
+- Claims ledgered: 63 (C01-C34 frozen at 714178dd9; C35-C49 first
+  append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
-  C47 (revert-adapt), C50 (recency-guard), C53 (learner integration)
-  -> 18 SURVIVES (all bounded L2 or L2+, none L3)
+  C47 (revert-adapt), C50 (recency-guard), C53 (learner integration),
+  C54 (causal revert), C55 (OpScope displacement boundary), C56 (L3B v2),
+  C57 (learner revert), C58 (threshold boundary map), C59 (L3C v2
+  adversary round) -> 24 SURVIVES (all bounded L2 or L2+, none L3)
 - KILLED: C01 (generic reading), C02, C05, C07, C09, C10, C12, C14, C31,
   C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C),
   C51 (OpScope gate) -> 13 KILLED
@@ -926,13 +1156,19 @@ learner (P11 episode), pure composition from frozen parts.
 - VOID / INVALID: C32 (H-B void; H-C invalid; H-A kill-with-retracted)
 - BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
   (figures), C22, C36 (L3C form builder), C43 (L3B growth) -> 6 BUILD-PASS
-- BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate)
-- EXPLORATORY: old C1 wave (superseded by C03), C52 (HypD v2 review)
+- BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate),
+  C60 (L3A trace; K3 process FAIL) -> 3 BUILD-FAIL
+- EXPLORATORY: old C1 wave (superseded by C03), C52 (HypD v2 review);
+  C60 technical findings (invention/reuse/C0-A, exploratory only
+  pending clean rebuild)
 - UNVERIFIABLE: C04 (Design 1)
 - RETRACTED: C32 (H-A diagnosis), C41 (v1 emergence claim), C49 (tiered
   claim)
 - REPRODUCTION-CONFIRMS: C40 (threshold, confirms C11)
-- GOVERNANCE-PASS: C48 (fork battery 78/80)
+- GOVERNANCE-PASS: C48 (fork battery 78/80), C61 (fork battery 80/82),
+  C62 (paper governance v2) -> 3 GOVERNANCE-PASS
+- SUPERSEDED: C63 (paper-derived 34-claim draft; superseded by the v1
+  and v2 clean papers)
 - L3 achieved anywhere: zero
 
 No em dashes were used in this document (verified with the shell-only
