@@ -917,4 +917,6 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 ---
 
+**F2 Autonomous Scientist: BUILD-FAIL (4ebde580a).** Generic learner with primitive actions derives rules from passive traces, constructs experiments via iterative-deepening base-B composition (depths 1-6, pure simulation), executes once, eliminates, plans under survivors. World A: 6 hypotheses -> constructed [SD,W,OZ] and [SD,W,W,OY] -> goal achieved. Random 0/20. World B: 2 hypotheses -> constructed [SX,SK,W,W,OY] -> goal achieved. Random 1/20 (K-AS5 FAIL). The frozen bar caught a weak goal instance (transient Y=1 too easy), not a broken loop. Honest BUILD-FAIL. L2 structural learning, not L3. No seed-shopping. Follow-up: re-freeze with harder goal.
+
 **End of paper.**
