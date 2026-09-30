@@ -67,3 +67,33 @@
 - F3 (UNCERTAINTY without ACT): not triggered; S8 inquiry works.
 - F4 (eviction without bid correlation): not triggered; M2 holds.
 - F5 (stage/domain branch in learner): none; verified by inspection.
+
+## Correction note (2026-09-30, post red team)
+
+Per the independent red team report (commit `a5ccb100d`,
+`devint_cla2_redteam/DEVINT_REDTEAM_REPORT.md`), two claims above are
+overstated and are corrected here. No other content in this report is changed.
+
+1. **M2 retracted as measured.** The synergy-metrics section stated "M2
+   (causal -> retention): ... Bid-vs-survival correlation holds." The red
+   team verified by source inspection that `m2_check` (line 663) is defined
+   but never called. The frozen M2 metric (bid>=2 vs bid<=0 survival rates,
+   >= 40 point gap) was never computed. The correct statement is: M2 was
+   not measured. GROUPs survived S10 via harness-authored PROTECT edges,
+   not via bid-driven retention.
+
+2. **F4 guard vacuous.** The falsification section stated "F4 (eviction
+   without bid correlation): not triggered; M2 holds." Because the
+   bid-vs-survival correlation guarded by F4 was never computed (see item
+   1), the F4 guard is vacuous as stated. Additionally, the red team found
+   that `evict_one` breaks bid ties by lowest node id, so under
+   bid-collapse conditions the positional tie-break becomes the decider,
+   which weakens the F1 "no positional attractor" claim under sustained
+   interference (evidence-cascade probe: 200 distractors evicted all 3
+   rules). F1 and F4 as stated hold only under the tested S10 pressure,
+   not under the 10x-interference probe.
+
+The frozen B1-B5 bars and the 11 stage results are unaffected by this
+correction; BUILD-PASS stands. These corrections must be addressed (M2
+implemented or claim narrowed; retention hardened) before any SURVIVES
+consideration.
