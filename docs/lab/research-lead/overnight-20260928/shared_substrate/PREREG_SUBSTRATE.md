@@ -115,14 +115,32 @@ W = 32768 bytes. Header (64 bytes at 0):
 
 Episode record (ep_stride bytes):
 seq(4), state[nvar bytes], action(1 byte), next_state[nvar bytes].
-Remaining bytes zeroed. Stride = 8 + 2*nvar, rounded up to 4.
+Remaining bytes zeroed. Stride = 5 + 2*nvar, rounded up to 4.
 
 Causal entry (ent_stride bytes):
 used(4), action(4), mask(4), cond_vals[nvar*4],
 fx_kind[nvar] (0=UNRES,1=UNCH,2=SET),
 fx_param[nvar*4], status(4) (0=active,1=ambiguous,2=superseded),
 parent(4), support_count(4), support[8*4].
-Stride = 32 + 8*nvar, rounded up to 4.
+Stride = 56 + 9*nvar, rounded up to 4.
+
+Header field 64: fact_conflicts. Header field 68: ep_processed
+(count of episode records already consumed by
+sub_causal_update; episodes are processed strictly in order, so
+one counter suffices for the incremental protocol).
+
+Conflict specialization rule (frozen): when an active entry E is
+inconsistent with a new episode, E becomes ambiguous and two
+children are created. v* is the first variable where the new
+episode state differs from E's first support episode state (if
+none differs, the world is nondeterministic on identical state
+and both children use mask=all with their full states).
+Child1: mask = E.mask + {v*}, cond[v*] = new state[v*], effects
+derived from the new episode, support = [new episode].
+Child2: mask = E.mask + {v*}, cond[v*] = old support value,
+effects = E's effects, support = E's support episodes filtered
+to those matching child2's condition and consistent with its
+effects.
 
 Fact triple (12 bytes): e_off(4), a_off(4), v_off(4). Strings live
 in the string area (bump allocator). A later triple with the same
