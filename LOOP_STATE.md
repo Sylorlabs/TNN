@@ -4206,3 +4206,360 @@ the sealed pairs (unchanged, nothing added this wave); DP-1
 presentation is a parent-agent queue decision; Q1/Q2 banked; DDES
 t*=0 repair; H-EXP2; H-ROUTER2; DEVANG2 retry; conditional-first
 builder lane. Zero origin commits this window.
+
+---
+
+## Wave 20260930-0521pdt (backfilled 2026-09-30 by wave 0821pdt; no debate
+was held by the 0521pdt wave; no LOOP_STATE section was written by it)
+
+Run dir: docs/lab/rsi/runs/wave-20260930-0521pdt/ (RUN_START_PIN.txt =
+697d4f308). The wave froze and committed the corrected F3a re-freeze and
+produced its evidence, but left the evidence uncommitted and held no debate.
+
+1. H-PI-REV2-F3a2 prereg [NEW]: FROZEN, committed alone at 97d58e38e
+(PREREG_PI_REV2_F3a2.md plus RUN_START_PIN.txt only). Authority: debate
+0221pdt judge motion M5 (AMEND). Corrected K-F3-4 disjointness text;
+adversary byte 'v' (byte 118), the last of {k,m,r,v} in sorted order, by
+declared zero-discretion rule. Implementation frozen at 847a8f10f, not
+modified. Verdict on all four bars passing: BUILD-PASS only, never
+SURVIVES. Commit-order: prereg committed before any run. Note: the
+frozen prereg text carries a stale sentence claiming "the 0221pdt audit
+established" the allowed set, which is accurate for F3a2, but the F3a2
+evidence filenames (EVIDENCE_F3A2_runN.txt) are new.
+
+2. H-PI-REV2-F3a2 evidence [NEW]: produced, NOT committed at wave end.
+Three runs at docs/lab/rsi/runs/wave-20260930-0521pdt/f3a2_evidence/
+(EVIDENCE_F3A2_run1/2/3.txt, 2282 bytes each), P8 adversary byte 'v':
+COUNTEREXAMPLE_DETECTED(vab); DIAGNOSIS pos=0 byte=118 conflicts=0;
+PRIMITIVE-CONSTRUCTED (0,118); alt index 2 (C0 broadcast-first); v4
+ACTIVE parent v3; vab->vvv; priors unchanged (wab->www, xab->xxx,
+abc->ccc, xy->xx, defg->gggg); reuse vqv->vvv with no new revision;
+R 8/8; P9 rollback; RESULT fails=0; BUILD-PASS on the trace. The 0821pdt
+wave verifies and commits this evidence.
+
+3. Interactive survey [NEW]: NONE new. 0 new or modified .zag files in
+697d4f308..HEAD; the frozen prereg scanned for interactive claims: zero
+matches. tnn_chat FIT staleness 5 of 8 (due at 8 of 8).
+
+4. Process notes [NEW]: the wave's frontier/ subdirs (condfirst, devang2,
+f1, f2_retry, f3b_design, hexp2, hrouter2) and ddes_repro/, debate/,
+fork_battery/ dirs were created empty; no work product was left in them.
+No fork battery was run by the 0521pdt wave itself. Zero Python in wave
+work. No em-dashes in wave documentation.
+
+Provenance (verbatim probe): prereg text new this wave; implementation
+847a8f10f inherited unchanged; fixtures and prior F2/F3a evidence
+inherited; debate M5 of 0221pdt inherited as authority; F3a2 evidence new
+but uncommitted. All HELD statuses, rulings, banked questions, governance
+items, sealed pairs, DP-1, salt dispositions, and frontier dirs remain
+inherited and untouched.
+
+Queued next (as the 0521pdt wave left it): commit the F3a2 evidence;
+verify K-F3-3/K-F3-4 audits; then step 4 independent reproduction of
+H-PI-REV2; F3b interface-extension prereg then execution.
+
+---
+
+## Batch waves 20260930-0732/0750/0805pdt (backfilled 2026-09-30 by wave
+0821pdt; no run dirs and no debates exist for the batch; verdicts below
+are reconstructed from commit messages and the canonical ledger at
+fdadcbe3c, not independently re-verified by this backfill)
+
+About 110 commits between 2026-09-30 12:24 and 15:22 UTC. The canonical
+record is the claim ledger (CLAIM_LEDGER.md + CANONICAL_STATE.md at
+fdadcbe3c): 74 claims, 32 survivals (all bounded L2/L2+, zero L3), 13
+kills, 7 downgrades, 1 process-fail, 1 adversary-breaks. Prereg-first
+discipline was generally observed (preregs committed alone before
+implementations; the 0821pdt wave runs the commit-order self-check over
+the batch's prereg pairs).
+
+1. L3C lane [NEW batch]: L3C-FORM-PASS (e663864f5, emergent conditional
+dispatch, pure Zag, 3/3 byte-identical); L3C adversary Phase 1 independent
+reproduction REPRO-PASS (7fae6a188, rebuilt from e663864f5); L3C v2
+independent adversary SURVIVES-THIS-ROUND (8b82a836a); L3C adversary Phase
+2 attack result L3C-ADVERSARY-PROTOCOL-SMUGGLING-PROVEN (c96875d36, an
+adversary win: protocol smuggling proven); L3C v2 round-2 adversary
+SURVIVES-THIS-ROUND (593cc5906); L3C v3 alternative-cover dispatch
+L3C-V3-PASS (3bfa0947c, prereg 3124d2e9a; F2 blind spot closed, no OR
+case). Ledger: C66, C73.
+
+2. L3B lane [NEW batch]: L3B-V2-PASS constructor-level redesign
+(7a1d3265d); L3B C0-C adversary L3B-C0C-BOUNDARY-EXPOSED (a40aac558);
+L3B v2 independent adversary run-1 honest FAIL plus run-2 BOUNDED
+evidence (5be03c94f; prereg addendum 252440aa4 corrects D-REVISIT 3/3
+to 2/3 pre-run-2); L3B residual-growth L3B-GROWTH-PASS on K-RG-1..9
+(2fb110ce7, prereg c5be6dfb5; grown structures are base-language programs
+run by the pre-existing interpreter); L3B-V2-ROBUST-PASS (41b87007a,
+prereg 92c73aeca; ambiguity records plus archive-full discipline).
+Ledger: C64 (BOUNDED), C68.
+
+3. Causal lane [NEW batch]: CAUSAL-REVERT-PASS (da0cd17b6, learner
+constructed graphs survive law change and revert, 41/41 frozen checks);
+DDES law-revert REVERT-ADAPT-PASS (00e9a766e); C1 law-revert attack
+frozen (fd31db230); law-revert integration P11 LEARNER-REVERT-PASS
+(dc20745db, prereg daf4f015d); CAUSAL-EDITINVENT-PASS (4c233f82a,
+prereg 811fc06c9; learner-authored EXTEND-DELAY edit); CAUSAL-EDITADV
+attack implementation 16c7665bd (prereg d71be66dc) then results
+EDITINVENT-ADV-BREAKS SCOPE-COLLAPSE (df270dc82, 3/3 byte-identical):
+the diagnose-and-relax generality claim of C65 is broken (the max_rules
+arm was dead code; diagnose-and-relax is delay-specific); C65 itself is
+NOT retracted. Ledger: C65, C71 (ADVERSARY-BREAKS).
+
+4. OpScope lane [NEW batch]: OPSCOPE-R1R4-PASS (c60bfbe7a, prereg
+51c54e262); OPSCOPE-DISPLACEMENT-LOAD-BEARING sealed results
+(54d3e3ca9, prereg ae9c3f13e); OPSCOPE-BEHAV-PASS (e8be2d5ef, prereg
+82e0e94fd; gate lineage CLOSED, net -39 source lines, position-0 lemma
+blindness overcome behaviorally; no further gate permitted); OpScope
+compression COMPRESSION-PASS (5722ff3a8, prereg 08a0c0ac4;
+compress_learn.zag, 8,400-byte slice eliminated, 3/3 byte-identical).
+Ledger: C69, C74.
+
+5. L3A trace [NEW]: clean rebuild L3A-TRACE-CLEAN-BUILD-PASS (e16cc0391,
+prereg 05898699e; 3/3 identical, C0-A A1-A7 pass, zero Python; supersedes
+C60). Ledger: C70.
+
+6. Hypothesis D [NEW]: v3 implementation plus HYPD-V3-PASS (e7149e452,
+prereg 3847065e2; T3 SOLVE 3/3; selection schedule necessary and
+sufficient). Ledger: C72.
+
+7. Developmental language [NEW]: P12 episode LEARNER-DEV-PASS (fd8757ba9,
+prereg 980981716) then DOWNGRADED: PROCESS-FAIL (C67) on Python
+disclosure. The PASS label is dead; the mechanism evidence is not
+adopted. The 8,400-byte OpScope slice debt recorded in C67 was
+eliminated by C74.
+
+8. Threshold lane [NEW batch]: THRESHOLD-BOUNDARY-MAP-COMPLETE (ab9a3ccfd,
+prereg 2eaa1f122; A2-TIER1-FLOODED; B2-FINDS-D); THRESHOLD-REPRO-PASS
+(07785ac78, prereg 955106ae5, nine runs byte-identical);
+REDTEAM-THRESHOLD-BREAK (9c6ee8ba8, prereg 15982381c; Tier-2 pass
+decorative).
+
+9. Recency, churn, pressure [NEW batch]: RECENCY-GUARD-CONTAINED
+(6d7681138, prereg 68c5796d4; 9/10, door-absorption EVICT-confirmed);
+CHURN-REVISION-PASS (5db2712af, prereg 18fb10434); EPISODIC-PRESSURE-BLEED
+(136588de5, prereg 2e0c6ed10; implementation plus evidence committed in
+9c6ee8ba8, blob-verified).
+
+10. Learner integration and DDES [NEW batch]: LEARNER-INTEGRATION-PASS
+(d1305bd43, prereg c6288274d); LEARNER-STRESS-PASS (daa9bf2fc, prereg
+4ca3a7196, 6/6 frozen bars); DDES-MULTISTEP-PASS (7871ca6d3, prereg
+edcefc164); DDES-INTEGRATION-PASS (f843188ad, prereg c3fecd3c8,
+implementation d9f3871c5). Note: the DDES t*=0 soundness hole repair is
+still queued; these passes do not close it.
+
+11. Fragment discovery [NEW]: Hypothesis B implementation plus results
+BUILD-PASS (460fba9d2, prereg ce6d3b1a7).
+
+12. Valley [NEW]: VALLEY-REDESIGN2 implementation plus validation 0/10
+accepted, VALLEY-REDESIGN-FAIL on K2 (ea920137b, prereg 0310c7076).
+
+13. Core Freeze Challenge [NEW batch]: protocol FROZEN at 66e3c3f38
+(9-world battery, frozen bars, post-freeze adversary handoff W6/W9
+reserved); Stage 0 READINESS-PASS at e129b2fbd (world-input interface,
+32,768-byte W regions, null-world 3/3, 0 cognitive lines changed);
+freeze COMMITTED at 87ac95d08 (source b761efd90cb1, binary 8733af3d2814,
+reproducible byte-identical builds, void-on-mismatch); pre-freeze world
+designs sealed at e806d634e (W1-W5, W7, W8; four predicted FAILs);
+post-freeze adversary worlds sealed at 6d185ebce (W6 active inquiry
+designed to expose a false positive; W9 new representational structure,
+predicted near 0%; WORLDS-ADVERSARY-COMPLETE; K1/K2/K3 pass; design only,
+never executed; pure text/markdown). Run phase is executing against the
+frozen binary with per-world hash verification.
+
+14. Clean papers and governance audits [NEW batch]: paper v1 PAPER-DRAFTED
+(6425f5a55); paper v2 regenerated CLEAN-PAPER-V2-COMPLETE (89cf970ee);
+paper v3 at c4855a65b (supersedes v2); governance audit v1
+PAPER-GOVERNANCE-PASS (7b670b633); audit v2 PAPER-GOVERNANCE-V2-PASS
+(d66466101); audit v3 at b5a200ba0 claims PAPER-GOVERNANCE-V3-PASS but
+the label is PROCESS-INVALIDATED: third Python process incident this
+cycle (the v3 paper auditor used Python); the paper itself is clean and
+the audit's technical findings stand, but the PASS label cannot be
+adopted as a wave verdict (standing rule: disclosure does not cure use).
+
+15. Fork batteries [RE-CERT process confirmations]: 0732pdt 79/81 PASS
+(20705ab5a; manifest 54b91a077); 0750pdt 80/82 PASS (801736ec4; manifest
+a3d7a9ed3 plus consistency_gate.sh); 0805pdt 81/83 PASS (fe8485d7e;
+manifest fe20cb7fe; pre-run gate promotion A1+A2 ALL PASS). Each: 2
+UNTESTABLE (rh-pull-1-head, rh-pull-2-head, the known non-TNN
+research-doc trees); znc pin 498abcb5 uniform (0 divergence); archive
+immutability 41/41 clean.
+
+16. Ledger [NEW]: append 2 C35-C49 (71fe67563), append C50-C53
+(8837d2ee0), append 3 C54-C63 (236a63a5a), append 4 C64-C74 (fdadcbe3c).
+Canonical state: 74 claims, 32 survivals (all bounded L2/L2+, zero L3),
+13 kills, 7 downgrades, 1 process-fail (C67), 1 adversary-breaks (C71).
+
+Process notes [NEW]: no run dirs exist for the 0732/0750/0805 batch
+waves; no debates were held for the batch; no commit-order self-check
+was run over the batch by those waves (the 0821pdt wave backfills it).
+The batch's own commit messages observe prereg-alone discipline
+extensively. Zero Python in the batch's experimental work except the two
+disclosed process incidents (C67 P12, v3 paper auditor). No em-dashes in
+wave documentation per the standing documentation rule.
+
+Provenance (verbatim probe, answered for the batch as a whole): verdict
+labels new in batch commit messages; prereg texts new; implementations
+and evidence new; ledger and canonical state new at each append;
+governance audit findings new; all pre-batch HELD statuses, rulings,
+banked questions, sealed pairs, DP-1, salt dispositions, and frontier
+dirs remain inherited and untouched. This backfill is sourced from commit
+messages plus the canonical ledger; it re-verifies nothing.
+
+Queued next (as the batch left it): independent reproduction of H-PI-REV2
+(step 4) after F3a2; F3b interface-extension prereg; DDES t*=0 repair and
+sealed re-run; H-EXP2; H-ROUTER2; DEVANG2 retry; conditional-first
+builder lane; NQ4/NQ5 banked to Micah; tnn_chat FIT due at 8 of 8
+(staleness 5 of 8 at 0521pdt); his six pending governance rulings
+(untouched); his blind verdicts on the sealed pairs (unchanged, nothing
+added); DP-1 presentation is a parent-agent queue decision; Q1/Q2 banked.
+Zero origin commits this window.
+
+---
+
+---
+
+## Wave 20260930-0821pdt verdicts (completed 2026-09-30 ~15:55 UTC;
+one coordinator subagent, inline, no descendants; debate held over
+the full slate; transcript in
+docs/lab/rsi/runs/wave-20260930-0821pdt/debate/)
+
+1. H-PI-REV2-F3a2 [NEW]: BUILD-FAIL on K-F3-1 bar text; mechanism
+evidence clean. The coordinator verified the uncommitted F3a2
+evidence (docs/lab/rsi/runs/wave-20260930-0521pdt/f3a2_evidence/):
+three runs byte-identical (2282 bytes each, cmp), fails=0,
+BUILD-PASS on the trace; K-F3-2 PASS (3/3 identical); K-F3-3 PASS
+(zero 'v', zero "vab"/"vvv"/"vqv", zero 118 in the committed
+implementation blob 847a8f10f); K-F3-4 PASS (zero 0x76 in all
+frozen fixture inputs; F2 'i', F3a 'w' disjoint). K-F3-1 as written
+is NOT met: the trace shows "VERSION v3 ACTIVE (parent v2)" where
+the bar demands "v4 ACTIVE with parent v3" (v4 is unreachable in
+the frozen binary's single-execution P8 interface); "PREDICT vqw ->
+vvv [ok]" where the bar demands "vqv" (bar-design typo); no
+"wab"->"www" line (belongs to the F3a run, not a fresh F3a2
+execution). These are bar-design errors, not mechanism failures:
+the white box detected vab, diagnosed byte 118 from data,
+constructed the primitive, revised to a new active version, reused
+with no new revision, 8/8 R retention probes post-revision. The
+judge ruled BUILD-FAIL under the standing rule (never weaken a
+frozen kill bar to force a pass; the F3a precedent controls: F3a
+was killed on K-F3-4 bar text with a clean trace, then re-frozen
+and re-run). Ordered: re-freeze K-F3-1 with corrected text (v3
+ACTIVE parent v2; vqw reuse probe; drop wab; name the 8 R-probe
+retention explicitly), then re-run on the same frozen binary
+847a8f10f; the verified K-F3-2/3/4 results stand. This wave commits
+the F3a2 evidence. Commit-order: prereg 97d58e38e (committed alone)
+strictly precedes the evidence (mtimes 12:27:16 after 12:24:51);
+implementation unmodified since 847a8f10f. Strict-letter caveat
+recorded: the implementation commit (06:32:23) predates the
+re-freeze prereg (12:24:51); the re-freeze route stays authorized
+by the 0221pdt debate motion M5, not re-litigated here.
+
+2. Backfilled 0732/0750/0805pdt batch [NEW]: ADOPTED AS RECORDED
+with ordering verified. Backfill commit-order self-check 3/3
+ORDER-VERIFIED (L3C v3: prereg 3124d2e9a 15:14:36 before impl
+3bfa0947c 15:19:23; CAUSAL-EDITADV: prereg d71be66dc 15:14:19
+before impl 16c7665bd 15:17:08; OpScope compression: prereg
+08a0c0ac4 15:13:08 before impl 5722ff3a8 15:20:22). Adopted:
+L3C-V3-PASS, L3A-TRACE-CLEAN-BUILD-PASS, HYPD-V3-PASS,
+OPSCOPE-BEHAV-PASS, COMPRESSION-PASS. CAUSAL-EDITINVENT-PASS adopted
+WITH the narrowing carried in the verdict line (narrowed by
+EDITINVENT-ADV-BREAKS scope-collapse; delay-specific, not
+parameter-generic). WORLDS-ADVERSARY-COMPLETE recorded as a process
+milestone (sealed W6/W9 designs, K1/K2/K3 pass, never executed),
+not a verdict. The missing contemporaneous debate is a governance
+gap now closed, not a retroactive cure.
+
+3. PAPER-GOVERNANCE-V3-PASS [NEW]: label PROCESS-INVALIDATED and
+void. Third Python process incident this cycle (the v3 paper
+auditor used a python3 heredoc for read-only extraction); a
+governance PASS certifies process purity, and disclosure does not
+cure use. The audit's technical cross-checks are downgraded to
+UNVERIFIED-PENDING-CLEAN-RE-AUDIT, not "stand." Ordered: an
+independent clean re-audit of the v3 paper against the ledger,
+shell and git only, zero Python, before any governance PASS label
+is carried again. The paper itself is not accused; the ledger
+remains the authority for its claims.
+
+4. ROUTER7 [NEW]: no verdict. The H-ROUTER7 SURVIVES claim in the
+uncommitted ROUTER7_RESULT.md (prereg 34347580c committed
+2026-09-29; implementation and raw evidence uncommitted for over
+eight hours) cannot be verified. Ordered: commit the implementation
+and raw evidence, or drop the item, by wave-20260930-1121pdt;
+otherwise it is retired as EXPIRED and the prereg freeze lapses.
+Ledger C24 stands DOWNGRADED.
+
+5. WORKER_BRIEF_TEMPLATE.md one-system-rule addition [NEW]: FILED
+as process documentation (committed 519e6d5d1 by the parallel
+process; dash-clean; matches the standing rule). The embedded lane
+rulings are NOT adopted as decided governance; they stand as
+proposals pending their own debated motions. Workers may read the
+template; no one may cite its lane rulings as decided.
+
+6. Fork battery [NEW]: 82/84 PASS, 0 FAIL, 2 UNTESTABLE (expected).
+Fresh run pinned to run-start fdadcbe3c, driver exit 0. LIVE entry
+(1): local-tnn-native-lab at fdadcbe3c, PASS. Uniform on all 82:
+znc pin 498abcb5 (0 divergence); probe sha 3b29aa06; b1/b2/b3 PASS
+246/246; NEG1 E0002 82/82; NEG2 char-1 discrimination 82/82;
+harness rebuilt byte-identical to frozen pin. Consistency gate
+(A1-A4) ALL PASS. UNTESTABLEs: rh-pull-1-head, rh-pull-2-head (the
+known non-TNN research-doc trees).
+
+7. Interactive survey [NEW]: NONE new. The coordinator's scan over
+fdadcbe3c..HEAD found no interactive/chat/stdin/readline/repl
+patterns in any new .zag (the only chat-substring hits are
+"replay" comments). Post-survey parallel commits (C1 F-E family,
+C1 smallest-k, L3C v3 red team, valley satsearch) were scanned the
+same way: zero interactive patterns. The frozen probe instruments
+remain the only chat-capable instruments. tnn_chat FIT staleness 6
+of 8 (due at 8 of 8).
+
+8. Process notes [NEW]: the backfill sections for wave-20260930-0521pdt
+and the 0732/0750/0805pdt batch were written this wave (dash-check
+PASS). The 0821pdt wave ran one coordinator subagent with zero
+descendants; all wave work is pure Zag, shell, and git; zero
+Python. No frozen bar weakened. The parallel research-lead process
+landed 16 commits during this wave (listed below); they are queued
+for the next wave's slate, not litigated here.
+
+Parallel-process landings during this wave (queued for next wave):
+97b28e6a6 CORE-FREEZE-RUN-COMPLETE (9 sealed worlds executed
+against the frozen binary); cee63d75a FREEZE-GOVERNANCE-AUDIT-PASS
+(hash chain verified; W6 R1 exact; 5.4 disclosed; B4 not decided);
+f202b31e2 VALLEY-SATSEARCH-UNSATISFIABLE (0/71 pass V1-V3; 6 shards
+x 3 runs byte-identical); 6a329511b C1 law-revert
+REVERT-ATTACK-SURVIVES (96 runs); 8246edf0f, 0d8bdc111, 6e03b2fa5
+C1 F-E family FE-FAMILY-CONFIRMED (24/24 R1 APPLICATION misses);
+22e2554b8, 13efc8f86, 92ab7a270 C1 smallest-consistent-k
+SMALLK-REVISION-CONFIRMED (24/24 R1 hits); f63d36e3a L3C v3
+red-team sealed attack plan; f4b07f12e L3C-V3-REDTEAM-SURVIVES
+(A/C/D confirm, B design-miss disclosed, B2 minimality confirmed);
+f0c3c980f L3A-TRACE red-team sealed attack plan (5 attacks);
+c6d3ee782 HypD v3 prereg hygiene (C72 unchanged); 10cb968b6 git
+bundle backup v10 (verified, 341 commits since v9).
+
+Provenance (verbatim probe answered in every debate motion): F3a2
+prereg and evidence new this wave (evidence committed here);
+implementation 847a8f10f inherited unchanged; F3a2 verification,
+commit-order backfill, fork battery evidence, interactive survey,
+and debate records new; batch verdicts inherited from the batch
+commits with ordering verified new; ledger C1-C74 inherited;
+ROUTER7 files inherited uncommitted. All HELD statuses, rulings
+(except M3-M5 above), banked questions, governance items, sealed
+pairs, DP-1, salt dispositions, and frontier dirs remain inherited
+and untouched.
+
+Queued next: F3a3 re-freeze (corrected K-F3-1 text) and re-run on
+frozen 847a8f10f, then step 4 independent reproduction of H-PI-REV2;
+F3b interface-extension prereg then execution; clean re-audit of
+the v3 paper (shell+git only); ROUTER7 commit-or-drop by 1121pdt;
+next-wave verdict slate from the 16 parallel landings (freeze run
+results, freeze governance audit, valley satsearch, C1 family
+results, L3C v3 red team); DDES t*=0 repair; H-EXP2; H-ROUTER2;
+DEVANG2 retry; conditional-first builder lane; NQ4/NQ5 banked to
+Micah; tnn_chat FIT due at 8 of 8 (staleness 6 of 8); his six
+pending governance rulings (untouched); his blind verdicts on the
+sealed pairs (unchanged, nothing added); DP-1 presentation is a
+parent-agent queue decision; Q1/Q2 banked. Zero origin commits this
+window.
+
+---
