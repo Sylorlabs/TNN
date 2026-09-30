@@ -115,13 +115,23 @@ B3 LEXH (exhaustive L search, independent reimplementation):
 
 These are expectations, not bars; the verdict follows section 4 only.
 
-- B1 MEM: TRAIN 6/6 (all n seen), HIDDEN 0/4 (9,11,15,17 unseen),
-  EXTENDED 0/3 (13,20,30 unseen), TRANSFER 1/4 (T1 n=4 seen and
-  content matches; T3 n=3 seen but stored symbols (a,b) mismatch
-  actual (x,y); T2/T4 unseen).
-- B2 NN: TRAIN 6/6, HIDDEN 0/4 (all map to stored n=7, emitting
-  (a,7,b,7)), EXTENDED 0/3, TRANSFER 1/4 (T1 exact n=4; T3 exact n=3
-  key but symbol mismatch fails).
+CORRECTION (2026-09-29, before any implementation existed): the TRAIN
+predictions below were first written as 6/6 for B1/B2. That contradicts
+the sequential protocol frozen in sections 2 and 3 (each TRAIN answer
+is revealed only after the prediction attempt, and TRAIN n values are
+all distinct, so the first attempt at each n necessarily misses). The
+corrected expectations are TRAIN 0/6 for both B1 and B2. No bar,
+definition, or verdict rule is changed; HIDDEN numbers (the ones the
+verdict keys on) are unaffected.
+
+- B1 MEM: TRAIN 0/6 (sequential protocol; each n novel at prediction
+  time), HIDDEN 0/4 (9,11,15,17 unseen), EXTENDED 0/3 (13,20,30
+  unseen), TRANSFER 1/4 (T1 n=4 seen and content matches; T3 n=3 seen
+  but stored symbols (a,b) mismatch actual (x,y); T2/T4 unseen).
+- B2 NN: TRAIN 0/6 (sequential protocol; ep0 table empty, later
+  episodes copy the nearest earlier n and miss), HIDDEN 0/4 (all map
+  to stored n=7, emitting (a,7,b,7)), EXTENDED 0/3, TRANSFER 1/4 (T1
+  exact n=4; T3 exact n=3 key but symbol mismatch fails).
 - B3 LEXH: check (a) max = 3 (any 3-diagonal ALT); check (b) max =
   3/17 (any 3-diagonal ALT covering 3 TRAIN n's; HIDDEN/EXTENDED n > 8
   are unreachable by branches capped at 8; TRANSFER unreachable via
