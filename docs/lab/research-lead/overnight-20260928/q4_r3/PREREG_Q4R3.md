@@ -13,11 +13,18 @@ NOT an installed perfect terminal?
   R1/R4 seeds.
 - Behavior signature: D = (x1 & (x2^x3)) | ((x1^1) & (x2&x3)) over
   all 64 input combos. 64-bit signature (lo = bits 0..31, hi = bits
-  32..63): lo = 0x68686868 = 1751477352, hi = 0x68686868 = 1751477352.
+  32..63): lo = 0x68686868 = 1751672936, hi = 0x68686868 = 1751672936.
   Derived from the F-PARCOND truth table in ADV_SPEC.md (b4e9b6a14),
   which the kept D matched 64/64. The implementation recomputes the
   signature from the sealed D definition at runtime and asserts
   equality with these frozen constants (DSEAL check, section 5).
+
+AMENDMENT 1 (before any arm ran): the decimal constant was
+transcribed as 1751477352 in the original freeze; the correct
+decimal for 0x68686868 is 1751672936 (verified via shell printf).
+The first binary run voided itself on DSEAL (no arm executed), which
+is the gate working as designed. This amendment corrects the
+decimal only; the hex, the truth table, and all arms are unchanged.
 - The artifact is correct (64/64 true) and non-minimal (a 5-op
   solution and a 4-op analytic form exist per the alternative
   explanation attack, 73d9637a2).
