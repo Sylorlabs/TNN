@@ -988,6 +988,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Learning-to-Learn Scale: SCALE-TESTED (d34e8135c).** 20→11→8→6→5 examples (retained) vs 20 flat (fresh). 50% savings. Adversarial rejected, cost returns to 20. Causal state: uses[] counter. Kept-counterexample rule load-bearing. Bounded L1/L2; learner selects but does not invent forms.
 
+**Machine-Native Stress: BUILD-PASS.** 13,040 claims. 50/50 provenance, 500 contested, 40/40 corrections, 10/10 withdrawals, 100/100 no-forgetting. Persistence byte-identical. Baselines dominated. Governance anomalies disclosed (mixed prereg commit, misleading message). No human claim.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
