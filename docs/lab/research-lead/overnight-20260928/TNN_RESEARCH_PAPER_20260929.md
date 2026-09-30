@@ -782,7 +782,7 @@ Micah corrected the wave structure on 2026-09-29: waves mean ~10 agents running 
 | FDCR | L2 (adequacy) | Held-out inference 6/6; MERGE/SPLIT downgrades open |
 | Revision bridge | Bounded L2+ | Binary-conditional; B-A6b fixed; F-LEAK fixed |
 | Learned router v2 | DOWNGRADED | Supervised compiler, not policy discoverer; diverges on nseg≥5 |
-| Unified learner | REPAIRED (H-UNIFIED10, 29/29, authenticated merit, quarantine tombstones, recency protection; H-UNIFIED9, 26/26, merit-threshold eviction for the unified causal store; DOWNGRADED by red team: merit flooding, quarantine resurrection, birth-age inversion; SUPERSEDED by H-UNIFIED10). Red team in progress. | Programmatic parse flag; defense-in-depth shape gates; stream cannot reach revise; digit-magnitude overflow covered by -2 MAGNITUDE_OVERFLOW; significant-digit counting |
+| Unified learner | REPAIRED (H-UNIFIED10, 29/29, authenticated merit, quarantine tombstones, recency protection; DOWNGRADED by red team: phantom zero-episode tombstone; H-UNIFIED9, 26/26, merit-threshold eviction for the unified causal store; DOWNGRADED by red team: merit flooding, quarantine resurrection, birth-age inversion; SUPERSEDED by H-UNIFIED10; SUPERSEDED by H-UNIFIED11). H-UNIFIED11 in progress. | Programmatic parse flag; defense-in-depth shape gates; stream cannot reach revise; digit-magnitude overflow covered by -2 MAGNITUDE_OVERFLOW; significant-digit counting |
 | Procedure intent | Bounded L2 | 10/10 standalone; not yet ported |
 | Experiment invention | Bounded L2 | First Level D; 4/4; selection not construction |
 | Memory strategy | Bounded L2* | Builder 6/6; adversary pending (*provisional) |
