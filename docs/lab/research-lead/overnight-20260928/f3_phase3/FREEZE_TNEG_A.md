@@ -51,5 +51,8 @@ world_tneg_a.zag. Zero Python used at any step of creation
 
 - Frozen artifact: world_tneg_a.zag (sha256 above).
 - Original sealed world_tneg.zag: unmodified, still in history.
-- Freeze commit: PENDING (recorded immediately after commit).
+- Freeze commit: 179ec88a40336835aa8f610cf9e1d8643899c2ec
+  (recorded in this note by follow-up commit 179ec88a4^..HEAD touching
+  this note only; the frozen artifact is unchanged and no build or
+  test ran before the freeze commit).
 - Rule: no build or test may run before the freeze commit exists.
