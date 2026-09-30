@@ -133,6 +133,53 @@ source.
   (with the exact overstated claim named).
 - Else -> H-FDCR-UNIFIED7 SURVIVES (all four attacks fail).
 
+## AMENDMENT 1 (2026-09-29, post-pilot, transparent)
+
+Pilot run: 3/3 byte-identical (md5 `eb2da0bb722cd157030f2a3f4fe57f58`
+x3, exit 0), preserved as `FU7_ADV_RAW_PILOT.txt` (committed).
+
+Pilot finding: X-FU7-2/B2 as written (`T e1 | is_a | pet`) does not
+drive the intended re-drop path. Because e1 is already a member of
+the animal concept (from B1), `handle_concept_learn` takes the
+cross-batch extension path: it extends animal's feature set with
+"is_a=pet" instead of calling `con_form`. Observed raw:
+`subject [e1] nfeat=1 -> concept 1 (total nfeat=2)`; total stayed
+128, overflow stayed 64 (no drop recorded). Per the prereg's VOID
+rule, B2 as written is VOID (intended path not driven), not a
+mechanism finding. This establishes a mechanism property worth
+disclosing: concept membership is sticky under the teach API;
+re-teaching an existing member extends its concept's feature set
+rather than re-forming, so the drop->member->drop cycle cannot
+re-drop through `con_form`.
+
+The intended attack path is the merge-overflow re-record path named
+in the task (`con_merge_into` -> `noadd_record` ->
+`noadd_drop_record`). It is driven by replacing B2 with B2a+B2b:
+
+- B2a: `T s1 | is_a | animal`. s1 is a pet member, so this extends
+  pet's feature set to {"is_a=pet","is_a=animal"}. No drop is
+  expected: require `con_nfeat(W2,0)==2`, total=128, ov=64, ov2=0.
+  If pet's feature set does not grow to 2, the attack is VOID.
+- B2b: `T e1 | is_a | pet`. e1 is an animal member, so this extends
+  animal's feature set to {"is_a=animal","is_a=pet"}. Animal now has
+  set-identity with pet, so `con_merge_check` fires
+  `con_merge_into(pet, animal)`. Pet holds 8 members (full), so e1
+  is recorded via `noadd_record` -> NOADD table full ->
+  `noadd_drop_record`, re-naming e1 into its freed overflow slot.
+  Require total=129 and the raw output to contain
+  `CONCEPT-MERGE 1 into 0` between the B2b marker and the result
+  line (path confirmation). If the merge does not fire, the attack
+  is VOID.
+
+DOWNGRADE criterion (unchanged): overflow==65 after B2b. Only 64
+distinct subjects were ever overflow-named (e1..e64); e1 would be
+counted twice, falsifying the frozen R1 claim "NOADD_DROP_OVERFLOW
+now genuinely counts distinct subjects dropped beyond the 64-name
+capacity" under R3 clear+re-record cycles.
+
+This amendment changes attack fixtures only. No kill bar and no
+downgrade criterion is weakened. The pilot raw is preserved.
+
 ## Governance
 
 - This prereg is committed alone BEFORE any attack code exists.
