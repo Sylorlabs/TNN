@@ -17,9 +17,16 @@ This is the margin by which the best-predicted feature beats all
 other features combined. Positive iff the best feature is a strict
 majority. It measures prediction QUALITY, not observation count.
 
-Merge iff strength(m) > strength(a) AND strength(m) > strength(b).
-Split iff strength(a) > strength(whole) AND strength(b) >
+Merge iff strength(m) > 0 AND strength(m) > strength(a) AND
+strength(m) > strength(b). Split iff strength(a) > 0 AND
+strength(b) > 0 AND strength(a) > strength(whole) AND strength(b) >
 strength(whole) AND best_feature(a) != best_feature(b).
+
+The positive-strength requirement (strict majority) is part of
+"predicts": a unit that does not predict a majority feature has no
+prediction to compare. The zero point is natural, not hand-tuned.
+This prevents the split from firing on noise (e.g., "not" -> "n"+"ot"
+when none have clear grounding).
 
 This is still a pure prediction-gain comparison. No hand-tuned
 thresholds. No word-specific rules. No constant rescues a test item.
