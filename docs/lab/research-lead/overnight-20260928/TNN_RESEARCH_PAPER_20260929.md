@@ -937,6 +937,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F1 (GENEXEC2): BUILD-FAIL.** Pure-Zag stack VM (ops 0-20) + learner (P1 beam, P2 CALL, P3 conditional assembly). Results: T1 (|x|) 17/17 via P3; T0,T2,T3,T4,T5 all 0 (P1 beam fails). Root cause: sparse scoring prunes solution prefixes. C0-A passes (architecture sound), C0-C/D unmet. P1 needs fundamental redesign.
 
+**Arena Causal: BUILD-PASS (7/7).** C9 0→1.000 (3/3). Total 0.735→0.779 (53/68). Added discrim format parser (11 lines). Honest scope: order unlearnable from observations (permutation symmetry), so format parsing is the only general solution. No interventions, no causal graphs. Still 0 on procedure, transfer, goal, language.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
