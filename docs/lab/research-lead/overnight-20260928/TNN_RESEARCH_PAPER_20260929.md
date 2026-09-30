@@ -968,6 +968,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES L3 Gap: L3-GAP-ANALYZED (678ea4162).** DDES fails all four C0 requirements at five independent loci (action codes, state layout, hypothesis format, schema menu, derivation algorithm all researcher-authored). Terminal classification: strong bounded L2. L3 structurally foreclosed for this lineage. L3 path runs through F2, Q3, or Q4, not DDES.
 
+**DEVANG3: BUILD-FAIL (e0d3a5e94).** 16/20 vs 17/20 baseline (missed by 1). Progress: 13/20→16/20, sub-bars 3/7→6/7, lexicon 3/10→6/10. V3 TP segmentation works. Gap: NEG novel regressed 1/3→0/3; lexicon-reuse pass splits "not" contexts differently than grounding expects.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
