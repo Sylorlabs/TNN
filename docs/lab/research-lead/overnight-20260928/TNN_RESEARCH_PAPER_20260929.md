@@ -1064,6 +1064,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **S10: BUILD-PASS (54851fd3f).** String pool GC implemented. F1-F6 all pass. 500 duplicates → 3 strings. Query temps reclaimed. Overflow handled. Latent OOB bug fixed. Substrate S9+S10 complete.
 
+**Lifetime Experience: LIFETIME-TESTED (ce2b8ea93).** 40k experiences stored. All queries match ground truth. Zag vs SQLite: ingest 57x, queries 7.7x faster. Re-abstraction 30ms. Bounded engineering, not TNN-unique. Machine-native A/B/C all measured.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
