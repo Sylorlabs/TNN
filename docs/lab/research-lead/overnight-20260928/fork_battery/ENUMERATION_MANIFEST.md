@@ -24,13 +24,13 @@ branches; the experimental branches (wave-20260927-0221pdt-exp1/exp2/
 sensory at 1010a63c3/a2a36e657/c368b8e1f, wave-debate-session-1-backup at
 3947dca1a) resolve to the same SHAs as the existing fixture entries, so
 they are covered by pinned-SHA extraction, not re-enumerated.
-Total: 80 named entries (1 LIVE, 79 fixture).
+Total: 81 named entries (1 LIVE, 80 fixture).
 
 Live entries (1):
 - local-tnn-native-lab (14a92a69d, run-start tip)
-Fixture entries (79): all prior-wave entries at their pins, every SHA
+Fixture entries (80): all prior-wave entries at their pins, every SHA
 verified to resolve in this repo before the run (git cat-file -t loop,
-79/79 commit, zero misses), including the renamed
+80/80 commit, zero misses), including the renamed
 local-20260930-0732pdt-tip at 955106ae5, arch-wave-20260930-0221pdt at
 697d4f308, arch-wave-20260929-1721pdt-tip2 at dff8c2005, and
 arch-wave-20260929-1721pdt at 7c11ac5af (old pin of the moved branch).
