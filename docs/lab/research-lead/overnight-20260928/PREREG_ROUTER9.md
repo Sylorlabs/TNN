@@ -17,23 +17,22 @@ contradiction check (R9-1) closes X-R8-3b on BOTH threshold sides
 ([s1>=B]->M and [s1<B]->WITHHOLD) while preserving all R8 behavior
 where no contradiction exists.
 
-## 2. Repair (frozen R9-1)
+## 2. Repair (frozen R9-1, amended by A1)
 
 New function `thresh_survivor_ok(W, s0v, B, M) -> i32`, called inside
 `compile_thresholds` after the clean-boundary checks pass and before
 any rule is added or any source compacted:
 
-- Enumerate the valid routing domain: f0 in 0..3, f1 in 1..9,
-  f2 in 0..3, skipping triples with f0 != 0 and f2 != 0 (feature map:
-  s0 in {1,2,3} implies s2 == 0).
-- For each entry e with ST_ACTIVE and FX_SET:
-  - If a valid triple matches e's mask condition (bit0: f0==cv0,
-    bit1: f1==cv1, bit2: f2==cv2) and f0 == s0v:
-    - claimed task = M if f1 >= B else TC_W().
-    - If en_fp(W,e,0) != claimed task: emit THRESH-REFUSED naming s0v,
-      the survivor entry index, its task, the contradicting triple,
-      and the contradicted claim; return 0.
-- Return 1 if no contradiction found.
+- For each entry e with ST_ACTIVE and FX_SET, for each episode k in
+  0..en_neps(e): let f0=ep_s(e,0), f1=ep_s(e,1), f2=ep_s(e,2),
+  t=ep_ns(e,0) (the TAUGHT task of that episode).
+- If f0 == s0v: the threshold pair claims triple (f0,f1,f2) as
+  M when f1 >= B, else TC_W().
+- If t differs from the claimed task: the threshold would shadow
+  DIRECT taught evidence. Emit THRESH-REFUSED naming s0v, the
+  survivor entry, the episode triple, the taught task, and the
+  contradicted claim; return 0.
+- Return 1 if no episode contradicts.
 
 On gate refusal (return 0): the whole threshold PAIR is refused.
 No threshold rules are added, no sources are compacted (they stay
@@ -46,6 +45,29 @@ including the THRESH-COMPILE and THRESHOLD-GENERALIZATION lines.
 
 Scope freeze: induction, merge, table build, audits, and all fixtures
 are untouched. Only `compile_thresholds` gains the gate call.
+
+## 2b. Amendment A1 (2026-09-30 ~00:30 UTC, before implementation; reason recorded)
+
+The prereg as first frozen specified a CONDITION-overlap gate (any
+surviving entry whose mask condition overlaps the generalized range
+with a different task refuses). Pre-implementation prototyping against
+the honest curriculum showed that criterion refuses the honest
+s0=1 and s0=2 thresholds: survivor H14 [any]->WITHHOLD (5 episodes,
+all with s0 not in {1,2}) overlaps every threshold range by condition
+alone. That refusal breaks frozen K-R9-3 (K-R4-4 falls to 0/10) and,
+worse, would refuse essentially every threshold whenever the
+induction's [any] default survives, destroying the mechanism's core
+capability (family-boundary generalization, frozen since H-ROUTER2).
+
+The X-R8-3b soundness hole is specifically DIRECT taught evidence at
+the contradicted triple being silently shadowed (the (1,5,0)->W mark
+absorbed into H1). The refined criterion above closes exactly that:
+a threshold may generalize over triples no survivor has direct
+evidence about (resolving generalization-vs-generalization by the
+designed family/specificity policy), but it may never contradict a
+taught episode. The kill bars in section 3 are unchanged: both
+frozen fixtures refuse via the absorbed taught episodes
+((1,5,0)->W in H1 for K-R9-1; (1,2,0)->PL in H1 for K-R9-2).
 
 ## 3. Frozen kill bars
 
