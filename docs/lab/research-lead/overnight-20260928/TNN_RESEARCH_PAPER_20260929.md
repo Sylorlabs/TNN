@@ -996,6 +996,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Segmentation Review: COMPLETE (9cef7f9d4).** Core flaw: pipeline segments first, grounds second; each pollutes other. "not" is semantic operator. H4 (multi-level revisable chunks) recommended; H2/H3 predicted to repeat NEG failure. No DEVANG5 authorized. Governance: swept commit disclosed.
 
+**Q4 Reuse: BUILD-PASS (b719bb54b).** 5-op shared subexpression (majority). Reuse: 0 interventions, 64/64. Scratch: 24 interventions, failed. Ratio 0.0 ≤ 0.5. **C0-D PASS.** Bounded L2 with demonstrated reuse; C0-C needs adversary.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
