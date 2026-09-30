@@ -40,6 +40,20 @@ with a 4-cycle so all strong transitions are gold and noise is weak:
 - c2: to c3 p=0.85, to c2 p=0.15
 - c3: to c0 p=0.85, to c3 p=0.15
 
+AMENDED 2026-09-30 (calibration fix, before implementation commit):
+a pilot run showed noise at p=0.15-0.2 crosses the count>=3
+threshold within 30 episodes (8 procedures formed instead of 4),
+breaking the Phase-A calibration check. Noise reduced to p=0.02:
+noise accumulates at ~0.025/episode, staying below 3 for 100
+episodes (2.5 < 3), while signal (~1.2/episode) crosses at ~ep 3.
+Final probabilities:
+- c0: to c1 p=0.98, to c0 p=0.02
+- c1: to c2 p=0.98, to c0 p=0.02
+- c2: to c3 p=0.98, to c2 p=0.02
+- c3: to c0 p=0.98, to c3 p=0.02
+Kill bars K1/K2/K3 and directional predictions P1/P2 are unchanged.
+Only the apparatus noise floor is corrected.
+
 Within-concept morpheme choice: uniform over the 2 members.
 
 Generation: LCG (a=1103515245, c=12345, m=2^31), fixed seed. Stream
