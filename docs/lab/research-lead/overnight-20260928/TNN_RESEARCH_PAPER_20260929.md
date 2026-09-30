@@ -939,6 +939,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Arena Causal: BUILD-PASS (7/7).** C9 0→1.000 (3/3). Total 0.735→0.779 (53/68). Added discrim format parser (11 lines). Honest scope: order unlearnable from observations (permutation symmetry), so format parsing is the only general solution. No interventions, no causal graphs. Still 0 on procedure, transfer, goal, language.
 
+**Note (2026-09-29 mandate):** Per autonomous research director directive sections 6 and 23, all arena improvements must be labeled BUGFIX / GENERIC-CAPABILITY / ARENA-ADAPTER. Only GENERIC-CAPABILITY counts as research progress. A2 audit pending to classify C4, C6, C8, C9. Clean canonical remains 0.573. Adapter-inflated score labeled separately until audit completes.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
