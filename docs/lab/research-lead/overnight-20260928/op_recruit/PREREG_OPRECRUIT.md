@@ -102,14 +102,14 @@ etgt = y. Identical to GENEXEC2.
 
 ### 4.2 Baseline (frozen; from GENEXEC2 F1 report)
 
-P1 beam (width 500, max_len 12, no CALL, no recruited ops) on T4: 0/13.
+P1 beam (width 100, max_len 12, no CALL, no recruited ops) on T4: 0/13.
 On T5: 0/13.
 
 ### 4.3 Treatment (frozen procedure)
 
 1. Verify P_ABS bytes against GENEXEC2 EVIDENCE.md (byte comparison).
 2. `r = recruit_op(P_ABS)`; assert r == 32.
-3. Run P1R on T4: beam search, universe = P1 ops + {(32,0)}, width 500,
+3. Run P1R on T4: beam search, universe = P1 ops + {(32,0)}, width 100,
    max_len 12, ordering (exact desc, mae asc, len asc, prog asc).
    Record best exact-match score, best program bytes, and whether
    (32,0) appears in the best program.
@@ -176,3 +176,13 @@ paths touched.
   bytes as semantics) plus the stack-discipline wrapper. The ablation
   that isolates them (wrapper with researcher-chosen bytes) is not run
   this wave; the CALL comparison in 3.4 is the analytic substitute.
+
+## 8. Amendment A1 (2026-09-30, before any implementation)
+
+Beam width is corrected from 500 to 100 in 4.2 and 4.3. Justification:
+the frozen GENEXEC2 implementation calls beam_search with width 100
+(solve_task: `beam_search(..., 0, 12, 100, p1)` for P1; the Amendment A5
+text mentions 500 but the code, which produced the 0/13 baseline, uses
+100). The baseline 0/13 was measured at width 100; the treatment must
+use the same width for a fair comparison. No other change. The
+prediction and falsification criteria are unchanged.
