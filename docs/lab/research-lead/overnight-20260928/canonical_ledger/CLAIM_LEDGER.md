@@ -777,6 +777,119 @@ not edited). If Tier-2 conditional discovery is wanted, the fix is in the
 selection/persistence interaction, not the combiner's slice math. Do not
 rewrite history to fix the fd31db230 message/content mismatch.
 
+## C50. Recency-guarded earning (retention-policy terminal experiment)
+
+Claim: a recency-guarded earning discipline contains the episodic
+sleeper bleed found in C45.
+
+- Prereg: 68c5796d4 (frozen alone, before implementation; NAMECHECK.md
+  + prereg only)
+- Implementation + evidence: 6d7681138 (RECENCY-GUARD-CONTAINED).
+  Inter-episode earning skips the most recent arrival (the highest-subj
+  survivor). Sleepers 9/10 across all three episodes vs the 7/10
+  episodic baseline (C45) and the 9/10 single-wave baseline (C44);
+  zero sleeper evictions in EP2/EP3; first evictions (329,99) and
+  (429,99) exactly as frozen; the EVICT log confirms the revolving
+  door always has an unproven occupant to sacrifice. 3/3 byte-identical.
+  Pure Zag.
+
+**Status: SURVIVES as bounded L2.** The retention-policy lane is
+CLOSED; no follow-up variants warranted. The earning discipline is
+ADOPTED as the inter-episode rule (needs no door knowledge; protects
+demonstrated utility, sacrifices the undemonstrated). Its efficacy is
+cited from this battery, not re-proven elsewhere.
+
+## C51. OpScope K=2 DELETION gate stress attack
+
+Claim: the K=2 DELETION gate resists confounds that clear K=2.
+
+- Pilot (pre-prereg): 82262d90c (diversity semantics corrected
+  pre-prereg: sforms[w] counts all following words, not the immediate
+  follower)
+- Attack prereg: 37d4212d (frozen alone, before sealed work)
+- Sealed results: ebd62fe5 (GATE-STRESS-FAIL). Family A (mid-utterance
+  confound clearing K=2): the confound installs as a DELETION operator
+  (CONFOUND_GRN_INSTALLED=1); TEST_ACC 5/20 vs 20/20 baseline; novel
+  compositions break; T1 holds via not-op, so this is FAIL-FALSE-INSTALL,
+  not a miss. Family B (K=2-deficient confound): 20/20, K=2 carries the
+  discrimination. Family C (position-0 confound): 20/20; the Position-0
+  Lemma is confirmed empirically (a position-0-only word always has
+  cs=0, provably immune). The harm is behavioral: the installed
+  confound fires on any utterance containing it and mispredicts novel
+  compositions; the gate has no behavioral validation. 3/3
+  byte-identical per family. Pure Zag.
+
+**Status: KILLED as a robust operator gate.** The gate discriminates
+only against K=2-deficient and position-0 confounds; a mid-utterance
+confound that clears K=2 installs and destroys composition. C38
+(OPSCOPE-R1R4-PASS) is not impugned within its battery; the attack
+shows the battery's position-1 "not" may be a hidden researcher choice.
+Recommended next step: the tak-displacement family.
+
+## C52. Hypothesis D v2 T3 parity miss: review
+
+Claim: the D-v2 T3 parity miss is structurally explained, not noise.
+
+- Review prereg: 2c4c58e80 (frozen alone, before analysis code)
+- Review implementation: c6069aca4 (HYPD-REVIEW-COMPLETE). R1: the
+  predicted 8-op parity solution [IN0,IN1,ADD,PUSH 2,MOD,PUSH 1,SWAP,SUB]
+  is REAL (25/25 train, 39/39 held-out); the miss is a search failure,
+  not a theory failure. R4 dilution: the solution needs 124 (chain A) or
+  144 (chain B) exact (niche, counter-value) alignments in sequence;
+  realistic cost ~992k / ~1.37M evals vs the 1M budget; the median niche
+  gets ~125 selections against a 191-entry mutation cycle, so deep
+  serial mutation plans cannot execute reliably. R5 carried niche
+  poisoning: T2's archive, carried into T3 silently, holds 11
+  constant-2 programs [PUSH:-9 x k, PUSH:2] mapping to the exact niches
+  the solution chain needs; carried [PUSH:-9 PUSH:-9 PUSH:-9 PUSH:2]
+  lands on niche 17570 = Q4's niche; the same output vector means the
+  same score, so the strictly-greater retention rule can never displace
+  it and Q4 is unreachable for the entire run regardless of budget.
+  This also explains the run-wide zero PUSH:1/PUSH:2-ending programs on
+  T3. A and C are FALSIFIED; B is still under construction; D is the
+  only surviving discovery hypothesis with a complete v2 run. 3/3
+  byte-identical. Pure Zag.
+
+**Status: EXPLORATORY diagnostic finding.** The review is a second
+independent T3 FAIL confirming D-V2-FAIL rather than overturning it.
+Recommended: D-v3 prereg fixing both mechanisms (a selection policy
+concentrating budget on promising niches; a carry-over rule so
+previous-task programs cannot permanently hold new-task niches), with
+niche 17570 occupancy as an explicit falsification check.
+
+## C53. Continuing-learner integration with DDES planner
+
+Claim: the continuing learner and the DDES adaptive intervention
+planner compose into one learner with one persistent state.
+
+- Prereg: c6288274d (frozen alone, before implementation; NAMECHECK.md
+  + prereg only)
+- Implementation + evidence: d1305bd43 (LEARNER-INTEGRATION-PASS). One
+  32768-byte state (stress store W[0..8192], DDES ledger slice
+  W[16384..32768]), one main(), no resets. P1-P8 byte-identical to the
+  committed C37 baseline (cmp against STRESS_RAW_OUTPUT.txt at
+  daa9bf2fc): retention 8/8, corrections 5/5+5/5 with 0/12 collateral,
+  interference 4/4 and 8/8, two-hop 5/5, final recall 8/8 with 2/2
+  corrections, FOUND_EVICT 0; STATEHASH ticks 16,64,108,153,201,211,
+  231,241. New capability: the M1 causal ambiguity is encountered
+  DURING the lifetime and resolved by two genuinely adaptive
+  interventions (round 1 eliminates h0, round 2 eliminates h1, winner
+  h2); the outcome is persisted as three earned rule-store facts and
+  all three are retrieved after a further 20-item pressure wave (3/3),
+  with foundation 8/8 and corrections 2/2 intact. The recency-guarded
+  earning discipline from C50 is active in code (earn_guarded skipped
+  the highest-subj survivor, 519); its efficacy is cited from C50, not
+  re-proven. One disclosed implementation detail: causal facts are
+  earned 3x (importance 31) per the battery's own P2 discipline; the
+  prereg froze the outcome and the mechanism. 3/3 byte-identical.
+  Pure Zag.
+
+**Status: SURVIVES as bounded L2.** The composition adds what neither
+part had alone (ambiguity resolved mid-lifetime by intervention,
+without reset). The "one continuing learner" goal is approached, not
+claimed. Recommended next target: the C1 law-revert fix in the same
+learner (P11 episode), pure composition from frozen parts.
+
 ---
 
 ## UNVERIFIABLE items (paper prose with no committed backing)
@@ -799,21 +912,22 @@ rewrite history to fix the fd31db230 message/content mismatch.
 
 ## Ledger tally
 
-- Claims ledgered: 49 (C01-C34 frozen at 714178dd9; C35-C49 appended
+- Claims ledgered: 53 (C01-C34 frozen at 714178dd9; C35-C53 appended
   2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
-  C47 (revert-adapt) -> 16 SURVIVES (all bounded L2 or L2+, none L3)
+  C47 (revert-adapt), C50 (recency-guard), C53 (learner integration)
+  -> 18 SURVIVES (all bounded L2 or L2+, none L3)
 - KILLED: C01 (generic reading), C02, C05, C07, C09, C10, C12, C14, C31,
-  C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C)
-  -> 12 KILLED
+  C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C),
+  C51 (OpScope gate) -> 13 KILLED
 - DOWNGRADED: C13, C16, C17, C18, C19, C24, C29 -> 7 DOWNGRADED
 - VOID / INVALID: C32 (H-B void; H-C invalid; H-A kill-with-retracted)
 - BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
   (figures), C22, C36 (L3C form builder), C43 (L3B growth) -> 6 BUILD-PASS
 - BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate)
-- EXPLORATORY: old C1 wave (superseded by C03)
+- EXPLORATORY: old C1 wave (superseded by C03), C52 (HypD v2 review)
 - UNVERIFIABLE: C04 (Design 1)
 - RETRACTED: C32 (H-A diagnosis), C41 (v1 emergence claim), C49 (tiered
   claim)

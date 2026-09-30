@@ -311,3 +311,50 @@ fd31db230 carries threshold red team files (C49) under the C1 worker
 message. Content verified blob-identical in both cases; provenance
 documented (COMMIT_NOTE.md for C45); history not rewritten. Workers now
 use explicit pathspecs with pre-commit status checks.
+
+## 7. Post-ledger verdicts (second append; 2026-09-30; ledger appendix
+C50-C53)
+
+Appended to CLAIM_LEDGER.md after the C35-C49 append. No C01-C49
+entry was modified. L3 achieved anywhere: still zero.
+
+### 7.1 Continuing learner: retention closed, integration composed
+(C50, C53)
+
+- C50 RECENCY-GUARD-CONTAINED (prereg 68c5796d4, impl 6d7681138):
+  SURVIVES as bounded L2. The recency-guarded earning discipline
+  (skip the most recent arrival at inter-episode earning) holds 9/10
+  sleeper retention across three pressure waves vs the 7/10 episodic
+  baseline. The retention-policy lane is CLOSED; the discipline is
+  adopted. The "in flight" note in 6.2 is resolved.
+- C53 LEARNER-INTEGRATION-PASS (prereg c6288274d, impl d1305bd43):
+  SURVIVES as bounded L2. One learner, one state: the frozen stress
+  battery byte-identical (no regression) plus mid-lifetime causal
+  ambiguity resolved by two adaptive interventions, persisted and
+  retrieved after pressure. C50's discipline is active in the composed
+  learner.
+
+Open question 7 advances: the integrated learner now covers stress,
+correction, interference, delayed reuse, memory pressure, and active
+causal intervention in one process. Law-revert (P11 episode) is in
+flight.
+
+### 7.2 Developmental language: gate killed (C51)
+
+- C51 GATE-STRESS-FAIL (pilot 82262d90c, prereg 37d4212d, sealed
+  ebd62fe5): KILLED as a robust operator gate. A mid-utterance confound
+  clearing K=2 installs as a DELETION operator and destroys novel
+  composition (5/20 vs 20/20). K=2 discriminates K=2-deficient
+  confounds; the Position-0 Lemma is confirmed empirically. C38 is not
+  impugned within its battery.
+
+Open question 8: the tak-displacement family is in flight.
+
+### 7.3 Program discovery: D-v2 review (C52)
+
+- C52 HYPD-REVIEW-COMPLETE (prereg 2c4c58e80, review c6069aca4):
+  EXPLORATORY diagnostic. The T3 miss is structurally explained
+  (dilution + carried niche poisoning); the predicted solution is real.
+  D-v3 is in flight with both fixes as kill bars.
+
+Open question 1 unchanged: zero.
