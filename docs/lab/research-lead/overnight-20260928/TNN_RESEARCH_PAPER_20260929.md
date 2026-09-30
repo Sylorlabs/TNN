@@ -1160,6 +1160,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Queue Analysis: QUEUE-ANALYSIS-COMPLETE.** Top 3: (1) D clean rerun then v2 freeze, (2) F3 alternative-attack, (3) Architecture trigger on double adversary defeat.
 
+**C1-CLEAN Freeze: FREEZE-VERIFIED (b8d38d9c8).** All 7 hashes match. Order: prereg 13e4b1ce3 → freeze b8d38d9c8 → worlds e0a30377f. No frozen modifications. Evaluation proceeding.
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
