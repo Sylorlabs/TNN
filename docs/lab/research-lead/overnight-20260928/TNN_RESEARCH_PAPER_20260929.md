@@ -984,6 +984,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Verification Attack: VERIFY-TESTED (483b0e61f).** All 5 hypotheses CONFIRMED. V1-V5: no detection, no revision, persists falsehoods. conf_n=0 everywhere; conflict machinery unreachable. V2: oracle lie overwrote teacher fact with no trace. Bound is structural (missing subsystem). Honest description: last-wins learning from trusted oracle.
 
+**Q4 Implementation: BUILD-FAIL (f889d43f9).** KB1/KB2 pass (discovers AND/XOR at 1.00 accuracy, 1 op, traced). KB3 FAIL: reuse ratio 1.0 > 0.5. Beam too strong; shared subexpression too shallow. Discovery is bounded L2; C0-D fails; L3 not achieved.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
