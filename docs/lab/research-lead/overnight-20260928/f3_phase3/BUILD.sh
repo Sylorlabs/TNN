@@ -14,7 +14,7 @@ while [ $i -le 3 ]; do
   i=$((i+1))
 done
 echo "=== T-NEG ==="
-cat $D/f3_p3.zag $D/world_tneg.zag > $D/run_p3n.zag
+cat $D/f3_p3.zag $D/world_tneg_a.zag > $D/run_p3n.zag
 $ZNC $D/run_p3n.zag -o $D/bin_p3n 2> $D/build_p3n.err || (cat $D/build_p3n.err; exit 1)
 i=1
 while [ $i -le 3 ]; do
