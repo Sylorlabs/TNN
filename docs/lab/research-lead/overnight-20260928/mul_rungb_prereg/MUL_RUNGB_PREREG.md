@@ -1,7 +1,7 @@
 # PREREG: MUL-from-ADD Rung B - Two-Level Learner Construction (MUL-1B)
 
 Date: 2026-09-30. Worker: MUL Rung B Prereg Prep.
-Status: PREREG-DRAFT (design only; no implementation in this commit).
+Status: PREREG-FROZEN (reviewed and accepted 2026-09-30; see REVIEW_DISPOSITION.md; K1 anchor for implementation).
 Lane: Construct-and-apply frontier; Micah's ISA boundary ruling consequence (2).
 
 ## Step 0 Name-Check
@@ -479,7 +479,7 @@ throughout. P-MULB4 bars: (a) must yield 0/8 on both sets (dependency);
 
 ## Verdict labels
 
-- MUL-RUNGB-PREREG-DRAFTED: this commit (design frozen alone).
+- MUL-RUNGB-PREREG-FROZEN: this commit (reviewed, accepted, frozen; K1 anchor).
 - MUL1B-BUILD-COMPLETE / MUL1B-BUILD-FAIL: implementation.
 - MUL1B-SURVIVES / MUL1B-KILLED: after the full 11-step pipeline
   (prereg, implementation, sealed evaluation, reproduction,
