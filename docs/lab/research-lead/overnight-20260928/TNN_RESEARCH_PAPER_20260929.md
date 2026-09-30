@@ -1222,6 +1222,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Adversary: Q4-ADV-CONSOLIDATED (d2e87a28d).** Six waves: F-RECFOLD v1/v2/zero, R1, R3, R4. W1-W4: tax trap, constant ceiling, evidence-fit failure, tax-off ties. Diagnosis: greedy + simplicity bias blocks true forms.
 
+**D v2: D-V2-FAIL (2500fd02b).** K4-clean. T0 SOLVE, T1 FAIL (9/17), T2 SOLVE, T3 FAIL (20/32, repeated anomaly triggers search review), T4 FAIL, T5 FAIL. v2 discrimination works (MOD shortcut killed).
+
 **Bundle v8: BUNDLE-COMPLETE.** HEAD 4f72454be, SHA 3788eaf82ebe3866d35e994cf50b6b39d842389e18573417de1fc224ae3f658c, 1.2GB. Replaces v7. Ahead 1235, local-only.
 
 **RULING (2026-09-30): C1 63/63 lifetime wave GOVERNANCE-VOID.** Micah ruled the 63/63 wave VOID for canonical claims (V2: binary not frozen before world gen; V4: Python used). Preserved as EXPLORATORY, NOT CANONICAL. C1-CLEAN launched immediately: bug fix before freeze, hashes before world gen, new unseen seed, zero Python, stronger sealed variants (deeper chains, contradictions, corrections, law reversals, misleading vocab, radical transfer, delayed reuse, unequal costs, inadequate hypotheses, procedure modification). TNN CLEAN SCORE pending. LLM BASELINE pending.
