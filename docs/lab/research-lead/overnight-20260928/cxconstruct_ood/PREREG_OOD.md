@@ -93,17 +93,19 @@ is false as a general law.
 ## OOD-4: Scale (combinatorial wall)
 
 Measure checked(d) = number of depth-d sequences with >=1 observe action,
-for d = 1..10, in a measurement harness (enumeration only).
+for d = 1..10, in a measurement harness (enumeration only, no simulation).
 
 Kill bar K-OOD4:
-- OOD-4 = PASS if checked(d+1)/checked(d) < 2.0 for all d in 1..9
-  (sub-exponential growth, implying pruning or guidance).
-- OOD-4 = FAIL if the ratio is within [3.5, 4.5] for all d in 1..9
-  (unpruned 4^d enumeration).
+- OOD-4 = FAIL if measured checked(d) equals 4^d - 2^d exactly for all
+  d = 1..10. Exact match proves zero pruning: the learner enumerates the
+  full unpruned menu. (The ratio checked(d+1)/checked(d) then necessarily
+  approaches 4; ratios will be reported.)
+- OOD-4 = PASS if measured checked(d) deviates from 4^d - 2^d at any d,
+  indicating pruning, guidance, or early termination.
 
 A FAIL maps the combinatorial wall: with no pruning, depth 10 requires
-~1M simulations per hypothesis pair. Wall-clock time per depth will also
-be reported.
+992,256 simulations per hypothesis pair (2x for the pair). Per-depth
+operation counts will be reported.
 
 ## Overall verdict
 
@@ -114,6 +116,16 @@ be reported.
 Prediction (not a bar): OOD-FAIL or OOD-PARTIAL. The A2 findings imply
 the depth cap (OOD-1), action set (OOD-2), and hypothesis class (OOD-3)
 are researcher-fixed boundaries, and the enumeration is unpruned (OOD-4).
+
+## Amendment 1 (2026-09-30, before any implementation)
+
+K-OOD4 corrected: the original ratio bound [3.5,4.5] was mathematically
+wrong for small d (checked(2)/checked(1) = 12/2 = 6). Replaced with an
+exact-match kill bar (measured checked(d) == 4^d - 2^d for all d), which
+is strictly stronger evidence of unpruned enumeration. Wall-clock replaced
+by exact deterministic operation counts (Zag exposes no clock builtin;
+counts are sufficient for the growth claim). No results seen; no other
+bar changed.
 
 ## Rules
 
