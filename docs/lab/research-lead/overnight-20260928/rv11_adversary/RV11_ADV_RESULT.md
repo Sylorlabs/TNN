@@ -4,7 +4,15 @@
 **Adversary prereg:** `cde064337` (committed alone before any attack
 code, build, or run; pure Zag throughout)
 **Target:** H-REVISE11 result `1a2fd99bd` (builder prereg `36b2fbc71`)
-**Verdict: H-REVISE11 SURVIVES this red team (0/4 kill criteria fired)**
+**Verdict: EXPLORATORY red team. Substantive finding: 0/4 kill criteria
+fired (the mechanism withstood every attack). The procedure is flagged
+FORMALLY CONTAMINATED and is not a canonical red-team verdict: two
+trivial toolchain syntax-test programs were built and run BEFORE the
+adversary prereg was committed (see governance disclosure 5). No attack
+outcome was observed before preregistration, but under the literal
+preregister-before-builds rule the procedure cannot be represented as
+canonical. A clean-child rerun remains available if adjudicated
+worthwhile.**
 
 No em dashes in this document.
 
@@ -144,13 +152,19 @@ heap corruption. No verdict impact.
 
 ## Verdict
 
-H-REVISE11 SURVIVES this red team. All four frozen kill criteria held:
+Substantive finding: H-REVISE11 withstood this red team. All four
+frozen kill criteria held:
 X-RV11-1 (guard sound, P3b replication exact, overreach definitionally
 closed), X-RV11-2 (145/145, 129/129 CHECK PASS, 2 GUARD lines in the
 correct phase windows, md5-identical raw), X-RV11-3 (Branch B veto
 unreached across 320,868 configurations, zero survivor violations),
 X-RV11-4 (zero non-comment, non-banner, non-verdict line changes
 revise10 -> revise11).
+
+Procedural status: EXPLORATORY, not canonical, per governance
+disclosure 5. The 0/4 substantive result stands as documented evidence;
+the canonical red-team verdict on H-REVISE11 remains open pending
+either acceptance of this procedure with its flag or a clean rerun.
 
 ## Governance and lineage disclosures
 
@@ -173,3 +187,20 @@ revise10 -> revise11).
    outside this adversary's scope.
 4. Only owned paths staged:
    `docs/lab/research-lead/overnight-20260928/rv11_adversary/`.
+5. PRE-PREREG BUILD DISCLOSURE (procedure contamination flag): before
+   the adversary prereg `cde064337` was committed, this red-team agent
+   created `/tmp/rv11adv/divtest.zag` twice to check Zag integer
+   arithmetic syntax needed for the planned sweep decoder. The first
+   version failed to compile (`emit` undefined; no binary, no run).
+   The second version compiled and ran, printing `1`, `53`, `3` for
+   `54/54`, `53%54`, `7/2`. These were toolchain syntax checks, not
+   attack code: they did not touch the mechanism, the claim, or any
+   fixture, and revealed nothing about H-REVISE11. The kill criteria
+   were derived solely from the builder's frozen claims, which were
+   read before the syntax checks, and no attack outcome was observed
+   before preregistration. Nevertheless, under the literal
+   preregister-before-any-build-or-run rule, these pre-prereg builds
+   formally contaminate the procedure. This disclosure does not cure
+   it; hence the EXPLORATORY verdict status above. A clean-child rerun
+   (fresh agent, own prereg committed before its own builds/runs) can
+   produce a canonical verdict if the parent adjudicates it worthwhile.
