@@ -64,6 +64,55 @@ Standing rules currently in force (name-checked at 2026-09-30):
 
 ---
 
+## Architecture accounting: the ONE-SYSTEM RULE (standing, 2026-09-30)
+
+The desired final architecture is ONE general cognitive substrate, not a
+collection of subsystems connected through routers, bridges, special modes,
+and task-specific admission gates. Existing mechanisms may remain as research
+experiments and historical evidence; they are not the target architecture.
+
+Every brief MUST include this standing question in Context, and the worker's
+final report MUST answer it:
+
+> Why can the existing general architecture not learn this behavior?
+
+If the answer identifies a missing general cognitive operation, that is the
+research target. If the answer is merely "this benchmark needs a new
+handler", the subsystem is rejected.
+
+Every builder/implementer final report MUST record the architecture delta:
+* cognition source lines added;
+* new hardcoded semantic cases;
+* new modes;
+* new bridges;
+* new task-specific handlers;
+* learner-state structures created by the learner.
+
+Prefer architectures where the capability-source delta approaches zero: a new
+capability should require EXPERIENCE leading to NEW LEARNED STATE/STRUCTURE,
+not a NEW ZAG SUBSYSTEM/MODE/BRIDGE/HANDLER.
+
+Modes CAUSAL_MODE, REVISION_MODE, LANGUAGE_MODE, MEMORY_MODE, PROCEDURE_MODE
+are architectural smells. A temporary experimental mode may isolate a
+hypothesis but must never silently become canonical architecture. Three custom
+bridges around the same architectural boundary trigger ARCHITECTURE REVIEW
+and block further bridge work until a shared-substrate alternative is tested.
+
+Score research directions on: GENERALITY, ARCHITECTURAL COMPRESSION, LEARNER
+AUTHORITY, CAPABILITY SOURCE DELTA.
+
+Current lane rulings (2026-09-30): causal-revert stays evidence; do not
+canonize revise mode. OpScope: no more admission-gate lineage after the one
+cross-context validation test; ask what general semantic-learning process
+identifies that not changes meaning regardless of position. L3B: continue
+adversary; if the constructor proves to be a finite menu, redesign toward
+incrementally constructed executable state, never expand the menu. Threshold:
+bounded L2 evidence only; no growing COND library. Continuing learner: HIGH
+PRIORITY; eliminate independent subsystem state formats toward one
+learner-owned structural workspace.
+
+---
+
 ## Brief-type variants
 
 All variants keep the sections above. They differ only in scope:
