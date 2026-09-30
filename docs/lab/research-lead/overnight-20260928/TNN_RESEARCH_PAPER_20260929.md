@@ -1004,6 +1004,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Form Invention: INVENT-TESTED (3d543e38e).** Learner does NOT invent fourth form. Mode (a): clean failure, burns budget, no diagnosis. Mode (b): near-miss misapplication, silent wrong-form confidence. Sketch control proves data learnable; failure is closed menu. R1-R6 spec for genuine inventor frozen.
 
+**Substrate Synergy: SYNERGY-TESTED (c22775f11).** Concept→procedure: 3 vs 23 episodes. Contradiction→revision: 168/200 vs 136/200. Positive cross-mechanism effects. Researcher-authored mechanisms; comparative utility, not L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
