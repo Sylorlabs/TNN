@@ -972,6 +972,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Substrate Integration: SUBSTRATE-INTEGRATED (6e3294a49).** 45 morphemes as substrate facts, 4 concepts formed (identical to Step E). Causal episodes on SAME workspace after concepts. No interference: concepts intact, all 4 causal queries correct. Facts, concepts, episodes coexist. Limitations: fixed-width-3 seg, S4-S11 not replayed, grouping researcher-authored, UNCH/SET only.
 
+**Q4 Design: Q4-DESIGNED (b8484775c).** Full protocol for learner-constructed explanatory variables (causal Stage 2, L3 path). 6 observables, sealed hidden cause, 5 families (CONJ/XOR/THRESH/MUX/NEST), composition language {AND,OR,NOT,XOR} max 7 nodes, beam-32 incremental growth with trace, 24 interventions, Phase 2 reuse via atomic terminals. Falsification F1-F5 frozen. C0-B risk explicitly noted.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
