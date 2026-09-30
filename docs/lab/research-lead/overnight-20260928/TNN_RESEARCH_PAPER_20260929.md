@@ -1034,6 +1034,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Procedure Amortization: AMORT-TESTED (2a8d7bf63).** Learned procedure: 39.9x speedup (signature lookup), 12.2x (compiled direct). C baseline 1.8x faster than best Zag. Honest: "TNN's edge is in learning, not executing." Bounded engineering, not TNN-unique.
 
+**OP-RECRUIT v2: DESIGN-COMPLETE (c6ef7ffcf).** Learner-driven operator recruitment: DETECT→PROPOSE→VALIDATE→RECRUIT→RETIRE. Semantics in persistent learner state. One generic interpreter case (opcodes 32..63). Falsifiable (F-DRIVER). Test battery with 6 falsifiers frozen.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
