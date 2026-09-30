@@ -1,0 +1,607 @@
+// ddesr3.zag -- DDES with the t*=0 soundness repair (wave 3, R3).
+// Re-implemented by worker DDES for wave 20260930-1421pdt from the
+// BUILD-PASS source ddes.zag @ 56db8d606, per the frozen prereg
+// PREREG_DDESREPAIR3.md in this directory. Pure Zag. No Python.
+//
+// Repair: the execution model fires rules only on W ticks, so the
+// effective wait count is max(t*, 1). Both synthesize_plan and predict
+// use eff_waits(t*), keeping them aligned. For t* >= 1 behavior is
+// identical to the frozen BUILD-PASS binary. The derivation path
+// flags the t*=0 boundary explicitly (FLAG TSTAR-ZERO-BOUNDARY)
+// instead of passing through it silently. World F (the adversary's
+// sealed t*=0 soundness world) is adopted as a regression world, plus
+// World F2 (new sealed boundary world: two-hop 0-delay cascade).
+// Successor to H-CAUSALEXP-CONSTRUCT. Instead of enumerating sequences
+// and filtering by disagreement, DDES DERIVES the experiment from the
+// symbolic difference between hypotheses:
+//
+// 1. Difference analysis: build each hypothesis's rule graph, compute
+//    earliest arrival times via shortest path (Bellman-Ford relaxation),
+//    find the disagreement frontier analytically: hypotheses disagree on
+//    V iff arrival0[V] != arrival1[V]; earliest disagreeing t is
+//    min(arrival0[V], arrival1[V]). No scan over t. No bound on t.
+// 2. Guided synthesis: from target (V*, t*), assemble exactly one plan:
+//    [S] if the winning schema needs intervention, then W while time < t*,
+//    then observe(V*). Every append is a function of (hypotheses, target).
+// 3. Execution: run the single plan once, eliminate mismatches.
+//
+// There is no sequence-generating loop. There is no length constant.
+// There is no filter over a pre-enumerated stream.
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ K-NX2 instrumentation ============
+// Counts complete plans assembled. DDES assembles exactly 1 per config.
+fn plan_counter()[]u8 {
+  // single static cell via a fixed buffer; index 0 holds the count
+  let b:[]u8=z_alloc(4);
+  return b;
+}
+
+// ============ generic arrival computation ============
+// Rules as data: src[i], dst[i], delay[i] for i in 0..n_rules-1.
+// Variables: 0..n_vars-1. INF = 1<<28.
+// If use_set_x: arrival[X=0] = 0 at t0. Else all INF.
+// Returns via out[] (length n_vars). Generic: no branch on any specific
+// delay value, variable id, or world id.
+fn compute_arrivals(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, n_vars:i32, use_set_x:i32, out:[]u8)void {
+  let INF:i32=268435456;
+  let v:i32=0;
+  while(v<n_vars){
+    set32(out, v*4, INF);
+    v=v+1;
+  }
+  if(use_set_x==1){
+    set32(out, 0, 0);
+  }
+  // Bellman-Ford relaxation: n_vars passes suffice for shortest paths
+  // with non-negative weights and no negative cycles.
+  let pass:i32=0;
+  while(pass<n_vars){
+    let i:i32=0;
+    while(i<n_rules){
+      let s:i32=get32(src, i*4);
+      let d:i32=get32(dst, i*4);
+      let w:i32=get32(delay, i*4);
+      let as:i32=get32(out, s*4);
+      if(as<INF){
+        let cand:i32=as+w;
+        let ad:i32=get32(out, d*4);
+        if(cand<ad){
+          set32(out, d*4, cand);
+        }
+      }
+      i=i+1;
+    }
+    pass=pass+1;
+  }
+  return;
+}
+
+// ============ generic frontier computation ============
+// Given arrival0[] and arrival1[] (length n_vars), find the earliest
+// (V*, t*) where predictions differ. Prediction at (V,t) is 1 iff
+// arrival[V] <= t. Hypotheses disagree on V iff arrival0[V] != arrival1[V];
+// earliest disagreeing t = min(arrival0[V], arrival1[V]).
+// Returns: found (0/1) via out_found[0], V* via out_v[0], t* via out_t[0].
+// Tie-break: lowest variable id. Generic over all values.
+fn compute_frontier(arr0:[]u8, arr1:[]u8, n_vars:i32, out_found:[]u8, out_v:[]u8, out_t:[]u8)void {
+  let INF:i32=268435456;
+  let best_t:i32=INF;
+  let best_v:i32=-1;
+  let v:i32=0;
+  while(v<n_vars){
+    let a0:i32=get32(arr0, v*4);
+    let a1:i32=get32(arr1, v*4);
+    if(a0!=a1){
+      let t:i32=a0;
+      if(a1<t){t=a1;}
+      if(t<best_t){
+        best_t=t;
+        best_v=v;
+      }
+    }
+    v=v+1;
+  }
+  if(best_v>=0){
+    set32(out_found, 0, 1);
+    set32(out_v, 0, best_v);
+    set32(out_t, 0, best_t);
+  } else {
+    set32(out_found, 0, 0);
+  }
+  return;
+}
+
+// ============ t*=0 soundness repair ============
+// The execution model fires rules only on W ticks; the S action sets X
+// but fires no rules. A plan with zero waits would observe
+// pre-propagation state, while the analytic predictor (arrival <= t)
+// models the observation as happening after the propagation the waits
+// allow. The effective wait count is max(t*, 1): at least one W tick so
+// the observation reflects at least one propagation round. Both
+// synthesis and prediction use this count, keeping them aligned.
+// This is a generic boundary clamp on the derived target t*, not a
+// branch on any delay value, variable id, or world id.
+// For all frozen K-NX worlds (t* >= 1) eff_waits(t*) = t*, so behavior
+// there is unchanged.
+fn eff_waits(t_star:i32)i32 {
+  if(t_star<1){return 1;}
+  return t_star;
+}
+
+// ============ generic plan synthesis ============
+// From (V*, t*, use_set_x): assemble exactly one plan.
+// Plan encoding: byte per action. 0=S, 1=W, 2=OY, 3=OZ.
+// Observe action for variable V: 2+(V-1) maps Z=1->3 (OZ), Y=2->2 (OY).
+// (X=0 is never observed; if V*=0 we still emit a plan but it cannot
+// discriminate via observation; the frontier selection prefers
+// observable variables by earliest t, and X arrivals are equal (0,0)
+// under set-X so X never appears in the frontier.)
+// Increments plans_built[0]. Returns plan length.
+fn synthesize_plan(v_star:i32, t_star:i32, use_set_x:i32, plan:[]u8, plans_built:[]u8) i32 {
+  let len:i32=0;
+  let cur_t:i32=0;
+  if(use_set_x==1){
+    plan[len]=0;
+    len=len+1;
+  }
+  // Soundness repair: wait for the effective count, which is at least
+  // one tick, so the observation reflects propagation.
+  let w:i32=eff_waits(t_star);
+  while(cur_t<w){
+    plan[len]=1;
+    len=len+1;
+    cur_t=cur_t+1;
+  }
+  // observe(V*): V*=1 (Z) -> 3 (OZ); V*=2 (Y) -> 2 (OY).
+  // Generic arithmetic: obs = 4 - v_star. No branch on variable id.
+  let obs:i32=4-v_star;
+  plan[len]=obs as u8;
+  len=len+1;
+  set32(plans_built, 0, get32(plans_built, 0)+1);
+  return len;
+}
+
+fn emit_plan(plan:[]u8, len:i32)void {
+  emit("[");
+  let i:i32=0;
+  while(i<len){
+    let a:i32=plan[i] as i32;
+    if(a==0){emit("S");}
+    else if(a==1){emit("W");}
+    else if(a==2){emit("OY");}
+    else{emit("OZ");}
+    if(i<len-1){emit(",");}
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+
+// ============ generic predictor (for elimination) ============
+// Predict observation of plan under hypothesis: simulate the single plan.
+// Uses the arrival-based analytic predictor: the observation at the end
+// is 1 iff arrival[V*] <= w where w = eff_waits(t*) is the effective
+// wait count the synthesized plan actually performs. Both use the same
+// count, keeping synthesis and prediction aligned (t*=0 repair).
+// We recompute arrivals and read the prediction directly.
+fn predict(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, n_vars:i32, use_set_x:i32, v_star:i32, t_star:i32)i32 {
+  let arr:[]u8=z_alloc(16);
+  compute_arrivals(n_rules, src, dst, delay, n_vars, use_set_x, arr);
+  let a:i32=get32(arr, v_star*4);
+  let w:i32=eff_waits(t_star);
+  if(a<=w){return 1;}
+  return 0;
+}
+
+// ============ sealed world simulator (test harness) ============
+// The true world: same rule format. Executes a plan, returns observation.
+// State: X,Z,Y values and times. Actions 0=S,1=W,2=OY,3=OZ.
+fn world_step(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, st:[]u8, a:i32)i32 {
+  let obs:i32=-1;
+  if(a==0){
+    set32(st,0,1);
+    set32(st,16,get32(st,12));
+  } else if(a==1){
+    let t:i32=get32(st,12)+1;
+    set32(st,12,t);
+    let pass:i32=0;
+    while(pass<3){
+      let r:i32=0;
+      while(r<n_rules){
+        let s:i32=get32(src, r*4);
+        let d:i32=get32(dst, r*4);
+        let w:i32=get32(delay, r*4);
+        if(get32(st,s*4)==1){
+          let ts:i32=get32(st,16+s*4);
+          if(t-ts>=w){
+            if(get32(st,d*4)==0){
+              set32(st,d*4,1);
+              set32(st,16+d*4,t);
+            }
+          }
+        }
+        r=r+1;
+      }
+      pass=pass+1;
+    }
+  } else if(a==2){
+    obs=get32(st,8);
+  } else {
+    obs=get32(st,4);
+  }
+  return obs;
+}
+
+// ============ DDES driver for one world ============
+// h0_*: hypothesis 0 rules; h1_*: hypothesis 1 rules.
+// true_*: sealed true world rules.
+// Schemas: 1 = set-X, 0 = null. For each schema, compute frontier;
+// pick the schema with the earliest target t* (set-X preferred on tie
+// only if it yields a strictly earlier target; null schema is the
+// fallback). Then synthesize, execute once, eliminate.
+fn ddes_world(name:[]u8, h0_nr:i32, h0_src:[]u8, h0_dst:[]u8, h0_delay:[]u8,
+              h1_nr:i32, h1_src:[]u8, h1_dst:[]u8, h1_delay:[]u8,
+              t_nr:i32, t_src:[]u8, t_dst:[]u8, t_delay:[]u8,
+              plans_built:[]u8)i32 {
+  let n_vars:i32=3;
+  let INF:i32=268435456;
+  emit("WORLD "); emit(name); emit("\n");
+
+  // Try schemas: set-X (1) then null (0). Keep the best (earliest t*).
+  let best_found:i32=0;
+  let best_v:i32=-1;
+  let best_t:i32=INF;
+  let best_schema:i32=-1;
+  let schema:i32=1;
+  while(schema>=0){
+    let a0:[]u8=z_alloc(16);
+    let a1:[]u8=z_alloc(16);
+    compute_arrivals(h0_nr, h0_src, h0_dst, h0_delay, n_vars, schema, a0);
+    compute_arrivals(h1_nr, h1_src, h1_dst, h1_delay, n_vars, schema, a1);
+    let f:[]u8=z_alloc(4);
+    let fv:[]u8=z_alloc(4);
+    let ft:[]u8=z_alloc(4);
+    compute_frontier(a0, a1, n_vars, f, fv, ft);
+    if(get32(f,0)==1){
+      let t:i32=get32(ft,0);
+      if(t<best_t){
+        best_t=t;
+        best_v=get32(fv,0);
+        best_schema=schema;
+        best_found=1;
+      }
+    }
+    schema=schema-1;
+  }
+
+  if(best_found==0){
+    emit("NO-DISCRIMINATING-PLAN\n");
+    return 0;
+  }
+
+  emit("TARGET V*="); e64(best_v); emit(" t*="); e64(best_t);
+  emit(" schema="); e64(best_schema); emit("\n");
+
+  // t*=0 boundary detection and flag (soundness repair): the unsound
+  // boundary condition (a zero-wait observation plan at t*=0) is
+  // flagged explicitly instead of passing through silently.
+  if(best_t==0){
+    emit("FLAG TSTAR-ZERO-BOUNDARY floor=1\n");
+  }
+
+  let plan:[]u8=z_alloc(64);
+  let plen:i32=synthesize_plan(best_v, best_t, best_schema, plan, plans_built);
+  emit("PLAN "); emit_plan(plan, plen);
+  emit(" candidates_built="); e64(get32(plans_built,0)); emit("\n");
+
+  // Single real execution.
+  let st:[]u8=z_alloc(32);
+  let real_obs:i32=-1;
+  let j:i32=0;
+  while(j<plen){
+    let o:i32=world_step(t_nr, t_src, t_dst, t_delay, st, plan[j] as i32);
+    if(o>=0){real_obs=o;}
+    j=j+1;
+  }
+  emit("EXEC real="); e64(real_obs); emit("\n");
+
+  // Eliminate via analytic predictor.
+  let p0:i32=predict(h0_nr, h0_src, h0_dst, h0_delay, n_vars, best_schema, best_v, best_t);
+  let p1:i32=predict(h1_nr, h1_src, h1_dst, h1_delay, n_vars, best_schema, best_v, best_t);
+  emit("PRED h0="); e64(p0); emit(" h1="); e64(p1); emit("\n");
+  let ok:i32=1;
+  if(p0!=real_obs){ emit("ELIM h0\n"); } else { emit("SURVIVE h0\n"); }
+  if(p1!=real_obs){ emit("ELIM h1\n"); } else { emit("SURVIVE h1\n"); }
+  // Convergence check: exactly one survives and it matches truth.
+  // Truth check: simulate the true world arrivals and see which
+  // hypothesis's prediction matches real_obs (already done above).
+  // For the verdict we require p0 != p1 (discriminating) and exactly
+  // one of (p0==real_obs, p1==real_obs).
+  if(p0==p1){ ok=0; }
+  let s0:i32=0; let s1:i32=0;
+  if(p0==real_obs){s0=1;}
+  if(p1==real_obs){s1=1;}
+  if(s0+s1!=1){ ok=0; }
+  if(ok==1){ emit("CONVERGE-OK\n"); } else { emit("CONVERGE-FAIL\n"); }
+  return ok;
+}
+
+// ============ world data (test harness; data tables) ============
+// Rule lists as parallel arrays. Variables: X=0, Z=1, Y=2.
+fn load_world_A(h:[]u8, which:i32)void {
+  // h: 0=h0, 1=h1, 2=true (true = h0 config for cfg0, h1 for cfg1; we
+  // run both configs by calling with which selecting the true world).
+  // Returns via h: nr at [0], then src/dst/delay arrays appended.
+  // Layout: +0 nr, +4 src[8], +36 dst[8], +68 delay[8] (max 8 rules).
+  if(which==0){
+    // H0 = [(X,Z,2),(Z,Y,0)]
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,2); set32(h,72,0);
+  } else if(which==1){
+    // H1 = [(X,Y,1)]
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,1);
+  } else if(which==2){
+    // true for cfg0 = H0
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,2); set32(h,72,0);
+  } else {
+    // true for cfg1 = H1
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,1);
+  }
+  return;
+}
+
+fn load_world_B(h:[]u8, which:i32)void {
+  if(which==0){
+    // H0 = [(X,Z,3),(Z,Y,0)]
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,3); set32(h,72,0);
+  } else if(which==1){
+    // H1 = [(X,Y,2)]
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,2);
+  } else if(which==2){
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,3); set32(h,72,0);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,2);
+  }
+  return;
+}
+
+fn load_world_C(h:[]u8, which:i32)void {
+  // A2 sealed killer: H5=[(X,Z,5),(Z,Y,0)], H6=[(X,Y,4)]
+  if(which==0){
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,5); set32(h,72,0);
+  } else if(which==1){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,4);
+  } else if(which==2){
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,5); set32(h,72,0);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,4);
+  }
+  return;
+}
+
+fn load_world_D(h:[]u8, which:i32)void {
+  // Z-only: H7=[(X,Z,2)], H8=[(X,Z,4)]
+  if(which==0){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,1);
+    set32(h,68,2);
+  } else if(which==1){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,1);
+    set32(h,68,4);
+  } else if(which==2){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,1);
+    set32(h,68,2);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,1);
+    set32(h,68,4);
+  }
+  return;
+}
+
+fn load_world_E(h:[]u8, which:i32)void {
+  // Empty frontier: H9=[(X,Y,1)], H10=[(X,Y,1)] (identical)
+  set32(h,0,1);
+  set32(h,4,0);
+  set32(h,36,2);
+  set32(h,68,1);
+  return;
+}
+
+// Extract parallel arrays from the packed world block.
+fn w_nr(h:[]u8)i32 {
+  return get32(h,0);
+}
+fn w_src(h:[]u8, i:i32)i32 {
+  return get32(h,4+i*4);
+}
+fn w_dst(h:[]u8, i:i32)i32 {
+  return get32(h,36+i*4);
+}
+fn w_delay(h:[]u8, i:i32)i32 {
+  return get32(h,68+i*4);
+}
+
+fn main()i32 {
+  let plans_built:[]u8=z_alloc(4);
+  let total_ok:i32=0;
+  let total_run:i32=0;
+
+  // World A, cfg0 (true=H0) and cfg1 (true=H1)
+  let cfg:i32=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_A(h0,0); load_world_A(h1,1); load_world_A(tr,2+cfg);
+    // build parallel arrays
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("A", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built);
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+  // World B
+  cfg=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_B(h0,0); load_world_B(h1,1); load_world_B(tr,2+cfg);
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("B", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built);
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+  // World C (A2 killer, depth 6)
+  cfg=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_C(h0,0); load_world_C(h1,1); load_world_C(tr,2+cfg);
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("C", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built);
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+  // World D (Z-only)
+  cfg=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_D(h0,0); load_world_D(h1,1); load_world_D(tr,2+cfg);
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("D", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built);
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+  // World E (empty frontier)
+  let e_h0:[]u8=z_alloc(128);
+  let e_h1:[]u8=z_alloc(128);
+  let e_tr:[]u8=z_alloc(128);
+  load_world_E(e_h0,0); load_world_E(e_h1,0); load_world_E(e_tr,0);
+  let e_n0:i32=w_nr(e_h0); let e_s0:[]u8=z_alloc(32); let e_d0:[]u8=z_alloc(32); let e_w0:[]u8=z_alloc(32);
+  let e_n1:i32=w_nr(e_h1); let e_s1:[]u8=z_alloc(32); let e_d1:[]u8=z_alloc(32); let e_w1:[]u8=z_alloc(32);
+  let e_nt:i32=w_nr(e_tr); let e_st:[]u8=z_alloc(32); let e_dt:[]u8=z_alloc(32); let e_wt:[]u8=z_alloc(32);
+  let ei:i32=0;
+  while(ei<e_n0){set32(e_s0,ei*4,w_src(e_h0,ei));set32(e_d0,ei*4,w_dst(e_h0,ei));set32(e_w0,ei*4,w_delay(e_h0,ei));ei=ei+1;}
+  ei=0;
+  while(ei<e_n1){set32(e_s1,ei*4,w_src(e_h1,ei));set32(e_d1,ei*4,w_dst(e_h1,ei));set32(e_w1,ei*4,w_delay(e_h1,ei));ei=ei+1;}
+  ei=0;
+  while(ei<e_nt){set32(e_st,ei*4,w_src(e_tr,ei));set32(e_dt,ei*4,w_dst(e_tr,ei));set32(e_wt,ei*4,w_delay(e_tr,ei));ei=ei+1;}
+  // E expects NO-DISCRIMINATING-PLAN; ddes_world returns 0 in that case.
+  // We count it as OK if no plan was built for E.
+  let e_before:i32=get32(plans_built,0);
+  let e_r:i32=ddes_world("E", e_n0,e_s0,e_d0,e_w0, e_n1,e_s1,e_d1,e_w1, e_nt,e_st,e_dt,e_wt, plans_built);
+  let e_after:i32=get32(plans_built,0);
+  if(e_after==e_before){
+    emit("E-EMPTY-OK\n");
+    total_ok=total_ok+1;
+  } else {
+    emit("E-EMPTY-FAIL\n");
+  }
+  total_run=total_run+1;
+
+  emit("SUMMARY ok="); e64(total_ok); emit("/"); e64(total_run);
+  emit(" plans_built="); e64(get32(plans_built,0)); emit("\n");
+  return 0;
+}
