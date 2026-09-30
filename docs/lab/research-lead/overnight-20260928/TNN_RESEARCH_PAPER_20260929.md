@@ -1078,6 +1078,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Substrate: SUBSTRATE-DOCUMENTED (3d37e96fe).** 297 lines. S9 (slots) + S10 (bytes). Interaction contract (7 points): ordering, root freshness, shared header, stacked preservation, byte accounting, failure sharing, shared assumption. 8 limits. Next: S11 dedup, tick review, graded importance.
 
+**Hypothesis B: B-TESTED.** T0-T5 SOLVE (T4/T5 via 2 RETRIEVE + 2 CALLs to ABS fragment). T4/T5 fresh FAIL (library causal). 5/6 predictions confirmed. K3 not met (T2 induction rejected). K4 violated (Python used).
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
