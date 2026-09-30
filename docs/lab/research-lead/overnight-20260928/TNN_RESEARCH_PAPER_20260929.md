@@ -933,6 +933,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **P7 Persistence Policy: POLICY-DESIGNED (55ed019e1).** Implementable policy: persist validated re-fittable schemas (never verbatim instances), verify via cheap gate before applying, retire on sustained rejection or negative ledger. Tested on 8-task workload: TOT_P7=630 vs TOT_EVERY=410 vs TOT_NONE=634. 9 examples saved. Full retire/rediscover lifecycle verified. All kill bars PASS.
 
+**DDES Depth: DEPTH-TESTED (25ea8936d).** Sealed World G (delays 9/8, absent from frozen source). Repaired DDES derives length-10 plan in one shot, converges correctly on both configs. 3/3 byte-identical. Closes deferred K-NX3 sub-bar. Still strong L2, NOT L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
