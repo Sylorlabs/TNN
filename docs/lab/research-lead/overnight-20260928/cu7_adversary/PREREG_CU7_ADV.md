@@ -167,3 +167,51 @@ Pure Zag throughout. Only the owned path
 `docs/lab/research-lead/overnight-20260928/cu7_adversary/` is
 staged. No binaries committed. Commits local; no push authorized.
 This document contains no em dashes.
+
+## AMENDMENT A1 (2026-09-30): X-CU7-2(a) fixture trace correction
+
+Status: TRANSPARENT AMENDMENT, re-frozen. The kill criterion intent
+is unchanged; only the fixture's hand-trace is corrected. No bar is
+weakened.
+
+Error: the frozen X-CU7-2(a) fixture predicted that 4 fresh
+`(2,0,0,2>1,1,1)` episodes would accumulate in conflicted entry 2
+and carve with the 4 fresh episodes as winners (counted becomes
+12, new entry list length 4). This trace was arithmetically wrong.
+After the F1 flood replay, entry 2's uncounted pool contains TWO
+`(0,0,0)` episodes (indices 29 and 30, both `EP_ACT`), not zero.
+The first fresh `(1,1,1)` makes the adjudication tally
+`(0,0,0):2` vs `(1,1,1):1`. The frozen `conflict_adjudicate`
+requires `sa>=2 && sa>sb`, so the OLD side correctly wins 2v1 and
+carves immediately: winners are exactly indices 29 and 30 (the
+pre-existing uncounted episodes, never previously counted), the
+fresh episode is superseded as the loser, total counted becomes
+10, and the new entry 4 is ACTIVE with list [29,30]. The prereg's
+expected outcome (4 fresh winners, counted 12) was impossible
+under the frozen mechanism; it reflected an adversary hand-trace
+error, not a mechanism defect. Killing on the letter of the
+mistaken trace would be a false kill.
+
+Corrected X-CU7-2(a) fixture (two phases, same kill intent):
+Phase 1, majority correctness: feed 1x `(2,0,0,2>1,1,1)`.
+Expect a carve for the old side: `nent` becomes 5, new entry 4
+has exactly 2 winner episodes (indices 29 and 30), both
+`EP_COUNTED`, neither previously counted (winct 0 before), the
+fresh index 31 is `EP_SUP`, total counted is 10. KILL on any
+GHOSTWIN, REVOTE, or wrong winner set.
+Phase 2, honest reversal: feed `(2,0,0,2>0,0,0)`,
+`(2,0,0,2>1,1,1)`, `(2,0,0,2>0,0,0)`, `(2,0,0,2>1,1,1)`,
+`(2,0,0,2>1,1,1)`. The first absorbs into ACTIVE entry 4; the
+second contradicts it and the contest cap marks entry 4
+ST_CONFL; the remaining three CONFLICTED-ABSORB into entry 2
+(oldest tombstone) where the fresh side accumulates to 2v1 and
+carves. Expect: `nent` becomes 6, new entry 5 has exactly the 2
+fresh winner episodes (indices 35 and 36, both >=31), both
+`EP_COUNTED`, total counted is 12, the `(0,0,0)` loser (index
+34) is `EP_SUP`. KILL if the winner set includes any previously
+counted or non-fresh episode, if counted != 12, or if
+`fu_predict(2,0,0,2)` returns confident (r=1) while
+`live_contra_at` reports live contradiction.
+X-CU7-2(b) runs after the corrected (a); its downgrade criterion
+is unchanged, only the starting world state shifts (entry 5 now
+exists as the newest tombstone).
