@@ -679,3 +679,49 @@ assertion to the pre-run gate (duplicate entry names would collide).
   cured, only the debt is resolved). Architectural compression
   achieved: one learner-owned structural workspace, as the
   one-system rule requires.
+
+### 9.13 Eviction tie-breaker pathology: the top continuing-learner blocker (C75)
+
+- C75 EVICTION-TIE-BREAKER-PATHOLOGY (source 97b28e6a6,
+  FREEZE-RUN-COMPLETE): SURVIVES as bounded L2 (characterization,
+  not a capability claim). The frozen binary's evict_c() breaks
+  lowest-importance ties by lowest index; when the 36-slot store
+  fills with importance-1 slots, sequential teaches overwrite the
+  same slot (signature: OBSERVED immediately followed by EVICT of
+  the just-taught key). This revised the W4 prediction (PASS to
+  FAIL) and the W5 prediction (PASS to FAIL) with a mechanism-level
+  cause, and confounded W6-treatment and W9 per the pre-registered
+  C1 clause. The substrate cannot stably hold 6 sequential new
+  facts; experience accumulation across worlds is broken by the
+  tie-breaker, independent of any capability-specific limitation.
+  This is the top continuing-learner blocker identified by the
+  freeze challenge. It revises two world predictions, not any
+  survival verdict; the finding is on the frozen binary, so no
+  source or binary change is implicated.
+
+### 9.14 Governance note: FREEZE-RUN-COMPLETE (not a numbered claim)
+
+The Core Freeze Challenge run phase completed at 97b28e6a6. All
+9 sealed worlds executed against the frozen binary in protocol
+order W1-W9 with persistent state carried across (S0 null through
+S9). The battery did not void: binary hash 8733af3d2814 verified
+before every world and re-verified after; source hash
+b761efd90cb1 re-verified after (MATCH); all 15 world-file seals
+verified before running. Learner profile: 1/9 WORLD-PASS (W1 new
+concepts, 10/12 plus retention 10/10, CONFIRMS). W2, W3, W7, W8
+failed as predicted (CONFIRMS). W4 and W5 predictions REVISED
+(PASS to FAIL) by the C75 eviction pathology. W6 FAILED on the
+adversary's attribution reading (treatment 1/5, 0/3 vault probes;
+the action channel is constant CHOICE 0, so any gap is
+world-authored); the literalist PASS reading is also recorded.
+The W6 B4 interpretation is a protocol-interpretation call for
+Micah and is NOT decided here. W9 failed as predicted on accuracy
+(0/28 tree A, 0/31 tree B) but is C1-confounded. V0 PASS (untaught
+triples return sentinel -2, not echo). C1 CONFOUNDED for
+W6-treatment and W9. This is the challenge-level instrument
+verdict (FREEZE-CHALLENGE-COMPLETE), not a learner trophy.
+
+The v3 clean paper is now stale for C64-C75 (its derivation rule
+pins it to the 63-claim freeze 236a63a5a0). A v4 regeneration
+should wait for ledger stability; the v3 audit stands as a
+historical audit against 236a63a5a0.

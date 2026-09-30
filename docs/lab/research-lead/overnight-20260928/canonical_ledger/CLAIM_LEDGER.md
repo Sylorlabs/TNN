@@ -1432,6 +1432,57 @@ compression achieved.
 
 ---
 
+## C75. Eviction tie-breaker pathology: the frozen substrate cannot stably hold 6 sequential new facts
+
+Claim: the frozen binary's state store has a state-management flaw,
+discovered unpredicted by the Core Freeze Challenge run phase, that
+revises the W4 and W5 world predictions and confounds W6/W9 per the
+pre-registered C1 clause.
+
+- Source: 97b28e6a6 (FREEZE-RUN-COMPLETE; all 9 sealed worlds
+  executed against the frozen binary; battery did not void).
+- Finding: learn() on a full 36-slot store calls evict_c(), which
+  returns the lowest-importance valid slot with ties broken by
+  lowest index. A newly taught slot has importance 1 (correct=0,
+  wrong=0, dependents=0, contradictions=0). When the store is full of
+  importance-1 slots, the tie-breaker picks the lowest-index slot;
+  the new fact is written there. On the NEXT teach, evict_c scans
+  again from index 0 and picks the just-written slot again (still
+  importance 1, at the low index). Sequential teaches overwrite the
+  same slot instead of spreading across available low-importance
+  slots. Observed signature in binary stdout: `OBSERVED 9601 610 10`
+  immediately followed by `EVICT 9601 610` (the just-taught key,
+  evicted by the next learn()).
+- Impact: W4 (law change/revert) predicted PASS 6/6,6/6,6/6,
+  observed 1/6 pre, 2/6 post, 3/6 revert (WORLD-FAIL; 6 sequential
+  teaches collapsed onto 1-2 surviving keys; the reversion bars
+  could not be tested). W5 (contradictions) predicted PASS 2/2
+  targeted and 6/6 collateral, observed 1/2 targeted, 4/6
+  collateral (cascade: W4's keys never stabilized). W6-treatment
+  and W9 confounded per the pre-registered C1 clause (the W6 reveal
+  triple and 27 of 28 W9 edge triples evicted). W1 survived only
+  because its 10 probed keys were taught early (before the store
+  filled) and earned importance 11 via probes.
+- Ceiling: the substrate cannot stably hold 6 sequential new facts.
+  This is the top continuing-learner blocker identified by the
+  freeze challenge. A substrate that cannot accumulate experience
+  across worlds cannot integrate new capabilities into one
+  continuing learner.
+
+**Status: SURVIVES as bounded L2 (characterization, not a
+capability claim).** This is a white-box mechanism finding about a
+state-management limitation. It does not revise any survival
+verdict; it revises two world predictions (W4, W5) from PASS to
+FAIL with a mechanism-level cause, and it bounds the continuing
+learner: persistent experience accumulation across sequential
+worlds is broken by the tie-breaker, independent of any
+capability-specific limitation.
+
+Architecture: 0 new source lines (finding on the frozen binary);
+0 new semantic cases/modes/bridges/handlers. Bounded L2 ceiling.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -1452,9 +1503,10 @@ compression achieved.
 
 ## Ledger tally
 
-- Claims ledgered: 74 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 75 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
-  2026-09-30; C64-C74 fourth append 2026-09-30)
+  2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
+  2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -1464,8 +1516,8 @@ compression achieved.
   adversary round), C64 (L3B v2 adversary bounded), C65 (causal
   editinvent), C66 (L3C v2 adversary round 2), C68 (L3B v2 robust),
   C69 (OpScope behavioral validation), C72 (HypD v3), C73 (L3C v3),
-  C74 (learner compression)
-  -> 32 SURVIVES (all bounded L2 or L2+, none L3)
+  C74 (learner compression), C75 (eviction tie-breaker pathology)
+  -> 33 SURVIVES (all bounded L2 or L2+, none L3)
 - KILLED: C01 (generic reading), C02, C05, C07, C09, C10, C12, C14, C31,
   C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C),
   C51 (OpScope gate) -> 13 KILLED
