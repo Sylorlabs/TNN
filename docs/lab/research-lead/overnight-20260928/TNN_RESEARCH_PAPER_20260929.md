@@ -1036,6 +1036,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **OP-RECRUIT v2: DESIGN-COMPLETE (c6ef7ffcf).** Learner-driven operator recruitment: DETECT→PROPOSE→VALIDATE→RECRUIT→RETIRE. Semantics in persistent learner state. One generic interpreter case (opcodes 32..63). Falsifiable (F-DRIVER). Test battery with 6 falsifiers frozen.
 
+**Q4 Baseline: BASELINE-COMPARED (757442c40).** Step 5 complete. E1: Learner 64/64 vs MEM 56/64. E2: MEM ties (64/64) but PRNG artifact disclosed. E4 reuse: Learner 64/64 vs MEM-COMP 56/64. Wins are compactness (7 ops) and composition-generality, not raw accuracy. Zero Python.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
