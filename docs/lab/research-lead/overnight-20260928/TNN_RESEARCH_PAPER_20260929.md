@@ -1030,6 +1030,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Wall Removal: DESIGN-COMPLETE (5daf15951).** CTSVR: T1 trigger (bump while transferred), gen/wgen tags, re-verify phase probes stale walls. Cost bounded (≤ stale count). Falsifiers F1-F5 frozen.
 
+**Hypothesis C: FALSIFIED (aae06bac6).** C-F1 fires. T0 FAIL (predicted SOLVE). Greedy repair picks constants, cannot generalize, degenerates to memorization. "No breakage" check blocks stepping stones. As implications analysis predicted. A and C both dead; B and D remain.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
