@@ -1050,6 +1050,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Wall Removal: BUILD-PASS (ed3d7e212).** CTSVR implemented. Env C: both removed walls revised to free, goal reached in 234 actions. F1-F5 all pass. Removal asymmetry closed. Goal-execution subsystem complete: navigate, revise, unlearn.
 
+**C2 Design: DESIGN-COMPLETE (e658766bd).** Non-myopic repair: lookahead L=3, net-progress criterion (fix + increase pass count), backtracking BMAX=6. Predicts T0-T5 SOLVE. Transparent amendment from C1. Bounded L2, not L3.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
