@@ -1056,6 +1056,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DEVANG-H4: BUILD-FAIL (5c2f64857).** Score 14/20 (vs 16/20 baseline). T1: 0/3 (grn never merges). Thrash 0 (inert). Root cause: bootstrap problem (needs clean grounding to merge, needs merge for grounding). Recommendation: fall back to H1.
 
+**L3 Bridge: DESIGN-COMPLETE (e4f8642fc).** Removes diagnose() enum, build_tree() recipes, node_count(sig). Implements: residual-facts interface, 4 generic operators, change-point generation, greedy MDL search. C0-A audit M1-M4 frozen. Feasible; risks disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
