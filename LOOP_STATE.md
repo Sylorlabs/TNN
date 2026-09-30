@@ -4117,3 +4117,92 @@ governance rulings (untouched); his blind verdicts on the sealed pairs
 (unchanged, nothing added this wave); DP-1 presentation is a
 parent-agent queue decision; Q1/Q2 banked. Zero origin commits this
 window.
+
+---
+
+## Wave 20260930-0221pdt (completed 2026-09-30 ~10:00 UTC; inline, no
+subagents, deliberate per the documented descendant-subagent runtime
+failure precedent: three recent waves died waiting on nested
+subagents, the 2321pdt inline wave completed cleanly)
+
+1. H-PI-REV2-F3a independent-adversary run [NEW]: BUILD-FAIL on
+K-F3-4 (bar text), mechanism exonerated on the functional lines.
+Prereg PREREG_PI_REV2_F3.md frozen and committed alone at d80106155
+(commit-order self-check VALID: prereg strictly precedes all
+evidence; no implementation file created or modified this wave).
+Frozen binary rebuilt from the committed implementation 847a8f10f
+(working tree verified byte-identical to the blob; pinned znc
+498abcb5; one benign pre-existing analyzer lint). Adversary byte 'w'
+(last of the sorted frozen allowed set, declared zero-discretion
+rule) via the frozen P8 argv interface: 3 executions, 3/3
+byte-identical (97dd4276), exit 0, fails=0. Scorecard: K-F3-1 PASS
+(COUNTEREXAMPLE_DETECTED(wab); DIAGNOSIS pos=0 byte=119 conflicts=0;
+PRIMITIVE-CONSTRUCTED (0,119); alt=C0 index 2; v3 ACTIVE parent v2;
+wab->www; xab->xxx, abc->ccc, xy->xx, defg->gggg unchanged;
+wqw->www reuse with no new revision; R 8/8); K-F3-2 PASS (3/3
+byte-identical); K-F3-3 PASS (zero 'w' char literal, zero
+"wab"/"www"/"wqw", zero 119 in committed machinery); K-F3-4 FAIL
+('w' occurs in the frozen F1-reuse fixture "xqw"). Debate held
+(advocate, skeptic, judge): the skeptic's textual case ruled
+dispositive (adopting the narrow "F1 = counterexample only" reading
+post-run would weaken a frozen bar to force a pass); verdict
+BUILD-FAIL with the killing line cited. Pinned to the verdict line:
+the kill is bar-design, not mechanism (clean white-box trace, no
+mechanism failure evidenced). New audit finding: the parent
+prereg's allowed-set disjointness rationale is inaccurate; only
+{i,k,m,r,v} are genuinely absent from all frozen fixture inputs ('i'
+spent on F2; j,l,n,o,t,u occur in R inputs; w in the F1-reuse
+fixture). Remedy queued: next wave re-freezes F3a with corrected
+K-F3-4 text and a byte from {k,m,r,v}, then re-runs; then step 4
+independent reproduction. F3b (non-first-letter ("abz"->"zzz") S4
+stress): design frozen in the prereg, execution deferred (the frozen
+binary's committed P8 interface cannot express it; the interface
+extension needs its own prereg plus implementation wave). Recorded
+FROZEN-DESIGNED, not a verdict.
+
+2. Fork battery [NEW]: CONFIRM as a process confirmation (toolchain
+and extraction stability only). Fresh 77-entry run at run-start pin
+1f681e87b, driver complete: 75 PASS, 0 FAIL, 2 UNTESTABLE
+(rh-pull-1-head, rh-pull-2-head; the known non-TNN research-doc
+trees). LIVE entries (2): arch-wave-20260929-2321pdt at a4314633
+(newly enumerated archive), local-tnn-native-lab at 1f681e87b
+(run-start tip). Uniform on all 75 tested: znc pin 498abcb5 (0 pin
+divergence); probe sha 3b29aa06 (0 divergence); b1/b2/b3 PASS; NEG1
+E0002 75/75; NEG2 char-1 discrimination 75/75. Duplicate-SHA group
+carried: {arch-wave-20260929-1721pdt, local-1721pdt-tip} at
+7c11ac5af. Remote: zero new refs (origin/tnn-native-lab bedf8b4a
+unchanged). Driver batch_0221.sh mechanically derived from frozen
+batch_2321.sh (sed/awk; zero Python); run_one.sh byte-identical to
+frozen (4c2fadfc); harness re-verified byte-identical to frozen pin
+(a2e6284c).
+
+3. Interactive survey [NEW]: NONE new. 158 new or modified .zag
+files in fed72668..HEAD (all from the parallel research-lead
+process); zero chat/stdin/readline/interactive pattern hits. The
+frozen probe instruments remain the only chat-capable instruments.
+tnn_chat FIT staleness 4 of 8 (due at 8 of 8).
+
+4. Commit-order self-check [NEW]: VALID for this wave's freeze.
+Prereg commit d80106155 contains exactly PREREG_PI_REV2_F3.md; no
+implementation file exists or was modified this wave.
+
+5. Python red-line touch [NEW]: NONE. Zero Python in wave work;
+driver derivation and byte checks used shell only per the 2026-09-30
+standing rule.
+
+Provenance (verbatim probe answered in every debate motion): prereg
+text new this wave; implementation, binary lineage, fixtures, F2
+evidence inherited; F3a evidence, audits, fork battery evidence,
+interactive survey, debate records new this wave. All HELD statuses,
+rulings, banked questions, governance items, sealed pairs, DP-1,
+salt dispositions, and frontier dirs remain inherited and untouched.
+
+Queued next: re-freeze F3a (corrected K-F3-4, byte from {k,m,r,v} by
+declared rule) and re-run; then independent reproduction of
+H-PI-REV2; F3b interface-extension prereg then execution; NQ4/NQ5
+banked to Micah; tnn_chat FIT due at 8 of 8 (staleness 4 of 8); his
+six pending governance rulings (untouched); his blind verdicts on
+the sealed pairs (unchanged, nothing added this wave); DP-1
+presentation is a parent-agent queue decision; Q1/Q2 banked; DDES
+t*=0 repair; H-EXP2; H-ROUTER2; DEVANG2 retry; conditional-first
+builder lane. Zero origin commits this window.
