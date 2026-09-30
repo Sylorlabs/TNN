@@ -923,4 +923,6 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Adversary: ATTACK-SUCCEEDS (e40bdfc9b).** K1 (hidden enumeration): FAILS (zero enumeration claim stands). K2 (sealed soundness): SUCCEEDS. World F (0-delay rule) causes silent wrong convergence: DDES eliminates the TRUE hypothesis at t*=0 because predictor mismatches execution (propagation fires on W ticks only). BUILD-PASS stands (no frozen world had t*=0), but promotion blocked until repaired. K3 confirms L2 ceiling (researcher-authored guidance).
 
+**F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
+
 **End of paper.**
