@@ -132,3 +132,42 @@ Bounded L2 integration repair (honest signaling). Not L3. The
 name-list capacities remain (64 + 64); the improvement is that
 overflow is now genuinely per-distinct-subject, the mixed case
 signals both facts, and stale entries stop consuming capacity.
+
+## AMENDMENT 1 (2026-09-29, post-first-run, transparent)
+
+First run: 46/47, deterministic 3/3 (md5
+`425f693a28398b4f19faf65b9d96e417` x3, exit 1, 1 FAIL line). Preserved
+as `FDCR_UNIFIED7_RAW_PRE_AMEND.txt`. The single failure is G-T2's
+legacy condition `noadd_vote_lost("d70")==0` (observed 1; all other
+G-T2 conditions pass: total=70, overflow=6, train_con=-1,
+d70vote=-1).
+
+Root cause: prereg inconsistency, not mechanism failure. Frozen R1
+specifies "`noadd_vote_lost` scans BOTH name lists", and frozen
+K-FU7-2 requires `noadd_vote_lost("d70")==1`; both entail that d70
+(overflow-named) is definitely-known. K-FU7-6's claim "G-T2 PASS
+unchanged" is therefore unsatisfiable as written: the frozen R1 and
+K-FU7-2 jointly contradict it, and the execution exposed the
+contradiction. The mechanism behaved exactly as R1 specifies (raw
+line 1832: the G-T2 procedure now fires the definite NOTE for d70).
+
+Disposition: G-T2's `d70lost==0` condition is SUPERSEDED by R1.
+G-T2's surviving intent (d70's genuine vote loss is signaled, not
+silent; train_con==-1) is preserved and strengthened: under R1 the
+signal is the definite NOTE rather than the uncertainty NOTE
+(K-FU7-2 verifies the definite NOTE fires). No threshold is weakened:
+the new expectation (d70 definitely-known) is strictly more
+informative than the old one (d70 unknown). The amendment changes
+test code only; the mechanism is untouched.
+
+Changes (frozen by this amendment):
+1. In `unified_fdcr7.zag` PART G (test code only), G-T2's condition
+   `noadd_vote_lost(W31,"d70")==0` becomes
+   `noadd_vote_lost(W31,"d70")==1`, with a SUPERSEDED comment and an
+   updated explanatory comment. All other G-T2 conditions unchanged.
+2. K-FU7-6 is corrected to: 41/42 preserved checks PASS unchanged,
+   G-T2's d70lost condition superseded per R1, 5 new checks PASS:
+   47/47. K-FU7-7 unchanged (3/3 byte-identical re-run required).
+
+This amendment is committed alone BEFORE the test-code change and
+the re-run.
