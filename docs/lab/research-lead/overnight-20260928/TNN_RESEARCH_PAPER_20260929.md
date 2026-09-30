@@ -1084,6 +1084,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Attack: ATTACK-COMPLETE (73d9637a2).** 32 obs underdetermine F-PARCOND (7/8 combos, 2 tie). 64/64 from evidence + tax + luck, not evidence alone. A2/A4/A5/A6 sustained. A3 killed (strong). K3 stands weakened. Revival: multi-seed bar, no compact alternative, imperfect-component reuse.
 
+**Discovery Compare: COMPARE-COMPLETE (2e2419a79).** B: valley-crossing via fragment reuse (cleanest). D: no valley demonstrated (control, not advance). D's MOD trick breaks T1/T4/T5 discrimination. C2 must show: T0 repair trace, T4 via splits (0 CALLs), T3 single repair, budget discipline. Review trigger: T-A/B/C defined.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
