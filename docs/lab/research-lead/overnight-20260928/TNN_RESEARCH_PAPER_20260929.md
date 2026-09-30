@@ -1042,6 +1042,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Substrate S9: SCALE-TESTED (83b78a781).** Fact eviction/GC: per-slot metadata (pin/tick/hits), compaction (keep last triple), scored eviction. 500/500 learns accepted (vs 256/500 control). Important 150/150 preserved. String pool GC remains as next gap.
 
+**Form Inventor: INVENTOR-TESTED (1b8e032c4).** R1-R6 machinery: residual diagnosis, generic expression-tree pool, construction, novelty gating, promotion, refit, honest failure. All 14 predictions matched. G/H/K invented form 3 (cost 54). **C0 scope:** Bounded L2, not L3 (dedicated branches). Advances: diagnosis, construction, persistent form, revision, refusal.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
