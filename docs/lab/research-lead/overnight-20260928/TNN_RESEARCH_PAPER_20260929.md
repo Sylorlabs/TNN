@@ -947,6 +947,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Red Team 2: ATTACK-SUCCEEDS (b19e0e594).** Sealed 4-variable World H exposes generality bound: frozen `synthesize_plan` uses `obs = 4 - v_star`, valid only for 3-variable worlds. On 4 variables, plan contains no observation action. All 3-variable results stand. DDES synthesis is 3-variable-specific, not generic.
 
+**F2 Memorization Control: MEMORIZATION-TESTED (5d0fd8c9e).** F2 beats memorizer 2-0. Memorizer failed World A despite having all transitions (delay dynamics non-Markovian in observed state); couldn't formulate plan on World B. F2's causal model does load-bearing work. Simpler-learner threat addressed for goal-achievement. Scope: goal bars only, not convergence.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
