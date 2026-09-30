@@ -1000,6 +1000,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Autonomous Goal: GOAL-TESTED (67947a848).** Env A: 174 actions, goal reached, 2 bumps/replans. Env B: 186 actions, 0 bumps, map persisted, no repeated collisions. Random control UNREACHED at 20000. Full hypothesize-plan-act-fail-revise-retry loop. Bounded L1/L2 (map learned, not action semantics).
 
+**F2 OOD: OOD-TESTED.** W1 hysteresis: confident false model, goal by luck. W2 inhibition: declares impossible what is achievable. W3 delay>DMAX: cannot distinguish "no cause" from "beyond depth". W4 disjunction: killed true rule. F2 sound over fixed vocabulary but blind outside; confidence doesn't track truth. Governance: swept commits disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
