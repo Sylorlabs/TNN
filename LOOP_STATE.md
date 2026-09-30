@@ -3959,3 +3959,89 @@ _zag_malloc overlapping-block claim stays unproven (red-team flag,
 narrowed). The descendant-subagent runtime failure killed three waves this
 week; this wave's inline run completed cleanly. Zero origin commits this
 window.
+
+## Wave 20260929-1721pdt verdicts
+
+Wave pin: 7c11ac5af (prereg-freeze tip). This wave ran INLINE with no
+nested subagents under the documented runtime-failure precedent (0821pdt,
+1421pdt). A parallel research-lead process committed to tnn-native-lab
+throughout the wave (UNIFIED10/11, ROUTER9 killed, SEG9, INTENT-UNIFIED9,
+REVISE11 red team, MEM7/MEM8, CAUSALV6 red team); it does not touch
+docs/lab/rsi or LOOP_STATE.md, and its recent commits show the new
+taxonomy (BUILD-PASS, CRITICAL REPAIR / BOUNDED EDGE), so the
+reorientation has reached it. Debate: debate/ADVOCATE_1721.md,
+debate/SKEPTIC_1721.md, debate/JUDGE_1721.md under
+docs/lab/rsi/runs/wave-20260929-1721pdt/ (6 motions M1-M6; skeptic's
+provenance probe answered verbatim in every motion). No verdict
+overturned on rhetoric; the skeptic's attacks sustained as narrowing
+caveats and banked commitments. No frozen bar weakened; no em-dashes in
+wave documentation; one disclosed Python no-op touch (M5, zero
+evidentiary consequence).
+
+1. H-PI-REV2 prereg [NEW]: ADOPT as FROZEN. Honors the 1421pdt M5 banked
+commitment as this wave's first design-lane act. Freezes the
+procedure-invention v2 revision architecture targeting L3 criterion 12
+and operationalizing Criterion 0 as K-RV2-1(a)-(e); kill bars K-RV2-1..7
+frozen. Keeps the exact H-REVISE counterexample fixture including its
+genuine conflict with "xy"->"yy", with the conflict rule (newer trusted
+evidence overrides; SUPERSEDED provenance) and the checkable consequence
+("xy" predicts "xx" post-revision) frozen. F2 adversary-sealed with a
+frozen generator and disjointness-checked allowed set
+{i,j,k,l,m,n,o,r,t,u,v,w}. The "875-regression cell" note is ungrounded
+in any committed document; the regression cell is exactly R (8 RT2-A
+pairs). Standing skeptic attacks S1-S5 recorded, S1 stays a live kill
+vector. Verdict label per the reorientation: implementation reports
+BUILD-PASS/BUILD-FAIL only; promotion follows the 11-step pipeline
+(sealed F2, independent reproduction, explicit memorization baseline
+banked for step 5, alternative-explanation attack, OOD, ablation,
+transfer, independent red team, governance audit). Committed alone
+(7c11ac5af) before any implementation exists. Implementation is next
+wave's work.
+
+2. Fork battery [NEW]: CONFIRM as a process confirmation (toolchain and
+extraction stability only). Fresh 73-entry run, driver exit 0: 71 PASS,
+0 FAIL, 2 UNTESTABLE (rh-pull-1-head, rh-pull-2-head, the known non-TNN
+research-doc trees). Uniform on all 71 tested: znc pin 498abcb5 (0 pin
+divergence); probe sha 3b29aa06; b1/b2/b3 PASS, b1_cmp/b2_bin_cmp PASS;
+NEG1 E0002 71/71; NEG2 char-1 discrimination 71/71; probe_run_stdout
+R32_ZNC_PROBE_OK 71/71; harness_verdict_pass_count 1 on 71/71. LIVE
+entries (2): arch-wave-20260929-1421pdt at 347260cee1 (newly enumerated
+archive), local-tnn-native-lab at 7c11ac5af (run-start tip).
+Duplicate-SHA group named: {arch-wave-20260929-1121pdt,
+local-1421pdt-tip} at d18f7f68d. Remote: zero new refs
+(origin/tnn-native-lab bedf8b4a, HEAD 27a4271f, all pins unchanged).
+
+3. Interactive survey [NEW]: NONE new. New .zag files in
+347260cee1..7c11ac5af are the parallel writer's research instruments;
+zero chat-pattern hits. The frozen probe instruments remain the only
+chat-capable instruments. tnn_chat FIT staleness 2 of 8 (due at 8 of 8).
+
+4. Commit-order self-check [NEW]: VALID for this wave's freeze. Prereg
+commit 7c11ac5af contains exactly PREREG_PI_REV2.md; no implementation
+file exists on the branch. Re-runs next wave when the implementation
+lands.
+
+5. Python red-line touch [NEW]: DISLOSED TOUCH, no evidentiary
+consequence. python3 invoked as a no-op heredoc fallback during driver
+derivation; performed no edit and no loop work; driver diff shows only
+the 4 intended rotation changes. Process note: keep Python out of
+derivation commands entirely going forward.
+
+Provenance (verbatim probe answered in every debate motion): prereg
+text new this wave; inherited H-REVISE fixture and impossibility proof,
+Family X training set, RT2-A regression pairs, 1421pdt M5 banked
+commitment, reorientation directives. Fork battery 1721pdt evidence new;
+1421pdt battery evidence inherited. Interactive survey new. Debate
+records new. All HELD statuses, rulings, banked questions, governance
+items, sealed pairs, DP-1, salt dispositions, and frontier dirs remain
+inherited and untouched.
+
+Queued next: H-PI-REV2 implementation under the frozen prereg (next
+wave; BUILD-PASS/BUILD-FAIL only); then the 11-step pipeline; NQ4/NQ5
+banked to Micah; tnn_chat FIT due at 8 of 8 (staleness 2 of 8); his six
+pending governance rulings (untouched); his blind verdicts on the sealed
+pairs (unchanged, nothing added this wave); DP-1 presentation is a
+parent-agent queue decision; Q1/Q2 banked. The _zag_malloc
+overlapping-block claim stays unproven (red-team flag, narrowed). The
+descendant-subagent runtime failure killed three waves this week; this
+wave's inline run completed cleanly. Zero origin commits this window.
