@@ -935,6 +935,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Depth: DEPTH-TESTED (25ea8936d).** Sealed World G (delays 9/8, absent from frozen source). Repaired DDES derives length-10 plan in one shot, converges correctly on both configs. 3/3 byte-identical. Closes deferred K-NX3 sub-bar. Still strong L2, NOT L3.
 
+**F1 (GENEXEC2): BUILD-FAIL.** Pure-Zag stack VM (ops 0-20) + learner (P1 beam, P2 CALL, P3 conditional assembly). Results: T1 (|x|) 17/17 via P3; T0,T2,T3,T4,T5 all 0 (P1 beam fails). Root cause: sparse scoring prunes solution prefixes. C0-A passes (architecture sound), C0-C/D unmet. P1 needs fundamental redesign.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
