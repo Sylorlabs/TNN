@@ -1527,6 +1527,66 @@ cases/modes/bridges/handlers. Bounded L2 ceiling.
 
 ---
 
+## C77. L3A-trace red team breaks the BUILD-PASS: the verdict measures beam-byte reproduction, not learning
+
+Claim: the independent red team against the C70 clean rebuild
+(L3A-TRACE-CLEAN-BUILD-PASS) breaks the claim as stated.
+
+- Source: attack plan f0c3c980f (sealed; committed alone before any
+  probe ran), results 43927f0a0 (4 of 5 attacks executed; Attack 4
+  INCOMPLETE, still running at report time).
+- Attack 1 (tie-break fragility; BREAKS): flipping the
+  lexicographic tie-break in `rankfirst` from `pcmp(...)<0` to
+  `pcmp(...)>0` (one character; no learning-logic change) makes the
+  beam find different but equally valid 7/7 solutions (T0
+  `[IN0 DUP MUL]` instead of `[IN0 IN0 MUL]`). The detector
+  correctly reified the genuine shared segment `[IN0,DUP]` with
+  credit=2. The SEGMENT-MATCH oracle (a hardcoded exact-byte check
+  for `[1,1,5]`) rejected it, downstream bars were skipped, and the
+  verdict flipped PASS to FAIL. The BUILD-PASS verdict is fragile
+  to an arbitrary researcher choice. The "invention" is
+  beam-determined: the researcher picks the tie-break, the
+  tie-break picks the bytes, the detector reports them, and the
+  oracle checks they match expectation. The test measures
+  beam-byte reproduction, not learning.
+- Attack 2 (generality; mechanism CONFIRMS, verdict BREAKS): on a
+  new battery (T0 y=x^2+x, T1 y=x^2+2x), the detector found a valid
+  novel shared segment `[IN0,ADD,MUL]` (arity 2, credit 2) that the
+  attacker did not pre-specify. The mechanism IS generic. The
+  oracle rejected it (not `[1,1,5]`); verdict FAIL. The detector
+  generalizes; the verdict does not.
+- Attack 3 (negative control; CONFIRMS honesty): with T0 y=x^2 and
+  T1 y=x+1 (no shared segment), the detector honestly reported
+  NO-INVENTION. The R2 credit conditions are strict enough to avoid
+  false positives on this control.
+- Attack 5 (state pressure; HOLE FOUND): `reify` has no bounds
+  check on `nre` against the 4-slot name table (16 bytes). The 5th
+  reification writes past the buffer and crashes (exit=1).
+  Genuine memory-safety bug; the frozen battery does one
+  reification, so BUILD-PASS is unaffected, but any continuing
+  learner reifying more than 4 operators will crash.
+- Process: the red team disclosed one python3 invocation during
+  Attack 5 setup (text insertion into a probe file); the file was
+  deleted, recreated from pristine source, and redone with awk.
+  No Python-derived content remains in committed files. Disclosure
+  does not cure use; recorded.
+
+**Status: ADVERSARY-BREAKS (C70 is NOT retracted; it is
+qualified).** The clean rebuild faithfully reproduces the
+original's behavior (3/3 byte-identical, red-team baseline
+verified); the break targets the verdict's evidential weight, not
+the rebuild's fidelity. C70 certifies byte-reproduction, not
+learning. A BUILD-PASS that flips to FAIL when the tie-break
+direction changes is not a robust evidence claim. The
+detector/reify mechanism has genuine strengths (honesty, bounded
+generality), but the verdict does not measure them.
+
+Architecture: 0 new source lines (adversarial finding on committed
+work); 0 new semantic cases/modes/bridges/handlers. The `reify`
+capacity bug needs a bounds check before continuing-learner use.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -1547,10 +1607,11 @@ cases/modes/bridges/handlers. Bounded L2 ceiling.
 
 ## Ledger tally
 
-- Claims ledgered: 76 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 77 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
-  2026-09-30; C76 sixth append 2026-09-30)
+  2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
+  2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -1572,11 +1633,14 @@ cases/modes/bridges/handlers. Bounded L2 ceiling.
   PROCESS-FAIL
 - BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
   (figures), C22, C36 (L3C form builder), C43 (L3B growth), C70 (L3A
-  trace clean rebuild) -> 7 BUILD-PASS
+  trace clean rebuild; QUALIFIED by C77: certifies byte-reproduction,
+  not learning) -> 7 BUILD-PASS
 - BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate),
   C60 (L3A trace; K3 process FAIL) -> 3 BUILD-FAIL
 - ADVERSARY-BREAKS: C71 (editinvent scope collapse; generality broken,
-  C65 not retracted) -> 1 ADVERSARY-BREAKS
+  C65 not retracted), C77 (L3A-trace red team; BUILD-PASS verdict
+  fragile to tie-break, C70 not retracted, qualified) -> 2
+  ADVERSARY-BREAKS
 - EXPLORATORY: old C1 wave (superseded by C03), C52 (HypD v2 review);
   C60 technical findings (superseded by the C70 clean rebuild)
 - UNVERIFIABLE: C04 (Design 1)

@@ -747,3 +747,35 @@ historical audit against 236a63a5a0.
   failure was a tie-break policy, not an architectural limitation.
   Architecture delta: 1 line modified, 0 added; 0 new semantic
   cases/modes/bridges/handlers.
+
+### 9.16 L3A-trace red team breaks the BUILD-PASS verdict (C77)
+
+- C77 L3A-TRACE-REDTEAM-BREAKS (attack plan f0c3c980f, results
+  43927f0a0): ADVERSARY-BREAKS against the C70 clean rebuild claim
+  as stated. Attack 1 flipped the beam's lexicographic tie-break in
+  `rankfirst` (one character, no learning-logic change); the beam
+  found different but equally valid 7/7 solutions, the detector
+  correctly reified a genuine shared segment with credit=2, and the
+  hardcoded SEGMENT-MATCH byte oracle rejected it, flipping the
+  verdict PASS to FAIL. The "invention" is beam-determined, not
+  learner-determined; the verdict measures beam-byte reproduction,
+  not learning. Attack 2 confirmed the detector generalizes to a
+  new battery (novel segment found) while the verdict oracle does
+  not. Attack 3 confirmed honesty (NO-INVENTION on the negative
+  control). Attack 5 found a genuine memory-safety hole: `reify`
+  has no bounds check on `nre` against the 4-slot name table; the
+  5th reification crashes. Attack 4 (ablation budget) INCOMPLETE.
+- C70 is NOT retracted; it is qualified. The clean rebuild
+  faithfully reproduces the original's behavior (3/3 byte-identical,
+  red-team baseline verified). The break targets the verdict's
+  evidential weight: C70 certifies byte-reproduction, not learning.
+  The v3 paper staleness note now covers C64-C77; v4 regeneration
+  stays deferred to ledger stability.
+- The red team disclosed one python3 invocation during Attack 5
+  setup (probe-file text insertion); the file was deleted,
+  recreated from pristine source, and redone with awk. No
+  Python-derived content in committed files. Disclosure does not
+  cure use; this is the fourth process incident this cycle.
+- Recommendations banked: generalize or remove the SEGMENT-MATCH
+  oracle; add a `reify` capacity check before continuing-learner
+  use.
