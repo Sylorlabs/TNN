@@ -970,6 +970,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DEVANG3: BUILD-FAIL (e0d3a5e94).** 16/20 vs 17/20 baseline (missed by 1). Progress: 13/20→16/20, sub-bars 3/7→6/7, lexicon 3/10→6/10. V3 TP segmentation works. Gap: NEG novel regressed 1/3→0/3; lexicon-reuse pass splits "not" contexts differently than grounding expects.
 
+**Substrate Integration: SUBSTRATE-INTEGRATED (6e3294a49).** 45 morphemes as substrate facts, 4 concepts formed (identical to Step E). Causal episodes on SAME workspace after concepts. No interference: concepts intact, all 4 causal queries correct. Facts, concepts, episodes coexist. Limitations: fixed-width-3 seg, S4-S11 not replayed, grouping researcher-authored, UNCH/SET only.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
