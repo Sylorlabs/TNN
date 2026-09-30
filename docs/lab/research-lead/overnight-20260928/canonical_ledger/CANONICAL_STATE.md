@@ -779,3 +779,126 @@ historical audit against 236a63a5a0.
 - Recommendations banked: generalize or remove the SEGMENT-MATCH
   oracle; add a `reify` capacity check before continuing-learner
   use.
+
+## 10. Post-ledger verdicts (eighth append; 2026-09-30; ledger appendix C78-C95)
+
+Appended to CLAIM_LEDGER.md after the C77 append. No C01-C77 entry
+was modified. L3 achieved anywhere: still zero. This append records
+the architecture wave under Micah's 2026-09-30 rulings: the Core
+Freeze Challenge as the central benchmark, the One-System Rule, the
+tooling ruling (pure Zag only), and the consolidation directives.
+No new capability SURVIVES in this append; all entries are
+analysis, prereg, design, audit, or evaluator-asset records.
+
+### 10.1 Freeze failure cluster analysis (C78)
+
+- C78 CLUSTER-ANALYSIS-COMPLETE (905586a3b): EXPLORATORY. The 8
+  freeze failures trace to 4 shared causes: A. state-management
+  pathology (W4, W5, W6-treatment, W8-recall, W9); B. no
+  hypothesis/rule construction machinery (W2, W3); C. no
+  compositional machinery (W1 two-hop, W8-novel, W9-traversal);
+  D. no agentic action machinery (W6-inquiry, W7). Each cluster
+  carries a falsifiable prediction. Approved as the working
+  diagnosis; merge clusters if deeper unity is found.
+
+### 10.2 L3B/L3C integration scout (C79)
+
+- C79 L3-INTEGRATION-SCOUT-COMPLETE (d7bddbc56): EXPLORATORY.
+  Recommendation REDESIGN, keep both separate. Neither mechanism
+  plugs into the frozen core without a forbidden bridge. The
+  missing operation is learner-owned compose-verify-promote,
+  which must not be hardcoded as one giant oracle.
+
+### 10.3 Substrate scout (C80)
+
+- C80 SUBSTRATE-SCOUT-COMPLETE (88622725f): EXPLORATORY. The C75
+  pathology is representational poverty, not scheduling; the
+  memory question and the representation question are the same
+  frontier from two sides. Proposed substrate: tiny cell algebra,
+  one learner-owned structural workspace, generic executor, zero
+  domain semantic cases. The fold-retention recommendation was
+  adopted in C89.
+
+### 10.4 CLA-1 prereg (C81); CLA-2 consolidation (C89); LORG superseded (C84)
+
+- C81 CONTINUING-LEARNER-PREREG-COMPLETE (b4f61ff8a):
+  PREREG-FROZEN. Protected core (six primitives), one
+  learner-owned workspace, mechanism integration as workspace
+  processes, three-part C75 answer, append-only experience log.
+  P1-P7; gaps G1-G3.
+- C84 MEMORY-SUBSTRATE-PREREG-COMPLETE (c830c3005): SUPERSEDED by
+  C89. LORG's diagnosis was correct; its packaging as a separate
+  engine was wrong.
+- C89 LORG-CONSOLIDATION-PREREG-COMPLETE (24351fd31):
+  PREREG-FROZEN. CLA-2 folds every LORG structure into existing
+  CLA-1 workspace conventions (no weight vector; probation as
+  PROTECTION edges with decay clocks). Q1/Q2/Q3 addressed with
+  falsifiable P7/P8/P9. CLA-2 is the primary architecture
+  direction.
+
+### 10.5 W2/W3 and W6/W7 analyses (C82, C83); CAM-1 prereg (C90)
+
+- C82 W2W3-ANALYSIS-COMPLETE (2121fd16d): EXPLORATORY. One shared
+  cause: no construct-and-apply step in the frozen core. Approved
+  as a major frontier: W2 and W3 should be instances of the SAME
+  general capability.
+- C83 W6W7-ANALYSIS-COMPLETE (e7bb3d0bc): EXPLORATORY. One shared
+  cause: the action channel is open-loop (constant CHOICE 0).
+  Proposed: a learner-state-consulting ACT handler; not a planner.
+- C90 CONSTRUCT-APPLY-PREREG-COMPLETE (68a41be8a):
+  PREREG-FROZEN. One propose-verify-promote-apply mechanism for
+  W2/W3; split bar S1-S3; guards G1-G5 enforce the One-System
+  Rule.
+
+### 10.6 Learner-state ACT prereg (C87); comparison protocol (C88)
+
+- C87 LEARNER-ACT-PREREG-COMPLETE (51a818141): PREREG-FROZEN.
+  Generic read path from workspace to actuator; fills CLA-1 gap
+  G2. Action choice from learned structures, per ruling F.
+- C88 ARCH-COMPARISON-PROTOCOL-COMPLETE (128921ed9):
+  PROTOCOL-FROZEN. Seven dimensions, weighted decision rule, D7
+  sealed new-capability battery. CLA-1 vs contlearn2 as temporary
+  competitors; converge after discrimination.
+
+### 10.7 One-System audit (C85); unified structures (C91); compose ops (C92)
+
+- C85 ONESYSTEM-AUDIT-COMPLETE (f2684204b): EXPLORATORY. 0
+  architectural modes; 1 bridge; 7 handlers; 0 hardcoded semantic
+  cases; 1 syntax router. The proc/caus split in the unified
+  learner is the real architectural debt. Three consolidations
+  proposed with falsifiable battery claims.
+- C91 UNIFIED-STRUCTURES-EXPLORATION-COMPLETE (4ab7d3890):
+  EXPLORATORY. Five cognitive objects as one executable
+  workspace; the proc/caus distinction should emerge from
+  learner structure.
+- C92 COMPOSE-OPS-INVESTIGATION-COMPLETE (881b17638):
+  EXPLORATORY. Four minimal operations (COPY, APPLY,
+  CORROBORATE, PROMOTE) over the CLA-1 six; oracle O1-O3;
+  falsification F1-F7.
+
+### 10.8 Tooling contamination audit (C93)
+
+- C93 TOOLING-AUDIT-COMPLETE (70c520637): AUDIT-COMPLETE. Under
+  the pure-Zag ruling: the Core Freeze Challenge 1/9 scoring and
+  the C1-family driver run_race.sh are NEEDS-RERUN (scientific
+  logic in shell). Underlying artifacts and data are intact; no
+  retraction of measured values, but no canonical citation until
+  pure-Zag re-derivation. C64-C75 lanes audited CLEAN.
+
+### 10.9 C1 baseline (C94); FW1-FW9 sealed (C95)
+
+- C94 C1-BASELINE-LEARNING-PROPERTY (8a2929098): NEEDS-RERUN.
+  45 runs; MEM 27/63, FREQ at most 6/63, RAND 5/63 vs C1-CLEAN
+  63/63. The frozen prereg rule yields the learning-property
+  verdict, but the shell driver is flagged by C93, so the claim
+  is provisional pending pure-Zag rerun.
+- C86 WORLDS-V2-DESIGN-COMPLETE (200387b42): DESIGN-APPROVED.
+  FW1-FW9 approved as sealed evaluator/adversary assets, not
+  design hints.
+- C95 WORLDS-V2-SEALED (396895595): SEALED. 16 world files plus
+  the FW6 responder generated in pure Zag; hashes recorded;
+  five design ambiguities resolved and documented. Evaluator
+  asset, not a capability claim.
+
+The v3 paper staleness note now covers C64-C95; v4 regeneration
+stays deferred to ledger stability.

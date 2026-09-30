@@ -1587,6 +1587,497 @@ capacity bug needs a bounds check before continuing-learner use.
 
 ---
 
+## C78. Freeze failure cluster analysis: 4 shared causes for 8 world failures
+
+Claim: the 8 Core Freeze Challenge failures trace to 4 shared
+architectural causes, not 8 separate defects (CLUSTER-ANALYSIS-COMPLETE,
+analysis only; no implementation proposed).
+
+- Source: 905586a3b. Evidence drawn from run outputs (W2.out, W4.out
+  with the verbatim C75 OBSERVED/EVICT signature, W6phaseA.out,
+  W6phaseB.out, W7.out, W8.out, W9treeA.out, S1-S3 state deltas).
+- Cluster A (state-management pathology, C75 eviction): W4 primary, W5
+  cascade, W6-treatment confound, W8-recall confound, W9 confound.
+  Fixing it cleanly measures 5 worlds.
+- Cluster B (no hypothesis/rule construction machinery): W2, W3.
+  Same missing operation (induction to executable rule) under different
+  surfaces.
+- Cluster C (no compositional/combinatorial machinery): W1 two-hop
+  probes, W8-novel, W9-traversal.
+- Cluster D (no agentic action machinery): W6-inquiry-attribution, W7.
+  CHOICE is constant 0, disconnected from learner state.
+- Each cluster carries a falsifiable prediction. Ranking: A first
+  (most worlds, most fundamental, other clusters' clean measurement
+  depends on it), then B, C, D.
+
+**Status: EXPLORATORY (analytical finding; not a capability claim).**
+Approved by Micah as the working diagnosis (2026-09-30 ruling H);
+treat as hypothesis, merge clusters if deeper unity is found.
+
+Architecture: 0 new source lines (analysis only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C79. L3B/L3C integration scout: REDESIGN, keep both separate
+
+Claim: neither surviving mechanism plugs into the frozen core under
+the One-System Rule (L3-INTEGRATION-SCOUT-COMPLETE; assessment only).
+
+- Source: d7bddbc56. L3B v2 is a finite-menu grower with provable
+  edges (C64/C68); the lane ruling mandates redesign toward
+  incremental construction, never menu expansion. L3C v3
+  cover-set composition is genuinely general (C73) but composes
+  predicates into dispatch routing, while W2 needs composition of
+  operations into executable sequences. Adopting either whole would
+  import control flow, bars, and trigger policy as a subsystem.
+- The shared cause behind W2/W3 is that the frozen core has no
+  operation for composing verified parts into a new working
+  structure. The target is a learner-owned compose-verify-promote
+  operation, which does not exist in any lane yet.
+
+**Status: EXPLORATORY (assessment and recommendation; not a
+capability claim).** Micah approved REDESIGN (2026-09-30 ruling G);
+compose-verify-promote is a legitimate frontier but must not be
+hardcoded as one giant oracle.
+
+Architecture: 0 source lines added (assessment only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C80. Substrate scout: memory and representation are the same frontier
+
+Claim: the C75 eviction pathology is representational poverty, not
+scheduling; the memory question and the representation question are
+the same frontier viewed from two sides (SUBSTRATE-SCOUT-COMPLETE;
+survey and gap analysis; no implementation).
+
+- Source: 88622725f. Survey covers L3B v2, L3C v3, causal edit
+  invention, the frozen core's fragmented formats, C75, and the
+  C0-A through C0-D frontier.
+- Proposed substrate: frozen core with a fixed tiny cell algebra,
+  one learner-owned structural workspace replacing fragmented slots,
+  a generic executor with zero domain semantic cases, citation for
+  composition. All meaning in learner-authored persistent state.
+- Gap analysis: no current mechanism is close on C0-B (open
+  structural form). The gap is architectural (workspace replacement),
+  not parametric. Recommendation: fold retention into the substrate
+  prereg rather than running a separate policy lane.
+- Four frozen kill conditions for the direction (per-world cell
+  kinds, no transfer, oracle indistinguishability, researcher-helped
+  revision).
+
+**Status: EXPLORATORY (survey and direction; not a capability
+claim).** The fold-retention recommendation was adopted in the C89
+consolidation.
+
+Architecture: 0 cognition source lines added; 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C81. CLA-1 continuing learner architecture prereg frozen
+
+Claim: the CLA-1 architecture is fully specified and frozen before
+any implementation (CONTINUING-LEARNER-PREREG-COMPLETE; design only).
+
+- Source: b4f61ff8a (PREREG_CLA1.md, 325 lines; NAMECHECK.md).
+  Prereg committed alone before any implementation exists.
+- (a) Protected core: six primitives only (ALLOC, WRITE, LINK, READ,
+  ACTIVATE, DECAY); one generic event stream with task identity
+  stripped; no semantic cases, modes, or bridges. Default eviction
+  reads ONLY learner-owned state.
+- (b) Learner-owned structural workspace: one node store, learner-
+  assigned type tags, typed-edge discipline (DEPENDS-ON, SUPPORTS,
+  CONTRADICTS, REFINES, INSTANCE-OF).
+- (c) Integration: each surviving mechanism contributes its general
+  operation as a workspace process; L3B's menu NOT integrated.
+- (d) C75 answer: utility ledger, dependency graph, protection set;
+  bootstrap is a one-line tie-break fix (same class as C76).
+- (e) Experience: append-only log, no task labels, no-reset
+  semantics.
+- Falsifiable predictions P1-P7; named gaps G1-G3 (incremental
+  executable construction; uncertainty-contingent action;
+  hierarchical traversal).
+
+**Status: PREREG-FROZEN (design only; no capability claim).**
+Micah's ruling: CLA-1 is the PRIMARY architecture direction
+(2026-09-30, B+C+E). Section (d) later superseded by C89.
+
+Architecture (prereg): projected net-negative cognition source
+lines vs summed mechanism sources; 0 new hardcoded semantic cases;
+0 modes; 0 bridges; 0 task-specific handlers.
+
+---
+
+## C82. W2/W3 share one cause: no construct-and-apply step
+
+Claim: W2 and W3 fail from one shared architectural cause
+(W2W3-ANALYSIS-COMPLETE; analysis only; no code).
+
+- Source: 2121fd16d. Both worlds return -2 on all novel probes
+  (W2 0/8, W3 0/10); battery outputs cited.
+- The frozen core's query path is exact-key associative lookup with
+  no step that constructs a general mapping from stored exemplars
+  and applies it to unobserved keys. Three sub-gaps: (1) no
+  regularity detection in learn(); (2) no persistent format for a
+  learner-owned function/procedure object (the root); (3) lookup-only
+  query() with no construct-and-apply on miss.
+- W1's 2 failing two-hop probes are the mildest member of the same
+  cluster. Single-world repairs are rejectable unless they reveal
+  the general mechanism.
+- None of the surviving mechanisms plug in: L3B is a finite menu on
+  string examples; L3C v3 operates on its own interpreter's feature
+  representation; causal edit-invent is delay-specific.
+
+**Status: EXPLORATORY (analytical finding; not a capability claim).**
+Approved by Micah as a major frontier (2026-09-30 ruling J): W2
+procedure abstraction and W3 causal construction should be instances
+of the SAME general capability.
+
+Architecture: 0 new source lines (analysis only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C83. W6/W7 share one cause: the action channel is open-loop
+
+Claim: both failures come from an action output disconnected from
+learner state (W6W7-ANALYSIS-COMPLETE; analysis only).
+
+- Source: e7bb3d0bc. W6: the eviction confound is separated from
+  the inquiry gap; uncertainty representation is PRESENT (core emits
+  -2 correctly) but state-contingent action selection is missing.
+  W7: planning does NOT depend on W2; the model is taught
+  explicitly, the gap is using it. CHOICE is the constant 0 in both.
+- Proposed general mechanism: a learner-state-consulting ACT
+  handler. One generic primitive; not a planner, not a curiosity
+  module. Zero new semantic cases, modes, or bridges.
+
+**Status: EXPLORATORY (analytical finding; not a capability claim).**
+Micah approved the learner-state ACT as a hypothesis with the
+constraint that action choice come from learned structures, not
+source-code task cases (2026-09-30 ruling F).
+
+Architecture: 0 new source lines (analysis only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C84. LORG memory substrate prereg frozen (later superseded)
+
+Claim: the Learner-Owned Retention Graph design was preregistered
+and frozen before any implementation (MEMORY-SUBSTRATE-PREREG-COMPLETE).
+
+- Source: c830c3005 (PREREG_LORG.md, 409 lines; NAMECHECK.md).
+- Root causes R1-R5: researcher-fixed importance weights; newness
+  invisible to policy; positional tie-break attractor; flat
+  representation with no shared fate; no learner retention agency.
+- Three-part design: probationary protection (learner-controlled
+  duration); dependency links with structural eviction cost plus
+  group shared-fate; regret-based weight adaptation with the update
+  rule fixed and the weights learned.
+- Seven predictions P1-P7; five falsification conditions F1-F5.
+- Micah's banked questions: Q1 (which weights move may itself be a
+  researcher prior); Q2 (protect-everything degeneracy); Q3 (100-130
+  lines acceptable only as general operation).
+
+**Status: SUPERSEDED by C89.** Per Micah's consolidation ruling,
+LORG must not become a separate permanent memory subsystem; its
+useful ideas were folded into the CLA-2 workspace. The design
+remains committed and readable; nothing was deleted.
+
+Architecture (prereg): est. 100-130 generic source lines; 0 new
+hardcoded semantic cases; 0 modes; 0 bridges; 0 task-specific
+handlers.
+
+---
+
+## C85. One-System Rule audit: 0 modes; proc/caus split flagged
+
+Claim: systematic grep inventory of all .zag sources
+(ONESYSTEM-AUDIT-COMPLETE; audit only; no code changes).
+
+- Source: f2684204b. Inventory: 0 architectural modes
+  (CAUSAL_MODE/REVISION_MODE/LANGUAGE_MODE/MEMORY_MODE/PROCEDURE_MODE
+  absent); 2 ablation flags (SEL_MODE, CARRY_MODE, confined to
+  hypd_v3); 1 bridge mechanism (bridge_apply/bridge_learn; no
+  review trigger); 7 distinct task-specific handlers; 0 hardcoded
+  semantic cases (switch/match); 1 router (route_line, 5 hardcoded
+  syntax codes).
+- The frozen core (world_learn.zag) is exemplary: zero modes,
+  bridges, handlers, router. The unified learner has the clearest
+  architectural division: separate PBASE/CBASE stores, handlers,
+  and a syntax-based router enforcing the proc/caus split.
+- Three consolidation opportunities with falsifiable battery-score
+  claims: unify proc/caus into one learned mapping substrate;
+  generalize the bridge into learner-created conditional structure;
+  replace the intent retrieval layer with substrate-native
+  disambiguation.
+
+**Status: EXPLORATORY (audit finding; not a capability claim).**
+Micah approved the audit with the constraint that consolidation
+must make the proc/caus distinction emerge from learner structure,
+not from a smarter router (2026-09-30 ruling I).
+
+Architecture: 0 new source lines (audit only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C86. FW1-FW9 designs approved as sealed evaluator assets
+
+Claim: nine fresh adversarial worlds designed and approved
+(WORLDS-V2-DESIGN-COMPLETE; design only).
+
+- Source: 200387b42 (WORLD_DESIGN.md, 293 lines; NAMECHECK.md).
+  Every world carries a falsifiable prediction with mechanism-level
+  reasons. FW6 and FW9 are post-freeze adversarial designs with
+  certification language.
+- FW4/FW5 target C75 with 2x pressure (12 sequential facts;
+  10-link chain). FW9 is the treadmill guard: DAG reachability plus
+  shortest path, which no eviction policy can construct. FW8
+  combines induction and retention pressure.
+- Micah's approval (2026-09-30 ruling A): APPROVED with the
+  restriction that they are sealed evaluator/adversary assets, not
+  design hints; the learner architecture must not be tuned to them.
+
+**Status: DESIGN-APPROVED (evaluator asset; not a capability
+claim).** Sealing recorded in C95.
+
+Architecture: 0 new source lines (design only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C87. Learner-state ACT prereg frozen (fills CLA-1 gap G2)
+
+Claim: the generic state-consulting action operation is fully
+specified and frozen (LEARNER-ACT-PREREG-COMPLETE; prereg only).
+
+- Source: 51a818141 (PREREG_ACT.md, 337 lines; NAMECHECK.md).
+- The frozen core's action output is not a function of any mutable
+  learner state (C83 established CHOICE as constant 0). The missing
+  piece is one generic read path from the workspace to the
+  actuator, not a planner.
+- Integrates with CLA-1: same node store, edge discipline, utility
+  ledger, event loop. No parallel state format.
+- Action choice comes from learned structures (goal + hypotheses +
+  expected consequences + uncertainty + learned procedures), not
+  source-code task cases, per Micah's ruling F.
+
+**Status: PREREG-FROZEN (design only; no capability claim).**
+
+Architecture (prereg): 0 new semantic cases/modes/bridges; generic
+operation only; no planner or curiosity subsystem.
+
+---
+
+## C88. Architecture comparison protocol frozen (CLA-1 vs contlearn2)
+
+Claim: the discriminating comparison between CLA-1 and contlearn2
+is fully specified before either is implemented or measured
+(ARCH-COMPARISON-PROTOCOL-COMPLETE; design only).
+
+- Source: 128921ed9 (ARCH_COMPARISON_PROTOCOL.md, 408 lines;
+  NAMECHECK.md).
+- Seven comparison dimensions with a weighted decision rule; D7 is
+  a sealed new-capability battery. Micah's ruling D: run them as
+  temporary competing architectures; prefer MORE capability from
+  LESS researcher-authored machinery; CLA-1 has architectural
+  priority; contlearn2 is a control/competitor until evidence says
+  otherwise; converge after discrimination.
+
+**Status: PROTOCOL-FROZEN (design only; no capability claim).**
+
+Architecture: 0 new source lines (protocol only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C89. CLA-2 consolidation prereg frozen; LORG superseded
+
+Claim: the consolidated continuing learner architecture is frozen,
+folding LORG into the CLA-1 workspace (LORG-CONSOLIDATION-PREREG-
+COMPLETE; prereg only; no implementation).
+
+- Source: 24351fd31 (PREREG_CLA2.md, 516 lines; NAMECHECK_CLA2.md).
+  Implements Micah's consolidation ruling (B+C+E).
+- Every LORG structure maps onto existing CLA-1 workspace
+  conventions without a new format: the weight vector becomes
+  learner-authored evidence edges; probation becomes PROTECTION
+  edges with a decay clock; dependency links become DEPENDS-ON
+  edges. There is no weight vector in CLA-2.
+- Q1 addressed: selection of what changes under regret moves into
+  learner state (falsifiable P7). Q2 addressed: protection carries
+  opportunity cost/resource pressure, no exception tables
+  (falsifiable P8). Q3 addressed: new lines must add GENERAL
+  cognitive operation (falsifiable P9).
+- Supersedes CLA-1 section (d) and the LORG design as a standalone
+  engine (C84). Superseded designs remain committed and readable.
+
+**Status: PREREG-FROZEN (design only; no capability claim).**
+CLA-2 is now the primary architecture direction.
+
+Architecture (prereg): 0 new semantic cases/modes/bridges/handlers;
+all policy content in learner state.
+
+---
+
+## C90. CAM-1 construct-and-apply mechanism prereg frozen
+
+Claim: the propose-verify-promote-apply mechanism for W2/W3 is
+fully specified and frozen (CONSTRUCT-APPLY-PREREG-COMPLETE;
+prereg only).
+
+- Source: 68a41be8a (PREREG_CAM1.md, 365 lines; NAMECHECK.md).
+- One mechanism for both W2 procedure abstraction and W3 causal
+  construction, per Micah's ruling J (do not build separate
+  constructors unless an experiment proves their requirements
+  fundamentally differ).
+- Split bar S1-S3; predictions P1-P7; guards G1-G5. Guards enforce
+  the One-System Rule at the mechanism level.
+
+**Status: PREREG-FROZEN (design only; no capability claim).**
+
+Architecture (prereg): 0 new semantic cases/modes/bridges/handlers;
+single general mechanism.
+
+---
+
+## C91. Unified structures exploration: five cognitive objects, one workspace
+
+Claim: procedure, causal rule, hypothesis, plan, and linguistic
+relation can all be represented as executable/inspectable structures
+in the shared workspace (UNIFIED-STRUCTURES-EXPLORATION-COMPLETE;
+design only; 0 source lines).
+
+- Source: 4ab7d3890 (UNIFIED_STRUCTURES.md, 386 lines;
+  NAMECHECK.md).
+- Implements Micah's ruling I: the proc/caus distinction should
+  emerge from learner structure rather than source architecture.
+  Replacing two handlers with one more abstract handler is not
+  sufficient; the goal is executable structures the learner authors.
+
+**Status: EXPLORATORY (design exploration; not a capability
+claim).**
+
+Architecture: 0 source lines (design only); 0 new semantic
+cases/modes/bridges/handlers.
+
+---
+
+## C92. Compose-verify-promote decomposition: minimal structural operations
+
+Claim: the compose-verify-promote frontier is decomposed into
+minimal general structural operations (COMPOSE-OPS-INVESTIGATION-
+COMPLETE; analysis and spec only; no implementation).
+
+- Source: 881b17638 (COMPOSE_OPS_SPEC.md, 366 lines;
+  NAMECHECK.md).
+- Four new operations over the CLA-1 six: COPY, APPLY,
+  CORROBORATE, PROMOTE. Oracle test O1-O3; W2/W3 worked traces;
+  falsification conditions F1-F7.
+- Directly answers the C79 concern: compose-verify-promote must
+  not be hardcoded as one giant intelligent oracle. The
+  investigation finds the minimal operations that let the learner
+  create, test, and retain useful structures.
+
+**Status: EXPLORATORY (spec and analysis; not a capability claim).**
+
+Architecture: 0 implemented source lines (spec only); 0 new
+semantic cases/modes/bridges/handlers in committed code.
+
+---
+
+## C93. Tooling contamination audit: freeze scoring and C1 driver NEEDS-RERUN
+
+Claim: a complete register of Python/shell-as-research-program
+contamination under Micah's 2026-09-30 tooling ruling
+(TOOLING-AUDIT-COMPLETE; audit only).
+
+- Source: 70c520637 (TOOLING_AUDIT.md, 234 lines; NAMECHECK.md).
+- Four recorded Python process incidents this cycle; dispositions
+  assigned (CLEAN, NEEDS-RERUN, NON-CANONICAL-OK).
+- NEEDS-RERUN (highest priority): the Core Freeze Challenge scoring
+  logic lived in shell; a pure-Zag scorer must re-derive all nine
+  world scores from the frozen artifacts before the 1/9 result can
+  be canonically cited under the new ruling. The underlying run
+  artifacts are intact.
+- NEEDS-RERUN: run_race.sh (the C1-family driver/scorer, 147 lines)
+  implements JSON parsing, the causal simulation, query scoring,
+  and score aggregation in shell. Every C1-family numeric claim
+  depends on it (C1 clean 63/63, F-E 24/24, C76 24/24, the C1
+  reproduction, and the C94 baseline). The Zag contestant binary
+  is clean; the contamination is in the driver/scorer. Underlying
+  data intact; a pure-Zag driver can re-derive the results.
+- C64-C75 lanes audited CLEAN.
+
+**Status: AUDIT-COMPLETE (governance finding; contamination
+register).** The NEEDS-RERUN items are blockers for canonical
+citation of the affected results, not retractions of the
+underlying data.
+
+Architecture: 0 new source lines (audit only).
+
+---
+
+## C94. C1 baseline: simple controls cannot reach the canonical scores
+
+Claim: three simple pure-Zag baselines on the frozen C1 worlds
+score far below the C1-CLEAN contestant (C1-BASELINE-LEARNING-
+PROPERTY; 45 runs).
+
+- Source: 8a2929098 (RESULTS.md; prereg 26937cb55 strictly precedes
+  freeze 11b957715; runs committed alone).
+- 45 runs: 3 baselines x 5 worlds x 3 reps; all reps byte-identical
+  on replies and scores.
+- Totals: MEM 27/63, FREQ at most 6/63, RAND 5/63 on canonical
+  worlds (C1-CLEAN reference: 63/63). Frozen predictions P-MEM1,
+  P-FREQ1, P-RAND1, P-DET1 all PASS.
+- Verdict rule from prereg: no baseline reached 60/63 on any
+  canonical world, so the verdict is C1-BASELINE-LEARNING-PROPERTY:
+  the 63/63 scores are a property of learning, not of the world
+  structure admitting a trivial solution.
+
+**Status: NEEDS-RERUN under C93.** The numeric result used the
+shell driver run_race.sh, which the tooling audit flags as
+shell-as-research-program. The underlying run data is intact and
+the verdict follows the frozen prereg rule, but canonical citation
+awaits a pure-Zag re-derivation. Not SURVIVES until the rerun.
+
+Architecture: 0 new cognition source lines (baseline measurement);
+0 new semantic cases/modes/bridges/handlers.
+
+---
+
+## C95. FW1-FW9 sealed as evaluator/adversary assets
+
+Claim: the 16 FW1-FW9 world files plus the FW6 responder were
+generated in pure Zag and sealed with recorded hashes
+(WORLDS-V2-SEALED).
+
+- Source: 396895595 (SEAL.md, 104 lines; seal_src/gen_fw.zag,
+  745 lines, compiled with the pinned znc; fw6_respond.zag).
+- All computed values (FW3 products, FW5 chain values, FW8 grammar
+  products, FW9 DAG reachability and shortest paths via in-generator
+  BFS) were calculated inside the generator at build time; no
+  value transcribed by hand.
+- Five design ambiguities resolved at implementation and recorded
+  in SEAL.md (FW2/FW5/FW8 line counts, FW6 combined probe,
+  FW1 double teach). The FW6 responder was tested on three mocks
+  before sealing.
+- Per Micah's ruling A: sealed evaluator/adversary assets, not
+  design hints. The learner architecture must not be tuned to them.
+
+**Status: SEALED (evaluator asset; not a capability claim).**
+
+Architecture: generator is tooling, not cognition; 0 new
+cognition source lines; 0 new semantic cases/modes/bridges/handlers.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -1607,11 +2098,11 @@ capacity bug needs a bounds check before continuing-learner use.
 
 ## Ledger tally
 
-- Claims ledgered: 77 (C01-C34 frozen at 714178dd9; C35-C49 first
+- Claims ledgered: 95 (C01-C34 frozen at 714178dd9; C35-C49 first
   append 2026-09-30; C50-C53 second append; C54-C63 third append
   2026-09-30; C64-C74 fourth append 2026-09-30; C75 fifth append
   2026-09-30; C76 sixth append 2026-09-30; C77 seventh append
-  2026-09-30)
+  2026-09-30; C78-C95 eighth append 2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
   C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
   (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
@@ -1651,8 +2142,27 @@ capacity bug needs a bounds check before continuing-learner use.
   C62 (paper governance v2) -> 3 GOVERNANCE-PASS; plus the unnumbered
   81/83 wave (fe8485d7e, governance instrument, not a C-claim)
 - SUPERSEDED: C63 (paper-derived 34-claim draft; superseded by the v1
-  and v2 clean papers)
+  and v2 clean papers); C84 (LORG standalone engine; superseded by
+  the C89 CLA-2 consolidation)
 - L3 achieved anywhere: zero
+- Architecture-wave appendix (C78-C95, 2026-09-30): EXPLORATORY: C78
+  (cluster analysis), C79 (L3 integration scout), C80 (substrate
+  scout), C82 (W2/W3 analysis), C83 (W6/W7 analysis), C85
+  (One-System audit), C91 (unified structures), C92 (compose-ops
+  spec) -> 8 EXPLORATORY; PREREG-FROZEN: C81 (CLA-1), C87
+  (learner-state ACT), C89 (CLA-2), C90 (CAM-1) -> 4 PREREG-FROZEN;
+  DESIGN-APPROVED: C86 (FW1-FW9) -> 1; PROTOCOL-FROZEN: C88
+  (arch comparison) -> 1; AUDIT-COMPLETE: C93 (tooling
+  contamination register) -> 1; NEEDS-RERUN: C94 (C1 baseline;
+  verdict provisional pending pure-Zag driver) -> 1; SEALED: C95
+  (FW1-FW9 worlds) -> 1; SUPERSEDED: C84 -> 1 (counted above)
+- C93 NEEDS-RERUN scope: the Core Freeze Challenge 1/9 scoring and
+  all C1-family numerics (C1 clean 63/63, F-E 24/24, C76 24/24, C1
+  reproduction, C94) are contaminated in their driver/scorer logic
+  (shell-as-research-program) until independently re-derived in
+  pure Zag. Underlying artifacts and data are intact; no
+  retraction of measured values, but no canonical citation until
+  the reruns.
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
