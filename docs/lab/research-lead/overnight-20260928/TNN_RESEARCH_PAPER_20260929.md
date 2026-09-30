@@ -962,6 +962,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **DDES Generalization: GENERALIZATION-TESTED, FIXABLE (843c45fee).** `obs = 2 + v_star` replaces `obs = 4 - v_star`. Tested on 3/4/5 variables, 6/6 converge, RT2 break closed. Fix was researcher-authored; learner does not derive encoding. Classification unchanged: strong L2, NOT L3. L2 envelope now N variables.
 
+**Shared Substrate: SUBSTRATE-PROTOTYPED (2835e5641).** Resolves Step B incompatibility as architectural evidence. Variable count is runtime header field; causal hypotheses are episode-supported entities; facts and episodes coexist on one 32768-byte workspace. Prototype runs fact AND causal episodes: 10/10 checks pass, 3/3 byte-identical. Limitations: UNCH/SET only, simplified contest, does not rewrite unified_learn.zag.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
