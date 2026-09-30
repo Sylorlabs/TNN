@@ -958,6 +958,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Segmentation Redesign: REDESIGN-BLOCKED (8178531c8).** Frozen V1 (TP-threshold, +26 Laplace) got 4/10 < 5/10 bar. But approach validated: cold-start fix works (single chars at t=0), TP beats raw frequency (discovers "red","blu"). Exploratory V3 (+4 Laplace) reaches 6/10, doubling baseline. Over-merging and hard words (bal,smal) need grounding cues. V3 frozen as DEVANG3 candidate.
 
+**F2 Reproduction: REPRODUCED (cfb0396db).** Independent non-author rebuild from frozen source. Both worlds match exactly (md5s identical, 3/3 byte-identical). Promotion step 4 COMPLETE.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
