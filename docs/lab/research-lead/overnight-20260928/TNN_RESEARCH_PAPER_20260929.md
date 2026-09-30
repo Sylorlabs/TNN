@@ -740,6 +740,8 @@ As of 2026-09-29 15:45 PDT, 8 subagents are running in parallel:
 
 **Queue discipline:** When any thread completes, a replacement is spawned immediately to maintain ~10 parallel workers. Completed today: NQ5 (discovery retirement), NQ8 (FDCR held-out), NQ2 (learned routing), NQ3 (experiment invention), NQ4 (F-LEAK fix), NQ6 (procedure intent).
 
+**CA-1 Competitive Arena: BUILD-FAIL (governance-void).** Infrastructure built in pure Zag (world_gen.zag, tnn_contestant.zag, arena.zag, run_arena.sh): 68 items, 16 capabilities, 131 turns, sealed generation, per-turn battery cross-check, cost ledger. Pilot: TNN reference scores 1.000 on all 16 (expected, validates infrastructure, not a discovery). Seven real Zag bugs found and fixed. LLM cell BLOCKED_BY_TOOLCHAIN. **Verdict driver:** Two Python no-op invocations occurred during the wave (heredoc spot-check, inadvertent python3 -c). Red line is literal; disclosure does not cure. Wave is void-on-sight. Committed Zag sources reusable for clean refreeze (new amendment, new never-viewed seed, zero Python validation).
+
 ---
 
 ## 6. Infrastructure and Provenance
