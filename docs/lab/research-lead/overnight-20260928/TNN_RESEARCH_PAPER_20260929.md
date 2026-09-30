@@ -1100,6 +1100,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **F3 Phase 3: BUILD-FAIL (57836684b).** T-CONJ PASS (OP-GROW forms 2-lit conjunction, 8 exps, drills pass). T-NEG BLOCKED (world missing main(), seal prevents fix). K4 FAIL (Python byte check). Recommendation: transparent amendment, re-freeze, test T-NEG.
 
+**Seg Review 2: REVIEW-COMPLETE (842638d15).** T1 0/3 across 4 systems. Scores 16→14→13, control 17/20. K2: YES, operator representation wrong; NO, segmentation not binding. Three wrongs: single-primary, pair-statistic, no scope object. H2 excluded as treadmill. Path: R1-R4 operator/scope.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
