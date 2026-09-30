@@ -2,7 +2,7 @@
 
 **Date (UTC):** 2026-09-30
 **Worker:** DEVINT-CLA2 E6 Prereg Amendment Worker
-**Verdict target:** E6-PREREG-DRAFTED
+**Verdict target:** E6-PREREG-FROZEN (reviewed and accepted 2026-09-30; see REVIEW_DISPOSITION.md; K1 anchor for implementation).
 **Parent prereg:** `devint_cla2_prereg/PREREG_DEVINT_CLA2.md` (commit `f24063bcb`, frozen)
 **Triage:** `devint_triage/DEVINT_TRIAGE.md` (commit `2ed45875d`; E6 ranked #1)
 **Red team:** `devint_cla2_redteam/DEVINT_REDTEAM_REPORT.md` (commit `a5ccb100d`; S6 is the strongest finding)
