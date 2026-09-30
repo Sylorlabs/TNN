@@ -31,20 +31,24 @@ mechanism's output form):
 - c3: "tav", "tiv" (init 't')
 
 Concept transition distribution (per bigram, conditioned on current
-concept c):
-- c0: to c1 p=0.8, to c0 p=0.2
-- c1: to c2 p=0.7, to c0 p=0.3
-- c2: to c3 p=0.75, to c2 p=0.25
-- c3: to c0 p=0.5, to c3 p=0.5
+concept c). AMENDED 2026-09-30 (before implementation): the original
+c3 row (to c0 p=0.5) would let a noise pair permanently exceed the
+count threshold, making exact-set convergence impossible. Replaced
+with a 4-cycle so all strong transitions are gold and noise is weak:
+- c0: to c1 p=0.85, to c0 p=0.15
+- c1: to c2 p=0.8, to c0 p=0.2
+- c2: to c3 p=0.85, to c2 p=0.15
+- c3: to c0 p=0.85, to c3 p=0.15
 
 Within-concept morpheme choice: uniform over the 2 members.
 
 Generation: LCG (a=1103515245, c=12345, m=2^31), fixed seed. Stream
 starts at c0. One episode = 5 consecutive bigrams.
 
-Gold ACTIVE sets (ACTIVE rule: count >= 3, same threshold as S5):
-- COND-CONCEPT gold: {(c0,c1),(c1,c2),(c2,c3)}
-- COND-RAW gold: the 12 morpheme pairs spanning those concept pairs.
+Gold ACTIVE sets (ACTIVE rule: count >= 3, same threshold as S5).
+AMENDED (follows the 4-cycle amendment above):
+- COND-CONCEPT gold: {(c0,c1),(c1,c2),(c2,c3),(c3,c0)}
+- COND-RAW gold: the 16 morpheme pairs spanning those concept pairs.
 
 Conditions (separate fresh workspaces, identical deterministic stream):
 - COND-CONCEPT: map each morpheme to its concept via initbyte (the
@@ -60,10 +64,11 @@ N=10, 20, 40. If never exact within 100 episodes, report
 
 ### Measurable prediction P1
 
-N_concept < N_raw. Rationale: in COND-RAW the c0 to c1 mass
-(p=0.8) splits across 4 morpheme cells, so each cell needs roughly
-4x the episodes to reach count 3. The concept mapping concentrates
-counts into 1 cell per transition.
+N_concept < N_raw. Rationale: in COND-RAW each concept transition's
+mass splits across 4 morpheme cells, so each cell needs roughly 4x
+the episodes to reach count 3. The concept mapping concentrates
+counts into 1 cell per transition. (Amended with the 4-cycle; the
+rationale is unchanged.)
 
 ## Synergy direction 2: contradiction to revision (world change)
 
@@ -74,6 +79,7 @@ counts into 1 cell per transition.
   names).
 - Phase B: 40 episodes from W2, identical to W1 except:
   c0: to c1 p=0.1, to c2 p=0.8, to c0 p=0.1.
+  (AMENDED: matches the 4-cycle W1; only the c0 row changes.)
   One continuous LCG stream; the transition table switches at
   episode 31.
 - Contradiction detector (researcher-authored, operates on
@@ -124,7 +130,8 @@ accuracy. COND-FROZEN keeps predicting c1.
   adds no value; report both numbers.
 - If a condition never converges within 100 episodes (S1),
   report "not converged" rather than a number.
-- If Phase-A ACTIVE set differs from {(c0,c1),(c1,c2),(c2,c3)},
+- If Phase-A ACTIVE set differs from
+  {(c0,c1),(c1,c2),(c2,c3),(c3,c0)},
   the world generator is miscalibrated; report
   SYNERGY-LIMITED with the observed set.
 
