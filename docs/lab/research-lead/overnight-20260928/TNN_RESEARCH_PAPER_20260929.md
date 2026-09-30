@@ -998,6 +998,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Q4 Reuse: BUILD-PASS (b719bb54b).** 5-op shared subexpression (majority). Reuse: 0 interventions, 64/64. Scratch: 24 interventions, failed. Ratio 0.0 ≤ 0.5. **C0-D PASS.** Bounded L2 with demonstrated reuse; C0-C needs adversary.
 
+**Autonomous Goal: GOAL-TESTED (67947a848).** Env A: 174 actions, goal reached, 2 bumps/replans. Env B: 186 actions, 0 bumps, map persisted, no repeated collisions. Random control UNREACHED at 20000. Full hypothesize-plan-act-fail-revise-retry loop. Bounded L1/L2 (map learned, not action semantics).
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
