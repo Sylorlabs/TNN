@@ -150,7 +150,11 @@ a clean re-do may be ordered before the figure is adopted).
 
 ### C146. MUL Rung B preregistration (PREREG-FROZEN)
 
-- Commit: 5924bbdae (local only). Design only; no implementation.
+- Commit: 3ce154801 (local only). Design only; no implementation.
+  Prereg design at 5924bbdae; freeze verification at 0f7034567
+  (RUNGB-FREEZE-INCOMPLETE: substantively complete but marked
+  DRAFT); reviewed and frozen at 3ce154801 (MUL-RUNGB-PREREG-FROZEN;
+  REVIEW_DISPOSITION.md). K1 anchor for implementation.
 - Parent: PREREG_MUL1.md @ 222899314. Rung A build: fbf14f73a.
   Rung A red team: 44f22979b (6/6 ATTACK-PASS).
 - Rung A baseline (adopted): learner promoted 4-cell PROC
