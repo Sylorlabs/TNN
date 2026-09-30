@@ -187,3 +187,127 @@ Until he rules, no newly Python-mirror-developed logic may be adopted.
   moved after results.
 - Commits remain local. Nothing is pushed without Micah's explicit
   approval.
+
+---
+
+## 6. Post-ledger verdicts (2026-09-30; ledger appendix C35-C49)
+
+Appended to CLAIM_LEDGER.md after the 714178dd9 freeze. No C01-C34
+entry was modified. L3 achieved anywhere: still zero.
+
+### 6.1 DDES line: integration, multi-step, revert (C35, C39, C47)
+
+- C35 DDES-INTEGRATION-PASS (prereg c3fecd3c8, impl d9f3871c5, evidence
+  f843188ad): SURVIVES as bounded L2 integration. Closes the C31
+  "integration pending" item at mechanism level. Arena C9 not remeasured.
+- C39 DDES-MULTISTEP-PASS (prereg edcefc164, impl 7871ca6d3): SURVIVES as
+  bounded L2. Adaptive chaining resolves the frozen 3-hypothesis case in
+  2 rounds where one-shot fails; termination proven.
+- C47 REVERT-ADAPT-PASS (prereg bb319407a, impl 00e9a766e): SURVIVES as
+  bounded L2. Adaptive re-derivation after law revert in 1 round;
+  partial-revert resolves to the new variant; STATIC shows the frozen
+  C1-pathology; outside-set declares and withholds.
+
+Open question 6 (DDES integration) is resolved at mechanism level.
+Arena C9 re-entry remains parked.
+
+### 6.2 Continuing learner: stress, churn, episodic pressure
+(C37, C44, C45)
+
+- C37 LEARNER-STRESS-PASS (prereg 4ca3a7196, addendum e16897bc9, impl
+  daa9bf2fc): SURVIVES as bounded L2. 8-phase lifetime: retention 8/8,
+  correction 5/5 with 0/12 collateral, interference 8/8, delayed reuse
+  5/5 through corrected premises. Revolving-door eviction finding.
+- C44 CHURN-REVISION-PASS (prereg 18fb10434, impl 5db2712af): the churn
+  concern is KILLED for the single-wave regime (falsifier triggered;
+  9/10 sleepers survive).
+- C45 EPISODIC-PRESSURE-BLEED (prereg 2e0c6ed10, evidence in 9c6ee8ba8,
+  verdict 136588de5): SURVIVES as a bounded L2 mechanism finding.
+  Sleepers 9/10 to 8/10 to 7/10 across episodes; inter-wave earning
+  launders junk to proven status. Provenance note: files landed in a
+  concurrent commit under a mismatched message; blob-verified and
+  documented in COMMIT_NOTE.md; history not rewritten.
+
+Open question 7 (continuing-learner integration) advances: stress,
+correction, interference, delayed reuse, and memory pressure are now
+measured in one process. The recency-guarded earning terminal experiment
+is in flight.
+
+### 6.3 Developmental language: OpScope R1-R4 (C38)
+
+- C38 OPSCOPE-R1R4-PASS (prereg 51c54e262, impl c60bfbe7a): SURVIVES as
+  bounded L2. Negation fixed: T1 0/3 to 3/3, battery 16/20 to 20/20;
+  falsifiers F1-F5 pass; DELETION operator discovered with white-box
+  OPREC trace. K=2 preregistered with justification; prior K=3 FAIL
+  stands.
+
+Open question 8 (developmental language) advances on negation. The K=2
+gate stress attack is in flight.
+
+### 6.4 Conditional lane: reproduction and red team (C40, C49)
+
+- C40 THRESHOLD-REPRO-PASS (prereg 955106ae5, repro 07785ac78):
+  REPRODUCTION-CONFIRMS C11 BUILD-PASS. Every committed number
+  byte-identical from committed source.
+- C49 REDTEAM-THRESHOLD-BREAK (attack prereg 15982381c, files in
+  fd31db230): the "tiered" claim is RETRACTED. The Tier-2 pass is
+  unreachable under beam selection pressure (selection-vs-persistence,
+  structural); THRESHOLD-PASS stands as a Tier-1 recalibration only.
+  Crowding: SURVIVE-THIS-ROUND with correct-via-equivalent caveat.
+
+Open question 3 (conditional lane pipeline): stage 4 done; stage 10 done
+with the tiered claim retired. C11 narrowed, not edited.
+
+### 6.5 L3C line: builder and adversary (C36, C41)
+
+- C36 L3C-FORM-PASS (prereg dc9a91501, result e663864f5): BUILD-PASS,
+  builder level only. Evidence toward C0-A/C0-B; NOT L3, NOT Criterion 0.
+  Prereg arithmetic slip disclosed (10/10 preserved).
+- C41 L3C-ADVERSARY-PROTOCOL-SMUGGLING-PROVEN (repro 7fae6a188, attack
+  prereg 7af24029e, results c96875d36): the v1 "emergence" claim is
+  RETRACTED as a C0-A candidate. Fixed template with data-driven
+  parameters; five breaking families; boundary map committed.
+
+Open question 1 (Criterion 0 / L3) is unchanged: zero. Protocol v2
+(recursive constructor) is in flight with families A-E as frozen
+falsifiers.
+
+### 6.6 L3B line: builder and adversary (C43, C46)
+
+- C43 L3B-GROWTH-PASS (prereg c5be6dfb5, impl 2fb110ce7): BUILD-PASS,
+  builder-side label only. C0-A answered mechanically (semantics in the
+  pre-existing interpreter). Toolchain finding recorded in ~/AGENTS.md:
+  pinned znc miscompiles `as *i32` slice construction in functions;
+  u8-backed cells mandatory.
+- C46 L3B-C0C-BOUNDARY-EXPOSED (attack prereg 14a92a69d, attack
+  a40aac558): KILLED as C0-C. Open execution, closed construction
+  (n-squared); revision churn with no version memory (alternating law).
+  C43 not impugned.
+
+Open question 1 unchanged. Constructor-level v2 redesign is in flight.
+
+### 6.7 Valley redesign 2 (C42)
+
+- C42 VALLEY-REDESIGN-FAIL (prereg 0310c7076, impl ea920137b):
+  BUILD-FAIL at the validation gate (0/10 accepted). Three architectural
+  lemmas committed. Battery remains void.
+
+Open question 4 (valley): bounded satisfiability search in flight to
+decide whether the V3 bar is satisfiable at all.
+
+### 6.8 Fork battery governance (C48)
+
+- C48 FORKBATTERY-78/80 PASS (enum 00b62fff9, results b4c81d190):
+  governance PASS. 78 PASS, 0 FAIL, 2 UNTESTABLE (expected). Harness
+  byte-identical; toolchain uniform. Archive-branch repoint finding
+  (tnn-native-lab-wave-archive-20260929-1721pdt moved 7c11ac5af to
+  dff8c2005); archive branches must be re-created, not moved.
+
+### 6.9 Provenance incidents (2026-09-30 wave)
+
+Shared-branch index races caused crossed commits: 9c6ee8ba8 carries
+episodic-pressure files (C45) under the threshold red team message, and
+fd31db230 carries threshold red team files (C49) under the C1 worker
+message. Content verified blob-identical in both cases; provenance
+documented (COMMIT_NOTE.md for C45); history not rewritten. Workers now
+use explicit pathspecs with pre-commit status checks.

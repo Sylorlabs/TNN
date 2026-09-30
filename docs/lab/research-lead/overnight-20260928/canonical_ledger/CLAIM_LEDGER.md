@@ -439,6 +439,346 @@ evidence that TNN is preferable to an LLM.
 
 ---
 
+## C35. DDES integration into the continuing learner
+
+Claim: the bounded DDES utility integrates with the continuing learner
+at mechanism level.
+
+- Prereg: c3fecd3c8 (frozen alone, before implementation)
+- Implementation: d9f3871c5
+- Evidence: f843188ad (DDES-INTEGRATION-PASS). Base learner withholds on
+  the frozen ambiguous causal case; integrated learner constructs one
+  discriminating intervention plan, executes once, observes an outcome
+  matching exactly one of two hypotheses, eliminates the other, and
+  resolves correctly. Base causal probes byte-identical between modes.
+  3/3 deterministic.
+
+**Status: SURVIVES as bounded L2 integration.** Closes the "integration
+pending" item recorded under C31. Arena C9 has not been remeasured; the
+arena gap is closed at the mechanism level only. No L3 claim.
+
+## C36. L3C emergent revision-form builder
+
+Claim: the learner constructs conditional-dispatch structure after
+hitting the H-REVISE impossibility (builder level).
+
+- Prereg: dc9a91501 (frozen alone, before implementation)
+- Result: e663864f5 (L3C-FORM-PASS). Learner starts without a conditional
+  form; contradiction monitor detects identical signatures requiring
+  different outputs; learner constructs dispatch structure using five
+  generic graph operations. Fixed discriminator discovered (f2 == 1) on
+  one family and (f3 == 9) on a second, with zero source change.
+  Constructed state: one dispatch node, two terminal nodes, two edges per
+  signature. Family 1: 6/6; family 2: 4/4. Construction-disabled ablation
+  fails clash cases while retaining training cases. 3/3 byte-identical.
+  Prereg contained an arithmetic slip ("12/12 total" vs operative
+  6 + 4 = 10); result preserved as 10/10 with disclosure.
+
+**Status: BUILD-PASS (builder level only).** Evidence toward C0-A and
+C0-B; NOT L3, NOT full Criterion 0, NOT SURVIVES. The fixed discriminator
+and protocol may be a conditional constructor in disguise; see C41.
+
+## C37. Continuing-learner stress battery
+
+Claim: the continuing learner survives memory pressure, interference,
+correction, and delayed reuse in one unbroken lifetime.
+
+- Prereg: 4ca3a7196 (frozen alone); addendum e16897bc9 clarifying K-S4(b)
+  pre-implementation
+- Implementation + evidence: daa9bf2fc (LEARNER-STRESS-PASS). 8-phase
+  lifetime, one process, no resets, no task labels, no recompilation.
+  Retention 8/8 through two pressure waves and 22-rule interference;
+  correction uptake 5/5 with 0/12 collateral and double-correction chains
+  resolving to the latest label; corrections survive targeted bombardment
+  4/4; delayed reuse 5/5 routing through corrected premises with zero
+  re-teaching. 3/3 byte-identical.
+
+**Status: SURVIVES as bounded L2 continuing-learner evidence.**
+Mechanism finding: pressure wave 2 churned 19 of 20 never-queried
+newcomers via a revolving-door eviction slot; new knowledge must earn
+retention through use. Recorded as the pre-DDES baseline for the stress
+battery.
+
+## C38. OpScope operator/scope R1-R4
+
+Claim: the frozen R1-R4 operator/scope design fixes negation on the
+developmental battery.
+
+- Prereg: 51c54e262 (frozen alone; K=2 preregistered with written
+  justification after a prior build measured K=3 unsatisfiable; the prior
+  K=3 FAIL verdict stands untouched)
+- Implementation + results: c60bfbe7a (OPSCOPE-R1R4-PASS). T1 (items
+  109-111) 0/3 to 3/3; full battery 16/20 to 20/20. Discovery trace: w=1
+  ("not") support 12/12, diversity 2, gate 40 > 28, installed as DELETION
+  operator with OPREC trig=1 sig=DELETION; w=0 positional confound killed
+  by the gate. Falsifiers F1-F5 all pass vs frozen predictions; ablation
+  T1 0/3 with the loss localized to the 3 NEG items. 3/3 byte-identical.
+  Pure Zag.
+
+**Status: SURVIVES as bounded L2 developmental-language result.** No L3
+claim. Retirement specified but uncovered on this battery (disclosed).
+
+## C39. DDES multi-step adaptive intervention planner
+
+Claim: the learner chains discriminating interventions adaptively, each
+round conditioned on the previous round's real outcome.
+
+- Prereg: edcefc164 (frozen alone, before implementation)
+- Implementation + evidence: 7871ca6d3 (DDES-MULTISTEP-PASS). Verbatim
+  DDES derivation core plus frontier generalization over n candidates,
+  oneshot and adapt modes. Frozen 3-hypothesis case M1: ONESHOT fails with
+  2 survivors; ADAPT eliminates one hypothesis in round 1, derives a
+  genuinely different round-2 target conditioned on the reduced survivor
+  set, and resolves the winner in round 2. M2 resolves in 2 rounds.
+  Regression case A resolves in 1 round under both modes. Termination
+  proven (at least one elimination per round when the true world is in the
+  candidate set); no plan space enumerated. 3/3 byte-identical. One
+  implementation-side VERIFY.sh transcription error (summary totals)
+  corrected pre-verdict with no frozen bar altered; disclosed.
+
+**Status: SURVIVES as bounded L2 adaptive causal mechanism.** Researcher
+still owns hypothesis format, frozen cases, derivation algorithm, action
+vocabulary, and budget. Arena C9 re-entry not done.
+
+## C40. Conditional threshold independent reproduction
+
+Claim: the threshold result reproduces byte-identically from committed
+source.
+
+- Prereg: 955106ae5 (frozen alone, before any build or run)
+- Reproduction: 07785ac78 (THRESHOLD-REPRO-PASS). Sources extracted via
+  git show from d0d296650; all three .zag files BLOB-MATCH committed
+  hashes. Every committed number reproduces exactly: R3/R1/FREC md5s
+  identical 3/3, all nine .err files zero bytes, P1'' round 0, P2''
+  A2-PASS 1 with REUSE_IV 64/64, P3'' DROUND < 4, P4''(a) A1-PASS 1,
+  P4''(b) 1/5, P4''(c) 48/64 63/64 40/64, nine audits none firing.
+  Full-file cmp of run-1 outputs vs committed originals: byte-identical.
+  Diff vs v2 base b0d1749f2 confirms the single functional delta is the
+  Tier-1 min slice line.
+
+**Status: REPRODUCTION-CONFIRMS C11 BUILD-PASS.** C11's builder-level
+status is unchanged; reproduction is pipeline stage 4 evidence, not
+promotion.
+
+## C41. L3C protocol-smuggling adversary
+
+Claim: the v1 revision-form emergence claim is protocol smuggling.
+
+- Phase 1 reproduction: 7fae6a188 (REPRO-PASS; rebuilt from committed
+  source at e663864f5, all four outputs byte-identical to committed
+  references)
+- Phase 2 attack prereg: 7af24029e (frozen before any attack run; protocol
+  lines 1-311 proven byte-identical to committed source by diff, only
+  main() replaced)
+- Phase 2 results: c96875d36
+  (L3C-ADVERSARY-PROTOCOL-SMUGGLING-PROVEN). Five families vs frozen
+  predictions: (a) conjunction needed, honest fail 2/4; (b) threshold
+  needed, eager overfit on first clash then dead end, 3/4; (c) nested
+  dispatch, silent dead end (return code 2, vectors not stashed), 4/6;
+  (d) underdetermined separator, silent misresolution, held-out 2/4 with
+  exactly the predicted silent errors; (e) stash-window forgetting, silent
+  misresolution, observed 4/5. construct() always emits the identical
+  shape; interp() implements exactly the matching fixed semantics.
+
+**Status: the v1 "emergence" claim is RETRACTED as a C0-A candidate.**
+The conditional FORM is researcher-supplied; only (feature, value)
+parameters are data-driven: parameter fitting of a supplied template. The
+mechanism stands as a clean bounded-L2 fixed-template conditional
+constructor with data-driven parameter discovery (see C36 honest scope).
+Boundary map: single-level single-feature-equality contradictions only.
+Do not widen the fixed template per family; that repeats the downgraded
+pattern.
+
+## C42. Valley redesign 2
+
+Claim: a redesigned valley battery produces accepted instances.
+
+- Prereg: 0310c7076 (frozen alone, 108 lines within the 120-line cap)
+- Implementation + validation: ea920137b (VALLEY-REDESIGN-FAIL, K2: 0/10
+  accepted, 8 required). All 10 candidates passed V1 (genuine score
+  valleys; REF-GREEDY halts at len 1) and all 10 failed V3, each with a
+  concrete 1- or 2-edit solver found by complete exhaustive check. Three
+  architectural lemmas: (1) 3-op solver lemma kills singleton-equality
+  and mod-m targets on GENEXEC2; (2) 1-gate lemma kills compositional AND
+  valleys; (3) MOD/DIV universality turns inert prologue constants into
+  lookup tables. 3/3 byte-identical. Pure Zag.
+
+**Status: BUILD-FAIL (validation gate; not a B/C2/D mechanism failure).**
+The valley battery remains void: no accepted instances, no mechanism runs
+authorized. Recommended next step: freeze the V3 checker as an oracle and
+run a bounded search over (target, path) pairs to decide whether any
+instance passes V1-V3, or the V3 bar itself is unsatisfiable.
+
+## C43. L3B residual-growth constructor
+
+Claim: the learner grows base-language programs via generic constructors
+(builder level).
+
+- Prereg: c5be6dfb5 (frozen alone, before implementation)
+- Implementation: 2fb110ce7 (L3B-GROWTH-PASS). Grown structures are
+  base-language programs (op codes 1-5, links, const values) executed by
+  the pre-existing frozen interpreter; growth adds no production, no
+  semantic case, no branch. KX1: all 512 canonical single branches score
+  at most 1/12; TRACE-CREATE fired at LEARN ep3 with preregistered
+  relations; HIDDEN 6/6; growth-disabled ablations 0/6; TRACE-RETIRE with
+  contradiction reason and v1-to-v2 supersession demonstrated; 3/3
+  byte-identical. C0-A audit: interpreter region has no dedicated relation
+  cases; interpreter generality confirmed on hand-written programs never
+  produced by growth.
+
+**Status: BUILD-PASS (builder-side label only).** The C0-A question
+"where are the semantics implemented" is answered mechanically: in the
+pre-existing base interpreter; the grown structure is base-language
+program data. Toolchain finding: pinned znc miscompiles `as *i32` slice
+construction inside functions (allocation aliasing, 8 isolated repros);
+u8-backed cells with little-endian pack/unpack are the mandatory
+workaround (recorded in ~/AGENTS.md).
+
+## C44. Newcomer-churn revision experiment
+
+Claim: useful-but-not-yet-queried knowledge is churned too aggressively
+under memory pressure.
+
+- Prereg: 18fb10434 (frozen alone, before implementation)
+- Implementation + results: 5db2712af (CHURN-REVISION-PASS, falsifier
+  branch). Control arm: 9/10 never-queried sleepers survived a 30-item
+  pressure wave; first-use probe 9/10; compositions through sleeper
+  premises 3/4; recovery cost 1 re-learn; foundation 12/12 intact. The
+  frozen prediction (0/10 sleepers survive) was wrong. EVICT log mechanism:
+  the first eviction creates a revolving-door slot at the lowest
+  importance-1 index; every subsequent eviction hits the same slot, so one
+  slot absorbs all sustained pressure and spares the other 9 newcomers.
+  Per the frozen prereg, the churn hypothesis is rejected for the
+  single-wave regime; no policy variant adopted.
+
+**Status: the churn concern is KILLED for the single-wave regime
+(falsifier triggered).** The retention policy stands as adequate under
+single pressure waves. 3/3 byte-identical. Pure Zag.
+
+## C45. Episodic-pressure experiment
+
+Claim: repeated separated pressure waves bleed never-queried newcomers
+that a single wave spares.
+
+- Prereg: 2e0c6ed10 (frozen alone, before implementation)
+- Evidence: committed inside 9c6ee8ba8 (concurrent worker's commit;
+  message/content mismatch documented); verdict + provenance: 136588de5
+  (EPISODIC-PRESSURE-BLEED). All 8 evidence files blob-verified identical
+  to the staged evidence; K1 holds structurally (prereg is an ancestor; no
+  implementation file existed before the prereg commit). Three separated
+  30-item waves with inter-wave earning: sleepers 9/10 to 8/10 to 7/10,
+  every frozen prediction matched exactly (per-episode first-eviction
+  victims (40,20), (41,20), (42,20); door-slot churn sequences).
+  Cumulative 7/10 < 9/10 single-wave baseline. Earned flood 100% survival;
+  final probes 3/3; compositions 4/4; foundation 12/12. Mechanism:
+  inter-wave earning launders junk to proven status, leaving sleepers as
+  the only unproven victims.
+
+**Status: SURVIVES as a bounded L2 mechanism finding.** Provenance note:
+implementation and evidence files were staged under the episodic worker's
+owned pathspec but landed in concurrent commit 9c6ee8ba8 under another
+worker's message; the worker blob-verified all files and documented this
+in COMMIT_NOTE.md rather than rewriting history. Do not rewrite history
+to fix the mismatch.
+
+## C46. L3B C0-C adversary
+
+Claim: the L3B mechanism achieves open structural form (C0-C).
+
+- Attack prereg: 14a92a69d (frozen alone, before any attack file existed)
+- Attack + results: a40aac558 (L3B-C0C-BOUNDARY-EXPOSED). Protocol lines
+  1-438 byte-identical to committed l3b.zag at 2fb110ce7 (only main()
+  replaced); committed mechanism unmodified. Family A2 (n-squared
+  residual): KX-A2 max 1; analyzer fired twice and abstained honestly
+  (NO-GROWTH); TRACE-CREATE 0; HIDDEN-A2 0/3. Crux exhibit: hand-built
+  MUL(VAR,VAR) via CREATE/CONNECT evaluates to 25 at f0=5, so the
+  execution substrate evaluates n-squared while the construction substrate
+  can neither detect nor assemble it: open execution, closed construction.
+  Family B2 (alternating law): TRACE-CREATE 3, TRACE-RETIRE 2; v3
+  content-identical to v1 but rebuilt from scratch (no version memory);
+  HIDDEN-B2 3/3, SWITCH 0/6, FINAL-B2 0/2. 3/3 byte-identical.
+
+**Status: KILLED as C0-C.** The fixed analyzer vocabulary and static
+single-program growth form are the boundary. The C0-A result (C43) is not
+impugned; the mechanism stands as a clean bounded-L2 grower of single
+stationary arithmetic residuals inside the vocabulary envelope. Families
+A2 and B2 are frozen regression falsifiers for any v2 constructor.
+
+## C47. DDES law-revert adaptive planner
+
+Claim: adaptive intervention handles change-then-revert law families.
+
+- Prereg: bb319407a (frozen alone, before implementation; NAMECHECK.md +
+  prereg only)
+- Implementation + evidence: 00e9a766e (REVERT-ADAPT-PASS). Time-indexed
+  feed protocol; competing rule graphs. R1 change-then-revert: ADAPT
+  tracks P0 to h0, P1 to h1, P2 back to h0, re-deriving h0 after the revert
+  in 1 round instead of sticking with h1 (4 rounds total, as frozen). R2
+  partial-revert: resolves P2 to the d2 variant, not snap-back to h0
+  (5 rounds). STATIC demonstrates the frozen C1-pathology (retires h1/h2
+  permanently, then misresolves P1 as SINGLE winner=h0). R3 outside-set:
+  all four modes DECLARE OUTSIDE-SET and withhold. Regression e0-e4
+  reproduce multi-step frozen expectations. One pre-freeze defect
+  (ep_winner/ep_round offsets overlapping the STATIC mask) found and fixed
+  before the verdict; documented. 3/3 byte-identical.
+
+**Status: SURVIVES as bounded L2.** Candidate graphs are
+researcher-supplied; the learner selects and re-selects. No L3 claim.
+Complementary to the parallel C1 law-revert attack (prereg 482980e9f).
+
+## C48. Fork battery wave (2026-09-30)
+
+Claim: every enumerated fork passes the frozen battery with discriminating
+negative controls.
+
+- Enumeration: 00b62fff9 (manifest committed before results; 80 entries:
+  3 LIVE, 77 fixture)
+- Results: b4c81d190 (FORKBATTERY-78/80 PASS). 78 PASS, 0 FAIL,
+  2 UNTESTABLE (both expected: non-TNN trees rh-pull-1-head,
+  rh-pull-2-head). Negative controls discriminate on every fork. Harness
+  rebuilt byte-identical to the frozen instrument (sha256 a2e6284c);
+  pinned znc 498abcb5 with 0 divergence; all 77 carried fixture SHAs
+  re-verified to resolve. Read-only ls-remote shows zero new remote refs.
+  Finding: archive branch tnn-native-lab-wave-archive-20260929-1721pdt was
+  repointed from enumerated pin 7c11ac5af to dff8c2005 (benign
+  content-wise); archive branches should be immutable, re-create rather
+  than move. Recommended: automated archive-branch immutability check in
+  the enumeration step.
+
+**Status: governance PASS.** This is infrastructure health, not a
+capability claim.
+
+## C49. Conditional-threshold red team
+
+Claim: the threshold mechanism's Tier-2 pass is unreachable under its own
+beam selection pressure.
+
+- Attack prereg: 15982381c (frozen alone, before family generation and
+  testing)
+- Attack files: committed inside fd31db230 (concurrent C1 worker's commit;
+  message/content mismatch, blobs verified byte-identical to the worker's
+  files). Results: REDTEAM-THRESHOLD-BREAK. Family A (Tier-2 condition,
+  fam 9: E9 = (C AND Y4) OR ((NOT C) AND Y5), C = (x1 AND x2), composite,
+  must be round-built): BREAK. Round 1 culls C from the beam (C_beam=0);
+  round 2 pbeam contains C but C is not in the current beam; the Tier-2
+  pass requires the condition in both current beam and pbeam (two
+  consecutive survivals), but beam selection rewards target-prediction
+  accuracy and a discriminative condition (50% predictive) is culled after
+  one round. The combiner logic was never reached; the failure is
+  selection-vs-persistence and structural. Family B (crowding, fam 8 with 3
+  distractors): SURVIVE-THIS-ROUND, 64/64 in 5 IVs, but installed COND
+  uses D3 (NOT D) with swapped arms, behaviorally correct via equivalence;
+  HAS_D=0, so the A2 reuse criterion fails under crowding. 3/3
+  byte-identical. Pure Zag.
+
+**Status: the "tiered" claim is RETRACTED.** THRESHOLD-PASS (C11) stands
+as a Tier-1 recalibration only; C11 is narrowed accordingly (C11 itself is
+not edited). If Tier-2 conditional discovery is wanted, the fix is in the
+selection/persistence interaction, not the combiner's slice math. Do not
+rewrite history to fix the fd31db230 message/content mismatch.
+
+---
+
 ## UNVERIFIABLE items (paper prose with no committed backing)
 
 1. Any numerical or qualitative claim in the contaminated research paper
@@ -459,18 +799,26 @@ evidence that TNN is preferable to an LLM.
 
 ## Ledger tally
 
-- Claims ledgered: 34
+- Claims ledgered: 49 (C01-C34 frozen at 714178dd9; C35-C49 appended
+  2026-09-30)
 - SURVIVES: C03, C06, C19-as-L2 (counted under DOWNGRADED), C20, C21, C23,
-  C25, C26, C28, C30 -> 10 SURVIVES (all bounded L2 or L2+, none L3)
+  C25, C26, C28, C30, C35 (DDES integration), C37 (learner stress), C38
+  (OpScope R1-R4), C39 (DDES multi-step), C45 (episodic-pressure finding),
+  C47 (revert-adapt) -> 16 SURVIVES (all bounded L2 or L2+, none L3)
 - KILLED: C01 (generic reading), C02, C05, C07, C09, C10, C12, C14, C31,
-  C33 (DEVANG2 part) -> 10 KILLED
+  C33 (DEVANG2 part), C44 (churn concern, single-wave), C46 (L3B C0-C)
+  -> 12 KILLED
 - DOWNGRADED: C13, C16, C17, C18, C19, C24, C29 -> 7 DOWNGRADED
 - VOID / INVALID: C32 (H-B void; H-C invalid; H-A kill-with-retracted)
-- BUILD-PASS: C11, C27, C34 (figures), C22 -> 4 BUILD-PASS
-- BUILD-FAIL: C33 (DEVANG2)
+- BUILD-PASS: C11 (narrowed by C49 to Tier-1 recalibration), C27, C34
+  (figures), C22, C36 (L3C form builder), C43 (L3B growth) -> 6 BUILD-PASS
+- BUILD-FAIL: C33 (DEVANG2), C42 (valley redesign-2 validation gate)
 - EXPLORATORY: old C1 wave (superseded by C03)
 - UNVERIFIABLE: C04 (Design 1)
-- RETRACTED: C32 (H-A diagnosis)
+- RETRACTED: C32 (H-A diagnosis), C41 (v1 emergence claim), C49 (tiered
+  claim)
+- REPRODUCTION-CONFIRMS: C40 (threshold, confirms C11)
+- GOVERNANCE-PASS: C48 (fork battery 78/80)
 - L3 achieved anywhere: zero
 
 No em dashes were used in this document (verified with the shell-only
