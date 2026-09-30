@@ -246,9 +246,8 @@ honest.
 
 - Adversary prereg: `b89469cb8` ("Prereg: H-UNIFIED10 red team (U10-ADV)
   FROZEN."), committed alone before attack code, build, or execution.
-- This result commit: (to be filled at commit time; must have
-  `b89469cb8` as strict ancestor, verified via
-  `git merge-base --is-ancestor`).
+- This result commit: `f0593a0c7` (verified: `b89469cb8` is a strict
+  ancestor via `git merge-base --is-ancestor`).
 - Target under test: `86a759d1b` (H-UNIFIED10 builder result).
 - Prior: `09bd9b933` (H-UNIFIED9, for the diff audit).
 - No pushes; commits local only.
