@@ -10,9 +10,9 @@ Method: MEASUREMENT_PROCEDURE.md, applied to frozen sources.
 |---|---|---|---|---|---|---|---|---|
 | Frozen core (87ac95d08 / run 97b28e6a6) | 1/9 freeze worlds | 586 | 0 | 0 | 0 | 0 | 32768 | 0 |
 | contlearn2 (179b4a950) | LEARNER-EXTENDED | 136 | 0 | 0 | 0 | 0 | 1024 | 0 |
-| CLA-2 (prereg 24351fd31) | pending implementation | projected 40-60 retention; net-negative vs mechanism sum | 0 projected | 0 projected | 0 projected | 0 projected | workspace + log (one format) | edge/node conventions only |
-| CAM-1 (prereg 68a41be8a) | pending implementation | pending | 0 projected | 0 projected | 0 projected | 0 projected | CLA-2 workspace | MAP nodes |
-| ACT (prereg 51a818141) | pending implementation | pending | 0 projected | 0 projected | 0 projected | 0 projected | CLA-2 workspace | POLICY_ROOT + conventions |
+| CLA-2 (e639904f2) | 15/15 self-tests (sealed FW pending) | 685 | 0 | 0 | 0 | 0 | 16384 | 3 (GROUP, MAP, edge-standing) |
+| CAM-1 (371d20743) | 6/6 synthetic (sealed FW pending) | 408 | 0 | 0 | 0 | 0 | 344080 | 1 (MAP nodes) |
+| ACT (f7d87938f) | 24/24 tests (sealed FW pending) | 162 | 0 | 0 | 0 | 0 | 33816 | 2 (POLICY_ROOT, GUIDEs) |
 
 Desired trajectory: capabilities up, learner-created state up,
 specialized source down, modes/bridges/handlers at zero.
@@ -71,6 +71,22 @@ counters at 664; learner fills values, creates no structure).
 
 Capabilities: LEARNER-EXTENDED, per CL2_RESULT.md at 179b4a950.
 
+## Re-measurement note (2026-09-30)
+
+The CLA-2 projection ("40-60 retention lines, net-negative vs mechanism
+sum") did not hold for the separate implementations. Measured:
+CLA-2 685 + CAM-1 408 + ACT 162 = 1255 cognition lines vs 586 for the
+frozen core. The three builders each wrote a full stack with duplicated
+workspace machinery (roughly 404 lines of duplicated INFRA/ACCESSOR).
+
+Modes, bridges, handlers, and semantic cases hold at zero across all
+three. Learned structures are now nonzero (3/1/2) where the baselines
+were zero.
+
+The honest comparison awaits the integrated one-system implementation
+measured on sealed FW1-FW9. See REMEASURE_REPORT.md in arch_remeasure/
+for the full analysis.
+
 ## Reading the baselines
 
 The frozen core carries 586 cognition lines for 1/9 worlds. The bulk
@@ -89,5 +105,6 @@ with capabilities measured on fresh adversarial worlds.
 | Date | Generation | Trigger | Result |
 |---|---|---|---|
 | 2026-09-30 | frozen core, contlearn2 | initial baseline | this document |
+| 2026-09-30 | CLA-2 (e639904f2), CAM-1 (371d20743), ACT (f7d87938f) | builder landings | REMEASURE_REPORT.md in arch_remeasure/; sum 1255 vs 586; details in report |
 
 Append rows here on every re-measurement. Never edit historical rows.
