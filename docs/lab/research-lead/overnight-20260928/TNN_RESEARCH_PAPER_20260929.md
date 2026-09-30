@@ -1110,6 +1110,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Pilot Plan: PLANNED (92db50b77).** OP-RECRUIT v2 not landed (staged, not committed). E3 = baseline form-inventor (ebdc4fd3e). Upgrade only if v2 lands AND Phase A passes. 8-section prereg structure. Recommendation: baseline now, don't block.
 
+**Valley Design: DESIGN-COMPLETE (76c7a887c).** 433 lines. Family K (depths 1-4, proved profile). Family A (ecological). CAL-0 sanity. Protocol: 1M evals, LOG-1/2/3, M1-M5. Triggers: T-BUDGET, T-WALL, CONTINUE. Barrier: after C2 freeze. Shortcut disclosed (5-op route).
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
