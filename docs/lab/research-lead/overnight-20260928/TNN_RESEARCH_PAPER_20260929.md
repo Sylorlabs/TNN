@@ -1104,6 +1104,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Battery v2: DESIGN-COMPLETE (611e8fa1f).** T1/T4/T5 COMPROMISED (MOD trick). Root: review's "straight line limit" false (MOD/DIV/LT shortcuts). Redesign: GENEXEC2-P (remove DIV/MOD/LT/EQ/GT). F-TRICK, F-SMUG, v2-SOLVE (≤40 ops). New matrix: T1/T4/T5(P) B FAIL*/C2 SOLVE/D FAIL. C2 redirected to v2.
 
+**F-RECFOLD Prereg: PREREG-COMPLETE (efbc9ad9e).** 317 lines. B1 amended (≥4/5 seeds, addresses luck). B2/B3/B4 frozen. Falsifiers F-SEAL..F5. Seed 770404483 (SHA committed). Independent draw. Coverage logging. Tax disclosed. Python violation (discarded seed) disclosed.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
