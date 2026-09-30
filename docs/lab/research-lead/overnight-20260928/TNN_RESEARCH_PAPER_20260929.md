@@ -964,6 +964,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Shared Substrate: SUBSTRATE-PROTOTYPED (2835e5641).** Resolves Step B incompatibility as architectural evidence. Variable count is runtime header field; causal hypotheses are episode-supported entities; facts and episodes coexist on one 32768-byte workspace. Prototype runs fact AND causal episodes: 10/10 checks pass, 3/3 byte-identical. Limitations: UNCH/SET only, simplified contest, does not rewrite unified_learn.zag.
 
+**Learner Transfer: TRANSFER-TESTED (08d7c9fd5).** 15 domains, single persistent learner. Transfer to novel values (100,50) via structural gate, not memorization. Interference shield works (correct rejection, fallback not wrong answers). Recovery and second ledger firing confirmed. Schema selection 7/7. OPS_P7=53 < OPS_FRESH=60. Bounded L1/L2; transfer within template, not cross-task.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
