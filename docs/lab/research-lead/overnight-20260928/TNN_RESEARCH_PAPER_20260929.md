@@ -966,6 +966,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Learner Transfer: TRANSFER-TESTED (08d7c9fd5).** 15 domains, single persistent learner. Transfer to novel values (100,50) via structural gate, not memorization. Interference shield works (correct rejection, fallback not wrong answers). Recovery and second ledger firing confirmed. Schema selection 7/7. OPS_P7=53 < OPS_FRESH=60. Bounded L1/L2; transfer within template, not cross-task.
 
+**DDES L3 Gap: L3-GAP-ANALYZED (678ea4162).** DDES fails all four C0 requirements at five independent loci (action codes, state layout, hypothesis format, schema menu, derivation algorithm all researcher-authored). Terminal classification: strong bounded L2. L3 structurally foreclosed for this lineage. L3 path runs through F2, Q3, or Q4, not DDES.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
