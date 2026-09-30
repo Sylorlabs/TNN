@@ -1102,6 +1102,8 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Seg Review 2: REVIEW-COMPLETE (842638d15).** T1 0/3 across 4 systems. Scores 16→14→13, control 17/20. K2: YES, operator representation wrong; NO, segmentation not binding. Three wrongs: single-primary, pair-statistic, no scope object. H2 excluded as treadmill. Path: R1-R4 operator/scope.
 
+**Battery v2: DESIGN-COMPLETE (611e8fa1f).** T1/T4/T5 COMPROMISED (MOD trick). Root: review's "straight line limit" false (MOD/DIV/LT shortcuts). Redesign: GENEXEC2-P (remove DIV/MOD/LT/EQ/GT). F-TRICK, F-SMUG, v2-SOLVE (≤40 ops). New matrix: T1/T4/T5(P) B FAIL*/C2 SOLVE/D FAIL. C2 redirected to v2.
+
 **F3 (DEVANG1 developmental language): BUILD-FAIL (d0817af17).** Implementation panics with "slice index out of bounds" during training. Lexicon overflow (8-byte field vs 9-char utterances). Root cause not identified. No kill bars measurable. Developmental L2 attempt.
 
 **Schema Persistence: SCHEMA-WINS (2e0f65a2b).** Replicates "schemas amortize; instances do not" in threshold classification. Schema NET=0 (free, safe, validation-gated). Instance NET=-68 (brittle, decays with distance). K3 PASS (0 > -68). Mirrors Invention Economics.
