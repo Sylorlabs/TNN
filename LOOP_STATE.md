@@ -39,6 +39,15 @@ recorded and enforced prospectively: fixture provisioning is Zag-only from
 the next wave on. The six hand-fetched photo seeds are grandfathered only
 as manifest-pinned bytes (2020/2020 manifest OK).
 
+## Standing rule: shell-only byte checks (2026-09-30)
+Workers checking loop documents for em or en dash bytes must use the
+shell-only snippet
+docs/lab/research-lead/overnight-20260928/worker_snippets/check_no_dash.sh
+(usage documented in WORKER_BYTECHECK.md in the same directory). Do not
+reach for python3 for byte checks: the 2026-09-30 governance audit found
+5 of the 6 newest K4 violations were python3 byte checks, and disclosure
+does not cure use.
+
 ## Wave 20260923-0834pdt verdicts (2026-09-23)
 Debate transcript: docs/lab/rsi/debates/wave-20260923-0834pdt/ (commit
 62dd96a67). No verdict was overturned; two were narrowed and one breach
