@@ -1422,3 +1422,116 @@ The ledger stands at 133 claims.
 
 The v3 paper staleness note now covers C64-C133; v4
 regeneration stays deferred to ledger stability.
+
+## 16. Inquiry re-frozen clean; three red teams; freeze plan (fourteenth append; 2026-09-30; ledger appendix C134-C142)
+
+### 16.1 Inquiry clean re-freeze supersedes the failed wave (C134)
+
+- C134 INQUIRY-REFREEZE-BUILD (18ed3331c): BUILD-PASS.
+  The INQUIRY-1 experiment re-implemented from scratch
+  in pure Zag (935 lines, pinned znc abed8aa1) after the
+  C129 PROCESS-FAIL wave. All frozen bars pass:
+  P-INQ1 (12 queries -> exactly 12 UNCERTAINTY nodes),
+  A1 (reify disabled -> 0 nodes), W1 + P-INQ2 (12 fresh
+  keys -> 12 guides, all CHOICE 30, within 10 events),
+  A2 (construct disabled -> 0 guides), P-INQ3
+  (>=10/12 attribution), P-INQ3b (no pre-play), P-INQ4
+  (>=16/20 follow-ups), P-INQ5a/b/c (novel conflict-type
+  transfer), C1/C2/C3 (non-vacuous controls). K-INQ1
+  through K-INQ4 PASS; 149 cognition lines (under the
+  300 budget); 3/3 byte-identical. Restricted safebin
+  PATH, python3 ABSENT. F-INQ1 through F-INQ5: none
+  triggered. This supersedes the C129 PROCESS-FAIL
+  wave; both are recorded.
+
+### 16.2 Three red teams: TNN-1 qualified, MUL clean, COMP-1 process-level (C135, C136, C137)
+
+- C135 TNN-1-REDTEAM (cbde38737): ADVERSARY-QUALIFIED.
+  5 ATTACK-PASS: the workspace is genuinely shared
+  (not three systems in a trench coat), line count
+  honest (1088 lines, one 11-line dead function), no
+  template smuggling, no menu resurrection, 3/3
+  byte-identical, tests isolated. 1 qualified
+  ATTACK-SUCCESS: the XCAP test (F-INT4) verifies
+  metric co-location on one node, not plan-to-guide
+  conversion; the claim needs strengthening or
+  narrowing before SURVIVES consideration.
+- C136 MUL-REDTEAM (44f22979b): ADVERSARY-QUALIFIED
+  with no qualifications. 6/6 ATTACK-PASS, no
+  successful attacks: no lookup smuggling, no oracle
+  leakage (trial 4298 verified arithmetically),
+  genuine scaling loop, structural honesty confirmed,
+  ablation honest (ADD survives as core ISA, not
+  workspace state), 3/3 byte-identical. Recorded
+  under the conservative existing taxonomy; no new
+  status invented.
+- C137 COMP-1-REDTEAM (7ffc2dae4):
+  ADVERSARY-QUALIFIED. 4 ATTACK-PASS: exactly three
+  templates, three-hop behavior is genuine plan
+  composition, the e-ruling is structural (no code
+  path for expected to reach construction),
+  determinism 3/3 byte-identical. 1 process-level
+  ATTACK-SUCCESS: the bootstrap is 157 lines vs the
+  150-line prereg bound; the prereg's "bound" language
+  is stronger than the builder's "projection"
+  framing. A prereg amendment documenting the
+  157-line actual is needed before SURVIVES
+  consideration.
+
+### 16.3 Governance and measurement (C138, C140, C141)
+
+- C138 PYTHON-AUDIT-2 (4a97c985c): EXPLORATORY. 16
+  commits audited since the guard audit; 1 new
+  incident (9th overall, the inquiry build,
+  self-disclosed). 15 commits clean. Zero scientific
+  contamination across all 9 incidents to date.
+  Self-disclosure 100%, Step 0 compliance 100%.
+  Weakness: only the MUL builder used a true safebin;
+  recommendation to make safebin default for builders.
+  Record inconsistency flagged on the inquiry
+  NAMECHECK (corrected separately).
+- C140 COMPRESSION-UPDATE (78a556e3a): EXPLORATORY.
+  First genuine compression: ~1555 lines across four
+  builds to 1088 lines in one TNN-1 binary (~30%
+  smaller), 35 tests across five capability families
+  plus XCAP. TNN-1 R_test 3.22/100; MUL-1 R_test
+  0.89/100 (construction tests, not comparable). The
+  6-test ACT compact vs 24/24 standalone deviation is
+  flagged, not hidden. Cognition-line caveat stands:
+  formal classification per
+  MEASUREMENT_PROCEDURE.md is open. Largest evidence
+  gap unchanged: no freeze worlds run on TNN-1 yet.
+- C141 FREEZE-RERUN-PLANNED (4e36f31f2): EXPLORATORY.
+  Full plan for the Core Freeze re-run on TNN-1.
+  Critical gap: TNN-1 has no world-driver interface;
+  a zero-cognition driver shim is needed or TNN-1 is
+  declared not-freezable as-is. Recommended scope:
+  freeze TNN-1 alone (Option A), FW1-FW9 primary,
+  W1-W9 supplementary. Five governance flags for
+  Micah: driver shim, new prereg, EXECUTE boundary
+  (inherited), inquiry scope, W1-W9 methodology.
+  Priority 5 remains blocked on rulings 1-4.
+
+### 16.4 Remediation and backup (C139, C142)
+
+- C139 DEVINT-REPORT-CORRECTED (a003bd19b):
+  REMEDIATION-COMPLETE. The DEVINT-CLA2 BUILD_REPORT
+  is amended with a dated correction note: M2
+  retracted as measured (m2_check never called; M2
+  was not measured; GROUP survival via hardcoded
+  PROTECT, not bid-driven retention); F4 guard
+  qualified as vacuous. B1-B5 and the 11 stage
+  results unaffected; BUILD-PASS stands. Resolves the
+  C130 recommendation.
+- C142 BUNDLE-V14 (323e3bbb4): BACKUP-VERIFIED. 2.0G,
+  SHA-256
+  06b43ac8db876447237da11e3e33d5f44e50e7d5277429deccf9396d89759481,
+  HEAD d5e3222b608c358b92332f0cad4020d00be71741,
+  69 refs, 3279 commits, complete history verified.
+  Supersedes v13 (C117).
+
+No new SURVIVES. L3 achieved anywhere: still zero.
+The ledger stands at 142 claims.
+
+The v3 paper staleness note now covers C64-C142; v4
+regeneration stays deferred to ledger stability.
