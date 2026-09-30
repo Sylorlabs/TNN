@@ -1242,7 +1242,7 @@ Research continues. The queue is non-empty. The next wave fires at 1721pdt.
 
 **Valley: VALLEY-FROZEN (cf0c85e78).** PREREG_VALLEY.md with B, C2-clean, D.
 
-**Scale-Up: SCALEUP-PASS.** Battery implemented, all floors pass.
+**Scale-Up: SCALEUP-PASS (f9b3372d5).** One continuing process, all floors pass. 65,536 bytes state, PRESS=1. Bounded L2 C0-D reuse.
 
 **REVISE: REVISE-PASS.** F3 REVISE implemented, falsifiers pass. Prereg c197e7cd8.
 
