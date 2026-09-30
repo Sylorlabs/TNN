@@ -175,7 +175,7 @@ all taught probes route correctly and replay is exact.
   local-tnn-native-lab/znc, znc 2026.07.0-dev (edition 2026).
 - Raw output md5: 9628052981a018896cff8dad89f2f870 (3/3 runs,
   byte-identical, zero stderr, exit code 0).
-- This result commit: [to be filled at commit time]
+- This result commit: 792bc1fb632e4af1fcb05bb1da13536d0a5f5ac2
 - Files committed (owned paths only):
   docs/lab/research-lead/overnight-20260928/router9_learn.zag
   docs/lab/research-lead/overnight-20260928/ROUTER9_RAW_OUTPUT.txt
