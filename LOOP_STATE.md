@@ -4767,3 +4767,83 @@ completion; 12/16 IDENTIFIED the law, but every w_X_2 run (4/4)
 STALLED at round=6, a systematic stall on one law family awaiting a
 verdict. All other lanes left only NAMECHECK records. Queued work
 rolls forward unchanged.
+
+---
+
+## Wave wave-20261001-1121pdt: COMPLETE (inline-only, no descendants)
+
+Run inline-only by the scheduler worker (no coordinator spawned: the
+descendant-subagent runtime defect killed the 05:21 and 08:21 waves
+today, twelfth and thirteenth kills; the 08:21 hybrid attempt died
+after partial progress. The inline-only execution-mode decision
+remains banked with Micah; the deviation from the body's coordinator
+order is debated and justified in debate/DEBATE_1121PDT.md under the
+body's own terminal priority order). Toolchain guard: safebin active
+all wave (setup_safebin.sh re-run; `command -v python3 python`
+printed nothing); zero Python invocations. Wave record:
+docs/lab/rsi/runs/wave-20261001-1121pdt/ (ddes, exp2, pi_rev2,
+debate). Commits local only, never pushed.
+
+Verdicts (all debated inline, debate/DEBATE_1121PDT.md; provenance
+probe asked and answered; no verdict overturned):
+
+- ddes_followup V2: BUILD-PASS [NEW]. Implementation ddesp2.zag
+  against the frozen V2 prereg (20261001-0821pdt, commit dc6b0cfd2).
+  K-G1 repaired by transparent AMENDMENT1 re-freeze (commit
+  ff6678567) before any implementation commit and before any
+  evaluation: the frozen zero-stderr-bytes bar is unsatisfiable under
+  the pinned znc's unconditional zagd warning (documented in
+  MEM6_RESULT.md; identical warning in the R2 REPAIR-PASS build
+  evidence). K-G2..K-G9 all pass on the sealed evaluation: World F
+  both configs show the FLAG line exactly as frozen with correct
+  convergence; World A anchor matches the R2-verified traces;
+  SCHEMA-RECORD byte-exact; SCAFFOLD-CALLS 0 with zero violations;
+  World G both configs CONVERGE-OK with persisted predictions
+  agreeing with EXEC; RECORD-LOAD byte-identical to SCHEMA-RECORD;
+  zero derivation markers in phase 2; static audit confirms
+  apply_persisted makes zero derivation-path calls; 3/3 runs
+  byte-identical (sha256 b8bc5fa9...), exit 0, zero stderr.
+  Commit-order self-check holds (prereg, then amendment, then
+  implementation, each in its own commit). Bounded L2 per the
+  prereg's honest boundaries; no L3 claim. Result doc:
+  ddes/RESULT_DDES_FOLLOWUP_V2.md (binary 50730 bytes, plans_built 4,
+  zero new semantic cases/modes/bridges). Next pipeline steps: step 4
+  independent reproduction, step 6 alternative-explanation attack.
+- Fork battery: 2 fresh PASS + 86 RE-CERT [RE-CERT]. Fresh: current
+  LIVE tip a298709d5 and the new archive branch
+  tnn-native-lab-wave-archive-wave-20261001-0221pdt (536101b5b), both
+  PASS with the frozen instrument (znc pin match, probe pin match,
+  negative controls discriminating). The 86 carried entries are
+  pinned-SHA RE-CERTs of the 02:21 full run (85 PASS / 1 FAIL / 2
+  UNTESTABLE; identical SHAs, identical trees). Archive-branch
+  immutability: 44/44 match, zero movement. Scratch:
+  ~/workspace/fb1001_1121pdt/.
+- H-EXP2 step 6: DIAGNOSIS only [NEW]. The 08:21 sweep's systematic
+  B=2 stall (4/4 at round 6) is a law-family identifiability
+  property, not a baseline artifact: proven by behavioral equivalence
+  (under B=2, action 2 always sets p=1 and no other action references
+  A or B, so the four A hypotheses are observationally identical
+  under every probe of any length; checked against both expworld.zag
+  and altexp.zag). The frozen mechanism correctly identified the
+  identifiable part (B=2) and stalled honestly. Interim alt-baseline
+  evidence recorded: "first" (splitting probe, no argmax) IDENTIFIED
+  both sealed worlds W-A/W-B (rounds 5/6); enum and fixed
+  BUDGET-EXHAUSTED; rnd split. Reading: the informativeness filter
+  plus pruning does the work; argmax maximization is not load-bearing
+  on W-A/W-B. No verdict rendered (no frozen step-6 prereg).
+  Diagnosis: exp2/STEP6_STALL_DIAGNOSIS.md.
+- H-PI-REV2 step 5: baseline-comparison PREREG FROZEN [NEW]
+  (pi_rev2/PREREG_PI_REV2_STEP5_BASELINE.md, committed alone,
+  writing-only). Baselines B0 (no-revision control), B1 (full
+  re-enumeration over T+F1r), B2 (memorization control); frozen bars
+  K-SB1..K-SB6; adversary byte 'r' per the frozen {k,m,r} selection
+  rule. Execution queued for a later wave.
+- DEVANG2 retry: QUEUED (no frozen prereg exists; advance only on a
+  frozen prereg per instructions).
+
+Queued next: ddes V2 step 4 independent reproduction and step 6
+attack; H-PI-REV2 step-5 baseline execution under the frozen prereg;
+H-EXP2 step-6 attack prereg (with the identifiability assumption
+stated); DEVANG2 prereg if one is frozen. The inline-only
+execution-mode decision remains with Micah (fourteenth wave overall
+affected by the defect; this wave completed inline).
