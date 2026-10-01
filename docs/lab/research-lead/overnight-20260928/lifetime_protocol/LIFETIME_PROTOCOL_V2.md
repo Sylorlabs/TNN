@@ -75,6 +75,20 @@ sections are marked [v2].
    H2 repair path, H3-lite vs lifetime ordering, which build(s) to run,
    protocol freeze decision.
 
+10. **CORRUPTION detector algorithm specified** (source:
+    `corruption_detector/CORRUPTION_DETECTOR.md`, commit ff2d1e1ef).
+    Changelog item 2 defined the CORRUPTION event type; this update
+    specifies the driver-side detection algorithm: two-pass MAP
+    field-20 root validator, valid-root set {101,102,103,104} grounded
+    in `t2_exec` semantics, canonical snapshot format with SHA-256,
+    classification taxonomy (BOOTSTRAP, Z_RANGE, FOSSIL, VALID,
+    ZOMBIE, Z_SHARED, Z_HIJACKED), onset-only transition rule,
+    world-granular attribution caveat, EVICT vs CORRUPTION
+    distinction, shared-root landmine rule for future revision
+    machinery, and three recommended extensions (guard field-12
+    target, literal-operand field 8, policy-anchor liveness).
+    Affects: Sections 5 (step 4a), 6 (new 6.2), 7.7, 18.
+
 ## 1. Purpose
 
 This protocol operationalizes Micah's 2026-10-01 architecture
@@ -332,7 +346,7 @@ one world's teach stream from a blank workspace, then that world's
 probes. Steps 6-7 apply per learner.
 
 [v2] Step 4a (new): at each world boundary, the driver takes a
-white-box snapshot and runs the corruption detector (Section 6,
+white-box snapshot and runs the corruption detector (Section 6.2,
 CORRUPTION events) and the theater guard (Section 6.1). Snapshot
 hashes are committed to the run log. This makes silent structural
 destruction visible even though the learner itself cannot detect it.
@@ -380,9 +394,10 @@ not a finding.
   leave surviving MAPs pointing at wrong node types (zombie MAPs).
   The learner cannot detect its own corruption; the driver must,
   by comparing MAP root fields against node types at each world
-  boundary snapshot. Each corruption is a distinct event from
-  EVICT: EVICT is clean removal, CORRUPTION is silent invalidation
-  of a surviving structure.
+  boundary snapshot (detection algorithm: Section 6.2). Each
+  corruption is a distinct event from EVICT: EVICT is clean
+  removal, CORRUPTION is silent invalidation of a surviving
+  structure.
 - ZOMBIE-STATE(world, map, status): retention-sweep classification.
   At the final sweep, every MAP is classified: LIVE (root valid,
   executable), FOSSIL (root cells evicted, MAP inert but occupying
@@ -418,6 +433,141 @@ not a finding.
   implements R1-R6; for frozen TNN-2 they are defined but never
   fire, and the protocol reports their absence as a finding about
   the architecture, not a gap in the instrumentation.
+
+### 6.2 [v2] Corruption detector (driver-side)
+
+Source: `corruption_detector/CORRUPTION_DETECTOR.md` (commit
+ff2d1e1ef). Driver-side (researcher harness), read-only,
+deterministic. Same workspace state always yields the same
+classification. The learner cannot detect its own corruption; this
+detector makes silent structural destruction visible.
+
+1. **When it runs.** At each world boundary per Section 5 step 4a
+   (after the teach stream completes, before the next world's
+   stream begins) and at the final retention sweep. Attribution
+   caveat: CORRUPTION events are emitted at boundary processing
+   time, but the corruption occurred at some unknown point during
+   the preceding world's stream. The `world` field names the world
+   whose stream just completed. This is world-granular
+   attribution, not event-granular; measures must not treat a
+   CORRUPTION event as timestamped to the boundary tick.
+
+2. **Snapshot format.** For every live (field 36 == 1) tag-20
+   node, one canonical line:
+
+   ```
+   MAP <id> <root> <root_tag_or_dead> <promo_index>
+   ```
+
+   where `<root>` is the field-20 value, `<root_tag_or_dead>` is
+   the node tag at root if the root node is live and else the
+   literal token `dead`, and `<promo_index>` is field 24 (the
+   promotion nonce). Lines sorted by id, joined with `\n`, hashed
+   with SHA-256; the hash is committed to the run log at each
+   boundary. MAP identity across snapshots is keyed by
+   `(id, promo_index)` because `alloc_node` reuses slots.
+
+3. **Valid-root set.** {101, 102, 103, 104} (SETREG,
+   guard/BRANCHEQ, INC, DEC), grounded in `t2_exec` semantics
+   (any other tag returns -999999), not convention.
+
+4. **Pass 1: per-MAP root validity.** For each live tag-20 MAP
+   with root = field20(m): root == 0 -> BOOTSTRAP (degenerate;
+   no event); root < 2 or root >= 1024 -> Z_RANGE (emit);
+   root node dead -> FOSSIL (emit; dangling root, MAP shell
+   survives at bid 2 with zero function); root live with tag in
+   {101,102,103,104} -> VALID (proceed to pass 2); root live with
+   any other tag -> ZOMBIE (emit; observed: tag-30 UNCERTAINTY
+   node, tag-902 literal cell).
+
+5. **Pass 2: shared and hijacked roots (VALID MAPs only).** A
+   pass-1-failed MAP is excluded as host and as victim. Build the
+   SEQ successor index in one edge pass over live type-12 edges.
+   For each VALID MAP, walk its graph: start at root; at a
+   tag-102 guard follow field 12 (matching the executor);
+   otherwise follow the SEQ successor; bound the walk at 80
+   steps. Z_SHARED: two live MAPs name the same root id (emit
+   for each MAP involved). Z_HIJACKED: MAP B's root is visited
+   during MAP A's graph walk, A != B (emit for B). A MAP passing
+   both passes is LIVE.
+
+6. **Transition and dedup rule.** The driver keeps a table of
+   last-known status keyed by MAP identity `(id, promo_index)`.
+   A CORRUPTION event is emitted only on transition into
+   {FOSSIL, ZOMBIE, Z_SHARED, Z_HIJACKED} (from LIVE or from a
+   newly seen MAP). A MAP that remains corrupt across consecutive
+   boundaries is not re-emitted; its ongoing presence is visible
+   in the per-boundary ZOMBIE-STATE counts. If a node id is
+   reused by a new MAP (promo_index differs), the old entry is
+   retired and the new MAP is evaluated fresh. CORRUPTION events
+   count corruption onsets; ZOMBIE-STATE counts report
+   prevalence.
+
+7. **Event format.** `CORRUPTION <world> <map> <field>
+   <expected_type> <actual_type>`, fixed field order, one event
+   per line (Section 6.1 signature). `<field>`: 20 for the core
+   check, 12 for the guard-target extension. `<expected_type>`:
+   for field 20 the literal string
+   `graph-cell(101|102|103|104)`; for field 12
+   `setreg-cell(101)`. `<actual_type>`: one of `tag-<n>` (the
+   occupying node's tag, e.g. `tag-30`, `tag-902`), `dead`
+   (FOSSIL), `range` (Z_RANGE), `shared-root` (Z_SHARED),
+   `hijacked` (Z_HIJACKED).
+
+8. **EVICT vs CORRUPTION.** EVICT is clean removal of a node
+   (slot freed, edges severed, budget recovered). CORRUPTION is
+   the silent invalidation of a surviving structure (the MAP
+   shell persists, occupies budget, and points at garbage or at
+   another structure's cells). A single eviction can cause zero
+   EVICT-adjacent harm to MAPs while causing one or more
+   CORRUPTION events.
+
+9. **Shared-root landmine.** Each Z_SHARED MAP looks healthy in
+   isolation (both roots are live graph cells of valid tags).
+   `t2_revise_graph` on one silently rewires the other's cells
+   with no REVISE event for the victim, because the writes pass
+   through the shared root. Rule for future builds: any revision
+   or execution machinery must consult the detector's
+   shared-root table before touching a MAP's graph, and a
+   Z_SHARED flag on a MAP must block unattributed in-place
+   revision of its cells.
+
+10. **Recommended extensions (not required for compliance).**
+    (a) Guard branch-target check: during the pass-2 walk, for
+    each tag-102 guard cell verify field 12 names a live tag-101
+    cell; emit `CORRUPTION <world> <map> 12 setreg-cell(101)
+    <actual>`. (b) Literal-operand check: for each tag-101
+    SETREG and tag-102 guard, if field 8 names a node id in the
+    `res_op` range, verify it is a live tag-902 node; a reused
+    slot means the cell silently reads a wrong literal value.
+    (c) Policy-anchor liveness: exactly one tag-2 node should
+    exist and be live; otherwise emit a CORRUPTION-class driver
+    alert.
+
+11. **Driver cost.** O(boundaries), not O(events): pass 1 scans
+    up to 1024 nodes filtering live tag-20; pass 2 is one edge
+    pass (4096 slots) plus at most one bounded 80-step walk per
+    VALID MAP. Negligible next to per-event scan costs.
+
+12. **Non-claims.** The detector does not prevent corruption and
+    does not repair it; it makes silent destruction visible. A
+    zero CORRUPTION count at a boundary is evidence of no
+    detected corruption, not proof of none: the core check
+    covers MAP roots only, and interior guard-target and
+    literal-operand corruption require the extensions. Counts
+    are workload- and pressure-dependent diagnostics, not
+    constants: 0% at 520/1024 nodes, 3.8% at 1022/1024 under
+    chain-promotion churn, 20% observed in the more diverse W
+    cumulative state. The detector reads frozen-state layout
+    (tags, field numbers); any build that changes the MAP layout
+    or graph cell tags must update this spec before its lifetime
+    runs.
+
+13. **Retention-sweep mapping.** At the final retention sweep the
+    per-MAP status maps onto the Section 7.7 end-states: LIVE
+    -> LIVE; ZOMBIE, Z_SHARED, Z_HIJACKED -> ZOMBIE; FOSSIL ->
+    FOSSIL; MAP node itself evicted -> DELETED (visible via
+    EVICT lines, not via this detector).
 
 Log format is line-oriented text, one event per line, fields in
 fixed order (same discipline as the H2 SIG log format). The exact
@@ -528,7 +678,11 @@ forgetting analysis 2726baf74, eviction corruption 986c52fdc):
 - ZOMBIE: MAP shell survives but its field-20 root now points to a
   wrong-typed node (a literal cell, another MAP's cell). Silently
   corrupted, undetectable by the learner, a landmine for any future
-  machinery that executes or revises it.
+  machinery that executes or revises it. Per the detector (Section
+  6.2), Z_SHARED (two MAPs sharing one root) and Z_HIJACKED (one
+  MAP's root absorbed into another's graph) are classified ZOMBIE
+  at the retention sweep, even though each shared root is
+  individually a live graph cell.
 
 The 1024-node budget finding predicts degradation; the protocol
 quantifies where, and in which end-state. The honest TNN-2
@@ -990,7 +1144,8 @@ never weakened to force a pass.
 - REVISION EVENTS: measure 7.6 (to be counted), with the V2-hole
   correctness sub-verdict.
 - CORRUPTION EVENTS: new category (Section 6.1), to be counted
-  from driver snapshots. Not revisions; not clean evictions.
+  from driver snapshots per the detector algorithm (Section 6.2).
+  Not revisions; not clean evictions.
 - COGNITION LINES: 0 (design only; no source changes).
 - MODES: 0. BRIDGES: 0. HANDLERS: 0. SEMANTIC CASES: 0.
 
