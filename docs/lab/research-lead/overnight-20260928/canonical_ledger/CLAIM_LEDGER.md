@@ -5108,3 +5108,171 @@ Claim: verified git bundle backup superseding v13.
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
+
+- C169 (WKLT5-CLEAN-EVAL; prereg 32382a122, seal 84855c1e1, eval 4e6fb77ef,
+  2026-10-01): WEAK-KLT5-PASS. Fresh prereg with actual source order
+  [0,1,2,3,4,5] (correcting the VOID run's order mismatch), fresh
+  independently sealed world (SHA-256 0971e946..., 20 probes), N=10
+  budget-scaled. Main run: Phase A E=19 (trajectory 4,4,3,2,1 then 1s,
+  policy converged [4,0,1,2,3,5]), Phase B E=10 (all 1s), R=1.90.
+  All 6 kill bars pass: K-WKLT5-1 (R=1.90 > 1.15), K-WKLT5-2 (C1 fresh
+  learner E(B)=19, not easier), K-WKLT5-3 (C2 policy reset returns
+  E(B)=19, causal), K-WKLT5-4 (3/3 byte-identical), K-WKLT5-5
+  (governance), K-WKLT5-6 (frozen R=1.00, discriminates). Validity:
+  all 20 probes vc>0, trial executed every probe. Prereg commit
+  strictly precedes seal precedes eval. Causal chain confirmed:
+  experience to policy write to policy read to reduced cost. Does NOT
+  establish strong K-LT-5 (same relation, not new domain). Policy node
+  remains evictable under pressure (architectural limitation from VOID
+  run, not retested here). Status: SURVIVES as preregistered weak
+  K-LT-5 result. Supersedes the VOID C164 run.
+- C170 (PROVENANCE-COMPLETE; commit 8c352e5bf, 2026-10-01): FIXES
+  (exploratory, no frozen prereg). Source tags (field 16, tag-1 FACT)
+  at first write: 0 UNKNOWN, 1 OBSERVED, 2 TAUGHT, 3 INFERRED,
+  4 PREDICTED, 5 REVISED, 6 DERIVED-FROM-STRUCTURE (reserved).
+  Treatment: bootstrap requires unanimous EXTERNAL facts
+  (OBSERVED/TAUGHT/REVISED); W3 majority computed over EXTERNAL only;
+  SELF facts (INFERRED/PREDICTED/DERIVED) do not vote. Majority-wrong
+  adversary: control 10/10 wrong persistence, truth excluded
+  (discount 3), self-amplification (4 to 7 inferred facts); treatment
+  0/10 wrong persistence, truth NOT excluded (discount 0), no
+  self-amplification (stays at 4). The apparent 5:1 majority was
+  1 external + 4 self-inferred; provenance exposes the illusion.
+  Tradeoff: treatment withholds (-2) permanently on genuine
+  contradiction instead of recovering. 3/3 byte-identical per arm.
+  Zero modes/bridges/handlers. Researcher-owned: 9 (field, tags,
+  partition, rules, write paths). Learner-owned: 0 (tag values are
+  researcher-defined). Status: BUILD-PASS (exploratory). Directly
+  addresses the C163 finding that source-blind discounting entrenches
+  error. Needs preregistered replication for promotion.
+- C171 (NODE2V2 K-H3 PASS + ABLATION; prereg 4b05c8011, build
+  0988839a2, ablation ab1bee9a6, 2026-10-01): PASS. Reachable
+  consequence-driven policy update. Mechanism: ev_observe_aw records
+  world-revealed actions in history slots (fields 8/12/16); 3
+  consistent values differing from default write field 20 (OVERWRITE,
+  history reset); miss_inquire reads field 20 for guide action.
+  Phase 1 (a_w=30/-1): default stays 30, no spurious shift. Phase 2
+  (3x a_w=45): 30 to 30 to 45, write fires exactly on 3rd consistent
+  revelation. Phase 3: new guide carries 45. 3/3 byte-identical.
+  Ablation: all 4 links NECESSARY (no record to no write; no write to
+  no policy change; no read to guide carries 30; no action to no
+  behavioral difference). Chain is causal, not correlational.
+  Inconsistent a_w (45,46,45) does NOT trigger write. Prereg strictly
+  precedes implementation (81s). Zero modes/bridges/handlers/semantic
+  cases. Researcher-owned: 6. Learner-owned: 1 (default=45 from
+  experience). Status: SURVIVES as preregistered K-H3 result.
+  Limitation: builder-sealed worlds (not independent adversary);
+  single policy node; threshold N=3 researcher-chosen.
+- C172 (REBINDING-COMPLETE; commit 91585087c, 2026-10-01): PASS
+  (chain family; exploratory, no frozen prereg). Structural rebinding
+  spliced into ev_query (treatment only): on miss, scan live promoted
+  MAPs for pure-chain graphs, re-instantiate chain shape on local
+  B-paths of matching length with B literals, verify by execution.
+  World A: decoy chain (plen-3 MAP) then main chain (plen-5 MAP).
+  World B: isomorphic chain, different literals, distractor paths.
+  Treatment: 7 verifications (6 decoy-shape rejections by execution,
+  1 plen-5 verify; trial never ran). Control (fresh): 11.
+  Ablation (A MAPs present, no rebind): 11, identical to fresh.
+  Reduction comes from rebind machinery reading MAPs, not A-facts
+  priming workspace. No hardcoded A-to-B correspondence (node-id
+  order scan); no fixed similarity metric (execution verification
+  only); plen read from learner-created topology; literals from B
+  facts positionally. 3/3 byte-identical per arm. Researcher-owned:
+  1 mechanism (~70 lines). Learner-owned: 2 (two A-phase MAP graphs).
+  SUF: 2 (scan order, path order). Status: BUILD-PASS (exploratory).
+  Limits: chain family only; STRONG K-LT-5 (new topology) untested.
+- C173 (DEDUP-COMPLETE; commit 296fd79cb, 2026-10-01): DYN-1 BENT
+  (exploratory, no frozen prereg). 15-line content-addressed reuse
+  gate at top of miss_inquire: scan for live tag-30/field4=-4 node
+  with matching (s,r); if found, return early (+0 nodes). The 70
+  duplicate UNCERTAINTY nodes are byte-identical (tag, field4,
+  field20, field24 determine all fields). Results 3/3 byte-identical:
+  Phase C 101 to 21 nodes (-80), Phase E 40 to 0 (-40), final 201
+  nodes (was 321, -120, 37% reduction), UNCERTAINTY 10 (1/key, was
+  70). All 70 misses still return -2; correctness preserved. First
+  miss +2, repeats +0: repeated experience costs less than novel.
+  Second mechanism to bend DYN-1 (after decline gate C161). Confirms:
+  bending requires touching allocation sites. Researcher-authored
+  (fixed identity rule), bounded L2. Researcher-owned: 1.
+  Learner-owned: 0. Reuse events: 60. Status: BUILD-PASS
+  (exploratory). Learner-authored amortization remains open.
+  Limitations: O(1024) lookup, byte-exact identity only.
+- C174 (SUBSTRATE-CONSOLIDATION; commit 1ed3f5a6b, 2026-10-01):
+  EMERGES (exploratory, no frozen prereg). Decline gate reimplemented
+  as consumer of shared consequence substrate (spec 550fa268b) on
+  unfrozen variant. DYN-1 still bends (3/3 byte-identical). Mapping:
+  substrate records (pursuit/outcome) drive the decline decision;
+  same substrate vocabulary used for retention input. One mechanism,
+  multiple consumers. Researcher-owned: 3 (record format, N=3
+  threshold, tag-61 storage). Learner-owned: 0. Zero
+  modes/bridges/handlers. Status: BUILD-PASS (exploratory). Supports
+  the One-System hypothesis: decline behavior emerges from generic
+  substrate rather than requiring a dedicated decline engine.
+- C175 (UTILITY-DESIGN; commit cd6a8a74a, 2026-10-01): DESIGN-COMPLETE
+  (design only, no implementation). Learner-owned utility signal for
+  MAPs (tag-20): f12 = signed utility U (init 0, floor -8, ceiling
+  +127), f16 = last-active tick L, shadow FACT f4 = owning MAP id.
+  Writes: promotion, query-answer attribution (guarded), trial success
+  (+2), revision success/failure, contradiction (-2). "Ran" alone
+  never increments (V2-hole guard). Reads: evict_node priority ZOMBIE
+  (root invalid) > FOSSIL (U<=0, old) > LIVE low-U > bid fallback.
+  Structure-atomic reclaim (MAP + SEQ-walked cells in one pass; zombie
+  route impossible by construction). Structure-aware cell protection
+  (live MAP cells inherit protection). One-System: 0 modes/bridges/
+  handlers/edge types; net mechanism count negative (atomic reclaim
+  removes need for zombie detector). Honest scope: U is use, not
+  truth; does not bend DYN-1; does not invent similarity. Includes 6
+  falsification tests for builder. Researcher scaffolding honestly
+  labeled with retirement condition. Status: DESIGN (not a claim).
+- C176 (PROTECTION-COMPLETE; commit a298709d5, 2026-10-01): SAVES-HOW
+  (exploratory, no frozen prereg). Learner-owned structural protection
+  for graph cells on unfrozen variant: MAP-to-cell PRO edges written
+  on use; protected cell set derived from learner-built graph
+  topology. Interference battery: reexec=5 at all IX-2 volumes (vs 0
+  in control at V>=1050). The executable how survives where the
+  unprotected variant loses it. Directly addresses C167 (how dies
+  before what) and C166 (use leaves no trace on bid). 3/3
+  byte-identical. Researcher-owned: 1 (protect-on-reference policy).
+  Learner-owned: protection edges + cell set from topology. Zero
+  modes/bridges/handlers. Status: BUILD-PASS (exploratory).
+- C177 (MINILIFETIME-RUN; design 0bab6db08, run 4339119e9,
+  2026-10-01): COMPLETE (design-before-build, not a formal kill-bar
+  prereg). Build B reuse-path variant (MAP-first query, shadow-teach
+  deletion, liveness, contradiction retargeting, most-recent
+  selection) vs Build A frozen TNN-2 on sealed worlds. Results: Build
+  B acceptance K-REUSE-1/K-REUSE-2 PASS; 3/3 byte-identical per
+  build; A/B outputs byte-identical; K-LT-1 PASS, K-LT-4a MIXED,
+  K-LT-4b FAIL as predicted, K-LT-2 PASS. 3/3 byte-identical.
+  Status: EXPLORATORY (design governed, not preregistered kill bars).
+  Build C (provenance/consequence variant) pending when mechanisms
+  earn inclusion.
+- C178 (RETENTION-COMPLETE; commit 5dc1004fc, 2026-10-01): MIXED
+  (exploratory, no frozen prereg). Minimal consequence-substrate
+  retention input on unfrozen variant: RETENTION namespace preserves
+  query answerability for evicted FACTs. Treatment beats control on
+  answer retention; re-learning cost not reduced to below first
+  learning (hence MIXED, not PASS). 3/3 byte-identical. Status:
+  BUILD-PASS with MIXED verdict (exploratory). Indicates retention
+  input helps answerability but does not yet achieve cheaper
+  re-learning.
+- C179 (DECLINE-ADV-COMPLETE; commit c7f4df907, 2026-10-01): SURVIVES
+  with 3 NEEDS-FIX (exploratory adversarial, no frozen prereg).
+  Decline gate tested against late-success false decline,
+  intermittent failures, cross-domain over-decline, re-engagement,
+  N=1..5 controls. Gate survives core adversarial battery; 3 items
+  need fixing (documented in report). Status: ADVERSARIAL-SURVIVES
+  (exploratory). Threshold tuning not a priority beyond this
+  validation per Micah 2026-10-01.
+- C180 (DEDUP-DECLINE-INTEGRATION; commit 4f45993c3, 2026-10-01):
+  REDUNDANT (exploratory, no frozen prereg). Combined dedup + decline
+  on unfrozen variant: byte-identical to dedup-only (201 nodes).
+  Decline tally defeated by dedup (fewer UNCERTAINTY nodes means
+  slower to reach N=3; withheld misses do not create dedup
+  opportunities). Mechanisms do not compose additively; dedup
+  subsumes decline in the DYN-1 battery. Architectural implication:
+  overlapping allocation-site interventions may be redundant; the
+  shared substrate (C174) should arbitrate rather than stacking
+  independent gates. Status: BUILD-PASS with REDUNDANT verdict
+  (exploratory). Valuable negative result for integration planning.
+
+No em dashes were used in these entries (verified).
