@@ -14,24 +14,21 @@ traced to its defining documents.
 **Cross-references: all resolve.** Every unique `Section X` reference
 in the document (4, 4.1, 5, 6, 6.1, 6.2, 7.7, 7.8, 8, 9, 12, 15, 16,
 17, 19) points to a section that exists with the expected content.
-Spot checks:
+Spot checks (all resolved correctly):
 
 - Section 0 item 10 "Affects: Sections 5 (step 4a), 6 (new 6.2), 7.7,
-  18" — step 4a exists in Section 5, Section 6.2 exists, Section 7.7
-  references the detector, Section 18 has the CORRUPTION EVENTS
-  bullet pointing to 6.2. All correct.
-- Section 5 step 4a references "Section 6.2" and "Section 6.1" —
-  both correct.
+  18". Verified: step 4a exists in Section 5; Section 6.2 exists;
+  Section 7.7 references the detector; Section 18 has the
+  CORRUPTION EVENTS bullet pointing to 6.2.
+- Section 5 step 4a references "Section 6.2" and "Section 6.1".
 - Section 6.1 CORRUPTION references "(detection algorithm:
-  Section 6.2)" — correct.
-- Section 6.2 item 13 references "the Section 7.7 end-states" —
-  correct.
-- Section 7.7 references "the detector (Section 6.2)" — correct.
-- Section 12 control 8 references "Section 4.1 and Section 9" —
-  both correct.
+  Section 6.2)".
+- Section 6.2 item 13 references "the Section 7.7 end-states".
+- Section 7.7 references "the detector (Section 6.2)".
+- Section 12 control 8 references "Section 4.1 and Section 9".
 - Section 16 item 8 references "Section 4.1", "Sections 9, 11",
-  "Section 6" — all correct.
-- Section 19 D4 references "(Section 16, item 6)" — correct.
+  "Section 6".
+- Section 19 D4 references "(Section 16, item 6)".
 
 **Terminology: ZOMBIE / FOSSIL / CORRUPTION / DELETED consistent.**
 Three independent definitions agree:
