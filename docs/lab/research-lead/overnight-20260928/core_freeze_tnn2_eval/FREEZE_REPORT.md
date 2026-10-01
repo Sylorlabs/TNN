@@ -11,7 +11,7 @@
 
 **FREEZE-EVAL-COMPLETE**
 
-- **FW SCORE (primary, sealed): 5/9** (TNN-1: 4/9). Pass: FW1, FW2, FW4, FW5.
+- **FW SCORE (primary, sealed): 4/9** (TNN-1: 4/9). Pass: FW1, FW2, FW4, FW5.
 - **OLD-WORLD REGRESSION SCORE (supplementary): 4/9** (TNN-1: 4/9). Pass: W1, W2, W4, W5.
 
 All kill bars passed. No falsifiers triggered. Determinism verified
@@ -67,7 +67,7 @@ Compiler: `src/tools/toolchain/znc_linux_x86_64_abed8aa1`
 | FW8 | FAIL | Novel 0/5 (bar 4/5); retention 4/4 (bar 3/4 met) |
 | FW9 | FAIL | B1 3/30 (bar 24/30); B2 7/30 (bar 24/30); B5 2/5 (bar 4/5) |
 
-**FW SCORE: 5/9** (FW1, FW2, FW4, FW5)
+**FW SCORE: 4/9** (FW1, FW2, FW4, FW5)
 
 ## W Results (Supplementary Regression)
 
@@ -167,12 +167,17 @@ mechanism exists, even though the sealed criterion fails.
 | FW9 DAG | 5/30, 7/30 | 3/30, 7/30 | No (partial engagement, huge slowdown) |
 | FW6 inquiry | constant 0 | 0 then 30 (contingent) | Partial (mechanism engages, sealed FAIL) |
 
-**Net:** FW 4/9 -> 5/9 (FW1's 3-hop compositional probes now pass:
-10/12 -> 12/12). OLD-WORLD 4/9 -> 4/9 (no regression, no improvement).
+**Net:** FW 4/9 -> 4/9 (same world set as TNN-1: FW1, FW2, FW4, FW5 pass;
+FW3, FW6, FW7, FW8, FW9 fail; zero fixes, zero regressions). FW1's internal
+3-hop compositional probes improved (10/12 -> 12/12) but FW1 was already a
+world-level PASS; this does not change the world-level score. OLD-WORLD
+4/9 -> 4/9 (no regression, no improvement).
 The three new mechanisms (runtime construction, uncertainty-to-action,
 counterexample revision) show signatures of engaging (FW6 contingent
-action, FW9 non-miss constructions, FW1 3-hop composition) but do not
-fix any of the 5 failure clusters at the sealed-bar level.
+action, FW9 non-miss constructions, FW1 3-hop composition) but fix zero
+of the 5 failure clusters at the sealed-bar level. The TNN-2 targeted
+architectural diagnosis is falsified. Do not represent TNN-2 as a
+world-level improvement over TNN-1.
 
 ## Files
 
