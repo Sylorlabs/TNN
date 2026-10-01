@@ -2,6 +2,7 @@
 
 **DRAFT - FREEZE PENDING. FREEZE SCORE PENDING - DO NOT QUOTE.**
 **KILL BARS DRAFT-NOT-FROZEN - AWAITING MICAH REVIEW.**
+**UPDATE 2026-10-01 06:52 UTC: Prereg audit found the evaluator draft claims 5/9 but documents 4 passes. Correct score is 4/9, matching TNN-1. See section 8.**
 
 Date: 2026-10-01. Assembler: Morning Report Assembler (assembly only, no
 new analysis). All claims below are transcribed or compressed from the
@@ -20,10 +21,15 @@ cognition path (5 mixed, about 240 researcher). Separately, a
 structural analysis proved that no freeze score, even 9/9, can
 establish C0-D (cognitive reuse), because promoted graphs are causally
 inert at query time: every promotion shadows itself with a memoized
-fact and the query path cannot read MAPs. The freeze evaluation is
-still running and its score is not quoted here. The post-freeze
-adversarial battery (GW1-GW8) is designed and sealed. TNN-3 kill bars
-are drafted (DRAFT-NOT-FROZEN, six open questions banked). Ledger
+fact and the query path cannot read MAPs. The freeze evaluation draft
+is internally inconsistent: it claims 5/9 but documents 4 passes
+(FW1, FW2, FW4, FW5). The prereg-compliance audit (`8959a7c14`)
+corrects this to **4/9, matching TNN-1**. Under the prereg criteria
+(">4/9 confirms the diagnosis" vs "at or below 4/9 falsifies and
+requires re-clustering"), the TNN-2 diagnosis is falsified and
+re-clustering is required. The post-freeze adversarial battery
+(GW1-GW8) is designed, sealed, and now under evaluation. TNN-3 kill
+bars are drafted (DRAFT-NOT-FROZEN, six open questions banked). Ledger
 stands at 159 claims with **zero L3 anywhere**.
 
 ## 2. The shared pattern: enumerated-schema / filled-slot
@@ -130,8 +136,20 @@ verification is answer-keyed: `expected` flows driver to `ev_query`
 to `t2_trial` to `t2_try_verify`, and the loop keeps the first
 candidate matching it. The system's largest capability lever is not
 learner-owned. Ten researcher decisions were identified as movable
-to learner state without new opcodes; a prioritizer is analyzing
-them.
+to learner state without new opcodes; the prioritizer (`f70ab617c`)
+ranked them by impact/difficulty ratio. **Top 3 quick wins:**
+(1) Trial phase order (ratio 2.0, cleanest locus move);
+(2) Comb gate (ratio 1.5, resurrects dead sum branch);
+(3) Repair target selection / operator choice (ratio 1.0, core
+revision fix). Explicitly not quick wins: the acceptance criterion
+(#9, H2 oracle problem, needs masked probes first), sum subset
+order alone (#3, moot without the comb gate), guide probe content
+(#7, theater without connecting inquiry to a consumer). **Key
+insight:** "zero learner-owned criteria is the disease; zero pure
+decisions is the symptom." Every MIXED point uses a
+researcher-fixed criterion (argmax bid, first-to-verify, scan
+order) over learner-supplied data. The high-value moves relocate
+criteria, not just parameters.
 
 ## 5. C0-D structural failure
 
@@ -250,7 +268,13 @@ central design question for any inquiry work.
   full L3 architecture; H3-lite is a stepping stone with marked
   limits (watch for "revisability theater"); three biggest
   risks are prereg spec gap redux, H3-lite as theater, and
-  solving H1 before H2.
+  solving H1 before H2. **Recommended order:** Step 0 H3 check
+  (done, confirmed); Step 1 H2 masked verification probes (no new
+  machinery); Step 2 H3-lite policy parameterization; Step 3
+  repair-proposal generator plus inquiry resolution; Step 4 H1
+  widening (ONLY after Step 1, to avoid the treadmill Micah
+  forbade); parallel track reuse path for C0-D; full H3 pending
+  Micah's protected-core governance decision.
 
 ## 8. Open items
 
@@ -260,19 +284,26 @@ central design question for any inquiry work.
    analyst (`f795807cc`) and the ledger (`af093bd94`): the
    evaluator's on-disk draft is internally inconsistent (claims a
    5/9 FW score but lists only 4 passing worlds; marks K-FZ2-4
-   PENDING while the draft verdict line says COMPLETE). That draft
-   is NOT adopted. A prereg-compliance auditor is comparing the
-   draft against the frozen K-FZ2 bars to prescribe reconciliation
-   steps. Seal integrity was verified independently (`0c97a669a`):
-   all 16 files intact, hashes match, git clean, seal commit
-   strictly precedes the freeze prereg. Interpretation framework:
-   per Micah's ruling FW1-FW9 are a regression/targeted-repair
-   battery for TNN-2 (designed after seeing TNN-1's failures), so
-   even 9/9 would not establish broad generality or L3; the
-   honest summary line is "capability improved within the
-   researcher-enumerated envelope; the envelope is unchanged in
-   kind." A freeze-interpretation drafter is preparing honest
-   templates for each possible outcome.
+   PENDING while the draft verdict line says COMPLETE). The
+   prereg-compliance audit (`8959a7c14`) found the 5/9 claim is an
+   arithmetic error: the table documents 4 PASS (FW1, FW2, FW4,
+   FW5) and 5 FAIL. **Correct score is 4/9, matching TNN-1.**
+   Under the prereg (">4/9 confirms the diagnosis" vs "at or
+   below 4/9 falsifies and requires re-clustering"), the TNN-2
+   diagnosis is falsified. Six reconciliation steps are specified,
+   including correcting the score, resolving K-FZ2-4, completing
+   the W battery, and per-cluster analysis. A re-clustering
+   drafter is preparing the required analysis. Seal integrity was
+   verified independently (`0c97a669a`): all 16 files intact,
+   hashes match, git clean, seal commit strictly precedes the
+   freeze prereg. Interpretation framework: per Micah's ruling
+   FW1-FW9 are a regression/targeted-repair battery for TNN-2
+   (designed after seeing TNN-1's failures), so even 9/9 would not
+   establish broad generality or L3; the honest summary line is
+   "capability improved within the researcher-enumerated envelope;
+   the envelope is unchanged in kind." A freeze-interpretation
+   drafter is preparing honest templates for each possible
+   outcome.
 2. **Post-freeze adversarial battery.** Design complete and sealed
    (`e409f5eea`, ADVERSARY-DESIGN-COMPLETE): **GW1-GW8**, designed
    from the public architecture claim only, pure-Zag generator,
@@ -283,7 +314,10 @@ central design question for any inquiry work.
    replacement; GW5 inquiry-gated construction, two stages with a
    responder contract; GW6 inquiry discrimination and retirement;
    GW7 A/B/C interference; GW8 revision lifecycle with revert.
-   These are the important generality test, per Micah's directive.
+   Predictions frozen in ADVERSARY_DESIGN.md. **A GW evaluator is
+   now active** (three runs per world, authorized, no TNN-2
+   modifications). These are the important generality test, per
+   Micah's directive.
 3. **Six open questions for Micah** (from the kill-bar draft,
    `76231baa8` section 11; achievability review `eb354e3a2`
    section 4 gives a recommendation on each, but Micah decides):
@@ -360,6 +394,8 @@ sources on branch `tnn-native-lab` (local only, nothing pushed):
 | Ledger C150-C159 | `af093bd94` | `canonical_ledger/CLAIM_LEDGER.md` |
 | Seal integrity verified | `0c97a669a` | `seal_integrity/SEAL_INTEGRITY.md` |
 | GW1-GW8 designed and sealed | `e409f5eea` | `postfreeze_adversary/ADVERSARY_DESIGN.md` |
+| Prereg audit; 5/9 corrected to 4/9 | `8959a7c14` | `freeze_audit/PREREG_COMPLIANCE_AUDIT.md` |
+| Movable priorities; top 3 quick wins | `f70ab617c` | `tnn2_movable/MOVABLE_PRIORITIES.md` |
 
 Standing conventions honored: pure Zag (safebin PATH, no forbidden
 executables); no source edits to the frozen build; paper untouched;
