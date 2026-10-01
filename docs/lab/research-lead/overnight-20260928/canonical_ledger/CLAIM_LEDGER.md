@@ -4958,26 +4958,28 @@ Claim: verified git bundle backup superseding v13.
     The sketch is honest L2 (a researcher-authored split-scoring
     procedure); it satisfies no part of C0. Analysis only; no source
     edits.
-- Cycle ledger count: 149 -> 159 (10 new claims: C150-C159).
+- Cycle ledger count: 149 -> 160 (11 new claims: C150-C160).
   ATTACK-SUCCESS: +3 (C150, C151, C152). ANALYSIS-COMPLETE: +3 (C153,
   C156, C159). AUDIT-PASS: +1 (C154). RESEARCH-BACKLOG: +1 (C155).
-  SYNTHESIS-COMPLETE: +1 (C157). ATTACK-COMPLETE: +1 (C158). Zero new
+  SYNTHESIS-COMPLETE: +1 (C157). ATTACK-COMPLETE: +1 (C158).
+  FREEZE-EVAL-COMPLETE: +1 (C160). Zero new
   SURVIVES. L3 achieved anywhere: still zero. The red-team verdicts do
   not alter the frozen TNN2-BUILD-PASS (C144) or TNN2-REPRO-PASS (C145),
   which were correctly scoped to build and reproduction; the attacks
   are mechanism-generality results, not capability results, and they
   neither confirm nor break frozen kill bars.
-- Freeze status note (follow-up to C149): NO FREEZE SCORE RECORDED. The
-  CORE-FREEZE-TNN2 evaluator is still running; its reconciled result is
-  not committed. The TNN-3 prerequisites analyst (commit f795807cc,
-  TNN3-PREREQUISITES-MAPPED) reports that the evaluator's on-disk draft
-  is internally inconsistent: it claims a 5/9 FW score but lists only
-  4 passing worlds, and it marks K-FZ2-4 PENDING while the draft verdict
-  line says COMPLETE. That draft is NOT adopted and must not be quoted.
-  Recorded status: evaluation in progress, draft inconsistent, awaiting
-  reconciled commit. No freeze score is recorded until the evaluator
-  commits its verdict and the parent verifies hashes, determinism, and
-  seal integrity.
+- Freeze status note (follow-up to C149, superseded by C160): FREEZE SCORE
+  RECORDED. The CORE-FREEZE-TNN2 evaluator committed eb47b8def with a
+  5/9 draft error (rejected); the corrected report 8556c3f32 records FW
+  4/9. All 6 reconciliation steps verified by parent. See C160.
+- C160 (FREEZE-EVAL-COMPLETE, corrected; commit 8556c3f32, 2026-10-01):
+  CORE-FREEZE-TNN2 reconciled result: FW 4/9 (FW1, FW2, FW4, FW5 pass;
+  FW3, FW6, FW7, FW8, FW9 fail), identical world set to TNN-1 baseline
+  7bde57f52. W supplementary battery 4/9 (W1, W2, W4, W5). The 5/9 draft
+  error corrected; zero 5/9 remain. FW1 internal 10/12 to 12/12 does not
+  change world-level score. Zero of five failure clusters fixed at bar
+  level. The TNN-2 targeted architectural diagnosis is falsified. Do not
+  represent TNN-2 as a world-level improvement over TNN-1.
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
