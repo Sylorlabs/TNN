@@ -4847,3 +4847,89 @@ H-EXP2 step-6 attack prereg (with the identifiability assumption
 stated); DEVANG2 prereg if one is frozen. The inline-only
 execution-mode decision remains with Micah (fourteenth wave overall
 affected by the defect; this wave completed inline).
+
+---
+
+## Wave wave-20261001-1421pdt: COMPLETE (coordinator + 11 workers + red team + debate group)
+
+Coordinator wave (not inline): 11 subsystem workers, 1 red-team reviewer,
+1 debate group; all 13 children safebin-verified, zero Python anywhere.
+One disclosure: the pinned znc's own A0102 lint text emits an em-dash, so
+one worker kept raw build logs in /tmp with recorded hashes. Wave record:
+docs/lab/rsi/runs/wave-20261001-1421pdt/ (WAVE_RECORD.md,
+debate/DEBATE_1421PDT.md). No coordinator disposition was overturned by the
+debate; one was modified (transfer), conditions attached to eight. Commits
+local only, never pushed.
+
+Verdicts (all debated, debate/DEBATE_1421PDT.md; provenance probe asked and
+answered; transcript byte-verified, zero em-dashes):
+
+- ddes V2 step 4: REPRODUCED [NEW]. Six files (3 wave transcripts + 3
+  reproduction runs) share sha256 b8bc5fa9cd2feec8c239baad42eba88438c9dea4341b226189bcc81cca6fcde3;
+  zero diffs; source extracted from the git object store. Bounded L2
+  boundaries unchanged.
+- ddes V2 step 6 attack: CLAIM-WEAKENED (scoped) [NEW]. Memorization
+  SUCCEEDS (lookup table byte-identical to sealed outputs); derivation
+  leak FAILS (disconnect genuine); phase-2 circularity SUCCEEDS scoped
+  disclosed (6 record values are numeric literals in main()); schema
+  byte-exactness SUCCEEDS narrowly. No hidden L3, no fraud.
+- DDES V2 BUILD-PASS citation: STANDS AS FROZEN with three BINDING
+  caveats [NEW] (menu-of-2 equivalence, G signature-identical to F,
+  derivation-to-record binding enforced offline only). Omitting any
+  caveat in citation is misrepresentation. Future persistence claims
+  need a post-freeze adversary-chosen record value.
+- H-PI-REV2 step 5: BASELINE-FAIL [NEW]. K-SB4 FAIL is a frozen-prereg
+  design flaw (B1 full 1055-program enumeration returns first-fit -1;
+  "B1's fitted program is correct" unsatisfiable as written); the
+  revision machinery passed every behavioral bar. Path: verify K-RV2-1b
+  against frozen code, transparent amendment, re-freeze.
+- H-EXP2 step 6: PREREG FROZEN THIS WAVE [NEW]. Identifiability
+  assumption frozen (B=2 stall is the correct terminal state); three
+  frozen subjects against three sealed worlds (W-C, W-D novel; W-T
+  trap); K-A1..K-A8 frozen; sealed law files committed with recorded
+  sha256.
+- DEVANG2 retry: PREREG FROZEN THIS WAVE [NEW]. Earlier devlang2 prereg
+  verified correctly frozen; its retry BUILD-FAIL'd on mechanism (13/20
+  vs C2 17/20).
+- F2 v2: PREREG FROZEN THIS WAVE [NEW]. Harder sustained goal; v1
+  history only in overnight-20260928/autosci/.
+- Sealed adversarial battery on the three TNN-2 mechanisms: ALL THREE
+  FAIL [NEW]. Prereg frozen by hash before worlds existed; all process
+  bars PASS (3/3 byte-identical, frozen binary verified, seal PASS).
+  M1: path-following over the fact graph, no procedure abstraction.
+  M2: inquiry action constant 30, no resolution transition. M3:
+  last-write-wins patching, no evidence model. Retention 12/12.
+  Informative negative; no-patch-treadmill: three substrate gaps for
+  TNN-3 (learner-owned procedure representation; content-bearing
+  lifecycle-managed uncertainty; evidence-weighted revision), at least
+  three structurally different hypotheses per bottleneck before new
+  mechanisms.
+- Arena language v6: CANDIDATE 0.794 (54/68), up from v4 0.676 [NEW].
+  C16 1.000 (6/6) from 0/6; no regressions; 8/8 bars PASS under a
+  transparently amended prereg (K3 expectation was factually wrong:
+  C10's items are operationally identical to C16's zemprod items in
+  world_gen.zag; unchanged binary re-frozen with 3 fresh sealed runs).
+  K7 different-seed probe 6/6 from exposure alone. Canonical 0.573
+  unchanged. Still zero: C8, C9, C12, C15.
+- Arena transfer: CANDIDATE (protocol validation only) [NEW]. 0.3333,
+  all 8 bars PASS on a simulated learner; zero evidential weight for any
+  contestant total until refreeze against the real frozen TNN-2 binary.
+- Fork battery: 2 fresh PASS + 55 RE-CERT (52 PASS, 1 PASS, 2
+  UNTESTABLE), 0 FAIL [RE-CERT]. Hygiene certification only.
+- Red team: REDTEAM-COMPLETE [NEW]. tnn2.zag source audit clean; arch
+  accounting on 02a338dbf and 1963e994d verified. Sealed-battery
+  triviality review carried to next wave.
+
+Undebated arrivals (NO VERDICT, queued for next-wave review; debate
+recommends the parent investigate the possible zombie lane): 02a338dbf
+substrate expansion (fork FRESH PASS; arch accounting verified),
+105e9ee8b persistent connections (fork FRESH PASS), ff0d91691 utility
+integration, 0509fd116 rebinding hardening, 293cf0672 governance wave 2
+(last three landed after the fork battery finished; untested). All carry
+NAMECHECK.md records; none produced by this wave's workers.
+
+Queued next: ddes V2 steps 7-11 with binding caveats; H-PI-REV2 step-5
+amendment and re-freeze; H-EXP2 step-6 execution; DEVANG2 and F2 v2
+implementations; sealed-battery triviality review; TNN-3 hypotheses per
+bottleneck; arena v6 refreeze; transfer refreeze on real TNN-2;
+zombie-lane investigation; sensory headspace line (no worker this wave).
