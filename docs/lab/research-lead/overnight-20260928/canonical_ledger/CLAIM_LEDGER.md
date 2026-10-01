@@ -4675,5 +4675,113 @@ Claim: verified git bundle backup superseding v13.
   fresh state. P2 and P6 stand without caveat. C93
   clearance unaffected.
 
+- Architecture-wave appendix (C143-C149, 2026-10-01): TNN-2 cycle
+  - Numbering note: the cycle-15 draft
+    (docs/lab/research-lead/overnight-20260928/ledger_cycle15_prep/LEDGER_15_DRAFT.md,
+    commit dd704acd8) proposed C143-C152 for earlier completed work but was
+    never appended to this canonical ledger. This append consumes C143-C149
+    for the chronologically later TNN-2 cycle. The draft file is preserved
+    untouched; its proposed numbering is stale and must be renumbered if
+    those claims are ever appended.
+  - PREREG-FROZEN: C143 (TNN-2 next-generation prereg; commit 7c1e30522).
+    Root-cause basis ed38121d4 (CORE-FREEZE-TNN1 analysis: five failure
+    clusters reduced to three shared architectural gaps: runtime executable
+    graph construction, miss-to-uncertainty-to-guide-to-act in learner state,
+    generic topology-changing revision of executable graphs). Three frozen
+    changes: (1) one executable graph type constructed at runtime via the
+    MUL Rung B-style propose/execute/verify/promote trial loop integrated
+    into the miss policy; fixed plan templates to be removed; (2) close the
+    miss-to-act loop by integrating the standalone validated inquiry build
+    (commit 18ed3331c): a true miss creates an UNCERTAINTY node and a
+    POLICY_ROOT-linked guide using existing node and edge types only;
+    (3) generic revision operator that rewires executable graph topology
+    after counterexamples, not standing demotion. K-T2-1..K-T2-8,
+    F-T2-1..F-T2-4. ISA frozen: no new opcodes, modes, bridges, handlers,
+    or semantic cases. K1 anchor for the TNN-2 build.
+  - BUILD-PASS: C144 (TNN-2 build; commit f4de7ff46). 1591 lines
+    (base 1328 + 263). 46/46 tests; 3/3 runs byte-identical; all three
+    transcripts share sha256
+    37c7b552fe56c9b03b93aadb8108dfbd1d8031c056dd0e2cdcb6a1fb88cd3911.
+    Source sha256
+    a29972ca8183b2857c0c7b262d004fce6e4547c02a971a7aef035b44aa76a8bd;
+    binary sha256
+    6044f91f8fe35e307e1d6f73a4ee73bffb930fa0a16a9c899048a086d0d5f77b.
+    Fixed plan templates and exec_plan deleted; one untouched execute()
+    handles runtime-built 4-op graphs; t2_trial propose/execute/verify/
+    promote records genuine rejections; true miss creates UNCERTAINTY and a
+    POLICY_ROOT-linked guide; ev_act can return learner-derived choice 30
+    rather than fallback 0; revise_on_contradict rewires topology and
+    re-verifies. Five new checks: T2-CHAIN4, T2-REJECT, T2-INQUIRE,
+    T2-ACTLIVE, T2-REVISE. Pure Zag; pinned compiler; safebin guard.
+    No new opcodes, modes, bridges, or handlers. 1591 lines exceeds the
+    frozen 1200-line ceiling: compression fail recorded and NOT waived;
+    no pre-evaluation compression per Micah's ruling. BUILD-PASS ONLY:
+    NOT SURVIVES. Promotion-pipeline steps 5-11 remain open (simple
+    baseline, alternative-explanation attack, OOD test, ablation,
+    transfer/reuse, independent red team, governance audit).
+  - REPRODUCTION-CONFIRMS: C145 (TNN-2 independent reproduction;
+    commit fdf1fa626). From-scratch recompile with the pinned znc produces
+    a byte-identical binary; 46/46 on three runs; all six transcripts
+    (three fresh, three committed) share hash 37c7b552. Source spot-check
+    confirms no executable exec_plan references, t2_trial on the miss
+    path, miss_inquire creating T_UNCERT tag 30 and a POLICY_ROOT guide,
+    and revise_on_contradict rewiring topology. This completes only
+    promotion-pipeline step 4.
+  - PREREG-FROZEN: C146 (CORE-FREEZE-TNN2 preregistration; commit
+    ce1a7c5f8). Second freeze cycle. Frozen TNN-2 source and binary hashes
+    (same as above); 1591 lines, 1200-line ceiling exceeded and recorded,
+    not waived. Same sealed FW1-FW9 assets; pure-Zag frozen scorers;
+    pinned compiler; no cognition edits after world exposure.
+    K-FZ2-1..K-FZ2-5, F-FZ2-1..F-FZ2-3. Interpretation rules frozen:
+    primary comparison TNN-2 FW SCORE vs TNN-1 4/9; report FW SCORE
+    (primary) and OLD-WORLD REGRESSION SCORE (supplementary) separately.
+    Per-cluster fix predictions: runtime construction targets FW3, FW8,
+    FW9, half of FW7; miss-to-act inquiry targets FW6 and half of FW7;
+    generic revision addresses lifecycle revision and may not directly
+    alter FW score. A score at or below 4/9, or regressions on
+    FW1/FW2/FW4/FW5, falsifies the frozen root-cause prediction and
+    requires re-clustering. K1 anchor for the TNN-2 shim.
+  - BUILD-PASS: C147 (CORE-FREEZE-TNN2 driver shim; commit 23c2c0206).
+    freeze_shim2.zag 1751 lines (1590 TNN-2 lines preserved verbatim plus
+    161 driver lines in shim_driver2.zag; only the test-suite main was
+    removed). Zero cognition attested under K-FZ2-3; F-FZ2-1 not
+    triggered. Shim source sha256
+    33795c19c9f7ecd8e4c0c9a180293bf577b53ba7aae6f6a5557c972fe372ace8;
+    shim binary sha256
+    9217054c5af6dec057c4530c4de3ba246f521acc6df741d1989a4504acc72954.
+    3/3 byte-identical runs. A simple ACT-only functional check returned
+    CHOICE 0; this does not contradict the integrated inquiry claim
+    because no miss-created guide preceded that check; the sealed FW6
+    evaluation must determine whether the inquiry loop fixes the
+    degeneracy.
+  - RULING-COMMITTED: C148 (Micah's overnight governance ruling on FW
+    interpretation for TNN-2). FW1-FW9 are a REGRESSION /
+    TARGETED-REPAIR battery for TNN-2 because TNN-2 was designed after
+    observing TNN-1's failures on those worlds. Therefore even a 9/9 FW
+    score does NOT establish broad generality or L3. The generality test
+    is a fresh post-freeze adversarial battery designed after the TNN-2
+    freeze by an independent adversary, attacking the three new
+    mechanisms: (A) runtime executable-graph construction, (B)
+    learner-originated uncertainty to guide to action, (C)
+    counterexample-driven executable-graph revision. This is a governance
+    claim, not a scientific result; it constrains how the freeze score
+    may be interpreted.
+  - EVALUATION-IN-PROGRESS: C149 (CORE-FREEZE-TNN2 evaluation; no score
+    adopted). The evaluator is running. Working files exist uncommitted
+    at docs/lab/research-lead/overnight-20260928/core_freeze_tnn2_eval/
+    (FREEZE_REPORT.md, NAMECHECK.md, run scripts, runs/). The working
+    report is internally inconsistent (an FW section showing a score with
+    a mismatched pass list) and its W battery is incomplete; it is NOT
+    adopted as a result and must not be quoted. A follow-up ledger entry
+    is required when the evaluator commits its verdict and the parent
+    verifies hashes, determinism, and seal integrity.
+- Cycle ledger count: 142 -> 149 (7 new claims: C143-C149).
+  PREREG-FROZEN: +2 (C143, C146). BUILD-PASS: +2 (C144, C147).
+  REPRODUCTION-CONFIRMS: +1 (C145). RULING-COMMITTED: +1 (C148).
+  EVALUATION-IN-PROGRESS: +1 (C149). Zero new SURVIVES. L3 achieved
+  anywhere: still zero. BUILD-PASS total: 17. PROCESS-FAIL total:
+  5 (unchanged). The TNN-2 cycle consumed C143-C149; see the numbering
+  note above regarding the unappended cycle-15 draft.
+
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
