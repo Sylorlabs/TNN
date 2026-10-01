@@ -4968,6 +4968,15 @@ Claim: verified git bundle backup superseding v13.
   which were correctly scoped to build and reproduction; the attacks
   are mechanism-generality results, not capability results, and they
   neither confirm nor break frozen kill bars.
+- Cycle ledger count: 160 -> 168 (8 new claims: C161-C168).
+  DECLINE-GATE-COMPLETE: +1 (C161, DYN-1 BENDS, bounded L2).
+  DYN1-DISCOUNT-COMPLETE: +1 (C162, FLAT). DISCOUNT-ADVERSARY-COMPLETE:
+  +1 (C163, W3 ENTRENCHES ERROR). WEAK-KLT5-EVAL-COMPLETE: +1 (C164,
+  VOID). BUDGET-PRESSURE-COMPLETE: +1 (C165, P4 CONFIRMED).
+  FOSSIL-CENSUS-COMPLETE: +1 (C166). INTERFERENCE-EXPERIMENT-COMPLETE:
+  +1 (C167). GIT-AUDIT-COMPLETE: +1 (C168, CLEAN). First DYN-1 bend
+  recorded (C161). Zero new SURVIVES. L3 achieved anywhere: still
+  zero.
 - Freeze status note (follow-up to C149, superseded by C160): FREEZE SCORE
   RECORDED. The CORE-FREEZE-TNN2 evaluator committed eb47b8def with a
   5/9 draft error (rejected); the corrected report 8556c3f32 records FW
@@ -4980,6 +4989,122 @@ Claim: verified git bundle backup superseding v13.
   change world-level score. Zero of five failure clusters fixed at bar
   level. The TNN-2 targeted architectural diagnosis is falsified. Do not
   represent TNN-2 as a world-level improvement over TNN-1.
+- C161 (DECLINE-GATE-COMPLETE; commit f3e6985d4, 2026-10-01): DYN-1
+  BENDS. Unfrozen variant with minimal decline gate in ev_query: tally
+  live UNCERTAINTY (tag 30) nodes per (s,r); after 3 consecutive
+  failures return WITHHOLD (-3), skip trial, bootstrap, and
+  miss_inquire. Same 250-event DYN-1 battery, 3/3 byte-identical. Phase
+  C miss: 101 to 61 nodes (20 declines). Phase E miss2: 40 to 0 nodes
+  (20 declines). 40 declines total, all dn=0. UNCERTAINTY census: 30
+  total, 3 per key (was 70, 7 per key). Final 241 live nodes vs 321
+  baseline: 80 nodes saved. Zero new node types, fields, modes,
+  bridges, handlers, or storage; gate reads learner state the
+  architecture already reifies. Counterfactual check passes (same probe
+  behaves differently across histories, mediated by the tally, caused
+  by the miss_inquire write path). Classification: bounded L2; the N=3
+  criterion is researcher-authored, not learner-internal. Limits: N=3
+  unsensitized; tally is total-not-strictly-consecutive; no
+  re-engagement path (decline sticky until eviction re-opens);
+  false-decline risk if trial would succeed on attempt 4+; novel misses
+  still cost +2. First mechanism to bend DYN-1. Architectural
+  implication: decision-change without allocation-site change leaves
+  DYN-1 flat (see C162); decline bends it by suppressing the allocation
+  sites themselves.
+- C162 (DYN1-DISCOUNT-COMPLETE; commit 8ad158352, 2026-10-01): FLAT.
+  Discount pilot on DYN-1 battery: output byte-identical to frozen
+  baseline (SHA-256 4f1367778a6b99f0b59021dc2f658ec4cd436dd1ec2a5098e66
+  305c4c358d753, matching 003767553). Per-phase deltas identical:
+  teach +1, hit +0, miss +2, observe +2. Final 321 nodes / 489 edges /
+  clock 250. Zero dedup (70 UNCERTAINTY, 7 per key). The mechanism was
+  inert: W3 (minority discount writes) never fired because Phase C/E
+  misses query r=99 which was never taught (bootstrap scan finds zero
+  facts, returns before unanimity check) and Phase D uses ev_observe
+  which never calls bootstrap_miss (the only modified function).
+  Structural reason discount cannot bend DYN-1: even when W3 fires it
+  performs in-place field writes allocating zero nodes; the dominant
+  DYN-1 costs (UNCERTAINTY node + guide per miss) are structural
+  allocation sites the mechanism never touches. Same lesson as DYN-1 on
+  Node 1 (C-subsumed): decision-changing mechanisms without
+  allocation-site changes leave the curve flat.
+- C163 (DISCOUNT-ADVERSARY-COMPLETE; commit 84d91dd9f, 2026-10-01):
+  W3 ENTRENCHES ERROR. Majority-wrong world: establish a wrong
+  self-generated 42 loop, introduce one genuine correct 99. W3
+  discounts the genuine minority; R1 excludes it; wrong 42 inference
+  resumes. M1: 10/10 wrong inferences persist. M3: truth-exclusion flip
+  at 60 queries. 65 queries of wrongness total. Source-blindness
+  confirmed: the minimal discount mechanism (D1 per-FACT discount field,
+  D2 threshold T=2, W3 strict-majority bootstrap discounts minority,
+  R1 bootstrap skips discounted facts) preserves a self-generated
+  majority by suppressing the only genuine minority evidence. The
+  majority-wrong adversary correctly shows why source-blind discounting
+  can entrench error. Architectural implication: provenance must be
+  architectural, not metadata; a learner's own inference must not
+  silently become independent evidence for itself. Do not fix the
+  bootstrap loop with majority discounting alone.
+- C164 (WEAK-KLT5-EVAL-COMPLETE; commit c040e5fde, 2026-10-01): VOID.
+  Weak K-LT-5 sealed evaluation hit the budget wall: learned policy
+  does not survive eviction. Node-1 policy learns and transfers
+  pre-wall (trial reorder functional, E(A)=30, E(B)=20, R=1.50 under
+  actual source order [0,1,2,3,4,5]), but the sealed protocol requires
+  post-eviction retention the architecture cannot provide. Separately,
+  the frozen prereg specifies initial order [2,1,0,3,4,5] while
+  implementation and world design use [0,1,2,3,4,5]; the running
+  evaluation used implementation behavior. Per Micah 2026-10-01
+  directive: current run finishes as EXPLORATORY; no post-hoc amendment
+  of the frozen bar; fresh prereg with actual order, fresh independently
+  sealed world, then rerun. No weak K-LT-5 verdict is canonical from
+  this wave.
+- C165 (BUDGET-PRESSURE-COMPLETE; commit bc96dd3d8, 2026-10-01): P4
+  CONFIRMED. Post-pressure capability characterized, 3/3
+  byte-identical. Frozen cognition reproduces the P4 profile at cap.
+  New learning and trial construction still function through eviction.
+  Specific old answers and executable graphs are forgotten and
+  fossilized. One forgotten-query miss evicted 28 facts to allocate
+  trial scratch. Re-learning cost equals first learning; eviction
+  history is not used. Eviction costs about 30M operations per victim
+  under current scans. R5 (retention of specific learned structures
+  through pressure) absent. Machinery survives, memories do not.
+  Architectural implication: the 1,024-node full-scan architecture is
+  not viable for continuous learning; saturation and eviction churn
+  destroy retained structure faster than learning rebuilds it.
+- C166 (FOSSIL-CENSUS-COMPLETE; commit 7a3ba6137, 2026-10-01): 75%
+  fossil under low pressure, 100% zombie under high pressure. Unfrozen
+  variant, behavior-preserving instrumentation, 3/3 byte-identical.
+  Pre-filler: live=1, fossil=3, zombie=0; three MAPs structurally
+  intact, never referenced post-promotion (refs=0), bid frozen at birth
+  value 2. The only post-promotion reference across four MAP lifetimes
+  was researcher-driven revision; re-queries hit shadow FACTs; nothing
+  learner-driven ever consults a MAP. Post-filler: live=0, fossil=0,
+  zombie=4; every MAP's graph root destroyed by eviction.
+  Fossilization is a waystation, not an end-state: the bid-2 shell
+  survives while bid-0 graph cells rot underneath. MAP 22 was LIVE
+  (referenced by revision) yet still zombified; being used does not
+  protect a MAP because use leaves no trace on the bid. Bid
+  distribution: all MAPs at bid 2 at every point, pre- and
+  post-filler, revised or not; the bid never reflected utility at any
+  point in any MAP's lifetime. Combined with the zombie census (C-sub),
+  the dead-structure population has two compartments (never-used
+  fossils, used-then-rotted), both invisible to the learner: no
+  machinery reads reference counts, no machinery checks root
+  integrity. Architectural implication: structure-level lifetime and
+  learner-owned utility are missing; the bid is not a utility signal.
+- C167 (INTERFERENCE-EXPERIMENT-COMPLETE; commit 3708fbd15,
+  2026-10-01): How dies before what. Retention curve under graded
+  interference on unfrozen TNN-2 variant; cognition byte-identical to
+  frozen f4de7ff46. IX-1 (no refresh): cells 18->8->0, shadow fact lost
+  at V=1050 (requery -2), chain facts survive (bid 1 via MAP DEP), MAP
+  fossil (bid 2). Executable structure breaks (reexec fails) at V=1000
+  while answer intact: the how dies before the what. IX-2 (refresh
+  every 10): answer preserved at all volumes (fail_at=-1), but cell
+  decay identical to IX-1. Fixed policy respects access recency for
+  facts, blind to structural importance; the learner cannot mark graph
+  cells worth keeping. Refresh preserves answers, not procedures.
+  Architectural implication: retention policy is fact-centric; no
+  mechanism protects executable structure as structure.
+- C168 (GIT-AUDIT-COMPLETE; commit a8312f0d9, 2026-10-01): CLEAN. 30
+  post-convention commits audited; zero sweep collisions; explicit
+  pathspecs on all sampled commits; no shared-history amendments; no
+  paper modifications; no pushes. Governance role ongoing.
 
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
