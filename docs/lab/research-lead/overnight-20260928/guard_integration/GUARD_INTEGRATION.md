@@ -31,7 +31,7 @@ existing material.
 |---|---|---|---|
 | A | Section 1, new 1.5 | Reference | Names the guard as the governing development discipline |
 | B | Section 2, end-of-section note | Note | Points builders to the per-capability treadmill analyses |
-| C | Section 3, Step 4 row | Note | Attaches warning sign 5 to the H1-widening constraint |
+| C | Prereg structure Section 3, Step 4 row | Note | Attaches warning sign 5 to the H1-widening constraint |
 | D | Section 6, new 6.9 | Insertion | Menu check becomes an architecture-accounting line item |
 | E | Section 8, new 8.6 | Insertion | The five checks, in full, as a verification procedure |
 | F | Section 10, new 10.4 | Insertion | Treadmill guard audit in governance |
@@ -87,7 +87,7 @@ Draft text:
 
 > ### Note on floor capabilities and the treadmill guard
 >
-> Each of the seven floor capabilities (F1/F2/F3/G1/G2/G3, floor
+> Each of the six floor capabilities (F1/F2/F3/G1/G2/G3, floor
 > spec commit `f383dd11c`) has a documented treadmill form and a
 > named guard mechanism in the treadmill guard (commit `1646b9732`,
 > section 4). The floor tests keep the floor; the guard names how
@@ -103,9 +103,9 @@ Draft text:
 
 ---
 
-## 4. Insertion C: Section 3, Step 4 row note
+## 4. Insertion C: prereg structure Section 3, Step 4 row note
 
-In the Section 3 order summary table, the Step 4 row already
+In the prereg structure Section 3 order summary table, the Step 4 row already
 carries the treadmill warning ("This step must not precede Step
 1, per the treadmill warning"). Append a precise citation so the
 warning is auditable.
