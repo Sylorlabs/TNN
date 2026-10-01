@@ -5276,3 +5276,79 @@ check_no_dash.sh snippet).
   (exploratory). Valuable negative result for integration planning.
 
 No em dashes were used in these entries (verified).
+- C181 (LEARNER-VERIFICATION; commit d52666a8b, 2026-10-01):
+  COMPLETE (exploratory, no frozen prereg). Learner-owned prediction
+  reliability replaces researcher-provided expected for revision
+  acceptance (Micah Priority 1). Builds on b320213f2 (learner-owned
+  success criteria). V4 revision acceptance PASS: treatment uses learned
+  reliability scores to accept/reject candidates; control uses
+  researcher-supplied expected. Directly addresses H2-v2 finding (8778f1d0b)
+  that learner-internal verification is missing. 3/3 deterministic.
+  Status: BUILD-PASS (exploratory).
+- C182 (ADAPTIVE-THRESHOLD; commit b6135c531, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Threshold value written by experience,
+  not researcher-fixed (Micah Priority 8). Addresses Node2-v2
+  generalization finding (f77f466c3) that threshold=3 was hardcoded and
+  DID-NOT-GENERALIZE. Tests learner-adaptive evidence requirements in
+  noisy, stable, and changing environments. 3/3 deterministic per arm.
+  Status: BUILD-PASS (exploratory).
+- C183 (PROVENANCE-LEARNING; commit 96fa237b1, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Source reliability learned from
+  consequences, no hardcoded OBSERVED greater than INFERRED rank
+  (Micah Priority 4). Treatment switches source A to B from experience
+  as B degrades; hardcoded control stuck 0/4 in P5. Builds on C170
+  (provenance FIXES, 8c352e5bf) and 9e9a2e372 (provenance treatment)
+  by making the epistemic policy learner-owned rather than
+  researcher-fixed. 3/3 deterministic per arm. Status: BUILD-PASS
+  (exploratory).
+- C184 (MINI-LIFETIME-INTEGRATION; commit 1963e994d, 2026-10-01):
+  COMPLETE (exploratory, no frozen prereg). 3-arm persistent comparison
+  (Micah Priority 9): A. frozen TNN-2, B. reuse/rebinding, C.
+  consequence plus provenance plus structural protection integration.
+  No resets. Tracks transfer, persistent connections,
+  examples-to-criterion, predictive accuracy, memory growth,
+  compute per event, structures retained, structures reused, policy
+  changes. Builds on C177 (mini-lifetime run, 4339119e9). 3/3
+  deterministic per arm. Status: BUILD-PASS (exploratory).
+- C185 (SUBSTRATE-EXPANSION; commit 02a338dbf, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). 5 behaviors from one consequence
+  substrate with per-behavior ablations (Micah Priority 5). Extends
+  C174 (substrate EMERGES, 1ed3f5a6b) and fa8405a90 (substrate build:
+  policy plus withholding). Same tag-61 store drives policy adaptation,
+  withholding, abandonment, retention, and search-order changes.
+  Ablations show the same consequence records matter to multiple
+  behaviors. All batteries PASS. 3/3 deterministic. Status:
+  BUILD-PASS (exploratory).
+- C186 (PERSISTENT-CONNECTIONS; commit 105e9ee8b, 2026-10-01):
+  COMPLETE (exploratory, no frozen prereg). Persistent cross-domain
+  A-B connections (Micah Priority 2). Addresses spontaneous lifetime
+  finding (82dd6c00d) that XEDGES a-b equals 0: prior rebinding was
+  functional reuse, not structural. Learner creates persistent relation
+  recording that A helped construct B; much later C exploits the
+  learned A-B relationship. Tests faster later retrieval, better
+  transfer, reusable higher-level structure, ablation loss when
+  connection removed. No researcher-authored A-to-B mapping. 3/3
+  deterministic. Status: BUILD-PASS (exploratory).
+- C187 (UTILITY-INTEGRATION; commit ff0d91691, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Test 6 redundancy plus predictive
+  utility plus wrong-but-frequent attack (Micah Priority 6). Completes
+  c912b9b19 (utility WORKS 5/6) by running the missing Test 6 control
+  build. Connects utility to learner-owned predictive success rather
+  than fixed plus2/minus2 events. Explicitly attacks the wrong but
+  frequently used case: structures that predict well, reduce search,
+  enable later structures, and survive reuse become more valuable than
+  frequently-used-but-wrong structures. Status: BUILD-PASS
+  (exploratory).
+- C188 (REBIND-HARDENING; commit 0509fd116, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Scale, deception, and adaptation
+  hardening (Micah Priority 3). All 4 hardening worlds GRACEFUL, 3/3
+  byte-identical. Zero crashes, zero hangs, zero false accepts on
+  unmasked queries. Two scale limitations documented (construction
+  workspace limits, wrong-plen scan cost). Extends db263d74c
+  (REBIND-ADV-COMPLETE, 7 worlds GRACEFUL). Measures
+  experienced-vs-fresh cost under 15 and 20 prior MAPs, deceptive MAPs,
+  partial applicability, branched topologies, negative transfer, and
+  misleading structurally similar MAPs. Status: BUILD-PASS
+  (exploratory).
+
+No em dashes were used in these entries (verified).
