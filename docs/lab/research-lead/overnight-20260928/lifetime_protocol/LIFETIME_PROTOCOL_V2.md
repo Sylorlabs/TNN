@@ -59,8 +59,11 @@ sections are marked [v2].
 
 7. **Fossil inversion in the interference measure** (source: forgetting
    2726baf74). Memory-under-interference now distinguishes four
-   end-states: live, retired (future), deleted, fossil (accidental).
-   Fossil count is a reported diagnostic. Affects: Section 7.7.
+   end-states: live, deleted, fossil (accidental), zombie (corrupted).
+   Fossil and zombie counts are reported diagnostics. Retirement
+   (excluded from lookup, low cost, recoverable) does not exist in
+   frozen TNN-2; per Section 7.7 it would become a fifth end-state
+   only if a future build implements it. Affects: Section 7.7.
 
 8. **L2L2 reference status corrected** (sources: `l2l2_audit/` commit
    af9a9765a; `l2l2_repair/` prereg amendment 0872a412d, implementation
@@ -88,6 +91,15 @@ sections are marked [v2].
     machinery, and three recommended extensions (guard field-12
     target, literal-operand field 8, policy-anchor liveness).
     Affects: Sections 5 (step 4a), 6 (new 6.2), 7.7, 18.
+
+11. **QA corrections** (source: `protocol_qa/PROTOCOL_QA.md`, report
+    a125a1984). Changelog item 7 now names the four Section 7.7
+    end-states (live, deleted, fossil, zombie) instead of the stale
+    "retired (future)"; the P4 profile referenced in K-LT-2 is
+    defined in-document with its source (`tnn2_transfer/
+    TRANSFER_ANALYSIS.md` P4 result); "H1 widening" in Section 17
+    is defined in-document with its source (`tnn3_roadmap/
+    TNN3_ROADMAP.md` section 2). Affects: Sections 0, 11, 17.
 
 ## 1. Purpose
 
@@ -893,7 +905,10 @@ controls, 3/3 byte-identical runs. A bar is PASS/FAIL/VOID
   report fossil and zombie counts alongside probe scores. The
   prediction beyond budget is corruption-first (zombie MAPs),
   then fossilization, then catastrophic answer loss (per the P4
-  profile and the eviction-corruption refinement).
+  profile: executable structures die first, MAPs fossilize,
+  learned answers are catastrophically forgotten; source:
+  `tnn2_transfer/TRANSFER_ANALYSIS.md` P4 result; and the
+  eviction-corruption refinement 986c52fdc).
 - K-LT-3 (cross-domain executable reuse): >= 1 L2 event
   (X-origin MAP executed in Y != X, correct result). Prediction
   for frozen TNN-2: FAIL (subject-bound graphs; transfer analysis
@@ -1107,7 +1122,11 @@ never weakened to force a pass.
   consumes no H2 result. H2's withhold/lie/criterion probes can
   be embedded as a world in a future lifetime sequence once
   H2 is re-frozen; for now H2 runs standalone per Micah's
-  ordering (H2 before H1 widening).
+  ordering (H2 before H1 widening; H1 is the hypothesis that
+  each mechanism's output space is enumerated in source, so
+  "H1 widening" means opening the constructor beyond the
+  enumerated space; source: `tnn3_roadmap/TNN3_ROADMAP.md`
+  section 2).
 - H3-lite: the policy-learning diagnostic. Its POLICY events
   are the log signature for measure 7.8. A lifetime run of an
   H3-lite build is the natural K-LT-5w test. [v2] Honest
