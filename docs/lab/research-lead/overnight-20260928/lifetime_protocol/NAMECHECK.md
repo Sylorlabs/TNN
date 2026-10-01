@@ -58,3 +58,54 @@ changes, no binary builds, no sealed content created.
 - No sealed FW or H2 contents inspected.
 - Commits local only. Nothing pushed (only Micah pushes).
 - Explicit pathspecs on all git operations.
+
+---
+
+# NAMECHECK APPEND: Lifetime Protocol Updater (2026-10-01)
+
+## Step 0: Toolchain Guard (update task, recorded first)
+
+- Safebin bootstrap re-ran: linked allowed tools into `$HOME/safebin`
+  (git, znc, sh, bash, ls, cp, mv, rm, mkdir, cat, grep, sed, awk, wc,
+  cmp, sha256sum, git-receive-pack, git-upload-pack, coreutils).
+- `export PATH="$HOME/safebin"` active for all work below.
+- Verification: `which python3 python` returned nothing (empty output
+  before "guard-check-done"). No forbidden interpreter resolvable.
+- All work in this task: file reads of the v1 draft and seven cited
+  analyses, document authoring (v2), git operations.
+- Zero forbidden executables invoked. Update ONLY: no implementation,
+  no source changes, no binary builds, no sealed content created or
+  opened.
+
+## Scope
+
+Update the lifetime protocol draft (v1, commit 9474bc232,
+DRAFT-NOT-FROZEN) to v2 incorporating findings from seven analyses
+completed after v1 was written. The v1 document is left untouched;
+v2 is a new file (`LIFETIME_PROTOCOL_V2.md`) with a full changelog.
+Status remains DRAFT-NOT-FROZEN. No freeze is performed by this task.
+
+## Input provenance (read-only)
+
+- `LIFETIME_PROTOCOL_DRAFT.md` (v1, this directory).
+- `state_dynamics/STATE_DYNAMICS.md` (commit ee238d8d4).
+- `forgetting/FORGETTING_ANALYSIS.md` (commit 2726baf74).
+- `eviction_corruption/EVICTION_CORRUPTION.md` (commit 986c52fdc).
+- `theater_audit/THEATER_AUDIT.md` (commit e0423538a).
+- `goal_origination/GOAL_ORIGINATION.md` (commit 3bf4d7bb4).
+- `l2l_analysis/L2L_ANALYSIS.md` (commit 106ee6698).
+- `l2l2_repair/` (prereg amendment 0872a412d, implementation
+  a530028ea; REPAIR-PASS, ablation closed).
+- `h2_eval/H2_EVAL_REPORT.md` (commit 72173fe11, H2-EVAL-VOID).
+- `verification_criterion/VERIFICATION_CRITERION.md` (commit c2a48bee6).
+- `decline_signal/DECLINE_SIGNAL.md` (commit 9e0ae81d1).
+
+## Constraints honored
+
+- v1 draft untouched. v2 is additive.
+- Zero em dashes in authored files (byte-verified before commit).
+- Paper untouched.
+- No sealed FW/H2 contents inspected (only the H2 eval report, which
+  is unsealed).
+- Commits local only. Nothing pushed.
+- Explicit pathspecs on all git operations.
