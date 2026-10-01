@@ -495,7 +495,7 @@ separately.
    repair preference is crude across heterogeneous faults.
 3. **Inquiry discrimination test design.** Section 3g notes the test
    needs worlds providing differential feedback on actions. Whether the
-   post-freeze adversary (GW1-GW9) can supply this is an open question
+   post-freeze adversary (GW1-GW8) can supply this is an open question
    for the adversary lane, not answered here.
 4. **Interaction with the freeze evaluation.** H3-lite is not a patch
    to TNN-2 and must not be applied to the frozen binary. It is a

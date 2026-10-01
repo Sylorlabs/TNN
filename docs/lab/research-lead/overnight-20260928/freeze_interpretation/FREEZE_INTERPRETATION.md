@@ -16,7 +16,7 @@ These rules are not scenario dependent. They come from Micah's explicit rulings 
 
 **Rule 4: The honest summary line.** From the synthesis: "capability improved within the researcher-enumerated envelope; the envelope is unchanged in kind." Any score above 4/9 is a legitimate capability result on sealed worlds, valid for causal comparison against TNN-1. It measures capability within the envelope, not generality beyond it.
 
-**Rule 5: The next test is the GW battery.** The post-freeze adversarial battery (GW1-GW9), authored after the freeze by an independent adversary, is the generality test. No freeze interpretation is complete without stating that the GW results are pending and that they, not the FW score, discriminate L3.
+**Rule 5: The next test is the GW battery.** The post-freeze adversarial battery (GW1-GW8), authored after the freeze by an independent adversary, is the generality test. No freeze interpretation is complete without stating that the GW results are pending and that they, not the FW score, discriminate L3.
 
 ---
 
@@ -100,7 +100,7 @@ For use whenever any freeze score is reported, in any scenario:
 
 ## 7. What the next test must be
 
-The post-freeze adversarial battery (GW1-GW9), authored after the TNN-2 freeze by an independent adversary who saw the public architecture claims but not the builder fixtures. Requirements from the TNN-3 prerequisites analysis (`f795807cc`): worlds must not be trivial FW variants; must attack unfamiliar graph structures, deeper or different composition, structurally different revisions, successive revision and reversion, ambiguous repairs, state-dependent informative actions, locally attractive wrong questions, cross-domain reuse, interference and memory pressure, and abstractions not anticipated by the arithmetic examples. Must not require new ISA opcodes. TNN-2 remains untouched. Worlds sealed before evaluation.
+The post-freeze adversarial battery (GW1-GW8), authored after the TNN-2 freeze by an independent adversary who saw the public architecture claims but not the builder fixtures. Requirements from the TNN-3 prerequisites analysis (`f795807cc`): worlds must not be trivial FW variants; must attack unfamiliar graph structures, deeper or different composition, structurally different revisions, successive revision and reversion, ambiguous repairs, state-dependent informative actions, locally attractive wrong questions, cross-domain reuse, interference and memory pressure, and abstractions not anticipated by the arithmetic examples. Must not require new ISA opcodes. TNN-2 remains untouched. Worlds sealed before evaluation.
 
 The GW battery is the test that discriminates the synthesis hypothesis ("capability improved within the researcher-enumerated envelope; the envelope is unchanged in kind"). The FW interpretation in every scenario above is written as a prediction about GW. If GW confirms the prediction, the red-team clustering stands and TNN-3 design proceeds from H1/H2/H3. If GW disconfirms it (an outside-envelope world passes), the most valuable outcome of the cycle has occurred: the synthesis is wrong in an interesting way, and the analysis must be redone from the passing world outward.
 
