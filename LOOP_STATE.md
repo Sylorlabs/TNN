@@ -4738,3 +4738,18 @@ implementation); H-EXP2 step 6 alternative-explanation attack;
 H-PI-REV2 step-5 baseline prereg; DEVANG2 prereg if one is frozen.
 The inline-only execution-mode decision remains with Micah (eleventh
 defect kill at 23:21; this wave ran inline-only successfully).
+
+---
+
+## Wave wave-20261001-0521pdt: INCOMPLETE (defect kill, twelfth)
+
+The 05:21 wave died on the descendant-subagent runtime defect
+(twelfth kill). Its coordinator dispatched 10 workers on the queued
+assignments (H-EXP2 step 6, H-PI-REV2 step-5 prereg, F3a3 step 5,
+ddes refreeze, adversarial battery prereg, fork battery, sensory,
+freelunch, redteam), but every lane left only a NAMECHECK guard
+record before the death. No results, no verdicts, no debate. Queued
+work rolls forward unchanged. Contrast: the 02:21 wave completed
+because it ran INLINE with no descendants; the 05:21 wave spawned a
+coordinator subagent and died. The inline-only execution-mode
+decision remains with Micah.
