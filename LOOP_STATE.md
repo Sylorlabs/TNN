@@ -4613,3 +4613,35 @@ next H-PI-REV2 round; full fork-battery results (enumeration manifest
 87 entries exists as pre-run gate only); 14:21/17:21 waves rendered
 no verdicts; the inline-only execution-mode decision remains with
 Micah (ninth defect kill at 17:21, four of the last five waves dead).
+
+---
+
+## Wave wave-20260930-2021pdt: INCOMPLETE (defect kill, tenth)
+
+The 20:21 wave died on the descendant-subagent runtime defect (tenth
+kill; five of the last six waves dead: 05:21, 11:21, 14:21, 17:21,
+20:21; only 08:21 completed in that span). It rendered no verdicts
+before dying, but its lanes left committed evidence:
+
+- ddes_r2_verify: INDEPENDENT re-verification of DDES R2 kill bars
+  K-R2.1..K-R2.6, all CONFIRMED. Recompiled ddesr2.zag from source in
+  safebin; 3/3 runs byte-identical to committed evidence (one shared
+  sha256); exit 0, zero stderr. Prereg d31e901b0 verified as strict
+  ancestor of implementation b42b10db5. Parent spot-verified the
+  three load-bearing claims.
+- Per the 11:21 M4 conditional ruling, the DDES R2 PROVISIONAL status
+  is LIFTED (see debate/JUDGE_1121_M4_ADDENDUM.md). DDES R2:
+  REPAIR-PASS, independently verified, strong L2, no L3 claim. The
+  t*=0 soundness hole is closed.
+- ddes_followup: frozen prereg (schema-persistence across scaffold
+  disconnect; World G new, never seen by the DDES derivation path)
+  plus implementation ddesp.zag; NO RESULTS (wave died before
+  execution). Prereg stands frozen; execution queued.
+- devang2, exp2, fork_battery: NAMECHECK guard records only; no
+  results before death.
+
+Queued next: ddes_followup execution (prereg frozen, World G sealed);
+H-EXP2 v2 bar-text audit then implementation; H-PI-REV2 step 4
+independent reproduction; fresh disjoint adversary byte set; full
+fork-battery results; the inline-only execution-mode decision remains
+with Micah (tenth kill).
