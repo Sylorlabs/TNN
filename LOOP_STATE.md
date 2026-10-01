@@ -4645,3 +4645,28 @@ H-EXP2 v2 bar-text audit then implementation; H-PI-REV2 step 4
 independent reproduction; fresh disjoint adversary byte set; full
 fork-battery results; the inline-only execution-mode decision remains
 with Micah (tenth kill).
+
+---
+
+## Wave wave-20260930-2321pdt: INCOMPLETE (defect kill, eleventh)
+
+The 23:21 wave died on the descendant-subagent runtime defect
+(eleventh kill; six of the last seven waves dead). Its hpi_rev2_repro
+lane completed before dying: H-PI-REV2 STEP 4 (independent
+reproduction) REPRO-PASS, committed as 6d778b960. Independent worker,
+source via git cat-file from 847a8f10f into /tmp, pinned safebin znc,
+3/3 runs byte-identical to committed evidence (one shared sha256
+b5389d71), K-F3-1..4 markers reproduced, prereg ancestry verified.
+Parent spot-verified the three load-bearing claims and debated the
+step-4 claim inline (debate/STEP4_F3A3_RECOVERY.md): step 4 COMPLETE,
+with the standing caveats that reproduction confirms integrity and
+determinism, not bar fairness (the 11:21 M1 third-draft caveat
+stands), and the shared-compiler limit is noted.
+
+F3a3 pipeline status [NEW]: steps 1-4 complete (prereg,
+implementation, sealed evaluation, independent reproduction). Next:
+step 5 simple-baseline comparison.
+
+Also: fork_battery enumeration manifest committed (results still
+queued); ddes_redteam guard record only. The inline-only
+execution-mode decision remains with Micah (eleventh kill).
