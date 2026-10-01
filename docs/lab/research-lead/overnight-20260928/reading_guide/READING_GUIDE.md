@@ -11,7 +11,7 @@ sources. Nothing here is a new finding.
 **The one-line bottom line (before you read anything):** TNN-2 is fixed
 templates with variable content, a real L2 advance over TNN-1, but the
 envelope is unchanged in kind. The three targeted changes moved zero
-freeze worlds. The adversarial generality battery scored 2/8. Ledger: 159
+freeze worlds. The adversarial generality battery (GW1-GW8) scored 2/8. Ledger: 159
 claims, zero new SURVIVES, L3 zero anywhere.
 
 ---
