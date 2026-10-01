@@ -4753,3 +4753,17 @@ work rolls forward unchanged. Contrast: the 02:21 wave completed
 because it ran INLINE with no descendants; the 05:21 wave spawned a
 coordinator subagent and died. The inline-only execution-mode
 decision remains with Micah.
+
+---
+
+## Wave wave-20261001-0821pdt: INCOMPLETE (defect kill, thirteenth)
+
+The 08:21 wave died on the descendant-subagent runtime defect
+(thirteenth kill). It tried a hybrid (descendants attempted, inline
+fallback for dead lanes) and got further than any descendant wave
+since 08:21 on 09-30, but still died before verdicts or debate.
+Partial evidence: H-EXP2 v2 step 6 sweep ran 16/16 baseline runs to
+completion; 12/16 IDENTIFIED the law, but every w_X_2 run (4/4)
+STALLED at round=6, a systematic stall on one law family awaiting a
+verdict. All other lanes left only NAMECHECK records. Queued work
+rolls forward unchanged.
