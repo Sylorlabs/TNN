@@ -4783,5 +4783,201 @@ Claim: verified git bundle backup superseding v13.
   5 (unchanged). The TNN-2 cycle consumed C143-C149; see the numbering
   note above regarding the unappended cycle-15 draft.
 
+- Red-team cycle appendix (C150-C159, 2026-10-01): attack results against TNN-2's three new mechanisms, plus compression, governance, synthesis, alternative-explanation, generalization analyses, and the frontier backlog. All work is analysis only; no source edits; none of these claims alters the frozen BUILD-PASS (C144) or REPRO-PASS (C145) verdicts, which were correctly scoped to build and reproduction. No L3 survives for any mechanism. Paper untouched; pure safebin throughout.
+  - ATTACK-SUCCESS: C150 (construction red team; commit 340e94e3e).
+    t2_trial is generate-and-test over a finite researcher-authored
+    family: three linear graph assemblers (chain, count, sum; the sum
+    branch is unreachable in production, gated on a type-8 marker only
+    the test suite creates), hard bounds (depth 4, 96 paths, 12 values,
+    16 count links), a fixed search order, and a verifier using the
+    environment-supplied expected answer. Boundary probes confirm a
+    5-hop chain is unrepresentable, not merely undiscovered. The learner
+    supplies literals and wirings from observed facts; the researcher
+    supplied the family. Classification: a genuine L2 structural-learning
+    mechanism (runtime composition, genuine rejections, T2-CHAIN4 exceeds
+    the old 3-template ceiling), NOT L3. C0-B and C0-C fail: the final
+    structures are effectively enumerable from a complete
+    researcher-written family.
+  - ATTACK-SUCCESS: C151 (inquiry red team; commit 4e329c772).
+    Six-link causal chain verified: L1 miss trigger, L2 uncertainty
+    creation, and L4 POLICY_ROOT linkage all PASS and learner-originated
+    on the real path; empty-state creation with no test scaffolding.
+    L3 discriminating need is HARDCODED: guide action 30 and content
+    -999 are researcher constants (miss_inquire lines 805-808); the
+    learner never computes what would be informative. L5 ACT selection
+    is real machinery but trivially satisfied (exactly one guide ever
+    exists in exercised scenarios). L6 evidence-updates-behavior is
+    ABSENT: uncertainty is never resolved, guides are never superseded,
+    stale guides stay ACT-eligible. Ambiguous evidence yields arbitrary
+    selection (bid ties break by edge order); misleading evidence locks
+    in (no guide revision path). Classification: a learner-triggered
+    miss flag with a constant action; below L2 as inquiry (the
+    trigger/uncertainty creation alone is L1-L2 infrastructure). The
+    mechanism satisfies the letter of K-T2-4/K-T2-5 but not the spirit.
+  - ATTACK-SUCCESS: C152 (revision red team; commit 687ba0219).
+    t2_revise_graph is a single-schema literal-patch procedure: find
+    licensing MAPs, tombstone the stale BRANCHEQ-guarded SETREG, insert
+    a corrected SETREG holding the just-observed literal, rewire
+    guard->new->succ. The learner chooses operands (which cell via
+    provenance lookup, which literal); the researcher chose the
+    topology. t2_trial (the genuine search machinery) is never invoked
+    by the revision path. The T2-REVISE trace demonstrates L0 storage:
+    the revised graph stores the observed 999 rather than computing it.
+    Classification: L1 parameter filling inside a researcher-authored
+    repair template; no L3. C0-A FAIL (repair semantics live in
+    source), C0-B FAIL (the repair family has exactly one member),
+    C0-C FAIL (any other required repair shape receives return 0),
+    C0-D unestablished.
+  - ANALYSIS-COMPLETE: C153 (compression analysis; commit b2a6ae82c).
+    TNN-2 is 1591 lines (plus 263 vs the 1328-line base: 565 added,
+    302 removed). Approximately 103 lines are dead in the cognition
+    path with zero capability loss: the sum assembler family
+    (t2_asm_sum, t2_gather_sum, comb_present, popcnt, and the subset
+    loop inside t2_trial; roughly 58 lines; gated on a type-8 marker no
+    cognitive path creates), test-only helpers sitting in the cognition
+    region (t2_sig, exec_val, map_standing, contradict_map), and the
+    unused ET_REG tag. Roughly 32 more lines are pending a
+    bootstrap_miss disable experiment; roughly 32 more via unification
+    (ev_teach/merge, chain/count assembler merge, mp_run inline).
+    Findings bearing on freeze interpretation: if FW3 passes it comes
+    from chain/count, not the sum path; TNN-2 replaced 3 fixed templates
+    with 3 fixed assemblers; the revision repair is fully
+    researcher-authored; the inquiry guide content is constant. Even
+    after all trimming, the 1200-line ceiling is still roughly 290 lines
+    away: closing that gap needs architectural deletion, not trimming.
+    Investigation only; zero source edits.
+  - AUDIT-PASS: C154 (TNN-2 cycle governance audit; commit 622363372;
+    promotion-pipeline step 11). Prereg-to-build and
+    freeze-prereg-to-shim commit ordering verified; K-T2-1..K-T2-8 and
+    K-FZ2-1..K-FZ2-3 evidence re-verified; no kill bar weakened or
+    retroactively altered; ISA frozen (execute() byte-identical to the
+    base; no new opcodes, modes, bridges, handlers, or semantic cases);
+    pure Zag under safebin at every step; all four frozen artifact hashes
+    re-verified on disk; shim construction re-verified (1590 TNN-2 lines
+    verbatim plus 161 driver lines); builders stayed within prereg
+    scope; verdicts correctly limited to BUILD-PASS/REPRO-PASS with no
+    L3 or SURVIVES claims; contaminated paper untouched; sealed FW
+    assets untouched outside the authorized evaluator. Caveat, not a
+    violation: the freeze evaluation was still running at audit time, so
+    the evaluator's own K-FZ2-2-after, K-FZ2-4, and K-FZ2-5 bars are its
+    to close on completion.
+  - RESEARCH-BACKLOG: C155 (next-frontier scout; commit 65effc909).
+    FRONTIER-SCOUT-COMPLETE. Seventeen ranked research questions in five
+    groups: Q1-Q5 test whether the three mechanisms are genuine or
+    theater (revision generality, trial-loop openness,
+    multi-revision/revert, transfer/reuse, representational invention);
+    Q6-Q9 test generality and fair evaluation (cost scaling, baselines,
+    action planning, memory pressure, inquiry informativeness); Q10-Q13
+    test architecture convergence and developmental integration (causal
+    convergence, search self-control, baseline decomposition,
+    interference); Q14 compression by deletion; Q15 learner-defined
+    verification; Q16 non-arithmetic abstraction expansion; Q17 EXECUTE
+    deviations hygiene. Ranked by information gain; negative answers are
+    findings, not patch requests. Analysis only: questions, not claims;
+    proposes no opcodes, modes, bridges, handlers, or per-world patches.
+  - ANALYSIS-COMPLETE: C156 (revision generalization analysis; commit
+    edbb0e9b5). Five structurally different repair topologies enumerated
+    that the current operator cannot express: guard-predicate edit,
+    branch rerouting to an existing step, multi-step coordinated repair,
+    step-count/type conversion in unrolled sequences, and deletion
+    without insertion. Learner-state availability audit: blame
+    localization exists only over SETREG steps (guards and INC/DEC cells
+    lack provenance edges); the MAP's retained licensing facts exist in
+    state but are unused by revision; no disambiguation basis, no
+    ranking criterion, no repair history exists. Process finding: the
+    prereg's K-T2-6 wording ("in at least one test") is the loophole
+    that admitted the single-schema operator; future revision kill bars
+    must require at least two structurally different repairs with
+    derived (not copied) corrected content and retained-fact checks.
+    Analysis only; not a patch; informs TNN-3 root-cause clustering.
+  - SYNTHESIS-COMPLETE: C157 (red-team synthesis; commit 42b4dfa91).
+    Shared architectural cause named: "enumerated-schema / filled-slot".
+    In each mechanism the researcher authored the schema (the space of
+    possible structures and the filling procedure) and the learner fills
+    runtime slots (literals, cell indices, miss content); the learner
+    never chooses the schema. Net: operands yes, topology no. TNN-2
+    moved the content of cognition into learner state but left the form
+    of cognition in source code; TNN-1's failure was fixed templates
+    with fixed content, TNN-2's residual failure is fixed templates with
+    variable content. Learner-vs-researcher tabulations recorded per
+    mechanism. Fix direction: one open recursive graph-construction
+    substrate used by all three mechanisms (construction proposes in
+    open space, revision re-invokes the constructor over a multi-member
+    repair space, inquiry builds constructed discrimination structures),
+    with a banked caveat that the informativeness criterion is a second,
+    separate layer the substrate alone does not address. Three
+    structurally different bottleneck hypotheses formulated for
+    experimental discrimination: H1 enumerated output space (the grammar
+    hypothesis), H2 oracle verification (the environment supplies the
+    answer, so nothing must be discovered), H3 procedure ownership (the
+    mechanisms' operating procedures live in source, not learner state;
+    predicts no production path can revise a policy from experience).
+    Recommended discrimination order: H3's cheap policy-revisability
+    check, then H2 masked verification probes, then H1 constructor
+    widening. Freeze interpretation: a freeze score above 4/9 would be
+    a legitimate capability result (sealed worlds, causal comparison
+    intact) but would NOT establish generality or L3; the honest summary
+    is "capability improved within the researcher-enumerated envelope;
+    the envelope is unchanged in kind." No freeze outcome invalidates
+    the red teams, and no red team outcome invalidates the freeze.
+    Analysis only; no TNN-3 design.
+  - ATTACK-COMPLETE: C158 (alternative-explanation attack, pipeline step
+    6; commit ccee9e5e6). Simplest accounts formulated per mechanism,
+    each predicting all red-team findings including the genuine parts:
+    construction is parameterized retrieval from a fixed template
+    library keyed by an environment-supplied answer; inquiry is a sticky
+    miss flag wired to a constant output action (a miss alarm with a
+    fixed output wire and no off switch); revision is a
+    researcher-written patch script with runtime-filled operands
+    (semantically: overwrite the stored constant with the new stored
+    constant; L0 storage dressed as revision). Unified hypothesis: form
+    comes from the researcher, content from the learner; the learner's
+    degrees of freedom across all three mechanisms compress to indices
+    and literals; TNN-2 is answer-fed, not answer-derived. Unified
+    falsification: any single instance, without source change, of the
+    learner producing a FORM (a graph topology outside the researcher
+    family, a guide action varying with the uncertainty, or a repair
+    space with more than one member) breaks the "indices and literals
+    only" bound. A consolidated falsification checklist for TNN-3 is
+    recorded. This step does not promote or demote TNN-2.
+  - ANALYSIS-COMPLETE: C159 (inquiry generalization analysis; commit
+    dedfad368). A derived-question design sketch within the frozen ISA:
+    persist trial candidates as hypothesis structures linked to the
+    uncertainty node; derive one guide per discriminating sub-query
+    (probe parameter in the currently dead slot24, an informativeness
+    score in slot28, provenance edges to the hypotheses it splits);
+    score competing guides by informativeness in ev_act's existing
+    max-scan; on later learning, resolve uncertainties and supersede
+    guides via the existing type-3 self-edge convention already honored
+    by both selection paths. Constant-action root cause: a prereg spec
+    gap, the K-T2-4/K-T2-5 letter-vs-spirit gap (the bars tested chain
+    structure, not question content). Shared-cause note for TNN-3
+    clustering: TNN-2's learner state records verdicts but not the
+    structures verdicts were about (trial counts without candidates,
+    guides without questions, revisions without repair alternatives).
+    The sketch is honest L2 (a researcher-authored split-scoring
+    procedure); it satisfies no part of C0. Analysis only; no source
+    edits.
+- Cycle ledger count: 149 -> 159 (10 new claims: C150-C159).
+  ATTACK-SUCCESS: +3 (C150, C151, C152). ANALYSIS-COMPLETE: +3 (C153,
+  C156, C159). AUDIT-PASS: +1 (C154). RESEARCH-BACKLOG: +1 (C155).
+  SYNTHESIS-COMPLETE: +1 (C157). ATTACK-COMPLETE: +1 (C158). Zero new
+  SURVIVES. L3 achieved anywhere: still zero. The red-team verdicts do
+  not alter the frozen TNN2-BUILD-PASS (C144) or TNN2-REPRO-PASS (C145),
+  which were correctly scoped to build and reproduction; the attacks
+  are mechanism-generality results, not capability results, and they
+  neither confirm nor break frozen kill bars.
+- Freeze status note (follow-up to C149): NO FREEZE SCORE RECORDED. The
+  CORE-FREEZE-TNN2 evaluator is still running; its reconciled result is
+  not committed. The TNN-3 prerequisites analyst (commit f795807cc,
+  TNN3-PREREQUISITES-MAPPED) reports that the evaluator's on-disk draft
+  is internally inconsistent: it claims a 5/9 FW score but lists only
+  4 passing worlds, and it marks K-FZ2-4 PENDING while the draft verdict
+  line says COMPLETE. That draft is NOT adopted and must not be quoted.
+  Recorded status: evaluation in progress, draft inconsistent, awaiting
+  reconciled commit. No freeze score is recorded until the evaluator
+  commits its verdict and the parent verifies hashes, determinism, and
+  seal integrity.
+
 No em dashes were used in this document (verified with the shell-only
 check_no_dash.sh snippet).
