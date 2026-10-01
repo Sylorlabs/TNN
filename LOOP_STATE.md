@@ -4670,3 +4670,71 @@ step 5 simple-baseline comparison.
 Also: fork_battery enumeration manifest committed (results still
 queued); ddes_redteam guard record only. The inline-only
 execution-mode decision remains with Micah (eleventh kill).
+
+---
+
+## Wave wave-20261001-0221pdt: COMPLETE (coordinator inline, no descendants)
+
+Run inline-only by the coordinator (twelfth consecutive inline wave
+after the eleven descendant-subagent runtime defect kills). Toolchain
+guard: safebin active all wave, no Python invoked. Lock was this
+wave's own (parent-written at 02:21:54 PDT); left in place for the
+parent. Commits local only, never pushed.
+
+Verdicts (all debated inline, debate/DEBATE_0221PDT.md; no verdict
+overturned):
+
+- H-EXP2 v2: BUILD-PASS [NEW]. All six frozen bars pass on sealed
+  execution. W-A: IDENTIFIED 2 3 at round 4 (3 probes, budget 6),
+  log sha c9dbe095. W-B: IDENTIFIED 2 1 at round 5 (4 probes,
+  budget 10), log sha 3c4c6725. Survivors 16->10->8->2->1 strictly
+  decreasing in rounds 2-4 (K-X3). Byte-identical re-runs, zero
+  stderr (K-X4). No-leak grep audit clean (K-X5). All executed probe
+  scores >= 2 (K-X6). Commit-order self-check holds (prereg frozen
+  1121pdt, implementation this wave). Bounded L2 per the prereg's
+  honest-boundaries section; no L3 claim. Toolchain incident: the
+  first build used []i32 via as *i32 slice construction inside
+  functions and silently miscompiled (element reads returned 0);
+  repaired with the u8-backed get32/set32 workaround per the
+  workspace AGENTS.md toolchain lesson; both worlds re-run from
+  scratch on the repaired binaries. Result doc:
+  exp2/RESULT_H_EXP2_V2.md. Next pipeline step: step 6
+  alternative-explanation attack.
+- ddes_followup: BUILD-FAIL + UNVERIFIABLE ORDERING [NEW]. The
+  2021pdt-frozen ddesp.zag does not compile under the pinned znc
+  (ddes_world 15 params, 6 call sites pass 14; Phase B never wired).
+  Prereg and implementation share commit 904e9b6f6, so ordering is
+  unverifiable; cannot be adopted. Diagnostic /tmp build shows the
+  design's bars would hold under mechanical completion (3/3
+  byte-identical, K-F1..K-F6 pass); queued for re-freeze next wave.
+- H-PI-REV2 step 5: DEFERRED [NEW]. No frozen baseline bar text
+  exists in any prereg or the M5 debate record; inventing bars
+  post-hoc is forbidden. Queued: write and freeze a
+  baseline-comparison prereg before execution.
+- Fresh disjoint adversary byte set: FROZEN [NEW].
+  pi_rev2/ADVERSARY_BYTE_SET4.md declares {k, m, r} by mechanical
+  audit of the frozen fixture strings (union
+  abcdefghijlnopqstuvwxyz; z reserved for F3b); standing selection
+  rule (last letter in sorted byte order, per F3a2/F3a3 convention)
+  yields 'r' when the next adversary prereg executes it.
+- Fork battery: 85 PASS / 1 FAIL / 2 UNTESTABLE [RE-CERT]. 88
+  entries, manifest at fork_battery/MANIFEST.md. Current LIVE
+  (eb47b8def) PASS. The FAIL is the rotated old-LIVE pin 23c2c02
+  (znc pin divergence from the frozen instrument; expected, and the
+  reason it was rotated to a fixture). The 2 UNTESTABLEs are the
+  PR-head trees lacking the pinned toolchain path (same as prior
+  waves). Process lesson: the driver carried a duplicate entry label
+  (two entries, one result dir; the earlier result was clobbered and
+  re-run under a distinct label). Future drivers must assert unique
+  entry labels as a pre-run gate.
+- DEVANG2 retry: QUEUED (no frozen prereg exists; advance only on a
+  frozen prereg per instructions).
+
+F3a3 pipeline status: steps 1-4 complete; step 5 deferred (above);
+steps 6+ queued with the fresh byte set banked.
+
+Queued next: ddes_followup re-freeze (prereg strictly before
+implementation); H-EXP2 step 6 alternative-explanation attack;
+H-PI-REV2 step-5 baseline prereg; DEVANG2 prereg if one is frozen.
+The inline-only execution-mode decision remains with Micah (eleventh
+defect kill at 23:21; this wave ran inline-only successfully).
