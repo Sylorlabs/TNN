@@ -4563,3 +4563,53 @@ parent-agent queue decision; Q1/Q2 banked. Zero origin commits this
 window.
 
 ---
+
+---
+
+## Wave wave-20260930-1121pdt: verdicts via parent-agent recovery debate (2026-09-30)
+
+The 11:21, 14:21, and 17:21 waves died on the descendant-subagent
+runtime defect before convening their mandatory debates. The 11:21
+verdict slate is debated here from committed evidence only
+(debate/ADVOCATE_1121_RECOVERY.md, SKEPTIC_1121_RECOVERY.md,
+JUDGE_1121_RECOVERY.md). This is a recovery debate, not an
+independent debate group. [NEW]
+
+- F3a3 BUILD-PASS [NEW]: H-PI-REV2 independent-adversary pass on
+  corrected bars (K-F3-1..4 PASS; adversary byte v; 3/3 byte-identical
+  b5389d71; exit 0, fails=0; prereg 53256838f before evidence at
+  d1b6ec51f; implementation 847a8f10f unmodified). CAVEAT: the passing
+  bar text is the third draft (F3a fixture collision, F3a2
+  unsatisfiable text, both corrected and debated). Future adversary
+  bar texts require a fixture-collision pre-check before freezing,
+  and adversary families should be authored by a party with no stake
+  in the mechanism. The declared disjoint set {k,m,r,v} is exhausted;
+  the next round needs a fresh disjoint set.
+- F3b BUILD-PASS [NEW]: 6/6 frozen bars (K-F3B-1..6; K-F3B-2 8/8
+  hidden; K-F3B-3 diff clean, zero new semantic cases; K-F3B-4
+  byte-identical x3; K-F3B-5 g=[N C1 SUB], N-dependent;
+  K-F3B-6 anti-tuning clean; cost 0.007 s vs 60 s). Classification:
+  bounded L2+, drop-last family ONLY, explicitly not L3. NARROWING:
+  no transfer evidence; this verdict must not be quoted as general
+  procedure invention.
+- H-EXP2 v2 prereg FROZEN [NEW]: sustained active experiment
+  construction, sealed laws W-A/W-B, committed at cc87d6f09.
+  PRECONDITION to implementation: bar-text audit (fixture-collision
+  and satisfiability check on every bar) and a named, verifiable
+  seal-holder for W-A/W-B.
+- DDES R2 BUILD-PASS, PROVISIONAL [NEW]: t*=0 soundness repair
+  (eff_waits clamp + TSTAR-ZERO-BOUNDARY flag), strict descendant of
+  frozen prereg d31e901b0; 3/3 byte-identical (297d0b59); World F
+  correct convergence both configs; A-E zero regression. PROVISIONAL
+  because implementer and verifier are both the recovery
+  coordinator; K-R2.1..K-R2.6 await independent re-verification.
+  Classification: strong L2 repair, no L3 claim.
+
+Queued next: independent re-verification of DDES R2 K-R2.1..K-R2.6;
+H-EXP2 v2 bar-text audit then implementation; H-PI-REV2 step 4
+independent reproduction; F3b transfer probe beyond drop-last (queued,
+not yet preregistered); fresh disjoint adversary byte set for the
+next H-PI-REV2 round; full fork-battery results (enumeration manifest
+87 entries exists as pre-run gate only); 14:21/17:21 waves rendered
+no verdicts; the inline-only execution-mode decision remains with
+Micah (ninth defect kill at 17:21, four of the last five waves dead).
