@@ -28,7 +28,7 @@
   (`tnn3_prereg_struct/PREREG_STRUCTURE.md`): 10-section outline,
   17-bar inventory, dependencies, order, gaps, 6 open questions for
   Micah. DRAFT-NOT-FROZEN.
-- Floor spec `f383dd11c`: the 7 floor capabilities F1/F2/F3/G1/G2/G3
+- Floor spec `f383dd11c`: the 6 floor capabilities F1/F2/F3/G1/G2/G3
   and the anti-gaming clause (criterion 4).
 - SUF property definition `64eec921f`: Source-Underdetermined Form
   and its operational test (section 5).
