@@ -28,7 +28,7 @@ corrects this to **4/9, matching TNN-1**. Under the prereg criteria
 (">4/9 confirms the diagnosis" vs "at or below 4/9 falsifies and
 requires re-clustering"), the TNN-2 diagnosis is falsified and
 re-clustering is required. The post-freeze adversarial battery
-(GW1-GW8) is designed, sealed, and now under evaluation. TNN-3 kill
+(GW1-GW8) is designed, sealed, and evaluated (GW-EVAL-COMPLETE 2/8 WORLD-PASS). TNN-3 kill
 bars are drafted (DRAFT-NOT-FROZEN, six open questions banked). Ledger
 stands at 159 claims with **zero L3 anywhere**.
 
@@ -314,9 +314,8 @@ central design question for any inquiry work.
    replacement; GW5 inquiry-gated construction, two stages with a
    responder contract; GW6 inquiry discrimination and retirement;
    GW7 A/B/C interference; GW8 revision lifecycle with revert.
-   Predictions frozen in ADVERSARY_DESIGN.md. **A GW evaluator is
-   now active** (three runs per world, authorized, no TNN-2
-   modifications). These are the important generality test, per
+   Predictions frozen in ADVERSARY_DESIGN.md. **GW-EVAL-COMPLETE 2/8 WORLD-PASS**
+   (three runs per world, authorized, no TNN-2 modifications). These are the important generality test, per
    Micah's directive.
 3. **Six open questions for Micah** (from the kill-bar draft,
    `76231baa8` section 11; achievability review `eb354e3a2`

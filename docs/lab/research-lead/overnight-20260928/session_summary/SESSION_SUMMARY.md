@@ -52,7 +52,7 @@ committed report is the authoritative source.
 
 **Post-freeze generality battery:**
 - GW1-GW8 adversary `e409f5eea`: 8 sealed worlds, predictions frozen,
-  TNN-2 untouched; GW evaluator active
+  TNN-2 untouched; GW-EVAL-COMPLETE 2/8 WORLD-PASS
 
 **Interpretation and reporting:**
 - Prereg compliance audit `8959a7c14` (see critical findings)
@@ -102,7 +102,7 @@ regardless of score."
 
 **GW1-GW8 are the generality test.** Eight sealed adversarial worlds designed
 post-freeze from the public architecture claim. Predictions frozen.
-The evaluator is active. Per Micah's ruling, FW1-FW9 are a regression
+GW-EVAL-COMPLETE 2/8 WORLD-PASS. Per Micah's ruling, FW1-FW9 are a regression
 battery; the GW battery is the important generality test.
 
 **Protected-core brief is ready.** The H3 probe proved the frozen 4-op ISA
@@ -121,11 +121,11 @@ with explicit triggers for re-examination.
   battery, complete per-cluster analysis, and verify post-eval hashes.
   Six reconciliation steps are specified in `8959a7c14`. Do not quote any
   score until the reconciled committed report lands.
-- **GW1-GW8 evaluation.** The evaluator is active (three runs per world,
+- **GW1-GW8 evaluation.** GW-EVAL-COMPLETE: 2/8 WORLD-PASS (three runs per world,
   authorized, no TNN-2 modifications). Predictions are frozen in
   ADVERSARY_DESIGN.md.
 - **Bundle v16.** Inventory is being prepared. The bundle should wait until
-  the freeze reconciles and the GW evaluation completes.
+  the freeze reconciles.
 
 ---
 
