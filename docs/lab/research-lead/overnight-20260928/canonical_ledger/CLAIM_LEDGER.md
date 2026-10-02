@@ -6621,3 +6621,22 @@ No em dashes were used in this entry (verified).
   KILL, 5 BOUND, 1 SURVIVE.
 
 No em dashes were used in this entry (verified).
+
+- C262 (COMPOSITION-LEVELS; prereg 4c15fe32d, amend 1, results
+  35a9aa828, 2026-10-02): COMPLETE (frozen prereg precedes
+  implementation; independent reproduction from scratch,
+  byte-identical binary). Three-level measurement, honest per-level
+  scores: L1 exact reuse PASS (ans=107, n=2; causal proof via
+  ablations; LINK14 provenance; reuse works). L2 adaptive reuse
+  FAIL (adaptation gap: Z needs 4 r1 links, MAP_X covers 3, cleanly
+  rejected; no extension operator; admits only whole MAPs; T4 gap in
+  extension variant). L3 novel intermediate FAIL (invention gap:
+  composes only existing MAPs; MAP_Z promotion is assembly of
+  enumerated parts, not representational invention). All 8 kill
+  bars PASS. 3/3 byte-identical. Recommendation: stop claiming
+  composition progress at L3; honest next frontiers are T4
+  (decomposable MAPs), T5 (unsupervised verification), and a genuine
+  L2 adaptation operator first. L2 operator dispatched. 0
+  modes/bridges/handlers. Status: L1 PASS, L2/L3 FAIL (honest).
+
+No em dashes were used in this entry (verified).
