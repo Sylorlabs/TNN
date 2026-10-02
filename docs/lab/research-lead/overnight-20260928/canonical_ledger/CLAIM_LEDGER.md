@@ -6121,3 +6121,19 @@ No em dashes were used in this entry (verified).
   BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C237 (BELIEF-DECEPTION; prereg e3f9714e5, results fa78c53f2,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  H-DECEPT-1: source builds reliability 20 rounds then high-stakes
+  falsehood vs 2 independent sources. D1a PASS: stance 11->12->22,
+  sides with independents; rational. D1b FAIL (informative): downgrade
+  EXACTLY linear at all six checkpoints (952=1000*20/21, then
+  909/869/833/800/769, zero deviation); no trajectory-shaped or
+  stake-weighted update; betrayal moves reliability by one instance.
+  R1 PASS: unpopular truth held (11->12->12, s1=3000 vs s2=2000);
+  evidence weighted, not counted. H-DECEPT-1 NOT SUPPORTED as stated
+  (partial). Specifies H-DECEPT-2: trajectory-shaped update must beat
+  the frozen baseline table. 3/3 byte-identical. 0
+  modes/bridges/handlers. Status: INFORMATIVE NEGATIVE.
+
+No em dashes were used in this entry (verified).
