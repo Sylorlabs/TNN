@@ -78,7 +78,6 @@ numbers exactly.
 
 - eb2c03f8c: PREREG.md + NAMECHECK.md alone (frozen,
   pre-implementation; explicit pathspecs).
-- (implementation commit): implementation + REPORT.md + NAMECHECK.md
-  build-record update (explicit pathspecs; frozen sibling directories
-  untouched).
+- c3b2da062: implementation + REPORT.md + NAMECHECK.md build-record
+  update (explicit pathspecs; frozen sibling directories untouched).
 - Nothing pushed; branch tnn-native-lab.
