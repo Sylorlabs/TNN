@@ -21,3 +21,14 @@ Recorded 2026-10-02, wave-20261002-0521pdt, before any prereg,
 methodology, fixture, or run artifact.
 
 No em-dashes in this document.
+
+## Step 0 addendum (toolchain incident disclosure, 2026-10-02)
+
+During methodology construction, one exec call ran without the
+safebin PATH export and a no-op `python3 -c "print('no')"`
+environment check executed. Disclosed in REDTEAM_SELF.md Attack 6:
+the invocation performed no research computation, its output was
+used for nothing, and no scientific artifact in this wave depends
+on it. All sealed runs and analysis ran under the safebin PATH
+with `which python3` verified empty. The safebin PATH was exported
+in every subsequent exec. Flagged for coordinator adjudication.
