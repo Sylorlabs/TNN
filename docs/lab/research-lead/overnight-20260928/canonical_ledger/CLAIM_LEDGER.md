@@ -6902,3 +6902,21 @@ No em dashes were used in this entry (verified).
   (H1+H2).
 
 No em dashes were used in this entry (verified).
+
+- C278 (COMPOSITION-L2; commits 8974bbac4, 053a08c5e, 2026-10-02):
+  COMPLETE. EXTEND, TRUNCATE, SPECIALIZE operators for unified
+  composition DFS. All 12 frozen kill bars pass (K1-K12, PREREG
+  c521249ba before implementation). Per-operator, 3/3
+  byte-identical: EXTEND 1/1 (X=[1,1,1] via fact (104,1,105)
+  covers 4 r1 links, ans=108); TRUNCATE 1/1 (X2=[1,1,1,1] to
+  plen-2 prefix, ans=107); SPECIALIZE 1/1 (ambiguity-triggered
+  nearest-object re-walk, ans=107). Operators learner-triggered
+  (structural preconditions in un_candidates; researcher never
+  selects per problem; adapt_on() is the causal control).
+  Adaptation cost bounded (max 11 satisfy calls vs 200 bound;
+  L2 same cost as L1). Honest limits: finite researcher-defined
+  operator set (L2 not L3); chain-family only. Aligns with
+  Micah 2026-10-02 directive: L2 ADAPTIVE REUSE is top priority.
+  Status: COMPLETE (L2 adaptive reuse demonstrated).
+
+No em dashes were used in this entry (verified).
