@@ -71,6 +71,28 @@ they score the attempt to break the claim):
 
 ## Frozen sha256 hashes (30 files)
 
+
+## ERRATUM (transparent amendment; no execution preceded it)
+
+The original seal commit 8b86b27d2 contained three hand-transcription
+errors in the frozen hash listing, caught by the mandatory
+pre-execution load-time verification (sha256sum -c) before any
+adversarial executor run, binary execution, or transcript existed:
+
+- M2_FW.txt: hash line had 63 hex chars (truncated).
+- S4_EW.txt: hash line had 63 hex chars (truncated).
+- S4_RW.txt: hash line had 64 chars but one wrong char
+  ("d2e" for "d3e" at one position).
+
+No world file was created, modified, or tuned after the original
+seal; the files are byte-identical to the pre-freeze validated
+designs. This amendment corrects only the hash listing, regenerated
+mechanically with sha256sum (no hand transcription), and re-freezes
+it. The 27 unaffected lines are unchanged. The pre-execution
+verification that caught the errors is recorded in
+ADV_EXEC_RECORD.md.
+
+## Frozen sha256 hashes (30 files, mechanically generated)
 M1_CONFLICT.txt 3ea59280273d06623987af467fc56e4752aef12da546f83bdc1549081dc468ac
 M1_EW.txt 773e6b42f1f717d0379462bf1c8347f036273d4485109879a096302379d03dc3
 M1_FW.txt 75d204d9f8ac92369bdc170f2ad3a6fe06c513f25749c9a00db7abdc288b97c1
@@ -78,7 +100,7 @@ M1_RW.txt c4e386324f77369bba40acb72444ba80162e46a6e7995c4dd5b9b0b3671c8d1c
 M1_TW.txt d24126846cec9896a9c95324cc913f51f8bce9d718ceb01db3285239187c5455
 M2_CONFLICT.txt e699c095c7e67a2737125ed4903f704b01bcf2c08647885837cffa89986f0e0d
 M2_EW.txt 371b980e172f4927374493057d37bb9bd95d4ec6bad09d2b2fbdb111def3c613
-M2_FW.txt 57fe58a837a64b2ea06b879b0fecd48d9ef346995e8a8c6ee1cf7fd612ca3
+M2_FW.txt 57fe58a837a64b2ea06b879b0fecd48d9ef346995e8a1c9327aaefafbd612ca3
 M2_RW.txt 9c57f6e2371f264bd5c7a3859f3810ec4ac4e74cab96fb8bb2f80f96baf54dd5
 M2_TW.txt d24126846cec9896a9c95324cc913f51f8bce9d718ceb01db3285239187c5455
 S1_CONFLICT.txt a31d03771e32974e1c1ae0bbd8d6441ce16874af2e6ba0bd3d845bbd5c9dcc3b
@@ -97,9 +119,9 @@ S3_FW.txt 33c4cd667f9b54f5bc6c6106d8b18ad9174ab868d1a133847cb26d1940b00c3a
 S3_RW.txt af01c6e22069d82da01258a6d1631c99af5af20275b8a8556208a8c6ee1cf7fd
 S3_TW.txt 7fb0bcf58ebc732deabff55d9cdbb445764ae382a0de8e7a93b7f79daa274a6a
 S4_CONFLICT.txt 18bfe3973c600fef3d6f239d32d8c7b5a6b3ece63054e439da123090f1f28b42
-S4_EW.txt b745a5a6a82485676b35d45afbb3aae5d1b4807777536499f9c99c5bd0f5c4f3b
+S4_EW.txt b745a5a6a82485676b35d45afbb3aae5d1b4807777536499f9c99c5bd0f5c4b3
 S4_FW.txt 6bf6b251ec71548ee214d6a27f5d3ad7886990f2529e1ee9c2bfe87ce0096a59
-S4_RW.txt 7e88b2a8f0cee59657b25096b5495686d2a95b42f6d2eafd213cbf2125b263e6
+S4_RW.txt 7e88b2a8f0cee59657b25096b5495686d2a95b42f6d3eafd213cbf2125b263e6
 S4_TW.txt d24126846cec9896a9c95324cc913f51f8bce9d718ceb01db3285239187c5455
 
 No em-dashes in this documentation.
