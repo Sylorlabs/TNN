@@ -640,3 +640,291 @@ No em dashes used (verified).
 New treadmill note: the scaling-number lineage is unfrozen from PROCESS-FAIL but remains exploratory (no frozen prereg). Further scale claims should move to frozen preregistration per the 11-step pipeline before canonical promotion beyond reproduction.
 
 No em dashes used (verified).
+
+---
+
+## Status update: 2026-10-02, frontier generation wave (16 new hypotheses)
+
+Worker: Frontier Generation Worker (frontier_gen_20261002). Branch: tnn-native-lab. Local only, nothing pushed.
+
+### Latest results mined
+
+1. composition_xdomain REPORT (COMPOSITION-XDOMAIN-COMPLETE): all three mechanisms (A, B, C) fail cross-domain cleanly, 3/3 byte-identical per mechanism. Diagnosis: "every existing mechanism implements composition as navigation concatenation; cross-domain needs function composition over typed values." X = navigation (chain-following, output a literal retrieved by walking facts); Y = aggregation (count queries via INC cells tag 103 plus MOV epilogue, output computed arithmetically, no output literal in the fact store). Z = chain-then-count: X's output node (34) is Y's input subject; Y's output (2) is a number, not a walkable node. Count MAPs (plen=-1, contract=-1, relseq=[]) are real, competent, reusable-via-trial, but every mechanism's admission filter renders them invisible.
+2. grammar_induction REPORT (GRAMMAR-INDUCTION-COMPLETE): INDUCE arm 11/11 valid; HARDCODE arm 11/11 valid; causal ablation.
+3. Invention: H-MUT-1/H-MUT-2 PASS; INVENTION-RECOMBINE-COMPLETE ("Fragment recombination strictly generalizes whole-MAP chaining (when frag_on=1, whole MAPs are just (m,0,len) fragments, so C is a special case)"; "if fragment recombination subsumes Composition C (it does, as a special case), the whole-MAP path could be deleted, yielding net-negative lines. This is flagged for the integration worker, not done here."); INVENTION-CONSTRAINT-COMPLETE (TREAT constructs all 3, K1 PASS). All PASS at L2, honestly bounded.
+4. cogops_structures REPORT: composition links shield applicability. Ablation (comp links recorded but not used): treat late N 96.6% vs ablation 58.1%, gap 38.5pp (bar >=30pp). Appl-only learner collapses to a stable bad equilibrium: late F 24% (treat 100%), late N2 15% (treat 98%).
+5. integration_adaptive REPORT (INTEGRATION-ADAPTIVE-COMPLETE): "K1: adaptive total beats both fixed gates on every seed"; the policy "contains no threshold constant and no AND/OR combination of signals."
+6. C209: scaling canonical, pure-Zag safebin, 3/3 byte-identical (eee373a2): 140x/693x/1393x at 1000 MAPs.
+7. belief_formation REPORT (BELIEF-FORMATION-COMPLETE): "Rationality 3/3 phases relative to evidence at time. Both ablations pass."
+8. meta_applicability REPORT: Verdict FAIL (K7, correctness). TREAT C-P5 trial fails with WRONG answer (ans=-2, trial=11) on the 21st problem. "The base TNN-2 trial cannot solve the 21st problem correctly, indicating a scaling limitation in the base (not the APPL gate, which correctly set gate=0)." APPL mechanism demonstrated: K1, K4, K5 PASS; K2, K3, K6 partial.
+9. composition_sealed REPORT (COMPOSITION-SEALED-COMPLETE with causal reuse proof): skill X (scalar transform) plus domain Y (sequences) compose to sealed novel Z with no paired examples, no combination hint, no task label. "Ablating X or Y destroys Z. All ten frozen kill bars passed. 3/3 byte-identical."
+
+### New hypotheses, ranked by expected information gain (#1 highest)
+
+### H-COLLAPSE-1: Delete Composition C's whole-MAP path into fragment recombination (rank #1)
+
+Question: The recombination report proves fragment recombination strictly generalizes whole-MAP chaining (with frag_on=1, whole MAPs are just (m,0,len) fragments, so C is a special case) and flags that the whole-MAP path could be deleted for net-negative lines, but the integration was never done. Can Composition C be deleted entirely and reimplemented as fragment recombination restricted to (m,0,len) fragments, with zero capability loss?
+
+Mechanism sketch: Replace cc_dfs with ir_frag_dfs parameterized to whole-MAP fragments; port C's applicability predicates (contract, co-use, relseq) to fragment-level predicates; delete the duplicated DFS structure. The single composition operation becomes the recombination operator in its (m,0,len) special case.
+
+Expected result: Every C-positive battery (chain composition batteries, C208 T1 3-fragment composition, sealed composition) still passes; cognition lines strictly decrease by the size of the deleted whole-MAP path; zero new semantic cases, modes, or bridges.
+
+Simplest baseline: Keep both paths (current state: two parallel DFS implementations).
+
+Falsifier: Any C-positive battery flips to FAIL under the collapsed implementation, or the line count does not decrease (the "duplication" was load-bearing after all).
+
+Likely failure mode: Fragment DFS admission semantics differ at the (m,0,len) boundary (e.g. count MAPs with plen=-1 and empty relseq break the fragment mapping), so collapse works on chains but silently changes behavior on irregular MAPs.
+
+Priority: P0.
+
+### H-XIO-1: Learner-built typed I/O adapters rescue cross-domain composition (rank #2)
+
+Question: The xdomain diagnosis is exact: all three mechanisms implement composition as navigation concatenation, but Z (chain-then-count) needs function composition over typed values. X's output node (34) is Y's input subject; Y's output (2) is a number, not a walkable node. Count MAPs (plen=-1, contract=-1, relseq=[]) are real and competent but invisible to every admission filter. Can the learner construct interface adapters (typed I/O bridge structures) that make Y's MAPs admissible and bind X's output value as Y's input?
+
+Mechanism sketch: When admission rejects a MAP with empty relseq that has verified trial history, the learner builds an adapter: a small executable structure declaring the MAP's input type (subject node) and output type (number, produced by INC cells tag 103 plus MOV epilogue), plus a value-binding edge from the upstream fragment's output. Adapters are learner-owned structures subject to revision and retirement, never researcher bridges.
+
+Expected result: Z query (31,93)->2 solves via X-then-Y with a learner-constructed adapter; ablations of adapter, X MAPs, and Y MAPs each destroy Z; the adapter reuses on a second cross-domain goal with fresh literals.
+
+Simplest baseline: Direct navigation concatenation (current behavior) = 0/3 on Z in all arms.
+
+Falsifier: Learner-constructed adapters never verify across 3/3 runs in three X/Y family pairs; only researcher hand-coded type mappings work.
+
+Likely failure mode: The learner has no type vocabulary (numbers vs node literals are not distinguished in learner state), so adapter construction has nothing to build on; typed values must be induced first, making this hypothesis premature without a type-induction precursor.
+
+Priority: P0.
+
+### H-DECOMP-1: Store MAPs as fragment-addressable structures (rank #3)
+
+Question: C208 T4 and H-PARTADAPT-1 failed cleanly: MAPs are atomic units, no prefix use. The named next architecture target is decomposable MAPs. Can MAPs be stored with learner-created segment boundaries so that rebind and composition address (m,start,len) directly instead of whole MAP ids?
+
+Mechanism sketch: At episode success, the learner writes segment-boundary marks (reusing the type-15 LINK edge machinery from mechanism B) at points where sub-sequences independently verified. The MAP store becomes fragment-addressable; rebind and composition take (m,start,len) arguments. The collapsed recombination operator (H-COLLAPSE-1) consumes fragments natively.
+
+Expected result: Prefix reuse works (a plen-4 MAP contributes its plen-3 prefix to a plen-3 subgoal); T4-style fixtures pass; partial-applicability adaptation (H-PARTADAPT-1) flips to positive.
+
+Simplest baseline: Atomic whole-MAP rebinding = 0 on all prefix fixtures.
+
+Falsifier: Fragment-addressable storage costs more than fresh trial (boundary maintenance overhead dominates), or learner-placed segment boundaries never align with reuse needs across 3/3 mismatch families.
+
+Likely failure mode: Boundary placement is the hard part; wrong boundaries make fragments useless and the mechanism degrades to whole-MAP rebinding with overhead, or boundaries proliferate and the index story (H-INDEX-1) regresses.
+
+Priority: P0.
+
+### H-COMPVER-1: C181 learner verification replaces expected answers in composition (rank #4)
+
+Question: H-COMPNOEXP-1 failed (C208 T5: all mechanisms fail without expected). The named open experiment is learner verification (C181) replacing expected. Can composition search accept Z candidates via reliability-gated learner verification instead of matching a researcher-supplied expected literal?
+
+Mechanism sketch: Composition proposes Z candidates; acceptance uses C181 machinery (predicted reliability from consequence history, honest withholding when no predictor exists) against goal properties to satisfy, never an expected structure. Withholding fires on uncomposable goals instead of emitting garbage.
+
+Expected result: Composition succeeds on goals where no researcher expected value exists; false-composition rate drops vs the expected-free baseline; ablating verification returns the T5 failure.
+
+Simplest baseline: Expected-guided composition (current positive) and fresh trial.
+
+Falsifier: Treatment composes only when the goal state is isomorphic to an expected literal (verification is supervision renamed), or ablating verification changes nothing (search found Z first anyway).
+
+Likely failure mode: Reliability scores are trained on trial outcomes, not composition outcomes, so the verifier cannot discriminate good from bad compositions; the search accepts wrong Z or withholds on everything.
+
+Priority: P0.
+
+### H-CAP-1: Lift the segment cap; test 4/5-fragment composition (rank #5)
+
+Question: C208 T1: 3-structure composition works (C only); 4/5 fail on caps, not architecture. Is the segment cap a harness artifact or load-bearing?
+
+Mechanism sketch: Remove the cap in the collapsed composition op, or make the cap a learner-owned parameter adjusted from consequence records (composition success/failure vs segment count). Run K=3,4,5 fragment worlds with per-fragment ablations.
+
+Expected result: 4- and 5-fragment compositions succeed with causal per-fragment ablation loss; cost grows sub-quadratically in K; the K-composite persists and reuses.
+
+Simplest baseline: Capped composition = hard fail at K>=4 by construction.
+
+Falsifier: Uncapped cost grows superlinearly and exceeds fresh trial at K=4 (the cap was load-bearing, masking blowup).
+
+Likely failure mode: Search combinatorics explode; uncapped composition is correct but useless, and the real need is consequence-ranked candidate ordering, not cap removal.
+
+Priority: P0.
+
+### H-SHIELD-1: What exactly shields applicability when composition links are used (rank #6)
+
+Question: The cogops ablation is the most surprising recent finding: with comp links recorded but not used, late N drops 96.6% to 58.1% and the appl-only learner collapses into a stable bad equilibrium (F 24%, N2 15%). Is the shielding carried by the edge structure or by the composition episode's consequence records?
+
+Mechanism sketch: Four-way dissociation: (a) full treat, (b) comp links deleted but consequence records kept, (c) consequence records deleted but edges kept, (d) harness-written comp links with no composition episode ever run. The shielding carrier is whichever single deletion reproduces the collapse.
+
+Expected result: Deleting the episode's consequence records reproduces the collapse even with edges intact (shielding is episodic, not structural); harness-written links do not shield.
+
+Simplest baseline: Current treat vs full ablation (already measured: 38.5pp gap).
+
+Falsifier: Harness-written links shield equally well (shielding is structural), or no single deletion reproduces the collapse (the effect is irreducibly entangled).
+
+Likely failure mode: Links and records are written by the same code path, so clean dissociation is impossible and the mechanism stays a black-box correlation; the honest result is "entangled, needs a rewrite to separate."
+
+Priority: P1.
+
+### H-QUAR-1: Learner quarantine of corrupted base evidence (rank #7)
+
+Question: Meta-applicability FAILED K7 because base TNN-2 trial produced a WRONG answer (ans=-2, trial=11) on the 21st problem; the APPL gate correctly set gate=0 but the run still burned. Can the learner detect the corruption signature (sudden clustered failures on previously-mastered problems, contradicting long mastery history) and quarantine those evidence records instead of revising good structures?
+
+Mechanism sketch: Per-family mastery records (verified-solve history). A corruption detector fires when failures cluster on mastered problems at a rate incompatible with the mastery history. Quarantined records are excluded from revision, reliability, and utility updates, and the corruption is flagged in learner state.
+
+Expected result: With a corrupted base injected, the quarantine learner preserves mastered structures and flags the corruption; the control revises good structures (measurable negative learning: post-corruption competence drop).
+
+Simplest baseline: No quarantine (current) = base bug poisons learner state.
+
+Falsifier: Quarantine never fires on real injected corruption across 3/3 runs, or fires on genuine world change (false quarantine worse than no quarantine on H-THRESH-1 regime-change worlds).
+
+Likely failure mode: "Base bug" vs "world changed" is genuinely hard to distinguish from inside; the signature overlaps regime change, and the detector either never fires or fires on every shift.
+
+Priority: P1.
+
+### H-GRAMZAG-1: Induced grammar transfers to Zag syntax itself (rank #8)
+
+Question: Grammar induction reached 11/11 on a tiny language with causal ablation. The untested transfer is grammar->Zag: can the same induction machinery induce constraints on real Zag syntax (the researcher's own language) from valid/invalid program fragments, and do the induced constraints actively block invalid construction?
+
+Mechanism sketch: Feed the H-GRAMIND-1 induction machinery a corpus of valid/invalid Zag fragments; the learner induces Zag-syntax constraints into learner-owned state; test on a novel Zag program-construction task, measuring invalid-attempt rejection pre-execution.
+
+Expected result: Induced Zag constraints reach near-whitelist performance; ablation (delete induced constraints) restores construction errors; the constraint transfers to Zag constructs absent from the training corpus.
+
+Simplest baseline: Researcher-whitelist of Zag syntax (C205-style) vs no constraint.
+
+Falsifier: Induction never reaches whitelist performance on Zag across 3/3 runs, or the induced constraint is never consulted during generation (performance comes from elsewhere).
+
+Likely failure mode: Real Zag syntax has irregularities the tiny-language induction cannot capture; the experiment reveals the induction machinery's complexity ceiling, which bounds H-GRAMIND-1 honestly.
+
+Priority: P1.
+
+### H-DECEPT-1: Belief machinery detects source defection (rank #9)
+
+Question: Belief formation is 3/3 rational relative to evidence at time. The untested transfer is belief->deception: a source builds high reliability over many episodes, then defects (the C203 adversarial-source scenario that broke the integrated AND gate). Do belief-stance trajectories detect defection faster than scalar reliability scores?
+
+Mechanism sketch: Sources reliable for N episodes then defect; treatment uses H-BELIEF-1 stance records (stance values with evidence links, revision traces) to detect defection; control uses raw reliability scores / the adaptive policy. Measure false trusts post-defection and detection latency.
+
+Expected result: Belief treatment detects defection in fewer episodes because stance trajectories encode the shape of evidence history (sudden contradiction of a long-supported stance), not just a scalar average.
+
+Simplest baseline: Reliability-score-only detection (C183/C194 machinery).
+
+Falsifier: Belief treatment detects no faster than scalar reliability across 3/3 defection schedules; stance trajectories add no signal.
+
+Likely failure mode: Belief stances are derived from the same reliability scores, so no independent signal exists and deception detection reduces to threshold tuning; the honest result bounds belief machinery to honest-but-noisy worlds.
+
+Priority: P1.
+
+### H-INVNCH-1: Recombination invention outside the chain family (rank #10)
+
+Question: Invention H1/H2/H3 all PASS at L2, honestly bounded, but inside the chain family. The untested transfer is invention->non-chain: does the recombination operator (ir_frag_dfs) produce novel, verifying, persisting forms on non-chain structures (numeric procedure graphs with INC cells, count MAPs with plen=-1)?
+
+Mechanism sketch: Inadequacy worlds in non-chain domains where no existing structure suffices (verified by distance: no parent within K edits); run the recombination operator over non-chain fragments; track internal acceptance, execution success, persistence, reuse, and transfer to a new surface.
+
+Expected result: Recombination produces a novel non-chain form that verifies, persists, and reuses; the final form is source-underdetermined (no researcher-enumerated candidate family contains it).
+
+Simplest baseline: Fresh trial in the non-chain domain; chain-family recombination (current positive).
+
+Falsifier: Recombination never produces a verifying non-chain form across 3/3 non-chain inadequacy families.
+
+Likely failure mode: The fragment representation (m,start,len) assumes sequential structure; non-chain graphs are not fragment-addressable, so the operator cannot represent candidates at all; this would show the invention operators are chain-shaped and need a graph-native redesign.
+
+Priority: P1.
+
+### H-POLXFER-1: Does the consequence-taught policy transfer across contexts (rank #11)
+
+Question: The adaptive policy beats both fixed gates on every seed with no threshold constant and no AND/OR combination. Is the learned policy reusable knowledge or context-fitted weights? Teach in context A (honest sources), move to context B (adversarial) with the policy intact vs reset.
+
+Mechanism sketch: Two-phase lifetime; treatment carries the taught policy into phase B; control resets to the untrained policy at the phase boundary; a third arm carries the policy but freezes it (no further teaching). Measure adaptation speed and accuracy-per-cost in phase B.
+
+Expected result: Carried unfrozen policy adapts faster than reset (policy structure transfers); carried frozen policy beats reset early but loses late (teaching still needed).
+
+Simplest baseline: Reset policy at phase boundary (re-learn from scratch).
+
+Falsifier: Carried policy performs no better than reset, or worse (negative policy transfer: phase A's cost structure must be unlearned first).
+
+Likely failure mode: The policy encodes phase A's cost structure; in phase B it must unlearn before relearning, making transfer slower than fresh learning; the honest result bounds the policy to single-context lifetimes.
+
+Priority: P1.
+
+### H-SEAL2-1: Second adversarial seal on composition (rank #12)
+
+Question: Sealed composition passed all ten kill bars with causal reuse proof (scalar transform X plus sequences Y to Z). Was the first seal accidentally easy? An independent adversary designs a second sealed battery post-freeze: new X/Y pairs, new Z goals, new surface forms.
+
+Mechanism sketch: Freeze the current composition machinery; the adversary (who did not build it) designs three new X/Y/Z sealed worlds with a preregistered solvability check (a human-composed solution must exist and be executable); run 3/3 byte-identical; diagnose failures to the exact line.
+
+Expected result: Either a second pass (generality evidence beyond the first seal) or a clean diagnostic failure naming the next mechanism gap.
+
+Simplest baseline: The first seal (already passed).
+
+Falsifier: The second seal fails in a way showing the first seal's X/Y were accidentally composable (shared surface structure the machinery exploited), downgrading the first pass to family-bounded.
+
+Likely failure mode: The adversary designs a seal that is impossible in principle, producing an uninformative fail; seal validity needs its own preregistered solvability criterion or the exercise wastes a wave.
+
+Priority: P1.
+
+### H-INVLIVE-1: Hardened index invariants under learner-driven mutation (rank #13)
+
+Question: H-INDEXADV-1 hardened the index against harness-injected corruption (cycles, bucket corruption, slot reuse). But the learner itself mutates the index on every insert/link/evict/slot-reuse path. Do the general invariants hold on the learner's own mutation paths under memory pressure?
+
+Mechanism sketch: Long lifetime (500+ events) with eviction pressure forcing repeated learner-driven evict/reinsert cycles; assert the invariants (liveness, type checks, cycle detection, bounded buffers) on every mutation path; zero crashes and retrieval correctness required throughout.
+
+Expected result: Zero crashes; invariant checks fire and recover on learner-generated edge cases; retrieval correctness maintained.
+
+Simplest baseline: Harness-corruption battery (H-INDEXADV-1, already passed).
+
+Falsifier: Any learner-driven mutation crashes or silently corrupts retrieval (the invariant is incomplete on the learner's own paths).
+
+Likely failure mode: Learner mutation paths are a strict subset of harness-tested paths, so this passes trivially and adds no information; still worth one run as a guard before canonical promotion.
+
+Priority: P2.
+
+### H-SCALEADV-1: 1393x under adversarial query distributions (rank #14)
+
+Question: C209 made 140x/693x/1393x canonical at 1000 MAPs on the standard workload. Is the reduction architectural or workload-dependent? An adversary designs worst-case queries post-freeze: largest-bucket hits, adversarial plen distributions, adversarial literal choices.
+
+Mechanism sketch: Frozen index; two workloads (standard, adversarial); scale 100/500/1000 MAPs; measure verifies per query vs n for both; the claim holds if the adversarial curve stays sublinear.
+
+Expected result: Graceful degradation (still strongly sublinear) rather than collapse to linear scan.
+
+Simplest baseline: Standard workload (1393x at 1000 MAPs).
+
+Falsifier: Adversarial queries collapse retrieval to linear scan (the 1393x is workload-dependent, and the honest claim must carry the workload restriction).
+
+Likely failure mode: The index's worst case is genuinely linear and the adversary finds it immediately; still informative because it bounds the claim honestly, but it is a negative result on a canonical number.
+
+Priority: P2.
+
+### H-BASECERT-1: Pre-registered base-trial certification (rank #15)
+
+Question: The K7 failure burned a full mechanism run on a base limitation: base TNN-2 trial could not solve problem 21 (ans=-2 vs trial=11). Should every meta-level experiment preregister a base-trial certification battery (all fixture problems solvable by base alone, 3/3 byte-identical) whose failure invalidates the fixture, not the mechanism?
+
+Mechanism sketch: Governance experiment: take the next three meta-level preregs, add a certification gate (base-only 3/3 on every fixture problem before the mechanism run); measure certification catches vs wasted runs vs added cost.
+
+Expected result: Certification catches base limitations before they burn mechanism runs; K7-style misattribution becomes impossible.
+
+Simplest baseline: Current practice (no certification; K7 failed the mechanism for a base bug).
+
+Falsifier: Certification passes but the base still fails mid-run on problems outside the certification set (certification is not predictive of base competence).
+
+Likely failure mode: Certification doubles experiment cost (every fixture needs a base-only 3/3 run first); the governance overhead exceeds the waste it prevents, and workers skip it under time pressure.
+
+Priority: P2.
+
+### H-CATFORGET-1: Structure-type survival census under interference (rank #16)
+
+Question: Composition LINK edges shield applicability, but what about the other learner-owned state types: reliability scores, utility values, induced grammar constraints, belief stances, threshold state? A 1000+ event interference lifetime with a census of each type before and after gives an empirical survival ranking.
+
+Mechanism sketch: Lifetime with heavy interference; census LINK edges, reliability scores, utility values, grammar constraints, belief stances, and threshold state before/after; measure survival rate and post-interference competence attributable to each type (per-type ablation).
+
+Expected result: A survival ranking that tells builders which learner-owned state is interference-robust and which needs protection; extends C189's 3-tier eviction with empirical data.
+
+Simplest baseline: No-interference control (all types survive by construction).
+
+Falsifier: All types survive equally (interference does not differentiate) or none survive (the lifetime is too hostile to be informative).
+
+Likely failure mode: Survival correlates trivially with recency/frequency (LRU-like), adding nothing beyond standard caching theory; the census then just re-derives recency.
+
+Priority: P2.
+
+### Live frontier after this wave
+
+Prior live: 41. New: 16 (all untested). Total live: 57. Requirement: 20+. Met with margin.
+
+New untested: H-COLLAPSE-1, H-XIO-1, H-DECOMP-1, H-COMPVER-1, H-CAP-1, H-SHIELD-1, H-QUAR-1, H-GRAMZAG-1, H-DECEPT-1, H-INVNCH-1, H-POLXFER-1, H-SEAL2-1, H-INVLIVE-1, H-SCALEADV-1, H-BASECERT-1, H-CATFORGET-1.
+
+### Treadmill check (Constitution 23)
+
+H-COMPVER-1 is the repair follow-up to the H-COMPNOEXP-1 negative (T5): this is the one allowed retry with a structurally different acceptance mechanism (learner verification instead of expected matching), not a re-run of the failed design. H-CAP-1 re-opens the K-scaling question C208 closed on caps: allowed because the cap was a harness parameter, not a tested architectural limit. H-SEAL2-1 is the second seal: allowed because the adversary and worlds are fresh, not a re-run of the first seal.
+
+No em dashes used (verified).
