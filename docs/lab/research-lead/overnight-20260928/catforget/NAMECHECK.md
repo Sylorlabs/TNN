@@ -63,11 +63,34 @@ semantic cases.
 
 ## Step 3: Development notes
 
-(Filled after implementation and runs.)
+Single implementation version (v1), written after the prereg commit
+(5de0d76a7); one typo fix before compile (results-array index
+`(si*4+3)*1+1` corrected to `(si*4+3)*3+1`; caught by reading the
+verdict code, no behavior had been observed yet). Compiled first try
+with the pinned znc; only benign E0101 analyzer warnings (adding 0 in
+`(si*4+0)*3+1` index arithmetic; no effect).
+
+One design point worth recording: the first-draft design made
+retention = episode success with a tight step limit, but hand
+simulation showed the severed arm could still succeed by trying gather
+late in the episode, making the bar step-limit-dependent. The frozen
+prereg instead defines retention as Phase-3 success under greedy
+frozen evaluation, and the actual mechanism turned out cleaner than
+the draft: the severed arm fails via wrong answers (gather outscores
+complete at the shared context), not via timeout, so the result does
+not depend on the step limit at all.
 
 ## Step 4: Determinism
 
-(Filled after runs: 3/3 byte-identical sha256, seeds, rebuild info.)
+3/3 runs byte-identical. sha256:
+3572d18999898f2e4d7b6cb5ab08cf83469c78c47bdd539c9308212ae0b67dc8
+(run1.txt, run2.txt, run3.txt). Fixed LCG seeds (111, 222, 333;
+learn stream seeded seed*7+13), fixed tie-breaks (least-tried then
+lowest op id). Rebuild: pinned znc
+(~/workspace/tnn-rsi/src/tools/toolchain/znc_linux_x86_64_abed8aa1)
+on catforget.zag. Binary stdout verified byte-wise before trusting
+(single preallocated buffer + one _zag_raw_syscall write; exit 0,
+empty stderr).
 
 ## Architecture accounting
 
