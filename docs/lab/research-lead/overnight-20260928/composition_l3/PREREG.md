@@ -203,6 +203,39 @@ one raw syscall write. 3/3 byte-identical required.
   open future work.
 - One world family (foraging aggregation). No generality claim beyond
   the demonstrated phases.
+## 10. Amendments (transparent, re-frozen before implementation commit)
+
+ERRATUM-1 (K-L3-5 scope, internal contradiction resolved): section 3
+requires phase-2 threshold refit to reach 4/4 at t=14 (adapt code 1),
+while K-L3-5 as written requires full 32-byte M-slot identity. The M
+slot's threshold field (bytes 236..239) is Y's adaptive decision
+parameter, recorded per M generation for revision history; it must
+change 10 to 14 in phase 2. The intermediate M's structural identity is
+its program: bytes n@232, gen@233, sup@234, pad@235, prog@240..263
+(28 bytes). K-L3-5 is clarified to: the 28 structural bytes of the M
+slot dumped after phase 1 are byte-identical after phase 2. The driver
+check compares exactly those bytes. Rationale for the split: the
+threshold is Y's parameter (it also lives in Y's own slot at 228..231);
+the novel intermediate is the reduction program. The frozen phase-2
+expectation (adapt code 1, threshold-only update, M program untouched)
+is unchanged.
+
+ERRATUM-2 (menu-fit detail): the SUM train-fit threshold is t=18, not
+t=19 as hand-computed in section 3. Cause: builder arithmetic slip
+(P4=[5,5,4,1] sums to 15, not 18; with rich sums {15,20,20,21} and poor
+sums {10,17,6,15}, t=18 is the first ascending threshold reaching 7/8).
+The frozen episode tables are unchanged and the derived value is
+correct. No kill bar depends on this value; F-MENU-WIN is evaluated on
+the test episodes.
+
+Both errata are builder-side corrections documented here before the
+implementation commit. The learner (learner.zag) is untouched by
+ERRATUM-1; only the driver's persistence check scope is refined to match
+the clarified bar. No threshold, episode, rule, or machinery was altered
+to rescue a result.
+
+## 11. Standing non-claims (unchanged)
+
 - This build targets the seven composition-L3 bars above. It does not
   claim Micah's full 12-criterion L3 bar.
 - 0 modes, 0 bridges, 0 handlers, 0 new semantic cases. Pure Zag.
