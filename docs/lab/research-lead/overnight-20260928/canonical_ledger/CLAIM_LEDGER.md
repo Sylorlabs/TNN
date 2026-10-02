@@ -6789,3 +6789,19 @@ No em dashes were used in this entry (verified).
   0 modes/bridges/handlers. Status: BUILD-PASS (3 kills repaired).
 
 No em dashes were used in this entry (verified).
+
+- C272 (BELIEF-MISINFO; prereg a22818224, results 13451a814,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  PROCESS-PASS. K1-K5 all HOLD; 3/3 byte-identical. M1 (copied
+  misinformation): correction 22 rational (two independent
+  moderate sources outweigh one strong stale claim); M1b count
+  3. M2 (source degradation): downgrade rational, fraction
+  tracks evidence exactly; W1 control 1000. M3 (forgiveness):
+  recovery 870/888/902/913, final 913, nevicted==0. KEY FINDING:
+  the belief update rule LACKS FORGIVENESS; a degraded source
+  does not recover even when reliable again (M3 non-recovery is
+  rational given the fraction rule, and that IS the finding).
+  0 cognition lines, 0 modes/bridges/handlers. Status:
+  BUILD-PASS + architectural finding (no-forgiveness).
+
+No em dashes were used in this entry (verified).
