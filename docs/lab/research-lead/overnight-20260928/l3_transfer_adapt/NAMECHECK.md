@@ -35,6 +35,16 @@
 5. `run1.txt`, `run2.txt`, `run3.txt` - 3/3 byte-identical, ALL PASS.
 6. `REPORT.md` - results against the frozen bars.
 
+## Commits
+
+- `5b8f3ce8c` l3_transfer_adapt: PREREG frozen (T1-T8), committed
+  alone before implementation. Contains NAMECHECK.md + PREREG.md.
+- `d2eb95237` l3_transfer_adapt: implementation, 3/3 deterministic
+  ALL PASS, REPORT; verdict L3-TRANSFER-ADAPT-COMPLETE. Contains
+  REPORT.md, learner.zag, driver.zag, full.zag, build.sh,
+  compile.log, l3a_bin, run1/2/3.txt.
+- Both local only, never pushed.
+
 ## Constraints honored
 
 - Pure Zag for all research logic. Shell used only to invoke znc, run
