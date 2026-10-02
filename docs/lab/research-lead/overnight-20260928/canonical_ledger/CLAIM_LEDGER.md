@@ -6977,3 +6977,21 @@ No em dashes were used in this entry (verified).
   persistence, and revision. Status: COMPLETE (L3 EVIDENCE).
 
 No em dashes were used in this entry (verified).
+
+- C282 (XDOMAIN-CAUSAL; commits 016aa13d9, 46344a6c6, 2026-10-02):
+  COMPLETE. H1/H2 with L2 adaptation (REBIND) on causal→
+  intervention. H1: 6/6 arms PASS, 3/3 byte-identical. H2: 6/6
+  arms PASS, 3/3 byte-identical. Both solve do-surgery queries
+  (Z1, Z4) via adaptive rebinding (in2/p2 87→89), NOT graph
+  surgery. K9 vs C275: FALSIFIES the "irreducibly structural"
+  claim for the C273 query class. L2 achieves same functional
+  outcome as sever+recompute, proving sever+recompute is NOT
+  strictly necessary. The do-operator requires redirecting the
+  intervened variable's evidence source; rebinding suffices.
+  L2 does NOT subsume sever+recompute mechanistically
+  (different operations), but functionally equivalent here.
+  Boundary between rebinding-sufficient and surgery-necessary
+  do-queries remains open. Status: COMPLETE (with C275
+  refinement).
+
+No em dashes were used in this entry (verified).
