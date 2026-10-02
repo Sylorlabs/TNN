@@ -79,20 +79,62 @@ sha256sum x3_run1.txt x3_run2.txt x3_run3.txt
 
 ## Step 3: Prereg commit-order self-check
 
-(To be filled after the prereg commit. Must show: PREREG.md first
-commit hash and timestamp, verification that the commit contains ONLY
-PREREG.md + NAMECHECK.md under xio_third/, and that the
-implementation commit (x3_driver.zag) is strictly later.)
+- PREREG.md first commit hash:
+  c21e49503f198bed89067785646ff31b3199c445
+  (2026-10-02 14:52:00 UTC). Verified via git ls-tree: that commit
+  contains ONLY PREREG.md + NAMECHECK.md under xio_third/
+  (no driver, no binary, no run outputs, no report).
+- Implementation file (x3_driver.zag) was written after 14:52 UTC
+  and is committed separately, strictly later.
+- Self-check: PASS (no implementation at or before c21e49503).
 
 ## Step 4: Build and run log
 
-(To be filled after implementation: assembly, core sha256 recheck,
-compile result, run hashes, key trace lines.)
+- Assembly: cat ../composition_A/cx_core.zag
+  ../xio_adapters/xio_core.zag x3_driver.zag > x3_full.zag
+  (2200 lines; both bases verbatim, zero edits).
+- Core reuse verified: sha256 of ../xio_adapters/xio_core.zag is
+  4d4d2e0e932b6a472e3cd8456d7e1c633218e611ce5df51d03507218440a8a7f
+  before assembly and after the runs, identical to the C229/HARDER
+  freeze value. The adapter mechanism was not copied, forked, or
+  edited: the assembly recipe references the sibling file directly.
+- Compile: success, warnings only (682 warning lines, same A0102
+  ignored-return-value class as sibling workers; the em dashes in
+  x3_compile.txt are znc's own warning text, also present in the
+  sibling compile logs). Binary x3_bin 272546 bytes
+  (pinned znc, safebin /home/hatch/safebin/znc).
+- The cx_core.zag internal test battery references ev_query; as in
+  H-XIO-1/H-XIO-2, the driver defines ev_query as
+  xio_query(...,xio_on=1). The battery is never invoked.
+- Runs: 3/3 byte-identical, sha256
+  d3ad77208ddc8771427a911a74bb80571ec2fd154ed1c7f78dfb452ad4a10220.
+- Key trace (TREAT + AUDIT, identical all 3 runs):
+  census: 2 chain MAPs (plen 4, oty 0), 2 sum MAPs (plen -1, oty 1,
+  all-INC graphs); X1=14, X2=18, Y1=8, Y2=12.
+  PAIR-AUDIT on (41,93): tried=8; the 4 (chain,sum) pairs show
+  v1=44 v2=1; the 4 (sum,chain) pairs show v1=-999999 v2=-999999.
+  Zero XIO-BUILD and zero XIO-REUSE lines in the full output.
+  Z1=Z2a=Z2b=-2 in TREAT, ABL-XIO, ABL-X, ABL-Y, FRESH;
+  adapters=0 throughout.
 
 ## Step 5: Kill-bar scorecard
 
-(To be filled after runs: K1-K8 PASS/FAIL against the frozen bars,
-observed diagnostic signature S1/S2/S3/S4, verdict.)
+- K1 Z1 boundary (Z1=-2, adapters=0, no XIO-BUILD): PASS
+- K2 oty observation (2 chain oty 0 + 2 sum oty 1, no other MAPs):
+  PASS (S2 ruled out)
+- K3 mismatch gate (audit tried=8 differing pairs): PASS
+  (S3 ruled out)
+- K4 stage diagnosis ((chain,sum): v1=44 v2=1; (sum,chain):
+  v1=-999999; never v2=10): PASS
+- K5 ablations (all arms Z1/Z2a/Z2b=-2, adapters=0): PASS
+- K6 competence (X1=14, X2=18, Y1=8, Y2=12): PASS
+- K7 core unchanged (sha256 match; no SUM_CHAIN/CHAIN_SUM template,
+  no type-conversion table in driver): PASS
+- K8 determinism (3/3 byte-identical, sha256 d3ad7720...): PASS
+- Diagnostic signature: S4 observed as predicted. S1/S2/S3 not
+  observed.
+- Verdict: XIO-THIRD-COMPLETE (H-XIO-3 rejected; generality boundary
+  localized at stage assembly)
 
 ## Constraints observed
 
