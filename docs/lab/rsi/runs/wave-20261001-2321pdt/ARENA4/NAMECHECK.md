@@ -34,3 +34,15 @@ built on the v6 base (devint1_contestant_v6.zag); the roster does not
 compose with the TRX/INQ candidate line, it is orthogonal, and the
 v6 base is the honest substrate. Prereg frozen in
 PREREG_ARENA_GOAL.md with kill bars K1-K8.
+
+## Lane-end status (2026-10-01, post sealed evaluation)
+
+- Toolchain re-verified at lane end: `which python3` prints nothing
+  (exit 1). Zero non-safebin invocations all lane. No PROCESS-FAIL.
+- Verdict: BUILD-PASS. All 8 frozen kill bars pass (SEALED_EVAL.md).
+  C15 0.000 -> 0.947; total 54/68 = 0.794 -> 54.947/68 = 0.808;
+  zero regressions on the other 15 capabilities; 3/3 byte-identical.
+- Commits: 19d9edc87 (prereg+audit, no implementation), 171c45101
+  (ROSTER implementation). Commit-order self-check: prereg commit
+  strictly precedes implementation commit. Satisfied.
+- L3 disclaimed (K8). ROSTER is a CANDIDATE only.
