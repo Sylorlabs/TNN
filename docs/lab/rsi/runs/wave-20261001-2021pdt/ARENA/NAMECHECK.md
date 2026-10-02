@@ -68,3 +68,68 @@ PROCEDURE (genuine procedure invention), per the recommended ranking.
 Rationale recorded in the prereg (section 2). Phase 1 deliverable:
 PREREG_ARENA_PROCEDURE.md (frozen prereg, written before any implementation).
 Phase 1 ends at PREREG READY; no implementation in this turn.
+
+## Step 0b: Phase 2 implementation start (worker toolchain guard re-verified)
+
+- Date/time: 2026-10-01 PDT, wave-20261001-2021pdt, lane ARENA, phase 2.
+- Re-ran: bash docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh
+  (exit 0). SAFEBIN-READY: /home/hatch/safebin (36 tools, no python).
+  PATH=/home/hatch/safebin for all subsequent commands in this lane.
+- Fresh-shell verification with PATH=/home/hatch/safebin:
+  `which python3` prints NOTHING (exit 1); `which python` prints NOTHING
+  (exit 1). `which znc` resolves to /home/hatch/safebin/znc (pinned).
+- Prereg commit-order check: HEAD is 8f8663026
+  (8f8663026f8574effe9330364f99e486e64ed513), whose message reads
+  "FREEZE arena PROCEDURE prereg (writing-only, committed alone before any
+  implementation)". All implementation files in this lane are created after
+  this commit, so implementation timestamps strictly follow the prereg
+  commit; ordering is verifiable from git history (UNVERIFIABLE ORDERING
+  guard satisfied).
+- PURE ZAG ONLY in this lane: all computation via Zag compiled with the
+  pinned znc, or shell plus safebin coreutils. No python anywhere.
+  Any forbidden executable invocation is automatic PROCESS-FAIL and will
+  be reported honestly.
+- Working copy: /home/hatch/workspace/tnn-rsi, branch tnn-native-lab.
+  No git commit, no push, no reset, no rebase in this lane (coordinator
+  commits). Write scope: ONLY
+  docs/lab/rsi/runs/wave-20261001-2021pdt/ARENA/.
+- Documentation rule: zero em-dash bytes in lane docs and in implementation
+  stdout/stderr text (colons, parentheses, and commas only).
+
+## Step 3: Implementation complete (TCNP), dev/control testing done
+
+- Date/time: 2026-10-01 PDT, wave-20261001-2021pdt, lane ARENA.
+- Toolchain guard held for the whole turn: safebin PATH only; `which python3`
+  prints nothing (re-verified at phase start); zero Python or other
+  interpreter invocations; shell only sequenced pinned znc, built binaries,
+  git read ops, and file copies. No PROCESS-FAIL event.
+- Contestant `bin/tcn_p` sha256:
+  71ea78f717e5cf25146487b1da110b05173573af1924a00e726ade0579cdda2b
+  (v6 base sha256 c6dbc20cf447dce7ab506576b42557a0542065e170bee6516558ecfb435d1e89;
+  585 lines added, 8 v6 lines changed at documented insertion points only).
+- Dev battery (contaminated by construction, /tmp only, never sealed):
+  dA 6/6, dB 6/6, dC 6/6, dD 6/6 via zero-trial rebind (proc=dA, trials=0),
+  dE 0/6 with 6/6 abstain (0 confident wrong). A-D dev total 24/24.
+  Dev logs in ARENA/dev_logs/.
+- K7a ablation (`bin/tcn_p_ablated`, one-line source delta): 0/24 on dev
+  A-D, all UNKNOWN. PASS.
+- K7b memorization control (`bin/tcn_p_memctrl`): 0/24 on dev A-D
+  (<=6/24 bar). PASS; dev battery not memorization-solvable.
+- K4 no-regression: world_gen and arena rebuilt from committed sources,
+  hashes match the refreeze record; turns.jsonl hash matches the sealed
+  world; `bin/tcn_p` over all 131 turns scores per-capability byte-identical
+  to the v6 baseline (54/68 = 0.794, same per-cap distribution); TCNP trace
+  empty on this battery. PASS.
+- Determinism: 3/3 byte-identical stripped reply streams
+  (57eaec92e48ca0fbe24fc713fdaad84654bd3a47224cbd6577545275348710b2) and
+  byte-identical stderr traces. Zero RNG in decision paths.
+- Byte scan: zero em-dash bytes anywhere in the lane (exit 1 on grep).
+- Delta accounting: 0 new modes, 0 bridges, 0 routers, 0 hardcoded semantic
+  cases, 0 new task-specific handlers; learner state (procedure table,
+  trial log, verdict ring) verified live in state.bin.
+- Full record: ARENA/IMPLEMENTATION.md. No deviations from the frozen
+  prereg beyond three documented concretizations (turn envelope reuse,
+  verdict/fitter caps, table caps), all inside prereg latitude.
+- Lane stops here per task. No sealed worlds seen. The coordinator runs
+  sealed evaluation after the independent adversary commits worlds.
+  IMPLEMENTATION COMPLETE; READY FOR SEALED EVALUATION; no blockers.
