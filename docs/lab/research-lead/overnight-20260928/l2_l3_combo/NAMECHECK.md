@@ -82,3 +82,16 @@ scalar threshold decider Y.
 - combo_run1/2/3.txt sha256 identical:
   dc0651ba7f965c5c8f9567d114675f30ce84c868050697abf88627667ee483f6
   (all three). K-CB-6 PASS.
+
+## Step 5: Commit provenance note (2026-10-02)
+
+The implementation files were staged with explicit pathspecs, but the
+first `git commit` hit a transient index.lock from a concurrent
+worker. Before the retry, a different worker's commit (857bdb896,
+"rule_revision prereg") swept the shared index and committed all
+twelve l2_l3_combo files under its own message. Verified
+byte-identical: every committed blob matches the working-tree file
+(sha256). Commit order is preserved (prereg fb1075ef0 strictly
+precedes the implementation files). This note records the
+misattributed commit message; no content was altered and no history
+was rewritten.
