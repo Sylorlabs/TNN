@@ -6713,3 +6713,21 @@ No em dashes were used in this entry (verified).
   Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C268 (H2-COMPLETENESS; prereg 1157eee96, results 0b9da0062,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  PROCESS-PASS. Repair: banded round-robin fragment enumeration
+  in ir_frag_candidates; outer bands stay flen-descending 7..1,
+  within each band round-robin across MAPs (fair-share: every MAP
+  keeps floor(R/M) fragments; small MAPs fully retained). Cap 48
+  untouched (no patch treadmill); 0 modes/bridges/handlers. T1 B1a
+  (decoys taught first): now SOLVES with the exact true triple;
+  T2 B1c (trues first): still SOLVES; teach order no longer flips
+  the verdict. T3/T4/T5 byte-identical to fixer's frozen runs.
+  T6 100-fragment stress byte-identical. T7 3/3 deterministic.
+  Residual limitation (honest): bands still drain flen-desc; a
+  band filling the cap still excludes shorter bands. Goal-derived
+  relevance ranking is a follow-up redesign, not claimed here.
+  Status: BUILD-PASS (kill repaired).
+
+No em dashes were used in this entry (verified).
