@@ -31,6 +31,7 @@ Debate group: convened after lanes land (advocate, skeptic, judge; provenance pr
 ## Verdicts (debated in DEBATE.md)
 
 - Fork battery: 59 refs (53 local, 6 remote); 2 FRESH PASS (tnn-native-lab @ 3dceac9cc moved tip; new archive ref tnn-native-lab-wave-archive-wave-20261001-2021pdt @ a272a8f6); 55 RE-CERT PASS; 2 RE-CERT UNTESTABLE (rh-pull-1-head, rh-pull-2-head, standing cause); 0 FAIL. Archive immutability: 47/47 pre-existing tips byte-identical, plus 1 new ref fresh-tested PASS (48/48). Frozen pins verified (znc 498abcb5..., probe 3b29aa06..., b1_run 5dfe3c16..., b2_bin 75b85d3c...). Commit 668ae8d8f. [NEW] (debate pending)
+- CONSEQ (shared consequence substrate, Node2-v2 K-H3): VALIDATION-PASS [NEW] (debate pending). Independent re-execution of frozen Node2-v2 K-H3 prereg (4b05c8011): 5/5 frozen kill bars PASS, 3/3 byte-identical reruns, hashes match committed records bit for bit. Causal ablation Link 1 (consequence record disabled): default reverts to fixed 30, NECESSARY confirmed. Causal ablation Link 3 (production read disabled): write fires but guide stays 30, NECESSARY confirmed. K-H3 disambiguation: single lineage (H3LITE_DESIGN.md Sec 6 draft -> frozen H3-lite Node 2 unreachable -> Node2-v2 prereg), no conflict. Scope honestly held: validates the consequence re-entry template, not the shared tag-61 substrate itself (C174 remains EMERGES, exploratory). Commits e068ac9a4 (+ lane files).
 
 ## Queued next
 
