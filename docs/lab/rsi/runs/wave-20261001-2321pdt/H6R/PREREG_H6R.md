@@ -279,8 +279,10 @@ standing-free events (the frozen B4-R1's 12 query hits), and ref_prot can only
 refresh LIVE type-9 edges, so the frozen "13 filler confirms re-pin the root"
 step was a no-op: the root stayed permanently unprotected and would have been
 evicted before either target. The frozen bar (B4: preferential survival of
-high-standing nodes) is unchanged; the corrected worlds keep the exact frozen
-counts (nH confirms, nF confirms + query hits) and add a pacemaker slot P
+high-standing nodes) is unchanged. The corrected worlds keep the frozen nH/nF
+confirm counts; R2/R3 query counts were adjusted from 9/20 to 8/16 (even, for
+exact halving into interleave rounds; the bar-relevant control property
+bid(nH) < bid(nF) is preserved: 5 < 10 and 6 < 17). A pacemaker slot P
 (taught once, confirmed on a fixed interleave) whose confirms re-pin
 STAND_ROOT without touching nH/nF standing: queries run as
 [2 queries + 1 pacemaker confirm] rounds, and target protection is lapsed by
