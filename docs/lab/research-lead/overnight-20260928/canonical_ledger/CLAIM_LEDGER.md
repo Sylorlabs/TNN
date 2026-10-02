@@ -6493,3 +6493,29 @@ No em dashes were used in this entry (verified).
   Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C257 (COMPOSITION-UNIFIED-REDTEAM; commit 797d63f2f, 2026-10-02):
+  COMPLETE (exploratory). 3 KILL, 4 BOUND, 3 SURVIVE.
+  Recommendation: DO NOT ADOPT AS CANONICAL. R1/R2/R3 SURVIVE (no
+  A/B/C regressions); R4a SURVIVE (honest depth 6/7/8); R8 SURVIVE
+  (0 bridges, not a router). R4b decline blowup: KILL (3-wide
+  depth-8, unreachable goal, non-terminating at 15+ min; fallback
+  admits 10/12 candidates per node vs 2 honest; 46x wall time per
+  depth level). R4c success blowup: KILL (same, reachable goal,
+  correct path last, non-terminating). R5 plen ceiling: BOUND
+  (raised bounds inert; 4-link ceiling binds). R6a poison steering:
+  BOUND (one false type-15 edge flips selection; no dedup;
+  verification preserves answer but provenance steered). R6b poison
+  cost: BOUND. R7 predicate conflict: KILL (M[1,1]/N[7,7]/P[8,8];
+  unified picks [M,N] with false LINK14/type-15; C-alone picks
+  [N,P]; root cause: fallback conflates relseq-extraction failure
+  with walk failure; fix: gate on cc_relseq == -1 not
+  cc_satisfy == 0; also fires in ordinary training, poisoning
+  provenance). Adopt only after: fallback gated on extraction
+  failure, branching bounded, decline-at-scale kill bars. Repair
+  dispatched against the collapsed mechanism (kills likely
+  transfer). Process note: worker self-reports one accidental
+  `python3 -c` probe typed; binary absent under safebin, nothing
+  executed; no PROCESS-FAIL per worker. Status: 3 KILLS.
+
+No em dashes were used in this entry (verified).
