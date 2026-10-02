@@ -62,5 +62,18 @@ file); TNN core untouched.
   expected answer; frozen grep audit over learner functions.
 - No em/en dashes in loop docs (check_no_dash.sh before doc
   commits).
-- Prereg commit: [recorded after commit]
+- Prereg commit: c0cff4c48 (PREREG.md + NAMECHECK.md only; no
+  implementation existed at that point; verified via git show --stat).
 - Implementation commit: [recorded after commit]
+- Verdict: DELAYED-CONSEQUENCE-PASS, K1..K10 all pass.
+- sha256 (3/3 byte-identical runs):
+  bf34bd2e03907e07be68ceacf2cb9a9fad4a1a317104acd2a6ced18b8e276cdd
+- Key numbers: D1 relA 120->130; D2 relB 120->60, attr (B,F3);
+  D3 attr (C,-1), B stays 120, follow-up B -> FAIL; D4 relB 140->80,
+  attr (B,F3), follow-up A.
+- Disclosures: (1) PREREG section 5 hand-derived D4 C/D/E values
+  should read 140/140/140 (script gives 4 executions each); the
+  frozen script was implemented exactly and no bar is affected.
+  (2) One znc E0101 lint warning on the standard flush idiom;
+  warning only. (3) Seal threat model is accidental corruption, not
+  adversarial learner (disclosed in REPORT.md).
