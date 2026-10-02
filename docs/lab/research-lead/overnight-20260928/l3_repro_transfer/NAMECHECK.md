@@ -41,22 +41,54 @@ steps postdate it).
 
 ## Post-freeze checks (filled as the experiment runs)
 
-- [ ] R1 REPRO-BUILD: rebuilt from committed source, zero errors.
-- [ ] R2 REPRO-DETERMINISM: 3/3 byte-identical per rebuilt binary.
-- [ ] R3 REPRO-FIDELITY: digests match committed; M=(4,0,0); 9/9.
-- [ ] R4 REPRO-AUDIT: C281 grep specs zero on committed machinery.
-- [ ] R5 TRANSFER-SOLVE: Z PASS both, M'=(1,0,0) created=1.
-- [ ] R6 TRANSFER-NECESSITY: L1-ONLY/ABL-X/ABL-Y/FRESH fail both.
-- [ ] R7 TRANSFER-M-NECESSARY: NO-M fails both (ablation).
-- [ ] R8 TRANSFER-CREATED: C-ROUND gain>0; origin audit clean.
-- [ ] R9 TRANSFER-REUSE: Z2 PASS both, build_count==1.
-- [ ] R10 TRANSFER-REVISE: code 2 both; Mprev=(1,0,0) sup=1;
-      M=(1,0,0,4,0,0); Z3 PASS both.
-- [ ] R11 TRANSFER-DETERMINISM: 3/3 byte-identical per binary.
-- [ ] R12 TOOLCHAIN: safebin held for the whole run; no forbidden
-      executable invoked.
+- [x] R1 REPRO-BUILD: rebuilt from committed source with the pinned
+  znc, zero compile errors. Rebuilt binaries are BYTE-IDENTICAL to
+  the committed h1_bin/h2_bin (sha256 6f076073... / af7870cd...).
+- [x] R2 REPRO-DETERMINISM: 3/3 byte-identical runs per rebuilt
+  binary (sha256 recorded in REPORT.md).
+- [x] R3 REPRO-FIDELITY: run-output digests equal the committed
+  digests (H1 abc3e018..., H2 ee0bf4ba...); M-PROG bytes (4,0,0)
+  with C-ROUND 1 base=0 win=4,0,0 gain=2 score=2; TOTAL 9/9 both.
+- [x] R4 REPRO-AUDIT: C281 prereg section 8 grep specs return zero
+  matches on the committed machinery; SUPPLIED-INSTALL appears
+  exactly once per committed run log, inside the SUPPLIED arm.
+- [x] R5 TRANSFER-SOLVE: Z PASS both; H1 REBOUND a=5 param=83
+  rebound_of=0; H2 VC-COMPOSE ok m1=1 m2=2 rel=83; m_created=1;
+  M-PROG bytes (1,0,0).
+- [x] R6 TRANSFER-NECESSITY: L1-ONLY, ABL-X, ABL-Y, FRESH fail both.
+- [x] R7 TRANSFER-M-NECESSARY: NO-M fails both (rebind finds 48,
+  Y lookup misses -> L2-FAIL); reproduction NO-M likewise fails.
+- [x] R8 TRANSFER-CREATED: C-ROUND 1 base=0 win=1,0,0 gain=2
+  score=2; origin audit clean (machinery code has no transfer-world
+  literals; 83/84 only on add_fact lines in drivers); no
+  SUPPLIED-INSTALL on the transfer TREAT path.
+- [x] R9 TRANSFER-REUSE: Z2 PASS both; build_count==1 after Z+Z2.
+- [x] R10 TRANSFER-REVISE: adapt code 2 both; Mprev (1,0,0) sup=1;
+  M (1,0,0,4,0,0); Z3 (5,145) PASS both.
+- [x] R11 TRANSFER-DETERMINISM: 3/3 byte-identical per transfer
+  binary (H1 c03202cd..., H2 6bae6757...).
+- [x] R12 TOOLCHAIN: safebin held for the whole run; `which
+  python3 python` empty at start and end; pure Zag; 0
+  modes/bridges/handlers.
 
 ## Namecheck audit notes
 
 (Any anomaly found during the run is recorded here with the step
-where it was found. None before implementation.)
+where it was found.)
+
+- R8b machinery audit refinement (found during transfer build):
+  the word-boundary grep for transfer-world literals in
+  tr_learner.zag returns one match: the comment line
+  `//   [24..27]=build_count i32, [28..31]=reserved.`
+  The "24" is a byte offset inside the M slot layout comment
+  (absolute bytes 2136..2139), not a world literal; the code uses
+  the absolute constant 2136, never 24. Non-comment lines are fully
+  clean of all transfer-world literals
+  (81,82,83,84,24,36,48,60,72,96,120,145). Recorded as a comment-only
+  exception, not a bar failure: the constructor cannot read comments,
+  and the C281-style relation audit (71|72|73|74|81|82|83|84) is
+  zero on all lines.
+- No other anomalies. The frozen hand-derived transfer expectations
+  (PREREG.md section 4) matched the implementation output exactly,
+  including the 10-try TREAT Z trace, the C-ROUND winner bytes, and
+  the adapt extension winner bytes.
