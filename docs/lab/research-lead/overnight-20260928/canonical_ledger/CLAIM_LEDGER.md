@@ -6373,3 +6373,33 @@ No em dashes were used in this entry (verified).
   (dispatched). 0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C250 (APPL-INTEGRATION; prereg c4821dc44, results 05325e9a5,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Per-MAP-shape APPL gate integrated into collapsed composition.
+  Key design finding: records keyed by exact frontier-F match plus
+  shape, not per-shape alone (a faithful permap port false-negatives
+  T4B: seeded (my,0,2) fails at cur=105 and its record would veto it
+  at cur=104 where it completes). K1-K12 PASS. T1/T2A/T2B/T3/T4B
+  byte-identical to C234; T4 clean fail; T5 declines. DFS work:
+  GATE 19 vs BASE 27 (30% fewer wasted cl_satisfy evals); T4B 22 vs
+  26. Gate never fires on success paths (skip=0); pure search prune,
+  verification still arbitrates. BASE vs GATE outputs differ only in
+  CGATE lines (diff-verified). 3/3 byte-identical per arm. AP region
+  is learner-owned state. 0 modes/bridges/handlers. Status:
+  BUILD-PASS.
+
+- C251 (GOAL-INFERENCE; commit 9aa06e463, 2026-10-02): COMPLETE
+  (exploratory). H-GOALINF-1: the learner INFERS the query goal type
+  from its own state (no researcher goal flag). ev_iquery routes:
+  confident FACT + no walkable structure -> RETRIEVE (ev_query);
+  walkable MAP structure -> CONSTRUCT (ev_cquery); confident FACT
+  contradicted by structure -> CONFLICT (supersede the FACT via the
+  native type-3 primitive, re-derive by construction); weak/absent
+  basis -> WITHHOLD. 5/5 PASS, 3/3 byte-identical. Inference rule:
+  verifiable channel (constructed, execution-checked) beats opaque
+  recall on conflict. Answers the H-COMPVER-2 open question:
+  learner-inferred, not caller-specified. Status: BUILD-PASS
+  (exploratory).
+
+No em dashes were used in this entry (verified).
