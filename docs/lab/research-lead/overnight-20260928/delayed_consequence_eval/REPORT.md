@@ -130,5 +130,5 @@ volatility signal distinguished them), so the recovery is credited
 to the temporal machinery, not to commit-time detection. No harness
 expected answer appears anywhere in the learner path (K6).
 
-Commits: prereg c0cff4c48; implementation [recorded after commit].
+Commits: prereg c0cff4c48; implementation f58603a33.
 Local only, never pushed.

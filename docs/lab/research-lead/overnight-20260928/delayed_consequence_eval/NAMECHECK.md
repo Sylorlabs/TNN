@@ -64,7 +64,7 @@ file); TNN core untouched.
   commits).
 - Prereg commit: c0cff4c48 (PREREG.md + NAMECHECK.md only; no
   implementation existed at that point; verified via git show --stat).
-- Implementation commit: [recorded after commit]
+- Implementation commit: f58603a33
 - Verdict: DELAYED-CONSEQUENCE-PASS, K1..K10 all pass.
 - sha256 (3/3 byte-identical runs):
   bf34bd2e03907e07be68ceacf2cb9a9fad4a1a317104acd2a6ced18b8e276cdd
