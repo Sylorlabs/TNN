@@ -96,8 +96,61 @@ rules before canonical promotion.
 ## Next candidates (this lane, in progress)
 
 - Candidate B: cross-domain L2 adaptation (SUBSTITUTE operator; structure
-  learned in domain A adapted for domain B with partial mismatch). Prereg to
-  be frozen before implementation.
-- Candidate C: ADAPT-REVISION interface adaptation (adapt a composite's
-  input/output contract to a new goal without rebuilding). Prereg to be
-  frozen before implementation.
+  learned in domain A adapted for domain B with partial mismatch). Prereg
+  frozen (770a72afd), amendment 1 frozen (4fe6edc7b). Implementation
+  complete (l2x_patch.zag). Battery BLOCKED: see below.
+- Candidate C: ADAPT-REVISION interface adaptation (SUBSEQ operator; adapt a
+  composite's input/output contract to a new goal without rebuilding).
+  Prereg frozen (770a72afd), amendment 1 frozen (4fe6edc7b). Implementation
+  complete (l2x_patch.zag). Battery BLOCKED: see below.
+
+## Candidates B/C status: IMPLEMENTED, BATTERY BLOCKED
+
+### What was built
+
+l2x_patch.zag extends l2_patch.zag with two new operators (fixed set now 5):
+
+- SUBSTITUTE (variant 4000+r): when native walk fails, find first failing
+  relation r_fail, collect candidate relations r' from observed target facts
+  at the failure cursor, substitute r_fail->r' globally, walk. Structural,
+  data-driven, no researcher menu.
+- SUBSEQ (variant 5000+i*10+j): when native walk fails, try all contiguous
+  sub-sequences [i..j] of relseq (excluding full sequence and prefixes
+  covered by TRUNCATE). Interface adaptation for sub-interval goals.
+
+Both compile cleanly with the pinned safebin znc. L1REG (107) passes,
+confirming no regression to base composition.
+
+### Blocker: fallback confound in battery design
+
+Probe experiments revealed the ev_query fallback (mp_run/trial) walks fact
+chains up to 4 links without any MAP:
+- 3 links: succeeds | 4 links: succeeds | 5+ links: fails (-2)
+
+The original PREREG_BC battery used 3-link (B) and 2-link (C) targets.
+Result: XB-FRESH and IC-ABL answered correctly via fallback, invalidating
+KB3/KB4/KC4. Transparent amendment 1 (4fe6edc7b) lengthened batteries to
+5+ links.
+
+Remaining blocker: training a 5+ link MAP requires a 5+ link training query,
+which the fallback cannot execute, so no MAP is promoted. Training via
+composition+EXTEND was attempted but the (11,70,16) EXTEND query did not
+promote the 5-link MAP (COMP-FAIL, ext=0). Root cause under investigation.
+
+### Verdict
+
+- Candidate B: NO VERDICT (battery blocked, cannot test hypothesis).
+- Candidate C: NO VERDICT (battery blocked, cannot test hypothesis).
+
+The operators are implemented and the prereg/amendment are frozen. The
+battery engineering problem (training >4-link MAPs without fallback
+support) is the sole blocker. This is an honest negative result on battery
+design, not on the operators themselves.
+
+### Next steps (queued)
+
+1. Debug why (11,70,16) EXTEND query fails to promote 5-link MAP.
+2. Alternative: direct MAP construction via workspace manipulation.
+3. Alternative: redesign B/C to use 4-link MAPs with a different isolation
+   mechanism (e.g., distractor facts that defeat fallback but not MAP).
+4. Once battery works: run 3x, verify kill bars, red-team.
