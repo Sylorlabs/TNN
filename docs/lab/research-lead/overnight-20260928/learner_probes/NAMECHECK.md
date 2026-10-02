@@ -62,8 +62,8 @@ pushed. Pure Zag for all research logic.
   probe inputs) is new.
 - Prereg commit: 247e85cb4 (PREREG.md + NAMECHECK.md only; no
   implementation existed at that point).
-- Implementation commit: (recorded after the implementation commit
-  lands).
+- Implementation commit: 2045d343f (all implementation, binaries,
+  run outputs, REPORT.md, NAMECHECK.md update).
 - Near miss disclosed in REPORT.md: a `python3` token typed into a
   shell line during compiler bisection did not resolve under the
   safebin PATH (`command -v` empty); no Python process spawned, no
