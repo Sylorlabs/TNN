@@ -70,7 +70,8 @@ Standalone simulation; TNN core untouched.
   af3915aa66d935f6d848d456e64d25651ed1df9b691e71082b0510a33ff502a9).
   The unguarded redteam binary reuses those functions verbatim; the
   guarded binary adds only the preregistered checksum guard.
-- Redteam prereg commit: (recorded after commit)
+- Redteam prereg commit: 7c1629e97 (PREREG.md + NAMECHECK.md only; no
+  attack code existed at that point; verified via git show --stat).
 - Attack implementation commit: (recorded after commit)
 - REPORT.md: per-attack verdicts against the frozen bars, guard
   proposal with control results, cognition lines touched.
