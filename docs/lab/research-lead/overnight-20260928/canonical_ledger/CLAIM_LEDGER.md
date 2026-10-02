@@ -7168,3 +7168,15 @@ No em dashes were used in this entry (verified).
   specialization. Status: COMPLETE (L2 revision+transfer).
 
 No em dashes were used in this entry (verified).
+
+- C292 (LEARNER-PROBE; commits 247e85cb4, 2045d343f, 2026-10-02):
+  COMPLETE. Learner chooses WHICH inputs to probe from open
+  pool (not just when). All 8 frozen kill bars pass, 3/3
+  byte-identical. Learner scores candidates from own state:
+  boundary proximity to held contract dominates; novelty vs
+  own experience breaks ties. No labels consulted. Driver
+  only reads learner's choices (C_CHOICE0..2). Active inquiry:
+  learner-directed probe selection. Pure Zag. Status:
+  COMPLETE.
+
+No em dashes were used in this entry (verified).
