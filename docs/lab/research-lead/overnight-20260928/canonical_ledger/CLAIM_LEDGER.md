@@ -6206,3 +6206,21 @@ No em dashes were used in this entry (verified).
   0..9, ternary operators.
 
 No em dashes were used in this entry (verified).
+
+- C242 (BELIEF-TRAJECTORY; prereg a3c9b2482, results 81c857387,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  H-DECEPT-2 SUPPORTED. General parameter-free trajectory update
+  (uniform over sources, no betrayal checks): correct -> +1/+1,
+  streak+1; wrong -> penalty p=floor(streak*stake/(streak+stake))
+  extra instances, streak reset. Zero on zero streak, monotone,
+  saturates at claim stake. Baseline-beat table (D1): 869<952,
+  833<909, 800<869, 769<833, 740<800, 714<769; all 6 beat frozen
+  baseline. Controls: R1 truth-teller keeps rel=1000 (no
+  over-penalize); streak-2 wrongs get p=0, rel=666 = linear null;
+  single no-streak errors = 500/500 linear null (no noise
+  overreaction); stances unchanged (11,12,22). 3/3 byte-identical.
+  Caveats: researcher-authored rule (L2, not L3); sealed re-test owed;
+  repeated betrayal after rebuild untested (H-DECEPT-3 dispatched).
+  0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
