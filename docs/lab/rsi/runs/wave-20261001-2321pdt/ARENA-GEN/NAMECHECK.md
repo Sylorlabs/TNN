@@ -36,4 +36,10 @@ The ARENA5 and ARENA4 lane working dirs are not modified.
 
 ## Lane end re-verification
 
-(to be filled at lane end)
+At lane end (2026-10-02, after all runs): `which python3`
+prints nothing (exit 1); `which python` prints nothing
+(exit 1). PATH remained /home/hatch/safebin for the whole
+lane. Zero Python or other interpreter invocations. All
+research logic in pure Zag (znc builds, compiled binaries);
+shell only sequenced builds, runs, git ops, and file copies.
+No PROCESS-FAIL event. AG-5 PASS.
