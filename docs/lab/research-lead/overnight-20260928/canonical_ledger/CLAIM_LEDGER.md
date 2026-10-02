@@ -6080,3 +6080,22 @@ No em dashes were used in this entry (verified).
   9% delta modest. 0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C235 (XIO-HARDER; prereg bea72f336, results 629f21e3a, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation). XIO adapters on
+  the harder pair (count->chain, computed intermediate). ZERO lines
+  of adapter machinery changed (xio_core.zag sha256 identical
+  before/after); only the driver is new. All 8 kill bars PASS, 3/3
+  byte-identical. K1: XIO-BUILD with reversed signature (o1=1, o2=0),
+  computed handoff mid=4 in white-box trace, tried=1 rejected=0. K2:
+  XIO-REUSE on Z2a. K3: second adapter for qr=94 (mid=3), same stages.
+  K4: ABL-XIO reproduces the harder negative. K5: ABL-X/Y/FRESH all
+  -2, causal reuse confirmed. Handoff analysis: number->subject works
+  with no special casing (t2_gather indexes by untyped i32); the
+  "type transition" was never a substrate barrier; H1/H2/H3 lacked
+  the value-level handoff step itself. Same operator now covers both
+  directions: direction-agnostic pairing by observed oty mismatch.
+  Still chain/count stage types only. 0 modes/bridges/handlers.
+  Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
