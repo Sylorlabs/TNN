@@ -155,5 +155,5 @@ learner-side checksum verification with quarantine on mismatch
 (16 lines); it closes A3 with zero behavior change on every
 uncorrupted arm, including the full C306 D1/D2/D4 battery.
 
-Commits: redteam prereg 7c1629e97; implementation (recorded below).
+Commits: redteam prereg 7c1629e97; implementation f58e3eabd.
 Local only, never pushed.

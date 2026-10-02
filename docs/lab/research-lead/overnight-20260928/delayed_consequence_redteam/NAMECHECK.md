@@ -72,6 +72,6 @@ Standalone simulation; TNN core untouched.
   guarded binary adds only the preregistered checksum guard.
 - Redteam prereg commit: 7c1629e97 (PREREG.md + NAMECHECK.md only; no
   attack code existed at that point; verified via git show --stat).
-- Attack implementation commit: (recorded after commit)
+- Attack implementation commit: f58e3eabd
 - REPORT.md: per-attack verdicts against the frozen bars, guard
   proposal with control results, cognition lines touched.
