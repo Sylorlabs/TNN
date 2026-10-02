@@ -50,5 +50,5 @@ PROCESS-FAIL.
 ## Commit record
 
 - 68c590d32: PREREG.md alone (frozen, pre-implementation).
-- TBD: implementation (explicit pathspecs; nothing pushed; branch
-  tnn-native-lab).
+- a374f9664: implementation (explicit pathspecs; nothing pushed;
+  branch tnn-native-lab).
