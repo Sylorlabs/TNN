@@ -17,6 +17,14 @@ which python3 python 2>/dev/null; echo "guard-check-done"
 Result: `which python3 python` printed NOTHING; only `guard-check-done`.
 No forbidden executable is reachable in this worker's PATH.
 
+Continuation worker re-verification (2026-10-02): the guard block above
+was re-executed at continuation startup; `which python3 python` again
+printed nothing, only `guard-check-done`. Safebin znc sha256 still
+matches the pinned compiler
+(498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef).
+All continuation computation is pure Zag; shell used only to invoke
+znc, run binaries, and do git/file operations.
+
 Compiler check: `sha256sum` of `$HOME/safebin/znc` equals the sha256 of
 `~/workspace/tnn-rsi/src/tools/toolchain/znc_linux_x86_64_abed8aa1`
 (498abcb5ab346f8cb246222a1ca63699d035a4277dedfba4782e1373137e58ef).
