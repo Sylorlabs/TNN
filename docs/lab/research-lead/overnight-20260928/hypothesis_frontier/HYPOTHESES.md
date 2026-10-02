@@ -611,3 +611,19 @@ C194 deleted one private store (net-negative integration). C201/C202/C199 add th
 Active: composition_compare (H-COMPGEN-1), scaling_clean (H-SCALE-1 clean rerun), plus 12 more lanes per Micah priorities: grammar_induction (H-GRAMIND-1), index_hardening (H-INDEXADV-1), belief_formation (H-BELIEF-1), logic_vs_prediction (H-LOGIC-1), meta_learning (H-APPLIC-1), cognitive_ops (H-OPSTRUCT-1), integration_policy (H-INTEGPOL-1), strong_composition_sealed (H-XYSKILL-1), cross_domain_composition (H-COMPCROSS-1), invention_1/2/3 (H-INVENT-MUT-1, H-INVENT-REC-1, H-INVENT-CON-1).
 
 No em dashes used (verified).
+
+---
+
+## Status update: 2026-10-02, composition comparison landed (C208)
+
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| H-COMPGEN-1 | TESTED (positive, bounded) | C208: C subsumes A/B on arity; collapse to one operation via C's DFS with pluggable applicability predicates. All fail T4 (atomic MAPs), T5 (expected required), 4+ (cap). |
+| H-COMPK-1 | TESTED (partial) | C208 T1: 3-structure composition works (C only). 4/5 fail on caps, not architecture. A/B are pair-bound by design. |
+| H-COMPCROSS-1 | TESTED (positive, bounded) | C208 T3: all three pass cross-domain (chain + single-hop). Heterogeneity is not the blocker; decomposition is. |
+| H-PARTADAPT-1 | TESTED (negative) | C208 T4: all fail. MAPs are atomic units; no prefix use. Decomposable MAPs are the next architecture target. |
+| H-COMPNOEXP-1 | TESTED (negative) | C208 T5: all fail without expected. Learner verification (C181) replacing expected is the open experiment. |
+
+Live count unchanged (41). The composition-collapse recommendation from C208 is now the highest-priority integration task: build the single DFS composition op, port contract/co-use/relsew as applicability predicates, remove or learner-control the segment cap, then attack MAP decomposability (T4) and expected-free verification (T5).
+
+No em dashes used (verified).

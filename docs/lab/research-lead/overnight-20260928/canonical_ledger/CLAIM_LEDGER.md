@@ -5587,3 +5587,29 @@ No em dashes were used in these entries (verified).
   full 3/3. Status: BUILD-PASS (exploratory, partial completion noted).
 
 No em dashes were used in these entries (verified).
+
+## Governance saturation wave continued, 2026-10-02 (C208)
+
+- C208 (COMPOSITION-COMPARE; commit 3dceac9cc, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Adversarial comparison of A, B, C
+  on 6 fresh tests (Micah Priority 1, H-COMPGEN-1). Three binaries, one
+  comparative driver, same base TNN-2 core; 3/3 byte-identical per
+  mechanism. Results: T1 (3 structures): C PASS, A/B FAIL (pair-bound
+  search, arity fixed at 2, no transitive link traversal). T2A/T2B (4
+  and 5 structures): ALL FAIL; A/B pair-bound, C blocked by
+  researcher-imposed max-3-segments cap in cc_dfs. T3 (cross-domain
+  chain + single-hop): ALL PASS; composition is not limited to uniform
+  chains when the interface (contract/history/relsew) abstracts
+  correctly. T4 (partial, 75% useful): ALL FAIL; all mechanisms treat
+  MAPs as atomic units, cannot use a prefix of a learned structure.
+  T5 (no expected-answer): ALL FAIL; all three use expected for
+  verification. Collapse finding: C subsumes A/B on arity (no test
+  where A/B succeed and C fails); selection is pluggable into C's DFS
+  (contracts, co-use history, relseq walkability as applicability
+  predicates); recommendation is ONE composition operation on C's DFS
+  with the 3-cap removed or learner-controlled, not three engines.
+  Remaining: MAP decomposability (T4), learner verification replacing
+  expected (T5), signal arbitration, 4+ scaling. RESEARCHER-OWNED:
+  driver, tests, DFS cap, pair-search loops. LEARNER-OWNED: fragment
+  choices, composed structures. 0 modes/bridges/handlers/semantic
+  cases. Status: BUILD-PASS (exploratory).
