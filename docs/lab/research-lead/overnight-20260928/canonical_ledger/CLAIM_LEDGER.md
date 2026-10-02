@@ -6403,3 +6403,33 @@ No em dashes were used in this entry (verified).
   (exploratory).
 
 No em dashes were used in this entry (verified).
+
+- C252 (BELIEF-SEALED; commit cff02d5de, 2026-10-02): COMPLETE
+  (exploratory). Sealed adversarial re-test of the antifarm rule
+  (rule layer byte-identical to 035e9593c). Per-world: A SURVIVE, B
+  SURVIVE with aggregate BOUND, C SURVIVE, D KILL. The D kill:
+  noise-grudge. The b counter increments on zero-penalty noise
+  (p=floor(c*w/(c+w))=0 yet b still increments); b reaches 40 on
+  harmless noise, then a test event gets p=205. A noisy-but-honest
+  source accumulates massive betrayal count from harmless noise,
+  then is crushed on its first real mistake. Repair dispatched (b
+  increments only on material penalty). 3/3 byte-identical. Status:
+  1 KILL, 3 SURVIVE/BOUND.
+
+- C253 (XIO-GENERAL; prereg e08110f47, results a36206064,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Generalized XIO core (xio_core2.zag): xio_sclass structural
+  signature (0=guard-only, 1=guard+INC mixed, 2=INC-only, -1=unknown
+  fail-closed; integers only, zero researcher domain labels);
+  mismatch gate moved from oty-difference to sclass-difference;
+  per-class stage dispatch (class 0/1 branches verbatim, new class-2
+  total re-derivation from the MAP's own DEP provenance). All three
+  pairs SOLVE: chain->count (C229 values reproduced exactly),
+  count->chain (C235 values reproduced exactly), chain->sum (Z=10,
+  the XIO-THIRD S4 failure gone). 8/8 kill bars PASS, 3/3
+  byte-identical. The C243 generality boundary is repaired by growing
+  the type system and stage executors together. Red-team on the
+  generalized core dispatched. 0 modes/bridges/handlers. Status:
+  BUILD-PASS.
+
+No em dashes were used in this entry (verified).
