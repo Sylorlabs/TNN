@@ -308,3 +308,28 @@ multop_bin_v5. Kill-bar thresholds UNCHANGED.
   T-gated ADJUST and full-error revision unchanged. Bars unchanged.
 
 This amendment is committed alone and re-frozen before any v6 code.
+
+## 10. Amendment v7 (2026-10-02, after the v6 run, BEFORE v7 code)
+
+v6 ran 3/3 byte-identical. Verdicts: T1=1, T2=1, T3=0.
+v6 outputs preserved as run1_v6.txt/run2_v6.txt/run3_v6.txt and
+multop_bin_v6. Kill-bar thresholds UNCHANGED.
+
+- T1=1 (DISCOVERY ep=55, clean=1, pre13=0/5, pre32=0/1): CLEAN
+  COMPOSITIONAL DISCOVERY. The triple was assembled all-greedy
+  with neither inner link ever rewarded. T2=1 (late 27/27).
+  The v6 design works for composition.
+- T3=0 (p4=12, rev_n=3, EST 0/241): two bugs. (1) With eps=0 the
+  deterministic tie-break picked ADJUST 3 times in one episode
+  (tables do not update mid-episode); full-error revision applied
+  the stale error 3 times, overshooting 0->12. Fix: at most one
+  parameter revision per op per episode (the error signal is stale
+  after the first). (2) With eps=0, after ADJUST's initial -1s its
+  applicability (-1000) sits below the fail-0 competitors, so it
+  is never retried and EST never recovers; Arm B needs exploration.
+- v7: (a) one-revision-per-op-per-episode rule; (b) arm-dependent
+  exploration: Arm A eps=0 (clean compositional test), Arm B normal
+  eps schedule (recovery via exploration, as in v2 which passed
+  T3). Bars unchanged.
+
+This amendment is committed alone and re-frozen before any v7 code.
