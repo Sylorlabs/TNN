@@ -55,7 +55,9 @@ Zero new edge types, zero new opcodes, zero modes/bridges/handlers.
   only (no `as *i32` slice construction); no `_zag_print`
   anywhere (one preallocated 64KB buffer, single raw-syscall
   write loop, stdout bytes verified); no `as []f64`/`as []i64`;
-  sub-conditions hoisted, if-nesting kept at 3 or fewer;
+  sub-conditions hoisted, if-nesting kept at 4 or fewer with all
+  call results hoisted into locals before conditions (build clean,
+  zero E0204);
   far under the 1024-node workspace budget (16 MAP slots,
   32 fact slots, 64 edge slots); MAP inventory taught via
   direct m_teach calls (no rebind assemblies).
@@ -65,13 +67,58 @@ Zero new edge types, zero new opcodes, zero modes/bridges/handlers.
 
 ## Step 3: Development notes
 
-(To be filled after the build: first-build fidelity to the frozen
-hand derivation, build invocation, stdout verification, audit
-results.)
+1. First build reproduced the frozen hand derivation with one
+   correction: FULL adapt counters came out S=8 E=3, not the
+   hand-derived S=9. Root cause: the frozen first-match rule stops
+   the piece search at the first MATCH, so the distractor MAP d is
+   never examined in FULL (my hand count had examined it). The
+   implementation follows the frozen counting rules exactly; the
+   hand derivation double-counted. Recorded transparently in
+   PREREG_AMENDMENT2.md (5x products 45 -> 40; the 5x ratio
+   threshold itself unchanged; measured 76 and 72 clear both).
+   No other deviation: SUB-STALE m=0 hop=1 fact=1; MATCH on MAP1
+   (2->3, facts 3,4 live); SUB-BUILD rels=1,2,2,1 facts=0,3,4,2;
+   SUB-VERIFY term=4; SUB-PROMOTE m2=3; SUB-T16 3->0 and 3->1;
+   SUB-RETIRE m=0; ANS via=3 val=4; post-query ans=4 via=3 with
+   m0live=0. NO-SUB: ET-TRUNC t=3 from=0, ET-EXTEND e=4 from=2,
+   ET-EXTEND e=5 from=3, ans=-2, t16=3. ABLATE-N: RB-CAND
+   sequence L=1 term=2,11 / L=2 term=5,13,12 / L=3 term=3,14 /
+   L=4 term=4 exactly as derived; RB-BUILD m3=3 native; ADAPT
+   S=76 E=10; ans=4; t16=0. ABLATE-M: stale@hop0, no candidate,
+   rebuild dead-ends at 12, ans=-2, t16=0, nm=3. FRESH: RB-BUILD
+   m3=0 native; ADAPT S=72 E=9; ans=4 via=0; t16=0.
+2. Build: `cat learner.zag world.zag driver.zag > sub_full.zag`
+   (1220 lines), then `znc sub_full.zag -o sub_bin`. Build exit 0.
+   Only diagnostics: the benign zagd-unavailable notice, one
+   unused-local warning (wv), and ignored-return-value notes;
+   zero errors, zero E0204. Fourth-defect pattern `while.*!(`
+   grep-clean; `as *i32` grep-clean.
+3. Output path follows the AGENTS.md stdout workaround: numbers
+   formatted directly into one preallocated 64KB buffer with
+   cursor-returning helpers (ob_app/ob_i32), single
+   `_zag_raw_syscall(1,1,ptr,len)` write loop. No `_zag_print`
+   anywhere. Stdout verified: 125 lines, 0 NUL bytes, ends with
+   L2-SUBSTITUTE-END.
+4. State uses u8 buffers with get32/set32 only; no `as *i32`
+   slice construction. If-nesting kept at 4 or fewer with all
+   call results hoisted into locals before conditions.
+5. K9 audit: all 8 frozen patterns return 0 hits on learner.zag.
+   One self-inflicted near-miss fixed pre-verdict: the header
+   comment said "0 bridges", tripping the case-insensitive
+   `bridge` pattern; rephrased (comment only, no behavior
+   change), rebuilt, re-ran 3x.
+6. Amendments: AMENDMENT1 (operator firing semantics,
+   pre-implementation); AMENDMENT2 (FULL A_SEARCH 9 -> 8,
+   post-first-build pre-verdict, arithmetic correction only).
+   No kill bar weakened; no threshold moved.
 
 ## Step 4: Determinism
 
 - No RNG anywhere. Node-id order in every scan; first-match
   candidate rule; ascending fact-id scans; iterative deepening
   L=1..4 in the rebuild fallback.
-- sub_run1/2/3.txt sha256 digests recorded here after the runs.
+- sub_run1/2/3.txt sha256 identical:
+  198ef5c6d9bdc2dae17182cb4f9a7b1c89b6f2e53208243b7bd2b4474c38f261
+  (all three). K8 PASS.
+- Binary sha256:
+  9f9a4cd1af7644f34441aa6c18f7d7a1875c05e841b72d20f956e16b902f91a1
