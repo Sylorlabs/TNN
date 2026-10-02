@@ -6036,3 +6036,26 @@ No em dashes were used in this entry (verified).
   (exploratory).
 
 No em dashes were used in this entry (verified).
+
+- C233 (INVENTION-H2-FIX; commit f4dafef3b, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Fixes the C225 A4 heap overflow
+  with a GENERAL bound, not a fixture constant. Two single-sourced
+  constants: frag_cand_max()=48, frag_depth_max()=3; cand buffer =
+  D*B*12 = 1728 bytes; loop guards, read indices, level bases, and
+  depth check all derived from the constants. Proof: per-level writes
+  <= B, levels < D, disjoint regions inside [0, D*B), so D*B entries
+  sufficient for every execution; no future change can silently
+  reintroduce the overflow. Diff: 16 added + 10 mechanical lines;
+  search order and cap values unchanged. A4 re-run: fixed frag binary
+  SOLVES (n=3 fragments, ans=43, exit 0, 3/3 byte-identical);
+  subsumption claim operationally restored. Regression: A1/A2/A3/A4c
+  BOUND unchanged, A5 SURVIVE unchanged (6-arm battery, 3/3).
+  Stress: 100 satisfiable fragments truncate at 48 cap per level,
+  solves, exit 0. A1 documented OPEN (needs goal-supplied
+  relation-form constraint; ev_query protocol lacks it; no
+  answer-only verifier can reject a true fact-store chain).
+  Follow-up flagged: ofrag result buffers need same derivation if
+  depth raised. 0 modes/bridges/handlers. Status: BUILD-PASS
+  (exploratory).
+
+No em dashes were used in this entry (verified).
