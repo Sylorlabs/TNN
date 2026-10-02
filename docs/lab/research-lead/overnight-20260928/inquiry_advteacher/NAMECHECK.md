@@ -62,6 +62,28 @@ rubric. Do NOT fix what is killed.
 - REPORT.md: results, per-teacher scores, verdict
   INQUIRY-ADVTEACHER-COMPLETE.
 
+## Results (2026-10-02)
+
+3/3 runs byte-identical
+(SHA-256 ec58b02cea4e3dad0a625a16fc93ec634511268c7761b6dc5999749512fe5dcd).
+
+- ADV-CTRL: -4, GI-ANSWER P=34 op=42 t=2, 1/1 queries, POST 1, D=8
+  a=[2,6] b=[2,6], battery 1/1 class 1. Exact reproduction of
+  grammar_inquiry NEG-AMB: driver loop faithful.
+- ADV-LIE: -4, lie answer (35,42,2), 1/1 queries, POST 1, D=17
+  a=[1,3] b=[1,3], grammar WRITTEN, no detection signal, battery
+  1/1 (wrong grammar self-consistent). Score: KILL.
+- ADV-WASTE: -4, four true non-discriminating answers, 4/4 queries,
+  POST -4, GI-GRAMMAR none. Budget fully burned; fail-closed held.
+  Score: BOUND.
+- ADV-POISON: -4, poison answer (0,43,63), 1/1 queries, POST 1, D=8
+  a=[2,7] b=[2,7] (ranges corrupted), grammar written, no detection
+  signal, battery 1/1. Score: KILL.
+
+Verdict: INQUIRY-ADVTEACHER-COMPLETE
+(ADV-LIE KILL, ADV-WASTE BOUND, ADV-POISON KILL).
+Nothing fixed, per instructions.
+
 ## Constraints observed
 
 - Pure Zag. Zero em/en dashes in docs.
