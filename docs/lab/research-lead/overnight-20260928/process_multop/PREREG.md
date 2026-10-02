@@ -143,3 +143,55 @@ Cognition lines added, new hardcoded semantic cases, modes, bridges,
 handlers (all expected 0), learner-state structures created,
 capability-source delta. Standalone unfrozen experiment; frozen
 sources untouched; paper untouched; nothing pushed.
+
+## 5. Amendment v2 (2026-10-02, after the v1 run, BEFORE v2 code)
+
+v1 ran 3/3 byte-identical. Verdicts: T1=0, T2=1, T3=0.
+v1 outputs preserved as run1_v1.txt/run2_v1.txt/run3_v1.txt and
+multop_bin_v1. The kill-bar thresholds below are UNCHANGED; only the
+apparatus is fixed. Root causes:
+
+- T1 failed (DISCOVERY ep=26, clean=0, pre13=2/4): in single-phase
+  training, early exploration (30%) emitted exploration-assisted
+  triples (e.g. one exploration step plus two greedy steps) that
+  rewarded the inner links (1,3) and (3,2) before the first
+  all-greedy triple. The "no prior reward" condition is fragile when
+  component learning and novel-task exposure are simultaneous.
+  Apparatus failure, not a hypothesis kill: T2 showed the triple is
+  reliably produced and adopted (late 26/27 solved, 22/27 triple).
+- T3 failed (p4=0, rev_n=0, EST 0/241): design deadlock. The v1 rule
+  revised p4 only on greedy wrong answers, but after ADJUST's first
+  wrong answer at the EST context its applicability (-1000) fell
+  below the fail-0 competitors (FOLLOW/COMPLETE/SHIFT score 0), so
+  greedy never selected it again and exploration selections could not
+  revise. Permanent lockout. Apparatus failure.
+
+v2 design changes (bars unchanged):
+
+- Arm A becomes two-phase. Phase 1 (ep 0..249): F/F2/T2 only, so
+  component applicability (FOLLOW at D-contexts, SHIFT at S-contexts,
+  COMPLETE at V+R-contexts) converges with no CHAIN3 exposure.
+  Phase 2 (ep 250..499): F/F2/T2/CHAIN3 (30/25/15/30). CHAIN3 and its
+  E4 context are entirely novel in Phase 2; the inner links still
+  cannot be rewarded in Phase 1 (verified empirically at the phase
+  boundary and by the pre-discovery snapshot). Discovery is then a
+  zero-shot composition of mastered components plus optimism, and
+  clean discovery is robust to exploration. This is a curriculum, not
+  an answer leak: the triple and its inner links remain unexperienced
+  and unrewarded until discovery.
+- Arm B: ADJUST body gains a T-edge gate (MATCH T after MATCH V;
+  FAIL if no T edge). ADJUST therefore FAILS (rec 0, no revision, no
+  -1 pollution) in F worlds and only ever answers wrongly in EST
+  worlds, structurally isolating parameter revision to the task that
+  needs it. Revision rule becomes: on ANY wrong answer
+  (greedy or exploration), p[o] <- p[o] + (true_ans - ans_given)
+  (full signed error, a generic delta rule; the deterministic
+  additive bias is identified by one sample). The v1 greedy-only
+  restriction is dropped because the T-gate removes the interference
+  it was guarding against. T3 clause updated to match: p4 == 4 at
+  end AND rev_n >= 1 AND late EST success >= 75% (thresholds 4 and
+  75% unchanged).
+- Step limit stays 4; all other machinery identical.
+
+This amendment is committed alone and re-frozen before any v2 code
+is written. v1 remains reported honestly in REPORT.md.
