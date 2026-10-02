@@ -21,11 +21,12 @@ printed). Safebin contains 36 tools including pinned znc
 Pure Zag for all research computation. Shell only for: invoking znc,
 running binaries, git operations, moving/copying files.
 
-## Steps 1-6: (to be filled)
+## Steps 1-6: COMPLETE
 
-- [ ] Prereg frozen before implementation (PREREG.md committed alone).
-- [ ] Implementation in pure Zag, unfrozen files only.
-- [ ] Frozen base (cc_base.zag, cc_patch.zag) used verbatim, read-only.
-- [ ] 3/3 byte-identical runs per arm.
-- [ ] Zero em/en dashes (byte-verified).
-- [ ] Paper untouched. Nothing pushed.
+- [x] Prereg frozen before implementation (PREREG.md committed as 5b5bb39e8).
+- [x] Implementation in pure Zag, unfrozen files only (vc_patch.zag, vc_driver.zag).
+- [x] Frozen base (cc_base.zag, cc_patch.zag) used verbatim, read-only.
+- [x] 3/3 byte-identical runs per arm (sha256 72f4a805...).
+- [x] Zero em/en dashes (byte-verified via grep -P).
+- [x] Paper untouched. Nothing pushed.
+- [x] K1-K7 all PASS. Verdict: XDOMAIN-VALUE-COMPLETE.
