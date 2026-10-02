@@ -2,8 +2,8 @@
 
 ## Provenance header
 
-- RENDER_SHA: (commit containing E2_RUN.md and this brief; brief
-  committed after the run report)
+- RENDER_SHA: 6c9d96cef (commit containing E2_RUN.md and this
+  brief; brief committed after the run report)
 - FIRST_RENDERED_WAVE: wave-20261001-2321pdt
 - COMPONENT_LINEAGE: BATTERY Part 2 post-freeze sealed adversarial
   battery 1/6 PASS on frozen TNN-2 (tnn2.zag
