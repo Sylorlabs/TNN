@@ -65,9 +65,51 @@ threshold decider Y (t=6).
 
 ## Step 3: Development notes
 
-(To be filled after the build: construction trace, arm outcomes,
-build command, stdout verification.)
+1. Two defects were found and fixed BEFORE any implementation commit
+   (both in uncommitted working files; the prereg mechanism was
+   sound):
+   a. x_recall read the kind tag from st[o] (the episode id slot)
+      instead of st[o+1], and both x_recall and x_learn_masks indexed
+      reading slots off by one, so masks stayed 0 and the generic
+      replay included the id. Fixed to st[o+1] tag and st[o+1+i]
+      reading slots, matching the [id,r0..r5] store layout.
+   b. The v1 world table broke the ARM-L3-ONLY pairing proof: kind 2
+      train episodes had distinct `a` values in singleton (k,a)
+      groups, so [CPY R0,R1] reached 5/8 and construction did not
+      halt with n=0. Fixed by transparent prereg amendment A1
+      (committed prereg-only at 839c701a2): kind 2's signal pair
+      moved from (a,b) to (b,c); `a` is now constant 0 across train,
+      MASK_K2 = bits {2,3} = 12. The ARM-FULL hand derivation was
+      unaffected.
+2. The amended build reproduced every frozen hand-derived expectation
+   on the first post-amendment build with zero source changes:
+   LEARN-LEN L=6, MASKS k1=48 k2=12; C-ROUND 1 base=6 eval=20
+   win=1,0,1 gain=2 score=8 t=6; C-ROUND 2 base=8 eval=20 stop;
+   M-BUILT n=1 t=6 score=8/8; Z-FULL 4/4; Z-L2ONLY 0/4 with spec=8;
+   Z-L3ONLY 0/4 with spec=0, M n=0, and `C-ROUND 1 base=4 eval=20
+   stop`; Z-FRESH 0/4; Y-PRIOR fit=6/6 t=6 in all arms; T-AGREE y=6
+   m=6 (genuine agreement).
+3. Build: `cat learner.zag world.zag driver.zag > spec_full.zag`
+   (854 lines), then `znc spec_full.zag -o spec_bin`. Build exit 0.
+   Only diagnostics: the benign zagd-unavailable notice plus three
+   A0101 off-by-one heuristic warnings in x_learn_masks/x_recall
+   (analyzer cannot prove the bounds; indices are provably in range:
+   max store index 8+15*7+6=119, max out index 5, max mask offset
+   261, all inside their buffers).
+4. Output path follows the AGENTS.md stdout workaround: numbers
+   formatted directly into one preallocated 64KB buffer with
+   cursor-returning helpers (ob_app/ob_i32), single
+   `_zag_raw_syscall(1,1,ptr,len)` write loop. No `_zag_print`
+   anywhere. Stdout verified: 105 lines, 3357 bytes, 0 NUL bytes
+   (tr/cmp check), ends with L2L3-SPEC-END.
+5. State uses u8 buffers with get32/set32 only; no `as *i32` slice
+   construction. Register file is an 8-byte scratch (2 registers).
+   Per-kind masks use integer division bit tests, not bitwise ops.
 
 ## Step 4: Determinism
 
-(To be filled after the runs: 3/3 sha256.)
+- No RNG anywhere. Fixed candidate order (op 0..4, d 0..1, s 0..1),
+  first-max tie-breaking, ascending threshold sweeps (t=0..40).
+- spec_run1/2/3.txt sha256 identical:
+  76495902b74a56bdcb01c0d8b64db7703059e479e7f7ac440aa9e93e54f3e78f
+  (all three). K-CB-6 PASS.
