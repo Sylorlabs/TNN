@@ -15,19 +15,31 @@
   do file/git operations.
 - If any forbidden executable is invoked, this wave is PROCESS-FAIL.
 
-## Provenance (to be completed after implementation)
+## Provenance (completed after implementation)
 
-- lv2_base.zag: byte-identical copy of
+- lv2_base.zag: byte-identical copy (cmp-verified) of
   composition_learnerver/lvcomp_base.zag (itself cc_base.zag +
-  un_patch.zag). Verified with cmp.
-- lv2_patch.zag: verbatim copy of
-  composition_learnerver/lvcomp_patch.zag (320 lines) plus the new
-  ev_cquery section (CONSTRUCT-goal query entry point).
-- lv2_driver.zag: new battery driver. World builders ported verbatim
-  from composition_unified/un_driver.zag; evidence helper adapted from
-  composition_learnerver/lvcomp_driver.zag (parametrized cycles).
-- Build: cat lv2_base.zag lv2_patch.zag lv2_driver.zag > lv2_full.zag;
-  compiled with pinned znc; 3 runs; SHA-256 recorded in REPORT.md.
+  un_patch.zag). Never edited; ev_query untouched.
+- lv2_patch.zag (347 lines): first 320 lines byte-identical
+  (cmp-verified head) to composition_learnerver/lvcomp_patch.zag
+  (compose_lv, lv_dfs, lv_setup, lv_predict, lv_pred_resolve,
+  lv_observe, lv_verify_chain); plus a new 27-line section defining
+  ev_cquery, the CONSTRUCT-goal query entry point (RETRIEVE/CONSTRUCT
+  contract distinction, no flag, no ev_query change).
+- lv2_driver.zag (455 lines): new battery driver. World builders
+  (T1/T2A/T2B/T3/T4 train, couse, zfacts, gap) body-identical to
+  composition_unified/un_driver.zag (diff-checked function by function;
+  only episode comment lines were re-added to match verbatim); evidence
+  helper adapted from composition_learnerver/lvcomp_driver.zag,
+  parametrized by cycle count.
+- Build: cat lv2_base.zag lv2_patch.zag lv2_driver.zag > lv2_full.zag
+  (2899 lines); compiled with pinned znc (exit 0, A0102 warnings only,
+  same class as H-COMPVER-1); 3 runs, SHA-256
+  fc054b5e3bfb3ef8fcb2e4ad5d94dd0f52e5c65dc7de3b9e6ea8e282d2f8942f,
+  3/3 byte-identical.
+- Prereg commit-order self-check: PREREG.md committed alone in
+  6081afa94 before any implementation file existed; this results
+  commit strictly follows it.
 
 ## Constraints honored
 
