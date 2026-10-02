@@ -59,5 +59,10 @@ handlers.
   by the learner. What IS learner owned: the spend/no-spend decision
   each step, from learner state alone (prediction, surprise mean,
   remaining budget).
-- Prereg commit: (recorded after commit)
+- Prereg commit: 2ae81480a (PREREG.md + NAMECHECK.md only; no
+  implementation existed at that point). Disclosure: the commit swept
+  in two other workers' already staged files
+  (truncate_theorem/PREREG_AMENDMENT1.md and a 4 line
+  learner_probes/NAMECHECK.md touch); unrelated to this wave, left
+  untouched.
 - Implementation commit: (recorded after commit)
