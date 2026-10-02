@@ -6731,3 +6731,23 @@ No em dashes were used in this entry (verified).
   Status: BUILD-PASS (kill repaired).
 
 No em dashes were used in this entry (verified).
+
+- C269 (XDOMAIN-ARITH-PLAN; commits 91e84ee0d/82d4300d8,
+  2026-10-02): COMPLETE (frozen PREREG2 superseded an unrelated
+  prior PREREG via amend-and-refreeze; implementation strictly
+  after). PROCESS-PASS. Sum-then-plan pair: H1 KILLED
+  (MUT-STAT tried=0; staging failure, chain-bound one step
+  earlier than the harder pair); H2 KILLED (RECOMB-FAIL,
+  identical to C231); H3 KILLED (INVENT-FAIL, identical to
+  C231). XIO (control) FAIL: NEW boundary finding. The gate
+  perceives the pair (sum oty=1, plan oty=0) but the NUMBER
+  stage re-derives COUNT (t2_chain+t2_asm_count), computing
+  count(103)=2 instead of sum(103)=15. XIO's typed composition
+  is count-specific, NOT arithmetic-general. Follow-up: oty-1
+  stage should re-execute the MAP's own arithmetic graph via
+  DEP provenance (no core SUM detector). 3/3 byte-identical.
+  0 modes/bridges/handlers. Incident: a concurrent worker's
+  broad git add swept this directory mid-task; files verified
+  byte-identical. Status: 3 KILLS + 1 BOUNDARY (negative).
+
+No em dashes were used in this entry (verified).
