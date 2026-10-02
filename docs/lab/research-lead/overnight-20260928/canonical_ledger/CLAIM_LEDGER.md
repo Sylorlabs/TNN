@@ -6311,3 +6311,23 @@ No em dashes were used in this entry (verified).
   dispatched. Status: 3 KILLS, 5 BOUNDS.
 
 No em dashes were used in this entry (verified).
+
+- C247a (XIO-REDTEAM addendum, worker full report, 2026-10-02): A4c
+  is worse than a silent rebinding. Full cascade probe-verified:
+  after chain MAP deletion, a count MAP first-fits onto the adapter's
+  old m1 id (newmap=27 = ad.m1); recorded o1=0 vs live oty=1,
+  recorded rel1=81 vs live rel=82; liveness+tag checks still pass.
+  Stale DEP edges from the deleted occupant shadow the new MAP's
+  provenance; freed id 45 (taken by an internal teach fact) reorders
+  t2_gather's id-ordered path scan; a masked trial takes first-valid
+  path [31,7,70], promotes a MAP, and TEACHES THE WRONG ANSWER FACT
+  (31,93,70), permanently poisoning the relation via activate.
+  A6 detail: the prereg's "sum MAPs excluded from pairs (documented,
+  not tested)" is NOT enforced in code (tried=4 includes chain/sum
+  pairs); the type system is chain-or-count in practice. Net
+  assessment: the three kills share one smell, structural proxies
+  (INC scan, first DEP edge, bare node id, first path) where
+  behavioral/generative evidence is needed. Five candidate repairs
+  listed in REPORT.md in leverage order. A4c repair in flight.
+
+No em dashes were used in this entry (verified).
