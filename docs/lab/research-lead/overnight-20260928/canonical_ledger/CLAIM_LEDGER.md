@@ -6224,3 +6224,22 @@ No em dashes were used in this entry (verified).
   0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C243 (XIO-THIRD; prereg c21e49503, results 920584056, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation; S4 predicted and
+  observed). Third pair chain->sum (Z=SUM(CHAIN(s))=10). XIO is
+  HALF-GENERAL: typed pairing/gating is domain-agnostic (correct oty
+  on unseen SUM family via INC-cell proxy; mismatch gate admits all 8
+  cross-type pairs), but stage executors are domain-specific: 2-bucket
+  oty conflates count and sum in bucket 1, and the bucket-1 executor
+  hardcodes count re-derivation. (chain,sum) -> v1=44 then v2=1
+  (count semantics, never sum 10); (sum,chain) -> v1=-999999. Zero
+  XIO-BUILD lines. K6: sum MAPs work via trial (X1=14 X2=18 Y1=8
+  Y2=12); the adapter cannot stage them. Generality boundary
+  localized: genuine generality needs the type system and stage
+  executors to grow together (richer learner-observed signature or
+  per-structural-class dispatch). Diagnosed, not built. 3/3
+  byte-identical. 0 modes/bridges/handlers. Status: INFORMATIVE
+  NEGATIVE (boundary found).
+
+No em dashes were used in this entry (verified).
