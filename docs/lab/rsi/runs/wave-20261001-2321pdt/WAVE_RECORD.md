@@ -80,4 +80,15 @@ Debate group: convened after lanes land (advocate, skeptic, judge; provenance pr
 - H5R2-SKEPTIC3 (gate vs NEWEST-LIVE-ON-KEY separator): SEPARATED [NEW]. The t2_prov_ok gate (H5R2) and the NEWEST-LIVE-ON-KEY skeptic are finally discriminated on the family skeptic2 named. All four frozen kill bars hold with the exact pre-registered divergence signature. Separator design: two live facts on one key without supersession (ev_teach never writes supersession edges; frozen sequence teach(a,RF1,b), teach(b,RF2,c_old), teach(b,RF2,c_new); no OBSERVE so both stay live; query with masked=1 so the policy, not the verifier, decides). Per-arm (8 separator probes, 2 sealed worlds): SEP-OLD: H5R2 8/8, skeptic 0/8; SEP-NEW: H5R2 0/8, skeptic 8/8; SEP-TWOLIVE ok 8/8 both; 3/3 byte-identical. White-box: both see TWOLIVE n=2; H5R2's MAP deps to F_old (c_old), skeptic's to F_new (c_new). The separator favors NEWEST-LIVE-ON-KEY (pre-registered rationale: re-teach is an update; protocol's contradiction semantics leaves newest fact live; gate's oldest-first pick is a creation-order artifact, not a provenance principle). Honest caveat: under strict monotonic teach reading, neither answer is privileged; the family discriminates tie-breaking policies without crowning one. Open: whether a gate strictly stronger than both exists (e.g., newest-live-among-all-live). Commits: 6bf257048 (prereg) -> 2affa9bcd (implementation) -> cb36a9978 (eval) -> f54465adb (cleanup: removed swept MECH-VERIFY files) -> 69f91f459 (RENDER_SHA). Incident: shared-index race swept 2 MECH-VERIFY files into eval commit; removed via git rm --cached in dedicated cleanup. Pure Zag throughout.
 ## Queued next
 
-(to be filled)
+- SENSORY verdict pickup (H2v1 FSDF candidate; KB1-KB11) plus red-team review when the lane lands.
+- Wave debate: convene advocate/skeptic/judge on the 8 adjudication questions (DEBATE-SLATE); skeptic must ask the verbatim provenance probe.
+- Newest-live-among-all-live gate test (H5R2-SYNTHESIS named next hypothesis; debate decision required).
+- Bare-prompt abstention test: DEFRECALL must abstain on whattime/invent (ARENA-GEN NARROW + RT-ARENA5 QUALIFY).
+- LEARNER-OWNED mechanism-proposal-first instruction (per CONTLEARN-OWNED/OWNED2 MACHINERY-DEPENDENT; no further machinery-disabled replications).
+- F1 repair-time policy work (F1-REPAIR2 REPAIR2-CONFIRMED).
+- C9GEN instrument candidate for future governance; C9 world-generator fix.
+- Blind re-examination mandate (BATTERY-E3): scope per debate Q4.
+- H2R/H6R/H7R substrate re-attempts (gated on Micah's TNN3-SUBSTRATE governance decision).
+- Arena work toward 1.0 across all capabilities (C9, C12, C15 remaining).
+- Cluster 2 program COMPLETE (no further discriminators).
+- Record bookkeeping: supersession bindings, SHA-256 typo fix in LEARNER_MECH_ANALYSIS.md.
