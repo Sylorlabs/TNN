@@ -5654,3 +5654,150 @@ No em dashes were used in these entries (verified).
   BUILD-PASS (exploratory).
 
 No em dashes were used in these entries (verified).
+
+## Watchdog wave, 2026-10-02 (C211-C221)
+
+- C211 (BELIEF-FORMATION; commit 78e5a5eac, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Three-phase belief test (Micah
+  Priority 9). Per-hypothesis support scores; source reliability learned
+  from verification outcomes (all start neutral); independence discount
+  halves repeated same-source claims. Phase 1: PROVISIONAL H1 (support
+  750 vs bar 4000). Phase 2: UNCERTAIN (2500 vs 2000, inside band).
+  Phase 3: CONFIDENT H2 (8500 >= bar 6000, three independent reports).
+  Rationality 3/3 relative to evidence at time. Ablations: ABL-REL
+  (reliability off) stubbornly holds discredited H1; Probe R (6x
+  repetition) goes falsely CONFIDENT without the discount. Provenance
+  queries return exact contributing records; all 13 evidence records
+  retained. RESEARCHER-OWNED: band rule forms (U=wmax, T=2U),
+  strength levels assigned by world script. LEARNER-OWNED: band values,
+  reliability scores, belief states. 0 modes/bridges/handlers. Status:
+  BUILD-PASS (exploratory).
+
+- C212 (INVENTION-MUTATION; commit 96e9bdea3, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Invention H1: structural mutation
+  from failure (Micah Priority 8). mutate_try pipeline stage: on total
+  failure, stages chain MAPs longest-first, checks learner-available
+  "too short" signal, extends by one cell, verifies, promotes with
+  type-1 DEP to parent. H-MUT-1: plen-6 invented from plen-5 parent
+  (zmap=271, ans=306). H-MUT-2: reuse via direct rebind on fresh
+  problem (ans=406, no new mutation). H-MUT-3: open-ended iteration,
+  plen-6 mutant became parent for plen-7 (lineage 116 -> 271 -> 549).
+  Ablation (mutation disabled) fails. 3/3 byte-identical. SUF: honest
+  L2, not L3 (operator researcher-authored; learner selects outputs).
+  0 modes/bridges/handlers. Status: BUILD-PASS (exploratory).
+
+- C213 (INVENTION-RECOMBINE; commit 31391237a, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Invention H2: fragment recombination
+  (Micah Priority 8). Extracts sub-MAP fragments (map_id, start,
+  length), recombines via constraint satisfaction. Novel 6-link form
+  [1,1,1,2,2,2] invented (MAP_Z id 165, ans=37); reused on Z' (ans=47).
+  WHOLE-ONLY control (frag_on=0): Z fails, proving strictly greater
+  expressive power than Composition C on the same goal. Ablations
+  (X/Y deleted, fresh) all fail correctly. SUF: honest L2, not L3
+  (fragmentation operation researcher-designed). Compression note:
+  fragment DFS subsumes Composition C as special case. 652 lines,
+  0 modes/bridges/handlers. Status: BUILD-PASS (exploratory).
+
+- C214 (INVENTION-CONSTRAINT; prereg 75583d6ee, results 31391237a,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Invention H3: constraint-driven construction from facts (Micah
+  Priority 8). Backtracking DFS over individual facts pruned by goal
+  constraints (plen, rel_exact, first_rel, last_rel). P1/P2/P3 all
+  solved with novel forms ([3,7,5,7,9], [3,5,7,9], [3,7,5,7,9,7]).
+  NO-INVENT control finds correct ANSWERS via distractor paths but
+  wrong FORM on all 3, proving trial is form-blind. All 6 kill bars
+  PASS. Key distinction: constructs from facts, never selects existing
+  MAPs. 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+- C215 (COMPOSITION-XDOMAIN; commit 0c91d9b3f, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). CLEAN NEGATIVE. Cross-domain
+  composition: X (chain navigation) + Y (count aggregation,
+  structurally different: INC cells, arithmetic output) -> Z
+  (chain-then-count). Z = -2 in all 12 arm/mechanism cells. Diagnosis:
+  A fails at admission (plen contract rejects count MAPs); B's type-15
+  history generalizes across domains (edge formed) but assembly needs
+  value chains; C fails at admission (INC breaks relseq) and conflates
+  MAP behavior with relation walk. All three implement composition as
+  navigation concatenation; cross-domain needs typed I/O contracts,
+  value-level handoff f(g(x)), heterogeneous execution. New hard
+  problem. 0 cognition lines (reused A/B/C patches verbatim).
+  Status: INFORMATIVE NEGATIVE.
+
+- C216 (INDEX-HARDEN; commit 395c72675, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Fixes redteam wave-3 index BREAK
+  with GENERAL invariants, not fixture patch. idx_walk_bucket enforces:
+  I1 bounds (m in [2, NN())), I2 cycle (per-bucket seen-bitmap), I3
+  liveness (allocator flag), I4 type (tag 20), I5 buffer (nc<512,
+  corrected from 1024). 36/36 corruption worlds correct, zero crashes
+  (cycle incl. redteam exact break, non-MAP, OOB, stale). 3/3
+  deterministic. Zero regression: byte-identical to original on clean
+  worlds. Termination, memory-safety, no-legitimate-candidate-lost
+  proofs in REPORT.md. 0 modes/bridges/handlers. Status: BUILD-PASS
+  (exploratory).
+
+- C217 (INTEGRATION-ADAPTIVE; prereg a5cd5aeb1, results a8e4cc0ee,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Consequence-learned decision policy beats fixed AND/OR gates (Micah
+  Priority 7). 3 seeds, 2000 rounds/arm: adaptive totals 8588/8827/
+  9352 vs AND negative, OR ~7400. K2 stake adaptivity: identical
+  accuracy, HIGH stakes withholds 319/400, LOW answers 394/400 (fixed
+  gates score 0). K3 (RSV redteam: perfect predictor + adversarial
+  source): adaptive learns TRUST_PREDICTOR at 0.95 where AND withholds
+  all. K4 audit: no threshold constants or gate logic in learner path.
+  Two issues caught and fixed transparently (memory layout overlap,
+  K3 denominator). 271 lines, 0 modes/bridges/handlers. Bounds:
+  synthetic Bernoulli world, unfrozen precursor. Status: BUILD-PASS.
+
+- C218 (COMPOSITION-SEALED; prereg a9fa821f3, results bda6cb426,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Sealed strong composition (Micah Priority 4). X (scalar transform,
+  induced from examples) + Y (sequence domain) -> Z (transform
+  sequence). No paired X+Y examples, no hint, no task label. All 10
+  kill bars PASS, 3/3 byte-identical. TREAT solves via ELTWISE;
+  ABL-X/ABL-Y/FRESH/NO-COMPOSE all fail (-2), proving causal reuse.
+  Z reused on unseen sequence with 1 verify. Machine check:
+  ELTCT-PRE-SEAL=0 (no pre-seal elementwise execution). Honest bounds:
+  target given for verification; candidate families
+  researcher-authored. 309 lines, 0 modes/bridges/handlers. Status:
+  BUILD-PASS.
+
+- C219 (GRAMMAR-INDUCTION; commit 62c6a7734, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). TNN induced EXL BUILD grammar from
+  8 examples, zero hardcoded rules (Micah Priority 2). Licensor
+  relations {43,44} DISCOVERED by scanning BUILD facts (zero 43/44
+  literals in source). Literal ranges [0,9]x[0,9] induced from decomp
+  experience. INDUCE arm: 11/11 valid novel constructions (matches
+  hardcoded arm). ABLATE (grammar deleted): 0/11, errors return,
+  causal proof. FRESH: 0/11, induction necessary. 3/3 byte-identical.
+  Architectural note: custom node types must respect 40-byte limit
+  (fields 40+ corrupt adjacent nodes). 0 modes/bridges/handlers.
+  Status: BUILD-PASS (exploratory).
+
+- C220 (COGOPS-STRUCTURES; commit ef77823af, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Cognitive operations as
+  learner-owned structures (Micah Priority 3). Five ops exist only as
+  byte-array instruction bodies in learner state, executed by generic
+  8-instruction interpreter. Applicability, composition links, and
+  retirement all learned from consequences. T1 applicability revision:
+  PASS (924 vs 0 by context). T2 composition: PASS (follow->complete
+  at comp=1000, second sequence shift->gather independently
+  discovered). T3 retirement: PASS (predict retired at episode 49).
+  KEY FINDING: composition links shield applicability; no-comp
+  ablation catastrophically forgets (F 100% vs 24%, N2 98% vs 15%).
+  Honest bound: op bodies are innate bootstrap; only control learned.
+  v1->v2 transparent correction documented. 0 modes/bridges/handlers.
+  Status: BUILD-PASS (exploratory).
+
+- C221 (META-APPLICABILITY; commit 0478b8eaf, 2026-10-02): FAIL
+  (frozen prereg; K7 not met). Learner-owned applicability judgments
+  (Micah Priority 5). APPL gate: 8 observable features, consequence
+  records, similarity-weighted decisions, zero researcher domain
+  labels. Mechanism behavior CORRECT: A' accelerates (5 vs 10 fresh),
+  B neutral (gate=0, 5 vs 5), C burns once then rejects (wcx
+  100->150). But K7 FAIL: TREAT only single run (not 3/3), and C-P5
+  WRONG due to base TNN-2 t2_trial failing on 21st problem (BASE bug,
+  not gate fault). Final commit blocked by git index corruption
+  (files intact on disk). Rerun worker dispatched to fix base bug and
+  complete K7. Status: FAIL (recoverable).
+
+No em dashes were used in these entries (verified).
