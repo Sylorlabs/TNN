@@ -222,3 +222,26 @@ Unfrozen files only under `operand_namespace_fix/`; frozen tree read-only;
 paper untouched; nothing pushed; commits use explicit pathspecs; commit-order
 self-check (prereg commit strictly precedes implementation commit); no em
 dashes in loop docs (check_no_dash.sh).
+
+## 9. AMENDMENT 1 (2026-10-02, before any verification run)
+
+During implementation, analysis found that the section-3 `res_op` as written
+(`if(op<0){...} return ng(W,op,20);`) performs an out-of-bounds read for
+malformed `op >= 65536` (`ng` indexes byte `64+op*40`, past the workspace),
+whereas the old base routed such magnitudes to `fr_get` (slow but in-bounds).
+Valid node ids are always `< 65536` (proof P1-P3), so a memory-safety bound
+changes behavior ONLY on malformed inputs (panic becomes defined 0).
+
+Amended `res_op`:
+`fn res_op(W:[]u8,f:i32,op:i32)i32 {`
+`  if(op<0){return fr_get(W,f,-op-1);}`
+`  if(op>=65536){return 0;}`
+`  return ng(W,op,20);`
+`}`
+
+65536 here is `NN()`, the frozen workspace node count, used ONLY as a
+memory-safety bound, never as a namespace discriminator (the sign rule still
+does all discrimination). No kill bar is weakened: K6's "no panic on
+malformed operands" becomes achievable; all other bars are unaffected
+because no valid input reaches the new branch. No verification run had been
+executed at amendment time.
