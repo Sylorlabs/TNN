@@ -41,4 +41,8 @@ implementation and evaluation step and recorded here.
 
 Prereg freeze: 6bf257048 (2026-10-02 ~07:34 UTC, branch tnn-native-lab).
 Implementation commit: 2affa9bcd (2026-10-02 ~07:36 UTC).
-Eval commit: (recorded at eval commit below).
+Eval commit: cb36a9978 (2026-10-02 ~07:38 UTC).
+Cleanup commit f54465adb removed two MECH-VERIFY lane files that a
+shared-index race swept into the eval commit; the owning lane's
+worktree files were left intact and untracked. RENDER_SHA finalized
+in the follow-up commit below.

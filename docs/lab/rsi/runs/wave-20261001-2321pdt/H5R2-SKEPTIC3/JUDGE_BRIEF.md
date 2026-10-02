@@ -2,7 +2,7 @@
 
 ## Provenance header
 
-- RENDER_SHA: PENDING (sealed-eval commit: 4 assembled separator
+- RENDER_SHA: cb36a9978 (sealed-eval commit: 4 assembled separator
   world sources, 4 compiled world binaries, 12 run logs,
   EVAL_SKEPTIC3.md with the 3/3 byte-identical full-stdout hashes;
   this judge brief finalized in the immediate follow-up commit;
