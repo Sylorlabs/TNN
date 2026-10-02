@@ -7058,3 +7058,21 @@ No em dashes were used in this entry (verified).
   process working as designed. Status: COMPLETE (L3 KILLED).
 
 No em dashes were used in this entry (verified).
+
+- C286 (BELIEF-FORGIVENESS; commits 48ed4891e, d66ff903e,
+  d8669aae0, 2026-10-02): COMPLETE (independently reproduced
+  byte-identically). Forgiveness rule: streak-gated wrong
+  retirement (one historical wrong retired per consecutive
+  correct round beyond first; no tunable parameters).
+  Recovery: 851/888/925/962/1000 at +1..+5 clean rounds; full
+  recovery in wrongs+1=5 rounds. Protections preserved (K2):
+  all C272 M1/M1b/M2 predictions hold exactly. LAUNDERING
+  VULNERABILITY (M4): R,R,W liar climbs 666/800/857/888;
+  2 truths buy 1 lie's forgiveness. M4b alternating: 500/500/
+  500, no forgiveness. M5 relapse: 1000→976 immediately,
+  2 clean rounds to repair. 3/3 deterministic. Follow-ups:
+  parameter-free laundering mitigation; retired-wrong discount
+  policy. Status: COMPLETE (forgiveness works, laundering
+  open).
+
+No em dashes were used in this entry (verified).
