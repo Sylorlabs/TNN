@@ -5613,3 +5613,44 @@ No em dashes were used in these entries (verified).
   driver, tests, DFS cap, pair-search loops. LEARNER-OWNED: fragment
   choices, composed structures. 0 modes/bridges/handlers/semantic
   cases. Status: BUILD-PASS (exploratory).
+
+- C209 (SCALING-CLEAN-REPRO; commit 405fe57e5, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Clean safebin reproduction of C204
+  (11adcb0ea) in pure Zag with ZERO Python invocations. Every source
+  file regenerated or verified byte-identical via cmp/sha256sum:
+  sc_base_expanded.zag regenerated from rebinding_hardening/hard_base.zag
+  with the same sed expansion (1024->8192 nodes) and the same 11
+  threshold substitutions (1000->10000), cmp-verified identical; patch
+  and driver copied from scaling_cont, sha256sum-verified. 3/3 runs
+  byte-identical to each other AND to the prior wave's output hash
+  eee373a21053b2a3a0005be8c1c83ed923f51b22c528b36cd9425d3052146d9d.
+  Results canonically reproduced: 100 MAPs 699->5 scan visits (140x),
+  500 MAPs 3464->5 (693x), 1000 MAPs 6964->5 (1393x); move-to-front
+  consequence ordering 49->1 verifies (stale fast-path cost 2); FACT
+  index gather 32760->167 and lookup 24800->1092 (196x/23x).
+  Governance ruling: C204 remains PROCESS-FAIL as a wave; its
+  measurements are now PROMOTED to canonical evidence via this clean
+  reproduction. Status: PROCESS-PASS.
+- C210 (LOGIC-VS-PREDICT; uncommitted worker, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Battery testing Micah Priority 9
+  (H-LOGIC-1). lp_full.zag (418 lines, 331 code). Two arms, fresh
+  workspace per instance: CTL prediction-first vs TRT state-driven
+  dispatch with NO problem-type label (learner T_PROC record consulted
+  first, else exact processes before approximate: RETRIEVE, DERIVE,
+  PREDICT, INQUIRE). Adversarial twist: K and D setups include a
+  competing WEAK PREDICTOR (stale MAP predicting wrong values).
+  Results (3/3 byte-identical, sha256 2ca8d498...): TRT invoked
+  prediction 0 times across 12 K/D queries; stale predictors never
+  consulted; CTL wasted 12 predictions there and wrote 12 false PRED
+  nodes into learner state (prediction-first pollutes state, not just
+  compute). D instances derived entailed values (21, 22, 23) via
+  transitivity with 0 predictions. On uncertain U, TRT predicts
+  (pred=2, unnec=0). X-empty: honest withholding with reified
+  UNCERTAINTY node, no derivation invented. Second queries reuse the
+  learner-written T_PROC record (hit=1 everywhere). Ablation:
+  identical dispatcher derives on full state, withholds on empty,
+  predicts on predictor-only state; the K/D/U distinction emerges from
+  learner state contents. 0 new hardcoded semantic cases. Status:
+  BUILD-PASS (exploratory).
+
+No em dashes were used in these entries (verified).

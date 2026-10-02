@@ -627,3 +627,16 @@ No em dashes used (verified).
 Live count unchanged (41). The composition-collapse recommendation from C208 is now the highest-priority integration task: build the single DFS composition op, port contract/co-use/relsew as applicability predicates, remove or learner-control the segment cap, then attack MAP decomposability (T4) and expected-free verification (T5).
 
 No em dashes used (verified).
+
+---
+
+## Status update: 2026-10-02, scaling clean + logic-vs-predict landed (C209, C210)
+
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| H-SCALE-1 | TESTED (positive, clean) | C209: pure-Zag safebin reproduction of C204, zero Python, 3/3 byte-identical (eee373a2). 140x/693x/1393x canonical now. PROCESS-PASS. H-SCALE-1 moves from exploratory-only to canonical evidence. |
+| H-LOGIC-1 | TESTED (positive) | C210: state-driven dispatch never predicts on exact knowledge even with competing weak predictor; derives entailed values exactly; predicts only under uncertainty; withholds honestly on empty. Prediction-first pollutes state with false PRED nodes. 0 new semantic cases. |
+
+New treadmill note: the scaling-number lineage is unfrozen from PROCESS-FAIL but remains exploratory (no frozen prereg). Further scale claims should move to frozen preregistration per the 11-step pipeline before canonical promotion beyond reproduction.
+
+No em dashes used (verified).
