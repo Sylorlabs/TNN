@@ -136,8 +136,10 @@ is in CUR(27) and the returned relation == 82.
 3. Build sum graph: t2_asm_sum over vals=[30,40] (total 70, in
    1..900). The assembler writes NO type-1 cell edges (verified by
    reading the frozen source).
-4. Raw delete X (deactivate tag/field36; stale provenance remains).
-5. Teach summand facts (50,82,30),(50,82,40) -> G1,G2.
+4. Teach summand facts (50,82,30),(50,82,40) -> G1,G2. This MUST
+   precede the deletion: teaching after the delete would recycle X's
+   own id for a fact node.
+5. Raw delete X (deactivate tag/field36; stale provenance remains).
    promote_graph(W,sumroot,50,82,70,[G1,G2],2); require the returned
    id == X (first-fit recycle; else VOID). The new occupant is a sum
    MAP: field4=82, MAP-level provenance X->G1,G2 (high ids), fact-less
@@ -260,3 +262,13 @@ untouched. composition_integration/ untouched. Nothing pushed
 (commits local only). No em or en dashes in deliverable docs
 (audited by worker_snippets/check_no_dash.sh). Explicit pathspecs.
 Never amend shared history. No Python at any step.
+
+## 9. Amendment log (transparent, post-freeze)
+
+- Amendment 1 (2026-10-02, before any attack implementation was
+  committed): A2 construction steps 4-5 reordered. Teaching the
+  summand facts must precede the raw delete; teaching after the
+  delete would recycle X's own node id for a fact, breaking the
+  first-fit recycle the attack requires. The ATTACK-SUCCEEDS /
+  ATTACK-FAILS bar is unchanged (dr==81 succeeds, dr==82 fails).
+  No bar was weakened.
