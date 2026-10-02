@@ -6660,3 +6660,40 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C264 (XDOMAIN-GRAMMAR; prereg df4c874e2, results 9ea047e3d,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Learned grammar constrains composition via a generic clause
+  registry (domain-neutral ABI: field/xform/k/lo/hi). Arm N (no
+  channel): 0/12 well-formed; the induced grammar sits inert in
+  learner state, composer follows its own bias. Arm C (channel):
+  12/12 well-formed; identical composer filters through reg_check.
+  Fidelity 936/936 (representational adequate). K5: composer has
+  zero grammar references, one external call. Diagnosis:
+  architectural/control gap, not representational. One generic
+  channel closes 0/12 -> 12/12 with zero per-grammar wiring.
+  Caveat: the clause ABI is researcher-defined (ISA-like); the
+  channel was not learned. 3/3 byte-identical. 0
+  modes/bridges/handlers. Status: BUILD-PASS.
+
+- C265 (BASE-CERT; commit 8e142fba1, 2026-10-02): COMPLETE
+  (exploratory). Reusable certify_base harness + pure-Zag driver.
+  Scored vs ma_base.zag: A LEAK FAIL (40 nodes/24 edges per
+  problem), B ARENA PASS, C 3/3 deterministic PASS, D 4/4 correct
+  PASS. Leak documented as known limitation L1-L4, not repaired
+  (TNN-2 frozen; reclamation separate frontier). Sweep across
+  active bases dispatched. Status: BUILD-PASS (harness).
+
+- C266 (COMPOSITION-SEAL2; commit 27416d9f9, 2026-10-02): COMPLETE
+  (exploratory). Second adversarial seal on collapsed+gate
+  composition: 4 KILL, 4 SURVIVE, 1 BOUND. S2A SURVIVE
+  (winner-not-first); S2B SURVIVE (misleading co-use); S2C KILL
+  (malformed hand-pointed mark); S2D SURVIVE+BOUND (cross-domain);
+  S2E SURVIVE (T4 partial); S2F KILL (2 fabricated AP records ->
+  gate false-negative on solvable world); S2G KILL (32 decoys
+  ahead of winner, cap -> FAIL); S2H KILL (triple reuse excluded
+  -> FAIL). S2F is critical: the AP gate's consequence records can
+  be fabricated to veto solvable worlds (trust gap). Repairs
+  dispatched. Status: 4 KILLS.
+
+No em dashes were used in this entry (verified).
