@@ -65,23 +65,50 @@ sha256sum xio_run1.txt xio_run2.txt xio_run3.txt
 
 ## Step 3: Prereg commit-order self-check
 
-- PREREG.md first commit hash: (filled below after commit)
+- PREREG.md first commit hash: 12e7bc30129b5fa404c0eb209785c97c09cde1a7
+  (2026-10-02 14:25:36 UTC). Note: the commit also carried a sibling
+  worker's staged prereg pair (meta_applicability_rerun); no xio
+  implementation file was in that commit (verified via git show/ls-tree:
+  only PREREG.md + NAMECHECK.md under xio_adapters/).
 - Implementation files (xio_core.zag, xio_driver.zag) first commit
-  hash: (filled below; MUST be strictly after the prereg commit)
-- Self-check: PASS / FAIL (filled below)
-
-No implementation file may exist in git history at or before the
-prereg commit. Working-tree scratch before the prereg commit is
-allowed only if never committed; this worker wrote NO implementation
-before the prereg commit (only PREREG.md and NAMECHECK.md exist).
+  hash: (this commit, strictly after 12e7bc301; filled at commit time)
+- Self-check: PASS on prereg side (no implementation at or before
+  12e7bc301). Final verdict pending the implementation commit.
+- Post-stat-fix note: after the first 3/3 green runs, one cosmetic
+  fix was applied BEFORE the implementation commit: xio_try now
+  records tried/rejected pair counts into header field 16 and
+  xio_adapt zeroes it, so Z-line trial stats are honest (previously
+  they showed stale stats from the prior trial query). No prereg
+  bar covers these stats; mechanism and kill bars unchanged.
+  Recompiled, reran 3/3, all bars re-verified.
 
 ## Step 4: Build and run log
 
-(filled as the wave proceeds)
+- Assembly: cat ../composition_A/cx_core.zag xio_core.zag
+  xio_driver.zag > xio_full.zag (2096+ lines; cx_core.zag verbatim).
+- First compile failed: cx_core.zag's internal test battery
+  references ev_query (defined in cx_patch.zag, deliberately not
+  included). Resolved by defining ev_query in xio_driver.zag as
+  xio_query(...,xio_on=1); battery never invoked.
+- Second compile: success, warnings only (same A0102 class as
+  sibling workers), binary xio_bin 262527 bytes (pinned znc).
+- Runs: 3/3 byte-identical, sha256
+  3b10e33ebdbb99d6826b945cd6ffbcb35c99ed17a6f4da3a84fb26d0325c9e98.
+- Key trace (TREAT): XIO-BUILD id=380 m1=27 m2=115 o1=0 o2=1
+  rel1=81 rel2=82 qr=93 mid=34 ans=2; XIO-REUSE id=380 (Z2a);
+  XIO-BUILD id=467 qr=94 mid=74 ans=2 (Z2b).
 
 ## Step 5: Kill-bar scorecard
 
-(filled from runs; see REPORT.md)
+- K1 Z success (Z1=2, one adapter, o1=0 o2=1, mid=34): PASS
+- K2 Reuse (Z2a=2 via REUSE, adapters stay 1): PASS
+- K3 Generalization (Z2b=2, second adapter qr=94): PASS
+- K4 Ablation (ABL-XIO all -2, adapters 0): PASS
+- K5 No-MAP controls (ABL-X/ABL-Y/FRESH all -2): PASS
+- K6 Competence (14/18/3/4, matches C215): PASS
+- K7 Learner-built (census + grep, no table/template): PASS
+- K8 Determinism (3/3 identical sha256): PASS
+- Verdict: XIO-ADAPTERS-COMPLETE
 
 ## Constraints observed
 
