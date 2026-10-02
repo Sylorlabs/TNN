@@ -282,3 +282,29 @@ multop_bin_v4. Kill-bar thresholds UNCHANGED.
   Bars unchanged.
 
 This amendment is committed alone and re-frozen before any v5 code.
+
+## 9. Amendment v6 (2026-10-02, after the v5 run, BEFORE v6 code)
+
+v5 ran 3/3 byte-identical. Verdicts: T1=0, T2=0, T3=1.
+v5 outputs preserved as run1_v5.txt/run2_v5.txt/run3_v5.txt and
+multop_bin_v5. Kill-bar thresholds UNCHANGED.
+
+- T3=1 again (four versions running). Body revision is solid.
+- T1=0, T2=0: two-phase starves SHIFT applicability (Phase 1 has no
+  CHAIN3, so appl(3,4) only reaches ~590 and loses to F2's pair
+  history). v2's single-phase reached appl(3,4)=946 because CHAIN3
+  itself trained it. Lesson: the compositional test needs the
+  components trained in the same regime where they will compose.
+- v6: single-phase (F30/F2-25/T2-15/CHAIN3-30, as v2), 3-step
+  limit, epsilon = 0 GLOBALLY (pure greedy + least-tried tie-break
+  + uniform optimism; no stochastic exploration). Rationale: with
+  eps=0, every emitted triple is all-greedy by construction, and
+  with a 3-step limit the inner links can be rewarded ONLY by the
+  triple itself, so the first triple is STRUCTURALLY guaranteed to
+  satisfy T1's clean condition. Discovery still requires genuine
+  composition: component applicability from F/F2/T2 plus systematic
+  rotation at the novel E4 context under optimism. This is the
+  cleanest possible measurement of the research question.
+  T-gated ADJUST and full-error revision unchanged. Bars unchanged.
+
+This amendment is committed alone and re-frozen before any v6 code.
