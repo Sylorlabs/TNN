@@ -232,5 +232,8 @@ V2-REG, G-IDENT, MACH-0, K7, COMMIT-ORDER. No bar failed, no
 weakening, no reinterpretation. VOID not triggered. No forbidden
 interpreter invoked at any point (safebin toolchain guard held).
 
-Commits: prereg e5e350bb0; implementation recorded in NAMECHECK.md
-after the commit lands. Local only, never pushed.
+Commits: prereg e5e350bb0; implementation files committed in
+c64fb6d96 (swept by another worker's bare commit; verified
+byte-identical; prereg is an ancestor, order holds); this worker's
+NAMECHECK record commit follows with explicit pathspec. Local only,
+never pushed.

@@ -83,10 +83,22 @@ semantic cases. Standalone simulation; TNN core untouched.
 - Redteam implementation commit: f58e3eabd.
 - DCE-V2 prereg commit: e5e350bb0 (PREREG.md + NAMECHECK.md only;
   verified via git show --stat: 2 files, 357 insertions).
-- DCE-V2 implementation commit: <to be recorded after commit>.
-- COMMIT-ORDER self-check: e5e350bb0 must be an ancestor of the
-  implementation commit (git merge-base --is-ancestor); the prereg
-  commit strictly precedes the implementation commit. Recorded after
-  the commit lands.
+- DCE-V2 implementation commit: recorded below (NAMECHECK record
+  commit, explicit pathspec, DCE-V2 message).
+- Implementation files (src/delayed_consequence_v2.zag, REPORT.md,
+  bin/, runs/, NAMECHECK.md Steps 0-3) were staged by this worker
+  with an explicit pathspec and were swept into c64fb6d96 by another
+  worker's bare `git commit` (SCALING-FALLBACKFIX implementation,
+  2026-10-02) before this worker's own commit could land; this
+  worker's two commit attempts failed first on a pathspec/-m order
+  error, then on a HEAD race (cannot lock ref). The swept files were
+  verified byte-identical to the working tree via sha256
+  (.zag 12b34cf692017a042df94d2b149eb834602dad68dad362d5efdeaf3ef18b38d1,
+  REPORT.md e0942bb6456161c11a8f17132b51aad2a0ac664c09531b048f0d5404eab6c7b2).
+- COMMIT-ORDER self-check: prereg e5e350bb0 is an ancestor of
+  c64fb6d96 (git merge-base --is-ancestor) and of this record
+  commit; the prereg commit (PREREG.md + NAMECHECK.md only, verified
+  via git show --stat: 2 files, 357 insertions) strictly precedes
+  the implementation in git log order. COMMIT-ORDER: PASS.
 - REPORT.md: per-bar verdicts against the frozen bars, guard-identity
   diff evidence, per-arm verdicts, cognition lines added.
