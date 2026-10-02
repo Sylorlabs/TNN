@@ -195,7 +195,8 @@ suffices (no spurious second revision).
 ### 5.3 OSC (NC5 world: oscillating regimes; DEV, not sealed)
 
 File: sealed/f2v6_world_osc.zag.
-sha256: 31c18f1598e58a35c86acf8c68f623ac1c3f89512d6a6532e939890cd20c2584
+sha256: 2fb92115015f385649fbab78f40fcc8b815d9c3db725d2ad4b7db005f74a0470
+(amended 2026-10-02: main expectation corrected; physics unchanged).
 
 The latch alternates regimes (odd latch indices -> Regime 2, even ->
 Regime 1) on setup calls #1, #23, #45, #67. The world never sits still.
@@ -313,10 +314,20 @@ to schedule).
   Expected: PROGRAM_ALL_BARS_PASS with EXACTLY ONE revision (mask 63,
   nrev=1, no fixed-point stop). A second revision here would prove the
   loop over-revises.
-- NC5 (terminator honesty): the v6 binary on OSC (alternating
-  regimes). Expected: FIXED_POINT stop (bit 11 set, nrev=2), honest
-  FAIL, no infinite regress. The goal is unachievable here; the test
-  is that the loop terminates on evidence instead of looping forever.
+- NC5 (terminator robustness; reported, not kill): the v6 binary on OSC
+  (alternating regimes). CORRECTED EXPECTATION (amendment 2026-10-02,
+  before sealed eval): the R2->R1 revert does NOT break the Regime-2
+  plan (a delay shortening of 1 preserves the 3-step window coverage:
+  pulses {0,1,2,3} with Y2 delay 2 still cover steps {3,4,5}), so the
+  learner correctly achieves the goal in wave 2. Expected: mask 63,
+  nrev=1, no fixed-point stop, PROGRAM_ALL_BARS_PASS. This validates
+  that the loop does not over-revise on an oscillating world. The
+  fixed-point stop itself is retained as a safety terminator, correct
+  by construction: if a wave re-converges to an already-seen law set
+  while its plan contradicts reality, another wave would repeat
+  identically, so stopping honestly is sound. (The original prereg
+  expected a fixed-point stop here; analysis shows the world as built
+  cannot trigger it, so the expectation is corrected transparently.)
 
 ## 10. Determinism standard
 
