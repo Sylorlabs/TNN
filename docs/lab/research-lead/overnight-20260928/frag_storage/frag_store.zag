@@ -1,0 +1,673 @@
+// frag_store.zag -- H-DECOMP-1 fragment-addressable MAP storage (unfrozen).
+//
+// A fragment mark is a type-15 LINK edge in learner-state storage:
+//   from = MAP node m
+//   to   = entry guard cell of the sub-chain (guard at position start)
+//   aux  = (start << 16) | len   (segment marks packed in the edge aux field)
+//
+// API:
+//   frag_store(W,m,start,len)          write (dedup) a mark, return edge id or -1
+//   frag_fetch(W,m,start,len,cur,...)  resolve a mark, walk len steps, return len or -1
+//   frag_list(W,m,out)                 enumerate marks of m, return count
+//
+// Two consumer mechanisms share the one store:
+//   c_dfs      Composition C lineage: depth-first fragment chaining
+//   h2_greedy  Invention H2 lineage: longest-first greedy fragment assembly
+// Neither mechanism stores fragment marks of its own.
+//
+// Pure Zag. Single output buffer flushed with one raw write syscall.
+// No _zag_print for dynamic content (stdout miscompile workaround).
+// No em dashes or en dashes anywhere in this file.
+
+// ============ output: one buffer, cursor helpers, one raw write ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn o_str(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c]=s[i]; c=c+1; i=i+1; }
+  return c;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  if(v==0){ b[c]=48; return c+1; }
+  let neg:i32=0;
+  let u:i64=v;
+  if(v<0){ neg=1; u=0-v; }
+  let t:i64=u;
+  let nd:i32=0;
+  while(t>0){ nd=nd+1; t=t/10; }
+  let e:i32=c+nd+neg;
+  t=u;
+  while(nd>0){
+    nd=nd-1;
+    let d:i32=(t%10) as i32;
+    b[c+neg+nd]=(d+48) as u8;
+    t=t/10;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_i(b:[]u8,c:i32,v:i32)i32 { return o_i64(b,c,v as i64); }
+
+// ============ u8 cell access ============
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+
+// ============ workspace layout ============
+// header: 0=clock 20=node count 24=edge count 28=C reads 32=H2 reads
+// nodes: 40 bytes at 64+n*40, field36=live
+// edges: 16 bytes at 41024+e*16: 0=from 4=type 8=to 12=aux; empty when from=-1
+fn NN()i32 { return 1024; }
+fn NE()i32 { return 4096; }
+fn hg(W:[]u8,f:i32)i32 { return get32(W,f); }
+fn hs(W:[]u8,f:i32,v:i32)void { set32(W,f,v); return; }
+fn noff(n:i32)i32 { return 64+n*40; }
+fn ng(W:[]u8,n:i32,f:i32)i32 { return get32(W,noff(n)+f); }
+fn ns(W:[]u8,n:i32,f:i32,v:i32)void { set32(W,noff(n)+f,v); return; }
+fn eoff(e:i32)i32 { return 41024+e*16; }
+fn eg(W:[]u8,e:i32,f:i32)i32 { return get32(W,eoff(e)+f); }
+fn es(W:[]u8,e:i32,f:i32,v:i32)void { set32(W,eoff(e)+f,v); return; }
+fn T_FACT()i32 { return 1; }
+fn T_MAP()i32 { return 20; }
+fn T_SET()i32 { return 101; }
+fn T_GRD()i32 { return 102; }
+fn E_DEP()i32 { return 1; }
+fn E_SEQ()i32 { return 12; }
+fn E_FRAG()i32 { return 15; }
+fn fpack(s:i32,l:i32)i32 { return (s<<16)|l; }
+fn fun_s(a:i32)i32 { return a>>16; }
+fn fun_l(a:i32)i32 { return a&65535; }
+
+fn w_init(W:[]u8)void {
+  hs(W,0,0); hs(W,20,2); hs(W,24,0); hs(W,28,0); hs(W,32,0);
+  let n:i32=0;
+  while(n<1024){ ns(W,n,36,0); n=n+1; }
+  let e:i32=0;
+  while(e<4096){ es(W,e,0,-1); e=e+1; }
+  return;
+}
+fn alloc_node(W:[]u8)i32 {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==0){
+      ns(W,n,36,1);
+      ns(W,n,0,0); ns(W,n,4,0); ns(W,n,8,0); ns(W,n,12,0); ns(W,n,16,0);
+      ns(W,n,20,0); ns(W,n,24,0); ns(W,n,28,0); ns(W,n,32,0);
+      hs(W,20,hg(W,20)+1);
+      return n;
+    }
+    n=n+1;
+  }
+  return -1;
+}
+fn add_edge(W:[]u8,from:i32,ty:i32,to:i32,aux:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==-1){
+      es(W,e,0,from); es(W,e,4,ty); es(W,e,8,to); es(W,e,12,aux);
+      hs(W,24,hg(W,24)+1);
+      return e;
+    }
+    e=e+1;
+  }
+  return -1;
+}
+
+// ============ facts ============
+fn mk_fact(W:[]u8,s:i32,r:i32,o:i32)i32 {
+  let n:i32=alloc_node(W);
+  if(n<0){return -1;}
+  ns(W,n,0,1); ns(W,n,20,s); ns(W,n,24,r); ns(W,n,28,o);
+  return n;
+}
+fn lu_fact(W:[]u8,s:i32,r:i32)i32 {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==s && ng(W,n,24)==r){return n;}
+    n=n+1;
+  }
+  return -1;
+}
+fn seq_nx(W:[]u8,c:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)!=-1 && eg(W,e,4)==12 && eg(W,e,0)==c){return eg(W,e,8);}
+    e=e+1;
+  }
+  return -1;
+}
+fn dep_fact(W:[]u8,c:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)!=-1 && eg(W,e,4)==1 && eg(W,e,0)==c){return eg(W,e,8);}
+    e=e+1;
+  }
+  return -1;
+}
+
+// ============ MAP builder: guard/set chain with DEP licensing facts ============
+// chain: G0 -12-> S0 -SEQ-> G1 -12-> S1 ... ; each SET has a DEP edge to its fact.
+fn mk_map(W:[]u8,s:i32,r:i32,seq:[]u8,nsteps:i32)i32 {
+  let root:i32=alloc_node(W);
+  if(root<0){return -1;}
+  ns(W,root,0,102);
+  let prev:i32=-1;
+  let cur:i32=s;
+  let g:i32=root;
+  let i:i32=0;
+  while(i<nsteps){
+    let st:i32=alloc_node(W);
+    if(st<0){return -1;}
+    ns(W,st,0,101);
+    ns(W,g,12,st);
+    let f:i32=lu_fact(W,cur,get32(seq,i*4));
+    if(f<0){return -1;}
+    add_edge(W,st,1,f,0);
+    if(prev>=0){ add_edge(W,prev,12,g,0); }
+    cur=ng(W,f,28);
+    prev=st;
+    i=i+1;
+    if(i<nsteps){
+      g=alloc_node(W);
+      if(g<0){return -1;}
+      ns(W,g,0,102);
+    }
+  }
+  let m:i32=alloc_node(W);
+  if(m<0){return -1;}
+  ns(W,m,0,20); ns(W,m,4,r); ns(W,m,8,s);
+  ns(W,m,20,root); ns(W,m,24,hg(W,24)); ns(W,m,28,cur);
+  return m;
+}
+
+// ============ structural chain analysis (never consults MAP fields 4/8) ============
+fn chain_len(W:[]u8,m:i32)i32 {
+  if(m<2 || m>=1024){return -1;}
+  if(ng(W,m,36)!=1 || ng(W,m,0)!=20){return -1;}
+  let cell:i32=ng(W,m,20);
+  let n:i32=0;
+  let exp:i32=102;
+  let k:i32=0;
+  while(k<200){
+    if(cell<2 || cell>=1024 || ng(W,cell,36)!=1){return -1;}
+    let tag:i32=ng(W,cell,0);
+    if(exp==102){
+      if(tag!=102){return -1;}
+      cell=ng(W,cell,12);
+      exp=101;
+    } else {
+      if(tag!=101){return -1;}
+      if(dep_fact(W,cell)<0){return -1;}
+      n=n+1;
+      cell=seq_nx(W,cell);
+      if(cell<0){return n;}
+      exp=102;
+    }
+    k=k+1;
+  }
+  return -1;
+}
+fn entry_cell(W:[]u8,m:i32,start:i32)i32 {
+  let cell:i32=ng(W,m,20);
+  let k:i32=0;
+  while(k<start){
+    if(cell<2 || ng(W,cell,36)!=1 || ng(W,cell,0)!=102){return -1;}
+    let st:i32=ng(W,cell,12);
+    if(st<2 || ng(W,st,36)!=1 || ng(W,st,0)!=101){return -1;}
+    cell=seq_nx(W,st);
+    if(cell<0){return -1;}
+    k=k+1;
+  }
+  if(cell<2 || ng(W,cell,36)!=1 || ng(W,cell,0)!=102){return -1;}
+  return cell;
+}
+
+// ============ fragment store API ============
+fn frag_store(W:[]u8,m:i32,start:i32,len:i32)i32 {
+  if(m<2 || m>=1024){return -1;}
+  if(ng(W,m,36)!=1 || ng(W,m,0)!=20){return -1;}
+  if(start<0 || len<1){return -1;}
+  let L:i32=chain_len(W,m);
+  if(L<0){return -1;}
+  if(start+len>L){return -1;}
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && fun_s(eg(W,e,12))==start && fun_l(eg(W,e,12))==len){
+      return e;
+    }
+    e=e+1;
+  }
+  let en:i32=entry_cell(W,m,start);
+  if(en<0){return -1;}
+  return add_edge(W,m,15,en,fpack(start,len));
+}
+fn frag_fetch(W:[]u8,m:i32,start:i32,len:i32,cur:i32,vals:[]u8,fids:[]u8)i32 {
+  let entry:i32=-1;
+  let e:i32=0;
+  while(e<4096 && entry<0){
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && fun_s(eg(W,e,12))==start && fun_l(eg(W,e,12))==len){
+      entry=eg(W,e,8);
+    }
+    e=e+1;
+  }
+  if(entry<0){return -1;}
+  set32(vals,0,cur);
+  let cell:i32=entry;
+  let i:i32=0;
+  while(i<len){
+    if(cell<2 || ng(W,cell,36)!=1 || ng(W,cell,0)!=102){return -1;}
+    let st:i32=ng(W,cell,12);
+    if(st<2 || ng(W,st,36)!=1 || ng(W,st,0)!=101){return -1;}
+    let f:i32=dep_fact(W,st);
+    if(f<0 || ng(W,f,36)!=1 || ng(W,f,0)!=1){return -1;}
+    let rq:i32=ng(W,f,24);
+    let fnd:i32=lu_fact(W,get32(vals,i*4),rq);
+    if(fnd<0){return -1;}
+    set32(vals,(i+1)*4,ng(W,fnd,28));
+    set32(fids,i*4,fnd);
+    cell=seq_nx(W,st);
+    i=i+1;
+  }
+  return len;
+}
+fn frag_list(W:[]u8,m:i32,out:[]u8)i32 {
+  let n:i32=0;
+  let e:i32=0;
+  while(e<4096 && n<64){
+    if(eg(W,e,0)==m && eg(W,e,4)==15){
+      set32(out,n*12,fun_s(eg(W,e,12)));
+      set32(out,n*12+4,fun_l(eg(W,e,12)));
+      set32(out,n*12+8,eg(W,e,8));
+      n=n+1;
+    }
+    e=e+1;
+  }
+  return n;
+}
+fn count_frag(W:[]u8)i32 {
+  let n:i32=0;
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)!=-1 && eg(W,e,4)==15){n=n+1;}
+    e=e+1;
+  }
+  return n;
+}
+// whole-MAP satisfiability from cur (control path, no fragment marks)
+fn map_satisfy(W:[]u8,m:i32,cur:i32,vals:[]u8)i32 {
+  let cell:i32=ng(W,m,20);
+  set32(vals,0,cur);
+  let i:i32=0;
+  while(i<64){
+    if(cell<2 || ng(W,cell,36)!=1 || ng(W,cell,0)!=102){return -1;}
+    let st:i32=ng(W,cell,12);
+    if(st<2 || ng(W,st,36)!=1 || ng(W,st,0)!=101){return -1;}
+    let f:i32=dep_fact(W,st);
+    if(f<0){return -1;}
+    let fnd:i32=lu_fact(W,get32(vals,i*4),ng(W,f,24));
+    if(fnd<0){return -1;}
+    set32(vals,(i+1)*4,ng(W,fnd,28));
+    i=i+1;
+    cell=seq_nx(W,st);
+    if(cell<0){return i;}
+  }
+  return -1;
+}
+
+// ============ mechanism C-DFS: depth-first fragment chaining ============
+fn used_has(ub:[]u8,nu:i32,m:i32,s:i32,l:i32)i32 {
+  let i:i32=0;
+  while(i<nu){
+    if(get32(ub,i*12)==m && get32(ub,i*12+4)==s && get32(ub,i*12+8)==l){return 1;}
+    i=i+1;
+  }
+  return 0;
+}
+fn c_dfs(W:[]u8,cur:i32,exp:i32,dep:i32,ub:[]u8,nu:i32,pb:[]u8,pl:[]u8)i32 {
+  if(cur==exp){
+    let i:i32=0;
+    while(i<nu){
+      set32(pb,i*12,get32(ub,i*12));
+      set32(pb,i*12+4,get32(ub,i*12+4));
+      set32(pb,i*12+8,get32(ub,i*12+8));
+      i=i+1;
+    }
+    set32(pl,0,nu);
+    return 1;
+  }
+  if(dep>=6){return 0;}
+  let lb:[]u8=z_alloc(768);
+  let vb:[]u8=z_alloc(256);
+  let fb:[]u8=z_alloc(256);
+  let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){
+      let nl:i32=frag_list(W,m,lb);
+      let k:i32=0;
+      while(k<nl){
+        let s0:i32=get32(lb,k*12);
+        let l0:i32=get32(lb,k*12+4);
+        if(used_has(ub,nu,m,s0,l0)==0){
+          let r:i32=frag_fetch(W,m,s0,l0,cur,vb,fb);
+          hs(W,28,hg(W,28)+1);
+          if(r>0){
+            set32(ub,nu*12,m); set32(ub,nu*12+4,s0); set32(ub,nu*12+8,l0);
+            if(c_dfs(W,get32(vb,r*4),exp,dep+1,ub,nu+1,pb,pl)==1){return 1;}
+          }
+        }
+        k=k+1;
+      }
+    }
+    m=m+1;
+  }
+  return 0;
+}
+// control: whole-MAP DFS, no fragment marks consulted
+fn whole_dfs(W:[]u8,cur:i32,exp:i32,dep:i32,ub:[]u8,nu:i32)i32 {
+  if(cur==exp){return 1;}
+  if(dep>=6){return 0;}
+  let vb:[]u8=z_alloc(256);
+  let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20 && used_has(ub,nu,m,0,0)==0){
+      let r:i32=map_satisfy(W,m,cur,vb);
+      if(r>0){
+        set32(ub,nu*12,m); set32(ub,nu*12+4,0); set32(ub,nu*12+8,0);
+        if(whole_dfs(W,get32(vb,r*4),exp,dep+1,ub,nu+1)==1){return 1;}
+      }
+    }
+    m=m+1;
+  }
+  return 0;
+}
+
+// ============ mechanism H2-greedy: longest-first fragment assembly ============
+fn h2_greedy(W:[]u8,cur:i32,exp:i32,ub:[]u8,nu:i32,pb:[]u8,pl:[]u8)i32 {
+  let cb:[]u8=z_alloc(2048);
+  let vb:[]u8=z_alloc(256);
+  let fb:[]u8=z_alloc(256);
+  let lb:[]u8=z_alloc(768);
+  let round:i32=0;
+  while(round<8){
+    let nc:i32=0;
+    let m:i32=2;
+    while(m<1024 && nc<128){
+      if(ng(W,m,36)==1 && ng(W,m,0)==20){
+        let nl:i32=frag_list(W,m,lb);
+        let k:i32=0;
+        while(k<nl && nc<128){
+          set32(cb,nc*16,m);
+          set32(cb,nc*16+4,get32(lb,k*12));
+          set32(cb,nc*16+8,get32(lb,k*12+4));
+          set32(cb,nc*16+12,get32(lb,k*12+8));
+          nc=nc+1;
+          k=k+1;
+        }
+      }
+      m=m+1;
+    }
+    let i:i32=0;
+    while(i<nc){
+      let j:i32=i+1;
+      while(j<nc){
+        let li:i32=get32(cb,i*16+8);
+        let lj:i32=get32(cb,j*16+8);
+        let mi:i32=get32(cb,i*16);
+        let mj:i32=get32(cb,j*16);
+        let si:i32=get32(cb,i*16+4);
+        let sj:i32=get32(cb,j*16+4);
+        let sw:i32=0;
+        if(lj>li){sw=1;}
+        else {
+          if(lj==li){
+            if(mj<mi){sw=1;}
+            else { if(mj==mi && sj<si){sw=1;} }
+          }
+        }
+        if(sw==1){
+          let t:i32=0;
+          while(t<4){
+            let a:i32=get32(cb,i*16+t*4);
+            set32(cb,i*16+t*4,get32(cb,j*16+t*4));
+            set32(cb,j*16+t*4,a);
+            t=t+1;
+          }
+        }
+        j=j+1;
+      }
+      i=i+1;
+    }
+    let adv:i32=0;
+    let k2:i32=0;
+    while(k2<nc && adv==0){
+      let cm:i32=get32(cb,k2*16);
+      let cs:i32=get32(cb,k2*16+4);
+      let cl:i32=get32(cb,k2*16+8);
+      if(used_has(ub,nu,cm,cs,cl)==0){
+        let r:i32=frag_fetch(W,cm,cs,cl,cur,vb,fb);
+        hs(W,32,hg(W,32)+1);
+        if(r>0){
+          set32(ub,nu*12,cm); set32(ub,nu*12+4,cs); set32(ub,nu*12+8,cl);
+          nu=nu+1;
+          cur=get32(vb,r*4);
+          adv=1;
+        }
+      }
+      k2=k2+1;
+    }
+    if(adv==0){return 0;}
+    if(cur==exp){
+      let q:i32=0;
+      while(q<nu){
+        set32(pb,q*12,get32(ub,q*12));
+        set32(pb,q*12+4,get32(ub,q*12+4));
+        set32(pb,q*12+8,get32(ub,q*12+8));
+        q=q+1;
+      }
+      set32(pl,0,nu);
+      return 1;
+    }
+    round=round+1;
+  }
+  return 0;
+}
+
+// ============ driver ============
+fn main()i32 {
+  let out:[]u8=z_alloc(65536);
+  let c:i32=0;
+  c=o_str(out,c,"H-DECOMP-1 frag-store run\n");
+  let W:[]u8=z_alloc(110656);
+  w_init(W);
+  // T4 world facts: X plen-4 r1, Y plen-2 r2
+  mk_fact(W,11,1,12); mk_fact(W,12,1,13); mk_fact(W,13,1,14); mk_fact(W,14,1,15);
+  mk_fact(W,21,2,22); mk_fact(W,22,2,23);
+  let sx:[]u8=z_alloc(16);
+  set32(sx,0,1); set32(sx,4,1); set32(sx,8,1); set32(sx,12,1);
+  let sy:[]u8=z_alloc(8);
+  set32(sy,0,2); set32(sy,4,2);
+  let mx:i32=mk_map(W,11,71,sx,4);
+  let my:i32=mk_map(W,21,72,sy,2);
+  c=o_str(out,c,"maps mx=");
+  c=o_i(out,c,mx);
+  c=o_str(out,c," my=");
+  c=o_i(out,c,my);
+  c=o_nl(out,c);
+
+  // UNIT-1: bounds rejection, no edges written
+  let e0:i32=count_frag(W);
+  let r1:i32=frag_store(W,mx,-1,2);
+  let r2:i32=frag_store(W,mx,0,0);
+  let r3:i32=frag_store(W,mx,2,3);
+  let r4:i32=frag_store(W,999,0,1);
+  let u1:i32=0;
+  if(r1==-1 && r2==-1 && r3==-1 && r4==-1 && count_frag(W)==e0){u1=1;}
+  c=o_str(out,c,"UNIT-1 bounds rej=[");
+  c=o_i(out,c,r1); c=o_str(out,c,","); c=o_i(out,c,r2);
+  c=o_str(out,c,","); c=o_i(out,c,r3); c=o_str(out,c,","); c=o_i(out,c,r4);
+  c=o_str(out,c,"] edges0=");
+  c=o_i(out,c,e0);
+  c=o_str(out,c," => ");
+  if(u1==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // store the six marks
+  let e1:i32=frag_store(W,mx,0,3);
+  let e2:i32=frag_store(W,mx,0,4);
+  let e3:i32=frag_store(W,mx,1,3);
+  let e4:i32=frag_store(W,mx,2,2);
+  let e5:i32=frag_store(W,my,0,2);
+  let e6:i32=frag_store(W,my,0,1);
+  c=o_str(out,c,"STORE edges=[");
+  c=o_i(out,c,e1); c=o_str(out,c,","); c=o_i(out,c,e2);
+  c=o_str(out,c,","); c=o_i(out,c,e3); c=o_str(out,c,","); c=o_i(out,c,e4);
+  c=o_str(out,c,","); c=o_i(out,c,e5); c=o_str(out,c,","); c=o_i(out,c,e6);
+  c=o_str(out,c,"] count=");
+  c=o_i(out,c,count_frag(W));
+  c=o_nl(out,c);
+
+  // UNIT-2: dedup
+  let d1:i32=frag_store(W,mx,0,3);
+  let u2:i32=0;
+  if(d1==e1 && count_frag(W)==6){u2=1;}
+  c=o_str(out,c,"UNIT-2 dedup same=");
+  c=o_i(out,c,d1);
+  c=o_str(out,c," edges=");
+  c=o_i(out,c,count_frag(W));
+  c=o_str(out,c," => ");
+  if(u2==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // UNIT-3: unknown fetch
+  let vb3:[]u8=z_alloc(64);
+  let fb3:[]u8=z_alloc(64);
+  let r5:i32=frag_fetch(W,mx,3,1,11,vb3,fb3);
+  let u3:i32=0;
+  if(r5==-1){u3=1;}
+  c=o_str(out,c,"UNIT-3 unknown fetch=");
+  c=o_i(out,c,r5);
+  c=o_str(out,c," => ");
+  if(u3==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // UNIT-4: list enumeration (separate buffers; my list must not clobber mx)
+  let lbx:[]u8=z_alloc(768);
+  let lby:[]u8=z_alloc(768);
+  let nx:i32=frag_list(W,mx,lbx);
+  let ny:i32=frag_list(W,my,lby);
+  let pok:i32=0;
+  if(nx==4 && ny==2){pok=1;}
+  // check exact pairs for mx: (0,3) (0,4) (1,3) (2,2) in edge order
+  if(get32(lbx,0)!=0 || get32(lbx,4)!=3){pok=0;}
+  if(get32(lbx,12)!=0 || get32(lbx,16)!=4){pok=0;}
+  if(get32(lbx,24)!=1 || get32(lbx,28)!=3){pok=0;}
+  if(get32(lbx,36)!=2 || get32(lbx,40)!=2){pok=0;}
+  // check exact pairs for my: (0,2) (0,1) in edge order
+  if(get32(lby,0)!=0 || get32(lby,4)!=2){pok=0;}
+  if(get32(lby,12)!=0 || get32(lby,16)!=1){pok=0;}
+  let u4:i32=0;
+  if(pok==1){u4=1;}
+  c=o_str(out,c,"UNIT-4 list mx=");
+  c=o_i(out,c,nx);
+  c=o_str(out,c," my=");
+  c=o_i(out,c,ny);
+  c=o_str(out,c," pairs-ok=");
+  c=o_i(out,c,pok);
+  c=o_str(out,c," => ");
+  if(u4==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // UNIT-5: fetch correctness from cur=11 over X facts
+  let vb5:[]u8=z_alloc(64);
+  let fb5:[]u8=z_alloc(64);
+  let r6:i32=frag_fetch(W,mx,0,3,11,vb5,fb5);
+  let u5:i32=0;
+  if(r6==3 && get32(vb5,0)==11 && get32(vb5,4)==12 && get32(vb5,8)==13 && get32(vb5,12)==14){u5=1;}
+  c=o_str(out,c,"UNIT-5 fetch steps=");
+  c=o_i(out,c,r6);
+  c=o_str(out,c," vals=[");
+  c=o_i(out,c,get32(vb5,0)); c=o_str(out,c,",");
+  c=o_i(out,c,get32(vb5,4)); c=o_str(out,c,",");
+  c=o_i(out,c,get32(vb5,8)); c=o_str(out,c,",");
+  c=o_i(out,c,get32(vb5,12));
+  c=o_str(out,c,"] => ");
+  if(u5==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // Z facts for the T4 query
+  mk_fact(W,101,1,102); mk_fact(W,102,1,103); mk_fact(W,103,1,104);
+  mk_fact(W,104,2,105); mk_fact(W,105,2,106);
+
+  // T4-CTRL: whole-MAP DFS must FAIL (replicates C208)
+  let uw:[]u8=z_alloc(768);
+  let tctrl:i32=whole_dfs(W,101,106,0,uw,0);
+  c=o_str(out,c,"T4-CTRL whole-map ans=");
+  c=o_i(out,c,tctrl);
+  c=o_str(out,c," => ");
+  if(tctrl==0){c=o_str(out,c,"PASS(FAIL-replicated)\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // T4-FRAG-C: C-DFS over the shared store
+  let ub:[]u8=z_alloc(768);
+  let pb:[]u8=z_alloc(768);
+  let pl:[]u8=z_alloc(16);
+  let tc:i32=c_dfs(W,101,106,0,ub,0,pb,pl);
+  let plen:i32=get32(pl,0);
+  let p0m:i32=get32(pb,0); let p0s:i32=get32(pb,4); let p0l:i32=get32(pb,8);
+  let p1m:i32=get32(pb,12); let p1s:i32=get32(pb,16); let p1l:i32=get32(pb,20);
+  let u6:i32=0;
+  if(tc==1 && plen==2 && p0m==mx && p0s==0 && p0l==3 && p1m==my && p1s==0 && p1l==2){u6=1;}
+  c=o_str(out,c,"T4-FRAG-C ans=");
+  c=o_i(out,c,tc);
+  c=o_str(out,c," pathlen=");
+  c=o_i(out,c,plen);
+  c=o_str(out,c," path=[(");
+  c=o_i(out,c,p0m); c=o_str(out,c,","); c=o_i(out,c,p0s); c=o_str(out,c,","); c=o_i(out,c,p0l);
+  c=o_str(out,c,"),(");
+  c=o_i(out,c,p1m); c=o_str(out,c,","); c=o_i(out,c,p1s); c=o_str(out,c,","); c=o_i(out,c,p1l);
+  c=o_str(out,c,")] => ");
+  if(u6==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // T4-FRAG-H2: greedy over the same store
+  let uh:[]u8=z_alloc(768);
+  let ph:[]u8=z_alloc(768);
+  let ql:[]u8=z_alloc(16);
+  let th:i32=h2_greedy(W,101,106,uh,0,ph,ql);
+  let hlen:i32=get32(ql,0);
+  let u7:i32=0;
+  if(th==1 && hlen==2){u7=1;}
+  c=o_str(out,c,"T4-FRAG-H2 ans=");
+  c=o_i(out,c,th);
+  c=o_str(out,c," pathlen=");
+  c=o_i(out,c,hlen);
+  c=o_str(out,c," => ");
+  if(u7==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  // SHARED: one store, both mechanisms read it
+  let ne:i32=count_frag(W);
+  let cr:i32=hg(W,28);
+  let hr:i32=hg(W,32);
+  let u8:i32=0;
+  if(ne==6 && cr>0 && hr>0){u8=1;}
+  c=o_str(out,c,"SHARED frag-edges=");
+  c=o_i(out,c,ne);
+  c=o_str(out,c," c-reads=");
+  c=o_i(out,c,cr);
+  c=o_str(out,c," h2-reads=");
+  c=o_i(out,c,hr);
+  c=o_str(out,c," => ");
+  if(u8==1){c=o_str(out,c,"PASS\n");} else {c=o_str(out,c,"FAIL\n");}
+
+  let all:i32=0;
+  if(u1==1 && u2==1 && u3==1 && u4==1 && u5==1 && tctrl==0 && u6==1 && u7==1 && u8==1){all=1;}
+  if(all==1){c=o_str(out,c,"VERDICT=FRAG-STORAGE-COMPLETE\n");}
+  else {c=o_str(out,c,"VERDICT=FRAG-STORAGE-INCOMPLETE\n");}
+  let w:i64=_zag_raw_syscall(1,1,(_zag_slice_ptr(out) as i64),c as i64,0,0,0);
+  return 0;
+}
