@@ -5867,3 +5867,45 @@ No em dashes were used in this entry (verified).
   0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C225 (INVENTION-H2-REDTEAM; commit f870c5930, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Independent adversarial battery on
+  H2 fragment recombination (6 attacks, 3/3 byte-identical per arm).
+  A1 SPURIOUS: BOUND (strong); answer-only verifier promotes
+  distractor-determined form, never inspects relation form. A2
+  DUP-ABL: BOUND; duplicate MAP defeats the ablation causality
+  reading; causal unit is fragment shape, provenance is
+  search-order-relative. A3 SINGLE: BOUND; Z' "reuse" is whole-MAP
+  fragment, really Composition C's operation. A4 OVERFLOW: KILL;
+  12-link + 4 duplicates -> panic slice out of bounds; cand buffer
+  1296 bytes = 108 entries but level-2 writes 96..143 (432-byte heap
+  overflow); "strictly generalizes whole-MAP chaining" operationally
+  false as implemented. A4c: BOUND; used-triple exclusion bans
+  chaining same fragment twice (shared with C). A5 THREEFRAG:
+  SURVIVE; genuine 3-proper-fragment recombination solves 9-link goal
+  where whole-MAP fails. Net: honest L2 core survives in narrowed
+  envelope (distractor-free, level-2 candidates <13). Five fix
+  recommendations in REPORT.md. 0 modes/bridges/handlers. Status:
+  ADVERSARIAL (1 kill, 4 bounds, 1 survive).
+
+- C226 (INVENTION-H3-REDTEAM; commit 9ef522189, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Independent adversarial battery on
+  H3 constraint construction (5 attacks, mirror-fidelity
+  cross-validated, 3/3 byte-identical). Attack 1 underdetermination:
+  KILL; first DFS hit taken with no scoring, teach order decides form,
+  no continued search after verify-fail (verifying chain exists but
+  INVENT-FAIL emitted). Attack 2 contradictions: SURVIVE; all
+  unsatisfiable sets terminate cleanly. Attack 3 blowup: BOUND;
+  visits match full enumeration exactly (pruning contributes nothing
+  dense-case); plen-7 is a permanent scope ceiling. Attack 4
+  smuggling: BOUND; all 3 H3 worlds admit exactly one
+  constraint-satisfying sequence with zero backtracks; form-selecting
+  work done by constraint author, not mechanism; H3 is constraint
+  satisfaction, not form discovery. Attack 5 poisoning: KILL;
+  stuttering detour promoted check=1 (answer-only verification);
+  first_lit never read by invent_dfs (harness-only constraint).
+  Recommended: verify-fail backtrack, enforce/drop first_lit,
+  tie-breaking policy. 0 modes/bridges/handlers. Status:
+  ADVERSARIAL (2 kills, 2 bounds, 1 survive).
+
+No em dashes were used in these entries (verified).
