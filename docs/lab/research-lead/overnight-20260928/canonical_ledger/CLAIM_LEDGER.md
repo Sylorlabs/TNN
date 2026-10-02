@@ -6519,3 +6519,37 @@ No em dashes were used in this entry (verified).
   executed; no PROCESS-FAIL per worker. Status: 3 KILLS.
 
 No em dashes were used in this entry (verified).
+
+- C253a (XIO-GENERAL-REDTEAM full; commit 681db154c, 2026-10-02):
+  3 KILL, 1 BOUND, plus B5 confirmation. B1 sclass defeat: KILL
+  (output-dead INC cells; new dispatch confidently stages a
+  behaviorally-chain MAP through the count branch, returning NUMBER
+  where the graph computes NODE; worse than old core's silent
+  exclusion). B2 class -1: BOUND (fail-closed as documented, but
+  discriminators not total over graph structure). B3 gate nonsense:
+  KILL (sclass-difference admits a same-type pair; number-as-node
+  handoff verifies via node-id/number collision; reuse returns 71
+  determined by colliding node 2). B4 class-2 garbage: KILL
+  (constant-5 function staged as sum; class-2 never executes T's
+  graph, re-derives from DEP edges; INC-only does not denote total
+  semantics). B5 A1 rerun: KILL (not fixed). Synthesis: the core
+  reasons through graph-syntax proxies rather than behavioral
+  evidence; the new machinery converts silent exclusion into
+  confident miscomputation. The generalization did not repair the
+  proxy. Does not void XIO-GENERAL-COMPLETE; bounds the trust
+  envelope. Incidental: frozen fr_get/fr_set alias slots >=4 into
+  node 0 header (slots 0-3 safe). Status: 4 KILLS.
+
+- C258 (GOALINF-REDTEAM; commit 808ee293f, 2026-10-02): COMPLETE
+  (exploratory). Attack A: KILL (decoy structure vs correct
+  confident FACT -> route 2 CONFLICT, correct FACT demoted, 207
+  constructed "with verification"; verification was circular,
+  checked against the decoy's own logic). B: BOUND (score 3 vs 2
+  discontinuity, deterministic, no flip). C: BOUND (stale-vs-stale:
+  structure wins, stale 307 constructed, truth 912 ignored). D:
+  BOUND (six weak agreeing FACTs withhold honestly, no
+  aggregation). Repair dispatched (independent structure validation
+  before FACT demotion). 3/3 byte-identical. Status: 1 KILL, 3
+  BOUNDS.
+
+No em dashes were used in this entry (verified).
