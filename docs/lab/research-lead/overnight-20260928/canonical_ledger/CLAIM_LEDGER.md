@@ -7076,3 +7076,24 @@ No em dashes were used in this entry (verified).
   open).
 
 No em dashes were used in this entry (verified).
+
+- C287 (COGOP-INVENTION; commits e9ffbd9f7, 52b093810,
+  2026-10-02): COMPLETE. Learner invented op tower on frozen
+  4-op ISA (MOVE/INC/DEC/BEQ)+CALL: OP_ADD from basis, OP_MUL
+  from basis+CALL OP_ADD, OP_POW from basis+CALL OP_ADD+CALL
+  OP_MUL. Each persisted to learner-state inventory, reused
+  opaquely for next invention. 3/3 byte-identical. Ablations:
+  MUL-without-ADD (59040 candidates) and POW-without-MUL
+  (61992) both INVENTION-FAIL; invented ops causally
+  necessary. Not-a-macro: T1/T2/T3 prove new semantic content
+  (input-dependent iteration count); no fixed unfolding
+  expresses it. STAGE-2 SURPRISE: learner found different
+  valid multiplication than prereg predicted
+  (P0,[DEC R0;CALL 0],R0 vs P4,[MOVE R1 R3;CALL 0],R1);
+  genuine construction, not matching. Honest limit: REPEAT
+  schema researcher-enumerated; does not clear C0-B open-form
+  bar. Operation invention with learner-defined semantics,
+  not full L3. Status: COMPLETE (invention demonstrated,
+  C0-B open).
+
+No em dashes were used in this entry (verified).
