@@ -260,3 +260,25 @@ multop_bin_v3. Kill-bar thresholds UNCHANGED.
   T-gated ADJUST, full-error revision) is unchanged. Bars unchanged.
 
 This amendment is committed alone and re-frozen before any v4 code.
+
+## 8. Amendment v5 (2026-10-02, after the v4 run, BEFORE v5 code)
+
+v4 ran 3/3 byte-identical. Verdicts: T1=0, T2=0, T3=1.
+v4 outputs preserved as run1_v4.txt/run2_v4.txt/run3_v4.txt and
+multop_bin_v4. Kill-bar thresholds UNCHANGED.
+
+- T3=1 again. Body revision is solid across v2/v3/v4.
+- T1=0, T2=0 (CHAIN3 69 episodes, 0 solved): at CHAIN3-E2,
+  COMPLETE (comp(1,2)=627 from F2 pair history) still outscored
+  SHIFT (appl(3,4)=571 + comp(1,3)=0). SHIFT's applicability was
+  diluted by unavoidable exploration zeros (T2 episodes where a
+  mistep left SHIFT non-terminal in an unsolved episode), so the
+  applicability-vs-pair-history contest was not fair: weak
+  applicability vs strong habit. This contest IS the experiment,
+  so Phase 1 must train the component strongly.
+- v5: Phase 1 distribution becomes F(20)/F2(20)/T2(60) (was
+  35/25/40). Everything else unchanged (two phases, eps=0 in
+  Phase 2, 3-step limit, T-gated ADJUST, full-error revision).
+  Bars unchanged.
+
+This amendment is committed alone and re-frozen before any v5 code.
