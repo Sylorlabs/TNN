@@ -5823,3 +5823,27 @@ No em dashes were used in these entries (verified).
   BUILD-PASS (exploratory).
 
 No em dashes were used in this entry (verified).
+
+- C223 (BELIEF-DELAYED; prereg a83c30b21, results 065244564,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation; one
+  transparent amendment E3 arithmetic 22->12 before eval). Belief under
+  delay, eviction, rediscovery, defection (extension of C211). Phase A:
+  3 moderate H1 reports -> CONFIDENT H1 (6000 vs bar 4000). Phase B1:
+  12 unrelated events leave status/scores bit-identical; delay itself
+  weakens nothing. Phase B2: delayed strong H2 revises with latency 4
+  (same bar as immediate); first contrary yields directional
+  uncertainty leaning prior, not symmetric flip. Phase C eviction:
+  32-event burst evicts all 23 records FIFO; scores persist, provenance
+  degrades gracefully (why-H2 returns 0, identity register still
+  answers eids as seen). Phase C rediscovery: PROV arm rejects all 4
+  re-presented events (ndup=4, no double count) while genuine new
+  event accepted; NAIVE arm (identity ablated) double counts exactly
+  as preregistered (s2 12000->24000). Provenance win demonstrated
+  causally. Phase D: reliability tracks defection monotonically
+  (1000->800->666); identical claim contributes 2000 vs 1332.
+  Rationality 5/6 (sixth is NAIVE bug control, 0/1 by design). K1-K9
+  all pass. 3/3 byte-identical. Honest limits: eviction preserves
+  scores by design; identity window 128; band forms scaffold. 485
+  lines, 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
