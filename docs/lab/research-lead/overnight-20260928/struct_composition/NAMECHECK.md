@@ -24,7 +24,7 @@ move/copy files, and run git/sha256sum.
 
 - PREREG.md first commit: dfa75105fc05b3408c0c87bfb0a11c505917b1e9
   (frozen before any implementation file existed)
-- Implementation + REPORT commit: <to record: hash>
+- Implementation + REPORT commit: 266b95b393eacf4c88b64bd5da3c54bb52550010
 - Self-check: PASS. sc_driver.zag was written after dfa75105; no
   result was obtained before the prereg commit. (One build failure
   occurred post-prereg: ev_query lives in cx_patch.zag, not the
