@@ -67,9 +67,27 @@ K1 BUILD-ORDER INVARIANCE (primary regression test): in ALL three
 orders, every query in steps 2..5 returns ok=1. If any order fails,
 the FACT fix did not resolve the s5 build-order bug.
 
-K2 SCALE LAW PRESERVED: in ALL three orders, every mode-1 query has
-scan (header 56) <= 32, and every mode-0 query has scan >= 60000.
-Indexed-to-linear reduction >= 1000x per order.
+K2 SCALE LAW PRESERVED:
+- K2a (indexed flat): every mode-1 query in every order has scan
+  (header 56) <= 32.
+- K2b (linear scales): in order D, every mode-0 query has scan
+  >= 25000. Rationale: decoys-first puts ~4990 decoys (each >= 6
+  nodes) before the 5 real MAPs in id order, so the linear scan must
+  visit them all before the first verifying MAP. Orders R and I are
+  exempt from K2b because the linear scan exits early at the first
+  verifying MAP, whose id depends on build order.
+- K2c (reduction): in order D, (mode-0 scan)/(mode-1 scan) >= 1000x
+  for every query pair.
+
+AMENDMENT 2026-10-02 (before any full-scale run): the original K2
+("every mode-0 query has scan >= 60000") was miscalibrated. A
+small-scale pilot (/tmp, 60 decoys, not part of the preregistered
+runs) showed that in a working world the linear rebind exits early at
+the first verifying MAP, so mode-0 scan tracks the first real MAP's
+id, which is build-order dependent (pilot: 58..478 across orders).
+The amended K2a/K2b/K2c preserve the intent (indexed flat, linear
+scales with MAP count, large reduction) with order-robust bars. No
+full-scale results had been observed at amendment time.
 
 K3 DETERMINISM: 3/3 runs byte-identical. sha256 of each full run
 stdout must match across the three runs.
