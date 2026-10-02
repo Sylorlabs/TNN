@@ -42,10 +42,9 @@ dynamic content.
 
 ## Commit log (local only, never pushed)
 
-* <prereg-sha> PREREG.md + NAMECHECK.md frozen (no src yet)
-* <impl-sha> src/*.zag implementation
-* <bin-sha> bin/* compiled binaries
-* <out-sha> outputs/*.txt + sha256sums.txt
-* <report-sha> REPORT.md
+* c1f0e5c30 PREREG.md + NAMECHECK.md frozen (no src yet)
+* 53a50e762 src/*.zag implementation
+* 5b17c2e16 bin/* compiled binaries + outputs/*.txt + sha256sums.txt
+* <report-sha> REPORT.md + NAMECHECK.md SHAs
 
 (SHAs filled at commit time.)
