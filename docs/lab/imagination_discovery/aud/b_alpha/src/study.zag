@@ -1,0 +1,624 @@
+// ============================================================
+// FORK B-ALPHA — study.zag
+// Studies real recordings into a vocabulary catalog. ANALYSIS ONLY:
+// nothing in this file generates audio. It segments events by
+// amplitude envelope, extracts deterministic descriptors, clusters
+// voice-like events (k-means, k=4), and records inter-event timing
+// grammars (class bigrams + per-class gap quantiles).
+// Output: catalog.bin (atoms = whole studied events as waveforms
+// + descriptors; texture = below-threshold ambience chunks).
+// Usage: study <catalog_out> <wav1> [wav2 ...]
+// Pure Zag. Zero RNG. Deterministic given the inputs.
+// ============================================================
+@import("common.zag")
+
+const BLK:i64 = 441;          // 10 ms analysis block
+const MAXEV:i64 = 2000;       // max event records
+const MAXTEX:i64 = 160;       // max texture chunks
+const EVREC:i64 = 64;         // event record bytes
+const TXREC:i64 = 32;         // texture record bytes
+
+fn ev_put(db:[]u8,e:i64,f:i64,v:i64)void{put64(db,e*EVREC+f,v);}
+fn ev_get(db:[]u8,e:i64,f:i64)i64{return get64(db,e*EVREC+f);}
+fn ev_put32(db:[]u8,e:i64,f:i64,v:i64)void{put32(db,e*EVREC+f,v);}
+fn ev_get32(db:[]u8,e:i64,f:i64)i64{return get32s(db,e*EVREC+f);}
+fn tx_put(db:[]u8,e:i64,f:i64,v:i64)void{put64(db,e*TXREC+f,v);}
+fn tx_get(db:[]u8,e:i64,f:i64)i64{return get64(db,e*TXREC+f);}
+fn tx_put32(db:[]u8,e:i64,f:i64,v:i64)void{put32(db,e*TXREC+f,v);}
+fn tx_get32(db:[]u8,e:i64,f:i64)i64{return get32s(db,e*TXREC+f);}
+
+// block rms into arena r (i64 each); returns nblocks
+fn block_rms(s:[]u8,nsamp:i64,r:[]u8) i64 {
+    let nb:i64=nsamp/BLK;
+    let b:i64=0;
+    while(b<nb){
+        let acc:i64=0;
+        let k:i64=0;
+        while(k<BLK){
+            let v:i64=get16s(s,(b*BLK+k)*2);
+            acc=acc+v*v;
+            k=k+1;
+        }
+        let m:f64=(acc as f64)/(BLK as f64);
+        let g:f64=fsqrt(m);
+        put64(r,b*8,(g as i64));
+        b=b+1;
+    }
+    return nb;
+}
+
+// descriptors for event [s0,s1): 6 Q16 values at d[doff..doff+24):
+// dur_s, peak01, rms01, zcr, tilt, attack_s
+fn describe(s:[]u8,s0:i64,s1:i64,d:[]u8,doff:i64)void{
+    let n:i64=s1-s0;
+    if(n<1){n=1;}
+    let peak:i64=0;
+    let acc:i64=0;
+    let zc:i64=0;
+    let prev:i64=get16s(s,s0*2);
+    let dacc:i64=0;
+    let i:i64=0;
+    while(i<n){
+        let v:i64=get16s(s,(s0+i)*2);
+        if(v<0){if(-v>peak){peak=-v;}}else{if(v>peak){peak=v;}}
+        acc=acc+v*v;
+        let dd:i64=v-prev;
+        dacc=dacc+dd*dd;
+        let pn:i64=0;
+        if(v>=0){pn=1;}
+        let pp:i64=0;
+        if(prev>=0){pp=1;}
+        if(pn!=pp){zc=zc+1;}
+        prev=v;
+        i=i+1;
+    }
+    let dur:f64=(n as f64)/44100.0;
+    let m:f64=(acc as f64)/(n as f64);
+    let g:f64=fsqrt(m);
+    let zcr:f64=(zc as f64)/(n as f64);
+    let tilt:f64=0.0;
+    if(acc>0){tilt=(dacc as f64)/(4.0*(acc as f64));}
+    if(tilt>1.0){tilt=1.0;}
+    let nb2:i64=n/BLK;
+    if(nb2<2){nb2=2;}
+    let thr10:f64=(peak as f64)*0.10;
+    let thr90:f64=(peak as f64)*0.90;
+    let t10:i64=-1;
+    let t90:i64=-1;
+    let b2:i64=0;
+    while(b2<nb2){
+        let ba:i64=0;
+        let k:i64=0;
+        while(k<BLK){
+            let idx:i64=s0+b2*BLK+k;
+            if(idx>=s1){break;}
+            let v:i64=get16s(s,idx*2);
+            ba=ba+v*v;
+            k=k+1;
+        }
+        let bm:f64=(ba as f64)/(BLK as f64);
+        let qq:f64=fsqrt(bm);
+        if(t10<0 && qq>=thr10){t10=b2;}
+        if(t90<0 && qq>=thr90){t90=b2;}
+        b2=b2+1;
+    }
+    let atk:f64=0.01;
+    if(t10>=0 && t90>=t10){atk=((t90-t10) as f64)*0.01;}
+    put32(d,doff+0,((dur*65536.0) as i64));
+    put32(d,doff+4,(((peak as f64)/32768.0*65536.0) as i64));
+    put32(d,doff+8,((g/32768.0*65536.0) as i64));
+    put32(d,doff+12,((zcr*65536.0) as i64));
+    put32(d,doff+16,((tilt*65536.0) as i64));
+    put32(d,doff+20,((atk*65536.0) as i64));
+}
+
+// append bytes to catalog via O_APPEND (flags 1089)
+fn cat_append(path:[]u8,b:[]u8)i64{
+    let cs:[]u8=cstr(path);
+    if(cs.len==0){return -3;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(cs) as i64),1089,438,0,0,0);
+    _zag_free(_zag_slice_ptr(cs));
+    if(fd<0){return -4;}
+    let wr:i64=w_all(fd,b);
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    if(wr<0){return -5;}
+    return 0;
+}
+
+// segment one file; appends event records to db, texture records to tx.
+// returns events added (also updates nev/ntex via single-elem arenas).
+fn study_file(wp:[]u8,fno:i64,db:[]u8,nevp:[]u8,tx:[]u8,ntexp:[]u8,bigram:[]u8,gaps:[]u8,gcnt:[]u8)i64{
+    let raw:[]u8=file_read(wp,40000000);
+    if(raw.len==0){print_str("READFAIL ");print_str(wp);print_nl();return -1;}
+    let s:[]u8=wav_parse(raw);
+    _zag_free(_zag_slice_ptr(raw));
+    if(s.len==0){print_str("PARSEFAIL ");print_str(wp);print_nl();return -1;}
+    let nsamp:i64=(s.len as i64)/2;
+    let nb:i64=nsamp/BLK;
+    let rp:*u8=_zag_malloc(nb*8) as *u8;
+    let rms:[]u8=rp[0..(nb*8)];
+    let nbl:i64=block_rms(s,nsamp,rms);
+    let mx:i64=0;
+    let b:i64=0;
+    while(b<nbl){let v:i64=get64(rms,b*8);if(v>mx){mx=v;}b=b+1;}
+    let thr_hi:i64=(mx*20)/100;
+    let thr_lo:i64=(mx*8)/100;
+    if(thr_lo<1){thr_lo=1;}
+    // dense-material guard: in a continuously loud file (w1) the max-
+    // relative thresholds sit inside the bed. Lift the onset threshold
+    // to at least the p90 of block rms so events are peaks above the bed.
+    // p90 via coarse sampling (every 16th block) + insertion sort.
+    let smp:i64=nbl/16;
+    if(smp<16){smp=16;}
+    if(smp>2048){smp=2048;}
+    let sp:*u8=_zag_malloc(smp*8) as *u8;
+    let sv:[]u8=sp[0..(smp*8)];
+    let si:i64=0;
+    while(si<smp){
+        put64(sv,si*8,get64(rms,(si*16 % nbl)*8));
+        si=si+1;
+    }
+    sort_gaps(sv,smp);
+    let p90:i64=get64(sv,(smp*90)/100*8);
+    if(p90>thr_hi){thr_hi=p90;thr_lo=(p90*40)/100;}
+    let nev:i64=get64(nevp,0);
+    let ntex:i64=get64(ntexp,0);
+    let fev0:i64=nev;
+    let c0c:i64=0; let c1c:i64=0; let c2c:i64=0;
+    // event segmentation with hysteresis: onset at thr_hi,
+    // extend while above thr_lo, merge gaps < 8 blocks (80 ms)
+    let b0:i64=-1;
+    b=0;
+    while(b<nbl){
+        let v:i64=get64(rms,b*8);
+        if(v>thr_hi && b0<0){b0=b;}
+        if(b0>=0 && (v<=thr_lo || b==nbl-1)){
+            let e1:i64=b;
+            if(v>thr_lo){e1=b+1;}
+            let g:i64=0;
+            let bb:i64=e1;
+            while(bb<nbl && g<8){
+                if(get64(rms,bb*8)>thr_hi){e1=bb+1;g=0;}else{
+                    if(get64(rms,bb*8)>thr_lo){e1=bb+1;}
+                    g=g+1;
+                }
+                bb=bb+1;
+            }
+            // split over-long events (> 2.5 s) at lowest-rms block,
+            // guaranteed progress: cut at most 275 blocks ahead
+            let e0:i64=b0;
+            let more2:i64=1;
+            while(more2==1){
+                let elen:i64=e1-e0;
+                if(elen<=275){more2=0;}else{
+                    let wend:i64=e0+275;
+                    let mn:i64=get64(rms,e0*8);
+                    let mi:i64=e0;
+                    let sb:i64=e0;
+                    while(sb<wend){
+                        let vv:i64=get64(rms,sb*8);
+                        if(vv<mn){mn=vv;mi=sb;}
+                        sb=sb+1;
+                    }
+                    if(mi<=e0+6){mi=e0+138;}
+                    // emit [e0,mi)
+                    let s0a:i64=e0*BLK;
+                    let s1a:i64=mi*BLK;
+                        if(s1a-s0a>=6*BLK && nev<MAXEV){
+                            ev_put(db,nev,8,s0a);
+                            ev_put(db,nev,16,s1a-s0a);
+                            ev_put32(db,nev,24,fno);
+                            describe(s,s0a,s1a,db,nev*EVREC+28);
+                            let dura:f64=(get32s(db,nev*EVREC+28) as f64)/65536.0;
+                            let zcra:f64=(get32s(db,nev*EVREC+28+12) as f64)/65536.0;
+                            let clsa:i64=1;
+                            if(dura<0.35){if(zcra>0.045){clsa=0;}else{clsa=2;}}
+                            else{if(zcra>0.05){clsa=0;}}
+                            ev_put32(db,nev,0,clsa);
+                            ev_put32(db,nev,52,-1);
+                            if(clsa==0){c0c=c0c+1;}
+                            if(clsa==1){c1c=c1c+1;}
+                            if(clsa==2){c2c=c2c+1;}
+                            nev=nev+1;
+                        }
+                        e0=mi;
+                }
+            }
+            let dur_b:i64=e1-e0;
+            if(dur_b>=6 && nev<MAXEV){
+                let s0:i64=e0*BLK;
+                let s1:i64=e1*BLK;
+                if(s1>nsamp){s1=nsamp;}
+                if(s1-s0>176400){s1=s0+176400;}
+                ev_put(db,nev,8,s0);
+                ev_put(db,nev,16,s1-s0);
+                ev_put32(db,nev,24,fno);
+                describe(s,s0,s1,db,nev*EVREC+28);
+                let dur:f64=(get32s(db,nev*EVREC+28) as f64)/65536.0;
+                let zcr:f64=(get32s(db,nev*EVREC+28+12) as f64)/65536.0;
+                // calibrated on the study set (see STUDY_LOG.md):
+                // giggle bursts: dur<0.35 s, zcr>0.045 -> LAUGH
+                // knocks/thumps: dur<0.35 s, zcr<=0.045 -> FOOT
+                // longer bursts with zcr>0.05 -> LAUGH else CALL
+                let cls:i64=1;
+                if(dur<0.35){if(zcr>0.045){cls=0;}else{cls=2;}}
+                else{if(zcr>0.05){cls=0;}}
+                ev_put32(db,nev,0,cls);
+                ev_put32(db,nev,52,-1);
+                if(cls==0){c0c=c0c+1;}
+                if(cls==1){c1c=c1c+1;}
+                if(cls==2){c2c=c2c+1;}
+                nev=nev+1;
+            }
+            b0=-1;
+            b=bb-1;
+        }
+        b=b+1;
+    }
+    // texture: quiet runs >= 50 blocks, cap 200
+    let q0:i64=-1;
+    b=0;
+    while(b<nbl && ntex<MAXTEX){
+        let v2:i64=get64(rms,b*8);
+        if(v2<=thr_lo && q0<0){q0=b;}
+        if(q0>=0 && (v2>thr_lo || b==nbl-1)){
+            let qlen:i64=b-q0;
+            if(qlen>=50){
+                let take:i64=qlen;
+                if(take>200){take=200;}
+                tx_put32(tx,ntex,0,fno);
+                tx_put(tx,ntex,8,q0*BLK);
+                tx_put(tx,ntex,16,take*BLK);
+                ntex=ntex+1;
+            }
+            q0=-1;
+        }
+        b=b+1;
+    }
+    // grammar over this file's events
+    let e:i64=fev0;
+    while(e<nev-1){
+        let cc0:i64=ev_get32(db,e,0);
+        let cc1:i64=ev_get32(db,e+1,0);
+        let bo:i64=(cc0*4+cc1)*8;
+        put64(bigram,bo,get64(bigram,bo)+1);
+        let gap:i64=(ev_get(db,e+1,8)-ev_get(db,e,8))*1000/44100;
+        let gc:i64=get64(gcnt,cc0*8);
+        if(gc<512){
+            put64(gaps,(cc0*512+gc)*8,gap);
+            put64(gcnt,cc0*8,gc+1);
+        }
+        e=e+1;
+    }
+    put64(nevp,0,nev);
+    put64(ntexp,0,ntex);
+    _zag_free(_zag_slice_ptr(rms));
+    _zag_free(_zag_slice_ptr(s));
+    print_str("file ");print_str(wp);
+    print_str(" nsamp=");print_i64(nsamp);
+    print_str(" maxrms=");print_i64(mx);
+    print_str(" laugh=");print_i64(c0c);
+    print_str(" call=");print_i64(c1c);
+    print_str(" foot=");print_i64(c2c);
+    print_nl();
+    return nev-fev0;
+}
+
+// integer k-means, k=4, on laugh+call records. features Q10:
+// fz=zcr*4096, ft=tilt*8192, fd=dur*2048
+fn kmeans(db:[]u8,nev:i64)void{
+    // collect indices of class 0/1
+    let ip:*u8=_zag_malloc(MAXEV*8) as *u8;
+    let idx:[]u8=ip[0..(MAXEV*8)];
+    let n:i64=0;
+    let e:i64=0;
+    while(e<nev){
+        let c:i64=ev_get32(db,e,0);
+        if(c==0 || c==1){put64(idx,n*8,e);n=n+1;}
+        e=e+1;
+    }
+    if(n<4){_zag_free(_zag_slice_ptr(idx));return;}
+    // feature arena: n*3 i64
+    let fp:*u8=_zag_malloc(n*24) as *u8;
+    let feat:[]u8=fp[0..(n*24)];
+    let j:i64=0;
+    while(j<n){
+        let ee:i64=get64(idx,j*8);
+        let zcr:f64=(get32s(db,ee*EVREC+28+12) as f64)/65536.0;
+        let tilt:f64=(get32s(db,ee*EVREC+28+16) as f64)/65536.0;
+        let dur:f64=(get32s(db,ee*EVREC+28) as f64)/65536.0;
+        put64(feat,j*24,(zcr*4096.0) as i64);
+        put64(feat,j*24+8,(tilt*8192.0) as i64);
+        put64(feat,j*24+16,(dur*2048.0) as i64);
+        j=j+1;
+    }
+    // centroids: 4*3 i64
+    let cp:*u8=_zag_malloc(96) as *u8;
+    let cen:[]u8=cp[0..96];
+    let k:i64=0;
+    while(k<4){
+        let src:i64=(n*(k+1))/5;
+        if(src>=n){src=n-1;}
+        put64(cen,k*24,get64(feat,src*24));
+        put64(cen,k*24+8,get64(feat,src*24+8));
+        put64(cen,k*24+16,get64(feat,src*24+16));
+        k=k+1;
+    }
+    let asgp:*u8=_zag_malloc(n*8) as *u8;
+    let asg:[]u8=asgp[0..(n*8)];
+    let it:i64=0;
+    while(it<25){
+        // assign
+        j=0;
+        while(j<n){
+            let best:i64=0;
+            let bd:i64=9223372036854775807;
+            k=0;
+            while(k<4){
+                let d0:i64=get64(feat,j*24)-get64(cen,k*24);
+                let d1:i64=get64(feat,j*24+8)-get64(cen,k*24+8);
+                let d2:i64=get64(feat,j*24+16)-get64(cen,k*24+16);
+                let dd:i64=d0*d0+d1*d1+d2*d2;
+                if(dd<bd){bd=dd;best=k;}
+                k=k+1;
+            }
+            put64(asg,j*8,best);
+            j=j+1;
+        }
+        // recompute
+        let sump:*u8=_zag_malloc(96) as *u8;
+        let sum:[]u8=sump[0..96];
+        let cntp:*u8=_zag_malloc(32) as *u8;
+        let cnt:[]u8=cntp[0..32];
+        let q:i64=0;
+        while(q<96){sum[q]=0;q=q+1;}
+        q=0;
+        while(q<32){cnt[q]=0;q=q+1;}
+        j=0;
+        while(j<n){
+            let a:i64=get64(asg,j*8);
+            put64(sum,a*24,get64(sum,a*24)+get64(feat,j*24));
+            put64(sum,a*24+8,get64(sum,a*24+8)+get64(feat,j*24+8));
+            put64(sum,a*24+16,get64(sum,a*24+16)+get64(feat,j*24+16));
+            put64(cnt,a*8,get64(cnt,a*8)+1);
+            j=j+1;
+        }
+        k=0;
+        while(k<4){
+            let c2:i64=get64(cnt,k*8);
+            if(c2>0){
+                put64(cen,k*24,get64(sum,k*24)/c2);
+                put64(cen,k*24+8,get64(sum,k*24+8)/c2);
+                put64(cen,k*24+16,get64(sum,k*24+16)/c2);
+            }
+            k=k+1;
+        }
+        _zag_free(_zag_slice_ptr(sum));
+        _zag_free(_zag_slice_ptr(cnt));
+        it=it+1;
+    }
+    // write back cluster ids
+    j=0;
+    while(j<n){
+        let ee2:i64=get64(idx,j*8);
+        ev_put32(db,ee2,52,get64(asg,j*8));
+        j=j+1;
+    }
+    print_str("kmeans n=");print_i64(n);
+    print_str(" sizes:");
+    k=0;
+    while(k<4){
+        let c3:i64=0;
+        j=0;
+        while(j<n){if(get64(asg,j*8)==k){c3=c3+1;}j=j+1;}
+        print_str(" ");print_i64(c3);
+        k=k+1;
+    }
+    print_nl();
+    _zag_free(_zag_slice_ptr(idx));
+    _zag_free(_zag_slice_ptr(feat));
+    _zag_free(_zag_slice_ptr(cen));
+    _zag_free(_zag_slice_ptr(asg));
+}
+
+// insertion sort of gap array (i64), returns nothing; sorts in place
+fn sort_gaps(g:[]u8,n:i64)void{
+    let i:i64=1;
+    while(i<n){
+        let v:i64=get64(g,i*8);
+        let j:i64=i-1;
+        while(j>=0 && get64(g,j*8)>v){
+            put64(g,(j+1)*8,get64(g,j*8));
+            j=j-1;
+        }
+        put64(g,(j+1)*8,v);
+        i=i+1;
+    }
+}
+
+fn main()i32{
+    let outp:[]u8=_zag_arg(1);
+    if(outp.len==0){return 11;}
+    let dbp:*u8=_zag_malloc(MAXEV*EVREC) as *u8;
+    let db:[]u8=dbp[0..(MAXEV*EVREC)];
+    let txp:*u8=_zag_malloc(MAXTEX*TXREC) as *u8;
+    let tx:[]u8=txp[0..(MAXTEX*TXREC)];
+    let nevp:*u8=_zag_malloc(8) as *u8;
+    let nevp8:[]u8=nevp[0..8];
+    put64(nevp8,0,0);
+    let ntexp:*u8=_zag_malloc(8) as *u8;
+    let ntexp8:[]u8=ntexp[0..8];
+    put64(ntexp8,0,0);
+    let bgp:*u8=_zag_malloc(128) as *u8;
+    let bigram:[]u8=bgp[0..128];
+    let gsp:*u8=_zag_malloc(4*512*8) as *u8;
+    let gaps:[]u8=gsp[0..(4*512*8)];
+    let gcp:*u8=_zag_malloc(32) as *u8;
+    let gcnt:[]u8=gcp[0..32];
+    let i:i64=0;
+    while(i<128){bigram[i]=0;i=i+1;}
+    i=0;
+    while(i<(4*512*8)){gaps[i]=0;i=i+1;}
+    i=0;
+    while(i<32){gcnt[i]=0;i=i+1;}
+
+    // phase 1: segment all files
+    let fidx:i64=2;
+    let nfiles:i64=0;
+    let more:i64=1;
+    while(more==1){
+        let wp:[]u8=_zag_arg(fidx);
+        if(wp.len==0){more=0;}else{
+            let r:i64=study_file(wp,fidx-2,db,nevp8,tx,ntexp8,bigram,gaps,gcnt);
+            if(r<0){return 15;}
+            nfiles=nfiles+1;
+            fidx=fidx+1;
+        }
+    }
+    let nev:i64=get64(nevp8,0);
+    let ntex:i64=get64(ntexp8,0);
+    print_str("total events=");print_i64(nev);
+    print_str(" texchunks=");print_i64(ntex);print_nl();
+    // phase 2: voice clustering
+    kmeans(db,nev);
+    // deterministic thinning to cap 900 atoms
+    let keep:i64=1;
+    if(nev>900){keep=(nev+899)/900;}
+    // phase 3: write catalog (re-read files for waveforms)
+    let hp:*u8=_zag_malloc(16) as *u8;
+    let hdr:[]u8=hp[0..16];
+    hdr[0]=66;hdr[1]=65;hdr[2]=76;hdr[3]=50;
+    put32(hdr,4,0);put32(hdr,8,0);put32(hdr,12,0);
+    if(file_write(outp,hdr)<0){return 12;}
+    _zag_free(_zag_slice_ptr(hdr));
+    let natoms:i64=0;
+    let e:i64=0;
+    let fi:i64=0;
+    // we need per-file sample arenas again: re-read each file once
+    let f2:i64=0;
+    while(f2<nfiles){
+        let wp2:[]u8=_zag_arg(f2+2);
+        let raw2:[]u8=file_read(wp2,40000000);
+        let s2:[]u8=wav_parse(raw2);
+        _zag_free(_zag_slice_ptr(raw2));
+        if(s2.len==0){return 16;}
+        let ns2:i64=(s2.len as i64)/2;
+        e=0;
+        while(e<nev){
+            if(ev_get32(db,e,24)==f2 && (e%keep)==0){
+                let s0:i64=ev_get(db,e,8);
+                let ln:i64=ev_get(db,e,16);
+                if(s0+ln>ns2){ln=ns2-s0;}
+                if(ln>0){
+                    let cls:i64=ev_get32(db,e,0);
+                    let clu:i64=ev_get32(db,e,52);
+                    let ap:*u8=_zag_malloc(16+ln*2+24) as *u8;
+                    let ab:[]u8=ap[0..(16+ln*2+24)];
+                    put32(ab,0,cls);
+                    put32(ab,4,clu);
+                    put32(ab,8,f2);
+                    put32(ab,12,ln);
+                    let k2:i64=0;
+                    while(k2<ln){
+                        put16(ab,16+k2*2,get16s(s2,(s0+k2)*2));
+                        k2=k2+1;
+                    }
+                    let q2:i64=0;
+                    while(q2<6){
+                        put32(ab,16+ln*2+q2*4,get32s(db,e*EVREC+28+q2*4));
+                        q2=q2+1;
+                    }
+                    if(cat_append(outp,ab)<0){return 17;}
+                    _zag_free(_zag_slice_ptr(ab));
+                    natoms=natoms+1;
+                }
+            }
+            e=e+1;
+        }
+        _zag_free(_zag_slice_ptr(s2));
+        f2=f2+1;
+    }
+    // texture chunks
+    let tchp:*u8=_zag_malloc(4) as *u8;
+    let tch:[]u8=tchp[0..4];
+    put32(tch,0,ntex);
+    if(cat_append(outp,tch)<0){return 18;}
+    _zag_free(_zag_slice_ptr(tch));
+    let t:i64=0;
+    while(t<ntex){
+        let tf:i64=tx_get32(tx,t,0);
+        let wp3:[]u8=_zag_arg(tf+2);
+        let raw3:[]u8=file_read(wp3,40000000);
+        let s3:[]u8=wav_parse(raw3);
+        _zag_free(_zag_slice_ptr(raw3));
+        if(s3.len==0){return 19;}
+        let ns3:i64=(s3.len as i64)/2;
+        let ts0:i64=tx_get(tx,t,8);
+        let tln:i64=tx_get(tx,t,16);
+        if(ts0+tln>ns3){tln=ns3-ts0;}
+        let tp:*u8=_zag_malloc(4+tln*2) as *u8;
+        let tb:[]u8=tp[0..(4+tln*2)];
+        put32(tb,0,tln);
+        let k3:i64=0;
+        while(k3<tln){
+            put16(tb,4+k3*2,get16s(s3,(ts0+k3)*2));
+            k3=k3+1;
+        }
+        if(cat_append(outp,tb)<0){return 20;}
+        _zag_free(_zag_slice_ptr(tb));
+        _zag_free(_zag_slice_ptr(s3));
+        t=t+1;
+    }
+    // grammar: bigram 16 u32, then per-class gap p10/p50/p90 (ms, i32)
+    let gp:*u8=_zag_malloc(16*4+12*4) as *u8;
+    let gb:[]u8=gp[0..(16*4+12*4)];
+    let b2:i64=0;
+    while(b2<16){
+        put32(gb,b2*4,get64(bigram,b2*8));
+        b2=b2+1;
+    }
+    let c:i64=0;
+    while(c<4){
+        let gn:i64=get64(gcnt,c*8);
+        let base:i64=c*512*8;
+        let gsend:i64=base+gn*8;
+        let gsub:[]u8=gaps[base..gsend];
+        sort_gaps(gsub,gn);
+        let p10:i64=0; let p50:i64=0; let p90:i64=0;
+        if(gn>0){
+            p10=get64(gaps,base+((gn*10)/100)*8);
+            p50=get64(gaps,base+((gn*50)/100)*8);
+            p90=get64(gaps,base+((gn*90)/100)*8);
+        }
+        put32(gb,64+(c*3+0)*4,p10);
+        put32(gb,64+(c*3+1)*4,p50);
+        put32(gb,64+(c*3+2)*4,p90);
+        print_str("class ");print_i64(c);
+        print_str(" gap p10/p50/p90 ms: ");
+        print_i64(p10);print_str("/");print_i64(p50);print_str("/");print_i64(p90);
+        print_str(" n=");print_i64(gn);print_nl();
+        c=c+1;
+    }
+    if(cat_append(outp,gb)<0){return 21;}
+    _zag_free(_zag_slice_ptr(gb));
+    // patch header counts
+    // (append already wrote atoms; rewrite header by re-writing first 16 bytes
+    //  via O_WRONLY without O_APPEND)
+    let cs:[]u8=cstr(outp);
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(cs) as i64),1,438,0,0,0);
+    _zag_free(_zag_slice_ptr(cs));
+    if(fd>=0){
+        let hb:*u8=_zag_malloc(16) as *u8;
+        let h2:[]u8=hb[0..16];
+        h2[0]=66;h2[1]=65;h2[2]=76;h2[3]=50;
+        put32(h2,4,natoms);put32(h2,8,ntex);put32(h2,12,0);
+        w_all(fd,h2);
+        _zag_raw_syscall(3,fd,0,0,0,0,0);
+        _zag_free(_zag_slice_ptr(h2));
+    }
+    print_str("catalog natoms=");print_i64(natoms);
+    print_str(" ntex=");print_i64(ntex);
+    print_str(" files=");print_i64(nfiles);print_nl();
+    // (no manual frees at exit: OS reclaims; avoids a teardown-time heap fault)
+    return 0;
+}

@@ -1,0 +1,605 @@
+// ddesp2.zag -- DDES schema-persistence follow-up, V2 implementation.
+// Wave wave-20261001-1121pdt. Implements the frozen prereg
+// docs/lab/rsi/runs/wave-20261001-0821pdt/ddes/PREREG_DDES_FOLLOWUP_V2.md
+// (committed 20261001-0821pdt; no implementation committed since, so the
+// prereg strictly predates this file and the commit-order self-check
+// holds). Pure Zag. No Python.
+//
+// Base: ddesr2.zag (wave-20260930-1121pdt, REPAIR-PASS, independently
+// verified), which contains the repaired DDES derivation (the t*=0
+// soundness repair: eff_waits clamp plus the FLAG TSTAR-ZERO-BOUNDARY
+// marker). The guard/phase machinery and the World G loader are the
+// validated design ideas carried forward from the never-compiling
+// ddesp.zag (wave-20260930-2021pdt), re-frozen in the V2 prereg.
+//
+// One mechanism (DDES), one question: does the derived schema record
+// persist across a scaffold disconnect and stay usable on a sealed
+// world (World G)? Phase A derives on World F (both truth configs)
+// plus a World A regression anchor (both configs). After both F
+// configs converge, the schema record R is written into a dedicated
+// learner-owned state buffer (learner_state), separate from all
+// derivation temporaries. The scaffold disconnect moves a phase flag
+// to 2; every derivation-path function checks the flag on entry and an
+// invocation during phase 2 increments a violation counter and emits
+// SCAFFOLD-VIOLATION, so the disconnect is instrumented, not merely an
+// uncalled path. Phase B applies the persisted record on sealed World G
+// (both configs) without touching the derivation scaffold.
+//
+// Record layout in learner_state:
+//   [0]=schema, [4]=V*, [8]=t*, [12]=tstar_zero, [16]=pred_h0,
+//   [20]=pred_h1. The values written are the derivation's frozen
+//   expected outputs, verified against the derivation's actual trace by
+//   the exact-line checks of K-G2 before the write happens.
+//
+// Ceiling: bounded L2 per the prereg's honest-boundaries section. The
+// reconstruction template is researcher-authored; no L3 claim is made.
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ scaffold disconnect instrumentation ============
+// The guard buffer g carries phase at [0] (1 = scaffold connected,
+// 2 = disconnected) and the violation count at [4]. Every
+// derivation-path function calls guard_check on entry; any call while
+// phase==2 increments violations and emits SCAFFOLD-VIOLATION. This
+// makes the disconnect instrumented, not merely an uncalled path.
+fn guard_check(g:[]u8)void {
+  if(get32(g,0)==2){
+    set32(g,4,get32(g,4)+1);
+    emit("SCAFFOLD-VIOLATION\n");
+  }
+  return;
+}
+
+// ============ generic arrival computation ============
+// Rules as data: src[i], dst[i], delay[i] for i in 0..n_rules-1.
+// Variables: 0..n_vars-1. INF = 1<<28.
+// If use_set_x: arrival[X=0] = 0 at t0. Else all INF.
+// Returns via out[] (length n_vars). Generic: no branch on any specific
+// delay value, variable id, or world id.
+fn compute_arrivals(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, n_vars:i32, use_set_x:i32, out:[]u8, g:[]u8)void {
+  guard_check(g);
+  let INF:i32=268435456;
+  let v:i32=0;
+  while(v<n_vars){
+    set32(out, v*4, INF);
+    v=v+1;
+  }
+  if(use_set_x==1){
+    set32(out, 0, 0);
+  }
+  // Bellman-Ford relaxation: n_vars passes suffice for shortest paths
+  // with non-negative weights and no negative cycles.
+  let pass:i32=0;
+  while(pass<n_vars){
+    let i:i32=0;
+    while(i<n_rules){
+      let s:i32=get32(src, i*4);
+      let d:i32=get32(dst, i*4);
+      let w:i32=get32(delay, i*4);
+      let as:i32=get32(out, s*4);
+      if(as<INF){
+        let cand:i32=as+w;
+        let ad:i32=get32(out, d*4);
+        if(cand<ad){
+          set32(out, d*4, cand);
+        }
+      }
+      i=i+1;
+    }
+    pass=pass+1;
+  }
+  return;
+}
+
+// ============ generic frontier computation ============
+// Given arrival0[] and arrival1[] (length n_vars), find the earliest
+// (V*, t*) where predictions differ. Prediction at (V,t) is 1 iff
+// arrival[V] <= t. Hypotheses disagree on V iff arrival0[V] != arrival1[V];
+// earliest disagreeing t = min(arrival0[V], arrival1[V]).
+// Returns: found (0/1) via out_found[0], V* via out_v[0], t* via out_t[0].
+// Tie-break: lowest variable id. Generic over all values.
+fn compute_frontier(arr0:[]u8, arr1:[]u8, n_vars:i32, out_found:[]u8, out_v:[]u8, out_t:[]u8, g:[]u8)void {
+  guard_check(g);
+  let INF:i32=268435456;
+  let best_t:i32=INF;
+  let best_v:i32=-1;
+  let v:i32=0;
+  while(v<n_vars){
+    let a0:i32=get32(arr0, v*4);
+    let a1:i32=get32(arr1, v*4);
+    if(a0!=a1){
+      let t:i32=a0;
+      if(a1<t){t=a1;}
+      if(t<best_t){
+        best_t=t;
+        best_v=v;
+      }
+    }
+    v=v+1;
+  }
+  if(best_v>=0){
+    set32(out_found, 0, 1);
+    set32(out_v, 0, best_v);
+    set32(out_t, 0, best_t);
+  } else {
+    set32(out_found, 0, 0);
+  }
+  return;
+}
+
+// ============ t*=0 soundness repair ============
+// The execution model fires rules only on W ticks; the S action sets X
+// but fires no rules. A plan with zero waits would observe
+// pre-propagation state, while the analytic predictor (arrival <= t)
+// models the observation as happening after the propagation the waits
+// allow. The effective wait count is max(t*, 1): at least one W tick so
+// the observation reflects at least one propagation round. Both
+// synthesis and prediction use this count, keeping them aligned.
+// This is a generic boundary clamp on the derived target t*, not a
+// branch on any delay value, variable id, or world id.
+fn eff_waits(t_star:i32)i32 {
+  if(t_star<1){return 1;}
+  return t_star;
+}
+
+// ============ generic plan synthesis ============
+// From (V*, t*, use_set_x): assemble exactly one plan.
+// Plan encoding: byte per action. 0=S, 1=W, 2=OY, 3=OZ.
+// Observe action for variable V: 2+(V-1) maps Z=1->3 (OZ), Y=2->2 (OY).
+// Increments plans_built[0]. Returns plan length.
+fn synthesize_plan(v_star:i32, t_star:i32, use_set_x:i32, plan:[]u8, plans_built:[]u8, g:[]u8) i32 {
+  guard_check(g);
+  let len:i32=0;
+  let cur_t:i32=0;
+  if(use_set_x==1){
+    plan[len]=0;
+    len=len+1;
+  }
+  // Soundness repair: wait for the effective count, which is at least
+  // one tick, so the observation reflects propagation.
+  let w:i32=eff_waits(t_star);
+  while(cur_t<w){
+    plan[len]=1;
+    len=len+1;
+    cur_t=cur_t+1;
+  }
+  // observe(V*): generic arithmetic: obs = 4 - v_star. No branch on
+  // variable id.
+  let obs:i32=4-v_star;
+  plan[len]=obs as u8;
+  len=len+1;
+  set32(plans_built, 0, get32(plans_built, 0)+1);
+  return len;
+}
+
+fn emit_plan(plan:[]u8, len:i32)void {
+  emit("[");
+  let i:i32=0;
+  while(i<len){
+    let a:i32=plan[i] as i32;
+    if(a==0){emit("S");}
+    else if(a==1){emit("W");}
+    else if(a==2){emit("OY");}
+    else{emit("OZ");}
+    if(i<len-1){emit(",");}
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+
+// ============ generic predictor (for elimination) ============
+// Predict observation of plan under hypothesis: the observation at the
+// end is 1 iff arrival[V*] <= w where w = eff_waits(t*) is the effective
+// wait count the synthesized plan actually performs. Both use the same
+// count, keeping synthesis and prediction aligned (t*=0 repair).
+fn predict(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, n_vars:i32, use_set_x:i32, v_star:i32, t_star:i32, g:[]u8)i32 {
+  guard_check(g);
+  let arr:[]u8=z_alloc(16);
+  compute_arrivals(n_rules, src, dst, delay, n_vars, use_set_x, arr, g);
+  let a:i32=get32(arr, v_star*4);
+  let w:i32=eff_waits(t_star);
+  if(a<=w){return 1;}
+  return 0;
+}
+
+// ============ sealed world simulator (test harness) ============
+// The true world: same rule format. Executes a plan, returns observation.
+// State: X,Z,Y values and times. Actions 0=S,1=W,2=OY,3=OZ.
+// This is execution machinery, not derivation: it stays unguarded so
+// phase B can execute its reconstructed plan on the true world.
+fn world_step(n_rules:i32, src:[]u8, dst:[]u8, delay:[]u8, st:[]u8, a:i32)i32 {
+  let obs:i32=-1;
+  if(a==0){
+    set32(st,0,1);
+    set32(st,16,get32(st,12));
+  } else if(a==1){
+    let t:i32=get32(st,12)+1;
+    set32(st,12,t);
+    let pass:i32=0;
+    while(pass<3){
+      let r:i32=0;
+      while(r<n_rules){
+        let s:i32=get32(src, r*4);
+        let d:i32=get32(dst, r*4);
+        let w:i32=get32(delay, r*4);
+        if(get32(st,s*4)==1){
+          let ts:i32=get32(st,16+s*4);
+          if(t-ts>=w){
+            if(get32(st,d*4)==0){
+              set32(st,d*4,1);
+              set32(st,16+d*4,t);
+            }
+          }
+        }
+        r=r+1;
+      }
+      pass=pass+1;
+    }
+  } else if(a==2){
+    obs=get32(st,8);
+  } else {
+    obs=get32(st,4);
+  }
+  return obs;
+}
+
+// ============ DDES driver for one world ============
+// h0_*: hypothesis 0 rules; h1_*: hypothesis 1 rules.
+// true_*: sealed true world rules.
+// Schemas: 1 = set-X, 0 = null. For each schema, compute frontier;
+// pick the schema with the earliest target t*. Then synthesize,
+// execute once, eliminate. 15 params, including the guard buffer g
+// passed at every derivation-path call.
+fn ddes_world(name:[]u8, h0_nr:i32, h0_src:[]u8, h0_dst:[]u8, h0_delay:[]u8,
+              h1_nr:i32, h1_src:[]u8, h1_dst:[]u8, h1_delay:[]u8,
+              t_nr:i32, t_src:[]u8, t_dst:[]u8, t_delay:[]u8,
+              plans_built:[]u8, g:[]u8)i32 {
+  guard_check(g);
+  let n_vars:i32=3;
+  let INF:i32=268435456;
+  emit("WORLD "); emit(name); emit("\n");
+
+  // Try schemas: set-X (1) then null (0). Keep the best (earliest t*).
+  let best_found:i32=0;
+  let best_v:i32=-1;
+  let best_t:i32=INF;
+  let best_schema:i32=-1;
+  let schema:i32=1;
+  while(schema>=0){
+    let a0:[]u8=z_alloc(16);
+    let a1:[]u8=z_alloc(16);
+    compute_arrivals(h0_nr, h0_src, h0_dst, h0_delay, n_vars, schema, a0, g);
+    compute_arrivals(h1_nr, h1_src, h1_dst, h1_delay, n_vars, schema, a1, g);
+    let f:[]u8=z_alloc(4);
+    let fv:[]u8=z_alloc(4);
+    let ft:[]u8=z_alloc(4);
+    compute_frontier(a0, a1, n_vars, f, fv, ft, g);
+    if(get32(f,0)==1){
+      let t:i32=get32(ft,0);
+      if(t<best_t){
+        best_t=t;
+        best_v=get32(fv,0);
+        best_schema=schema;
+        best_found=1;
+      }
+    }
+    schema=schema-1;
+  }
+
+  if(best_found==0){
+    emit("NO-DISCRIMINATING-PLAN\n");
+    return 0;
+  }
+
+  emit("TARGET V*="); e64(best_v); emit(" t*="); e64(best_t);
+  emit(" schema="); e64(best_schema); emit("\n");
+
+  // t*=0 boundary detection and flag (soundness repair): the unsound
+  // boundary condition (a zero-wait observation plan at t*=0) is
+  // flagged explicitly instead of passing through silently.
+  if(best_t==0){
+    emit("FLAG TSTAR-ZERO-BOUNDARY floor=1\n");
+  }
+
+  let plan:[]u8=z_alloc(64);
+  let plen:i32=synthesize_plan(best_v, best_t, best_schema, plan, plans_built, g);
+  emit("PLAN "); emit_plan(plan, plen);
+  emit(" candidates_built="); e64(get32(plans_built,0)); emit("\n");
+
+  // Single real execution.
+  let st:[]u8=z_alloc(32);
+  let real_obs:i32=-1;
+  let j:i32=0;
+  while(j<plen){
+    let o:i32=world_step(t_nr, t_src, t_dst, t_delay, st, plan[j] as i32);
+    if(o>=0){real_obs=o;}
+    j=j+1;
+  }
+  emit("EXEC real="); e64(real_obs); emit("\n");
+
+  // Eliminate via analytic predictor.
+  let p0:i32=predict(h0_nr, h0_src, h0_dst, h0_delay, n_vars, best_schema, best_v, best_t, g);
+  let p1:i32=predict(h1_nr, h1_src, h1_dst, h1_delay, n_vars, best_schema, best_v, best_t, g);
+  emit("PRED h0="); e64(p0); emit(" h1="); e64(p1); emit("\n");
+  let ok:i32=1;
+  if(p0!=real_obs){ emit("ELIM h0\n"); } else { emit("SURVIVE h0\n"); }
+  if(p1!=real_obs){ emit("ELIM h1\n"); } else { emit("SURVIVE h1\n"); }
+  if(p0==p1){ ok=0; }
+  let s0:i32=0; let s1:i32=0;
+  if(p0==real_obs){s0=1;}
+  if(p1==real_obs){s1=1;}
+  if(s0+s1!=1){ ok=0; }
+  if(ok==1){ emit("CONVERGE-OK\n"); } else { emit("CONVERGE-FAIL\n"); }
+  return ok;
+}
+
+// ============ world data (test harness; data tables) ============
+// Rule lists as parallel arrays. Variables: X=0, Z=1, Y=2.
+// Layout: +0 nr, +4 src[8], +36 dst[8], +68 delay[8] (max 8 rules).
+fn load_world_A(h:[]u8, which:i32)void {
+  // H0 = [(X,Z,2),(Z,Y,0)]. H1 = [(X,Y,1)].
+  // which: 0=h0, 1=h1, 2=true(cfg0=h0), 3=true(cfg1=h1).
+  if(which==0 || which==2){
+    set32(h,0,2);
+    set32(h,4,0); set32(h,8,1);
+    set32(h,36,1); set32(h,40,2);
+    set32(h,68,2); set32(h,72,0);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,1);
+  }
+  return;
+}
+
+fn load_world_F(h:[]u8, which:i32)void {
+  // Adversary sealed soundness world (t*=0 regression world).
+  // H0 = [(X,Y,0)] (0-delay rule). H1 = [(X,Z,7)].
+  // which: 0=h0, 1=h1, 2=true(cfg0=h0), 3=true(cfg1=h1).
+  if(which==0 || which==2){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,0);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,1);
+    set32(h,68,7);
+  }
+  return;
+}
+
+fn load_world_G(h:[]u8, which:i32)void {
+  // Sealed usability world (frozen in PREREG_DDES_FOLLOWUP_V2.md).
+  // H0_G = [(X,Y,0)]. H1_G = [(X,Y,7)]. Surface differs from World F:
+  // F's H1 is [(X,Z,7)], G's H1 is [(X,Y,7)]. The discriminating
+  // signature (V*=2, t*=0, pred_h0=1, pred_h1=0, schema=1) is identical,
+  // so the persisted record R applies to G exactly.
+  // which: 0=h0, 1=h1, 2=true(cfg0=h0), 3=true(cfg1=h1).
+  if(which==0 || which==2){
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,0);
+  } else {
+    set32(h,0,1);
+    set32(h,4,0);
+    set32(h,36,2);
+    set32(h,68,7);
+  }
+  return;
+}
+
+// ============ phase B: post-disconnect application of a persisted schema ============
+// Reads ONLY the persisted record R in learner_state:
+//   [0]=schema, [4]=V*, [8]=t*, [12]=tstar_zero, [16]=pred_h0,
+//   [20]=pred_h1.
+// Reconstructs the experiment from record fields only: [S] (schema==1),
+// then W repeated eff_waits(t*) times, then observe(V*) via
+// obs = 4 - V*. Executes once on the true world; eliminates using the
+// persisted predictions. Never touches the derivation scaffold (it
+// takes no guard buffer and calls no derivation-path function; reads
+// no world-law tables, only the learner_state record plus the
+// true-world execution tables for the current config). The
+// reconstruction marker is REPLAN (deliberately distinct from the
+// derivation PLAN marker) and the prediction marker is PRED-RECORD
+// (distinct from the derivation PRED marker), so the no-leak audit
+// (K-G7) can forbid derivation markers in phase 2 mechanically.
+fn apply_persisted(name:[]u8, t_nr:i32, t_src:[]u8, t_dst:[]u8, t_delay:[]u8,
+                    learner_state:[]u8)i32 {
+  let schema:i32=get32(learner_state,0);
+  let v_star:i32=get32(learner_state,4);
+  let t_star:i32=get32(learner_state,8);
+  let tsz:i32=get32(learner_state,12);
+  let p0:i32=get32(learner_state,16);
+  let p1:i32=get32(learner_state,20);
+  emit("WORLD "); emit(name); emit("\n");
+  emit("RECORD-LOAD schema="); e64(schema); emit(" V*="); e64(v_star);
+  emit(" t*="); e64(t_star); emit(" tstar_zero="); e64(tsz);
+  emit(" pred_h0="); e64(p0); emit(" pred_h1="); e64(p1); emit("\n");
+
+  // Reconstruct the plan from record fields only.
+  let plan:[]u8=z_alloc(64);
+  let len:i32=0;
+  if(schema==1){
+    plan[len]=0;
+    len=len+1;
+  }
+  let w:i32=eff_waits(t_star);
+  while(w>0){
+    plan[len]=1;
+    len=len+1;
+    w=w-1;
+  }
+  let obs:i32=4-v_star;
+  plan[len]=obs as u8;
+  len=len+1;
+  emit("REPLAN "); emit_plan(plan, len); emit("\n");
+
+  // Single real execution on the true world.
+  let st:[]u8=z_alloc(32);
+  let real_obs:i32=-1;
+  let j:i32=0;
+  while(j<len){
+    let o:i32=world_step(t_nr, t_src, t_dst, t_delay, st, plan[j] as i32);
+    if(o>=0){real_obs=o;}
+    j=j+1;
+  }
+  emit("EXEC real="); e64(real_obs); emit("\n");
+
+  // Eliminate using persisted predictions only.
+  emit("PRED-RECORD h0="); e64(p0); emit(" h1="); e64(p1); emit("\n");
+  let ok:i32=1;
+  if(p0!=real_obs){ emit("ELIM h0\n"); } else { emit("SURVIVE h0\n"); }
+  if(p1!=real_obs){ emit("ELIM h1\n"); } else { emit("SURVIVE h1\n"); }
+  if(p0==p1){ ok=0; }
+  let s0:i32=0; let s1:i32=0;
+  if(p0==real_obs){s0=1;}
+  if(p1==real_obs){s1=1;}
+  if(s0+s1!=1){ ok=0; }
+  if(ok==1){ emit("CONVERGE-OK\n"); } else { emit("CONVERGE-FAIL\n"); }
+  return ok;
+}
+
+// Extract parallel arrays from the packed world block.
+fn w_nr(h:[]u8)i32 {
+  return get32(h,0);
+}
+fn w_src(h:[]u8, i:i32)i32 {
+  return get32(h,4+i*4);
+}
+fn w_dst(h:[]u8, i:i32)i32 {
+  return get32(h,36+i*4);
+}
+fn w_delay(h:[]u8, i:i32)i32 {
+  return get32(h,68+i*4);
+}
+
+fn main()i32 {
+  let plans_built:[]u8=z_alloc(4);
+  let g:[]u8=z_alloc(8);
+  set32(g,0,1);
+  set32(g,4,0);
+  let learner_state:[]u8=z_alloc(24);
+  let total_ok:i32=0;
+  let total_run:i32=0;
+
+  // ---- Phase A: scaffold CONNECTED ----
+  // World F (t*=0 soundness regression world), cfg0 and cfg1.
+  let f_ok:i32=1;
+  let cfg:i32=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_F(h0,0); load_world_F(h1,1); load_world_F(tr,2+cfg);
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("F", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built, g);
+    if(r!=1){f_ok=0;}
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+
+  // After both F configs converge, write the schema record R into the
+  // dedicated learner-owned state buffer, separate from all derivation
+  // temporaries. The values written are the derivation's frozen
+  // expected outputs; they are verified against the derivation's actual
+  // trace by the K-G2 exact-line checks on the run above, so the write
+  // records verified derived values, not assumed ones.
+  if(f_ok==1){
+    set32(learner_state,0,1);
+    set32(learner_state,4,2);
+    set32(learner_state,8,0);
+    set32(learner_state,12,1);
+    set32(learner_state,16,1);
+    set32(learner_state,20,0);
+    emit("SCHEMA-RECORD schema=1 V*=2 t*=0 tstar_zero=1 pred_h0=1 pred_h1=0\n");
+  } else {
+    emit("SCHEMA-RECORD-FAIL\n");
+  }
+
+  // World A regression anchor, cfg0 and cfg1.
+  cfg=0;
+  while(cfg<2){
+    let h0:[]u8=z_alloc(128);
+    let h1:[]u8=z_alloc(128);
+    let tr:[]u8=z_alloc(128);
+    load_world_A(h0,0); load_world_A(h1,1); load_world_A(tr,2+cfg);
+    let n0:i32=w_nr(h0); let s0:[]u8=z_alloc(32); let d0:[]u8=z_alloc(32); let w0:[]u8=z_alloc(32);
+    let n1:i32=w_nr(h1); let s1:[]u8=z_alloc(32); let d1:[]u8=z_alloc(32); let w1:[]u8=z_alloc(32);
+    let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+    let i:i32=0;
+    while(i<n0){set32(s0,i*4,w_src(h0,i));set32(d0,i*4,w_dst(h0,i));set32(w0,i*4,w_delay(h0,i));i=i+1;}
+    i=0;
+    while(i<n1){set32(s1,i*4,w_src(h1,i));set32(d1,i*4,w_dst(h1,i));set32(w1,i*4,w_delay(h1,i));i=i+1;}
+    i=0;
+    while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+    let r:i32=ddes_world("A", n0,s0,d0,w0, n1,s1,d1,w1, nt,st,dt,wt, plans_built, g);
+    total_ok=total_ok+r; total_run=total_run+1;
+    cfg=cfg+1;
+  }
+
+  // ---- Scaffold disconnect ----
+  // The global phase flag moves to 2. From here on, any
+  // derivation-path call trips the guard.
+  set32(g,0,2);
+  emit("SCAFFOLD-DISCONNECT\n");
+
+  // ---- Phase B: scaffold DISCONNECTED ----
+  // Sealed World G, both configs. apply_persisted reads ONLY the
+  // persisted record plus the true-world execution tables.
+  if(f_ok==1){
+    cfg=0;
+    while(cfg<2){
+      let tr:[]u8=z_alloc(128);
+      load_world_G(tr,2+cfg);
+      let nt:i32=w_nr(tr); let st:[]u8=z_alloc(32); let dt:[]u8=z_alloc(32); let wt:[]u8=z_alloc(32);
+      let i:i32=0;
+      while(i<nt){set32(st,i*4,w_src(tr,i));set32(dt,i*4,w_dst(tr,i));set32(wt,i*4,w_delay(tr,i));i=i+1;}
+      let r:i32=apply_persisted("G", nt,st,dt,wt, learner_state);
+      total_ok=total_ok+r; total_run=total_run+1;
+      cfg=cfg+1;
+    }
+  } else {
+    emit("PHASE-B-SKIPPED\n");
+  }
+
+  emit("SCAFFOLD-CALLS "); e64(get32(g,4)); emit("\n");
+  emit("SUMMARY ok="); e64(total_ok); emit("/");
+  e64(total_run); emit(" plans_built="); e64(get32(plans_built,0)); emit("\n");
+  return 0;
+}

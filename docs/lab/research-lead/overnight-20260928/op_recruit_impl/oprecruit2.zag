@@ -1,0 +1,1202 @@
+// oprecruit2.zag -- OP-RECRUIT v2: learner-driven runtime operator recruitment.
+// Pure Zag. No Python anywhere.
+//
+// Per PREREG_OPRECRUIT2.md (commit 1df644256, frozen before implementation).
+// Amendments A1..A6 documented in the prereg.
+//
+// VM: GENEXEC2 stack machine (adapted from v1 op_recruit.zag).
+// Op encoding (op:i32, arg:i32):
+//   0=PUSH k, 1=IN0, 2=IN1, 3=ADD, 4=SUB, 5=MUL, 6=DIV, 7=MOD,
+//   8=NEG, 9=DUP, 10=DROP, 11=SWAP, 12=OVER,
+//   13=LT, 14=EQ, 15=GT, 16=JZ addr, 17=JNZ addr, 18=JMP addr,
+//   21=IN2, 22=IN3 (generic primitives for recruited-body arity),
+//   32..63 = recruited ops, ONE generic dispatch case.
+// No CALL/library in v2 (A4). No per-meaning source case anywhere.
+//
+// Wrapper semantics (prereg A1): pop a values v[0..a-1] (v[a-1] was top;
+// missing values read as 0); fresh stack initialized to [v0..v(a-1)];
+// in_k bound to v[k]; execute body; push back every value left on the
+// fresh stack (at most 4).
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn get64(b:[]u8, i:i32)i64 {
+  let lo:i64=get32(b,i) as i64;
+  let hi:i64=get32(b,i+4) as i64;
+  return lo|(hi<<32);
+}
+fn set64(b:[]u8, i:i32, v:i64)void {
+  set32(b,i,v as i32);
+  set32(b,i+4,(v>>32) as i32);
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+fn imod(a:i32, b:i32)i32 {
+  let r:i32=a-(a/b)*b;
+  if(r<0){ r=r+b; }
+  return r;
+}
+fn popcnt(x:i32)i32 {
+  let c:i32=0;
+  let v:i32=x;
+  while(v>0){ c=c+imod(v,2); v=v/2; }
+  return c;
+}
+
+// ============ program representation ============
+// A program is a []u8: bytes 0..3 = len (i32), then len * 8 bytes of
+// (op:i32 at +0, arg:i32 at +4). Max 48 ops per program.
+fn prog_len(p:[]u8)i32 { return get32(p, 0); }
+fn prog_set_len(p:[]u8, l:i32)void { set32(p, 0, l); return; }
+fn prog_op(p:[]u8, i:i32)i32 { return get32(p, 4+i*8); }
+fn prog_arg(p:[]u8, i:i32)i32 { return get32(p, 4+i*8+4); }
+fn prog_set(p:[]u8, i:i32, op:i32, arg:i32)void {
+  set32(p, 4+i*8, op); set32(p, 4+i*8+4, arg); return;
+}
+fn prog_new(maxlen:i32)[]u8 {
+  let p:[]u8=z_alloc(4+maxlen*8);
+  set32(p, 0, 0);
+  return p;
+}
+fn prog_append(p:[]u8, op:i32, arg:i32)void {
+  let l:i32=prog_len(p);
+  if(l<48){
+    prog_set(p, l, op, arg);
+    prog_set_len(p, l+1);
+  }
+  return;
+}
+fn prog_copy(dst:[]u8, src:[]u8)void {
+  let l:i32=prog_len(src);
+  prog_set_len(dst, l);
+  let i:i32=0;
+  while(i<l){ prog_set(dst, i, prog_op(src,i), prog_arg(src,i)); i=i+1; }
+  return;
+}
+fn prog_cmp(a:[]u8, b:[]u8)i32 {
+  let la:i32=prog_len(a); let lb:i32=prog_len(b);
+  let n:i32=la; if(lb<n){n=lb;}
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=prog_op(a,i); let ob:i32=prog_op(b,i);
+    if(oa<ob){return -1;} if(oa>ob){return 1;}
+    let aa:i32=prog_arg(a,i); let ab:i32=prog_arg(b,i);
+    if(aa<ab){return -1;} if(aa>ab){return 1;}
+    i=i+1;
+  }
+  if(la<lb){return -1;} if(la>lb){return 1;}
+  return 0;
+}
+fn prog_has_op(p:[]u8, op:i32)i32 {
+  let l:i32=prog_len(p);
+  let i:i32=0;
+  while(i<l){ if(prog_op(p,i)==op){return 1;} i=i+1; }
+  return 0;
+}
+
+// ============ VM ============
+// Execute pl instructions from p on stack (caller-provided, sp entries
+// valid on entry). Returns final sp. in0..in3 are bound inputs.
+// lst: learner state scalars (+0 = nrec). rec_meta: 32 slots x 16 bytes
+// (+0 idx:i32, +4 arity:u8, +5 len:u8, +6 res:u8, +8 use:i32, +12 idle:i32).
+// rec_buf: flat bodies, each (len:i32, then len*8 bytes).
+// depth: recursion guard for recruited-op execution.
+fn vm_run(p:[]u8, pl:i32, in0:i32, in1:i32, in2:i32, in3:i32,
+          stack:[]u8, sp:i32, lst:[]u8, rec_meta:[]u8, rec_buf:[]u8,
+          depth:i32)i32 {
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<100000){
+    if(pc<0 || pc>=pl){ break; }
+    let op:i32=get32(p, 4+pc*8);
+    let arg:i32=get32(p, 4+pc*8+4);
+    pc=pc+1;
+    steps=steps+1;
+    if(op==0){
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==21){
+      if(sp<256){ set32(stack, sp*4, in2); sp=sp+1; }
+    } else if(op==22){
+      if(sp<256){ set32(stack, sp*4, in3); sp=sp+1; }
+    } else if(op==3){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=a/b;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==7){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=imod(a,b);} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==8){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a<b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==14){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a==b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==15){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a>b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==16){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){
+      pc=arg;
+    } else if(op>=32 && op<64){
+      // RECRUITED OP: the single generic dispatch case. All semantics
+      // reside in rec_buf (learner-created bytes). No per-meaning case
+      // exists anywhere in source.
+      let ri:i32=op-32;
+      let nrec:i32=get32(lst, 0);
+      if(ri<nrec && depth<8){
+        let a:i32=rec_meta[ri*16+4] as i32;
+        let tmp:[]u8=z_alloc(16);
+        let j:i32=0;
+        while(j<a){
+          let tv:i32=0;
+          if(sp>0){ sp=sp-1; tv=get32(stack, sp*4); }
+          set32(tmp, j*4, tv);
+          j=j+1;
+        }
+        // tmp[j] = v[a-1-j]; v[k] = tmp[a-1-k]. Fresh stack [v0..v(a-1)].
+        let fstack:[]u8=z_alloc(256*4);
+        let k:i32=0;
+        while(k<a){ set32(fstack, k*4, get32(tmp, (a-1-k)*4)); k=k+1; }
+        let b0:i32=0; let b1:i32=0; let b2:i32=0; let b3:i32=0;
+        if(a>0){ b0=get32(tmp,(a-1)*4); }
+        if(a>1){ b1=get32(tmp,(a-2)*4); }
+        if(a>2){ b2=get32(tmp,(a-3)*4); }
+        if(a>3){ b3=get32(tmp,(a-4)*4); }
+        let base:i32=get32(rec_meta, ri*16);
+        let flen:i32=rec_meta[ri*16+5] as i32;
+        let frag:[]u8=rec_buf[base..base+4+flen*8];
+        let fsp:i32=vm_run(frag, flen, b0, b1, b2, b3, fstack, a,
+                          lst, rec_meta, rec_buf, depth+1);
+        let nb:i32=fsp; if(nb>4){ nb=4; }
+        let q:i32=0;
+        while(q<nb){
+          if(sp<256){ set32(stack, sp*4, get32(fstack, q*4)); sp=sp+1; }
+          q=q+1;
+        }
+        set32(rec_meta, ri*16+8, get32(rec_meta, ri*16+8)+1);
+      }
+    }
+  }
+  return sp;
+}
+// Top of stack after running p with in0=x (in1..in3 = 0). Fresh stack.
+fn prog_top(p:[]u8, x:i32, lst:[]u8, rec_meta:[]u8, rec_buf:[]u8)i32 {
+  let stack:[]u8=z_alloc(256*4);
+  let sp:i32=vm_run(p, prog_len(p), x, 0, 0, 0, stack, 0,
+                    lst, rec_meta, rec_buf, 0);
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+// Score of p on n episodes (early exit on first miss).
+fn eval_score(p:[]u8, ex:[]u8, et:[]u8, n:i32,
+              lst:[]u8, rec_meta:[]u8, rec_buf:[]u8)i32 {
+  let s:i32=0;
+  let i:i32=0;
+  while(i<n){
+    if(prog_top(p, get32(ex,i*4), lst, rec_meta, rec_buf)==get32(et,i*4)){
+      s=s+1;
+    } else {
+      return s;
+    }
+    i=i+1;
+  }
+  return s;
+}
+
+// ============ learner state ============
+// lst: 64 bytes of scalars:
+//   +0 nrec, +4 rec_buf_top, +8 stage_len, +12 stage_arity, +16 stage_valid,
+//   +20 rng, +24 nprog, +28 exp_n, +32 n_recruited, +36 n_retired,
+//   +40 n_stage_reject, +44 n_stage_invalid, +48 last_op, +52 fbreak
+// rec_meta: 32 slots x 16 bytes: +0 idx:i32, +4 arity:u8, +5 len:u8,
+//   +6 res:u8, +7 pad, +8 use:i32, +12 idle:i32.
+// rec_buf: 2048 bytes of (len:i32, then len*8 bytes) bodies.
+// stage_buf: 64 bytes flat (op,arg) pairs, up to 8 ops.
+// exp_buf: 256 bytes = 64 i32 experience inputs.
+// store: 16 programs x 388 bytes (48-op slots).
+fn learner_init(lst:[]u8, rec_meta:[]u8, rec_buf:[]u8, stage_buf:[]u8,
+                exp_buf:[]u8, store:[]u8)void {
+  let i:i32=0;
+  while(i<64){ set32(lst, i, 0); i=i+4; }
+  set32(lst, 20, 0x9E3779B9 as i32);
+  set32(lst, 48, -1);
+  i=0; while(i<512){ rec_meta[i]=0; i=i+1; }
+  i=0; while(i<2048){ rec_buf[i]=0; i=i+1; }
+  i=0; while(i<64){ stage_buf[i]=0; i=i+1; }
+  i=0; while(i<256){ exp_buf[i]=0; i=i+1; }
+  i=0; while(i<16*388){ store[i]=0; i=i+1; }
+  return;
+}
+fn store_prog(store:[]u8, i:i32)[]u8 { return store[i*388..i*388+388]; }
+fn ap(store:[]u8, idx:i32, op:i32, arg:i32)void {
+  prog_append(store_prog(store, idx), op, arg);
+  return;
+}
+// xorshift32 on lst+20; returns non-negative i32.
+fn rng_next(lst:[]u8)i32 {
+  let r:i32=get32(lst, 20);
+  r=r^(r<<13);
+  r=r^(r>>17);
+  r=r^(r<<5);
+  if(r<0){ r=-r; }
+  set32(lst, 20, r);
+  return r;
+}
+fn exp_pick(lst:[]u8, exp_buf:[]u8, exp_n:i32)i32 {
+  let idx:i32=imod(rng_next(lst), exp_n);
+  return get32(exp_buf, idx*4);
+}
+
+// ============ DETECT ============
+// Scans the distinct programs of the store for repeated subsequences of
+// length 2..8 (prereg A2). Candidate pool: up to 384 candidates, each
+// 80 bytes: +0 mask:i32 (distinct-program bitmask), +4 len:i32,
+// +8 first_prog:i32, +12 first_pos:i32, +16 8*(op:i32,arg:i32).
+// A subsequence counts once per distinct program (dedupe by byte-compare).
+fn detect_candidates(store:[]u8, nprog:i32, cand:[]u8)i32 {
+  let dlist:[]u8=z_alloc(64);
+  let nd:i32=0;
+  let i:i32=0;
+  while(i<nprog){
+    let pi:[]u8=store_prog(store, i);
+    let dup:i32=0;
+    let j:i32=0;
+    while(j<nd){
+      if(prog_cmp(pi, store_prog(store, get32(dlist,j*4)))==0){ dup=1; }
+      j=j+1;
+    }
+    if(dup==0){ set32(dlist, nd*4, i); nd=nd+1; }
+    i=i+1;
+  }
+  let nc:i32=0;
+  let di:i32=0;
+  while(di<nd){
+    let pp:[]u8=store_prog(store, get32(dlist, di*4));
+    let ln:i32=prog_len(pp);
+    let s:i32=0;
+    while(s<ln){
+      let l:i32=2;
+      while(l<=8){
+        if(s+l<=ln){
+          let found:i32=-1;
+          let c:i32=0;
+          while(c<nc){
+            if(get32(cand, c*80+4)==l){
+              let m:i32=1;
+              let k:i32=0;
+              while(k<l){
+                if(get32(cand, c*80+16+k*8)!=prog_op(pp,s+k)){ m=0; }
+                if(get32(cand, c*80+16+k*8+4)!=prog_arg(pp,s+k)){ m=0; }
+                k=k+1;
+              }
+              if(m==1){ found=c; }
+            }
+            c=c+1;
+          }
+          if(found>=0){
+            set32(cand, found*80, get32(cand, found*80)|(1<<di));
+          } else {
+            if(nc<384){
+              set32(cand, nc*80, 1<<di);
+              set32(cand, nc*80+4, l);
+              set32(cand, nc*80+8, get32(dlist, di*4));
+              set32(cand, nc*80+12, s);
+              let k:i32=0;
+              while(k<l){
+                set32(cand, nc*80+16+k*8, prog_op(pp,s+k));
+                set32(cand, nc*80+16+k*8+4, prog_arg(pp,s+k));
+                k=k+1;
+              }
+              nc=nc+1;
+            }
+          }
+        }
+        l=l+1;
+      }
+      s=s+1;
+    }
+    di=di+1;
+  }
+  return nc;
+}
+// 1 if candidate x ranks above candidate y: gain desc, then len desc,
+// then first_prog desc, then first_pos desc (prereg A3: latest first
+// occurrence wins ties).
+fn cand_better(cand:[]u8, x:i32, y:i32, ci:i32)i32 {
+  let fx:i32=popcnt(get32(cand, x*80));
+  let fy:i32=popcnt(get32(cand, y*80));
+  let gx:i32=(get32(cand, x*80+4)-1)*fx-ci;
+  let gy:i32=(get32(cand, y*80+4)-1)*fy-ci;
+  if(gx!=gy){ if(gx>gy){return 1;} return 0; }
+  let lx:i32=get32(cand, x*80+4);
+  let ly:i32=get32(cand, y*80+4);
+  if(lx!=ly){ if(lx>ly){return 1;} return 0; }
+  let px:i32=get32(cand, x*80+8);
+  let py:i32=get32(cand, y*80+8);
+  if(px!=py){ if(px>py){return 1;} return 0; }
+  if(get32(cand, x*80+12)>get32(cand, y*80+12)){return 1;}
+  return 0;
+}
+fn rank_candidates(cand:[]u8, nc:i32, rank:[]u8, ci:i32)void {
+  let i:i32=0;
+  while(i<nc){ set32(rank, i*4, i); i=i+1; }
+  let a:i32=0;
+  while(a<nc){
+    let b:i32=a+1;
+    while(b<nc){
+      if(cand_better(cand, get32(rank,b*4), get32(rank,a*4), ci)==1){
+        let t:i32=get32(rank, a*4);
+        set32(rank, a*4, get32(rank, b*4));
+        set32(rank, b*4, t);
+      }
+      b=b+1;
+    }
+    a=a+1;
+  }
+  return;
+}
+
+// ============ PROPOSE ============
+// Abstract stack-effect interpretation. Body bytes in flat (op,arg)
+// buffer b (blen ops). Tries arity A = 1..4. For each A, a worklist
+// simulates (pc, depth) states; depth is relative to the A inputs
+// (d = -A means all A inputs consumed). Rejects: underflow, CALL (19),
+// data-dependent or multiple final depths, unbounded states, INk with
+// k >= A, unknown recruited opcodes. On success writes out[0]=arity,
+// out[1]=result-count and returns 1.
+fn abs_effect(op:i32, A:i32, d:i32, rec_meta:[]u8, nrec:i32)i32 {
+  // returns new d, or -1000 = need-fail, -2000 = reject
+  let have:i32=d+A;
+  if(op==0){ return d+1; }
+  if(op==1){ return d+1; }
+  if(op==2){ return d+1; }
+  if(op==21){ return d+1; }
+  if(op==22){ return d+1; }
+  if(op==9){ if(have<1){return -1000;} return d+1; }
+  if(op==12){ if(have<2){return -1000;} return d+1; }
+  if(op==10){ if(have<1){return -1000;} return d-1; }
+  if(op==11){ if(have<2){return -1000;} return d; }
+  if(op==3){ if(have<2){return -1000;} return d-1; }
+  if(op==4){ if(have<2){return -1000;} return d-1; }
+  if(op==5){ if(have<2){return -1000;} return d-1; }
+  if(op==6){ if(have<2){return -1000;} return d-1; }
+  if(op==7){ if(have<2){return -1000;} return d-1; }
+  if(op==13){ if(have<2){return -1000;} return d-1; }
+  if(op==14){ if(have<2){return -1000;} return d-1; }
+  if(op==15){ if(have<2){return -1000;} return d-1; }
+  if(op==8){ if(have<1){return -1000;} return d; }
+  if(op==16){ if(have<1){return -1000;} return d-1; }
+  if(op==17){ if(have<1){return -1000;} return d-1; }
+  if(op==18){ return d; }
+  if(op>=32 && op<64){
+    let ri:i32=op-32;
+    if(ri>=nrec){ return -2000; }
+    let aa:i32=rec_meta[ri*16+4] as i32;
+    let rr:i32=rec_meta[ri*16+6] as i32;
+    if(have<aa){ return -1000; }
+    return d+rr-aa;
+  }
+  return -2000;
+}
+fn propose(blen:i32, b:[]u8, rec_meta:[]u8, nrec:i32, out:[]u8)i32 {
+  let i:i32=0;
+  while(i<blen){
+    let op0:i32=get32(b, i*8);
+    // A7: reject CALL and all INk (1,2,21,22). A recruited body must be
+    // stack-polymorphic: the wrapper binds in_k to popped stack values,
+    // so a body INk that read program inputs in the original program is
+    // unsound after recruitment (the F_BREAK gate caught two such cases).
+    if(op0==19){ return 0; }
+    if(op0==1){ return 0; }
+    if(op0==2){ return 0; }
+    if(op0==21){ return 0; }
+    if(op0==22){ return 0; }
+    i=i+1;
+  }
+  let A:i32=1;
+  while(A<=4){
+    if(A>=1){
+      let st:[]u8=z_alloc(512*8);
+      let vis:[]u8=z_alloc(9*24);
+      let nst:i32=1;
+      set32(st, 0, 0); set32(st, 4, 0);
+      vis[4]=1;
+      let finals:[]u8=z_alloc(16);
+      let nf:i32=0;
+      let bad:i32=0;
+      while(nst>0 && bad==0){
+        nst=nst-1;
+        let pc:i32=get32(st, nst*8);
+        let d:i32=get32(st, nst*8+4);
+        if(pc<0 || pc>=blen){
+          let dup:i32=0;
+          let f:i32=0;
+          while(f<nf){
+            if(get32(finals, f*4)==d){ dup=1; }
+            f=f+1;
+          }
+          if(dup==0){
+            if(nf<4){ set32(finals, nf*4, d); nf=nf+1; }
+            else { bad=1; }
+          }
+        } else {
+          let op:i32=get32(b, pc*8);
+          let arg:i32=get32(b, pc*8+4);
+          let nd:i32=abs_effect(op, A, d, rec_meta, nrec);
+          if(nd<=-1000){ bad=1; }
+          else {
+            if(nd<-A || nd>16){ bad=1; }
+            else {
+              if(op==16 || op==17){
+                // JZ/JNZ: fall-through (pc+1) and branch (arg)
+                let t1:i32=pc+1;
+                if(t1<0 || t1>=blen){
+                  let dup:i32=0; let f:i32=0;
+                  while(f<nf){ if(get32(finals,f*4)==nd){dup=1;} f=f+1; }
+                  if(dup==0){ if(nf<4){set32(finals,nf*4,nd);nf=nf+1;} else {bad=1;} }
+                } else {
+                  if(vis[t1*24+nd+4]==0){ vis[t1*24+nd+4]=1; set32(st,nst*8,t1); set32(st,nst*8+4,nd); nst=nst+1; }
+                }
+                let t2:i32=arg;
+                if(t2<0 || t2>=blen){
+                  let dup:i32=0; let f:i32=0;
+                  while(f<nf){ if(get32(finals,f*4)==nd){dup=1;} f=f+1; }
+                  if(dup==0){ if(nf<4){set32(finals,nf*4,nd);nf=nf+1;} else {bad=1;} }
+                } else {
+                  if(vis[t2*24+nd+4]==0){ vis[t2*24+nd+4]=1; set32(st,nst*8,t2); set32(st,nst*8+4,nd); nst=nst+1; }
+                }
+              } else if(op==18){
+                let t:i32=arg;
+                if(t<0 || t>=blen){
+                  let dup:i32=0; let f:i32=0;
+                  while(f<nf){ if(get32(finals,f*4)==nd){dup=1;} f=f+1; }
+                  if(dup==0){ if(nf<4){set32(finals,nf*4,nd);nf=nf+1;} else {bad=1;} }
+                } else {
+                  if(vis[t*24+nd+4]==0){ vis[t*24+nd+4]=1; set32(st,nst*8,t); set32(st,nst*8+4,nd); nst=nst+1; }
+                }
+              } else {
+                let t:i32=pc+1;
+                if(t<0 || t>=blen){
+                  let dup:i32=0; let f:i32=0;
+                  while(f<nf){ if(get32(finals,f*4)==nd){dup=1;} f=f+1; }
+                  if(dup==0){ if(nf<4){set32(finals,nf*4,nd);nf=nf+1;} else {bad=1;} }
+                } else {
+                  if(vis[t*24+nd+4]==0){ vis[t*24+nd+4]=1; set32(st,nst*8,t); set32(st,nst*8+4,nd); nst=nst+1; }
+                }
+              }
+            }
+          }
+        }
+      }
+      if(bad==0 && nf==1){
+        let res:i32=A+get32(finals, 0);
+        if(res>=1 && res<=4){
+          set32(out, 0, A);
+          set32(out, 4, res);
+          return 1;
+        }
+      }
+    }
+    A=A+1;
+  }
+  return 0;
+}
+
+// ============ VALIDATE ============
+// Provisional-installs the staged body, then compares INLINE (body as a
+// main program on a preloaded stack) vs WRAPPED ([OP] dispatch on the
+// same preload) on N_VAL=16 learner-generated input tuples. Full-stack
+// equality required. On failure the provisional install is removed and
+// stage_valid stays 0. On success the install is kept and stage_valid=1.
+fn validate(lst:[]u8, rec_meta:[]u8, rec_buf:[]u8, exp_buf:[]u8,
+            stage_buf:[]u8, slen:i32, sarity:i32, res:i32)i32 {
+  let nrec:i32=get32(lst, 0);
+  let exp_n:i32=get32(lst, 28);
+  if(nrec>=32){ return 0; }
+  let top0:i32=get32(lst, 4);
+  if(top0+4+slen*8>2048){ return 0; }
+  let ri:i32=nrec;
+  set32(rec_meta, ri*16, top0);
+  rec_meta[ri*16+4]=sarity as u8;
+  rec_meta[ri*16+5]=slen as u8;
+  rec_meta[ri*16+6]=res as u8;
+  set32(rec_meta, ri*16+8, 0);
+  set32(rec_meta, ri*16+12, 0);
+  set32(rec_buf, top0, slen);
+  let i:i32=0;
+  while(i<slen*8){ rec_buf[top0+4+i]=stage_buf[i]; i=i+1; }
+  set32(lst, 0, nrec+1);
+  set32(lst, 4, top0+4+slen*8);
+  let ok:i32=1;
+  let t:i32=0;
+  while(t<16 && ok==1){
+    let tup:[]u8=z_alloc(16);
+    let k:i32=0;
+    while(k<sarity){ set32(tup, k*4, exp_pick(lst, exp_buf, exp_n)); k=k+1; }
+    // INLINE
+    let bp:[]u8=prog_new(8);
+    let q:i32=0;
+    while(q<slen){ prog_set(bp, q, get32(stage_buf,q*8), get32(stage_buf,q*8+4)); q=q+1; }
+    prog_set_len(bp, slen);
+    let istack:[]u8=z_alloc(256*4);
+    set32(istack, 0, 7); set32(istack, 4, 13);
+    let qq:i32=0;
+    while(qq<sarity){ set32(istack, (2+qq)*4, get32(tup, qq*4)); qq=qq+1; }
+    let isp:i32=vm_run(bp, slen, get32(tup,0), get32(tup,4), get32(tup,8), get32(tup,12),
+                       istack, 2+sarity, lst, rec_meta, rec_buf, 0);
+    // WRAPPED
+    let wp:[]u8=prog_new(2);
+    prog_append(wp, 32+ri, 0);
+    let wstack:[]u8=z_alloc(256*4);
+    set32(wstack, 0, 7); set32(wstack, 4, 13);
+    let q2:i32=0;
+    while(q2<sarity){ set32(wstack, (2+q2)*4, get32(tup, q2*4)); q2=q2+1; }
+    let wsp:i32=vm_run(wp, 1, 0, 0, 0, 0, wstack, 2+sarity,
+                       lst, rec_meta, rec_buf, 0);
+    if(isp!=wsp){ ok=0; }
+    else {
+      let s:i32=0;
+      while(s<isp){
+        if(get32(istack, s*4)!=get32(wstack, s*4)){ ok=0; }
+        s=s+1;
+      }
+    }
+    t=t+1;
+  }
+  if(ok==0){
+    set32(lst, 0, nrec);
+    set32(lst, 4, top0);
+    set32(lst, 44, get32(lst, 44)+1);
+    return 0;
+  }
+  set32(lst, 16, 1);
+  return 1;
+}
+
+// ============ RECRUIT ============
+// Checksum of a program's tops over 16 fixed experience inputs.
+fn prog_checksum(store:[]u8, pi:i32, exp_buf:[]u8, exp_n:i32,
+                 lst:[]u8, rec_meta:[]u8, rec_buf:[]u8)i64 {
+  let s:i64=0;
+  let j:i32=0;
+  while(j<16){
+    let x:i32=get32(exp_buf, imod(j, exp_n)*4);
+    s=s+(prog_top(store_prog(store, pi), x, lst, rec_meta, rec_buf) as i64);
+    j=j+1;
+  }
+  return s;
+}
+// Rewrite: replace every non-overlapping occurrence of the staged body
+// (sl2 ops in flat buffer sub) with (newop,0). Byte-exact otherwise.
+fn rewrite_store(store:[]u8, nprog:i32, sub:[]u8, sl2:i32, newop:i32)void {
+  let i:i32=0;
+  while(i<nprog){
+    let pp:[]u8=store_prog(store, i);
+    let ln:i32=prog_len(pp);
+    let np:[]u8=prog_new(48);
+    let s:i32=0;
+    while(s<ln){
+      let m:i32=0;
+      if(s+sl2<=ln){
+        m=1;
+        let k:i32=0;
+        while(k<sl2){
+          if(prog_op(pp,s+k)!=get32(sub,k*8)){ m=0; }
+          if(prog_arg(pp,s+k)!=get32(sub,k*8+4)){ m=0; }
+          k=k+1;
+        }
+      }
+      if(m==1){ prog_append(np, newop, 0); s=s+sl2; }
+      else { prog_append(np, prog_op(pp,s), prog_arg(pp,s)); s=s+1; }
+    }
+    prog_copy(pp, np);
+    i=i+1;
+  }
+  return;
+}
+// Finalize a staged, validated recruitment:
+// F-BREAK gate (record checksums, rewrite, re-check, abort on mismatch),
+// then log RECRUITED, clear staging, count the event.
+fn recruit_finalize(lst:[]u8, rec_meta:[]u8, rec_buf:[]u8, store:[]u8,
+                    exp_buf:[]u8, stage_buf:[]u8, gain:i32)i32 {
+  let nrec:i32=get32(lst, 0);
+  let ri:i32=nrec-1;
+  let slen:i32=get32(lst, 8);
+  let nprog:i32=get32(lst, 24);
+  let exp_n:i32=get32(lst, 28);
+  let sums:[]u8=z_alloc(16*8);
+  let i:i32=0;
+  while(i<nprog){
+    set64(sums, i*8, prog_checksum(store, i, exp_buf, exp_n, lst, rec_meta, rec_buf));
+    i=i+1;
+  }
+  // Backup store for transactional rollback on F_BREAK.
+  let store_bak:[]u8=z_alloc(16*388);
+  let bi:i32=0;
+  while(bi<16*388){ store_bak[bi]=store[bi]; bi=bi+1; }
+  let top0:i32=get32(rec_meta, ri*16);
+  rewrite_store(store, nprog, stage_buf, slen, 32+ri);
+  i=0;
+  while(i<nprog){
+    if(prog_checksum(store, i, exp_buf, exp_n, lst, rec_meta, rec_buf)!=get64(sums, i*8)){
+      // F_BREAK: restore store, uninstall provisional op, roll back state.
+      bi=0;
+      while(bi<16*388){ store[bi]=store_bak[bi]; bi=bi+1; }
+      set32(lst, 0, nrec-1);
+      set32(lst, 4, top0);
+      set32(lst, 8, 0);
+      set32(lst, 16, 0);
+      emit("F_BREAK 1\n");
+      set32(lst, 52, 1);
+      return 0;
+    }
+    i=i+1;
+  }
+  emit("RECRUITED op="); e64(32+ri);
+  emit(" arity="); e64(get32(lst, 12));
+  emit(" len="); e64(slen);
+  emit(" gain="); e64(gain);
+  emit("\n");
+  set32(lst, 8, 0);
+  set32(lst, 16, 0);
+  set32(lst, 32, get32(lst, 32)+1);
+  set32(lst, 48, 32+ri);
+  return 1;
+}
+
+// ============ RETIRE ============
+// Re-expand every occurrence of (32+ri,0) to the recorded body bytes.
+fn expand_op(store:[]u8, nprog:i32, rec_meta:[]u8, rec_buf:[]u8, ri:i32)void {
+  let base:i32=get32(rec_meta, ri*16);
+  let flen:i32=rec_meta[ri*16+5] as i32;
+  let i:i32=0;
+  while(i<nprog){
+    let pp:[]u8=store_prog(store, i);
+    let ln:i32=prog_len(pp);
+    let np:[]u8=prog_new(48);
+    let s:i32=0;
+    while(s<ln){
+      if(prog_op(pp,s)==32+ri && prog_arg(pp,s)==0){
+        let k:i32=0;
+        while(k<flen){
+          prog_append(np, get32(rec_buf,base+4+k*8), get32(rec_buf,base+4+k*8+4));
+          k=k+1;
+        }
+        s=s+1;
+      } else {
+        prog_append(np, prog_op(pp,s), prog_arg(pp,s));
+        s=s+1;
+      }
+    }
+    prog_copy(pp, np);
+    i=i+1;
+  }
+  return;
+}
+fn rewrite_opcode(store:[]u8, nprog:i32, from:i32, to:i32)void {
+  let i:i32=0;
+  while(i<nprog){
+    let pp:[]u8=store_prog(store, i);
+    let ln:i32=prog_len(pp);
+    let s:i32=0;
+    while(s<ln){
+      if(prog_op(pp,s)==from && prog_arg(pp,s)==0){ prog_set(pp, s, to, 0); }
+      s=s+1;
+    }
+    i=i+1;
+  }
+  return;
+}
+// Per-episode decay and retirement (prereg 7). Idle counters increment on
+// episodes with zero usage; retirement fires at idle >= W_IDLE=3. Bodies
+// are re-expanded byte-exactly, then the recruited-op tables are compacted
+// so surviving opcodes keep a dense 32.. range. New opcodes after retire
+// reuse 32+0.
+fn retire_step(lst:[]u8, rec_meta:[]u8, rec_buf:[]u8, store:[]u8)void {
+  let nrec:i32=get32(lst, 0);
+  let nprog:i32=get32(lst, 24);
+  let ri:i32=0;
+  while(ri<nrec){
+    let use:i32=get32(rec_meta, ri*16+8);
+    let idle:i32=get32(rec_meta, ri*16+12);
+    if(use==0){ idle=idle+1; }
+    else { idle=0; }
+    set32(rec_meta, ri*16+12, idle);
+    set32(rec_meta, ri*16+8, 0);
+    if(idle>=3){
+      expand_op(store, nprog, rec_meta, rec_buf, ri);
+      let rj:i32=ri+1;
+      while(rj<nrec){
+        let b:i32=0;
+        while(b<16){ rec_meta[(rj-1)*16+b]=rec_meta[rj*16+b]; b=b+1; }
+        rewrite_opcode(store, nprog, 32+rj, 32+rj-1);
+        rj=rj+1;
+      }
+      nrec=nrec-1;
+      set32(lst, 0, nrec);
+      set32(lst, 36, get32(lst, 36)+1);
+      emit("RETIRED op="); e64(32+ri); emit("\n");
+    } else {
+      ri=ri+1;
+    }
+  }
+  return;
+}
+
+// ============ consolidate ============
+// One learner episode: DETECT (scan + rank), walk the ranking staging the
+// best candidate that survives PROPOSE and VALIDATE, then RECRUIT (at most
+// one op per episode), then RETIRE decay. The driver calls this; the driver
+// never recruits directly. Returns 1 if an op was recruited this episode.
+fn consolidate(lst:[]u8, rec_meta:[]u8, rec_buf:[]u8, store:[]u8,
+               exp_buf:[]u8, stage_buf:[]u8)i32 {
+  let nprog:i32=get32(lst, 24);
+  let cand:[]u8=z_alloc(384*80);
+  let nc:i32=detect_candidates(store, nprog, cand);
+  let rank:[]u8=z_alloc(384*4);
+  rank_candidates(cand, nc, rank, 3);
+  let recruited:i32=0;
+  let r:i32=0;
+  while(r<nc && recruited==0){
+    let ci:i32=get32(rank, r*4);
+    let ln:i32=get32(cand, ci*80+4);
+    let freq:i32=popcnt(get32(cand, ci*80));
+    let gain:i32=(ln-1)*freq-3;
+    let fpos:i32=get32(cand, ci*80+12);
+    if(freq>=3 && gain>0){
+      // Stage with jump relativization: JZ/JNZ/JMP args are absolute
+      // program positions; subtract first_pos to make them body-relative.
+      // Sound only when every occurrence shares first_pos (documented).
+      let k:i32=0;
+      while(k<ln*8){
+        let sop:i32=get32(cand, ci*80+16+k);
+        let sarg:i32=get32(cand, ci*80+16+k+4);
+        if(sop==16 || sop==17 || sop==18){ sarg=sarg-fpos; }
+        set32(stage_buf, k, sop);
+        set32(stage_buf, k+4, sarg);
+        k=k+8;
+      }
+      set32(lst, 8, ln);
+      let out:[]u8=z_alloc(8);
+      if(propose(ln, stage_buf, rec_meta, get32(lst,0), out)==1){
+        set32(lst, 12, get32(out, 0));
+        if(validate(lst, rec_meta, rec_buf, exp_buf, stage_buf,
+                    ln, get32(out,0), get32(out,4))==1){
+          recruited=recruit_finalize(lst, rec_meta, rec_buf, store,
+                                     exp_buf, stage_buf, gain);
+        }
+      } else {
+        set32(lst, 40, get32(lst, 40)+1);
+      }
+    }
+    r=r+1;
+  }
+  retire_step(lst, rec_meta, rec_buf, store);
+  return recruited;
+}
+
+// ============ test battery ============
+fn fill_exp(lst:[]u8, exp_buf:[]u8)void {
+  let i:i32=0;
+  while(i<64){
+    set32(exp_buf, i*4, -10+imod(i*7+3, 21));
+    i=i+1;
+  }
+  set32(lst, 28, 64);
+  return;
+}
+fn build_self_progs(store:[]u8)void {
+  // S0 = [IN0, DUP, MUL, PUSH:1, ADD]
+  ap(store,0,1,0); ap(store,0,9,0); ap(store,0,5,0); ap(store,0,0,1); ap(store,0,3,0);
+  // S1 = [PUSH:7, DROP, IN0, PUSH:0, ADD, DUP, MUL, PUSH:2, MUL]
+  ap(store,1,0,7); ap(store,1,10,0); ap(store,1,1,0); ap(store,1,0,0); ap(store,1,3,0);
+  ap(store,1,9,0); ap(store,1,5,0); ap(store,1,0,2); ap(store,1,5,0);
+  // S2 = [IN0, NEG, NEG, DUP, MUL]
+  ap(store,2,1,0); ap(store,2,8,0); ap(store,2,8,0); ap(store,2,9,0); ap(store,2,5,0);
+  // S3 = [PUSH:3, IN0, SWAP, DROP, DUP, MUL, NEG]
+  ap(store,3,0,3); ap(store,3,1,0); ap(store,3,11,0); ap(store,3,10,0);
+  ap(store,3,9,0); ap(store,3,5,0); ap(store,3,8,0);
+  // S4 = [IN0, DUP, MUL, DUP, ADD]
+  ap(store,4,1,0); ap(store,4,9,0); ap(store,4,5,0); ap(store,4,9,0); ap(store,4,3,0);
+  return;
+}
+fn store_checksum(store:[]u8, nprog:i32, lst:[]u8, rec_meta:[]u8, rec_buf:[]u8)i64 {
+  let s:i64=0;
+  let i:i32=0;
+  while(i<nprog){
+    let x:i32=-4;
+    while(x<=4){
+      s=s+(prog_top(store_prog(store,i), x, lst, rec_meta, rec_buf) as i64);
+      x=x+1;
+    }
+    i=i+1;
+  }
+  return s;
+}
+
+// R-V1: recruit an ABS-equivalent 8-op body autonomously; 17/17 checks.
+fn test_rv1()void {
+  emit("TEST R-V1\n");
+  let lst:[]u8=z_alloc(64);
+  let rec_meta:[]u8=z_alloc(512);
+  let rec_buf:[]u8=z_alloc(2048);
+  let stage_buf:[]u8=z_alloc(64);
+  let exp_buf:[]u8=z_alloc(256);
+  let store:[]u8=z_alloc(16*388);
+  learner_init(lst, rec_meta, rec_buf, stage_buf, exp_buf, store);
+  fill_exp(lst, exp_buf);
+  // 5 programs: [IN0, ABS8 at pos 1, PUSH:(100+i), ADD].
+  // ABS8 (DUP-based, no INk per A7):
+  // [DUP, PUSH:-1, GT, JZ:7, DUP, JMP:9, DUP, NEG]
+  // Jump args are absolute; staging rebases them by first_pos.
+  let p:i32=0;
+  while(p<5){
+    ap(store,p,1,0);
+    ap(store,p,9,0); ap(store,p,0,-1); ap(store,p,15,0); ap(store,p,16,7);
+    ap(store,p,9,0); ap(store,p,18,9); ap(store,p,9,0); ap(store,p,8,0);
+    ap(store,p,0,100+p); ap(store,p,3,0);
+    p=p+1;
+  }
+  set32(lst, 24, 5);
+  let rc:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let op:i32=get32(lst, 48);
+  emit("RV1 recruited="); e64(rc);
+  emit(" nrec="); e64(get32(lst,0));
+  emit(" op="); e64(op); emit("\n");
+  let pass:i32=1;
+  if(rc!=1 || get32(lst,0)!=1 || get32(lst,52)!=0){ pass=0; }
+  // behavioral: [PUSH:x, OP] top == |x| for x in -8..8
+  let x:i32=-8;
+  while(x<=8){
+    let pr:[]u8=prog_new(4);
+    prog_append(pr, 0, x);
+    prog_append(pr, op, 0);
+    let want:i32=x; if(want<0){ want=-want; }
+    if(prog_top(pr, 0, lst, rec_meta, rec_buf)!=want){ pass=0; }
+    x=x+1;
+  }
+  // sanity: [IN0, OP] top == |x| for x in -8..8
+  x=-8;
+  while(x<=8){
+    let pr:[]u8=prog_new(4);
+    prog_append(pr, 1, 0);
+    prog_append(pr, op, 0);
+    let want:i32=x; if(want<0){ want=-want; }
+    if(prog_top(pr, x, lst, rec_meta, rec_buf)!=want){ pass=0; }
+    x=x+1;
+  }
+  if(pass==1){ emit("R-V1 PASS\n"); } else { emit("R-V1 FAIL\n"); }
+  return;
+}
+
+// T-NOFIRE: no repeated substructure -> zero recruitments.
+fn test_nofire()void {
+  emit("TEST T-NOFIRE\n");
+  let lst:[]u8=z_alloc(64);
+  let rec_meta:[]u8=z_alloc(512);
+  let rec_buf:[]u8=z_alloc(2048);
+  let stage_buf:[]u8=z_alloc(64);
+  let exp_buf:[]u8=z_alloc(256);
+  let store:[]u8=z_alloc(16*388);
+  learner_init(lst, rec_meta, rec_buf, stage_buf, exp_buf, store);
+  fill_exp(lst, exp_buf);
+  // 6 programs with pairwise-unique 2-grams.
+  ap(store,0,0,1); ap(store,0,0,11); ap(store,0,3,0);
+  ap(store,1,0,2); ap(store,1,0,22); ap(store,1,4,0);
+  ap(store,2,0,3); ap(store,2,0,33); ap(store,2,5,0);
+  ap(store,3,1,0); ap(store,3,0,44); ap(store,3,6,0);
+  ap(store,4,0,5); ap(store,4,9,0); ap(store,4,3,0);
+  ap(store,5,1,0); ap(store,5,8,0); ap(store,5,0,66); ap(store,5,3,0);
+  set32(lst, 24, 6);
+  let r1:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let r2:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  emit("TNOFIRE r1="); e64(r1);
+  emit(" r2="); e64(r2);
+  emit(" nrec="); e64(get32(lst,0)); emit("\n");
+  if(r1==0 && r2==0 && get32(lst,0)==0){ emit("T-NOFIRE PASS\n"); }
+  else { emit("T-NOFIRE FAIL\n"); }
+  return;
+}
+
+// Deterministic enumerative search (prereg A6). Alphabet base[10] =
+// PUSH:-1,0,1,2,3, IN0, ADD, SUB, MUL, DUP; treatment adds the recruited
+// opcode. Control cap 5, treatment cap 4. Tasks: H1 x^2+x, H2 2x^2,
+// H3 x^2-1 on x in -4..4. Returns candidate evaluations to first exact
+// (9/9) solution.
+fn enum_evals(task:i32, use_rec:i32, op:i32,
+              lst:[]u8, rec_meta:[]u8, rec_buf:[]u8)i32 {
+  let alph:[]u8=z_alloc(12*8);
+  set32(alph,0*8,0); set32(alph,0*8+4,-1);
+  set32(alph,1*8,0); set32(alph,1*8+4,0);
+  set32(alph,2*8,0); set32(alph,2*8+4,1);
+  set32(alph,3*8,0); set32(alph,3*8+4,2);
+  set32(alph,4*8,0); set32(alph,4*8+4,3);
+  set32(alph,5*8,1); set32(alph,5*8+4,0);
+  set32(alph,6*8,3); set32(alph,6*8+4,0);
+  set32(alph,7*8,4); set32(alph,7*8+4,0);
+  set32(alph,8*8,5); set32(alph,8*8+4,0);
+  set32(alph,9*8,9); set32(alph,9*8+4,0);
+  let na:i32=10;
+  let cap:i32=5;
+  if(use_rec==1){
+    set32(alph,10*8,op); set32(alph,10*8+4,0);
+    na=11; cap=4;
+  }
+  let ex:[]u8=z_alloc(9*4);
+  let et:[]u8=z_alloc(9*4);
+  let i:i32=0;
+  while(i<9){
+    let x:i32=i-4;
+    set32(ex,i*4,x);
+    if(task==0){ set32(et,i*4,x*x+x); }
+    if(task==1){ set32(et,i*4,2*x*x); }
+    if(task==2){ set32(et,i*4,x*x-1); }
+    i=i+1;
+  }
+  let evals:i32=0;
+  let found:i32=0;
+  let L:i32=1;
+  while(L<=cap && found==0){
+    let dig:[]u8=z_alloc(L*4);
+    let d0:i32=0;
+    while(d0<L){ set32(dig,d0*4,0); d0=d0+1; }
+    let done:i32=0;
+    while(done==0 && found==0){
+      let pr:[]u8=prog_new(8);
+      let q:i32=0;
+      while(q<L){
+        let dv:i32=get32(dig,q*4);
+        prog_append(pr, get32(alph,dv*8), get32(alph,dv*8+4));
+        q=q+1;
+      }
+      evals=evals+1;
+      if(eval_score(pr,ex,et,9,lst,rec_meta,rec_buf)==9){ found=1; }
+      let carry:i32=1;
+      let c2:i32=0;
+      while(c2<L && carry==1){
+        let v:i32=get32(dig,c2*4)+1;
+        if(v<na){ set32(dig,c2*4,v); carry=0; }
+        else { set32(dig,c2*4,0); c2=c2+1; }
+      }
+      if(carry==1){ done=1; }
+    }
+    L=L+1;
+  }
+  return evals;
+}
+
+// T-SELF: recruit [DUP,MUL], compress the store, reduce search cost.
+fn test_self()void {
+  emit("TEST T-SELF\n");
+  let lst:[]u8=z_alloc(64);
+  let rec_meta:[]u8=z_alloc(512);
+  let rec_buf:[]u8=z_alloc(2048);
+  let stage_buf:[]u8=z_alloc(64);
+  let exp_buf:[]u8=z_alloc(256);
+  let store:[]u8=z_alloc(16*388);
+  learner_init(lst, rec_meta, rec_buf, stage_buf, exp_buf, store);
+  fill_exp(lst, exp_buf);
+  build_self_progs(store);
+  set32(lst, 24, 5);
+  let before:i32=0;
+  let i:i32=0;
+  while(i<5){ before=before+prog_len(store_prog(store,i)); i=i+1; }
+  let rc:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let after:i32=0;
+  i=0;
+  while(i<5){ after=after+prog_len(store_prog(store,i)); i=i+1; }
+  let op:i32=get32(lst, 48);
+  emit("TSELF recruited="); e64(rc);
+  emit(" before="); e64(before);
+  emit(" after="); e64(after);
+  emit(" op="); e64(op); emit("\n");
+  let pass:i32=1;
+  if(rc!=1 || get32(lst,52)!=0){ pass=0; }
+  if(after>=before){ pass=0; }
+  let t:i32=0;
+  while(t<3){
+    let ctrl:i32=enum_evals(t, 0, op, lst, rec_meta, rec_buf);
+    let treat:i32=enum_evals(t, 1, op, lst, rec_meta, rec_buf);
+    emit("TSELF task"); e64(t);
+    emit(" ctrl="); e64(ctrl);
+    emit(" treat="); e64(treat); emit("\n");
+    if(treat>=ctrl){ pass=0; }
+    t=t+1;
+  }
+  if(pass==1){ emit("T-SELF PASS\n"); } else { emit("T-SELF FAIL\n"); }
+  return;
+}
+
+// T-ARITY2: recruit a binary [ADD,PUSH:2,MUL]-shaped op; verify arity,
+// behavior on 9 probes, then hierarchical composition (a second recruited
+// op whose body contains the first).
+fn test_arity2()void {
+  emit("TEST T-ARITY2\n");
+  let lst:[]u8=z_alloc(64);
+  let rec_meta:[]u8=z_alloc(512);
+  let rec_buf:[]u8=z_alloc(2048);
+  let stage_buf:[]u8=z_alloc(64);
+  let exp_buf:[]u8=z_alloc(256);
+  let store:[]u8=z_alloc(16*388);
+  learner_init(lst, rec_meta, rec_buf, stage_buf, exp_buf, store);
+  fill_exp(lst, exp_buf);
+  // A0 = [IN0, IN1, ADD, PUSH:2, MUL, PUSH:1, ADD]
+  ap(store,0,1,0); ap(store,0,2,0); ap(store,0,3,0); ap(store,0,0,2);
+  ap(store,0,5,0); ap(store,0,0,1); ap(store,0,3,0);
+  // A1 = [PUSH:5, DROP, IN0, IN1, ADD, PUSH:2, MUL]
+  ap(store,1,0,5); ap(store,1,10,0); ap(store,1,1,0); ap(store,1,2,0);
+  ap(store,1,3,0); ap(store,1,0,2); ap(store,1,5,0);
+  // A2 = [IN1, IN0, SWAP, ADD, PUSH:2, MUL, NEG]
+  ap(store,2,2,0); ap(store,2,1,0); ap(store,2,11,0); ap(store,2,3,0);
+  ap(store,2,0,2); ap(store,2,5,0); ap(store,2,8,0);
+  // A3 = [IN0, PUSH:0, ADD, IN1, ADD, PUSH:2, MUL, PUSH:3, ADD]
+  ap(store,3,1,0); ap(store,3,0,0); ap(store,3,3,0); ap(store,3,2,0);
+  ap(store,3,3,0); ap(store,3,0,2); ap(store,3,5,0); ap(store,3,0,3); ap(store,3,3,0);
+  // A4 = [PUSH:9, IN0, IN1, ADD, PUSH:2, MUL, DROP]
+  ap(store,4,0,9); ap(store,4,1,0); ap(store,4,2,0); ap(store,4,3,0);
+  ap(store,4,0,2); ap(store,4,5,0); ap(store,4,10,0);
+  set32(lst, 24, 5);
+  let rc:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let op:i32=get32(lst, 48);
+  emit("TARITY2 recruited="); e64(rc);
+  emit(" op="); e64(op); emit("\n");
+  let pass:i32=1;
+  if(rc!=1 || get32(lst,52)!=0){ pass=0; }
+  let arity:i32=-1;
+  if(rc==1){ arity=rec_meta[(op-32)*16+4] as i32; }
+  emit("TARITY2 arity="); e64(arity); emit("\n");
+  if(arity!=2){ pass=0; }
+  // [PUSH:3, PUSH:4, OP] top == 14
+  let pr:[]u8=prog_new(4);
+  prog_append(pr, 0, 3); prog_append(pr, 0, 4); prog_append(pr, op, 0);
+  if(prog_top(pr, 0, lst, rec_meta, rec_buf)!=14){ pass=0; }
+  // 9 probes: [PUSH:a, PUSH:b, OP] top == 2(a+b)
+  let a:i32=-4;
+  while(a<=4){
+    let b:i32=-4;
+    while(b<=4){
+      let pr2:[]u8=prog_new(4);
+      prog_append(pr2, 0, a); prog_append(pr2, 0, b); prog_append(pr2, op, 0);
+      if(prog_top(pr2, 0, lst, rec_meta, rec_buf)!=2*(a+b)){ pass=0; }
+      b=b+4;
+    }
+    a=a+4;
+  }
+  // compositional reuse: add two programs sharing [OP32,PUSH:1,ADD] with A0';
+  // a second consolidation should recruit a further op whose body contains
+  // the arity-2 op (hierarchical composition), with no INk per A7.
+  // P5 = [PUSH:7, DROP, IN0, IN1, OP32, PUSH:1, ADD]
+  ap(store,5,0,7); ap(store,5,10,0); ap(store,5,1,0); ap(store,5,2,0);
+  ap(store,5,op,0); ap(store,5,0,1); ap(store,5,3,0);
+  // P6 = [PUSH:8, DROP, IN0, IN1, OP32, PUSH:1, ADD]
+  ap(store,6,0,8); ap(store,6,10,0); ap(store,6,1,0); ap(store,6,2,0);
+  ap(store,6,op,0); ap(store,6,0,1); ap(store,6,3,0);
+  set32(lst, 24, 7);
+  let rc2:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let op2:i32=get32(lst, 48);
+  emit("TARITY2 rc2="); e64(rc2); emit(" op2="); e64(op2); emit("\n");
+  if(rc2!=1){ pass=0; }
+  else {
+    // [PUSH:3, PUSH:4, OP33] top == 2(3+4)+1 == 15
+    let pr3:[]u8=prog_new(4);
+    prog_append(pr3, 0, 3); prog_append(pr3, 0, 4); prog_append(pr3, op2, 0);
+    if(prog_top(pr3, 0, lst, rec_meta, rec_buf)!=15){ pass=0; }
+  }
+  if(pass==1){ emit("T-ARITY2 PASS\n"); } else { emit("T-ARITY2 FAIL\n"); }
+  return;
+}
+
+// T-RETIRE: recruit [DUP,MUL], then consolidate with no intervening
+// executions; retirement must fire within W_IDLE+2 episodes and preserve
+// all outputs byte-exactly.
+fn test_retire()void {
+  emit("TEST T-RETIRE\n");
+  let lst:[]u8=z_alloc(64);
+  let rec_meta:[]u8=z_alloc(512);
+  let rec_buf:[]u8=z_alloc(2048);
+  let stage_buf:[]u8=z_alloc(64);
+  let exp_buf:[]u8=z_alloc(256);
+  let store:[]u8=z_alloc(16*388);
+  learner_init(lst, rec_meta, rec_buf, stage_buf, exp_buf, store);
+  fill_exp(lst, exp_buf);
+  build_self_progs(store);
+  set32(lst, 24, 5);
+  let rc:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+  let pass:i32=1;
+  if(rc!=1){ pass=0; }
+  let before:i64=store_checksum(store, 5, lst, rec_meta, rec_buf);
+  let e:i32=1;
+  let retired_at:i32=0;
+  while(e<=5){
+    let r2:i32=consolidate(lst, rec_meta, rec_buf, store, exp_buf, stage_buf);
+    if(get32(lst,36)>0 && retired_at==0){ retired_at=e; }
+    // Stop at first retirement: after re-expansion the same body is
+    // detectable again and would re-recruit (oscillation, documented
+    // limitation). The prereg bar is retirement within W_IDLE+2.
+    if(retired_at>0){ break; }
+    if(r2!=0){ pass=0; }
+    e=e+1;
+  }
+  let after:i64=store_checksum(store, 5, lst, rec_meta, rec_buf);
+  emit("TRETIRE retired_at="); e64(retired_at);
+  emit(" nrec="); e64(get32(lst,0));
+  emit(" n_recruited="); e64(get32(lst,32));
+  emit(" n_retired="); e64(get32(lst,36)); emit("\n");
+  if(retired_at==0 || retired_at>5){ pass=0; }
+  if(before!=after){ pass=0; }
+  if(get32(lst,0)!=0){ pass=0; }
+  if(get32(lst,32)!=1){ pass=0; }
+  if(get32(lst,52)!=0){ pass=0; }
+  if(pass==1){ emit("T-RETIRE PASS\n"); } else { emit("T-RETIRE FAIL\n"); }
+  return;
+}
+
+fn main()void {
+  emit("OPRECRUIT2 battery\n");
+  test_rv1();
+  test_nofire();
+  test_self();
+  test_arity2();
+  test_retire();
+  emit("T-ADV PENDING\n");
+  emit("BATTERY DONE\n");
+  return;
+}

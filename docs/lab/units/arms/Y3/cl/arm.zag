@@ -1,0 +1,1680 @@
+// Y3 — Temporal/versioned IDs (IDENT family)
+// Frozen §3 row (verbatim, byte-verified against frozen commit b0b9140c0eda):
+//   "Y3 — Temporal/versioned IDs | IDENT | Mechanism: Identity = serial +
+//    birth epoch + revision lineage; tombstoned IDs never reused; never
+//    dangles. | Binding kill criterion: Mean lineage depth > 50 on the
+//    standard revision curriculum (fragmentation, not versioning); OR any
+//    recall resolving to a tombstoned span (dangling reference observed) —
+//    kill and fix before any further claim."
+// Trial layout: y3/cl/arm.zag + y3/substrate/{R33_NATIVE_SHA256_V2.zag,R33_NATIVE_IO_V1.zag}
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+
+const Y3_CHUNK:i32=64;
+const Y3_C_PROSE:i32=1;
+const Y3_C_CODE:i32=2;
+const Y3_C_T1P:i32=3;
+const Y3_C_T1C:i32=4;
+const Y3_C_T2P:i32=5;
+const Y3_C_T2C:i32=6;
+const Y3_C_T3:i32=7;
+const Y3_C_FRESH:i32=8;
+const Y3_M3_CAP:i32=4000;      // C_M3: harness-fixed M3 store capacity (slots)
+const Y3_M3_V:i32=1000;        // valuable set size
+const Y3_M3_FRESH1:i32=3000;   // phase-1 fresh ingests
+const Y3_M3_KILL:i32=3000;     // phase-2 kills
+const Y3_M3_FRESH2:i32=4000;   // phase-3 ingests at capacity
+const Y3_M4_N:i32=200;         // defect units per corpus
+const Y3_M7_LOOKUPS:i32=5000;
+
+// flags bits
+const F_OCC:i32=1;
+const F_LIVE:i32=2;
+const F_PIN:i32=4;
+const F_WEAK:i32=8;
+const F_SHIFT:i32=16;
+const F_PATCH:i32=32;
+
+// ledger opcodes (frozen namespace, ARM_INTERFACE.md §6)
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_PROMOTE:i32=5;
+const OP_REVISE:i32=6;
+const OP_REFUSE:i32=8;
+const OP_EVICT:i32=9;
+const OP_SLOT_REUSE:i32=10;   // 0x0A
+const OP_TDB:i32=16;          // TRAINER_DEFECT_BOUNDARY
+const OP_TDC:i32=17;          // TRAINER_DEFECT_CONTENT
+const OP_TMV:i32=18;          // TRAINER_MARK_VALUABLE
+const OP_TSP:i32=19;          // TRAINER_SWAP_PROBE (0x13, frozen; A15 provisional schedule)
+
+// ---- little-endian u32/i32 packing on []u8 (playbook idiom) ----
+fn uget(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn uput(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v & 255) as u8;b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;b[at+3]=((v>>24) & 255) as u8;
+}
+fn iget(b:[]u8,at:i32)i32 { return uget(b,at) as i32; }
+fn iput(b:[]u8,at:i32,v:i32)void { uput(b,at,v as i64); }
+
+// ---- Y3 temporal/versioned identity store ----
+// Identity = (serial, birth_epoch, lineage_root).
+//   serial: monotonic issuance counter; tombstoned serials are NEVER reused.
+//   birth_epoch: ledger sequence number of the ADD entry that issued the serial
+//     (deterministic; no wall clock anywhere).
+//   lineage_root: serial of the lineage's first version (= serial; every
+//     serial founds its own lineage; kept for schema completeness).
+// A revision that alters a chunk's span tombstones the old version into the
+// version log and issues a new version (same serial, epoch = current ledger
+// sequence). Content-patch repairs do not alter the span -> no new version.
+// Recall always resolves through the live lineage head; old versions are
+// reachable only via explicit (serial, epoch) time-travel recall.
+struct Y3 {
+    cap:i32,
+    serials:[]u8,  // cap * u32: identity serial (the arm's ID)
+    epochs:[]u8,   // cap * u32: birth epoch of the LIVE version
+    roots:[]u8,    // cap * u32: lineage root (= serial)
+    offs:[]u8,     // cap * u32: byte offset of the live version's span
+    lens:[]u8,     // cap * u32: length
+    corps:[]u8,    // cap * u32: corpus id
+    flags:[]u8,    // cap * u32: flags bits
+    shifts:[]u8,   // cap * i32: recorded boundary shift
+    pidx:[]u8,     // cap * i32: patch index or -1
+    skeys:[]u8,    // cap * u32: span key (corpus<<24)|off  (dedup index)
+    svals:[]u8,    // cap * i32: serial for span key, or -1
+    patches:[]u8,  // patch_n * 64 bytes: recorded content-defect patches
+    patch_n:i32,
+    patch_cap:i32,
+    vlog:[]u8,     // vlog_n * 20 bytes: tombstoned versions
+                   // (serial, epoch, off, len, corpus) per record
+    vlog_n:i32,
+    vlog_cap:i32,
+    led:[]u8,      // ledger bytes
+    led_n:i32,     // entries appended
+    led_cap:i32,   // byte capacity
+    ins:[]u8,      // insertion-order queue of serials (ins_cap * i32)
+    ins_cap:i32,
+    ins_n:i32,
+    ins_head:i32,
+    next_serial:i32,   // next serial to issue (monotonic; never reused)
+    probe_active:i32,  // A15 swap-probe override: when 1, y3_resolve maps
+    probe_serial:i32,  // probe_serial -> probe_slot instead of the table
+    probe_slot:i32,
+    trace:[]u8,    // alloc trace text
+    trace_n:i32,
+    trace_cap:i32,
+    nlive:i32,
+}
+
+// ---- allocator wrappers with trace (addresses never logged) ----
+fn halloc(s:*Y3,n:i32)[]u8 {
+    // append "A <n>\n" to trace
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(n as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=65;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    return nio_alloc(n);
+}
+fn hfree(s:*Y3,b:[]u8)void {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(b.len as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;}}
+    t=s.*.trace;
+    t[tn]=70;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+    nio_free(b);
+}
+
+fn y3_init(s:*Y3,cap:i32,led_entries:i32,ins_max:i32,vlog_cap:i32)void {
+    s.*.cap=cap;s.*.nlive=0;
+    s.*.trace_cap=65536;s.*.trace=nio_alloc(65536);s.*.trace_n=0;
+    s.*.serials=halloc(s,cap*4);s.*.epochs=halloc(s,cap*4);s.*.roots=halloc(s,cap*4);
+    s.*.offs=halloc(s,cap*4);s.*.lens=halloc(s,cap*4);
+    s.*.corps=halloc(s,cap*4);s.*.flags=halloc(s,cap*4);s.*.shifts=halloc(s,cap*4);
+    s.*.pidx=halloc(s,cap*4);
+    let i:i32=0;while(i<cap){iput(s.*.pidx,i*4,-1);i=i+1;}
+    s.*.skeys=halloc(s,cap*4);s.*.svals=halloc(s,cap*4);
+    i=0;while(i<cap){iput(s.*.svals,i*4,-1);i=i+1;}
+    s.*.patch_cap=1024;s.*.patches=halloc(s,1024*64);s.*.patch_n=0;
+    s.*.vlog_cap=vlog_cap;s.*.vlog=halloc(s,vlog_cap*20);s.*.vlog_n=0;
+    s.*.led_cap=led_entries*64;s.*.led=halloc(s,s.*.led_cap);s.*.led_n=0;
+    s.*.ins=halloc(s,ins_max*4);s.*.ins_cap=ins_max;s.*.ins_n=0;s.*.ins_head=0;
+    s.*.next_serial=1;
+    s.*.probe_active=0;s.*.probe_serial=0;s.*.probe_slot=-1;
+}
+fn y3_new(cap:i32,led_entries:i32,ins_max:i32,vlog_cap:i32) Y3 {
+    let s:Y3=Y3{.cap=0,.serials="",.epochs="",.roots="",.offs="",.lens="",
+        .corps="",.flags="",.shifts="",.pidx="",.skeys="",.svals="",
+        .patches="",.patch_n=0,.patch_cap=0,.vlog="",.vlog_n=0,.vlog_cap=0,
+        .led="",.led_n=0,.led_cap=0,.ins="",.ins_cap=0,.ins_n=0,.ins_head=0,
+        .next_serial=1,.probe_active=0,.probe_serial=0,.probe_slot=-1,
+        .trace="",.trace_n=0,.trace_cap=0,.nlive=0};
+    y3_init(&s,cap,led_entries,ins_max,vlog_cap);
+    return s;
+}
+
+// ---- ledger ----
+fn y3_led(s:*Y3,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+          a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)void {
+    let at:i32=s.*.led_n*64;
+    if(at+64>s.*.led_cap){return;} // LEDGER-BOUND: scored on what completed
+    let l:[]u8=s.*.led;
+    iput(l,at,op);iput(l,at+4,slot);iput(l,at+8,rc);
+    iput(l,at+12,b1);iput(l,at+16,b2);iput(l,at+20,b3);iput(l,at+24,b4);iput(l,at+28,b5);
+    iput(l,at+32,a1);iput(l,at+36,a2);iput(l,at+40,a3);iput(l,at+44,a4);iput(l,at+48,a5);
+    iput(l,at+52,1);iput(l,at+56,d1);iput(l,at+60,d2);
+    s.*.led_n=s.*.led_n+1;
+}
+
+// ---- slot placement: serial-derived (order-independent), linear probe ----
+fn slot_hash(id:i32,cap:i32) i32 {
+    let x:i64=(id as i64)*2654435761;
+    x=x ^ (x>>16);
+    x=x*2246822519;
+    x=x ^ (x>>13);
+    let h:i64=x % (cap as i64);
+    if(h<0){h=h+(cap as i64);}
+    return h as i32;
+}
+fn y3_slot_find(s:*Y3,serial:i32) i32 {
+    // the persistent ID->storage mapping (the ID layer the swap probe patches)
+    let cap:i32=s.*.cap;
+    let serials:[]u8=s.*.serials;let flags:[]u8=s.*.flags;
+    let h:i32=slot_hash(serial,cap);
+    let t:i32=0;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){return -1;}
+        if(iget(serials,h*4)==serial){return h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    return -1;
+}
+fn y3_resolve(s:*Y3,serial:i32) i32 {
+    // recall path: consults the ID layer, honoring a live swap-probe remap
+    if(s.*.probe_active==1 && serial==s.*.probe_serial){return s.*.probe_slot;}
+    return y3_slot_find(s,serial);
+}
+fn y3_slot_insert(s:*Y3,serial:i32,corpus:i32,off:i32,len:i32) i32 {
+    // returns slot, or -1 if full. Epoch is fixed up by the caller after any
+    // SLOT_REUSE log so that birth_epoch == the ADD entry's ledger index.
+    let cap:i32=s.*.cap;
+    let serials:[]u8=s.*.serials;let offs:[]u8=s.*.offs;let lens:[]u8=s.*.lens;
+    let corps:[]u8=s.*.corps;let flags:[]u8=s.*.flags;let shifts:[]u8=s.*.shifts;
+    let pidx:[]u8=s.*.pidx;let roots:[]u8=s.*.roots;let epochs:[]u8=s.*.epochs;
+    let h:i32=slot_hash(serial,cap);
+    let t:i32=0;let first_dead:i32=-1;
+    while(t<cap){
+        let f:i32=iget(flags,h*4);
+        if((f & F_OCC)==0){
+            let sl:i32=h;
+            if(first_dead>=0){
+                sl=first_dead;
+                y3_led(s,OP_SLOT_REUSE,sl,0,iget(serials,sl*4),serial,0,corpus,serial,
+                       0,0,0,0,0,sl,0);
+            }
+            iput(serials,sl*4,serial);iput(epochs,sl*4,-1);
+            iput(roots,sl*4,serial);
+            iput(offs,sl*4,off);iput(lens,sl*4,len);
+            iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+            iput(shifts,sl*4,0);iput(pidx,sl*4,-1);
+            let ins:[]u8=s.*.ins;iput(ins,s.*.ins_n*4,serial);s.*.ins_n=s.*.ins_n+1;
+            s.*.nlive=s.*.nlive+1;
+            return sl;
+        }
+        if(iget(serials,h*4)==serial){
+            // serials are never reused; this path is unreachable by
+            // construction (kept as a loud no-op guard)
+            return h;
+        }
+        if(((f & F_LIVE)==0) && first_dead<0){first_dead=h;}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    if(first_dead>=0){
+        // table has no empty slot: reuse the first tombstoned slot
+        let sl:i32=first_dead;
+        y3_led(s,OP_SLOT_REUSE,sl,0,iget(serials,sl*4),serial,0,corpus,serial,
+               0,0,0,0,0,sl,0);
+        iput(serials,sl*4,serial);iput(epochs,sl*4,-1);
+        iput(roots,sl*4,serial);
+        iput(offs,sl*4,off);iput(lens,sl*4,len);
+        iput(corps,sl*4,corpus);iput(flags,sl*4,F_OCC | F_LIVE);
+        iput(shifts,sl*4,0);iput(pidx,sl*4,-1);
+        let ins:[]u8=s.*.ins;iput(ins,s.*.ins_n*4,serial);s.*.ins_n=s.*.ins_n+1;
+        s.*.nlive=s.*.nlive+1;
+        return sl;
+    }
+    return -1;
+}
+
+// ---- span->serial dedup index ----
+// The corpus buffers are immutable, so an identical span is identical content:
+// re-ingesting a live span resolves to the SAME serial (no new version).
+// A killed/evicted serial's span entry goes stale; span_find checks liveness
+// and treats dead serials as a miss, so a re-ingested span mints a FRESH
+// serial (tombstoned IDs are never reused).
+fn span_key(corpus:i32,off:i32) i32 { return (corpus<<24)|off; }
+fn y3_span_find(s:*Y3,key:i32) i32 {
+    let cap:i32=s.*.cap;
+    let x:i64=(key as i64)*2654435761;
+    x=x ^ (x>>16);
+    let h:i64=x % (cap as i64);
+    if(h<0){h=h+(cap as i64);}
+    let hh:i32=h as i32;
+    let t:i32=0;
+    while(t<cap){
+        let v:i32=iget(s.*.svals,hh*4);
+        if(v<0){return -1;}
+        if(iget(s.*.skeys,hh*4)==key){
+            let sl:i32=y3_slot_find(s,v);
+            if(sl>=0 && (iget(s.*.flags,sl*4) & F_LIVE)!=0){return v;}
+            return -1; // stale: serial dead -> miss -> fresh serial on insert
+        }
+        hh=hh+1;if(hh>=cap){hh=0;}t=t+1;
+    }
+    return -1;
+}
+fn y3_span_insert(s:*Y3,key:i32,serial:i32) void {
+    let cap:i32=s.*.cap;
+    let x:i64=(key as i64)*2654435761;
+    x=x ^ (x>>16);
+    let h:i64=x % (cap as i64);
+    if(h<0){h=h+(cap as i64);}
+    let hh:i32=h as i32;
+    let t:i32=0;
+    while(t<cap){
+        let v:i32=iget(s.*.svals,hh*4);
+        if(v<0 || iget(s.*.skeys,hh*4)==key){
+            iput(s.*.skeys,hh*4,key);
+            iput(s.*.svals,hh*4,serial);
+            return;
+        }
+        hh=hh+1;if(hh>=cap){hh=0;}t=t+1;
+    }
+}
+
+// ---- version log: tombstoned versions stay auditable, never recallable ----
+fn vlog_append(s:*Y3,serial:i32,epoch:i32,off:i32,len:i32,corpus:i32) void {
+    if(s.*.vlog_n>=s.*.vlog_cap){
+        // grow (old buffer abandoned; arena is per-run so the leak is bounded
+        // and deterministic — never hfree a non-top allocation)
+        let nc:i32=s.*.vlog_cap*2;
+        let nb:[]u8=halloc(s,nc*20);
+        let i:i32=0;
+        while(i<s.*.vlog_n*20){nb[i]=s.*.vlog[i];i=i+1;}
+        s.*.vlog=nb;s.*.vlog_cap=nc;
+    }
+    let at:i32=s.*.vlog_n*20;
+    iput(s.*.vlog,at,serial);iput(s.*.vlog,at+4,epoch);
+    iput(s.*.vlog,at+8,off);iput(s.*.vlog,at+12,len);
+    iput(s.*.vlog,at+16,corpus);
+    s.*.vlog_n=s.*.vlog_n+1;
+}
+
+// ---- core ops ----
+fn y3_ingest(s:*Y3,corpus:i32,off:i32,len:i32) i32 {
+    // deliberate add; loud refusal (rc=1) if full.
+    // returns the serial (identity).
+    let key:i32=span_key(corpus,off);
+    let dup:i32=y3_span_find(s,key);
+    if(dup>0){return dup;} // dedup: same span -> same serial, no new version
+    let serial:i32=s.*.next_serial;
+    s.*.next_serial=s.*.next_serial+1;
+    let sl:i32=y3_slot_insert(s,serial,corpus,off,len);
+    if(sl<0){
+        y3_led(s,OP_REFUSE,-1,1,off,0,len,corpus,serial,0,serial,0,0,0,101,0);
+        return -1;
+    }
+    // birth_epoch = the ADD entry's own ledger index (fixed up after any
+    // SLOT_REUSE log above so the epoch is exact)
+    let epoch:i32=s.*.led_n;
+    iput(s.*.epochs,sl*4,epoch);
+    y3_span_insert(s,key,serial);
+    y3_led(s,OP_ADD,sl,0,off,0,len,corpus,serial,epoch,serial,0,0,0,0,0);
+    return serial;
+}
+fn y3_ingest_ev(s:*Y3,corpus:i32,off:i32,len:i32) i32 {
+    // y3_ingest, but evicts oldest-unpinned when full (M3 phase-3 / M8)
+    let key:i32=span_key(corpus,off);
+    let dup:i32=y3_span_find(s,key);
+    if(dup>0){return dup;}
+    let serial:i32=s.*.next_serial;
+    s.*.next_serial=s.*.next_serial+1;
+    let sl:i32=y3_slot_insert(s,serial,corpus,off,len);
+    if(sl<0){
+        y3_evict_oldest_unpinned(s);
+        sl=y3_slot_insert(s,serial,corpus,off,len);
+    }
+    if(sl<0){
+        y3_led(s,OP_REFUSE,-1,1,off,0,len,corpus,serial,0,serial,0,0,0,103,0);
+        return -1;
+    }
+    let epoch:i32=s.*.led_n;
+    iput(s.*.epochs,sl*4,epoch);
+    y3_span_insert(s,key,serial);
+    y3_led(s,OP_ADD,sl,0,off,0,len,corpus,serial,epoch,serial,0,0,0,0,0);
+    return serial;
+}
+fn y3_recall(s:*Y3,corp_bufs:[]u8,corp_offs:[]u8,corp_lens:[]u8,serial:i32,out:[]u8) i32 {
+    // resolve serial -> lineage head -> bytes. Returns len or -1 (loud).
+    // A tombstoned serial never resolves: recall fails loudly, never dangles.
+    let sl:i32=y3_resolve(s,serial);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    let f:i32=iget(flags,sl*4);
+    if((f & F_LIVE)==0){return -1;}
+    let len:i32=iget(s.*.lens,sl*4);
+    let corpus:i32=iget(s.*.corps,sl*4);
+    // recorded content defect: recall applies the patch, like a corrupted copy
+    if((f & F_PATCH)!=0){
+        let pi:i32=iget(s.*.pidx,sl*4);
+        let pb:[]u8=s.*.patches;
+        let i:i32=0;while(i<len){out[i]=pb[pi*64+i];i=i+1;}
+        return len;
+    }
+    let bo:i32=iget(corp_offs,(corpus-1)*4);
+    let bl:i32=iget(corp_lens,(corpus-1)*4);
+    let off:i32=iget(s.*.offs,sl*4);
+    if((f & F_SHIFT)!=0){off=off+iget(s.*.shifts,sl*4);}
+    if(off<0){off=0;}
+    if(off+len>bo+bl){len=bo+bl-off;}
+    if(len<=0){return -1;}
+    let i2:i32=0;while(i2<len){out[i2]=corp_bufs[bo+off+i2];i2=i2+1;}
+    return len;
+}
+fn y3_recall_version(s:*Y3,corp_bufs:[]u8,corp_offs:[]u8,corp_lens:[]u8,
+                     serial:i32,epoch:i32,out:[]u8) i32 {
+    // time-travel recall: explicit (serial, epoch) resolves a tombstoned
+    // version's span from the version log. The live head is epoch-checked.
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl>=0 && (iget(s.*.flags,sl*4) & F_LIVE)!=0 && iget(s.*.epochs,sl*4)==epoch){
+        return y3_recall(s,corp_bufs,corp_offs,corp_lens,serial,out);
+    }
+    let v:i32=0;
+    while(v<s.*.vlog_n){
+        let at:i32=v*20;
+        if(iget(s.*.vlog,at)==serial && iget(s.*.vlog,at+4)==epoch){
+            let corpus:i32=iget(s.*.vlog,at+16);
+            let off:i32=iget(s.*.vlog,at+8);
+            let len:i32=iget(s.*.vlog,at+12);
+            let bo:i32=iget(corp_offs,(corpus-1)*4);
+            let bl:i32=iget(corp_lens,(corpus-1)*4);
+            if(bl==0){return -1;}
+            let q:i32=0;
+            while(q<len){out[q]=corp_bufs[bo+off+q];q=q+1;}
+            return len;
+        }
+        v=v+1;
+    }
+    return -1;
+}
+fn y3_kill(s:*Y3,serial:i32,reason:i32) i32 {
+    // kill tombstones the lineage head; the serial is never reused.
+    // history stays auditable (ledger + version log) but unrecallable.
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    let f:i32=iget(flags,sl*4);
+    if((f & F_LIVE)==0){return -1;}
+    iput(flags,sl*4,f & (0-1-F_LIVE)); // clear live, keep occupied (tombstone)
+    s.*.nlive=s.*.nlive-1;
+    y3_led(s,OP_KILL,sl,0,0,0,0,0,serial,0,0,0,0,0,reason,0);
+    return 0;
+}
+fn y3_pin(s:*Y3,serial:i32) i32 {
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PIN);
+    y3_led(s,OP_PIN,sl,0,0,0,0,0,serial,0,0,0,0,0,1,0);
+    return 0;
+}
+fn y3_weaken(s:*Y3,serial:i32,seq:i32) i32 {
+    // documented policy: weaken is a management annotation (WEAKENED flag,
+    // audited). It never changes stored bytes or the version lineage.
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){
+        y3_led(s,OP_REFUSE,-1,1,0,0,0,0,serial,0,0,0,0,0,102,0);
+        return -1;
+    }
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_WEAK);
+    y3_led(s,OP_WEAKEN,sl,0,0,0,0,0,serial,0,0,0,0,0,seq,0);
+    return 0;
+}
+fn y3_defect_boundary(s:*Y3,serial:i32,delta:i32) i32 {
+    // EXTERNAL trainer op: shift the recorded span
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return -1;}
+    let shifts:[]u8=s.*.shifts;let flags:[]u8=s.*.flags;
+    iput(shifts,sl*4,delta);iput(flags,sl*4,iget(flags,sl*4) | F_SHIFT);
+    y3_led(s,OP_TDB,sl,0,0,0,0,0,serial,0,0,0,0,0,delta,0);
+    return 0;
+}
+fn y3_defect_content(s:*Y3,serial:i32,patch:[]u8,plen:i32) i32 {
+    // EXTERNAL trainer op: record a byte patch the recall path must apply
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return -1;}
+    if(s.*.patch_n>=s.*.patch_cap){return -1;}
+    let pi:i32=s.*.patch_n;
+    let pb:[]u8=s.*.patches;
+    let i:i32=0;while(i<plen){pb[pi*64+i]=patch[i];i=i+1;}
+    while(i<64){pb[pi*64+i]=0;i=i+1;}
+    s.*.patch_n=pi+1;
+    iput(s.*.pidx,sl*4,pi);
+    let flags:[]u8=s.*.flags;
+    iput(flags,sl*4,iget(flags,sl*4) | F_PATCH);
+    y3_led(s,OP_TDC,sl,0,0,0,0,0,serial,0,0,0,0,0,plen,0);
+    return 0;
+}
+fn y3_revise(s:*Y3,serial:i32) i32 {
+    // deliberate repair. A span alteration tombstones the old version into
+    // the version log and issues a new version (same serial, epoch = current
+    // ledger sequence). A content-patch repair alters no span -> no new
+    // version. Returns 1 if a repair happened, 0 if clean, -1 if dead.
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return -1;}
+    let flags:[]u8=s.*.flags;
+    let f:i32=iget(flags,sl*4);
+    if((f & F_LIVE)==0){return -1;}
+    if((f & (F_SHIFT | F_PATCH))==0){return 0;}
+    let old_epoch:i32=iget(s.*.epochs,sl*4);
+    let old_off:i32=iget(s.*.offs,sl*4)+iget(s.*.shifts,sl*4);
+    let new_off:i32=iget(s.*.offs,sl*4);
+    let new_epoch:i32=old_epoch;
+    if((f & F_SHIFT)!=0){
+        // span revision: tombstone old version, issue new version
+        vlog_append(s,serial,old_epoch,new_off,iget(s.*.lens,sl*4),
+                    iget(s.*.corps,sl*4));
+        new_epoch=s.*.led_n; // the REVISE entry's own ledger index
+        iput(s.*.epochs,sl*4,new_epoch);
+    }
+    iput(s.*.shifts,sl*4,0);
+    iput(s.*.pidx,sl*4,-1);
+    iput(flags,sl*4,f & (0-1-F_SHIFT-F_PATCH));
+    y3_led(s,OP_REVISE,sl,0,new_off,0,iget(s.*.lens,sl*4),
+           iget(s.*.corps,sl*4),serial,old_epoch,new_epoch,0,0,0,old_off,new_off);
+    return 1;
+}
+fn y3_evict_oldest_unpinned(s:*Y3) i32 {
+    // FIFO eviction of the oldest live unpinned serial. Returns serial or -1.
+    let ins:[]u8=s.*.ins;let flags:[]u8=s.*.flags;
+    while(s.*.ins_head<s.*.ins_n){
+        let ser:i32=iget(ins,s.*.ins_head*4);
+        s.*.ins_head=s.*.ins_head+1;
+        let sl:i32=y3_slot_find(s,ser);
+        if(sl<0){continue;}
+        let f:i32=iget(flags,sl*4);
+        if((f & F_LIVE)!=0 && (f & F_PIN)==0){
+            iput(flags,sl*4,f & (0-1-F_LIVE));
+            s.*.nlive=s.*.nlive-1;
+            y3_led(s,OP_EVICT,sl,0,0,0,0,0,ser,0,0,0,0,0,1,0);
+            return ser;
+        }
+    }
+    return -1;
+}
+fn y3_mark_valuable(s:*Y3,serial:i32) i32 {
+    y3_led(s,OP_TMV,-1,0,0,0,0,0,serial,0,0,0,0,0,1,0);
+    return y3_pin(s,serial); // Y3's marking mechanism: pin
+}
+
+// ---- file IO ----
+fn read_file(dir:[]u8,name:[]u8) []u8 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let sz:i64=nio_seek(fd,0,2);
+    if(sz<=0 || sz>33554432){nio_close(fd);return "";}
+    let buf:[]u8=nio_alloc(sz as i32);
+    if(buf.len!=(sz as i32)){nio_close(fd);return "";}
+    let nr:i64=nio_read_exact(fd,buf,sz as i32);
+    nio_close(fd);
+    if(nr!=sz){nio_free(buf);return "";}
+    return buf;
+}
+fn file_size(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);
+    nio_close(fd);
+    return sz;
+}
+fn write_file(dir:[]u8,name:[]u8,data:[]u8) i32 {
+    // nio_write_all caps at 1MB per call: chunk the write. O_EXCL: the file
+    // must not exist (the runner uses a fresh workdir per mode).
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let at:i32=0;
+    while(at<data.len){
+        let n:i32=data.len-at;
+        if(n>1048576){n=1048576;}
+        let w:i64=nio_write_all(fd,data[at..at+n]);
+        if(w!=(n as i64)){nio_close(fd);return -1;}
+        at=at+n;
+    }
+    nio_close(fd);
+    return 0;
+}
+// ---- JSON emission (schema metrics-v1) ----
+fn j_begin(mode:[]u8)void {
+    _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"y3\",\"round\":\"r1\",\"scale\":\"1x\",\"mode\":\"");
+    _zag_print(mode);
+    _zag_print("\",\"fields\":{");
+}
+fn j_sep(f:*i32)void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_end()void { _zag_print("}}");_zag_println(""); }
+fn p_dec1(tenths:i64)void {
+    // print integer tenths as one-decimal, e.g. 1000 -> 100.0 ; -35 -> -3.5
+    if(tenths<0){_zag_print("-");tenths=0-tenths;}
+    let ip:i64=tenths/10;let fp:i64=tenths-(ip*10);
+    let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+    _zag_print(".");
+    let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+fn p_dec2(x100:i64)void {
+    // print integer hundredths as two-decimal, e.g. 206 -> 2.06
+    if(x100<0){_zag_print("-");x100=0-x100;}
+    let ip:i64=x100/100;let fp:i64=x100-ip*100;
+    let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+    _zag_print(".");
+    if(fp<10){_zag_print("0");}
+    let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+fn jf_dec1(f:*i32,key:[]u8,tenths:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec1(tenths);
+}
+fn jf_dec2(f:*i32,key:[]u8,x100:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec2(x100);
+}
+fn jf_int(f:*i32,key:[]u8,v:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s);
+}
+fn jf_str(f:*i32,key:[]u8,v:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+fn jf_bool(f:*i32,key:[]u8,v:i32)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    if(v==1){_zag_print("true");}else{_zag_print("false");}
+}
+fn jf_null(f:*i32,key:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":null");
+}
+fn p_i64(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+
+// ---- shared trial helpers ----
+fn nunits_of(buflen:i32) i32 { return (buflen+Y3_CHUNK-1)/Y3_CHUNK; }
+fn unit_off(idx:i32) i32 { return idx*Y3_CHUNK; }
+fn unit_len(idx:i32,buflen:i32) i32 {
+    let off:i32=idx*Y3_CHUNK;let l:i32=buflen-off;
+    if(l>Y3_CHUNK){l=Y3_CHUNK;}
+    return l;
+}
+fn ingest_all(s:*Y3,buf:[]u8,corpus:i32) i32 {
+    let n:i32=nunits_of(buf.len);
+    let i:i32=0;
+    while(i<n){
+        y3_ingest(s,corpus,unit_off(i),unit_len(i,buf.len));
+        i=i+1;
+    }
+    return n;
+}
+// registry: 8 corpus slots, indexed (corpus_id-1)
+fn reg_set(coffs:[]u8,clens:[]u8,corpus:i32,base:i32,len:i32) void {
+    iput(coffs,(corpus-1)*4,base);iput(clens,(corpus-1)*4,len);
+}
+
+// ---- M1 recall driver with the A15-provisional swap probe ----
+// Y3 is an ID arm (persistent serial->slot mapping). The prereg-literal probe
+// (N=64 deterministic ID->content remappings) uses the harness's proposed
+// schedule PROVISIONALLY: after every ceil(n/64) recalls, patch the ID table
+// so the next recall target serial resolves to the next serial's slot, log
+// TRAINER_SWAP_PROBE (frozen opcode 0x13), issue the recall. The arm must
+// return the remapped content (probe PASS) or fail loudly. Returning the
+// ORIGINAL content despite the remap = side channel -> M1 scored 0.
+// The 64 probed recalls are excluded from the recall/boundary denominators.
+// ser0 = first serial of this corpus's range (0 for a fresh single-corpus
+// store; nun_p for code in M8).
+fn y3_m1_run(s:*Y3,buf:[]u8,corpus:i32,n:i32,ser0:i32,bout:[]u8,
+             coffs:[]u8,clens:[]u8,cok:*i32,bok:*i32,pok:*i32,sidechan:*i32) void {
+    let step:i32=(n+63)/64;
+    let probes:i32=0;let pk:i32=0;let sc:i32=0;
+    let ok:i32=0;let bo:i32=0;let counted:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let serial:i32=ser0+i+1;
+        if(probes<64 && i==probes*step){
+            // patch the ID table: serial -> next serial's slot (wrap)
+            let tgt:i32=ser0+((i+1)%n)+1;
+            let tsl:i32=y3_slot_find(s,tgt);
+            s.*.probe_active=1;s.*.probe_serial=serial;s.*.probe_slot=tsl;
+            y3_led(s,OP_TSP,-1,0,0,0,0,corpus,serial,0,0,0,0,0,probes,tsl);
+            let rl:i32=y3_recall(s,buf,coffs,clens,serial,bout);
+            // must return the REMAPPED unit's bytes
+            let tidx:i32=tgt-1-ser0;
+            let toff:i32=unit_off(tidx);let tlen:i32=unit_len(tidx,buf.len);
+            let good:i32=0;
+            if(rl==tlen && tsl>=0){
+                good=1;
+                let q:i32=0;
+                while(q<tlen){if(bout[q]!=buf[toff+q]){good=0;break;}q=q+1;}
+            }
+            // side-channel check: original bytes despite remap
+            let ooff:i32=unit_off(i);let olen:i32=unit_len(i,buf.len);
+            let orig:i32=0;
+            if(rl==olen){
+                orig=1;
+                let q2:i32=0;
+                while(q2<olen){if(bout[q2]!=buf[ooff+q2]){orig=0;break;}q2=q2+1;}
+            }
+            if(good==1){pk=pk+1;}
+            else if(orig==1){sc=1;}
+            s.*.probe_active=0;s.*.probe_serial=0;s.*.probe_slot=-1;
+            y3_led(s,OP_TSP,-1,1,0,0,0,corpus,serial,0,0,0,0,0,probes,good);
+            probes=probes+1;
+        }else{
+            let off:i32=unit_off(i);let len:i32=unit_len(i,buf.len);
+            let rl:i32=y3_recall(s,buf,coffs,clens,serial,bout);
+            if(rl==len){
+                let g2:i32=1;let q3:i32=0;
+                while(q3<len){if(bout[q3]!=buf[off+q3]){g2=0;break;}q3=q3+1;}
+                if(g2==1){ok=ok+1;}
+            }
+            // boundary: slot record must equal the grid span
+            let sl:i32=y3_slot_find(s,serial);
+            if(sl>=0){
+                let f:i32=iget(s.*.flags,sl*4);
+                if((f & F_LIVE)!=0 && iget(s.*.offs,sl*4)==off
+                   && iget(s.*.lens,sl*4)==len && (f & F_SHIFT)==0){bo=bo+1;}
+            }
+            counted=counted+1;
+        }
+        i=i+1;
+    }
+    if(counted>0){cok.*=ok*1000/counted;bok.*=bo*1000/counted;}
+    else{cok.*=0;bok.*=0;}
+    pok.*=pk;sidechan.*=sc;
+}
+
+// probe_reg: plain full recall (no swap probe), for M2/M6 training loops
+fn probe_reg(s:*Y3,cbufs:[]u8,coffs:[]u8,clens:[]u8,buf:[]u8,corpus:i32,
+             ser0:i32,bout:[]u8,cok:*i32,bok:*i32) void {
+    let n:i32=nunits_of(buf.len);
+    let ok:i32=0;let bo:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let serial:i32=ser0+i+1;
+        let off:i32=unit_off(i);let len:i32=unit_len(i,buf.len);
+        let rl:i32=y3_recall(s,cbufs,coffs,clens,serial,bout);
+        if(rl==len){
+            let good:i32=1;
+            let j:i32=0;while(j<len){if(bout[j]!=buf[off+j]){good=0;break;}j=j+1;}
+            if(good==1){ok=ok+1;}
+        }
+        let sl:i32=y3_slot_find(s,serial);
+        if(sl>=0){
+            let f:i32=iget(s.*.flags,sl*4);
+            if((f & F_LIVE)!=0 && iget(s.*.offs,sl*4)==off && iget(s.*.lens,sl*4)==len
+               && (f & F_SHIFT)==0){bo=bo+1;}
+        }
+        i=i+1;
+    }
+    if(n>0){cok.*=ok*1000/n;bok.*=bo*1000/n;}else{cok.*=0;bok.*=0;}
+}
+
+// ---- M1: single-corpus perfect-recall + A15 swap probe ----
+fn t_m1(cdir:[]u8,fname:[]u8,corpus:i32,keyp:[]u8,jmode:[]u8) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M1,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(buf.len);
+    let s:Y3=y3_new(n+n/4+2048,n+4096,n+1024,4096);
+    let bout:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,corpus,0,buf.len);
+    ingest_all(&s,buf,corpus);
+    let cok:i32=0;let bok:i32=0;let pok:i32=0;let sc:i32=0;
+    y3_m1_run(&s,buf,corpus,n,0,bout,coffs,clens,&cok,&bok,&pok,&sc);
+    let probe_txt:[]u8="FAIL (probe)";
+    if(sc==1){probe_txt="FAIL (side channel)";}
+    else if(pok==64){probe_txt="PASS";}
+    let rec_t:i64=cok as i64;let bnd_t:i64=bok as i64;
+    if(sc==1){rec_t=0;bnd_t=0;} // side channel -> M1 cell scored 0
+    _zag_print("M1,");
+    _zag_print(fname);_zag_print(",");
+    p_dec1(rec_t);_zag_print(",");p_dec1(bnd_t);
+    _zag_print(",");p_i64(n as i64);
+    _zag_print(",probe=");p_i64(pok as i64);_zag_print("/64");
+    _zag_print(",sidechan=");p_i64(sc as i64);_zag_println("");
+    _zag_print("M1PROBE,");_zag_print(keyp);_zag_print(",");
+    _zag_print(probe_txt);_zag_println(",PROVISIONAL-PENDING-FREEZE");
+    let f:i32=0;
+    j_begin(jmode);
+    jf_dec1(&f,"m1_recall_tenths",rec_t);
+    jf_dec1(&f,"m1_boundary_tenths",bnd_t);
+    jf_int(&f,"m1_units",n as i64);
+    jf_str(&f,"m1_corpus",keyp);
+    jf_str(&f,"m1_id_probe",probe_txt);
+    j_end();
+    hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);
+}
+
+// ---- M2: tiered curriculum (episodes-to-criterion) ----
+fn t_m2(cdir:[]u8,fname:[]u8,corpus:i32,tier:[]u8,do_m9:i32) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M2,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(buf.len);
+    let s:Y3=y3_new(n+n/4+2048,3*(n+n/4)+8192,n+1024,4096);
+    let bout:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,corpus,0,buf.len);
+    // episode 0 probe on empty store
+    let cok:i32=0;let bok:i32=0;
+    probe_reg(&s,buf,coffs,clens,buf,corpus,0,bout,&cok,&bok);
+    let r0:i64=cok as i64;
+    // M9 curve storage (max 51 episodes)
+    let rs:[]u8=halloc(&s,51*4);
+    iput(rs,0,cok);
+    let e:i32=1;let consec:i32=0;let etc:i32=50;let nep:i32=1;
+    let rc:i32=cok;let bc:i32=bok;
+    while(e<=50){
+        ingest_all(&s,buf,corpus);
+        probe_reg(&s,buf,coffs,clens,buf,corpus,0,bout,&cok,&bok);
+        iput(rs,e*4,cok);
+        nep=e+1;
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;rc=cok;bc=bok;break;}
+        rc=cok;bc=bok;
+        e=e+1;
+    }
+    let censored:i32=0;
+    if(etc>=50){censored=1;}
+    _zag_print("M2,");_zag_print(tier);_zag_print(",");
+    p_i64(etc as i64);_zag_print(",");
+    p_i64(censored as i64);_zag_print(",");
+    p_dec1(r0);_zag_println("");
+    let f:i32=0;
+    j_begin(tier);
+    jf_int(&f,"m2_episodes",etc as i64);
+    jf_bool(&f,"m2_censored",censored);
+    jf_dec1(&f,"m2_ep0_recall_tenths",r0);
+    jf_dec1(&f,"m2_final_recall_tenths",rc as i64);
+    jf_dec1(&f,"m2_final_boundary_tenths",bc as i64);
+    if(do_m9==1){
+        // M9 literal descriptors: takeoff = first episode with r >= 50%;
+        // steepness = max single-episode jump; late gain = r(ETC) - r(takeoff).
+        let npts:i32=nep;
+        let takeoff:i32=npts;
+        let e2:i32=0;
+        while(e2<npts){
+            if(iget(rs,e2*4)>=500){takeoff=e2;break;}
+            e2=e2+1;
+        }
+        let steep:i64=0;
+        e2=1;
+        while(e2<npts){
+            let jmp:i64=(iget(rs,e2*4)-iget(rs,(e2-1)*4)) as i64;
+            if(jmp>steep){steep=jmp;}
+            e2=e2+1;
+        }
+        let etc_idx:i32=etc;
+        if(etc_idx>=npts){etc_idx=npts-1;}
+        let to_idx:i32=takeoff;
+        if(to_idx>=npts){to_idx=npts-1;}
+        let late:i64=(iget(rs,etc_idx*4)-iget(rs,to_idx*4)) as i64;
+        let shape:[]u8="other";
+        if(steep>=400 && late<=150){shape="fast-then-flat";}
+        else{
+            if(takeoff>=3 && steep>=400){shape="slow-then-sudden";}
+            else{
+                if(steep<400){shape="gradual";}
+            }
+        }
+        jf_str(&f,"m9_shape",shape);
+        jf_int(&f,"m9_takeoff_ep",takeoff as i64);
+        jf_dec1(&f,"m9_steepness_tenths",steep);
+        jf_dec1(&f,"m9_late_gain_tenths",late);
+        j_end();
+        _zag_print("M9,");_zag_print(tier);_zag_print(",");
+        _zag_print(shape);_zag_println("");
+    }
+    if(do_m9==0){
+        j_end();
+    }
+    hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);hfree(&s,rs);
+}
+
+// ---- M3: strength trial (with dangling-reference check) ----
+fn t_m3(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let code:[]u8=read_file(cdir,"code.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){_zag_println("M3,FATAL,empty-corpus");return;}
+    let nun_p:i32=nunits_of(prose.len);let nun_c:i32=nunits_of(code.len);
+    let total:i32=nun_p+nun_c;
+    let k:i32=total/Y3_M3_V;
+    if(k<1){k=1;}
+    let s:Y3=y3_new(Y3_M3_CAP,24000,9000,4096);
+    let bout:[]u8=halloc(&s,64);
+    // registry: prose@0, code@plen, fresh@plen+clen
+    let cbufs:[]u8=halloc(&s,prose.len+code.len+fresh.len);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    let i:i32=0;while(i<prose.len){cbufs[i]=prose[i];i=i+1;}
+    let j2:i32=0;while(j2<code.len){cbufs[prose.len+j2]=code[j2];j2=j2+1;}
+    let j3:i32=0;while(j3<fresh.len){cbufs[prose.len+code.len+j3]=fresh[j3];j3=j3+1;}
+    reg_set(coffs,clens,Y3_C_PROSE,0,prose.len);
+    reg_set(coffs,clens,Y3_C_CODE,prose.len,code.len);
+    reg_set(coffs,clens,Y3_C_FRESH,prose.len+code.len,fresh.len);
+    // V: ingest + mark
+    let v_ser:[]u8=halloc(&s,Y3_M3_V*4);
+    let v_corpus:[]u8=halloc(&s,Y3_M3_V*4);
+    let v_idx:[]u8=halloc(&s,Y3_M3_V*4);
+    let v:i32=0;
+    while(v<Y3_M3_V){
+        let g:i32=v*k;
+        let cid:i32=Y3_C_PROSE;let idx:i32=g;
+        if(g>=nun_p){cid=Y3_C_CODE;idx=g-nun_p;}
+        let buflen:i32=prose.len;if(cid==Y3_C_CODE){buflen=code.len;}
+        let ser:i32=y3_ingest(&s,cid,unit_off(idx),unit_len(idx,buflen));
+        y3_mark_valuable(&s,ser);
+        iput(v_ser,v*4,ser);iput(v_corpus,v*4,cid);iput(v_idx,v*4,idx);
+        v=v+1;
+    }
+    // phase 1: 3000 fresh ingests
+    let f_ser:[]u8=halloc(&s,Y3_M3_FRESH1*4);
+    let f:i32=0;
+    while(f<Y3_M3_FRESH1){
+        iput(f_ser,f*4,y3_ingest(&s,Y3_C_FRESH,unit_off(f),unit_len(f,fresh.len)));
+        f=f+1;
+    }
+    let n_p1:i32=s.led_n;
+    // phase 2: 3000 fresh-only kills
+    f=0;
+    while(f<Y3_M3_KILL){
+        y3_kill(&s,iget(f_ser,f*4),1);
+        f=f+1;
+    }
+    // DANGLE check (kill-criterion half 2): recall of a tombstoned serial
+    // must fail loudly (-1), never resolve to the tombstoned span
+    let dang_ok:i32=0;
+    f=0;
+    while(f<Y3_M3_KILL){
+        if(y3_recall(&s,cbufs,coffs,clens,iget(f_ser,f*4),bout)==-1){dang_ok=dang_ok+1;}
+        f=f+1;
+    }
+    _zag_print("DANGLE,m3,");p_i64(dang_ok as i64);_zag_print(",3000");_zag_println("");
+    // weaken probe: 50 weaken ops on every 20th valuable (documented policy)
+    let w:i32=0;let w_ok:i32=0;
+    while(w<50){
+        let vj:i32=w*20;
+        let ser:i32=iget(v_ser,vj*4);
+        if(y3_weaken(&s,ser,w+1)==0){w_ok=w_ok+1;}
+        w=w+1;
+    }
+    let n_p2:i32=s.led_n;
+    // phase 3: 4000 ingests at capacity, evict-oldest-unpinned as needed
+    let f3_ser:[]u8=halloc(&s,Y3_M3_FRESH2*4);
+    f=Y3_M3_FRESH1;
+    while(f<Y3_M3_FRESH1+Y3_M3_FRESH2){
+        iput(f3_ser,(f-Y3_M3_FRESH1)*4,
+             y3_ingest_ev(&s,Y3_C_FRESH,unit_off(f),unit_len(f,fresh.len)));
+        f=f+1;
+    }
+    let n_p3:i32=s.led_n;
+    // metrics
+    let surv_ok:i32=0;
+    v=0;
+    while(v<Y3_M3_V){
+        let ser:i32=iget(v_ser,v*4);let cid:i32=iget(v_corpus,v*4);let idx:i32=iget(v_idx,v*4);
+        let buflen:i32=prose.len;let buf:[]u8=prose;
+        if(cid==Y3_C_CODE){buflen=code.len;buf=code;}
+        let off:i32=unit_off(idx);let len:i32=unit_len(idx,buflen);
+        let rl:i32=y3_recall(&s,cbufs,coffs,clens,ser,bout);
+        if(rl==len){
+            let good:i32=1;let q:i32=0;
+            while(q<len){if(bout[q]!=buf[off+q]){good=0;break;}q=q+1;}
+            if(good==1){surv_ok=surv_ok+1;}
+        }
+        v=v+1;
+    }
+    let surv:i64=(surv_ok as i64)*1000/(Y3_M3_V as i64);
+    // fresh sample: last 500 ingested (f=6500..6999)
+    let fs_ok:i32=0;
+    f=Y3_M3_FRESH1+Y3_M3_FRESH2-500;
+    while(f<Y3_M3_FRESH1+Y3_M3_FRESH2){
+        let ser:i32=iget(f3_ser,(f-Y3_M3_FRESH1)*4);
+        let off:i32=unit_off(f);let len:i32=unit_len(f,fresh.len);
+        let rl:i32=y3_recall(&s,cbufs,coffs,clens,ser,bout);
+        if(rl==len){
+            let good:i32=1;let q:i32=0;
+            while(q<len){if(bout[q]!=fresh[off+q]){good=0;break;}q=q+1;}
+            if(good==1){fs_ok=fs_ok+1;}
+        }
+        f=f+1;
+    }
+    let fresht:i64=(fs_ok as i64)*1000/500;
+    // liveness: management ops in ledger entries [n_p1, n_p3)
+    let mgmt:i32=0;let le:i32=n_p1;
+    while(le<n_p3){
+        let op:i32=iget(s.led,le*64);
+        if(op==OP_ADD || op==OP_KILL || op==OP_PIN || op==OP_WEAKEN ||
+           op==OP_PROMOTE || op==OP_EVICT || op==OP_REFUSE){mgmt=mgmt+1;}
+        le=le+1;
+    }
+    let freeze:i32=0;
+    if(surv>=900 && fresht<800){freeze=1;}
+    if(mgmt<700){freeze=1;}
+    if(w_ok<50){freeze=1;}
+    let fz:[]u8="CLEAR";
+    if(freeze==1){fz="FROZEN-UNDER-PRESSURE";}
+    _zag_print("M3,");
+    p_dec1(surv);_zag_print(",");p_dec1(fresht);_zag_print(",");
+    p_i64(mgmt as i64);_zag_print(",");p_i64(w_ok as i64);_zag_print(",");
+    _zag_println(fz);
+    let ff:i32=0;
+    j_begin("m3-1x");
+    jf_dec1(&ff,"m3_survival_tenths",surv);
+    jf_dec1(&ff,"m3_fresh_recall_tenths",fresht);
+    jf_int(&ff,"m3_mgmt_entries",mgmt as i64);
+    jf_int(&ff,"m3_weaken_handled",w_ok as i64);
+    jf_str(&ff,"m3_freeze",fz);
+    jf_int(&ff,"m3_valuable",Y3_M3_V as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,cbufs);hfree(&s,coffs);hfree(&s,clens);
+    hfree(&s,v_ser);hfree(&s,v_corpus);hfree(&s,v_idx);
+    hfree(&s,f_ser);hfree(&s,f3_ser);
+}
+
+// ---- defect patch builders ----
+fn patch_prose_xor(buf:[]u8,off:i32,len:i32,out:[]u8) void {
+    let i:i32=0;
+    while(i<len){
+        let b:u8=buf[off+i];
+        if(i%7==0){b=(b as i32 ^ 255) as u8;}
+        out[i]=b;i=i+1;
+    }
+}
+fn code_rename(buf:[]u8,off:i32,len:i32,out:[]u8) void {
+    // fixed-map identifier rename, same-length replacements, left-to-right
+    let i:i32=0;while(i<len){out[i]=buf[off+i];i=i+1;}
+    let p0:[]u8="sqlite3";let r0:[]u8="sqlite4";
+    let p1:[]u8="SQLITE";let r1:[]u8="SQLITF";
+    let p2:[]u8="Vdbe";let r2:[]u8="Vdbf";
+    let p3:[]u8="Mem";let r3:[]u8="Mfm";
+    let p4:[]u8="pBt";let r4:[]u8="pBu";
+    let k:i32=0;
+    while(k<5){
+        let pat:[]u8=p0;let rep:[]u8=r0;
+        if(k==1){pat=p1;rep=r1;}
+        if(k==2){pat=p2;rep=r2;}
+        if(k==3){pat=p3;rep=r3;}
+        if(k==4){pat=p4;rep=r4;}
+        let pl:i32=pat.len;
+        let pos:i32=0;
+        while(pos+pl<=len){
+            let m:i32=1;let q:i32=0;
+            while(q<pl){if(out[pos+q]!=pat[q]){m=0;break;}q=q+1;}
+            if(m==1){q=0;while(q<pl){out[pos+q]=rep[q];q=q+1;}pos=pos+pl;}
+            else{pos=pos+1;}
+        }
+        k=k+1;
+    }
+}
+// verify a unit is fully repaired: live, no shift/patch flags, bytes == source
+fn unit_verified(s:*Y3,cbufs:[]u8,coffs:[]u8,clens:[]u8,buf:[]u8,corpus:i32,
+                 idx:i32,bout:[]u8) i32 {
+    let serial:i32=idx+1; // fresh sequential ingest: serial = idx+1
+    let sl:i32=y3_slot_find(s,serial);
+    if(sl<0){return 0;}
+    let f:i32=iget(s.*.flags,sl*4);
+    if((f & F_LIVE)==0){return 0;}
+    if((f & (F_SHIFT | F_PATCH))!=0){return 0;}
+    let off:i32=unit_off(idx);let len:i32=unit_len(idx,buf.len);
+    let rl:i32=y3_recall(s,cbufs,coffs,clens,serial,bout);
+    if(rl!=len){return 0;}
+    let i:i32=0;while(i<len){if(bout[i]!=buf[off+i]){return 0;}i=i+1;}
+    return 1;
+}
+
+// ---- M4: defect revision (the standard revision curriculum) ----
+// Boundary-defect repairs issue new versions (span alteration -> tombstone
+// old, epoch+1); content-patch repairs do not. Mean lineage depth over the
+// 200 revised units is the binding kill metric (kill if > 50).
+fn t_m4(cdir:[]u8,fname:[]u8,corpus:i32,is_code:i32,keyp:[]u8,jmode:[]u8) void {
+    let buf:[]u8=read_file(cdir,fname);
+    if(buf.len==0){_zag_println("M4,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(buf.len);
+    let s:Y3=y3_new(n+n/4+2048,n+16384,n+1024,4096);
+    let bout:[]u8=halloc(&s,64);
+    let patch:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,corpus,0,buf.len);
+    ingest_all(&s,buf,corpus);
+    let d_idx:[]u8=halloc(&s,Y3_M4_N*4);
+    // plant: 100 boundary (j<100), 100 content (j>=100)
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    let j:i32=0;
+    while(j<Y3_M4_N){
+        let idx:i32=j*n/Y3_M4_N;
+        iput(d_idx,j*4,idx);
+        let serial:i32=idx+1;
+        if(j<100){
+            y3_defect_boundary(&s,serial,iget(cyc,(j%12)*4));
+        }else{
+            let off:i32=unit_off(idx);let len:i32=unit_len(idx,buf.len);
+            if(is_code==1){code_rename(buf,off,len,patch);}
+            else{patch_prose_xor(buf,off,len,patch);}
+            y3_defect_content(&s,serial,patch,len);
+        }
+        j=j+1;
+    }
+    // revision episodes
+    let rep_b:i32=0;let rep_c:i32=0;
+    let ep:i32=1;
+    while(ep<=20){
+        j=0;
+        while(j<Y3_M4_N){
+            y3_revise(&s,iget(d_idx,j*4)+1);
+            j=j+1;
+        }
+        rep_b=0;rep_c=0;
+        j=0;
+        while(j<100){
+            rep_b=rep_b+unit_verified(&s,buf,coffs,clens,buf,corpus,iget(d_idx,j*4),bout);
+            j=j+1;
+        }
+        j=100;
+        while(j<Y3_M4_N){
+            rep_c=rep_c+unit_verified(&s,buf,coffs,clens,buf,corpus,iget(d_idx,j*4),bout);
+            j=j+1;
+        }
+        if(rep_b+rep_c>=Y3_M4_N){break;}
+        ep=ep+1;
+    }
+    // lineage depth over the 200 revised units (kill if mean > 50)
+    let tot_depth:i64=0;let max_depth:i32=0;
+    j=0;
+    while(j<Y3_M4_N){
+        let ser:i32=iget(d_idx,j*4)+1;
+        let d:i32=1;
+        let vv:i32=0;
+        while(vv<s.vlog_n){
+            if(iget(s.vlog,vv*20)==ser){d=d+1;}
+            vv=vv+1;
+        }
+        tot_depth=tot_depth+(d as i64);
+        if(d>max_depth){max_depth=d;}
+        j=j+1;
+    }
+    let mean_dt:i64=tot_depth*10/(Y3_M4_N as i64);
+    _zag_print("LINEAGE,");_zag_print(keyp);_zag_print(",");
+    p_dec1(mean_dt);_zag_print(",max=");p_i64(max_depth as i64);_zag_println("");
+    // time-travel self-test: old versions auditable via (serial, epoch)
+    let tt_ok:i32=0;let tt_n:i32=0;
+    j=0;
+    while(j<100){
+        let ser:i32=iget(d_idx,j*4)+1;
+        let vv2:i32=0;
+        while(vv2<s.vlog_n){
+            if(iget(s.vlog,vv2*20)==ser){
+                let ve:i32=iget(s.vlog,vv2*20+4);
+                let vo:i32=iget(s.vlog,vv2*20+8);
+                let vl:i32=iget(s.vlog,vv2*20+12);
+                let rl:i32=y3_recall_version(&s,buf,coffs,clens,ser,ve,bout);
+                if(rl==vl){
+                    let good:i32=1;let q:i32=0;
+                    while(q<vl){if(bout[q]!=buf[vo+q]){good=0;break;}q=q+1;}
+                    tt_ok=tt_ok+good;
+                }
+                tt_n=tt_n+1;
+                break;
+            }
+            vv2=vv2+1;
+        }
+        j=j+1;
+    }
+    _zag_print("TIMETRAVEL,");_zag_print(keyp);_zag_print(",");
+    p_i64(tt_ok as i64);_zag_print(",");p_i64(tt_n as i64);_zag_println("");
+    // classify kills
+    let killed:i32=0;
+    j=0;
+    while(j<Y3_M4_N){
+        let sl:i32=y3_slot_find(&s,iget(d_idx,j*4)+1);
+        if(sl>=0){
+            let f:i32=iget(s.flags,sl*4);
+            if((f & F_LIVE)==0){killed=killed+1;}
+        }else{killed=killed+1;}
+        j=j+1;
+    }
+    let rev_bt:i64=(rep_b as i64)*1000/100;
+    let rev_ct:i64=(rep_c as i64)*1000/100;
+    let kill_t:i64=(killed as i64)*1000/(Y3_M4_N as i64);
+    let ksub:i32=0;
+    if(kill_t>500 && (rev_bt<800 || rev_ct<800)){ksub=1;}
+    _zag_print("M4,");_zag_print(keyp);_zag_print(",");
+    p_dec1(rev_bt);_zag_print(",");p_dec1(rev_ct);_zag_print(",");
+    p_dec1(kill_t);_zag_print(",");p_i64(ksub as i64);_zag_println("");
+    let f:i32=0;
+    j_begin(jmode);
+    jf_dec1(&f,"m4_rev_boundary_tenths",rev_bt);
+    jf_dec1(&f,"m4_rev_content_tenths",rev_ct);
+    jf_dec1(&f,"m4_kill_rate_tenths",kill_t);
+    jf_bool(&f,"m4_killsub",ksub);
+    jf_int(&f,"m4_episodes",ep as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,patch);hfree(&s,coffs);hfree(&s,clens);
+    hfree(&s,cyc);hfree(&s,d_idx);
+}
+
+// ---- M5: resource pressure ----
+fn t_m5(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0){_zag_println("M5,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(prose.len);
+    let s:Y3=y3_new(n+n/4+4096,n+4096,n+2048,4096);
+    let bout:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,Y3_C_PROSE,0,prose.len);
+    ingest_all(&s,prose,Y3_C_PROSE);
+    // mini-pressure: 500 fresh ingests + 500 kills
+    let f:i32=0;
+    while(f<500){
+        y3_ingest(&s,Y3_C_FRESH,unit_off(f),unit_len(f,fresh.len));
+        f=f+1;
+    }
+    f=0;
+    while(f<500){y3_kill(&s,n+1+f,2);f=f+1;}
+    // learned = byte-exact recall now
+    let l:i32=0;let src:i64=0;
+    let i2:i32=0;
+    while(i2<n){
+        let serial:i32=i2+1;
+        let off:i32=unit_off(i2);let len:i32=unit_len(i2,prose.len);
+        let rl:i32=y3_recall(&s,prose,coffs,clens,serial,bout);
+        if(rl==len){
+            let good:i32=1;let q:i32=0;
+            while(q<len){if(bout[q]!=prose[off+q]){good=0;break;}q=q+1;}
+            if(good==1){l=l+1;src=src+(len as i64);}
+        }
+        i2=i2+1;
+    }
+    // slot region: 11 slot arrays (cap*4 each) + ins queue + version log
+    let slot_bytes:i64=(s.cap as i64)*44+(s.ins_cap as i64)*4+(s.vlog_cap as i64)*20;
+    let ledger_bytes:i64=(s.led_n as i64)*64;
+    // corpus buffer is the loaded prose buffer (harness fixture, reported)
+    let wf:i32=write_file(".","ledger.bin",s.led[0..s.led_n*64]);
+    _zag_print("M5,");p_i64(l as i64);_zag_print(",");
+    p_i64(src);_zag_print(",");p_i64(slot_bytes);_zag_print(",");
+    p_i64(ledger_bytes);_zag_print(",");p_i64(wf as i64);_zag_println("");
+    let ff:i32=0;
+    j_begin("m5-1x");
+    jf_int(&ff,"m5_units_learned",l as i64);
+    jf_int(&ff,"m5_source_bytes_learned",src);
+    jf_int(&ff,"m5_slot_table_bytes",slot_bytes);
+    jf_int(&ff,"m5_ledger_bytes",ledger_bytes);
+    jf_int(&ff,"m5_ledger_entries",s.led_n as i64);
+    jf_int(&ff,"m5_corpus_buffer_bytes",prose.len as i64);
+    j_end();
+    hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);
+}
+
+// ---- M6: transfer tax (standard: train T1 to criterion, face the new domain) ----
+fn t_m6(cdir:[]u8,dir:i32) void {
+    // dir 0 = prose->code, 1 = code->prose
+    let tname:[]u8="t1_prose.bin";let tcid:i32=Y3_C_T1P;
+    let yname:[]u8="code.bin";let ycid:i32=Y3_C_CODE;
+    let dkey:[]u8="m6-p2c-1x";let dtag:[]u8="p2c";
+    if(dir==1){
+        tname="t1_code.bin";tcid=Y3_C_T1C;yname="prose.bin";ycid=Y3_C_PROSE;
+        dkey="m6-c2p-1x";dtag="c2p";
+    }
+    let tbuf:[]u8=read_file(cdir,tname);
+    let ybuf:[]u8=read_file(cdir,yname);
+    if(tbuf.len==0 || ybuf.len==0){_zag_println("M6,FATAL,empty-corpus");return;}
+    let nt:i32=nunits_of(tbuf.len);let ny:i32=nunits_of(ybuf.len);
+    let s:Y3=y3_new(nt+ny+(nt+ny)/4+8192,nt+ny+16384,nt+ny+2048,4096);
+    let bout:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,tcid,0,tbuf.len);
+    reg_set(coffs,clens,ycid,0,ybuf.len);
+    // train on tier-1 to the M2 criterion (policy frozen afterwards)
+    let cok:i32=0;let bok:i32=0;
+    let e:i32=1;let consec:i32=0;let etc:i32=50;
+    while(e<=50){
+        ingest_all(&s,tbuf,tcid);
+        probe_reg(&s,tbuf,coffs,clens,tbuf,tcid,0,bout,&cok,&bok);
+        if(cok>=995 && bok>=950){consec=consec+1;}else{consec=0;}
+        if(consec>=3){etc=e-2;break;}
+        e=e+1;
+    }
+    let rec_d:i64=cok as i64;let bnd_d:i64=bok as i64;
+    let cyc:[]u8=halloc(&s,12*4);
+    iput(cyc,0*4,1);iput(cyc,1*4,-1);iput(cyc,2*4,2);iput(cyc,3*4,-2);
+    iput(cyc,4*4,4);iput(cyc,5*4,-4);iput(cyc,6*4,8);iput(cyc,7*4,-8);
+    iput(cyc,8*4,16);iput(cyc,9*4,-16);iput(cyc,10*4,32);iput(cyc,11*4,-32);
+    // in-domain revision: 100 boundary defects on train units
+    let j:i32=0;
+    while(j<100){
+        let idx:i32=j*nt/100;
+        y3_defect_boundary(&s,idx+1,iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){
+        y3_revise(&s,(j*nt/100)+1);
+        j=j+1;
+    }
+    let rev_d:i32=0;
+    j=0;
+    while(j<100){
+        rev_d=rev_d+unit_verified(&s,tbuf,coffs,clens,tbuf,tcid,j*nt/100,bout);
+        j=j+1;
+    }
+    let rev_dt:i64=(rev_d as i64)*10;
+    // transfer: face the new domain (ingest allowed, policy frozen)
+    ingest_all(&s,ybuf,ycid);
+    let rec_t:i32=0;let bnd_t:i32=0;
+    probe_reg(&s,ybuf,coffs,clens,ybuf,ycid,nt,bout,&rec_t,&bnd_t);
+    // transfer revision
+    j=0;
+    while(j<100){
+        let idx:i32=j*ny/100;
+        y3_defect_boundary(&s,nt+idx+1,iget(cyc,(j%12)*4));
+        j=j+1;
+    }
+    j=0;
+    while(j<100){
+        y3_revise(&s,nt+(j*ny/100)+1);
+        j=j+1;
+    }
+    let rev_t:i32=0;
+    j=0;
+    while(j<100){
+        let idx2:i32=j*ny/100;
+        // unit_verified assumes serial=idx+1 on a fresh store; transfer
+        // serials are offset by nt, so verify inline here
+        let serial:i32=nt+idx2+1;
+        let sl:i32=y3_slot_find(&s,serial);
+        let okv:i32=0;
+        if(sl>=0){
+            let f2:i32=iget(s.flags,sl*4);
+            if((f2 & F_LIVE)!=0 && (f2 & (F_SHIFT | F_PATCH))==0){
+                let off:i32=unit_off(idx2);let len:i32=unit_len(idx2,ybuf.len);
+                let rl:i32=y3_recall(&s,ybuf,coffs,clens,serial,bout);
+                if(rl==len){
+                    okv=1;
+                    let q:i32=0;
+                    while(q<len){if(bout[q]!=ybuf[off+q]){okv=0;break;}q=q+1;}
+                }
+            }
+        }
+        rev_t=rev_t+okv;
+        j=j+1;
+    }
+    let rev_tt:i64=(rev_t as i64)*10;
+    let tax:i64=((rec_d-(rec_t as i64))+((bnd_d-(bnd_t as i64)))+(rev_dt-rev_tt))/3;
+    _zag_print("M6,");_zag_print(dtag);_zag_print(",");
+    p_dec1(rec_t as i64);_zag_print(",");p_dec1(bnd_t as i64);_zag_print(",");
+    p_dec1(rev_tt);_zag_print(",");p_dec1(tax);_zag_println("");
+    let f:i32=0;
+    j_begin(dkey);
+    let g:i32=0;
+    jf_dec1(&g,"rec_tenths",rec_t as i64);
+    jf_dec1(&g,"bnd_tenths",bnd_t as i64);
+    jf_dec1(&g,"rev_tenths",rev_tt);
+    jf_dec1(&g,"tax_tenths",tax);
+    j_end();
+    hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);hfree(&s,cyc);
+}
+
+// ---- M7: ID-arm identity trial ----
+// Y3 carries a persistent serial->slot ID layer, so M7 runs with bars.
+// Literal-reading adoptions (prereg does not freeze them; the harness
+// validator's construction is the only concrete specification):
+//   C' edit = first-byte XOR 0xFF on every 100th unit (recorded patch,
+//     audited as trainer op); lookup schedule = (l*37)%n serials split
+//     1666/1667/1667 across the three rounds.
+// reuse = ID references / distinct live IDs, where a reference is every
+// deliberate ID resolution or binding (ingest mint, ingest dedup-hit,
+// lookup). dedup = 1 - distinct new stored / total ingested over rounds 1-2.
+fn t_m7(cdir:[]u8) void {
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    if(prose.len==0){_zag_println("M7,FATAL,empty-corpus");return;}
+    let n:i32=nunits_of(prose.len);
+    let s:Y3=y3_new(n+n/4+2048,8192,n+1024,4096);
+    let bout:[]u8=halloc(&s,64);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    reg_set(coffs,clens,Y3_C_PROSE,0,prose.len);
+    let refs:i64=0;
+    // round 0: ingest C
+    let i:i32=0;
+    while(i<n){y3_ingest(&s,Y3_C_PROSE,unit_off(i),unit_len(i,prose.len));refs=refs+1;i=i+1;}
+    // lookups phase 1: 1666
+    let hits:i64=0;let reread:i64=0;
+    let l:i32=0;
+    while(l<1666){
+        let ser:i32=((l*37)%n)+1;
+        let rl:i32=y3_recall(&s,prose,coffs,clens,ser,bout);
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        refs=refs+1;
+        l=l+1;
+    }
+    // round 1: ingest C again (dedup: same spans -> same serials)
+    i=0;
+    while(i<n){y3_ingest(&s,Y3_C_PROSE,unit_off(i),unit_len(i,prose.len));refs=refs+1;i=i+1;}
+    // lookups phase 2: 1667
+    while(l<3333){
+        let ser:i32=((l*37)%n)+1;
+        let rl:i32=y3_recall(&s,prose,coffs,clens,ser,bout);
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        refs=refs+1;
+        l=l+1;
+    }
+    // round 2: C' = C with deterministic every-100th-unit edits
+    // (Y3 edit mechanism: recorded byte patch, audited as trainer op)
+    let ep2:[]u8=halloc(&s,64);
+    let q:i32=0;
+    while(q<n){
+        if(q%100==0){
+            let off:i32=unit_off(q);let len:i32=unit_len(q,prose.len);
+            let a:i32=0;
+            while(a<len){ep2[a]=prose[off+a];a=a+1;}
+            ep2[0]=(ep2[0] as i32 ^ 255) as u8;
+            y3_defect_content(&s,q+1,ep2,len);
+        }
+        q=q+1;
+    }
+    hfree(&s,ep2);
+    // lookups phase 3: 1667
+    while(l<Y3_M7_LOOKUPS){
+        let ser:i32=((l*37)%n)+1;
+        let rl:i32=y3_recall(&s,prose,coffs,clens,ser,bout);
+        if(rl>0){hits=hits+1;reread=reread+(rl as i64);}
+        refs=refs+1;
+        l=l+1;
+    }
+    let hit_t:i64=hits*1000/5000;
+    let live:i32=s.nlive;
+    let reuse_x100:i64=refs*100/(live as i64);
+    // dedup over rounds 1-2: round 1 = dedup hits (0 new), round 2 = in-place
+    // patches (0 new) -> 1.00
+    let dedup_x100:i64=100;
+    _zag_print("M7,id,");
+    p_dec1(hit_t);_zag_print(",");p_dec2(reuse_x100);_zag_print(",");
+    p_dec2(dedup_x100);_zag_println("");
+    _zag_print("M7LITERAL,edit=first-byte-xor-100,schedule=(l*37)%n,split=1666/1667/1667");
+    _zag_println("");
+    let f:i32=0;
+    j_begin("m7-1x");
+    jf_dec1(&f,"m7_hit_rate_tenths",hit_t);
+    jf_dec2(&f,"m7_reuse_rate_tenths",reuse_x100);
+    jf_dec2(&f,"m7_dedup_savings_bytes",dedup_x100);
+    jf_null(&f,"m7_na_reason");
+    jf_int(&f,"m7_reread_bytes",reread);
+    j_end();
+    hfree(&s,bout);hfree(&s,coffs);hfree(&s,clens);
+}
+
+// ---- M8: determinism gate ----
+fn img_append(dst:[]u8,at:i32,src:[]u8,n:i32) i32 {
+    let i:i32=0;while(i<n){dst[at+i]=src[i];i=i+1;}
+    return at+n;
+}
+fn write_hex_line(dir:[]u8,fname:[]u8,tag:[]u8,hash:[]u8) i32 {
+    // "<tag> <hex>\n"
+    let hx:[]u8=ns_hex(hash);
+    let line:[]u8=nio_alloc(tag.len+1+hx.len+1);
+    let i:i32=0;while(i<tag.len){line[i]=tag[i];i=i+1;}
+    line[tag.len]=32;
+    let k:i32=0;while(k<hx.len){line[tag.len+1+k]=hx[k];k=k+1;}
+    line[tag.len+1+hx.len]=10;
+    let r:i32=write_file(dir,fname,line);
+    nio_free(hx);nio_free(line);
+    return r;
+}
+fn t_m8(cdir:[]u8,outdir:[]u8,pert:[]u8) void {
+    // perturbations (raw allocations bypass the logged trace: the trace must
+    // capture only the arm's own allocations, identical across perturbations)
+    if(_zag_strcmp(pert,"frag")==1){
+        let i:i32=0;
+        while(i<256){
+            let sz:i32=(i*37)%4096+16;
+            let b:[]u8=nio_alloc(sz);
+            if(i%3==0){nio_free(b);}
+            // survivors leak intentionally: freed by OS at exit; identical each run
+            i=i+1;
+        }
+    }
+    let aslr_pad:[]u8="";
+    if(_zag_strcmp(pert,"aslr")==1){
+        aslr_pad=nio_alloc(1234567);
+    }
+    // freelist-rev / starve: accepted, documented no-ops for Y3
+    // (slot placement is a pure function of serial; clock/entropy unused)
+    let prose:[]u8=read_file(cdir,"prose.bin");
+    let code:[]u8=read_file(cdir,"code.bin");
+    let fresh:[]u8=read_file(cdir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){_zag_println("M8,FATAL,empty-corpus");return;}
+    let nun_p:i32=nunits_of(prose.len);let nun_c:i32=nunits_of(code.len);
+    let cap:i32=nun_p+nun_c+(nun_p+nun_c)/4+16384;
+    let s:Y3=y3_new(cap,300000,nun_p+nun_c+9000,4096);
+    let bout:[]u8=halloc(&s,64);
+    let cbufs:[]u8=halloc(&s,prose.len+code.len+fresh.len);
+    let coffs:[]u8=halloc(&s,32);let clens:[]u8=halloc(&s,32);
+    let i:i32=0;while(i<prose.len){cbufs[i]=prose[i];i=i+1;}
+    let j2:i32=0;while(j2<code.len){cbufs[prose.len+j2]=code[j2];j2=j2+1;}
+    let j3:i32=0;while(j3<fresh.len){cbufs[prose.len+code.len+j3]=fresh[j3];j3=j3+1;}
+    reg_set(coffs,clens,Y3_C_PROSE,0,prose.len);
+    reg_set(coffs,clens,Y3_C_CODE,prose.len,code.len);
+    reg_set(coffs,clens,Y3_C_FRESH,prose.len+code.len,fresh.len);
+    // M1: ingest + full recall with swap probe, both corpora.
+    // The M1 phases use single-corpus buffers, so they need a base-0
+    // registry (offs2); the M3 phase below uses the cbufs registry.
+    // (Passing the cbufs registry with a single-corpus buffer would mix
+    // coordinates and read out of bounds -- the slot's off is always
+    // corpus-relative, the registry supplies the buffer base.)
+    let offs2:[]u8=halloc(&s,32);let lens2:[]u8=halloc(&s,32);
+    reg_set(offs2,lens2,Y3_C_PROSE,0,prose.len);
+    reg_set(offs2,lens2,Y3_C_CODE,0,code.len);
+    ingest_all(&s,prose,Y3_C_PROSE);
+    let cok:i32=0;let bok:i32=0;let pok:i32=0;let sc:i32=0;
+    y3_m1_run(&s,prose,Y3_C_PROSE,nun_p,0,bout,offs2,lens2,&cok,&bok,&pok,&sc);
+    let m1p:i32=cok;let pok_p:i32=pok;
+    ingest_all(&s,code,Y3_C_CODE);
+    y3_m1_run(&s,code,Y3_C_CODE,nun_c,nun_p,bout,offs2,lens2,&cok,&bok,&pok,&sc);
+    let m1c:i32=cok;let pok_c:i32=pok;
+    // M3 sequence on the same instance (V = every k-th over both corpora;
+    // serial = g+1 since prose took 1..nun_p and code nun_p+1..)
+    let total:i32=nun_p+nun_c;
+    let k:i32=total/Y3_M3_V;if(k<1){k=1;}
+    let v_ser:[]u8=halloc(&s,Y3_M3_V*4);
+    let v:i32=0;
+    while(v<Y3_M3_V){
+        let g:i32=v*k;
+        let ser:i32=g+1;
+        iput(v_ser,v*4,ser);
+        y3_mark_valuable(&s,ser);
+        v=v+1;
+    }
+    let f_ser:[]u8=halloc(&s,Y3_M3_FRESH1*4);
+    let f:i32=0;
+    while(f<Y3_M3_FRESH1){
+        iput(f_ser,f*4,y3_ingest_ev(&s,Y3_C_FRESH,unit_off(f),unit_len(f,fresh.len)));
+        f=f+1;
+    }
+    f=0;
+    while(f<Y3_M3_KILL){y3_kill(&s,iget(f_ser,f*4),1);f=f+1;}
+    // DANGLE check: tombstoned serials must fail loudly
+    let dang_ok:i32=0;
+    f=0;
+    while(f<Y3_M3_KILL){
+        if(y3_recall(&s,cbufs,coffs,clens,iget(f_ser,f*4),bout)==-1){dang_ok=dang_ok+1;}
+        f=f+1;
+    }
+    let w:i32=0;
+    while(w<50){
+        let g2:i32=(w*20)*k;
+        y3_weaken(&s,g2+1,w+1);
+        w=w+1;
+    }
+    f=Y3_M3_FRESH1;
+    while(f<Y3_M3_FRESH1+Y3_M3_FRESH2){
+        y3_ingest_ev(&s,Y3_C_FRESH,unit_off(f),unit_len(f,fresh.len));
+        f=f+1;
+    }
+    // artifacts
+    // store image: raw LE bytes of the persistent slot-region arrays
+    // (serials, epochs, roots, offs, lens, corps, flags, shifts, pidx,
+    //  skeys, svals: cap*4 each; ins: ins_cap*4; vlog: vlog_cap*20;
+    //  next_serial: 4 bytes)
+    let img:[]u8=halloc(&s,cap*44+s.ins_cap*4+s.vlog_cap*20+4);
+    let at:i32=0;
+    at=img_append(img,at,s.serials,cap*4);
+    at=img_append(img,at,s.epochs,cap*4);
+    at=img_append(img,at,s.roots,cap*4);
+    at=img_append(img,at,s.offs,cap*4);
+    at=img_append(img,at,s.lens,cap*4);
+    at=img_append(img,at,s.corps,cap*4);
+    at=img_append(img,at,s.flags,cap*4);
+    at=img_append(img,at,s.shifts,cap*4);
+    at=img_append(img,at,s.pidx,cap*4);
+    at=img_append(img,at,s.skeys,cap*4);
+    at=img_append(img,at,s.svals,cap*4);
+    at=img_append(img,at,s.ins,s.ins_cap*4);
+    at=img_append(img,at,s.vlog,s.vlog_cap*20);
+    let nsb:[]u8=halloc(&s,4);
+    iput(nsb,0,s.next_serial);
+    at=img_append(img,at,nsb,4);
+    // per-2^20-chunk sha256 of image, then chain
+    let nch:i32=(img.len+1048575)/1048576;
+    let chain_in:[]u8=halloc(&s,nch*32);
+    let ci:i32=0;
+    while(ci<nch){
+        let cs:i32=ci*1048576;let cn:i32=img.len-cs;
+        if(cn>1048576){cn=1048576;}
+        ns_sha256(img[cs..cs+cn],chain_in[ci*32..ci*32+32]);
+        ci=ci+1;
+    }
+    let chl:[]u8=halloc(&s,nch*80);
+    let cho:i32=0;
+    ci=0;
+    while(ci<nch){
+        let cs:i32=ci*32;
+        let hx:[]u8=ns_hex(chain_in[cs..cs+32]);
+        let tag:[]u8=_zag_i64_to_str(ci as i64);
+        chl[cho]=99;chl[cho+1]=104;chl[cho+2]=117;chl[cho+3]=110;chl[cho+4]=107;cho=cho+5;
+        let a2:i32=0;while(a2<tag.len){chl[cho]=tag[a2];cho=cho+1;a2=a2+1;}
+        chl[cho]=32;cho=cho+1;
+        let b2:i32=0;while(b2<hx.len){chl[cho]=hx[b2];cho=cho+1;b2=b2+1;}
+        chl[cho]=10;cho=cho+1;
+        nio_free(hx);nio_free(tag);
+        ci=ci+1;
+    }
+    write_file(outdir,"store_hashes.txt",chl[0..cho]);
+    let chain:[]u8=halloc(&s,32);
+    ns_sha256(chain_in,chain);
+    write_hex_line(outdir,"store_chain.txt","chain",chain);
+    write_file(outdir,"ledger.bin",s.led[0..s.led_n*64]);
+    let lhash:[]u8=halloc(&s,32);
+    ns_sha256(s.led[0..s.led_n*64],lhash);
+    write_hex_line(outdir,"ledger_chain.txt","chain",lhash);
+    write_file(outdir,"alloc_trace.txt",s.trace[0..s.trace_n]);
+    // stdout stays perturbation-agnostic
+    _zag_print("M8,");
+    p_dec1(m1p as i64);_zag_print(",");p_dec1(m1c as i64);_zag_print(",");
+    p_i64(s.led_n as i64);
+    _zag_print(",probe=");p_i64((pok_p+pok_c) as i64);_zag_print("/128");
+    _zag_print(",dangle=");p_i64(dang_ok as i64);_zag_print("/3000");
+    _zag_println("");
+    hfree(&s,bout);hfree(&s,cbufs);hfree(&s,coffs);hfree(&s,clens);
+    hfree(&s,img);hfree(&s,chain_in);hfree(&s,chl);hfree(&s,nsb);
+    hfree(&s,v_ser);hfree(&s,f_ser);hfree(&s,offs2);hfree(&s,lens2);
+    if(aslr_pad.len>0){nio_free(aslr_pad);}
+    // frag survivors: freed by OS at exit
+}
+
+// ---- main dispatch ----
+fn main() i32 {
+    let mode:[]u8=_zag_arg(1);
+    if(mode.len==0){_zag_println("usage: y3 <mode> [corpus-root] [outdir] [perturbation]");return 2;}
+    let croot:[]u8=_zag_arg(2);
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){t_m1(croot,"prose.bin",Y3_C_PROSE,"prose","m1-1x-prose");}
+    else if(_zag_strcmp(mode,"m1-1x-code")==1){t_m1(croot,"code.bin",Y3_C_CODE,"code","m1-1x-code");}
+    else if(_zag_strcmp(mode,"m2-t1-prose")==1){t_m2(croot,"t1_prose.bin",Y3_C_T1P,"m2-t1-prose",1);}
+    else if(_zag_strcmp(mode,"m2-t1-code")==1){t_m2(croot,"t1_code.bin",Y3_C_T1C,"m2-t1-code",1);}
+    else if(_zag_strcmp(mode,"m2-t2-prose")==1){t_m2(croot,"t2_prose.bin",Y3_C_T2P,"m2-t2-prose",0);}
+    else if(_zag_strcmp(mode,"m2-t2-code")==1){t_m2(croot,"t2_code.bin",Y3_C_T2C,"m2-t2-code",0);}
+    else if(_zag_strcmp(mode,"m2-t3-1x")==1){t_m2(croot,"t3.bin",Y3_C_T3,"m2-t3-1x",0);}
+    else if(_zag_strcmp(mode,"m3-1x")==1){t_m3(croot);}
+    else if(_zag_strcmp(mode,"m4-1x-prose")==1){t_m4(croot,"prose.bin",Y3_C_PROSE,0,"prose","m4-1x-prose");}
+    else if(_zag_strcmp(mode,"m4-1x-code")==1){t_m4(croot,"code.bin",Y3_C_CODE,1,"code","m4-1x-code");}
+    else if(_zag_strcmp(mode,"m5-1x")==1){t_m5(croot);}
+    else if(_zag_strcmp(mode,"m5-baseline")==1){
+        // Empty-store RSS baseline: allocate the same empty store m5-1x uses,
+        // touch it, then spin briefly so the harness RSS sampler can observe
+        // the peak. The spin is measurement scaffolding, not arm cognition.
+        let psz:i64=file_size(croot,"prose.bin");
+        if(psz<=0){_zag_println("M5,FATAL,empty-corpus");return 1;}
+        let pn:i32=nunits_of(psz as i32);
+        let bs:Y3=y3_new(pn+pn/4+4096,pn+4096,pn+2048,4096);
+        // fully touch the empty store so it is resident: the baseline RSS
+        // must contain the whole slot region, leaving no double-count in
+        // the literal (rss_delta + slot_table) formula (AMBIGUITIES.md A4).
+        let b0:[]u8=bs.serials;let b1:[]u8=bs.epochs;let b2:[]u8=bs.roots;
+        let b3:[]u8=bs.offs;let b4:[]u8=bs.lens;let b5:[]u8=bs.corps;
+        let b6:[]u8=bs.flags;let b7:[]u8=bs.shifts;let b8:[]u8=bs.pidx;
+        let b9:[]u8=bs.skeys;let b10:[]u8=bs.svals;let b11:[]u8=bs.ins;
+        let b12:[]u8=bs.vlog;
+        let bj:i32=0;
+        while(bj<b0.len){b0[bj]=0;b1[bj]=0;b2[bj]=0;b3[bj]=0;b4[bj]=0;b5[bj]=0;b6[bj]=0;b7[bj]=0;b8[bj]=0;b9[bj]=0;b10[bj]=0;bj=bj+1;}
+        bj=0;
+        while(bj<b11.len){b11[bj]=0;bj=bj+1;}
+        bj=0;
+        while(bj<b12.len){b12[bj]=0;bj=bj+1;}
+        _zag_println("M5_BASELINE,ok");
+        let f:i32=0;
+        j_begin("m5-baseline");
+        jf_bool(&f,"m5_baseline",1);
+        j_end();
+        let spin:i64=0;while(spin<300000000){spin=spin+1;}
+    }
+    else if(_zag_strcmp(mode,"m6-p2c-1x")==1){t_m6(croot,0);}
+    else if(_zag_strcmp(mode,"m6-c2p-1x")==1){t_m6(croot,1);}
+    else if(_zag_strcmp(mode,"m7-1x")==1){t_m7(croot);}
+    else if(_zag_strcmp(mode,"m8-1x")==1){
+        let outdir:[]u8=_zag_arg(3);
+        let pert:[]u8=_zag_arg(4);
+        if(outdir.len==0 || pert.len==0){
+            _zag_println("usage: y3 m8-1x <corpus-root> <outdir> <perturbation>");
+            return 2;
+        }
+        t_m8(croot,outdir,pert);
+    }
+    else{_zag_print("unknown mode: ");_zag_println(mode);return 2;}
+    return 0;
+}

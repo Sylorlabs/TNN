@@ -1,0 +1,617 @@
+@import("toolchain/R33_NATIVE_IO_V1.zag")
+@import("scene_spec.zag")
+// scene.zag — TNN playground scene-graph renderer (pure Zag, zero RNG).
+//
+// Renders the deliberated scene (scene_spec.zag) as ONE coherent acoustic
+// world: polyphonic voices from the v5 long-memory engine, placed in a
+// shared space (distance gain + air lowpass per voice, shared early
+// reflections on the mix, one low air bed), staged by deterministic rules.
+//
+// Voice identity: child c keeps (model, pitch-scale, distance) across all
+// its phrases — the same child in the same place. Formant-preserving pitch
+// transposition = phase-rate scaling of the learned plm (verified: F0
+// tracks scale exactly, formants unchanged).
+// Decorrelation: every event's fmix32 streams are offset by
+// seed*1000003, so no two voices share walk inputs.
+//
+// argv[1]: models dir   argv[2]: out.wav   argv[3]: "1"=air bed on, "0"=off
+
+fn s_abs(x:f64) f64 {
+    if (x < 0.0) { return 0.0 - x; }
+    return x;
+}
+fn s_rint(x:f64) i64 {
+    if (x >= 0.0) { return (x + 0.5) as i64; }
+    return 0 - (((0.0 - x) + 0.5) as i64);
+}
+fn s_mul32(a:i64, b:i64) i64 {
+    let alo:i64 = a & 65535;
+    let ahi:i64 = (a >> 16) & 65535;
+    let blo:i64 = b & 65535;
+    let bhi:i64 = (b >> 16) & 65535;
+    let lo:i64 = alo * blo;
+    let mid:i64 = (ahi * blo + alo * bhi) & 65535;
+    return (lo + mid * 65536) & 4294967295;
+}
+fn s_fmix32(h:i64) i64 {
+    let x:i64 = h & 4294967295;
+    x = x ^ (x >> 16);
+    x = s_mul32(x, 2246822507);
+    x = x ^ (x >> 13);
+    x = s_mul32(x, 3266489909);
+    x = x ^ (x >> 16);
+    return x & 4294967295;
+}
+fn s_cstr(s:[]u8) []u8 {
+    let b:[]u8 = nio_alloc((s.len + 1) as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) {
+        b[i] = s[i];
+        i = i + 1;
+    }
+    b[s.len] = 0;
+    return b;
+}
+// raw copy WITHOUT NUL terminator — for building paths via s_cat2.
+// (s_cstr's trailing NUL would embed mid-path and truncate open() at it.)
+fn s_rawcopy(s:[]u8) []u8 {
+    let b:[]u8 = nio_alloc(s.len as i32);
+    if (b.len == 0) { return b; }
+    let i:i64 = 0;
+    while (i < s.len) {
+        b[i] = s[i];
+        i = i + 1;
+    }
+    return b;
+}
+fn s_get64(m:[]u8, o:i64) i64 {
+    let b0:i64 = m[o] as i64;
+    let b1:i64 = m[o+1] as i64;
+    let b2:i64 = m[o+2] as i64;
+    let b3:i64 = m[o+3] as i64;
+    let b4:i64 = m[o+4] as i64;
+    let b5:i64 = m[o+5] as i64;
+    let b6:i64 = m[o+6] as i64;
+    let b7:i64 = m[o+7] as i64;
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56);
+}
+fn s_getf64(m:[]u8, o:i64) f64 {
+    let f:[]f64 = m as []f64;
+    return f[o / 8];
+}
+fn s_put16(ar:[]u8, o:i64, v:i64) void {
+    ar[o] = (v & 255) as u8;
+    ar[o+1] = ((v >> 8) & 255) as u8;
+    return;
+}
+fn s_put32(ar:[]u8, o:i64, v:i64) void {
+    ar[o] = (v & 255) as u8;
+    ar[o+1] = ((v >> 8) & 255) as u8;
+    ar[o+2] = ((v >> 16) & 255) as u8;
+    ar[o+3] = ((v >> 24) & 255) as u8;
+    return;
+}
+fn s_load_file(path:[]u8) []u8 {
+    let cs:[]u8 = s_cstr(path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 0, 0, 0, 0, 0);
+    nio_free(cs);
+    if (fd < 0) { return nio_alloc(0); }
+    let msz:i64 = _zag_raw_syscall(8, fd, 0, 2, 0, 0, 0);
+    _zag_raw_syscall(8, fd, 0, 0, 0, 0, 0);
+    let m:[]u8 = nio_alloc(msz as i32);
+    let at:i64 = 0;
+    while (at < msz) {
+        let n:i64 = _zag_raw_syscall(0, fd, (_zag_slice_ptr(m) as i64) + at, msz - at, 0, 0, 0);
+        if (n <= 0) { break; }
+        at = at + n;
+    }
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    return m;
+}
+fn s_write_file(path:[]u8, buf:[]u8, len:i64) void {
+    let cs:[]u8 = s_cstr(path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(cs) as i64, 577, 420, 0, 0, 0);
+    if (fd >= 0) {
+        let at:i64 = 0;
+        while (at < len) {
+            let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(buf) as i64) + at, len - at, 0, 0, 0);
+            if (w <= 0) { break; }
+            at = at + w;
+        }
+        _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    }
+    nio_free(cs);
+    return;
+}
+fn s_cat2(a:[]u8, b:[]u8) []u8 {
+    let o:[]u8 = nio_alloc((a.len + b.len) as i32);
+    let i:i64 = 0;
+    while (i < a.len) {
+        o[i] = a[i];
+        i = i + 1;
+    }
+    let j:i64 = 0;
+    while (j < b.len) {
+        o[a.len + j] = b[j];
+        j = j + 1;
+    }
+    return o;
+}
+fn tb_put(buf:[]u8, pos:i64, s:[]u8) i64 {
+    let i:i64 = 0;
+    while (i < s.len) {
+        buf[pos + i] = s[i];
+        i = i + 1;
+    }
+    return pos + s.len;
+}
+fn tb_i64(buf:[]u8, pos:i64, v:i64) i64 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    let p:i64 = tb_put(buf, pos, s);
+    nio_free(s);
+    return p;
+}
+
+// voice_core: one v5-imagine event rendered into the shared mix.
+// Parses the model header itself; all randomness replaced by
+// seed-offset fmix32 streams (decorrelated across events).
+fn voice_core(mix:[]f64, m:[]u8, seed:i64, pscn:i64, pscd:i64, nsamp:i64, start:i64, dgain:f64, lp:f64, fade_in:i64, fade_out:i64) void {
+    let P:i64 = s_get64(m, 8);
+    let K:i64 = s_get64(m, 16);
+    let sr:i64 = s_get64(m, 32);
+    let a_off:i64 = 40;
+    let proto_off:i64 = a_off + 8*P;
+    let bg_off:i64 = proto_off + 8*K;
+    let tail:i64 = bg_off + 8*K*K*K;
+    let ob0:i64 = s_get64(m, tail);
+    let ob1:i64 = s_get64(m, tail+8);
+    let attackv:f64 = s_getf64(m, tail+24);
+    let frlen:i64 = s_get64(m, tail+32);
+    let eplen:i64 = s_get64(m, tail+40);
+    let EP_off:i64 = tail+48;
+    let pT:i64 = s_get64(m, EP_off+8*eplen);
+    let T0:f64 = s_getf64(m, EP_off+8*eplen+8);
+    let NBINS:i64 = s_get64(m, EP_off+8*eplen+16);
+    let plm_off:i64 = EP_off+8*eplen+24;
+    let PMF_off:i64 = plm_off+8*NBINS;
+    let boost:f64 = s_getf64(m, PMF_off+8*17);
+    let use_h:i64 = 0;
+    if (pT > 0 and T0 > 0.0 and NBINS > 0) { use_h = 1; }
+    let pscale:f64 = (pscn as f64) / (pscd as f64);
+    let sbase:i64 = seed * 1000003;
+    let EST:[]f64 = nio_alloc((nsamp*8) as i32) as []f64;
+    let w:[]f64 = nio_alloc(512) as []f64;
+    let zi:i64 = 0;
+    while (zi < nsamp) { EST[zi] = 0.0; zi = zi + 1; }
+    let prev2:i64 = ob0;
+    let prev1:i64 = ob1;
+    let ewalk:f64 = attackv;
+    if (ewalk < 1.0) { ewalk = 1.0; }
+    let phase:f64 = 0.0;
+    let L:f64 = pT as f64;
+    if (L < 1.0) { L = 1.0; }
+    let ndraw:i64 = 0;
+    let lpst:f64 = 0.0;
+    let i:i64 = 0;
+    while (i < nsamp) {
+        let fr:i64 = i / frlen;
+        if (fr > eplen - 1) { fr = eplen - 1; }
+        let epr:f64 = s_getf64(m, EP_off + fr*8);
+        let lo:f64 = epr * 0.2;
+        let hi:f64 = epr * 5.0;
+        if (hi < 1.0) { hi = 1.0; }
+        let tot:f64 = 0.0;
+        let c:i64 = 0;
+        while (c < K) {
+            let bv:i64 = s_get64(m, bg_off + 8*((prev2*K + prev1)*K + c));
+            let wc:f64 = (bv as f64) + 1.0;
+            if (epr >= 1.0) {
+                let pc:f64 = s_getf64(m, proto_off + c*8);
+                let apc:f64 = s_abs(pc);
+                if (apc < lo or apc > hi) { wc = 0.0; }
+            }
+            w[c] = wc;
+            tot = tot + wc;
+            c = c + 1;
+        }
+        let u:f64 = (s_fmix32(sbase + i + 1) as f64) / 4294967296.0;
+        let target:f64 = u * tot;
+        let cum:f64 = 0.0;
+        let bi:i64 = K - 1;
+        c = 0;
+        while (c < K) {
+            cum = cum + w[c];
+            if (target < cum) { bi = c; c = K; } else { c = c + 1; }
+        }
+        let rv0:f64 = s_getf64(m, proto_off + bi*8);
+        ewalk = 0.99*ewalk + 0.01*s_abs(rv0);
+        let g:f64 = 1.0;
+        if (epr < 1.0) {
+            g = 0.02;
+        } else if (ewalk > 0.5) {
+            g = epr / ewalk;
+            if (g > 8.0) { g = 8.0; }
+            if (g < 0.125) { g = 0.125; }
+        }
+        let rv:f64 = rv0 * g;
+        if (use_h == 1) {
+            let hbin:i64 = ((phase * (NBINS as f64)) as i64) % NBINS;
+            rv = rv + s_getf64(m, plm_off + hbin*8) * g * boost;
+            phase = phase + pscale / L;
+            if (phase >= 1.0) {
+                phase = phase - 1.0;
+                ndraw = ndraw + 1;
+                let uu:f64 = (s_fmix32(sbase + 777777777 + ndraw) as f64) / 4294967296.0;
+                let ccum:f64 = 0.0;
+                let pidx:i64 = 16;
+                let pi:i64 = 0;
+                while (pi < 17) {
+                    ccum = ccum + s_getf64(m, PMF_off + pi*8);
+                    if (uu < ccum) { pidx = pi; pi = 17; } else { pi = pi + 1; }
+                }
+                L = (pT - 8 + pidx) as f64;
+            }
+        }
+        let pred:f64 = 0.0;
+        if (i > 0) {
+            let take:i64 = i;
+            if (take > P) { take = P; }
+            let k:i64 = 0;
+            while (k < take) {
+                pred = pred + s_getf64(m, a_off + k*8) * EST[i-1-k];
+                k = k + 1;
+            }
+        }
+        let ev:f64 = pred + rv;
+        EST[i] = ev;
+        // event envelope: fades only (the EP already shapes the event)
+        let env:f64 = 1.0;
+        if (i < fade_in) { env = (i as f64) / (fade_in as f64); }
+        if (i > nsamp - fade_out) { env = ((nsamp - i) as f64) / (fade_out as f64); }
+        let add:f64 = ev * dgain * env;
+        lpst = lpst + (add - lpst) * lp;
+        mix[start + i] = mix[start + i] + lpst;
+        prev2 = prev1;
+        prev1 = bi;
+        i = i + 1;
+    }
+    nio_free(EST);
+    nio_free(w);
+    return;
+}
+
+fn main() void {
+    // copy _zag_arg(1) immediately: it is a non-owned transient buffer.
+    // raw copy (no NUL): path segments are joined with s_cat2, and
+    // s_load_file/s_write_file add the NUL terminator themselves.
+    let mdir:[]u8 = s_rawcopy(_zag_arg(1));
+    let opath:[]u8 = s_cstr(_zag_arg(2));
+    let bed_on:i64 = 1;
+    let a3:[]u8 = _zag_arg(3);
+    if (a3.len > 0 and a3[0] == 48) { bed_on = 0; }
+    let slash:[]u8 = "/";
+    let p0:[]u8 = s_cat2(mdir, slash);
+    let pc:[]u8 = s_cat2(p0, "m5g_cry.bin");
+    let pv:[]u8 = s_cat2(p0, "m5g_vowel.bin");
+    let pg:[]u8 = s_cat2(p0, "m5g_clang.bin");
+    let ps:[]u8 = s_cat2(p0, "m5g_strike.bin");
+    let m0:[]u8 = s_load_file(pc);
+    let m1:[]u8 = s_load_file(pv);
+    let m2:[]u8 = s_load_file(pg);
+    let m3:[]u8 = s_load_file(ps);
+    nio_free(p0); nio_free(pc); nio_free(pv); nio_free(pg); nio_free(ps); nio_free(mdir);
+    let sr:i64 = s_get64(m0, 32);
+    let dur_s:i64 = spec_dur_s();
+    let nchild:i64 = spec_count();
+    let N:i64 = dur_s * sr;
+    // ---------- staging: deterministic event layout ----------
+    let NEV:i64 = 64;
+    let ev_model:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_seed:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_pscn:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_pscd:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_start:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_nsamp:[]i64 = nio_alloc((NEV*8) as i32) as []i64;
+    let ev_dgain:[]f64 = nio_alloc((NEV*8) as i32) as []f64;
+    let ev_lp:[]f64 = nio_alloc((NEV*8) as i32) as []f64;
+    let nev:i64 = 0;
+    // child identities: model alternates cry/vowel; stable pitch + distance
+    // pscale table: child -> (num,den): F0 345, 365, 310, 396 Hz
+    let c:i64 = 0;
+    while (c < nchild) {
+        let cmodel:i64 = c % 2;
+        let pscn:i64 = 100;
+        let pscd:i64 = 100;
+        if (c == 1) { pscn = 115; }
+        if (c == 2) { pscn = 90; }
+        if (c == 3) { pscn = 125; }
+        let dist_dm:i64 = 35;
+        if (c == 1) { dist_dm = 55; }
+        if (c == 2) { dist_dm = 45; }
+        if (c == 3) { dist_dm = 70; }
+        let dm:f64 = (dist_dm as f64) / 10.0;
+        let dg:f64 = 1.0 / (1.0 + 0.5 * dm);
+        // model loudness compensation: the learned cry voice renders ~4x
+        // the RMS of the learned vowel voice (cry_3s 3618 vs vowel_3s 899).
+        // Without it the two vowel children sit 12dB under the cry children
+        // and the deliberated 4-child scene collapses to 2 audible voices.
+        // This is a staging (placement) gain, not a change to the voices.
+        if (cmodel == 1) { dg = dg * 4.0; }
+        let lpc:f64 = 1.0 / (1.0 + 0.15 * dm);
+        // 4 phrases per child, INTERLEAVED across children (slot = k*4+c):
+        // at each time-slot every child gets one phrase, so the children
+        // vocalize throughout the scene, overlapping — one world, not a
+        // sequence of solos. (Block layout c*4+k was sequential: rejected.)
+        let k:i64 = 0;
+        while (k < 4) {
+            let slot:i64 = k * 4 + c;
+            let u1:f64 = (s_fmix32(100000 + c*10000 + k*2) as f64) / 4294967296.0;
+            let u2:f64 = (s_fmix32(100000 + c*10000 + k*2 + 1) as f64) / 4294967296.0;
+            let st_s:f64 = 0.3 + (slot as f64) * 0.83 + (u1 - 0.5) * 0.5;
+            let du_s:f64 = 0.8 + u2 * 1.7;
+            if (st_s < 0.1) { st_s = 0.1; }
+            if (st_s + du_s > (dur_s as f64) - 0.3) { du_s = (dur_s as f64) - 0.3 - st_s; }
+            ev_model[nev] = cmodel;
+            ev_seed[nev] = 5000 + nev * 131;
+            ev_pscn[nev] = pscn;
+            ev_pscd[nev] = pscd;
+            ev_start[nev] = (st_s * (sr as f64)) as i64;
+            ev_nsamp[nev] = (du_s * (sr as f64)) as i64;
+            ev_dgain[nev] = dg;
+            ev_lp[nev] = lpc;
+            nev = nev + 1;
+            k = k + 1;
+        }
+        c = c + 1;
+    }
+    // polyphony repair: every 1s window in [3,12]s must hold >=2 voices;
+    // else extend the nearest phrase (cap 3.5s). max 8 repairs.
+    let rep:i64 = 0;
+    let w0:i64 = 3;
+    while (w0 < 12 and rep < 8) {
+        let cnt:i64 = 0;
+        let e:i64 = 0;
+        while (e < nev) {
+            if (ev_model[e] == 0 or ev_model[e] == 1) {
+                let s0:i64 = ev_start[e] / sr;
+                let s1:i64 = (ev_start[e] + ev_nsamp[e]) / sr;
+                if (s0 <= w0 and s1 >= w0 + 1) { cnt = cnt + 1; }
+            }
+            e = e + 1;
+        }
+        if (cnt < 2) {
+            // nearest voice phrase: extend by 0.8s
+            let wmid:i64 = (w0 * sr + sr / 2);
+            let bestd:i64 = 999999999;
+            let be:i64 = -1;
+            e = 0;
+            while (e < nev) {
+                if (ev_model[e] == 0 or ev_model[e] == 1) {
+                    let mid:i64 = ev_start[e] + ev_nsamp[e] / 2;
+                    let d:i64 = mid - wmid;
+                    if (d < 0) { d = 0 - d; }
+                    if (d < bestd) { bestd = d; be = e; }
+                }
+                e = e + 1;
+            }
+            if (be >= 0) {
+                let mx:i64 = (35 * sr) / 10;
+                let nn:i64 = ev_nsamp[be] + (8 * sr) / 10;
+                if (nn > mx) { nn = mx; }
+                ev_nsamp[be] = nn;
+                rep = rep + 1;
+            } else {
+                w0 = 12;
+            }
+        } else {
+            w0 = w0 + 1;
+        }
+    }
+    // texture: ball-bounce trains (strike), slide clangs (clang), soft thuds
+    let tbase:i64 = 0;
+    while (tbase < 3) {
+        let tb0:i64 = 25;
+        if (tbase == 1) { tb0 = 76; }
+        if (tbase == 2) { tb0 = 122; }
+        let uj:f64 = (s_fmix32(200000 + tbase) as f64) / 4294967296.0;
+        let t0:i64 = ((tb0 as f64) / 10.0 + (uj - 0.5)) as i64;
+        let acc:i64 = 0;
+        let j:i64 = 0;
+        while (j < 5) {
+            let gap:i64 = 34;
+            if (j == 1) { gap = 28; }
+            if (j == 2) { gap = 23; }
+            if (j == 3) { gap = 19; }
+            if (j == 4) { gap = 15; }
+            acc = acc + gap;
+            let st:i64 = (t0 * sr) / 1 + (acc * sr) / 100;
+            let decay:f64 = 1.0;
+            if (j == 1) { decay = 0.8; }
+            if (j == 2) { decay = 0.62; }
+            if (j == 3) { decay = 0.48; }
+            if (j == 4) { decay = 0.36; }
+            ev_model[nev] = 3;
+            ev_seed[nev] = 9000 + nev * 131;
+            ev_pscn[nev] = 100;
+            ev_pscd[nev] = 100;
+            ev_start[nev] = st;
+            ev_nsamp[nev] = (15 * sr) / 100;
+            ev_dgain[nev] = decay / (1.0 + 0.5 * 5.0);
+            ev_lp[nev] = 1.0 / (1.0 + 0.15 * 5.0);
+            nev = nev + 1;
+            j = j + 1;
+        }
+        tbase = tbase + 1;
+    }
+    let cl:i64 = 0;
+    while (cl < 3) {
+        let cb:i64 = 42;
+        if (cl == 1) { cb = 88; }
+        if (cl == 2) { cb = 132; }
+        let uj2:f64 = (s_fmix32(300000 + cl) as f64) / 4294967296.0;
+        let st2:i64 = (((cb as f64) / 10.0 + (uj2 - 0.5)) * (sr as f64)) as i64;
+        ev_model[nev] = 2;
+        ev_seed[nev] = 9400 + nev * 131;
+        ev_pscn[nev] = 100;
+        ev_pscd[nev] = 100;
+        ev_start[nev] = st2;
+        ev_nsamp[nev] = (45 * sr) / 100;
+        ev_dgain[nev] = 0.8 / (1.0 + 0.5 * 6.0);
+        ev_lp[nev] = 1.0 / (1.0 + 0.15 * 6.0);
+        nev = nev + 1;
+        cl = cl + 1;
+    }
+    let th:i64 = 0;
+    while (th < 2) {
+        let hb:i64 = 61;
+        if (th == 1) { hb = 109; }
+        let uj3:f64 = (s_fmix32(400000 + th) as f64) / 4294967296.0;
+        let st3:i64 = (((hb as f64) / 10.0 + (uj3 - 0.5)) * (sr as f64)) as i64;
+        ev_model[nev] = 3;
+        ev_seed[nev] = 9600 + nev * 131;
+        ev_pscn[nev] = 100;
+        ev_pscd[nev] = 100;
+        ev_start[nev] = st3;
+        ev_nsamp[nev] = (30 * sr) / 100;
+        ev_dgain[nev] = 0.5 / (1.0 + 0.5 * 8.5);
+        ev_lp[nev] = 1.0 / (1.0 + 0.15 * 8.5);
+        nev = nev + 1;
+        th = th + 1;
+    }
+    // ---------- render ----------
+    let mix:[]f64 = nio_alloc((N*8) as i32) as []f64;
+    let zi2:i64 = 0;
+    while (zi2 < N) { mix[zi2] = 0.0; zi2 = zi2 + 1; }
+    let e2:i64 = 0;
+    while (e2 < nev) {
+        let msel:[]u8 = m0;
+        let mi:i64 = ev_model[e2];
+        if (mi == 1) { msel = m1; }
+        if (mi == 2) { msel = m2; }
+        if (mi == 3) { msel = m3; }
+        let st4:i64 = ev_start[e2];
+        let ns4:i64 = ev_nsamp[e2];
+        if (st4 < 0) { st4 = 0; }
+        if (st4 + ns4 > N) { ns4 = N - st4; }
+        if (ns4 > 64) {
+            voice_core(mix, msel, ev_seed[e2], ev_pscn[e2], ev_pscd[e2], ns4, st4, ev_dgain[e2], ev_lp[e2], 220, 2646);
+        }
+        e2 = e2 + 1;
+    }
+    // ---------- room: shared early reflections on the mix ----------
+    let out:[]f64 = nio_alloc((N*8) as i32) as []f64;
+    let d1:i64 = (11 * sr) / 1000;
+    let d2:i64 = (29 * sr) / 1000;
+    let d3:i64 = (53 * sr) / 1000;
+    let i2:i64 = 0;
+    while (i2 < N) {
+        let v:f64 = mix[i2];
+        if (i2 >= d1) { v = v + 0.22 * mix[i2 - d1]; }
+        if (i2 >= d2) { v = v + 0.14 * mix[i2 - d2]; }
+        if (i2 >= d3) { v = v + 0.09 * mix[i2 - d3]; }
+        out[i2] = v;
+        i2 = i2 + 1;
+    }
+    // ---------- air bed: one low non-tonal room tone for the whole space --
+    if (bed_on == 1) {
+        let lpb:f64 = 0.0;
+        let i3:i64 = 0;
+        while (i3 < N) {
+            let wh:f64 = (s_fmix32(31337 * 1000003 + i3) as f64) / 2147483648.0 - 1.0;
+            lpb = lpb + (wh - lpb) * 0.03;
+            out[i3] = out[i3] + lpb * 490.0;
+            i3 = i3 + 1;
+        }
+    }
+    // ---------- normalize + write ----------
+    let peak:f64 = 0.0;
+    let i4:i64 = 0;
+    while (i4 < N) {
+        let a:f64 = s_abs(out[i4]);
+        if (a > peak) { peak = a; }
+        i4 = i4 + 1;
+    }
+    let sc:f64 = 1.0;
+    if (peak > 30000.0) { sc = 30000.0 / peak; }
+    let sout:[]u8 = nio_alloc((N*2) as i32);
+    let i5:i64 = 0;
+    while (i5 < N) {
+        let s:i64 = s_rint(out[i5] * sc);
+        if (s > 32767) { s = 32767; }
+        if (s < -32768) { s = -32768; }
+        s_put16(sout, 2*i5, s);
+        i5 = i5 + 1;
+    }
+    let hdr:[]u8 = nio_alloc(44);
+    hdr[0]=82; hdr[1]=73; hdr[2]=70; hdr[3]=70;
+    s_put32(hdr, 4, 36 + 2*N);
+    hdr[8]=87; hdr[9]=65; hdr[10]=86; hdr[11]=69;
+    hdr[12]=102; hdr[13]=109; hdr[14]=116; hdr[15]=32;
+    s_put32(hdr, 16, 16);
+    s_put16(hdr, 20, 1);
+    s_put16(hdr, 22, 1);
+    s_put32(hdr, 24, sr);
+    s_put32(hdr, 28, sr*2);
+    s_put16(hdr, 32, 2);
+    s_put16(hdr, 34, 16);
+    hdr[36]=100; hdr[37]=97; hdr[38]=116; hdr[39]=97;
+    s_put32(hdr, 40, 2*N);
+    let fd2:i64 = _zag_raw_syscall(2, _zag_slice_ptr(opath) as i64, 577, 420, 0, 0, 0);
+    if (fd2 >= 0) {
+        _zag_raw_syscall(1, fd2, _zag_slice_ptr(hdr) as i64, 44, 0, 0, 0);
+        let at2:i64 = 0;
+        let dlen:i64 = 2*N;
+        while (at2 < dlen) {
+            let chunk:i64 = dlen - at2;
+            if (chunk > 1048576) { chunk = 1048576; }
+            let ww:i64 = _zag_raw_syscall(1, fd2, (_zag_slice_ptr(sout) as i64) + at2, chunk, 0, 0, 0);
+            if (ww <= 0) { break; }
+            at2 = at2 + ww;
+        }
+        _zag_raw_syscall(3, fd2, 0, 0, 0, 0, 0);
+    }
+    // ---------- staging report ----------
+    let rep2:[]u8 = nio_alloc(16384);
+    let rp:i64 = 0;
+    rp = tb_put(rep2, rp, "STAGING REPORT — playground scene (deterministic, zero RNG)\n");
+    rp = tb_put(rep2, rp, "spec: mood=1 lively-midday, ages 3-6 mixed, 4 children,\n");
+    rp = tb_put(rep2, rp, "mixed free play, pocket park, 15s. voices: child0 cry 345Hz\n");
+    rp = tb_put(rep2, rp, "@3.5m, child1 vowel 365Hz @5.5m, child2 cry 310Hz @4.5m,\n");
+    rp = tb_put(rep2, rp, "child3 vowel 396Hz @7m. polyphony repairs: ");
+    rp = tb_i64(rep2, rp, rep);
+    rp = tb_put(rep2, rp, "\nevents (idx model start_ms dur_ms pscale_num/den dist_dm seed):\n");
+    let e3:i64 = 0;
+    while (e3 < nev) {
+        rp = tb_i64(rep2, rp, e3);
+        rp = tb_put(rep2, rp, " m=");
+        rp = tb_i64(rep2, rp, ev_model[e3]);
+        rp = tb_put(rep2, rp, " st=");
+        rp = tb_i64(rep2, rp, (ev_start[e3] * 1000) / sr);
+        rp = tb_put(rep2, rp, " du=");
+        rp = tb_i64(rep2, rp, (ev_nsamp[e3] * 1000) / sr);
+        rp = tb_put(rep2, rp, " ps=");
+        rp = tb_i64(rep2, rp, ev_pscn[e3]);
+        rp = tb_put(rep2, rp, "/");
+        rp = tb_i64(rep2, rp, ev_pscd[e3]);
+        rp = tb_put(rep2, rp, " seed=");
+        rp = tb_i64(rep2, rp, ev_seed[e3]);
+        rp = tb_put(rep2, rp, "\n");
+        e3 = e3 + 1;
+    }
+    s_write_file("STAGING_REPORT.txt", rep2, rp);
+    nio_free(rep2);
+    _zag_print("events=");
+    _zag_print(_zag_i64_to_str(nev));
+    _zag_print(" peak=");
+    _zag_print(_zag_i64_to_str(peak as i64));
+    _zag_print(" scale_x1000=");
+    _zag_println(_zag_i64_to_str((sc * 1000.0) as i64));
+    nio_free(hdr);
+    nio_free(mix); nio_free(out); nio_free(sout);
+    nio_free(m0); nio_free(m1); nio_free(m2); nio_free(m3);
+    nio_free(ev_model); nio_free(ev_seed); nio_free(ev_pscn); nio_free(ev_pscd);
+    nio_free(ev_start); nio_free(ev_nsamp); nio_free(ev_dgain); nio_free(ev_lp);
+    nio_free(opath);
+    return;
+}

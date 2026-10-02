@@ -1,0 +1,2886 @@
+// unified_learn.zag — End-to-end unlabeled learn-route-revise loop.
+// Unifies H-ROUTER (structure-inferred routing) with H-BRIDGE (revision
+// bridge) in a single continuing process.
+//
+// Architecture:
+//   - Router: per-item structure inference, no P/C/Q labels (from route_learn.zag)
+//   - Procedure store: 16 slots, 1055-program discovery (from bridge_learn.zag)
+//   - Bridge: direct-first, then (pos,val) conditional induction (from bridge_learn.zag,
+//     includes the B-A6b dry-run fix)
+//   - Causal store: 16 rules (from route_learn.zag)
+//   - PROC_LEARN failure automatically triggers bridge induction.
+//
+// Prereg: PREREG_UNIFIED.md (commit d652fdaee, frozen before implementation).
+//
+// Pure Zag. No Python.
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn i32s(v:i32)[]u8 { return _zag_i64_to_str(v as i64); }
+fn streq(a:[]u8, b:[]u8)i32 {
+  if(a.len!=b.len){return 0;}
+  let i:i32=0;
+  while(i<a.len){ if(a[i]!=b[i]){return 0;} i=i+1; }
+  return 1;
+}
+fn get32(b:[]u8, off:i32)i32 {
+  return (b[off] as i32) | ((b[off+1] as i32)<<8) | ((b[off+2] as i32)<<16) | ((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn wcopy(W:[]u8, off:i32, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ W[off+i]=s[i]; i=i+1; }
+  return s.len;
+}
+
+// ============ PROCEDURE STORE (from bridge_learn.zag, PROC_MAX=16) ============
+// Program: [type, left, right] triples. Types: 0=K,1=N,2=C0,3=C1,4=C2,5=ADD,6=SUB
+fn peval_node(prog:[]u8, idx:i32, k:i32, n:i32)i32 {
+  let base:i32=idx*3;
+  let t:i32=prog[base] as i32;
+  if(t==0){return k;}
+  if(t==1){return n;}
+  if(t==2){return 0;}
+  if(t==3){return 1;}
+  if(t==4){return 2;}
+  if(t==5 || t==6){
+    let a:i32=peval_node(prog, prog[base+1] as i32, k, n);
+    let b:i32=peval_node(prog, prog[base+2] as i32, k, n);
+    if(t==5){return a+b;}
+    return a-b;
+  }
+  return -9999;
+}
+fn peval(prog:[]u8, nnodes:i32, k:i32, n:i32)i32 {
+  return peval_node(prog, nnodes-1, k, n);
+}
+
+// Extract index sequence from (inp, out). Returns len or -1 if ambiguous.
+fn pextract(inp:[]u8, out:[]u8, seq:[]u8)i32 {
+  let k:i32=0;
+  while(k<out.len){
+    let c:u8=out[k];
+    let found:i32=-1;
+    let cnt:i32=0;
+    let j:i32=0;
+    while(j<inp.len){
+      if(inp[j]==c){found=j; cnt=cnt+1;}
+      j=j+1;
+    }
+    if(cnt!=1){return -1;}
+    set32(seq, k*4, found);
+    k=k+1;
+  }
+  return out.len;
+}
+fn pfits(prog:[]u8, nnodes:i32, seq:[]u8, seqlen:i32, n:i32)i32 {
+  let k:i32=0;
+  while(k<seqlen){
+    if(peval(prog, nnodes, k, n)!=get32(seq, k*4)){return 0;}
+    k=k+1;
+  }
+  return 1;
+}
+fn PROC_MAX()i32 { return 16; }
+fn PROC_SZ()i32 { return 64; }
+fn proc_slot(W:[]u8, base:i32, slot:i32)i32 {
+  return base + slot*PROC_SZ();
+}
+fn proc_used(W:[]u8, base:i32, slot:i32)i32 {
+  return get32(W, proc_slot(W,base,slot));
+}
+fn proc_set_used(W:[]u8, base:i32, slot:i32, v:i32)void {
+  set32(W, proc_slot(W,base,slot), v);
+  return;
+}
+// Store program bytes at slot. Returns slot index or -1.
+fn proc_store(W:[]u8, base:i32, prog:[]u8, nnodes:i32)i32 {
+  let s:i32=0;
+  while(s<PROC_MAX()){
+    if(proc_used(W,base,s)==0){
+      proc_set_used(W,base,s,1);
+      set32(W, proc_slot(W,base,s)+4, nnodes);
+      let i:i32=0;
+      while(i<nnodes*3){
+        W[proc_slot(W,base,s)+8+i]=prog[i];
+        i=i+1;
+      }
+      return s;
+    }
+    s=s+1;
+  }
+  return -1;
+}
+fn proc_nnodes(W:[]u8, base:i32, slot:i32)i32 {
+  return get32(W, proc_slot(W,base,slot)+4);
+}
+fn peval_from_store(W:[]u8, base:i32, slot:i32, nnodes:i32, k:i32, n:i32)i32 {
+  let tmp:[]u8=z_alloc(48);
+  let i:i32=0;
+  while(i<nnodes*3){
+    tmp[i]=W[proc_slot(W,base,slot)+8+i];
+    i=i+1;
+  }
+  return peval(tmp, nnodes, k, n);
+}
+fn proc_apply(W:[]u8, base:i32, slot:i32, inp:[]u8, out:[]u8)i32 {
+  let nnodes:i32=proc_nnodes(W,base,slot);
+  let n:i32=inp.len;
+  let k:i32=0;
+  while(k<n){
+    let idx:i32=peval_from_store(W, base, slot, nnodes, k, n);
+    if(idx<0 || idx>=n){return 0;}
+    out[k]=inp[idx];
+    k=k+1;
+  }
+  return 1;
+}
+fn p_binop(prog_store:[]u8, prog_index:[]u8, pcount:i32, store_off:i32, op:i32, la:i32, rb:i32)i32 {
+  let lo:i32=get32(prog_index, la*4);
+  let ro:i32=get32(prog_index, rb*4);
+  let ln:i32=prog_store[lo] as i32;
+  let rn:i32=prog_store[ro] as i32;
+  set32(prog_index, pcount*4, store_off);
+  prog_store[store_off]=(ln+rn+1) as u8;
+  let dst:i32=store_off+1;
+  let i:i32=0;
+  while(i<ln){
+    prog_store[dst]=prog_store[lo+1+i*3];
+    prog_store[dst+1]=prog_store[lo+1+i*3+1];
+    prog_store[dst+2]=prog_store[lo+1+i*3+2];
+    dst=dst+3; i=i+1;
+  }
+  i=0;
+  while(i<rn){
+    let tt:i32=prog_store[ro+1+i*3] as i32;
+    let l:i32=prog_store[ro+1+i*3+1] as i32;
+    let r:i32=prog_store[ro+1+i*3+2] as i32;
+    prog_store[dst]=tt as u8;
+    if(l==255){prog_store[dst+1]=255 as u8;} else {prog_store[dst+1]=(l+ln) as u8;}
+    if(r==255){prog_store[dst+2]=255 as u8;} else {prog_store[dst+2]=(r+ln) as u8;}
+    dst=dst+3; i=i+1;
+  }
+  prog_store[dst]=op as u8;
+  prog_store[dst+1]=(ln-1) as u8;
+  prog_store[dst+2]=(ln+rn-1) as u8;
+  return pcount+1;
+}
+fn p_last_off(prog_store:[]u8, prog_index:[]u8, pi:i32)i32 {
+  let off:i32=get32(prog_index, pi*4);
+  let n:i32=prog_store[off] as i32;
+  return off+1+n*3;
+}
+// prog_uses_n: returns 1 if program pi references N (node type 1).
+// Generality bias helper (H-GENBIAS): N-referencing programs can adapt to length.
+fn prog_uses_n(prog_store:[]u8, prog_index:[]u8, pi:i32)i32 {
+  let off:i32=get32(prog_index, pi*4);
+  let nn:i32=prog_store[off] as i32;
+  let i:i32=0;
+  while(i<nn){
+    if((prog_store[off+1+i*3] as i32)==1){return 1;}
+    i=i+1;
+  }
+  return 0;
+}
+// try_discover_pass: one bias pass. want_n=1 → only N-using; want_n=0 → only non-N.
+// Returns proc slot or -1.
+fn try_discover_pass(W:[]u8, pbase:i32, prog_store:[]u8, prog_index:[]u8, pcount:i32, seqs:[]u8, nseq:i32, want_n:i32)i32 {
+  let pi:i32=0;
+  let tmp:[]u8=z_alloc(48);
+  while(pi<pcount){
+    if(prog_uses_n(prog_store, prog_index, pi)==want_n){
+      let off:i32=get32(prog_index, pi*4);
+      let nn:i32=prog_store[off] as i32;
+      let i:i32=0;
+      while(i<nn*3){ tmp[i]=prog_store[off+1+i]; i=i+1; }
+      let allfit:i32=1;
+      let s:i32=0;
+      while(s<nseq){
+        let sq:i32=get32(seqs, s*12);
+        let sl:i32=get32(seqs, s*12+4);
+        let sn:i32=get32(seqs, s*12+8);
+        if(pfits(tmp, nn, W[sq..sq+sl*4], sl, sn)==0){ allfit=0; break; }
+        s=s+1;
+      }
+      if(allfit==1){
+        let slot:i32=proc_store(W, pbase, tmp, nn);
+        return slot;
+      }
+    }
+    pi=pi+1;
+  }
+  return -1;
+}
+// try_dry_pass: one bias pass for dry-run discovery. Returns nnodes or -1.
+fn try_dry_pass(W:[]u8, prog_store:[]u8, prog_index:[]u8, pcount:i32, seqs:[]u8, nseq:i32, out_prog:[]u8, want_n:i32)i32 {
+  let pi:i32=0;
+  let tmp:[]u8=z_alloc(48);
+  while(pi<pcount){
+    if(prog_uses_n(prog_store, prog_index, pi)==want_n){
+      let off:i32=get32(prog_index, pi*4);
+      let nn:i32=prog_store[off] as i32;
+      let i:i32=0;
+      while(i<nn*3){ tmp[i]=prog_store[off+1+i]; i=i+1; }
+      let allfit:i32=1;
+      let s:i32=0;
+      while(s<nseq){
+        let sq:i32=get32(seqs, s*12);
+        let sl:i32=get32(seqs, s*12+4);
+        let sn:i32=get32(seqs, s*12+8);
+        if(pfits(tmp, nn, W[sq..sq+sl*4], sl, sn)==0){ allfit=0; break; }
+        s=s+1;
+      }
+      if(allfit==1){
+        let i2:i32=0;
+        while(i2<nn*3){ out_prog[i2]=tmp[i2]; i2=i2+1; }
+        return nn;
+      }
+    }
+    pi=pi+1;
+  }
+  return -1;
+}
+fn pdiscover_direct(W:[]u8, pbase:i32, seqs:[]u8, nseq:i32)i32 {
+  let prog_store:[]u8=z_alloc(200000);
+  let prog_index:[]u8=z_alloc(1200*4);
+  let pcount:i32=0;
+  let store_off:i32=0;
+  let t:i32=0;
+  while(t<5){
+    set32(prog_index, pcount*4, store_off);
+    prog_store[store_off]=1 as u8;
+    prog_store[store_off+1]=t as u8;
+    prog_store[store_off+2]=255 as u8;
+    prog_store[store_off+3]=255 as u8;
+    store_off=store_off+4;
+    pcount=pcount+1;
+    t=t+1;
+  }
+  let s1end:i32=pcount;
+  let op:i32=5;
+  while(op<7){
+    let a:i32=0;
+    while(a<s1end){
+      let b:i32=0;
+      while(b<s1end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b=b+1;
+      }
+      a=a+1;
+    }
+    op=op+1;
+  }
+  let s3end:i32=pcount;
+  op=5;
+  while(op<7){
+    let a:i32=0;
+    while(a<s1end){
+      let b:i32=s1end;
+      while(b<s3end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b=b+1;
+      }
+      a=a+1;
+    }
+    a=s1end;
+    while(a<s3end){
+      let b2:i32=0;
+      while(b2<s1end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b2);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b2=b2+1;
+      }
+      a=a+1;
+    }
+    op=op+1;
+  }
+  // H-GENBIAS: N-first generality bias. Pass 1 prefers N-using programs
+  // (can generalize across lengths); Pass 2 is the original fallback.
+  let slot:i32=try_discover_pass(W, pbase, prog_store, prog_index, pcount, seqs, nseq, 1);
+  if(slot<0){
+    slot=try_discover_pass(W, pbase, prog_store, prog_index, pcount, seqs, nseq, 0);
+  }
+  return slot;
+}
+
+// pdiscover_dry: dry-run discovery WITHOUT consuming proc slots.
+// On success copies the winning program to out_prog and returns nnodes.
+// On failure returns -1. NEVER calls proc_store. (B-A6b fix)
+fn pdiscover_dry(W:[]u8, seqs:[]u8, nseq:i32, out_prog:[]u8)i32 {
+  let prog_store:[]u8=z_alloc(200000);
+  let prog_index:[]u8=z_alloc(1200*4);
+  let pcount:i32=0;
+  let store_off:i32=0;
+  let t:i32=0;
+  while(t<5){
+    set32(prog_index, pcount*4, store_off);
+    prog_store[store_off]=1 as u8;
+    prog_store[store_off+1]=t as u8;
+    prog_store[store_off+2]=255 as u8;
+    prog_store[store_off+3]=255 as u8;
+    store_off=store_off+4;
+    pcount=pcount+1;
+    t=t+1;
+  }
+  let s1end:i32=pcount;
+  let op:i32=5;
+  while(op<7){
+    let a:i32=0;
+    while(a<s1end){
+      let b:i32=0;
+      while(b<s1end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b=b+1;
+      }
+      a=a+1;
+    }
+    op=op+1;
+  }
+  let s3end:i32=pcount;
+  op=5;
+  while(op<7){
+    let a:i32=0;
+    while(a<s1end){
+      let b:i32=s1end;
+      while(b<s3end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b=b+1;
+      }
+      a=a+1;
+    }
+    a=s1end;
+    while(a<s3end){
+      let b2:i32=0;
+      while(b2<s1end){
+        pcount=p_binop(prog_store, prog_index, pcount, store_off, op, a, b2);
+        store_off=p_last_off(prog_store, prog_index, pcount-1);
+        b2=b2+1;
+      }
+      a=a+1;
+    }
+    op=op+1;
+  }
+  // H-GENBIAS: N-first generality bias for dry-run discovery as well.
+  let nnr:i32=try_dry_pass(W, prog_store, prog_index, pcount, seqs, nseq, out_prog, 1);
+  if(nnr<0){
+    nnr=try_dry_pass(W, prog_store, prog_index, pcount, seqs, nseq, out_prog, 0);
+  }
+  return nnr;
+}
+
+// ============ BRIDGE RULE STORE (from bridge_learn.zag) ============
+// Rule: [used(4), cond_pos(4), cond_val(4), proc_true(4), proc_false(4)]
+// Semantics: IF input[cond_pos]==cond_val THEN apply proc_true ELSE proc_false
+fn BR_MAX()i32 { return 4; }
+fn BR_SZ()i32 { return 20; }
+fn br_slot(W:[]u8, base:i32, slot:i32)i32 {
+  return base + slot*BR_SZ();
+}
+fn br_used(W:[]u8, base:i32, slot:i32)i32 {
+  return get32(W, br_slot(W,base,slot));
+}
+fn br_store(W:[]u8, base:i32, cpos:i32, cval:i32, pt:i32, pf:i32)i32 {
+  let s:i32=0;
+  while(s<BR_MAX()){
+    if(br_used(W,base,s)==0){
+      let o:i32=br_slot(W,base,s);
+      set32(W,o,1); set32(W,o+4,cpos); set32(W,o+8,cval);
+      set32(W,o+12,pt); set32(W,o+16,pf);
+      return s;
+    }
+    s=s+1;
+  }
+  return -1;
+}
+fn br_count(W:[]u8, base:i32)i32 {
+  let c:i32=0;
+  let s:i32=0;
+  while(s<BR_MAX()){ if(br_used(W,base,s)==1){c=c+1;} s=s+1; }
+  return c;
+}
+fn br_cpos(W:[]u8, base:i32, slot:i32)i32 { return get32(W, br_slot(W,base,slot)+4); }
+fn br_cval(W:[]u8, base:i32, slot:i32)i32 { return get32(W, br_slot(W,base,slot)+8); }
+fn br_ptrue(W:[]u8, base:i32, slot:i32)i32 { return get32(W, br_slot(W,base,slot)+12); }
+fn br_pfalse(W:[]u8, base:i32, slot:i32)i32 { return get32(W, br_slot(W,base,slot)+16); }
+
+// bridge_apply: evaluate condition, dispatch to correct procedure.
+// If input shorter than cond_pos, defaults to proc_false.
+fn bridge_apply(W:[]u8, pbase:i32, bbase:i32, bslot:i32, inp:[]u8, out:[]u8)i32 {
+  let cpos:i32=br_cpos(W,bbase,bslot);
+  let cval:i32=br_cval(W,bbase,bslot);
+  let pt:i32=br_ptrue(W,bbase,bslot);
+  let pf:i32=br_pfalse(W,bbase,bslot);
+  if(inp.len>cpos && (inp[cpos] as i32)==cval){
+    return proc_apply(W, pbase, pt, inp, out);
+  }
+  return proc_apply(W, pbase, pf, inp, out);
+}
+
+// ============ BRIDGE LEARN (from bridge_learn.zag) ============
+// pairs in W at pairbase: npairs * 16 bytes: (in_off, in_len, out_off, out_len)
+// work: scratch area in W for seq data.
+// Returns:
+//   0..15: procedure slot (direct discovery succeeded, NO BRIDGE)
+//   1000+bslot: bridge rule created
+//   -1: failure
+//
+// The (pos, val) condition is discovered by searching over all input
+// positions and all byte values present in the training data. No byte
+// literals for condition values appear in this function.
+fn bridge_learn(W:[]u8, pbase:i32, bbase:i32, pairbase:i32, npairs:i32, work:i32)i32 {
+  let seqbase:i32=work;
+  let statbase:i32=work + npairs*64;
+  let lenbase:i32=statbase + npairs*4;
+
+  // Step 1: extract all pairs
+  let i:i32=0;
+  let allok:i32=1;
+  let maxlen:i32=0;
+  while(i<npairs){
+    let in_off:i32=get32(W, pairbase+i*16);
+    let in_len:i32=get32(W, pairbase+i*16+4);
+    let out_off:i32=get32(W, pairbase+i*16+8);
+    let out_len:i32=get32(W, pairbase+i*16+12);
+    if(in_len>maxlen){maxlen=in_len;}
+    let sq:[]u8=z_alloc(64);
+    let sl:i32=pextract(W[in_off..in_off+in_len], W[out_off..out_off+out_len], sq);
+    if(sl<0){
+      set32(W, statbase+i*4, 0);
+      allok=0;
+    } else {
+      set32(W, statbase+i*4, 1);
+      set32(W, lenbase+i*4, sl);
+      let j:i32=0;
+      while(j<sl*4){ W[seqbase+i*64+j]=sq[j]; j=j+1; }
+    }
+    i=i+1;
+  }
+
+  // Step 2: try direct discovery (only if all extracted)
+  if(allok==1){
+    let desc:[]u8=z_alloc(npairs*12);
+    i=0;
+    while(i<npairs){
+      set32(desc, i*12, seqbase+i*64);
+      set32(desc, i*12+4, get32(W, lenbase+i*4));
+      set32(desc, i*12+8, get32(W, pairbase+i*16+4));
+      i=i+1;
+    }
+    let slot:i32=pdiscover_direct(W, pbase, desc, npairs);
+    if(slot>=0){
+      return slot;
+    }
+  }
+
+  // Step 3: bridge triggered. Search (pos, val).
+  emit("bridge: direct failed, inducing condition...\n");
+  let p:i32=0;
+  while(p<maxlen){
+    // All pairs must have in_len > p for this position to be usable
+    let okp:i32=1;
+    i=0;
+    while(i<npairs){
+      if(get32(W, pairbase+i*16+4)<=p){okp=0; break;}
+      i=i+1;
+    }
+    if(okp==1){
+      // Collect distinct byte values at position p (from data, not literals)
+      let dvals:[]u8=z_alloc(128);
+      let ndv:i32=0;
+      i=0;
+      while(i<npairs){
+        let in_off:i32=get32(W, pairbase+i*16);
+        let v:i32=W[in_off+p] as i32;
+        let found:i32=0;
+        let k:i32=0;
+        while(k<ndv){
+          if((dvals[k] as i32)==v){found=1; break;}
+          k=k+1;
+        }
+        if(found==0){
+          dvals[ndv]=v as u8;
+          ndv=ndv+1;
+        }
+        i=i+1;
+      }
+      // Try each distinct value as the split point
+      let vi:i32=0;
+      while(vi<ndv){
+        let v:i32=dvals[vi] as i32;
+        let s1idx:[]u8=z_alloc(64);
+        let s2idx:[]u8=z_alloc(64);
+        let n1:i32=0;
+        let n2:i32=0;
+        i=0;
+        while(i<npairs){
+          // Only include extractable pairs
+          if(get32(W, statbase+i*4)==1){
+            let in_off:i32=get32(W, pairbase+i*16);
+            if((W[in_off+p] as i32)==v){
+              set32(s1idx, n1*4, i); n1=n1+1;
+            } else {
+              set32(s2idx, n2*4, i); n2=n2+1;
+            }
+          }
+          i=i+1;
+        }
+        if(n1>0 && n2>0){
+          let d1:[]u8=z_alloc(n1*12);
+          let k:i32=0;
+          while(k<n1){
+            let pi:i32=get32(s1idx, k*4);
+            set32(d1, k*12, seqbase+pi*64);
+            set32(d1, k*12+4, get32(W, lenbase+pi*4));
+            set32(d1, k*12+8, get32(W, pairbase+pi*16+4));
+            k=k+1;
+          }
+          let d2:[]u8=z_alloc(n2*12);
+          k=0;
+          while(k<n2){
+            let pi:i32=get32(s2idx, k*4);
+            set32(d2, k*12, seqbase+pi*64);
+            set32(d2, k*12+4, get32(W, lenbase+pi*4));
+            set32(d2, k*12+8, get32(W, pairbase+pi*16+4));
+            k=k+1;
+          }
+          // B-A6b fix: dry-run discovery WITHOUT consuming proc slots.
+          let prog1:[]u8=z_alloc(48);
+          let nn1:i32=pdiscover_dry(W, d1, n1, prog1);
+          if(nn1>=0){
+            let prog2:[]u8=z_alloc(48);
+            let nn2:i32=pdiscover_dry(W, d2, n2, prog2);
+            if(nn2>=0){
+              // Winning split found. Now store both procedures.
+              let s1:i32=proc_store(W, pbase, prog1, nn1);
+              if(s1>=0){
+                let s2:i32=proc_store(W, pbase, prog2, nn2);
+                if(s2>=0){
+                  let bs:i32=br_store(W, bbase, p, v, s1, s2);
+                  if(bs>=0){
+                    emit("bridge: learned IF input[");
+                    emit(i32s(p));
+                    emit("]==");
+                    emit(i32s(v));
+                    emit(" THEN proc");
+                    emit(i32s(s1));
+                    emit(" ELSE proc");
+                    emit(i32s(s2));
+                    emit("\n");
+                    return 1000+bs;
+                  }
+                  // F-LEAK FIX (H-FLEAKFIX): bridge rule store full.
+                  // Roll back both subset procedures: the failed attempt
+                  // must waste zero proc slots (transactional).
+                  proc_set_used(W, pbase, s2, 0);
+                  proc_set_used(W, pbase, s1, 0);
+                } else {
+                  // F-LEAK FIX (H-FLEAKFIX): second proc store failed.
+                  // Roll back the first: no partial allocation survives.
+                  proc_set_used(W, pbase, s1, 0);
+                }
+              }
+              // Store failed: slots genuinely exhausted.
+              return -1;
+            }
+          }
+        }
+        vi=vi+1;
+      }
+    }
+    p=p+1;
+  }
+  return -1;
+}
+
+// ============ CAUSAL STORE (from route_learn.zag) ============
+// Rules: (cond_var, cond_val, action, effect_var, effect_val, status)
+// Max 16 rules. Status: 0=active, 1=superseded, 2=conflicted
+fn CR_MAX()i32 { return 16; }
+fn CR_SZ()i32 { return 28; }  // 7*4
+
+fn cr_slot(W:[]u8, base:i32, slot:i32)i32 {
+  return base + slot*CR_SZ();
+}
+fn cr_used(W:[]u8, base:i32, slot:i32)i32 { return get32(W, cr_slot(W,base,slot)); }
+fn cr_set(W:[]u8, base:i32, slot:i32, used:i32, cv:i32, cval:i32, act:i32, ev:i32, eval:i32, st:i32)void {
+  let o:i32=cr_slot(W,base,slot);
+  set32(W,o,used); set32(W,o+4,cv); set32(W,o+8,cval);
+  set32(W,o+12,act); set32(W,o+16,ev); set32(W,o+20,eval); set32(W,o+24,st);
+  return;
+}
+// Learn from episode: (s0,s1,action) -> (ns0,ns1)
+fn clearn(W:[]u8, base:i32, s0:i32, s1:i32, act:i32, ns0:i32, ns1:i32)void {
+  let slot:i32=0;
+  let found:i32=-1;
+  while(slot<CR_MAX()){
+    if(cr_used(W,base,slot)==1 &&
+       get32(W,cr_slot(W,base,slot)+12)==act &&
+       get32(W,cr_slot(W,base,slot)+24)==0){
+      let cv:i32=get32(W,cr_slot(W,base,slot)+4);
+      let cval:i32=get32(W,cr_slot(W,base,slot)+8);
+      let sv:i32=s0;
+      if(cv==1){sv=s1;}
+      if(sv==cval){found=slot; break;}
+    }
+    slot=slot+1;
+  }
+  if(found<0){
+    slot=0;
+    while(slot<CR_MAX()){
+      if(cr_used(W,base,slot)==0){break;}
+      slot=slot+1;
+    }
+    if(slot>=CR_MAX()){return;}
+    cr_set(W,base,slot,1, 0,s0, act, 1,ns1, 0);
+    emit("causal: new rule R");
+    emit(i32s(slot));
+    emit(" IF s0==");
+    emit(i32s(s0));
+    emit(" AND a==");
+    emit(i32s(act));
+    emit(" THEN s1:=");
+    emit(i32s(ns1));
+    emit("\n");
+  } else {
+    let ev:i32=get32(W,cr_slot(W,base,found)+16);
+    let eval:i32=get32(W,cr_slot(W,base,found)+20);
+    let actual:i32=ns1;
+    if(ev==1 && actual!=eval){
+      set32(W,cr_slot(W,base,found)+24,2);
+      emit("causal: R");
+      emit(i32s(found));
+      emit(" CONFLICTED\n");
+    }
+  }
+  return;
+}
+// Predict: given (s0,s1,act), find matching active rule
+fn cpredict(W:[]u8, base:i32, s0:i32, s1:i32, act:i32, out:[]u8)i32 {
+  let slot:i32=0;
+  while(slot<CR_MAX()){
+    if(cr_used(W,base,slot)==1 && get32(W,cr_slot(W,base,slot)+24)==0){
+      let cv:i32=get32(W,cr_slot(W,base,slot)+4);
+      let cval:i32=get32(W,cr_slot(W,base,slot)+8);
+      let a:i32=get32(W,cr_slot(W,base,slot)+12);
+      if(a==act){
+        let sv:i32=s0;
+        if(cv==1){sv=s1;}
+        if(sv==cval){
+          let ev:i32=get32(W,cr_slot(W,base,slot)+16);
+          let eval:i32=get32(W,cr_slot(W,base,slot)+20);
+          out[0]=s0 as u8; out[1]=s1 as u8;
+          if(ev==0){out[0]=eval as u8;}
+          if(ev==1){out[1]=eval as u8;}
+          return 1;
+        }
+      }
+    }
+    slot=slot+1;
+  }
+  return 0;
+}
+
+// ============ STRUCTURE-INFERRED ROUTER (from route_learn.zag) ============
+// Route codes: 0=WITHHOLD, 1=PROC_LEARN, 2=CAUS_LEARN, 3=PROC_QUERY, 4=CAUS_QUERY
+fn is_digit(c:u8)i32 {
+  if(c>=48 && c<=57){return 1;}
+  return 0;
+}
+
+// field_kind: -2 empty, -1 string, else int count (>=1)
+fn field_kind(b:[]u8, lo:i32, hi:i32)i32 {
+  if(hi<=lo){return -2;}
+  let i:i32=lo;
+  let nints:i32=1;
+  let expect_digit:i32=1;
+  while(i<hi){
+    let c:u8=b[i];
+    if(is_digit(c)==1){expect_digit=0;}
+    else {
+      if(c==44){
+        if(expect_digit==1){return -1;}
+        nints=nints+1;
+        expect_digit=1;
+      } else {return -1;}
+    }
+    i=i+1;
+  }
+  if(expect_digit==1){return -1;}
+  return nints;
+}
+
+fn find_ch(b:[]u8, lo:i32, hi:i32, ch:u8)i32 {
+  let i:i32=lo;
+  while(i<hi){if(b[i]==ch){return i;}i=i+1;}
+  return -1;
+}
+
+fn route_name(c:i32)[]u8 {
+  if(c==1){return "PROC_LEARN";}
+  if(c==2){return "CAUS_LEARN";}
+  if(c==3){return "PROC_QUERY";}
+  if(c==4){return "CAUS_QUERY";}
+  if(c==5){return "CONCEPT_LEARN";}
+  return "WITHHOLD";
+}
+
+fn route_line(line:[]u8)i32 {
+  let n:i32=line.len;
+  let code:i32=0;
+  let reason:[]u8="empty line";
+  if(n>0){
+    // H-FDCR-UNIFIED: fact lines contain '|' (pipe, ASCII 124).
+    // Format: T subj | rel | obj. Route to CONCEPT_LEARN (code 5).
+    let has_pipe:i32=0;
+    let pi:i32=0;
+    while(pi<n){if(line[pi]==124){has_pipe=1;break;}pi=pi+1;}
+    if(has_pipe==1){
+      // Must start with 'T ' (fact) to be concept learn.
+      if(n>=2 && line[0]==84 && line[1]==32){
+        emit("ROUTE [");
+        emit(line);
+        emit("] -> CONCEPT_LEARN (fact line with pipe)\n");
+        return 5;
+      }
+      // Pipe but not T-form: withhold (not a valid fact).
+      emit("ROUTE [");
+      emit(line);
+      emit("] -> WITHHOLD (pipe but not T-fact)\n");
+      return 0;
+    }
+    let nseg:i32=1;
+    let i:i32=0;
+    while(i<n){if(line[i]==59){nseg=nseg+1;}i=i+1;}
+    let s:i32=0;
+    let pos:i32=0;
+    let all_pair_str:i32=1;
+    let all_ep:i32=1;
+    let has_gt:i32=0;
+    let bad:i32=0;
+    while(s<nseg){
+      let end:i32=find_ch(line,pos,n,59);
+      if(end<0){end=n;}
+      if(end<=pos){bad=1;reason="empty segment";}
+      else {
+        let gt:i32=find_ch(line,pos,end,62);
+        if(gt<0){
+          all_pair_str=0;
+          all_ep=0;
+        } else {
+          has_gt=1;
+          if(find_ch(line,gt+1,end,62)>=0){
+            all_pair_str=0;
+            all_ep=0;
+          } else {
+            let lk:i32=field_kind(line,pos,gt);
+            let rk:i32=field_kind(line,gt+1,end);
+            if(lk!=-1 || rk!=-1){all_pair_str=0;}
+            if(lk!=3 || rk!=2){all_ep=0;}
+          }
+        }
+      }
+      if(bad==1){break;}
+      pos=end+1;
+      s=s+1;
+    }
+    if(bad==0){
+      if(nseg>=2 && all_pair_str==1){code=1;reason="2+ segs, str>str";}
+      else {
+        if(nseg>=2 && all_ep==1){code=2;reason="2+ segs, iii>ii";}
+        else {
+          if(nseg==1 && has_gt==0){
+            let k:i32=field_kind(line,0,n);
+            if(k==-1){code=3;reason="single bare string";}
+            else {
+              if(k==3){code=4;reason="single 3-int tuple";}
+              else {reason="single seg: not string nor 3-int tuple";}
+            }
+          } else {
+            if(nseg==1){reason="single pair/episode: learning needs 2+ segs";}
+            else {reason="mixed or malformed segments";}
+          }
+        }
+      }
+    }
+  }
+  emit("ROUTE [");
+  emit(line);
+  emit("] -> ");
+  emit(route_name(code));
+  emit(" (");
+  emit(reason);
+  emit(")\n");
+  return code;
+}
+
+fn parse_ints(b:[]u8, lo:i32, hi:i32, out:[]u8)void {
+  let idx:i32=0;
+  let i:i32=lo;
+  while(i<hi){
+    let v:i32=0;
+    while(i<hi){
+      if(is_digit(b[i])==0){break;}
+      v=v*10+((b[i] as i32)-48);
+      i=i+1;
+    }
+    set32(out,idx*4,v);
+    idx=idx+1;
+    if(i<hi && b[i]==44){i=i+1;}
+  }
+  return;
+}
+
+// ============ WORKSPACE LAYOUT ============
+// W: 65536 bytes.
+//   pbase=0       proc store: 16*64 = 1024
+//   bbase=1024    bridge store: 4*20 = 80
+//   cbase=1104    causal store: 16*28 = 448 (ends 1552)
+//   work=4096     bridge_learn scratch (moved from 2048 for concept store)
+//   pairbase=8192 pair descriptors (16 bytes each)
+//   ST_STR=65000  persistent string-data cursor (init 16384)
+fn PBASE()i32 { return 0; }
+fn BBASE()i32 { return 1024; }
+fn CBASE()i32 { return 1104; }
+fn WORK()i32 { return 4096; }
+fn PAIRBASE()i32 { return 8192; }
+fn ST_STR()i32 { return 65000; }
+fn STR0()i32 { return 16384; }
+// Intent store (H-INTENT, ported): IBASE=1560. 16 proc slots * 12 bytes
+// (learn_seq, train_len, concept_idx) then 4 bridge rules * 12 bytes.
+// Global seq counter at SEQADDR=1800.
+// Concept store (H-FDCR-UNIFIED): CCONCEPT=1804. 8 concepts * 76 bytes
+// = 608 bytes (ends 2412). Each concept: active(4), nfeat(4),
+// feats(8*4), nmem(4), members(8*4).
+// NOADD vote table (H-FDCR-UNIFIED4 R1): NOADD_BASE=2412. 32 entries
+// * 8 bytes (subject string offset, concept index) = 256 bytes
+// (ends 2668). Vote-only: MATCH-NOADD subjects count as concept
+// votes at the procedure layer but are never members.
+// NOADD drop tracking (H-FDCR-UNIFIED5 R1): NOADD_DROP_COUNT=2668
+// (one i32: total subjects refused vote recording because the
+// table was full); NOADD_DROP_BASE=2672, NOADD_DROP_MAX=64
+// entries of 4 bytes (subject string offsets) = 256 bytes
+// (ends 2928). Best-effort naming for the procedure-layer NOTE.
+// Free: causal store ends at 1552, WORK=4096.
+fn IBASE()i32 { return 1560; }
+fn SEQADDR()i32 { return 1800; }
+fn CCONCEPT()i32 { return 1804; }
+fn CON_MAX()i32 { return 8; }
+fn CON_SZ()i32 { return 76; }
+fn INTENT_SZ()i32 { return 12; }
+fn NOADD_BASE()i32 { return 2412; }
+fn NOADD_MAX()i32 { return 32; }
+fn NOADD_DROP_COUNT()i32 { return 2668; }
+fn NOADD_DROP_BASE()i32 { return 2672; }
+fn NOADD_DROP_MAX()i32 { return 64; }
+
+// ============ INTENT STORE (H-INTENT) ============
+fn intent_proc_base(W:[]u8, slot:i32)i32 { return IBASE() + slot*INTENT_SZ(); }
+fn intent_br_base(W:[]u8, bslot:i32)i32 { return IBASE() + 16*INTENT_SZ() + bslot*INTENT_SZ(); }
+// All learn_seq init to -1: only slots with learn_seq >= 0 are candidates.
+// Bridge sub-procedures never receive intent records, so they are excluded.
+// Concept_idx init to -1: no concept association.
+fn intent_init(W:[]u8)void {
+  let i:i32=0;
+  while(i<20){
+    set32(W, IBASE()+i*INTENT_SZ(), -1);
+    set32(W, IBASE()+i*INTENT_SZ()+4, -1);
+    set32(W, IBASE()+i*INTENT_SZ()+8, -1);
+    i=i+1;
+  }
+  set32(W, SEQADDR(), 0);
+  return;
+}
+fn intent_record_proc(W:[]u8, slot:i32, train_len:i32)void {
+  let o:i32=intent_proc_base(W, slot);
+  set32(W, o, get32(W, SEQADDR()));
+  set32(W, o+4, train_len);
+  set32(W, o+8, -1);
+  set32(W, SEQADDR(), get32(W, SEQADDR())+1);
+  return;
+}
+// Record with concept association (H-FDCR-UNIFIED).
+fn intent_record_proc_con(W:[]u8, slot:i32, train_len:i32, concept:i32)void {
+  let o:i32=intent_proc_base(W, slot);
+  set32(W, o, get32(W, SEQADDR()));
+  set32(W, o+4, train_len);
+  set32(W, o+8, concept);
+  set32(W, SEQADDR(), get32(W, SEQADDR())+1);
+  return;
+}
+fn intent_record_br(W:[]u8, bslot:i32, train_len:i32)void {
+  let o:i32=intent_br_base(W, bslot);
+  set32(W, o, get32(W, SEQADDR()));
+  set32(W, o+4, train_len);
+  set32(W, o+8, -1);
+  set32(W, SEQADDR(), get32(W, SEQADDR())+1);
+  return;
+}
+// Record bridge with concept association (H-FDCR-UNIFIED2 R4).
+fn intent_record_br_con(W:[]u8, bslot:i32, train_len:i32, concept:i32)void {
+  let o:i32=intent_br_base(W, bslot);
+  set32(W, o, get32(W, SEQADDR()));
+  set32(W, o+4, train_len);
+  set32(W, o+8, concept);
+  set32(W, SEQADDR(), get32(W, SEQADDR())+1);
+  return;
+}
+
+// ============ INTENT DECISION (H-INTENT) ============
+// intent_winner: pure decision, minimal emission.
+// res: [kind(4), slot(4), gap(4)].
+// kind: -1 = no candidate, -2 = ambiguous, 0 = proc, 1 = bridge.
+fn intent_winner(W:[]u8, line:[]u8, res:[]u8)void {
+  let qlen:i32=line.len;
+  let ck:[]u8=z_alloc(20*4);
+  let ci:[]u8=z_alloc(20*4);
+  let cs:[]u8=z_alloc(20*4);
+  let ncand:i32=0;
+  // H-FDCR-UNIFIED: check if query is a concept member.
+  let qcon:i32=con_find_member_str(W, line);
+  let s:i32=0;
+  while(s<PROC_MAX()){
+    if(proc_used(W,PBASE(),s)==1 && get32(W,intent_proc_base(W,s))>=0){
+      let out:[]u8=z_alloc(qlen+1);
+      if(proc_apply(W,PBASE(),s,line,out)==1){
+        let o:i32=intent_proc_base(W,s);
+        let seq:i32=get32(W,o);
+        let tlen:i32=get32(W,o+4);
+        let pcon:i32=get32(W,o+8);
+        let lm:i32=0;
+        if(tlen>=0 && tlen==qlen){lm=1;}
+        // Concept boost: +5000 if query and procedure share a concept.
+        // Below cond_fire (20000) and len_match (10000), above seq.
+        let cb:i32=0;
+        if(qcon>=0 && pcon>=0 && qcon==pcon){cb=1;}
+        set32(ck,ncand*4,0);
+        set32(ci,ncand*4,s);
+        set32(cs,ncand*4,lm*10000+cb*5000+seq);
+        ncand=ncand+1;
+      }
+    }
+    s=s+1;
+  }
+  let b:i32=0;
+  while(b<BR_MAX()){
+    if(br_used(W,BBASE(),b)==1){
+      let out:[]u8=z_alloc(qlen+1);
+      if(bridge_apply(W,PBASE(),BBASE(),b,line,out)==1){
+        let o:i32=intent_br_base(W,b);
+        let seq:i32=get32(W,o);
+        let tlen:i32=get32(W,o+4);
+        let bcon:i32=get32(W,o+8);
+        let lm:i32=0;
+        if(tlen>=0 && tlen==qlen){lm=1;}
+        let cf:i32=0;
+        let cpos:i32=br_cpos(W,BBASE(),b);
+        if(qlen>cpos && (line[cpos] as i32)==br_cval(W,BBASE(),b)){cf=1;}
+        // H-FDCR-UNIFIED2 R4: concept boost for bridges.
+        let cb:i32=0;
+        if(qcon>=0 && bcon>=0 && qcon==bcon){cb=1;}
+        set32(ck,ncand*4,1);
+        set32(ci,ncand*4,b);
+        set32(cs,ncand*4,cf*20000+lm*10000+cb*5000+seq);
+        ncand=ncand+1;
+      }
+    }
+    b=b+1;
+  }
+  if(ncand==0){
+    set32(res,0,-1); set32(res,4,-1); set32(res,8,0);
+    return;
+  }
+  let top:i32=0;
+  let second:i32=-1;
+  let i:i32=1;
+  while(i<ncand){
+    if(get32(cs,i*4)>get32(cs,top*4)){second=top; top=i;}
+    else {
+      if(second<0 || get32(cs,i*4)>get32(cs,second*4)){second=i;}
+    }
+    i=i+1;
+  }
+  let gap:i32=0;
+  if(second>=0){gap=get32(cs,top*4)-get32(cs,second*4);}
+  set32(res,8,gap);
+  if(second>=0 && gap<2){
+    set32(res,0,-2); set32(res,4,-1);
+    return;
+  }
+  set32(res,0,get32(ck,top*4));
+  set32(res,4,get32(ci,top*4));
+  return;
+}
+
+// intent_trace_emit: inspectable white-box trace of the intent decision.
+// H-FDCR-UNIFIED2 R3: the trace includes the concept boost term so the
+// displayed scores explain the actual winner.
+fn intent_trace_emit(W:[]u8, line:[]u8)void {
+  let qlen:i32=line.len;
+  emit("INTENT query [");
+  emit(line);
+  emit("] qlen=");
+  emit(i32s(qlen));
+  emit("\n");
+  // H-FDCR-UNIFIED2 R3: query concept, as intent_winner computes it.
+  let qcon:i32=con_find_member_str(W, line);
+  let s:i32=0;
+  while(s<PROC_MAX()){
+    if(proc_used(W,PBASE(),s)==1 && get32(W,intent_proc_base(W,s))>=0){
+      let out:[]u8=z_alloc(qlen+1);
+      if(proc_apply(W,PBASE(),s,line,out)==1){
+        let o:i32=intent_proc_base(W,s);
+        let seq:i32=get32(W,o);
+        let tlen:i32=get32(W,o+4);
+        let pcon:i32=get32(W,o+8);
+        let lm:i32=0;
+        if(tlen>=0 && tlen==qlen){lm=1;}
+        let cb:i32=0;
+        if(qcon>=0 && pcon>=0 && qcon==pcon){cb=1;}
+        emit("  cand kind=proc slot=");
+        emit(i32s(s));
+        emit(" len_match=");
+        emit(i32s(lm));
+        emit(" train_len=");
+        emit(i32s(tlen));
+        emit(" seq=");
+        emit(i32s(seq));
+        emit(" concept_boost=");
+        emit(i32s(cb));
+        emit(" cond_fire=0 score=");
+        emit(i32s(lm*10000+cb*5000+seq));
+        emit("\n");
+      } else {
+        emit("  cand kind=proc slot=");
+        emit(i32s(s));
+        emit(" DOES-NOT-APPLY\n");
+      }
+    }
+    s=s+1;
+  }
+  let b:i32=0;
+  while(b<BR_MAX()){
+    if(br_used(W,BBASE(),b)==1){
+      let out:[]u8=z_alloc(qlen+1);
+      if(bridge_apply(W,PBASE(),BBASE(),b,line,out)==1){
+        let o:i32=intent_br_base(W,b);
+        let seq:i32=get32(W,o);
+        let tlen:i32=get32(W,o+4);
+        let bcon:i32=get32(W,o+8);
+        let lm:i32=0;
+        if(tlen>=0 && tlen==qlen){lm=1;}
+        let cf:i32=0;
+        let cpos:i32=br_cpos(W,BBASE(),b);
+        if(qlen>cpos && (line[cpos] as i32)==br_cval(W,BBASE(),b)){cf=1;}
+        let cb:i32=0;
+        if(qcon>=0 && bcon>=0 && qcon==bcon){cb=1;}
+        emit("  cand kind=bridge slot=");
+        emit(i32s(b));
+        emit(" len_match=");
+        emit(i32s(lm));
+        emit(" train_len=");
+        emit(i32s(tlen));
+        emit(" seq=");
+        emit(i32s(seq));
+        emit(" concept_boost=");
+        emit(i32s(cb));
+        emit(" cond_fire=");
+        emit(i32s(cf));
+        emit(" score=");
+        emit(i32s(cf*20000+lm*10000+cb*5000+seq));
+        emit("\n");
+      } else {
+        emit("  cand kind=bridge slot=");
+        emit(i32s(b));
+        emit(" DOES-NOT-APPLY\n");
+      }
+    }
+    b=b+1;
+  }
+  return;
+}
+
+// handle_proc_query_intent: full query handler with trace and answer.
+// Returns: 1 answered, 0 withhold (none), -1 withhold (ambiguous).
+fn handle_proc_query_intent(W:[]u8, line:[]u8)i32 {
+  intent_trace_emit(W, line);
+  let res:[]u8=z_alloc(12);
+  intent_winner(W, line, res);
+  let kind:i32=get32(res,0);
+  let slot:i32=get32(res,4);
+  let gap:i32=get32(res,8);
+  if(kind==-1){
+    emit("QINTENT WITHHOLD: no procedure or bridge rule applies\n");
+    return 0;
+  }
+  if(kind==-2){
+    emit("QINTENT WITHHOLD AMBIGUOUS: top two candidates gap=");
+    emit(i32s(gap));
+    emit(" < 2\n");
+    return -1;
+  }
+  let qlen:i32=line.len;
+  let out:[]u8=z_alloc(qlen+1);
+  if(kind==0){
+    proc_apply(W,PBASE(),slot,line,out);
+    emit("QINTENT ANSWER kind=proc slot=");
+  } else {
+    bridge_apply(W,PBASE(),BBASE(),slot,line,out);
+    emit("QINTENT ANSWER kind=bridge slot=");
+  }
+  emit(i32s(slot));
+  emit(" gap=");
+  emit(i32s(gap));
+  emit(" [");
+  emit(line);
+  emit("] -> [");
+  emit(out[0..qlen]);
+  emit("]\n");
+  return 1;
+}
+
+// ============ CONCEPT STORE (H-FDCR-UNIFIED, FORM-only v1) ============
+// Minimal FDCR-derived concept formation. Concepts group entities with
+// identical feature sets (FORM operator). Each concept record (76 bytes):
+//   +0: active (0/1)
+//   +4: nfeat (number of features)
+//   +8: feats[8] (feature string offsets in ST_STR area, 4 bytes each)
+//   +40: nmem (number of members)
+//   +44: members[8] (member string offsets, 4 bytes each)
+// Features and members are string offsets into the ST_STR area.
+// This is FORM-only: no SPLIT, no MERGE, no GRADE in v1.
+fn con_slot(W:[]u8, c:i32)i32 {
+  return CCONCEPT() + c*CON_SZ();
+}
+fn con_active(W:[]u8, c:i32)i32 {
+  return get32(W, con_slot(W,c));
+}
+fn con_set_active(W:[]u8, c:i32, v:i32)void {
+  set32(W, con_slot(W,c), v);
+  return;
+}
+fn con_nfeat(W:[]u8, c:i32)i32 {
+  return get32(W, con_slot(W,c)+4);
+}
+fn con_set_nfeat(W:[]u8, c:i32, v:i32)void {
+  set32(W, con_slot(W,c)+4, v);
+  return;
+}
+fn con_feat(W:[]u8, c:i32, i:i32)i32 {
+  return get32(W, con_slot(W,c)+8+i*4);
+}
+fn con_set_feat(W:[]u8, c:i32, i:i32, v:i32)void {
+  set32(W, con_slot(W,c)+8+i*4, v);
+  return;
+}
+fn con_nmem(W:[]u8, c:i32)i32 {
+  return get32(W, con_slot(W,c)+40);
+}
+fn con_set_nmem(W:[]u8, c:i32, v:i32)void {
+  set32(W, con_slot(W,c)+40, v);
+  return;
+}
+fn con_mem(W:[]u8, c:i32, i:i32)i32 {
+  return get32(W, con_slot(W,c)+44+i*4);
+}
+fn con_set_mem(W:[]u8, c:i32, i:i32, v:i32)void {
+  set32(W, con_slot(W,c)+44+i*4, v);
+  return;
+}
+// Initialize concept store: all inactive.
+fn con_init(W:[]u8)void {
+  let c:i32=0;
+  while(c<CON_MAX()){
+    con_set_active(W,c,0);
+    con_set_nfeat(W,c,0);
+    con_set_nmem(W,c,0);
+    c=c+1;
+  }
+  noadd_init(W);
+  return;
+}
+// Intern a string into ST_STR area. Returns offset. Simple linear append;
+// no deduplication in v1 (caller should check if needed).
+fn con_intern(W:[]u8, s:[]u8)i32 {
+  let base:i32=get32(W, ST_STR());
+  let i:i32=0;
+  while(i<s.len){
+    W[base+i]=s[i];
+    i=i+1;
+  }
+  W[base+s.len]=0;
+  set32(W, ST_STR(), base+s.len+1);
+  return base;
+}
+// Get string at offset as slice (null-terminated).
+fn con_str_at(W:[]u8, off:i32)[]u8 {
+  let e:i32=off;
+  while(W[e]!=0){e=e+1;}
+  return W[off..e];
+}
+// FORM: create or extend a concept for an entity with given features.
+// Features are string offsets. If a concept with identical feature set
+// (by string content) exists, add the entity as member. Otherwise create
+// a new concept. Returns concept index or -1 if store full.
+fn con_form(W:[]u8, mem_off:i32, feats:[]u8, nfeat:i32)i32 {
+  // Check existing concepts for identical feature set (by content).
+  // Order-normalized (H-FDCR-UNIFIED3 R1): same SET merges regardless
+  // of fact order. nfeat equality is enforced first, so one-way
+  // inclusion implies set identity.
+  let c:i32=0;
+  while(c<CON_MAX()){
+    if(con_active(W,c)==1 && con_nfeat(W,c)==nfeat){
+      let match:i32=1;
+      let i:i32=0;
+      while(i<nfeat){
+        let f2:[]u8=con_str_at(W, get32(feats,i*4));
+        let hit:i32=0;
+        let k:i32=0;
+        while(k<nfeat){
+          let f1:[]u8=con_str_at(W, con_feat(W,c,k));
+          if(streq(f1,f2)==1){hit=1;break;}
+          k=k+1;
+        }
+        if(hit==0){match=0;break;}
+        i=i+1;
+      }
+      if(match==1){
+        // Add member if not already present and space available.
+        // Member cap is 8 per concept; a full concept reports
+        // MATCH-NOADD (-2) with an explicit warning (R2). The
+        // caller must not assert membership for -2.
+        let nm:i32=con_nmem(W,c);
+        let found:i32=0;
+        let j:i32=0;
+        while(j<nm){
+          if(con_mem(W,c,j)==mem_off){found=1;break;}
+          j=j+1;
+        }
+        if(found==0){
+          if(nm<8){
+            con_set_mem(W,c,nm,mem_off);
+            con_set_nmem(W,c,nm+1);
+            return c;
+          }
+          emit("ULEARN concept: WARN member cap 8 reached on concept ");
+          emit(i32s(c));
+          emit("; subject NOT added\n");
+          // H-FDCR-UNIFIED4 R1: record the excluded subject as a
+          // vote-only NOADD entry so it still counts at the
+          // procedure layer.
+          noadd_record(W, mem_off, c);
+          return -2;
+        }
+        return c;
+      }
+    }
+    c=c+1;
+  }
+  // Create new concept.
+  c=0;
+  while(c<CON_MAX()){
+    if(con_active(W,c)==0){
+      con_set_active(W,c,1);
+      con_set_nfeat(W,c,nfeat);
+      let i:i32=0;
+      while(i<nfeat){
+        con_set_feat(W,c,i,get32(feats,i*4));
+        i=i+1;
+      }
+      con_set_mem(W,c,0,mem_off);
+      con_set_nmem(W,c,1);
+      return c;
+    }
+    c=c+1;
+  }
+  return -1;
+}
+// Post-extension concept merge (H-FDCR-UNIFIED4 R2). After the
+// extension branch grows concept ci, another active concept may
+// hold the identical feature set (the X-FU3-1 fragmentation).
+// Scan all other active concepts for set-identity and merge on
+// match, so batch order cannot control the concept count.
+fn con_merge_into(W:[]u8, ci:i32, c2:i32)void {
+  // Step 1: move c2's members into ci (deduplicated, 8 cap).
+  // Overflow members become vote-only NOADD entries for ci.
+  let nm:i32=con_nmem(W,ci);
+  let dropped:i32=0;
+  let j:i32=0;
+  let n2:i32=con_nmem(W,c2);
+  while(j<n2){
+    let mo:i32=con_mem(W,c2,j);
+    let found:i32=0;
+    let k:i32=0;
+    while(k<nm){
+      if(con_mem(W,ci,k)==mo){found=1;break;}
+      k=k+1;
+    }
+    if(found==0){
+      if(nm<8){
+        con_set_mem(W,ci,nm,mo);
+        nm=nm+1;
+      } else {
+        noadd_record(W, mo, ci);
+        dropped=dropped+1;
+      }
+    }
+    j=j+1;
+  }
+  con_set_nmem(W,ci,nm);
+  if(dropped>0){
+    emit("ULEARN concept: WARN merge member overflow on concept ");
+    emit(i32s(ci));
+    emit("; ");
+    emit(i32s(dropped));
+    emit(" members kept as votes only\n");
+  }
+  // Step 2: remap NOADD vote entries pointing at c2.
+  noadd_remap(W, c2, ci);
+  // Step 3: remap intent concept records pointing at c2.
+  let s:i32=0;
+  while(s<20){
+    let o:i32=IBASE()+s*INTENT_SZ();
+    if(get32(W,o)>=0 && get32(W,o+8)==c2){
+      set32(W,o+8,ci);
+    }
+    s=s+1;
+  }
+  // Step 4: deactivate the absorbed concept.
+  // H-FDCR-UNIFIED5 R2: also clear its member/feature lists so no
+  // stale data survives invisibly. Safe: every reader gates on
+  // con_active==1, and the create path resets these on reuse.
+  con_set_active(W,c2,0);
+  con_set_nmem(W,c2,0);
+  con_set_nfeat(W,c2,0);
+  // Step 5: announce the merge.
+  emit("ULEARN concept: CONCEPT-MERGE ");
+  emit(i32s(c2));
+  emit(" into ");
+  emit(i32s(ci));
+  emit("\n");
+  return;
+}
+fn con_merge_check(W:[]u8, ci:i32)void {
+  let n1:i32=con_nfeat(W,ci);
+  let c2:i32=0;
+  while(c2<CON_MAX()){
+    if(c2!=ci && con_active(W,c2)==1 && con_nfeat(W,c2)==n1){
+      let match:i32=1;
+      let i:i32=0;
+      while(i<n1){
+        let f2:[]u8=con_str_at(W, con_feat(W,c2,i));
+        let hit:i32=0;
+        let k:i32=0;
+        while(k<n1){
+          let f1:[]u8=con_str_at(W, con_feat(W,ci,k));
+          if(streq(f1,f2)==1){hit=1;break;}
+          k=k+1;
+        }
+        if(hit==0){match=0;break;}
+        i=i+1;
+      }
+      if(match==1){
+        con_merge_into(W, ci, c2);
+      }
+    }
+    c2=c2+1;
+  }
+  return;
+}
+// Check if a string (by offset) is a member of any active concept.
+// Returns concept index or -1.
+fn con_find_member(W:[]u8, mem_off:i32)i32 {
+  let c:i32=0;
+  while(c<CON_MAX()){
+    if(con_active(W,c)==1){
+      let nm:i32=con_nmem(W,c);
+      let j:i32=0;
+      while(j<nm){
+        if(con_mem(W,c,j)==mem_off){return c;}
+        j=j+1;
+      }
+    }
+    c=c+1;
+  }
+  return -1;
+}
+// Check if a string (by content) is a member of any concept.
+// Returns concept index or -1. Compares string content.
+fn con_find_member_str(W:[]u8, s:[]u8)i32 {
+  let c:i32=0;
+  while(c<CON_MAX()){
+    if(con_active(W,c)==1){
+      let nm:i32=con_nmem(W,c);
+      let j:i32=0;
+      while(j<nm){
+        let mo:i32=con_mem(W,c,j);
+        let ms:[]u8=con_str_at(W,mo);
+        if(streq(ms,s)==1){return c;}
+        j=j+1;
+      }
+    }
+    c=c+1;
+  }
+  return -1;
+}
+// NOADD vote table (H-FDCR-UNIFIED4 R1). Subjects whose feature set
+// matched a concept but were excluded by the 8-member cap
+// (MATCH-NOADD) are recorded here. They count as concept VOTES at
+// the procedure layer via con_vote_concept, but are never members:
+// con_find_member_str keeps exact member-only semantics.
+fn noadd_init(W:[]u8)void {
+  let i:i32=0;
+  while(i<NOADD_MAX()){
+    set32(W, NOADD_BASE()+i*8, -1);
+    set32(W, NOADD_BASE()+i*8+4, -1);
+    i=i+1;
+  }
+  noadd_drop_init(W);
+  return;
+}
+// NOADD drop tracking (H-FDCR-UNIFIED5 R1). Records subjects whose
+// vote recording was refused because the NOADD table was full, so
+// the procedure layer can explicitly surface vote-exhaustion.
+fn noadd_drop_init(W:[]u8)void {
+  set32(W, NOADD_DROP_COUNT(), 0);
+  let i:i32=0;
+  while(i<NOADD_DROP_MAX()){
+    set32(W, NOADD_DROP_BASE()+i*4, -1);
+    i=i+1;
+  }
+  return;
+}
+fn noadd_drop_record(W:[]u8, mem_off:i32)void {
+  set32(W, NOADD_DROP_COUNT(), get32(W, NOADD_DROP_COUNT())+1);
+  let i:i32=0;
+  while(i<NOADD_DROP_MAX()){
+    if(get32(W, NOADD_DROP_BASE()+i*4)<0){
+      set32(W, NOADD_DROP_BASE()+i*4, mem_off);
+      return;
+    }
+    i=i+1;
+  }
+  return;
+}
+fn noadd_drop_total(W:[]u8)i32 {
+  return get32(W, NOADD_DROP_COUNT());
+}
+// Returns 1 if s is content-equal to a subject whose vote was lost
+// to NOADD table exhaustion, else 0. A subject whose feature set
+// matched no concept returns 0 here: "never voted" is distinct
+// from "vote lost".
+fn noadd_vote_lost(W:[]u8, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<NOADD_DROP_MAX()){
+    let off:i32=get32(W, NOADD_DROP_BASE()+i*4);
+    if(off>=0){
+      let ms:[]u8=con_str_at(W, off);
+      if(streq(ms,s)==1){return 1;}
+    }
+    i=i+1;
+  }
+  return 0;
+}
+fn noadd_find(W:[]u8, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<NOADD_MAX()){
+    if(get32(W, NOADD_BASE()+i*8)>=0){
+      let ms:[]u8=con_str_at(W, get32(W, NOADD_BASE()+i*8));
+      if(streq(ms,s)==1){return get32(W, NOADD_BASE()+i*8+4);}
+    }
+    i=i+1;
+  }
+  return -1;
+}
+fn noadd_record(W:[]u8, mem_off:i32, c:i32)void {
+  // Defensive (AMEND1): never record a subject already a member of
+  // the TARGET concept c. Members of other concepts (e.g. overflow
+  // members of an absorbed concept during a merge) are legitimate
+  // voters and must be recorded.
+  let s0:[]u8=con_str_at(W, mem_off);
+  if(con_find_member_str(W, s0)==c){return;}
+  let s:[]u8=s0;
+  let i:i32=0;
+  while(i<NOADD_MAX()){
+    if(get32(W, NOADD_BASE()+i*8)>=0){
+      let ms:[]u8=con_str_at(W, get32(W, NOADD_BASE()+i*8));
+      if(streq(ms,s)==1){
+        set32(W, NOADD_BASE()+i*8+4, c);
+        return;
+      }
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<NOADD_MAX()){
+    if(get32(W, NOADD_BASE()+i*8)<0){
+      set32(W, NOADD_BASE()+i*8, mem_off);
+      set32(W, NOADD_BASE()+i*8+4, c);
+      return;
+    }
+    i=i+1;
+  }
+  // H-FDCR-UNIFIED5 R1: track the lost vote before warning, so the
+  // procedure layer can surface vote-exhaustion explicitly.
+  noadd_drop_record(W, mem_off);
+  emit("ULEARN concept: WARN NOADD vote table full; subject will not vote\n");
+  return;
+}
+fn noadd_remap(W:[]u8, c2:i32, ci:i32)void {
+  let i:i32=0;
+  while(i<NOADD_MAX()){
+    if(get32(W, NOADD_BASE()+i*8)>=0 && get32(W, NOADD_BASE()+i*8+4)==c2){
+      set32(W, NOADD_BASE()+i*8+4, ci);
+    }
+    i=i+1;
+  }
+  return;
+}
+// Procedure-layer voting concept: member concept first, else the
+// NOADD vote mapping. Never asserts membership.
+fn con_vote_concept(W:[]u8, s:[]u8)i32 {
+  let m:i32=con_find_member_str(W, s);
+  if(m>=0){return m;}
+  return noadd_find(W, s);
+}
+// Count active concepts.
+fn con_count(W:[]u8)i32 {
+  let n:i32=0;
+  let c:i32=0;
+  while(c<CON_MAX()){
+    if(con_active(W,c)==1){n=n+1;}
+    c=c+1;
+  }
+  return n;
+}
+
+// ============ UNIFIED HANDLERS ============
+
+// Parse an unlabeled PROC_LEARN line into str>str pairs, stage them into W,
+// and run bridge_learn (direct-first, bridge on failure).
+// Returns: 0..15 direct slot, 1000+bslot bridge rule, -1 failure.
+fn handle_proc_learn_unified(W:[]u8, line:[]u8)i32 {
+  let n:i32=line.len;
+  let nseg:i32=1;
+  let i:i32=0;
+  while(i<n){if(line[i]==59){nseg=nseg+1;}i=i+1;}
+  let strbase:i32=get32(W, ST_STR());
+  let s:i32=0;
+  let pos:i32=0;
+  while(s<nseg){
+    let end:i32=find_ch(line,pos,n,59);
+    if(end<0){end=n;}
+    let gt:i32=find_ch(line,pos,end,62);
+    let in_off:i32=strbase;
+    i=pos;
+    while(i<gt){W[strbase]=line[i];strbase=strbase+1;i=i+1;}
+    let in_len:i32=gt-pos;
+    let out_off:i32=strbase;
+    i=gt+1;
+    while(i<end){W[strbase]=line[i];strbase=strbase+1;i=i+1;}
+    let out_len:i32=end-(gt+1);
+    set32(W, PAIRBASE()+s*16, in_off);
+    set32(W, PAIRBASE()+s*16+4, in_len);
+    set32(W, PAIRBASE()+s*16+8, out_off);
+    set32(W, PAIRBASE()+s*16+12, out_len);
+    pos=end+1;
+    s=s+1;
+  }
+  set32(W, ST_STR(), strbase);
+  let rc:i32=bridge_learn(W, PBASE(), BBASE(), PAIRBASE(), nseg, WORK());
+  // Intent recording (H-INTENT): uniform training input length, or -1 if
+  // varied. Bridge sub-procedures stored inside bridge_learn receive no
+  // records (PREREG_INTENT_AMEND1): they are excluded from candidacy.
+  // H-FDCR-UNIFIED: also record concept association if training input
+  // is a concept member.
+  let tlen:i32=-1;
+  let l0:i32=get32(W, PAIRBASE()+4);
+  let allsame:i32=1;
+  let ci:i32=0;
+  while(ci<nseg){
+    if(get32(W, PAIRBASE()+ci*16+4)!=l0){allsame=0; break;}
+    ci=ci+1;
+  }
+  if(allsame==1){tlen=l0;}
+  // H-FDCR-UNIFIED2 R1: majority-vote concept association over ALL
+  // training inputs (not just the first). For each distinct concept
+  // among the inputs, count how many inputs are members. Select the
+  // top concept; require strict majority (count*2 > nseg).
+  // Ties: first-seen wins (disclosed).
+  let train_con:i32=-1;
+  let best_con:i32=-1;
+  let best_cnt:i32=0;
+  let vi:i32=0;
+  while(vi<nseg){
+    let vio:i32=get32(W, PAIRBASE()+vi*16);
+    let vil:i32=get32(W, PAIRBASE()+vi*16+4);
+    if(vil>0){
+      let vstr:[]u8=W[vio..vio+vil];
+      // H-FDCR-UNIFIED4 R1: vote via con_vote_concept so
+      // MATCH-NOADD subjects count as concept votes.
+      let vc:i32=con_vote_concept(W, vstr);
+      if(vc>=0){
+        let cnt:i32=0;
+        let vj:i32=0;
+        while(vj<nseg){
+          let vjo:i32=get32(W, PAIRBASE()+vj*16);
+          let vjl:i32=get32(W, PAIRBASE()+vj*16+4);
+          if(vjl>0){
+            let vjstr:[]u8=W[vjo..vjo+vjl];
+            if(con_vote_concept(W, vjstr)==vc){cnt=cnt+1;}
+          }
+          vj=vj+1;
+        }
+        if(cnt>best_cnt){
+          best_cnt=cnt;
+          best_con=vc;
+        }
+      }
+    }
+    vi=vi+1;
+  }
+  if(best_cnt*2>nseg){train_con=best_con;}
+  // H-FDCR-UNIFIED5 R1: surface vote-exhaustion at the procedure
+  // layer. Count training inputs whose vote was lost to a full
+  // NOADD table. noadd_vote_lost distinguishes "vote lost" from
+  // "never voted": an input whose feature set matched no concept
+  // returns con_vote_concept=-1 but noadd_vote_lost=0.
+  let nlost:i32=0;
+  let li:i32=0;
+  while(li<nseg){
+    let lio:i32=get32(W, PAIRBASE()+li*16);
+    let lil:i32=get32(W, PAIRBASE()+li*16+4);
+    if(lil>0){
+      let lstr:[]u8=W[lio..lio+lil];
+      if(con_vote_concept(W,lstr)<0 && noadd_vote_lost(W,lstr)==1){nlost=nlost+1;}
+    }
+    li=li+1;
+  }
+  if(nlost>0){
+    emit("ULEARN: NOTE ");
+    emit(i32s(nlost));
+    emit(" train input(s) lost concept votes (NOADD table full); train_con computed without them\n");
+  }
+  if(rc>=0 && rc<1000){
+    intent_record_proc_con(W, rc, tlen, train_con);
+    emit("ULEARN: direct discovery -> proc slot ");
+    emit(i32s(rc));
+    emit(" (intent seq recorded, train_len=");
+    emit(i32s(tlen));
+    emit(", concept=");
+    emit(i32s(train_con));
+    emit(")\n");
+  } else {
+    if(rc>=1000){
+      // H-FDCR-UNIFIED2 R4: bridge rules get concept association too.
+      intent_record_br_con(W, rc-1000, tlen, train_con);
+      emit("ULEARN: bridge triggered -> rule ");
+      emit(i32s(rc-1000));
+      emit(" (intent seq recorded, train_len=");
+      emit(i32s(tlen));
+      emit(", concept=");
+      emit(i32s(train_con));
+      emit(")\n");
+    } else {
+      emit("ULEARN FAIL: no program and no bridge\n");
+    }
+  }
+  return rc;
+}
+
+// Learn causal rules from iii>ii episodes (from route_learn.zag, unchanged).
+fn handle_caus_learn(W:[]u8, line:[]u8)void {
+  let n:i32=line.len;
+  let pos:i32=0;
+  let ne:i32=0;
+  while(pos<n){
+    let end:i32=find_ch(line,pos,n,59);
+    if(end<0){end=n;}
+    let gt:i32=find_ch(line,pos,end,62);
+    let lv:[]u8=z_alloc(12);
+    let rv:[]u8=z_alloc(8);
+    parse_ints(line,pos,gt,lv);
+    parse_ints(line,gt+1,end,rv);
+    clearn(W,CBASE(),get32(lv,0),get32(lv,4),get32(lv,8),get32(rv,0),get32(rv,4));
+    ne=ne+1;
+    pos=end+1;
+  }
+  emit("ULEARN: ");
+  emit(i32s(ne));
+  emit(" causal episodes\n");
+  return;
+}
+
+// Concept learn from FDCR-style fact lines (H-FDCR-UNIFIED2).
+// Input: one or more `T subj | rel | obj` facts separated by ';'.
+// Each fact contributes (rel, obj) as a feature of subj.
+// H-FDCR-UNIFIED2 R2: two-pass feature accumulation. Pass 1 parses all
+// facts into (subject, feature) pairs. Pass 2 groups by subject,
+// accumulates each subject's full feature set, then either extends the
+// subject's existing concept (cross-batch) or calls con_form once with
+// nfeat>1. The call site now passes multi-feature sets.
+// Returns number of facts processed.
+// Limitation (disclosed): extending a concept's feature set does not
+// re-evaluate other existing members against the enlarged set.
+fn handle_concept_learn(W:[]u8, line:[]u8)i32 {
+  let n:i32=line.len;
+  // Pass 1: parse all facts into (subject_off, feat_off) pairs.
+  // Max 16 facts per batch (parse array limit, disclosed).
+  let subj_offs:[]u8=z_alloc(16*4);
+  let feat_offs:[]u8=z_alloc(16*4);
+  let np:i32=0;
+  // H-FDCR-UNIFIED3 R3: facts beyond the 16/batch cap are counted
+  // and reported with an explicit warning (were silently dropped).
+  let ndropped_facts:i32=0;
+  let pos:i32=0;
+  while(pos<n){
+    let end:i32=find_ch(line,pos,n,59);
+    if(end<0){end=n;}
+    if(end>pos){
+      // Parse T subj | rel | obj within [pos, end).
+      // Find pipes.
+      let p1:i32=find_ch(line,pos,end,124);
+      if(p1>=0){
+        let p2:i32=find_ch(line,p1+1,end,124);
+        if(p2>=0){
+          // Subject: from pos+2 (skip "T ") to p1, trimmed.
+          let ss:i32=pos+2;
+          while(ss<p1 && line[ss]==32){ss=ss+1;}
+          let se:i32=p1;
+          while(se>ss && line[se-1]==32){se=se-1;}
+          // Rel: from p1+1 to p2, trimmed.
+          let rs:i32=p1+1;
+          while(rs<p2 && line[rs]==32){rs=rs+1;}
+          let re:i32=p2;
+          while(re>rs && line[re-1]==32){re=re-1;}
+          // Obj: from p2+1 to end, trimmed.
+          let os:i32=p2+1;
+          while(os<end && line[os]==32){os=os+1;}
+          let oe:i32=end;
+          while(oe>os && line[oe-1]==32){oe=oe-1;}
+          if(se>ss && re>rs && oe>os){
+            if(np<16){
+            let subj:[]u8=line[ss..se];
+            let rel:[]u8=line[rs..re];
+            let obj:[]u8=line[os..oe];
+            // Build feature string "rel=obj" for FORM grouping.
+            let feat:[]u8=z_alloc(rel.len+obj.len+2);
+            let fi:i32=0;
+            let k:i32=0;
+            while(k<rel.len){feat[fi]=rel[k];fi=fi+1;k=k+1;}
+            feat[fi]=61;fi=fi+1; // '='
+            k=0;
+            while(k<obj.len){feat[fi]=obj[k];fi=fi+1;k=k+1;}
+            let feat_s:[]u8=feat[0..fi];
+            // Intern subject and feature.
+            let mem_off:i32=con_intern(W, subj);
+            let feat_off:i32=con_intern(W, feat_s);
+            set32(subj_offs, np*4, mem_off);
+            set32(feat_offs, np*4, feat_off);
+            np=np+1;
+            emit("ULEARN concept: fact [");
+            emit(subj);
+            emit(" | ");
+            emit(rel);
+            emit(" | ");
+            emit(obj);
+            emit("] parsed\n");
+            } else {
+              ndropped_facts=ndropped_facts+1;
+            }
+          }
+        }
+      }
+    }
+    pos=end+1;
+  }
+  if(ndropped_facts>0){
+    emit("ULEARN concept: WARN fact cap 16 reached; ");
+    emit(i32s(ndropped_facts));
+    emit(" facts dropped\n");
+  }
+  // Pass 2: group by subject, accumulate features, form or extend.
+  let nsubj:i32=0;
+  let i:i32=0;
+  while(i<np){
+    let so:i32=get32(subj_offs, i*4);
+    let sistr:[]u8=con_str_at(W, so);
+    // Skip if this subject was already processed (earlier index).
+    let done:i32=0;
+    let j:i32=0;
+    while(j<i){
+      let soj:[]u8=con_str_at(W, get32(subj_offs, j*4));
+      if(streq(sistr,soj)==1){done=1;break;}
+      j=j+1;
+    }
+    if(done==0){
+      // Accumulate all features for this subject (deduplicated).
+      // H-FDCR-UNIFIED3 R4: features beyond 8 are counted and
+      // reported (were silently dropped).
+      let facc:[]u8=z_alloc(8*4);
+      let nfacc:i32=0;
+      let ndropped_feat:i32=0;
+      let k:i32=i;
+      while(k<np){
+        let sok:[]u8=con_str_at(W, get32(subj_offs, k*4));
+        if(streq(sistr,sok)==1){
+          let fo:i32=get32(feat_offs, k*4);
+          let dup:i32=0;
+          let q:i32=0;
+          while(q<nfacc){
+            let fq:[]u8=con_str_at(W, get32(facc, q*4));
+            let fn2:[]u8=con_str_at(W, fo);
+            if(streq(fq,fn2)==1){dup=1;break;}
+            q=q+1;
+          }
+          if(dup==0){
+            if(nfacc<8){
+              set32(facc, nfacc*4, fo);
+              nfacc=nfacc+1;
+            } else {
+              ndropped_feat=ndropped_feat+1;
+            }
+          }
+        }
+        k=k+1;
+      }
+      // Cross-batch: if the subject is already a concept member,
+      // extend its concept's feature set. Otherwise form with the
+      // full accumulated set (nfeat may exceed 1).
+      let existing:i32=con_find_member_str(W, sistr);
+      let ci:i32=-1;
+      if(existing>=0){
+        ci=existing;
+        // H-FDCR-UNIFIED3 R4: features beyond 8 on extension are
+        // counted and reported (were silently dropped).
+        let ndropped_ext:i32=0;
+        let a:i32=0;
+        while(a<nfacc){
+          let fo2:i32=get32(facc, a*4);
+          let dup2:i32=0;
+          let nf2:i32=con_nfeat(W, ci);
+          let q2:i32=0;
+          while(q2<nf2){
+            let f1:[]u8=con_str_at(W, con_feat(W, ci, q2));
+            let f2:[]u8=con_str_at(W, fo2);
+            if(streq(f1,f2)==1){dup2=1;break;}
+            q2=q2+1;
+          }
+          if(dup2==0){
+            if(con_nfeat(W,ci)<8){
+              con_set_feat(W, ci, con_nfeat(W,ci), fo2);
+              con_set_nfeat(W, ci, con_nfeat(W,ci)+1);
+            } else {
+              ndropped_ext=ndropped_ext+1;
+            }
+          }
+          a=a+1;
+        }
+        if(ndropped_ext>0){
+          emit("ULEARN concept: WARN feature cap 8 reached on concept ");
+          emit(i32s(ci));
+          emit("; ");
+          emit(i32s(ndropped_ext));
+          emit(" features dropped\n");
+        }
+        // H-FDCR-UNIFIED4 R2: the extension may have grown ci into
+        // set-identity with another concept. Merge on match.
+        con_merge_check(W, ci);
+      } else {
+        ci=con_form(W, so, facc, nfacc);
+      }
+      nsubj=nsubj+1;
+      emit("ULEARN concept: subject [");
+      emit(sistr);
+      emit("] nfeat=");
+      emit(i32s(nfacc));
+      // H-FDCR-UNIFIED3 R2: ci==-2 is MATCH-NOADD (feature set
+      // known, member cap full). Never assert membership for it.
+      if(ci==-2){
+        emit(" -> MATCH (feature set known; subject NOT added: 8-member cap)\n");
+      } else {
+        emit(" -> concept ");
+        emit(i32s(ci));
+        if(ci>=0){
+          emit(" (total nfeat=");
+          emit(i32s(con_nfeat(W,ci)));
+          emit(")");
+        }
+        emit("\n");
+      }
+      if(ndropped_feat>0){
+        emit("ULEARN concept: WARN feature cap 8 reached for subject [");
+        emit(sistr);
+        emit("]; ");
+        emit(i32s(ndropped_feat));
+        emit(" features dropped\n");
+      }
+    }
+    i=i+1;
+  }
+  emit("ULEARN: ");
+  emit(i32s(np));
+  emit(" concept facts, ");
+  emit(i32s(nsubj));
+  emit(" subjects, ");
+  emit(i32s(con_count(W)));
+  emit(" active concepts\n");
+  return np;
+}
+
+
+// Intent-based procedure query (H-INTENT-UNIFIED). Replaces the old
+// spray-all handler: infers which stored procedure or bridge rule the
+// querier intends, withholds on genuine ambiguity. Same name and return
+// convention (1 answered, 0 withhold-none, -1 withhold-ambiguous).
+fn handle_proc_query_unified(W:[]u8, line:[]u8)i32 {
+  return handle_proc_query_intent(W, line);
+}
+
+// Causal query from a 3-int tuple (from route_learn.zag, unchanged).
+fn handle_caus_query(W:[]u8, line:[]u8)i32 {
+  let v:[]u8=z_alloc(12);
+  parse_ints(line,0,line.len,v);
+  let out:[]u8=z_alloc(2);
+  if(cpredict(W,CBASE(),get32(v,0),get32(v,4),get32(v,8),out)==1){
+    emit("QCAUS [");
+    emit(line);
+    emit("] -> s0=");
+    emit(i32s(out[0] as i32));
+    emit(" s1=");
+    emit(i32s(out[1] as i32));
+    emit("\n");
+    return 1;
+  }
+  emit("QCAUS WITHHOLD: no rule fired\n");
+  return 0;
+}
+
+// ============ MAIN: mixed unlabeled stream ============
+fn main()i32 {
+  emit("=== unified_fdcr v2: unlabeled learn-route-revise loop + intent + concepts ===\n");
+  emit("=== H-FDCR-UNIFIED3 repairs: order-normalized identity, loud caps, honest member emit ===\n");
+  let W:[]u8=z_alloc(65536);
+  set32(W, ST_STR(), STR0());
+  intent_init(W);
+  con_init(W);
+  let npass:i32=0;
+  let ntest:i32=0;
+
+  // ---- L1: simple procedure, unlabeled (K-U1) ----
+  emit("\n--- L1: simple procedure ---\n");
+  let r1:i32=route_line("abc>cba;xy>yx");
+  let slot_rev:i32=-1;
+  if(r1==1){slot_rev=handle_proc_learn_unified(W,"abc>cba;xy>yx");}
+  ntest=ntest+1;
+  if(r1==1 && slot_rev>=0 && slot_rev<1000){
+    let o:[]u8=z_alloc(6);
+    if(proc_apply(W,PBASE(),slot_rev,"hello",o)==1 && streq(o[0..5],"olleh")==1){
+      emit("K-U1 simple reverse hello->olleh PASS\n");npass=npass+1;
+    } else {emit("K-U1 FAIL (apply)\n");}
+  } else {emit("K-U1 FAIL (route/learn) rc=");emit(i32s(slot_rev));emit("\n");}
+
+  // ---- L2: conditional procedure, unlabeled (K-U2) ----
+  emit("\n--- L2: conditional procedure ---\n");
+  let r2:i32=route_line("xab>xxx;xcd>xxx;abc>ccc;def>fff;abcde>eeeee");
+  let rc2:i32=-1;
+  if(r2==1){rc2=handle_proc_learn_unified(W,"xab>xxx;xcd>xxx;abc>ccc;def>fff;abcde>eeeee");}
+  ntest=ntest+1;
+  let bslot:i32=-1;
+  if(r2==1 && rc2>=1000 && br_count(W,BBASE())==1){
+    bslot=rc2-1000;
+    emit("K-U2a bridge rule created PASS\n");npass=npass+1;
+  } else {emit("K-U2a FAIL rc=");emit(i32s(rc2));emit(" bridges=");emit(i32s(br_count(W,BBASE())));emit("\n");}
+  ntest=ntest+1;
+  if(bslot>=0 && br_cpos(W,BBASE(),bslot)==0 && br_cval(W,BBASE(),bslot)==120){
+    emit("K-U2b condition (pos=0,val=120) PASS\n");npass=npass+1;
+  } else {emit("K-U2b FAIL\n");}
+  ntest=ntest+1;
+  let uq1:[]u8=z_alloc(4);
+  let uq2:[]u8=z_alloc(4);
+  if(bslot>=0 &&
+     bridge_apply(W,PBASE(),BBASE(),bslot,"xqw",uq1)==1 &&
+     bridge_apply(W,PBASE(),BBASE(),bslot,"zzz",uq2)==1 &&
+     streq(uq1[0..3],"xxx")==1 && streq(uq2[0..3],"zzz")==1){
+    emit("K-U2c dispatch xqw->xxx, zzz->zzz PASS\n");npass=npass+1;
+  } else {emit("K-U2c FAIL\n");}
+
+  // ---- L3: causal, unlabeled (K-U3) ----
+  emit("\n--- L3: causal ---\n");
+  let r3:i32=route_line("0,0,0>0,1;0,0,0>0,1;1,0,0>1,0;1,0,0>1,0");
+  if(r3==2){handle_caus_learn(W,"0,0,0>0,1;0,0,0>0,1;1,0,0>1,0;1,0,0>1,0");}
+  ntest=ntest+1;
+  let cq:[]u8=z_alloc(2);
+  let cq2:[]u8=z_alloc(2);
+  if(r3==2 && cpredict(W,CBASE(),1,0,0,cq)==1 && (cq[1] as i32)==0 &&
+     cpredict(W,CBASE(),0,0,0,cq2)==1 && (cq2[1] as i32)==1){
+    emit("K-U3 causal hot->low, cold->high PASS\n");npass=npass+1;
+  } else {emit("K-U3 FAIL\n");}
+
+  // ---- Q1: procedure query, unlabeled (K-U4, intent-adapted) ----
+  emit("\n--- Q1: procedure query (intent) ---\n");
+  let r4:i32=route_line("hello");
+  ntest=ntest+1;
+  if(r4==3){
+    let nq:i32=handle_proc_query_unified(W,"hello");
+    // Intent: reverse slot (seq 0, train_len -1, score 0) vs bridge rule
+    // (seq 1, train_len -1, cond not firing, score 1): gap=1 < 2, so the
+    // correct intent decision is WITHHOLD AMBIGUOUS. The bridge machinery
+    // itself still dispatches hello->ooooo via the ELSE branch.
+    let bo:[]u8=z_alloc(6);
+    let bhit:i32=0;
+    if(bslot>=0 && bridge_apply(W,PBASE(),BBASE(),bslot,"hello",bo)==1 && streq(bo[0..5],"ooooo")==1){bhit=1;}
+    if(nq==-1 && bhit==1){
+      emit("K-U4a intent WITHHOLD AMBIGUOUS + bridge dispatch intact PASS\n");npass=npass+1;
+    } else {emit("K-U4a FAIL nq=");emit(i32s(nq));emit(" bhit=");emit(i32s(bhit));emit("\n");}
+  } else {emit("K-U4a FAIL (route)\n");}
+  // Q1b: "xqz" fires the bridge condition. Intent must select the bridge
+  // rule on cond_fire (score 20001 vs 0) and answer "xxx".
+  ntest=ntest+1;
+  let r4b:i32=route_line("xqz");
+  if(r4b==3){
+    let nqb:i32=handle_proc_query_unified(W,"xqz");
+    let bx:[]u8=z_alloc(4);
+    if(nqb==1 && bslot>=0 && bridge_apply(W,PBASE(),BBASE(),bslot,"xqz",bx)==1 && streq(bx[0..3],"xxx")==1){
+      emit("K-U4a2 intent selects firing bridge rule xqz->xxx PASS\n");npass=npass+1;
+    } else {emit("K-U4a2 FAIL nqb=");emit(i32s(nqb));emit("\n");}
+  } else {emit("K-U4a2 FAIL (route)\n");}
+
+  // ---- Q2: causal query, unlabeled (K-U4) ----
+  emit("\n--- Q2: causal query ---\n");
+  let r5:i32=route_line("1,0,0");
+  ntest=ntest+1;
+  if(r5==4){
+    let f:i32=handle_caus_query(W,"1,0,0");
+    let q5:[]u8=z_alloc(2);
+    if(f==1 && cpredict(W,CBASE(),1,0,0,q5)==1 && (q5[1] as i32)==0){
+      emit("K-U4b caus-query PASS\n");npass=npass+1;
+    } else {emit("K-U4b FAIL\n");}
+  } else {emit("K-U4b FAIL (route)\n");}
+
+  // ---- K-U5: no interference ----
+  emit("\n--- K-U5: no interference ---\n");
+  ntest=ntest+1;
+  let of:[]u8=z_alloc(6);
+  let qf:[]u8=z_alloc(2);
+  if(slot_rev>=0 && proc_apply(W,PBASE(),slot_rev,"hello",of)==1 && streq(of[0..5],"olleh")==1 &&
+     cpredict(W,CBASE(),1,0,0,qf)==1 && (qf[1] as i32)==0){
+    emit("K-U5 reverse intact + causal intact PASS\n");npass=npass+1;
+  } else {emit("K-U5 FAIL\n");}
+
+  // ---- Ambiguity: still withholds ----
+  emit("\n--- A: ambiguity ---\n");
+  let ra:i32=route_line("ab>ba");
+  ntest=ntest+1;
+  if(ra==0){
+    emit("K-A ambiguity WITHHOLD PASS\n");npass=npass+1;
+  } else {emit("K-A FAIL (misroute)\n");}
+
+  // ============ PART B: H-INTENT battery in the unified process ============
+  // The 10 H-INTENT checks, run with the unified learn/query handlers on
+  // fresh workspaces. Proves intent retrieval works inside the integrated
+  // learner, not just the standalone intent_learn.zag.
+  emit("\n=== PART B: H-INTENT battery (unified handlers) ===\n");
+
+  // ---- B-T1: length disambiguation ----
+  emit("\n--- B-T1: length disambiguation ---\n");
+  let W1:[]u8=z_alloc(65536);
+  set32(W1, ST_STR(), STR0());
+  intent_init(W1);
+  let lr1:i32=handle_proc_learn_unified(W1,"dcba>abcd;wxyz>zyxw");
+  let lr2:i32=handle_proc_learn_unified(W1,"abcde>eeeee;fghij>jjjjj");
+  ntest=ntest+1;
+  if(lr1>=0 && lr1<1000 && lr2>=0 && lr2<1000 && lr1!=lr2){
+    emit("B-T1 setup: reverse slot ");
+    emit(i32s(lr1));
+    emit(", broadcast slot ");
+    emit(i32s(lr2));
+    emit(" PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T1 setup FAIL lr1=");
+    emit(i32s(lr1));
+    emit(" lr2=");
+    emit(i32s(lr2));
+    emit("\n");
+  }
+  ntest=ntest+1;
+  let bres1:[]u8=z_alloc(12);
+  intent_winner(W1,"hello",bres1);
+  if(get32(bres1,0)==0){
+    let slot:i32=get32(bres1,4);
+    let o:[]u8=z_alloc(6);
+    proc_apply(W1,PBASE(),slot,"hello",o);
+    let io:i32=intent_proc_base(W1,slot);
+    if(streq(o[0..5],"ooooo")==1 && get32(W1,io+4)==5){
+      emit("B-T1a hello->ooooo via n=5 slot PASS\n");
+      npass=npass+1;
+    } else {
+      emit("B-T1a FAIL bytes/train_len\n");
+    }
+  } else {
+    emit("B-T1a FAIL kind=");
+    emit(i32s(get32(bres1,0)));
+    emit("\n");
+  }
+  ntest=ntest+1;
+  let bres2:[]u8=z_alloc(12);
+  intent_winner(W1,"abcd",bres2);
+  if(get32(bres2,0)==0){
+    let slot:i32=get32(bres2,4);
+    let o:[]u8=z_alloc(5);
+    proc_apply(W1,PBASE(),slot,"abcd",o);
+    let io:i32=intent_proc_base(W1,slot);
+    if(streq(o[0..4],"dcba")==1 && get32(W1,io+4)==4){
+      emit("B-T1b abcd->dcba via n=4 slot PASS\n");
+      npass=npass+1;
+    } else {
+      emit("B-T1b FAIL bytes/train_len\n");
+    }
+  } else {
+    emit("B-T1b FAIL kind=");
+    emit(i32s(get32(bres2,0)));
+    emit("\n");
+  }
+
+  // ---- B-T2: bridge condition intent ----
+  emit("\n--- B-T2: bridge condition intent ---\n");
+  let W2:[]u8=z_alloc(65536);
+  set32(W2, ST_STR(), STR0());
+  intent_init(W2);
+  let br:i32=handle_proc_learn_unified(W2,"xab>xxx;xcd>xxx;abc>ccc;def>fff;abcde>eeeee");
+  ntest=ntest+1;
+  if(br>=1000 && br_cpos(W2,BBASE(),br-1000)==0 && br_cval(W2,BBASE(),br-1000)==120){
+    emit("B-T2 setup: bridge rule ");
+    emit(i32s(br-1000));
+    emit(" IF input[0]==120 PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T2 setup FAIL br=");
+    emit(i32s(br));
+    emit("\n");
+  }
+  ntest=ntest+1;
+  let bres3:[]u8=z_alloc(12);
+  intent_winner(W2,"xqz",bres3);
+  if(get32(bres3,0)==1){
+    let bslot2:i32=get32(bres3,4);
+    let o:[]u8=z_alloc(4);
+    bridge_apply(W2,PBASE(),BBASE(),bslot2,"xqz",o);
+    if(streq(o[0..3],"xxx")==1){
+      emit("B-T2a xqz->xxx via firing bridge PASS\n");
+      npass=npass+1;
+    } else {
+      emit("B-T2a FAIL bytes\n");
+    }
+  } else {
+    emit("B-T2a FAIL kind=");
+    emit(i32s(get32(bres3,0)));
+    emit("\n");
+  }
+  ntest=ntest+1;
+  let bres4:[]u8=z_alloc(12);
+  intent_winner(W2,"qrs",bres4);
+  if(get32(bres4,0)==1){
+    let bslot2:i32=get32(bres4,4);
+    let o:[]u8=z_alloc(4);
+    bridge_apply(W2,PBASE(),BBASE(),bslot2,"qrs",o);
+    if(streq(o[0..3],"sss")==1){
+      emit("B-T2b qrs->sss via bridge ELSE PASS\n");
+      npass=npass+1;
+    } else {
+      emit("B-T2b FAIL bytes\n");
+    }
+  } else {
+    emit("B-T2b FAIL kind=");
+    emit(i32s(get32(bres4,0)));
+    emit("\n");
+  }
+
+  // ---- B-T3: genuine ambiguity ----
+  emit("\n--- B-T3: ambiguity ---\n");
+  let W3:[]u8=z_alloc(65536);
+  set32(W3, ST_STR(), STR0());
+  intent_init(W3);
+  let ar1:i32=handle_proc_learn_unified(W3,"abcde>edcba;vwxyz>zyxwv");
+  let ar2:i32=handle_proc_learn_unified(W3,"abcde>eeeee;fghij>jjjjj");
+  ntest=ntest+1;
+  if(ar1>=0 && ar1<1000 && ar2>=0 && ar2<1000 && ar1!=ar2){
+    emit("B-T3 setup: reverse slot ");
+    emit(i32s(ar1));
+    emit(", broadcast slot ");
+    emit(i32s(ar2));
+    emit(" PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T3 setup FAIL ar1=");
+    emit(i32s(ar1));
+    emit(" ar2=");
+    emit(i32s(ar2));
+    emit("\n");
+  }
+  ntest=ntest+1;
+  let bres5:[]u8=z_alloc(12);
+  intent_winner(W3,"world",bres5);
+  if(get32(bres5,0)==-2){
+    emit("B-T3 world WITHHOLD AMBIGUOUS gap=");
+    emit(i32s(get32(bres5,8)));
+    emit(" PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T3 FAIL kind=");
+    emit(i32s(get32(bres5,0)));
+    emit(" (expected -2 ambiguous)\n");
+  }
+  ntest=ntest+1;
+  let bhq:i32=handle_proc_query_unified(W3,"world");
+  if(bhq==-1){
+    emit("B-T3b handler returns -1 AMBIGUOUS PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T3b FAIL bhq=");
+    emit(i32s(bhq));
+    emit("\n");
+  }
+
+  // ---- B-T3c: empty store withholds ----
+  emit("\n--- B-T3c: empty store ---\n");
+  let W4:[]u8=z_alloc(65536);
+  set32(W4, ST_STR(), STR0());
+  intent_init(W4);
+  ntest=ntest+1;
+  let bhq2:i32=handle_proc_query_unified(W4,"hello");
+  if(bhq2==0){
+    emit("B-T3c empty store WITHHOLD PASS\n");
+    npass=npass+1;
+  } else {
+    emit("B-T3c FAIL bhq2=");
+    emit(i32s(bhq2));
+    emit("\n");
+  }
+
+  emit("\n=== INTENT-UNIFIED RESULT: ");
+  emit(i32s(npass));
+  emit("/");
+  emit(i32s(ntest));
+  emit(" ===\n");
+  if(npass!=ntest){
+    emit("H-INTENT-UNIFIED KILLED\n");
+    return 1;
+  }
+  emit("H-INTENT-UNIFIED SURVIVES (Part A+B)\n");
+
+  // ============ PART C: H-FDCR-UNIFIED concept integration ============
+  // Tests K-FU2: concepts are formed from facts and used in intent.
+  emit("\n=== PART C: H-FDCR-UNIFIED concept integration ===\n");
+
+  // ---- C-T1: concept formation (K-FU2a) ----
+  emit("\n--- C-T1: concept formation ---\n");
+  let W5:[]u8=z_alloc(65536);
+  set32(W5, ST_STR(), STR0());
+  intent_init(W5);
+  con_init(W5);
+  // Learn facts: cat and dog are both pets.
+  // (Using cat/dog to avoid repeated-char extractor limitation.)
+  let cr1:i32=route_line("T cat | is_a | pet");
+  ntest=ntest+1;
+  if(cr1==5){
+    let nf1:i32=handle_concept_learn(W5,"T cat | is_a | pet");
+    let nf2:i32=handle_concept_learn(W5,"T dog | is_a | pet");
+    if(nf1==1 && nf2==1 && con_count(W5)==1){
+      // Verify the concept has 2 members.
+      let cc:i32=con_find_member_str(W5,"cat");
+      if(cc>=0 && con_nmem(W5,cc)==2){
+        emit("C-T1 concept {cat,dog} formed PASS\n");
+        npass=npass+1;
+      } else {
+        emit("C-T1 FAIL: concept members cc=");
+        emit(i32s(cc));
+        emit("\n");
+      }
+    } else {
+      emit("C-T1 FAIL: nf1=");
+      emit(i32s(nf1));
+      emit(" nf2=");
+      emit(i32s(nf2));
+      emit(" count=");
+      emit(i32s(con_count(W5)));
+      emit("\n");
+    }
+  } else {
+    emit("C-T1 FAIL: route cr1=");
+    emit(i32s(cr1));
+    emit(" (expected 5)\n");
+  }
+
+  // ---- C-T2: concept boost in intent (K-FU2b) ----
+  emit("\n--- C-T2: concept boost ---\n");
+  // Train P1 (older) on cat data, P2 (newer) on other data.
+  // Query with "dog" (concept member with cat).
+  // P1 should win via concept boost despite P2's recency.
+  let W6:[]u8=z_alloc(65536);
+  set32(W6, ST_STR(), STR0());
+  intent_init(W6);
+  con_init(W6);
+  // Form concept first.
+  handle_concept_learn(W6,"T cat | is_a | pet");
+  handle_concept_learn(W6,"T dog | is_a | pet");
+  // P1: reverse trained on cat (older, seq=0). "cat" has no repeat chars.
+  let p1r:i32=handle_proc_learn_unified(W6,"cat>tac");
+  // P2: broadcast trained on 3-char data (newer, seq=1). Same train_len=3
+  // as P1, so concept boost (not len_match) decides the winner.
+  let p2r:i32=handle_proc_learn_unified(W6,"abc>aaa;def>ddd");
+  ntest=ntest+1;
+  if(p1r>=0 && p1r<1000 && p2r>=0 && p2r<1000 && p1r!=p2r){
+    emit("C-T2 setup: P1 slot ");
+    emit(i32s(p1r));
+    emit(" (cat), P2 slot ");
+    emit(i32s(p2r));
+    emit(" (broadcast) PASS\n");
+    npass=npass+1;
+  } else {
+    emit("C-T2 setup FAIL p1r=");
+    emit(i32s(p1r));
+    emit(" p2r=");
+    emit(i32s(p2r));
+    emit("\n");
+  }
+  // Query with "dog". Both P1 (reverse) and P2 (broadcast) can apply
+  // to 3-char inputs. P1 has concept boost (cat/dog share concept),
+  // P2 does not. P1 should win despite P2's recency.
+  ntest=ntest+1;
+  let cres:[]u8=z_alloc(12);
+  intent_winner(W6,"dog",cres);
+  let ckind:i32=get32(cres,0);
+  let cslot:i32=get32(cres,4);
+  if(ckind==0 && cslot==p1r){
+    emit("C-T2 concept boost selects P1 (cat-trained) for dog query PASS\n");
+    npass=npass+1;
+  } else {
+    emit("C-T2 FAIL: kind=");
+    emit(i32s(ckind));
+    emit(" slot=");
+    emit(i32s(cslot));
+    emit(" (expected kind=0 slot=");
+    emit(i32s(p1r));
+    emit(")\n");
+  }
+
+  // ============ PART D: H-FDCR-UNIFIED3 red-team repairs ============
+  // K-FU3-1..4 run here on fresh worlds. K-FU3-5 is the whole-suite
+  // regression (Parts A-C above run unchanged on the repaired
+  // mechanism); K-FU3-6 is 3x byte-identical execution.
+  emit("\n=== PART D: H-FDCR-UNIFIED3 (order-normalized identity, loud caps) ===\n");
+
+  // ---- D-T1: order fragility (K-FU3-1) ----
+  // Exact X-FU2-2a red-team fixture: same feature SET, different
+  // fact ORDER across batches. Old code: 2 concepts, train_con=-1.
+  emit("\n--- D-T1: order fragility ---\n");
+  let W7:[]u8=z_alloc(65536);
+  set32(W7, ST_STR(), STR0());
+  intent_init(W7);
+  con_init(W7);
+  let d1a:i32=handle_concept_learn(W7,"T cat | is_a | pet;T cat | color | orange");
+  let d1b:i32=handle_concept_learn(W7,"T dog | color | orange;T dog | is_a | pet");
+  ntest=ntest+1;
+  let dcat:i32=con_find_member_str(W7,"cat");
+  let ddog:i32=con_find_member_str(W7,"dog");
+  if(d1a==2 && d1b==2 && con_count(W7)==1 && dcat>=0 && dcat==ddog){
+    let dp:i32=handle_proc_learn_unified(W7,"cat>tac;dog>god");
+    let dpcon:i32=-99;
+    if(dp>=0 && dp<1000){dpcon=get32(W7, intent_proc_base(W7,dp)+8);}
+    if(dpcon==0){
+      emit("D-T1 order variation: 1 concept, train_con=0 PASS\n");npass=npass+1;
+    } else {
+      emit("D-T1 FAIL: train_con=");emit(i32s(dpcon));emit(" (expected 0)\n");
+    }
+  } else {
+    emit("D-T1 FAIL: d1a=");emit(i32s(d1a));emit(" d1b=");emit(i32s(d1b));
+    emit(" count=");emit(i32s(con_count(W7)));emit(" cat=");emit(i32s(dcat));
+    emit(" dog=");emit(i32s(ddog));emit("\n");
+  }
+
+  // ---- D-T2: fact cap is loud (K-FU3-2) ----
+  // 20 facts, one batch. np must stay 16; s16..s19 absent. The
+  // WARN fact cap line is asserted in the raw output, not here.
+  emit("\n--- D-T2: fact cap ---\n");
+  let W8:[]u8=z_alloc(65536);
+  set32(W8, ST_STR(), STR0());
+  intent_init(W8);
+  con_init(W8);
+  let d2:i32=handle_concept_learn(W8,"T s0 | is_a | pet;T s1 | is_a | pet;T s2 | is_a | pet;T s3 | is_a | pet;T s4 | is_a | pet;T s5 | is_a | pet;T s6 | is_a | pet;T s7 | is_a | pet;T s8 | is_a | pet;T s9 | is_a | pet;T s10 | is_a | pet;T s11 | is_a | pet;T s12 | is_a | pet;T s13 | is_a | pet;T s14 | is_a | pet;T s15 | is_a | pet;T s16 | is_a | pet;T s17 | is_a | pet;T s18 | is_a | pet;T s19 | is_a | pet");
+  ntest=ntest+1;
+  if(d2==16 && con_find_member_str(W8,"s19")==-1 && con_find_member_str(W8,"s0")>=0){
+    emit("D-T2 20 facts: np=16, s19 absent, s0 member PASS\n");npass=npass+1;
+  } else {
+    emit("D-T2 FAIL: np=");emit(i32s(d2));emit("\n");
+  }
+
+  // ---- D-T3: member cap is honest (K-FU3-3) ----
+  // 9 subjects, identical features. 1 concept; m8 NOT a member.
+  // The subject emit for m8 must NOT assert membership (checked in
+  // raw output); the member-cap WARN must appear (raw output).
+  emit("\n--- D-T3: member cap ---\n");
+  let W9:[]u8=z_alloc(65536);
+  set32(W9, ST_STR(), STR0());
+  intent_init(W9);
+  con_init(W9);
+  let d3:i32=handle_concept_learn(W9,"T m0 | is_a | pet;T m1 | is_a | pet;T m2 | is_a | pet;T m3 | is_a | pet;T m4 | is_a | pet;T m5 | is_a | pet;T m6 | is_a | pet;T m7 | is_a | pet;T m8 | is_a | pet");
+  ntest=ntest+1;
+  let m8c:i32=con_find_member_str(W9,"m8");
+  let m0c:i32=con_find_member_str(W9,"m0");
+  if(d3==9 && con_count(W9)==1 && m8c==-1 && m0c==0){
+    emit("D-T3 9 subjects: 1 concept, m8 not member, m0 in concept 0 PASS\n");npass=npass+1;
+  } else {
+    emit("D-T3 FAIL: np=");emit(i32s(d3));emit(" count=");emit(i32s(con_count(W9)));
+    emit(" m8=");emit(i32s(m8c));emit(" m0=");emit(i32s(m0c));emit("\n");
+  }
+
+  // ---- D-T4: feature cap is loud (K-FU3-4) ----
+  // One subject, 10 distinct features. nfeat must be 8. The WARN
+  // feature cap line naming 2 dropped is asserted in raw output.
+  emit("\n--- D-T4: feature cap ---\n");
+  let W10:[]u8=z_alloc(65536);
+  set32(W10, ST_STR(), STR0());
+  intent_init(W10);
+  con_init(W10);
+  let d4:i32=handle_concept_learn(W10,"T u | f0 | v0;T u | f1 | v1;T u | f2 | v2;T u | f3 | v3;T u | f4 | v4;T u | f5 | v5;T u | f6 | v6;T u | f7 | v7;T u | f8 | v8;T u | f9 | v9");
+  ntest=ntest+1;
+  let uc:i32=con_find_member_str(W10,"u");
+  if(d4==10 && uc>=0 && con_nfeat(W10,uc)==8){
+    emit("D-T4 10 features: nfeat=8 PASS\n");npass=npass+1;
+  } else {
+    emit("D-T4 FAIL: np=");emit(i32s(d4));emit(" uc=");emit(i32s(uc));emit("\n");
+  }
+
+  // ============ PART E: H-FDCR-UNIFIED4 repairs ============
+  // K-FU4-1..K-FU4-5 run here on fresh worlds. K-FU4-3 also
+  // requires Parts A-D byte-identical to FDCR_UNIFIED3_RAW.txt
+  // (verified externally by diff); E-T5 re-runs the D-T1..D-T4
+  // criteria in-evidence.
+  emit("\n=== PART E: H-FDCR-UNIFIED4 (NOADD votes, post-extension merge) ===\n");
+  emit("=== H-FDCR-UNIFIED4 repairs: NOADD vote table, post-extension merge ===\n");
+
+  // ---- E-T1: extension-path fragmentation, attack order (K-FU4-1) ----
+  // Exact X-FU3-1A red-team fixture. Old code: 2 concepts.
+  emit("\n--- E-T1: extension merge, attack order ---\n");
+  let W11:[]u8=z_alloc(65536);
+  set32(W11, ST_STR(), STR0());
+  intent_init(W11);
+  con_init(W11);
+  handle_concept_learn(W11,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W11,"T dog | color | orange;T dog | is_a | pet;T dog | size | big");
+  handle_concept_learn(W11,"T cat | size | big");
+  ntest=ntest+1;
+  let e1cat:i32=con_find_member_str(W11,"cat");
+  let e1dog:i32=con_find_member_str(W11,"dog");
+  if(con_count(W11)==1 && e1cat>=0 && e1cat==e1dog){
+    let e1p:i32=handle_proc_learn_unified(W11,"cat>tac;dog>god");
+    let e1con:i32=-99;
+    if(e1p>=0 && e1p<1000){e1con=get32(W11, intent_proc_base(W11,e1p)+8);}
+    if(e1con==0){
+      emit("E-T1 attack order: 1 concept, train_con=0 PASS\n");npass=npass+1;
+    } else {
+      emit("E-T1 FAIL: train_con=");emit(i32s(e1con));emit(" (expected 0)\n");
+    }
+  } else {
+    emit("E-T1 FAIL: count=");emit(i32s(con_count(W11)));
+    emit(" cat=");emit(i32s(e1cat));emit(" dog=");emit(i32s(e1dog));emit("\n");
+  }
+
+  // ---- E-T2: same facts, control order (K-FU4-1) ----
+  // Exact X-FU3-1B red-team fixture. Must stay 1 concept.
+  emit("\n--- E-T2: extension merge, control order ---\n");
+  let W12:[]u8=z_alloc(65536);
+  set32(W12, ST_STR(), STR0());
+  intent_init(W12);
+  con_init(W12);
+  handle_concept_learn(W12,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W12,"T cat | size | big");
+  handle_concept_learn(W12,"T dog | color | orange;T dog | is_a | pet;T dog | size | big");
+  ntest=ntest+1;
+  let e2cat:i32=con_find_member_str(W12,"cat");
+  let e2dog:i32=con_find_member_str(W12,"dog");
+  if(con_count(W12)==1 && e2cat>=0 && e2cat==e2dog){
+    let e2p:i32=handle_proc_learn_unified(W12,"cat>tac;dog>god");
+    let e2con:i32=-99;
+    if(e2p>=0 && e2p<1000){e2con=get32(W12, intent_proc_base(W12,e2p)+8);}
+    if(e2con==0){
+      emit("E-T2 control order: 1 concept, train_con=0 PASS\n");npass=npass+1;
+    } else {
+      emit("E-T2 FAIL: train_con=");emit(i32s(e2con));emit(" (expected 0)\n");
+    }
+  } else {
+    emit("E-T2 FAIL: count=");emit(i32s(con_count(W12)));
+    emit(" cat=");emit(i32s(e2cat));emit(" dog=");emit(i32s(e2dog));emit("\n");
+  }
+
+  // ---- E-T3: member-cap vote splitting (K-FU4-2) ----
+  // Exact X-FU3-2 red-team fixture. Old code: train_con=-1.
+  emit("\n--- E-T3: NOADD votes ---\n");
+  let W13:[]u8=z_alloc(65536);
+  set32(W13, ST_STR(), STR0());
+  intent_init(W13);
+  con_init(W13);
+  handle_concept_learn(W13,"T qaa | is_a | pet;T qab | is_a | pet;T qac | is_a | pet;T qad | is_a | pet;T qae | is_a | pet;T qaf | is_a | pet;T qag | is_a | pet;T qah | is_a | pet;T qai | is_a | pet;T qaj | is_a | pet;T qak | is_a | pet;T qal | is_a | pet;T qam | is_a | pet;T qan | is_a | pet;T qao | is_a | pet;T qap | is_a | pet");
+  ntest=ntest+1;
+  let e3p:i32=handle_proc_learn_unified(W13,"qaa>aaq;qab>baq;qac>caq;qad>daq;qae>eaq;qaf>faq;qag>gaq;qah>haq;qai>iaq;qaj>jaq;qak>kaq;qal>laq;qam>maq;qan>naq;qao>oaq;qap>paq");
+  let e3con:i32=-99;
+  if(e3p>=0 && e3p<1000){e3con=get32(W13, intent_proc_base(W13,e3p)+8);}
+  if(e3p>=1000){e3con=get32(W13, intent_br_base(W13,e3p-1000)+8);}
+  if(con_count(W13)==1 && e3p>=0 && e3con==0 &&
+     con_find_member_str(W13,"qap")==-1 && con_vote_concept(W13,"qap")==0){
+    emit("E-T3 16 subjects: 1 concept, train_con=0, qap votes-not-member PASS\n");npass=npass+1;
+  } else {
+    emit("E-T3 FAIL: count=");emit(i32s(con_count(W13)));
+    emit(" rc=");emit(i32s(e3p));emit(" train_con=");emit(i32s(e3con));
+    emit(" qap_mem=");emit(i32s(con_find_member_str(W13,"qap")));
+    emit(" qap_vote=");emit(i32s(con_vote_concept(W13,"qap")));emit("\n");
+  }
+
+  // ---- E-T4: merge bookkeeping (K-FU4-5) ----
+  // C1 fills to 8 members + d8 NOADD; a proc is trained on d0
+  // (train_con=1); then cat's extension merges C1 into C0.
+  emit("\n--- E-T4: merge remap + overflow ---\n");
+  let W14:[]u8=z_alloc(65536);
+  set32(W14, ST_STR(), STR0());
+  intent_init(W14);
+  con_init(W14);
+  handle_concept_learn(W14,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W14,"T d0 | is_a | pet;T d0 | color | orange;T d0 | size | big;T d1 | is_a | pet;T d1 | color | orange;T d1 | size | big;T d2 | is_a | pet;T d2 | color | orange;T d2 | size | big;T d3 | is_a | pet;T d3 | color | orange;T d3 | size | big");
+  handle_concept_learn(W14,"T d4 | is_a | pet;T d4 | color | orange;T d4 | size | big;T d5 | is_a | pet;T d5 | color | orange;T d5 | size | big;T d6 | is_a | pet;T d6 | color | orange;T d6 | size | big;T d7 | is_a | pet;T d7 | color | orange;T d7 | size | big");
+  handle_concept_learn(W14,"T d8 | is_a | pet;T d8 | color | orange;T d8 | size | big");
+  ntest=ntest+1;
+  let e4noadd_d8:i32=noadd_find(W14,"d8");
+  let e4slot:i32=handle_proc_learn_unified(W14,"d0>0d");
+  let e4pre:i32=-99;
+  if(e4slot>=0 && e4slot<1000){e4pre=get32(W14, intent_proc_base(W14,e4slot)+8);}
+  handle_concept_learn(W14,"T cat | size | big");
+  let e4post:i32=-99;
+  if(e4slot>=0 && e4slot<1000){e4post=get32(W14, intent_proc_base(W14,e4slot)+8);}
+  let e4cat:i32=con_find_member_str(W14,"cat");
+  let e4d0:i32=con_find_member_str(W14,"d0");
+  let e4d7m:i32=con_find_member_str(W14,"d7");
+  let e4d7v:i32=con_vote_concept(W14,"d7");
+  let e4d8v:i32=noadd_find(W14,"d8");
+  if(con_count(W14)==1 && e4noadd_d8==1 && e4pre==1 && e4post==0 &&
+     e4cat==0 && e4d0==0 && e4d7m==-1 && e4d7v==0 && e4d8v==0){
+    emit("E-T4 merge: remap + overflow-to-votes PASS\n");npass=npass+1;
+  } else {
+    emit("E-T4 FAIL: count=");emit(i32s(con_count(W14)));
+    emit(" noadd_d8_pre=");emit(i32s(e4noadd_d8));
+    emit(" precon=");emit(i32s(e4pre));emit(" postcon=");emit(i32s(e4post));
+    emit(" cat=");emit(i32s(e4cat));emit(" d0=");emit(i32s(e4d0));
+    emit(" d7mem=");emit(i32s(e4d7m));emit(" d7vote=");emit(i32s(e4d7v));
+    emit(" d8vote=");emit(i32s(e4d8v));emit("\n");
+  }
+
+  // ---- E-T5: FU3 regression criteria (K-FU4-3, in-evidence) ----
+  emit("\n--- E-T5: FU3 regression ---\n");
+  ntest=ntest+1;
+  let rok:i32=0;
+  // D-T1 criterion.
+  let W15:[]u8=z_alloc(65536);
+  set32(W15, ST_STR(), STR0());
+  intent_init(W15);
+  con_init(W15);
+  let r1a:i32=handle_concept_learn(W15,"T cat | is_a | pet;T cat | color | orange");
+  let r1b:i32=handle_concept_learn(W15,"T dog | color | orange;T dog | is_a | pet");
+  let rcat:i32=con_find_member_str(W15,"cat");
+  let rdog:i32=con_find_member_str(W15,"dog");
+  if(r1a==2 && r1b==2 && con_count(W15)==1 && rcat>=0 && rcat==rdog){
+    let rp:i32=handle_proc_learn_unified(W15,"cat>tac;dog>god");
+    let rpcon:i32=-99;
+    if(rp>=0 && rp<1000){rpcon=get32(W15, intent_proc_base(W15,rp)+8);}
+    if(rpcon==0){rok=rok+1;}
+  }
+  // D-T2 criterion.
+  let W16:[]u8=z_alloc(65536);
+  set32(W16, ST_STR(), STR0());
+  intent_init(W16);
+  con_init(W16);
+  let r2:i32=handle_concept_learn(W16,"T s0 | is_a | pet;T s1 | is_a | pet;T s2 | is_a | pet;T s3 | is_a | pet;T s4 | is_a | pet;T s5 | is_a | pet;T s6 | is_a | pet;T s7 | is_a | pet;T s8 | is_a | pet;T s9 | is_a | pet;T s10 | is_a | pet;T s11 | is_a | pet;T s12 | is_a | pet;T s13 | is_a | pet;T s14 | is_a | pet;T s15 | is_a | pet;T s16 | is_a | pet;T s17 | is_a | pet;T s18 | is_a | pet;T s19 | is_a | pet");
+  if(r2==16 && con_find_member_str(W16,"s19")==-1 && con_find_member_str(W16,"s0")>=0){rok=rok+1;}
+  // D-T3 criterion.
+  let W17:[]u8=z_alloc(65536);
+  set32(W17, ST_STR(), STR0());
+  intent_init(W17);
+  con_init(W17);
+  let r3:i32=handle_concept_learn(W17,"T m0 | is_a | pet;T m1 | is_a | pet;T m2 | is_a | pet;T m3 | is_a | pet;T m4 | is_a | pet;T m5 | is_a | pet;T m6 | is_a | pet;T m7 | is_a | pet;T m8 | is_a | pet");
+  if(r3==9 && con_count(W17)==1 && con_find_member_str(W17,"m8")==-1 && con_find_member_str(W17,"m0")==0){rok=rok+1;}
+  // D-T4 criterion.
+  let W18:[]u8=z_alloc(65536);
+  set32(W18, ST_STR(), STR0());
+  intent_init(W18);
+  con_init(W18);
+  let r4:i32=handle_concept_learn(W18,"T u | f0 | v0;T u | f1 | v1;T u | f2 | v2;T u | f3 | v3;T u | f4 | v4;T u | f5 | v5;T u | f6 | v6;T u | f7 | v7;T u | f8 | v8;T u | f9 | v9");
+  let uc:i32=con_find_member_str(W18,"u");
+  if(r4==10 && uc>=0 && con_nfeat(W18,uc)==8){rok=rok+1;}
+  if(rok==4){
+    emit("E-T5 FU3 D-T1..D-T4 criteria hold PASS\n");npass=npass+1;
+  } else {
+    emit("E-T5 FAIL: rok=");emit(i32s(rok));emit(" (expected 4)\n");
+  }
+
+  // ============ PART F: H-FDCR-UNIFIED5 repairs ============
+  // K-FU5-1..K-FU5-5 run here on fresh worlds. K-FU5-4 also
+  // requires Parts A-E byte-identical to FDCR_UNIFIED4_RAW.txt
+  // (verified externally by diff).
+  emit("\n=== PART F: H-FDCR-UNIFIED5 (vote-exhaustion signal, merge hygiene) ===\n");
+  emit("=== H-FDCR-UNIFIED5 repairs: NOADD drop tracking, procedure NOTE, absorbed-concept clearing ===\n");
+
+  // ---- F-T1: vote-exhaustion surfaced (K-FU5-1) ----
+  // Exact red-team T2a+T2b world: 41 subjects fill the NOADD table
+  // (s41's vote lost), then the pivotal procedure learn.
+  emit("\n--- F-T1: vote-exhaustion NOTE ---\n");
+  let W19:[]u8=z_alloc(65536);
+  set32(W19, ST_STR(), STR0());
+  intent_init(W19);
+  con_init(W19);
+  handle_concept_learn(W19,"T s1 | is_a | pet;T s2 | is_a | pet;T s3 | is_a | pet;T s4 | is_a | pet;T s5 | is_a | pet;T s6 | is_a | pet;T s7 | is_a | pet;T s8 | is_a | pet;T s9 | is_a | pet;T s10 | is_a | pet;T s11 | is_a | pet;T s12 | is_a | pet;T s13 | is_a | pet;T s14 | is_a | pet;T s15 | is_a | pet;T s16 | is_a | pet");
+  handle_concept_learn(W19,"T s17 | is_a | pet;T s18 | is_a | pet;T s19 | is_a | pet;T s20 | is_a | pet;T s21 | is_a | pet;T s22 | is_a | pet;T s23 | is_a | pet;T s24 | is_a | pet;T s25 | is_a | pet;T s26 | is_a | pet;T s27 | is_a | pet;T s28 | is_a | pet;T s29 | is_a | pet;T s30 | is_a | pet;T s31 | is_a | pet;T s32 | is_a | pet");
+  handle_concept_learn(W19,"T s33 | is_a | pet;T s34 | is_a | pet;T s35 | is_a | pet;T s36 | is_a | pet;T s37 | is_a | pet;T s38 | is_a | pet;T s39 | is_a | pet;T s40 | is_a | pet;T s41 | is_a | pet");
+  handle_concept_learn(W19,"T zz | color | orange");
+  ntest=ntest+1;
+  let f1p:i32=handle_proc_learn_unified(W19,"s1>1s;zz>zz;s41>14s");
+  let f1con:i32=-99;
+  if(f1p>=0 && f1p<1000){f1con=get32(W19, intent_proc_base(W19,f1p)+8);}
+  if(f1p>=1000){f1con=get32(W19, intent_br_base(W19,f1p-1000)+8);}
+  if(con_count(W19)==2 && f1p>=0 && f1con==-1 &&
+     con_vote_concept(W19,"s1")==0 && con_vote_concept(W19,"s41")==-1 &&
+     noadd_vote_lost(W19,"s41")==1 && noadd_vote_lost(W19,"s1")==0 &&
+     noadd_vote_lost(W19,"zz")==0 && noadd_drop_total(W19)==1){
+    emit("F-T1 vote-exhaustion: train_con=-1 with explicit NOTE, s41 lost-vote tracked PASS\n");npass=npass+1;
+  } else {
+    emit("F-T1 FAIL: count=");emit(i32s(con_count(W19)));
+    emit(" train_con=");emit(i32s(f1con));
+    emit(" s1vote=");emit(i32s(con_vote_concept(W19,"s1")));
+    emit(" s41vote=");emit(i32s(con_vote_concept(W19,"s41")));
+    emit(" s41lost=");emit(i32s(noadd_vote_lost(W19,"s41")));
+    emit(" drops=");emit(i32s(noadd_drop_total(W19)));emit("\n");
+  }
+
+  // ---- F-T2: merge overflow into a full NOADD table (K-FU5-2) ----
+  // 41 subjects fill the table (s41 dropped); C1 (8 members) merges
+  // into C0 and its 8 members overflow into the full table.
+  emit("\n--- F-T2: merge overflow into full table ---\n");
+  let W20:[]u8=z_alloc(65536);
+  set32(W20, ST_STR(), STR0());
+  intent_init(W20);
+  con_init(W20);
+  handle_concept_learn(W20,"T s1 | is_a | pet;T s2 | is_a | pet;T s3 | is_a | pet;T s4 | is_a | pet;T s5 | is_a | pet;T s6 | is_a | pet;T s7 | is_a | pet;T s8 | is_a | pet;T s9 | is_a | pet;T s10 | is_a | pet;T s11 | is_a | pet;T s12 | is_a | pet;T s13 | is_a | pet;T s14 | is_a | pet;T s15 | is_a | pet;T s16 | is_a | pet");
+  handle_concept_learn(W20,"T s17 | is_a | pet;T s18 | is_a | pet;T s19 | is_a | pet;T s20 | is_a | pet;T s21 | is_a | pet;T s22 | is_a | pet;T s23 | is_a | pet;T s24 | is_a | pet;T s25 | is_a | pet;T s26 | is_a | pet;T s27 | is_a | pet;T s28 | is_a | pet;T s29 | is_a | pet;T s30 | is_a | pet;T s31 | is_a | pet;T s32 | is_a | pet");
+  handle_concept_learn(W20,"T s33 | is_a | pet;T s34 | is_a | pet;T s35 | is_a | pet;T s36 | is_a | pet;T s37 | is_a | pet;T s38 | is_a | pet;T s39 | is_a | pet;T s40 | is_a | pet;T s41 | is_a | pet");
+  handle_concept_learn(W20,"T m1 | is_a | pet;T m1 | color | orange;T m2 | is_a | pet;T m2 | color | orange;T m3 | is_a | pet;T m3 | color | orange;T m4 | is_a | pet;T m4 | color | orange;T m5 | is_a | pet;T m5 | color | orange;T m6 | is_a | pet;T m6 | color | orange;T m7 | is_a | pet;T m7 | color | orange;T m8 | is_a | pet;T m8 | color | orange");
+  handle_concept_learn(W20,"T s1 | color | orange");
+  ntest=ntest+1;
+  let f2p:i32=handle_proc_learn_unified(W20,"m1>1m;s1>1s");
+  let f2con:i32=-99;
+  if(f2p>=0 && f2p<1000){f2con=get32(W20, intent_proc_base(W20,f2p)+8);}
+  if(con_count(W20)==1 && noadd_drop_total(W20)==9 &&
+     noadd_vote_lost(W20,"m1")==1 && con_vote_concept(W20,"m1")==-1 &&
+     con_vote_concept(W20,"s1")==0 && f2p>=0 && f2con==-1){
+    emit("F-T2 merge overflow into full table: 9 drops tracked, NOTE fires PASS\n");npass=npass+1;
+  } else {
+    emit("F-T2 FAIL: count=");emit(i32s(con_count(W20)));
+    emit(" drops=");emit(i32s(noadd_drop_total(W20)));
+    emit(" m1lost=");emit(i32s(noadd_vote_lost(W20,"m1")));
+    emit(" m1vote=");emit(i32s(con_vote_concept(W20,"m1")));
+    emit(" train_con=");emit(i32s(f2con));emit("\n");
+  }
+
+  // ---- F-T3: absorbed-concept hygiene (K-FU5-3) ----
+  // Exact E-T1 world; the absorbed concept must be deactivated with
+  // its member/feature lists cleared.
+  emit("\n--- F-T3: absorbed-concept clearing ---\n");
+  let W21:[]u8=z_alloc(65536);
+  set32(W21, ST_STR(), STR0());
+  intent_init(W21);
+  con_init(W21);
+  handle_concept_learn(W21,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W21,"T dog | color | orange;T dog | is_a | pet;T dog | size | big");
+  handle_concept_learn(W21,"T cat | size | big");
+  ntest=ntest+1;
+  let f3cat:i32=con_find_member_str(W21,"cat");
+  let f3dog:i32=con_find_member_str(W21,"dog");
+  let f3p:i32=-1;
+  let f3con:i32=-99;
+  if(con_count(W21)==1 && f3cat>=0 && f3cat==f3dog){
+    f3p=handle_proc_learn_unified(W21,"cat>tac;dog>god");
+    if(f3p>=0 && f3p<1000){f3con=get32(W21, intent_proc_base(W21,f3p)+8);}
+  }
+  if(con_count(W21)==1 && f3cat==0 && f3dog==0 && f3con==0 &&
+     con_active(W21,1)==0 && con_nmem(W21,1)==0 && con_nfeat(W21,1)==0){
+    emit("F-T3 absorbed concept cleared: inactive, nmem=0, nfeat=0 PASS\n");npass=npass+1;
+  } else {
+    emit("F-T3 FAIL: count=");emit(i32s(con_count(W21)));
+    emit(" cat=");emit(i32s(f3cat));emit(" dog=");emit(i32s(f3dog));
+    emit(" train_con=");emit(i32s(f3con));
+    emit(" c1active=");emit(i32s(con_active(W21,1)));
+    emit(" c1nmem=");emit(i32s(con_nmem(W21,1)));
+    emit(" c1nfeat=");emit(i32s(con_nfeat(W21,1)));emit("\n");
+  }
+
+  // ---- F-T4: FU4 regression, E-T1..E-T5 criteria verbatim (K-FU5-4) ----
+  emit("\n--- F-T4: FU4 regression rerun ---\n");
+  // F-T4a: E-T1 criterion.
+  let W22:[]u8=z_alloc(65536);
+  set32(W22, ST_STR(), STR0());
+  intent_init(W22);
+  con_init(W22);
+  handle_concept_learn(W22,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W22,"T dog | color | orange;T dog | is_a | pet;T dog | size | big");
+  handle_concept_learn(W22,"T cat | size | big");
+  ntest=ntest+1;
+  let g1cat:i32=con_find_member_str(W22,"cat");
+  let g1dog:i32=con_find_member_str(W22,"dog");
+  if(con_count(W22)==1 && g1cat>=0 && g1cat==g1dog){
+    let g1p:i32=handle_proc_learn_unified(W22,"cat>tac;dog>god");
+    let g1con:i32=-99;
+    if(g1p>=0 && g1p<1000){g1con=get32(W22, intent_proc_base(W22,g1p)+8);}
+    if(g1con==0){
+      emit("F-T4a E-T1 rerun PASS\n");npass=npass+1;
+    } else {
+      emit("F-T4a FAIL: train_con=");emit(i32s(g1con));emit("\n");
+    }
+  } else {
+    emit("F-T4a FAIL: count=");emit(i32s(con_count(W22)));emit("\n");
+  }
+  // F-T4b: E-T2 criterion.
+  let W23:[]u8=z_alloc(65536);
+  set32(W23, ST_STR(), STR0());
+  intent_init(W23);
+  con_init(W23);
+  handle_concept_learn(W23,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W23,"T cat | size | big");
+  handle_concept_learn(W23,"T dog | color | orange;T dog | is_a | pet;T dog | size | big");
+  ntest=ntest+1;
+  let g2cat:i32=con_find_member_str(W23,"cat");
+  let g2dog:i32=con_find_member_str(W23,"dog");
+  if(con_count(W23)==1 && g2cat>=0 && g2cat==g2dog){
+    let g2p:i32=handle_proc_learn_unified(W23,"cat>tac;dog>god");
+    let g2con:i32=-99;
+    if(g2p>=0 && g2p<1000){g2con=get32(W23, intent_proc_base(W23,g2p)+8);}
+    if(g2con==0){
+      emit("F-T4b E-T2 rerun PASS\n");npass=npass+1;
+    } else {
+      emit("F-T4b FAIL: train_con=");emit(i32s(g2con));emit("\n");
+    }
+  } else {
+    emit("F-T4b FAIL: count=");emit(i32s(con_count(W23)));emit("\n");
+  }
+  // F-T4c: E-T3 criterion.
+  let W24:[]u8=z_alloc(65536);
+  set32(W24, ST_STR(), STR0());
+  intent_init(W24);
+  con_init(W24);
+  handle_concept_learn(W24,"T qaa | is_a | pet;T qab | is_a | pet;T qac | is_a | pet;T qad | is_a | pet;T qae | is_a | pet;T qaf | is_a | pet;T qag | is_a | pet;T qah | is_a | pet;T qai | is_a | pet;T qaj | is_a | pet;T qak | is_a | pet;T qal | is_a | pet;T qam | is_a | pet;T qan | is_a | pet;T qao | is_a | pet;T qap | is_a | pet");
+  ntest=ntest+1;
+  let g3p:i32=handle_proc_learn_unified(W24,"qaa>aaq;qab>baq;qac>caq;qad>daq;qae>eaq;qaf>faq;qag>gaq;qah>haq;qai>iaq;qaj>jaq;qak>kaq;qal>laq;qam>maq;qan>naq;qao>oaq;qap>paq");
+  let g3con:i32=-99;
+  if(g3p>=0 && g3p<1000){g3con=get32(W24, intent_proc_base(W24,g3p)+8);}
+  if(g3p>=1000){g3con=get32(W24, intent_br_base(W24,g3p-1000)+8);}
+  if(con_count(W24)==1 && g3p>=0 && g3con==0 &&
+     con_find_member_str(W24,"qap")==-1 && con_vote_concept(W24,"qap")==0){
+    emit("F-T4c E-T3 rerun PASS\n");npass=npass+1;
+  } else {
+    emit("F-T4c FAIL: count=");emit(i32s(con_count(W24)));
+    emit(" train_con=");emit(i32s(g3con));emit("\n");
+  }
+  // F-T4d: E-T4 criterion.
+  let W25:[]u8=z_alloc(65536);
+  set32(W25, ST_STR(), STR0());
+  intent_init(W25);
+  con_init(W25);
+  handle_concept_learn(W25,"T cat | is_a | pet;T cat | color | orange");
+  handle_concept_learn(W25,"T d0 | is_a | pet;T d0 | color | orange;T d0 | size | big;T d1 | is_a | pet;T d1 | color | orange;T d1 | size | big;T d2 | is_a | pet;T d2 | color | orange;T d2 | size | big;T d3 | is_a | pet;T d3 | color | orange;T d3 | size | big");
+  handle_concept_learn(W25,"T d4 | is_a | pet;T d4 | color | orange;T d4 | size | big;T d5 | is_a | pet;T d5 | color | orange;T d5 | size | big;T d6 | is_a | pet;T d6 | color | orange;T d6 | size | big;T d7 | is_a | pet;T d7 | color | orange;T d7 | size | big");
+  handle_concept_learn(W25,"T d8 | is_a | pet;T d8 | color | orange;T d8 | size | big");
+  ntest=ntest+1;
+  let g4noadd_d8:i32=noadd_find(W25,"d8");
+  let g4slot:i32=handle_proc_learn_unified(W25,"d0>0d");
+  let g4pre:i32=-99;
+  if(g4slot>=0 && g4slot<1000){g4pre=get32(W25, intent_proc_base(W25,g4slot)+8);}
+  handle_concept_learn(W25,"T cat | size | big");
+  let g4post:i32=-99;
+  if(g4slot>=0 && g4slot<1000){g4post=get32(W25, intent_proc_base(W25,g4slot)+8);}
+  let g4cat:i32=con_find_member_str(W25,"cat");
+  let g4d0:i32=con_find_member_str(W25,"d0");
+  let g4d7m:i32=con_find_member_str(W25,"d7");
+  let g4d7v:i32=con_vote_concept(W25,"d7");
+  let g4d8v:i32=noadd_find(W25,"d8");
+  if(con_count(W25)==1 && g4noadd_d8==1 && g4pre==1 && g4post==0 &&
+     g4cat==0 && g4d0==0 && g4d7m==-1 && g4d7v==0 && g4d8v==0){
+    emit("F-T4d E-T4 rerun PASS\n");npass=npass+1;
+  } else {
+    emit("F-T4d FAIL: count=");emit(i32s(con_count(W25)));
+    emit(" postcon=");emit(i32s(g4post));emit("\n");
+  }
+  // F-T4e: E-T5 criterion (D-T1..D-T4).
+  ntest=ntest+1;
+  let grok:i32=0;
+  let W26:[]u8=z_alloc(65536);
+  set32(W26, ST_STR(), STR0());
+  intent_init(W26);
+  con_init(W26);
+  let gr1a:i32=handle_concept_learn(W26,"T cat | is_a | pet;T cat | color | orange");
+  let gr1b:i32=handle_concept_learn(W26,"T dog | color | orange;T dog | is_a | pet");
+  let grcat:i32=con_find_member_str(W26,"cat");
+  let grdog:i32=con_find_member_str(W26,"dog");
+  if(gr1a==2 && gr1b==2 && con_count(W26)==1 && grcat>=0 && grcat==grdog){
+    let grp:i32=handle_proc_learn_unified(W26,"cat>tac;dog>god");
+    let grpcon:i32=-99;
+    if(grp>=0 && grp<1000){grpcon=get32(W26, intent_proc_base(W26,grp)+8);}
+    if(grpcon==0){grok=grok+1;}
+  }
+  let W27:[]u8=z_alloc(65536);
+  set32(W27, ST_STR(), STR0());
+  intent_init(W27);
+  con_init(W27);
+  let gr2:i32=handle_concept_learn(W27,"T s0 | is_a | pet;T s1 | is_a | pet;T s2 | is_a | pet;T s3 | is_a | pet;T s4 | is_a | pet;T s5 | is_a | pet;T s6 | is_a | pet;T s7 | is_a | pet;T s8 | is_a | pet;T s9 | is_a | pet;T s10 | is_a | pet;T s11 | is_a | pet;T s12 | is_a | pet;T s13 | is_a | pet;T s14 | is_a | pet;T s15 | is_a | pet;T s16 | is_a | pet;T s17 | is_a | pet;T s18 | is_a | pet;T s19 | is_a | pet");
+  if(gr2==16 && con_find_member_str(W27,"s19")==-1 && con_find_member_str(W27,"s0")>=0){grok=grok+1;}
+  let W28:[]u8=z_alloc(65536);
+  set32(W28, ST_STR(), STR0());
+  intent_init(W28);
+  con_init(W28);
+  let gr3:i32=handle_concept_learn(W28,"T m0 | is_a | pet;T m1 | is_a | pet;T m2 | is_a | pet;T m3 | is_a | pet;T m4 | is_a | pet;T m5 | is_a | pet;T m6 | is_a | pet;T m7 | is_a | pet;T m8 | is_a | pet");
+  if(gr3==9 && con_count(W28)==1 && con_find_member_str(W28,"m8")==-1 && con_find_member_str(W28,"m0")==0){grok=grok+1;}
+  let W29:[]u8=z_alloc(65536);
+  set32(W29, ST_STR(), STR0());
+  intent_init(W29);
+  con_init(W29);
+  let gr4:i32=handle_concept_learn(W29,"T u | f0 | v0;T u | f1 | v1;T u | f2 | v2;T u | f3 | v3;T u | f4 | v4;T u | f5 | v5;T u | f6 | v6;T u | f7 | v7;T u | f8 | v8;T u | f9 | v9");
+  let guc:i32=con_find_member_str(W29,"u");
+  if(gr4==10 && guc>=0 && con_nfeat(W29,guc)==8){grok=grok+1;}
+  if(grok==4){
+    emit("F-T4e E-T5 rerun PASS\n");npass=npass+1;
+  } else {
+    emit("F-T4e FAIL: grok=");emit(i32s(grok));emit(" (expected 4)\n");
+  }
+
+  emit("\n=== FDCR-UNIFIED RESULT: ");
+  emit(i32s(npass));
+  emit("/");
+  emit(i32s(ntest));
+  emit(" ===\n");
+  if(npass==ntest){
+    emit("H-FDCR-UNIFIED SURVIVES\n");
+    return 0;
+  }
+  emit("H-FDCR-UNIFIED KILLED\n");
+  return 1;
+}

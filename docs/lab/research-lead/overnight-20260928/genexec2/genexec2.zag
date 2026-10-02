@@ -1,0 +1,807 @@
+// genexec2.zag -- GENEXEC2: Learner-Authored Executable Semantics.
+// Pure Zag. No Python anywhere.
+//
+// A generic stack VM executes learner-constructed programs. The learner
+// builds programs via beam search (P1), library CALL composition (P2),
+// and failure-driven conditional assembly (P3). Solved programs are
+// promoted to a persistent library callable via CALL.
+//
+// Op encoding (op:i32, arg:i32):
+//   0=PUSH k, 1=IN0, 2=IN1, 3=ADD, 4=SUB, 5=MUL, 6=DIV, 7=MOD,
+//   8=NEG, 9=DUP, 10=DROP, 11=SWAP, 12=OVER,
+//   13=LT, 14=EQ, 15=GT, 16=JZ addr, 17=JNZ addr, 18=JMP addr,
+//   19=CALL f, 20=RET
+//
+// P1/P2 search only over {0..12} plus {19} for P2 (see Amendment A1).
+// P3 probes use {1,2,0,13,14,15}. Assembled programs may use 16,18.
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ program representation ============
+// A program is a []u8: bytes 0..3 = len (i32), then len * 8 bytes of
+// (op:i32 at +0, arg:i32 at +4).
+fn prog_len(p:[]u8)i32 { return get32(p, 0); }
+fn prog_set_len(p:[]u8, l:i32)void { set32(p, 0, l); return; }
+fn prog_op(p:[]u8, i:i32)i32 { return get32(p, 4+i*8); }
+fn prog_arg(p:[]u8, i:i32)i32 { return get32(p, 4+i*8+4); }
+fn prog_set(p:[]u8, i:i32, op:i32, arg:i32)void {
+  set32(p, 4+i*8, op); set32(p, 4+i*8+4, arg); return;
+}
+fn prog_new(maxlen:i32)[]u8 {
+  let p:[]u8=z_alloc(4+maxlen*8);
+  set32(p, 0, 0);
+  return p;
+}
+fn prog_copy(dst:[]u8, src:[]u8)void {
+  let l:i32=prog_len(src);
+  prog_set_len(dst, l);
+  let i:i32=0;
+  while(i<l){ prog_set(dst, i, prog_op(src,i), prog_arg(src,i)); i=i+1; }
+  return;
+}
+fn prog_append(p:[]u8, op:i32, arg:i32)void {
+  let l:i32=prog_len(p);
+  prog_set(p, l, op, arg);
+  prog_set_len(p, l+1);
+  return;
+}
+// Lexicographic compare for tie-breaking: -1, 0, 1.
+fn prog_cmp(a:[]u8, b:[]u8)i32 {
+  let la:i32=prog_len(a); let lb:i32=prog_len(b);
+  let n:i32=la; if(lb<n){n=lb;}
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=prog_op(a,i); let ob:i32=prog_op(b,i);
+    if(oa<ob){return -1;} if(oa>ob){return 1;}
+    let aa:i32=prog_arg(a,i); let ab:i32=prog_arg(b,i);
+    if(aa<ab){return -1;} if(aa>ab){return 1;}
+    i=i+1;
+  }
+  if(la<lb){return -1;} if(la>lb){return 1;}
+  return 0;
+}
+
+// ============ VM ============
+// lib_ops: []u8 of size nlib*4 holding pointers? No, Zag can't easily do
+// arrays of slices. Instead: lib is a flat []u8 where each fragment is
+// stored as (len:i32, then len*8 bytes). lib_idx[f] gives byte offset.
+// We pass lib_buf and lib_idx and nlib.
+fn mod_nonneg(a:i32, b:i32)i32 {
+  let r:i32=a - (a/b)*b;
+  if(r<0){ r=r+b; }
+  return r;
+}
+// Run program p (len pl) with inputs. Returns top of stack or 0.
+// lib_buf/lib_idx/nlib give the fragment library for CALL.
+// stack: []u8 of 256*4 bytes (caller-provided). rs: []u8 of 64*8 (caller-provided).
+fn vm_run(p:[]u8, pl:i32, in0:i32, in1:i32,
+           lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+           stack:[]u8, rs:[]u8)i32 {
+  let sp:i32=0;
+  // return stack: each entry 8 bytes (prog_id:i32, pc:i32)
+  // prog_id: -1 = main program p; else fragment index.
+  let rsp:i32=0;
+  let cur_is_main:i32=1;
+  let cur_frag:i32=-1;
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<10000){
+    let clen:i32=pl;
+    if(cur_is_main==0){ clen=get32(lib_buf, get32(lib_idx, cur_frag*4)); }
+    if(pc<0 || pc>=clen){
+      // end of current program: return or halt
+      if(cur_is_main==1){ break; }
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+      steps=steps+1;
+      continue;
+    }
+    let op:i32=0; let arg:i32=0;
+    if(cur_is_main==1){
+      op=prog_op(p, pc); arg=prog_arg(p, pc);
+    } else {
+      let base:i32=get32(lib_idx, cur_frag*4);
+      op=get32(lib_buf, base+4+pc*8); arg=get32(lib_buf, base+4+pc*8+4);
+    }
+    pc=pc+1; steps=steps+1;
+    if(op==0){ // PUSH
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){ // IN0
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){ // IN1
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==3){ // ADD
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){ // SUB
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){ // MUL
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){ // DIV
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=a/b;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==7){ // MOD
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=mod_nonneg(a,b);} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==8){ // NEG
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){ // DUP
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){ // DROP
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){ // SWAP
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){ // OVER
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){ // LT
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a<b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==14){ // EQ
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a==b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==15){ // GT
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a>b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==16){ // JZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){ // JNZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){ // JMP
+      pc=arg;
+    } else if(op==19){ // CALL
+      if(arg>=0 && arg<nlib && rsp<64){
+        let rid:i32=-1;
+        if(cur_is_main==0){ rid=cur_frag; }
+        set32(rs, rsp*8, rid); set32(rs, rsp*8+4, pc); rsp=rsp+1;
+        cur_is_main=0; cur_frag=arg; pc=0;
+      }
+    } else if(op==20){ // RET
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+    }
+  }
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+
+// ============ evaluation ============
+// Count exact matches of program p on episodes.
+fn eval_prog(p:[]u8, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+             lib_buf:[]u8, lib_idx:[]u8, nlib:i32)i32 {
+  let s:i32=0;
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let i:i32=0;
+  while(i<n){
+    let o:i32=vm_run(p, prog_len(p), get32(ein0,i*4), get32(ein1,i*4),
+                     lib_buf, lib_idx, nlib, stack, rs);
+    if(o==get32(etgt,i*4)){ s=s+1; }
+    i=i+1;
+  }
+  return s;
+}
+// Total absolute error (for beam tie-breaking).
+fn eval_mae(p:[]u8, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+            lib_buf:[]u8, lib_idx:[]u8, nlib:i32)i64 {
+  let mae:i64=0;
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let i:i32=0;
+  while(i<n){
+    let o:i32=vm_run(p, prog_len(p), get32(ein0,i*4), get32(ein1,i*4),
+                     lib_buf, lib_idx, nlib, stack, rs);
+    let d:i64=(o as i64)-(get32(etgt,i*4) as i64);
+    if(d<0){ d=-d; }
+    mae=mae+d;
+    i=i+1;
+  }
+  return mae;
+}
+
+// ============ beam search ============
+// Op universe for P1/P2 (Amendment A1): arithmetic/stack only.
+// Order is fixed for determinism.
+// Returns via out_prog (copied), out_len, out_score.
+// allow_call: 0 = P1 (no CALL), 1 = P2 (CALL f for f in 0..nlib-1).
+// max_len, beam_w as configured.
+fn beam_search(ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+               lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+               allow_call:i32, max_len:i32, beam_w:i32,
+               out_prog:[]u8)i32 {
+  // Beam storage: beam_w programs, each max_len instructions.
+  // We keep two generations: cur and next.
+  // nxt must hold beam_w * (num_ops) candidates.
+  let psize:i32=4+max_len*8;
+  let cur:[]u8=z_alloc(beam_w*psize);
+  // Max ops: 19 PUSH + 2 IN + 6 arith + 4 stack + 8 CALL = 39. Use 40.
+  let nxt_cap:i32=beam_w*40;
+  let nxt:[]u8=z_alloc(nxt_cap*psize);
+  let cur_n:i32=1;
+  // program 0 = empty
+  set32(cur, 0, 0);
+  let best_score:i32=-1;
+  let best_len:i32=0;
+  // best program stored in out_prog
+  prog_set_len(out_prog, 0);
+  let depth:i32=0;
+  while(depth<max_len){
+    // expand each program in cur by each op
+    // candidate pool: we do a simple bounded insertion into nxt
+    let nxt_n:i32=0;
+    let ci:i32=0;
+    while(ci<cur_n){
+      let base:[]u8=cur[ci*psize..ci*psize+psize];
+      // iterate ops in fixed order
+      // PUSH k for k in -9..9
+      let k:i32=-9;
+      while(k<=9){
+        if(nxt_n<nxt_cap){
+          let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize];
+          prog_copy(nb, base); prog_append(nb, 0, k);
+          nxt_n=nxt_n+1;
+        }
+        k=k+1;
+      }
+      // IN0, IN1
+      if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,1,0); nxt_n=nxt_n+1; }
+      if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,2,0); nxt_n=nxt_n+1; }
+      // ADD SUB MUL DIV MOD NEG
+      let o:i32=3;
+      while(o<=8){
+        if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,o,0); nxt_n=nxt_n+1; }
+        o=o+1;
+      }
+      // DUP DROP SWAP OVER
+      o=9;
+      while(o<=12){
+        if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,o,0); nxt_n=nxt_n+1; }
+        o=o+1;
+      }
+      // CALL f
+      if(allow_call==1){
+        let f:i32=0;
+        while(f<nlib){
+          if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,19,f); nxt_n=nxt_n+1; }
+          f=f+1;
+        }
+      }
+      ci=ci+1;
+    }
+    // Score all candidates in nxt[0..nxt_n), keep top beam_w.
+    // We maintain a sorted list of the best beam_w via insertion.
+    // Order: (score desc, mae asc, len asc, prog asc).
+    let scores:[]u8=z_alloc(nxt_n*4);
+    let maes:[]u8=z_alloc(nxt_n*8);
+    let si:i32=0;
+    while(si<nxt_n){
+      let cb:[]u8=nxt[si*psize..si*psize+psize];
+      set32(scores, si*4, eval_prog(cb, ein0, ein1, etgt, n, lib_buf, lib_idx, nlib));
+      let m:i64=eval_mae(cb, ein0, ein1, etgt, n, lib_buf, lib_idx, nlib);
+      // store i64 as two i32 (low, high)
+      set32(maes, si*8, (m as i32));
+      set32(maes, si*8+4, ((m>>32) as i32));
+      si=si+1;
+    }
+    // Helper to get mae as i64.
+    // top_idx: indices of current top, sorted by (score desc, mae asc, len asc, prog asc).
+    // top_n: number in top_idx (<= beam_w).
+    let top_idx:[]u8=z_alloc(beam_w*4);
+    let top_n:i32=0;
+    si=0;
+    while(si<nxt_n){
+      let sc:i32=get32(scores, si*4);
+      let cb:[]u8=nxt[si*psize..si*psize+psize];
+      let cl:i32=prog_len(cb);
+      let mlo:i32=get32(maes, si*8);
+      let mhi:i32=get32(maes, si*8+4);
+      // Find insertion position.
+      let pos:i32=0;
+      while(pos<top_n){
+        let oi:i32=get32(top_idx, pos*4);
+        let os:i32=get32(scores, oi*4);
+        let ob:[]u8=nxt[oi*psize..oi*psize+psize];
+        let ol:i32=prog_len(ob);
+        let olo:i32=get32(maes, oi*8);
+        let ohi:i32=get32(maes, oi*8+4);
+        let before:i32=0;
+        if(sc>os){ before=1; }
+        else if(sc==os){
+          // mae asc: compare (mhi,mlo) vs (ohi,olo)
+          if(mhi<ohi){ before=1; }
+          else if(mhi==ohi){
+            if(mlo<olo){ before=1; }
+            else if(mlo==olo){
+              if(cl<ol){ before=1; }
+              else if(cl==ol){ if(prog_cmp(cb,ob)<0){ before=1; } }
+            }
+          }
+        }
+        if(before==1){ break; }
+        pos=pos+1;
+      }
+      if(pos<beam_w){
+        // Insert at pos, shifting right.
+        let sh:i32=top_n;
+        if(sh>beam_w-1){ sh=beam_w-1; }
+        while(sh>pos){
+          set32(top_idx, sh*4, get32(top_idx, (sh-1)*4));
+          sh=sh-1;
+        }
+        set32(top_idx, pos*4, si);
+        if(top_n<beam_w){ top_n=top_n+1; }
+        // Update global best if this is better.
+        let better:i32=0;
+        if(sc>best_score){ better=1; }
+        else if(sc==best_score){
+          if(cl<best_len){ better=1; }
+          else if(cl==best_len){ if(prog_cmp(cb,out_prog)<0){ better=1; } }
+        }
+        if(better==1){ best_score=sc; best_len=cl; prog_copy(out_prog, cb); }
+      }
+      si=si+1;
+    }
+    // Copy top into cur for next depth, deduplicating.
+    let taken:i32=0;
+    let oi:i32=0;
+    while(oi<top_n && taken<beam_w){
+      let idx:i32=get32(top_idx, oi*4);
+      let cb:[]u8=nxt[idx*psize..idx*psize+psize];
+      let dup:i32=0;
+      let t2:i32=0;
+      while(t2<taken){
+        let tb:[]u8=cur[t2*psize..t2*psize+psize];
+        if(prog_cmp(cb,tb)==0){ dup=1; }
+        t2=t2+1;
+      }
+      if(dup==0){
+        let db:[]u8=cur[taken*psize..taken*psize+psize];
+        prog_copy(db, cb);
+        taken=taken+1;
+      }
+      oi=oi+1;
+    }
+    cur_n=taken;
+    if(cur_n==0){ break; }
+    // Early exit: if best is exact and (depth+1) is minimal possible?
+    // We continue to allow shorter exact to be found, but depth only grows.
+    // Actually once we find exact at depth d, any later exact has len>d,
+    // so we can stop. But there might be a SHORTER exact we missed? No:
+    // beam explores by increasing length, so first exact found is shortest
+    // among beam-reachable. We still continue in case a shorter exact exists
+    // at the same depth via different path? No, same depth = same length.
+    // So: if best_score==n, break.
+    if(best_score==n){ break; }
+    depth=depth+1;
+  }
+  return best_score;
+}
+
+// ============ P3: failure-driven conditional assembly ============
+// Probe family: [INx, PUSH k, CMP] for x in {0,1}, k in -4..4,
+// CMP in {LT(13), GT(15), EQ(14)}. Fixed order.
+// Returns 1 if a conditional was assembled into out_prog, 0 otherwise.
+// Sets out_probe_desc for the trace (probe op/arg summary).
+fn try_conditional(ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+                   best_prog:[]u8, best_score:i32,
+                   lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+                   out_prog:[]u8, out_info:[]u8)i32 {
+  // Build fail flags: 1 if best_prog is wrong on episode i.
+  let fail:[]u8=z_alloc(n*4);
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let i:i32=0;
+  while(i<n){
+    let o:i32=vm_run(best_prog, prog_len(best_prog),
+                     get32(ein0,i*4), get32(ein1,i*4),
+                     lib_buf, lib_idx, nlib, stack, rs);
+    if(o==get32(etgt,i*4)){ set32(fail,i*4,0); } else { set32(fail,i*4,1); }
+    i=i+1;
+  }
+  // Try probes in fixed order.
+  let x:i32=0;
+  while(x<=1){
+    let k:i32=-4;
+    while(k<=4){
+      let c:i32=0;
+      while(c<3){
+        let cmp:i32=13; // LT
+        if(c==1){ cmp=15; } // GT
+        if(c==2){ cmp=14; } // EQ
+        // Build probe program: [INx, PUSH k, CMP]
+        let probe:[]u8=prog_new(4);
+        if(x==0){ prog_append(probe, 1, 0); } else { prog_append(probe, 2, 0); }
+        prog_append(probe, 0, k);
+        prog_append(probe, cmp, 0);
+        // Evaluate probe on all episodes.
+        // Check separation: (fail=1 iff probe=1) or (fail=1 iff probe=0).
+        let sep_a:i32=1; // fail=1 -> probe=1, fail=0 -> probe=0
+        let sep_b:i32=1; // fail=1 -> probe=0, fail=0 -> probe=1
+        let cnt_p1:i32=0; let cnt_p0:i32=0;
+        i=0;
+        while(i<n){
+          let pv:i32=vm_run(probe, 3, get32(ein0,i*4), get32(ein1,i*4),
+                            lib_buf, lib_idx, nlib, stack, rs);
+          if(pv!=0 && pv!=1){ sep_a=0; sep_b=0; }
+          else {
+            if(pv==1){ cnt_p1=cnt_p1+1; } else { cnt_p0=cnt_p0+1; }
+            let f:i32=get32(fail,i*4);
+            if(f==1 && pv!=1){ sep_a=0; }
+            if(f==0 && pv!=0){ sep_a=0; }
+            if(f==1 && pv!=0){ sep_b=0; }
+            if(f==0 && pv!=1){ sep_b=0; }
+          }
+          i=i+1;
+        }
+        if(cnt_p1==0 || cnt_p0==0){ sep_a=0; sep_b=0; }
+        if(sep_a==1 || sep_b==1){
+          // Split episodes. subset_T = probe=1, subset_F = probe=0.
+          let t_in0:[]u8=z_alloc(n*4); let t_in1:[]u8=z_alloc(n*4); let t_tgt:[]u8=z_alloc(n*4);
+          let f_in0:[]u8=z_alloc(n*4); let f_in1:[]u8=z_alloc(n*4); let f_tgt:[]u8=z_alloc(n*4);
+          let nt:i32=0; let nf:i32=0;
+          i=0;
+          while(i<n){
+            let pv:i32=vm_run(probe, 3, get32(ein0,i*4), get32(ein1,i*4),
+                              lib_buf, lib_idx, nlib, stack, rs);
+            if(pv==1){
+              set32(t_in0,nt*4,get32(ein0,i*4)); set32(t_in1,nt*4,get32(ein1,i*4)); set32(t_tgt,nt*4,get32(etgt,i*4));
+              nt=nt+1;
+            } else {
+              set32(f_in0,nf*4,get32(ein0,i*4)); set32(f_in1,nf*4,get32(ein1,i*4)); set32(f_tgt,nf*4,get32(etgt,i*4));
+              nf=nf+1;
+            }
+            i=i+1;
+          }
+          // Synthesize bodies via P1 (no CALL) on subsets.
+          let body_t:[]u8=prog_new(16);
+          let body_f:[]u8=prog_new(16);
+          let st:i32=beam_search(t_in0, t_in1, t_tgt, nt,
+                                 lib_buf, lib_idx, nlib,
+                                 0, 12, 100, body_t);
+          let sf:i32=beam_search(f_in0, f_in1, f_tgt, nf,
+                                 lib_buf, lib_idx, nlib,
+                                 0, 12, 100, body_f);
+          if(st==nt && sf==nf){
+            // Assemble: [probe][JZ L_else][body_T][JMP L_end][body_F]
+            let plen:i32=3;
+            let tlen:i32=prog_len(body_t);
+            let flen:i32=prog_len(body_f);
+            let l_else:i32=plen+1+tlen+1;
+            let l_end:i32=l_else+flen;
+            prog_set_len(out_prog, 0);
+            // probe
+            prog_append(out_prog, prog_op(probe,0), prog_arg(probe,0));
+            prog_append(out_prog, prog_op(probe,1), prog_arg(probe,1));
+            prog_append(out_prog, prog_op(probe,2), prog_arg(probe,2));
+            // JZ L_else
+            prog_append(out_prog, 16, l_else);
+            // body_T
+            i=0; while(i<tlen){ prog_append(out_prog, prog_op(body_t,i), prog_arg(body_t,i)); i=i+1; }
+            // JMP L_end
+            prog_append(out_prog, 18, l_end);
+            // body_F (at L_else)
+            i=0; while(i<flen){ prog_append(out_prog, prog_op(body_f,i), prog_arg(body_f,i)); i=i+1; }
+            // out_info: probe x, k, cmp
+            set32(out_info, 0, x); set32(out_info, 4, k); set32(out_info, 8, cmp);
+            set32(out_info, 12, tlen); set32(out_info, 16, flen);
+            return 1;
+          }
+        }
+        c=c+1;
+      }
+      k=k+1;
+    }
+    x=x+1;
+  }
+  return 0;
+}
+
+// ============ library ============
+// lib_buf: flat storage. lib_idx[f]: byte offset of fragment f.
+// Each fragment: [len:i32][op,arg pairs...].
+// lib_cap: max fragments (8).
+fn lib_promote(lib_buf:[]u8, lib_idx:[]u8, nlib:i32, prog:[]u8, lib_used:i32)i32 {
+  // Find free offset: we track lib_used as bytes used.
+  let off:i32=lib_used;
+  let l:i32=prog_len(prog);
+  set32(lib_buf, off, l);
+  let i:i32=0;
+  while(i<l){
+    set32(lib_buf, off+4+i*8, prog_op(prog,i));
+    set32(lib_buf, off+4+i*8+4, prog_arg(prog,i));
+    i=i+1;
+  }
+  set32(lib_idx, nlib*4, off);
+  return off+4+l*8; // new lib_used
+}
+fn lib_get_len(lib_buf:[]u8, lib_idx:[]u8, f:i32)i32 {
+  return get32(lib_buf, get32(lib_idx, f*4));
+}
+
+// ============ trace helpers ============
+fn op_name(op:i32)[]u8 {
+  if(op==0){return "PUSH";}
+  if(op==1){return "IN0";}
+  if(op==2){return "IN1";}
+  if(op==3){return "ADD";}
+  if(op==4){return "SUB";}
+  if(op==5){return "MUL";}
+  if(op==6){return "DIV";}
+  if(op==7){return "MOD";}
+  if(op==8){return "NEG";}
+  if(op==9){return "DUP";}
+  if(op==10){return "DROP";}
+  if(op==11){return "SWAP";}
+  if(op==12){return "OVER";}
+  if(op==13){return "LT";}
+  if(op==14){return "EQ";}
+  if(op==15){return "GT";}
+  if(op==16){return "JZ";}
+  if(op==17){return "JNZ";}
+  if(op==18){return "JMP";}
+  if(op==19){return "CALL";}
+  return "RET";
+}
+fn print_prog(p:[]u8)void {
+  let l:i32=prog_len(p);
+  emit("[");
+  let i:i32=0;
+  while(i<l){
+    if(i>0){emit(" ");}
+    emit(op_name(prog_op(p,i)));
+    let op:i32=prog_op(p,i);
+    if(op==0 || op==16 || op==17 || op==18 || op==19){
+      emit(":"); e64(prog_arg(p,i));
+    }
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+fn count_calls(p:[]u8, f:i32)i32 {
+  let c:i32=0;
+  let i:i32=0;
+  let l:i32=prog_len(p);
+  while(i<l){
+    if(prog_op(p,i)==19 && prog_arg(p,i)==f){ c=c+1; }
+    i=i+1;
+  }
+  return c;
+}
+
+// ============ task episodes ============
+// Fill ein0, ein1, etgt (each n*4 bytes). Returns n.
+fn build_task(t:i32, ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  if(t==0){
+    // T0: y = 2x+1, x in 0..8
+    let x:i32=0;
+    while(x<=8){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,2*x+1);
+      n=n+1; x=x+1;
+    }
+  } else if(t==1){
+    // T1: y = |x|, x in -8..8
+    let x:i32=-8;
+    while(x<=8){
+      let y:i32=x; if(y<0){y=-y;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,y);
+      n=n+1; x=x+1;
+    }
+  } else if(t==2){
+    // T2: y = x mod 3, x in 0..16
+    let x:i32=0;
+    while(x<=16){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,mod_nonneg(x,3));
+      n=n+1; x=x+1;
+    }
+  } else if(t==3){
+    // T3: y = 1 if (a+b) even else 0, a,b in 0..4
+    let a:i32=0;
+    while(a<=4){
+      let b:i32=0;
+      while(b<=4){
+        let y:i32=0; if(mod_nonneg(a+b,2)==0){y=1;}
+        set32(ein0,n*4,a); set32(ein1,n*4,b); set32(etgt,n*4,y);
+        n=n+1; b=b+1;
+      }
+      a=a+1;
+    }
+  } else if(t==4){
+    // T4: y = ||x|-2|, x in -6..6
+    let x:i32=-6;
+    while(x<=6){
+      let ax:i32=x; if(ax<0){ax=-ax;}
+      let d:i32=ax-2; if(d<0){d=-d;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,d);
+      n=n+1; x=x+1;
+    }
+  } else if(t==5){
+    // T5: y = |x| + |x-2|, x in -4..8
+    let x:i32=-4;
+    while(x<=8){
+      let ax:i32=x; if(ax<0){ax=-ax;}
+      let b:i32=x-2; if(b<0){b=-b;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,ax+b);
+      n=n+1; x=x+1;
+    }
+  }
+  return n;
+}
+// T1 held-out: x in -12..12 excluding -8..8
+fn build_heldout(ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  let x:i32=-12;
+  while(x<=12){
+    if(x<-8 || x>8){
+      let y:i32=x; if(y<0){y=-y;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,y);
+      n=n+1;
+    }
+    x=x+1;
+  }
+  return n;
+}
+
+// ============ solver ============
+// Solve one task. Returns 1 if exact, 0 otherwise.
+// solution copied to out_prog. phase_out: 1=P1, 2=P2, 3=P3.
+// disable_call: for ablation (P2 does not use CALL).
+fn solve_task(ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+              lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+              disable_call:i32,
+              out_prog:[]u8, phase_out:[]u8)i32 {
+  let p1:[]u8=prog_new(16);
+  let s1:i32=beam_search(ein0, ein1, etgt, n, lib_buf, lib_idx, nlib,
+                         0, 12, 100, p1);
+  let best:[]u8=prog_new(40);
+  prog_copy(best, p1);
+  let best_score:i32=s1;
+  let phase:i32=1;
+  // P2 (if lib non-empty and CALL allowed)
+  if(nlib>0 && disable_call==0){
+    let p2:[]u8=prog_new(16);
+    let s2:i32=beam_search(ein0, ein1, etgt, n, lib_buf, lib_idx, nlib,
+                           1, 10, 100, p2);
+    // Select: exact beats non-exact; tie -> shorter.
+    if(s2==n && (s1<n || prog_len(p2)<prog_len(p1))){
+      prog_copy(best, p2); best_score=s2; phase=2;
+    } else if(s2==n && s1==n && prog_len(p2)<prog_len(p1)){
+      prog_copy(best, p2); best_score=s2; phase=2;
+    } else if(s2>n && s2>best_score){
+      // P2 better but not exact; keep for P3 fail analysis? P3 uses best.
+      // Actually P3 needs the best (possibly non-exact) for fail flags.
+      // We'll use the higher-scoring one.
+      if(s2>s1){ prog_copy(best, p2); best_score=s2; phase=2; }
+    }
+  }
+  if(best_score==n){
+    prog_copy(out_prog, best);
+    set32(phase_out, 0, phase);
+    return 1;
+  }
+  // P3: conditional assembly
+  let p3:[]u8=prog_new(40);
+  let info:[]u8=z_alloc(20*4);
+  let ok:i32=try_conditional(ein0, ein1, etgt, n, best, best_score,
+                             lib_buf, lib_idx, nlib, p3, info);
+  if(ok==1){
+    let s3:i32=eval_prog(p3, ein0, ein1, etgt, n, lib_buf, lib_idx, nlib);
+    if(s3==n){
+      prog_copy(out_prog, p3);
+      set32(phase_out, 0, 3);
+      // stash probe info after phase
+      set32(phase_out, 4, get32(info,0));
+      set32(phase_out, 8, get32(info,4));
+      set32(phase_out, 12, get32(info,8));
+      return 1;
+    }
+  }
+  prog_copy(out_prog, best);
+  set32(phase_out, 0, phase);
+  return 0;
+}
+
+// ============ main ============
+fn main()void {
+  emit("GENEXEC2\n");
+  // Library: flat buffer 8KB, idx 8*4, cap 8.
+  let lib_buf:[]u8=z_alloc(8192);
+  let lib_idx:[]u8=z_alloc(8*4);
+  let nlib:i32=0;
+  let lib_used:i32=0;
+  // Task solutions for later checks.
+  let sol:[]u8=z_alloc(6*(4+40*8));
+  let sol_len:[]u8=z_alloc(6*4);
+  let t:i32=0;
+  while(t<6){
+    let ein0:[]u8=z_alloc(30*4); let ein1:[]u8=z_alloc(30*4); let etgt:[]u8=z_alloc(30*4);
+    let n:i32=build_task(t, ein0, ein1, etgt);
+    let out:[]u8=prog_new(40);
+    let ph:[]u8=z_alloc(20*4);
+    let exact:i32=solve_task(ein0, ein1, etgt, n, lib_buf, lib_idx, nlib, 0, out, ph);
+    emit("TASK "); e64(t);
+    emit(" phase="); e64(get32(ph,0));
+    emit(" exact="); e64(exact);
+    emit(" len="); e64(prog_len(out));
+    emit(" prog=");
+    print_prog(out);
+    emit("\n");
+    if(get32(ph,0)==3){
+      emit("  probe x="); e64(get32(ph,4));
+      emit(" k="); e64(get32(ph,8));
+      emit(" cmp="); emit(op_name(get32(ph,12)));
+      emit("\n");
+    }
+    // Save solution.
+    let sb:[]u8=sol[t*(4+40*8)..t*(4+40*8)+4+40*8];
+    prog_copy(sb, out);
+    // Promote if exact and lib not full.
+    if(exact==1 && nlib<8){
+      emit("  PROMOTE FRAG"); e64(nlib); emit("\n");
+      lib_used=lib_promote(lib_buf, lib_idx, nlib, out, lib_used);
+      nlib=nlib+1;
+    }
+    // T1 held-out check.
+    if(t==1 && exact==1){
+      let h0:[]u8=z_alloc(12*4); let h1:[]u8=z_alloc(12*4); let ht:[]u8=z_alloc(12*4);
+      let hn:i32=build_heldout(h0,h1,ht);
+      let hs:i32=eval_prog(out, h0,h1,ht,hn, lib_buf, lib_idx, nlib);
+      emit("  HELDOUT "); e64(hs); emit("/"); e64(hn); emit("\n");
+    }
+    t=t+1;
+  }
+  emit("NLIB "); e64(nlib); emit("\n");
+  // K-D1: count CALLs in T4 (task 4) and T5 (task 5) solutions.
+  // Fragment indices: T0->0 (STEP), T1->1 (ABS). T4 should CALL 1 twice; T5 CALL 1 twice.
+  let s4:[]u8=sol[4*(4+40*8)..4*(4+40*8)+4+40*8];
+  let s5:[]u8=sol[5*(4+40*8)..5*(4+40*8)+4+40*8];
+  emit("T4_CALLS_TO_FRAG1 "); e64(count_calls(s4,1)); emit("\n");
+  emit("T5_CALLS_TO_FRAG1 "); e64(count_calls(s5,1)); emit("\n");
+  // K-P1: verify T5 uses the same ABS bytes as T1's fragment.
+  // (Fragment 1 is T1's solution; we check s4/s5 CALL it, which count_calls does.)
+  // Ablation: re-run T4 and T5 with CALL disabled.
+  emit("ABLATION\n");
+  let at:i32=4;
+  while(at<=5){
+    let ein0:[]u8=z_alloc(30*4); let ein1:[]u8=z_alloc(30*4); let etgt:[]u8=z_alloc(30*4);
+    let n:i32=build_task(at, ein0, ein1, etgt);
+    let out:[]u8=prog_new(40);
+    let ph:[]u8=z_alloc(20*4);
+    let exact:i32=solve_task(ein0, ein1, etgt, n, lib_buf, lib_idx, nlib, 1, out, ph);
+    let sc:i32=eval_prog(out, ein0, ein1, etgt, n, lib_buf, lib_idx, nlib);
+    emit("ABL_TASK "); e64(at);
+    emit(" exact="); e64(exact);
+    emit(" score="); e64(sc); emit("/"); e64(n);
+    emit(" len="); e64(prog_len(out)); emit("\n");
+    at=at+1;
+  }
+  emit("DONE\n");
+  return;
+}

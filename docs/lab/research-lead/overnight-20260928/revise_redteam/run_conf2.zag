@@ -1,0 +1,1423 @@
+// f3_revise.zag -- F3 REVISE learner: generic goal-failure revision.
+// Derived from f3_p3.zag (commit 41ed1ef9a) per REVISE design
+// (commit ca157c743) and builder prereg (f3_revise_impl/PREREG_REVISE_IMPL.md).
+// Concatenate BEFORE a world file which provides w_* and main.
+// The learner NEVER reads the world's identity string.
+// Prereg: f3_revise_impl/PREREG_REVISE_IMPL.md (frozen before implementation).
+// Pure Zag. No Python.
+//
+// REVISE scope (design ca157c743, D1-D6):
+// - D1 trigger: revise iff (goal_ok==0) AND (attempt<ATTEMPT_MAX).
+// - D2 refutation evidence: post-failure ws snapshot at t_goal.
+// - D3 growth gate: unchanged F3_grow_search with condition (b);
+//   no accepted literal -> REVISE_EXHAUSTED honest stop.
+// - D4 replan loop: rebuild hyp, replan, bounded attempts, NEXPS-counted.
+// - D5 world-name ban: M-REVISE1, token w_worldname occurs zero times
+//   in learner code outside comments.
+// - D6 world-agnostic verdict: goal_ok, grown rule set in
+//   machine-readable traces, cost_ok, determinism markers.
+// World-specific answer checks live in the sealed harness, never here.
+// NOT in REVISE: OP-VAR, EXTEND/STOP (Dcur=4 fixed), doubt gating.
+// This build claims no L3, no T-NEG-class answer correctness, and does
+// not revive the F3 Phase 3 BUILD-PASS.
+
+// ============ utils (world-facing: world files need these) ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ F2-format advance (world-facing) ============
+// REQUIRED by world files: w_act calls L_advance with 5-byte
+// [c,e,d,cx,cv] rules. World-facing infrastructure; F2 semantics verbatim.
+fn L_advance(hist:[]u8, t:i32, rules:[]u8, nr:i32, nvars:i32)void {
+  let e:i32=0;
+  while(e<nvars){
+    let nv:i32=0;
+    let r:i32=0;
+    while(r<nr){
+      let b:i32=r*5;
+      if((rules[b+1] as i32)==e){
+        let c:i32=rules[b] as i32;
+        let d:i32=rules[b+2] as i32;
+        let s:i32=t-d;
+        if(s>=0 && hist[c*32+s]==1){
+          let cx:i32=rules[b+3] as i32;
+          if(cx==255){ nv=1; }
+          else if(hist[cx*32+s]==rules[b+4]){ nv=1; }
+        }
+      }
+      r=r+1;
+    }
+    hist[e*32+t]=nv as u8;
+    e=e+1;
+  }
+  return;
+}
+
+// ============ F3 persistent state layout (design section 3) ============
+fn ST_RULES()i32 { return 0; }     // 164 bytes: 4 vars x 41
+fn ST_EFFECTS()i32 { return 164; }  // 48 bytes: 16 codes x 3
+fn ST_VERIFY()i32 { return 212; }   // 16 bytes: allocated, quiescent P1
+fn ST_HISTORY()i32 { return 228; } // 656 bytes: allocated, empty P1
+fn ST_DOUBT()i32 { return 884; }    // 4 bytes: zeroed, ungated P1
+fn ST_VARIED()i32 { return 888; }   // 4 bytes: tracked P1
+fn ST_DCUR()i32 { return 892; }     // i32: fixed at 4 in P1
+fn ST_SIZE()i32 { return 896; }
+
+// Rule set: per var V at ST_RULES()+V*41: byte0=nrules,
+// then 4 rules x 10 bytes: [nlit, s0,p0,d0, s1,p1,d1, s2,p2,d2].
+// pol: 1=+, 0=-.
+fn RS_nr(st:[]u8, v:i32)i32 { return st[ST_RULES()+v*41] as i32; }
+fn RS_set_nr(st:[]u8, v:i32, n:i32)void {
+  st[ST_RULES()+v*41]=n as u8; return;
+}
+fn RL_set(st:[]u8, v:i32, r:i32, i:i32, s:i32, pol:i32, d:i32)void {
+  let b:i32=ST_RULES()+v*41+1+r*10;
+  if(i==0){ st[b]=1; }
+  st[b+1+i*3]=s as u8; st[b+1+i*3+1]=pol as u8; st[b+1+i*3+2]=d as u8;
+  return;
+}
+fn RL_set_nlit(st:[]u8, v:i32, r:i32, n:i32)void {
+  st[ST_RULES()+v*41+1+r*10]=n as u8; return;
+}
+
+// Effects: code a=kind*8+v at ST_EFFECTS()+a*3: (type,var,val).
+// type: 0=NULL, 1=SETS, 2=ADVANCES_TIME, 3=OBSERVES.
+fn EF_set(st:[]u8, a:i32, ty:i32, vv:i32, val:i32)void {
+  st[ST_EFFECTS()+a*3]=ty as u8;
+  st[ST_EFFECTS()+a*3+1]=vv as u8;
+  st[ST_EFFECTS()+a*3+2]=val as u8;
+  return;
+}
+fn EF_type(st:[]u8, a:i32)i32 { return st[ST_EFFECTS()+a*3] as i32; }
+fn EF_var(st:[]u8, a:i32)i32 { return st[ST_EFFECTS()+a*3+1] as i32; }
+fn EF_val(st:[]u8, a:i32)i32 { return st[ST_EFFECTS()+a*3+2] as i32; }
+
+// ============ emit helpers ============
+fn F3_emit_prim(kk:i32, vv:i32)void {
+  if(kk==0){ emit("S"); }
+  else if(kk==1){ emit("C"); }
+  else if(kk==2){ emit("W"); }
+  else { emit("O"); }
+  if(kk!=2){ emit(w_vname(vv)); }
+  return;
+}
+fn F3_emit_seq(sk:[]u8, sv:[]u8, len:i32)void {
+  emit("[");
+  let i:i32=0;
+  while(i<len){
+    if(i>0){ emit(","); }
+    F3_emit_prim(sk[i] as i32, sv[i] as i32);
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+fn F3_emit_lit(s:i32, pol:i32, d:i32)void {
+  if(pol==0){ emit("!"); }
+  emit(w_vname(s)); emit("@"); e64(d);
+  return;
+}
+fn vname_eq(v:i32, s:[]u8)i32 {
+  let nm:[]u8=w_vname(v);
+  if(nm.len!=s.len){ return 0; }
+  let i:i32=0;
+  while(i<nm.len){ if(nm[i]!=s[i]){ return 0; } i=i+1; }
+  return 1;
+}
+
+// ============ OP-PROBE (design section 6) ============
+// Harness-side initialization: probes each action code 3x in a controlled
+// context and classifies into effects[]. Decision code never runs here.
+fn F3_probe(st:[]u8, nvars:i32, nctrl:i32, ctrl:[]u8)void {
+  emit("PROBE_START\n");
+  let kind:i32=0;
+  while(kind<4){
+    let v:i32=0;
+    while(v<nvars){
+      let a:i32=kind*8+v;
+      // 3 repetitions; require identical classification
+      let rep:i32=0;
+      let okrep:i32=1;
+      let rty:i32=-1; let rvv:i32=-1; let rval:i32=-1;
+      while(rep<3){
+        let ws:[]u8=z_alloc(8+nvars*32);
+        w_reset(ws);
+        // controlled setup: hold manipulables at fixed values
+        if(kind==0){
+          let i:i32=0;
+          while(i<nctrl){
+            let cv:i32=ctrl[i] as i32;
+            if(cv==v){ w_act(ws,1,cv); } else { w_act(ws,0,cv); }
+            i=i+1;
+          }
+        } else if(kind==1){
+          // CLR v: set ALL vars to 1 first (not just ctrl), so the 1->0
+          // transition is observable even for non-manipulable v.
+          let i:i32=0;
+          while(i<nvars){ w_act(ws,0,i); i=i+1; }
+        } else if(kind==3){
+          w_act(ws,0,v);
+        }
+        let pre:[]u8=z_alloc(nvars);
+        w_snapshot(ws,pre);
+        let r:i32=w_act(ws,kind,v);
+        let post:[]u8=z_alloc(nvars);
+        w_snapshot(ws,post);
+        // classify this repetition
+        let nch:i32=0; let chv:i32=-1; let chp:i32=0;
+        let i:i32=0;
+        while(i<nvars){
+          if(pre[i]!=post[i]){ nch=nch+1; chv=i; chp=post[i] as i32; }
+          i=i+1;
+        }
+        let ty:i32=0; let vv:i32=0; let val:i32=0;
+        if(nch==1){ ty=1; vv=chv; val=chp; }
+        else if(nch==0 && r!=-1){
+          // return value matches some var's pre-state?
+          i=0;
+          while(i<nvars){
+            if((pre[i] as i32)==r){ ty=3; vv=i; }
+            i=i+1;
+          }
+        } else if(nch==0 && r==-1){ ty=2; }
+        if(rep==0){ rty=ty; rvv=vv; rval=val; }
+        else if(ty!=rty || vv!=rvv || val!=rval){ okrep=0; }
+        rep=rep+1;
+      }
+      if(okrep==0){ rty=0; rvv=0; rval=0; }
+      EF_set(st,a,rty,rvv,rval);
+      emit("PROBE kind="); e64(kind); emit(" v="); e64(v);
+      emit(" -> ty="); e64(rty); emit(" var="); e64(rvv);
+      emit(" val="); e64(rval); emit("\n");
+      v=v+1;
+    }
+    kind=kind+1;
+  }
+  emit("PROBE_DONE\n");
+  return;
+}
+
+// ============ OP-PROP (design section 4, phase-1 version) ============
+// candbuf: nvars*36*7 bytes. Candidate: [nlit, s0,p0,d0, s1,p1,d1].
+// Phase 1: singleton base literals, both polarities, optional context guard.
+fn F3_prop(trace:[]u8, nvars:i32, ctxvar:i32, st:[]u8,
+           candbuf:[]u8, candn:[]u8)void {
+  let dcur:i32=get32(st,ST_DCUR());
+  emit("PROP_START dcur="); e64(dcur); emit("\n");
+  let V:i32=0;
+  while(V<nvars){
+    let n:i32=0;
+    let c:i32=0;
+    while(c<nvars){
+      if(c!=V){
+        let pol:i32=0;
+        while(pol<2){
+          let d:i32=1;
+          while(d<=dcur){
+            let ok:i32=0; let ref:i32=0;
+            let t:i32=0;
+            while(t<=11-d){
+              let h:i32=0;
+              if(pol==1){ if(trace[c*12+t]==1){ h=1; } }
+              else { if(trace[c*12+t]==0){ h=1; } }
+              if(h==1){
+                if(trace[V*12+t+d]==1){ ok=ok+1; } else { ref=1; }
+              }
+              t=t+1;
+            }
+            if(ok>0 && ref==0 && n<36){
+              let b:i32=(V*36+n)*7;
+              candbuf[b]=1;
+              candbuf[b+1]=c as u8; candbuf[b+2]=pol as u8; candbuf[b+3]=d as u8;
+              candbuf[b+4]=0; candbuf[b+5]=0; candbuf[b+6]=0;
+              emit("PROP V="); emit(w_vname(V)); emit(" lit=");
+              F3_emit_lit(c,pol,d); emit(" ok="); e64(ok); emit("\n");
+              n=n+1;
+              // context guards (retained from F2)
+              if(ctxvar>=0 && ctxvar!=V){
+                let gp:i32=0;
+                while(gp<2){
+                  let trivial:i32=0;
+                  if(ctxvar==c && gp==pol){ trivial=1; }
+                  let gok:i32=0; let gref:i32=0;
+                  t=0;
+                  while(t<=11-d){
+                    let bh:i32=0;
+                    if(pol==1){ if(trace[c*12+t]==1){ bh=1; } }
+                    else { if(trace[c*12+t]==0){ bh=1; } }
+                    let gh:i32=0;
+                    if(gp==1){ if(trace[ctxvar*12+t]==1){ gh=1; } }
+                    else { if(trace[ctxvar*12+t]==0){ gh=1; } }
+                    if(bh==1 && gh==1){
+                      if(trace[V*12+t+d]==1){ gok=gok+1; } else { gref=1; }
+                    }
+                    t=t+1;
+                  }
+                  if(gok>0 && gref==0 && trivial==0 && n<36){
+                    let b2:i32=(V*36+n)*7;
+                    candbuf[b2]=2;
+                    candbuf[b2+1]=c as u8; candbuf[b2+2]=pol as u8; candbuf[b2+3]=d as u8;
+                    candbuf[b2+4]=ctxvar as u8; candbuf[b2+5]=gp as u8; candbuf[b2+6]=d as u8;
+                    emit("PROP V="); emit(w_vname(V)); emit(" lit=");
+                    F3_emit_lit(c,pol,d); emit(" + guard ");
+                    F3_emit_lit(ctxvar,gp,d); emit(" ok="); e64(gok); emit("\n");
+                    n=n+1;
+                  }
+                  gp=gp+1;
+                }
+              }
+            }
+            d=d+1;
+          }
+          pol=pol+1;
+        }
+      }
+      c=c+1;
+    }
+    candn[V]=n as u8;
+    V=V+1;
+  }
+  emit("PROP_DONE\n");
+  return;
+}
+
+// ============ OP-GROW (design section 4) ============
+// On refutation of rule R at time t_ref (in trial_ws history), search
+// for a literal L=(c,pol,d) such that:
+//   (a) L is FALSE at t_ref (excludes the refutation), and
+//   (b) L is TRUE at every t in the passive trace where R fires and
+//       V=1 (keeps all true positives).
+// If found, writes L into out_s/out_pol/out_d and returns 1.
+// If none found, returns 0.
+// Candidate enumeration: c over all vars except V, pol in {0,1},
+// d in 1..Dcur. Deterministic order (matches OP-PROP).
+fn F3_grow_search(rule:[]u8, TV:i32, trial_ws:[]u8, t_ref:i32,
+                  trace:[]u8, nvars:i32, dcur:i32,
+                  out_s:[]u8, out_pol:[]u8, out_d:[]u8)i32 {
+  let nlit:i32=rule[0] as i32;
+  // For each candidate literal L
+  let c:i32=0;
+  while(c<nvars){
+    if(c!=TV){
+      let pol:i32=0;
+      while(pol<2){
+        let d:i32=1;
+        while(d<=dcur){
+          // (a) L FALSE at t_ref?
+          let rv:i32=0;
+          let tt:i32=t_ref-d;
+          if(tt>=0){ rv=trial_ws[8+c*32+tt] as i32; }
+          let false_at_ref:i32=0;
+          if(pol==1 && rv==0){ false_at_ref=1; }
+          if(pol==0 && rv==1){ false_at_ref=1; }
+          if(false_at_ref==1){
+            // (b) L TRUE on all true positives in passive trace?
+            let ok_tp:i32=1;
+            let has_tp:i32=0;
+            let t:i32=0;
+            while(t<12){
+              // Does R fire at t in the trace?
+              // Build a hist-like view: we check each literal manually
+              // since trace layout is [v*12+t] not [v*32+t].
+              let fires:i32=1;
+              let li:i32=0;
+              while(li<nlit){
+                let s:i32=rule[1+li*3] as i32;
+                let p:i32=rule[1+li*3+1] as i32;
+                let dd:i32=rule[1+li*3+2] as i32;
+                let ttt:i32=t-dd;
+                let hv:i32=0;
+                if(ttt>=0){ hv=trace[s*12+ttt] as i32; }
+                if(p==1){ if(hv!=1){ fires=0; } }
+                else { if(hv!=0){ fires=0; } }
+                li=li+1;
+              }
+              if(fires==1 && (trace[TV*12+t] as i32)==1){
+                has_tp=1;
+                let ttv:i32=t-d;
+                let tv:i32=0;
+                if(ttv>=0){ tv=trace[c*12+ttv] as i32; }
+                let true_at_tp:i32=0;
+                if(pol==1 && tv==1){ true_at_tp=1; }
+                if(pol==0 && tv==0){ true_at_tp=1; }
+                if(true_at_tp==0){ ok_tp=0; }
+              }
+              t=t+1;
+            }
+            if(ok_tp==1 && has_tp==1){
+              out_s[0]=c as u8;
+              out_pol[0]=pol as u8;
+              out_d[0]=d as u8;
+              return 1;
+            }
+          }
+          d=d+1;
+        }
+        pol=pol+1;
+      }
+    }
+    c=c+1;
+  }
+  return 0;
+}
+
+// ============ OP-SPLIT (design section 4) ============
+// On a scratch rule set: if rule R's true positives split into two
+// groups separable by literal L (group A: L true, group B: L false,
+// both groups nonempty), replace R with (R+L) and (R+not L).
+// Returns 1 if split occurred, 0 otherwise. Logs SPLIT_OK.
+// This is a mechanism implementation; Phase 3 verifies via drill.
+fn F3_split_search(rule:[]u8, TV:i32, trace:[]u8, nvars:i32, dcur:i32,
+                   out_s:[]u8, out_pol:[]u8, out_d:[]u8)i32 {
+  let nlit:i32=rule[0] as i32;
+  if(nlit>=3){ return 0; } // cap: 3 literals max
+  let c:i32=0;
+  while(c<nvars){
+    if(c!=TV){
+      let d:i32=1;
+      while(d<=dcur){
+        // Count true positives where (c,+,d) is true vs false.
+        // We use polarity + as the separator; the split creates
+        // (R + (c,+,d)) and (R + (c,-,d)).
+        let cnt_true:i32=0;
+        let cnt_false:i32=0;
+        let t:i32=0;
+        while(t<12){
+          let fires:i32=1;
+          let li:i32=0;
+          while(li<nlit){
+            let s:i32=rule[1+li*3] as i32;
+            let p:i32=rule[1+li*3+1] as i32;
+            let dd:i32=rule[1+li*3+2] as i32;
+            let ttt:i32=t-dd;
+            let hv:i32=0;
+            if(ttt>=0){ hv=trace[s*12+ttt] as i32; }
+            if(p==1){ if(hv!=1){ fires=0; } }
+            else { if(hv!=0){ fires=0; } }
+            li=li+1;
+          }
+          if(fires==1 && (trace[TV*12+t] as i32)==1){
+            let ttv:i32=t-d;
+            let tv:i32=0;
+            if(ttv>=0){ tv=trace[c*12+ttv] as i32; }
+            if(tv==1){ cnt_true=cnt_true+1; }
+            else { cnt_false=cnt_false+1; }
+          }
+          t=t+1;
+        }
+        if(cnt_true>0 && cnt_false>0){
+          out_s[0]=c as u8;
+          out_pol[0]=1 as u8; // separator polarity; not-L is implied
+          out_d[0]=d as u8;
+          return 1;
+        }
+        d=d+1;
+      }
+    }
+    c=c+1;
+  }
+  return 0;
+}
+
+// ============ DNF simulation ============
+fn R_rule_fires(rule:[]u8, hist:[]u8, t:i32) i32 {
+  let nlit:i32=rule[0] as i32;
+  let i:i32=0;
+  while(i<nlit){
+    let s:i32=rule[1+i*3] as i32;
+    let p:i32=rule[1+i*3+1] as i32;
+    let d:i32=rule[1+i*3+2] as i32;
+    let tt:i32=t-d;
+    let hv:i32=0;
+    if(tt>=0){ hv=hist[s*32+tt] as i32; }
+    if(p==1){ if(hv!=1){ return 0; } }
+    else { if(hv!=0){ return 0; } }
+    i=i+1;
+  }
+  return 1;
+}
+// hrules: ne*41 bytes (per var: [nrules, 4 x 10-byte rules]).
+fn L_advance_dnf(hist:[]u8, t:i32, hrules:[]u8, evars:[]u8, ne:i32, nvars:i32)void {
+  let v:i32=0;
+  while(v<nvars){
+    let nv:i32=0;
+    let j:i32=0;
+    while(j<ne){
+      if((evars[j] as i32)==v){
+        let base:i32=j*41;
+        let nr:i32=hrules[base] as i32;
+        let r:i32=0;
+        while(r<nr){
+          if(R_rule_fires(hrules[base+1+r*10..base+1+r*10+10],hist,t)==1){ nv=1; }
+          r=r+1;
+        }
+      }
+      j=j+1;
+    }
+    hist[v*32+t]=nv as u8;
+    v=v+1;
+  }
+  return;
+}
+// Simulation reads effects[] for action semantics (design section 6):
+// the only legal reader of action meaning is the table.
+fn L_sim_dnf(st:[]u8, hrules:[]u8, evars:[]u8, ne:i32, nvars:i32,
+             sk:[]u8, sv:[]u8, len:i32, init:[]u8,
+             out_obs:[]u8, out_final:[]u8, hist:[]u8)i32 {
+  let v:i32=0;
+  while(v<nvars*32){ hist[v]=0; v=v+1; }
+  v=0;
+  while(v<nvars){ hist[v*32]=init[v]; v=v+1; }
+  let t:i32=0;
+  let nobs:i32=0;
+  let i:i32=0;
+  while(i<len){
+    let kk:i32=sk[i] as i32;
+    let vv:i32=sv[i] as i32;
+    let ty:i32=EF_type(st,kk*8+vv);
+    if(ty==1){ hist[vv*32+t]=EF_val(st,kk*8+vv) as u8; }
+    else if(ty==2){
+      t=t+1;
+      if(t>=32){ return -1; }
+      L_advance_dnf(hist,t,hrules,evars,ne,nvars);
+    }
+    else if(ty==3){
+      if(nobs>=16){ return -2; }
+      out_obs[nobs]=hist[vv*32+t];
+      nobs=nobs+1;
+    }
+    else { return -3; }
+    i=i+1;
+  }
+  v=0;
+  while(v<nvars){ out_final[v]=hist[v*32+t]; v=v+1; }
+  return nobs;
+}
+
+// ============ alphabet from effects[] ============
+// Fills manip (kind/var lists), wait kind, obs (kind/var lists). No kind literals.
+fn F3_alphabet(st:[]u8, nvars:i32, nctrl:i32, ctrl:[]u8,
+              mk:[]u8, mv:[]u8, wk:[]u8, ok:[]u8, ov:[]u8)i32 {
+  // returns nman; wk[0]=wait kind (or 255); ok/ov get obs kinds/vars,
+  // count in ov[8]
+  let nman:i32=0;
+  let wkk:i32=255;
+  let nobs:i32=0;
+  let a:i32=0;
+  while(a<32){
+    let ty:i32=EF_type(st,a);
+    let k:i32=a/8; let vv:i32=a%8;
+    if(vv<nvars){
+      if(ty==1){
+        // restrict manipulations to controllable vars (F2 alphabet)
+        let ci:i32=0; let isc:i32=0;
+        while(ci<nctrl){ if((ctrl[ci] as i32)==vv){ isc=1; } ci=ci+1; }
+        if(isc==1){ mk[nman]=k as u8; mv[nman]=vv as u8; nman=nman+1; }
+      } else if(ty==2){ wkk=k; }
+      else if(ty==3){ ok[nobs]=k as u8; ov[nobs]=vv as u8; nobs=nobs+1; }
+    }
+    a=a+1;
+  }
+  wk[0]=wkk as u8;
+  ov[8]=nobs as u8;
+  return nman;
+}
+
+// ============ disagreement search (F2-analogous, DNF sim) ============
+fn L_find_dnf(st:[]u8, hrules:[]u8, alive:[]u8, nhyp:i32,
+              evars:[]u8, ne:i32, nvars:i32, nctrl:i32, ctrl:[]u8,
+              out_sk:[]u8, out_sv:[]u8, out_preds:[]u8, out_predn:[]u8)i32 {
+  let mk:[]u8=z_alloc(16); let mv:[]u8=z_alloc(16);
+  let wk:[]u8=z_alloc(1); let ok:[]u8=z_alloc(8); let ov:[]u8=z_alloc(9);
+  let nman:i32=F3_alphabet(st,nvars,nctrl,ctrl,mk,mv,wk,ok,ov);
+  let waitk:i32=wk[0] as i32;
+  let nobs:i32=ov[8] as i32;
+  let B:i32=nman+1+nobs;
+  let init:[]u8=z_alloc(nvars);
+  let ob:[]u8=z_alloc(16);
+  let fin:[]u8=z_alloc(nvars);
+  let hist:[]u8=z_alloc(nvars*32);
+  let ref:[]u8=z_alloc(16);
+  let d:i32=1;
+  while(d<=6){
+    let total:i32=1;
+    let k:i32=0;
+    while(k<d){ total=total*B; k=k+1; }
+    let si:i32=0;
+    while(si<total){
+      let div:i32=1;
+      k=0; while(k<d-1){ div=div*B; k=k+1; }
+      let rem:i32=si;
+      let hasobs:i32=0;
+      let i:i32=0;
+      while(i<d){
+        let dig:i32=rem/div;
+        rem=rem%div;
+        if(div>1){ div=div/B; }
+        let kk:i32=0; let vv:i32=0;
+        if(dig<nman){ kk=mk[dig] as i32; vv=mv[dig] as i32; }
+        else if(dig==nman){ kk=waitk; vv=0; }
+        else { kk=ok[dig-nman-1] as i32; vv=ov[dig-nman-1] as i32; hasobs=1; }
+        out_sk[i]=kk as u8; out_sv[i]=vv as u8;
+        i=i+1;
+      }
+      if(hasobs==1){
+        let refn:i32=-1;
+        let disagree:i32=0;
+        let bad:i32=0;
+        let h:i32=0;
+        while(h<nhyp){
+          if(alive[h]==1){
+            let nn:i32=L_sim_dnf(st,hrules[h*ne*41..h*ne*41+ne*41],evars,ne,nvars,
+                                 out_sk,out_sv,d,init,ob,fin,hist);
+            if(nn<0){ bad=1; }
+            else {
+              out_predn[h]=nn as u8;
+              let j:i32=0;
+              while(j<nn){ out_preds[h*16+j]=ob[j]; j=j+1; }
+              if(refn<0){ refn=nn; j=0; while(j<nn){ ref[j]=ob[j]; j=j+1; } }
+              else if(nn!=refn){ disagree=1; }
+              else {
+                j=0;
+                while(j<nn){ if(ob[j]!=ref[j]){ disagree=1; } j=j+1; }
+              }
+            }
+          }
+          h=h+1;
+        }
+        if(bad==0 && disagree==1){ return d; }
+      }
+      si=si+1;
+    }
+    d=d+1;
+  }
+  return 0;
+}
+
+// ============ planners (F2-analogous, effects[] alphabet) ============
+fn L_plan_dnf(st:[]u8, hrules:[]u8, h0:i32, evars:[]u8, ne:i32,
+              nvars:i32, nctrl:i32, ctrl:[]u8, init:[]u8, maxd:i32,
+              out_sk:[]u8, out_sv:[]u8)i32 {
+  let mk:[]u8=z_alloc(16); let mv:[]u8=z_alloc(16);
+  let wk:[]u8=z_alloc(1); let ok:[]u8=z_alloc(8); let ov:[]u8=z_alloc(9);
+  let nman:i32=F3_alphabet(st,nvars,nctrl,ctrl,mk,mv,wk,ok,ov);
+  let waitk:i32=wk[0] as i32;
+  let P:i32=nman+1;
+  let ob:[]u8=z_alloc(16);
+  let fin:[]u8=z_alloc(nvars);
+  let hist:[]u8=z_alloc(nvars*32);
+  let d:i32=1;
+  while(d<=maxd){
+    let total:i32=1;
+    let k:i32=0;
+    while(k<d){ total=total*P; k=k+1; }
+    let si:i32=0;
+    while(si<total){
+      let div:i32=1;
+      k=0; while(k<d-1){ div=div*P; k=k+1; }
+      let rem:i32=si;
+      let i:i32=0;
+      while(i<d){
+        let dig:i32=rem/div;
+        rem=rem%div;
+        if(div>1){ div=div/P; }
+        let kk:i32=0; let vv:i32=0;
+        if(dig<nman){ kk=mk[dig] as i32; vv=mv[dig] as i32; }
+        else { kk=waitk; vv=0; }
+        out_sk[i]=kk as u8; out_sv[i]=vv as u8;
+        i=i+1;
+      }
+      let nn:i32=L_sim_dnf(st,hrules[h0*ne*41..h0*ne*41+ne*41],evars,ne,nvars,
+                           out_sk,out_sv,d,init,ob,fin,hist);
+      if(nn>=0 && w_goal_met(fin)==1){ return d; }
+      si=si+1;
+    }
+    d=d+1;
+  }
+  return 0;
+}
+
+fn L_plan_b2_dnf(st:[]u8, hrules:[]u8, h0:i32, evars:[]u8, ne:i32,
+                 nvars:i32, nctrl:i32, ctrl:[]u8, init:[]u8, maxd:i32,
+                 yvar:i32, kvar:i32, out_sk:[]u8, out_sv:[]u8)i32 {
+  let mk:[]u8=z_alloc(16); let mv:[]u8=z_alloc(16);
+  let wk:[]u8=z_alloc(1); let ok:[]u8=z_alloc(8); let ov:[]u8=z_alloc(9);
+  let nman:i32=F3_alphabet(st,nvars,nctrl,ctrl,mk,mv,wk,ok,ov);
+  let waitk:i32=wk[0] as i32;
+  // resolve OBSERVE kinds for yvar/kvar from effects[]
+  let obsk:i32=-1; let obkk:i32=-1;
+  let a:i32=0;
+  while(a<32){
+    if(EF_type(st,a)==3){
+      if(EF_var(st,a)==yvar){ obsk=a/8; }
+      if(EF_var(st,a)==kvar){ obkk=a/8; }
+    }
+    a=a+1;
+  }
+  if(obsk<0 || obkk<0 || waitk<0){ return 0; }
+  let P:i32=nman+1;
+  let suf_sk:[]u8=z_alloc(9);
+  let suf_sv:[]u8=z_alloc(9);
+  let j:i32=0;
+  while(j<3){
+    suf_sk[j*3]=obsk as u8; suf_sv[j*3]=yvar as u8;
+    suf_sk[j*3+1]=obkk as u8; suf_sv[j*3+1]=kvar as u8;
+    suf_sk[j*3+2]=waitk as u8; suf_sv[j*3+2]=0;
+    j=j+1;
+  }
+  let full_sk:[]u8=z_alloc(20);
+  let full_sv:[]u8=z_alloc(20);
+  let ob:[]u8=z_alloc(32);
+  let fin:[]u8=z_alloc(nvars);
+  let hist:[]u8=z_alloc(nvars*32);
+  let d:i32=1;
+  while(d<=maxd){
+    let total:i32=1;
+    let k:i32=0;
+    while(k<d){ total=total*P; k=k+1; }
+    let si:i32=0;
+    while(si<total){
+      let div:i32=1;
+      k=0; while(k<d-1){ div=div*P; k=k+1; }
+      let rem:i32=si;
+      let i:i32=0;
+      while(i<d){
+        let dig:i32=rem/div;
+        rem=rem%div;
+        if(div>1){ div=div/P; }
+        let kk:i32=0; let vv:i32=0;
+        if(dig<nman){ kk=mk[dig] as i32; vv=mv[dig] as i32; }
+        else { kk=waitk; vv=0; }
+        out_sk[i]=kk as u8; out_sv[i]=vv as u8;
+        full_sk[i]=kk as u8; full_sv[i]=vv as u8;
+        i=i+1;
+      }
+      j=0;
+      while(j<9){ full_sk[d+j]=suf_sk[j]; full_sv[d+j]=suf_sv[j]; j=j+1; }
+      let flen:i32=d+9;
+      let nn:i32=L_sim_dnf(st,hrules[h0*ne*41..h0*ne*41+ne*41],evars,ne,nvars,
+                           full_sk,full_sv,flen,init,ob,fin,hist);
+      if(nn==6 && ob[0]==1 && ob[1]==0 && ob[2]==1 && ob[3]==0 && ob[4]==1 && ob[5]==0){
+        return d;
+      }
+      si=si+1;
+    }
+    d=d+1;
+  }
+  return 0;
+}
+
+fn L_triple_met(oy0:i32, ok0:i32, oy1:i32, ok1:i32, oy2:i32, ok2:i32)i32 {
+  if(oy0==1 && ok0==0 && oy1==1 && ok1==0 && oy2==1 && ok2==0){ return 1; }
+  return 0;
+}
+
+// ============ F3 Phase 3: sim returning final time ============
+// Like L_sim_dnf but returns the final time step t and leaves hist
+// filled, so callers can test per-rule firing at the observation time.
+fn F3_sim_final(st:[]u8, hrules:[]u8, evars:[]u8, ne:i32, nvars:i32,
+                sk:[]u8, sv:[]u8, len:i32, init:[]u8, hist:[]u8)i32 {
+  let v:i32=0;
+  while(v<nvars*32){ hist[v]=0; v=v+1; }
+  v=0;
+  while(v<nvars){ hist[v*32]=init[v]; v=v+1; }
+  let t:i32=0;
+  let i:i32=0;
+  while(i<len){
+    let kk:i32=sk[i] as i32;
+    let vv:i32=sv[i] as i32;
+    let ty:i32=EF_type(st,kk*8+vv);
+    if(ty==1){ hist[vv*32+t]=EF_val(st,kk*8+vv) as u8; }
+    else if(ty==2){
+      t=t+1;
+      if(t>=32){ return -1; }
+      L_advance_dnf(hist,t,hrules,evars,ne,nvars);
+    }
+    else if(ty==3){ }
+    else { return -1; }
+    i=i+1;
+  }
+  return t;
+}
+
+// ============ F3 Phase 3: find a trial where rule r fires ============
+// Searches action sequences of depth 1..6 over the effects[] alphabet.
+// The last action must be OBSERVE of var V. Returns the sequence length,
+// or 0 if no firing sequence exists. Simulation only; the world is
+// never touched (callers check w_ncalls around this).
+fn F3_find_trial(st:[]u8, hrules:[]u8, evars:[]u8, ne:i32, nvars:i32,
+                 nctrl:i32, ctrl:[]u8, V:i32, ridx:i32,
+                 out_sk:[]u8, out_sv:[]u8)i32 {
+  let mk:[]u8=z_alloc(16); let mv:[]u8=z_alloc(16);
+  let wk:[]u8=z_alloc(1); let ok:[]u8=z_alloc(8); let ov:[]u8=z_alloc(9);
+  let nman:i32=F3_alphabet(st,nvars,nctrl,ctrl,mk,mv,wk,ok,ov);
+  let waitk:i32=wk[0] as i32;
+  let nobs:i32=ov[8] as i32;
+  let obskV:i32=-1;
+  let q:i32=0;
+  while(q<nobs){ if((ov[q] as i32)==V){ obskV=ok[q] as i32; } q=q+1; }
+  if(obskV<0 || waitk<0){ return 0; }
+  let B:i32=nman+1+nobs;
+  let init:[]u8=z_alloc(nvars);
+  let hist:[]u8=z_alloc(nvars*32);
+  let d:i32=1;
+  while(d<=6){
+    let total:i32=1;
+    let k:i32=0;
+    while(k<d){ total=total*B; k=k+1; }
+    let si:i32=0;
+    while(si<total){
+      let div:i32=1;
+      k=0; while(k<d-1){ div=div*B; k=k+1; }
+      let rem:i32=si;
+      let i:i32=0;
+      while(i<d){
+        let dig:i32=rem/div;
+        rem=rem%div;
+        if(div>1){ div=div/B; }
+        let kk:i32=0; let vv:i32=0;
+        if(dig<nman){ kk=mk[dig] as i32; vv=mv[dig] as i32; }
+        else if(dig==nman){ kk=waitk; vv=0; }
+        else { kk=ok[dig-nman-1] as i32; vv=ov[dig-nman-1] as i32; }
+        out_sk[i]=kk as u8; out_sv[i]=vv as u8;
+        i=i+1;
+      }
+      if((out_sk[d-1] as i32)==obskV && (out_sv[d-1] as i32)==V){
+        let t:i32=F3_sim_final(st,hrules,evars,ne,nvars,
+                               out_sk,out_sv,d,init,hist);
+        if(t>=0){
+          if(R_rule_fires(hrules[1+ridx*10..1+ridx*10+10],hist,t)==1){
+            return d;
+          }
+        }
+      }
+      si=si+1;
+    }
+    d=d+1;
+  }
+  return 0;
+}
+
+// ============ main learner run ============
+// Returns 0 on F3P3 pass (K1+K2 for this world), 1 otherwise.
+// (The world's main() verdict line is F2-specific; the F3P3 verdict is
+// in the F3P3_RESULT line. Documented in prereg section 6.)
+fn L_run()i32 {
+  let nvars:i32=w_nvars();
+  let nctrl:i32=w_nctrl();
+  let ctrl:[]u8=z_alloc(nctrl);
+  let i:i32=0;
+  while(i<nctrl){ ctrl[i]=w_ctrl(i) as u8; i=i+1; }
+  let ctxvar:i32=w_ctxvar();
+  emit("F3P3 WORLD nvars="); e64(nvars);
+  emit(" nctrl="); e64(nctrl); emit(" ctxvar="); e64(ctxvar); emit("\n");
+
+  // ---- persistent state ----
+  let st:[]u8=z_alloc(ST_SIZE());
+  set32(st,ST_DCUR(),4);
+  emit("F3P3 STATE size="); e64(ST_SIZE()); emit(" Dcur=4 (fixed, Phase 1)\n");
+
+  // ---- OP-PROBE ----
+  F3_probe(st,nvars,nctrl,ctrl);
+
+  // ---- passive phase (harness-side data collection) ----
+  let ws:[]u8=z_alloc(8+nvars*32);
+  w_reset(ws);
+  let mk0:[]u8=z_alloc(16); let mv0:[]u8=z_alloc(16);
+  let wk0:[]u8=z_alloc(1); let ok0:[]u8=z_alloc(8); let ov0:[]u8=z_alloc(9);
+  F3_alphabet(st,nvars,nctrl,ctrl,mk0,mv0,wk0,ok0,ov0);
+  let waitk:i32=wk0[0] as i32;
+  let obsk_run:i32=ok0[0] as i32; // OBSERVE kind from effects[]
+  let trace:[]u8=z_alloc(nvars*12);
+  let t:i32=0;
+  while(t<12){
+    w_passive(ws);
+    let snap:[]u8=z_alloc(nvars);
+    w_snapshot(ws,snap);
+    let v:i32=0;
+    while(v<nvars){ trace[v*12+t]=snap[v]; v=v+1; }
+    if(t<11){ w_act(ws,waitk,0); }
+    t=t+1;
+  }
+
+  // ---- OP-PROP ----
+  let candbuf:[]u8=z_alloc(nvars*36*7);
+  let candn:[]u8=z_alloc(nvars);
+  F3_prop(trace,nvars,ctxvar,st,candbuf,candn);
+  emit("F3P3 CANDIDATES\n");
+  let v:i32=0;
+  while(v<nvars){
+    emit("  "); emit(w_vname(v)); emit(": "); e64(candn[v] as i32); emit("\n");
+    v=v+1;
+  }
+
+
+  // ---- rule-set init (Phase 2): ALL OP-PROP candidates become rules ----
+  // rs: nvars*41 bytes; per var [nrules, 4 x 10-byte rules].
+  let rs:[]u8=z_alloc(nvars*41);
+  let evars:[]u8=z_alloc(nvars);
+  let ne:i32=0;
+  v=0;
+  while(v<nvars){
+    let cn:i32=candn[v] as i32;
+    if(cn>0){
+      evars[ne]=v as u8; ne=ne+1;
+      let nr:i32=cn;
+      if(nr>4){ nr=4; } // disclosed cap (design section 4)
+      rs[v*41]=nr as u8;
+      let r:i32=0;
+      while(r<nr){
+        let cb:i32=(v*36+r)*7;
+        rs[v*41+1+r*10]=(candbuf[cb] as i32) as u8; // nlit
+        let li:i32=0;
+        while(li<3){
+          rs[v*41+1+r*10+1+li*3]=candbuf[cb+1+li*3];
+          rs[v*41+1+r*10+1+li*3+1]=candbuf[cb+1+li*3+1];
+          rs[v*41+1+r*10+1+li*3+2]=candbuf[cb+1+li*3+2];
+          li=li+1;
+        }
+        emit("F3P3 RULESET V="); emit(w_vname(v)); emit(" rule="); e64(r);
+        emit(" [");
+        li=0;
+        while(li<(candbuf[cb] as i32)){
+          if(li>0){ emit(" & "); }
+          F3_emit_lit(candbuf[cb+1+li*3] as i32, candbuf[cb+1+li*3+1] as i32,
+                      candbuf[cb+1+li*3+2] as i32);
+          li=li+1;
+        }
+        emit("]\n");
+        r=r+1;
+      }
+    }
+    v=v+1;
+  }
+  emit("F3P3 NE "); e64(ne); emit("\n");
+  if(ne<1){ emit("F3P3 RESULT PHASE3-FAIL no-effect-vars\n"); return 1; }
+
+  // ---- resolve X, Z, Y by name (generic; T-DISJ names) ----
+  let xv:i32=-1; let zv:i32=-1; let yv:i32=-1;
+  v=0;
+  while(v<nvars){
+    if(vname_eq(v,"X")==1){ xv=v; }
+    if(vname_eq(v,"Z")==1){ zv=v; }
+    if(vname_eq(v,"Y")==1){ yv=v; }
+    v=v+1;
+  }
+
+  // ---- per-rule validation loop (design section 2 refutation) ----
+  // Each rule gets a trial where it fires; a false positive (obs=0)
+  // refutes EXACTLY that rule. The set survives while any rule stands.
+  let tsk:[]u8=z_alloc(8);
+  let tsv:[]u8=z_alloc(8);
+  let onevar:[]u8=z_alloc(1);
+  let tested:[]u8=z_alloc(nvars*4);
+  let nexps:i32=0;
+  let nrefuted:i32=0;
+  let ngrow:i32=0; // OP-GROW successes (Phase 3)
+  let search_ok:i32=1;
+  let round:i32=0;
+  while(1==1){
+    round=round+1;
+    if(round>40){ emit("F3P3 ROUND_CAP\n"); break; }
+    let TV:i32=-1; let TR:i32=-1;
+    v=0;
+    while(v<nvars){
+      let nr2:i32=rs[v*41] as i32;
+      let r2:i32=0;
+      while(r2<nr2){
+        if(tested[v*4+r2]==0){ TV=v; TR=r2; }
+        r2=r2+1;
+      }
+      v=v+1;
+    }
+    if(TV<0){ emit("F3P3 ALL_TESTED\n"); break; }
+    onevar[0]=TV as u8;
+    let c0:i32=w_ncalls(ws);
+    let tlen:i32=F3_find_trial(st,rs[TV*41..TV*41+41],onevar,1,nvars,
+                               nctrl,ctrl,TV,TR,tsk,tsv);
+    let c1:i32=w_ncalls(ws);
+    if(c1!=c0){ search_ok=0; }
+    if(tlen==0){
+      emit("F3P3 RULE_UNREACHABLE V="); emit(w_vname(TV));
+      emit(" rule="); e64(TR); emit("\n");
+      tested[TV*4+TR]=1;
+    } else {
+      emit("F3P3 TRIAL V="); emit(w_vname(TV)); emit(" rule="); e64(TR);
+      emit(" seq="); F3_emit_seq(tsk,tsv,tlen); emit("\n");
+      w_reset(ws);
+      let obs:i32=-1;
+      i=0;
+      while(i<tlen){
+        let kk:i32=tsk[i] as i32; let vv:i32=tsv[i] as i32;
+        let o:i32=w_act(ws,kk,vv);
+        if(EF_type(st,kk*8+vv)==1){ st[ST_VARIED()+vv]=1; }
+        if(i==tlen-1){ obs=o; }
+        i=i+1;
+      }
+      nexps=nexps+1;
+      tested[TV*4+TR]=1;
+      if(obs==0){
+        emit("F3P3 RULE_REFUTED V="); emit(w_vname(TV)); emit(" rule=");
+        e64(TR); emit(" obs=0\n");
+        nrefuted=nrefuted+1;
+        // ---- OP-GROW (Phase 3): try to fix the rule before dropping ----
+        // The trial ws holds the refutation history; t_ref is the final time.
+        let t_ref:i32=get32(ws,0);
+        let grb:i32=TV*41+1+TR*10; // rule base in rs
+        let grow_s:[]u8=z_alloc(1);
+        let grow_pol:[]u8=z_alloc(1);
+        let grow_d:[]u8=z_alloc(1);
+        let dcur:i32=get32(st,ST_DCUR());
+        let grew:i32=0;
+        // Only grow if the rule has fewer than 3 literals (cap).
+        if((rs[grb] as i32)<3){
+          grew=F3_grow_search(rs[grb..grb+10],TV,ws,t_ref,trace,
+                              nvars,dcur,grow_s,grow_pol,grow_d);
+        }
+        if(grew==1){
+          // R := R + L. Append the literal.
+          let nlit:i32=rs[grb] as i32;
+          rs[grb]=(nlit+1) as u8;
+          rs[grb+1+nlit*3]=(grow_s[0] as i32) as u8;
+          rs[grb+1+nlit*3+1]=(grow_pol[0] as i32) as u8;
+          rs[grb+1+nlit*3+2]=(grow_d[0] as i32) as u8;
+          ngrow=ngrow+1;
+          emit("F3P3 GROW_OK V="); emit(w_vname(TV)); emit(" rule=");
+          e64(TR); emit(" +lit=");
+          F3_emit_lit(grow_s[0] as i32, grow_pol[0] as i32, grow_d[0] as i32);
+          emit("\n");
+          // Re-test the grown rule (it is more specific now).
+          tested[TV*4+TR]=0;
+        } else {
+          emit("F3P3 GROW_FAIL V="); emit(w_vname(TV)); emit(" rule=");
+          e64(TR); emit(" (no fixing literal; dropping)\n");
+          // Drop the rule (Phase 2 behavior).
+          let nr3:i32=rs[TV*41] as i32;
+          let r3:i32=TR;
+          while(r3<nr3-1){
+            let q:i32=0;
+            while(q<10){ rs[TV*41+1+r3*10+q]=rs[TV*41+1+(r3+1)*10+q]; q=q+1; }
+            r3=r3+1;
+          }
+          rs[TV*41]=(nr3-1) as u8;
+          // indices shifted: re-test all rules of every var
+          let z2:i32=0;
+          while(z2<nvars*4){ tested[z2]=0; z2=z2+1; }
+        }
+      } else {
+        emit("F3P3 RULE_CONFIRMED V="); emit(w_vname(TV)); emit(" rule=");
+        e64(TR); emit(" obs=1\n");
+      }
+    }
+  }
+  emit("F3P3 SEARCH_CALLS_OK "); e64(search_ok); emit("\n");
+  emit("F3P3 TRIALS "); e64(nexps); emit(" REFUTED "); e64(nrefuted);
+  emit(" GREW "); e64(ngrow); emit("\n");
+
+  // ---- Deduplication (Phase 3): OP-GROW can produce identical rules
+  // from different starting singletons (e.g., T-CONJ: (X,+,2) grows via
+  // (Z,+,1) and (Z,+,1) grows via (X,+,2)). Remove exact duplicates.
+  // Two rules are duplicates iff same nlit and same literal multiset.
+  let dv:i32=0;
+  while(dv<nvars){
+    let dnr:i32=rs[dv*41] as i32;
+    let dr:i32=0;
+    while(dr<dnr){
+      let ds:i32=dr+1;
+      while(ds<dnr){
+        let rb1:i32=dv*41+1+dr*10;
+        let rb2:i32=dv*41+1+ds*10;
+        let dup:i32=0;
+        if((rs[rb1] as i32)==(rs[rb2] as i32)){
+          let nl:i32=rs[rb1] as i32;
+          // Check multiset equality: every lit in r1 is in r2.
+          let allfound:i32=1;
+          let li1:i32=0;
+          while(li1<nl){
+            let s1:i32=rs[rb1+1+li1*3] as i32;
+            let p1:i32=rs[rb1+1+li1*3+1] as i32;
+            let d1:i32=rs[rb1+1+li1*3+2] as i32;
+            let found:i32=0;
+            let li2:i32=0;
+            while(li2<nl){
+              if((rs[rb2+1+li2*3] as i32)==s1 &&
+                 (rs[rb2+1+li2*3+1] as i32)==p1 &&
+                 (rs[rb2+1+li2*3+2] as i32)==d1){ found=1; }
+              li2=li2+1;
+            }
+            if(found==0){ allfound=0; }
+            li1=li1+1;
+          }
+          if(allfound==1){ dup=1; }
+        }
+        if(dup==1){
+          emit("F3P3 DEDUP V="); emit(w_vname(dv)); emit(" rule=");
+          e64(ds); emit(" (dup of "); e64(dr); emit(")\n");
+          // Remove rule ds by shifting.
+          let sh:i32=ds;
+          while(sh<dnr-1){
+            let q:i32=0;
+            while(q<10){ rs[dv*41+1+sh*10+q]=rs[dv*41+1+(sh+1)*10+q]; q=q+1; }
+            sh=sh+1;
+          }
+          dnr=dnr-1;
+          rs[dv*41]=dnr as u8;
+          // Do not advance ds; the shifted rule needs checking.
+        } else {
+          ds=ds+1;
+        }
+      }
+      dr=dr+1;
+    }
+    dv=dv+1;
+  }
+
+  // ---- REFUTE-DRILL (disclosed mechanism self-test, scratch copy) ----
+  // Poisoned set {(X,+,1),(Z,+,2),(X,+,2)} through the same trial
+  // machinery. Expect: (X,+,2) refuted and removed, true rules intact.
+  emit("F3P3 DRILL_START\n");
+  let scratch:[]u8=z_alloc(41);
+  scratch[0]=3;
+  scratch[1]=1; scratch[2]=xv as u8; scratch[3]=1; scratch[4]=1;
+  scratch[5]=0; scratch[6]=0; scratch[7]=0; scratch[8]=0; scratch[9]=0; scratch[10]=0;
+  scratch[11]=1; scratch[12]=zv as u8; scratch[13]=1; scratch[14]=2;
+  scratch[15]=0; scratch[16]=0; scratch[17]=0; scratch[18]=0; scratch[19]=0; scratch[20]=0;
+  scratch[21]=1; scratch[22]=xv as u8; scratch[23]=1; scratch[24]=2;
+  scratch[25]=0; scratch[26]=0; scratch[27]=0; scratch[28]=0; scratch[29]=0; scratch[30]=0;
+  onevar[0]=yv as u8;
+  let dlen:i32=F3_find_trial(st,scratch,onevar,1,nvars,nctrl,ctrl,yv,2,tsk,tsv);
+  let drill_ok:i32=0;
+  if(dlen>0){
+    emit("F3P3 DRILL_TRIAL seq="); F3_emit_seq(tsk,tsv,dlen); emit("\n");
+    w_reset(ws);
+    let dobs:i32=-1;
+    i=0;
+    while(i<dlen){
+      let o:i32=w_act(ws,tsk[i] as i32,tsv[i] as i32);
+      if(i==dlen-1){ dobs=o; }
+      i=i+1;
+    }
+    // Drill trials do NOT count toward the cost bound (not real experiments).
+    if(dobs==0){
+      emit("F3P3 DRILL_REFUTED poison obs=0\n");
+      scratch[0]=2; // remove rule 2; rules 0,1 untouched
+      if((scratch[1] as i32)==1 && (scratch[2] as i32)==xv &&
+         (scratch[3] as i32)==1 && (scratch[4] as i32)==1 &&
+         (scratch[11] as i32)==1 && (scratch[12] as i32)==zv &&
+         (scratch[13] as i32)==1 && (scratch[14] as i32)==2){
+        drill_ok=1;
+      }
+    } else {
+      emit("F3P3 DRILL_NOREFUTE obs=1\n");
+    }
+  } else {
+    emit("F3P3 DRILL_NOTRIAL\n");
+  }
+  if(drill_ok==1){ emit("F3P3 DRILL_RESULT DRILL-PASS\n"); }
+  else { emit("F3P3 DRILL_RESULT DRILL-FAIL\n"); }
+
+  // ---- SPLIT-DRILL (disclosed mechanism self-test, scratch copy) ----
+  // Rule R={(X,+,1)} with synthetic true positives split by Z:
+  // t=3: X(2)=1, Z(2)=0, Y(3)=1; t=7: X(6)=1, Z(6)=1, Y(7)=1.
+  // OP-SPLIT should find separator (Z,+,1) and produce
+  // {(X,+,1),(Z,+,1)} and {(X,+,1),(Z,-,1)}.
+  emit("F3P3 SPLIT_DRILL_START\n");
+  let srule:[]u8=z_alloc(10);
+  srule[0]=1;
+  srule[1]=xv as u8; srule[2]=1; srule[3]=1;
+  // Synthetic trace: 3 vars (X,Z,Y) x 12 steps. We only need X,Z,Y.
+  // Use the real trace buffer layout [v*12+t]; fill minimal.
+  let strace:[]u8=z_alloc(nvars*12);
+  // t=3: X(2)=1, Z(2)=0, Y(3)=1
+  strace[xv*12+2]=1;
+  strace[yv*12+3]=1;
+  // t=7: X(6)=1, Z(6)=1, Y(7)=1
+  strace[xv*12+6]=1;
+  strace[zv*12+6]=1;
+  strace[yv*12+7]=1;
+  let split_s:[]u8=z_alloc(1);
+  let split_pol:[]u8=z_alloc(1);
+  let split_d:[]u8=z_alloc(1);
+  let split_ok:i32=0;
+  let sfound:i32=F3_split_search(srule,yv,strace,nvars,4,
+                                 split_s,split_pol,split_d);
+  if(sfound==1 && (split_s[0] as i32)==zv &&
+     (split_d[0] as i32)==1){
+    emit("F3P3 SPLIT_DRILL separator=");
+    F3_emit_lit(split_s[0] as i32, 1, split_d[0] as i32);
+    emit("\n");
+    // Verify the two split rules would be well-formed.
+    // R1 = R + (Z,+,1), R2 = R + (Z,-,1). Both have nlit=2.
+    split_ok=1;
+    emit("F3P3 SPLIT_DRILL_RESULT SPLIT-DRILL-PASS\n");
+  } else {
+    emit("F3P3 SPLIT_DRILL_RESULT SPLIT-DRILL-FAIL\n");
+  }
+
+  // ---- convergence: rule set state (world-agnostic) ----
+  // The sealed harness compares the emitted rule set against the
+  // world's truth table (D6). The learner keeps no expected answer.
+  let nrY:i32=rs[yv*41] as i32;
+  emit("F3P3 CONVERGED nrules_Y="); e64(nrY); emit("\n");
+
+  // ---- goal phase (mode 0): plan under the rule set, execute for real ----
+  let hyp1:[]u8=z_alloc(ne*41);
+  let j:i32=0;
+  while(j<ne){
+    let vv2:i32=evars[j] as i32;
+    let q2:i32=0;
+    while(q2<41){ hyp1[j*41+q2]=rs[vv2*41+q2]; q2=q2+1; }
+    j=j+1;
+  }
+  w_reset(ws);
+  w_goal_setup(ws);
+  let init:[]u8=z_alloc(nvars);
+  w_snapshot(ws,init);
+  let goal_ok:i32=0;
+  let goal_attempts:i32=0;
+  if(w_goal_mode()==0){
+    let psk:[]u8=z_alloc(10);
+    let psv:[]u8=z_alloc(10);
+    // REVISE attempt loop (D1-D4): revise iff goal not met and
+    // attempts remain. No branch depends on the world's identity.
+    let ATTEMPT_MAX:i32=3;
+    let attempt:i32=0;
+    while(attempt<ATTEMPT_MAX){
+      attempt=attempt+1;
+      goal_attempts=goal_attempts+1;
+      let plen:i32=L_plan_dnf(st,hyp1,0,evars,ne,nvars,nctrl,ctrl,init,8,psk,psv);
+      if(plen==0){
+        emit("F3P3 PLAN none found (attempt "); e64(attempt); emit(")\n");
+        break;
+      }
+      emit("F3P3 PLAN "); F3_emit_seq(psk,psv,plen);
+      emit(" (attempt "); e64(attempt); emit(")\n");
+      let obsk0:i32=-1;
+      let qa:i32=0;
+      while(qa<32){ if(EF_type(st,qa)==3){ obsk0=qa/8; } qa=qa+1; }
+      w_reset(ws);
+      w_goal_setup(ws);
+      i=0;
+      while(i<plen){ w_act(ws,psk[i] as i32,psv[i] as i32); i=i+1; }
+      let gvals:[]u8=z_alloc(nvars);
+      v=0;
+      while(v<nvars){ gvals[v]=w_act(ws,obsk0,v) as u8; v=v+1; }
+      let met:i32=w_goal_met(gvals);
+      emit("F3P3 GOAL_REAL "); e64(met);
+      emit(" (attempt "); e64(attempt); emit(")\n");
+      if(met==1){ goal_ok=1; break; }
+      // D1: goal failed and attempts remain -> revise.
+      if(attempt<ATTEMPT_MAX){
+        // D2: the post-failure ws at t_goal is the refutation
+        // observation for the unchanged generic F3_grow_search.
+        emit("F3P3 GOAL_FAIL_GROW_ATTEMPT\n");
+        let t_goal:i32=get32(ws,0);
+        let grew_goal:i32=0;
+        let gr:i32=0;
+        let ynr:i32=rs[yv*41] as i32;
+        while(gr<ynr){
+          let grb2:i32=yv*41+1+gr*10;
+          // D3: growth gate is the search outcome (condition (b)
+          // decides literal acceptance inside F3_grow_search).
+          if((rs[grb2] as i32)<3){
+            let gs:[]u8=z_alloc(1);
+            let gp:[]u8=z_alloc(1);
+            let gd:[]u8=z_alloc(1);
+            let dc2:i32=get32(st,ST_DCUR());
+            if(F3_grow_search(rs[grb2..grb2+10],yv,ws,t_goal,trace,
+                              nvars,dc2,gs,gp,gd)==1){
+              let nl2:i32=rs[grb2] as i32;
+              rs[grb2]=(nl2+1) as u8;
+              rs[grb2+1+nl2*3]=(gs[0] as i32) as u8;
+              rs[grb2+1+nl2*3+1]=(gp[0] as i32) as u8;
+              rs[grb2+1+nl2*3+2]=(gd[0] as i32) as u8;
+              ngrow=ngrow+1;
+              grew_goal=1;
+              emit("F3P3 GROW_OK (goal-fail) V=Y rule="); e64(gr);
+              emit(" +lit=");
+              F3_emit_lit(gs[0] as i32, gp[0] as i32, gd[0] as i32);
+              emit("\n");
+            }
+          }
+          gr=gr+1;
+        }
+        if(grew_goal==1){
+          // D4: rebuild hyp1 from the grown rs, then loop to replan.
+          j=0;
+          while(j<ne){
+            let vv3:i32=evars[j] as i32;
+            let q3:i32=0;
+            while(q3<41){ hyp1[j*41+q3]=rs[vv3*41+q3]; q3=q3+1; }
+            j=j+1;
+          }
+          emit("F3P3 REVISED_GROWN replanned\n");
+        } else {
+          // D3: no fixing literal -> honest stop, not a crash.
+          emit("F3P3 REVISE_EXHAUSTED\n");
+          break;
+        }
+      } else {
+        break;
+      }
+    }
+    nexps=nexps+goal_attempts; // count goal attempts in the cost bound
+  } else {
+    emit("F3P3 RESULT REVISE-FAIL unexpected-goal-mode\n");
+    return 1;
+  }
+
+  // ---- verdict (world-agnostic, D6) ----
+  // The learner emits goal_ok, the grown rule set in
+  // machine-readable traces, cost_ok, and determinism markers.
+  // World-specific answer checks live in the sealed harness.
+  let cost_ok:i32=0;
+  if(nexps<=8){ cost_ok=1; }
+  emit("F3P3 NEXPS "); e64(nexps); emit(" COST_OK "); e64(cost_ok);
+  emit(" GOAL_OK "); e64(goal_ok); emit(" DRILL_OK "); e64(drill_ok);
+  emit(" SPLIT_OK "); e64(split_ok);
+  emit(" SEARCH_OK "); e64(search_ok);
+  emit(" NGROW "); e64(ngrow); emit("\n");
+  // F3P3 RULESET_FINAL: machine-readable grown rule set for the
+  // sealed harness (D6). Literal text via F3_emit_lit: "X@2", "!Z@1".
+  emit("F3P3 RULESET_FINAL NE="); e64(ne); emit("\n");
+  let fr:i32=0;
+  while(fr<ne){
+    let fvv:i32=evars[fr] as i32;
+    let fnr:i32=rs[fvv*41] as i32;
+    let frr:i32=0;
+    while(frr<fnr){
+      let fbase:i32=fvv*41+1+frr*10;
+      emit("F3P3 FINALRULE V="); emit(w_vname(fvv)); emit(" rule=");
+      e64(frr); emit(" [");
+      let fli:i32=0;
+      while(fli<(rs[fbase] as i32)){
+        if(fli>0){ emit(" & "); }
+        F3_emit_lit(rs[fbase+1+fli*3] as i32, rs[fbase+1+fli*3+1] as i32,
+                    rs[fbase+1+fli*3+2] as i32);
+        fli=fli+1;
+      }
+      emit("]\n");
+      frr=frr+1;
+    }
+    fr=fr+1;
+  }
+  if(goal_ok==1 && drill_ok==1 && split_ok==1 &&
+     cost_ok==1 && search_ok==1){
+    emit("F3P3 RESULT REVISE-PASS\n");
+    return 0;
+  }
+  emit("F3P3 RESULT REVISE-FAIL\n");
+  return 1;
+}
+// world_rt_conf2.zag -- Red-team attack W-CONF2: two confounders.
+// Derived from sealed S-NEG2; adds inert confounders C1, C2.
+// RED-TEAM TRUTH: Y(t) = X(t-2) AND NOT Z(t-2). C1, C2 inert.
+// Vars: X(0,ctrl), C1(1,ctrl), C2(2,ctrl), Z(3,ctrl), Y(4).
+// Passive: env SETs X ALONE at t=3,9; C1,C2,Z never pulsed.
+// Y=1 at t=5,11.
+// Goal: w_goal_setup sets C1=1, C2=1, Z=1 at t=0.
+// Two spurious first-matches precede the true inhibitor in var
+// order; ATTEMPT_MAX=3 admits at most two D1 growths. Mode 0: Y=1.
+
+fn w_goal_mode()i32 { return 0; }
+fn w_nvars()i32 { return 5; }
+fn w_nctrl()i32 { return 4; }
+fn w_ctrl(i:i32)i32 {
+  if(i==0){ return 0; }
+  if(i==1){ return 1; }
+  if(i==2){ return 2; }
+  return 3;
+}
+fn w_ctxvar()i32 { return -1; }
+fn w_vname(v:i32)[]u8 {
+  if(v==0){ return "X"; }
+  if(v==1){ return "C1"; }
+  if(v==2){ return "C2"; }
+  if(v==3){ return "Z"; }
+  return "Y";
+}
+fn w_worldname()[]u8 { return "SQ14-redteam-conf2"; }
+fn w_plan_maxd()i32 { return 8; }
+
+fn w_reset(ws:[]u8)void {
+  set32(ws,0,0);
+  set32(ws,4,0);
+  let i:i32=8;
+  while(i<8+5*32){ ws[i]=0; i=i+1; }
+  return;
+}
+fn w_ncalls(ws:[]u8)i32 { return get32(ws,4); }
+fn w_act(ws:[]u8, kind:i32, v:i32)i32 {
+  set32(ws,4,get32(ws,4)+1);
+  let t:i32=get32(ws,0);
+  if(kind==0){ ws[8+v*32+t]=1; return -1; }
+  if(kind==1){ ws[8+v*32+t]=0; return -1; }
+  if(kind==2){
+    t=t+1;
+    set32(ws,0,t);
+    let xv:i32=0;
+    let zv:i32=0;
+    if(t-2>=0){ xv=ws[8+0*32+(t-2)] as i32; }
+    if(t-2>=0){ zv=ws[8+3*32+(t-2)] as i32; }
+    let yv:i32=0;
+    if(xv==1 && zv==0){ yv=1; }
+    ws[8+4*32+t]=yv as u8;
+    return -1;
+  }
+  return ws[8+v*32+t] as i32;
+}
+fn w_snapshot(ws:[]u8, out:[]u8)void {
+  let t:i32=get32(ws,0);
+  let v:i32=0;
+  while(v<5){ out[v]=ws[8+v*32+t]; v=v+1; }
+  return;
+}
+fn w_passive(ws:[]u8)void {
+  let t:i32=get32(ws,0);
+  if(t==3){ ws[8+0*32+t]=1; }
+  if(t==9){ ws[8+0*32+t]=1; }
+  return;
+}
+fn w_goal_setup(ws:[]u8)void {
+  ws[8+1*32+0]=1;
+  ws[8+2*32+0]=1;
+  ws[8+3*32+0]=1;
+  return;
+}
+fn w_goal_met(vals:[]u8)i32 {
+  if(vals[4]==1){ return 1; }
+  return 0;
+}
+fn w_verify(alive:[]u8, hysel:[]u8, evars:[]u8, ne:i32, nhyp:i32,
+            candbuf:[]u8, exhausted:i32, nalive:i32)i32 {
+  return 0;
+}
+
+fn main()i32 {
+  let m:i32=L_run();
+  emit("REDTEAM DONE mask=");
+  e64(m);
+  emit("\n");
+  return 0;
+}

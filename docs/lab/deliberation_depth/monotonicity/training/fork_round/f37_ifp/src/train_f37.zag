@@ -1,0 +1,440 @@
+// train_f37.zag — F37 IFP (Interior Fixed-Point Head) deterministic trainer.
+//
+// Mechanism (frozen: PREREG_FORKROUND.md §3 + ideas/grok_forks.md Fork 6;
+// full disambiguation record in f37_ifp/PRE_RUN_RECORD.md):
+//   features: f1, f5, f6, max(f4,0), my (thousandths); w1..w5, b init 0.
+//   s = b + floor(Σ w_i·f_i / 1000)
+//   C = (A_d + max(s,0))*1000 / (B_d + |s| + max(-s,0) + 1)   [raw emit]
+//   flip (theater): f3 0->1000 or f8 increased vs prev ladder depth
+//                   => C <- min(C, C_prev-1)   [chain emit]
+//   my: depth1 -> f5; else min(1000, max(0,f5-f5prev)*1000/max(Δf2,1)),
+//       Δf2 = (d-d_prev)*1000/64
+//   update (released, non-heldout only), t = #updates so far (0-based):
+//     (1) B_d++; A_d++ iff y=1
+//     (2) w_i <- w_i - floor(w_i/(1000+t))
+//                + floor((1000y-C)*f_i/(1000*(1000+t)))   [b: f=1000]
+//         decay runs every update, even when the error term is 0
+//     (3) outward freeze: (C>=980,y=1) or (C<=20,y=0) => error term skipped
+//     (4) depth coupling: mu_d = A_d*1000/B_d; if didx>0 and mu_d > mu_{d-1}+20
+//         and NOT (mean_my_d > mean_my_{d-1}) => B_d <- floor(A_d*1000/(mu_{d-1}+20))+1
+//         (closed form of the spec's unit-increment loop; identical result)
+//   All floor() are mathematical floor via ifp_fdiv (codegen-independent).
+//
+// Falsifier log: every 250 updates -> t, max|w_i| (w1..w5,b),
+// cumulative edge-band emits, cumulative emits.
+//
+// Usage: train_f37 <features.tsv> <passes> <params_out.zag> <log_out.tsv>
+//
+// Pure Zag. Zero RNG. []u8 arenas + LE accessors (ZNC-2026-09-21-007).
+// No fn named zalloc. No slice > 2^25 bytes.
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+// mathematical floor division for b>0 (deterministic regardless of codegen)
+fn ifp_fdiv(a:i64,b:i64)i64 {
+    if(b<=0){return 0;}
+    if(a>=0){return a/b;}
+    return -(((-a)+b-1)/b);
+}
+fn ifp_abs(a:i64)i64 {
+    if(a<0){return -a;}
+    return a;
+}
+fn ifp_min(a:i64,b:i64)i64 {
+    if(a<b){return a;}
+    return b;
+}
+fn ifp_max(a:i64,b:i64)i64 {
+    if(a>b){return a;}
+    return b;
+}
+
+// depth value -> d_idx 0..6 ; -1 unknown
+fn ifp_didx(d:i32)i32 {
+    if(d==1){return 0;}
+    if(d==2){return 1;}
+    if(d==4){return 2;}
+    if(d==8){return 3;}
+    if(d==16){return 4;}
+    if(d==32){return 5;}
+    if(d==64){return 6;}
+    return -1;
+}
+
+// raw (pre-flip) emit C from current head state.
+fn ifp_rawC(w:[]u8,b:i64,Ad:i64,Bd:i64,f1:i64,f5:i64,f6:i64,f4p:i64,my:i64)i64 {
+    let s:i64=b+ifp_fdiv(au_get64(w,0)*f1+au_get64(w,1)*f5+au_get64(w,2)*f6+au_get64(w,3)*f4p+au_get64(w,4)*my,1000);
+    let sp:i64=ifp_max(s,0);
+    let extra:i64=s;
+    if(s<0){extra=-2*s;}
+    let num:i64=(Ad+sp)*1000;
+    let den:i64=Bd+extra+1;
+    return num/den;
+}
+
+// find tab positions: fills tabs[0..nft] with field end offsets
+fn ifp_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+
+fn ifp_train(feat_path:[]u8,passes:i32,params_path:[]u8,log_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    // cell storage: meta (8 i32/cell), feats (8 i32/cell), id off/len (2 i32)
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let idix:[]u8=nio_alloc((maxcells*2*4) as i64);
+    let idbuf:[]u8=nio_alloc(1048576);
+    if(meta.len==0||feats.len==0||idix.len==0||idbuf.len==0){return 102;}
+    let tabs:[]u8=nio_alloc(17*4);
+    if(tabs.len==0){return 102;}
+    let ncells:i32=0;
+    let idn:i32=0;
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            ifp_split(line,tabs);
+            // fields: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+            let f0:i32=0;
+            let f1e:i32=au_get32(tabs,0);
+            let f2e:i32=au_get32(tabs,1);
+            let f3e:i32=au_get32(tabs,2);
+            let f4e:i32=au_get32(tabs,3);
+            let f5e:i32=au_get32(tabs,4);
+            let f6e:i32=au_get32(tabs,5);
+            let f7e:i32=au_get32(tabs,6);
+            let id:[]u8=line[f0..f1e];
+            let heldout:i32=dlb_atoi(line[f2e+1..f3e]);
+            let depth:i32=dlb_atoi(line[f3e+1..f4e]);
+            let ddx:i32=ifp_didx(depth);
+            let rel4:i32=dlb_atoi(line[f5e+1..f6e]);
+            let c4:[]u8=line[f6e+1..f7e];
+            let y:i32=-1;
+            if(rel4==1){
+                y=0;
+                if(c4.len==1 && c4[0]==49){y=1;}
+            }
+            let ci:i32=ncells;
+            au_put32(meta,ci*8+0,heldout);
+            au_put32(meta,ci*8+1,depth);
+            au_put32(meta,ci*8+2,ddx);
+            au_put32(meta,ci*8+3,rel4);
+            au_put32(meta,ci*8+4,y);
+            let k:i32=0;
+            while(k<8){
+                let a:i32=au_get32(tabs,6+k);
+                let b2:i32=au_get32(tabs,7+k);
+                au_put32(feats,ci*8+k,dlb_atoi(line[a+1..b2]));
+                k=k+1;
+            }
+            au_put32(idix,ci*2+0,idn);
+            au_put32(idix,ci*2+1,id.len);
+            let q:i32=0;
+            while(q<id.len){idbuf[idn+q]=id[q];q=q+1;}
+            idn=idn+id.len;
+            ncells=ncells+1;
+        }
+        pos=e+1;
+    }
+    // head state: w[5], b, per-stratum A/B, my sums/counts
+    let w:[]u8=nio_alloc(5*8);
+    let bA:[]u8=nio_alloc(8);
+    let PA:[]u8=nio_alloc(7*8);
+    let PB:[]u8=nio_alloc(7*8);
+    let SM:[]u8=nio_alloc(7*8);
+    let NM:[]u8=nio_alloc(7*8);
+    if(w.len==0||bA.len==0||PA.len==0||PB.len==0||SM.len==0||NM.len==0){return 102;}
+    let di:i32=0;
+    while(di<7){
+        au_put64(PA,di,1);
+        au_put64(PB,di,2);
+        di=di+1;
+    }
+    let t_upd:i64=0;
+    let edge:i64=0;
+    let emits:i64=0;
+    let drags:i64=0;
+    let lgo:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&lgo,65536)!=0){return 102;}
+    dout_str(&lgo,"# F37 IFP falsifier log: t\tmaxabsw\tedge_cum\temits_cum\tdrags_cum\n");
+    let p:i32=0;
+    while(p<passes){
+        // per-item trajectory chain (reset each pass; file is item-grouped)
+        let has_prev:i32=0;
+        let p_id_off:i32=0;
+        let p_id_len:i32=0;
+        let p_d:i32=0;
+        let p_f5:i64=0;
+        let p_f8:i64=0;
+        let p_f3:i64=0;
+        let p_C:i64=0;
+        let i:i32=0;
+        while(i<ncells){
+            let heldout:i32=au_get32(meta,i*8+0);
+            let depth:i32=au_get32(meta,i*8+1);
+            let didx:i32=au_get32(meta,i*8+2);
+            let rel:i32=au_get32(meta,i*8+3);
+            let y:i32=au_get32(meta,i*8+4);
+            let fbase:i32=i*8;
+            let f1:i64=au_get32(feats,fbase+0) as i64;
+            let f3:i64=au_get32(feats,fbase+2) as i64;
+            let f4:i64=au_get32(feats,fbase+3) as i64;
+            let f5:i64=au_get32(feats,fbase+4) as i64;
+            let f6:i64=au_get32(feats,fbase+5) as i64;
+            let f8:i64=au_get32(feats,fbase+7) as i64;
+            let id_off:i32=au_get32(idix,i*2+0);
+            let id_len:i32=au_get32(idix,i*2+1);
+            let same:i32=0;
+            if(has_prev==1 && id_len==p_id_len){
+                if(nio_equal(idbuf[id_off..id_off+id_len],idbuf[p_id_off..p_id_off+p_id_len])==1){same=1;}
+            }
+            if(same==0){has_prev=0;}
+            // marginal yield
+            let my:i64=f5;
+            if(has_prev==1){
+                let df2:i64=((depth-p_d) as i64)*1000/64;
+                if(df2<1){df2=1;}
+                let inc:i64=f5-p_f5;
+                if(inc<0){inc=0;}
+                my=inc*1000/df2;
+                if(my>1000){my=1000;}
+            }
+            // raw emit, then flip-rule chain emit
+            let f4p:i64=f4;
+            if(f4p<0){f4p=0;}
+            let Ad:i64=au_get64(PA,didx);
+            let Bd:i64=au_get64(PB,didx);
+            let b:i64=au_get64(bA,0);
+            let raw:i64=ifp_rawC(w,b,Ad,Bd,f1,f5,f6,f4p,my);
+            let chain:i64=raw;
+            if(has_prev==1){
+                let latch:i32=0;
+                if(f3==1000 && p_f3==0){latch=1;}
+                if(latch==1 || f8>p_f8){
+                    chain=raw;
+                    if(p_C-1<raw){chain=p_C-1;}
+                }
+            }
+            // advance chain (all cells, not just trained)
+            has_prev=1;
+            p_id_off=id_off;
+            p_id_len=id_len;
+            p_d=depth;
+            p_f5=f5;
+            p_f8=f8;
+            p_f3=f3;
+            p_C=chain;
+            // update on released, non-heldout cells
+            if(heldout==0 && rel==1 && didx>=0 && y>=0){
+                let emitted:i64=chain;
+                emits=emits+1;
+                if(emitted>=1 && emitted<=20){edge=edge+1;}
+                if(emitted>=980 && emitted<=999){edge=edge+1;}
+                let yy:i64=y as i64;
+                // (1) counts
+                au_put64(PB,didx,au_get64(PB,didx)+1);
+                if(y==1){au_put64(PA,didx,au_get64(PA,didx)+1);}
+                // my sums alongside
+                au_put64(SM,didx,au_get64(SM,didx)+my);
+                au_put64(NM,didx,au_get64(NM,didx)+1);
+                // (2)+(3) weight step with mandatory decay; outward freeze
+                let frozen:i32=0;
+                if(emitted>=980 && y==1){frozen=1;}
+                if(emitted<=20 && y==0){frozen=1;}
+                let div:i64=1000+t_upd;
+                let k:i32=0;
+                while(k<5){
+                    let wk:i64=au_get64(w,k);
+                    let fk:i64=f1;
+                    if(k==1){fk=f5;}
+                    if(k==2){fk=f6;}
+                    if(k==3){fk=f4p;}
+                    if(k==4){fk=my;}
+                    let nw:i64=wk-ifp_fdiv(wk,div);
+                    if(frozen==0){nw=nw+ifp_fdiv((yy*1000-emitted)*fk,1000*div);}
+                    au_put64(w,k,nw);
+                    k=k+1;
+                }
+                let nb:i64=b-ifp_fdiv(b,div);
+                if(frozen==0){nb=nb+ifp_fdiv((yy*1000-emitted)*1000,1000*div);}
+                au_put64(bA,0,nb);
+                // (4) monotone depth coupling of the base rate
+                if(didx>0){
+                    let nAd:i64=au_get64(PA,didx);
+                    let nBd:i64=au_get64(PB,didx);
+                    let mu:i64=nAd*1000/nBd;
+                    let mum:i64=au_get64(PA,didx-1)*1000/au_get64(PB,didx-1);
+                    let M:i64=mum+20;
+                    if(mu>M){
+                        let nm0:i64=au_get64(NM,didx);
+                        let nm1:i64=au_get64(NM,didx-1);
+                        let supported:i32=0;
+                        if(nm0>0 && nm1>0){
+                            if(au_get64(SM,didx)/nm0>au_get64(SM,didx-1)/nm1){supported=1;}
+                        }
+                        if(supported==0){
+                            let target:i64=(nAd*1000)/M+1;
+                            if(target>nBd){
+                                drags=drags+(target-nBd);
+                                au_put64(PB,didx,target);
+                            }
+                        }
+                    }
+                }
+                t_upd=t_upd+1;
+                if(t_upd%250==0){
+                    let mw:i64=ifp_abs(au_get64(w,0));
+                    let kk:i32=1;
+                    while(kk<5){
+                        let a2:i64=ifp_abs(au_get64(w,kk));
+                        if(a2>mw){mw=a2;}
+                        kk=kk+1;
+                    }
+                    let ab:i64=ifp_abs(au_get64(bA,0));
+                    if(ab>mw){mw=ab;}
+                    dout_i64(&lgo,t_upd);
+                    dout_byte(&lgo,9);
+                    dout_i64(&lgo,mw);
+                    dout_byte(&lgo,9);
+                    dout_i64(&lgo,edge);
+                    dout_byte(&lgo,9);
+                    dout_i64(&lgo,emits);
+                    dout_byte(&lgo,9);
+                    dout_i64(&lgo,drags);
+                    dout_line(&lgo);
+                    if(lgo.err!=0){return 103;}
+                }
+            }
+            i=i+1;
+        }
+        p=p+1;
+    }
+    // final falsifier snapshot
+    let mwf:i64=ifp_abs(au_get64(w,0));
+    let kkf:i32=1;
+    while(kkf<5){
+        let a3:i64=ifp_abs(au_get64(w,kkf));
+        if(a3>mwf){mwf=a3;}
+        kkf=kkf+1;
+    }
+    let abf:i64=ifp_abs(au_get64(bA,0));
+    if(abf>mwf){mwf=abf;}
+    dout_str(&lgo,"# final t=");
+    dout_i64(&lgo,t_upd);
+    dout_str(&lgo," maxabsw=");
+    dout_i64(&lgo,mwf);
+    dout_str(&lgo," edge=");
+    dout_i64(&lgo,edge);
+    dout_str(&lgo," emits=");
+    dout_i64(&lgo,emits);
+    dout_str(&lgo," drags=");
+    dout_i64(&lgo,drags);
+    dout_line(&lgo);
+    let ddi:i32=0;
+    while(ddi<7){
+        dout_str(&lgo,"# stratum d_idx=");
+        dout_i64(&lgo,ddi as i64);
+        dout_str(&lgo," A=");
+        dout_i64(&lgo,au_get64(PA,ddi));
+        dout_str(&lgo," B=");
+        dout_i64(&lgo,au_get64(PB,ddi));
+        dout_str(&lgo," mu=");
+        dout_i64(&lgo,au_get64(PA,ddi)*1000/au_get64(PB,ddi));
+        dout_str(&lgo," n_my=");
+        dout_i64(&lgo,au_get64(NM,ddi));
+        dout_line(&lgo);
+        ddi=ddi+1;
+    }
+    // params file
+    let po:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&po,8192)!=0){return 102;}
+    dout_str(&po,"// mt_f37_params — FROZEN trained F37-IFP head params\n");
+    dout_str(&po,"// Generated by train_f37.zag (fork F37, PREREG_FORKROUND §3). Do not hand-edit.\n");
+    dout_str(&po,"// final: t=");
+    dout_i64(&po,t_upd);
+    dout_str(&po," maxabsw=");
+    dout_i64(&po,mwf);
+    dout_str(&po," edge/emits=");
+    dout_i64(&po,edge);
+    dout_str(&po,"/");
+    dout_i64(&po,emits);
+    dout_str(&po," drags=");
+    dout_i64(&po,drags);
+    dout_line(&po);
+    let wi:i32=0;
+    while(wi<5){
+        dout_str(&po,"fn mt_w");
+        dout_i64(&po,wi as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,wi));
+        dout_str(&po,"; }\n");
+        wi=wi+1;
+    }
+    dout_str(&po,"fn mt_b()i64 { return ");
+    dout_i64(&po,au_get64(bA,0));
+    dout_str(&po,"; }\n");
+    let ai:i32=0;
+    while(ai<7){
+        dout_str(&po,"fn mt_A");
+        dout_i64(&po,ai as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(PA,ai));
+        dout_str(&po,"; }\n");
+        ai=ai+1;
+    }
+    let bi2:i32=0;
+    while(bi2<7){
+        dout_str(&po,"fn mt_B");
+        dout_i64(&po,bi2 as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(PB,bi2));
+        dout_str(&po,"; }\n");
+        bi2=bi2+1;
+    }
+    let wrc:i64=0;
+    if(lgo.err==0 && po.err==0){
+        wrc=dlb_write_file(log_path,dout_bytes(&lgo),lgo.n);
+        if(wrc>=0){wrc=dlb_write_file(params_path,dout_bytes(&po),po.n);}
+    }
+    nio_free(fbuf);
+    nio_free(meta);
+    nio_free(feats);
+    nio_free(idix);
+    nio_free(idbuf);
+    nio_free(tabs);
+    nio_free(w);
+    nio_free(bA);
+    nio_free(PA);
+    nio_free(PB);
+    nio_free(SM);
+    nio_free(NM);
+    dout_free(&lgo);
+    dout_free(&po);
+    if(lgo.err!=0 || po.err!=0 || wrc<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    if(_zag_argc()<5){
+        _zag_println("usage: train_f37 <features.tsv> <passes> <params_out.zag> <log_out.tsv>");
+        return 64;
+    }
+    let passes:i32=dlb_atoi(_zag_arg(2));
+    if(passes<1 || passes>1000){return 64;}
+    return ifp_train(_zag_arg(1),passes,_zag_arg(3),_zag_arg(4));
+}

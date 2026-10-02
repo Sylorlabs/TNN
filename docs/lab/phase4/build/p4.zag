@@ -1,0 +1,684 @@
+// Phase 4 differentiation: per-person substrate interpreter.
+// Frozen spec: docs/lab/phase4/PREREG.md (commit d97743268a8ff3ccedc637ecfdab07f8293ec965).
+// Reads probe script from argv[1]; emits L-ledger lines, R-result lines,
+// final R-chain FNV-1a-64 line. Pure Zag, zero randomness, deterministic.
+//
+// znc-defensive notes: callees before callers; dispatch is a FLAT sequence of
+// if(opc==N) (ZNC-2026-09-21-013: no deep else-nesting); all tables are []i64
+// (ZNC-2026-09-21-007: no []i32 casts); struct-free, parallel arrays in one
+// mem block; no lb self-slicing.
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------------- byte helpers ----------------
+fn p32(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+    return;
+}
+fn g32(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn copy_bytes(dst:[]u8,do:i32,src:[]u8,so:i32,n:i32)void {
+    let i:i32=0;
+    while(i<n){dst[do+i]=src[so+i];i=i+1;}
+    return;
+}
+fn beq(a:[]u8,ao:i32,b:[]u8,bo:i32,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){if(a[ao+i]!=b[bo+i]){return 0;}i=i+1;}
+    return 1;
+}
+// ---------------- file IO ----------------
+fn z_cstr(s:[]u8)[]u8 {
+    let b:[]u8=nio_alloc(s.len+1);
+    let i:i32=0;
+    while(i<s.len){b[i]=s[i];i=i+1;}
+    b[s.len]=0;
+    return b;
+}
+fn read_all(path:[]u8)[]u8 {
+    let p:[]u8=z_cstr(path);
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(p) as i64),0,0,0,0,0);
+    nio_free(p);
+    let empty:[]u8=nio_alloc(1);
+    if(fd<0){return empty[0..0];}
+    let cap:i32=1048576;
+    let buf:[]u8=nio_alloc(cap);
+    let chk:[]u8=nio_alloc(65536);
+    let total:i32=0;
+    let go:i32=1;
+    while(go==1){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(chk) as i64),65536,0,0,0);
+        if(n==-4){go=1;}
+        else{
+            if(n<=0){go=0;}
+            else{
+                let nb:i32=n as i32;
+                if(total+nb>cap){go=0;}
+                else{copy_bytes(buf,total,chk,0,nb);total=total+nb;}
+            }
+        }
+    }
+    _zag_raw_syscall(3,fd,0,0,0,0,0);
+    nio_free(chk);
+    if(total==0){nio_free(buf);return empty[0..0];}
+    let out:[]u8=buf[0..total];
+    return out;
+}
+// decimal of v into buf (needs >=24 bytes); returns length (v>=0 here)
+fn i64str(v:i64,buf:[]u8)i32 {
+    let x:i64=v;
+    let at:i32=23;
+    if(x==0){buf[at]=48;at=at-1;}
+    while(x>0){buf[at]=((x%10)+48) as u8;x=x/10;at=at-1;}
+    let start:i32=at+1;
+    let n:i32=24-start;
+    let i:i32=0;
+    while(i<n){buf[i]=buf[start+i];i=i+1;}
+    return n;
+}
+// ---------------- string arena ----------------
+// sa layout: entries are [len:u32 LE][bytes]; MEM_SA_USED tracks bump offset.
+fn sa_put(mem:[]i64,sa:[]u8,s:[]u8,so:i32,sl:i32)i32 {
+    let u:i32=mem[53890] as i32;
+    if(u+4+sl>sa.len){return -1;}
+    p32(sa,u,sl as i64);
+    copy_bytes(sa,u+4,s,so,sl);
+    mem[53890]=(u+4+sl) as i64;
+    return u;
+}
+fn streq(sa:[]u8,off:i32,ln:i32,s:[]u8,so:i32,sl:i32)i32 {
+    if(ln!=sl){return 0;}
+    return beq(sa,off+4,s,so,sl);
+}
+// ---------------- line buffer + FNV chain ----------------
+fn lb_reset(mem:[]i64)void { mem[53894]=0; return; }
+fn lb_len(mem:[]i64)i32 { return mem[53894] as i32; }
+fn lb_str(mem:[]i64,lb:[]u8,s:[]u8,so:i32,sl:i32)void {
+    let l:i32=lb_len(mem);
+    copy_bytes(lb,l,s,so,sl);
+    mem[53894]=(l+sl) as i64;
+    return;
+}
+fn lb_lit(mem:[]i64,lb:[]u8,lit:[]u8)void {
+    lb_str(mem,lb,lit,0,lit.len);
+    return;
+}
+fn lb_i64(mem:[]i64,lb:[]u8,v:i64)void {
+    let nb:[]u8=nio_alloc(24);
+    let n:i32=i64str(v,nb);
+    lb_str(mem,lb,nb,0,n);
+    nio_free(nb);
+    return;
+}
+fn lb_hex16(mem:[]i64,lb:[]u8,h:u64)void {
+    let dg:[]u8="0123456789abcdef";
+    let l:i32=lb_len(mem);
+    let k:i32=0;
+    while(k<16){
+        let sh:i64=60-(k as i64)*4;
+        let nib:i32=((h >> sh) & 15) as i32;
+        lb[l+k]=dg[nib];
+        k=k+1;
+    }
+    mem[53894]=(l+16) as i64;
+    return;
+}
+fn chain_add(mem:[]i64,lb:[]u8,ln:i32)void {
+    let h:u64=(mem[53893] as i64) as u64;
+    let i:i32=0;
+    while(i<ln){
+        h=(h ^ (lb[i] as u64))*1099511628211;
+        i=i+1;
+    }
+    mem[53893]=h as i64;
+    return;
+}
+// append newline, fold bytes into the FNV chain, print exactly those bytes
+fn lb_emit(mem:[]i64,lb:[]u8)void {
+    let l:i32=lb_len(mem);
+    lb[l]=10;
+    mem[53894]=(l+1) as i64;
+    chain_add(mem,lb,l+1);
+    _zag_print(lb[0..l+1]);
+    return;
+}
+// ---------------- mem accessors ----------------
+// persons: base 0, stride 10. fields: 0 used,1 name_off,2 name_len,3 fact_head,
+// 4 bel_head,5 nfact,6 nbel,7 nsec,8 ncorr,9 seq
+fn pget(mem:[]i64,p:i32,f:i32)i64 { return mem[p*10+f]; }
+fn pset(mem:[]i64,p:i32,f:i32,v:i64)void { mem[p*10+f]=v; return; }
+// facts: base 640, stride 7. fields: 0 next,1 topic_off,2 topic_len,3 val_off,
+// 4 val_len,5 secret,6 owner
+fn ffget(mem:[]i64,f:i32,fl:i32)i64 { return mem[640+f*7+fl]; }
+fn ffset(mem:[]i64,f:i32,fl:i32,v:i64)void { mem[640+f*7+fl]=v; return; }
+// beliefs: base 29312, stride 6. fields: 0 next,1 topic_off,2 topic_len,
+// 3 val_off,4 val_len,5 owner
+fn bfget(mem:[]i64,b:i32,fl:i32)i64 { return mem[29312+b*6+fl]; }
+fn bfset(mem:[]i64,b:i32,fl:i32,v:i64)void { mem[29312+b*6+fl]=v; return; }
+fn find_fact(mem:[]i64,sa:[]u8,p:i32,t:[]u8,to:i32,tl:i32)i32 {
+    let f:i32=pget(mem,p,3) as i32;
+    while(f!=-1){
+        if(streq(sa,ffget(mem,f,1) as i32,ffget(mem,f,2) as i32,t,to,tl)==1){return f;}
+        f=ffget(mem,f,0) as i32;
+    }
+    return -1;
+}
+fn find_bel(mem:[]i64,sa:[]u8,p:i32,t:[]u8,to:i32,tl:i32)i32 {
+    let b:i32=pget(mem,p,4) as i32;
+    while(b!=-1){
+        if(streq(sa,bfget(mem,b,1) as i32,bfget(mem,b,2) as i32,t,to,tl)==1){return b;}
+        b=bfget(mem,b,0) as i32;
+    }
+    return -1;
+}
+// ---------------- ledger + result emission ----------------
+fn emit_l(mem:[]i64,lb:[]u8,raw:[]u8,ro:i32,rl:i32,short:[]u8,so:i32,sl:i32)void {
+    lb_reset(mem);
+    lb_lit(mem,lb,"L ");
+    lb_i64(mem,lb,mem[53891]);
+    mem[53891]=mem[53891]+1;
+    lb_lit(mem,lb," ");
+    lb_str(mem,lb,raw,ro,rl);
+    lb_lit(mem,lb," => ");
+    lb_str(mem,lb,short,so,sl);
+    lb_emit(mem,lb);
+    return;
+}
+fn emit_r_error(mem:[]i64,lb:[]u8,op:[]u8,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    emit_l(mem,lb,raw,ro,rl,"ERROR unknown-person",0,20);
+    lb_reset(mem);lb_lit(mem,lb,"R ");lb_lit(mem,lb,op);
+    lb_lit(mem,lb," ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ERROR unknown-person");lb_emit(mem,lb);
+    return;
+}
+// ---------------- ops ----------------
+fn do_open(mem:[]i64,lb:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)==1){
+        emit_l(mem,lb,raw,ro,rl,"EXISTS",0,6);
+        lb_reset(mem);lb_lit(mem,lb,"R open ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," EXISTS");lb_emit(mem,lb);return;
+    }
+    pset(mem,p,0,1);pset(mem,p,1,-1);pset(mem,p,2,0);
+    pset(mem,p,3,-1);pset(mem,p,4,-1);
+    pset(mem,p,5,0);pset(mem,p,6,0);pset(mem,p,7,0);pset(mem,p,8,0);
+    pset(mem,p,9,mem[53892]);mem[53892]=mem[53892]+1;
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R open ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," h=");lb_i64(mem,lb,(p+1) as i64);lb_emit(mem,lb);
+    return;
+}
+fn do_name(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,nm:[]u8,no:i32,nl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){emit_r_error(mem,lb,"name",pid,po,pl,raw,ro,rl);return;}
+    let off:i32=sa_put(mem,sa,nm,no,nl);
+    if(off<0){
+        emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+        lb_reset(mem);lb_lit(mem,lb,"R name ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+    }
+    pset(mem,p,1,off as i64);pset(mem,p,2,nl as i64);
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R name ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ok");lb_emit(mem,lb);
+    return;
+}
+fn do_store(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,t:[]u8,to:i32,tl:i32,v:[]u8,vo:i32,vl:i32,secret:i32,raw:[]u8,ro:i32,rl:i32)void {
+    let op:[]u8="teach";
+    if(secret==1){op="secret";}
+    if(pget(mem,p,0)!=1){emit_r_error(mem,lb,op,pid,po,pl,raw,ro,rl);return;}
+    let vo2:i32=sa_put(mem,sa,v,vo,vl);
+    if(vo2<0){
+        emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+        lb_reset(mem);lb_lit(mem,lb,"R ");lb_lit(mem,lb,op);
+        lb_lit(mem,lb," ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+    }
+    let f:i32=find_fact(mem,sa,p,t,to,tl);
+    if(f>=0){
+        ffset(mem,f,3,vo2 as i64);ffset(mem,f,4,vl as i64);
+        if(secret==1 && ffget(mem,f,5)==0){ffset(mem,f,5,1);pset(mem,p,7,pget(mem,p,7)+1);}
+    } else {
+        let nf:i32=mem[53888] as i32;
+        if(nf>=4096){
+            emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+            lb_reset(mem);lb_lit(mem,lb,"R ");lb_lit(mem,lb,op);
+            lb_lit(mem,lb," ");lb_str(mem,lb,pid,po,pl);
+            lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+        }
+        let toff:i32=sa_put(mem,sa,t,to,tl);
+        ffset(mem,nf,0,pget(mem,p,3));ffset(mem,nf,1,toff as i64);
+        ffset(mem,nf,2,tl as i64);ffset(mem,nf,3,vo2 as i64);
+        ffset(mem,nf,4,vl as i64);ffset(mem,nf,5,secret as i64);
+        ffset(mem,nf,6,p as i64);
+        pset(mem,p,3,nf as i64);
+        mem[53888]=(nf+1) as i64;
+        pset(mem,p,5,pget(mem,p,5)+1);
+        if(secret==1){pset(mem,p,7,pget(mem,p,7)+1);}
+    }
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R ");lb_lit(mem,lb,op);
+    lb_lit(mem,lb," ");lb_str(mem,lb,pid,po,pl);lb_lit(mem,lb," ok");lb_emit(mem,lb);
+    return;
+}
+fn do_correct(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,t:[]u8,to:i32,tl:i32,v:[]u8,vo:i32,vl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){emit_r_error(mem,lb,"correct",pid,po,pl,raw,ro,rl);return;}
+    let vo2:i32=sa_put(mem,sa,v,vo,vl);
+    if(vo2<0){
+        emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+        lb_reset(mem);lb_lit(mem,lb,"R correct ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+    }
+    let f:i32=find_fact(mem,sa,p,t,to,tl);
+    if(f>=0){
+        ffset(mem,f,3,vo2 as i64);ffset(mem,f,4,vl as i64);
+    } else {
+        let nf:i32=mem[53888] as i32;
+        if(nf>=4096){
+            emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+            lb_reset(mem);lb_lit(mem,lb,"R correct ");lb_str(mem,lb,pid,po,pl);
+            lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+        }
+        let toff:i32=sa_put(mem,sa,t,to,tl);
+        ffset(mem,nf,0,pget(mem,p,3));ffset(mem,nf,1,toff as i64);
+        ffset(mem,nf,2,tl as i64);ffset(mem,nf,3,vo2 as i64);
+        ffset(mem,nf,4,vl as i64);ffset(mem,nf,5,0);ffset(mem,nf,6,p as i64);
+        pset(mem,p,3,nf as i64);
+        mem[53888]=(nf+1) as i64;
+        pset(mem,p,5,pget(mem,p,5)+1);
+    }
+    pset(mem,p,8,pget(mem,p,8)+1);
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R correct ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ok");lb_emit(mem,lb);
+    return;
+}
+fn do_recall(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,t:[]u8,to:i32,tl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R recall ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let f:i32=find_fact(mem,sa,p,t,to,tl);
+    if(f<0){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R recall ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let vo:i32=ffget(mem,f,3) as i32;
+    let vl:i32=ffget(mem,f,4) as i32;
+    emit_l(mem,lb,raw,ro,rl,sa,vo+4,vl);
+    lb_reset(mem);lb_lit(mem,lb,"R recall ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);lb_lit(mem,lb," = ");
+    lb_str(mem,lb,sa,vo+4,vl);lb_emit(mem,lb);
+    return;
+}
+fn do_assert(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,t:[]u8,to:i32,tl:i32,v:[]u8,vo:i32,vl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){emit_r_error(mem,lb,"assert",pid,po,pl,raw,ro,rl);return;}
+    let vo2:i32=sa_put(mem,sa,v,vo,vl);
+    if(vo2<0){
+        emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+        lb_reset(mem);lb_lit(mem,lb,"R assert ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+    }
+    let b:i32=find_bel(mem,sa,p,t,to,tl);
+    if(b>=0){
+        bfset(mem,b,3,vo2 as i64);bfset(mem,b,4,vl as i64);
+    } else {
+        let nb:i32=mem[53889] as i32;
+        if(nb>=4096){
+            emit_l(mem,lb,raw,ro,rl,"ERROR oom",0,9);
+            lb_reset(mem);lb_lit(mem,lb,"R assert ");lb_str(mem,lb,pid,po,pl);
+            lb_lit(mem,lb," ERROR oom");lb_emit(mem,lb);return;
+        }
+        let toff:i32=sa_put(mem,sa,t,to,tl);
+        bfset(mem,nb,0,pget(mem,p,4));bfset(mem,nb,1,toff as i64);
+        bfset(mem,nb,2,tl as i64);bfset(mem,nb,3,vo2 as i64);
+        bfset(mem,nb,4,vl as i64);bfset(mem,nb,5,p as i64);
+        pset(mem,p,4,nb as i64);
+        mem[53889]=(nb+1) as i64;
+        pset(mem,p,6,pget(mem,p,6)+1);
+    }
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R assert ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ok");lb_emit(mem,lb);
+    return;
+}
+fn do_belief(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,t:[]u8,to:i32,tl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R belief ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let b:i32=find_bel(mem,sa,p,t,to,tl);
+    if(b<0){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R belief ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let vo:i32=bfget(mem,b,3) as i32;
+    let vl:i32=bfget(mem,b,4) as i32;
+    emit_l(mem,lb,raw,ro,rl,sa,vo+4,vl);
+    lb_reset(mem);lb_lit(mem,lb,"R belief ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ");lb_str(mem,lb,t,to,tl);lb_lit(mem,lb," = ");
+    lb_str(mem,lb,sa,vo+4,vl);lb_emit(mem,lb);
+    return;
+}
+fn do_judge(mem:[]i64,lb:[]u8,sa:[]u8,t:[]u8,to:i32,tl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    let co:[]i64=nio_alloc(64*8) as []i64;
+    let cl:[]i64=nio_alloc(64*8) as []i64;
+    let n:i32=0;
+    let p:i32=0;
+    while(p<64){
+        if(pget(mem,p,0)==1){
+            let b:i32=find_bel(mem,sa,p,t,to,tl);
+            if(b>=0){
+                let vo:i32=bfget(mem,b,3) as i32;
+                let vl:i32=bfget(mem,b,4) as i32;
+                let seen:i32=0;
+                let k:i32=0;
+                while(k<n){
+                    if(streq(sa,vo+4,vl,sa,(co[k] as i32)+4,cl[k] as i32)==1){seen=1;}
+                    k=k+1;
+                }
+                if(seen==0){co[n]=vo as i64;cl[n]=vl as i64;n=n+1;}
+            }
+        }
+        p=p+1;
+    }
+    emit_l(mem,lb,raw,ro,rl,"judged",0,6);
+    lb_reset(mem);
+    lb_lit(mem,lb,"R judge ");lb_str(mem,lb,t,to,tl);lb_lit(mem,lb," = ");
+    if(n==0){lb_lit(mem,lb,"NONE");}
+    if(n==1){lb_lit(mem,lb,"SINGLE ");}
+    if(n>1){lb_lit(mem,lb,"CONFLICT ");}
+    if(n>0){
+        let k2:i32=0;
+        while(k2<n){
+            if(k2>0){lb_lit(mem,lb," ");}
+            lb_str(mem,lb,sa,(co[k2] as i32)+4,cl[k2] as i32);
+            k2=k2+1;
+        }
+    }
+    lb_emit(mem,lb);
+    return;
+}
+fn do_who(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R who ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let no:i32=pget(mem,p,1) as i32;
+    let nl:i32=pget(mem,p,2) as i32;
+    if(no>=0){emit_l(mem,lb,raw,ro,rl,sa,no+4,nl);}
+    if(no<0){emit_l(mem,lb,raw,ro,rl,"",0,0);}
+    lb_reset(mem);lb_lit(mem,lb,"R who ");lb_str(mem,lb,pid,po,pl);lb_lit(mem,lb," = ");
+    if(no>=0){lb_str(mem,lb,sa,no+4,nl);}
+    lb_emit(mem,lb);
+    return;
+}
+fn do_profile(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R profile ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    emit_l(mem,lb,raw,ro,rl,"profiled",0,8);
+    lb_reset(mem);
+    lb_lit(mem,lb,"R profile ");lb_str(mem,lb,pid,po,pl);lb_lit(mem,lb," = name=");
+    let no:i32=pget(mem,p,1) as i32;
+    let nl:i32=pget(mem,p,2) as i32;
+    if(no>=0){lb_str(mem,lb,sa,no+4,nl);}
+    lb_lit(mem,lb," facts=");lb_i64(mem,lb,pget(mem,p,5));
+    lb_lit(mem,lb," beliefs=");lb_i64(mem,lb,pget(mem,p,6));
+    lb_lit(mem,lb," secrets=");lb_i64(mem,lb,pget(mem,p,7));
+    lb_lit(mem,lb," corrections=");lb_i64(mem,lb,pget(mem,p,8));
+    lb_emit(mem,lb);
+    return;
+}
+fn do_topics(mem:[]i64,lb:[]u8,sa:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){
+        emit_l(mem,lb,raw,ro,rl,"WITHHOLD",0,8);
+        lb_reset(mem);lb_lit(mem,lb,"R topics ");lb_str(mem,lb,pid,po,pl);
+        lb_lit(mem,lb," = WITHHOLD");lb_emit(mem,lb);return;
+    }
+    let co:[]i64=nio_alloc(256*8) as []i64;
+    let cl:[]i64=nio_alloc(256*8) as []i64;
+    let n:i32=0;
+    let f:i32=pget(mem,p,3) as i32;
+    while(f!=-1){
+        if(ffget(mem,f,5)==0){
+            co[n]=ffget(mem,f,1);cl[n]=ffget(mem,f,2);n=n+1;
+        }
+        f=ffget(mem,f,0) as i32;
+    }
+    emit_l(mem,lb,raw,ro,rl,"listed",0,6);
+    lb_reset(mem);
+    lb_lit(mem,lb,"R topics ");lb_str(mem,lb,pid,po,pl);lb_lit(mem,lb," = ");
+    if(n==0){lb_lit(mem,lb,"EMPTY");}
+    if(n>0){
+        let k:i32=n-1;
+        while(k>=0){
+            if(k!=n-1){lb_lit(mem,lb,",");}
+            lb_str(mem,lb,sa,(co[k] as i32)+4,cl[k] as i32);
+            k=k-1;
+        }
+    }
+    lb_emit(mem,lb);
+    return;
+}
+fn do_close(mem:[]i64,lb:[]u8,p:i32,pid:[]u8,po:i32,pl:i32,raw:[]u8,ro:i32,rl:i32)void {
+    if(pget(mem,p,0)!=1){emit_r_error(mem,lb,"close",pid,po,pl,raw,ro,rl);return;}
+    pset(mem,p,0,0);
+    emit_l(mem,lb,raw,ro,rl,"ok",0,2);
+    lb_reset(mem);lb_lit(mem,lb,"R close ");lb_str(mem,lb,pid,po,pl);
+    lb_lit(mem,lb," ok");lb_emit(mem,lb);
+    return;
+}
+// ---------------- parsing ----------------
+fn tokis(buf:[]u8,off:i32,ln:i32,lit:[]u8)i32 {
+    if(ln!=lit.len){return 0;}
+    return beq(buf,off,lit,0,ln);
+}
+// 1=open 2=name 3=teach 4=secret 5=correct 6=recall 7=assert 8=belief
+// 9=judge 10=who 11=profile 12=topics 13=close 0=unknown
+fn op_code(buf:[]u8,off:i32,ln:i32)i32 {
+    if(tokis(buf,off,ln,"open")==1){return 1;}
+    if(tokis(buf,off,ln,"name")==1){return 2;}
+    if(tokis(buf,off,ln,"teach")==1){return 3;}
+    if(tokis(buf,off,ln,"secret")==1){return 4;}
+    if(tokis(buf,off,ln,"correct")==1){return 5;}
+    if(tokis(buf,off,ln,"recall")==1){return 6;}
+    if(tokis(buf,off,ln,"assert")==1){return 7;}
+    if(tokis(buf,off,ln,"belief")==1){return 8;}
+    if(tokis(buf,off,ln,"judge")==1){return 9;}
+    if(tokis(buf,off,ln,"who")==1){return 10;}
+    if(tokis(buf,off,ln,"profile")==1){return 11;}
+    if(tokis(buf,off,ln,"topics")==1){return 12;}
+    if(tokis(buf,off,ln,"close")==1){return 13;}
+    return 0;
+}
+fn parse_pid(buf:[]u8,off:i32,ln:i32)i32 {
+    if(ln<2 || buf[off]!=112){return -1;}
+    let n:i64=0;
+    let i:i32=1;
+    while(i<ln){
+        let c:i32=buf[off+i] as i32;
+        if(c<48 || c>57){return -1;}
+        n=n*10+(c-48) as i64;
+        i=i+1;
+    }
+    if(n<1 || n>64){return -1;}
+    return (n-1) as i32;
+}
+fn err_line(mem:[]i64,lb:[]u8,msg:[]u8,raw:[]u8,ro:i32,rl:i32)void {
+    emit_l(mem,lb,raw,ro,rl,msg,0,msg.len);
+    lb_reset(mem);lb_lit(mem,lb,"R ERROR ");lb_lit(mem,lb,msg);lb_emit(mem,lb);
+    return;
+}
+fn main()void {
+    let a1:[]u8=_zag_arg(1);
+    let mem:[]i64=nio_alloc(53900*8) as []i64;
+    let sa:[]u8=nio_alloc(262144);
+    let lb:[]u8=nio_alloc(8192);
+    if(a1.len==0){
+        lb_reset(mem);lb_lit(mem,lb,"R ERROR no-input");lb_emit(mem,lb);return;
+    }
+    let basis:u64=(1469598103934665603 as u64)*10+7;
+    mem[53893]=basis as i64;
+    mem[53888]=0;mem[53889]=0;mem[53890]=0;mem[53891]=0;mem[53892]=0;mem[53894]=0;
+    let pi:i32=0;
+    while(pi<64){
+        pset(mem,pi,3,-1);pset(mem,pi,4,-1);pset(mem,pi,1,-1);pset(mem,pi,9,-1);
+        pi=pi+1;
+    }
+    let buf:[]u8=read_all(a1);
+    let toff:[]i64=nio_alloc(8*8) as []i64;
+    let tlen:[]i64=nio_alloc(8*8) as []i64;
+    let pos:i32=0;
+    let empty:[]u8=sa[0..0];
+    while(pos<buf.len){
+        let eol:i32=pos;
+        while(eol<buf.len && buf[eol]!=10){eol=eol+1;}
+        let ll:i32=eol-pos;
+        if(ll>0 && buf[pos+ll-1]==13){ll=ll-1;}
+        let skip:i32=0;
+        if(ll==0){skip=1;}
+        if(skip==0 && buf[pos]==35){skip=1;}
+        if(skip==0){
+            let nt:i32=0;
+            let tp:i32=pos;
+            let over:i32=0;
+            while(tp<pos+ll){
+                while(tp<pos+ll && (buf[tp]==32 || buf[tp]==9)){tp=tp+1;}
+                if(tp<pos+ll){
+                    let ts:i32=tp;
+                    while(tp<pos+ll && buf[tp]!=32 && buf[tp]!=9){tp=tp+1;}
+                    if(nt<8){toff[nt]=ts as i64;tlen[nt]=(tp-ts) as i64;nt=nt+1;}
+                    else{over=1;}
+                }
+            }
+            if(over==1){err_line(mem,lb,"badargs",buf,pos,ll);}
+            if(over==0 && nt==0){skip=1;}
+            if(over==0 && nt>0){
+                let opc:i32=op_code(buf,toff[0] as i32,tlen[0] as i32);
+                if(opc==0){err_line(mem,lb,"badop",buf,pos,ll);}
+                if(opc==1){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_open(mem,lb,p,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==2){
+                    if(nt!=3){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{
+                            let nso:i32=toff[2] as i32;
+                            let nsl:i32=tlen[2] as i32;
+                            if(nsl==2 && buf[nso]==34 && buf[nso+1]==34){nso=0;nsl=0;}
+                            do_name(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,nso,nsl,buf,pos,ll);
+                        }
+                    }
+                }
+                if(opc==3 || opc==4){
+                    if(nt!=4){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{
+                            let sc:i32=0;
+                            if(opc==4){sc=1;}
+                            do_store(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,toff[2] as i32,tlen[2] as i32,buf,toff[3] as i32,tlen[3] as i32,sc,buf,pos,ll);
+                        }
+                    }
+                }
+                if(opc==5){
+                    if(nt!=4){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_correct(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,toff[2] as i32,tlen[2] as i32,buf,toff[3] as i32,tlen[3] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==6){
+                    if(nt!=3){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_recall(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,toff[2] as i32,tlen[2] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==7){
+                    if(nt!=4){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_assert(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,toff[2] as i32,tlen[2] as i32,buf,toff[3] as i32,tlen[3] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==8){
+                    if(nt!=3){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_belief(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,toff[2] as i32,tlen[2] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==9){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{do_judge(mem,lb,sa,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                }
+                if(opc==10){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_who(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==11){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_profile(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==12){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_topics(mem,lb,sa,p,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                    }
+                }
+                if(opc==13){
+                    if(nt!=2){err_line(mem,lb,"badargs",buf,pos,ll);}
+                    else{
+                        let p:i32=parse_pid(buf,toff[1] as i32,tlen[1] as i32);
+                        if(p<0){err_line(mem,lb,"badpid",buf,pos,ll);}
+                        else{do_close(mem,lb,p,buf,toff[1] as i32,tlen[1] as i32,buf,pos,ll);}
+                    }
+                }
+            }
+        }
+        if(eol<buf.len){pos=eol+1;}
+        if(eol>=buf.len){pos=eol;}
+    }
+    // final chain line: printed but NOT folded into the chain itself
+    lb_reset(mem);
+    lb_lit(mem,lb,"R chain ");
+    lb_hex16(mem,lb,(mem[53893] as i64) as u64);
+    let cl:i32=lb_len(mem);
+    lb[cl]=10;
+    _zag_print(lb[0..cl+1]);
+    return;
+}

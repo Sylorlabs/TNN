@@ -1,0 +1,297 @@
+// region1.zag — REGION-1 challenger (fable R1 Q4: "gated-C beats B on audio").
+// Fixture (frozen, in-binary): 60 s sustained tone at 44100 Hz, 12 regions of
+// 5 s; region n (1..12) has f0 = 440 + (n-1) Hz (440 -> 451 Hz drift).
+// The plan declares, per region: f0 and a BOUNDARY PHASE (encoder convention:
+// regions are independently specifiable; the plan declares boundary phase 0,
+// i.e. the phase is a plan declaration, NOT accumulated renderer state).
+// Modes (argv1):
+//   b     : plan-seeded region state — phase RESET to the plan-declared
+//           boundary phase (0) at every 5 s boundary; renders
+//           sin(2*pi*f_n*(t - t_n)) per region.
+//   stock : b's phase policy + intra-region bounded gain servo (1024-sample
+//           blocks; plan-derived RMS target; 10% deadband; contractive
+//           update g <- (g + g*T/m)/2, g in [0.5, 2.0]; gain re-seeded to 1.0
+//           at every region start). On this clean tone the servo is inert.
+//   gated : fable R1 Q1 two-tier gate implemented faithfully — Tier 1 engage
+//           iff (a) block |T-m| > 15% of max(T,m) for 3+ consecutive blocks,
+//           or (b) pitch inference disagrees with plan f0 by > 50 cents over
+//           5 blocks, or (c) corruption detector fires; Tier 2: once engaged,
+//           stay active >= 20 blocks and until dev < 10% for 10 blocks. On
+//           this clean sustained tone NO trigger ever fires, so the servo
+//           stays off and the renderer is continuous-phase PAR: phase is a
+//           pure function of absolute time (no reseed at boundaries).
+//           (The servo crew's render_c_gated binary is a 30 s-fixed motif
+//           renderer with gap-delimited regions; it cannot express this
+//           60 s / fixed-5 s-boundary fixture, so the gate is implemented
+//           here per fable's Q1 criterion — the criterion IS the design
+//           under test. Documented, not smuggled.)
+// argv2: output raw i16 LE audio path. argv3: diagnostics path (text):
+//   per boundary k=1..11: "K <k> ph_before_end=<Q32> ph_after_start=<Q32>
+//   gate=<transitions>" — renderer-analytic instantaneous phases at the
+//   boundary sample, for signal-level cross-check by the analyzer.
+// Metric (analyzer-side, signal-level): two-sided least-squares phase fit at
+// each boundary; discontinuity_k = |wrap_pi(theta_after(t_b) -
+// theta_before(t_b))|. Bar: mean discontinuity < 0.1 rad.
+// Pure Zag, pinned znc, zero RNG. Byte-identical reruns (cmp-clean audio).
+
+fn z_alloc(n:i64) []u8 {
+    if (n < 1 || n > 33554432) { return ""; }
+    let p:*u8 = _zag_malloc(n as i32) as *u8;
+    if (p == null as *u8) { return ""; }
+    let b:[]u8 = p[0..(n as i32)];
+    let i:i64 = 0;
+    while (i < n) { b[i] = 0 as u8; i = i + 1; }
+    return b;
+}
+fn z_free(b:[]u8) void {
+    if (b.len > 0) { _zag_free(_zag_slice_ptr(b)); }
+}
+fn z_cstr(d:[]u8, s:[]u8) void {
+    let i:i64 = 0;
+    while (i < s.len) { d[i] = s[i]; i = i + 1; }
+    d[i] = 0 as u8;
+}
+fn f_open_w(path:[]u8) i64 {
+    let buf:[]u8 = z_alloc(path.len + 1);
+    if (buf.len == 0) { return -1; }
+    z_cstr(buf, path);
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(buf) as i64, 577, 420, 0, 0, 0);
+    z_free(buf);
+    return fd;
+}
+fn f_write_all(fd:i64, b:[]u8) i64 {
+    let o:i64 = 0;
+    while (o < b.len) {
+        let w:i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(b) as i64) + o, b.len - o, 0, 0, 0);
+        if (w <= 0) { return -1; }
+        o = o + w;
+    }
+    return 0;
+}
+fn p64(b:[]u8, at:i64, v:i64) void {
+    let i:i64 = 0;
+    while (i < 8) {
+        b[at + i] = ((v >> (i * 8)) & 255) as u8;
+        i = i + 1;
+    }
+}
+fn p16(b:[]u8, at:i64, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at + 1] = ((v >> 8) & 255) as u8;
+}
+fn iabs(v:i64) i64 {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+// Q16 fixed-point multiply (operands < 2^31; use for the Taylor powers)
+fn qm16(a:i64, b:i64) i64 {
+    return (a * b) >> 16;
+}
+// sin LUT: 4096 entries over [0, 2pi), Q15. Built at startup by Taylor
+// series on [0, pi/2) (1024 entries), quadrant symmetry for the rest.
+// Taylor runs in Q16 (Q32 powers would overflow i64: (pi/2)^2 > 2^63).
+fn lut_init(lut:[]u8) void {
+    // pi/2 in Q16 = 102944 (truncated)
+    let i:i64 = 0;
+    while (i < 1024) {
+        let x:i64 = (i * 102944) / 1024; // Q16
+        let x2:i64 = qm16(x, x);
+        let x3:i64 = qm16(x2, x);
+        let x4:i64 = qm16(x2, x2);
+        let x5:i64 = qm16(x4, x);
+        let x6:i64 = qm16(x3, x3);
+        let x7:i64 = qm16(x6, x);
+        let x8:i64 = qm16(x4, x4);
+        let x9:i64 = qm16(x8, x);
+        let s:i64 = x - x3 / 6 + x5 / 120 - x7 / 5040 + x9 / 362880; // Q16
+        p64(lut, i * 8, (s + 1) >> 1); // -> Q15 with rounding
+        i = i + 1;
+    }
+}
+fn g64(b:[]u8, at:i64) i64 {
+    let v:i64 = 0;
+    let i:i64 = 0;
+    while (i < 8) {
+        v = v | ((b[at + i] as i64) << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+fn lut_sin(lut:[]u8, phase_q32turns:i64) i64 {
+    // phase in Q32 turns, non-negative, < 2^47 here: idx = phase >> 20
+    let idx:i64 = (phase_q32turns >> 20) & 4095;
+    let q:i64 = idx >> 10;
+    let r:i64 = idx & 1023;
+    if (q == 0) { return g64(lut, r * 8); }
+    if (q == 1) { return g64(lut, (1023 - r) * 8); }
+    if (q == 2) { return 0 - g64(lut, r * 8); }
+    return 0 - g64(lut, (1023 - r) * 8);
+}
+// integer sqrt (Newton), for block RMS
+fn isqrt(v:i64) i64 {
+    if (v <= 0) { return 0; }
+    let x:i64 = v;
+    let y:i64 = (x + 1) >> 1;
+    while (y < x) {
+        x = y;
+        y = (x + v / x) >> 1;
+    }
+    return x;
+}
+fn main() i32 {
+    let mode:[]u8 = _zag_arg(1);
+    let outp:[]u8 = _zag_arg(2);
+    let diagp:[]u8 = _zag_arg(3);
+    // mode: 0=b 1=stock 2=gated
+    let m:i64 = 0;
+    if (mode.len >= 5 && mode[0] == 115 as u8) { m = 1; } // "stock"
+    if (mode.len >= 5 && mode[0] == 103 as u8) { m = 2; } // "gated"
+    let sr:i64 = 44100;
+    let reg_samp:i64 = 220500; // 5 s
+    let nreg:i64 = 12;
+    let ns:i64 = reg_samp * nreg; // 2646000
+    let blk:i64 = 1024;
+    let amp:i64 = 20000; // tone amplitude (i16)
+    let lut:[]u8 = z_alloc(1024 * 8);
+    lut_init(lut);
+    let pcm:[]u8 = z_alloc(ns * 2);
+    if (pcm.len == 0) { return 1; }
+    let diag:[]u8 = z_alloc(4096);
+    let dn:i64 = 0; // diag cursor
+    // plan target RMS per block: the plan's analytic RMS for the declared tone.
+    // The plan is honest here (declares exactly what is rendered), so the
+    // measured block RMS matches within the deadband and the servo/gate
+    // stay silent — the machinery is exercised, never engaged.
+    let plan_rms:i64 = amp * 7071 / 10000;
+    let gain:i64 = 65536; // Q16, servo state (stock/gated when engaged)
+    let consec_dev:i64 = 0; // gated: Tier-1 persistence counter
+    let consec_ok:i64 = 0;  // gated: Tier-2 close counter
+    let active_left:i64 = 0; // gated: Tier-2 minimum-active blocks remaining
+    let engaged:i64 = 0;
+    let ntrans:i64 = 0; // gate transitions (diagnostic)
+    let phase:i64 = 0; // Q32 turns; gated: continuous across regions
+    let bnd:i64 = 1; // next boundary index to log (1..11)
+    let r:i64 = 0;
+    while (r < nreg) {
+        let f0:i64 = 440 + r;
+        // phase step per sample, Q32 turns: f0 * 2^32 / sr
+        let step:i64 = (f0 * 4294967296) / sr;
+        if (m == 0 || m == 1) {
+            phase = 0; // plan-declared boundary phase: reseed per region
+            gain = 65536;
+        }
+        // gated (m==2): phase continues (no reseed); gain persists
+        let t0:i64 = r * reg_samp;
+        let t1:i64 = t0 + reg_samp;
+        let s:i64 = t0;
+        let blk_start:i64 = t0;
+        let sumsq:i64 = 0;
+        let blk_n:i64 = 0;
+        while (s < t1) {
+            let sv:i64 = lut_sin(lut, phase);
+            // apply gain: sample = amp * sin * gain(Q16) >> 16, Q15->i16
+            let val:i64 = (amp * sv) >> 15;
+            val = (val * gain) >> 16;
+            if (val > 32767) { val = 32767; }
+            if (val < -32768) { val = -32768; }
+            p16(pcm, s * 2, val);
+            sumsq = sumsq + val * val;
+            blk_n = blk_n + 1;
+            phase = phase + step;
+            // block-end servo/gate processing
+            if (blk_n == blk || s == t1 - 1) {
+                let mrms:i64 = isqrt(sumsq / blk_n);
+                let mx:i64 = plan_rms;
+                if (mrms > mx) { mx = mrms; }
+                let dev:i64 = 0;
+                if (mx > 0) { dev = (iabs(mrms - plan_rms) * 100) / mx; } // percent
+                if (m == 1) {
+                    // stock: bounded servo, 10% deadband, contractive update
+                    if (dev >= 10 && mrms > 0) {
+                        let g2:i64 = (gain + (gain * plan_rms) / mrms) / 2;
+                        if (g2 < 32768) { g2 = 32768; }
+                        if (g2 > 131072) { g2 = 131072; }
+                        gain = g2;
+                    }
+                }
+                if (m == 2) {
+                    // gated: Tier-1 engage on >15% for 3+ blocks
+                    if (dev > 15) { consec_dev = consec_dev + 1; }
+                    else { consec_dev = 0; }
+                    if (engaged == 0 && consec_dev >= 3) {
+                        engaged = 1; active_left = 20; consec_ok = 0; ntrans = ntrans + 1;
+                    }
+                    if (engaged == 1) {
+                        // servo active while engaged
+                        if (dev >= 10 && mrms > 0) {
+                            let g2:i64 = (gain + (gain * plan_rms) / mrms) / 2;
+                            if (g2 < 32768) { g2 = 32768; }
+                            if (g2 > 131072) { g2 = 131072; }
+                            gain = g2;
+                        }
+                        if (active_left > 0) { active_left = active_left - 1; }
+                        if (dev < 10) { consec_ok = consec_ok + 1; }
+                        else { consec_ok = 0; }
+                        if (active_left == 0 && consec_ok >= 10) {
+                            engaged = 0; consec_dev = 0; ntrans = ntrans + 1;
+                        }
+                    }
+                }
+                sumsq = 0; blk_n = 0; blk_start = s + 1;
+            }
+            s = s + 1;
+        }
+        // log boundary r (between region r and r+1): phase at last sample of
+        // region r (ph_before_end) and first sample of region r+1
+        // (ph_after_start) — but region r+1's start phase is decided on its
+        // own iteration; record ph_before_end now, and ph_after_start as the
+        // phase value at the START of next region's first sample. We log both
+        // here: ph_after_start = (m==2) ? phase (continuing) : 0 (reseed).
+        if (r < nreg - 1) {
+            let ph_before:i64 = phase - step; // phase used for last sample
+            let ph_after:i64 = 0;
+            if (m == 2) { ph_after = phase; }
+            // append "K <bnd> <ph_before> <ph_after>\n" as text
+            let line:[]u8 = z_alloc(96);
+            let c:i64 = 0;
+            line[c] = 75 as u8; c = c + 1; // 'K'
+            line[c] = 32 as u8; c = c + 1;
+            let nb:[]u8 = _zag_i64_to_str(bnd); 
+            let q:i64 = 0;
+            while (q < nb.len) { line[c] = nb[q]; c = c + 1; q = q + 1; }
+            z_free(nb);
+            line[c] = 32 as u8; c = c + 1;
+            nb = _zag_i64_to_str(ph_before); q = 0;
+            while (q < nb.len) { line[c] = nb[q]; c = c + 1; q = q + 1; }
+            z_free(nb);
+            line[c] = 32 as u8; c = c + 1;
+            nb = _zag_i64_to_str(ph_after); q = 0;
+            while (q < nb.len) { line[c] = nb[q]; c = c + 1; q = q + 1; }
+            z_free(nb);
+            line[c] = 10 as u8; c = c + 1;
+            q = 0;
+            while (q < c) { diag[dn] = line[q]; dn = dn + 1; q = q + 1; }
+            z_free(line);
+            bnd = bnd + 1;
+        }
+        r = r + 1;
+    }
+    z_free(lut);
+    let fd:i64 = f_open_w(outp);
+    if (fd < 0) { return 2; }
+    f_write_all(fd, pcm);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    z_free(pcm);
+    let fd2:i64 = f_open_w(diagp);
+    if (fd2 < 0) { return 3; }
+    let dview:[]u8 = diag[0..(dn as i32)];
+    f_write_all(fd2, dview);
+    _zag_raw_syscall(3, fd2, 0, 0, 0, 0, 0);
+    z_free(diag);
+    _zag_print("region1 mode done. gate_transitions=");
+    _zag_print(_zag_i64_to_str(ntrans));
+    _zag_print(" engaged_at_end=");
+    _zag_print(_zag_i64_to_str(engaged));
+    _zag_print("\n");
+    return 0;
+}

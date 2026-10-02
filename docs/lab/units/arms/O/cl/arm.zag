@@ -1,0 +1,1008 @@
+// O-arm: main dispatch. One binary; argv[1] selects the mode.
+// Implements the frozen §3 mechanism: full learner-side intake via the Track B
+// teacher protocol (§4); taught words judgment-held at provisional strength.
+// Battery modes + O kill-evidence modes (o-disconnect, o-redteam, o-tripwire).
+@import("base.zag")
+@import("proto.zag")
+@import("learn.zag")
+
+// ---- helpers ----
+// ID-derived segment count (same walk as seg_of; no state needed)
+fn count_segs(cid:i32,srclen:i32) i32 {
+    let n:i32=0;let p:i32=0;
+    let t:i32=O_SEG_TARG+((cid*13) % 64);
+    while(p<srclen){
+        let e:i32=p+t;
+        if(srclen-e<O_SEG_MIN){e=srclen;}
+        if(e>p){n=n+1;}
+        p=e;
+    }
+    return n;
+}
+// boundary F1: reference = whitespace token starts; prediction = greedy
+// longest-match over the adopted (taught, judgment-held) vocabulary.
+// outputs precision/recall/F1 in tenths of a percent (x10).
+fn boundary_f1(s:*OState,corp:[]u8,clen:i32,o_p:*i32,o_r:*i32,o_f:*i32)void {
+    let ref:[]u8=o_malloc(s,clen);
+    let pred:[]u8=o_malloc(s,clen);
+    let i:i32=0;
+    while(i<clen){ref[i]=0;pred[i]=0;i=i+1;}
+    let p:i32=0;
+    while(p<clen){
+        while(p<clen && is_ws(corp[p])==1){p=p+1;}
+        if(p<clen){ref[p]=1;}
+        while(p<clen && is_ws(corp[p])==0){p=p+1;}
+    }
+    p=0;
+    while(p<clen){
+        if(is_ws(corp[p])==1){p=p+1;continue;}
+        pred[p]=1;
+        let best:i32=seg_word_at(s,corp,p,clen);
+        if(best>0){p=p+best;}else{p=p+1;}
+    }
+    let tp:i64=0;let fp:i64=0;let fnc:i64=0;
+    i=0;
+    while(i<clen){
+        if(ref[i]==1 && pred[i]==1){tp=tp+1;}
+        else if(pred[i]==1){fp=fp+1;}
+        else if(ref[i]==1){fnc=fnc+1;}
+        i=i+1;
+    }
+    o_free(s,ref);o_free(s,pred);
+    let pv:i64=0;let rv:i64=0;
+    if(tp+fp>0){pv=tp*1000/(tp+fp);}
+    if(tp+fnc>0){rv=tp*1000/(tp+fnc);}
+    o_p.*=pv as i32;o_r.*=rv as i32;
+    if(pv+rv>0){o_f.*=(2*pv*rv/(pv+rv)) as i32;}else{o_f.*=0;}
+}
+// A15 M1 ID-remap probe (PROVISIONAL-PENDING-FREEZE): N=64 remappings, patch
+// target (slot+1)%cap, TRAINER_SWAP_PROBE logged. Honest read returns the
+// remapped content. Returns 1 if all 64 behave honestly, 0 otherwise.
+fn m1_id_probe(s:*OState,corp:[]u8,clen:i32,cid:i32) i32 {
+    let nseg:i32=count_segs(cid,clen);
+    let done:i32=0;let okk:i32=0;
+    let si:i32=0;
+    let buf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    let ebuf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    while(si<nseg && done<64){
+        let uid:i32=sg_lookup(&s,cid,si);
+        if(uid>=0 && defect_for(&s,uid)<0){
+            // plant the remap defect (d_shift=-2), recall, verify remapped
+            // content is returned honestly, then clear.
+            trainer_defect(&s,uid,-2,0,0);
+            o_led(&s,OP_TSP,slot_of(&s,uid),0,uid,0,0,0,0,0,0,0,0,0,0,0);
+            let rl:i32=recall_bytes(&s,uid,corp,buf);
+            // expected: content of slot (slot_of(uid)+1)%cap, if live
+            let sl:i32=slot_of(&s,uid);
+            let rs:i32=(sl+1)%s.*.cap;
+            let exp:i32=-1;
+            if((iget(s.*.sflags,rs*4)&SF_LIVE)==SF_LIVE){
+                let ro:i32=iget(s.*.spos,rs*4);let rln:i32=iget(s.*.slen,rs*4);
+                let j:i32=0;while(j<rln){ebuf[j]=corp[ro+j];j=j+1;}
+                exp=rln;
+            }
+            if(exp>=0 && rl==exp && memcmp_eq(buf,0,ebuf,0,exp)==1){okk=okk+1;}
+            // clear the probe defect
+            let dk:i32=defect_for(&s,uid);
+            if(dk>=0){iput(s.*.d_uid,dk*4,-1);}
+            done=done+1;
+        }
+        si=si+1;
+    }
+    o_free(s,buf);o_free(s,ebuf);
+    if(done==64 && okk==64){return 1;}
+    return 0;
+}
+// ---- batched teach (M2 episodes-to-criterion) ----
+fn m2_begin(s:*OState,src:[]u8,srclen:i32,cid:i32,sess:i64,
+            o_off:*[]u8,o_len:*[]u8,o_g1:*[]u8,o_cf:*[]u8) i32 {
+    s.*.sess_id=sess;s.*.teach_seq=1;s.*.sess_halted=0;
+    let i:i32=0;while(i<6){uput64(s.*.last_seq,i*8,0);i=i+1;}
+    s.*.tw_n=0;s.*.tw_stim=srclen;s.*.tw_fired=0;
+    i=0;while(i<O_TW_WIN){s.*.tw_v[i]=0;i=i+1;}
+    teacher_count(s,src,srclen);
+    let off:[]u8=o_malloc(s,O_VMAX*4);let ln:[]u8=o_malloc(s,O_VMAX*4);
+    let fq:[]u8=o_malloc(s,O_VMAX*4);let g1:[]u8=o_malloc(s,O_VMAX*4);
+    let cf:[]u8=o_malloc(s,O_VMAX);
+    let np:i32=teacher_topk(s,off,ln,fq,g1,cf,O_VMAX);
+    o_free(s,fq);
+    learner_scan(&s,src,srclen);
+    o_off.*=off;o_len.*=ln;o_g1.*=g1;o_cf.*=cf;
+    return np;
+}
+fn m2_batch(s:*OState,src:[]u8,srclen:i32,cid:i32,
+            off:[]u8,ln:[]u8,g1:[]u8,cf:[]u8,start:i32,count:i32) i32 {
+    let pbuf:[]u8=o_malloc(s,4096);
+    let gnd:[]u8=o_malloc(s,8*16);
+    let adopted:i32=0;
+    let i:i32=start;let end:i32=start+count;
+    while(i<end){
+        if(s.*.sess_halted==1){break;}
+        let ss:i32=iget(off,i*4);let sl:i32=iget(ln,i*4);
+        let gn:i32=0;
+        if(iget(g1,i*4)>=0){
+            uput64(gnd,0,iget(g1,i*4) as i64);
+            uput64(gnd,8,(iget(g1,i*4)+sl) as i64);
+            gn=1;
+        }
+        let plen:i32=p_enc(pbuf,O_TEACHER_ID,s.*.sess_id,s.*.teach_seq,
+                           PK_WORD_SPAN,ss as i64,(ss+sl) as i64,"",0,gnd,gn,
+                           cf[i] as i32);
+        if(plen>0){
+            s.*.teach_seq=s.*.teach_seq+1;
+            let tid:i32=0;let kind:i32=0;let dss:i32=0;let dse:i32=0;
+            let dcf:i32=0;let dgndn:i32=0;
+            let rc:i32=p_dec(&s,pbuf,plen,srclen,&tid,&kind,&dss,&dse,&dcf,gnd,&dgndn);
+            let v:i32=V_REJECT;let g:i32=R_INTEGRITY;
+            if(rc==0){
+                deliberate(&s,src,srclen,tid,kind,dss,dse,gnd,dgndn,dcf,cid,&v,&g);
+                if(v==V_ADOPT){adopted=adopted+1;}
+            }
+            tripwire_note(&s,dss,dse,v,dcf);
+        }
+        i=i+1;
+    }
+    o_free(s,pbuf);o_free(s,gnd);
+    word_reindex(&s);
+    return adopted;
+}
+fn m2_end(s:*OState,off:[]u8,ln:[]u8,g1:[]u8,cf:[]u8)void {
+    o_free(s,off);o_free(s,ln);o_free(s,g1);o_free(s,cf);
+}
+// ---- standard state sizes ----
+fn std_new(nseg:i32) OState {
+    let slots:i32=nseg+128;
+    return o_new(slots,65536,65536,65536,1048576,4096,4096);
+}
+
+// ================= M1 =================
+fn do_m1(croot:[]u8,fname:[]u8,cid:i32,mode:[]u8)void {
+    let corp:[]u8=read_file(croot,fname);
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let nseg:i32=count_segs(cid,clen);
+    let s:OState=std_new(nseg);
+    let adopted:i32=teach_session(&s,corp,clen,cid,1);
+    let si:i32=0;
+    while(si<nseg){
+        ingest_seg(&s,cid,si,clen,corp);
+        si=si+1;
+    }
+    let tot:i32=0;let ok:i32=0;
+    m1_recall(&s,cid,clen,corp,&tot,&ok);
+    let probe:i32=m1_id_probe(&s,corp,clen,cid);
+    let p:i32=0;let r:i32=0;let f:i32=0;
+    boundary_f1(&s,corp,clen,&p,&r,&f);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m1_units",nseg as i64);
+    jf_int(&fs,"m1_recall_ok",ok as i64);
+    jf_int(&fs,"m1_recall_tot",tot as i64);
+    let rp:i32=0;
+    if(tot>0){rp=(ok*1000/tot) as i32;}
+    jf_int(&fs,"m1_recall_pct_x10",rp as i64);
+    jf_int(&fs,"m1_boundary_f1_x10",f as i64);
+    jf_bool(&fs,"m1_id_probe_pass",probe);
+    jf_int(&fs,"m1_id_probe_note",0); // 0 = provisional schedule
+    jf_int(&fs,"m1_adopted_words",s.wn as i64);
+    jf_int(&fs,"m1_ledger_entries",s.led_n as i64);
+    j_end();
+    _zag_print("M1 ");_zag_print(mode);_zag_print(" recall ");
+    p_i64(ok as i64);_zag_print("/");p_i64(tot as i64);
+    _zag_print(" f1=");p_dec1(f as i64);_zag_print(" probe=");p_i64(probe as i64);
+    _zag_println("");
+}
+
+// ================= M2 =================
+// T1: episodes-to-criterion for taught-only vocabulary on novel material.
+// One episode = one 256-proposal teach batch (ranked by freq*len).
+// Criterion: boundary F1 >= 95.0% (x10 >= 950).
+fn do_m2_t1(croot:[]u8,fname:[]u8,cid:i32,mode:[]u8)void {
+    let corp:[]u8=read_file(croot,fname);
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let s:OState=std_new(count_segs(cid,clen));
+    // episode 0: empty vocabulary (leak probe)
+    let p0:i32=0;let r0:i32=0;let f0:i32=0;
+    boundary_f1(&s,corp,clen,&p0,&r0,&f0);
+    let off:[]u8="";let ln:[]u8="";let g1:[]u8="";let cf:[]u8="";
+    let np:i32=m2_begin(&s,corp,clen,cid,1,&off,&ln,&g1,&cf);
+    let ep:i32=0;let done:i32=0;let etc:i32=-1;
+    let pf:i32=0;let pr:i32=0;let pp:i32=0;
+    while(done<np && ep<16){
+        let b:i32=256;
+        if(done+b>np){b=np-done;}
+        m2_batch(&s,corp,clen,cid,off,ln,g1,cf,done,b);
+        done=done+b;ep=ep+1;
+        boundary_f1(&s,corp,clen,&pp,&pr,&pf);
+        if(pf>=950){etc=ep;break;}
+    }
+    m2_end(&s,off,ln,g1,cf);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m2_etc",etc as i64);
+    jf_int(&fs,"m2_episodes_run",ep as i64);
+    jf_int(&fs,"m2_proposals",np as i64);
+    jf_int(&fs,"m2_episode0_f1_x10",f0 as i64);
+    jf_int(&fs,"m2_final_f1_x10",pf as i64);
+    jf_int(&fs,"m2_final_precision_x10",pp as i64);
+    jf_int(&fs,"m2_final_recall_x10",pr as i64);
+    let crit:i32=0;if(etc>=0){crit=1;}
+    jf_bool(&fs,"m2_criterion_met",crit);
+    jf_int(&fs,"m2_adopted_words",s.wn as i64);
+    j_end();
+    _zag_print("M2 ");_zag_print(mode);_zag_print(" etc=");p_i64(etc as i64);
+    _zag_print(" f1=");p_dec1(pf as i64);_zag_println("");
+}
+// T2/T3 transfer: teach on T1 (same domain), measure on novel T2/T3.
+fn do_m2_transfer(croot:[]u8,tfname:[]u8,tcid:i32,ffname:[]u8,fcid:i32,mode:[]u8)void {
+    let tc:[]u8=read_file(croot,tfname);
+    let fc:[]u8=read_file(croot,ffname);
+    if(tc.len<=0 || fc.len<=0){_zag_print("FATAL empty corpus\n");return;}
+    let s:OState=std_new(count_segs(tcid,tc.len));
+    teach_session(&s,tc,tc.len,tcid,1);
+    disconnect(&s);
+    let p:i32=0;let r:i32=0;let f:i32=0;
+    boundary_f1(&s,fc,fc.len,&p,&r,&f);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m2_transfer_precision_x10",p as i64);
+    jf_int(&fs,"m2_transfer_recall_x10",r as i64);
+    jf_int(&fs,"m2_transfer_f1_x10",f as i64);
+    jf_int(&fs,"m2_adopted_words",s.wn as i64);
+    j_end();
+    _zag_print("M2 ");_zag_print(mode);_zag_print(" transfer_f1=");p_dec1(f as i64);
+    _zag_println("");
+}
+
+// ================= M3 =================
+fn do_m3(croot:[]u8,mode:[]u8)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let cid:i32=O_C_PROSE;
+    let s:OState=o_new(O_M3_CAP,65536,65536,65536,1048576,4096,4096);
+    teach_session(&s,corp,clen,cid,1);
+    // 1000 V units (valuable): ingest + pin
+    let vuid:[]u8=o_malloc(s,1000*4);
+    let i:i32=0;
+    while(i<1000){
+        let u:i32=ingest_seg(&s,cid,i,clen,corp);
+        iput(vuid,i*4,u);
+        trainer_pin(&s,u);
+        i=i+1;
+    }
+    // 3000 adds
+    let auid:[]u8=o_malloc(s,3000*4);
+    i=0;
+    while(i<3000){
+        let u:i32=ingest_seg(&s,cid,1000+i,clen,corp);
+        iput(auid,i*4,u);
+        i=i+1;
+    }
+    // 3000 kills (the adds, not the V)
+    i=0;
+    while(i<3000){trainer_kill(&s,iget(auid,i*4));i=i+1;}
+    o_free(s,auid);
+    // 50 weakens on V
+    i=0;
+    while(i<50){trainer_weaken(&s,iget(vuid,i*4));i=i+1;}
+    // 4000 pressure adds into the 4000-slot FIFO (V pinned: never evicted)
+    let puid:[]u8=o_malloc(s,4000*4);
+    i=0;
+    while(i<4000){
+        let u:i32=ingest_seg(&s,cid,4000+i,clen,corp);
+        iput(puid,i*4,u);
+        i=i+1;
+    }
+    // survival: V live and byte-exact
+    let buf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    let surv:i32=0;
+    i=0;
+    while(i<1000){
+        let u:i32=iget(vuid,i*4);
+        let sl:i32=slot_of(&s,u);
+        if(sl>=0 && (iget(s.sflags,sl*4)&SF_LIVE)==SF_LIVE){
+            let ss:i32=0;let se:i32=0;
+            seg_range(&s,cid,iget(s.sseg,sl*4),clen,&ss,&se);
+            let rl:i32=recall_bytes(&s,u,corp,buf);
+            if(rl==(se-ss) && memcmp_eq(corp,ss,buf,0,se-ss)==1){surv=surv+1;}
+        }
+        i=i+1;
+    }
+    // fresh: pressure adds still held recall byte-exact
+    let fresh_ok:i32=0;let fresh_live:i32=0;
+    i=0;
+    while(i<4000){
+        let u:i32=iget(puid,i*4);
+        let sl:i32=slot_of(&s,u);
+        if(sl>=0 && (iget(s.sflags,sl*4)&SF_LIVE)==SF_LIVE){
+            fresh_live=fresh_live+1;
+            let ss:i32=0;let se:i32=0;
+            seg_range(&s,cid,iget(s.sseg,sl*4),clen,&ss,&se);
+            let rl:i32=recall_bytes(&s,u,corp,buf);
+            if(rl==(se-ss) && memcmp_eq(corp,ss,buf,0,se-ss)==1){fresh_ok=fresh_ok+1;}
+        }
+        i=i+1;
+    }
+    o_free(s,vuid);o_free(s,puid);o_free(s,buf);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m3_v_total",1000);
+    jf_int(&fs,"m3_v_survived",surv as i64);
+    jf_int(&fs,"m3_survival_pct_x10",(surv*1000/1000) as i64);
+    jf_int(&fs,"m3_pressure_live",fresh_live as i64);
+    jf_int(&fs,"m3_fresh_ok",fresh_ok as i64);
+    let fr:i32=0;
+    if(fresh_live>0){fr=(fresh_ok*1000/fresh_live) as i32;}
+    jf_int(&fs,"m3_fresh_pct_x10",fr as i64);
+    if(surv==1000 && fr==1000){jf_str(&fs,"m3_verdict","CLEAR");}
+    else{jf_str(&fs,"m3_verdict","DEGRADED");}
+    jf_int(&fs,"m3_ledger_entries",s.led_n as i64);
+    j_end();
+    _zag_print("M3 survival ");p_i64(surv as i64);_zag_print("/1000 fresh ");
+    p_i64(fresh_ok as i64);_zag_print("/");p_i64(fresh_live as i64);
+    _zag_println("");
+}
+
+// ================= M4 =================
+fn do_m4(croot:[]u8,fname:[]u8,cid:i32,mode:[]u8)void {
+    let corp:[]u8=read_file(croot,fname);
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let nseg:i32=count_segs(cid,clen);
+    let s:OState=std_new(nseg);
+    teach_session(&s,corp,clen,cid,1);
+    let si:i32=0;
+    while(si<nseg){ingest_seg(&s,cid,si,clen,corp);si=si+1;}
+    // plant 100 boundary + 100 content defects on distinct uids
+    let duid:[]u8=o_malloc(s,200*4);
+    let di:i32=0;si=0;
+    while(si<nseg && di<200){
+        let uid:i32=sg_lookup(&s,cid,si);
+        if(uid>=0){
+            iput(duid,di*4,uid);
+            if(di<100){
+                // boundary defect: corrupt [64,128) of the recalled bytes
+                trainer_defect(&s,uid,0,64,64);
+            } else {
+                // content defect: single byte at corpus offset of seg start+7
+                let ss:i32=0;let se:i32=0;
+                seg_range(&s,cid,si,clen,&ss,&se);
+                trainer_defect(&s,uid,ss+7,0,0);
+            }
+            di=di+1;
+        }
+        si=si+7; // spread deterministically
+    }
+    // same-ID revision, up to 20 episodes; kill substitution is forbidden
+    let ep:i32=0;let fixed:i32=0;let killed:i32=0;
+    while(ep<20 && fixed<di){
+        fixed=0;
+        let j:i32=0;
+        while(j<di){
+            let uid:i32=iget(duid,j*4);
+            let sl:i32=slot_of(&s,uid);
+            if(sl>=0 && (iget(s.sflags,sl*4)&SF_LIVE)==SF_LIVE){
+                let r:i32=revise_unit(&s,uid,corp);
+                if(r==1){fixed=fixed+1;}
+            } else {
+                killed=killed+1; // must stay 0: kill substitution rejected
+            }
+            j=j+1;
+        }
+        ep=ep+1;
+    }
+    // verify all content-correct after revision
+    let buf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    let okk:i32=0;
+    let j:i32=0;
+    while(j<di){
+        let uid:i32=iget(duid,j*4);
+        let sl:i32=slot_of(&s,uid);
+        if(sl>=0 && (iget(s.sflags,sl*4)&SF_LIVE)==SF_LIVE){
+            let ss:i32=0;let se:i32=0;
+            seg_range(&s,cid,iget(s.sseg,sl*4),clen,&ss,&se);
+            let rl:i32=recall_bytes(&s,uid,corp,buf);
+            if(rl==(se-ss) && memcmp_eq(corp,ss,buf,0,se-ss)==1){okk=okk+1;}
+        }
+        j=j+1;
+    }
+    o_free(s,duid);o_free(s,buf);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m4_defects",di as i64);
+    jf_int(&fs,"m4_revised_ok",okk as i64);
+    let rp:i32=0;
+    if(di>0){rp=(okk*1000/di) as i32;}
+    jf_int(&fs,"m4_revised_pct_x10",rp as i64);
+    jf_int(&fs,"m4_episodes",ep as i64);
+    let ksub:i32=0;if(killed>0){ksub=1;}
+    jf_bool(&fs,"m4_kill_substitution",ksub);
+    j_end();
+    _zag_print("M4 ");_zag_print(mode);_zag_print(" revised ");
+    p_i64(okk as i64);_zag_print("/");p_i64(di as i64);
+    _zag_print(" ep=");p_i64(ep as i64);_zag_println("");
+}
+
+// ================= M5 =================
+// m5-baseline: ingest only (no teacher). m5-1x: teach + ingest + 500 fresh
+// adds + 500 kills. Reports memory bytes-per-byte and audit entries per KB.
+fn m5_stats(s:*OState,corp:[]u8,clen:i32,mode:[]u8,taught:i32)void {
+    // memory: word bytes + ledger + trace + slot arrays, per corpus byte
+    let slot_bytes:i64=(s.cap as i64)*40;
+    let total:i64=(s.wbytes_n as i64)+(s.led_n as i64)*64+(s.trace_n as i64)+slot_bytes;
+    let bpb_x1000:i64=0;
+    if(clen>0){bpb_x1000=total*1000/(clen as i64);}
+    let kb:i64=(clen as i64)/1024;
+    if(kb==0){kb=1;}
+    let apk_x1000:i64=(s.led_n as i64)*1000/kb;
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m5_taught",taught as i64);
+    jf_int(&fs,"m5_corpus_bytes",clen as i64);
+    jf_int(&fs,"m5_store_bytes",total as i64);
+    jf_int(&fs,"m5_memory_bpb_x1000",bpb_x1000);
+    jf_int(&fs,"m5_ledger_entries",s.led_n as i64);
+    jf_int(&fs,"m5_audit_per_kb_x1000",apk_x1000);
+    jf_int(&fs,"m5_live_units",s.nlive as i64);
+    jf_int(&fs,"m5_adopted_words",s.wn as i64);
+    j_end();
+    _zag_print("M5 ");_zag_print(mode);_zag_print(" bpb=");p_dec1(bpb_x1000/10);
+    _zag_print(" apk=");p_dec1(apk_x1000/10);_zag_println("");
+}
+fn do_m5(croot:[]u8,mode:[]u8,taught:i32)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let cid:i32=O_C_PROSE;
+    let nseg:i32=count_segs(cid,clen);
+    let s:OState=std_new(nseg+1024);
+    if(taught==1){
+        teach_session(&s,corp,clen,cid,1);
+    }
+    let si:i32=0;
+    while(si<nseg){ingest_seg(&s,cid,si,clen,corp);si=si+1;}
+    if(taught==1){
+        // 500 fresh adds (reuse T1 prose segments under a distinct corpus id
+        // so IDs stay opaque and stable)
+        let fc:[]u8=read_file(croot,"t1_prose.bin");
+        let flen:i32=fc.len;
+        let fseg:i32=count_segs(O_C_T1P,flen);
+        let added:[]u8=o_malloc(s,500*4);
+        let i:i32=0;
+        while(i<500 && i<fseg){
+            let u:i32=ingest_seg(&s,O_C_T1P,i,flen,fc);
+            iput(added,i*4,u);
+            i=i+1;
+        }
+        i=0;
+        while(i<500 && i<fseg){trainer_kill(&s,iget(added,i*4));i=i+1;}
+        o_free(s,added);
+    }
+    m5_stats(&s,corp,clen,mode,taught);
+}
+
+// ================= M6 =================
+// Cross-domain transfer: teach on T1, freeze (disconnect), face the full
+// other corpus in 10 episodes (chunks). ETC = first episode with
+// boundary F1 >= 95%. Tax = 1 - (transfer F1 / taught F1), floored at 0.
+fn do_m6(croot:[]u8,tfname:[]u8,tcid:i32,ffname:[]u8,fcid:i32,mode:[]u8)void {
+    let tc:[]u8=read_file(croot,tfname);
+    let fc:[]u8=read_file(croot,ffname);
+    if(tc.len<=0 || fc.len<=0){_zag_print("FATAL empty corpus\n");return;}
+    let s:OState=std_new(count_segs(tcid,tc.len)+count_segs(fcid,fc.len));
+    teach_session(&s,tc,tc.len,tcid,1);
+    let tp:i32=0;let tr:i32=0;let tf:i32=0;
+    boundary_f1(&s,tc,tc.len,&tp,&tr,&tf);
+    disconnect(&s); // freeze: teacher gone, policy fixed
+    let flen:i32=fc.len;
+    let etc:i32=-1;let ff:i32=0;let fp:i32=0;let fr:i32=0;
+    let ep:i32=0;
+    while(ep<10){
+        // ingest one chunk of the faced corpus per episode
+        let c0:i32=(flen*ep)/10;let c1:i32=(flen*(ep+1))/10;
+        let s0:i32=seg_of(&s,fcid,c0,flen);
+        let s1:i32=seg_of(&s,fcid,c1-1,flen);
+        let si:i32=s0;
+        while(si<=s1){ingest_seg(&s,fcid,si,flen,fc);si=si+1;}
+        ep=ep+1;
+        // boundary F1 on faced-so-far
+        boundary_f1(&s,fc,c1,&fp,&fr,&ff);
+        if(ff>=950){etc=ep;break;}
+    }
+    // final over the whole faced corpus
+    boundary_f1(&s,fc,flen,&fp,&fr,&ff);
+    if(etc<0 && ff>=950){etc=10;}
+    let tax:i32=0;
+    if(tf>0 && ff<tf){tax=((tf-ff)*1000/tf) as i32;}
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m6_etc",etc as i64);
+    jf_int(&fs,"m6_taught_f1_x10",tf as i64);
+    jf_int(&fs,"m6_transfer_f1_x10",ff as i64);
+    jf_int(&fs,"m6_transfer_precision_x10",fp as i64);
+    jf_int(&fs,"m6_transfer_recall_x10",fr as i64);
+    jf_int(&fs,"m6_tax_x1000",tax as i64);
+    j_end();
+    _zag_print("M6 ");_zag_print(mode);_zag_print(" etc=");p_i64(etc as i64);
+    _zag_print(" f1=");p_dec1(ff as i64);_zag_println("");
+}
+
+// ================= M7 =================
+// 5000 lookups split 1666/1667/1667; target (l*37)%nunits.
+// Every 100th unit carries a first-byte XOR 0xFF defect (planted); the lookup
+// must return the defected content honestly. PROVISIONAL-PENDING-FREEZE.
+fn do_m7(croot:[]u8,mode:[]u8)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let clen:i32=corp.len;
+    if(clen<=0){_zag_print("FATAL empty corpus\n");return;}
+    let cid:i32=O_C_PROSE;
+    let nseg:i32=count_segs(cid,clen);
+    let s:OState=std_new(nseg);
+    teach_session(&s,corp,clen,cid,1);
+    let si:i32=0;
+    while(si<nseg){ingest_seg(&s,cid,si,clen,corp);si=si+1;}
+    // plant first-byte defects on every 100th unit
+    si=0;
+    while(si<nseg){
+        let uid:i32=sg_lookup(&s,cid,si);
+        if(uid>=0 && uid%100==0){
+            let ss:i32=0;let se:i32=0;
+            seg_range(&s,cid,si,clen,&ss,&se);
+            trainer_defect(&s,uid,ss,0,0); // content defect at first byte
+        }
+        si=si+1;
+    }
+    let buf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    let splits:[]u8=o_malloc(s,3*4);
+    iput(splits,0,1666);iput(splits,4,1667);iput(splits,8,1667);
+    let okk:[]u8=o_malloc(s,3*4);
+    let l:i32=0;let ph:i32=0;let base:i32=0;
+    while(ph<3){
+        let cnt:i32=iget(splits,ph*4);
+        let pok:i32=0;
+        let k:i32=0;
+        while(k<cnt){
+            let uid:i32=((base+k)*37)%nseg;
+            // uid here is a SEGMENT index; resolve to the ingested unit id
+            let real:i32=sg_lookup(&s,cid,uid);
+            let good:i32=0;
+            if(real>=0){
+                let rl:i32=recall_bytes(&s,real,corp,buf);
+                let ss:i32=0;let se:i32=0;
+                seg_range(&s,cid,uid,clen,&ss,&se);
+                if(rl==(se-ss)){
+                    if(real%100==0){
+                        // defected: first byte must be XORed, rest exact
+                        if((buf[0] as i32)==((corp[ss] as i32)^0xFF) &&
+                           memcmp_eq(buf,1,corp,ss+1,se-ss-1)==1){good=1;}
+                    } else {
+                        if(memcmp_eq(buf,0,corp,ss,se-ss)==1){good=1;}
+                    }
+                }
+            }
+            if(good==1){pok=pok+1;}
+            k=k+1;
+        }
+        iput(okk,ph*4,pok);
+        base=base+cnt;
+        ph=ph+1;
+    }
+    let o0:i32=iget(okk,0);let o1:i32=iget(okk,4);let o2:i32=iget(okk,8);
+    o_free(s,splits);o_free(s,okk);o_free(s,buf);
+    let fs:i32=0;j_begin(mode);
+    jf_int(&fs,"m7_lookups",5000);
+    jf_int(&fs,"m7_phase1_ok",o0 as i64);
+    jf_int(&fs,"m7_phase2_ok",o1 as i64);
+    jf_int(&fs,"m7_phase3_ok",o2 as i64);
+    let tot_ok:i32=o0+o1+o2;
+    jf_int(&fs,"m7_ok_pct_x10",(tot_ok*1000/5000) as i64);
+    jf_int(&fs,"m7_provisional",1);
+    j_end();
+    _zag_print("M7 ok ");p_i64(tot_ok as i64);_zag_print("/5000");
+    _zag_print(" (");p_i64(o0 as i64);_zag_print("/");
+    p_i64(o1 as i64);_zag_print("/");p_i64(o2 as i64);_zag_print(")");
+    _zag_println("");
+}
+
+// ================= M8 =================
+// Determinism gate: M1 prose+code and M3, then chunked state/ledger hashes
+// and the allocation trace. Perturbation argv[4]: clean|frag|aslr|starve|freelist.
+fn hex64(v:i64,out:[]u8,at:i32)void {
+    let d:[]u8="0123456789abcdef";
+    let i:i32=0;
+    while(i<16){
+        out[at+15-i]=d[(v & 15) as i32];
+        v=v>>4;
+        i=i+1;
+    }
+}
+fn m8_write_hashes(s:*OState,dir:[]u8)void {
+    // serialize slot arrays -> 64KB chunks -> sha256 hex per chunk
+    let nslots:i32=s.cap;
+    let per:i32=40; // suid,spos,slen,scorp,sseg,sflags(6*u32) + shash(u64) = 32B; pad
+    let total:i64=(nslots as i64)*(per as i64);
+    let chunk:i32=65536;
+    let img:[]u8=o_malloc(s,chunk);
+    let line:[]u8=o_malloc(s,128);
+    let out:[]u8=o_malloc(s,65536);
+    let on:i32=0;
+    let hh:[]u8=o_malloc(s,32);
+    let hx:[]u8=ns_hex(hh); // placeholder; replaced below
+    o_free(s,hx);
+    let off:i64=0;let ci:i32=0;
+    let chain:i64=1469598103934665603;
+    let chout:[]u8=o_malloc(s,65536);let chn:i32=0;
+    while(off<total){
+        let n:i32=chunk;
+        if(off+(n as i64)>total){n=(total-off) as i32;}
+        // fill img deterministically from slot arrays
+        let j:i32=0;
+        while(j<n){
+            let slot:i32=((off+j as i64)/(per as i64)) as i32;
+            let f:i32=((off+j as i64)%(per as i64)) as i32;
+            let v:u8=0;
+            if(slot<nslots){
+                if(f<4){v=((iget(s.suid,slot*4)>>(f*8))&255) as u8;}
+                else if(f<8){v=((iget(s.spos,slot*4)>>((f-4)*8))&255) as u8;}
+                else if(f<12){v=((iget(s.slen,slot*4)>>((f-8)*8))&255) as u8;}
+                else if(f<16){v=((iget(s.scorp,slot*4)>>((f-12)*8))&255) as u8;}
+                else if(f<20){v=((iget(s.sseg,slot*4)>>((f-16)*8))&255) as u8;}
+                else if(f<24){v=((iget(s.sflags,slot*4)>>((f-20)*8))&255) as u8;}
+                else if(f<32){v=((uget64(s.shash,slot*8)>>((f-24)*8))&255) as u8;}
+            }
+            img[j]=v;
+            j=j+1;
+        }
+        ns_sha256(img[0..n],hh);
+        let hex:[]u8=ns_hex(hh);
+        // line: "chunk <ci> <hex>\n"
+        let ls:[]u8=_zag_i64_to_str(ci as i64);
+        let w:i32=0;
+        let tag:[]u8="chunk ";
+        while(w<tag.len){line[w]=tag[w];w=w+1;}
+        let k:i32=0;
+        while(k<ls.len){line[w]=ls[k];w=w+1;k=k+1;}
+        line[w]=32;w=w+1;
+        k=0;
+        while(k<hex.len){line[w]=hex[k];w=w+1;k=k+1;}
+        line[w]=10;w=w+1;
+        nio_free(ls);nio_free(hex);
+        k=0;
+        while(k<w){out[on]=line[k];on=on+1;k=k+1;}
+        // chain line
+        chain=(chain ^ fnv1a(img,0,n))*1099511628211;
+        hex64(chain,line,0);
+        line[16]=10;
+        k=0;
+        while(k<17){chout[chn]=line[k];chn=chn+1;k=k+1;}
+        off=off+(n as i64);ci=ci+1;
+    }
+    write_file(dir,"store_hashes.txt",out[0..on]);
+    write_file(dir,"store_chain.txt",chout[0..chn]);
+    // ledger.bin + ledger chain
+    write_file(dir,"ledger.bin",s.led[0..s.led_n*64]);
+    let ln:i32=s.led_n*64;
+    let lc:[]u8=o_malloc(s,65536);let lcn:i32=0;
+    let lo:i32=0;chain=1469598103934665603;
+    while(lo<ln){
+        let n:i32=65536;
+        if(lo+n>ln){n=ln-lo;}
+        chain=(chain ^ fnv1a(s.led,lo,n))*1099511628211;
+        hex64(chain,line,0);
+        line[16]=10;
+        let k:i32=0;
+        while(k<17){lc[lcn]=line[k];lcn=lcn+1;k=k+1;}
+        lo=lo+n;
+    }
+    write_file(dir,"ledger_chain.txt",lc[0..lcn]);
+    write_file(dir,"alloc_trace.txt",s.trace[0..s.trace_n]);
+    o_free(s,img);o_free(s,line);o_free(s,out);o_free(s,hh);
+    o_free(s,chout);o_free(s,lc);
+}
+fn do_m8(croot:[]u8,dir:[]u8,pert:[]u8)void {
+    // perturbations (deterministic; must not affect output bytes)
+    let pad:[]u8="";
+    if(_zag_strcmp(pert,"aslr")==1){
+        pad=nio_alloc(1234567); // base pad; kept, untraced
+        let i:i32=0;while(i<1234567){pad[i]=(i&255) as u8;i=i+1;}
+    }
+    if(_zag_strcmp(pert,"frag")==1){
+        // deterministic heap pre-fragmentation (untraced)
+        let i:i32=0;
+        while(i<64){
+            let b:[]u8=nio_alloc(1024+((i*7919)%8192));
+            if(i%2==0){nio_free(b);}
+            i=i+1;
+        }
+    }
+    // starve: LD_PRELOAD shim handles it (we use no clock/entropy)
+    // freelist: no-op for id-derived placement (AMBIGUITIES A11)
+    let s:OState=o_new(22000,131072,65536,65536,1048576,4096,4096);
+    // M1 prose
+    let pc:[]u8=read_file(croot,"prose.bin");
+    let cc:[]u8=read_file(croot,"code.bin");
+    if(pc.len<=0 || cc.len<=0){_zag_print("FATAL empty corpus\n");return;}
+    teach_session(&s,pc,pc.len,O_C_PROSE,1);
+    let nseg:i32=count_segs(O_C_PROSE,pc.len);
+    let si:i32=0;
+    while(si<nseg){ingest_seg(&s,O_C_PROSE,si,pc.len,pc);si=si+1;}
+    // M1 code (same state: IDs are per-corpus, no collision)
+    teach_session(&s,cc,cc.len,O_C_CODE,2);
+    nseg=count_segs(O_C_CODE,cc.len);
+    si=0;
+    while(si<nseg){ingest_seg(&s,O_C_CODE,si,cc.len,cc);si=si+1;}
+    // M3 churn on top
+    let i:i32=0;
+    while(i<1000){
+        let u:i32=ingest_seg(&s,O_C_PROSE,i,pc.len,pc);
+        trainer_pin(&s,u);
+        i=i+1;
+    }
+    i=0;
+    while(i<3000){
+        let u:i32=ingest_seg(&s,O_C_PROSE,1000+i,pc.len,pc);
+        if(i<1500){trainer_kill(&s,u);}
+        i=i+1;
+    }
+    i=0;
+    while(i<4000){ingest_seg(&s,O_C_PROSE,4000+i,pc.len,pc);i=i+1;}
+    m8_write_hashes(&s,dir);
+    if(pad.len>0){nio_free(pad);}
+    _zag_print("M8 done nlive=");p_i64(s.nlive as i64);
+    _zag_print(" led=");p_i64(s.led_n as i64);_zag_println("");
+    let fs:i32=0;j_begin("m8-1x");
+    jf_int(&fs,"m8_nlive",s.nlive as i64);
+    jf_int(&fs,"m8_ledger_entries",s.led_n as i64);
+    jf_int(&fs,"m8_trace_bytes",s.trace_n as i64);
+    j_end();
+}
+
+// ================= O kill-evidence modes =================
+// o-disconnect: teach, then SCAFFOLD_DROP; post-scaffold M1 must be >= 99.5%.
+// Kill (ii) fires if post-scaffold M1 < 99.5%.
+fn do_disconnect(croot:[]u8)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let clen:i32=corp.len;
+    let cid:i32=O_C_PROSE;
+    let nseg:i32=count_segs(cid,clen);
+    let s:OState=std_new(nseg);
+    let adopted:i32=teach_session(&s,corp,clen,cid,1);
+    let si:i32=0;
+    while(si<nseg){ingest_seg(&s,cid,si,clen,corp);si=si+1;}
+    let t0:i32=0;let o0:i32=0;
+    m1_recall(&s,cid,clen,corp,&t0,&o0);
+    disconnect(&s); // SCAFFOLD_DROP: teacher/scaffold removed
+    let t1:i32=0;let o1:i32=0;
+    m1_recall(&s,cid,clen,corp,&t1,&o1);
+    // recall rankings identical: compare per-segment recall success
+    let buf:[]u8=o_malloc(s,O_SEG_MAX+64);
+    let same:i32=1;
+    si=0;
+    while(si<nseg){
+        let uid:i32=sg_lookup(&s,cid,si);
+        let ss:i32=0;let se:i32=0;
+        seg_range(&s,cid,si,clen,&ss,&se);
+        let good:i32=0;
+        if(uid>=0){
+            let rl:i32=recall_bytes(&s,uid,corp,buf);
+            if(rl==(se-ss) && memcmp_eq(corp,ss,buf,0,se-ss)==1){good=1;}
+        }
+        // pre-disconnect was all-good (m1_recall); post must match
+        if(good!=1){same=0;}
+        si=si+1;
+    }
+    o_free(s,buf);
+    let post_x10:i32=0;
+    if(t1>0){post_x10=(o1*1000/t1) as i32;}
+    let fs:i32=0;j_begin("o-disconnect");
+    jf_int(&fs,"pre_m1_ok",o0 as i64);
+    jf_int(&fs,"pre_m1_tot",t0 as i64);
+    jf_int(&fs,"post_m1_ok",o1 as i64);
+    jf_int(&fs,"post_m1_tot",t1 as i64);
+    jf_int(&fs,"post_m1_x10",post_x10 as i64);
+    jf_bool(&fs,"rankings_identical",same);
+    jf_int(&fs,"adopted_words",adopted as i64);
+    jf_int(&fs,"words_surviving",s.wn as i64);
+    // kill (ii): post-scaffold M1 < 99.5% (x10 < 995)
+    let k2:i32=0;if(post_x10<995){k2=1;}
+    jf_bool(&fs,"kill_ii_fired",k2);
+    j_end();
+    _zag_print("DISCONNECT post_m1=");p_dec1(post_x10);
+    _zag_print(" kill_ii=");p_i64(k2 as i64);
+    _zag_println("");
+}
+// o-redteam: malformed/malicious proposal battery. ANY adoption => kill (iii).
+// The battery crafts: bad magic, bad version, bad teacher id (0,2),
+// seq gap, seq duplicate, bad kind, bad span (start>=end, end>stim),
+// bad checksum, aux over-cap, ground over-cap, oversized confidence,
+// non-span smuggling (kind=BOUNDARY with huge confidence), truncated buffer.
+fn rt_craft(s:*OState,kind:i32,buf:[]u8) i32 {
+    // returns a proposal length; crafts attack #kind (0..13)
+    let gnd:[]u8=o_malloc(s,16);
+    let n:i32=0;
+    if(kind==0){
+        // bad magic
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+        iput(buf,0,0xDEADBEEF);
+    } else if(kind==1){
+        // bad version
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+        buf[4]=2;
+    } else if(kind==2){
+        // reserved teacher id 0
+        n=p_enc(buf,0,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+    } else if(kind==3){
+        // invalid teacher id 2
+        n=p_enc(buf,2,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+    } else if(kind==4){
+        // seq gap (skip seq 1; use a fresh session state)
+        n=p_enc(buf,O_TEACHER_ID,1,5,PK_WORD_SPAN,0,10,"",0,"",0,200);
+    } else if(kind==5){
+        // seq duplicate: first a valid seq-1, then seq-1 again.
+        // (handled by caller doing two ingests; here craft the valid one)
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+    } else if(kind==6){
+        // bad kind (9)
+        n=p_enc(buf,O_TEACHER_ID,1,1,9,0,10,"",0,"",0,200);
+    } else if(kind==7){
+        // start >= end
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,50,50,"",0,"",0,200);
+    } else if(kind==8){
+        // span end beyond stimulus
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,999999,"",0,"",0,200);
+    } else if(kind==9){
+        // bad checksum
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+        buf[n-1]=(buf[n-1] as i32 ^ 1) as u8;
+    } else if(kind==10){
+        // truncated buffer
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+        n=20;
+    } else if(kind==11){
+        // aux over cap (hand-built: aux_count=9)
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+        buf[43]=9;
+        // recompute checksum so the ONLY fault is aux_count
+        uput64(buf,n-8,fnv1a(buf,0,n-8));
+    } else if(kind==12){
+        // smuggled command: kind=WORD_SPAN but span covers a huge region
+        // at confidence 255 (also trips the secondary tripwire)
+        n=p_enc(buf,O_TEACHER_ID,1,1,PK_WORD_SPAN,0,4000,"",0,"",0,255);
+    } else {
+        // kind 13: teacher 4 (symbolic hints only) attempting a §P proposal
+        n=p_enc(buf,4,1,1,PK_WORD_SPAN,0,10,"",0,"",0,200);
+    }
+    o_free(s,gnd);
+    return n;
+}
+fn do_redteam(croot:[]u8)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let clen:i32=corp.len;
+    // small stimulus so the 4000-byte smuggle exceeds 5%
+    let stim:[]u8=corp[0..8192];
+    let slen:i32=8192;
+    let s:OState=std_new(64);
+    // minimal session init (no real teach; we attack the gate directly)
+    s.sess_id=1;s.teach_seq=1;
+    let i:i32=0;while(i<6){uput64(s.last_seq,i*8,0);i=i+1;}
+    s.tw_stim=slen;
+    learner_scan(&s,stim,slen);
+    let buf:[]u8=o_malloc(s,4096);
+    let gnd:[]u8=o_malloc(s,8*16);
+    let adopted:i32=0;let rejected:i32=0;let gate_err:i32=0;
+    let k:i32=0;
+    while(k<14){
+        // fresh seq state per attack (except the duplicate test)
+        let j:i32=0;while(j<6){uput64(s.last_seq,j*8,0);j=j+1;}
+        s.sess_halted=0;
+        let n:i32=rt_craft(s,k,buf);
+        let reps:i32=1;
+        if(k==5){reps=2;} // duplicate: ingest the same valid proposal twice
+        let r:i32=0;
+        while(r<reps){
+            let tid:i32=0;let kd:i32=0;let ss:i32=0;let se:i32=0;
+            let cf:i32=0;let gn:i32=0;
+            let rc:i32=p_dec(&s,buf,n,slen,&tid,&kd,&ss,&se,&cf,gnd,&gn);
+            if(rc==0){
+                let v:i32=V_REJECT;let gr:i32=R_INTEGRITY;
+                deliberate(&s,stim,slen,tid,kd,ss,se,gnd,gn,cf,O_C_PROSE,&v,&gr);
+                if(v==V_ADOPT || v==V_REVISE){adopted=adopted+1;}
+                else{rejected=rejected+1;}
+                tripwire_note(&s,ss,se,v,cf);
+            } else {
+                gate_err=gate_err+1;
+                rejected=rejected+1;
+            }
+            r=r+1;
+        }
+        k=k+1;
+    }
+    o_free(s,buf);o_free(s,gnd);
+    let fs:i32=0;j_begin("o-redteam");
+    jf_int(&fs,"attacks",14);
+    jf_int(&fs,"adopted",adopted as i64);
+    jf_int(&fs,"rejected",rejected as i64);
+    jf_int(&fs,"gate_errors",gate_err as i64);
+    // kill (iii): ANY malformed/malicious adoption
+    let k3:i32=0;if(adopted>0){k3=1;}
+    jf_bool(&fs,"kill_iii_fired",k3);
+    j_end();
+    _zag_print("REDTEAM adopted=");p_i64(adopted as i64);
+    _zag_print(" rejected=");p_i64(rejected as i64);
+    _zag_print(" kill_iii=");p_i64(k3 as i64);
+    _zag_println("");
+}
+// o-tripwire: BPE-smuggling teacher (exact BPE tiling at confidence 255).
+// Kill (iv) fires if the tripwire does NOT fire.
+// o-tripwire: BPE-smuggling teacher (exact BPE tiling at confidence 255).
+// Kill (iv) fires if the tripwire does NOT fire.
+// Tests the SECONDARY trigger: a single conf-255 proposal covering >5%
+// of the session stimulus must immediately fire the tripwire.
+fn do_tripwire(croot:[]u8)void {
+    let corp:[]u8=read_file(croot,"prose.bin");
+    let slen:i32=2000;
+    if(slen>corp.len){slen=corp.len;}
+    let stim:[]u8=corp[0..slen];
+    let s:OState=std_new(64);
+    s.sess_id=9;s.teach_seq=1;
+    let i:i32=0;while(i<6){uput64(s.last_seq,i*8,0);i=i+1;}
+    s.tw_stim=slen;s.tw_n=0;s.tw_fired=0;
+    i=0;while(i<O_TW_WIN){s.tw_v[i]=0;i=i+1;}
+    // Secondary trigger: one conf-255 proposal covering 10% of stimulus.
+    // (10% > 5% threshold). The learner will DEFER (no corroboration),
+    // but the tripwire must fire on the 255 + large-span alone.
+    let pbuf:[]u8=o_malloc(&s,4096);
+    let gnd:[]u8=o_malloc(&s,128);
+    let span:i32=slen/10;
+    let n:i32=p_enc(pbuf,O_TEACHER_ID,9,s.teach_seq,PK_WORD_SPAN,
+                    0,span as i64,"",0,"",0,255);
+    s.teach_seq=s.teach_seq+1;
+    let tid:i32=0;let kd:i32=0;let ss:i32=0;let ee:i32=0;
+    let cf:i32=0;let gn:i32=0;
+    let rc:i32=p_dec(&s,pbuf,n,slen,&tid,&kd,&ss,&ee,&cf,gnd,&gn);
+    let v:i32=V_REJECT;let gr:i32=R_INTEGRITY;
+    if(rc==0){
+        deliberate(&s,stim,slen,tid,kd,ss,ee,gnd,gn,cf,O_C_PROSE,&v,&gr);
+    }
+    // Directly test the secondary trigger logic:
+    // conf==255 && (se-ss)*20 > tw_stim  =>  span*20 > slen
+    // span = slen/10, so span*20 = 2*slen > slen. TRUE.
+    tripwire_note(&s,ss,ee,v,cf);
+    o_free(&s,pbuf);o_free(&s,gnd);
+    let fs:i32=0;j_begin("o-tripwire");
+    jf_int(&fs,"proposals",1);
+    jf_bool(&fs,"tripwire_fired",s.tw_fired);
+    jf_bool(&fs,"session_halted",s.sess_halted);
+    let k4:i32=0;if(s.tw_fired==0){k4=1;}
+    jf_bool(&fs,"kill_iv_fired",k4);
+    j_end();
+    _zag_print("TRIPWIRE proposals=1 fired=");p_i64(s.tw_fired as i64);
+    _zag_print(" kill_iv=");p_i64(k4 as i64);
+    _zag_println("");
+}
+
+
+// ================= dispatch =================
+fn main()void {
+    let mode:[]u8=_zag_arg(1);
+    let croot:[]u8=_zag_arg(2);
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){do_m1(croot,"prose.bin",O_C_PROSE,mode);}
+    else if(_zag_strcmp(mode,"m1-1x-code")==1){do_m1(croot,"code.bin",O_C_CODE,mode);}
+    else if(_zag_strcmp(mode,"m2-t1-prose")==1){do_m2_t1(croot,"t1_prose.bin",O_C_T1P,mode);}
+    else if(_zag_strcmp(mode,"m2-t1-code")==1){do_m2_t1(croot,"t1_code.bin",O_C_T1C,mode);}
+    else if(_zag_strcmp(mode,"m2-t2-prose")==1){do_m2_transfer(croot,"t1_prose.bin",O_C_T1P,"t2_prose.bin",O_C_T2P,mode);}
+    else if(_zag_strcmp(mode,"m2-t2-code")==1){do_m2_transfer(croot,"t1_code.bin",O_C_T1C,"t2_code.bin",O_C_T2C,mode);}
+    else if(_zag_strcmp(mode,"m2-t3-1x")==1){do_m2_transfer(croot,"t1_prose.bin",O_C_T1P,"t3.bin",O_C_T3,mode);}
+    else if(_zag_strcmp(mode,"m3-1x")==1){do_m3(croot,mode);}
+    else if(_zag_strcmp(mode,"m4-1x-prose")==1){do_m4(croot,"prose.bin",O_C_PROSE,mode);}
+    else if(_zag_strcmp(mode,"m4-1x-code")==1){do_m4(croot,"code.bin",O_C_CODE,mode);}
+    else if(_zag_strcmp(mode,"m5-baseline")==1){do_m5(croot,mode,0);}
+    else if(_zag_strcmp(mode,"m5-1x")==1){do_m5(croot,mode,1);}
+    else if(_zag_strcmp(mode,"m6-p2c-1x")==1){do_m6(croot,"t1_prose.bin",O_C_T1P,"prose.bin",O_C_PROSE,mode);}
+    else if(_zag_strcmp(mode,"m6-c2p-1x")==1){do_m6(croot,"t1_code.bin",O_C_T1C,"code.bin",O_C_CODE,mode);}
+    else if(_zag_strcmp(mode,"m7-1x")==1){do_m7(croot,mode);}
+    else if(_zag_strcmp(mode,"m8-1x")==1){
+        let dir:[]u8=_zag_arg(3);
+        let pert:[]u8=_zag_arg(4);
+        do_m8(croot,dir,pert);
+    }
+    else if(_zag_strcmp(mode,"o-disconnect")==1){do_disconnect(croot);}
+    else if(_zag_strcmp(mode,"o-redteam")==1){do_redteam(croot);}
+    else if(_zag_strcmp(mode,"o-tripwire")==1){do_tripwire(croot);}
+    else{_zag_print("FATAL unknown mode: ");_zag_print(mode);_zag_println("");}
+}

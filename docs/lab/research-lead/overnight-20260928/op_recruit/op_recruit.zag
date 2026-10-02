@@ -1,0 +1,582 @@
+// op_recruit.zag -- Q3 Runtime Operator Recruitment.
+// Pure Zag. No Python anywhere.
+//
+// Extends the GENEXEC2 stack VM with learner-recruited opcodes.
+// Opcode range 32..63: recruited ops. ONE generic VM dispatch case;
+// semantics live in learner state (rec_buf), not in source.
+//
+// ALLOCATE_OP (recruit_op) is learner-invoked between tasks: it copies
+// a solved program's bytes into rec_buf and assigns the next opcode.
+// The VM executes a recruited op as a unary stack function:
+//   pop a, run bytes with in0=a on a fresh stack, push result.
+//
+// Test: recruit T1's ABS solution as OP32; run P1R (beam + OP32) on
+// T4 (||x|-2|) and T5 (|x|+|x-2|); compare to P1 baseline (0/13).
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+
+// ============ program representation ============
+fn prog_len(p:[]u8)i32 { return get32(p, 0); }
+fn prog_set_len(p:[]u8, l:i32)void { set32(p, 0, l); return; }
+fn prog_op(p:[]u8, i:i32)i32 { return get32(p, 4+i*8); }
+fn prog_arg(p:[]u8, i:i32)i32 { return get32(p, 4+i*8+4); }
+fn prog_set(p:[]u8, i:i32, op:i32, arg:i32)void {
+  set32(p, 4+i*8, op); set32(p, 4+i*8+4, arg); return;
+}
+fn prog_new(maxlen:i32)[]u8 {
+  let p:[]u8=z_alloc(4+maxlen*8);
+  set32(p, 0, 0);
+  return p;
+}
+fn prog_copy(dst:[]u8, src:[]u8)void {
+  let l:i32=prog_len(src);
+  prog_set_len(dst, l);
+  let i:i32=0;
+  while(i<l){ prog_set(dst, i, prog_op(src,i), prog_arg(src,i)); i=i+1; }
+  return;
+}
+fn prog_append(p:[]u8, op:i32, arg:i32)void {
+  let l:i32=prog_len(p);
+  prog_set(p, l, op, arg);
+  prog_set_len(p, l+1);
+  return;
+}
+fn prog_cmp(a:[]u8, b:[]u8)i32 {
+  let la:i32=prog_len(a); let lb:i32=prog_len(b);
+  let n:i32=la; if(lb<n){n=lb;}
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=prog_op(a,i); let ob:i32=prog_op(b,i);
+    if(oa<ob){return -1;} if(oa>ob){return 1;}
+    let aa:i32=prog_arg(a,i); let ab:i32=prog_arg(b,i);
+    if(aa<ab){return -1;} if(aa>ab){return 1;}
+    i=i+1;
+  }
+  if(la<lb){return -1;} if(la>lb){return 1;}
+  return 0;
+}
+// Count occurrences of (op,arg) in program.
+fn prog_has(p:[]u8, op:i32, arg:i32)i32 {
+  let l:i32=prog_len(p);
+  let i:i32=0;
+  while(i<l){
+    if(prog_op(p,i)==op && prog_arg(p,i)==arg){return 1;}
+    i=i+1;
+  }
+  return 0;
+}
+
+// ============ VM ============
+fn mod_nonneg(a:i32, b:i32)i32 {
+  let r:i32=a - (a/b)*b;
+  if(r<0){ r=r+b; }
+  return r;
+}
+// Run program p (len pl) with inputs. Returns top of stack or 0.
+// lib_buf/lib_idx/nlib: fragment library for CALL (may be empty).
+// rec_buf/rec_idx/nrec: recruited-op table (learner state).
+// depth: recursion guard for recruited-op execution.
+// The ONLY recruited-op case is the generic `op>=32 && op<64` branch;
+// there is no per-op semantic case anywhere in source.
+fn vm_run(p:[]u8, pl:i32, in0:i32, in1:i32,
+           lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+           rec_buf:[]u8, rec_idx:[]u8, nrec:i32,
+           stack:[]u8, rs:[]u8, depth:i32)i32 {
+  let sp:i32=0;
+  let rsp:i32=0;
+  let cur_is_main:i32=1;
+  let cur_frag:i32=-1;
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<10000){
+    let clen:i32=pl;
+    if(cur_is_main==0){ clen=get32(lib_buf, get32(lib_idx, cur_frag*4)); }
+    if(pc<0 || pc>=clen){
+      if(cur_is_main==1){ break; }
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+      steps=steps+1;
+      continue;
+    }
+    let op:i32=0; let arg:i32=0;
+    if(cur_is_main==1){
+      op=prog_op(p, pc); arg=prog_arg(p, pc);
+    } else {
+      let base:i32=get32(lib_idx, cur_frag*4);
+      op=get32(lib_buf, base+4+pc*8); arg=get32(lib_buf, base+4+pc*8+4);
+    }
+    pc=pc+1; steps=steps+1;
+    if(op==0){ // PUSH
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){ // IN0
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){ // IN1
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==3){ // ADD
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){ // SUB
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){ // MUL
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){ // DIV
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=a/b;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==7){ // MOD
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=mod_nonneg(a,b);} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==8){ // NEG
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){ // DUP
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){ // DROP
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){ // SWAP
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){ // OVER
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){ // LT
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a<b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==14){ // EQ
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a==b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==15){ // GT
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a>b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==16){ // JZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){ // JNZ
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){ // JMP
+      pc=arg;
+    } else if(op==19){ // CALL
+      if(arg>=0 && arg<nlib && rsp<64){
+        let rid:i32=-1;
+        if(cur_is_main==0){ rid=cur_frag; }
+        set32(rs, rsp*8, rid); set32(rs, rsp*8+4, pc); rsp=rsp+1;
+        cur_is_main=0; cur_frag=arg; pc=0;
+      }
+    } else if(op==20){ // RET
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+    } else if(op>=32 && op<64){
+      // RECRUITED OP (generic dispatch; semantics in rec_buf).
+      // Unary stack function: pop a, execute bytes with in0=a on a
+      // fresh stack, push result. No per-op case exists.
+      let ri:i32=op-32;
+      if(ri<nrec && depth<8){
+        let a:i32=0;
+        if(sp>=1){ a=get32(stack,(sp-1)*4); sp=sp-1; }
+        let base:i32=get32(rec_idx, ri*4);
+        let flen:i32=get32(rec_buf, base);
+        let frag:[]u8=rec_buf[base..base+4+flen*8];
+        let fstack:[]u8=z_alloc(256*4);
+        let frs:[]u8=z_alloc(64*8);
+        let r:i32=vm_run(frag, flen, a, 0,
+                         lib_buf, lib_idx, nlib,
+                         rec_buf, rec_idx, nrec,
+                         fstack, frs, depth+1);
+        if(sp<256){ set32(stack, sp*4, r); sp=sp+1; }
+      }
+    }
+  }
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+
+// ============ evaluation ============
+fn eval_prog(p:[]u8, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+             lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+             rec_buf:[]u8, rec_idx:[]u8, nrec:i32)i32 {
+  let s:i32=0;
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let i:i32=0;
+  while(i<n){
+    let o:i32=vm_run(p, prog_len(p), get32(ein0,i*4), get32(ein1,i*4),
+                     lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                     stack, rs, 0);
+    if(o==get32(etgt,i*4)){ s=s+1; }
+    i=i+1;
+  }
+  return s;
+}
+fn eval_mae(p:[]u8, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+            lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+            rec_buf:[]u8, rec_idx:[]u8, nrec:i32)i64 {
+  let mae:i64=0;
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let i:i32=0;
+  while(i<n){
+    let o:i32=vm_run(p, prog_len(p), get32(ein0,i*4), get32(ein1,i*4),
+                     lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                     stack, rs, 0);
+    let d:i64=(o as i64)-(get32(etgt,i*4) as i64);
+    if(d<0){ d=-d; }
+    mae=mae+d;
+    i=i+1;
+  }
+  return mae;
+}
+
+// ============ ALLOCATE_OP ============
+// Learner-invoked (between tasks; not a VM opcode). Copies frag's bytes
+// into rec_buf, assigns opcode 32+nrec. st holds [nrec, rec_used].
+// Returns the new opcode number. Deterministic; no task-specific logic.
+fn recruit_op(frag:[]u8, rec_buf:[]u8, rec_idx:[]u8, st:[]u8)i32 {
+  let nrec:i32=get32(st, 0);
+  let used:i32=get32(st, 4);
+  let flen:i32=prog_len(frag);
+  let need:i32=4+flen*8;
+  set32(rec_idx, nrec*4, used);
+  let i:i32=0;
+  while(i<need){
+    rec_buf[used+i]=frag[i];
+    i=i+1;
+  }
+  set32(st, 0, nrec+1);
+  set32(st, 4, used+need);
+  return 32+nrec;
+}
+
+// ============ beam search (P1R) ============
+// Op universe: P1 ops (Amendment A1: arithmetic/stack only, no compare,
+// no jumps, no CALL) plus recruited ops {(32+r,0) for r in 0..nrec-1}
+// when allow_recruit==1. Fixed order for determinism.
+// Ordering: (exact desc, mae asc, len asc, prog asc).
+fn beam_search(ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+               lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+               rec_buf:[]u8, rec_idx:[]u8, nrec:i32,
+               allow_recruit:i32, max_len:i32, beam_w:i32,
+               out_prog:[]u8)i32 {
+  let psize:i32=4+max_len*8;
+  let cur:[]u8=z_alloc(beam_w*psize);
+  let nxt_cap:i32=beam_w*64;
+  let nxt:[]u8=z_alloc(nxt_cap*psize);
+  let cur_n:i32=1;
+  set32(cur, 0, 0);
+  let best_score:i32=-1;
+  let best_len:i32=0;
+  prog_set_len(out_prog, 0);
+  let depth:i32=0;
+  while(depth<max_len){
+    let nxt_n:i32=0;
+    let ci:i32=0;
+    while(ci<cur_n){
+      let base:[]u8=cur[ci*psize..ci*psize+psize];
+      let k:i32=-9;
+      while(k<=9){
+        if(nxt_n<nxt_cap){
+          let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize];
+          prog_copy(nb, base); prog_append(nb, 0, k);
+          nxt_n=nxt_n+1;
+        }
+        k=k+1;
+      }
+      if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,1,0); nxt_n=nxt_n+1; }
+      if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,2,0); nxt_n=nxt_n+1; }
+      let o:i32=3;
+      while(o<=8){
+        if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,o,0); nxt_n=nxt_n+1; }
+        o=o+1;
+      }
+      o=9;
+      while(o<=12){
+        if(nxt_n<nxt_cap){ let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize]; prog_copy(nb,base); prog_append(nb,o,0); nxt_n=nxt_n+1; }
+        o=o+1;
+      }
+      // RECRUITED ops as atomic choices (generic; no per-op logic).
+      if(allow_recruit==1){
+        let r:i32=0;
+        while(r<nrec){
+          if(nxt_n<nxt_cap){
+            let nb:[]u8=nxt[nxt_n*psize..nxt_n*psize+psize];
+            prog_copy(nb,base); prog_append(nb,32+r,0);
+            nxt_n=nxt_n+1;
+          }
+          r=r+1;
+        }
+      }
+      ci=ci+1;
+    }
+    let scores:[]u8=z_alloc(nxt_n*4);
+    let maes:[]u8=z_alloc(nxt_n*8);
+    let si:i32=0;
+    while(si<nxt_n){
+      let cb:[]u8=nxt[si*psize..si*psize+psize];
+      set32(scores, si*4, eval_prog(cb, ein0, ein1, etgt, n,
+                                    lib_buf, lib_idx, nlib,
+                                    rec_buf, rec_idx, nrec));
+      let m:i64=eval_mae(cb, ein0, ein1, etgt, n,
+                         lib_buf, lib_idx, nlib,
+                         rec_buf, rec_idx, nrec);
+      set32(maes, si*8, (m as i32));
+      set32(maes, si*8+4, ((m>>32) as i32));
+      si=si+1;
+    }
+    let top_idx:[]u8=z_alloc(beam_w*4);
+    let top_n:i32=0;
+    si=0;
+    while(si<nxt_n){
+      let sc:i32=get32(scores, si*4);
+      let cb:[]u8=nxt[si*psize..si*psize+psize];
+      let cl:i32=prog_len(cb);
+      let mlo:i32=get32(maes, si*8);
+      let mhi:i32=get32(maes, si*8+4);
+      let pos:i32=0;
+      while(pos<top_n){
+        let oi:i32=get32(top_idx, pos*4);
+        let os:i32=get32(scores, oi*4);
+        let ob:[]u8=nxt[oi*psize..oi*psize+psize];
+        let ol:i32=prog_len(ob);
+        let olo:i32=get32(maes, oi*8);
+        let ohi:i32=get32(maes, oi*8+4);
+        let before:i32=0;
+        if(sc>os){ before=1; }
+        else if(sc==os){
+          if(mhi<ohi){ before=1; }
+          else if(mhi==ohi){
+            if(mlo<olo){ before=1; }
+            else if(mlo==olo){
+              if(cl<ol){ before=1; }
+              else if(cl==ol){ if(prog_cmp(cb,ob)<0){ before=1; } }
+            }
+          }
+        }
+        if(before==1){ break; }
+        pos=pos+1;
+      }
+      if(pos<beam_w){
+        let sh:i32=top_n;
+        if(sh>beam_w-1){ sh=beam_w-1; }
+        while(sh>pos){
+          set32(top_idx, sh*4, get32(top_idx, (sh-1)*4));
+          sh=sh-1;
+        }
+        set32(top_idx, pos*4, si);
+        if(top_n<beam_w){ top_n=top_n+1; }
+        let better:i32=0;
+        if(sc>best_score){ better=1; }
+        else if(sc==best_score){
+          if(cl<best_len){ better=1; }
+          else if(cl==best_len){ if(prog_cmp(cb,out_prog)<0){ better=1; } }
+        }
+        if(better==1){ best_score=sc; best_len=cl; prog_copy(out_prog, cb); }
+      }
+      si=si+1;
+    }
+    let taken:i32=0;
+    let oi:i32=0;
+    while(oi<top_n && taken<beam_w){
+      let idx:i32=get32(top_idx, oi*4);
+      let cb:[]u8=nxt[idx*psize..idx*psize+psize];
+      let dup:i32=0;
+      let t2:i32=0;
+      while(t2<taken){
+        let tb:[]u8=cur[t2*psize..t2*psize+psize];
+        if(prog_cmp(cb,tb)==0){ dup=1; }
+        t2=t2+1;
+      }
+      if(dup==0){
+        let db:[]u8=cur[taken*psize..taken*psize+psize];
+        prog_copy(db, cb);
+        taken=taken+1;
+      }
+      oi=oi+1;
+    }
+    cur_n=taken;
+    if(cur_n==0){ break; }
+    if(best_score==n){ break; }
+    depth=depth+1;
+  }
+  return best_score;
+}
+
+// ============ printing ============
+fn op_name(op:i32)[]u8 {
+  if(op==0){return "PUSH";}
+  if(op==1){return "IN0";}
+  if(op==2){return "IN1";}
+  if(op==3){return "ADD";}
+  if(op==4){return "SUB";}
+  if(op==5){return "MUL";}
+  if(op==6){return "DIV";}
+  if(op==7){return "MOD";}
+  if(op==8){return "NEG";}
+  if(op==9){return "DUP";}
+  if(op==10){return "DROP";}
+  if(op==11){return "SWAP";}
+  if(op==12){return "OVER";}
+  if(op==13){return "LT";}
+  if(op==14){return "EQ";}
+  if(op==15){return "GT";}
+  if(op==16){return "JZ";}
+  if(op==17){return "JNZ";}
+  if(op==18){return "JMP";}
+  if(op==19){return "CALL";}
+  if(op==20){return "RET";}
+  return "OPR";
+}
+fn print_prog(p:[]u8)void {
+  let l:i32=prog_len(p);
+  emit("[");
+  let i:i32=0;
+  while(i<l){
+    if(i>0){emit(" ");}
+    let op:i32=prog_op(p,i);
+    if(op>=32){ emit("OP"); e64(op); }
+    else{
+      emit(op_name(op));
+      if(op==0 || op==16 || op==17 || op==18 || op==19){
+        emit(":"); e64(prog_arg(p,i));
+      }
+    }
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+
+// ============ task builders (frozen; from PREREG_GENEXEC2.md) ============
+fn build_t1(ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  let x:i32=-8;
+  while(x<=8){
+    let y:i32=x; if(y<0){y=-y;}
+    set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,y);
+    n=n+1; x=x+1;
+  }
+  return n;
+}
+fn build_t4(ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  let x:i32=-6;
+  while(x<=6){
+    let ax:i32=x; if(ax<0){ax=-ax;}
+    let d:i32=ax-2; if(d<0){d=-d;}
+    set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,d);
+    n=n+1; x=x+1;
+  }
+  return n;
+}
+fn build_t5(ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  let x:i32=-4;
+  while(x<=8){
+    let ax:i32=x; if(ax<0){ax=-ax;}
+    let b:i32=x-2; if(b<0){b=-b;}
+    set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,ax+b);
+    n=n+1; x=x+1;
+  }
+  return n;
+}
+
+// ============ main ============
+fn main()void {
+  emit("OP_RECRUIT\n");
+  // Empty library (P1R does not use CALL).
+  let lib_buf:[]u8=z_alloc(4);
+  let lib_idx:[]u8=z_alloc(4);
+  let nlib:i32=0;
+  // Recruit table: 32 slots, each up to 64 ops.
+  let rec_buf:[]u8=z_alloc(32*(4+64*8));
+  let rec_idx:[]u8=z_alloc(32*4);
+  let rec_st:[]u8=z_alloc(8);
+  set32(rec_st, 0, 0);
+  set32(rec_st, 4, 0);
+
+  // P_ABS: T1 solution bytes (verified against GENEXEC2 EVIDENCE.md:
+  // TASK 1 phase=3 exact=1 len=8 prog=[IN0 PUSH:-1 GT JZ:6 IN0 JMP:8 IN0 NEG]).
+  let pabs:[]u8=prog_new(16);
+  prog_append(pabs, 1, 0);    // IN0
+  prog_append(pabs, 0, -1);   // PUSH -1
+  prog_append(pabs, 15, 0);   // GT
+  prog_append(pabs, 16, 6);   // JZ 6
+  prog_append(pabs, 1, 0);    // IN0
+  prog_append(pabs, 18, 8);   // JMP 8
+  prog_append(pabs, 1, 0);    // IN0
+  prog_append(pabs, 8, 0);    // NEG
+  emit("P_ABS len="); e64(prog_len(pabs)); emit(" prog=");
+  print_prog(pabs); emit("\n");
+
+  // ALLOCATE_OP: recruit P_ABS.
+  let r:i32=recruit_op(pabs, rec_buf, rec_idx, rec_st);
+  let nrec:i32=get32(rec_st, 0);
+  emit("RECRUIT opcode="); e64(r); emit(" nrec="); e64(nrec); emit("\n");
+  if(r==32 && nrec==1){ emit("RECRUIT_OK 1\n"); } else { emit("RECRUIT_OK 0\n"); }
+
+  // Sanity (4.3 step 5): [IN0, OP32] on T1 episodes must equal |x|.
+  let e0:[]u8=z_alloc(30*4); let e1:[]u8=z_alloc(30*4); let et:[]u8=z_alloc(30*4);
+  let n1:i32=build_t1(e0, e1, et);
+  let sanity:[]u8=prog_new(4);
+  prog_append(sanity, 1, 0);
+  prog_append(sanity, 32, 0);
+  let ss:i32=eval_prog(sanity, e0, e1, et, n1,
+                       lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec);
+  emit("SANITY_OP32 "); e64(ss); emit("/"); e64(n1); emit("\n");
+
+  // Baseline check: P1 (no recruit) on T4 and T5.
+  let t4e0:[]u8=z_alloc(30*4); let t4e1:[]u8=z_alloc(30*4); let t4et:[]u8=z_alloc(30*4);
+  let n4:i32=build_t4(t4e0, t4e1, t4et);
+  let t5e0:[]u8=z_alloc(30*4); let t5e1:[]u8=z_alloc(30*4); let t5et:[]u8=z_alloc(30*4);
+  let n5:i32=build_t5(t5e0, t5e1, t5et);
+  let b4:[]u8=prog_new(16);
+  let s4b:i32=beam_search(t4e0, t4e1, t4et, n4,
+                          lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                          0, 12, 100, b4);
+  emit("BASELINE_T4 score="); e64(s4b); emit("/"); e64(n4); emit(" prog=");
+  print_prog(b4); emit("\n");
+  let b5:[]u8=prog_new(16);
+  let s5b:i32=beam_search(t5e0, t5e1, t5et, n5,
+                          lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                          0, 12, 100, b5);
+  emit("BASELINE_T5 score="); e64(s5b); emit("/"); e64(n5); emit(" prog=");
+  print_prog(b5); emit("\n");
+
+  // Treatment: P1R (beam + OP32) on T4 and T5.
+  let p4:[]u8=prog_new(16);
+  let s4:i32=beam_search(t4e0, t4e1, t4et, n4,
+                         lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                         1, 12, 100, p4);
+  emit("P1R_T4 score="); e64(s4); emit("/"); e64(n4);
+  emit(" uses_op32="); e64(prog_has(p4, 32, 0));
+  emit(" prog="); print_prog(p4); emit("\n");
+  let p5:[]u8=prog_new(16);
+  let s5:i32=beam_search(t5e0, t5e1, t5et, n5,
+                         lib_buf, lib_idx, nlib, rec_buf, rec_idx, nrec,
+                         1, 12, 100, p5);
+  emit("P1R_T5 score="); e64(s5); emit("/"); e64(n5);
+  emit(" uses_op32="); e64(prog_has(p5, 32, 0));
+  emit(" prog="); print_prog(p5); emit("\n");
+  emit("DONE\n");
+  return;
+}

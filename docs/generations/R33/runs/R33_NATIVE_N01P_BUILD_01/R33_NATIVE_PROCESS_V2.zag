@@ -1,0 +1,240 @@
+// R33 native direct-child process supervisor V2.
+// Engineering host adapter only: no learner, training, scientific evaluator or grant.
+// Imports the frozen generic Darwin I/O/syscall helpers without modifying them.
+// Timeout containment is the direct child PID only. Descendant/process-group containment
+// is NOT claimed by this version.
+@import("R33_NATIVE_IO_V1.zag")
+
+const NRV2_OK:i32=0;
+const NRV2_INVALID:i32=-7501;
+const NRV2_OUTPUT_CREATE:i32=-7502;
+const NRV2_OUTPUT_TYPE:i32=-7503;
+const NRV2_ALLOC:i32=-7504;
+const NRV2_NONREGULAR:i32=-7505;
+const NRV2_FORK:i32=-7506;
+const NRV2_WAIT:i32=-7507;
+const NRV2_TIMEOUT:i32=-7508;
+const NRV2_OUTPUT_LIMIT:i32=-7509;
+const NRV2_CLOCK:i32=-7510;
+const NRV2_ROOT_OPEN:i32=-7511;
+
+const NRV2_ARTIFACT_NONE:i32=0;
+const NRV2_ARTIFACT_PARTIAL:i32=1;
+const NRV2_ARTIFACT_COMPLETE:i32=2;
+
+struct NativeAdmissionV2 {
+    status:i64,
+    root:i64,
+    created:i32,
+    partial:i32,
+}
+
+struct NativeRunV2 {
+    status:i32,
+    detail:i64,
+    artifact_status:i32,
+    started:i32,
+    timed_out:i32,
+    reaped:i32,
+    exit_code:i32,
+    signal:i32,
+    cpu_us:i64,
+    wall_ms:i64,
+    peak_rss:i64,
+    stdout_bytes:i64,
+    stderr_bytes:i64,
+    output_over_limit:i32,
+}
+
+fn nrv2_label_valid(label:[]u8)i32 {
+    // 57 + len(".stdout") == 64, the frozen IO_V1 child-name limit.
+    if(label.len<1 || label.len>57){return 0;}
+    return nio_name_valid(label);
+}
+
+fn nrv2_admit_root(path:[]u8)NativeAdmissionV2 {
+    let r:NativeAdmissionV2=NativeAdmissionV2{.status=NRV2_INVALID,.root=-1,.created=0,.partial=0};
+    if(path.len<1 || path.len>4095){return r;}
+    // Atomic create-or-refuse at the directory-name boundary. Existing root returns EEXIST.
+    let made:i64=nio_mkdir(path);
+    if(made!=0){r.status=made;return r;}
+    r.created=1;
+    let root:i64=nio_open_root(path);
+    if(root<0){r.status=NRV2_ROOT_OPEN;r.partial=1;return r;}
+    r.root=root;r.status=0;return r;
+}
+
+fn nrv2_open_regular_child(root:i64,name:[]u8,create:i32)i64 {
+    let fd:i64=nio_open_child(root,name,create);
+    if(fd<0){return fd;}
+    if(nio_regular(fd)!=1){nio_close(fd);return NRV2_NONREGULAR;}
+    return fd;
+}
+
+fn nrv2_result()NativeRunV2 {
+    return NativeRunV2{
+        .status=NRV2_INVALID,.detail=0,.artifact_status=NRV2_ARTIFACT_NONE,
+        .started=0,.timed_out=0,.reaped=0,.exit_code=-1,.signal=0,
+        .cpu_us=0,.wall_ms=0,.peak_rss=0,.stdout_bytes=-1,.stderr_bytes=-1,
+        .output_over_limit=0,
+    };
+}
+
+fn nrv2_free_preflight(b:[]u8,m:[]u8,oname:[]u8,ename:[]u8,
+    argv:*i64,env:*i64,status:*i32,usage:*i64,pause:*i64)void {
+    nio_free(b);nio_free(m);nio_free(oname);nio_free(ename);
+    if(argv!=null as *i64){_zag_free(argv as *i8);}
+    if(env!=null as *i64){_zag_free(env as *i8);}
+    if(status!=null as *i32){_zag_free(status as *i8);}
+    if(usage!=null as *i64){_zag_free(usage as *i8);}
+    if(pause!=null as *i64){_zag_free(pause as *i8);}
+}
+
+fn nrv2_pause_5ms(pause:*i64)void {
+    pause[0]=0;pause[1]=5000;
+    // select(0,NULL,NULL,NULL,&timeval) is used only as a bounded polling pause.
+    _zag_darwin_syscall(93,0,0,0,0,pause as i64,0);
+}
+
+fn nrv2_decode_wait(result:*NativeRunV2,status:*i32,usage:*i64)void {
+    result.reaped=1;
+    result.signal=status[0] & 127;
+    if(result.signal==0){result.exit_code=(status[0]>>8)&255;}
+    result.cpu_us=usage[0]*1000000+usage[1]+usage[2]*1000000+usage[3];
+    result.peak_rss=usage[4];
+}
+
+fn nrv2_final_reap(pid:i64,status:*i32,usage:*i64)i64 {
+    let waited:i64=_zag_darwin_syscall(7,pid,status as i64,0,usage as i64,0,0);
+    let retries:i32=0;
+    while(waited==-4 && retries<64){
+        waited=_zag_darwin_syscall(7,pid,status as i64,0,usage as i64,0,0);
+        retries=retries+1;
+    }
+    return waited;
+}
+
+// Parent-owned direct-child supervision. Uses monotonic time + wait4(WNOHANG), then
+// SIGKILL and final blocking reap on timeout. The child need not install any guard.
+// Output files are exclusive, regular and empty before fork. Partial artifacts are
+// preserved and reported; this function never deletes evidence.
+fn nrv2_run(root:i64,binary:[]u8,mode:[]u8,label:[]u8,
+    deadline_ms:i64,output_limit:i64)NativeRunV2 {
+    let result:NativeRunV2=nrv2_result();
+    if(root<0 || nrv2_label_valid(label)!=1 || binary.len<1 || binary.len>4095 ||
+       mode.len<1 || mode.len>4095 || deadline_ms<1 || deadline_ms>60000 ||
+       output_limit<1 || output_limit>1048576){return result;}
+
+    // All fallible allocations and generated-name validation happen before output writes.
+    let b:[]u8=nio_cstr(binary);let m:[]u8=nio_cstr(mode);
+    let oname:[]u8=_zag_str_concat(label,".stdout");
+    let ename:[]u8=_zag_str_concat(label,".stderr");
+    let argv:*i64=_zag_malloc(24) as *i64;let env:*i64=_zag_malloc(8) as *i64;
+    let status:*i32=_zag_malloc(8) as *i32;let usage:*i64=_zag_malloc(256) as *i64;
+    let pause:*i64=_zag_malloc(16) as *i64;
+    if(b.len==0 || m.len==0 || oname.len==0 || ename.len==0 ||
+       nio_name_valid(oname)!=1 || nio_name_valid(ename)!=1 ||
+       argv==null as *i64 || env==null as *i64 || status==null as *i32 ||
+       usage==null as *i64 || pause==null as *i64){
+        result.status=NRV2_ALLOC;
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;
+    }
+    argv[0]=_zag_slice_ptr(b) as i64;argv[1]=_zag_slice_ptr(m) as i64;argv[2]=0;env[0]=0;
+    status[0]=0;let i:i32=0;while(i<32){usage[i]=0;i=i+1;}
+
+    let out:i64=nio_open_child(root,oname,1);
+    if(out<0){result.status=NRV2_OUTPUT_CREATE;result.detail=out;
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;}
+    result.artifact_status=NRV2_ARTIFACT_PARTIAL;
+    if(nio_regular(out)!=1 || nio_seek(out,0,2)!=0){
+        result.status=NRV2_OUTPUT_TYPE;nio_close(out);
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;
+    }
+    let err:i64=nio_open_child(root,ename,1);
+    if(err<0){result.status=NRV2_OUTPUT_CREATE;result.detail=err;nio_close(out);
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;}
+    if(nio_regular(err)!=1 || nio_seek(err,0,2)!=0){
+        result.status=NRV2_OUTPUT_TYPE;nio_close(out);nio_close(err);
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;
+    }
+    result.artifact_status=NRV2_ARTIFACT_COMPLETE;
+
+    let pid:i64=_zag_darwin_fork();
+    if(pid==0){
+        // Hard per-child regular-file output ceiling before exec. `pause` is a
+        // process-private post-fork copy and is reused by the parent for polling.
+        pause[0]=output_limit;pause[1]=output_limit;
+        if(_zag_darwin_syscall(195,1,pause as i64,0,0,0,0)!=0){_zag_exit(125);}
+        if(_zag_darwin_syscall(90,out,1,0,0,0,0)<0 ||
+           _zag_darwin_syscall(90,err,2,0,0,0,0)<0){_zag_exit(126);}
+        nio_close(out);nio_close(err);
+        _zag_darwin_syscall(59,_zag_slice_ptr(b) as i64,argv as i64,env as i64,0,0,0);
+        _zag_exit(127);
+    }
+    if(pid<0){
+        result.status=NRV2_FORK;result.detail=pid;nio_close(out);nio_close(err);
+        nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);return result;
+    }
+
+    result.started=1;result.status=NRV2_OK;
+    let started_ms:i64=_zag_clock_monotonic_ms();
+    if(started_ms<0){
+        result.status=NRV2_CLOCK;result.detail=started_ms;
+        _zag_darwin_syscall(37,pid,9,0,0,0,0);
+        let final_wait:i64=nrv2_final_reap(pid,status,usage);
+        if(final_wait==pid){nrv2_decode_wait(&result,status,usage);}else{result.detail=final_wait;}
+    }else{
+        let done:i32=0;
+        while(done==0){
+            let waited:i64=_zag_darwin_syscall(7,pid,status as i64,1,usage as i64,0,0);
+            if(waited==pid){nrv2_decode_wait(&result,status,usage);done=1;}
+            else if(waited<0 && waited!=-4){
+                result.status=NRV2_WAIT;result.detail=waited;
+                _zag_darwin_syscall(37,pid,9,0,0,0,0);
+                let final_wait:i64=nrv2_final_reap(pid,status,usage);
+                if(final_wait==pid){nrv2_decode_wait(&result,status,usage);}else{result.detail=final_wait;}
+                done=1;
+            }else{
+                let now_ms:i64=_zag_clock_monotonic_ms();
+                if(now_ms<started_ms){
+                    result.status=NRV2_CLOCK;result.detail=now_ms;
+                    _zag_darwin_syscall(37,pid,9,0,0,0,0);
+                    let final_wait:i64=nrv2_final_reap(pid,status,usage);
+                    if(final_wait==pid){nrv2_decode_wait(&result,status,usage);}else{result.detail=final_wait;}
+                    done=1;
+                }else if(now_ms-started_ms>=deadline_ms){
+                    result.status=NRV2_TIMEOUT;result.timed_out=1;
+                    result.detail=_zag_darwin_syscall(37,pid,9,0,0,0,0);
+                    let final_wait:i64=nrv2_final_reap(pid,status,usage);
+                    if(final_wait==pid){nrv2_decode_wait(&result,status,usage);}else{result.detail=final_wait;}
+                    done=1;
+                }else{nrv2_pause_5ms(pause);}
+            }
+        }
+    }
+
+    result.stdout_bytes=nio_seek(out,0,2);result.stderr_bytes=nio_seek(err,0,2);
+    let ended_ms:i64=_zag_clock_monotonic_ms();
+    if(started_ms>=0 && ended_ms>=started_ms){result.wall_ms=ended_ms-started_ms;}
+    else{if(result.status==NRV2_OK){result.status=NRV2_CLOCK;}}
+    if(result.stdout_bytes<0 || result.stderr_bytes<0 ||
+       result.stdout_bytes>output_limit || result.stderr_bytes>output_limit || result.signal==25){
+        result.output_over_limit=1;
+        if(result.status==NRV2_OK){result.status=NRV2_OUTPUT_LIMIT;}
+    }
+    nio_close(out);nio_close(err);
+    nrv2_free_preflight(b,m,oname,ename,argv,env,status,usage,pause);
+    _zag_print("PROCESSV2,");_zag_print(label);_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.status as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.started as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.timed_out as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.reaped as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.exit_code as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.signal as i64));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.stdout_bytes));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.stderr_bytes));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.wall_ms));_zag_print(",");
+    _zag_print(_zag_i64_to_str(result.cpu_us));_zag_print(",");
+    _zag_println(_zag_i64_to_str(result.peak_rss));
+    return result;
+}

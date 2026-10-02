@@ -1,0 +1,560 @@
+@import("common_v5.zag")
+// ============================================================
+// FORK B-ALPHA V6 ("opus's version") — 2026-09-23.
+// Implements the v6_opus_swarm DIAGNOSIS.md fix spec, verified
+// against the committed v5 WAVs with measure_v6.py:
+//
+//  M1 bed "sloppy DJ mix": bed() laid ~42 chunks/30 s, hash-walked
+//     between DIFFERENT recordings, 0.5 s equal-gain crossfade at
+//     every boundary (~3 dB dip each), 0.7 s chunk period.
+//     FIX: no chunk rotation, no crossfade-everywhere. The bed is
+//     3 LAYERED LOOPS of the 3 qualified textures (tx0/tx1/tx2,
+//     rms<600 crest<7.0 — the only ones passing v4's qualification),
+//     each looping seamlessly onto ITSELF with a short equal-power
+//     loop crossfade, at INCOMMENSURATE loop periods, each under a
+//     slow independent amplitude LFO (11.7/17.3/23.9 s). The sum
+//     never repeats; there are no discrete events in the bed at all.
+//     Two-pass: measure bed RMS, scale to BED_RMS_TGT (-37 dBFS,
+//     ~20 dB below the foreground instead of v5's 31 dB).
+//  M2 events "randomly stops": 23.7% of clip (b) below -60 dBFS,
+//     20 gaps, 3.4 s dead tail (nothing scheduled after 26.42 s),
+//     atoms punched in/out of digital zero (8 ms/60 ms edges).
+//     FIX: the bed runs continuously UNDER everything (audible at
+//     -37 dBFS, so gaps are ambience, not digital zero); atom
+//     release is 500 ms (decays INTO the bed / into each other);
+//     the score composes THROUGH 30 s — the v2 "natural ending"
+//     reserves at 27.0/28.6 s and the reserved 4th footstep are
+//     PLACED, grammar fill runs to 29.2 s, two composed tail events
+//     breathe the ending out. No dead head (bed from t=0), no dead
+//     tail. Event selection for 0-26.4 s is hash-identical to v5's
+//     clip (c) (same seed 6101, same stm streams) so the A/B is clean.
+//  M3 mastering grit: wav_write()'s x/(1+0.35|x|) soft clip ran on
+//     EVERY sample (3.6% THD at event peaks). FIX: wav_write_v6
+//     limits ONLY above 0.95 FS (soft knee to 1.0); below that the
+//     path is transparent — zero added THD. DC removal, FIXPEAK
+//     normalization (-1 dB map of the v4 peak, keeps v5 comparability)
+//     and 30 ms raised ends are kept.
+//
+// Determinism: every choice is a pure function of (seed, stream,
+// sample index). No RNG anywhere. Two runs -> byte-identical WAV.
+//
+// A-NATIVE: no static, no hiss; everything here is studied material
+// (catalog.bin atoms/textures) arranged continuously. The fsinr()
+// Taylor sine drives only inaudible LFO gain curves (11-24 s
+// periods), never audio-rate content — it is modulation control,
+// not a synthesis primitive.
+// ============================================================
+
+// ---------- slow-LFO sine (Taylor to x^7; x folded to [-pi,pi]) ----------
+// Control-rate only: called with LFO phase, never audio rate.
+fn fsinr(x:f64)f64{
+    let a:f64=x;
+    if(a>3.141592653589793){a=a-6.283185307179586;}
+    let x2:f64=a*a;
+    let x3:f64=x2*a;
+    let x5:f64=x3*x2;
+    let x7:f64=x5*x2;
+    return a-x3/6.0+x5/120.0-x7/5040.0;
+}
+
+// RMS of a texture in FS units (one pass over the short texture).
+fn txrms(txwave:[]u8,wo:i64,ln:i64)f64{
+    let ss:f64=0.0;
+    let j:i64=0;
+    while(j<ln){
+        let s:f64=(get16s(txwave,wo+j*2) as f64);
+        ss=ss+s*s;
+        j=j+1;
+    }
+    return fsqrt(ss/(ln as f64))/32768.0;
+}
+
+// One bed layer, pure function of the sample index t:
+// seamless same-texture loop (equal-power crossfade at the wrap) with
+// a slow LFO gain. No boundaries, no swaps, no dips.
+fn bedsamp(txwave:[]u8,t:i64,wo:i64,L:i64,xfl:i64,w:f64,ph0:f64,dph:f64)f64{
+    let lp:i64=t % L;
+    let sv:f64=0.0;
+    if(lp<L-xfl){
+        sv=(get16s(txwave,wo+lp*2) as f64)/32768.0;
+    }else{
+        let u:i64=lp-(L-xfl);
+        let s:f64=sstep((u as f64)/(xfl as f64));
+        let go:f64=fsqrt(1.0-s);
+        let gi:f64=fsqrt(s);
+        let tail:f64=(get16s(txwave,wo+(L-xfl+u)*2) as f64)/32768.0;
+        let head:f64=(get16s(txwave,wo+u*2) as f64)/32768.0;
+        sv=tail*go+head*gi;
+    }
+    let ph:f64=ph0+(t as f64)*dph;
+    while(ph>=6.283185307179586){ph=ph-6.283185307179586;}
+    let g:f64=0.70+0.30*fsinr(ph);
+    return sv*g*w;
+}
+
+// Target bed level: -37 dBFS RMS ~ 20 dB below the foreground
+// (v5 measured -48.4 dBFS bed vs -17.1 dBFS events = 31 dB).
+const BED_RMS_TGT:i64 = 463;
+
+fn bed_v6(mix:[]u8,nsamp:i64,txtab:[]u8,txwave:[]u8,seed:i64)void{
+    // The 3 qualified textures (measured from catalog.bin 2026-09-23):
+    // tx0: 2.00 s, rms 129, crest 6.0 | tx1: 1.32 s, rms 275, crest 3.2
+    // tx2: 2.00 s, rms 141, crest 5.5. Different loop crossfade lengths
+    // make the effective loop periods incommensurate (77175/47187/70560).
+    let wo0:i64=get64(txtab,0*16+8);
+    let wo1:i64=get64(txtab,1*16+8);
+    let wo2:i64=get64(txtab,2*16+8);
+    let ln0:i64=get32(txtab,0*16);
+    let ln1:i64=get32(txtab,1*16);
+    let ln2:i64=get32(txtab,2*16);
+    let xfl0:i64=11025;
+    let xfl1:i64=11025;
+    let xfl2:i64=17640;
+    let L0:i64=ln0-xfl0;
+    let L1:i64=ln1-xfl1;
+    let L2:i64=ln2-xfl2;
+    let w0:f64=0.50/txrms(txwave,wo0,ln0);
+    let w1:f64=0.35/txrms(txwave,wo1,ln1);
+    let w2:f64=0.42/txrms(txwave,wo2,ln2);
+    let dph0:f64=6.283185307179586/(17.3*44100.0);
+    let dph1:f64=6.283185307179586/(23.9*44100.0);
+    let dph2:f64=6.283185307179586/(11.7*44100.0);
+    let ph0:f64=h01(seed,11)*6.283185307179586;
+    let ph1:f64=h01(seed,12)*6.283185307179586;
+    let ph2:f64=h01(seed,13)*6.283185307179586;
+    // pass 1: measure the composite bed RMS (deterministic)
+    let ss:f64=0.0;
+    let t:i64=0;
+    while(t<nsamp){
+        let v:f64=bedsamp(txwave,t,wo0,L0,xfl0,w0,ph0,dph0)
+                +bedsamp(txwave,t,wo1,L1,xfl1,w1,ph1,dph1)
+                +bedsamp(txwave,t,wo2,L2,xfl2,w2,ph2,dph2);
+        ss=ss+v*v;
+        t=t+1;
+    }
+    let rms:f64=fsqrt(ss/(nsamp as f64));
+    let scale:f64=((BED_RMS_TGT as f64)/32768.0)/rms;
+    print_str("bed_rms_raw=");print_f3(rms*32768.0);print_nl();
+    print_str("bed_scale=");print_f3(scale);print_nl();
+    // pass 2: write the scaled bed into the mix
+    t=0;
+    let bo:i64=0;
+    while(t<nsamp){
+        let v2:f64=bedsamp(txwave,t,wo0,L0,xfl0,w0,ph0,dph0)
+                +bedsamp(txwave,t,wo1,L1,xfl1,w1,ph1,dph1)
+                +bedsamp(txwave,t,wo2,L2,xfl2,w2,ph2,dph2);
+        let cur:i64=get64(mix,bo);
+        put64(mix,bo,cur+((v2*scale*16777216.0) as i64));
+        bo=bo+8;
+        t=t+1;
+    }
+}
+
+// ---------- events: natural levels, long decays, no digital-zero gaps ----------
+// Per-class median atom peaks, measured from catalog.bin 2026-09-23:
+// class 0 (laughter): 13108 | class 1 (voice): 3836 | class 2 (footsteps): 9182.
+// v5 peak-normalized EVERY atom to 0.55-0.75 FS (a whisper as loud as a
+// shout). v6 normalizes against the class median, preserving each class's
+// natural intra-class dynamics: lvl = tpeak * (median_pk / pk).
+fn cls_refpk(cls:i64)f64{
+    if(cls==0){return 13108.0;}
+    if(cls==1){return 3836.0;}
+    return 9182.0;
+}
+
+fn at_put32(t:[]u8,a:i64,f:i64,v:i64)void{put32(t,a*ATREC+f,v);}
+fn at_get32(t:[]u8,a:i64,f:i64)i64{return get32s(t,a*ATREC+f);}
+fn at_put(t:[]u8,a:i64,f:i64,v:i64)void{put64(t,a*ATREC+f,v);}
+fn at_get(t:[]u8,a:i64,f:i64)i64{return get64(t,a*ATREC+f);}
+const ATREC:i64 = 24;
+
+// place_event with v6 staging: 8 ms attack (transients stay crisp),
+// 500 ms smoothstep release (atoms decay INTO the bed and into each
+// other instead of punching out to digital zero), class-median level
+// reference (natural intra-class dynamics).
+fn place_event_v6(mix:[]u8,nsamp:i64,wave:[]u8,atab:[]u8,ai:i64,start:i64,ratio:f64,tpeak:f64,gain:f64,refpk:f64)void{
+    let ln:i64=at_get32(atab,ai,8);
+    let wo:i64=at_get(atab,ai,16);
+    if(ln<64){return;}
+    let dsum:i64=0;
+    let pk:i64=0;
+    let k:i64=0;
+    while(k<ln){
+        let sv:i64=get16s(wave,wo+k*2);
+        dsum=dsum+sv;
+        if(sv<0){sv=-sv;}
+        if(sv>pk){pk=sv;}
+        k=k+1;
+    }
+    let dc:f64=(dsum as f64)/(ln as f64);
+    let lvl:f64=1.0;
+    if(pk>0){lvl=tpeak*(refpk/(pk as f64));}
+    let olen:i64=((ln as f64)/ratio) as i64;
+    if(olen<32){return;}
+    if(start<0){return;}
+    if(start+olen>nsamp){olen=nsamp-start;}
+    let fa:i64=353; // ~8 ms attack
+    if(fa>olen/4){fa=olen/4;}
+    let frel:i64=22050; // ~500 ms release: decay into the bed, not a chop
+    if(frel>olen/2){frel=olen/2;}
+    let j:i64=0;
+    while(j<olen){
+        let sp:f64=(j as f64)*ratio;
+        let i0:i64=(sp as i64);
+        if(i0>=ln-1){i0=ln-2;}
+        let fr:f64=sp-(i0 as f64);
+        let s0:f64=(get16s(wave,wo+i0*2) as f64)-dc;
+        let s1:f64=(get16s(wave,wo+(i0+1)*2) as f64)-dc;
+        let v:f64=(s0+(s1-s0)*fr)/32768.0*lvl*gain;
+        if(j<fa){v=v*sstep((j as f64)/(fa as f64));}
+        let rem:i64=olen-j;
+        if(rem<frel){v=v*sstep((rem as f64)/(frel as f64));}
+        let cur:i64=get64(mix,(start+j)*8);
+        put64(mix,(start+j)*8,cur+((v*16777216.0) as i64));
+        j=j+1;
+    }
+}
+
+fn pick_atom(atab:[]u8,natoms:i64,cls:i64,cl:i64,seed:i64,stream:i64)i64{
+    let best:i64=-1;
+    let cnt:i64=0;
+    let a:i64=0;
+    while(a<natoms){
+        let ok:i64=1;
+        if(cls>=0 && at_get32(atab,a,0)!=cls){ok=0;}
+        if(cl>=0 && at_get32(atab,a,4)!=cl){ok=0;}
+        if(ok==1){cnt=cnt+1;}
+        a=a+1;
+    }
+    if(cnt==0){
+        if(cl>=0){return pick_atom(atab,natoms,cls,-1,seed,stream);}
+        if(cls>=0){return pick_atom(atab,natoms,-1,-1,seed,stream);}
+        return -1;
+    }
+    let want:i64=(h32(seed,stream) % cnt);
+    a=0;
+    while(a<natoms){
+        let ok2:i64=1;
+        if(cls>=0 && at_get32(atab,a,0)!=cls){ok2=0;}
+        if(cl>=0 && at_get32(atab,a,4)!=cl){ok2=0;}
+        if(ok2==1){
+            if(want==0){return a;}
+            want=want-1;
+        }
+        a=a+1;
+    }
+    return -1;
+}
+
+// ev with v6 staging (no isolation modes — this is the full mix).
+fn ev6(mix:[]u8,nsamp:i64,wave:[]u8,atab:[]u8,natoms:i64,lastuse:[]u8,cls:i64,cl:i64,tsec:f64,ratio:f64,gain:f64,seed:i64,stm:i64,usedcl:[]u8)i64{
+    let start:i64=((tsec*44100.0) as i64);
+    let ai:i64=-1;
+    let tr:i64=0;
+    while(tr<8){
+        let cand:i64=pick_atom(atab,natoms,cls,cl,seed,stm+tr*77);
+        if(cand<0){tr=tr+1;}else{
+            let lu:i64=get64(lastuse,cand*8);
+            if(start-lu>132300){ai=cand;tr=8;}else{tr=tr+1;}
+        }
+    }
+    if(ai<0){return -1;}
+    put64(lastuse,ai*8,start);
+    let tp:f64=0.70;
+    if(cls==1){tp=0.75;}
+    if(cls==2){tp=0.55;}
+    place_event_v6(mix,nsamp,wave,atab,ai,start,ratio,tp,gain,cls_refpk(cls));
+    if(cls==0 || cls==1){
+        let c2:i64=at_get32(atab,ai,4);
+        if(c2>=0 && c2<8){put64(usedcl,c2*8,1);}
+    }
+    return ai;
+}
+
+// ---------- score: the kids playground, composed through 30 s ----------
+// Same seed (6101), same composed beats, same hash streams as v5's clip
+// (c) for 0-26.4 s (event SELECTION there is hash-identical, so the A/B
+// is clean). Differences: the v2 "natural ending" reserves are PLACED
+// (4th footstep ~27.1 s, laugh at 27.0 s, call at 28.6 s), the grammar
+// fill runs to 29.2 s, and two composed tail events breathe the ending
+// out into the bed. No dead head (bed from t=0), no dead tail.
+fn score_kids_v6(mix:[]u8,nsamp:i64,wave:[]u8,atab:[]u8,natoms:i64,bigram:[]u8,gapq:[]u8)void{
+    let seed:i64=6101;
+    let lup:*u8=_zag_malloc(natoms*8) as *u8;
+    let lastuse:[]u8=lup[0..(natoms*8)];
+    let ucp:*u8=_zag_malloc(64) as *u8;
+    let usedcl:[]u8=ucp[0..64];
+    let i:i64=0;
+    while(i<natoms){put64(lastuse,i*8,-1000000000);i=i+1;}
+    i=0;
+    while(i<64){usedcl[i]=0;i=i+1;}
+    let stm:i64=0;
+    // --- composed beats (identical selection to v5 clip c) ---
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,0,0.6,1.0,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,1,1.15,0.97,0.9,seed,stm,usedcl);stm=stm+1;
+    let ft:f64=1.6;
+    let fg:f64=0.30;
+    let fi:i64=0;
+    while(fi<6){
+        ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,ft,1.02,0.8,seed,stm,usedcl);stm=stm+1;
+        ft=ft+fg;fg=fg*0.88;fi=fi+1;
+    }
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,2.2,1.05,0.85,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,0,4.5,0.96,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,1,5.2,1.0,0.9,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,5.35,1.03,0.9,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,0,5.55,0.98,0.9,seed,stm,usedcl);stm=stm+1;
+    ft=7.0;fg=0.24;fi=0;
+    while(fi<5){
+        ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,ft,1.0,0.8,seed,stm,usedcl);stm=stm+1;
+        ft=ft+fg;fg=fg*0.92;fi=fi+1;
+    }
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,1,8.0,1.0,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,9.2,1.06,0.9,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,0,11.0,1.0,1.0,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,1,12.0,1.02,0.9,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,12.25,0.97,0.9,seed,stm,usedcl);stm=stm+1;
+    // stumble
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,14.5,1.0,0.85,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,14.7,1.05,0.85,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,14.79,0.95,0.85,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,15.3,0.80,1.0,seed,stm,usedcl);stm=stm+1; // thud
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,2,15.7,1.12,0.8,seed,stm,usedcl);stm=stm+1;  // gasp
+    // THE TUMBLE
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,16.2,1.04,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,0,16.45,0.95,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,1,16.75,0.87,0.95,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,17.1,0.92,0.9,seed,stm,usedcl);stm=stm+1;
+    // rolling laughter, density decreasing
+    let lt:f64=18.0;
+    let lg:f64=0.6;
+    let li:i64=0;
+    while(li<6){
+        ev6(mix,nsamp,wave,atab,natoms,lastuse,0,-1,lt,0.90+0.10*h01(seed,stm),0.85,seed,stm,usedcl);stm=stm+1;
+        lt=lt+lg;lg=lg*1.35;li=li+1;
+    }
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,0,24.5,0.94,0.85,seed,stm,usedcl);stm=stm+1;
+    // footsteps: v6 PLACES the 4th (~27.1 s) — no more reserved cutoff
+    ft=25.5;fg=0.40;fi=0;
+    while(fi<4){
+        ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,ft,0.95,0.7,seed,stm,usedcl);
+        stm=stm+1;
+        ft=ft+fg;fg=fg*1.3;fi=fi+1;
+    }
+    // v6 ending: the 27.0 s laugh and 28.6 s call are PLACED (v2/v5
+    // reserved them, leaving the 3.4 s dead tail). The ending breathes
+    // out into the bed instead of stopping.
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,2,27.0,0.95,0.75,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,1,1,28.6,1.0,0.70,seed,stm,usedcl);stm=stm+1;
+    // --- grammar fill: hash-walk over studied bigrams/gap quantiles,
+    // --- runs to 29.2 s (v5 stopped at 26.0 s)
+    let prev:i64=1;
+    let cur:f64=0.2;
+    let clrot:i64=0;
+    while(cur<29.2){
+        let row:i64=prev*4;
+        let tot:i64=0;
+        let cc:i64=0;
+        while(cc<4){
+            tot=tot+get32(bigram,(row+cc)*4);
+            cc=cc+1;
+        }
+        let nxt:i64=prev;
+        if(tot>0){
+            let r:i64=((h01(seed,stm) as f64)*(tot as f64)) as i64;
+            if(r>=tot){r=tot-1;}
+            cc=0;
+            let acc2:i64=0;
+            while(cc<4){
+                acc2=acc2+get32(bigram,(row+cc)*4);
+                if(r<acc2){nxt=cc;cc=4;}else{cc=cc+1;}
+            }
+        }else{
+            nxt=(h32(seed,stm) % 3);
+        }
+        let p10:f64=(get32s(gapq,(nxt*3)*4) as f64)/1000.0;
+        let p90:f64=(get32s(gapq,(nxt*3+2)*4) as f64)/1000.0;
+        if(p90<p10){p90=p10;}
+        let gp:f64=p10+(p90-p10)*h01(seed,stm+1);
+        cur=cur+gp*1.0;
+        if(cur<29.2 && (nxt==0 || nxt==1 || nxt==2)){
+            let clw:i64=-1;
+            if(nxt==0 || nxt==1){clw=clrot % 3;clrot=clrot+1;}
+            let ratio:f64=0.90+0.24*h01(seed,stm+2);
+            let gain:f64=0.55+0.20*h01(seed,stm+3);
+            ev6(mix,nsamp,wave,atab,natoms,lastuse,nxt,clw,cur,ratio,gain,seed,stm+4,usedcl);
+        }
+        stm=stm+5;
+        prev=nxt;
+    }
+    // two composed tail breaths (distant, soft) so the ending is
+    // deliberate: a receding footstep and a far laugh decaying into air
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,2,-1,28.2,0.90,0.50,seed,stm,usedcl);stm=stm+1;
+    ev6(mix,nsamp,wave,atab,natoms,lastuse,0,-1,29.0,0.85,0.55,seed,stm,usedcl);stm=stm+1;
+    print_str("kids v6: voices(clusters) used:");
+    let vc:i64=0;
+    while(vc<4){
+        if(get64(usedcl,vc*8)==1){print_str(" ");print_i64(vc);}
+        vc=vc+1;
+    }
+    print_nl();
+}
+
+// ---------- mastering: limit ONLY on actual clipping ----------
+// v5's x/(1+0.35|x|) ran on every sample: 3.6% THD at event peaks,
+// 2.7% at typical levels — a permanent grit floor. v6 keeps DC
+// removal, FIXPEAK normalization and 30 ms raised ends, but the
+// limiter engages only above 0.95 FS (soft knee to 1.0). Below that
+// the path is transparent: zero added THD by construction.
+fn wav_write_v6(path:[]u8,m:[]u8,nsamp:i64)i64{
+    let dsum:f64=0.0;
+    let s:i64=0;
+    while(s<nsamp){
+        dsum=dsum+((get64(m,s*8) as f64)/16777216.0);
+        s=s+1;
+    }
+    let dc:f64=dsum/(nsamp as f64);
+    let peak:i64=0;
+    s=0;
+    while(s<nsamp){
+        let v:i64=get64(m,s*8)-((dc*16777216.0) as i64);
+        if(v<0){v=-v;}
+        if(v>peak){peak=v;}
+        s=s+1;
+    }
+    print_str("mixpeak=");print_i64(peak);print_nl();
+    let norm:f64=1.0;
+    if(FIXPEAK>0){norm=0.891250938*16777216.0/(FIXPEAK as f64);}
+    else{if(peak>0){norm=0.891250938*16777216.0/(peak as f64);}} // -1 dB
+    let p:*u8=_zag_malloc(44+nsamp*2) as *u8;
+    if(p==null as *u8){return -2;}
+    let out:[]u8=p[0..(44+nsamp*2)];
+    let i:i64=0;
+    while(i<44+nsamp*2){out[i]=0;i=i+1;}
+    out[0]=82;out[1]=73;out[2]=70;out[3]=70;
+    put32(out,4,36+nsamp*2);
+    out[8]=87;out[9]=65;out[10]=86;out[11]=69;
+    out[12]=102;out[13]=109;out[14]=116;out[15]=32;
+    put32(out,16,16);
+    put16(out,20,1);put16(out,22,1);
+    put32(out,24,44100);put32(out,28,88200);
+    put16(out,32,2);put16(out,34,16);
+    out[36]=100;out[37]=97;out[38]=116;out[39]=97;
+    put32(out,40,nsamp*2);
+    let fade:i64=1323; // 30 ms
+    let limited:i64=0;
+    s=0;
+    while(s<nsamp){
+        let v:i64=get64(m,s*8);
+        let x:f64=((v as f64)/16777216.0-dc)*norm;
+        if(s<fade){x=x*sstep((s as f64)/(fade as f64));}
+        let rem:i64=nsamp-s;
+        if(rem<fade){x=x*sstep((rem as f64)/(fade as f64));}
+        let ax:f64=x;
+        if(ax<0.0){ax=-ax;}
+        if(ax>0.95){
+            // genuine limiter: soft knee 0.95 -> 1.0, idle otherwise
+            let ov:f64=ax-0.95;
+            let lim:f64=0.95+0.05*ov/(1.0+ov);
+            x=(x/ax)*lim;
+            limited=limited+1;
+        }
+        put16(out,44+s*2,(x*32767.0) as i64);
+        s=s+1;
+    }
+    print_str("limited_samples=");print_i64(limited);print_nl();
+    let rc:i64=file_write(path,out);
+    _zag_free(_zag_slice_ptr(out));
+    return rc;
+}
+
+fn main()i32{
+    let subj:[]u8=_zag_arg(1);
+    let catp:[]u8=_zag_arg(2);
+    let outp:[]u8=_zag_arg(3);
+    if(subj.len==0 || catp.len==0 || outp.len==0){return 31;}
+    let which:i64=0;
+    if(_zag_strcmp(subj,"kidf")==1){which=16;}
+    if(which==0){return 32;}
+    let dur_s:i64=30;
+    // ---- catalog load (inlined; ZNC-WORKAROUND: separate loader fns
+    // ---- miscompile bed() in larger binaries) ----
+    let raw:[]u8=file_read(catp,60000000);
+    if(raw.len<16){return -1;}
+    if(raw[0]!=66||raw[1]!=65||raw[2]!=76||raw[3]!=50){return -2;}
+    let natoms:i64=get32(raw,4);
+    let ap:*u8=_zag_malloc(900*24) as *u8;
+    let atab:[]u8=ap[0..(900*24)];
+    let wp:*u8=_zag_malloc(32505856) as *u8;
+    let wave:[]u8=wp[0..32505856];
+    let pos:i64=16;
+    let woff0:i64=0;
+    let a:i64=0;
+    while(a<natoms){
+        let cls:i64=get32(raw,pos);
+        let clu:i64=get32(raw,pos+4);
+        let fno:i64=get32(raw,pos+8);
+        let ln:i64=get32(raw,pos+12);
+        put32(atab,a*24,cls);
+        put32(atab,a*24+4,clu);
+        put32(atab,a*24+8,ln);
+        put64(atab,a*24+16,woff0);
+        put32(atab,a*24+12,fno);
+        let k:i64=0;
+        while(k<ln){
+            put16(wave,woff0+k*2,get16s(raw,pos+16+k*2));
+            k=k+1;
+        }
+        woff0=woff0+ln*2;
+        pos=pos+16+ln*2+24;
+        a=a+1;
+    }
+    let ntex:i64=get32(raw,pos);
+    pos=pos+4;
+    let tp:*u8=_zag_malloc(160*16) as *u8;
+    let txtab:[]u8=tp[0..(160*16)];
+    let xp:*u8=_zag_malloc(12582912) as *u8;
+    let txwave:[]u8=xp[0..12582912];
+    let woff:i64=0;
+    let t:i64=0;
+    while(t<ntex){
+        let ln:i64=get32(raw,pos);
+        put32(txtab,t*16,ln);
+        put64(txtab,t*16+8,woff);
+        let k:i64=0;
+        while(k<ln){
+            put16(txwave,woff+k*2,get16s(raw,pos+4+k*2));
+            k=k+1;
+        }
+        woff=woff+ln*2;
+        pos=pos+4+ln*2;
+        t=t+1;
+    }
+    let bp:*u8=_zag_malloc(64) as *u8;
+    let bigram:[]u8=bp[0..64];
+    let gqp:*u8=_zag_malloc(48) as *u8;
+    let gapq:[]u8=gqp[0..48];
+    let b2:i64=0;
+    while(b2<16){
+        put32(bigram,b2*4,get32(raw,pos+b2*4));
+        b2=b2+1;
+    }
+    pos=pos+64;
+    let c:i64=0;
+    while(c<12){
+        put32(gapq,c*4,get32s(raw,pos+c*4));
+        c=c+1;
+    }
+    // ---- render ----
+    let nsamp:i64=dur_s*44100;
+    let mp:*u8=_zag_malloc(nsamp*8) as *u8;
+    let mix:[]u8=mp[0..(nsamp*8)];
+    let z:i64=0;
+    while(z<nsamp*8){mix[z]=0;z=z+1;}
+    // ZNC-WORKAROUND 2026-09-22: bed_v6() called directly from main.
+    bed_v6(mix,nsamp,txtab,txwave,6101);
+    score_kids_v6(mix,nsamp,wave,atab,natoms,bigram,gapq);
+    let rc:i64=wav_write_v6(outp,mix,nsamp);
+    print_str("render rc=");print_i64(rc);print_nl();
+    return (rc<0) as i32;
+}

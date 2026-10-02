@@ -1,0 +1,1136 @@
+// hyp_d_v3.zag -- Hypothesis D v3: MAP-Elites with concentrating selection
+// and non-poisoning carry-over. Pure Zag. No Python anywhere.
+//
+// v3 deltas (frozen in PREREG_HYPD_V3.md, same directory):
+// - Fix 1 (SEL_MODE=1, attacks R4 dilution): parent selection is a
+//   deterministic four-source schedule. A selection counter k chooses:
+//   k%8 in {0,1,2,3} -> nursery (256 most recent insertions, round-robin);
+//   k%8==4 -> score bands (17 score_norm bands, deficit-weighted by
+//   band+1, round-robin within band); k%8==5 -> uniform round-robin over
+//   all occupied niches (v2 behavior, coverage floor); k%8 in {6,7} ->
+//   seed pool (carried programs banded by new-task score). Empty sources
+//   fall back to the first non-empty of (seed, uniform, nursery, score).
+//   All weights use only elite score and insertion recency. No RNG.
+// - Fix 2 (CARRY_MODE=1, attacks R5 poisoning): carried programs are
+//   NEVER inserted into the new task's archive. Each is evaluated once
+//   on the new task and banded into the seed pool by new-task
+//   score_norm, with its own cyclic mutation counter. Archive niches
+//   are claimed only by the new task's own search. CARRY_BLOCK_CHECK
+//   (T3, niche 17570) is a diagnostic observer only.
+// - SEL_MODE=0 restores v2 round-robin; CARRY_MODE=0 restores v2 silent
+//   carry insertion. The three build configurations (both, selection-only,
+//   carry-only) differ ONLY in these two constants (via sed in BUILD_V3.sh).
+// - Task sequence is T0..T3 (the carry chain T3 needs); T4/T5 out of scope.
+//
+// Frozen against PREREG_HYPD_V3.md in this directory.
+
+// ============ utils ============
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn z_free(b:[]u8)void {
+  if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+  return;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn get32(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn set32(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+fn now_ms()i64 {
+  let tv:[]u8=z_alloc(16);
+  _zag_raw_syscall(228,(_zag_slice_ptr(tv) as i64),0,0,0,0,0);
+  let sec:i64=(tv[0] as i64)|((tv[1] as i64)<<8)|((tv[2] as i64)<<16)|((tv[3] as i64)<<24)|((tv[4] as i64)<<32)|((tv[5] as i64)<<40)|((tv[6] as i64)<<48)|((tv[7] as i64)<<56);
+  let nsec:i64=(tv[8] as i64)|((tv[9] as i64)<<8)|((tv[10] as i64)<<16)|((tv[11] as i64)<<24)|((tv[12] as i64)<<32)|((tv[13] as i64)<<40)|((tv[14] as i64)<<48)|((tv[15] as i64)<<56);
+  z_free(tv);
+  return sec*1000+nsec/1000000;
+}
+
+// ============ program representation ============
+// A program is a []u8: bytes 0..3 = len (i32), then len * 8 bytes of
+// (op:i32 at +0, arg:i32 at +4). Max 16 ops.
+fn prog_len(p:[]u8)i32 { return get32(p, 0); }
+fn prog_set_len(p:[]u8, l:i32)void { set32(p, 0, l); return; }
+fn prog_op(p:[]u8, i:i32)i32 { return get32(p, 4+i*8); }
+fn prog_arg(p:[]u8, i:i32)i32 { return get32(p, 4+i*8+4); }
+fn prog_set(p:[]u8, i:i32, op:i32, arg:i32)void {
+  set32(p, 4+i*8, op); set32(p, 4+i*8+4, arg); return;
+}
+fn prog_new(maxlen:i32)[]u8 {
+  let p:[]u8=z_alloc(4+maxlen*8);
+  set32(p, 0, 0);
+  return p;
+}
+fn prog_copy(dst:[]u8, src:[]u8)void {
+  let l:i32=prog_len(src);
+  prog_set_len(dst, l);
+  let i:i32=0;
+  while(i<l){ prog_set(dst, i, prog_op(src,i), prog_arg(src,i)); i=i+1; }
+  return;
+}
+fn prog_append(p:[]u8, op:i32, arg:i32)void {
+  let l:i32=prog_len(p);
+  prog_set(p, l, op, arg);
+  prog_set_len(p, l+1);
+  return;
+}
+fn prog_cmp(a:[]u8, b:[]u8)i32 {
+  let la:i32=prog_len(a); let lb:i32=prog_len(b);
+  let n:i32=la; if(lb<n){n=lb;}
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=prog_op(a,i); let ob:i32=prog_op(b,i);
+    if(oa<ob){return -1;} if(oa>ob){return 1;}
+    let aa:i32=prog_arg(a,i); let ab:i32=prog_arg(b,i);
+    if(aa<ab){return -1;} if(aa>ab){return 1;}
+    i=i+1;
+  }
+  if(la<lb){return -1;} if(la>lb){return 1;}
+  return 0;
+}
+fn op_name(op:i32)[]u8 {
+  if(op==0){return "PUSH";}
+  if(op==1){return "IN0";}
+  if(op==2){return "IN1";}
+  if(op==3){return "ADD";}
+  if(op==4){return "SUB";}
+  if(op==5){return "MUL";}
+  if(op==6){return "DIV";}
+  if(op==7){return "MOD";}
+  if(op==8){return "NEG";}
+  if(op==9){return "DUP";}
+  if(op==10){return "DROP";}
+  if(op==11){return "SWAP";}
+  if(op==12){return "OVER";}
+  return "UNK";
+}
+fn print_prog(p:[]u8)void {
+  let l:i32=prog_len(p);
+  emit("[");
+  let i:i32=0;
+  while(i<l){
+    if(i>0){emit(" ");}
+    emit(op_name(prog_op(p,i)));
+    let op:i32=prog_op(p,i);
+    if(op==0){
+      emit(":"); e64(prog_arg(p,i));
+    }
+    i=i+1;
+  }
+  emit("]");
+  return;
+}
+
+// ============ VM: full GENEXEC2 (verbatim from v1; no edits) ============
+fn mod_nonneg(a:i32, b:i32)i32 {
+  let r:i32=a - (a/b)*b;
+  if(r<0){ r=r+b; }
+  return r;
+}
+fn vm_run_full(p:[]u8, pl:i32, in0:i32, in1:i32,
+           lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+           stack:[]u8, rs:[]u8)i32 {
+  let sp:i32=0;
+  let rsp:i32=0;
+  let cur_is_main:i32=1;
+  let cur_frag:i32=-1;
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<10000){
+    let clen:i32=pl;
+    if(cur_is_main==0){ clen=get32(lib_buf, get32(lib_idx, cur_frag*4)); }
+    if(pc<0 || pc>=clen){
+      if(cur_is_main==1){ break; }
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+      steps=steps+1;
+      continue;
+    }
+    let op:i32=0; let arg:i32=0;
+    if(cur_is_main==1){
+      op=prog_op(p, pc); arg=prog_arg(p, pc);
+    } else {
+      let base:i32=get32(lib_idx, cur_frag*4);
+      op=get32(lib_buf, base+4+pc*8); arg=get32(lib_buf, base+4+pc*8+4);
+    }
+    pc=pc+1; steps=steps+1;
+    if(op==0){
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==3){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=a/b;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==7){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(b!=0){r=mod_nonneg(a,b);} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==8){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a<b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==14){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a==b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==15){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; let r:i32=0; if(a>b){r=1;} set32(stack,sp*4,r); sp=sp+1; }
+    } else if(op==16){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){
+      pc=arg;
+    } else if(op==19){
+      if(arg>=0 && arg<nlib && rsp<64){
+        let rid:i32=-1;
+        if(cur_is_main==0){ rid=cur_frag; }
+        set32(rs, rsp*8, rid); set32(rs, rsp*8+4, pc); rsp=rsp+1;
+        cur_is_main=0; cur_frag=arg; pc=0;
+      }
+    } else if(op==20){
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+    }
+  }
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+
+// ============ VM: GENEXEC2-P (ablated variant; traps on 6,7,13,14,15) ============
+// Derived mechanically from vm_run_full above: the five dispatch bodies for
+// DIV/MOD/LT/EQ/GT are replaced with trap branches (count, break). Every
+// kept opcode has byte-identical dispatch code. Matches genexec2p semantics.
+fn vm_run_p(p:[]u8, pl:i32, in0:i32, in1:i32,
+           lib_buf:[]u8, lib_idx:[]u8, nlib:i32,
+           stack:[]u8, rs:[]u8, traps:[]u8)i32 {
+  let sp:i32=0;
+  let rsp:i32=0;
+  let cur_is_main:i32=1;
+  let cur_frag:i32=-1;
+  let pc:i32=0;
+  let steps:i32=0;
+  while(steps<10000){
+    let clen:i32=pl;
+    if(cur_is_main==0){ clen=get32(lib_buf, get32(lib_idx, cur_frag*4)); }
+    if(pc<0 || pc>=clen){
+      if(cur_is_main==1){ break; }
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+      steps=steps+1;
+      continue;
+    }
+    let op:i32=0; let arg:i32=0;
+    if(cur_is_main==1){
+      op=prog_op(p, pc); arg=prog_arg(p, pc);
+    } else {
+      let base:i32=get32(lib_idx, cur_frag*4);
+      op=get32(lib_buf, base+4+pc*8); arg=get32(lib_buf, base+4+pc*8+4);
+    }
+    pc=pc+1; steps=steps+1;
+    if(op==0){
+      if(sp<256){ set32(stack, sp*4, arg); sp=sp+1; }
+    } else if(op==1){
+      if(sp<256){ set32(stack, sp*4, in0); sp=sp+1; }
+    } else if(op==2){
+      if(sp<256){ set32(stack, sp*4, in1); sp=sp+1; }
+    } else if(op==3){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a+b); sp=sp+1; }
+    } else if(op==4){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a-b); sp=sp+1; }
+    } else if(op==5){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); sp=sp-2; set32(stack,sp*4,a*b); sp=sp+1; }
+    } else if(op==6){
+      set32(traps,0,get32(traps,0)+1); break;
+    } else if(op==7){
+      set32(traps,0,get32(traps,0)+1); break;
+    } else if(op==8){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); set32(stack,(sp-1)*4,-a); }
+    } else if(op==9){
+      if(sp>=1 && sp<256){ let a:i32=get32(stack,(sp-1)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==10){
+      if(sp>=1){ sp=sp-1; }
+    } else if(op==11){
+      if(sp>=2){ let b:i32=get32(stack,(sp-1)*4); let a:i32=get32(stack,(sp-2)*4); set32(stack,(sp-2)*4,b); set32(stack,(sp-1)*4,a); }
+    } else if(op==12){
+      if(sp>=2 && sp<256){ let a:i32=get32(stack,(sp-2)*4); set32(stack,sp*4,a); sp=sp+1; }
+    } else if(op==13){
+      set32(traps,0,get32(traps,0)+1); break;
+    } else if(op==14){
+      set32(traps,0,get32(traps,0)+1); break;
+    } else if(op==15){
+      set32(traps,0,get32(traps,0)+1); break;
+    } else if(op==16){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a==0){pc=arg;} }
+    } else if(op==17){
+      if(sp>=1){ let a:i32=get32(stack,(sp-1)*4); sp=sp-1; if(a!=0){pc=arg;} }
+    } else if(op==18){
+      pc=arg;
+    } else if(op==19){
+      if(arg>=0 && arg<nlib && rsp<64){
+        let rid:i32=-1;
+        if(cur_is_main==0){ rid=cur_frag; }
+        set32(rs, rsp*8, rid); set32(rs, rsp*8+4, pc); rsp=rsp+1;
+        cur_is_main=0; cur_frag=arg; pc=0;
+      }
+    } else if(op==20){
+      if(rsp==0){ break; }
+      rsp=rsp-1;
+      let rid:i32=get32(rs, rsp*8);
+      let rpc:i32=get32(rs, rsp*8+4);
+      if(rid==-1){ cur_is_main=1; cur_frag=-1; }
+      else{ cur_is_main=0; cur_frag=rid; }
+      pc=rpc;
+    }
+  }
+  if(sp>0){ return get32(stack, (sp-1)*4); }
+  return 0;
+}
+// pvm_valid: 1 iff the program contains no ablated opcode (6,7,13,14,15).
+fn pvm_valid(p:[]u8)i32 {
+  let l:i32=prog_len(p);
+  let i:i32=0;
+  while(i<l){
+    let op:i32=prog_op(p,i);
+    if(op==6 || op==7 || op==13 || op==14 || op==15){return 0;}
+    i=i+1;
+  }
+  return 1;
+}
+
+// ============ task episodes (frozen per battery PREREG_BATTERY.md) ============
+// Train builders. Fill ein0, ein1, etgt (each n*4 bytes). Returns n.
+fn build_train(t:i32, ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  if(t==0){
+    let x:i32=0;
+    while(x<=8){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,2*x+1);
+      n=n+1; x=x+1;
+    }
+  } else if(t==1){
+    let x:i32=-8;
+    while(x<=8){
+      let y:i32=x; if(y<0){y=-y;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,y);
+      n=n+1; x=x+1;
+    }
+  } else if(t==2){
+    let x:i32=0;
+    while(x<=16){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,mod_nonneg(x,3));
+      n=n+1; x=x+1;
+    }
+  } else if(t==3){
+    let a:i32=0;
+    while(a<=4){
+      let b:i32=0;
+      while(b<=4){
+        let y:i32=0; if(mod_nonneg(a+b,2)==0){y=1;}
+        set32(ein0,n*4,a); set32(ein1,n*4,b); set32(etgt,n*4,y);
+        n=n+1; b=b+1;
+      }
+      a=a+1;
+    }
+  } else if(t==4){
+    let x:i32=-6;
+    while(x<=6){
+      let ax:i32=x; if(ax<0){ax=-ax;}
+      let d:i32=ax-2; if(d<0){d=-d;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,d);
+      n=n+1; x=x+1;
+    }
+  } else if(t==5){
+    let x:i32=-4;
+    while(x<=8){
+      let ax:i32=x; if(ax<0){ax=-ax;}
+      let b2:i32=x-2; if(b2<0){b2=-b2;}
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,ax+b2);
+      n=n+1; x=x+1;
+    }
+  }
+  return n;
+}
+// Held-out builders. Returns n.
+fn build_heldout(t:i32, ein0:[]u8, ein1:[]u8, etgt:[]u8)i32 {
+  let n:i32=0;
+  if(t==0){
+    let x:i32=-8;
+    while(x<0){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,2*x+1);
+      n=n+1; x=x+1;
+    }
+    x=9;
+    while(x<=16){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,2*x+1);
+      n=n+1; x=x+1;
+    }
+  } else if(t==1){
+    let x:i32=-12;
+    while(x<=12){
+      if(x<-8 || x>8){
+        let y:i32=x; if(y<0){y=-y;}
+        set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,y);
+        n=n+1;
+      }
+      x=x+1;
+    }
+  } else if(t==2){
+    let x:i32=17;
+    while(x<=33){
+      set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,mod_nonneg(x,3));
+      n=n+1; x=x+1;
+    }
+  } else if(t==3){
+    let a:i32=0;
+    while(a<=7){
+      let b:i32=0;
+      while(b<=7){
+        if(a>4 || b>4){
+          let y:i32=0; if(mod_nonneg(a+b,2)==0){y=1;}
+          set32(ein0,n*4,a); set32(ein1,n*4,b); set32(etgt,n*4,y);
+          n=n+1;
+        }
+        b=b+1;
+      }
+      a=a+1;
+    }
+  } else if(t==4){
+    let x:i32=-10;
+    while(x<=10){
+      if(x<-6 || x>6){
+        let ax:i32=x; if(ax<0){ax=-ax;}
+        let d:i32=ax-2; if(d<0){d=-d;}
+        set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,d);
+        n=n+1;
+      }
+      x=x+1;
+    }
+  } else if(t==5){
+    let x:i32=-8;
+    while(x<=12){
+      if(x<-4 || x>8){
+        let ax:i32=x; if(ax<0){ax=-ax;}
+        let b2:i32=x-2; if(b2<0){b2=-b2;}
+        set32(ein0,n*4,x); set32(ein1,n*4,0); set32(etgt,n*4,ax+b2);
+        n=n+1;
+      }
+      x=x+1;
+    }
+  }
+  return n;
+}
+fn task_name(t:i32)[]u8 {
+  if(t==0){return "2x+1";}
+  if(t==1){return "abs";}
+  if(t==2){return "mod3";}
+  if(t==3){return "parity";}
+  if(t==4){return "nestedabs";}
+  return "fragcomp";
+}
+
+// ============ MAP-Elites (Hypothesis D) ============
+// Niche = (length_bucket, score_norm, behavior_hash).
+// length_bucket = min(len,12) in 0..12; score_norm = (score*16)/n in 0..16;
+// behavior_hash = rolling trit hash mod 256 over train outputs.
+// Template universe. Full VM: 31 templates (0..30). P-VM: 29 templates
+// (0..28), DIV and MOD removed. t in 0..18 -> PUSH (t-9); t=19 -> IN0;
+// t=20 -> IN1; t>=21 -> arithmetic/stack op (P-VM skips 6,7).
+fn tmpl_op(t:i32, pvm:i32)i32 {
+  if(t<=18){return 0;}
+  if(t==19){return 1;}
+  if(t==20){return 2;}
+  if(pvm==1){
+    if(t<=23){return t-18;}
+    return t-16;
+  }
+  return t-18;
+}
+fn tmpl_arg(t:i32, pvm:i32)i32 {
+  if(t<=18){return t-9;}
+  return 0;
+}
+// Evaluate candidate on train. Returns score; writes behavior hash to out_bh.
+// pvm selects the interpreter (1 = GENEXEC2-P, 0 = full). traps counts
+// P-VM trap firings (expected 0).
+fn eval_cand(p:[]u8, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+             stack:[]u8, rs:[]u8, out_bh:[]u8, pvm:i32, traps:[]u8)i32 {
+  let score:i32=0;
+  let h:i32=0;
+  let pl:i32=prog_len(p);
+  // empty lib for D (no CALL)
+  let lb:[]u8="";
+  let li:[]u8="";
+  let i:i32=0;
+  while(i<n){
+    let o:i32=0;
+    if(pvm==1){
+      o=vm_run_p(p, pl, get32(ein0,i*4), get32(ein1,i*4),
+                 lb, li, 0, stack, rs, traps);
+    } else {
+      o=vm_run_full(p, pl, get32(ein0,i*4), get32(ein1,i*4),
+                    lb, li, 0, stack, rs);
+    }
+    if(o==get32(etgt,i*4)){score=score+1;}
+    let trit:i32=0;
+    if(o>0){trit=2;} else if(o==0){trit=1;}
+    h=(h*3+trit)%256;
+    i=i+1;
+  }
+  set32(out_bh,0,h);
+  return score;
+}
+fn niche_of(plen:i32, score:i32, n:i32, behav:i32)i32 {
+  let lb:i32=plen;
+  if(lb>12){lb=12;}
+  let sn:i32=(score*16)/n;
+  return (lb*17+sn)*256+behav;
+}
+// Archive slot size: 4 (len) + 16*8 (ops).
+fn arch_prog_ptr(aprog:[]u8, niche:i32)[]u8 {
+  return aprog[niche*132..niche*132+132];
+}
+fn arch_store(aprog:[]u8, ascore:[]u8, niche:i32, p:[]u8, score:i32)void {
+  let dst:[]u8=arch_prog_ptr(aprog, niche);
+  prog_copy(dst, p);
+  set32(ascore, niche*4, score);
+  return;
+}
+fn arch_load(aprog:[]u8, niche:i32, dst:[]u8)void {
+  let src:[]u8=arch_prog_ptr(aprog, niche);
+  prog_copy(dst, src);
+  return;
+}
+// Reference deceptive prefix [IN0, PUSH 2, MUL, PUSH 1] for trace flagging.
+fn build_prefix(p:[]u8)void {
+  prog_set_len(p,0);
+  prog_append(p,1,0);
+  prog_append(p,0,2);
+  prog_append(p,5,0);
+  prog_append(p,0,1);
+  return;
+}
+
+// ============ v3 helpers: nursery, score bands, seed pool ============
+// All v3 selection state uses only mechanism-internal quantities
+// (elite score, insertion recency). No task knowledge. Deterministic.
+
+// Append niche to band b's list. bandlist layout: band b occupies
+// bytes [b*NN*4, (b+1)*NN*4). bandn[b] = count, bandptr[b] = rr pointer,
+// banddebt[b] = deficit counter.
+fn band_append(bandlist:[]u8, NN:i32, bandn:[]u8, b:i32, niche:i32)void {
+  let j:i32=get32(bandn,b*4);
+  set32(bandlist,(b*NN+j)*4,niche);
+  set32(bandn,b*4,j+1);
+  return;
+}
+// Remove niche from band b's list (linear scan; elite replacements that
+// change band are rare). Fixes the rr pointer if it pointed past the end.
+fn band_drop(bandlist:[]u8, NN:i32, bandn:[]u8, bandptr:[]u8, b:i32, niche:i32)void {
+  let cn:i32=get32(bandn,b*4);
+  let j:i32=0;
+  while(j<cn){
+    if(get32(bandlist,(b*NN+j)*4)==niche){
+      let last:i32=get32(bandlist,(b*NN+cn-1)*4);
+      set32(bandlist,(b*NN+j)*4,last);
+      set32(bandn,b*4,cn-1);
+      let pp:i32=get32(bandptr,b*4);
+      if(cn-1<=0){ set32(bandptr,b*4,0); }
+      else if(pp>=cn-1){ set32(bandptr,b*4,pp%(cn-1)); }
+      return;
+    }
+    j=j+1;
+  }
+  return;
+}
+// Deficit-weighted band pick over the 17 score bands. Weight of band b is
+// (b+1); total 153. Picks the max-debt non-empty band (ties -> smallest b),
+// subtracts 153, and returns the next niche round-robin within that band.
+// Returns -1 if every band is empty.
+fn band_pick(bandlist:[]u8, NN:i32, bandn:[]u8, bandptr:[]u8, banddebt:[]u8)i32 {
+  let b:i32=0;
+  while(b<17){
+    if(get32(bandn,b*4)>0){
+      set32(banddebt,b*4,get32(banddebt,b*4)+(b+1));
+    }
+    b=b+1;
+  }
+  let best:i32=-1;
+  let bestd:i32=-1;
+  b=0;
+  while(b<17){
+    if(get32(bandn,b*4)>0){
+      let d:i32=get32(banddebt,b*4);
+      if(d>bestd){bestd=d; best=b;}
+    }
+    b=b+1;
+  }
+  if(best<0){return -1;}
+  set32(banddebt,best*4,get32(banddebt,best*4)-153);
+  let cn:i32=get32(bandn,best*4);
+  let pp:i32=get32(bandptr,best*4)%cn;
+  set32(bandptr,best*4,(pp+1)%cn);
+  return get32(bandlist,(best*NN+pp)*4);
+}
+// Deficit-weighted pick over the 17 seed bands. Returns a seed index
+// (into the seed buffer), or -1 if every seed band is empty.
+fn seed_pick(seedband:[]u8, seedbandn:[]u8, seedbandptr:[]u8, seedbanddebt:[]u8)i32 {
+  let b:i32=0;
+  while(b<17){
+    if(get32(seedbandn,b*4)>0){
+      set32(seedbanddebt,b*4,get32(seedbanddebt,b*4)+(b+1));
+    }
+    b=b+1;
+  }
+  let best:i32=-1;
+  let bestd:i32=-1;
+  b=0;
+  while(b<17){
+    if(get32(seedbandn,b*4)>0){
+      let d:i32=get32(seedbanddebt,b*4);
+      if(d>bestd){bestd=d; best=b;}
+    }
+    b=b+1;
+  }
+  if(best<0){return -1;}
+  set32(seedbanddebt,best*4,get32(seedbanddebt,best*4)-153);
+  let cn:i32=get32(seedbandn,best*4);
+  let pp:i32=get32(seedbandptr,best*4)%cn;
+  set32(seedbandptr,best*4,(pp+1)%cn);
+  return get32(seedband,(best*56576+pp)*4);
+}
+
+// ============ per-task MAP-Elites search ============
+// Runs one task. carry_in/carry_out are flat buffers of 132-byte programs.
+// pvm: 1 = GENEXEC2-P task, 0 = full VM task. nt: template count (29|31).
+// Returns carry_out_n. Prints the metrics and the construction trace.
+fn run_task(t:i32, ein0:[]u8, ein1:[]u8, etgt:[]u8, n:i32,
+            carry_in:[]u8, carry_in_n:i32, carry_out:[]u8,
+            t0_ms:i64, pvm:i32, nt:i32, sel_mode:i32, carry_mode:i32)i32 {
+  // v3 modes (frozen in PREREG_HYPD_V3.md; the ONLY per-configuration lines
+  // are the two constant definitions in main, passed here as parameters).
+  let SEL_MODE:i32=sel_mode; // V3MODE-SEL: 1=v3 schedule, 0=v2 round-robin
+  let CARRY_MODE:i32=carry_mode; // V3MODE-CARRY: 1=v3 seed pool, 0=v2 silent insert
+  let NN:i32=56576;
+  let occ:[]u8=z_alloc(NN*4);
+  let aprog:[]u8=z_alloc(NN*132);
+  let ascore:[]u8=z_alloc(NN*4);
+  let amut:[]u8=z_alloc(NN*4);
+  let occlist:[]u8=z_alloc(NN*4);
+  let occn:i32=0;
+  let parptr:i32=0;
+  // v3: nursery (256 most recent insertions), score bands, seed pool.
+  let nursery:[]u8=z_alloc(256*4);
+  let nursery_n:i32=0;
+  let nursery_ptr:i32=0;
+  let nursery_ins:i32=0;
+  let bandlist:[]u8=z_alloc(17*NN*4);
+  let bandn:[]u8=z_alloc(17*4);
+  let bandptr:[]u8=z_alloc(17*4);
+  let banddebt:[]u8=z_alloc(17*4);
+  let seedbuf:[]u8=z_alloc(56576*132);
+  let seedmut:[]u8=z_alloc(56576*4);
+  let seedband:[]u8=z_alloc(17*56576*4);
+  let seedbandn:[]u8=z_alloc(17*4);
+  let seedbandptr:[]u8=z_alloc(17*4);
+  let seedbanddebt:[]u8=z_alloc(17*4);
+  let seedn:i32=0;
+  let sel_ctr:i32=0;
+  let stack:[]u8=z_alloc(256*4);
+  let rs:[]u8=z_alloc(64*8);
+  let out_bh:[]u8=z_alloc(4);
+  let traps:[]u8=z_alloc(4);
+  set32(traps,0,0);
+  let cand:[]u8=prog_new(16);
+  let parent:[]u8=prog_new(16);
+  let best:[]u8=prog_new(16);
+  let prefix:[]u8=prog_new(16);
+  build_prefix(prefix);
+  let evals:i32=0;
+  let best_score:i32=-1;
+  let solved:i32=0;
+  let timeout:i32=0;
+  let dropped:i32=0;
+  // solve info
+  let sol_pniche:i32=-1;
+  let sol_psrc:i32=0;
+  let sol_mkind:i32=-1;
+  let sol_md1:i32=-1;
+  let sol_md2:i32=-1;
+  let sol_pprog:[]u8=prog_new(16);
+  emit("TASK "); e64(t); emit(" "); emit(task_name(t)); emit("\n");
+  emit("VM "); if(pvm==1){emit("p\n");} else {emit("full\n");}
+  emit("TRAIN_N "); e64(n); emit("\n");
+  emit("CARRY_IN "); e64(carry_in_n); emit("\n");
+  // v3 carry handling.
+  // CARRY_MODE=1: carried programs are evaluated once and banded into the
+  //   seed pool by new-task score; they NEVER enter the archive.
+  // CARRY_MODE=0: v2 silent insertion (verbatim), plus v3 structure
+  //   updates when SEL_MODE=1.
+  // On P-VM tasks, carried programs containing an ablated opcode are
+  // dropped (never evaluated); the drop count is logged.
+  let ci:i32=0;
+  while(ci<carry_in_n){
+    let src:[]u8=carry_in[ci*132..ci*132+132];
+    prog_copy(cand, src);
+    if(pvm==1){
+      if(pvm_valid(cand)==0){
+        dropped=dropped+1;
+        ci=ci+1;
+        continue;
+      }
+    }
+    let sc:i32=eval_cand(cand, ein0, ein1, etgt, n, stack, rs, out_bh, pvm, traps);
+    evals=evals+1;
+    if(CARRY_MODE==1){
+      // Seed pool: band by new-task score_norm. Never touches the archive.
+      if(seedn<56576){
+        let sb:i32=(sc*16)/n;
+        let sdst:[]u8=seedbuf[seedn*132..seedn*132+132];
+        prog_copy(sdst, cand);
+        set32(seedmut,seedn*4,0);
+        band_append(seedband,56576,seedbandn,sb,seedn);
+        seedn=seedn+1;
+      }
+    } else {
+      let bh:i32=get32(out_bh,0);
+      let nch:i32=niche_of(prog_len(cand), sc, n, bh);
+      if(get32(occ,nch*4)==0){
+        set32(occ,nch*4,1);
+        arch_store(aprog,ascore,nch,cand,sc);
+        set32(amut,nch*4,0);
+        set32(occlist,occn*4,nch);
+        occn=occn+1;
+        if(SEL_MODE==1){
+          set32(nursery,(nursery_ins%256)*4,nch);
+          nursery_ins=nursery_ins+1;
+          if(nursery_n<256){nursery_n=nursery_n+1;}
+          band_append(bandlist,NN,bandn,(sc*16)/n,nch);
+        }
+      } else {
+        let osc0:i32=get32(ascore,nch*4);
+        if(sc>osc0){
+          arch_store(aprog,ascore,nch,cand,sc);
+          if(SEL_MODE==1){
+            let ob0:i32=(osc0*16)/n;
+            let nb0:i32=(sc*16)/n;
+            if(ob0!=nb0){
+              band_drop(bandlist,NN,bandn,bandptr,ob0,nch);
+              band_append(bandlist,NN,bandn,nb0,nch);
+            }
+          }
+        }
+      }
+    }
+    if(sc>best_score){best_score=sc; prog_copy(best,cand);}
+    else if(sc==best_score){
+      if(prog_len(cand)<prog_len(best)){prog_copy(best,cand);}
+      else if(prog_len(cand)==prog_len(best)){
+        if(prog_cmp(cand,best)<0){prog_copy(best,cand);}
+      }
+    }
+    ci=ci+1;
+  }
+  emit("CARRY_DROPPED_INVALID "); e64(dropped); emit("\n");
+  if(CARRY_MODE==1){
+    emit("SEED_IN "); e64(seedn); emit("\n");
+  }
+  // First task: seed with the empty program.
+  if(carry_in_n==0){
+    prog_set_len(cand,0);
+    let sc:i32=eval_cand(cand, ein0, ein1, etgt, n, stack, rs, out_bh, pvm, traps);
+    evals=evals+1;
+    let bh:i32=get32(out_bh,0);
+    let nch:i32=niche_of(0, sc, n, bh);
+    set32(occ,nch*4,1);
+    arch_store(aprog,ascore,nch,cand,sc);
+    set32(amut,nch*4,0);
+    set32(occlist,occn*4,nch);
+    occn=occn+1;
+    if(SEL_MODE==1){
+      set32(nursery,(nursery_ins%256)*4,nch);
+      nursery_ins=nursery_ins+1;
+      if(nursery_n<256){nursery_n=nursery_n+1;}
+      band_append(bandlist,NN,bandn,(sc*16)/n,nch);
+    }
+    best_score=sc; prog_copy(best,cand);
+    emit("SEED_EMPTY niche="); e64(nch); emit(" score="); e64(sc); emit("\n");
+  }
+  // Main loop.
+  while(evals<1000000){
+    if(evals%1024==0){
+      if(now_ms()-t0_ms>=300000){timeout=1;}
+    }
+    if(timeout==1){break;}
+    // v3 parent selection (SEL_MODE=1) or v2 round-robin (SEL_MODE=0).
+    // psrc=0: pid is an archive niche; psrc=1: pid is a seed-pool index.
+    let psrc:i32=0;
+    let pid:i32=-1;
+    if(SEL_MODE==1){
+      let src:i32=sel_ctr%8;
+      sel_ctr=sel_ctr+1;
+      if(src<4){
+        if(nursery_n>0){
+          pid=get32(nursery,(nursery_ptr%nursery_n)*4);
+          nursery_ptr=nursery_ptr+1;
+          if(nursery_ptr>=nursery_n){nursery_ptr=0;}
+          psrc=0;
+        }
+      } else if(src==4){
+        pid=band_pick(bandlist,NN,bandn,bandptr,banddebt);
+        if(pid>=0){psrc=0;}
+      } else if(src==5){
+        if(occn>0){
+          pid=get32(occlist,parptr*4);
+          parptr=parptr+1;
+          if(parptr>=occn){parptr=0;}
+          psrc=0;
+        }
+      } else {
+        pid=seed_pick(seedband,seedbandn,seedbandptr,seedbanddebt);
+        if(pid>=0){psrc=1;}
+      }
+      if(pid<0){
+        // Fallback chain: seed, uniform, nursery, score.
+        pid=seed_pick(seedband,seedbandn,seedbandptr,seedbanddebt);
+        if(pid>=0){psrc=1;}
+        else if(occn>0){
+          pid=get32(occlist,parptr*4);
+          parptr=parptr+1;
+          if(parptr>=occn){parptr=0;}
+          psrc=0;
+        } else if(nursery_n>0){
+          pid=get32(nursery,(nursery_ptr%nursery_n)*4);
+          nursery_ptr=nursery_ptr+1;
+          if(nursery_ptr>=nursery_n){nursery_ptr=0;}
+          psrc=0;
+        } else {
+          pid=band_pick(bandlist,NN,bandn,bandptr,banddebt);
+          if(pid>=0){psrc=0;}
+        }
+      }
+      if(pid<0){
+        emit("SEL_EMPTY\n");
+        break;
+      }
+    } else {
+      // v2 round-robin.
+      pid=get32(occlist,parptr*4);
+      parptr=parptr+1;
+      if(parptr>=occn){parptr=0;}
+      psrc=0;
+    }
+    if(psrc==0){
+      arch_load(aprog,pid,parent);
+    } else {
+      let ssrc:[]u8=seedbuf[pid*132..pid*132+132];
+      prog_copy(parent,ssrc);
+    }
+    let pl:i32=prog_len(parent);
+    // Generate next mutation in cyclic order.
+    let M:i32=nt+(nt+1)*pl;
+    let mutarr:[]u8=amut;
+    if(psrc==1){mutarr=seedmut;}
+    let mi:i32=get32(mutarr,pid*4)%M;
+    let tried:i32=0;
+    let mkind:i32=-1;
+    let md1:i32=-1;
+    let md2:i32=-1;
+    while(tried<M){
+      if(mi<nt){
+        if(pl<16){mkind=0; md1=mi; break;}
+      } else if(mi<nt+nt*pl){
+        mkind=1; md1=(mi-nt)/nt; md2=(mi-nt)%nt; break;
+      } else {
+        mkind=2; md1=mi-(nt+nt*pl); break;
+      }
+      mi=(mi+1)%M;
+      tried=tried+1;
+    }
+    if(mkind==-1){
+      // No valid mutation (should not happen); advance and continue.
+      set32(mutarr,pid*4,(get32(mutarr,pid*4)+1)%M);
+      continue;
+    }
+    set32(mutarr,pid*4,(mi+1)%M);
+    // Apply mutation.
+    if(mkind==0){
+      prog_copy(cand,parent);
+      prog_append(cand,tmpl_op(md1,pvm),tmpl_arg(md1,pvm));
+    } else if(mkind==1){
+      prog_copy(cand,parent);
+      prog_set(cand,md1,tmpl_op(md2,pvm),tmpl_arg(md2,pvm));
+    } else {
+      // delete md1
+      let nl:i32=pl-1;
+      let i:i32=0;
+      while(i<nl){
+        let src:i32=i;
+        if(i>=md1){src=i+1;}
+        prog_set(cand,i,prog_op(parent,src),prog_arg(parent,src));
+        i=i+1;
+      }
+      prog_set_len(cand,nl);
+    }
+    // Evaluate.
+    let sc:i32=eval_cand(cand, ein0, ein1, etgt, n, stack, rs, out_bh, pvm, traps);
+    evals=evals+1;
+    let bh:i32=get32(out_bh,0);
+    let nch:i32=niche_of(prog_len(cand), sc, n, bh);
+    // Prefix flagging (T0 mechanism trace).
+    if(prog_cmp(cand,prefix)==0){
+      emit("PREFIX_EVAL eval="); e64(evals); emit(" niche="); e64(nch);
+      emit(" score="); e64(sc); emit("\n");
+    }
+    // Insert.
+    let inserted:i32=0;
+    if(get32(occ,nch*4)==0){
+      set32(occ,nch*4,1);
+      arch_store(aprog,ascore,nch,cand,sc);
+      set32(amut,nch*4,0);
+      set32(occlist,occn*4,nch);
+      occn=occn+1;
+      inserted=1;
+      if(SEL_MODE==1){
+        set32(nursery,(nursery_ins%256)*4,nch);
+        nursery_ins=nursery_ins+1;
+        if(nursery_n<256){nursery_n=nursery_n+1;}
+        band_append(bandlist,NN,bandn,(sc*16)/n,nch);
+      }
+    } else {
+      let osc1:i32=get32(ascore,nch*4);
+      if(sc>osc1){
+        arch_store(aprog,ascore,nch,cand,sc);
+        inserted=1;
+        if(SEL_MODE==1){
+          let ob1:i32=(osc1*16)/n;
+          let nb1:i32=(sc*16)/n;
+          if(ob1!=nb1){
+            band_drop(bandlist,NN,bandn,bandptr,ob1,nch);
+            band_append(bandlist,NN,bandn,nb1,nch);
+          }
+        }
+      }
+    }
+    if(inserted==1){
+      emit("I eval="); e64(evals); emit(" niche="); e64(nch);
+      emit(" len="); e64(prog_len(cand)); emit(" score="); e64(sc);
+      emit(" prog="); print_prog(cand); emit("\n");
+      if(prog_cmp(cand,prefix)==0){
+        emit("PREFIX_INSERT eval="); e64(evals); emit(" niche="); e64(nch);
+        emit(" score="); e64(sc);
+        emit(" retained_independent_of_score=1\n");
+      }
+    }
+    // Global best.
+    if(sc>best_score){
+      best_score=sc; prog_copy(best,cand);
+      emit("BEST eval="); e64(evals); emit(" score="); e64(sc);
+      emit(" prog="); print_prog(cand); emit("\n");
+    } else if(sc==best_score && sc>=0){
+      if(prog_len(cand)<prog_len(best)){
+        prog_copy(best,cand);
+      } else if(prog_len(cand)==prog_len(best)){
+        if(prog_cmp(cand,best)<0){prog_copy(best,cand);}
+      }
+    }
+    // SOLVE check: v2-SOLVE = n/n train AND total ops <= 40.
+    // D has no CALLs and no fragments, so total ops = program length.
+    if(sc==n){
+      solved=1;
+      sol_pniche=pid;
+      sol_psrc=psrc;
+      sol_mkind=mkind; sol_md1=md1; sol_md2=md2;
+      prog_copy(sol_pprog,parent);
+      prog_copy(best,cand);
+      emit("SOLVE eval="); e64(evals);
+      emit(" parent_src="); e64(psrc);
+      emit(" parent_id="); e64(pid);
+      emit(" parent_prog="); print_prog(parent);
+      emit(" mut_kind="); e64(mkind);
+      emit(" md1="); e64(md1); emit(" md2="); e64(md2);
+      emit(" sol_prog="); print_prog(cand); emit("\n");
+      emit("OPCAP_OK "); if(prog_len(cand)<=40){emit("1\n");} else {emit("0\n");}
+      if(pvm==1){
+        emit("PVM_VALID "); e64(pvm_valid(cand)); emit("\n");
+      }
+      break;
+    }
+  }
+  let wall:i64=now_ms()-t0_ms;
+  emit("VERDICT ");
+  if(solved==1){emit("SOLVE\n");} else if(timeout==1){emit("TIMEOUT\n");} else {emit("FAIL\n");}
+  // Falsifier audits.
+  if(pvm==1){
+    emit("PVM_TRAPS "); e64(get32(traps,0)); emit("\n");
+  }
+  if(t==1 || t==4 || t==5){
+    emit("TRICK_CHECK ");
+    if(solved==1){emit("F-TRICK FIRED\n");} else {emit("silent\n");}
+  }
+  emit("EVALS "); e64(evals); emit("\n");
+  emit("BEST_SCORE "); e64(best_score); emit("\n");
+  emit("BEST_PROG "); print_prog(best); emit("\n");
+  emit("OCC_NICHES "); e64(occn); emit("\n");
+  // v3 falsification check: diagnostic observer ONLY (T3, niche 17570 =
+  // Q4/PA's niche). Reports whether the niche is occupied and whether its
+  // elite is byte-identical to any carried program. Does not influence
+  // selection, mutation, or retention in any way.
+  if(t==3){
+    emit("CARRY_BLOCK_CHECK niche=17570");
+    if(get32(occ,17570*4)==0){
+      emit(" occupied=0\n");
+    } else {
+      emit(" occupied=1 elite=");
+      let cbe:[]u8=prog_new(16);
+      arch_load(aprog,17570,cbe);
+      print_prog(cbe);
+      let cm:i32=0;
+      let qc:[]u8=prog_new(16);
+      let q:i32=0;
+      while(q<carry_in_n){
+        let qsrc:[]u8=carry_in[q*132..q*132+132];
+        prog_copy(qc,qsrc);
+        if(prog_cmp(cbe,qc)==0){cm=1;}
+        q=q+1;
+      }
+      z_free(qc);
+      emit(" carried_match="); e64(cm); emit("\n");
+      z_free(cbe);
+    }
+  }
+  emit("WALL_MS "); emit(i64s(wall)); emit("\n");
+  // Held-out accuracy on the best/solution program.
+  let h0:[]u8=z_alloc(64*4); let h1:[]u8=z_alloc(64*4); let ht:[]u8=z_alloc(64*4);
+  let hn:i32=build_heldout(t,h0,h1,ht);
+  let hs:i32=0;
+  let lb2:[]u8="";
+  let li2:[]u8="";
+  let i:i32=0;
+  while(i<hn){
+    let o:i32=0;
+    if(pvm==1){
+      o=vm_run_p(best, prog_len(best), get32(h0,i*4), get32(h1,i*4),
+                 lb2, li2, 0, stack, rs, traps);
+    } else {
+      o=vm_run_full(best, prog_len(best), get32(h0,i*4), get32(h1,i*4),
+                    lb2, li2, 0, stack, rs);
+    }
+    if(o==get32(ht,i*4)){hs=hs+1;}
+    i=i+1;
+  }
+  emit("HIDDEN "); e64(hs); emit("/"); e64(hn); emit("\n");
+  emit("EXAMPLES "); e64(n); emit("\n");
+  emit("LIB_FRAGS 0\n");
+  emit("CALLS 0\n");
+  // Extract elites for the next task (persistent state).
+  let con:i32=0;
+  let oi:i32=0;
+  while(oi<occn){
+    let nch:i32=get32(occlist,oi*4);
+    let dst:[]u8=carry_out[con*132..con*132+132];
+    let src:[]u8=arch_prog_ptr(aprog,nch);
+    // copy 132 bytes
+    let b:i32=0;
+    while(b<132){dst[b]=src[b]; b=b+1;}
+    con=con+1;
+    oi=oi+1;
+  }
+  emit("CARRY_OUT "); e64(con); emit("\n");
+  // Free.
+  z_free(occ); z_free(aprog); z_free(ascore); z_free(amut); z_free(occlist);
+  z_free(stack); z_free(rs); z_free(out_bh); z_free(traps);
+  z_free(cand); z_free(parent); z_free(best); z_free(prefix); z_free(sol_pprog);
+  z_free(h0); z_free(h1); z_free(ht);
+  z_free(nursery);
+  z_free(bandlist); z_free(bandn); z_free(bandptr); z_free(banddebt);
+  z_free(seedbuf); z_free(seedmut);
+  z_free(seedband); z_free(seedbandn); z_free(seedbandptr); z_free(seedbanddebt);
+  return con;
+}
+
+// ============ main ============
+fn main()void {
+  emit("HYP_D_MAPELITES_V3\n");
+  emit("PREREG_HYPD_V3\n");
+  // v3 modes (frozen in PREREG_HYPD_V3.md; the ONLY per-configuration lines).
+  // Ablation builds sed these two lines (see BUILD_V3.sh).
+  let SEL_MODE:i32=1; // V3MODE-SEL: 1=v3 schedule, 0=v2 round-robin
+  let CARRY_MODE:i32=1; // V3MODE-CARRY: 1=v3 seed pool, 0=v2 silent insert
+  emit("SEL_MODE "); e64(SEL_MODE); emit("\n");
+  emit("CARRY_MODE "); e64(CARRY_MODE); emit("\n");
+  // Carry buffers (ping-pong). Each program 132 bytes, max 56576.
+  let carry_a:[]u8=z_alloc(56576*132);
+  let carry_b:[]u8=z_alloc(56576*132);
+  let carry_n:i32=0;
+  let use_a:i32=1; // carry_in is carry_a when use_a==1
+  let t:i32=0;
+  // v3 task sequence: T0..T3 only (the carry chain T3 needs).
+  // T4/T5 are out of scope for v3 (PREREG_HYPD_V3.md section 4).
+  while(t<=3){
+    let ein0:[]u8=z_alloc(64*4);
+    let ein1:[]u8=z_alloc(64*4);
+    let etgt:[]u8=z_alloc(64*4);
+    let n:i32=build_train(t, ein0, ein1, etgt);
+    let t0:i64=now_ms();
+    // VM assignment: T1 on GENEXEC2-P (pvm=1, 29 templates);
+    // T0/T2/T3 on full GENEXEC2 (pvm=0, 31 templates).
+    let pvm:i32=0;
+    let nt:i32=31;
+    if(t==1){pvm=1; nt=29;}
+    let new_n:i32=0;
+    if(use_a==1){
+      new_n=run_task(t, ein0, ein1, etgt, n, carry_a, carry_n, carry_b, t0, pvm, nt, SEL_MODE, CARRY_MODE);
+    } else {
+      new_n=run_task(t, ein0, ein1, etgt, n, carry_b, carry_n, carry_a, t0, pvm, nt, SEL_MODE, CARRY_MODE);
+    }
+    carry_n=new_n;
+    if(use_a==1){use_a=0;} else {use_a=1;}
+    z_free(ein0); z_free(ein1); z_free(etgt);
+    t=t+1;
+  }
+  z_free(carry_a); z_free(carry_b);
+  emit("DONE\n");
+  return;
+}

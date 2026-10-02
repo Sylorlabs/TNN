@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,sys
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+from sklearn.linear_model import Ridge,LogisticRegression
+from sklearn.ensemble import RandomForestRegressor,ExtraTreesRegressor
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph')
+from experiments_memory_v3 import make_episode,feat,sufficient,COST,fixed_choose
+POLICIES=['PRIVILEGED_HEURISTIC_CONTROL','LRU','RANDOM','EXACT_ALL','STRUCTURED_ALL','DIRECT_LINEAR','DIRECT_RF','DIRECT_ET','EXACT_BINARY','DIRECT_ENSEMBLE']
+FIXSEED={p:i*1009+17 for i,p in enumerate(POLICIES)}
+
+def target_utility(r,a,pressure):
+ ok=sufficient(a,r['q']); base=r['importance']*(1.20 if ok else -0.82)
+ hot=(.14*r['retrieval'] if a==0 else .03*r['retrieval'] if a==1 else 0.)
+ return base+hot-(.035+.30*pressure)*COST[a]
+
+def train_rows(dev):
+ X=[];Y=[]
+ pressures=[0.,.2,.4,.6,.8,1.]
+ for r in dev:
+  f=feat(r)
+  for p in pressures:
+   X.append(np.concatenate([f,[p]]));Y.append([target_utility(r,a,p) for a in range(4)])
+ return np.asarray(X),np.asarray(Y)
+
+class DirectPolicy:
+ def __init__(self,name,dev,seed):
+  self.name=name;X,Y=train_rows(dev)
+  if name=='DIRECT_LINEAR':self.m=Ridge(alpha=2.0).fit(X,Y)
+  elif name=='DIRECT_RF':self.m=RandomForestRegressor(n_estimators=48,max_depth=11,min_samples_leaf=4,max_features=.8,random_state=seed,n_jobs=1).fit(X,Y)
+  elif name=='DIRECT_ET':self.m=ExtraTreesRegressor(n_estimators=48,max_depth=12,min_samples_leaf=3,max_features=.9,random_state=seed,n_jobs=1).fit(X,Y)
+  elif name=='DIRECT_ENSEMBLE':
+   self.rf=RandomForestRegressor(n_estimators=48,max_depth=12,min_samples_leaf=4,max_features=.8,random_state=seed,n_jobs=1).fit(X,Y)
+   self.lin=Ridge(alpha=2.0).fit(X,Y)
+  elif name=='EXACT_BINARY':
+   xb=np.stack([feat(r) for r in dev]);yb=np.array([int(r['q']==0) for r in dev]);imp=np.array([r['importance'] for r in dev])
+   self.ex=LogisticRegression(max_iter=350,class_weight='balanced',C=.8).fit(xb,yb);self.imp=Ridge(alpha=1.5).fit(xb,imp)
+  else:raise ValueError(name)
+ def q(self,r,pressure):
+  if self.name=='EXACT_BINARY':
+   f=feat(r);pe=float(self.ex.predict_proba(f.reshape(1,-1))[0,1]);imp=max(.1,float(self.imp.predict(f.reshape(1,-1))[0]))
+   # q0 requires exact; other queries can use structured. Cold exact is useful at moderate exact probability.
+   vals=np.array([
+    imp*(1.2*pe + 1.2*(1-pe)) +.14*r['retrieval']-(.035+.30*pressure)*4,
+    imp*(1.2) +.03*r['retrieval']-(.035+.30*pressure)*2.5,
+    imp*(1.2*(1-pe)-.82*pe)-(.035+.30*pressure),
+    -.82*imp
+   ])
+   return vals
+  x=np.concatenate([feat(r),[pressure]]).reshape(1,-1)
+  if self.name=='DIRECT_ENSEMBLE':return .68*self.rf.predict(x)[0]+.32*self.lin.predict(x)[0]
+  return self.m.predict(x)[0]
+ def choose(self,r,pressure):
+  vals=self.q(r,pressure);a=int(np.argmax(vals));return a,float(vals[a])
+ def density(self,r,a,pressure):
+  if COST[a]<=0:return -1e9
+  vals=self.q(r,pressure);return float(vals[a]/COST[a])
+
+def simulate(name,seed,dev,n=1400,budget=760):
+ rng=np.random.default_rng(seed);pol=DirectPolicy(name,dev,seed) if name.startswith('DIRECT_') or name=='EXACT_BINARY' else None
+ entries={};used=0.;queries=defaultdict(list);episodes=[];by=defaultdict(list);storage=[];evict=0;actions=np.zeros(4,int)
+ for i in range(n):
+  r=make_episode(rng,i);episodes.append(r);pressure=min(1.,used/budget)
+  if pol:a,val=pol.choose(r,pressure);density=pol.density(r,a,pressure)
+  else:a=fixed_choose(name,r,i,rng);density=None
+  actions[a]+=1;entries[i]={'a':a,'r':r,'last':i,'density':density};used+=COST[a];queries[i+r['delay']].append(i)
+  while used>budget:
+   cand=[(eid,e) for eid,e in entries.items() if COST[e['a']]>0]
+   if not cand:break
+   if pol:eid,e=min(cand,key=lambda z:z[1]['density'])
+   else:eid,e=min(cand,key=lambda z:z[1]['last'])
+   used-=COST[e['a']];del entries[eid];evict+=1
+  for eid in queries.get(i,[]):
+   rr=episodes[eid];e=entries.get(eid);ok=e is not None and sufficient(e['a'],rr['q']);by[rr['q']].append(bool(ok));
+   if e:e['last']=i
+  storage.append(used)
+ for t in range(n,n+340):
+  for eid in queries.get(t,[]):
+   rr=episodes[eid];e=entries.get(eid);by[rr['q']].append(bool(e is not None and sufficient(e['a'],rr['q'])))
+ allv=[x for v in by.values() for x in v]
+ return {'policy':name,'seed':seed,'overall':float(np.mean(allv)),'exact':float(np.mean(by[0])),'semantic':float(np.mean(by[1])),'source':float(np.mean(by[2])),'procedure':float(np.mean(by[3])),'mean_storage':float(np.mean(storage)),'evictions':evict,'action_fraction':(actions/actions.sum()).tolist()}
+
+def run_seed(si,out,dev_n=5000):
+ dr=np.random.default_rng(284000+si);dev=[make_episode(dr,i) for i in range(dev_n)];rows=[]
+ for p in POLICIES:
+  rows.append(simulate(p,285000+si+FIXSEED[p],dev));print(p,'done',flush=True)
+ Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','seed_index':si,'dev_history':dev_n,'rows':rows},indent=2))
+
+def combine(files,out):
+ rows=[]
+ for f in files:rows+=json.loads(Path(f).read_text())['rows']
+ g=defaultdict(list)
+ for r in rows:g[r['policy']].append(r)
+ s=[]
+ for p,rs in g.items():
+  z={'policy':p,'n':len(rs)}
+  for k in ['overall','exact','semantic','source','procedure','mean_storage','evictions']:
+   v=np.array([r[k] for r in rs],float);z[k]=float(v.mean());z[k+'_sd']=float(v.std())
+  z['utility']=.38*z['exact']+.19*z['semantic']+.19*z['source']+.24*z['procedure']-.0001*z['mean_storage'];z['action_fraction']=np.mean(np.array([r['action_fraction'] for r in rs]),axis=0).tolist();s.append(z)
+ s.sort(key=lambda x:x['utility'],reverse=True);Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE','rows':rows,'summary':s},indent=2));print(json.dumps(s,indent=2))
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='cmd',required=True);a=sp.add_parser('seed');a.add_argument('--index',type=int,required=True);a.add_argument('--out',required=True);a.add_argument('--dev-n',type=int,default=5000);b=sp.add_parser('combine');b.add_argument('--out',required=True);b.add_argument('files',nargs='+');x=ap.parse_args();run_seed(x.index,x.out,x.dev_n) if x.cmd=='seed' else combine(x.files,x.out)
