@@ -18,3 +18,10 @@ Result: PASS. Pure Zag only. PATH=$HOME/safebin for all subsequent work.
 - Prereg frozen alone first, then implementation. Kill bars never move after freezing.
 - Commits local only under docs/lab/rsi/runs/wave-20261001-2321pdt/ARENA-BLIND/. No push. No reset --hard. No rebase.
 - Read-only toward ARENA4, ARENA2, ARENA3, BATTERY-E3 lane dirs: sources extracted via git show from recorded commits only.
+
+## Step 1 (commit-order self-check)
+- Prereg frozen alone: commit 0b95a6601 (PREREG_ARENA_BLIND.md + NAMECHECK, no audit evidence, no implementation, no runs).
+- Audit evidence (ARENA_BLIND_AUDIT.md, JUDGE_BRIEF.md) recorded after the freeze; collected read-only from recorded commits (git show 171c45101 for lane sources; sealed world files read, not modified).
+- Kill bars never moved; the frozen decision rule (ORACLE-FREE vs BLIND-SUSTAINED vs BLIND-COLLAPSE) governed the verdict.
+- Commits local only under docs/lab/rsi/runs/wave-20261001-2321pdt/ARENA-BLIND/. No push. No reset --hard. No rebase.
+- Lane-end toolchain: `which python3` prints nothing (exit 1), safebin PATH throughout, zero interpreter invocations. No PROCESS-FAIL event.
