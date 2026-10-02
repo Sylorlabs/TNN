@@ -5,6 +5,18 @@ Wave: wave-20261001-2321pdt. Lane: CONTLEARN-OWNED. Date: 2026-10-02.
 Worker phase: 1 (writing only). Implementation authorized only after the
 coordinator commits this prereg alone.
 
+## Amendment A1 (2026-10-02, before any counted run)
+
+Arithmetic correction only; no tuple, bar, or decision rule changes. The
+frozen tuple script in section 4 lists STORE as 6 concept TEACH + 6 anchor
+TEACH + 6 integrate MQUERY + 6 family-E TEACH = 24 events, not 30; the
+correct full-script total is 98 events (24+30+12+20+12), not 104. The K1c
+audit expectation is corrected to 98. The implementation's audit constant
+is corrected to match, the two binaries are rebuilt, and the runs below
+are fresh runs against this amended freeze. The first (pre-amendment) pilot
+runs are discarded and not counted; they are documented in RUN_LOG.md as
+the reason for this amendment.
+
 ## 0. Commit order (K0)
 
 This prereg is committed alone in
@@ -131,9 +143,9 @@ core. Event kinds: TEACH (ev_teach), MQUERY (ev_query expected=-2,
 flags=1; supervisor disconnected, disclosed; not a task label). PHASE
 markers are driver-side prints and never reach cognition.
 
-Full script (104 events), both binaries:
+Full script (98 events), both binaries:
 
-- STORE (30 events):
+- STORE (24 events):
   - Family D, concept links: for i in 0..5: TEACH(9001+i, 501, 9101+i).
   - Family D, anchor links: for i in 0..5: TEACH(9501+i, 701, 9001+i).
   - Family D, integrate: for i in 0..5: MQUERY(9501+i, 702). Integration
@@ -216,14 +228,14 @@ merge-base before verdict.
 
 K1 (one learner, no reset, no recompile, no task labels): K1a: exactly 6
 learner processes total (2 binaries x 3 reps), one process per full
-104-event run; transcripts contain no PID; harness log records spawns.
+98-event run; transcripts contain no PID; harness log records spawns.
 K1b: a znc wrapper logs every znc invocation; exactly 2 entries (the two
 pre-run builds, one per binary) before the runs; 0 new entries during the
 runs. K1c: driver self-audit; every tuple flows through the two choke
 points with kind in {1,2} and plain integer operands; MQUERY carries the
 frozen parameters expected=-2, flags=1 (disclosed supervisor disconnect,
 not a task label); PHASE markers never reach cognition; all runs launch
-with empty argv and empty env; expected audited count 104 per run;
+with empty argv and empty env; expected audited count 98 per run;
 prints AUDIT_PASS.
 
 K2 (frozen ISA boundary and architecture accounting): K2a: SHA-256 of the
@@ -269,7 +281,7 @@ K6 (determinism) is CO-3; listed once.
 
 ## 8. Exact claim bound (frozen)
 
-If OWNED: on the fixed disclosed 104-event battery, with the trial /
+If OWNED: on the fixed disclosed 98-event battery, with the trial /
 promotion / P-INV machinery verified absent from the event path, the
 continuing learner integrates 6/6 fresh 2-hop chains into MAP structures
 with DEP citations using only its standing structures, UNCERTAINTY/guide
