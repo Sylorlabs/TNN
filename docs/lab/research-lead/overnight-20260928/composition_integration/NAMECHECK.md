@@ -69,3 +69,23 @@
 - Cognition lines (integ_patch.zag, non-comment non-blank): 157.
 - Commit order re-verified: `git show --stat 05d1b7a28` shows
   PREREG.md as the sole file. Freeze ordering: PASS.
+
+## Final battery build record (amended design, Amendments 1-3)
+
+- Amendments 1/2/3 each committed before the redesigned
+  implementation was run (6bdfb7216 amends 1+2 and 3; the final
+  driver edits and Amendment 3 are included here).
+- Rebuild: build.sh, compile exit 0 (warnings only, A0102 class).
+  integ_full.zag is the cat of the 8 sources in build order.
+- Runs: 3x ./integ_bin > integ_runN.txt, exit 0 each; sha256
+  8e73222767a21f5a89e5d35b13a7730e261ee47aabd281e5dacf2784f05797f1
+  all three; pairwise cmp clean. K6 PASS.
+- K7: `expected` absent from integ_patch.zag (grep 0); zero
+  em/en dashes byte-verified across all deliverables; 0
+  modes/bridges/handlers (single comment declaration only).
+- K8: frozen copies sha256-verified against origins at copy
+  time; origins unmodified.
+- Cognition lines: integ_patch.zag 157, integ_driver.zag 335
+  (harness).
+- Verdict: COMPOSITION-INTEGRATION-COMPLETE. K1-K5 PASS (arms),
+  K6-K8 PASS. I5 diagnostic PASS (non-gating).
