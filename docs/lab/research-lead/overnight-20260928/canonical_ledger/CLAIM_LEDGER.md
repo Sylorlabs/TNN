@@ -6697,3 +6697,19 @@ No em dashes were used in this entry (verified).
   dispatched. Status: 4 KILLS.
 
 No em dashes were used in this entry (verified).
+
+- C267 (SCALING-5000; commit b0779fd01, 2026-10-02): COMPLETE
+  (exploratory). PROCESS-PASS (pure Zag, safebin). S5000 scale law:
+  linear 34999 vs hardened-indexed 5 -> ~7000x; tried=1, ok=1.
+  MTF emergent ordering 49->1, byte-identical to canonical. FACT
+  index 167/1092 identical to canonical. Robustness: fails=0, no
+  eviction, no crash, no panic. 3/3 byte-identical. Cross-workstream
+  finding: the parallel s5_* workstream's "FACT index bug"
+  (SCALING-5000-PARTIAL) is THEIR layout bug (WSZ()/loff() left at
+  8192-node values while expanding to 65536; log_ev clobbers live
+  nodes above id ~14745); their FACT-index code is diff-identical
+  to canonical; the FACT index is CORRECT at D=4990. 10000 MAPs
+  queued (needs NN=131072 rebuild). 0 modes/bridges/handlers.
+  Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
