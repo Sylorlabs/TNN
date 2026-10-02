@@ -40,4 +40,5 @@ implementation and evaluation step and recorded here.
 - EVAL_SKEPTIC3.md: strictly after implementation
 
 Prereg freeze: 6bf257048 (2026-10-02 ~07:34 UTC, branch tnn-native-lab).
-Implementation commit: (recorded at implementation commit below).
+Implementation commit: 2affa9bcd (2026-10-02 ~07:36 UTC).
+Eval commit: (recorded at eval commit below).
