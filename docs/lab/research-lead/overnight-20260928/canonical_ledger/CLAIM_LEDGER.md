@@ -6769,3 +6769,23 @@ No em dashes were used in this entry (verified).
   dispatched. Status: BUILD-PASS (sweep) + harness finding.
 
 No em dashes were used in this entry (verified).
+
+- C271 (INQUIRY-HARDENED; prereg ea624ffec, results 03eebe6ca,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  PROCESS-PASS. Repairs: R1 provenance (learner-owned prov
+  array; gi_inquiry_accept sole entry; quarantine by exclusion);
+  R2 corroboration gate (DIV d|P trusted; other kills trigger
+  verification round requiring independent strong corroborator);
+  R3 decomp decode-and-verify + pair-witness corroboration;
+  R4 waste budget (GI-WASTE-STOP at 2 non-shrinking). Re-tests:
+  ADV-LIE SURVIVE (GI-LIE-SUSPECT, quarantined, -4 fail-closed);
+  ADV-WASTE SURVIVE (issued=2 < QMAX=4); ADV-POISON SURVIVE
+  (GI-POISON-SUSPECT, no range corruption). Regression clean
+  (NEG-AMB 1 query; EXL2/3/4 0 queries). 3/3 byte-identical.
+  214 cognition lines in learner patch, 0 in base. Honest
+  limitation: a fully coherent liar with a complete alternative
+  world model could still fabricate; no learner-side check can
+  rule that out in principle. Independent adversary dispatched.
+  0 modes/bridges/handlers. Status: BUILD-PASS (3 kills repaired).
+
+No em dashes were used in this entry (verified).
