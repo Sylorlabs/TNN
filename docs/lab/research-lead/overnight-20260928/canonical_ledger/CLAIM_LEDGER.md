@@ -6805,3 +6805,24 @@ No em dashes were used in this entry (verified).
   BUILD-PASS + architectural finding (no-forgiveness).
 
 No em dashes were used in this entry (verified).
+
+- C273 (XDOMAIN-CAUSAL; prereg 2dc11c883, results 664c04d8d,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  PROCESS-PASS. 9/9 kill bars pass; 3/3 byte-identical. ALL FOUR
+  mechanisms (A, B, C, XIO) fail exactly the do-surgery cases
+  (Z1=Z4=-2); zero composites/adapters built. Observational
+  coincidence: Z2=3, Z3=6 via rebind on all (machinery works,
+  but implements observational composition, coinciding with
+  intervention only when do==see). Oracle 5,3,6,4 on all four:
+  world solvable; gap is composition-specific. DIAGNOSIS: all
+  four assume composition is a function of the first stage's
+  output value. Under confounding, the interventional answer is
+  not a function of the observational output. The do-operator
+  needs STRUCTURE-TRANSFORMING composition (sever incoming
+  edges, recompute with context fixed). Either the ONE general
+  composition op is strictly more powerful than value chaining,
+  or causal->intervention is an irreducibly structural second
+  composition kind. Prototype dispatched. 0 modes/bridges/handlers.
+  Status: 4 FAILS (surgery) + architectural diagnosis.
+
+No em dashes were used in this entry (verified).
