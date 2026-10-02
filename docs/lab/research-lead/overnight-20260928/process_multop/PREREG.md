@@ -235,3 +235,28 @@ v3 design changes (bars unchanged):
 
 v1 and v2 remain reported honestly in REPORT.md as apparatus
 iterations; the verdict is governed by v3.
+
+## 7. Amendment v4 (2026-10-02, after the v3 run, BEFORE v4 code)
+
+v3 ran 3/3 byte-identical. Verdicts: T1=0, T2=0, T3=1.
+v3 outputs preserved as run1_v3.txt/run2_v3.txt/run3_v3.txt and
+multop_bin_v3. Kill-bar thresholds UNCHANGED.
+
+- T3=1 again (p4=4, late EST 53/53). Body revision is solid.
+- T1=0, T2=0 (CHAIN3 65 episodes, 0 solved, 0 triples): v3 broke
+  discovery. Root cause: at CHAIN3-E2, COMPLETE outscored SHIFT
+  (664 vs 541) because F2's FOLLOW->COMPLETE pair history
+  (comp(1,2)) outweighed SHIFT's applicability, which Phase 1 had
+  left weak (T2 only 25%, plus F2-exploration dilution). With eps=0
+  the greedy policy then picked COMPLETE (which fails at E2) every
+  time and never reached E4. This is itself informative: it is the
+  pair-history-vs-applicability contest the experiment is about, and
+  v3's Phase 1 did not train applicability strongly enough to be a
+  fair test.
+- v4: Phase 1 distribution becomes F(35)/F2(25)/T2(40) (was
+  40/30/25), so SHIFT applicability at S-contexts is mastered
+  strongly enough to fairly contest F2's pair history at E2.
+  Everything else (two phases, eps=0 in Phase 2, 3-step limit,
+  T-gated ADJUST, full-error revision) is unchanged. Bars unchanged.
+
+This amendment is committed alone and re-frozen before any v4 code.
