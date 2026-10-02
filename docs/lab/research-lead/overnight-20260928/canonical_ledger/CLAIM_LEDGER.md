@@ -6059,3 +6059,24 @@ No em dashes were used in this entry (verified).
   (exploratory).
 
 No em dashes were used in this entry (verified).
+
+- C234 (COMPOSITION-COLLAPSE; prereg dada745c8, results 6e3e1d47d,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  H-COLLAPSE-1: whole-MAP DFS path DELETED; all composition routes
+  through the shared type-15 fragment store + fragment DFS (whole MAPs
+  as (m,0,L) marks). compose_try auto-marks live chain MAPs
+  (deduplicated); cl_dfs searches FRAG marks only; no MAP-structural
+  candidate walk remains (verified: no cc_relseq/cc_satisfy/un_dfs
+  remnants). Aux discrimination: FRAG aux=(start<<16)|len nonzero;
+  B co-use aux=0. Predicates ported to fragments (C satisfiability,
+  A plen-contract via len+1, B co-use ordering + write). 11/11 kill
+  bars PASS, 3/3 byte-identical. T1/T2A/T2B/T3 match unified exactly
+  (identical segment MAPs 13 26 39 / 52 / 65; ans 107/109/111/105).
+  T4/T5 no regression. New T4B: PASS via seeded marks (mx,0,3),
+  proving the fragment path is real, not renamed whole-MAP.
+  382 vs 420 lines (38 fewer, 9%). Architectural win: one search
+  path; T4 becomes a store question, not a mechanism question.
+  Honest: T4 still fails unseeded (marks consumable, not invented);
+  9% delta modest. 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
