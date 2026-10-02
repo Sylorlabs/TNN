@@ -6751,3 +6751,21 @@ No em dashes were used in this entry (verified).
   byte-identical. Status: 3 KILLS + 1 BOUNDARY (negative).
 
 No em dashes were used in this entry (verified).
+
+- C270 (CERT-SWEEP; commit 55bc4d3ce, 2026-10-02): COMPLETE
+  (exploratory). Per-base scorecard: composition_collapse,
+  grammar_codec, goal_inference all FAIL (A leak) with the
+  byte-identical leak signature (n0=0 n1=800 e0=0 e1=493,
+  perprob_n=40 perprob_e=24); B/C/D PASS everywhere. The leak
+  is universal across trial-family bases; the composition
+  collapse did not change the leak rate. XIO-general core:
+  NOT APPLICABLE (host-dependent adapter layer). Belief
+  antifarm: NOT APPLICABLE (self-testing experiment). Harness
+  portability finding: the committed harness only compiled on
+  one base shape; the sweep adapted (drop driver ev_query glue
+  when base defines its own; trim base main in scratch). The
+  leak stays documented as known limitation L1 (capacity rule:
+  problems x 40 + teaching residue < 1024). certify_base v2
+  dispatched. Status: BUILD-PASS (sweep) + harness finding.
+
+No em dashes were used in this entry (verified).
