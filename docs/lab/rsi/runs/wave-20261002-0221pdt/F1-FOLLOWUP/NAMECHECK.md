@@ -26,12 +26,16 @@ candidate (not a verdict change on F1's BUILD-FAIL, which stands untouched).
 
 ## Commit log (this lane only)
 
-- (pending) prereg commit: PREREG_F1FOLLOWUP.md + NAMECHECK.md alone.
-- (pending) methodology commit: dev/ (generator/scorer sources and
-  binaries, f1f_analyze.zag and binary, run scripts).
-- (pending) fixture commit: sealed/ fixtures + FIXTURE_SHA256.txt,
-  NC-HARNESS calibration record.
-- (pending) sealed eval commit: runs/, SEALED_EVAL.md, REDTEAM_SELF.md.
+- d7164c12b prereg commit: PREREG_F1FOLLOWUP.md + NAMECHECK.md alone.
+- 742081f93 methodology commit: dev/ (generator/scorer sources and
+  binaries, f1f_analyze.zag and binary, run scripts), METHODOLOGY.md.
+  NOTE: this commit inadvertently swept in staged ARENA-lane files
+  from another worker; disclosed in REDTEAM_SELF.md Attack 6. ARENA
+  working copies intact, match HEAD.
+- a920ba752 fixture commit: sealed/ fixtures + FIXTURE_SHA256.txt,
+  ncharness/ (NC-HARNESS PASS record). Lane-only (pathspec-limited).
+- (pending) sealed eval commit: runs/, analysis/, SEALED_EVAL.md,
+  REDTEAM_SELF.md, dev/f1f_diag.zag + binary (post-hoc diagnostic).
 
 ## Read-only inputs (never modified)
 
