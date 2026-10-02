@@ -60,6 +60,75 @@ Result:
 - Paper untouched.
 - Nothing pushed to GitHub. Explicit pathspecs for all git operations.
 
+## Completion Worker (2026-10-02, watchdog completion)
+
+Step 0 (completion worker, fresh guard): ran
+docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh,
+exported PATH="$HOME/safebin"; `which python3 python` returned NOTHING.
+One accidental `python3 -c` probe was attempted during file editing; it
+failed to resolve (no interpreter in safebin PATH, exit 127, nothing
+executed). No Python code ran at any point. Pure Zag for all research
+computation; shell only for znc, binaries, git, file ops.
+
+### Stale source finding (load-bearing)
+
+The committed ff_patch.zag (mtime 16:27) did NOT compile. Its
+cl_build_cache addition passes `cache+base+16` (i32) where []u8 is
+expected: znc error E0203, typed declaration check FAILED. The function
+is dead code (zero call sites in patch or drivers) and was never wired
+into cl_satisfy. Minimal fix applied: `cache[base+16..base+48]` (the
+[]u8 slice idiom used at cc_base.zag line 24). One line changed; the
+function remains dead code; behavior is byte-identical to the embedded
+patch version. All completion builds and runs use the fixed final patch.
+The final patch differs from the 16:12 embedded version ONLY by this
+dead function; the behavioral path (cl_extract/cl_walk/cl_satisfy/
+cl_candidates/cl_dfs/compose_try/cb_couse_link) is byte-identical.
+
+### Amendment-2 compliance fix (verify driver)
+
+ff_verify_driver.zag (16:10) predates PREREG_AMENDMENT2 (frozen 16:21)
+and trains V-R4B/V-R4C via direct t2_trial. Created ff2_verify_driver.zag:
+identical worlds, training via ev_query per the frozen amendment
+(ffv_train1 mirrors ff_driver.zag ff_train1). Per-test mains split out
+so the 600s K2 timeouts apply per test.
+
+### Build records (all against the fixed final ff_patch.zag)
+
+- ff2_fast_full.zag = cc_base + ff_patch + ff_driver_nomain + ff_fast_main
+  -> ff2_fast_bin (R7/R3/R6A)
+- ff2_r4b_full.zag = cc_base + ff_patch + ff_driver_nomain + ff2_r4b_main
+  -> ff2_r4b_bin (R4B only)
+- ff2_r4c_full.zag = cc_base + ff_patch + ff_driver_nomain + ff2_r4c_main
+  -> ff2_r4c_bin (R4C only)
+- ff2_vr7_full.zag = cc_base + ff_cl_patch_orig + ff2_verify_driver
+  + ff2_vr7_main -> ff2_vr7_bin (V-R7, unfixed)
+- ff2_vr4b_full.zag / ff2_vr4c_full.zag = cc_base + ff_cl_patch_orig
+  + ff2_verify_driver + ff2_vr4b/vr4c_main -> ff2_vr4b_bin/ff2_vr4c_bin
+- ff2_c234_full.zag = cc_base + ff_patch
+  + ../composition_collapse/cl_driver.zag -> ff2_c234_bin (C234 battery)
+- All 7 compiled clean with pinned znc (warnings only, A0102 class).
+
+### Run records
+
+- ff2_fast_run1/2/3.txt: 3/3 byte-identical,
+  sha256 3acef38e9281f8e77e0df04c1f953e5d5ae2d695ca235ebb3d72d13406072216.
+  R7 PASS, R3 PASS, R6A PASS.
+- ff2_vr7_run1/2/3.txt: 3/3 byte-identical,
+  sha256 7fe32b422fafe67799979ce8dc256a8e271fc3bb74d024011e52351a9981abd3.
+  Kill signature reproduced.
+- ff2_c234_run1/2/3.txt: 3/3 byte-identical,
+  sha256 4c898771fdaafe79a7bd0c0daa3faf247cbbde742fe7102a945e0e94e0b4ad5a,
+  identical to the C234 baseline cl_run1/2/3.txt digest.
+- ff2_vr4b_run1.txt: timeout 600 kill (exit 124). Branch probe n=28,
+  training done, Z started, no completion.
+- ff2_vr4c_run1.txt: timeout 600 kill (exit 124). Training done,
+  Z started, no completion.
+- ff2_r4b_run1.txt / ff2_r4b_run2.txt: timeout 300 kills (exit 124).
+  Machine loadavg ~9 on 2 CPUs during these runs; process received
+  ~14 percent of CPU (36-41s user per 300s wall).
+- ff2_r4b_run3.txt: completion run, no wall timeout (see REPORT.md).
+- R4C runs: see REPORT.md.
+
 ## Orphan Recovery (2026-10-02, triage worker)
 
 Step 0 note: this section was written by the watchdog triage worker
