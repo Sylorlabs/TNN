@@ -51,12 +51,38 @@ Commit order is verified below.
   `l2_driver_na.zag` (`l2_patch_na.zag` differs by exactly one line:
   `adapt_on()` returns 0).
 
+### Step 2b: Continuation fixes (2026-10-02, post-prereg, implementation only)
+
+The first-pass build failed every arm vacuously (all ans=-2, zero MAPs
+promoted). Root causes found by the continuation worker:
+
+1. Both drivers never called `tnn2_init` on their `z_alloc` workspaces
+   (the frozen baseline driver does). Added `tnn2_init(wN)` after each
+   alloc in `l2_driver.zag` and `l2_driver_na.zag`. This alone took the
+   battery from 0/14 to 14/14 arms passing.
+2. `cand_ins` tie-break was reverse MAP-id (newcomer before equals),
+   contradicting the PREREG's "ties stable by MAP id" and the frozen
+   baseline's insertion. Fixed to stable (newcomer after equals, ascending
+   MAP id on ties).
+
+Neither fix touches the frozen hypothesis, battery spec, or kill bars.
+`l2_patch_na.zag` regenerated from `l2_patch.zag` by one-line sed
+(verified: diff shows exactly the `adapt_on` line). Both full sources
+reassembled by concatenation and rebuilt with the pinned safebin znc.
+
 ## Step 3: Determinism
 
 Each binary is run 3 times; stdout sha256 digests must match byte for byte.
 Run outputs are stored as `l2_run1.txt` .. `l2_run3.txt` and
 `l2_na_run1.txt` .. `l2_na_run3.txt`.
 
+Continuation results: `l2_bin` 3/3 byte-identical
+(529e0e7debca4ec0bb2670ad44aa161c6954fb01121d07e6c8caeff97ecc9426);
+`l2_na_bin` 3/3 byte-identical
+(aabe551df8dee2451750e867e85dc3276814b0fdc0122102787ec58c78ec1d1c).
+
 ## Step 4: Verdict
 
 Recorded in REPORT.md after the frozen bars are checked against the runs.
+Continuation verdict: COMPOSITION-L2-COMPLETE, 12/12 frozen kill bars pass,
+per-operator success rates recorded in REPORT.md.
