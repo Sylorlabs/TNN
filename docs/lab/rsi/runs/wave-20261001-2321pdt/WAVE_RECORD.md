@@ -4,6 +4,8 @@ Coordinator wave. Standing rules: PURE ZAG ONLY (safebin Step 0 in every worker 
 
 Repair-branch check: no repair branch exists in the working copy for the three boundary-overreach repair threads paused 2026-10-01 19:14 UTC. The threads left no recoverable state in the repo. Recorded as an escalation item for Micah (corrections still pending, scope to be re-established).
 
+Concurrent-activity note: other loop processes are committing to this branch during this wave (e.g. 19b789b3e governance saturation, 3dceac9cc composition comparative battery, both landing after this wave's skeleton commit c5ea959d4). They work under docs/lab/research-lead/overnight-20260928/, outside this wave's record dir. Staging race observed: this wave's skeleton commit c5ea959d4 swept in composition_compare/ files another worker had staged. The files are genuine loop work, attribution is wrong, history left as-is (no rewrite). Lane workers were instructed to commit lane-local paths only and retry on races.
+
 ## Lanes spawned
 
 1. HPIREV2: step-7 single-conflict bound as the narrowed surviving claim (prereg, sealed re-run).
