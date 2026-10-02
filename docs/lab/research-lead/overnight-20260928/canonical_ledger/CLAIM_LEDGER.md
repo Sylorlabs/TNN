@@ -6472,3 +6472,24 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C256 (GRAMMAR-INQUIRY; prereg b86508442, results b545f5c21,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Active inquiry resolves codec ambiguity instead of refusing.
+  gi_codec_induce2 returns the full consistent candidate list;
+  gi_inquire emits one GI-INQUIRY request naming the hypothesis set
+  (names no components, no op, no pair structure); gi_cands_after
+  simulates the consistent set under a hypothetical fact.
+  Driver loop: -4 triggers inquiry (QMAX=4); terminal -4 preserved
+  when teacher refuses, no discriminator exists, or QMAX exhausts
+  (inquiry is a request, not a guarantee; fail-closed survives).
+  Query-count table (all preregistered values hit exactly):
+  EXL2/3/4 -> 0 queries (no wasteful questions); NEG-AMB -> 1 query,
+  resolved to true D=8; NEG-SHIFT -> 0 queries, refused -3
+  (contradiction is not ambiguity); NEG-AMB-R (teacher refuses) ->
+  terminal -4; NEG-AMB4 (4-way {8,17,26,53}) -> 2 queries, resolved.
+  GI-VERDICT 7/7, 3/3 byte-identical, K1-K7 PASS. 0
+  modes/bridges/handlers. Adversarial teacher test dispatched.
+  Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
