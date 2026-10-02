@@ -5928,3 +5928,28 @@ No em dashes were used in these entries (verified).
   Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C228 (INVENTION-H1-REDTEAM; commit 86a3e4483, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Independent adversarial battery on
+  H1 structural mutation (5 attacks on unmodified sources, 15/15 runs
+  byte-identical). A1 WRONG-PARENT: BOUND; distractor plen-6 tried
+  first (longest-first), mutant DEP points cross-domain; mu_extend_one
+  never reads the parent graph, stages the query subject's own paths;
+  the "parent" is a length license. A2 DECOY-SIGNAL: BOUND; "too
+  short" signal is relation-blind, any (vend->w) fact counts; mutant
+  licensed by rel-99 decoy. A3 NON-CHAIN: BOUND; inert outside
+  chain-family (mu_best_plen=-1, tried=0). A4 EXPLOSION: KILL of
+  open-endedness claim; t2_gather caps paths at 6 values so plen-7
+  parent can never stage (plen 8 unreachable, contradicting
+  "unbounded"); latent heap OOB (ve/fe overflow 4 bytes each at parent
+  plen >= 7); ~200 nodes leaked per failing query (178->1001 over 5);
+  no brake on attempts. A5 SUF: BOUND (strong); identical worlds with
+  different parent values produce byte-identical mutants; only
+  parent plen is causally load-bearing; the "mutant" is the
+  researcher's world chain re-derived at parent-plen+1. Net:
+  H-MUT-1/2/3 not falsified; killed is unbounded open-ended
+  iteration. Survives: deterministic length-licensed one-cell
+  extension, blind to domain/relation/content. 0 modes/bridges/
+  handlers. Status: ADVERSARIAL (1 kill, 4 bounds).
+
+No em dashes were used in this entry (verified).
