@@ -5801,3 +5801,25 @@ No em dashes were used in these entries (verified).
   complete K7. Status: FAIL (recoverable).
 
 No em dashes were used in these entries (verified).
+
+- C222 (GRAMMAR-TRANSFER; commit dce5d3d43, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Induction machinery transferred to
+  second formal system EXL2 (SUB/DIV, lower-bound and divisibility
+  constraints; genuinely different constraint shape than EXL).
+  MACHINERY-IDENTITY PROOF: gt_patch.zag SHA-256 identical to
+  gi_patch.zag; all four driver arm functions byte-identical via cmp;
+  driver diff confined to example stream and test battery. Induced
+  from 4 BUILD examples: licensor relations {44,43} (DDIV, DSUB)
+  discovered, not hardcoded. W1 INDUCE: 6/6 valid novel constructions
+  (domain maximum: SUB/DIV admits exactly 10 target values, 4 train +
+  6 disjoint test). W2 ABLATE: 0/6, causal necessity holds. W3
+  HARDCODE: 6/6, induced matches researcher restriction. W4 FRESH:
+  0/6, induction necessary. W5 contradictions: both fail-closed (one
+  deceptive BUILD fact -> no grammar written; bogus third licensor ->
+  nlic=3 guard trips). Limit: one bad example poisons the whole batch
+  (no outlier exclusion). Honest note: relation-id labels 41-45 reused
+  by documented design; world assumptions now explicit (eval lookup,
+  rubric refs, pair decode a*16+b). 0 modes/bridges/handlers. Status:
+  BUILD-PASS (exploratory).
+
+No em dashes were used in this entry (verified).
