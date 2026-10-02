@@ -195,3 +195,43 @@ v2 design changes (bars unchanged):
 
 This amendment is committed alone and re-frozen before any v2 code
 is written. v1 remains reported honestly in REPORT.md.
+
+## 6. Amendment v3 (2026-10-02, after the v2 run, BEFORE v3 code)
+
+v2 ran 3/3 byte-identical. Verdicts: T1=0, T2=1, T3=1.
+v2 outputs preserved as run1_v2.txt/run2_v2.txt/run3_v2.txt and
+multop_bin_v2. Kill-bar thresholds UNCHANGED again.
+
+- T3=1 (p4=4, rev_n=1, late EST 53/53): body revision works. The
+  T-gate plus full-error delta rule fixed the v1 deadlock; a single
+  wrong answer identified the bias exactly.
+- T2=1 (late 25/25 solved, 19/25 exact triple): adoption works.
+- T1=0 again (DISCOVERY ep=277, clean=0, pre13=1/7, pre32=3/4):
+  with a 4-step limit, solved non-triple episodes of the form
+  [1,3,X,2] (X a failed/wrong op at E4, COMPLETE recovering at
+  step 4) rewarded the (1,3) link, and exploration-assisted triples
+  rewarded (3,2), before the first all-greedy triple. Phase 1 itself
+  was clean (PHASE2-START comp13sum=0/6 comp32sum=0/1). Root cause:
+  the 4-step budget lets a perturbed triple still solve, so link
+  rewards leak before the policy's own greedy composition.
+
+v3 design changes (bars unchanged):
+
+- Global step limit 4 -> 3. With 3 steps, a CHAIN3 episode can only
+  solve via the exact [1,3,2] triple (2 steps to reach E4, 1 step to
+  answer); any perturbed [1,3,X] ends unsolved and rewards nothing.
+  Hence the inner links (1,3)/(3,2) can be rewarded ONLY by the
+  triple itself, structurally, in all phases.
+- Arm A Phase 2 (ep>=250) runs with epsilon = 0 (train/test split:
+  Phase 1 explores, Phase 2 tests the greedy policy on the novel
+  task). With eps=0 every Phase-2 triple is all-greedy by
+  construction, so the first triple is the compositional discovery
+  event and clean=1 holds structurally (verified empirically).
+  Component applicability still transfers from Phase 1; the E4
+  context is novel and COMPLETE is found there by the greedy
+  least-tried rotation under uniform optimism. This does not hand
+  the learner the triple: the triple remains unexperienced and its
+  links unrewarded until the policy assembles it.
+
+v1 and v2 remain reported honestly in REPORT.md as apparatus
+iterations; the verdict is governed by v3.
