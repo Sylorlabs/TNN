@@ -7097,3 +7097,21 @@ No em dashes were used in this entry (verified).
   C0-B open).
 
 No em dashes were used in this entry (verified).
+
+- C288 (BELIEF-LAUNDERING; commits d706e41ed, bb1451b4e,
+  2026-10-02): COMPLETE. Parameter-free mitigation for C286
+  laundering vulnerability. New learner-owned cell ret =
+  cumulative wrongs retired. Rule: retire wrong only if new
+  correct streak >= ret+2. Price derived from source's own
+  consumed forgiveness; no tunable parameters. K1-K7 all
+  hold, 3/3 byte-identical. M4 BLOCKED: 24 rounds R,R,W give
+  666/800/750/727/705/695, decreasing after r6, converging to
+  666 (true rate); only 1 wrong laundered (vs parent 1000).
+  M3 PRESERVED: 851/888/925/962/1000 recovery unchanged.
+  M5 price: relapse after ret=4 costs 6 rounds (vs 2);
+  deliberate pre-registered cost. M6: 10 wrongs recover in 11
+  rounds (proportional). Analytical bound: liar with max truth
+  run L retires at most L-1 wrongs, ever. Status: COMPLETE
+  (laundering blocked, forgiveness preserved).
+
+No em dashes were used in this entry (verified).
