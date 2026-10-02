@@ -111,6 +111,23 @@ P8 (M5 relapse): after M3 (27/27, streak +20): one wrong gives
 immediately. Two clean rounds give (28,29) rel 965 then (29,29) rel
 1000: repair costs 2 rounds for 1 wrong.
 
+## AMENDMENT 1 (2026-10-02, before REPORT, transparent)
+
+P8 was computed from a wrong mental model of the post M3 record. The
+author modeled the record as frozen at (27,27) after the 4 wrongs were
+retired at +5. In fact correct outcomes keep incrementing both counters
+after wrongs reach 0: rounds +6..+20 add 15 more correct to each, so the
+post M3 state is (42,42), streak +20, wrongs 0. Corrected P8: relapse
+wrong gives (42,43) rel 976 (1000*42/43); repair round 1 gives (43,44)
+rel 977 (1000*43/44), streak +1, no forgiveness yet; repair round 2
+gives (44,44) rel 1000, streak +2, the 1 wrong retired. The qualitative
+predictions are unchanged (relapse drops reliability immediately; a
+single wrong costs 2 clean rounds to repair); only the exact values
+move, because a longer clean record cushions a single relapse more.
+The implementation's M5 checks were updated to the corrected values
+after this amendment was written. Nothing else in this prereg changes:
+P4-P7 held exactly as written on the first execution.
+
 ## Hypothesis verdict rule (frozen)
 
 BELIEF-FORGIVENESS-COMPLETE iff K1 through K5 all hold. The report must
