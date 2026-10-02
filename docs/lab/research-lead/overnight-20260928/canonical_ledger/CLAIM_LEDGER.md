@@ -6352,3 +6352,24 @@ No em dashes were used in this entry (verified).
   Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C249 (GRAMMAR-CODEC; prereg 7f3d9caae, results a599045a5,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  The pair codec is now INDUCED grammar state, not a hardcoded
+  constant. gi_codec_induce: from literal co-occurrence (SUB facts
+  give P+t=a*(D+1), unit DIV/DDIV give P=b*(D+1)), take g=gcd of
+  positive members; candidates d=v-1 for v|g derived by exact
+  arithmetic (no hardcoded candidate set); op-consistency check per
+  candidate; exactly one -> induce; zero -> refuse -3; 2+ ->
+  refuse -4. D stored in the type-70 node (field4 packing,
+  documented); all five decode sites use induced D; the vacuous
+  part-1 check DELETED per diagnosis. Results 3/3 byte-identical:
+  EXL2 -> D=16, EXL3 -> D=8, EXL4 -> D=32, all correct ranges and
+  batteries; NEG-AMB (D=8 vs 17 both consistent) -> refused -4
+  fail-closed; NEG-SHIFT (mid-stream shift, g=1) -> refused -3
+  fail-closed. EXL3 (the silent-wrong world) now induces true codec
+  and true ranges. K1-K6 PASS. Caveats: the P=a*D+b family itself
+  remains researcher-owned; NEG-AMB could yield to active inquiry
+  (dispatched). 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
