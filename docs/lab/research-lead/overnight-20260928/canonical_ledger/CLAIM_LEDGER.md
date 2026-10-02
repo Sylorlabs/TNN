@@ -7115,3 +7115,22 @@ No em dashes were used in this entry (verified).
   (laundering blocked, forgiveness preserved).
 
 No em dashes were used in this entry (verified).
+
+- C289 (LEARNER-WIRING LW1; commits 421d57afe, 889109063,
+  2026-10-02): COMPLETE. Learner CAN create wiring from
+  learned knowledge into its own judgment path. All P1-P6
+  hold, 3/3 byte-identical per condition (15 runs). selfwire:
+  learner's keep-if-better policy → TEST 6/6 (vs base 3/6);
+  learner created and kept the specific link (hypothesis slot
+  0 → judgment path) from own runtime measurements.
+  Ablations: noeval (3/6), nowrite (3/6) prove mechanism.
+  Four necessary/sufficient pieces: W1 reified mutable
+  generation path; W2 learner-owned evaluation; W3 write
+  action; W4 try-and-keep-improvements policy. Honesty: W4
+  researcher-authored generic machinery; learner created the
+  specific link + keep decision. REFINES C283: wiring gap is
+  bridgeable with generic machinery. Open: LW2 (learner
+  invents W4 itself). Status: COMPLETE (self-wiring
+  demonstrated).
+
+No em dashes were used in this entry (verified).
