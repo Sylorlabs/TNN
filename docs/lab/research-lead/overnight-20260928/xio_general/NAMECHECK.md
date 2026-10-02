@@ -94,21 +94,78 @@ sha256sum xg_run1.txt xg_run2.txt xg_run3.txt
 
 ## Step 3: Prereg commit-order self-check
 
-- PREREG.md first commit hash: (filled after commit)
-- Verified via git ls-tree: that commit contains ONLY PREREG.md +
-  NAMECHECK.md under xio_general/ (no core, no driver, no binary,
-  no run outputs, no report).
-- Implementation files (xio_core2.zag, xg_driver.zag) written
-  strictly after the prereg commit timestamp.
-- Self-check: (PASS/FAIL filled after commit)
+- PREREG.md first commit hash:
+  e08110f47bd36eb6549bf41bae557420331ade8b
+  (2026-10-02 15:06:59 UTC). Verified via git ls-tree: that commit
+  contains ONLY PREREG.md + NAMECHECK.md under xio_general/
+  (no core, no driver, no binary, no run outputs, no report).
+- Implementation files (xio_core2.zag, xg_driver.zag) were written
+  after 15:06:59 UTC and are committed separately, strictly later.
+- Self-check: PASS (no implementation at or before e08110f47).
 
 ## Step 4: Build and run log
 
-(filled after runs)
+- Assembly: cat ../composition_A/cx_core.zag xio_core2.zag
+  xg_driver.zag > xg_full.zag (2417 lines).
+- Frozen base integrity: sha256 of ../composition_A/cx_core.zag is
+  dc0e86d44db11390e6e7d2450e1b52d7fb8f8012b42346dc4d4739ef888d1ab6
+  before assembly and after the runs, matching the frozen value.
+  The base was referenced, never copied or edited.
+- Compile: success, warnings only (213 A0102-class analyzer notes,
+  same class as sibling workers; the em dashes in xg_compile.txt
+  are znc's own warning text). Binary xg_bin 289693 bytes
+  (pinned znc, safebin /home/hatch/safebin/znc).
+- A comment-only scrub of xio_core2.zag (domain words removed from
+  comments; xio_stage_sum renamed xio_stage_c2) was rebuilt and
+  re-run: identical binary behavior, same run sha256.
+- The cx_core.zag internal test battery references ev_query; as in
+  prior waves, the driver defines ev_query as
+  xio_query(...,xio_on=1). The battery is never invoked.
+- Runs: 3/3 byte-identical, sha256
+  a7cf8b524b20e50906d21cb3d58e88cf8ba63e12276ee3cb2337ccfeee4b63ae.
+- Key traces (identical all 3 runs):
+  PAIR-A TREAT: census 2 sclass-0 + 2 sclass-1 MAPs; X1=14, X2=18,
+  Y1=3, Y2=4; XIO-BUILD id=380 m1=27 m2=115 c1=0 c2=1 rel1=81
+  rel2=82 qr=93 mid=34 ans=2; XIO-REUSE id=380 ans=2 on Z2a;
+  second BUILD id=467 qr=94 mid=74 ans=2 on Z2b. ABL-XIO: all -2,
+  adapters=0.
+  PAIR-B TREAT: census 2 sclass-1 + 2 sclass-0 MAPs; X1=3, X2=2,
+  Y1=32, Y2=42; XIO-BUILD id=214 m1=44 m2=96 c1=1 c2=0 rel1=81
+  rel2=82 qr=93 mid=4 ans=52; XIO-REUSE id=214 ans=52 on Z2a;
+  second BUILD id=313 qr=94 mid=3 ans=32 on Z2b. ABL-XIO: all -2,
+  adapters=0.
+  PAIR-C TREAT: census 2 sclass-0 + 2 sclass-2 MAPs; X1=14, X2=18,
+  Y1=8, Y2=12; XIO-BUILD id=190 m1=27 m2=59 c1=0 c2=2 rel1=81
+  rel2=82 qr=93 mid=44 ans=10; XIO-REUSE id=190 ans=10 on Z2a;
+  second BUILD id=275 qr=94 mid=74 ans=10 on Z2b.
+  ABL-XIO/ABL-X/ABL-Y/FRESH: Z1=Z2a=Z2b=-2, adapters=0, zero
+  XIO-BUILD lines.
+  PAIR-C AUDIT: tried=8 cross-class pairs, gate_rejected=4
+  same-class pairs; the 4 (class 0, class 2) pairs show v1=44
+  v2=10; the 4 (class 2, class 0) pairs show v1=-999999.
+- Note: the second sum MAP promotes at id 103 (vs 91 in
+  XIO-THIRD) because the Y2 xio_try probe now stages the first sum
+  MAP through the class-2 branch (different allocation sequence
+  than the old count branch) before trial promotes the second MAP.
 
 ## Step 5: Kill-bar scorecard
 
-(filled after runs; verdict requires 8/8)
+- K1 PAIR-A no-regression (Z1=2 BUILD c1=0 c2=1 mid=34 ans=2;
+  Z2a=2 REUSE; Z2b=2 second BUILD mid=74; X1=14 X2=18 Y1=3 Y2=4;
+  ABL-XIO all -2): PASS (ids/mids match C229 exactly)
+- K2 PAIR-B no-regression (Z1=52 BUILD c1=1 c2=0 mid=4 ans=52;
+  Z2a=52 REUSE; Z2b=32 second BUILD mid=3; X1=3 X2=2 Y1=32 Y2=42;
+  ABL-XIO all -2): PASS (ids/mids match C235 exactly)
+- K3 PAIR-C solves (Z1=10 BUILD c1=0 c2=2 mid=44 ans=10;
+  Z2a=10 REUSE; Z2b=10 second BUILD mid=74 ans=10): PASS
+- K4 structural signature (censuses 0/0/1/1, 1/1/0/0, 0/0/2/2;
+  oty agrees; grep clean): PASS
+- K5 gate/stage diagnosis (audit tried=8, gate_rejected=4;
+  (0,2): v1=44 v2=10; (2,0): v1=-999999): PASS
+- K6 ablations (all arms -2, adapters=0, zero BUILD lines): PASS
+- K7 competence (PAIR-C X1=14 X2=18 Y1=8 Y2=12): PASS
+- K8 determinism (3/3 byte-identical, sha256 a7cf8b52...): PASS
+- Verdict: XIO-GENERAL-COMPLETE (with 3-pair battery)
 
 ## Constraints observed
 
