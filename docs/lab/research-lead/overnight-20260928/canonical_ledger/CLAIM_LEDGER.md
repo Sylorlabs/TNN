@@ -7014,3 +7014,24 @@ No em dashes were used in this entry (verified).
   researcher-dependent. Status: COMPLETE (with wiring gap).
 
 No em dashes were used in this entry (verified).
+
+- C284 (L3-REPRO-TRANSFER; commits f843cba55, 93df97cb2,
+  2026-10-02): COMPLETE. Independent reproduction and transfer
+  of C281 L3 result. All 12 frozen kill bars (R1-R12) hold, H1
+  and H2. REPRODUCTION: byte-identical rebuild; run digests
+  match committed (H1 abc3e018, H2 ee0bf4ba); M=[INC R0] with
+  exact gain=2 trace; 3/3 byte-identical. TRANSFER (new sealed
+  world, different validity rules): learner created DIFFERENT
+  intermediate M'=[ADD R0,R0] (bytes 1,0,0), NOT a copy of
+  C281's [INC R0]; C281 solution scores 0 under new rules, so
+  form was constructed from new experience. Revision: T2 shift
+  → M''=[ADD R0,R0,INC R0], old M retired. ABLATION: NO-M
+  destroys advantage in both worlds (L2 rebinding intact but
+  Y lookup misses); intermediate causally necessary.
+  PERSISTENCE: Z2 via persisted composite, build_count=1.
+  L3 claim strengthened: independent repro + transfer with
+  novel construction + ablation + persistence + revision.
+  Caveat: transfer world worker-designed, not adversarial.
+  Status: COMPLETE (L3 VALIDATED).
+
+No em dashes were used in this entry (verified).
