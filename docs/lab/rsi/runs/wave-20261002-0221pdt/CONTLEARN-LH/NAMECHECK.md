@@ -68,5 +68,8 @@ REDTEAM_SELF.md, VERDICT_CONTLEARN_LH.md, RUN_LOG.md.
 
 ## Step 4: commit log (this lane only)
 
-- (prereg freeze commit id recorded in RUN_LOG.md)
-- (implementation commit id recorded in RUN_LOG.md)
+- Prereg freeze: 8d43c6e55 (NAMECHECK.md + PREREG_CONTLEARN_LH.md, no
+  implementation).
+- Amendment 1: 32bfea311 (pre-implementation event-count correction
+  358 to 356; no design change).
+- Implementation + sealed results: recorded in RUN_LOG.md (this commit).
