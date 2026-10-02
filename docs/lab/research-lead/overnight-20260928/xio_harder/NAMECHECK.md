@@ -77,16 +77,69 @@ znc xhio_full.zag -o xhio_bin 2> xhio_compile.txt
 sha256sum xhio_run1.txt xhio_run2.txt xhio_run3.txt
 ```
 
-## Step 3: Prereg commit-order self-check (filled at commit time)
+## Step 3: Prereg commit-order self-check
 
-- PREREG.md first commit hash: (filled at commit time)
-- Implementation file (xhio_driver.zag) first commit hash: (filled at
-  commit time; must be strictly after the prereg commit)
-- Self-check: (filled at commit time)
+- PREREG.md first commit hash:
+  bea72f336d107f14e943922eeb224e3d58e8e262
+  (2026-10-02 14:38:42 UTC). Verified via git show/ls-tree: that
+  commit contains ONLY PREREG.md + NAMECHECK.md under xio_harder/
+  (no driver, no binary, no run outputs).
+- Implementation file (xhio_driver.zag) first commit hash: (this
+  commit, strictly after bea72f336; filled at commit time)
+- Self-check: PASS on prereg side (no implementation at or before
+  bea72f336). Final verdict pending the implementation commit.
 
-## Step 4: Build and run log (filled after runs)
+## Step 4: Build and run log
 
-## Step 5: Kill-bar scorecard (filled after runs)
+- Assembly: cat ../composition_A/cx_core.zag
+  ../xio_adapters/xio_core.zag xhio_driver.zag > xhio_full.zag
+  (2130 lines; both bases verbatim, zero edits).
+- Core reuse verified: sha256 of ../xio_adapters/xio_core.zag is
+  4d4d2e0e932b6a472e3cd8456d7e1c633218e611ce5df51d03507218440a8a7f,
+  identical to the value recorded at freeze time (Step 2). The
+  adapter mechanism was not copied, forked, or edited: the assembly
+  recipe references the sibling file directly.
+- Compile: success, warnings only (171 warning lines, same A0102
+  ignored-return-value class as sibling workers; the em dashes in
+  xhio_compile.txt are znc's own warning text, also present 162x in
+  the sibling's compile log). Binary xhio_bin 268371 bytes
+  (pinned znc 2026.07.0-dev).
+- The cx_core.zag internal test battery references ev_query; as in
+  H-XIO-1, the driver defines ev_query as xio_query(...,xio_on=1).
+  The battery is never invoked.
+- Runs: 3/3 byte-identical, sha256
+  6909ba0c576b3204c110e259411cbb71970f3caa39912f812a2d7761188ab51a.
+- Key trace (TREAT, identical all 3 runs):
+  XIO-BUILD id=214 m1=44 m2=96 o1=1 o2=0 rel1=81 rel2=82 qr=93
+  mid=4 ans=52
+  (m1=44: learner-promoted count MAP r=91 s=11; m2=96:
+  learner-promoted chain MAP r=92 s=3; mid=4 is the computed
+  number-to-subject handoff value)
+  XIO-REUSE id=214 ans=52 (Z2a)
+  XIO-BUILD id=313 m1=44 m2=96 o1=1 o2=0 rel1=81 rel2=82 qr=94
+  mid=3 ans=32 (Z2b)
+
+## Step 5: Kill-bar scorecard
+
+- K1 Z success (Z1=52, one adapter, o1=1 o2=0, rel1=81 rel2=82,
+  qr=93, mid=4, tried=1 rejected=0): PASS
+- K2 Reuse (Z2a=52 via XIO-REUSE id=214, adapters stay 1): PASS
+- K3 Generalization (Z2b=32 via second adapter qr=94 mid=3,
+  adapters become 2): PASS
+- K4 Ablation (ABL-XIO Z1=Z2a=Z2b=-2, adapters 0; d09995951
+  negative reproduced): PASS
+- K5 No-MAP controls (ABL-X/ABL-Y/FRESH all -2, adapters 0): PASS
+- K6 Competence (X1=3, X2=2, Y1=32, Y2=42, matches d09995951): PASS
+- K7 Learner-built (census: 2 count MAPs plen -1 oty 1, 2 chain
+  MAPs plen 4 oty 0; adapter fields reference learner MAP ids 44,
+  96; core sha256 unchanged; grep finds no type-conversion table
+  and no COUNT_CHAIN/CHAIN_COUNT template in xhio_driver.zag): PASS
+- K8 Determinism (3/3 byte-identical, sha256
+  6909ba0c576b3204c110e259411cbb71970f3caa39912f812a2d7761188ab51a):
+  PASS
+- Handoff signature: S1 observed (BUILD o1=1 o2=0 mid=4 ans=52,
+  tried=1 rejected=0). S2/S3/S4 not observed.
+- Verdict: XIO-HARDER-COMPLETE
 
 ## Constraints observed
 
