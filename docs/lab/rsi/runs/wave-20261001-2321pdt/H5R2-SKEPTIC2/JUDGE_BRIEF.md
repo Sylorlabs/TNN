@@ -2,10 +2,11 @@
 
 ## Provenance header
 
-- RENDER_SHA: PENDING_AMEND (sealed-eval commit: 10 assembled chained
+- RENDER_SHA: bbbc333d6 (sealed-eval commit: 10 assembled chained
   decoy world files, 10 compiled world binaries, EVAL_SKEPTIC2.md with
-  the 3/3 byte-identical full-stdout hashes; implementation commit
-  f461e812d strictly follows prereg freeze commit 709e1e82e)
+  the 3/3 byte-identical full-stdout hashes; this judge brief finalized
+  in the immediate follow-up commit; implementation commit f461e812d
+  strictly follows prereg freeze commit 709e1e82e)
 - FIRST_RENDERED_WAVE: wave-20261001-2321pdt
 - COMPONENT_LINEAGE: H5R2 BUILD-PASS + REPRO-PASS, H5R2-BASELINE
   BASELINE-MATCHES, H5R2-DECOY DECOY-DISCRIMINATES as the motivating
