@@ -94,11 +94,14 @@ sets, never by guessed layout.
 1. Fresh world. Filler: 200 ev_teach(7000+i, 60+(i%10), 8000+i) for
    i in 0..199 (pushes the edge allocator high).
 2. setup_a4c(W) copied verbatim (trains X chain MAPs, Y count MAPs,
-   gap, Z facts, builds adapter; ad.m1 = 27, the r=91 chain MAP whose
-   provenance edges land at HIGH ids because the filler's type-9
-   edges have not yet expired). Record STALE(27); record
-   F1=find_fact(11,81,12), F2=find_fact(12,81,13),
-   F3=find_fact(13,81,14).
+   gap, Z facts, builds adapter; ad.m1 = M, the r=91 chain MAP id; 27
+   in the no-filler fixture, shifted higher by the 200 filler nodes;
+   the actual id is recorded and used for STALE/CUR classification
+   throughout; the verdict bar is id-set based and does not depend on
+   the specific value). The old MAP's provenance edges land at HIGH
+   ids because the filler's type-9 edges have not yet expired when it
+   is promoted. Record STALE(M); record F1=find_fact(11,81,12),
+   F2=find_fact(12,81,13), F3=find_fact(13,81,14).
 3. rt_del_map_r(W,91) (raw delete: missed hygiene).
 4. Deactivate F1,F2,F3 (ns field36=0): aggressive id recycling of
    the old licensing facts.
@@ -272,3 +275,8 @@ Never amend shared history. No Python at any step.
   first-fit recycle the attack requires. The ATTACK-SUCCEEDS /
   ATTACK-FAILS bar is unchanged (dr==81 succeeds, dr==82 fails).
   No bar was weakened.
+- Amendment 2 (2026-10-02, before any attack implementation was
+  committed): A1 step 2 clarified. The 200-node filler shifts ad.m1
+  above the fixture's 27; the actual id M is recorded and used for
+  STALE/CUR classification. The verdict bar was and remains id-set
+  based, so no specific id value is required. No bar was weakened.
