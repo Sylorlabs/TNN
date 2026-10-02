@@ -65,4 +65,5 @@ handlers.
   (truncate_theorem/PREREG_AMENDMENT1.md and a 4 line
   learner_probes/NAMECHECK.md touch); unrelated to this wave, left
   untouched.
-- Implementation commit: (recorded after commit)
+- Implementation commit: d1745d83f (source, binary, run outputs,
+  REPORT.md, NAMECHECK.md update).
