@@ -60,4 +60,22 @@ freezing; this NAMECHECK.md is not frozen.
 
 ## Build Record
 
-To be filled after prereg commit.
+- Toolchain: pinned `src/tools/toolchain/znc_linux_x86_64_abed8aa1`,
+  safebin PATH, zero Python invocations (Step 0 attestation above).
+- `l2_h1.zag` -> `l2_bin_h1`: compiles warning-free. 3/3 runs
+  byte-identical, sha256
+  `0dd8e67761a37ad08efb4eca9da318cbd826deb79b5efcc48aa505c21d2f6a7f`
+  (`l2_run_h1_1/2/3.txt`).
+- `l2_h2.zag` -> `l2_bin_h2`: compiles warning-free. 3/3 runs
+  byte-identical, sha256
+  `2bd7afaa5541bb0418dc0fd3346548d6b2487e4e2281301c29953f83fcdcc9af`
+  (`l2_run_h2_1/2/3.txt`).
+- Commit order (prereg commit-order self-check satisfied):
+  `418db9bd4` PREREG freeze (PREREG.md only),
+  `2108d5d45` H1/H2 implementation,
+  `aee652eb0` REPORT (verdict XDOMAIN-L2-COMPLETE).
+- All commits local on `tnn-native-lab`; nothing pushed.
+- A concurrent worker's early uncompilable drafts are preserved
+  unmodified under `sibling_draft_uncompilable/` for the record; the
+  committed implementation is independent and post-dates the prereg
+  freeze.
