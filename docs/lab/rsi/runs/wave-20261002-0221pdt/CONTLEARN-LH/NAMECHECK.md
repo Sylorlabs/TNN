@@ -72,4 +72,5 @@ REDTEAM_SELF.md, VERDICT_CONTLEARN_LH.md, RUN_LOG.md.
   implementation).
 - Amendment 1: 32bfea311 (pre-implementation event-count correction
   358 to 356; no design change).
-- Implementation + sealed results: recorded in RUN_LOG.md (this commit).
+- Implementation + sealed results: 4dbef4a19 (merge-base ancestry of both
+  prereg commits verified; see RUN_LOG.md).

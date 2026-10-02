@@ -10,7 +10,8 @@ Wave: wave-20261002-0221pdt. Lane: CONTLEARN-LH.
   event count corrected 358 to 356; per-phase sum is 356; no phase,
   tuple, bar, or decision-rule change). The worker caught its own
   arithmetic error while writing the driver, before any build.
-- Implementation: this commit (see below).
+- Implementation: 4dbef4a19 (this lane's files only; merge-base ancestry of
+  8d43c6e55 and 32bfea311 verified).
 
 ## Builds (K1b)
 
