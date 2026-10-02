@@ -40,11 +40,16 @@ supply it (L2).
 
 ## Build record
 
-(To be filled as the work proceeds: file digests, commit order,
-binary sha256, run digests.)
-
-- PREREG.md frozen: <commit pending>
+- PREREG.md frozen: commit e5b747176 (strictly before implementation)
 - Scope: docs/lab/research-lead/overnight-20260928/xdomain_grammar_l2m/
-- Files: PREREG.md, NAMECHECK.md, glm_learner.zag, gl2m_h1.zag,
+- Pinned compiler: ~/workspace/tnn-rsi/src/tools/toolchain/znc_linux_x86_64_abed8aa1
+- Binaries: h1_bin sha256 6f076073eb1fdb2728b55c790369588310349e7423692bdaf72c8aba5e764eba
+            h2_bin sha256 af7870cd5332a97ab1f2df0ed61674dd77c5b2417ccacf20849533b6b04dc995
+- H1 runs 1-3: abc3e0182c22f23e73e075549fd977c9f165d6cc000931c4b85f6ba5012ac426 (identical)
+- H2 runs 1-3: ee0bf4ba9f8acc289d549c590b96c1ca41269b1939cd39dd8ab09e6f84b3a022 (identical)
+- Implementation: glm_learner.zag, gl2m_h1.zag, gl2m_h2.zag, h1_full.zag, h2_full.zag, build.sh
+- One driver fix before determinism runs: H2 teach_all first-seen binding (was last-seen, rel=72)
+- Verdict: XDOMAIN-GRAMMAR-L2M-COMPLETE, L3 classification
+- Files: PREREG.md, NAMECHECK.md, REPORT.md, glm_learner.zag, gl2m_h1.zag,
   gl2m_h2.zag, h1_full.zag, h2_full.zag, build.sh, h1_bin, h2_bin,
-  compile logs, run1/2/3 logs per binary, REPORT.md
+  h1_compile.log, h2_compile.log, run_h1_1..3.log, run_h2_1..3.log
