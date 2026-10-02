@@ -2,8 +2,9 @@
 
 ## Provenance header
 
-- RENDER_SHA: (to be filled in a follow-up commit per lane
-  precedent; source documents committed at the hashes below)
+- RENDER_SHA: 8955f6881 (commit containing the synthesis
+  documents NAMECHECK.md, CLUSTER_SYNTHESIS.md, and this brief;
+  brief committed in the same commit)
 - FIRST_RENDERED_WAVE: wave-20261001-2321pdt
 - COMPONENT_LINEAGE: BATTERY-CLUSTER/CLUSTER_ANALYSIS.md
   (committed at 55ee13a1c; judge brief at 335b169ae), which
