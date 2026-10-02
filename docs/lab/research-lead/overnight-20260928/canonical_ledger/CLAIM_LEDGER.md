@@ -6015,3 +6015,24 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: INFORMATIVE NEGATIVE.
 
 No em dashes were used in this entry (verified).
+
+- C232 (INVENTION-H3-FIX; uncommitted worker files, 2026-10-02):
+  COMPLETE (exploratory, no frozen prereg). Repairs all three H3
+  red-team defects (C226) in unfrozen fix_mech.zag (frozen original
+  untouched, read-only). FIX-1: invent_dfs rewritten as full
+  enumeration with verify-and-select; verify-fail backtracks into
+  search instead of returning -2. FIX-2: first_lit enforced via entry
+  check (C[20] read; mismatch -> -1). FIX-3: deterministic tie-break
+  (fewest repeats, then lexicographic-min, then DFS order).
+  Re-runs: Attack 1 -> SURVIVE (continued search finds the 1-of-4
+  verifying chain; reversed teach order promotes identical chain).
+  Attack 5 -> SURVIVE (clean chain wins by non-redundancy;
+  first_lit violation now fails). No regressions: Attack 2 still
+  terminates; H3 P1/P2/P3 identical answers and MAP ids (32,27,35).
+  3/3 byte-identical. Attack 3 (exponential scaling) not addressed
+  beyond documentation; needs redesign. Honest limits: tie-break is
+  ordering not filter; Attack 4 constraint-authorship bound
+  unaffected. 0 modes/bridges/handlers. Status: BUILD-PASS
+  (exploratory).
+
+No em dashes were used in this entry (verified).
