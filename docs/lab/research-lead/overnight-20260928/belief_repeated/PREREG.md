@@ -105,12 +105,28 @@ target reliability r the deceiver needs N >= r*(1+p)/(1-r), finite for
 every r < 1, using arbitrarily cheap w=1 truths. Since p <= w, each
 betrayal costs at most w+1 instances while its gain scales with w.
 
-## Verdict rule (frozen)
+## Amendment A1 (2026-10-02, before any re-run, transparent)
+
+K2 as first written contained an arithmetic error: it required
+rel(S) == 1000 after every rebuild. That is wrong under the rule. A
+penalized betrayal adds 1 + p to the total with no addition to correct,
+so reliability cannot return to 1000 after any finite honest rebuild;
+only the streak resets. The correct rule-derived rebuild predictions
+are: phase A build 20/20 -> 1000; phase B build 40/43 -> 930
+(43*930 = 39990); phase C build 60/68 -> 882 (68*882 = 59976); phase D
+build 80/94 -> 851 (94*851 = 79994); phase E build 100/120 -> 833
+(120*833 = 99960). Streak is 20 after every rebuild. This correction is
+derivable from the rule alone and was verified against no run output
+beyond the rule arithmetic; it changes no threshold, only fixes the
+prediction. K2 and verdict clause (a) are amended accordingly. The
+farming-relevant precondition (streak fully rebuilt to 20) is unchanged.
+
+## Verdict rule (frozen, as amended by A1)
 
 H-DECEPT-3 completes as BELIEF-REPEATED-COMPLETE iff all of the
 following hold:
-(a) after each of the five rebuilds, rel(S) == 1000 and streak(S) == 20
-    (the rebuild the farming strategy depends on is verified real);
+(a) after each of the five rebuilds, streak(S) == 20 and rel(S) is
+    exactly 1000, 930, 882, 851, 833 (A1 corrected);
 (b) S exposure reliabilities are exactly 869, 833, 810 for betrayals
     1, 2, 3;
 (c) S exposure reliabilities are exactly 800, 793 for betrayals 4, 5,
@@ -135,7 +151,8 @@ cycle fixed point.
 ## Kill bars
 
 K1: 3/3 runs byte identical (sha256 of stdout equal across run1..run3).
-K2: after each rebuild: rel(S) == 1000, streak(S) == 20 (5 builds).
+K2: after each rebuild: streak(S) == 20 and rel(S) exactly 1000, 930,
+    882, 851, 833 (A1 corrected; 5 builds).
 K3: betrayal exposures 1..3 rel(S) == 869, 833, 810 exactly.
 K4: betrayal exposures 4, 5 rel(S) == 800, 793 exactly; penalties
     exactly 2, 4, 5, 5, 5.
