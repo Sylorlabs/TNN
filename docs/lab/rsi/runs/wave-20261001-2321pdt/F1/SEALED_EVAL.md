@@ -158,3 +158,26 @@ testing on the prior wave's W2 fixtures shows zero trigger regression
 Passing bars: K-TRIG-FIRE, K-TRACE, K-LEARN-INTERLEAVED,
 K-TRIG-CLEAN, K-C0C-REG on R-W3, K-ABL-TA, K-BASE-TA, K-C0A, NC-TRIG,
 determinism 3/3. Bounded L2+ ceiling stands; no L3 claim follows.
+
+## ERRATUM (appended 2026-10-02, wave-20261002-0521pdt lane F1; original text above untouched)
+
+Section 3's T-A example trace is inaccurate in detail. It reads:
+"TRIGGER 2 winfail=2 win=3 buf=3; CONSTRUCT 2 0 EQ r0,f0,f1 err
+4->2; CONSTRUCT 2 1 ADD r0,r0,r0 err 2->0."
+
+The sealed raw trace (sealed/runs/1/tA_train.trace) is:
+- TRIGGER 2 winfail=2 win=3 buf=3
+- CONSTRUCT 2 0 NODE id=0 op=READ p1=0 p2=8 p3=0 err_before=4 err_after=1
+- STALL 2 nodes=2 buf_err=1
+- TRIGGER 5 winfail=2 win=3 buf=6
+- CONSTRUCT 5 0 NODE id=1 op=EQ p1=0 p2=0 p3=9 err_before=8 err_after=3
+- CONSTRUCT 5 1 NODE id=2 op=ADD p1=0 p2=0 p3=0 err_before=3 err_after=0
+
+Corrections: the first construction event was READ (err 4->1), not
+EQ; the EQ and the second ADD occurred at episode 5 under the
+second trigger (err 8->3 and 3->0), not at episode 2; a STALL at
+episode 2 and the second TRIGGER at episode 5 were omitted. The
+headline numbers were and remain correct: 3 CONSTRUCT events, 2
+trigger episodes, hidden 30/30. No bar, verdict, or conclusion is
+affected. Recorded transparently; the original section 3 text is
+not rewritten.
