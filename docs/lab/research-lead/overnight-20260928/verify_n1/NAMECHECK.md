@@ -80,4 +80,15 @@ numbers exactly.
   pre-implementation; explicit pathspecs).
 - c3b2da062: implementation + REPORT.md + NAMECHECK.md build-record
   update (explicit pathspecs; frozen sibling directories untouched).
+- 14f6657d4: NAMECHECK commit record pins implementation hash
+  c3b2da062.
+- c8d208025: restore PREREG.md byte-identical to eb2c03f8c.
+  Incident: an external process ran `git reset` to 2045d343f
+  (reflog HEAD@{6}) after the prereg-alone commit, removing
+  eb2c03f8c from the branch before the implementation commit. The
+  prereg content was never altered (verified byte-identical,
+  sha256 46f37ddc761505537ee3bd2bf6b5da9b73e3c540bcae0102fc4fb92a83051a8d);
+  re-committed unchanged with the incident recorded. Prereg-order
+  self-check: the frozen prereg strictly preceded all implementation
+  work; zero amendments.
 - Nothing pushed; branch tnn-native-lab.
