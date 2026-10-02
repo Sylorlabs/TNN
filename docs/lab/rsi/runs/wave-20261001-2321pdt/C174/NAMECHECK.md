@@ -20,3 +20,6 @@
   consequence-derived utility is this lane's).
 - PREREG_C174.md frozen (this commit, prereg alone). Kill bars
   a-e fixed; seal procedure committed; no implementation yet.
+- Implementation written and smoke-tested (selftest SELFTEST_OK,
+  generator produces deterministic worlds). No tuning after seeing
+  the generated world: constants and seeds stand as frozen.
