@@ -181,20 +181,32 @@ stipulated, never event-revealed):
 - B3-W4 (two slots): slot A follows W1's structure, slot B follows W2's
   structure, 10 probes per slot. Predicted: margin 0.
 
-B4 retention worlds (each: loading, then 13 filler teach+confirm pairs on fresh
-slots to lapse protection on the targets while STAND_ROOT is re-pinned by every
-filler confirm, then repeated evict_node calls recording eviction order until
-both targets are evicted):
+B4 retention worlds (each: loading, then a pacemaker slot P keeps STAND_ROOT
+pinned while target protection lapses, then one REAL evict_node call through
+the retention mechanism; two further real evictions document the history-node
+churn as an observation):
 
-- B4-R1: nH = teach (701,71,1) + 8 confirms (standing 8, bid 8);
-  nF = teach (702,72,2) + 3 confirms + 12 query hits (standing 3, bid 15).
-  Frozen expectation: treatment evicts nF strictly before nH; white-box
-  bid(nH) == 8 < bid(nF) == 15 (the bid-only control provably reverses the
-  order, since both bids are static under eviction of other nodes).
-- B4-R2: nH 5 confirms (703,73); nF 2 confirms + 9 query hits (704,74).
-  Expectation: treatment nF before nH; bid 5 < 11.
-- B4-R3: nH 6 confirms (705,75); nF 1 confirm + 20 query hits (706,76).
-  Expectation: treatment nF before nH; bid 6 < 21.
+- Common structure: nH = teach (sH,rH,1) + nconfH confirms (standing nconfH,
+  bid nconfH); nF = teach (sF,rF,2) + nconfF confirms; P = teach (pslot,90,7).
+  Then nqF/2 rounds of [2 query hits on (sF,rF) + 1 confirm on (pslot,90,7)]:
+  nF gains nqF type-6 frequency edges (standing nconfF, bid nconfF+nqF) while
+  P's confirms re-pin STAND_ROOT (verified substrate property, section 12:
+  the root's type-9 protection edge is removed after 12 standing-free events
+  and ref_prot cannot restore a removed edge, so the pacemaker interleave is
+  required). Then 2 rounds of [10 ev_acts (pure decay; no guides exist, node
+  count asserted fixed) + 1 confirm on (pslot,90,7)]: nH and nF protection
+  lapses (13+ decays since their last touch) while the root never sees 12
+  decays without a standing touch. White-box asserts: is_prot(nH)==0,
+  is_prot(nF)==0, is_prot(STAND_ROOT)==1; then v1 = evict_node() must equal
+  nF (treatment evicts the high-frequency node first); the bid control
+  provably reverses (bid(nH) == nconfH < nconfF+nqF == bid(nF), both static
+  under eviction of other nodes).
+- B4-R1: (701,71) nconfH=8; (702,72) nconfF=3, nqF=12; pslot 901.
+  Expectation: v1 == nF; control premise 8 < 15.
+- B4-R2: (703,73) nconfH=5; (704,74) nconfF=2, nqF=8; pslot 902.
+  Expectation: v1 == nF; control premise 5 < 10.
+- B4-R3: (705,75) nconfH=6; (706,76) nconfF=1, nqF=16; pslot 903.
+  Expectation: v1 == nF; control premise 6 < 17.
 
 Concrete (s, r) values above are illustrative of the frozen structures; the
 implementation commits the final numeric parameters post-freeze under the
@@ -256,3 +268,25 @@ any implementation. The implementation commit follows strictly after. The
 commit-order self-check: this commit's timestamp precedes the implementation
 commit's timestamp. Sealed world parameters are committed before the
 evaluation run; the run log is committed after.
+
+## 12. Amendments (transparent; kill bars in section 6 unchanged)
+
+AMENDMENT 1, 2026-10-01 (after prereg freeze 784b329eb, before the sealed
+evaluation; forced by a pilot run of the implementation, which failed
+"B4 root unprotected"): B4 world construction corrected. Verified root cause:
+STAND_ROOT's type-9 protection edge is removed by decay after 12 consecutive
+standing-free events (the frozen B4-R1's 12 query hits), and ref_prot can only
+refresh LIVE type-9 edges, so the frozen "13 filler confirms re-pin the root"
+step was a no-op: the root stayed permanently unprotected and would have been
+evicted before either target. The frozen bar (B4: preferential survival of
+high-standing nodes) is unchanged; the corrected worlds keep the exact frozen
+counts (nH confirms, nF confirms + query hits) and add a pacemaker slot P
+(taught once, confirmed on a fixed interleave) whose confirms re-pin
+STAND_ROOT without touching nH/nF standing: queries run as
+[2 queries + 1 pacemaker confirm] rounds, and target protection is lapsed by
+2 rounds of [10 ev_acts + 1 pacemaker confirm] (the root never sees 12 decays
+without a standing touch, while the targets see 13+). The pacemaker is world
+structure (a continuously confirming background slot), not a mechanism change;
+its confirms go through the frozen ev_observe polarities like all other
+events, so no researcher-authored standing update is involved. B1, B2, B3
+are unaffected.

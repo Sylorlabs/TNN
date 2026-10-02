@@ -18,6 +18,17 @@ Verification: `which python3` printed NOTHING (exit code 1). python3 does not re
 
 Guard status: PASS. Pure Zag only. No Python invoked.
 
+## Step 2 (pilot finding and transparent amendment)
+
+A pilot run of the implementation (before the sealed evaluation) found the
+frozen B4 world construction unexecutable as written: STAND_ROOT's type-9
+protection edge decayed away during the 12 query hits and the frozen
+filler-confirm re-pin was a no-op ("B4 root unprotected"). Verified root
+cause: decay removes the edge after 12 standing-free events and ref_prot
+cannot restore a removed edge. The prereg was amended transparently
+(Amendment 1, section 12: pacemaker interleave; frozen counts and kill bars
+unchanged) and re-frozen before the sealed evaluation. B1/B2/B3 unaffected.
+
 ## Step 1 (working copy integrity)
 
 - Branch: tnn-native-lab (verified via git branch --show-current at wave start)
