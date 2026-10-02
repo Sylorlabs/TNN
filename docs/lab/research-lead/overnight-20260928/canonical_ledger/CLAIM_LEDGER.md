@@ -7153,3 +7153,18 @@ No em dashes were used in this entry (verified).
   Status: COMPLETE (with regress theorem).
 
 No em dashes were used in this entry (verified).
+
+- C291 (LW3; commits dfdb9ef51, ab7e3a2dc, 2026-10-02):
+  COMPLETE. Policy revision and transfer. 18/18 runs match
+  frozen predictions, 3/3 byte-identical per mode. REVISION:
+  policy 381→725 in 1 move, 780 evals (4.6% of fresh search);
+  try-keep skeleton preserved; overwrite diagnostic 6/12 on
+  old regime (revision, not replacement). TRANSFER: schema
+  (DEC,INC) chosen by measurement, 12/12 in threshold domain
+  at 4 evals; fixedmap 10/12, habit 6/12, freshsearch 12/12
+  (policy 61). L2 revision + L2 transfer; invention regress
+  not re-litigated (per C290). The constructed policy can be
+  efficiently revised and transferred via measurement-driven
+  specialization. Status: COMPLETE (L2 revision+transfer).
+
+No em dashes were used in this entry (verified).
