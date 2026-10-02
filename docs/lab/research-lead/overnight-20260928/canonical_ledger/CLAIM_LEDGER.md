@@ -6640,3 +6640,23 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: L1 PASS, L2/L3 FAIL (honest).
 
 No em dashes were used in this entry (verified).
+
+- C263 (GOALINF-DECOYFIX; prereg c1f0e5c30, results dd1b403b6,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Repairs the C258 Attack A kill. Demotion gate requires
+  INDEPENDENT structure validation before a confident FACT may be
+  demoted: (a) triangulation on held-out ENV observations (>=2
+  hits), (b) earned reliability (>=3 from episode log), (c)
+  circularity rejection (zero external verification or all-SELF
+  construction). Universal reversible demotion (every supersede
+  writes a restore record; restore reinstates byte-exactly).
+  Provenance derived from the observation log, never self-reported.
+  KB1: Attack A blocked (DEMOTE-WITHHELD reason 7; correct FACT
+  retained; vuln sanity confirms old gate demotes). KB2: T-STALE
+  resolves (genuinely stale FACT superseded; restore exact). KB3:
+  5/5 regression. KB4: determinism (12 runs). 3/3 byte-identical.
+  Honest scope: provenance-ingress trusted harness; reliability
+  from fixed log; targeted repair, no L3 claim. 0
+  modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
