@@ -29,6 +29,18 @@ znc resolved from the safebin. No python3/python resolves anywhere on this
 PATH. Any forbidden-interpreter invocation would be automatic PROCESS-FAIL
 for this lane's wave; none has occurred.
 
+## Step 0c - SENSORY-RECOVERY worker re-verification (2026-10-02 ~15:00 PDT)
+
+Prior worker died on a runtime restart-drain (background exec rejected),
+not a scientific failure. Recovery worker re-ran safebin setup first:
+- setup output: SAFEBIN-READY: /home/hatch/safebin (36 tools, no python)
+- `which python3` => (empty, rc=1; resolves to NOTHING)
+- `which python`  => (empty, rc=1; resolves to NOTHING)
+- `which znc`     => /home/hatch/safebin/znc (znc 2026.07.0-dev)
+
+Guard: PASS (independent re-verification). Recovery proceeds to finish
+the H5 leg only; SA1b verdict (BUILD-FAIL) is preserved, not re-litigated.
+
 ## Step 0b - sparse checkout repair
 
 The worktree's sparse-checkout info file contained a bogus literal
