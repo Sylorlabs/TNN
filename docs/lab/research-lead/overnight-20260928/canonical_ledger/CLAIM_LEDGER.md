@@ -6920,3 +6920,20 @@ No em dashes were used in this entry (verified).
   Status: COMPLETE (L2 adaptive reuse demonstrated).
 
 No em dashes were used in this entry (verified).
+
+- C279 (XDOMAIN-L2; commits 418db9bd4, 2108d5d45, aee652eb0,
+  2026-10-02): COMPLETE. Learner-driven L2 adaptation operator
+  (REBIND) for H1 (typed contracts) and H2 (value composition)
+  on arithmetic→planning. All 7 frozen kill bars PASS for both
+  mechanisms (K1/K2 L2-SOLVE, K3 L1 necessarily fails, K4
+  causal ablation, K5 rebind discovered not templated, K6 3/3
+  byte-identical, K7 no template). H1: Z-COMP z=6 a=5 b=1 with
+  REBOUND a=5 param=73; H2: VC-COMPOSE ok m1=1 m2=2 rel=73
+  (rel != rel_train=71). Honest caveats: Y signature taught on
+  X training outputs; single sealed world (existence proof,
+  not generality); operator researcher-built (L2 not L3).
+  Suggested next: second sealed world, different adaptation
+  shape. Status: COMPLETE (L2 adaptation exists for H1+H2
+  cross-domain).
+
+No em dashes were used in this entry (verified).
