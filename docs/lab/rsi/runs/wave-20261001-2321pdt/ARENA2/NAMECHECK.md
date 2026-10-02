@@ -84,3 +84,17 @@ C12 (transfer, n=6) SELECTED. Justification:
 
 - 2026-10-01 ~23:35 PDT: Step 0 toolchain guard recorded. Safebin
   active, python3 absent. Lane directory created.
+- 2026-10-01 ~23:40 PDT: Prereg PREREG_ARENA_TRANSFER.md frozen and
+  committed alone (5a055b575), before any implementation.
+- 2026-10-01 ~23:55 PDT: REMAP implemented (remap_contestant.zag),
+  built with pinned znc (bin/remap,
+  4a80837a2ad90779c156584ec0be80aabc548ac6c29e5ec91d940ce010ec9a21).
+  Dev smoke test in /tmp passed (prod/class/yes/no/malformed/no
+  template/zemprod regression/fresh state). Fixed trace append
+  (w_open truncates; trace1 is now read-modify-write).
+- 2026-10-01 ~00:05 PDT: Sealed evaluation complete. world_gen and
+  arena rebuilt from committed sources, hashes match the refreeze
+  record; regenerated world hash matches; pre-run key hash recorded.
+  3/3 sealed runs: 60/68 = 0.882, C12 = 6/6, zero regressions.
+  Ablations: prod-off and class-off each zero exactly their half.
+  All 8 kill bars PASS. Verdict: BUILD-PASS.
