@@ -46,3 +46,21 @@ Read-only sources consulted (never modified):
 
 - 2026-10-01 ~23:50 PDT: Step 0 toolchain guard recorded. Safebin
   active, python3 absent. Lane directory created.
+- 2026-10-01 ~23:55 PDT: Prereg PREREG_C9GEN.md frozen and
+  committed alone (9e2ea47fc), before any implementation.
+- 2026-10-01 ~00:05 PDT: Implemented c9gen/c9gamer/c9exp/c9score
+  (pure Zag), committed (4dc4a6d02). Trial in /tmp (seed 12345,
+  not the frozen seed) found two bugs, both fixed without
+  moving any kill bar: (1) LCG bit-0 parity made the
+  candidate-order coin degenerate 24/24 true-first; binary
+  draws now use bit 33, edge flips use mod-2000 at p=0.05;
+  (2) the Fisher-Yates shuffle via %3/%2 draws reached only
+  3/6 chains; replaced by uniform permutation index via
+  mod-6000 (prereg amendment A1, committed c2448aa0b before
+  validation).
+- 2026-10-01 ~00:15 PDT: Frozen validation run (run_dev.sh,
+  SEED_DEV=777001337): gamer old 0/24, gamer first 11/24,
+  gamer second 13/24, experimenter 24/24, all-UNKNOWN 0/24,
+  3/3 byte-identical generation, 0 chain literals, python3
+  absent at end. All 8 kill bars PASS. Verdict: GEN-PASS.
+  Reports: DEV_VALIDATION.md, JUDGE_BRIEF.md.
