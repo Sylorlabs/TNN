@@ -48,6 +48,17 @@ seeded RNG. chain[0] = root, chain[1] = middle,
 chain[2] = leaf. All 6 permutations reachable; none
 hand-picked.
 
+AMENDMENT A1 (2026-10-01 PDT, before any frozen validation
+run): the Fisher-Yates mechanism is replaced by a uniform
+permutation index, truepi0 = rng_range(rng,6000)/1000 into
+the 6-slot table. Reason: a trial run showed the %3/%2
+draws only reached 3 of 6 permutations in 24 worlds (the
+LCG low bits have short periods under the even inter-world
+draw count). The design property (uniform draw from the 6
+permutations by the seeded RNG) is unchanged; only the
+extraction honors it. No kill bar is moved by this
+amendment.
+
 3.2 Observational turns: sample root bit from rng_range(2);
 each downstream node copies its parent bit and flips it
 iff rng_range(100) < 5. Emitted as
