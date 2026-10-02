@@ -7195,3 +7195,7 @@ No em dashes were used in this entry (verified).
   substrate (recorded, not claimed). Status: COMPLETE.
 
 No em dashes were used in this entry (verified).
+
+- C294 (L3-NIV2-DESIGN; commit affe2c3eb, 2026-10-02): DESIGN-FROZEN. Next L3 novel-intermediate attempt after L3-REDTEAM killed C281/C284. Prereg only, no implementation exists. Two-process LEARNER/WORLD protocol: learner sees inputs plus ACCEPT/REJECT consequences of its own TESTs; expected values sealed in the evaluator process. Propose-and-test over complete candidate programs (no per-step positive-gain promotion); L2 operators APPEND/TRUNCATE/SUBSTITUTE plus DEFINE for named sub-program abstractions; commit requires a sole surviving hypothesis after self-constructed discriminating probes, else DEFER. Arms T1-T5b plus controls C0-C5 and audits A-INFO/A-TRACE/A-LIT/A-ORDER. K1-K11 map 1:1 to the 12 invention criteria; K12 enforces the 7/12 rule (all bars pass, no partial L3); KC0A-D map to Criterion 0 A-D. Design claims structural/procedural defeat of all 7 successful L3-REDTEAM attacks. Honest boundary: C0-B claimed over unbounded composition on a fixed generic ISA basis, not over primitives; adversary independence is procedural (follow-up worker, not external party); N=6 held-out per regime is a mechanism demonstration, not generality. Status: DESIGN-FROZEN, implementation assigned to follow-up worker.
+
+No em dashes were used in this entry (verified).
