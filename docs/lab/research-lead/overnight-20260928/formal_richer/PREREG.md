@@ -110,3 +110,19 @@ rel == reqtype, pair decodes, eval knowledge confirms);
 - Single-link construction only; no nested expressions.
 - Candidate order is gather order, not learned.
 - Stepping stone toward Zag, not Zag mastery.
+
+## AMENDMENT 1 (transparent, before sealed evaluation)
+
+Dry-run revealed: t2_gather's value-based cycle check rejects a len-2
+path when the fact object numerically equals the target subject.
+P(0,1)=1 equals t=1, so (1,43,P(0,1)) is ungatherable; W1 (1,Int)
+had no usable Int-licensor path.
+
+Change: ambiguous int-decomp (1,43,P(0,1)) becomes (1,43,P(1,0)).
+ADD(1,0)=1 preserves the design: Int-licensor taught before DLT,
+first-gathered, so W3 (1,Bool) still fails with class 6.
+
+Note: (0,43,P(0,0)) is likewise cycle-rejected (P(0,0)=0=t); the
+(0,Int) Int-path is via (0,48,P(5,5)), deterministic. No change.
+
+K1-K7 expectations unchanged. K3 rationale unchanged.
