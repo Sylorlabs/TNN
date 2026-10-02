@@ -1,0 +1,80 @@
+# NAMECHECK.md -- DCE-V2 Integration Worker
+
+## Step 0: Toolchain Guard (mandatory)
+
+Executed at worker startup, before any other work, via the mandated
+setup script:
+
+```
+bash docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh
+export PATH="$HOME/safebin"
+which python3; which python
+```
+
+Result: the setup script printed
+`SAFEBIN-READY: /home/hatch/safebin (36 tools, no python)` and its own
+verify lines confirmed python3 and python absent from the safebin
+PATH. Afterwards `which python3` returned NOTHING (rc=1) and
+`which python` returned NOTHING (rc=1). All subsequent work runs with
+PATH=$HOME/safebin. znc resolves to the safebin pinned build
+(src/tools/toolchain/znc_linux_x86_64_abed8aa1 lineage).
+
+No forbidden executable invoked at any point. Pure Zag via the pinned
+znc for all research logic. Shell used only for: safebin setup, file
+writes, znc invocation, binary runs, sha256sum, read-only greps/diffs,
+and git ops.
+
+Compiler lessons applied (from AGENTS.md): u8-backed cells with
+get32/set32 little-endian helpers, never `as *i32` slice construction
+in functions; single preallocated output buffer with one
+_zag_raw_syscall flush, never _zag_print for dynamic output, stdout
+bytes verified; no reliance on .len of cast slices; if-nesting at
+most 3 with hoisted sub-conditions; no `!(.. && ..)` in while
+conditions (De Morgan rewrites only, grep checked).
+
+## Step 1: Task identity
+
+DCE-V2 integration worker (subagent, 2026-10-02). Adoption step:
+integrate the C309 red-team guard (learner_phase4_record_checked,
+16 lines, GUARD-EFFECTIVE with zero overreach) INTO the C306
+delayed-consequence mechanism as a permanent P4-entry step. V2
+supersedes V1 with the guard built in (not a const-flag variant).
+Re-verify the full C306 battery (D1-D4, K1-K10), re-run red-team
+attacks A1-A4 against V2, add new arm A5 (partial corruption of a
+non-id record field, not run by the red team).
+
+## Step 2: Scope
+
+`docs/lab/research-lead/overnight-20260928/delayed_consequence_v2/`
+only. The C306 committed files
+(docs/lab/research-lead/overnight-20260928/delayed_consequence_eval/)
+and the C309 red-team files
+(docs/lab/research-lead/overnight-20260928/delayed_consequence_redteam/)
+are read only: copied, hash verified, never modified. No paper
+changes. Commits local only, never pushed. Pure Zag for all research
+logic. Zero new edge/MAP types, opcodes, modes, bridges, handlers,
+semantic cases. Standalone simulation; TNN core untouched.
+
+## Step 3: Governance notes
+
+- PREREG.md written and committed BEFORE any implementation;
+  PREREG.md + NAMECHECK.md alone in the prereg commit (hash recorded
+  below). No implementation code existed at that point.
+- K1-K10 bars copied verbatim from the C306 prereg (commit c0cff4c48);
+  A1-A4 attack bars copied verbatim from the DCRT prereg (commit
+  7c1629e97). The prereg is self-contained: no silent inheritance.
+- Frozen V2 bars: V2-REG (C306 regression), A3Q (A3 now quarantines),
+  A5Q (new arm), G-IDENT (guard logic byte-identical to the red-team
+  guarded copy, diff verified), MACH-0 (0 new machinery beyond the
+  16-line guard), K7 (3/3 byte-identical runs, sha256), COMMIT-ORDER
+  (prereg commit strictly precedes implementation).
+- Verdict DCE-V2-COMPLETE iff all frozen bars pass. VOID is terminal.
+- No em/en dashes in loop docs (check_no_dash.sh before doc commits).
+- This adopts the guard into the experimental mechanism only;
+  promotion to any frozen base is out of scope (banked for Micah).
+- Redteam prereg commit: <to be recorded>.
+- Redteam implementation commit: <to be recorded>.
+- DCE-V2 prereg commit: <to be recorded after commit>.
+- DCE-V2 implementation commit: <to be recorded after commit>.
+- REPORT.md: per-bar verdicts against the frozen bars, guard-identity
+  diff evidence, per-arm verdicts, cognition lines added.
