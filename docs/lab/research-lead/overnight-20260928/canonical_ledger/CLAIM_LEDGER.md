@@ -5974,3 +5974,23 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C230 (META-APPLICABILITY-RERUN; prereg 12e7bc301, results e34ed5ebc,
+  2026-10-02): FAIL (K3). Recovery of C221. Bug diagnosed exactly:
+  every failed t2_trial candidate leaked its 4-op ISA graph and every
+  t2_try_verify leaked one frame node; 1024-slot arena exhausted
+  (983 live after C-P4; C-P5 needs ~1034), causing pathological
+  eviction-scan stall (not infinite loop). Fix: t2_free_graph reclaims
+  failed candidates; FRESH 3/3 hash byte-identical to 2026-10-01
+  (afe2fff8...), proving no behavior change. K7 achieved (3/3 per
+  arm). K3 FAILS: TREAT_C=49 < NAIVE_C/2=29.5 clause false
+  (NAIVE_C measured 59, not predicted 159; naive reuses C0-promoted
+  MAP at 1 try each after burning on C-P0/C-P1). Informative: the
+  problem-level gate cannot express per-candidate applicability;
+  after C0 burn it refuses all reuse (gate=0, trial 4 each) while the
+  C0 MAP is reusable at 1 try. Decision bars K4/K5/K6 perfect; gate
+  wins every block total (5 vs 10, 5 vs 25, 49 vs 59). Next frontier:
+  per-MAP applicability judgments. 0 modes/bridges/handlers. Status:
+  FAIL (informative; points to per-candidate hypothesis).
+
+No em dashes were used in this entry (verified).
