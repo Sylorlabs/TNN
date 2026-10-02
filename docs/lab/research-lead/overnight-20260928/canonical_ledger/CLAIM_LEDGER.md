@@ -6553,3 +6553,27 @@ No em dashes were used in this entry (verified).
   BOUNDS.
 
 No em dashes were used in this entry (verified).
+
+- C259 (CATFORGET; prereg 5de0d76a7, results ed979f760, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation). H-CATFORGET-1:
+  composition links shield a learned capability from interference.
+  Phased battery (A 200eps -> B 300eps -> A retest frozen, one
+  persistent learner, no reset). Retention table (Phase-3 A success):
+  FULL-SIM 100%, SEV-SIM 0%, FULL-DIFF 100%, SEV-DIFF 100% (all 3
+  seeds identical). R1-R5 all PASS. Mechanism (white-box): Phase-2
+  corrupts shared appl cell (-1000 -> +875..+929) while comp(1,2)
+  stays 1000; FULL routes via the link (100%), SEV scores appl only
+  and forgets entirely (0%). Sharpest: in SEV-SIM the link EXISTS
+  in state (comp=1000) but severed from the decision loop, and A is
+  entirely forgotten. The link's decision-loop role, not its
+  existence, is what shields. Unrelated B causes zero forgetting.
+  3/3 byte-identical. 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+- PROCESS NOTE (2026-10-02): Two daemon restarts killed 8 workers
+  total (4 originals + 4 respawns) with "no live runtime handle or
+  restart checkpoint." 5 workers survived both restarts uninterrupted
+  (scaling 5000, base-cert, RT2-H2H3, seal2, adv-teacher). The hard
+  invariant (>=1 substantive worker running) held throughout. Dead
+  workers have no recoverable state; respawned fresh.
+
+No em dashes were used in this entry (verified).
