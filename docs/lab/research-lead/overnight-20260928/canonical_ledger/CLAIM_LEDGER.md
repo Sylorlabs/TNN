@@ -6826,3 +6826,22 @@ No em dashes were used in this entry (verified).
   Status: 4 FAILS (surgery) + architectural diagnosis.
 
 No em dashes were used in this entry (verified).
+
+- C274 (INQUIRY-ADVERSARY; prereg b09d2c62b, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation).
+  PROCESS-PASS. Independent red team on hardened inquiry: 2
+  KILL, 2 SURVIVE. ADV-COHERENT KILL: liar answers (16,42,0),
+  a STRONG kill true in its coherent D=17 world; R2 gate only
+  gates WEAK kills, so the liar walks the strong-kill fast
+  path with no verification; wrong grammar written silently.
+  ADV-SLOWPOISON KILL: the verification round is satisfiable
+  by the adversary it was built to stop (liar's verify answer
+  passes all six checks). ADV-SUBWASTE SURVIVE (budget
+  airtight); ADV-PROVSPOOF SURVIVE (no teacher write path).
+  Caveat: both KILLs need the D=17 alternative genuinely
+  consistent with the taught stream (real {8,17} ambiguity).
+  Follow-up: the strong-kill fast path is now the primary
+  unverified trust path. Repair dispatched. 3/3 byte-identical.
+  0 modes/bridges/handlers. Status: 2 KILLS.
+
+No em dashes were used in this entry (verified).
