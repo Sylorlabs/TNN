@@ -4933,3 +4933,26 @@ amendment and re-freeze; H-EXP2 step-6 execution; DEVANG2 and F2 v2
 implementations; sealed-battery triviality review; TNN-3 hypotheses per
 bottleneck; arena v6 refreeze; transfer refreeze on real TNN-2;
 zombie-lane investigation; sensory headspace line (no worker this wave).
+
+## Wave wave-20261001-1721pdt: COMPLETE (coordinator + 19 children incl. replacements + debate group)
+
+Coordinator wave (not inline). 11 lanes; 4 of 11 lanes required replacement workers (originals completed with no or no-substantive output; recorded as process cost). All workers safebin-verified, pure Zag, zero Python invocations; one honest near-miss (typed python3 token never resolved; judged non-violating, honest self-reporting rewarded). Prereg commits: 17d14d896 (H2-v2 gen-2, writing-only, alone before implementation), 72168c608 (H-PI-REV2 step-5 amendment, writing-only re-freeze, alone before re-execution). Wave record: docs/lab/rsi/runs/wave-20261001-1721pdt/ (WAVE_RECORD.md, DEBATE.md). No coordinator disposition was overturned by the debate. Commits local only, never pushed.
+
+Verdicts (all debated, DEBATE.md; provenance probe asked and answered 14 times; zero em-dashes):
+
+- H2-v2 generation-2: VALID (not VOID); 4/4 FAIL on frozen TNN-2 [NEW]. Prereg frozen alone at 17d14d896; two independent post-freeze adversary families; all gates held (calibration PASS, TRIAL_ENTERED>0 on all 8 probes, zero direct-query contamination, seal verified, commit order holds, 3/3 byte-identical). Replicates the generation-1 negative. Informative negative: learner-internal verification failure on the frozen core.
+- H-EXP2 step-6: 8/8 bars PASS [NEW]. Axis I attack FAILS (identifies both novel sealed laws, honest B=2 stall, never misidentifies). Axis II attack SUCCEEDS: satisficing first-probe matches at one extra probe per world, so argmax maximization is not load-bearing; component credit reframed, BUILD-PASS not overturned.
+- DEVANG2: BUILD-FAIL stands (triply determined) [NEW]. Crash gate PASS, determinism PASS. Cold-start hypothesis falsified (byte-identical to no-cold-start overnight run). Red-team EVIDENCE HOLDS; deeper cause adopted (bigram statistics are segmentation-independent, so the repair was architecturally inert). DEVANG3 requires segmentation-dependent statistics.
+- F2 v2: BUILD-FAIL stands [NEW]. K3-R4 in World C (nalive=4 vs frozen exactly-1); X-rule equivalence class within frozen depth 6. Goal succeeded but frozen bar explicit.
+- H-PI-REV2 step-5: transparent amendment accepted, frozen alone at 72168c608 [NEW]. K-RV2-1b verified against frozen code (exhaustive dsearch -1). Original BASELINE-FAIL unchanged. Re-execution next wave.
+- ddes V2 steps 7-11: BUILD-PASS on the REBUILT evidence set only [NEW]. t*=0 hole closed (clamp load-bearing; RT2 fails loudly). 9/9 bars; three binding caveats restated verbatim. Fabricated draft voided and never citable. Process fixes: one lane one writer; re-derive before citing; fabrication named with voiding rule; keep instrumented builds.
+- TNN-3: H1-H11 accepted as test-target backlog [NEW]. Root cause + arch accounting + 11 hypotheses ranked by information gain, falsifiable predictions, zero-or-negative cognition source lines, no modes/bridges/routers/handlers. Analysis only.
+- Sealed-battery triviality review: MISCALIBRATED (not TRIVIAL) [NEW]. 3/9 bars degenerate-passable, 2 sub-bars implementation-coupled; kills stand on calibrated portion; 6 battery-design corrections queued.
+- Arena v6 refreeze: CONFIRMED 0.794 (54/68), 8/8 bars PASS [RE-CERT]. Canonical 0.573 unchanged. Still zero on C8/C9/C12/C15.
+- Arena transfer refreeze: BLOCKED on execution [NEW]. TNN-2 trial loop combinatorial wall (step 15 72s, step 16 124s). No transfer score; simulated 0.3333 zero evidential weight.
+- Zombie investigation: NOT a live zombie [NEW]. Seven commits were legitimate direct handoffs above the coordinator. Gaps: mli only run1 transcripts per arm despite 3/3 claim; protect-how Step 0 missing; C189 never appended. Retrospective charter for C181-C188 required before adoption.
+- Fork battery: 8 FRESH PASS [NEW]; 55 RE-CERT (53 PASS + 2 UNTESTABLE) [RE-CERT]; 0 FAIL; 46/46 archive immutability.
+- Sensory H1 LIT CLOUD DECK: DISCARDED on frozen KB3 (-2.13 vs >= 6.0, wrong sign) [NEW]. Not queued; no blind pair. Corrected march would be a new candidate.
+- Process findings [NEW]: 4/11 lanes needed replacement workers; one fabricated RESULT draft found and voided; two workers wrote concurrently to DDESv2 (one-lane-one-writer adopted); one honest python3 near-miss (non-violating).
+
+Queued next: H-PI-REV2 step-5 re-execution under amended prereg; TNN-3 hypothesis testing (H5 first, then H1; H10 before H11-scale runs); DEVANG3 with segmentation-dependent statistics; sealed-battery redesign per 6 corrections; F2 v3 with X-rule distinguishability; H1 corrected march as new candidate (new prereg); arena C8/C9/C12/C15; continuing learner integration.
