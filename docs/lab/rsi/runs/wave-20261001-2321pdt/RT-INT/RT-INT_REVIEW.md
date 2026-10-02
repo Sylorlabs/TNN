@@ -206,7 +206,7 @@ exact-hit nature of reuse) remains researcher-authored by frozen design.
 
 ## Commit ids
 
-- RT-INT review commit: (recorded at commit time)
+- RT-INT review commit: f70c676f4
 - CONSEQ lane commits this wave: 473631b6 (re-execution + ablations),
   e068ac9a (K-H3 disambiguation)
 - CONTLEARN lane commits this wave: 408ffdcdc (prereg, phase 1),
