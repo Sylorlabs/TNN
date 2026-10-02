@@ -6175,3 +6175,13 @@ No em dashes were used in this entry (verified).
   Status: INFORMATIVE NEGATIVE (bug found).
 
 No em dashes were used in this entry (verified).
+
+- C241 (PROCESS-MULTIOP; wave 20261002-0708pdt, commit 89197ce42,
+  2026-10-02): COMPLETE (prereg v7 re-frozen before code, bars
+  unchanged). Learner-owned process selection on multi-op sequences:
+  T1=1, T2=1, T3=1. DISCOVERY ep=55 clean=1; late 27/27; p4=4 rev_n=1
+  late 53/53. 3/3 byte-identical. Multi-op sequences demonstrated
+  under learner-owned process selection (Priority F). Status:
+  BUILD-PASS.
+
+No em dashes were used in this entry (verified).
