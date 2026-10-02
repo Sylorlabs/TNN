@@ -6451,3 +6451,24 @@ No em dashes were used in this entry (verified).
   0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C255 (XIO-IDFIX; prereg 53bb4e9ae, results e4b25c110, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation). Repairs the C247
+  A4c kill via generation-checked stage binding. Each adapter stage
+  bound by (id, generation-token) not bare id; token =
+  (promotion-index << 10) | graph-root-id (write-once fields;
+  recycled ids always get fresh cell ids). Tokens recorded in the
+  adapter->stage DEP edges' clk field at build; no node layout
+  change. xio_exec compares recorded vs live token after
+  liveness+tag; on mismatch: XIO-INVALID, adapter deactivated, fails
+  closed. Strict identity semantics: even structurally identical
+  re-promotion invalidates (fresh promotion = new evidentiary
+  basis). K1 A4c retest PASS (token 13328 vs 261513, XIO-INVALID,
+  adapters=0); K2/K3 C229/C235 regression PASS (3/3 byte-identical
+  to committed runs); K4 A4 bound PASS; K5 identical re-promotion
+  PASS; K6 hygiene PASS. 3/3 deterministic. Residual (out of
+  scope): stale DEP-edge shadowing, first-fit recycling,
+  masked-trial relation poisoning (dispatched). 0
+  modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
