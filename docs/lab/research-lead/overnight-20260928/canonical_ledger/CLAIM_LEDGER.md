@@ -6137,3 +6137,41 @@ No em dashes were used in this entry (verified).
   modes/bridges/handlers. Status: INFORMATIVE NEGATIVE.
 
 No em dashes were used in this entry (verified).
+
+- C238 (COMPOSITION-LEARNERVER; prereg 3e692a037, results faf1b2547,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  compose_lv: learner-verified composition with NO researcher answer
+  parameter (grep audit: zero researcher-target tokens in 320 lines).
+  Verification = execute assembled composition, check against the
+  learner's own prediction from C181-style experience, gated by earned
+  reliability (threshold 3, honestly labeled scaffold). DFS termination
+  keyed to learner prediction. Withhold (-3) when evidence
+  absent/unreliable. Battery 3/3 byte-identical: T1-LV PASS (ans=107,
+  MAP_Z promoted 7->8, LINK14=3); T-NE PASS (honest withhold, no
+  hallucination); T-WE PASS (treatment compose_lv -> 107 with no
+  target; control compose_try(expected=999) -> -2; sanity 107 ->
+  107): researcher error no longer fails a supported composition.
+  Verification is genuinely learner-owned. Caveats: evidence phase
+  teaches a direct FACT (C181 V4 precedent); only 3-structure world;
+  ev_query hookup future work (FACT activate-shortcut bypasses
+  composition). 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+- C239 (APPLICABILITY-PERMAP; commit d8e05afc8, 2026-10-02): COMPLETE
+  (exploratory). Per-MAP-shape APPL gate resolves the C230 failure:
+  C-block 10 vs problem-gate 49 vs naive 59. P1-P8 all PASS, 3/3
+  byte-identical per arm. Problem-level gating could not express
+  per-candidate applicability; shape-level gating can. Status:
+  BUILD-PASS (exploratory).
+
+- C240 (GRAMMAR-THIRD; commit ee621a50d, 2026-10-02): COMPLETE
+  (exploratory). EXL3 breaks ONE assumption: pair encoding P=a*8+b vs
+  machinery's a*16+b (byte-identical machinery, sha256-verified).
+  Result: SILENTLY WRONG, not fail-closed. Induced confident wrong
+  grammar (a=[0,3], b=[0,15] vs true 0..7); battery 4/4 valid; the
+  wrongness is self-consistent (same wrong decode at all 5 sites) so
+  invisible in headline scores. Silent-wrong is the worst failure
+  mode: confident, invisible, wrong. Repair direction specified:
+  round-trip decode-consistency check -> fail-closed refusal.
+  Status: INFORMATIVE NEGATIVE (bug found).
+
+No em dashes were used in this entry (verified).
