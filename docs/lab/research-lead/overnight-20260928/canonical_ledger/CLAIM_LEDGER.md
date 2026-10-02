@@ -5505,3 +5505,85 @@ No em dashes were used in these entries (verified).
   byte-identical. Status: BUILD-PASS (exploratory).
 
 No em dashes were used in these entries (verified).
+
+## Governance saturation wave, 2026-10-02 (C201-C207)
+
+- C201 (COMPOSITION-B; commit 24fbbba35, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Fragment composition via persistent
+  co-use history (Micah Priority 1). Successful episodes wrote type-15
+  co-use links; link-guided composition solved Z and later W. Link
+  deletion, no-episode, and fresh controls all failed. Z recorded
+  provenance links to both fragments. RESEARCHER-OWNED: link type 15
+  definition, episode write rule, search machinery, expected-answer
+  verification. LEARNER-OWNED: co-use link values, fragment choices, Z
+  graph. Chain-family only; expected-answer verification retained.
+  Status: BUILD-PASS (exploratory).
+- C202 (COMPOSITION-A; commit aad55282f, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Goal-conditioned graph composition
+  from MAP contracts (Micah Priority 1). Derived MAP contracts from
+  structure/plen. X plen-3 + Y plen-4 composed into plen-6 Z beyond
+  trial depth. X ablation, Y ablation, and fresh all failed. Composite
+  later reused directly. RESEARCHER-OWNED: contract derivation,
+  contract-matching search, expected-answer verification. LEARNER-OWNED:
+  contract values, candidate MAPs, Z graph. Bounded L2 structural reuse,
+  not L3. Status: BUILD-PASS (exploratory).
+- C203 (REDTEAM-WAVE3; commit 98f68d6a3, 2026-10-02): COMPLETE
+  (adversarial, exploratory fixtures). Three bounds on prior claims:
+  (1) BREAK: cycle in the plen-bucket list crashed the scaling index;
+  no liveness/type/cycle check, candidate buffer overflowed. The 140x
+  claim holds only on intact happy-path state. (2) BOUND: irrelevant
+  plen-3 history made plen-5 Family 2 cost 40 vs fresh 10, a 4x
+  slowdown; the 6x L2L gain applies to relevant structural families
+  only, irrelevant history can cause negative transfer. (3) TRADEOFF:
+  perfect predictor plus adversarial source yielded 100% for
+  prediction-only and withholding/0% answered for the integrated AND
+  gate; RSV integration avoids false trust but is not always more
+  accurate. Status: REDTEAM-COMPLETE (bounds recorded, fixes required).
+- C204 (SCALING-CONT; commit 11adcb0ea, 2026-10-02): PROCESS-FAIL for
+  canonical promotion. The worker disclosed an actual accidental
+  `python3 -c` invocation during the wave. Under the mandatory
+  toolchain guard, this wave is PROCESS-FAIL for canonical promotion
+  regardless of claimed harmlessness. Measurements preserved as
+  EXPLORATORY ONLY: 100 MAPs 699->5 scan visits (140x), 500 MAPs
+  3464->5 (693x), 1000 MAPs 6964->5 (1393x); move-to-front consequence
+  ordering reduced repeated retrieval from 49 verifies to 1 (stale
+  fast-path cost 2); FACT index reduced gather visits 32760->167 and
+  lookup visits 24800->1092. Must NOT be promoted or canonized until
+  independently rerun cleanly under safebin with proof that python3
+  and python do not resolve. Status: PROCESS-FAIL (canonical);
+  measurements exploratory-only.
+- C205 (FORMAL-UNDERSTANDING; commit cd58d10e9, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Tiny EXL system: literals, ADD/MUL,
+  grammar, semantics, value constraint (Micah Priority 2). Both arms
+  demonstrated 10/10 mastery. Base TNN trial produced 0/11 valid novel
+  constructions. Researcher grammar-restricted treatment produced 11/11
+  valid. Base failure causes: (1) grammar-blind candidate generation,
+  (2) longer invalid chains preferred, (3) masked acceptance checked
+  output, not form. Treatment proves constraint use can eliminate
+  errors, but the grammar restriction was researcher-authored. Next
+  frontier: learner grammar induction from examples. Also: trial
+  leaked approximately 13 nodes per candidate, including rejected
+  candidates. Status: BUILD-PASS (exploratory).
+- C206 (FORMAL-ERRORS; commit 0ec9c0dc3, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). F1 relation purity: base 4/4 errors
+  despite 16 prior rejections; treatment 0/4. F2 structural form: base
+  4/4 errors despite ten precedents; treatment 0/4. F3 referential
+  integrity: both arms lost 8/8 graph nodes under pressure; base
+  executed the corrupted graph; treatment detected corruption and
+  refused. Architectural gaps: (1) consequences do not re-enter
+  generation, (2) search order ignores learned form, (3) no
+  referential-integrity invariant. Patches consulted learner-owned
+  knowledge but the consultation logic remained researcher-authored.
+  Dead candidate accumulation and full edge scans caused superlinear
+  slowdown. Status: BUILD-PASS (exploratory).
+- C207 (P2-LIFETIME; commit f11e8d612, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). 1000+ event lifetime with 960
+  interference events. Links survived: census 2->3->4->5. However
+  treatment, ablation, and control all reached one verify by C/D.
+  Cause: distractor executable graphs were evicted, removing the
+  competition cost that links had avoided. Link mechanism remains sound
+  but its value is conditional on persistent competitors. Only 2/3
+  treatment outputs and 1/1 controls completed due long runtimes; not
+  full 3/3. Status: BUILD-PASS (exploratory, partial completion noted).
+
+No em dashes were used in these entries (verified).

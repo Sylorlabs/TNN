@@ -315,3 +315,299 @@ H-SCALE-1, H-ADAPT-1, H-SUB6-1, H-UTILRET-1, H-THRESH-1, H-COMPRESS-1, H-SLOT-1,
 The exact-plen fallback lineage now has 4 adjacent "correct fallback" results (C188 H3/H4, C191 C1/C3 pattern). H-ADAPT-1 remains the last allowed characterization; next work on this lineage must be adaptation machinery or a different approach, not another fallback measurement.
 
 No em dashes used (verified).
+
+---
+
+## Saturation wave 2026-10-02: 19 new hypotheses (Micah 10 priorities)
+
+Status of prior hypotheses updated in the status table below. New IDs:
+
+### P0: Composition is a core frontier
+
+### H-COMPGEN-1: Which composition mechanism generalizes furthest, and can the three collapse into one operation?
+
+Question: A, B, and C independently demonstrated X+Y->Z in the chain family. Which mechanism survives fresh post-freeze domains (misleading fragments, multiple valid compositions, branch topology, incorrect expected targets), does one subsume the others, and can their useful principles collapse into ONE general composition operation rather than three engines?
+
+Why it matters: Micah Priority 1 forbids permanently integrating three separate composition engines. Three positive results in one battery is fork success, not architecture. If contracts, co-use history, and constraints share a common substrate (e.g. structure satisfying parts of a new goal), keeping three mechanisms is the same menu-expansion failure mode the constitution forbids.
+
+Experiment: Adversarial comparison battery on fresh sealed worlds unseen during development: (a) misleading fragments that look composable but are not, (b) multiple valid compositions with different costs, (c) branch (non-chain) topologies, (d) wrong expected targets that must be rejected. Run A, B, C mechanisms plus a candidate collapsed mechanism on all four. Score: solves, false compositions, cost vs fresh rediscovery.
+
+Falsifier: If all three mechanisms fail on branch topologies, composition is chain-bounded and no collapse is possible without new machinery. If the collapsed candidate matches or beats all three on every fixture with fewer cognition lines, the three-engine design is superseded.
+
+Priority: P0.
+
+### H-COMPNOEXP-1: Does composition work without expected-answer supervision?
+
+Question: A, B, C all used the expected output as the search target. Can X+Y->Z be driven by an internal goal-satisfaction criterion (goal state entailment, learner-owned verification) so that composition succeeds where no researcher expected value exists?
+
+Why it matters: Expected-answer verification is the last researcher crutch in the composition path. Composition that cannot proceed without the answer is assembly, not intelligence. This is the C181/C199 lesson applied to the composition frontier.
+
+Experiment: Composition battery where goals are states to reach or properties to satisfy, never expected structures. Treatment composes using learner-owned verification (C181 machinery) as the acceptance test. Controls: expected-guided (prior positive), fresh trial. Ablation: remove learner verification, keep composition.
+
+Falsifier: If treatment composes only when the goal state is isomorphic to an expected literal (verification is a rename of supervision), nothing changed. If ablation shows verification contributed nothing (search found Z first), composition does not use it.
+
+Priority: P0.
+
+### H-COMPK-1: Do compositions scale to 3, 4, 5+ learned structures?
+
+Question: All positive composition results combine exactly two fragments. Can TNN compose three, four, or five previously learned structures into one executable Z, with ablation of each fragment showing causal contribution?
+
+Why it matters: Two-fragment composition might be a special case (one boundary to bridge). Multi-fragment composition tests whether the mechanism is a general operation or a two-body trick. Micah Priority 1 names 3, 4, 5+ explicitly.
+
+Experiment: Chain worlds requiring K fragments (K=3,4,5) learned independently. Treatment: composition; controls: fresh trial, leave-one-fragment-out (K ablations each). Measure: solves, cost vs fresh, per-fragment ablation loss, later reuse of the K-composite.
+
+Falsifier: If cost grows superlinearly in K and exceeds fresh trial at K=3, the mechanism is a pairwise trick. If K-composites never persist or reuse, multi-composition produces disposable structures.
+
+Priority: P0.
+
+### H-COMPCROSS-1: Do structures from radically different domains compose?
+
+Question: Can X from one structure family (e.g. arithmetic procedure graphs) compose with Y from a radically different family (e.g. causal experiment sequences) into a Z neither family produces alone?
+
+Why it matters: Chain-family composition is bounded L2. Cross-domain composition is the test Micah Priority 1 and 4 demand: programming plus audio knowledge, formal language plus algorithm, causal knowledge plus planning. If composition only works inside one family, the "knowledge composes" claim is family assembly.
+
+Experiment: Teach procedure-graph X in a numeric domain and sequence-graph Y in a planning-ish domain, independently. Pose goal Z requiring both: e.g. construct a plan whose steps are computed by the numeric procedure. No paired examples, no hint, no label. Treatment vs fresh control, X ablation, Y ablation.
+
+Falsifier: If composition never bridges families across 3/3 runs in three family pairs, composition is family-bounded. If it works only when surface literals overlap, the bridge is surface matching.
+
+Priority: P0.
+
+### H-PARTADAPT-1: Can partial applicability be adapted during composition?
+
+Question: H-ADAPT-1 asks whether single MAPs adapt across shape mismatch. In composition, can a fragment that partially satisfies a sub-goal be adapted (prefix reuse, extension, truncation) rather than rejected whole?
+
+Why it matters: Exact-shape composition plus exact-shape rebinding both hit the same ceiling: anything mismatched falls back to trial. If fragments adapt inside composition, the reuse machinery contributes where shapes differ. Otherwise composition inherits the C188 ceiling.
+
+Experiment: Composition worlds where X fits sub-goal 1 exactly but Y needs one-step extension for sub-goal 2, the missing step inferable from Y's own data. Treatment: adapt Y inside composition; control: fresh trial for sub-goal 2. Measure verifies, whether the adapted Y persists and reuses.
+
+Falsifier: If adapted fragments cost more than fresh trial or never verify across three mismatch families, partial applicability is a fallback-only story.
+
+Priority: P0.
+
+### P0: Formal knowledge must constrain behavior
+
+### H-GRAMIND-1: Can TNN induce grammar/semantics from examples so learned constraints become causally active in construction?
+
+Question: C205 showed researcher-authored grammar restriction turns 0/11 into 11/11. Can the learner instead induce the grammar (allowable forms, type constraints) from positive and negative examples, store it in learner-owned state, and have it actively constrain generation so invalid structures become impossible or explicitly rejected?
+
+Why it matters: Micah Priority 2: do not permanently hardcode grammar restriction. Induce it from examples, then ablate the learned constraint and verify errors return. This is the sharpest test of "formal understanding constrains behavior" as learner-owned knowledge rather than researcher whitelist.
+
+Experiment: Teach the EXL tiny language (or a fresh compact formal language) via examples only: valid and invalid constructions with outcomes. Treatment: learner induces a constraint structure; later novel construction tasks. Controls: researcher-whitelist (C205 treatment), no-constraint base. Ablation: delete the induced constraint, keep everything else; errors must return. Long-term: extend toward Zag syntax.
+
+Falsifier: If induced constraints never reach whitelist performance across 3/3 runs in three languages, induction fails. If ablation does not restore errors, the constraint was not causal. If the induction procedure enumerates researcher-listed rule forms, the learning is template fitting.
+
+Priority: P0.
+
+### H-GENREENTRY-1: Do consequences re-enter candidate generation and search order?
+
+Question: C206 found consequences do not re-enter generation: base repeated 4/4 errors despite 16 prior rejections. Can rejection consequences alter future candidate generation and search ordering so previously rejected forms are not regenerated?
+
+Why it matters: This is the architectural gap behind F1/F2. A system that remembers outcomes but generates candidates as if nothing happened has memory without learning. The consequence loop (Constitution: outcome to retention to changed decision) is broken at the generation step.
+
+Experiment: Worlds with repeated construction opportunities in a constrained grammar. Treatment: rejection consequence records feed a generation-order penalty (via the shared substrate). Control: C206 base. Measure: repeat-error rate over trials, verifies to first valid, whether search order visibly shifts after rejections.
+
+Falsifier: If repeat errors persist at base rates after 20+ rejection records, consequences do not constrain generation. If order shifts but errors stay, ordering without form-avoidance is insufficient.
+
+Priority: P0.
+
+### P0: Scaling
+
+### H-INDEXADV-1: Can the general index invariant survive adversarial corruption?
+
+Question: C203 broke the plen-bucket index with a single cycle (no liveness/type/cycle check, buffer overflow). Can a GENERAL invariant (structural liveness checks, bounded candidate buffers, cycle detection on every index mutation path) be built so no fixture-specific fix is needed again?
+
+Why it matters: Micah Priority 6: fix the general invariant, not just that fixture. An index that crashes on corrupt state is not a scaling solution; it is a happy-path demo. Every index mutation (insert, link, evict, slot-reuse) must preserve the invariant.
+
+Experiment: Adversarial index battery: cycles injected at insert, bucket corruption, slot reuse after eviction, concurrent mutation during scan. Treatment: invariant-hardened index. Control: C193 index. Measure: crashes (must be zero), retrieval correctness, scan visits unchanged on intact state. Red team designs post-freeze corruption fixtures.
+
+Falsifier: If any corruption fixture crashes or silently returns wrong candidates, the invariant is incomplete. If hardening costs more than the index saves below 100 MAPs, record crossover.
+
+Priority: P0.
+
+### H-TRIALMEM-1: Can trial reclaim rejected candidates structurally?
+
+Question: C205/C206 noted trial leaks ~13 nodes per candidate including rejected ones, plus superlinear full edge scans. Can the learner reclaim dead candidate structure and index live structure so construction cost stays sublinear in trial history?
+
+Why it matters: Generation without reclamation is a memory leak wearing a lab coat. Long lifetimes require structure-level reclamation (Constitution 17). This is the memory half of the scaling story; indexing is the retrieval half.
+
+Experiment: Long construction lifetime (hundreds of candidates, most rejected). Treatment: structural reclamation of dead candidates plus live-structure indexing. Control: C206 base. Measure: workspace occupancy over time, per-candidate allocation cost trend, slowdown factor over 100/500/1000 candidates.
+
+Falsifier: If occupancy still grows linearly with rejected candidates, reclamation fails. If reclamation corrupts live structures (post-reclamation queries return wrong results), it is unsafe.
+
+Priority: P0.
+
+### P1: Cognitive operations as learner-owned structures
+
+### H-OPSTRUCT-1: Can cognitive operations be represented as learner-owned executable structures with learned applicability, consequence records, composition, revision, and retirement?
+
+Question: C197/C200 select operations from consequence history, but the operation set and preconditions are researcher-authored. Can operations themselves become learner-owned executable graphs whose applicability is learned from history, whose records live on the shared substrate, and which compose with each other, revise, and retire?
+
+Why it matters: Micah Priority 3. Researcher-authored ops with learned selection is still a menu. The north star: the learner discovers useful cognitive sequences itself. Avoid recreating modes as RETRIEVE_OP/REASON_OP/PREDICT_OP/INVENT_OP with a smarter router.
+
+Experiment: Operation records as executable structures: each op has applicability conditions learned from consequence records, cost estimates from history, and composition edges to successor ops. Worlds requiring multi-step cognition. Treatment: op structures editable by the learner (revise applicability after failures, retire ops with sustained negative utility). Control: C200 fixed op set. Measure: novel op sequences discovered, dead-op retirement events, composition of two ops into a compound op that reuses.
+
+Falsifier: If the learner never revises an applicability condition or retires an op across 3/3 lifetimes, ops are frozen entries. If op composition never yields a reused compound op, composition of cognition is absent.
+
+Priority: P1.
+
+### P1: Consequence-taught adaptive policy
+
+### H-INTEGPOL-1: Can consequences teach TNN the costs of false trust, unnecessary withholding, wrong prediction, and missed opportunity?
+
+Question: C203 showed the integrated AND gate withholds on a perfect predictor when the source is adversarial (0% answered) while prediction-only scores 100%. Can consequence records teach the decision policy the four costs (false trust, unnecessary withholding, wrong prediction, missed opportunity) so the policy adapts to context instead of using a hardcoded AND/OR?
+
+Why it matters: Micah Priority 7: do not patch the AND gate with a new hardcoded OR/AND switch. The policy must learn from consequences which error is expensive in the current context. This merges utility (C187), reliability (C183/C194), withholding (C195), and operation selection (C200) into one adaptive policy.
+
+Experiment: Context-varying lifetime: phases where (a) sources are honest (withholding is pure cost), (b) sources adversarial (trust is pure cost), (c) predictors unreliable (prediction cost). Treatment: policy parameters (trust/withhold/predict weights) updated from tagged consequence records. Control: C194 AND gate. Measure: accuracy per phase, answer rate, adaptation lag after phase change. Ablation: freeze weights at phase-a values.
+
+Falsifier: If treatment never beats the AND gate in any phase, consequence teaching fails. If weights oscillate without settling, the teaching signal is too noisy to be a policy.
+
+Priority: P1.
+
+### P1: Meta-learning applicability
+
+### H-APPLIC-1: Can the learner judge "does it apply HERE" with no researcher domain labels?
+
+Question: C203 proved irrelevant plen-3 history causes a 4x slowdown on plen-5 Family 2. Can the learner maintain applicability judgments (this old structure applies here / is irrelevant / is misleading) that accelerate related domains, stay neutral on irrelevant ones, and reject misleading ones, with NO researcher-supplied domain labels?
+
+Why it matters: Micah Priority 5. Learning-to-learn that cannot detect irrelevance is a liability at scale: every old structure becomes a tax. Applicability must be learner-owned and label-free, derived from structural match evidence and consequence history.
+
+Experiment: Mixed lifetime: Family B episodes interleaved with structurally related, structurally unrelated, and adversarially misleading families. Treatment: applicability tags learned per MAP/family from structural-match records and outcome consequences. Control: C198 machinery without applicability. Measure: cost on related (must accelerate), unrelated (must be neutral vs fresh), misleading (must reject faster than control). Ablation: delete applicability tags.
+
+Falsifier: If unrelated-family cost stays above fresh (neutrality fails), applicability is not learned. If the learner needs surface similarity to judge applicability, it is label-free only in name.
+
+Priority: P1.
+
+### P1: Invention (three structurally different hypotheses)
+
+### H-INVENT-MUT-1: Mutation: do new forms arise from structure mutation under inadequacy pressure?
+
+Question: When existing structures provably fail a goal (inadequacy detected via repeated consequence failure), can the learner generate mutated variants of its own structures (edge rewiring, node substitution, subgraph splicing) and does a useful mutant ever survive internal evaluation, persist, and reuse?
+
+Why it matters: Micah Priority 8 requires existing structures inadequate as the trigger. Mutation is the simplest structurally different invention hypothesis: variation on what exists, selected by learner-owned evaluation.
+
+Experiment: Worlds where all learned structures fail a novel goal but a one-mutation variant succeeds. Treatment: mutation generator over learner structures with internal evaluation (consequence-predicted utility) before execution. Controls: fresh trial, exact-reuse only. Track: mutants generated, mutants passing internal eval, mutants executed successfully, mutants persisting and reusing later.
+
+Falsifier: If no mutant ever passes internal eval and executes successfully across 3/3 runs in three inadequacy families, mutation does not produce invention. If mutants succeed but never reuse, they are disposable repairs.
+
+Priority: P1.
+
+### H-INVENT-REC-1: Recombination: do new forms arise from cross-family structure splicing?
+
+Question: Can the learner splice subgraphs from structures of different families (inadequate individually) into a novel form that neither family contains, evaluated internally, persisted, and reused?
+
+Why it matters: Second structurally different invention hypothesis. Recombination differs from mutation: the new form's parts come from unrelated structures, so the result is not a variant of any one parent. This tests whether TNN can be combinatorially creative rather than locally adaptive.
+
+Experiment: Goal requiring part of arithmetic-chain structure plus part of planning-sequence structure, where no single parent suffices. Treatment: subgraph splicing across families with internal eval. Controls: mutation-only (H-INVENT-MUT-1 arm), fresh trial. Measure: spliced forms created, internally accepted, executed, persisted, reused, transferred to a new surface.
+
+Falsifier: If spliced forms never outperform mutation-only across three cross-family worlds, recombination adds nothing. If every "splice" is actually one parent plus cosmetic graft, it is mutation in disguise.
+
+Priority: P1.
+
+### H-INVENT-CON-1: Constraint-driven: do new forms emerge from constraint satisfaction search over structure space?
+
+Question: Can the learner express a goal as constraints on structure (form requirements, type requirements, cost bounds) and search structure space for a form satisfying them, producing a form no existing structure resembles?
+
+Why it matters: Third structurally different invention hypothesis. Constraint search differs from mutation (no parent required) and recombination (no parts required): the form is specified by requirements, not derived from parents. This is the C199 constraint idea turned inward on structure creation.
+
+Experiment: Inadequacy worlds where the needed form is not a mutant or splice of anything known (verified by distance: no parent within K edits). Treatment: constraint extraction from goal plus structure-space search. Controls: mutation arm, recombination arm. Measure: forms created, constraint satisfaction verified, persistence, reuse, transfer. Crucial check: the final form must be source-underdetermined (no researcher-enumerated candidate family contains it).
+
+Falsifier: If constraint search never produces a form beyond K edits of a parent, it collapses to mutation. If forms are produced but never reused, they are one-off solutions.
+
+Priority: P1.
+
+### P1: Belief and logic
+
+### H-BELIEF-1: Does TNN form rational beliefs from available evidence (provisional, uncertain, revised)?
+
+Question: Given weak evidence, does TNN hold a provisional belief (acted on cautiously); given contrary evidence, does it become uncertain rather than flipping or freezing; given strong independent evidence, does it revise with an explanation trace?
+
+Why it matters: Micah Priority 9. Belief formation is scored against available evidence, not omniscience. The current machinery (reliability scores, thresholds) adjusts numbers; belief requires the learner to hold a stance toward a proposition and change it for stated reasons.
+
+Experiment: Evidence-ladder worlds: proposition P with (a) one weak source, (b) two contradicting sources, (c) three independent strong sources, (d) a later retraction. Treatment: belief records with evidence links and stance values. Measure: stance trajectory vs evidence, explanation quality (can TNN state why it believes P?), revision latency after retraction, action calibration (cautious action under weak evidence).
+
+Falsifier: If stances do not track evidence strength (e.g. full commitment on one weak source), belief is absent. If revision after retraction requires researcher intervention, the mechanism is not learner-driven.
+
+Priority: P1.
+
+### H-LOGIC-1: When known facts entail X, does TNN derive X without prediction?
+
+Question: In exact logical situations where premises entail a conclusion, does the learner DERIVE the conclusion (C190/C197 have DERIVE) rather than route through prediction machinery, and does it do so faster and more reliably than prediction-based paths?
+
+Why it matters: Micah Priority 9 and the constitution: prediction is one optional process. Forcing prediction into exact knowledge is waste and error. This tests whether the operation selector distinguishes entailed from uncertain.
+
+Experiment: Entailment worlds: premises that logically determine answers (deductive chains, constraint propagation) mixed with genuinely uncertain worlds. Treatment: unlabeled selector (C197) over operation set including DERIVE and PREDICT. Measure: on entailment worlds, DERIVE usage rate, correctness, cost vs PREDICT path; on uncertain worlds, PREDICT usage rate. Control: prediction-forced baseline.
+
+Falsifier: If DERIVE is not preferentially selected on entailment worlds (usage at chance), the selector cannot tell entailment from uncertainty. If DERIVE is selected but wrong more often than prediction, the DERIVE machinery is broken.
+
+Priority: P1.
+
+### P1: Strong composition sealed tests
+
+### H-COMPREVISE-1: Can composite structures be revised and reused later?
+
+Question: A, B, C showed Z persists and reuses once. Can a composite Z later be REVISED (counterexample arrives, Z must change while keeping its fragment provenance) and can the revised Z reuse in a new context?
+
+Why it matters: Micah Priority 1 and 4: persistence without revision is fossilization. The continuing learner must revise composites the way it revises beliefs. Revision of a composite tests whether the composition's internal structure (X part, Y part, bridge) is learner-legible.
+
+Experiment: Composition battery, then a counterexample invalidating the X-derived part of Z. Treatment: revise Z's X-part via re-composition or adaptation, keep Y-part. Controls: rebuild from scratch, keep broken Z. Measure: revision cost vs rebuild, whether revised Z verifies, later reuse of revised Z, provenance integrity after revision.
+
+Falsifier: If revision always costs as much as rebuild, composites are write-once. If revision corrupts the intact part, the composite is not modular.
+
+Priority: P1.
+
+### H-XYSKILL-1: Sealed X-skill plus Y-domain to novel Z (Micah core example battery)
+
+Question: In sealed worlds: learn skill X independently (e.g. a construction procedure), learn domain Y independently (e.g. audio fact structures), then receive novel goal Z requiring both (e.g. construct an audio system). No paired examples, no combination hint, no task label. Does causal reuse of both competencies occur?
+
+Why it matters: Micah Priority 4. This is the canonical strong-composition test, harder than chain batteries: the competencies live in different representational neighborhoods and Z is not a longer chain. Eventual instances: programming plus audio, formal language plus algorithm, causal knowledge plus planning.
+
+Experiment: Three sealed domain pairs designed post-freeze by an independent adversary. Treatment: full learner with composition machinery. Controls: X-only learner, Y-only learner, fresh learner. Require: both X and Y ablation loss, Z executable, no paired examples in training, no task label at goal time.
+
+Falsifier: If treatment fails all three pairs while X-only or Y-only succeed on their parts, cross-competency composition is absent. If Z succeeds but ablation shows only one competency was used, it is single-skill transfer.
+
+Priority: P1.
+
+---
+
+## Frontier status update: 2026-10-02 (Governance saturation wave)
+
+### Tested since the 2026-10-02 governance wave-3 update
+
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| H-COMP-1 | TESTED (positive, bounded) | C201/C202/C199: A, B, C all positive in chain family. Causal ablations pass. Researcher search machinery + expected-answer verification retained in all three. |
+| H-PERSIST-1 | TESTED (positive, bounded) | C207: links survive 1000+ events (census 2->3->4->5) but speedup conditional on persistent competitors; distractors were evicted. Partial completion (2/3 treatment). |
+| H-FORMAL-1 | TESTED (positive, bounded) | C205: mastery 10/10 both arms; construction 0/11 base vs 11/11 grammar-restricted. Restriction researcher-authored. C206: F1 4/4 base errors vs 0/4 treatment; F2 same; F3 both lost 8/8 nodes under pressure. |
+| H-NEGTR-1 | TESTED (negative) | C203: irrelevant plen-3 history causes 4x slowdown (40 vs 10) on plen-5 Family 2. Consequence substrate does NOT prevent negative transfer without applicability judgments. |
+| H-INDEX-1 | TESTED (positive, bounded) | C193 positive; C203 BREAKS it: cycle in bucket list crashes (no liveness/type/cycle check, buffer overflow). 140x claim valid only on intact happy-path state. |
+| H-INTEG-1 | TESTED (positive, bounded) | C194 positive; C203 TRADEOFF: perfect predictor + adversarial source gives 100% prediction-only vs 0% answered for integrated AND gate. Integration avoids false trust but can be too conservative. |
+| H-PREDOPT-2 | TESTED (positive) | C197: unlabeled selection 19/19 correct, emergent sequences; fresh ablation returns to 3 ops. Op set still researcher-authored. |
+| H-SUB6-1 | TESTED (positive) | C200: substrate-driven operation selection 7/7 vs 3/7 control; 6th/7th substrate behavior. Signature bits + score formula researcher-authored. |
+| H-THRESH-1 | TESTED (partial) | C195: adaptive WT wins on regime change 111 vs 104; loses stationary. Values learner-owned; update formula + clamp researcher-owned. |
+| H-SEQ-1 | TESTED (partial) | C197 emergent sequences GATHER->DERIVE->VERIFY->EXEC, RETRIEVE->REBIND->CROSSCHECK observed; sequencing researcher-free but op definitions researcher-authored. |
+| H-L2L-2 | TESTED (partial) | C198: cross-regime temporal-noise transfer (T=5 from noisy A); 0 wrong commits vs 3 for others. Cross-paradigm transfer still untested. |
+| H-SCALE-1 | RE-RUNNING CLEAN | C204 (11adcb0ea) PROCESS-FAIL for canonical (Python violation). Clean safebin reproduction in progress (scaling_clean worker; byte-identical source rebuild verified via cmp/sha256sum). |
+| H-COMP-0 | SUPERSEDED | A/B/C all consumed MAPs via composition machinery; the bridge question is answered positively for chains. Replaced by H-COMPGEN-1. |
+
+### Live frontier (open hypotheses)
+
+Untested: H-SCALE-1, H-ADAPT-1, H-UTILRET-1, H-COMPRESS-1, H-SLOT-1, H-PROVUTIL-1, H-XDOMAIN-1, H-COMP-0(s), H-EMERGKEY-1, H-COMPGEN-1, H-COMPNOEXP-1, H-COMPK-1, H-COMPCROSS-1, H-PARTADAPT-1, H-GRAMIND-1, H-GENREENTRY-1, H-INDEXADV-1, H-TRIALMEM-1, H-OPSTRUCT-1, H-INTEGPOL-1, H-APPLIC-1, H-INVENT-MUT-1, H-INVENT-REC-1, H-INVENT-CON-1, H-BELIEF-1, H-LOGIC-1, H-COMPREVISE-1, H-XYSKILL-1.
+Partially tested but open: H-VER-1, H-INDEX-1, H-INTEG-1, H-PREDOPT-1, H-COMP-1, H-L2L-1, H-PERSIST-1, H-THRESH-1, H-FORMAL-1, H-NEGTR-1, H-PREDOPT-2, H-SEQ-1, H-L2L-2.
+Total live: 41. Requirement: 20+. Met with margin.
+
+### Treadmill check (Constitution 23)
+
+New treadmill risk: composition A/B/C are three adjacent positive results on the same chain battery. Per Section 23, freeze the "another composition mechanism on chains" lineage: H-COMPGEN-1 is the last allowed chain-family characterization; next composition work must be adversarial generalization (H-COMPCROSS-1, H-COMPNOEXP-1, H-COMPK-1), cross-domain, or the collapse experiment, not a fourth mechanism on chains.
+
+The exact-plen fallback lineage stays frozen per the prior update. The scaling numbers lineage (100/500/1000 MAP claims) is frozen until the clean rerun lands; no new scale claims may cite C204 measurements as canonical.
+
+### Compression note
+
+C194 deleted one private store (net-negative integration). C201/C202/C199 add three parallel composition mechanisms (~250 lines each estimated). Net direction is wrong until H-COMPGEN-1 collapses them. Compression ledger addendum follows in the next governance commit.
+
+### Saturation worker mapping (no fixed cap; maximize useful throughput)
+
+Active: composition_compare (H-COMPGEN-1), scaling_clean (H-SCALE-1 clean rerun), plus 12 more lanes per Micah priorities: grammar_induction (H-GRAMIND-1), index_hardening (H-INDEXADV-1), belief_formation (H-BELIEF-1), logic_vs_prediction (H-LOGIC-1), meta_learning (H-APPLIC-1), cognitive_ops (H-OPSTRUCT-1), integration_policy (H-INTEGPOL-1), strong_composition_sealed (H-XYSKILL-1), cross_domain_composition (H-COMPCROSS-1), invention_1/2/3 (H-INVENT-MUT-1, H-INVENT-REC-1, H-INVENT-CON-1).
+
+No em dashes used (verified).
