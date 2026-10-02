@@ -280,3 +280,27 @@ Never amend shared history. No Python at any step.
   above the fixture's 27; the actual id M is recorded and used for
   STALE/CUR classification. The verdict bar was and remains id-set
   based, so no specific id value is required. No bar was weakened.
+- Amendment 3 (2026-10-02, before the amended-order attack binary
+  was built or run): A1/A3 construction order fix (mechanical,
+  bar-neutral). Both frozen constructions free the target MAP node
+  before intermediate allocations, and alloc_node is first-fit over
+  field36==0, so an intermediate allocation consumes the freed MAP
+  node and the require-nm==M step can never hold. Demonstrated:
+  A1 in frozen order printed nm=622, VOID nm!=m1 (the step-6 fact
+  teaches consumed node M); A3 in frozen order printed nm=421,
+  VOID nm!=m1 (node 27 held a live tag-1 fact after the count-graph
+  build, so a step-5 fact teach consumed it). The amended order
+  moves each attack's raw delete (missed hygiene) to immediately
+  before its promote_graph call: A1 executes steps as 1, 2, 4, 6, 7,
+  5, 3, 8, 9; A3 executes steps as 1, 2(record/check), 3(deactivate),
+  4(wrong-fact), 5(count facts), 6(count build), 2b(delete), 7
+  (promote), 8(trace/verdict), with the control tombstone applied
+  immediately after the moved delete (same relative position as the
+  frozen step 9). No step's content changes: each stale edge set is
+  recorded at the same point (after setup_a4c, before any delete);
+  decay still precedes promote_graph's provenance-edge writes, so
+  new edges still land at low ids; deactivation still precedes
+  re-teaching, so the recycle verifications are unchanged; the
+  missed-hygiene condition is unchanged (stale provenance edges
+  remain untombstoned). The ATTACK-SUCCEEDS / ATTACK-FAILS bars are
+  unchanged. No bar was weakened.
