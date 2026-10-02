@@ -6995,3 +6995,22 @@ No em dashes were used in this entry (verified).
   refinement).
 
 No em dashes were used in this entry (verified).
+
+- C283 (FORMAL-CONSTRAINTS; commits 0cf6fe35f, 14d630d35,
+  2026-10-02): COMPLETE. Learned formal knowledge constraining
+  generation. All K1-K7 PASS, 3/3 byte-identical. Induction
+  wrote one clause (field=0, mod, k=32, lo=17, hi=23). Arm N:
+  0/6. Arm R: 6/6. Arm L: 6/6 (identical picks to R).
+  WIRING-DEPENDENCE (critical test): split three ways. (1)
+  Registry ABI researcher-defined. (2) Composer reg_check call
+  site researcher-written: Arm N proves removing it leaves
+  judgments inert (0/6); LEARNER DID NOT WIRE its knowledge
+  into generation path. (3) Channel CONTENT learner-built from
+  judgments via generic Occam separation (K6 clean); constrains
+  generation once researcher-written composer consults it.
+  Boundary: learned content is a shortcut (mod-32), not the
+  grammar; faithful compilation needs researcher knowledge of
+  decode structure. IMPORTANT NEGATIVE: auto-wiring remains
+  researcher-dependent. Status: COMPLETE (with wiring gap).
+
+No em dashes were used in this entry (verified).
