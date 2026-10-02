@@ -123,3 +123,48 @@ guard function. Commits local only, explicit pathspecs, nothing pushed.
 This PREREG.md and NAMECHECK.md are committed BEFORE any implementation
 file is written. Implementation (e4_patch.zag, e4_driver.zag, binaries,
 run outputs, REPORT.md) follows only after the prereg commit exists.
+
+## Amendment A1 (2026-10-02, pre-verdict, transparent)
+
+During implementation testing (before any verdict was adopted), sub-check
+(A) the grid round-trip FALSE-REFUSED the EXL2 control: EXL2 returned -2
+instead of the predicted 1. Root cause: the check required every
+(a,b) point of the induced rectangle to appear as an observed pair
+object, but real worlds teach only constraint-satisfying pairs. EXL2
+never teaches pair (1,2) (SUB: 1-2<0; DIV: 1/2 inexact), so grid point
+18 is legitimately absent from the fact stream. The rectangle is the
+wrong unit for the round trip; a codec can be correct while the
+rectangle is sparsely observed, and the naive pair-set round trip is
+additionally provably vacuous for EXL3 (induced ranges a=[0,3], b=[0,15]
+re-encode to exactly the observed set 0..63). Sub-check (A) is therefore
+removed from the guard. The surviving guard is sub-check (B),
+op-consistency: the semantic round-trip P -> decode -> op(a,b) -> t vs
+the taught t. It is still fully general (it names no broken encoding;
+the discriminator comes from the fact stream), and the DIV facts with
+b=1 pin the decoded components to the true ones on the observed support,
+so a wrong codec cannot pass it.
+
+Revised frozen predictions (this amendment re-freezes the bars):
+
+1. EXL2: GI-INDUCED 1. GI-GRAMMAR nbuild=4 nlic=2 a=[0,9] b=[0,9].
+   Battery GI-I-VALID 6/6. No false refusal.
+2. EXL3: GI-INDUCED -3 (codec op-consistency diagnostic). GI-GRAMMAR
+   none. Battery arm prints GI-I-NOGRAMMAR and builds nothing.
+3. EXL4: GI-INDUCED -3 (codec op-consistency diagnostic; the stride-32
+   encoding is caught by the same general check, no encoding-specific
+   logic). GI-GRAMMAR none. Battery arm prints GI-I-NOGRAMMAR.
+4. Determinism: 3/3 runs byte-identical (equal SHA-256).
+5. Machinery identity: e4_base.zag byte-identical to
+   grammar_third/g3_base.zag (shared SHA-256); e4_patch.zag equals
+   grammar_third/g3_patch.zag plus the gi_codec_check function and the
+   guard insertion in gi_induce (diff recorded in REPORT.md); the five
+   /16 decode sites are byte-unchanged.
+6. No type-70 node exists in learner state after a refusal
+   (GI-GRAMMAR none in both EXL3 and EXL4 worlds).
+
+Revised kill bars: FAIL if EXL2 refuses or induces wrong ranges or
+scores != 6/6; FAIL if EXL3 or EXL4 induces (code == 1) or writes any
+grammar node; FAIL if either refuses with a code other than -3; FAIL if
+the 3 runs are not byte-identical; FAIL on any base/patch identity
+violation; FAIL (PROCESS-FAIL) on any forbidden executable invocation.
+The -2 diagnostic code is retired with sub-check (A).
