@@ -6294,3 +6294,20 @@ No em dashes were used in this entry (verified).
   BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C247 (XIO-REDTEAM; commit 64d12b79f, 2026-10-02): COMPLETE
+  (exploratory). 8 adversarial attacks on typed I/O adapters, 3/3
+  byte-identical. A1 type confusion: KILL (chain MAP with structural
+  INC misclassified oty=1; oty-difference gate permanently excludes
+  a competent MAP; "contains INC" is a researcher-side semantic
+  assumption, not a type signature). A2 wrong handoff: BOUND. A2b
+  distractor shadowing: BOUND. A3 adapter explosion: SURVIVE/BOUND.
+  A4 stale adapter: BOUND (4a/4b SURVIVE). A4c id recycling silently
+  rebinds a stage: KILL. A5 three-stage: BOUND. A6 oty proxy vs sum
+  family: KILL (consistent with C243). Scope: does not void
+  XIO-ADAPTERS-COMPLETE; bounds the trust envelope (chain/count, no
+  deletion or id recycling, two-stage, first-valid-path worlds).
+  A1/A6 addressed by XIO-generalization (in flight); A4c repair
+  dispatched. Status: 3 KILLS, 5 BOUNDS.
+
+No em dashes were used in this entry (verified).
