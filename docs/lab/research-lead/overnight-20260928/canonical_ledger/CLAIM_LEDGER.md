@@ -7134,3 +7134,22 @@ No em dashes were used in this entry (verified).
   demonstrated).
 
 No em dashes were used in this entry (verified).
+
+- C290 (LW2; commits bf523af0b, 229a6baca, 2026-10-02):
+  COMPLETE. Learner policy invention (W4). All 5 predictions
+  hold, 12/12 runs, 3/3 byte-identical. bandit: VALUABLE
+  NEGATIVE (context-blind habit, not policy; missing
+  measurement-conditioned branching). construct: exhaustive
+  search over 16,807 policies → retained policy 381 =
+  [EVAL,WIRE0,EVAL,IFB,UNWIRE0], matching scheduled exactly.
+  INVENTION REGRESS (preregistered): any finite learner's
+  topmost driver is fixed code; goal-directed construction
+  requires trial-and-selection at that level. Strong-sense W4
+  invention (no trial-and-selection anywhere) is incoherent.
+  Coherent target: specialization of generic trial-and-
+  selection substrate to new domains (demonstrated). This is
+  L2 construction, not L3 (finite researcher-defined policy
+  space; C0-B). Follow-up: LW3 (policy revision, transfer).
+  Status: COMPLETE (with regress theorem).
+
+No em dashes were used in this entry (verified).
