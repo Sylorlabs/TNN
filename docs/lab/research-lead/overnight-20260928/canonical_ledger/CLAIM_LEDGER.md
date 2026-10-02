@@ -6845,3 +6845,29 @@ No em dashes were used in this entry (verified).
   0 modes/bridges/handlers. Status: 2 KILLS.
 
 No em dashes were used in this entry (verified).
+
+- C275 (STRUCT-COMPOSITION; prereg dfa75105f, results
+  266b95b39, 2026-10-02): COMPLETE (frozen prereg precedes
+  implementation). PROCESS-PASS. 8/8 kill bars pass; 3/3
+  byte-identical. Built sever+recompute operator (sc_do, 497
+  lines pure Zag): reads causal edges, structural equations,
+  observation mapping, intervention spec from learner state;
+  copies edge list, severs incoming edges of intervened var,
+  fixes do-value, recomputes in topological order. K2 SURGERY:
+  (5,3,6,4) on Z1..Z4; both surgery cases solved. K4
+  GENERALITY: unmodified operator on new world (Q=2*P, R=P+Q)
+  gives (3,0). K5 IRREDUCIBILITY: deleting one edge+term moves
+  5->4, 4->2 with identical value facts; value chaining cannot
+  express this. GENERALITY ANALYSIS: generalization, not
+  reduction. Value chaining is the no-surgery degenerate case
+  (K6). The surgery step has no value-chaining expression
+  (K5). Do-composition is a second, irreducibly structural
+  kind; sever+recompute strictly generalizes value chaining by
+  adding a structure-rewriting dimension. This answers C273:
+  the ONE general composition op CAN exceed value chaining.
+  Honest boundaries: equations are planted declarative facts
+  (learning them is future work); two causal structures
+  tested. 0 modes/bridges/handlers. Status: BUILD-PASS +
+  architectural breakthrough.
+
+No em dashes were used in this entry (verified).
