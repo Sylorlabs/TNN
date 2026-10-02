@@ -318,6 +318,57 @@ No em dashes used (verified).
 
 ---
 
+## Frontier status update: 2026-10-02 (Composition consolidation)
+
+Canonical consolidation: `docs/lab/research-lead/overnight-20260928/composition_canonical/CONSOLIDATION.md`.
+Verdict: COMPOSITION-CANONICAL-COMPLETE.
+
+### Tested since the Wave 3 update
+
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| H-COMPGEN-1 | TESTED | H1 (typed contracts) + H2 (value composition) solve 4 domain pairs with unmodified mechanism logic (commits `99bf95ed7`, `0e63486c5`, `0c6cfa780`, `81b984bdc`, `141db015a`). H3's 2-mode structure-derived execution retired on structural grounds (cannot express value aggregation; mode extension is the finite-menu treadmill). H3 wiring discovery preserved as pluggable search option. Survivor set for value-handoff composition: H1+H2. |
+| H-COMPCROSS-1 | TESTED (positive, bounded) | H1/H2 bridge 4 family pairs at Level 1 exact reuse: navigation x aggregation, arithmetic x alloc, causal x intervention, grammar x construction. Family-bounded falsifier not triggered. Boundary is planning, not family distance (see H-PLANCOMP-1). |
+| H-XDOMAIN-1 | TESTED (mixed) | SUM to ALLOC (integer division): yes, H1/H2 PASS (`0c6cfa780`, artifacts in `xdomain_arith_plan/superseded_prereg1/`). SUM to PLAN (genuine goal-directed action sequences): no; H1/H2/H3/XIO all fail, clean negative (PREREG2 `91e84ee0d`, current `xdomain_arith_plan/REPORT.md`). The hypothesis as stated is confirmed for arithmetic value handoff and falsified for planning composition. |
+| H-COMP-1 | SUPERSEDED | C191's "composition architecturally absent" verdict is superseded for value-handoff composition: H1/H2 demonstrate X+Y->Z across 4 pairs. Still open for planning composition (H-PLANCOMP-1) and for Levels 2/3. |
+
+### Correction recorded
+
+The `xdomain_h3_arith` / `h3_generality` "three-way comparison on the
+same pair" (H1 PASS, H2 PASS, H3 FAIL) was invalid: H1/H2's figures
+are from the PREREG1 world (SUM to ALLOC, Z=(101,93)->3) while H3 was
+tested on the PREREG2 world (SUM to PLAN, Z=(103,93)->203). Different
+Y domains, different sealed goals. Corrected record: on SUM to ALLOC,
+H1 PASS / H2 PASS / H3 UNTESTED; on SUM to PLAN, all FAIL. H3's
+retirement stands on the independent structural argument (2-mode
+dispatch cannot express value aggregation), not on the invalid
+comparison. Full correction in CONSOLIDATION.md Section 5.
+
+### Architectural lesson (candidate constitutional principle)
+
+Composition should depend on learned behavior contracts, not on
+structural heuristics about how procedures compute. H1 observes WHAT
+procedures consume/produce; H2 executes and observes results; both
+are representation-agnostic. H3 inspected structure to select
+execution method and failed at the first computation type outside
+its heuristic. Structure underdetermines computation.
+
+### New hypothesis from this consolidation
+
+- **H-PLANCOMP-1 (P0):** Can any mechanism compose a computed value
+  into a goal-directed planning procedure? PREREG2 shows H1/H2/H3/XIO
+  all fail SUM to PLAN (plan(sum(s)) with parameterized action
+  sequences). The failure is architectural and shared: every current
+  mechanism is a novel-chain constructor. Falsifier: a mechanism that
+  solves SUM to PLAN at cost below fresh trial with X/Y ablations
+  causal and no planning-specific template. If three structurally
+  distinct approaches fail, planning composition needs a new
+  architectural primitive, not a better chain constructor.
+
+No em dashes used (verified).
+
+---
+
 ## Saturation wave 2026-10-02: 19 new hypotheses (Micah 10 priorities)
 
 Status of prior hypotheses updated in the status table below. New IDs:
