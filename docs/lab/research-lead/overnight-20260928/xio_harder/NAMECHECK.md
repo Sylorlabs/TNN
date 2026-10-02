@@ -84,10 +84,12 @@ sha256sum xhio_run1.txt xhio_run2.txt xhio_run3.txt
   (2026-10-02 14:38:42 UTC). Verified via git show/ls-tree: that
   commit contains ONLY PREREG.md + NAMECHECK.md under xio_harder/
   (no driver, no binary, no run outputs).
-- Implementation file (xhio_driver.zag) first commit hash: (this
-  commit, strictly after bea72f336; filled at commit time)
+- Implementation file (xhio_driver.zag) first commit hash:
+  629f21e3a1df15169e6129ad98b69932cb633e59
+  (strictly after bea72f336).
 - Self-check: PASS on prereg side (no implementation at or before
-  bea72f336). Final verdict pending the implementation commit.
+  bea72f336). Implementation commit 629f21e3a is strictly later.
+  Commit-order self-check: PASS.
 
 ## Step 4: Build and run log
 
