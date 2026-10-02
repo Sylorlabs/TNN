@@ -90,4 +90,27 @@ SURVIVED. The 0221pdt index-cycle panic class is dead under direct
 adversarial corruption: the gate rejects and every hardened path
 completes.
 
-(viii)-(xi): storm_fill / storm_evict / storm_churn runs in progress.
+(viii) Soak coherence. KILL. storm_evict r1: deep validator
+returned 0 at eviction k=2 (victim v=13, tag=102, a chain node);
+the run was terminated for diagnosis after k=4. Evidence in
+work/storm_evict_r1.txt:
+  EVICT k=2 v=13 tag=102 deep=0
+  EVICT DEEP-VIOLATION k=2
+  EVICT k=3 v=14 tag=101 deep=1
+Root cause (code analysis, patch_control.zag): the sealed 0521pdt
+eviction hook `idx_on_chain_break` detects chain membership via
+`idx_chain_hits`, which hard-codes a strict 102/101 alternation
+(`if(tag!=102){return 0;}` / `if(tag!=101){return 0;}`) and follows
+tag-101 steps only through the type-12 seqtab. Any chain shape that
+deviates (a 101-rooted chain, a 101 without a type-12 seq edge, or a
+non-alternating layout) makes the walker return 0, so the broken
+MAP is never unlinked and `idx_validate` correctly reports the
+incoherence. At k=3 the walker happened to hit (victim tag 101 in a
+walkable position), unlinked the MAP, and the gate recovered to 1,
+confirming the k=2 miss was a walker false-negative, not a
+validator false-positive. The 0521pdt evict storm did not cover this
+shape; the 120-chain soak did. This KILL applies to the BASE
+eviction hook, not to the revise candidate (C1): the revise path was
+not exercised in this storm. A fix (generalizing the walker to
+mirror `rb_chain_plen`) is a new candidate requiring its own
+prereg; it is queued, not attempted in this wave.

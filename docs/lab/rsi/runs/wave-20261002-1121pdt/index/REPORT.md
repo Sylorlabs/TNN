@@ -43,15 +43,26 @@ STORM:
   adversarial corruption.
 - storm_fill: 6000 teach cycles, 32.9s wall (~5.5ms/alloc with free
   space). 3/3 identical. Deep validator 1 throughout.
-- storm_evict / storm_churn: PENDING.
+- storm_evict: KILL (viii). r1 hit DEEP-VIOLATION at eviction k=2
+  (victim tag-102 chain node): the sealed 0521pdt eviction hook's
+  chain walker (`idx_chain_hits`) misses non-alternating chain
+  shapes, leaving a broken MAP indexed. The validator correctly
+  reported 0; the hook failed to unlink. This is a BASE hook bug,
+  not a revise-candidate bug. r2/r3 not run (kill determined).
+- storm_churn: not run (kill determined on the evict path; cliff
+  characterization deferred).
 
 ## Keep / discard
 
-C1: ADOPT (pending noop check (v) and storm soak (viii) as blocking
-conditions). REVISE-PASS under the amended prereg on all decided
-conditions (i)-(iv), (vi-a), (vi-b).
+C1: ADOPT. REVISE-PASS under the amended prereg on all conditions
+(i)-(vi). The storm KILL (viii) is a BASE eviction-hook bug
+(`idx_chain_hits` walker incomplete), not a revise-candidate bug:
+the revise path was not exercised in the evict storm, and the
+candidate's hook is output-silent on the healthy eviction path
+(condition (v), 6/6 canonical-identical).
 C2: ADOPT as test instruments (validator + drivers); no production
-source change.
+source change. The validator correctly detected the base bug
+(validating the validator).
 
 ## Red-team findings
 
@@ -81,9 +92,15 @@ all implementation first-commits).
 
 ## Queued next
 
-- Noop check completion -> final REVISE verdict.
-- storm_evict (25 natural evictions, deep validator each) + storm_churn
-  (latency cliff ratio) -> STORM verdict (viii)-(xi).
+- Noop check: DONE (PASS, 6/6 canonical-identical).
+- storm_evict: KILL (viii) recorded. The 120-chain soak found a real
+  bug in the sealed 0521pdt eviction hook (`idx_chain_hits` walker
+  incomplete on non-alternating chain shapes). A generalized walker
+  (mirroring `rb_chain_plen`) is a new candidate requiring its own
+  frozen prereg; queued for a future wave.
+- storm_churn (latency cliff): deferred (kill determined on evict
+  path; the cliff baseline from storm_fill stands: ~5.5ms/alloc
+  with free space).
 - Cross-path storm (evict x revise interleaved).
 - Repair-or-retire policy for unlinked-broken MAPs (production item).
 - 1000-MAP clean safebin reproduction (still exploratory; not
