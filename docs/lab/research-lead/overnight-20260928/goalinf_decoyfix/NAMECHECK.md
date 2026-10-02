@@ -45,6 +45,6 @@ dynamic content.
 * c1f0e5c30 PREREG.md + NAMECHECK.md frozen (no src yet)
 * 53a50e762 src/*.zag implementation
 * 5b17c2e16 bin/* compiled binaries + outputs/*.txt + sha256sums.txt
-* <report-sha> REPORT.md + NAMECHECK.md SHAs
+* dd1b403b6 REPORT.md + NAMECHECK.md SHAs
 
 (SHAs filled at commit time.)
