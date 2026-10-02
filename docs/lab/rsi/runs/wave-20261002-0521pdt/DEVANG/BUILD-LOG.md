@@ -52,6 +52,20 @@ measurement used the frozen DEVANG4 binary only.
   sliq, gabo, imlau, gabexu). The explicit list governs;
   implemented as listed. No kill bar is affected.
 
-## Sealed runs (to be appended)
+## Sealed runs
 
-(pending)
+14. Sealed-run hashes verified against sealed5/SHA256SUMS (all OK);
+    devang5 binary hash `a11bd350...` verified before any sealed run.
+15. Sealed runs 3/3 each (exit 0, zero stderr): `segb` learner
+    (12/12), `segb-abl` (6/12), `sealc-fresh` learner/c0/c2/c1/c3
+    (14/8/14/3/3 of 20), `segb-scene` Family E learner (6/6).
+    All 3/3 byte-identical (sha256 recorded in SEALED_EVAL.md).
+16. `SEALED_EVAL.md`: per-bar results; verdict BUILD-FAIL on K_ABL
+    leg 1 (ablation 6/12 > frozen 5/12); classified as
+    bar-miscalibration/test-design with evidence (K_DISC 6/6,
+    learner 12/12 vs ablation 6/12, K_AUD pass).
+17. `REDTEAM_SELF.md`: adversarial self-review (structural
+    difference, K_DISC reality, K_ABL classification, metric
+    gaming, fabrication check).
+18. `sealed5/familye_key.txt` (Family E key, from prereg-explicit
+    content) and `scoree` binary committed with the eval.
