@@ -1,6 +1,7 @@
 # PREREG: Cross-Domain Grammar to Program L3 Novel Intermediate (COMPILE)
 
-Status: PREREG-FROZEN. No implementation exists at this commit.
+Status: PREREG-FROZEN (amended; see section 11). No implementation
+commit exists.
 Scope: `docs/lab/research-lead/overnight-20260928/xdomain_l3/` only.
 Worker: Cross-Domain L3 Worker (subagent, 2026-10-02).
 Parent mandate: test L3 novel intermediate on grammar to program
@@ -20,7 +21,7 @@ Design decision (disclosed): `learner.zag` is a byte-identical copy of
 is not modified). The only new artifacts are the world (grammar
 productions, program fuel rules) and the driver (arms, phases, checks).
 This is the experiment, not a shortcut: the discriminating prediction
-is that the frozen machinery invents M = [ADD R1,R3] here versus
+is that the frozen machinery invents M = [ADD R0,R3] here versus
 [ADD R0,R2] in FORAGE. If the intermediate's form were baked into the
 machinery, it could not differ across worlds. A different invented form
 from the same frozen source is the cross-domain L3 evidence.
@@ -47,10 +48,10 @@ input type do not meet. A new intermediate is required.
 
 Identical to composition_l3, section 2 of its PREREG (state layout,
 X store, label store, Y scalar observations and threshold, M slot and
-Mprev slot, register machine with R0..R3 preloaded, frozen op basis
-{0=CPY, 1=ADD, 2=SUB, 3=MAX, 4=MIN}, construct() greedy search with
-80 candidates per round and strictly positive first-max gain,
-refit_threshold(), adapt() with codes 0/1/2/3, decide() with
+Mprev slot, register machine with R0..R3 preloaded and R0 as output,
+frozen op basis {0=CPY, 1=ADD, 2=SUB, 3=MAX, 4=MIN}, construct() greedy
+search with 80 candidates per round and strictly positive first-max
+gain, refit_threshold(), adapt() with codes 0/1/2/3, decide() with
 NO_DECISION=-1). No production data, no hidden world rules, and no
 reduction solution live in the learner source. The op basis is the same
 disclosed residual researcher footprint as FORAGE and is NOT expandable
@@ -66,53 +67,54 @@ learner source never calls them.
 - Y prior fuel experience (teaches that Y exists and consumes scalars):
   (12,1),(15,1),(11,1),(8,0),(5,0),(9,0).
   Y threshold from this data: t=10 (first-max ascending; 6/6).
-- TRUE1 (phase 1): RUN-OK iff e1+e3 >= 10.
-- TRUE2 (phase 2): RUN-OK iff e1+e3 >= 14 (stricter fuel criterion).
-- TRUE3 (phase 3): RUN-OK iff e1+e2+e3 >= 16 (world change).
+- TRUE1 (phase 1): RUN-OK iff e0+e3 >= 10.
+- TRUE2 (phase 2): RUN-OK iff e0+e3 >= 14 (stricter fuel criterion).
+- TRUE3 (phase 3): RUN-OK iff e0+e2+e3 >= 16 (world change).
 
 Frozen production tables (rule id: [e0,e1,e2,e3], outcome under the
 phase rule):
 
 Phase 1 train (labels from TRUE1):
-1: [3,7,1,5] ok    2: [9,4,8,6] ok    3: [1,9,2,3] ok
-4: [6,2,9,8] ok    5: [8,6,0,3] fail  6: [4,9,7,0] fail
-7: [2,1,5,4] fail  8: [7,3,6,5] fail
+1: [7,1,2,5] ok    2: [2,9,0,9] ok    3: [8,0,8,4] ok
+4: [1,2,9,9] ok    5: [9,0,1,0] fail  6: [8,8,0,1] fail
+7: [0,1,3,2] fail  8: [5,5,1,4] fail
 Phase 1 test:
-9: [5,6,2,4] ok   10: [8,1,7,2] fail   11: [0,9,9,5] ok
+9: [6,0,0,6] ok   10: [9,9,0,0] fail   11: [3,3,8,8] ok
 12: [4,4,4,4] fail
 
 Phase 2 refit (labels from TRUE2):
-21: [3,8,1,7] ok  22: [9,5,2,9] ok  23: [6,9,4,4] fail
-24: [2,2,8,8] fail
+21: [7,1,2,7] ok  22: [9,0,0,5] ok  23: [8,2,1,5] fail
+24: [6,6,6,6] fail
 Phase 2 held-out:
-25: [1,7,3,8] ok  26: [9,2,6,3] fail
+25: [5,0,0,9] ok  26: [9,9,4,4] fail
 
 Phase 3 train (labels from TRUE3):
-31: [7,6,5,5] ok  32: [2,9,4,5] ok  33: [8,2,3,4] fail
-34: [1,9,8,2] ok  35: [5,5,5,5] fail 36: [9,1,7,7] fail
-37: [3,3,3,9] fail 38: [6,4,6,6] ok
+31: [7,1,6,5] ok  32: [2,9,7,9] ok  33: [8,0,8,4] ok
+34: [6,2,1,9] ok  35: [9,0,6,0] fail 36: [8,8,0,1] fail
+37: [0,1,3,2] fail 38: [5,5,1,9] fail
 Phase 3 test:
-39: [5,7,5,4] ok  40: [9,1,1,1] fail  41: [2,8,4,5] ok
-42: [7,2,2,3] fail
+39: [6,0,6,6] ok  40: [9,9,0,0] fail  41: [5,5,4,7] ok
+42: [7,7,1,7] fail
 
 Frozen hand-derived expectations (the implementation must reproduce
 them; any deviation is a falsifier, not a tuning opportunity):
 - Phase 1 construction from empty: round 1 evaluates 80 candidates;
-  baseline score 5/8 (best threshold on R0=e0); ADD R1,R3 (op=1,d=1,
-  s=3) is the unique 8/8 candidate (gain 3 over baseline); round 2 finds
-  no positive gain; M = [ADD R1,R3] (1 instruction: program bytes
-  1,1,3), threshold t=10, train 8/8.
+  baseline score 5/8 (best threshold on R0=e0); ADD R0,R3 (op=1,d=0,
+  s=3) is the unique 8/8 candidate (gain 3 over baseline; CPY R0,R3
+  reaches 7/8, gain 2); round 2 finds no positive gain; M =
+  [ADD R0,R3] (1 instruction: program bytes 1,0,3), threshold t=10,
+  train 8/8.
 - Menu controls (experiment controls in the world file, NOT learner
   machinery), thresholds fit on phase-1 train (first-max ascending):
-  SUM t=25, MAX t=9, MIN t=1, FIRST t=9, LAST t=5. Each misclassifies
-  at least one phase-1 test production (SUM on 9, MAX on 9, MIN on
-  10, FIRST on 9, LAST on 9).
+  SUM t=18, MAX t=6, MIN t=1, FIRST t=1, LAST t=4. Each misclassifies
+  at least one phase-1 test production (SUM on 9, MAX on 10, MIN on
+  9, FIRST on 10, LAST on 12).
 - Phase 2 adapt: M+t=10 scores 2/4 on refit; threshold refit reaches
   4/4 at t=14; adapt code 1; M structural bytes unchanged; held-out
   2/2.
-- Phase 3 adapt: M+t=14 scores 5/8 on train; threshold refit maxes at
-  7/8 (t=11); extension finds ADD R0,R2 as the first positive-gain
-  append (gain 1); adapt code 2; M' = [ADD R1,R3, ADD R0,R2], t=16,
+- Phase 3 adapt: M+t=14 scores 4/8 on train; threshold refit maxes at
+  7/8 (t=10); extension finds ADD R0,R2 as the first positive-gain
+  append (gain 1); adapt code 2; M' = [ADD R0,R3, ADD R0,R2], t=16,
   test 4/4; old M in Mprev with superseded=1.
 
 ## 4. Frozen arms
@@ -136,7 +138,7 @@ them; any deviation is a falsifier, not a tuning opportunity):
 - K-XD-3 (creation trace): the run log shows construction with at
   least one positive-gain round, the final program is non-empty, and
   it scores 8/8 on phase-1 train. The program bytes are printed from
-  learner state and must be (1,1,3).
+  learner state and must be (1,0,3).
 - K-XD-4 (causal necessity): ARM-FULL == 4/4 AND ARM-NO-M == 0/4.
   Removing M restores the X/Y type gap and Z fails.
 - K-XD-5 (persistence): the 28 structural bytes of the M slot
@@ -156,10 +158,10 @@ firing.
 ## 6. Frozen K-XD-2 grep audit spec (run on learner.zag)
 
 Each pattern must return zero matches (grep -c == 0):
-1. `e1+e3` (the solution expression)
-2. `ADD R1,R3`
-3. `3,7,1,5` (production data must not live in the learner)
-4. `odd` (no positional concept in the learner)
+1. `e0+e3` (the solution expression)
+2. `ADD R0,R3`
+3. `7,1,2,5` (production data must not live in the learner)
+4. `outer` (no positional concept in the learner)
 5. `threshold.*=.*10` (no hardcoded threshold; thresholds come only
    from sweeps over experience)
 6. `_MODE` (zero modes allowed)
@@ -203,7 +205,7 @@ one raw syscall write. 3/3 byte-identical required.
 - One world family (grammar production to program fuel). No generality
   claim beyond the demonstrated phases.
 - The cross-domain comparison (FORAGE [ADD R0,R2] vs COMPILE
-  [ADD R1,R3] from the same frozen learner) is evidence, not a bar.
+  [ADD R0,R3] from the same frozen learner) is evidence, not a bar.
 
 ## 10. Standing non-claims (unchanged)
 
@@ -212,3 +214,30 @@ one raw syscall write. 3/3 byte-identical required.
 - 0 modes, 0 bridges, 0 handlers, 0 new semantic cases. Pure Zag.
   No em/en dashes in loop documentation. Paper untouched. Nothing
   pushed. Commits local on tnn-native-lab.
+
+## 11. Amendments (transparent, re-frozen before implementation commit)
+
+AMENDMENT-1 (builder hand-derivation error, caught by the first full
+run before any implementation commit). The original freeze expected
+M = [ADD R1,R3] (program bytes 1,1,3) for rule TRUE1: RUN-OK iff
+e1+e3 >= 10. That expectation is unimplementable in the frozen
+register machine: the executor's output is always R0, so an
+instruction with d != 0 can never affect the output, and no
+single-instruction program computes e1+e3 into R0. The first full run
+confirmed the machinery is sound (it found a 3-instruction 8/8 program
+[CPY R0,R2, MAX R0,R1, ADD R0,R3]) but the frozen expectation was
+wrong, so the prereg as written could not pass. Per the
+amend-transparently-and-re-freeze rule, the world is redesigned: the
+production tables swap the e2/e3 columns relative to the original
+draft and TRUE1 becomes RUN-OK iff e0+e3 >= 10 (TRUE2: e0+e3 >= 14;
+TRUE3: e0+e2+e3 >= 16, symmetric and unchanged). The expected
+intermediate is now M = [ADD R0,R3] (program bytes 1,0,3), which the
+machinery can express; the phase-3 revision becomes M' = [ADD R0,R3,
+ADD R0,R2]. All hand-derived expectations in section 3 (construction
+winner and gains, menu fits, adapt codes, thresholds) were recomputed
+for the swapped tables; the menu LAST fit moves t=5 -> t=4 and its
+miss moves from production 9 to production 12. Sections 1, 5 (K-XD-3),
+and 6 (audit patterns) are updated to match. No learner, driver
+logic, op basis, arm, or bar was altered to rescue a result; only the
+world tables/rules and their derived expectations changed, before any
+implementation commit.
