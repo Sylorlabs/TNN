@@ -6937,3 +6937,23 @@ No em dashes were used in this entry (verified).
   cross-domain).
 
 No em dashes were used in this entry (verified).
+
+- C280 (LEARNER-VERIFICATION H-LVNAV-1; commits 514e4ef6a,
+  59cdd6114, 2026-10-02): COMPLETE. Learner-owned verification
+  on 8x8 grid navigation (OPEN/LAVA variants). Learner induces
+  displacement contracts, composes MAPs, commits with predicted
+  final cell, driver executes committed MAP, learner judges from
+  world state alone (PASS iff final==goal AND burned==0 AND
+  final==predicted). All 8 frozen kill bars PASS. Agreement vs
+  harness: 3/4 (75%) value key, 2/4 (50%) trace key. KEY
+  FINDING: learner-owned verification diverges exactly where
+  answer key is mis-specified: D1 (keys under-specify, miss
+  unburned constraint; learner catches lava violation); D2
+  (trace key over-specifies, rejects valid alternative route;
+  learner accepts it). CTRL arm (prediction-only, no world
+  read) spuriously passes T3, proving world observation is
+  load-bearing. Learner verification is neither subset nor
+  superset of harness verification. Aligns with Micah 2026-10-02
+  directive #5 (internal verification). Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
