@@ -7035,3 +7035,26 @@ No em dashes were used in this entry (verified).
   Status: COMPLETE (L3 VALIDATED).
 
 No em dashes were used in this entry (verified).
+
+- C285 (L3-REDTEAM; commits aeb7b3f6a, 76197e77c, 2026-10-02):
+  COMPLETE. Independent adversarial attack on C281/C284 L3
+  claim. 10 preregistered attacks; 7 SUCCEEDED, 3 FAILED.
+  KILL: L3 classification does not survive. The "creation" is
+  a single greedy step whose exact outcome was named in the
+  frozen prereg before implementation; it is MENU SELECTION
+  over 5 ops (explicitly excluded from L3 per Micah taxonomy;
+  fails C0-B open structural form). Successful attacks: A1
+  ORACLE-SELECTION (exhaustive trial, no internal criterion);
+  A2 TRANSFER-SEAL (prereg hand-derived bytes; sealed vs
+  copying not vs anticipation); V1 OP-REMOVAL (cannot compose
+  SET1+ADD); V2 TWO-STEP-RULE (greedy traps at score 1);
+  V3 AMBIGUOUS-LABELS (builds WRONG M by tie-break; not
+  goal-directed); V4 OPNUM-SWAP (byte bar coupled to
+  researcher numbering); V5 FACT-ORDER (answer key selects).
+  Survives: genuine trace, no planting, generic machinery,
+  label-responsive transfer, persistence/revision mechanics.
+  RECLASSIFICATION: C281/C284 are L2+ mechanism demonstration,
+  NOT L3 evidence/validated. Honest negative; red-team
+  process working as designed. Status: COMPLETE (L3 KILLED).
+
+No em dashes were used in this entry (verified).
