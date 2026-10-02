@@ -42,3 +42,36 @@ sc(grn)=10, sc(sph)=10.
 Baseline run confirms: 2321pdt picks the shatter on all six (0/6).
 COSEG design: whole has margin 2 (50 coherence) vs shatter margin 0;
 50 + 5 (seg parsimony) > max gap 33 -> whole wins on all six.
+
+## Post-freeze timeline (all after c768b02be)
+9. `devang4.zag` implementation edits: interpret_scores extraction,
+   coseg_margin, seg_coseg (beam B=6 + joint rerank), 5 learner-path
+   call-site switches, mode_segb_scene harness, argv dispatch.
+10. Built `devang4` via pinned znc (sha256
+    cfba24f157a22b0e721f9a27722320f6b2d3a77e250b96c9045659b58bb9ddbd).
+11. Dev runs: `fama` DEV-PASS (K1 10/10, 7/7 sub-bars, K8/K_C0/K_ABL-A
+    pass); `segb-scene` on Family D: 2/6 (D3, D5 correct).
+12. `genseal4.zag` written; validated with altered seeds in /tmp
+    (formats OK; output discarded); real run produced sealed4/.
+13. `scoreb.zag` written and validated.
+14. Sealed package committed (20f1500f1) BEFORE any sealed run; hashes
+    verified pre-run.
+15. Sealed runs 3/3 byte-identical, exit 0, zero stderr:
+    K_SEG 4/12 (FAIL), K_SEAL 12/20 (PASS), K_ABL 1/12 + gap 2 (PASS),
+    K_DISC 2/6 (FAIL, premise holds).
+16. `IMPLEMENTATION.md`, `SEALED_EVAL.md`, `REDTEAM_SELF.md` written.
+
+## Implementation edit history (devang4.zag vs 2321pdt devang3.zag)
+1. Header comment: DEVANG4 prereg reference.
+2. `interpret` refactored: extracted `interpret_scores` (identical
+   behavior); `interpret` now calls it then argmax.
+3. Added `coseg_margin` (best minus second-best object score; zero W
+   writes).
+4. Added `seg_coseg` after `seg_dp`: cold start (same as seg_dp),
+   beam DP B=6 over exact 2321pdt scoring, backtrack, rerank by
+   joint = lexScore + 25*margin - 5*nseg, argmax (beam-order ties).
+5. Learner path (scene available) switched seg_dp -> seg_coseg:
+   mode_segb training, sealc_train_one v0, sealc_test_one v0, fama
+   train, fama test. mode_segb sealed path keeps seg_dp (no scene).
+6. Added `mode_segb_scene` harness + `segb-scene` argv dispatch.
+7. Labels updated to DEVANG4. C0/ablation/C1/C3 untouched.
