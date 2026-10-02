@@ -6957,3 +6957,23 @@ No em dashes were used in this entry (verified).
   directive #5 (internal verification). Status: COMPLETE.
 
 No em dashes were used in this entry (verified).
+
+- C281 (XDOMAIN-GRAMMAR-L2M; commits e5b747176, 762cda924,
+  2026-10-02): COMPLETE with L3 classification. Grammar→
+  construction pair where Y (taught as divisor→word lookup)
+  cannot construct; sealed Z requires (a) L2 relation rebinding
+  of X and (b) a generator intermediate M. All 12 kill bars
+  pass, H1 and H2. CRITICAL: intermediate created by LEARNER,
+  not researcher. Creation trace: C-ROUND 1 base=0 win=4,0,0
+  gain=2 score=2 → M=[INC R0] (bytes 4,0,0, created=1).
+  Causal: NO-M fails (intermediate necessary); SUPPLIED passes
+  (solvable given M). Persistence: Z2 via persisted composite.
+  Revision: regime change → M'=[INC R0,ADD R0,R0], old M
+  retired. H1: rebound X param=73 → 24→25. H2: VC-COMPOSE
+  rel=73. 3/3 byte-identical. Honest bounds: validity rules
+  builder-designed; one L2 form, one intermediate form; does
+  not claim full 12-criterion L3 bar. First L3-class result:
+  learner-created intermediate with creation trace,
+  persistence, and revision. Status: COMPLETE (L3 EVIDENCE).
+
+No em dashes were used in this entry (verified).
