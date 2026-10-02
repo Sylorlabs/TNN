@@ -30,7 +30,7 @@ Debate group: convened after lanes land (advocate, skeptic, judge; provenance pr
 
 ## Verdicts (debated in DEBATE.md)
 
-(to be filled)
+- Fork battery: 59 refs (53 local, 6 remote); 2 FRESH PASS (tnn-native-lab @ 3dceac9cc moved tip; new archive ref tnn-native-lab-wave-archive-wave-20261001-2021pdt @ a272a8f6); 55 RE-CERT PASS; 2 RE-CERT UNTESTABLE (rh-pull-1-head, rh-pull-2-head, standing cause); 0 FAIL. Archive immutability: 47/47 pre-existing tips byte-identical, plus 1 new ref fresh-tested PASS (48/48). Frozen pins verified (znc 498abcb5..., probe 3b29aa06..., b1_run 5dfe3c16..., b2_bin 75b85d3c...). Commit 668ae8d8f. [NEW] (debate pending)
 
 ## Queued next
 
