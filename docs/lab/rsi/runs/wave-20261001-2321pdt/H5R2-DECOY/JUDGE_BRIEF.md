@@ -2,8 +2,9 @@
 
 ## Provenance header
 
-- RENDER_SHA: (sealed-eval commit: 8 assembled decoy world files, 8
-  compiled world binaries, EVAL_DECOY.md with the 3/3 byte-identical
+- RENDER_SHA: 12d69043fcfac44052b3ab1495a441a90b6c4510
+  (sealed-eval commit: 8 assembled decoy world files, 8 compiled
+  world binaries, EVAL_DECOY.md with the 3/3 byte-identical
   full-stdout hashes; implementation commit 4511f5c64 strictly follows
   prereg freeze commit 51a4fe8e1)
 - FIRST_RENDERED_WAVE: wave-20261001-2321pdt
