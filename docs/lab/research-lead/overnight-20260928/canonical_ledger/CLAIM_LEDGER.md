@@ -6099,3 +6099,25 @@ No em dashes were used in this entry (verified).
   Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C236 (GRAMMAR-OUTLIER; prereg 2858ea46b, results 3d9938812,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Repairs the C222 W5 denial-of-learning vulnerability via
+  learner-derived outlier exclusion (gi_induce2; original gi_induce
+  untouched for comparison). Criterion: majority consistency over
+  per-example licensor profiles; minority-unlicensed exclusion;
+  smallest relation set covering strict majority; ties broken by
+  cross-target attestation (genuine 43/44 span all 10 targets).
+  Results 3/3 byte-identical: clean batch -> byte-identical grammar
+  to transfer W1, 6/6; +1 deceiver -> excluded+flagged, 6/6 (original
+  returns 0, vulnerability reproduced then repaired); +2 deceivers ->
+  6/6; 50/50 disjoint -> honest REFUSAL code 4, no silent pick;
+  majority poisoning 5v4 -> predicted DEFEAT (bogus lic={46}, 0/6,
+  caught by eval); coordinated minority piggyback -> CAUGHT via
+  attestation (20 vs 12), 6/6; piggyback at exact 50/50 -> predicted
+  limitation (wrong exclusion). Terminal boundary stated: adversary
+  matching genuine attestation is no longer an outlier by any
+  learner-visible measure. 0 modes/bridges/handlers. Status:
+  BUILD-PASS.
+
+No em dashes were used in this entry (verified).
