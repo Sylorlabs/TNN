@@ -5909,3 +5909,22 @@ No em dashes were used in this entry (verified).
   ADVERSARIAL (2 kills, 2 bounds, 1 survive).
 
 No em dashes were used in these entries (verified).
+
+- C227 (FRAG-STORAGE; prereg b5b8fe190, results 7087302a8, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation). Fragment-addressable
+  MAP storage via type-15 LINK segment marks (H-DECOMP-1, P0). One mark
+  = one type-15 edge: from MAP node m, to entry guard at position
+  start, aux (start<<16)|len. API: frag_store (dedup + bounds),
+  frag_fetch (resolve + walk len steps via DEP edges), frag_list
+  (enumerate). Zero new tables/node types/modes/bridges/handlers. All
+  7 kill bars PASS, 3/3 byte-identical. T4-CTRL: whole-MAP DFS FAILS
+  (replicates C208). T4-FRAG-C (Composition C lineage over store):
+  PASS with path [(mx,0,3),(my,0,2)]; the PREFIX is used. T4-FRAG-H2
+  (H2 lineage, greedy over SAME store): PASS. SHARED: 6 type-15 edges
+  total, both mechanisms read through frag_fetch against the identical
+  set; the only type-15 write is inside frag_store. T4 partial
+  applicability RESOLVED via shared substrate. Caveat: marks
+  researcher-seeded in prototype; learner origination out of scope.
+  Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
