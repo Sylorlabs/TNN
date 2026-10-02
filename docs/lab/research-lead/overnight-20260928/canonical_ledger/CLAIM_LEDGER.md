@@ -5461,5 +5461,47 @@ No em dashes were used in these entries (verified).
   (3 adjacent correct fallbacks; H-ADAPT-1 is last characterization).
   No auto-promotions; all 18 require experiments first. Status:
   GOVERNANCE-COMPLETE.
+- C197 (UNLABELED-SELECTION; commit 808323e1a, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Removes researcher-authored process
+  taxonomy (Micah Section 1 correction to C190). Goals presented as
+  (s,r) only, no type labels, no mode selector. Learner selects
+  operations from state via learned consequence history (tag-61
+  records: op,sig to succ,att). 19/19 correct, 3/3 byte-identical.
+  Cognition lines ~600. RESEARCHER-OWNED: op definitions,
+  preconditions, DER rules, tie-break. LEARNER-OWNED: consequence
+  records, per-goal selections, MAP promotions. Status: BUILD-PASS
+  (exploratory).
+- C198 (STRONG-L2L; commit 79405d4a0, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Cross-regime meta-transfer via
+  learned caution (Micah Section 5, harder than C192). 4-arm test:
+  noisy-A (T=5) vs stable-A (T=2) vs fresh (T=3) vs ablated (reset T).
+  Family B has sustained noise bursts. NOISY-A: 11 revs to stable
+  correct, 0 wrong commits. Others: 26 revs, 3 burst-traps each.
+  Ablation proves T causal; stable-A proves noise-specificity. Builds
+  on C182 (adaptive threshold b6135c531). RESEARCHER-OWNED: E update
+  rule, T formula, arm design. LEARNER-OWNED: all T/E values, write
+  decisions and timing, threshold trajectory. 3/3 byte-identical.
+  Status: BUILD-PASS (exploratory).
+- C199 (COMPOSITION-C; commit 69f59a7f9, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Constraint-driven assembly:
+  X+Y to Z via structural property matching. Follows C191 negative
+  (TNN-2 does not compose). Mechanism (~250 lines, 0 modes/bridges/
+  handlers): structural property extraction walks MAP executable graph
+  reading SET cell DEP edges to licensing facts; constraint
+  satisfaction matches MAP relation sequences against goal state.
+  TREAT 37 via MAP 27 to 63; ABL-X, ABL-Y, FRESH, NO-COMPOSE all -2;
+  Z prime reuse via composed MAP. No paired examples, no hint, no task
+  label. LEARNER-OWNED: relseq values, candidate choices, segment
+  MAPs, Z graph. 3/3 byte-identical. Status: BUILD-PASS
+  (exploratory).
+- C200 (SUBSTRATE-SELECTION; commit ced35d5c3, 2026-10-02): COMPLETE
+  (exploratory, no frozen prereg). Consequence history selects
+  cognitive operations from the shared substrate. No task labels, no
+  mode switch. Treatment 7/7 vs fixed-order control 3/7. Extends C185
+  (substrate expansion): operation selection becomes the 6th behavior
+  driven by the same tag-61 store. RESEARCHER-OWNED: signature bit
+  definitions, score formula, default order, curriculum.
+  LEARNER-OWNED: all success records, per-situation selections. 3/3
+  byte-identical. Status: BUILD-PASS (exploratory).
 
 No em dashes were used in these entries (verified).
