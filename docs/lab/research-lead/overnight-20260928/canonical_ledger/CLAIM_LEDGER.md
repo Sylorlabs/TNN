@@ -5994,3 +5994,24 @@ No em dashes were used in this entry (verified).
   FAIL (informative; points to per-candidate hypothesis).
 
 No em dashes were used in this entry (verified).
+
+- C231 (XDOMAIN-HARDER; prereg 23266dc1c, results d09995951,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  CLEAN NEGATIVE. Harder cross-domain pair: transform-then-navigate
+  (X=COUNT node->number, Y=CHAIN on numeric subjects number->node,
+  Z=Y(X(s)) with computed intermediate k=4). Harder than C215: first
+  domain non-navigational and invisible to chain perception;
+  intermediate is computed, not a fact-store node; Y indexed by
+  computed values. XH-H1 KILLED: sees only Y chain MAPs, mutations
+  rejected. XH-H2 KILLED: zero 82-fragments satisfiable, cannot
+  re-subject to k=4. XH-H3 KILLED: plen sweep 1-4 finds 81-chains but
+  verify fails at every plen. All arms Z=-2. Shared diagnosis: every
+  invention mechanism is a novel-chain constructor (perception via
+  rb_chain_plen/ir_relseq/invent_relseq demands guard/set; assembly
+  via t2_asm_chain; goal test on walked values). Same disease as
+  composition A/B/C, one level deeper. Indicated direction: B-style
+  type-15 history + typed function composition with value->subject
+  re-subjecting. 3/3 byte-identical per mechanism. 0
+  modes/bridges/handlers. Status: INFORMATIVE NEGATIVE.
+
+No em dashes were used in this entry (verified).
