@@ -6871,3 +6871,19 @@ No em dashes were used in this entry (verified).
   architectural breakthrough.
 
 No em dashes were used in this entry (verified).
+
+- C276 (CERT-V2; commit 876f36dd2, 2026-10-02): COMPLETE
+  (exploratory). PROCESS-PASS. Folded sweep adaptations into
+  certify_base_v2: auto-classifies candidates (BASE iff defines
+  tnn2_init; else probe compile: unknown fn -> ADAPTER, clean
+  -> MECHANISM-EXPERIMENT); non-bases get NOT APPLICABLE (exit
+  3), never FAIL. For BASE: auto-detects base's own ev_query;
+  trims base main in scratch only. Verified vs all 5 sweep
+  targets: identical verdicts (3 BASE FAIL-A, 2 NOT
+  APPLICABLE). Host+adapter cert: xio_core2 vs cl_full ->
+  XIO-CERT-VERDICT PASS (AC2-AC6, 3/3 byte-identical).
+  ma_base v1 parity reproduces H-BASECERT-1 exactly. One
+  classifier bug found/fixed (greedy sed). All bases
+  sha256-verified untouched. Status: BUILD-PASS (harness v2).
+
+No em dashes were used in this entry (verified).
