@@ -5350,5 +5350,22 @@ No em dashes were used in these entries (verified).
   partial applicability, branched topologies, negative transfer, and
   misleading structurally similar MAPs. Status: BUILD-PASS
   (exploratory).
+- C189 (PROTECT-HOW; commit eb19a4f3c, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Generative structure protection by
+  eviction order (Micah Priority 7). Retry of throttled worker; 6 runs
+  at 15 to 18 min each. Teach 4-hop chain P (8 cells, reexec=5), derive
+  20 answers cached as INFERRED FACTs, 1000 interference teaches.
+  Control (stock eviction): 0/8 P cells survive, reexec dead, MAP
+  fossil. Treatment (3-tier eviction: derived answers, then other,
+  then generative last): 8/8 P cells survive, fully executable; 0/20
+  cached answers survive (deliberately sacrificed Tier-1 victims);
+  Phase 5: 17/20 rebind, 3 trials (9 verifies) vs control 20/20 rebind.
+  Only cognition difference is evict_node (~36 lines), so survival is
+  causally attributable to eviction order. Q6 reversal demonstrated
+  mechanically: retaining P (9 nodes) preserves ability to regenerate
+  unbounded answers. Honest boundary: 3-tier policy is
+  researcher-authored, not learner-derived; proves retention order
+  works, not that TNN discovers it. LEARNER-OWNED structural decisions:
+  0. 3/3 deterministic per arm. Status: BUILD-PASS (exploratory).
 
 No em dashes were used in these entries (verified).
