@@ -115,9 +115,9 @@ wrongs = 7). Streak at r24 = -1.
 P4 (M4b alternating): r2/r4/r6: 500/500/500. wrongs = 3, ret = 0.
 No forgiveness, exactly the fraction rule, unchanged from parent.
 
-P5 (M5 escalated repair): continuing M3 state (27/27, streak +20,
-ret 4): one wrong gives (27,28) rel 964, streak -1. Seven clean rounds
-give: r1: 965, r2: 966, r3: 967, r4: 968, r5: 969, r6: 1000, r7: 1000.
+P5 (M5 escalated repair): continuing M3 state (42/42, streak +20,
+ret 4): one wrong gives (42,43) rel 976, streak -1. Seven clean rounds
+give: r1: 977, r2: 977, r3: 978, r4: 978, r5: 979, r6: 1000, r7: 1000.
 Full repair of the single relapse wrong at the 6th clean round (streak
 reaches ret+2 = 6). ret ends at 5, wrongs = 0. The mitigation's price
 is measured: 6 rounds versus 2 under the parent rule.
@@ -146,7 +146,7 @@ K3: P2 holds exactly (M3 recovery 851/888/925/962/1000 at +1..+5,
 K4: P3 and P4 hold exactly (laundering checkpoints 666/800/750/727/
     705/695 strictly decreasing after r6; ret == 1 and wrongs == 7 at
     r24; alternating 500/500/500 with ret == 0).
-K5: P5 holds exactly (relapse 964 then 965/966/967/968/969/1000/1000;
+K5: P5 holds exactly (relapse 976 then 977/977/978/978/979/1000/1000;
     full repair at 6th clean round; ret ends at 5).
 K6: P6 holds exactly (heavy debt c1 = 90, c2 = 181, c11 = 1000,
     c12 = 1000; ret ends at 10, wrongs == 0).
@@ -164,3 +164,19 @@ recovery curve confirming preservation, the M5 repair cost as the
 measured price, and the M6 heavy debt curve. Byte verify stdout of the
 binary before trusting it (od -c spot check). State plainly whether
 each prediction held, with the exact frozen verdict rule cited.
+
+## Amendment A1 (2026-10-02, pre execution, transparent)
+
+Caught by re derivation before any compile or run: the original P5/K5
+used post M3 state (27/27). The true post M3 state is (42/42): M3 runs
+20 clean rounds, and after full recovery at +5 the record keeps growing
+(28/28) through (42/42), with streak +20 and ret 4. (The same (27/27)
+slip appears in the parent P8 text; the parent code correctly used the
+(42/42) state with nulls 976/977/1000.) Corrected M5 nulls: relapse
+976, then 977/977/978/978/979/1000/1000 over the 7 clean rounds, full
+repair at the 6th clean round, ret ending at 5, wrongs 0. The mechanism
+(6 clean rounds to repair 1 relapse wrong under ret=4) is unchanged;
+only the reliability values move with the larger denominator. No
+implementation had been compiled or executed when this amendment was
+written; no results were observed. P5 and K5 above carry the corrected
+values.
