@@ -227,5 +227,19 @@ ds_run1.txt, ds_run2.txt, ds_run3.txt.
 Commit record:
 - fdac1ee31: PREREG.md + NAMECHECK.md alone (frozen,
   pre-implementation).
-- (implementation commit hash below; explicit pathspecs; nothing
-  pushed; branch tnn-native-lab.)
+- a183745df: implementation + REPORT (explicit pathspecs for
+  `git add`; note: the shared branch index held 10 pre-staged
+  contract_drift_detect files from a concurrent worker, which were
+  swept into the same commit; no data lost, directories separate).
+- Nothing pushed; branch tnn-native-lab.
+
+## Shared-index incident note
+
+During the implementation commit, the tnn-native-lab branch index
+was shared with concurrent workers. Ten contract_drift_detect files
+pre-staged by another worker were committed together with the ten
+l3_delayed_stochastic deliverables under the l3_delayed_stochastic
+commit message. All twenty files are intact in the repo; the two
+directories are separate. No history rewrite was attempted (shared
+branch, concurrent writers, and a WATCHDOG commit already sits on
+top).

@@ -61,7 +61,11 @@ pinned znc. No forbidden executable invoked: no PROCESS-FAIL.
 
 ## Commit record
 
-- (prereg commit hash recorded in REPORT.md; PREREG.md + NAMECHECK.md
-  only; explicit pathspecs; nothing pushed; branch tnn-native-lab.)
-- (implementation commit hash recorded in REPORT.md; explicit
-  pathspecs; nothing pushed; branch tnn-native-lab.)
+- fdac1ee31: PREREG.md + NAMECHECK.md alone (frozen,
+  pre-implementation; explicit pathspecs).
+- a183745df: implementation + REPORT (explicit pathspecs for
+  `git add`; the shared branch index also held 10 pre-staged
+  contract_drift_detect files from a concurrent worker, which were
+  swept into the same commit; no data lost, directories are
+  separate; see REPORT.md).
+- Nothing pushed; branch tnn-native-lab.
