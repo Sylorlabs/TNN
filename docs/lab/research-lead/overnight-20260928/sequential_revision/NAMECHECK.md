@@ -97,7 +97,7 @@ lines, 15 MATCH, 0 MISMATCH.
 
 ## Step 6: commits (explicit pathspecs, local only, never pushed)
 
-- Prereg commit: PREREG.md alone.
-- Implementation commit: NAMECHECK.md, REPORT.md, sr_mech.zag,
+- 8d54c2d7e: PREREG.md alone (frozen before implementation).
+- dc4bf7d3f: implementation: NAMECHECK.md, REPORT.md, sr_mech.zag,
   sr_main.zag, sr_full.zag, build.sh, sr_bin, compile.txt,
-  run1/2/3.txt, sha256sums.txt (explicit pathspecs).
+  run1/2/3.txt, sha256sums.txt (12 files, explicit pathspecs).
