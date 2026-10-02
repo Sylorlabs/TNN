@@ -47,3 +47,24 @@
 - Governance caveat honored: the mini_lifetime_integration 3/3 determinism
   claim is not artifact-backed beyond run1 transcripts (per the 1721pdt zombie
   investigation); it is not cited as established anywhere in this lane.
+
+## Step 0b: implementation-phase toolchain re-verification (worker 2 of lane CONTLEARN)
+
+- Date: 2026-10-01 20:48 PDT (Thu). Worker: phase-2 implementation subagent.
+- Ran: `bash docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh ; export PATH="$HOME/safebin"`
+- Result: SAFEBIN-READY: /home/hatch/safebin (36 tools, no python); znc OK
+  (pinned /home/hatch/workspace/tnn-rsi/src/tools/toolchain/znc_linux_x86_64_abed8aa1)
+- `which python3` prints NOTHING (verified empty, exit 1).
+- `which python` prints NOTHING (verified empty, exit 1).
+- K2a gate pre-implementation: SHA-256 of
+  docs/lab/research-lead/overnight-20260928/tnn2_build/tnn2.zag =
+  a29972ca8183b2857c0c7b262d004fce6e4547c02a971a7aef035b44aa76a8bd (match);
+  `git diff f4de7ff46` on that path is empty. Frozen core read-only for the
+  build. PASS, not blocked.
+- K0 ordering verified: HEAD is 2ed8fb7d3 (prereg committed alone); no
+  implementation files exist in the lane directory before this write; all
+  lane deliverables will first appear as descendants of the prereg commit.
+- PURE ZAG ONLY: shell invokes only the pinned znc, runs compiled binaries,
+  git read ops, and file moves/copies. No Python/C/JS/Rust at any stage.
+  Any forbidden executable invocation is automatic PROCESS-FAIL.
+- Do NOT git commit; the coordinator commits. No push, no reset, no rebase.
