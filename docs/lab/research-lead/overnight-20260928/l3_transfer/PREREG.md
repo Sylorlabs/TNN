@@ -243,3 +243,24 @@ trusting it.
   record provenance, and the decoy rejection in phase C shows it does
   not blindly apply old solutions.
 - This build does not claim Micah's full 12 criterion L3 bar.
+
+## 11. Amendments (transparent, before the frozen evaluation runs)
+
+AMEND-1 (SENTRY Y prior fit scope): section 3 lists the SENTRY Y prior
+fit as 6/6 t=16. In ARM-TRANSFER the learner is continuing: Y scalar
+observations accumulate across phases (6 FORAGE + 6 RELAY + 6 SENTRY =
+18), so the fit over the accumulated 18 mixed observations is 15/18 at
+t=10 and is not asserted. The 6/6 t=16 expectation applies to the
+isolated 6 SENTRY observations, evaluated in ARM-FRESH (asserted
+there). In ARM-TRANSFER phase B the driver still teaches the 6 SENTRY
+scalars (honest accumulation); the operative B threshold is the library
+refit t=16, asserted via the probe and the M slot. No load bearing bar
+changes: T4 still requires probe entry 0 at 8/8 t=16 and M slot
+threshold 16.
+
+AMEND-2 (T7 arithmetic): the driver first asserted ARM-NO-LIB total
+construct evals == 320, a builder slip: state N accumulates phase A
+(160) + phase C (160) + phase B (160) = 480. T7 is corrected to assert
+the phase B delta == 160 (reinvention cost fully restored by wiping the
+library). The T6 comparison (transfer B delta 0 vs fresh B delta 160)
+is unchanged.
