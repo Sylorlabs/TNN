@@ -123,6 +123,7 @@ K-R2.1..K-R2.6 or RT-K1..K3. DDES remains bounded L2.
 
 ## Commits (lane branch lane-ddes-20261002-1121pdt, local only)
 
-- dd5d92f63: PREREG_DDES_RT10.md frozen alone.
-- (implementation + results commit follows; ordering verified
-  below before the verdict is reported.)
+- dd5d92f63: PREREG_DDES_RT10.md frozen alone (1 file).
+- a14d652cf: implementation + results (14 files). Commit-order
+  self-check: git merge-base --is-ancestor dd5d92f63 a14d652cf
+  passes (ORDER-OK); prereg strictly precedes implementation.
