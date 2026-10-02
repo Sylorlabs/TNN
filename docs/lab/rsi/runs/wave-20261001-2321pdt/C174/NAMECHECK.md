@@ -23,3 +23,10 @@
 - Implementation written and smoke-tested (selftest SELFTEST_OK,
   generator produces deterministic worlds). No tuning after seeing
   the generated world: constants and seeds stand as frozen.
+- Seal committed (0096b30ca): world_sealed.zag
+  e66dab44370eaad23da57cedfef59e202a1f14aec42447addeaec4edad787fc8,
+  before any eval binary ran.
+- Eval run: all five kill bars PASS. VALIDATION-PASS.
+  Disclosed fix: removed the arm metadata line from eval stdout
+  (bar c compares whole-output hashes; arm id stays in filenames).
+  No prereg/world/decision change.
