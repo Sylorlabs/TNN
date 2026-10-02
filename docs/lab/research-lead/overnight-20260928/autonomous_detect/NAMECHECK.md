@@ -66,8 +66,39 @@ ARM-NOREVISE (detection fires, revision withheld, stays broken).
 
 ## Step 3: Development notes
 
-(To be filled after implementation.)
+1. The prereg hand derivations were done before any implementation
+   existed. The first full build reproduced every one with zero
+   source changes after the initial pre-run cleanup (one unused
+   driver local `ereq` removed; it only triggered a B0103 warning).
+2. Build: `cat learner.zag world.zag driver.zag > ad_full.zag`
+   (1210 lines), then `znc ad_full.zag -o ad_bin`. Build exit 0.
+   Only diagnostics: the benign zagd-unavailable notice plus three
+   A0101 off-by-one heuristic warnings in x_revise_masks/x_recall
+   (analyzer cannot prove the bounds; indices are provably in
+   range, same as the spec_mask_revision build).
+3. Output path follows the AGENTS.md stdout workaround: numbers
+   formatted directly into one preallocated 64KB buffer with
+   cursor-returning helpers (ob_app/ob_i32), single
+   `_zag_raw_syscall(1,1,ptr,len)` write loop. No `_zag_print`
+   anywhere. Stdout verified: 187 lines, 0 NUL bytes (tr/cmp
+   check), ends with AUTONOMOUS-DETECT-END.
+4. State uses u8 buffers with get32/set32 only; no `as *i32` slice
+   construction. Register file is an 8-byte scratch (2 registers).
+   Mask bit tests use integer division, not bitwise ops.
+5. Key result shape: baseline mean=9 spread=4 from phase-1 test
+   scores [13,5,13,5]; stable phase-5 scores deviate exactly 4,
+   never strictly exceeding, so no false trigger; stale-mask
+   scores collapse to 0 (deviation 9 > 4) and the learner sets
+   DET_REVISE_REQ at the 3rd consecutive surprise (ZT id=23 line
+   shows surp=1 req=1); x_maybe_revise swaps masks 48<->12 to
+   12/48 with REV_PTR 24 and revs=1; Z-CHANGE 4/4 with M1 reused.
+   The NOREVISE control shows detection without revision stays at
+   2/4, attributing recovery to the learner-triggered revision.
 
 ## Step 4: Determinism
 
-(To be filled after runs: 3/3 byte-identical sha256.)
+- No RNG anywhere. Fixed candidate order, first-max tie-breaking,
+  ascending threshold sweeps, deterministic monitor logic.
+- ad_run1/2/3.txt sha256 identical:
+  33a7b29f15194c2d8a031642f7e80276c15d4ccc38968c51a69cecdf92a055c6
+  (all three). K-AD-7 PASS.
