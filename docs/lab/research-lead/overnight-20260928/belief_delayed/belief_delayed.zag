@@ -1,0 +1,485 @@
+// belief_delayed.zag -- Belief under delayed evidence and rediscovery.
+// H extension of belief formation (78e5a5eac). Unfrozen variant.
+// Pure Zag. 0 modes, 0 bridges, 0 handlers, 0 semantic cases.
+//
+// Extends the baseline mechanism (evidence records, reliability learned
+// from verification outcomes only, independence discount, band derived
+// statuses) with:
+//   1. Finite evidence table (32 records), FIFO eviction under memory
+//      pressure. Eviction drops the receipt but the score contribution
+//      persists: the learner remembers the bottom line, forgets the detail.
+//   2. Event identity register (128 ids). Every observation carries an
+//      event id. A re presented event whose id is already registered is
+//      rejected as a duplicate: no record, no score change. Familiarity
+//      without recall. Genuine new events are always counted.
+//   3. Ablation arm NAIVE: identity register disabled (baseline behavior
+//      under pressure). Expected to double count on rediscovery.
+//   4. Delay phase: unrelated calibration events between settled belief
+//      and contrary evidence.
+//   5. Phase D: source reliable for 20 rounds then adversarial.
+//
+// Output discipline (toolchain lesson 2026-10-02): ONE preallocated
+// output buffer, cursor returning emit helpers formatting numbers
+// directly into the buffer, a single _zag_raw_syscall(1,1,ptr,len)
+// write at the end. No _zag_print anywhere.
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn eq(a:i32,b:i32)i32 { if(a==b){return 1;} return 0; }
+
+// ---- single output buffer, cursor returning emit helpers ----
+fn e_str(ob:[]u8,at:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ob[at+i]=s[i];i=i+1;}
+  return at+s.len;
+}
+fn e_i64(ob:[]u8,at:i32,v:i64)i32 {
+  let neg:i32=0;
+  let u:i64=v;
+  if(v<0){neg=1;u=-v;}
+  let nd:i32=1;
+  let t:i64=u;
+  while(t>=10){t=t/10;nd=nd+1;}
+  let e:i32=at+neg+nd;
+  let k:i32=e;
+  let x:i64=u;
+  while(k>at+neg){k=k-1;ob[k]=((x%10) as u8)+48;x=x/10;}
+  if(neg==1){ob[at]=45;}
+  return e;
+}
+fn e_i32(ob:[]u8,at:i32,v:i32)i32 { return e_i64(ob,at,v as i64); }
+fn e_nl(ob:[]u8,at:i32)i32 { ob[at]=10; return at+1; }
+fn chk(ob:[]u8,at:i32,F:[]u8,ok:i32,msg:[]u8)i32 {
+  if(ok==0){
+    at=e_str(ob,at,"FAIL ");
+    at=e_str(ob,at,msg);
+    at=e_nl(ob,at);
+    set32(F,0,get32(F,0)+1);
+  }
+  return at;
+}
+
+// ============ state block: 688 i32 cells ============
+fn cg(B:[]u8,c:i32)i32 { return get32(B,c*4); }
+fn cs(B:[]u8,c:i32,v:i32)void { set32(B,c*4,v); return; }
+// header: 0 nev, 1 nsrc, 2 wmax, 3 first_contrary, 4 revision_seq,
+// 5 s1, 6 s2, 7 truth, 8 abl_identity, 9 reserved, 10 nid,
+// 11 nevicted, 12 ndup, 13 last_contrib
+fn EVB()i32 { return 16; }
+fn EVN()i32 { return 32; }
+fn EVW()i32 { return 7; }   // qid,hyp,w,src,phase,contrib,eid
+fn SRB()i32 { return 240; }
+fn SRN()i32 { return 64; }
+fn SRW()i32 { return 3; }   // correct,total,extid
+fn DCB()i32 { return 432; }
+fn DCN()i32 { return 32; }
+fn DCW()i32 { return 4; }   // src,hyp,phase,count
+fn IDB()i32 { return 560; }
+fn IDN()i32 { return 128; }
+fn NCELL()i32 { return 688; }
+fn ST_NONE()i32 { return 0; }
+fn ST_PROV()i32 { return 1; }
+fn ST_UNC()i32 { return 2; }
+fn ST_CONF()i32 { return 3; }
+
+fn st_init(B:[]u8,abl_identity:i32)void {
+  let i:i32=0;
+  while(i<NCELL()){ cs(B,i,0); i=i+1; }
+  cs(B,8,abl_identity);
+  return;
+}
+
+// ---- sources ----
+fn src_idx(B:[]u8,ext:i32)i32 {
+  let i:i32=0;
+  while(i<SRN()){
+    let id:i32=cg(B,SRB()+i*SRW()+2);
+    if(id==ext+1){ return i; }
+    i=i+1;
+  }
+  i=0;
+  while(i<SRN()){
+    if(cg(B,SRB()+i*SRW()+2)==0){
+      cs(B,SRB()+i*SRW()+2,ext+1);
+      cs(B,1,cg(B,1)+1);
+      return i;
+    }
+    i=i+1;
+  }
+  return -1;
+}
+fn src_rel(B:[]u8,si:i32)i32 {
+  let correct:i32=cg(B,SRB()+si*SRW()+0);
+  let total:i32=cg(B,SRB()+si*SRW()+1);
+  if(total<2){ return 1000; }
+  return 1000*correct/total;
+}
+
+// ---- independence discount: k-th claim by (src,hyp) in a phase ----
+fn disc_for(B:[]u8,si:i32,hyp:i32,phase:i32)i32 {
+  let i:i32=0;
+  while(i<DCN()){
+    if(cg(B,DCB()+i*DCW()+0)==si+1 && cg(B,DCB()+i*DCW()+1)==hyp && cg(B,DCB()+i*DCW()+2)==phase){
+      let k:i32=cg(B,DCB()+i*DCW()+3);
+      cs(B,DCB()+i*DCW()+3,k+1);
+      let d:i32=1000; let j:i32=0;
+      while(j<k){ d=d/2; j=j+1; }
+      return d;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<DCN()){
+    if(cg(B,DCB()+i*DCW()+0)==0){
+      cs(B,DCB()+i*DCW()+0,si+1);
+      cs(B,DCB()+i*DCW()+1,hyp);
+      cs(B,DCB()+i*DCW()+2,phase);
+      cs(B,DCB()+i*DCW()+3,1);
+      return 1000;
+    }
+    i=i+1;
+  }
+  return 1000;
+}
+
+// ---- event identity register: familiarity without recall ----
+fn id_seen(B:[]u8,eid:i32)i32 {
+  let i:i32=0;
+  while(i<cg(B,10)){
+    if(cg(B,IDB()+i)==eid){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+fn id_add(B:[]u8,eid:i32)void {
+  let n:i32=cg(B,10);
+  if(n<IDN()){ cs(B,IDB()+n,eid); cs(B,10,n+1); }
+  return;
+}
+
+// ---- evidence record with FIFO eviction under memory pressure ----
+// Eviction drops the receipt; the score contribution persists.
+fn ev_record(B:[]u8,qid:i32,hyp:i32,w:i32,src:i32,phase:i32,contrib:i32,eid:i32)i32 {
+  let n:i32=cg(B,0);
+  let slot:i32=n;
+  if(n>=EVN()){
+    let i:i32=0;
+    while(i<EVN()-1){
+      let a:i32=EVB()+i*EVW();
+      let c:i32=EVB()+(i+1)*EVW();
+      let k:i32=0;
+      while(k<EVW()){ cs(B,a+k,cg(B,c+k)); k=k+1; }
+      i=i+1;
+    }
+    slot=EVN()-1;
+    cs(B,11,cg(B,11)+1);
+  }
+  let o:i32=EVB()+slot*EVW();
+  cs(B,o+0,qid); cs(B,o+1,hyp); cs(B,o+2,w);
+  cs(B,o+3,src); cs(B,o+4,phase); cs(B,o+5,contrib); cs(B,o+6,eid);
+  if(n<EVN()){ cs(B,0,n+1); }
+  return slot+1;
+}
+fn note_wmax(B:[]u8,contrib:i32)void {
+  if(contrib>cg(B,2)){ cs(B,2,contrib); }
+  return;
+}
+
+// ---- calibration: claim on a verifiable fact; outcome observed ----
+fn ev_calibrate(B:[]u8,src:i32,hyp:i32,w:i32,truth:i32,eid:i32)i32 {
+  if(cg(B,8)==0){
+    if(id_seen(B,eid)==1){ cs(B,12,cg(B,12)+1); return -1; }
+    id_add(B,eid);
+  }
+  let si:i32=src_idx(B,src);
+  let r:i32=src_rel(B,si);
+  let contrib:i32=w*r;
+  ev_record(B,0,hyp,w,src,0,contrib,eid);
+  note_wmax(B,contrib);
+  cs(B,SRB()+si*SRW()+1,cg(B,SRB()+si*SRW()+1)+1);
+  if(hyp==truth){ cs(B,SRB()+si*SRW()+0,cg(B,SRB()+si*SRW()+0)+1); }
+  return 0;
+}
+
+// ---- observation on the H1/H2 question ----
+fn ev_observe(B:[]u8,src:i32,hyp:i32,w:i32,phase:i32,eid:i32)i32 {
+  if(cg(B,8)==0){
+    if(id_seen(B,eid)==1){ cs(B,12,cg(B,12)+1); return -1; }
+    id_add(B,eid);
+  }
+  let si:i32=src_idx(B,src);
+  let r:i32=src_rel(B,si);
+  let d:i32=disc_for(B,si,hyp,phase);
+  let contrib:i32=w*r*d/1000;
+  let seq:i32=ev_record(B,1,hyp,w,src,phase,contrib,eid);
+  note_wmax(B,contrib);
+  if(hyp==1){ cs(B,5,cg(B,5)+contrib); }
+  else { cs(B,6,cg(B,6)+contrib); }
+  cs(B,13,contrib);
+  if(phase>=1 && hyp==2 && cg(B,3)==0){ cs(B,3,seq); }
+  let st:i32=st_compute(B);
+  if(st==23 && cg(B,4)==0){ cs(B,4,seq); }
+  return seq;
+}
+
+// ---- belief status: leader*10 + code ----
+fn st_compute(B:[]u8)i32 {
+  let s1:i32=cg(B,5); let s2:i32=cg(B,6);
+  let wm:i32=cg(B,2);
+  if(s1==0 && s2==0){ return 0; }
+  let d:i32=s1-s2;
+  if(d==0){ return 2; }
+  let leader:i32=1;
+  if(d<0){ leader=2; }
+  let ad:i32=d; if(ad<0){ ad=-ad; }
+  let both:i32=0;
+  if(s1>0 && s2>0){ both=1; }
+  let U:i32=wm; let T:i32=wm*2;
+  if(both==1 && ad<=U){ return leader*10+ST_UNC(); }
+  if(ad>=T){ return leader*10+ST_CONF(); }
+  return leader*10+ST_PROV();
+}
+fn st_name(ob:[]u8,at:i32,code:i32)i32 {
+  if(code==0){ return e_str(ob,at,"NONE"); }
+  if(code==1){ return e_str(ob,at,"PROVISIONAL"); }
+  if(code==2){ return e_str(ob,at,"UNCERTAIN"); }
+  return e_str(ob,at,"CONFIDENT");
+}
+fn print_belief(B:[]u8,ob:[]u8,at:i32,tag:[]u8)i32 {
+  let st:i32=st_compute(B);
+  let leader:i32=st/10; let code:i32=st%10;
+  at=e_str(ob,at,tag); at=e_str(ob,at," leader="); at=e_i32(ob,at,leader);
+  at=e_str(ob,at," status="); at=st_name(ob,at,code);
+  at=e_str(ob,at," s1="); at=e_i32(ob,at,cg(B,5));
+  at=e_str(ob,at," s2="); at=e_i32(ob,at,cg(B,6));
+  at=e_str(ob,at," conf="); at=e_i32(ob,at,cg(B,5)-cg(B,6));
+  at=e_str(ob,at," U="); at=e_i32(ob,at,cg(B,2));
+  at=e_str(ob,at," T="); at=e_i32(ob,at,cg(B,2)*2);
+  at=e_nl(ob,at);
+  return at;
+}
+fn belief_why(B:[]u8,ob:[]u8,at:i32,hyp:i32)i32 {
+  let n:i32=0;
+  let i:i32=0;
+  while(i<cg(B,0)){
+    let o:i32=EVB()+i*EVW();
+    if(cg(B,o+0)==1 && cg(B,o+1)==hyp){
+      at=e_str(ob,at,"  seq="); at=e_i32(ob,at,i+1);
+      at=e_str(ob,at," phase="); at=e_i32(ob,at,cg(B,o+4));
+      at=e_str(ob,at," src="); at=e_i32(ob,at,cg(B,o+3));
+      at=e_str(ob,at," w="); at=e_i32(ob,at,cg(B,o+2));
+      at=e_str(ob,at," contrib="); at=e_i32(ob,at,cg(B,o+5));
+      at=e_str(ob,at," eid="); at=e_i32(ob,at,cg(B,o+6));
+      at=e_nl(ob,at);
+      n=n+1;
+    }
+    i=i+1;
+  }
+  return n;
+}
+fn contrary_count(B:[]u8)i32 {
+  let f:i32=cg(B,3); let r:i32=cg(B,4);
+  let n:i32=0; let i:i32=0;
+  while(i<cg(B,0)){
+    let o:i32=EVB()+i*EVW();
+    let seq:i32=i+1;
+    if(cg(B,o+0)==1 && cg(B,o+1)==2 && seq>=f && (r==0 || seq<=r)){ n=n+1; }
+    i=i+1;
+  }
+  return n;
+}
+
+// ============ world scripts ============
+// sources: 1=Sa 2=Sb 3=Sc 4=Sd 5=Se 6=Sf 7=Sg 8=Sh 9=Si
+//          10..21 delay, 30..61 burst, 90=Sx
+fn run_calibration(B:[]u8)void {
+  ev_calibrate(B,1,1,1,1,1);
+  ev_calibrate(B,1,2,1,1,2);
+  ev_calibrate(B,2,2,1,2,3);
+  ev_calibrate(B,2,2,2,2,4);
+  return;
+}
+fn run_delay(B:[]u8)void {
+  // 12 unrelated calibration events, fresh sources, all correct
+  let i:i32=0;
+  while(i<12){
+    let h:i32=1+(i%2);
+    ev_calibrate(B,10+i,h,1,h,1001+i);
+    i=i+1;
+  }
+  return;
+}
+fn run_burst(B:[]u8)void {
+  // 32 unrelated calibration events: memory pressure
+  let i:i32=0;
+  while(i<32){
+    let h:i32=1+(i%2);
+    ev_calibrate(B,30+i,h,1,h,2001+i);
+    i=i+1;
+  }
+  return;
+}
+fn run_phaseA(B:[]u8)void {
+  ev_observe(B,2,1,2,1,101);
+  ev_observe(B,3,1,2,1,102);
+  ev_observe(B,4,1,2,1,103);
+  return;
+}
+fn run_phaseB2(B:[]u8)void {
+  ev_observe(B,5,2,3,2,201);
+  ev_observe(B,6,2,3,2,202);
+  ev_observe(B,7,2,3,2,203);
+  ev_observe(B,8,2,3,2,204);
+  return;
+}
+fn run_rediscovery(B:[]u8)void {
+  // the SAME 4 H2 events, re presented as new, phase 3
+  ev_observe(B,5,2,3,3,201);
+  ev_observe(B,6,2,3,3,202);
+  ev_observe(B,7,2,3,3,203);
+  ev_observe(B,8,2,3,3,204);
+  return;
+}
+
+fn main()i32 {
+  let ob:[]u8=z_alloc(16384);
+  let at:i32=0;
+  let F:[]u8=z_alloc(4);
+
+  // ===== Arm PROV: identity register on =====
+  let P:[]u8=z_alloc(NCELL()*4); st_init(P,0);
+  run_calibration(P);
+  at=e_str(ob,at,"PROV cal: Sa rel="); at=e_i32(ob,at,src_rel(P,src_idx(P,1)));
+  at=e_str(ob,at," Sb rel="); at=e_i32(ob,at,src_rel(P,src_idx(P,2))); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(src_rel(P,src_idx(P,1)),500),"K2-cal-Sa-rel");
+  at=chk(ob,at,F,eq(src_rel(P,src_idx(P,2)),1000),"K2-cal-Sb-rel");
+
+  run_phaseA(P);
+  at=print_belief(P,ob,at,"PROV A:");
+  at=chk(ob,at,F,eq(st_compute(P),13),"K2-A-status-13");
+  at=chk(ob,at,F,eq(cg(P,5),6000),"K2-A-s1-6000");
+  at=chk(ob,at,F,eq(cg(P,6),0),"K2-A-s2-0");
+
+  // delay checkpoint values
+  let dst0:i32=st_compute(P); let ds10:i32=cg(P,5);
+  let ds20:i32=cg(P,6); let dw0:i32=cg(P,2);
+  run_delay(P);
+  at=print_belief(P,ob,at,"PROV B1-delay:");
+  at=chk(ob,at,F,eq(st_compute(P),dst0),"K3-delay-status-unchanged");
+  at=chk(ob,at,F,eq(cg(P,5),ds10),"K3-delay-s1-unchanged");
+  at=chk(ob,at,F,eq(cg(P,6),ds20),"K3-delay-s2-unchanged");
+  at=chk(ob,at,F,eq(cg(P,2),dw0),"K3-delay-wmax-unchanged");
+
+  ev_observe(P,5,2,3,2,201);
+  at=chk(ob,at,F,eq(st_compute(P),12),"K4-B2-after1-UNCERTAIN-lean-H1");
+  ev_observe(P,6,2,3,2,202);
+  at=chk(ob,at,F,eq(st_compute(P),2),"K4-B2-after2-tied");
+  ev_observe(P,7,2,3,2,203);
+  at=chk(ob,at,F,eq(st_compute(P),22),"K4-B2-after3-UNCERTAIN");
+  ev_observe(P,8,2,3,2,204);
+  at=print_belief(P,ob,at,"PROV B2:");
+  at=chk(ob,at,F,eq(st_compute(P),23),"K4-B2-final-CONFIDENT-H2");
+  at=chk(ob,at,F,eq(cg(P,3),20),"K4-first-contrary-20");
+  at=chk(ob,at,F,eq(cg(P,4),23),"K4-revision-23");
+  at=chk(ob,at,F,eq(contrary_count(P),4),"K4-latency-4");
+  at=chk(ob,at,F,eq(cg(P,6),12000),"K4-s2-12000");
+
+  run_burst(P);
+  at=print_belief(P,ob,at,"PROV C-burst:");
+  at=chk(ob,at,F,eq(cg(P,11),23),"K5-evicted-23");
+  at=chk(ob,at,F,eq(cg(P,5),6000),"K5-s1-persists");
+  at=chk(ob,at,F,eq(cg(P,6),12000),"K5-s2-persists");
+  at=chk(ob,at,F,eq(st_compute(P),23),"K5-status-persists");
+  at=e_str(ob,at,"PROV C why-H2 retained records:\n");
+  let why2:i32=belief_why(P,ob,at,2);
+  at=chk(ob,at,F,eq(why2,0),"K5-why-H2-zero-retained");
+  at=e_str(ob,at,"PROV C identity: nid="); at=e_i32(ob,at,cg(P,10));
+  at=e_str(ob,at," seen201="); at=e_i32(ob,at,id_seen(P,201));
+  at=e_str(ob,at," seen202="); at=e_i32(ob,at,id_seen(P,202));
+  at=e_str(ob,at," seen203="); at=e_i32(ob,at,id_seen(P,203));
+  at=e_str(ob,at," seen204="); at=e_i32(ob,at,id_seen(P,204)); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(cg(P,10),55),"K5-nid-55");
+  at=chk(ob,at,F,eq(id_seen(P,201)+id_seen(P,202)+id_seen(P,203)+id_seen(P,204),4),"K5-eids-seen");
+
+  let nev_before:i32=cg(P,0);
+  run_rediscovery(P);
+  at=print_belief(P,ob,at,"PROV C-rediscovery:");
+  at=chk(ob,at,F,eq(cg(P,12),4),"K5-ndup-4");
+  at=chk(ob,at,F,eq(cg(P,6),12000),"K5-no-double-count");
+  at=chk(ob,at,F,eq(cg(P,0),nev_before),"K5-no-new-records");
+
+  ev_observe(P,9,2,3,3,205);
+  at=print_belief(P,ob,at,"PROV C-genuine-new:");
+  at=chk(ob,at,F,eq(cg(P,6),15000),"K7-genuine-new-counted");
+
+  // ===== Arm NAIVE: identity register off (bug control) =====
+  let N:[]u8=z_alloc(NCELL()*4); st_init(N,1);
+  run_calibration(N);
+  run_phaseA(N);
+  run_delay(N);
+  run_phaseB2(N);
+  at=chk(ob,at,F,eq(st_compute(N),23),"K6-naive-precheck-CONFIDENT-H2");
+  run_burst(N);
+  at=chk(ob,at,F,eq(cg(N,11),23),"K6-naive-evicted-23");
+  run_rediscovery(N);
+  at=print_belief(N,ob,at,"NAIVE C-rediscovery:");
+  at=chk(ob,at,F,eq(cg(N,6),24000),"K6-double-count-s2-24000");
+  at=chk(ob,at,F,eq(cg(N,12),0),"K6-naive-ndup-0");
+  at=e_str(ob,at,"NAIVE why-H2 records (same events twice, undetectable):\n");
+  let nwhy:i32=belief_why(N,ob,at,2);
+  at=chk(ob,at,F,eq(nwhy,4),"K6-naive-why-4");
+
+  // ===== Phase D: reliable 20 rounds, then adversarial =====
+  let D:[]u8=z_alloc(NCELL()*4); st_init(D,0);
+  let i:i32=0;
+  while(i<20){ ev_calibrate(D,90,1,1,1,3001+i); i=i+1; }
+  let rel20:i32=src_rel(D,src_idx(D,90));
+  at=e_str(ob,at,"PHASED rel after 20 correct: "); at=e_i32(ob,at,rel20); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(rel20,1000),"K8-rel-20-correct-1000");
+  ev_observe(D,90,1,2,1,3031);
+  let c_rel:i32=cg(D,13);
+  at=e_str(ob,at,"PHASED reliable-phase claim contrib: "); at=e_i32(ob,at,c_rel); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(c_rel,2000),"K8-reliable-contrib-2000");
+  i=0;
+  while(i<5){ ev_calibrate(D,90,1,1,2,3041+i); i=i+1; }
+  let rel25:i32=src_rel(D,src_idx(D,90));
+  at=e_str(ob,at,"PHASED rel after 5 adversarial: "); at=e_i32(ob,at,rel25); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(rel25,800),"K8-rel-5-adv-800");
+  i=0;
+  while(i<5){ ev_calibrate(D,90,1,1,2,3046+i); i=i+1; }
+  let rel30:i32=src_rel(D,src_idx(D,90));
+  at=e_str(ob,at,"PHASED rel after 10 adversarial: "); at=e_i32(ob,at,rel30); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(rel30,666),"K8-rel-10-adv-666");
+  let mono:i32=0;
+  if(rel20>=rel25 && rel25>=rel30){ mono=1; }
+  at=chk(ob,at,F,eq(mono,1),"K8-rel-monotonic");
+  ev_observe(D,90,1,2,2,3052);
+  let c_adv:i32=cg(D,13);
+  at=e_str(ob,at,"PHASED adversarial-phase claim contrib: "); at=e_i32(ob,at,c_adv); at=e_nl(ob,at);
+  at=chk(ob,at,F,eq(c_adv,1332),"K8-adv-contrib-1332");
+  let weaker:i32=0;
+  if(c_adv<c_rel){ weaker=1; }
+  at=chk(ob,at,F,eq(weaker,1),"K8-adv-weaker-than-reliable");
+
+  let fails:i32=get32(F,0);
+  if(fails==0){ at=e_str(ob,at,"ALL PASS\n"); }
+  else { at=e_str(ob,at,"FAILURES: "); at=e_i32(ob,at,fails); at=e_nl(ob,at); }
+
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(ob) as i64),at as i64,0,0,0);
+  if(fails==0){ return 0; }
+  return 1;
+}

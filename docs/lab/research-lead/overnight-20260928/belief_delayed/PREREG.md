@@ -90,12 +90,19 @@ E1 (Phase A): st == 13 (CONFIDENT H1), s1 == 6000, s2 == 0.
 E2 (Phase B1 delay): status, s1, s2, wmax all unchanged vs pre delay
    (st == 13, s1 == 6000, s2 == 0, wmax == 2000). The delay itself does not
    weaken the prior: no contrary evidence, no change. Rational 1/1.
-E3 (Phase B2): after 1st strong claim st == 22 (UNCERTAIN); after 2nd
-   st == 2 (UNCERTAIN, tied); after 3rd st == 22; after 4th st == 23
+E3 (Phase B2): after 1st strong claim st == 12 (UNCERTAIN, leader still H1:
+   the settled 6000 prior leads the single 3000 contrary claim by 3000,
+   exactly inside the uncertainty band U = 3000); after 2nd st == 2
+   (UNCERTAIN, tied); after 3rd st == 22; after 4th st == 23
    (CONFIDENT H2). first_contrary_seq == 20, revision_seq == 23, contrary
    pieces to confident revision == 4, final s2 == 12000. Rational 1/1:
    strong independent evidence outweighs the settled prior; the learner
-   neither flips on first contact nor holds stubbornly.
+   neither flips on first contact nor holds stubbornly. Amendment
+   2026-10-02 (transparent, before frozen evaluation runs): the original
+   text wrote st == 22 after the 1st claim; that was an arithmetic slip
+   in the prereg (s1 = 6000 still exceeds s2 = 3000 after one claim).
+   The band rule predicts 12, and the directional uncertainty (leaning
+   the settled prior) is itself a finding. No other expectation changes.
 E4 (Phase C eviction): nevicted == 23, s1 == 6000, s2 == 12000, st == 23,
    belief_why(H2) returns 0 retained records while the identity register
    reports the 4 H2 eids as seen.
