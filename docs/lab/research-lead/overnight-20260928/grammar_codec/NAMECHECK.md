@@ -55,11 +55,36 @@ read-only.
 - c_run1.txt, c_run2.txt, c_run3.txt: 3 deterministic runs.
 - REPORT.md: results and verdict GRAMMAR-CODEC-COMPLETE.
 
+## Results (2026-10-02)
+
+3/3 runs byte-identical
+(SHA-256 173a69f1fa4e060c94b100d221717f0efc4fdf74b56ab2e20f8a9d16edad42c4).
+GI-VERDICT 5/5 against the frozen prereg:
+
+- EXL2: GI-INDUCED 1, D=16, a=[0,9] b=[0,9]; induce 6/6 class 1;
+  ablate 0/6 (class 2); hardcode 6/6.
+- EXL3: GI-INDUCED 1, D=8, a=[0,7] b=[0,7]; induce 4/4 class 1;
+  ablate 0/4; hardcode 4/4. (The world that went silently wrong under
+  hardcoded /16 now induces the true codec and true ranges.)
+- EXL4: GI-INDUCED 1, D=32, a=[0,3] b=[0,3]; induce 2/2 class 1;
+  ablate 0/2; hardcode 2/2.
+- NEG-AMB: GI-INDUCED -4 (ambiguous: D=8 and D=17 both consistent),
+  GI-GRAMMAR none, GI-I-NOGRAMMAR.
+- NEG-SHIFT: GI-INDUCED -3 (contradicted: g=1), GI-GRAMMAR none,
+  GI-I-NOGRAMMAR.
+
+K3 check: `grep -n "/16\|\*16"` on c_patch.zag returns only two
+comment lines; no codec divisor literal in machinery logic (the 8/16/32
+matches are node field offsets, buffer sizes, and the pre-existing
+nlic<16 capacity bound). Candidates come only from divisors of the
+observed gcd.
+
 ## Constraints observed
 
 - Pure Zag. Zero em/en dashes in docs.
 - 0 modes/bridges/handlers. Codec induction is plain functions called
   from gi_induce, not a mode.
 - Frozen dirs untouched (grammar_third, grammar_transfer read-only).
-- Prereg committed before implementation (commit-order self-check).
+- Prereg committed before implementation (commit-order self-check:
+  prereg commit 7f3d9caae precedes the implementation commit).
 - Nothing pushed. Commits local only, explicit pathspecs.
