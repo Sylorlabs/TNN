@@ -35,12 +35,12 @@ Concrete scenario (ORCHARD):
   structural preconditions computed from learner state (kind tag +
   learned masks), never selected per problem by the researcher.
   Adapted X' canonicalizes the view: kind 1 replays [d,e], kind 2
-  replays [a,b]; in both cases (R0,R1) holds the signal pair.
+  replays [b,c]; in both cases (R0,R1) holds the signal pair.
 - Y: threshold decide. Given a scalar s, Y outputs PICK(1) iff s >= t
   else SKIP(0). Y consumes a SCALAR. Threshold t=6 learned from prior
   scalar experience (first-max, 6/6).
 - Hidden world rule: PICK iff the kind's signal pair sums >= 10.
-  Kind 1 uses (d,e); kind 2 uses (a,b).
+  Kind 1 uses (d,e); kind 2 uses (b,c).
 - L3 invention: the bridge between X' (2-reading canonical sequence)
   and Y (scalar) is a reduction program M constructed by greedy search
   over the frozen generic op basis {CPY,ADD,SUB,MAX,MIN} on 2
@@ -126,38 +126,39 @@ calls them.
 - Phase 0 (old world, teaches the standing replay and the masks).
   Old episodes (id: [k,a,b,c,d,e]):
   O1 id=51: [1,0,0,0,3,7]; O2 id=52: [1,0,0,0,8,2];
-  O3 id=53: [2,5,1,0,0,0]; O4 id=54: [2,2,6,0,0,0].
+  O3 id=53: [2,0,5,1,0,0]; O4 id=54: [2,0,2,6,0,0].
   Stored fully filled. x_learn_len -> L=6. x_learn_masks: kind 1
   episodes vary only in slots 4,5 -> MASK_K1 = bits {4,5} = 48;
-  kind 2 episodes vary only in slots 1,2 -> MASK_K2 = bits {1,2} = 6.
+  kind 2 episodes vary only in slots 2,3 -> MASK_K2 = bits {2,3} = 12.
 - Y prior scalar experience: (7,pick),(8,pick),(9,pick),
   (3,skip),(4,skip),(5,skip). Y threshold t=6 (first-max; 6/6:
   t=5 gives 5/6).
 - TRUE (phase 1): PICK iff (k==1 and d+e >= 10) or (k==2 and
-  a+b >= 10).
+  b+c >= 10).
 
 Frozen episode tables (id: [k,a,b,c,d,e], label under TRUE):
 
 Phase 1 train (labels from TRUE):
 1: [1,0,0,0,4,9] pick    2: [1,0,0,0,9,4] pick
 3: [1,0,0,0,4,1] skip    4: [1,0,0,0,1,4] skip
-5: [2,4,9,0,0,0] pick    6: [2,9,4,0,0,0] pick
-7: [2,4,1,0,0,0] skip    8: [2,1,4,0,0,0] skip
+5: [2,0,4,9,0,0] pick    6: [2,0,9,4,0,0] pick
+7: [2,0,4,1,0,0] skip    8: [2,0,1,4,0,0] skip
 Phase 1 test:
 9: [1,0,0,0,5,8] pick   10: [1,0,0,0,3,2] skip
-11: [2,7,6,0,0,0] pick  12: [2,2,3,0,0,0] skip
+11: [2,0,7,6,0,0] pick  12: [2,0,2,3,0,0] skip
 
-Digit-string encodings (world.zag): old "100037","100082","251000",
-"226000"; train "100049","100094","100041","100014","249000",
-"294000","241000","214000"; test "100058","100032","276000","223000".
+Digit-string encodings (world.zag): old "100037","100082","205100",
+"202600"; train "100049","100094","100041","100014","204900",
+"209400","204100","201400"; test "100058","100032","207600",
+"202300".
 
 Frozen hand-derived expectations (the implementation must reproduce
 them; any deviation is a falsifier, not a tuning opportunity):
 
 - Phase-0 teaching then x_learn_len gives L=6; x_learn_masks gives
-  MASK_K1=48, MASK_K2=6. After phase-1 teaching L is still 6.
+  MASK_K1=48, MASK_K2=12. After phase-1 teaching L is still 6.
 - ARM-FULL construction on train ids 1..8 (ADAPT_ON=1; specialized
-  replay: kind 1 -> [d,e], kind 2 -> [a,b]; hence R0=S0, R1=S1 with
+  replay: kind 1 -> [d,e], kind 2 -> [b,c]; hence R0=S0, R1=S1 with
   S0=[4,9,4,1,4,9,4,1], S1=[9,4,1,4,9,4,1,4], labels [1,1,0,0,1,1,0,0]):
   - Empty baseline: R0=S0. t sweep: t=0: 4/8; t=1: 4/8; t=2..9: 6/8;
     t>=10: 4/8. First-max: 6/8 at t=2. (Each single reading overlaps
@@ -190,13 +191,13 @@ them; any deviation is a falsifier, not a tuning opportunity):
   fails.
 - ARM-L3-ONLY (specialization off, construction on): generic replay
   [k,a,b,c,d,e]; 2-register first-2 loading gives (R0,R1)=(k,a).
-  Train (k,a) groups: (1,0): ids 1,2,3,4 labels 1,1,0,0; (2,4):
-  ids 5,7 labels 1,0; (2,9): ids 6,8 labels 1,0. Any deterministic
-  program on (k,a) is constant on each group, hence correct on
-  exactly half of each group: 4/8 = the empty baseline (R0=k:
-  t=0..1: 4/8; t=2: 4/8). Round 1 finds no positive gain;
-  construction stops with M n=0. decide -1 on all 4. Z-L3ONLY 0/4.
-  (Pairing proof; no candidate enumeration needed.)
+  All train episodes have a=0, so the (k,a) groups are (1,0):
+  ids 1,2,3,4 labels 1,1,0,0 and (2,0): ids 5,6,7,8 labels 1,1,0,0.
+  Any deterministic program on (k,a) is constant on each group,
+  hence correct on exactly half of each group: 4/8 = the empty
+  baseline (R0=k: t=0..1: 4/8; t=2: 4/8). Round 1 finds no positive
+  gain; construction stops with M n=0. decide -1 on all 4. Z-L3ONLY
+  0/4. (Pairing proof; no candidate enumeration needed.)
 - ARM-FRESH (nothing taught): x_recall finds nothing; Z-FRESH 0/4.
 
 ## 4. Frozen arms
@@ -237,7 +238,7 @@ firing.
 
 Each pattern must return zero matches (grep -c == 0):
 1. `d+e` (hidden rule fragment for kind 1)
-2. `a+b` (hidden rule fragment for kind 2)
+2. `b+c` (hidden rule fragment for kind 2)
 3. `ADD R0,R1` (the constructed instruction)
 4. `1,0,1` (the constructed program triple)
 5. `100049` (train episode 1 digit string; no episode data in learner)
@@ -305,3 +306,21 @@ one raw syscall write. 3/3 byte-identical required.
   pushed. Commits local on tnn-native-lab.
 - Unfrozen only: no frozen source touched. The frozen TNN core is not
   used here; this is a standalone learner-mechanism experiment.
+
+## 11. Amendment record (transparent re-freeze)
+
+Amendment A1 (2026-10-02, before any implementation commit): the
+v1 pairing proof for ARM-L3-ONLY was arithmetically wrong. With the
+v1 tables, kind 2 train episodes had distinct `a` values in
+singleton (k,a) groups (id 6: a=9 rich; id 8: a=1 poor), so
+[CPY R0,R1] reached 5/8 and construction did not halt. The v1
+mechanism (masks, replay, constructor) was correct; the world table
+was flawed. Fix: kind 2's signal pair moved from (a,b) to (b,c),
+so `a` is constant (0) across all train episodes and every (k,a)
+group is exactly half pick / half skip. Changed: old O3/O4
+episodes (now vary slots 2,3), MASK_K2 (now bits {2,3} = 12),
+train ids 5..8 and test ids 11,12 tables and digit strings, TRUE
+rule (kind 2 uses b+c), K-CB-5 pattern 2 (`b+c`). The ARM-FULL
+hand derivation is unchanged (same (S0,S1) values). No
+implementation file existed at v1 commit time; this amendment is
+committed prereg-only, before any implementation commit.
