@@ -113,10 +113,10 @@ Operand spec encoding (generic, documented, no domain content):
   with field20 = spec (exactly what t2_lit does, inlined).
 
 Builder (lb_run / lb_build_ticket): two passes. Pass 1 allocates one cell per step
-with the ticket's tag, in order. Pass 2 resolves specs, writes field4/8/12, chains
-consecutive cells with ET_SEQ, and defaults a BRANCHEQ cell's field16 (false target)
-to the next cell (documented wiring convention; a trailing BRANCHEQ keeps field16=0
-and fails closed, the assemblers' convention). On any failure the ticket is marked
+with the ticket's tag, in order. Pass 2 resolves specs, writes field4/8/12, and
+chains consecutive cells with ET_SEQ. A BRANCHEQ cell's field16 (false target) is
+left 0, so a failed guard fails closed: the assemblers' convention, documented on
+the frozen ISA ("A GUARD cell with no SEQ fallthrough fails closed"). On any failure the ticket is marked
 -1; partial allocations are left (same as the assemblers' failure behavior).
 The builder performs no semantic validation: a ticket that builds a graph which
 fails at execute time is a built graph that fails at execute time.
@@ -280,7 +280,6 @@ fn lb_build_ticket(W:[]u8,t:i32)void {
     }
     if(ok==1 && i+1<nc){
       seq_link(W,c,get32(cells,(i+1)*4));
-      if(ng(W,c,0)==102){ns(W,c,16,get32(cells,(i+1)*4));}
     }
     i=i+1;
   }
@@ -404,7 +403,9 @@ Verification checks (each must pass; any failure kills the package design):
   and a back-reference true-target. One ev_observe processes it. White-box asserts:
   ticket status 1, built root recorded, cell0 tag 102 with field4 1001 (learner-chosen
   slot honored, not researcher slot 0), literal node values exact, field12 wired to
-  cell1. Execute asserts: slot1=5 gives slot0=7; slot1=6 falls through to slot0=9.
+  cell1. Execute asserts: slot1=5 (guard true) writes 7 to slot2 through the
+  true-target cell, then the spine writes 9 to slot0; slot1=6 (guard false)
+  fails closed with -999999, the assemblers' documented guard convention.
   A second assembler-shaped ticket (slot 0) builds through the same code path,
   proving content-neutrality.
 - V2 CONTRADICTION TRIGGER: teach (101,11,102); ev_observe (101,11,999) must yield
@@ -549,3 +550,24 @@ TNN-2 lineage changes the frozen baseline, which is itself a governance decision
 This prereg is committed alone, before any implementation. The prototype commit
 follows strictly after. The commit-order self-check: the prereg commit's timestamp
 precedes the prototype commit's timestamp.
+
+## 11. Amendments (transparent; kill bars in section 8 unchanged)
+
+AMENDMENT 1, 2026-10-01 (after prereg freeze be112b78f, before any adoption):
+BRANCHEQ field16 convention changed. The frozen spec said the builder defaults a
+BRANCHEQ cell's field16 (false target) to the next cell. Prototype verification
+(V1) caught that this collapses the true and false branches whenever the true
+target is the next cell (the common ticket shape): both branches execute the same
+cell. The amended convention leaves field16 at 0 so a failed guard fails closed,
+exactly the assemblers' convention and the frozen ISA's documented behavior ("A
+GUARD cell with no SEQ fallthrough fails closed"). This also deletes one line of
+builder code (more minimal). The V1 harness now asserts fail-closed (-999999) on
+guard-false. Rationale recorded; the change is in the builder only, no bar moves.
+
+AMENDMENT 2, 2026-10-01 (accounting correction, no spec change): the frozen
+section 6 estimated 176 cognition source lines. The mechanical extraction
+(PKG-BEGIN to PKG-END, the exact adopted text) is 197 lines inclusive of comments
+and blank lines within the section (198 at freeze, minus 1 for the Amendment 1
+deletion). Section 6's count is corrected to 197. All
+other accounting figures (0 semantic cases, 0 modes, 0 bridges, 0 routers,
+0 task-specific handlers, 0 protected-core ops) stand as frozen.
