@@ -1,0 +1,44 @@
+# ARENA5 NAMECHECK (wave-20261001-2321pdt)
+
+## Step 0 (toolchain guard, mandatory, first)
+
+- Ran: `cd ~/workspace/tnn-rsi && sh docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh && export PATH="$HOME/safebin"`
+- Exact output:
+  - `safebin: /home/hatch/safebin`
+  - `linked: 36 tools`
+  - `znc: OK (/home/hatch/workspace/tnn-rsi/src/tools/toolchain/znc_linux_x86_64_abed8aa1)`
+  - `verify: python3 absent from safebin PATH (OK)`
+  - `verify: python absent from safebin PATH (OK)`
+  - `SAFEBIN-READY: /home/hatch/safebin (36 tools, no python)`
+- Verification: `which python3` printed NOTHING (exit code 1). `which python` printed NOTHING (exit code 1).
+- Guard status: SATISFIED. Pure Zag constraint in force for this worker. Shell only sequences the pinned znc, built binaries, git read/commit ops, and file copies.
+
+## Lane assignment
+
+Replacement worker for wave-20261001-2321pdt, lane ARENA5. The ARENA4
+lane completed BUILD-PASS with the ROSTER entity-roster mechanism
+(C15 0.000 -> 0.947); the H7R lane completed BUILD-PASS. This lane
+builds the fuller C15 that the ARENA4 audit specified (flag #2):
+the implemented C15 is a single probe (a listnames question handler)
+while the prereg spec described AUTONOMOUS GOAL COMPLETION WITH TOOLS.
+
+## Task
+
+Close the gap: build the autonomous goal-completion version of C15.
+Load-bearing design constraint: satisfy the stated goal WITHOUT a
+dedicated goal-completion handler. The learner must enumerate its
+persistent entity roster to satisfy the goal through the EXISTING
+generic action machinery (the same machinery that answers other
+questions). If a dedicated handler is unavoidable, the verdict is
+HANDLER-DEPENDENT (an honest negative), not BUILD-PASS.
+
+Read-only inputs (extracted via git show from recorded commits, never
+from working files):
+- prereg+audit: 19d9edc87
+- implementation: 171c45101 (roster_contestant.zag)
+- sealed eval + judge brief: f8d7b9b2e
+- v6 base: docs/lab/rsi/runs/wave-20261001-1721pdt/ARENA/refreeze/devint1_contestant_v6.zag
+
+## Lane-end status
+
+(recorded after sealed evaluation)
