@@ -6243,3 +6243,32 @@ No em dashes were used in this entry (verified).
   NEGATIVE (boundary found).
 
 No em dashes were used in this entry (verified).
+
+- C244 (COMPOSITION-LEARNERVER2; prereg 6081afa94, results 0cfd4b0ba,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation). All
+  8 tests PASS, 9/9 kill bars, 3/3 byte-identical. T2A-LV (109, 4
+  segs), T2B-LV (111, 5 segs), T3-LV (105, cross-domain) all PASS.
+  T4-LV: honest -2 (evidence supports outcome rel=4 but structure
+  cannot construct; no false positive). T-THR-LO/HI: gate exact
+  (closed at rel=2, open at rel=3). T-HOOK: ev_cquery CONSTRUCT entry
+  works (ans=107 via composition, tried=1, not recall); ev_query
+  frozen pipeline untouched (shortcut is correct RETRIEVE behavior).
+  Hookup resolution: RETRIEVE and CONSTRUCT are distinct query goals
+  served by distinct operations; evidence FACT serves only as
+  prediction basis, never as the answer. Withholding propagates (-3)
+  rather than falling back to trial. Unreliable evidence (rel 1-2)
+  -> withhold, which is rational (gate keeps luck from driving
+  structural promotion). Open: caller-specified vs learner-inferred
+  goal type (H-GOALINF-1 dispatched); T4 atomic-MAP assumption still
+  open. 0 modes/bridges/handlers. Status: BUILD-PASS.
+
+- C245 (BELIEF-REPEATED; commit 8be4b18d4, 2026-10-02): COMPLETE
+  (exploratory). H-DECEPT-3: the trajectory update is FARMABLE.
+  Repeat betrayal punished exactly as the first (no-escalation
+  equalities hold); rel(S) converges to fixed point 769, not
+  distrust. Build-streak -> betray -> rebuild -> betray is a
+  profitable indefinite cycle. Specifies H-DECEPT-4:
+  betrayal-history-aware update with escalation and reform decay.
+  3/3 byte-identical. Status: INFORMATIVE NEGATIVE (exploit found).
+
+No em dashes were used in this entry (verified).
