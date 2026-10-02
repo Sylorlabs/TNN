@@ -6185,3 +6185,24 @@ No em dashes were used in this entry (verified).
   BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C240a (GRAMMAR-THIRD addendum, worker full report, 2026-10-02): The
+  designated guard is VACUOUS: the part-1 sanity check a*16+b!=P with
+  a=P/16 is a tautology under any fixed divisor; it reduces to P>255
+  and can never fire on EXL/EXL2/EXL3. This is where fail-closed
+  should have happened and structurally cannot. Breakage order:
+  licensor discovery correct ({44,43}, codec-independent) -> guard
+  vacuous -> range induction silently wrong (breakage enters learner
+  state here) -> construction works (verification keys on raw P) ->
+  rubric agrees (same wrong decode). The wrong grammar remains
+  causally load-bearing (ABLATE 0/4, FRESH 0/4) because its relational
+  core is right. Minimal repair diagnosed, not implemented: promote
+  codec to induced grammar state (type-70 field), induce the divisor,
+  thread through all 5 decode sites, replace the tautology with a real
+  cross-fact consistency check, fail closed when no codec established.
+  Hard part: divisor weakly identified by the fact stream;
+  discriminator must come from literal co-occurrence structure.
+  Remaining open probes: 3 licensors vs nlic<=2 guard, literals beyond
+  0..9, ternary operators.
+
+No em dashes were used in this entry (verified).
