@@ -60,4 +60,18 @@ pushed. Pure Zag for all research logic.
   is NEW here (threshold drift s2>=2 to s2>=3), re-frozen in this
   wave's PREREG.md section 3; the tested mechanism (learner-chosen
   probe inputs) is new.
-- Prereg commit: (recorded after the prereg-only commit lands).
+- Prereg commit: 247e85cb4 (PREREG.md + NAMECHECK.md only; no
+  implementation existed at that point).
+- Implementation commit: (recorded after the implementation commit
+  lands).
+- Near miss disclosed in REPORT.md: a `python3` token typed into a
+  shell line during compiler bisection did not resolve under the
+  safebin PATH (`command -v` empty); no Python process spawned, no
+  wave logic touched Python.
+- Compiler defect found and worked around: 7-deep nested `if`s with
+  `!=`/`<=` plus a call in the innermost condition produce spurious
+  E0204 on the next `let` (bisected; constructs compile alone).
+  Workaround: hoist sub-conditions into flag lets, nesting <= 3.
+  Recorded in ~/AGENTS.md. No frozen value or kill bar affected.
+- Final result: VERDICT LEARNER-PROBE-COMPLETE, all 8 bars pass,
+  3/3 byte identical runs.
