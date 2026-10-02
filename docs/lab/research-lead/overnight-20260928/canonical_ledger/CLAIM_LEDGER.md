@@ -5953,3 +5953,24 @@ No em dashes were used in this entry (verified).
   handlers. Status: ADVERSARIAL (1 kill, 4 bounds).
 
 No em dashes were used in this entry (verified).
+
+- C229 (XIO-ADAPTERS; prereg 12e7bc301, results e34ed5ebc, 2026-10-02):
+  COMPLETE (frozen prereg precedes implementation). Learner-built typed
+  I/O adapters rescue the C215 cross-domain failure (H-XIO-1, P0).
+  oty(m) observed at runtime via INC-cell scan (1=NUMBER, 0=NODE); no
+  researcher type table. xio_try runs after lookup+rebind fail, over
+  ordered pairs with oty mismatch. Staged execution re-derives each
+  stage graph via the learner's own trial assemblers, then executes:
+  v2 = stage(m2, stage(m1, s)). Adapter node (tag 40) records
+  (m1,m2,oty1,oty2,rel1,rel2,answer,qr) with DEP provenance; teaches
+  no fact, reuse re-executes. All 8 kill bars PASS, 3/3 byte-identical:
+  K1 Z1 via XIO-BUILD (mid=34 exact handoff); K2 Z2a via XIO-REUSE
+  (adapter count stays 1); K3 Z2b via second adapter (same stages);
+  K4 ABL-XIO reproduces C215 (-2); K5 ABL-X/Y/FRESH all -2; K6
+  competence matches C215; K7 grep confirms no conversion table, no
+  CHAIN_COUNT template; K8 determinism. Caveats: pair search
+  brute-force (needs indexing at scale); chain/count stages only;
+  oty is structural proxy, not learned classifier. 0
+  modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
