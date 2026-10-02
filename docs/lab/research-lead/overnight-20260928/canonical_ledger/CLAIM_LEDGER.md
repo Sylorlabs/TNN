@@ -6433,3 +6433,21 @@ No em dashes were used in this entry (verified).
   BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C254 (BELIEF-NOGRUDGE; prereg 0c334898e, results e1880dd96,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Repairs the C252 D kill. Single branch in ev_calibrate: b
+  increments only when base=floor(c*w/(c+w)) > 0 (p > 0).
+  Zero-penalty noise adds its linear unit but leaves b untouched.
+  Rule layer byte-identical to 035e9593c except this branch.
+  World D retest: 40 noise cycles -> rel=833, b=0 (was 40); test
+  event w=8 -> p=5 (was 205), rel=827, b=1; 200-honest tail ->
+  rel=901, b=0 (forgiveness now reachable for noisy honest
+  sources). Escalation preserved (2/8/15/20/25;
+  869/769/681/620/571). Reform preserved (b=0 rel=952; second
+  betrayal = fresh). R1/C1 controls clean. 3/3 byte-identical.
+  Caveat: noisy source with real b>0 still has its forgiveness
+  clock reset by noise wrongs (separate design question, flagged).
+  0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
