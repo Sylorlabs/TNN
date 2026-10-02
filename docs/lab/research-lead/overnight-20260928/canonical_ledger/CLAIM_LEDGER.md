@@ -5847,3 +5847,23 @@ No em dashes were used in this entry (verified).
   lines, 0 modes/bridges/handlers. Status: BUILD-PASS.
 
 No em dashes were used in this entry (verified).
+
+- C224 (COMPOSITION-UNIFIED; prereg 06ea103bd, results 83f8853b2,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  ONE composition mechanism replacing A/B/C three engines (Micah
+  Priority D, H-COMPGEN-1 collapse). C's iterative DFS core, 3-segment
+  cap removed (bound now 8, documented); pluggable applicability
+  predicates: C relseq (primary), A plen-contract (fallback), B
+  type-15 co-use history (ordering + accumulation). Deleted: A/B
+  pair-search, B cb_stage, C cc_candidates/cc_dfs. All 8 kill bars
+  PASS: K1 3-struct matches C; K2 cross-domain matches C; K3 4-struct
+  PASS (cap was the only blocker); K4 5-struct PASS; K5 420 vs 789
+  lines (369 fewer, 47%); K6 3/3 byte-identical; K7 bridge audit PASS
+  (1 compose_try, 1 call site, no MODE identifiers); K8 T4/T5 no
+  regression (decline cleanly). Co-use edges accumulate from
+  composition itself (T1 2->4, T2B 4->8). Open: T4 partial, T5
+  unsupervised, predicate arbitration (permissive OR). Builder
+  recommends canonical adoption; A/B retirement pending red-team.
+  0 modes/bridges/handlers. Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
