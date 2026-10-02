@@ -39,4 +39,5 @@ implementation and evaluation step and recorded here.
 - Implementation commit (SEP_FRAG.zag): strictly after prereg freeze
 - EVAL_SKEPTIC3.md: strictly after implementation
 
-Prereg freeze: PENDING (this file is committed with the prereg).
+Prereg freeze: 6bf257048 (2026-10-02 ~07:34 UTC, branch tnn-native-lab).
+Implementation commit: (recorded at implementation commit below).
