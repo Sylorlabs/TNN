@@ -7180,3 +7180,18 @@ No em dashes were used in this entry (verified).
   COMPLETE.
 
 No em dashes were used in this entry (verified).
+
+- C293 (TRUNCATE-THEOREM; commits 49641f9c8, 84551a641,
+  2026-10-02): COMPLETE. Boundary conditions of TRUNCATE
+  non-staleness theorem. All kill bars pass, 3/3 byte-identical.
+  Arm A (non-prefix head-drop): K-A1..K-A5 PASS. Arm B
+  (prefix, middle fact replaced): K-B1..K-B4 PASS. Arm C
+  (prefix, root fact replaced): K-C1..K-C4 PASS. Arm T
+  (control): K-T1..K-T3 PASS. BOUNDARY MAP: pure-prefix +
+  intact source cannot go stale; pure-prefix or head-drop with
+  damaged source can go stale (revision gate correctly closed);
+  "source intact" gate is load-bearing. Open: non-prefix
+  TRUNCATE with intact source not constructible in this
+  substrate (recorded, not claimed). Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
