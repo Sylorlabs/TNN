@@ -54,7 +54,8 @@ Criterion 0 not met. Report as mechanism-targeted evidence only
   runs. v3 VALIDATED.
 - 59e029102: PREREG post-freeze sealed adversarial battery frozen
   (design only).
-- (post-freeze implementation commit id to be recorded on commit)
+- e7a1d4217: Post-freeze sealed adversarial battery implementation
+  and runs. 1/6 PASS.
 
 ## Evidence paths
 
