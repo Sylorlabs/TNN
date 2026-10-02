@@ -35,7 +35,16 @@ Local only, never pushed.
 
 ## Fourth-defect grep record
 
-(To be filled after implementation files are written; must show zero hits.)
+Run 2026-10-02 on both new .zag files (ia_core.zag, ia_full_noadapt.zag):
+
+- `grep -n 'while.*!(' *.zag` -> no matches (rc=1). All loop conditions
+  use De Morgan form or plain conjunctions of positive tests.
+- `grep -n '_zag_print'` -> no matches. Output is single-buffer e1str/e1i64
+  plus one `_zag_raw_syscall(1,1,ptr,len)`; both binaries exit rc=0, which
+  asserts bytes-written == cursor (stdout verified).
+- `grep -n 'as \*i32'` -> no matches. u8-backed workspace with g32/s32.
+- if-nesting kept at 3 or fewer by hoisting sub-conditions into flag lets
+  (live2, endok, cand, smatch, cmatch, okc, go/go2).
 
 ## Scope
 
