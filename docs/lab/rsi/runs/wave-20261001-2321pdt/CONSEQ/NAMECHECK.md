@@ -45,3 +45,38 @@
 - Safebin PATH for every command. `which python3` empty throughout. Zero
   forbidden executables. Pure Zag. No commits outside CONSEQ/ lane dir. Nothing
   pushed. Frozen prereg and source untouched (read-only).
+
+## K-H3 disambiguation (coordinator pointer verification, 2026-10-01)
+
+Per coordinator pointer, read the CLAIM_LEDGER.md K-H3 entries and
+H3LITE_DESIGN.md K-H3 definition to check whether the K-H3 in those
+files is a different K-H3 from the Node2-v2 K-H3 this lane executed.
+
+Result: SAME K-H3, direct lineage. No second K-H3 exists.
+
+Evidence:
+- H3LITE_DESIGN.md Section 6 drafts K-H3 (Policy Revisability): for every
+  structural decision not determined by immediate input, the prereg must
+  list (1) the decision (examples: "trial search order", "guide default
+  action", "repair topology selection"); (2) the learner-state node and
+  fields; (3) the production write path; (4) the triggering experience;
+  (5) a sealed demonstration. Failure conditions: (a) source-literal,
+  (b) read-only policy, (c) unreachable write path, (d) researcher-encoded
+  histories. DRAFT-NOT-FROZEN at that point.
+- The Node2-v2 frozen prereg (commit 4b05c8011, executed by this lane)
+  Section 4 performs the K-H3 Audit with the same six elements for the
+  structural decision "guide default action" (one of the exact examples
+  in the H3LITE_DESIGN.md draft) and the same (a)-(d) failure conditions.
+- The frozen prereg's stated purpose: replace the unreachable H3-lite
+  Node 2 (guide template policy) with a reachable experience-dependent
+  write path, "preserving the diagnostic intent". The frozen H3-lite
+  prereg (9084a7760) Node 2 was the guide-default-action node; its
+  unreachability was proven in b0ad6c5d3.
+- CLAIM_LEDGER.md C171 is explicitly "NODE2V2 K-H3 PASS + ABLATION",
+  the same result this lane independently reproduced.
+- TNN3_ROADMAP.md references the same K-H3 draft bar lineage (commits
+  76231baa8, 22197da2c) as the policy-revisability kill bar.
+
+Conclusion: one K-H3 lineage, from draft (H3LITE_DESIGN.md Section 6) to
+frozen instantiation (Node2-v2 prereg 4b05c8011). The validation verdict
+(VALIDATION-PASS) stands against the correct, intended K-H3.
