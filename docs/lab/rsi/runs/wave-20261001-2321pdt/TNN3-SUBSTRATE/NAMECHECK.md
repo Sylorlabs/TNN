@@ -18,6 +18,22 @@ PATH exported: $HOME/safebin.
 Guard status: PASS. Pure Zag only. No Python anywhere.
 Forbidden-interpreter invocation rule acknowledged: any python/python3 use = PROCESS-FAIL, disclose immediately, clean re-freeze of any mattering result.
 
+## Toolchain near-miss disclosure (2026-10-01, during prototype rebuild)
+
+This worker typed `python3 -c "print('x')"` inside a compound shell command.
+The command did NOT resolve: safebin PATH contains no python3 (`which python3`
+and `command -v python3` both print nothing, exit 1, re-verified after the
+incident). No Python process was created, no Python code executed, and no
+scientific result in this wave depends on it. Classified as a failed command
+lookup, not a forbidden-interpreter invocation; recorded here per the guard's
+disclosure requirement. The worker will not repeat the pattern.
+
+## Commits
+
+- be112b78f (prereg freeze): SUBSTRATE_PREREG.md + this NAMECHECK.md, before any
+  implementation. Commit-order self-check: prereg timestamp strictly precedes
+  the prototype commit.
+
 ## Worker identity
 
 - Lane: TNN3-SUBSTRATE
