@@ -38,12 +38,26 @@ eight bars; any FAIL is BUILD-FAIL.
   resolve to nothing (NAMECHECK.md Step 0).
 - Sealed binary: /tmp/f2v6_shift2, sha256
   196c889361dfae6968318b132b054f481a23037ef059756578b69beca559a545
-  (built from frozen sources via lane build.sh).
+  (built from frozen sources via lane build.sh; hash reproduced
+  byte-identically after a machine reboot + rebuild).
 - Serialization: one sealed run at a time; no compiles in parallel
   with measurement; live scaling binaries (s5f_bin, s10000_bin_fixed)
   not disturbed.
 - Byte-identical check: sha256sum + cmp over the binary's stdout
   (run metadata kept in separate .meta files, not in the compared log).
+
+## Environmental incident (not scientific)
+
+At ~2026-10-02 21:58 UTC the VM rebooted (uptime reset; all processes
+lost, /tmp wiped). Run 1 was at ~2h45m wall, in the wave-3 11-action
+planning phase (log intact through S2_VERIFY_RESULT 3, 1240 lines;
+archived as eval_logs/shift2_r1_reboot_partial.log). The partial run
+does not count toward K6-R7. The binary was rebuilt from the frozen
+sources; sha256 reproduced exactly
+(196c889361dfae6968318b132b054f481a23037ef059756578b69beca559a545),
+confirming build determinism. Run 1 restarted from scratch at
+~22:00 UTC. CPU contention from other lanes' restarted binaries
+continues; documented per run.
 
 ## SHIFT2 sealed runs (the 11-action planning gap)
 
