@@ -6331,3 +6331,24 @@ No em dashes were used in this entry (verified).
   listed in REPORT.md in leverage order. A4c repair in flight.
 
 No em dashes were used in this entry (verified).
+
+- C248 (BELIEF-ANTIFARM; prereg e443c5bd9, results 035e9593c,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  H-DECEPT-4 SUPPORTED. Per-source learner-owned betrayal count b;
+  penalty p=floor(c*w/(c+w))*(1+b) (smooth multiplicative
+  escalation, no strike threshold, no ban); forgiveness 1b per 100
+  consecutive honest outcomes; no-streak wrongs stay linear null and
+  do not touch b. Escalation table (H-DECEPT-3 farming strategy):
+  869 -> 769 -> 681 -> 620 -> 571; 769 bar beaten and falling;
+  analytic rel(n) -> 0, no positive fixed point. Escalation
+  inequalities: p(S#2)=8 > p(Q)=4; p(S#3)=15 > p(V)=5 (old
+  no-escalation equalities break correctly). Controls: reform (1
+  betrayal + 100 honest -> b=0, rel=952, second betrayal = fresh);
+  R1 truth-teller rel=1000 b=0; no-streak wrongs uninflated.
+  Honest limitation: maximally patient farmer (100 honest/betrayal)
+  sustains rel 925, the documented price of reform (5x honesty
+  cost). 3/3 byte-identical. K1-K6 PASS. 0 modes/bridges/handlers.
+  Sealed adversarial re-test dispatched (owed since H-DECEPT-2).
+  Status: BUILD-PASS.
+
+No em dashes were used in this entry (verified).
