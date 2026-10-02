@@ -6600,3 +6600,24 @@ No em dashes were used in this entry (verified).
   byte-identical. 0 modes/bridges/handlers. Status: 2 KILLS, 1 BOUND.
 
 No em dashes were used in this entry (verified).
+
+- C261 (REDTEAM2-H2H3; commit 3adc31acc, 2026-10-02): COMPLETE
+  (exploratory). Independent second red-team on repaired H2/H3 (all
+  attacks new). H2-B1 TRUNC-LOSS: KILL (headline). 8 decoy + 3 true
+  MAPs; 48 decoy fragments enumerate before true fragments at DFS
+  level 1; true fragments dropped -> RECOMB-FAIL; control (trues
+  first) -> SOLVE. Teach order alone flips SOLVE/FAIL. Kills the
+  fix's "truncation is intended bounding": order-dependent
+  incompleteness, contradicting "discovery by constraint
+  satisfaction only." Repair direction (no-patch-treadmill):
+  completeness-aware enumeration, not a bigger cap. H2-B2
+  ORDER-FORM: BOUND (teach-order determines promoted form).
+  H2-B4 DEPTH4: BOUND (clean fail, bound holds). H3-C1
+  TIEBREAK-WRONG: BOUND (fewest-repeats picks distractor over
+  genuine hub; inverts A5a moral). H3-C2 FIRSTLIT-VACUITY: BOUND.
+  H3-C3 VERIFY-BLOWUP: BOUND (quantified: ~1ms/candidate,
+  ~3h/query at b=10/plen=7). H3-C4 SCRATCH-HYGIENE: SURVIVE.
+  3/3 byte-identical. Completeness repair dispatched. Status: 1
+  KILL, 5 BOUND, 1 SURVIVE.
+
+No em dashes were used in this entry (verified).
