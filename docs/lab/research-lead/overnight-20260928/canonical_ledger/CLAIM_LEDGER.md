@@ -6577,3 +6577,26 @@ No em dashes were used in this entry (verified).
   workers have no recoverable state; respawned fresh.
 
 No em dashes were used in this entry (verified).
+
+- C260 (INQUIRY-ADVTEACHER; prereg a25a1c653, results a4c9a521e,
+  2026-10-02): COMPLETE (frozen prereg precedes implementation).
+  Adversarial battery on the grammar active-inquiry mechanism (7/7).
+  ADV-LIE: KILL. False fact (35,42,2) is protocol-legal, kills true
+  d=8, keeps wrong d=17; learner writes silent-wrong D=17 grammar
+  with zero detection; the -4 fail-closed defeated by one lie.
+  Lesson: op-consistency tests facts against candidate divisors, not
+  ground truth; a lie consistent with a surviving candidate is
+  indistinguishable from a true discriminating fact. ADV-WASTE:
+  BOUND. Four true-but-useless facts burn QMAX=4; no usefulness
+  tracking, no early stop; fail-closed held (nothing written).
+  ADV-POISON: KILL. False decomp fact (0,43,63) bypasses the op
+  check (43/44 never scanned); trusted into W; inquiry resolves to
+  true D=8 (masking the attack) while ranges corrupt to a=[2,7]
+  b=[2,7]; battery passes 1/1. Lesson: the decomp channel is an
+  unverified trust path into persistent grammar state. Vulnerabilities
+  are in trust, not inference (the learner was correct relative to
+  its adversarially shaped evidence). Hardening dispatched (answer
+  provenance, decomp op checks, waste early-stop). 3/3
+  byte-identical. 0 modes/bridges/handlers. Status: 2 KILLS, 1 BOUND.
+
+No em dashes were used in this entry (verified).
