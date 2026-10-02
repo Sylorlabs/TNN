@@ -1,17 +1,20 @@
 # REPORT.md: Meta-Learning Applicability (Micah Priority 5)
 
-## Verdict: FAIL (K7)
+## Verdict: FAIL (K7, correctness)
 
 Per PREREG: "Verdict META-APPLICABILITY-COMPLETE requires K1-K8 all PASS.
 Any bar failed: verdict is FAIL with the bar named, no reinterpretation."
 
 K7 (3/3 byte-identical per arm) FAILS: FRESH achieves 3/3, but TREAT and
-NAIVE hang on the 21-problem sequence due to a base TNN-2 scaling
-limitation (t2_trial combinatorial fallback with 21 problems' MAPs).
-The APPL mechanism itself is demonstrated: K1, K4, K5 PASS; K2, K3, K6
-partial PASS with predictions matched.
+NAIVE do not complete 3 runs within practical time (21-problem sequence
+takes ~5 min/run; TREAT C-P5 trial fails with WRONG answer).
 
-The failure is technical (base scaling), not conceptual (mechanism works).
+Additionally, TREAT C-P5 produces WRONG answer (ans=-2, trial=11). The base
+TNN-2 trial cannot solve the 21st problem correctly, indicating a scaling
+limitation in the base (not the APPL gate, which correctly set gate=0).
+
+The APPL mechanism itself is demonstrated: K1, K4, K5 PASS; K2, K3, K6
+partial PASS with predictions matched on 20/21 problems.
 
 ## Transfer Matrix (verify-tries per problem; lower is better)
 
