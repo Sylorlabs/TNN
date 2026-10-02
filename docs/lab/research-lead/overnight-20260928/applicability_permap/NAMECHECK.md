@@ -34,8 +34,9 @@ for all research logic (compiler: the pinned znc used by the rerun).
 ## Step 2: ordering
 
 - PREREG.md frozen and committed BEFORE the per-candidate
-  implementation is written, built, or run (prereg-alone commit, explicit
-  pathspec; commit hash recorded here after the commit lands).
+  implementation is written, built, or run: prereg-alone commit
+  1403e0b57 (2026-10-02), explicit pathspecs, verified
+  `git show --stat HEAD` lists only the two prereg files.
 - Control arms (TREAT/NAIVE/FRESH) rebuild the rerun sources verbatim;
   their output hashes must match the frozen rerun hashes or the setup
   change is reported and the comparison voided.
