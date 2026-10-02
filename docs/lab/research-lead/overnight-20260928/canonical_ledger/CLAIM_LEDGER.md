@@ -6272,3 +6272,25 @@ No em dashes were used in this entry (verified).
   3/3 byte-identical. Status: INFORMATIVE NEGATIVE (exploit found).
 
 No em dashes were used in this entry (verified).
+
+- C246 (GRAMMAR-ENCODE; prereg b38324b6a, amend A1 e26874d43,
+  results df668fa20, 2026-10-02): COMPLETE (frozen prereg precedes
+  implementation; A1 transparently re-frozen before verdicts).
+  gi_codec_check: semantic round-trip guard in gi_induce (after range
+  induction, before type-70 write). For every taught eval fact,
+  decode the pair under the assumed codec and require the named op
+  to reproduce the taught value (SUB: a-b==t; DIV: b>0, exact,
+  a/b==t). Violation -> refuse -3, nothing written. Names no broken
+  encoding; DIV b=1 facts pin decoded components to true ones.
+  Results 3/3 byte-identical: EXL2 -> GI-INDUCED 1, correct ranges,
+  6/6, no false refusal; EXL3 -> GI-INDUCED -3, refused; EXL4 (new
+  broken P=a*32+b) -> refused by the same general check. Key finding:
+  the naive pair-set round-trip FALSE-refused EXL2 (real worlds teach
+  only constraint-satisfying pairs) and was provably vacuous for
+  EXL3; rejected, prereg amended. Machinery identity: patch diff is
+  exactly the guard + 4-line call site; all five /16 sites
+  byte-unchanged. Silent-wrong repaired to fail-closed. Deeper fix
+  (codec induction) dispatched. 0 modes/bridges/handlers. Status:
+  BUILD-PASS.
+
+No em dashes were used in this entry (verified).
