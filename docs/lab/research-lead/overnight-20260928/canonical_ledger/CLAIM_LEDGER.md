@@ -5369,3 +5369,97 @@ No em dashes were used in these entries (verified).
   0. 3/3 deterministic per arm. Status: BUILD-PASS (exploratory).
 
 No em dashes were used in these entries (verified).
+- C190 (PREDICTION-OPTIONAL; commit 43d3bccb0, 2026-10-01):
+  COMPLETE (exploratory, no frozen prereg). Constitution Section 13
+  battery: 7 cognitive process types (retrieve, derive, verify, causal,
+  predict, inquire, construct). Prediction-first control (CTL) invokes
+  ev_predict on every query: 21 predictions, 18 wasted (86 percent).
+  State-driven treatment (TRT): 3 predictions, 0 wasted, all 7 types
+  ok=1. Same answers, 7x fewer predictions. Learner-owned T_PROC record
+  reuses learned process choice on repeat queries. Honest boundary:
+  A/B/C/D/E/F/G taxonomy and dispatch order are researcher-authored;
+  this is a BASELINE proving unnecessary prediction can be removed, not
+  TNN's final process-selection architecture. Micah correction
+  accepted: do NOT canonize the 7-type router; next experiment must
+  remove explicit task/process labels. 3/3 deterministic. Status:
+  BUILD-PASS (exploratory).
+- C191 (KNOWLEDGE-COMPOSITION; commit 7c3ce673e, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Clean NEGATIVE on Constitution
+  Section 8/26 novel composition. Three X/Y/Z combinations, 9 arms, 3/3
+  byte-identical. C1: Z solved via trial but deleting X/Y MAPs changes
+  nothing; ZMAP has zero references to X/Y; treatment costs MORE than
+  fresh (7 vs 3 verifies). C2: Z FAILS when trial cannot reach it. C3:
+  same as C1. Conclusion: TNN-2 does not compose independently-learned
+  structures; it re-derives from scratch or fails. Architectural reason:
+  trial is a monolithic gather/assemble/verify solver using raw facts,
+  never MAPs; rebind is whole-shape plen matching; no mechanism exists
+  to sequence, nest, or combine two MAP executions. Composition is
+  architecturally absent, not merely untested. 0 cognition lines added.
+  Status: BUILD-PASS as evidence (negative result, high information).
+- C192 (LEARNING-TO-LEARN; commit 4976be69b, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Constitution Section 16 test on
+  persistent-connections mechanism. Family 1 (5 chains) then Family 2
+  (5 new chains). Treatment Family-2 cost: 5 verifies vs fresh 30 (6x
+  reduction). Examples-to-criterion: treatment needs 0 additional
+  examples in Family 2; fresh needs 2. Ablation (LINKs deleted, MAPs
+  kept): Family-2 cost reverts 5 to 15, proving the learned LINK-ordered
+  retrieval STRATEGY is causal, not MAP possession. Accuracy 100% all
+  arms; effect is purely on learning cost. Honest boundary: families
+  structurally identical; strategy is recency-ordered retry, not an
+  abstract learning rule. 3/3 deterministic per arm. Status: BUILD-PASS
+  (exploratory).
+- C193 (SCALING-INDEX; commit 2bea4c73f, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Constitution Section 17: learner-
+  maintained plen-bucket MAP index for rebind retrieval (~150 lines,
+  si_patch.zag). 4 plen buckets in dedicated index node; idx_add fires
+  on promotion; no researcher static table. Results (10/50/100 MAPs,
+  3/3 byte-identical): verifies identical 1/0 in all 18 runs (semantics
+  preserved exactly). Scan visits: linear 69/349/699 vs indexed 5/5/5.
+  140x fewer scan visits at 100 MAPs. Sublinear: YES for scan work.
+  Amortized: pays D+5 walks once at promotion; wins when queries exceed
+  promotions. Honest limits: index removes scan work, not verifies;
+  t2_gather still O(1024); 1000+ needs bigger workspace. Micah note:
+  plen buckets must not become a permanent researcher taxonomy; future
+  work should test emergent index keys. Status: BUILD-PASS
+  (exploratory).
+- C194 (INTEGRATION-RSV; commit b755e33ff, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). One-System integration of C181
+  (prediction reliability) + C183 (source reliability) + C185
+  (substrate). Single shared tag-61 substrate stores both reliabilities;
+  C183's private rel store REMOVED (architecture compression).
+  Verification (6th substrate behavior) consults both reliabilities.
+  I1: no interference, all records coexist. I2 synergy: integrated 3/3
+  vs prediction-only 2/3 vs source-only 2/3; avoids both false trusts.
+  I3 ablation: removing PRED loses Z, removing SRC loses X; each
+  load-bearing; removing both withholds safely. 0 modes/bridges/
+  handlers. One subsystem deleted. 3/3 deterministic. Status: BUILD-PASS
+  (exploratory).
+- C195 (P1-WITHHOLDING; commit 868077a7c, 2026-10-01): COMPLETE
+  (exploratory, no frozen prereg). Learner-owned withhold/guess boundary
+  on C181 prediction machinery (Micah P1-deep gap). WT in learner
+  state, +1 on false guess, -1 on false withhold. W1 stationary (60%):
+  fixed-3 (122) beats adaptive (117). W2 regime change (90% to 10%):
+  adaptive (111) beats fixed-3 (104); adaptive withholds at t=280 after
+  38 wrong guesses, WT 3 to 30; fixed never withholds. W3 low buildup:
+  tied. Honest: reliability SCORE does most adaptive work; WT threshold
+  is a secondary modulator; 38 wrong guesses before withholding is
+  slow. Bug found and fixed: ev_teach via ctx_push clobbers header
+  bytes 32/36/40/44 (also affects C181). Completes Micah Priority 1
+  (revision C181 + withholding). 3/3 deterministic per arm. Status:
+  BUILD-PASS (exploratory).
+- C196 (HYPOTHESIS-FRONTIER; commit 639d873ad, 2026-10-01): COMPLETE
+  (governance, Constitution Section 20). 18 live hypotheses with
+  question, information-gain rationale, experiment design, falsifier,
+  and priority. P0 (5): H-SCALE-1, H-VER-1, H-ADAPT-1, H-INDEX-1,
+  H-INTEG-1. P1 (7): prediction-optional, composition, L2L, LINK
+  persistence, substrate revision, predictive utility + eviction,
+  threshold forgetting. P2 (6): formal errors, 30% compression, learner
+  creates slot, reliability-weighted utility, negative transfer,
+  cross-domain. Bottleneck clustering per Constitution 23: H-SCALE-1,
+  H-INDEX-1, H-PERSIST-1, H-PREDOPT-1 share one cause (no cost-aware
+  retrieval layer). Treadmill warning on exact-plen fallback lineage
+  (3 adjacent correct fallbacks; H-ADAPT-1 is last characterization).
+  No auto-promotions; all 18 require experiments first. Status:
+  GOVERNANCE-COMPLETE.
+
+No em dashes were used in these entries (verified).

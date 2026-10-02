@@ -280,3 +280,38 @@ Auto-promote rule (Constitution: "if undecided you must test and if it turns int
 - 1 governance (ledger, SUF tracking).
 
 Total: 10. Replacement order per Micah: BUILD, RUN, ABLATE, ADVERSARY, INTEGRATE, ANALYZE.
+
+---
+
+## Frontier status update: 2026-10-02 (Governance Wave 3)
+
+### Tested since 2026-10-01
+
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| H-PREDOPT-1 | TESTED (partial) | C190: 86% prediction waste measured; state-driven selection works. Micah correction: 7-type taxonomy is researcher-authored; must remove labels next. |
+| H-COMP-1 | TESTED (negative) | C191: clean negative; composition architecturally absent. A/B/C hypotheses NOT yet tested. |
+| H-L2L-1 | TESTED (positive, bounded) | C192: 6x Family-2 cost reduction; ablation proves LINK strategy causal. Families structurally identical; cross-family still open. |
+| H-INDEX-1 | TESTED (positive) | C193: 140x scan reduction at 100 MAPs; learner-maintained; verifies identical. Plen buckets risk becoming researcher taxonomy (Micah note). |
+| H-INTEG-1 | TESTED (positive) | C194: integrated 3/3 vs 2/3 each alone; C183 private store deleted. First net-negative integration. |
+| H-VER-1 | TESTED (positive, bounded) | C195: adaptive WT wins on regime change (111 vs 104); loses stationary. Reliability score does most work; threshold secondary. |
+| H-PERSIST-1 | TESTED (positive, pending commit) | p2_lifetime REPORT: links survive 960 interference events; C and D cost 1 try vs 11 control; D links to B (node-id ordering). Ablation batch pending. Worker active, uncommitted. |
+| H-FORMAL-1 | IN PROGRESS | formal_errors worker active (run outputs exist, no REPORT.md yet). |
+
+### Still live (untested)
+
+H-SCALE-1, H-ADAPT-1, H-SUB6-1, H-UTILRET-1, H-THRESH-1, H-COMPRESS-1, H-SLOT-1, H-PROVUTIL-1, H-NEGTR-1, H-XDOMAIN-1.
+
+### New hypotheses from this wave
+
+- **H-COMP-0 (P0):** C191 proves the trial/MAP divide blocks all composition. Before testing A/B/C, test whether ANY mechanism can make trial consume MAPs (not raw facts). If trial cannot be bridged to MAPs, composition needs a new execution path, not a better rebind. Falsifier: a MAP-consuming trial variant costs more than fresh trial with zero reuse.
+- **H-PREDOPT-2 (P0):** Per Micah's correction, test unlabeled process selection: present goal/situation with no TYPE label; TNN must determine the cognitive operation sequence from its own state (knowledge, missing pieces, constraints, uncertainty, consequences). Falsifier: selection accuracy at chance without labels, or labels prove necessary.
+- **H-SEQ-1 (P1):** Test multi-operation sequences (RECALL to DERIVE to VERIFY to ACT). Single-operation selection (C190) is insufficient for general intelligence. Falsifier: TNN cannot chain two different operations without researcher sequencing.
+- **H-EMERGKEY-1 (P1):** Per Micah Section 6, test whether index keys can emerge from learned structure and access/consequence history rather than researcher plen buckets. Falsifier: emergent keys perform worse than plen buckets at all scales.
+- **H-L2L-2 (P0):** Strong learning-to-learn per Micah Section 5: Family A (chains) to structurally different Family B (not just new literals). Ablation of learned meta-structure must remove the advantage. Falsifier: no transfer across structurally different families.
+
+### Treadmill check (Constitution 23)
+
+The exact-plen fallback lineage now has 4 adjacent "correct fallback" results (C188 H3/H4, C191 C1/C3 pattern). H-ADAPT-1 remains the last allowed characterization; next work on this lineage must be adaptation machinery or a different approach, not another fallback measurement.
+
+No em dashes used (verified).
