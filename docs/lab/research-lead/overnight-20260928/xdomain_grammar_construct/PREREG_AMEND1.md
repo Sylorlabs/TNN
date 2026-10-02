@@ -31,12 +31,9 @@ at (X, Y) first.
 ### H1 NOTYPE trace (type_on = 0)
 
 Singles: X(1) = 16, Y(1) = 2, D1(1) = 7, D2(1) = 1. 4 tries, all wrong.
-Pairs in order: (X, X): X(16) = -1 (no r = 71 fact from 16; find_obj
-returns -1)... 
-
-Correction: X(16): find_obj(16, 71) scans facts for subject 16, rel
-71. No such fact. Returns -1. So (X, X): mid = -1, r = X(-1) = -1.
-Not 17. Try 5. (X, Y): mid = 16, r = 17. SOLVE. Try 6.
+Pairs in order: (X, X): mid = X(1) = 16, r = X(16) = find_obj(16, 71)
+= -1 (no r = 71 fact from subject 16). Not 17. Try 5. (X, Y):
+mid = 16, r = Y(16) = 17. SOLVE. Try 6.
 
 Total: 6 tries > 3. K3 (contract prunes) holds.
 
