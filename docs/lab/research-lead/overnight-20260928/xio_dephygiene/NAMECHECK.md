@@ -55,7 +55,9 @@ in a single commit before any implementation source, driver,
 assembly, binary, or run output for this prereg exists. The commit
 hash is recorded here after the commit:
 
-- Freeze commit: (recorded post-commit)
+- Freeze commit: c8c811a73 (PREREG.md + NAMECHECK.md Step 0 only,
+  committed alone; recorded here post-commit as a reference, not a
+  prereg change)
 
 The exploratory_uncommitted_20261002/ directory holds the earlier
 never-committed pass (retained for provenance, not evidence). No file
