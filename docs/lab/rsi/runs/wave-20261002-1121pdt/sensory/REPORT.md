@@ -51,4 +51,5 @@ penumbra-specificity: >50% of shadowed pixels must have center-tap csh >
 
 ## Commits
 f3ee683f5 NAMECHECK < ea028fa71 PREREG_SA1b < c9da6ec2e PREREG_H5 <
-172017586 SA1b impl+eval < 041e54f5a H5 impl.
+172017586 SA1b impl+eval < 041e54f5a H5 impl < dd0a8c388 h5_verify
+renormalization fix < c195a19fd interim REPORT.
