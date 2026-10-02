@@ -6887,3 +6887,18 @@ No em dashes were used in this entry (verified).
   sha256-verified untouched. Status: BUILD-PASS (harness v2).
 
 No em dashes were used in this entry (verified).
+
+- C277 (COMPOSITION-CANONICAL; commit 8ed0b7c06, 2026-10-02):
+  COMPLETE (consolidation). H1 (learned typed I/O contracts)
+  and H2 (value-level function composition) are canonical for
+  cross-domain composition. H3's structure-derived execution
+  dispatch is RETIRED. Invalid 3-way comparison corrected.
+  H1: probe_kind classifies NODE/NUM; signatures by majority;
+  admits pair iff sig(A).out == sig(B).in; ~300 cognition
+  lines. H2: vc_compose tries ordered mode pairs; two-stage
+  with intermediate VALUE; ~250 cognition lines. Generality:
+  four pairs, unmodified logic. One boundary remains open for
+  all mechanisms. H-PLANCOMP-1 opened. Status: CANONICAL
+  (H1+H2).
+
+No em dashes were used in this entry (verified).
