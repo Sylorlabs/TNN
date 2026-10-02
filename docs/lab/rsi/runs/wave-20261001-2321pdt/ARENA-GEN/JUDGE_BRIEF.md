@@ -1,7 +1,6 @@
 # JUDGE BRIEF: ARENA-GEN (wave-20261001-2321pdt)
 
-RENDER_SHA: (filled at commit; the sha of the commit that
-first renders this file)
+RENDER_SHA: 81fccb8577cc4ecf43240a7ddf7ec7e68e0ffe75
 FIRST_RENDERED_WAVE: wave-20261001-2321pdt
 COMPONENT_LINEAGE: ARENA5 BUILD-PASS DEFRECALL (implementation
 commit 2320c3454; sealed eval commit 6582398e9)
