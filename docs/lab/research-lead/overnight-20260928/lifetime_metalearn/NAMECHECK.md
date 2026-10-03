@@ -53,4 +53,21 @@ never in the lane; no frozen experiment executed):
 
 ## Build record
 
-(to be filled post-prereg)
+- 2026-10-03: `lm3.zag` written (14760 bytes, neutral identifiers; B6/B7
+  audits pass -- B7 case-insensitive grep for frozen word list returns
+  empty). Compiled with pinned safebin znc -> `lm3_bin` (64588 bytes).
+  One A0102 analyzer warning (ignored return value of reg_new in
+  lrn_select; suppressed, result intentionally discarded).
+- 2026-10-03: 3/3 runs byte-identical, sha256
+  `46838f88f9f245e68b9d0de6690f1d5d0dea1dcb0c3fd0a0896c17fb4e728e52`
+  (run1/2/3.txt).
+- 2026-10-03: REPORT.md written. Frozen verdict: RETENTION WITHOUT
+  META-LEARNING. Bars: B5A=1 B5B=1 B5C=1 B5D=0 B5E=1 B5F=1 B4=1.
+  B5d failed (E03-E12 = 17-24 = -7 < 8); all other bars pass.
+- PRNG bug fix (pre-commit, documented): low-bit LCG output caused
+  identical query streams (B4 DS=0 failure in v1 pilot). Fixed to use
+  high bits ((s>>16)%n), the standard correct LCG output. This changed
+  calibration values from PREREG sec 5 (which used low-bit pilot);
+  B5d's expected PASS became a FAIL. Bars themselves unchanged (frozen).
+- Commit order self-check: prereg b3b3ee00a (PREREG.md + NAMECHECK.md
+  only) strictly before this implementation commit. PASS (B1).
