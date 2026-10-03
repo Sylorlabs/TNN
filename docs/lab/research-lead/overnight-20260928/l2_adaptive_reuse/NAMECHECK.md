@@ -63,10 +63,24 @@ query. Parent kill bars K1-K8 govern.
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (this file +
-      PREREG.md) before any implementation exists.
-- [ ] Step 2: implementation (pure Zag learner + world +
-      driver, concatenated to mr_full.zag), compiled with
-      pinned znc.
-- [ ] Step 3: 3/3 runs byte-identical, K7 audit zero hits,
-      driver audit zero hits, REPORT.md with verdict.
+- [x] Step 1: PREREG.md frozen, committed ALONE (this file +
+      PREREG.md) at 4f043b49f, before any implementation existed.
+- [x] Step 2: implementation (pure Zag learner + world +
+      driver, concatenated to mr_full.zag, 1585 lines),
+      compiled with pinned znc (`znc mr_full.zag -o mr_bin`,
+      rc=0, 59 benign analyzer warnings: A0102
+      ignored-return-value class + two E0101/E0102
+      constant-fold notes in driver arithmetic, same
+      classes as the sibling lanes).
+- [x] Step 3: 3/3 runs byte-identical
+      (sha256 5fb7423cce26c3a34ceb52f201591e2349ea7c62ae56f0865dc8c0e3f0bbe6d8
+      x3), K7 audit 12/12 patterns zero hits, driver
+      audit 5/5 zero hits, REPORT.md with verdict
+      L2-METAREUSE-PASS (K1-K8 all PASS, 0 falsifiers,
+      F-COUNT silent at QC 260/2, QS 214/2, QT 203/2).
+      One pre-verdict transparent amendment
+      (PREREG_AMENDMENT1.md, commit d57f14216): QC-AS
+      280->260 pure hand-derivation arithmetic
+      correction (b=1 tail attempted only when the
+      AGG-head succeeds); no counting-rule or code
+      change.
