@@ -50,7 +50,17 @@
   + CAP parameterization + 3-arm main + per-arm bars).
 - Build `znc ntsweep_full.zag -o ntsweep_bin` under safebin-only
   PATH. 3/3 runs byte-identical, exit 0, zero stderr.
-- Results: <to fill>.
-- Digests: run `<sha256>`, bin `<sha256>`, src `<sha256>`.
+- Results: ARM20 COST-CONFIRMED (S1-S5 all 1: nevict=30, phev=1,
+  118 displaced, u=3, forget=1, avail160=4, FP 50%);
+  ARM22 REPRODUCED (R1-R7 all 1: byte-exact NT-TEACHASSOC numbers);
+  ARM24 SLACK-CONFIRMED (T1-T5 all 1: nevict=10, u=4, forget=0,
+  avail160=4, bprobe=2, FP 50%). Overall: CURVE-CONFIRMED.
+  First-run exact match on all frozen hand-derived numbers.
+- Digests: run
+  `614e046b9d906a4e32ead8b6a05ce8225e6f03abfeae15fa566d4426eecda6a6`,
+  bin
+  `a25cb20ce53113c62c64ded35a621a1ed6671679cd4f4e25cbb096d245908415`,
+  src
+  `80cf0e57c6752c0fd9797aecff54d8a9834b51e52ac0f9ef7f76bae78762528a`.
 - Commits local only, explicit pathspecs, never pushed.
   Non-ledger task (claim minting paused).
