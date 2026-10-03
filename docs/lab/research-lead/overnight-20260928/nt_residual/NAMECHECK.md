@@ -42,3 +42,20 @@
 - PREREG.md: frozen kill bars K1-K7, hand-derived Section 5
   predictions (single arm R6), verdict mapping (Section 8).
   Predicted verdict: RESIDUAL-CONFIRMED.
+- Prereg freeze: commit `8dc808fb4e839c3f3404b7f7304986db2345d1cc`
+  on `tnn-native-lab` (PREREG.md + NAMECHECK.md only), strictly
+  before implementation.
+- Implementation: `ntres_full.zag` (NTNL D5 learner verbatim;
+  workload adds RESIDUAL keys 160/161 + q(160) probe; layout
+  extended to subjs 100..165). Build `znc ntres_full.zag -o
+  ntres_bin` exit 0 (benign zagd warning). 3/3 runs
+  byte-identical, exit 0, zero stderr. Digests: run
+  `6be7bc39438cf53b2980a4605deb4ab1b1f3aee4505dbae8f028163532ac2bf4`,
+  bin
+  `c07bb48e70ba568190ebe3936d483452cc1558cd678d9eabee0b28cdbcfd4e03`,
+  src
+  `25f935daa65c269475cec795c5a8bc10b5e57c9f0a4ab85fa52f7cbae5d28a2e`.
+- Results: K1-K7 all 1, VERDICT=RESIDUAL-CONFIRMED. REPORT.md
+  written.
+- Commits local only, explicit pathspecs, never pushed.
+  Non-ledger task (claim minting paused).
