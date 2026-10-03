@@ -82,3 +82,40 @@ original, interference, recover). Comments avoid the listed words.
 ## Build record
 
 (recorded after the prereg commit; implementation has not begun)
+
+### Implementation (post-PREREG.md, pre-amendment)
+
+- `ms_w6.zag` = frozen `ma4c.zag` + write-only `ms_eval`
+  (per-W-trigger and fixed-probe proxy-firing audit: nvalid,
+  min-ratio pair as i64 NUM/DEN, K1..K5 bits = exact firing
+  semantics, PCT hundredths; arena 3685200/3685204, 32x64B) +
+  probes at 0-indexed e=734/794 + MS printing + banner tag.
+- Diff ms_w6.zag vs ma4c.zag: audit additions only; mechanism
+  untouched.
+- B4 verified: ms_w6 minus MS/banner lines byte-identical to
+  frozen ma4c run1.txt (cmp). MS reproduces W6 diagnostic exactly
+  (E735: VI=2 J=3 PCT=294 K3=1; E795: VI=2 J=3 PCT=341 K3=0).
+- `ms_s1..s4.zag` via sed (W Bernoulli seed 20261026 ->
+  20261027..30 + banner); diffs show exactly 2 lines each.
+- All 5 built with safebin znc (only pre-existing A0101 in
+  etc_ep); 3/3 byte-identical per stream.
+
+### Vacuity finding (prompted PREREG_AMEND.md)
+
+- S1..S4 tallies bit-identical to W6 (PCT 294/341 on all five):
+  the Bernoulli seed is causally inert (trials feed only write-only
+  etc_ep -> t). Streams superseded for verdicts, kept as artifacts.
+
+### T-stream implementation (post-PREREG_AMEND.md)
+
+- `ms_t1..t4.zag` = ms_w6.zag + W tile-set re-shuffle in gen()
+  (s64(TSEED) then Fisher-Yates on t9w/t9wb/t9c/t9d; TSEED
+  20261027..30; X/Y/Z/D untouched) + banner TSEED tag.
+- B7 whole-word grep clean on all nine sources.
+- Built with safebin znc (only pre-existing A0101); 3/3
+  byte-identical per stream (sha256: t1 16843139..., t2 eaa876b5...,
+  t3 99a29cac..., t4 cb6d95b9...).
+- X/Y/Z byte-identical across all streams (cmp sans banner).
+- Results: B6 FAIL 4/4 (T1/T2/T3 genuine-silent at 321/302/318;
+  T4 adversarial-fire at 257 with ADVKILL2=1). Headline
+  MARGIN-FRAGILE + K-VARIES implication (see REPORT.md).
