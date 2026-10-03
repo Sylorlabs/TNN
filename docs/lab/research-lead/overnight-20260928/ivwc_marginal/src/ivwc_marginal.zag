@@ -1,0 +1,1478 @@
+// ivwc_marginal.zag -- marginal (decision-boundary-local) per-bucket
+// miscalibration worth-K verdicts.
+// The bucket-mean gap is driven by far-from-margin cases, while profit
+// asks which side of the bar the marginal cases are on. This wave
+// measures miscalibration only on the train cases near the worth-K
+// bar and sets each bucket's bar from that local estimate.
+// V_PMW: bar_b = K + mwmcalib[b], where mwmcalib[b] is the trunc mean
+// of (adj - eff) over the train cases in bucket b with
+// |adj - K| <= MWIN (MWIN = 10, frozen), falling back to the
+// full-bucket train mcalib when the marginal set is empty. GO iff
+// the sealed score clears its bucket's own bar. Reads only bkt
+// (sealed, bias-free), train-fixed local quantities, K, and the
+// frozen structural window rule. Never reads a sealed bias-adjusted
+// score, so it is probe-proof by structure.
+// V_PMN: bar_b = K + mncalib[b], where mncalib[b] is the trunc mean
+// of (adj - eff) over the N_b = ceil(n_b/2) train cases in bucket b
+// with smallest |adj - K| (ties by lowest train index; N_b is
+// data-driven, no magnitude constant). Learner-computable, no sealed
+// data, probe-proof by structure.
+// V_PMWX / V_PMNX: fenced marginal exact diagnostics. The exact
+// sealed marginal gaps under the same two marginality rules,
+// computed fenced AFTER the REFERENCE phase. They bound the marginal
+// estimand: the best any decision-boundary-local signal could do.
+// Not learner verdicts; zero world calls. Named pmmwx / pmmnx on
+// purpose.
+// K = EXCOST is a world parameter (the execution cost), fixed
+// before any sealed case is seen: not a label, not a threshold
+// on truth. The marginal bars keep the structural property: they
+// read only bkt, train-fixed quantities, K, and the frozen
+// marginality rules.
+// World / belief / composer / stepper / seeds / biases / bars are
+// verbatim from IVWC-HYBRID-VERDICT, IVWC-APPLIED,
+// IVWC-CONSEQUENCE, IVWC-BATCHAWARE, and IVWC-PERBUCKET (K3
+// re-verifies bars).
+// Scoring is pure consequence: the world charges EXCOST per GO;
+// profit = sum over GO cases of (eff - EXCOST). No ge, no label,
+// no threshold on truth anywhere -- not for the learner, not
+// even fenced for scoring (K1-A9 audits the threshold token
+// absent).
+// Arms: UCB x V_WK (verbatim lineage control: the learner's own
+// UCB bias under the fixed stakes bar); UCB x V_PBK (verbatim
+// bucket-mean comparator); UCB x V_PMW (MAIN: marginal-window
+// worth-K); UCB x V_PMN (second: marginal N-nearest worth-K).
+// Fenced: V_PMWX / V_PMNX marginal exact diagnostics (arithmetic
+// only, zero world calls), V_PBX per-bucket exact diagnostic
+// (recomputed verbatim). Reference: execute-all profit per batch
+// (fenced, counterfactual).
+// Pure Zag, deterministic, integer arithmetic only.
+
+// ---------- frozen parameters (identical to IVWC-APPLIED) ----------
+const CW:i32=20;
+const EBUD:i32=36;
+const PLANMAX:i32=64;
+const NTRAIN:i32=24;
+const NSEAL:i32=12;
+const RECW:i32=41;
+const RECM:i32=16;
+const RECC:i32=24;
+const EREC:i32=128;
+const NSHIFT:i32=3;
+// World execution cost per GO (preregistered; consequence phase only).
+// K is ALSO the stakes parameter read by the V_HKC and V_WK bars:
+// a world constant, fixed before any sealed case, not a label.
+const EXCOST:i32=15;
+// Marginal half-width (preregistered structural mechanism parameter;
+// the learner still computes all miscalibration quantities from
+// train data). A train case is marginal iff |adj - EXCOST| <= MWIN.
+const MWIN:i32=10;
+
+// ---------- helpers (u8-backed cells, little-endian; verbatim) ----------
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8, off:i32)i32 {
+  return (b[off] as i32) | ((b[off+1] as i32)<<8) | ((b[off+2] as i32)<<16) | ((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn get8(b:[]u8, off:i32)i32 {
+  return b[off] as i32;
+}
+fn set8(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8;
+  return;
+}
+fn ob_app(ob:[]u8, at:i32, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ob[at+i]=s[i];i=i+1;}
+  return at+s.len;
+}
+fn ob_nl(ob:[]u8, at:i32)i32 { ob[at]=10; return at+1; }
+fn ob_i32(ob:[]u8, at:i32, v:i32)i32 {
+  let neg:i32=0;
+  let x:i32=v;
+  if(x<0){neg=1;x=0-x;}
+  let nd:i32=1;
+  let t:i32=x;
+  while(t>=10){t=t/10;nd=nd+1;}
+  if(neg==1){ob[at]=45;}
+  let p:i32=at+neg+nd-1;
+  t=x;
+  let k:i32=0;
+  while(k<nd){ob[p-k]=((t%10)+48) as u8; t=t/10; k=k+1;}
+  return at+neg+nd;
+}
+// Deterministic LCG, small modulus (no i32 overflow).
+fn lcg_next(st:[]u8)i32 {
+  let s:i32=get32(st,0)%65536;
+  s=(s*25173+13849)%65536;
+  set32(st,0,s);
+  return s;
+}
+// Integer floor square root (for the V-UCB bias estimator).
+fn isqrt(x:i32)i32 {
+  let r:i32=0;
+  while((r+1)*(r+1)<=x){ r=r+1; }
+  return r;
+}
+
+// ===== WORLD =====
+// Verbatim copies from IVWC-HYBRID-VERDICT. The learner never calls
+// these.
+fn world_gen(seed:i32, wp:i32, world_buf:[]u8, world_off:i32)void {
+  let st:[]u8=z_alloc(4);
+  set32(st,0,seed);
+  let c:i32=0;
+  while(c<CW){
+    set8(world_buf,world_off+c,0);
+    set8(world_buf,world_off+CW+c,0);
+    c=c+1;
+  }
+  c=1;
+  while(c<CW-1){
+    if(lcg_next(st)%100 < wp){ set8(world_buf,world_off+c,1); }
+    c=c+1;
+  }
+  c=0;
+  while(c<CW){
+    if(get8(world_buf,world_off+c)==0){
+      if(lcg_next(st)%100 < 25){ set8(world_buf,world_off+CW+c,1); }
+    }
+    c=c+1;
+  }
+  let s:i32=2+(lcg_next(st)%16);
+  let done:i32=0;
+  while(done==0){
+    if(get8(world_buf,world_off+s)==0){ done=1; }
+    else {
+      s=s+1;
+      if(s>=CW){ s=0; }
+    }
+  }
+  set8(world_buf,world_off+2*CW,s);
+  return;
+}
+fn belief_gen(seed:i32, world_buf:[]u8, world_off:i32, bb:[]u8, boff:i32)void {
+  let st:[]u8=z_alloc(4);
+  set32(st,0,seed);
+  let start:i32=get8(world_buf,world_off+2*CW);
+  let c:i32=0;
+  while(c<CW){
+    let w:i32=get8(world_buf,world_off+c);
+    if(c!=start){
+      if(lcg_next(st)%100 < 12){ w=1-w; }
+    }
+    set8(bb,boff+c,w);
+    c=c+1;
+  }
+  c=0;
+  while(c<CW){
+    let it:i32=get8(world_buf,world_off+CW+c);
+    if(it==1){
+      if(lcg_next(st)%100 < 15){ it=0; }
+    } else {
+      if(get8(world_buf,world_off+c)==0){
+        if(lcg_next(st)%100 < 18){ it=1; }
+      }
+    }
+    set8(bb,boff+CW+c,it);
+    c=c+1;
+  }
+  set8(bb,boff+2*CW,start);
+  return;
+}
+fn w_left(world_buf:[]u8, world_off:i32, st:[]u8)i32 {
+  let pos:i32=get32(st,0);
+  let bump:i32=1;
+  if(pos>0){
+    if(get8(world_buf,world_off+pos-1)==0){ bump=0; }
+  }
+  if(bump==0){ set32(st,0,pos-1); }
+  else { set32(st,8,get32(st,8)+1); }
+  return bump;
+}
+fn w_right(world_buf:[]u8, world_off:i32, st:[]u8)i32 {
+  let pos:i32=get32(st,0);
+  let bump:i32=1;
+  if(pos<CW-1){
+    if(get8(world_buf,world_off+pos+1)==0){ bump=0; }
+  }
+  if(bump==0){ set32(st,0,pos+1); }
+  else { set32(st,8,get32(st,8)+1); }
+  return bump;
+}
+fn w_gather(world_buf:[]u8, world_off:i32, got:[]u8, st:[]u8)i32 {
+  let pos:i32=get32(st,0);
+  let hit:i32=0;
+  if(get8(world_buf,world_off+CW+pos)==1){
+    if(get8(got,pos)==0){ hit=1; }
+  }
+  if(hit==1){
+    set8(got,pos,1);
+    set32(st,4,get32(st,4)+1);
+  } else {
+    set32(st,12,get32(st,12)+1);
+  }
+  return hit;
+}
+fn w_step(world_buf:[]u8, world_off:i32, got:[]u8, st:[]u8, a:i32)i32 {
+  if(a==0){
+    if(w_left(world_buf,world_off,st)==1){ return 1; }
+    return 0;
+  }
+  if(a==1){
+    if(w_right(world_buf,world_off,st)==1){ return 2; }
+    return 0;
+  }
+  if(w_gather(world_buf,world_off,got,st)==1){ return 3; }
+  return 4;
+}
+// True-world stepper. Called ONLY in train CONSEQ, sealed
+// CONSEQUENCE (GO cases), and the fenced REFERENCE -- never by the
+// learner. wc counts true executions.
+fn world_execute(world_buf:[]u8, world_off:i32, pb:[]u8, poff:i32, L:i32, cb:[]u8, coff:i32, eb:[]u8, eoff:i32, wc:[]u8)void {
+  set32(wc,0,get32(wc,0)+1);
+  let got:[]u8=z_alloc(CW);
+  let st:[]u8=z_alloc(16);
+  set32(st,0,get8(world_buf,world_off+2*CW));
+  let i:i32=0;
+  while(i<L){
+    let pos:i32=get32(st,0);
+    let oc:i32=w_step(world_buf,world_off,got,st,get8(pb,poff+i));
+    set8(eb,eoff+2*i,pos);
+    set8(eb,eoff+2*i+1,oc);
+    i=i+1;
+  }
+  set32(cb,coff,get32(st,4));
+  set32(cb,coff+4,L);
+  set32(cb,coff+8,get32(st,8));
+  set32(cb,coff+12,get32(st,12));
+  set32(cb,coff+16,get32(st,0));
+  set32(cb,coff+20,L);
+  return;
+}
+
+// ===== LEARNER =====
+// Everything in this section touches beliefs and plans only.
+// No true-world array token appears below (checked by audit A7).
+fn lc_blocked(bb:[]u8, boff:i32, lo:i32, hi:i32)i32 {
+  let k:i32=lo;
+  let r:i32=0;
+  while(k<=hi){
+    if(get8(bb,boff+k)==1){ r=1; }
+    k=k+1;
+  }
+  return r;
+}
+fn lc_leg(pb:[]u8, poff:i32, at:i32, pcs:[]u8)void {
+  let pos:i32=get32(pcs,0);
+  let tgt:i32=get32(pcs,4);
+  while(pos<tgt){
+    if(at<PLANMAX){ set8(pb,poff+at,1); at=at+1; }
+    pos=pos+1;
+  }
+  while(pos>tgt){
+    if(at<PLANMAX){ set8(pb,poff+at,0); at=at+1; }
+    pos=pos-1;
+  }
+  if(at<PLANMAX){ set8(pb,poff+at,2); at=at+1; }
+  set32(pcs,0,pos);
+  set32(pcs,8,at);
+  return;
+}
+// NAV+GATHER composition from beliefs only (verbatim).
+// meta cells: gathers@0, plan_len@4, raw_conf@8, bucket@12.
+fn learner_compose(bb:[]u8, boff:i32, pb:[]u8, poff:i32, mb:[]u8, moff:i32)void {
+  let pcs:[]u8=z_alloc(12);
+  set32(pcs,0,get8(bb,boff+2*CW));
+  set32(pcs,8,0);
+  let c:i32=0;
+  while(c<CW){
+    if(get8(bb,boff+CW+c)==1){
+      let pos:i32=get32(pcs,0);
+      let lo:i32=pos;
+      let hi:i32=c;
+      if(lo>hi){
+        let t:i32=lo;
+        lo=hi;
+        hi=t;
+      }
+      if(lc_blocked(bb,boff,lo,hi)==0){
+        set32(pcs,4,c);
+        lc_leg(pb,poff,get32(pcs,8),pcs);
+      }
+    }
+    c=c+1;
+  }
+  let at:i32=get32(pcs,8);
+  let L:i32=at;
+  if(L>EBUD){ L=EBUD; }
+  let g:i32=0;
+  let i:i32=0;
+  while(i<L){
+    if(get8(pb,poff+i)==2){ g=g+1; }
+    i=i+1;
+  }
+  let raw:i32=0;
+  if(L>0){ raw=(100*g)/L; }
+  let b:i32=0;
+  if(g>=2){ b=2; }
+  if(g>=4){ b=3; }
+  if(g==1){ b=1; }
+  set32(mb,moff,g);
+  set32(mb,moff+4,L);
+  set32(mb,moff+8,raw);
+  set32(mb,moff+12,b);
+  return;
+}
+// Extract gather cells from a plan (walk from start), insertion-sort
+// them, return the count. Flat control flow (no deep nesting).
+fn gather_cells(pb:[]u8, poff:i32, L:i32, start:i32, out:[]u8, ooff:i32)i32 {
+  let pos:i32=start;
+  let n:i32=0;
+  let i:i32=0;
+  while(i<L){
+    let a:i32=get8(pb,poff+i);
+    if(a==0){ pos=pos-1; }
+    else {
+      if(a==1){ pos=pos+1; }
+      else {
+        set8(out,ooff+n,pos);
+        n=n+1;
+      }
+    }
+    i=i+1;
+  }
+  let k:i32=1;
+  while(k<n){
+    let v:i32=get8(out,ooff+k);
+    let j:i32=k-1;
+    let go:i32=1;
+    while(go==1){
+      let stop:i32=0;
+      if(j<0){ stop=1; }
+      if(stop==0){
+        if(get8(out,ooff+j)<=v){ stop=1; }
+      }
+      if(stop==1){ go=0; }
+      else {
+        set8(out,ooff+j+1,get8(out,ooff+j));
+        j=j-1;
+      }
+    }
+    set8(out,ooff+j+1,v);
+    k=k+1;
+  }
+  return n;
+}
+
+// Runs the world's response for one arm's GO cases; returns profit.
+// Single world_execute call site for all arm consequences (K1-A5).
+fn conseq_arm(wseal:[]u8, pseal:[]u8, sL:[]u8, go:[]u8, cseal:[]u8, etmp:[]u8, wc:[]u8)i32 {
+  let profit:i32=0;
+  let s:i32=0;
+  while(s<NSEAL){
+    if(get32(go,4*s)==1){
+      let sL2:i32=get32(sL,4*s);
+      world_execute(wseal, s*RECW, pseal, s*PLANMAX, sL2, cseal, s*RECC, etmp, 0, wc);
+      let sc:i32=get32(cseal,s*RECC);
+      let su:i32=get32(cseal,s*RECC+4);
+      let se:i32=0;
+      if(su>0){ se=(100*sc)/su; }
+      profit=profit+se-EXCOST;
+    }
+    s=s+1;
+  }
+  return profit;
+}
+
+// ===== MAIN: consequence-aware hybrid verdict (no outside truth) =====
+fn main()i32 {
+  let ob:[]u8=z_alloc(65536);
+  let at:i32=0;
+  at=ob_app(ob,at,"IVWCMG-BEGIN\n");
+  // Train buffers.
+  let wtrain:[]u8=z_alloc(NTRAIN*RECW);
+  let btrain:[]u8=z_alloc(NTRAIN*RECW);
+  let ptrain:[]u8=z_alloc(NTRAIN*PLANMAX);
+  let mtrain:[]u8=z_alloc(NTRAIN*RECM);
+  let ctrain:[]u8=z_alloc(NTRAIN*RECC);
+  let tbkt:[]u8=z_alloc(NTRAIN*4);
+  let teff:[]u8=z_alloc(NTRAIN*4);
+  let preff_tr:[]u8=z_alloc(NTRAIN*4);
+  // UCB tables.
+  let biassum:[]u8=z_alloc(16);
+  let biascnt:[]u8=z_alloc(16);
+  let bias:[]u8=z_alloc(16);
+  let bsq:[]u8=z_alloc(16);
+  let bucb:[]u8=z_alloc(16);
+  // Sealed buffers.
+  let wseal:[]u8=z_alloc(NSEAL*RECW);
+  let bseal:[]u8=z_alloc(NSEAL*RECW);
+  let pseal:[]u8=z_alloc(NSEAL*PLANMAX);
+  let mseal:[]u8=z_alloc(NSEAL*RECM);
+  let cseal:[]u8=z_alloc(NSEAL*RECC);
+  let preff:[]u8=z_alloc(NSEAL*4);
+  let sL:[]u8=z_alloc(NSEAL*4);
+  let sstart:[]u8=z_alloc(NSEAL*4);
+  // Learner GO decisions (UCB arms; per sealed batch).
+  let go_uwk:[]u8=z_alloc(NSEAL*4);
+  let go_upbk:[]u8=z_alloc(NSEAL*4);
+  let go_upmw:[]u8=z_alloc(NSEAL*4);
+  let go_upmn:[]u8=z_alloc(NSEAL*4);
+  // Profit per arm per batch (3 batches).
+  let p_uwk:[]u8=z_alloc(12);
+  let p_upbk:[]u8=z_alloc(12);
+  let p_upmw:[]u8=z_alloc(12);
+  let p_upmn:[]u8=z_alloc(12);
+  let p_pbx:[]u8=z_alloc(12);
+  let p_pmmwx:[]u8=z_alloc(12);
+  let p_pmmnx:[]u8=z_alloc(12);
+  let pall:[]u8=z_alloc(12);
+  // Bars per batch (verbatim lineage bars, K3 check).
+  let thyA_a:[]u8=z_alloc(12);
+  let thyB_a:[]u8=z_alloc(12);
+  let tvucb_a:[]u8=z_alloc(12);
+  let thykc_a:[]u8=z_alloc(12);
+  // Train per-bucket miscalibration (learner-visible on train).
+  let msum:[]u8=z_alloc(16);
+  let mcnt:[]u8=z_alloc(16);
+  let mcalib:[]u8=z_alloc(16);
+  // Per-bucket bars: V_PBK (K + mcalib) and V_PBOPT
+  // (train-profit-optimal, ties toward K).
+  let pbkbar:[]u8=z_alloc(16);
+  let pboptbar:[]u8=z_alloc(16);
+  // Marginal local miscalibration (learner, train-fixed):
+  // mwmcalib = window rule, mncalib = N-nearest rule;
+  // pmwbar / pmnbar = K + local.
+  let mwmcalib:[]u8=z_alloc(16);
+  let pmwbar:[]u8=z_alloc(16);
+  let mncalib:[]u8=z_alloc(16);
+  let pmnbar:[]u8=z_alloc(16);
+  // Fenced marginal exact diagnostic buffers.
+  let pmmwxgap:[]u8=z_alloc(16);
+  let pmmwxbar:[]u8=z_alloc(16);
+  let pmmnxgap:[]u8=z_alloc(16);
+  let pmmnxbar:[]u8=z_alloc(16);
+  // Fenced per-bucket exact diagnostic buffers.
+  let pgsum:[]u8=z_alloc(16);
+  let pgcnt:[]u8=z_alloc(16);
+  let pbxbar:[]u8=z_alloc(16);
+  let pbxgap:[]u8=z_alloc(16);
+  // Misc.
+  let adjucb:[]u8=z_alloc(NSEAL*4);
+  let sbkt:[]u8=z_alloc(NSEAL*4);
+  let wc:[]u8=z_alloc(4);
+  let etmp:[]u8=z_alloc(EREC);
+  let gout2:[]u8=z_alloc(CW);
+  let k1:i32=1;
+  let Tfixed:i32=0;
+  let Cval:i32=0;
+  // PHASE: train SETUP (harness; wp=15; seeds verbatim).
+  let t:i32=0;
+  while(t<NTRAIN){
+    world_gen(7919*t+13, 15, wtrain, t*RECW);
+    belief_gen(104729*t+7, wtrain, t*RECW, btrain, t*RECW);
+    t=t+1;
+  }
+  // PHASE: train COMMIT (learner; beliefs only).
+  let wcb0:i32=get32(wc,0);
+  t=0;
+  while(t<NTRAIN){
+    learner_compose(btrain, t*RECW, ptrain, t*PLANMAX, mtrain, t*RECM);
+    t=t+1;
+  }
+  if(get32(wc,0)!=wcb0){ k1=0; }
+  // PHASE: train PREFF (learner).
+  wcb0=get32(wc,0);
+  t=0;
+  while(t<NTRAIN){
+    let tg:i32=get32(mtrain,t*RECM);
+    let tL:i32=get32(mtrain,t*RECM+4);
+    let tp:i32=0;
+    if(tL>0){ tp=(100*tg)/tL; }
+    set32(preff_tr,4*t,tp);
+    t=t+1;
+  }
+  if(get32(wc,0)!=wcb0){ k1=0; }
+  // PHASE: train CONSEQ (harness).
+  t=0;
+  while(t<NTRAIN){
+    world_execute(wtrain, t*RECW, ptrain, t*PLANMAX, get32(mtrain,t*RECM+4), ctrain, t*RECC, etmp, 0, wc);
+    t=t+1;
+  }
+  // PHASE: train LEARN (learner). (bucket, eff) pairs; UCB tables.
+  t=0;
+  while(t<NTRAIN){
+    let bk:i32=get32(mtrain,t*RECM+12);
+    let tc:i32=get32(ctrain,t*RECC);
+    let te:i32=get32(ctrain,t*RECC+4);
+    let tf:i32=0;
+    if(te>0){ tf=(100*tc)/te; }
+    set32(tbkt,4*t,bk);
+    set32(teff,4*t,tf);
+    t=t+1;
+  }
+  let b:i32=0;
+  while(b<4){
+    set32(biassum,4*b,0);
+    set32(biascnt,4*b,0);
+    set32(bsq,4*b,0);
+    b=b+1;
+  }
+  t=0;
+  while(t<NTRAIN){
+    let bk2:i32=get32(tbkt,4*t);
+    let d:i32=get32(preff_tr,4*t)-get32(teff,4*t);
+    if(bk2>=0){
+      if(bk2<4){
+        set32(biassum,4*bk2,get32(biassum,4*bk2)+d);
+        set32(biascnt,4*bk2,get32(biascnt,4*bk2)+1);
+      }
+    }
+    t=t+1;
+  }
+  b=0;
+  while(b<4){
+    let bb:i32=0;
+    if(get32(biascnt,4*b)>0){ bb=get32(biassum,4*b)/get32(biascnt,4*b); }
+    set32(bias,4*b,bb);
+    b=b+1;
+  }
+  t=0;
+  while(t<NTRAIN){
+    let bk5:i32=get32(tbkt,4*t);
+    if(bk5>=0){
+      if(bk5<4){
+        let mb5:i32=get32(bias,4*bk5);
+        let d5:i32=get32(preff_tr,4*t)-get32(teff,4*t);
+        let e5:i32=d5-mb5;
+        set32(bsq,4*bk5,get32(bsq,4*bk5)+e5*e5);
+      }
+    }
+    t=t+1;
+  }
+  b=0;
+  while(b<4){
+    let mb6:i32=get32(bias,4*b);
+    let nb6:i32=get32(biascnt,4*b);
+    let ub:i32=0;
+    if(nb6>0){ ub=mb6; }
+    if(nb6>1){ ub=mb6+isqrt(get32(bsq,4*b)/(nb6-1)); }
+    set32(bucb,4*b,ub);
+    b=b+1;
+  }
+  // Train per-bucket miscalibration M_train[b]: mean over train
+  // cases in bucket b of (adj - eff), where adj = preff - bucb[b].
+  // All quantities are learner-visible on train (consequences
+  // realized in train CONSEQ). Integer division, trunc toward zero.
+  b=0;
+  while(b<4){
+    set32(msum,4*b,0);
+    set32(mcnt,4*b,0);
+    b=b+1;
+  }
+  t=0;
+  while(t<NTRAIN){
+    let mbk:i32=get32(tbkt,4*t);
+    if(mbk>=0){
+      if(mbk<4){
+        let madj:i32=get32(preff_tr,4*t)-get32(bucb,4*mbk);
+        let mr:i32=madj-get32(teff,4*t);
+        set32(msum,4*mbk,get32(msum,4*mbk)+mr);
+        set32(mcnt,4*mbk,get32(mcnt,4*mbk)+1);
+      }
+    }
+    t=t+1;
+  }
+  b=0;
+  while(b<4){
+    let mm:i32=0;
+    if(get32(mcnt,4*b)>0){ mm=get32(msum,4*b)/get32(mcnt,4*b); }
+    set32(mcalib,4*b,mm);
+    b=b+1;
+  }
+  // Train-profit-optimal per-bucket bars (learner). For bucket b:
+  // bar*_b maximizes P_b(bar) = sum over train cases in bucket b
+  // with adj > bar of (eff - EXCOST); ties broken toward EXCOST
+  // (then the larger bar). All quantities are learner-visible on
+  // train. Candidate bars range over [min_adj-1,
+  // max(max_adj, EXCOST)]; the EXCOST-closest optimal bar always
+  // lies in this range.
+  b=0;
+  while(b<4){
+    set32(pbkbar,4*b,EXCOST+get32(mcalib,4*b));
+    let bcnt:i32=0;
+    let bmn:i32=1000000;
+    let bmx:i32=-1000000;
+    let t2:i32=0;
+    while(t2<NTRAIN){
+      if(get32(tbkt,4*t2)==b){
+        bcnt=bcnt+1;
+        let ta:i32=get32(preff_tr,4*t2)-get32(bucb,4*b);
+        if(ta<bmn){ bmn=ta; }
+        if(ta>bmx){ bmx=ta; }
+      }
+      t2=t2+1;
+    }
+    let bbar:i32=EXCOST;
+    if(bcnt>0){
+      let bhi:i32=bmx;
+      if(EXCOST>bhi){ bhi=EXCOST; }
+      let bestp:i32=-1000000;
+      let bestc:i32=EXCOST;
+      let bestad:i32=1000000;
+      let c:i32=bmn-1;
+      while(c<=bhi){
+        let cp:i32=0;
+        let t3:i32=0;
+        while(t3<NTRAIN){
+          if(get32(tbkt,4*t3)==b){
+            let ta3:i32=get32(preff_tr,4*t3)-get32(bucb,4*b);
+            if(ta3>c){
+              cp=cp+get32(teff,4*t3)-EXCOST;
+            }
+          }
+          t3=t3+1;
+        }
+        let cad:i32=c-EXCOST;
+        if(cad<0){ cad=0-cad; }
+        let gt:i32=0;
+        if(cp>bestp){ gt=1; }
+        let eq:i32=0;
+        if(cp==bestp){ eq=1; }
+        let lt:i32=0;
+        if(cad<bestad){ lt=1; }
+        let eqad:i32=0;
+        if(cad==bestad){ eqad=1; }
+        let gtc:i32=0;
+        if(c>bestc){ gtc=1; }
+        let take:i32=gt+eq*lt+eq*eqad*gtc;
+        if(take>0){
+          bestp=cp;
+          bestc=c;
+          bestad=cad;
+        }
+        c=c+1;
+      }
+      bbar=bestc;
+    }
+    set32(pboptbar,4*b,bbar);
+    b=b+1;
+  }
+  // Marginal-window local miscalibration (learner). Per bucket b:
+  // the marginal train set is {t : tbkt[t]==b, |adj_t - EXCOST|
+  // <= MWIN}. mwmcalib[b] is the trunc mean of (adj - eff) over
+  // the marginal set, falling back to the full-bucket train
+  // mcalib when the set is empty. pmwbar[b] = EXCOST +
+  // mwmcalib[b]. All quantities are learner-visible on train.
+  // Flat control flow (flag lets; no deep nesting).
+  b=0;
+  while(b<4){
+    let wsum:i32=0;
+    let wcnt:i32=0;
+    let t4:i32=0;
+    while(t4<NTRAIN){
+      let inb:i32=0;
+      if(get32(tbkt,4*t4)==b){ inb=1; }
+      let wadj:i32=get32(preff_tr,4*t4)-get32(bucb,4*b);
+      let wd:i32=wadj-EXCOST;
+      if(wd<0){ wd=0-wd; }
+      let near:i32=0;
+      if(wd<=MWIN){ near=1; }
+      let use:i32=inb*near;
+      if(use==1){
+        wsum=wsum+wadj-get32(teff,4*t4);
+        wcnt=wcnt+1;
+      }
+      t4=t4+1;
+    }
+    let wm:i32=0;
+    if(wcnt>0){ wm=wsum/wcnt; }
+    else { wm=get32(mcalib,4*b); }
+    set32(mwmcalib,4*b,wm);
+    set32(pmwbar,4*b,EXCOST+wm);
+    b=b+1;
+  }
+  // Marginal N-nearest local miscalibration (learner). Per bucket
+  // b: N_b = ceil(n_b/2); select the N_b train cases in bucket b
+  // with smallest |adj - EXCOST|, ties by lowest train index.
+  // mncalib[b] is the trunc mean of (adj - eff) over the selected
+  // cases; pmnbar[b] = EXCOST + mncalib[b]. All quantities are
+  // learner-visible on train. Flat control flow.
+  b=0;
+  while(b<4){
+    let nb:i32=0;
+    let t5:i32=0;
+    while(t5<NTRAIN){
+      if(get32(tbkt,4*t5)==b){ nb=nb+1; }
+      t5=t5+1;
+    }
+    let nn:i32=(nb+1)/2;
+    let picked:[]u8=z_alloc(NTRAIN);
+    let nsum:i32=0;
+    let pass:i32=0;
+    while(pass<nn){
+      let bestd:i32=1000000;
+      let bestt:i32=-1;
+      let t6:i32=0;
+      while(t6<NTRAIN){
+        let inb6:i32=0;
+        if(get32(tbkt,4*t6)==b){ inb6=1; }
+        let unp:i32=1;
+        if(get8(picked,t6)==1){ unp=0; }
+        let ok6:i32=inb6*unp;
+        let d6:i32=0;
+        if(ok6==1){
+          let a6:i32=get32(preff_tr,4*t6)-get32(bucb,4*b);
+          d6=a6-EXCOST;
+          if(d6<0){ d6=0-d6; }
+        }
+        let better:i32=0;
+        if(ok6==1){
+          if(d6<bestd){ better=1; }
+        }
+        if(better==1){
+          bestd=d6;
+          bestt=t6;
+        }
+        t6=t6+1;
+      }
+      if(bestt>=0){
+        set8(picked,bestt,1);
+        let ba:i32=get32(preff_tr,4*bestt)-get32(bucb,4*b);
+        nsum=nsum+ba-get32(teff,4*bestt);
+      }
+      pass=pass+1;
+    }
+    let nm:i32=0;
+    if(nn>0){ nm=nsum/nn; }
+    set32(mncalib,4*b,nm);
+    set32(pmnbar,4*b,EXCOST+nm);
+    b=b+1;
+  }
+  // PHASE: train BAR (learner). T_fixed = mean train adjV_UCB.
+  let tfsum:i32=0;
+  t=0;
+  while(t<NTRAIN){
+    let tbk:i32=get32(tbkt,4*t);
+    tfsum=tfsum+get32(preff_tr,4*t)-get32(bucb,4*tbk);
+    t=t+1;
+  }
+  Tfixed=tfsum/NTRAIN;
+  at=ob_app(ob,at,"TFIXED=");
+  at=ob_i32(ob,at,Tfixed);
+  at=ob_nl(ob,at);
+  // Hybrid offset C = mean over train of bucb[bkt_tr] (train-fixed).
+  let csum:i32=0;
+  t=0;
+  while(t<NTRAIN){
+    let cbk:i32=get32(tbkt,4*t);
+    csum=csum+get32(bucb,4*cbk);
+    t=t+1;
+  }
+  Cval=csum/NTRAIN;
+  at=ob_app(ob,at,"CVAL=");
+  at=ob_i32(ob,at,Cval);
+  at=ob_nl(ob,at);
+  // Per-bucket bars (learner): PBK = K + mcalib; PBOPT =
+  // train-profit-optimal. Printed for the K3 check.
+  at=ob_app(ob,at,"PBBARS mcalib=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(mcalib,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_app(ob,at,"pbk=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(pbkbar,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_app(ob,at,"pbopt=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(pboptbar,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_nl(ob,at);
+  // Marginal bars (learner): PMW = K + mwmcalib (window rule);
+  // PMN = K + mncalib (N-nearest rule). Printed for the K3 check.
+  at=ob_app(ob,at,"MWBARS mwcalib=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(mwmcalib,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_app(ob,at,"pmw=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(pmwbar,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_nl(ob,at);
+  at=ob_app(ob,at,"MNBARS mncalib=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(mncalib,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_app(ob,at,"pmn=");
+  b=0;
+  while(b<4){
+    at=ob_i32(ob,at,get32(pmnbar,4*b));
+    at=ob_app(ob,at," ");
+    b=b+1;
+  }
+  at=ob_nl(ob,at);
+  // TA-train audit (learner-visible only).
+  at=ob_app(ob,at,"TAUDIT t bkt preff eff d adj\n");
+  t=0;
+  while(t<NTRAIN){
+    let abk:i32=get32(tbkt,4*t);
+    at=ob_app(ob,at,"TA t=");
+    at=ob_i32(ob,at,t);
+    at=ob_app(ob,at," bkt=");
+    at=ob_i32(ob,at,abk);
+    at=ob_app(ob,at," preff=");
+    at=ob_i32(ob,at,get32(preff_tr,4*t));
+    at=ob_app(ob,at," eff=");
+    at=ob_i32(ob,at,get32(teff,4*t));
+    at=ob_app(ob,at," d=");
+    at=ob_i32(ob,at,get32(preff_tr,4*t)-get32(teff,4*t));
+    at=ob_app(ob,at," adj=");
+    at=ob_i32(ob,at,get32(preff_tr,4*t)-get32(bucb,4*abk));
+    at=ob_nl(ob,at);
+    t=t+1;
+  }
+  // PHASE: sealed SHIFT LOOP. sh=0..2, wp=15/30/45.
+  let sh:i32=0;
+  while(sh<NSHIFT){
+    let wp:i32=15+15*sh;
+    // PHASE: sealed SETUP (harness; seeds verbatim).
+    let s:i32=0;
+    while(s<NSEAL){
+      let cid:i32=100+s;
+      world_gen(7919*cid+13, wp, wseal, s*RECW);
+      belief_gen(104729*cid+7, wseal, s*RECW, bseal, s*RECW);
+      s=s+1;
+    }
+    // PHASE: sealed COMMIT (learner). No world calls.
+    wcb0=get32(wc,0);
+    s=0;
+    while(s<NSEAL){
+      learner_compose(bseal, s*RECW, pseal, s*PLANMAX, mseal, s*RECM);
+      let sg:i32=get32(mseal,s*RECM);
+      let sLl:i32=get32(mseal,s*RECM+4);
+      let sq:i32=0;
+      if(sLl>0){ sq=(100*sg)/sLl; }
+      set32(preff,4*s,sq);
+      set32(sL,4*s,sLl);
+      set32(sstart,4*s,get8(bseal,s*RECW+2*CW));
+      let sbk:i32=get32(mseal,s*RECM+12);
+      set32(adjucb,4*s,sq-get32(bucb,4*sbk));
+      set32(sbkt,4*s,sbk);
+      s=s+1;
+    }
+    if(get32(wc,0)!=wcb0){ k1=0; }
+    // PHASE: sealed BARS (learner). No world data.
+    // V_HA: ThyA = mean_sealed(preff) - C. V_HB: ThyB =
+    // mean_sealed(preff - bucb_frozen[bkt]). V_HKC: ThyHKC =
+    // max(ThyA, EXCOST). V_WK (worth-K control): bar = EXCOST, a
+    // constant. These lineage bars are computed and printed for
+    // the K3 verbatim-machinery check; their verdict arms are
+    // not re-run in this wave.
+    // V_PBK (MAIN): bar_b = EXCOST + mcalib[b], per bucket.
+    // V_PBOPT: bar*_b from train, per bucket. Both bars are
+    // train-fixed; the sealed case only selects its bucket's
+    // bar via bkt_s (sealed, bias-free). Neither bar reads a
+    // sealed bias-adjusted score: probe-proof by structure
+    // (K1-A10).
+    let totucb:i32=0;
+    let totp:i32=0;
+    s=0;
+    while(s<NSEAL){
+      totucb=totucb+get32(adjucb,4*s);
+      totp=totp+get32(preff,4*s);
+      s=s+1;
+    }
+    let TVucb:i32=totucb/NSEAL;
+    let ThyA:i32=totp/NSEAL-Cval;
+    let ThyB:i32=totucb/NSEAL;
+    let ThyHKC:i32=ThyA;
+    if(EXCOST>ThyHKC){ ThyHKC=EXCOST; }
+    set32(tvucb_a,4*sh,TVucb);
+    set32(thyA_a,4*sh,ThyA);
+    set32(thyB_a,4*sh,ThyB);
+    set32(thykc_a,4*sh,ThyHKC);
+    at=ob_app(ob,at,"BARS sh=");
+    at=ob_i32(ob,at,sh);
+    at=ob_app(ob,at," TVucb=");
+    at=ob_i32(ob,at,TVucb);
+    at=ob_app(ob,at," Tfixed=");
+    at=ob_i32(ob,at,Tfixed);
+    at=ob_app(ob,at," ThyA=");
+    at=ob_i32(ob,at,ThyA);
+    at=ob_app(ob,at," ThyB=");
+    at=ob_i32(ob,at,ThyB);
+    at=ob_app(ob,at," ThyHKC=");
+    at=ob_i32(ob,at,ThyHKC);
+    at=ob_nl(ob,at);
+    // PHASE: sealed VERDICT (learner). GO = 1 iff score > bar.
+    // Rendered BEFORE any consequence; the learner never sees eff.
+    // UCB x V_WK (verbatim control), UCB x V_PBK (verbatim
+    // bucket-mean comparator), UCB x V_PMW (MAIN: marginal-window
+    // worth-K), UCB x V_PMN (marginal N-nearest worth-K).
+    let cuwk:i32=0;
+    let cupbk:i32=0;
+    let cupmw:i32=0;
+    let cupmn:i32=0;
+    s=0;
+    while(s<NSEAL){
+      let sbk5:i32=get32(sbkt,4*s);
+      let guwk:i32=0;
+      if(get32(adjucb,4*s)>EXCOST){ guwk=1; }
+      set32(go_uwk,4*s,guwk);
+      cuwk=cuwk+guwk;
+      let gupbk:i32=0;
+      if(get32(adjucb,4*s)>get32(pbkbar,4*sbk5)){ gupbk=1; }
+      set32(go_upbk,4*s,gupbk);
+      cupbk=cupbk+gupbk;
+      let gupmw:i32=0;
+      if(get32(adjucb,4*s)>get32(pmwbar,4*sbk5)){ gupmw=1; }
+      set32(go_upmw,4*s,gupmw);
+      cupmw=cupmw+gupmw;
+      let gupmn:i32=0;
+      if(get32(adjucb,4*s)>get32(pmnbar,4*sbk5)){ gupmn=1; }
+      set32(go_upmn,4*s,gupmn);
+      cupmn=cupmn+gupmn;
+      s=s+1;
+    }
+    // PHASE: CONSEQUENCE (harness). The world responds to real
+    // commitments only: world_execute runs on GO cases; profit
+    // accumulates (eff - EXCOST). No learner calls from here on.
+    let p1:i32=conseq_arm(wseal, pseal, sL, go_uwk, cseal, etmp, wc);
+    let p2:i32=conseq_arm(wseal, pseal, sL, go_upbk, cseal, etmp, wc);
+    let p3:i32=conseq_arm(wseal, pseal, sL, go_upmw, cseal, etmp, wc);
+    let p4:i32=conseq_arm(wseal, pseal, sL, go_upmn, cseal, etmp, wc);
+    set32(p_uwk,4*sh,p1);
+    set32(p_upbk,4*sh,p2);
+    set32(p_upmw,4*sh,p3);
+    set32(p_upmn,4*sh,p4);
+    // PHASE: REFERENCE (fenced harness). Execute-all profit per
+    // batch (counterfactual; never learner-visible). Shows whether
+    // verification beats none.
+    let pallv:i32=0;
+    s=0;
+    while(s<NSEAL){
+      world_execute(wseal, s*RECW, pseal, s*PLANMAX, get32(sL,4*s), cseal, s*RECC, etmp, 0, wc);
+      let sca:i32=get32(cseal,s*RECC);
+      let sua:i32=get32(cseal,s*RECC+4);
+      let sea:i32=0;
+      if(sua>0){ sea=(100*sca)/sua; }
+      pallv=pallv+sea-EXCOST;
+      s=s+1;
+    }
+    set32(pall,4*sh,pallv);
+    // PHASE: FENCED-PBX (harness diagnostic; NOT a learner verdict).
+    // Per-bucket exact diagnostic: bar_b(sh) = K + G(sh,b), where
+    // G(sh,b) is the exact sealed per-bucket gap: mean over sealed
+    // cases in bucket b of (adjucb_s - eff_s), computed fenced
+    // AFTER the REFERENCE phase (which fills eff for all cases in
+    // cseal). Bounds the per-bucket estimand: the best any
+    // per-bucket miscalibration signal could do. Reads sealed eff,
+    // so it is explicitly not probe-proof and not a candidate
+    // mechanism. Zero world_execute calls: pure arithmetic on the
+    // REFERENCE-filled consequence buffer and the stored adjucb.
+    b=0;
+    while(b<4){
+      set32(pgsum,4*b,0);
+      set32(pgcnt,4*b,0);
+      b=b+1;
+    }
+    s=0;
+    while(s<NSEAL){
+      let xsc:i32=get32(cseal,s*RECC);
+      let xsu:i32=get32(cseal,s*RECC+4);
+      let xeff:i32=0;
+      if(xsu>0){ xeff=(100*xsc)/xsu; }
+      let xbk:i32=get32(sbkt,4*s);
+      if(xbk>=0){
+        if(xbk<4){
+          set32(pgsum,4*xbk,get32(pgsum,4*xbk)+get32(adjucb,4*s)-xeff);
+          set32(pgcnt,4*xbk,get32(pgcnt,4*xbk)+1);
+        }
+      }
+      s=s+1;
+    }
+    b=0;
+    while(b<4){
+      let xg:i32=0;
+      if(get32(pgcnt,4*b)>0){ xg=get32(pgsum,4*b)/get32(pgcnt,4*b); }
+      set32(pbxgap,4*b,xg);
+      set32(pbxbar,4*b,EXCOST+xg);
+      b=b+1;
+    }
+    let ppbx:i32=0;
+    let gpbx:i32=0;
+    s=0;
+    while(s<NSEAL){
+      if(get32(adjucb,4*s)>get32(pbxbar,4*get32(sbkt,4*s))){
+        let ysc:i32=get32(cseal,s*RECC);
+        let ysu:i32=get32(cseal,s*RECC+4);
+        let yeff:i32=0;
+        if(ysu>0){ yeff=(100*ysc)/ysu; }
+        ppbx=ppbx+yeff-EXCOST;
+        gpbx=gpbx+1;
+      }
+      s=s+1;
+    }
+    set32(p_pbx,4*sh,ppbx);
+    at=ob_app(ob,at,"PBX sh=");
+    at=ob_i32(ob,at,sh);
+    at=ob_app(ob,at," gaps=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pbxgap,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"bars=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pbxbar,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"p=");
+    at=ob_i32(ob,at,ppbx);
+    at=ob_app(ob,at," go=");
+    at=ob_i32(ob,at,gpbx);
+    at=ob_nl(ob,at);
+    // PHASE: FENCED-PMWX (harness diagnostic; NOT a learner
+    // verdict). Exact sealed marginal-window gaps: per bucket b,
+    // the marginal sealed set is {s : sbkt[s]==b,
+    // |adjucb_s - EXCOST| <= MWIN}; the gap is the trunc mean of
+    // (adjucb_s - eff_s) over that set, falling back to the
+    // full-bucket exact gap when the set is empty. bar = EXCOST +
+    // gap. Bounds the marginal-window estimand. Reads sealed eff,
+    // so it is explicitly not probe-proof and not a candidate
+    // mechanism. Zero world_execute calls: pure arithmetic on the
+    // REFERENCE-filled consequence buffer and the stored adjucb.
+    b=0;
+    while(b<4){
+      let xwsum:i32=0;
+      let xwcnt:i32=0;
+      s=0;
+      while(s<NSEAL){
+        let xbin:i32=0;
+        if(get32(sbkt,4*s)==b){ xbin=1; }
+        let xwd:i32=get32(adjucb,4*s)-EXCOST;
+        if(xwd<0){ xwd=0-xwd; }
+        let xnear:i32=0;
+        if(xwd<=MWIN){ xnear=1; }
+        let xuse:i32=xbin*xnear;
+        if(xuse==1){
+          let xwsc:i32=get32(cseal,s*RECC);
+          let xwsu:i32=get32(cseal,s*RECC+4);
+          let xweff:i32=0;
+          if(xwsu>0){ xweff=(100*xwsc)/xwsu; }
+          xwsum=xwsum+get32(adjucb,4*s)-xweff;
+          xwcnt=xwcnt+1;
+        }
+        s=s+1;
+      }
+      let xwg:i32=0;
+      if(xwcnt>0){ xwg=xwsum/xwcnt; }
+      else {
+        if(get32(pgcnt,4*b)>0){ xwg=get32(pgsum,4*b)/get32(pgcnt,4*b); }
+      }
+      set32(pmmwxgap,4*b,xwg);
+      set32(pmmwxbar,4*b,EXCOST+xwg);
+      b=b+1;
+    }
+    let pwx:i32=0;
+    let gwx:i32=0;
+    s=0;
+    while(s<NSEAL){
+      if(get32(adjucb,4*s)>get32(pmmwxbar,4*get32(sbkt,4*s))){
+        let ywxsc:i32=get32(cseal,s*RECC);
+        let ywxsu:i32=get32(cseal,s*RECC+4);
+        let ywxeff:i32=0;
+        if(ywxsu>0){ ywxeff=(100*ywxsc)/ywxsu; }
+        pwx=pwx+ywxeff-EXCOST;
+        gwx=gwx+1;
+      }
+      s=s+1;
+    }
+    set32(p_pmmwx,4*sh,pwx);
+    at=ob_app(ob,at,"PMWX sh=");
+    at=ob_i32(ob,at,sh);
+    at=ob_app(ob,at," gaps=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pmmwxgap,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"bars=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pmmwxbar,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"p=");
+    at=ob_i32(ob,at,pwx);
+    at=ob_app(ob,at," go=");
+    at=ob_i32(ob,at,gwx);
+    at=ob_nl(ob,at);
+    // PHASE: FENCED-PMNX (harness diagnostic; NOT a learner
+    // verdict). Exact sealed marginal N-nearest gaps: per bucket
+    // b, n = sealed case count in bucket b, N = (n+1)/2; the gap
+    // is the trunc mean of (adjucb_s - eff_s) over the N sealed
+    // cases with smallest |adjucb_s - EXCOST|, ties by lowest
+    // sealed index. bar = EXCOST + gap. Bounds the marginal
+    // N-nearest estimand. Reads sealed eff, so it is explicitly
+    // not probe-proof and not a candidate mechanism. Zero
+    // world_execute calls.
+    b=0;
+    while(b<4){
+      let xn:i32=0;
+      s=0;
+      while(s<NSEAL){
+        if(get32(sbkt,4*s)==b){ xn=xn+1; }
+        s=s+1;
+      }
+      let xnn:i32=(xn+1)/2;
+      let xpicked:[]u8=z_alloc(NSEAL);
+      let xnsum:i32=0;
+      let xpass:i32=0;
+      while(xpass<xnn){
+        let xbestd:i32=1000000;
+        let xbestt:i32=-1;
+        s=0;
+        while(s<NSEAL){
+          let xnbin:i32=0;
+          if(get32(sbkt,4*s)==b){ xnbin=1; }
+          let xnunp:i32=1;
+          if(get8(xpicked,s)==1){ xnunp=0; }
+          let xnok:i32=xnbin*xnunp;
+          let xnd:i32=0;
+          if(xnok==1){
+            xnd=get32(adjucb,4*s)-EXCOST;
+            if(xnd<0){ xnd=0-xnd; }
+          }
+          let xnbetter:i32=0;
+          if(xnok==1){
+            if(xnd<xbestd){ xnbetter=1; }
+          }
+          if(xnbetter==1){
+            xbestd=xnd;
+            xbestt=s;
+          }
+          s=s+1;
+        }
+        if(xbestt>=0){
+          set8(xpicked,xbestt,1);
+          let xnsc:i32=get32(cseal,xbestt*RECC);
+          let xnsu:i32=get32(cseal,xbestt*RECC+4);
+          let xneff:i32=0;
+          if(xnsu>0){ xneff=(100*xnsc)/xnsu; }
+          xnsum=xnsum+get32(adjucb,4*xbestt)-xneff;
+        }
+        xpass=xpass+1;
+      }
+      let xng:i32=0;
+      if(xnn>0){ xng=xnsum/xnn; }
+      set32(pmmnxgap,4*b,xng);
+      set32(pmmnxbar,4*b,EXCOST+xng);
+      b=b+1;
+    }
+    let pnx:i32=0;
+    let gnx:i32=0;
+    s=0;
+    while(s<NSEAL){
+      if(get32(adjucb,4*s)>get32(pmmnxbar,4*get32(sbkt,4*s))){
+        let ynxsc:i32=get32(cseal,s*RECC);
+        let ynxsu:i32=get32(cseal,s*RECC+4);
+        let ynxeff:i32=0;
+        if(ynxsu>0){ ynxeff=(100*ynxsc)/ynxsu; }
+        pnx=pnx+ynxeff-EXCOST;
+        gnx=gnx+1;
+      }
+      s=s+1;
+    }
+    set32(p_pmmnx,4*sh,pnx);
+    at=ob_app(ob,at,"PMNX sh=");
+    at=ob_i32(ob,at,sh);
+    at=ob_app(ob,at," gaps=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pmmnxgap,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"bars=");
+    b=0;
+    while(b<4){
+      at=ob_i32(ob,at,get32(pmmnxbar,4*b));
+      at=ob_app(ob,at," ");
+      b=b+1;
+    }
+    at=ob_app(ob,at,"p=");
+    at=ob_i32(ob,at,pnx);
+    at=ob_app(ob,at," go=");
+    at=ob_i32(ob,at,gnx);
+    at=ob_nl(ob,at);
+    at=ob_app(ob,at,"PROFIT sh=");
+    at=ob_i32(ob,at,sh);
+    at=ob_app(ob,at," uwk=");
+    at=ob_i32(ob,at,p1);
+    at=ob_app(ob,at," guwk=");
+    at=ob_i32(ob,at,cuwk);
+    at=ob_app(ob,at," upbk=");
+    at=ob_i32(ob,at,p2);
+    at=ob_app(ob,at," gupbk=");
+    at=ob_i32(ob,at,cupbk);
+    at=ob_app(ob,at," upmw=");
+    at=ob_i32(ob,at,p3);
+    at=ob_app(ob,at," gupmw=");
+    at=ob_i32(ob,at,cupmw);
+    at=ob_app(ob,at," upmn=");
+    at=ob_i32(ob,at,p4);
+    at=ob_app(ob,at," gupmn=");
+    at=ob_i32(ob,at,cupmn);
+    at=ob_app(ob,at," pbx=");
+    at=ob_i32(ob,at,ppbx);
+    at=ob_app(ob,at," pmmwx=");
+    at=ob_i32(ob,at,pwx);
+    at=ob_app(ob,at," pmmnx=");
+    at=ob_i32(ob,at,pnx);
+    at=ob_app(ob,at," all=");
+    at=ob_i32(ob,at,pallv);
+    at=ob_nl(ob,at);
+    sh=sh+1;
+  }
+  // WC final audit.
+  at=ob_app(ob,at,"WC-FINAL=");
+  at=ob_i32(ob,at,get32(wc,0));
+  at=ob_nl(ob,at);
+  // Kill-bar flags (in-program exact checks vs prereg predictions).
+  // K3: verbatim machinery + new quantities. Sub-flags keep
+  // nesting shallow.
+  let k3a:i32=0;
+  if(get32(thyA_a,0)==13){
+    if(get32(thyA_a,4)==20){
+      if(get32(thyA_a,8)==6){
+        if(get32(thyB_a,0)==13){
+          if(get32(thyB_a,4)==20){
+            if(get32(thyB_a,8)==13){
+              if(Tfixed==12){
+                if(Cval==15){
+                  if(get32(thykc_a,0)==15){
+                    if(get32(thykc_a,4)==20){
+                      if(get32(thykc_a,8)==15){ k3a=1; }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  let k3b:i32=0;
+  if(get32(mcalib,0)==0){
+    if(get32(mcalib,4)==-11){
+      if(get32(mcalib,8)==-12){
+        if(get32(mcalib,12)==-3){
+          if(get32(pbkbar,0)==15){
+            if(get32(pbkbar,4)==4){
+              if(get32(pbkbar,8)==3){
+                if(get32(pbkbar,12)==12){ k3b=1; }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  let k3c:i32=0;
+  if(get32(pboptbar,0)==15){
+    if(get32(pboptbar,4)==16){
+      if(get32(pboptbar,8)==5){
+        if(get32(pboptbar,12)==15){ k3c=1; }
+      }
+    }
+  }
+  let k3d:i32=0;
+  if(get32(p_uwk,0)==75){
+    if(get32(p_uwk,4)==128){
+      if(get32(p_uwk,8)==55){
+        if(get32(p_pbx,0)==90){
+          if(get32(p_pbx,4)==138){
+            if(get32(p_pbx,8)==55){
+              if(get32(pall,0)==43){
+                if(get32(pall,4)==113){
+                  if(get32(pall,8)==-80){ k3d=1; }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  // K3 new quantities: marginal-window local miscalibration and
+  // bars; marginal N-nearest local miscalibration and bars.
+  let k3e:i32=0;
+  if(get32(mwmcalib,0)==0){
+    if(get32(mwmcalib,4)==0){
+      if(get32(mwmcalib,8)==-12){
+        if(get32(mwmcalib,12)==-3){
+          if(get32(pmwbar,0)==15){
+            if(get32(pmwbar,4)==15){
+              if(get32(pmwbar,8)==3){
+                if(get32(pmwbar,12)==12){ k3e=1; }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  let k3f:i32=0;
+  if(get32(mncalib,0)==0){
+    if(get32(mncalib,4)==-7){
+      if(get32(mncalib,8)==-12){
+        if(get32(mncalib,12)==-5){
+          if(get32(pmnbar,0)==15){
+            if(get32(pmnbar,4)==8){
+              if(get32(pmnbar,8)==3){
+                if(get32(pmnbar,12)==10){ k3f=1; }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  let k3:i32=0;
+  if(k3a==1){
+    if(k3b==1){
+      if(k3c==1){
+        if(k3d==1){
+          if(k3e==1){
+            if(k3f==1){ k3=1; }
+          }
+        }
+      }
+    }
+  }
+  // K4 (PRIMARY, preregistered NULL): no learner-computable
+  // marginal bar beats the fixed stakes bar.
+  let tot_upbk:i32=get32(p_upbk,0)+get32(p_upbk,4)+get32(p_upbk,8);
+  let tot_upmw:i32=get32(p_upmw,0)+get32(p_upmw,4)+get32(p_upmw,8);
+  let tot_upmn:i32=get32(p_upmn,0)+get32(p_upmn,4)+get32(p_upmn,8);
+  let tot_uwk:i32=get32(p_uwk,0)+get32(p_uwk,4)+get32(p_uwk,8);
+  let k4:i32=0;
+  if(tot_upmw==228){
+    if(tot_upmn==248){
+      if(tot_uwk==258){
+        if(tot_upmw<tot_uwk){
+          if(tot_upmn<tot_uwk){ k4=1; }
+        }
+      }
+    }
+  }
+  let k5:i32=0;
+  if(get32(pall,0)==43){
+    if(get32(pall,4)==113){
+      if(get32(pall,8)==-80){ k5=1; }
+    }
+  }
+  // K6: UCB x V_PMN total = 248, coinciding with the UCB x V_PBK
+  // bucket-mean total (identical GO sets; the differential bands
+  // between the marginal bars (15,8,3,10) and the bucket-mean bars
+  // (15,4,3,12) contain no sealed cases on these batches).
+  let k6:i32=0;
+  if(tot_upmn==248){
+    if(tot_upbk==248){ k6=1; }
+  }
+  // K7: UCB x V_PMW total = 228 < 248 = UCB x V_PMN total. The
+  // fixed-window marginal estimate is noisier, not more
+  // decision-relevant.
+  let k7:i32=0;
+  if(tot_upmw==228){
+    if(tot_upmn==248){
+      if(tot_upmw<tot_upmn){ k7=1; }
+    }
+  }
+  let k8:i32=0;
+  if(get32(wc,0)==138){ k8=1; }
+  // K9 (divergence): UCB x V_PMN total 248 < UCB x V_WK total 258.
+  let k9:i32=0;
+  if(tot_upmn==248){
+    if(tot_uwk==258){
+      if(tot_upmn<tot_uwk){ k9=1; }
+    }
+  }
+  // K10 (divergence): the exact marginal bounds beat the learner
+  // marginal bars: V_PMWX total 288 > 228 and V_PMNX total 318 >
+  // 248. The marginal information is real but not extractable
+  // from {train, bkt, K}.
+  let tot_pmmwx:i32=get32(p_pmmwx,0)+get32(p_pmmwx,4)+get32(p_pmmwx,8);
+  let tot_pmmnx:i32=get32(p_pmmnx,0)+get32(p_pmmnx,4)+get32(p_pmmnx,8);
+  let k10:i32=0;
+  if(tot_pmmwx==288){
+    if(tot_upmw==228){
+      if(tot_pmmnx==318){
+        if(tot_upmn==248){
+          if(tot_pmmwx>tot_upmw){
+            if(tot_pmmnx>tot_upmn){ k10=1; }
+          }
+        }
+      }
+    }
+  }
+  at=ob_app(ob,at,"K1STRUCT=");
+  at=ob_i32(ob,at,k1);
+  at=ob_app(ob,at," K3=");
+  at=ob_i32(ob,at,k3);
+  at=ob_app(ob,at," K4=");
+  at=ob_i32(ob,at,k4);
+  at=ob_app(ob,at," K5=");
+  at=ob_i32(ob,at,k5);
+  at=ob_app(ob,at," K6=");
+  at=ob_i32(ob,at,k6);
+  at=ob_app(ob,at," K7=");
+  at=ob_i32(ob,at,k7);
+  at=ob_app(ob,at," K8=");
+  at=ob_i32(ob,at,k8);
+  at=ob_app(ob,at," K9=");
+  at=ob_i32(ob,at,k9);
+  at=ob_app(ob,at," K10=");
+  at=ob_i32(ob,at,k10);
+  at=ob_nl(ob,at);
+  at=ob_app(ob,at,"IVWCMG-END\n");
+  let out:[]u8=ob[0..at];
+  _zag_print(out);
+  return 0;
+}
