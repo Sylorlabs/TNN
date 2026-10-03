@@ -1,0 +1,239 @@
+// nec_v2.zag — Native Epistemic Calibration (NEC) driver, variant m11.
+//
+// Reads a combined TSV (id, fam, depth, f1, f5, release, correct) in frozen
+// leg order, computes NEC confidence per released cell, writes output TSV
+// (id, fam, depth, release, correct, conf_thousandths).
+//
+// NEC m11 (ADDENDUM_V2_m11.md):
+//   class = (min(f1/150,6), min(f5/250,4))  [35 classes, no depth, no family]
+//   conf_ledger = (c + 2*0.95)/(t + 2)      [Laplace K=2, p0=0.95, millionths]
+//   personal ledger: per-item (cp, tp) over own PAST released judgments.
+//     p_raw = (cp*1e6)/tp                   [RAW rate, no Laplace smoothing]
+//     conf_raw = min(conf_ledger, p_raw) if tp>=1 else conf_ledger
+//   conf = min(conf_raw, prev_conf)         [per-item deliberation ceiling]
+//   both ledgers updated AFTER conf (online, uses GT of past cells).
+//   output in thousandths (conf_mil / 1000).
+//
+// Pure Zag. Zero RNG. Deterministic. A/B byte-identical.
+//
+// Usage: nec_v2 <in.tsv> <out.tsv>
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+// 35 classes * 2 i64 (c, t)
+fn dout_init_dummy()DOut {
+    let d:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    return d;
+}
+fn nec_ledger_get(ld:[]u8, cls:i32, c:*i64, t:*i64)void {
+    c.*=au_get64(ld, cls*2);
+    t.*=au_get64(ld, cls*2+1);
+}
+fn nec_ledger_put(ld:[]u8, cls:i32, c:i64, t:i64)void {
+    au_put64(ld, cls*2, c);
+    au_put64(ld, cls*2+1, t);
+}
+
+// Item map: fixed 64-byte ID slots, parallel i64 conf slots.
+// Returns slot index or -1.
+fn nec_find(id:[]u8, slots:[]u8, n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let base:i32=i*64;
+        let sl:[]u8=slots[base..base+64];
+        // compare up to id.len, then check NUL terminator
+        let ok:i32=1;
+        if(sl.len<id.len+1){ok=0;}
+        if(ok==1){
+            let k:i32=0;
+            while(k<id.len){
+                if(sl[k]!=id[k]){ok=0;break;}
+                k=k+1;
+            }
+            if(ok==1 && sl[id.len]!=0){ok=0;}
+        }
+        if(ok==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn nec_store(id:[]u8, slots:[]u8, n:i32)void {
+    let base:i32=n*64;
+    let k:i32=0;
+    while(k<id.len && k<63){
+        slots[base+k]=id[k];
+        k=k+1;
+    }
+    slots[base+k]=0;
+}
+
+fn nec_run(in_path:[]u8, out_path:[]u8)i32 {
+    // Read input
+    let ibuf:[]u8=nio_alloc(4*1024*1024);
+    if(ibuf.len==0){return 101;}
+    let nr:i64=dlb_read_file(in_path, ibuf);
+    if(nr<0){nio_free(ibuf);return 102;}
+    let n:i32=nr as i32;
+
+    // Ledger: 35*16 = 560 bytes, zeroed by nio_alloc
+    let ld:[]u8=nio_alloc(35*16);
+    if(ld.len==0){nio_free(ibuf);return 103;}
+
+    // Item map: 1200 slots
+    let slots:[]u8=nio_alloc(1200*64);
+    if(slots.len==0){nio_free(ibuf);nio_free(ld);return 104;}
+    let confs:[]u8=nio_alloc(1200*8);
+    if(confs.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);return 105;}
+    // personal ledger: per-item (cp, tp), explicitly zeroed
+    let pcp:[]u8=nio_alloc(1200*8);
+    if(pcp.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);return 108;}
+    let ptp:[]u8=nio_alloc(1200*8);
+    if(ptp.len==0){nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);nio_free(pcp);return 109;}
+    let zi:i32=0;
+    while(zi<1200){
+        au_put64(pcp, zi, 0);
+        au_put64(ptp, zi, 0);
+        au_put64(confs, zi, 0);
+        zi=zi+1;
+    }
+    let n_items:i32=0;
+
+    // Output
+    let res:DOut=dout_init_dummy();
+    if(dout_init(&res, 2*1024*1024)!=0){
+        nio_free(ibuf);nio_free(ld);nio_free(slots);nio_free(confs);nio_free(pcp);nio_free(ptp);
+        return 106;
+    }
+
+    let pos:i32=0;
+    let ok:i32=1;
+    while(pos<n && ok==1){
+        // find line end
+        let e:i32=pos;
+        while(e<n && ibuf[e]!=10){e=e+1;}
+        if(e>pos){
+            // parse 7 tab-separated cols
+            // col boundaries
+            let c0s:i32=pos; let c0e:i32=pos;
+            let c1s:i32=0; let c1e:i32=0;
+            let c2s:i32=0; let c2e:i32=0;
+            let c3s:i32=0; let c3e:i32=0;
+            let c4s:i32=0; let c4e:i32=0;
+            let c5s:i32=0; let c5e:i32=0;
+            let c6s:i32=0; let c6e:i32=0;
+            let col:i32=0;
+            let cs:i32=pos;
+            let k:i32=pos;
+            while(k<e){
+                if(ibuf[k]==9){
+                    if(col==0){c0e=k; c1s=k+1;}
+                    else if(col==1){c1e=k; c2s=k+1;}
+                    else if(col==2){c2e=k; c3s=k+1;}
+                    else if(col==3){c3e=k; c4s=k+1;}
+                    else if(col==4){c4e=k; c5s=k+1;}
+                    else if(col==5){c5e=k; c6s=k+1;}
+                    col=col+1;
+                }
+                k=k+1;
+            }
+            c6e=e;
+            if(col==6){
+                let id:[]u8=ibuf[c0s..c0e];
+                let fam:[]u8=ibuf[c1s..c1e];
+                let depth_s:[]u8=ibuf[c2s..c2e];
+                let f1:[]u8=ibuf[c3s..c3e];
+                let f5:[]u8=ibuf[c4s..c4e];
+                let rel_s:[]u8=ibuf[c5s..c5e];
+                let corr_s:[]u8=ibuf[c6s..c6e];
+                let f1v:i32=dlb_atoi(f1);
+                let f5v:i32=dlb_atoi(f5);
+                let rel:i32=dlb_atoi(rel_s);
+                let corr:i32=dlb_atoi(corr_s);
+
+                let conf:i64=0;
+                if(rel==1){
+                    let mb:i32=f1v/150;
+                    if(mb>6){mb=6;}
+                    let cb:i32=f5v/250;
+                    if(cb>4){cb=4;}
+                    let cls:i32=mb*5+cb;
+                    let c:i64=0; let t:i64=0;
+                    nec_ledger_get(ld, cls, &c, &t);
+                    // conf in millionths: (c*1e6 + 1.9e6)/(t+2)
+                    // = (c*1000000 + 1900000)/(t+2)
+                    let cl_mil:i64=(c*1000000+1900000)/(t+2);
+                    // m11: personal pessimistic cap (raw rate, tp>=1), then ceiling
+                    let idx:i32=nec_find(id, slots, n_items);
+                    if(idx>=0){
+                        let tp:i64=au_get64(ptp, idx);
+                        if(tp>=1){
+                            let cp:i64=au_get64(pcp, idx);
+                            let p_raw:i64=(cp*1000000)/tp;
+                            if(cl_mil>p_raw){cl_mil=p_raw;}
+                        }
+                        let pc:i64=au_get64(confs, idx);
+                        if(cl_mil>pc){cl_mil=pc;}
+                        au_put64(confs, idx, cl_mil);
+                        // personal ledger update (AFTER conf)
+                        tp=tp+1;
+                        let cp2:i64=au_get64(pcp, idx);
+                        if(corr==1){cp2=cp2+1;}
+                        au_put64(ptp, idx, tp);
+                        au_put64(pcp, idx, cp2);
+                    } else {
+                        if(n_items<1200){
+                            nec_store(id, slots, n_items);
+                            au_put64(confs, n_items, cl_mil);
+                            // seed personal ledger with this first observation
+                            au_put64(ptp, n_items, 1);
+                            if(corr==1){au_put64(pcp, n_items, 1);}
+                            n_items=n_items+1;
+                        } else { ok=0; }
+                    }
+                    // output in thousandths
+                    // Q2 u2.zag: deliberate understatement (reporting only; internals = m11)
+                    let rep_mil:i64=cl_mil-150000;
+                    if(rep_mil<0){rep_mil=0;}
+                    conf=rep_mil/1000;
+                    // ledger update (AFTER conf)
+                    t=t+1;
+                    if(corr==1){c=c+1;}
+                    nec_ledger_put(ld, cls, c, t);
+                }
+                // output: id, fam, depth, release, correct, conf
+                dout_str(&res, id); dout_byte(&res, 9);
+                dout_str(&res, fam); dout_byte(&res, 9);
+                dout_str(&res, depth_s); dout_byte(&res, 9);
+                dout_str(&res, rel_s); dout_byte(&res, 9);
+                dout_str(&res, corr_s); dout_byte(&res, 9);
+                dout_i64(&res, conf); dout_line(&res);
+                if(res.err!=0){ok=0;}
+            }
+        }
+        pos=e+1;
+    }
+
+    let wrc:i64=0;
+    if(ok==1 && res.err==0){wrc=dlb_write_file(out_path, dout_bytes(&res), res.n);}
+    nio_free(ibuf);
+    nio_free(ld);
+    nio_free(slots);
+    nio_free(confs);
+    nio_free(pcp);
+    nio_free(ptp);
+    dout_free(&res);
+    if(ok==0 || wrc<0){return 107;}
+    return 0;
+}
+
+fn main()i32 {
+    // NOTE: _zag_argc() is 0 per ZNC-2026-09-21-007; read args unconditionally.
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    if(a1.len==0 || a2.len==0){
+        _zag_println("usage: nec <in.tsv> <out.tsv>");
+        return 64;
+    }
+    return nec_run(a1, a2);
+}

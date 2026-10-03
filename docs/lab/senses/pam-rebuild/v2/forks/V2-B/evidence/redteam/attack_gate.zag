@@ -1,0 +1,247 @@
+// attack_gate.zag — Gap Crew C red-team: V2-B interventional program + admission
+// law + memory slot + sha256 ledger, per PREREG_V2-B.md §2 (the FROZEN spec).
+// CLI: attack_gate <records> <mode>   mode: "full" (preregistered, residual
+//   check with 3σ) | "judg" (sibling's judgment-only variant, no residual).
+// Records lines: name|task|truth|jF|confF|measF|jG|confG|measG|jP1|measP1|
+//   jP2|measP2|jP3|measP3   (judgments 0/1, truth 0/1)
+// Pure Zag, integer math, zero RNG, deterministic.
+// Laws honored: no `as []i32` casts, no bare blocks, no `};`, shallow nesting.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("R33_NATIVE_SHA256_V2.zag")
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+
+fn z_read_full(path:[]u8, buf:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -1; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -1; }
+    let n:i64 = nio_read_exact(fd, buf, max);
+    nio_close(fd);
+    return n;
+}
+
+fn p_i64(b:[]u8, s:i32, e:i32) i64 {
+    let v:i64 = 0;
+    let i:i32 = s;
+    while(i < e) {
+        let c:i64 = b[i] as i64;
+        if(c >= 48 && c <= 57) { v = v * 10 + (c - 48); }
+        i = i + 1;
+    }
+    return v;
+}
+
+// field starts into fs (16 x u32); returns field count
+fn parse_fields(line:[]u8, fs:[]u8) i32 {
+    t_put32(fs, 0, 0);
+    let nf:i32 = 1;
+    let i:i32 = 0;
+    while(i < line.len) {
+        if(line[i] == 124) {
+            if(nf < 16) { t_put32(fs, nf * 4, (i + 1) as i64); }
+            nf = nf + 1;
+        }
+        i = i + 1;
+    }
+    return nf;
+}
+fn fstart(fs:[]u8, i:i32) i32 { return t_get32(fs, i * 4) as i32; }
+fn fend(line:[]u8, fs:[]u8, nf:i32, i:i32) i32 {
+    if(i + 1 < nf) { return (t_get32(fs, (i + 1) * 4) as i32) - 1; }
+    return line.len;
+}
+fn pf(line:[]u8, fs:[]u8, nf:i32, i:i32) i64 {
+    return p_i64(line, fstart(fs, i), fend(line, fs, nf, i));
+}
+
+fn o_str(out:[]u8, p:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { out[p + i] = s[i]; i = i + 1; }
+    return p + s.len;
+}
+fn o_i64(out:[]u8, p:i32, v:i64) i32 {
+    let t:[]u8 = _zag_i64_to_str(v);
+    return o_str(out, p, t);
+}
+fn o_ch(out:[]u8, p:i32, c:i64) i32 {
+    out[p] = c as u8;
+    return p + 1;
+}
+
+// ledger: hh = sha256(hh || line || dbyte)
+fn ledger_step(hh:[]u8, line:[]u8, dbyte:i64) void {
+    let m:[]u8 = nio_alloc(32 + line.len + 1);
+    let i:i32 = 0;
+    while(i < 32) { m[i] = hh[i]; i = i + 1; }
+    let j:i32 = 0;
+    while(j < line.len) { m[32 + j] = line[j]; j = j + 1; }
+    m[32 + line.len] = dbyte as u8;
+    let nh:[]u8 = nio_alloc(32);
+    let rc:i32 = ns_sha256(m, nh);
+    if(rc == 0) {
+        let k:i32 = 0;
+        while(k < 32) { hh[k] = nh[k]; k = k + 1; }
+    }
+    nio_free(m);
+    nio_free(nh);
+}
+
+// process one record line; updates out/opos, hh, slot, cnt
+fn do_line(line:[]u8, out:[]u8, opos:[]u8, hh:[]u8, slot:[]u8, cnt:[]u8, mode:i32) void {
+    let fs:[]u8 = nio_alloc(64);
+    let nf:i32 = parse_fields(line, fs);
+    if(nf < 15) { nio_free(fs); return; }
+    let truth:i64 = pf(line, fs, nf, 2);
+    let jF:i64 = pf(line, fs, nf, 3);
+    let confG:i64 = pf(line, fs, nf, 7);
+    let measG:i64 = pf(line, fs, nf, 8);
+    let jG:i64 = pf(line, fs, nf, 6);
+    let jP1:i64 = pf(line, fs, nf, 9);
+    let mP1:i64 = pf(line, fs, nf, 10);
+    let jP2:i64 = pf(line, fs, nf, 11);
+    let mP2:i64 = pf(line, fs, nf, 12);
+    let jP3:i64 = pf(line, fs, nf, 13);
+    let mP3:i64 = pf(line, fs, nf, 14);
+    let n0:i32 = fstart(fs, 0);
+    let n1:i32 = fend(line, fs, nf, 0);
+    // 3σ_task colordisc = 69 (committed calibration_3sigma.json)
+    let s3:i64 = 69;
+    let cf1:i32 = 0;
+    if(jP1 != jG) { cf1 = 1; }
+    if(mode == 0 && iabs(measG - mP1) > s3) { cf1 = 1; }
+    let cf2:i32 = 0;
+    if(jP2 != jG) { cf2 = 1; }
+    if(mode == 0 && iabs(measG - mP2) > s3) { cf2 = 1; }
+    let cf3:i32 = 0;
+    if(jP3 != jG) { cf3 = 1; }
+    if(mode == 0 && iabs(measG - mP3) > s3) { cf3 = 1; }
+    let prog:i32 = 0;
+    if(confG >= 700 && cf1 == 1 && cf2 == 1 && cf3 == 1) { prog = 1; }
+    let admit:i32 = 0;
+    if(jF == jG) { admit = 1; }
+    // decision: 73='I' INSTALL, 87='W' WITHHOLD, 67='C' CONFLICT_WITHHELD
+    let dec:i64 = 87;
+    let held:i64 = t_get64(slot, 0);
+    if(admit == 0) { dec = 87; }
+    if(admit == 1 && prog == 0) { dec = 87; }
+    if(admit == 1 && prog == 1 && held >= 0 && held != jF) { dec = 67; }
+    if(admit == 1 && prog == 1 && (held < 0 || held == jF)) {
+        dec = 73;
+        if(held < 0) { t_put64(slot, 0, jF); }
+    }
+    let wrong:i32 = 0;
+    if(dec == 73 && jF != truth) { wrong = 1; }
+    // counters: cnt[0]=n, [1]=installs, [2]=false, [3]=conflicts
+    t_put64(cnt, 0, t_get64(cnt, 0) + 1);
+    if(dec == 73) { t_put64(cnt, 8, t_get64(cnt, 8) + 1); }
+    if(wrong == 1) { t_put64(cnt, 16, t_get64(cnt, 16) + 1); }
+    if(dec == 67) { t_put64(cnt, 24, t_get64(cnt, 24) + 1); }
+    ledger_step(hh, line, dec);
+    // emit: name|prog|admit|decision|wrong
+    let p:i32 = t_get32(opos, 0) as i32;
+    let q:i32 = n0;
+    while(q < n1) { p = o_ch(out, p, line[q] as i64); q = q + 1; }
+    nio_free(fs);
+    p = o_ch(out, p, 124);
+    p = o_i64(out, p, prog as i64);
+    p = o_ch(out, p, 124);
+    p = o_i64(out, p, admit as i64);
+    p = o_ch(out, p, 124);
+    p = o_ch(out, p, dec);
+    p = o_ch(out, p, 124);
+    p = o_i64(out, p, wrong as i64);
+    p = o_ch(out, p, 10);
+    t_put32(opos, 0, p as i64);
+}
+
+fn main() i32 {
+    let rpath:[]u8 = _zag_arg(1);
+    let smode:[]u8 = _zag_arg(2);
+    if(rpath.len == 0 || smode.len == 0) { return 1; }
+    let mode:i32 = 1;
+    if(_zag_strcmp(smode, "full") == 1) { mode = 0; }
+    let buf:[]u8 = nio_alloc(1048576);
+    if(buf.len == 0) { return 2; }
+    let n:i64 = z_read_full(rpath, buf, 1048576);
+    if(n <= 0) { return 3; }
+    let data:[]u8 = buf[0..n as i32];
+    let out:[]u8 = nio_alloc(1048576);
+    let opos:[]u8 = nio_alloc(4);
+    t_put32(opos, 0, 0);
+    let hh:[]u8 = nio_alloc(32);
+    let zi:i32 = 0;
+    while(zi < 32) { hh[zi] = 0; zi = zi + 1; }
+    let slot:[]u8 = nio_alloc(8);
+    t_put64(slot, 0, -1);
+    let cnt:[]u8 = nio_alloc(32);
+    let ci:i32 = 0;
+    while(ci < 4) { t_put64(cnt, ci * 8, 0); ci = ci + 1; }
+    let ls:i32 = 0;
+    while(ls < data.len) {
+        let le:i32 = ls;
+        while(le < data.len && data[le] != 10) { le = le + 1; }
+        if(le > ls) { do_line(data[ls..le], out, opos, hh, slot, cnt, mode); }
+        ls = le + 1;
+    }
+    let p:i32 = t_get32(opos, 0) as i32;
+    p = o_str(out, p, "LEDGER_HEAD=");
+    let hx:[]u8 = ns_hex(hh);
+    p = o_str(out, p, hx);
+    p = o_ch(out, p, 10);
+    p = o_str(out, p, "N=");
+    p = o_i64(out, p, t_get64(cnt, 0));
+    p = o_ch(out, p, 10);
+    p = o_str(out, p, "INSTALLS=");
+    p = o_i64(out, p, t_get64(cnt, 8));
+    p = o_ch(out, p, 10);
+    p = o_str(out, p, "FALSE_INSTALLS=");
+    p = o_i64(out, p, t_get64(cnt, 16));
+    p = o_ch(out, p, 10);
+    p = o_str(out, p, "CONFLICTS=");
+    p = o_i64(out, p, t_get64(cnt, 24));
+    p = o_ch(out, p, 10);
+    nio_write_all(1, out[0..p]);
+    return 0;
+}

@@ -1,0 +1,453 @@
+// skep_lib.zag — SKEPTIC: deterministic poison gate + safe-mode deliberation.
+//
+// Frozen per PREREG_WS1C.md section 1. Pure Zag, zero RNG.
+//
+// The gate (skp_gate) runs a deterministic pre-scan over the full evidence
+// set with RAW weights and exact integer arithmetic:
+//   M = final raw-batch leader margin (lowest-index tiebreak)
+//   A = maximum single attack weight
+//   F = leave-one-out verdict flip count
+//   P1: M <= 0 or A >= M
+//   P2: F >= 1
+//   P3a: a lone pure-attack item with attack weight >= refute_thr
+//   P3b: a lone single-polarity item with |weight| >= elim_margin
+// GATE = P1 or P2 or P3a or P3b.
+//
+// Safe mode (skp_run_safe) = the TOCAP sequential procedure with:
+//   S1: lone pure-attack weights damped to 1/4 (integer floor division)
+//   S2: no ELIMINATE/TEST-refute unless margin >= elim_margin + residual_risk
+//   S3: full evidence pass before verdict
+//   S4: final confidence = clamp(damped-batch leader margin, 0, 1000)
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+@import("dlb_json.zag")
+@import("dlb_cfg.zag")
+@import("dlb_ledger.zag")
+@import("dlb_delib.zag")
+
+// Fast-refusal rule (verbatim logic from fastref.zag: refuse iff any
+// evidence id carries the `sig_` prefix; otherwise allow). Inlined here
+// because fastref.zag is a standalone program with its own main.
+fn skp_has_sig(eid:[]u8)i32 {
+    if(eid.len<4){return 0;}
+    if(eid[0]==115 && eid[1]==105 && eid[2]==103 && eid[3]==95){return 1;}
+    return 0;
+}
+// Returns verdict: 1=REFUSE, 0=ALLOW. ops via out-param.
+fn skp_fr_decide(it:*Item,out_ops:*i64)i32 {
+    let ops:i64=0;
+    let refuse:i32=0;
+    let e:i32=0;
+    while(e<it.*.ne && refuse==0){
+        ops=ops+1;
+        if(skp_has_sig(dj_eid(it,e))==1){refuse=1;}
+        e=e+1;
+    }
+    out_ops.*=ops;
+    return refuse;
+}
+
+struct GateOut {
+    fire:i32,
+    reason:i32,
+    m:i64,
+    a:i32,
+    f:i32
+}
+
+// Raw batch scores over evidence[0..ne), skipping index `skip` (-1 = none).
+// sc must have >= nh i64 slots; zeroed on entry.
+fn skp_batch_scores(it:*Item,skip:i32,sc:[]i64)void {
+    let nh:i32=it.*.nh;
+    let h:i32=0;
+    while(h<nh){sc[h]=0;h=h+1;}
+    let e:i32=0;
+    while(e<it.*.ne){
+        if(e!=skip){
+            let k:i32=0;let ns:i32=dj_sup_n(it,e);
+            while(k<ns){
+                let hh:i32=dj_sup_h(it,e,k);let w:i32=dj_sup_w(it,e,k);
+                sc[hh]=sc[hh]+(w as i64);
+                k=k+1;
+            }
+            k=0;
+            let na:i32=dj_att_n(it,e);
+            while(k<na){
+                let hh:i32=dj_att_h(it,e,k);let w:i32=dj_att_w(it,e,k);
+                sc[hh]=sc[hh]-(w as i64);
+                k=k+1;
+            }
+        }
+        e=e+1;
+    }
+}
+
+// Leader of a score table: lowest index wins ties.
+fn skp_verdict_of(sc:[]i64,nh:i32)i32 {
+    let best:i32=0;let bs:i64=sc[0];
+    let i:i32=1;
+    while(i<nh){
+        if(sc[i]>bs){best=i;bs=sc[i];}
+        i=i+1;
+    }
+    return best;
+}
+
+// Leader margin: best minus runner-up (0 on tie; leader score if nh==1).
+fn skp_margin_of(sc:[]i64,nh:i32,leader:i32)i64 {
+    if(nh<=1){return sc[leader];}
+    let bs:i64=sc[leader];let ss:i64=-4000000000000000000;let have:i32=0;
+    let i:i32=0;
+    while(i<nh){
+        if(i!=leader){
+            if(have==0){have=1;ss=sc[i];}
+            if(have==1 && sc[i]>ss){ss=sc[i];}
+        }
+        i=i+1;
+    }
+    return bs-ss;
+}
+
+// Damped weight of one link: attack weights on lone pure-attack items are
+// quartered (integer floor); everything else unchanged.
+// is_att: 0=support, 1=attack.
+fn skp_damp_w(w:i32,is_att:i32,damp_e:i32)i32 {
+    if(is_att==1 && damp_e==1){return w/4;}
+    return w;
+}
+
+// Net damped delta of evidence u on hypothesis h:
+// supports(h) - attacks(h) with S1 damping applied.
+fn skp_net_d(it:*Item,u:i32,h:i32,damp:[]u8) i64 {
+    let d:i64=0;
+    let k:i32=0;let ns:i32=dj_sup_n(it,u);
+    while(k<ns){
+        if(dj_sup_h(it,u,k)==h){d=d+(dj_sup_w(it,u,k) as i64);}
+        k=k+1;
+    }
+    k=0;
+    let na:i32=dj_att_n(it,u);
+    let de:i32=0;
+    if(damp[u]==1){de=1;}
+    while(k<na){
+        if(dj_att_h(it,u,k)==h){d=d-(skp_damp_w(dj_att_w(it,u,k),1,de) as i64);}
+        k=k+1;
+    }
+    return d;
+}
+
+// Residual risk of eliminating `victim` while `leader` leads: over all
+// not-yet-consumed evidence, how much the victim could still gain on the
+// leader (damped weights). Non-negative sum.
+fn skp_residual(st:*DSt,it:*Item,damp:[]u8,victim:i32,leader:i32)i64 {
+    let r:i64=0;
+    let u:i32=st.*.consumed;
+    while(u<it.*.ne){
+        st.*.ops=st.*.ops+1;
+        let g:i64=skp_net_d(it,u,victim,damp)-skp_net_d(it,u,leader,damp);
+        if(g>0){r=r+g;}
+        u=u+1;
+    }
+    return r;
+}
+
+// The deterministic poison gate. Fills g and the per-evidence damp flags
+// (damp[e]=1 iff e is a lone pure-attack item). Pure computation: no ledger,
+// no state mutation except g/damp/scratch.
+fn skp_gate(it:*Item,cfg:*DCfg,g:*GateOut,damp:[]u8)void {
+    let nh:i32=it.*.nh;let ne:i32=it.*.ne;
+    let sc:[]i64=nio_alloc(16*8) as []i64;
+    let sc2:[]i64=nio_alloc(16*8) as []i64;
+    let pc:[]i64=nio_alloc(48*8) as []i64;
+    g.*.fire=0;g.*.reason=0;g.*.m=0;g.*.a=0;g.*.f=0;
+    let e:i32=0;
+    while(e<ne){damp[e]=0;e=e+1;}
+    if(sc.len<16 || sc2.len<16 || pc.len<48){return;}
+    // full raw batch: verdict, margin, max attack
+    skp_batch_scores(it,-1,sc);
+    let vfull:i32=skp_verdict_of(sc,nh);
+    g.*.m=skp_margin_of(sc,nh,vfull);
+    let amax:i32=0;
+    e=0;
+    while(e<ne){
+        let k:i32=0;let na:i32=dj_att_n(it,e);
+        while(k<na){
+            let w:i32=dj_att_w(it,e,k);
+            if(w>amax){amax=w;}
+            k=k+1;
+        }
+        e=e+1;
+    }
+    g.*.a=amax;
+    // F: leave-one-out flips
+    let flips:i32=0;
+    e=0;
+    while(e<ne){
+        skp_batch_scores(it,e,sc2);
+        if(skp_verdict_of(sc2,nh)!=vfull){flips=flips+1;}
+        e=e+1;
+    }
+    g.*.f=flips;
+    // per-item target/polarity; pair counts
+    let p:i32=0;
+    while(p<48){pc[p]=0;p=p+1;}
+    let tgt:[]i64=nio_alloc(64*8) as []i64;
+    let pol:[]i64=nio_alloc(64*8) as []i64;
+    if(tgt.len>=64 && pol.len>=64){
+        e=0;
+        while(e<ne){
+            let h2:i32=0;
+            while(h2<nh){sc2[h2]=0;h2=h2+1;}
+            let st_:i64=0;let at_:i64=0;
+            let k:i32=0;let ns:i32=dj_sup_n(it,e);
+            while(k<ns){
+                let hh:i32=dj_sup_h(it,e,k);let w:i32=dj_sup_w(it,e,k);
+                sc2[hh]=sc2[hh]+(w as i64);st_=st_+(w as i64);
+                k=k+1;
+            }
+            k=0;
+            let na:i32=dj_att_n(it,e);
+            while(k<na){
+                let hh:i32=dj_att_h(it,e,k);let w:i32=dj_att_w(it,e,k);
+                sc2[hh]=sc2[hh]-(w as i64);at_=at_+(w as i64);
+                k=k+1;
+            }
+            let t:i32=skp_verdict_of(sc2,nh);
+            let pp:i32=2;
+            if(st_>0 && at_==0){pp=0;}
+            if(at_>0 && st_==0){pp=1;}
+            tgt[e]=t as i64;pol[e]=pp as i64;
+            pc[t*3+pp]=pc[t*3+pp]+1;
+            e=e+1;
+        }
+        // P3a/P3b + damp flags
+        let p3a:i32=0;let p3b:i32=0;
+        e=0;
+        while(e<ne){
+            let t:i32=tgt[e] as i32;let pp:i32=pol[e] as i32;
+            let lone:i32=0;
+            if(pc[t*3+pp]<2){lone=1;}
+            if(lone==1 && pp==1){damp[e]=1;}
+            if(lone==1 && pp==1){
+                let k:i32=0;let na:i32=dj_att_n(it,e);let aw:i32=0;
+                while(k<na){aw=aw+dj_att_w(it,e,k);k=k+1;}
+                if(aw>=cfg.*.refute_thr){p3a=1;}
+                if(aw>=cfg.*.elim_margin){p3b=1;}
+            }
+            if(lone==1 && pp==0){
+                let k:i32=0;let ns:i32=dj_sup_n(it,e);let sw:i32=0;
+                while(k<ns){sw=sw+dj_sup_w(it,e,k);k=k+1;}
+                if(sw>=cfg.*.elim_margin){p3b=1;}
+            }
+            e=e+1;
+        }
+        // fire predicates, reason in P1/P2/P3a/P3b priority
+        let fire:i32=0;let reason:i32=0;
+        if(g.*.m<=0 || (amax as i64)>=g.*.m){fire=1;reason=1;}
+        if(fire==0 && flips>=1){fire=1;reason=2;}
+        if(fire==0 && p3a==1){fire=1;reason=3;}
+        if(fire==0 && p3b==1){fire=1;reason=4;}
+        g.*.fire=fire;g.*.reason=reason;
+    }
+}
+
+// Apply evidence e with S1 damping (lone pure-attack weights quartered).
+fn skp_apply_damped(st:*DSt,it:*Item,e:i32,damp:[]u8)void {
+    let scores:[]u8=st.*.scores;let alive:[]u8=st.*.alive;
+    let de:i32=0;
+    if(damp[e]==1){de=1;}
+    let k:i32=0;let ns:i32=dj_sup_n(it,e);
+    while(k<ns){
+        st.*.ops=st.*.ops+1;
+        let h:i32=dj_sup_h(it,e,k);let w:i32=dj_sup_w(it,e,k);
+        if(alive[h]==1){au_put64(scores,h,au_get64(scores,h)+(w as i64));}
+        k=k+1;
+    }
+    k=0;
+    let na:i32=dj_att_n(it,e);
+    while(k<na){
+        st.*.ops=st.*.ops+1;
+        let h:i32=dj_att_h(it,e,k);let w:i32=skp_damp_w(dj_att_w(it,e,k),1,de);
+        if(alive[h]==1){au_put64(scores,h,au_get64(scores,h)-(w as i64));}
+        k=k+1;
+    }
+}
+
+// Safe-mode deliberation: the TOCAP sequential procedure with S1 damping,
+// S2 residual-risk guards on ELIMINATE and TEST-refute, S3 full pass, and
+// S4 final confidence = clamp(damped-batch leader margin, 0, 1000).
+// Returns 0 on success, negative on ledger error.
+fn skp_run_safe(st:*DSt,it:*Item,cfg:*DCfg,lg:*LG,lgo:*DOut,damp:[]u8,g:*GateOut)i32 {
+    let nh:i32=it.*.nh;let ne:i32=it.*.ne;
+    st.*.ops=0;
+    au_zero(st.*.scores);
+    let alive:[]u8=st.*.alive;
+    let ai:i32=0;
+    while(ai<nh){alive[ai]=1;ai=ai+1;}
+    st.*.rounds=0;st.*.consumed=0;st.*.leader=-1;st.*.margin=0;st.*.conf=0;
+    let iid:[]u8=dj_id(it);
+    let td:DOut=DOut{.buf:"",.n:0,.cap:0,.err:0};
+    if(dout_init(&td,512)!=0){return -1;}
+    dlb_d_begin(&td,it,cfg);
+    let rc:i32=lg_step(lg,lgo,iid,0,"BEGIN",dout_bytes(&td));
+    if(rc!=0){dout_free(&td);return rc;}
+    dlb_td_reset(&td);
+    dout_str(&td,"skeptic fire=");dout_i64(&td,g.*.fire as i64);
+    dout_str(&td," reason=");dout_i64(&td,g.*.reason as i64);
+    dout_str(&td," m=");dout_i64(&td,g.*.m);
+    dout_str(&td," a=");dout_i64(&td,g.*.a as i64);
+    dout_str(&td," f=");dout_i64(&td,g.*.f as i64);
+    rc=lg_step(lg,lgo,iid,0,"SKEPTIC",dout_bytes(&td));
+    if(rc!=0){dout_free(&td);return rc;}
+    let stop:i32=0;
+    let cap:i32=0;
+    while(stop==0){
+        let nalive:i32=dlb_nalive(st,nh);
+        let can_ev:i32=0;
+        if(st.*.consumed<ne && st.*.consumed<cfg.*.evcap){can_ev=1;}
+        if(can_ev==0 && nalive<=1){stop=1;}
+        if(stop==0){
+            st.*.rounds=st.*.rounds+1;
+            let r:i32=st.*.rounds;
+            let progress:i32=0;
+            if(can_ev==1){
+                let e:i32=st.*.consumed;
+                skp_apply_damped(st,it,e,damp);
+                st.*.consumed=e+1;
+                progress=1;
+                dlb_td_reset(&td);
+                dlb_d_ev(&td,it,e,st.*.consumed);
+                rc=lg_step(lg,lgo,iid,r,"EVIDENCE",dout_bytes(&td));
+                if(rc!=0){dout_free(&td);return rc;}
+            }
+            dlb_leader(st,it);
+            let best:i32=st.*.leader;
+            let scores:[]u8=st.*.scores;
+            let bs:i64=au_get64(scores,best);
+            // S2-guarded ELIMINATE
+            let h2:i32=0;
+            while(h2<nh){
+                st.*.ops=st.*.ops+1;
+                if(alive[h2]==1 && h2!=best){
+                    let d:i64=bs-au_get64(scores,h2);
+                    if(d>=(cfg.*.elim_margin as i64)){
+                        let rr:i64=skp_residual(st,it,damp,h2,best);
+                        if(d>=(cfg.*.elim_margin as i64)+rr){
+                            alive[h2]=0;
+                            progress=1;
+                            dlb_td_reset(&td);
+                            dlb_d_elim(&td,it,h2,best,d);
+                            rc=lg_step(lg,lgo,iid,r,"ELIMINATE",dout_bytes(&td));
+                            if(rc!=0){dout_free(&td);return rc;}
+                        }
+                    }
+                }
+                h2=h2+1;
+            }
+            dlb_leader(st,it);
+            best=st.*.leader;
+            bs=au_get64(scores,best);
+            // S2-guarded TEST refutation
+            let second:i32=dlb_second(st,it);
+            if(second>=0){
+                let refuted:i32=0;let rw:i32=0;
+                let e2:i32=0;
+                while(e2<st.*.consumed && refuted==0){
+                    let k:i32=0;let na:i32=dj_att_n(it,e2);
+                    while(k<na && refuted==0){
+                        st.*.ops=st.*.ops+1;
+                        let de:i32=0;
+                        if(damp[e2]==1){de=1;}
+                        let w:i32=skp_damp_w(dj_att_w(it,e2,k),1,de);
+                        if(dj_att_h(it,e2,k)==second && w>=cfg.*.refute_thr){
+                            refuted=1;rw=w;
+                        }
+                        k=k+1;
+                    }
+                    e2=e2+1;
+                }
+                if(refuted==1){
+                    let d2:i64=bs-au_get64(scores,second);
+                    let rr:i64=skp_residual(st,it,damp,second,best);
+                    if(d2>=(cfg.*.elim_margin as i64)+rr){
+                        alive[second]=0;
+                        progress=1;
+                    }
+                }
+                dlb_td_reset(&td);
+                dlb_d_test(&td,it,second,refuted,rw);
+                rc=lg_step(lg,lgo,iid,r,"TEST",dout_bytes(&td));
+                if(rc!=0){dout_free(&td);return rc;}
+            }
+            dlb_leader(st,it);
+            let nalive2:i32=dlb_nalive(st,nh);
+            if(nalive2<=1){st.*.conf=1000;}
+            if(nalive2>1){
+                let m:i64=st.*.margin;
+                if(m<0){m=0;}
+                if(m>1000){m=1000;}
+                st.*.conf=m as i32;
+            }
+            dlb_td_reset(&td);
+            dlb_d_round(&td,it,r,st.*.leader,st.*.margin,st.*.conf);
+            rc=lg_step(lg,lgo,iid,r,"ROUND",dout_bytes(&td));
+            if(rc!=0){dout_free(&td);return rc;}
+            // TOCAP stopping: always run to the cap (S3: full pass)
+            if(r>=cfg.*.amax){stop=1;cap=1;}
+            if(progress==0){stop=1;}
+        }
+    }
+    // S4: final confidence = clamp(damped-batch leader margin, 0, 1000)
+    let sc:[]i64=nio_alloc(16*8) as []i64;
+    if(sc.len>=16){
+        let h:i32=0;
+        while(h<nh){sc[h]=0;h=h+1;}
+        let e:i32=0;
+        while(e<ne){
+            let de:i32=0;
+            if(damp[e]==1){de=1;}
+            let k:i32=0;let ns:i32=dj_sup_n(it,e);
+            while(k<ns){
+                let hh:i32=dj_sup_h(it,e,k);
+                sc[hh]=sc[hh]+(dj_sup_w(it,e,k) as i64);
+                k=k+1;
+            }
+            k=0;
+            let na:i32=dj_att_n(it,e);
+            while(k<na){
+                let hh:i32=dj_att_h(it,e,k);
+                sc[hh]=sc[hh]-(skp_damp_w(dj_att_w(it,e,k),1,de) as i64);
+                k=k+1;
+            }
+            e=e+1;
+        }
+        let bl:i32=skp_verdict_of(sc,nh);
+        let bm:i64=skp_margin_of(sc,nh,bl);
+        if(bm<0){bm=0;}
+        if(bm>1000){bm=1000;}
+        st.*.conf=bm as i32;
+    }
+    dlb_td_reset(&td);
+    dlb_d_verdict(&td,it,st.*.leader,st.*.conf,st.*.rounds,st.*.consumed,cap);
+    rc=lg_step(lg,lgo,iid,st.*.rounds,"VERDICT",dout_bytes(&td));
+    dout_free(&td);
+    if(rc!=0){return rc;}
+    return 0;
+}
+
+// Discriminator D-D: 1 = SUSPECT, 0 = CLEAN.
+fn skp_suspect(it:*Item,cfg:*DCfg,damp:[]u8) i32 {
+    let g:GateOut=GateOut{.fire=0,.reason=0,.m=0,.a=0,.f=0};
+    skp_gate(it,cfg,&g,damp);
+    return g.fire;
+}
+
+// Arm dispatch. arm: 1=forced, 2=skeptic, 3=autopilot, 4=router.
+// g/damp must already be filled by skp_gate for arms 2 and 4.
+fn skp_run_arm(st:*DSt,it:*Item,cfg:*DCfg,lg:*LG,lgo:*DOut,arm:i32,g:*GateOut,damp:[]u8)i32 {
+    if(arm==3){return dlb_autopilot(st,it,cfg,lg,lgo);}
+    if(arm==2 && g.*.fire==1){return skp_run_safe(st,it,cfg,lg,lgo,damp,g);}
+    if(arm==4 && g.*.fire==1){return dlb_autopilot(st,it,cfg,lg,lgo);}
+    return dlb_run(st,it,cfg,lg,lgo);
+}

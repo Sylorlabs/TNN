@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+import argparse,json,sys
+from pathlib import Path
+from collections import defaultdict
+import numpy as np
+sys.path.insert(0,'/mnt/data/tnn-r28-aeif-no-graph/experiments')
+from entity_aeif_factorial import World,render,Rep,Model,eval_model,MODES
+ARCHS=['AE_PURE','AE_ACTIVE','AEIF_ACTIVE','FOUNDRY_HYBRID','G_ACTIVE','G_ALL','G_MULTIVIEW','G_TEMPORAL']
+DOSES=[2,4,8,16,32,64,128,256,512,1024]
+KINDS=['clean','view','scale','noise','occ.3','occ.55','compound']
+
+def build_pool(w,seed,maxdose=1024):
+ pool=[]
+ for e,b in enumerate(w.bases):
+  rows=[]
+  for j in range(maxdose):
+   k=KINDS[j%len(KINDS)]; rows.append((k,render(b,k,np.random.default_rng(seed*100003+e*997+j))))
+  pool.append(rows)
+ return pool
+
+def mode_orders(w,pool,mode,seed):
+ rng=np.random.default_rng(seed);outs=[];L=len(pool[0])
+ # difficulty from actual internal geometric distortion, learned on first 1/3 entities for teacher-like regimes
+ diff={k:0. for k in KINDS}
+ for k in KINDS:
+  vals=[]
+  for e in range(max(2,len(pool)//3)):
+   clean=pool[e][0][1]; vals += [np.linalg.norm(v-clean) for kk,v in pool[e][:min(140,L)] if kk==k]
+  diff[k]=float(np.mean(vals)) if vals else 0.
+ for e,rows in enumerate(pool):
+  if mode=='RANDOM': order=list(rng.permutation(L))
+  elif mode=='BALANCED': order=list(range(L))
+  elif mode in ('MAX_DIVERSITY','ACTIVE_SELF'):
+   # efficient cumulative diversity curriculum: rank by deviation from experienced center,
+   # interleave transform families so coverage is retained at every dose.
+   c=np.mean([v for _,v in rows[:min(140,L)]],axis=0)
+   buckets={k:[] for k in KINDS}
+   for i,(k,v) in enumerate(rows):buckets[k].append((float(np.linalg.norm(v-c)),i))
+   for k in buckets:buckets[k].sort(reverse=True)
+   order=[];ptr={k:0 for k in KINDS}
+   while len(order)<L:
+    ks=sorted(KINDS,key=lambda k:(buckets[k][ptr[k]][0] if ptr[k]<len(buckets[k]) else -1),reverse=True)
+    progressed=False
+    for k in ks:
+     if ptr[k]<len(buckets[k]):order.append(buckets[k][ptr[k]][1]);ptr[k]+=1;progressed=True
+     if len(order)>=L:break
+    if not progressed:break
+  elif mode=='ADAPTIVE_MASTER':
+   priority={'compound':8,'occ.55':7,'noise':6,'occ.3':5,'view':4,'scale':3,'clean':1}
+   # hard examples first but interleave anchors every fourth example
+   hard=sorted(range(L),key=lambda i:(priority[rows[i][0]],np.linalg.norm(rows[i][1]-rows[0][1])),reverse=True)
+   anchor=[i for i,(k,_) in enumerate(rows) if k in ('clean','view','scale')];order=[];hi=ai=0
+   while len(order)<L:
+    for _ in range(3):
+     while hi<len(hard) and hard[hi] in order:hi+=1
+     if hi<len(hard):order.append(hard[hi]);hi+=1
+    while ai<len(anchor) and anchor[ai] in order:ai+=1
+    if ai<len(anchor):order.append(anchor[ai]);ai+=1
+    if hi>=len(hard) and ai>=len(anchor):break
+   order += [i for i in range(L) if i not in set(order)]
+  elif mode=='CONTRASTIVE':
+   t=w.twins[e];center=pool[t][0][1] if t>=0 else rows[0][1];order=sorted(range(L),key=lambda i:np.linalg.norm(rows[i][1]-center))
+  elif mode=='COUNTEREXAMPLE':
+   t=w.twins[e];center=pool[t][0][1] if t>=0 else rows[0][1];near=sorted(range(L),key=lambda i:np.linalg.norm(rows[i][1]-center));order=[]
+   lo=0;hi=L-1
+   while lo<=hi:
+    order.append(near[lo]);lo+=1
+    if lo<=hi:order.append(near[hi]);hi-=1
+  elif mode=='TNN_REPLAY':
+   c=np.mean([x for _,x in rows[:7]],0);order=sorted(range(L),key=lambda i:np.linalg.norm(rows[i][1]-c),reverse=True)
+  elif mode=='SIBLING_ASSIST':
+   hard=[i for i,(k,_) in enumerate(rows) if k in ('view','noise','compound')];rest=[i for i in range(L) if i not in set(hard)];rng.shuffle(hard);rng.shuffle(rest);order=[]
+   # one sibling-hard observation then two ordinary observations
+   h=r=0
+   while len(order)<L:
+    if h<len(hard):order.append(hard[h]);h+=1
+    for _ in range(2):
+     if r<len(rest):order.append(rest[r]);r+=1
+    if h>=len(hard) and r>=len(rest):break
+  elif mode=='MASTER_DIVERSE':
+   # use learned difficulty rather than fixed transform names for 1/3, diverse/random remainder
+   hard=sorted(range(L),key=lambda i:(diff[rows[i][0]],np.linalg.norm(rows[i][1]-rows[0][1])),reverse=True);rest=list(range(L));rng.shuffle(rest);order=[];seen=set();h=r=0
+   while len(order)<L:
+    if len(order)%3==0:
+     while h<L and hard[h] in seen:h+=1
+     if h<L:order.append(hard[h]);seen.add(hard[h]);h+=1;continue
+    while r<L and rest[r] in seen:r+=1
+    if r<L:order.append(rest[r]);seen.add(rest[r]);r+=1
+    else:break
+  else: # MIXED
+   # cyclic coverage + random within transform family
+   b={k:[] for k in KINDS}
+   for i,(k,_) in enumerate(rows):b[k].append(i)
+   for k in KINDS:rng.shuffle(b[k])
+   order=[];ptr={k:0 for k in KINDS}
+   while len(order)<L:
+    for k in KINDS:
+     if ptr[k]<len(b[k]):order.append(b[k][ptr[k]]);ptr[k]+=1
+  outs.append(order)
+ return outs
+
+def run_seed(seed,out,n_trials=2):
+ w=World(seed);pool=build_pool(w,seed,DOSES[-1]);rows=[]
+ orders={m:mode_orders(w,pool,m,seed+909+abs(hash(m))%10000) for m in MODES}
+ for mode in MODES:
+  for dose in DOSES:
+   views=[np.stack([pool[e][i][1] for i in orders[mode][e][:dose]]) for e in range(len(pool))];rep=Rep(views)
+   for a in ARCHS:
+    met=eval_model(Model(a,rep,w,seed+333),w,seed+1000+dose*3,n_trials);rows.append({'seed':seed,'mode':mode,'dose':dose,'arch':a,'graph':a.startswith('G_'),**met})
+  print(mode,'done',flush=True)
+ Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','seed':seed,'doses':DOSES,'modes':MODES,'archs':ARCHS,'rows':rows},indent=2));print('rows',len(rows))
+
+def combine(files,out):
+ rows=[]
+ for f in files:rows+=json.loads(Path(f).read_text())['rows']
+ g=defaultdict(list)
+ for r in rows:g[(r['arch'],r['mode'],r['dose'])].append(r)
+ s=[]
+ for (a,m,d),rs in g.items():
+  z={'arch':a,'mode':m,'dose':d,'graph':a.startswith('G_'),'n':len(rs)}
+  for k in ['overall','floor','viewpoint','occlusion80','true_switch','switch_occluded','long_gap_replacement','ambiguous_mix','high_conf_corruption','compound','extra_rate']:
+   v=np.array([r[k] for r in rs]);z[k]=float(v.mean());z[k+'_sd']=float(v.std())
+  s.append(z)
+ curves=[]
+ for a in ARCHS:
+  for m in MODES:
+   ss=sorted([x for x in s if x['arch']==a and x['mode']==m],key=lambda x:x['dose'])
+   if not ss:continue
+   tail=ss[-4:];den=max(1e-9,np.log2(tail[-1]['dose'])-np.log2(tail[0]['dose']));slope=(tail[-1]['overall']-tail[0]['overall'])/den
+   curves.append({'arch':a,'mode':m,'final_dose':ss[-1]['dose'],'final_overall':ss[-1]['overall'],'final_floor':ss[-1]['floor'],'tail_gain':tail[-1]['overall']-tail[0]['overall'],'gain_per_doubling':float(slope),'classification':'PLATEAU' if abs(slope)<.01 else 'IMPROVING' if slope>0 else 'REGRESSING'})
+ Path(out).write_text(json.dumps({'status':'REFERENCE_ONLY_NOT_NATIVE_ZAG','rows':rows,'summary':s,'curves':curves},indent=2));print(json.dumps(sorted(curves,key=lambda x:(x['final_floor'],x['final_overall']),reverse=True)[:24],indent=2))
+
+if __name__=='__main__':
+ ap=argparse.ArgumentParser();sp=ap.add_subparsers(dest='cmd',required=True);a=sp.add_parser('seed');a.add_argument('--seed',type=int,required=True);a.add_argument('--out',required=True);a.add_argument('--n-trials',type=int,default=2);b=sp.add_parser('combine');b.add_argument('--out',required=True);b.add_argument('files',nargs='+');x=ap.parse_args();run_seed(x.seed,x.out,x.n_trials) if x.cmd=='seed' else combine(x.files,x.out)

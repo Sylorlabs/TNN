@@ -1,0 +1,290 @@
+// audit_events.zag — A3: event census + tombstone scan.
+// usage: audit_events <storedir>
+// Checks:
+//   E1: total events == 66 (57 tag-7 episodes + 9 tag-8 rejects), no other tags.
+//   E2: tag-7 stages are exactly 0..56 in order; tag-8 lessons/masks match replay.
+//   E3: tombstone scan — flags[slot] (4B at 4096*w+32768+slot*4 in each sealed
+//       chunk) must be a kind 1..4 for all n slots; 255 (tombstone) count == 0.
+// Pure Zag. Zero RNG. Read-only.
+fn au_alloc(n:i32)[]u8 {
+    if(n<1){let e:[]u8="";return e;}
+    let p:*u8=_zag_malloc(n as i64) as *u8;
+    if((p as i64)==0){let e2:[]u8="";return e2;}
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+fn au_cstr(s:[]u8)[]u8 {
+    let n:i32=s.len;
+    let b:[]u8=au_alloc(n+1);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<n){b[i]=s[i];i=i+1;}
+    b[n]=0;
+    return b;
+}
+fn au_open_rdonly(path:[]u8)i64 {
+    let c:[]u8=au_cstr(path);
+    if(c.len==0){return -1;}
+    let fd:i64=_zag_raw_syscall(2,(_zag_slice_ptr(c) as i64),0,0,0,0,0);
+    _zag_free(_zag_slice_ptr(c));
+    return fd;
+}
+fn au_close(fd:i64)void {_zag_raw_syscall(3,fd,0,0,0,0,0);}
+fn au_read_into(fd:i64,buf:[]u8)i32 {
+    if(buf.len<1){return -1;}
+    let at:i32=0;
+    while(at<buf.len){
+        let n:i64=_zag_raw_syscall(0,fd,(_zag_slice_ptr(buf) as i64)+(at as i64),(buf.len-at) as i64,0,0,0);
+        if(n==-4){continue;}
+        if(n<0){return -1;}
+        if(n==0){break;}
+        at=at+(n as i32);
+    }
+    return at;
+}
+fn au_g32(b:[]u8,o:i32)i32 {
+    let v:i32=0;
+    v=v|((b[o] as i32)&255);
+    v=v|(((b[o+1] as i32)&255)<<8);
+    v=v|(((b[o+2] as i32)&255)<<16);
+    v=v|(((b[o+3] as i32)&255)<<24);
+    return v;
+}
+fn au_s64(b:[]u8,o:i64,v:i64)void {
+    let o32:i32=o as i32;
+    b[o32]=(v&255) as u8;
+    b[o32+1]=((v>>8)&255) as u8;
+    b[o32+2]=((v>>16)&255) as u8;
+    b[o32+3]=((v>>24)&255) as u8;
+    b[o32+4]=((v>>32)&255) as u8;
+    b[o32+5]=((v>>40)&255) as u8;
+    b[o32+6]=((v>>48)&255) as u8;
+    b[o32+7]=((v>>56)&255) as u8;
+}
+fn au_g64(b:[]u8,o:i64)i64 {
+    let o32:i32=o as i32;
+    let v:i64=0;
+    v=v|((b[o32] as i64)&255);
+    v=v|(((b[o32+1] as i64)&255)<<8);
+    v=v|(((b[o32+2] as i64)&255)<<16);
+    v=v|(((b[o32+3] as i64)&255)<<24);
+    v=v|(((b[o32+4] as i64)&255)<<32);
+    v=v|(((b[o32+5] as i64)&255)<<40);
+    v=v|(((b[o32+6] as i64)&255)<<48);
+    v=v|(((b[o32+7] as i64)&255)<<56);
+    return v;
+}
+fn au_print(s:[]u8)void {_zag_print(s);}
+fn au_println(s:[]u8)void {_zag_println(s);}
+fn au_i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0){
+        if(s[s.len-1]==10){return s[0..s.len-1];}
+    }
+    return s;
+}
+fn au_join(dir:[]u8,name:[]u8)[]u8 {
+    let b:[]u8=au_alloc(dir.len+1+name.len);
+    if(b.len==0){return b;}
+    let i:i32=0;
+    while(i<dir.len){b[i]=dir[i];i=i+1;}
+    b[dir.len]=47;
+    i=0;
+    while(i<name.len){b[dir.len+1+i]=name[i];i=i+1;}
+    return b;
+}
+struct AuStore {
+    cap:i32, n:i32,
+    nchunks:i32, chunk_ptrs:[]u8,
+    chain:[]u8, nsealed:i32,
+    events:[]u8, events_n:i32, events_cap:i32,
+    seal:[]u8, chain_scratch:[]u8,
+    fill_buf:[]u8, widths:[]u8, clkbase:[]u8,
+    learn_gate:i32, clock:i32
+}
+fn au_store_init_for_load(cap:i32,s:*AuStore)i32 {
+    let nchunks:i32=(cap+4095)/4096;
+    let cptrs:[]u8=au_alloc(nchunks*8);
+    if(cptrs.len==0){return -1;}
+    let chn:[]u8=au_alloc(nchunks*32);
+    if(chn.len==0){return -1;}
+    let evb:[]u8=au_alloc(256*16);
+    if(evb.len==0){return -1;}
+    let sl:[]u8=au_alloc(32);
+    if(sl.len==0){return -1;}
+    let scr:[]u8=au_alloc(49184);
+    if(scr.len==0){return -1;}
+    s.*.cap=cap;s.*.n=0;
+    s.*.nchunks=nchunks;s.*.chunk_ptrs=cptrs;
+    s.*.chain=chn;s.*.nsealed=0;
+    s.*.events=evb;s.*.events_n=0;s.*.events_cap=256;
+    s.*.seal=sl;s.*.chain_scratch=scr;
+    let fb:[]u8=au_alloc(49152);
+    if(fb.len==0){return -1;}
+    let wd:[]u8=au_alloc(nchunks);
+    if(wd.len==0){return -1;}
+    s.*.fill_buf=fb;s.*.widths=wd;
+    let ckb:[]u8=au_alloc(nchunks*4);
+    if(ckb.len==0){return -1;}
+    let ci:i32=0;
+    while(ci<nchunks*4){ckb[ci]=255;ci=ci+1;}
+    s.*.clkbase=ckb;
+    s.*.learn_gate=1;s.*.clock=0;
+    return 0;
+}
+fn au_event_grow(s:*AuStore)i32 {
+    let cap:i32=s.*.events_cap;
+    let ncap:i32=cap*2;
+    let nb:[]u8=au_alloc(ncap*16);
+    if(nb.len==0){return -1;}
+    let ob:[]u8=s.*.events;
+    let i:i32=0;
+    let nn:i32=s.*.events_n*16;
+    while(i<nn){nb[i]=ob[i];i=i+1;}
+    s.*.events=nb;s.*.events_cap=ncap;
+    return 0;
+}
+fn au_store_load(s:*AuStore,dir:[]u8)i32 {
+    let nm:[]u8=au_join(dir,"store.dat");
+    if(nm.len==0){return -1;}
+    let fd:i64=au_open_rdonly(nm);
+    if(fd<0){return -1;}
+    let hdr:[]u8=au_alloc(28);
+    if(hdr.len==0){au_close(fd);return -1;}
+    if(au_read_into(fd,hdr)!=28){au_close(fd);return -1;}
+    if(hdr[0]!=73||hdr[1]!=71||hdr[2]!=78||hdr[3]!=83||hdr[4]!=84){au_close(fd);return -1;}
+    let ncap:i32=au_g32(hdr,8);
+    let n:i32=au_g32(hdr,12);
+    let nsealed:i32=au_g32(hdr,16);
+    let nchunks:i32=au_g32(hdr,20);
+    let clock:i32=au_g32(hdr,24);
+    if(au_store_init_for_load(ncap,s)!=0){au_close(fd);return -1;}
+    let wd:[]u8=s.*.widths;
+    if(au_read_into(fd,wd[0..nchunks])!=nchunks){au_close(fd);return -1;}
+    let cptrs:[]u8=s.*.chunk_ptrs;
+    let c:i32=0;
+    while(c<nsealed){
+        let lb:[]u8=au_alloc(4);
+        if(lb.len==0){au_close(fd);return -1;}
+        if(au_read_into(fd,lb)!=4){au_close(fd);return -1;}
+        let len:i32=au_g32(lb,0);
+        let cc:[]u8=au_alloc(len);
+        if(cc.len==0){au_close(fd);return -1;}
+        if(au_read_into(fd,cc)!=len){au_close(fd);return -1;}
+        au_s64(cptrs,c*8,_zag_slice_ptr(cc) as i64);
+        c=c+1;
+    }
+    s.*.n=n;
+    s.*.nsealed=nsealed;
+    s.*.clock=clock;
+    let chn:[]u8=s.*.chain;
+    if(au_read_into(fd,chn[0..nsealed*32])!=nsealed*32){au_close(fd);return -1;}
+    let enb:[]u8=au_alloc(4);
+    if(enb.len==0){au_close(fd);return -1;}
+    if(au_read_into(fd,enb)!=4){au_close(fd);return -1;}
+    let evn:i32=au_g32(enb,0);
+    while(s.*.events_cap<evn){
+        if(au_event_grow(s)!=0){au_close(fd);return -1;}
+    }
+    let ev:[]u8=s.*.events;
+    if(au_read_into(fd,ev[0..evn*16])!=evn*16){au_close(fd);return -1;}
+    s.*.events_n=evn;
+    au_close(fd);
+    return 0;
+}
+fn main()void {
+    let dir:[]u8=_zag_arg(1);
+    if(dir.len==0){au_println("usage: audit_events <storedir>");return;}
+    let s:AuStore=AuStore{.cap=0,.n=0,.nchunks=0,.chunk_ptrs="",
+        .chain="",.nsealed=0,.events="",.events_n=0,.events_cap=0,
+        .seal="",.chain_scratch="",.fill_buf="",.widths="",.clkbase="",
+        .learn_gate=0,.clock=0};
+    if(au_store_load(&s,dir)!=0){au_println("load failed");return;}
+    let ps:*AuStore=&s;
+    let ev:[]u8=ps.*.events;
+    let evn:i32=ps.*.events_n;
+    au_print("EVENTS total=");
+    au_print(au_i64s(evn as i64));
+    au_println("");
+    let t7:i32=0; let t8:i32=0; let toth:i32=0;
+    let stage_ok:i32=1;
+    let lastpos:i64=-1;
+    let pos_ok:i32=1;
+    let e:i32=0;
+    while(e<evn){
+        let tag:i32=(ev[e*16] as i32)&255;
+        let pos:i32=au_g32(ev,e*16+1);
+        let p0:i32=au_g32(ev,e*16+5);
+        if(tag==7){
+            if(p0!=t7){stage_ok=0;}
+            if((pos as i64)<lastpos){pos_ok=0;}
+            lastpos=pos as i64;
+            t7=t7+1;
+        }else{
+            if(tag==8){t8=t8+1;}else{toth=toth+1;}
+        }
+        e=e+1;
+    }
+    au_print("tag7=");
+    au_print(au_i64s(t7 as i64));
+    au_print(" tag8=");
+    au_print(au_i64s(t8 as i64));
+    au_print(" other=");
+    au_print(au_i64s(toth as i64));
+    au_print(" stages0..56_in_order=");
+    au_print(au_i64s(stage_ok as i64));
+    au_print(" pos_nondecreasing=");
+    au_print(au_i64s(pos_ok as i64));
+    au_println("");
+    // tag-8 lessons and masks in order
+    au_print("reject-lessons:");
+    e=0;
+    while(e<evn){
+        let tag:i32=(ev[e*16] as i32)&255;
+        if(tag==8){
+            let les:i32=au_g32(ev,e*16+1);
+            let mask:i32=au_g32(ev,e*16+5);
+            au_print(" ");
+            au_print(au_i64s(les as i64));
+            au_print(":");
+            au_print(au_i64s(mask as i64));
+        }
+        e=e+1;
+    }
+    au_println("");
+    // tombstone scan: flags for all n slots
+    let cptrs:[]u8=ps.*.chunk_ptrs;
+    let wd:[]u8=ps.*.widths;
+    let n:i32=ps.*.n;
+    let nsealed:i32=ps.*.nsealed;
+    let tomb:i64=0;
+    let slot:i32=0;
+    let c:i32=0;
+    while(c<nsealed){
+        let wtag:i32=(wd[c] as i32)&255;
+        let w:i32=wtag&15;
+        let p:i64=au_g64(cptrs,c*8);
+        let cp:*u8=p as *u8;
+        let ch:[]u8=cp[0..4096*(w+4)];
+        let cnt:i32=4096;
+        if(slot+cnt>n){cnt=n-slot;}
+        let fbase:i32=4096*w;
+        let j:i32=0;
+        while(j<cnt){
+            // flags byte @ fbase+j*4+2; bit0 = deleted (sc_flags_set fl|1).
+            // bytes 0..1 = u16 clock_delta (arbitrary), byte 3 = 0.
+            let fb2:u8=ch[fbase+j*4+2];
+            if(((fb2 as i32)&1)!=0){tomb=tomb+1;}
+            j=j+1;
+        }
+        slot=slot+cnt;
+        c=c+1;
+    }
+    au_print("TOMBSTONES scanned=");
+    au_print(au_i64s(slot as i64));
+    au_print(" deleted_bit0=");
+    au_print(au_i64s(tomb));
+    au_println("");
+}

@@ -1,0 +1,478 @@
+// semantics.zag — Z0 reference interpreter: the authoritative world semantics.
+// Integer-only, deterministic, no RNG. The learner (learner.zag) NEVER calls
+// into this module; it reimplements execution parameterized by induced rules.
+// Program layout (i32 words, little-endian in []u8):
+//   word0 = n_instr, word1 = n_heap,
+//   words 2..2+4*n_instr-1 = instructions (4 words each: op,x,y,z),
+//   words 98..98+n_heap-1 = heap init words.  (CG_MAXI=24 -> 2+96+16 <= 128)
+@import("zutil.zag")
+
+const Z_LIT:i32=1;
+const Z_ADD:i32=2;
+const Z_SUB:i32=3;
+const Z_MUL:i32=4;
+const Z_DIV:i32=5;
+const Z_MOD:i32=6;
+const Z_NEG:i32=7;
+const Z_EQ:i32=8;
+const Z_LT:i32=9;
+const Z_GT:i32=10;
+const Z_AND:i32=11;
+const Z_OR:i32=12;
+const Z_NOT:i32=13;
+const Z_LET:i32=14;
+const Z_END:i32=15;
+const Z_IFZ:i32=16;
+const Z_LOOP:i32=17;
+const Z_CALL:i32=18;
+const Z_RET:i32=19;
+const Z_SLICE:i32=20;
+const Z_LDX:i32=21;
+const Z_STX:i32=22;
+const Z_PTR:i32=23;
+const Z_LDPTR:i32=24;
+const Z_STPTR:i32=25;
+const Z_SOME:i32=26;
+const Z_NONE:i32=27;
+const Z_UNWRAP:i32=28;
+const Z_ERR:i32=29;
+const Z_MATCH:i32=30;
+const Z_IMPORT:i32=31;
+const Z_CALLM:i32=32;
+const Z_ANDO:i32=33;
+const Z_ORO:i32=34;
+const Z_SEL:i32=35;
+
+const ZF_OK:i32=0;
+const ZF_DIV0:i32=1;
+const ZF_UNWRAP:i32=2;
+const ZF_BOUNDS:i32=3;
+const ZF_DEPTH:i32=4;
+const ZF_NOMOD:i32=5;
+const ZF_MATCH:i32=6;
+const ZF_ERR:i32=7;
+const ZF_SCOPE:i32=8;
+
+const ZT_PLAIN:i32=0;
+const ZT_SOME:i32=1;
+const ZT_NONE:i32=2;
+const ZT_ERR:i32=3;
+const ZT_SLICE:i32=4;
+const ZT_PTR:i32=5;
+
+const Z_NREG:i32=8;
+const Z_HEAPW:i32=256;
+const Z_NSLICE:i32=16;
+const Z_MAXF:i32=4;
+const Z_FSTRIDE:i32=72;
+const Z_MAXMOD:i32=2;
+const Z_MAXSCOPE:i32=4;
+const Z_LOOPCAP:i32=512;
+
+struct ZMach {
+    heap: []u8,
+    sh_base: []u8,
+    sh_len: []u8,
+    nslice: i32,
+    scopes: []u8,
+    nscope: i32,
+    mods: i32,
+    fault: i32,
+    ferr: i32,
+    ret: i32,
+    ev: []u8,
+    evn: i32,
+    evcap: i32
+}
+
+fn z0_new_mach()ZMach {
+    return ZMach{.heap=nio_alloc(Z_HEAPW*4),.sh_base=nio_alloc(Z_NSLICE*4),
+        .sh_len=nio_alloc(Z_NSLICE*4),.nslice=0,
+        .scopes=nio_alloc(Z_MAXSCOPE*(Z_NREG*4+Z_NREG)),.nscope=0,
+        .mods=0,.fault=ZF_OK,.ferr=0,.ret=0,
+        .ev=nio_alloc(4),.evn=0,.evcap=0};
+}
+fn z0_free_mach(m:*ZMach)void {
+    nio_free(m.*.heap);nio_free(m.*.sh_base);nio_free(m.*.sh_len);
+    nio_free(m.*.scopes);nio_free(m.*.ev);
+}
+fn z0_reset(m:*ZMach)void {
+    m.*.nslice=0;m.*.nscope=0;m.*.mods=0;
+    m.*.fault=ZF_OK;m.*.ferr=0;m.*.ret=0;m.*.evn=0;
+}
+// C12 path-trace event recording. Event = 3 words: [kind, w, extra].
+// kind 1 = LOOPBODY (loop body iteration ran at code word w), kind 2 = BRANCH
+// (IFZ at code word w took branch extra: 1=then, 0=else). Recording is a
+// no-op unless the caller arms it (evcap>0); arming never changes execution.
+fn z0_ev(m:*ZMach,kind:i32,w:i32,extra:i32)void {
+    if(m.*.evcap<=0){return;}
+    if(m.*.evn+3>m.*.evcap){return;}
+    let o:i32=m.*.evn;
+    zu_set(m.*.ev,o*4,kind);zu_set(m.*.ev,(o+1)*4,w);zu_set(m.*.ev,(o+2)*4,extra);
+    m.*.evn=o+3;
+}
+fn z0_arm_ev(m:*ZMach,buf:[]u8,cap:i32)void {
+    nio_free(m.*.ev);
+    m.*.ev=buf;m.*.evn=0;m.*.evcap=cap;
+}
+fn z0_disarm_ev(m:*ZMach)void {
+    m.*.ev=nio_alloc(4);m.*.evn=0;m.*.evcap=0;
+}
+// C12 oracle: evaluate path predicate q over the recorded event trace plus
+// final state. q: 0 loop-body-runs, 1 then-branch-taken, 2 path-faults,
+// 3 r7!=0 at end, 4 loop-body-runs>=3, 5 both-branches-taken.
+fn z0_check_pred(q:i32,ev:[]u8,evn:i32,regs:[]u8,fault:i32)i32 {
+    let n:i32=evn/3;
+    if(q==0){
+        let i:i32=0;
+        while(i<n){if(zu_get(ev,i*3*4)==1){return 1;}i=i+1;}
+        return 0;
+    }
+    if(q==1){
+        let i:i32=0;
+        while(i<n){
+            if(zu_get(ev,i*3*4)==2 && zu_get(ev,(i*3+2)*4)==1){return 1;}
+            i=i+1;
+        }
+        return 0;
+    }
+    if(q==2){if(fault!=ZF_OK){return 1;}return 0;}
+    if(q==3){if(zu_get(regs,7*4)!=0){return 1;}return 0;}
+    if(q==4){
+        let i:i32=0;
+        while(i<n){
+            if(zu_get(ev,i*3*4)==1){
+                let w:i32=zu_get(ev,(i*3+1)*4);
+                let c:i32=0;let j:i32=0;
+                while(j<n){
+                    if(zu_get(ev,j*3*4)==1 && zu_get(ev,(j*3+1)*4)==w){c=c+1;}
+                    j=j+1;
+                }
+                if(c>=3){return 1;}
+            }
+            i=i+1;
+        }
+        return 0;
+    }
+    if(q==5){
+        let i:i32=0;
+        while(i<n){
+            if(zu_get(ev,i*3*4)==2){
+                let w:i32=zu_get(ev,(i*3+1)*4);
+                let t:i32=0;let e:i32=0;let j:i32=0;
+                while(j<n){
+                    if(zu_get(ev,j*3*4)==2 && zu_get(ev,(j*3+1)*4)==w){
+                        if(zu_get(ev,(j*3+2)*4)==1){t=1;}else{e=1;}
+                    }
+                    j=j+1;
+                }
+                if(t==1 && e==1){return 1;}
+            }
+            i=i+1;
+        }
+        return 0;
+    }
+    return 0;
+}
+fn z0_regs_new()[]u8 { return nio_alloc(Z_NREG*4); }
+fn z0_tags_new()[]u8 { return nio_alloc(Z_NREG); }
+
+fn z0_r(regs:[]u8,r:i32)i32 { return zu_get(regs,r*4); }
+fn z0_tg(tags:[]u8,r:i32)i32 { return tags[r] as i32; }
+fn z0_wr(regs:[]u8,tags:[]u8,r:i32,v:i32,t:i32)void {
+    zu_set(regs,r*4,v);tags[r]=t as u8;
+}
+fn z0_regok(m:*ZMach,r:i32)i32 {
+    if(r<0 || r>=Z_NREG){m.*.fault=ZF_BOUNDS;return 0;}
+    return 1;
+}
+
+// Execute n instructions at word offset at. regs/tags = current frame.
+fn z0_exec(code:[]u8,at:i32,n:i32,regs:[]u8,tags:[]u8,
+           m:*ZMach,funcs:[]u8,modtabs:[]u8,depth:i32)void {
+    let mp:*ZMach=m;
+    let pc:i32=0;
+    while(pc<n){
+        if(mp.*.fault!=ZF_OK){return;}
+        if(mp.*.ret==1){return;}
+        let w:i32=at+pc*4;
+        let op:i32=zu_get(code,w*4);
+        let x:i32=zu_get(code,(w+1)*4);
+        let y:i32=zu_get(code,(w+2)*4);
+        let z:i32=zu_get(code,(w+3)*4);
+        if(op==Z_LIT){
+            if(z0_regok(mp,x)==0){return;}
+            z0_wr(regs,tags,x,y,ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_ADD || op==Z_SUB || op==Z_MUL || op==Z_DIV || op==Z_MOD){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            let a:i32=z0_r(regs,y);let b:i32=z0_r(regs,z);
+            if((op==Z_DIV || op==Z_MOD) && b==0){mp.*.fault=ZF_DIV0;return;}
+            let v:i32=0;
+            if(op==Z_ADD){v=a+b;} else if(op==Z_SUB){v=a-b;}
+            else if(op==Z_MUL){v=a*b;} else if(op==Z_DIV){v=a/b;}
+            else {v=a%b;}
+            z0_wr(regs,tags,x,v,ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_NEG){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            z0_wr(regs,tags,x,0-z0_r(regs,y),ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_EQ || op==Z_LT || op==Z_GT){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            let a:i32=z0_r(regs,y);let b:i32=z0_r(regs,z);
+            let v:i32=0;
+            if(op==Z_EQ && a==b){v=1;}
+            if(op==Z_LT && a<b){v=1;}
+            if(op==Z_GT && a>b){v=1;}
+            z0_wr(regs,tags,x,v,ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_AND || op==Z_OR){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            let a:i32=z0_r(regs,y);let b:i32=z0_r(regs,z);
+            let v:i32=0;
+            if(op==Z_AND && a!=0 && b!=0){v=1;}
+            if(op==Z_OR && (a!=0 || b!=0)){v=1;}
+            z0_wr(regs,tags,x,v,ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_NOT){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            let v:i32=0;
+            if(z0_r(regs,y)==0){v=1;}
+            z0_wr(regs,tags,x,v,ZT_PLAIN);pc=pc+1;
+        } else if(op==Z_LET){
+            if(mp.*.nscope>=Z_MAXSCOPE){mp.*.fault=ZF_SCOPE;return;}
+            let f:i32=mp.*.nscope;mp.*.nscope=f+1;
+            let base:i32=f*(Z_NREG*4+Z_NREG);
+            let i:i32=0;
+            while(i<Z_NREG){zu_set(mp.*.scopes,(base+i*4),z0_r(regs,i));i=i+1;}
+            i=0;
+            while(i<Z_NREG){mp.*.scopes[base+Z_NREG*4+i]=tags[i];i=i+1;}
+            pc=pc+1;
+        } else if(op==Z_END){
+            if(mp.*.nscope<=0){mp.*.fault=ZF_SCOPE;return;}
+            let f:i32=mp.*.nscope-1;mp.*.nscope=f;
+            let base:i32=f*(Z_NREG*4+Z_NREG);
+            let i:i32=0;
+            while(i<Z_NREG){zu_set(regs,i*4,zu_get(mp.*.scopes,base+i*4));i=i+1;}
+            i=0;
+            while(i<Z_NREG){tags[i]=mp.*.scopes[base+Z_NREG*4+i];i=i+1;}
+            pc=pc+1;
+        } else if(op==Z_IFZ){
+            if(z0_regok(mp,x)==0){return;}
+            let then_n:i32=y;let else_n:i32=z;
+            if(z0_r(regs,x)==0){
+                z0_ev(mp,2,w,1);
+                z0_exec(code,w+4,then_n,regs,tags,mp,funcs,modtabs,depth);
+            } else {
+                z0_ev(mp,2,w,0);
+                z0_exec(code,w+4+then_n*4,else_n,regs,tags,mp,funcs,modtabs,depth);
+            }
+            pc=pc+1+then_n+else_n;
+        } else if(op==Z_LOOP){
+            if(z0_regok(mp,x)==0){return;}
+            let cnt:i32=z0_r(regs,x);let body_n:i32=y;
+            if(cnt>Z_LOOPCAP){mp.*.fault=ZF_DEPTH;return;}
+            if(cnt>0){
+                let k:i32=0;
+                while(k<cnt){
+                    if(mp.*.fault!=ZF_OK){return;}
+                    if(mp.*.ret==1){return;}
+                    z0_ev(mp,1,w,0);
+                    z0_exec(code,w+4,body_n,regs,tags,mp,funcs,modtabs,depth);
+                    k=k+1;
+                }
+            }
+            pc=pc+1+body_n;
+        } else if(op==Z_CALL){
+            if(z0_regok(mp,z)==0){return;}
+            if(depth+1>z0_r(regs,z)){mp.*.fault=ZF_DEPTH;return;}
+            if(x<0 || x>=Z_MAXF){mp.*.fault=ZF_BOUNDS;return;}
+            let fb:i32=x*Z_FSTRIDE;
+            let fn_n:i32=zu_get(funcs,fb*4);
+            let cr:[]u8=z0_regs_new();let ct:[]u8=z0_tags_new();
+            let i:i32=0;
+            while(i<y){if(i<Z_NREG){zu_set(cr,i*4,z0_r(regs,i));ct[i]=tags[i];}i=i+1;}
+            mp.*.ret=0;
+            z0_exec(funcs,fb+1,fn_n,cr,ct,mp,funcs,modtabs,depth+1);
+            mp.*.ret=0;
+            if(mp.*.fault==ZF_OK){
+                if(z0_regok(mp,0)==0){nio_free(cr);nio_free(ct);return;}
+                z0_wr(regs,tags,0,z0_r(cr,0),z0_tg(ct,0));
+            }
+            nio_free(cr);nio_free(ct);
+            pc=pc+1;
+        } else if(op==Z_RET){
+            if(z0_regok(mp,x)==0){return;}
+            let v:i32=z0_r(regs,x);let t:i32=z0_tg(tags,x);
+            z0_wr(regs,tags,0,v,t);
+            mp.*.ret=1;
+            return;
+        } else if(op==Z_SLICE){
+            if(z0_regok(mp,x)==0){return;}
+            if(mp.*.nslice>=Z_NSLICE){mp.*.fault=ZF_BOUNDS;return;}
+            let h:i32=mp.*.nslice;mp.*.nslice=h+1;
+            zu_set(mp.*.sh_base,h*4,y);zu_set(mp.*.sh_len,h*4,z);
+            z0_wr(regs,tags,x,h,ZT_SLICE);
+            pc=pc+1;
+        } else if(op==Z_LDX){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            if(z0_tg(tags,y)!=ZT_SLICE){mp.*.fault=ZF_BOUNDS;return;}
+            let hid:i32=z0_r(regs,y);let idx:i32=z0_r(regs,z);
+            if(hid<0 || hid>=mp.*.nslice){mp.*.fault=ZF_BOUNDS;return;}
+            let base:i32=zu_get(mp.*.sh_base,hid*4);
+            let len:i32=zu_get(mp.*.sh_len,hid*4);
+            if(idx<0 || idx>=len || base+idx<0 || base+idx>=Z_HEAPW){
+                mp.*.fault=ZF_BOUNDS;return;
+            }
+            z0_wr(regs,tags,x,zu_get(mp.*.heap,(base+idx)*4),ZT_PLAIN);
+            pc=pc+1;
+        } else if(op==Z_STX){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            if(z0_tg(tags,x)!=ZT_SLICE){mp.*.fault=ZF_BOUNDS;return;}
+            let hid:i32=z0_r(regs,x);let idx:i32=z0_r(regs,y);
+            if(hid<0 || hid>=mp.*.nslice){mp.*.fault=ZF_BOUNDS;return;}
+            let base:i32=zu_get(mp.*.sh_base,hid*4);
+            let len:i32=zu_get(mp.*.sh_len,hid*4);
+            if(idx<0 || idx>=len || base+idx<0 || base+idx>=Z_HEAPW){
+                mp.*.fault=ZF_BOUNDS;return;
+            }
+            zu_set(mp.*.heap,(base+idx)*4,z0_r(regs,z));
+            pc=pc+1;
+        } else if(op==Z_PTR){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            z0_wr(regs,tags,x,y,ZT_PTR);
+            pc=pc+1;
+        } else if(op==Z_LDPTR){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_tg(tags,y)!=ZT_PTR){mp.*.fault=ZF_BOUNDS;return;}
+            let t:i32=z0_r(regs,y);
+            if(z0_regok(mp,t)==0){return;}
+            z0_wr(regs,tags,x,z0_r(regs,t),z0_tg(tags,t));
+            pc=pc+1;
+        } else if(op==Z_STPTR){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_tg(tags,x)!=ZT_PTR){mp.*.fault=ZF_BOUNDS;return;}
+            let t:i32=z0_r(regs,x);
+            if(z0_regok(mp,t)==0){return;}
+            z0_wr(regs,tags,t,z0_r(regs,y),z0_tg(tags,y));
+            pc=pc+1;
+        } else if(op==Z_SOME){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            z0_wr(regs,tags,x,z0_r(regs,y),ZT_SOME);
+            pc=pc+1;
+        } else if(op==Z_NONE){
+            if(z0_regok(mp,x)==0){return;}
+            z0_wr(regs,tags,x,0,ZT_NONE);
+            pc=pc+1;
+        } else if(op==Z_UNWRAP){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_tg(tags,y)==ZT_NONE){mp.*.fault=ZF_UNWRAP;return;}
+            z0_wr(regs,tags,x,z0_r(regs,y),ZT_PLAIN);
+            pc=pc+1;
+        } else if(op==Z_ERR){
+            mp.*.fault=ZF_ERR;mp.*.ferr=x;
+            return;
+        } else if(op==Z_MATCH){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_tg(tags,x)==ZT_NONE && y==0){mp.*.fault=ZF_MATCH;return;}
+            if(z0_tg(tags,x)==ZT_NONE){z0_wr(regs,tags,0,0,ZT_PLAIN);}
+            else {z0_wr(regs,tags,0,z0_r(regs,x),ZT_PLAIN);}
+            pc=pc+1;
+        } else if(op==Z_IMPORT){
+            mp.*.mods=mp.*.mods|(1<<x);
+            pc=pc+1;
+        } else if(op==Z_CALLM){
+            // x=mod, y=func, z=packed(argc, meas_reg)
+            if(z0_regok(mp,0)==0){return;}
+            if(x<0 || x>=Z_MAXMOD){mp.*.fault=ZF_NOMOD;return;}
+            if(((mp.*.mods>>x)&1)==0){mp.*.fault=ZF_NOMOD;return;}
+            let argc:i32=z&255;let mz:i32=(z>>8)&255;
+            if(z0_regok(mp,mz)==0){return;}
+            if(depth+1>z0_r(regs,mz)){mp.*.fault=ZF_DEPTH;return;}
+            if(y<0 || y>=Z_MAXF){mp.*.fault=ZF_BOUNDS;return;}
+            let fb:i32=(x*Z_MAXF+y)*Z_FSTRIDE;
+            let fn_n:i32=zu_get(modtabs,fb*4);
+            let cr:[]u8=z0_regs_new();let ct:[]u8=z0_tags_new();
+            let i:i32=0;
+            while(i<argc){if(i<Z_NREG){zu_set(cr,i*4,z0_r(regs,i));ct[i]=tags[i];}i=i+1;}
+            mp.*.ret=0;
+            z0_exec(modtabs,fb+1,fn_n,cr,ct,mp,funcs,modtabs,depth+1);
+            mp.*.ret=0;
+            if(mp.*.fault==ZF_OK){z0_wr(regs,tags,0,z0_r(cr,0),z0_tg(ct,0));}
+            nio_free(cr);nio_free(ct);
+            pc=pc+1;
+        } else if(op==Z_ANDO){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            if(z0_r(regs,y)==0){z0_wr(regs,tags,x,0,ZT_PLAIN);}
+            else {
+                if(z0_tg(tags,z)==ZT_NONE){mp.*.fault=ZF_UNWRAP;return;}
+                let v:i32=0;
+                if(z0_r(regs,z)!=0){v=1;}
+                z0_wr(regs,tags,x,v,ZT_PLAIN);
+            }
+            pc=pc+1;
+        } else if(op==Z_ORO){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            if(z0_regok(mp,z)==0){return;}
+            if(z0_r(regs,y)!=0){z0_wr(regs,tags,x,1,ZT_PLAIN);}
+            else {
+                if(z0_tg(tags,z)==ZT_NONE){mp.*.fault=ZF_UNWRAP;return;}
+                let v:i32=0;
+                if(z0_r(regs,z)!=0){v=1;}
+                z0_wr(regs,tags,x,v,ZT_PLAIN);
+            }
+            pc=pc+1;
+        } else if(op==Z_SEL){
+            if(z0_regok(mp,x)==0){return;}
+            if(z0_regok(mp,y)==0){return;}
+            let rt:i32=(z>>8)&255;let rf:i32=z&255;
+            if(z0_regok(mp,rt)==0){return;}
+            if(z0_regok(mp,rf)==0){return;}
+            if(z0_r(regs,y)!=0){z0_wr(regs,tags,x,z0_r(regs,rt),z0_tg(tags,rt));}
+            else {z0_wr(regs,tags,x,z0_r(regs,rf),z0_tg(tags,rf));}
+            pc=pc+1;
+        } else {
+            mp.*.fault=ZF_BOUNDS;
+            return;
+        }
+    }
+}
+
+// Load heap init words from the program header into the machine heap.
+fn z0_load_heap(code:[]u8,m:*ZMach)void {
+    let nh:i32=zu_get(code,4);
+    let j:i32=0;
+    while(j<nh){
+        if(j<Z_HEAPW){zu_set(m.*.heap,j*4,zu_get(code,(98+j)*4));}
+        j=j+1;
+    }
+}
+
+// Canonical output: 18 words = 8*(tag,reg) + fault + ferr.
+fn z0_output(regs:[]u8,tags:[]u8,m:*ZMach,out:[]u8)void {
+    let i:i32=0;
+    while(i<Z_NREG){
+        zu_set(out,(i*2)*4,tags[i] as i32);
+        zu_set(out,(i*2+1)*4,zu_get(regs,i*4));
+        i=i+1;
+    }
+    zu_set(out,16*4,m.*.fault);
+    zu_set(out,17*4,m.*.ferr);
+}
+const Z_OUTW:i32=18;

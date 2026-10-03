@@ -1,0 +1,449 @@
+// op_patch.zag -- Invention Operator-Authorship experiment (unfrozen).
+//
+// Decomposes H1's monolithic mutate_try into 8 generic transformation
+// primitives. The learner must ASSEMBLE the extend-sequence via Q-learning
+// over consequence history. The sequence is not in source; the learner
+// creates the operator.
+//
+// Primitives:
+//   OP_STAGE (0): stage longest chain MAP on subject
+//   OP_EXEC (1): execute staged chain to endpoint
+//   OP_PROBE (2): find continuing facts past endpoint
+//   OP_APPEND (3): append continuing fact as new cell
+//   OP_VERIFY (4): verify extended chain against goal
+//   OP_PROMOTE (5): promote as new MAP with DEP to parent
+//   OP_SHRINK (6): remove last cell (distractor)
+//   OP_SWAPREL (7): change a relation (distractor)
+//
+// State: (done_mask[6 bits], endpoint_live[1 bit]) = 128 states.
+// Q-table: 128 x 8, learner-owned, updated by Monte Carlo.
+
+// ---- RNG (LCG) ----
+fn op_rng_next(st:[]u8)i32 {
+  let x:i32=get32(st,0);
+  // LCG: x = (1103515245 * x + 12345) mod 2^31. Use high bits.
+  let nx:i32=(1103515245*x+12345)&2147483647;
+  set32(st,0,nx);
+  return (nx>>16)&32767;
+}
+
+// ---- Operator scratch ----
+// Layout (byte offsets):
+//   0: parent_map (i32)
+//   4: plen (i32)
+//   8: staged values (7*4=28 bytes, max plen 7)
+//   36: staged facts (6*4=24 bytes)
+//   60: endpoint (i32)
+//   64: cont_fact (i32, fact node id)
+//   68: extended_root (i32)
+//   72: verified_ans (i32)
+//   76: done_mask (i32, 6 bits: staged,exec,probed,appended,verified,promoted)
+//   80: endpoint_live (i32)
+fn op_new()[]u8 {
+  let op:[]u8=z_alloc(84);
+  set32(op,0,-1); set32(op,4,0); set32(op,60,-999999);
+  set32(op,64,-1); set32(op,68,-1); set32(op,72,-2);
+  set32(op,76,0); set32(op,80,0);
+  return op;
+}
+fn op_reset(op:[]u8)void {
+  set32(op,0,-1); set32(op,4,0); set32(op,60,-999999);
+  set32(op,64,-1); set32(op,68,-1); set32(op,72,-2);
+  set32(op,76,0); set32(op,80,0);
+  return;
+}
+fn op_mask(op:[]u8)i32 { return get32(op,76); }
+fn op_set_mask(op:[]u8,b:i32)void {
+  set32(op,76,get32(op,76)|b); return;
+}
+fn op_state(op:[]u8)i32 {
+  // state = done_mask * 2 + endpoint_live (0..127)
+  return get32(op,76)*2+get32(op,80);
+}
+
+// ---- Primitives ----
+// Each returns 0 on success, -1 on precondition failure.
+// On success, sets the corresponding done_mask bit.
+
+// OP_STAGE (0): stage longest chain MAP on subject s.
+// Finds longest chain MAP, gathers paths from s, picks first with
+// matching plen. Stores values/facts in op scratch.
+fn op_stage(W:[]u8,op:[]u8,s:i32)i32 {
+  if((op_mask(op)&1)!=0){return -1;} // already staged
+  // Find longest chain MAP (like mu_best_plen, but also get the id)
+  let best:i32=-1; let bestm:i32=-1; let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){
+      let p:i32=rb_chain_plen(W,ng(W,m,20));
+      if(p>best){best=p; bestm=m;}
+    }
+    m=m+1;
+  }
+  if(bestm<0){return -1;}
+  let paths:[]u8=z_alloc(4608);
+  let np:i32=t2_gather(W,s,paths);
+  let i:i32=0; let found:i32=0;
+  while(i<np && found==0){
+    let base:i32=i*48;
+    if(get32(paths,base)==best){
+      let j:i32=0;
+      while(j<best){set32(op,8+j*4,get32(paths,base+4+j*4)); j=j+1;}
+      j=0;
+      while(j<best-1){set32(op,36+j*4,get32(paths,base+28+j*4)); j=j+1;}
+      found=1;
+    }
+    i=i+1;
+  }
+  if(found==0){return -1;}
+  set32(op,0,bestm); set32(op,4,best);
+  op_set_mask(op,1);
+  return 0;
+}
+// OP_EXEC (1): execute staged chain to endpoint.
+fn op_exec(W:[]u8,op:[]u8,s:i32)i32 {
+  if((op_mask(op)&1)==0){return -1;} // not staged
+  if((op_mask(op)&2)!=0){return -1;} // already executed
+  let p:i32=get32(op,4);
+  let v:[]u8=z_alloc(28); let f:[]u8=z_alloc(24);
+  let j:i32=0;
+  while(j<p){set32(v,j*4,get32(op,8+j*4)); j=j+1;}
+  j=0;
+  while(j<p-1){set32(f,j*4,get32(op,36+j*4)); j=j+1;}
+  let root:i32=t2_asm_chain(W,v,p,f);
+  let vend:i32=t2_exec(W,root,s);
+  if(vend==-999999){return -1;}
+  set32(op,60,vend);
+  op_set_mask(op,2);
+  return 0;
+}
+// OP_PROBE (2): find continuing facts past endpoint.
+// Sets cont_fact to first continuing fact, endpoint_live=1 if found.
+fn op_probe(W:[]u8,op:[]u8)i32 {
+  if((op_mask(op)&2)==0){return -1;} // not executed
+  if((op_mask(op)&4)!=0){return -1;} // already probed
+  let vend:i32=get32(op,60);
+  let p:i32=get32(op,4);
+  let n:i32=2; let found:i32=0;
+  while(n<1024 && found==0){
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==vend && ng(W,n,28)!=-999){
+      let w:i32=ng(W,n,28);
+      // avoid cycles: w not already in staged values
+      let k:i32=0; let cyc:i32=0;
+      while(k<p){if(get32(op,8+k*4)==w){cyc=1;} k=k+1;}
+      if(cyc==0){
+        set32(op,64,n); found=1;
+      }
+    }
+    n=n+1;
+  }
+  set32(op,80,found); // endpoint_live
+  op_set_mask(op,4);
+  return 0;
+}
+// OP_APPEND (3): append cont_fact as new cell.
+fn op_append(W:[]u8,op:[]u8)i32 {
+  if((op_mask(op)&4)==0){return -1;} // not probed
+  if((op_mask(op)&8)!=0){return -1;} // already appended
+  if(get32(op,80)==0){return -1;} // endpoint not live
+  let cf:i32=get32(op,64);
+  if(cf<0){return -1;}
+  let p:i32=get32(op,4);
+  let w:i32=ng(W,cf,28);
+  set32(op,8+p*4,w); // append value
+  set32(op,36+(p-1)*4,cf); // append fact
+  set32(op,4,p+1); // plen+1
+  op_set_mask(op,8);
+  return 0;
+}
+// OP_VERIFY (4): verify extended chain against goal.
+fn op_verify(W:[]u8,op:[]u8,s:i32,expected:i32,masked:i32)i32 {
+  if((op_mask(op)&8)==0){return -1;} // not appended
+  if((op_mask(op)&16)!=0){return -1;} // already verified
+  let p:i32=get32(op,4);
+  let v:[]u8=z_alloc(28); let f:[]u8=z_alloc(24);
+  let j:i32=0;
+  while(j<p){set32(v,j*4,get32(op,8+j*4)); j=j+1;}
+  j=0;
+  while(j<p-1){set32(f,j*4,get32(op,36+j*4)); j=j+1;}
+  let root:i32=t2_asm_chain(W,v,p,f);
+  set32(op,68,root);
+  let st:[]u8=z_alloc(8); set32(st,0,0); set32(st,4,0);
+  let ans:i32=t2_try_verify(W,root,s,expected,masked,st);
+  set32(op,72,ans);
+  op_set_mask(op,16);
+  if(ans==-2){return -1;} // verification failed
+  return 0;
+}
+// OP_PROMOTE (5): promote verified graph as new MAP with DEP to parent.
+fn op_promote(W:[]u8,op:[]u8,s:i32,r:i32)i32 {
+  if((op_mask(op)&16)==0){return -1;} // not verified
+  if((op_mask(op)&32)!=0){return -1;} // already promoted
+  let ans:i32=get32(op,72);
+  if(ans==-2){return -1;}
+  let root:i32=get32(op,68);
+  let p:i32=get32(op,4);
+  let f:[]u8=z_alloc(24);
+  let j:i32=0;
+  while(j<p-1){set32(f,j*4,get32(op,36+j*4)); j=j+1;}
+  let zm:i32=promote_graph(W,root,s,r,ans,f,p-1);
+  if(zm<0){return -1;}
+  let pm:i32=get32(op,0);
+  if(pm>=0){
+    let _l:i32=link_edge(W,zm,1,pm,0);
+  }
+  op_set_mask(op,32);
+  emit("OP-PROMOTE zm="); e64(zm); emit(" plen="); e64(p); emit("\n");
+  return 0;
+}
+// OP_SHRINK (6): remove last cell (distractor).
+fn op_shrink(W:[]u8,op:[]u8)i32 {
+  if((op_mask(op)&1)==0){return -1;} // not staged
+  let p:i32=get32(op,4);
+  if(p<=2){return -1;}
+  set32(op,4,p-1);
+  // Clear executed/probed/etc. since structure changed
+  set32(op,76,get32(op,76)&1); // keep only staged bit
+  set32(op,80,0);
+  return 0;
+}
+// OP_SWAPREL (7): change a relation (distractor). Swaps first fact's
+// relation to a different one, breaking the chain.
+fn op_swaprel(W:[]u8,op:[]u8)i32 {
+  if((op_mask(op)&1)==0){return -1;} // not staged
+  // Change the first staged fact to a bogus one (fact id 2, likely unrelated)
+  // This is a distractor: it breaks the chain structure.
+  set32(op,36,2);
+  set32(op,76,get32(op,76)&1); // keep only staged bit
+  set32(op,80,0);
+  return 0;
+}
+
+// ---- Q-learning ----
+// Q-table: 128 states x 8 actions, i32 values (fixed point, scale 1).
+// Stored as byte array: 128*8*4 = 4096 bytes.
+fn q_new()[]u8 {
+  let q:[]u8=z_alloc(4096);
+  return q; // zero-initialized
+}
+fn q_get(Q:[]u8,s:i32,a:i32)i32 {
+  return get32(Q,(s*8+a)*4);
+}
+fn q_set(Q:[]u8,s:i32,a:i32,v:i32)void {
+  set32(Q,(s*8+a)*4,v); return;
+}
+// Epsilon-greedy action selection. epsilon in 0..100.
+fn q_select(Q:[]u8,s:i32,epsilon:i32,rng:[]u8)i32 {
+  let r:i32=op_rng_next(rng);
+  if((r%100)<epsilon){
+    return (r/100)%8; // random action
+  }
+  // greedy: max Q
+  let best:i32=0; let bestv:i32=q_get(Q,s,0);
+  let a:i32=1;
+  while(a<8){
+    let v:i32=q_get(Q,s,a);
+    if(v>bestv){bestv=v; best=a;}
+    a=a+1;
+  }
+  return best;
+}
+// Monte Carlo update: for each visited (s,a), Q += alpha*(G - Q).
+// visited is array of (s*8+a) indices, nvisited count. alpha in 0..100.
+fn q_update_mc(Q:[]u8,visited:[]u8,nv:i32,G:i32,alpha:i32)void {
+  let i:i32=0;
+  while(i<nv){
+    let idx:i32=get32(visited,i*4);
+    let s:i32=idx/8; let a:i32=idx-(idx/8)*8;
+    let q:i32=q_get(Q,s,a);
+    let nq:i32=q+(alpha*(G-q))/100;
+    q_set(Q,s,a,nq);
+    i=i+1;
+  }
+  return;
+}
+
+// ---- Episode runner (TD Q-learning) ----
+// Runs one episode on problem (s,r,expected). Returns 1 if solved.
+// If train=1, updates Q via TD(0). Epsilon-greedy with given epsilon.
+fn op_episode(W:[]u8,s:i32,r:i32,expected:i32,Q:[]u8,epsilon:i32,rng:[]u8,train:i32)i32 {
+  let op:[]u8=op_new();
+  let solved:i32=0;
+  let step:i32=0;
+  while(step<12 && solved==0){
+    let st0:i32=op_state(op);
+    let a:i32=q_select(Q,st0,epsilon,rng);
+    let rc:i32=-1; let rew:i32=-1;
+    if(a==0){rc=op_stage(W,op,s); if(rc==0){rew=2;}}
+    else{if(a==1){rc=op_exec(W,op,s); if(rc==0){rew=2;}}
+    else{if(a==2){rc=op_probe(W,op); if(rc==0){if(get32(op,80)==1){rew=5;}else{rew=0;}}}
+    else{if(a==3){rc=op_append(W,op); if(rc==0){rew=5;}}
+    else{if(a==4){rc=op_verify(W,op,s,expected,0); if(rc==0){rew=10;}else{if((op_mask(op)&16)!=0){rew=-5; rc=0;}}}
+    else{if(a==5){rc=op_promote(W,op,s,r); if(rc==0){rew=100; solved=1;}}
+    else{if(a==6){rc=op_shrink(W,op); if(rc==0){rew=-2;}}
+    else{if(a==7){rc=op_swaprel(W,op); if(rc==0){rew=-2;}}
+    else{rc=-1;}}}}}}}}
+    if(rc!=0){
+      // precondition failure: end episode
+      rew=-10;
+      if(train==1){
+        // TD update with terminal value 0
+        let q0:i32=q_get(Q,st0,a);
+        let nq:i32=q0+(20*(rew-q0))/100;
+        q_set(Q,st0,a,nq);
+      }
+      step=12; // end episode
+    } else {
+      if(train==1){
+        // TD(0) update: Q(s,a) += alpha*(r + gamma*max Q(s',a') - Q(s,a))
+        let st1:i32=op_state(op);
+        let maxq:i32=q_get(Q,st1,0);
+        let aa:i32=1;
+        while(aa<8){
+          let v:i32=q_get(Q,st1,aa);
+          if(v>maxq){maxq=v;}
+          aa=aa+1;
+        }
+        let q0:i32=q_get(Q,st0,a);
+        // gamma=90 (0.9), alpha=20 (0.2)
+        let target:i32=rew+(90*maxq)/100;
+        if(solved==1){target=rew;} // terminal: no future value
+        let nq:i32=q0+(20*(target-q0))/100;
+        q_set(Q,st0,a,nq);
+      }
+    }
+    step=step+1;
+  }
+  return solved;
+}
+
+// ---- Training ----
+// Train Q on plen-6 problem (subject s0). Between episodes, delete any
+// invented plen-6 MAP to isolate operator learning. Q persists.
+fn op_delete_plen6(W:[]u8,s:i32,r:i32)void {
+  let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20 && ng(W,m,8)==s && ng(W,m,4)==r){
+      let p:i32=rb_chain_plen(W,ng(W,m,20));
+      if(p==6){
+        ns(W,m,36,0); // mark dead
+        emit("OP-DEL zm="); e64(m); emit("\n");
+      }
+    }
+    m=m+1;
+  }
+  return;
+}
+fn op_train(W:[]u8,s:i32,r:i32,expected:i32,Q:[]u8,episodes:i32,rng:[]u8)void {
+  let ep:i32=0;
+  while(ep<episodes){
+    op_delete_plen6(W,s,r);
+    let solved:i32=op_episode(W,s,r,expected,Q,30,rng,1);
+    if((ep%20)==0){
+      emit("OP-TRAIN ep="); e64(ep); emit(" solved="); e64(solved); emit("\n");
+    }
+    ep=ep+1;
+  }
+  return;
+}
+// Greedy test (epsilon=0, no training).
+fn op_test(W:[]u8,s:i32,r:i32,expected:i32,Q:[]u8,rng:[]u8)i32 {
+  return op_episode(W,s,r,expected,Q,0,rng,0);
+}
+
+// ---- Base ev_query (no mutate) for training plen-3/4/5 ----
+fn ev_query_base(W:[]u8,s:i32,r:i32,expected:i32,flags:i32)i32 {
+  hs(W,0,hg(W,0)+1); decay(W); ctx_push(W,s);
+  let n:i32=activate(W,s,r);
+  if(n>=0){
+    let _l:i32=link_edge(W,n,6,n,0); ref_prot(W,n);
+    log_ev(W,2,s,r,ng(W,n,28),1,0,0); return ng(W,n,28);
+  }
+  let rbs:[]u8=z_alloc(8); set32(rbs,0,0); set32(rbs,4,0);
+  let masked:i32=flags&1;
+  let ra:i32=rebind_try(W,s,r,expected,masked,rbs);
+  if(ra!=-2){
+    log_ev(W,2,s,r,ra,1,0,0); return ra;
+  }
+  let ans:i32=mp_run(W,s,r,expected,flags);
+  if(ans!=-2){log_ev(W,2,s,r,ans,1,0,0); return ans;}
+  let bv:i32=bootstrap_miss(W,s,r);
+  if(bv!=-2){log_ev(W,2,s,r,bv,1,0,0); return bv;}
+  log_ev(W,2,s,r,-2,0,0,0);
+  miss_inquire(W,s,r);
+  return -2;
+}
+// Training helpers (reuse mu_shared logic but with ev_query_base)
+fn op_train3(W:[]u8)void {
+  ev_teach(W,101,1,102); ev_teach(W,102,1,103);
+  let a:i32=ev_query_base(W,101,71,103,0);
+  emit("TR3 ans="); e64(a); emit("\n");
+  return;
+}
+fn op_train4(W:[]u8)void {
+  ev_teach(W,111,1,112); ev_teach(W,112,1,113); ev_teach(W,113,1,114);
+  let a:i32=ev_query_base(W,111,71,114,0);
+  emit("TR4 ans="); e64(a); emit("\n");
+  return;
+}
+fn op_train5(W:[]u8)void {
+  ev_teach(W,121,1,122); ev_teach(W,122,1,123);
+  ev_teach(W,123,1,124); ev_teach(W,124,1,125);
+  let a:i32=ev_query_base(W,121,71,125,0);
+  emit("TR5 ans="); e64(a); emit("\n");
+  return;
+}
+// Teach plen-6 facts (for the invention problem)
+fn op_teach6(W:[]u8,s0:i32)void {
+  ev_teach(W,s0,1,s0+1); ev_teach(W,s0+1,1,s0+2); ev_teach(W,s0+2,1,s0+3);
+  ev_teach(W,s0+3,1,s0+4); ev_teach(W,s0+4,1,s0+5);
+  return;
+}
+// Teach plen-7 facts
+fn op_teach7(W:[]u8,s0:i32)void {
+  ev_teach(W,s0,1,s0+1); ev_teach(W,s0+1,1,s0+2); ev_teach(W,s0+2,1,s0+3);
+  ev_teach(W,s0+3,1,s0+4); ev_teach(W,s0+4,1,s0+5); ev_teach(W,s0+5,1,s0+6);
+  return;
+}
+// Count MAPs and report best plen
+fn op_count_maps(W:[]u8)i32 {
+  let n:i32=0; let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){n=n+1;}
+    m=m+1;
+  }
+  return n;
+}
+fn op_best_plen(W:[]u8)i32 {
+  let best:i32=-1; let m:i32=2;
+  while(m<1024){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){
+      let p:i32=rb_chain_plen(W,ng(W,m,20));
+      if(p>best){best=p;}
+    }
+    m=m+1;
+  }
+  return best;
+}
+// Dump the greedy policy's preferred action per state (for analysis)
+fn op_dump_policy(Q:[]u8)void {
+  emit("OP-POLICY (state->best action):\n");
+  let s:i32=0;
+  while(s<128){
+    let best:i32=0; let bestv:i32=q_get(Q,s,0);
+    let a:i32=1;
+    while(a<8){
+      let v:i32=q_get(Q,s,a);
+      if(v>bestv){bestv=v; best=a;}
+      a=a+1;
+    }
+    if(bestv!=0){
+      emit(" s="); e64(s); emit(" a="); e64(best); emit(" q="); e64(bestv); emit("\n");
+    }
+    s=s+1;
+  }
+  return;
+}
+// ev_query wrapper for mu_core test battery (delegates to base, no mutate).
+fn ev_query(W:[]u8,s:i32,r:i32,expected:i32,flags:i32)i32 {
+  return ev_query_base(W,s,r,expected,flags);
+}

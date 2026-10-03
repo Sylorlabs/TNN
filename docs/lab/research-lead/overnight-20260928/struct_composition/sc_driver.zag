@@ -1,0 +1,497 @@
+// sc_driver.zag -- STRUCT-COMPOSITION prototype driver.
+//
+// Prototype mechanism: sever+recompute, a structure-transforming
+// composition operator for causal intervention. Given a causal graph
+// (edge facts, rel 71), structural equations (term facts, rel 72,
+// packed parent*10+coeff), an observation mapping (rel 70), and an
+// intervention spec on the query relation (rel 69, packed
+// do_var*10+do_val), the operator:
+//   1. copies the edge list,
+//   2. severs incoming edges of the intervened variable (graph surgery),
+//   3. fixes the intervened variable to the do-value,
+//   4. recomputes every other variable in topological order from the
+//      surviving equations, holding exogenous variables at observed
+//      values (context held fixed).
+// The operator reads all structure from learner state; nothing about
+// any particular variable is hardcoded. Surgery acts on the operator's
+// working copy; workspace facts are not mutated.
+//
+// Worlds:
+//   World 1 (frozen xdomain world): A=801, C=802, E=803; C=1*A,
+//     E=1*A+2*C; units 501 (A=1), 502 (A=2); queries 93=do(C=1),
+//     94=do(C=2), target E=803.
+//   World 2 (generality): P=811, Q=812, R=813; Q=2*P, R=1*P+1*Q;
+//     units 511 (P=1), 512 (P=2); queries 95=do(Q=1), 96=do(P=0),
+//     target R=813.
+//   World 3 (degenerate, no surgery): IN=901, OUT=903, OUT=1*IN;
+//     unit 521 (IN=7); query 97, target 903, no intervention.
+// Arms: TREAT, ABL-NOEDGE, ABL-NOEQ, ABL-NOOBS, FRESH, GEN, IRRED,
+// DEGEN, AUDIT. Pure Zag. Safebin PATH.
+
+// ---------- small utilities ----------
+fn sc_tstat(W:[]u8)void {
+  let t:i32=hg(W,16);
+  emit(" tried="); e64(t/1024);
+  emit(" rejected="); e64(t-(t/1024)*1024); emit("\n");
+  return;
+}
+// First o of fact (s,r,*), or -999999 when missing.
+fn sc_fact_o(W:[]u8,s:i32,r:i32)i32 {
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,20)==s && ng(W,x,24)==r){
+      return ng(W,x,28);
+    }
+    x=x+1;
+  }
+  return -999999;
+}
+fn sc_inbuf(buf:[]u8,n:i32,v:i32)i32 {
+  let i:i32=0;
+  while(i<n){
+    if(get32(buf,i*4)==v){return 1;}
+    i=i+1;
+  }
+  return 0;
+}
+// Distinct variable ids in [800,920] from rel-71 (as s or o) and
+// rel-72 (as s) facts. vbuf holds 4-byte slots, capacity ncap.
+fn sc_collect_vars(W:[]u8,vbuf:[]u8,ncap:i32)i32 {
+  let n:i32=0;
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1){
+      let s:i32=ng(W,x,20);
+      let r:i32=ng(W,x,24);
+      let o:i32=ng(W,x,28);
+      if(r==71){
+        if(s>=800 && s<=920 && n<ncap && sc_inbuf(vbuf,n,s)==0){
+          set32(vbuf,n*4,s); n=n+1;
+        }
+        if(o>=800 && o<=920 && n<ncap && sc_inbuf(vbuf,n,o)==0){
+          set32(vbuf,n*4,o); n=n+1;
+        }
+      }
+      if(r==72){
+        if(s>=800 && s<=920 && n<ncap && sc_inbuf(vbuf,n,s)==0){
+          set32(vbuf,n*4,s); n=n+1;
+        }
+      }
+    }
+    x=x+1;
+  }
+  return n;
+}
+// Edge pairs (p,c) from rel-71 facts among collected vars, deduped.
+// ebuf holds 8-byte pairs, capacity ecap pairs.
+fn sc_collect_edges(W:[]u8,vbuf:[]u8,nv:i32,ebuf:[]u8,ecap:i32)i32 {
+  let n:i32=0;
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,24)==71){
+      let s:i32=ng(W,x,20);
+      let o:i32=ng(W,x,28);
+      if(sc_inbuf(vbuf,nv,s)==1 && sc_inbuf(vbuf,nv,o)==1 && n<ecap){
+        let dup:i32=0;
+        let i:i32=0;
+        while(i<n){
+          if(get32(ebuf,i*8)==s && get32(ebuf,i*8+4)==o){dup=1;}
+          i=i+1;
+        }
+        if(dup==0){
+          set32(ebuf,n*8,s); set32(ebuf,n*8+4,o); n=n+1;
+        }
+      }
+    }
+    x=x+1;
+  }
+  return n;
+}
+// Delete one exact fact (s,r,o): mark node invalid.
+fn sc_delfact(W:[]u8,s:i32,r:i32,o:i32)void {
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,20)==s && ng(W,x,24)==r && ng(W,x,28)==o){
+      ns(W,x,0,-1); ns(W,x,36,0);
+    }
+    x=x+1;
+  }
+  return;
+}
+// Delete all facts with relation r.
+fn sc_delfacts_r(W:[]u8,r:i32)void {
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,24)==r){
+      ns(W,x,0,-1); ns(W,x,36,0);
+    }
+    x=x+1;
+  }
+  return;
+}
+// Delete all facts with s in [slo,shi] and relation r.
+fn sc_delfacts_sr(W:[]u8,slo:i32,shi:i32,r:i32)void {
+  let x:i32=2;
+  while(x<1024){
+    if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,20)>=slo && ng(W,x,20)<=shi && ng(W,x,24)==r){
+      ns(W,x,0,-1); ns(W,x,36,0);
+    }
+    x=x+1;
+  }
+  return;
+}
+
+// ---------- the sever+recompute operator ----------
+fn sc_do_inner(W:[]u8,unit:i32,qrel:i32,audit:i32)i32 {
+  let target:i32=sc_fact_o(W,qrel,68);
+  if(target==-999999){return -2;}
+  let dspec:i32=sc_fact_o(W,qrel,69);
+  let do_var:i32=-1;
+  let do_val:i32=0;
+  if(dspec!=-999999){
+    do_var=dspec/10;
+    do_val=dspec-do_var*10;
+  }
+  let vbuf:[]u8=z_alloc(128);
+  if(vbuf.len<128){return -2;}
+  let nv:i32=sc_collect_vars(W,vbuf,32);
+  if(nv<1){return -2;}
+  if(sc_inbuf(vbuf,nv,target)==0){return -2;}
+  if(do_var!=-1 && sc_inbuf(vbuf,nv,do_var)==0){return -2;}
+  let ebuf:[]u8=z_alloc(512);
+  if(ebuf.len<512){return -2;}
+  let ne:i32=sc_collect_edges(W,vbuf,nv,ebuf,64);
+  // Surgery: working copy of the edge list minus incoming edges of
+  // the intervened variable.
+  let wbuf:[]u8=z_alloc(512);
+  if(wbuf.len<512){return -2;}
+  let nw:i32=0;
+  let i:i32=0;
+  while(i<ne){
+    let p:i32=get32(ebuf,i*8);
+    let c:i32=get32(ebuf,i*8+4);
+    if(do_var==-1 || c!=do_var){
+      set32(wbuf,nw*8,p); set32(wbuf,nw*8+4,c); nw=nw+1;
+    } else {
+      if(audit==1){
+        emit("SEVER "); e64(p); emit("->"); e64(c); emit("\n");
+      }
+    }
+    i=i+1;
+  }
+  // Topological order (Kahn) over the severed graph.
+  let obuf:[]u8=z_alloc(128);
+  if(obuf.len<128){return -2;}
+  let ibuf:[]u8=z_alloc(128);
+  if(ibuf.len<128){return -2;}
+  let taken:[]u8=z_alloc(128);
+  if(taken.len<128){return -2;}
+  let j:i32=0;
+  while(j<nv){set32(ibuf,j*4,0); j=j+1;}
+  i=0;
+  while(i<nw){
+    let cc:i32=get32(wbuf,i*8+4);
+    j=0;
+    while(j<nv){
+      if(get32(vbuf,j*4)==cc){set32(ibuf,j*4,get32(ibuf,j*4)+1);}
+      j=j+1;
+    }
+    i=i+1;
+  }
+  let no:i32=0;
+  while(no<nv){
+    let pick:i32=-1;
+    j=0;
+    while(j<nv){
+      if(get32(taken,j*4)==0 && get32(ibuf,j*4)==0){pick=j;}
+      j=j+1;
+    }
+    if(pick==-1){return -2;}
+    set32(taken,pick*4,1);
+    set32(obuf,no*4,get32(vbuf,pick*4));
+    no=no+1;
+    i=0;
+    while(i<nw){
+      if(get32(wbuf,i*8)==get32(vbuf,pick*4)){
+        let c2:i32=get32(wbuf,i*8+4);
+        let j2:i32=0;
+        while(j2<nv){
+          if(get32(vbuf,j2*4)==c2){set32(ibuf,j2*4,get32(ibuf,j2*4)-1);}
+          j2=j2+1;
+        }
+      }
+      i=i+1;
+    }
+  }
+  // Recompute in topological order.
+  let valbuf:[]u8=z_alloc(128);
+  if(valbuf.len<128){return -2;}
+  let k:i32=0;
+  while(k<no){
+    let v:i32=get32(obuf,k*4);
+    if(v==do_var){
+      set32(valbuf,k*4,do_val);
+    } else {
+      let pbuf:[]u8=z_alloc(64);
+      if(pbuf.len<64){return -2;}
+      let np:i32=0;
+      i=0;
+      while(i<nw){
+        if(get32(wbuf,i*8+4)==v){
+          let pp:i32=get32(wbuf,i*8);
+          if(np<16 && sc_inbuf(pbuf,np,pp)==0){
+            set32(pbuf,np*4,pp); np=np+1;
+          }
+        }
+        i=i+1;
+      }
+      if(np==0){
+        // Exogenous: hold at the observed value (context fixed).
+        let obsrel:i32=sc_fact_o(W,v,70);
+        if(obsrel==-999999){return -2;}
+        let ov:i32=sc_fact_o(W,unit,obsrel);
+        if(ov==-999999){return -2;}
+        set32(valbuf,k*4,ov);
+      } else {
+        let tseen:[]u8=z_alloc(64);
+        if(tseen.len<64){return -2;}
+        let nt:i32=0;
+        let sum:i32=0;
+        let x:i32=2;
+        while(x<1024){
+          if(ng(W,x,36)==1 && ng(W,x,0)==1 && ng(W,x,20)==v && ng(W,x,24)==72){
+            let t:i32=ng(W,x,28);
+            let ep:i32=t/10;
+            let ec:i32=t-ep*10;
+            if(sc_inbuf(pbuf,np,ep)==0){return -2;}
+            if(sc_inbuf(tseen,nt,ep)==0 && nt<16){
+              set32(tseen,nt*4,ep); nt=nt+1;
+              let pv:i32=-999999;
+              j=0;
+              while(j<k){
+                if(get32(obuf,j*4)==ep){pv=get32(valbuf,j*4);}
+                j=j+1;
+              }
+              if(pv==-999999){return -2;}
+              sum=sum+ec*pv;
+            }
+          }
+          x=x+1;
+        }
+        if(nt!=np){return -2;}
+        set32(valbuf,k*4,sum);
+      }
+    }
+    k=k+1;
+  }
+  if(audit==1){
+    emit("TOPO [");
+    k=0;
+    while(k<no){
+      if(k>0){emit(",");}
+      e64(get32(obuf,k*4));
+      k=k+1;
+    }
+    emit("]\n");
+    emit("VALS ");
+    k=0;
+    while(k<no){
+      e64(get32(obuf,k*4)); emit("="); e64(get32(valbuf,k*4)); emit(" ");
+      k=k+1;
+    }
+    emit("\n");
+  }
+  k=0;
+  while(k<no){
+    if(get32(obuf,k*4)==target){return get32(valbuf,k*4);}
+    k=k+1;
+  }
+  return -2;
+}
+fn sc_do(W:[]u8,unit:i32,qrel:i32,audit:i32)i32 {
+  let a:i32=sc_do_inner(W,unit,qrel,audit);
+  if(a==-2 && audit==0){emit("STRUCT-MISSING ");}
+  return a;
+}
+fn sc_zq(W:[]u8,tag:[]u8,unit:i32,qrel:i32,expected:i32)void {
+  let a:i32=sc_do(W,unit,qrel,0);
+  emit(tag); emit(" ans="); e64(a);
+  emit(" expected="); e64(expected);
+  if(a==expected){emit(" PASS\n");} else {emit(" FAIL\n");}
+  return;
+}
+
+// ---------- world builders ----------
+fn sc_gap(W:[]u8)void {
+  let i:i32=0;
+  while(i<30){
+    ev_teach(W,5000+i,60+(i%10),6000+i);
+    i=i+1;
+  }
+  return;
+}
+// World 1 base: units + causal edges (taught before X/Y training so
+// the K1 prefix matches the xdomain TREAT prefix exactly).
+fn sc_world1_base(W:[]u8)void {
+  ev_teach(W,501,86,1); ev_teach(W,502,86,2);
+  ev_teach(W,801,71,802); ev_teach(W,801,71,803); ev_teach(W,802,71,803);
+  return;
+}
+// World 1 structure: equations, observation mapping, query specs.
+fn sc_world1_struct(W:[]u8)void {
+  ev_teach(W,802,72,8011);
+  ev_teach(W,803,72,8011); ev_teach(W,803,72,8022);
+  ev_teach(W,801,70,86);
+  ev_teach(W,93,68,803); ev_teach(W,93,69,8021);
+  ev_teach(W,94,68,803); ev_teach(W,94,69,8022);
+  return;
+}
+// World 2 (generality): P=811, Q=812, R=813; Q=2*P, R=1*P+1*Q.
+fn sc_world2(W:[]u8)void {
+  ev_teach(W,511,86,1); ev_teach(W,512,86,2);
+  ev_teach(W,811,71,812); ev_teach(W,811,71,813); ev_teach(W,812,71,813);
+  ev_teach(W,812,72,8112);
+  ev_teach(W,813,72,8111); ev_teach(W,813,72,8121);
+  ev_teach(W,811,70,86);
+  ev_teach(W,95,68,813); ev_teach(W,95,69,8121);
+  ev_teach(W,96,68,813); ev_teach(W,96,69,8110);
+  return;
+}
+// World 3 (degenerate): single edge, no intervention.
+fn sc_world3(W:[]u8)void {
+  ev_teach(W,521,86,7);
+  ev_teach(W,901,71,903);
+  ev_teach(W,903,72,9011);
+  ev_teach(W,901,70,86);
+  ev_teach(W,97,68,903);
+  return;
+}
+fn sc_trainX(W:[]u8)void {
+  ev_teach(W,501,81,511); ev_teach(W,511,81,515); ev_teach(W,515,81,3);
+  ev_teach(W,502,81,512); ev_teach(W,512,81,516); ev_teach(W,516,81,6);
+  let x1:i32=ev_query(W,501,91,3,0);
+  emit("X1 ans="); e64(x1); sc_tstat(W);
+  let x2:i32=ev_query(W,502,91,6,0);
+  emit("X2 ans="); e64(x2); sc_tstat(W);
+  return;
+}
+fn sc_trainY(W:[]u8)void {
+  ev_teach(W,501,88,521); ev_teach(W,521,88,1);
+  ev_teach(W,502,88,522); ev_teach(W,522,88,2);
+  let y1:i32=ev_query(W,501,92,1,0);
+  emit("Y1 ans="); e64(y1); sc_tstat(W);
+  let y2:i32=ev_query(W,502,92,2,0);
+  emit("Y2 ans="); e64(y2); sc_tstat(W);
+  return;
+}
+
+// ---------- arms ----------
+fn sc_arm_treat(W:[]u8)void {
+  emit("=== TREAT ===\n");
+  sc_world1_base(W);
+  sc_trainX(W);
+  sc_trainY(W);
+  sc_world1_struct(W);
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,5);
+  sc_zq(W,"Z2",501,93,3);
+  sc_zq(W,"Z3",502,94,6);
+  sc_zq(W,"Z4",502,93,4);
+  return;
+}
+fn sc_arm_noedge(W:[]u8)void {
+  emit("=== ABL-NOEDGE ===\n");
+  sc_world1_base(W);
+  sc_world1_struct(W);
+  sc_delfacts_r(W,71);
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,-2);
+  sc_zq(W,"Z2",501,93,-2);
+  sc_zq(W,"Z3",502,94,-2);
+  sc_zq(W,"Z4",502,93,-2);
+  return;
+}
+fn sc_arm_noeq(W:[]u8)void {
+  emit("=== ABL-NOEQ ===\n");
+  sc_world1_base(W);
+  sc_world1_struct(W);
+  sc_delfacts_r(W,72);
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,-2);
+  sc_zq(W,"Z2",501,93,-2);
+  sc_zq(W,"Z3",502,94,-2);
+  sc_zq(W,"Z4",502,93,-2);
+  return;
+}
+fn sc_arm_noobs(W:[]u8)void {
+  emit("=== ABL-NOOBS ===\n");
+  sc_world1_base(W);
+  sc_world1_struct(W);
+  sc_delfacts_sr(W,500,599,86);
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,-2);
+  sc_zq(W,"Z2",501,93,-2);
+  sc_zq(W,"Z3",502,94,-2);
+  sc_zq(W,"Z4",502,93,-2);
+  return;
+}
+fn sc_arm_fresh(W:[]u8)void {
+  emit("=== FRESH ===\n");
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,-2);
+  sc_zq(W,"Z2",501,93,-2);
+  sc_zq(W,"Z3",502,94,-2);
+  sc_zq(W,"Z4",502,93,-2);
+  return;
+}
+fn sc_arm_gen(W:[]u8)void {
+  emit("=== GEN ===\n");
+  sc_world2(W);
+  sc_gap(W);
+  sc_zq(W,"G1",512,95,3);
+  sc_zq(W,"G2",511,96,0);
+  return;
+}
+fn sc_arm_irred(W:[]u8)void {
+  emit("=== IRRED ===\n");
+  sc_world1_base(W);
+  sc_trainX(W);
+  sc_trainY(W);
+  sc_world1_struct(W);
+  sc_delfact(W,801,71,803);
+  sc_delfact(W,803,72,8011);
+  sc_gap(W);
+  sc_zq(W,"Z1",501,94,4);
+  sc_zq(W,"Z4",502,93,2);
+  return;
+}
+fn sc_arm_degen(W:[]u8)void {
+  emit("=== DEGEN ===\n");
+  sc_world3(W);
+  sc_gap(W);
+  sc_zq(W,"D1",521,97,7);
+  return;
+}
+fn sc_arm_audit(W:[]u8)void {
+  emit("=== AUDIT ===\n");
+  sc_world1_base(W);
+  sc_world1_struct(W);
+  sc_gap(W);
+  let a:i32=sc_do(W,501,94,1);
+  emit("AUDIT Z1 ans="); e64(a); emit("\n");
+  return;
+}
+fn main()i32 {
+  emit("SC-START\n");
+  let W1:[]u8=z_alloc(110656); tnn2_init(W1); sc_arm_treat(W1);
+  let W2:[]u8=z_alloc(110656); tnn2_init(W2); sc_arm_noedge(W2);
+  let W3:[]u8=z_alloc(110656); tnn2_init(W3); sc_arm_noeq(W3);
+  let W4:[]u8=z_alloc(110656); tnn2_init(W4); sc_arm_noobs(W4);
+  let W5:[]u8=z_alloc(110656); tnn2_init(W5); sc_arm_fresh(W5);
+  let W6:[]u8=z_alloc(110656); tnn2_init(W6); sc_arm_gen(W6);
+  let W7:[]u8=z_alloc(110656); tnn2_init(W7); sc_arm_irred(W7);
+  let W8:[]u8=z_alloc(110656); tnn2_init(W8); sc_arm_degen(W8);
+  let W9:[]u8=z_alloc(110656); tnn2_init(W9); sc_arm_audit(W9);
+  emit("SC-END\n");
+  return 0;
+}

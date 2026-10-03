@@ -1,0 +1,118 @@
+#!/bin/bash
+# integ-1 STRETCH runner: the preregistered 4,800-episode leg.
+# Authority: PREREG_INTEG1.md §3 (conditional stretch; conditions met —
+# see stretch/STRETCH_NOTES.md). Same gates as run_integ.sh, applied to
+# the mechanically-scaled integ_stretch.zag. Usage: ./run_stretch.sh
+set -u
+cd "$(dirname "$0")"
+ZNC=~/workspace/tnn-lab/toolchain/bin/znc_linux_x86_64_abed8aa1
+SRC=integ_stretch.zag
+BIN=integ_stretch.bin
+LOGDIR=logs
+mkdir -p "$LOGDIR"
+
+fail(){ echo "GATE_FAIL: $1" | tee -a "$LOGDIR/stretch_run.log"; exit 1; }
+pass(){ echo "GATE_PASS: $1" | tee -a "$LOGDIR/stretch_run.log"; }
+: > "$LOGDIR/stretch_run.log"
+
+# --- Gate 0: toolchain present ---
+[ -x "$ZNC" ] || fail "compiler missing: $ZNC"
+"$ZNC" --version >> "$LOGDIR/stretch_run.log" 2>&1 || true
+
+# --- Gate 1: imported substrates unmodified (prereg §12 hashes) ---
+SR=~/workspace/tnn-lab/wave4/scaffold-release/sr.zag
+IL=~/workspace/tnn-lab/wave4/integrity-ledger/il_core.zag
+SRH=$(sha256sum "$SR" | cut -d' ' -f1)
+ILH=$(sha256sum "$IL" | cut -d' ' -f1)
+[ "$SRH" = "24a61ed672dd2b47a21543729d634306d33fc877302855ec127d29372bbd1e5d" ] \
+  || fail "sr.zag modified: $SRH"
+[ "$ILH" = "4b723b65a4808bc3896b6afe5f9b903648a4c1564301092ca0462d62f440b325" ] \
+  || fail "il_core.zag modified: $ILH"
+pass "imported substrates match prereg hashes"
+
+# --- Gate 1b: stretch source is a pure mechanical scaling of integ.zag ---
+# 58 diff lines = 54 documented scalings + 4 (2 import-path lines, depth fix)
+DIFFN=$(diff ../integ.zag "$SRC" | grep -c "^[<>]")
+[ "$DIFFN" = "58" ] || fail "stretch source diff is $DIFFN lines, expected 58 (see STRETCH_NOTES.md)"
+pass "stretch source differs from integ.zag by exactly the 58 documented lines"
+
+# --- Gate 2: no RNG tokens anywhere in AI decision paths (comments stripped) ---
+sed 's|//.*||' "$SRC" | grep -nEi 'rand|srand|random|entropy|/dev/urandom|getrandom|rdtsc|time\(|clock\(' \
+  && fail "RNG token found in $SRC" || pass "no RNG tokens in $SRC"
+
+# --- Gate 3: claims-channel isolation ---
+python3 - "$SRC" <<'EOF'
+import sys
+src = open(sys.argv[1]).read()
+b = src.index('// INTEG-LEARNER-BEGIN')
+e = src.index('// INTEG-LEARNER-END')
+region = '\n'.join(l.split('//')[0] for l in src[b:e].split('\n'))
+bad = [t for t in ('clmk', 'prefa', 'mon', 'claims_arena', 'claim_kind') if t in region]
+if bad:
+    print('CLAIMS LEAK INTO LEARNER REGION:', bad); sys.exit(1)
+print('claims channel isolated from learner region')
+EOF
+[ $? -eq 0 ] || fail "claims channel leaks into learner region"
+pass "claims channel isolated from learner region"
+
+# --- Gate 4: compile (native, same flags as the base leg) ---
+"$ZNC" "$SRC" -O3 -o "$BIN" > "$LOGDIR/stretch_compile.log" 2>&1 \
+  || { tail -40 "$LOGDIR/stretch_compile.log"; fail "compile failed"; }
+pass "compiled: $BIN"
+[ -x "$BIN" ] || fail "binary not executable"
+
+sha256sum "$SRC" > "$LOGDIR/stretch_sha256sums.txt"
+
+# --- Gate 5: two runs, byte-identical output (wall-clock recorded) ---
+START=$(date +%s)
+"./$BIN" > "$LOGDIR/stretch_run1.log" 2>&1; R1=$?
+MID=$(date +%s)
+"./$BIN" > "$LOGDIR/stretch_run2.log" 2>&1; R2=$?
+END=$(date +%s)
+[ $R1 -eq 0 ] || fail "run 1 exited $R1"
+[ $R2 -eq 0 ] || fail "run 2 exited $R2"
+H1=$(sha256sum "$LOGDIR/stretch_run1.log" | cut -d' ' -f1)
+H2=$(sha256sum "$LOGDIR/stretch_run2.log" | cut -d' ' -f1)
+[ "$H1" = "$H2" ] || fail "runs differ: $H1 vs $H2"
+pass "byte-identical reruns: sha256 $H1 (run1 ${MID}s, run2 ${END}s wall)"
+echo "WALLCLOCK_RUN1_S=$((MID-START)) WALLCLOCK_RUN2_S=$((END-MID))" | tee -a "$LOGDIR/stretch_run.log"
+sha256sum "$LOGDIR/stretch_run1.log" >> "$LOGDIR/stretch_sha256sums.txt"
+
+# --- Gate 6: every INTEG_CHECK line actual==expected; INTEG_FAILURES,0 ---
+python3 - "$LOGDIR/stretch_run1.log" <<'EOF'
+import sys, re
+n = 0; bad = []
+fails = None
+for line in open(sys.argv[1]):
+    m = re.match(r'INTEG_CHECK,([^,]+),(-?\d+),(-?\d+)\s*$', line)
+    if m:
+        n += 1
+        name, actual, expected = m.group(1), int(m.group(2)), int(m.group(3))
+        if actual != expected:
+            bad.append((name, actual, expected))
+    m2 = re.match(r'INTEG_FAILURES,(-?\d+)\s*$', line)
+    if m2:
+        fails = int(m2.group(1))
+print('checks parsed:', n)
+for name, a, e in bad:
+    print('CHECK_FAIL:', name, 'actual', a, 'expected', e)
+if fails is None:
+    print('MISSING INTEG_FAILURES'); sys.exit(1)
+print('INTEG_FAILURES =', fails)
+if bad or fails != 0:
+    sys.exit(1)
+print('all', n, 'checks hold')
+EOF
+[ $? -eq 0 ] || fail "check validation failed (see above)"
+pass "all INTEG_CHECK lines hold, INTEG_FAILURES,0"
+
+# --- summary excerpts for the report ---
+echo "--- judge verdicts ---" | tee -a "$LOGDIR/stretch_run.log"
+grep '^INTEG_JUDGE' "$LOGDIR/stretch_run1.log" | tee -a "$LOGDIR/stretch_run.log"
+echo "--- IL gate verdicts ---" | tee -a "$LOGDIR/stretch_run.log"
+grep '^INTEG_IL' "$LOGDIR/stretch_run1.log" | tee -a "$LOGDIR/stretch_run.log"
+echo "--- branch decisions ---" | tee -a "$LOGDIR/stretch_run.log"
+grep '^INTEG_BRANCH' "$LOGDIR/stretch_run1.log" | tee -a "$LOGDIR/stretch_run.log"
+echo "--- core mechanism excerpts ---" | tee -a "$LOGDIR/stretch_run.log"
+grep -E '^INTEG_CHECK,R_(fire_step|ndisconnect|b_ntrap|b_trapcorrect|b_sig|h_mm|g_inv|a_sig1|a_sig2)' "$LOGDIR/stretch_run1.log" | tee -a "$LOGDIR/stretch_run.log"
+echo "ALL GATES PASSED" | tee -a "$LOGDIR/stretch_run.log"

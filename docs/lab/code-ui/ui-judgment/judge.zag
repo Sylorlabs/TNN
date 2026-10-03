@@ -1,0 +1,807 @@
+// judge.zag — CONSCIOUS VISUAL-JUDGMENT mechanism (pure Zag, zero RNG).
+//
+// A deliberate aesthetic judge for UI screenshots. Reads an .img fixture
+// (u32 LE w, u32 LE h, W*H*3 RGB24), computes deliberate visual metrics
+// (typography / spacing / hierarchy / color restraint / alignment families),
+// scores the image against 5 frozen T3 reference profiles (best-match), and
+// emits a GOOD/BAD verdict with SPECIFIC named defects.
+//
+// It CONSUMES the frozen image-sense binaries as perceptual evidence: the
+// driver runs sense colordisc (judged|reference pair) and sense shapetrans
+// (judged) for each representation (a_raw / b_percept) and hands the results
+// in as <sense_evidence.txt>. All aesthetic logic is here; the driver has none.
+//
+// CLI:
+//   judge metrics <img>                                   -> metric vector
+//   judge judge <judged.img> <refs_profile.txt> <sense_evidence.txt>
+// Determinism: 3 runs byte-identical (no wall-clock, no RNG, no uninit reads).
+//
+// znc workarounds honored: no argc gate, []u8 arenas + LE accessors only
+// (never `as []i32`), no slice ==, no `.*` on non-pointers, no `};`,
+// bare `return;` in void fns, shallow else nesting, explicit init.
+
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------------- little-endian accessors over []u8 arenas ----------------
+fn t_put32(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+}
+fn t_get32(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24);
+}
+fn t_put64(b:[]u8, at:i32, v:i64) void {
+    b[at] = (v & 255) as u8;
+    b[at+1] = ((v >> 8) & 255) as u8;
+    b[at+2] = ((v >> 16) & 255) as u8;
+    b[at+3] = ((v >> 24) & 255) as u8;
+    b[at+4] = ((v >> 32) & 255) as u8;
+    b[at+5] = ((v >> 40) & 255) as u8;
+    b[at+6] = ((v >> 48) & 255) as u8;
+    b[at+7] = ((v >> 56) & 255) as u8;
+}
+fn t_get64(b:[]u8, at:i32) i64 {
+    return (b[at] as i64) | ((b[at+1] as i64) << 8)
+         | ((b[at+2] as i64) << 16) | ((b[at+3] as i64) << 24)
+         | ((b[at+4] as i64) << 32) | ((b[at+5] as i64) << 40)
+         | ((b[at+6] as i64) << 48) | ((b[at+7] as i64) << 56);
+}
+fn op_add(op:[]u8, n:i64) void {
+    t_put64(op, 0, t_get64(op, 0) + n);
+}
+
+// ---------------- integer math --------------------------------------------
+fn iabs(x:i64) i64 {
+    if(x < 0) { return 0 - x; }
+    return x;
+}
+fn imin(a:i64, b:i64) i64 {
+    if(a < b) { return a; }
+    return b;
+}
+fn imax(a:i64, b:i64) i64 {
+    if(a > b) { return a; }
+    return b;
+}
+// zero a byte slice (nio_alloc is NOT zeroed; counting arenas must be explicit)
+fn zfill(s:[]u8) void {
+    let i:i32 = 0;
+    while(i < s.len) { s[i] = 0; i = i + 1; }
+    return;
+}
+
+// ---------------- file IO ---------------------------------------------------
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+// Read a whole file into a fresh arena. Returns "" on any error.
+fn z_read_all(path:[]u8) []u8 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return ""; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return ""; }
+    let size:i64 = nio_seek(fd, 0, 2);
+    if(size < 0 || size > 9000000) { nio_close(fd); return ""; }
+    let out:[]u8 = nio_alloc(size as i32);
+    if(out.len == 0) { nio_close(fd); return ""; }
+    let n:i64 = nio_read_exact(fd, out, size as i32);
+    nio_close(fd);
+    if(n < 0) { nio_free(out); return ""; }
+    return out;
+}
+
+// ---------------- stdout line builder ---------------------------------------
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_kv(ob:[]u8, pos:i32, k:[]u8, v:[]u8) i32 {
+    pos = ob_add(ob, pos, k);
+    pos = ob_add(ob, pos, "=");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn ob_kint(ob:[]u8, pos:i32, k:[]u8, v:i64) i32 {
+    return ob_kv(ob, pos, k, _zag_i64_to_str(v));
+}
+
+// ---------------- text parsing ----------------------------------------------
+// Parse a decimal integer from buf[lo..hi). Handles optional leading '-'.
+fn parse_int(buf:[]u8, lo:i32, hi:i32) i64 {
+    let neg:i64 = 1;
+    let v:i64 = 0;
+    let i:i32 = lo;
+    if(i < hi && buf[i] == 45) { neg = 0 - 1; i = i + 1; }
+    while(i < hi) {
+        let c:i64 = buf[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v * neg;
+}
+// Find '=' in buf[lo..hi); return index or -1.
+fn find_eq(buf:[]u8, lo:i32, hi:i32) i32 {
+    let i:i32 = lo;
+    while(i < hi) {
+        if(buf[i] == 61) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// ---------------- metric computation --------------------------------------
+// Metric indices: 0 bg_lum, 1 ink_lum, 2 contrast, 3 ink_total_pm,
+// 4 bands, 5 gap_cv_pm, 6 margin_ink_pm, 7 guides, 8 align_conc_pm,
+// 9 type_modes, 10 hues, 11 hero_ratio_pm, 12 rows, 13 satcov_pm.
+fn compute_metrics(img:[]u8, m:[]u8, op:[]u8) i32 {
+    let w:i32 = t_get32(img, 0) as i32;
+    let h:i32 = t_get32(img, 4) as i32;
+    if(w < 8 || h < 8 || w > 2048 || h > 2048) { return 1; }
+    let np:i32 = w * h;
+    if(np <= 0 || img.len < 8 + np * 3) { return 2; }
+    let lum:[]u8 = nio_alloc(np);
+    if(lum.len == 0) { return 3; }
+    let hist:[]u8 = nio_alloc(64);
+    let rows:[]u8 = nio_alloc(h * 4);
+    let cols:[]u8 = nio_alloc(w * 4);
+    let hueb:[]u8 = nio_alloc(48);
+    if(hist.len == 0 || rows.len == 0 || cols.len == 0 || hueb.len == 0) {
+        nio_free(lum); nio_free(hist); nio_free(rows);
+        nio_free(cols); nio_free(hueb);
+        return 4;
+    }
+    zfill(hist); zfill(rows); zfill(cols); zfill(hueb);
+    // pass 1: luminance + histogram
+    let p:i32 = 0;
+    while(p < np) {
+        let o:i32 = 8 + p * 3;
+        let r:i64 = img[o] as i64;
+        let g:i64 = img[o + 1] as i64;
+        let b:i64 = img[o + 2] as i64;
+        let L:i64 = (299 * r + 587 * g + 114 * b) / 1000;
+        lum[p] = L as u8;
+        let bin:i32 = (L / 16) as i32;
+        if(bin > 15) { bin = 15; }
+        t_put32(hist, bin * 4, t_get32(hist, bin * 4) + 1);
+        p = p + 1;
+    }
+    op_add(op, np as i64);
+    // background = argmax histogram bin
+    let bg_bin:i32 = 0;
+    let bg_c:i64 = 0;
+    let q:i32 = 0;
+    while(q < 16) {
+        let c:i64 = t_get32(hist, q * 4);
+        if(c > bg_c) { bg_c = c; bg_bin = q; }
+        q = q + 1;
+    }
+    let bg_lum:i64 = (bg_bin as i64) * 16 + 8;
+    // pass 2: ink mask, row counts, ink luminance, hue bins
+    let ink_total:i64 = 0;
+    let ink_lum_sum:i64 = 0;
+    let sat_total:i64 = 0;
+    let y:i32 = 0;
+    while(y < h) {
+        let x:i32 = 0;
+        let rowink:i64 = 0;
+        while(x < w) {
+            let L:i64 = lum[y * w + x] as i64;
+            let d:i64 = L - bg_lum;
+            if(d > 48 || d < -48) {
+                rowink = rowink + 1;
+                ink_total = ink_total + 1;
+                ink_lum_sum = ink_lum_sum + L;
+            }
+            let o:i32 = 8 + (y * w + x) * 3;
+            let r:i64 = img[o] as i64;
+            let g:i64 = img[o + 1] as i64;
+            let b:i64 = img[o + 2] as i64;
+            let mx:i64 = imax(r, imax(g, b));
+            let mn:i64 = imin(r, imin(g, b));
+            let sat:i64 = mx - mn;
+            if(sat > 48) {
+                sat_total = sat_total + 1;
+                let mid:i64 = r + g + b - mx - mn;
+                let base:i64 = 8;
+                if(r >= g && r >= b) { base = 0; }
+                if(g >= r && g >= b) { base = 4; }
+                let t:i64 = 0;
+                if(mx > mn) { t = (mid - mn) * 2 / (mx - mn); }
+                if(t > 2) { t = 2; }
+                let hb2:i32 = (base + t) as i32;
+                t_put32(hueb, hb2 * 4, t_get32(hueb, hb2 * 4) + 1);
+            }
+            x = x + 1;
+        }
+        t_put32(rows, y * 4, rowink);
+        y = y + 1;
+    }
+    op_add(op, np as i64);
+    // pass 3: vertical edge energy per column
+    let xx:i32 = 1;
+    while(xx < w) {
+        let yy:i32 = 0;
+        let c:i64 = 0;
+        while(yy < h) {
+            let d:i64 = (lum[yy * w + xx] as i64) - (lum[yy * w + xx - 1] as i64);
+            if(d > 56 || d < -56) { c = c + 1; }
+            yy = yy + 1;
+        }
+        t_put32(cols, xx * 4, c);
+        xx = xx + 1;
+    }
+    op_add(op, np as i64);
+    // guides: columns with edge count > 12% of height
+    let gthr:i64 = (h as i64) * 12 / 100;
+    let ge:[]u8 = nio_alloc(160);
+    let ng:i32 = 0;
+    let tot_e:i64 = 0;
+    xx = 0;
+    while(xx < w) {
+        let c:i64 = t_get32(cols, xx * 4);
+        tot_e = tot_e + c;
+        if(c > gthr && ng < 40) {
+            t_put32(ge, ng * 4, c);
+            ng = ng + 1;
+        }
+        xx = xx + 1;
+    }
+    // top-4 guide energy (selection, 4 passes)
+    let top4:i64 = 0;
+    let used:[]u8 = nio_alloc(160);
+    zfill(used);
+    let pass:i32 = 0;
+    while(pass < 4) {
+        let bi:i32 = -1;
+        let bv:i64 = -1;
+        let gi:i32 = 0;
+        while(gi < ng) {
+            let v:i64 = t_get32(ge, gi * 4);
+            if(used[gi] == 0 && v > bv) { bv = v; bi = gi; }
+            gi = gi + 1;
+        }
+        if(bi >= 0) { used[bi] = 1; top4 = top4 + bv; }
+        pass = pass + 1;
+    }
+    let align_conc:i64 = 1000;
+    if(tot_e > 0) { align_conc = top4 * 1000 / tot_e; }
+    // bands: contiguous text rows (row ink > 2.5% of width)
+    let bands:[]u8 = nio_alloc(1024);
+    let nb:i32 = 0;
+    let inband:i32 = 0;
+    let btop:i32 = 0;
+    let bink:i64 = 0;
+    y = 0;
+    while(y < h) {
+        let ri:i64 = t_get32(rows, y * 4);
+        let istext:i32 = 0;
+        if(ri * 1000 > (w as i64) * 25) { istext = 1; }
+        if(istext == 1 && inband == 0) {
+            inband = 1; btop = y; bink = ri;
+        }
+        if(istext == 1 && inband == 1) { bink = bink + ri; }
+        if(istext == 0 && inband == 1) {
+            if(nb < 64) {
+                t_put32(bands, nb * 16, btop as i64);
+                t_put32(bands, nb * 16 + 4, (y - 1) as i64);
+                t_put32(bands, nb * 16 + 8, bink);
+                nb = nb + 1;
+            }
+            inband = 0;
+        }
+        y = y + 1;
+    }
+    if(inband == 1 && nb < 64) {
+        t_put32(bands, nb * 16, btop as i64);
+        t_put32(bands, nb * 16 + 4, (h - 1) as i64);
+        t_put32(bands, nb * 16 + 8, bink);
+        nb = nb + 1;
+    }
+    // gap CV between bands
+    let gap_cv:i64 = 1000;
+    if(nb >= 2) {
+        let gs:i64 = 0;
+        let gsq:i64 = 0;
+        let gi2:i32 = 1;
+        while(gi2 < nb) {
+            let gp:i64 = t_get32(bands, gi2 * 16) - t_get32(bands, (gi2 - 1) * 16 + 4) - 1;
+            if(gp < 0) { gp = 0; }
+            gs = gs + gp;
+            gsq = gsq + gp * gp;
+            gi2 = gi2 + 1;
+        }
+        let gn:i64 = (nb - 1) as i64;
+        let gmean:i64 = gs / gn;
+        let gvar:i64 = gsq / gn - gmean * gmean;
+        if(gvar < 0) { gvar = 0; }
+        let gstd:i64 = 0;
+        let r2:i64 = gvar;
+        if(r2 > 0) {
+            let yy2:i64 = r2;
+            if(yy2 > 3037000499) { yy2 = 3037000499; }
+            let z:i64 = (yy2 + 1) / 2;
+            while(z < yy2) { yy2 = z; z = (yy2 + r2 / yy2) / 2; }
+            gstd = yy2;
+        }
+        if(gmean > 0) { gap_cv = gstd * 1000 / gmean; }
+    }
+    // margin ink: outer 10% rows
+    let mh:i32 = h / 10;
+    let marg:i64 = 0;
+    y = 0;
+    while(y < mh) { marg = marg + t_get32(rows, y * 4); y = y + 1; }
+    y = h - mh;
+    while(y < h) { marg = marg + t_get32(rows, y * 4); y = y + 1; }
+    let margin_ink:i64 = marg * 1000 / (np as i64);
+    // type modes: distinct band-height classes (height/8)
+    let hcls:[]u8 = nio_alloc(48);
+    let qc:i32 = 0;
+    while(qc < 12) { t_put32(hcls, qc * 4, -1); qc = qc + 1; }
+    let nmodes:i32 = 0;
+    let bi2:i32 = 0;
+    while(bi2 < nb) {
+        let bh:i64 = t_get32(bands, bi2 * 16 + 4) - t_get32(bands, bi2 * 16) + 1;
+        let cls:i64 = bh / 8;
+        let found:i32 = 0;
+        qc = 0;
+        while(qc < 12) {
+            if(t_get32(hcls, qc * 4) == cls) { found = 1; }
+            qc = qc + 1;
+        }
+        if(found == 0 && nmodes < 12) {
+            t_put32(hcls, nmodes * 4, cls);
+            nmodes = nmodes + 1;
+        }
+        bi2 = bi2 + 1;
+    }
+    // dominant hues: bins with > 0.5% of all pixels
+    let hues:i32 = 0;
+    q = 0;
+    while(q < 12) {
+        if(t_get32(hueb, q * 4) * 1000 > (np as i64) * 5) { hues = hues + 1; }
+        q = q + 1;
+    }
+    // hero ratio: largest band mass share
+    let totmass:i64 = 0;
+    let maxmass:i64 = 0;
+    bi2 = 0;
+    while(bi2 < nb) {
+        let bh2:i64 = t_get32(bands, bi2 * 16 + 4) - t_get32(bands, bi2 * 16) + 1;
+        let mass:i64 = bh2 * t_get32(bands, bi2 * 16 + 8);
+        totmass = totmass + mass;
+        if(mass > maxmass) { maxmass = mass; }
+        bi2 = bi2 + 1;
+    }
+    let hero_ratio:i64 = 1000;
+    if(totmass > 0) { hero_ratio = maxmass * 1000 / totmass; }
+    // contrast
+    let ink_mean:i64 = bg_lum;
+    if(ink_total > 0) { ink_mean = ink_lum_sum / ink_total; }
+    let hi:i64 = imax(bg_lum, ink_mean);
+    let lo:i64 = imin(bg_lum, ink_mean);
+    let contrast:i64 = (hi + 10) * 1000 / (lo + 10);
+    if(contrast > 30000) { contrast = 30000; }
+    let ink_total_pm:i64 = ink_total * 1000 / (np as i64);
+    let satcov_pm:i64 = sat_total * 1000 / (np as i64);
+    // store
+    t_put64(m, 0 * 8, bg_lum);
+    t_put64(m, 1 * 8, ink_mean);
+    t_put64(m, 2 * 8, contrast);
+    t_put64(m, 3 * 8, ink_total_pm);
+    t_put64(m, 4 * 8, nb as i64);
+    t_put64(m, 5 * 8, gap_cv);
+    t_put64(m, 6 * 8, margin_ink);
+    t_put64(m, 7 * 8, (ng as i64));
+    t_put64(m, 8 * 8, align_conc);
+    t_put64(m, 9 * 8, nmodes as i64);
+    t_put64(m, 10 * 8, hues as i64);
+    t_put64(m, 11 * 8, hero_ratio);
+    t_put64(m, 12 * 8, h as i64);
+    t_put64(m, 13 * 8, satcov_pm);
+    nio_free(lum); nio_free(hist); nio_free(rows); nio_free(cols);
+    nio_free(hueb); nio_free(ge); nio_free(used); nio_free(bands);
+    nio_free(hcls);
+    return 0;
+}
+
+// length of NUL-terminated string in a fixed slot
+fn zlen(b:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < b.len && b[i] != 0) { i = i + 1; }
+    return i;
+}
+
+// ---------------- profile + evidence parsing --------------------------------
+// refs: 5 x 13 i64 arena. names: 5 x 32-byte slots (NUL-padded).
+fn parse_profile(txt:[]u8, refs:[]u8, names:[]u8) i32 {
+    let blk:i32 = 0;
+    let mi:i32 = 0;
+    let i:i32 = 0;
+    while(i < txt.len) {
+        let j:i32 = i;
+        while(j < txt.len && txt[j] != 10) { j = j + 1; }
+        let eq:i32 = find_eq(txt, i, j);
+        if(eq > 0 && blk < 5) {
+            if(txt[i] == 114) {
+                // "ref=<name>"
+                let k:i32 = 0;
+                let s2:i32 = eq + 1;
+                while(s2 < j && k < 31) {
+                    names[blk * 32 + k] = txt[s2];
+                    s2 = s2 + 1; k = k + 1;
+                }
+                names[blk * 32 + k] = 0;
+            }
+            if(txt[i] == 109 && mi < 14) {
+                // "m_...=<int>"
+                let v:i64 = parse_int(txt, eq + 1, j);
+                t_put64(refs, (blk * 14 + mi) * 8, v);
+                mi = mi + 1;
+                if(mi >= 14) { mi = 0; blk = blk + 1; }
+            }
+        }
+        i = j + 1;
+    }
+    if(blk == 5) { return 0; }
+    return 1;
+}
+// ev: 5 colordisc bytes (1=SAME) + shapetrans code at [5]; rep at [6].
+fn parse_evidence(txt:[]u8, ev:[]u8) i32 {
+    let ci:i32 = 0;
+    let i:i32 = 0;
+    while(i < txt.len) {
+        let j:i32 = i;
+        while(j < txt.len && txt[j] != 10) { j = j + 1; }
+        let eq:i32 = find_eq(txt, i, j);
+        if(eq > 0) {
+            if(txt[i] == 114 && ci == 0) {
+                // "representation=a|b"
+                if(eq + 1 < j && txt[eq + 1] == 98) { ev[6] = 1; }
+                ci = 1;
+            }
+            if(txt[i] == 99 && ci >= 1 && ci <= 5) {
+                // "colordisc=SAME|DIFFERENT"
+                let same:i32 = 0;
+                if(_zag_strcmp(txt[eq + 1 .. j], "SAME") == 1) { same = 1; }
+                ev[ci - 1] = same as u8;
+                ci = ci + 1;
+            }
+            if(txt[i] == 115) {
+                // "shapetrans=<VALUE>"
+                let code:i32 = 0;
+                if(_zag_strcmp(txt[eq + 1 .. j], "SQUARE") == 1) { code = 1; }
+                if(_zag_strcmp(txt[eq + 1 .. j], "CIRCLE") == 1) { code = 2; }
+                if(_zag_strcmp(txt[eq + 1 .. j], "TRIANGLE") == 1) { code = 3; }
+                ev[5] = code as u8;
+            }
+        }
+        i = j + 1;
+    }
+    return 0;
+}
+
+// ---------------- scoring ---------------------------------------------------
+// tols and weights per scored metric index, preregistered.
+// Scored: 2 contrast, 3 ink_total, 5 gap_cv, 6 margin_ink, 7 guides,
+//         8 align_conc, 9 type_modes, 10 hues, 11 hero_ratio.
+// (m_bands is context only: band count is not a rubric defect.)
+fn mscored(mi:i32) i32 {
+    if(mi == 2) { return 1; }
+    if(mi == 3) { return 1; }
+    if(mi == 5) { return 1; }
+    if(mi == 6) { return 1; }
+    if(mi == 7) { return 1; }
+    if(mi == 8) { return 1; }
+    if(mi == 9) { return 1; }
+    if(mi == 10) { return 1; }
+    if(mi == 11) { return 1; }
+    if(mi == 13) { return 1; }
+    return 0;
+}
+// bad direction: 1 = high values are bad, -1 = low values are bad.
+fn mbaddir(mi:i32) i64 {
+    if(mi == 2) { return 0 - 1; }
+    if(mi == 8) { return 0 - 1; }
+    if(mi == 11) { return 0 - 1; }
+    return 1;
+}
+fn mtol(mi:i32) i64 {
+    if(mi == 2) { return 1000; }
+    if(mi == 3) { return 60; }
+    if(mi == 5) { return 300; }
+    if(mi == 6) { return 40; }
+    if(mi == 7) { return 4; }
+    if(mi == 8) { return 150; }
+    if(mi == 9) { return 2; }
+    if(mi == 10) { return 2; }
+    if(mi == 13) { return 150; }
+    return 150;
+}
+fn mw(mi:i32) i64 {
+    if(mi == 2) { return 2; }
+    return 1;
+}
+// One-sided envelope deviation: 0 while the judged value is inside the
+// reference envelope on the good side; grows past the envelope edge in the
+// bad direction. devs: 12-slot i64 arena (indices 0..11).
+fn score_vs_env(m:[]u8, env_lo:[]u8, env_hi:[]u8, bonus:i64, devs:[]u8) i64 {
+    let acc:i64 = 0;
+    let wsum:i64 = 0;
+    let mi:i32 = 0;
+    while(mi < 14) {
+        t_put64(devs, mi * 8, 0);
+        if(mscored(mi) == 1) {
+            let mj:i64 = t_get64(m, mi * 8);
+            let lo:i64 = t_get64(env_lo, mi * 8);
+            let hi:i64 = t_get64(env_hi, mi * 8);
+            let dev:i64 = 0;
+            if(mbaddir(mi) == 1 && mj > hi) {
+                dev = (mj - hi) * 1000 / mtol(mi);
+            }
+            if(mbaddir(mi) == -1 && mj < lo) {
+                dev = (lo - mj) * 1000 / mtol(mi);
+            }
+            if(dev > 1000) { dev = 1000; }
+            t_put64(devs, mi * 8, dev);
+            acc = acc + mw(mi) * dev;
+            wsum = wsum + mw(mi);
+        }
+        mi = mi + 1;
+    }
+    let s:i64 = 1000 - acc / wsum + bonus;
+    if(s > 1000) { s = 1000; }
+    if(s < 0) { s = 0; }
+    return s;
+}
+fn defect_name(di:i32) []u8 {
+    if(di == 0) { return "TYPOGRAPHY_INCONSISTENT"; }
+    if(di == 1) { return "CONTRAST_POOR"; }
+    if(di == 2) { return "SPACING_IRREGULAR"; }
+    if(di == 3) { return "MARGIN_CROWDED"; }
+    if(di == 4) { return "DENSITY_CLUTTER"; }
+    if(di == 5) { return "HIERARCHY_FLAT"; }
+    if(di == 6) { return "COLOR_UNRESTRAINED"; }
+    return "ALIGNMENT_WEAK";
+}
+// defect slot: metric index that fires it (2..11 subset)
+fn defect_metric(di:i32) i32 {
+    if(di == 0) { return 9; }
+    if(di == 1) { return 2; }
+    if(di == 2) { return 5; }
+    if(di == 3) { return 6; }
+    if(di == 4) { return 3; }
+    if(di == 5) { return 11; }
+    if(di == 6) { return 10; }
+    return 7;
+}
+
+// ---------------- main ------------------------------------------------------
+fn main() void {
+    let mode:[]u8 = _zag_arg(1);
+    let ob:[]u8 = nio_alloc(16384);
+    let pos:i32 = 0;
+    if(ob.len == 0) { return; }
+    if(_zag_strcmp(mode, "metrics") == 1) {
+        let img:[]u8 = z_read_all(_zag_arg(2));
+        if(img.len == 0) {
+            pos = ob_kv(ob, pos, "error", "read_img_failed");
+            _zag_print(ob[0..pos]);
+            return;
+        }
+        let m:[]u8 = nio_alloc(14 * 8);
+        let op:[]u8 = nio_alloc(8);
+        let rc:i32 = compute_metrics(img, m, op);
+        if(rc != 0) {
+            pos = ob_kv(ob, pos, "error", "metrics_failed");
+            pos = ob_kint(ob, pos, "rc", rc as i64);
+            _zag_print(ob[0..pos]);
+            return;
+        }
+        pos = ob_kv(ob, pos, "mechanism", "aesthetic-judge-v1");
+        pos = ob_kint(ob, pos, "m_bg_lum", t_get64(m, 0 * 8));
+        pos = ob_kint(ob, pos, "m_ink_lum", t_get64(m, 1 * 8));
+        pos = ob_kint(ob, pos, "m_contrast", t_get64(m, 2 * 8));
+        pos = ob_kint(ob, pos, "m_ink_total", t_get64(m, 3 * 8));
+        pos = ob_kint(ob, pos, "m_bands", t_get64(m, 4 * 8));
+        pos = ob_kint(ob, pos, "m_gap_cv", t_get64(m, 5 * 8));
+        pos = ob_kint(ob, pos, "m_margin_ink", t_get64(m, 6 * 8));
+        pos = ob_kint(ob, pos, "m_guides", t_get64(m, 7 * 8));
+        pos = ob_kint(ob, pos, "m_align_conc", t_get64(m, 8 * 8));
+        pos = ob_kint(ob, pos, "m_type_modes", t_get64(m, 9 * 8));
+        pos = ob_kint(ob, pos, "m_hues", t_get64(m, 10 * 8));
+        pos = ob_kint(ob, pos, "m_hero_ratio", t_get64(m, 11 * 8));
+        pos = ob_kint(ob, pos, "m_rows", t_get64(m, 12 * 8));
+        pos = ob_kint(ob, pos, "m_satcov", t_get64(m, 13 * 8));
+        pos = ob_kint(ob, pos, "ops", t_get64(op, 0));
+        _zag_print(ob[0..pos]);
+        return;
+    }
+    if(_zag_strcmp(mode, "judge") == 1) {
+        let img:[]u8 = z_read_all(_zag_arg(2));
+        let ptxt:[]u8 = z_read_all(_zag_arg(3));
+        let etxt:[]u8 = z_read_all(_zag_arg(4));
+        if(img.len == 0 || ptxt.len == 0 || etxt.len == 0) {
+            pos = ob_kv(ob, pos, "error", "read_input_failed");
+            _zag_print(ob[0..pos]);
+            return;
+        }
+        let m:[]u8 = nio_alloc(14 * 8);
+        let op:[]u8 = nio_alloc(8);
+        let rc:i32 = compute_metrics(img, m, op);
+        if(rc != 0) {
+            pos = ob_kv(ob, pos, "error", "metrics_failed");
+            _zag_print(ob[0..pos]);
+            return;
+        }
+        let refs:[]u8 = nio_alloc(5 * 14 * 8);
+        let names:[]u8 = nio_alloc(5 * 32);
+        if(parse_profile(ptxt, refs, names) != 0) {
+            pos = ob_kv(ob, pos, "error", "profile_parse_failed");
+            _zag_print(ob[0..pos]);
+            return;
+        }
+        let ev:[]u8 = nio_alloc(8);
+        zfill(ev);
+        parse_evidence(etxt, ev);
+        // reference envelope: per-metric min/max across the 5 references
+        let env_lo:[]u8 = nio_alloc(14 * 8);
+        let env_hi:[]u8 = nio_alloc(14 * 8);
+        let mi4:i32 = 0;
+        while(mi4 < 14) {
+            let lo:i64 = 999999999;
+            let hi:i64 = 0 - 999999999;
+            let r2:i32 = 0;
+            while(r2 < 5) {
+                let v:i64 = t_get64(refs, (r2 * 14 + mi4) * 8);
+                if(v < lo) { lo = v; }
+                if(v > hi) { hi = v; }
+                r2 = r2 + 1;
+            }
+            t_put64(env_lo, mi4 * 8, lo);
+            t_put64(env_hi, mi4 * 8, hi);
+            mi4 = mi4 + 1;
+        }
+        // sense bonus: +30 on majority colordisc=SAME across the 5 refs
+        let nsame:i32 = 0;
+        let r3:i32 = 0;
+        while(r3 < 5) {
+            if(ev[r3] == 1) { nsame = nsame + 1; }
+            r3 = r3 + 1;
+        }
+        let bonus:i64 = 0;
+        if(nsame >= 3) { bonus = 30; }
+        let devs:[]u8 = nio_alloc(14 * 8);
+        let base_s:i64 = score_vs_env(m, env_lo, env_hi, bonus, devs);
+        // nearest reference (trace info only; the score is envelope-based)
+        let best_r:i32 = 0;
+        let best_d:i64 = 999999999;
+        r3 = 0;
+        while(r3 < 5) {
+            let acc2:i64 = 0;
+            mi4 = 2;
+            while(mi4 <= 13) {
+                acc2 = acc2 + iabs(t_get64(m, mi4 * 8)
+                                  - t_get64(refs, (r3 * 14 + mi4) * 8));
+                mi4 = mi4 + 1;
+            }
+            if(acc2 < best_d) { best_d = acc2; best_r = r3; }
+            r3 = r3 + 1;
+        }
+        // defects first: the score deducts per fired defect
+        let nd:i32 = 0;
+        let di:i32 = 0;
+        let dlist:[]u8 = nio_alloc(512);
+        let dl:i32 = 0;
+        while(di < 8) {
+            let mi2:i32 = defect_metric(di);
+            let dv:i64 = t_get64(devs, mi2 * 8);
+            if(di == 6) {
+                // COLOR_UNRESTRAINED fires on hue count OR saturation coverage
+                let dv13:i64 = t_get64(devs, 13 * 8);
+                if(dv13 > dv) { dv = dv13; }
+            }
+            if(di == 7) {
+                // ALIGNMENT_WEAK fires on guide count OR alignment concentration
+                let dv2:i64 = t_get64(devs, 8 * 8);
+                if(dv2 > dv) { dv = dv2; }
+            }
+            if(dv >= 450) {
+                if(dl > 0) { dl = ob_add(dlist, dl, ","); }
+                dl = ob_add(dlist, dl, defect_name(di));
+                nd = nd + 1;
+            }
+            di = di + 1;
+        }
+        let best_s:i64 = base_s - 80 * (nd as i64);
+        if(best_s < 0) { best_s = 0; }
+        let verdict:[]u8 = "BAD";
+        if(best_s >= 600) { verdict = "GOOD"; }
+        let conf:i64 = iabs(best_s - 600) * 1000 / 400;
+        if(conf > 1000) { conf = 1000; }
+        pos = ob_kv(ob, pos, "mechanism", "aesthetic-judge-v1");
+        if(ev[6] == 1) {
+            pos = ob_kv(ob, pos, "representation", "b");
+        }
+        if(ev[6] == 0) {
+            pos = ob_kv(ob, pos, "representation", "a");
+        }
+        pos = ob_kv(ob, pos, "judgment", verdict);
+        pos = ob_kint(ob, pos, "score", best_s);
+        pos = ob_kint(ob, pos, "confidence", conf);
+        let nm:[]u8 = names[best_r * 32 .. best_r * 32 + 32];
+        pos = ob_kv(ob, pos, "best_ref", nm[0..zlen(nm)]);
+        if(nd == 0) {
+            pos = ob_kv(ob, pos, "defects", "none");
+        }
+        if(nd > 0) {
+            pos = ob_kv(ob, pos, "defects", dlist[0..dl]);
+        }
+        pos = ob_kint(ob, pos, "n_defects", nd as i64);
+        di = 0;
+        while(di < 8) {
+            let mi3:i32 = defect_metric(di);
+            let dv3:i64 = t_get64(devs, mi3 * 8);
+            if(di == 6) {
+                let dv5:i64 = t_get64(devs, 13 * 8);
+                if(dv5 > dv3) { dv3 = dv5; }
+            }
+            if(di == 7) {
+                let dv4:i64 = t_get64(devs, 8 * 8);
+                if(dv4 > dv3) { dv3 = dv4; }
+            }
+            let kn:[]u8 = nio_alloc(64);
+            let kp:i32 = 0;
+            kp = ob_add(kn, kp, "defect_sev_");
+            kp = ob_add(kn, kp, defect_name(di));
+            pos = ob_kint(ob, pos, kn[0..kp], dv3);
+            nio_free(kn);
+            di = di + 1;
+        }
+        pos = ob_kint(ob, pos, "m_bg_lum", t_get64(m, 0 * 8));
+        pos = ob_kint(ob, pos, "m_ink_lum", t_get64(m, 1 * 8));
+        pos = ob_kint(ob, pos, "m_contrast", t_get64(m, 2 * 8));
+        pos = ob_kint(ob, pos, "m_ink_total", t_get64(m, 3 * 8));
+        pos = ob_kint(ob, pos, "m_bands", t_get64(m, 4 * 8));
+        pos = ob_kint(ob, pos, "m_gap_cv", t_get64(m, 5 * 8));
+        pos = ob_kint(ob, pos, "m_margin_ink", t_get64(m, 6 * 8));
+        pos = ob_kint(ob, pos, "m_guides", t_get64(m, 7 * 8));
+        pos = ob_kint(ob, pos, "m_align_conc", t_get64(m, 8 * 8));
+        pos = ob_kint(ob, pos, "m_type_modes", t_get64(m, 9 * 8));
+        pos = ob_kint(ob, pos, "m_hues", t_get64(m, 10 * 8));
+        pos = ob_kint(ob, pos, "m_hero_ratio", t_get64(m, 11 * 8));
+        pos = ob_kint(ob, pos, "m_rows", t_get64(m, 12 * 8));
+        pos = ob_kint(ob, pos, "m_satcov", t_get64(m, 13 * 8));
+        let sdb:[]u8 = "DIFFERENT";
+        if(ev[best_r] == 1) { sdb = "SAME"; }
+        pos = ob_kv(ob, pos, "sense_colordisc_best", sdb);
+        let stv:[]u8 = "OTHER";
+        if(ev[5] == 1) { stv = "SQUARE"; }
+        if(ev[5] == 2) { stv = "CIRCLE"; }
+        if(ev[5] == 3) { stv = "TRIANGLE"; }
+        pos = ob_kv(ob, pos, "sense_shapetrans", stv);
+        pos = ob_kint(ob, pos, "ops", t_get64(op, 0));
+        _zag_print(ob[0..pos]);
+        return;
+    }
+    pos = ob_kv(ob, pos, "error", "unknown_mode");
+    _zag_print(ob[0..pos]);
+    return;
+}

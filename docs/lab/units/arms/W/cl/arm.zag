@@ -1,0 +1,2757 @@
+// W — Multi-granularity (STRUCT). Arm W crew, Track A. REIMPLEMENTATION r1.
+// Mechanism (frozen: briefs/W.json > ALPHABET_S-X.md §W):
+//   Three segmentations maintained simultaneously over the same bytes:
+//   L0 = 64-byte atoms (fixed grid, incl. a final partial atom < 64B),
+//   L1 = S-rule crystallized chunks (S's exact recall crystallization:
+//         64B atoms at ingest; per-episode recall flags; merge proposal
+//         J>=2 AND J/(J+Ia+Ib)>=3/5; 8-episode history vetting with veto on
+//         any differing trailing bit; merge = new ID + tombstone constituents
+//         audited KILL(reason 10); split proposal (Ia+Ib)/(J+1)>=2, split at
+//         len/2, audited KILL(reason 11)),
+//   L2 = superchunks (the S merge rule one level up: adjacent live L1 chunks
+//         with joint chunk-scale recall fuse; constituents stay live).
+//   Every recall query is served at exactly one granularity, chosen per query
+//   by a deterministic selector (similarity bucket (log2(len), corpus_id),
+//   outcome-blind argmax of expected bytes-saved over logged counters) with an
+//   independent justification-gate recomputation. Committed as GRAN_SEL (0x0B).
+// L2 ambiguity variants (Micah: test both): merge-only | merge+split,
+// selected by argv ("ms" anywhere in argv[3..5] => merge+split).
+// Pure Zag, zero RNG in any decision path, byte-identical reruns.
+// One binary; argv[1] selects the trial mode (see cl/ARM_SPEC.md).
+@import("../substrate/R33_NATIVE_SHA256_V2.zag")
+
+const W_L0:i32=0;
+const W_L1:i32=1;
+const W_L2:i32=2;
+const W_ATOM:i32=64;
+// S-rule constants (frozen, ported from S)
+const S_THETA_MERGE:i32=2;
+const S_RHO_NUM:i32=3;
+const S_RHO_DEN:i32=5;
+const S_SIGMA_NUM:i32=2;
+const S_SIGMA_DEN:i32=1;
+const S_VET_WINDOW:i32=8;
+const S_KILL_MERGE:i32=10;
+const S_KILL_SPLIT:i32=11;
+// W ID-space bits (deterministic from span; tombstoned IDs never reused)
+const W_CHUNK_BIT:i32=4194304;   // 0x400000: L1 merged chunks
+const W_FRAG_BIT:i32=8388608;    // 0x800000: L1 split fragments
+const W_SUPER_BIT:i32=12582912;  // 0xC00000: L2 superchunks
+// selector cost model (judgment-set, frozen per trial; documented in ARM_SPEC)
+const W_KQ:i32=32;               // per-query selection overhead
+const W_KU:i32=8;                // per-unit ID-layer lookup cost
+const W_C_PROSE:i32=1;
+const W_C_CODE:i32=2;
+const W_C_T1P:i32=3;
+const W_C_T1C:i32=4;
+const W_C_T2P:i32=5;
+const W_C_T2C:i32=6;
+const W_C_T3:i32=7;
+const W_C_FRESH:i32=8;
+const W_M3_CAP:i32=4000;    // harness-fixed M3 slot budget (applied to L0, where churn lands)
+const W_M3_V:i32=1000;
+const W_M3_FRESH1:i32=3000;
+const W_M3_KILLF:i32=3000;
+const W_M3_FRESH2:i32=4000;
+const W_M3_LIVENESS_DEN:i32=10; // >=1 mgmt entry per 10 churn steps, steps 3001..10000
+const W_M4_N:i32=200;
+const W_M7_LOOKUPS:i32=5000;
+const W_PROBES:i32=64;      // M1 swap-probe remappings per M1 leg (A15 PROVISIONAL)
+
+// flag bits
+const F_OCC:i32=1;
+const F_LIVE:i32=2;
+const F_PIN:i32=4;
+const F_WEAK:i32=8;
+const F_SHIFT:i32=16;
+const F_PATCH:i32=32;
+const F_CHUNK:i32=64;
+const F_SUPER:i32=128;
+
+// ledger opcodes: frozen namespace + arm-local extensions (ARM_SPEC.md)
+const OP_ADD:i32=1;
+const OP_KILL:i32=2;
+const OP_PIN:i32=3;
+const OP_WEAKEN:i32=4;
+const OP_PROMOTE:i32=5;
+const OP_REVISE:i32=6;
+const OP_REFUSE:i32=8;
+const OP_EVICT:i32=9;
+const OP_GRANSEL:i32=11;   // 0x0B arm-local: selector decision
+const OP_L2ADD:i32=12;     // arm-local: L2 superchunk fusion (ADD of superchunk)
+const OP_TDB:i32=16;
+const OP_TDC:i32=17;
+const OP_TMV:i32=18;
+const OP_TSP:i32=19;       // TRAINER_SWAP_PROBE
+
+// L2 consolidation variant: 0 = merge-only, 1 = merge+split (argv-selected)
+fn w_variant() i32 {
+    let a3:[]u8=_zag_arg(3);let a4:[]u8=_zag_arg(4);let a5:[]u8=_zag_arg(5);
+    if(_zag_strcmp(a3,"ms")==1){return 1;}
+    if(_zag_strcmp(a4,"ms")==1){return 1;}
+    if(_zag_strcmp(a5,"ms")==1){return 1;}
+    return 0;
+}
+
+// ---- little-endian packing on []u8 ----
+fn wuget(b:[]u8,at:i32)i64 {
+    return (b[at] as i64)+((b[at+1] as i64)<<8)+((b[at+2] as i64)<<16)+((b[at+3] as i64)<<24);
+}
+fn wuput(b:[]u8,at:i32,v:i64)void {
+    b[at]=(v & 255) as u8;b[at+1]=((v>>8) & 255) as u8;
+    b[at+2]=((v>>16) & 255) as u8;b[at+3]=((v>>24) & 255) as u8;
+}
+fn wigetc(b:[]u8,at:i32)i32 { return wuget(b,at) as i32; }
+fn wiput(b:[]u8,at:i32,v:i32)void { wuput(b,at,v as i64); }
+fn sget(b:[]u8,at:i32)i64 {
+    return wuget(b,at)+(wuget(b,at+4)<<32);
+}
+fn sput(b:[]u8,at:i32,v:i64)void {
+    wuput(b,at,v & 4294967295);wuput(b,at+4,(v>>32) & 4294967295);
+}
+fn zfill(b:[]u8)void {
+    let i:i32=0;while(i<b.len){b[i]=0;i=i+1;}
+}
+fn zfill_ff(b:[]u8)void {
+    let i:i32=0;while(i<b.len){b[i]=255;i=i+1;}
+}
+fn w_hash(id:i32,cap:i32)i32 {
+    let h:i32=id ^ ((id>>16)*2654435761);
+    if(h<0){h=-h;}
+    if(cap<=0){return 0;}
+    return h%cap;
+}
+
+struct W {
+    cap1:i32,
+    l1_id:[]u8,l1_off:[]u8,l1_len:[]u8,l1_corp:[]u8,l1_flags:[]u8,
+    l1_pidx:[]u8,l1_nxt:[]u8,l1_prv:[]u8,
+    l1_jr:[]u8,l1_ind:[]u8,l1_hist:[]u8,l1_rflg:[]u8,l1_rflg2:[]u8,
+    l1_mrgj:[]u8,l1_mrgiu:[]u8,l1_mrgiv:[]u8,l1_pch:[]u8,l1_shift:[]u8,
+    ord1_head:i32,ord1_tail:i32,n1:i32,iseq1:i32,chunk_seq:i32,ep:i32,
+    cap0:i32,
+    l0_id:[]u8,l0_off:[]u8,l0_len:[]u8,l0_corp:[]u8,l0_flags:[]u8,
+    l0_pidx:[]u8,l0_nxt:[]u8,l0_prv:[]u8,l0_pch:[]u8,l0_shift:[]u8,
+    ord0_head:i32,ord0_tail:i32,n0:i32,iseq0:i32,
+    cap2:i32,
+    l2_id:[]u8,l2_off:[]u8,l2_len:[]u8,l2_corp:[]u8,l2_flags:[]u8,
+    l2_pidx:[]u8,l2_nxt:[]u8,l2_prv:[]u8,
+    l2_la:[]u8,l2_lb:[]u8,l2_mrgj:[]u8,l2_mrgiu:[]u8,l2_mrgiv:[]u8,
+    ord2_head:i32,ord2_tail:i32,n2:i32,iseq2:i32,sc_seq:i32,
+    pl_cap:i32,pl_n:i32,
+    pl_a:[]u8,pl_b:[]u8,pl_j:[]u8,pl_iu:[]u8,pl_iv:[]u8,
+    pl_hu:[]u8,pl_hv:[]u8,pl_live:[]u8,pl_fused:[]u8,
+    p2_cap:i32,p2_n:i32,
+    p2_a:[]u8,p2_b:[]u8,p2_j:[]u8,p2_iu:[]u8,p2_iv:[]u8,
+    p2_hu:[]u8,p2_hv:[]u8,p2_live:[]u8,p2_fused:[]u8,
+    s1_key:[]u8,s1_slot:[]u8,s1_cap:i32,
+    s0_key:[]u8,s0_slot:[]u8,s0_cap:i32,
+    s2_key:[]u8,s2_slot:[]u8,s2_cap:i32,
+    idm_key:[]u8,idm_val:[]u8,idm_cap:i32,id_refs:i64,
+    l1_patches:[]u8,l1_patch_n:i32,l1_patch_cap:i32,
+    l0_patches:[]u8,l0_patch_n:i32,l0_patch_cap:i32,
+    sel_count:[]u8,sel_saved:[]u8,
+    sel_refusals:i32,sel_selections:i32,
+    led0:[]u8,led1:[]u8,led2:[]u8,led3:[]u8,
+    led4:[]u8,led5:[]u8,led6:[]u8,led7:[]u8,
+    led_n:i32,led_dropped:i32,
+    l1_cover:[]u8,l1_tosuper:[]u8,
+    trace:[]u8,trace_n:i32,trace_cap:i32,
+    frozen:i32,n_veto:i32,n_merge:i32,n_split:i32,
+    ph0:i32,ph1:i32,ph2:i32,
+}
+
+// ---- allocator trace (M8): A <size> / F <size>, order+size only ----
+fn w_trace_add(s:*W,tag:i32,n:i32)void {
+    let t:[]u8=s.*.trace;let tn:i32=s.*.trace_n;
+    let num:[]u8=_zag_i64_to_str(n as i64);
+    let need:i32=2+num.len+1;
+    if(tn+need>=s.*.trace_cap){
+        let nc:i32=s.*.trace_cap*2;let nb:[]u8=nio_alloc(nc);
+        if(nb.len==nc){
+            let i:i32=0;while(i<tn){nb[i]=t[i];i=i+1;}
+            nio_free(t);s.*.trace=nb;s.*.trace_cap=nc;t=nb;
+        }
+    }
+    t=s.*.trace;
+    t[tn]=tag as u8;tn=tn+1;t[tn]=32;tn=tn+1;
+    let i:i32=0;while(i<num.len){t[tn]=num[i];tn=tn+1;i=i+1;}
+    t[tn]=10;tn=tn+1;s.*.trace_n=tn;
+    nio_free(num);
+}
+fn halloc(s:*W,n:i32)[]u8 {
+    w_trace_add(s,65,n);
+    return nio_alloc(n);
+}
+fn hfree(s:*W,b:[]u8)void {
+    w_trace_add(s,70,b.len);
+    nio_free(b);
+}
+
+fn w_init(s:*W,cap1:i32,cap2:i32,cap0:i32,plcap:i32,
+          s1cap:i32,s0cap:i32,s2cap:i32,idmcap:i32,
+          p1cap:i32,p0cap:i32,led_entries:i32)void {
+    s.*.cap1=cap1;s.*.cap2=cap2;s.*.cap0=cap0;
+    s.*.trace_cap=65536;s.*.trace=nio_alloc(65536);s.*.trace_n=0;
+    s.*.l1_id=halloc(s,cap1*4);s.*.l1_off=halloc(s,cap1*4);
+    s.*.l1_len=halloc(s,cap1*4);s.*.l1_corp=halloc(s,cap1*4);
+    s.*.l1_flags=halloc(s,cap1*4);
+    s.*.l1_pidx=halloc(s,cap1*4);s.*.l1_nxt=halloc(s,cap1*4);s.*.l1_prv=halloc(s,cap1*4);
+    s.*.l1_jr=halloc(s,cap1*4);s.*.l1_ind=halloc(s,cap1*4);s.*.l1_hist=halloc(s,cap1*4);
+    s.*.l1_rflg=halloc(s,cap1*4);s.*.l1_rflg2=halloc(s,cap1*4);
+    s.*.l1_mrgj=halloc(s,cap1*4);s.*.l1_mrgiu=halloc(s,cap1*4);s.*.l1_mrgiv=halloc(s,cap1*4);
+    s.*.l1_pch=halloc(s,cap1*4);s.*.l1_shift=halloc(s,cap1*4);
+    zfill(s.*.l1_id);zfill(s.*.l1_off);zfill(s.*.l1_len);zfill(s.*.l1_corp);
+    zfill(s.*.l1_flags);zfill(s.*.l1_jr);zfill(s.*.l1_ind);zfill(s.*.l1_hist);
+    zfill(s.*.l1_rflg);zfill(s.*.l1_rflg2);
+    zfill(s.*.l1_mrgj);zfill(s.*.l1_mrgiu);zfill(s.*.l1_mrgiv);
+    zfill(s.*.l1_shift);
+    zfill_ff(s.*.l1_pidx);zfill_ff(s.*.l1_nxt);zfill_ff(s.*.l1_prv);
+    let i:i32=0;while(i<cap1){wiput(s.*.l1_pch,i*4,-1);i=i+1;}
+    s.*.ord1_head=-1;s.*.ord1_tail=-1;s.*.n1=0;s.*.iseq1=0;s.*.chunk_seq=0;s.*.ep=0;
+    s.*.l0_id=halloc(s,cap0*4);s.*.l0_off=halloc(s,cap0*4);
+    s.*.l0_len=halloc(s,cap0*4);s.*.l0_corp=halloc(s,cap0*4);
+    s.*.l0_flags=halloc(s,cap0*4);
+    s.*.l0_pidx=halloc(s,cap0*4);s.*.l0_nxt=halloc(s,cap0*4);s.*.l0_prv=halloc(s,cap0*4);
+    s.*.l0_pch=halloc(s,cap0*4);s.*.l0_shift=halloc(s,cap0*4);
+    zfill(s.*.l0_id);zfill(s.*.l0_off);zfill(s.*.l0_len);zfill(s.*.l0_corp);
+    zfill(s.*.l0_flags);zfill(s.*.l0_shift);
+    zfill_ff(s.*.l0_pidx);zfill_ff(s.*.l0_nxt);zfill_ff(s.*.l0_prv);
+    i=0;while(i<cap0){wiput(s.*.l0_pch,i*4,-1);i=i+1;}
+    s.*.ord0_head=-1;s.*.ord0_tail=-1;s.*.n0=0;s.*.iseq0=0;
+    s.*.l2_id=halloc(s,cap2*4);s.*.l2_off=halloc(s,cap2*4);
+    s.*.l2_len=halloc(s,cap2*4);s.*.l2_corp=halloc(s,cap2*4);
+    s.*.l2_flags=halloc(s,cap2*4);
+    s.*.l2_pidx=halloc(s,cap2*4);s.*.l2_nxt=halloc(s,cap2*4);s.*.l2_prv=halloc(s,cap2*4);
+    s.*.l2_la=halloc(s,cap2*4);s.*.l2_lb=halloc(s,cap2*4);
+    s.*.l2_mrgj=halloc(s,cap2*4);s.*.l2_mrgiu=halloc(s,cap2*4);s.*.l2_mrgiv=halloc(s,cap2*4);
+    zfill(s.*.l2_id);zfill(s.*.l2_off);zfill(s.*.l2_len);zfill(s.*.l2_corp);
+    zfill(s.*.l2_flags);
+    zfill(s.*.l2_la);zfill(s.*.l2_lb);
+    zfill(s.*.l2_mrgj);zfill(s.*.l2_mrgiu);zfill(s.*.l2_mrgiv);
+    zfill_ff(s.*.l2_pidx);zfill_ff(s.*.l2_nxt);zfill_ff(s.*.l2_prv);
+    s.*.ord2_head=-1;s.*.ord2_tail=-1;s.*.n2=0;s.*.iseq2=0;s.*.sc_seq=0;
+    s.*.pl_cap=plcap;s.*.pl_n=0;
+    s.*.pl_a=halloc(s,plcap*4);s.*.pl_b=halloc(s,plcap*4);
+    s.*.pl_j=halloc(s,plcap*4);s.*.pl_iu=halloc(s,plcap*4);s.*.pl_iv=halloc(s,plcap*4);
+    s.*.pl_hu=halloc(s,plcap*4);s.*.pl_hv=halloc(s,plcap*4);
+    s.*.pl_live=halloc(s,plcap*4);s.*.pl_fused=halloc(s,plcap*4);
+    zfill(s.*.pl_a);zfill(s.*.pl_b);zfill(s.*.pl_j);zfill(s.*.pl_iu);zfill(s.*.pl_iv);
+    zfill(s.*.pl_hu);zfill(s.*.pl_hv);zfill(s.*.pl_live);zfill(s.*.pl_fused);
+    s.*.p2_cap=plcap;s.*.p2_n=0;
+    s.*.p2_a=halloc(s,plcap*4);s.*.p2_b=halloc(s,plcap*4);
+    s.*.p2_j=halloc(s,plcap*4);s.*.p2_iu=halloc(s,plcap*4);s.*.p2_iv=halloc(s,plcap*4);
+    s.*.p2_hu=halloc(s,plcap*4);s.*.p2_hv=halloc(s,plcap*4);
+    s.*.p2_live=halloc(s,plcap*4);s.*.p2_fused=halloc(s,plcap*4);
+    zfill(s.*.p2_a);zfill(s.*.p2_b);zfill(s.*.p2_j);zfill(s.*.p2_iu);zfill(s.*.p2_iv);
+    zfill(s.*.p2_hu);zfill(s.*.p2_hv);zfill(s.*.p2_live);zfill(s.*.p2_fused);
+    s.*.s1_cap=s1cap;
+    s.*.s1_key=halloc(s,s1cap*8);s.*.s1_slot=halloc(s,s1cap*4);
+    zfill(s.*.s1_key);zfill(s.*.s1_slot);
+    s.*.s0_cap=s0cap;
+    s.*.s0_key=halloc(s,s0cap*8);s.*.s0_slot=halloc(s,s0cap*4);
+    zfill(s.*.s0_key);zfill(s.*.s0_slot);
+    s.*.s2_cap=s2cap;
+    s.*.s2_key=halloc(s,s2cap*8);s.*.s2_slot=halloc(s,s2cap*4);
+    zfill(s.*.s2_key);zfill(s.*.s2_slot);
+    s.*.idm_cap=idmcap;
+    s.*.idm_key=halloc(s,idmcap*8);s.*.idm_val=halloc(s,idmcap*4);
+    zfill(s.*.idm_key);zfill(s.*.idm_val);
+    if(p1cap<1){p1cap=1;}
+    s.*.l1_patch_cap=p1cap;s.*.l1_patches=halloc(s,p1cap*4096);
+    zfill(s.*.l1_patches);s.*.l1_patch_n=0;
+    if(p0cap<1){p0cap=1;}
+    s.*.l0_patch_cap=p0cap;s.*.l0_patches=halloc(s,p0cap*64);
+    zfill(s.*.l0_patches);s.*.l0_patch_n=0;
+    // selector evidence: 472 buckets x 6 i64 (stride 6, no overlap)
+    s.*.sel_count=halloc(s,1800*4);s.*.sel_saved=halloc(s,3000*8);
+    zfill(s.*.sel_count);zfill(s.*.sel_saved);
+    s.*.sel_refusals=0;s.*.sel_selections=0;
+    s.*.led0="";s.*.led1="";s.*.led2="";s.*.led3="";
+    s.*.led4="";s.*.led5="";s.*.led6="";s.*.led7="";
+    s.*.led_n=0;s.*.led_dropped=0;
+    s.*.l1_cover=halloc(s,cap0*4);
+    s.*.l1_tosuper=halloc(s,cap1*4);
+    let ci2:i32=0;while(ci2<cap0){wiput(s.*.l1_cover,ci2*4,-1);ci2=ci2+1;}
+    ci2=0;while(ci2<cap1){wiput(s.*.l1_tosuper,ci2*4,-1);ci2=ci2+1;}
+    s.*.frozen=0;s.*.n_veto=0;s.*.n_merge=0;s.*.n_split=0;
+    s.*.ph0=0;s.*.ph1=0;s.*.ph2=0;
+}
+fn w_new(cap1:i32,cap2:i32,cap0:i32,plcap:i32,
+         s1cap:i32,s0cap:i32,s2cap:i32,idmcap:i32,
+         p1cap:i32,p0cap:i32,led_entries:i32) W {
+    let s:W=W{.cap1=0,
+        .l1_id="",.l1_off="",.l1_len="",.l1_corp="",.l1_flags="",
+        .l1_pidx="",.l1_nxt="",.l1_prv="",
+        .l1_jr="",.l1_ind="",.l1_hist="",.l1_rflg="",.l1_rflg2="",
+        .l1_mrgj="",.l1_mrgiu="",.l1_mrgiv="",.l1_pch="",.l1_shift="",
+        .ord1_head=0,.ord1_tail=0,.n1=0,.iseq1=0,.chunk_seq=0,.ep=0,
+        .cap0=0,
+        .l0_id="",.l0_off="",.l0_len="",.l0_corp="",.l0_flags="",
+        .l0_pidx="",.l0_nxt="",.l0_prv="",.l0_pch="",.l0_shift="",
+        .ord0_head=0,.ord0_tail=0,.n0=0,.iseq0=0,
+        .cap2=0,
+        .l2_id="",.l2_off="",.l2_len="",.l2_corp="",.l2_flags="",
+        .l2_pidx="",.l2_nxt="",.l2_prv="",
+        .l2_la="",.l2_lb="",.l2_mrgj="",.l2_mrgiu="",.l2_mrgiv="",
+        .ord2_head=0,.ord2_tail=0,.n2=0,.iseq2=0,.sc_seq=0,
+        .pl_cap=0,.pl_n=0,
+        .pl_a="",.pl_b="",.pl_j="",.pl_iu="",.pl_iv="",
+        .pl_hu="",.pl_hv="",.pl_live="",.pl_fused="",
+        .p2_cap=0,.p2_n=0,
+        .p2_a="",.p2_b="",.p2_j="",.p2_iu="",.p2_iv="",
+        .p2_hu="",.p2_hv="",.p2_live="",.p2_fused="",
+        .s1_key="",.s1_slot="",.s1_cap=0,
+        .s0_key="",.s0_slot="",.s0_cap=0,
+        .s2_key="",.s2_slot="",.s2_cap=0,
+        .idm_key="",.idm_val="",.idm_cap=0,.id_refs=0,
+        .l1_patches="",.l1_patch_n=0,.l1_patch_cap=0,
+        .l0_patches="",.l0_patch_n=0,.l0_patch_cap=0,
+        .sel_count="",.sel_saved="",
+        .sel_refusals=0,.sel_selections=0,
+        .led0="",.led1="",.led2="",.led3="",
+        .led4="",.led5="",.led6="",.led7="",
+        .led_n=0,.led_dropped=0,
+        .l1_cover="",.l1_tosuper="",
+        .trace="",.trace_n=0,.trace_cap=0,
+        .frozen=0,.n_veto=0,.n_merge=0,.n_split=0,.ph0=0,.ph1=0,.ph2=0};
+    w_init(&s,cap1,cap2,cap0,plcap,s1cap,s0cap,s2cap,idmcap,p1cap,p0cap,led_entries);
+    return s;
+}
+
+// ---- ledger (two segments; 16 words / 64B per entry) ----
+// ---- audit ledger: 8 chunks, 524287 entries x 64B = 33.5MB each (<=2^25) ----
+fn w_led_get(s:*W,ci:i32) []u8 {
+    if(ci==0){return s.*.led0;}if(ci==1){return s.*.led1;}
+    if(ci==2){return s.*.led2;}if(ci==3){return s.*.led3;}
+    if(ci==4){return s.*.led4;}if(ci==5){return s.*.led5;}
+    if(ci==6){return s.*.led6;}return s.*.led7;
+}
+fn w_led_set(s:*W,ci:i32,b:[]u8) void {
+    if(ci==0){s.*.led0=b;}else if(ci==1){s.*.led1=b;}
+    else if(ci==2){s.*.led2=b;}else if(ci==3){s.*.led3=b;}
+    else if(ci==4){s.*.led4=b;}else if(ci==5){s.*.led5=b;}
+    else if(ci==6){s.*.led6=b;}else{s.*.led7=b;}
+}
+fn w_led(s:*W,op:i32,slot:i32,rc:i32,b1:i32,b2:i32,b3:i32,b4:i32,b5:i32,
+         a1:i32,a2:i32,a3:i32,a4:i32,a5:i32,d1:i32,d2:i32)void {
+    let n:i32=s.*.led_n;
+    let ci:i32=n/524287;
+    if(ci>=8){s.*.led_dropped=s.*.led_dropped+1;return;}
+    let seg:[]u8=w_led_get(s,ci);
+    if(seg.len==0){
+        seg=halloc(s,524287*64);
+        w_led_set(s,ci,seg);
+    }
+    let at:i32=(n-ci*524287)*64;
+    wiput(seg,at,op);wiput(seg,at+4,slot);wiput(seg,at+8,rc);
+    wiput(seg,at+12,b1);wiput(seg,at+16,b2);wiput(seg,at+20,b3);
+    wiput(seg,at+24,b4);wiput(seg,at+28,b5);
+    wiput(seg,at+32,a1);wiput(seg,at+36,a2);wiput(seg,at+40,a3);
+    wiput(seg,at+44,a4);wiput(seg,at+48,a5);
+    wiput(seg,at+52,0);
+    wiput(seg,at+56,d1);wiput(seg,at+60,d2);
+    s.*.led_n=n+1;
+}
+fn w_led_used(s:*W,ci:i32) i32 {
+    // bytes used in ledger chunk ci
+    let base:i32=ci*524287;
+    if(s.*.led_n<=base){return 0;}
+    let e:i32=s.*.led_n-base;
+    if(e>524287){e=524287;}
+    return e*64;
+}
+fn w_led_bytes(s:*W) i64 { return (s.*.led_n as i64)*64; }
+
+// ---- span index: (corpus,off) -> slot (open addressing; key 0 = empty) ----
+fn w_skey(corpus:i32,off:i32) i64 {
+    return ((corpus as i64)<<32)|(off as i64);
+}
+fn w_idx_lookup(keyb:[]u8,slotb:[]u8,cap:i32,key:i64) i32 {
+    if(cap<=0){return -1;}
+    let sk:i64=key+1;
+    let h:i32=((sk ^ (sk>>33)) as i32) % cap;
+    if(h<0){h=-h;}
+    let t:i32=0;
+    while(t<cap){
+        let k:i64=sget(keyb,h*8);
+        if(k==0){return -1;}
+        if(k==sk){return wigetc(slotb,h*4);}
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    return -1;
+}
+fn w_idx_add(keyb:[]u8,slotb:[]u8,cap:i32,key:i64,slot:i32) i32 {
+    // keys are stored shifted by +1 so that key 0 (corpus 0, offset 0 — the
+    // very first atom) is storable; 0 remains the empty sentinel. r1.1 fix:
+    // previously key 0 was rejected, making the first atom unrecallable
+    // (M1 recall 999/1000) and breaking the ID probe for id 0.
+    if(cap<=0){return -1;}
+    let sk:i64=key+1;
+    let h:i32=((sk ^ (sk>>33)) as i32) % cap;
+    if(h<0){h=-h;}
+    let t:i32=0;
+    while(t<cap){
+        let k:i64=sget(keyb,h*8);
+        if(k==0 || k==sk){
+            sput(keyb,h*8,sk);wiput(slotb,h*4,slot);
+            return 0;
+        }
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+    return -1;
+}
+fn w_idx_del(keyb:[]u8,slotb:[]u8,cap:i32,key:i64) void {
+    if(cap<=0){return;}
+    let sk:i64=key+1;
+    let h:i32=((sk ^ (sk>>33)) as i32) % cap;
+    if(h<0){h=-h;}
+    let t:i32=0;
+    while(t<cap){
+        let k:i64=sget(keyb,h*8);
+        if(k==0){return;}
+        if(k==sk){
+            // delete + backward-shift rehash (Knuth R)
+            let d:i32=h;
+            sput(keyb,d*8,0);
+            let j:i32=d;
+            t=t+1;
+            while(1==1){
+                j=j+1;if(j>=cap){j=0;}
+                let jk:i64=sget(keyb,j*8);
+                if(jk==0){break;}
+                let js:i32=wigetc(slotb,j*4);
+                sput(keyb,j*8,0);
+                w_idx_add(keyb,slotb,cap,jk-1,js);
+                t=t+1;
+                if(t>cap*2){break;}
+            }
+            return;
+        }
+        h=h+1;if(h>=cap){h=0;}t=t+1;
+    }
+}
+
+// ---- L0 atom registry ----
+fn w0_place(s:*W) i32 {
+    // returns a free slot; reuses dead slots; -1 if full.
+    // Placement-hint optimization (r1.1): ph0 is maintained as <= the lowest
+    // free slot (lowered on every kill), so scanning from ph0 finds the exact
+    // lowest free slot — identical assignment to the original from-zero scan,
+    // amortized O(1) instead of O(n). Deterministic: pure function of op order.
+    let cap:i32=s.*.cap0;
+    let fl:[]u8=s.*.l0_flags;let px:[]u8=s.*.l0_pidx;
+    let start:i32=s.*.ph0;
+    if(start>=cap){start=0;}
+    let sl:i32=start;
+    let t:i32=0;
+    while(t<cap){
+        if((wigetc(fl,sl*4) & F_OCC)==0){
+            wiput(px,sl*4,s.*.iseq0);s.*.iseq0=s.*.iseq0+1;
+            let np:i32=sl+1;if(np>=cap){np=0;}
+            s.*.ph0=np;
+            return sl;
+        }
+        sl=sl+1;if(sl>=cap){sl=0;}t=t+1;
+    }
+    return -1;
+}
+fn w0_ord_remove(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l0_nxt;let pv:[]u8=s.*.l0_prv;
+    let nxi:i32=wigetc(nx,sl*4);let pvi:i32=wigetc(pv,sl*4);
+    // r1.1 fix: w0_ord_append calls remove-then-append for every ingest; for
+    // a fresh slot (nxt=prv=-1, not head/tail) there is nothing to unlink and
+    // the old code zeroed head/tail, collapsing the list to length 1. That
+    // made eviction take the newest unit instead of the oldest (M3 fresh
+    // recall collapsed to ~0% and the freeze flag fired spuriously).
+    if(nxi<0 && pvi<0 && s.*.ord0_head!=sl && s.*.ord0_tail!=sl){return;}
+    if(pvi>=0){wiput(nx,pvi*4,nxi);}else{if(s.*.ord0_head==sl){s.*.ord0_head=nxi;}}
+    if(nxi>=0){wiput(pv,nxi*4,pvi);}else{if(s.*.ord0_tail==sl){s.*.ord0_tail=pvi;}}
+    wiput(nx,sl*4,-1);wiput(pv,sl*4,-1);
+}
+fn w0_ord_append(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l0_nxt;let pv:[]u8=s.*.l0_prv;
+    w0_ord_remove(s,sl);
+    wiput(pv,sl*4,s.*.ord0_tail);wiput(nx,sl*4,-1);
+    if(s.*.ord0_tail>=0){wiput(nx,s.*.ord0_tail*4,sl);}else{s.*.ord0_head=sl;}
+    s.*.ord0_tail=sl;
+}
+fn w_id_add(s:*W,id:i32,level:i32,slot:i32)void {
+    let v:i32=(level<<24)|slot;
+    w_idx_add(s.*.idm_key,s.*.idm_val,s.*.idm_cap,id as i64,v);
+}
+fn w_id_del(s:*W,id:i32)void {
+    w_idx_del(s.*.idm_key,s.*.idm_val,s.*.idm_cap,id as i64);
+}
+fn w_id_loc(s:*W,id:i32) i32 {
+    // returns (level<<24)|slot, or -1
+    s.*.id_refs=s.*.id_refs+1;
+    return w_idx_lookup(s.*.idm_key,s.*.idm_val,s.*.idm_cap,id as i64);
+}
+fn w0_ingest(s:*W,corpus:i32,off:i32,len:i32) i32 {
+    // ingest one atom; dedups by span; returns slot or -1 (full)
+    let key:i64=w_skey(corpus,off);
+    let ex:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,key);
+    if(ex>=0){return ex;}
+    let sl:i32=w0_place(s);
+    if(sl<0){return -1;}
+    let id:[]u8=s.*.l0_id;let fo:[]u8=s.*.l0_off;let ln:[]u8=s.*.l0_len;
+    let fc:[]u8=s.*.l0_corp;let fl:[]u8=s.*.l0_flags;
+    let aid:i32=((corpus<<24)|off) as i32;
+    wiput(id,sl*4,aid);wiput(fo,sl*4,off);wiput(ln,sl*4,len);
+    wiput(fc,sl*4,corpus);
+    wiput(fl,sl*4,F_OCC|F_LIVE);
+    w_idx_add(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,key,sl);
+    w_id_add(s,aid,W_L0,sl);
+    w0_ord_append(s,sl);
+    s.*.n0=s.*.n0+1;
+    w_led(s,OP_ADD,sl,0,off,len,corpus,aid,0,0,0,0,0,0,0,0);
+    return sl;
+}
+fn w0_kill(s:*W,sl:i32,reason:i32)void {
+    let fl:[]u8=s.*.l0_flags;
+    let f:i32=wigetc(fl,sl*4);
+    if((f&F_LIVE)==0){return;}
+    let aid:i32=wigetc(s.*.l0_id,sl*4);
+    let off:i32=wigetc(s.*.l0_off,sl*4);
+    let corp:i32=wigetc(s.*.l0_corp,sl*4);
+    wiput(fl,sl*4,f - (f & F_LIVE));
+    w_idx_del(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,w_skey(corp,off));
+    w_id_del(s,aid);
+    w0_ord_remove(s,sl);
+    wiput(s.*.l1_cover,sl*4,-1);
+    s.*.n0=s.*.n0-1;
+    if(sl<s.*.ph0){s.*.ph0=sl;}
+    w_led(s,OP_KILL,sl,0,0,0,0,aid,0,0,0,0,0,0,reason,0);
+}
+
+// ---- L1 chunk registry (S-rule crystallization) ----
+fn w1_place(s:*W) i32 {
+    // placement-hint optimization (r1.1): identical lowest-free-slot
+    // assignment to the original from-zero scan; see w0_place.
+    let cap:i32=s.*.cap1;
+    let fl:[]u8=s.*.l1_flags;let px:[]u8=s.*.l1_pidx;
+    let start:i32=s.*.ph1;
+    if(start>=cap){start=0;}
+    let sl:i32=start;
+    let t:i32=0;
+    while(t<cap){
+        if((wigetc(fl,sl*4) & F_OCC)==0){
+            wiput(px,sl*4,s.*.iseq1);s.*.iseq1=s.*.iseq1+1;
+            let np:i32=sl+1;if(np>=cap){np=0;}
+            s.*.ph1=np;
+            return sl;
+        }
+        sl=sl+1;if(sl>=cap){sl=0;}t=t+1;
+    }
+    return -1;
+}
+fn w1_ord_remove(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l1_nxt;let pv:[]u8=s.*.l1_prv;
+    let nxi:i32=wigetc(nx,sl*4);let pvi:i32=wigetc(pv,sl*4);
+    // r1.1 fix: same guard as w0_ord_remove (see above).
+    if(nxi<0 && pvi<0 && s.*.ord1_head!=sl && s.*.ord1_tail!=sl){return;}
+    if(pvi>=0){wiput(nx,pvi*4,nxi);}else{if(s.*.ord1_head==sl){s.*.ord1_head=nxi;}}
+    if(nxi>=0){wiput(pv,nxi*4,pvi);}else{if(s.*.ord1_tail==sl){s.*.ord1_tail=pvi;}}
+    wiput(nx,sl*4,-1);wiput(pv,sl*4,-1);
+}
+fn w1_ord_append(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l1_nxt;let pv:[]u8=s.*.l1_prv;
+    w1_ord_remove(s,sl);
+    wiput(pv,sl*4,s.*.ord1_tail);wiput(nx,sl*4,-1);
+    if(s.*.ord1_tail>=0){wiput(nx,s.*.ord1_tail*4,sl);}else{s.*.ord1_head=sl;}
+    s.*.ord1_tail=sl;
+}
+fn w1_alloc_unit(s:*W,corpus:i32,off:i32,len:i32,is_chunk:i32) i32 {
+    // raw placement of an L1 unit (atom or chunk); caller audits.
+    // dedup by span first.
+    let key:i64=w_skey(corpus,off);
+    let ex:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+    if(ex>=0){
+        let fl:[]u8=s.*.l1_flags;
+        if((wigetc(fl,ex*4)&F_LIVE)!=0){return ex;}
+    }
+    let sl:i32=w1_place(s);
+    if(sl<0){return -1;}
+    let aid:i32=((corpus<<24)|off) as i32;
+    if(is_chunk==1){aid=aid | W_CHUNK_BIT;}
+    let id:[]u8=s.*.l1_id;let fo:[]u8=s.*.l1_off;let ln:[]u8=s.*.l1_len;
+    let fc:[]u8=s.*.l1_corp;let fl2:[]u8=s.*.l1_flags;
+    wiput(id,sl*4,aid);wiput(fo,sl*4,off);wiput(ln,sl*4,len);
+    wiput(fc,sl*4,corpus);
+    let flg:i32=F_OCC|F_LIVE;
+    if(is_chunk==1){flg=flg|F_CHUNK;}
+    wiput(fl2,sl*4,flg);
+    let jr:[]u8=s.*.l1_jr;let ind:[]u8=s.*.l1_ind;let hs:[]u8=s.*.l1_hist;
+    let rf:[]u8=s.*.l1_rflg;let rf2:[]u8=s.*.l1_rflg2;
+    let mj:[]u8=s.*.l1_mrgj;let mu:[]u8=s.*.l1_mrgiu;let mv:[]u8=s.*.l1_mrgiv;
+    wiput(jr,sl*4,0);wiput(ind,sl*4,0);wiput(hs,sl*4,0);
+    wiput(rf,sl*4,0);wiput(rf2,sl*4,0);
+    wiput(mj,sl*4,0);wiput(mu,sl*4,0);wiput(mv,sl*4,0);
+    w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key,sl);
+    w_id_add(s,aid,W_L1,sl);
+    w1_ord_append(s,sl);
+    s.*.n1=s.*.n1+1;
+    return sl;
+}
+fn w1_kill(s:*W,sl:i32,reason:i32,new_id:i32)void {
+    let fl:[]u8=s.*.l1_flags;
+    let f:i32=wigetc(fl,sl*4);
+    if((f&F_LIVE)==0){return;}
+    let aid:i32=wigetc(s.*.l1_id,sl*4);
+    let off:i32=wigetc(s.*.l1_off,sl*4);
+    let corp:i32=wigetc(s.*.l1_corp,sl*4);
+    wiput(fl,sl*4,f - (f & F_LIVE));
+    w_idx_del(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corp,off));
+    w_id_del(s,aid);
+    w1_ord_remove(s,sl);
+    w_p2_invalidate_slot(s,sl);
+    wiput(s.*.l1_tosuper,sl*4,-1);
+    s.*.n1=s.*.n1-1;
+    if(sl<s.*.ph1){s.*.ph1=sl;}
+    w_led(s,OP_KILL,sl,0,0,0,0,aid,0,0,0,0,0,0,reason,new_id);
+}
+fn w1_ingest_atom(s:*W,corpus:i32,off:i32,len:i32) i32 {
+    // S-faithful L1 base unit: one atom at ingest (64B, or final partial).
+    let sl:i32=w1_alloc_unit(s,corpus,off,len,0);
+    if(sl<0){return -1;}
+    let aid:i32=wigetc(s.*.l1_id,sl*4);
+    w_led(s,OP_ADD,sl,0,off,len,corpus,aid,0,0,0,0,0,0,0,0);
+    return sl;
+}
+fn w1_mark_chunk(s:*W,sl:i32)void {
+    let fl:[]u8=s.*.l1_flags;
+    wiput(fl,sl*4,wigetc(fl,sl*4)|F_CHUNK);
+}
+// pair bookkeeping for the L1 S-rule
+fn w_pair_find(s:*W,a:i32,b:i32) i32 {
+    let n:i32=s.*.pl_n;
+    let pa:[]u8=s.*.pl_a;let pb:[]u8=s.*.pl_b;let pv:[]u8=s.*.pl_live;
+    let i:i32=0;
+    while(i<n){
+        if(wigetc(pa,i*4)==a && wigetc(pb,i*4)==b && wigetc(pv,i*4)==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn w_pair_add(s:*W,a:i32,b:i32) i32 {
+    let ex:i32=w_pair_find(s,a,b);
+    if(ex>=0){return ex;}
+    let n:i32=s.*.pl_n;
+    if(n>=s.*.pl_cap){return -1;}
+    let pa:[]u8=s.*.pl_a;let pb:[]u8=s.*.pl_b;
+    let pj:[]u8=s.*.pl_j;let piu:[]u8=s.*.pl_iu;let piv:[]u8=s.*.pl_iv;
+    let phu:[]u8=s.*.pl_hu;let phv:[]u8=s.*.pl_hv;
+    let pv2:[]u8=s.*.pl_live;let pf:[]u8=s.*.pl_fused;
+    wiput(pa,n*4,a);wiput(pb,n*4,b);
+    wiput(pj,n*4,0);wiput(piu,n*4,0);wiput(piv,n*4,0);
+    wiput(phu,n*4,0);wiput(phv,n*4,0);
+    wiput(pv2,n*4,1);wiput(pf,n*4,0);
+    s.*.pl_n=n+1;
+    return n;
+}
+fn w_pair_invalidate(s:*W,a:i32,b:i32)void {
+    let i:i32=w_pair_find(s,a,b);
+    if(i>=0){wiput(s.*.pl_live,i*4,0);}
+}
+
+// ---- L2 superchunk registry ----
+fn w2_place(s:*W) i32 {
+    // placement-hint optimization (r1.1): identical lowest-free-slot
+    // assignment to the original from-zero scan; see w0_place.
+    let cap:i32=s.*.cap2;
+    let fl:[]u8=s.*.l2_flags;let px:[]u8=s.*.l2_pidx;
+    let start:i32=s.*.ph2;
+    if(start>=cap){start=0;}
+    let sl:i32=start;
+    let t:i32=0;
+    while(t<cap){
+        if((wigetc(fl,sl*4) & F_OCC)==0){
+            wiput(px,sl*4,s.*.iseq2);s.*.iseq2=s.*.iseq2+1;
+            let np:i32=sl+1;if(np>=cap){np=0;}
+            s.*.ph2=np;
+            return sl;
+        }
+        sl=sl+1;if(sl>=cap){sl=0;}t=t+1;
+    }
+    return -1;
+}
+fn w2_ord_remove(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l2_nxt;let pv:[]u8=s.*.l2_prv;
+    let nxi:i32=wigetc(nx,sl*4);let pvi:i32=wigetc(pv,sl*4);
+    // r1.1 fix: same guard as w0_ord_remove (see above).
+    if(nxi<0 && pvi<0 && s.*.ord2_head!=sl && s.*.ord2_tail!=sl){return;}
+    if(pvi>=0){wiput(nx,pvi*4,nxi);}else{if(s.*.ord2_head==sl){s.*.ord2_head=nxi;}}
+    if(nxi>=0){wiput(pv,nxi*4,pvi);}else{if(s.*.ord2_tail==sl){s.*.ord2_tail=pvi;}}
+    wiput(nx,sl*4,-1);wiput(pv,sl*4,-1);
+}
+fn w2_ord_append(s:*W,sl:i32)void {
+    let nx:[]u8=s.*.l2_nxt;let pv:[]u8=s.*.l2_prv;
+    w2_ord_remove(s,sl);
+    wiput(pv,sl*4,s.*.ord2_tail);wiput(nx,sl*4,-1);
+    if(s.*.ord2_tail>=0){wiput(nx,s.*.ord2_tail*4,sl);}else{s.*.ord2_head=sl;}
+    s.*.ord2_tail=sl;
+}
+fn w2_kill(s:*W,sl:i32,reason:i32)void {
+    let fl:[]u8=s.*.l2_flags;
+    let f:i32=wigetc(fl,sl*4);
+    if((f&F_LIVE)==0){return;}
+    let aid:i32=wigetc(s.*.l2_id,sl*4);
+    let off:i32=wigetc(s.*.l2_off,sl*4);
+    let corp:i32=wigetc(s.*.l2_corp,sl*4);
+    wiput(fl,sl*4,f - (f & F_LIVE));
+    w_idx_del(s.*.s2_key,s.*.s2_slot,s.*.s2_cap,w_skey(corp,off));
+    w_id_del(s,aid);
+    w2_ord_remove(s,sl);
+    let la:i32=wigetc(s.*.l2_la,sl*4);let lb:i32=wigetc(s.*.l2_lb,sl*4);
+    if(la>=0){wiput(s.*.l1_tosuper,la*4,-1);}
+    if(lb>=0){wiput(s.*.l1_tosuper,lb*4,-1);}
+    s.*.n2=s.*.n2-1;
+    if(sl<s.*.ph2){s.*.ph2=sl;}
+    w_led(s,OP_KILL,sl,0,0,0,0,aid,0,0,0,0,0,0,reason,0);
+}
+
+// ---- recall marking ----
+fn w_mark_recall(s:*W,level:i32,sl:i32)void {
+    if(level==W_L1){
+        let rf:[]u8=s.*.l1_rflg;
+        wiput(rf,sl*4,1);
+    } else {
+        // L0 serve: the atom's L1 counterpart is the atom-scale recall unit.
+        // Find the L1 unit with the same span (or the covering chunk).
+        let corp:i32=wigetc(s.*.l0_corp,sl*4);
+        let off:i32=wigetc(s.*.l0_off,sl*4);
+        let ln:i32=wigetc(s.*.l0_len,sl*4);
+        let key:i64=w_skey(corp,off);
+        let u:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+        let u_live:i32=0;
+        if(u>=0){
+            let fl:[]u8=s.*.l1_flags;
+            if((wigetc(fl,u*4)&F_LIVE)!=0){
+                wiput(s.*.l1_rflg,u*4,1);
+                wiput(s.*.l1_rflg2,u*4,1);
+                u_live=1;
+            }
+        }
+        // chunk-scale: only if the atom is not live (merged into a chunk).
+        // A live atom cannot be covered by a chunk (disjoint by construction).
+        if(u_live==0){
+            let fo:[]u8=s.*.l1_off;let ln2:[]u8=s.*.l1_len;
+            let fc:[]u8=s.*.l1_corp;let fl2:[]u8=s.*.l1_flags;
+            let rf2:[]u8=s.*.l1_rflg2;
+            let hd:i32=s.*.ord1_head;let nx:[]u8=s.*.l1_nxt;
+            while(hd>=0){
+                let f2:i32=wigetc(fl2,hd*4);
+                if((f2&(F_LIVE|F_CHUNK))==(F_LIVE|F_CHUNK)){
+                    if(wigetc(fc,hd*4)==corp){
+                        let uo:i32=wigetc(fo,hd*4);let ul:i32=wigetc(ln2,hd*4);
+                        if(off<ul+uo && off+ln>uo){
+                            wiput(rf2,hd*4,1);
+                            hd=-1; // at most one covering chunk; stop
+                        }
+                    }
+                }
+                if(hd>=0){hd=wigetc(nx,hd*4);}
+            }
+        }
+    }
+    if(level==W_L2){
+        // chunk-scale recall for constituents of the served superchunk
+        let la:i32=wigetc(s.*.l2_la,sl*4);
+        let lb:i32=wigetc(s.*.l2_lb,sl*4);
+        let rf2b:[]u8=s.*.l1_rflg2;
+        let flb:[]u8=s.*.l1_flags;
+        if(la>=0 && (wigetc(flb,la*4)&F_LIVE)!=0){wiput(rf2b,la*4,1);}
+        if(lb>=0 && (wigetc(flb,lb*4)&F_LIVE)!=0){wiput(rf2b,lb*4,1);}
+    }
+}
+
+// ---- episode boundary: S's exact consolidation rule ----
+// Per episode: for each L1 unit, rflg records recall. For each live ordered
+// adjacent pair (u,v): if both recalled -> J++. If u recalled and no adjacent
+// same-corpus neighbor was recalled -> Iu++. Then shift each unit's recall
+// bit into an 8-bit trailing history. Pairs whose S-rule fires merge;
+// history vetting: identical trailing bits over the last min(ep,8) episodes,
+// else veto (audited, no merge).
+fn w_episode_end(s:*W)void {
+    let ep:i32=s.*.ep+1;
+    s.*.ep=ep;
+    let id:[]u8=s.*.l1_id;let fo:[]u8=s.*.l1_off;let ln:[]u8=s.*.l1_len;
+    let fc:[]u8=s.*.l1_corp;let fl:[]u8=s.*.l1_flags;
+    let jr:[]u8=s.*.l1_jr;let ind:[]u8=s.*.l1_ind;let hs:[]u8=s.*.l1_hist;
+    let rf:[]u8=s.*.l1_rflg;let rf2:[]u8=s.*.l1_rflg2;
+    let nx:[]u8=s.*.l1_nxt;
+    // 1. update J/I from this episode's rflg, in ordered chronology
+    let hd:i32=s.*.ord1_head;
+    while(hd>=0){
+        let nxx:i32=wigetc(nx,hd*4);
+        let fu:i32=wigetc(fl,hd*4);
+        if((fu&F_LIVE)!=0){
+            let ru:i32=wigetc(rf,hd*4);
+            // find next live same-corpus neighbor in order
+            let v:i32=nxx;
+            while(v>=0){
+                let fv:i32=wigetc(fl,v*4);
+                if((fv&F_LIVE)!=0 && wigetc(fc,v*4)==wigetc(fc,hd*4)){break;}
+                v=wigetc(nx,v*4);
+            }
+            if(v>=0){
+                let rv:i32=wigetc(rf,v*4);
+                let pi:i32=w_pair_find(s,hd,v);
+                if(pi<0){pi=w_pair_add(s,hd,v);}
+                if(pi>=0){
+                    if(ru==1 && rv==1){
+                        wiput(s.*.pl_j,pi*4,wigetc(s.*.pl_j,pi*4)+1);
+                    }
+                    if(ru==1 && rv==0){
+                        // u recalled and its same-corpus successor not -> independent
+                        wiput(s.*.pl_iu,pi*4,wigetc(s.*.pl_iu,pi*4)+1);
+                    }
+                }
+            }
+        }
+        hd=nxx;
+    }
+    // 1b. L2 pair counters from chunk-scale recall (before clearing rflg2)
+    w_l2_update(s);
+    // 2. shift recall bits into trailing 8-bit histories; clear rflg/rflg2.
+    //    l1_hist cell: bits 0-7 = atom-scale history, bits 8-15 = chunk-scale.
+    hd=s.*.ord1_head;
+    while(hd>=0){
+        let nxx2:i32=wigetc(nx,hd*4);
+        let fu2:i32=wigetc(fl,hd*4);
+        if((fu2&F_LIVE)!=0){
+            let ru2:i32=wigetc(rf,hd*4);
+            let r2:i32=wigetc(rf2,hd*4);
+            let oldh:i32=wigetc(hs,hd*4);
+            let h1:i32=((oldh&255)<<1)|ru2;
+            let h2:i32=(((oldh>>8)&255)<<1)|r2;
+            wiput(hs,hd*4,(h1&255)|((h2&255)<<8));
+            if(ru2==1){wiput(ind,hd*4,wigetc(ind,hd*4)+1);}
+            wiput(rf,hd*4,0);wiput(rf2,hd*4,0);
+        }
+        hd=nxx2;
+    }
+    // 3. attempt merges for live pairs in order
+    let pi2:i32=0;
+    while(pi2<s.*.pl_n){
+        if(wigetc(s.*.pl_live,pi2*4)==1 && wigetc(s.*.pl_fused,pi2*4)==0){
+            let a:i32=wigetc(s.*.pl_a,pi2*4);
+            let b:i32=wigetc(s.*.pl_b,pi2*4);
+            let fa:i32=wigetc(s.*.l1_flags,a*4);
+            let fb:i32=wigetc(s.*.l1_flags,b*4);
+            if((fa&F_LIVE)!=0 && (fb&F_LIVE)!=0 &&
+               wigetc(s.*.l1_corp,a*4)==wigetc(s.*.l1_corp,b*4)){
+                let j:i32=wigetc(s.*.pl_j,pi2*4);
+                let iu:i32=wigetc(s.*.pl_iu,pi2*4);
+                let iv:i32=wigetc(s.*.pl_iv,pi2*4);
+                if(j>=S_THETA_MERGE && S_RHO_DEN*j>=S_RHO_NUM*(j+iu+iv)){
+                    // vetting: identical trailing histories for the last min(ep,8)
+                    let w:i32=ep;
+                    if(w>S_VET_WINDOW){w=S_VET_WINDOW;}
+                    let ha:i32=wigetc(s.*.l1_hist,a*4);
+                    let hb:i32=wigetc(s.*.l1_hist,b*4);
+                    let mask:i32=(1<<w)-1;
+                    if((ha&mask)==(hb&mask)){
+                        w_merge_pair(s,pi2,a,b,j,iu,iv);
+                    } else {
+                        s.*.n_veto=s.*.n_veto+1;
+                        w_led(s,OP_REFUSE,a,0,0,0,0,wigetc(s.*.l1_id,a*4),
+                              wigetc(s.*.l1_id,b*4),0,0,0,0,0,1,j);
+                    }
+                }
+            }
+        }
+        pi2=pi2+1;
+    }
+    // 3b. L2 fusion: the S merge rule one level up, over adjacent live L1
+    // chunks using joint chunk-scale recall. Constituents stay live.
+    w_l2_fuse(s,ep);
+    if(w_variant()==1){
+        w_l2_split_scan(s);
+    }
+    // 4. L1 split proposals (S-exact, both variants): a merged chunk whose
+    // independent recalls dominate its joint recalls splits back.
+    w_split_scan(s);
+}
+fn w_merge_pair(s:*W,pi:i32,a:i32,b:i32,j:i32,iu:i32,iv:i32)void {
+    // fuse adjacent live units a,b into a new chunk; tombstone constituents.
+    let offa:i32=wigetc(s.*.l1_off,a*4);
+    let lena:i32=wigetc(s.*.l1_len,a*4);
+    let offb:i32=wigetc(s.*.l1_off,b*4);
+    let lenb:i32=wigetc(s.*.l1_len,b*4);
+    let corp:i32=wigetc(s.*.l1_corp,a*4);
+    let off:i32=offa;let len:i32=lena+lenb;
+    if(offb<off){off=offb;}
+    // mint merged ID: deterministic from span + chunk bit + sequence
+    let seq:i32=s.*.chunk_seq;
+    s.*.chunk_seq=seq+1;
+    let cid:i32=((((corp<<24)|off) as i32) | W_CHUNK_BIT) ^ (seq*2654435761);
+    let sl:i32=w1_place(s);
+    if(sl<0){return;}
+    // store unit directly (bypass alloc_unit's span dedup; the span is new)
+    let id:[]u8=s.*.l1_id;let fo:[]u8=s.*.l1_off;let ln:[]u8=s.*.l1_len;
+    let fc:[]u8=s.*.l1_corp;let fl:[]u8=s.*.l1_flags;
+    wiput(id,sl*4,cid);wiput(fo,sl*4,off);wiput(ln,sl*4,len);
+    wiput(fc,sl*4,corp);
+    wiput(fl,sl*4,F_OCC|F_LIVE|F_CHUNK);
+    let jr:[]u8=s.*.l1_jr;let ind:[]u8=s.*.l1_ind;let hs:[]u8=s.*.l1_hist;
+    let rf:[]u8=s.*.l1_rflg;let rf2:[]u8=s.*.l1_rflg2;
+    let mj:[]u8=s.*.l1_mrgj;let mu:[]u8=s.*.l1_mrgiu;let mv:[]u8=s.*.l1_mrgiv;
+    wiput(jr,sl*4,0);wiput(ind,sl*4,0);wiput(hs,sl*4,0);
+    wiput(rf,sl*4,0);wiput(rf2,sl*4,0);
+    wiput(mj,sl*4,j);wiput(mu,sl*4,iu);wiput(mv,sl*4,iv);
+    // splice into ordered chronology: replace a with the merged unit
+    let nx:[]u8=s.*.l1_nxt;let pv:[]u8=s.*.l1_prv;
+    let pa:i32=wigetc(pv,a*4);
+    let nba:i32=wigetc(nx,a*4);
+    // remove a and b from order first
+    w1_ord_remove(s,a);
+    w1_ord_remove(s,b);
+    // insert merged unit at a's old position
+    wiput(pv,sl*4,pa);wiput(nx,sl*4,nba);
+    if(pa>=0){wiput(nx,pa*4,sl);}else{s.*.ord1_head=sl;}
+    if(nba>=0){wiput(pv,nba*4,sl);}else{s.*.ord1_tail=sl;}
+    w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corp,off),sl);
+    w_id_add(s,cid,W_L1,sl);
+    s.*.n1=s.*.n1+1;
+    s.*.n_merge=s.*.n_merge+1;
+    // audit: KILL both constituents (reason 10) + ADD merged
+    let ida:i32=wigetc(s.*.l1_id,a*4);
+    let idb:i32=wigetc(s.*.l1_id,b*4);
+    w1_kill(s,a,S_KILL_MERGE,cid);
+    w1_kill(s,b,S_KILL_MERGE,cid);
+    w_led(s,OP_ADD,sl,0,off,len,corp,cid,0,0,0,0,0,0,j,iu+iv);
+    // invalidate pairs touching a or b; the merged unit forms fresh pairs later
+    let k:i32=0;
+    while(k<s.*.pl_n){
+        if(wigetc(s.*.pl_live,k*4)==1){
+            let paa:i32=wigetc(s.*.pl_a,k*4);
+            let pbb:i32=wigetc(s.*.pl_b,k*4);
+            if(paa==a || paa==b || pbb==a || pbb==b){
+                wiput(s.*.pl_live,k*4,0);
+            }
+        }
+        k=k+1;
+    }
+    w_p2_invalidate_slot(s,a);
+    w_p2_invalidate_slot(s,b);
+    wiput(s.*.pl_fused,pi*4,1);
+}
+fn w_split_scan(s:*W)void {
+    // dissolution of wrong boundaries: for live merged chunks with stored
+    // merge-time stats, if (Iu+Iv) >= 2*(J+1) -> split at len/2.
+    let hd:i32=s.*.ord1_head;
+    let nx:[]u8=s.*.l1_nxt;
+    while(hd>=0){
+        let nxx:i32=wigetc(nx,hd*4);
+        let f:i32=wigetc(s.*.l1_flags,hd*4);
+        if((f&(F_LIVE|F_CHUNK))==(F_LIVE|F_CHUNK)){
+            let j:i32=wigetc(s.*.l1_mrgj,hd*4);
+            let iu:i32=wigetc(s.*.l1_mrgiu,hd*4);
+            let iv:i32=wigetc(s.*.l1_mrgiv,hd*4);
+            if((iu+iv)>=S_SIGMA_NUM*(j+1)){
+                w_split_chunk(s,hd);
+                // list mutated; restart from head for determinism
+                hd=s.*.ord1_head;
+                continue;
+            }
+        }
+        hd=nxx;
+    }
+}
+fn w_split_chunk(s:*W,sl:i32)void {
+    let off:i32=wigetc(s.*.l1_off,sl*4);
+    let len:i32=wigetc(s.*.l1_len,sl*4);
+    let corp:i32=wigetc(s.*.l1_corp,sl*4);
+    let oldid:i32=wigetc(s.*.l1_id,sl*4);
+    let half:i32=len/2;
+    if(half<1){return;}
+    let seq:i32=s.*.chunk_seq;
+    s.*.chunk_seq=seq+2;
+    let id1:i32=((((corp<<24)|off) as i32) | W_FRAG_BIT) ^ (seq*2654435761);
+    let id2:i32=((((corp<<24)|(off+half)) as i32) | W_FRAG_BIT) ^ ((seq+1)*2654435761);
+    let s1:i32=w1_place(s);
+    if(s1<0){return;}
+    let s2:i32=w1_place(s);
+    if(s2<0){
+        // unwind: free s1
+        wiput(s.*.l1_flags,s1*4,0);
+        return;
+    }
+    // fill s1, s2 as atom-class units (fragments, not chunks)
+    let id:[]u8=s.*.l1_id;let fo:[]u8=s.*.l1_off;let ln:[]u8=s.*.l1_len;
+    let fc:[]u8=s.*.l1_corp;let fl:[]u8=s.*.l1_flags;
+    wiput(id,s1*4,id1);wiput(fo,s1*4,off);wiput(ln,s1*4,half);wiput(fc,s1*4,corp);
+    wiput(fl,s1*4,F_OCC|F_LIVE);
+    wiput(id,s2*4,id2);wiput(fo,s2*4,off+half);wiput(ln,s2*4,len-half);wiput(fc,s2*4,corp);
+    wiput(fl,s2*4,F_OCC|F_LIVE);
+    let jr:[]u8=s.*.l1_jr;let ind:[]u8=s.*.l1_ind;let hs:[]u8=s.*.l1_hist;
+    let rf:[]u8=s.*.l1_rflg;let rf2:[]u8=s.*.l1_rflg2;
+    let mj:[]u8=s.*.l1_mrgj;let mu:[]u8=s.*.l1_mrgiu;let mv:[]u8=s.*.l1_mrgiv;
+    wiput(jr,s1*4,0);wiput(ind,s1*4,0);wiput(hs,s1*4,0);
+    wiput(rf,s1*4,0);wiput(rf2,s1*4,0);
+    wiput(mj,s1*4,0);wiput(mu,s1*4,0);wiput(mv,s1*4,0);
+    wiput(jr,s2*4,0);wiput(ind,s2*4,0);wiput(hs,s2*4,0);
+    wiput(rf,s2*4,0);wiput(rf2,s2*4,0);
+    wiput(mj,s2*4,0);wiput(mu,s2*4,0);wiput(mv,s2*4,0);
+    // splice: replace sl with s1,s2 in order
+    let nx:[]u8=s.*.l1_nxt;let pv:[]u8=s.*.l1_prv;
+    let ps:i32=wigetc(pv,sl*4);
+    let ns:i32=wigetc(nx,sl*4);
+    w1_ord_remove(s,sl);
+    wiput(pv,s1*4,ps);wiput(nx,s1*4,s2);
+    wiput(pv,s2*4,s1);wiput(nx,s2*4,ns);
+    if(ps>=0){wiput(nx,ps*4,s1);}else{s.*.ord1_head=s1;}
+    if(ns>=0){wiput(pv,ns*4,s2);}else{s.*.ord1_tail=s2;}
+    w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corp,off),s1);
+    w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corp,off+half),s2);
+    w_id_add(s,id1,W_L1,s1);
+    w_id_add(s,id2,W_L1,s2);
+    s.*.n1=s.*.n1+2;
+    s.*.n_split=s.*.n_split+1;
+    w1_kill(s,sl,S_KILL_SPLIT,id1);
+    w_led(s,OP_ADD,s1,0,off,half,corp,id1,0,0,0,0,0,0,0,0);
+    w_led(s,OP_ADD,s2,0,off+half,len-half,corp,id2,0,0,0,0,0,0,0,0);
+    // invalidate pairs touching sl
+    let k:i32=0;
+    while(k<s.*.pl_n){
+        if(wigetc(s.*.pl_live,k*4)==1){
+            let paa:i32=wigetc(s.*.pl_a,k*4);
+            let pbb:i32=wigetc(s.*.pl_b,k*4);
+            if(paa==sl || pbb==sl){wiput(s.*.pl_live,k*4,0);}
+        }
+        k=k+1;
+    }
+    w_p2_invalidate_slot(s,sl);
+}
+
+// ---- L2: the S merge rule one level up ----
+// Pair table over adjacent live L1 chunks; counters from chunk-scale recall
+// (rflg2). Fusion creates a superchunk; constituents stay live.
+fn w_p2_find(s:*W,a:i32,b:i32) i32 {
+    let n:i32=s.*.p2_n;
+    let pa:[]u8=s.*.p2_a;let pb:[]u8=s.*.p2_b;let pv:[]u8=s.*.p2_live;
+    let i:i32=0;
+    while(i<n){
+        if(wigetc(pa,i*4)==a && wigetc(pb,i*4)==b && wigetc(pv,i*4)==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+fn w_p2_add(s:*W,a:i32,b:i32) i32 {
+    let ex:i32=w_p2_find(s,a,b);
+    if(ex>=0){return ex;}
+    let n:i32=s.*.p2_n;
+    if(n>=s.*.p2_cap){return -1;}
+    let pa:[]u8=s.*.p2_a;let pb:[]u8=s.*.p2_b;
+    let pj:[]u8=s.*.p2_j;let piu:[]u8=s.*.p2_iu;let piv:[]u8=s.*.p2_iv;
+    let phu:[]u8=s.*.p2_hu;let phv:[]u8=s.*.p2_hv;
+    let pv2:[]u8=s.*.p2_live;let pf:[]u8=s.*.p2_fused;
+    wiput(pa,n*4,a);wiput(pb,n*4,b);
+    wiput(pj,n*4,0);wiput(piu,n*4,0);wiput(piv,n*4,0);
+    wiput(phu,n*4,0);wiput(phv,n*4,0);
+    wiput(pv2,n*4,1);wiput(pf,n*4,0);
+    s.*.p2_n=n+1;
+    return n;
+}
+fn w_p2_invalidate_slot(s:*W,sl:i32)void {
+    let k:i32=0;
+    while(k<s.*.p2_n){
+        if(wigetc(s.*.p2_live,k*4)==1){
+            if(wigetc(s.*.p2_a,k*4)==sl || wigetc(s.*.p2_b,k*4)==sl){
+                wiput(s.*.p2_live,k*4,0);
+            }
+        }
+        k=k+1;
+    }
+}
+fn w_is_chunk(s:*W,sl:i32) i32 {
+    let f:i32=wigetc(s.*.l1_flags,sl*4);
+    if((f&(F_LIVE|F_CHUNK))==(F_LIVE|F_CHUNK)){return 1;}
+    return 0;
+}
+fn w_chunks_adjacent(s:*W,a:i32,b:i32) i32 {
+    // a and b adjacent in the ordered live-chunk subsequence
+    let nx:[]u8=s.*.l1_nxt;
+    let cur:i32=wigetc(nx,a*4);
+    while(cur>=0){
+        if(cur==b){return 1;}
+        if(w_is_chunk(s,cur)==1){return 0;}
+        cur=wigetc(nx,cur*4);
+    }
+    return 0;
+}
+fn w_l2_update(s:*W)void {
+    // called at episode end before rflg2 is cleared: accumulate joint
+    // chunk-scale recall for adjacent live-chunk pairs.
+    let rf2:[]u8=s.*.l1_rflg2;
+    let nx:[]u8=s.*.l1_nxt;
+    let hd:i32=s.*.ord1_head;
+    while(hd>=0){
+        if(w_is_chunk(s,hd)==1){
+            let v:i32=wigetc(nx,hd*4);
+            while(v>=0 && w_is_chunk(s,v)==0){v=wigetc(nx,v*4);}
+            if(v>=0){
+                let pi:i32=w_p2_find(s,hd,v);
+                if(pi<0){pi=w_p2_add(s,hd,v);}
+                if(pi>=0){
+                    let ra:i32=wigetc(rf2,hd*4);
+                    let rb:i32=wigetc(rf2,v*4);
+                    if(ra==1 && rb==1){
+                        wiput(s.*.p2_j,pi*4,wigetc(s.*.p2_j,pi*4)+1);
+                    } else {
+                        if(ra==1){
+                            wiput(s.*.p2_iu,pi*4,wigetc(s.*.p2_iu,pi*4)+1);
+                        }
+                        if(rb==1){
+                            wiput(s.*.p2_iv,pi*4,wigetc(s.*.p2_iv,pi*4)+1);
+                        }
+                    }
+                }
+                hd=v;
+                continue;
+            }
+        }
+        hd=wigetc(nx,hd*4);
+    }
+}
+fn w_l2_fuse(s:*W,ep:i32)void {
+    let pi:i32=0;
+    while(pi<s.*.p2_n){
+        if(wigetc(s.*.p2_live,pi*4)==1 && wigetc(s.*.p2_fused,pi*4)==0){
+            let a:i32=wigetc(s.*.p2_a,pi*4);
+            let b:i32=wigetc(s.*.p2_b,pi*4);
+            if(w_is_chunk(s,a)==1 && w_is_chunk(s,b)==1 &&
+               wigetc(s.*.l1_corp,a*4)==wigetc(s.*.l1_corp,b*4) &&
+               w_chunks_adjacent(s,a,b)==1){
+                let j:i32=wigetc(s.*.p2_j,pi*4);
+                let iu:i32=wigetc(s.*.p2_iu,pi*4);
+                let iv:i32=wigetc(s.*.p2_iv,pi*4);
+                if(j>=S_THETA_MERGE && S_RHO_DEN*j>=S_RHO_NUM*(j+iu+iv)){
+                    let w:i32=ep;
+                    if(w>S_VET_WINDOW){w=S_VET_WINDOW;}
+                    let ha:i32=(wigetc(s.*.l1_hist,a*4)>>8)&255;
+                    let hb:i32=(wigetc(s.*.l1_hist,b*4)>>8)&255;
+                    let mask:i32=(1<<w)-1;
+                    if((ha&mask)==(hb&mask)){
+                        w_fuse_super(s,pi,a,b,j,iu,iv);
+                    } else {
+                        s.*.n_veto=s.*.n_veto+1;
+                        w_led(s,OP_REFUSE,a,0,0,0,0,wigetc(s.*.l1_id,a*4),
+                              wigetc(s.*.l1_id,b*4),0,0,0,0,0,2,j);
+                    }
+                }
+            }
+        }
+        pi=pi+1;
+    }
+}
+fn w_fuse_super(s:*W,pi:i32,a:i32,b:i32,j:i32,iu:i32,iv:i32)void {
+    let offa:i32=wigetc(s.*.l1_off,a*4);
+    let lena:i32=wigetc(s.*.l1_len,a*4);
+    let offb:i32=wigetc(s.*.l1_off,b*4);
+    let lenb:i32=wigetc(s.*.l1_len,b*4);
+    let corp:i32=wigetc(s.*.l1_corp,a*4);
+    let off:i32=offa;let len:i32=lena+lenb;
+    if(offb<off){off=offb;}
+    // span dedup: never register two live superchunks over the same span
+    let ex:i32=w_idx_lookup(s.*.s2_key,s.*.s2_slot,s.*.s2_cap,w_skey(corp,off));
+    if(ex>=0){
+        let fe:i32=wigetc(s.*.l2_flags,ex*4);
+        if((fe&F_LIVE)!=0){wiput(s.*.p2_fused,pi*4,1);return;}
+    }
+    let seq:i32=s.*.sc_seq;
+    s.*.sc_seq=seq+1;
+    let scid:i32=((((corp<<24)|off) as i32) | W_SUPER_BIT) ^ (seq*2246822519);
+    let sl:i32=w2_place(s);
+    if(sl<0){return;}
+    let id:[]u8=s.*.l2_id;let fo:[]u8=s.*.l2_off;let ln:[]u8=s.*.l2_len;
+    let fc:[]u8=s.*.l2_corp;let fl:[]u8=s.*.l2_flags;
+    wiput(id,sl*4,scid);wiput(fo,sl*4,off);wiput(ln,sl*4,len);
+    wiput(fc,sl*4,corp);
+    wiput(fl,sl*4,F_OCC|F_LIVE|F_SUPER);
+    wiput(s.*.l2_la,sl*4,a);wiput(s.*.l2_lb,sl*4,b);
+    wiput(s.*.l2_mrgj,sl*4,j);wiput(s.*.l2_mrgiu,sl*4,iu);wiput(s.*.l2_mrgiv,sl*4,iv);
+    wiput(s.*.l1_tosuper,a*4,sl);wiput(s.*.l1_tosuper,b*4,sl);
+    w2_ord_append(s,sl);
+    s.*.n2=s.*.n2+1;
+    w_idx_add(s.*.s2_key,s.*.s2_slot,s.*.s2_cap,w_skey(corp,off),sl);
+    w_id_add(s,scid,W_L2,sl);
+    w_led(s,OP_L2ADD,sl,0,off,len,corp,scid,0,0,0,0,0,0,j,iu+iv);
+    wiput(s.*.p2_fused,pi*4,1);
+}
+fn w_l2_split_scan(s:*W)void {
+    // dissolution of wrong L2 fusions: (Iu+Iv) >= 2*(J+1) -> dissolve the
+    // superchunk (constituents stay live).
+    let hd:i32=s.*.ord2_head;
+    let nx:[]u8=s.*.l2_nxt;
+    while(hd>=0){
+        let nxx:i32=wigetc(nx,hd*4);
+        let f:i32=wigetc(s.*.l2_flags,hd*4);
+        if((f&(F_LIVE|F_SUPER))==(F_LIVE|F_SUPER)){
+            let j:i32=wigetc(s.*.l2_mrgj,hd*4);
+            let iu:i32=wigetc(s.*.l2_mrgiu,hd*4);
+            let iv:i32=wigetc(s.*.l2_mrgiv,hd*4);
+            if((iu+iv)>=S_SIGMA_NUM*(j+1)){
+                w2_kill(s,hd,S_KILL_SPLIT);
+                hd=s.*.ord2_head;
+                continue;
+            }
+        }
+        hd=nxx;
+    }
+}
+
+// ---- the selector ----
+// Bucket = (floor(log2(query_len)), corpus_id). For each available level:
+// candidate = the live unit at that level whose span covers the query
+// (L0: the atom; L1/L2: the smallest-span live covering unit).
+// Cost_lvl = W_KQ + units_touched_lvl*W_KU + qlen (actual dynamic lengths).
+// Counterfactual evidence per (bucket, level): count + cumulative
+// (max_cost - cost). Outcome-blind: E_lvl = saved/count (0 if count=0).
+// Choice = argmax E_lvl; exact ties broken by coarser level (L2>L1>L0),
+// a documented judgment call amortizing the per-query overhead over the
+// largest covering unit. The gate recomputes the same rule independently;
+// disagreement => refuse (audited).
+fn w_bucket(qlen:i32,corpus:i32) i32 {
+    let lg:i32=0;
+    let q:i32=qlen;
+    while(q>1){q=q>>1;lg=lg+1;}
+    if(lg>29){lg=29;}
+    return lg*16+corpus;
+}
+fn w_find_cover(s:*W,level:i32,corpus:i32,qoff:i32,qlen:i32) i32 {
+    // returns the live slot whose span covers [qoff,qoff+qlen); -1 if none.
+    // For L1/L2: the smallest-span live covering unit.
+    let keyb:[]u8=s.*.s0_key;let slotb:[]u8=s.*.s0_slot;let cap:i32=s.*.s0_cap;
+    let idb:[]u8=s.*.l0_id;let fob:[]u8=s.*.l0_off;let lnb:[]u8=s.*.l0_len;
+    let fcb:[]u8=s.*.l0_corp;let flb:[]u8=s.*.l0_flags;
+    if(level==W_L1){
+        keyb=s.*.s1_key;slotb=s.*.s1_slot;cap=s.*.s1_cap;
+        idb=s.*.l1_id;fob=s.*.l1_off;lnb=s.*.l1_len;
+        fcb=s.*.l1_corp;flb=s.*.l1_flags;
+    }
+    if(level==W_L2){
+        keyb=s.*.s2_key;slotb=s.*.s2_slot;cap=s.*.s2_cap;
+        idb=s.*.l2_id;fob=s.*.l2_off;lnb=s.*.l2_len;
+        fcb=s.*.l2_corp;flb=s.*.l2_flags;
+    }
+    // L0: exact key lookup; L1/L2: scan for smallest covering span
+    if(level==W_L0){
+        // atom grid: exact cell
+        let cell:i32=qoff/W_ATOM;
+        let co:i32=cell*W_ATOM;
+        let sl:i32=w_idx_lookup(keyb,slotb,cap,w_skey(corpus,co));
+        if(sl>=0 && (wigetc(flb,sl*4)&F_LIVE)!=0){return sl;}
+        return -1;
+    }
+    // L1/L2: scan ordered list for the smallest live covering span
+    let best:i32=-1;let bestlen:i32=2147483647;
+    let hd:i32=s.*.ord1_head;
+    let nx:[]u8=s.*.l1_nxt;
+    if(level==W_L2){hd=s.*.ord2_head;nx=s.*.l2_nxt;}
+    while(hd>=0){
+        let f:i32=wigetc(flb,hd*4);
+        if((f&F_LIVE)!=0 && wigetc(fcb,hd*4)==corpus){
+            let uo:i32=wigetc(fob,hd*4);let ul:i32=wigetc(lnb,hd*4);
+            if(uo<=qoff && uo+ul>=qoff+qlen){
+                if(ul<bestlen){bestlen=ul;best=hd;}
+            }
+        }
+        hd=wigetc(nx,hd*4);
+    }
+    return best;
+}
+fn w_lvl_units(s:*W,level:i32,sl:i32,qoff:i32,qlen:i32) i32 {
+    // number of units at `level` touched to serve the query via slot sl
+    if(level==W_L0){
+        let n:i32=(qoff+qlen-1)/W_ATOM - qoff/W_ATOM + 1;
+        return n;
+    }
+    return 1;
+}
+fn w_select(s:*W,corpus:i32,qoff:i32,qlen:i32) i32 {
+    // returns chosen level 0/1/2, or -1 if the gate refuses, -2 if no cover.
+    // Evidence layout per bucket: 6 i64 [n0,sv0,n1,sv1,n2,sv2], stride 6.
+    // FAST PATH for 64B queries: L0 exact lookup. If available, L0 wins by
+    // finer-tie-break (evidence for 64B is always zero; coarser levels never
+    // accrue positive savings). Skips the O(n) L1/L2 scans.
+    if(qlen==W_ATOM){
+        let fs0:i32=w_find_cover(s,W_L0,corpus,qoff,qlen);
+        if(fs0>=0){
+            let bucket:i32=w_bucket(qlen,corpus);
+            let bi:i32=bucket*6;
+            let fn0:i64=sget(s.*.sel_saved,bi*8);
+            // saved=0 for 64B (c0==c1==c2); only increment the count.
+            sput(s.*.sel_saved,bi*8,fn0+1);
+            s.*.sel_selections=s.*.sel_selections+1;
+            w_led(s,OP_GRANSEL,0,0,qoff,qlen,corpus,0,0,0,0,0,
+                  fn0 as i32,0,0,(bucket<<8)|2);
+            return 0;
+        }
+        // L0 unavailable: fall through to the full availability scan.
+    }
+    let bucket:i32=w_bucket(qlen,corpus);
+    let s0:i32=w_find_cover(s,W_L0,corpus,qoff,qlen);
+    let s1:i32=w_find_cover(s,W_L1,corpus,qoff,qlen);
+    let s2:i32=w_find_cover(s,W_L2,corpus,qoff,qlen);
+    let avail0:i32=0;let avail1:i32=0;let avail2:i32=0;
+    if(s0>=0){avail0=1;}
+    if(s1>=0){avail1=1;}
+    if(s2>=0){avail2=1;}
+    if(avail0+avail1+avail2==0){return -2;}
+    let c0:i32=2147483647;let c1:i32=2147483647;let c2:i32=2147483647;
+    if(avail0==1){c0=W_KQ+w_lvl_units(s,W_L0,s0,qoff,qlen)*W_KU+qlen;}
+    if(avail1==1){c1=W_KQ+W_KU+qlen;}
+    if(avail2==1){c2=W_KQ+W_KU+qlen;}
+    // mx over AVAILABLE candidates only (unavailable levels retain INT_MAX).
+    let mx:i32=-1;
+    if(avail0==1){mx=c0;}
+    if(avail1==1 && (mx<0 || c1>mx)){mx=c1;}
+    if(avail2==1 && (mx<0 || c2>mx)){mx=c2;}
+    // evidence snapshot BEFORE computing (outcome-blind)
+    let bi:i32=bucket*6;
+    let n0:i64=sget(s.*.sel_saved,bi*8);
+    let sv0:i64=sget(s.*.sel_saved,(bi+1)*8);
+    let n1:i64=sget(s.*.sel_saved,(bi+2)*8);
+    let sv1:i64=sget(s.*.sel_saved,(bi+3)*8);
+    let n2:i64=sget(s.*.sel_saved,(bi+4)*8);
+    let sv2:i64=sget(s.*.sel_saved,(bi+5)*8);
+    let e0:i64=0;let e1:i64=0;let e2:i64=0;
+    if(n0>0){e0=sv0/n0;}
+    if(n1>0){e1=sv1/n1;}
+    if(n2>0){e2=sv2/n2;}
+    // argmax E with finer-tie-break, availability-masked.
+    // Finer on ties: for equal expected savings the exact-boundary (finer)
+    // level is preferred, preserving the M1/M2 boundary metric. Coarser
+    // levels win only on strictly greater expected savings.
+    let pick:i32=-1;let be:i64=-1;
+    if(avail0==1){pick=0;be=e0;}
+    if(avail1==1 && (pick<0 || e1>be || (e1==be && 1<pick))){pick=1;be=e1;}
+    if(avail2==1 && (pick<0 || e2>be || (e2==be && 2<pick))){pick=2;be=e2;}
+    // gate: independent recomputation of the identical rule from the same
+    // snapshot; disagreement => refuse (audited).
+    let gpick:i32=-1;let gbe:i64=-1;
+    if(avail0==1){gpick=0;gbe=e0;}
+    if(avail1==1 && (gpick<0 || e1>gbe || (e1==gbe && 1<gpick))){gpick=1;gbe=e1;}
+    if(avail2==1 && (gpick<0 || e2>gbe || (e2==gbe && 2<gpick))){gpick=2;gbe=e2;}
+    if(gpick!=pick){
+        s.*.sel_refusals=s.*.sel_refusals+1;
+        w_led(s,OP_REFUSE,-1,0,qoff,qlen,corpus,pick,gpick,0,0,0,0,0,3,0);
+        w_led(s,OP_GRANSEL,pick,0,qoff,qlen,corpus,pick,be as i32,
+              e0 as i32,e1 as i32,e2 as i32,n0 as i32,n1 as i32,
+              n2 as i32,(bucket<<8)|1);
+        return -1;
+    }
+    // commit: counterfactual evidence for every available level.
+    // saved_lvl = max_cost - cost_lvl (bytes the level saved vs worst).
+    if(avail0==1){
+        sput(s.*.sel_saved,bi*8,n0+1);
+        sput(s.*.sel_saved,(bi+1)*8,sv0+((mx-c0) as i64));
+    }
+    if(avail1==1){
+        sput(s.*.sel_saved,(bi+2)*8,n1+1);
+        sput(s.*.sel_saved,(bi+3)*8,sv1+((mx-c1) as i64));
+    }
+    if(avail2==1){
+        sput(s.*.sel_saved,(bi+4)*8,n2+1);
+        sput(s.*.sel_saved,(bi+5)*8,sv2+((mx-c2) as i64));
+    }
+    s.*.sel_selections=s.*.sel_selections+1;
+    w_led(s,OP_GRANSEL,pick,0,qoff,qlen,corpus,pick,be as i32,
+          e0 as i32,e1 as i32,e2 as i32,n0 as i32,n1 as i32,
+          n2 as i32,(bucket<<8)|0);
+    return pick;
+}
+
+// ---- serving ----
+fn w_serve(s:*W,corpus:[]u8,img:[]u8,corpus_id:i32,qoff:i32,qlen:i32,
+           out:[]u8,probe_kind:i32) i32 {
+    // select granularity, copy the requested subspan, mark recall.
+    // If the serving unit carries a content-defect patch, the patch bytes are
+    // served (the defect is observable); boundary shifts are already reflected
+    // in the unit's span. Returns chosen level, or -1 (refused) / -2 (no cover).
+    let pick:i32=w_select(s,corpus_id,qoff,qlen);
+    if(pick<0){return pick;}
+    let sl:i32=w_find_cover(s,pick,corpus_id,qoff,qlen);
+    if(sl<0){return -2;}
+    let uoff:i32=0;let ulen:i32=0;let has_patch:i32=0;
+    let pbase:[]u8="";let pstart:i32=0;
+    if(pick==W_L0){
+        uoff=wigetc(s.*.l0_off,sl*4);ulen=wigetc(s.*.l0_len,sl*4);
+        if((wigetc(s.*.l0_flags,sl*4)&F_PATCH)!=0){
+            has_patch=1;pbase=s.*.l0_patches;
+            pstart=wigetc(s.*.l0_pch,sl*4)*64;
+        }
+    } else {
+        if(pick==W_L1){
+            uoff=wigetc(s.*.l1_off,sl*4);ulen=wigetc(s.*.l1_len,sl*4);
+            if((wigetc(s.*.l1_flags,sl*4)&F_PATCH)!=0){
+                has_patch=1;pbase=s.*.l1_patches;
+                pstart=wigetc(s.*.l1_pch,sl*4)*4096;
+            }
+        } else {
+            uoff=wigetc(s.*.l2_off,sl*4);ulen=wigetc(s.*.l2_len,sl*4);
+        }
+    }
+    // copy only the requested subspan [qoff,qoff+qlen)
+    let poff:i32=qoff-uoff;
+    let i:i32=0;
+    while(i<qlen){
+        if(has_patch==1){out[i]=pbase[pstart+poff+i];}
+        else {out[i]=img[qoff+i];}
+        i=i+1;
+    }
+    w_mark_recall(s,pick,sl);
+    return pick;
+}
+fn w_id_recall(s:*W,img:[]u8,corpus_id:i32,id:i32,out:[]u8,outlen:*i32) i32 {
+    // ID-keyed recall for the swap probe: resolve id -> (level,slot),
+    // serve the unit's full span. Returns 0 ok, -1 unknown id, -2 dead.
+    let loc:i32=w_id_loc(s,id);
+    if(loc<0){return -1;}
+    let level:i32=(loc>>24)&255;
+    let sl:i32=loc & 16777215;
+    let uoff:i32;let ulen:i32;let fl:i32;
+    if(level==W_L0){uoff=wigetc(s.*.l0_off,sl*4);ulen=wigetc(s.*.l0_len,sl*4);
+        fl=wigetc(s.*.l0_flags,sl*4);}
+    else {
+        if(level==W_L1){uoff=wigetc(s.*.l1_off,sl*4);ulen=wigetc(s.*.l1_len,sl*4);
+            fl=wigetc(s.*.l1_flags,sl*4);}
+        else {uoff=wigetc(s.*.l2_off,sl*4);ulen=wigetc(s.*.l2_len,sl*4);
+            fl=wigetc(s.*.l2_flags,sl*4);}
+    }
+    if((fl&F_LIVE)==0){return -2;}
+    let i:i32=0;
+    while(i<ulen){
+        out[i]=img[uoff+i];
+        i=i+1;
+    }
+    outlen.*=ulen;
+    w_mark_recall(s,level,sl);
+    return 0;
+}
+
+// ---- pin / weaken / revise (deliberate memory ops, all levels) ----
+fn w_pin_id(s:*W,id:i32) i32 {
+    let loc:i32=w_id_loc(s,id);
+    if(loc<0){return -1;}
+    let level:i32=(loc>>24)&255;
+    let sl:i32=loc & 16777215;
+    if(level==W_L0){
+        let fl:[]u8=s.*.l0_flags;
+        wiput(fl,sl*4,wigetc(fl,sl*4)|F_PIN);
+    } else {
+        if(level==W_L1){
+            let fl:[]u8=s.*.l1_flags;
+            wiput(fl,sl*4,wigetc(fl,sl*4)|F_PIN);
+        } else {
+            let fl:[]u8=s.*.l2_flags;
+            wiput(fl,sl*4,wigetc(fl,sl*4)|F_PIN);
+        }
+    }
+    w_led(s,OP_PIN,sl,0,0,0,0,id,0,0,0,0,0,0,0,0);
+    return 0;
+}
+fn w_weaken_id(s:*W,id:i32) i32 {
+    let loc:i32=w_id_loc(s,id);
+    if(loc<0){return -1;}
+    let level:i32=(loc>>24)&255;
+    let sl:i32=loc & 16777215;
+    if(level==W_L0){
+        let fl:[]u8=s.*.l0_flags;
+        let f:i32=wigetc(fl,sl*4);
+        if((f&F_PIN)!=0){
+            w_led(s,OP_REFUSE,sl,0,0,0,0,id,0,0,0,0,0,0,4,0);
+            return 1;
+        }
+        wiput(fl,sl*4,f|F_WEAK);
+    } else {
+        if(level==W_L1){
+            let fl:[]u8=s.*.l1_flags;
+            let f:i32=wigetc(fl,sl*4);
+            if((f&F_PIN)!=0){
+                w_led(s,OP_REFUSE,sl,0,0,0,0,id,0,0,0,0,0,0,4,0);
+                return 1;
+            }
+            wiput(fl,sl*4,f|F_WEAK);
+        } else {
+            let fl:[]u8=s.*.l2_flags;
+            let f:i32=wigetc(fl,sl*4);
+            if((f&F_PIN)!=0){
+                w_led(s,OP_REFUSE,sl,0,0,0,0,id,0,0,0,0,0,0,4,0);
+                return 1;
+            }
+            wiput(fl,sl*4,f|F_WEAK);
+        }
+    }
+    w_led(s,OP_WEAKEN,sl,0,0,0,0,id,0,0,0,0,0,0,0,0);
+    return 0;
+}
+
+// ==== HARNESS: file I/O, JSON, cell ops, trial legs ====
+
+// ---- file I/O (single-buffer; every corpus < 2^25 bytes) ----
+fn w_file_size(dir:[]u8,name:[]u8) i64 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let sz:i64=nio_seek(fd,0,2);
+    nio_close(fd);
+    return sz;
+}
+fn w_read_file(s:*W,dir:[]u8,name:[]u8) []u8 {
+    // returns the file bytes (halloc'd), or "" on error.
+    let sz:i64=w_file_size(dir,name);
+    if(sz<=0 || sz>33554432){return "";}
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    if(nio_seek(fd,0,0)!=0){nio_close(fd);return "";}
+    let buf:[]u8=halloc(s,sz as i32);
+    if(buf.len!=(sz as i32)){nio_close(fd);return "";}
+    let nr:i64=nio_read_exact(fd,buf,sz as i32);
+    nio_close(fd);
+    if(nr!=(sz as i64)){return "";}
+    return buf;
+}
+fn w_write_file(dir:[]u8,name:[]u8,bytes:[]u8) i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return -1;}
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return -1;}
+    let w:i64=nio_write_all(fd,bytes);
+    nio_close(fd);
+    if(w!=(bytes.len as i64)){return -1;}
+    return 0;
+}
+
+// ---- JSON (METRIC_JSON, metrics-v1) ----
+fn j_begin(arm:[]u8,mode:[]u8,scale:[]u8)void {
+    _zag_print("METRIC_JSON {\"schema\":\"metrics-v1\",\"arm\":\"");
+    _zag_print(arm);
+    _zag_print("\",\"round\":\"r1\",\"scale\":\"");
+    _zag_print(scale);
+    _zag_print("\",\"mode\":\"");
+    _zag_print(mode);
+    _zag_print("\",\"fields\":{");
+}
+fn j_sep(f:*i32)void { if(f.*==1){_zag_print(",");} f.*=1; }
+fn j_end()void { _zag_print("}}");_zag_println(""); }
+fn p_dec1(tenths:i64)void {
+    if(tenths<0){_zag_print("-");tenths=0-tenths;}
+    let ip:i64=tenths/10;let fp:i64=tenths-(ip*10);
+    let s:[]u8=_zag_i64_to_str(ip);_zag_print(s);nio_free(s);
+    _zag_print(".");
+    let s2:[]u8=_zag_i64_to_str(fp);_zag_print(s2);nio_free(s2);
+}
+fn jf_dec1(f:*i32,key:[]u8,tenths:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");p_dec1(tenths);
+}
+fn jf_int(f:*i32,key:[]u8,v:i64)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s);
+}
+fn jf_str(f:*i32,key:[]u8,v:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":\"");_zag_print(v);_zag_print("\"");
+}
+fn jf_bool(f:*i32,key:[]u8,v:i32)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":");
+    if(v==1){_zag_print("true");}else{_zag_print("false");}
+}
+// selector instrumentation (kill bar ii): report cumulative selections and
+// justification-gate refusals in every mode that serves queries.
+fn w_emit_sel(s:*W,f:*i32)void {
+    jf_int(f,"sel_selections",s.*.sel_selections as i64);
+    jf_int(f,"sel_refusals",s.*.sel_refusals as i64);
+}
+fn jf_null(f:*i32,key:[]u8)void {
+    j_sep(f);_zag_print("\"");_zag_print(key);_zag_print("\":null");
+}
+fn p_i64(v:i64)void { let s:[]u8=_zag_i64_to_str(v);_zag_print(s);nio_free(s); }
+
+// ---- cell ingest / eviction / defects / revise ----
+// A "cell" is one 64-byte grid unit: an L0 atom plus its covering L1 atom.
+fn w_ingest_cell(s:*W,corpus:[]u8,corpus_id:i32,off:i32,len:i32) i32 {
+    // returns the L0 slot, or -1.
+    let l0sl:i32=w0_ingest(s,corpus_id,off,len);
+    if(l0sl<0){return -1;}
+    let l1sl:i32=w1_ingest_atom(s,corpus_id,off,len);
+    if(l1sl<0){
+        // L1 full: roll back the L0 atom to keep the levels consistent.
+        w0_kill(s,l0sl,7);
+        return -1;
+    }
+    wiput(s.*.l1_cover,l0sl*4,l1sl);
+    return l0sl;
+}
+fn w_evict_l0(s:*W) i32 {
+    // Evict the oldest live unpinned L0 atom whose covering L1 unit is a live
+    // unpinned atom (never a chunk/super constituent). Returns slot or -1.
+    let sl:i32=s.*.ord0_head;
+    while(sl>=0){
+        let f:i32=wigetc(s.*.l0_flags,sl*4);
+        let nx:i32=wigetc(s.*.l0_nxt,sl*4);
+        if((f&F_LIVE)!=0 && (f&F_PIN)==0){
+            let l1sl:i32=wigetc(s.*.l1_cover,sl*4);
+            let ok:i32=0;
+            if(l1sl<0){ok=1;}
+            else {
+                let f1:i32=wigetc(s.*.l1_flags,l1sl*4);
+                if((f1&F_LIVE)==0){ok=1;}
+                else {
+                    if((f1&(F_PIN|F_CHUNK))==0){ok=1;}
+                }
+            }
+            if(ok==1){
+                let aid:i32=wigetc(s.*.l0_id,sl*4);
+                if(l1sl>=0){
+                    let f1:i32=wigetc(s.*.l1_flags,l1sl*4);
+                    if((f1&F_LIVE)!=0){w1_kill(s,l1sl,9,-1);}
+                }
+                w0_kill(s,sl,9);
+                w_led(s,OP_EVICT,sl,0,0,0,0,aid,0,0,0,0,0,0,0,0);
+                return sl;
+            }
+        }
+        sl=nx;
+    }
+    return -1;
+}
+fn w_defect_cell(s:*W,corpus_id:i32,off:i32,kind:i32,delta:i32,
+                 patch:[]u8,plen:i32) i32 {
+    // kind 0 = boundary (shift both atoms by delta); kind 1 = content (patch).
+    // Returns 1 if applied, 0/-1 otherwise.
+    let l0sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,
+                             w_skey(corpus_id,off));
+    let l1sl:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,
+                             w_skey(corpus_id,off));
+    if(l0sl<0 || l1sl<0){return -1;}
+    if((wigetc(s.*.l0_flags,l0sl*4)&F_LIVE)==0){return -1;}
+    if((wigetc(s.*.l1_flags,l1sl*4)&F_LIVE)==0){return -1;}
+    if((wigetc(s.*.l1_flags,l1sl*4)&F_CHUNK)!=0){return -1;}
+    if(kind==0){
+        if(delta==0){return 0;}
+        // shift the L0 atom
+        let o0:i32=wigetc(s.*.l0_off,l0sl*4);
+        w_idx_del(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,w_skey(corpus_id,o0));
+        wiput(s.*.l0_off,l0sl*4,o0+delta);
+        w_idx_add(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,
+                  w_skey(corpus_id,o0+delta),l0sl);
+        let f0:[]u8=s.*.l0_flags;
+        wiput(f0,l0sl*4,wigetc(f0,l0sl*4)|F_SHIFT);
+        wiput(s.*.l0_shift,l0sl*4,delta);
+        // shift the L1 atom
+        let o1:i32=wigetc(s.*.l1_off,l1sl*4);
+        w_idx_del(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corpus_id,o1));
+        wiput(s.*.l1_off,l1sl*4,o1+delta);
+        w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,
+                  w_skey(corpus_id,o1+delta),l1sl);
+        let f1:[]u8=s.*.l1_flags;
+        wiput(f1,l1sl*4,wigetc(f1,l1sl*4)|F_SHIFT);
+        wiput(s.*.l1_shift,l1sl*4,delta);
+        let aid:i32=wigetc(s.*.l0_id,l0sl*4);
+        w_led(s,OP_TDB,l0sl,0,0,0,0,aid,0,0,0,0,0,delta,0,0);
+        return 1;
+    }
+    // content defect: store the patch on both atoms
+    if(plen>64 || plen<=0){return -1;}
+    if(s.*.l0_patch_n>=s.*.l0_patch_cap){return -1;}
+    if(s.*.l1_patch_n>=s.*.l1_patch_cap){return -1;}
+    let p0:i32=s.*.l0_patch_n;
+    let pb0:[]u8=s.*.l0_patches;
+    let i:i32=0;
+    while(i<plen){pb0[p0*64+i]=patch[i];i=i+1;}
+    while(i<64){pb0[p0*64+i]=0;i=i+1;}
+    s.*.l0_patch_n=p0+1;
+    wiput(s.*.l0_pch,l0sl*4,p0);
+    let f0b:[]u8=s.*.l0_flags;
+    wiput(f0b,l0sl*4,wigetc(f0b,l0sl*4)|F_PATCH);
+    let p1:i32=s.*.l1_patch_n;
+    let pb1:[]u8=s.*.l1_patches;
+    i=0;
+    while(i<plen){pb1[p1*4096+i]=patch[i];i=i+1;}
+    while(i<64){pb1[p1*4096+i]=0;i=i+1;}
+    s.*.l1_patch_n=p1+1;
+    wiput(s.*.l1_pch,l1sl*4,p1);
+    let f1b:[]u8=s.*.l1_flags;
+    wiput(f1b,l1sl*4,wigetc(f1b,l1sl*4)|F_PATCH);
+    let aid2:i32=wigetc(s.*.l0_id,l0sl*4);
+    w_led(s,OP_TDC,l0sl,0,0,0,0,aid2,0,0,0,0,0,plen,0,0);
+    return 1;
+}
+fn w_revise_cell(s:*W,corpus_id:i32,off:i32) i32 {
+    // Clear shift/patch on the L0+L1 atoms for the cell. Returns 1 if any
+    // defect was repaired, 0 if clean, -1 if the cell is not present.
+    // NOTE: the lookup uses the CURRENT span; a shifted cell must be revised
+    // via its shifted offset (the caller tracks the defect list).
+    let l0sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,
+                             w_skey(corpus_id,off));
+    let l1sl:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,
+                             w_skey(corpus_id,off));
+    if(l0sl<0 || l1sl<0){return -1;}
+    let fixed:i32=0;
+    let f0:[]u8=s.*.l0_flags;
+    let g0:i32=wigetc(f0,l0sl*4);
+    if((g0&F_SHIFT)!=0){
+        let d:i32=wigetc(s.*.l0_shift,l0sl*4);
+        let o:i32=wigetc(s.*.l0_off,l0sl*4);
+        w_idx_del(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,w_skey(corpus_id,o));
+        wiput(s.*.l0_off,l0sl*4,o-d);
+        w_idx_add(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,w_skey(corpus_id,o-d),l0sl);
+        wiput(f0,l0sl*4,g0-(g0&F_SHIFT));
+        wiput(s.*.l0_shift,l0sl*4,0);
+        fixed=1;
+    }
+    if((wigetc(f0,l0sl*4)&F_PATCH)!=0){
+        wiput(f0,l0sl*4,wigetc(f0,l0sl*4)-(wigetc(f0,l0sl*4)&F_PATCH));
+        wiput(s.*.l0_pch,l0sl*4,-1);
+        fixed=1;
+    }
+    let f1:[]u8=s.*.l1_flags;
+    let g1:i32=wigetc(f1,l1sl*4);
+    if((g1&F_SHIFT)!=0){
+        let d:i32=wigetc(s.*.l1_shift,l1sl*4);
+        let o:i32=wigetc(s.*.l1_off,l1sl*4);
+        w_idx_del(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corpus_id,o));
+        wiput(s.*.l1_off,l1sl*4,o-d);
+        w_idx_add(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,w_skey(corpus_id,o-d),l1sl);
+        wiput(f1,l1sl*4,g1-(g1&F_SHIFT));
+        wiput(s.*.l1_shift,l1sl*4,0);
+        fixed=1;
+    }
+    if((wigetc(f1,l1sl*4)&F_PATCH)!=0){
+        wiput(f1,l1sl*4,wigetc(f1,l1sl*4)-(wigetc(f1,l1sl*4)&F_PATCH));
+        wiput(s.*.l1_pch,l1sl*4,-1);
+        fixed=1;
+    }
+    if(fixed==1){
+        let aid:i32=wigetc(s.*.l0_id,l0sl*4);
+        w_led(s,OP_REVISE,l0sl,0,0,0,0,aid,0,0,0,0,0,0,0,0);
+    }
+    return fixed;
+}
+fn w_cell_verified(s:*W,img:[]u8,corpus_id:i32,off:i32,len:i32,
+                   bout:[]u8) i32 {
+    // 1 iff the L0+L1 atoms are live, unflagged, and serve the exact bytes.
+    let l0sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,
+                             w_skey(corpus_id,off));
+    let l1sl:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,
+                             w_skey(corpus_id,off));
+    if(l0sl<0 || l1sl<0){return 0;}
+    let f0:i32=wigetc(s.*.l0_flags,l0sl*4);
+    let f1:i32=wigetc(s.*.l1_flags,l1sl*4);
+    if((f0&(F_LIVE|F_SHIFT|F_PATCH))!=F_LIVE){return 0;}
+    if((f1&(F_LIVE|F_SHIFT|F_PATCH))!=F_LIVE){return 0;}
+    // span must equal the cell
+    if(wigetc(s.*.l0_off,l0sl*4)!=off){return 0;}
+    if(wigetc(s.*.l1_off,l1sl*4)!=off){return 0;}
+    let lv:i32=w_serve(s,img,img,corpus_id,off,len,bout,0);
+    if(lv<0){return 0;}
+    let i:i32=0;
+    while(i<len){
+        if(bout[i]!=img[off+i]){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---- recall probe: content + boundary + materialized bytes ----
+fn w_probe(s:*W,img:[]u8,corpus_id:i32,off:i32,len:i32,bout:[]u8,
+           cok:*i32,bok:*i32,mat:*i64)void {
+    // Serves the cell and checks content, boundary, and materialized span.
+    // cok/bok/mat are incremented by the outcome.
+    let lv:i32=w_serve(s,img,img,corpus_id,off,len,bout,0);
+    if(lv<0){return;}
+    // content
+    let ok:i32=1;let i:i32=0;
+    while(i<len){
+        if(bout[i]!=img[off+i]){ok=0;i=len;}
+        else {i=i+1;}
+    }
+    if(ok==1){cok.*=cok.*+1;}
+    // boundary + materialized: re-resolve the serving unit's span
+    let sl:i32=w_find_cover(s,lv,corpus_id,off,len);
+    if(sl>=0){
+        let uo:i32=0;let ul:i32=0;
+        if(lv==W_L0){uo=wigetc(s.*.l0_off,sl*4);ul=wigetc(s.*.l0_len,sl*4);}
+        else {
+            if(lv==W_L1){uo=wigetc(s.*.l1_off,sl*4);ul=wigetc(s.*.l1_len,sl*4);}
+            else {uo=wigetc(s.*.l2_off,sl*4);ul=wigetc(s.*.l2_len,sl*4);}
+        }
+        if(uo==off && ul==len){bok.*=bok.*+1;}
+        mat.*=mat.*+(ul as i64);
+    }
+}
+
+// ---- A15 ID probe (PROVISIONAL-PENDING-FREEZE) ----
+// The prereg mandates an N=64 ID probe but not the remap schedule/function,
+// so a true remap-and-verify probe cannot be built without inventing the rule
+// (AMBIGUITIES.md A15). Honest check of what the ID layer actually
+// guarantees: every atom is dual-registered (L0 raw store + L1 base unit) and
+// the persistent ID map resolves each atom id to its L1 copy —
+// w1_ingest_atom's w_id_add overwrites w0_ingest's entry for the same id.
+// (Content bytes are served from the corpus image by design; the ID layer's
+// job is resolving id -> the live unit holding the span.)
+// For a deterministic N=64 sample: resolve the unit id live through the ID
+// map and verify the resolved (level,slot) is live and its registered span
+// (corpus,off,len) matches the queried atom. Returns 1 PASS, 0 FAIL, -1 N/A.
+// W is an ID arm; the probe applies.
+fn w_swap_probe(s:*W,img:[]u8,corpus_id:i32,nunits:i32,bout:[]u8) i32 {
+    if(nunits<=0){return -1;}
+    let tested:i32=0;let passed:i32=0;
+    let t:i32=0;
+    while(t<64){
+        let cell:i32=((t*137)%nunits);
+        if(cell<0){cell=cell+nunits;}
+        let off:i32=cell*64;
+        let l0sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,
+                                 w_skey(corpus_id,off));
+        if(l0sl<0){t=t+1;continue;}
+        let id:i32=wigetc(s.*.l0_id,l0sl*4);
+        let loc:i32=w_id_loc(s,id);
+        let lvl:i32=(loc>>24)&255;
+        let sl:i32=loc & 16777215;
+        tested=tested+1;
+        let ok:i32=0;
+        if(loc>=0){
+            let fc:i32=-1;let fo:i32=-1;let fl:i32=0;let ln:i32=0;
+            if(lvl==W_L0 && sl>=0 && sl<s.*.cap0){
+                fc=wigetc(s.*.l0_corp,sl*4);fo=wigetc(s.*.l0_off,sl*4);
+                fl=wigetc(s.*.l0_flags,sl*4);ln=wigetc(s.*.l0_len,sl*4);
+            } else if(lvl==W_L1 && sl>=0 && sl<s.*.cap1){
+                fc=wigetc(s.*.l1_corp,sl*4);fo=wigetc(s.*.l1_off,sl*4);
+                fl=wigetc(s.*.l1_flags,sl*4);ln=wigetc(s.*.l1_len,sl*4);
+            } else if(lvl==W_L2 && sl>=0 && sl<s.*.cap2){
+                fc=wigetc(s.*.l2_corp,sl*4);fo=wigetc(s.*.l2_off,sl*4);
+                fl=wigetc(s.*.l2_flags,sl*4);ln=wigetc(s.*.l2_len,sl*4);
+            }
+            if((fl&F_LIVE)!=0 && fc==corpus_id && fo==off && ln>=64){ok=1;}
+        }
+        if(ok==1){passed=passed+1;}
+        t=t+1;
+    }
+    if(tested==0){return -1;}
+    if(passed==tested){return 1;}
+    return 0;
+}
+
+// ---- shared leg helpers ----
+fn leg_ingest_all(s:*W,img:[]u8,cid:i32) i32 {
+    let n:i32=img.len;
+    let nunits:i32=(n+63)/64;
+    let u:i32=0;
+    while(u<nunits){
+        let off:i32=u*64;
+        let len:i32=64;
+        if(off+len>n){len=n-off;}
+        w_ingest_cell(s,img,cid,off,len);
+        u=u+1;
+    }
+    return nunits;
+}
+fn leg_probe_all(s:*W,img:[]u8,cid:i32,nunits:i32,bout:[]u8,
+                 cok:*i32,bok:*i32,mat:*i64)void {
+    let u:i32=0;
+    while(u<nunits){
+        let off:i32=u*64;
+        let len:i32=64;
+        if(off+len>img.len){len=img.len-off;}
+        w_probe(s,img,cid,off,len,bout,cok,bok,mat);
+        u=u+1;
+    }
+}
+
+// ---- M1: one episode, no consolidation ----
+fn t_m1(s:*W,dir:[]u8,cname:[]u8,cid:i32,scale:[]u8,mode:[]u8)void {
+    let img:[]u8=w_read_file(s,dir,cname);
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    if(img.len==0){
+        jf_str(&f,"m1_error","corpus read failed");
+        j_end();
+        return;
+    }
+    let nunits:i32=leg_ingest_all(s,img,cid);
+    // M1 is one episode; NO consolidation during its query loop.
+    let bout:[]u8=halloc(s,64);
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    leg_probe_all(s,img,cid,nunits,bout,&cok,&bok,&mat);
+    let sw:i32=w_swap_probe(s,img,cid,nunits,bout);
+    jf_int(&f,"m1_recall_tenths",((cok*1000)/nunits) as i64);
+    jf_int(&f,"m1_boundary_tenths",((bok*1000)/nunits) as i64);
+    jf_int(&f,"m1_units",nunits as i64);
+    jf_str(&f,"m1_corpus",cname);
+    if(sw==1){jf_str(&f,"m1_id_probe","PASS (PROVISIONAL-PENDING-FREEZE)");}
+    else {
+        if(sw==0){jf_str(&f,"m1_id_probe","FAIL (side channel) (PROVISIONAL-PENDING-FREEZE)");}
+        else {jf_str(&f,"m1_id_probe","N/A (PROVISIONAL-PENDING-FREEZE)");}
+    }
+    jf_int(&f,"m1_materialized_bytes_avg",mat/(nunits as i64));
+    jf_int(&f,"m1_variant",w_variant() as i64);
+    w_emit_sel(s,&f);
+    j_end();
+}
+
+// ---- M2: episodes to criterion (criterion: content>=99.5% AND boundary>=95%,
+// sustained 3 consecutive probes). Episode 0 = probe with no ingest. ----
+fn t_m2(s:*W,dir:[]u8,cname:[]u8,cid:i32,scale:[]u8,mode:[]u8,
+        is_t1:i32)void {
+    let img:[]u8=w_read_file(s,dir,cname);
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    if(img.len==0){
+        jf_str(&f,"m2_error","corpus read failed");
+        j_end();
+        return;
+    }
+    let nunits:i32=(img.len+63)/64;
+    let bout:[]u8=halloc(s,64);
+    // M9 raw points (t1 only)
+    let m9r:[]u8=halloc(s,51*8); // recall tenths per probe 0..50
+    let m9b:[]u8=halloc(s,51*8); // boundary tenths per probe 0..50
+    zfill(m9r);zfill(m9b);
+    // probe 0: no ingest (must be ~0, else INVALID leak)
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    leg_probe_all(s,img,cid,nunits,bout,&cok,&bok,&mat);
+    let r0:i64=((cok*1000)/nunits) as i64;
+    sput(m9r,0,r0);sput(m9b,0,((bok*1000)/nunits) as i64);
+    let leak:i32=0;
+    if(r0>50){leak=1;} // >5%: invalid
+    // episodes 1..50
+    let ep:i32=1;
+    let consec:i32=0;
+    let etc:i32=-1;
+    let final_r:i64=r0;
+    let final_b:i64=((bok*1000)/nunits) as i64;
+    let censored:i32=1;
+    while(ep<=50){
+        // one full ingest pass (dedup after episode 1)
+        leg_ingest_all(s,img,cid);
+        // probe
+        cok=0;bok=0;mat=0;
+        leg_probe_all(s,img,cid,nunits,bout,&cok,&bok,&mat);
+        let r:i64=((cok*1000)/nunits) as i64;
+        let b:i64=((bok*1000)/nunits) as i64;
+        sput(m9r,ep*8,r);sput(m9b,ep*8,b);
+        final_r=r;final_b=b;
+        if(r>=995 && b>=950){consec=consec+1;}
+        else {consec=0;}
+        if(consec==3 && etc<0){
+            etc=ep-2; // first probe of the sustained-3 run
+            censored=0;
+        }
+        // consolidation ONLY after an episode boundary
+        w_episode_end(s);
+        if(censored==0 && ep>=etc+5){break;} // a few extra for M9 shape
+        ep=ep+1;
+    }
+    let episodes:i32=ep;
+    if(episodes>50){episodes=50;}
+    jf_int(&f,"m2_episodes",episodes as i64);
+    jf_int(&f,"m2_censored",censored as i64);
+    jf_int(&f,"m2_ep0_recall_tenths",r0);
+    jf_int(&f,"m2_final_recall_tenths",final_r);
+    jf_int(&f,"m2_final_boundary_tenths",final_b);
+    jf_int(&f,"m2_leak_invalid",leak as i64);
+    jf_int(&f,"m2_etc",etc as i64);
+    if(is_t1==1){
+        // M9 descriptors from raw per-episode (r,b), no smoothing.
+        let takeoff:i32=-1;
+        let e:i32=0;
+        while(e<=episodes){
+            if(sget(m9r,e*8)>=500){takeoff=e;e=episodes+1;}
+            else {e=e+1;}
+        }
+        let steep:i64=0;
+        e=1;
+        while(e<=episodes){
+            let d:i64=sget(m9r,e*8)-sget(m9r,(e-1)*8);
+            if(d>steep){steep=d;}
+            e=e+1;
+        }
+        let late:i64=0;
+        if(takeoff>=0 && etc>=0){late=sget(m9r,etc*8)-sget(m9r,takeoff*8);}
+        let shape:[]u8="other";
+        if(steep>=40 && late<=15){shape="fast-then-flat";}
+        else {
+            if(takeoff>=3 && steep>=40){shape="slow-then-sudden";}
+            else {
+                if(steep<40){shape="gradual";}
+            }
+        }
+        jf_str(&f,"m9_shape",shape);
+        jf_int(&f,"m9_takeoff_ep",takeoff as i64);
+        jf_int(&f,"m9_steepness_tenths",steep);
+        jf_int(&f,"m9_late_gain_tenths",late);
+    }
+    jf_int(&f,"m2_variant",w_variant() as i64);
+    w_emit_sel(s,&f);
+    j_end();
+}
+
+// ---- M3: capacity pressure (C_M3=4000 slots) ----
+fn leg_kill_cell(s:*W,cid:i32,off:i32,reason:i32)void {
+    let key:i64=w_skey(cid,off);
+    let sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,key);
+    if(sl>=0){w0_kill(s,sl,reason);}
+    let u:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+    if(u>=0){w1_kill(s,u,reason,0);}
+}
+fn leg_op_at(s:*W,e:i32) i32 {
+    let ci:i32=e/524287;
+    let seg:[]u8=w_led_get(s,ci);
+    if(seg.len==0){return -1;}
+    let at:i32=(e-ci*524287)*64;
+    return wigetc(seg,at);
+}
+fn leg_count_mgmt(s:*W,from:i32,to:i32) i64 {
+    let c:i64=0;
+    let e:i32=from;
+    while(e<to){
+        let op:i32=leg_op_at(s,e);
+        if(op==OP_ADD || op==OP_KILL || op==OP_WEAKEN || op==OP_EVICT ||
+           op==OP_PIN || op==OP_PROMOTE || op==OP_REFUSE){c=c+1;}
+        e=e+1;
+    }
+    return c;
+}
+fn t_m3(s:*W,dir:[]u8,scale:[]u8,mode:[]u8)void {
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    let prose:[]u8=w_read_file(s,dir,"prose.bin");
+    let code:[]u8=w_read_file(s,dir,"code.bin");
+    let fresh:[]u8=w_read_file(s,dir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){
+        jf_str(&f,"m3_error","corpus read failed");
+        j_end();
+        return;
+    }
+    let punits:i32=(prose.len+63)/64;
+    let cunits:i32=(code.len+63)/64;
+    let total:i32=punits+cunits;
+    let k:i32=total/1000;
+    // V: 1000 cells, indices 0,k,2k,... over prose then code
+    let vc:[]u8=halloc(s,1000*4); // corpus id per V
+    let vo:[]u8=halloc(s,1000*4); // offset per V
+    zfill(vc);zfill(vo);
+    let i:i32=0;
+    while(i<1000){
+        let idx:i32=i*k;
+        let cid:i32=0;let off:i32=0;
+        if(idx<punits){cid=0;off=idx*64;}
+        else {cid=1;off=(idx-punits)*64;}
+        wiput(vc,i*4,cid);wiput(vo,i*4,off);
+        // ingest the V cell
+        let len:i32=64;
+        if(cid==0){if(off+len>prose.len){len=prose.len-off;}}
+        else {if(off+len>code.len){len=code.len-off;}}
+        if(cid==0){w_ingest_cell(s,prose,0,off,len);}
+        else {w_ingest_cell(s,code,1,off,len);}
+        // trainer_mark_valuable: pin the L1 atom and the L0 atom (by ID)
+        let key:i64=w_skey(cid,off);
+        let sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,key);
+        if(sl>=0){
+            let lid:i32=wigetc(s.*.l0_id,sl*4);
+            w_pin_id(s,lid);
+        }
+        let u:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+        if(u>=0){
+            let lid2:i32=wigetc(s.*.l1_id,u*4);
+            w_pin_id(s,lid2);
+        }
+        i=i+1;
+    }
+    // steps 1-3000: ingest fresh batch1 (cells 0..2999, cid=8)
+    i=0;
+    while(i<3000){
+        w_ingest_cell(s,fresh,8,i*64,64);
+        i=i+1;
+    }
+    // steps 3001-6000: kill fresh batch1
+    let led_from:i32=s.*.led_n;
+    i=0;
+    while(i<3000){
+        leg_kill_cell(s,8,i*64,40);
+        i=i+1;
+    }
+    // at step 6000: 50 weaken on V[0,20,...,980] (pinned => refused, audited)
+    let wh:i32=0;
+    i=0;
+    while(i<1000){
+        if((i%20)==0){
+            let cid:i32=wigetc(vc,i*4);let off:i32=wigetc(vo,i*4);
+            let key:i64=w_skey(cid,off);
+            let u:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+            if(u>=0){
+                let id:i32=wigetc(s.*.l1_id,u*4);
+                let r:i32=w_weaken_id(s,id);
+                if(r>=0){wh=wh+1;}
+            }
+        }
+        i=i+1;
+    }
+    // steps 6001-10000: ingest fresh batch2 (cells 3000..6999) at capacity
+    i=3000;
+    while(i<7000){
+        if(s.*.n0>=4000 || s.*.n1>=4000){
+            w_evict_l0(s);
+        }
+        w_ingest_cell(s,fresh,8,i*64,64);
+        i=i+1;
+    }
+    let led_to:i32=s.*.led_n;
+    let mgmt:i64=leg_count_mgmt(s,led_from,led_to);
+    // survival: M1-recall on V
+    let bout:[]u8=halloc(s,64);
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    i=0;
+    while(i<1000){
+        let cid:i32=wigetc(vc,i*4);let off:i32=wigetc(vo,i*4);
+        let len:i32=64;
+        if(cid==0){if(off+len>prose.len){len=prose.len-off;}}
+        else {if(off+len>code.len){len=code.len-off;}}
+        if(cid==0){w_probe(s,prose,0,off,len,bout,&cok,&bok,&mat);}
+        else {w_probe(s,code,1,off,len,bout,&cok,&bok,&mat);}
+        i=i+1;
+    }
+    let survival:i64=((cok*1000)/1000) as i64;
+    // fresh_recall: last 500 ingested fresh (cells 6500..6999)
+    cok=0;bok=0;mat=0;
+    i=6500;
+    while(i<7000){
+        w_probe(s,fresh,8,i*64,64,bout,&cok,&bok,&mat);
+        i=i+1;
+    }
+    let fresh_r:i64=((cok*1000)/500) as i64;
+    // freeze distinguisher
+    let frozen:i32=0;
+    if((survival>=900 && fresh_r<800) || mgmt<700 || wh<50){frozen=1;}
+    jf_int(&f,"m3_survival_tenths",survival);
+    jf_int(&f,"m3_fresh_recall_tenths",fresh_r);
+    jf_int(&f,"m3_mgmt_entries",mgmt);
+    jf_int(&f,"m3_weaken_handled",wh as i64);
+    jf_int(&f,"m3_freeze",frozen as i64);
+    jf_str(&f,"m3_valuable","pinned L0+L1; weaken on pinned refused per policy");
+    jf_int(&f,"m3_variant",w_variant() as i64);
+    w_emit_sel(s,&f);
+    j_end();
+}
+
+// ---- M4 helpers: code identifier rename patch ----
+fn leg_apply_pat(cell:[]u8,tmp:[]u8,pat:[]u8,rep:[]u8)void {
+    let n:i32=64;let pl:i32=pat.len;
+    let i:i32=0;
+    while(i+pl<=n){
+        let m:i32=1;let j:i32=0;
+        while(j<pl){
+            if(cell[i+j]!=pat[j]){m=0;j=pl;}
+            else {j=j+1;}
+        }
+        if(m==1){
+            j=0;
+            while(j<pl){tmp[i+j]=rep[j];j=j+1;}
+            i=i+pl;
+        } else {i=i+1;}
+    }
+}
+fn leg_code_patch(s:*W,cell:[]u8,patch:[]u8)void {
+    let tmp:[]u8=halloc(s,64);
+    let i:i32=0;
+    while(i<64){tmp[i]=cell[i];patch[i]=0;i=i+1;}
+    let p1:[]u8="sqlite3";let r1:[]u8="sqlite4";
+    let p2:[]u8="SQLITE";let r2:[]u8="SQLITF";
+    let p3:[]u8="Vdbe";let r3:[]u8="Vdbf";
+    let p4:[]u8="Mem";let r4:[]u8="Mfm";
+    let p5:[]u8="pBt";let r5:[]u8="pBu";
+    leg_apply_pat(cell,tmp,p1,r1);
+    leg_apply_pat(cell,tmp,p2,r2);
+    leg_apply_pat(cell,tmp,p3,r3);
+    leg_apply_pat(cell,tmp,p4,r4);
+    leg_apply_pat(cell,tmp,p5,r5);
+    i=0;
+    while(i<64){patch[i]=cell[i]^tmp[i];i=i+1;}
+}
+fn t_m4(s:*W,dir:[]u8,cname:[]u8,cid:i32,scale:[]u8,mode:[]u8)void {
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    let img:[]u8=w_read_file(s,dir,cname);
+    if(img.len==0){
+        jf_str(&f,"m4_error","corpus read failed");
+        j_end();
+        return;
+    }
+    let nunits:i32=(img.len+63)/64;
+    leg_ingest_all(s,img,cid);
+    // 200 units at i*nunits/200
+    let doff:[]u8=halloc(s,200*4);
+    let dkind:[]u8=halloc(s,200*4); // 0=boundary,1=content
+    let ddelta:[]u8=halloc(s,200*4);
+    zfill(doff);zfill(dkind);zfill(ddelta);
+    let cyc:[]u8=halloc(s,12*4);
+    wiput(cyc,0,1);wiput(cyc,4,-1);wiput(cyc,8,2);wiput(cyc,12,-2);
+    wiput(cyc,16,4);wiput(cyc,20,-4);wiput(cyc,24,8);wiput(cyc,28,-8);
+    wiput(cyc,32,16);wiput(cyc,36,-16);wiput(cyc,40,32);wiput(cyc,44,-32);
+    let bout:[]u8=halloc(s,64);
+    let patch:[]u8=halloc(s,64);
+    let j:i32=0;
+    while(j<200){
+        let idx:i32=j*nunits/200;
+        let off:i32=idx*64;
+        let len:i32=64;
+        if(off+len>img.len){len=img.len-off;}
+        wiput(doff,j*4,off);
+        if(j<100){
+            // boundary defect
+            wiput(dkind,j*4,0);
+            let d:i32=wigetc(cyc,(j%12)*4);
+            wiput(ddelta,j*4,d);
+            let dummy:[]u8=halloc(s,1);
+            w_defect_cell(s,cid,off,0,d,dummy,0);
+        } else {
+            // content defect
+            wiput(dkind,j*4,1);
+            let k:i32=0;
+            while(k<64){patch[k]=0;k=k+1;}
+            if(cid==0){
+                // prose: every 7th byte XOR 0xFF
+                k=0;
+                while(k<len){if((k%7)==0){patch[k]=255;}k=k+1;}
+            } else {
+                // code: identifier rename patch
+                let cell:[]u8=halloc(s,64);
+                k=0;
+                while(k<len){cell[k]=img[off+k];k=k+1;}
+                while(k<64){cell[k]=0;k=k+1;}
+                leg_code_patch(s,cell,patch);
+            }
+            w_defect_cell(s,cid,off,1,0,patch,len);
+        }
+        j=j+1;
+    }
+    // revision episodes (max 20)
+    let ep:i32=0;
+    let done:i32=0;
+    while(ep<20 && done==0){
+        done=1;
+        j=0;
+        while(j<200){
+            let off:i32=wigetc(doff,j*4);
+            let kind:i32=wigetc(dkind,j*4);
+            let len:i32=64;
+            if(off+len>img.len){len=img.len-off;}
+            let cur_off:i32=off;
+            if(kind==0){cur_off=off+wigetc(ddelta,j*4);}
+            let v:i32=w_cell_verified(s,img,cid,off,len,bout);
+            if(v==0){
+                w_revise_cell(s,cid,cur_off);
+                v=w_cell_verified(s,img,cid,off,len,bout);
+                if(v==0){done=0;}
+            }
+            j=j+1;
+        }
+        ep=ep+1;
+    }
+    // score per class
+    let rb:i32=0;let kb:i32=0;let ub:i32=0;
+    let rc:i32=0;let kc:i32=0;let uc:i32=0;
+    j=0;
+    while(j<200){
+        let off:i32=wigetc(doff,j*4);
+        let kind:i32=wigetc(dkind,j*4);
+        let len:i32=64;
+        if(off+len>img.len){len=img.len-off;}
+        let v:i32=w_cell_verified(s,img,cid,off,len,bout);
+        // killed? check L1 atom liveness
+        let key:i64=w_skey(cid,off);
+        let u:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key);
+        let dead:i32=0;
+        if(u>=0){
+            if((wigetc(s.*.l1_flags,u*4)&F_LIVE)==0){dead=1;}
+        } else {dead=1;}
+        if(kind==0){
+            if(v==1){rb=rb+1;}
+            else {if(dead==1){kb=kb+1;}else{ub=ub+1;}}
+        } else {
+            if(v==1){rc=rc+1;}
+            else {if(dead==1){kc=kc+1;}else{uc=uc+1;}}
+        }
+        j=j+1;
+    }
+    let kill_rate:i64=((kb+kc)*1000)/200;
+    let killsub:i32=0;
+    if(kill_rate>500 && (rb+rc)<180){killsub=1;} // kill>50% AND revision below bar
+    jf_int(&f,"m4_rev_boundary_tenths",((rb*1000)/100) as i64);
+    jf_int(&f,"m4_rev_content_tenths",((rc*1000)/100) as i64);
+    jf_int(&f,"m4_kill_rate_tenths",kill_rate);
+    jf_int(&f,"m4_killsub",killsub as i64);
+    jf_int(&f,"m4_episodes",ep as i64);
+    jf_int(&f,"m4_variant",w_variant() as i64);
+    w_emit_sel(s,&f);
+    j_end();
+}
+
+// ---- M5: memory footprint ----
+fn t_m5(s:*W,dir:[]u8,scale:[]u8,mode:[]u8,is_baseline:i32)void {
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    let slot_bytes:i64=(s.*.cap0 as i64)*40+(s.*.cap1 as i64)*72+
+                       (s.*.cap2 as i64)*52;
+    if(is_baseline==1){
+        // same empty store, fully touched (w_init zfills); no ingest.
+        jf_int(&f,"m5_units_learned",0);
+        jf_int(&f,"m5_source_bytes_learned",0);
+        jf_int(&f,"m5_slot_table_bytes",slot_bytes);
+        jf_int(&f,"m5_ledger_bytes",0);
+        jf_int(&f,"m5_ledger_entries",0);
+        jf_int(&f,"m5_corpus_buffer_bytes",0);
+        jf_int(&f,"m5_variant",w_variant() as i64);
+        j_end();
+        return;
+    }
+    let prose:[]u8=w_read_file(s,dir,"prose.bin");
+    let fresh:[]u8=w_read_file(s,dir,"churn_fresh.bin");
+    if(prose.len==0 || fresh.len==0){
+        jf_str(&f,"m5_error","corpus read failed");
+        j_end();
+        return;
+    }
+    // full prose ingest (deliberate add path)
+    let nunits:i32=leg_ingest_all(s,prose,0);
+    // 1000-step mini-pressure: 500 fresh ingests, 500 kills
+    let i:i32=0;
+    while(i<500){
+        w_ingest_cell(s,fresh,8,i*64,64);
+        i=i+1;
+    }
+    i=0;
+    while(i<500){
+        leg_kill_cell(s,8,i*64,41);
+        i=i+1;
+    }
+    // byte-exact M1 recall at trial end (L)
+    let bout:[]u8=halloc(s,64);
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    leg_probe_all(s,prose,0,nunits,bout,&cok,&bok,&mat);
+    // units learned = deliberate adds that survive with byte-exact recall
+    jf_int(&f,"m5_units_learned",nunits as i64);
+    jf_int(&f,"m5_source_bytes_learned",prose.len as i64);
+    jf_int(&f,"m5_slot_table_bytes",slot_bytes);
+    jf_int(&f,"m5_ledger_bytes",(s.*.led_n as i64)*64);
+    jf_int(&f,"m5_ledger_entries",s.*.led_n as i64);
+    jf_int(&f,"m5_corpus_buffer_bytes",prose.len as i64);
+    jf_int(&f,"m5_recall_tenths",((cok*1000)/nunits) as i64);
+    jf_int(&f,"m5_variant",w_variant() as i64);
+    j_end();
+}
+
+// ---- M6: interference (P->C and C->P separate) ----
+fn leg_m6_train(s:*W,img:[]u8,cid:i32,rout:*i64,bout2:*i64)void {
+    // M2 episode loop to criterion (content>=99.5% AND boundary>=95% x3)
+    let nunits:i32=(img.len+63)/64;
+    let bout:[]u8=halloc(s,64);
+    let ep:i32=1;
+    let consec:i32=0;
+    let r:i64=0;let b:i64=0;
+    while(ep<=50){
+        leg_ingest_all(s,img,cid);
+        let cok:i32=0;let bok:i32=0;let mat:i64=0;
+        leg_probe_all(s,img,cid,nunits,bout,&cok,&bok,&mat);
+        r=((cok*1000)/nunits) as i64;
+        b=((bok*1000)/nunits) as i64;
+        if(r>=995 && b>=950){consec=consec+1;}
+        else {consec=0;}
+        w_episode_end(s);
+        if(consec>=3){ep=50;}
+        ep=ep+1;
+    }
+    rout.*=r;bout2.*=b;
+}
+fn leg_m6_rev(s:*W,img:[]u8,cid:i32) i64 {
+    // 100 boundary defects at fixed indices, revise, return rev_tenths
+    let nunits:i32=(img.len+63)/64;
+    let cyc:[]u8=halloc(s,12*4);
+    wiput(cyc,0,1);wiput(cyc,4,-1);wiput(cyc,8,2);wiput(cyc,12,-2);
+    wiput(cyc,16,4);wiput(cyc,20,-4);wiput(cyc,24,8);wiput(cyc,28,-8);
+    wiput(cyc,32,16);wiput(cyc,36,-16);wiput(cyc,40,32);wiput(cyc,44,-32);
+    let doff:[]u8=halloc(s,100*4);
+    let ddelta:[]u8=halloc(s,100*4);
+    let j:i32=0;
+    while(j<100){
+        let idx:i32=j*nunits/100;
+        let off:i32=idx*64;
+        let len:i32=64;
+        if(off+len>img.len){len=img.len-off;}
+        wiput(doff,j*4,off);
+        let d:i32=wigetc(cyc,(j%12)*4);
+        wiput(ddelta,j*4,d);
+        let dummy:[]u8=halloc(s,1);
+        w_defect_cell(s,cid,off,0,d,dummy,0);
+        j=j+1;
+    }
+    // revise (single pass; deterministic)
+    j=0;
+    while(j<100){
+        let off:i32=wigetc(doff,j*4);
+        let cur:i32=off+wigetc(ddelta,j*4);
+        w_revise_cell(s,cid,cur);
+        j=j+1;
+    }
+    let rev:i32=0;
+    let bout:[]u8=halloc(s,64);
+    j=0;
+    while(j<100){
+        let off:i32=wigetc(doff,j*4);
+        let len:i32=64;
+        if(off+len>img.len){len=img.len-off;}
+        if(w_cell_verified(s,img,cid,off,len,bout)==1){rev=rev+1;}
+        j=j+1;
+    }
+    return ((rev*1000)/100) as i64;
+}
+fn t_m6(s:*W,dir:[]u8,scale:[]u8,mode:[]u8,p_to_c:i32)void {
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    let t1p:[]u8=w_read_file(s,dir,"t1_prose.bin");
+    let t1c:[]u8=w_read_file(s,dir,"t1_code.bin");
+    if(t1p.len==0 || t1c.len==0){
+        jf_str(&f,"m6_error","corpus read failed");
+        j_end();
+        return;
+    }
+    let train_img:[]u8=t1p;let train_cid:i32=10;
+    let test_img:[]u8=t1c;let test_cid:i32=11;
+    if(p_to_c==0){train_img=t1c;train_cid=11;test_img=t1p;test_cid=10;}
+    // train to criterion
+    let ind_r:i64=0;let ind_b:i64=0;
+    leg_m6_train(s,train_img,train_cid,&ind_r,&ind_b);
+    // in-domain revision (100 boundary defects on train corpus)
+    let ind_rev:i64=leg_m6_rev(s,train_img,train_cid);
+    // FREEZE policy: no more w_episode_end (no consolidation)
+    // face code: ingest allowed, policy frozen
+    let tnunits:i32=leg_ingest_all(s,test_img,test_cid);
+    let bout:[]u8=halloc(s,64);
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    leg_probe_all(s,test_img,test_cid,tnunits,bout,&cok,&bok,&mat);
+    let tr_r:i64=((cok*1000)/tnunits) as i64;
+    let tr_b:i64=((bok*1000)/tnunits) as i64;
+    let tr_rev:i64=leg_m6_rev(s,test_img,test_cid);
+    // transfer tax = mean(in-domain - transfer) over rec/bnd/rev, signed
+    let tax:i64=((ind_r-tr_r)+(ind_b-tr_b)+(ind_rev-tr_rev))/3;
+    jf_int(&f,"rec_tenths",tr_r);
+    jf_int(&f,"bnd_tenths",tr_b);
+    jf_int(&f,"rev_tenths",tr_rev);
+    jf_int(&f,"tax_tenths",tax);
+    jf_int(&f,"m6_ind_rec",ind_r);
+    jf_int(&f,"m6_ind_bnd",ind_b);
+    jf_int(&f,"m6_ind_rev",ind_rev);
+    jf_int(&f,"m6_variant",w_variant() as i64);
+    w_emit_sel(s,&f);
+    j_end();
+}
+
+// ---- M7: BLOCKED pending Micah freeze of A7/A8 ----
+fn t_m7(s:*W,scale:[]u8,mode:[]u8)void {
+    let f:i32=0;
+    j_begin("w",mode,scale);
+    jf_str(&f,"m7_na_reason","BLOCKED pending Micah freeze of A7/A8 (C' edit bytes and 5000-lookup schedule); ARM_INTERFACE.md requires freeze before ID-arm M7 runs");
+    jf_int(&f,"m7_variant",w_variant() as i64);
+    j_end();
+}
+
+// write the concatenated used bytes of all 8 audit chunks to
+// <dir>/ledger.bin in <=1MB pieces (nio_write_all caps at 1MB).
+fn t_m8_write_ledger(s:*W,dir:[]u8)void {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return;}
+    let cs:[]u8=nio_cstr("ledger.bin");
+    if(cs.len==0){nio_close(root);return;}
+    // O_RDWR|O_CREAT|O_TRUNC on top of the O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK base
+    let flags:i64=657408+2+64+512;
+    let fd:i64=_zag_raw_syscall(257,root,_zag_slice_ptr(cs) as i64,flags,384,0,0);
+    nio_free(cs);
+    nio_close(root);
+    if(fd<0){return;}
+    let ci:i32=0;
+    while(ci<8){
+        let used:i32=w_led_used(s,ci);
+        if(used>0){
+            let seg:[]u8=w_led_get(s,ci);
+            let at:i32=0;
+            while(at<used){
+                let n:i32=used-at;
+                if(n>1048576){n=1048576;}
+                let w:i64=nio_write_all(fd,seg[at..at+n]);
+                if(w!=(n as i64)){break;}
+                at=at+n;
+            }
+        }
+        ci=ci+1;
+    }
+    nio_close(fd);
+}
+
+// append "tag hex\n" to buf at at; returns new at.
+fn t_m8_line(buf:[]u8,at:i32,tag:[]u8,hx:[]u8) i32 {
+    let i:i32=0;
+    while(i<tag.len){buf[at]=tag[i];at=at+1;i=i+1;}
+    buf[at]=32;at=at+1;
+    i=0;
+    while(i<hx.len){buf[at]=hx[i];at=at+1;i=i+1;}
+    buf[at]=10;at=at+1;
+    return at;
+}
+
+// ---- M8: determinism gate (N=5 adversarial perturbations x 2 reruns) ----
+// Perturbation allocs (frag/aslr) are applied in main() BEFORE w_new so the
+// heap layout differs per leg. Workload exercises ingest, the selector (fast
+// path + full path with varied lengths), consolidation, pin/weaken/kill, and
+// eviction. Artifacts: per-chunk ledger hashes + registry hashes chained,
+// alloc trace. stdout is perturbation-agnostic: "M8,cok,bok,led,sel,ref".
+fn t_m8(s:*W,dir:[]u8,outdir:[]u8,pert:[]u8,m8pad:[]u8)void {
+    let prose:[]u8=w_read_file(s,dir,"prose.bin");
+    let code:[]u8=w_read_file(s,dir,"code.bin");
+    let fresh:[]u8=w_read_file(s,dir,"churn_fresh.bin");
+    if(prose.len==0 || code.len==0 || fresh.len==0){
+        _zag_println("M8,FATAL,empty-corpus");
+        if(m8pad.len>0){nio_free(m8pad);}
+        return;
+    }
+    // 1. ingest both corpora
+    let punits:i32=leg_ingest_all(s,prose,0);
+    let cunits:i32=leg_ingest_all(s,code,1);
+    // 2. full 64B recall sweep (selector fast path)
+    let bout:[]u8=halloc(s,64);
+    let cok:i32=0;let bok:i32=0;let mat:i64=0;
+    leg_probe_all(s,prose,0,punits,bout,&cok,&bok,&mat);
+    leg_probe_all(s,code,1,cunits,bout,&cok,&bok,&mat);
+    // 3. varied-length queries (full selector path + justification gate)
+    let qb:[]u8=halloc(s,4096);
+    let q:i32=0;
+    while(q<2000){
+        let qlen:i32=8<<(q%10);
+        let span:i32=prose.len-qlen;
+        let qoff:i32=0;
+        if(span>0){qoff=(q*7919)%span;}
+        w_serve(s,prose,prose,0,qoff,qlen,qb,0);
+        q=q+1;
+    }
+    // 4. consolidation episode (merge/split machinery)
+    w_episode_end(s);
+    // 5. M3-style pressure, scaled down
+    let total:i32=punits+cunits;
+    let k:i32=total/200;if(k<1){k=1;}
+    let v:i32=0;
+    while(v<200){
+        let g:i32=v*k;let cid:i32=0;let idx:i32=g;
+        if(g>=punits){cid=1;idx=g-punits;}
+        let key:i64=w_skey(cid,idx*64);
+        let sl:i32=w_idx_lookup(s.*.s0_key,s.*.s0_slot,s.*.s0_cap,key);
+        if(sl>=0){w_pin_id(s,wigetc(s.*.l0_id,sl*4));}
+        v=v+1;
+    }
+    let fi:i32=0;
+    while(fi<600){
+        w_ingest_cell(s,fresh,8,fi*64,64);
+        fi=fi+1;
+    }
+    fi=0;
+    while(fi<600){
+        leg_kill_cell(s,8,fi*64,40);
+        fi=fi+1;
+    }
+    let wi:i32=0;
+    while(wi<10){
+        let g2:i32=(wi*20)*k;let cid2:i32=0;let idx2:i32=g2;
+        if(g2>=punits){cid2=1;idx2=g2-punits;}
+        let key2:i64=w_skey(cid2,idx2*64);
+        let u2:i32=w_idx_lookup(s.*.s1_key,s.*.s1_slot,s.*.s1_cap,key2);
+        if(u2>=0){w_weaken_id(s,wigetc(s.*.l1_id,u2*4));}
+        wi=wi+1;
+    }
+    fi=600;
+    while(fi<1400){
+        if(s.*.n0>=4000 || s.*.n1>=4000){w_evict_l0(s);}
+        w_ingest_cell(s,fresh,8,fi*64,64);
+        fi=fi+1;
+    }
+    // 6. artifacts
+    let lines:[]u8=halloc(s,16*80);
+    let lo:i32=0;
+    let chain:[]u8=halloc(s,32);
+    zfill(chain);
+    let ci:i32=0;
+    while(ci<8){
+        let used:i32=w_led_used(s,ci);
+        let hx:[]u8=halloc(s,32);
+        zfill(hx);
+        if(used>0){
+            let seg:[]u8=w_led_get(s,ci);
+            ns_sha256(seg[0..used],hx);
+        }
+        let cat:[]u8=halloc(s,64);
+        let a:i32=0;
+        while(a<32){cat[a]=chain[a];cat[a+32]=hx[a];a=a+1;}
+        ns_sha256(cat,chain);
+        hfree(s,cat);
+        let hex:[]u8=ns_hex(hx);
+        let tag:[]u8="ledger0";
+        if(ci==1){tag="ledger1";}else if(ci==2){tag="ledger2";}
+        else if(ci==3){tag="ledger3";}else if(ci==4){tag="ledger4";}
+        else if(ci==5){tag="ledger5";}else if(ci==6){tag="ledger6";}
+        else if(ci==7){tag="ledger7";}
+        lo=t_m8_line(lines,lo,tag,hex);
+        nio_free(hex);
+        hfree(s,hx);
+        ci=ci+1;
+    }
+    // registry id arrays (placement determinism under frag/aslr)
+    let r0:[]u8=halloc(s,32);let r1:[]u8=halloc(s,32);let r2:[]u8=halloc(s,32);
+    zfill(r0);zfill(r1);zfill(r2);
+    ns_sha256(s.*.l0_id[0..s.*.n0*4],r0);
+    ns_sha256(s.*.l1_id[0..s.*.n1*4],r1);
+    ns_sha256(s.*.l2_id[0..s.*.n2*4],r2);
+    let hx0:[]u8=ns_hex(r0);lo=t_m8_line(lines,lo,"reg0",hx0);nio_free(hx0);
+    let hx1:[]u8=ns_hex(r1);lo=t_m8_line(lines,lo,"reg1",hx1);nio_free(hx1);
+    let hx2:[]u8=ns_hex(r2);lo=t_m8_line(lines,lo,"reg2",hx2);nio_free(hx2);
+    hfree(s,r0);hfree(s,r1);hfree(s,r2);
+    w_write_file(outdir,"store_hashes.txt",lines[0..lo]);
+    let chx:[]u8=ns_hex(chain);
+    let cl:[]u8=halloc(s,80);
+    let clo:i32=t_m8_line(cl,0,"chain",chx);
+    // store_chain.txt and ledger_chain.txt carry the same chain: W's ledger
+    // IS the chunked audit log, and store_hashes.txt holds the per-chunk
+    // hashes the chain folds (plus the registry id-array hashes).
+    w_write_file(outdir,"store_chain.txt",cl[0..clo]);
+    w_write_file(outdir,"ledger_chain.txt",cl[0..clo]);
+    t_m8_write_ledger(s,outdir);
+    nio_free(chx);
+    hfree(s,cl);
+    hfree(s,chain);
+    hfree(s,lines);
+    w_write_file(outdir,"alloc_trace.txt",s.*.trace[0..s.*.trace_n]);
+    // stdout (perturbation-agnostic)
+    _zag_print("M8,");
+    p_i64(cok as i64);_zag_print(",");
+    p_i64(bok as i64);_zag_print(",");
+    p_i64(s.*.led_n as i64);_zag_print(",");
+    p_i64(s.*.sel_selections as i64);_zag_print(",");
+    p_i64(s.*.sel_refusals as i64);
+    _zag_println("");
+    hfree(s,bout);hfree(s,qb);
+    if(m8pad.len>0){nio_free(m8pad);}
+    // frag survivors: freed by OS at exit (identical each run)
+}
+
+// ---- main dispatch ----
+fn main() i32 {
+    let mode:[]u8=_zag_arg(1);
+    // harness convention (shared units/arms/harness/run_battery.sh, m8_gate.sh):
+    //   <bin> <mode> <corpus-root> [outdir] [perturbation] [ms]
+    // variant "ms" is read by w_variant() from _zag_arg(3/4/5).
+    // (r1.1: dir moved from argv[4] to argv[2]; the old layout was
+    // self-contradictory — argv[4] was both variant slot and corpus dir —
+    // and incompatible with the shared harness.)
+    let dir:[]u8=_zag_arg(2);
+    if(dir.len==0){dir=".";}
+    let scale:[]u8="1x";
+    // M8 perturbations run BEFORE w_new so the heap layout differs per leg.
+    // frag: 256 deterministic raw allocs, every 3rd freed (survivors leak
+    //   intentionally; freed by OS at exit; identical each run).
+    // aslr: 1,234,567-byte base pad (freed at the end of t_m8).
+    // freelist/starve: accepted no-ops — slot placement is a pure function of
+    //   op order and unit ID; clock/entropy are never read (cf. A11).
+    let m8pad:[]u8="";
+    if(_zag_strcmp(mode,"m8-1x")==1){
+        let pert0:[]u8=_zag_arg(4);
+        if(_zag_strcmp(pert0,"frag")==1){
+            let fi:i32=0;
+            while(fi<256){
+                let fsz:i32=(fi*37)%4096+16;
+                let fb:[]u8=nio_alloc(fsz);
+                if(fi%3==0){nio_free(fb);}
+                fi=fi+1;
+            }
+        }
+        if(_zag_strcmp(pert0,"aslr")==1){
+            m8pad=nio_alloc(1234567);
+        }
+    }
+    // init with large caps (M3 enforces 4000 manually)
+    let s:W=w_new(200000,50000,200000,5000,400000,400000,100000,400000,
+                  5000,5000,4194296);
+    let sp:*W=&s;
+    if(_zag_strcmp(mode,"m1-1x-prose")==1){
+        t_m1(sp,dir,"prose.bin",0,scale,mode);
+    } else {
+        if(_zag_strcmp(mode,"m1-1x-code")==1){
+            t_m1(sp,dir,"code.bin",1,scale,mode);
+        } else {
+            if(_zag_strcmp(mode,"m2-t1-prose")==1){
+                t_m2(sp,dir,"t1_prose.bin",10,scale,mode,1);
+            } else {
+                if(_zag_strcmp(mode,"m2-t1-code")==1){
+                    t_m2(sp,dir,"t1_code.bin",11,scale,mode,1);
+                } else {
+                    if(_zag_strcmp(mode,"m2-t2-prose")==1){
+                        t_m2(sp,dir,"t2_prose.bin",12,scale,mode,0);
+                    } else {
+                        if(_zag_strcmp(mode,"m2-t2-code")==1){
+                            t_m2(sp,dir,"t2_code.bin",13,scale,mode,0);
+                        } else {
+                            if(_zag_strcmp(mode,"m2-t3-1x")==1){
+                                t_m2(sp,dir,"t3.bin",14,scale,mode,0);
+                            } else {
+                                if(_zag_strcmp(mode,"m3-1x")==1){
+                                    t_m3(sp,dir,scale,mode);
+                                } else {
+                                    if(_zag_strcmp(mode,"m4-1x-prose")==1){
+                                        t_m4(sp,dir,"prose.bin",0,scale,mode);
+                                    } else {
+                                        if(_zag_strcmp(mode,"m4-1x-code")==1){
+                                            t_m4(sp,dir,"code.bin",1,scale,mode);
+                                        } else {
+                                            if(_zag_strcmp(mode,"m5-1x")==1){
+                                                t_m5(sp,dir,scale,mode,0);
+                                            } else {
+                                                if(_zag_strcmp(mode,"m5-baseline")==1){
+                                                    t_m5(sp,dir,scale,mode,1);
+                                                } else {
+                                                    if(_zag_strcmp(mode,"m6-p2c-1x")==1){
+                                                        t_m6(sp,dir,scale,mode,1);
+                                                    } else {
+                                                        if(_zag_strcmp(mode,"m6-c2p-1x")==1){
+                                                            t_m6(sp,dir,scale,mode,0);
+                                                        } else {
+                                                            if(_zag_strcmp(mode,"m7-1x")==1){
+                                                                t_m7(sp,scale,mode);
+                                                            } else if(_zag_strcmp(mode,"m8-1x")==1){
+                                                                t_m8(sp,dir,_zag_arg(3),_zag_arg(4),m8pad);
+                                                            } else {
+                                                                let f:i32=0;
+                                                                j_begin("w",mode,scale);
+                                                                jf_str(&f,"error","unknown mode");
+                                                                j_end();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}

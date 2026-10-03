@@ -1,0 +1,505 @@
+// x3_driver.zag — B-3034X3 composition driver (frozen prereg PREREG_B3034X3.md).
+//
+// The 30+34 composition rebuilt as a driver-owned mechanism:
+//   - H-PAM-30's full-pin verdict gate as the admission surface: the 30-half
+//     checks the FULL tuple (label, conf, meas) against the driver's world.
+//   - H-PAM-34's interleave/delay-line protocol as the continuity binding:
+//     the driver-owned queue, driver-counted K, driver-owned monotonic
+//     cross-call clock, driver-authenticated gap marks, epoch digests, the
+//     single-trajectory seed, payload continuity, and the sink call.
+//
+// The driver OWNS the mechanism: queue, K counting, clocks, gap
+// authentication, digest, trajectory, and the sink call are driver-side.
+// Fixtures present percepts and epochs ONLY:
+//   x3_enqueue(st,id,epoch,label,conf,meas,extra) / x3_gap(st,id,epoch) /
+//   x3_decide(st,id).
+// There is NO n_epochs parameter (K is driver-pinned), NO presenter time
+// (temporal rule reads driver stamps only), NO presenter verdict/bound
+// (digests are driver-computed), NO reset in the decision API
+// (operator-only per frozen C-R0: the symbol does not exist here).
+//
+// Construction fixes (prereg §1), each verifiable by source inspection:
+//   C-E0:   K driver-owned/pinned (K_PIN); zero counted epochs -> rc=10.
+//   C-TEMP: temporal rule t_q < t_stored < t_dec on driver stamps only.
+//   C-GAP:  gap marks driver-issued + seal-bound; a gap NEVER suppresses a
+//           queued world failure (world check runs on ALL queued records);
+//           all-gap input refuses (rc=10).
+//   C-SHORT: every counted epoch is non-gap (has a queued record); windows
+//           of 1-2 epochs refuse (rc=14).
+//   C-CLONE: digest binds (id,epoch,label,conf,meas,extra); exact replays
+//           are refused at enqueue (rc=4) so one percept's bytes presented
+//           twice count as ONE epoch.
+//   C-SEED: one seed per decision: x3_seed(id), driver-derived; world
+//           functions are evaluated against the decision's seed only.
+//   C-NOP:  the 30-half checks label, conf (|d|<=TOL_C=10) and meas
+//           (|d|<=TOL_M=50); the sink's own threshold (conf>=95) is carried
+//           as the preregistered scope note from B-3034COMP §6.
+//   C-POISON: ledger entries bind (id, seed, epoch digests); a ledger line
+//           for id A is never consulted for id B (lhas is id-exact).
+//   C-RC7:  rc=7 payload-split path is code-present and battery-exercised;
+//           gap marks cannot drop an epoch out of continuity.
+//   C-SINK: x3_act_sink is ACTUALLY CALLED on the promotion path (the call
+//           below, not a pack bit). It fires on extra-consistent goals
+//           (extra!=0, minconf>=95) and never on false G (false G never
+//           promotes, so the call site is unreachable).
+//   C-R0:   FROZEN CHOICE — no reset symbol exists in this file; reset is
+//           operator-only by absence from the decision API.
+//   C-Q0:   SCOPE-CARRY (liveness): at most QCAP never-decided records can
+//           starve honest enqueues; the battery measures the count.
+//
+// Pure Zag, zero RNG. State is one []u8 arena passed to every call (no
+// globals). All tables via []u8 LE64 accessors (ZNC-2026-09-21-007: never
+// consecutive narrow casts; every arena explicitly zeroed at creation).
+
+// ---------- preregistered test values (governance values await Micah) ----------
+fn k_pin() i64 { return 3; }
+fn qcap() i64 { return 40; }
+fn gcap() i64 { return 64; }
+fn lcap() i64 { return 64; }
+fn scap() i64 { return 64; }
+fn tol_c() i64 { return 10; }
+fn tol_m() i64 { return 50; }
+fn sink_conf_min() i64 { return 95; }
+fn max_age() i64 { return 64; }
+
+// ---------- state arena layout (byte offsets; all fields LE64 = 8 bytes) ----------
+// 0: clk | 8: q_len | 16: g_len | 24: l_len | 32: s_len
+// 40: queue: 40 x 72B records (id,epoch,label,conf,meas,extra,t_q,t_stored,digest)
+// 2920: gaps: 64 x 32B (id,epoch,t_g,seal)
+// 4968: ledger: 64 x 64B (id,seed,d0,d1,d2,t_dec,extra)
+// 9064: sink log: 64 x 32B (id,extra,minconf,t)
+fn qbase() i32 { return 40; }
+fn qrec() i32 { return 72; }
+fn gbase() i32 { return 2920; }
+fn grec() i32 { return 32; }
+fn lbase() i32 { return 4968; }
+fn lrec() i32 { return 64; }
+fn sbase() i32 { return 9064; }
+fn srec() i32 { return 32; }
+fn arena_bytes() i32 { return 11112; }
+
+// ---------- LE64 accessors ([]u8 arena; ZNC-2026-09-21-007 workaround) ----------
+fn t_put64(b:[]u8, o:i32, v:i64) void {
+    b[o] = (v % 256) as u8;
+    b[o+1] = ((v / 256) % 256) as u8;
+    b[o+2] = ((v / 65536) % 256) as u8;
+    b[o+3] = ((v / 16777216) % 256) as u8;
+    b[o+4] = ((v / 4294967296) % 256) as u8;
+    b[o+5] = ((v / 1099511627776) % 256) as u8;
+    b[o+6] = ((v / 281474976710656) % 256) as u8;
+    b[o+7] = ((v / 72057594037927936) % 256) as u8;
+    return;
+}
+fn t_get64(b:[]u8, o:i32) i64 {
+    let r:i64 = (b[o] as i64) + (b[o+1] as i64) * 256 + (b[o+2] as i64) * 65536 + (b[o+3] as i64) * 16777216 + (b[o+4] as i64) * 4294967296 + (b[o+5] as i64) * 1099511627776 + (b[o+6] as i64) * 281474976710656 + (b[o+7] as i64) * 72057594037927936;
+    return r;
+}
+
+// ---------- toy hash ----------
+// th_mix / toyhash3 / toyhash5 come from vendor/b303134_common_6e74ce54.zag
+// (hardened against negative inputs; identical to the naive mix on the
+// non-negative inputs used here).
+
+// ---------- driver-owned world (frozen conventions from the X2 line) ----------
+// E-TIME epoch world: the label flips at the promotion epoch (e>=2).
+// All world inputs are reduced mod 2^31 first: ids up to 2^63 (the P-class
+// remint arm) must not overflow the i64 multiplies below. The fixture and
+// the driver call the same functions, so the world is self-consistent.
+fn x3_wl(id:i64, seed:i64) i64 { return ((((id % 2147483647) * 2654435761 + seed * 97 + 11) / 65536) % 2); }
+fn x3_wc(id:i64, seed:i64) i64 { return 70 + (((id % 2147483647) * 97 + seed * 13) % 31); }
+fn x3_wm(id:i64, seed:i64) i64 { return 1000 + (((id % 2147483647) * 131 + seed * 17) % 500); }
+fn x3_wle(id:i64, e:i64, seed:i64) i64 {
+    if(e < 2) { return x3_wl(id, seed); }
+    return 1 - x3_wl(id, seed);
+}
+// C-SEED: ONE seed per decision, driver-derived from the id. There is no
+// per-record seed field anywhere in this file; the world is evaluated
+// against x3_seed(id) only.
+fn x3_seed(id:i64) i64 { return toyhash3(id, 915, 31); }
+// C-CLONE: the per-epoch digest binds (id, epoch, label, conf, meas, extra).
+fn x3_digest(id:i64, epoch:i64, label:i64, conf:i64, meas:i64, extra:i64) i64 {
+    return th_mix(toyhash5(id, epoch, label, conf, meas), extra);
+}
+// C-NOP: the 30-half checks the full tuple against the frozen tolerances.
+fn x3_world_ok(label:i64, conf:i64, meas:i64, id:i64, e:i64, seed:i64) i32 {
+    if(label != x3_wle(id, e, seed)) { return 0; }
+    let dc:i64 = conf - x3_wc(id, seed);
+    if(dc < 0) { dc = 0 - dc; }
+    if(dc > tol_c()) { return 0; }
+    let dm:i64 = meas - x3_wm(id, seed);
+    if(dm < 0) { dm = 0 - dm; }
+    if(dm > tol_m()) { return 0; }
+    return 1;
+}
+// The 30-half's STATIC world (no epoch flip), used by the preregistered
+// 34-half ablation x3_decide_nop only.
+fn x3_world_ok_static(label:i64, conf:i64, meas:i64, id:i64, seed:i64) i32 {
+    if(label != x3_wl(id, seed)) { return 0; }
+    let dc:i64 = conf - x3_wc(id, seed);
+    if(dc < 0) { dc = 0 - dc; }
+    if(dc > tol_c()) { return 0; }
+    let dm:i64 = meas - x3_wm(id, seed);
+    if(dm < 0) { dm = 0 - dm; }
+    if(dm > tol_m()) { return 0; }
+    return 1;
+}
+
+// ---------- state ----------
+// Explicit zeroing: znc heap arrays are NOT reliably zeroed.
+fn x3_new() []u8 {
+    let st:[]u8 = nio_alloc(arena_bytes());
+    let i:i32 = 0;
+    while(i < arena_bytes()) { st[i] = 0 as u8; i = i + 1; }
+    return st;
+}
+// Driver-owned monotonic cross-call clock. Every presentation and every
+// decision phase advances it; stamps are written by the driver only.
+fn x3_tick(st:[]u8) i64 {
+    let c:i64 = t_get64(st, 0);
+    t_put64(st, 0, c + 1);
+    return c + 1;
+}
+fn x3_pack(promoted:i32, fired:i32, rc:i32) i64 {
+    return (promoted as i64) + (fired as i64) * 2 + (rc as i64) * 4;
+}
+
+// ---------- presentation: percepts and epochs ONLY ----------
+// rc: 0 ok | 2 QUEUE_FULL | 4 DUP_DIGEST (C-CLONE: one percept's bytes
+// presented twice count as ONE epoch — the replay is refused at ingress).
+// The clock ticks even on refusal: time passes whether or not the queue
+// has room (this is what lets the T0 staleness transcript advance time).
+fn x3_enqueue(st:[]u8, id:i64, epoch:i64, label:i64, conf:i64, meas:i64, extra:i64) i64 {
+    let tq:i64 = x3_tick(st);
+    let n:i64 = t_get64(st, 8);
+    if(n >= qcap()) { return 2; }
+    let dg:i64 = x3_digest(id, epoch, label, conf, meas, extra);
+    let i:i64 = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o + 64) == dg) { return 4; }
+        i = i + 1;
+    }
+    let o:i32 = qbase() + (n as i32) * qrec();
+    t_put64(st, o, id);
+    t_put64(st, o + 8, epoch);
+    t_put64(st, o + 16, label);
+    t_put64(st, o + 24, conf);
+    t_put64(st, o + 32, meas);
+    t_put64(st, o + 40, extra);
+    t_put64(st, o + 48, tq);
+    t_put64(st, o + 56, 0);
+    t_put64(st, o + 64, dg);
+    t_put64(st, 8, n + 1);
+    return 0;
+}
+// C-GAP: gap marks are DRIVER-AUTHENTICATED. The only way a gap mark comes
+// into existence is this driver call: it stamps the driver clock and seals
+// the mark with a driver-bound sentinel. There is no presenter-supplied
+// authenticator to forge (the X2 failure: a public gap_sentinel anyone
+// could mint). rc: 0 ok | 15 GAP_FULL.
+fn x3_gap(st:[]u8, id:i64, epoch:i64) i64 {
+    let tg:i64 = x3_tick(st);
+    let g:i64 = t_get64(st, 16);
+    if(g >= gcap()) { return 15; }
+    let o:i32 = gbase() + (g as i32) * grec();
+    t_put64(st, o, id);
+    t_put64(st, o + 8, epoch);
+    t_put64(st, o + 16, tg);
+    t_put64(st, o + 24, th_mix(toyhash3(id, epoch, 7919), tg));
+    t_put64(st, 16, g + 1);
+    return 0;
+}
+// ---------- promotion ledger ----------
+// C-POISON: entries bind the deciding evidence (id + seed + epoch digests);
+// lhas is id-exact, so a ledger line for id A is never accepted for id B.
+fn x3_lhas(st:[]u8, id:i64) i32 {
+    let n:i64 = t_get64(st, 24);
+    let i:i64 = 0;
+    while(i < n) {
+        let o:i32 = lbase() + (i as i32) * lrec();
+        if(t_get64(st, o) == id) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+fn x3_lappend(st:[]u8, id:i64, seed:i64, d0:i64, d1:i64, d2:i64, tdec:i64, extra:i64) i64 {
+    let n:i64 = t_get64(st, 24);
+    if(n >= lcap()) { return 16; }
+    let o:i32 = lbase() + (n as i32) * lrec();
+    t_put64(st, o, id);
+    t_put64(st, o + 8, seed);
+    t_put64(st, o + 16, d0);
+    t_put64(st, o + 24, d1);
+    t_put64(st, o + 32, d2);
+    t_put64(st, o + 40, tdec);
+    t_put64(st, o + 48, extra);
+    t_put64(st, 24, n + 1);
+    return 0;
+}
+// A decision consumes its presentation: the decided id's queue records and
+// gap marks are removed on every terminal decide path. The driver clock,
+// the promotion ledger, and the sink log are NEVER retired (cross-call
+// state).
+fn x3_retire(st:[]u8, id:i64) void {
+    let n:i64 = t_get64(st, 8);
+    let w:i64 = 0;
+    let r:i64 = 0;
+    while(r < n) {
+        let bo:i32 = qbase() + (r as i32) * qrec();
+        if(t_get64(st, bo) != id) {
+            if(w != r) {
+                let a:i32 = qbase() + (w as i32) * qrec();
+                let k:i32 = 0;
+                while(k < qrec()) { st[a + k] = st[bo + k]; k = k + 1; }
+            }
+            w = w + 1;
+        }
+        r = r + 1;
+    }
+    t_put64(st, 8, w);
+    let g:i64 = t_get64(st, 16);
+    w = 0;
+    r = 0;
+    while(r < g) {
+        let bo:i32 = gbase() + (r as i32) * grec();
+        if(t_get64(st, bo) != id) {
+            if(w != r) {
+                let a:i32 = gbase() + (w as i32) * grec();
+                let k:i32 = 0;
+                while(k < grec()) { st[a + k] = st[bo + k]; k = k + 1; }
+            }
+            w = w + 1;
+        }
+        r = r + 1;
+    }
+    t_put64(st, 16, w);
+    return;
+}
+// ---------- the sink ----------
+// C-SINK: x3_act_sink is ACTUALLY CALLED on the promotion path (the call
+// sites are in x3_decide and x3_decide_nop below) — a call, not a pack
+// bit. The sink's own threshold (minconf >= 95, the preregistered scope
+// note from B-3034COMP §6) gates firing: it fires on true extra-consistent
+// goals and never on false G (false G never promotes, so the call site is
+// unreachable there). Returns 1 when the sink fired.
+fn x3_act_sink(st:[]u8, id:i64, extra:i64, minconf:i64) i64 {
+    if(minconf < sink_conf_min()) { return 0; }
+    let n:i64 = t_get64(st, 32);
+    if(n < scap()) {
+        let o:i32 = sbase() + (n as i32) * srec();
+        t_put64(st, o, id);
+        t_put64(st, o + 8, extra);
+        t_put64(st, o + 16, minconf);
+        t_put64(st, o + 24, t_get64(st, 0));
+        t_put64(st, 32, n + 1);
+    }
+    return 1;
+}
+// Read-only observability for the battery: how many times the sink fired.
+fn x3_sink_count(st:[]u8) i64 { return t_get64(st, 32); }
+
+// ---------- the decision: x3_decide ----------
+// rc codes (each a dedicated code; a refusal is never a silent promote):
+//   0 promote | 2 QUEUE_FULL | 4 DUP_DIGEST | 6 ALREADY_PROMOTED |
+//   7 PAYLOAD_SPLIT | 10 NO_EVIDENCE | 11 TIME (order or staleness) |
+//   12 GAP_SEAL | 13 WORLD_FAIL | 14 SHORT_WINDOW | 15 GAP_FULL |
+//   16 LEDGER_FULL.
+fn x3_decide(st:[]u8, id:i64) i64 {
+    let t_open:i64 = x3_tick(st);
+    if(x3_lhas(st, id) == 1) { return x3_pack(0, 0, 6); }
+    let seed:i64 = x3_seed(id);
+    // Pass 1 — C-GAP: the contradiction/world check runs on ALL queued
+    // records for the id, regardless of gap marks. A gap mark NEVER
+    // suppresses a queued world failure. t_stored is stamped here, by the
+    // driver, between t_open and t_dec.
+    let n:i64 = t_get64(st, 8);
+    let i:i64 = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o) == id) {
+            let wok:i32 = x3_world_ok(t_get64(st, o + 16), t_get64(st, o + 24), t_get64(st, o + 32), id, t_get64(st, o + 8), seed);
+            if(wok == 0) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 13);
+            }
+            t_put64(st, o + 56, x3_tick(st));
+        }
+        i = i + 1;
+    }
+    // Pass 2 — C-SHORT + C-RC7: count distinct epochs (every counted epoch
+    // is non-gap, i.e. has a queued record); payload continuity over ALL
+    // queued records (a gap mark cannot drop an epoch out of continuity).
+    let distinct:i64 = 0;
+    let ex0:i64 = 0;
+    let have_ex:i32 = 0;
+    let minconf:i64 = 999999999;
+    i = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o) == id) {
+            let ep:i64 = t_get64(st, o + 8);
+            let seen:i32 = 0;
+            let k:i64 = 0;
+            while(k < i) {
+                let ok2:i32 = qbase() + (k as i32) * qrec();
+                if(t_get64(st, ok2) == id) {
+                    if(t_get64(st, ok2 + 8) == ep) { seen = 1; }
+                }
+                k = k + 1;
+            }
+            if(seen == 0) { distinct = distinct + 1; }
+            let ex:i64 = t_get64(st, o + 40);
+            if(have_ex == 0) { ex0 = ex; have_ex = 1; }
+            if(ex != ex0) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 7);
+            }
+            let cf:i64 = t_get64(st, o + 24);
+            if(cf < minconf) { minconf = cf; }
+        }
+        i = i + 1;
+    }
+    // C-E0 / C-SHORT: zero non-gap records never promote; short windows
+    // (1-2 epochs) refuse. K is driver-pinned; there is no caller count.
+    if(distinct == 0) {
+        x3_retire(st, id);
+        return x3_pack(0, 0, 10);
+    }
+    if(distinct < k_pin()) {
+        x3_retire(st, id);
+        return x3_pack(0, 0, 14);
+    }
+    let t_dec:i64 = x3_tick(st);
+    // Pass 3 — C-TEMP: the temporal rule reads DRIVER stamps only:
+    // t_q < t_stored < t_dec on the driver-owned monotonic cross-call
+    // clock, plus the freshness bound. No presenter time exists in this
+    // file; nothing here reads a caller-supplied timestamp.
+    i = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o) == id) {
+            let tq:i64 = t_get64(st, o + 48);
+            let ts:i64 = t_get64(st, o + 56);
+            if(tq >= ts) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 11);
+            }
+            if(ts >= t_dec) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 11);
+            }
+            if(t_dec - tq > max_age()) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 11);
+            }
+        }
+        i = i + 1;
+    }
+    // Pass 4 — C-GAP: verify the driver seal on every gap mark for the id.
+    let g:i64 = t_get64(st, 16);
+    i = 0;
+    while(i < g) {
+        let o:i32 = gbase() + (i as i32) * grec();
+        if(t_get64(st, o) == id) {
+            let ep:i64 = t_get64(st, o + 8);
+            let tg:i64 = t_get64(st, o + 16);
+            if(th_mix(toyhash3(id, ep, 7919), tg) != t_get64(st, o + 24)) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 12);
+            }
+        }
+        i = i + 1;
+    }
+    // Promote. The ledger binds the deciding evidence: id + decision seed
+    // + the distinct epoch digests (C-POISON).
+    let d0:i64 = 0;
+    let d1:i64 = 0;
+    let d2:i64 = 0;
+    let dcnt:i64 = 0;
+    i = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o) == id) {
+            let ep:i64 = t_get64(st, o + 8);
+            let seen:i32 = 0;
+            let k:i64 = 0;
+            while(k < i) {
+                let ok2:i32 = qbase() + (k as i32) * qrec();
+                if(t_get64(st, ok2) == id) {
+                    if(t_get64(st, ok2 + 8) == ep) { seen = 1; }
+                }
+                k = k + 1;
+            }
+            if(seen == 0) {
+                let dg:i64 = t_get64(st, o + 64);
+                if(dcnt == 0) { d0 = dg; }
+                if(dcnt == 1) { d1 = dg; }
+                if(dcnt == 2) { d2 = dg; }
+                dcnt = dcnt + 1;
+            }
+        }
+        i = i + 1;
+    }
+    x3_lappend(st, id, seed, d0, d1, d2, t_dec, ex0);
+    // C-SINK: the sink is ACTUALLY CALLED here, on the promotion path. The
+    // fired condition is the call. It fires on extra-consistent goals
+    // (extra != 0 with every admitted percept at conf >= 95, the carried
+    // scope note); false G never promotes, so this site is unreachable
+    // there. t_open is read here so the open stamp is bound, not dropped.
+    let fired:i32 = 0;
+    if(ex0 != 0) {
+        if(minconf >= sink_conf_min()) {
+            if(t_open < t_dec) {
+                if(x3_act_sink(st, id, ex0, minconf) == 1) { fired = 1; }
+            }
+        }
+    }
+    x3_retire(st, id);
+    return x3_pack(1, fired, 0);
+}
+
+// ---------- the preregistered 34-half ablation: x3_decide_nop ----------
+// The 30-half ALONE applied FLAT over the queued records: every queued
+// record for the id must match the STATIC world tuple. NO K counting, NO
+// temporal check, NO gap machinery, NO epoch world, NO payload continuity,
+// NO digest dedup. It keeps the promotion ledger and the sink call (they
+// are not 34-half).
+// NOTE (documents the §3 anti-stub movement): with the 34-half's refusal
+// machinery removed, the zero-evidence refusal is gone too — over zero
+// records the flat check is vacuously true, so the nop PROMOTES on E0/G0.
+// That is the point of the ablation: the E0/G0 refusals are load-bearing
+// on the 34-half, and the battery must move under the nop.
+fn x3_decide_nop(st:[]u8, id:i64) i64 {
+    if(x3_lhas(st, id) == 1) { return x3_pack(0, 0, 6); }
+    let seed:i64 = x3_seed(id);
+    let n:i64 = t_get64(st, 8);
+    let ex0:i64 = 0;
+    let have_ex:i32 = 0;
+    let minconf:i64 = 999999999;
+    let i:i64 = 0;
+    while(i < n) {
+        let o:i32 = qbase() + (i as i32) * qrec();
+        if(t_get64(st, o) == id) {
+            let wok:i32 = x3_world_ok_static(t_get64(st, o + 16), t_get64(st, o + 24), t_get64(st, o + 32), id, seed);
+            if(wok == 0) {
+                x3_retire(st, id);
+                return x3_pack(0, 0, 13);
+            }
+            if(have_ex == 0) { ex0 = t_get64(st, o + 40); have_ex = 1; }
+            let cf:i64 = t_get64(st, o + 24);
+            if(cf < minconf) { minconf = cf; }
+        }
+        i = i + 1;
+    }
+    x3_lappend(st, id, seed, 0, 0, 0, t_get64(st, 0), ex0);
+    let fired:i32 = 0;
+    if(have_ex == 1) {
+        if(ex0 != 0) {
+            if(minconf >= sink_conf_min()) {
+                if(x3_act_sink(st, id, ex0, minconf) == 1) { fired = 1; }
+            }
+        }
+    }
+    x3_retire(st, id);
+    return x3_pack(1, fired, 0);
+}
