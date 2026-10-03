@@ -88,3 +88,19 @@ NAMECHECK.md; no other files.
 - git add uses explicit pathspecs for the two files only.
 - The freeze commit contains the two files ALONE; the commit message
 marks it local-only, never pushed.
+
+## Step 0 (Wave 2 implementation worker, 2026-10-02)
+
+Safebin activated: mkdir -p $HOME/safebin; symlinks created for git, znc
+(pinned src/tools/toolchain/znc_linux_x86_64_abed8aa1), sh, bash, ls, cp,
+mv, rm, mkdir, cat, grep, sed, awk, wc, cmp, sha256sum, git-receive-pack,
+git-upload-pack. export PATH="$HOME/safebin".
+
+Verification: `which python3` returns nothing. `which python` returns nothing.
+Pure Zag for all scientific computation. Shell only for znc invocation,
+binary execution, git ops, file movement.
+
+Near-miss disclosure: During debugging a command fragment containing
+`python3 -c "print('skip')"` was typed. With safebin PATH active, python3
+does not resolve; the invocation failed (command not found). No forbidden
+computation occurred. Disclosed per governance ruling.

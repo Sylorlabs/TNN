@@ -1,0 +1,290 @@
+// lm_cons.zag -- propose-and-test construction engine (L3-NIV2).
+// Frozen design (see ADVERSARY_NOTES.md):
+// - Complete candidate programs scored by training ACCEPT count through
+//   the consequence channel (early exit on first REJECT; the score is the
+//   deterministic ACCEPT count).
+// - Promotion/retention never requires strictly positive per-step gain:
+//   a child is retained iff its score >= its parent's score (zero gain
+//   retained), or a bounded depth-2 lookahead shows eventual full
+//   acceptance (negative-gain rescue, anti-V2).
+// - Beam: width 10, rank by (score desc, length asc, bytes asc, id asc).
+//   Ranking is mechanical; no researcher-authored tie-break.
+// - Operators: APPEND, SUBSTITUTE-last (construction); TRUNCATE used in
+//   revision; INLINE (abstraction chunks) in transfer re-derivation.
+//   One engine serves construction, revision, and transfer.
+
+// pool entry stride 216: [0]=id,[4]=parent,[8]=op,[12]=len,
+// [16..208]=bytes(192),[208]=score,[212]=evals
+// op codes: 0 SEED, 1 APPEND, 2 SUBST, 3 INLINE, 4 EDIT, 5 GREEDY, 6 ENUM
+fn POOL_N()i32 { return 32768; }
+fn pool_base(pi:i32)i32 { return pi*216; }
+fn cand_id(pool:[]u8,pi:i32)i32 { return ig(pool,pool_base(pi)); }
+fn cand_len(pool:[]u8,pi:i32)i32 { return ig(pool,pool_base(pi)+12); }
+fn cand_score(pool:[]u8,pi:i32)i32 { return ig(pool,pool_base(pi)+208); }
+fn cand_op(pool:[]u8,pi:i32)i32 { return ig(pool,pool_base(pi)+8); }
+
+fn cons_reset(cfg:[]u8,pool:[]u8,stab:[]u8)void {
+  put32(cfg,36,0); put32(cfg,40,1);
+  let i:i32=0;
+  while(i<65536){ put32(stab,i*8,-1); i=i+1; }
+  return;
+}
+fn phash(prog:[]u8,n:i32)i32 {
+  let h:i32=2166136261;
+  let i:i32=0;
+  while(i<n){
+    h=h^(prog[i] as i32);
+    h=h*16777619;
+    i=i+1;
+  }
+  h=h^(n*2654435761);
+  if(h<0){ h=0-h; }
+  return h;
+}
+// stab_lookup: returns pool idx or -1.
+fn stab_lookup(stab:[]u8,h:i32,pool:[]u8,prog:[]u8,n:i32)i32 {
+  let s:i32=h&65535;
+  let k:i32=0;
+  while(k<65536){
+    let e:i32=(s+k)&65535;
+    let eh:i32=ig(stab,e*8);
+    if(eh==-1){ return -1; }
+    if(eh==h){
+      let pi:i32=ig(stab,e*8+4);
+      let bl:i32=cand_len(pool,pi);
+      if(bl==n){
+        let bb:i32=pool_base(pi)+16;
+        let eq:i32=1;
+        let i:i32=0;
+        while(i<n){ if(pool[bb+i]!=prog[i]){ eq=0; break; } i=i+1; }
+        if(eq==1){ return pi; }
+      }
+    }
+    k=k+1;
+  }
+  return -1;
+}
+fn stab_insert(stab:[]u8,h:i32,pi:i32)void {
+  let s:i32=h&65535;
+  let k:i32=0;
+  while(k<65536){
+    let e:i32=(s+k)&65535;
+    if(ig(stab,e*8)==-1){ put32(stab,e*8,h); put32(stab,e*8+4,pi); return; }
+    k=k+1;
+  }
+  return;
+}
+fn mk_cand(cfg:[]u8,pool:[]u8,parent:i32,op:i32,prog:[]u8,n:i32)i32 {
+  let pn:i32=ig(cfg,36);
+  if(pn>=32768){ return -1; }
+  let b:i32=pool_base(pn);
+  let id:i32=ig(cfg,40);
+  put32(cfg,40,id+1);
+  put32(pool,b,id); put32(pool,b+4,parent); put32(pool,b+8,op);
+  put32(pool,b+12,n);
+  let i:i32=0;
+  while(i<n*3){ pool[b+16+i]=prog[i]; i=i+1; }
+  put32(pool,b+208,-1); put32(pool,b+212,0);
+  put32(cfg,36,pn+1);
+  return pn;
+}
+// cand_cmp: 1 if a ranks better than b.
+fn cand_cmp(pool:[]u8,a:i32,b:i32)i32 {
+  let sa:i32=cand_score(pool,a);
+  let sb:i32=cand_score(pool,b);
+  if(sa>sb){ return 1; }
+  if(sa<sb){ return 0; }
+  let la:i32=cand_len(pool,a);
+  let lb:i32=cand_len(pool,b);
+  if(la<lb){ return 1; }
+  if(la>lb){ return 0; }
+  let ba:i32=pool_base(a)+16;
+  let bb:i32=pool_base(b)+16;
+  let i:i32=0;
+  while(i<la){
+    let x:i32=pool[ba+i] as i32;
+    let y:i32=pool[bb+i] as i32;
+    if(x<y){ return 1; }
+    if(x>y){ return 0; }
+    i=i+1;
+  }
+  if(cand_id(pool,a)<cand_id(pool,b)){ return 1; }
+  return 0;
+}
+// eval_prog: score pool[pi] on training via TESTs.
+// Two-pass: first 3 instances (early exit); if >=1 ACCEPT, test rest.
+// Returns exact ACCEPT count for candidates with any early signal,
+// 0 for others. Uses scored-set dedupe. Logs TR EVAL.
+fn eval_prog(cfg:[]u8,R:[]u8,OUT:[]u8,lgc:[]u8,PL:[]u8,line:[]u8,tok:[]u8,ov:[]u8,train:[]u8,pool:[]u8,stab:[]u8,pi:i32)i32 {
+  let b:i32=pool_base(pi);
+  let n:i32=ig(pool,b+12);
+  let nb:i32=n*3;
+  let h:i32=phash(pool[b+16..b+208],nb);
+  let hit:i32=stab_lookup(stab,h,pool,pool[b+16..b+208],nb);
+  if(hit>=0){ return cand_score(pool,hit); }
+  let tn:i32=ig(cfg,24);
+  let sc:i32=0;
+  let i:i32=0;
+  let stop:i32=0;
+  // pass 1: first 3 instances, early exit on first REJECT
+  let p1n:i32=3;
+  if(tn<3){ p1n=tn; }
+  while(i<p1n && stop==0){
+    let x:i32=ig(train,i*4);
+    let ov2:[]u8=z_alloc(8);
+    let ok:i32=isa_run(pool[b+16..b+208],n,x,ov2);
+    let r:i32=0;
+    if(ok==1){ r=do_test(cfg,R,OUT,lgc,PL,line,tok,ov,x,ig(ov2,0),0,cand_id(pool,pi)); }
+    else { r=do_test(cfg,R,OUT,lgc,PL,line,tok,ov,x,0,1,cand_id(pool,pi)); }
+    if(r==-1){ stop=1; }
+    else { if(r==1){ sc=sc+1; } else { stop=1; } }
+    i=i+1;
+  }
+  // pass 2: remaining instances (only if pass 1 had a signal)
+  if(stop==0 && sc>0){
+    while(i<tn && stop==0){
+      let x2:i32=ig(train,i*4);
+      let ov3:[]u8=z_alloc(8);
+      let ok2:i32=isa_run(pool[b+16..b+208],n,x2,ov3);
+      let r2:i32=0;
+      if(ok2==1){ r2=do_test(cfg,R,OUT,lgc,PL,line,tok,ov,x2,ig(ov3,0),0,cand_id(pool,pi)); }
+      else { r2=do_test(cfg,R,OUT,lgc,PL,line,tok,ov,x2,0,1,cand_id(pool,pi)); }
+      if(r2==-1){ stop=1; }
+      else { if(r2==1){ sc=sc+1; } }
+      i=i+1;
+    }
+  }
+  put32(pool,b+208,sc);
+  stab_insert(stab,h,pi);
+  put32(cfg,44,ig(cfg,44)+1);
+  // log CAND + EVAL
+  let RB:[]u8=z_alloc(512);
+  let rc:i32=0;
+  rc=e1i64(RB,rc,cand_id(pool,pi) as i64); RB[rc]=32; rc=rc+1;
+  rc=e1i64(RB,rc,ig(pool,b+4) as i64); RB[rc]=32; rc=rc+1;
+  rc=e1i64(RB,rc,ig(pool,b+8) as i64); RB[rc]=32; rc=rc+1;
+  rc=e1i64(RB,rc,n as i64); RB[rc]=32; rc=rc+1;
+  rc=e1hex(RB,rc,pool[b+16..b+208],n*3);
+  tr_emit(cfg,OUT,lgc,"CAND",RB,rc);
+  let RB2:[]u8=z_alloc(64);
+  let rc2:i32=0;
+  rc2=e1i64(RB2,rc2,cand_id(pool,pi) as i64); RB2[rc2]=32; rc2=rc2+1;
+  rc2=e1i64(RB2,rc2,sc as i64); RB2[rc2]=32; rc2=rc2+1;
+  rc2=e1i64(RB2,rc2,tn as i64);
+  tr_emit(cfg,OUT,lgc,"EVAL",RB2,rc2);
+  return sc;
+}
+// beam_insert: insert pi into sorted beam (best first), cap 10.
+fn beam_insert(pool:[]u8,beam:[]u8,bn:i32,pi:i32)i32 {
+  let i:i32=0;
+  while(i<bn){
+    if(cand_cmp(pool,pi,ig(beam,i*4))==1){ break; }
+    i=i+1;
+  }
+  if(i>=10){ return bn; }
+  let nb:i32=bn;
+  if(nb<10){ nb=nb+1; }
+  let j:i32=nb-1;
+  while(j>i){ put32(beam,j*4,ig(beam,(j-1)*4)); j=j-1; }
+  put32(beam,i*4,pi);
+  return nb;
+}
+// acc_add: add program (n instructions) to accepted set (dedupe by bytes).
+// accb: 1024 entries x 200: [0]=n_instr,[4..196]=bytes
+fn acc_add(accb:[]u8,accn:[]u8,prog:[]u8,n:i32)void {
+  let an:i32=ig(accn,0);
+  let i:i32=0;
+  while(i<an){
+    let bl:i32=ig(accb,i*200);
+    if(bl==n){
+      let eq:i32=1;
+      let k:i32=0;
+      while(k<n*3){ if(accb[i*200+4+k]!=prog[k]){ eq=0; break; } k=k+1; }
+      if(eq==1){ return; }
+    }
+    i=i+1;
+  }
+  if(an>=1024){ return; }
+  put32(accb,an*200,n);
+  let k2:i32=0;
+  while(k2<n*3){ accb[an*200+4+k2]=prog[k2]; k2=k2+1; }
+  put32(accn,0,an+1);
+  return;
+}
+// gen_appends: generate all 80 append children of pool[pi] into ch.
+// Returns count added. Caller provides ch array and start count.
+fn gen_appends(cfg:[]u8,pool:[]u8,pi:i32,op:i32,ch:[]u8,cn:i32)i32 {
+  let b:i32=pool_base(pi);
+  let n:i32=ig(pool,b+12);
+  if(n>=64){ return cn; }
+  let tmp:[]u8=z_alloc(192);
+  let i:i32=0;
+  while(i<n*3){ tmp[i]=pool[b+16+i]; i=i+1; }
+  let o:i32=0;
+  while(o<5){
+    let d:i32=0;
+    while(d<4){
+      let s:i32=0;
+      while(s<4){
+        tmp[n*3]=o as u8; tmp[n*3+1]=d as u8; tmp[n*3+2]=s as u8;
+        let ci:i32=mk_cand(cfg,pool,cand_id(pool,pi),op,tmp,n+1);
+        if(ci>=0){ put32(ch,cn*4,ci); cn=cn+1; }
+        s=s+1;
+      }
+      d=d+1;
+    }
+    o=o+1;
+  }
+  return cn;
+}
+// gen_substs: 80 substitute-last children.
+fn gen_substs(cfg:[]u8,pool:[]u8,pi:i32,op:i32,ch:[]u8,cn:i32)i32 {
+  let b:i32=pool_base(pi);
+  let n:i32=ig(pool,b+12);
+  if(n<1){ return cn; }
+  let tmp:[]u8=z_alloc(192);
+  let i:i32=0;
+  while(i<n*3){ tmp[i]=pool[b+16+i]; i=i+1; }
+  let o:i32=0;
+  while(o<5){
+    let d:i32=0;
+    while(d<4){
+      let s:i32=0;
+      while(s<4){
+        tmp[(n-1)*3]=o as u8; tmp[(n-1)*3+1]=d as u8; tmp[(n-1)*3+2]=s as u8;
+        let ci:i32=mk_cand(cfg,pool,cand_id(pool,pi),op,tmp,n);
+        if(ci>=0){ put32(ch,cn*4,ci); cn=cn+1; }
+        s=s+1;
+      }
+      d=d+1;
+    }
+    o=o+1;
+  }
+  return cn;
+}
+// gen_inlines: parent ++ abstraction chunk (full + leading prefixes).
+fn gen_inlines(cfg:[]u8,pool:[]u8,abst:[]u8,pi:i32,ch:[]u8,cn:i32)i32 {
+  let b:i32=pool_base(pi);
+  let n:i32=ig(pool,b+12);
+  let na:i32=ig(cfg,32);
+  let tmp:[]u8=z_alloc(192);
+  let a:i32=0;
+  while(a<na){
+    let ab:i32=a*208;
+    let al:i32=ig(abst,ab+4);
+    let pl:i32=al;
+    while(pl>=1){
+      if(n+pl<=64){
+        let i:i32=0;
+        while(i<n*3){ tmp[i]=pool[b+16+i]; i=i+1; }
+        let k2:i32=0;
+        while(k2<pl*3){ tmp[n*3+k2]=abst[ab+8+k2]; k2=k2+1; }
+        let ci:i32=mk_cand(cfg,pool,cand_id(pool,pi),3,tmp,n+pl);
+        if(ci>=0){ put32(ch,cn*4,ci); cn=cn+1; }
+      }
+      pl=pl-1;
+    }
+    a=a+1;
+  }
+  return cn;
+}
