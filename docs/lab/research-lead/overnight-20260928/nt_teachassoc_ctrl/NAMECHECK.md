@@ -47,8 +47,9 @@
 - PREREG.md: frozen kill bars K1-K7, hand-derived Section 4 trace
   (single arm R6), verdict mapping (Section 7). Predicted verdict:
   CTRL-CONFIRMED.
-- Prereg freeze: commit `<hash>` on `tnn-native-lab`
-  (PREREG.md + NAMECHECK.md only), strictly before implementation.
+- Prereg freeze: commit `02cd84a3d75756dd767a894fff76be108fb20680` on
+  `tnn-native-lab` (PREREG.md + NAMECHECK.md only), strictly before
+  implementation.
 - Implementation: `ntctrl_full.zag` (NT-TEACHASSOC's ntteach_full.zag
   verbatim except: exploratory episode deleted; tag NTTCTRL; fprate
   guarded against apin=0; kill bars / verdict codes per PREREG
