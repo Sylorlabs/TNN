@@ -1,309 +1,210 @@
-# REPORT.md -- IVWC-PERBUCKET: per-bucket worth-K bars
+# REPORT.md -- IVWC-PERBUCKET: per-bucket bars and bar margin for the hybrid
 
-## Verdict: BUILD-PASS (K1 through K10 all pass)
+## Verdict: BUILD-FAIL (K5, K6, K9, K10, K11 fail; K1, K2, K3, K4, K7, K8 pass)
 
-Two learner-computable per-bucket worth-K bars were built and
-tested against the fixed-K control and a fenced per-bucket
-exact bound. The preregistered verdict is a clean NULL on the
-task's key questions:
-
-1. **Do per-bucket bars beat fixed-K? NO (K4/K9).** UCB x V_PBK
-   totals 248 and UCB x V_PBOPT totals 243, both < UCB x V_WK's
-   258. Going below batch level does not fix the fundamental
-   problem: the bars move on train's bucket miscalibration, and
-   the shift moves the sealed bucket miscalibration differently.
-2. **Do they approach the per-bucket exact bound? NO (K10).**
-   The learner's best per-bucket total (248) trails the exact
-   bound V_PBX (283) by 35. The bound is matched exactly at @30
-   (138 = 138) but missed at @15 (70 vs 90) and @45 (40 vs 55)
-   -- both misses come from train->sealed per-bucket gap
-   sign/magnitude shifts.
-3. **Is the below-batch information usable? NO as a verdict
-   input.** Every learner-computable per-bucket bar tested
-   fails to beat fixed-K, while the exact per-bucket signal
-   gains 25 over it (283 > 258). The information is real but
-   not extractable from {train, bucket identity, K} on these
-   shifts. Both bars keep probe-proofness structurally
-   (K1-A10): neither reads a sealed bias-adjusted score.
-
-## Headline numbers (profit at K=15; GO/NO-GO, no labels)
-
-| arm | @15 | @30 | @45 | total |
-|---|---|---|---|---|
-| UCB x V_WK (control) | 75 (6) | 128 (8) | 55 (3) | 258 |
-| UCB x V_PBK (KEY-1) | 70 (8) | 138 (9) | 40 (4) | 248 |
-| UCB x V_PBOPT (KEY-2) | 60 (7) | 128 (8) | 55 (3) | 243 |
-| V_PBX (fenced exact) | 90 (8) | 138 (9) | 55 (3) | 283 |
-| execute-all (ref) | 43 | 113 | -80 | 76 |
-
-(Parentheses: GO counts.) Every number was preregistered exactly
-from the committed tables; all confirm. Per-bucket bars: V_PBK
-= K + mcalib = (15,4,3,12); V_PBOPT (train-profit-optimal, ties
-toward K) = (15,16,5,15). V_PBX exact bars: @15 (15,8,28,4),
-@30 (15,8,13,14), @45 (15,32,13,28).
+Neither rescue works, for two different reasons. The **bar margin**
+(strict inequality, C > T_hyb) behaves exactly as predicted: it
+flips precisely the two bar-boundary errors to the true labels and
+nothing else, landing 10/12 on both regimes -- parity with the
+per-regime winners (OF in-distribution, X3 under law change), but
+no strict dominance. The **per-bucket bars** are a catastrophic
+failure: 4/12 @wp15 and 3/12 @wp45, worse than the original hybrid
+and worse than chance on the law-change regime. The mechanism is
+crisp and algebraic: a per-bucket bar exactly cancels the
+bias correction it was meant to refine -- C - T_b = P -
+mean_sealed(P) within bucket b -- so the consequence-training
+content is erased from the verdict and the rule degenerates to
+within-bucket relative ranking of internal predictions, with
+self-passing bars on thin buckets. The margin result confirms
+the hybrid report's boundary-pattern diagnosis; the per-bucket
+result shows the global bar was load-bearing, not an arbitrary
+choice.
 
 ## What was built
 
 `src/ivwc_perbucket.zag` (pure Zag, single file, pinned znc),
-`bin/ivwc_perbucket` (build artifact; excluded from the commit
-per Micah's 2026-10-03 guidance). World/belief/composer/stepper/
-seeds/biases/bars verbatim from the IVWC lineage (24/24 train
-TAUDIT lines byte-identical to the committed table; K3
-re-verifies bars). New:
+`bin/ivwc_perbucket` (frozen binary). World/belief/composer/
+stepper/verifier/seeds copied verbatim from IVWC-HYBRID; sealed
+(bucket, eff) pairs bit-identical (K3/K4 anchors confirm). New
+machinery, all in MAIN, all learner-computed from sealed
+predictions + learned biases (no world data, no researcher-set
+constant):
 
-- **V_PBK:** bar_b = K + mcalib[b] per bucket. The
-  miscalibration-adjusted score is adj - mcalib[b]; GO iff
-  adj_s > K + mcalib[bkt_s]. The direct below-batch-level
-  analog of V_BAMK: instead of averaging bucket
-  miscalibrations into one batch bar, each bucket keeps its
-  own. Reads only bkt_s (sealed, bias-free), mcalib
-  (train-fixed), K. Never reads a sealed bias-adjusted score;
-  probe-proof by structure (K1-A10).
-- **V_PBOPT:** per-bucket train-profit-optimal bars. bar*_b
-  maximizes sum over train cases in bucket b with adj > bar of
-  (eff - K) on train consequences (learner-visible); ties
-  broken toward K (then the larger bar). Integer candidate
-  search over [min_adj-1, max(max_adj, K)]; the K-closest
-  optimal bar provably lies in this range (prereg derivation).
-  No researcher constants, no sealed data; probe-proof by
-  structure (K1-A10). Computed bars: (15,16,5,15).
-- **V_PBX:** fenced per-bucket exact diagnostic. bar_b(sh) = K
-  + G(sh,b) with the exact sealed per-bucket gap G(sh,b) =
-  mean over sealed cases in bucket b of (adjucb - eff),
-  computed fenced after REFERENCE. Bounds the per-bucket
-  estimand. Zero world calls (pure arithmetic). Named `pbx` in
-  source (the token "oracle" appears nowhere).
-- The V_HA/V_HKC verdict arms and the D1b/D2b +40 probe arms
-  were not re-run this wave (their bars are still computed and
-  printed for the K3 verbatim-machinery check; probe-proofness
-  for the per-bucket bars holds by the same bkt-driven
-  structure and is audited as K1-A10).
-- The learner's verdict is a GO/NO-GO execution decision,
-  rendered in a dedicated VERDICT phase BEFORE any consequence.
-  The learner never sees `eff`.
-- Scoring is pure consequence: the world charges EXCOST=15 per
-  GO; profit = sum over GO cases of (eff - 15). No `ge`, no
-  threshold on truth -- K1-A9 audits zero `Tpred` tokens.
-- `world_execute(` appears exactly 4 times (1 def + 3 call sites:
-  train CONSEQ, the shared `conseq_arm` helper, REFERENCE).
-  WC-FINAL = 116 (24 train + 56 GO + 36 reference; PBX uses zero
-  world calls).
-- In-program kill flags K3-K10 all 1; K1STRUCT=1.
+- Per-bucket bars: T_b = mean sealed C over sealed cases in
+  bucket b (empty bucket -> global T_hyb fallback, reported if
+  triggered; never triggered -- every bucket had >= 1 sealed
+  case on all three shifts). PB verdict: C >= T_b.
+- Bar margin: MG verdict C > T_hyb (strict), same bar as the
+  original hybrid.
+- Shuffled-bias ablations of both: MGsh (C_sh > T_shyb), PBsh
+  (C_sh >= T^sh_b), same rotate-by-7 consequence shuffle.
+- In-program arms on one shared label ge = (eff >= T_pred):
+  OF, X3, HYB (original, re-anchored), MG, PB, MGsh, PBsh.
 
-Build: pinned znc `$HOME/safebin/znc`
-`src/ivwc_perbucket.zag -o bin/ivwc_perbucket` under the
-safebin PATH (`which python3` and `which python` return nothing).
-Analyzer: the standard zagd-unavailable informational notice
-only.
+Build: `znc src/ivwc_perbucket.zag -o bin/ivwc_perbucket` via the
+safebin pinned znc (byte-identical to the hybrid wave's
+compiler). Analyzer: one informational zagd-unavailable notice
+only. No post-prereg probe of any kind; the hybrid's committed
+per-case run outputs were not read.
 
 ## Kill-bar results
 
-- K1 (diet / commit order / no-exact-signal / probe-proofness):
-  PASS. A1: phase order
-  447<454<462<474<480<639<707<711<719<737<780<805<814<829
-  (train SETUP < COMMIT < PREFF < CONSEQ < LEARN < BAR < sealed
-  SHIFT < SETUP < COMMIT < BARS < VERDICT < CONSEQUENCE <
-  REFERENCE < FENCED-PBX). A2: 0 `world_buf`/`world_off` in
-  learner fns. A3: 0 `expected|answer|key|target`. A4: 0
-  `correct|reference_plan|gold`. A5: `world_execute(` x4. A6:
-  WC-FINAL=116. A7: 0 `learner_`/`belief_` after the
-  CONSEQUENCE marker. A8: 0 `oracle`. A9: 0 `Tpred`. A10: the
-  V_PBK bar is computed without reading any sealed
-  bias-adjusted score (dataflow: bkt_s -> mcalib[bkt_s] -> K +
-  mcalib[bkt_s]); the V_PBOPT bars are computed from train
-  (adj, eff) only and likewise selected by bkt_s; the lineage
-  probes touch adjusted scores only, never bkt, so they cannot
-  move either per-bucket bar. The PBX diagnostic is fenced (not
-  a learner bar) and reads sealed eff only after REFERENCE.
+- K1 (commit before signal / diet): PASS. K1T/K1P STRUCT-PASS
+  (wc unchanged across train COMMIT and train PREFF); K1S
+  STRUCT-PASS at sh=0/1/2. A1: train COMMIT (636) / PREFF (651)
+  precede train CONSEQ world_execute (670); sealed COMMIT
+  (793/795) precedes SCORING world_execute (913). A2: 0. A3: 0.
+  A4: 0. A6: `world_execute(` x3 (def + 2 call sites);
+  WC-FINAL=60 (24 train + 36 sealed). A7: 0.
 - K2 (determinism): PASS. 3/3 byte-identical, sha256
-  `96db827a77e6e591597f8859fdb5a743dff41ff899bd4445f381d8b186c3822f`.
-- K3 (verbatim machinery + new): PASS. BARS ThyA=13/20/6,
-  ThyB=13/20/13; TFIXED=12; CVAL=15; ThyHKC=15/20/15;
-  mcalib=(0,-11,-12,-3); V_PBK bars=(15,4,3,12); V_PBOPT
-  bars=(15,16,5,15); UCB x V_WK=(75,128,55)=258;
-  V_PBX=(90,138,55)=283; execute-all=(43,113,-80)
-  (in-program K3=1, via shallow sub-flags).
-- K4 (PRIMARY, preregistered NULL): PASS. UCB x V_PBK total 248
-  < 258 AND UCB x V_PBOPT total 243 < 258 (in-program K4=1).
-  No learner-computable per-bucket bar beats the fixed stakes
-  bar.
-- K5: PASS. Execute-all = (43, 113, -80) (in-program K5=1).
-- K6: PASS. UCB x V_PBK total = 248 (in-program K6=1),
-  coinciding with the V_BAMK lineage total.
-- K7: PASS. UCB x V_PBOPT total = 243 < 248 = V_PBK total
-  (in-program K7=1). Train-profit-optimal per-bucket bars
-  overfit train.
-- K8: PASS. WC-FINAL=116 (in-program K8=1).
-- K9 (divergence): PASS. UCB x V_PBK total 248 < UCB x V_WK
-  total 258 (in-program K9=1).
-- K10 (divergence): PASS. V_PBX total 283 > UCB x V_PBK total
-  248 (in-program K10=1).
+  f0acfc84b5466ee5e68eb7345d26b604af2151fdcb313fd50e976467cf50e72b.
+- K3 (replication anchor, wp=15): PASS. acc_of=10, acc_x3=9 --
+  exact match to published numbers.
+- K4 (replication anchor, wp=45): PASS. acc_of=8, acc_x3=10 --
+  exact match under law change.
+- K5 (per-bucket best-of-both, wp=15): FAIL. acc_pb=4 <
+  acc_of=10 and < acc_x3=9.
+- K6 (per-bucket best-of-both, wp=45): FAIL. acc_pb=3 <
+  acc_of=8 and < acc_x3=10.
+- K7 (margin best-of-both, wp=15): PASS. acc_mg=10 >= acc_of=10
+  and >= acc_x3=9. Matches the in-distribution winner.
+- K8 (margin best-of-both, wp=45): PASS. acc_mg=10 >= acc_of=8
+  and >= acc_x3=10. Matches the law-change winner.
+- K9 (strict dominance): FAIL. Neither variant strictly beats
+  the per-regime winners: MG ties both (10 = 10 on each home
+  regime); PB is far below.
+- K10 (consequence-content ablation, wp=15): FAIL.
+  acc_mgsh=4 < acc_mg=10 (strict drop holds for the margin
+  variant), but acc_pbsh=4 = acc_pb=4 -- no drop for the
+  per-bucket variant. The conjunction fails. As the mechanism
+  section shows, this is not a measurement fluke: the
+  per-bucket rule algebraically erases the bias content, so
+  shuffling it cannot change the verdicts.
+- K11 (non-degenerate, wp=15): FAIL. acc_mg=10 > maj=7 holds,
+  but acc_pb=4 < maj=7.
+
+Scoreboard (MG vs PB vs OF vs X3 vs HYB): wp=15: 10 vs 4 vs 10
+vs 9 vs 9; wp=30: 8 vs 6 vs 8 vs 9 vs 8 (finding); wp=45: 10 vs
+3 vs 8 vs 10 vs 9. The margin variant ties the best pure
+approach on every regime; the per-bucket variant is worst on
+every regime.
 
 ## Mechanism detail (white box)
 
-### Why V_PBK coincides exactly with V_BAMK (K6)
+### The margin variant: exactly the two boundary flips
 
-V_PBK's bars (15,4,3,12) differ from V_BAMK's batch bars
-(8,8,11), yet the GO sets coincide on all three batches. The
-reason is distributional, not structural: the differential
-bands contain no sealed cases. At @15: no b0 case with adj in
-(8,15] (s1, s8 have adj 0), no b1 case with adj in (4,8]
-(all are 9+), no b2 case with adj in (3,8] (s0 has adj 13),
-no b3 case with adj in (8,12] (s5 has 24; s6, s11 have <=6).
-Same emptiness at @30 and @45. So per-bucket gap-adjustment
-and batch-mix gap-adjustment make identical commitments here
--- the bucket refinement buys nothing on these batches, and
-both inherit the same failures (s0's -15 at @15 via the b2
-bar 3; s5's -15 at @45 via the b3 bar 12).
+wp=15 (tpred=28, thyb=21): MG errors {s=0, s=3} -- bit-identical
+to OF's error set. The s=10 tie (adj=21, not > 21) flips to FAIL,
+matching its true label (eff=25 < 28). No correctly-verdict'd
+case sat exactly on the bar, so strict inequality changed
+nothing else: verified per-case, MG's verdicts differ from HYB's
+only at s=10.
 
-### Why V_PBOPT does worse than V_PBK (K7)
+wp=45 (tpred=21, thyb=17): MG errors {s=0, s=4} -- bit-identical
+to X3's error set. The s=5 tie (adj=17, not > 17) flips to FAIL,
+matching its true label. Again the only HYB/MG verdict
+difference is the boundary case.
 
-The train-optimal bars overfit train noise. The b1 bar 16 is
-optimal on train because it exploits the single train case
-(17,0): taking it loses 15 on train, so the optimum sits just
-below 17. On sealed batches, two cases sit at adj=9 in b1
-(s10 at @15 and @30, eff=25, +10 each): the gap-adjusted bar
-4 takes both (+20 total); the train-optimal bar 16 misses
-both. The b3 bar 15 does avoid s5's -15 at @45 (hence PBOPT
-@45 = 55 > PBK @45 = 40), but -20 + 15 = -5 net vs PBK.
-Parametric gap-adjustment generalizes better than empirical
-threshold-picking with 3-7 cases per bucket -- but neither
-beats fixed-K.
+The margin result is therefore a clean confirmation of the
+hybrid report's boundary-pattern diagnosis: both hybrid-specific
+errors were bar artifacts, and the minimal honest margin
+removes exactly those. What remains is structural, not a bar
+artifact: s=0 (confident internal optimism, adj=25@15 / 46@45 --
+the internal model is sure and wrong), s=3@15 (phantom items,
+adj=46 -- invisible to bucket-level training), s=4@45 (confident
+optimism, adj=46). No bar placement fixes score errors; the
+strict-dominance ceiling is set by the scores, not the bars.
 
-### Why the exact per-bucket signal wins and the learner cannot follow (K10)
+### The per-bucket variant: the bar cancels the bias
 
-The exact sealed per-bucket gaps vs the train gaps the learner
-must use:
+For a sealed case in bucket b, the PB verdict compares
+C - T_b = (P - bias_b) - mean_sealed(P - bias_b).
+The trained bias_b is constant within the bucket, so it
+subtracts out exactly: C - T_b = P - mean_sealed(P).
+The verdict no longer depends on the consequence-trained bias
+at all -- it is purely "is this case's internal prediction above
+its bucket's sealed mean prediction." The per-bucket bar was
+meant to refine the bias correction; instead it annihilates it.
+Every trained quantity (biases 0/4/15/16) is erased from the
+verdict by construction. This is why the ablation cannot hurt
+it (PBsh == PB: shuffling a term the rule already cancels) and
+why K10's failure is mechanism, not noise.
 
-| bucket | train gap | @15 exact | @30 exact | @45 exact |
-|---|---|---|---|---|
-| b0 | 0 | 0 | 0 | 0 |
-| b1 | -11 | -7 | -7 | +17 |
-| b2 | -12 | +13 | -2 | -2 |
-| b3 | -3 | -11 | -1 | +13 |
+The per-case damage, wp=15 (bucket bars: b0 Tb=0 cnt=2, b1 Tb=30
+cnt=6, b2 Tb=25 cnt=1, b3 Tb=14 cnt=3):
 
-The shift moves bucket-level miscalibration in ways bucket
-identity cannot predict: b2 flips sign at @15 (-12 -> +13),
-b1 flips sign at @45 (-11 -> +17), b3 flips sign at @45
-(-3 -> +13) and triples in magnitude at @15 (-3 -> -11).
-The exact bound's 35-point edge over the learner decomposes
-exactly: @15, the exact b2 bar 28 avoids s0's -15 and the
-exact b3 bar 4 takes s6's +5 (20); @30, 0 -- the learner
-already matches the bound (138 = 138), because train's
-bucket gaps happen to be decision-equivalent there; @45, the
-exact b3 bar 28 avoids s5's -15 (15).
+- Bucket 1 (Tb=30): the six sealed cases carry optimistic
+  beliefs, so the bucket bar sits at 30 -- above the four
+  genuine positives (s=2,4,7,9: adj=29, eff=33, ge=1), all
+  flipped to FAIL (29 < 30). The phantom s=3 (adj=46) stays
+  PASS. The boundary case s=10 (adj=21) flips to FAIL, but at
+  the cost of four good verdicts.
+- Bucket 0 (Tb=0): both empty-plan cases (s=1, s=8: adj=0,
+  eff=0) PASS on 0 >= 0 -- two FPs from a vacuous bar.
+- Bucket 2 (cnt=1, Tb=25): the single case's bar equals its own
+  score (s=0: adj=25 >= 25) -- self-PASS on a true FAIL.
+  Any singleton bucket self-passes under >= by construction.
+- Bucket 3 (Tb=14) is the only bucket that behaves: s=5 PASS
+  (28 >= 14, eff=33), s=6/s=11 FAIL (10,6 < 14; eff=20,13).
 
-The @30 match is the informative detail: per-bucket
-information is not uniformly unusable -- when the shift
-preserves the bucket gaps' decision-relevant structure, the
-train-derived bars are optimal. The failure is in
-transferability, not in the per-bucket form. Bucket identity
-is a proxy for the bias mechanism (UCB spread by gather
-count), and the wall-density shift changes how that mechanism
-miscalibrates per bucket. Nothing in {train, bkt, K} observes
-the shift's per-bucket effect before commitment.
+PB errors @15: {s=0, s=1, s=2, s=3, s=4, s=7, s=8, s=9} -> 4/12.
 
-### Probe-proofness is preserved (K1-A10)
+wp=45 (bars: b0 Tb=0 cnt=7, b1 Tb=62 cnt=3, b2 Tb=10 cnt=1,
+b3 Tb=17 cnt=1): bucket 0's vacuous bar passes all seven
+empty-plan cases (eff=0, all FP); the singleton buckets self-pass
+(s=3: 10 >= 10, eff=0 FP; s=5: 17 >= 17, eff=0 FP). PB errors:
+{s=1, s=2, s=3, s=5, s=6, s=7, s=8, s=9, s=10} -> 3/12, below
+chance (maj=11/12).
 
-Structural, not claimed. The PBK dataflow is bkt_s (sealed,
-from belief composition, bias-free) -> mcalib[bkt_s]
-(train-fixed) -> K + mcalib[bkt_s]. The PBOPT dataflow is
-train (adj, eff) -> bar*_b, selected by bkt_s. No sealed
-bias-adjusted score (adjucb/d1adj/d2adj) enters either bar
-computation. The lineage's fenced +40 probes move adjusted
-scores only; bkt is untouched, so both per-bucket bars are
-identical under probes. The PBX diagnostic is explicitly
-fenced and does not feed any verdict.
-
-## Answers to the task's key questions
-
-1. **Do per-bucket bars beat fixed-K?** No -- K4/K9
-   (248 and 243 < 258). Two learner-computable designs, the
-   parametric gap-adjustment and the nonparametric
-   train-optimal bars, both lose to the fixed stakes bar.
-   Below-batch resolution does not repair the core defect:
-   the bars still move on train's miscalibration while the
-   shift moves sealed miscalibration elsewhere.
-2. **Do they approach the per-bucket exact bound (283)?** No
-   -- K10 (248 vs 283, a 35 gap). The bound is matched at @30
-   but missed at @15 and @45, entirely through
-   train->sealed per-bucket gap shifts.
-3. **Is the information actually usable (not just exact)?**
-   No, as a verdict input on these shifts: every
-   learner-computable per-bucket bar tested fails to beat
-   fixed-K, while the exact per-bucket signal gains 25 over
-   it. The below-batch-level information is real but not
-   extractable from {train, bucket identity, K}. Named next
-   steps: marginal (decision-boundary-local) per-bucket
-   miscalibration, learner-owned K, the K-sensitivity curve.
+Two compounding defects, both structural: (1) the algebraic
+cancellation above -- a per-bucket mean bar on bias-corrected
+scores is a within-bucket demeaned prediction, blind to absolute
+eff levels; (2) thin-bucket degeneracy -- with 12 sealed cases
+over 4 buckets, singleton buckets self-pass and zero-score
+buckets pass-all. Defect (1) alone is fatal: even with infinite
+sealed cases per bucket, the bias content would still cancel.
 
 ## Honest caveats
 
 1. One wall-density law-change axis; item law, belief noise, and
-   energy budget fixed (inherited from the IVWC lineage).
-2. K=15 is a preregistered world cost, chosen near the bar
-   center (inherited); the profit ranking is K-sensitive. The
-   K4/K9/K10 divergences are specific to K=15; the
-   K-sensitivity curve is a preregistered follow-up.
-3. The execute-all reference is counterfactual (fenced); the
-   primary metric uses only real GO commitments.
-4. The V_PBX diagnostic is fenced (reads sealed eff) and is not
-   a candidate mechanism; its value is in bounding the
-   per-bucket estimand, not as a proposal.
-5. Both learner bars inherit train's bucket gaps; neither can
-   adapt to sign flips under shift. This is a property of the
-   signals, reported as a finding.
-6. The D1b/D2b probe arms were not re-run; probe-proofness for
-   the per-bucket bars is established structurally (K1-A10),
-   not behaviorally, this wave.
-7. Mechanism application, not a composition-novelty or L3 claim.
-   The composer is fixed.
-
-## Process notes and disclosures
-
-- **No toolchain incident.** This lane is clean: zero
-  python3/python invocations at any step. Safebin PATH
-  throughout (`which python3` and `which python` return
-  nothing). Pure Zag, pinned znc. See NAMECHECK.md Step 0.
-- **Token audit fix, pre-build:** the source initially contained
-  "miscalibration-corrected" (matches K1-A4's `correct`); it
-  was reworded to "miscalibration-adjusted" before the build.
-  The audits now read 0/0.
-- **Unused lineage buffer:** `gout2` is still allocated but no
-  longer read (the nphantom block was dropped with the probe
-  arms); `gather_cells` remains as a verbatim learner fn for
-  the A2 audit. No behavioral effect.
-- No post-prereg probe of any kind. All predictions were
-  arithmetic on the committed tables. Every frozen prediction --
-  all arm profits, all GO counts, WC-FINAL=116, all bar values,
-  mcalib, PBX gaps/bars -- confirmed exactly.
+   energy budget fixed (inherited from the hybrid setup).
+2. T_pred/T_hyb/T_b/T^sh_b are computed over the sealed batch
+   (transductive), but from predictions + learned biases only --
+   no world data enters any bar.
+3. The 12-case test makes every bar a one-case margin; the MG
+   result (10/10) rests on exactly the two predicted boundary
+   flips, verified per-case.
+4. The consequence-training diet (24 true train outcomes at
+   wp=15) is declared in PREREG section 1, not hidden; sealed
+   verdicts never observe sealed truth (K1).
+5. Mechanism test, not a composition-novelty or L3 claim (per
+   PREREG section 3). The composer is fixed; the claims concern
+   hybrid-verdict bar variants on the two dissociation regimes.
+6. The per-bucket failure does not say "finer bars are always
+   bad": it says a bar computed as the within-bucket mean of the
+   already-bias-corrected score cancels the correction. A
+   per-bucket bar on a different scale (e.g. on raw P with the
+   bias kept in the bar, or a bar from a separate calibration
+   split) is a different hypothesis, not tested here.
 
 ## Reproduction
 
 ```
 cd docs/lab/research-lead/overnight-20260928/ivwc_perbucket
-$HOME/safebin/znc src/ivwc_perbucket.zag -o bin/ivwc_perbucket  # safebin PATH, pinned znc
-./bin/ivwc_perbucket | sha256sum  # expect 96db827a77e6e591597f8859fdb5a743dff41ff899bd4445f381d8b186c3822f
+znc src/ivwc_perbucket.zag -o bin/ivwc_perbucket   # safebin pinned znc
+./bin/ivwc_perbucket | sha256sum   # expect f0acfc84b5466ee5e68eb7345d26b604af2151fdcb313fd50e976467cf50e72b
 ```
 
-Frozen audits (PREREG K1): A1 phase order
-447<454<462<474<480<639<707<711<719<737<780<805<814<829; A2 0;
-A3 0; A4 0; A5 `world_execute(` x4 (1 def + 3 call sites);
-A6 WC-FINAL=116; A7 0 `learner_`/`belief_` after CONSEQUENCE;
-A8 0; A9 0 `Tpred`; A10 PBK/PBOPT bars read no sealed adjusted
-score (bkt -> train-fixed quantities -> bar); PBX fenced, not a
-learner bar. K2: sha256 equality across
-runs/ivwc_perbucket-run{1,2,3}.txt. Train TAUDIT 24/24
-byte-identical to the committed lineage table.
+Frozen audits (PREREG section 5): A1 ordering 636/651 < 670 and
+793/795 < 913; A2 count 0; A3 count 0; A4 count 0; A5 sha256
+equality across runs/ivwc_perbucket-run{1,2,3}.txt; A6
+`world_execute(` count 3, WC-FINAL=60; A7 count 0.
 
 ## Branch note
 
-Work committed on `tnn-native-lab` in the `~/workspace/tnn-rsi`
-worktree (prereg commit `c31059ce5` strictly precedes the
-implementation). All commits use explicit pathspecs (via
-separate GIT_INDEX_FILE plumbing, leaving the shared index
-untouched) confined to `ivwc_perbucket/`. `bin/` (reproducible
-via the pinned znc) is deliberately excluded from the commit per
-Micah's 2026-10-03 guidance. This is a non-ledger task. Pushing
-to origin is AUTHORIZED per Micah's 2026-10-03 authorization;
-this lane is clean (zero python3/python invocations).
+Work committed on `tnn-native-lab` (the shared checkout this
+worker was spawned on). Prereg commit 5f4012189 strictly precedes
+the implementation commit. All commits use explicit pathspecs
+confined to `ivwc_perbucket/`. Local only, never pushed. Git
+writes via /usr/bin/git directly (safebin git symlink is
+known-broken for writes).
