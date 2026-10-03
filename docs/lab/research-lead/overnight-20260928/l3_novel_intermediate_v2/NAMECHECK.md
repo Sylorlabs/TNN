@@ -143,3 +143,49 @@ invocation would make this wave PROCESS-FAIL.
   TNN_RESEARCH_PAPER_20260929.md or other workers' files.
 - No em/en dashes in loop documentation (verified with
   worker_snippets/check_no_dash.sh before commit).
+
+## Step 0 (Wave 4 staged-deepening worker, 2026-10-02)
+
+Safebin activated before any execution in this task:
+
+- Ran the mandatory setup: mkdir -p $HOME/safebin; symlinks created for
+  git, znc, sh, bash, ls, cp, mv, rm, mkdir, cat, grep, sed, awk, wc,
+  cmp, sha256sum, git-receive-pack, git-upload-pack. export
+  PATH="$HOME/safebin".
+- Verified under the safebin PATH: `which python3` returns nothing,
+  `which python` returns nothing.
+- Corrected $HOME/safebin/znc to the pinned compiler
+  src/tools/toolchain/znc_linux_x86_64_abed8aa1 (it already resolved
+  there; re-linked explicitly and verified byte-identical).
+- All scientific computation is pure Zag compiled with the pinned znc.
+  Shell is used only for: invoking znc, running compiled binaries, git
+  operations, file moves, sha256sum digests, FIFO plumbing in the battery
+  supervisor, and the no-dash documentation check. Design-time
+  estimation used two pure-Zag probe binaries (/tmp/probe/probe_bin,
+  /tmp/probe/probe2_bin) that replicate 2S-CALR logic against the
+  unsealed DEV-S2 target directly; no world process, no channel, no
+  sealed content involved. No python3, python, or any other forbidden
+  interpreter is invoked at any point.
+
+Per Micah's 2026-09-30 governance ruling: any forbidden executable
+invocation would make this wave PROCESS-FAIL.
+
+## Step 1 (Wave 4): Scope check
+
+- Extend CALR beyond depth 3 via staged deepening (2S-CALR), the honest
+  limitation recorded in REPORT_WAVE3.md section 8.
+- Diagnose first (in PREREG_WAVE4.md, frozen before implementation),
+  then implement in pure Zag, run, and report honestly.
+- Do NOT weaken K1 through K12 or KC0A through KC0D. Do NOT widen the
+  5-op ISA. Do NOT redesign the task. Do NOT introduce beam quotas as
+  the retention mechanism (CALR no-pruning principle stands). Do NOT
+  inspect sealed-world contents (DEV fixtures are unsealed smoke-test
+  fixtures and are the only worlds touched).
+- Freeze PREREG_WAVE4.md plus this Step 0 update in a commit containing
+  those two files ALONE, before any wave-4 .zag source, binary, or run
+  log exists.
+- Commits stay LOCAL on branch tnn-native-lab, explicit pathspecs, never
+  pushed, never amend shared history, never git reset. Do not touch
+  TNN_RESEARCH_PAPER_20260929.md or other workers' files.
+- No em/en dashes in loop documentation (verified with
+  worker_snippets/check_no_dash.sh before commit).
