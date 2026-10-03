@@ -108,7 +108,7 @@ answer diverges from the generic on identical inputs.
   setup_worldA2 (same facts, permuted slots: 603 at 0-15, 602 at
   16-31, 601 at 32-47), post-drift query on the same goal disagrees.
   t8: tag 831 rel 601 obj 623
-  t9: tag 832 rel 602 obj 625
+  t9: tag 832 rel 602 obj 622
   t10: tag 833 rel 601 obj 621
 - kind 3 (t=11..13): VFY drift, same A to A2 protocol, 2-link chains
   chosen so no bucket index accidentally hits post-drift (verified by
@@ -120,7 +120,7 @@ answer diverges from the generic on identical inputs.
   setup_worldA3 (world A minus fact slots 0-3: the two 601 facts and
   two 602 facts of i=0; indices shift by 4), post-drift disagrees.
   t14: tag 837 rel 601 subj 611
-  t15: tag 838 rel 602 subj 611
+  t15: tag 838 rel 603 subj 611
 
 CLEAN trials (4, after the 16): fresh state, world A, no drift, no
 collision; single queries that agree first-try. The probe must never
@@ -132,6 +132,37 @@ Goal tags: baseline/pre-drift 950+t (clean 970+q); collision goals
 960+t (kinds 0,1 only; kinds 2-4 reuse the same goal post-drift to
 exercise the plan-hit path). Oracle kinds: ret=oracle_1ret (okind 2),
 vfy=oracle_1vfy (3), cnt=oracle_1cnt (new, okind 4, cnt_gen-based).
+
+## Amendment A1 (2026-10-03, pre-execution, kill bars unchanged)
+
+Static analysis during implementation found three trial rows that
+cannot produce the staged disagreement (verified by hand against
+the world-A fact layout before any battery run):
+
+- t9 (kind 2, COV-RET): obj was 625, but no (602,*,625) fact exists
+  in world A, so spec and generic both return 0 pre- and
+  post-drift (vacuous agreement, no probe). Corrected obj to 622:
+  (611,602,622) exists at A slot 2. Pre-drift spec finds it via
+  the 602 bucket (agree); post-drift the stale buckets miss
+  (disagree). Row is now t9:(832,602,622).
+- t14/t15 (kind 4, COV-CNT): the original subj=611 rows were
+  re-analyzed against cnt_spec's actual logic. cnt_spec is
+  relation-blind at bucketed slots (it checks fs==subj but not
+  fr==rel), so on the shifted world A3 the stale 601-buckets count
+  603-facts. t14:(837,601,611): post-drift the spec counts the two
+  (611,603,*) facts now at the bucketed slots (returns 2) while the
+  generic correctly returns 0 (the (601,611,*) facts were deleted):
+  DIVERGE. t15 was changed to (838,603,611): post-drift the stale
+  603-buckets see only 602-facts (the (602,611,*) facts were
+  deleted, returns 0) while the generic returns 2: DIVERGE. Both
+  baselines agree on world A (2 vs 2).
+
+Additionally, a latent out-of-bounds bug in cb's ans_eq (it walks
+the flat answer buffer as fixed-size records, misreading object
+ids like 613 as record lengths) panics on this battery's answers.
+da_main.zag carries a minimal corrected flat element-wise ans_eq,
+documented at the function. The probe, contracts, retry logic, and
+all kill-bar thresholds are unchanged.
 
 ## 5. Frozen expectations (derivation summary)
 
