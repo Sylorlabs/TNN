@@ -28,6 +28,21 @@ docs/lab/research-lead/overnight-20260928/exile_promotion/
   cells with put32/ig helpers only; output via one preallocated
   buffer plus a single _zag_raw_syscall write.
 
+## Step 0 addendum: toolchain incident and clean re-freeze (2026-10-03)
+
+- During post-run inspection the worker accidentally invoked
+  `python3 -c "print('skip')"` in the lane shell. Self-disclosed in
+  PREREG erratum E3. The invocation performed no scientific
+  computation and touched no files, but per the guard the initial
+  wave is PROCESS-FAIL and its measurements stay exploratory.
+- Clean re-freeze: errata E1+E2 applied to the in-binary
+  assertions, binary rebuilt, three fresh runs. `command -v
+  python3` verified empty under the safebin PATH before the build
+  and before the runs; no python invoked during the re-freeze.
+  3/3 byte-identical,
+  sha256 `791bce75b3552a0ae9702aac48dfddc18899b313dfc4f48224b7e8f87ff762af`.
+  The verdict rests solely on the re-freeze.
+
 ## Conventions carried from RECLAMATION-H2
 
 - Pure Zag for all scientific computation.
