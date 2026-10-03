@@ -51,8 +51,27 @@ Commits local, never pushed, explicit pathspecs.
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (this file +
-      PREREG.md) before any implementation existed.
-- [ ] Step 2: implementation, build with pinned znc, 3/3
-      byte-identical runs, K7 audit clean.
-- [ ] Step 3: REPORT.md with verdict.
+- [x] Step 1: PREREG.md frozen, committed ALONE (this file +
+      PREREG.md) at ee8dca0ca, before any implementation existed.
+- [x] Step 2: implementation (extended learner.zag +
+      world.zag + driver.zag, concatenated to iv_full.zag,
+      2797 lines), compiled with pinned znc (`znc
+      iv_full.zag -o iv_bin`, rc=0, only A0102
+      ignored-return-value warnings, same class as the
+      parent lane).
+- [x] Step 3: 3/3 runs byte-identical (sha256
+      649609a2e92041a8ffb299a48bec6294b417a685b7ce04b3d64aea9f221b8e9c
+      x3), K7 audit clean (frozen token allowlist +
+      new-id spot check), driver tag audit 0 hits,
+      REPORT.md with verdict L2-INVERT-VALUE-PASS
+      (K1-K8 all PASS, 0 falsifiers, F-COUNT silent at
+      333/335/324/1237/1286/1146/393). One pre-verdict
+      transparent amendment (PREREG_AMENDMENT1.md):
+      QV-AS 1186->1237 (prereg used pre-amendment
+      parent base 1142 instead of amended 1193),
+      removal of a stale duplicate F-ABLATET-T16 line,
+      and corrections to two informational
+      ablation-arm counts (ABLATE-TRUNC 585->497,
+      ABLATE-INV QINV 1132->1183) whose parent bases
+      contained errors; no counting-rule or
+      learner-code change.
