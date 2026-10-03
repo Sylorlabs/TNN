@@ -105,9 +105,31 @@ S5: 4/4). The drivers were corrected to the PREREG-specified values
   unchanged 64/64/64/6-round resource bounds, NM>8 not exercised,
   WIDEN semantics unchanged (S3's contract-violating success is
   reproduced exactly, as characterized by GEN-STRESS).
-- The addressable limit is now ARENASZ(NM), not 4. The 5/10+
-  structure-combination question is unblocked at the arena level.
-- Recommended follow-up: the clean reproduction (untainted worker
-  re-runs build.sh from the committed sources) to lift the
-  exploratory label; then NM=10+ batteries for the 10+ structure
-  question.
+## 8. Clean reproduction (GEN-REDIM-CLEAN, 2026-10-03)
+
+An untainted worker re-ran the committed build.sh from the frozen
+prereg + committed sources with zero interpreter invocations:
+
+- Safebin activated before any command; `which python3/python/perl/
+  ruby/node` all return nothing. Guard recorded as NAMECHECK.md
+  Step 0-clean.
+- Sources untouched: working tree rbase.zag, rgen.zag, drivers, and
+  PREREG.md byte-identical to implementation commit 341598554 (only
+  NAMECHECK.md carries the new Step 0-clean lines).
+- build.sh (fail-closed, set -e) exit 0: Steps 1-4 (frozen digests,
+  ref identity vs gen_stress, C10 minimal-diff, C11 opacity) all pass;
+  C2 3/3 byte-identical for all five binaries with empty stderr;
+  C3/C4 byte-identical to the frozen-baseline binaries;
+  C5-C8 section byte-identical to the PREREG blocks;
+  C9 S5 counts exact (3 INTER=, 2731 INTER2=, 0 WIDEN=1).
+- Binary digests reproduced exactly: rd_dbin 8a88af16..., rd_gbin
+  aad5e969..., rd_sbin ef6ee431... (full values in Section 3).
+  Run-output digests reproduced: rd_dbin 37d22e2a..., rd_gbin
+  d12645a2..., rd_sbin 25a6acdc... (full values in Section 3).
+- Commit order intact: prereg e5709c139 remains a strict ancestor of
+  implementation 341598554; this verification commits after both.
+
+Verdict: **CLEAN-REPRODUCTION-PASS.** The exploratory label is lifted;
+GEN-REDIM results are canonical.
+
+Recommended follow-up: NM=10+ batteries for the 10+ structure question.

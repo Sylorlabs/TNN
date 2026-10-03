@@ -54,6 +54,19 @@ Lane reference copies (byte-copies, verified by sha256 in build.sh):
 - ref_rd_gen.zag <= gen_stress/ref_gs_gen.zag
 - ref_gs_new.zag <= gen_stress/gs_new.zag (setup source)
 
+## Step 0-clean: clean-reproduction worker guard (GEN-REDIM-CLEAN)
+
+- Safebin activated as the very first action of the reproduction
+  session: `export PATH="$HOME/safebin"`, before any other command.
+- `which python3` -> nothing. `which python` -> nothing.
+  `which perl`, `which ruby`, `which node` -> nothing.
+- This worker performed NO python3/python/perl/ruby/node invocation
+  at any point; all verification via safebin tools (znc, sh, cmp,
+  diff, grep, sed, awk, sha256sum, wc, cut, tail).
+- The implementation sources (rbase.zag, rgen.zag, drivers, PREREG.md)
+  were NOT modified; build.sh re-run from the committed frozen
+  state constitutes the clean reproduction.
+
 ## Step 2: prereg commit order
 
 - This NAMECHECK.md (Steps 0-2) + PREREG.md commit strictly precedes
