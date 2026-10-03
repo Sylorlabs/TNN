@@ -77,6 +77,64 @@ minted.
   bp5_driver.zag, bp5_full.zag, runs, REPORT.md) comes in
   a LATER commit, strictly after this one.
 
-## Step 2: implementation (pending)
+## Step 2: implementation (done)
 
-## Step 3: runs + REPORT.md (pending)
+- Files: bp5_learner.zag (verbatim copy of BP-4's
+  bp4_learner.zag, SHA-256
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e
+  on both, `cmp` clean), bp5_rules.zag (new: exactly
+  three learner functions, bp5_form_fact / bp5_form_meta
+  / bp5_fact_tombstone, disclosed in PREREG Section 1),
+  bp5_driver.zag (new: six world arms E-R3/E-R5/B-FACT/
+  B-META/MH/CY, emergent-evidence absorption, meta-update
+  mapping, R5 field28-delta trigger, in-driver bars).
+- Built: `cat ../xhier_countmap_fix/xf_block.zag
+  bp5_learner.zag bp5_rules.zag bp5_driver.zag >
+  bp5_full.zag`; pinned znc by absolute path, build exit
+  0 -> bp5_bin (408778 bytes; log: bp5_compile.txt;
+  A0102 warnings are the benign ignored-return-value
+  pattern pervasive in the frozen block itself, same as
+  BP-4).
+- xf_block.zag SHA-256 re-verified before AND after the
+  build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged; the patched XHIER-COUNTMAP-FIX block).
+- No Python/C/JS/Rust invoked at any point. Safebin PATH
+  held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any authored lane file
+  (byte-verified with grep); the only dash bytes in the
+  lane are znc's own A0102 warning text inside the
+  machine-generated bp5_compile.txt, disclosed in
+  REPORT.md.
+- 0 new edge types (1/3/14 frozen; 16 pre-exists in the
+  block per DESIGN.md P5, used for meta-rows), 0 new
+  node types (tags 1/3/20 pre-existing), 0 modes, 0
+  bridges, 0 handlers (one-system accounting).
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  6793bd2bd5798c1546702bac42efd8d74a974dc00a65a88448e317a29b58af2f
+  for bp5_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 31/31 PASS (4 PCs + 27 K bars).
+  E-R3: block-written type-7/type-3 route to R2/R3
+  (110/90), R5 correctly absent on reverted revise.
+  E-R5: R5 iff block revised (field28 201->999, sup
+  50); control shows no spurious revision. B-FACT:
+  formation partition (1,0)/(0,1)/(0,0), emergent
+  evidence (110/80), R7 selection, eff branches, I1
+  (record death, fresh recycle). B-META: formation,
+  one event moves rival meta-rows oppositely
+  (110 vs 80), R7 follows the revised policy. MH:
+  no cascade on single R6 (60/100/100), 3-hop via
+  per-hop application (60/60/60), min combiner. CY:
+  fixpoint (80,80), R6 snap-up (60->80),
+  0-absorption with reason-2 retirement.
+  BP5-SUMMARY 31/31; 33/33 with K-DET/K-HYG.
+- REPORT.md written with verdict BP-5-PASS. The 7
+  sealed predictions stay sealed; this lane adds
+  open-dynamics evidence only.
+- Committed with explicit pathspecs, local only, never
+  pushed.
+- Ledger: non-ledger task, nothing minted; ledger file
+  untouched.
