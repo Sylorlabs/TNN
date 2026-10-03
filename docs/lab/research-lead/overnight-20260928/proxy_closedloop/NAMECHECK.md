@@ -47,3 +47,25 @@ prereg freezes this predicted feedback-induced behavior change
 ## Build record
 
 (recorded after the prereg commit; implementation has not begun)
+
+## Step 2: Build record (2026-10-03)
+
+- Safebin PATH active; `which python3` returns nothing.
+- Implementation: 5 files cl_w6.zag, cl_t1..t4.zag copied from
+  proxy_redesign pr_*.zag; the ONLY functional changes (verified
+  by diff) are: (1) victim path (b) uses redun3(G,cb,vi,e);
+  (2)/(3) badred/protdest consistency checks use redun3(G,cb,v,e);
+  (4) banner PROXY=redun3-CL. Header/comment wording updated.
+  No new identifiers, functions, arena regions, or tallies.
+- Built 5 binaries with safebin znc:
+  - cl_w6.zag -> cl_w6_bin (194787 bytes)
+  - cl_t1.zag -> cl_t1_bin (198898 bytes)
+  - cl_t2.zag -> cl_t2_bin (198898 bytes)
+  - cl_t3.zag -> cl_t3_bin (198898 bytes)
+  - cl_t4.zag -> cl_t4_bin (198898 bytes)
+- 3/3 runs byte-identical per stream (C3 PASS); sha256 recorded
+  in REPORT.md.
+- C4/C5/C6(i) PASS: E735 PX kind=0 shows P0=2,P1=0,P2=4,P3=0 and
+  TRIGW shows E735:0R on all 5 streams, exactly as preregistered.
+- C6(ii) PASS: BADRED=0 on all streams; no active-cell proxy kill.
+- C7/C8/C9 PASS: REDUN3-CLOSEDLOOP-DISCRIMINATES.
