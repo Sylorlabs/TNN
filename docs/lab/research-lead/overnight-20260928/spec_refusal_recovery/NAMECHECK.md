@@ -24,4 +24,19 @@
   (spec_epochtag). New: rr_spec.zag (recovery wrappers), rr_main.zag
   (harness), rr_build.sh.
 
-## Steps 1..n: reserved for build/run verification records
+## Step 1: build/run verification (2026-10-03)
+
+- `./rr_build.sh` run from the lane directory under safebin PATH.
+- Pinned znc built `rr_bin` with no errors; exit 0 on all 3 runs; stderr
+  empty on all 3 runs (K3).
+- 3/3 byte-identical stdout: sha256
+  4828c6608e79b1652c18bd1b74fd8afb7f6a55458ecfb30528b157e293c4af4d
+  across rr_run1/2/3.txt (K10).
+- All frozen kill bars K1..K11 PASS as amended by A1 (see REPORT.md
+  adjudication table). Verdict: BUILD-PASS (11/11).
+- `da_learn.zag` byte-unmodified; DA battery untouched (separate lane).
+- Commit order verified: e7e26a63c (frozen prereg, alone) -> 8be4d2066
+  (Amendment A1, transparent) -> implementation + outputs + REPORT.md.
+- One hygiene iteration (comment tripped the no-literals grep; reworded)
+  and one bar-calibration iteration (A1: E3's rebuilt buckets are
+  legitimately empty, so the retry scans 0 slots) during the build.
