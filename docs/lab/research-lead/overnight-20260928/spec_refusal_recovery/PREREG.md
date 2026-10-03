@@ -76,9 +76,9 @@ before every emitted line, so each line states its own delta.
 | E2CNT_RR | 0 | 0 | 1 | 1 | 1 | >0 |
 | E2VFY_RR | 0 | 0 | 1 | 1 | 1 | >0 |
 | E3RET_ET | 0 | - | - | 1 | - | 0 |
-| E3RET_RR | 0 | 0 | 1 | 1 | 1 | >0 |
-| E3CNT_RR | 0 | 0 | 1 | 1 | 1 | >0 |
-| E3VFY_RR | 0 | 0 | 1 | 1 | 1 | >0 |
+| E3RET_RR | 0 | 0 | 1 | 1 | 1 | 0 (A1) |
+| E3CNT_RR | 0 | 0 | 1 | 1 | 1 | 0 (A1) |
+| E3VFY_RR | 0 | 0 | 1 | 1 | 1 | 0 (A1) |
 
 Key predictions to note: E2/E3 recovery lines have spec=0 (the drifted world
 genuinely contains no (901,10) fact); correctness is agree=1. E3RET_ET must
@@ -120,6 +120,23 @@ because a fix miss with matching epoch is an answer, not staleness.
 
 Verdict rule: BUILD-PASS requires 11/11. Any single bar failure is
 BUILD-FAIL with the failing bar named.
+
+## Amendment A1 (2026-10-03, after first full run, before final adjudication)
+
+K9 as originally written ("kbs>0 on every RR recovery line") over-specified:
+on E3 the world rebuild leaves NO 901 facts, so the re-specialized 901
+buckets are legitimately empty and the retry scans 0 slots (kbs=0). This is
+correct mechanism behavior, not a no-op recovery. Evidence the E3 retry
+really ran: resp=1 (the re-specialize event fired on the refusal path),
+refuse stayed 1 (the retry's epoch gate passed; a second refusal would make
+it 2), and spec=0=gen with agree=1 (stale buckets would have phantom'd
+spec=1, as the original spec did on E3 in SPEC-EPOCHTAG).
+
+Amended K9: kbs>0 on the E1/E2 RR recovery lines (non-empty rebuilt buckets:
+observed E1 kbs=2, E2 kbs=1, both strictly above the refuse-only kbs=0);
+on E3 the "real work" evidence is resp=1 plus agree=1 (already covered by
+K7). All other bars unchanged. The original K9 text above is preserved for
+audit; this amendment overrides it.
 
 ## Cost question (to be answered in REPORT, reasoned from measured data)
 
