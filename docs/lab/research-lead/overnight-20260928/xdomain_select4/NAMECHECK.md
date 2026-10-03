@@ -38,7 +38,15 @@
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (commit-order self-check).
-- [ ] Step 2: implementation (xs4_patch.zag, drivers, binaries).
-- [ ] Step 3: 3/3 runs, REPORT.md.
-- [ ] Scratch ~/workspace/_scratch_xs4 deleted after the run.
+- [x] Step 1: PREREG.md frozen, committed ALONE (commit b631afac7).
+- [x] Step 2: implementation (xs4_patch.zag, xs4_patch_noadapt.zag,
+  xs4_driver.zag, xs4_driver_noadapt.zag, binaries). No
+  post-freeze fixes needed: the first build passed all arms 3/3.
+  One-line no-adapt diff verified (adapt_on 1 -> 0, exactly one
+  line). No frozen bar changed.
+- [x] Step 3: 3/3 runs, REPORT.md. Verdict XP-SELECT-4-PASS
+  (K1-K13). Run shas: main
+  fcfc1afcf9e4f704c4cefe72a2090e4f4e682f27d174080f03dca9538ef343a9,
+  noadapt
+  448d4690eddf70ee51924ad8cd9edd5674b9a3cd497020520711994de159d611.
+- [x] Scratch ~/workspace/_scratch_xs4 deleted after the run.
