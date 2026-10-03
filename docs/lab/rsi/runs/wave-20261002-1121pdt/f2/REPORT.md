@@ -77,7 +77,67 @@ continues; documented per run.
 
 ## Red team
 
-(to be filled)
+### RT1: Is the 11-action gap a planning failure or a harness artifact?
+
+The planner (L_plan_c2) is provably complete: exhaustive
+iterative-deepening lexicographic search over the 7-symbol primitive
+alphabet to maxd=12. It cannot "fail to plan" in the algorithmic sense;
+given sufficient CPU it must return the shortest valid plan or prove
+none exists within maxd. The wave-3 world model is correct
+(S2_VERIFY_RESULT 3, single survivor hyp82, byte-identical across two
+independent builds). A length-11 plan exists by design (prereg section
+5.1) and was independently reconstructed by this worker
+([SX,SJ,SK,W,SX,W,SX,W,SX,W,SX], valid under the v5-tightened
+soundness check). The observed incompleteness is therefore a
+COMPUTE-TIME artifact: the binary received 12-18% CPU on a 2-core VM
+with 5+ competing heavy processes (other lanes' scaling binaries,
+which were not disturbed), plus a mid-run VM reboot. It is NOT a
+horizon artifact either: maxd=12 exceeds the length-11 solution, so
+the solution lies within the disclosed horizon.
+
+### RT2: Does the failure mode match a genuine planning deficit?
+
+Genuine planning-deficit signatures would be: convergence to wrong
+laws, a planner bug that misses existing plans, or a found plan that
+fails for real. Observed: correct convergence in all three waves
+(1/2/3), a correct exhaustive planner, and an incomplete search.
+The failure mode (wall-clock timeout under contention) does not match
+a planning deficit.
+
+### RT3: Is exhaustive search itself an intelligence limitation?
+
+Yes, and worth recording: the learner brute-forces up to 2e9
+candidates instead of exploiting structural insight (e.g., extending
+the wave-1/wave-2 pulse-train pattern, which a more intelligent
+planner would generalize). This is a legitimate intelligence critique
+of the mechanism, but it is out of scope for the frozen K6 bars: the
+prereg explicitly discloses "The Regime-3 plan needs an 11-action
+exhaustive search; wall-clock cost is reported, not hidden." It does
+not constitute a bar failure.
+
+### RT4: Soundness of the v5 tightening
+
+The v5 soundness tightening (3-consecutive-goal-step window at exactly
+[nwait,nwait+2]) is SUFFIX-sound: it matches the real observation
+times. The independently reconstructed length-11 plan satisfies it.
+No evidence the tightening renders the problem unsatisfiable.
+
+### RT5: Tuning / world-learner collusion
+
+Sealed worlds hash-verified against the prereg freeze record (all
+three match). NC3 (pristine v5-base must PROGRAM_FAIL on SHIFT2)
+guards against a world tuned for v6; it passed in 0521pdt. The
+learner contains no shift-specific content (source audit in
+IMPLEMENTATION.md: no S2_* references, w_* interface only). The
+double-shift structure defeats the one-revision v5 mechanism
+structurally, not by a depth gap.
+
+### RT6: Determinism status
+
+Waves 1-2 and wave-3 convergence are byte-identical across two
+independent builds (pre-reboot and post-reboot binaries, sha256-identical).
+This is strong evidence for K6-R7, but the bar requires 3/3 complete
+runs cmp-verified, which is pending run completion.
 
 ## VERDICT
 
