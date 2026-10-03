@@ -80,6 +80,79 @@ minted.
   bp7_full.zag, runs, REPORT.md) comes in a LATER commit,
   strictly after this one.
 
-## Step 2: implementation (pending)
+## Step 2: implementation (done)
 
-## Step 3: runs + REPORT.md (pending)
+- Files: bp7_learner.zag (verbatim copy of BP-6's
+  bp6_learner.zag, SHA-256
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e
+  on both, `cmp` clean), bp7_driver.zag (new: three
+  world arms DSELF/META/PBAR, bp7_absorb,
+  driver-side experimental bp7_bar_param and
+  per-belief selection bp7_select_pbar,
+  bp7_kill_self_prov, commitment bookkeeping,
+  in-driver bars). Zero new learner functions this
+  lane. bp4_rules.zag (frozen BP-4 R3-prime) reused
+  verbatim in the build (SHA-256
+  7392299309082836bf376bb445492ef8d9fd75b3d857ad425b8ca74d7399e4d9).
+- Built: `cat ../xhier_countmap_fix/xf_block.zag
+  bp7_learner.zag ../belief_provenance_4/bp4_rules.zag
+  bp7_driver.zag > bp7_full.zag`; pinned znc by
+  absolute path, build exit 0 -> bp7_bin (411569
+  bytes; log: bp7_compile.txt; A0102 warnings are
+  the benign ignored-return-value pattern pervasive
+  in the frozen block itself, same as BP-4/BP-5/BP-6).
+- xf_block.zag SHA-256 re-verified before AND after
+  the build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged; the patched XHIER-COUNTMAP-FIX block).
+- Amendment round (PREREG.md Section 5b): the first
+  run went 23/26, exposing three prereg errors (two
+  arithmetic slips of mine: S5 final 48 not 49,
+  streak conf 41 not 40; one wrong block assumption:
+  repeats of ev_observe contradict on one fact write
+  no new type-3, probe-verified in /tmp/bp7probe).
+  Prereg amended transparently and re-frozen; the
+  PBAR world fixed to one-contradict-per-fact (mA
+  promotes 3 facts); S3/S5 e1 values promoted to
+  explicit bars K-MT-S3E1/K-MT-S5E1. No
+  implementation rule was changed to chase a bar.
+- No Python/C/JS/Rust invoked at any point. Safebin
+  PATH held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any authored lane file or run
+  output (byte-verified with grep).
+- 0 new edge types (1/3/7/14 all pre-existing in the
+  block), 0 new node types (tags 1/3/20 pre-existing),
+  0 modes, 0 bridges, 0 handlers (one-system
+  accounting).
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  e4dcfdd510433e39834e353595f3cc5a62aadfe74fefaeefc846942b5063a0e3
+  for bp7_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 28/28 PASS (3 PCs + 25 K bars).
+  DSELF: d_self 255->5 at k=10, floor 0 at k=11
+  (no wraparound), no recovery through 3
+  confirmations (stays 0, sup 30), eff teeth
+  (30->7), source-selectivity at support 0,
+  strict-majority boundary, live majority
+  re-evaluation after relicensing. META: unit
+  values 51/50/10/50; trajectory finals
+  50/52/48/47/48/51 across the six settings;
+  S3/S5 discriminated at e1 (51 vs 50); all 30
+  selections mA; S1 replicates BP-6's BA
+  trajectory. PBAR: isolation (global 51 excludes
+  innocent mB, per-belief admits), availability
+  (global 53 abstains entirely, per-belief returns
+  mB), teeth (mX penalized where earned), 40-TP
+  streak to pb 10 (sup 255, conf 41), overfit
+  divergence at eff 15 (per-belief selects, global
+  53 refuses). BP7-SUMMARY 28/28; 30/30 with
+  K-DET/K-HYG.
+- REPORT.md written with verdict BP-7-PASS. The 7
+  sealed predictions stay sealed; this lane adds
+  open-dynamics evidence only.
+- Committed with explicit pathspecs, local only, never
+  pushed.
+- Ledger: non-ledger task, nothing minted; ledger file
+  untouched.

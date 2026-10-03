@@ -49,10 +49,11 @@ kill bars:
   110): frozen (1,1,2x), aggressive raise (3,1,2x),
   aggressive lower (1,3,2x), hair-trigger threshold
   (1,1,1.5x), zero raise (0,1,2x), zero lower (1,0,2x).
-  Predicted final bars: 50/52/48/47/49/51, all six
-  distinct: the trajectory is sensitive to every
-  meta-parameter, and only the frozen setting is
-  neutral over a balanced FP/TP cycle.
+  Predicted final bars: 50/52/48/47/48/51. S3 and
+  S5 share the final 48 (both end low by different
+  routes: aggressive lowering vs never raising); they
+  are discriminated at e1 (51 vs 50). Only the frozen
+  setting is neutral over a balanced FP/TP cycle.
 - PBAR (per-belief bars): one global bar punishes every
   belief for one belief's false positives.
   Driver-side experimental per-belief bar array plus
@@ -196,9 +197,12 @@ Hand-derived trajectories:
   100*2=200>=147 -> 48; e5: 110*2=220>=144 -> 47.
   Final 47: hair-trigger threshold ratchets down
   every step.
-- S5 (0,1,2,1): 50->50->50->50->50->49 (e5:
-  110>=100 -> 49). Final 49: FP never moves the
-  bar; the raise is load-bearing.
+- S5 (0,1,2,1): 50->50->50->49->48 (e4: 100>=2*50
+  =100 -> 49; e5: 110>=2*49=98 -> 48). Final 48: FP
+  never moves the bar; the raise is load-bearing. S3
+  and S5 share the final 48; they are discriminated at
+  e1 (51 vs 50: the FP raise step), promoted to
+  explicit bars K-MT-S3E1/K-MT-S5E1 below.
 - S6 (1,0,2,1): 50->51->51->51->51->51 (e5:
   110>=102 but dec=0 -> 51). Final 51: permanent
   ratchet, never recovers.
@@ -218,25 +222,35 @@ inc/dec-balanced band around the frozen setting.
 ## 4. Arm PBAR: per-belief bars (world WP)
 
 tnn2_init. mA: ga1=ev_teach(801,81,10) tag 2,
-ga2=ev_teach(802,82,20) tag 6;
-mA=promote_graph(WP,-1,801,81,10,[ga1,ga2],2);
-bp2_form(mA,0): sup=100, ext=1, self=1.
+ga2=ev_teach(802,82,20) tag 6, ga3=ev_teach(804,84,25)
+tag 2; mA=promote_graph(WP,-1,801,81,10,
+[ga1,ga2,ga3],3); bp2_form(mA,0): sup=100, ext=2,
+self=1. (Three facts: the block writes at most one
+type-3 per fact, probe-verified 2026-10-03 in
+/tmp/bp7probe; each FP below contradicts a fresh
+fact. A repeated contradict returns 1 and writes no
+new edge, and a contradicted fact ignores later
+matches.)
 mB=alloc_node; bp2_form(mB,1); bp2_revise(mB) ->
 sup=50 (bare B-COMP: eff=sup=50).
 mX=alloc_node; bp2_form(mX,1); bp2_revise(mX) ->
 sup=50.
-mO: go1=ev_teach(803,83,30) tag 2;
-mO=promote_graph(WP,-1,803,83,30,[go1],1);
+mO: go1=ev_teach(805,85,30) tag 2;
+mO=promote_graph(WP,-1,805,85,30,[go1],1);
 bp2_form(mO,0): sup=100, ext=1, self=0.
 gbar=50; pb[0..1023]=50.
 
-Help script (world-driven FPs on mA):
+Help script (world-driven FPs on mA, one fresh fact
+per FP):
 - FP1: contradict ga1 (ev_observe(WP,801,81,999))
   -> type-3 -> absorb -> R3(mA): sup 80.
   gbar=bp2_bar_after(50,1,100)=51.
   pb[mA]=bp7_bar_param(50,1,100,1,1,2,1,10)=51;
   pb[mB]=50 (mB never commits).
-- FP2,FP3: sup 60,40; gbar 52,53; pb[mA]=53.
+- FP2,FP3: contradict ga2 (ev_observe(WP,802,82,
+  999)) then ga3 (ev_observe(WP,804,84,999)): sup
+  60,40; gbar 52,53; pb[mA]=53. (eff(mA)=sup
+  throughout: d_self=255, partition (2,1).)
 
 Hand-derived comparisons:
 - After FP1: bp2_select({mB},1,51)==-3 (50<51:
@@ -254,13 +268,13 @@ Hand-derived comparisons:
 
 Overfit script (mO lucky streak, world-driven):
 - 40x: sel=bp7_select_pbar({mO},1,pb) (must be
-  mO); ev_observe(WP,803,83,30) -> type-7 on go1
+  mO); ev_observe(WP,805,85,30) -> type-7 on go1
   -> absorb -> R2(mO,0); pb[mO]=bp7_bar_param(
   pb,0,eff_c,1,1,2,1,10) with eff_c=sup before
   the confirm. sup: 100+20k clamped: k=1:120...
-  k=8:255; conf=40. pb: 50->49->...->10 (every
-  step eff_c >= 2*pb: k=1: 100>=100; holds all
-  the way down). The global bar does NOT move on
+  k=8:255; conf=41 (formation sets b_conf=1, plus
+  40 R2s). pb: 50->49->...->10 (every step eff_c
+  >= 2*pb: k=1: 100>=100; holds all the way down). The global bar does NOT move on
   mO's outcomes (credit-assignment scope under
   test; disclosed in Section 1).
 - Then 12x direct bp2_disconfirm(mO) (driver-side,
@@ -282,7 +296,7 @@ Preconditions:
   ext==2 && self==2; m4: ext==1 && self==3.
 - PC-MT-FORM: mA: sup==100 && ext==2 && self==2;
   mB: sup==60.
-- PC-PB-FORM: mA: sup==100 && ext==1 && self==1;
+- PC-PB-FORM: mA: sup==100 && ext==2 && self==1;
   mB: sup==50; mX: sup==50; mO: sup==100.
 
 DSELF bars:
@@ -306,8 +320,11 @@ META bars:
 - K-MT-S2: final bar S2==52.
 - K-MT-S3: final bar S3==48.
 - K-MT-S4: final bar S4==47.
-- K-MT-S5: final bar S5==49.
+- K-MT-S5: final bar S5==48.
 - K-MT-S6: final bar S6==51.
+- K-MT-S3E1: bar S3 after e1==51.
+- K-MT-S5E1: bar S5 after e1==50 (the FP raise
+  step discriminates S3 from S5; both end at 48).
 - K-MT-SEL: all 30 selections (5 events x 6
   settings) == mA.
 
@@ -319,7 +336,7 @@ PBAR bars:
 - K-PB-TEETH: pb[mX]==51 &&
   bp7_select_pbar({mX},1,pb)==-3.
 - K-PB-STREAK: pb[mO]==10 && b_sup[mO]==255 &&
-  b_conf[mO]==40.
+  b_conf[mO]==41 (formation sets b_conf=1).
 - K-PB-OVERFIT: after 12x R3: b_sup[mO]==15 &&
   bp7_select_pbar({mO},1,pb)==mO &&
   bp2_select({mO},1,53)==-3.
@@ -343,7 +360,53 @@ Determinism and hygiene:
   7392299309082836bf376bb445492ef8d9fd75b3d857ad425b8ca74d7399e4d9);
   opaque identifiers.
 
-Bar count: 3 PCs + 23 K bars + K-DET + K-HYG = 28.
+Bar count: 3 PCs + 25 K bars + K-DET + K-HYG = 30.
+
+## 5b. Amendments (2026-10-03, after the first
+implementation run; transparent re-freeze)
+
+The first run (23/26) exposed three prereg errors.
+No implementation rule was changed to chase a bar;
+each correction below re-derives the prediction from
+the frozen rule or a measured block behavior. The
+implementation was then fixed to match the corrected
+world design, and the lane re-run from scratch.
+
+- A1 (K-MT-S5 arithmetic slip): the prereg predicted
+  S5 final 49 with trajectory 50->50->50->50->50
+  ->49. Wrong: at e4 the bar is already 50 (the FP
+  never raised it), so 100 >= 2*50 fires the lower
+  one step earlier than written. Correct trajectory:
+  50->50->50->49->48, final 48. The implementation
+  (unit bars K-MT-U1..U4 all passing) was faithful
+  to the frozen rule; the hand composition was not.
+  Consequence: S3 and S5 share the final 48 (both
+  end low by different routes). Discrimination is
+  preserved by promoting the already-preregistered
+  e1 values to explicit bars: K-MT-S3E1==51,
+  K-MT-S5E1==50 (the inc step is what separates
+  them).
+- A2 (K-PB-STREAK conf slip): the prereg predicted
+  b_conf==40 after 40 R2s. Wrong: bp2_form sets
+  b_conf=1 at formation (same pattern as BP-6
+  PC-COMB-FORM: 2 confirms -> conf 3). Correct:
+  41.
+- A3 (repeat-contradict block behavior): the prereg
+  assumed each ev_observe contradict writes one new
+  type-3. Probe-measured 2026-10-03 (/tmp/bp7probe,
+  ephemeral): the first contradict on a fact returns
+  0 and writes one type-3; a second contradict on
+  the same fact returns 1 and writes nothing; a
+  contradicted fact also ignores later matches
+  (ret 0, no type-7). So the PBAR world as built
+  could not deliver FP3 (repeat contradict on ga1:
+  no R3, cf=0, gbar stuck at 52). World fix: mA
+  now promotes 3 facts (tags 2,6,2; ext=2, self=1;
+  PC-PB-FORM updated) and FP1/FP2/FP3 contradict
+  ga1/ga2/ga3 once each; mO's fact renumbered to
+  (805,85,30) to avoid key overlap. All downstream
+  hand-derivations are unchanged (eff(mA)=sup still
+  holds with partition (2,1)).
 
 ## 6. Falsifiers (what kills the claim)
 
