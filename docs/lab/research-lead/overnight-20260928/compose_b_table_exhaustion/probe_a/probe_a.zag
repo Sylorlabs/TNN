@@ -1,0 +1,1087 @@
+// sus_base.zag -- COMPOSE-SUSPEND-1 base.
+// Alloc, little-endian i32 access, output helpers, kind compatibility,
+// fact store, MAP table, MAP execution with ASSEMBLE/EVALUATE phase
+// instrumentation. Pure Zag.
+//
+// Output rule (mandatory): dynamic content is formatted into ONE
+// preallocated buffer with cursor-returning helpers, then a single
+// _zag_raw_syscall write. _zag_print is never used for dynamic content.
+//
+// Arena A (world): MAP inventory + facts.
+//   0: nf (fact count)
+//   4: facts, 64 * 12 bytes (s, r, o)
+//   772: MAP table, 16 maps * 8 fields * 4 bytes
+//        fields: 0 class, 1 rel, 2 inmask, 3 outmask,
+//                4 inmask1, 5 inmask2, 6 arity, 7 nobs
+//   1284: nmaps
+// Classes: 0=WALK, 1=COUNT, 4=ADD2 (matches the PAIR6 substrate).
+//
+// Arena S (suspend learner state):
+//   0: nthunk
+//   4: asm_steps      (app-thunks newly interned while phase==0)
+//   8: search_runs    (ASSEMBLE enumerations executed)
+//   12: widen         (0/1)
+//   16: viol_asm      (MAP executions while phase==0; must stay 0)
+//   20: phase         (0=ASSEMBLE, 1=EVALUATE)
+//   24: const_tid    (current goal const thunk)
+//   28: exec_total
+//   32: exec per map, 16 * 4 bytes
+//   96: thunk table, 256 entries * 8 fields * 4 bytes
+//       fields: 0 map(-1=const), 1 in1, 2 in2, 3 cval,
+//               4 kindmask, 5 size, 6 memo, 7 onstack
+//   8288: per-thunk exec, 256 * 4 bytes
+//   9312: composite store, 8 entries * 4 fields * 4 bytes
+//         fields: kin, kout, sketch, root
+//   9440: nstore
+//   9444: invalidated tid list, 256 * 4 bytes; 10468: ninv
+// Sentinels: MISS=-2, NOVAL=-999999.
+
+fn z_alloc(n:i32)[]u8 {
+  let p:*u8=_zag_malloc(n) as *u8;
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+// ---- output helpers: append into buffer, return new cursor ----
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c+i]=s[i]; i=i+1; }
+  return c+s.len;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0;
+  let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1;
+  let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n;
+  let p:i32=e-1;
+  let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){
+    b[p]=(48+(y-(y/10)*10)) as u8;
+    y=y/10;
+    p=p-1;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0);
+  return;
+}
+// ---- kind compatibility: mask==0 compatible with all; kinds are 1-based bit positions ----
+fn khas(mask:i32,k:i32)i32 {
+  if(mask==0){ return 1; }
+  if((mask & (1<<(k-1)))!=0){ return 1; }
+  return 0;
+}
+// ---- arena accessors ----
+fn ag(A:[]u8,off:i32)i32 { return get32(A,off); }
+fn ap(A:[]u8,off:i32,v:i32)void { set32(A,off,v); return; }
+fn mg(A:[]u8,m:i32,f:i32)i32 { return get32(A,772+m*32+f*4); }
+fn mp(A:[]u8,m:i32,f:i32,v:i32)void { set32(A,772+m*32+f*4,v); return; }
+fn sg(S:[]u8,off:i32)i32 { return get32(S,off); }
+fn sp(S:[]u8,off:i32,v:i32)void { set32(S,off,v); return; }
+fn tg(S:[]u8,t:i32,f:i32)i32 { return get32(S,96+t*32+f*4); }
+fn tp(S:[]u8,t:i32,f:i32,v:i32)void { set32(S,96+t*32+f*4,v); return; }
+fn eg(S:[]u8,m:i32)i32 { return get32(S,32+m*4); }
+fn ep(S:[]u8,m:i32,v:i32)void { set32(S,32+m*4,v); return; }
+fn te(S:[]u8,t:i32)i32 { return get32(S,8288+t*4); }
+fn te_set(S:[]u8,t:i32,v:i32)void { set32(S,8288+t*4,v); return; }
+// ---- facts: single-hop lookup, missing -> -2 ----
+fn fact_add(A:[]u8,s:i32,r:i32,o:i32)void {
+  let n:i32=ag(A,0);
+  if(n<64){
+    set32(A,4+n*12,s); set32(A,4+n*12+4,r); set32(A,4+n*12+8,o);
+    ap(A,0,n+1);
+  }
+  return;
+}
+fn fact_del(A:[]u8,s:i32,r:i32)void {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==r){
+      let li:i32=n-1;
+      set32(A,4+i*12,get32(A,4+li*12));
+      set32(A,4+i*12+4,get32(A,4+li*12+4));
+      set32(A,4+i*12+8,get32(A,4+li*12+8));
+      ap(A,0,li);
+      return;
+    }
+    i=i+1;
+  }
+  return;
+}
+fn fact1(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ return get32(A,4+i*12+8); }
+    i=i+1;
+  }
+  return -2;
+}
+fn count_rel(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  let c:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ c=c+1; }
+    i=i+1;
+  }
+  if(c==0){ return -2; }
+  return c;
+}
+// ---- MAP table ----
+fn map_new(A:[]u8,m:i32,cl:i32,rel:i32,inm:i32,outm:i32,inm1:i32,inm2:i32,ar:i32)void {
+  mp(A,m,0,cl); mp(A,m,1,rel); mp(A,m,2,inm); mp(A,m,3,outm);
+  mp(A,m,4,inm1); mp(A,m,5,inm2); mp(A,m,6,ar); mp(A,m,7,0);
+  let nm:i32=ag(A,1284);
+  if(m>=nm){ ap(A,1284,m+1); }
+  return;
+}
+// ---- MAP execution with phase instrumentation ----
+// Any execution while phase==0 is a phase-separation violation (F-B4).
+fn exec_map(S:[]u8,A:[]u8,m:i32,v1:i32)i32 {
+  if(sg(S,20)==0){ sp(S,16,sg(S,16)+1); }
+  ep(S,m,eg(S,m)+1);
+  sp(S,28,sg(S,28)+1);
+  let cl:i32=mg(A,m,0);
+  let rel:i32=mg(A,m,1);
+  if(cl==0){ return fact1(A,v1,rel); }
+  if(cl==1){ return count_rel(A,v1,rel); }
+  return -2;
+}
+fn exec_map2(S:[]u8,A:[]u8,m:i32,v1:i32,v2:i32)i32 {
+  if(sg(S,20)==0){ sp(S,16,sg(S,16)+1); }
+  ep(S,m,eg(S,m)+1);
+  sp(S,28,sg(S,28)+1);
+  let cl:i32=mg(A,m,0);
+  if(cl==4){
+    if(v1==-2){ return -2; }
+    if(v2==-2){ return -2; }
+    return v1+v2;
+  }
+  return -2;
+}
+// sus_thunk.zag -- thunk table, hash-cons interning, demand evaluation.
+// Identity = tid equality after interning. Sharing is by thunk
+// identity, never by value equality.
+
+fn th_new(S:[]u8,m:i32,i1:i32,i2:i32,cv:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  if(n>=256){ return -2; }
+  tp(S,n,0,m); tp(S,n,1,i1); tp(S,n,2,i2); tp(S,n,3,cv);
+  tp(S,n,4,km); tp(S,n,6,-999999); tp(S,n,7,0);
+  let sz:i32=0;
+  if(m>=0){
+    sz=1+tg(S,i1,5);
+    if(i2>=0){ sz=sz+tg(S,i2,5); }
+  }
+  tp(S,n,5,sz);
+  te_set(S,n,0);
+  sp(S,0,n+1);
+  return n;
+}
+// intern(m,i1,i2): hash-cons. Returns existing tid on match, else
+// allocates. App-thunks newly interned while phase==0 count as
+// assembly steps. Returns -2 on table overflow.
+fn intern(S:[]u8,m:i32,i1:i32,i2:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==m){
+      if(m==-1){
+        if(tg(S,t,3)==i1){ return t; }
+      } else {
+        if(tg(S,t,1)==i1){
+          if(tg(S,t,2)==i2){ return t; }
+        }
+      }
+    }
+    t=t+1;
+  }
+  // kindmask: const -> caller supplies via i2 slot trick is not used;
+  // app-thunk kindmask is set by the caller after interning.
+  let nt:i32=th_new(S,m,i1,i2,0,0);
+  if(nt<0){ return -2; }
+  if(sg(S,20)==0){
+    if(m>=0){ sp(S,4,sg(S,4)+1); }
+  }
+  return nt;
+}
+fn const_thunk(S:[]u8,v:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==-1){
+      if(tg(S,t,3)==v){ return t; }
+    }
+    t=t+1;
+  }
+  let nt:i32=th_new(S,-1,-1,-1,v,km);
+  return nt;
+}
+// demand(t): evaluate on demand with identity memoization.
+// Loop guard: t on the evaluation stack fails the candidate (-2).
+fn demand(S:[]u8,A:[]u8,t:i32) i32 {
+  let memo:i32=tg(S,t,6);
+  if(memo!=-999999){ return memo; }
+  if(tg(S,t,7)==1){ return -2; }
+  tp(S,t,7,1);
+  let m:i32=tg(S,t,0);
+  let v:i32=-2;
+  if(m==-1){
+    v=tg(S,t,3);
+  } else {
+    let ar:i32=mg(A,m,6);
+    let i1:i32=tg(S,t,1);
+    let v1:i32=demand(S,A,i1);
+    if(ar==1){
+      v=exec_map(S,A,m,v1);
+    } else {
+      let i2:i32=tg(S,t,2);
+      let v2:i32=demand(S,A,i2);
+      v=exec_map2(S,A,m,v1,v2);
+    }
+    te_set(S,t,te(S,t)+1);
+  }
+  tp(S,t,6,v);
+  tp(S,t,7,0);
+  return v;
+}
+// observe: idempotent contract recording (mask-OR of already-present
+// kind bits; no prediction depends on it).
+fn observe_app(S:[]u8,A:[]u8,t:i32) void {
+  let m:i32=tg(S,t,0);
+  if(m<0){ return; }
+  let v:i32=tg(S,t,6);
+  if(v==-2){ return; }
+  mp(A,m,3,mg(A,m,3)|tg(S,t,4));
+  let i1:i32=tg(S,t,1);
+  mp(A,m,2,mg(A,m,2)|tg(S,i1,4));
+  if(mg(A,m,6)==2){
+    let i2:i32=tg(S,t,2);
+    mp(A,m,4,mg(A,m,4)|tg(S,i1,4));
+    mp(A,m,5,mg(A,m,5)|tg(S,i2,4));
+  }
+  mp(A,m,7,mg(A,m,7)+1);
+  return;
+}
+// mark reachable set from t into byte array R (R[t]=1). Iterative DFS.
+fn mark_reach(S:[]u8,t:i32,R:[]u8) void {
+  let st:[]u8=z_alloc(1024);
+  let spx:i32=0;
+  set32(st,0,t);
+  spx=1;
+  while(spx>0){
+    spx=spx-1;
+    let u:i32=get32(st,spx*4);
+    if((R[u] as i32)==0){
+      R[u]=1 as u8;
+      let m:i32=tg(S,u,0);
+      if(m>=0){
+        let i1:i32=tg(S,u,1);
+        set32(st,spx*4,i1); spx=spx+1;
+        let i2:i32=tg(S,u,2);
+        if(i2>=0){ set32(st,spx*4,i2); spx=spx+1; }
+      }
+    }
+  }
+  return;
+}
+// sum of per-thunk exec counters over the reachable set of t.
+fn path_exec(S:[]u8,t:i32) i32 {
+  let R:[]u8=z_alloc(256);
+  mark_reach(S,t,R);
+  let n:i32=sg(S,0);
+  let s:i32=0;
+  let u:i32=0;
+  while(u<n){
+    if((R[u] as i32)==1){ s=s+te(S,u); }
+    u=u+1;
+  }
+  return s;
+}
+// sus_asm.zag -- ASSEMBLE: regressive need solving over kind-set
+// contracts, purely symbolic (zero execution). Candidate DAGs are
+// enumerated in frozen deterministic order and evaluated in order
+// by the EVALUATE phase.
+//
+// Loop guard (general termination rule): a (need-kind, producer-id)
+// pair already on the open need stack fails that producer choice.
+// No shape knowledge anywhere: all decisions consult opaque map
+// ids, arities, and kind bitmasks.
+
+fn app1(S:[]u8,A:[]u8,m:i32,t:i32) i32 {
+  let nt:i32=intern(S,m,t,-1);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+fn app2(S:[]u8,A:[]u8,m:i32,t1:i32,t2:i32) i32 {
+  let nt:i32=intern(S,m,t1,t2);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+fn onpath(stk:[]u8,sd:i32,m:i32) i32 {
+  let i:i32=0;
+  while(i<sd){
+    if(get32(stk,i*4)==m){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+// alts: alternative thunks deriving kind-K values from the goal
+// input, in frozen order: producer id order; direct-close before
+// sub-need alternatives; 2-input legs t1-outer/t2-inner.
+// Appends tids into buf, returns count appended.
+fn alts(S:[]u8,A:[]u8,base:i32,nm:i32,kin:i32,K:i32,stk:[]u8,sd:i32,depth:i32,buf:[]u8,cap:i32) i32 {
+  let n:i32=0;
+  let C:i32=sg(S,24);
+  let m:i32=base;
+  while(m<base+nm){
+    if(khas(mg(A,m,3),K)==1){
+      if(onpath(stk,sd,m)==0){
+      let ar:i32=mg(A,m,6);
+      if(ar==1){
+        if(khas(mg(A,m,2),kin)==1){
+          let c:i32=app1(S,A,m,C);
+          if(c>=0 && n<cap){ set32(buf,n*4,c); n=n+1; }
+        }
+        if(depth<6){
+          set32(stk,sd*4,m);
+          let sub:[]u8=z_alloc(512);
+          let sn:i32=alts(S,A,base,nm,kin,mg(A,m,2),stk,sd+1,depth+1,sub,128);
+          let i:i32=0;
+          while(i<sn){
+            let c:i32=app1(S,A,m,get32(sub,i*4));
+            if(c>=0 && n<cap){ set32(buf,n*4,c); n=n+1; }
+            i=i+1;
+          }
+        }
+      } else {
+        // arity 2
+        let t1:[]u8=z_alloc(512);
+        let t2:[]u8=z_alloc(512);
+        let hasc1:i32=0;
+        let hasc2:i32=0;
+        if(khas(mg(A,m,4),kin)==1){ hasc1=1; }
+        if(khas(mg(A,m,5),kin)==1){ hasc2=1; }
+        let a:i32=0;
+        let b:i32=0;
+        if(depth<6){
+          set32(stk,sd*4,m);
+          a=alts(S,A,base,nm,kin,mg(A,m,4),stk,sd+1,depth+1,t1,128);
+          b=alts(S,A,base,nm,kin,mg(A,m,5),stk,sd+1,depth+1,t2,128);
+        }
+        let i:i32=0;
+        while(i<hasc1+a){
+          let x:i32=0;
+          if(i==0 && hasc1==1){ x=C; } else { x=get32(t1,(i-hasc1)*4); }
+          let j:i32=0;
+          while(j<hasc2+b){
+            let y:i32=0;
+            if(j==0 && hasc2==1){ y=C; } else { y=get32(t2,(j-hasc2)*4); }
+            let c:i32=app2(S,A,m,x,y);
+            if(c>=0 && n<cap){ set32(buf,n*4,c); n=n+1; }
+            j=j+1;
+          }
+          i=i+1;
+        }
+      }
+      }
+    }
+    m=m+1;
+  }
+  return n;
+}
+fn obs_reach(S:[]u8,A:[]u8,t:i32) void {
+  let R:[]u8=z_alloc(256);
+  mark_reach(S,t,R);
+  let n:i32=sg(S,0);
+  let u:i32=0;
+  while(u<n){
+    if(R[u]==1){ observe_app(S,A,u); }
+    u=u+1;
+  }
+  return;
+}
+// assemble: phase 0 builds the ordered candidate list symbolically;
+// phase 1 evaluates in order; first end-to-end success wins.
+fn assemble(S:[]u8,A:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32) i32 {
+  sp(S,20,0);
+  sp(S,8,sg(S,8)+1);
+  let C:i32=const_thunk(S,s,kin);
+  sp(S,24,C);
+  let cand:[]u8=z_alloc(1024);
+  let stk:[]u8=z_alloc(256);
+  let n:i32=alts(S,A,base,nm,kin,kout,stk,0,0,cand,256);
+  sp(S,20,1);
+  let i:i32=0;
+  while(i<n){
+    let t:i32=get32(cand,i*4);
+    let v:i32=demand(S,A,t);
+    if(v==exp){
+      obs_reach(S,A,t);
+      return t;
+    }
+    i=i+1;
+  }
+  return -2;
+}
+// widen_pass: exactly one admission-relaxed pass over thunks with
+// observed non-negative values (observed-kind admission).
+fn widen_pass(S:[]u8,A:[]u8,base:i32,nm:i32,exp:i32) i32 {
+  let good:[]u8=z_alloc(1024);
+  let ng:i32=0;
+  let nt:i32=sg(S,0);
+  let t:i32=0;
+  while(t<nt){
+    let isapp:i32=0;
+    if(tg(S,t,0)>=0){ isapp=1; }
+    let isgood:i32=0;
+    if(isapp==1){
+      if(tg(S,t,6)>=0){ isgood=1; }
+    }
+    if(isgood==1){ set32(good,ng*4,t); ng=ng+1; }
+    t=t+1;
+  }
+  let m:i32=base;
+  while(m<base+nm){
+    if(mg(A,m,6)==1){
+      let i:i32=0;
+      while(i<ng){
+        let c:i32=app1(S,A,m,get32(good,i*4));
+        let fresh:i32=0;
+        if(c>=0){
+          if(tg(S,c,6)==-999999){ fresh=1; }
+        }
+        if(fresh==1){
+          let v:i32=demand(S,A,c);
+          if(v==exp){ obs_reach(S,A,c); return c; }
+        }
+        i=i+1;
+      }
+    } else {
+      let i:i32=0;
+      while(i<ng){
+        let j:i32=0;
+        while(j<ng){
+          let c:i32=app2(S,A,m,get32(good,i*4),get32(good,j*4));
+          let fresh:i32=0;
+          if(c>=0){
+            if(tg(S,c,6)==-999999){ fresh=1; }
+          }
+          if(fresh==1){
+            let v:i32=demand(S,A,c);
+            if(v==exp){ obs_reach(S,A,c); return c; }
+          }
+          j=j+1;
+        }
+        i=i+1;
+      }
+    }
+    m=m+1;
+  }
+  return -2;
+}
+fn solve(S:[]u8,A:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32) i32 {
+  let r:i32=assemble(S,A,base,nm,s,kin,kout,exp);
+  if(r<0){
+    sp(S,12,1);
+    r=widen_pass(S,A,base,nm,exp);
+  }
+  if(r>=0){ store_put(S,kin,kout,sketch(S,A,base,nm),r); }
+  return r;
+}
+// sus_rev.zag -- composite store, REBIND, inventory-change
+// invalidation, REVISE (surgical sub-thunk revision).
+// All rules quantify over opaque ids, arities, and kind bitmasks.
+
+fn sketch(S:[]u8,A:[]u8,base:i32,nm:i32) i32 {
+  let s:i32=0;
+  let m:i32=base;
+  while(m<base+nm){
+    s=s+mg(A,m,6)*1000000+mg(A,m,2)*10000+mg(A,m,3)*100+mg(A,m,4)+mg(A,m,5);
+    m=m+1;
+  }
+  return s;
+}
+fn store_put(S:[]u8,kin:i32,kout:i32,sk:i32,root:i32) void {
+  let n:i32=sg(S,9440);
+  let i:i32=0;
+  while(i<n){
+    let ok:i32=0;
+    if(get32(S,9312+i*16)==kin){ ok=1; } else { ok=0; }
+    if(ok==1){
+      if(get32(S,9312+i*16+4)==kout){ ok=1; } else { ok=0; }
+    }
+    if(ok==1){
+      if(get32(S,9312+i*16+8)==sk){ ok=1; } else { ok=0; }
+    }
+    if(ok==1){ set32(S,9312+i*16+12,root); return; }
+    i=i+1;
+  }
+  if(n<8){
+    set32(S,9312+n*16,kin); set32(S,9312+n*16+4,kout);
+    set32(S,9312+n*16+8,sk); set32(S,9312+n*16+12,root);
+    sp(S,9440,n+1);
+  }
+  return;
+}
+fn store_get(S:[]u8,kin:i32,kout:i32,sk:i32) i32 {
+  let n:i32=sg(S,9440);
+  let i:i32=0;
+  while(i<n){
+    let ok:i32=1;
+    if(get32(S,9312+i*16)!=kin){ ok=0; }
+    if(get32(S,9312+i*16+4)!=kout){ ok=0; }
+    if(get32(S,9312+i*16+8)!=sk){ ok=0; }
+    if(ok==1){ return get32(S,9312+i*16+12); }
+    i=i+1;
+  }
+  return -1;
+}
+// rcopy: structural copy of DAG t, replacing oldC with newC.
+fn rcopy(S:[]u8,A:[]u8,t:i32,oldC:i32,newC:i32) i32 {
+  if(t==oldC){ return newC; }
+  let m:i32=tg(S,t,0);
+  if(m==-1){ return t; }
+  let i1:i32=rcopy(S,A,tg(S,t,1),oldC,newC);
+  if(mg(A,m,6)==1){ return app1(S,A,m,i1); }
+  let i2:i32=rcopy(S,A,tg(S,t,2),oldC,newC);
+  return app2(S,A,m,i1,i2);
+}
+// rebind: zero-search reuse of a stored composite on a new input.
+fn rebind(S:[]u8,A:[]u8,root:i32,news:i32,kin:i32) i32 {
+  let oldC:i32=sg(S,24);
+  let newC:i32=const_thunk(S,news,kin);
+  sp(S,24,newC);
+  return rcopy(S,A,root,oldC,newC);
+}
+// ---- inventory-change invalidation ----
+fn inv_do(S:[]u8,t:i32) void {
+  if(tg(S,t,6)==-999999){ return; }
+  // already recorded?
+  let nn:i32=sg(S,10468);
+  let i:i32=0;
+  let seen:i32=0;
+  while(i<nn){
+    if(get32(S,9444+i*4)==t){ seen=1; }
+    i=i+1;
+  }
+  if(seen==1){ return; }
+  tp(S,t,6,-999999);
+  set32(S,9444+nn*4,t);
+  sp(S,10468,nn+1);
+  let n:i32=sg(S,0);
+  let u:i32=0;
+  while(u<n){
+    if(tg(S,u,1)==t){ inv_do(S,u); }
+    else {
+      if(tg(S,u,2)==t){ inv_do(S,u); }
+    }
+    u=u+1;
+  }
+  return;
+}
+fn inv_notify(S:[]u8,chg:i32) void {
+  sp(S,10468,0);
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    let m:i32=tg(S,t,0);
+    if(m>=0){
+      if((chg&(1<<m))!=0){ inv_do(S,t); }
+    }
+    t=t+1;
+  }
+  return;
+}
+// inv_clean012: 1 iff no invalidated thunk has map-id 0 or 1.
+fn inv_clean01(S:[]u8) i32 {
+  let nn:i32=sg(S,10468);
+  let i:i32=0;
+  while(i<nn){
+    let t:i32=get32(S,9444+i*4);
+    let m:i32=tg(S,t,0);
+    if(m==0){ return 0; }
+    if(m==1){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+// ---- REVISE ----
+fn findpar(S:[]u8,u:i32,target:i32) i32 {
+  let m:i32=tg(S,u,0);
+  if(m<0){ return -1; }
+  let i1:i32=tg(S,u,1);
+  if(i1==target){ return u*4+1; }
+  let r:i32=findpar(S,i1,target);
+  if(r!=-1){ return r; }
+  let i2:i32=tg(S,u,2);
+  if(i2>=0){
+    if(i2==target){ return u*4+2; }
+    let r2:i32=findpar(S,i2,target);
+    if(r2!=-1){ return r2; }
+  }
+  return -1;
+}
+fn subst(S:[]u8,A:[]u8,u:i32,target:i32,alt:i32) i32 {
+  if(u==target){ return alt; }
+  let m:i32=tg(S,u,0);
+  if(m==-1){ return u; }
+  let i1:i32=subst(S,A,tg(S,u,1),target,alt);
+  if(mg(A,m,6)==1){ return app1(S,A,m,i1); }
+  let i2:i32=subst(S,A,tg(S,u,2),target,alt);
+  return app2(S,A,m,i1,i2);
+}
+// faulty origin: reachable -2 app-thunk of max size whose inputs
+// are all non--2. tried[] marks already-attempted positions.
+fn find_faulty(S:[]u8,root:i32,tried:[]u8) i32 {
+  let R:[]u8=z_alloc(256);
+  mark_reach(S,root,R);
+  let n:i32=sg(S,0);
+  let best:i32=-1;
+  let bestsz:i32=-1;
+  let t:i32=0;
+  while(t<n){
+    let cand:i32=0;
+    if((R[t] as i32)==1){ cand=1; } else { cand=0; }
+    if(cand==1){
+      if(tg(S,t,0)<0){ cand=0; }
+    }
+    if(cand==1){
+      if(tg(S,t,6)!=-2){ cand=0; }
+    }
+    if(cand==1){
+      if((tried[t] as i32)==1){ cand=0; }
+    }
+    if(cand==1){
+      let i1:i32=tg(S,t,1);
+      if(tg(S,i1,6)==-2){ cand=0; }
+      let i2:i32=tg(S,t,2);
+      if(cand==1 && i2>=0){
+        if(tg(S,i2,6)==-2){ cand=0; }
+      }
+    }
+    if(cand==1){
+      if(tg(S,t,5)>bestsz){ best=t; bestsz=tg(S,t,5); }
+    }
+    t=t+1;
+  }
+  return best;
+}
+fn revise(S:[]u8,A:[]u8,root:i32,base:i32,nm:i32,kout:i32,exp:i32,kin:i32) i32 {
+  let v:i32=demand(S,A,root);
+  if(v==exp){ return root; }
+  let tried:[]u8=z_alloc(256);
+  let done:i32=0;
+  let result:i32=-2;
+  while(done==0){
+    let best:i32=find_faulty(S,root,tried);
+    if(best<0){ done=1; }
+    else {
+      tried[best]=1 as u8;
+      let K:i32=kout;
+      if(best!=root){
+        let pos:i32=findpar(S,root,best);
+        let par:i32=pos/4;
+        let slot:i32=pos-(par*4);
+        let pm:i32=tg(S,par,0);
+        if(slot==1){
+          if(mg(A,pm,6)==1){ K=mg(A,pm,2); } else { K=mg(A,pm,4); }
+        } else {
+          K=mg(A,pm,5);
+        }
+      }
+      let fm:i32=tg(S,best,0);
+      let arf:i32=mg(A,fm,6);
+      let fi1:i32=tg(S,best,1);
+      let fi2:i32=tg(S,best,2);
+      let q:i32=base;
+      while(q<base+nm){
+        let okq:i32=0;
+        if(q!=fm){ okq=1; }
+        if(okq==1){
+          if(mg(A,q,6)!=arf){ okq=0; }
+        }
+        if(okq==1){
+          if(khas(mg(A,q,3),K)!=1){ okq=0; }
+        }
+        if(okq==1){
+          let alt:i32=-1;
+          if(arf==1){ alt=app1(S,A,q,fi1); } else { alt=app2(S,A,q,fi1,fi2); }
+          if(alt>=0){
+            let nr:i32=subst(S,A,root,best,alt);
+            let vv:i32=demand(S,A,nr);
+            if(vv==exp){
+              store_put(S,kin,kout,sketch(S,A,base,nm),nr);
+              result=nr;
+              done=1;
+              q=base+nm;
+            }
+          }
+        }
+        q=q+1;
+      }
+    }
+  }
+  if(result>=0){ return result; }
+  // fallback (predicted unused in frozen tests): full re-assembly.
+  return assemble(S,A,base,nm,tg(S,sg(S,24),3),kin,kout,exp);
+}
+// adv_worlds.zag -- COMPOSE-ADVERSARY sealed world builders.
+// Pure Zag. Transcription of PREREG.md Section 4 (frozen).
+// Uses the substrate API (map_new, fact_add) shared by all three
+// frozen mechanisms, so these functions are drop-in replacements
+// for the builders' w_* world functions at sealed-evaluation time.
+// map_new(A,m,class,rel,inmask,outmask,inmask1,inmask2,arity).
+// Classes: 0=WALK, 1=COUNT, 4=ADD2. Kinds 1/2 are opaque.
+
+// F-A1 CHAIN15: 15-link chain (A: frame explosion; B: depth; C: cold).
+fn w_adv_chain15(A:[]u8) void {
+  let i:i32=0;
+  while(i<15){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,15,1,76,1,2,0,0,1);
+  fact_add(A,516,76,801); fact_add(A,516,76,802);
+  fact_add(A,516,76,803); fact_add(A,516,76,804);
+  return;
+}
+// F-B1 CHAIN7: 7-link chain (B depth cap: 6 max).
+fn w_adv_chain7(A:[]u8) void {
+  let i:i32=0;
+  while(i<7){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,7,1,68,1,2,0,0,1);
+  fact_add(A,508,68,801); fact_add(A,508,68,802);
+  fact_add(A,508,68,803); fact_add(A,508,68,804);
+  return;
+}
+// F-B2 SUBCAP: correct = C1(W3(W2(s))); B's 128 sub-buffer fills
+// with W1-rooted chains, so the W3-rooted program is never built.
+fn w_adv_subcap(A:[]u8) void {
+  map_new(A,0,1,71,1,2,0,0,1);
+  map_new(A,1,1,72,1,2,0,0,1);
+  map_new(A,2,1,73,1,2,0,0,1);
+  map_new(A,3,1,74,1,2,0,0,1);
+  let i:i32=0;
+  while(i<11){
+    map_new(A,4+i,0,81+i,1,1,0,0,1);
+    i=i+1;
+  }
+  fact_add(A,501,82,601);
+  fact_add(A,601,83,602);
+  fact_add(A,602,71,701); fact_add(A,602,71,702);
+  fact_add(A,602,71,703); fact_add(A,602,71,704);
+  fact_add(A,501,81,699);
+  return;
+}
+// F-C1 TEACH: 2-chain [X,Y]; C stores it as E1.
+fn w_adv_teach(A:[]u8) void {
+  map_new(A,1,0,91,1,1,0,0,1);
+  map_new(A,2,1,92,1,2,0,0,1);
+  fact_add(A,201,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  return;
+}
+// F-C1 TRAP1: 16-map inventory; codes superset of TEACH -> sim 2.
+// Correct = [Z,X,Y]; retrieved [X,Y] misfires, R1-R4 cannot prepend.
+fn w_adv_trap1(A:[]u8) void {
+  map_new(A,0,0,90,1,1,0,0,1);
+  map_new(A,1,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<10){
+    map_new(A,2+i,0,93+i,1,1,0,0,1);
+    fact_add(A,201,93+i,700+i);
+    i=i+1;
+  }
+  map_new(A,12,1,92,1,2,0,0,1);
+  map_new(A,13,1,103,1,2,0,0,1);
+  map_new(A,14,1,104,1,2,0,0,1);
+  map_new(A,15,1,105,1,2,0,0,1);
+  fact_add(A,201,90,211);
+  fact_add(A,211,91,212);
+  fact_add(A,212,92,911); fact_add(A,212,92,912); fact_add(A,212,92,913);
+  fact_add(A,212,92,914); fact_add(A,212,92,915);
+  fact_add(A,201,103,921); fact_add(A,201,103,922);
+  fact_add(A,201,104,923); fact_add(A,201,104,924);
+  fact_add(A,201,105,925); fact_add(A,201,105,926);
+  return;
+}
+// D-C2 TRAP2: same inventory; correct = [W1,X,Y] (1-edit from
+// TRAP1's stored [Z,X,Y]; R1 SUBST_FAILED repairs it).
+fn w_adv_trap2(A:[]u8) void {
+  map_new(A,0,0,90,1,1,0,0,1);
+  map_new(A,1,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<10){
+    map_new(A,2+i,0,93+i,1,1,0,0,1);
+    i=i+1;
+  }
+  map_new(A,12,1,92,1,2,0,0,1);
+  map_new(A,13,1,103,1,2,0,0,1);
+  map_new(A,14,1,104,1,2,0,0,1);
+  map_new(A,15,1,105,1,2,0,0,1);
+  fact_add(A,201,93,213);
+  fact_add(A,213,91,212);
+  fact_add(A,212,92,911); fact_add(A,212,92,912); fact_add(A,212,92,913);
+  fact_add(A,212,92,914); fact_add(A,212,92,915);
+  return;
+}
+// D-C1 TEACH-D: diamond (stores E1 for transfer).
+fn w_adv_teachd(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  map_new(A,1,1,92,1,2,0,0,1);
+  map_new(A,2,1,94,1,2,0,0,1);
+  map_new(A,3,4,0,0,2,2,2,2);
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  fact_add(A,211,94,911); fact_add(A,211,94,912);
+  return;
+}
+// D-C1 T-FANIN: 2-leg fan-in; diamond memory transfers via
+// DROP_UNMAPPED (X unmapped -> legs rewired to CONST).
+fn w_adv_tfanin(A:[]u8) void {
+  map_new(A,0,1,71,1,2,0,0,1);
+  map_new(A,1,1,72,1,2,0,0,1);
+  map_new(A,2,4,0,0,2,2,2,2);
+  fact_add(A,401,71,701); fact_add(A,401,71,702); fact_add(A,401,71,703);
+  fact_add(A,401,72,704); fact_add(A,401,72,705);
+  return;
+}
+// D-C1 T-CHAIN: 2-chain; diamond memory transfers via
+// DROP_UNMAPPED (G unmapped -> dropped; last instr Wp wins).
+fn w_adv_tchain(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  map_new(A,1,1,92,1,2,0,0,1);
+  map_new(A,2,1,94,1,2,0,0,1);
+  fact_add(A,301,91,311);
+  fact_add(A,311,92,801); fact_add(A,311,92,802);
+  fact_add(A,311,92,803); fact_add(A,311,92,804);
+  fact_add(A,311,94,811); fact_add(A,311,94,812); fact_add(A,311,94,813);
+  return;
+}
+// D-B1 / S-ALL1 CYCLE: one WALK on a cyclic relation.
+fn w_adv_cycle(A:[]u8) void {
+  map_new(A,0,0,61,1,1,0,0,1);
+  fact_add(A,501,61,502);
+  fact_add(A,502,61,503);
+  fact_add(A,503,61,502);
+  return;
+}
+// X-CHAIN5: 5-link chain, fresh relations.
+fn w_adv_chain5(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,5,1,66,1,2,0,0,1);
+  let k:i32=0;
+  while(k<6){
+    fact_add(A,506,66,801+k);
+    k=k+1;
+  }
+  return;
+}
+// X-FANOUT5: X -> 5 COUNT consumers -> 4-ADD2 join tree.
+fn w_adv_fanout5(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<5){
+    map_new(A,1+i,1,92+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,6+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902);
+  fact_add(A,211,93,903);
+  fact_add(A,211,94,904); fact_add(A,211,94,905); fact_add(A,211,94,906);
+  fact_add(A,211,95,907); fact_add(A,211,95,908);
+  fact_add(A,211,96,909); fact_add(A,211,96,910);
+  return;
+}
+// X-FANIN5: 5 WALK->COUNT legs -> 4-ADD2 join tree.
+fn w_adv_fanin5(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    map_new(A,5+i,1,71+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,10+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,401,61,501); fact_add(A,501,71,701); fact_add(A,501,71,702);
+  fact_add(A,401,62,502); fact_add(A,502,72,703); fact_add(A,502,72,704);
+  fact_add(A,502,72,705);
+  fact_add(A,401,63,503); fact_add(A,503,73,706);
+  fact_add(A,401,64,504); fact_add(A,504,74,707); fact_add(A,504,74,708);
+  fact_add(A,504,74,709); fact_add(A,504,74,710);
+  fact_add(A,401,65,505); fact_add(A,505,75,711); fact_add(A,505,75,712);
+  return;
+}
+// X-DAG10: 2-chain -> shared X -> two diamonds -> ADD2 join.
+fn w_adv_dag10(A:[]u8) void {
+  map_new(A,0,0,60,1,1,0,0,1);
+  map_new(A,1,0,61,1,1,0,0,1);
+  map_new(A,2,0,62,1,1,0,0,1);
+  map_new(A,3,1,71,1,2,0,0,1);
+  map_new(A,4,1,72,1,2,0,0,1);
+  map_new(A,5,4,0,0,2,2,2,2);
+  map_new(A,6,1,73,1,2,0,0,1);
+  map_new(A,7,1,74,1,2,0,0,1);
+  map_new(A,8,4,0,0,2,2,2,2);
+  map_new(A,9,4,0,0,2,2,2,2);
+  fact_add(A,301,60,302); fact_add(A,302,61,303); fact_add(A,303,62,310);
+  fact_add(A,310,71,711); fact_add(A,310,71,712);
+  fact_add(A,310,72,713); fact_add(A,310,72,714); fact_add(A,310,72,715);
+  fact_add(A,310,73,716);
+  fact_add(A,310,74,717); fact_add(A,310,74,718);
+  fact_add(A,310,74,719); fact_add(A,310,74,720);
+  return;
+}
+// X-PARTIAL: 5-leg fan-in; legs 4,5 factless (partial applicability).
+fn w_adv_partial(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    map_new(A,5+i,1,71+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,10+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,401,61,501); fact_add(A,501,71,701); fact_add(A,501,71,702);
+  fact_add(A,401,62,502); fact_add(A,502,72,703); fact_add(A,502,72,704);
+  fact_add(A,502,72,705);
+  fact_add(A,401,63,503); fact_add(A,503,73,706); fact_add(A,503,73,707);
+  fact_add(A,503,73,708); fact_add(A,503,73,709); fact_add(A,503,73,710);
+  return;
+}
+// probe_main_a.zag -- dump B's thunk table after CHAIN5 solve.
+// Concat: sus_base sus_thunk sus_asm sus_rev adv_worlds probe_main_a.
+// B sources are UNMODIFIED copies. Pure Zag.
+fn findmap(S:[]u8,A:[]u8,n:i32,wantm:i32,wanti1:i32) i32 {
+  let t:i32=0;
+  while(t<n){
+    let ok:i32=0;
+    if(tg(S,t,0)==wantm){ ok=1; }
+    if(ok==1){
+      if(tg(S,t,1)!=wanti1){ ok=0; }
+    }
+    if(ok==1){ return t; }
+    t=t+1;
+  }
+  return -1;
+}
+fn main() i32 {
+  let B:[]u8=z_alloc(65536);
+  let c:i32=0;
+  let A:[]u8=z_alloc(8192);
+  let S:[]u8=z_alloc(16384);
+  w_adv_chain5(A);
+  let r:i32=solve(S,A,0,6,501,1,2,6);
+  c=o_app(B,c,"SOLVE_R="); c=o_i64(B,c,r as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NTHUNK="); c=o_i64(B,c,sg(S,0) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"ASMSTEPS="); c=o_i64(B,c,sg(S,4) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"WIDEN="); c=o_i64(B,c,sg(S,12) as i64); c=o_nl(B,c);
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  let nconst:i32=0;
+  let nwalk:i32=0;
+  let ncount:i32=0;
+  let ncountroot:i32=0;
+  let nadd2:i32=0;
+  let tidC:i32=-1;
+  while(t<n){
+    let m:i32=tg(S,t,0);
+    if(m==-1){
+      nconst=nconst+1;
+      tidC=t;
+    } else {
+      let cl:i32=mg(A,m,0);
+      if(cl==0){ nwalk=nwalk+1; }
+      if(cl==1){
+        ncount=ncount+1;
+        if(tg(S,t,1)!=tidC){ ncountroot=ncountroot+1; }
+      }
+      if(cl==4){ nadd2=nadd2+1; }
+    }
+    t=t+1;
+  }
+  c=o_app(B,c,"TIDC="); c=o_i64(B,c,tidC as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NCONST="); c=o_i64(B,c,nconst as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NWALK_THUNKS="); c=o_i64(B,c,nwalk as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NCOUNT_THUNKS="); c=o_i64(B,c,ncount as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NCOUNT_NONTRIVIAL="); c=o_i64(B,c,ncountroot as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NADD2_THUNKS="); c=o_i64(B,c,nadd2 as i64); c=o_nl(B,c);
+  // true W-chain: map4(map3(map2(map1(map0(C)))))
+  let t0:i32=findmap(S,A,n,0,tidC);
+  let t1:i32=-1;
+  let t2:i32=-1;
+  let t3:i32=-1;
+  let t4:i32=-1;
+  if(t0>=0){ t1=findmap(S,A,n,1,t0); }
+  if(t1>=0){ t2=findmap(S,A,n,2,t1); }
+  if(t2>=0){ t3=findmap(S,A,n,3,t2); }
+  if(t3>=0){ t4=findmap(S,A,n,4,t3); }
+  c=o_app(B,c,"TRUE_WCHAIN_TID="); c=o_i64(B,c,t4 as i64); c=o_nl(B,c);
+  let cr:i32=-1;
+  if(t4>=0){ cr=findmap(S,A,n,5,t4); }
+  c=o_app(B,c,"TRUE_COUNTROOT_TID="); c=o_i64(B,c,cr as i64); c=o_nl(B,c);
+  // first 8 and last 4 thunks: (map,in1) to show fill order
+  c=o_app(B,c,"FIRST8="); c=o_nl(B,c);
+  t=0;
+  while(t<8){
+    c=o_app(B,c,"t"); c=o_i64(B,c,t as i64); c=o_app(B,c," m=");
+    c=o_i64(B,c,tg(S,t,0) as i64); c=o_app(B,c," i1=");
+    c=o_i64(B,c,tg(S,t,1) as i64); c=o_nl(B,c);
+    t=t+1;
+  }
+  c=o_app(B,c,"LAST4="); c=o_nl(B,c);
+  t=n-4;
+  while(t<n){
+    c=o_app(B,c,"t"); c=o_i64(B,c,t as i64); c=o_app(B,c," m=");
+    c=o_i64(B,c,tg(S,t,0) as i64); c=o_app(B,c," i1=");
+    c=o_i64(B,c,tg(S,t,1) as i64); c=o_nl(B,c);
+    t=t+1;
+  }
+  o_flush(B,c);
+  return 0;
+}

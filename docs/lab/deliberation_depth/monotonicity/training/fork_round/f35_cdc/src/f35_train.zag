@@ -1,0 +1,615 @@
+// f35_train.zag — F35 CDC training driver (pure Zag, zero RNG).
+//
+// usage: f35_train <features.tsv> <params.out> <cluster_log.out> <train_stats.out>
+//
+// Streams features.tsv (frozen, SHA-256 4682190cfd504cb692df122a6b054d8fad65
+// ef860707e6a92abfdf04e65a897d), learns prototypes/tau/per-cluster residual
+// state from heldout=0 cells only, and writes frozen params. Heldout rows
+// are skipped entirely (never touch learned state).
+//
+// Outputs:
+//   params.out      frozen params (prototypes, rho counts, transition sums)
+//   cluster_log.out id, family, final-cluster for each training released cell
+//   train_stats.out per-256-block churn stats + tau history
+//
+// Exit codes: 0 ok; 64 usage; 7x IO/alloc; 8x data-order violations.
+
+@import("f35_common.zag")
+
+fn dout_init_dummy()DOut {
+    let d:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    return d;
+}
+
+// insertion sort of n i64 slots ascending (n <= 256).
+fn f35_isort(a:[]u8,n:i32)void {
+    let i:i32=1;
+    while(i<n){
+        let v:i64=au_get64(a,(i as i64));
+        let j:i32=i-1;
+        let go:i32=1;
+        while(j>=0 && go==1){
+            if(au_get64(a,(j as i64))>v){
+                au_put64(a,((j+1) as i64),au_get64(a,(j as i64)));
+                j=j-1;
+            }
+            else {go=0;}
+        }
+        au_put64(a,((j+1) as i64),v);
+        i=i+1;
+    }
+}
+
+// one running-mean coordinate step; adds |step| to *mv (L1 movement).
+fn f35_coord_step(proto:[]u8,c:i32,k:i32,xk:i64,n:i64,mv:*i64)void {
+    let p:i64=au_get64(proto,((c*5+k) as i64));
+    let step:i64=f35_tdiv(xk-p,n);
+    au_put64(proto,((c*5+k) as i64),p+step);
+    mv.*=mv.*+f35_abs(step);
+}
+
+fn f35_proto_update(proto:[]u8,nproto:[]u8,c:i32,x0:i64,x1:i64,x2:i64,x3:i64,x4:i64,mv:*i64)void {
+    let n:i64=au_get64(nproto,(c as i64))+1;
+    au_put64(nproto,(c as i64),n);
+    f35_coord_step(proto,c,0,x0,n,mv);
+    f35_coord_step(proto,c,1,x1,n,mv);
+    f35_coord_step(proto,c,2,x2,n,mv);
+    f35_coord_step(proto,c,3,x3,n,mv);
+    f35_coord_step(proto,c,4,x4,n,mv);
+}
+
+// merge cluster j into i (i<j); cluster state (rho counts, transition
+// sums) merges along; compacts slot K-1 into j; remaps *c_cur; returns K-1.
+fn f35_merge(proto:[]u8,nproto:[]u8,kc:[]u8,nc:[]u8,tr:[]u8,K:i32,i:i32,j:i32,c_cur:*i32)i32 {
+    let ni:i64=au_get64(nproto,(i as i64));
+    let nj:i64=au_get64(nproto,(j as i64));
+    let nn:i64=ni+nj;
+    let k:i32=0;
+    while(k<5){
+        let pi:i64=au_get64(proto,((i*5+k) as i64));
+        let pj:i64=au_get64(proto,((j*5+k) as i64));
+        au_put64(proto,((i*5+k) as i64),f35_tdiv(ni*pi+nj*pj,nn));
+        k=k+1;
+    }
+    au_put64(nproto,(i as i64),nn);
+    au_put64(kc,(i as i64),au_get64(kc,(i as i64))+au_get64(kc,(j as i64)));
+    au_put64(nc,(i as i64),au_get64(nc,(i as i64))+au_get64(nc,(j as i64)));
+    let jj:i32=0;
+    while(jj<6){
+        let s:i32=0;
+        while(s<6){
+            let bi:i64=((((i*6+jj)*6)+s) as i64);
+            let bj:i64=((((j*6+jj)*6)+s) as i64);
+            au_put64(tr,bi,au_get64(tr,bi)+au_get64(tr,bj));
+            s=s+1;
+        }
+        jj=jj+1;
+    }
+    let last:i32=K-1;
+    let cc:i32=c_cur.*;
+    if(cc==j){c_cur.*=i;}
+    else {
+        if(last!=j){
+            if(cc==last){c_cur.*=j;}
+        }
+    }
+    if(last!=j){
+        let k2:i32=0;
+        while(k2<5){
+            au_put64(proto,((j*5+k2) as i64),au_get64(proto,((last*5+k2) as i64)));
+            k2=k2+1;
+        }
+        au_put64(nproto,(j as i64),au_get64(nproto,(last as i64)));
+        au_put64(kc,(j as i64),au_get64(kc,(last as i64)));
+        au_put64(nc,(j as i64),au_get64(nc,(last as i64)));
+        let jj2:i32=0;
+        while(jj2<6){
+            let s2:i32=0;
+            while(s2<6){
+                au_put64(tr,((((j*6+jj2)*6)+s2) as i64),au_get64(tr,((((last*6+jj2)*6)+s2) as i64)));
+                s2=s2+1;
+            }
+            jj2=jj2+1;
+        }
+    }
+    return K-1;
+}
+
+// full merge pass: repeated ascending (i,j) scans; each merge restarts the
+// scan. merges_out counts merges. Returns new K.
+fn f35_merge_pass(proto:[]u8,nproto:[]u8,kc:[]u8,nc:[]u8,tr:[]u8,K:i32,tau:i64,c_cur:*i32,merges_out:*i64)i32 {
+    let thr:i64=f35_tdiv(tau,3);
+    let kk:i32=K;
+    let changed:i32=1;
+    while(changed==1){
+        changed=0;
+        let i:i32=0;
+        let done:i32=0;
+        while(i<kk && done==0){
+            let j:i32=i+1;
+            while(j<kk && done==0){
+                let d:i64=f35_l1(proto,i,
+                    au_get64(proto,((j*5+0) as i64)),
+                    au_get64(proto,((j*5+1) as i64)),
+                    au_get64(proto,((j*5+2) as i64)),
+                    au_get64(proto,((j*5+3) as i64)),
+                    au_get64(proto,((j*5+4) as i64)));
+                if(d<thr){
+                    kk=f35_merge(proto,nproto,kc,nc,tr,kk,i,j,c_cur);
+                    merges_out.*=merges_out.*+1;
+                    changed=1;
+                    done=1;
+                }
+                j=j+1;
+            }
+            i=i+1;
+        }
+    }
+    return kk;
+}
+
+fn main()i32 {
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    let a4:[]u8=_zag_arg(4);
+    if(a1.len==0){_zag_println("usage: f35_train <features.tsv> <params.out> <cluster_log.out> <train_stats.out>");return 64;}
+    if(a2.len==0){_zag_println("usage: f35_train <features.tsv> <params.out> <cluster_log.out> <train_stats.out>");return 64;}
+    if(a3.len==0){_zag_println("usage: f35_train <features.tsv> <params.out> <cluster_log.out> <train_stats.out>");return 64;}
+    if(a4.len==0){_zag_println("usage: f35_train <features.tsv> <params.out> <cluster_log.out> <train_stats.out>");return 64;}
+
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 71;}
+    let fnr:i64=dlb_read_file(a1,fbuf);
+    if(fnr<0){_zag_println("read features failed");return 72;}
+    let fbytes:i32=fnr as i32;
+
+    // input identity to stdout (run script verifies against frozen SHA)
+    let hout:[]u8=nio_alloc(32);
+    if(hout.len==32){
+        if(ns_sha256(fbuf[0..fbytes],hout)==0){
+            let hhex:[]u8=ns_hex(hout);
+            _zag_println(hhex);
+            nio_free(hhex);
+        }
+    }
+    nio_free(hout);
+
+    // ---- arenas ----
+    let proto:[]u8=nio_alloc(64*5*8);
+    let nproto:[]u8=nio_alloc(64*8);
+    let kc:[]u8=nio_alloc(64*8);
+    let nc:[]u8=nio_alloc(64*8);
+    let tr:[]u8=nio_alloc(64*6*6*8);
+    let dists:[]u8=nio_alloc(8192*8);
+    let stmp:[]u8=nio_alloc(256*8);
+    let idlen:[]u8=nio_alloc(2048*8);
+    let idbuf:[]u8=nio_alloc(2048*64);
+    let c_depth:[]u8=nio_alloc(2048*8);
+    let c_rel:[]u8=nio_alloc(2048*8);
+    let c_clu:[]u8=nio_alloc(2048*8);
+    let c_C:[]u8=nio_alloc(2048*8);
+    let c_cor:[]u8=nio_alloc(2048*8);
+    let r_depth:[]u8=nio_alloc(2048*8);
+    let r_clu:[]u8=nio_alloc(2048*8);
+    let r_C:[]u8=nio_alloc(2048*8);
+    let r_cor:[]u8=nio_alloc(2048*8);
+    let r_f5:[]u8=nio_alloc(2048*8);
+    let r_my:[]u8=nio_alloc(2048*8);
+    let r_f8d1:[]u8=nio_alloc(2048*8);
+    let r_Cstar:[]u8=nio_alloc(2048*8);
+    if(idbuf.len==0){return 71;}
+
+    let K:i32=0;
+    let tau:i64=0;
+    let tau_set:i32=0;
+    let n_rel:i64=0;
+    let dist_count:i64=0;
+    let cap_bound:i32=0;
+    let nitems:i32=0;
+    let tot_births:i64=0;
+    let tot_merges:i64=0;
+
+    // block stats
+    let st:DOut=dout_init_dummy();
+    if(dout_init(&st,65536)!=0){return 73;}
+    dout_str(&st,"block\tn_items\ttau_end\tmax_move\tbirths\tmerges\n");
+    let blk:i64=-1;
+    let blk_move:i64=0;
+    let blk_births:i64=0;
+    let blk_merges:i64=0;
+
+    // ---- main training pass ----
+    let pos:i32=0;
+    let rc:i32=0;
+    while(pos<fbytes){
+        if(rc!=0){pos=fbytes;}
+        else {
+        let e:i32=pos;
+        while(e<fbytes && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        pos=e+1;
+        if(line.len>0){
+            let id:[]u8=f35_field(line,0);
+            let h:[]u8=f35_field(line,2);
+            let held:i32=0;
+            if(h.len>0 && h[0]==49){held=1;}
+            if(held==0){
+                let depth:i64=f35_atoi64(f35_field(line,3));
+                let didx:i32=f35_didx(depth);
+                if(didx<0){rc=81;}
+                else {
+                let rf:[]u8=f35_field(line,5);
+                let rel:i32=0;
+                if(rf.len>0 && rf[0]==49){rel=1;}
+                let cf:[]u8=f35_field(line,6);
+                let correct:i64=-1;
+                if(cf.len>0 && cf[0]==48){correct=0;}
+                if(cf.len>0 && cf[0]==49){correct=1;}
+                if(rel==1 && correct<0){rc=82;}
+                if(rel==0 && correct>=0){rc=83;}
+                if(rc==0){
+                let f1:i64=f35_atoi64(f35_field(line,7));
+                let f3:i64=f35_atoi64(f35_field(line,9));
+                let f5:i64=f35_atoi64(f35_field(line,11));
+                let f6:i64=f35_atoi64(f35_field(line,12));
+                let f8:i64=f35_atoi64(f35_field(line,14));
+                let si:i32=f35_slot_find(id,idlen,idbuf,nitems);
+                if(si<0){
+                    if(nitems>=2048){rc=84;}
+                    else {
+                        si=f35_slot_new(id,idlen,idbuf,nitems);
+                        nitems=nitems+1;
+                    }
+                }
+                if(rc==0){
+                let sis:i64=si as i64;
+                let pd:i64=au_get64(c_depth,sis);
+                if(depth==1){
+                    if(pd!=0){rc=85;}
+                }
+                else {
+                    if(pd!=depth/2){rc=86;}
+                }
+                if(rc==0){
+                if(rel==1){
+                    // ---- released training cell ----
+                    let has_prev:i32=0;
+                    let d_prev:i64=0;
+                    let f5_prev:i64=0;
+                    if(au_get64(r_depth,sis)>0){
+                        has_prev=1;
+                        d_prev=au_get64(r_depth,sis);
+                        f5_prev=au_get64(r_f5,sis);
+                    }
+                    let my:i64=f35_my(depth,f5,has_prev,d_prev,f5_prev);
+                    let x0:i64=f1;
+                    let x1:i64=f5;
+                    let x2:i64=f6;
+                    let x3:i64=f8;
+                    if(x3>1000){x3=1000;}
+                    let x4:i64=my;
+                    // §5 discovery
+                    let c:i32=0;
+                    let dist:i64=0;
+                    let born:i32=0;
+                    if(K==0){
+                        au_put64(proto,0,x0);
+                        au_put64(proto,1,x1);
+                        au_put64(proto,2,x2);
+                        au_put64(proto,3,x3);
+                        au_put64(proto,4,x4);
+                        au_put64(nproto,0,1);
+                        K=1;
+                        born=1;
+                    }
+                    else {
+                        c=f35_assign(proto,K,x0,x1,x2,x3,x4,&dist);
+                        if(tau_set==1 && dist>tau){
+                            if(K<8){
+                                let kk:i64=K as i64;
+                                au_put64(proto,kk*5+0,x0);
+                                au_put64(proto,kk*5+1,x1);
+                                au_put64(proto,kk*5+2,x2);
+                                au_put64(proto,kk*5+3,x3);
+                                au_put64(proto,kk*5+4,x4);
+                                au_put64(nproto,kk,1);
+                                c=K;
+                                K=K+1;
+                                born=1;
+                            }
+                            else {cap_bound=1;}
+                        }
+                        let mv:i64=0;
+                        f35_proto_update(proto,nproto,c,x0,x1,x2,x3,x4,&mv);
+                        if(mv>blk_move){blk_move=mv;}
+                        if(tau_set==1){
+                            let mg:i64=0;
+                            K=f35_merge_pass(proto,nproto,kc,nc,tr,K,tau,&c,&mg);
+                            blk_merges=blk_merges+mg;
+                            tot_merges=tot_merges+mg;
+                        }
+                    }
+                    if(born==1){
+                        blk_births=blk_births+1;
+                        tot_births=tot_births+1;
+                    }
+                    // Record distance for ASSIGNED cells only (a birth cell has no
+                    // nearest-prototype distance; fabricating 0 would drag tau
+                    // down). Then tau bookkeeping.
+                    if(born==0){
+                        au_put64(dists,dist_count,dist);
+                        dist_count=dist_count+1;
+                    }
+                    n_rel=n_rel+1;
+                    if(n_rel==32 && tau_set==0){
+                        // 75th percentile of assigned distances so far.
+                        let dc:i32=dist_count as i32;
+                        let q:i32=0;
+                        while(q<dc){
+                            au_put64(stmp,(q as i64),au_get64(dists,(q as i64)));
+                            q=q+1;
+                        }
+                        f35_isort(stmp,dc);
+                        let ti75:i64=((dist_count-1)*3)/4;
+                        tau=au_get64(stmp,ti75);
+                        tau_set=1;
+                    }
+                    else {
+                        if(n_rel%256==0){
+                            let w:i64=256;
+                            if(dist_count<256){w=dist_count;}
+                            let wc:i32=w as i32;
+                            let q2:i32=0;
+                            while(q2<wc){
+                                au_put64(stmp,(q2 as i64),au_get64(dists,dist_count-w+(q2 as i64)));
+                                q2=q2+1;
+                            }
+                            f35_isort(stmp,wc);
+                            let tmed:i64=(w-1)/2;
+                            tau=2*au_get64(stmp,tmed);
+                            tau_set=1;
+                        }
+                    }
+                    // block stats
+                    let b:i64=(n_rel-1)/256;
+                    if(b!=blk){
+                        if(blk>=0){
+                            dout_i64(&st,blk);dout_str(&st,"\t");
+                            dout_i64(&st,256);dout_str(&st,"\t");
+                            dout_i64(&st,tau);dout_str(&st,"\t");
+                            dout_i64(&st,blk_move);dout_str(&st,"\t");
+                            dout_i64(&st,blk_births);dout_str(&st,"\t");
+                            dout_i64(&st,blk_merges);dout_line(&st);
+                        }
+                        blk=b;blk_move=0;blk_births=0;blk_merges=0;
+                    }
+                    // ---- emit (RSW order: emit -> observe -> update) ----
+                    let Cstar:i64=0;
+                    let f8d1:i64=0;
+                    if(depth==1){
+                        Cstar=f35_rho(au_get64(kc,(c as i64)),au_get64(nc,(c as i64)));
+                        f8d1=f8;
+                    }
+                    else {
+                        Cstar=au_get64(r_Cstar,sis);
+                        f8d1=au_get64(r_f8d1,sis);
+                    }
+                    let hp2:i32=0;
+                    if(au_get64(r_depth,sis)>0){hp2=1;}
+                    let C:i64=f35_emit(Cstar,c,didx,tr,f3,f8,f8d1,hp2,
+                        au_get64(r_clu,sis) as i32,au_get64(r_C,sis),my,au_get64(r_my,sis));
+                    // ---- updates ----
+                    if(depth==1){
+                        au_put64(kc,(c as i64),au_get64(kc,(c as i64))+correct);
+                        au_put64(nc,(c as i64),au_get64(nc,(c as i64))+1);
+                    }
+                    else {
+                        let jj:i32=didx-1;
+                        if(au_get64(c_rel,sis)==1){
+                            let c2:i32=au_get64(c_clu,sis) as i32;
+                            let Cp:i64=au_get64(c_C,sis);
+                            let kp:i64=au_get64(c_cor,sis);
+                            let tb:i64=((((c2*6+jj)*6)) as i64);
+                            au_put64(tr,tb+2,au_get64(tr,tb+2)+1);
+                            au_put64(tr,tb+3,au_get64(tr,tb+3)+Cp);
+                            au_put64(tr,tb+4,au_get64(tr,tb+4)+kp);
+                            au_put64(tr,tb+0,au_get64(tr,tb+0)+1);
+                            au_put64(tr,tb+1,au_get64(tr,tb+1)+Cp);
+                            au_put64(tr,tb+5,au_get64(tr,tb+5)+kp);
+                        }
+                    }
+                    au_put64(c_depth,sis,depth);
+                    au_put64(c_rel,sis,1);
+                    au_put64(c_clu,sis,(c as i64));
+                    au_put64(c_C,sis,C);
+                    au_put64(c_cor,sis,correct);
+                    au_put64(r_depth,sis,depth);
+                    au_put64(r_clu,sis,(c as i64));
+                    au_put64(r_C,sis,C);
+                    au_put64(r_cor,sis,correct);
+                    au_put64(r_f5,sis,f5);
+                    au_put64(r_my,sis,my);
+                    if(depth==1){
+                        au_put64(r_f8d1,sis,f8);
+                        au_put64(r_Cstar,sis,Cstar);
+                    }
+                }
+                else {
+                    // ---- non-released training cell: transition nall only ----
+                    if(depth>1){
+                        let jj2:i32=didx-1;
+                        if(au_get64(c_rel,sis)==1){
+                            let c3:i32=au_get64(c_clu,sis) as i32;
+                            let Cp2:i64=au_get64(c_C,sis);
+                            let kp2:i64=au_get64(c_cor,sis);
+                            let tb2:i64=((((c3*6+jj2)*6)) as i64);
+                            au_put64(tr,tb2+2,au_get64(tr,tb2+2)+1);
+                            au_put64(tr,tb2+3,au_get64(tr,tb2+3)+Cp2);
+                            au_put64(tr,tb2+4,au_get64(tr,tb2+4)+kp2);
+                        }
+                    }
+                    au_put64(c_depth,sis,depth);
+                    au_put64(c_rel,sis,0);
+                    au_put64(c_clu,sis,-1);
+                    au_put64(c_C,sis,0);
+                    au_put64(c_cor,sis,-1);
+                }
+                }
+                }
+                }
+                }
+            }
+        }
+        }
+    }
+
+    if(rc!=0){return rc;}
+
+    // flush final block
+    dout_i64(&st,blk);dout_str(&st,"\t");
+    dout_i64(&st,n_rel-blk*256);dout_str(&st,"\t");
+    dout_i64(&st,tau);dout_str(&st,"\t");
+    dout_i64(&st,blk_move);dout_str(&st,"\t");
+    dout_i64(&st,blk_births);dout_str(&st,"\t");
+    dout_i64(&st,blk_merges);dout_line(&st);
+    if(dlb_write_file(a4,dout_bytes(&st),dout_bytes(&st).len as i32)<0){return 74;}
+    dout_free(&st);
+
+    // ---- params ----
+    let pm:DOut=dout_init_dummy();
+    if(dout_init(&pm,262144)!=0){return 73;}
+    dout_str(&pm,"F35CDC-PARAMS-v1\n");
+    dout_str(&pm,"K\t");dout_i64(&pm,(K as i64));dout_line(&pm);
+    dout_str(&pm,"TEST_KMAX\t8\n");
+    dout_str(&pm,"cap_bound\t");dout_i64(&pm,(cap_bound as i64));dout_line(&pm);
+    dout_str(&pm,"n_train_released\t");dout_i64(&pm,n_rel);dout_line(&pm);
+    dout_str(&pm,"tau_final\t");dout_i64(&pm,tau);dout_line(&pm);
+    dout_str(&pm,"PROTOTYPES\n");
+    let pi2:i32=0;
+    while(pi2<K){
+        dout_i64(&pm,(pi2 as i64));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(nproto,(pi2 as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(proto,((pi2*5+0) as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(proto,((pi2*5+1) as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(proto,((pi2*5+2) as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(proto,((pi2*5+3) as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(proto,((pi2*5+4) as i64)));dout_line(&pm);
+        pi2=pi2+1;
+    }
+    dout_str(&pm,"RHO\n");
+    let ri:i32=0;
+    while(ri<K){
+        dout_i64(&pm,(ri as i64));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(kc,(ri as i64)));dout_str(&pm,"\t");
+        dout_i64(&pm,au_get64(nc,(ri as i64)));dout_line(&pm);
+        ri=ri+1;
+    }
+    dout_str(&pm,"TRANSITIONS\n");
+    let ti:i32=0;
+    while(ti<K){
+        let tj:i32=0;
+        while(tj<6){
+            let tb3:i64=((((ti*6+tj)*6)) as i64);
+            dout_i64(&pm,(ti as i64));dout_str(&pm,"\t");
+            dout_i64(&pm,(tj as i64));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+0));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+1));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+2));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+3));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+4));dout_str(&pm,"\t");
+            dout_i64(&pm,au_get64(tr,tb3+5));dout_line(&pm);
+            tj=tj+1;
+        }
+        ti=ti+1;
+    }
+    if(dlb_write_file(a2,dout_bytes(&pm),dout_bytes(&pm).len as i32)<0){return 75;}
+    dout_free(&pm);
+
+    // ---- reassignment pass: final clusters for training released cells ----
+    let idlen2:[]u8=nio_alloc(2048*8);
+    let idbuf2:[]u8=nio_alloc(2048*64);
+    let r2_depth:[]u8=nio_alloc(2048*8);
+    let r2_f5:[]u8=nio_alloc(2048*8);
+    if(idbuf2.len==0){return 71;}
+    let nitems2:i32=0;
+    let cl:DOut=dout_init_dummy();
+    if(dout_init(&cl,1048576)!=0){return 73;}
+    let pos2:i32=0;
+    let rc2:i32=0;
+    while(pos2<fbytes){
+        if(rc2!=0){pos2=fbytes;}
+        else {
+        let e2:i32=pos2;
+        while(e2<fbytes && fbuf[e2]!=10){e2=e2+1;}
+        let line2:[]u8=fbuf[pos2..e2];
+        pos2=e2+1;
+        if(line2.len>0){
+            let h2:[]u8=f35_field(line2,2);
+            let held2:i32=0;
+            if(h2.len>0 && h2[0]==49){held2=1;}
+            if(held2==0){
+                let rf2:[]u8=f35_field(line2,5);
+                let rel2:i32=0;
+                if(rf2.len>0 && rf2[0]==49){rel2=1;}
+                if(rel2==1){
+                    let id2:[]u8=f35_field(line2,0);
+                    let fam2:[]u8=f35_field(line2,1);
+                    let depth2:i64=f35_atoi64(f35_field(line2,3));
+                    let f12:i64=f35_atoi64(f35_field(line2,7));
+                    let f52:i64=f35_atoi64(f35_field(line2,11));
+                    let f62:i64=f35_atoi64(f35_field(line2,12));
+                    let f82:i64=f35_atoi64(f35_field(line2,14));
+                    let si2:i32=f35_slot_find(id2,idlen2,idbuf2,nitems2);
+                    if(si2<0){
+                        if(nitems2>=2048){rc2=84;}
+                        else {
+                            si2=f35_slot_new(id2,idlen2,idbuf2,nitems2);
+                            nitems2=nitems2+1;
+                        }
+                    }
+                    if(rc2==0){
+                    let s2s:i64=si2 as i64;
+                    let hp3:i32=0;
+                    let dp3:i64=0;
+                    let fp3:i64=0;
+                    if(au_get64(r2_depth,s2s)>0){
+                        hp3=1;
+                        dp3=au_get64(r2_depth,s2s);
+                        fp3=au_get64(r2_f5,s2s);
+                    }
+                    let my2:i64=f35_my(depth2,f52,hp3,dp3,fp3);
+                    let y3:i64=f82;
+                    if(y3>1000){y3=1000;}
+                    let dd2:i64=0;
+                    let cc2:i32=f35_assign(proto,K,f12,f52,f62,y3,my2,&dd2);
+                    dout_str(&cl,id2);dout_str(&cl,"\t");
+                    dout_str(&cl,fam2);dout_str(&cl,"\t");
+                    dout_i64(&cl,(cc2 as i64));dout_line(&cl);
+                    au_put64(r2_depth,s2s,depth2);
+                    au_put64(r2_f5,s2s,f52);
+                    }
+                }
+            }
+        }
+        }
+    }
+    if(rc2!=0){return rc2;}
+    if(dlb_write_file(a3,dout_bytes(&cl),dout_bytes(&cl).len as i32)<0){return 76;}
+    dout_free(&cl);
+
+    // summary to stdout
+    let sm:DOut=dout_init_dummy();
+    if(dout_init(&sm,1024)==0){
+        dout_str(&sm,"K=");dout_i64(&sm,(K as i64));
+        dout_str(&sm," tau_final=");dout_i64(&sm,tau);
+        dout_str(&sm," n_train_released=");dout_i64(&sm,n_rel);
+        dout_str(&sm," cap_bound=");dout_i64(&sm,(cap_bound as i64));
+        dout_str(&sm," births=");dout_i64(&sm,tot_births);
+        dout_str(&sm," merges=");dout_i64(&sm,tot_merges);
+        dout_line(&sm);
+        _zag_println(dout_bytes(&sm));
+        dout_free(&sm);
+    }
+    return 0;
+}

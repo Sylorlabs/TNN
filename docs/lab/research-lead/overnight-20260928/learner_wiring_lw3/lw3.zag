@@ -1,0 +1,677 @@
+// lw3.zag : LW3 learner policy revision and transfer.
+// Part R: revise LW2's constructed policy 381 after counterexample episodes.
+// Part T: transfer the try-keep schema to a new domain (threshold tuning).
+// Modes (argv 1): revise | freshswap | transfer | fixedmap | habit | freshsearch
+// Pure Zag. Zero RNG. All data literal. Deterministic.
+// Build: znc lw3.zag -o lw3_bin --no-analyze
+// Output: single preallocated buffer, one raw syscall write. No _zag_print.
+
+// ---------- local allocator on _zag_malloc (zeroed u8 buffer) ----------
+fn lw_alloc(n:i64)[]u8{
+    if(n<1){ return ""; }
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..n];
+    let i:i64=0;
+    while(i<n){ b[i]=0; i=i+1; }
+    return b;
+}
+
+// ---------- byte helpers: little-endian i64 cells in u8 buffers ----------
+fn put64(b:[]u8,i:i64,v:i64)void{
+    b[i]=(v & 255) as u8;
+    b[i+1]=((v>>8) & 255) as u8;
+    b[i+2]=((v>>16) & 255) as u8;
+    b[i+3]=((v>>24) & 255) as u8;
+    b[i+4]=((v>>32) & 255) as u8;
+    b[i+5]=((v>>40) & 255) as u8;
+    b[i+6]=((v>>48) & 255) as u8;
+    b[i+7]=((v>>56) & 255) as u8;
+}
+fn get64(b:[]u8,i:i64)i64{
+    return (b[i] as i64) | ((b[i+1] as i64)<<8) | ((b[i+2] as i64)<<16) | ((b[i+3] as i64)<<24) | ((b[i+4] as i64)<<32) | ((b[i+5] as i64)<<40) | ((b[i+6] as i64)<<48) | ((b[i+7] as i64)<<56);
+}
+
+// ---------- single-buffer emit helpers (cursor-returning) ----------
+fn e1str(b:[]u8,c:i64,s:[]u8)i64{
+    let i:i64=0;
+    let n:i64=s.len as i64;
+    while(i<n){ b[c+i]=s[i]; i=i+1; }
+    return c+n;
+}
+fn e1i64(b:[]u8,c:i64,v:i64)i64{
+    let neg:i64=0;
+    let x:i64=v;
+    if(x<0){ neg=1; x=0-x; }
+    let n:i64=0;
+    let t:i64=x;
+    if(t==0){ n=1; } else { while(t>0){ n=n+1; t=t/10; } }
+    let p:i64=c+neg+n-1;
+    t=x;
+    if(t==0){ b[p]=48; } else { while(t>0){ b[p]=((t%10)+48) as u8; p=p-1; t=t/10; } }
+    if(neg==1){ b[c]=45; }
+    return c+neg+n;
+}
+
+// ---------- data loading: ascii digit literals -> values 0..3 ----------
+fn load4(dst:[]u8,dat:[]u8,n:i64)void{
+    let i:i64=0;
+    let m:i64=n*4;
+    while(i<m){ dst[i]=((dat[i] as i64)-48) as u8; i=i+1; }
+}
+fn load1(dst:[]u8,dat:[]u8,n:i64)void{
+    let i:i64=0;
+    while(i<n){ dst[i]=((dat[i] as i64)-48) as u8; i=i+1; }
+}
+
+// ---------- world helper: max symbol count in a 4-symbol string ----------
+fn maxcount(s:[]u8,at:i64)i64{
+    let c0:i64=0;
+    let c1:i64=0;
+    let c2:i64=0;
+    let c3:i64=0;
+    let i:i64=0;
+    while(i<4){
+        let v:i64=s[at+i] as i64;
+        if(v==0){ c0=c0+1; }
+        if(v==1){ c1=c1+1; }
+        if(v==2){ c2=c2+1; }
+        if(v==3){ c3=c3+1; }
+        i=i+1;
+    }
+    let m:i64=c0;
+    if(c1>m){ m=c1; }
+    if(c2>m){ m=c2; }
+    if(c3>m){ m=c3; }
+    return m;
+}
+
+// ---------- hypothesis kinds ----------
+// kind 1 = MAXCOUNT(k): reject iff maxcount > k
+// kind 2 = ALLDISTINCT-NOT: reject iff maxcount == 1 (all symbols distinct)
+fn hyp_reject(hkind:i64,hparam:i64,s:[]u8,at:i64)i64{
+    if(hkind==1){
+        if(maxcount(s,at)>hparam){ return 1; }
+        return 0;
+    }
+    if(hkind==2){
+        if(maxcount(s,at)==1){ return 1; }
+        return 0;
+    }
+    return 0;
+}
+
+// ---------- Occam selection over k=1..3: first k separating TRAIN ----------
+fn occam(str:[]u8,lab:[]u8,n:i64)i64{
+    let k:i64=1;
+    while(k<=3){
+        let ok:i64=1;
+        let i:i64=0;
+        while(i<n){
+            let rej:i64=hyp_reject(1,k,str,i*4);
+            let want:i64=0;
+            if(lab[i]==0){ want=1; }
+            if(rej!=want){ ok=0; }
+            i=i+1;
+        }
+        if(ok==1){ return k; }
+        k=k+1;
+    }
+    return 0;
+}
+
+// ---------- judge: 1=ACCEPT, 0=REJECT ----------
+// Reads only the learner-owned consultation list. hyp store: 2 x 24B records.
+fn judge(s:[]u8,at:i64,consult:[]u8,cn:i64,hyp:[]u8)i64{
+    let i:i64=0;
+    while(i<cn){
+        let hid:i64=get64(consult,i*8);
+        if(hid>=0){
+            if(hid<2){
+                if(hyp_reject(get64(hyp,hid*24),get64(hyp,hid*24+8),s,at)==1){ return 0; }
+            }
+        }
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---------- learner-owned evaluation over VALID (world labels = experience) ----------
+fn selftest(vstr:[]u8,vlab:[]u8,vn:i64,consult:[]u8,cn:i64,hyp:[]u8)i64{
+    let c:i64=0;
+    let i:i64=0;
+    while(i<vn){
+        let v:i64=judge(vstr,i*4,consult,cn,hyp);
+        if(v==(vlab[i] as i64)){ c=c+1; }
+        i=i+1;
+    }
+    return c;
+}
+
+// ---------- wiring actions on the consultation list ----------
+fn wire(consult:[]u8,cn:i64,hid:i64)i64{
+    let i:i64=0;
+    while(i<cn){
+        if(get64(consult,i*8)==hid){ return cn; }
+        i=i+1;
+    }
+    if(cn>=4){ return cn; }
+    put64(consult,cn*8,hid);
+    return cn+1;
+}
+fn unwire_h(consult:[]u8,cn:i64,hid:i64)i64{
+    let i:i64=0;
+    while(i<cn){
+        if(get64(consult,i*8)==hid){
+            let j:i64=i;
+            while(j<cn-1){
+                put64(consult,j*8,get64(consult,(j+1)*8));
+                j=j+1;
+            }
+            put64(consult,(cn-1)*8,-1);
+            return cn-1;
+        }
+        i=i+1;
+    }
+    return cn;
+}
+fn clear_list(consult:[]u8)i64{
+    let i:i64=0;
+    while(i<4){ put64(consult,i*8,-1); i=i+1; }
+    return 0;
+}
+
+// ---------- episode setup: load hyp slots per episode type ----------
+// etype 0=A: slot0=helpful, slot1=harmful
+// etype 1=B: slot0=harmful,  slot1=neutral
+// etype 2=C: slot0=helpful, slot1=helpful
+// etype 3=D: slot0=harmful,  slot1=harmful
+// etype 4=A2: slot0=harmful, slot1=helpful   (counterexample regime)
+// etype 5=B2: slot0=neutral, slot1=harmful
+// etype 6=C2: slot0=helpful, slot1=helpful   (held-out)
+// etype 7=D2: slot0=harmful, slot1=harmful   (held-out)
+// helpful = (kind1, k_occam); harmful = (kind2, 0); neutral = (kind1, 3)
+fn setup_episode(hyp:[]u8,etype:i64,khelp:i64)void{
+    if(etype==0){
+        put64(hyp,0,1); put64(hyp,8,khelp); put64(hyp,16,1);
+        put64(hyp,24,2); put64(hyp,32,0); put64(hyp,40,1);
+    }
+    if(etype==1){
+        put64(hyp,0,2); put64(hyp,8,0); put64(hyp,16,1);
+        put64(hyp,24,1); put64(hyp,32,3); put64(hyp,40,1);
+    }
+    if(etype==2){
+        put64(hyp,0,1); put64(hyp,8,khelp); put64(hyp,16,1);
+        put64(hyp,24,1); put64(hyp,32,khelp); put64(hyp,40,1);
+    }
+    if(etype==3){
+        put64(hyp,0,2); put64(hyp,8,0); put64(hyp,16,1);
+        put64(hyp,24,2); put64(hyp,32,0); put64(hyp,40,1);
+    }
+    if(etype==4){
+        put64(hyp,0,2); put64(hyp,8,0); put64(hyp,16,1);
+        put64(hyp,24,1); put64(hyp,32,khelp); put64(hyp,40,1);
+    }
+    if(etype==5){
+        put64(hyp,0,1); put64(hyp,8,3); put64(hyp,16,1);
+        put64(hyp,24,2); put64(hyp,32,0); put64(hyp,40,1);
+    }
+    if(etype==6){
+        put64(hyp,0,1); put64(hyp,8,khelp); put64(hyp,16,1);
+        put64(hyp,24,1); put64(hyp,32,khelp); put64(hyp,40,1);
+    }
+    if(etype==7){
+        put64(hyp,0,2); put64(hyp,8,0); put64(hyp,16,1);
+        put64(hyp,24,2); put64(hyp,32,0); put64(hyp,40,1);
+    }
+}
+
+// ---------- policy alphabet (7 actions) ----------
+// 0=EVAL, 1=WIRE0, 2=WIRE1, 3=UNWIRE0, 4=UNWIRE1, 5=IFB, 6=IDLE
+// IFB: if R0 > R1, skip the next step; else execute it.
+fn decode(p:i64,steps:[]u8)void{
+    let d:i64=2401;
+    let i:i64=0;
+    let q:i64=p;
+    while(i<5){
+        steps[i]=(q/d) as u8;
+        q=q%d;
+        d=d/7;
+        i=i+1;
+    }
+}
+fn pol_index(steps:[]u8,base:i64)i64{
+    let v:i64=0;
+    let i:i64=0;
+    while(i<5){
+        v=v*base+(steps[i] as i64);
+        i=i+1;
+    }
+    return v;
+}
+
+// run a 5-step 7-action policy on one episode; returns final selftest score.
+fn run_policy(steps:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8)i64{
+    let cn:i64=clear_list(consult);
+    let r0:i64=-1;
+    let r1:i64=-1;
+    let i:i64=0;
+    while(i<5){
+        let a:i64=steps[i] as i64;
+        let ni:i64=i+1;
+        if(a==0){ r1=r0; r0=selftest(vstr,vlab,6,consult,cn,hyp); }
+        if(a==1){ cn=wire(consult,cn,0); }
+        if(a==2){ cn=wire(consult,cn,1); }
+        if(a==3){ cn=unwire_h(consult,cn,0); }
+        if(a==4){ cn=unwire_h(consult,cn,1); }
+        if(a==5){ if(r0>r1){ ni=i+2; } }
+        i=ni;
+    }
+    return selftest(vstr,vlab,6,consult,cn,hyp);
+}
+
+// ---------- score a 7-action policy on an episode list ----------
+// eps: neps i64 cells of episode etypes. per: neps i64 cells of scores.
+// returns total.
+fn score_eps(steps:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8,khelp:i64,eps:[]u8,neps:i64,per:[]u8)i64{
+    let tot:i64=0;
+    let f:i64=0;
+    while(f<neps){
+        setup_episode(hyp,get64(eps,f*8),khelp);
+        let sc:i64=run_policy(steps,vstr,vlab,consult,hyp);
+        put64(per,f*8,sc);
+        tot=tot+sc;
+        f=f+1;
+    }
+    return tot;
+}
+
+// ---------- revision driver helpers ----------
+// consider: score one candidate; update best/bs in st ([bs, evals]) and best steps.
+fn consider(cand:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8,khelp:i64,eps:[]u8,per:[]u8,st:[]u8,best:[]u8)void{
+    let s:i64=score_eps(cand,vstr,vlab,consult,hyp,khelp,eps,4,per);
+    put64(st,8,get64(st,8)+1);
+    let bs:i64=get64(st,0);
+    let upd:i64=0;
+    if(s>bs){ upd=1; }
+    if(s==bs){
+        let ci:i64=pol_index(cand,7);
+        let bi:i64=pol_index(best,7);
+        if(ci<bi){ upd=1; }
+    }
+    if(upd==1){
+        put64(st,0,s);
+        let k:i64=0;
+        while(k<5){ best[k]=cand[k]; k=k+1; }
+    }
+}
+fn try1(p1:i64,a:i64,cur:[]u8,cand:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8,khelp:i64,eps:[]u8,per:[]u8,st:[]u8,best:[]u8)void{
+    if(a==(cur[p1] as i64)){ return; }
+    let k:i64=0;
+    while(k<5){ cand[k]=cur[k]; k=k+1; }
+    cand[p1]=a as u8;
+    consider(cand,vstr,vlab,consult,hyp,khelp,eps,per,st,best);
+}
+fn try2(p2:i64,q2:i64,a2:i64,b2:i64,cur:[]u8,cand:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8,khelp:i64,eps:[]u8,per:[]u8,st:[]u8,best:[]u8)void{
+    if(a2==(cur[p2] as i64)){ return; }
+    if(b2==(cur[q2] as i64)){ return; }
+    let k:i64=0;
+    while(k<5){ cand[k]=cur[k]; k=k+1; }
+    cand[p2]=a2 as u8;
+    cand[q2]=b2 as u8;
+    consider(cand,vstr,vlab,consult,hyp,khelp,eps,per,st,best);
+}
+
+// steepest ascent from seed over 1- and 2-edit neighborhoods.
+// seed updated in place to the final policy. log: [moves, evals, final_total].
+fn revise_driver(seed:[]u8,vstr:[]u8,vlab:[]u8,consult:[]u8,hyp:[]u8,khelp:i64,eps:[]u8,per:[]u8,log:[]u8)void{
+    let cur:[]u8=lw_alloc(5);
+    let cand:[]u8=lw_alloc(5);
+    let best:[]u8=lw_alloc(5);
+    let st:[]u8=lw_alloc(16);
+    let i:i64=0;
+    while(i<5){ cur[i]=seed[i]; i=i+1; }
+    let cursc:i64=score_eps(cur,vstr,vlab,consult,hyp,khelp,eps,4,per);
+    let moves:i64=0;
+    let improved:i64=1;
+    while(improved==1){
+        improved=0;
+        put64(st,0,cursc);
+        let k0:i64=0;
+        while(k0<5){ best[k0]=cur[k0]; k0=k0+1; }
+        let p1:i64=0;
+        while(p1<5){
+            let a:i64=0;
+            while(a<7){
+                try1(p1,a,cur,cand,vstr,vlab,consult,hyp,khelp,eps,per,st,best);
+                a=a+1;
+            }
+            p1=p1+1;
+        }
+        let p2:i64=0;
+        while(p2<5){
+            let q2:i64=p2+1;
+            while(q2<5){
+                let a2:i64=0;
+                while(a2<7){
+                    let b2:i64=0;
+                    while(b2<7){
+                        try2(p2,q2,a2,b2,cur,cand,vstr,vlab,consult,hyp,khelp,eps,per,st,best);
+                        b2=b2+1;
+                    }
+                    a2=a2+1;
+                }
+                q2=q2+1;
+            }
+            p2=p2+1;
+        }
+        let bs:i64=get64(st,0);
+        if(bs>cursc){
+            let k4:i64=0;
+            while(k4<5){ cur[k4]=best[k4]; k4=k4+1; }
+            cursc=bs;
+            moves=moves+1;
+            improved=1;
+        }
+    }
+    let k5:i64=0;
+    while(k5<5){ seed[k5]=cur[k5]; k5=k5+1; }
+    put64(log,0,moves);
+    put64(log,8,get64(st,8));
+    put64(log,16,cursc);
+}
+
+// ---------- threshold domain (part T) ----------
+// accuracy of MAXCOUNT(p) on VALID: reject iff maxcount > p.
+fn theval(vstr:[]u8,vlab:[]u8,vn:i64,p:i64)i64{
+    let c:i64=0;
+    let i:i64=0;
+    while(i<vn){
+        let mc:i64=maxcount(vstr,i*4);
+        let got:i64=1;
+        if(mc>p){ got=0; }
+        if(got==(vlab[i] as i64)){ c=c+1; }
+        i=i+1;
+    }
+    return c;
+}
+// 5-action alphabet: 0=EVAL, 1=INC, 2=DEC, 3=IFB, 4=IDLE
+fn decode5(p:i64,steps:[]u8)void{
+    let d:i64=625;
+    let i:i64=0;
+    let q:i64=p;
+    while(i<5){
+        steps[i]=(q/d) as u8;
+        q=q%d;
+        d=d/5;
+        i=i+1;
+    }
+}
+fn run_tpolicy(steps:[]u8,vstr:[]u8,vlab:[]u8,p0:i64)i64{
+    let p:i64=p0;
+    let r0:i64=-1;
+    let r1:i64=-1;
+    let i:i64=0;
+    while(i<5){
+        let a:i64=steps[i] as i64;
+        let ni:i64=i+1;
+        if(a==0){ r1=r0; r0=theval(vstr,vlab,6,p); }
+        if(a==1){ if(p<3){ p=p+1; } }
+        if(a==2){ if(p>0){ p=p-1; } }
+        if(a==3){ if(r0>r1){ ni=i+2; } }
+        i=ni;
+    }
+    return theval(vstr,vlab,6,p);
+}
+
+fn main()i32{
+    let a1:[]u8=_zag_arg(1);
+    let cond:i64=-1;
+    if(_zag_strcmp(a1,"revise")==1){ cond=0; }
+    if(_zag_strcmp(a1,"freshswap")==1){ cond=1; }
+    if(_zag_strcmp(a1,"transfer")==1){ cond=2; }
+    if(_zag_strcmp(a1,"fixedmap")==1){ cond=3; }
+    if(_zag_strcmp(a1,"habit")==1){ cond=4; }
+    if(_zag_strcmp(a1,"freshsearch")==1){ cond=5; }
+    let out:[]u8=lw_alloc(2048);
+    let c:i64=0;
+    if(cond<0){
+        c=e1str(out,c,"LW3|error=bad-cond\n");
+        let w0:i64=_zag_raw_syscall(1,1,(_zag_slice_ptr(out) as i64),c,0,0,0);
+        if(w0<0){ return 3; }
+        return 2;
+    }
+    // data: all literals (same TRAIN/VALID as LW1/LW2)
+    let tstr:[]u8=lw_alloc(48);
+    let tlab:[]u8=lw_alloc(12);
+    let vstr:[]u8=lw_alloc(24);
+    let vlab:[]u8=lw_alloc(6);
+    load4(tstr,"012301320213102312032013001211032231332001012323",12);
+    load1(tlab,"111111000000",12);
+    load4(vstr,"230130123012001122021313",6);
+    load1(vlab,"111000",6);
+    let hyp:[]u8=lw_alloc(48);
+    let consult:[]u8=lw_alloc(32);
+    let khelp:i64=occam(tstr,tlab,12);
+    // episode lists as i64 cells
+    let eps_old:[]u8=lw_alloc(32);
+    put64(eps_old,0,0); put64(eps_old,8,1); put64(eps_old,16,0); put64(eps_old,24,1);
+    let eps_new:[]u8=lw_alloc(32);
+    put64(eps_new,0,4); put64(eps_new,8,5); put64(eps_new,16,4); put64(eps_new,24,5);
+    let eps_hold:[]u8=lw_alloc(16);
+    put64(eps_hold,0,6); put64(eps_hold,8,7);
+    let eps_orig:[]u8=lw_alloc(16);
+    put64(eps_orig,0,0); put64(eps_orig,8,1);
+    let per:[]u8=lw_alloc(32);
+    let steps:[]u8=lw_alloc(5);
+    if(cond==0){
+        // revise: phase1 construct on (A,B,A,B); phase2 counterexample;
+        // phase3 revision driver; phase4 heldout + overwrite diagnostic
+        c=e1str(out,c,"LW3|mode=revise\n");
+        let bestp:i64=0;
+        let bests:i64=-1;
+        let p:i64=0;
+        while(p<16807){
+            decode(p,steps);
+            let tot:i64=score_eps(steps,vstr,vlab,consult,hyp,khelp,eps_old,4,per);
+            if(tot>bests){ bests=tot; bestp=p; }
+            p=p+1;
+        }
+        decode(bestp,steps);
+        let t1:i64=score_eps(steps,vstr,vlab,consult,hyp,khelp,eps_old,4,per);
+        c=e1str(out,c,"LW3|phase1_policy=");
+        c=e1i64(out,c,bestp);
+        c=e1str(out,c,"|phase1_train=");
+        let qi:i64=0;
+        while(qi<4){
+            c=e1i64(out,c,get64(per,qi*8));
+            if(qi<3){ c=e1str(out,c,","); }
+            qi=qi+1;
+        }
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,t1);
+        c=e1str(out,c,"|n=24\n");
+        let t2:i64=score_eps(steps,vstr,vlab,consult,hyp,khelp,eps_new,4,per);
+        c=e1str(out,c,"LW3|retained_on_new=");
+        let qj:i64=0;
+        while(qj<4){
+            c=e1i64(out,c,get64(per,qj*8));
+            if(qj<3){ c=e1str(out,c,","); }
+            qj=qj+1;
+        }
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,t2);
+        c=e1str(out,c,"|n=24\n");
+        let log:[]u8=lw_alloc(24);
+        revise_driver(steps,vstr,vlab,consult,hyp,khelp,eps_new,per,log);
+        let t3:i64=get64(log,16);
+        c=e1str(out,c,"LW3|revision_moves=");
+        c=e1i64(out,c,get64(log,0));
+        c=e1str(out,c,"|revision_evals=");
+        c=e1i64(out,c,get64(log,8));
+        c=e1str(out,c,"|final_policy=");
+        c=e1i64(out,c,pol_index(steps,7));
+        c=e1str(out,c,"|final_train=");
+        let qk:i64=0;
+        while(qk<4){
+            setup_episode(hyp,get64(eps_new,qk*8),khelp);
+            c=e1i64(out,c,run_policy(steps,vstr,vlab,consult,hyp));
+            if(qk<3){ c=e1str(out,c,","); }
+            qk=qk+1;
+        }
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,t3);
+        c=e1str(out,c,"|n=24\n");
+        setup_episode(hyp,6,khelp);
+        let h0:i64=run_policy(steps,vstr,vlab,consult,hyp);
+        setup_episode(hyp,7,khelp);
+        let h1:i64=run_policy(steps,vstr,vlab,consult,hyp);
+        c=e1str(out,c,"LW3|heldout=");
+        c=e1i64(out,c,h0);
+        c=e1str(out,c,",");
+        c=e1i64(out,c,h1);
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,h0+h1);
+        c=e1str(out,c,"|n=12\n");
+        setup_episode(hyp,0,khelp);
+        let g0:i64=run_policy(steps,vstr,vlab,consult,hyp);
+        setup_episode(hyp,1,khelp);
+        let g1:i64=run_policy(steps,vstr,vlab,consult,hyp);
+        c=e1str(out,c,"LW3|final_on_old=");
+        c=e1i64(out,c,g0);
+        c=e1str(out,c,",");
+        c=e1i64(out,c,g1);
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,g0+g1);
+        c=e1str(out,c,"|n=12\n");
+    }
+    if(cond==1){
+        // freshswap: exhaustive 7^5 on (A2,B2,A2,B2)
+        c=e1str(out,c,"LW3|mode=freshswap\n");
+        let bestp2:i64=0;
+        let bests2:i64=-1;
+        let p2:i64=0;
+        while(p2<16807){
+            decode(p2,steps);
+            let tot2:i64=score_eps(steps,vstr,vlab,consult,hyp,khelp,eps_new,4,per);
+            if(tot2>bests2){ bests2=tot2; bestp2=p2; }
+            p2=p2+1;
+        }
+        decode(bestp2,steps);
+        let t4:i64=score_eps(steps,vstr,vlab,consult,hyp,khelp,eps_new,4,per);
+        c=e1str(out,c,"LW3|policy=");
+        c=e1i64(out,c,bestp2);
+        c=e1str(out,c,"|train=");
+        let qm:i64=0;
+        while(qm<4){
+            c=e1i64(out,c,get64(per,qm*8));
+            if(qm<3){ c=e1str(out,c,","); }
+            qm=qm+1;
+        }
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,t4);
+        c=e1str(out,c,"|n=24\n");
+    }
+    if(cond==2){
+        // transfer: per-episode schema probe over (DEC,INC) vs (INC,DEC)
+        c=e1str(out,c,"LW3|mode=transfer\n");
+        let ts:[]u8=lw_alloc(5);
+        let ch0:i64=0;
+        let ch1:i64=0;
+        let s0a:i64=0;
+        let s0b:i64=0;
+        let s1a:i64=0;
+        let s1b:i64=0;
+        // T1 (p0=2): candidate 0 = (DEC,INC)
+        ts[0]=0; ts[1]=2; ts[2]=0; ts[3]=3; ts[4]=1;
+        s0a=run_tpolicy(ts,vstr,vlab,2);
+        // candidate 1 = (INC,DEC)
+        ts[0]=0; ts[1]=1; ts[2]=0; ts[3]=3; ts[4]=2;
+        s0b=run_tpolicy(ts,vstr,vlab,2);
+        ch0=0;
+        let sc0:i64=s0a;
+        if(s0b>s0a){ ch0=1; sc0=s0b; }
+        // T2 (p0=0)
+        ts[0]=0; ts[1]=2; ts[2]=0; ts[3]=3; ts[4]=1;
+        s1a=run_tpolicy(ts,vstr,vlab,0);
+        ts[0]=0; ts[1]=1; ts[2]=0; ts[3]=3; ts[4]=2;
+        s1b=run_tpolicy(ts,vstr,vlab,0);
+        ch1=0;
+        let sc1:i64=s1a;
+        if(s1b>s1a){ ch1=1; sc1=s1b; }
+        c=e1str(out,c,"LW3|T1_choice=");
+        c=e1i64(out,c,ch0);
+        c=e1str(out,c,"|T1_score=");
+        c=e1i64(out,c,sc0);
+        c=e1str(out,c,"|n=6\n");
+        c=e1str(out,c,"LW3|T2_choice=");
+        c=e1i64(out,c,ch1);
+        c=e1str(out,c,"|T2_score=");
+        c=e1i64(out,c,sc1);
+        c=e1str(out,c,"|n=6\n");
+        c=e1str(out,c,"LW3|total=");
+        c=e1i64(out,c,sc0+sc1);
+        c=e1str(out,c,"|n=12|evals=4\n");
+    }
+    if(cond==3){
+        // fixedmap: researcher-fixed (INC,DEC), no experience
+        c=e1str(out,c,"LW3|mode=fixedmap\n");
+        let fs:[]u8=lw_alloc(5);
+        fs[0]=0; fs[1]=1; fs[2]=0; fs[3]=3; fs[4]=2;
+        let f1:i64=run_tpolicy(fs,vstr,vlab,2);
+        let f2:i64=run_tpolicy(fs,vstr,vlab,0);
+        c=e1str(out,c,"LW3|T1=");
+        c=e1i64(out,c,f1);
+        c=e1str(out,c,"|T2=");
+        c=e1i64(out,c,f2);
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,f1+f2);
+        c=e1str(out,c,"|n=12\n");
+    }
+    if(cond==4){
+        // habit: blind [DEC]x5
+        c=e1str(out,c,"LW3|mode=habit\n");
+        let hs:[]u8=lw_alloc(5);
+        let hi:i64=0;
+        while(hi<5){ hs[hi]=2; hi=hi+1; }
+        let u1:i64=run_tpolicy(hs,vstr,vlab,2);
+        let u2:i64=run_tpolicy(hs,vstr,vlab,0);
+        c=e1str(out,c,"LW3|T1=");
+        c=e1i64(out,c,u1);
+        c=e1str(out,c,"|T2=");
+        c=e1i64(out,c,u2);
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,u1+u2);
+        c=e1str(out,c,"|n=12\n");
+    }
+    if(cond==5){
+        // freshsearch: exhaustive 5^5 on (T1,T2)
+        c=e1str(out,c,"LW3|mode=freshsearch\n");
+        let bestp5:i64=0;
+        let bests5:i64=-1;
+        let p5:i64=0;
+        while(p5<3125){
+            decode5(p5,steps);
+            let w1:i64=run_tpolicy(steps,vstr,vlab,2);
+            let w2:i64=run_tpolicy(steps,vstr,vlab,0);
+            let tot5:i64=w1+w2;
+            if(tot5>bests5){ bests5=tot5; bestp5=p5; }
+            p5=p5+1;
+        }
+        decode5(bestp5,steps);
+        let z1:i64=run_tpolicy(steps,vstr,vlab,2);
+        let z2:i64=run_tpolicy(steps,vstr,vlab,0);
+        c=e1str(out,c,"LW3|policy=");
+        c=e1i64(out,c,bestp5);
+        c=e1str(out,c,"|T1=");
+        c=e1i64(out,c,z1);
+        c=e1str(out,c,"|T2=");
+        c=e1i64(out,c,z2);
+        c=e1str(out,c,"|total=");
+        c=e1i64(out,c,z1+z2);
+        c=e1str(out,c,"|n=12\n");
+    }
+    let w9:i64=_zag_raw_syscall(1,1,(_zag_slice_ptr(out) as i64),c,0,0,0);
+    if(w9!=c){ return 4; }
+    return 0;
+}

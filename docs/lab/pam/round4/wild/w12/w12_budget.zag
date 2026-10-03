@@ -1,0 +1,314 @@
+// w12_budget.zag — W12 BUDGET-PAM instrument (frozen PREREG_W12.md)
+// Pure Zag, zero RNG. Usage: w12_budget <stream>
+// Stream rows: idx|conf|mrgF|strong|agree[|...] (extra columns ignored —
+// they are NOT price inputs; B3 enumerates the complete input list).
+// First stage: frozen M1 bar (CT=705, MT=3588, ST=0, AT=0) -> BAR_REJECT or
+// W12 candidate. W12: per-episode budget B=24814 (frozen), episode=128
+// candidates (frozen), deferral with priority requeue, starvation guard
+// D=3 -> QUARANTINE (frozen). Drain loop over leftovers.
+// Emits idx|VERDICT|price|defer_count per candidate-episode (+BAR_REJECT),
+// EP|... per-episode summaries, SUMMARY at end.
+@import("R33_NATIVE_IO_V1.zag")
+fn i64s(v:i64) []u8 {
+    let s:[]u8 = _zag_i64_to_str(v);
+    if(s.len > 0 && s[s.len - 1] == 10) { return s[0..s.len - 1]; }
+    return s;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) { ob[pos] = s[i]; pos = pos + 1; i = i + 1; }
+    return pos;
+}
+fn pfield(line:[]u8, llen:i32, which:i32, out:[]u8) i32 {
+    let fi:i32 = 0; let st:i32 = 0; let i:i32 = 0;
+    while(i <= llen) {
+        let c:u8 = 10;
+        if(i < llen) { c = line[i]; }
+        if(c == 124 || i == llen) {
+            if(fi == which) {
+                let n:i32 = i - st;
+                if(n > out.len) { n = out.len; }
+                let k:i32 = 0;
+                while(k < n) { out[k] = line[st + k]; k = k + 1; }
+                return n;
+            }
+            fi = fi + 1; st = i + 1;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+fn atoi(b:[]u8, n:i32) i64 {
+    let v:i64 = 0; let neg:i64 = 1; let i:i32 = 0;
+    if(n > 0 && b[0] == 45) { neg = -1; i = 1; }
+    while(i < n) {
+        let c:i64 = b[i] as i64;
+        if(c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48); i = i + 1;
+    }
+    return v * neg;
+}
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 4095) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+// candidate record: 24 bytes, LE i32 fields
+// idx@0 conf@4 mrgF@8 strong@12 agree@16 defer@20
+fn cget(ca:[]u8, ord:i64, off:i64) i64 {
+    let b:i64 = ord * 24 + off;
+    return (ca[b] as i64) | ((ca[b + 1] as i64) << 8)
+         | ((ca[b + 2] as i64) << 16) | ((ca[b + 3] as i64) << 24);
+}
+fn cput(ca:[]u8, ord:i64, off:i64, v:i64) void {
+    let b:i64 = ord * 24 + off;
+    ca[b] = (v & 255) as u8; ca[b + 1] = ((v >> 8) & 255) as u8;
+    ca[b + 2] = ((v >> 16) & 255) as u8; ca[b + 3] = ((v >> 24) & 255) as u8;
+}
+fn qget(qa:[]u8, i:i64) i64 {
+    let b:i64 = i * 4;
+    return (qa[b] as i64) | ((qa[b + 1] as i64) << 8)
+         | ((qa[b + 2] as i64) << 16) | ((qa[b + 3] as i64) << 24);
+}
+fn qput(qa:[]u8, i:i64, v:i64) void {
+    let b:i64 = i * 4;
+    qa[b] = (v & 255) as u8; qa[b + 1] = ((v >> 8) & 255) as u8;
+    qa[b + 2] = ((v >> 16) & 255) as u8; qa[b + 3] = ((v >> 24) & 255) as u8;
+}
+// frozen price function (PREREG_W12 §2). Inputs ONLY:
+// conf, mrgF, strong, agree, ledger index, per-episode seen-set.
+fn price_of(ca:[]u8, ord:i64, seen:[]u8) i64 {
+    let idx:i64 = cget(ca, ord, 0);
+    let conf:i64 = cget(ca, ord, 4);
+    let mrg:i64 = cget(ca, ord, 8);
+    let s:i64 = cget(ca, ord, 12);
+    let a:i64 = cget(ca, ord, 16);
+    let cb:i64 = conf / 50;
+    let mb:i64 = mrg / 500;
+    let key:i64 = ((cb * 512 + mb) * 2 + s) * 2 + a;
+    if(key < 0 || key >= 65536) { return -1; }
+    let nov:i64 = 0;
+    if(seen[key] == 0) { nov = 1; seen[key] = 1; }
+    let stake:i64 = 0;
+    if(idx % 10 == 0) { stake = 1; }
+    let tt:i64 = 0;
+    if(s == 1 && a == 1) { tt = 2; } else { if(a == 1) { tt = 1; } }
+    let size:i64 = 100 + (conf % 900);
+    return 10 + nov * 40 + stake * 30 + (2 - tt) * 25 + size / 100 + (idx % 8);
+}
+fn emit_row(ob:[]u8, pos:i32, idx:i64, v:[]u8, pr:i64, dc:i64) i32 {
+    pos = ob_add(ob, pos, i64s(idx));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, v);
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(pr));
+    pos = ob_add(ob, pos, "|");
+    pos = ob_add(ob, pos, i64s(dc));
+    pos = ob_add(ob, pos, "\n");
+    return pos;
+}
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    if(a1.len == 0) { return 1; }
+    let fmax:i32 = 4194304;
+    let fb:[]u8 = nio_alloc(fmax);
+    if(fb.len == 0) { return 1; }
+    let n:i64 = z_read(a1, fb, fmax);
+    if(n < 0) { return 1; }
+    let nl:i64 = n;
+    // frozen pins
+    let B:i64 = 24814;
+    let EP:i64 = 128;
+    let D:i64 = 3;
+    let CT:i64 = 705;
+    let MT:i64 = 3588;
+    let cap_rows:i64 = 2048;
+    let ca:[]u8 = nio_alloc(cap_rows * 24);
+    if(ca.len == 0) { return 1; }
+    let fld:[]u8 = nio_alloc(64);
+    let ncand:i64 = 0;
+    let nbar_rej:i64 = 0;
+    let ob:[]u8 = nio_alloc(2097152);
+    if(ob.len == 0) { return 1; }
+    let pos:i32 = 0;
+    pos = ob_add(ob, pos, "W12_BUDGET|frozen=PREREG_W12.md|B=24814|EP=128|D=3\n");
+    // parse stream; first stage: frozen M1 bar
+    let p:i64 = 0;
+    while(p < nl) {
+        let le:i64 = p;
+        while(le < nl && fb[le as i32] != 10) { le = le + 1; }
+        let llen:i32 = (le - p) as i32;
+        if(llen > 0 && llen < 512 && ncand < cap_rows) {
+            let line:[]u8 = fb[p as i32 .. (p + llen as i64) as i32];
+            let ok:i64 = 1;
+            let f0:i64 = 0; let f1:i64 = 0; let f2:i64 = 0;
+            let f3:i64 = 0; let f4:i64 = 0;
+            let nf:i32 = pfield(line, llen, 0, fld);
+            if(nf <= 0) { ok = 0; } else { f0 = atoi(fld, nf); }
+            nf = pfield(line, llen, 1, fld);
+            if(nf <= 0) { ok = 0; } else { f1 = atoi(fld, nf); }
+            nf = pfield(line, llen, 2, fld);
+            if(nf <= 0) { ok = 0; } else { f2 = atoi(fld, nf); }
+            nf = pfield(line, llen, 3, fld);
+            if(nf <= 0) { ok = 0; } else { f3 = atoi(fld, nf); }
+            nf = pfield(line, llen, 4, fld);
+            if(nf <= 0) { ok = 0; } else { f4 = atoi(fld, nf); }
+            if(ok == 1) {
+                if(f1 >= CT && f2 >= MT) {
+                    cput(ca, ncand, 0, f0); cput(ca, ncand, 4, f1);
+                    cput(ca, ncand, 8, f2); cput(ca, ncand, 12, f3);
+                    cput(ca, ncand, 16, f4); cput(ca, ncand, 20, 0);
+                    ncand = ncand + 1;
+                } else {
+                    pos = emit_row(ob, pos, f0, "BAR_REJECT", 0, 0);
+                    nbar_rej = nbar_rej + 1;
+                }
+            }
+        }
+        p = le + 1;
+    }
+    // W12 episode loop
+    let seen:[]u8 = nio_alloc(65536);
+    let defa:[]u8 = nio_alloc(cap_rows * 4);   // deferred ordinals
+    let newd:[]u8 = nio_alloc(cap_rows * 4);
+    let qbuf:[]u8 = nio_alloc((cap_rows + 128) * 4);
+    if(seen.len == 0 || defa.len == 0) { return 1; }
+    let defc:i64 = 0;
+    let fresh:i64 = 0;
+    let ep:i64 = 0;
+    let nadmit:i64 = 0;
+    let nquar:i64 = 0;
+    let maxdefer:i64 = 0;
+    let stall:i64 = 0;
+    while(fresh < ncand || defc > 0) {
+        let drain:i64 = 0;
+        if(fresh >= ncand) { drain = 1; }
+        // sort deferred by (defer desc, idx asc) — selection sort
+        let si:i64 = 0;
+        while(si < defc) {
+            let bi:i64 = si;
+            let sj:i64 = si + 1;
+            while(sj < defc) {
+                let od_b:i64 = qget(defa, bi);
+                let od_j:i64 = qget(defa, sj);
+                let db:i64 = cget(ca, od_b, 20);
+                let dj:i64 = cget(ca, od_j, 20);
+                let ib:i64 = cget(ca, od_b, 0);
+                let ij:i64 = cget(ca, od_j, 0);
+                let better:i64 = 0;
+                if(dj > db) { better = 1; }
+                else { if(dj == db && ij < ib) { better = 1; } }
+                if(better == 1) { bi = sj; }
+                sj = sj + 1;
+            }
+            let tmp:i64 = qget(defa, si);
+            qput(defa, si, qget(defa, bi));
+            qput(defa, bi, tmp);
+            si = si + 1;
+        }
+        // build queue: deferred ++ fresh slice
+        let qn:i64 = 0;
+        si = 0;
+        while(si < defc) { qput(qbuf, qn, qget(defa, si)); qn = qn + 1; si = si + 1; }
+        let fcnt:i64 = 0;
+        if(drain == 0) {
+            while(fcnt < EP && fresh + fcnt < ncand) {
+                qput(qbuf, qn, fresh + fcnt); qn = qn + 1; fcnt = fcnt + 1;
+            }
+        }
+        // reset per-episode seen-set
+        let zi:i64 = 0;
+        while(zi < 65536) { seen[zi] = 0; zi = zi + 1; }
+        let running:i64 = 0;
+        let cutoff:i64 = 0;
+        let ep_adm:i64 = 0;
+        let ep_def:i64 = 0;
+        let ep_quar:i64 = 0;
+        let newc:i64 = 0;
+        let qi:i64 = 0;
+        while(qi < qn) {
+            let ord:i64 = qget(qbuf, qi);
+            let pr:i64 = price_of(ca, ord, seen);
+            if(pr < 0) { return 7; }
+            let dc:i64 = cget(ca, ord, 20);
+            let idx:i64 = cget(ca, ord, 0);
+            if(cutoff == 0 && running + pr <= B) {
+                pos = emit_row(ob, pos, idx, "ADMIT", pr, dc);
+                running = running + pr;
+                ep_adm = ep_adm + 1;
+                nadmit = nadmit + 1;
+            } else {
+                cutoff = 1;
+                dc = dc + 1;
+                cput(ca, ord, 20, dc);
+                if(dc > maxdefer) { maxdefer = dc; }
+                if(dc > D) {
+                    pos = emit_row(ob, pos, idx, "QUARANTINE", pr, dc);
+                    ep_quar = ep_quar + 1;
+                    nquar = nquar + 1;
+                } else {
+                    pos = emit_row(ob, pos, idx, "DEFER", pr, dc);
+                    ep_def = ep_def + 1;
+                    qput(newd, newc, ord);
+                    newc = newc + 1;
+                }
+            }
+            qi = qi + 1;
+        }
+        // commit new deferred list
+        si = 0;
+        while(si < newc) { qput(defa, si, qget(newd, si)); si = si + 1; }
+        if(drain == 1 && newc >= defc && defc > 0) {
+            stall = 1;
+            pos = ob_add(ob, pos, "DRAIN_STALL\n");
+            break;
+        }
+        defc = newc;
+        if(drain == 0) { fresh = fresh + EP; }
+        pos = ob_add(ob, pos, "EP|");
+        pos = ob_add(ob, pos, i64s(ep));
+        pos = ob_add(ob, pos, "|fresh=");
+        pos = ob_add(ob, pos, i64s(fcnt));
+        pos = ob_add(ob, pos, "|def_in=");
+        pos = ob_add(ob, pos, i64s(qn - fcnt));
+        pos = ob_add(ob, pos, "|admitted=");
+        pos = ob_add(ob, pos, i64s(ep_adm));
+        pos = ob_add(ob, pos, "|deferred=");
+        pos = ob_add(ob, pos, i64s(ep_def));
+        pos = ob_add(ob, pos, "|quarantined=");
+        pos = ob_add(ob, pos, i64s(ep_quar));
+        pos = ob_add(ob, pos, "|spent=");
+        pos = ob_add(ob, pos, i64s(running));
+        pos = ob_add(ob, pos, "\n");
+        ep = ep + 1;
+    }
+    pos = ob_add(ob, pos, "SUMMARY|ncand=");
+    pos = ob_add(ob, pos, i64s(ncand));
+    pos = ob_add(ob, pos, "|admit=");
+    pos = ob_add(ob, pos, i64s(nadmit));
+    pos = ob_add(ob, pos, "|quarantine=");
+    pos = ob_add(ob, pos, i64s(nquar));
+    pos = ob_add(ob, pos, "|bar_reject=");
+    pos = ob_add(ob, pos, i64s(nbar_rej));
+    pos = ob_add(ob, pos, "|max_defer=");
+    pos = ob_add(ob, pos, i64s(maxdefer));
+    pos = ob_add(ob, pos, "|stall=");
+    pos = ob_add(ob, pos, i64s(stall));
+    pos = ob_add(ob, pos, "\n");
+    _zag_print(ob[0..pos]);
+    return 0;
+}

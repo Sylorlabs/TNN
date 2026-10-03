@@ -1,0 +1,1612 @@
+// hostnorm.zag — hardened glue-layer host normalization (LI-HARDEN-GLUE).
+// Pure Zag. Zero RNG. Deterministic: same input bytes -> same output bytes.
+// Implements PREREG_LI_HARDEN_GLUE.md §3 (frozen pipeline), §4 (eTLD+1),
+// §6 (deterministic pid sort).
+//
+// Driver modes:
+//   hostnorm norm <urlfile>          lines "U|pid|url" -> "N|pid|canonical|origin|status"
+//   hostnorm pages <infile> <outfile>  hardened pages.txt emission (sorted pids)
+//
+// Status codes: 0 OK, 1 INVALID_HOSTLESS, 2 INVALID_EMPTY, 3 INVALID_BADPCT,
+// 4 INVALID_DELIM, 5 INVALID_BADPORT, 6 INVALID_BADIP, 7 INVALID_BADLABEL,
+// 8 INVALID_BADUTF8, 9 INVALID_PUNYCODE.
+@import("R33_NATIVE_IO_V1.zag")
+
+fn p32(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;
+    b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;
+    b[at+3]=((v>>24)&255) as u8;
+    return;
+}
+
+fn g32(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+
+fn bsub(h:[]u8,n:[]u8)i32 {
+    if(n.len==0){return 1;}
+    if(n.len>h.len){return 0;}
+    let i:i32=0;
+    while(i+n.len<=h.len){
+        let j:i32=0;
+        while(j<n.len){
+            if(h[i+j]!=n[j]){break;}
+            j=j+1;
+        }
+        if(j==n.len){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn bsub_eq(a:[]u8,ao:i32,b:[]u8,bo:i32,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(a[ao+i]!=b[bo+i]){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+fn hexval(c:u8)i32 {
+    if(c>=48 && c<=57){return (c as i32)-48;}
+    if(c>=65 && c<=70){return (c as i32)-55;}
+    if(c>=97 && c<=102){return (c as i32)-87;}
+    return -1;
+}
+
+fn atoi(s:[]u8)i32 {
+    let i:i32=0;
+    let v:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c<48 || c>57){break;}
+        v=v*10+((c as i32)-48);
+        i=i+1;
+    }
+    return v;
+}
+
+fn i64s(v:i64)[]u8 {
+    let s:[]u8=_zag_i64_to_str(v);
+    if(s.len>0 && s[s.len-1]==10){
+        if(s.len==1){return "";}
+        return s[0..s.len-1];
+    }
+    return s;
+}
+
+fn next_line(b:[]u8,pos:*i32,ls:*i32,ll:*i32)i32 {
+    if(pos[0]>=b.len){return 0;}
+    let s:i32=pos[0];
+    let e:i32=s;
+    while(e<b.len && b[e]!=10){e=e+1;}
+    ls[0]=s;
+    ll[0]=e-s;
+    if(e<b.len){pos[0]=e+1;}else{pos[0]=e;}
+    return 1;
+}
+
+fn read_file(dir:[]u8,name:[]u8,ok:*i32)[]u8 {
+    ok[0]=0;
+    let root:i64=nio_open_root(dir);
+    if(root<0){return "";}
+    let fd:i64=nio_open_child(root,name,0);
+    nio_close(root);
+    if(fd<0){return "";}
+    let buf:[]u8=nio_alloc(1048576);
+    if(buf.len==0){nio_close(fd); return "";}
+    let n:i64=nio_read_exact(fd,buf,1048575);
+    nio_close(fd);
+    if(n<0){nio_free(buf); return "";}
+    ok[0]=1;
+    let nn:i32=n as i32;
+    return buf[0..nn];
+}
+
+fn read_path(path:[]u8,ok:*i32)[]u8 {
+    let k:i32=path.len-1;
+    while(k>=0 && path[k]!=47){k=k-1;}
+    if(k<0){return read_file(".",path,ok);}
+    let dir:[]u8=path[0..k];
+    let name:[]u8=path[k+1..path.len];
+    if(k==0){dir="/";}
+    return read_file(dir,name,ok);
+}
+
+fn nio_unlink_child(root:i64,name:[]u8)void {
+    if(root<0 || nio_name_valid(name)!=1){return;}
+    let s:[]u8=nio_cstr(name);
+    if(s.len==0){return;}
+    _zag_raw_syscall(263,root,_zag_slice_ptr(s) as i64,0,0,0,0);
+    nio_free(s);
+    return;
+}
+
+fn write_file(dir:[]u8,name:[]u8,data:[]u8)i32 {
+    let root:i64=nio_open_root(dir);
+    if(root<0){return 0;}
+    nio_unlink_child(root,name);
+    let fd:i64=nio_open_child(root,name,1);
+    nio_close(root);
+    if(fd<0){return 0;}
+    let n:i64=nio_write_all(fd,data);
+    nio_close(fd);
+    if(n<0){return 0;}
+    return 1;
+}
+
+fn write_path(path:[]u8,data:[]u8) i32 {
+    let k:i32=path.len-1;
+    while(k>=0 && path[k]!=47){k=k-1;}
+    if(k<0){return write_file(".",path,data);}
+    let dir:[]u8=path[0..k];
+    let name:[]u8=path[k+1..path.len];
+    if(k==0){dir="/";}
+    return write_file(dir,name,data);
+}
+
+fn st_str(st:i32)[]u8 {
+    if(st==0){return "OK";}
+    if(st==1){return "INVALID_HOSTLESS";}
+    if(st==2){return "INVALID_EMPTY";}
+    if(st==3){return "INVALID_BADPCT";}
+    if(st==4){return "INVALID_DELIM";}
+    if(st==5){return "INVALID_BADPORT";}
+    if(st==6){return "INVALID_BADIP";}
+    if(st==7){return "INVALID_BADLABEL";}
+    if(st==8){return "INVALID_BADUTF8";}
+    return "INVALID_PUNYCODE";
+}
+
+// ---------- UTF-8 ----------
+// decode one code point at pos; advances pos. 1 ok / 0 fail (strict:
+// rejects overlongs, surrogates, >U+10FFFF).
+fn utf8_decode(s:[]u8,pos:*i32,cp:*i32)i32 {
+    if(pos[0]>=s.len){return 0;}
+    let b0:u8=s[pos[0]];
+    if(b0<128){cp[0]=b0 as i32; pos[0]=pos[0]+1; return 1;}
+    let need:i32=0;
+    let min:i32=0;
+    let cpi:i32=0;
+    if(b0>=192 && b0<224){need=1; min=128; cpi=(b0 as i32)-192;}
+    else{
+        if(b0>=224 && b0<240){need=2; min=2048; cpi=(b0 as i32)-224;}
+        else{
+            if(b0>=240 && b0<248){need=3; min=65536; cpi=(b0 as i32)-240;}
+            else{return 0;}
+        }
+    }
+    if(pos[0]+need>=s.len){return 0;}
+    let k:i32=1;
+    while(k<=need){
+        let bx:u8=s[pos[0]+k];
+        if(bx<128 || bx>=192){return 0;}
+        cpi=cpi*64+((bx as i32)-128);
+        k=k+1;
+    }
+    if(cpi<min){return 0;}
+    if(cpi>=55296 && cpi<=57343){return 0;}
+    if(cpi>1114111){return 0;}
+    cp[0]=cpi;
+    pos[0]=pos[0]+need+1;
+    return 1;
+}
+
+// encode cp at dst[at]; returns bytes written, 0 on invalid.
+fn utf8_encode(cp:i32,dst:[]u8,at:i32)i32 {
+    if(cp<0 || cp>1114111){return 0;}
+    if(cp>=55296 && cp<=57343){return 0;}
+    if(cp<128){dst[at]=cp as u8; return 1;}
+    if(cp<2048){
+        dst[at]=(192|(cp>>6)) as u8;
+        dst[at+1]=(128|(cp&63)) as u8;
+        return 2;
+    }
+    if(cp<65536){
+        dst[at]=(224|(cp>>12)) as u8;
+        dst[at+1]=(128|((cp>>6)&63)) as u8;
+        dst[at+2]=(128|(cp&63)) as u8;
+        return 3;
+    }
+    dst[at]=(240|(cp>>18)) as u8;
+    dst[at+1]=(128|((cp>>12)&63)) as u8;
+    dst[at+2]=(128|((cp>>6)&63)) as u8;
+    dst[at+3]=(128|(cp&63)) as u8;
+    return 4;
+}
+
+// ---------- Punycode (RFC 3492) decode ----------
+// cpa: code-point arena (n*4 via p32). returns code-point count, or -1.
+fn puny_digit(c:u8)i32 {
+    if(c>=97 && c<=122){return (c as i32)-97;}
+    if(c>=65 && c<=90){return (c as i32)-65;}
+    if(c>=48 && c<=57){return (c as i32)-22;}
+    return -1;
+}
+
+fn puny_adapt(delta:i64,numpoints:i64,first:i32)i64 {
+    let d:i64=delta;
+    if(first==1){d=d/700;}else{d=d/2;}
+    d=d+d/numpoints;
+    let k:i64=0;
+    while(d>455){d=d/35; k=k+36;}
+    return k+(37*d)/(d+38);
+}
+
+// read one generalized integer from src at *pos with bias; accumulates into *di.
+fn puny_decode_int(src:[]u8,pos:*i32,bias:i64,di:*i64)i32 {
+    let w:i64=1;
+    let k:i64=36;
+    let i2:i64=di[0];
+    while(1==1){
+        if(pos[0]>=src.len){return 0;}
+        let d:i32=puny_digit(src[pos[0]]);
+        pos[0]=pos[0]+1;
+        if(d<0){return 0;}
+        if((d as i64)>(9223372036854775807-i2)/w){return 0;}
+        i2=i2+(d as i64)*w;
+        let t:i64=k-bias;
+        if(t<1){t=1;}
+        else{if(t>26){t=26;}}
+        if((d as i64)<t){break;}
+        if(w>9223372036854775807/(36-t)){return 0;}
+        w=w*(36-t);
+        k=k+36;
+    }
+    di[0]=i2;
+    return 1;
+}
+
+fn puny_decode(src:[]u8,cpa:[]u8)i32 {
+    let dlm:i32=-1;
+    let i:i32=0;
+    while(i<src.len){
+        if(src[i]==45){dlm=i;}
+        i=i+1;
+    }
+    let ncp:i32=0;
+    let inp:i32=0;
+    if(dlm>=0){
+        i=0;
+        while(i<dlm){
+            let c:u8=src[i];
+            if(c>=128){return -1;}
+            p32(cpa,ncp*4,c as i32);
+            ncp=ncp+1;
+            i=i+1;
+        }
+        inp=dlm+1;
+    }
+    let n:i64=128;
+    let ii:i64=0;
+    let bias:i64=72;
+    let first:i32=1;
+    while(inp<src.len){
+        let oldi:i64=ii;
+        if(puny_decode_int(src,&inp,bias,&ii)==0){return -1;}
+        bias=puny_adapt(ii-oldi,(ncp as i64)+1,first);
+        first=0;
+        n=n+ii/((ncp as i64)+1);
+        ii=ii%((ncp as i64)+1);
+        if(n>1114111 || n<0){return -1;}
+        if(ncp>=64){return -1;}
+        let iii:i32=ii as i32;
+        let j:i32=ncp;
+        while(j>iii){
+            p32(cpa,j*4,g32(cpa,(j-1)*4));
+            j=j-1;
+        }
+        p32(cpa,iii*4,n as i32);
+        ncp=ncp+1;
+        ii=ii+1;
+    }
+    return ncp;
+}
+
+// decode an "xn--..." label to UTF-8 in dst; returns bytes, -1 on failure.
+fn puny_label(label:[]u8,dst:[]u8,cpa:[]u8)i32 {
+    let ncp:i32=puny_decode(label[4..label.len],cpa);
+    if(ncp<=0){return -1;}
+    let o:i32=0;
+    let i:i32=0;
+    while(i<ncp){
+        let w:i32=utf8_encode(g32(cpa,i*4),dst,o);
+        if(w==0){return -1;}
+        o=o+w;
+        i=i+1;
+    }
+    // decoded '.' would smuggle a label boundary -> reject
+    let k:i32=0;
+    while(k<o){
+        if(dst[k]==46){return -1;}
+        k=k+1;
+    }
+    return o;
+}
+
+// ---------- Frozen confusable skeleton map ----------
+// "cp:asc;cp:asc;..." codepoints decimal, ascii target decimal.
+fn conf_literal()[]u8 {
+    return "1072:97;1077:101;1086:111;1088:112;1089:99;1091:121;1093:120;1040:65;1045:69;1054:79;1056:82;1057:67;1053:72;1050:75;1052:77;1058:84;1061:88;945:97;949:101;959:111;961:112;962:99;967:120;913:65;917:69;919:72;921:73;925:78;927:79;929:82;935:88;65313:65;65314:66;65315:67;65316:68;65317:69;65318:70;65319:71;65320:72;65321:73;65322:74;65323:75;65324:76;65325:77;65326:78;65327:79;65328:80;65329:81;65330:82;65331:83;65332:84;65333:85;65334:86;65335:87;65336:88;65337:89;65338:90;65345:97;65346:98;65347:99;65348:100;65349:101;65350:102;65351:103;65352:104;65353:105;65354:106;65355:107;65356:108;65357:109;65358:110;65359:111;65360:112;65361:113;65362:114;65363:115;65364:116;65365:117;65366:118;65367:119;65368:120;65369:121;65370:122;65296:48;65297:49;65298:50;65299:51;65300:52;65301:53;65302:54;65303:55;65304:56;65305:57;";
+}
+
+fn conf_init(cft:[]u8)i32 {
+    let lit:[]u8=conf_literal();
+    let n:i32=0;
+    let i:i32=0;
+    while(i<lit.len){
+        let j:i32=i;
+        while(j<lit.len && lit[j]!=59){j=j+1;}
+        if(j>i){
+            let ent:[]u8=lit[i..j];
+            let c:i32=0;
+            while(c<ent.len && ent[c]!=58){c=c+1;}
+            if(c<ent.len){
+                p32(cft,n*8,atoi(ent[0..c]));
+                cft[n*8+4]=(atoi(ent[c+1..ent.len]) as u8);
+                n=n+1;
+            }
+        }
+        i=j+1;
+    }
+    return n;
+}
+
+fn conf_lookup(cp:i32,cft:[]u8,cfn:i32)i32 {
+    let i:i32=0;
+    while(i<cfn){
+        if(g32(cft,i*8)==cp){return cft[i*8+4] as i32;}
+        i=i+1;
+    }
+    return -1;
+}
+
+// skeletonize src (UTF-8) -> dst; returns bytes, -1 on bad UTF-8.
+fn skeletonize(src:[]u8,dst:[]u8,cft:[]u8,cfn:i32)i32 {
+    let pos:i32=0;
+    let o:i32=0;
+    while(pos<src.len){
+        let cp:i32=0;
+        let pp:i32=pos;
+        if(utf8_decode(src,&pp,&cp)==0){return -1;}
+        pos=pp;
+        let m:i32=conf_lookup(cp,cft,cfn);
+        if(m>=0){
+            dst[o]=m as u8;
+            o=o+1;
+        }else{
+            let w:i32=utf8_encode(cp,dst,o);
+            if(w==0){return -1;}
+            o=o+w;
+        }
+    }
+    return o;
+}
+
+// ---------- URL -> authority ----------
+// extract_authority: find scheme "://" or protocol-relative "//". 1 ok / 0 hostless.
+// as/al: authority offsets into url.
+fn extract_authority(url:[]u8,as:*i32,al:*i32)i32 {
+    let i:i32=0;
+    let se:i32=-1;
+    while(i+2<url.len){
+        if(url[i]==58 && url[i+1]==47 && url[i+2]==47){se=i; break;}
+        if(url[i]==47 || url[i]==63 || url[i]==35){break;}
+        i=i+1;
+    }
+    let a:i32=0;
+    if(se>=0){
+        a=se+3;
+    }else{
+        if(url.len>=2 && url[0]==47 && url[1]==47){a=2;}
+        else{return 0;}
+    }
+    let e:i32=a;
+    while(e<url.len){
+        let c:u8=url[e];
+        if(c==47 || c==63 || c==35){break;}
+        e=e+1;
+    }
+    as[0]=a;
+    al[0]=e-a;
+    return 1;
+}
+
+// split_authority: brackets / userinfo / port.
+// hs/hl: hostpart offsets into auth. returns 0 regular, 1 v6-bracketed,
+// 2 v6-unbracketed, else ST_* (4 DELIM, 5 BADPORT).
+fn split_authority(auth:[]u8,hs:*i32,hl:*i32)i32 {
+    if(auth.len>0 && auth[0]==91){
+        let j:i32=1;
+        while(j<auth.len && auth[j]!=93){j=j+1;}
+        if(j>=auth.len){return 4;}
+        let k:i32=1;
+        while(k<j){
+            if(auth[k]==64){return 4;}
+            k=k+1;
+        }
+        if(j+1<auth.len){
+            if(auth[j+1]!=58){return 4;}
+            let p:i32=j+2;
+            if(p>=auth.len){return 5;}
+            while(p<auth.len){
+                let c:u8=auth[p];
+                if(c<48 || c>57){return 5;}
+                p=p+1;
+            }
+        }
+        hs[0]=1;
+        hl[0]=j-1;
+        return 1;
+    }
+    let at:i32=-1;
+    let i:i32=0;
+    while(i<auth.len){
+        if(auth[i]==64){at=i;}
+        i=i+1;
+    }
+    let hh:i32=0;
+    let hhl:i32=auth.len;
+    if(at>=0){hh=at+1; hhl=auth.len-at-1;}
+    // unbracketed IPv6-literal sniff: contains "::" or starts with ':'
+    let v6:i32=0;
+    let q:i32=hh;
+    while(q+1<hh+hhl){
+        if(auth[q]==58 && auth[q+1]==58){v6=1;}
+        q=q+1;
+    }
+    if(hhl>0 && auth[hh]==58){v6=1;}
+    if(v6==1){
+        hs[0]=hh;
+        hl[0]=hhl;
+        return 2;
+    }
+    let colon:i32=-1;
+    i=hh;
+    while(i<hh+hhl){
+        if(auth[i]==58){colon=i;}
+        i=i+1;
+    }
+    if(colon>=0){
+        let p2:i32=colon+1;
+        if(p2>=hh+hhl){return 5;}
+        while(p2<hh+hhl){
+            let c2:u8=auth[p2];
+            if(c2<48 || c2>57){return 5;}
+            p2=p2+1;
+        }
+        hhl=colon-hh;
+    }
+    hs[0]=hh;
+    hl[0]=hhl;
+    return 0;
+}
+
+// pct-decode src into dst; returns bytes, -1 on bad sequence.
+fn pct_decode(src:[]u8,dst:[]u8)i32 {
+    let i:i32=0;
+    let o:i32=0;
+    while(i<src.len){
+        let c:u8=src[i];
+        if(c==37){
+            if(i+1>=src.len || i+2>=src.len){return -1;}
+            let h1:i32=hexval(src[i+1]);
+            let h2:i32=hexval(src[i+2]);
+            if(h1<0 || h2<0){return -1;}
+            dst[o]=(h1*16+h2) as u8;
+            o=o+1;
+            i=i+3;
+        }else{
+            dst[o]=c;
+            o=o+1;
+            i=i+1;
+        }
+    }
+    return o;
+}
+
+// delimiter scan (regular mode): @ / ? # [ ] space tab LF CR and ':'.
+fn has_delim(s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c==64 || c==47 || c==63 || c==35 || c==91 || c==93){return 1;}
+        if(c==32 || c==9 || c==10 || c==13 || c==58){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+fn has_pct(s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){
+        if(s[i]==37){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+// split s on '.' into (start,len) pairs in tab; -1 empty label, -2 overflow.
+fn split_labels(s:[]u8,tab:[]u8,cap:i32)i32 {
+    let n:i32=0;
+    let i:i32=0;
+    let st:i32=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==46){
+            let l:i32=i-st;
+            if(l==0){return -1;}
+            if(n>=cap){return -2;}
+            p32(tab,n*8,st);
+            p32(tab,n*8+4,l);
+            n=n+1;
+            st=i+1;
+        }
+        i=i+1;
+    }
+    return n;
+}
+
+// DNS label validation on canonical bytes. 1 ok / 0 fail.
+fn valid_dns_labels(s:[]u8,tab:[]u8,n:i32)i32 {
+    if(s.len>253){return 0;}
+    let i:i32=0;
+    while(i<n){
+        let ls:i32=g32(tab,i*8);
+        let ll:i32=g32(tab,i*8+4);
+        if(ll<1 || ll>63){return 0;}
+        let f:u8=s[ls];
+        let l:u8=s[ls+ll-1];
+        if(f==45 || l==45){return 0;}
+        let k:i32=0;
+        while(k<ll){
+            let c:u8=s[ls+k];
+            let ok:i32=0;
+            if((c>=97 && c<=122) || (c>=48 && c<=57) || c==45){ok=1;}
+            if(c>=128){ok=1;}
+            if(ok==0){return 0;}
+            k=k+1;
+        }
+        i=i+1;
+    }
+    return 1;
+}
+
+// ---------- IP literals ----------
+// parse_number: 0x hex / 0 octal / decimal. 1 ok (value in *v), else 0/-1.
+fn parse_number(s:[]u8,v:*i64)i32 {
+    if(s.len>=2 && s[0]==48 && (s[1]==120 || s[1]==88)){
+        if(s.len==2){return -1;}
+        let val:i64=0;
+        let i:i32=2;
+        while(i<s.len){
+            let d:i32=hexval(s[i]);
+            if(d<0){return 0;}
+            val=val*16+(d as i64);
+            i=i+1;
+        }
+        v[0]=val;
+        return 1;
+    }
+    if(s.len>1 && s[0]==48){
+        let val:i64=0;
+        let i:i32=1;
+        while(i<s.len){
+            let c:u8=s[i];
+            if(c<48 || c>55){return -1;}
+            val=val*8+((c as i64)-48);
+            i=i+1;
+        }
+        v[0]=val;
+        return 1;
+    }
+    let val:i64=0;
+    let i:i32=0;
+    while(i<s.len){
+        let c:u8=s[i];
+        if(c<48 || c>57){return 0;}
+        val=val*10+((c as i64)-48);
+        i=i+1;
+    }
+    v[0]=val;
+    return 1;
+}
+
+fn store_part(pi:i32,vv:i64,v0:*i64,v1:*i64,v2:*i64,v3:*i64)void {
+    if(pi==0){v0[0]=vv; return;}
+    if(pi==1){v1[0]=vv; return;}
+    if(pi==2){v2[0]=vv; return;}
+    v3[0]=vv;
+    return;
+}
+
+fn emit_byte_part(ob:[]u8,at:i32,v:i64,ok:*i32)void {
+    if(v<0 || v>255){ok[0]=0; return;}
+    ob[at]=v as u8;
+    return;
+}
+
+// parse_ip4: 1 ok (4 bytes BE into ob), -1 invalid.
+fn parse_ip4(s:[]u8,ob:[]u8)i32 {
+    let dots:i32=0;
+    let i:i32=0;
+    while(i<s.len){
+        if(s[i]==46){dots=dots+1;}
+        i=i+1;
+    }
+    let np:i32=dots+1;
+    if(np>4){return -1;}
+    let v0:i64=0; let v1:i64=0; let v2:i64=0; let v3:i64=0;
+    let pi:i32=0;
+    let st:i32=0;
+    i=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==46){
+            let plen:i32=i-st;
+            if(plen<=0){return -1;}
+            let vv:i64=0;
+            if(parse_number(s[st..st+plen],&vv)!=1){return -1;}
+            store_part(pi,vv,&v0,&v1,&v2,&v3);
+            pi=pi+1;
+            st=i+1;
+        }
+        i=i+1;
+    }
+    let ok:i32=1;
+    if(np==4){
+        emit_byte_part(ob,0,v0,&ok);
+        emit_byte_part(ob,1,v1,&ok);
+        emit_byte_part(ob,2,v2,&ok);
+        emit_byte_part(ob,3,v3,&ok);
+    }else{
+        if(np==3){
+            if(v0<0 || v0>255 || v1<0 || v1>255 || v2<0 || v2>65535){return -1;}
+            ob[0]=v0 as u8; ob[1]=v1 as u8;
+            ob[2]=(v2>>8) as u8; ob[3]=(v2&255) as u8;
+        }else{
+            if(np==2){
+                if(v0<0 || v0>255 || v1<0 || v1>16777215){return -1;}
+                ob[0]=v0 as u8;
+                ob[1]=(v1>>16) as u8; ob[2]=((v1>>8)&255) as u8; ob[3]=(v1&255) as u8;
+            }else{
+                if(v0<0 || v0>4294967295){return -1;}
+                ob[0]=(v0>>24) as u8; ob[1]=((v0>>16)&255) as u8;
+                ob[2]=((v0>>8)&255) as u8; ob[3]=(v0&255) as u8;
+            }
+        }
+    }
+    if(ok==0){return -1;}
+    return 1;
+}
+
+fn parse_hextet(s:[]u8)i32 {
+    if(s.len<1 || s.len>4){return -1;}
+    let v:i32=0;
+    let i:i32=0;
+    while(i<s.len){
+        let d:i32=hexval(s[i]);
+        if(d<0){return -1;}
+        v=v*16+d;
+        i=i+1;
+    }
+    return v;
+}
+
+// parse dotted quad into ob[at..at+4]; 1 ok / 0 fail.
+fn parse_quad(s:[]u8,ob:[]u8,at:i32)i32 {
+    let dots:i32=0;
+    let i:i32=0;
+    while(i<s.len){
+        if(s[i]==46){dots=dots+1;}
+        i=i+1;
+    }
+    if(dots!=3){return 0;}
+    let pi:i32=0;
+    let st:i32=0;
+    i=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==46){
+            let plen:i32=i-st;
+            if(plen<1 || plen>3){return 0;}
+            let v:i32=atoi(s[st..st+plen]);
+            // atoi stops at nondigit; ensure all digits
+            let k:i32=st;
+            while(k<st+plen){
+                if(s[k]<48 || s[k]>57){return 0;}
+                k=k+1;
+            }
+            if(v>255){return 0;}
+            ob[at+pi]=v as u8;
+            pi=pi+1;
+            st=i+1;
+        }
+        i=i+1;
+    }
+    if(pi!=4){return 0;}
+    return 1;
+}
+
+// parse a run of hextets (no dots) into htab (u32 each); count in *n. 1 ok/0 fail.
+fn parse_hextet_run(s:[]u8,htab:[]u8,n:*i32)i32 {
+    if(s.len==0){n[0]=0; return 1;}
+    let cnt:i32=0;
+    let st:i32=0;
+    let i:i32=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==58){
+            let plen:i32=i-st;
+            let v:i32=parse_hextet(s[st..st+plen]);
+            if(v<0){return 0;}
+            if(cnt>=8){return 0;}
+            p32(htab,cnt*4,v);
+            cnt=cnt+1;
+            st=i+1;
+        }
+        i=i+1;
+    }
+    n[0]=cnt;
+    return 1;
+}
+
+// parse_ipv6: 1 ok (16 bytes into ob), 0 fail.
+fn parse_ipv6(s:[]u8,ob:[]u8)i32 {
+    let dc:i32=-1;
+    let i:i32=0;
+    while(i+1<s.len){
+        if(s[i]==58 && s[i+1]==58){
+            if(dc>=0){return 0;}
+            dc=i;
+        }
+        i=i+1;
+    }
+    let head:[]u8=s[0..0];
+    let tail:[]u8=s[0..0];
+    let hasdc:i32=0;
+    if(dc>=0){
+        hasdc=1;
+        head=s[0..dc];
+        tail=s[dc+2..s.len];
+    }else{
+        head=s;
+    }
+    let htab:[]u8=nio_alloc(32);
+    let ttab:[]u8=nio_alloc(32);
+    if(htab.len==0 || ttab.len==0){
+        if(htab.len>0){nio_free(htab);}
+        if(ttab.len>0){nio_free(ttab);}
+        return 0;
+    }
+    let hn:i32=0;
+    let tn:i32=0;
+    let rc:i32=1;
+    // tail may end with dotted quad
+    let tcore:[]u8=tail;
+    let quad:[]u8="";
+    let hasq:i32=0;
+    let k2:i32=tail.len-1;
+    while(k2>=0 && tail[k2]!=58){k2=k2-1;}
+    let lastpart:[]u8=tail[k2+1..tail.len];
+    if(bsub(lastpart,".")==1){
+        quad=lastpart;
+        hasq=1;
+        if(k2<0){tcore=tail[0..0];}else{tcore=tail[0..k2];}
+    }
+    if(parse_hextet_run(head,htab,&hn)==0){rc=0;}
+    if(rc==1 && parse_hextet_run(tcore,ttab,&tn)==0){rc=0;}
+    let total:i32=hn+tn;
+    if(hasq==1){total=total+2;}
+    if(hasdc==1){
+        if(total>=8){rc=0;}
+    }else{
+        if(total!=8){rc=0;}
+    }
+    if(rc==0){
+        nio_free(htab);
+        nio_free(ttab);
+        return 0;
+    }
+    let o:i32=0;
+    let i2:i32=0;
+    while(i2<hn){
+        let v:i32=g32(htab,i2*4);
+        ob[o]=(v>>8) as u8;
+        ob[o+1]=(v&255) as u8;
+        o=o+2;
+        i2=i2+1;
+    }
+    let zeros:i32=8-total;
+    let z2:i32=0;
+    while(z2<zeros){
+        ob[o]=0;
+        ob[o+1]=0;
+        o=o+2;
+        z2=z2+1;
+    }
+    i2=0;
+    while(i2<tn){
+        let v2:i32=g32(ttab,i2*4);
+        ob[o]=(v2>>8) as u8;
+        ob[o+1]=(v2&255) as u8;
+        o=o+2;
+        i2=i2+1;
+    }
+    if(hasq==1){
+        if(parse_quad(quad,ob,o)==0){
+            nio_free(htab);
+            nio_free(ttab);
+            return 0;
+        }
+        o=o+4;
+    }
+    nio_free(htab);
+    nio_free(ttab);
+    if(o!=16){return 0;}
+    return 1;
+}
+
+// hex4_put: lowercase hex of 16-bit v, no leading zeros; returns bytes, -1 alloc fail.
+fn hex4_put(v:i32,out:[]u8,at:i32)i32 {
+    if(v==0){
+        out[at]=48;
+        return 1;
+    }
+    let tmp:[]u8=nio_alloc(4);
+    if(tmp.len==0){return -1;}
+    let n:i32=0;
+    let x:i32=v;
+    while(x>0){
+        let d:i32=x&15;
+        if(d<10){tmp[n]=(48+d) as u8;}else{tmp[n]=(87+d) as u8;}
+        n=n+1;
+        x=x>>4;
+    }
+    let i:i32=0;
+    while(i<n){
+        out[at+i]=tmp[n-1-i];
+        i=i+1;
+    }
+    nio_free(tmp);
+    return n;
+}
+
+// ip6_canon: 16 bytes -> RFC 5952 canonical text, or dotted-decimal for
+// v4-mapped. returns bytes written, -1 on internal error.
+fn ip6_canon(b16:[]u8,out:[]u8)i32 {
+    let mapped:i32=1;
+    let i:i32=0;
+    while(i<10){
+        if(b16[i]!=0){mapped=0;}
+        i=i+1;
+    }
+    if(b16[10]!=255 || b16[11]!=255){mapped=0;}
+    if(mapped==1){
+        let o:i32=0;
+        let q:i32=0;
+        while(q<4){
+            if(q>0){
+                out[o]=46;
+                o=o+1;
+            }
+            let ds:[]u8=i64s(b16[12+q] as i64);
+            let k:i32=0;
+            while(k<ds.len){
+                out[o]=ds[k];
+                o=o+1;
+                k=k+1;
+            }
+            q=q+1;
+        }
+        return o;
+    }
+    let h:[]u8=nio_alloc(32);
+    if(h.len==0){return -1;}
+    i=0;
+    while(i<8){
+        p32(h,i*4,((b16[2*i] as i32)<<8)|(b16[2*i+1] as i32));
+        i=i+1;
+    }
+    let brs:i32=-1;
+    let brl:i32=0;
+    let cs:i32=0;
+    while(cs<8){
+        if(g32(h,cs*4)==0){
+            let ce:i32=cs;
+            while(ce<8 && g32(h,ce*4)==0){ce=ce+1;}
+            let cl2:i32=ce-cs;
+            if(cl2>brl){
+                brl=cl2;
+                brs=cs;
+            }
+            cs=ce;
+        }else{
+            cs=cs+1;
+        }
+    }
+    if(brl<2){brs=-1;}
+    let o2:i32=0;
+    let k2:i32=0;
+    let first2:i32=1;
+    while(k2<8){
+        if(k2==brs){
+            out[o2]=58;
+            out[o2+1]=58;
+            o2=o2+2;
+            k2=k2+brl;
+            first2=1;
+        }else{
+            if(first2==0){
+                out[o2]=58;
+                o2=o2+1;
+            }
+            let w:i32=hex4_put(g32(h,k2*4),out,o2);
+            if(w<0){
+                nio_free(h);
+                return -1;
+            }
+            o2=o2+w;
+            first2=0;
+            k2=k2+1;
+        }
+    }
+    nio_free(h);
+    return o2;
+}
+
+// ---------- Frozen PSL approximation ----------
+// Single-line literal, "\n"-separated, sorted by label count DESC (longest
+// match wins by first hit). Generated from the frozen prereg §4 rule list.
+fn psl_literal()[]u8 {
+    return "city.kawasaki.jp\ncity.kitakyushu.jp\ncity.kobe.jp\ncity.nagoya.jp\ncity.sapporo.jp\ncity.sendai.jp\ncity.yokohama.jp\ncom.ac\nedu.ac\nac.uk\nco.uk\ngov.uk\nme.uk\nnet.uk\norg.uk\nsch.uk\ncom.au\nnet.au\norg.au\nedu.au\ngov.au\nasn.au\nid.au\nco.jp\nne.jp\nor.jp\ngo.jp\nac.jp\ned.jp\nco.kr\nne.kr\nor.kr\nre.kr\npe.kr\ngo.kr\nac.in\nco.in\nnet.in\norg.in\ngov.in\nnic.in\nres.in\nco.nz\nnet.nz\norg.nz\ngovt.nz\nac.nz\nschool.nz\nco.za\norg.za\nnet.za\nweb.za\ncom.br\nnet.br\norg.br\ngov.br\nedu.br\ncom.mx\norg.mx\ngob.mx\nedu.mx\ncom.ar\norg.ar\ngov.ar\nedu.ar\ncom.co\nnet.co\nnom.co\nedu.co\ncom.pl\nnet.pl\norg.pl\nedu.pl\ngov.pl\ncom.tr\nnet.tr\norg.tr\ngov.tr\nedu.tr\ncom.ua\nnet.ua\norg.ua\nedu.ua\nin.ua\nkiev.ua\nco.il\norg.il\nnet.il\nac.il\ngov.il\nidf.il\ncom.sg\nnet.sg\norg.sg\nedu.sg\ngov.sg\nper.sg\ncom.hk\nnet.hk\norg.hk\nedu.hk\ngov.hk\nidv.hk\ncom.tw\nnet.tw\norg.tw\nedu.tw\ngov.tw\nidv.tw\ncom.cn\nnet.cn\norg.cn\ngov.cn\nedu.cn\nac.cn\ncom.my\nnet.my\norg.my\nedu.my\ngov.my\ncom.ph\nnet.ph\norg.ph\ngov.ph\nedu.ph\ncom.vn\nnet.vn\norg.vn\nedu.vn\ngov.vn\ncom.th\nnet.th\norg.th\nac.th\ngo.th\ncom.id\nnet.id\norg.id\nac.id\ngo.id\nmil.id\nsch.id\nco.ke\nne.ke\nor.ke\nac.ke\ngo.ke\ncom.ng\nnet.ng\norg.ng\ngov.ng\nedu.ng\ncom.gh\norg.gh\nedu.gh\ngov.gh\ncom.et\norg.et\nedu.et\ngov.et\ncom.ly\nnet.ly\norg.ly\nedu.ly\nsch.ly\nmed.ly\ncom.fj\nnet.fj\norg.fj\nac.fj\ngov.fj\ncom.pg\nnet.pg\norg.pg\nac.pg\ncom.ws\nnet.ws\norg.ws\ngov.ws\ncom.tj\nnet.tj\nco.tj\ncom.kw\nnet.kw\norg.kw\nedu.kw\ngov.kw\ncom.sa\nnet.sa\norg.sa\nedu.sa\ngov.sa\nmed.sa\ncom.eg\nnet.eg\norg.eg\nedu.eg\ngov.eg\ncom.jm\nnet.jm\norg.jm\nedu.jm\ngov.jm\nmil.jm\nac\nad\nco\ncom\nedu\ngov\nmil\nnet\nnom\norg\nbiz\ninfo\nname\npro\naero\nasia\ncat\ncoop\njobs\nmobi\nmuseum\ntel\ntravel\nxxx\narpa\nint\nlocal\nlocalhost\ninvalid\ntest\nexample\nonion\n";
+}
+
+// parse into tab (12 bytes/entry: start,len,nlabels). returns count.
+fn psl_init(tab:[]u8)i32 {
+    let lit:[]u8=psl_literal();
+    let n:i32=0;
+    let i:i32=0;
+    while(i<lit.len){
+        let j:i32=i;
+        while(j<lit.len && lit[j]!=10){j=j+1;}
+        if(j>i){
+            let nl:i32=1;
+            let k:i32=i;
+            while(k<j){
+                if(lit[k]==46){nl=nl+1;}
+                k=k+1;
+            }
+            p32(tab,n*12,i);
+            p32(tab,n*12+4,j-i);
+            p32(tab,n*12+8,nl);
+            n=n+1;
+        }
+        i=j+1;
+    }
+    return n;
+}
+
+// 1 if host's last labels equal the suffix's labels.
+fn labels_end_match(host:[]u8,labt:[]u8,nlab:i32,suf:[]u8)i32 {
+    let snl:i32=1;
+    let i:i32=0;
+    while(i<suf.len){
+        if(suf[i]==46){snl=snl+1;}
+        i=i+1;
+    }
+    if(snl>nlab){return 0;}
+    let sp:i32=suf.len;
+    let hi:i32=nlab-1;
+    let k:i32=0;
+    while(k<snl){
+        let ss2:i32=sp-1;
+        while(ss2>=0 && suf[ss2]!=46){ss2=ss2-1;}
+        let slen:i32=sp-(ss2+1);
+        let hs:i32=g32(labt,hi*8);
+        let hl:i32=g32(labt,hi*8+4);
+        if(hl!=slen){return 0;}
+        if(bsub_eq(host,hs,suf,ss2+1,slen)==0){return 0;}
+        sp=ss2;
+        hi=hi-1;
+        k=k+1;
+    }
+    return 1;
+}
+
+// copy the last k labels of host into arena[at..]; returns bytes written.
+fn copy_last_labels(host:[]u8,labt:[]u8,nlab:i32,k:i32,arena:[]u8,at:i32)i32 {
+    let first:i32=nlab-k;
+    let hs:i32=g32(labt,first*8);
+    let last:i32=nlab-1;
+    let le:i32=g32(labt,last*8)+g32(labt,last*8+4);
+    let n:i32=le-hs;
+    let i:i32=0;
+    while(i<n){
+        arena[at+i]=host[hs+i];
+        i=i+1;
+    }
+    return n;
+}
+
+// etld1: write origin bytes at arena[at..]; returns origin length, -1 on failure.
+fn etld1(host:[]u8,labt:[]u8,nlab:i32,psl:[]u8,psln:i32,lit:[]u8,arena:[]u8,at:i32)i32 {
+    let pi:i32=0;
+    while(pi<psln){
+        let ps:i32=g32(psl,pi*12);
+        let pl:i32=g32(psl,pi*12+4);
+        let pnl:i32=g32(psl,pi*12+8);
+        if(pnl<nlab){
+            let suf:[]u8=lit[ps..ps+pl];
+            if(labels_end_match(host,labt,nlab,suf)==1){
+                return copy_last_labels(host,labt,nlab,pnl+1,arena,at);
+            }
+        }
+        pi=pi+1;
+    }
+    if(nlab>=2){return copy_last_labels(host,labt,nlab,2,arena,at);}
+    if(nlab==1){return copy_last_labels(host,labt,nlab,1,arena,at);}
+    return -1;
+}
+
+// ---------- Main normalization pipeline ----------
+// scratch: 16384-byte reusable buffer. Layout:
+//   0..2047 dec | 2048..4095 low | 4096..5119 labt | 5120..5375 cpa |
+//   5376..6399 pbuf | 6400..6415 b16 | 6416..6419 b4 | 6420..6483 ipout |
+//   6484..8531 joined
+// arena: output arena; canonical host then origin appended at *apos.
+// Returns status code; on OK, o_chs/o_chl = canonical, o_ohs/o_ohl = origin.
+fn norm_url(url:[]u8,scratch:[]u8,arena:[]u8,apos:*i32,
+            psl:[]u8,psln:i32,lit:[]u8,cft:[]u8,cfn:i32,
+            o_chs:*i32,o_chl:*i32,o_ohs:*i32,o_ohl:*i32)i32 {
+    o_chs[0]=0; o_chl[0]=0; o_ohs[0]=0; o_ohl[0]=0;
+    let aas:i32=0;
+    let aal:i32=0;
+    if(extract_authority(url,&aas,&aal)==0){return 1;}
+    let auth:[]u8=url[aas..aas+aal];
+    if(auth.len>2000){return 7;}
+    let hs:i32=0;
+    let hl:i32=0;
+    let sm:i32=split_authority(auth,&hs,&hl);
+    if(sm!=0 && sm!=1 && sm!=2){return sm;}
+    let hostpart:[]u8=auth[hs..hs+hl];
+    let dec:[]u8=scratch[0..2048];
+    let dl:i32=pct_decode(hostpart,dec);
+    if(dl<0){return 3;}
+    let decs:[]u8=scratch[0..dl];
+    if(sm==0){
+        if(has_delim(decs)==1){return 4;}
+    }else{
+        if(has_pct(decs)==1){return 4;}
+    }
+    if(dl==0){return 2;}
+    let e2:i32=dl;
+    while(e2>0 && scratch[e2-1]==46){e2=e2-1;}
+    if(e2==0){return 2;}
+    // ascii lowercase copy -> low
+    let i:i32=0;
+    while(i<e2){
+        let c:u8=scratch[i];
+        if(c>=65 && c<=90){scratch[2048+i]=c+32;}
+        else{scratch[2048+i]=c;}
+        i=i+1;
+    }
+    let llen:i32=e2;
+    let low:[]u8=scratch[2048..2048+llen];
+    let labt:[]u8=scratch[4096..5120];
+    let nlab:i32=split_labels(low,labt,128);
+    if(nlab<0){return 2;}
+    // joined: lowercase labels with punycode decoded
+    let joined:[]u8=scratch[6484..8532];
+    let jpos:i32=0;
+    let li:i32=0;
+    let prc:i32=0;
+    while(li<nlab){
+        let ls:i32=g32(labt,li*8);
+        let ll:i32=g32(labt,li*8+4);
+        let lab:[]u8=low[ls..ls+ll];
+        if(li>0){
+            if(jpos>=2040){prc=7; break;}
+            joined[jpos]=46;
+            jpos=jpos+1;
+        }
+        if(ll>=4 && lab[0]==120 && lab[1]==110 && lab[2]==45 && lab[3]==45){
+            let pbuf:[]u8=scratch[5376..6400];
+            let cpa:[]u8=scratch[5120..5376];
+            let w:i32=puny_label(lab,pbuf,cpa);
+            if(w<0){prc=9; break;}
+            if(jpos+w>=2040){prc=7; break;}
+            let k:i32=0;
+            while(k<w){
+                joined[jpos+k]=pbuf[k];
+                k=k+1;
+            }
+            jpos=jpos+w;
+        }else{
+            if(jpos+ll>=2040){prc=7; break;}
+            let k2:i32=0;
+            while(k2<ll){
+                joined[jpos+k2]=lab[k2];
+                k2=k2+1;
+            }
+            jpos=jpos+ll;
+        }
+        li=li+1;
+    }
+    if(prc!=0){return prc;}
+    let jsl:[]u8=scratch[6484..6484+jpos];
+    // skeletonize -> arena
+    let apos0:i32=apos[0];
+    let chlen:i32=skeletonize(jsl,arena[apos0..apos0+4096],cft,cfn);
+    if(chlen<0){return 8;}
+    let canon:[]u8=arena[apos0..apos0+chlen];
+    let kind:i32=ip_shape_kind(canon);
+    if(kind==2){
+        let b16:[]u8=scratch[6400..6416];
+        if(parse_ipv6(canon,b16)==0){return 6;}
+        let ipout:[]u8=scratch[6420..6484];
+        let iplen:i32=ip6_canon(b16,ipout);
+        if(iplen<0){return 6;}
+        let c2:i32=0;
+        while(c2<iplen){
+            arena[apos0+c2]=ipout[c2];
+            c2=c2+1;
+        }
+        o_chs[0]=apos0; o_chl[0]=iplen;
+        o_ohs[0]=apos0; o_ohl[0]=iplen;
+        apos[0]=apos0+iplen;
+        return 0;
+    }
+    if(kind==1){
+        let b4:[]u8=scratch[6416..6420];
+        if(parse_ip4(canon,b4)!=1){return 6;}
+        // dotted-decimal canonical emit into arena
+        let o2:i32=apos0;
+        let q3:i32=0;
+        while(q3<4){
+            if(q3>0){arena[o2]=46; o2=o2+1;}
+            let ds2:[]u8=i64s(b4[q3] as i64);
+            let d5:i32=0;
+            while(d5<ds2.len){
+                arena[o2]=ds2[d5];
+                o2=o2+1;
+                d5=d5+1;
+            }
+            q3=q3+1;
+        }
+        let iplen2:i32=o2-apos0;
+        o_chs[0]=apos0; o_chl[0]=iplen2;
+        o_ohs[0]=apos0; o_ohl[0]=iplen2;
+        apos[0]=o2;
+        return 0;
+    }
+    // DNS path
+    let nlab2:i32=split_labels(canon,labt,128);
+    if(nlab2<0){return 7;}
+    if(valid_dns_labels(canon,labt,nlab2)==0){return 7;}
+    let olen:i32=etld1(canon,labt,nlab2,psl,psln,lit,arena,apos0+chlen);
+    if(olen<0){return 7;}
+    o_chs[0]=apos0; o_chl[0]=chlen;
+    o_ohs[0]=apos0+chlen; o_ohl[0]=olen;
+    apos[0]=apos0+chlen+olen;
+    return 0;
+}
+
+// 1 if s is IPv4-number-like: 0x[0-9a-f]+ | [0-9]+ (input pre-lowercased).
+fn part_number_like(s:[]u8)i32 {
+    if(s.len==0){return 0;}
+    if(s.len>=2 && s[0]==48 && s[1]==120){
+        if(s.len==2){return 0;}
+        let i:i32=2;
+        while(i<s.len){
+            let c:u8=s[i];
+            if((c<48 || c>57) && (c<97 || c>102)){return 0;}
+            i=i+1;
+        }
+        return 1;
+    }
+    let i2:i32=0;
+    while(i2<s.len){
+        if(s[i2]<48 || s[i2]>57){return 0;}
+        i2=i2+1;
+    }
+    return 1;
+}
+
+// 2 = v6 (has colon), 1 = v4-ish (1-4 dot parts, each number-like), 0 = DNS.
+fn ip_shape_kind(s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){
+        if(s[i]==58){return 2;}
+        i=i+1;
+    }
+    let np:i32=1;
+    i=0;
+    while(i<s.len){
+        if(s[i]==46){np=np+1;}
+        i=i+1;
+    }
+    if(np>4){return 0;}
+    let st:i32=0;
+    i=0;
+    while(i<=s.len){
+        if(i==s.len || s[i]==46){
+            if(part_number_like(s[st..i])==0){return 0;}
+            st=i+1;
+        }
+        i=i+1;
+    }
+    return 1;
+}
+
+// index of '=' in "=>" separator, or -1.
+fn find_arrow(line:[]u8)i32 {
+    let i:i32=0;
+    while(i+1<line.len){
+        if(line[i]==61 && line[i+1]==62){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+
+// ---------- Deterministic pid sort (byte-wise, unsigned) ----------
+fn pid_less(pa:[]u8,ao:i32,al:i32,bo:i32,bl:i32)i32 {
+    let m:i32=al;
+    if(bl<m){m=bl;}
+    let i:i32=0;
+    while(i<m){
+        let a:u8=pa[ao+i];
+        let b:u8=pa[bo+i];
+        if(a<b){return 1;}
+        if(a>b){return 0;}
+        i=i+1;
+    }
+    if(al<bl){return 1;}
+    return 0;
+}
+
+// insertion sort of idx[] (u32 pid indices) by pid bytes.
+fn sort_pids(pa:[]u8,ptab:[]u8,idx:[]u8,n:i32)void {
+    let i:i32=1;
+    while(i<n){
+        let key:i32=g32(idx,i*4);
+        let ks:i32=g32(ptab,key*8);
+        let kl:i32=g32(ptab,key*8+4);
+        let j:i32=i-1;
+        while(j>=0){
+            let c2:i32=g32(idx,j*4);
+            let cs:i32=g32(ptab,c2*8);
+            let cl:i32=g32(ptab,c2*8+4);
+            if(pid_less(pa,ks,kl,cs,cl)==0){break;}
+            p32(idx,(j+1)*4,c2);
+            j=j-1;
+        }
+        p32(idx,(j+1)*4,key);
+        i=i+1;
+    }
+    return;
+}
+
+fn obuf_put(o:[]u8,op:*i32,s:[]u8)void {
+    let i:i32=0;
+    while(i<s.len){
+        o[op[0]+i]=s[i];
+        i=i+1;
+    }
+    op[0]=op[0]+s.len;
+    return;
+}
+
+// split "X|pid|rest" -> p1,p2 positions of pipes. 1 ok / 0 malformed.
+fn split2(line:[]u8,p1:*i32,p2:*i32)i32 {
+    let a:i32=-1;
+    let b:i32=-1;
+    let i:i32=0;
+    while(i<line.len){
+        if(line[i]==124){
+            if(a<0){a=i;}else{b=i; break;}
+        }
+        i=i+1;
+    }
+    if(a<0 || b<0){return 0;}
+    p1[0]=a;
+    p2[0]=b;
+    return 1;
+}
+
+// find pid in ptab; returns index or -1.
+fn pid_find(pa:[]u8,ptab:[]u8,n:i32,pid:[]u8)i32 {
+    let i:i32=0;
+    while(i<n){
+        let s:i32=g32(ptab,i*8);
+        let l:i32=g32(ptab,i*8+4);
+        if(l==pid.len && bsub_eq(pa,s,pid,0,l)==1){return i;}
+        i=i+1;
+    }
+    return -1;
+}
+
+// ---------- norm mode ----------
+fn cmd_norm(fp:[]u8,scratch:[]u8,arena:[]u8,psl:[]u8,psln:i32,lit:[]u8,cft:[]u8,cfn:i32)i32 {
+    let ok:i32=0;
+    let data:[]u8=read_path(fp,&ok);
+    if(ok==0){
+        _zag_println("ERR cannot read urlfile");
+        return 2;
+    }
+    let ob:[]u8=nio_alloc(8192);
+    if(ob.len==0){
+        nio_free(data);
+        return 2;
+    }
+    let pos:i32=0;
+    let ls:i32=0;
+    let ll:i32=0;
+    while(next_line(data,&pos,&ls,&ll)==1){
+        let line:[]u8=data[ls..ls+ll];
+        if(line.len==0){continue;}
+        if(line[0]==35){continue;}
+        let pid:[]u8="";
+        let url:[]u8=line;
+        let tagged:i32=0;
+        if(line.len>2 && line[0]==85 && line[1]==124){
+            let p1:i32=0;
+            let p2:i32=0;
+            if(split2(line,&p1,&p2)==1){
+                pid=line[p1+1..p2];
+                url=line[p2+1..line.len];
+                tagged=1;
+            }else{continue;}
+        }else{
+            let ai:i32=find_arrow(line);
+            if(ai>0){
+                let ue:i32=ai;
+                while(ue>0 && line[ue-1]==32){ue=ue-1;}
+                url=line[0..ue];
+            }
+        }
+        let apos:i32=0;
+        let chs:i32=0; let chl:i32=0;
+        let ohs:i32=0; let ohl:i32=0;
+        let st:i32=norm_url(url,scratch,arena,&apos,psl,psln,lit,cft,cfn,&chs,&chl,&ohs,&ohl);
+        let canon:[]u8="";
+        let origin:[]u8="INVALID";
+        if(st==0){
+            canon=arena[chs..chs+chl];
+            origin=arena[ohs..ohs+ohl];
+        }
+        let oo:i32=0;
+        if(tagged==1){
+            obuf_put(ob,&oo,"N|");
+            obuf_put(ob,&oo,pid);
+            obuf_put(ob,&oo,"|");
+            obuf_put(ob,&oo,canon);
+            obuf_put(ob,&oo,"|");
+            obuf_put(ob,&oo,origin);
+            obuf_put(ob,&oo,"|");
+            obuf_put(ob,&oo,st_str(st));
+            obuf_put(ob,&oo,"\n");
+        }else{
+            obuf_put(ob,&oo,url);
+            obuf_put(ob,&oo," => ");
+            obuf_put(ob,&oo,canon);
+            obuf_put(ob,&oo,"|");
+            obuf_put(ob,&oo,origin);
+            obuf_put(ob,&oo,"|");
+            obuf_put(ob,&oo,st_str(st));
+            obuf_put(ob,&oo,"\n");
+        }
+        _zag_print(ob[0..oo]);
+    }
+    nio_free(data);
+    nio_free(ob);
+    return 0;
+}
+
+// ---------- pages mode ----------
+fn cmd_pages(inf:[]u8,outf:[]u8,scratch:[]u8,arena:[]u8,psl:[]u8,psln:i32,lit:[]u8,cft:[]u8,cfn:i32)i32 {
+    let ok:i32=0;
+    let data:[]u8=read_path(inf,&ok);
+    if(ok==0){
+        _zag_println("ERR cannot read infile");
+        return 2;
+    }
+    let parena:[]u8=nio_alloc(65536);
+    let uarena:[]u8=nio_alloc(262144);
+    let tarena:[]u8=nio_alloc(65536);
+    let sarena:[]u8=nio_alloc(524288);
+    let ptab:[]u8=nio_alloc(64*8);
+    let utab:[]u8=nio_alloc(64*8);
+    let ttab:[]u8=nio_alloc(64*8);
+    let stab:[]u8=nio_alloc(512*12);
+    if(parena.len==0 || uarena.len==0 || tarena.len==0 || sarena.len==0){
+        _zag_println("ERR alloc");
+        return 2;
+    }
+    let n:i32=0;
+    let pp:i32=0;
+    let up:i32=0;
+    let tp:i32=0;
+    let sp:i32=0;
+    let ns:i32=0;
+    let pos:i32=0;
+    let ls:i32=0;
+    let ll:i32=0;
+    while(next_line(data,&pos,&ls,&ll)==1){
+        let line:[]u8=data[ls..ls+ll];
+        if(line.len<3){continue;}
+        let p1:i32=0;
+        let p2:i32=0;
+        if(split2(line,&p1,&p2)==0){continue;}
+        let pid:[]u8=line[p1+1..p2];
+        let rest:[]u8=line[p2+1..line.len];
+        let kind:u8=line[0];
+        let pi2:i32=pid_find(parena,ptab,n,pid);
+        if(pi2<0){
+            if(n>=64){continue;}
+            let c3:i32=0;
+            while(c3<pid.len){
+                parena[pp+c3]=pid[c3];
+                c3=c3+1;
+            }
+            p32(ptab,n*8,pp);
+            p32(ptab,n*8+4,pid.len);
+            pp=pp+pid.len;
+            p32(utab,n*8,0);
+            p32(utab,n*8+4,0);
+            // default title = pid
+            let c4:i32=0;
+            while(c4<pid.len){
+                tarena[tp+c4]=pid[c4];
+                c4=c4+1;
+            }
+            p32(ttab,n*8,tp);
+            p32(ttab,n*8+4,pid.len);
+            tp=tp+pid.len;
+            pi2=n;
+            n=n+1;
+        }
+        if(kind==85){
+            // U|: url
+            let c5:i32=0;
+            while(c5<rest.len){
+                uarena[up+c5]=rest[c5];
+                c5=c5+1;
+            }
+            p32(utab,pi2*8,up);
+            p32(utab,pi2*8+4,rest.len);
+            up=up+rest.len;
+        }else{
+            if(kind==84){
+                // T|: title
+                let c6:i32=0;
+                while(c6<rest.len){
+                    tarena[tp+c6]=rest[c6];
+                    c6=c6+1;
+                }
+                p32(ttab,pi2*8,tp);
+                p32(ttab,pi2*8+4,rest.len);
+                tp=tp+rest.len;
+            }else{
+                if(kind==83){
+                    // S|: sentence
+                    if(ns<512){
+                        let c7:i32=0;
+                        while(c7<rest.len){
+                            sarena[sp+c7]=rest[c7];
+                            c7=c7+1;
+                        }
+                        p32(stab,ns*12,pi2);
+                        p32(stab,ns*12+4,sp);
+                        p32(stab,ns*12+8,rest.len);
+                        sp=sp+rest.len;
+                        ns=ns+1;
+                    }
+                }
+            }
+        }
+    }
+    nio_free(data);
+    // sort pid indices
+    let idx:[]u8=nio_alloc(64*4);
+    let i:i32=0;
+    while(i<n){
+        p32(idx,i*4,i);
+        i=i+1;
+    }
+    sort_pids(parena,ptab,idx,n);
+    // emit
+    let out:[]u8=nio_alloc(1048576);
+    let op:i32=0;
+    let si:i32=0;
+    while(si<n){
+        let pi3:i32=g32(idx,si*4);
+        let ul:i32=g32(utab,pi3*8+4);
+        if(ul>0){
+            let ps:i32=g32(ptab,pi3*8);
+            let pl:i32=g32(ptab,pi3*8+4);
+            let pid3:[]u8=parena[ps..ps+pl];
+            let us:i32=g32(utab,pi3*8);
+            let url3:[]u8=uarena[us..us+ul];
+            let ts:i32=g32(ttab,pi3*8);
+            let tl:i32=g32(ttab,pi3*8+4);
+            let title3:[]u8=tarena[ts..ts+tl];
+            obuf_put(out,&op,"P|");
+            obuf_put(out,&op,pid3);
+            obuf_put(out,&op,"|");
+            obuf_put(out,&op,title3);
+            obuf_put(out,&op,"\n");
+            let apos:i32=0;
+            let chs:i32=0; let chl:i32=0;
+            let ohs:i32=0; let ohl:i32=0;
+            let st:i32=norm_url(url3,scratch,arena,&apos,psl,psln,lit,cft,cfn,&chs,&chl,&ohs,&ohl);
+            if(st==0){
+                let origin:[]u8=arena[ohs..ohs+ohl];
+                obuf_put(out,&op,"H|");
+                obuf_put(out,&op,origin);
+                obuf_put(out,&op,"\n");
+            }
+            let q:i32=0;
+            while(q<ns){
+                if(g32(stab,q*12)==pi3){
+                    let ss2:i32=g32(stab,q*12+4);
+                    let sl2:i32=g32(stab,q*12+8);
+                    obuf_put(out,&op,"S|");
+                    obuf_put(out,&op,sarena[ss2..ss2+sl2]);
+                    obuf_put(out,&op,"\n");
+                }
+                q=q+1;
+            }
+        }
+        si=si+1;
+    }
+    let rc:i32=0;
+    if(write_path(outf,out[0..op])==0){
+        _zag_println("ERR cannot write outfile");
+        rc=2;
+    }
+    nio_free(parena);
+    nio_free(uarena);
+    nio_free(tarena);
+    nio_free(sarena);
+    nio_free(ptab);
+    nio_free(utab);
+    nio_free(ttab);
+    nio_free(stab);
+    nio_free(idx);
+    nio_free(out);
+    return rc;
+}
+
+fn main()i32 {
+    let lit:[]u8=psl_literal();
+    let psl:[]u8=nio_alloc(256*12);
+    let cft:[]u8=nio_alloc(128*8);
+    let scratch:[]u8=nio_alloc(16384);
+    let arena:[]u8=nio_alloc(65536);
+    if(psl.len==0 || cft.len==0 || scratch.len==0 || arena.len==0){
+        _zag_println("ERR alloc");
+        return 2;
+    }
+    let psln:i32=psl_init(psl);
+    let cfn:i32=conf_init(cft);
+    let mode:[]u8=_zag_arg(1);
+    let rc:i32=2;
+    if(nio_equal(mode,"norm")==1){
+        let fp:[]u8=_zag_arg(2);
+        if(fp.len>0){rc=cmd_norm(fp,scratch,arena,psl,psln,lit,cft,cfn);}
+        else{_zag_println("usage: hostnorm norm <urlfile>");}
+    }else{
+        if(nio_equal(mode,"pages")==1){
+            let inf:[]u8=_zag_arg(2);
+            let outf:[]u8=_zag_arg(3);
+            if(inf.len>0 && outf.len>0){rc=cmd_pages(inf,outf,scratch,arena,psl,psln,lit,cft,cfn);}
+            else{_zag_println("usage: hostnorm pages <infile> <outfile>");}
+        }else{
+            _zag_println("usage: hostnorm norm <urlfile> | pages <infile> <outfile>");
+        }
+    }
+    nio_free(psl);
+    nio_free(cft);
+    nio_free(scratch);
+    nio_free(arena);
+    return rc;
+}

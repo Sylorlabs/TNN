@@ -1,0 +1,184 @@
+// sus_base.zag -- COMPOSE-SUSPEND-1 base.
+// Alloc, little-endian i32 access, output helpers, kind compatibility,
+// fact store, MAP table, MAP execution with ASSEMBLE/EVALUATE phase
+// instrumentation. Pure Zag.
+//
+// Output rule (mandatory): dynamic content is formatted into ONE
+// preallocated buffer with cursor-returning helpers, then a single
+// _zag_raw_syscall write. _zag_print is never used for dynamic content.
+//
+// Arena A (world): MAP inventory + facts.
+//   0: nf (fact count)
+//   4: facts, 64 * 12 bytes (s, r, o)
+//   772: MAP table, 16 maps * 8 fields * 4 bytes
+//        fields: 0 class, 1 rel, 2 inmask, 3 outmask,
+//                4 inmask1, 5 inmask2, 6 arity, 7 nobs
+//   1284: nmaps
+// Classes: 0=WALK, 1=COUNT, 4=ADD2 (matches the PAIR6 substrate).
+//
+// Arena S (suspend learner state):
+//   0: nthunk
+//   4: asm_steps      (app-thunks newly interned while phase==0)
+//   8: search_runs    (ASSEMBLE enumerations executed)
+//   12: widen         (0/1)
+//   16: viol_asm      (MAP executions while phase==0; must stay 0)
+//   20: phase         (0=ASSEMBLE, 1=EVALUATE)
+//   24: const_tid    (current goal const thunk)
+//   28: exec_total
+//   32: exec per map, 16 * 4 bytes
+//   96: thunk table, 256 entries * 8 fields * 4 bytes
+//       fields: 0 map(-1=const), 1 in1, 2 in2, 3 cval,
+//               4 kindmask, 5 size, 6 memo, 7 onstack
+//   32864: per-thunk exec, 256 * 4 bytes
+//   9312: composite store, 8 entries * 4 fields * 4 bytes
+//         fields: kin, kout, sketch, root
+//   9440: nstore
+//   9444: invalidated tid list, 256 * 4 bytes; 10468: ninv
+// Sentinels: MISS=-2, NOVAL=-999999.
+
+fn z_alloc(n:i32)[]u8 {
+  let p:*u8=_zag_malloc(n) as *u8;
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+// ---- output helpers: append into buffer, return new cursor ----
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c+i]=s[i]; i=i+1; }
+  return c+s.len;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0;
+  let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1;
+  let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n;
+  let p:i32=e-1;
+  let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){
+    b[p]=(48+(y-(y/10)*10)) as u8;
+    y=y/10;
+    p=p-1;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0);
+  return;
+}
+// ---- kind compatibility: mask==0 compatible with all; kinds are 1-based bit positions ----
+fn khas(mask:i32,k:i32)i32 {
+  if(mask==0){ return 1; }
+  if((mask & (1<<(k-1)))!=0){ return 1; }
+  return 0;
+}
+// ---- arena accessors ----
+fn ag(A:[]u8,off:i32)i32 { return get32(A,off); }
+fn ap(A:[]u8,off:i32,v:i32)void { set32(A,off,v); return; }
+fn mg(A:[]u8,m:i32,f:i32)i32 { return get32(A,772+m*32+f*4); }
+fn mp(A:[]u8,m:i32,f:i32,v:i32)void { set32(A,772+m*32+f*4,v); return; }
+fn sg(S:[]u8,off:i32)i32 { return get32(S,off); }
+fn sp(S:[]u8,off:i32,v:i32)void { set32(S,off,v); return; }
+fn tg(S:[]u8,t:i32,f:i32)i32 { return get32(S,96+t*32+f*4); }
+fn tp(S:[]u8,t:i32,f:i32,v:i32)void { set32(S,96+t*32+f*4,v); return; }
+fn eg(S:[]u8,m:i32)i32 { return get32(S,32+m*4); }
+fn ep(S:[]u8,m:i32,v:i32)void { set32(S,32+m*4,v); return; }
+fn te(S:[]u8,t:i32)i32 { return get32(S,32864+t*4); }
+fn te_set(S:[]u8,t:i32,v:i32)void { set32(S,32864+t*4,v); return; }
+// ---- facts: single-hop lookup, missing -> -2 ----
+fn fact_add(A:[]u8,s:i32,r:i32,o:i32)void {
+  let n:i32=ag(A,0);
+  if(n<64){
+    set32(A,4+n*12,s); set32(A,4+n*12+4,r); set32(A,4+n*12+8,o);
+    ap(A,0,n+1);
+  }
+  return;
+}
+fn fact_del(A:[]u8,s:i32,r:i32)void {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==r){
+      let li:i32=n-1;
+      set32(A,4+i*12,get32(A,4+li*12));
+      set32(A,4+i*12+4,get32(A,4+li*12+4));
+      set32(A,4+i*12+8,get32(A,4+li*12+8));
+      ap(A,0,li);
+      return;
+    }
+    i=i+1;
+  }
+  return;
+}
+fn fact1(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ return get32(A,4+i*12+8); }
+    i=i+1;
+  }
+  return -2;
+}
+fn count_rel(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  let c:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ c=c+1; }
+    i=i+1;
+  }
+  if(c==0){ return -2; }
+  return c;
+}
+// ---- MAP table ----
+fn map_new(A:[]u8,m:i32,cl:i32,rel:i32,inm:i32,outm:i32,inm1:i32,inm2:i32,ar:i32)void {
+  mp(A,m,0,cl); mp(A,m,1,rel); mp(A,m,2,inm); mp(A,m,3,outm);
+  mp(A,m,4,inm1); mp(A,m,5,inm2); mp(A,m,6,ar); mp(A,m,7,0);
+  let nm:i32=ag(A,1284);
+  if(m>=nm){ ap(A,1284,m+1); }
+  return;
+}
+// ---- MAP execution with phase instrumentation ----
+// Any execution while phase==0 is a phase-separation violation (F-B4).
+fn exec_map(S:[]u8,A:[]u8,m:i32,v1:i32)i32 {
+  if(sg(S,20)==0){ sp(S,16,sg(S,16)+1); }
+  ep(S,m,eg(S,m)+1);
+  sp(S,28,sg(S,28)+1);
+  let cl:i32=mg(A,m,0);
+  let rel:i32=mg(A,m,1);
+  if(cl==0){ return fact1(A,v1,rel); }
+  if(cl==1){ return count_rel(A,v1,rel); }
+  return -2;
+}
+fn exec_map2(S:[]u8,A:[]u8,m:i32,v1:i32,v2:i32)i32 {
+  if(sg(S,20)==0){ sp(S,16,sg(S,16)+1); }
+  ep(S,m,eg(S,m)+1);
+  sp(S,28,sg(S,28)+1);
+  let cl:i32=mg(A,m,0);
+  if(cl==4){
+    if(v1==-2){ return -2; }
+    if(v2==-2){ return -2; }
+    return v1+v2;
+  }
+  return -2;
+}

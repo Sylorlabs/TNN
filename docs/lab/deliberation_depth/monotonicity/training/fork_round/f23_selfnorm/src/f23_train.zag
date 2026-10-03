@@ -1,0 +1,307 @@
+// f23_train.zag — F23 SELFNORM deterministic coordinate-descent trainer.
+//
+// Fits the self-normalized head
+//   C = clamp((w1*f1' + w2*f2 + w3*f3 + w4*f4' + w5*f5 + w6*f6 + w7*f7 + w8*f8)/1000 + b, 0, 1000)
+// with
+//   f1' = min(1000, 1000*f1 / max(64, M1))            (M1: trailing max f1, inclusive)
+//   f4' = clamp(tdiv(1000*f4 / max(64, M4a)), -1000, 1000)  (M4a: trailing max |f4|, inclusive)
+// M1/M4a are CROSS-DEPTH: trailing max over the item's (item,depth) cells in
+// depth order (features.tsv is verified depth-ordered per item, 0 violations).
+// The transform pass covers ALL cells (heldout included — no labels leak;
+// f1/f4 are features); training uses heldout==0 && rel4==1 only.
+//
+// Optimizer (recorded in BUILDLOG.md BEFORE first run): deterministic
+// full-batch integer coordinate descent on
+//   L = sum_cells [ (C-Y)^2 + 2*[Y=0]*C^2 + 4*rise*(C-Cprev)^2 ]
+// (base trainer's loss on transformed features; NO G-batch term — see BUILDLOG).
+// Inits w=(1000,0,0,0,0,0,0,0), b=0. Steps +-64, +-16, +-4, +-1; coordinate
+// order w1..w8,b; greedy strict-improvement acceptance; max 50 sweeps/step.
+// Zero RNG. Pure integer arithmetic (truncation-toward-zero division).
+//
+// Usage: f23_train <features.tsv> <params_out.zag> <log_out.tsv> <transform_out.tsv>
+// transform_out.tsv cols: id \t depth \t f1 \t f4 \t M1 \t M4a \t f1p \t f4p
+// (audit artifact: python cross-checks the self-norm transform; A/B runs
+// must also produce byte-identical transform files.)
+
+@import("R33_NATIVE_SHA256_V2.zag")
+@import("dlb_util.zag")
+
+fn f23_tdiv(a:i64,b:i64)i64 {
+    if(a>=0){return a/b;}
+    return -((-a)/b);
+}
+fn f23_clamp(v:i64,lo:i64,hi:i64)i64 {
+    if(v<lo){return lo;}
+    if(v>hi){return hi;}
+    return v;
+}
+fn f23_split(line:[]u8,tabs:[]u8)void {
+    let n:i32=0;
+    let i:i32=0;
+    while(i<line.len && n<16){
+        if(line[i]==9){au_put32(tabs,n,i);n=n+1;}
+        i=i+1;
+    }
+    au_put32(tabs,n,line.len);
+}
+// id map over 64-byte slots; returns slot index, -1 if full.
+// New slots are initialized: M1=0, M4a=0, lastrel=-1 (explicit init;
+// heap arrays are not reliably zeroed — AGENTS.md znc arena-init lesson).
+fn f23_idslot(id:[]u8,slots:[]u8,lens:[]u8,idst:[]u8,nslots:i32,nused:*i32)i32 {
+    let i:i32=0;
+    while(i<nused.*){
+        if(au_get32(lens,i)==id.len){
+            let base:i32=i*64;
+            if(nio_equal(slots[base..base+id.len],id)==1){return i;}
+        }
+        i=i+1;
+    }
+    if(nused.*>=nslots){return -1;}
+    let s:i32=nused.*;
+    let base2:i32=s*64;
+    let k:i32=0;
+    while(k<id.len && k<64){slots[base2+k]=id[k];k=k+1;}
+    au_put32(lens,s,id.len);
+    au_put64(idst,s*3+0,0);
+    au_put64(idst,s*3+1,0);
+    au_put64(idst,s*3+2,-1);
+    nused.*=s+1;
+    return s;
+}
+// confidence of cell ci (transformed feats live at feats[ci*8 ..]) under (w,b)
+fn f23_conf(w:[]u8,b:i64,feats:[]u8,ci:i32)i64 {
+    let acc:i64=0;
+    let base:i32=ci*8;
+    let k:i32=0;
+    while(k<8){
+        acc=acc+au_get64(w,k)*(au_get32(feats,base+k) as i64);
+        k=k+1;
+    }
+    return f23_clamp(f23_tdiv(acc,1000)+b,0,1000);
+}
+// full-batch objective over training cells (meta[ci*6+5]==1)
+fn f23_loss(w:[]u8,b:i64,ncells:i32,meta:[]u8,feats:[]u8)i64 {
+    let L:i64=0;
+    let i:i32=0;
+    while(i<ncells){
+        if(au_get32(meta,i*6+5)==1){
+            let y:i32=au_get32(meta,i*6+3);
+            let yy:i64=0;
+            if(y==1){yy=1000;}
+            let c:i64=f23_conf(w,b,feats,i);
+            let err:i64=c-yy;
+            let yw:i64=0;
+            if(y==0){yw=1;}
+            let pv:i32=au_get32(meta,i*6+4);
+            let rise:i64=0;
+            if(pv>=0 && y==0 && au_get32(meta,pv*6+3)==0){
+                let cp:i64=f23_conf(w,b,feats,pv);
+                if(c>cp){rise=c-cp;}
+            }
+            L=L+err*err+2*yw*c*c+4*rise*rise;
+        }
+        i=i+1;
+    }
+    return L;
+}
+
+fn f23_train(feat_path:[]u8,params_path:[]u8,log_path:[]u8,xform_path:[]u8)i32 {
+    let fbuf:[]u8=nio_alloc(4194304);
+    if(fbuf.len==0){return 102;}
+    let bn:i64=dlb_read_file(feat_path,fbuf);
+    if(bn<0){nio_free(fbuf);return 102;}
+    let blen:i32=bn as i32;
+    let maxcells:i32=8192;
+    let meta:[]u8=nio_alloc((maxcells*6*4) as i64);
+    let feats:[]u8=nio_alloc((maxcells*8*4) as i64);
+    let tabs:[]u8=nio_alloc(17*4);
+    if(meta.len==0||feats.len==0||tabs.len==0){return 102;}
+    let nslots:i32=2048;
+    let idslots:[]u8=nio_alloc((nslots*64) as i64);
+    let idlens:[]u8=nio_alloc((nslots*4) as i64);
+    let idst:[]u8=nio_alloc((nslots*3*8) as i64);
+    if(idslots.len==0||idlens.len==0||idst.len==0){return 102;}
+    let nused:i32=0;
+    let ncells:i32=0;
+    let ntrain:i32=0;
+    let nf1live:i32=0;
+    let xf:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    if(dout_init(&xf,1048576)!=0){return 102;}
+    dout_str(&xf,"id\tdepth\tf1\tf4\tM1\tM4a\tf1p\tf4p\n");
+    let pos:i32=0;
+    while(pos<blen){
+        let e:i32=pos;
+        while(e<blen && fbuf[e]!=10){e=e+1;}
+        let line:[]u8=fbuf[pos..e];
+        if(line.len>0 && line[line.len-1]==13){line=line[0..line.len-1];}
+        if(line.len>0 && ncells<maxcells){
+            f23_split(line,tabs);
+            // cols: 0 id,1 family,2 heldout,3 depth,4 t,5 rel4,6 correct4,7..14 f1..f8
+            let e0:i32=au_get32(tabs,0);
+            let e1:i32=au_get32(tabs,1);
+            let e2:i32=au_get32(tabs,2);
+            let e3:i32=au_get32(tabs,3);
+            let e4:i32=au_get32(tabs,4);
+            let e5:i32=au_get32(tabs,5);
+            let id:[]u8=line[0..e0];
+            let heldout:i32=dlb_atoi(line[e1+1..e2]);
+            let depth:i32=dlb_atoi(line[e2+1..e3]);
+            let rel4:i32=dlb_atoi(line[e4+1..e5]);
+            let c4:[]u8=line[e5+1..au_get32(tabs,6)];
+            let y:i32=-1;
+            if(rel4==1){
+                y=0;
+                if(c4.len==1 && c4[0]==49){y=1;}
+            }
+            let f1:i32=dlb_atoi(line[au_get32(tabs,6)+1..au_get32(tabs,7)]);
+            let f4:i32=dlb_atoi(line[au_get32(tabs,9)+1..au_get32(tabs,10)]);
+            // trailing-max state for this id (inclusive update)
+            let slot:i32=f23_idslot(id,idslots,idlens,idst,nslots,&nused);
+            if(slot<0){return 102;}
+            let m1:i64=au_get64(idst,slot*3+0);
+            let m4a:i64=au_get64(idst,slot*3+1);
+            let f1g:i64=f1 as i64;
+            if(rel4==1){
+                if(f1g>m1){m1=f1g;}
+                let af4:i64=f4 as i64;
+                if(af4<0){af4=-af4;}
+                if(af4>m4a){m4a=af4;}
+                au_put64(idst,slot*3+0,m1);
+                au_put64(idst,slot*3+1,m4a);
+            }
+            let d1:i64=m1;
+            if(d1<64){d1=64;}
+            let f1p:i64=(1000*f1g)/d1;
+            if(f1p>1000){f1p=1000;}
+            let d4:i64=m4a;
+            if(d4<64){d4=64;}
+            let f4p:i64=f23_clamp(f23_tdiv(1000*(f4 as i64),d4),-1000,1000);
+            if(f1p!=1000){nf1live=nf1live+1;}
+            dout_str(&xf,id);dout_byte(&xf,9);
+            dout_i64(&xf,depth as i64);dout_byte(&xf,9);
+            dout_i64(&xf,f1 as i64);dout_byte(&xf,9);
+            dout_i64(&xf,f4 as i64);dout_byte(&xf,9);
+            dout_i64(&xf,m1);dout_byte(&xf,9);
+            dout_i64(&xf,m4a);dout_byte(&xf,9);
+            dout_i64(&xf,f1p);dout_byte(&xf,9);
+            dout_i64(&xf,f4p);dout_line(&xf);
+            if(xf.err!=0){return 102;}
+            // prev released same-id cell
+            let pv:i64=au_get64(idst,slot*3+2);
+            let pvi:i32=pv as i32;
+            if(pv<0){pvi=-1;}
+            if(rel4==1){au_put64(idst,slot*3+2,ncells as i64);}
+            // store cell
+            let ci:i32=ncells;
+            au_put32(meta,ci*6+0,heldout);
+            au_put32(meta,ci*6+1,depth);
+            au_put32(meta,ci*6+2,rel4);
+            au_put32(meta,ci*6+3,y);
+            au_put32(meta,ci*6+4,pvi);
+            let tr:i32=0;
+            if(heldout==0 && rel4==1){tr=1;ntrain=ntrain+1;}
+            au_put32(meta,ci*6+5,tr);
+            au_put32(feats,ci*8+0,f1p as i32);
+            au_put32(feats,ci*8+1,dlb_atoi(line[au_get32(tabs,7)+1..au_get32(tabs,8)]));
+            au_put32(feats,ci*8+2,dlb_atoi(line[au_get32(tabs,8)+1..au_get32(tabs,9)]));
+            au_put32(feats,ci*8+3,f4p as i32);
+            au_put32(feats,ci*8+4,dlb_atoi(line[au_get32(tabs,10)+1..au_get32(tabs,11)]));
+            au_put32(feats,ci*8+5,dlb_atoi(line[au_get32(tabs,11)+1..au_get32(tabs,12)]));
+            au_put32(feats,ci*8+6,dlb_atoi(line[au_get32(tabs,12)+1..au_get32(tabs,13)]));
+            au_put32(feats,ci*8+7,dlb_atoi(line[au_get32(tabs,13)+1..au_get32(tabs,14)]));
+            ncells=ncells+1;
+        }
+        pos=e+1;
+    }
+    // coordinate descent
+    let w:[]u8=nio_alloc(8*8);
+    if(w.len==0){return 102;}
+    let wi:i32=0;
+    while(wi<8){au_put64(w,wi,0);wi=wi+1;}
+    au_put64(w,0,1000);
+    let b:i64=0;
+    let lgo:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    if(dout_init(&lgo,65536)!=0){return 102;}
+    dout_str(&lgo,"sweep\tstep\tL\tw1\tw2\tw3\tw4\tw5\tw6\tw7\tw8\tb\n");
+    let Lcur:i64=f23_loss(w,b,ncells,meta,feats);
+    let si:i32=0;
+    while(si<4){
+        let step:i64=64;
+        if(si==1){step=16;}
+        if(si==2){step=4;}
+        if(si==3){step=1;}
+        let sweep:i32=0;
+        let improved:i32=1;
+        while(improved==1 && sweep<50){
+            improved=0;
+            let k:i32=0;
+            while(k<9){
+                let dir:i32=0;
+                while(dir<2){
+                    let delta:i64=step;
+                    if(dir==1){delta=-step;}
+                    if(k<8){au_put64(w,k,au_get64(w,k)+delta);}
+                    if(k==8){b=b+delta;}
+                    let Ln:i64=f23_loss(w,b,ncells,meta,feats);
+                    if(Ln<Lcur){Lcur=Ln;improved=1;}
+                    else{
+                        if(k<8){au_put64(w,k,au_get64(w,k)-delta);}
+                        if(k==8){b=b-delta;}
+                    }
+                    dir=dir+1;
+                }
+                k=k+1;
+            }
+            sweep=sweep+1;
+            dout_i64(&lgo,sweep as i64);dout_byte(&lgo,9);
+            dout_i64(&lgo,step);dout_byte(&lgo,9);
+            dout_i64(&lgo,Lcur);dout_byte(&lgo,9);
+            let k2:i32=0;
+            while(k2<8){dout_i64(&lgo,au_get64(w,k2));dout_byte(&lgo,9);k2=k2+1;}
+            dout_i64(&lgo,b);dout_line(&lgo);
+            if(lgo.err!=0){return 102;}
+        }
+        si=si+1;
+    }
+    // params file
+    let po:DOut=DOut{.buf="",.n=0,.cap=0,.err=0};
+    if(dout_init(&po,4096)!=0){return 102;}
+    dout_str(&po,"// f23_params — FROZEN F23 SELFNORM head weights.\n");
+    dout_str(&po,"// Generated by f23_train.zag (coordinate descent; see BUILDLOG.md). Do not hand-edit.\n");
+    let k3:i32=0;
+    while(k3<8){
+        dout_str(&po,"fn f23_w");
+        dout_i64(&po,k3 as i64);
+        dout_str(&po,"()i64 { return ");
+        dout_i64(&po,au_get64(w,k3));
+        dout_str(&po,"; }\n");
+        k3=k3+1;
+    }
+    dout_str(&po,"fn f23_b()i64 { return ");
+    dout_i64(&po,b);
+    dout_str(&po,"; }\n");
+    let wrc:i64=dlb_write_file(params_path,dout_bytes(&po),po.n);
+    let wrc2:i64=dlb_write_file(log_path,dout_bytes(&lgo),lgo.n);
+    let wrc3:i64=dlb_write_file(xform_path,dout_bytes(&xf),xf.n);
+    _zag_println("f23_train done");
+    nio_free(fbuf);
+    nio_free(meta);nio_free(feats);nio_free(tabs);
+    nio_free(idslots);nio_free(idlens);nio_free(idst);
+    nio_free(w);
+    dout_free(&lgo);dout_free(&po);dout_free(&xf);
+    if(wrc<0 || wrc2<0 || wrc3<0){return 103;}
+    return 0;
+}
+
+fn main()i32 {
+    // NOTE: _zag_argc() is 0 per ZNC-2026-09-21-007; read args unconditionally.
+    let a1:[]u8=_zag_arg(1);
+    let a2:[]u8=_zag_arg(2);
+    let a3:[]u8=_zag_arg(3);
+    let a4:[]u8=_zag_arg(4);
+    if(a1.len==0 || a2.len==0 || a3.len==0 || a4.len==0){
+        _zag_println("usage: f23_train <features.tsv> <params_out.zag> <log_out.tsv> <transform_out.tsv>");
+        return 64;
+    }
+    return f23_train(a1,a2,a3,a4);
+}

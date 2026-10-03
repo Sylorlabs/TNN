@@ -1,0 +1,884 @@
+// l3a_trace_clean.zag
+// L3A-TRACE clean-room rebuild: the learner invents an executable operator
+// from its own execution traces.
+//
+// Written independently from the frozen prereg (05898699e) plus amendments
+// A1 (444617dd4) and A2 (439dd54c5). Same frozen design as the original
+// builder's implementation, expressed in fresh code: own helper names, own
+// buffer/offset conventions, own code organization. Pure Zag throughout.
+// No other language is used at any step of this wave.
+//
+// Mechanism sketch:
+//   A stack VM (ops 0..18, frozen) executes candidate programs.
+//   Phase-1 beam search solves training tasks T0 (y = x^2) and T1 (y = 2x^2).
+//   R1 RECORD: the learner re-executes each solution on every training
+//     episode with tracing on, storing (op, arg, depth_before, depth_after)
+//     per step in learner state.
+//   R2 DETECT: the learner finds the longest contiguous (op,arg) segment
+//     present in EVERY recorded episode of at least two distinct tasks,
+//     with abstract stack arity in 0..2 and produced >= 1. Deterministic
+//     tie-breaks: longest, then credit count, then lexicographic.
+//   R3 REIFY: the segment is copied into trace_heap plus a name-table entry
+//     under a runtime-assigned name id. The invented operator's semantics
+//     is exactly those stored bytes; no source case describes it.
+//   R4 REUSE: phase-2 beam search may expand TCALL n, a generic indirection
+//     op (bounds check, name-table lookup, recursive call into the same
+//     interpreter). The search learns what TCALL does only by executing it.
+//   Held-out T2 (y = x^4+2x^2+x+1) tests reuse; the ablation (no TCALL
+//     expansions) must fail to reach exact within the frozen budget.
+//
+// Base VM op encoding (op:i32, arg:i32), frozen by the prereg:
+//   0=PUSH k, 1=IN0, 2=IN1, 3=ADD, 4=SUB, 5=MUL, 6=DIV (0 on div-by-zero),
+//   7=NEG, 8=DUP, 9=DROP, 10=SWAP, 11=OVER,
+//   12=LT, 13=EQ, 14=GT, 15=JZ a, 16=JNZ a, 17=JMP a,
+//   18=TCALL n (generic trace call by runtime name id).
+
+// ============ byte buffer helpers ============
+// The loop's established idiom: u8-backed cells with little-endian
+// pack/unpack helpers. Allocation via the pinned pattern only.
+fn newbuf(n:i32)[]u8 {
+  if(n<1){ return ""; }
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){ return ""; }
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn i32get(b:[]u8, i:i32)i32 {
+  return (b[i] as i32)|((b[i+1] as i32)<<8)|((b[i+2] as i32)<<16)|((b[i+3] as i32)<<24);
+}
+fn i32set(b:[]u8, i:i32, v:i32)void {
+  b[i]=v as u8; b[i+1]=(v>>8) as u8; b[i+2]=(v>>16) as u8; b[i+3]=(v>>24) as u8;
+  return;
+}
+fn i64get(b:[]u8, i:i32)i64 {
+  let lo:i32=i32get(b, i);
+  let hi:i32=i32get(b, i+4);
+  return (lo as i64)|((hi as i64)<<32);
+}
+fn i64set(b:[]u8, i:i32, v:i64)void {
+  i32set(b, i, v as i32);
+  i32set(b, i+4, (v>>32) as i32);
+  return;
+}
+fn pstr(s:[]u8)void { _zag_print(s); return; }
+fn pint(v:i32)void {
+  let r:[]u8=_zag_i64_to_str(v as i64);
+  if(r.len>0 && r[r.len-1]==10){ _zag_print(r[0..r.len-1]); return; }
+  _zag_print(r);
+  return;
+}
+
+// ============ program representation ============
+// A program occupies a byte buffer at a base offset:
+//   base+0: length L (i32)
+//   base+4+i*8: op of slot i (i32); base+4+i*8+4: arg of slot i (i32)
+fn plen(b:[]u8, base:i32)i32 { return i32get(b, base); }
+fn psetlen(b:[]u8, base:i32, l:i32)void { i32set(b, base, l); return; }
+fn popof(b:[]u8, base:i32, i:i32)i32 { return i32get(b, base+4+i*8); }
+fn pargof(b:[]u8, base:i32, i:i32)i32 { return i32get(b, base+4+i*8+4); }
+fn pset(b:[]u8, base:i32, i:i32, op:i32, arg:i32)void {
+  i32set(b, base+4+i*8, op); i32set(b, base+4+i*8+4, arg); return;
+}
+fn pcopy(dst:[]u8, db:i32, src:[]u8, sb:i32)void {
+  let l:i32=plen(src, sb);
+  psetlen(dst, db, l);
+  let i:i32=0;
+  while(i<l){ pset(dst, db, i, popof(src, sb, i), pargof(src, sb, i)); i=i+1; }
+  return;
+}
+// Append exactly one (op,arg) pair. Every beam expansion uses this single
+// helper; there is no multi-op template or op-sequence literal anywhere.
+fn pappend(b:[]u8, base:i32, op:i32, arg:i32)void {
+  let l:i32=plen(b, base);
+  pset(b, base, l, op, arg);
+  psetlen(b, base, l+1);
+  return;
+}
+// Lexicographic compare on (op,arg) sequences, then by length.
+fn pcmp(a:[]u8, ab:i32, b:[]u8, bb:i32)i32 {
+  let la:i32=plen(a, ab); let lb:i32=plen(b, bb);
+  let n:i32=la; if(lb<n){ n=lb; }
+  let i:i32=0;
+  while(i<n){
+    let oa:i32=popof(a, ab, i); let ob:i32=popof(b, bb, i);
+    if(oa<ob){ return -1; } if(oa>ob){ return 1; }
+    let aa:i32=pargof(a, ab, i); let abv:i32=pargof(b, bb, i);
+    if(aa<abv){ return -1; } if(aa>abv){ return 1; }
+    i=i+1;
+  }
+  if(la<lb){ return -1; } if(la>lb){ return 1; }
+  return 0;
+}
+fn phas_tcall(b:[]u8, base:i32, name:i32)i32 {
+  let l:i32=plen(b, base);
+  let i:i32=0;
+  while(i<l){
+    if(popof(b, base, i)==18 && pargof(b, base, i)==name){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+
+// ============ opcode names (printing only) ============
+fn opname(op:i32)[]u8 {
+  if(op==0){ return "PUSH"; }
+  if(op==1){ return "IN0"; }
+  if(op==2){ return "IN1"; }
+  if(op==3){ return "ADD"; }
+  if(op==4){ return "SUB"; }
+  if(op==5){ return "MUL"; }
+  if(op==6){ return "DIV"; }
+  if(op==7){ return "NEG"; }
+  if(op==8){ return "DUP"; }
+  if(op==9){ return "DROP"; }
+  if(op==10){ return "SWAP"; }
+  if(op==11){ return "OVER"; }
+  if(op==12){ return "LT"; }
+  if(op==13){ return "EQ"; }
+  if(op==14){ return "GT"; }
+  if(op==15){ return "JZ"; }
+  if(op==16){ return "JNZ"; }
+  if(op==17){ return "JMP"; }
+  if(op==18){ return "TCALL"; }
+  return "OP?";
+}
+fn printprog(b:[]u8, base:i32)void {
+  let l:i32=plen(b, base);
+  pstr("[");
+  let i:i32=0;
+  while(i<l){
+    if(i>0){ pstr(" "); }
+    let o:i32=popof(b, base, i);
+    pstr(opname(o));
+    if(o==0 || o==15 || o==16 || o==17 || o==18){ pstr(":"); pint(pargof(b, base, i)); }
+    i=i+1;
+  }
+  pstr("]");
+  return;
+}
+
+// ============ generic trace interpreter (frozen base VM) ============
+// Executes clen (op,arg) pairs from code at cbase, with an operand stack
+// (stk, sp in spcell), program inputs in0/in1, and a 10000-step cap.
+// heap/toff/tlen/nre form the learner's trace store. ONLY the TCALL branch
+// (op 18) consults it, and that branch does exactly: bounds-check the name
+// id against nre, look up (offset,length) in the name table, and recurse
+// into this same interpreter over the stored bytes with the shared stack.
+// The branch contains no arithmetic, no stack push/pop, no comparison on
+// invented identity, and no conditional keyed on any invented operator:
+// it is pure indirection over learner-state bytes, frozen before invention.
+//
+// Tracing: when tcap>0, (tbuf,tbase) is one episode's record area in
+// learner state; tbuf[tbase..tbase+3] holds the step count and 16-byte
+// records (op, arg, depth_before, depth_after) follow from tbase+4.
+// Returns the top stack value, or 0 when the stack is empty.
+fn runvm(code:[]u8, cbase:i32, clen:i32, in0:i32, in1:i32,
+         heap:[]u8, toff:[]u8, tlen:[]u8, nre:i32,
+         stk:[]u8, spcell:[]u8, tbuf:[]u8, tbase:i32, tcap:i32)i32 {
+  let pc:i32=0;
+  let steps:i32=0;
+  let tc:i32=0;
+  if(tcap>0){ tc=i32get(tbuf, tbase); }
+  while(steps<10000){
+    if(pc<0 || pc>=clen){ break; }
+    let opc:i32=i32get(code, cbase+pc*8);
+    let argv:i32=i32get(code, cbase+pc*8+4);
+    let sp:i32=i32get(spcell, 0);
+    pc=pc+1; steps=steps+1;
+    if(opc==0){
+      if(sp<256){ i32set(stk, sp*4, argv); i32set(spcell, 0, sp+1); }
+    } else if(opc==1){
+      if(sp<256){ i32set(stk, sp*4, in0); i32set(spcell, 0, sp+1); }
+    } else if(opc==2){
+      if(sp<256){ i32set(stk, sp*4, in1); i32set(spcell, 0, sp+1); }
+    } else if(opc==3){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); i32set(stk,(sp-2)*4,av+bv); i32set(spcell,0,sp-1); }
+    } else if(opc==4){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); i32set(stk,(sp-2)*4,av-bv); i32set(spcell,0,sp-1); }
+    } else if(opc==5){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); i32set(stk,(sp-2)*4,av*bv); i32set(spcell,0,sp-1); }
+    } else if(opc==6){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); let rv:i32=0; if(bv!=0){rv=av/bv;} i32set(stk,(sp-2)*4,rv); i32set(spcell,0,sp-1); }
+    } else if(opc==7){
+      if(sp>=1){ let av:i32=i32get(stk,(sp-1)*4); i32set(stk,(sp-1)*4,-av); }
+    } else if(opc==8){
+      if(sp>=1 && sp<256){ let av:i32=i32get(stk,(sp-1)*4); i32set(stk,sp*4,av); i32set(spcell,0,sp+1); }
+    } else if(opc==9){
+      if(sp>=1){ i32set(spcell,0,sp-1); }
+    } else if(opc==10){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); i32set(stk,(sp-2)*4,bv); i32set(stk,(sp-1)*4,av); }
+    } else if(opc==11){
+      if(sp>=2 && sp<256){ let av:i32=i32get(stk,(sp-2)*4); i32set(stk,sp*4,av); i32set(spcell,0,sp+1); }
+    } else if(opc==12){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); let rv:i32=0; if(av<bv){rv=1;} i32set(stk,(sp-2)*4,rv); i32set(spcell,0,sp-1); }
+    } else if(opc==13){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); let rv:i32=0; if(av==bv){rv=1;} i32set(stk,(sp-2)*4,rv); i32set(spcell,0,sp-1); }
+    } else if(opc==14){
+      if(sp>=2){ let bv:i32=i32get(stk,(sp-1)*4); let av:i32=i32get(stk,(sp-2)*4); let rv:i32=0; if(av>bv){rv=1;} i32set(stk,(sp-2)*4,rv); i32set(spcell,0,sp-1); }
+    } else if(opc==15){
+      if(sp>=1){ let av:i32=i32get(stk,(sp-1)*4); i32set(spcell,0,sp-1); if(av==0){pc=argv;} }
+    } else if(opc==16){
+      if(sp>=1){ let av:i32=i32get(stk,(sp-1)*4); i32set(spcell,0,sp-1); if(av!=0){pc=argv;} }
+    } else if(opc==17){
+      pc=argv;
+    } else if(opc==18){
+      // TCALL n: generic indirection over learner-state bytes.
+      if(argv>=0 && argv<nre){
+        let nb:i32=i32get(toff, argv*4);
+        let nl:i32=i32get(tlen, argv*4);
+        runvm(heap, nb, nl, in0, in1, heap, toff, tlen, nre,
+              stk, spcell, tbuf, tbase, 0);
+      }
+    }
+    let sp2:i32=i32get(spcell, 0);
+    if(tcap>0 && tc<tcap){
+      i32set(tbuf, tbase+4+tc*16, opc);
+      i32set(tbuf, tbase+4+tc*16+4, argv);
+      i32set(tbuf, tbase+4+tc*16+8, sp);
+      i32set(tbuf, tbase+4+tc*16+12, sp2);
+      tc=tc+1;
+    }
+  }
+  if(tcap>0){ i32set(tbuf, tbase, tc); }
+  let spf:i32=i32get(spcell, 0);
+  if(spf>0){ return i32get(stk, (spf-1)*4); }
+  return 0;
+}
+
+// ============ evaluation ============
+// Evaluate a program on n episodes. Returns the exact-match count and
+// stores the total absolute error (i64) in maecell at offset 0.
+fn peval(b:[]u8, base:i32, e0:[]u8, e1:[]u8, et:[]u8, n:i32,
+         heap:[]u8, toff:[]u8, tlen:[]u8, nre:i32, maecell:[]u8)i32 {
+  let s:i32=0;
+  let mae:i64=0;
+  let stk:[]u8=newbuf(256*4);
+  let spc:[]u8=newbuf(4);
+  let dum:[]u8=newbuf(4);
+  let i:i32=0;
+  while(i<n){
+    i32set(spc, 0, 0);
+    let o:i32=runvm(b, base+4, plen(b, base), i32get(e0, i*4), i32get(e1, i*4),
+                    heap, toff, tlen, nre, stk, spc, dum, 0, 0);
+    let want:i32=i32get(et, i*4);
+    if(o==want){ s=s+1; }
+    let d:i64=(o as i64)-(want as i64);
+    if(d<0){ d=-d; }
+    mae=mae+d;
+    i=i+1;
+  }
+  i64set(maecell, 0, mae);
+  return s;
+}
+
+// ============ beam search ============
+// Deterministic beam search over the frozen expansion universe.
+// Expansion order (fixed): PUSH k for k in -4..4; IN0; IN1;
+// ADD..GT (ops 3..14); then, only when usetcall==1, TCALL n for
+// n in 0..nre-1. Frozen ranking: exact-match count descending, then
+// total absolute error ascending, then program length ascending, then
+// lexicographic ascending on the (op,arg) sequence. Beam dedup by exact
+// (op,arg) sequence equality. No RNG anywhere.
+// Returns the best exact-match count; outb/outbase receives the best
+// program found under the same ranking.
+fn rankfirst(s1:i32, m1:i64, l1:i32, a:[]u8, ab:i32,
+             s2:i32, m2:i64, l2:i32, b:[]u8, bb:i32)i32 {
+  if(s1>s2){ return 1; }
+  if(s1<s2){ return 0; }
+  if(m1<m2){ return 1; }
+  if(m1>m2){ return 0; }
+  if(l1<l2){ return 1; }
+  if(l1>l2){ return 0; }
+  if(pcmp(a, ab, b, bb)<0){ return 1; }
+  return 0;
+}
+fn beamsearch(e0:[]u8, e1:[]u8, et:[]u8, n:i32,
+              heap:[]u8, toff:[]u8, tlen:[]u8, nre:i32,
+              usetcall:i32, maxlen:i32, beamw:i32,
+              outb:[]u8, outbase:i32)i32 {
+  let psize:i32=4+maxlen*8;
+  let maxexp:i32=24;
+  let cur:[]u8=newbuf(beamw*psize);
+  let nxt:[]u8=newbuf(beamw*maxexp*psize);
+  let curn:i32=1;
+  i32set(cur, 0, 0);
+  let bests:i32=-1;
+  let bestm:i64=0;
+  let bestl:i32=0;
+  psetlen(outb, outbase, 0);
+  let depth:i32=0;
+  while(depth<maxlen){
+    // Expand every beam entry by one op.
+    let nxtn:i32=0;
+    let ci:i32=0;
+    while(ci<curn){
+      let cb:i32=ci*psize;
+      let k:i32=-4;
+      while(k<=4){
+        if(nxtn<beamw*maxexp){
+          let nb:i32=nxtn*psize;
+          pcopy(nxt, nb, cur, cb); pappend(nxt, nb, 0, k);
+          nxtn=nxtn+1;
+        }
+        k=k+1;
+      }
+      if(nxtn<beamw*maxexp){
+        let nb:i32=nxtn*psize;
+        pcopy(nxt, nb, cur, cb); pappend(nxt, nb, 1, 0); nxtn=nxtn+1;
+      }
+      if(nxtn<beamw*maxexp){
+        let nb:i32=nxtn*psize;
+        pcopy(nxt, nb, cur, cb); pappend(nxt, nb, 2, 0); nxtn=nxtn+1;
+      }
+      let o:i32=3;
+      while(o<=14){
+        if(nxtn<beamw*maxexp){
+          let nb:i32=nxtn*psize;
+          pcopy(nxt, nb, cur, cb); pappend(nxt, nb, o, 0); nxtn=nxtn+1;
+        }
+        o=o+1;
+      }
+      if(usetcall==1){
+        let f:i32=0;
+        while(f<nre){
+          if(nxtn<beamw*maxexp){
+            let nb:i32=nxtn*psize;
+            pcopy(nxt, nb, cur, cb); pappend(nxt, nb, 18, f); nxtn=nxtn+1;
+          }
+          f=f+1;
+        }
+      }
+      ci=ci+1;
+    }
+    // Evaluate all candidates.
+    let sc:[]u8=newbuf(nxtn*4);
+    let mm:[]u8=newbuf(nxtn*8);
+    let maec:[]u8=newbuf(8);
+    let si:i32=0;
+    while(si<nxtn){
+      let cb:i32=si*psize;
+      let s:i32=peval(nxt, cb, e0, e1, et, n, heap, toff, tlen, nre, maec);
+      i32set(sc, si*4, s);
+      i64set(mm, si*8, i64get(maec, 0));
+      si=si+1;
+    }
+    // Stable top-k insertion under the frozen ranking: a candidate that is
+    // strictly better inserts before equals, so generation order breaks
+    // remaining ties deterministically.
+    let top:[]u8=newbuf(beamw*4);
+    let topn:i32=0;
+    si=0;
+    while(si<nxtn){
+      let s:i32=i32get(sc, si*4);
+      let m:i64=i64get(mm, si*8);
+      let cb:i32=si*psize;
+      let l:i32=plen(nxt, cb);
+      let pos:i32=0;
+      while(pos<topn){
+        let oi:i32=i32get(top, pos*4);
+        if(rankfirst(s, m, l, nxt, cb,
+                    i32get(sc, oi*4), i64get(mm, oi*8), plen(nxt, oi*psize),
+                    nxt, oi*psize)==1){ break; }
+        pos=pos+1;
+      }
+      if(pos<beamw){
+        let sh:i32=topn;
+        if(sh>beamw-1){ sh=beamw-1; }
+        while(sh>pos){
+          i32set(top, sh*4, i32get(top, (sh-1)*4));
+          sh=sh-1;
+        }
+        i32set(top, pos*4, si);
+        if(topn<beamw){ topn=topn+1; }
+        if(rankfirst(s, m, l, nxt, cb, bests, bestm, bestl, outb, outbase)==1){
+          bests=s; bestm=m; bestl=l; pcopy(outb, outbase, nxt, cb);
+        }
+      }
+      si=si+1;
+    }
+    // Dedup by exact (op,arg) sequence equality into the next beam.
+    let taken:i32=0;
+    let oi:i32=0;
+    while(oi<topn && taken<beamw){
+      let idx:i32=i32get(top, oi*4);
+      let cb:i32=idx*psize;
+      let dup:i32=0;
+      let t2:i32=0;
+      while(t2<taken){
+        if(pcmp(nxt, cb, cur, t2*psize)==0){ dup=1; }
+        t2=t2+1;
+      }
+      if(dup==0){
+        pcopy(cur, taken*psize, nxt, cb);
+        taken=taken+1;
+      }
+      oi=oi+1;
+    }
+    curn=taken;
+    if(curn==0){ break; }
+    if(bests==n){ break; }
+    depth=depth+1;
+  }
+  return bests;
+}
+
+// ============ task battery (frozen by Amendments A1/A2) ============
+// T0: y = x^2 ; T1: y = 2x^2 ; T2 (held-out): y = x^4+2x^2+x+1.
+// x in 0..6 (7 episodes). T2 is never touched before the reuse/ablation bars.
+fn buildtask(t:i32, e0:[]u8, e1:[]u8, et:[]u8)i32 {
+  let n:i32=0;
+  let x:i32=0;
+  while(x<=6){
+    let y:i32=0;
+    if(t==0){ y=x*x; }
+    else if(t==1){ y=2*x*x; }
+    else { let x2:i32=x*x; y=x2*x2+2*x2+x+1; }
+    i32set(e0, n*4, x); i32set(e1, n*4, 0); i32set(et, n*4, y);
+    n=n+1; x=x+1;
+  }
+  return n;
+}
+
+// ============ R1: trace recording ============
+// Recorded traces live in learner state. Record area for (task t, episode e):
+//   recbase(t,e) = (t*8+e)*(4+256*16)
+//   +0: step count (i32); +4+s*16: (op, arg, depth_before, depth_after).
+fn recbase(t:i32, e:i32)i32 { return (t*8+e)*(4+256*16); }
+fn reccntat(reccnt:[]u8, t:i32, e:i32)i32 { return i32get(reccnt, (t*8+e)*4); }
+fn recop(rec:[]u8, t:i32, e:i32, s:i32)i32 {
+  return i32get(rec, recbase(t, e)+4+s*16);
+}
+fn recarg(rec:[]u8, t:i32, e:i32, s:i32)i32 {
+  return i32get(rec, recbase(t, e)+4+s*16+4);
+}
+// After a task is solved exactly, execute the solution on every episode
+// with tracing on and keep each episode's executed steps in learner state.
+fn recordtask(t:i32, sol:[]u8, solbase:i32, e0:[]u8, e1:[]u8, n:i32,
+              heap:[]u8, toff:[]u8, tlen:[]u8, nre:i32,
+              rec:[]u8, reccnt:[]u8)void {
+  let stk:[]u8=newbuf(256*4);
+  let spc:[]u8=newbuf(4);
+  let e:i32=0;
+  while(e<n){
+    let rb:i32=recbase(t, e);
+    i32set(rec, rb, 0);
+    i32set(spc, 0, 0);
+    runvm(sol, solbase+4, plen(sol, solbase), i32get(e0, e*4), i32get(e1, e*4),
+          heap, toff, tlen, nre, stk, spc, rec, rb, 256);
+    i32set(reccnt, (t*8+e)*4, i32get(rec, rb));
+    e=e+1;
+  }
+  return;
+}
+
+// ============ R2: segment detection ============
+// Abstract stack effect of one op, encoded pop*16+push; -1 rejects
+// control-flow ops and TCALL (a reified segment is straight-line code
+// the learner actually executed).
+fn opeffect(op:i32)i32 {
+  if(op==0){ return 0*16+1; }
+  if(op==1){ return 0*16+1; }
+  if(op==2){ return 0*16+1; }
+  if(op==3){ return 2*16+1; }
+  if(op==4){ return 2*16+1; }
+  if(op==5){ return 2*16+1; }
+  if(op==6){ return 2*16+1; }
+  if(op==7){ return 1*16+1; }
+  if(op==8){ return 1*16+2; }
+  if(op==9){ return 1*16+0; }
+  if(op==10){ return 2*16+2; }
+  if(op==11){ return 2*16+3; }
+  if(op==12){ return 2*16+1; }
+  if(op==13){ return 2*16+1; }
+  if(op==14){ return 2*16+1; }
+  return -1;
+}
+// Abstract arity of the segment of length L starting at step s0 of
+// episode (t0,e0), by generic abstract stack simulation from symbolic
+// depth 0. Returns arity*64+produced, or -1 when the segment holds a
+// rejected op.
+fn segarcode(rec:[]u8, t0:i32, e0:i32, s0:i32, L:i32)i32 {
+  let d:i32=0;
+  let mind:i32=0;
+  let i:i32=0;
+  while(i<L){
+    let ef:i32=opeffect(recop(rec, t0, e0, s0+i));
+    if(ef<0){ return -1; }
+    let pop:i32=ef/16;
+    let push:i32=ef-pop*16;
+    d=d-pop;
+    if(d<mind){ mind=d; }
+    d=d+push;
+    i=i+1;
+  }
+  let arity:i32=-mind;
+  let produced:i32=arity+d;
+  return arity*64+produced;
+}
+// Does the (op,arg) segment of length L at (t0,e0,s0) occur contiguously
+// in episode ep of task t?
+fn seginep(rec:[]u8, reccnt:[]u8, t:i32, ep:i32,
+           t0:i32, e0:i32, s0:i32, L:i32)i32 {
+  let cnt:i32=reccntat(reccnt, t, ep);
+  if(cnt<L){ return 0; }
+  let s1:i32=0;
+  while(s1+L<=cnt){
+    let ok:i32=1;
+    let i:i32=0;
+    while(i<L){
+      if(recop(rec, t, ep, s1+i)!=recop(rec, t0, e0, s0+i) ||
+         recarg(rec, t, ep, s1+i)!=recarg(rec, t0, e0, s0+i)){
+        ok=0; break;
+      }
+      i=i+1;
+    }
+    if(ok==1){ return 1; }
+    s1=s1+1;
+  }
+  return 0;
+}
+// Lexicographic compare of segment A=(t0,e0,s0,L) vs B=(bt,be,bs,L).
+fn segcmp(rec:[]u8, t0:i32, e0:i32, s0:i32, bt:i32, be:i32, bs:i32, L:i32)i32 {
+  let i:i32=0;
+  while(i<L){
+    let oa:i32=recop(rec, t0, e0, s0+i); let ob:i32=recop(rec, bt, be, bs+i);
+    if(oa<ob){ return -1; } if(oa>ob){ return 1; }
+    let aa:i32=recarg(rec, t0, e0, s0+i); let abv:i32=recarg(rec, bt, be, bs+i);
+    if(aa<abv){ return -1; } if(aa>abv){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+// Detect the best segment over solved tasks 0..ntasks-1 under the frozen
+// R2 conditions: length >= 2; credited to >= 2 distinct tasks; present in
+// EVERY episode trace of each credited task; abstract arity in 0..2 and
+// produced >= 1. Deterministic selection: longest length wins, then credit
+// count descending, then lexicographic ascending on the (op,arg) sequence.
+// At most one reification per battery run (the first under this order).
+// outseg receives L*8 bytes of (op,arg); outinfo receives
+// [L, credit, arity, produced]. Returns 1 when a segment qualifies.
+fn detect(ntasks:i32, nep:[]u8, rec:[]u8, reccnt:[]u8,
+          outseg:[]u8, outinfo:[]u8)i32 {
+  let bestL:i32=0;
+  let bestcred:i32=0;
+  let bt:i32=-1; let be:i32=-1; let bs:i32=-1;
+  let t0:i32=0;
+  while(t0<ntasks){
+    let ne0:i32=i32get(nep, t0*4);
+    let e0:i32=0;
+    while(e0<ne0){
+      let cnt0:i32=reccntat(reccnt, t0, e0);
+      let s0:i32=0;
+      while(s0<cnt0){
+        let L:i32=2;
+        while(s0+L<=cnt0){
+          let code:i32=segarcode(rec, t0, e0, s0, L);
+          if(code>=0){
+            let arity:i32=code/64;
+            let produced:i32=code-arity*64;
+            if(arity>=0 && arity<=2 && produced>=1){
+              let cred:i32=0;
+              let t:i32=0;
+              while(t<ntasks){
+                let ne:i32=i32get(nep, t*4);
+                let all:i32=1;
+                let ep:i32=0;
+                while(ep<ne){
+                  if(seginep(rec, reccnt, t, ep, t0, e0, s0, L)==0){
+                    all=0; break;
+                  }
+                  ep=ep+1;
+                }
+                if(all==1){ cred=cred+1; }
+                t=t+1;
+              }
+              if(cred>=2){
+                let better:i32=0;
+                if(L>bestL){ better=1; }
+                else if(L==bestL){
+                  if(cred>bestcred){ better=1; }
+                  else if(cred==bestcred){
+                    if(bt<0){ better=1; }
+                    else if(segcmp(rec, t0, e0, s0, bt, be, bs, L)<0){
+                      better=1;
+                    }
+                  }
+                }
+                if(better==1){
+                  bestL=L; bestcred=cred; bt=t0; be=e0; bs=s0;
+                  i32set(outinfo, 8, arity);
+                  i32set(outinfo, 12, produced);
+                }
+              }
+            }
+          }
+          L=L+1;
+        }
+        s0=s0+1;
+      }
+      e0=e0+1;
+    }
+    t0=t0+1;
+  }
+  if(bt<0){ return 0; }
+  i32set(outinfo, 0, bestL);
+  i32set(outinfo, 4, bestcred);
+  let i:i32=0;
+  while(i<bestL){
+    i32set(outseg, i*8, recop(rec, bt, be, bs+i));
+    i32set(outseg, i*8+4, recarg(rec, bt, be, bs+i));
+    i=i+1;
+  }
+  return 1;
+}
+
+// ============ R3: reification ============
+// Copy the segment's (op,arg) pairs into trace_heap, install the name-table
+// entry, and assign the next runtime name id from the learner state's own
+// counter (0-based; never a source constant). Returns the new heap top.
+fn reify(seg:[]u8, L:i32, arity:i32, produced:i32,
+         heap:[]u8, toff:[]u8, tlen:[]u8, tarity:[]u8, tprod:[]u8,
+         nre:i32, heaptop:i32, idcell:[]u8)i32 {
+  i32set(toff, nre*4, heaptop);
+  i32set(tlen, nre*4, L);
+  i32set(tarity, nre*4, arity);
+  i32set(tprod, nre*4, produced);
+  let i:i32=0;
+  while(i<L){
+    i32set(heap, heaptop+i*8, i32get(seg, i*8));
+    i32set(heap, heaptop+i*8+4, i32get(seg, i*8+4));
+    i=i+1;
+  }
+  i32set(idcell, 0, nre);
+  return heaptop+L*8;
+}
+
+// ============ state export and probes (bars b and e) ============
+// Byte-copy the trace store into fresh arrays, simulating a fresh session
+// that receives only the persisted bytes. Copies only; never executes.
+fn stateexport(heap:[]u8, heaptop:i32,
+               toff:[]u8, tlen:[]u8, tarity:[]u8, tprod:[]u8, nre:i32,
+               eheap:[]u8, eoff:[]u8, elen:[]u8,
+               earity:[]u8, eprod:[]u8, enre:[]u8)void {
+  let i:i32=0;
+  while(i<heaptop){ eheap[i]=heap[i]; i=i+1; }
+  let j:i32=0;
+  while(j<nre){
+    i32set(eoff, j*4, i32get(toff, j*4));
+    i32set(elen, j*4, i32get(tlen, j*4));
+    i32set(earity, j*4, i32get(tarity, j*4));
+    i32set(eprod, j*4, i32get(tprod, j*4));
+    j=j+1;
+  }
+  i32set(enre, 0, nre);
+  return;
+}
+// Run the one-op program [TCALL name] on x in -3..6 against the given store.
+// mode 0 expects x*x; mode 1 expects 2*x. Returns the correct count of 10.
+fn probe(eheap:[]u8, eoff:[]u8, elen:[]u8, nre:i32, name:i32, mode:i32)i32 {
+  let stk:[]u8=newbuf(256*4);
+  let spc:[]u8=newbuf(4);
+  let dum:[]u8=newbuf(4);
+  let code:[]u8=newbuf(4+8);
+  psetlen(code, 0, 1);
+  pset(code, 0, 0, 18, name);
+  let good:i32=0;
+  let x:i32=-3;
+  while(x<=6){
+    i32set(spc, 0, 0);
+    let o:i32=runvm(code, 4, 1, x, 0, eheap, eoff, elen, nre,
+                    stk, spc, dum, 0, 0);
+    let want:i32=x*x;
+    if(mode==1){ want=2*x; }
+    if(o==want){ good=good+1; }
+    x=x+1;
+  }
+  return good;
+}
+
+// ============ main battery ============
+fn main()void {
+  pstr("L3A-TRACE-CLEAN battery\n");
+  // Learner state (persistent): trace store plus recorded traces.
+  let heap:[]u8=newbuf(4096);
+  let toff:[]u8=newbuf(16);
+  let tlen:[]u8=newbuf(16);
+  let tarity:[]u8=newbuf(16);
+  let tprod:[]u8=newbuf(16);
+  let nre:i32=0;
+  let heaptop:i32=0;
+  let rec:[]u8=newbuf(4*8*(4+256*16));
+  let reccnt:[]u8=newbuf(32*4);
+  let nep:[]u8=newbuf(16);
+
+  // Phase 1: solve the training tasks T0 and T1 with the base beam.
+  let trainok:i32=1;
+  let t:i32=0;
+  while(t<2){
+    let e0:[]u8=newbuf(32); let e1:[]u8=newbuf(32); let et:[]u8=newbuf(32);
+    let n:i32=buildtask(t, e0, e1, et);
+    i32set(nep, t*4, n);
+    let out:[]u8=newbuf(4+8*8);
+    let sc:i32=beamsearch(e0, e1, et, n, heap, toff, tlen, nre,
+                          0, 8, 600, out, 0);
+    pstr("TRAIN t="); pint(t);
+    pstr(" score="); pint(sc); pstr("/"); pint(n);
+    pstr(" len="); pint(plen(out, 0));
+    pstr(" prog="); printprog(out, 0); pstr("\n");
+    if(sc==n){
+      recordtask(t, out, 0, e0, e1, n, heap, toff, tlen, nre, rec, reccnt);
+      pstr("RECORDED t="); pint(t);
+      pstr(" ep0steps="); pint(reccntat(reccnt, t, 0)); pstr("\n");
+    } else {
+      trainok=0;
+      pstr("TRAIN-FAIL t="); pint(t); pstr("\n");
+    }
+    t=t+1;
+  }
+
+  // R2/R3: detect the shared segment and reify it under a runtime name id.
+  let invented:i32=0;
+  let segmatch:i32=0;
+  let nameid:i32=-1;
+  if(trainok==1){
+    let seg:[]u8=newbuf(64);
+    let info:[]u8=newbuf(16);
+    let found:i32=detect(2, nep, rec, reccnt, seg, info);
+    if(found==1){
+      let L:i32=i32get(info, 0);
+      let cred:i32=i32get(info, 4);
+      let arity:i32=i32get(info, 8);
+      let produced:i32=i32get(info, 12);
+      let idc:[]u8=newbuf(4);
+      heaptop=reify(seg, L, arity, produced, heap, toff, tlen, tarity, tprod,
+                    nre, heaptop, idc);
+      nameid=i32get(idc, 0);
+      nre=nre+1;
+      invented=1;
+      pstr("REIFIED name="); pint(nameid);
+      pstr(" len="); pint(L);
+      pstr(" arity="); pint(arity);
+      pstr(" produced="); pint(produced);
+      pstr(" credit="); pint(cred);
+      pstr(" seg=[");
+      let i:i32=0;
+      while(i<L){
+        if(i>0){ pstr(" "); }
+        pstr(opname(i32get(seg, i*8))); pstr(":"); pint(i32get(seg, i*8+4));
+        i=i+1;
+      }
+      pstr("]\n");
+      // SEGMENT-MATCH guard (frozen by Amendment A2): the downstream bars
+      // assume the intended invention [(IN0,0),(IN0,0),(MUL,0)] = [1,1,5]
+      // ("push x*x"). The beam's lexicographic tie-break prefers IN0,IN0
+      // over IN0,DUP (both push x,x), so [1,1,5] is the reachable form.
+      if(L==3 && i32get(seg, 0)==1 && i32get(seg, 4)==0 &&
+         i32get(seg, 8)==1 && i32get(seg, 12)==0 &&
+         i32get(seg, 16)==5 && i32get(seg, 20)==0){
+        segmatch=1;
+      }
+      pstr("SEGMENT-MATCH "); pint(segmatch); pstr("\n");
+    } else {
+      pstr("NO-INVENTION\n");
+    }
+  }
+
+  // STATE-DUMP: the learner-state bytes behind the invented operator.
+  pstr("STATE-DUMP nre="); pint(nre);
+  pstr(" heaptop="); pint(heaptop); pstr("\n");
+  let di:i32=0;
+  while(di<nre){
+    pstr("ENTRY id="); pint(di);
+    pstr(" off="); pint(i32get(toff, di*4));
+    pstr(" len="); pint(i32get(tlen, di*4));
+    pstr(" arity="); pint(i32get(tarity, di*4));
+    pstr(" produced="); pint(i32get(tprod, di*4));
+    pstr("\n");
+    di=di+1;
+  }
+
+  // Bar (b) T-PERSIST: export the bytes, probe [TCALL name] from the copy.
+  let persistok:i32=0;
+  let eheap:[]u8=newbuf(4096);
+  let eoff:[]u8=newbuf(16);
+  let elen:[]u8=newbuf(16);
+  let earity:[]u8=newbuf(16);
+  let eprod:[]u8=newbuf(16);
+  let enre:[]u8=newbuf(4);
+  if(invented==1 && segmatch==1){
+    stateexport(heap, heaptop, toff, tlen, tarity, tprod, nre,
+                eheap, eoff, elen, earity, eprod, enre);
+    let g:i32=probe(eheap, eoff, elen, nre, nameid, 0);
+    pstr("T-PERSIST x2="); pint(g); pstr("/10\n");
+    if(g==10){ persistok=1; }
+  } else {
+    pstr("T-PERSIST skipped\n");
+  }
+
+  // Bar (c) T-REUSE: phase-2 beam with TCALL on held-out T2.
+  let reuseok:i32=0;
+  let t2len:i32=0;
+  let r0:[]u8=newbuf(32); let r1:[]u8=newbuf(32); let rt:[]u8=newbuf(32);
+  let rn:i32=buildtask(2, r0, r1, rt);
+  let rout:[]u8=newbuf(4+8*8);
+  let rsc:i32=beamsearch(r0, r1, rt, rn, heap, toff, tlen, nre,
+                         1, 8, 600, rout, 0);
+  t2len=plen(rout, 0);
+  pstr("T-REUSE score="); pint(rsc); pstr("/"); pint(rn);
+  pstr(" len="); pint(t2len);
+  pstr(" prog="); printprog(rout, 0);
+  pstr(" hastcall="); pint(phas_tcall(rout, 0, nameid)); pstr("\n");
+  if(rsc==rn && invented==1 && phas_tcall(rout, 0, nameid)==1){
+    reuseok=1;
+  }
+
+  // Bar (d) T-ABLATE: identical search with TCALL expansions removed.
+  let ablateok:i32=0;
+  let a0:[]u8=newbuf(32); let a1:[]u8=newbuf(32); let at:[]u8=newbuf(32);
+  let an:i32=buildtask(2, a0, a1, at);
+  let aout:[]u8=newbuf(4+8*8);
+  let asc:i32=beamsearch(a0, a1, at, an, heap, toff, tlen, nre,
+                         0, 8, 600, aout, 0);
+  pstr("T-ABLATE score="); pint(asc); pstr("/"); pint(an);
+  pstr(" len="); pint(plen(aout, 0)); pstr("\n");
+  if(asc<an){ ablateok=1; }
+
+  // Bar (e) T-SWAP: behavior must follow the stored bytes, both ways.
+  let swapok:i32=0;
+  if(invented==1 && segmatch==1 && persistok==1){
+    let off0:i32=i32get(eoff, 0);
+    // Overwrite entry 0 in the EXPORTED copy with [IN0, DUP, ADD].
+    i32set(eheap, off0, 1);    i32set(eheap, off0+4, 0);
+    i32set(eheap, off0+8, 8);  i32set(eheap, off0+12, 0);
+    i32set(eheap, off0+16, 3); i32set(eheap, off0+20, 0);
+    let g1:i32=probe(eheap, eoff, elen, nre, nameid, 1);
+    pstr("T-SWAP to2x="); pint(g1); pstr("/10\n");
+    // Restore the original bytes from the live learner state.
+    let i:i32=0;
+    while(i<heaptop){ eheap[i]=heap[i]; i=i+1; }
+    let g2:i32=probe(eheap, eoff, elen, nre, nameid, 0);
+    pstr("T-SWAP backtox2="); pint(g2); pstr("/10\n");
+    if(g1==10 && g2==10){ swapok=1; }
+  } else {
+    pstr("T-SWAP skipped\n");
+  }
+
+  // Verdict lines.
+  pstr("BAR-A-INVENT "); pint(invented); pstr("\n");
+  pstr("BAR-A-SEGMATCH "); pint(segmatch); pstr("\n");
+  pstr("BAR-B-PERSIST "); pint(persistok); pstr("\n");
+  pstr("BAR-C-REUSE "); pint(reuseok);
+  pstr(" t2len="); pint(t2len); pstr("\n");
+  pstr("BAR-D-ABLATE "); pint(ablateok); pstr("\n");
+  pstr("BAR-E-SWAP "); pint(swapok); pstr("\n");
+  if(trainok==1 && invented==1 && segmatch==1 && persistok==1 &&
+     reuseok==1 && ablateok==1 && swapok==1){
+    pstr("VERDICT L3A-TRACE-CLEAN-BUILD-PASS\n");
+  } else {
+    pstr("VERDICT L3A-TRACE-CLEAN-BUILD-FAIL\n");
+  }
+  pstr("DONE\n");
+  return;
+}

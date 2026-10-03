@@ -1,0 +1,1778 @@
+// plan_main.zag — UNIFIED planner/vocabulary for audio long-horizon (Phase B-F1).
+// Pure Zag, zero RNG. Links organ.zag (frozen organ DSP) + f0low.zag (guard).
+// Assembly: organ.zag (main renamed) + f0low.zag (byte-identical) +
+// plan_main.zag -> build/plan_full.zag, compiled with the pinned toolchain.
+//
+// One binary, one deliberation state, one journal, one render path. The
+// planner turn runs INSIDE the same main loop as hearing and rendering: it
+// reads the same bytes (reference WAVs and its own probe WAVs through the
+// same frozen organ+guard), journals into the same HEARD/CONSULTED/PLANNED/
+// RENDERED/ITER/DEVIATION state (extended with CAL/DELIBERATED/PREDICT, all
+// byte-compatible with the frozen scorer_ctrl.py), and renders through the
+// same WAV writer. The vocabulary table lives in the planner's own memory
+// next to the 16-entry history ring. No module boundary, no bridge.
+//
+// Deliberative method (fixed inference rules; vocabulary CONTENT is grown):
+//   R1 self-calibration: probe tones through own renderer+organ, no frozen gain.
+//   R2 coverage consult: actions whose MEASURED range covers the need; argmin
+//      predicted native ERR.
+//   R3 growth on coverage failure: probe ALL candidate hypotheses, hear them,
+//      install argmin-predicted-ERR, journal DELIBERATED with every number.
+//   R4 predict-before-correct: correct only if predicted ERR < measured ERR.
+//   R5 damp on measured overshoot (sign flip -> halve multiplier).
+//   R6 extrapolation distrust: need beyond largest probed param -> R3.
+//
+// Action substrate (fixed mechanisms; actions are grown compositions):
+//   sine-FM components (rate_mhz, depth_pm) x2, per-period deterministic
+//   jitter via fmix32 (the v5 long-memory mechanism, reimplemented natively,
+//   zero RNG), piecewise-linear 16-pt contour following, flat/rise/decay env.
+// Initial vocabulary: ONE action (A1 = single sine FM at 5 Hz, the previous
+// vocabulary's form as the null hypothesis). No clamp constant anywhere.
+//
+// D arena (i64 @8B): f0_mhz@0, voiced_frac_pm@8, env@16, rms_mdb@24, cv_pm@32,
+//   nfr@40, sr@48, heard_ok@56, contour[16]@64..184 (median-3 guarded f0 mHz),
+//   crate_mhz@192 (measured modulation rate), cvcnt@200.
+
+fn parse_i64(s: []u8) i64 {
+    let n: i64 = s.len as i64;
+    if (n == 0) { return 0; }
+    let neg: i64 = 0;
+    let i: i64 = 0;
+    if (s[0] == 45) {
+        neg = 1;
+        i = 1;
+    }
+    let v: i64 = 0;
+    while (i < n) {
+        let c: i64 = s[i] as i64;
+        if (c < 48 || c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    if (neg == 1) { v = 0 - v; }
+    return v;
+}
+
+fn starts_with(line: []u8, pre: []u8) i64 {
+    if ((line.len as i64) < (pre.len as i64)) { return 0; }
+    let i: i64 = 0;
+    while (i < (pre.len as i64)) {
+        if (line[i] != pre[i]) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// pad3: zero-padded 3-digit decimal of v (v>=0, v<1000)
+fn pad3(v: i64) []u8 {
+    let b: []u8 = (_zag_malloc(4) as *u8)[0..4];
+    b[0] = (48 + v / 100) as u8;
+    b[1] = (48 + (v / 10) % 10) as u8;
+    b[2] = (48 + v % 10) as u8;
+    b[3] = 0;
+    return b[0..3];
+}
+
+// 10^x via e^{x ln10}, Taylor 40 terms (deterministic)
+fn exp10(x: f64) f64 {
+    let y: f64 = x * 2.302585092994046;
+    let term: f64 = 1.0;
+    let acc: f64 = 1.0;
+    let k: i64 = 1;
+    while (k <= 40) {
+        term = term * y / (k as f64);
+        acc = acc + term;
+        k = k + 1;
+    }
+    return acc;
+}
+
+fn newt_sqrt(v: f64) f64 {
+    if (v <= 0.0) { return 0.0; }
+    let s: f64 = v;
+    let it: i64 = 0;
+    while (it < 40) {
+        s = 0.5 * (s + v / s);
+        it = it + 1;
+    }
+    return s;
+}
+
+// ---- deterministic 32-bit hash (the v5 long-memory jitter mechanism,
+//      reimplemented natively here; cf. rb_longmem.zag fmix32). Zero RNG:
+//      the jitter stream is a pure function of the period counter.
+fn mul32(a: i64, b: i64) i64 {
+    let alo: i64 = a & 65535;
+    let ahi: i64 = (a >> 16) & 65535;
+    let blo: i64 = b & 65535;
+    let bhi: i64 = (b >> 16) & 65535;
+    let lo: i64 = alo * blo;
+    let mid: i64 = (ahi * blo + alo * bhi) & 65535;
+    return (lo + mid * 65536) & 4294967295;
+}
+fn fmix32(h: i64) i64 {
+    let x: i64 = h & 4294967295;
+    x = x ^ (x >> 16);
+    x = mul32(x, 2246822507);
+    x = x ^ (x >> 13);
+    x = mul32(x, 3266489909);
+    x = x ^ (x >> 16);
+    return x & 4294967295;
+}
+
+// ---------------- descriptor hearing (frozen organ + guard, internal) ----
+// Extended D arena (208 bytes): + 16-pt median-3 guarded contour @64,
+// crate_mhz @192, cvcnt @200.
+fn hear(path: []u8, D: []u8) i64 {
+    let FR: []u8 = (_zag_malloc(208000) as *u8)[0..208000];
+    let XW: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let DW: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let ON: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let META: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let SORT: []u8 = (_zag_malloc(32768) as *u8)[0..32768];
+    let H: []u8 = (_zag_malloc(8192) as *u8)[0..8192];
+    let H512: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWC: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let TWS: []u8 = (_zag_malloc(2048) as *u8)[0..2048];
+    let RL: []u8 = (_zag_malloc(4408) as *u8)[0..4408];
+    let LRL: []u8 = (_zag_malloc(12288) as *u8)[0..12288];
+    let LRES: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GRES: []u8 = (_zag_malloc(24) as *u8)[0..24];
+    let META2: []u8 = (_zag_malloc(16) as *u8)[0..16];
+    let GF0: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    let GV: []u8 = (_zag_malloc(20800) as *u8)[0..20800];
+    build_tables(H, H512, TWC, TWS);
+    let nfr: i64 = analyze(path, FR, XW, DW, ON, META, H, H512, TWC, TWS, RL);
+    if (nfr < 0) { return -1; }
+    let b: []u8 = file_read(path, 6000000);
+    if (wav_parse(b, META2) == 0) { return -1; }
+    let ds0: i64 = get64(META2, 0);
+    let nsamp: i64 = get64(META2, 8);
+    let f: i64 = 0;
+    while (f < nfr) {
+        let s: i64 = f * 1024;
+        guard_frame(b, ds0, nsamp, s, 44100, get64(FR, f * 80 + 8), get64(FR, f * 80 + 24), get64(FR, f * 80), 0, LRL, LRES, GRES);
+        put64(GF0, f * 8, get64(GRES, 0));
+        put64(GV, f * 8, get64(GRES, 8));
+        f = f + 1;
+    }
+    let f0: i64 = guarded_med_f0(GF0, GV, nfr, SORT);
+    let vf: i64 = guarded_voiced_frac(GV, nfr);
+    let env: i64 = env_class(FR, nfr);
+    let rms: i64 = med_field(FR, nfr, SORT, 0);
+    let c: i64 = 0;
+    let g: i64 = 0;
+    while (g < nfr) {
+        if (get64(GV, g * 8) == 1) {
+            let gf0v: i64 = get64(GF0, g * 8);
+            if (gf0v > 0) {
+                put64(SORT, c * 8, gf0v);
+                c = c + 1;
+            }
+        }
+        g = g + 1;
+    }
+    let cvpm: i64 = 0;
+    if (c >= 7) {
+        let q: i64 = 0;
+        while (q < c) {
+            let qa: i64 = q; if (q > 0) { qa = q - 1; }
+            let qc: i64 = q; if (q < c - 1) { qc = q + 1; }
+            let a0: i64 = get64(SORT, qa * 8);
+            let b0: i64 = get64(SORT, q * 8);
+            let c0: i64 = get64(SORT, qc * 8);
+            let m3v: i64 = b0;
+            if ((a0 <= b0 && b0 <= c0) || (c0 <= b0 && b0 <= a0)) { m3v = b0; }
+            else {
+                if ((b0 <= a0 && a0 <= c0) || (c0 <= a0 && a0 <= b0)) { m3v = a0; }
+                else { m3v = c0; }
+            }
+            put64(SORT, 16384 + q * 8, m3v);
+            q = q + 1;
+        }
+        let sum: i64 = 0;
+        let z: i64 = 0;
+        while (z < c) { sum = sum + get64(SORT, 16384 + z * 8); z = z + 1; }
+        let mean: i64 = sum / c;
+        if (mean > 0) {
+            let sf2: f64 = 0.0;
+            let w: i64 = 0;
+            while (w < c) {
+                let dv: f64 = (get64(SORT, 16384 + w * 8) - mean) as f64;
+                sf2 = sf2 + dv * dv;
+                w = w + 1;
+            }
+            let sd: f64 = newt_sqrt(sf2 / (c as f64));
+            cvpm = ((sd * 1000.0 / (mean as f64)) + 0.5) as i64;
+        }
+    }
+    put64(D, 0, f0);
+    put64(D, 8, vf);
+    put64(D, 16, env);
+    put64(D, 24, rms);
+    put64(D, 32, cvpm);
+    put64(D, 40, nfr);
+    put64(D, 48, 44100);
+    put64(D, 56, 1);
+    // 16-pt downsampled median-3 guarded contour (mHz)
+    let j: i64 = 0;
+    while (j < 16) {
+        let cv2: i64 = 0;
+        if (c > 0) {
+            let idx: i64 = j * c / 16;
+            if (idx >= c) { idx = c - 1; }
+            cv2 = get64(SORT, 16384 + idx * 8);
+        }
+        put64(D, 64 + j * 8, cv2);
+        j = j + 1;
+    }
+    put64(D, 200, c);
+    // Level-anchor the contour to f0h: the 16-point SHAPE carries the
+    // modulation (CV is scale-invariant), but its absolute level must match
+    // the robust median F0. Without this, the contour's mean can drift from
+    // f0h (the voiced frame set used for the contour differs from the
+    // median's frame set), and the render inherits the drift.
+    // (Detected 2026-09-26: d1 contour mean 165796 vs f0h 150125.)
+    if (c > 0 && f0 > 0) {
+        let asum: i64 = 0;
+        let acnt: i64 = 0;
+        let aj: i64 = 0;
+        while (aj < 16) {
+            let av: i64 = get64(D, 64 + aj * 8);
+            if (av > 0) { asum = asum + av; acnt = acnt + 1; }
+            aj = aj + 1;
+        }
+        if (acnt > 0) {
+            let amean: i64 = asum / acnt;
+            if (amean > 0) {
+                aj = 0;
+                while (aj < 16) {
+                    let av2: i64 = get64(D, 64 + aj * 8);
+                    if (av2 > 0) { put64(D, 64 + aj * 8, av2 * f0 / amean); }
+                    aj = aj + 1;
+                }
+            }
+        }
+    }
+    // measured modulation rate: zero-crossings of demeaned voiced contour
+    let crate: i64 = 0;
+    if (c >= 7) {
+        let sum2: i64 = 0;
+        let z2: i64 = 0;
+        while (z2 < c) { sum2 = sum2 + get64(SORT, 16384 + z2 * 8); z2 = z2 + 1; }
+        let mean2: i64 = sum2 / c;
+        let cross: i64 = 0;
+        let prev_s: i64 = 0;
+        let z3: i64 = 0;
+        while (z3 < c) {
+            let dv2: i64 = get64(SORT, 16384 + z3 * 8) - mean2;
+            let sgn: i64 = 0;
+            if (dv2 > 0) { sgn = 1; }
+            if (dv2 < 0) { sgn = -1; }
+            if (z3 > 0 && sgn != 0 && prev_s != 0 && sgn != prev_s) { cross = cross + 1; }
+            if (sgn != 0) { prev_s = sgn; }
+            z3 = z3 + 1;
+        }
+        if (cross >= 2 && nfr > 0) {
+            crate = cross * 44100 * 1000 / (2 * nfr * 1024);
+        }
+    }
+    put64(D, 192, crate);
+    return 0;
+}
+
+fn print_env_name(e: i64) void {
+    if (e == 1) { _zag_print("rise"); }
+    if (e == 2) { _zag_print("decay"); }
+    if (e == 0) { _zag_print("flat"); }
+    return;
+}
+
+fn print_heard(tag: []u8, D: []u8) void {
+    _zag_print(tag);
+    _zag_print(" f0_mhz=");
+    _zag_print(i64s(get64(D, 0)));
+    _zag_print(" voiced_frac_pm=");
+    _zag_print(i64s(get64(D, 8)));
+    _zag_print(" env=");
+    print_env_name(get64(D, 16));
+    _zag_print(" cv_pm=");
+    _zag_print(i64s(get64(D, 32)));
+    _zag_print(" rms_mdb=");
+    _zag_print(i64s(get64(D, 24)));
+    _zag_print(" nfr=");
+    _zag_print(i64s(get64(D, 40)));
+    _zag_print(" crate_mhz=");
+    _zag_print(i64s(get64(D, 192)));
+    _zag_print(" cvcnt=");
+    _zag_print(i64s(get64(D, 200)));
+    _zag_print("\n");
+    return;
+}
+
+// ---------------- grown renderer ----------------
+// Renders 2.0 s PCM16 mono 44100 Hz from an ACTION composition:
+//   amode 0 (vib1):    p1 = rate_mhz,  p2 = depth_pm
+//   amode 1 (vib2):    p1 = rate1_mhz, p2 = depth1_pm, p3 = rate2_mhz, p4 = depth2_pm
+//   amode 2 (jitter):  p1 = width_pm,  p2 = depth_pm (underlying FM, may be 0), p3 = rate_mhz
+//   amode 3 (contour): CON = 16 i64 contour points (mHz); p1..p4 unused
+// NO clamp anywhere: depths/widths are unbounded f64 fractions. A hypothesis
+// that is pathological (deep FM phase reversal, wide jitter) renders raw;
+// the planner's probe measurement judges it honestly.
+// Jitter: per-period multiplier redrawn via fmix32(period_counter) — the v5
+// long-memory mechanism, zero RNG, deterministic.
+fn render_plan(path: []u8, f0_mhz: i64, env: i64, slope_db: i64, amode: i64, p1: i64, p2: i64, p3: i64, p4: i64, CON: []u8) i64 {
+    let dur: i64 = 88200;
+    let data: []u8 = (_zag_malloc(dur * 2) as *u8)[0..(dur * 2)];
+    let i: i64 = 0;
+    while (i < dur * 2) { data[i] = 0; i = i + 1; }
+    let pi: f64 = 3.141592653589793;
+    let sr: f64 = 44100.0;
+    let r1: f64 = 0.0;
+    let d1: f64 = 0.0;
+    let r2: f64 = 0.0;
+    let d2: f64 = 0.0;
+    let jw: f64 = 0.0;
+    let use_con: i64 = 0;
+    if (amode == 0) {
+        r1 = (p1 as f64) / 1000.0;
+        d1 = (p2 as f64) / 1000000.0;
+    }
+    if (amode == 1) {
+        r1 = (p1 as f64) / 1000.0;
+        d1 = (p2 as f64) / 1000000.0;
+        r2 = (p3 as f64) / 1000.0;
+        d2 = (p4 as f64) / 1000000.0;
+    }
+    if (amode == 2) {
+        jw = (p1 as f64) / 1000000.0;
+        r1 = (p3 as f64) / 1000.0;
+        d1 = (p2 as f64) / 1000000.0;
+    }
+    if (amode == 3) { use_con = 1; }
+    let f0: f64 = (f0_mhz as f64) / 1000.0;
+    if (f0 < 1.0) { f0 = 440.0; }
+    let S: f64 = slope_db as f64;
+    let k: f64 = 1.0;
+    let amp: f64 = 1.0;
+    if (env == 1) {
+        k = exp10(S / (10.0 * (dur as f64)));
+        amp = exp10(0.0 - S / 10.0);
+    }
+    if (env == 2) {
+        k = exp10(0.0 - S / (10.0 * (dur as f64)));
+        amp = 1.0;
+    }
+    let phase: f64 = 0.0;
+    let jmult: f64 = 1.0;
+    let jper: i64 = 0;
+    let last_cyc: i64 = 0;
+    let n: i64 = 0;
+    while (n < dur) {
+        let t: f64 = (n as f64) / sr;
+        let fb: f64 = f0;
+        if (use_con == 1) {
+            let pos: f64 = (n as f64) * 16.0 / (dur as f64);
+            let j0: i64 = pos as i64;
+            if (j0 > 14) { j0 = 14; }
+            if (j0 < 0) { j0 = 0; }
+            let fr: f64 = pos - (j0 as f64);
+            let c0: f64 = (get64(CON, j0 * 8) as f64) / 1000.0;
+            let c1: f64 = (get64(CON, (j0 + 1) * 8) as f64) / 1000.0;
+            if (c0 < 1.0) { c0 = f0; }
+            if (c1 < 1.0) { c1 = f0; }
+            fb = c0 + (c1 - c0) * fr;
+        }
+        let fm: f64 = d1 * cosr(2.0 * pi * r1 * t - pi / 2.0) + d2 * cosr(2.0 * pi * r2 * t - pi / 2.0);
+        let finst: f64 = fb * (1.0 + fm) * jmult;
+        phase = phase + 2.0 * pi * finst / sr;
+        let cyc: i64 = (phase / 6.283185307179586) as i64;
+        if (cyc != last_cyc) {
+            last_cyc = cyc;
+            jper = jper + 1;
+            if (jw > 0.0) {
+                let u1: f64 = (fmix32(7919 * jper + 13) as f64) / 4294967296.0;
+                let u2: f64 = (fmix32(104729 * jper + 7) as f64) / 4294967296.0;
+                let z: f64 = u1 + u2 - 1.0;
+                jmult = 1.0 + jw * z;
+            }
+        }
+        let s: f64 = 0.25 * cosr(phase - pi / 2.0);
+        s = s * amp;
+        amp = amp * k;
+        let fade: f64 = 1.0;
+        if (n < 441) { fade = (n as f64) / 441.0; }
+        if (n > dur - 441) { fade = ((dur - n) as f64) / 441.0; }
+        s = s * fade;
+        let v: i64 = (s * 32767.0) as i64;
+        if (v > 32767) { v = 32767; }
+        if (v < -32768) { v = -32768; }
+        let uv: i64 = v;
+        if (uv < 0) { uv = uv + 65536; }
+        data[n * 2] = (uv & 255) as u8;
+        data[n * 2 + 1] = ((uv / 256) & 255) as u8;
+        n = n + 1;
+    }
+    let cs: []u8 = cstr(path);
+    if (cs.len == 0) { return -1; }
+    let hdr: []u8 = (_zag_malloc(44) as *u8)[0..44];
+    hdr[0] = 82; hdr[1] = 73; hdr[2] = 70; hdr[3] = 70;
+    put32(hdr, 4, 36 + dur * 2);
+    hdr[8] = 87; hdr[9] = 65; hdr[10] = 86; hdr[11] = 69;
+    hdr[12] = 102; hdr[13] = 109; hdr[14] = 116; hdr[15] = 32;
+    put32(hdr, 16, 16);
+    hdr[20] = 1; hdr[21] = 0;
+    hdr[22] = 1; hdr[23] = 0;
+    put32(hdr, 24, 44100);
+    put32(hdr, 28, 88200);
+    hdr[32] = 2; hdr[33] = 0;
+    hdr[34] = 16; hdr[35] = 0;
+    hdr[36] = 100; hdr[37] = 97; hdr[38] = 116; hdr[39] = 97;
+    put32(hdr, 40, dur * 2);
+    let fd: i64 = _zag_raw_syscall(2, (_zag_slice_ptr(cs) as i64), 577, 420, 0, 0, 0);
+    if (fd < 0) { return -2; }
+    let w1: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(hdr) as i64), 44, 0, 0, 0);
+    let w2: i64 = _zag_raw_syscall(1, fd, (_zag_slice_ptr(data) as i64), dur * 2, 0, 0, 0);
+    _zag_raw_syscall(3, fd, 0, 0, 0, 0, 0);
+    if (w1 != 44 || w2 != dur * 2) { return -3; }
+    return 0;
+}
+
+// path = outdir + "/" + stem + ".wav"
+fn out_path(outdir: []u8, stem: []u8) []u8 {
+    let od: i64 = outdir.len as i64;
+    let sl: i64 = stem.len as i64;
+    let pl: i64 = od + 1 + sl + 4;
+    let path: []u8 = (_zag_malloc(pl + 1) as *u8)[0..(pl + 1)];
+    let a: i64 = 0;
+    while (a < od) { path[a] = outdir[a]; a = a + 1; }
+    path[od] = 47;
+    let b: i64 = 0;
+    while (b < sl) { path[od + 1 + b] = stem[b]; b = b + 1; }
+    path[od + 1 + sl] = 46;
+    path[od + 2 + sl] = 119;
+    path[od + 3 + sl] = 97;
+    path[od + 4 + sl] = 118;
+    path[pl] = 0;
+    return path[0..pl];
+}
+
+fn stem3(pre: []u8, idx: i64) []u8 {
+    let p3: []u8 = pad3(idx);
+    let pl: i64 = pre.len as i64;
+    let s: []u8 = (_zag_malloc(pl + 3 + 1) as *u8)[0..(pl + 4)];
+    let a: i64 = 0;
+    while (a < pl) { s[a] = pre[a]; a = a + 1; }
+    s[pl] = p3[0]; s[pl + 1] = p3[1]; s[pl + 2] = p3[2]; s[pl + 3] = 0;
+    return s[0..(pl + 3)];
+}
+
+// ---------------- history ring (88-byte entries: ctrl's 10 fields + action) --
+fn hist_store(HIST: []u8, pos: i64, f0h: i64, rmsh: i64, envh: i64, cvh: i64, frender: i64, depthpm: i64, slope: i64, turn: i64, kind: i64, act: i64) void {
+    let o: i64 = pos * 88;
+    put64(HIST, o, f0h);
+    put64(HIST, o + 8, rmsh);
+    put64(HIST, o + 16, envh);
+    put64(HIST, o + 24, cvh);
+    put64(HIST, o + 32, frender);
+    put64(HIST, o + 40, depthpm);
+    put64(HIST, o + 48, slope);
+    put64(HIST, o + 56, turn);
+    put64(HIST, o + 64, kind);
+    put64(HIST, o + 72, act);
+    put64(HIST, o + 80, 1);
+    return;
+}
+
+fn hist_consult(HIST: []u8, hcount: i64, f0h: i64, rmsh: i64, envh: i64) i64 {
+    let best: i64 = 1000000000;
+    let besti: i64 = -1;
+    let e: i64 = 0;
+    let nv: i64 = hcount;
+    if (nv > 16) { nv = 16; }
+    while (e < nv) {
+        let o: i64 = e * 88;
+        if (get64(HIST, o + 80) == 1) {
+            let df0: i64 = f0h - get64(HIST, o);
+            if (df0 < 0) { df0 = 0 - df0; }
+            let drms: i64 = rmsh - get64(HIST, o + 8);
+            if (drms < 0) { drms = 0 - drms; }
+            let dd: i64 = df0 / 4000 + drms / 1000;
+            if (get64(HIST, o + 16) != envh) { dd = dd + 60; }
+            if (dd < best) {
+                best = dd;
+                besti = e;
+            }
+        }
+        e = e + 1;
+    }
+    if (best < 25) { return besti; }
+    return -1;
+}
+
+fn clamp_f0(f: i64) i64 {
+    if (f < 60000) { return 60000; }
+    if (f > 2000000) { return 2000000; }
+    return f;
+}
+
+// ---------------- vocabulary table ----------------
+// 8 entries x 80 bytes: id@0, amode@8, p1@16, p2@24, p3@32, p4@40,
+// maxcv_pm@48, gain_pm@56 (cv_pm per unit primary param), bias_ppm@64
+// (measured f0 bias at install params), fid_pm@72 (yield/need x1000 at install).
+fn vocab_add(VOCAB: []u8, nvoc: i64, amode: i64, p1: i64, p2: i64, p3: i64, p4: i64, maxcv: i64, gain: i64, bias: i64, fid: i64) i64 {
+    // 32-entry table (2560 bytes). The cap is a trial memory-size parameter,
+    // NOT a deliberative limit: if growth ever needs a 33rd entry the
+    // planner journals VOCAB_FULL and refuses loudly instead of silently
+    // dropping the action.
+    if (nvoc >= 32) {
+        _zag_print("DELIBERATED VOCAB_FULL refused_growth reason=table-full-33rd-action\n");
+        return nvoc;
+    }
+    let o: i64 = nvoc * 80;
+    put64(VOCAB, o, nvoc + 1);
+    put64(VOCAB, o + 8, amode);
+    put64(VOCAB, o + 16, p1);
+    put64(VOCAB, o + 24, p2);
+    put64(VOCAB, o + 32, p3);
+    put64(VOCAB, o + 40, p4);
+    put64(VOCAB, o + 48, maxcv);
+    put64(VOCAB, o + 56, gain);
+    put64(VOCAB, o + 64, bias);
+    put64(VOCAB, o + 72, fid);
+    return nvoc + 1;
+}
+
+// native ERR in per-mille: |f0-f0ref|/f0ref*1000 [f0ref>=125000] +
+// 500*[env mismatch] + 500*[cv outside +-25%]
+fn native_err_pm(f0ref: i64, f0h: i64, envref: i64, envh: i64, cvref: i64, cvh: i64) i64 {
+    let e: i64 = 0;
+    if (f0ref >= 125000 && f0ref > 0 && f0h > 0) {
+        let df: i64 = f0h - f0ref;
+        if (df < 0) { df = 0 - df; }
+        e = e + df * 1000 / f0ref;
+    }
+    if (envh != envref) { e = e + 500; }
+    if (cvref > 0) {
+        let dc: i64 = cvh - cvref;
+        if (dc < 0) { dc = 0 - dc; }
+        if (dc * 1000 / cvref > 250) { e = e + 500; }
+    } else {
+        if (cvh > 5) { e = e + 500; }
+    }
+    return e;
+}
+
+// predicted f0-hearing bias in ppm at render f0 (mHz) and total FM depth (pm),
+// from the self-cal bias table (piecewise-linear in f0, linear in depth).
+// CALIB: bias90@16, bias220@24, bias1010@32 (ppm at depth 250000).
+fn bias_ppm_at(CALIB: []u8, f0mhz: i64, depthpm: i64) i64 {
+    let b90: i64 = get64(CALIB, 16);
+    let b220: i64 = get64(CALIB, 24);
+    let b1010: i64 = get64(CALIB, 32);
+    let b: i64 = b220;
+    if (f0mhz <= 90000) { b = b90; }
+    else {
+        if (f0mhz >= 1010000) { b = b1010; }
+        else {
+            if (f0mhz <= 220000) {
+                b = b90 + (b220 - b90) * (f0mhz - 90000) / (220000 - 90000);
+            } else {
+                b = b220 + (b1010 - b220) * (f0mhz - 220000) / (1010000 - 220000);
+            }
+        }
+    }
+    return b * depthpm / 250000;
+}
+
+// ---------------- self-calibration (R1) ----------------
+// Renders probe tones through the planner's OWN renderer, hears them through
+// the planner's OWN organ+guard, records (param -> heard quantity) curves.
+// No frozen gain constant. No clamp constant. Probes live in <outdir>/cal/.
+// CALIB arena (i64 @8B): gain1_pm@0, maxcv1_pm@8, bias90_ppm@16,
+//   bias220_ppm@24, bias1010_ppm@32, rise_slope@40, decay_slope@48,
+//   track_depth_pm@56: deepest FM depth the organ still tracks (see below),
+//   jitter_gain_pm@64: measured CV yield per unit jitter width (amode 2).
+fn slope_for_env(CALIB: []u8, env: i64) i64 {
+    if (env == 1) { return get64(CALIB, 40); }
+    if (env == 2) { return get64(CALIB, 48); }
+    return 5;
+}
+
+fn cal_run(outdir: []u8, CALIB: []u8) i64 {
+    let D: []u8 = (_zag_malloc(208) as *u8)[0..208];
+    // caldir = outdir + "/cal" (built manually; out_path appends .wav)
+    let od: i64 = outdir.len as i64;
+    let cd: []u8 = (_zag_malloc(od + 5) as *u8)[0..(od + 5)];
+    let a: i64 = 0;
+    while (a < od) { cd[a] = outdir[a]; a = a + 1; }
+    cd[od] = 47; cd[od + 1] = 99; cd[od + 2] = 97; cd[od + 3] = 108; cd[od + 4] = 0;
+    let caldir: []u8 = cd[0..(od + 4)];
+    _zag_print("CALIB_BEGIN\n");
+    let depths: []u8 = (_zag_malloc(40) as *u8)[0..40];
+    put64(depths, 0, 100000);
+    put64(depths, 8, 300000);
+    put64(depths, 16, 500000);
+    // per-probe: heard f0 (mHz), voiced_frac (pm), cv (organ units)
+    let pf0: []u8 = (_zag_malloc(40) as *u8)[0..40];
+    let pvf: []u8 = (_zag_malloc(40) as *u8)[0..40];
+    let cvd: []u8 = (_zag_malloc(40) as *u8)[0..40];
+    let n: i64 = 0;
+    while (n < 3) {
+        let stem: []u8 = stem3("c", n + 1);
+        let pp: []u8 = out_path(caldir, stem);
+        if (render_plan(pp, 220000, 0, 5, 0, 5000, get64(depths, n * 8), 0, 0, "") != 0) {
+            _zag_print("ERR cal render failed\n");
+            return -1;
+        }
+        if (hear(pp, D) != 0) {
+            _zag_print("ERR cal hear failed\n");
+            return -1;
+        }
+        _zag_print("CAL vib1 depth_pm=");
+        _zag_print(i64s(get64(depths, n * 8)));
+        _zag_print(" ");
+        print_heard("CALHEARD", D);
+        put64(pf0, n * 8, get64(D, 0));
+        put64(pvf, n * 8, get64(D, 8));
+        put64(cvd, n * 8, get64(D, 32));
+        n = n + 1;
+    }
+    // Tracking frontier: deepest probe where the organ still hears the
+    // rendered F0 within 5% with >=50% voiced frames (voiced_frac is
+    // per-mille: 1000 = fully voiced). Beyond this the organ's F0 lock
+    // breaks (measured 2026-09-26: depth 0.75 heard as 294 Hz instead of
+    // 220 Hz) — the planner must not plan or correct FM depths past its
+    // own hearing. This is a MEASURED limit, not a programmed clamp:
+    // it comes from the probes above.
+    let nvalid: i64 = 0;
+    let v: i64 = 0;
+    while (v < 3) {
+        let df: i64 = get64(pf0, v * 8) - 220000;
+        if (df < 0) { df = 0 - df; }
+        if (df * 20 <= 220000 && get64(pvf, v * 8) >= 500) {
+            nvalid = v + 1;
+        }
+        v = v + 1;
+    }
+    if (nvalid < 2) {
+        _zag_print("ERR cal: organ tracks fewer than 2 FM depths; cannot calibrate\n");
+        return -1;
+    }
+    let track_depth: i64 = get64(depths, (nvalid - 1) * 8);
+    put64(CALIB, 56, track_depth);
+    let gain1: i64 = (get64(cvd, (nvalid - 1) * 8) - get64(cvd, 0)) * 1000000 / (track_depth - 100000);
+    if (gain1 <= 0) {
+        _zag_print("ERR cal gain non-positive; calibration failed\n");
+        return -1;
+    }
+    put64(CALIB, 0, gain1);
+    // maxcv1: the CV the planner can both render AND verify (hear correctly).
+    put64(CALIB, 8, gain1 * track_depth / 1000000);
+    _zag_print("CALIB_FRONTIER track_depth_pm=");
+    _zag_print(i64s(track_depth));
+    _zag_print(" gain1_pm=");
+    _zag_print(i64s(gain1));
+    _zag_print(" maxcv1_pm=");
+    _zag_print(i64s(get64(CALIB, 8)));
+    _zag_print("\n");
+    // Jitter actuator calibration (R1: no baked constants). Render amode=2
+    // (per-period fmix32 jitter) at a known width, hear the CV yield, and
+    // store the measured gain at CALIB@64. The growth shootout derives H3
+    // widths from this measurement. (Found 2026-09-26: the H3 probe width
+    // used a baked 408000 divisor mismatched with the renderer's p1/1e6
+    // scaling by 1000x, so every H3 probe yielded CV 0.)
+    let jw_probe: i64 = 200000;
+    let stemj: []u8 = stem3("c", 20);
+    let ppj: []u8 = out_path(caldir, stemj);
+    if (render_plan(ppj, 220000, 0, 5, 2, jw_probe, 0, 0, 0, "") != 0) {
+        _zag_print("ERR cal jitter render failed\n");
+        return -1;
+    }
+    if (hear(ppj, D) != 0) {
+        _zag_print("ERR cal jitter hear failed\n");
+        return -1;
+    }
+    _zag_print("CAL jitter width_pm=");
+    _zag_print(i64s(jw_probe));
+    _zag_print(" ");
+    print_heard("CALHEARD", D);
+    let jgain: i64 = get64(D, 32) * 1000000 / jw_probe;
+    put64(CALIB, 64, jgain);
+    _zag_print("CALIB_JITTER gain_pm=");
+    _zag_print(i64s(jgain));
+    _zag_print("\n");
+    // f0-bias probes at 90 Hz and 1010 Hz (220 Hz bias from depth probe #2)
+    let f0s: []u8 = (_zag_malloc(24) as *u8)[0..24];
+    put64(f0s, 0, 90000);
+    put64(f0s, 8, 220000);
+    put64(f0s, 16, 1010000);
+    let m: i64 = 0;
+    while (m < 3) {
+        let f0p: i64 = get64(f0s, m * 8);
+        let hf0: i64 = 0;
+        if (m == 1) {
+            // reuse depth probe #2 (220 Hz, depth 250000): re-hear its file
+            let stem: []u8 = stem3("c", 2);
+            let pp: []u8 = out_path(caldir, stem);
+            if (hear(pp, D) != 0) { return -1; }
+            hf0 = get64(D, 0);
+        } else {
+            let stem: []u8 = stem3("c", 6 + m);
+            let pp: []u8 = out_path(caldir, stem);
+            if (render_plan(pp, f0p, 0, 5, 0, 5000, 250000, 0, 0, "") != 0) { return -1; }
+            if (hear(pp, D) != 0) { return -1; }
+            _zag_print("CAL vib1-f0bias f0_mhz=");
+            _zag_print(i64s(f0p));
+            _zag_print(" ");
+            print_heard("CALHEARD", D);
+            hf0 = get64(D, 0);
+        }
+        let bias: i64 = 0;
+        if (hf0 > 0 && f0p > 0) { bias = (hf0 - f0p) * 1000000 / f0p; }
+        put64(CALIB, 16 + m * 8, bias);
+        m = m + 1;
+    }
+    // envelope actuator curve: min probed slope reaching the class
+    let slopes: []u8 = (_zag_malloc(40) as *u8)[0..40];
+    put64(slopes, 0, 3);
+    put64(slopes, 8, 6);
+    put64(slopes, 16, 9);
+    put64(slopes, 24, 12);
+    put64(slopes, 32, 15);
+    let e: i64 = 1;
+    while (e <= 2) {
+        let s2: i64 = 0;
+        while (s2 < 5) {
+            let sl: i64 = get64(slopes, s2 * 8);
+            let stem: []u8 = stem3("c", 10 + (e - 1) * 5 + s2);
+            let pp: []u8 = out_path(caldir, stem);
+            if (render_plan(pp, 220000, e, sl, 0, 5000, 0, 0, 0, "") != 0) { return -1; }
+            if (hear(pp, D) != 0) { return -1; }
+            _zag_print("CAL env class=");
+            _zag_print(i64s(e));
+            _zag_print(" slope_db=");
+            _zag_print(i64s(sl));
+            _zag_print(" ");
+            print_heard("CALHEARD", D);
+            s2 = s2 + 1;
+        }
+        // smallest probed slope whose heard env class matches: re-hear renders
+        let s3: i64 = 0;
+        let best: i64 = 15;
+        while (s3 < 5) {
+            let stem: []u8 = stem3("c", 10 + (e - 1) * 5 + s3);
+            let pp: []u8 = out_path(caldir, stem);
+            // re-hear already-rendered probe
+            if (hear(pp, D) != 0) { return -1; }
+            if (get64(D, 16) == e) {
+                best = get64(slopes, s3 * 8);
+                s3 = 5;
+            } else {
+                s3 = s3 + 1;
+            }
+        }
+        if (e == 1) { put64(CALIB, 40, best); } else { put64(CALIB, 48, best); }
+        e = e + 1;
+    }
+    // CALIB@56 keeps the measured tracking frontier (set above at
+    // put64(CALIB, 56, track_depth)): the deepest FM depth the organ still
+    // hears correctly. R6 gates both initial plans and corrections on it.
+    _zag_print("CALIB_END gain1_pm=");
+    _zag_print(i64s(get64(CALIB, 0)));
+    _zag_print(" maxcv1_pm=");
+    _zag_print(i64s(get64(CALIB, 8)));
+    _zag_print(" bias90_ppm=");
+    _zag_print(i64s(get64(CALIB, 16)));
+    _zag_print(" bias220_ppm=");
+    _zag_print(i64s(get64(CALIB, 24)));
+    _zag_print(" bias1010_ppm=");
+    _zag_print(i64s(get64(CALIB, 32)));
+    _zag_print(" rise_slope=");
+    _zag_print(i64s(get64(CALIB, 40)));
+    _zag_print(" decay_slope=");
+    _zag_print(i64s(get64(CALIB, 48)));
+    _zag_print("\n");
+    return 0;
+}
+
+// ---------------- growth shootout (R3) ----------------
+// Probes ALL candidate hypotheses for a coverage failure, hears each,
+// installs argmin-predicted-ERR as a new vocabulary action — EXCEPT when the
+// winner has the same form as an existing action (H1 single-FM vs A1):
+// then the measured frontier EXTENDS that action instead of duplicating it.
+// PLAN arena (5 i64): amode@0, p1@8, p2@16, p3@24, p4@32 <- winner's params.
+// ACTID arena (1 i64): selected action index (0-based). GERR arena (1 i64):
+//   winner's predicted ERR. Journals DELIBERATED with every candidate's numbers.
+fn growth_shootout(outdir: []u8, depth: i64, D: []u8, CALIB: []u8, VOCAB: []u8, nvoc: i64, CON: []u8, has_con: i64, PLAN: []u8, ACTID: []u8, GERR: []u8) i64 {
+    let need_pm: i64 = get64(D, 32);
+    let f0h: i64 = clamp_f0(get64(D, 0));
+    let envh: i64 = get64(D, 16);
+    let crate: i64 = get64(D, 192);
+    if (crate == 0) { crate = 5000; }
+    let gain1: i64 = get64(CALIB, 0);
+    let slope: i64 = slope_for_env(CALIB, envh);
+    _zag_print("DELIBERATED growth depth=");
+    _zag_print(i64s(depth));
+    _zag_print(" need_cv_pm=");
+    _zag_print(i64s(need_pm));
+    _zag_print(" crate_mhz=");
+    _zag_print(i64s(crate));
+    _zag_print(" reason=no-known-action-covers-need");
+    _zag_print("\n");
+    // probe dir: outdir + "/probes"
+    let od: i64 = outdir.len as i64;
+    let pd: []u8 = (_zag_malloc(od + 8) as *u8)[0..(od + 8)];
+    let a: i64 = 0;
+    while (a < od) { pd[a] = outdir[a]; a = a + 1; }
+    pd[od] = 47; pd[od + 1] = 112; pd[od + 2] = 114; pd[od + 3] = 111;
+    pd[od + 4] = 98; pd[od + 5] = 101; pd[od + 6] = 115; pd[od + 7] = 0;
+    let pdir: []u8 = pd[0..(od + 7)];
+    let D2: []u8 = (_zag_malloc(208) as *u8)[0..208];
+    let best: i64 = -1;
+    let best_err: i64 = 1000000000;
+    let best_yield: i64 = 0;
+    let best_bias: i64 = 0;
+    let ncand: i64 = 4;
+    let ci: i64 = 0;
+    while (ci < ncand) {
+        let am: i64 = -1;
+        let q1: i64 = 0;
+        let q2: i64 = 0;
+        let q3: i64 = 0;
+        let q4: i64 = 0;
+        if (ci == 0) {
+            am = 0; q1 = crate; q2 = need_pm * 1000000 / gain1;
+        }
+        if (ci == 1) {
+            am = 1; q1 = crate;
+            q2 = need_pm * 1000000 / gain1 * 7071 / 10000;
+            q3 = crate / 2;
+            if (q3 < 500) { q3 = 2500; }
+            q4 = q2;
+        }
+        if (ci == 2) {
+            // H3 width from the MEASURED jitter gain (CALIB@64, R1) —
+            // never a baked divisor. Physical limit: jw>=1 makes F0 go
+            // negative, so widths past 0.9 cannot be rendered; if the need
+            // requires more, H3 cannot cover it (journaled, skipped).
+            let jg: i64 = get64(CALIB, 64);
+            if (jg > 0) {
+                let wq: i64 = need_pm * 1000000 / jg;
+                if (wq <= 900000) {
+                    am = 2; q1 = wq; q2 = 0; q3 = 0;
+                } else {
+                    _zag_print("DELIBERATED candidate=H3 skipped reason=need-exceeds-jitter-physical-limit\n");
+                }
+            } else {
+                _zag_print("DELIBERATED candidate=H3 skipped reason=jitter-gain-not-measured\n");
+            }
+        }
+        if (ci == 3) {
+            if (has_con == 0) {
+                _zag_print("DELIBERATED candidate=H4 skipped reason=contour-too-sparse cvcnt=");
+                _zag_print(i64s(get64(D, 200)));
+                _zag_print("\n");
+            } else {
+                am = 3;
+            }
+        }
+        if (am < 0) {
+            ci = ci + 1;
+        } else {
+        // stem: p<depth>c<ci>, e.g. p007c2
+        let p3d: []u8 = pad3(depth);
+        let stem: []u8 = (_zag_malloc(8) as *u8)[0..8];
+        stem[0] = 112;
+        stem[1] = p3d[0]; stem[2] = p3d[1]; stem[3] = p3d[2];
+        stem[4] = 99; stem[5] = (48 + ci) as u8; stem[6] = 0;
+        let pp: []u8 = out_path(pdir, stem[0..6]);
+        if (render_plan(pp, f0h, envh, slope, am, q1, q2, q3, q4, CON) != 0) {
+            _zag_print("ERR growth probe render failed\n");
+            return nvoc;
+        }
+        if (hear(pp, D2) != 0) {
+            _zag_print("ERR growth probe hear failed\n");
+            return nvoc;
+        }
+        let yield_pm: i64 = get64(D2, 32);
+        let hf0: i64 = get64(D2, 0);
+        let bias: i64 = 0;
+        if (hf0 > 0 && f0h > 0) { bias = (hf0 - f0h) * 1000000 / f0h; }
+        let env_ok: i64 = 0;
+        if (get64(D2, 16) == envh) { env_ok = 1; }
+        let f0t: i64 = 0;
+        if (f0h >= 125000) {
+            if (bias < 0) { f0t = (0 - bias) / 1000; } else { f0t = bias / 1000; }
+        }
+        let cvt: i64 = 0;
+        if (need_pm > 0) {
+            let dc: i64 = yield_pm - need_pm;
+            if (dc < 0) { dc = 0 - dc; }
+            if (dc * 1000 / need_pm > 250) { cvt = 500; }
+        } else {
+            if (yield_pm > 5) { cvt = 500; }
+        }
+        let envt: i64 = 0;
+        if (env_ok == 0) { envt = 500; }
+        let pred: i64 = f0t + cvt + envt;
+        _zag_print("DELIBERATED candidate=H");
+        _zag_print(i64s(ci + 1));
+        _zag_print(" amode=");
+        _zag_print(i64s(am));
+        _zag_print(" p1=");
+        _zag_print(i64s(q1));
+        _zag_print(" p2=");
+        _zag_print(i64s(q2));
+        _zag_print(" p3=");
+        _zag_print(i64s(q3));
+        _zag_print(" p4=");
+        _zag_print(i64s(q4));
+        _zag_print(" yield_pm=");
+        _zag_print(i64s(yield_pm));
+        _zag_print(" bias_ppm=");
+        _zag_print(i64s(bias));
+        _zag_print(" env_ok=");
+        _zag_print(i64s(env_ok));
+        _zag_print(" pred_err_pm=");
+        _zag_print(i64s(pred));
+        _zag_print("\n");
+        if (pred < best_err) {
+            best_err = pred;
+            best = ci;
+            best_yield = yield_pm;
+            best_bias = bias;
+            put64(PLAN, 0, am);
+            put64(PLAN, 8, q1);
+            put64(PLAN, 16, q2);
+            put64(PLAN, 24, q3);
+            put64(PLAN, 32, q4);
+        }
+        ci = ci + 1;
+        }
+    }
+    if (best < 0) {
+        _zag_print("DELIBERATED growth FAILED: no candidate produced a hearing\n");
+        return nvoc;
+    }
+    let wam: i64 = get64(PLAN, 0);
+    let wq1: i64 = get64(PLAN, 8);
+    let wq2: i64 = get64(PLAN, 16);
+    let wq3: i64 = get64(PLAN, 24);
+    let wq4: i64 = get64(PLAN, 32);
+    let wgain: i64 = gain1;
+    let wmaxcv: i64 = best_yield;
+    let wfid: i64 = 1000;
+    if (need_pm > 0) { wfid = best_yield * 1000 / need_pm; }
+    if (wam == 1) {
+        let tot: i64 = wq2 + wq4;
+        if (tot > 0) { wgain = best_yield * 1000000 / tot; }
+    }
+    if (wam == 2) {
+        if (wq1 > 0) { wgain = best_yield * 1000000 / wq1; }
+    }
+    if (wam == 3) {
+        wgain = 1000000;
+        wmaxcv = 2000000;
+    }
+    let newid: i64 = nvoc + 1;
+    let nnvoc: i64 = nvoc;
+    let sel: i64 = nvoc;
+    if (wam == 0) {
+        // Same form as the inherited single-FM action: extend its measured
+        // frontier instead of installing a duplicate. Find the amode-0 entry.
+        let ei: i64 = 0;
+        let efound: i64 = -1;
+        while (ei < nvoc) {
+            if (get64(VOCAB, ei * 80 + 8) == 0) { efound = ei; }
+            ei = ei + 1;
+        }
+        if (efound >= 0) {
+            put64(VOCAB, efound * 80 + 48, best_yield);
+            sel = efound;
+            newid = efound + 1;
+            _zag_print("DELIBERATED extended action_id=");
+            _zag_print(i64s(newid));
+            _zag_print(" form=vib1 new_maxcv_pm=");
+            _zag_print(i64s(best_yield));
+            _zag_print(" reason=same-form-deeper-probe-not-a-new-action\n");
+        } else {
+            nnvoc = vocab_add(VOCAB, nvoc, wam, wq1, wq2, wq3, wq4, wmaxcv, wgain, best_bias, wfid);
+            sel = nnvoc - 1;
+            if (sel < 0) { sel = 0; }
+        }
+    } else {
+        nnvoc = vocab_add(VOCAB, nvoc, wam, wq1, wq2, wq3, wq4, wmaxcv, wgain, best_bias, wfid);
+        sel = nnvoc - 1;
+        if (sel < 0) { sel = 0; }
+    }
+    put64(ACTID, 0, sel);
+    put64(GERR, 0, best_err);
+    _zag_print("DELIBERATED grown action_id=");
+    _zag_print(i64s(newid));
+    _zag_print(" winner=H");
+    _zag_print(i64s(best + 1));
+    _zag_print(" amode=");
+    _zag_print(i64s(wam));
+    _zag_print(" reason=argmin-predicted-ERR pred_err_pm=");
+    _zag_print(i64s(best_err));
+    _zag_print(" need_pm=");
+    _zag_print(i64s(need_pm));
+    _zag_print(" yield_pm=");
+    _zag_print(i64s(best_yield));
+    _zag_print("\n");
+    if (best_err >= 500) {
+        _zag_print("DELIBERATED UNEXPRESSIBLE need_cv_pm=");
+        _zag_print(i64s(need_pm));
+        _zag_print(" best_yield_pm=");
+        _zag_print(i64s(best_yield));
+        _zag_print(" finding=no-candidate-covers-need-using-best-available");
+        _zag_print("\n");
+    }
+    return nnvoc;
+}
+
+// ---------------- case planning: consult vocab, grow on failure, derive params
+// PLAN arena (5 i64): amode@0, p1@8, p2@16, p3@24, p4@32.
+// ACTID arena (1 i64): selected action index (0-based).
+// CC arena (16 i64): case contour (for amode 3; copied from D).
+// Returns new nvoc. Journals CONSULTED-selection and DELIBERATED growth.
+fn plan_case(D: []u8, CALIB: []u8, VOCAB: []u8, nvoc: i64, outdir: []u8, depth: i64, PLAN: []u8, ACTID: []u8, GERR: []u8, CC: []u8) i64 {
+    let need_pm: i64 = get64(D, 32);
+    let f0h: i64 = get64(D, 0);
+    let envh: i64 = get64(D, 16);
+    let crate: i64 = get64(D, 192);
+    if (crate == 0) { crate = 5000; }
+    let j: i64 = 0;
+    while (j < 16) {
+        put64(CC, j * 8, get64(D, 64 + j * 8));
+        j = j + 1;
+    }
+    let has_con: i64 = 0;
+    if (get64(D, 200) >= 4) { has_con = 1; }
+    let best: i64 = -1;
+    let best_err: i64 = 1000000000;
+    let vi: i64 = 0;
+    while (vi < nvoc) {
+        let vo: i64 = vi * 80;
+        let am0: i64 = get64(VOCAB, vo + 8);
+        // Coverage is form-aware: FM/jitter actions cover by measured CV
+        // frontier; the contour action covers iff THIS case has a usable
+        // contour (it imposes the reference's shape; magnitude rescales).
+        let covers: i64 = 0;
+        if (am0 == 3) {
+            if (has_con == 1) { covers = 1; }
+        } else {
+            if (get64(VOCAB, vo + 48) >= need_pm) { covers = 1; }
+        }
+        if (covers == 1) {
+            let am: i64 = get64(VOCAB, vo + 8);
+            let gain: i64 = get64(VOCAB, vo + 56);
+            let biasE: i64 = get64(VOCAB, vo + 64);
+            let fid: i64 = get64(VOCAB, vo + 72);
+            let bpred: i64 = 0;
+            let cvt: i64 = 0;
+            if (am == 0 || am == 1) {
+                let d: i64 = 0;
+                if (gain > 0) { d = need_pm * 1000000 / gain; }
+                bpred = bias_ppm_at(CALIB, f0h, d);
+            }
+            if (am == 2) {
+                let w: i64 = 0;
+                if (gain > 0) { w = need_pm * 1000000 / gain; }
+                let p1e: i64 = get64(VOCAB, vo + 16);
+                if (p1e > 0) { bpred = biasE * w / p1e; } else { bpred = biasE; }
+            }
+            if (am == 3) {
+                bpred = biasE;
+                let dc2: i64 = fid - 1000;
+                if (dc2 < 0) { dc2 = 0 - dc2; }
+                if (need_pm > 0 && dc2 * 1000 / 1000 > 250) { cvt = 500; }
+            }
+            let f0t: i64 = 0;
+            if (f0h >= 125000) {
+                if (bpred < 0) { f0t = (0 - bpred) / 1000; } else { f0t = bpred / 1000; }
+            }
+            let pred: i64 = f0t + cvt;
+            if (pred < best_err) {
+                best_err = pred;
+                best = vi;
+            }
+        }
+        vi = vi + 1;
+    }
+    let nnvoc: i64 = nvoc;
+    if (best < 0) {
+        nnvoc = growth_shootout(outdir, depth, D, CALIB, VOCAB, nvoc, CC, has_con, PLAN, ACTID, GERR);
+        best = get64(ACTID, 0);
+        best_err = get64(GERR, 0);
+        if (best < 0) { best = 0; }
+    } else {
+        // derive params for the selected known action at this case's need
+        let vo: i64 = best * 80;
+        let am: i64 = get64(VOCAB, vo + 8);
+        let gain: i64 = get64(VOCAB, vo + 56);
+        put64(PLAN, 0, am);
+        put64(PLAN, 8, 0);
+        put64(PLAN, 16, 0);
+        put64(PLAN, 24, 0);
+        put64(PLAN, 32, 0);
+        if (am == 0) {
+            let d: i64 = 0;
+            if (gain > 0) { d = need_pm * 1000000 / gain; }
+            put64(PLAN, 8, crate);
+            put64(PLAN, 16, d);
+        }
+        if (am == 1) {
+            let tot: i64 = 0;
+            if (gain > 0) { tot = need_pm * 1000000 / gain; }
+            let q2s: i64 = get64(VOCAB, vo + 24);
+            let q4s: i64 = get64(VOCAB, vo + 40);
+            let q1s: i64 = get64(VOCAB, vo + 16);
+            let q3s: i64 = get64(VOCAB, vo + 32);
+            let p2n: i64 = tot / 2;
+            let p4n: i64 = tot / 2;
+            if (q2s + q4s > 0) {
+                p2n = tot * q2s / (q2s + q4s);
+                p4n = tot * q4s / (q2s + q4s);
+            }
+            let p3n: i64 = crate / 2;
+            if (q1s > 0) { p3n = crate * q3s / q1s; }
+            if (p3n < 500) { p3n = 2500; }
+            put64(PLAN, 8, crate);
+            put64(PLAN, 16, p2n);
+            put64(PLAN, 24, p3n);
+            put64(PLAN, 32, p4n);
+        }
+        if (am == 2) {
+            let w: i64 = 0;
+            if (gain > 0) { w = need_pm * 1000000 / gain; }
+            put64(PLAN, 8, w);
+        }
+    }
+    // R6 plan side: never plan an FM depth past the planner's own measured
+    // tracking frontier (the probes, not the planner, may explore there).
+    if (cap_plan_depth(CALIB, PLAN) == 1) {
+        _zag_print("DELIBERATED depth_capped_at_tracking_frontier reason=own-hearing-frontier tdepth_pm=");
+        _zag_print(i64s(get64(CALIB, 56)));
+        _zag_print("\n");
+    }
+    put64(ACTID, 0, best);
+    _zag_print("CONSULTED vocab_action=");
+    _zag_print(i64s(best + 1));
+    _zag_print(" pred_err_pm=");
+    _zag_print(i64s(best_err));
+    _zag_print(" need_cv_pm=");
+    _zag_print(i64s(need_pm));
+    _zag_print("\n");
+    return nnvoc;
+}
+
+fn print_plan(prefix: []u8, fcur: i64, envr: i64, slope: i64, actid: i64, PLAN: []u8, why: []u8) void {
+    _zag_print(prefix);
+    _zag_print(" f0_mhz=");
+    _zag_print(i64s(fcur));
+    _zag_print(" env=");
+    print_env_name(envr);
+    _zag_print(" slope_db=");
+    _zag_print(i64s(slope));
+    _zag_print(" action=");
+    _zag_print(i64s(actid + 1));
+    _zag_print(" amode=");
+    _zag_print(i64s(get64(PLAN, 0)));
+    _zag_print(" p1=");
+    _zag_print(i64s(get64(PLAN, 8)));
+    _zag_print(" p2=");
+    _zag_print(i64s(get64(PLAN, 16)));
+    _zag_print(" p3=");
+    _zag_print(i64s(get64(PLAN, 24)));
+    _zag_print(" p4=");
+    _zag_print(i64s(get64(PLAN, 32)));
+    _zag_print(" why=");
+    _zag_print(why);
+    _zag_print("\n");
+    return;
+}
+
+// total FM depth (pm) of the current plan, for bias prediction
+fn plan_depth_pm(PLAN: []u8) i64 {
+    let am: i64 = get64(PLAN, 0);
+    if (am == 0) { return get64(PLAN, 16); }
+    if (am == 1) { return get64(PLAN, 16) + get64(PLAN, 32); }
+    if (am == 2) { return get64(PLAN, 8); }
+    return 0;
+}
+
+// R6, plan side: cap the planned FM depth at the planner's own measured
+// tracking frontier (CALIB@56). Past it the planner cannot hear its own
+// product, so planning there is a guess, not a plan. Returns 1 if capped.
+// (Correction side is gated separately in the loop with reason journaling.)
+fn cap_plan_depth(CALIB: []u8, PLAN: []u8) i64 {
+    let am: i64 = get64(PLAN, 0);
+    let tdepth: i64 = get64(CALIB, 56);
+    if (tdepth <= 0) { return 0; }
+    if (am == 0) {
+        let d: i64 = get64(PLAN, 16);
+        if (d > tdepth) { put64(PLAN, 16, tdepth); return 1; }
+    }
+    if (am == 1) {
+        let d2: i64 = get64(PLAN, 16);
+        let d4: i64 = get64(PLAN, 32);
+        let tot: i64 = d2 + d4;
+        if (tot > tdepth) {
+            if (tot > 0) {
+                put64(PLAN, 16, d2 * tdepth / tot);
+                put64(PLAN, 32, d4 * tdepth / tot);
+            } else {
+                put64(PLAN, 16, tdepth / 2);
+                put64(PLAN, 32, tdepth / 2);
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// ------------------------------- main --------------------------------
+// mkdir -p for a single path (syscall 83; EEXIST is fine). The runtime
+// creates its own cal/ and probes/ directories; no manual setup.
+fn mkpath(dir: []u8) i64 {
+    let cs: []u8 = cstr(dir);
+    if (cs.len == 0) { return -1; }
+    let rc: i64 = _zag_raw_syscall(83, (_zag_slice_ptr(cs) as i64), 493, 0, 0, 0, 0);
+    return rc;
+}
+
+fn main() i32 {
+    let mode: []u8 = _zag_arg(1);
+    if (streq(mode, "cal") == 1) {
+        // smoke: one vib1 probe, heard back
+        let out: []u8 = _zag_arg(2);
+        if (render_plan(out, 220000, 0, 5, 0, 5000, 250000, 0, 0, "") != 0) {
+            _zag_print("ERR cal render failed\n");
+            return 1;
+        }
+        let D: []u8 = (_zag_malloc(208) as *u8)[0..208];
+        if (hear(out, D) != 0) {
+            _zag_print("ERR cal hear failed\n");
+            return 1;
+        }
+        print_heard("CALHEARD", D);
+        return 0;
+    }
+    if (streq(mode, "batch") == 1 || streq(mode, "batchfresh") == 1 || streq(mode, "batchdeep") == 1) {
+        let batchpath: []u8 = _zag_arg(2);
+        let outp: []u8 = _zag_arg(3);
+        // fresh: vocabulary+history reset per target (no cross-target learning).
+        // deep: vocabulary+history persist across targets (genuine accumulation).
+        // "batch" alone means deep (backward compatible).
+        let fresh: i64 = 0;
+        if (streq(mode, "batchfresh") == 1) { fresh = 1; }
+        _zag_print("PLAN mode=");
+        _zag_print(mode);
+        _zag_print("\n");
+        // runtime creates its own directories
+        mkpath(outp);
+        let od: i64 = outp.len as i64;
+        let pd: []u8 = (_zag_malloc(od + 8) as *u8)[0..(od + 8)];
+        let q: i64 = 0;
+        while (q < od) { pd[q] = outp[q]; q = q + 1; }
+        pd[od] = 47; pd[od+1] = 112; pd[od+2] = 114; pd[od+3] = 111; pd[od+4] = 98; pd[od+5] = 101; pd[od+6] = 115; pd[od+7] = 0;
+        mkpath(pd[0..(od+7)]);
+        let kd: []u8 = (_zag_malloc(od + 5) as *u8)[0..(od + 5)];
+        q = 0;
+        while (q < od) { kd[q] = outp[q]; q = q + 1; }
+        kd[od] = 47; kd[od+1] = 99; kd[od+2] = 97; kd[od+3] = 108; kd[od+4] = 0;
+        mkpath(kd[0..(od+4)]);
+        let HIST: []u8 = (_zag_malloc(1408) as *u8)[0..1408];
+        let i: i64 = 0;
+        while (i < 1408) { HIST[i] = 0; i = i + 1; }
+        let VOCAB: []u8 = (_zag_malloc(2560) as *u8)[0..2560];
+        let CALIB: []u8 = (_zag_malloc(72) as *u8)[0..72];
+        let hcount: i64 = 0;
+        let hpos: i64 = 0;
+        // R1: native self-calibration
+        if (cal_run(outp, CALIB) != 0) {
+            _zag_print("ERR self-calibration failed\n");
+            return 1;
+        }
+        // vocab init: A1 = single sine FM at 5 Hz, the previous vocabulary's
+        // form, kept explicitly as the null hypothesis.
+        let nvoc: i64 = vocab_add(VOCAB, 0, 0, 5000, 0, 0, 0, get64(CALIB, 8), get64(CALIB, 0), 0, 1000);
+        _zag_print("DELIBERATED vocab_init action=1 form=vib1-5Hz reason=inherited-null-hypothesis gain_pm=");
+        _zag_print(i64s(get64(CALIB, 0)));
+        _zag_print(" maxcv_pm=");
+        _zag_print(i64s(get64(CALIB, 8)));
+        _zag_print("\n");
+        // target list (same format as ctrl: "M <wav>" | "L <wav>")
+        let TL: []u8 = (_zag_malloc(200000) as *u8)[0..200000];
+        let tn: i64 = 0;
+        let tb: []u8 = file_read(batchpath, 1048576);
+        if ((tb.len as i64) == 0) {
+            _zag_print("ERR cannot read targets file\n");
+            return 1;
+        }
+        let n: i64 = tb.len as i64;
+        let p: i64 = 0;
+        while (p < n) {
+            let q: i64 = p;
+            while (q < n && tb[q] != 10) { q = q + 1; }
+            let line: []u8 = tb[p..q];
+            if ((line.len as i64) > 2 && line[0] != 35) {
+                let k: i64 = 2;
+                while (k < (line.len as i64) && line[k] == 32) { k = k + 1; }
+                put64(TL, tn * 16, line[0] as i64);
+                let base: i64 = 4096 + tn * 512;
+                let r: i64 = 0;
+                while (k + r < (line.len as i64) && r < 500) {
+                    TL[base + r] = line[k + r];
+                    r = r + 1;
+                }
+                TL[base + r] = 0;
+                put64(TL, tn * 16 + 8, base);
+                tn = tn + 1;
+            }
+            p = q + 1;
+        }
+        let D: []u8 = (_zag_malloc(208) as *u8)[0..208];
+        let DR: []u8 = (_zag_malloc(208) as *u8)[0..208];
+        let PLAN: []u8 = (_zag_malloc(40) as *u8)[0..40];
+        let ACTID: []u8 = (_zag_malloc(8) as *u8)[0..8];
+        let GERR: []u8 = (_zag_malloc(8) as *u8)[0..8];
+        let CC: []u8 = (_zag_malloc(128) as *u8)[0..128];
+        let CC2: []u8 = (_zag_malloc(128) as *u8)[0..128];
+        let ti: i64 = 0;
+        let nmatch: i64 = 0;
+        let nloop: i64 = 0;
+        while (ti < tn) {
+            let kind: i64 = get64(TL, ti * 16);
+            let pbase: i64 = get64(TL, ti * 16 + 8);
+            let plen: i64 = 0;
+            while (TL[pbase + plen] != 0) { plen = plen + 1; }
+            let rp: []u8 = TL[pbase..(pbase + plen)];
+            let depth: i64 = ti + 1;
+            // fresh mode: reset deliberative state per target
+            if (fresh == 1) {
+                let zi: i64 = 0;
+                while (zi < 1408) { HIST[zi] = 0; zi = zi + 1; }
+                hcount = 0;
+                hpos = 0;
+                nvoc = vocab_add(VOCAB, 0, 0, 5000, 0, 0, 0, get64(CALIB, 8), get64(CALIB, 0), 0, 1000);
+                _zag_print("DELIBERATED state_reset reason=fresh-mode-target-boundary\n");
+            }
+            _zag_print("TARGET ");
+            _zag_print(i64s(depth));
+            _zag_print(" depth=");
+            _zag_print(i64s(depth));
+            _zag_print(" kind=");
+            if (kind == 76) { _zag_print("L"); } else { _zag_print("M"); }
+            _zag_print(" ref=");
+            _zag_print(rp);
+            _zag_print("\n");
+            if (hear(rp, D) != 0) {
+                _zag_print("ERR hear failed\n");
+                return 1;
+            }
+            print_heard("HEARD", D);
+            let f0h: i64 = get64(D, 0);
+            let rmsh: i64 = get64(D, 24);
+            let envh: i64 = get64(D, 16);
+            let cvh: i64 = get64(D, 32);
+            let ci: i64 = hist_consult(HIST, hcount, f0h, rmsh, envh);
+            let cturn: i64 = -1;
+            let cdelta: i64 = 0;
+            if (ci >= 0) {
+                cturn = get64(HIST, ci * 88 + 56);
+                cdelta = get64(HIST, ci * 88 + 32) - get64(HIST, ci * 88);
+            }
+            _zag_print("CONSULTED hist_turn=");
+            _zag_print(i64s(cturn));
+            _zag_print(" delta_reused_mhz=");
+            _zag_print(i64s(cdelta));
+            _zag_print("\n");
+            // R2/R3: consult vocabulary, grow on coverage failure
+            let nvoc_before: i64 = nvoc;
+            nvoc = plan_case(D, CALIB, VOCAB, nvoc, outp, depth, PLAN, ACTID, GERR, CC);
+            let actid: i64 = get64(ACTID, 0);
+            let am: i64 = get64(PLAN, 0);
+            let grew: i64 = 0;
+            if (nvoc > nvoc_before) { grew = 1; }
+            // initial plan
+            let fcur: i64 = 440000;
+            if (f0h > 0) { fcur = clamp_f0(f0h); }
+            if (ci >= 0) { fcur = clamp_f0(f0h + cdelta); }
+            let envr: i64 = envh;
+            let slope: i64 = slope_for_env(CALIB, envh);
+            let why: []u8 = "consulted-action";
+            if (grew == 1) { why = "grown-action"; }
+            if (ci >= 0) {
+                if (grew == 1) { why = "grown-action+recalled-delta"; }
+                else { why = "consulted-action+recalled-delta"; }
+            }
+            // PREDICT iter0 from the action's measured curves
+            let dtot0: i64 = plan_depth_pm(PLAN);
+            let bp0: i64 = bias_ppm_at(CALIB, fcur, dtot0);
+            if (am == 3) { bp0 = get64(VOCAB, actid * 80 + 64); }
+            let fpred0: i64 = fcur + fcur * bp0 / 1000000;
+            let cvpred0: i64 = cvh;
+            if (am == 3) { cvpred0 = cvh * get64(VOCAB, actid * 80 + 72) / 1000; }
+            let errpred0: i64 = native_err_pm(f0h, fpred0, envh, envh, cvh, cvpred0);
+            _zag_print("PREDICT f0_mhz=");
+            _zag_print(i64s(fpred0));
+            _zag_print(" cv_pm=");
+            _zag_print(i64s(cvpred0));
+            _zag_print(" env=");
+            print_env_name(envh);
+            _zag_print(" err_pm=");
+            _zag_print(i64s(errpred0));
+            _zag_print("\n");
+            if (kind == 77) {
+                // ---- MATCH (open loop) ----
+                print_plan("PLANNED", fcur, envr, slope, actid, PLAN, why);
+                let stem: []u8 = stem3("m", depth);
+                let op: []u8 = out_path(outp, stem);
+                if (render_plan(op, fcur, envr, slope, am, get64(PLAN, 8), get64(PLAN, 16), get64(PLAN, 24), get64(PLAN, 32), CC) != 0) {
+                    _zag_print("ERR render failed\n");
+                    return 1;
+                }
+                _zag_print("RENDERED ");
+                _zag_print(op);
+                _zag_print("\n");
+                hist_store(HIST, hpos, f0h, rmsh, envh, cvh, fcur, plan_depth_pm(PLAN), slope, depth, 0, actid);
+                hpos = hpos + 1;
+                if (hpos >= 16) { hpos = 0; }
+                hcount = hcount + 1;
+                nmatch = nmatch + 1;
+            } else {
+                // ---- LOOP: iter0 render, then hear->deliberate->replan x3 ----
+                let mf0: i64 = 1000000;
+                let mcv: i64 = 1000000;
+                let ps_f0: i64 = 0;
+                let ps_cv: i64 = 0;
+                // R8: no-progress hold state
+                let prev_meas: i64 = 1000000000;
+                let corrected_last: i64 = 0;
+                let it: i64 = 0;
+                while (it <= 3) {
+                    let pre: []u8 = "ITER 0 PLANNED";
+                    if (it == 1) { pre = "ITER 1 PLANNED"; }
+                    if (it == 2) { pre = "ITER 2 PLANNED"; }
+                    if (it == 3) { pre = "ITER 3 PLANNED"; }
+                    print_plan(pre, fcur, envr, slope, actid, PLAN, why);
+                    let stem2: []u8 = stem3("l", depth);
+                    let s2l: i64 = stem2.len as i64;
+                    let nm2: []u8 = (_zag_malloc(s2l + 7) as *u8)[0..(s2l + 7)];
+                    let a2: i64 = 0;
+                    while (a2 < s2l) { nm2[a2] = stem2[a2]; a2 = a2 + 1; }
+                    nm2[s2l] = 95; nm2[s2l + 1] = 105; nm2[s2l + 2] = 116;
+                    nm2[s2l + 3] = 101; nm2[s2l + 4] = 114;
+                    nm2[s2l + 5] = (48 + it) as u8; nm2[s2l + 6] = 0;
+                    let op2: []u8 = out_path(outp, nm2[0..(s2l + 6)]);
+                    if (render_plan(op2, fcur, envr, slope, am, get64(PLAN, 8), get64(PLAN, 16), get64(PLAN, 24), get64(PLAN, 32), CC) != 0) {
+                        _zag_print("ERR render failed\n");
+                        return 1;
+                    }
+                    let rpre: []u8 = "ITER 0 RENDERED";
+                    if (it == 1) { rpre = "ITER 1 RENDERED"; }
+                    if (it == 2) { rpre = "ITER 2 RENDERED"; }
+                    if (it == 3) { rpre = "ITER 3 RENDERED"; }
+                    _zag_print(rpre);
+                    _zag_print(" ");
+                    _zag_print(op2);
+                    _zag_print("\n");
+                    if (it < 3) {
+                        if (hear(op2, DR) != 0) {
+                            _zag_print("ERR hear render failed\n");
+                            return 1;
+                        }
+                        let hpre: []u8 = "ITER 1";
+                        if (it == 1) { hpre = "ITER 2"; }
+                        if (it == 2) { hpre = "ITER 3"; }
+                        _zag_print(hpre);
+                        _zag_print(" ");
+                        print_heard("ITERHEARD", DR);
+                        let f0dr: i64 = get64(DR, 0);
+                        let envdr: i64 = get64(DR, 16);
+                        let cvdr: i64 = get64(DR, 32);
+                        let df0: i64 = f0h - f0dr;
+                        let envok: i64 = 0;
+                        if (envdr == envh) { envok = 1; }
+                        let dcv: i64 = cvh - cvdr;
+                        let meas: i64 = native_err_pm(f0h, f0dr, envh, envdr, cvh, cvdr);
+                        _zag_print(hpre);
+                        _zag_print(" DEVIATION df0_mhz=");
+                        _zag_print(i64s(df0));
+                        _zag_print(" env_ok=");
+                        _zag_print(i64s(envok));
+                        _zag_print(" dcv_pm=");
+                        _zag_print(i64s(dcv));
+                        _zag_print(" err_pm=");
+                        _zag_print(i64s(meas));
+                        _zag_print("\n");
+                        // R8: no-progress hold. If the previous iteration
+                        // applied a correction and the measured ERR did not
+                        // strictly improve, the correction model is wrong
+                        // for this case — hold instead of drifting.
+                        let force_hold: i64 = 0;
+                        if (corrected_last == 1 && meas >= prev_meas) {
+                            force_hold = 1;
+                        }
+                        // R5: damp on measured overshoot (sign flip)
+                        let s_f0: i64 = 0;
+                        if (df0 > 0) { s_f0 = 1; }
+                        if (df0 < 0) { s_f0 = -1; }
+                        if (s_f0 != 0 && ps_f0 != 0 && s_f0 != ps_f0) {
+                            mf0 = mf0 / 2;
+                            _zag_print(hpre);
+                            _zag_print(" DELIBERATED damped component=f0 reason=measured-overshoot-sign-flip new_mult_pm=");
+                            _zag_print(i64s(mf0));
+                            _zag_print("\n");
+                        }
+                        if (s_f0 != 0) { ps_f0 = s_f0; }
+                        let s_cv: i64 = 0;
+                        if (dcv > 0) { s_cv = 1; }
+                        if (dcv < 0) { s_cv = -1; }
+                        if (s_cv != 0 && ps_cv != 0 && s_cv != ps_cv) {
+                            mcv = mcv / 2;
+                            _zag_print(hpre);
+                            _zag_print(" DELIBERATED damped component=cv reason=measured-overshoot-sign-flip new_mult_pm=");
+                            _zag_print(i64s(mcv));
+                            _zag_print("\n");
+                        }
+                        if (s_cv != 0) { ps_cv = s_cv; }
+                        // correction candidates
+                        let gain_e: i64 = get64(VOCAB, actid * 80 + 56);
+                        if (gain_e <= 0) { gain_e = 1; }
+                        // f0: held when the f0 term is excluded from the
+                        // objective (scorer floor). For the contour action
+                        // (amode 3) fcur is not a free parameter, but the
+                        // contour MEAN is correctable by rescaling — a
+                        // measured f0 correction through the damped
+                        // multiplier, not a hold.
+                        let fnew: i64 = fcur;
+                        let f0held_note: []u8 = "";
+                        let mfac3: i64 = 1000000;
+                        if (am == 3) {
+                            if (f0h >= 125000 && f0dr > 0) {
+                                let raw: i64 = f0h * 1000000 / f0dr;
+                                mfac3 = 1000000 + (raw - 1000000) * mf0 / 1000000;
+                                f0held_note = "f0-contour-mean-rescale";
+                            } else {
+                                f0held_note = "f0-held-below-scorer-floor";
+                            }
+                        } else {
+                            if (f0h >= 125000) {
+                                fnew = fcur + df0 * mf0 / 1000000;
+                            } else {
+                                f0held_note = "f0-held-below-scorer-floor";
+                            }
+                        }
+                        let dtot2: i64 = plan_depth_pm(PLAN);
+                        let bpred2: i64 = bias_ppm_at(CALIB, fnew, dtot2);
+                        if (am == 3) { bpred2 = get64(VOCAB, actid * 80 + 64); }
+                        let fpred2: i64 = fnew + fnew * bpred2 / 1000000;
+                        if (am == 3) { fpred2 = f0dr * mfac3 / 1000000; }
+                        let f0t2: i64 = 0;
+                        if (f0h >= 125000 && f0h > 0) {
+                            let dff: i64 = fpred2 - f0h;
+                            if (dff < 0) { dff = 0 - dff; }
+                            f0t2 = dff * 1000 / f0h;
+                        }
+                        // cv candidate per action form
+                        let np1: i64 = get64(PLAN, 8);
+                        let np2: i64 = get64(PLAN, 16);
+                        let np3: i64 = get64(PLAN, 24);
+                        let np4: i64 = get64(PLAN, 32);
+                        let cvpred2: i64 = cvdr;
+                        if (am == 0) {
+                            let dnew: i64 = np2 + dcv * mcv / gain_e;
+                            if (dnew < 0) { dnew = 0; }
+                            cvpred2 = cvdr + (dnew - np2) * gain_e / 1000000;
+                            np2 = dnew;
+                        }
+                        if (am == 1) {
+                            let tcvt: i64 = cvdr + dcv * mcv / 1000000;
+                            if (tcvt < 0) { tcvt = 0; }
+                            if (cvdr > 0) {
+                                np2 = get64(PLAN, 16) * tcvt / cvdr;
+                                np4 = get64(PLAN, 32) * tcvt / cvdr;
+                            }
+                            cvpred2 = tcvt;
+                        }
+                        if (am == 2) {
+                            let wnew: i64 = np1 + dcv * mcv / gain_e;
+                            if (wnew < 0) { wnew = 0; }
+                            cvpred2 = cvdr + (wnew - np1) * gain_e / 1000000;
+                            np1 = wnew;
+                        }
+                        if (am == 3) {
+                            let knew: i64 = cvdr + dcv * mcv / 1000000;
+                            if (knew < 0) { knew = 0; }
+                            let csum: i64 = 0;
+                            let ccnt: i64 = 0;
+                            let qq: i64 = 0;
+                            while (qq < 16) {
+                                let vv: i64 = get64(CC, qq * 8);
+                                if (vv > 0) { csum = csum + vv; ccnt = ccnt + 1; }
+                                qq = qq + 1;
+                            }
+                            if (ccnt > 0 && cvdr > 0) {
+                                let cmean: i64 = csum / ccnt;
+                                let q3: i64 = 0;
+                                while (q3 < 16) {
+                                    let vv: i64 = get64(CC, q3 * 8);
+                                    if (vv > 0) {
+                                        let shaped: i64 = cmean + (vv - cmean) * knew / cvdr;
+                                        // CV shape rescale AND contour-mean
+                                        // rescale (the amode-3 f0 correction).
+                                        put64(CC2, q3 * 8, shaped * mfac3 / 1000000);
+                                    } else {
+                                        put64(CC2, q3 * 8, 0);
+                                    }
+                                    q3 = q3 + 1;
+                                }
+                            } else {
+                                let q3: i64 = 0;
+                                while (q3 < 16) {
+                                    put64(CC2, q3 * 8, get64(CC, q3 * 8));
+                                    q3 = q3 + 1;
+                                }
+                            }
+                            cvpred2 = knew;
+                        }
+                        let cvt2: i64 = 0;
+                        if (cvh > 0) {
+                            let dcc: i64 = cvpred2 - cvh;
+                            if (dcc < 0) { dcc = 0 - dcc; }
+                            if (dcc * 1000 / cvh > 250) { cvt2 = 500; }
+                        } else {
+                            if (cvpred2 > 5) { cvt2 = 500; }
+                        }
+                        // env: proven slope from self-cal; no blind stepping
+                        let slopenew: i64 = slope;
+                        let envpred_ok: i64 = envok;
+                        let envnote: []u8 = "";
+                        if (envok == 0) {
+                            let sneed: i64 = slope_for_env(CALIB, envh);
+                            if (sneed != slope) {
+                                slopenew = sneed;
+                                envpred_ok = 1;
+                                envnote = "env-slope-from-proven-curve";
+                            } else {
+                                envnote = "env-actuator-at-proven-value-holding";
+                            }
+                        }
+                        let envt2: i64 = 0;
+                        if (envpred_ok == 0) { envt2 = 500; }
+                        let pred2: i64 = f0t2 + cvt2 + envt2;
+                        // R6: never correct an FM depth past the measured
+                        // tracking frontier — the planner cannot hear its
+                        // own product there, so the correction is blind.
+                        let beyond: i64 = 0;
+                        let tdepth: i64 = get64(CALIB, 56);
+                        if (am == 0 && np2 > tdepth) { beyond = 1; }
+                        if (am == 1 && np2 + np4 > tdepth) { beyond = 1; }
+                        // R4: correct only on predicted strict improvement
+                        // (R8 force_hold overrides: model proven wrong).
+                        if (pred2 < meas && beyond == 0 && force_hold == 0) {
+                            fcur = fnew;
+                            put64(PLAN, 8, np1);
+                            put64(PLAN, 16, np2);
+                            put64(PLAN, 24, np3);
+                            put64(PLAN, 32, np4);
+                            slope = slopenew;
+                            corrected_last = 1;
+                            if (am == 3) {
+                                let q4: i64 = 0;
+                                while (q4 < 16) {
+                                    put64(CC, q4 * 8, get64(CC2, q4 * 8));
+                                    q4 = q4 + 1;
+                                }
+                            }
+                            _zag_print(hpre);
+                            _zag_print(" DELIBERATED corrected f0_new_mhz=");
+                            _zag_print(i64s(fcur));
+                            _zag_print(" cv_params=p1=");
+                            _zag_print(i64s(get64(PLAN, 8)));
+                            _zag_print(",p2=");
+                            _zag_print(i64s(get64(PLAN, 16)));
+                            _zag_print(" slope_db=");
+                            _zag_print(i64s(slope));
+                            _zag_print(" pred_err_pm=");
+                            _zag_print(i64s(pred2));
+                            _zag_print(" meas_err_pm=");
+                            _zag_print(i64s(meas));
+                            _zag_print(" ");
+                            _zag_print(envnote);
+                            _zag_print(f0held_note);
+                            _zag_print("\n");
+                            _zag_print(hpre);
+                            _zag_print(" PREDICT f0_mhz=");
+                            _zag_print(i64s(fpred2));
+                            _zag_print(" cv_pm=");
+                            _zag_print(i64s(cvpred2));
+                            _zag_print(" env=");
+                            if (envpred_ok == 1) { print_env_name(envh); } else { print_env_name(envdr); }
+                            _zag_print(" err_pm=");
+                            _zag_print(i64s(pred2));
+                            _zag_print("\n");
+                        } else {
+                            corrected_last = 0;
+                            _zag_print(hpre);
+                            _zag_print(" DELIBERATED held reason=");
+                            if (force_hold == 1) {
+                                _zag_print("no-progress-hold");
+                            } else {
+                                if (beyond == 1) {
+                                    _zag_print("correction-beyond-tracking-frontier");
+                                } else {
+                                    _zag_print("predicted-no-improvement");
+                                }
+                            }
+                            _zag_print(" pred_err_pm=");
+                            _zag_print(i64s(pred2));
+                            _zag_print(" meas_err_pm=");
+                            _zag_print(i64s(meas));
+                            _zag_print(" ");
+                            _zag_print(f0held_note);
+                            _zag_print("\n");
+                            // held: next render is byte-identical, so the
+                            // prediction is exactly the last hearing.
+                            _zag_print(hpre);
+                            _zag_print(" PREDICT f0_mhz=");
+                            _zag_print(i64s(f0dr));
+                            _zag_print(" cv_pm=");
+                            _zag_print(i64s(cvdr));
+                            _zag_print(" env=");
+                            print_env_name(envdr);
+                            _zag_print(" err_pm=");
+                            _zag_print(i64s(meas));
+                            _zag_print(" note=held-render-identical");
+                            _zag_print("\n");
+                        }
+                        prev_meas = meas;
+                    }
+                    it = it + 1;
+                }
+                hist_store(HIST, hpos, f0h, rmsh, envh, cvh, fcur, plan_depth_pm(PLAN), slope, depth, 1, actid);
+                hpos = hpos + 1;
+                if (hpos >= 16) { hpos = 0; }
+                hcount = hcount + 1;
+                nloop = nloop + 1;
+            }
+            ti = ti + 1;
+        }
+        _zag_print("SUMMARY match=");
+        _zag_print(i64s(nmatch));
+        _zag_print(" loop=");
+        _zag_print(i64s(nloop));
+        _zag_print(" targets=");
+        _zag_print(i64s(tn));
+        _zag_print(" actions_grown=");
+        _zag_print(i64s(nvoc));
+        _zag_print("\nPLAN_DONE\n");
+        return 0;
+    }
+    _zag_print("ERR usage: plan cal|batch ...\n");
+    return 1;
+}

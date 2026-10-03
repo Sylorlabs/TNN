@@ -1,0 +1,418 @@
+// lp_full.zag -- Logic vs Prediction battery (Micah Priority 9).
+// "Test exact logical situations where prediction is unnecessary. If known
+// facts entail X, derive X. Do not force prediction into exact knowledge."
+//
+// Three problem types, 3 instances each, fresh workspace per instance per arm:
+//   K (known fact):  exact fact present. Expected: RETRIEVE. No prediction.
+//   D (derivable):   facts logically entail the answer via a transitivity
+//                    rule. Expected: DERIVE. No prediction.
+//   U (uncertain):   no fact, no entailment, only a weak predictor.
+//                    Expected: PREDICT (prediction belongs here).
+// Two ablation probes X1 (empty state) and X2 (empty + weak predictor).
+//
+// Two arms, one binary:
+//   CTL: prediction-first. ev_predict is invoked on every query before the
+//        shared dispatch runs. Models the PREDICT EVERYTHING pattern.
+//   TRT: state-driven dispatch. solve(W,s,r) takes NO problem-type label.
+//        A learner-owned process record (T_PROC node, written on success) is
+//        consulted first; otherwise exact processes are tried before
+//        approximate ones: RETRIEVE, DERIVE, PREDICT, INQUIRE. Each branch
+//        fires only if learner state provides a basis, else NO_VAL.
+//
+// Adversarial twist: K and D setups include a competing WEAK PREDICTOR (a
+// stale MAP that would predict a wrong value). TRT must still never consult
+// prediction there: the answer must come from exact knowledge even when a
+// predictor is available. This separates "prediction is unnecessary" from
+// "no predictor happened to exist".
+//
+// Researcher-authored machinery (documented, not claimed as learned):
+//   - the transitivity deduction rule (s,51,x),(x,52,o) => (s,53,o)
+//   - the fallback ordering "exact before approximate"
+//   - the generic cell executor
+// Learner-owned: facts, MAPs and their scores, LINK-free process records,
+// UNCERTAINTY nodes, and every branch decision (state-gated).
+//
+// Pure Zag. Pinned znc. No Python.
+
+// ============ section 0: primitives (u8-backed cell idiom) ============
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn hg(W:[]u8,f:i32)i32 { return get32(W,f); }
+fn hs(W:[]u8,f:i32,v:i32)void { set32(W,f,v); return; }
+fn noff(n:i32)i32 { return 64+n*40; }
+fn ng(W:[]u8,n:i32,f:i32)i32 { return get32(W,noff(n)+f); }
+fn ns(W:[]u8,n:i32,f:i32,v:i32)void { set32(W,noff(n)+f,v); return; }
+fn eoff(e:i32)i32 { return 41024+e*16; }
+fn eg(W:[]u8,e:i32,f:i32)i32 { return get32(W,eoff(e)+f); }
+fn es(W:[]u8,e:i32,f:i32,v:i32)void { set32(W,eoff(e)+f,v); return; }
+// scratch cell past the edge table (4096 edges end at 106560; we use < 8)
+fn SCR()i32 { return 106560; }
+
+// ============ section 1: init, alloc ============
+fn lp_init(W:[]u8)void {
+  let e:i32=0;
+  while(e<4096){ es(W,e,0,-1); e=e+1; }
+  ns(W,0,36,1); ns(W,1,36,1);
+  hs(W,20,0); hs(W,24,0);
+  return;
+}
+fn alloc_node(W:[]u8)i32 {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==0){
+      ns(W,n,36,1); ns(W,n,0,0);
+      ns(W,n,4,0); ns(W,n,8,0); ns(W,n,12,0); ns(W,n,16,0);
+      ns(W,n,20,0); ns(W,n,24,0); ns(W,n,28,0); ns(W,n,32,0);
+      hs(W,20,hg(W,20)+1); return n;
+    }
+    n=n+1;
+  }
+  return -1;
+}
+fn freshW()[]u8 {
+  let W:[]u8=z_alloc(110656);
+  lp_init(W);
+  return W;
+}
+
+// ============ section 2: constants ============
+// node types
+fn T_FACT()i32 { return 1; }
+fn T_MAP()i32 { return 20; }
+fn T_CELL()i32 { return 22; }
+fn T_UNCERT()i32 { return 30; }
+fn T_PRED()i32 { return 31; }
+fn T_PROC()i32 { return 40; }
+// cell ops (generic arithmetic machinery, not benchmark detectors)
+fn OP_ADD()i32 { return 1; }
+// process ids (integer tags, not modes: no mode flags exist anywhere)
+fn P_RETRIEVE()i32 { return 1; }
+fn P_DERIVE()i32 { return 2; }
+fn P_PREDICT()i32 { return 3; }
+fn P_INQUIRE()i32 { return 4; }
+fn NO_VAL()i32 { return -999999; }
+fn WITHHOLD()i32 { return -3; }
+
+// ============ section 3: counters (header offsets 28..52) ============
+fn bump(W:[]u8,f:i32)void { hs(W,f,hg(W,f)+1); return; }
+fn zero_counters(W:[]u8)void {
+  hs(W,28,0); hs(W,32,0); hs(W,36,0); hs(W,40,0);
+  hs(W,44,0); hs(W,48,0); hs(W,52,0);
+  return;
+}
+// 28 c_predict      total ev_predict invocations
+// 32 c_unnecessary  ev_predict calls on queries where retrieve/derive won
+// 36 n_retrieve  40 n_derive  44 n_inquire  48 n_record_hit
+// 52 n_prednodes    PRED nodes allocated (prediction state pollution)
+
+// ============ section 4: structure ops ============
+// FACT: f0=1 f4=s f8=r f12=o f16=prov
+fn teach_fact(W:[]u8,s:i32,r:i32,o:i32,prov:i32)i32 {
+  let n:i32=alloc_node(W);
+  if(n<0){return -1;}
+  ns(W,n,0,1); ns(W,n,4,s); ns(W,n,8,r); ns(W,n,12,o); ns(W,n,16,prov);
+  return n;
+}
+fn find_fact(W:[]u8,s:i32,r:i32)i32 {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,4)==s && ng(W,n,8)==r){ return n; }
+    n=n+1;
+  }
+  return 0;
+}
+// MAP: f0=20 f8=r f20=score f24=entry cell. Single-cell predictors here.
+fn teach_map(W:[]u8,r:i32,score:i32,op1:i32,im1:i32)i32 {
+  let m:i32=alloc_node(W);
+  if(m<0){return -1;}
+  ns(W,m,0,20); ns(W,m,8,r); ns(W,m,20,score);
+  let c1:i32=alloc_node(W);
+  if(c1<0){return -1;}
+  ns(W,c1,0,22); ns(W,c1,24,op1); ns(W,c1,28,im1);
+  ns(W,m,24,c1);
+  return m;
+}
+fn apply_op(v:i32,op:i32,im:i32)i32 {
+  if(op==1){return v+im;}
+  return im;
+}
+fn exec_map(W:[]u8,m:i32,s:i32)i32 {
+  let c:i32=ng(W,m,24);
+  if(c>1){ return apply_op(s,ng(W,c,24),ng(W,c,28)); }
+  return s;
+}
+fn find_best_map(W:[]u8,r:i32)i32 {
+  let best:i32=0;
+  let bs:i32=-1;
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==20 && ng(W,n,8)==r){
+      let sc:i32=ng(W,n,20);
+      if(sc>bs){ bs=sc; best=n; }
+    }
+    n=n+1;
+  }
+  return best;
+}
+
+// ============ section 5: prediction ============
+// PRED: f0=31 f4=s f8=r f12=predicted f16=resolved(0) f20=predictor MAP
+fn ev_predict(W:[]u8,s:i32,r:i32)i32 {
+  bump(W,28);
+  let m:i32=find_best_map(W,r);
+  if(m==0){ return NO_VAL(); }
+  let v:i32=exec_map(W,m,s);
+  let p:i32=alloc_node(W);
+  if(p>1){
+    ns(W,p,0,31); ns(W,p,4,s); ns(W,p,8,r); ns(W,p,12,v); ns(W,p,16,0); ns(W,p,20,m);
+    bump(W,52);
+  }
+  return v;
+}
+
+// ============ section 6: deduction and inquiry ============
+// DER rule (researcher-authored machinery, like the executor):
+// (s,51,x) and (x,52,o) entails (s,53,o). The derived triple is never stored.
+// The *choice* to derive rather than predict is state-driven.
+fn try_derive_val(W:[]u8,s:i32,r:i32)i32 {
+  if(r!=53){ return NO_VAL(); }
+  let n1:i32=2;
+  while(n1<1024){
+    if(ng(W,n1,36)==1 && ng(W,n1,0)==1 && ng(W,n1,4)==s && ng(W,n1,8)==51){
+      let x:i32=ng(W,n1,12);
+      let n2:i32=2;
+      while(n2<1024){
+        if(ng(W,n2,36)==1 && ng(W,n2,0)==1 && ng(W,n2,4)==x && ng(W,n2,8)==52){
+          return ng(W,n2,12);
+        }
+        n2=n2+1;
+      }
+    }
+    n1=n1+1;
+  }
+  return NO_VAL();
+}
+// inquire: reify UNCERTAINTY for (s,r) unless one already exists
+fn inquire(W:[]u8,s:i32,r:i32)void {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==30 && ng(W,n,4)==s && ng(W,n,8)==r){ return; }
+    n=n+1;
+  }
+  let u:i32=alloc_node(W);
+  if(u>1){ ns(W,u,0,30); ns(W,u,4,s); ns(W,u,8,r); }
+  return;
+}
+
+// ============ section 7: process-success records (learner-owned) ============
+// T_PROC node: f0=40 f8=r f24=process id. Written on success, read first.
+fn proc_get(W:[]u8,r:i32)i32 {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==40 && ng(W,n,8)==r){ return ng(W,n,24); }
+    n=n+1;
+  }
+  return 0;
+}
+fn proc_set(W:[]u8,r:i32,p:i32)void {
+  let n:i32=2;
+  while(n<1024){
+    if(ng(W,n,36)==1 && ng(W,n,0)==40 && ng(W,n,8)==r){ ns(W,n,24,p); return; }
+    n=n+1;
+  }
+  let q:i32=alloc_node(W);
+  if(q>1){ ns(W,q,0,40); ns(W,q,8,r); ns(W,q,24,p); }
+  return;
+}
+
+// ============ section 8: state-driven dispatch (no type label) ============
+// do_process runs one cognitive process if learner state supports it.
+// Returns the answer, or NO_VAL if the process has no basis in state.
+fn do_process(W:[]u8,s:i32,r:i32,p:i32)i32 {
+  if(p==1){
+    let n:i32=find_fact(W,s,r);
+    if(n>0){ bump(W,36); return ng(W,n,12); }
+    return NO_VAL();
+  }
+  if(p==2){
+    let dv:i32=try_derive_val(W,s,r);
+    if(dv!=NO_VAL()){ bump(W,40); return dv; }
+    return NO_VAL();
+  }
+  if(p==3){
+    let pm:i32=find_best_map(W,r);
+    if(pm>0){ return ev_predict(W,s,r); }
+    return NO_VAL();
+  }
+  inquire(W,s,r);
+  bump(W,44);
+  return WITHHOLD();
+}
+// Treatment dispatch: learner's own process record first (written by its own
+// past success); otherwise exact processes before approximate ones. Which
+// branch fires is determined by learner state contents, never by a label.
+fn solve(W:[]u8,s:i32,r:i32)i32 {
+  hs(W,SCR(),0);
+  let rec:i32=proc_get(W,r);
+  if(rec>0){
+    let rv:i32=do_process(W,s,r,rec);
+    if(rv!=NO_VAL()){ bump(W,48); hs(W,SCR(),rec); return rv; }
+  }
+  let v:i32=do_process(W,s,r,1);
+  if(v!=NO_VAL()){ proc_set(W,r,1); hs(W,SCR(),1); return v; }
+  v=do_process(W,s,r,2);
+  if(v!=NO_VAL()){ proc_set(W,r,2); hs(W,SCR(),2); return v; }
+  v=do_process(W,s,r,3);
+  if(v!=NO_VAL()){ proc_set(W,r,3); hs(W,SCR(),3); return v; }
+  v=do_process(W,s,r,4);
+  proc_set(W,r,4); hs(W,SCR(),4);
+  return v;
+}
+// Control: prediction-first. ev_predict runs on every query, then the shared
+// dispatch overrides. A prediction is marked unnecessary when an exact
+// process (retrieve/derive) wins that query anyway.
+fn solve_ctl(W:[]u8,s:i32,r:i32)i32 {
+  let pv:i32=ev_predict(W,s,r);
+  hs(W,SCR(),0);
+  let v:i32=solve(W,s,r);
+  let sp:i32=hg(W,SCR());
+  if(sp==1 || sp==2){ bump(W,32); }
+  return v;
+}
+
+// ============ section 9: setups ============
+// K: exact fact + competing weak predictor (stale MAP, would predict wrong)
+fn setupK(i:i32,W:[]u8)void {
+  let dw:i32=teach_map(W,70,2,1,100);
+  if(i==1){ let f:i32=teach_fact(W,5,70,42,1); }
+  if(i==2){ let f:i32=teach_fact(W,9,70,77,1); }
+  if(i==3){ let f:i32=teach_fact(W,3,70,-15,1); }
+  return;
+}
+// D: entailment chain + competing weak predictor
+fn setupD(i:i32,W:[]u8)void {
+  let dw:i32=teach_map(W,53,2,1,1000);
+  if(i==1){ let a:i32=teach_fact(W,10,51,11,1); let b:i32=teach_fact(W,11,52,21,1); }
+  if(i==2){ let a:i32=teach_fact(W,12,51,13,1); let b:i32=teach_fact(W,13,52,22,1); }
+  if(i==3){ let a:i32=teach_fact(W,14,51,15,1); let b:i32=teach_fact(W,15,52,23,1); }
+  return;
+}
+// U: only a weak predictor (ADD 7); no facts, no entailment
+fn setupU(i:i32,W:[]u8)void {
+  let dw:i32=teach_map(W,80,2,1,7);
+  return;
+}
+// X1: empty state. X2: empty + weak predictor.
+fn setupX2(W:[]u8)void {
+  let dw:i32=teach_map(W,80,2,1,7);
+  return;
+}
+fn k_subj(i:i32)i32 {
+  if(i==1){return 5;}
+  if(i==2){return 9;}
+  return 3;
+}
+fn k_exp(i:i32)i32 {
+  if(i==1){return 42;}
+  if(i==2){return 77;}
+  return -15;
+}
+fn d_subj(i:i32)i32 {
+  if(i==1){return 10;}
+  if(i==2){return 12;}
+  return 14;
+}
+fn d_exp(i:i32)i32 {
+  if(i==1){return 21;}
+  if(i==2){return 22;}
+  return 23;
+}
+
+// ============ section 10: driver ============
+fn rep_line(tag:[]u8,arm:[]u8,W:[]u8,a1:i32,a2:i32,e1:i32,e2:i32)void {
+  emit("TYP "); emit(tag); emit(" "); emit(arm);
+  emit(" ans="); e64(a1); emit(","); e64(a2);
+  let ok:i32=0;
+  if(a1==e1 && a2==e2){ ok=1; }
+  emit(" ok="); e64(ok);
+  emit(" pred="); e64(hg(W,28));
+  emit(" unnec="); e64(hg(W,32));
+  emit(" retr="); e64(hg(W,36));
+  emit(" der="); e64(hg(W,40));
+  emit(" inq="); e64(hg(W,44));
+  emit(" hit="); e64(hg(W,48));
+  emit(" pnodes="); e64(hg(W,52));
+  emit("\n");
+  return;
+}
+// two queries per instance: q1 populates the learner process record,
+// q2 exercises the learner-owned shortcut
+fn run2(tag:[]u8,typ:i32,i:i32,r:i32,s:i32,e:i32)void {
+  let Wc:[]u8=freshW();
+  let Wt:[]u8=freshW();
+  if(typ==1){ setupK(i,Wc); setupK(i,Wt); }
+  if(typ==2){ setupD(i,Wc); setupD(i,Wt); }
+  if(typ==3){ setupU(i,Wc); setupU(i,Wt); }
+  zero_counters(Wc); zero_counters(Wt);
+  let a1:i32=solve_ctl(Wc,s,r);
+  let a2:i32=solve_ctl(Wc,s,r);
+  let b1:i32=solve(Wt,s,r);
+  let b2:i32=solve(Wt,s,r);
+  rep_line(tag,"CTL",Wc,a1,a2,e,e);
+  rep_line(tag,"TRT",Wt,b1,b2,e,e);
+  return;
+}
+fn run1(tag:[]u8,x:i32,r:i32,s:i32,e:i32)void {
+  let Wc:[]u8=freshW();
+  let Wt:[]u8=freshW();
+  if(x==2){ setupX2(Wc); setupX2(Wt); }
+  zero_counters(Wc); zero_counters(Wt);
+  let a1:i32=solve_ctl(Wc,s,r);
+  let b1:i32=solve(Wt,s,r);
+  rep_line(tag,"CTL",Wc,a1,a1,e,e);
+  rep_line(tag,"TRT",Wt,b1,b1,e,e);
+  return;
+}
+fn main()i32 {
+  emit("LOGIC-VS-PREDICTION BATTERY\n");
+  let i:i32=1;
+  while(i<=3){
+    run2("K-known",1,i,70,k_subj(i),k_exp(i));
+    i=i+1;
+  }
+  i=1;
+  while(i<=3){
+    run2("D-derive",2,i,53,d_subj(i),d_exp(i));
+    i=i+1;
+  }
+  i=1;
+  while(i<=3){
+    run2("U-uncertain",3,i,80,i,i+7);
+    i=i+1;
+  }
+  run1("X-empty",1,70,5,-3);
+  run1("X-emptypred",2,80,5,12);
+  emit("DONE\n");
+  return 0;
+}

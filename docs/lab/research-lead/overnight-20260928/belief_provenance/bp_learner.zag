@@ -1,0 +1,461 @@
+// bp_learner.zag -- BELIEF-PROVENANCE 1 learner machinery.
+// Generic machinery + learned state only. No world data, no fact
+// literals, no relation literals in this file. The adjudicator is
+// the mechanism under test: conflict scan over live same-start
+// MAPs, scoring by the learner-owned meta-table (wcorr match
+// counts), argmax with tie -> -3 INDETERMINATE, exploration
+// fallback when indeterminate, confirmation against the world's
+// revealed terminal, meta-row + type-15/type-16 provenance writes.
+// corr = corroboration count, maintained only by bp_observe.
+// rev = revision count, provisioned, always 0 in BP-1.
+// Prereg: belief_provenance/PREREG.md (commit 21dce2653). Pure Zag.
+// 0 modes, 0 handlers, 0 new edge types, 0 new opcodes,
+// 0 semantic cases. No frozen source touched.
+//
+// State layout (u8 buffer, 8192):
+//   0 NF  1 NM  2 NE  3 LAST_VIA(255=none)  4 LAST_VAL
+//   5 NN  6 NMETA  7 unused
+//   16..1039:   facts, 128 x 8B [sub,rel,obj,live,0,0,0,0]
+//   1040..3599: MAPs, 64 x 40B [tag=20,live,start,end,corr,rev,
+//                rlen,flen, rels x8 @+8, facts x8 @+16, pad @+32]
+//   3600..4111: edges, 128 x 4B [from,to,type,pad]
+//   4112..4175: answer nodes, 16 x 4B [via,val,0,0], ids 100+nn
+//   4176..4431: meta rows, 32 x 8B
+//                [wcorr,lcorr,wmid,lmid,ep,0,0,0], edge ids 200+row
+//   4432 C_ADJ i32  4436 C_EXPL i32  4440 C_CONF i32  4444 N_RES i32
+//   4448..8191: scratch
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8, off:i32)i32 {
+  return (b[off] as i32) | ((b[off+1] as i32)<<8) | ((b[off+2] as i32)<<16) | ((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn ob_app(ob:[]u8, at:i32, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ob[at+i]=s[i];i=i+1;}
+  return at+s.len;
+}
+fn ob_nl(ob:[]u8, at:i32)i32 { ob[at]=10; return at+1; }
+fn ob_i32(ob:[]u8, at:i32, v:i32)i32 {
+  let neg:i32=0;
+  let x:i32=v;
+  if(x<0){neg=1;x=0-x;}
+  let nd:i32=1;
+  let t:i32=x;
+  while(t>=10){t=t/10;nd=nd+1;}
+  if(neg==1){ob[at]=45;}
+  let p:i32=at+neg+nd-1;
+  t=x;
+  let k:i32=0;
+  while(k<nd){ob[p-k]=((t%10)+48) as u8; t=t/10; k=k+1;}
+  return at+neg+nd;
+}
+
+// ---- facts ----
+fn f_teach(st:[]u8, sub:i32, rel:i32, obj:i32)i32 {
+  let n:i32=st[0] as i32;
+  if(n>=128){return -1;}
+  let o:i32=16+n*8;
+  st[o]=sub as u8; st[o+1]=rel as u8; st[o+2]=obj as u8; st[o+3]=1;
+  st[o+4]=0; st[o+5]=0; st[o+6]=0; st[o+7]=0;
+  st[0]=(n+1) as u8;
+  return n;
+}
+
+// ---- MAPs (corr/rev maintained by learner machinery only) ----
+fn m_teach(st:[]u8, rs:[]u8, rl:i32, fs:[]u8, fl:i32, start:i32, end:i32)i32 {
+  let n:i32=st[1] as i32;
+  if(n>=64){return -1;}
+  if(rl>8){return -1;}
+  if(fl>8){return -1;}
+  let k:i32=0;
+  while(k<fl){
+    let fid:i32=fs[k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){return -1;}
+    if((st[fo+1] as i32)!=(rs[k] as i32)){return -1;}
+    k=k+1;
+  }
+  let o:i32=1040+n*40;
+  st[o]=20; st[o+1]=1; st[o+2]=start as u8; st[o+3]=end as u8;
+  st[o+4]=0; st[o+5]=0; st[o+6]=rl as u8; st[o+7]=fl as u8;
+  k=0;
+  while(k<8){
+    if(k<rl){st[o+8+k]=rs[k];}
+    else {st[o+8+k]=0;}
+    k=k+1;
+  }
+  k=0;
+  while(k<8){
+    if(k<fl){st[o+16+k]=fs[k];}
+    else {st[o+16+k]=0;}
+    k=k+1;
+  }
+  k=0;
+  while(k<8){st[o+32+k]=0;k=k+1;}
+  st[1]=(n+1) as u8;
+  return n;
+}
+fn m_exec(st:[]u8, mid:i32, start:i32)i32 {
+  let o:i32=1040+mid*40;
+  if((st[o+1] as i32)==0){return -1;}
+  let rl:i32=st[o+6] as i32;
+  let cur:i32=start;
+  let k:i32=0;
+  while(k<rl){
+    let fid:i32=st[o+16+k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){return -1;}
+    let bad:i32=0;
+    if((st[fo] as i32)!=cur){bad=1;}
+    if((st[fo+1] as i32)!=(st[o+8+k] as i32)){bad=1;}
+    if(bad==1){return -1;}
+    cur=st[fo+2] as i32;
+    k=k+1;
+  }
+  return cur;
+}
+
+// ---- observation: the world's confirmation of a terminal ----
+// Learner machinery: increments corr on match. The driver (world)
+// supplies term_obs; the learner never sees the regime.
+fn bp_observe(st:[]u8, mid:i32, term_obs:i32, ob:[]u8, atp:[]u8)i32 {
+  let o:i32=1040+mid*40;
+  let term:i32=m_exec(st,mid,st[o+2] as i32);
+  let ok:i32=0;
+  if(term==term_obs){
+    st[o+4]=((st[o+4] as i32)+1) as u8;
+    ok=1;
+  }
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,"OBSERVE mid=");
+  at=ob_i32(ob,at,mid);
+  at=ob_app(ob,at," ok=");
+  at=ob_i32(ob,at,ok);
+  at=ob_app(ob,at," corr=");
+  at=ob_i32(ob,at,st[o+4] as i32);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  return ok;
+}
+
+// ---- edges (types 14/15/16 only) ----
+fn e_add(st:[]u8, from:i32, to:i32, typ:i32)void {
+  let n:i32=st[2] as i32;
+  if(n>=128){return;}
+  let i:i32=0;
+  while(i<n){
+    let o:i32=3600+i*4;
+    let dup:i32=0;
+    if((st[o] as i32)==from){
+      if((st[o+1] as i32)==to){
+        if((st[o+2] as i32)==typ){dup=1;}
+      }
+    }
+    if(dup==1){return;}
+    i=i+1;
+  }
+  let o:i32=3600+n*4;
+  st[o]=from as u8; st[o+1]=to as u8; st[o+2]=typ as u8; st[o+3]=0;
+  st[2]=(n+1) as u8;
+  return;
+}
+fn e_count(st:[]u8, typ:i32)i32 {
+  let n:i32=st[2] as i32;
+  let c:i32=0;
+  let i:i32=0;
+  while(i<n){
+    if((st[3600+i*4+2] as i32)==typ){c=c+1;}
+    i=i+1;
+  }
+  return c;
+}
+fn e_other(st:[]u8)i32 {
+  let n:i32=st[2] as i32;
+  let c:i32=0;
+  let i:i32=0;
+  while(i<n){
+    let t:i32=st[3600+i*4+2] as i32;
+    let known:i32=0;
+    if(t==14){known=1;}
+    if(t==15){known=1;}
+    if(t==16){known=1;}
+    if(known==0){c=c+1;}
+    i=i+1;
+  }
+  return c;
+}
+
+// ---- meta-table: the learner's evidential policy content ----
+// Row: [wcorr,lcorr,wmid,lmid,ep,0,0,0], edge id 200+row.
+fn meta_add(st:[]u8, wmid:i32, lmid:i32, ep:i32, ob:[]u8, atp:[]u8)i32 {
+  let r:i32=st[6] as i32;
+  if(r>=32){return -1;}
+  let wo:i32=1040+wmid*40;
+  let lo:i32=1040+lmid*40;
+  let o:i32=4176+r*8;
+  st[o]=st[wo+4]; st[o+1]=st[lo+4];
+  st[o+2]=wmid as u8; st[o+3]=lmid as u8; st[o+4]=ep as u8;
+  st[o+5]=0; st[o+6]=0; st[o+7]=0;
+  st[6]=(r+1) as u8;
+  e_add(st,200+r,wmid,16);
+  e_add(st,200+r,lmid,16);
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,"META-ROW r=");
+  at=ob_i32(ob,at,r);
+  at=ob_app(ob,at," wcorr=");
+  at=ob_i32(ob,at,st[o] as i32);
+  at=ob_app(ob,at," wmid=");
+  at=ob_i32(ob,at,wmid);
+  at=ob_app(ob,at," lcorr=");
+  at=ob_i32(ob,at,st[o+1] as i32);
+  at=ob_app(ob,at," lmid=");
+  at=ob_i32(ob,at,lmid);
+  at=ob_app(ob,at," ep=");
+  at=ob_i32(ob,at,ep);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  return r;
+}
+fn meta_score(st:[]u8, c:i32)i32 {
+  let n:i32=st[6] as i32;
+  let s:i32=0;
+  let r:i32=0;
+  while(r<n){
+    if((st[4176+r*8] as i32)==c){s=s+1;}
+    r=r+1;
+  }
+  return s;
+}
+
+// ---- candidate collection: live MAPs with start == s ----
+fn collect(st:[]u8, s:i32, cm:[]u8, cc:[]u8, ct:[]u8)i32 {
+  let n:i32=0;
+  let nm:i32=st[1] as i32;
+  let mid:i32=0;
+  while(mid<nm){
+    let o:i32=1040+mid*40;
+    if((st[o+1] as i32)==1){
+      if((st[o+2] as i32)==s){
+        cm[n]=mid as u8;
+        cc[n]=st[o+4];
+        ct[n]=m_exec(st,mid,s) as u8;
+        n=n+1;
+      }
+    }
+    mid=mid+1;
+  }
+  return n;
+}
+
+// ---- adjudicator: decide by learned evidential state ----
+// Returns winning mid, or -3 INDETERMINATE (tie, incl. empty
+// table), -4 no conflict, -5 agreement. No corr magnitude
+// comparison, no recency, no identity preference anywhere.
+fn bp_adjudicate(st:[]u8, s:i32, ob:[]u8, atp:[]u8)i32 {
+  set32(st,4432,get32(st,4432)+1);
+  let cm:[]u8=z_alloc(64);
+  let cc:[]u8=z_alloc(64);
+  let ct:[]u8=z_alloc(64);
+  let n:i32=collect(st,s,cm,cc,ct);
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,"ADJUDICATE s=");
+  at=ob_i32(ob,at,s);
+  at=ob_app(ob,at," n=");
+  at=ob_i32(ob,at,n);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  if(n<2){
+    at=get32(atp,0);
+    at=ob_app(ob,at,"ADJ-WIN win=-4\n");
+    set32(atp,0,at);
+    return -4;
+  }
+  let t0:i32=ct[0] as i32;
+  let agree:i32=1;
+  let k:i32=1;
+  while(k<n){
+    if((ct[k] as i32)!=t0){agree=0;}
+    k=k+1;
+  }
+  if(agree==1){
+    at=get32(atp,0);
+    at=ob_app(ob,at,"ADJ-WIN win=-5\n");
+    set32(atp,0,at);
+    return -5;
+  }
+  let best:i32=0;
+  let bests:i32=-1;
+  let tie:i32=0;
+  k=0;
+  while(k<n){
+    let sc:i32=meta_score(st,cc[k] as i32);
+    at=get32(atp,0);
+    at=ob_app(ob,at,"ADJ-CAND mid=");
+    at=ob_i32(ob,at,cm[k] as i32);
+    at=ob_app(ob,at," corr=");
+    at=ob_i32(ob,at,cc[k] as i32);
+    at=ob_app(ob,at," term=");
+    at=ob_i32(ob,at,ct[k] as i32);
+    at=ob_app(ob,at," score=");
+    at=ob_i32(ob,at,sc);
+    at=ob_nl(ob,at);
+    set32(atp,0,at);
+    if(sc>bests){bests=sc;best=k;tie=0;}
+    else {
+      if(sc==bests){tie=1;}
+    }
+    k=k+1;
+  }
+  at=get32(atp,0);
+  at=ob_app(ob,at,"ADJ-WIN win=");
+  if(tie==1){
+    at=ob_i32(ob,at,-3);
+    at=ob_nl(ob,at);
+    set32(atp,0,at);
+    return -3;
+  }
+  let wm:i32=cm[best] as i32;
+  at=ob_i32(ob,at,wm);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  return wm;
+}
+
+// ---- exploration fallback: only when adjudication is -3 ----
+// Tries candidates in order (higher corr first if hi_first,
+// else lower corr first; ties -> lower mid). The first whose
+// terminal equals the revealed terminal wins. Writes the
+// meta-row + type-15 co-consideration edges.
+fn bp_explore(st:[]u8, s:i32, revealed:i32, hi_first:i32, ep:i32, ob:[]u8, atp:[]u8)i32 {
+  set32(st,4436,get32(st,4436)+1);
+  let cm:[]u8=z_alloc(64);
+  let cc:[]u8=z_alloc(64);
+  let ct:[]u8=z_alloc(64);
+  let n:i32=collect(st,s,cm,cc,ct);
+  let ord:[]u8=z_alloc(64);
+  let first:i32=0;
+  let k:i32=1;
+  while(k<n){
+    let ck:i32=cc[k] as i32;
+    let cf:i32=cc[first] as i32;
+    let mk:i32=cm[k] as i32;
+    let mf:i32=cm[first] as i32;
+    let take:i32=0;
+    if(hi_first==1){
+      if(ck>cf){take=1;}
+      else {
+        if(ck==cf){
+          if(mk<mf){take=1;}
+        }
+      }
+    }
+    else {
+      if(ck<cf){take=1;}
+      else {
+        if(ck==cf){
+          if(mk<mf){take=1;}
+        }
+      }
+    }
+    if(take==1){first=k;}
+    k=k+1;
+  }
+  ord[0]=first as u8;
+  let no:i32=1;
+  k=0;
+  while(k<n){
+    if(k!=first){ord[no]=k as u8;no=no+1;}
+    k=k+1;
+  }
+  let j:i32=0;
+  while(j<no){
+    let ci:i32=ord[j] as i32;
+    let mid:i32=cm[ci] as i32;
+    let term:i32=ct[ci] as i32;
+    let hit:i32=0;
+    if(term==revealed){hit=1;}
+    let at:i32=get32(atp,0);
+    at=ob_app(ob,at,"EXPLORE-TRY mid=");
+    at=ob_i32(ob,at,mid);
+    at=ob_app(ob,at," term=");
+    at=ob_i32(ob,at,term);
+    at=ob_app(ob,at," rev=");
+    at=ob_i32(ob,at,revealed);
+    if(hit==1){at=ob_app(ob,at," HIT\n");}
+    else {at=ob_app(ob,at," MISS\n");}
+    set32(atp,0,at);
+    if(hit==1){
+      let lmid:i32=cm[0] as i32;
+      if(mid==(cm[0] as i32)){lmid=cm[1] as i32;}
+      let mr:i32=meta_add(st,mid,lmid,ep,ob,atp);
+      e_add(st,mid,lmid,15);
+      e_add(st,lmid,mid,15);
+      set32(st,4444,get32(st,4444)+1);
+      return mid;
+    }
+    j=j+1;
+  }
+  return -3;
+}
+
+// ---- confirmation: learner-owned evaluation of a commitment ----
+// Compares the committed structure's terminal to the revealed
+// terminal. On match writes meta-row + type-15 edges, returns 1;
+// else returns 0 and writes nothing.
+fn bp_confirm(st:[]u8, wmid:i32, lmid:i32, revealed:i32, ep:i32, ob:[]u8, atp:[]u8)i32 {
+  set32(st,4440,get32(st,4440)+1);
+  let wo:i32=1040+wmid*40;
+  let term:i32=m_exec(st,wmid,st[wo+2] as i32);
+  let ok:i32=0;
+  if(term==revealed){ok=1;}
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,"CONFIRM mid=");
+  at=ob_i32(ob,at,wmid);
+  at=ob_app(ob,at," term=");
+  at=ob_i32(ob,at,term);
+  at=ob_app(ob,at," rev=");
+  at=ob_i32(ob,at,revealed);
+  if(ok==1){at=ob_app(ob,at," OK\n");}
+  else {at=ob_app(ob,at," FAIL\n");}
+  set32(atp,0,at);
+  if(ok==1){
+    let mr:i32=meta_add(st,wmid,lmid,ep,ob,atp);
+    e_add(st,wmid,lmid,15);
+    e_add(st,lmid,wmid,15);
+    set32(st,4444,get32(st,4444)+1);
+  }
+  return ok;
+}
+
+// ---- deliver: commit to an answer, observably ----
+fn bp_deliver(st:[]u8, mid:i32, val:i32, ob:[]u8, atp:[]u8)void {
+  let nn:i32=st[5] as i32;
+  if(nn<16){
+    let aid:i32=100+nn;
+    let o:i32=4112+nn*4;
+    st[o]=mid as u8; st[o+1]=val as u8; st[o+2]=0; st[o+3]=0;
+    st[5]=(nn+1) as u8;
+    e_add(st,aid,mid,14);
+  }
+  st[3]=mid as u8; st[4]=val as u8;
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,"ANS via=");
+  at=ob_i32(ob,at,mid);
+  at=ob_app(ob,at," val=");
+  at=ob_i32(ob,at,val);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  return;
+}

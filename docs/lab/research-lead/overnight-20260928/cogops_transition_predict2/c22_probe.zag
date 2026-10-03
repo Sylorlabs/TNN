@@ -1,0 +1,367 @@
+// c22_probe.zag -- corrected transition-inequality probe.
+//
+// Rewrites /tmp/tpv/probe.zag fixing three design flaws:
+//   (1) Simulates full selection (argmin + hedge) in EVERY stage,
+//       including setup stages (c21 flaw: setup hardcoded as
+//       "PW,WHOLE fail / NEED wins", missing the nn=4,k=2 hedge).
+//   (2) Updates the rescue ledger (rt,rc) WITHIN a stage after each
+//       non-first strategy's turn, BEFORE the next strat_sel
+//       (c21 flaw: ledger held constant across the stage; observed
+//       c21 P1b1 order ALT, PW, NEED, WHOLE requires the update:
+//       NEED overtakes WHOLE only after PW's failure bumps ra/rb).
+//   (3) (u,w,c) updates apply per-turn (excluded strategy, so order
+//       among the rest is preserved; verified against source).
+//
+// Turn-cost model (calibrated on c21 DET evidence, exact):
+//   SETUP goal (NEED-winnable):
+//     PW   first (fail,2)   non-first (fail,3)
+//     WHOLE first (fail,1)   non-first (fail,2)
+//     NEED  any   (win,nn)
+//     ALT   first (win,2+nn)  non-first (win,3+nn)
+//   TEST goal (unwinnable):
+//     PW   first (fail,2)   non-first (fail,3)
+//     WHOLE first (fail,1)   non-first (fail,2)
+//     NEED  first (fail,nn)  non-first (fail,2*nn)
+//     ALT   first (fail,2+2*nn) non-first (fail,3+2*nn)
+// Rescue ledger: first strategy's turn accrues nothing; each later
+//   strategy's turn adds (tc,1) to (rt,rc) via rescue_finalize,
+//   before the next selection. Win/loss recorded per turn.
+//
+// Assumptions (asserted by kill bars on the real battery):
+//   - vr==3 (quiescence) never occurs.
+//   - prior does not change calibrated costs (test stages run at
+//     prior=2; setup stage 1 at prior=0 costs identical).
+//   - goal kinds behave as labeled (setup NEED-winnable, test
+//     unwinnable by all four forms).
+fn z_alloc(n:i32)[]u8 {
+  let p:*u8=_zag_malloc(n) as *u8;
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c+i]=s[i]; i=i+1; }
+  return c+s.len;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0;
+  let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1;
+  let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n;
+  let p:i32=e-1;
+  let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){
+    b[p]=(48+(y-(y/10)*10)) as u8;
+    y=y/10;
+    p=p-1;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0);
+  return;
+}
+fn pow2(n:i32)i32 {
+  let r:i32=1;
+  let i:i32=0;
+  while(i<n){ r=r*2; i=i+1; }
+  return r;
+}
+// per-context strategy state: u[1..4], w[1..4], c[1..4]
+fn getu(u:[]u8,s:i32)i32 { return get32(u,s*4); }
+fn getw(w:[]u8,s:i32)i32 { return get32(w,s*4); }
+fn getc(cc:[]u8,s:i32)i32 { return get32(cc,s*4); }
+fn setu(u:[]u8,s:i32,v:i32)void { set32(u,s*4,v); return; }
+fn setw(w:[]u8,s:i32,v:i32)void { set32(w,s*4,v); return; }
+fn setc(cc:[]u8,s:i32,v:i32)void { set32(cc,s*4,v); return; }
+// nsc(s) = (c+8)*rb + (u-w+1)*ra
+fn nsc(s:i32,u:[]u8,w:[]u8,cc:[]u8,ra:i32,rb:i32)i32 {
+  return (getc(cc,s)+8)*rb+(getu(u,s)-getw(w,s)+1)*ra;
+}
+// exact tie of s with the argmin (bu,bn)
+fn ties_best(s:i32,u:[]u8,w:[]u8,cc:[]u8,ra:i32,rb:i32,bu:i32,bn:i32)i32 {
+  let ns:i32=nsc(s,u,w,cc,ra,rb);
+  let us:i32=getu(u,s);
+  if(ns*(bu+2)==bn*(us+2)){ return 1; }
+  return 0;
+}
+// argmin of nsc/(u+2) over untried strategies; lower-id tie-break.
+// Returns best id. (Transcribed from strat_sel.)
+fn argmin(u:[]u8,w:[]u8,cc:[]u8,ra:i32,rb:i32,tried:i32) i32 {
+  let best:i32=0;
+  let bu:i32=0;
+  let bn:i32=0;
+  let s:i32=1;
+  while(s<5){
+    let b2:i32=pow2(s);
+    let q:i32=tried/b2;
+    let ist:i32=q-(q/2)*2;
+    if(ist==0){
+      let uu:i32=getu(u,s);
+      let ns:i32=nsc(s,u,w,cc,ra,rb);
+      let better:i32=0;
+      if(best==0){ better=1; }
+      if(best!=0){
+        if(ns*(bu+2)<bn*(uu+2)){ better=1; }
+      }
+      if(better==1){ best=s; bu=uu; bn=ns; }
+    }
+    s=s+1;
+  }
+  return best;
+}
+// argmin's (bu,bn) for the tie check
+fn argmin_bn(u:[]u8,w:[]u8,cc:[]u8,ra:i32,rb:i32,tried:i32,best:i32,out:[]u8)void {
+  let bu:i32=0;
+  let bn:i32=0;
+  let s:i32=1;
+  while(s<5){
+    let b2:i32=pow2(s);
+    let q:i32=tried/b2;
+    let ist:i32=q-(q/2)*2;
+    if(ist==0){
+      let uu:i32=getu(u,s);
+      let ns:i32=nsc(s,u,w,cc,ra,rb);
+      if(s==best){ bu=uu; bn=ns; }
+    }
+    s=s+1;
+  }
+  set32(out,0,bu);
+  set32(out,4,bn);
+  return;
+}
+// turn cost model; win_out/tc_out via out[0], out[4]
+// kind: 0=setup (NEED-winnable), 1=test (unwinnable)
+fn costs(s:i32,kind:i32,first:i32,nn:i32,out:[]u8)void {
+  let win:i32=0;
+  let tc:i32=0;
+  if(kind==0){
+    if(s==1){ win=0; if(first==1){ tc=2; } if(first==0){ tc=3; } }
+    if(s==2){ win=0; if(first==1){ tc=1; } if(first==0){ tc=2; } }
+    if(s==3){ win=1; tc=nn; }
+    if(s==4){ win=1; if(first==1){ tc=2+nn; } if(first==0){ tc=3+nn; } }
+  }
+  if(kind==1){
+    if(s==1){ win=0; if(first==1){ tc=2; } if(first==0){ tc=3; } }
+    if(s==2){ win=0; if(first==1){ tc=1; } if(first==0){ tc=2; } }
+    if(s==3){ win=0; if(first==1){ tc=nn; } if(first==0){ tc=2*nn; } }
+    if(s==4){ win=0; if(first==1){ tc=2+2*nn; } if(first==0){ tc=3+2*nn; } }
+  }
+  set32(out,0,win);
+  set32(out,4,tc);
+  return;
+}
+// simulate one stage. u,w,cc: context arrays; rr: [rt,rc].
+// Returns chosen in cout[0], hedge flag in cout[4].
+fn sim_stage(nn:i32,kind:i32,u:[]u8,w:[]u8,cc:[]u8,rr:[]u8,cout:[]u8)void {
+  let rt:i32=get32(rr,0);
+  let rc:i32=get32(rr,4);
+  let tried:i32=0;
+  let turn:i32=0;
+  let chosen:i32=0;
+  let hedge:i32=0;
+  let live:i32=1;
+  let bb:[]u8=z_alloc(8);
+  let co:[]u8=z_alloc(8);
+  while(live==1){
+    let ra:i32=rt+2;
+    let rb:i32=rc+2;
+    let best:i32=argmin(u,w,cc,ra,rb,tried);
+    if(best==0){ live=0; }
+    if(best!=0){
+      if(turn==0){
+        chosen=best;
+        // hedge: PW+NEED exact tie for argmin, both with in-context
+        // cost evidence (c1>0, c3>0)
+        if(getc(cc,1)>0){
+          if(getc(cc,3)>0){
+            argmin_bn(u,w,cc,ra,rb,tried,best,bb);
+            let bu:i32=get32(bb,0);
+            let bn:i32=get32(bb,4);
+            if(ties_best(1,u,w,cc,ra,rb,bu,bn)==1){
+              if(ties_best(3,u,w,cc,ra,rb,bu,bn)==1){
+                best=4; hedge=1; chosen=4;
+              }
+            }
+          }
+        }
+      }
+      let first:i32=0;
+      if(turn==0){ first=1; }
+      costs(best,kind,first,nn,co);
+      let win:i32=get32(co,0);
+      let tc:i32=get32(co,4);
+      setu(u,best,getu(u,best)+1);
+      setc(cc,best,getc(cc,best)+tc);
+      if(win==1){ setw(w,best,getw(w,best)+1); }
+      // rescue: non-first turns accrue (tc,1) before next selection
+      if(turn>0){ rt=rt+tc; rc=rc+1; }
+      turn=turn+1;
+      if(win==1){ live=0; }
+      if(win==0){
+        tried=tried+pow2(best);
+        if(tried==30){ live=0; }
+      }
+    }
+  }
+  set32(rr,0,rt);
+  set32(rr,4,rc);
+  set32(cout,0,chosen);
+  set32(cout,4,hedge);
+  return;
+}
+// simulate one arc: k setup stages then nt test stages.
+// Fresh context per arc (zeroed u,w,cc).
+// Prints per-stage chosen/hedge for the test block.
+fn sim_arc(b:[]u8,c:i32,nn:i32,k:i32,nt:i32,rr:[]u8,tag:[]u8) i32 {
+  let u:[]u8=z_alloc(24);
+  let w:[]u8=z_alloc(24);
+  let cc:[]u8=z_alloc(24);
+  let cout:[]u8=z_alloc(8);
+  c=o_app(b,c,tag); c=o_app(b,c," nn="); c=o_i64(b,c,nn as i64);
+  c=o_app(b,c," k="); c=o_i64(b,c,k as i64);
+  c=o_app(b,c," rt0="); c=o_i64(b,c,get32(rr,0) as i64);
+  c=o_app(b,c," rc0="); c=o_i64(b,c,get32(rr,4) as i64);
+  c=o_nl(b,c);
+  // setup stages (kind 0)
+  let j:i32=1;
+  while(j<=k){
+    sim_stage(nn,0,u,w,cc,rr,cout);
+    c=o_app(b,c,"  a"); c=o_i64(b,c,j as i64);
+    c=o_app(b,c," chosen="); c=o_i64(b,c,get32(cout,0) as i64);
+    c=o_app(b,c," hedge="); c=o_i64(b,c,get32(cout,4) as i64);
+    c=o_nl(b,c);
+    j=j+1;
+  }
+  // test stages (kind 1)
+  let t:i32=1;
+  let prev:i32=0;
+  let ntrans:i32=0;
+  let firsttrans:i32=0;
+  while(t<=nt){
+    sim_stage(nn,1,u,w,cc,rr,cout);
+    let ch:i32=get32(cout,0);
+    let hg:i32=get32(cout,4);
+    c=o_app(b,c,"  t"); c=o_i64(b,c,t as i64);
+    c=o_app(b,c," chosen="); c=o_i64(b,c,ch as i64);
+    c=o_app(b,c," hedge="); c=o_i64(b,c,hg as i64);
+    if(t==1){ prev=ch; }
+    if(t>1){
+      if(ch!=prev){
+        c=o_app(b,c," TRANS");
+        ntrans=ntrans+1;
+        if(firsttrans==0){ firsttrans=t; }
+        prev=ch;
+      }
+    }
+    c=o_nl(b,c);
+    t=t+1;
+  }
+  c=o_app(b,c,"  ntrans="); c=o_i64(b,c,ntrans as i64);
+  c=o_app(b,c," firsttrans="); c=o_i64(b,c,firsttrans as i64);
+  c=o_app(b,c," rt1="); c=o_i64(b,c,get32(rr,0) as i64);
+  c=o_app(b,c," rc1="); c=o_i64(b,c,get32(rr,4) as i64);
+  c=o_nl(b,c);
+  return c;
+}
+fn main()i32 {
+  let b:[]u8=z_alloc(65536);
+  let c:i32=0;
+  let rr:[]u8=z_alloc(8);
+  set32(rr,0,0);
+  set32(rr,4,0);
+  // MODE 0: c21 replay validation (shared (4,613) context across
+  // P1/P2/Q1 arcs; fresh (3,613) for Q2). Layout mirrors c21.
+  // MODE 1: c22 prediction (fresh context per arc).
+  let mode:i32=1;
+  if(mode==0){
+    // shared context for P1+P2+Q1: simulate as one arc sequence
+    // P1: nn=4,k=2,nt=10; P2: nn=4,k=3,nt=10; Q1: nn=4,k=12,nt=10
+    // (contexts shared: single u,w,cc across all three)
+    let u:[]u8=z_alloc(24);
+    let w:[]u8=z_alloc(24);
+    let cc:[]u8=z_alloc(24);
+    let cout:[]u8=z_alloc(8);
+    c=o_app(b,c,"C21-REPLAY shared(4,613)"); c=o_nl(b,c);
+    let arcs:[]u8=z_alloc(24);
+    // arc params: (nn,k,nt) x3: P1(4,2,10) P2(4,3,10) Q1(4,12,10)
+    set32(arcs,0,4); set32(arcs,4,2); set32(arcs,8,10);
+    set32(arcs,12,4); set32(arcs,16,3); set32(arcs,20,10);
+    // (third arc params appended below in code)
+    let ai:i32=0;
+    while(ai<2){
+      let nn:i32=get32(arcs,ai*12);
+      let k:i32=get32(arcs,ai*12+4);
+      let nt:i32=get32(arcs,ai*12+8);
+      c=o_app(b,c," arc"); c=o_i64(b,c,ai as i64);
+      c=o_app(b,c," nn="); c=o_i64(b,c,nn as i64);
+      c=o_app(b,c," k="); c=o_i64(b,c,k as i64); c=o_nl(b,c);
+      let j:i32=1;
+      while(j<=k){
+        sim_stage(nn,0,u,w,cc,rr,cout);
+        c=o_app(b,c,"  a"); c=o_i64(b,c,j as i64);
+        c=o_app(b,c," chosen="); c=o_i64(b,c,get32(cout,0) as i64);
+        c=o_app(b,c," hedge="); c=o_i64(b,c,get32(cout,4) as i64);
+        c=o_nl(b,c);
+        j=j+1;
+      }
+      let t:i32=1;
+      while(t<=nt){
+        sim_stage(nn,1,u,w,cc,rr,cout);
+        c=o_app(b,c,"  t"); c=o_i64(b,c,t as i64);
+        c=o_app(b,c," chosen="); c=o_i64(b,c,get32(cout,0) as i64);
+        c=o_app(b,c," hedge="); c=o_i64(b,c,get32(cout,4) as i64);
+        c=o_nl(b,c);
+        t=t+1;
+      }
+      ai=ai+1;
+    }
+    // Q1: nn=4,k=12,nt=10 on the SAME shared context
+    c=o_app(b,c," arc2 nn=4 k=12"); c=o_nl(b,c);
+    let j2:i32=1;
+    while(j2<=12){
+      sim_stage(4,0,u,w,cc,rr,cout);
+      c=o_app(b,c,"  a"); c=o_i64(b,c,j2 as i64);
+      c=o_app(b,c," chosen="); c=o_i64(b,c,get32(cout,0) as i64);
+      c=o_app(b,c," hedge="); c=o_i64(b,c,get32(cout,4) as i64);
+      c=o_nl(b,c);
+      j2=j2+1;
+    }
+    let t2:i32=1;
+    while(t2<=10){
+      sim_stage(4,1,u,w,cc,rr,cout);
+      c=o_app(b,c,"  t"); c=o_i64(b,c,t2 as i64);
+      c=o_app(b,c," chosen="); c=o_i64(b,c,get32(cout,0) as i64);
+      c=o_app(b,c," hedge="); c=o_i64(b,c,get32(cout,4) as i64);
+      c=o_nl(b,c);
+      t2=t2+1;
+    }
+    // Q2: fresh (3,613): nn=3,k=12,nt=10
+    c=o_app(b,c,"C21-REPLAY fresh(3,613) Q2"); c=o_nl(b,c);
+    c=sim_arc(b,c,3,12,10,rr,"Q2");
+  }
+  if(mode==1){
+    c=o_app(b,c,"C22-PREDICT fresh contexts"); c=o_nl(b,c);
+    c=sim_arc(b,c,3,2,10,rr,"P1");
+    c=sim_arc(b,c,3,3,15,rr,"P2");
+    c=sim_arc(b,c,3,12,10,rr,"Q1");
+    c=sim_arc(b,c,3,12,10,rr,"Q2");
+  }
+  o_flush(b,c);
+  return 0;
+}

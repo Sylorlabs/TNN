@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Third SAR shadow tournament: support-gap one-shot motifs + active discourse."""
+from __future__ import annotations
+import argparse,csv,importlib.util,json,statistics,sys
+from collections import Counter
+from pathlib import Path
+import numpy as np
+HERE=Path(__file__).resolve().parent
+sp=importlib.util.spec_from_file_location('rev1',HERE/'run_architecture_revision_tournament.py')
+if sp is None or sp.loader is None:raise RuntimeError
+R=importlib.util.module_from_spec(sp);sys.modules[sp.name]=R;sp.loader.exec_module(R);T=R.T
+VARIANTS=('baseline','workspace','one_shot_motifs','combined')
+
+class OneShotMotifs:
+    """Recruit a localized raw-byte motif when exactly one grounded slot lacks support."""
+    def __init__(self):
+        self.trigrams=Counter();self.cells=[[{} for _ in range(T.VALUES)] for _ in range(T.SLOTS)]
+        self.observations=0;self.operations=0
+    @staticmethod
+    def regions(mask):
+        out=[];start=None
+        for i,x in enumerate(mask+[False]):
+            if x and start is None:start=i
+            elif not x and start is not None:out.append((start,i));start=None
+        return out
+    def observe(self,text,state,source,lex_conf,gain=1.0):
+        b=text.encode('utf-8')
+        order=np.argsort(lex_conf)
+        if self.observations>=96 and float(lex_conf[order[0]])<.05 and float(lex_conf[order[1]])>.35:
+            slot=int(order[0]);covered=[False]*len(b)
+            for i in range(max(0,len(b)-2)):
+                g=b[i:i+3];self.operations+=1
+                if self.trigrams[g]>=2:
+                    for j in range(i,min(len(b),i+3)):covered[j]=True
+            candidates=[x for x in self.regions([not x for x in covered]) if 3<=x[1]-x[0]<=40]
+            if candidates:
+                start,end=max(candidates,key=lambda x:x[1]-x[0]);region=b[start:end]
+                bank=self.cells[slot][int(state[slot])]
+                # Multiple reversible subspans make boundary variation robust,
+                # while prediction uses only the longest matching evidence.
+                for n in range(4,min(20,len(region))+1):
+                    for i in range(len(region)-n+1):
+                        g=region[i:i+n];ev=bank.get(g)
+                        if ev is None:ev=R.SparseEvidence();bank[g]=ev
+                        bit=1<<(source%8);ind=1.0 if not(ev.sources&bit) else .18
+                        ev.fast+=gain*ind;ev.sources|=bit
+        for i in range(max(0,len(b)-2)):self.trigrams[b[i:i+3]]+=1
+        self.observations+=1
+    def consolidate(self,verified):
+        for row in self.cells:
+            for bank in row:
+                for ev in bank.values():
+                    if verified or ev.sources.bit_count()>=2:ev.slow+=(.36 if verified else .10)*ev.fast
+                    ev.fast*=.76
+    def predict(self,text):
+        b=text.encode('utf-8');vals=[];margins=[];conf=[]
+        for slot in range(T.SLOTS):
+            scores=[]
+            for value in range(T.VALUES):
+                best=0.0
+                for g,ev in self.cells[slot][value].items():
+                    self.operations+=max(1,len(b)-len(g)+1)
+                    if g in b:best=max(best,ev.support*(len(g)**3))
+                scores.append(best)
+            order=np.argsort(scores);best=int(order[-1]);runner=int(order[-2])
+            vals.append(best);margins.append(scores[best]-scores[runner]);conf.append(scores[best])
+        return tuple(vals),np.asarray(margins,np.float32),np.asarray(conf,np.float32)
+    def memory_bytes(self):return sum(len(g)+24 for row in self.cells for bank in row for g in bank)
+
+class Brain(T.SharedBrain):
+    def __init__(self,architecture,seed,variant):
+        super().__init__(architecture,seed);self.variant=variant
+        self.workspace=variant in ('workspace','combined')
+        self.oneshot=OneShotMotifs() if variant in ('one_shot_motifs','combined') else None
+    def observe(self,ep,modalities,reliability=1.0,contradiction=False,duplicate=1,corrupt=None):
+        if self.oneshot is not None and 'text' in modalities and self.fitted_text and not contradiction:
+            _,_,cf=self.text_contrast.predict(ep.text)
+            self.oneshot.observe(ep.text,ep.state,ep.source,cf,reliability)
+        T.SharedBrain.observe(self,ep,modalities,reliability,contradiction,duplicate,corrupt)
+    def consolidate(self,verified,rounds=1):
+        T.SharedBrain.consolidate(self,verified,rounds)
+        if self.oneshot is not None:
+            for _ in range(rounds):self.oneshot.consolidate(verified)
+    def predict_modality(self,modality,ep,corrupt=None):
+        base,margin=T.SharedBrain.predict_modality(self,modality,ep,corrupt)
+        if modality!='text' or self.oneshot is None:return base,margin
+        v,m,c=self.oneshot.predict(ep.text);out=list(base);om=list(map(float,margin))
+        for r in range(T.SLOTS):
+            if c[r]>100 and m[r]>50:out[r]=v[r];om[r]=float(m[r])
+        return tuple(out),np.asarray(om,np.float32)
+    def explicit_evidence(self,text):
+        lex,lm,cf=self.text_contrast.predict(text)
+        if self.oneshot is not None:
+            ov,om,oc=self.oneshot.predict(text)
+            lex=list(lex);lm=lm.copy();cf=cf.copy()
+            for r in range(T.SLOTS):
+                if oc[r]>100 and om[r]>50:lex[r]=ov[r];lm[r]=om[r];cf[r]=oc[r]
+            lex=tuple(lex)
+        return lex,lm,cf
+    def predict_text_stream(self,ep):
+        if not self.workspace:return self.predict_modality('text',ep)
+        b=ep.text.encode('utf-8');widths=(24,30,36,42,52,64,80,96)
+        endpoints=sorted(set(list(range(24,len(b)+1,8))+[len(b)]));active=[0]*T.SLOTS;am=[0.0]*T.SLOTS
+        for end in endpoints:
+            choice=[None]*T.SLOTS
+            for width in widths:
+                if width>end:continue
+                text=b[max(0,end-width):end].decode('utf-8',errors='ignore');lex,lm,cf=self.explicit_evidence(text)
+                for r in range(T.SLOTS):
+                    if choice[r] is None and float(cf[r])>.35 and float(lm[r])>.05:choice[r]=(int(lex[r]),float(lm[r]))
+            for r,c in enumerate(choice):
+                if c is not None:active[r],am[r]=c
+        return tuple(active),np.asarray(am,np.float32)
+    def memory_bytes(self):return T.SharedBrain.memory_bytes(self)+(self.oneshot.memory_bytes() if self.oneshot else 0)
+    def operations(self):return T.SharedBrain.operations(self)+(self.oneshot.operations if self.oneshot else 0)
+
+def avg(xs):return statistics.fmean(xs) if xs else 0.0
+
+def run(seed,variant,budget,train_n,test_n):
+    tr,te=T.generate_dataset(seed,train_n,test_n);b=Brain('recurrent_pam',seed,variant);T.train_history(b,'noisy_then_clean',tr,budget,seed);m=R.targeted_eval(b,te,seed);return {'seed':seed,'variant':variant,'budget':budget,**m}
+
+def main():
+    p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True);p.add_argument('--seeds',default='81,82,83,84,85');p.add_argument('--budget',type=int,default=512);p.add_argument('--train',type=int,default=420);p.add_argument('--test',type=int,default=120);a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True)
+    rows=[]
+    for seed in [int(x) for x in a.seeds.split(',') if x]:
+        for v in VARIANTS:
+            r=run(seed,v,a.budget,a.train,a.test);rows.append(r);print(json.dumps(r,sort_keys=True),flush=True)
+    fields=list(rows[0]);
+    with (a.out/'raw_runs.csv').open('w',newline='',encoding='utf-8') as f:w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
+    summary=[]
+    for v in VARIANTS:
+        it=[r for r in rows if r['variant']==v];s={'variant':v,'runs':len(it)}
+        for k in fields:
+            if k in ('seed','variant','budget'):continue
+            vals=[float(x[k]) for x in it];s[k+'_mean']=avg(vals);s[k+'_min']=min(vals);s[k+'_max']=max(vals)
+        summary.append(s)
+    base=next(x for x in summary if x['variant']=='baseline')
+    for s in summary:
+        s['revision_score']=.18*s['heldout_exact_mean']+.26*s['one_shot_role_mean']+.26*s['reference_exact_mean']+.15*s['fused_component_mean']+.15*s['stress_component_mean']
+        s['controlled_regression_pass']=s['heldout_exact_mean']>=base['heldout_exact_mean']-.02
+        s['sensory_regression_pass']=s['stress_component_mean']>=base['stress_component_mean']-.02
+        s['compute_ratio']=s['operations_mean']/base['operations_mean']
+    bscore=next(x['revision_score'] for x in summary if x['variant']=='baseline')
+    for s in summary:s['promotion_candidate']=bool(s['controlled_regression_pass'] and s['sensory_regression_pass'] and s['revision_score']>=bscore+.05 and s['compute_ratio']<=1.35)
+    summary.sort(key=lambda x:x['revision_score'],reverse=True)
+    with (a.out/'summary.csv').open('w',newline='',encoding='utf-8') as f:w=csv.DictWriter(f,fieldnames=list(summary[0]));w.writeheader();w.writerows(summary)
+    status={'release':'R5 SAR revision v3','runs':len(rows),'seeds':sorted(set(r['seed'] for r in rows)),'ranking':summary,'selected':summary[0]['variant'] if summary[0]['promotion_candidate'] else None,'teenager_english':'NOT_MET'}
+    (a.out/'status.json').write_text(json.dumps(status,indent=2,sort_keys=True));print(json.dumps(status,indent=2,sort_keys=True))
+if __name__=='__main__':main()

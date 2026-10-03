@@ -1,0 +1,625 @@
+// bc_base.zag -- COMPOSE-BACKCHAIN-1 base.
+// Alloc, little-endian i32 access, output helpers, kind compatibility
+// (with relaxed/widen flag), fact store, MAP table (40 ids), MAP
+// execution counting. Pure Zag. No phases: execution is interleaved
+// with search by construction.
+//
+// Output rule (mandatory): dynamic content is formatted into ONE
+// preallocated buffer with cursor-returning helpers, then a single
+// _zag_raw_syscall write. _zag_print is never used for dynamic content.
+//
+// Arena A (world): MAP inventory + facts.
+//   0: nf (fact count)
+//   4: facts, 64 * 12 bytes (s, r, o)
+//   772: MAP table, 40 maps * 8 fields * 4 bytes
+//        fields: 0 class, 1 rel, 2 inmask, 3 outmask,
+//                4 inmask1, 5 inmask2, 6 arity, 7 nobs
+//   2052: nmaps
+// Classes: 0=WALK, 1=COUNT, 4=ADD2 (PAIR6 substrate).
+//
+// Arena S (backchain learner state; FRESH per problem: memoryless):
+//   0: nthunk
+//   4: tries (= total MAP executions)
+//   8: widen (0/1)
+//   12: relaxed (0/1; widen pass)
+//   16: e1set
+//   20: e1 (exec_total right after first candidate executed)
+//   24: const_tid (current goal const thunk)
+//   28: nocc
+//   32: exec per map, 40 * 4 bytes
+//   192: thunk table, 4096 entries * 8 fields * 4 bytes
+//        fields: 0 map(-1=const), 1 in1, 2 in2, 3 cval,
+//                4 kindmask, 5 memo, 6 onstack, 7 unused
+//   131264: occ frames, 1200000 * 8 fields * 4 bytes
+//        (chain-10 needs ~986k frames: the (need,producer)-pair guard
+//        permits permutation exploration; the design's 4.8 notes the
+//        exponential worst case, so the arena is sized for it)
+//        fields: 0 need-kind K, 1 next-producer cursor, 2 cur producer,
+//                3 stage, 4 child occ, 5 child2 occ, 6 leg1 thunk,
+//                7 parent occ
+// Sentinels: MISS=-2, NOVAL=-999999.
+
+fn z_alloc(n:i32)[]u8 {
+  let p:*u8=_zag_malloc(n) as *u8;
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+// ---- output helpers: append into buffer, return new cursor ----
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c+i]=s[i]; i=i+1; }
+  return c+s.len;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0;
+  let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1;
+  let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n;
+  let p:i32=e-1;
+  let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){
+    b[p]=(48+(y-(y/10)*10)) as u8;
+    y=y/10;
+    p=p-1;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0);
+  return;
+}
+// ---- arena accessors ----
+fn ag(A:[]u8,off:i32)i32 { return get32(A,off); }
+fn ap(A:[]u8,off:i32,v:i32)void { set32(A,off,v); return; }
+fn mg(A:[]u8,m:i32,f:i32)i32 { return get32(A,772+m*32+f*4); }
+fn mp(A:[]u8,m:i32,f:i32,v:i32)void { set32(A,772+m*32+f*4,v); return; }
+fn sg(S:[]u8,off:i32)i32 { return get32(S,off); }
+fn sp(S:[]u8,off:i32,v:i32)void { set32(S,off,v); return; }
+fn tg(S:[]u8,t:i32,f:i32)i32 { return get32(S,192+t*32+f*4); }
+fn tp(S:[]u8,t:i32,f:i32,v:i32)void { set32(S,192+t*32+f*4,v); return; }
+fn eg(S:[]u8,m:i32)i32 { return get32(S,32+m*4); }
+fn ep(S:[]u8,m:i32,v:i32)void { set32(S,32+m*4,v); return; }
+fn of(S:[]u8,o:i32,f:i32)i32 { return get32(S,131264+o*32+f*4); }
+fn of_set(S:[]u8,o:i32,f:i32,v:i32)void { set32(S,131264+o*32+f*4,v); return; }
+// ---- kind compatibility: mask==0 compatible with all; kinds are 1-based bit positions ----
+// khas_rel: relaxed (widen pass) ignores kind compatibility entirely.
+fn khas(mask:i32,k:i32)i32 {
+  if(mask==0){ return 1; }
+  if((mask & (1<<(k-1)))!=0){ return 1; }
+  return 0;
+}
+fn khas_rel(S:[]u8,mask:i32,k:i32)i32 {
+  if(sg(S,12)==1){ return 1; }
+  return khas(mask,k);
+}
+// ---- facts: single-hop lookup / count, missing -> -2 ----
+fn fact_add(A:[]u8,s:i32,r:i32,o:i32)void {
+  let n:i32=ag(A,0);
+  if(n<64){
+    set32(A,4+n*12,s); set32(A,4+n*12+4,r); set32(A,4+n*12+8,o);
+    ap(A,0,n+1);
+  }
+  return;
+}
+fn fact_del(A:[]u8,s:i32,r:i32)void {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==r){
+      let li:i32=n-1;
+      set32(A,4+i*12,get32(A,4+li*12));
+      set32(A,4+i*12+4,get32(A,4+li*12+4));
+      set32(A,4+i*12+8,get32(A,4+li*12+8));
+      ap(A,0,li);
+      return;
+    }
+    i=i+1;
+  }
+  return;
+}
+fn fact1(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ return get32(A,4+i*12+8); }
+    i=i+1;
+  }
+  return -2;
+}
+fn count_rel(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  let c:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ c=c+1; }
+    i=i+1;
+  }
+  if(c==0){ return -2; }
+  return c;
+}
+// ---- MAP table ----
+fn map_new(A:[]u8,m:i32,cl:i32,rel:i32,inm:i32,outm:i32,inm1:i32,inm2:i32,ar:i32)void {
+  mp(A,m,0,cl); mp(A,m,1,rel); mp(A,m,2,inm); mp(A,m,3,outm);
+  mp(A,m,4,inm1); mp(A,m,5,inm2); mp(A,m,6,ar); mp(A,m,7,0);
+  let nm:i32=ag(A,2052);
+  if(m>=nm){ ap(A,2052,m+1); }
+  return;
+}
+// ---- MAP execution (counted; tries == total MAP executions) ----
+fn exec_map(S:[]u8,A:[]u8,m:i32,v1:i32)i32 {
+  sp(S,4,sg(S,4)+1);
+  ep(S,m,eg(S,m)+1);
+  let cl:i32=mg(A,m,0);
+  let rel:i32=mg(A,m,1);
+  if(cl==0){ return fact1(A,v1,rel); }
+  if(cl==1){ return count_rel(A,v1,rel); }
+  return -2;
+}
+fn exec_map2(S:[]u8,A:[]u8,m:i32,v1:i32,v2:i32)i32 {
+  sp(S,4,sg(S,4)+1);
+  ep(S,m,eg(S,m)+1);
+  let cl:i32=mg(A,m,0);
+  if(cl==4){
+    if(v1==-2){ return -2; }
+    if(v2==-2){ return -2; }
+    return v1+v2;
+  }
+  return -2;
+}
+// bc_thunk.zag -- thunk table, hash-cons interning, demand evaluation.
+// Identity = tid equality after interning. A thunk evaluated once
+// never re-executes (identity memoization of VALUES; the search
+// strategy around it is what differs from SUSPEND).
+
+fn th_new(S:[]u8,m:i32,i1:i32,i2:i32,cv:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  if(n>=4096){ return -2; }
+  tp(S,n,0,m); tp(S,n,1,i1); tp(S,n,2,i2); tp(S,n,3,cv);
+  tp(S,n,4,km); tp(S,n,5,-999999); tp(S,n,6,0);
+  sp(S,0,n+1);
+  return n;
+}
+// intern(m,i1,i2): hash-cons on (map-id, in1, in2). Returns existing
+// tid on match (memo hit: no re-execution), else allocates.
+// Returns -2 on table overflow.
+fn intern(S:[]u8,m:i32,i1:i32,i2:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==m){
+      if(tg(S,t,1)==i1){
+        if(tg(S,t,2)==i2){ return t; }
+      }
+    }
+    t=t+1;
+  }
+  return th_new(S,m,i1,i2,0,0);
+}
+fn const_thunk(S:[]u8,v:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==-1){
+      if(tg(S,t,3)==v){ return t; }
+    }
+    t=t+1;
+  }
+  return th_new(S,-1,-1,-1,v,km);
+}
+fn app1(S:[]u8,A:[]u8,m:i32,t:i32) i32 {
+  let nt:i32=intern(S,m,t,-1);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+fn app2(S:[]u8,A:[]u8,m:i32,t1:i32,t2:i32) i32 {
+  let nt:i32=intern(S,m,t1,t2);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+// demand(t): evaluate on demand with identity memoization.
+// Inputs of a yielded candidate are always already evaluated
+// (solutions or the const), so each demand on a fresh thunk
+// executes exactly one MAP application.
+fn demand(S:[]u8,A:[]u8,t:i32) i32 {
+  let memo:i32=tg(S,t,5);
+  if(memo!=-999999){ return memo; }
+  if(tg(S,t,6)==1){ return -2; }
+  tp(S,t,6,1);
+  let m:i32=tg(S,t,0);
+  let v:i32=-2;
+  if(m==-1){
+    v=tg(S,t,3);
+  } else {
+    let ar:i32=mg(A,m,6);
+    let i1:i32=tg(S,t,1);
+    let v1:i32=demand(S,A,i1);
+    if(ar==1){
+      v=exec_map(S,A,m,v1);
+    } else {
+      let i2:i32=tg(S,t,2);
+      let v2:i32=demand(S,A,i2);
+      v=exec_map2(S,A,m,v1,v2);
+    }
+  }
+  tp(S,t,5,v);
+  tp(S,t,6,0);
+  return v;
+}
+// bc_search.zag -- BACKCHAIN: lazy chronological backtracking over
+// derivation trees, with INTERLEAVED execution.
+//
+// An occurrence frame solves one need occurrence (need = kind mask;
+// the goal input s is fixed per goal). occ_next returns the frame's
+// next non--2 solution thunk, or -1 when exhausted. Every candidate
+// derivation is executed IMMEDIATELY upon construction (do_cand);
+// -2 outcomes are skipped, never yielded. End-to-end failure at the
+// root resumes the search (chronological backtracking).
+//
+// Loop guard (PREREG 1.3, amended): a (need-kind, producer-id) pair
+// already on the open-need stack fails that producer choice
+// entirely. Backup: DMAX=16 path depth.
+//
+// Enumeration order (frozen): producer id order; direct-close before
+// sub-need alternatives; 2-input legs leg1-outer/leg2-inner, with a
+// fresh leg2 occurrence per leg1 solution.
+
+// producer choice ok: kind-compatible output and passes loop guard.
+// Hoisted out of occ_next to keep nesting shallow.
+fn prod_ok(S:[]u8,A:[]u8,occ:i32,K:i32,mi:i32) i32 {
+  if(khas_rel(S,mg(A,mi,3),K)==0){ return 0; }
+  let u:i32=occ;
+  while(u>=0){
+    if(of(S,u,2)==mi){
+      if(of(S,u,0)==K){ return 0; }
+    }
+    u=of(S,u,7);
+  }
+  return 1;
+}
+fn occ_new(S:[]u8,K:i32,base:i32,parent:i32) i32 {
+  let n:i32=sg(S,28);
+  if(n>=1200000){ return -1; }
+  let d:i32=0;
+  let u:i32=parent;
+  while(u>=0){ d=d+1; u=of(S,u,7); }
+  if(d>=16){ return -1; }
+  of_set(S,n,0,K); of_set(S,n,1,base); of_set(S,n,2,-1);
+  of_set(S,n,3,0); of_set(S,n,4,-1); of_set(S,n,5,-1);
+  of_set(S,n,6,-1); of_set(S,n,7,parent);
+  sp(S,28,n+1);
+  return n;
+}
+// do_cand: execute a completed candidate derivation immediately.
+// Records e1 (F-A-INT): exec_total right after the first candidate
+// is executed -- evidence that search and execution interleave.
+fn do_cand(S:[]u8,A:[]u8,t:i32) i32 {
+  let v:i32=demand(S,A,t);
+  if(sg(S,16)==0){
+    sp(S,16,1);
+    sp(S,20,sg(S,4));
+  }
+  return v;
+}
+fn occ_next(S:[]u8,A:[]u8,base:i32,nm:i32,kin:i32,occ:i32) i32 {
+  let C:i32=sg(S,24);
+  while(1==1){
+    let K:i32=of(S,occ,0);
+    let m:i32=of(S,occ,2);
+    let stage:i32=of(S,occ,3);
+    if(m<0){
+      let mi:i32=of(S,occ,1);
+      let found:i32=-1;
+      let scanning:i32=1;
+      while(scanning==1){
+        if(mi>=base+nm){ scanning=0; }
+        else {
+          if(prod_ok(S,A,occ,K,mi)==1){ found=mi; scanning=0; }
+          else { mi=mi+1; }
+        }
+      }
+      if(found<0){ return -1; }
+      of_set(S,occ,1,found+1);
+      of_set(S,occ,2,found);
+      of_set(S,occ,4,-1);
+      of_set(S,occ,5,-1);
+      of_set(S,occ,6,-1);
+      let ar:i32=mg(A,found,6);
+      if(ar==1){
+        if(khas_rel(S,mg(A,found,2),kin)==1){ of_set(S,occ,3,0); }
+        else { of_set(S,occ,3,1); }
+      } else {
+        of_set(S,occ,3,1);
+      }
+    } else {
+      if(mg(A,m,6)==1){
+        if(stage==0){
+          of_set(S,occ,3,1);
+          let t:i32=app1(S,A,m,C);
+          if(t>=0){
+            if(do_cand(S,A,t)!=-2){ return t; }
+          }
+        } else {
+          let ch:i32=of(S,occ,4);
+          if(ch<0){
+            ch=occ_new(S,mg(A,m,2),base,occ);
+            of_set(S,occ,4,ch);
+          }
+          if(ch<0){ of_set(S,occ,2,-1); }
+          else {
+            let ts:i32=occ_next(S,A,base,nm,kin,ch);
+            if(ts<0){ of_set(S,occ,2,-1); }
+            else {
+              let t:i32=app1(S,A,m,ts);
+              if(t>=0){
+                if(do_cand(S,A,t)!=-2){ return t; }
+              }
+            }
+          }
+        }
+      } else {
+        if(stage==1){
+          let ch:i32=of(S,occ,4);
+          if(ch<0){
+            ch=occ_new(S,mg(A,m,4),base,occ);
+            of_set(S,occ,4,ch);
+          }
+          if(ch<0){ of_set(S,occ,2,-1); }
+          else {
+            let p:i32=occ_next(S,A,base,nm,kin,ch);
+            if(p<0){ of_set(S,occ,2,-1); }
+            else {
+              of_set(S,occ,6,p);
+              of_set(S,occ,3,2);
+              of_set(S,occ,5,-1);
+            }
+          }
+        } else {
+          let ch2:i32=of(S,occ,5);
+          if(ch2<0){
+            ch2=occ_new(S,mg(A,m,5),base,occ);
+            of_set(S,occ,5,ch2);
+          }
+          if(ch2<0){ of_set(S,occ,3,1); }
+          else {
+            let q:i32=occ_next(S,A,base,nm,kin,ch2);
+            if(q<0){ of_set(S,occ,3,1); }
+            else {
+              let t:i32=app2(S,A,m,of(S,occ,6),q);
+              if(t>=0){
+                if(do_cand(S,A,t)!=-2){ return t; }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return -1;
+}
+// solve: regress from the goal; on exhaustive failure fire the
+// one-shot widen pass (relaxed kind matching), then report -2.
+fn solve(S:[]u8,A:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32) i32 {
+  sp(S,24,const_thunk(S,s,kin));
+  sp(S,28,0);
+  let root:i32=occ_new(S,kout,base,-1);
+  let ans:i32=-2;
+  let searching:i32=1;
+  while(searching==1){
+    let t:i32=occ_next(S,A,base,nm,kin,root);
+    if(t<0){ searching=0; }
+    else {
+      if(demand(S,A,t)==exp){ ans=t; searching=0; }
+    }
+  }
+  if(ans<0){
+    sp(S,12,1);
+    sp(S,8,1);
+    sp(S,28,0);
+    root=occ_new(S,kout,base,-1);
+    searching=1;
+    while(searching==1){
+      let t:i32=occ_next(S,A,base,nm,kin,root);
+      if(t<0){ searching=0; }
+      else {
+        if(demand(S,A,t)==exp){ ans=t; searching=0; }
+      }
+    }
+  }
+  return ans;
+}
+// bc_world.zag -- frozen world setups (PREREG Section 2).
+// Same PAIR6 substrate as COMPOSE-SUSPEND-1 PREREG Section 2.
+// Kinds 1/2 are opaque bit positions. MAP classes: 0=WALK
+// (single-hop fact lookup), 1=COUNT (number of matching facts),
+// 4=ADD2. Missing fact -> -2.
+
+// Q1 diamond inventory + facts (base 0, nm 4).
+fn w_q1(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  map_new(A,1,1,92,1,2,0,0,1);
+  map_new(A,2,1,94,1,2,0,0,1);
+  map_new(A,3,4,0,0,2,2,2,2);
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  fact_add(A,211,94,911); fact_add(A,211,94,912);
+  return;
+}
+// Q1b: additional facts for the new input (same inventory).
+fn w_q1b_add(A:[]u8) void {
+  fact_add(A,204,91,212);
+  fact_add(A,212,92,904); fact_add(A,212,92,905);
+  fact_add(A,212,94,913);
+  return;
+}
+// Q1rev: retract W's 94-facts; add alternative MAP V (id 4).
+fn w_q1rev(A:[]u8) void {
+  fact_del(A,211,94);
+  fact_del(A,211,94);
+  map_new(A,4,1,95,1,2,0,0,1);
+  fact_add(A,211,95,921); fact_add(A,211,95,922);
+  return;
+}
+// CHAIN3 (base 5, nm 3).
+fn w_chain3(A:[]u8) void {
+  map_new(A,5,0,81,1,1,0,0,1);
+  map_new(A,6,0,82,1,1,0,0,1);
+  map_new(A,7,1,83,1,2,0,0,1);
+  fact_add(A,301,81,302);
+  fact_add(A,302,82,303);
+  fact_add(A,303,83,801); fact_add(A,303,83,802); fact_add(A,303,83,803);
+  fact_add(A,303,83,804); fact_add(A,303,83,805); fact_add(A,303,83,806);
+  fact_add(A,303,83,807);
+  return;
+}
+// FANIN (base 8, nm 3): two independent legs, no shared intermediate.
+fn w_fanin(A:[]u8) void {
+  map_new(A,8,1,71,1,2,0,0,1);
+  map_new(A,9,1,72,1,2,0,0,1);
+  map_new(A,10,4,0,0,2,2,2,2);
+  fact_add(A,401,71,701); fact_add(A,401,71,702);
+  fact_add(A,401,71,703); fact_add(A,401,71,704);
+  fact_add(A,401,72,705); fact_add(A,401,72,706); fact_add(A,401,72,707);
+  fact_add(A,401,72,708); fact_add(A,401,72,709);
+  return;
+}
+// Q2 misleading teaching (base 11, nm 4): m3p claims in{NODE}.
+fn w_q2(A:[]u8) void {
+  map_new(A,11,0,91,1,1,0,0,1);
+  map_new(A,12,1,92,1,2,0,0,1);
+  map_new(A,13,1,94,1,2,0,0,1);
+  map_new(A,14,4,0,0,2,1,1,2);
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  fact_add(A,211,94,911); fact_add(A,211,94,912);
+  return;
+}
+// CHAIN10 (F-A1; base 20, nm 10): 10-link chain, fresh relations.
+fn w_chain10(A:[]u8) void {
+  map_new(A,20,0,61,1,1,0,0,1);
+  map_new(A,21,0,62,1,1,0,0,1);
+  map_new(A,22,0,63,1,1,0,0,1);
+  map_new(A,23,0,64,1,1,0,0,1);
+  map_new(A,24,0,65,1,1,0,0,1);
+  map_new(A,25,0,66,1,1,0,0,1);
+  map_new(A,26,0,67,1,1,0,0,1);
+  map_new(A,27,0,68,1,1,0,0,1);
+  map_new(A,28,0,69,1,1,0,0,1);
+  map_new(A,29,1,70,1,2,0,0,1);
+  fact_add(A,501,61,502);
+  fact_add(A,502,62,503);
+  fact_add(A,503,63,504);
+  fact_add(A,504,64,505);
+  fact_add(A,505,65,506);
+  fact_add(A,506,66,507);
+  fact_add(A,507,67,508);
+  fact_add(A,508,68,509);
+  fact_add(A,509,69,510);
+  fact_add(A,510,70,801); fact_add(A,510,70,802);
+  fact_add(A,510,70,803); fact_add(A,510,70,804);
+  return;
+}
+// DIST1 (F-A2 restated): Q1 inventory + distractor d (id 4,
+// in{NUM} out{NODE}, no facts).
+fn w_dist1(A:[]u8) void {
+  w_q1(A);
+  map_new(A,4,0,96,2,1,0,0,1);
+  return;
+}
+// Blind variants of Q1 (fresh arenas per variant; base 0, nm 4).
+// V0 baseline; V1 rels permuted; V2 nodes permuted;
+// V3 kind polarity swapped; V4 all three.
+fn w_blind(A:[]u8,v:i32) void {
+  let r91:i32=91;
+  let r92:i32=92;
+  let r94:i32=94;
+  let n_in:i32=202;
+  let n_mid:i32=211;
+  let kA:i32=1;
+  let kB:i32=2;
+  if(v==1){ r91=94; r92=91; r94=92; }
+  if(v==2){ n_in=707; n_mid=708; }
+  if(v==3){ kA=2; kB=1; }
+  if(v==4){ r91=94; r92=91; r94=92; n_in=707; n_mid=708; kA=2; kB=1; }
+  let bA:i32=1<<(kA-1);
+  let bB:i32=1<<(kB-1);
+  map_new(A,0,0,r91,bA,bA,0,0,1);
+  map_new(A,1,1,r92,bA,bB,0,0,1);
+  map_new(A,2,1,r94,bA,bB,0,0,1);
+  map_new(A,3,4,0,0,bB,bB,bB,2);
+  fact_add(A,n_in,r91,n_mid);
+  fact_add(A,n_mid,r92,901); fact_add(A,n_mid,r92,902); fact_add(A,n_mid,r92,903);
+  fact_add(A,n_mid,r94,911); fact_add(A,n_mid,r94,912);
+  return;
+}
+fn blind_kin(v:i32) i32 {
+  if(v==3){ return 2; }
+  if(v==4){ return 2; }
+  return 1;
+}
+fn blind_kout(v:i32) i32 {
+  if(v==3){ return 1; }
+  if(v==4){ return 1; }
+  return 2;
+}
+fn blind_s(v:i32) i32 {
+  if(v==2){ return 707; }
+  if(v==4){ return 707; }
+  return 202;
+}
+// bc_blindmain.zag -- COMPOSE-BACKCHAIN-1 blind battery driver.
+// Five Q1 variants (V0..V4) as separate fresh processes; each prints
+// only the blind summary lines. Summaries must be byte-identical.
+
+fn vans(S:[]u8,A:[]u8,r:i32) i32 {
+  if(r<0){ return -999; }
+  return demand(S,A,r);
+}
+fn main() i32 {
+  let B:[]u8=z_alloc(65536);
+  let c:i32=0;
+  let v:i32=0;
+  while(v<5){
+    let A:[]u8=z_alloc(8192);
+    let S:[]u8=z_alloc(41943040);
+    w_blind(A,v);
+    let r:i32=solve(S,A,0,4,blind_s(v),blind_kin(v),blind_kout(v),5);
+    let ans:i32=vans(S,A,r);
+    let p:i32=0;
+    if(ans==5){ p=1; } else { p=0; }
+    if(sg(S,4)!=7){ p=0; }
+    if(sg(S,8)!=0){ p=0; }
+    c=o_app(B,c,"PROB=BLIND");
+    c=o_i64(B,c,v as i64);
+    c=o_nl(B,c);
+    c=o_app(B,c,"ANS="); c=o_i64(B,c,ans as i64); c=o_nl(B,c);
+    c=o_app(B,c,"TRIES="); c=o_i64(B,c,sg(S,4) as i64); c=o_nl(B,c);
+    c=o_app(B,c,"WIDEN="); c=o_i64(B,c,sg(S,8) as i64); c=o_nl(B,c);
+    c=o_app(B,c,"VERDICT=");
+    if(p==1){ c=o_app(B,c,"PASS"); } else { c=o_app(B,c,"FAIL"); }
+    c=o_nl(B,c);
+    v=v+1;
+  }
+  o_flush(B,c);
+  return 0;
+}

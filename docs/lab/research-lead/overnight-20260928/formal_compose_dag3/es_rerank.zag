@@ -1,0 +1,404 @@
+// es_rerank.zag -- ARM-RERANK: rank-slot edge store with
+// promotion-based re-ranking on link.
+//
+// Builds on FORMAL-COMPOSE-E2E es_rep.zag (same frozen
+// interface: es_item_new, e_add, e_has, es_ndeps, es_dep_at,
+// e_count, e_has_to, ex_eoth, es_raw, es_audit, es_item_of,
+// plus diagnostics es_promotes, es_maxrank, es_diverge).
+// Records are (child-id, type, next), 12 bytes. Structural
+// vocabulary only (item, rank, head, link, edge, store, slot,
+// audit, promote, target, pass, relocate): the no-wire grep
+// audit must return 0 hits for domain vocabulary.
+//
+// Items 0..23. Rank starts as creation order (a creation-time
+// topological rank: the learners only ever link a newer item
+// to an older one). Unlike es_rep.zag, ranks are MUTABLE:
+// when a link would be rank-incompatible (rank(to) >=
+// rank(from)), es_promote re-ranks the affected items so the
+// attach becomes readable, while preserving every previously
+// readable edge and keeping cycles structurally impossible.
+//
+// Promotion (frozen): t := rank copy; t[p] := rank(c)+1;
+// relax up to 23 passes over READABLE written edges
+// (rank(child) < rank(parent)): if t[Y] <= t[W] then
+// t[Y] := t[W]+1. Readable edges always form a DAG, so 23
+// passes always converge (longest readable path < 24 items).
+// Then install t and relocate each promoted item's records to
+// its new head. No refusal branch exists anywhere: every link
+// writes its record; cycle-closing attaches end up inert
+// (their record relocates above the parent's interpreted
+// prefix), never refused.
+//
+// Layout in st (i32 via get32/set32):
+//   1984: rank[24], -1 = unregistered
+//   2080: next-rank counter; 2084: init flag (u8)
+//   2088: maxrank-seen; 2092: promote tally; 2096: diverge-flag
+//   2112: heads, 24 items * 256 ranks * 4 bytes
+//   26688: edge pool, 256 records * 12 bytes
+//   29760: pool cursor
+//
+// Relies on get32/set32/z_alloc from the learner file (or
+// rr_prelude.zag in standalone builds).
+
+fn es_item_of(id:i32)i32 {
+  if(id>=40){ return 16+(id-40); }
+  return id;
+}
+fn es_rank(st:[]u8,w:i32)i32 { return get32(st,1984+w*4); }
+fn es_set_rank(st:[]u8,w:i32,v:i32)void {
+  set32(st,1984+w*4,v);
+  return;
+}
+fn es_head_at(st:[]u8,p:i32,r:i32)i32 {
+  if(r<0){ return -1; }
+  if(r>=256){ return -1; }
+  return get32(st,2112+(p*256+r)*4);
+}
+fn es_head_set(st:[]u8,p:i32,r:i32,v:i32)void {
+  if(r<0){ return; }
+  if(r>=256){ return; }
+  set32(st,2112+(p*256+r)*4,v);
+  return;
+}
+fn es_ensure(st:[]u8)void {
+  if((st[2084] as i32)==1){ return; }
+  let i:i32=0;
+  while(i<24){ es_set_rank(st,i,-1); i=i+1; }
+  set32(st,2080,0);
+  set32(st,2088,0);
+  set32(st,2092,0);
+  set32(st,2096,0);
+  st[2084]=1;
+  return;
+}
+fn es_item_new(st:[]u8,id:i32)void {
+  es_ensure(st);
+  let it:i32=es_item_of(id);
+  if(it<0){ return; }
+  if(it>=24){ return; }
+  if(es_rank(st,it)>=0){ return; }
+  let rk:i32=get32(st,2080);
+  if(rk>=256){ return; }
+  es_set_rank(st,it,rk);
+  set32(st,2080,rk+1);
+  let mr:i32=get32(st,2088);
+  if(rk>mr){ set32(st,2088,rk); }
+  let r:i32=0;
+  while(r<256){ es_head_set(st,it,r,-1); r=r+1; }
+  return;
+}
+fn es_rec_new(st:[]u8,ch:i32,ty:i32,nx:i32)i32 {
+  let n:i32=get32(st,29760);
+  if(n>=256){ return -1; }
+  set32(st,26688+n*12,ch);
+  set32(st,26688+n*12+4,ty);
+  set32(st,26688+n*12+8,nx);
+  set32(st,29760,n+1);
+  return n;
+}
+// Move every record with child-item == w from y's head[old]
+// to y's head[nw]. Order not preserved; not needed.
+fn es_relocate(st:[]u8,w:i32,old:i32,nw:i32)void {
+  let y:i32=0;
+  while(y<24){
+    if(es_rank(st,y)>=0){
+    let e:i32=es_head_at(st,y,old);
+    let keep:i32=-1;
+    while(e>=0){
+      let nx:i32=get32(st,26688+e*12+8);
+      let chid:i32=get32(st,26688+e*12);
+      let ci:i32=es_item_of(chid);
+      if(ci==w){
+        set32(st,26688+e*12+8,es_head_at(st,y,nw));
+        es_head_set(st,y,nw,e);
+      } else {
+        set32(st,26688+e*12+8,keep);
+        keep=e;
+      }
+      e=nx;
+    }
+    es_head_set(st,y,old,keep);
+    }
+    y=y+1;
+  }
+  return;
+}
+// Promotion on rank-incompatible link(p, c): re-rank so the
+// attach becomes readable iff it is acyclic, preserving every
+// previously readable edge. Total function: no refusal.
+fn es_promote(st:[]u8,p:i32,c:i32)void {
+  let t:[]u8=z_alloc(96);
+  let i:i32=0;
+  while(i<24){ set32(t,i*4,es_rank(st,i)); i=i+1; }
+  set32(t,p*4,es_rank(st,c)+1);
+  set32(st,2092,get32(st,2092)+1);
+  let pass:i32=0;
+  let changed:i32=1;
+  while(changed==1){
+    if(pass>=23){ set32(st,2096,1); changed=0; }
+    else {
+      changed=0;
+      pass=pass+1;
+      let y:i32=0;
+      while(y<24){
+        let ry:i32=es_rank(st,y);
+        if(ry>=0){
+          let r:i32=0;
+          while(r<256){
+            let e:i32=es_head_at(st,y,r);
+            while(e>=0){
+              let chid:i32=get32(st,26688+e*12);
+              let w2:i32=es_item_of(chid);
+              let rw:i32=es_rank(st,w2);
+              if(rw<ry){
+                let ty:i32=get32(t,y*4);
+                let tw:i32=get32(t,w2*4);
+                if(ty<=tw){ set32(t,y*4,tw+1); changed=1; }
+              }
+              e=get32(st,26688+e*12+8);
+            }
+            r=r+1;
+          }
+        }
+        y=y+1;
+      }
+    }
+  }
+  let w:i32=0;
+  while(w<24){
+    let old:i32=es_rank(st,w);
+    let nw:i32=get32(t,w*4);
+    if(nw>old){
+      es_relocate(st,w,old,nw);
+      es_set_rank(st,w,nw);
+      let mr:i32=get32(st,2088);
+      if(nw>mr){ set32(st,2088,nw); }
+    }
+    w=w+1;
+  }
+  return;
+}
+// es_link: the slot write plus promotion on rank-incompatible
+// links. Unconditional write; no cyclicity branch.
+fn es_link(st:[]u8,from:i32,to:i32,typ:i32)void {
+  es_ensure(st);
+  let fi:i32=es_item_of(from);
+  let ti:i32=es_item_of(to);
+  if(fi<0){ return; }
+  if(fi>=24){ return; }
+  if(ti<0){ return; }
+  if(ti>=24){ return; }
+  if(es_rank(st,fi)<0){ es_item_new(st,from); }
+  if(es_rank(st,ti)<0){ es_item_new(st,to); }
+  let fr:i32=es_rank(st,fi);
+  let tr:i32=es_rank(st,ti);
+  if(fr<0){ return; }
+  if(tr<0){ return; }
+  let e:i32=es_rec_new(st,to,typ,es_head_at(st,fi,tr));
+  if(e>=0){ es_head_set(st,fi,tr,e); }
+  if(tr>=fr){ es_promote(st,fi,ti); }
+  return;
+}
+fn e_add(st:[]u8,from:i32,to:i32,typ:i32)void {
+  if(e_has(st,from,to,typ)==1){ return; }
+  es_link(st,from,to,typ);
+  return;
+}
+// ---- read path: interpreted prefix only ----
+fn es_ndeps(st:[]u8,it:i32)i32 {
+  es_ensure(st);
+  if(it<0){ return 0; }
+  if(it>=24){ return 0; }
+  let rp:i32=es_rank(st,it);
+  if(rp<0){ return 0; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let n:i32=0;
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,it,r);
+    while(e>=0){ n=n+1; e=get32(st,26688+e*12+8); }
+    r=r+1;
+  }
+  return n;
+}
+fn es_dep_at(st:[]u8,it:i32,i:i32)i32 {
+  es_ensure(st);
+  if(it<0){ return -1; }
+  if(it>=24){ return -1; }
+  let rp:i32=es_rank(st,it);
+  if(rp<0){ return -1; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let n:i32=0;
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,it,r);
+    while(e>=0){
+      if(n==i){ return es_item_of(get32(st,26688+e*12)); }
+      n=n+1;
+      e=get32(st,26688+e*12+8);
+    }
+    r=r+1;
+  }
+  return -1;
+}
+fn e_has(st:[]u8,from:i32,to:i32,typ:i32)i32 {
+  es_ensure(st);
+  let fi:i32=es_item_of(from);
+  if(fi<0){ return 0; }
+  if(fi>=24){ return 0; }
+  let rp:i32=es_rank(st,fi);
+  if(rp<0){ return 0; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,fi,r);
+    while(e>=0){
+      let ch:i32=get32(st,26688+e*12);
+      let ty:i32=get32(st,26688+e*12+4);
+      if(ch==to){
+        if(ty==typ){ return 1; }
+      }
+      e=get32(st,26688+e*12+8);
+    }
+    r=r+1;
+  }
+  return 0;
+}
+fn es_icount(st:[]u8,it:i32,typ:i32)i32 {
+  let rp:i32=es_rank(st,it);
+  if(rp<0){ return 0; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let c:i32=0;
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,it,r);
+    while(e>=0){
+      if(get32(st,26688+e*12+4)==typ){ c=c+1; }
+      e=get32(st,26688+e*12+8);
+    }
+    r=r+1;
+  }
+  return c;
+}
+fn e_count(st:[]u8,typ:i32)i32 {
+  es_ensure(st);
+  let c:i32=0;
+  let it:i32=0;
+  while(it<24){ c=c+es_icount(st,it,typ); it=it+1; }
+  return c;
+}
+fn es_ihas_to(st:[]u8,it:i32,to:i32,typ:i32)i32 {
+  let rp:i32=es_rank(st,it);
+  if(rp<0){ return 0; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,it,r);
+    while(e>=0){
+      let ch:i32=get32(st,26688+e*12);
+      let ty:i32=get32(st,26688+e*12+4);
+      if(ch==to){
+        if(ty==typ){ return 1; }
+      }
+      e=get32(st,26688+e*12+8);
+    }
+    r=r+1;
+  }
+  return 0;
+}
+fn e_has_to(st:[]u8,to:i32,typ:i32)i32 {
+  es_ensure(st);
+  let it:i32=0;
+  while(it<24){
+    if(es_ihas_to(st,it,to,typ)==1){ return 1; }
+    it=it+1;
+  }
+  return 0;
+}
+fn es_ioth(st:[]u8,it:i32)i32 {
+  let rp:i32=es_rank(st,it);
+  if(rp<0){ return 0; }
+  let rr:i32=rp;
+  if(rr>256){ rr=256; }
+  let c:i32=0;
+  let r:i32=0;
+  while(r<rr){
+    let e:i32=es_head_at(st,it,r);
+    while(e>=0){
+      let ty:i32=get32(st,26688+e*12+4);
+      if(ty!=14){
+        if(ty!=16){ c=c+1; }
+      }
+      e=get32(st,26688+e*12+8);
+    }
+    r=r+1;
+  }
+  return c;
+}
+fn ex_eoth(st:[]u8)i32 {
+  es_ensure(st);
+  let c:i32=0;
+  let it:i32=0;
+  while(it<24){ c=c+es_ioth(st,it); it=it+1; }
+  return c;
+}
+// es_raw: lowest-level write; on RERANK there is no gate to
+// bypass, so this is the same write+promote operation.
+fn es_raw(st:[]u8,from:i32,to:i32,typ:i32)void {
+  es_link(st,from,to,typ);
+  return;
+}
+// ---- diagnostics ----
+fn es_promotes(st:[]u8)i32 {
+  es_ensure(st);
+  return get32(st,2092);
+}
+fn es_maxrank(st:[]u8)i32 {
+  es_ensure(st);
+  return get32(st,2088);
+}
+fn es_diverge(st:[]u8)i32 {
+  es_ensure(st);
+  return get32(st,2096);
+}
+// ---- cycle audit (measurement only; identical algorithm all arms) ----
+fn es_reach(st:[]u8,x:i32,tgt:i32,vis:[]u8)i32 {
+  if(x==tgt){ return 1; }
+  if(x<0){ return 0; }
+  if(x>=24){ return 0; }
+  if((vis[x] as i32)==1){ return 0; }
+  vis[x]=1 as u8;
+  let n:i32=es_ndeps(st,x);
+  let i:i32=0;
+  while(i<n){
+    if(es_reach(st,es_dep_at(st,x,i),tgt,vis)==1){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+fn es_audit(st:[]u8)i32 {
+  es_ensure(st);
+  let c:i32=0;
+  let u:i32=0;
+  while(u<24){
+    let rp:i32=es_rank(st,u);
+    if(rp>=0){
+      let vis:[]u8=z_alloc(24);
+      let nd:i32=es_ndeps(st,u);
+      let i:i32=0;
+      let on:i32=0;
+      while(i<nd){
+        if(es_reach(st,es_dep_at(st,u,i),u,vis)==1){ on=1; }
+        i=i+1;
+      }
+      if(on==1){ c=c+1; }
+    }
+    u=u+1;
+  }
+  return c;
+}

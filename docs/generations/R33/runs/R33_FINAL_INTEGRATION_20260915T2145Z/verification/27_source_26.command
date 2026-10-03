@@ -1,0 +1,1 @@
+cwd=/Users/Shared/micah/Documents/TNN/TNN command=cmp /Users/Shared/micah/Documents/TNN/TNN/Research/R33_CONTINUING_LIFE_V1/outer_learner_packet_bridge_v68_tests.zag /Users/Shared/micah/Documents/TNN/TNN/Research/R33_FINAL_INTEGRATION_20260915T2145Z/sources/Research/R33_CONTINUING_LIFE_V1/outer_learner_packet_bridge_v68_tests.zag

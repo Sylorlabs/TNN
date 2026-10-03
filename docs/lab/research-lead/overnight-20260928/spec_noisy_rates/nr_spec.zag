@@ -1,0 +1,370 @@
+// nr_spec.zag -- SPEC-NOISY-RATES policy layer.
+//
+// Builds on SPEC-ADAPTIVE-SWITCH (frozen BUILD-PASS 9/9): the same
+// executable adaptive switch, but the 16-tick exact warmup on the
+// deterministic grid is replaced by noisy real-world-style arrivals
+// and EWMA rate estimation with a confidence-interval margin test.
+//
+// Noisy world: drift and query arrivals are exogenous per-tick events
+// from two independent two-state Markov-modulated Bernoulli processes
+// (bursty, irregular). Per tick, per stream: draw u1; burst->quiet iff
+// u1 < 2^31/8 (mean burst 8 ticks), quiet->burst iff u1 < 2^31/24
+// (mean quiet 24 ticks), both against the old state; then draw u2 and
+// fire iff (burst and u2 < THR_PB) or (quiet and u2 < THR_PQ), with
+// THR_PB(M) = min(2^31, 5*2^31/(2M)) and
+// THR_PQ(M) = max(0, (4*2^31/M - THR_PB)/3). Stationary P(burst) = 1/4
+// and mean fire rate = 1/M exactly (M >= 2); at M = 1 the event fires
+// every tick (a rate-1 process cannot be noisy). PRNG is an LCG with
+// per-(M,N,stream) frozen seeds, reset each episode, so all 6 arms of
+// a cell see the identical arrival sequence.
+//
+// Estimator (adapt arm): per-tick EWMA, alpha = 1/16, rates in events
+// per 1024 ticks: dh <- (15*dh + 1024*d_t)/16, plus empirical EWMA
+// variance ed <- (15*ed + dev^2)/16. Approx 95% CI from n_eff = 31:
+// dh +/- 2*isqrt(ed/31). Price interval by monotonicity:
+// phi = max(0,dhi-qlo)/max(qlo,1), plo = max(0,dlo-qhi)/max(qhi,1).
+//
+// Commit rule (frozen): checkpoints at elapsed e in
+// {32,48,64,80,96,112,128}; re-checks at {144,...,256} after a
+// decisive commit. Eager-decisive iff L*phid > phin (strict, the
+// parent's strict-> on the UPPER price bound); lazy-decisive iff
+// L*plod < plon (strict). Undecided at e = 128 -> budget-default lazy
+// (terminal). Post-commit flips only on opposite-decisive intervals
+// (decisiveness IS the hysteresis). Eager commits run a sync restamp
+// (+1 rebuild), which guarantees zero post-commit refusals because
+// each tick processes drift (restamp) before query.
+//
+// No world literals in this file: relation/object ids arrive via rb_*.
+fn nr_max0(a:i32)i32 {
+  if(a>0){ return a; }
+  return 0;
+}
+fn nr_maxi(a:i32,b:i32)i32 {
+  if(a>b){ return a; }
+  return b;
+}
+// Integer Newton sqrt, fixed 12 iterations: deterministic.
+fn nr_isqrt(n:i64)i64 {
+  if(n<=0){ return 0; }
+  let x:i64=n/2+1;
+  let i:i32=0;
+  while(i<12){
+    x=(x+n/x)/2;
+    i=i+1;
+  }
+  return x;
+}
+// LCG: s <- (s*1103515245 + 12345) mod 2^31. i64, mod hand-rolled.
+fn nr_next(s:i64)i64 {
+  let r:i64=s*1103515245+12345;
+  let q:i64=r/2147483648;
+  return r-q*2147483648;
+}
+// Burst fire threshold for mean rate 1/M: min(2^31, 5*2^31/(2M)).
+fn nr_thr_b(M:i32)i64 {
+  let C:i64=2147483648;
+  let t:i64=(5*C)/(2*(M as i64));
+  if(t>C){ return C; }
+  return t;
+}
+// Quiet fire threshold: max(0, (4*2^31/M - thr_b)/3).
+fn nr_thr_q(M:i32,tb:i64)i64 {
+  let C:i64=2147483648;
+  let t:i64=((4*C)/(M as i64)-tb)/3;
+  if(t<0){ return 0; }
+  return t;
+}
+fn nr_seed_d(M:i32,N:i32)i64 { return (M*1000003+N*101+17) as i64; }
+fn nr_seed_q(M:i32,N:i32)i64 { return (M*101+N*1000003+917) as i64; }
+// Margin-test decision. Returns 2 = eager-decisive (L > phi, strict),
+// 1 = lazy-decisive (L < plo, strict), 0 = undecided. phi >= plo
+// always (price increasing in d, decreasing in q), so both cannot fire.
+fn nr_decide(dh:i32,qh:i32,dlo:i32,dhi:i32,qlo:i32,qhi:i32,L:i32)i32 {
+  let phin:i32=nr_max0(dhi-qlo);
+  let phid:i32=nr_maxi(qlo,1);
+  let plon:i32=nr_max0(dlo-qhi);
+  let plod:i32=nr_maxi(qhi,1);
+  let eg:i32=0;
+  let lz:i32=0;
+  if(L*phid>phin){ eg=1; }
+  if(L*plod<plon){ lz=1; }
+  if(eg==1){ return 2; }
+  if(lz==1){ return 1; }
+  return 0;
+}
+// Snapshot commit-time estimates and intervals into CS.
+fn nr_snap(CS:[]u8,dh:i32,qh:i32,dlo:i32,dhi:i32,qlo:i32,qhi:i32)void {
+  set32(CS,32,dh);
+  set32(CS,36,qh);
+  set32(CS,40,dlo);
+  set32(CS,44,dhi);
+  set32(CS,48,qlo);
+  set32(CS,52,qhi);
+  set32(CS,56,nr_max0(dh-qh));
+  set32(CS,60,nr_maxi(qh,1));
+  set32(CS,64,nr_max0(dlo-qhi));
+  set32(CS,68,nr_maxi(qhi,1));
+  set32(CS,72,nr_max0(dhi-qlo));
+  set32(CS,76,nr_maxi(qlo,1));
+  return;
+}
+// Checkpoint logic. CS layout: 0=committed (0/1/2), 4=cm, 8=tc,
+// 12=cur policy, 16=sel, 20=flips, 24=Dc, 28=Qc, 32..76 estimate
+// snapshot, 80=restamps. e = elapsed ticks.
+fn nr_checkpoint(CS:[]u8,LA:[]u8,S:[]u8,A:[]u8,dh:i32,qh:i32,ed:i32,eq:i32,drifts:i32,queries:i32,L:i32,e:i32)void {
+  let sed:i64=nr_isqrt((ed/31) as i64);
+  let seq:i64=nr_isqrt((eq/31) as i64);
+  let dlo:i32=nr_max0(dh-2*(sed as i32));
+  let dhi:i32=dh+2*(sed as i32);
+  let qlo:i32=nr_max0(qh-2*(seq as i32));
+  let qhi:i32=qh+2*(seq as i32);
+  let com:i32=get32(CS,0);
+  if(com==0){
+    if(e>128){ return; }
+    let dec:i32=nr_decide(dh,qh,dlo,dhi,qlo,qhi,L);
+    if(dec==2){
+      set32(CS,0,1);
+      set32(CS,4,2);
+      set32(CS,8,e);
+      set32(CS,12,1);
+      set32(CS,16,1);
+      set32(CS,24,drifts);
+      set32(CS,28,queries);
+      et_specialize_ret(LA,S,A,0,0);
+      set32(CS,80,get32(CS,80)+1);
+      nr_snap(CS,dh,qh,dlo,dhi,qlo,qhi);
+      return;
+    }
+    if(dec==1){
+      set32(CS,0,1);
+      set32(CS,4,1);
+      set32(CS,8,e);
+      set32(CS,24,drifts);
+      set32(CS,28,queries);
+      nr_snap(CS,dh,qh,dlo,dhi,qlo,qhi);
+      return;
+    }
+    if(e==128){
+      set32(CS,0,2);
+      set32(CS,4,0);
+      set32(CS,8,128);
+      set32(CS,24,drifts);
+      set32(CS,28,queries);
+      nr_snap(CS,dh,qh,dlo,dhi,qlo,qhi);
+      return;
+    }
+    return;
+  }
+  if(com==1){
+    let dec:i32=nr_decide(dh,qh,dlo,dhi,qlo,qhi,L);
+    let cur:i32=get32(CS,12);
+    let want:i32=cur;
+    if(dec==2){ want=1; }
+    if(dec==1){ want=0; }
+    if(want!=cur){
+      set32(CS,12,want);
+      set32(CS,16,want);
+      set32(CS,20,get32(CS,20)+1);
+      if(want==1){
+        et_specialize_ret(LA,S,A,0,0);
+        set32(CS,80,get32(CS,80)+1);
+      }
+    }
+    return;
+  }
+  return;
+}
+fn nr_polname(B:[]u8,c:i32,pol:i32)i32 {
+  if(pol==0){ c=o_app(B,c,"lazy"); }
+  if(pol==1){ c=o_app(B,c,"eager"); }
+  if(pol==2){ c=o_app(B,c,"adapt"); }
+  return c;
+}
+fn nr_emit_cell(B:[]u8,c:i32,M:i32,N:i32,pol:i32,Lv:i32,CS:[]u8,dr:i32,q:i32,od:i32,an:i32,rf:i32,kb:i32)i32 {
+  c=o_app(B,c,"CELL M=");
+  c=o_i64(B,c,M as i64);
+  c=o_app(B,c," N=");
+  c=o_i64(B,c,N as i64);
+  c=o_app(B,c," P=");
+  c=nr_polname(B,c,pol);
+  c=o_app(B,c," L=");
+  c=o_i64(B,c,Lv as i64);
+  c=o_app(B,c," C=1 tc=");
+  c=o_i64(B,c,get32(CS,8) as i64);
+  c=o_app(B,c," cm=");
+  c=o_i64(B,c,get32(CS,4) as i64);
+  c=o_app(B,c," Dc=");
+  c=o_i64(B,c,get32(CS,24) as i64);
+  c=o_app(B,c," Qc=");
+  c=o_i64(B,c,get32(CS,28) as i64);
+  c=o_app(B,c," dh=");
+  c=o_i64(B,c,get32(CS,32) as i64);
+  c=o_app(B,c," qh=");
+  c=o_i64(B,c,get32(CS,36) as i64);
+  c=o_app(B,c," dlo=");
+  c=o_i64(B,c,get32(CS,40) as i64);
+  c=o_app(B,c," dhi=");
+  c=o_i64(B,c,get32(CS,44) as i64);
+  c=o_app(B,c," qlo=");
+  c=o_i64(B,c,get32(CS,48) as i64);
+  c=o_app(B,c," qhi=");
+  c=o_i64(B,c,get32(CS,52) as i64);
+  c=o_app(B,c," pnum=");
+  c=o_i64(B,c,get32(CS,56) as i64);
+  c=o_app(B,c," pden=");
+  c=o_i64(B,c,get32(CS,60) as i64);
+  c=o_app(B,c," plon=");
+  c=o_i64(B,c,get32(CS,64) as i64);
+  c=o_app(B,c," plod=");
+  c=o_i64(B,c,get32(CS,68) as i64);
+  c=o_app(B,c," phin=");
+  c=o_i64(B,c,get32(CS,72) as i64);
+  c=o_app(B,c," phid=");
+  c=o_i64(B,c,get32(CS,76) as i64);
+  c=o_app(B,c," sel=");
+  c=o_i64(B,c,get32(CS,16) as i64);
+  c=o_app(B,c," flips=");
+  c=o_i64(B,c,get32(CS,20) as i64);
+  c=o_app(B,c," D=");
+  c=o_i64(B,c,dr as i64);
+  c=o_app(B,c," Q=");
+  c=o_i64(B,c,q as i64);
+  c=o_app(B,c," od=");
+  c=o_i64(B,c,od as i64);
+  c=o_app(B,c," rs=");
+  c=o_i64(B,c,get32(CS,80) as i64);
+  c=o_app(B,c," rebuilds=");
+  c=o_i64(B,c,(od+get32(CS,80)) as i64);
+  c=o_app(B,c," answered=");
+  c=o_i64(B,c,an as i64);
+  c=o_app(B,c," refusals=");
+  c=o_i64(B,c,rf as i64);
+  c=o_app(B,c," kb=");
+  c=o_i64(B,c,kb as i64);
+  c=o_nl(B,c);
+  return c;
+}
+// One episode. pol 0 = fixed lazy, pol 1 = fixed eager (restamp on
+// every drift), pol 2 = adaptive with EWMA + confidence-interval
+// margin test (see nr_checkpoint). acc packs deltas: 0 = on-demand
+// rebuilds, 4 = answered, 8 = refusals, 12 = kb. CS packs commit
+// state; CS+80 counts restamps (sync + per-drift).
+fn nr_episode(B:[]u8,c:i32,M:i32,N:i32,pol:i32,Lv:i32,ra:i32,oa1:i32)i32 {
+  let LA:[]u8=z_alloc(16384);
+  let S:[]u8=z_alloc(16384);
+  let A:[]u8=world_new();
+  let K:[]u8=z_alloc(4096);
+  let OUT:[]u8=z_alloc(512);
+  let OUTG:[]u8=z_alloc(512);
+  let acc:[]u8=z_alloc(32);
+  let CS:[]u8=z_alloc(128);
+  let T:i32=256;
+  rb_setup(A);
+  set32(A,772,0);
+  ret_log_rel(LA,ra);
+  et_specialize_ret(LA,S,A,0,0);
+  set32(acc,0,0);
+  set32(acc,4,0);
+  set32(acc,8,0);
+  set32(acc,12,0);
+  set32(CS,0,0);
+  set32(CS,4,0);
+  set32(CS,8,-1);
+  set32(CS,12,pol);
+  set32(CS,16,pol);
+  set32(CS,20,0);
+  set32(CS,24,0);
+  set32(CS,28,0);
+  set32(CS,32,0);
+  set32(CS,36,0);
+  set32(CS,40,0);
+  set32(CS,44,0);
+  set32(CS,48,0);
+  set32(CS,52,0);
+  set32(CS,56,0);
+  set32(CS,60,1);
+  set32(CS,64,0);
+  set32(CS,68,1);
+  set32(CS,72,0);
+  set32(CS,76,1);
+  set32(CS,80,0);
+  if(pol==2){
+    set32(CS,12,0);
+    set32(CS,16,0);
+  }
+  let s1:i64=nr_seed_d(M,N);
+  let s2:i64=nr_seed_q(M,N);
+  let ds:i32=0;
+  let qs:i32=0;
+  let TPB:i64=nr_thr_b(M);
+  let TPQ:i64=nr_thr_q(M,TPB);
+  let TQB:i64=nr_thr_b(N);
+  let TQQ:i64=nr_thr_q(N,TQB);
+  let C31:i64=2147483648;
+  let TSB:i64=C31/8;
+  let TSQ:i64=C31/24;
+  let dh:i32=0;
+  let qh:i32=0;
+  let ed:i32=0;
+  let eq:i32=0;
+  let drifts:i32=0;
+  let queries:i32=0;
+  let cpd:i32=32;
+  let t:i32=0;
+  while(t<T){
+    s1=nr_next(s1);
+    let u1:i64=s1;
+    let nds:i32=ds;
+    if(ds==1 && u1<TSB){ nds=0; }
+    if(ds==0 && u1<TSQ){ nds=1; }
+    ds=nds;
+    s1=nr_next(s1);
+    let u2:i64=s1;
+    let df:i32=0;
+    if(ds==1 && u2<TPB){ df=1; }
+    if(ds==0 && u2<TPQ){ df=1; }
+    s2=nr_next(s2);
+    let u3:i64=s2;
+    let nqs:i32=qs;
+    if(qs==1 && u3<TSB){ nqs=0; }
+    if(qs==0 && u3<TSQ){ nqs=1; }
+    qs=nqs;
+    s2=nr_next(s2);
+    let u4:i64=s2;
+    let qf:i32=0;
+    if(qs==1 && u4<TQB){ qf=1; }
+    if(qs==0 && u4<TQQ){ qf=1; }
+    let cur:i32=get32(CS,12);
+    if(df==1){
+      et_drift_unrelated(A);
+      drifts=drifts+1;
+      if(cur==1){
+        et_specialize_ret(LA,S,A,0,0);
+        set32(CS,80,get32(CS,80)+1);
+      }
+    }
+    if(qf==1){
+      queries=queries+1;
+      ld_query_default(LA,S,A,ra,oa1,K,OUT,OUTG,acc);
+    }
+    if(pol==2){
+      let devd:i32=1024*df-dh;
+      dh=(15*dh+1024*df)/16;
+      ed=(15*ed+devd*devd)/16;
+      let devq:i32=1024*qf-qh;
+      qh=(15*qh+1024*qf)/16;
+      eq=(15*eq+devq*devq)/16;
+    }
+    cpd=cpd-1;
+    if(cpd==0){
+      if(pol==2){
+        nr_checkpoint(CS,LA,S,A,dh,qh,ed,eq,drifts,queries,Lv,t+1);
+      }
+      cpd=16;
+    }
+    t=t+1;
+  }
+  let od:i32=get32(acc,0);
+  c=nr_emit_cell(B,c,M,N,pol,Lv,CS,drifts,queries,od,get32(acc,4),get32(acc,8),get32(acc,12));
+  return c;
+}

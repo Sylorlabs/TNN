@@ -1,0 +1,902 @@
+// exile_promo.zag -- EXILE-PROMOTION lane (promotion / reheat dynamics).
+// Substrate carried over from RECLAMATION-H2 (hot mechanism, cold
+// tier, exile_victim, FIFO cold overflow, recovery path). Additive
+// new code only:
+//   - header offset 60: promote counter;
+//   - cold recovery-count side table (base 4032, 64 x u8, one per
+//     cold slot; reset in exile_victim on every install);
+//   - cold_lookup promotion trigger at frozen threshold T=2
+//     (per-entry recovery count), pm-gated;
+//   - promote_slot: MOVE cold->pool (never copy); first free pool
+//     slot else min last-touch victim re-exiled (priced demotion);
+//   - pm threaded through mem_read_recov / test_A_recov;
+//   - run_promo driver: teach, churn, three recovery passes with
+//     per-pass deltas, hot postH, optional second churn + R4.
+// See PREREG.md for the frozen design, derivations, kill bars.
+//
+// Header: 0 bumpA (pol 0/1 bump pointer), 4 conflicts, 8 evictions,
+// 12 table_full_errors, 16 pool_size (=32), 20 policy, 24 bumpB
+// (pol 1 class-1 bump pointer), 28 drop, 32 consent_mask (=16),
+// 36 clock (monotonic last-touch stamp), 40 exile, 44 recover,
+// 48 cold_drop, 52 cold_cost, 56 cold_seq, 60 promote.
+// Primary: 64, 128 slots x 16 bytes. Pool: 2112, 32 slots x 16 bytes.
+// Touch side table: 2624, 32 slots x 4 bytes (last-touch per pool slot).
+// Cold tier: 2752, 64 slots x 20 bytes (key,val,owner,used,exile-seq).
+// Recovery-count side table: 4032, 64 x u8 (recoveries per cold slot).
+//
+// Toolchain notes: u8-backed cells with put32/ig helpers; output via one
+// preallocated buffer plus a single _zag_raw_syscall write; if nesting at
+// most 3 (cold_lookup hit block flattened with hoisted flags); no negated
+// conjunctions in while conditions.
+
+// ---------- cell helpers ----------
+fn put32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn ig(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+
+// ---------- output: one buffer, one syscall ----------
+fn e1s(ob:[]u8,s:[]u8)void {
+  let cur:i32=ig(ob,0);
+  let i:i32=0;
+  while(i<s.len){ob[16+cur+i]=s[i];i=i+1;}
+  put32(ob,0,cur+s.len);
+  return;
+}
+fn e1i(ob:[]u8,v:i64)void {
+  let cur:i32=ig(ob,0);
+  let n:i64=v;
+  if(n<0){ob[16+cur]=45;cur=cur+1;n=-n;}
+  let nd:i32=0;
+  if(n==0){nd=1;}
+  let t:i64=n;
+  while(t>0){nd=nd+1;t=t/10;}
+  let e:i32=cur+nd;
+  let p:i32=e-1;
+  let m:i64=n;
+  if(m==0){ob[16+p]=48;}
+  while(m>0){ob[16+p]=(48+(m%10)) as u8;p=p-1;m=m/10;}
+  put32(ob,0,e);
+  return;
+}
+fn flush(ob:[]u8)void {
+  let cur:i32=ig(ob,0);
+  let ptr:i64=(_zag_slice_ptr(ob) as i64)+16;
+  _zag_raw_syscall(1,1,ptr,cur as i64,0,0,0);
+  return;
+}
+fn pf(v:i32)[]u8 {
+  if(v==1){return "PASS";}
+  return "FAIL";
+}
+
+// ---------- memory layout ----------
+fn soff(base:i32,idx:i32)i32 { return base+idx*16; }
+fn coff(idx:i32)i32 { return 2752+idx*20; }
+// recovery-count side table: one u8 per cold slot, base 4032
+fn rget(M:[]u8,s:i32)i32 { return M[4032+s] as i32; }
+fn rset(M:[]u8,s:i32,v:i32)void { M[4032+s]=v as u8; return; }
+fn mem_zero(M:[]u8)void {
+  let i:i32=0;
+  while(i<4096){put32(M,i,0);i=i+4;}
+  return;
+}
+fn hfn(key:i32)i32 {
+  let h:i64=(key as i64)*2654435761;
+  h=h%2147483647;
+  if(h<0){h=-h;}
+  return (h%128) as i32;
+}
+// last-touch side table (base 2624, 32 x 4 bytes)
+fn tget(M:[]u8,s:i32)i32 { return ig(M,2624+s*4); }
+fn stamp(M:[]u8,s:i32)void {
+  let c:i32=ig(M,36)+1;
+  put32(M,36,c);
+  put32(M,2624+s*4,c);
+  return;
+}
+// Exile: move a displaced hot-tier entry to the cold tier. First free
+// cold slot; if the cold tier is full, FIFO by exile-seq (cold_drop++).
+// exile++ on every displacement. The hot tier never destroys.
+// The slot's recovery count is reset on every install.
+fn exile_victim(M:[]u8,key:i32,val:i32,owner:i32)void {
+  let s:i32=0;
+  while(s<64){
+    let co:i32=coff(s);
+    if(ig(M,co+12)==0){
+      put32(M,co,key); put32(M,co+4,val);
+      put32(M,co+8,owner); put32(M,co+12,1);
+      rset(M,s,0);
+      let q:i32=ig(M,56)+1;
+      put32(M,56,q); put32(M,co+16,q);
+      put32(M,40,ig(M,40)+1);
+      return;
+    }
+    s=s+1;
+  }
+  let ms:i32=0;
+  let mq:i32=ig(M,coff(0)+16);
+  s=1;
+  while(s<64){
+    let qq:i32=ig(M,coff(s)+16);
+    if(qq<mq){mq=qq;ms=s;}
+    s=s+1;
+  }
+  let co:i32=coff(ms);
+  put32(M,co,key); put32(M,co+4,val);
+  put32(M,co+8,owner); put32(M,co+12,1);
+  rset(M,ms,0);
+  let q:i32=ig(M,56)+1;
+  put32(M,56,q); put32(M,co+16,q);
+  put32(M,48,ig(M,48)+1);
+  put32(M,40,ig(M,40)+1);
+  return;
+}
+// Promote cold slot cs to the hot pool (reheat). The entry is MOVED,
+// never copied: the cold slot is freed and its recovery count reset.
+// Target: first free pool slot if the pool is not full; else the used
+// pool slot with minimum last-touch (ties: lowest index), mirroring
+// policy 6. A displaced pool victim is re-exiled (priced demotion),
+// never destroyed. promote++ (header 60) per move.
+fn promote_slot(M:[]u8,cs:i32)void {
+  let co:i32=coff(cs);
+  let key:i32=ig(M,co);
+  let val:i32=ig(M,co+4);
+  let own:i32=ig(M,co+8);
+  let s:i32=0;
+  let tgt:i32=-1;
+  while(s<32){
+    let oo:i32=soff(2112,s);
+    if(tgt==-1 && ig(M,oo+12)==0){tgt=s;}
+    s=s+1;
+  }
+  if(tgt!=-1){
+    let oo:i32=soff(2112,tgt);
+    put32(M,oo,key); put32(M,oo+4,val);
+    put32(M,oo+8,own); put32(M,oo+12,1);
+    stamp(M,tgt);
+    put32(M,co+12,0);
+    rset(M,cs,0);
+    put32(M,60,ig(M,60)+1);
+    return;
+  }
+  let best:i32=-1;
+  let bestt:i32=0;
+  s=0;
+  while(s<32){
+    let oo:i32=soff(2112,s);
+    let used:i32=0;
+    if(ig(M,oo+12)==1){used=1;}
+    if(used==1){
+      let ts:i32=tget(M,s);
+      let take:i32=0;
+      if(best==-1){take=1;}
+      if(best!=-1 && ts<bestt){take=1;}
+      if(take==1){best=s;bestt=ts;}
+    }
+    s=s+1;
+  }
+  if(best==-1){return;}
+  let bo:i32=soff(2112,best);
+  exile_victim(M,ig(M,bo),ig(M,bo+4),ig(M,bo+8));
+  put32(M,bo,key); put32(M,bo+4,val);
+  put32(M,bo+8,own); put32(M,bo+12,1);
+  stamp(M,best);
+  put32(M,co+12,0);
+  rset(M,cs,0);
+  put32(M,60,ig(M,60)+1);
+  return;
+}
+// Cold-tier lookup for the recovery path. cold_cost += slots examined
+// (position+1 on hit, 64 on miss). recover++ on hit. The slot's
+// recovery count increments per hit; when pm==1 and the count reaches
+// the frozen threshold T=2, the entry is promoted to the hot pool.
+fn cold_lookup(M:[]u8,key:i32,owner:i32,pm:i32)i32 {
+  let s:i32=0;
+  while(s<64){
+    let co:i32=coff(s);
+    put32(M,52,ig(M,52)+1);
+    let hit:i32=0;
+    if(ig(M,co+12)==1 && ig(M,co)==key){hit=1;}
+    let ok:i32=0;
+    if(hit==1 && (ig(M,co+8)&owner)!=0){ok=1;}
+    if(ok==1){
+      put32(M,44,ig(M,44)+1);
+      let vv:i32=ig(M,co+4);
+      let rc:i32=rget(M,s)+1;
+      if(rc>250){rc=250;}
+      rset(M,s,rc);
+      let trig:i32=0;
+      if(pm==1 && rc>=2){trig=1;}
+      if(trig==1){promote_slot(M,s);}
+      return vv;
+    }
+    s=s+1;
+  }
+  return -1;
+}
+// Policy relocation for the conflict victim at primary slot so.
+// Caller has already counted the conflict. After this returns, the
+// caller installs the new value in the primary slot.
+// Every displaced entry is exiled; nothing in the hot tier is destroyed.
+fn relocate(M:[]u8,so:i32)void {
+  let pol:i32=ig(M,20);
+  let key:i32=ig(M,so);
+  let vv:i32=ig(M,so+4);
+  let vo:i32=ig(M,so+8);
+  if(pol==0){
+    // FIFO (verbatim from EVICTION-POLICY-COMPARE): single circular
+    // bump pointer modulo 32. The overwritten pool entry is exiled.
+    let op:i32=ig(M,0);
+    let oo:i32=soff(2112,op);
+    if(ig(M,oo+12)==1){
+      put32(M,8,ig(M,8)+1);
+      exile_victim(M,ig(M,oo),ig(M,oo+4),ig(M,oo+8));
+    }
+    put32(M,oo,key); put32(M,oo+4,vv);
+    put32(M,oo+8,vo); put32(M,oo+12,1);
+    put32(M,0,(op+1)%32);
+    return;
+  }
+  if(pol==1){
+    // PART (verbatim from EVICTION-POLICY-COMPARE): class 1 iff victim
+    // owner is exactly 16 (B-only), else class 0. 16-slot partition
+    // per class, own circular bump pointer modulo 16, FIFO within
+    // class. The overwritten pool entry is exiled.
+    let cls:i32=0;
+    if(vo==16){cls=1;}
+    let bp:i32=ig(M,0);
+    if(cls==1){bp=ig(M,24);}
+    let oo:i32=soff(2112,cls*16+bp);
+    if(ig(M,oo+12)==1){
+      put32(M,8,ig(M,8)+1);
+      exile_victim(M,ig(M,oo),ig(M,oo+4),ig(M,oo+8));
+    }
+    put32(M,oo,key); put32(M,oo+4,vv);
+    put32(M,oo+8,vo); put32(M,oo+12,1);
+    bp=(bp+1)%16;
+    if(cls==1){put32(M,24,bp);}
+    if(cls==0){put32(M,0,bp);}
+    return;
+  }
+  // All other policies: scan for the first free slot first.
+  let s:i32=0;
+  while(s<32){
+    let oo:i32=soff(2112,s);
+    if(ig(M,oo+12)==0){
+      put32(M,oo,key); put32(M,oo+4,vv);
+      put32(M,oo+8,vo); put32(M,oo+12,1);
+      stamp(M,s);
+      return;
+    }
+    s=s+1;
+  }
+  // Pool full: reclamation per policy.
+  if(pol==4){
+    // PIN-LRU (verbatim from PINNING-RECLAMATION): evict the used
+    // slot with minimum last-touch. The victim is exiled.
+    let ms:i32=0;
+    let mt:i32=tget(M,0);
+    s=1;
+    while(s<32){
+      let tt:i32=tget(M,s);
+      if(tt<mt){mt=tt;ms=s;}
+      s=s+1;
+    }
+    let oo:i32=soff(2112,ms);
+    put32(M,8,ig(M,8)+1);
+    exile_victim(M,ig(M,oo),ig(M,oo+4),ig(M,oo+8));
+    put32(M,oo,key); put32(M,oo+4,vv);
+    put32(M,oo+8,vo); put32(M,oo+12,1);
+    stamp(M,ms);
+    return;
+  }
+  if(pol==5){
+    // PIN-CONSENT: evict the first used slot whose owner intersects
+    // the consent mask; other slots stay pinned forever. The victim
+    // is exiled. On mask miss, the old primary entry is exiled and
+    // drop++ (destroy-in-place becomes exile-in-place).
+    let cm:i32=ig(M,32);
+    s=0;
+    while(s<32){
+      let oo:i32=soff(2112,s);
+      let used:i32=0;
+      if(ig(M,oo+12)==1){used=1;}
+      let consent:i32=0;
+      if((ig(M,oo+8)&cm)!=0){consent=1;}
+      let ok:i32=0;
+      if(used==1){ok=consent;}
+      if(ok==1){
+        put32(M,8,ig(M,8)+1);
+        exile_victim(M,ig(M,oo),ig(M,oo+4),ig(M,oo+8));
+        put32(M,oo,key); put32(M,oo+4,vv);
+        put32(M,oo+8,vo); put32(M,oo+12,1);
+        stamp(M,s);
+        return;
+      }
+      s=s+1;
+    }
+    exile_victim(M,key,vv,vo);
+    put32(M,28,ig(M,28)+1);
+    return;
+  }
+  if(pol==6){
+    // PIN-LIVELINESS: owner-blind. Evict the used slot with the
+    // minimum last-touch stamp (ties: lowest slot index). Owner
+    // identity is never consulted. The victim is exiled.
+    let best:i32=-1;
+    let bestt:i32=0;
+    s=0;
+    while(s<32){
+      let oo:i32=soff(2112,s);
+      let used:i32=0;
+      if(ig(M,oo+12)==1){used=1;}
+      if(used==1){
+        let ts:i32=tget(M,s);
+        let take:i32=0;
+        if(best==-1){take=1;}
+        if(best!=-1 && ts<bestt){take=1;}
+        if(take==1){best=s;bestt=ts;}
+      }
+      s=s+1;
+    }
+    if(best!=-1){
+      let bo:i32=soff(2112,best);
+      put32(M,8,ig(M,8)+1);
+      exile_victim(M,ig(M,bo),ig(M,bo+4),ig(M,bo+8));
+      put32(M,bo,key); put32(M,bo+4,vv);
+      put32(M,bo+8,vo); put32(M,bo+12,1);
+      stamp(M,best);
+      return;
+    }
+    exile_victim(M,key,vv,vo);
+    put32(M,28,ig(M,28)+1);
+    return;
+  }
+  // PIN-NORECLAIM (policy 3): no reclamation; the old primary entry
+  // is exiled and drop++ (destroy-in-place becomes exile-in-place).
+  exile_victim(M,key,vv,vo);
+  put32(M,28,ig(M,28)+1);
+  return;
+}
+fn mem_write(M:[]u8,key:i32,val:i32,owner:i32)void {
+  let i:i32=hfn(key);
+  let t:i32=0;
+  while(t<128){
+    let so:i32=soff(64,i);
+    let u:i32=ig(M,so+12);
+    if(u==0){
+      put32(M,so,key); put32(M,so+4,val); put32(M,so+8,owner); put32(M,so+12,1);
+      return;
+    }
+    if(ig(M,so)==key){
+      let vv:i32=ig(M,so+4);
+      if(vv==val){
+        put32(M,so+8,ig(M,so+8)|owner);
+        return;
+      }
+      // CONFLICT: same key, different val. Counted identically in all
+      // policies; only the relocation outcome is policy-dependent.
+      put32(M,4,ig(M,4)+1);
+      relocate(M,so);
+      put32(M,so,key); put32(M,so+4,val); put32(M,so+8,owner);
+      return;
+    }
+    i=i+1;
+    if(i>=128){i=0;}
+    t=t+1;
+  }
+  put32(M,12,ig(M,12)+1);
+  return;
+}
+// Hot-path read: primary -> pool, owner-scoped. Never consults cold.
+fn mem_read(M:[]u8,key:i32,owner:i32)i32 {
+  let i:i32=hfn(key);
+  let t:i32=0;
+  while(t<128){
+    let so:i32=soff(64,i);
+    let u:i32=ig(M,so+12);
+    if(u==1 && ig(M,so)==key){
+      if((ig(M,so+8)&owner)!=0){return ig(M,so+4);}
+    }
+    i=i+1;
+    if(i>=128){i=0;}
+    t=t+1;
+  }
+  let pn:i32=ig(M,16);
+  let o:i32=0;
+  while(o<pn){
+    let oo:i32=soff(2112,o);
+    if(ig(M,oo+12)==1 && ig(M,oo)==key){
+      if((ig(M,oo+8)&owner)!=0){stamp(M,o);return ig(M,oo+4);}
+    }
+    o=o+1;
+  }
+  return -1;
+}
+// Recovery-path read: hot path, then cold fallback on miss.
+// pm=1 enables promotion on the T-th recovery of one entry.
+fn mem_read_recov(M:[]u8,key:i32,owner:i32,pm:i32)i32 {
+  let v:i32=mem_read(M,key,owner);
+  if(v!=-1){return v;}
+  return cold_lookup(M,key,owner,pm);
+}
+
+// ---------- structures (identical to LIVENESS-SIGNAL) ----------
+// ka(i,hop)=1000+i*10+hop ; va(i,hop)=i*100+hop*7
+// owners: A_BASE=1 A_EXT=2 A_SPEC=4 A_TRUNC=8 B=16
+fn teach_A(M:[]u8,multi:i32)void {
+  let i:i32=1;
+  while(i<=10){
+    mem_write(M,1000+i*10+1,i*100+7,1);
+    mem_write(M,1000+i*10+2,i*100+14,1);
+    i=i+1;
+  }
+  if(multi==1){
+    i=1;
+    while(i<=10){
+      mem_write(M,1000+i*10+1,i*100+7,2);
+      mem_write(M,1000+i*10+2,i*100+14,2);
+      mem_write(M,1000+i*10+3,i*100+21,2);
+      i=i+1;
+    }
+    i=1;
+    while(i<=5){
+      mem_write(M,1000+i*10+1,i*100+7,4);
+      mem_write(M,1000+i*10+2,i*100+14,4);
+      mem_write(M,2000+i,9000+i,4);
+      i=i+1;
+    }
+    i=1;
+    while(i<=10){
+      mem_write(M,1000+i*10+1,i*100+7,8);
+      i=i+1;
+    }
+  }
+  return;
+}
+// B = interface-adapted template; cond=2 (FULL): all 20 keys overlap A's.
+fn teach_B(M:[]u8,cond:i32)void {
+  let i:i32=1;
+  while(i<=10){
+    let hop:i32=1;
+    while(hop<=2){
+      let k:i32=3000+i*10+hop;
+      let v:i32=555000+i*10+hop;
+      if(cond==2){k=1000+i*10+hop;v=777000+i*10+hop;}
+      mem_write(M,k,v,16);
+      hop=hop+1;
+    }
+    i=i+1;
+  }
+  return;
+}
+// churn adversary, single-owner (mode 0): w writes on B-owned fresh
+// key 3999. First write allocates; each later write conflicts and
+// relocates a B-owned victim. (unchanged from PINNING-RECLAMATION)
+fn teach_churn(M:[]u8,w:i32)void {
+  let j:i32=0;
+  while(j<w){
+    mem_write(M,3999,900001+j,16);
+    j=j+1;
+  }
+  return;
+}
+// churn adversary, multi-owner (unchanged from MULTI-OWNER-CHURN).
+// mode=1: key 3998 (owner 8) and key 3999 (owner 16), interleaved per
+// round. mode=2: adds key 3997 (owner 4) as the first write of each
+// round. mode=3 (X2): keys 3997 (owner 4) and 3998 (owner 8)
+// interleaved per round; no owner-16 churner at all.
+fn teach_churn_multi(M:[]u8,mode:i32,w:i32)void {
+  let j:i32=0;
+  while(j<w){
+    if(mode==2){mem_write(M,3997,700001+j,4);}
+    if(mode==3){mem_write(M,3997,700001+j,4);}
+    mem_write(M,3998,800001+j,8);
+    if(mode==1){mem_write(M,3999,900001+j,16);}
+    if(mode==2){mem_write(M,3999,900001+j,16);}
+    j=j+1;
+  }
+  return;
+}
+fn test_A(M:[]u8,multi:i32)i32 {
+  let ok:i32=0;
+  let i:i32=1;
+  while(i<=10){
+    if(mem_read(M,1000+i*10+1,1)==i*100+7 && mem_read(M,1000+i*10+2,1)==i*100+14){ok=ok+1;}
+    i=i+1;
+  }
+  if(multi==1){
+    i=1;
+    while(i<=10){
+      let a:i32=mem_read(M,1000+i*10+1,2);
+      let b:i32=mem_read(M,1000+i*10+2,2);
+      let c:i32=mem_read(M,1000+i*10+3,2);
+      if(a==i*100+7 && b==i*100+14 && c==i*100+21){ok=ok+1;}
+      i=i+1;
+    }
+    i=1;
+    while(i<=5){
+      let g:i32=mem_read(M,2000+i,4);
+      let a2:i32=mem_read(M,1000+i*10+1,4);
+      let b2:i32=mem_read(M,1000+i*10+2,4);
+      if(g==9000+i && a2==i*100+7 && b2==i*100+14){ok=ok+1;}
+      i=i+1;
+    }
+    i=1;
+    while(i<=10){
+      if(mem_read(M,1000+i*10+1,8)==i*100+7){ok=ok+1;}
+      i=i+1;
+    }
+  }
+  return ok;
+}
+// test_A on the recovery path: hot reads, cold fallback on miss.
+// pm=1 enables promotion.
+fn test_A_recov(M:[]u8,multi:i32,pm:i32)i32 {
+  let ok:i32=0;
+  let i:i32=1;
+  while(i<=10){
+    if(mem_read_recov(M,1000+i*10+1,1,pm)==i*100+7 && mem_read_recov(M,1000+i*10+2,1,pm)==i*100+14){ok=ok+1;}
+    i=i+1;
+  }
+  if(multi==1){
+    i=1;
+    while(i<=10){
+      let a:i32=mem_read_recov(M,1000+i*10+1,2,pm);
+      let b:i32=mem_read_recov(M,1000+i*10+2,2,pm);
+      let c:i32=mem_read_recov(M,1000+i*10+3,2,pm);
+      if(a==i*100+7 && b==i*100+14 && c==i*100+21){ok=ok+1;}
+      i=i+1;
+    }
+    i=1;
+    while(i<=5){
+      let g:i32=mem_read_recov(M,2000+i,4,pm);
+      let a2:i32=mem_read_recov(M,1000+i*10+1,4,pm);
+      let b2:i32=mem_read_recov(M,1000+i*10+2,4,pm);
+      if(g==9000+i && a2==i*100+7 && b2==i*100+14){ok=ok+1;}
+      i=i+1;
+    }
+    i=1;
+    while(i<=10){
+      if(mem_read_recov(M,1000+i*10+1,8,pm)==i*100+7){ok=ok+1;}
+      i=i+1;
+    }
+  }
+  return ok;
+}
+// rawA: key-level owner-scoped survival over A's 35 distinct keys
+// (diagnostic, hot path only).
+fn test_A_raw(M:[]u8)i32 {
+  let ok:i32=0;
+  let i:i32=1;
+  while(i<=10){
+    if(mem_read(M,1000+i*10+1,1)==i*100+7){ok=ok+1;}
+    if(mem_read(M,1000+i*10+2,1)==i*100+14){ok=ok+1;}
+    i=i+1;
+  }
+  i=1;
+  while(i<=10){
+    if(mem_read(M,1000+i*10+3,2)==i*100+21){ok=ok+1;}
+    i=i+1;
+  }
+  i=1;
+  while(i<=5){
+    if(mem_read(M,2000+i,4)==9000+i){ok=ok+1;}
+    i=i+1;
+  }
+  return ok;
+}
+fn test_B(M:[]u8,cond:i32)i32 {
+  let ok:i32=0;
+  let i:i32=1;
+  while(i<=10){
+    let hop:i32=1;
+    while(hop<=2){
+      let k:i32=1000+i*10+hop;
+      let v:i32=777000+i*10+hop;
+      if(cond!=2){k=3000+i*10+hop;v=555000+i*10+hop;}
+      if(mem_read(M,k,16)==v){ok=ok+1;}
+      hop=hop+1;
+    }
+    i=i+1;
+  }
+  return ok;
+}
+// Anchor driver (pm=0): H2's 14-column row layout.
+// R layout per condition (56 bytes): 0 pre, 4 post, 8 ret, 12 cf,
+// 16 ev, 20 bacc, 24 rawA, 28 drop, 32 postR, 36 retR, 40 exile,
+// 44 recover, 48 cold_drop, 52 cold_cost
+fn run_cond(M:[]u8,OB:[]u8,pol:i32,chw:i32,mode:i32,tag:[]u8,R:[]u8,ro:i32,mw:i32,pm:i32)void {
+  mem_zero(M);
+  put32(M,16,32);
+  put32(M,20,pol);
+  put32(M,32,16);
+  teach_A(M,1);
+  let pre:i32=test_A(M,1);
+  teach_B(M,2);
+  if(mode==0){teach_churn(M,chw);}
+  if(mode==1){teach_churn_multi(M,1,mw);}
+  if(mode==2){teach_churn_multi(M,2,mw);}
+  if(mode==3){teach_churn_multi(M,3,mw);}
+  let post:i32=test_A(M,1);
+  let bacc:i32=test_B(M,2);
+  let raw:i32=test_A_raw(M);
+  let postR:i32=test_A_recov(M,1,pm);
+  let cf:i32=ig(M,4);
+  let ev:i32=ig(M,8);
+  let dr:i32=ig(M,28);
+  let ex:i32=ig(M,40);
+  let rc:i32=ig(M,44);
+  let cd:i32=ig(M,48);
+  let cc:i32=ig(M,52);
+  let ret:i32=0;
+  if(pre>0){ret=(100*post)/pre;}
+  let retR:i32=0;
+  if(pre>0){retR=(100*postR)/pre;}
+  put32(R,ro,pre); put32(R,ro+4,post); put32(R,ro+8,ret);
+  put32(R,ro+12,cf); put32(R,ro+16,ev); put32(R,ro+20,bacc);
+  put32(R,ro+24,raw); put32(R,ro+28,dr); put32(R,ro+32,postR);
+  put32(R,ro+36,retR); put32(R,ro+40,ex); put32(R,ro+44,rc);
+  put32(R,ro+48,cd); put32(R,ro+52,cc);
+  e1s(OB,tag);
+  e1s(OB," policy="); e1i(OB,pol as i64);
+  e1s(OB," mode="); e1i(OB,mode as i64);
+  e1s(OB," churnw="); e1i(OB,chw as i64);
+  if(mw!=21){e1s(OB," mw="); e1i(OB,mw as i64);}
+  e1s(OB," pre="); e1i(OB,pre as i64);
+  e1s(OB," post="); e1i(OB,post as i64);
+  e1s(OB," ret="); e1i(OB,ret as i64);
+  e1s(OB," conflicts="); e1i(OB,cf as i64);
+  e1s(OB," evict="); e1i(OB,ev as i64);
+  e1s(OB," drop="); e1i(OB,dr as i64);
+  e1s(OB," bacc="); e1i(OB,bacc as i64);
+  e1s(OB," rawA="); e1i(OB,raw as i64);
+  e1s(OB," postR="); e1i(OB,postR as i64);
+  e1s(OB," retR="); e1i(OB,retR as i64);
+  e1s(OB," exile="); e1i(OB,ex as i64);
+  e1s(OB," recover="); e1i(OB,rc as i64);
+  e1s(OB," cdrop="); e1i(OB,cd as i64);
+  e1s(OB," ccost="); e1i(OB,cc as i64);
+  e1s(OB,"\n");
+  return;
+}
+// Promotion driver (pm=1): teach, churn, three recovery passes
+// R1/R2/R3 with per-pass ledger deltas, hot postH, optional second
+// churn (c2w rounds, mode 1) then R4 and hot postH2.
+// Promo row layout (128 bytes): 0 pre, 4 post, 8 bacc, 12 raw,
+// 16 cf, 20 ev, 24 drop, 28 exile, 32 cdrop,
+// 36 postR1, 40 rec1, 44 cc1, 48 prm1,
+// 52 postR2, 56 rec2, 60 cc2, 64 prm2,
+// 68 postR3, 72 rec3, 76 cc3, 80 prm3,
+// 84 postH, 88 recT, 92 ccT, 96 prmT,
+// 100 postR4, 104 rec4, 108 cc4, 112 prm4,
+// 116 postH2, 120 cfT, 124 evT
+fn run_promo(M:[]u8,OB:[]u8,pol:i32,mode:i32,w:i32,tag:[]u8,R:[]u8,ro:i32,c2w:i32)void {
+  mem_zero(M);
+  put32(M,16,32);
+  put32(M,20,pol);
+  put32(M,32,16);
+  teach_A(M,1);
+  let pre:i32=test_A(M,1);
+  teach_B(M,2);
+  if(mode==0){teach_churn(M,w);}
+  if(mode==1){teach_churn_multi(M,1,w);}
+  if(mode==2){teach_churn_multi(M,2,w);}
+  if(mode==3){teach_churn_multi(M,3,w);}
+  let post:i32=test_A(M,1);
+  let bacc:i32=test_B(M,2);
+  let raw:i32=test_A_raw(M);
+  let bfr:i32=ig(M,44);
+  let bfc:i32=ig(M,52);
+  let bfp:i32=ig(M,60);
+  let r1:i32=test_A_recov(M,1,1);
+  let rec1:i32=ig(M,44)-bfr;
+  let cc1:i32=ig(M,52)-bfc;
+  let pm1:i32=ig(M,60)-bfp;
+  bfr=ig(M,44); bfc=ig(M,52); bfp=ig(M,60);
+  let r2:i32=test_A_recov(M,1,1);
+  let rec2:i32=ig(M,44)-bfr;
+  let cc2:i32=ig(M,52)-bfc;
+  let pm2:i32=ig(M,60)-bfp;
+  bfr=ig(M,44); bfc=ig(M,52); bfp=ig(M,60);
+  let r3:i32=test_A_recov(M,1,1);
+  let rec3:i32=ig(M,44)-bfr;
+  let cc3:i32=ig(M,52)-bfc;
+  let pm3:i32=ig(M,60)-bfp;
+  let postH:i32=test_A(M,1);
+  let r4:i32=0;
+  let rec4:i32=0;
+  let cc4:i32=0;
+  let pm4:i32=0;
+  let postH2:i32=0;
+  if(c2w>0){
+    teach_churn_multi(M,1,c2w);
+    bfr=ig(M,44); bfc=ig(M,52); bfp=ig(M,60);
+    r4=test_A_recov(M,1,1);
+    rec4=ig(M,44)-bfr; cc4=ig(M,52)-bfc; pm4=ig(M,60)-bfp;
+    postH2=test_A(M,1);
+  }
+  let cf:i32=ig(M,4);
+  let ev:i32=ig(M,8);
+  let dr:i32=ig(M,28);
+  let ex:i32=ig(M,40);
+  let cd:i32=ig(M,48);
+  let recT:i32=ig(M,44);
+  let ccT:i32=ig(M,52);
+  let prmT:i32=ig(M,60);
+  put32(R,ro,pre); put32(R,ro+4,post); put32(R,ro+8,bacc);
+  put32(R,ro+12,raw); put32(R,ro+16,cf); put32(R,ro+20,ev);
+  put32(R,ro+24,dr); put32(R,ro+28,ex); put32(R,ro+32,cd);
+  put32(R,ro+36,r1); put32(R,ro+40,rec1); put32(R,ro+44,cc1);
+  put32(R,ro+48,pm1);
+  put32(R,ro+52,r2); put32(R,ro+56,rec2); put32(R,ro+60,cc2);
+  put32(R,ro+64,pm2);
+  put32(R,ro+68,r3); put32(R,ro+72,rec3); put32(R,ro+76,cc3);
+  put32(R,ro+80,pm3);
+  put32(R,ro+84,postH); put32(R,ro+88,recT); put32(R,ro+92,ccT);
+  put32(R,ro+96,prmT);
+  put32(R,ro+100,r4); put32(R,ro+104,rec4); put32(R,ro+108,cc4);
+  put32(R,ro+112,pm4); put32(R,ro+116,postH2);
+  put32(R,ro+120,cf); put32(R,ro+124,ev);
+  e1s(OB,tag);
+  e1s(OB," policy="); e1i(OB,pol as i64);
+  e1s(OB," mode="); e1i(OB,mode as i64);
+  e1s(OB," w="); e1i(OB,w as i64);
+  if(c2w>0){e1s(OB," c2w="); e1i(OB,c2w as i64);}
+  e1s(OB," pre="); e1i(OB,pre as i64);
+  e1s(OB," post="); e1i(OB,post as i64);
+  e1s(OB," bacc="); e1i(OB,bacc as i64);
+  e1s(OB," rawA="); e1i(OB,raw as i64);
+  e1s(OB," cf="); e1i(OB,cf as i64);
+  e1s(OB," ev="); e1i(OB,ev as i64);
+  e1s(OB," drop="); e1i(OB,dr as i64);
+  e1s(OB," exile="); e1i(OB,ex as i64);
+  e1s(OB," cdrop="); e1i(OB,cd as i64);
+  e1s(OB," R1[postR="); e1i(OB,r1 as i64);
+  e1s(OB," rec="); e1i(OB,rec1 as i64);
+  e1s(OB," cc="); e1i(OB,cc1 as i64);
+  e1s(OB," prm="); e1i(OB,pm1 as i64);
+  e1s(OB,"] R2[postR="); e1i(OB,r2 as i64);
+  e1s(OB," rec="); e1i(OB,rec2 as i64);
+  e1s(OB," cc="); e1i(OB,cc2 as i64);
+  e1s(OB," prm="); e1i(OB,pm2 as i64);
+  e1s(OB,"] R3[postR="); e1i(OB,r3 as i64);
+  e1s(OB," rec="); e1i(OB,rec3 as i64);
+  e1s(OB," cc="); e1i(OB,cc3 as i64);
+  e1s(OB," prm="); e1i(OB,pm3 as i64);
+  e1s(OB,"] postH="); e1i(OB,postH as i64);
+  e1s(OB," recT="); e1i(OB,recT as i64);
+  e1s(OB," ccT="); e1i(OB,ccT as i64);
+  e1s(OB," prmT="); e1i(OB,prmT as i64);
+  if(c2w>0){
+    e1s(OB," R4[postR="); e1i(OB,r4 as i64);
+    e1s(OB," rec="); e1i(OB,rec4 as i64);
+    e1s(OB," cc="); e1i(OB,cc4 as i64);
+    e1s(OB," prm="); e1i(OB,pm4 as i64);
+    e1s(OB,"] postH2="); e1i(OB,postH2 as i64);
+  }
+  e1s(OB,"\n");
+  return;
+}
+fn main()i32 {
+  let M:[]u8=z_alloc(4096);
+  let OB:[]u8=z_alloc(16384);
+  put32(OB,0,0);
+  let R:[]u8=z_alloc(2048);
+  e1s(OB,"LANE=EXILE-PROMOTION\n");
+  // pm=0 anchors: must reproduce H2's frozen rows bit-for-bit
+  run_cond(M,OB,6,1,0,"COND=EXH2-B0",R,0,21,0);
+  run_cond(M,OB,6,33,0,"COND=EXH2-A32",R,56,21,0);
+  run_cond(M,OB,6,21,1,"COND=EXH2-M2",R,112,21,0);
+  run_cond(M,OB,6,51,2,"COND=EXH2-OVF",R,168,51,0);
+  run_cond(M,OB,5,21,1,"COND=EXCON-M2",R,224,21,0);
+  // pm=1 promotion conditions
+  run_promo(M,OB,6,0,1,"COND=PXP-B0",R,512,0);
+  run_promo(M,OB,6,1,21,"COND=PXP-M2",R,640,0);
+  run_promo(M,OB,6,1,21,"COND=PXP-M2C2",R,768,10);
+  run_promo(M,OB,6,2,51,"COND=PXP-OVF",R,896,0);
+  // K1 ANCHOR-NOPROMO: bit-for-bit H2 frozen rows
+  let k1:i32=1;
+  if(ig(R,0)!=35 || ig(R,4)!=35 || ig(R,8)!=100){k1=0;}
+  if(ig(R,12)!=20 || ig(R,16)!=0 || ig(R,28)!=0){k1=0;}
+  if(ig(R,20)!=20 || ig(R,24)!=35){k1=0;}
+  if(ig(R,32)!=35 || ig(R,36)!=100){k1=0;}
+  if(ig(R,40)!=0 || ig(R,44)!=0 || ig(R,48)!=0 || ig(R,52)!=0){k1=0;}
+  if(ig(R,56)!=35 || ig(R,60)!=0 || ig(R,64)!=0){k1=0;}
+  if(ig(R,68)!=52 || ig(R,72)!=20 || ig(R,84)!=0){k1=0;}
+  if(ig(R,76)!=20 || ig(R,80)!=15){k1=0;}
+  if(ig(R,88)!=35 || ig(R,92)!=100){k1=0;}
+  if(ig(R,96)!=20 || ig(R,100)!=60 || ig(R,104)!=0 || ig(R,108)!=575){k1=0;}
+  if(ig(R,112)!=35 || ig(R,116)!=0 || ig(R,120)!=0){k1=0;}
+  if(ig(R,124)!=60 || ig(R,128)!=28 || ig(R,140)!=0){k1=0;}
+  if(ig(R,132)!=20 || ig(R,136)!=15){k1=0;}
+  if(ig(R,144)!=35 || ig(R,148)!=100){k1=0;}
+  if(ig(R,152)!=28 || ig(R,156)!=60 || ig(R,160)!=0 || ig(R,164)!=575){k1=0;}
+  if(ig(R,168)!=35 || ig(R,172)!=0 || ig(R,176)!=0){k1=0;}
+  if(ig(R,180)!=170 || ig(R,184)!=138 || ig(R,196)!=0){k1=0;}
+  if(ig(R,188)!=20 || ig(R,192)!=15){k1=0;}
+  if(ig(R,200)!=0 || ig(R,204)!=0){k1=0;}
+  if(ig(R,208)!=138 || ig(R,212)!=0 || ig(R,216)!=74 || ig(R,220)!=3200){k1=0;}
+  if(ig(R,224)!=35 || ig(R,228)!=35 || ig(R,232)!=100){k1=0;}
+  if(ig(R,236)!=60 || ig(R,240)!=11 || ig(R,252)!=17){k1=0;}
+  if(ig(R,244)!=20 || ig(R,248)!=35){k1=0;}
+  if(ig(R,256)!=35 || ig(R,260)!=100){k1=0;}
+  if(ig(R,264)!=28 || ig(R,268)!=0 || ig(R,272)!=0 || ig(R,276)!=0){k1=0;}
+  e1s(OB,"K1 ANCHOR-NOPROMO -> "); e1s(OB,pf(k1)); e1s(OB,"\n");
+  // K2 PROMO-BENIGN (P0 @512)
+  let k2:i32=1;
+  if(ig(R,512)!=35 || ig(R,516)!=35){k2=0;}
+  if(ig(R,520)!=20 || ig(R,524)!=35){k2=0;}
+  if(ig(R,528)!=20 || ig(R,532)!=0 || ig(R,536)!=0){k2=0;}
+  if(ig(R,540)!=0 || ig(R,544)!=0){k2=0;}
+  if(ig(R,548)!=35 || ig(R,552)!=0 || ig(R,556)!=0 || ig(R,560)!=0){k2=0;}
+  if(ig(R,564)!=35 || ig(R,568)!=0 || ig(R,572)!=0 || ig(R,576)!=0){k2=0;}
+  if(ig(R,580)!=35 || ig(R,584)!=0 || ig(R,588)!=0 || ig(R,592)!=0){k2=0;}
+  if(ig(R,596)!=35 || ig(R,600)!=0 || ig(R,604)!=0 || ig(R,608)!=0){k2=0;}
+  e1s(OB,"K2 PROMO-BENIGN -> "); e1s(OB,pf(k2)); e1s(OB,"\n");
+  // K3 PROMO-AMORTIZE (P1 @640)
+  let k3:i32=1;
+  if(ig(R,640)!=35 || ig(R,644)!=0){k3=0;}
+  if(ig(R,648)!=20 || ig(R,652)!=15){k3=0;}
+  if(ig(R,656)!=60 || ig(R,660)!=28 || ig(R,664)!=0){k3=0;}
+  if(ig(R,668)!=48 || ig(R,672)!=0){k3=0;}
+  if(ig(R,676)!=35 || ig(R,680)!=40 || ig(R,688)!=20){k3=0;}
+  if(ig(R,684)>=575){k3=0;}
+  if(ig(R,692)!=35 || ig(R,696)!=0 || ig(R,700)!=0 || ig(R,704)!=0){k3=0;}
+  if(ig(R,708)!=35 || ig(R,712)!=0 || ig(R,716)!=0 || ig(R,720)!=0){k3=0;}
+  if(ig(R,724)!=35 || ig(R,728)!=40 || ig(R,736)!=20){k3=0;}
+  if(ig(R,732)>=1725){k3=0;}
+  e1s(OB,"K3 PROMO-AMORTIZE -> "); e1s(OB,pf(k3)); e1s(OB,"\n");
+  // K4 PROMO-REHEAT (P2 @768)
+  let k4:i32=1;
+  if(ig(R,768)!=35 || ig(R,772)!=0){k4=0;}
+  if(ig(R,776)!=20 || ig(R,780)!=15){k4=0;}
+  if(ig(R,804)!=35 || ig(R,808)!=40 || ig(R,816)!=20){k4=0;}
+  if(ig(R,852)!=35){k4=0;}
+  if(ig(R,868)!=35 || ig(R,872)!=16 || ig(R,880)!=8){k4=0;}
+  if(ig(R,876)!=712){k4=0;}
+  if(ig(R,884)!=35 || ig(R,864)!=28){k4=0;}
+  if(ig(R,796)!=76 || ig(R,888)!=80 || ig(R,892)!=48){k4=0;}
+  if(ig(R,792)!=0 || ig(R,800)!=0){k4=0;}
+  e1s(OB,"K4 PROMO-REHEAT -> "); e1s(OB,pf(k4)); e1s(OB,"\n");
+  // K5 PROMO-NORESURRECT (P3 @896)
+  let k5:i32=1;
+  if(ig(R,896)!=35 || ig(R,900)!=0){k5=0;}
+  if(ig(R,904)!=20 || ig(R,908)!=15){k5=0;}
+  if(ig(R,912)!=170 || ig(R,916)!=138 || ig(R,920)!=0){k5=0;}
+  if(ig(R,924)!=138 || ig(R,928)!=74){k5=0;}
+  if(ig(R,932)!=0 || ig(R,948)!=0 || ig(R,964)!=0){k5=0;}
+  if(ig(R,980)!=0 || ig(R,984)!=0 || ig(R,992)!=0){k5=0;}
+  if(ig(R,988)!=9600){k5=0;}
+  e1s(OB,"K5 PROMO-NORESURRECT -> "); e1s(OB,pf(k5)); e1s(OB,"\n");
+  // K6 PROMO-LEDGER: exile == ev + drop + promote in P0..P3;
+  // cold_drop == 0 except P3 (74)
+  let k6:i32=1;
+  let pro:i32=512;
+  while(pro<1024){
+    if(ig(R,pro+28)!=ig(R,pro+20)+ig(R,pro+24)+ig(R,pro+96)){k6=0;}
+    if(pro!=896 && ig(R,pro+32)!=0){k6=0;}
+    pro=pro+128;
+  }
+  if(ig(R,928)!=74){k6=0;}
+  e1s(OB,"K6 PROMO-LEDGER -> "); e1s(OB,pf(k6)); e1s(OB,"\n");
+  e1s(OB,"K7 DETERMINISM external: sha256 across 3 runs\n");
+  let all:i32=0;
+  if(k1==1 && k2==1 && k3==1 && k4==1 && k5==1 && k6==1){all=1;}
+  e1s(OB,"VERDICT="); e1s(OB,pf(all)); e1s(OB,"\n");
+  flush(OB);
+  return 0;
+}
