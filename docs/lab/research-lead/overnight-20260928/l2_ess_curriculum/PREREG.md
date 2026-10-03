@@ -1,5 +1,74 @@
 # PREREG: L2-ESS-CURRICULUM (two-family test of H-OP-ESS)
 
+## AMENDMENT A1 (2026-10-03, pre-results, transparent)
+Cause: The fact table stores sub/rel/obj as u8 (single byte);
+values >= 256 wrap (300 stored as 44). The original Family B
+values 300..332 all wrapped, so m_teach for mX returned -1
+(descriptor derivation seeks a live fact with sub==end==312;
+stored sub was 56). No results had been observed (run1 showed
+k_famb=0 before diagnosis); this amends the DESIGN, not a kill bar.
+Remap (all < 256, still disjoint from Family A values):
+300->245, 310->246, 311->247, 312->248, 320->249, 321->250,
+322->251, 330->252, 331->253, 332->254. Relations
+51,52,53,54,61,62 and answers 71,72,73 were already < 256 and are
+unchanged. Unsolvable terminals 999..994 stay (i32 query params,
+never match a u8 fact obj). Queries remap identically:
+q7 (245,248,71), q8 (71,245,71), q9..q14 (245,999..994,71),
+q15 (245,251,72), q16 (245,254,73). mX facts become
+44:(245,51,246) 45:(246,52,247) 46:(247,53,248) 47:(248,54,71);
+B-prime facts become 48:(245,61,249) 49:(249,52,250)
+50:(250,53,251) 51:(251,54,72) 52:(245,62,252) 53:(252,52,253)
+54:(253,53,254) 55:(254,54,73); mX MAP start=245 end=248.
+Predicted signatures/trajectories/kill bars are UNCHANGED
+(structure identical; only value labels moved).
+
+## AMENDMENT A2 (2026-10-03, pre-results, transparent)
+Cause: q7 (245,248,71) is solved by DIRECT EXECUTION of mX
+(m_exec returns 248==t) before meta-reuse, so it never touches
+the standing cell and QTOUCH stalls at 7 by q15 (probation needs
+8). Redesign q7 as (245,245,71): direct execution fails
+(248!=245); op 4 Form B solves via reverse lookup (v=71 ->
+fact 47, tstar=248==aend, backward walk cur=245==t). Ops 1-3
+fail (op 2: zero substitute candidates). q7 now touches sig=18:
+QTOUCH=1, op 2 (0,4,1). Trajectory becomes q7(0,4,1) q9(0,8,2)
+q10(0,12,3) STRIKE q11-14 skipped q15 QTOUCH=8 PROBATION (8,6,0)
+q16 (16,3,0). KB-FAM-B updated: q7 op4/v71 (was op5/v71); q8
+op4/v71 unchanged.
+
+## AMENDMENT A3 (2026-10-03, pre-results, transparent)
+Cause: A2's q7 (245,245,71) fails: op 4 Form B's chain_exec_bwd
+requires s==v (s must equal the value fact's obj); with s=245,
+v=71, VERIFY fails (term=-1). Redesign q7 for op 5 ABSTRACT:
+add initial-world fact 48:(244,51,246) (new entry, rel==d_entry).
+q7=(244,248,71): direct execution fails (m_exec fact-44 sub 245 !=
+244); op 5 finds candidate (244,51,246), foldwalk 246->247->248,
+t=248 val=71 SUCCESS. s=244 gives em=1 (fact 48), sig=18; op 2
+has zero substitute candidates (only fact with sub==244 is
+rel==d_entry) -> FAIL (0,4,1), QTOUCH=1. B-prime facts shift to
+ids 49..56 (taught by value, order unchanged). KB-FAM-B: q7
+op5/v71 (restored); KB-P1 comment: fact count 49 during phase B
+(threshold >=48 unchanged).
+
+## AMENDMENT A4 (2026-10-03, pre-results, transparent)
+Cause: A3 exceeds f_teach cap (56 facts max; 49 initial + 8 B'
+= 57, the 8th B' fact (254,54,73) fails to teach, breaking q16).
+Revert fact 48; q7 becomes unsolvable (245,990,71) touching
+sig=18 (op 2 fails, QTOUCH=1). B-prime facts return to ids 48..55.
+KB-FAM-B: q7 val==-2 (family sanity via q8 op4/v71 alone);
+trajectory q7(0,4,1) q9(0,8,2) q10(0,12,3) STRIKE q11-14 skipped
+q15 QTOUCH=8 PROBATION (8,6,0) q16 (16,3,0) UNCHANGED.
+
+## AMENDMENT A5 (2026-10-03, pre-results, transparent)
+Cause: Trajectory prediction in A2/A4 was wrong. The frozen
+strike rule (STRK>=3 OR SUC*2<FAIL) strikes after ONE failure:
+after q7, cell (0,4,1) has SUC*2=0 < FAIL=4, so op 2 is STRUCK
+immediately (not after 3 fails). Correct trajectory for
+(op2,sig18): q7 (0,4,1) STRUCK; q9-q14 skipped (QTOUCH 2..7);
+q15 QTOUCH=8 PROBATION -> (8,2,0); q16 -> (16,1,0). P2/P3/P5
+phenomena UNCHANGED (skip, probation recovery, context beats
+global); only the strike latency was mispredicted. Kill bars
+k_p1/k_p3/k_p5 unaffected.
+
 Status: PREREG-FROZEN. No implementation exists at this commit and none
 is built in this lane until after the freeze commit. This file holds the
 frozen experimental design: the two families, the four arms, the standing
@@ -43,23 +112,21 @@ mX, and queries solvable by a different operator mix while op 2
 
 New world facts (appended after the 44 frozen facts; fact region grows
 44 -> 56; see section 6):
-- 44:(300,51,310) 45:(310,52,311) 46:(311,53,312) 47:(312,54,71)
-- mX: rs=[51,52,53], fs=[44,45,46], start=300, end=312, dom=3, cap=3.
+- 44:(245,51,246) 45:(246,52,247) 46:(247,53,248) 47:(248,54,71)
+- mX: rs=[51,52,53], fs=[44,45,46], start=245, end=248, dom=3, cap=3.
   Descriptor (generic m_teach derivation, extended to cap 3 per
   section 6): d_entry=51, d_r1=52, d_r2=53, d_nf=1, d_valrel=54.
 - Family-B queries (cap=3, dom=3, agg_src=mX by the frozen first-live
   MAP rule):
-  - q7 QABS2 (300,312,71): op 5 ABSTRACT solves (entry (300,51,310),
-    1-fold walk 310->311->312, valof(312,54)=71). Ops 1-4 fail.
-    op 2 fails: zero entry candidates (only fact with sub==300 is
-    (300,51,310), rel == d_entry).
-  - q8 QINVB (71,300,71): op 4 Form B solves (reverse lookup v=71 ->
-    fact 47 (312,54,71), tstar=312 == mX end, backward walk
-    312->311->310->300, key 300 == t). Ops 1-3 fail (no sub==71
+  - q7 QX2 (245,990,71): UNSOLVABLE by design (touches sig=18;
+    op 2 fails: zero substitute candidates; all six ops fail).
+  - q8 QINVB (71,245,71): op 4 Form B solves (reverse lookup v=71 ->
+    fact 47 (248,54,71), tstar=248 == mX end, backward walk
+    248->247->246->245, key 245 == t). Ops 1-3 fail (no sub==71
     facts; truncate dnf=1 never tries). op 2 fails: no candidates.
-  - q9..q14 QX3..QX8 (300,999,71),(300,998,71),(300,997,71),
-    (300,996,71),(300,995,71),(300,994,71): UNSOLVABLE by design
-    (terminals unreachable; value 71 belongs to mX's terminal 312,
+  - q9..q14 QX3..QX8 (245,999,71),(245,998,71),(245,997,71),
+    (245,996,71),(245,995,71),(245,994,71): UNSOLVABLE by design
+    (terminals unreachable; value 71 belongs to mX's terminal 248,
     not to these terminals). All six operators fail in the ungated
     baseline. op 2 fails on each (no candidates). These queries exist
     to drive the strike latch and then exhibit the skip.
@@ -72,18 +139,18 @@ New world facts (appended after the 44 frozen facts; fact region grows
 Family B-prime (world change, then recovery): between q14 and q15 the
 driver teaches 8 more facts (world change, driver-side teaching, not
 learner state):
-- 48:(300,61,320) 49:(320,52,321) 50:(321,53,322) 51:(322,54,72)
-- 52:(300,62,330) 53:(330,52,331) 54:(331,53,332) 55:(332,54,73)
-- q15 B1 (300,322,72,cap3,dom3): op 2 now viable via candidate
-  (300,61,320) (rel 61 != 51): foldwalk 320->321->322, terminal 322,
-  valof(322,54)=72. Solvable ONLY by op 2 (op 3: dnf=1 never tries;
-  op 4B: v=72 -> fact 51, tstar=322 != mX end 312, FAIL; op 4A:
-  reversed rels [53,52,51] from 300, no (300,53,?) fact, FAIL;
-  op 5: foldwalk terminal 312 != 322, FAIL; op 6 must fail, verified
+- 49:(245,61,249) 50:(249,52,250) 51:(250,53,251) 52:(251,54,72)
+- 53:(245,62,252) 54:(252,52,253) 55:(253,53,254) 56:(254,54,73)
+- q15 B1 (245,251,72,cap3,dom3): op 2 now viable via candidate
+  (245,61,249) (rel 61 != 51): foldwalk 249->250->251, terminal 251,
+  valof(251,54)=72. Solvable ONLY by op 2 (op 3: dnf=1 never tries;
+  op 4B: v=72 -> fact 51, tstar=251 != mX end 248, FAIL; op 4A:
+  reversed rels [53,52,51] from 245, no (245,53,?) fact, FAIL;
+  op 5: foldwalk terminal 248 != 251, FAIL; op 6 must fail, verified
   at runtime by KB-FAM-B).
-- q16 B2 (300,332,73,cap3,dom3): op 2 via candidate (300,62,330)
-  (candidate (300,61,320) tried first, verifies to 322 != 332, then
-  (300,62,330) verifies to 332, valof=73). Solvable ONLY by op 2.
+- q16 B2 (245,254,73,cap3,dom3): op 2 via candidate (245,62,252)
+  (candidate (245,61,249) tried first, verifies to 251 != 254, then
+  (245,62,252) verifies to 254, valof=73). Solvable ONLY by op 2.
 
 ## 3. Arms (one binary, four sequential arms, fresh state each)
 
@@ -179,7 +246,7 @@ property lists (T7; audited by KB-P4).
 - KB-FAM-A (harness sanity): ARM UNGATED q0..q6 commit ops
   1,2,3,4,5,6,4 with vals 42,11,32,60,77,91,11. (Guards against
   breakage from the layout shift and m_teach extension.)
-- KB-FAM-B (new-family sanity): ARM UNGATED q7 op==5 val==71;
+- KB-FAM-B (new-family sanity): ARM UNGATED q7 val==-2;
   q8 op==4 val==71; q9..q14 val==-2 (all six operators fail);
   q15 op==2 val==72; q16 op==2 val==73.
 - KB-P1 (gating saves): for each of q11..q14,
