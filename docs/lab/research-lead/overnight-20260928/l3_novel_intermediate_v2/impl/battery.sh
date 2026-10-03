@@ -13,7 +13,7 @@ SEED=42
 
 build() {
   cat "$D/prelude.zag" "$D/isa.zag" "$D/lm_prot.zag" "$D/lm_cons.zag" \
-      "$D/lm_cons2.zag" "$D/lm_cons3.zag" "$D/lm_arms.zag" "$D/lm_main.zag" > "$D/learner_full.zag"
+      "$D/lm_cons2.zag" "$D/lm_cons3.zag" "$D/lm_cons4.zag" "$D/lm_arms.zag" "$D/lm_main.zag" > "$D/learner_full.zag"
   cat "$D/prelude.zag" "$D/isa.zag" "$D/world.zag" > "$D/world_full.zag"
   znc "$D/learner_full.zag" -o "$D/learner_bin" 2>"$D/learner_compile.txt" || return 1
   znc "$D/world_full.zag" -o "$D/world_bin" 2>"$D/world_compile.txt" || return 1
