@@ -63,3 +63,27 @@ implementation file. `ntpp_full.zag`, the binary, run outputs, and
 REPORT.md come in later commits. The self-check (prereg commit strictly
 precedes implementation commit) will be verified via git log before the
 implementation commit lands.
+
+## Build record (completed 2026-10-03)
+
+- [x] ntpp_full.zag written per PREREG Sections 2-4; audit grep for
+      protection/task-label/freeze/importance/mode logic: clean
+      (matches are disclosure comments only); "python" appears once,
+      in the header comment "Pure Zag. No Python."
+- [x] compiler-defect workarounds honored (get32/set32 only; single
+      output buffer + one _zag_raw_syscall; no `!(A && B)` in while
+      conditions; if-nesting at most 3 deep; no `[]u8 as *u8` casts;
+      _zag_print never used for dynamic content)
+- [x] build: `znc ntpp_full.zag -o ntpp_bin` (exit 0; benign
+      zagd-unavailable warning only)
+- [x] 3/3 runs byte-identical (cmp), exit 0, zero stderr; sha256
+      recorded in REPORT.md
+- [x] REPORT.md written; verdict PORT-PASS-STRUCT per PREREG
+      Section 8 (K1=1,K2=1,K3=1,K4=1,K5=1); every frozen numeric
+      prediction matched exactly, including the 5-bin eviction
+      histogram and all three arms' retest partitions
+- [x] one self-caught display-field bug fixed pre-build (FRESH
+      out[28] held phev instead of bprobe; K1 always read the
+      intended field; frozen binary built only from corrected source)
+- [x] commit-order self-check: prereg commit `4460908ca` strictly
+      precedes the implementation commit (verified via git log)
