@@ -1,0 +1,1439 @@
+// lc_base.zag -- COMPOSE-LEARNCOMPOSE-1 base (verbatim copy of BACKCHAIN-1 substrate).
+// Alloc, little-endian i32 access, output helpers, kind compatibility
+// (with relaxed/widen flag), fact store, MAP table (40 ids), MAP
+// execution counting. Pure Zag. No phases: execution is interleaved
+// with search by construction.
+//
+// Output rule (mandatory): dynamic content is formatted into ONE
+// preallocated buffer with cursor-returning helpers, then a single
+// _zag_raw_syscall write. _zag_print is never used for dynamic content.
+//
+// Arena A (world): MAP inventory + facts.
+//   0: nf (fact count)
+//   4: facts, 64 * 12 bytes (s, r, o)
+//   772: MAP table, 40 maps * 8 fields * 4 bytes
+//        fields: 0 class, 1 rel, 2 inmask, 3 outmask,
+//                4 inmask1, 5 inmask2, 6 arity, 7 nobs
+//   2052: nmaps
+// Classes: 0=WALK, 1=COUNT, 4=ADD2 (PAIR6 substrate).
+//
+// Arena S (backchain learner state; FRESH per problem: memoryless):
+//   0: nthunk
+//   4: tries (= total MAP executions)
+//   8: widen (0/1)
+//   12: relaxed (0/1; widen pass)
+//   16: e1set
+//   20: e1 (exec_total right after first candidate executed)
+//   24: const_tid (current goal const thunk)
+//   28: nocc
+//   32: exec per map, 40 * 4 bytes
+//   192: thunk table, 4096 entries * 8 fields * 4 bytes
+//        fields: 0 map(-1=const), 1 in1, 2 in2, 3 cval,
+//                4 kindmask, 5 memo, 6 onstack, 7 unused
+//   131264: occ frames, 1200000 * 8 fields * 4 bytes
+//        (chain-10 needs ~986k frames: the (need,producer)-pair guard
+//        permits permutation exploration; the design's 4.8 notes the
+//        exponential worst case, so the arena is sized for it)
+//        fields: 0 need-kind K, 1 next-producer cursor, 2 cur producer,
+//                3 stage, 4 child occ, 5 child2 occ, 6 leg1 thunk,
+//                7 parent occ
+// Sentinels: MISS=-2, NOVAL=-999999.
+
+fn z_alloc(n:i32)[]u8 {
+  let p:*u8=_zag_malloc(n) as *u8;
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+// ---- output helpers: append into buffer, return new cursor ----
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ b[c+i]=s[i]; i=i+1; }
+  return c+s.len;
+}
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0;
+  let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1;
+  let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n;
+  let p:i32=e-1;
+  let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){
+    b[p]=(48+(y-(y/10)*10)) as u8;
+    y=y/10;
+    p=p-1;
+  }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0);
+  return;
+}
+// ---- arena accessors ----
+fn ag(A:[]u8,off:i32)i32 { return get32(A,off); }
+fn ap(A:[]u8,off:i32,v:i32)void { set32(A,off,v); return; }
+fn mg(A:[]u8,m:i32,f:i32)i32 { return get32(A,772+m*32+f*4); }
+fn mp(A:[]u8,m:i32,f:i32,v:i32)void { set32(A,772+m*32+f*4,v); return; }
+fn sg(S:[]u8,off:i32)i32 { return get32(S,off); }
+fn sp(S:[]u8,off:i32,v:i32)void { set32(S,off,v); return; }
+fn tg(S:[]u8,t:i32,f:i32)i32 { return get32(S,192+t*32+f*4); }
+fn tp(S:[]u8,t:i32,f:i32,v:i32)void { set32(S,192+t*32+f*4,v); return; }
+fn eg(S:[]u8,m:i32)i32 { return get32(S,32+m*4); }
+fn ep(S:[]u8,m:i32,v:i32)void { set32(S,32+m*4,v); return; }
+fn of(S:[]u8,o:i32,f:i32)i32 { return get32(S,131264+o*32+f*4); }
+fn of_set(S:[]u8,o:i32,f:i32,v:i32)void { set32(S,131264+o*32+f*4,v); return; }
+// ---- kind compatibility: mask==0 compatible with all; kinds are 1-based bit positions ----
+// khas_rel: relaxed (widen pass) ignores kind compatibility entirely.
+fn khas(mask:i32,k:i32)i32 {
+  if(mask==0){ return 1; }
+  if((mask & (1<<(k-1)))!=0){ return 1; }
+  return 0;
+}
+fn khas_rel(S:[]u8,mask:i32,k:i32)i32 {
+  if(sg(S,12)==1){ return 1; }
+  return khas(mask,k);
+}
+// ---- facts: single-hop lookup / count, missing -> -2 ----
+fn fact_add(A:[]u8,s:i32,r:i32,o:i32)void {
+  let n:i32=ag(A,0);
+  if(n<64){
+    set32(A,4+n*12,s); set32(A,4+n*12+4,r); set32(A,4+n*12+8,o);
+    ap(A,0,n+1);
+  }
+  return;
+}
+fn fact_del(A:[]u8,s:i32,r:i32)void {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==r){
+      let li:i32=n-1;
+      set32(A,4+i*12,get32(A,4+li*12));
+      set32(A,4+i*12+4,get32(A,4+li*12+4));
+      set32(A,4+i*12+8,get32(A,4+li*12+8));
+      ap(A,0,li);
+      return;
+    }
+    i=i+1;
+  }
+  return;
+}
+fn fact1(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ return get32(A,4+i*12+8); }
+    i=i+1;
+  }
+  return -2;
+}
+fn count_rel(A:[]u8,s:i32,rel:i32)i32 {
+  let n:i32=ag(A,0);
+  let i:i32=0;
+  let c:i32=0;
+  while(i<n){
+    let fs:i32=get32(A,4+i*12);
+    let fr:i32=get32(A,4+i*12+4);
+    if(fs==s && fr==rel){ c=c+1; }
+    i=i+1;
+  }
+  if(c==0){ return -2; }
+  return c;
+}
+// ---- MAP table ----
+fn map_new(A:[]u8,m:i32,cl:i32,rel:i32,inm:i32,outm:i32,inm1:i32,inm2:i32,ar:i32)void {
+  mp(A,m,0,cl); mp(A,m,1,rel); mp(A,m,2,inm); mp(A,m,3,outm);
+  mp(A,m,4,inm1); mp(A,m,5,inm2); mp(A,m,6,ar); mp(A,m,7,0);
+  let nm:i32=ag(A,2052);
+  if(m>=nm){ ap(A,2052,m+1); }
+  return;
+}
+// ---- MAP execution (counted; tries == total MAP executions) ----
+fn exec_map(S:[]u8,A:[]u8,m:i32,v1:i32)i32 {
+  sp(S,4,sg(S,4)+1);
+  ep(S,m,eg(S,m)+1);
+  let cl:i32=mg(A,m,0);
+  let rel:i32=mg(A,m,1);
+  if(cl==0){ return fact1(A,v1,rel); }
+  if(cl==1){ return count_rel(A,v1,rel); }
+  return -2;
+}
+fn exec_map2(S:[]u8,A:[]u8,m:i32,v1:i32,v2:i32)i32 {
+  sp(S,4,sg(S,4)+1);
+  ep(S,m,eg(S,m)+1);
+  let cl:i32=mg(A,m,0);
+  if(cl==4){
+    if(v1==-2){ return -2; }
+    if(v2==-2){ return -2; }
+    return v1+v2;
+  }
+  return -2;
+}
+// lc_thunk.zag -- thunk table (verbatim copy of BACKCHAIN-1 substrate)., hash-cons interning, demand evaluation.
+// Identity = tid equality after interning. A thunk evaluated once
+// never re-executes (identity memoization of VALUES; the search
+// strategy around it is what differs from SUSPEND).
+
+fn th_new(S:[]u8,m:i32,i1:i32,i2:i32,cv:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  if(n>=4096){ return -2; }
+  tp(S,n,0,m); tp(S,n,1,i1); tp(S,n,2,i2); tp(S,n,3,cv);
+  tp(S,n,4,km); tp(S,n,5,-999999); tp(S,n,6,0);
+  sp(S,0,n+1);
+  return n;
+}
+// intern(m,i1,i2): hash-cons on (map-id, in1, in2). Returns existing
+// tid on match (memo hit: no re-execution), else allocates.
+// Returns -2 on table overflow.
+fn intern(S:[]u8,m:i32,i1:i32,i2:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==m){
+      if(tg(S,t,1)==i1){
+        if(tg(S,t,2)==i2){ return t; }
+      }
+    }
+    t=t+1;
+  }
+  return th_new(S,m,i1,i2,0,0);
+}
+fn const_thunk(S:[]u8,v:i32,km:i32) i32 {
+  let n:i32=sg(S,0);
+  let t:i32=0;
+  while(t<n){
+    if(tg(S,t,0)==-1){
+      if(tg(S,t,3)==v){ return t; }
+    }
+    t=t+1;
+  }
+  return th_new(S,-1,-1,-1,v,km);
+}
+fn app1(S:[]u8,A:[]u8,m:i32,t:i32) i32 {
+  let nt:i32=intern(S,m,t,-1);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+fn app2(S:[]u8,A:[]u8,m:i32,t1:i32,t2:i32) i32 {
+  let nt:i32=intern(S,m,t1,t2);
+  if(nt>=0){ tp(S,nt,4,mg(A,m,3)); }
+  return nt;
+}
+// demand(t): evaluate on demand with identity memoization.
+// Inputs of a yielded candidate are always already evaluated
+// (solutions or the const), so each demand on a fresh thunk
+// executes exactly one MAP application.
+fn demand(S:[]u8,A:[]u8,t:i32) i32 {
+  let memo:i32=tg(S,t,5);
+  if(memo!=-999999){ return memo; }
+  if(tg(S,t,6)==1){ return -2; }
+  tp(S,t,6,1);
+  let m:i32=tg(S,t,0);
+  let v:i32=-2;
+  if(m==-1){
+    v=tg(S,t,3);
+  } else {
+    let ar:i32=mg(A,m,6);
+    let i1:i32=tg(S,t,1);
+    let v1:i32=demand(S,A,i1);
+    if(ar==1){
+      v=exec_map(S,A,m,v1);
+    } else {
+      let i2:i32=tg(S,t,2);
+      let v2:i32=demand(S,A,i2);
+      v=exec_map2(S,A,m,v1,v2);
+    }
+  }
+  tp(S,t,5,v);
+  tp(S,t,6,0);
+  return v;
+}
+// lc_search.zag -- regressive search (verbatim copy of BACKCHAIN-1 substrate).: lazy chronological backtracking over
+// derivation trees, with INTERLEAVED execution.
+//
+// An occurrence frame solves one need occurrence (need = kind mask;
+// the goal input s is fixed per goal). occ_next returns the frame's
+// next non--2 solution thunk, or -1 when exhausted. Every candidate
+// derivation is executed IMMEDIATELY upon construction (do_cand);
+// -2 outcomes are skipped, never yielded. End-to-end failure at the
+// root resumes the search (chronological backtracking).
+//
+// Loop guard (PREREG 1.3, amended): a (need-kind, producer-id) pair
+// already on the open-need stack fails that producer choice
+// entirely. Backup: DMAX=16 path depth.
+//
+// Enumeration order (frozen): producer id order; direct-close before
+// sub-need alternatives; 2-input legs leg1-outer/leg2-inner, with a
+// fresh leg2 occurrence per leg1 solution.
+
+// producer choice ok: kind-compatible output and passes loop guard.
+// Hoisted out of occ_next to keep nesting shallow.
+fn prod_ok(S:[]u8,A:[]u8,occ:i32,K:i32,mi:i32) i32 {
+  if(khas_rel(S,mg(A,mi,3),K)==0){ return 0; }
+  let u:i32=occ;
+  while(u>=0){
+    if(of(S,u,2)==mi){
+      if(of(S,u,0)==K){ return 0; }
+    }
+    u=of(S,u,7);
+  }
+  return 1;
+}
+fn occ_new(S:[]u8,K:i32,base:i32,parent:i32) i32 {
+  let n:i32=sg(S,28);
+  if(n>=1200000){ return -1; }
+  let d:i32=0;
+  let u:i32=parent;
+  while(u>=0){ d=d+1; u=of(S,u,7); }
+  if(d>=16){ return -1; }
+  of_set(S,n,0,K); of_set(S,n,1,base); of_set(S,n,2,-1);
+  of_set(S,n,3,0); of_set(S,n,4,-1); of_set(S,n,5,-1);
+  of_set(S,n,6,-1); of_set(S,n,7,parent);
+  sp(S,28,n+1);
+  return n;
+}
+// do_cand: execute a completed candidate derivation immediately.
+// Records e1 (F-A-INT): exec_total right after the first candidate
+// is executed -- evidence that search and execution interleave.
+fn do_cand(S:[]u8,A:[]u8,t:i32) i32 {
+  let v:i32=demand(S,A,t);
+  if(sg(S,16)==0){
+    sp(S,16,1);
+    sp(S,20,sg(S,4));
+  }
+  return v;
+}
+fn occ_next(S:[]u8,A:[]u8,base:i32,nm:i32,kin:i32,occ:i32) i32 {
+  let C:i32=sg(S,24);
+  while(1==1){
+    let K:i32=of(S,occ,0);
+    let m:i32=of(S,occ,2);
+    let stage:i32=of(S,occ,3);
+    if(m<0){
+      let mi:i32=of(S,occ,1);
+      let found:i32=-1;
+      let scanning:i32=1;
+      while(scanning==1){
+        if(mi>=base+nm){ scanning=0; }
+        else {
+          if(prod_ok(S,A,occ,K,mi)==1){ found=mi; scanning=0; }
+          else { mi=mi+1; }
+        }
+      }
+      if(found<0){ return -1; }
+      of_set(S,occ,1,found+1);
+      of_set(S,occ,2,found);
+      of_set(S,occ,4,-1);
+      of_set(S,occ,5,-1);
+      of_set(S,occ,6,-1);
+      let ar:i32=mg(A,found,6);
+      if(ar==1){
+        if(khas_rel(S,mg(A,found,2),kin)==1){ of_set(S,occ,3,0); }
+        else { of_set(S,occ,3,1); }
+      } else {
+        of_set(S,occ,3,1);
+      }
+    } else {
+      if(mg(A,m,6)==1){
+        if(stage==0){
+          of_set(S,occ,3,1);
+          let t:i32=app1(S,A,m,C);
+          if(t>=0){
+            if(do_cand(S,A,t)!=-2){ return t; }
+          }
+        } else {
+          let ch:i32=of(S,occ,4);
+          if(ch<0){
+            ch=occ_new(S,mg(A,m,2),base,occ);
+            of_set(S,occ,4,ch);
+          }
+          if(ch<0){ of_set(S,occ,2,-1); }
+          else {
+            let ts:i32=occ_next(S,A,base,nm,kin,ch);
+            if(ts<0){ of_set(S,occ,2,-1); }
+            else {
+              let t:i32=app1(S,A,m,ts);
+              if(t>=0){
+                if(do_cand(S,A,t)!=-2){ return t; }
+              }
+            }
+          }
+        }
+      } else {
+        if(stage==1){
+          let ch:i32=of(S,occ,4);
+          if(ch<0){
+            ch=occ_new(S,mg(A,m,4),base,occ);
+            of_set(S,occ,4,ch);
+          }
+          if(ch<0){ of_set(S,occ,2,-1); }
+          else {
+            let p:i32=occ_next(S,A,base,nm,kin,ch);
+            if(p<0){ of_set(S,occ,2,-1); }
+            else {
+              of_set(S,occ,6,p);
+              of_set(S,occ,3,2);
+              of_set(S,occ,5,-1);
+            }
+          }
+        } else {
+          let ch2:i32=of(S,occ,5);
+          if(ch2<0){
+            ch2=occ_new(S,mg(A,m,5),base,occ);
+            of_set(S,occ,5,ch2);
+          }
+          if(ch2<0){ of_set(S,occ,3,1); }
+          else {
+            let q:i32=occ_next(S,A,base,nm,kin,ch2);
+            if(q<0){ of_set(S,occ,3,1); }
+            else {
+              let t:i32=app2(S,A,m,of(S,occ,6),q);
+              if(t>=0){
+                if(do_cand(S,A,t)!=-2){ return t; }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return -1;
+}
+// solve: regress from the goal; on exhaustive failure fire the
+// one-shot widen pass (relaxed kind matching), then report -2.
+fn solve(S:[]u8,A:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32) i32 {
+  sp(S,24,const_thunk(S,s,kin));
+  sp(S,28,0);
+  let root:i32=occ_new(S,kout,base,-1);
+  let ans:i32=-2;
+  let searching:i32=1;
+  while(searching==1){
+    let t:i32=occ_next(S,A,base,nm,kin,root);
+    if(t<0){ searching=0; }
+    else {
+      if(demand(S,A,t)==exp){ ans=t; searching=0; }
+    }
+  }
+  if(ans<0){
+    sp(S,12,1);
+    sp(S,8,1);
+    sp(S,28,0);
+    root=occ_new(S,kout,base,-1);
+    searching=1;
+    while(searching==1){
+      let t:i32=occ_next(S,A,base,nm,kin,root);
+      if(t<0){ searching=0; }
+      else {
+        if(demand(S,A,t)==exp){ ans=t; searching=0; }
+      }
+    }
+  }
+  return ans;
+}
+// lc_mem.zag -- COMPOSE-LEARNCOMPOSE-1 composition memory.
+// Learner-owned state: (goal-signature, composite program, outcome
+// history) entries. Signature = (kin, kout, sorted contract-code
+// multiset). Similarity, retrieval, contract-defined adaptation,
+// program extraction/storage. All decisions over opaque ids, arities,
+// kind bitmasks, and code multisets: no labels enter.
+//
+// Arena M layout:
+//   0: nentries
+//   4: entries, 16 * 600 bytes
+// entry e at 4+e*600:
+//   +0: kin, +4: kout, +8: ncodes, +12: codes[16] (64 bytes),
+//   +76: succ, +80: fail, +84: plen, +88: instrs[16]*32 bytes
+// instr i: +0 map_id, +4 arity, +8 c_in, +12 c_out, +16 c_in1,
+//          +20 c_in2, +24 a, +28 b   (a,b: instr idx or -1=CONST;
+//          b=-9 unused for arity 1)
+//
+// Program buffer P (scratch): 0: plen; 4: instrs[16]*32 bytes.
+
+// ---- entry accessors ----
+fn egh(M:[]u8,e:i32,f:i32) i32 { return get32(M,4+e*600+f); }
+fn esh(M:[]u8,e:i32,f:i32,v:i32) void { set32(M,4+e*600+f,v); return; }
+fn ecg(M:[]u8,e:i32,i:i32) i32 { return get32(M,4+e*600+12+i*4); }
+fn ecs(M:[]u8,e:i32,i:i32,v:i32) void { set32(M,4+e*600+12+i*4,v); return; }
+fn eig(M:[]u8,e:i32,i:i32,f:i32) i32 { return get32(M,4+e*600+88+i*32+f*4); }
+fn eis(M:[]u8,e:i32,i:i32,f:i32,v:i32) void { set32(M,4+e*600+88+i*32+f*4,v); return; }
+// ---- program buffer accessors ----
+fn pblen(P:[]u8) i32 { return get32(P,0); }
+fn pbsetlen(P:[]u8,n:i32) void { set32(P,0,n); return; }
+fn pbg(P:[]u8,i:i32,f:i32) i32 { return get32(P,4+i*32+f*4); }
+fn pbs(P:[]u8,i:i32,f:i32,v:i32) void { set32(P,4+i*32+f*4,v); return; }
+// ---- contract code (label-free: arity + kind bitmasks only) ----
+fn code_of(A:[]u8,m:i32) i32 {
+  let ar:i32=mg(A,m,6);
+  if(ar==1){ return 1000000+mg(A,m,2)*1000+mg(A,m,3); }
+  return 2000000+mg(A,m,4)*1000+mg(A,m,5)*10+mg(A,m,3);
+}
+// sketch: sorted contract codes of inventory [base,base+nm).
+// codes: 64-byte scratch (16 i32). Returns ncodes.
+fn sketch(A:[]u8,base:i32,nm:i32,codes:[]u8) i32 {
+  let n:i32=0;
+  let m:i32=base;
+  while(m<base+nm){
+    set32(codes,n*4,code_of(A,m));
+    n=n+1;
+    m=m+1;
+  }
+  let i:i32=0;
+  while(i<n){
+    let j:i32=i+1;
+    while(j<n){
+      if(get32(codes,j*4)<get32(codes,i*4)){
+        let t:i32=get32(codes,i*4);
+        set32(codes,i*4,get32(codes,j*4));
+        set32(codes,j*4,t);
+      }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  return n;
+}
+fn count_code(codes:[]u8,nc:i32,c:i32) i32 {
+  let k:i32=0;
+  let i:i32=0;
+  while(i<nc){
+    if(get32(codes,i*4)==c){ k=k+1; }
+    i=i+1;
+  }
+  return k;
+}
+fn ecount(M:[]u8,e:i32,c:i32) i32 {
+  let k:i32=0;
+  let n:i32=egh(M,e,8);
+  let i:i32=0;
+  while(i<n){
+    if(ecg(M,e,i)==c){ k=k+1; }
+    i=i+1;
+  }
+  return k;
+}
+// multiset subset: every code's count in a <= its count in b.
+fn msubset_a(a:[]u8,na:i32,M:[]u8,e:i32) i32 {
+  let i:i32=0;
+  while(i<na){
+    let c:i32=get32(a,i*4);
+    if(count_code(a,na,c)>ecount(M,e,c)){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+fn msubset_e(M:[]u8,e:i32,b:[]u8,nb:i32) i32 {
+  let n:i32=egh(M,e,8);
+  let i:i32=0;
+  while(i<n){
+    let c:i32=ecg(M,e,i);
+    if(ecount(M,e,c)>count_code(b,nb,c)){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+fn ecodes_equal(M:[]u8,e:i32,codes:[]u8,nc:i32) i32 {
+  if(egh(M,e,8)!=nc){ return 0; }
+  let i:i32=0;
+  while(i<nc){
+    if(ecg(M,e,i)!=get32(codes,i*4)){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+// similarity: 3 exact, 2 subset/superset, 1 kind-only, 0 none.
+fn sim_of(M:[]u8,e:i32,kin:i32,kout:i32,codes:[]u8,nc:i32) i32 {
+  if(egh(M,e,0)!=kin){ return 0; }
+  if(egh(M,e,4)!=kout){ return 0; }
+  if(ecodes_equal(M,e,codes,nc)==1){ return 3; }
+  if(msubset_a(codes,nc,M,e)==1){ return 2; }
+  if(msubset_e(M,e,codes,nc)==1){ return 2; }
+  return 1;
+}
+// retrieve: best entry with sim>=2 by (sim, succ-fail, low index).
+// Key encoding keeps the comparison flat and deterministic.
+fn retrieve(M:[]u8,kin:i32,kout:i32,codes:[]u8,nc:i32) i32 {
+  let ne:i32=get32(M,0);
+  let best:i32=-1;
+  let bkey:i32=-1;
+  let e:i32=0;
+  while(e<ne){
+    let s:i32=sim_of(M,e,kin,kout,codes,nc);
+    if(s>=2){
+      let score:i32=egh(M,e,76)-egh(M,e,80)+500;
+      let key:i32=s*1000000+score*1000+(15-e);
+      if(key>bkey){ best=e; bkey=key; }
+    }
+    e=e+1;
+  }
+  return best;
+}
+fn mem_new(M:[]u8,kin:i32,kout:i32,codes:[]u8,nc:i32) i32 {
+  let ne:i32=get32(M,0);
+  if(ne>=16){ return -1; }
+  esh(M,ne,0,kin); esh(M,ne,4,kout); esh(M,ne,8,nc);
+  let i:i32=0;
+  while(i<nc){ ecs(M,ne,i,get32(codes,i*4)); i=i+1; }
+  esh(M,ne,76,0); esh(M,ne,80,0); esh(M,ne,84,0);
+  set32(M,0,ne+1);
+  return ne;
+}
+// exact contract match (frozen adaptation rule).
+fn contract_match(A:[]u8,m:i32,ar:i32,ci:i32,co:i32,ci1:i32,ci2:i32) i32 {
+  if(mg(A,m,6)!=ar){ return 0; }
+  if(ar==1){
+    if(mg(A,m,2)!=ci){ return 0; }
+    if(mg(A,m,3)!=co){ return 0; }
+    return 1;
+  }
+  if(mg(A,m,4)!=ci1){ return 0; }
+  if(mg(A,m,5)!=ci2){ return 0; }
+  if(mg(A,m,3)!=co){ return 0; }
+  return 1;
+}
+// adapt one instruction's map id: identity if present+matching,
+// else lowest contract-matching id, else -1.
+fn adapt_map(A:[]u8,base:i32,nm:i32,om:i32,ar:i32,ci:i32,co:i32,ci1:i32,ci2:i32) i32 {
+  if(om>=base){
+    if(om<base+nm){
+      if(contract_match(A,om,ar,ci,co,ci1,ci2)==1){ return om; }
+    }
+  }
+  let m:i32=base;
+  while(m<base+nm){
+    if(contract_match(A,m,ar,ci,co,ci1,ci2)==1){ return m; }
+    m=m+1;
+  }
+  return -1;
+}
+// is candidate new_id already used by an earlier instruction?
+fn is_used(P:[]u8,i:i32,cand:i32) i32 {
+  let j:i32=0;
+  while(j<i){
+    if(pbg(P,j,0)==cand){ return 1; }
+    j=j+1;
+  }
+  return 0;
+}
+// adapt entry e's program into P (current-inventory ids; -1 unmapped).
+// INJECTIVE (AMEND2): distinct original ids map to distinct new ids
+// when possible; same original id reuses its new id. Returns count
+// of unmapped instructions.
+fn adapt_prog(M:[]u8,e:i32,A:[]u8,base:i32,nm:i32,P:[]u8) i32 {
+  let n:i32=egh(M,e,84);
+  pbsetlen(P,n);
+  let nun:i32=0;
+  let i:i32=0;
+  while(i<n){
+    let om:i32=eig(M,e,i,0);
+    let ar:i32=eig(M,e,i,1);
+    let ci:i32=eig(M,e,i,2);
+    let co:i32=eig(M,e,i,3);
+    let ci1:i32=eig(M,e,i,4);
+    let ci2:i32=eig(M,e,i,5);
+    let nid:i32=-2;
+    // 1. same original id already mapped earlier: reuse its new id.
+    let j:i32=0;
+    while(j<i){
+      if(eig(M,e,j,0)==om){ nid=pbg(P,j,0); }
+      j=j+1;
+    }
+    // 2. identity: original id present, matching, unused.
+    if(nid==-2){
+      if(om>=base){
+        if(om<base+nm){
+          if(contract_match(A,om,ar,ci,co,ci1,ci2)==1){
+            if(is_used(P,i,om)==0){ nid=om; }
+          }
+        }
+      }
+    }
+    // 3. lowest unused contract-matching id.
+    if(nid==-2){
+      let m:i32=base;
+      let found:i32=0;
+      while(m<base+nm){
+        if(found==0){
+          if(contract_match(A,m,ar,ci,co,ci1,ci2)==1){
+            if(is_used(P,i,m)==0){ nid=m; found=1; }
+          }
+        }
+        m=m+1;
+      }
+    }
+    // 4. unmapped.
+    if(nid==-2){ nid=-1; }
+    if(nid<0){ nun=nun+1; }
+    pbs(P,i,0,nid); pbs(P,i,1,ar); pbs(P,i,2,ci); pbs(P,i,3,co);
+    pbs(P,i,4,ci1); pbs(P,i,5,ci2);
+    pbs(P,i,6,eig(M,e,i,6)); pbs(P,i,7,eig(M,e,i,7));
+    i=i+1;
+  }
+  return nun;
+}
+// DROP_UNMAPPED repair: drop -1 instructions, rewire dependents to
+// CONST, reindex. Returns new length (0 -> caller cold-starts).
+fn drop_unmapped(P:[]u8) i32 {
+  let n:i32=pblen(P);
+  let keep:[]u8=z_alloc(n*4);
+  let nidx:[]u8=z_alloc(n*4);
+  let i:i32=0;
+  while(i<n){
+    if(pbg(P,i,0)>=0){ set32(keep,i*4,1); } else { set32(keep,i*4,0); }
+    i=i+1;
+  }
+  let j:i32=0;
+  i=0;
+  while(i<n){
+    if(get32(keep,i*4)==1){ set32(nidx,i*4,j); j=j+1; }
+    else { set32(nidx,i*4,-1); }
+    i=i+1;
+  }
+  let Q:[]u8=z_alloc(516);
+  let k:i32=0;
+  i=0;
+  while(i<n){
+    if(get32(keep,i*4)==1){
+      let f:i32=0;
+      while(f<8){ pbs(Q,k,f,pbg(P,i,f)); f=f+1; }
+      let a:i32=pbg(Q,k,6);
+      let b:i32=pbg(Q,k,7);
+      if(a>=0){
+        if(get32(keep,a*4)==1){ pbs(Q,k,6,get32(nidx,a*4)); }
+        else { pbs(Q,k,6,-1); }
+      }
+      if(b>=0){
+        if(get32(keep,b*4)==1){ pbs(Q,k,7,get32(nidx,b*4)); }
+        else { pbs(Q,k,7,-1); }
+      }
+      k=k+1;
+    }
+    i=i+1;
+  }
+  pbsetlen(P,k);
+  i=0;
+  while(i<k){
+    let f:i32=0;
+    while(f<8){ pbs(P,i,f,pbg(Q,i,f)); f=f+1; }
+    i=i+1;
+  }
+  return k;
+}
+fn prog_copy(P:[]u8,Q:[]u8) void {
+  let n:i32=pblen(P);
+  pbsetlen(Q,n);
+  let i:i32=0;
+  while(i<n){
+    let f:i32=0;
+    while(f<8){ pbs(Q,i,f,pbg(P,i,f)); f=f+1; }
+    i=i+1;
+  }
+  return;
+}
+// extract winning thunk DAG as a program (DFS post-order;
+// const -> -1). Stored into entry e.
+fn ext_dfs(S:[]u8,A:[]u8,M:[]u8,e:i32,t:i32,idxmap:[]u8) i32 {
+  if(tg(S,t,0)==-1){ return -1; }
+  let got:i32=get32(idxmap,t*4);
+  if(got>=0){ return got; }
+  let m:i32=tg(S,t,0);
+  let ar:i32=mg(A,m,6);
+  let a:i32=ext_dfs(S,A,M,e,tg(S,t,1),idxmap);
+  let b:i32=-9;
+  if(ar==2){ b=ext_dfs(S,A,M,e,tg(S,t,2),idxmap); }
+  let ii:i32=egh(M,e,84);
+  eis(M,e,ii,0,m); eis(M,e,ii,1,ar);
+  eis(M,e,ii,2,mg(A,m,2)); eis(M,e,ii,3,mg(A,m,3));
+  eis(M,e,ii,4,mg(A,m,4)); eis(M,e,ii,5,mg(A,m,5));
+  eis(M,e,ii,6,a); eis(M,e,ii,7,b);
+  esh(M,e,84,ii+1);
+  set32(idxmap,t*4,ii);
+  return ii;
+}
+fn prog_extract(S:[]u8,A:[]u8,M:[]u8,e:i32,root:i32) void {
+  let idxmap:[]u8=z_alloc(16384);
+  let t:i32=0;
+  while(t<4096){ set32(idxmap,t*4,-1); t=t+1; }
+  esh(M,e,84,0);
+  ext_dfs(S,A,M,e,root,idxmap);
+  return;
+}
+// store program buffer P as a new entry under (kin,kout,codes).
+fn mem_store_pb(M:[]u8,kin:i32,kout:i32,codes:[]u8,nc:i32,P:[]u8) i32 {
+  let e:i32=mem_new(M,kin,kout,codes,nc);
+  if(e<0){ return -1; }
+  let n:i32=pblen(P);
+  esh(M,e,84,n);
+  esh(M,e,76,1);
+  esh(M,e,80,0);
+  let i:i32=0;
+  while(i<n){
+    let f:i32=0;
+    while(f<8){ eis(M,e,i,f,pbg(P,i,f)); f=f+1; }
+    i=i+1;
+  }
+  return e;
+}
+// lc_rev.zag -- COMPOSE-LEARNCOMPOSE-1 solve driver.
+// Per goal: retrieve -> adapt -> execute -> verify -> revise
+// (R1 SUBST_FAILED, R2 TRUNCATE, R3 SUBST, R4 APPEND) -> cold-start.
+// Stats buffer ST: +0 mode (0=COLD,1=RETRIEVE,2=REVISE), +4 sim,
+// +8 negrec, +12 esel, +16 esel_succ, +20 esel_fail.
+
+// build program P as hash-consed thunks; demand root; return value.
+// -2 if a thunk overflows (fail-clean; predicted never hit).
+fn exec_prog(S:[]u8,A:[]u8,P:[]u8,s:i32,kin:i32) i32 {
+  let n:i32=pblen(P);
+  let tids:[]u8=z_alloc(n*4);
+  let tc:i32=const_thunk(S,s,kin);
+  let i:i32=0;
+  let bad:i32=0;
+  while(i<n){
+    let mid:i32=pbg(P,i,0);
+    let ar:i32=pbg(P,i,1);
+    let a:i32=pbg(P,i,6);
+    let b:i32=pbg(P,i,7);
+    let ta:i32=tc;
+    if(a>=0){ ta=get32(tids,a*4); }
+    let t:i32=-2;
+    if(ar==1){ t=app1(S,A,mid,ta); }
+    else {
+      let tb:i32=tc;
+      if(b>=0){ tb=get32(tids,b*4); }
+      t=app2(S,A,mid,ta,tb);
+    }
+    if(t<0){ bad=1; }
+    else { set32(tids,i*4,t); }
+    i=i+1;
+  }
+  if(bad==1){ return -2; }
+  return demand(S,A,get32(tids,(n-1)*4));
+}
+// build + demand every instruction into vals; return root value.
+fn exec_prog_vals(S:[]u8,A:[]u8,P:[]u8,s:i32,kin:i32,tids:[]u8,vals:[]u8) i32 {
+  let n:i32=pblen(P);
+  let tc:i32=const_thunk(S,s,kin);
+  let i:i32=0;
+  while(i<n){
+    let mid:i32=pbg(P,i,0);
+    let ar:i32=pbg(P,i,1);
+    let a:i32=pbg(P,i,6);
+    let b:i32=pbg(P,i,7);
+    let ta:i32=tc;
+    if(a>=0){ ta=get32(tids,a*4); }
+    let t:i32=-2;
+    if(ar==1){ t=app1(S,A,mid,ta); }
+    else {
+      let tb:i32=tc;
+      if(b>=0){ tb=get32(tids,b*4); }
+      t=app2(S,A,mid,ta,tb);
+    }
+    set32(tids,i*4,t);
+    i=i+1;
+  }
+  i=0;
+  while(i<n){
+    set32(vals,i*4,demand(S,A,get32(tids,i*4)));
+    i=i+1;
+  }
+  return get32(vals,(n-1)*4);
+}
+// cold-start: clean-room regressive search (the substrate), then
+// store the winning program. MODE=COLD.
+fn lc_cold(S:[]u8,A:[]u8,M:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32,ST:[]u8,codes:[]u8,nc:i32) i32 {
+  sp(S,0,0);
+  let r:i32=solve(S,A,base,nm,s,kin,kout,exp);
+  set32(ST,0,0);
+  set32(ST,4,-1);
+  set32(ST,8,0);
+  set32(ST,12,-1);
+  set32(ST,16,0);
+  set32(ST,20,0);
+  if(r>=0){
+    let e:i32=mem_new(M,kin,kout,codes,nc);
+    if(e>=0){
+      prog_extract(S,A,M,e,r);
+      esh(M,e,76,1);
+    }
+  }
+  if(r<0){ return -2; }
+  return demand(S,A,r);
+}
+// R3 helper: try SUBST of instruction i with map q.
+fn try_subst(S:[]u8,A:[]u8,M:[]u8,P:[]u8,i:i32,q:i32,s:i32,kin:i32,kout:i32,exp:i32,codes:[]u8,nc:i32) i32 {
+  let Q:[]u8=z_alloc(516);
+  prog_copy(P,Q);
+  pbs(Q,i,0,q);
+  let v:i32=exec_prog(S,A,Q,s,kin);
+  if(v==exp){
+    mem_store_pb(M,kin,kout,codes,nc,Q);
+    return v;
+  }
+  return -2;
+}
+// revision: R1 SUBST_FAILED, R2 TRUNCATE, R3 SUBST, R4 APPEND,
+// then cold-start. MODE=REVISE.
+fn lc_revise(S:[]u8,A:[]u8,M:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32,ST:[]u8,P:[]u8,codes:[]u8,nc:i32) i32 {
+  set32(ST,0,2);
+  let n:i32=pblen(P);
+  let tids:[]u8=z_alloc(n*4);
+  let vals:[]u8=z_alloc(n*4);
+  exec_prog_vals(S,A,P,s,kin,tids,vals);
+  // R1: SUBST_FAILED -- -2 instructions in program order.
+  let i:i32=0;
+  while(i<n){
+    if(get32(vals,i*4)==-2){
+      let q:i32=base;
+      while(q<base+nm){
+        let ok:i32=0;
+        if(q!=pbg(P,i,0)){
+          if(contract_match(A,q,pbg(P,i,1),pbg(P,i,2),pbg(P,i,3),pbg(P,i,4),pbg(P,i,5))==1){ ok=1; }
+        }
+        if(ok==1){
+          let v:i32=try_subst(S,A,M,P,i,q,s,kin,kout,exp,codes,nc);
+          if(v==exp){ return v; }
+        }
+        q=q+1;
+      }
+    }
+    i=i+1;
+  }
+  // R2: TRUNCATE -- prefixes, longest first.
+  let k:i32=n-1;
+  while(k>=1){
+    let Q:[]u8=z_alloc(516);
+    pbsetlen(Q,k);
+    let j:i32=0;
+    while(j<k){
+      let f:i32=0;
+      while(f<8){ pbs(Q,j,f,pbg(P,j,f)); f=f+1; }
+      j=j+1;
+    }
+    let v:i32=exec_prog(S,A,Q,s,kin);
+    if(v==exp){
+      mem_store_pb(M,kin,kout,codes,nc,Q);
+      return v;
+    }
+    k=k-1;
+  }
+  // R3: SUBST -- every instruction, id order alternatives.
+  i=0;
+  while(i<n){
+    let q:i32=base;
+    while(q<base+nm){
+      let ok:i32=0;
+      if(q!=pbg(P,i,0)){
+        if(contract_match(A,q,pbg(P,i,1),pbg(P,i,2),pbg(P,i,3),pbg(P,i,4),pbg(P,i,5))==1){ ok=1; }
+      }
+      if(ok==1){
+        let v:i32=try_subst(S,A,M,P,i,q,s,kin,kout,exp,codes,nc);
+        if(v==exp){ return v; }
+      }
+      q=q+1;
+    }
+    i=i+1;
+  }
+  // R4: APPEND -- extend the frontier (blind; verification decides).
+  let m:i32=base;
+  while(m<base+nm){
+    let ar:i32=mg(A,m,6);
+    if(ar==1){
+      let Q:[]u8=z_alloc(516);
+      prog_copy(P,Q);
+      pbsetlen(Q,n+1);
+      pbs(Q,n,0,m); pbs(Q,n,1,1);
+      pbs(Q,n,2,mg(A,m,2)); pbs(Q,n,3,mg(A,m,3));
+      pbs(Q,n,4,0); pbs(Q,n,5,0);
+      pbs(Q,n,6,n-1); pbs(Q,n,7,-9);
+      let v:i32=exec_prog(S,A,Q,s,kin);
+      if(v==exp){
+        mem_store_pb(M,kin,kout,codes,nc,Q);
+        return v;
+      }
+    }
+    else {
+      let slot:i32=0;
+      while(slot<3){
+        let Q:[]u8=z_alloc(516);
+        prog_copy(P,Q);
+        pbsetlen(Q,n+1);
+        pbs(Q,n,0,m); pbs(Q,n,1,2);
+        pbs(Q,n,2,0); pbs(Q,n,3,mg(A,m,3));
+        pbs(Q,n,4,mg(A,m,4)); pbs(Q,n,5,mg(A,m,5));
+        if(slot==0){ pbs(Q,n,6,n-1); pbs(Q,n,7,-1); }
+        if(slot==1){ pbs(Q,n,6,-1); pbs(Q,n,7,n-1); }
+        if(slot==2){ pbs(Q,n,6,n-1); pbs(Q,n,7,n-1); }
+        let v:i32=exec_prog(S,A,Q,s,kin);
+        if(v==exp){
+          mem_store_pb(M,kin,kout,codes,nc,Q);
+          return v;
+        }
+        slot=slot+1;
+      }
+    }
+    m=m+1;
+  }
+  // exhausted: cold-start.
+  return lc_cold(S,A,M,base,nm,s,kin,kout,exp,ST,codes,nc);
+}
+// main per-goal driver. Returns answer value; fills ST.
+fn lc_solve(S:[]u8,A:[]u8,M:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32,ST:[]u8) i32 {
+  let codes:[]u8=z_alloc(64);
+  let nc:i32=sketch(A,base,nm,codes);
+  let e:i32=retrieve(M,kin,kout,codes,nc);
+  if(e<0){
+    return lc_cold(S,A,M,base,nm,s,kin,kout,exp,ST,codes,nc);
+  }
+  let sim:i32=sim_of(M,e,kin,kout,codes,nc);
+  let P:[]u8=z_alloc(516);
+  let nun:i32=adapt_prog(M,e,A,base,nm,P);
+  let repaired:i32=0;
+  if(nun>0){
+    repaired=1;
+    let nl:i32=drop_unmapped(P);
+    if(nl==0){
+      return lc_cold(S,A,M,base,nm,s,kin,kout,exp,ST,codes,nc);
+    }
+  }
+  let v:i32=exec_prog(S,A,P,s,kin);
+  if(v==exp){
+    esh(M,e,76,egh(M,e,76)+1);
+    if(repaired==1){ set32(ST,0,2); } else { set32(ST,0,1); }
+    set32(ST,4,sim);
+    set32(ST,8,0);
+    set32(ST,12,e);
+    set32(ST,16,egh(M,e,76));
+    set32(ST,20,egh(M,e,80));
+    return v;
+  }
+  // negative evidence: the retrieved composite failed verification.
+  esh(M,e,80,egh(M,e,80)+1);
+  set32(ST,4,sim);
+  set32(ST,8,1);
+  set32(ST,12,e);
+  set32(ST,16,egh(M,e,76));
+  set32(ST,20,egh(M,e,80));
+  return lc_revise(S,A,M,base,nm,s,kin,kout,exp,ST,P,codes,nc);
+}
+// lc_rep.zag -- shared problem runner + report printer for the
+// COMPOSE-LEARNCOMPOSE-1 binaries.
+
+fn mode_str(B:[]u8,c:i32,mode:i32) i32 {
+  if(mode==0){ c=o_app(B,c,"COLD"); }
+  if(mode==1){ c=o_app(B,c,"RETRIEVE"); }
+  if(mode==2){ c=o_app(B,c,"REVISE"); }
+  return c;
+}
+fn do_prob(B:[]u8,c:i32,name:[]u8,A:[]u8,S:[]u8,M:[]u8,base:i32,nm:i32,s:i32,kin:i32,kout:i32,exp:i32,e_ans:i32,e_tries:i32,e_widen:i32,e_mode:i32,e_sim:i32,e_neg:i32) i32 {
+  let ST:[]u8=z_alloc(32);
+  let ans:i32=lc_solve(S,A,M,base,nm,s,kin,kout,exp,ST);
+  let mode:i32=get32(ST,0);
+  let sim:i32=get32(ST,4);
+  let neg:i32=get32(ST,8);
+  let p:i32=1;
+  if(ans!=e_ans){ p=0; }
+  if(sg(S,4)!=e_tries){ p=0; }
+  if(sg(S,8)!=e_widen){ p=0; }
+  if(mode!=e_mode){ p=0; }
+  if(sim!=e_sim){ p=0; }
+  if(neg!=e_neg){ p=0; }
+  c=o_app(B,c,"PROB="); c=o_app(B,c,name); c=o_nl(B,c);
+  c=o_app(B,c,"ANS="); c=o_i64(B,c,ans as i64); c=o_nl(B,c);
+  c=o_app(B,c,"TRIES="); c=o_i64(B,c,sg(S,4) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"WIDEN="); c=o_i64(B,c,sg(S,8) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"MODE="); c=mode_str(B,c,mode); c=o_nl(B,c);
+  c=o_app(B,c,"SIM="); c=o_i64(B,c,sim as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NEGREC="); c=o_i64(B,c,neg as i64); c=o_nl(B,c);
+  c=o_app(B,c,"ESEL="); c=o_i64(B,c,get32(ST,12) as i64);
+  c=o_app(B,c," SUCC="); c=o_i64(B,c,get32(ST,16) as i64);
+  c=o_app(B,c," FAIL="); c=o_i64(B,c,get32(ST,20) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"MEM="); c=o_i64(B,c,get32(M,0) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"VERDICT=");
+  if(p==1){ c=o_app(B,c,"PASS"); } else { c=o_app(B,c,"FAIL"); }
+  c=o_nl(B,c);
+  return c;
+}
+// adv_worlds.zag -- COMPOSE-ADVERSARY sealed world builders.
+// Pure Zag. Transcription of PREREG.md Section 4 (frozen).
+// Uses the substrate API (map_new, fact_add) shared by all three
+// frozen mechanisms, so these functions are drop-in replacements
+// for the builders' w_* world functions at sealed-evaluation time.
+// map_new(A,m,class,rel,inmask,outmask,inmask1,inmask2,arity).
+// Classes: 0=WALK, 1=COUNT, 4=ADD2. Kinds 1/2 are opaque.
+
+// F-A1 CHAIN15: 15-link chain (A: frame explosion; B: depth; C: cold).
+fn w_adv_chain15(A:[]u8) void {
+  let i:i32=0;
+  while(i<15){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,15,1,76,1,2,0,0,1);
+  fact_add(A,516,76,801); fact_add(A,516,76,802);
+  fact_add(A,516,76,803); fact_add(A,516,76,804);
+  return;
+}
+// F-B1 CHAIN7: 7-link chain (B depth cap: 6 max).
+fn w_adv_chain7(A:[]u8) void {
+  let i:i32=0;
+  while(i<7){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,7,1,68,1,2,0,0,1);
+  fact_add(A,508,68,801); fact_add(A,508,68,802);
+  fact_add(A,508,68,803); fact_add(A,508,68,804);
+  return;
+}
+// F-B2 SUBCAP: correct = C1(W3(W2(s))); B's 128 sub-buffer fills
+// with W1-rooted chains, so the W3-rooted program is never built.
+fn w_adv_subcap(A:[]u8) void {
+  map_new(A,0,1,71,1,2,0,0,1);
+  map_new(A,1,1,72,1,2,0,0,1);
+  map_new(A,2,1,73,1,2,0,0,1);
+  map_new(A,3,1,74,1,2,0,0,1);
+  let i:i32=0;
+  while(i<11){
+    map_new(A,4+i,0,81+i,1,1,0,0,1);
+    i=i+1;
+  }
+  fact_add(A,501,82,601);
+  fact_add(A,601,83,602);
+  fact_add(A,602,71,701); fact_add(A,602,71,702);
+  fact_add(A,602,71,703); fact_add(A,602,71,704);
+  fact_add(A,501,81,699);
+  return;
+}
+// F-C1 TEACH: 2-chain [X,Y]; C stores it as E1.
+fn w_adv_teach(A:[]u8) void {
+  map_new(A,1,0,91,1,1,0,0,1);
+  map_new(A,2,1,92,1,2,0,0,1);
+  fact_add(A,201,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  return;
+}
+// F-C1 TRAP1: 16-map inventory; codes superset of TEACH -> sim 2.
+// Correct = [Z,X,Y]; retrieved [X,Y] misfires, R1-R4 cannot prepend.
+fn w_adv_trap1(A:[]u8) void {
+  map_new(A,0,0,90,1,1,0,0,1);
+  map_new(A,1,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<10){
+    map_new(A,2+i,0,93+i,1,1,0,0,1);
+    fact_add(A,201,93+i,700+i);
+    i=i+1;
+  }
+  map_new(A,12,1,92,1,2,0,0,1);
+  map_new(A,13,1,103,1,2,0,0,1);
+  map_new(A,14,1,104,1,2,0,0,1);
+  map_new(A,15,1,105,1,2,0,0,1);
+  fact_add(A,201,90,211);
+  fact_add(A,211,91,212);
+  fact_add(A,212,92,911); fact_add(A,212,92,912); fact_add(A,212,92,913);
+  fact_add(A,212,92,914); fact_add(A,212,92,915);
+  fact_add(A,201,103,921); fact_add(A,201,103,922);
+  fact_add(A,201,104,923); fact_add(A,201,104,924);
+  fact_add(A,201,105,925); fact_add(A,201,105,926);
+  return;
+}
+// D-C2 TRAP2: same inventory; correct = [W1,X,Y] (1-edit from
+// TRAP1's stored [Z,X,Y]; R1 SUBST_FAILED repairs it).
+fn w_adv_trap2(A:[]u8) void {
+  map_new(A,0,0,90,1,1,0,0,1);
+  map_new(A,1,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<10){
+    map_new(A,2+i,0,93+i,1,1,0,0,1);
+    i=i+1;
+  }
+  map_new(A,12,1,92,1,2,0,0,1);
+  map_new(A,13,1,103,1,2,0,0,1);
+  map_new(A,14,1,104,1,2,0,0,1);
+  map_new(A,15,1,105,1,2,0,0,1);
+  fact_add(A,201,93,213);
+  fact_add(A,213,91,212);
+  fact_add(A,212,92,911); fact_add(A,212,92,912); fact_add(A,212,92,913);
+  fact_add(A,212,92,914); fact_add(A,212,92,915);
+  return;
+}
+// D-C1 TEACH-D: diamond (stores E1 for transfer).
+fn w_adv_teachd(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  map_new(A,1,1,92,1,2,0,0,1);
+  map_new(A,2,1,94,1,2,0,0,1);
+  map_new(A,3,4,0,0,2,2,2,2);
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902); fact_add(A,211,92,903);
+  fact_add(A,211,94,911); fact_add(A,211,94,912);
+  return;
+}
+// D-C1 T-FANIN: 2-leg fan-in; diamond memory transfers via
+// DROP_UNMAPPED (X unmapped -> legs rewired to CONST).
+fn w_adv_tfanin(A:[]u8) void {
+  map_new(A,0,1,71,1,2,0,0,1);
+  map_new(A,1,1,72,1,2,0,0,1);
+  map_new(A,2,4,0,0,2,2,2,2);
+  fact_add(A,401,71,701); fact_add(A,401,71,702); fact_add(A,401,71,703);
+  fact_add(A,401,72,704); fact_add(A,401,72,705);
+  return;
+}
+// D-C1 T-CHAIN: 2-chain; diamond memory transfers via
+// DROP_UNMAPPED (G unmapped -> dropped; last instr Wp wins).
+fn w_adv_tchain(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  map_new(A,1,1,92,1,2,0,0,1);
+  map_new(A,2,1,94,1,2,0,0,1);
+  fact_add(A,301,91,311);
+  fact_add(A,311,92,801); fact_add(A,311,92,802);
+  fact_add(A,311,92,803); fact_add(A,311,92,804);
+  fact_add(A,311,94,811); fact_add(A,311,94,812); fact_add(A,311,94,813);
+  return;
+}
+// D-B1 / S-ALL1 CYCLE: one WALK on a cyclic relation.
+fn w_adv_cycle(A:[]u8) void {
+  map_new(A,0,0,61,1,1,0,0,1);
+  fact_add(A,501,61,502);
+  fact_add(A,502,61,503);
+  fact_add(A,503,61,502);
+  return;
+}
+// X-CHAIN5: 5-link chain, fresh relations.
+fn w_adv_chain5(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    fact_add(A,501+i,61+i,502+i);
+    i=i+1;
+  }
+  map_new(A,5,1,66,1,2,0,0,1);
+  let k:i32=0;
+  while(k<6){
+    fact_add(A,506,66,801+k);
+    k=k+1;
+  }
+  return;
+}
+// X-FANOUT5: X -> 5 COUNT consumers -> 4-ADD2 join tree.
+fn w_adv_fanout5(A:[]u8) void {
+  map_new(A,0,0,91,1,1,0,0,1);
+  let i:i32=0;
+  while(i<5){
+    map_new(A,1+i,1,92+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,6+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,202,91,211);
+  fact_add(A,211,92,901); fact_add(A,211,92,902);
+  fact_add(A,211,93,903);
+  fact_add(A,211,94,904); fact_add(A,211,94,905); fact_add(A,211,94,906);
+  fact_add(A,211,95,907); fact_add(A,211,95,908);
+  fact_add(A,211,96,909); fact_add(A,211,96,910);
+  return;
+}
+// X-FANIN5: 5 WALK->COUNT legs -> 4-ADD2 join tree.
+fn w_adv_fanin5(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    map_new(A,5+i,1,71+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,10+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,401,61,501); fact_add(A,501,71,701); fact_add(A,501,71,702);
+  fact_add(A,401,62,502); fact_add(A,502,72,703); fact_add(A,502,72,704);
+  fact_add(A,502,72,705);
+  fact_add(A,401,63,503); fact_add(A,503,73,706);
+  fact_add(A,401,64,504); fact_add(A,504,74,707); fact_add(A,504,74,708);
+  fact_add(A,504,74,709); fact_add(A,504,74,710);
+  fact_add(A,401,65,505); fact_add(A,505,75,711); fact_add(A,505,75,712);
+  return;
+}
+// X-DAG10: 2-chain -> shared X -> two diamonds -> ADD2 join.
+fn w_adv_dag10(A:[]u8) void {
+  map_new(A,0,0,60,1,1,0,0,1);
+  map_new(A,1,0,61,1,1,0,0,1);
+  map_new(A,2,0,62,1,1,0,0,1);
+  map_new(A,3,1,71,1,2,0,0,1);
+  map_new(A,4,1,72,1,2,0,0,1);
+  map_new(A,5,4,0,0,2,2,2,2);
+  map_new(A,6,1,73,1,2,0,0,1);
+  map_new(A,7,1,74,1,2,0,0,1);
+  map_new(A,8,4,0,0,2,2,2,2);
+  map_new(A,9,4,0,0,2,2,2,2);
+  fact_add(A,301,60,302); fact_add(A,302,61,303); fact_add(A,303,62,310);
+  fact_add(A,310,71,711); fact_add(A,310,71,712);
+  fact_add(A,310,72,713); fact_add(A,310,72,714); fact_add(A,310,72,715);
+  fact_add(A,310,73,716);
+  fact_add(A,310,74,717); fact_add(A,310,74,718);
+  fact_add(A,310,74,719); fact_add(A,310,74,720);
+  return;
+}
+// X-PARTIAL: 5-leg fan-in; legs 4,5 factless (partial applicability).
+fn w_adv_partial(A:[]u8) void {
+  let i:i32=0;
+  while(i<5){
+    map_new(A,i,0,61+i,1,1,0,0,1);
+    map_new(A,5+i,1,71+i,1,2,0,0,1);
+    i=i+1;
+  }
+  i=0;
+  while(i<4){
+    map_new(A,10+i,4,0,0,2,2,2,2);
+    i=i+1;
+  }
+  fact_add(A,401,61,501); fact_add(A,501,71,701); fact_add(A,501,71,702);
+  fact_add(A,401,62,502); fact_add(A,502,72,703); fact_add(A,502,72,704);
+  fact_add(A,502,72,705);
+  fact_add(A,401,63,503); fact_add(A,503,73,706); fact_add(A,503,73,707);
+  fact_add(A,503,73,708); fact_add(A,503,73,709); fact_add(A,503,73,710);
+  return;
+}
+// eval_main_c.zag -- TEMPLATE for the sealed evaluator (Hypothesis C).
+// Concat order: lc_base.zag lc_thunk.zag lc_search.zag lc_mem.zag
+//               lc_rev.zag adv_worlds.zag eval_main_c.zag
+// Compile with the pinned znc. M (composition memory) persists
+// within each sequence; S fresh per problem (mirrors lc_main.zag).
+// Sequences (PREREG Section 6):
+//   SEQ1: TEACH -> TRAP1 -> TRAP2 (one M)
+//   SEQ2: TEACH-D -> T-FANIN -> T-CHAIN (one M)
+//   all other problems: fresh M each.
+// Reports raw fields; the parent scores PREREG.md Section 5 bars.
+// MODE: 0=COLD, 1=RETRIEVE, 2=REVISE (lc_rev.zag ST layout).
+// ematch: 1 = expect ANS==exp, 0 = expect ANS!=exp.
+
+fn crep(B:[]u8,c:i32,name:[]u8,ans:i32,S:[]u8,M:[]u8,ST:[]u8,ematch:i32,exp:i32) i32 {
+  c=o_app(B,c,"PROB="); c=o_app(B,c,name); c=o_nl(B,c);
+  c=o_app(B,c,"ANS="); c=o_i64(B,c,ans as i64); c=o_nl(B,c);
+  c=o_app(B,c,"TRIES="); c=o_i64(B,c,sg(S,4) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"WIDEN="); c=o_i64(B,c,sg(S,8) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"MODE="); c=o_i64(B,c,get32(ST,0) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"SIM="); c=o_i64(B,c,get32(ST,4) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"NEGREC="); c=o_i64(B,c,get32(ST,8) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"MEM="); c=o_i64(B,c,get32(M,0) as i64); c=o_nl(B,c);
+  c=o_app(B,c,"ANSMATCH=");
+  let ok:i32=0;
+  if(ematch==1){
+    if(ans==exp){ ok=1; }
+  } else {
+    if(ans!=exp){ ok=1; }
+  }
+  if(ok==1){ c=o_app(B,c,"PASS"); } else { c=o_app(B,c,"FAIL"); }
+  c=o_nl(B,c);
+  return c;
+}
+fn main() i32 {
+  let B:[]u8=z_alloc(65536);
+  let c:i32=0;
+  let M:[]u8=z_alloc(16384);
+  let A:[]u8=z_alloc(8192);
+  let S:[]u8=z_alloc(41943040);
+  let ST:[]u8=z_alloc(32);
+  let ans:i32=0;
+  // ---- SEQ1: TEACH -> TRAP1 -> TRAP2 (one M) ----
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_teach(A);
+  ans=lc_solve(S,A,M,0,3,201,1,2,3,ST);
+  c=crep(B,c,"TEACH",ans,S,M,ST,1,3);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_trap1(A);
+  ans=lc_solve(S,A,M,0,16,201,1,2,5,ST);
+  c=crep(B,c,"TRAP1",ans,S,M,ST,1,5);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_trap2(A);
+  ans=lc_solve(S,A,M,0,16,201,1,2,5,ST);
+  c=crep(B,c,"TRAP2",ans,S,M,ST,1,5);
+  // ---- SEQ2: TEACH-D -> T-FANIN -> T-CHAIN (fresh M) ----
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_teachd(A);
+  ans=lc_solve(S,A,M,0,4,202,1,2,5,ST);
+  c=crep(B,c,"TEACHD",ans,S,M,ST,1,5);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_tfanin(A);
+  ans=lc_solve(S,A,M,0,3,401,1,2,5,ST);
+  c=crep(B,c,"TFANIN",ans,S,M,ST,1,5);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_tchain(A);
+  ans=lc_solve(S,A,M,0,3,301,1,2,3,ST);
+  c=crep(B,c,"TCHAIN",ans,S,M,ST,1,3);
+  // ---- fresh M per remaining problem ----
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_chain15(A);
+  ans=lc_solve(S,A,M,0,16,501,1,2,4,ST);
+  c=crep(B,c,"CHAIN15",ans,S,M,ST,0,4);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_chain7(A);
+  ans=lc_solve(S,A,M,0,8,501,1,2,4,ST);
+  c=crep(B,c,"CHAIN7",ans,S,M,ST,1,4);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_subcap(A);
+  ans=lc_solve(S,A,M,0,15,501,1,2,4,ST);
+  c=crep(B,c,"SUBCAP",ans,S,M,ST,1,4);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_cycle(A);
+  ans=lc_solve(S,A,M,0,1,501,1,1,503,ST);
+  c=crep(B,c,"CYC2",ans,S,M,ST,0,503);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_cycle(A);
+  ans=lc_solve(S,A,M,0,1,501,1,1,502,ST);
+  c=crep(B,c,"CYC3",ans,S,M,ST,0,502);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_chain5(A);
+  ans=lc_solve(S,A,M,0,6,501,1,2,6,ST);
+  c=crep(B,c,"CHAIN5",ans,S,M,ST,1,6);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_fanout5(A);
+  ans=lc_solve(S,A,M,0,10,202,1,2,10,ST);
+  c=crep(B,c,"FANOUT5",ans,S,M,ST,1,10);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_fanin5(A);
+  ans=lc_solve(S,A,M,0,14,401,1,2,12,ST);
+  c=crep(B,c,"FANIN5",ans,S,M,ST,1,12);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_dag10(A);
+  ans=lc_solve(S,A,M,0,10,301,1,2,10,ST);
+  c=crep(B,c,"DAG10",ans,S,M,ST,1,10);
+  M=z_alloc(16384);
+  A=z_alloc(8192); S=z_alloc(41943040); ST=z_alloc(32);
+  w_adv_partial(A);
+  ans=lc_solve(S,A,M,0,14,401,1,2,10,ST);
+  c=crep(B,c,"PARTIAL",ans,S,M,ST,1,10);
+  o_flush(B,c);
+  return 0;
+}
