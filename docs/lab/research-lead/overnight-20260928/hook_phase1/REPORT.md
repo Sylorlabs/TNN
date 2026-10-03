@@ -2,9 +2,8 @@
 
 ## Verdict
 
-BUILD-PASS. All 10 frozen kill bars green (HQ-R1, HQ-A1, HQ-A2,
-HQ-A3, HQ-A4, HQ-A5, HQ-A6, HQ-A7, HQ-H1; HQ-A1 counted separately
-from HQ-R1 as the Phase-0 substrate check). Prereg fab65d9e0
+BUILD-PASS. All 9 frozen kill bars green (HQ-R1, HQ-A1, HQ-A2,
+HQ-A3, HQ-A4, HQ-A5, HQ-A6, HQ-A7, HQ-H1). Prereg fab65d9e0
 committed strictly before any implementation.
 
 This is infrastructure, not invention. Nothing in this lane claims
