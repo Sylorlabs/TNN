@@ -183,8 +183,10 @@ W5 -> 1824, W6 -> 1888.
   ai==0 AND lcheck==12 AND cf==8 AND trs==22222222. (The guard
   does not block reason-2 entries without live references.)
 - G13 DETERMINISM (external): 3/3 runs byte-identical (sha256).
-- G14 CLEAN: ai==0 AND ar==0 in all 6 rows; av==releases wherever
-  releases>0.
+- G14 CLEAN: ai==0 AND ar==0 in W1, W2, W4, W5, W6 (W3's ai==5
+  and ar==5 are its frozen sealed values, covered by G7);
+  lcheck==12 in all 6 rows; av==releases in W2 and W6 (all releases
+  valid there; W3's av==8/ai==5 split is frozen in G7).
 
 Verdict: GUARDED-SEALED-PASS iff G0..G14 all hold. G0 failure ->
 VOID (terminal). Any G1..G14 failure names the bar and yields
@@ -238,6 +240,20 @@ they are not moved after results.
   number) is still GUARDED-SEALED-FAIL per the frozen bars; the
   report must root-cause it as derivation error vs mechanism
   surprise, without moving the bar.
+
+## Amendments (all before implementation and all runs)
+
+- Amendment A (2026-10-03, before implementation, no results seen):
+  G14 corrected. As first frozen it required ai==0 and ar==0 "in all
+  6 rows" and av==releases "wherever releases>0", which contradicts
+  the frozen W3 sealed row (releases=13, av=8, ai=5, ar=5: the
+  corrupted log's 5 false entries are SUPPOSED to audit invalid and
+  release A entries; that is W3's frozen sealed behavior, covered by
+  G7). Corrected G14: ai==0 AND ar==0 in W1, W2, W4, W5, W6;
+  lcheck==12 in all 6 rows; av==releases in W2 and W6. This narrows
+  G14 to its intended meaning (no unexpected invalid releases, no
+  unexpected A releases, learner intact, all valid where expected)
+  without touching any frozen number.
 
 ## Commit order
 
