@@ -33,5 +33,17 @@
 ## Step 1: build/run verification (2026-10-03)
 
 - `./pe_build.sh` run from the lane directory under safebin PATH.
-- (To be filled after the build: clean build, 3x exit 0, empty stderr,
-  byte-identity, kill-bar adjudication.)
+- Pinned znc built `pe_bin` with no errors; exit 0 on all 3 runs; stderr
+  empty on all 3 runs (K3).
+- 3/3 byte-identical stdout: sha256
+  9caa0a3b33f544b8f11cba771e51bd42d9b8cfc9ad851c1b8ff2e48772b0bb1a
+  across pe_run1/2/3.txt (K11).
+- All frozen kill bars K1..K12 PASS on the first full run (see REPORT.md
+  adjudication table). Verdict: BUILD-PASS (12/12).
+- `da_learn.zag` byte-unmodified; DA battery untouched (separate lane).
+- Commit order verified: 5b7db4f94 (frozen prereg, alone) -> 29b51d26d
+  (implementation + outputs) -> report + this namecheck.
+- One hygiene iteration (epoch field labels `e901=`/`e902=` tripped the
+  no-literals grep; renamed to `era=`/`erb=`, no frozen bar affected)
+  before the first full run. No bar-calibration iteration: every frozen
+  expected value matched the measured output exactly.
