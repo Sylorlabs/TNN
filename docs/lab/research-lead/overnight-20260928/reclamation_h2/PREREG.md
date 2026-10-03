@@ -146,7 +146,7 @@ postR, retR, exile, recover, cold_drop, cold_cost.
 | EXH2-M3    | 6   | mode2      | 0    | 0   | 80  | 48  | 0    | 20   | 15   | 35    | 100  | 48    | 60      | 0     | 575   |
 | EXH2-X2    | 6   | mode3      | 0    | 0   | 60  | 28  | 0    | 20   | 15   | 35    | 100  | 28    | 60      | 0     | 575   |
 | EXH2R-M2   | 6   | mode1+rer  | 35   | 100 | 60  | 28  | 0    | 20   | 35   | 35    | 100  | 28    | 0       | 0     | 0     |
-| EXH2-OVF   | 6   | mode2 w51  | 0    | 0   | 170 | 138 | 0    | 20   | 15   | 0     | 0    | 138   | 0       | 74    | 3840  |
+| EXH2-OVF   | 6   | mode2 w51  | 0    | 0   | 170 | 138 | 0    | 20   | 15   | 0     | 0    | 138   | 0       | 74    | 3200  |
 
 pre=35 in every condition (frozen).
 
@@ -220,8 +220,11 @@ conflicts, cf=170. 12 fills + 138 evictions: exiles 1..20 = benign
 slots 0..19; exiles 21..138 = 118 oldest churn installs in install
 order. Cold FIFO destroys exiles 1..74 (cold_drop=74); cold holds
 exiles 75..138. All 20 benign entries destroyed in the cold tier:
-recovery reads for benign keys miss (60 reads x 64 slots = 3840
-cost), recover=0, postR=0, retR=0. Hot: post=0, ret=0, rawA=15
+recovery reads for benign keys miss, except loop1's second read never
+executes: loop1's two reads are inline in the if condition and znc's
+&& short-circuits, so a cold-miss on read1 skips read2. Cold misses:
+10 (loop1) + 20 (loop2) + 10 (loop3) + 10 (loop4) = 50 x 64 slots =
+3200 cost), recover=0, postR=0, retR=0. Hot: post=0, ret=0, rawA=15
 (primary-resident owner-2 hop3 and owner-4 2000+i only), bacc=20.
 
 ## Frozen kill bars
@@ -256,7 +259,7 @@ cost), recover=0, postR=0, retR=0. Hot: post=0, ret=0, rawA=15
   exile costs nothing unless the miss case fires.
 - K10 H2-RECURSION: EXH2-OVF: hot post=0, ret=0, cf=170, ev=138,
   drop=0, bacc=20, rawA=15; exile=138, cold_drop=74, postR=0,
-  retR=0, recover=0, cold_cost=3840. The destruction question
+  retR=0, recover=0, cold_cost=3200. The destruction question
   recurses: a bounded cold tier delays the collapse by one tier, it
   does not remove it.
 - K11 NO-HOT-DESTRUCTION: exile == ev + drop in ALL 26 conditions;
@@ -304,6 +307,25 @@ K12 bars the "stronger adversary under one policy" confound.
   evidence, not a work order for an H2-2. In particular K10's
   recursion result is evidence about the hypothesis, not a defect
   to patch with a bigger cold tier.
+
+## Erratum (2026-10-03, before REPORT; implementation unchanged)
+
+K10's frozen cold_cost prediction (3840) was a worker derivation
+error, found when the frozen run produced ccost=3200 with all other
+12 K10 assertions passing. Cause: the derivation assumed all 75
+recovery reads execute; but test_A_recov's loop1 reads are inline in
+the if condition (read1==v1 && read2==v2) and znc's && short-circuits,
+so on a cold miss read2 never runs. Verified by instrumented debug
+builds (lane-external, /tmp): OVF recovery executes 50 cold lookups
+(10+20+10+10 across loops 1..4) and 15 true primary hits (the 10
+owner-2 hop3 keys and 5 owner-4 2000+i keys, logged by key), i.e.
+50x64=3200 exactly. In every other condition loop1's read1 always
+hits, so the short-circuit never fires and no other derivation is
+affected. Corrected value: cold_cost=3200 (table, derivation notes,
+K10). No mechanism or implementation change; the binary is byte-
+identical before and after this amendment. Original frozen K10 is
+recorded as FAIL (ccost 3200 != 3840 as frozen); amended K10 is
+re-frozen here and re-run below.
 
 ## Commit order
 
