@@ -1,84 +1,93 @@
-# NAMECHECK.md -- IVWC-PERBUCKET Worker
+# NAMECHECK.md -- IVWC-PERBUCKET
 
-## Step 0: Toolchain Guard (mandatory, executed at worker startup)
+## Step 0: Toolchain guard (mandatory)
 
-Executed 2026-10-03 at worker startup:
+- Lane: `docs/lab/research-lead/overnight-20260928/ivwc_perbucket/`
+  (fresh lane; all other lanes untouched).
+- Worktree: `~/workspace/tnn-rsi` (shared checkout; all commits
+  for this lane target `tnn-native-lab` via explicit pathspec
+  plumbing that leaves the shared index untouched).
+- Safebin: `export PATH="$HOME/safebin"`. Verified this session:
+  `which python3` returns nothing (rc=1), `which python` returns
+  nothing (rc=1). Pinned znc at `$HOME/safebin/znc`
+  (znc 2026.07.0-dev). Pure Zag only. No python, no C, no JS, no
+  Rust in implementation, scoring, or analysis. Absolutely no
+  python3/python invocation at any step. This lane is clean: no
+  toolchain incident, no disclosure needed.
+- Git: `/usr/bin/git` directly (the safebin `git` symlink is
+  known-broken for writes per AGENTS.md). Commits local, explicit
+  pathspecs confined to `ivwc_perbucket/` (via separate
+  GIT_INDEX_FILE plumbing; shared index and worktree files
+  untouched), targeting `tnn-native-lab`. Pushing to origin is
+  AUTHORIZED per Micah's 2026-10-03 authorization (fresh GitHub
+  PAT; exclude reproducible cache/build artifacts; push promptly
+  as the token will be deleted soon).
+- Prereg commit (PREREG.md + NAMECHECK.md) strictly precedes the
+  implementation commit. No amendments.
+- Non-ledger task (claim minting paused).
 
-```
-export PATH="$HOME/safebin"
-which python3   # returned NOTHING (rc=1)
-which python    # returned NOTHING (rc=1)
-which znc       # /home/hatch/safebin/znc -> pinned znc_linux_x86_64_abed8aa1
-```
+## Step 1: What is being built
 
-Result: safebin active at /home/hatch/safebin, no forbidden
-interpreter reachable. `cmp` confirmed the safebin znc is
-byte-identical to
-`~/workspace/tnn-rsi-gpi3/src/tools/toolchain/znc_linux_x86_64_abed8aa1`
-(the binary IVWC-HYBRID used). All scientific computation in pure
-Zag via the pinned znc. Shell only for: znc invocation, binary
-runs, sha256sum, read-only greps, file moves, git ops. Any
-forbidden executable invocation would be PROCESS-FAIL; none
-occurred. Guard status: ACTIVE.
+`src/ivwc_perbucket.zag`: per-bucket worth-K verdicts.
+World/belief/composer/stepper/seeds/biases/bars are verbatim from
+the IVWC lineage (IVWC-HYBRID-VERDICT / IVWC-APPLIED /
+IVWC-CONSEQUENCE / IVWC-BATCHAWARE; K3 re-verifies: ThyA=13/20/6,
+ThyB=13/20/13, TFIXED=12, CVAL=15, ThyHKC=15/20/15,
+mcalib=(0,-11,-12,-3)). What is NEW: the worth-K bar is set
+per bucket instead of once per batch.
 
-## Step 1: Task identity
+- **V_PBK (per-bucket worth-K, KEY-1):** bar_b = K + mcalib[b],
+  K=15, so per-bucket bars (15,4,3,12). The miscalibration-
+  corrected score is adj - mcalib[b]; GO iff adj > K +
+  mcalib[b]. Reads only bkt (sealed, bias-free), mcalib
+  (train-fixed), K (world constant). Never reads a sealed
+  bias-adjusted score; probe-proof by structure (K1-A10).
+- **V_PBOPT (train-optimal per-bucket bars, KEY-2):** per bucket,
+  bar*_b = the train-profit-optimal bar (maximizes sum over
+  train GO cases of (eff - K) on train consequences, which are
+  learner-visible), ties broken toward K. Computed bars:
+  (15,16,5,15). Learner-computable, no researcher constants, no
+  sealed data. Probe-proof by structure (K1-A10).
+- **V_PBX (fenced per-bucket exact diagnostic):** bar_b(sh) =
+  K + exact sealed per-bucket gap, computed fenced AFTER the
+  REFERENCE phase. Bounds the per-bucket estimand: the best any
+  per-bucket miscalibration signal could do. Reads sealed eff,
+  so explicitly NOT a learner bar and NOT a candidate mechanism.
+  Zero world calls. Named `pbx` (the token "oracle" appears
+  nowhere in source, per K1-A8).
+- Lineage control re-verified verbatim: UCB x V_WK (bar = K).
+  Fenced execute-all reference.
+- Scoring is pure consequence (profit = sum over GO of
+  (eff - K)), no labels anywhere. K1 audits zero
+  `expected|answer|key|target`, zero
+  `correct|reference_plan|gold`, zero `oracle`, zero `Tpred`.
+- `world_execute(` appears exactly 4 times (1 def + 3 call sites:
+  train CONSEQ, the shared `conseq_arm` helper, REFERENCE).
+  WC-FINAL = 116 (24 train + 17 + 21 + 18 GO + 36 reference;
+  PBX uses zero world calls), preregistered.
 
-IVWC-PERBUCKET (subagent, 2026-10-03, non-ledger task; claim
-minting paused). Follows IVWC-HYBRID (BUILD-FAIL K5/K6/K7):
-the hybrid (bias-corrected internal prediction C = P - bias_bkt,
-PASS iff C >= T_hyb) repairs one pure-approach error per regime
-but introduces one bar-boundary error per regime on exact ties
-(s=10@15: adj=21 == thyb=21; s=5@45: adj=17 == thyb=17), landing
-9/12 on both regimes -- never strictly best. This wave tests the
-report's own suggested follow-up: can per-bucket bars or a bar
-margin rescue the hybrid to strict dominance (beat OF
-in-distribution AND beat X3 under law change)? A negative result
-is valid, with the mechanism shown.
+## Step 2: Mechanism predictions (summary; full tables in PREREG.md)
 
-Lane: `docs/lab/research-lead/overnight-20260928/ivwc_perbucket/`.
-Prereg: ivwc_perbucket/PREREG.md (frozen kill bars K1..K11,
-committed alone before implementation).
-Implementation: ivwc_perbucket/src/ivwc_perbucket.zag (pure Zag,
-single file; world/belief/composer/stepper/verifier copied
-verbatim from ivwc_hybrid.zag; sealed worlds and train cases
-bit-identical).
+From the committed tables (no new probing), at K=15:
 
-Branch note: stays on tnn-native-lab (shared checkout), commits
-only its own lane directory with explicit pathspecs, local only,
-never pushed. Git writes via /usr/bin/git directly (safebin git
-symlink is known-broken for writes).
-
-## Step 2: Work plan
-
-1. Freeze PREREG.md + this NAMECHECK.md, commit ALONE (prereg
-   commit, explicit pathspec). Verify prereg commit strictly
-   precedes the implementation commit.
-2. Write src/ivwc_perbucket.zag (pure Zag). NO probe of any kind
-   was run before the prereg: the margin-variant prediction
-   (10/12 @15, 10/12 @45) is derived from the published hybrid
-   per-case analysis in the hybrid REPORT.md, not from any
-   execution; the per-bucket variant's outcome is not derivable
-   from published data (sealed per-bucket C means are unknown).
-   The hybrid's committed runs/*.txt were NOT read (they would
-   reveal per-case sealed triples and destroy the experiment's
-   blindness). K3/K4 anchors are hand-verified against published
-   numbers; K5-K11 directions are theory-fixed per PREREG
-   section 6.
-3. Build with pinned znc, run 3x, sha256 determinism check (K2).
-4. Run frozen shell audits A1-A7.
-5. Write REPORT.md with verdict and numbers, commit
-   implementation + binary + runs + report with explicit
-   pathspecs. Local only, never pushed.
-
-## Step 3: Zag pitfall checklist
-
-u8-backed cells with get32/set32/get8/set8 (copied helpers); no
-_zag_print for dynamic content (single ob buffer, one raw-syscall
-flush); no `as *i32` slice construction; no `&`/hex; LCG mod
-65536; if nesting kept shallow with hoisted flag lets; no
-`!(A && B)` in while conditions (De Morgan where needed); integer
-arithmetic only; token hygiene in source AND comments (no
-expected|answer|key|target or correct|reference_plan|gold
-substrings -- "correctly" and even "monkey" are banned by
-substring). Signed i32 division for bias/bar means (deterministic;
-counts guarded against /0).
+- Per-bucket PBK bars (15,4,3,12); PBOPT bars (15,16,5,15).
+- K4 (PRIMARY, preregistered NULL): UCB x V_PBK total = 248 <
+  258 AND UCB x V_PBOPT total = 243 < 258. No learner-computable
+  per-bucket bar beats the fixed stakes bar. The below-batch
+  information is real but not learner-usable from train alone:
+  the train->sealed per-bucket gap shift (b2: -12 train vs +13
+  sealed @15; b1: -11 train vs +17 sealed @45) is not
+  predictable from bucket identity.
+- K6: UCB x V_PBK = 248 (coincides with the V_BAMK lineage
+  total; the differential bands between per-bucket bars and the
+  batch-mix bar are empty on these batches).
+- K7: UCB x V_PBOPT = 243 < 248 = V_PBK. Train-profit-optimal
+  per-bucket bars overfit train (b1 bar 16 misses sealed s10's
+  +10 twice; b3 bar 15 avoids s5's -15 once -- net worse).
+- K9 (divergence): UCB x V_PBK total 248 < UCB x V_WK total 258.
+- K10 (divergence): V_PBX total 283 > 248. The exact
+  per-bucket signal beats the learner per-bucket signal by 35
+  (sh0: s0's -15 avoided, s6's +5 taken = 20; sh1: 0; sh2: s5's
+  -15 avoided = 15). The information is real; it lives below
+  what train alone can supply.
+- K5/K8: execute-all (43,113,-80); WC-FINAL=116.
