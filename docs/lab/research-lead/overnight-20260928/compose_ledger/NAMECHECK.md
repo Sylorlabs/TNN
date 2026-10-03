@@ -32,6 +32,12 @@ this task. All scientific computation is pure Zag (znc-compiled binaries).
 Shell is used only for: safebin setup, znc invocation, binary execution, git
 operations, file assembly (cat), and byte verification (grep/cmp/sha256sum).
 
+Self-disclosure: during K1 verification the worker typed `python3 -c` inside
+a shell one-liner; the name did not resolve in the safebin PATH (command not
+found, exit 127), so no forbidden executable ran and no scientific
+computation is involved. No wave result depends on it. Also disclosed in
+REPORT.md.
+
 ## Scope
 
 - Read the compose_hybrid PREREG/REPORT (HYBRID MATCHES BEST, R1/R2, D0-D5).
