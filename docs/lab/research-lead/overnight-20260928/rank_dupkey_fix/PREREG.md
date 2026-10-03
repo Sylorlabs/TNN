@@ -133,6 +133,63 @@ at the promote (frees slot 53 instead of 8).
 - K8 DETERMINISM: 3/3 runs byte-identical (external
   sha256).
 
+## Amendment A1 (2026-10-03; committed separately after the
+frozen spec, BEFORE the kh implementation below is run)
+
+The scan-version implementation (et==3 lowest-slot scan,
+per frozen section 3) was built and run once. Result:
+K3 FAILED (V1 d=11, V6 d=9, S5 d=31; mm_et=3,
+mm_first=90 on all three) while K1, K2, K4, K5, K6, K7
+passed. K3's failure is informative and the frozen bars
+are not weakened; the repair spec is corrected
+transparently as follows.
+
+Root cause, trace-verified: the substrate's promote_slot,
+on the pool-full path, exiles a pool victim to cold
+BEFORE freeing the promoted cold slot. When the cold
+tier is full, exile_victim does min-exile-seq eviction,
+which can select the very slot being promoted (it holds
+the oldest exile-seq). The substrate then unconditionally
+frees that slot (put32(M,co+12,0)), DESTROYING the
+just-installed victim entry. Trace signature: etype-2
+(victim, cs) immediately followed by etype-3 (key, cs)
+with the same slot cs (V1: i=89 et=2 key=3998 slot=2,
+i=90 et=3 key=1021 slot=2).
+
+The parent Sim B's ks map is stale across this
+overwrite (ks[old] is not cleared on overflow install)
+and therefore still points at cs at the etype-3; freeing
+sk[cs] exactly mirrors the substrate's clobber. The
+frozen et==3 lowest-slot scan finds no entry (it was
+overwritten) and frees nothing, diverging from the
+substrate. So the frozen section-4 claim ("on
+non-duplicate worlds the lowest-slot scan provably
+equals ks[key]") is WITHDRAWN for the promote path:
+the clobber case is a non-duplicate world where
+scan != ks and ks is the correct predictor.
+
+Corrected et==3 repair spec (replaces frozen section 3):
+maintain a key->hit-slot map `kh` (16384 bytes, init
+-1) in sim_prosp. On et==1, after the hit and any
+periodic swap, record kh[key] = post-move slot (0 if
+swapped, else the scanned hit slot). On et==3,
+ps = kh[key] (then clear kh[key], as with ks).
+Rationale: the substrate promotes/frees the entry it
+HIT (post-move slot); the hit slot is the correct
+identity across the intervening victim-exile, in all
+three cases: normal (kh == ks), clobber (kh == ks ==
+hit slot; the stale ks is load-bearing), and
+duplicate-key (S9: kh[1051] = 8, the hit slot, while
+ks[1051] = 53 is wrong). Between a key's hit and its
+promote the trace contains at most the victim-exile
+etype-2 (substrate cold_lookup is atomic across
+hit/rank-move/promote), so no cross-key swap can
+invalidate kh. The et==1 lowest-slot scan (frozen
+section 2) is UNCHANGED: it is correct on hits
+(S9-r2 white-box: scan=8=trace, ks=53).
+
+The kill bars K1-K8 are UNCHANGED by this amendment.
+
 ## Verdict rule
 
 VERDICT=PASS iff K1..K8 all PASS. A PASS verdict means
