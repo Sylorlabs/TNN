@@ -87,13 +87,87 @@ current frozen semantics only.
   novel field12 VALUE used only as the forgery
   marker, not a new edge type or semantic case.
 
-## Step 1: prereg commit (this commit)
+## Step 1: prereg commit (done, commit 0742f9cea)
 
-- PREREG.md written and frozen BEFORE any
-  implementation file exists in this lane. This
-  NAMECHECK.md Step 0/1 recorded.
-- Commit contains ONLY: PREREG.md, NAMECHECK.md
-  (this file).
-- Implementation (bp9_learner.zag, bp9_driver.zag,
-  bp9_full.zag, runs, REPORT.md) comes in a LATER
-  commit, strictly after this one.
+- PREREG.md was written and frozen BEFORE any
+  implementation file existed in this lane.
+- The prereg commit contained ONLY: PREREG.md,
+  NAMECHECK.md (Step 0/1 as then written).
+- Implementation came in a LATER commit,
+  strictly after the prereg commit
+  (commit-order self-check holds).
+
+## Step 2: implementation (done)
+
+- Files: bp9_learner.zag (verbatim copy of BP-8's
+  bp8_learner.zag, SHA-256
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e
+  on both, `cmp` clean), bp9_driver.zag (new: two
+  world arms FORGE/CHAIN, bp9_absorb with the
+  identical body of bp8_absorb, bp9_ck/bp9_bar/
+  bp9_selfcnt/bp9_allsup/bp9_liclive test helpers,
+  world builders, in-driver bars). Zero new learner
+  functions this lane; the forgery actions are
+  adversary actions in the driver, not belief-layer
+  changes.
+- Built: `sed -n '1,2668p'
+  ../belief_provenance_8/bp8_full.zag` (the patched
+  block, verbatim) + bp9_learner.zag + bp9_driver.zag
+  > bp9_full.zag; pinned znc by absolute path,
+  build exit 0 -> bp9_bin (383428 bytes; log:
+  bp9_compile.txt; 322 A0102 warnings are the benign
+  ignored-return-value pattern pervasive in the
+  frozen block itself, same as BP-4 through BP-8).
+- Block SHA-256 re-verified before AND after the
+  build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged).
+- No amendment round: the first implementation run
+  went 17/17 against the frozen prereg, so PREREG.md
+  Section 5b stays empty. No frozen rule changed to
+  chase a bar.
+- No Python/C/JS/Rust invoked at any point. Safebin
+  PATH held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any authored lane file or run
+  output (byte-verified with grep).
+- 0 new edge types (1/3/7/14 all pre-existing in the
+  block; kind-3 self-edges pre-exist via bp2_retire),
+  0 new node types (tags 1/3/20 pre-existing),
+  0 modes, 0 bridges, 0 handlers, 0 semantic cases
+  (one-system accounting). Reason code 9 is a novel
+  field12 VALUE used only as the forgery marker,
+  not a new edge type or semantic case.
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  55de4ccfa05f33d22e477d670a67abdbb8b33560f8523a9f7b9e6f41d1125a18
+  for bp9_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 17/17 PASS (2 PCs + 15 K bars).
+  FORGE: forged match 110/2 (n7==1,
+  undetectable); forged contradict 80/0/1
+  (n3==1, undetectable); forged match on
+  contradicted fact absorbed 90/1/0 (n7==1,
+  bypasses block one-shot protection,
+  forgery-unique signature); 3 forged type-7s
+  saturate to one R2 (n7==3, 110/2);
+  stale-watermark replay 120/3 (no replay
+  protection); shared-fact genuine match 110/110
+  (non-rivalrous); one forged shared-fact edge
+  120/120 (blast radius 2). CHAIN: propagated
+  weakening 40 and snap-up 80 leave no trace on
+  the composite's record (disc 0, conf 1, no k3);
+  forged reason-9 queryable, coexists with
+  genuine reason-2 retire (ambiguous record);
+  table tamper to 100 accepted (eff 100, retired
+  belief selected at bar 50 with reason-2 edge
+  present); fact death leaves b_ext stale (1 vs
+  live 0); explicit relicense retires reason-2.
+  BP9-SUMMARY 17/17; 19/19 with K-DET/K-HYG.
+- REPORT.md written with verdict BP-9-PASS. The 7
+  sealed predictions stay sealed; this lane adds
+  adversarial-integrity evidence only.
+- Committed with explicit pathspecs, local only,
+  never pushed.
+- Ledger: non-ledger task, nothing minted; ledger
+  file untouched.
