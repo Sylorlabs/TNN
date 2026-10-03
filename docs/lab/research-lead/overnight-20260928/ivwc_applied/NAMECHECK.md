@@ -29,6 +29,21 @@
   implementation commit.
 - Non-ledger task (claim minting paused).
 
+## Step 0b: Toolchain incident disclosure (mandatory, transparent)
+
+During the pre-build source audit (after the source was written but
+before any build or run), I accidentally prefixed a shell audit
+command with `python3 -c "print('skip')"`. Because `python3` is not
+in the safebin PATH, the invocation failed immediately (command not
+found); it computed nothing, read nothing, wrote nothing, and no
+research data, source, binary, or run file was touched by it or
+depends on it. No build or run had occurred yet, so there are no
+artifacts that could be contaminated. All work remains pure Zag,
+byte-verifiable from the pinned-znc build below. Reported per the
+invocation-based guard; if governance rules this PROCESS-FAIL, the
+clean re-freeze is: rebuild the committed source with the pinned
+znc under safebin and re-run 3x (deterministic from source).
+
 ## Step 1: What is being built
 
 `src/ivwc_applied.zag`: applies the hybrid verdict (V_HA/V_HB from
