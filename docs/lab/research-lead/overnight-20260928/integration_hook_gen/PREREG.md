@@ -152,7 +152,14 @@ New (cs=/cg= recorded, not frozen; nclause tuple on G1-REV recorded):
 - N10: G1Q1R2 `st=1 agree=1`; stale stays 2.
 - N11: `Q id=G2Q1R goal=821 decline=1`;
   `IHH-INV goal=821 cached=0 cur=-1 need=0 stale=3`
-- N12: `G3-REV tag=806 dc=2 active=0 req=1 olderr=0 revcount=1 route0=1 route1=0 route2=0`
+- N12: `G3-REV tag=806 dc=0 active=1 req=1 olderr=0 revcount=1 route0=1 route1=0 route2=0`
+  AMENDMENT 2026-10-03 (committed before implementation): the original
+  freeze predicted dc=2 active=0, assuming dc/active were captured before
+  u_revise (the ISD-REV pattern). stage_g3_restore reads them inline
+  AFTER u_revise, and u_revise restores active=1, dc=0. Observed dc=0
+  active=1 is the correct restored-clause state (route0=1 confirms).
+  Telemetry read-timing miss in the prediction, not a mechanism or
+  kill-bar failure; the driver is NOT changed to chase the prediction.
 - N13: `Q id=G2Q2 goal=821 st=2 vers=0 ans=2:1,611 agree=1`
 
 Derivation notes (no run preceded this prereg): vers values from the
