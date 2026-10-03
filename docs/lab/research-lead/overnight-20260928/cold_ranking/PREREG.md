@@ -1,0 +1,186 @@
+# PREREG: COLD-RANKING (LRU/importance ranking within cold)
+
+Date: 2026-10-03. Worker: COLD-RANKING (non-ledger task; claim
+minting paused). Lane:
+`docs/lab/research-lead/overnight-20260928/cold_ranking/`.
+
+## Motivation (from EXILE-PROMOTION's honest finding)
+
+EXILE-PROMOTION reached VERDICT=PASS 7/7 with one honest finding:
+reheat cost is POSITIONAL. In PXP-M2C2, R4's 8 re-exiled entries
+sat at cold slots 40..47, so reheating them cost cc4=712, above a
+no-promo single pass (575). The report names the follow-up
+explicitly: LRU/importance ranking *within* cold. This lane is that
+follow-up, built additively on EXILE-PROMOTION (substrate +
+promotion machinery carried over unchanged; no redesign).
+
+## Frozen design
+
+Cold tier lookup is currently FIFO by slot position; scan cost per
+hit = position+1. Two rank modes are added, selected by frozen
+parameter rk threaded through mem_read_recov / test_A_recov /
+cold_lookup:
+
+- rk=0: no ranking. cold_lookup behaves exactly as in
+  EXILE-PROMOTION (the anchor; K1 requires bit-for-bit equality
+  with the published PXP-M2C2 row).
+- rk=1 (recency / move-to-front): on every cold hit, after the
+  recovery-count increment and before the promotion check, the hit
+  entry is moved to cold slot 0; slots [0,s-1] shift right by one.
+  rank_cost += s (slot-positions advanced); rank_moves += 1 iff
+  s > 0.
+- rk=2 (importance / bubble by recovery count): on every cold hit,
+  after the recovery-count increment and before the promotion
+  check, the hit entry bubbles left while rc(s) > rc(s-1)
+  (strictly greater; ties do not move). rank_cost += positions
+  advanced; rank_moves += 1 iff advanced > 0.
+
+Uniform rules (frozen):
+
+1. Rank repositioning happens on EVERY cold hit (move-then-promote
+   order): the promotion check at T=2 runs after the move. Work
+   spent moving an entry that is then promoted counts as honest
+   overhead.
+2. The recovery-count byte moves WITH its slot. Slot moves relocate
+   the 20-byte cold entry and its rc byte together; the signal never
+   detaches from its entry.
+3. Cost units: rank_cost counts slot-positions advanced, the same
+   granularity as cold_cost's slots-examined. NET = ccT + rkT is the
+   honest total for "does maintenance offset the savings".
+4. exile-seq (co+16) stays per-entry and moves with the slot; cold
+   overflow eviction (min exile-seq) is position-independent and
+   unchanged. (Cold never fills in these conditions: occupancy 28 <
+   64, cdrop=0 throughout.)
+5. New header offsets: 64 rank_cost, 68 rank_moves. All other
+   offsets identical to EXILE-PROMOTION.
+
+Conditions (frozen): the M2C2 scenario only (pol=6, mode=1, w=21,
+c2w=10: teach, churn, three recovery passes, second churn, R4),
+run once per rk in {0,1,2}. pm=1 throughout (promotion machinery
+from EXILE-PROMOTION, threshold T=2).
+
+## Frozen derivations (M2C2)
+
+R1: cold holds 28 entries at slots 0..27; the 20 owner-1 A keys sit
+at slots 0..19 in test order (EXILE-PROMOTION's cc1=420 = 2x210
+derivation). Each A key is hit twice: owner-1 check (rc 0->1, stays
+cold), owner-2 check (rc 1->2, promotes). Owner-4/8 checks are hot.
+
+- rk=1: owner-1 pass hits slots 0..19 in order: cc 210, rank cost
+  0+1+...+19 = 190, 19 advancing moves; entries end reversed.
+  owner-2 pass hits slots 0..19 in order: cc 210, rank cost 190, 19
+  moves; 20 promotions; pool victims exiled to first-free slots.
+  R1: cc1=420, rk1=380, rkm1=38.
+- rk=2: owner-1 pass: every hit sets rc=1; all predecessors rc=1,
+  strict > fails, zero moves; cc 210, rk 0. owner-2 pass: rc->2,
+  each entry bubbles past the rc=0 pool victims ahead of it:
+  0+1+...+19 = 190, 19 moves; cc 210. R1: cc1=420, rk1=190,
+  rkm1=19.
+- Post-R1 cold layout is IDENTICAL for rk=0,1,2 (slots 0..19 = 20
+  exiled pool victims in promotion order; slots 20..27 = 8
+  never-hit entries), because every moved A entry is promoted out
+  in the same pass and victims always land at first-free slots.
+
+R2/R3: no cold hits (rec=0 in EXILE-PROMOTION); no moves; layout
+unchanged. Second churn: no cold hits; 28 exiles install at slots
+28..55; the 8 re-exiled A entries land at slots 40..47 (E1
+derivation, unaffected by rk since no cold hits occurred).
+
+R4: the 8 A entries are hit under owner-1 (rc 0->1, reposition to
+front), owner-2 (rc 1->2 at slot 0, promote), owner-4/8 hot.
+rk=1 and rk=2 behave IDENTICALLY here (all predecessors rc=0, so
+bubble-to-front = move-to-front):
+
+- cc4 = 364 + N, rk4 = 348 + N, rkm4 = 8, where N = number of
+  non-inversion pairs between hit order and slot order, 0 <= N <=
+  28 (not hand-derivable; bounded only).
+- Hence 364 <= cc4 <= 392 < 712 (scan savings vs FIFO's 712);
+  348 <= rk4 <= 376; R4 net = cc4 + rk4 = 712 + 2N in [712, 768].
+
+Totals (predicted):
+
+- rk=0: ccT=1132, rkT=0, NET=1132 (EXILE-PROMOTION's row).
+- rk=1: ccT = 420 + 364 + N = 784 + N (<= 812 < 1132);
+  rkT = 380 + 348 + N = 728 + N (in [728, 756]);
+  NET = 1512 + 2N >= 1512 > 1132.
+- rk=2: ccT = 784 + N (<= 812 < 1132);
+  rkT = 190 + 348 + N = 538 + N (in [538, 566]);
+  NET = 1322 + 2N >= 1322 > 1132.
+- rkmT: rk=1: 38 + 8 = 46; rk=2: 19 + 8 = 27; rk=0: 0.
+
+Predicted headline: ranking DOES reduce the positional scan cost
+(cc4 712 -> at most 392), but maintenance cost offsets it: NET
+never beats FIFO (1512+/1322+ vs 1132). Importance (rk=2) is
+cheaper to maintain than pure recency (rk=1) for identical scan
+savings, because it moves entries only on evidence (rc strictly
+exceeding the predecessor).
+
+## Frozen kill bars
+
+Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
+20 ev, 24 drop, 28 exile, 32 cdrop, 36 postR1, 40 rec1, 44 cc1,
+48 prm1, 52 postR2, 56 rec2, 60 cc2, 64 prm2, 68 postR3, 72 rec3,
+76 cc3, 80 prm3, 84 postH, 88 recT, 92 ccT, 96 prmT, 100 postR4,
+104 rec4, 108 cc4, 112 prm4, 116 postH2, 120 cfT, 124 evT,
+128 rkT, 132 rkmT, 136 rk, 140 spare.
+
+- K1 ANCHOR-RK0: the rk=0 row equals EXILE-PROMOTION's published
+  PXP-M2C2 row exactly: pre=35, post=0, bacc=20, raw=15, cf=80,
+  ev=48, drop=0, exile=76, cdrop=0; R1 35/40/420/20; R2 and R3
+  35/0/0/0; postH=35; recT=56; ccT=1132; prmT=28;
+  R4 35/16/712/8; postH2=35; cfT=80; evT=48; and rkT=0, rkmT=0.
+  Any drift means the substrate was not carried over unchanged:
+  FAIL.
+- K2 SCAN-SAVINGS: cc4(rk=1) < 712 and cc4(rk=2) < 712;
+  ccT(rk=1) < 1132 and ccT(rk=2) < 1132;
+  cc4(rk=1) == cc4(rk=2) (R4 scan identical across rank modes).
+  If ranking does not reduce the positional scan cost, its stated
+  purpose fails: FAIL.
+- K3 OFFSET (the honest bar): NET(rk=1) = ccT+rkT > 1132 and
+  NET(rk=2) > 1132 (maintenance offsets the savings; ranking is not
+  a net win); rkT(rk=1) > rkT(rk=2) > 0 (importance cheaper to
+  maintain than pure recency); 728 <= rkT(rk=1) <= 756;
+  538 <= rkT(rk=2) <= 566. If either NET beats FIFO, the prereg's
+  honest prediction is falsified (report as FAIL of the prediction,
+  with the measured numbers).
+- K4 INVARIANCE: identical across rk=0,1,2: rec1=40, prm1=20,
+  rec2=rec3=0, prm2=prm3=0, rec4=16, prm4=8, recT=56, prmT=28,
+  postR1=postR2=postR3=35, postH=35, postH2=35, exile=76, ev=48,
+  drop=0, cdrop=0, pre=35, post=0. Ranking must change costs only,
+  never outcomes: FAIL on any difference.
+- K5 LEDGER: exile == ev + drop + promote for rk=0,1,2;
+  cdrop=0 in all three rows. (Ranking must not disturb the priced
+  accounting.)
+- K6 RANK-ACCOUNTING: rkmT(rk=1)==46, rkmT(rk=2)==27,
+  rkmT(rk=0)==0. (Exact move counts from the derivation.)
+- K7 DETERMINISM: 3/3 byte-identical runs (external sha256
+  comparison). VOID-grade.
+
+Verdict rule: PASS requires K1..K7 all PASS. A FAIL on K3's
+inequality direction (NET beating FIFO) is reported as a failed
+prediction with measured numbers, not re-derived.
+
+## What this does NOT test
+
+- Importance signals beyond current-residency rc (a lifetime
+  counter would need key-keyed state, new machinery beyond the
+  additive brief; the rc-reset-on-install that promotion needs
+  destroys cross-residency importance, which is itself a finding).
+- Ranking under cold overflow (cold never fills here; cdrop=0).
+- Rank modes interacting with pm=0 or other policies/doses.
+- Whether a cheaper maintenance primitive (swap-with-front,
+  lazy ranking) changes the NET comparison.
+- Sealed post-freeze worlds.
+
+## Toolchain and hygiene
+
+- Pure Zag; safebin mandatory (PATH=$HOME/safebin); `command -v
+  python3` verified empty before build and before runs; znc pinned
+  2026.07.0-dev, cmp-verified against
+  src/tools/toolchain/znc_linux_x86_64_abed8aa1 before the prereg
+  commit.
+- grep audit on new code: no `while.*!(` negated conjunctions, no
+  _zag_print, no `as *i32` slice construction, single approved
+  `as *u8` in z_alloc (carried over), if-nesting at most 3.
+- Commits local only, never pushed, explicit pathspecs, no reset.
+  Prereg committed alone first (strict commit order).
