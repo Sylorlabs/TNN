@@ -41,3 +41,18 @@
 - PREREG.md: frozen kill bars K1-K7, hand-derived predictions for
   all 8 arms (Section 5), verdict mapping (Section 8). No
   implementation yet.
+- Prereg freeze: commit `b6ff8416039d8a5614c4ed2ee319dbb1c28147c2`
+  on `tnn-native-lab` (PREREG.md + NAMECHECK.md only), strictly
+  before implementation.
+- Implementation: `ntnl_full.zag` (D5 = D4 base + revision-target
+  pinning via per-slot pendtgt). Build `znc ntnl_full.zag -o
+  ntnl_bin` exit 0 (benign zagd warning). 3/3 runs byte-identical,
+  exit 0, zero stderr. Digests: run
+  `36f36fec8c995f8ab78c3927a5bd0be6e3e65427d5e6e4eef25ab2c3617d4ada`,
+  bin
+  `1d6a118a7dfb252dc55fc16fb921bcb23b3a1b0219f65c918f3580de42046170`,
+  src
+  `3f11766d2c3eb664f56e675d96625b2061535102939deb8595808eeeeaae00dd`.
+- Results: K1-K7 all 1, VERDICT=FIX-CLEAN. REPORT.md written.
+- Commits local only, explicit pathspecs, never pushed.
+  Non-ledger task (claim minting paused).
