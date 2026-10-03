@@ -1,0 +1,1686 @@
+// learner.zag -- L3-INR LEARNER process. Pure Zag.
+// Phase state machine implementing the frozen prereg battery (T1-T5b, C0-C5).
+// Persists phase in work.dat, entity KB in kb.dat, working edge set in
+// edges.dat, committed slot G in slot_G.dat, hypothesis set in hyps.dat.
+// The learner NEVER opens the .world file: all world knowledge arrives via
+// the OBSERVE / TEST consequence channel (protocol firewall, prereg A-INFO).
+// One invocation = one phase step; the shell driver relays outbox/inbox.
+// Exit code: 1 = arm complete (summary.txt written), 0 = more steps needed.
+//
+// Phase numbers:
+// 0 INIT  1 SEND_OBSERVE  2 WAIT_OBSERVE
+// 3 ADD_NEXT  4 ADD_WAIT  5 DEL_NEXT  6 DEL_WAIT
+// 7 HYP_BUILD  8 HYP_WAIT  9 PROBE_NEXT  10 PROBE_SEND  11 PROBE_WAIT
+// 12 COMMIT_SEND  13 COMMIT_WAIT  14 DEFER_SEND  15 DEFER_WAIT
+// 16 HELDOUT_REQ  17 HELDOUT_WAIT  18 HELDOUT_SEND  19 HELDOUT_TALLY
+// 20 RANK_BUILD  21 RANK_SEND  22 RANK_WAIT
+// 23 MONITOR_SEND  24 MONITOR_WAIT
+// 25 CONFIRM_SEND  26 CONFIRM_WAIT
+// 27 PREDICT_SEND  28 PREDICT_TALLY
+// 29 MEMO_SEND  30 MEMO_WAIT
+// 31 DONE
+// 32 C5_SEND  33 C5_WAIT
+// Arm codes: T1=1 T2=2 T3=3 T3b=4 T4=5 T5a=6 T5b=7
+//            C0=11 C1=12 C2=13 C3=14 C4=15 C5=16
+// work.dat aux slots: [84..88) construct_ct  [88..92) inbox_consumed
+//                     [92..96) aux (candidate idx / reobserve flag)
+// kb.dat scratch: tried pairs [696..876), held pairs [876..940),
+//                 rank perm [940..950)  attrs [452..482)
+fn arm_code(arm:[]u8)i32 {
+  if(seq8(arm,"T3b")==1){ return 4; }
+  if(seq8(arm,"T5a")==1){ return 6; }
+  if(seq8(arm,"T5b")==1){ return 7; }
+  if(seq8(arm,"T1")==1){ return 1; }
+  if(seq8(arm,"T2")==1){ return 2; }
+  if(seq8(arm,"T3")==1){ return 3; }
+  if(seq8(arm,"T4")==1){ return 5; }
+  if(seq8(arm,"C0")==1){ return 11; }
+  if(seq8(arm,"C1")==1){ return 12; }
+  if(seq8(arm,"C2")==1){ return 13; }
+  if(seq8(arm,"C3")==1){ return 14; }
+  if(seq8(arm,"C4")==1){ return 15; }
+  if(seq8(arm,"C5")==1){ return 16; }
+  return 0;
+}
+fn arm_budget(ac:i32)i32 {
+  if(ac==1){ return 3000; }
+  if(ac==2){ return 100; }
+  if(ac==3){ return 300; }
+  if(ac==4){ return 50; }
+  if(ac==5){ return 2000; }
+  if(ac==6){ return 3000; }
+  if(ac==7){ return 3000; }
+  if(ac==11){ return 100; }
+  if(ac==12){ return 100; }
+  if(ac==13){ return 100; }
+  if(ac==14){ return 3000; }
+  if(ac==15){ return 600; }
+  if(ac==16){ return 10; }
+  return 100;
+}
+// heldout kind: 0=A 1=B 2=C, -1 = none for this arm
+fn held_kind_of(ac:i32)i32 {
+  if(ac==1){ return 0; }
+  if(ac==2){ return 1; }
+  if(ac==4){ return 2; }
+  if(ac==5){ return 0; }
+  if(ac==6){ return 0; }
+  if(ac==11){ return 0; }
+  if(ac==12){ return 0; }
+  return -1;
+}
+fn resp_class(tok:[]u8)i32 {
+  if(seq8(tok,"ACCEPT")==1){ return 1; }
+  if(seq8(tok,"REJECT")==1){ return 0; }
+  if(seq8(tok,"FORBIDDEN")==1){ return 2; }
+  if(seq8(tok,"RANK_ACCEPT")==1){ return 3; }
+  if(seq8(tok,"RANK_REJECT")==1){ return 4; }
+  if(seq8(tok,"COMMIT_OK")==1){ return 5; }
+  if(seq8(tok,"DEFER_OK")==1){ return 6; }
+  return -1;
+}
+// predict (a,b) from working edge set via reachability
+fn pred_edges(e:[]u8,a:i32,b:i32)i32 {
+  let ne:i32=ig(e,0);
+  let ea:[]u8=z_alloc(100);
+  let eb:[]u8=z_alloc(100);
+  let i:i32=0;
+  while(i<ne){ ea[i]=e[4+i*2]; eb[i]=e[4+i*2+1]; i=i+1; }
+  let r:[]u8=z_alloc(100);
+  reach_of_edges(r,10,ea,eb,ne);
+  return r[a*10+b] as i32;
+}
+// training acceptance of working edge set, computed locally
+// (deterministic: identical to the world's consequence channel)
+fn local_score(e:[]u8,k:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  let sc:i32=0;
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    let y:i32=k[352+4+i*3+2] as i32;
+    if(pred_edges(e,a,b)==y){ sc=sc+1; }
+    i=i+1;
+  }
+  return sc;
+}
+fn emit_tp(sd:[]u8,k:[]u8,a:i32,b:i32,y:i32)void {
+  let OUT:[]u8=z_alloc(96);
+  let c:i32=e1str(OUT,0,"TEST_PAIR ");
+  c=kb_emit_name(k,OUT,c,a);
+  c=e1str(OUT,c," ");
+  c=kb_emit_name(k,OUT,c,b);
+  c=e1str(OUT,c," ");
+  c=e1i32(OUT,c,y);
+  ob_add(sd,OUT[0..c]);
+  return;
+}
+// emit one TEST_PAIR batch over all training pairs using edge buffer e
+fn emit_train_batch(sd:[]u8,k:[]u8,e:[]u8)void {
+  let nt:i32=ig(k,352);
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    emit_tp(sd,k,a,b,pred_edges(e,a,b));
+    i=i+1;
+  }
+  return;
+}
+// copy edge buffer
+fn ed_copy(e:[]u8)[]u8 {
+  let ne:i32=ig(e,0);
+  let c:[]u8=z_alloc(4+ne*2);
+  put32(c,0,ne);
+  let i:i32=0;
+  while(i<ne*2){ c[4+i]=e[4+i]; i=i+1; }
+  return c;
+}
+// parse M response lines from inbox starting at byte offset `from`;
+// returns new offset; tallies into acc/rej/forb via out cells
+fn parse_resps(ib:[]u8,iblen:i32,from:i32,m:i32,acc:[]u8,rej:[]u8,forb:[]u8)i32 {
+  let off:i32=from;
+  let i:i32=0;
+  let tok:[]u8=z_alloc(64);
+  while(i<m){
+    let le:i32=line_end(ib,off,iblen);
+    let ll:i32=le-off;
+    let tl:i32=gettok(ib[off..le],ll,0,tok);
+    let c:i32=resp_class(tok[0..tl]);
+    if(c==1){ acc[0]=acc[0]+1; }
+    if(c==0){ rej[0]=rej[0]+1; }
+    if(c==2){ forb[0]=forb[0]+1; }
+    off=le+1;
+    i=i+1;
+  }
+  return off;
+}
+// tried-pair scratch list in kb[692..872)
+fn tried_has(k:[]u8,a:i32,b:i32)i32 {
+  let i:i32=0;
+  while(i<90){
+    if((k[696+i*2] as i32)==a && (k[696+i*2+1] as i32)==b){ return 1; }
+    i=i+1;
+  }
+  return 0;
+}
+fn tried_add(k:[]u8,a:i32,b:i32)void {
+  let i:i32=0;
+  while(i<90){
+    if((k[696+i*2] as i32)==255){ k[696+i*2]=a as u8; k[696+i*2+1]=b as u8; return; }
+    i=i+1;
+  }
+  return;
+}
+fn kb_wipe_scratch(k:[]u8)void {
+  let i:i32=0;
+  while(i<180){ k[696+i]=255; i=i+1; }
+  i=0;
+  while(i<64){ k[876+i]=255; i=i+1; }
+  i=0;
+  while(i<10){ k[940+i]=255; i=i+1; }
+  return;
+}
+// find a disagreeing, untried pair across hypothesis variants; 1=found
+fn probe_find(k:[]u8,sd:[]u8,oa:[]u8,ob:[]u8)i32 {
+  let nh:i32=hyps_count(sd);
+  let a:i32=0;
+  while(a<10){
+    let b:i32=0;
+    while(b<10){
+      if(a!=b && tried_has(k,a,b)==0){
+        let p0:i32=hyps_get(sd,0,a,b);
+        let diff:i32=0;
+        let h:i32=1;
+        while(h<nh){ if(hyps_get(sd,h,a,b)!=p0){ diff=1; } h=h+1; }
+        if(diff==1){ oa[0]=a as u8; ob[0]=b as u8; return 1; }
+      }
+      b=b+1;
+    }
+    a=a+1;
+  }
+  return 0;
+}
+// keep only hypothesis variants predicting y on (a,b)
+fn hyps_filter(sd:[]u8,a:i32,b:i32,y:i32)void {
+  let p:[]u8=z_alloc(256);
+  let n:i32=st_path(sd,"hyps.dat",p);
+  let old:[]u8=read_file(p[0..n]);
+  let nh:i32=ig(old,0);
+  let new:[]u8=z_alloc(4+16*100);
+  let n2:i32=0;
+  let h:i32=0;
+  while(h<nh){
+    let base:i32=4+h*100;
+    if((old[base+a*10+b] as i32)==y){
+      let j:i32=0;
+      while(j<100){ new[4+n2*100+j]=old[base+j]; j=j+1; }
+      n2=n2+1;
+    }
+    h=h+1;
+  }
+  put32(new,0,n2);
+  write_file(p[0..n],new[0..4+n2*100]);
+  return;
+}
+// ---- OBSERVE parsing: fill kb train/attrs/forbid from inbox lines ----
+fn ph_parse_observe(ib:[]u8,iblen:i32,from:i32,k:[]u8)i32 {
+  let off:i32=from;
+  let tok:[]u8=z_alloc(64);
+  let tok2:[]u8=z_alloc(64);
+  let tok3:[]u8=z_alloc(64);
+  let ov:[]u8=z_alloc(4);
+  // INSTANCES m
+  let le:i32=line_end(ib,off,iblen);
+  let tl:i32=gettok(ib[off..le],le-off,1,tok);
+  p_int(tok,0,tl,ov);
+  let m:i32=ig(ov,0);
+  off=le+1;
+  let i:i32=0;
+  while(i<m){
+    le=line_end(ib,off,iblen);
+    let ll:i32=le-off;
+    let al:i32=gettok(ib[off..le],ll,1,tok);
+    let bl:i32=gettok(ib[off..le],ll,2,tok2);
+    let yl:i32=gettok(ib[off..le],ll,3,tok3);
+    p_int(tok3,0,yl,ov);
+    let y:i32=ig(ov,0);
+    let a:i32=kb_name_id(k,tok[0..al],al);
+    let b:i32=kb_name_id(k,tok2[0..bl],bl);
+    put32(k,352,ig(k,352)+1);
+    let nt:i32=ig(k,352)-1;
+    k[352+4+nt*3]=a as u8; k[352+4+nt*3+1]=b as u8; k[352+4+nt*3+2]=y as u8;
+    off=le+1;
+    i=i+1;
+  }
+  // NATTRS na
+  le=line_end(ib,off,iblen);
+  tl=gettok(ib[off..le],le-off,1,tok);
+  p_int(tok,0,tl,ov);
+  let na:i32=ig(ov,0);
+  off=le+1;
+  i=0;
+  while(i<na){
+    le=line_end(ib,off,iblen);
+    let ll2:i32=le-off;
+    let al2:i32=gettok(ib[off..le],ll2,1,tok);
+    let a2:i32=kb_name_id(k,tok[0..al2],al2);
+    let v0l:i32=gettok(ib[off..le],ll2,2,tok2);
+    p_int(tok2,0,v0l,ov);
+    let v0:i32=ig(ov,0);
+    let v1l:i32=gettok(ib[off..le],ll2,3,tok3);
+    p_int(tok3,0,v1l,ov);
+    let v1:i32=ig(ov,0);
+    let v2l:i32=gettok(ib[off..le],ll2,4,tok2);
+    p_int(tok2,0,v2l,ov);
+    let v2:i32=ig(ov,0);
+    k[452+a2*3]=v0 as u8; k[452+a2*3+1]=v1 as u8; k[452+a2*3+2]=v2 as u8;
+    off=le+1;
+    i=i+1;
+  }
+  // PROBE_EXCEPT nx
+  le=line_end(ib,off,iblen);
+  tl=gettok(ib[off..le],le-off,1,tok);
+  p_int(tok,0,tl,ov);
+  let nx:i32=ig(ov,0);
+  off=le+1;
+  i=0;
+  while(i<nx){
+    le=line_end(ib,off,iblen);
+    let ll3:i32=le-off;
+    let al3:i32=gettok(ib[off..le],ll3,1,tok);
+    let bl3:i32=gettok(ib[off..le],ll3,2,tok2);
+    let a3:i32=kb_name_id(k,tok[0..al3],al3);
+    let b3:i32=kb_name_id(k,tok2[0..bl3],bl3);
+    put32(k,512,ig(k,512)+1);
+    let nf:i32=ig(k,512)-1;
+    k[512+4+nf*2]=a3 as u8; k[512+4+nf*2+1]=b3 as u8;
+    off=le+1;
+    i=i+1;
+  }
+  // END_OBSERVE
+  le=line_end(ib,off,iblen);
+  off=le+1;
+  return off;
+}
+// ---- COMMIT / RANK emit ----
+fn emit_commit(sd:[]u8,k:[]u8,e:[]u8,gid:i32,par:i32)void {
+  let OUT:[]u8=z_alloc(64);
+  let c:i32=e1str(OUT,0,"COMMIT G ");
+  c=e1i32(OUT,c,gid);
+  c=e1str(OUT,c," ");
+  c=e1i32(OUT,c,par);
+  c=e1str(OUT,c," ");
+  c=e1i32(OUT,c,ig(e,0));
+  ob_add(sd,OUT[0..c]);
+  let ne:i32=ig(e,0);
+  let i:i32=0;
+  while(i<ne){
+    let L:[]u8=z_alloc(96);
+    let d:i32=e1str(L,0,"EDGE ");
+    d=kb_emit_name(k,L,d,e[4+i*2] as i32);
+    d=e1str(L,d," ");
+    d=kb_emit_name(k,L,d,e[4+i*2+1] as i32);
+    ob_add(sd,L[0..d]);
+    i=i+1;
+  }
+  let E2:[]u8=z_alloc(16);
+  let f:i32=e1str(E2,0,"COMMIT_END");
+  ob_add(sd,E2[0..f]);
+  return;
+}
+fn emit_rank(sd:[]u8,k:[]u8,perm:[]u8)void {
+  let OUT:[]u8=z_alloc(512);
+  let c:i32=e1str(OUT,0,"TEST_RANK");
+  let r:i32=0;
+  while(r<10){
+    c=e1str(OUT,c," ");
+    c=kb_emit_name(k,OUT,c,perm[r] as i32);
+    r=r+1;
+  }
+  ob_add(sd,OUT[0..c]);
+  return;
+}
+// ---- summary writer ----
+// rankres: 1=ACCEPT 0=REJECT -1=NA ; verdict: 1=DEV-PASS 0=DEV-FAIL
+fn write_summary(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,held_score:i32,rankres:i32,defer:i32,verdict:i32,note:[]u8)void {
+  let p:[]u8=z_alloc(256);
+  let n:i32=st_path(sd,"summary.txt",p);
+  let OUT:[]u8=z_alloc(2048);
+  let c:i32=0;
+  c=e1str(OUT,c,"ARM ");
+  let arm:[]u8=z_alloc(32);
+  let alen:i32=st_getstr(s,96,arm);
+  c=e1str(OUT,c,arm[0..alen]);
+  c=e1str(OUT,c,"\nSEED ");
+  c=e1i32(OUT,c,ig(s,16));
+  c=e1str(OUT,c,"\nNTEST ");
+  c=e1i32(OUT,c,ig(s,4));
+  c=e1str(OUT,c,"\nTRAIN ");
+  c=e1i32(OUT,c,local_score(e,k));
+  c=e1str(OUT,c,"/");
+  c=e1i32(OUT,c,ig(k,352));
+  c=e1str(OUT,c,"\nHELD ");
+  c=e1i32(OUT,c,held_score);
+  c=e1str(OUT,c,"/");
+  c=e1i32(OUT,c,ig(s,48));
+  c=e1str(OUT,c,"\nEDGES ");
+  c=e1i32(OUT,c,ig(e,0));
+  c=e1str(OUT,c,"\nGID ");
+  c=e1i32(OUT,c,ig(s,24));
+  c=e1str(OUT,c," PARENT ");
+  c=e1i32(OUT,c,ig(s,28));
+  c=e1str(OUT,c,"\nCONSTRUCT ");
+  c=e1i32(OUT,c,ig(s,84));
+  c=e1str(OUT,c,"\nRANK ");
+  c=e1i32(OUT,c,rankres);
+  c=e1str(OUT,c,"\nDEFER ");
+  c=e1i32(OUT,c,defer);
+  c=e1str(OUT,c,"\nDEV_VERDICT ");
+  if(verdict==1){ c=e1str(OUT,c,"PASS"); } else { c=e1str(OUT,c,"FAIL"); }
+  c=e1str(OUT,c,"\nNOTE ");
+  c=e1str(OUT,c,note);
+  c=e1str(OUT,c,"\n");
+  write_file(p[0..n],OUT[0..c]);
+  let L:[]u8=z_alloc(64);
+  let d:i32=e1str(L,0,"SUMMARY verdict=");
+  d=e1i32(L,d,verdict);
+  trace_add(sd,s,L[0..d]);
+  return;
+}
+// ---- C2: greedy OR of attribute-threshold rules (local, 0 TESTs) ----
+fn c2_eval(k:[]u8,sel:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  let sc:i32=0;
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    let y:i32=k[352+4+i*3+2] as i32;
+    let p:i32=0;
+    let r:i32=0;
+    while(r<6){
+      if(sel[r]==1){
+        let kk:i32=r/2;
+        let dd:i32=r%2;
+        let va:i32=k[452+a*3+kk] as i32;
+        let vb:i32=k[452+b*3+kk] as i32;
+        let rp:i32=0;
+        if(dd==0){ if(va<vb){ rp=1; } } else { if(va>vb){ rp=1; } }
+        if(rp==1){ p=1; }
+      }
+      r=r+1;
+    }
+    if(p==y){ sc=sc+1; }
+    i=i+1;
+  }
+  return sc;
+}
+fn do_c2(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let sel:[]u8=z_alloc(6);
+  let cur:i32=c2_eval(k,sel);
+  let rounds:i32=0;
+  let improved:i32=1;
+  while(improved==1){
+    improved=0;
+    let best:i32=0;
+    let bestr:i32=-1;
+    let r:i32=0;
+    while(r<6){
+      if(sel[r]==0){
+        sel[r]=1;
+        let sc:i32=c2_eval(k,sel);
+        sel[r]=0;
+        let g:i32=sc-cur;
+        if(g>best){ best=g; bestr=r; }
+      }
+      r=r+1;
+    }
+    if(bestr>=0){
+      sel[bestr]=1;
+      cur=cur+best;
+      rounds=rounds+1;
+      improved=1;
+      let L:[]u8=z_alloc(64);
+      let c:i32=e1str(L,0,"C2_ADD_RULE ");
+      c=e1i32(L,c,bestr);
+      c=e1str(L,c," gain ");
+      c=e1i32(L,c,best);
+      trace_add(sd,s,L[0..c]);
+    }
+  }
+  let nt:i32=ig(k,352);
+  let v:i32=0;
+  if(cur<nt){ v=1; }
+  let N:[]u8=z_alloc(64);
+  let nc:i32=e1str(N,0,"rounds=");
+  nc=e1i32(N,nc,rounds);
+  write_summary(sd,s,k,e,-1,-1,0,v,N[0..nc]);
+  return 31;
+}
+// ---- C3: greedy single-edge hill climb (local, 0 TESTs) ----
+fn c3_score(ea:[]u8,eb:[]u8,ne:i32,k:[]u8)i32 {
+  let r:[]u8=z_alloc(100);
+  reach_of_edges(r,10,ea,eb,ne);
+  let nt:i32=ig(k,352);
+  let sc:i32=0;
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    let y:i32=k[352+4+i*3+2] as i32;
+    if((r[a*10+b] as i32)==y){ sc=sc+1; }
+    i=i+1;
+  }
+  return sc;
+}
+fn do_c3(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let ea:[]u8=z_alloc(100);
+  let eb:[]u8=z_alloc(100);
+  let ne:i32=0;
+  let cur:i32=c3_score(ea,eb,0,k);
+  let rounds:i32=0;
+  let moved:i32=1;
+  while(moved==1 && rounds<40){
+    moved=0;
+    let best:i32=0;
+    let bu:i32=0;
+    let bv:i32=0;
+    let idx:i32=0;
+    while(idx<90){
+      let u:i32=idx/10;
+      let v:i32=idx%10;
+      if(u!=v){
+        let has:i32=0;
+        let j:i32=0;
+        while(j<ne){ if((ea[j] as i32)==u && (eb[j] as i32)==v){ has=1; } j=j+1; }
+        // skip if would create a cycle (reach v->u already)
+        let cyc:i32=0;
+        if(has==0){
+          let rr:[]u8=z_alloc(100);
+          reach_of_edges(rr,10,ea,eb,ne);
+          if((rr[v*10+u] as i32)==1){ cyc=1; }
+        }
+        if(has==0 && cyc==0){
+          ea[ne]=u as u8;
+          eb[ne]=v as u8;
+          let sc:i32=c3_score(ea,eb,ne+1,k);
+          let g:i32=sc-cur;
+          if(g>best){ best=g; bu=u; bv=v; }
+        }
+      }
+      idx=idx+1;
+    }
+    if(best>0){
+      ea[ne]=bu as u8;
+      eb[ne]=bv as u8;
+      ne=ne+1;
+      cur=cur+best;
+      rounds=rounds+1;
+      moved=1;
+      let L:[]u8=z_alloc(64);
+      let c:i32=e1str(L,0,"C3_ADD_EDGE ");
+      c=e1i32(L,c,bu);
+      c=e1str(L,c," ");
+      c=e1i32(L,c,bv);
+      c=e1str(L,c," gain ");
+      c=e1i32(L,c,best);
+      trace_add(sd,s,L[0..c]);
+    }
+  }
+  let nt:i32=ig(k,352);
+  let v:i32=0;
+  if(cur<nt){ v=1; }
+  let N:[]u8=z_alloc(64);
+  let nc:i32=e1str(N,0,"rounds=");
+  nc=e1i32(N,nc,rounds);
+  nc=e1str(N,nc," edges=");
+  nc=e1i32(N,nc,ne);
+  write_summary(sd,s,k,e,-1,-1,0,v,N[0..nc]);
+  return 31;
+}
+// edge buffer with one edge appended / removed
+fn ed_plus(e:[]u8,u:i32,v:i32)[]u8 {
+  let ne:i32=ig(e,0);
+  let c:[]u8=z_alloc(4+(ne+1)*2);
+  put32(c,0,ne+1);
+  let i:i32=0;
+  while(i<ne*2){ c[4+i]=e[4+i]; i=i+1; }
+  c[4+ne*2]=u as u8;
+  c[4+ne*2+1]=v as u8;
+  return c;
+}
+fn ed_minus(e:[]u8,u:i32,v:i32)[]u8 {
+  let ne:i32=ig(e,0);
+  let c:[]u8=z_alloc(4+ne*2);
+  let n2:i32=0;
+  let i:i32=0;
+  while(i<ne){
+    let a:i32=e[4+i*2] as i32;
+    let b:i32=e[4+i*2+1] as i32;
+    if(a!=u || b!=v){ c[4+n2*2]=a as u8; c[4+n2*2+1]=b as u8; n2=n2+1; }
+    i=i+1;
+  }
+  put32(c,0,n2);
+  return c;
+}
+fn arm_observes(ac:i32)i32 {
+  if(ac==2){ return 0; }
+  if(ac==3){ return 0; }
+  if(ac==5){ return 0; }
+  if(ac==16){ return 0; }
+  return 1;
+}
+fn load_slot_into_working(sd:[]u8,s:[]u8,e:[]u8)i32 {
+  let g:[]u8=slot_load(sd,"G");
+  if(g.len<16 || ig(g,8)==0){ return 0; }
+  let ne:i32=ig(g,8);
+  put32(e,0,ne);
+  let i:i32=0;
+  while(i<ne*2){ e[4+i]=g[12+i]; i=i+1; }
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"SLOT_READ G gid ");
+  c=e1i32(L,c,ig(g,0));
+  trace_add(sd,s,L[0..c]);
+  return 1;
+}
+// ---- phase 0: INIT ----
+fn ph_init(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,arm:[]u8)i32 {
+  let ac:i32=arm_code(arm);
+  put32(s,36,arm_budget(ac));
+  put32(s,40,150);
+  put32(s,4,0);
+  put32(s,8,0);
+  put32(s,84,0);
+  put32(s,48,0);
+  put32(s,92,0);
+  put32(s,76,ac);
+  put32(s,80,held_kind_of(ac));
+  kb_wipe_scratch(k);
+  if(arm_observes(ac)==1){
+    put32(k,352,0);
+    put32(k,512,0);
+  }
+  let L:[]u8=z_alloc(96);
+  let c:i32=e1str(L,0,"ARM ");
+  c=e1str(L,c,arm);
+  c=e1str(L,c," SEED ");
+  c=e1i32(L,c,ig(s,16));
+  trace_add(sd,s,L[0..c]);
+  if(ac==2 || ac==3 || ac==16 || ac==5 || ac==4){
+    if(load_slot_into_working(sd,s,e)==0){
+      let N:[]u8=z_alloc(32);
+      let nc:i32=e1str(N,0,"no slot G");
+      write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+      return 31;
+    }
+    if(ac==2){ return 16; }
+    if(ac==3){ return 20; }
+    if(ac==16){ return 32; }
+    if(ac==4){ return 1; }
+    return 23;
+  }
+  return 1;
+}
+// ---- phase 2: WAIT_OBSERVE ----
+fn ph_wait_observe(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  if(ig(s,76)==5){
+    put32(k,352,0);
+    put32(k,512,0);
+  }
+  let off:i32=ph_parse_observe(ib,iblen,from,k);
+  put32(s,88,off);
+  let ac:i32=ig(s,76);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"OBSERVED train=");
+  c=e1i32(L,c,ig(k,352));
+  trace_add(sd,s,L[0..c]);
+  if(ac==1 || ac==6 || ac==7 || ac==15){
+    put32(e,0,0);
+    put32(s,92,0);
+    return 3;
+  }
+  if(ac==4){ return 25; }
+  if(ac==5){
+    if(ig(s,92)!=1){
+      let N:[]u8=z_alloc(32);
+      let nc:i32=e1str(N,0,"T4 observe w/o regime");
+      write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+      return 31;
+    }
+    load_slot_into_working(sd,s,e);
+    put32(s,92,0);
+    return 3;
+  }
+  if(ac==11){ return 16; }
+  if(ac==12){ return 29; }
+  if(ac==13){ return do_c2(sd,s,k,e); }
+  if(ac==14){ return do_c3(sd,s,k,e); }
+  let N2:[]u8=z_alloc(32);
+  let nc2:i32=e1str(N2,0,"unknown arm");
+  write_summary(sd,s,k,e,-1,-1,0,0,N2[0..nc2]);
+  return 31;
+}
+// ---- phase 3: ADD_ALL ----
+// Propose-and-test over a COMPLETE edge set (prereg 4c): seed E with a
+// direct edge for every positive training pair (all known-true from
+// OBSERVE; a total order's positives form a DAG, so no cycle can arise).
+// No per-edge positive-gain requirement (anti-V2): we do not add
+// incrementally by gain at all. Then score the complete set via the
+// consequence channel.
+fn ph_add_next(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  if(ig(s,4)+nt>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit in ADD");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let ac:i32=ig(s,76);
+  // T4 revises from slot G (keeps E); others build fresh from positives
+  if(ac!=5){ put32(e,0,0); }
+  else {
+    // toxic purge: drop G edges directly contradicted by new training
+    let nt0:i32=ig(k,352);
+    let ne0:i32=ig(e,0);
+    let ei:i32=0;
+    while(ei<ne0){
+      // re-read each time as ed_del shifts
+      let ne1:i32=ig(e,0);
+      if(ei<ne1){
+        let a:i32=e[4+ei*2] as i32;
+        let b:i32=e[4+ei*2+1] as i32;
+        let toxic:i32=0;
+        let ti:i32=0;
+        while(ti<nt0){
+          let ta:i32=k[352+4+ti*3] as i32;
+          let tb:i32=k[352+4+ti*3+1] as i32;
+          let ty:i32=k[352+4+ti*3+2] as i32;
+          if(ta==a && tb==b && ty==0){ toxic=1; }
+          ti=ti+1;
+        }
+        if(toxic==1){
+          let ddi:i32=ed_find(e,a,b);
+          if(ddi>=0){ ed_del(e,ddi); }
+          put32(s,84,ig(s,84)+1);
+          let Lx:[]u8=z_alloc(64);
+          let cx:i32=e1str(Lx,0,"DEL_EDGE_TOXIC ");
+          cx=e1i32(Lx,cx,a);
+          cx=e1str(Lx,cx," ");
+          cx=e1i32(Lx,cx,b);
+          trace_add(sd,s,Lx[0..cx]);
+        } else { ei=ei+1; }
+      } else { ei=ei+1; }
+    }
+  }
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    let y:i32=k[352+4+i*3+2] as i32;
+    if(y==1 && ed_has(e,a,b)==0 && pred_edges(e,b,a)==0){
+      ed_add(e,a,b);
+      put32(s,84,ig(s,84)+1);
+      let L:[]u8=z_alloc(64);
+      let c:i32=e1str(L,0,"ADD_EDGE ");
+      c=e1i32(L,c,a);
+      c=e1str(L,c," ");
+      c=e1i32(L,c,b);
+      c=e1str(L,c," from-train-pos");
+      trace_add(sd,s,L[0..c]);
+    }
+    i=i+1;
+  }
+  let L2:[]u8=z_alloc(64);
+  let d2:i32=e1str(L2,0,"ADD_DONE edges=");
+  d2=e1i32(L2,d2,ig(e,0));
+  trace_add(sd,s,L2[0..d2]);
+  emit_train_batch(sd,k,e);
+  return 4;
+}
+// ---- phase 4: ADD_CONFIRM ----
+fn ph_add_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let nt:i32=ig(k,352);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,nt,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"ADD_CONFIRM score=");
+  c=e1i32(L,c,acc[0]);
+  c=e1str(L,c,"/");
+  c=e1i32(L,c,nt);
+  trace_add(sd,s,L[0..c]);
+  if(acc[0]!=nt){
+    // T4 revision: toxic edges from the old regime are removed by DEL;
+    // proceed even without full acceptance here.
+    if(ig(s,76)!=5){
+      let N:[]u8=z_alloc(48);
+      let nc:i32=e1str(N,0,"positive-closure not full");
+      write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+      return 31;
+    }
+    let Lt:[]u8=z_alloc(48);
+    let dt:i32=e1str(Lt,0,"T4_PARTIAL ");
+    dt=e1i32(Lt,dt,acc[0]);
+    trace_add(sd,s,Lt[0..dt]);
+  }
+  // snapshot for DEL
+  let p:[]u8=z_alloc(256);
+  let n:i32=st_path(sd,"dellist.dat",p);
+  let ne:i32=ig(e,0);
+  let d:[]u8=z_alloc(4+ne*2);
+  put32(d,0,ne);
+  let j:i32=0;
+  while(j<ne*2){ d[4+j]=e[4+j]; j=j+1; }
+  write_file(p[0..n],d);
+  put32(s,68,0);
+  put32(s,64,nt);
+  return 5;
+}
+// ---- phase 5: DEL_NEXT ----
+fn ph_del_next(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let p:[]u8=z_alloc(256);
+  let n:i32=st_path(sd,"dellist.dat",p);
+  let d:[]u8=read_file(p[0..n]);
+  let dne:i32=ig(d,0);
+  let di:i32=ig(s,68);
+  let found:i32=0;
+  while(di<dne && found==0){
+    let u:i32=d[4+di*2] as i32;
+    let v:i32=d[4+di*2+1] as i32;
+    if(ed_has(e,u,v)==1){ found=1; } else { di=di+1; }
+  }
+  put32(s,68,di);
+  if(found==0){
+    let L:[]u8=z_alloc(64);
+    let c:i32=e1str(L,0,"DEL_DONE edges=");
+    c=e1i32(L,c,ig(e,0));
+    trace_add(sd,s,L[0..c]);
+    return 7;
+  }
+  let u2:i32=d[4+di*2] as i32;
+  let v2:i32=d[4+di*2+1] as i32;
+  let nt:i32=ig(k,352);
+  if(ig(s,4)+nt>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit in DEL");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  put32(s,56,u2);
+  put32(s,60,v2);
+  put32(s,64,local_score(e,k));
+  let t:[]u8=ed_minus(e,u2,v2);
+  emit_train_batch(sd,k,t);
+  return 6;
+}
+// ---- phase 6: DEL_WAIT ----
+fn ph_del_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let nt:i32=ig(k,352);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,nt,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let newscore:i32=acc[0];
+  let u:i32=ig(s,56);
+  let v:i32=ig(s,60);
+  let base:i32=ig(s,64);
+  let removed:i32=0;
+  if(newscore>=base){
+    let ddi:i32=ed_find(e,u,v); if(ddi>=0){ ed_del(e,ddi); }
+    put32(s,84,ig(s,84)+1);
+    removed=1;
+  }
+  let L:[]u8=z_alloc(96);
+  let c:i32=e1str(L,0,"DEL_EDGE ");
+  c=e1i32(L,c,u);
+  c=e1str(L,c," ");
+  c=e1i32(L,c,v);
+  c=e1str(L,c," score ");
+  c=e1i32(L,c,newscore);
+  c=e1str(L,c," base ");
+  c=e1i32(L,c,base);
+  c=e1str(L,c," removed ");
+  c=e1i32(L,c,removed);
+  trace_add(sd,s,L[0..c]);
+  put32(s,68,ig(s,68)+1);
+  return 5;
+}
+// ---- phase 7: HYP_BUILD ----
+fn ph_hyp_build(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let ne:i32=ig(e,0);
+  let ea:[]u8=z_alloc(100);
+  let eb:[]u8=z_alloc(100);
+  let i:i32=0;
+  while(i<ne){ ea[i]=e[4+i*2]; eb[i]=e[4+i*2+1]; i=i+1; }
+  let r:[]u8=z_alloc(100);
+  reach_of_edges(r,10,ea,eb,ne);
+  let ux:[]u8=z_alloc(90);
+  let uy:[]u8=z_alloc(90);
+  let nu:i32=0;
+  let x:i32=0;
+  while(x<10){
+    let y:i32=x+1;
+    while(y<10){
+      if(r[x*10+y]==0 && r[y*10+x]==0){ ux[nu]=x as u8; uy[nu]=y as u8; nu=nu+1; }
+      y=y+1;
+    }
+    x=x+1;
+  }
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"UNCONSTRAINED ");
+  c=e1i32(L,c,nu);
+  trace_add(sd,s,L[0..c]);
+  let h:[]u8=hyps_new();
+  if(nu==0){
+    hyps_add(h,r,10);
+    hyps_save(sd,h);
+    return 9;
+  }
+  if(nu>4){
+    let L2:[]u8=z_alloc(64);
+    let d:i32=e1str(L2,0,"AMBIGUOUS nu=");
+    d=e1i32(L2,d,nu);
+    trace_add(sd,s,L2[0..d]);
+    return 14;
+  }
+  let nvars:i32=1<<nu;
+  let nt:i32=ig(k,352);
+  if(ig(s,4)+nvars*nt>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit in HYP");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let vp:[]u8=z_alloc(256);
+  let vn:i32=st_path(sd,"vars.dat",vp);
+  let vd:[]u8=z_alloc(4+nvars*204);
+  put32(vd,0,nvars);
+  let mask:i32=0;
+  while(mask<nvars){
+    let va:[]u8=z_alloc(100);
+    let vb:[]u8=z_alloc(100);
+    let nv2:i32=ne;
+    let j:i32=0;
+    while(j<ne){ va[j]=ea[j]; vb[j]=eb[j]; j=j+1; }
+    let b2:i32=0;
+    while(b2<nu){
+      let xx:i32=ux[b2] as i32;
+      let yy:i32=uy[b2] as i32;
+      let bit:i32=(mask>>b2)&1;
+      if(bit==1){ va[nv2]=xx as u8; vb[nv2]=yy as u8; }
+      else { va[nv2]=yy as u8; vb[nv2]=xx as u8; }
+      nv2=nv2+1;
+      b2=b2+1;
+    }
+    let base:i32=4+mask*204;
+    put32(vd[base..base+4],0,nv2);
+    let q:i32=0;
+    while(q<nv2){ vd[base+4+q*2]=va[q]; vd[base+4+q*2+1]=vb[q]; q=q+1; }
+    let rr:[]u8=z_alloc(100);
+    reach_of_edges(rr,10,va,vb,nv2);
+    let t2:i32=0;
+    while(t2<nt){
+      let a:i32=k[352+4+t2*3] as i32;
+      let b3:i32=k[352+4+t2*3+1] as i32;
+      emit_tp(sd,k,a,b3,rr[a*10+b3] as i32);
+      t2=t2+1;
+    }
+    mask=mask+1;
+  }
+  write_file(vp[0..vn],vd[0..4+nvars*204]);
+  put32(s,92,nvars);
+  let L3:[]u8=z_alloc(64);
+  let e3:i32=e1str(L3,0,"HYP_VARIANTS ");
+  e3=e1i32(L3,e3,nvars);
+  trace_add(sd,s,L3[0..e3]);
+  return 8;
+}
+// ---- phase 8: HYP_WAIT ----
+fn ph_hyp_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let nt:i32=ig(k,352);
+  let nvars:i32=ig(s,92);
+  let vp:[]u8=z_alloc(256);
+  let vn:i32=st_path(sd,"vars.dat",vp);
+  let vd:[]u8=read_file(vp[0..vn]);
+  let h:[]u8=hyps_new();
+  let off:i32=from;
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let mask:i32=0;
+  while(mask<nvars){
+    acc[0]=0; rej[0]=0; forb[0]=0;
+    off=parse_resps(ib,iblen,off,nt,acc,rej,forb);
+    if(acc[0]==nt){
+      let base:i32=4+mask*204;
+      let nv2:i32=ig(vd,base);
+      let va:[]u8=z_alloc(100);
+      let vb:[]u8=z_alloc(100);
+      let q:i32=0;
+      while(q<nv2){ va[q]=vd[base+4+q*2]; vb[q]=vd[base+4+q*2+1]; q=q+1; }
+      let rr:[]u8=z_alloc(100);
+      reach_of_edges(rr,10,va,vb,nv2);
+      hyps_add(h,rr,10);
+    }
+    mask=mask+1;
+  }
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+nvars*nt);
+  // E* itself, if fully consistent
+  if(local_score(e,k)==nt){
+    let ne:i32=ig(e,0);
+    let ea:[]u8=z_alloc(100);
+    let eb:[]u8=z_alloc(100);
+    let j:i32=0;
+    while(j<ne){ ea[j]=e[4+j*2]; eb[j]=e[4+j*2+1]; j=j+1; }
+    let r:[]u8=z_alloc(100);
+    reach_of_edges(r,10,ea,eb,ne);
+    hyps_add(h,r,10);
+  }
+  hyps_save(sd,h);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"HYP_KEPT ");
+  c=e1i32(L,c,ig(h,0));
+  trace_add(sd,s,L[0..c]);
+  if(ig(h,0)==0){
+    let L2:[]u8=z_alloc(48);
+    let d:i32=e1str(L2,0,"NO_FULL_HYP");
+    trace_add(sd,s,L2[0..d]);
+    return 14;
+  }
+  return 9;
+}
+// ---- phase 9: PROBE_NEXT ----
+fn ph_probe_next(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let nh:i32=hyps_count(sd);
+  // C4 (efficiency baseline): rank from the built set, no commit
+  if(nh<=1){
+    if(ig(s,76)==15){ return 20; }
+    return 12;
+  }
+  let oa:[]u8=z_alloc(4);
+  let ob:[]u8=z_alloc(4);
+  if(probe_find(k,sd,oa,ob)==0){
+    let L:[]u8=z_alloc(48);
+    let c:i32=e1str(L,0,"NO_DISCRIMINATING_PROBE");
+    trace_add(sd,s,L[0..c]);
+    return 14;
+  }
+  if(ig(s,8)+2>ig(s,40)){
+    let L2:[]u8=z_alloc(48);
+    let d:i32=e1str(L2,0,"PROBE_BUDGET_HIT");
+    trace_add(sd,s,L2[0..d]);
+    return 14;
+  }
+  put32(s,56,oa[0] as i32);
+  put32(s,60,ob[0] as i32);
+  return 10;
+}
+// ---- phase 10: PROBE_SEND ----
+fn ph_probe_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let a:i32=ig(s,56);
+  let b:i32=ig(s,60);
+  emit_tp(sd,k,a,b,0);
+  emit_tp(sd,k,a,b,1);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"PROBE_SEND ");
+  c=e1i32(L,c,a);
+  c=e1str(L,c," ");
+  c=e1i32(L,c,b);
+  trace_add(sd,s,L[0..c]);
+  return 11;
+}
+// ---- phase 11: PROBE_WAIT ----
+fn ph_probe_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let a:i32=ig(s,56);
+  let b:i32=ig(s,60);
+  let tok:[]u8=z_alloc(64);
+  let le0:i32=line_end(ib,from,iblen);
+  let tl0:i32=gettok(ib[from..le0],le0-from,0,tok);
+  let c0:i32=resp_class(tok[0..tl0]);
+  let off1:i32=le0+1;
+  let le1:i32=line_end(ib,off1,iblen);
+  let tl1:i32=gettok(ib[off1..le1],le1-off1,0,tok);
+  let c1:i32=resp_class(tok[0..tl1]);
+  put32(s,88,le1+1);
+  if(c0==2 || c1==2){
+    tried_add(k,a,b);
+    let L:[]u8=z_alloc(64);
+    let c:i32=e1str(L,0,"PROBE_FORBIDDEN ");
+    c=e1i32(L,c,a);
+    c=e1str(L,c," ");
+    c=e1i32(L,c,b);
+    trace_add(sd,s,L[0..c]);
+    return 9;
+  }
+  put32(s,8,ig(s,8)+2);
+  put32(s,4,ig(s,4)+2);
+  tried_add(k,a,b);
+  let ay:i32=1;
+  if(c0==1){ ay=0; }
+  if(c0!=1 && c1!=1){
+    let L2:[]u8=z_alloc(48);
+    let d:i32=e1str(L2,0,"PROBE_NO_ACCEPT");
+    trace_add(sd,s,L2[0..d]);
+    return 14;
+  }
+  hyps_filter(sd,a,b,ay);
+  let nh:i32=hyps_count(sd);
+  // materialize the winning edge into E (survivors all agree on it)
+  if(ay==1){
+    if(ed_has(e,a,b)==0){ ed_add(e,a,b); }
+  } else {
+    if(ed_has(e,b,a)==0){ ed_add(e,b,a); }
+  }
+  put32(s,84,ig(s,84)+1);
+  let Lm:[]u8=z_alloc(64);
+  let dm:i32=e1str(Lm,0,"PROBE_MATERIALIZE ");
+  dm=e1i32(Lm,dm,a);
+  dm=e1str(Lm,dm," ");
+  dm=e1i32(Lm,dm,b);
+  dm=e1str(Lm,dm," ");
+  dm=e1i32(Lm,dm,ay);
+  trace_add(sd,s,Lm[0..dm]);
+  let L3:[]u8=z_alloc(96);
+  let e3:i32=e1str(L3,0,"PROBE ");
+  e3=e1i32(L3,e3,a);
+  e3=e1str(L3,e3," ");
+  e3=e1i32(L3,e3,b);
+  e3=e1str(L3,e3," -> ");
+  e3=e1i32(L3,e3,ay);
+  e3=e1str(L3,e3," survivors ");
+  e3=e1i32(L3,e3,nh);
+  trace_add(sd,s,L3[0..e3]);
+  return 9;
+}
+// ---- phase 12: COMMIT_SEND ----
+fn ph_commit_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let gid:i32=ig(s,20);
+  let par:i32=ig(s,24);
+  put32(s,20,gid+1);
+  // T4 revision commits to slot G2, preserving T1's slot G for T3b
+  let slot:[]u8="G";
+  if(ig(s,76)==5){ slot="G2"; }
+  slot_save(sd,slot,gid,par,e);
+  put32(s,24,gid);
+  put32(s,28,par);
+  emit_commit(sd,k,e,gid,par);
+  let L:[]u8=z_alloc(96);
+  let c:i32=e1str(L,0,"COMMIT slot ");
+  c=e1str(L,c,slot);
+  c=e1str(L,c," gid ");
+  c=e1i32(L,c,gid);
+  c=e1str(L,c," parent ");
+  c=e1i32(L,c,par);
+  c=e1str(L,c," edges ");
+  c=e1i32(L,c,ig(e,0));
+  trace_add(sd,s,L[0..c]);
+  return 13;
+}
+// ---- phase 13: COMMIT_WAIT ----
+fn ph_commit_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let tok:[]u8=z_alloc(64);
+  let le:i32=line_end(ib,from,iblen);
+  let tl:i32=gettok(ib[from..le],le-from,0,tok);
+  let c:i32=resp_class(tok[0..tl]);
+  put32(s,88,le+1);
+  if(c!=5){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"commit not acked");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  return 16;
+}
+// ---- phase 14: DEFER_SEND ----
+fn ph_defer_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  ob_add(sd,"DEFER");
+  let L:[]u8=z_alloc(32);
+  let c:i32=e1str(L,0,"DEFER emitted");
+  trace_add(sd,s,L[0..c]);
+  return 15;
+}
+// ---- phase 15: DEFER_WAIT ----
+fn ph_defer_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let tok:[]u8=z_alloc(64);
+  let le:i32=line_end(ib,from,iblen);
+  let tl:i32=gettok(ib[from..le],le-from,0,tok);
+  let c:i32=resp_class(tok[0..tl]);
+  put32(s,88,le+1);
+  if(c!=6){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"defer not acked");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let v:i32=0;
+  if(ig(s,76)==7){ v=1; }
+  let N2:[]u8=z_alloc(32);
+  let nc2:i32=e1str(N2,0,"deferred");
+  write_summary(sd,s,k,e,-1,-1,1,v,N2[0..nc2]);
+  return 31;
+}
+// ---- phase 16: HELDOUT_REQ ----
+fn ph_heldout_req(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let hk:i32=ig(s,80);
+  let OUT:[]u8=z_alloc(16);
+  let c:i32=0;
+  if(hk==0){ c=e1str(OUT,0,"HELDOUT_A"); }
+  if(hk==1){ c=e1str(OUT,0,"HELDOUT_B"); }
+  if(hk==2){ c=e1str(OUT,0,"HELDOUT_C"); }
+  ob_add(sd,OUT[0..c]);
+  return 17;
+}
+// ---- phase 17: HELDOUT_WAIT ----
+fn ph_heldout_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let tok:[]u8=z_alloc(64);
+  let tok2:[]u8=z_alloc(64);
+  let ov:[]u8=z_alloc(4);
+  let le:i32=line_end(ib,from,iblen);
+  let tl:i32=gettok(ib[from..le],le-from,1,tok);
+  p_int(tok,0,tl,ov);
+  let p:i32=ig(ov,0);
+  let off:i32=le+1;
+  let i:i32=0;
+  while(i<p){
+    le=line_end(ib,off,iblen);
+    let ll:i32=le-off;
+    let al:i32=gettok(ib[off..le],ll,1,tok);
+    let bl:i32=gettok(ib[off..le],ll,2,tok2);
+    let a:i32=kb_name_id(k,tok[0..al],al);
+    let b:i32=kb_name_id(k,tok2[0..bl],bl);
+    k[876+i*2]=a as u8;
+    k[876+i*2+1]=b as u8;
+    off=le+1;
+    i=i+1;
+  }
+  put32(s,88,off);
+  put32(s,48,p);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"HELDOUT pairs=");
+  c=e1i32(L,c,p);
+  trace_add(sd,s,L[0..c]);
+  let ac:i32=ig(s,76);
+  if(ac==11 || ac==12){ return 27; }
+  return 18;
+}
+// ---- phase 18: HELDOUT_SEND (edge predictions) ----
+fn ph_heldout_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let p:i32=ig(s,48);
+  if(ig(s,4)+p>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit in heldout");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let i:i32=0;
+  while(i<p){
+    let a:i32=k[876+i*2] as i32;
+    let b:i32=k[876+i*2+1] as i32;
+    emit_tp(sd,k,a,b,pred_edges(e,a,b));
+    i=i+1;
+  }
+  return 19;
+}
+// lineage |G_old cap G_new| for T4
+fn lineage_inter(sd:[]u8,e:[]u8)[]u8 {
+  let out:[]u8=z_alloc(8);
+  let p:[]u8=z_alloc(256);
+  let n:i32=st_path(sd,"oldslot.dat",p);
+  let g:[]u8=read_file(p[0..n]);
+  if(g.len<16){ put32(out,0,-1); put32(out,4,0); return out; }
+  let on:i32=ig(g,8);
+  let nn:i32=ig(e,0);
+  let inter:i32=0;
+  let i:i32=0;
+  while(i<nn){
+    let a:i32=e[4+i*2] as i32;
+    let b:i32=e[4+i*2+1] as i32;
+    let j:i32=0;
+    while(j<on){
+      if((g[12+j*2] as i32)==a && (g[12+j*2+1] as i32)==b){ inter=inter+1; }
+      j=j+1;
+    }
+    i=i+1;
+  }
+  put32(out,0,inter);
+  put32(out,4,on);
+  return out;
+}
+// ---- phase 19: HELDOUT_TALLY ----
+fn ph_heldout_tally(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let p:i32=ig(s,48);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,p,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let hs:i32=acc[0];
+  let ac:i32=ig(s,76);
+  let nt:i32=ig(k,352);
+  let ts:i32=local_score(e,k);
+  let v:i32=0;
+  let N:[]u8=z_alloc(128);
+  let nc:i32=0;
+  if(ac==1){
+    if(ts==nt && hs>=5 && ig(e,0)<=10){ v=1; }
+    nc=e1str(N,0,"T1 train+heldout");
+  }
+  if(ac==2){
+    if(hs>=5 && ig(s,84)==0){ v=1; }
+    nc=e1str(N,0,"T2 transfer no-construct");
+  }
+  if(ac==4){
+    if(hs>=5 && ig(s,84)==0){ v=1; }
+    nc=e1str(N,0,"T3b recode transfer");
+  }
+  if(ac==5){
+    let li:[]u8=lineage_inter(sd,e);
+    let inter:i32=ig(li,0);
+    let oldn:i32=ig(li,4);
+    nc=e1str(N,0,"T4 lineage ");
+    nc=e1i32(N,nc,inter);
+    nc=e1str(N,nc,"/");
+    nc=e1i32(N,nc,oldn);
+    if(hs>=5 && inter>=0 && inter*2>=oldn){ v=1; }
+  }
+  if(ac==6){
+    if(hs>=5){ v=1; }
+    nc=e1str(N,0,"T5a probe+commit");
+  }
+  write_summary(sd,s,k,e,hs,-1,0,v,N[0..nc]);
+  return 31;
+}
+// ---- phase 20: RANK_BUILD ----
+fn ph_rank_build(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let ne:i32=ig(e,0);
+  let ea:[]u8=z_alloc(100);
+  let eb:[]u8=z_alloc(100);
+  let i:i32=0;
+  while(i<ne){ ea[i]=e[4+i*2]; eb[i]=e[4+i*2+1]; i=i+1; }
+  let r:[]u8=z_alloc(100);
+  reach_of_edges(r,10,ea,eb,ne);
+  let perm:[]u8=z_alloc(10); rank_by_reach(r,10,perm);
+  i=0;
+  while(i<10){ k[940+i]=perm[i]; i=i+1; }
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"RANK_BUILD edges=");
+  c=e1i32(L,c,ne);
+  trace_add(sd,s,L[0..c]);
+  return 21;
+}
+// ---- phase 21: RANK_SEND ----
+fn ph_rank_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let perm:[]u8=z_alloc(10);
+  let i:i32=0;
+  while(i<10){ perm[i]=k[940+i]; i=i+1; }
+  emit_rank(sd,k,perm);
+  return 22;
+}
+// ---- phase 22: RANK_WAIT ----
+fn ph_rank_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let tok:[]u8=z_alloc(64);
+  let le:i32=line_end(ib,from,iblen);
+  let tl:i32=gettok(ib[from..le],le-from,0,tok);
+  let c:i32=resp_class(tok[0..tl]);
+  put32(s,88,le+1);
+  put32(s,4,ig(s,4)+1);
+  let rr:i32=-1;
+  if(c==3){ rr=1; }
+  if(c==4){ rr=0; }
+  let ac:i32=ig(s,76);
+  let v:i32=0;
+  let N:[]u8=z_alloc(64);
+  let nc:i32=0;
+  if(ac==3){
+    if(rr==1){ v=1; }
+    nc=e1str(N,0,"T3 rank from slot G");
+  }
+  if(ac==15){
+    nc=e1str(N,0,"C4 scratch rankres=");
+    nc=e1i32(N,nc,rr);
+    nc=e1str(N,nc," ntest=");
+    nc=e1i32(N,nc,ig(s,4));
+    v=1;
+  }
+  write_summary(sd,s,k,e,-1,rr,0,v,N[0..nc]);
+  return 31;
+}
+// ---- phase 23: MONITOR_SEND ----
+fn ph_monitor_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  let m:i32=6;
+  if(nt<m){ m=nt; }
+  if(ig(s,4)+m>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit monitor");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let i:i32=0;
+  while(i<m){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    emit_tp(sd,k,a,b,pred_edges(e,a,b));
+    i=i+1;
+  }
+  put32(s,92,m);
+  return 24;
+}
+// ---- phase 24: MONITOR_WAIT ----
+fn ph_monitor_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let m:i32=ig(s,92);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,m,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"MONITOR rej=");
+  c=e1i32(L,c,rej[0]);
+  c=e1str(L,c,"/");
+  c=e1i32(L,c,m);
+  trace_add(sd,s,L[0..c]);
+  if(rej[0]>0){
+    // regime change: preserve old slot for lineage, re-observe
+    let p1:[]u8=z_alloc(256);
+    let n1:i32=st_path(sd,"slot_G.dat",p1);
+    let p2:[]u8=z_alloc(256);
+    let n2:i32=st_path(sd,"oldslot.dat",p2);
+    let g:[]u8=read_file(p1[0..n1]);
+    write_file(p2[0..n2],g);
+    let L2:[]u8=z_alloc(48);
+    let d:i32=e1str(L2,0,"REGIME_CHANGE");
+    trace_add(sd,s,L2[0..d]);
+    put32(s,92,1);
+    return 1;
+  }
+  let L3:[]u8=z_alloc(48);
+  let e3:i32=e1str(L3,0,"NO_CHANGE");
+  trace_add(sd,s,L3[0..e3]);
+  return 16;
+}
+// ---- phase 25: CONFIRM_SEND ----
+fn ph_confirm_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  let m:i32=6;
+  if(nt<m){ m=nt; }
+  if(ig(s,4)+m>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit confirm");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let i:i32=0;
+  while(i<m){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    emit_tp(sd,k,a,b,pred_edges(e,a,b));
+    i=i+1;
+  }
+  put32(s,92,m);
+  return 26;
+}
+// ---- phase 26: CONFIRM_WAIT ----
+fn ph_confirm_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let m:i32=ig(s,92);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,m,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"CONFIRM acc=");
+  c=e1i32(L,c,acc[0]);
+  c=e1str(L,c,"/");
+  c=e1i32(L,c,m);
+  trace_add(sd,s,L[0..c]);
+  return 16;
+}
+// attribute distance^2 between entities
+fn attr_dist(k:[]u8,x:i32,y:i32)i64 {
+  let s:i64=0;
+  let kk:i32=0;
+  while(kk<3){
+    let d:i64=(k[452+x*3+kk] as i64)-(k[452+y*3+kk] as i64);
+    s=s+d*d;
+    kk=kk+1;
+  }
+  return s;
+}
+// nearest training pair by pair-attribute distance -> its y
+fn nn_predict(k:[]u8,a:i32,b:i32)i32 {
+  let nt:i32=ig(k,352);
+  let best:i32=0;
+  let bd:i64=999999999;
+  let i:i32=0;
+  while(i<nt){
+    let ta:i32=k[352+4+i*3] as i32;
+    let tb:i32=k[352+4+i*3+1] as i32;
+    let d:i64=attr_dist(k,a,ta)+attr_dist(k,b,tb);
+    if(d<bd){ bd=d; best=i; }
+    i=i+1;
+  }
+  return k[352+4+best*3+2] as i32;
+}
+// ---- phase 27: PREDICT_SEND (C0/C1) ----
+fn ph_predict_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let p:i32=ig(s,48);
+  if(ig(s,4)+p>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit predict");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let i:i32=0;
+  while(i<p){
+    let a:i32=k[876+i*2] as i32;
+    let b:i32=k[876+i*2+1] as i32;
+    emit_tp(sd,k,a,b,nn_predict(k,a,b));
+    i=i+1;
+  }
+  return 28;
+}
+// ---- phase 28: PREDICT_TALLY ----
+fn ph_predict_tally(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let p:i32=ig(s,48);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,p,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let hs:i32=acc[0];
+  let v:i32=0;
+  if(hs<5){ v=1; }
+  let N:[]u8=z_alloc(48);
+  let nc:i32=0;
+  if(ig(s,76)==11){ nc=e1str(N,0,"C0 attr-NN"); }
+  else { nc=e1str(N,0,"C1 memo+1NN"); }
+  write_summary(sd,s,k,e,hs,-1,0,v,N[0..nc]);
+  return 31;
+}
+// ---- phase 29: MEMO_SEND ----
+fn ph_memo_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let nt:i32=ig(k,352);
+  if(ig(s,4)+nt>ig(s,36)){
+    let N:[]u8=z_alloc(32);
+    let nc:i32=e1str(N,0,"budget hit memo");
+    write_summary(sd,s,k,e,-1,-1,0,0,N[0..nc]);
+    return 31;
+  }
+  let i:i32=0;
+  while(i<nt){
+    let a:i32=k[352+4+i*3] as i32;
+    let b:i32=k[352+4+i*3+1] as i32;
+    let y:i32=k[352+4+i*3+2] as i32;
+    emit_tp(sd,k,a,b,y);
+    i=i+1;
+  }
+  put32(s,92,nt);
+  return 30;
+}
+// ---- phase 30: MEMO_WAIT ----
+fn ph_memo_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let nt:i32=ig(s,92);
+  let acc:[]u8=z_alloc(4);
+  let rej:[]u8=z_alloc(4);
+  let forb:[]u8=z_alloc(4);
+  let off:i32=parse_resps(ib,iblen,from,nt,acc,rej,forb);
+  put32(s,88,off);
+  put32(s,4,ig(s,4)+acc[0]+rej[0]);
+  let L:[]u8=z_alloc(64);
+  let c:i32=e1str(L,0,"MEMO acc=");
+  c=e1i32(L,c,acc[0]);
+  c=e1str(L,c,"/");
+  c=e1i32(L,c,nt);
+  trace_add(sd,s,L[0..c]);
+  return 16;
+}
+// ---- phase 32: C5_SEND (id-order rank) ----
+fn ph_c5_send(sd:[]u8,s:[]u8,k:[]u8,e:[]u8)i32 {
+  let perm:[]u8=z_alloc(10);
+  let i:i32=0;
+  while(i<10){ perm[i]=i as u8; i=i+1; }
+  emit_rank(sd,k,perm);
+  let L:[]u8=z_alloc(48);
+  let c:i32=e1str(L,0,"C5 id-order rank sent");
+  trace_add(sd,s,L[0..c]);
+  return 33;
+}
+// ---- phase 33: C5_WAIT ----
+fn ph_c5_wait(sd:[]u8,s:[]u8,k:[]u8,e:[]u8,ib:[]u8,iblen:i32)i32 {
+  let from:i32=ig(s,88);
+  let tok:[]u8=z_alloc(64);
+  let le:i32=line_end(ib,from,iblen);
+  let tl:i32=gettok(ib[from..le],le-from,0,tok);
+  let c:i32=resp_class(tok[0..tl]);
+  put32(s,88,le+1);
+  put32(s,4,ig(s,4)+1);
+  let rr:i32=-1;
+  if(c==3){ rr=1; }
+  if(c==4){ rr=0; }
+  let v:i32=0;
+  if(rr==0){ v=1; }
+  let N:[]u8=z_alloc(32);
+  let nc:i32=e1str(N,0,"C5 id-order");
+  write_summary(sd,s,k,e,-1,rr,0,v,N[0..nc]);
+  return 31;
+}
+// ================= main dispatch =================
+fn main()i32 {
+  let sd:[]u8=_zag_arg(1);
+  let arm:[]u8=_zag_arg(2);
+  let seedstr:[]u8=_zag_arg(3);
+  let s:[]u8=st_load(sd);
+  if(s.len==0){
+    s=st_new();
+    st_setstr(s,96,arm);
+    let ov:[]u8=z_alloc(4);
+    p_int(seedstr,0,seedstr.len,ov);
+    put32(s,16,ig(ov,0));
+    put32(s,0,0);
+  } else {
+    if(ig(s,0)==31){
+      let oseq:i32=ig(s,12);
+      let ogid:i32=ig(s,20);
+      let ocom:i32=ig(s,24);
+      let opar:i32=ig(s,28);
+      let ocons:i32=ig(s,88);
+      s=st_new();
+      put32(s,12,oseq);
+      put32(s,20,ogid);
+      put32(s,24,ocom);
+      put32(s,28,opar);
+      put32(s,88,ocons);
+      st_setstr(s,96,arm);
+      let ov2:[]u8=z_alloc(4);
+      p_int(seedstr,0,seedstr.len,ov2);
+      put32(s,16,ig(ov2,0));
+      put32(s,0,0);
+    }
+  }
+  let k:[]u8=kb_load(sd);
+  if(k.len==0){ k=kb_new(); }
+  let e:[]u8=ed_load(sd);
+  if(e.len==0){ e=ed_new(); }
+  let ip:[]u8=z_alloc(256);
+  let inl:i32=st_path(sd,"inbox.txt",ip);
+  let ib:[]u8=read_file(ip[0..inl]);
+  let iblen:i32=ib.len;
+  let phase:i32=ig(s,0);
+  let next:i32=phase;
+  if(phase==0){ next=ph_init(sd,s,k,e,arm); }
+  if(phase==1){ ob_add(sd,"OBSERVE"); next=2; }
+  if(phase==2){ next=ph_wait_observe(sd,s,k,e,ib,iblen); }
+  if(phase==3){ next=ph_add_next(sd,s,k,e); }
+  if(phase==4){ next=ph_add_wait(sd,s,k,e,ib,iblen); }
+  if(phase==5){ next=ph_del_next(sd,s,k,e); }
+  if(phase==6){ next=ph_del_wait(sd,s,k,e,ib,iblen); }
+  if(phase==7){ next=ph_hyp_build(sd,s,k,e); }
+  if(phase==8){ next=ph_hyp_wait(sd,s,k,e,ib,iblen); }
+  if(phase==9){ next=ph_probe_next(sd,s,k,e); }
+  if(phase==10){ next=ph_probe_send(sd,s,k,e); }
+  if(phase==11){ next=ph_probe_wait(sd,s,k,e,ib,iblen); }
+  if(phase==12){ next=ph_commit_send(sd,s,k,e); }
+  if(phase==13){ next=ph_commit_wait(sd,s,k,e,ib,iblen); }
+  if(phase==14){ next=ph_defer_send(sd,s,k,e); }
+  if(phase==15){ next=ph_defer_wait(sd,s,k,e,ib,iblen); }
+  if(phase==16){ next=ph_heldout_req(sd,s,k,e); }
+  if(phase==17){ next=ph_heldout_wait(sd,s,k,e,ib,iblen); }
+  if(phase==18){ next=ph_heldout_send(sd,s,k,e); }
+  if(phase==19){ next=ph_heldout_tally(sd,s,k,e,ib,iblen); }
+  if(phase==20){ next=ph_rank_build(sd,s,k,e); }
+  if(phase==21){ next=ph_rank_send(sd,s,k,e); }
+  if(phase==22){ next=ph_rank_wait(sd,s,k,e,ib,iblen); }
+  if(phase==23){ next=ph_monitor_send(sd,s,k,e); }
+  if(phase==24){ next=ph_monitor_wait(sd,s,k,e,ib,iblen); }
+  if(phase==25){ next=ph_confirm_send(sd,s,k,e); }
+  if(phase==26){ next=ph_confirm_wait(sd,s,k,e,ib,iblen); }
+  if(phase==27){ next=ph_predict_send(sd,s,k,e); }
+  if(phase==28){ next=ph_predict_tally(sd,s,k,e,ib,iblen); }
+  if(phase==29){ next=ph_memo_send(sd,s,k,e); }
+  if(phase==30){ next=ph_memo_wait(sd,s,k,e,ib,iblen); }
+  if(phase==32){ next=ph_c5_send(sd,s,k,e); }
+  if(phase==33){ next=ph_c5_wait(sd,s,k,e,ib,iblen); }
+  put32(s,0,next);
+  st_save(sd,s);
+  kb_save(sd,k);
+  ed_save(sd,e);
+  if(next==31){ return 1; }
+  return 0;
+}
+// find edge index in working set, -1 if absent
+fn ed_find(e:[]u8,a:i32,b:i32)i32 {
+  let ne:i32=ig(e,0);
+  let i:i32=0;
+  while(i<ne){
+    if((e[4+i*2] as i32)==a && (e[4+i*2+1] as i32)==b){ return i; }
+    i=i+1;
+  }
+  return -1;
+}
