@@ -87,7 +87,10 @@ learn-file-adjacent change is one additive branch in do_query
   S12-NOFIRE.
 - S12A HOOKGEN-SETUP (disclosed apparatus, in order): read tagC from
   the live binding directory (pre-clear, runtime-derived, no
-  literals); setup_worldA(A); clear_plans(L2); clear_bindings(L2,S2);
+  literals); setup_worldA(A); re-specialize ret/vfy/cnt on the
+  restored world A (specialize_ret/vfy/cnt; the L-state spec indexes
+  are world-relative and S10E built them on A2; no new episodes, rel
+  logs intact; amendment N1); clear_plans(L2); clear_bindings(L2,S2);
   zero_counters(S2); zero L2+13276..13296 (hook telemetry re-arm, per
   the S11A precedent); derive t1..t4 = tagC+2..+5, rels/objs from
   vocab_scan/first_obj/first_subj, gtG1/gtG2 = 813+7/+8, build G1/G2.
@@ -206,3 +209,38 @@ hc_run1/2/3.txt with empty stderr logs. Verify HK-R1..HK-G8.
 Then write REPORT.md. Commits: prereg (alone, this commit),
 implementation, artifacts, report. All local, never pushed,
 explicit pathspecs.
+
+## 8. Amendment N1 (committed alone before the corrected build)
+
+Cause: the first build's Act 3 run broke the frozen G2Q0 line. G2Q0
+did not agree first-try; instead trigger-B fired twice (RETRY att=1,
+att=2), retired the RET coverage contract, and the query agreed on
+generic fallback. Root cause: a design miss in the S12A apparatus,
+not a mechanism failure. The L-state spec-procedure indexes
+(ret/vfy/cnt fact indexes at L+68/L+132 etc.) are WORLD-RELATIVE:
+they store fact indices into the live world. S10E re-specialized
+them on the drifted world A2 (specialize_ret/vfy/cnt at cb_main
+1078/1086/1094). S12A restored world A WITHOUT re-specializing, so
+ret_spec read A2 fact positions against world-A facts and returned 0
+subjects for (601,621); the S-contract still routed 601 to spec
+(vers=2), hence the disagreement. Notably, self-trigger handled the
+stale index exactly as designed: two bounded retries, coverage
+contract retired, generic fallback, agree.
+
+Correction (frozen): S12A now re-specializes on the restored world
+A (specialize_ret/vfy/cnt on L2/S2, no new episodes; the rel logs
+are intact and deduped), following the S10E precedent
+("re-specialize after a world change"). At S12A all three coverage
+contracts are active, so cov_induct takes the u_induct path (fresh
+induct, no revcount bump, no req latch); admit sets are unchanged
+(RET {601,602}, VFY {601,602,603}, CNT {601,602,603}), so all
+section-4 predictions stand UNCHANGED, including G2-COVREV's
+olderr=1 (dc saturates at 2 from the re-inducted dc=0) and the
+SUMMARY-HOOKGEN counts. The broken run's artifacts are discarded
+(run files overwritten by the corrected runs); the observed RETRY
+sequence is recorded here as evidence, not adopted.
+
+Kill bars HK-R1..HK-G8 are unchanged. F4 is extended: the stale
+spec-index episode is recorded as a real integration finding
+(world-relative learner indexes must be re-specialized after a
+world restore), with the trigger-B recovery as the safety net.
