@@ -167,7 +167,8 @@ recorded targets; R2 indep=1 = +20; R3 = -20):
   takes its successor's 40 -> all 40.
 - Re-apply R6 all 12: all stay 40 (fixpoint).
 - 2x R2(z[6],1): 40->60->80. R6(z[5]) -> 80;
-  z[4] stays 100.
+  z[4] stays 40 (it was set to 40 by the FULL
+  sweep; the 1-hop does not reach it).
 - Backward sweep again (z[6] applied last, its
   successor z[7] already 80): all 80.
 
@@ -242,7 +243,7 @@ CY12 bars:
   re-application.
 - K-CY12-RAISE: after 2x R2(z6,1):
   b_sup[z6]==80; R6(z5): b_sup[z5]==80 &&
-  b_sup[z4]==100.
+  b_sup[z4]==40.
 - K-CY12-RAISEFULL: all 12 b_sup==80 after
   the backward sweep.
 
@@ -284,6 +285,32 @@ Determinism and hygiene:
   opaque identifiers.
 
 Bar count: 3 PCs + 18 K bars + K-DET + K-HYG = 23.
+
+## 5b. Amendment (2026-10-03, after the first
+implementation run; transparent re-freeze)
+
+The first run went 20/21, exposing one prereg error.
+No frozen rule was changed to chase the bar; the
+correction below re-derives the prediction from the
+frozen rules. The implementation was then re-run
+from scratch.
+
+- A1 (K-CY12-RAISE composition slip): the prereg
+  predicted b_sup[z4]==100 at the raise 1-hop
+  ("z4 stays 100"). Wrong: the FULL sweep set every
+  node to 40 (K-CY12-FULL, K-CY12-FIX both passed),
+  and nothing touches z4 between the sweep and the
+  raise 1-hop, so z4 is 40, not 100, when R6(z5)
+  is applied. The implementation was faithful to
+  the frozen rules (CY12-RAISED emitted z6=80;
+  R6(z5) set z5=80); the hand composition forgot
+  the sweep's effect on z4. Corrected bar:
+  b_sup[z6]==80 && b_sup[z5]==80 &&
+  b_sup[z4]==40. The discriminating content is
+  preserved: the raise reaches exactly one hop
+  (z5 takes 80, z4 unchanged); a transitive
+  one-application propagation would have set
+  z4=80.
 
 ## 6. Falsifiers (what kills the claim)
 

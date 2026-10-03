@@ -88,6 +88,69 @@ minted.
   bp8_full.zag, runs, REPORT.md) comes in a LATER
   commit, strictly after this one.
 
-## Step 2: implementation (pending)
+## Step 2: implementation (done)
 
-## Step 3: runs + REPORT.md (pending)
+- Files: bp8_learner.zag (verbatim copy of BP-7's
+  bp7_learner.zag, SHA-256
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e
+  on both, `cmp` clean), bp8_driver.zag (new: three
+  world arms MCH/CY12/HET, bp8_absorb with the
+  identical body of bp7_absorb, bp8_allsup test
+  helper, bp8_selfcnt, world builders, in-driver
+  bars). Zero new learner functions this lane.
+- Built: `sed -n '1,2668p'
+  ../belief_provenance_7/bp7_full.zag` (the patched
+  block, verbatim) + bp8_learner.zag + bp8_driver.zag
+  > bp8_full.zag; pinned znc by absolute path,
+  build exit 0 -> bp8_bin (376036 bytes; log:
+  bp8_compile.txt; A0102 warnings are the benign
+  ignored-return-value pattern pervasive in the
+  frozen block itself, same as BP-4 through BP-7).
+- Block SHA-256 re-verified before AND after the
+  build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged).
+- Amendment round (PREREG.md Section 5b): the first
+  run went 20/21, exposing one prereg composition
+  slip of mine (K-CY12-RAISE: z4=40 not 100 at the
+  raise 1-hop; the FULL sweep had set every node to
+  40). Prereg amended transparently with the
+  re-derivation; no frozen rule changed to chase
+  the bar. The lane was then re-run from scratch.
+- No Python/C/JS/Rust invoked at any point. Safebin
+  PATH held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any authored lane file or run
+  output (byte-verified with grep).
+- 0 new edge types (1/3/7/14 all pre-existing in the
+  block; the HET ring reuses pre-existing kinds 1
+  and 3), 0 new node types (tags 1/3/20
+  pre-existing), 0 modes, 0 bridges, 0 handlers
+  (one-system accounting).
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  fa9caf0f7a3c025cf72d6e83ef143252699aa1bc58ff4c4575705a3b02ce2bae
+  for bp8_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 21/21 PASS (3 PCs + 18 K bars).
+  MCH: match/contradict codes 1/0; same-fact net
+  90/0/1 (frozen R2-then-R3 order pinned);
+  reversed order absorbs only the contradict
+  (80/1/0, n7==0); two type-7s saturate to one R2
+  (conf 2, sup 110); multi-fact net 90/0/1;
+  same-fact/multi-fact nets equal (fact-blind).
+  CY12: weak 40, 1-hop 40 (z4/z11 stay 100), full
+  sweep all 40, fixpoint all 40, raise to 80,
+  raise 1-hop z5=80/z4=40, raise-full all 80.
+  HET: weak v4=40; R6(v3) no-op ret 255 (type-1
+  blocks); R6(v4) ret 100 reabsorbs; full sweep
+  all 100; fixpoint all 100; type-3 no-op ret 255
+  on v5, v6 weakening reabsorbed.
+  BP8-SUMMARY 21/21; 23/23 with K-DET/K-HYG.
+- REPORT.md written with verdict BP-8-PASS. The 7
+  sealed predictions stay sealed; this lane adds
+  open-dynamics evidence only.
+- Committed with explicit pathspecs, local only,
+  never pushed.
+- Ledger: non-ledger task, nothing minted; ledger
+  file untouched.
