@@ -1,0 +1,1884 @@
+// learner.zag -- L2-METAREUSE-COMPOSE-2 (operator composition),
+// based byte-identical on l2_metareuse_adversary/learner.zag
+// (L2-INVERT-VALUE) plus a composition phase 2. Generic
+// machinery + learned state only. No world data, no fact
+// literals, no relation literals, no domain literals, no
+// per-query operator literals in this file.
+// Phase 1 (unchanged): the six reuse operators tried in
+// fixed order [1..6] on agg_src, first verifying operator
+// wins. Phase 2 (new): if phase 1 fails, the fixed [1..6]
+// enumeration is retried with each operator-built Z MAP
+// (recorded in ZSRC_IDS, live, cap==qcap, id != agg_src)
+// as the source, in build order. A Z-structure produced
+// by one operator can thus serve as the source for
+// another operator on a later query. Termination: phase 2
+// runs only if phase 1 failed; the source list is
+// snapshotted once per query (Z MAPs built during phase 2
+// are not reused mid-query); one composition step per
+// query; every operator call stays fold/rel bounded;
+// op_mask gates phase 2 identically (skipped when 0).
+// The six reuse operators (1=COMBINE, 2=SUBSTITUTE, 3=TRUNCATE,
+// 4=INVERT, 5=ABSTRACT, 6=CONCRETIZE); INVERT has two
+// forms: Form B (value-mapping inversion: reverse value
+// lookup + backward chain walk, tried first) and Form A
+// (structural relation-sequence reversal, fallback). The
+// learner selects which operator to apply per query by
+// trial verification under a fixed generic order: the
+// first operator whose full grounding executes to the
+// query terminal with the required value is committed. OP_MASK (driver-set causal-control flag, never
+// written by the learner) gates which operators may be tried.
+// Every interface mapping (entry relation, fold-pair relations,
+// value relation, partner walk rels, substitute entry candidates,
+// truncate fold counts, invert reversed rels, abstract pattern,
+// concretize bindings) is discovered from learner state and
+// world facts, never hardcoded.
+// Prereg: l2_invert_value/PREREG.md (frozen). Pure Zag.
+// 0 modes, 0 handlers, 0 new edge types, 0 new opcodes,
+// 0 semantic cases, 0 domain-pair templates.
+//
+// State layout (u8 buffer):
+//   0 NF  1 NM  2 NE  3 reserved  4 NN  5 unused
+//   6 STALE_MAP  7 STALE_HOP  8 STALE_FACT
+//   9 LAST_VIA  10 unused  11 IN_MR  12 MR_ENTERED
+//   16..367:  facts, 44 x 8B [sub,rel,obj,live,0,0,0,0]
+//   368..1007: MAPs, 16 x 40B [tag=20,live,start,end,rlen,flen,
+//               reason,pad, rels x12 @+8, facts x12 @+20,
+//               dom @+32, cap @+33, d_entry @+34, d_r1 @+35,
+//               d_r2 @+36, d_nf @+37, d_valrel @+38,
+//               dir @+39 (0=forward, 1=inverse/backward)]
+//   1008..1263: edges, 64 x 4B [from,to,type,pad]
+//   1264..1327: answer nodes, 16 x 4B [via,0,0,0]
+//   1328 SEARCH i32  1332 EXEC i32  1336 A_SEARCH i32  1340 A_EXEC i32
+//   1344 LAST_VAL i32  1348 AGG_SRC (i32)  1352 ROUTE_SRC (i32)
+//   1356 BINDING (i32)  1360 BIND_DECIDED (i32)
+//   1364 BIND_TRIES (i32, binding attempts made)
+//   1368 PIPE_HIT (i32)  1372 LAST_TERM (i32)
+//   1376 MR_OP (i32)  1380 MR_OP_TRIES (i32)
+//   1384 MR_OP_DECIDED (i32)  1388 OP_MASK (i32)
+//   1392 ZSRC_COUNT (i32)  1396..1411 ZSRC_IDS (16 x u8:
+//   operator-built Z MAP ids in build order; never cleared
+//   by ex_query, persists across queries within one arm)
+//   1412..: scratch (caller-allocated)
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8, off:i32)i32 {
+  return (b[off] as i32) | ((b[off+1] as i32)<<8) | ((b[off+2] as i32)<<16) | ((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn ob_app(ob:[]u8, at:i32, s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){ob[at+i]=s[i];i=i+1;}
+  return at+s.len;
+}
+fn ob_nl(ob:[]u8, at:i32)i32 { ob[at]=10; return at+1; }
+fn ob_i32(ob:[]u8, at:i32, v:i32)i32 {
+  let neg:i32=0;
+  let x:i32=v;
+  if(x<0){neg=1;x=0-x;}
+  let nd:i32=1;
+  let t:i32=x;
+  while(t>=10){t=t/10;nd=nd+1;}
+  if(neg==1){ob[at]=45;}
+  let p:i32=at+neg+nd-1;
+  t=x;
+  let k:i32=0;
+  while(k<nd){ob[p-k]=((t%10)+48) as u8; t=t/10; k=k+1;}
+  return at+neg+nd;
+}
+
+// ---- trace emit helpers (cursor via atp) ----
+fn ex_p(ob:[]u8, atp:[]u8, s:[]u8)void {
+  let at:i32=get32(atp,0);
+  at=ob_app(ob,at,s);
+  set32(atp,0,at);
+  return;
+}
+fn ex_pi(ob:[]u8, atp:[]u8, v:i32)void {
+  let at:i32=get32(atp,0);
+  at=ob_i32(ob,at,v);
+  set32(atp,0,at);
+  return;
+}
+fn ex_pnl(ob:[]u8, atp:[]u8)void {
+  let at:i32=get32(atp,0);
+  at=ob_nl(ob,at);
+  set32(atp,0,at);
+  return;
+}
+
+// ---- cost counting (frozen rules) ----
+fn ex_tick(st:[]u8)void {
+  set32(st,1336,get32(st,1336)+1);
+  set32(st,1328,get32(st,1328)+1);
+  return;
+}
+fn ex_tickm(st:[]u8)void {
+  set32(st,1336,get32(st,1336)+1);
+  set32(st,1328,get32(st,1328)+1);
+  return;
+}
+fn ex_exec(st:[]u8)void {
+  set32(st,1332,get32(st,1332)+1);
+  if((st[11] as i32)==1){set32(st,1340,get32(st,1340)+1);}
+  return;
+}
+
+// ---- facts: world observations ----
+fn f_teach(st:[]u8, sub:i32, rel:i32, obj:i32)i32 {
+  let n:i32=st[0] as i32;
+  if(n>=44){return -1;}
+  let o:i32=16+n*8;
+  st[o]=sub as u8; st[o+1]=rel as u8; st[o+2]=obj as u8; st[o+3]=1;
+  st[o+4]=0; st[o+5]=0; st[o+6]=0; st[o+7]=0;
+  st[0]=(n+1) as u8;
+  return n;
+}
+
+// ---- MAPs (40-byte rows, 12 rel/fact slots) ----
+fn m_teach(st:[]u8, rs:[]u8, rl:i32, fs:[]u8, fl:i32, start:i32, end:i32, dom:i32, cap:i32)i32 {
+  let n:i32=st[1] as i32;
+  if(n>=16){return -1;}
+  if(rl>12){return -1;}
+  if(fl>12){return -1;}
+  let k:i32=0;
+  while(k<fl){
+    let fid:i32=fs[k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){return -1;}
+    if((st[fo+1] as i32)!=(rs[k] as i32)){return -1;}
+    k=k+1;
+  }
+  // interface descriptor extraction (cap==AGG only), generic:
+  // d_entry=rels[0], rels[1..] must alternate (r1,r2), d_valrel =
+  // rel of first live fact with sub==end. No rel literal here.
+  let de:i32=0; let dr1:i32=0; let dr2:i32=0; let dnf:i32=0; let dvr:i32=0;
+  if(cap==1){
+    if(rl<3){return -1;}
+    let rem:i32=rl-1;
+    if((rem%2)==1){return -1;}
+    dr1=rs[1] as i32; dr2=rs[2] as i32;
+    let ok:i32=1;
+    let i:i32=1;
+    while(i<rl){
+      let e:i32=dr1;
+      if((i%2)==0){e=dr2;}
+      if((rs[i] as i32)!=e){ok=0;}
+      i=i+1;
+    }
+    if(ok==0){return -1;}
+    de=rs[0] as i32; dnf=rem/2;
+    let nf2:i32=st[0] as i32;
+    let j:i32=0;
+    let got:i32=0;
+    while(j<nf2){
+      if(got==0){
+        let fo2:i32=16+j*8;
+        if((st[fo2+3] as i32)==1){
+          if((st[fo2] as i32)==end){dvr=st[fo2+1] as i32; got=1;}
+        }
+      }
+      j=j+1;
+    }
+    if(got==0){return -1;}
+  }
+  let o:i32=368+n*40;
+  st[o]=20; st[o+1]=1; st[o+2]=start as u8; st[o+3]=end as u8;
+  st[o+4]=rl as u8; st[o+5]=fl as u8; st[o+6]=0; st[o+7]=0;
+  k=0;
+  while(k<12){
+    if(k<rl){st[o+8+k]=rs[k];}
+    else {st[o+8+k]=0;}
+    k=k+1;
+  }
+  k=0;
+  while(k<12){
+    if(k<fl){st[o+20+k]=fs[k];}
+    else {st[o+20+k]=0;}
+    k=k+1;
+  }
+  st[o+32]=dom as u8; st[o+33]=cap as u8;
+  st[o+34]=de as u8; st[o+35]=dr1 as u8; st[o+36]=dr2 as u8;
+  st[o+37]=dnf as u8; st[o+38]=dvr as u8; st[o+39]=0;
+  st[1]=(n+1) as u8;
+  return n;
+}
+fn map_create(st:[]u8, rs:[]u8, rl:i32, fs:[]u8, fl:i32, start:i32, end:i32, dom:i32, cap:i32, de:i32, dr1:i32, dr2:i32, dnf:i32, dvr:i32, dir:i32)i32 {
+  let n:i32=st[1] as i32;
+  if(n>=16){return -1;}
+  let o:i32=368+n*40;
+  st[o]=20; st[o+1]=1; st[o+2]=start as u8; st[o+3]=end as u8;
+  st[o+4]=rl as u8; st[o+5]=fl as u8; st[o+6]=0; st[o+7]=0;
+  let k:i32=0;
+  while(k<12){
+    if(k<rl){st[o+8+k]=rs[k];}
+    else {st[o+8+k]=0;}
+    k=k+1;
+  }
+  k=0;
+  while(k<12){
+    if(k<fl){st[o+20+k]=fs[k];}
+    else {st[o+20+k]=0;}
+    k=k+1;
+  }
+  st[o+32]=dom as u8; st[o+33]=cap as u8;
+  st[o+34]=de as u8; st[o+35]=dr1 as u8; st[o+36]=dr2 as u8;
+  st[o+37]=dnf as u8; st[o+38]=dvr as u8; st[o+39]=dir as u8;
+  st[1]=(n+1) as u8;
+  return n;
+}
+fn map_retire(st:[]u8, mid:i32, reason:i32)void {
+  let o:i32=368+mid*40;
+  st[o+1]=0;
+  st[o+6]=reason as u8;
+  return;
+}
+
+// ---- execution ----
+fn m_exec(st:[]u8, mid:i32, start:i32)i32 {
+  ex_exec(st);
+  st[6]=255;
+  let o:i32=368+mid*40;
+  if((st[o+1] as i32)==0){return -1;}
+  let rl:i32=st[o+4] as i32;
+  let bwd:i32=st[o+39] as i32;
+  let cur:i32=start;
+  let k:i32=0;
+  while(k<rl){
+    let fid:i32=st[o+20+k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){
+      st[6]=mid as u8; st[7]=k as u8; st[8]=fid as u8;
+      return -1;
+    }
+    let bad:i32=0;
+    if(bwd==1){
+      if((st[fo+2] as i32)!=cur){bad=1;}
+    } else {
+      if((st[fo] as i32)!=cur){bad=1;}
+    }
+    if((st[fo+1] as i32)!=(st[o+8+k] as i32)){bad=1;}
+    if(bad==1){return -1;}
+    if(bwd==1){
+      cur=st[fo] as i32;
+    } else {
+      cur=st[fo+2] as i32;
+    }
+    k=k+1;
+  }
+  return cur;
+}
+fn chain_exec(st:[]u8, fs:[]u8, rs:[]u8, n:i32, start:i32)i32 {
+  ex_exec(st);
+  let cur:i32=start;
+  let k:i32=0;
+  while(k<n){
+    let fid:i32=fs[k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){return -1;}
+    if((st[fo] as i32)!=cur){return -1;}
+    if((st[fo+1] as i32)!=(rs[k] as i32)){return -1;}
+    cur=st[fo+2] as i32;
+    k=k+1;
+  }
+  return cur;
+}
+// backward chain execution over stored fact/rel arrays:
+// each hop requires obj==cur and rel==rs[k], then
+// cur=sub. Verifies inverse (dir=1) groundings.
+fn chain_exec_bwd(st:[]u8, fs:[]u8, rs:[]u8, n:i32, start:i32)i32 {
+  ex_exec(st);
+  let cur:i32=start;
+  let k:i32=0;
+  while(k<n){
+    let fid:i32=fs[k] as i32;
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==0){return -1;}
+    if((st[fo+2] as i32)!=cur){return -1;}
+    if((st[fo+1] as i32)!=(rs[k] as i32)){return -1;}
+    cur=st[fo] as i32;
+    k=k+1;
+  }
+  return cur;
+}
+
+// ---- edges ----
+fn e_add(st:[]u8, from:i32, to:i32, typ:i32)void {
+  let n:i32=st[2] as i32;
+  if(n>=64){return;}
+  let i:i32=0;
+  while(i<n){
+    let o:i32=1008+i*4;
+    let dup:i32=0;
+    if((st[o] as i32)==from){
+      if((st[o+1] as i32)==to){
+        if((st[o+2] as i32)==typ){dup=1;}
+      }
+    }
+    if(dup==1){return;}
+    i=i+1;
+  }
+  let o:i32=1008+n*4;
+  st[o]=from as u8; st[o+1]=to as u8; st[o+2]=typ as u8; st[o+3]=0;
+  st[2]=(n+1) as u8;
+  return;
+}
+fn e_count(st:[]u8, typ:i32)i32 {
+  let n:i32=st[2] as i32;
+  let c:i32=0;
+  let i:i32=0;
+  while(i<n){
+    if((st[1008+i*4+2] as i32)==typ){c=c+1;}
+    i=i+1;
+  }
+  return c;
+}
+fn e_has(st:[]u8, from:i32, to:i32, typ:i32)i32 {
+  let n:i32=st[2] as i32;
+  let i:i32=0;
+  while(i<n){
+    let o:i32=1008+i*4;
+    if((st[o] as i32)==from){
+      if((st[o+1] as i32)==to){
+        if((st[o+2] as i32)==typ){return 1;}
+      }
+    }
+    i=i+1;
+  }
+  return 0;
+}
+fn e_has_to(st:[]u8, to:i32, typ:i32)i32 {
+  let n:i32=st[2] as i32;
+  let i:i32=0;
+  while(i<n){
+    let o:i32=1008+i*4;
+    if((st[o+1] as i32)==to){
+      if((st[o+2] as i32)==typ){return 1;}
+    }
+    i=i+1;
+  }
+  return 0;
+}
+fn ex_eoth(st:[]u8)i32 {
+  let n:i32=st[2] as i32;
+  let c:i32=0;
+  let i:i32=0;
+  while(i<n){
+    let tp:i32=st[1008+i*4+2] as i32;
+    if(tp!=14){ if(tp!=16){ c=c+1; } }
+    i=i+1;
+  }
+  return c;
+}
+
+// ---- counted fact scans (frozen counting rules) ----
+fn ex_find_sub_skip(st:[]u8, s:i32, skiprel:i32)i32 {
+  let nf:i32=st[0] as i32;
+  let i:i32=0;
+  while(i<nf){
+    ex_tick(st);
+    let fo:i32=16+i*8;
+    if((st[fo+3] as i32)==1){
+      if((st[fo] as i32)==s){
+        if((st[fo+1] as i32)!=skiprel){return i;}
+      }
+    }
+    i=i+1;
+  }
+  return -1;
+}
+fn ex_find_subrel(st:[]u8, s:i32, r:i32)i32 {
+  let nf:i32=st[0] as i32;
+  let i:i32=0;
+  while(i<nf){
+    ex_tick(st);
+    let fo:i32=16+i*8;
+    if((st[fo+3] as i32)==1){
+      if((st[fo] as i32)==s){
+        if((st[fo+1] as i32)==r){return i;}
+      }
+    }
+    i=i+1;
+  }
+  return -1;
+}
+// obj-match scan: first live fact with obj==o AND rel==r.
+// Used by value-mapping inversion (reverse value lookup is
+// done inline in mr_invert_val; this serves the backward
+// chain hops). Cost (first matching fid)+1, or 44 on miss.
+fn ex_find_objrel(st:[]u8, o:i32, r:i32)i32 {
+  let nf:i32=st[0] as i32;
+  let i:i32=0;
+  while(i<nf){
+    ex_tick(st);
+    let fo:i32=16+i*8;
+    let m1:i32=0;
+    if((st[fo+3] as i32)==1){m1=1;}
+    let m2:i32=0;
+    if(m1==1){
+      if((st[fo+2] as i32)==o){m2=1;}
+    }
+    let m3:i32=0;
+    if(m2==1){
+      if((st[fo+1] as i32)==r){m3=1;}
+    }
+    if(m3==1){return i;}
+    i=i+1;
+  }
+  return -1;
+}
+fn ex_valof(st:[]u8, nd:i32, vrel:i32)i32 {
+  let f:i32=ex_find_subrel(st,nd,vrel);
+  if(f<0){return -1;}
+  return st[16+f*8+2] as i32;
+}
+
+// ---- fold-walk (as in the sibling combine lane) ----
+fn ex_foldwalk(st:[]u8, u:i32, k:i32, vrel:i32, ff:[]u8)i32 {
+  let f1:i32=ex_find_sub_skip(st,u,vrel);
+  if(f1<0){return 0;}
+  let s1:i32=st[16+f1*8+1] as i32;
+  let a0:i32=st[16+f1*8+2] as i32;
+  let f2:i32=ex_find_sub_skip(st,a0,vrel);
+  if(f2<0){return 0;}
+  let s2:i32=st[16+f2*8+1] as i32;
+  let cur:i32=st[16+f2*8+2] as i32;
+  ff[0]=f1 as u8; ff[1]=f2 as u8;
+  let j:i32=1;
+  while(j<k){
+    let g1:i32=ex_find_subrel(st,cur,s1);
+    if(g1<0){return 0;}
+    let ak:i32=st[16+g1*8+2] as i32;
+    let g2:i32=ex_find_subrel(st,ak,s2);
+    if(g2<0){return 0;}
+    cur=st[16+g2*8+2] as i32;
+    ff[2*j]=g1 as u8; ff[2*j+1]=g2 as u8;
+    j=j+1;
+  }
+  return s1 + s2*256 + cur*65536;
+}
+
+// ---- AGG segment: entry scan from s, then a k-fold walk with
+// runtime relation discovery. final==0: midpoint segment, shape
+// success suffices. final==1: terminal segment, require
+// term==t AND VAL(term,vrel)==v. Records segment rels into tr
+// and fact ids into tf. Returns the foldwalk pack or 0.
+fn mr_agg_seg(st:[]u8, ob:[]u8, atp:[]u8, s:i32, k:i32, vrel:i32, final:i32, t:i32, v:i32, tr:[]u8, tf:[]u8)i32 {
+  let nfacts:i32=st[0] as i32;
+  let fid:i32=0;
+  let found:i32=0;
+  let re:i32=0;
+  let u:i32=0;
+  let efid:i32=0;
+  while(fid<nfacts){
+    if(found==0){
+      ex_tick(st);
+      let fo:i32=16+fid*8;
+      if((st[fo+3] as i32)==1){
+        if((st[fo] as i32)==s){
+          re=st[fo+1] as i32;
+          u=st[fo+2] as i32;
+          efid=fid;
+          found=1;
+        }
+      }
+    }
+    fid=fid+1;
+  }
+  if(found==0){return 0;}
+  let ff:[]u8=z_alloc(16);
+  let p2:i32=ex_foldwalk(st,u,k,vrel,ff);
+  ex_p(ob,atp,"MR-ENTRY-CAND r=");
+  ex_pi(ob,atp,re);
+  ex_p(ob,atp," u=");
+  ex_pi(ob,atp,u);
+  if(p2==0){
+    ex_p(ob,atp," FAIL-SHAPE\n");
+    return 0;
+  }
+  let s1:i32=p2%256;
+  let s2:i32=(p2/256)%256;
+  let term:i32=(p2/65536)%256;
+  ex_p(ob,atp," SHAPE-OK term=");
+  ex_pi(ob,atp,term);
+  let ok:i32=1;
+  if(final==1){
+    if(term!=t){ok=0;}
+    if(ok==1){
+      let vv:i32=ex_valof(st,term,vrel);
+      if(vv!=v){ok=0;}
+    }
+    if(ok==1){ex_p(ob,atp," VERIFY-OK\n");}
+    else {ex_p(ob,atp," VERIFY-FAIL\n");}
+  } else {
+    ex_pnl(ob,atp);
+  }
+  if(ok==0){return 0;}
+  tr[0]=re as u8;
+  tf[0]=efid as u8;
+  let w:i32=0;
+  while(w<2*k){
+    if((w%2)==0){tr[1+w]=s1 as u8;}
+    else {tr[1+w]=s2 as u8;}
+    tf[1+w]=ff[w];
+    w=w+1;
+  }
+  return p2;
+}
+
+// ---- partner segment: strict walk over the partner source's
+// stored relseq rels from s. A missing hop fails the segment.
+fn mr_route_seg(st:[]u8, s:i32, rsrc:i32, hr:[]u8, hf:[]u8)i32 {
+  let o:i32=368+rsrc*40;
+  let rl:i32=st[o+4] as i32;
+  let cur:i32=s;
+  let k:i32=0;
+  while(k<rl){
+    let r:i32=st[o+8+k] as i32;
+    let f:i32=ex_find_subrel(st,cur,r);
+    if(f<0){return -1;}
+    hr[k]=r as u8;
+    hf[k]=f as u8;
+    cur=st[16+f*8+2] as i32;
+    k=k+1;
+  }
+  return cur;
+}
+
+// ---- build, execution-verify, promote, deliver the adapted Z.
+// src2<0 means single-source provenance.
+fn mr_buildwin(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, src1:i32, src2:i32, hr1:[]u8, hf1:[]u8, l1:i32, hr2:[]u8, hf2:[]u8, l2:i32, de:i32, dr1:i32, dr2:i32, dnf:i32, dvr:i32)i32 {
+  let zr:[]u8=z_alloc(32);
+  let zf:[]u8=z_alloc(32);
+  let w:i32=0;
+  while(w<l1){
+    zr[w]=hr1[w];
+    zf[w]=hf1[w];
+    w=w+1;
+  }
+  let x:i32=0;
+  while(x<l2){
+    zr[l1+x]=hr2[x];
+    zf[l1+x]=hf2[x];
+    x=x+1;
+  }
+  let zl:i32=l1+l2;
+  ex_p(ob,atp,"MR-ZBUILD rels=");
+  w=0;
+  while(w<zl){
+    ex_pi(ob,atp,zr[w] as i32);
+    if(w+1<zl){ex_p(ob,atp,",");}
+    w=w+1;
+  }
+  ex_p(ob,atp," facts=");
+  w=0;
+  while(w<zl){
+    ex_pi(ob,atp,zf[w] as i32);
+    if(w+1<zl){ex_p(ob,atp,",");}
+    w=w+1;
+  }
+  ex_pnl(ob,atp);
+  let vt:i32=chain_exec(st,zf,zr,zl,s);
+  ex_p(ob,atp,"MR-VERIFY term=");
+  ex_pi(ob,atp,vt);
+  if(vt==t){
+    ex_p(ob,atp," OK\n");
+    let zid:i32=map_create(st,zr,zl,zf,zl,s,vt,qdom,qcap,de,dr1,dr2,dnf,dvr,0);
+    if(zid>=0){
+      let zc0:i32=get32(st,1392);
+      if(zc0<16){
+        st[1396+zc0]=zid as u8;
+        set32(st,1392,zc0+1);
+      }
+    }
+    e_add(st,zid,src1,16);
+    if(src2>=0){e_add(st,zid,src2,16);}
+    ex_p(ob,atp,"MR-PROMOTE z=");
+    ex_pi(ob,atp,zid);
+    ex_p(ob,atp," t16=");
+    ex_pi(ob,atp,zid);
+    ex_p(ob,atp,"->");
+    ex_pi(ob,atp,src1);
+    if(src2>=0){
+      ex_p(ob,atp," t16=");
+      ex_pi(ob,atp,zid);
+      ex_p(ob,atp,"->");
+      ex_pi(ob,atp,src2);
+    }
+    ex_pnl(ob,atp);
+    ex_deliver(st,ob,atp,zid,s,vt,v);
+    return vt;
+  }
+  ex_p(ob,atp," FAIL\n");
+  return -2;
+}
+
+// ---- build, backward-verify, promote, deliver the inverse Z.
+// hr/hf arrive in walk order (value hop first, then the
+// backward chain hops). The MAP is created with dir=1 so
+// pipeline execution walks it backward; the pipeline reads
+// the inverse's value from stored fact[0]'s obj.
+fn mr_buildwin_inv(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, src1:i32, hr:[]u8, hf:[]u8, zl:i32, de:i32, dr1:i32, dr2:i32, dnf:i32, dvr:i32)i32 {
+  ex_p(ob,atp,"MR-ZBUILD rels=");
+  let w:i32=0;
+  while(w<zl){
+    ex_pi(ob,atp,hr[w] as i32);
+    if(w+1<zl){ex_p(ob,atp,",");}
+    w=w+1;
+  }
+  ex_p(ob,atp," facts=");
+  w=0;
+  while(w<zl){
+    ex_pi(ob,atp,hf[w] as i32);
+    if(w+1<zl){ex_p(ob,atp,",");}
+    w=w+1;
+  }
+  ex_pnl(ob,atp);
+  let vt:i32=chain_exec_bwd(st,hf,hr,zl,s);
+  ex_p(ob,atp,"MR-VERIFY term=");
+  ex_pi(ob,atp,vt);
+  if(vt==t){
+    ex_p(ob,atp," OK\n");
+    let zid:i32=map_create(st,hr,zl,hf,zl,s,vt,qdom,qcap,de,dr1,dr2,dnf,dvr,1);
+    if(zid>=0){
+      let zc0:i32=get32(st,1392);
+      if(zc0<16){
+        st[1396+zc0]=zid as u8;
+        set32(st,1392,zc0+1);
+      }
+    }
+    e_add(st,zid,src1,16);
+    ex_p(ob,atp,"MR-PROMOTE z=");
+    ex_pi(ob,atp,zid);
+    ex_p(ob,atp," t16=");
+    ex_pi(ob,atp,zid);
+    ex_p(ob,atp,"->");
+    ex_pi(ob,atp,src1);
+    ex_pnl(ob,atp);
+    ex_deliver(st,ob,atp,zid,s,vt,v);
+    return vt;
+  }
+  ex_p(ob,atp," FAIL\n");
+  return -2;
+}
+
+// ---- operator 1: cross-domain COMBINE ----
+fn mr_combine(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  set32(st,1348,agg_src);
+  let ao:i32=368+agg_src*40;
+  let anfk:i32=st[ao+37] as i32;
+  let avrel:i32=st[ao+38] as i32;
+  ex_p(ob,atp,"MR-SRC-AGG id=");
+  ex_pi(ob,atp,agg_src);
+  ex_p(ob,atp," entry=");
+  ex_pi(ob,atp,st[ao+34] as i32);
+  ex_p(ob,atp," r1=");
+  ex_pi(ob,atp,st[ao+35] as i32);
+  ex_p(ob,atp," r2=");
+  ex_pi(ob,atp,st[ao+36] as i32);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,anfk);
+  ex_p(ob,atp," valrel=");
+  ex_pi(ob,atp,avrel);
+  ex_pnl(ob,atp);
+  let nm:i32=st[1] as i32;
+  let rsrcs:[]u8=z_alloc(16);
+  let nr:i32=0;
+  let pcap:i32=-1;
+  let mid:i32=0;
+  while(mid<nm){
+    ex_tickm(st);
+    let o:i32=368+mid*40;
+    let live:i32=st[o+1] as i32;
+    let mc:i32=st[o+33] as i32;
+    ex_p(ob,atp,"MR-RSEARCH id=");
+    ex_pi(ob,atp,mid);
+    ex_p(ob,atp," cap=");
+    ex_pi(ob,atp,mc);
+    let take:i32=0;
+    if(live==1){
+      if(mc!=qcap){
+        if(pcap<0){pcap=mc;}
+        if(mc==pcap){take=1;}
+      }
+    }
+    if(take==1){
+      ex_p(ob,atp," PCAP\n");
+      rsrcs[nr]=mid as u8;
+      nr=nr+1;
+    } else {
+      ex_p(ob,atp," SKIP\n");
+    }
+    mid=mid+1;
+  }
+  let hr1:[]u8=z_alloc(16);
+  let hf1:[]u8=z_alloc(16);
+  let hr2:[]u8=z_alloc(16);
+  let hf2:[]u8=z_alloc(16);
+  let ans:i32=-2;
+  let ri:i32=0;
+  let won:i32=0;
+  while(ri<nr){
+    if(won==0){
+      let rsrc:i32=rsrcs[ri] as i32;
+      ex_p(ob,atp,"MR-SRC-ROUTE id=");
+      ex_pi(ob,atp,rsrc);
+      ex_pnl(ob,atp);
+      // binding b=1: AGG head, partner tail
+      set32(st,1364,get32(st,1364)+1);
+      let hp:i32=mr_agg_seg(st,ob,atp,s,anfk,avrel,0,0,0,hr1,hf1);
+      let w1:i32=0;
+      if(hp!=0){
+        let ht:i32=(hp/65536)%256;
+        let l1:i32=1+2*anfk;
+        let ro:i32=368+rsrc*40;
+        let l2:i32=st[ro+4] as i32;
+        let tt:i32=mr_route_seg(st,ht,rsrc,hr2,hf2);
+        if(tt>=0){
+          if(tt==t){
+            let vv:i32=ex_valof(st,tt,avrel);
+            if(vv==v){w1=1;}
+          }
+        }
+        if(w1==1){
+          set32(st,1352,rsrc);
+          set32(st,1356,1);
+          set32(st,1360,1);
+          ex_p(ob,atp,"MR-BIND b=1 OK\n");
+          ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,rsrc,hr1,hf1,l1,hr2,hf2,l2,0,0,0,0,avrel);
+          won=1;
+        }
+      }
+      if(w1==0){
+        ex_p(ob,atp,"MR-BIND b=1 FAIL\n");
+        // binding b=2: partner head, AGG tail
+        set32(st,1364,get32(st,1364)+1);
+        let ro2:i32=368+rsrc*40;
+        let l1b:i32=st[ro2+4] as i32;
+        let ht2:i32=mr_route_seg(st,s,rsrc,hr1,hf1);
+        let w2:i32=0;
+        if(ht2>=0){
+          ex_p(ob,atp,"MR-HEAD term=");
+          ex_pi(ob,atp,ht2);
+          ex_pnl(ob,atp);
+          let tp:i32=mr_agg_seg(st,ob,atp,ht2,anfk,avrel,1,t,v,hr2,hf2);
+          if(tp!=0){w2=1;}
+        }
+        if(w2==1){
+          set32(st,1352,rsrc);
+          set32(st,1356,2);
+          set32(st,1360,1);
+          ex_p(ob,atp,"MR-BIND b=2 OK\n");
+          let l2b:i32=1+2*anfk;
+          ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,rsrc,hr1,hf1,l1b,hr2,hf2,l2b,0,0,0,0,avrel);
+          won=1;
+        } else {
+          ex_p(ob,atp,"MR-BIND b=2 FAIL\n");
+        }
+      }
+    }
+    ri=ri+1;
+  }
+  return ans;
+}
+
+// ---- operator 2: SUBSTITUTE (entry-relation substitution) ----
+fn mr_substitute(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  let ao:i32=368+agg_src*40;
+  let de:i32=st[ao+34] as i32;
+  let dr1:i32=st[ao+35] as i32;
+  let dr2:i32=st[ao+36] as i32;
+  let dnf:i32=st[ao+37] as i32;
+  let dvr:i32=st[ao+38] as i32;
+  ex_p(ob,atp,"MR-SRC-SUB id=");
+  ex_pi(ob,atp,agg_src);
+  ex_p(ob,atp," entry=");
+  ex_pi(ob,atp,de);
+  ex_p(ob,atp," r1=");
+  ex_pi(ob,atp,dr1);
+  ex_p(ob,atp," r2=");
+  ex_pi(ob,atp,dr2);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,dnf);
+  ex_p(ob,atp," valrel=");
+  ex_pi(ob,atp,dvr);
+  ex_pnl(ob,atp);
+  // entry-candidate collection: all live facts with sub==s
+  // and rel != d_entry, fid order, every fid ticked.
+  let cands:[]u8=z_alloc(44);
+  let candr:[]u8=z_alloc(44);
+  let ncu:i32=0;
+  let nf:i32=st[0] as i32;
+  let fid:i32=0;
+  while(fid<nf){
+    ex_tick(st);
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==1){
+      if((st[fo] as i32)==s){
+        if((st[fo+1] as i32)!=de){
+          cands[ncu]=fid as u8;
+          candr[ncu]=st[fo+1];
+          ncu=ncu+1;
+        }
+      }
+    }
+    fid=fid+1;
+  }
+  let ans:i32=-2;
+  let won:i32=0;
+  let ci:i32=0;
+  while(ci<ncu){
+    if(won==0){
+      let cf:i32=cands[ci] as i32;
+      let cr:i32=candr[ci] as i32;
+      let cfo:i32=16+cf*8;
+      let u:i32=st[cfo+2] as i32;
+      ex_p(ob,atp,"MR-SUB-CAND r=");
+      ex_pi(ob,atp,cr);
+      ex_p(ob,atp," u=");
+      ex_pi(ob,atp,u);
+      let ff:[]u8=z_alloc(16);
+      let p:i32=ex_foldwalk(st,u,dnf,dvr,ff);
+      if(p==0){
+        ex_p(ob,atp," FAIL-SHAPE\n");
+      } else {
+        let s1:i32=p%256;
+        let s2:i32=(p/256)%256;
+        let term:i32=(p/65536)%256;
+        ex_p(ob,atp," SHAPE-OK term=");
+        ex_pi(ob,atp,term);
+        let ok:i32=1;
+        if(term!=t){ok=0;}
+        if(ok==1){
+          let vv:i32=ex_valof(st,term,dvr);
+          if(vv!=v){ok=0;}
+        }
+        if(ok==1){
+          ex_p(ob,atp," VERIFY-OK\n");
+          let zr:[]u8=z_alloc(32);
+          let zf:[]u8=z_alloc(32);
+          zr[0]=cr as u8;
+          zf[0]=cf as u8;
+          let w:i32=0;
+          while(w<2*dnf){
+            if((w%2)==0){zr[1+w]=s1 as u8;}
+            else {zr[1+w]=s2 as u8;}
+            zf[1+w]=ff[w];
+            w=w+1;
+          }
+          let zl:i32=1+2*dnf;
+          ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,-1,zr,zf,zl,zr,zf,0,cr,s1,s2,dnf,dvr);
+          if(ans>=0){won=1;}
+        } else {
+          ex_p(ob,atp," VERIFY-FAIL\n");
+        }
+      }
+    }
+    ci=ci+1;
+  }
+  return ans;
+}
+
+// ---- operator 3: TRUNCATE (prefix truncation, nf descending) ----
+fn mr_truncate(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  let ao:i32=368+agg_src*40;
+  let dnf:i32=st[ao+37] as i32;
+  let dvr:i32=st[ao+38] as i32;
+  ex_p(ob,atp,"MR-SRC-TRUNC id=");
+  ex_pi(ob,atp,agg_src);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,dnf);
+  ex_pnl(ob,atp);
+  let hr:[]u8=z_alloc(16);
+  let hf:[]u8=z_alloc(16);
+  let ans:i32=-2;
+  let won:i32=0;
+  let nf2:i32=dnf-1;
+  while(nf2>=1){
+    if(won==0){
+      ex_p(ob,atp,"MR-TRUNC-TRY nf=");
+      ex_pi(ob,atp,nf2);
+      ex_pnl(ob,atp);
+      let p:i32=mr_agg_seg(st,ob,atp,s,nf2,dvr,1,t,v,hr,hf);
+      if(p!=0){
+        let s1:i32=p%256;
+        let s2:i32=(p/256)%256;
+        let re:i32=hr[0] as i32;
+        let zl:i32=1+2*nf2;
+        ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,-1,hr,hf,zl,hr,hf,0,re,s1,s2,nf2,dvr);
+        if(ans>=0){won=1;}
+      }
+    }
+    nf2=nf2-1;
+  }
+  return ans;
+}
+
+// ---- operator 4 Form B: value-mapping inversion. The source
+// MAP's value mapping is key->value (key --forward rels-->
+// terminal --valrel--> value); the inverse is value->key.
+// Reverse value lookup: scan facts for rel==dvr AND obj==v;
+// the first match must land on the SOURCE's own terminal
+// (else the value does not belong to this source's mapping).
+// Then walk the source's forward rels backward (obj-match
+// hops) from that terminal to the key. The query's value v
+// is consumed by the reverse lookup itself.
+fn mr_invert_val(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  let ao:i32=368+agg_src*40;
+  let rl:i32=st[ao+4] as i32;
+  let dvr:i32=st[ao+38] as i32;
+  let aend:i32=st[ao+3] as i32;
+  let nf:i32=st[0] as i32;
+  let fid:i32=0;
+  let tfv:i32=-1;
+  let tstar:i32=-1;
+  while(fid<nf){
+    ex_tick(st);
+    let fo:i32=16+fid*8;
+    let m1:i32=0;
+    if((st[fo+3] as i32)==1){m1=1;}
+    let m2:i32=0;
+    if(m1==1){
+      if((st[fo+1] as i32)==dvr){m2=1;}
+    }
+    let m3:i32=0;
+    if(m2==1){
+      if((st[fo+2] as i32)==v){m3=1;}
+    }
+    if(m3==1){
+      if(tfv<0){
+        tfv=fid;
+        tstar=st[fo] as i32;
+      }
+    }
+    fid=fid+1;
+  }
+  ex_p(ob,atp,"MR-INVVAL-LOOKUP t*=");
+  ex_pi(ob,atp,tstar);
+  ex_p(ob,atp," srcend=");
+  ex_pi(ob,atp,aend);
+  ex_pnl(ob,atp);
+  if(tfv<0){
+    ex_p(ob,atp,"MR-INVVAL-FAIL\n");
+    return -2;
+  }
+  if(tstar!=aend){
+    ex_p(ob,atp,"MR-INVVAL-FAIL\n");
+    return -2;
+  }
+  let hr:[]u8=z_alloc(16);
+  let hf:[]u8=z_alloc(16);
+  hr[0]=dvr as u8;
+  hf[0]=tfv as u8;
+  let cur:i32=tstar;
+  let bad:i32=0;
+  let k:i32=0;
+  while(k<rl){
+    if(bad==0){
+      let r:i32=st[ao+8+rl-1-k] as i32;
+      let f:i32=ex_find_objrel(st,cur,r);
+      if(f<0){bad=1;}
+      else {
+        hr[1+k]=r as u8;
+        hf[1+k]=f as u8;
+        cur=st[16+f*8] as i32;
+      }
+    }
+    k=k+1;
+  }
+  if(bad==1){
+    ex_p(ob,atp,"MR-INVVAL-FAIL\n");
+    return -2;
+  }
+  if(cur!=t){
+    ex_p(ob,atp,"MR-INVVAL-VERIFY-FAIL\n");
+    return -2;
+  }
+  ex_p(ob,atp,"MR-INVVAL-WALK key=");
+  ex_pi(ob,atp,cur);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"MR-INVVAL-OK\n");
+  let zl:i32=rl+1;
+  let bwd1:i32=st[ao+8+rl-1] as i32;
+  let bwd2:i32=st[ao+8+rl-2] as i32;
+  let dnf:i32=(rl-1)/2;
+  let ans:i32=mr_buildwin_inv(st,ob,atp,s,t,v,qdom,qcap,agg_src,hr,hf,zl,dvr,bwd1,bwd2,dnf,dvr);
+  return ans;
+}
+
+// ---- operator 4: INVERT. Form B (value-mapping inversion)
+// is tried first and completes the operator per the lane
+// mandate; Form A (reverse the source's stored relation
+// sequence, then walk it strictly forward) is the fallback
+// for queries that do not ground a reverse value chain.
+fn mr_invert(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  let ao:i32=368+agg_src*40;
+  let rl:i32=st[ao+4] as i32;
+  let dvr:i32=st[ao+38] as i32;
+  ex_p(ob,atp,"MR-SRC-INV id=");
+  ex_pi(ob,atp,agg_src);
+  ex_p(ob,atp," rlen=");
+  ex_pi(ob,atp,rl);
+  ex_pnl(ob,atp);
+  let ansb:i32=mr_invert_val(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+  if(ansb>=0){return ansb;}
+  let irev:[]u8=z_alloc(12);
+  let k:i32=0;
+  while(k<rl){
+    irev[k]=st[ao+8+rl-1-k];
+    k=k+1;
+  }
+  ex_p(ob,atp,"MR-INV-REV rels=");
+  k=0;
+  while(k<rl){
+    ex_pi(ob,atp,irev[k] as i32);
+    if(k+1<rl){ex_p(ob,atp,",");}
+    k=k+1;
+  }
+  ex_pnl(ob,atp);
+  let hr:[]u8=z_alloc(16);
+  let hf:[]u8=z_alloc(16);
+  let cur:i32=s;
+  let bad:i32=0;
+  k=0;
+  while(k<rl){
+    if(bad==0){
+      let r:i32=irev[k] as i32;
+      let f:i32=ex_find_subrel(st,cur,r);
+      if(f<0){bad=1;}
+      else {
+        hr[k]=r as u8;
+        hf[k]=f as u8;
+        cur=st[16+f*8+2] as i32;
+      }
+    }
+    k=k+1;
+  }
+  if(bad==1){
+    ex_p(ob,atp,"MR-INV-FAIL\n");
+    return -2;
+  }
+  if(cur!=t){
+    ex_p(ob,atp,"MR-INV-VERIFY-FAIL\n");
+    return -2;
+  }
+  let vv:i32=ex_valof(st,cur,dvr);
+  if(vv!=v){
+    ex_p(ob,atp,"MR-INV-VERIFY-FAIL\n");
+    return -2;
+  }
+  ex_p(ob,atp,"MR-INV-OK\n");
+  let dnf:i32=(rl-1)/2;
+  let ans:i32=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,-1,hr,hf,rl,hr,hf,0,irev[0] as i32,irev[1] as i32,irev[2] as i32,dnf,dvr);
+  return ans;
+}
+
+// ---- operator 5: ABSTRACT (extract the pattern: the interface
+// relation plus the fold skeleton; concrete fold relations are
+// discovered at runtime from the query's own chain) ----
+fn mr_abstract(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  let ao:i32=368+agg_src*40;
+  let de:i32=st[ao+34] as i32;
+  let dnf:i32=st[ao+37] as i32;
+  let dvr:i32=st[ao+38] as i32;
+  ex_p(ob,atp,"MR-SRC-ABS id=");
+  ex_pi(ob,atp,agg_src);
+  ex_p(ob,atp," entry=");
+  ex_pi(ob,atp,de);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,dnf);
+  ex_p(ob,atp," valrel=");
+  ex_pi(ob,atp,dvr);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"MR-PATTERN entry=");
+  ex_pi(ob,atp,de);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,dnf);
+  ex_p(ob,atp," valrel=");
+  ex_pi(ob,atp,dvr);
+  ex_pnl(ob,atp);
+  // entry-candidate collection: live facts with sub==s AND
+  // rel==d_entry (the pattern's interface must match; no
+  // interface adaptation happens here).
+  let cands:[]u8=z_alloc(44);
+  let ncu:i32=0;
+  let nf:i32=st[0] as i32;
+  let fid:i32=0;
+  while(fid<nf){
+    ex_tick(st);
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==1){
+      if((st[fo] as i32)==s){
+        if((st[fo+1] as i32)==de){
+          cands[ncu]=fid as u8;
+          ncu=ncu+1;
+        }
+      }
+    }
+    fid=fid+1;
+  }
+  let ans:i32=-2;
+  let won:i32=0;
+  let ci:i32=0;
+  while(ci<ncu){
+    if(won==0){
+      let cf:i32=cands[ci] as i32;
+      let cfo:i32=16+cf*8;
+      let u:i32=st[cfo+2] as i32;
+      ex_p(ob,atp,"MR-ABS-CAND r=");
+      ex_pi(ob,atp,de);
+      ex_p(ob,atp," u=");
+      ex_pi(ob,atp,u);
+      let ff:[]u8=z_alloc(16);
+      let p:i32=ex_foldwalk(st,u,dnf,dvr,ff);
+      if(p==0){
+        ex_p(ob,atp," FAIL-SHAPE\n");
+      } else {
+        let s1:i32=p%256;
+        let s2:i32=(p/256)%256;
+        let term:i32=(p/65536)%256;
+        ex_p(ob,atp," SHAPE-OK term=");
+        ex_pi(ob,atp,term);
+        let ok:i32=1;
+        if(term!=t){ok=0;}
+        if(ok==1){
+          let vv:i32=ex_valof(st,term,dvr);
+          if(vv!=v){ok=0;}
+        }
+        if(ok==1){
+          ex_p(ob,atp," VERIFY-OK\n");
+          let zr:[]u8=z_alloc(32);
+          let zf:[]u8=z_alloc(32);
+          zr[0]=de as u8;
+          zf[0]=cf as u8;
+          let w:i32=0;
+          while(w<2*dnf){
+            if((w%2)==0){zr[1+w]=s1 as u8;}
+            else {zr[1+w]=s2 as u8;}
+            zf[1+w]=ff[w];
+            w=w+1;
+          }
+          let zl:i32=1+2*dnf;
+          ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,agg_src,-1,zr,zf,zl,zr,zf,0,de,s1,s2,dnf,dvr);
+          if(ans>=0){won=1;}
+        } else {
+          ex_p(ob,atp," VERIFY-FAIL\n");
+        }
+      }
+    }
+    ci=ci+1;
+  }
+  return ans;
+}
+
+// ---- operator 6: CONCRETIZE (instantiate a pattern MAP's
+// skeleton with concrete values: any entry binding may fill
+// the hole, fold relations are discovered at runtime and must
+// be novel against the source structure's folds) ----
+fn mr_concretize(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32)i32 {
+  // pattern-source search: first live MAP in id order with
+  // cap==qcap and d_entry==0 (the hole entry marks a pattern).
+  let nm:i32=st[1] as i32;
+  let pat:i32=-1;
+  let done:i32=0;
+  let mid:i32=0;
+  while(mid<nm){
+    if(done==0){
+      ex_tickm(st);
+      let o:i32=368+mid*40;
+      let mc:i32=st[o+33] as i32;
+      let pde:i32=st[o+34] as i32;
+      ex_p(ob,atp,"MR-PATSEARCH id=");
+      ex_pi(ob,atp,mid);
+      ex_p(ob,atp," cap=");
+      ex_pi(ob,atp,mc);
+      ex_p(ob,atp," entry=");
+      ex_pi(ob,atp,pde);
+      let hit:i32=0;
+      if((st[o+1] as i32)==1){hit=1;}
+      if(hit==1){
+        if(mc!=qcap){hit=0;}
+      }
+      if(hit==1){
+        if(pde!=0){hit=0;}
+      }
+      if(hit==1){
+        ex_p(ob,atp," MATCH\n");
+        pat=mid;
+        done=1;
+      } else {
+        ex_p(ob,atp," SKIP\n");
+      }
+    }
+    mid=mid+1;
+  }
+  if(pat<0){
+    ex_p(ob,atp,"MR-NO-PATTERN\n");
+    return -2;
+  }
+  let po:i32=368+pat*40;
+  let pnf:i32=st[po+37] as i32;
+  let pvr:i32=st[po+38] as i32;
+  let ao:i32=368+agg_src*40;
+  let ar1:i32=st[ao+35] as i32;
+  let ar2:i32=st[ao+36] as i32;
+  ex_p(ob,atp,"MR-PATTERN-SRC id=");
+  ex_pi(ob,atp,pat);
+  ex_p(ob,atp," nf=");
+  ex_pi(ob,atp,pnf);
+  ex_p(ob,atp," valrel=");
+  ex_pi(ob,atp,pvr);
+  ex_pnl(ob,atp);
+  // entry-candidate collection: ALL live facts with sub==s
+  // (any rel: the hole is concretized by whatever the query
+  // start offers).
+  let cands:[]u8=z_alloc(44);
+  let candr:[]u8=z_alloc(44);
+  let ncu:i32=0;
+  let nf:i32=st[0] as i32;
+  let fid:i32=0;
+  while(fid<nf){
+    ex_tick(st);
+    let fo:i32=16+fid*8;
+    if((st[fo+3] as i32)==1){
+      if((st[fo] as i32)==s){
+        cands[ncu]=fid as u8;
+        candr[ncu]=st[fo+1];
+        ncu=ncu+1;
+      }
+    }
+    fid=fid+1;
+  }
+  let ans:i32=-2;
+  let won:i32=0;
+  let ci:i32=0;
+  while(ci<ncu){
+    if(won==0){
+      let cf:i32=cands[ci] as i32;
+      let cr:i32=candr[ci] as i32;
+      let cfo:i32=16+cf*8;
+      let u:i32=st[cfo+2] as i32;
+      ex_p(ob,atp,"MR-CONC-CAND r=");
+      ex_pi(ob,atp,cr);
+      ex_p(ob,atp," u=");
+      ex_pi(ob,atp,u);
+      let ff:[]u8=z_alloc(16);
+      let p:i32=ex_foldwalk(st,u,pnf,pvr,ff);
+      if(p==0){
+        ex_p(ob,atp," FAIL-SHAPE\n");
+      } else {
+        let s1:i32=p%256;
+        let s2:i32=(p/256)%256;
+        let term:i32=(p/65536)%256;
+        ex_p(ob,atp," SHAPE-OK term=");
+        ex_pi(ob,atp,term);
+        let ok:i32=1;
+        let oldf:i32=0;
+        if(s1==ar1){
+          if(s2==ar2){oldf=1;}
+        }
+        if(oldf==1){
+          ex_p(ob,atp," OLD-FOLDS");
+          ok=0;
+        }
+        if(ok==1){
+          if(term!=t){ok=0;}
+        }
+        if(ok==1){
+          let vv:i32=ex_valof(st,term,pvr);
+          if(vv!=v){ok=0;}
+        }
+        if(ok==1){
+          ex_p(ob,atp," VERIFY-OK\n");
+          let zr:[]u8=z_alloc(32);
+          let zf:[]u8=z_alloc(32);
+          zr[0]=cr as u8;
+          zf[0]=cf as u8;
+          let w:i32=0;
+          while(w<2*pnf){
+            if((w%2)==0){zr[1+w]=s1 as u8;}
+            else {zr[1+w]=s2 as u8;}
+            zf[1+w]=ff[w];
+            w=w+1;
+          }
+          let zl:i32=1+2*pnf;
+          ans=mr_buildwin(st,ob,atp,s,t,v,qdom,qcap,pat,-1,zr,zf,zl,zr,zf,0,cr,s1,s2,pnf,pvr);
+          if(ans>=0){won=1;}
+        } else {
+          ex_p(ob,atp," VERIFY-FAIL\n");
+        }
+      }
+    }
+    ci=ci+1;
+  }
+  return ans;
+}
+
+// ---- fixed operator enumeration: the FIRST verifying
+// operator wins. Mask bits: 1=COMBINE, 2=SUBSTITUTE,
+// 4=TRUNCATE, 8=INVERT, 16=ABSTRACT, 32=CONCRETIZE
+// (via (mask/n)%2, no bitwise ops).
+fn mr_adapt(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, qdom:i32, qcap:i32, agg_src:i32, op_mask:i32)i32 {
+  set32(st,1388,op_mask);
+  let ans:i32=-2;
+  let done:i32=0;
+  if(done==0){
+    if((op_mask%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 1\n");
+      ans=mr_combine(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,1);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 1\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 1\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 1\n");
+    }
+  }
+  if(done==0){
+    if(((op_mask/2)%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 2\n");
+      ans=mr_substitute(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,2);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 2\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 2\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 2\n");
+    }
+  }
+  if(done==0){
+    if(((op_mask/4)%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 3\n");
+      ans=mr_truncate(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,3);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 3\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 3\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 3\n");
+    }
+  }
+  if(done==0){
+    if(((op_mask/8)%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 4\n");
+      ans=mr_invert(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,4);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 4\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 4\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 4\n");
+    }
+  }
+  if(done==0){
+    if(((op_mask/16)%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 5\n");
+      ans=mr_abstract(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,5);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 5\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 5\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 5\n");
+    }
+  }
+  if(done==0){
+    if(((op_mask/32)%2)==1){
+      set32(st,1380,get32(st,1380)+1);
+      ex_p(ob,atp,"MR-OP-TRY 6\n");
+      ans=mr_concretize(st,ob,atp,s,t,v,qdom,qcap,agg_src);
+      if(ans>=0){
+        set32(st,1376,6);
+        set32(st,1384,1);
+        ex_p(ob,atp,"MR-OP-OK 6\n");
+        done=1;
+      } else {
+        ex_p(ob,atp,"MR-OP-FAIL 6\n");
+      }
+    } else {
+      ex_p(ob,atp,"MR-OP-SKIP 6\n");
+    }
+  }
+  // ---- phase 2: composition over operator-built Z sources ----
+  // Runs only if phase 1 failed and reuse is enabled. The
+  // ZSRC_IDS list is snapshotted once per query; a Z built
+  // during phase 2 is recorded for future queries but never
+  // added mid-query (T2). One composition step per query
+  // (T3); all operator calls stay fold/rel bounded (T4);
+  // op_mask gates every try (T5); sources are live,
+  // cap==qcap, id != agg_src, operator-built only (T6).
+  if(done==0){
+    if(op_mask!=0){
+      let zc:i32=get32(st,1392);
+      let zi:i32=0;
+      let anyz:i32=0;
+      while(zi<zc){
+        if(done==0){
+          let zsrc:i32=st[1396+zi] as i32;
+          let okz:i32=0;
+          let oz:i32=368+zsrc*40;
+          if((st[oz+1] as i32)==1){okz=1;}
+          if(okz==1){
+            if((st[oz+33] as i32)!=qcap){okz=0;}
+          }
+          if(okz==1){
+            if(zsrc==agg_src){okz=0;}
+          }
+          if(okz==1){
+            anyz=1;
+            ex_p(ob,atp,"MR-COMP-SRC id=");
+            ex_pi(ob,atp,zsrc);
+            ex_pnl(ob,atp);
+            if(done==0){
+              if((op_mask%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 1\n");
+                ans=mr_combine(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,1);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 1\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 1\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 1\n");
+              }
+            }
+            if(done==0){
+              if(((op_mask/2)%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 2\n");
+                ans=mr_substitute(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,2);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 2\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 2\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 2\n");
+              }
+            }
+            if(done==0){
+              if(((op_mask/4)%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 3\n");
+                ans=mr_truncate(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,3);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 3\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 3\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 3\n");
+              }
+            }
+            if(done==0){
+              if(((op_mask/8)%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 4\n");
+                ans=mr_invert(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,4);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 4\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 4\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 4\n");
+              }
+            }
+            if(done==0){
+              if(((op_mask/16)%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 5\n");
+                ans=mr_abstract(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,5);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 5\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 5\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 5\n");
+              }
+            }
+            if(done==0){
+              if(((op_mask/32)%2)==1){
+                set32(st,1380,get32(st,1380)+1);
+                ex_p(ob,atp,"MR-COP-TRY 6\n");
+                ans=mr_concretize(st,ob,atp,s,t,v,qdom,qcap,zsrc);
+                if(ans>=0){
+                  set32(st,1376,6);
+                  set32(st,1384,1);
+                  ex_p(ob,atp,"MR-COP-OK 6\n");
+                  done=1;
+                } else {
+                  ex_p(ob,atp,"MR-COP-FAIL 6\n");
+                }
+              } else {
+                ex_p(ob,atp,"MR-COP-SKIP 6\n");
+              }
+            }
+          }
+        }
+        zi=zi+1;
+      }
+      if(anyz==0){
+        ex_p(ob,atp,"MR-COMP-NONE\n");
+      }
+    }
+  }
+  return ans;
+}
+
+// ---- deliver: answer-node provenance + ANS print ----
+fn ex_deliver(st:[]u8, ob:[]u8, atp:[]u8, mid:i32, start:i32, term:i32, val:i32)void {
+  let r:i32=m_exec(st,mid,start);
+  st[9]=mid as u8;
+  set32(st,1344,val);
+  set32(st,1372,term);
+  let nn:i32=st[4] as i32;
+  let aid:i32=40+nn;
+  let ao:i32=1264+nn*4;
+  st[ao]=mid as u8; st[ao+1]=0; st[ao+2]=0; st[ao+3]=0;
+  st[4]=(nn+1) as u8;
+  e_add(st,aid,mid,14);
+  ex_p(ob,atp,"ANS term=");
+  ex_pi(ob,atp,term);
+  ex_p(ob,atp," val=");
+  ex_pi(ob,atp,val);
+  ex_p(ob,atp," via=");
+  ex_pi(ob,atp,mid);
+  ex_pnl(ob,atp);
+  return;
+}
+
+// ---- query: pipeline, then the meta-reuse phase on failure ----
+fn ex_query(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, cap:i32, dom:i32, op_mask:i32)i32 {
+  st[12]=0;
+  set32(st,1344,-2);
+  set32(st,1372,-2);
+  set32(st,1368,0);
+  let nm:i32=st[1] as i32;
+  let mid:i32=0;
+  while(mid<nm){
+    let r:i32=m_exec(st,mid,s);
+    if(r==t){
+      let vv:i32=-1;
+      let mo:i32=368+mid*40;
+      let vr2:i32=st[mo+38] as i32;
+      let mdir:i32=st[mo+39] as i32;
+      if(mdir==1){
+        let ff0:i32=st[mo+20] as i32;
+        vv=st[16+ff0*8+2] as i32;
+      } else {
+        if(vr2!=0){vv=ex_valof(st,r,vr2);}
+      }
+      set32(st,1368,1);
+      ex_deliver(st,ob,atp,mid,s,r,vv);
+      return r;
+    }
+    mid=mid+1;
+  }
+  // meta-reuse phase
+  st[11]=1;
+  st[12]=1;
+  set32(st,1336,0);
+  set32(st,1340,0);
+  set32(st,1348,-1);
+  set32(st,1352,-1);
+  set32(st,1356,-1);
+  set32(st,1360,0);
+  set32(st,1364,0);
+  set32(st,1376,-1);
+  set32(st,1380,0);
+  set32(st,1384,0);
+  ex_p(ob,atp,"MR-QUERY s=");
+  ex_pi(ob,atp,s);
+  ex_p(ob,atp," t=");
+  ex_pi(ob,atp,t);
+  ex_p(ob,atp," v=");
+  ex_pi(ob,atp,v);
+  ex_p(ob,atp," cap=");
+  ex_pi(ob,atp,cap);
+  ex_p(ob,atp," dom=");
+  ex_pi(ob,atp,dom);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"MR-PIPELINE-FAIL\n");
+  // AGG-source search: first live MAP with cap==qcap (any domain)
+  let agg_src:i32=-1;
+  let done:i32=0;
+  mid=0;
+  while(mid<nm){
+    if(done==0){
+      ex_tickm(st);
+      let o:i32=368+mid*40;
+      let mc:i32=st[o+33] as i32;
+      ex_p(ob,atp,"MR-ASEARCH id=");
+      ex_pi(ob,atp,mid);
+      ex_p(ob,atp," cap=");
+      ex_pi(ob,atp,mc);
+      let hit:i32=0;
+      if((st[o+1] as i32)==1){hit=1;}
+      if(hit==1){
+        if(mc!=cap){hit=0;}
+      }
+      if(hit==1){
+        ex_p(ob,atp," MATCH\n");
+        agg_src=mid;
+        done=1;
+      } else {
+        ex_p(ob,atp," SKIP\n");
+      }
+    }
+    mid=mid+1;
+  }
+  let ans:i32=-2;
+  if(agg_src>=0){
+    ans=mr_adapt(st,ob,atp,s,t,v,dom,cap,agg_src,op_mask);
+  } else {
+    ex_p(ob,atp,"MR-NO-SRC\n");
+  }
+  st[11]=0;
+  if(ans<0){
+    ex_p(ob,atp,"ANS term=-2 val=-2 via=-1\n");
+    set32(st,1344,-2);
+    set32(st,1372,-2);
+  }
+  return ans;
+}
+// world_X4.zag -- falsification: greedy discovery
+// trapped by a cycle. QX4 region f15-f22 (120->126);
+// 2-cycle f16 (121,32,122), f17 (122,33,121) at lower
+// fid than the live continuation f18 (121,26,123).
+// ex_foldwalk is fold-count bounded, so it must
+// terminate (landing on 121, VERIFY-FAIL). 23 facts.
+
+fn w_teach_all(st:[]u8)void {
+  f_teach(st,10,24,11);
+  f_teach(st,20,21,21);
+  f_teach(st,21,22,22);
+  f_teach(st,22,23,23);
+  f_teach(st,23,22,24);
+  f_teach(st,24,23,25);
+  f_teach(st,25,4,51);
+  f_teach(st,30,24,31);
+  f_teach(st,31,24,32);
+  f_teach(st,70,0,71);
+  f_teach(st,71,34,72);
+  f_teach(st,72,35,73);
+  f_teach(st,73,34,74);
+  f_teach(st,74,35,75);
+  f_teach(st,75,4,52);
+  f_teach(st,120,25,121);
+  f_teach(st,121,32,122);
+  f_teach(st,122,33,121);
+  f_teach(st,121,26,123);
+  f_teach(st,123,27,124);
+  f_teach(st,124,26,125);
+  f_teach(st,125,27,126);
+  f_teach(st,126,4,62);
+  return;
+}
+// driver_X4.zag -- falsification build X4 driver
+// (greedy first-match fold discovery).
+// Predicted: QX1 fails all 6 ops gracefully
+// (XK1' boundary). Bars XK1',XK2' in-Zag; XK3'-XK5'
+// via shell.
+
+fn d_teach_maps(st:[]u8)void {
+  let rs:[]u8=z_alloc(12);
+  let fs:[]u8=z_alloc(12);
+  rs[0]=24; fs[0]=0;
+  m_teach(st,rs,1,fs,1,10,11,2,2);
+  rs[0]=21; rs[1]=22; rs[2]=23; rs[3]=22; rs[4]=23;
+  fs[0]=1; fs[1]=2; fs[2]=3; fs[3]=4; fs[4]=5;
+  m_teach(st,rs,5,fs,5,20,25,1,1);
+  rs[0]=24; rs[1]=24; fs[0]=7; fs[1]=8;
+  m_teach(st,rs,2,fs,2,30,32,2,2);
+  rs[0]=0; rs[1]=34; rs[2]=35; rs[3]=34; rs[4]=35;
+  fs[0]=9; fs[1]=10; fs[2]=11; fs[3]=12; fs[4]=13;
+  m_teach(st,rs,5,fs,5,70,75,1,1);
+  return;
+}
+fn d_teach_all(st:[]u8)void {
+  w_teach_all(st);
+  d_teach_maps(st);
+  return;
+}
+fn d_runq(st:[]u8, ob:[]u8, atp:[]u8, s:i32, t:i32, v:i32, cap:i32, dom:i32, mask:i32, tag:[]u8, rs:[]u8, ro:i32)void {
+  ex_p(ob,atp,"Q ");
+  ex_p(ob,atp,tag);
+  ex_pnl(ob,atp);
+  ex_query(st,ob,atp,s,t,v,cap,dom,mask);
+  set32(rs,ro,st[9] as i32);
+  set32(rs,ro+4,get32(st,1344));
+  set32(rs,ro+8,get32(st,1376));
+  set32(rs,ro+12,get32(st,1380));
+  set32(rs,ro+16,get32(st,1384));
+  set32(rs,ro+20,get32(st,1368));
+  set32(rs,ro+24,get32(st,1336));
+  set32(rs,ro+28,get32(st,1340));
+  set32(rs,ro+32,st[12] as i32);
+  return;
+}
+fn d_bar(ob:[]u8, atp:[]u8, nm:[]u8, v:i32)void {
+  ex_p(ob,atp,nm);
+  ex_p(ob,atp,"=");
+  ex_pi(ob,atp,v);
+  ex_p(ob,atp," ");
+  return;
+}
+fn main()i32 {
+  let ob:[]u8=z_alloc(65536);
+  let atp:[]u8=z_alloc(8);
+
+  // ---------- ARM FULL (mask 63) ----------
+  let stF:[]u8=z_alloc(8192);
+  d_teach_all(stF);
+  ex_p(ob,atp,"ARM FULL\n");
+  let rF:[]u8=z_alloc(256);
+  d_runq(stF,ob,atp,20,25,51,1,1,63,"QA",rF,0);
+  d_runq(stF,ob,atp,30,32,-1,2,2,63,"QB",rF,36);
+  d_runq(stF,ob,atp,120,126,62,1,1,63,"QX4",rF,72);
+  let f_qa_via:i32=get32(rF,0);
+  let f_qb_via:i32=get32(rF,36);
+  let f_qx_val:i32=get32(rF,76);
+  let f_qx_op:i32=get32(rF,80);
+  let f_qx_tries:i32=get32(rF,84);
+  let f_qx_phit:i32=get32(rF,92);
+  let f_qx_as:i32=get32(rF,96);
+  let f_qx_ae:i32=get32(rF,100);
+  let t16F:i32=e_count(stF,16);
+  let othF:i32=ex_eoth(stF);
+  let mdlive:i32=stF[368+0*40+1] as i32;
+  ex_p(ob,atp,"ARM-FULL-END as=");
+  ex_pi(ob,atp,f_qx_as);
+  ex_p(ob,atp," ae="); ex_pi(ob,atp,f_qx_ae);
+  ex_p(ob,atp," t16="); ex_pi(ob,atp,t16F);
+  ex_p(ob,atp," oth="); ex_pi(ob,atp,othF);
+  ex_pnl(ob,atp);
+
+  // ---------- ARM NOREUSE (mask 0) ----------
+  let stN:[]u8=z_alloc(8192);
+  d_teach_all(stN);
+  ex_p(ob,atp,"ARM NOREUSE\n");
+  let rN:[]u8=z_alloc(256);
+  d_runq(stN,ob,atp,20,25,51,1,1,0,"QA",rN,0);
+  d_runq(stN,ob,atp,30,32,-1,2,2,0,"QB",rN,36);
+  d_runq(stN,ob,atp,120,126,62,1,1,0,"QX4",rN,72);
+  let n_qx_val:i32=get32(rN,76);
+  let n_t16:i32=e_count(stN,16);
+  let othN:i32=ex_eoth(stN);
+  ex_p(ob,atp,"ARM-NOREUSE-END t16=");
+  ex_pi(ob,atp,n_t16);
+  ex_p(ob,atp," oth="); ex_pi(ob,atp,othN);
+  ex_pnl(ob,atp);
+
+  // ---------- bars XK1', XK2' ----------
+  let boundary:i32=0;
+  let okb:i32=1;
+  if(f_qx_val!=-2){okb=0;}
+  if(f_qx_tries!=6){okb=0;}
+  if(f_qx_op!=-1){okb=0;}
+  if(t16F!=0){okb=0;}
+  if(othF!=0){okb=0;}
+  if(okb==1){boundary=1;}
+  let solved:i32=0;
+  if(f_qx_val!=-2){solved=1;}
+  let xk2:i32=0;
+  let ok2:i32=1;
+  if(f_qa_via!=1){ok2=0;}
+  if(f_qb_via!=2){ok2=0;}
+  if(n_qx_val!=-2){ok2=0;}
+  if(n_t16!=0){ok2=0;}
+  if(ok2==1){xk2=1;}
+
+  // ---------- falsifiers (wave-level defects only) ----------
+  let ff:i32=0;
+  if(othF!=0){ex_p(ob,atp,"FALSIFIER F-X-EDGE-NEW FULL\n");ff=1;}
+  if(othN!=0){ex_p(ob,atp,"FALSIFIER F-X-EDGE-NEW NOREUSE\n");ff=1;}
+  if(t16F!=0){ex_p(ob,atp,"FALSIFIER F-X-T16-NONZERO\n");ff=1;}
+  if(f_qx_val==-2){
+    if(f_qx_tries!=6){ex_p(ob,atp,"FALSIFIER F-X-TRIES-SHORT\n");ff=1;}
+  }
+  if(mdlive!=1){ex_p(ob,atp,"FALSIFIER F-X-DISTR-SURVIVES\n");ff=1;}
+  ex_p(ob,atp,"XK1-BOUNDARY ");
+  ex_pi(ob,atp,boundary);
+  ex_p(ob,atp," XK1-SOLVED ");
+  ex_pi(ob,atp,solved);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"BARS ");
+  d_bar(ob,atp,"xk2",xk2);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"FALSIFIERS ");
+  ex_pi(ob,atp,ff);
+  ex_pnl(ob,atp);
+  ex_p(ob,atp,"ADV-X4-END\n");
+
+  let at:i32=get32(atp,0);
+  let ptr:i64=(_zag_slice_ptr(ob) as i64);
+  let left:i32=at;
+  let off:i32=0;
+  let go:i32=1;
+  while(go==1){
+    if(left<=0){go=0;}
+    else {
+      let n:i64=_zag_raw_syscall(1,1,ptr+(off as i64),(left as i64),0,0,0);
+      if(n<=0){go=0;}
+      else {
+        let nb:i32=n as i32;
+        off=off+nb;
+        left=left-nb;
+      }
+    }
+  }
+  return 0;
+}
