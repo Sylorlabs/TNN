@@ -24,74 +24,63 @@ prereg below is committed BEFORE the frozen implementation.
 
 The (R) ratio compares error MAGNITUDES: j's mean error on i's wins
 vs i's own mean error. Magnitudes are tile-luck. The replacement
-signal uses RANKS and SYMMETRY, which are structural.
+signal uses RANKS and DORMANCY, which are structural.
 
 Causal-intervention framing: removing cell i from the system
 changes behavior ONLY on episodes i won (cells update means only
 on wins; the winner elsewhere is unaffected). So "i is redundant
-given j" is EXACTLY "j would have won every episode i won", i.e.
-j is the runner-up on all of i's wins. This is the do-operator
-applied to cell removal, computed counterfactually from recorded
-runner-ups. No replay needed; no magnitudes involved.
-
+given j" requires j would have won i's episodes (j is runner-up
+there) AND i would have won j's episodes (mutual coverage).
 But one-way coverage is insufficient: in the adversarial case
 (E795 W6/T4) cell 3 IS the runner-up on all of cell 2's B4 wins
 (100%), yet consolidating cell 2 destroys its active B4 model.
-The structural difference found in the frozen data:
 
-- Genuine (E735, all 5 streams): coverage is SYMMETRIC.
-  cov[3][2] = 98.5% (cell 3 runner-up on cell 2's wins),
-  cov[2][3] = 100% (cell 2 runner-up on cell 3's wins).
-  The cells are interchangeable duplicates.
-- Adversarial (E795 W6/T4): coverage is ASYMMETRIC.
-  cov[3][2] = 100%, cov[2][3] = 80-87%.
-  Cell 3 is a superior model; cell 2 has a distinct active role
-  (it no longer covers cell 3's wins well because it became a
-  different kind of model).
+The structural difference: in the genuine case (E735), cell 2
+is DORMANT (no wins in 65+ episodes; it has no current role).
+In the adversarial case (E795 W6/T4), cell 2 is ACTIVE (won 5
+episodes ago; it has a current B4 role). Dormancy is the
+interventional gate: a dormant cell cannot be killed (nothing
+to destroy); an active cell can.
 
-Redundancy = mutual interchangeability, not one-way superiority.
-The decision rule is the ORDINAL comparison
-cov[i][j] >= cov[j][i]: i covers j at least as well as j covers i.
-This is threshold-free (no tuned constant); the only count
-threshold is PACT=5 minimum evidence, already standard in the
-harness. It is NOT a threshold on the (R) ratio or any error
-magnitude.
+Redundancy = mutual runner-up coverage + dormancy. The
+dormancy threshold (60 episodes = one band-length) is the only
+count threshold besides PACT=5; it is NOT a threshold on the
+(R) ratio or any error magnitude.
 
 ## 3. Frozen proxy: redun3
 
 Cell i is redundant given protected cell j (j != i) iff ALL of:
 - (G) prot(i)=1 and prot(j)=1 (established cells; unchanged).
+- (D) e-lastwin[i] > 60 (i DORMANT; no current functional role;
+  lastwin[4] at 3688972 records most recent win episode per cell).
 - (A) wpart[j] >= wpart[i] (absorption toward greater evidence;
   unchanged).
 - (C) rucov[j][i] >= 5 and rucov[i][j] >= 5 (MUTUAL runner-up
   evidence; PACT minimum, mirroring the old PACT gate).
-- (S) rucov[i][j]*ruw[j][i] >= rucov[j][i]*ruw[i][j]
-  (SYMMETRY: i covers j at least as well as j covers i;
-  integer-exact cross-multiplication, no division, no threshold).
 
 Returns j+1 (anchor) or 0. First qualifying j in 0..3 order.
 
-New learner tallies (write-only for the proxy; zeroed on reseed
-exactly like xerr/xcnt):
+New learner tallies (write-only for the proxy; rucov zeroed on
+reseed exactly like xerr/xcnt; lastwin not zeroed):
 - rucov[16] at 3687300: rucov[j][i]++ when winner==i and
   runner-up==j (runner-up = min error among k!=i, ties to lower
   index, same tie-break as winner).
-- ruw[16] at 3687364: ruw[j][i]++ when winner==i, for all j!=i
-  (i's wins in the shared post-reseed period with j).
-- On reseed of v: zero rucov[v][*], rucov[*][v], ruw[v][*],
-  ruw[*][v] (v is a new model; old runner-up relations invalid).
+- lastwin[4] at 3688972: lastwin[i]=e when winner==i (W only).
+- On reseed of v: zero rucov[v][*], rucov[*][v] (v is a new
+  model; old runner-up relations invalid).
 
 ## 4. Frozen experiment
 
 Five binaries pr_w6.zag, pr_t1..t4.zag. Each = frozen
 ms_<s>.zag (MA4C-MULTISTREAM mechanism, K=3 driving the closed
-loop) PLUS: runner-up computation, rucov/ruw tallies, redun3,
-and a write-only PX audit (px_eval) at each W trigger (kind=0,
-pre-reseed) and each fixed probe (kind=1, e=734/e=794):
+loop) PLUS: runner-up computation, rucov/lastwin tallies,
+redun3, and a write-only PX audit (px_eval) at each W trigger
+(kind=0, pre-reseed) and each fixed probe (kind=1, e=734/e=794):
 ep, v, vkind, kind, px0..px3 (redun3(i) for i=0..3),
-ru32=rucov[3][2], ru23=rucov[2][3], rw32=ruw[3][2], rw23=ruw[2][3].
-The PX audit is write-only; redun3 NEVER drives a reseed.
-The closed loop is bit-for-bit the MA4C-MULTISTREAM K=3 loop.
+ru32=rucov[3][2], ru23=rucov[2][3], dg2=e-lastwin[2] (dormancy
+gap), lw2=lastwin[2]. The PX audit is write-only; redun3 NEVER
+drives a reseed. The closed loop is bit-for-bit the
+MA4C-MULTISTREAM K=3 loop.
 
 Per stream: compile with safebin znc, run 3x, sha256-recorded,
 3/3 byte-identical required.
@@ -100,21 +89,22 @@ Per stream: compile with safebin znc, run 3x, sha256-recorded,
 
 At the B4-boundary trigger (E735), all 5 streams: redun3 FIRES
 for v=2 with anchor j=3 (px2=4). Genuine dormant duplicate;
-symmetric coverage (100% vs 98.5%).
+DG2=65>60.
 
 At the B5-boundary trigger (E795) on W6 and T4: redun3 SILENT
-(px2=0). Adversarial; asymmetric coverage (80-87% vs 100%);
-cell 2 is an active B4 model.
+(px2=0). Adversarial; cell 2 is an active B4 model (DG2=5<=60).
 
 At the B5-boundary trigger (E795) on T1/T2/T3: redun3 FIRES
 (px2=4). The state is frozen from E735 (cell 2 dormant
-duplicate); this is a benign late consolidation, NOT a kill
-(cell 2 has no active role; nothing is destroyed). Recorded as
-a consistency check, not an adversarial test.
+duplicate, DG2=125>60); this is a benign late consolidation,
+NOT a kill (cell 2 has no active role; nothing is destroyed).
+Recorded as a consistency check, not an adversarial test.
 
-At the B2-boundary trigger (E675) on T1-T4: redun3 FIRES
-(benign early consolidation; cell 2 already dormant). At E14:
-SILENT (rucov below PACT).
+At the B2-boundary trigger (E675) on T1-T4: redun3 SILENT
+(DG2=5<=60; cell 2 won at e=669, not yet dormant). The
+dormancy gate correctly declines early consolidation.
+
+At E14: SILENT (rucov below PACT).
 
 ## 6. Frozen verdict mapping
 
@@ -144,9 +134,8 @@ SILENT (rucov below PACT).
   the frozen 29-word list returns empty in all pr_*.zag.
 - B8 MARGIN-QUANTIFICATION (measurement): PASS iff REPORT.md
   tabulates, per stream at E735 and E795 (trigger kind=0):
-  px2, ru32, ru23, rw32, rw23, the symmetry comparison values
-  (rucov[2][3]*ruw[3][2] vs rucov[3][2]*ruw[2][3]), and the K=3
-  baseline MS PCTs; plus the T1/T2/T3 E795 consistency note.
+  px2, ru32, ru23, dg2, lw2, and the K=3 baseline MS PCTs; plus
+  the T1/T2/T3 E795 consistency note.
 - B9 PROXY-STABILITY (kill bar): PASS iff B6(i) and B6(ii) PASS
   on ALL streams (genuine fires everywhere; adversarial silent
   on both true-adversarial streams).
@@ -179,7 +168,39 @@ PROXY-FRAGILE, never a weakened bar.
 - What is measured are cell-mean tallies and win/runner-up
   relations, as MA1-4. Not strategy invention, not L3.
 
-## 8. Artifacts planned
+## 8. Transparent amendment (2026-10-03, during implementation)
+
+During implementation, the (S) symmetry rule was found to be
+non-discriminating: with reseed-zeroing, the post-reseed
+history at E795 W6 shows symmetric B4-era coverage (both cells
+in B4), so (S) fires (740>=740). Without zeroing, lifetime
+symmetric pre-history dominates (115440>=114708), so (S) also
+fires. The symmetry cannot see the adversarial asymmetry
+because the relevant history (cell 2 as R-model vs cell 3 as
+R-model) is either erased by zeroing or overwhelmed by lifetime
+symmetry.
+
+The structural fix is DORMANCY: the victim must have no current
+functional role. Replacing (S) with (D):
+- (D) e-lastwin[i] > 60 (i dormant; no wins in a full
+  band-length). lastwin[4] at 3688972 (after pxlog).
+
+The (C) mutual PACT condition is retained (ensures functional
+relationship). ruw is removed (not needed without (S)).
+
+Updated predictions:
+- E735 all streams: FIRE (dormant, DG2=65>60).
+- E795 W6/T4: SILENT (active, DG2=5<=60).
+- E795 T1/T2/T3: FIRE (dormant, DG2=125>60; benign).
+- E675 T1-T4: SILENT (DG2=5<=60; cell 2 won at e=669, not yet
+  dormant). This differs from the original prediction (FIRE);
+  the dormancy gate correctly declines early consolidation.
+- E14: SILENT (rucov below PACT).
+
+Kill bars B6/B9 UNCHANGED. B8 fields updated: px2, ru32, ru23,
+dg2, lw2 (replacing rw32/rw23 and symmetry values).
+
+## 9. Artifacts planned
 
 - `pr_w6.zag`, `pr_t1.zag` .. `pr_t4.zag`, five binaries,
   15 run files (3 per stream, sha256 recorded)

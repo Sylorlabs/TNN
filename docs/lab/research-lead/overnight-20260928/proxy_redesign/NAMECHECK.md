@@ -61,3 +61,19 @@ only i's win episodes, since means update only on wins).
 ## Build record
 
 (recorded after the prereg commit; implementation has not begun)
+
+## Step 2: Build record (2026-10-03)
+
+- Safebin PATH active; `which python3` returns nothing.
+- Built 5 binaries with safebin znc:
+  - pr_w6.zag -> pr_w6_bin (189010 bytes)
+  - pr_t1.zag -> pr_t1_bin (193516 bytes)
+  - pr_t2.zag -> pr_t2_bin (193516 bytes)
+  - pr_t3.zag -> pr_t3_bin (193516 bytes)
+  - pr_t4.zag -> pr_t4_bin (193516 bytes)
+- 3/3 runs byte-identical per stream (B3 PASS).
+- B4 PASS: core output byte-identical to MA4C-MULTISTREAM.
+- Design amendment: (S) symmetry replaced with (D) dormancy
+  during implementation (see PREREG.md Section 8). Kill bars
+  unchanged.
+- B6/B9 PASS: PROXY-DISCRIMINATES.
