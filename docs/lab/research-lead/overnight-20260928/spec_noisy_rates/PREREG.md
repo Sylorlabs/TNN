@@ -174,10 +174,14 @@ estimate/interval fields, flips=0, od/rb per parent accounting.
 - **K5 (estimation error).** Over the 100 adapt lines, with true per-
   1024-tick rates 4D and 4Q (T = 256): mean |dh - 4D|/max(4D, 4) <=
   0.6 AND mean |qh - 4Q|/max(4Q, 4) <= 0.6. Mean absolute price error
-  |pnum/pden - max(0, D-Q)/max(Q, 1)| <= 2.0 rebuilds. Coverage: the
-  commit-time interval [dlo, dhi] covers the realized post-commit rate
-  1024*(D-Dc)/(256-tc) in >= 70% of adapt episodes, and likewise
-  [qlo, qhi] for queries (interval calibration under burstiness).
+  |pnum/pden - max(0, D-Q)/max(Q, 1)| <= 2.0 rebuilds, RESTRICTED to
+  episodes with qh >= 1 (see Amendment A1). Coverage
+  (decision-relevant): the commit-time price interval
+  [plon/plod, phin/phid] covers the realized post-commit price
+  max(0,(D-Dc)-(Q-Qc))/max(Q-Qc,1) in >= 70% of adapt episodes with
+  (Q-Qc) > 0 (see Amendment A1). The rate-interval future coverage
+  ([dlo,dhi] vs 1024*(D-Dc)/(256-tc), [qlo,qhi] vs the query analogue)
+  is REPORTED AS A FINDING, not barred (see Amendment A1).
 - **K6 (commit behavior / no thrash / structural accounting).**
   (a) >= 30 of 100 adapt episodes commit decisively (cm in {1,2}) by
   e = 128 -- the switch actually decides rather than punting
@@ -216,8 +220,47 @@ estimate/interval fields, flips=0, od/rb per parent accounting.
   or biased (a correct EWMA on this stationary bursty process sits
   far below this ceiling; the ceiling catches sign/unit/divergence
   bugs, not legitimate noise).
-- Interval coverage < 70% (K5): the confidence term is miscalibrated
-  under burstiness (e.g. variance underestimated).
+- Price-interval coverage < 70% (K5): the margin test's confidence
+  term is miscalibrated for the decision it serves.
+
+## Amendment A1 (pre-implementation, 2026-10-03)
+
+After the prereg was frozen but BEFORE any implementation was
+committed, hand-analysis of the frozen interval arithmetic against
+the bursty world revealed two measurement flaws in K5 as written
+(the implementation did not yet exist; this corrects the
+measurement, not the science):
+
+1. **Price error undefined at qh = 0.** pnum/pden =
+   max(0,dh-qh)/max(qh,1). When qh = 0 (no queries observed yet, e.g.
+   an early commit on a rare-query cell), the per-avoided-refusal
+   price is mathematically undefined (division by zero); the
+   max(qh,1) guard emits dh/1, a per-1024-tick quantity, not a price.
+   The frozen bar (mean |est-true| <= 2.0 over all 100 episodes)
+   would fail on these guard artifacts (errors of 150-300) even with
+   a perfect estimator. CORRECTED: the price-error bar applies only
+   to episodes with qh >= 1, where the price is defined. (The switch
+   decision never uses pnum/pden; it uses the interval, which is
+   conservatively correct at qh = 0: phi explodes, forcing abstain.)
+
+2. **Rate-interval coverage tested the wrong estimand.** The frozen
+   bar asked the commit-time rate intervals [dlo,dhi],[qlo,qhi] to
+   cover the realized POST-COMMIT long-window rate. But the EWMA
+   interval is a LOCAL-rate interval (n_eff = 31 ticks); under
+   burstiness the local rate differs systematically from the future
+   128-224-tick rate, and early checkpoints carry EWMA burn-in bias
+   ((15/16)^32 ~= 0.13 residual, with SE ~= 0 on deterministic
+   M=1/N=1 cells so the bias is uncovered). The decision-relevant
+   calibration is the PRICE interval vs the realized post-commit
+   price -- that is what the margin test actually compares against L.
+   CORRECTED: K5 bars price-interval coverage >= 70%; rate-interval
+   future coverage is demoted to a reported finding with the
+   local-vs-future interpretation. The 70% threshold value is
+   unchanged.
+
+Neither correction changes the estimator, the world, the commit
+rule, or any other bar. The implementation below was written after
+this amendment.
 - Decisive commits < 30 (K6a): the margin test never fires -- the
   confidence term swallowed the switch.
 - Flips > 10 (K6b): the switch thrashes under noise.
