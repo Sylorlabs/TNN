@@ -76,9 +76,50 @@ bounds are mechanism-derived, not fitted.
 
 ## Build record
 
-(pending)
+- 2026-10-03: `ma3.zag` written after the frozen prereg commit
+  (7be552ca4). MA2's learner unchanged (selection, EMA 3/4 scoring,
+  winner-absorbs, consec>=3 trigger, prot() predicate) plus: new
+  `redun()` predicate (protected cell with a protected duplicator
+  within RDDM=10 of its mean, from revealed values only); victim
+  rule gains the redundancy sub-path (no unprotected candidate ->
+  redundant candidate with lowest wpart, ties highest score, ties
+  highest index; else decline as in MA2); trigger log path markers
+  U/R/D/X; new tallies REDSEEDW (redundancy reseeds) and BADRED
+  (in-binary tripwire: redundancy victim failing the predicate);
+  PROTDEST now counts only protected-UNIQUE victims. W5 condition:
+  852 episodes (D+R+B2+B4+B5; B4 = NEW tiled {46..54}, B5 = NEW
+  tiled {91..99}), SEED_W5=20261025; D/R/B2 tiles drawn from the
+  SEED_B stream in MA2's exact order so W5 values over 0..731 match
+  MA2's W and X. B7 audit: case-insensitive grep for the frozen
+  29-word list in ma3.zag returns empty (no hits at all). B6 audit:
+  e==/cond== hooks are write-only snapshots (snap/b5gok) with no
+  feedback into cell state; learner logic reads only revealed
+  values and derived tallies. Compiled with pinned safebin znc ->
+  `ma3_bin`; one A0101 analyzer warning, the known false-positive
+  class (max index fbase+e*1200+1199, in bounds).
+- 2026-10-03: 3/3 runs byte-identical, sha256
+  `5217cb95af51b7c656df1581e8720109fc811717c5297cc58005515e90d4dec8`
+  (run1/2/3.txt). Results: RX=7 RY=2 RZ=624 RXF=3 RXB2=4 RWB2=4
+  RWB4=5 RWB5=6 COSTXY=1022 COSTXZ=-3936; TRIGX n=2 (E14:3U F=1,
+  E675:1U F=13), TRIGY n=0, TRIGW n=4 (E14:3U F=1, E675:1U F=13,
+  E735:1R F=15, E795:2R F=15); DECLX=0 DECLY=0 DECLW=0;
+  REDSEEDX=0 REDSEEDY=0 REDSEEDW=2; BADRED=0; PROTDEST=0. All bars
+  PASS (B5a..B5g, B8, B9, DISTINCTD, PARID, XDISJ, MARG, GENFAIL).
+  White-box: T3 victim cell 1 (redundant via cell 0, |17-21|=4;
+  lowest wpart 19 < 437); T4 victim cell 2 (redundant via cell 3,
+  |76-81|=5; unique cell 0, nearest protected mean 28 away,
+  survived). X/Y/Z outputs byte-identical to MA2's (cmp
+  verified). Label note: prereg T3/T4 labels E734/E794 were
+  0-indexed episode numbers; the log prints 1-indexed (E735/E795);
+  both denote the mechanism-derived trigger points (B4k=3/B5k=3).
+- Commit order self-check: prereg (7be552ca4, PREREG.md +
+  NAMECHECK.md Step 0 only) strictly predates this implementation
+  commit. PASS (B1).
+
+(pending: none)
 
 ## Commit order self-check
 
-(pending: PREREG.md + NAMECHECK.md Step 0 committed alone before
-any implementation file)
+PASS (B1): prereg commit 7be552ca4 contains only PREREG.md and
+NAMECHECK.md (Step 0 + design record) and strictly predates the
+implementation commit below.
