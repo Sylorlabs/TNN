@@ -60,5 +60,22 @@
   `tnn-native-lab` as `<hash>` before any verdict was recorded;
   the implementation's K5 check was updated to the corrected
   bar and the binary rebuilt + rerun 3x after the amendment.
+  Amendment commit: `5351f79ecc053006fe4d38f62f5edbdb6bd86a97`.
 - Implementation: `ntteach_full.zag` (NT-RESIDUAL D5 learner verbatim
   + D6; oracles add exploratory episode + decoy chain; CAP=22).
+- Build `znc ntteach_full.zag -o ntteach_bin` exit 0 (benign
+  zagd-unavailable warning + 4 benign A0102 ignored-return warnings
+  on the exploratory h_query calls, whose results are intentionally
+  discarded). 3/3 runs byte-identical, exit 0, zero stderr.
+- Results: K1-K7 all 1, VERDICT=ASSOC-CONFIRMED.
+- Digests: run
+  `aec8cfc5ef734399c7e326d136bf35545a903cdc9e1bc122a5bccfa3939acfc1`,
+  bin
+  `63eb84da13666916ee9f3bde9ce666c39d2313966d5d14f77ba1d23bb8e2cdae`,
+  src
+  `57b7a91f7be1d0a0f33d3c8a950e150cfe01195a40486d2a0bcdf470113bb9a2`.
+- Amendment 1: see above. The implementation commit below contains
+  the amended PREREG.md + NAMECHECK.md (already frozen as
+  5351f79e), ntteach_full.zag, ntteach_bin, 3 run logs, REPORT.md.
+- Commits local only, explicit pathspecs, never pushed.
+  Non-ledger task (claim minting paused).
