@@ -81,16 +81,19 @@ P1 bar: W-R4B timed decline completes within 300s wall-clock.
 
 **Result: P1 FAIL for all designs.**
 
+Concrete measurement (D1 full R4B timed run):
+- wall=1373.41s, cpu=214.78s, load=5.49->9.69
+- Result: COMP-FAIL (correct decline)
+- P1: FAIL (1373s wall far exceeds 300s)
+
 The full timed workload (ev_query prefix with rebind_try + compose_try) is
-dominated by rebind_try, which takes 9+ minutes CPU in isolation. None of
-the three designs optimize rebind_try (they target compose_try's scans).
+dominated by rebind_try. None of the three designs optimize rebind_try (they
+target compose_try's scans).
 
-Breakdown (estimated):
-- rebind_try: ~540s CPU (node allocation/eviction storm)
-- compose_try (baseline): 1.57s CPU
+Breakdown (measured):
+- rebind_try: ~214.5s CPU (node allocation/eviction storm)
 - compose_try (D1): 0.26s CPU
-
-Total (D1): ~540s CPU, far exceeding 300s wall under any contention.
+- Total: 214.78s CPU, 1373s wall under contention (load 5.5-9.7)
 
 ## Bottleneck Analysis Refinement
 
@@ -104,7 +107,7 @@ This analysis is partially correct but misses the dominant cost:
    pc_try_one for 27 linked MAPs. Each pc_try_one calls t2_asm_chain, which
    allocates nodes via alloc_node. With 720 live nodes, thousands of
    allocations trigger repeated eviction (each eviction scans 1024 nodes and
-   4096 edges). This allocation/eviction storm takes 9+ minutes CPU.
+   4096 edges). This allocation/eviction storm takes ~215s CPU (measured).
 
 2. **compose_try scans are secondary**: On the pristine post-training world
    (391 edges), baseline compose_try takes only 1.57s CPU. The O(4096) scans
@@ -148,7 +151,7 @@ debugging (instrumented builds, world-state dumps) revealed:
    - R4C measurements not completed (time constraints; R4B suffices to answer
      the research question).
    - P1 measured via compose-only diagnostic plus rebind analysis, not full
-     3-rep timed runs (full runs impractical due to 9+ min rebind).
+     3-rep timed runs (full runs take 1373s wall; impractical to repeat).
    - These deviations are transparently reported; the core findings (scan
      speedups, bottleneck refinement) are robust.
 
