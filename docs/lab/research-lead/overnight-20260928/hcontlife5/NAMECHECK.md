@@ -1,6 +1,38 @@
 # NAMECHECK.md -- H-CONTLIFE-5 Worker
 
-## Step 0: Toolchain Guard (mandatory)
+## WORKER 2 (2026-10-02, revision follow-up): Step 0 Toolchain Guard
+
+Executed at worker startup, before any other work (same safebin recipe
+as Worker 1):
+
+```
+mkdir -p $HOME/safebin
+for t in git znc sh bash ls cp mv rm mkdir cat grep sed awk wc cmp sha256sum git-receive-pack git-upload-pack; do
+  p=$(which $t 2>/dev/null); [ -n "$p" ] && ln -sf "$p" $HOME/safebin/$t 2>/dev/null
+done
+export PATH="$HOME/safebin"
+```
+
+Result: `which python3` returned NOTHING. `which python` returned
+NOTHING. PATH=/home/hatch/safebin. The safebin holds symlinks to the
+same coreutils plus git and sha256sum as Worker 1; no python3, no
+python. The worker uses the pinned compiler at its explicit repo path
+`src/tools/toolchain/znc_linux_x86_64_abed8aa1` for every build. No
+other compiler is invoked.
+
+Guard status: ACTIVE for the whole session. All scientific computation
+in pure Zag via the pinned znc. Shell used only for: znc invocation,
+binary runs, sha256sum, read-only greps, file moves, git ops. Any
+forbidden executable invocation would be PROCESS-FAIL; none occurred.
+
+Worker 2 task identity: H-CONTLIFE-5-REVISE, the "revision after
+self-judged failure" follow-up. Prereg: hcontlife5/PREREG-REVISE.md
+(frozen kill bars R0..R7). Implementation: hcontlife5/src/revise.zag.
+
+## WORKER 1 (2026-10-02, learner-owned evaluation): Step 0 and below
+(unchanged; the original NAMECHECK content follows)
+
+### Step 0: Toolchain Guard (mandatory)
 
 Executed at worker startup, before any other work:
 
