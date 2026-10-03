@@ -52,7 +52,17 @@
   + 2-arm main + per-arm bars).
 - Build `znc nttip_full.zag -o nttip_bin` under safebin-only PATH.
   3/3 runs byte-identical, exit 0, zero stderr.
-- Results: (filled after runs)
-- Digests: run `<sha>`, bin `<sha>`, src `<sha>`.
+- Results: ARM21 TIP-CLEAN-AT-21 (U1-U5 all 1: nevict=28, phev=0,
+  evh118=0, u=4, forget=0, avail160=4, FP 50%, EVHIST
+  131=5,140=6,141=6,143=6,144=5, bprobe=0);
+  ARM22 REPRODUCED (R1-R7 all 1: byte-exact sweep ARM22 numbers).
+  Overall: TIPPOINT-LOCATED-AT-20.
+  First-run exact match on all frozen hand-derived numbers.
+- Digests: run
+  `b2810ba0d97886029990e9f51dc5688c76dd04000cc87f6b332b8da938ee245a`,
+  bin
+  `87a2056e935504c9acfc01cd7ba49164e27947085d5161a5d3996d573dd0a4d6`,
+  src
+  `38e204b677a09b425711045f1b01204cf22b18e0e342fdccdb2a143ad8ff530f`.
 - Commits local only, explicit pathspecs, never pushed.
   Non-ledger task (claim minting paused).
