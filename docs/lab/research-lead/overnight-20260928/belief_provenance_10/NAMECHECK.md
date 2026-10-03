@@ -96,9 +96,33 @@ recovery): all worlds use current frozen semantics only.
   0 modes, 0 bridges, 0 handlers, 0 semantic cases
   (one-system accounting).
 
-## Step 1: prereg commit (this commit)
+## Step 1: prereg commit (done, commit 3d3c450ca)
 
 - PREREG.md was written and frozen BEFORE any
   implementation file exists in this lane.
-- The prereg commit contains ONLY: PREREG.md,
+- The prereg commit contained ONLY: PREREG.md,
   NAMECHECK.md (Step 0/1 as then written).
+
+## Step 2: implementation + report (done)
+
+- bp10_learner.zag: byte-copy of bp9_learner.zag
+  (SHA-256 re-verified:
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e).
+- bp10_driver.zag: the CON/REC/REV/AMB battery (new
+  file, driver-side only, zero new learner
+  machinery).
+- bp10_full.zag: xf_block.zag (SHA-256 re-verified
+  172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a)
+  + bp10_learner.zag + bp10_driver.zag.
+- Build: pinned znc by absolute path, exit 0,
+  bp10_bin (417194 bytes); 322 A0102 warnings
+  (benign, same pattern as BP-4 through BP-9).
+- Runs: 3/3 byte-identical, SHA-256
+  5c682624b9e8cca5cdd7bd70cea666a8241f3a4b17e0938bd2abd565cc018419.
+- Result: 19/19 in-driver bars PASS on the first
+  run; K-DET PASS; K-HYG PASS (compile-log em
+  dashes are znc's own warning prose, disclosed in
+  REPORT.md); F-VOID not triggered.
+- Verdict: BP-10-PASS. REPORT.md written.
+- PREREG Section 5b holds the R1 mechanistic
+  refinement (no bar or number changed).

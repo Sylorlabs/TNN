@@ -363,7 +363,21 @@ In-driver total: 4 PC + 15 kill = 19.
 5a. Pre-implementation: none. This prereg is
 frozen as committed.
 
-5b. Post-run amendments: (to be filled only if a
-run exposes a prereg error; any change records the
-re-derivation here and no frozen rule is changed
-to chase a bar.)
+5b. Post-run amendments: one mechanistic refinement,
+no bar or number changed. K-REC-GENBLOCKED's derivation
+said the R1 match attempt is "routed to the newest node
+as contradict (ret 0)" per probe P-BP10a. The measured
+run shows r1m==1: with the promote_graph internal node
+present, the bid landscape (fB1 bid -1 from its genuine
+type-3; internal node bid 0) routes the observation to
+the internal node via the MATCH path (ret 1, type-7 on
+the internal node). fB1's absorb still sees zero new
+edges and the record is unchanged at 80/0/1, exactly as
+barred. The load-bearing claims (no new edges on the
+original fact; no rule fires; genuine same-fact recovery
+impossible) hold as predicted; only the gloss on which
+node and which path was refined. The mechanism is the
+same bid-penalty routing measured in P-BP10g, which
+strengthens the K-REC-FORGEBURN parallel. No frozen
+rule was changed to chase a bar; all 19 bars passed as
+frozen on the first run.
