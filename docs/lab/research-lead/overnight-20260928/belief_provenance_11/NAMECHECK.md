@@ -93,3 +93,46 @@ manipulation.
   implementation file exists in this lane.
 - The prereg commit contains ONLY: PREREG.md,
   NAMECHECK.md (Step 0/1 as then written).
+
+## Step 2: implementation and runs (this commit)
+
+- bp11_learner.zag is BP-10's bp10_learner.zag copied
+  verbatim (SHA-256 re-verified after copy:
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e).
+- bp11_full.zag = frozen block lines 1..2668 of
+  BP-10's bp10_full.zag (SHA-256 re-verified before
+  and after the build:
+  172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a)
+  + bp11_learner.zag + bp11_driver.zag (3233 lines).
+- Build: pinned znc by absolute path, exit 0 ->
+  bp11_bin (400718 bytes); the A0102 warnings are
+  the benign ignored-return-value pattern pervasive
+  in the frozen block itself (same as BP-4 through
+  BP-10). The 161 em-dash bytes in bp11_compile.txt
+  are the znc compiler's own warning prose
+  ("ignored return value of `link_edge` - result is
+  discarded" is compiler text with an em dash), not
+  authored text; all authored lane files and all
+  three run outputs are dash-clean by byte check.
+- First implementation run went 15/15 against the
+  frozen prereg: no amendment round was needed.
+  PREREG Section 5b stays empty.
+- K-DET: 3/3 runs byte-identical, SHA-256
+  bf1a0bfadbd5f9ab622c5fa43b83eaa08c3ea2ab9e8d1a725edaf443f81dd020.
+- K-HYG: pure Zag under safebin (`which python3` /
+  `which python` empty at build and run); zero
+  em/en dash bytes in authored files and run
+  outputs; 0 new edge types (1/3/7/14
+  pre-existing; kind-3 self-edges pre-exist via
+  bp2_retire); 0 new node types (tags 1/3/20
+  pre-existing); 0 modes, 0 bridges, 0 handlers,
+  0 semantic cases; block SHA-256 unchanged;
+  bp11_learner.zag byte-identical to
+  bp10_learner.zag; opaque identifiers. F-VOID not
+  triggered.
+- BP11-SUMMARY 15/15 in-driver; 17/17 with
+  K-DET/K-HYG.
+- One-system accounting: new learner machinery
+  ZERO functions; type-14 edges and forgery actions
+  are driver-side test setup / adversary actions,
+  disclosed in PREREG Section 1.
