@@ -89,3 +89,65 @@ B7: the 29-word list grep must return empty in ma4c_diag.zag and
 ma4c.zag; comments and string labels avoid the listed words
 ("count"->"n"/"tally", "event"->"episode", "regime"->"band",
 "learn"/"learner"->"cell"/"mechanism" wording, etc.).
+
+## Commit record correction (2026-10-03, disclosed)
+
+The diagnostic prereg commit did NOT land as a dedicated commit. Sequence:
+- 10:45 UTC: PREREG_DIAG.md + NAMECHECK.md written.
+- ~10:46 UTC: `git add` staged the two files; the subsequent `git commit`
+  used a wrong argument order (pathspecs before `-m`) and committed nothing.
+- 10:46:41 UTC: another worker's `C411-INVESTIGATE` commit (984e4d29)
+  ran a bare `git commit` on the shared branch and swept my staged files
+  in (the known shared-workspace hazard from AGENTS.md 2026-10-02).
+- The two blobs in 984e4d29 are byte-identical to my files (verified by
+  `git cat-file -p <blob> | cmp - <file>`).
+
+Standing: the prereg CONTENT is frozen in git (984e4d29, 10:46:41 UTC)
+strictly before any MA4C implementation file was written (ma4c_diag.zag
+created 10:51 UTC). The substantive commit-order requirement (prereg
+frozen before implementation) holds; the form (dedicated prereg commit)
+was broken by the sweep, disclosed here, not hidden. All subsequent
+MA4C commits use explicit pathspecs with add+commit in one command to
+minimize the stage window.
+
+## Build record: diagnostic stage 1 (2026-10-03)
+
+- Implemented `ma4c_diag.zag` strictly after the prereg content froze
+  (prereg blobs in 984e4d29 10:46:41 UTC; source written from 10:51 UTC).
+- Changes vs MA4b's `ma4b.zag`: write-only xerr[16] accumulation in the
+  episode loop, xerr row/column zeroing on reseed, per-trigger DIAG audit
+  (384-byte entries), DIAG printing after all existing output, banner
+  "MA4cD". No decision reads the new state.
+- B7: 29-word grep clean (0 hits).
+- Compiled with safebin znc (only the known A0101 false positive on
+  `etc_ep`, same class as MA4b); ran 3x, byte-identical, sha256
+  `970c7ec0cf394bd0f7d37232975366c489b751518da21a4aa1bb6b1c3bdea957`.
+- All non-DIAG, non-banner lines byte-identical to MA4b's run1.txt
+  (cmp clean after filtering): the cell trajectory is provably unchanged.
+
+## Diagnostic stage 1 findings (see PREREG_DIAG2.md for the revised design)
+
+Measured cross-error ratios xerr[j][i]/wpsm[i] (totals form):
+- E735 genuine pair (victim cell2, anchor cell3): 777/268 = 2.90.
+- E795 adversarial pair (victim cell2, anchor cell3): 205/60 = 3.42.
+K=2 fails the genuine case; K=3 separates (2.90 < 3 < 3.42) but the
+DIAG1 15%-margin gate is not met (3% margin on the genuine side).
+
+Two design flaws found in the totals form, both requiring revision:
+1. Vacuous fire: xerr[j][i]=0 when the anchor was reseeded after all
+   of the victim's wins (e.g. E735 VI0/J3, E795 VI0/J2,J3) makes the
+   totals comparison fire spuriously. Fix: overlap tally xcnt[16]
+   (victim wins witnessed by the anchor's current incarnation) with
+   a PACT-derived minimum-evidence guard (xcnt >= 5), and a means
+   comparison (xerr/xcnt <= K*wpsm/wpart). The means form also fixes
+   an apples-to-oranges case (E795 VI1/J2: totals bit fired, means
+   ratio is 12.7, correctly silent).
+2. Reverse absorption: at E795 the young B4 model (cell2, 37 wins)
+   "covers" the old R model's (cell3, 481 wins) 23 post-reseed wins
+   with ratio 2.12, which would fire under K=3 and reseed the R model
+   (a different kill, still a {1,3} conflation). Fix: absorption must
+   flow toward greater evidence, wpart[j] >= wpart[i] (no new constant).
+
+The revised design (xerr+xcnt, guard, age, means, K=3) is preregistered
+in PREREG_DIAG2.md and measured in diagnostic stage 2 before any frozen
+implementation.
