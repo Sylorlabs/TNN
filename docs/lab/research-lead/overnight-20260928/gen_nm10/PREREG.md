@@ -93,7 +93,7 @@ gen_solve(s=201, exp=3, nm=11). The chain end (m9 on 219) yields 3,
 but reaching it needs 10 rounds (one link per round: values added
 during a round are invisible until the next round snapshot). The cap
 is 6, so the expected outcome is a clean decline exactly like
-GEN-STRESS S4 at nm=8.
+GEN-REDIM S4 (C434) at nm=8.
 
 Derivation. All chain values are kind 1 (subjects); all MAPs admit
 kind 1. Each round adds exactly one new pool value, so tried1 lets

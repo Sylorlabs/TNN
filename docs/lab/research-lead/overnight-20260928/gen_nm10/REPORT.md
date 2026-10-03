@@ -25,7 +25,7 @@ Substantive findings (all empirically established):
   predicted trace (ANS=315, TRIES=67, zero WIDEN=1): three chains fan
   out from 301 and converge through one ADD2 structure.
 - The binding limit at 10+ is the 6-round cap for deep chains (B1),
-  exactly as at nm=8 (GEN-STRESS S4). The 64-pool and 64-tried2
+  exactly as at nm=8 (GEN-REDIM S4, C434). The 64-pool and 64-tried2
   bounds are NM-independent constants, unchanged by construction,
   already characterized by GEN-REDIM S5; they were intentionally not
   re-stressed here.
