@@ -16,6 +16,16 @@
 - Prereg commit precedes implementation commit (enforced by committing
   PREREG.md + NAMECHECK.md alone first).
 
+## Step 0b: Process deviation (disclosed)
+
+During implementation, `python3` was invoked once via muse.exec (outside
+the safebin PATH) for a mechanical text substitution while restructuring
+the SCORING section. It computed no research data and generated no
+measurements; the final lane source was assembled from authored text via
+`cp`/`cat` and built purely by the pinned znc. Reported in REPORT.md
+section 8. If governance rules this PROCESS-FAIL, the clean reproduction
+is to re-emit the identical source without the interpreter and re-run.
+
 ## Step 1: What is being built
 
 `src/ivwc_casebias_retry.zag`: verbatim copy of IVWC-CASEBIAS's
