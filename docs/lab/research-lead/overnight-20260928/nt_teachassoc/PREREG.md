@@ -1,5 +1,20 @@
 # PREREG: NT-TEACHASSOC -- teaching-stream association signal for the residual case
 
+## AMENDMENT 1 (2026-10-03) -- transparent correction of a hand-derivation error
+
+After the prereg freeze (commit 4aa6b2680) and before any verdict was
+recorded, the first implementation run revealed an arithmetic error in
+the Section 5 hand trace: on passes 3-6, the FIRST restore eviction
+of each pass takes 144 (youngest R=0), which makes 144 ABSENT, so its
+later teach becomes a FOURTH restore (not an update as traced). Each
+of passes 3-6 therefore has 4 evictions, not 3. Corrected: nevict=22
+(not 18); EVHIST 140=5, 141=6, 143=6, 144=5 (not 140=5, 141=6, 143=4,
+144=3). The frozen RULES (Section 2), workload (Section 3), protocol
+(Section 4), and all other frozen numbers are unchanged; the K5 bar
+remains EXACT (not weakened). Sections 5.4-5.8 and K5 below are the
+corrected versions. The original (erroneous) numbers are preserved in
+git history (commit 4aa6b2680) for audit.
+
 ## 1. Question
 
 NT-RESIDUAL (RESIDUAL-CONFIRMED) established that the rare-but-useful
@@ -215,41 +230,47 @@ pinned = {160,161,170,171: assoc} (D5: pt all 0); admitted R=0
 {130,131,148,144} -> max ins -> 144. Install 140. 141: restore
 -> EVICT #8: R=0 {130,131,148,140} -> 140. Install 141. 143:
 restore -> EVICT #9: R=0 {130,131,148,141} -> 141. Install 143.
-144: present -> agree.
-End of pass 3: nevict=9. Installed: 14 A + {130,131} +
-{160,161,170,171,148} + {143}. Absent: {140,141,144}.
+144: ABSENT (evicted by the 140 restore) -> restore -> EVICT #10:
+R=0 {130,131,148,143} -> 143. Install 144.
+End of pass 3: nevict=10. Installed: 14 A + {130,131} +
+{160,161,170,171,148} + {144}. Absent: {140,141,143}.
 Probes: q(100)@95: 100->148 (R100++), 148->152 (R148=1) =152,
 HIT (p3=1). q(160)@96: HIT (r3=1; R160=3,R161=3).
 
 ### 5.5 Pass 4 (teaches 97..106)
 
 100,104,101,105: hits/agrees. 130: agree (sup 3->4). 131: agree
-(sup 3->4). 140: restore -> EVICT #10: pinned {160,161,170,171};
-admitted R=0 {130,131,143} (148: R=1) -> max ins -> 143.
-Install 140. 141: restore -> EVICT #11: R=0 {130,131,140} ->
-140. Install 141. 143: present -> agree. 144: restore -> EVICT
-#12: R=0 {130,131,141} -> 141. Install 144.
-End of pass 4: nevict=12. Installed: 14 A + {130,131} +
+(sup 3->4). 140: absent -> restore -> EVICT #11: pinned
+{160,161,170,171}; admitted R=0 {130,131,144} (148: R=1) ->
+max ins -> 144. Install 140. 141: restore -> EVICT #12: R=0
+{130,131,140} -> 140. Install 141. 143: absent -> restore ->
+EVICT #13: R=0 {130,131,141} -> 141. Install 143. 144: ABSENT
+-> restore -> EVICT #14: R=0 {130,131,143} -> 143. Install 144.
+End of pass 4: nevict=14. Installed: 14 A + {130,131} +
 {160,161,170,171,148} + {144}. Absent: {140,141,143}.
 Probes: q(100) HIT (p4=1; R148=2). q(160) HIT (r4=1).
 
 ### 5.6 Pass 5 (teaches 109..118)
 
-140: restore -> EVICT #13: R=0 {130,131,144} -> 144. Install
-140. 141: restore -> EVICT #14: R=0 {130,131,140} -> 140.
-Install 141. 143: restore -> EVICT #15: R=0 {130,131,141} ->
-141. Install 143. 144: present -> agree.
-End of pass 5: nevict=15. Installed: 14 A + {130,131} +
-{160,161,170,171,148} + {143}. Absent: {140,141,144}.
+140: absent -> restore -> EVICT #15: R=0 {130,131,144} -> 144.
+Install 140. 141: restore -> EVICT #16: R=0 {130,131,140} ->
+140. Install 141. 143: absent -> restore -> EVICT #17: R=0
+{130,131,141} -> 141. Install 143. 144: ABSENT -> restore ->
+EVICT #18: R=0 {130,131,143} -> 143. Install 144.
+End of pass 5: nevict=18. Installed: 14 A + {130,131} +
+{160,161,170,171,148} + {144}. Absent: {140,141,143}.
 Probes: q(100) HIT (p5=1). q(160) HIT (r5=1).
 
-### 5.7 Pass 6 (teaches 121..130)
+### 5.7 Pass 6 (teaches 121..130) -- steady state, identical
 
-140: restore -> EVICT #16: R=0 {130,131,143} -> 143. Install
-140. 141: restore -> EVICT #17: R=0 {130,131,140} -> 140.
-Install 141. 143: present -> agree. 144: restore -> EVICT #18:
-R=0 {130,131,141} -> 141. Install 144.
-End of pass 6: nevict=18. Installed: 14 A + {130,131} +
+Start: 14 A + {130,131} + {160,161,170,171,148} + {144};
+absent {140,141,143}. 140: absent -> restore -> EVICT #19:
+admitted R=0 {130,131,144} -> max ins -> 144. Install 140.
+141: restore -> EVICT #20: R=0 {130,131,140} -> 140. Install
+141. 143: absent -> restore -> EVICT #21: R=0 {130,131,141} ->
+141. Install 143. 144: ABSENT -> restore -> EVICT #22: R=0
+{130,131,143} -> 143. Install 144.
+End of pass 6: nevict=22. Installed: 14 A + {130,131} +
 {160,161,170,171,148} + {144}. Absent: {140,141,143}.
 Probes: q(100) HIT (p6=1). q(160) HIT (r6=1).
 
@@ -264,12 +285,12 @@ q(160)=162 HIT =1.
 Assoc stats at end: apin=4 (160,161,170,171); reads: 160:7,
 161:7 (6 pass probes + resprobe), 170:0, 171:0 ->
 nassoc_useless=2; dec_present=1; res_present=1.
-EVHIST: 140=5 (p2,p3,p4,p5,p6), 141=6 (p1..p6), 143=4
-(p1,p2,p4,p6), 144=3 (p1,p3,p5); sum=18. evh(148)=0,
+EVHIST: 140=5 (p2,p3,p4,p5,p6), 141=6 (p1..p6), 143=6
+(p1,p2,p3,p4,p5,p6), 144=5 (p1,p3,p4,p5,p6); sum=22. evh(148)=0,
 evh(118)=0, evh(160)=0, evh(161)=0, evh(170)=0, evh(171)=0.
 phev=0.
 
-Frozen summary: ttcA=2, probeA=8, nevict=18, phev=0;
+Frozen summary: ttcA=2, probeA=8, nevict=22, phev=0;
 p1..p6 = 0,0,1,1,1,1 (avail100=4);
 r1..r6 = 1,1,1,1,1,1 (avail160=4);
 c=2, nc=2, u=4, forget=0, bprobe=1, resprobe=1;
@@ -308,9 +329,9 @@ apin=4, dec_present=1, res_present=1, nassoc_useless=2.
   evh(160) = 0 AND evh(161) = 0 (exact; Section 5.8).
 - K4 (final revision outcome): c = 2 AND forget = 0.
 - K5 (pressure exercised, eviction discipline, mechanism
-  attribution): nevict = 18 (exact); evh(148) = 0 (D5 pin holds);
-  phev = 0; EVHIST exact: evh(140)=5, evh(141)=6, evh(143)=4,
-  evh(144)=3.
+  attribution): nevict = 22 (exact, Amendment 1); evh(148) = 0
+  (D5 pin holds); phev = 0; EVHIST exact: evh(140)=5,
+  evh(141)=6, evh(143)=6, evh(144)=5.
 - K6 (discriminative validity): avail100 = 4 (the D5-covered probe
   still passes; not a broken probe) AND nevict > 0 (pressure
   actually exercised).

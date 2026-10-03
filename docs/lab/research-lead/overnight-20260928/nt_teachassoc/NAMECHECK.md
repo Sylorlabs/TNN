@@ -46,7 +46,19 @@
 - PREREG.md: frozen kill bars K1-K7, hand-derived Section 5 trace
   (single arm R6), verdict mapping (Section 8). Predicted verdict:
   ASSOC-CONFIRMED.
-- Prereg freeze: commit `<hash>` on `tnn-native-lab` (PREREG.md +
-  NAMECHECK.md only), strictly before implementation.
+- Prereg freeze: commit `4aa6b2680f1aa725f94b2c453a5148ea0ba6d57c`
+  on `tnn-native-lab` (PREREG.md + NAMECHECK.md only), strictly
+  before implementation.
+- AMENDMENT 1 (2026-10-03): transparent correction of a
+  hand-derivation error in PREREG Section 5 (passes 3-6 each have
+  4 evictions, not 3: the first restore evicts 144, making its
+  later teach a fourth restore). Corrected: nevict=22 (was 18);
+  EVHIST 140=5,141=6,143=6,144=5 (was 140=5,141=6,143=4,144=3).
+  Rules, workload, protocol, and all other frozen numbers
+  unchanged; K5 remains exact (not weakened). Original numbers
+  preserved in git history for audit. Amendment committed to
+  `tnn-native-lab` as `<hash>` before any verdict was recorded;
+  the implementation's K5 check was updated to the corrected
+  bar and the binary rebuilt + rerun 3x after the amendment.
 - Implementation: `ntteach_full.zag` (NT-RESIDUAL D5 learner verbatim
   + D6; oracles add exploratory episode + decoy chain; CAP=22).
