@@ -56,11 +56,25 @@ directories.
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (this file +
-      PREREG.md), before any implementation exists.
-- [ ] Step 2: implementation (7 sealed worlds + drivers;
-      learner.zag byte-identical copy of the builder's),
-      compiled with pinned znc.
-- [ ] Step 3: 3/3 runs byte-identical per build, K7'-style
-      seal audit, driver tag audit, REPORT.md with
-      verdict.
+- [x] Step 1: PREREG.md frozen, committed ALONE (this file +
+      PREREG.md) at a62b04c67, before any implementation existed.
+- [x] Step 2: implementation (7 sealed worlds + drivers;
+      learner.zag byte-identical copy of the builder's,
+      sha256 698be75b19e3d9a85b3b308aa4d1e645cbb4e386169bcb47d8b20dfb93877731),
+      compiled with pinned znc (`znc adv_*_full.zag -o
+      adv_*_bin`, rc=0, only A0102 warnings, same class
+      as the builder lanes). One pre-verdict amendment
+      (PREREG_AMENDMENT1.md, committed at d0f04fe02):
+      Z-id derivation correction for builds A/B (three
+      taught MAPs -> ids 3,4,5 / 3,4); no counting-rule
+      or learner-code change. One pre-verdict
+      implementation fix: driver_X3 QA terminal 25->27
+      (PREREG world spec authoritative; caught by xk2).
+- [x] Step 3: 3/3 runs byte-identical per build (7
+      sha256 recorded in REPORT.md), K7'/XK5' seal
+      audit clean (learner byte-identical, 0
+      operator/form trace tags in drivers/worlds,
+      builder lanes untouched), REPORT.md with verdict
+      L2-METAREUSE-ADVERSARY-PASS (core K1'-K5',K8'
+      all PASS, 0 falsifiers; X XK1' boundary
+      confirmed x4, XK2'-XK5' PASS, 0 falsifiers).
