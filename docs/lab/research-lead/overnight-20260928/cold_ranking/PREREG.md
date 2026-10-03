@@ -59,6 +59,36 @@ c2w=10: teach, churn, three recovery passes, second churn, R4),
 run once per rk in {0,1,2}. pm=1 throughout (promotion machinery
 from EXILE-PROMOTION, threshold T=2).
 
+## Erratum E1 (2026-10-03, post first-run; derivation error, no
+mechanism change)
+
+The frozen R4 derivation forgot within-pass self-interference. In
+R4's owner-1 pass the 8 hits each reposition their entry, pushing
+previously-moved entries right, so the entries end STACKED at slots
+0..7 rather than each sitting at slot 0 for the owner-2 pass:
+
+- rk=1 (MTF): owner-1 stacks them in REVERSE hit order; owner-2
+  hits each land at slot 7 (cc 8, rk 7 per hit): owner-2 cc=64,
+  rk=56, 8 advancing moves.
+- rk=2 (bubble): the strict-> tie rule STOPS each entry behind
+  equal-rc predecessors (h_j halts at slot j-1); owner-1 rk is
+  S-28 not S. Owner-2 hits land at slots 0..7 in hit order: cc=36,
+  rk=28, 7 advancing moves.
+
+With S = 348+N the summed owner-1 hit positions (N in [0,28] as
+before), corrected R4: cc4(rk1) = 420+N in [420,448];
+cc4(rk2) = 392+N in [392,420]; hence cc4(rk1) - cc4(rk2) = 28
+EXACTLY (same N); rk4(rk1) = 404+N in [404,432];
+rk4(rk2) = 348+N in [348,376]; rkm4 = 16 / 15. Corrected totals:
+rk=1: ccT = 1030+N (<=1058), rkT = 974+N in [974,1002],
+rkmT = 55, NET = 2004+2N; rk=2: ccT = 812+N (<=840),
+rkT = 538+N in [538,566], rkmT = 34, NET = 1350+2N. The
+implementation is unchanged; only this derivation and the
+affected bars (K2's cc4-equality replaced by the +28 gap plus
+bounds, K3's rkT(rk1) bounds, K6's move counts) are amended. The
+first run stays exploratory; the verdict rests on the clean
+re-freeze (amended assertions, rebuilt binary, three fresh runs).
+
 ## Frozen derivations (M2C2)
 
 Assumption A1 (stated, falsifiable): the 20 owner-1 A keys sit at
@@ -96,36 +126,41 @@ unchanged. Second churn: no cold hits; 28 exiles install at slots
 28..55; the 8 re-exiled A entries land at slots 40..47 (E1
 derivation, unaffected by rk since no cold hits occurred).
 
-R4: the 8 A entries are hit under owner-1 (rc 0->1, reposition to
-front), owner-2 (rc 1->2 at slot 0, promote), owner-4/8 hot.
-rk=1 and rk=2 behave IDENTICALLY here (all predecessors rc=0, so
-bubble-to-front = move-to-front):
+R4: the 8 A entries sit at cold slots 40..47 (E1 of
+EXILE-PROMOTION, unaffected by rk: no cold hits occur between R1
+and R4, and churn2's exile order is rk-independent). They are hit
+in test order in owner-1 (rc 0->1, reposition), owner-2 (rc 1->2,
+promote), owner-4/8 hot. The owner-1 repositionings stack the
+entries at slots 0..7 (see erratum E1):
 
-- cc4 = 364 + N, rk4 = 348 + N, rkm4 = 8, where N = number of
-  non-inversion pairs between hit order and slot order, 0 <= N <=
-  28 (not hand-derivable; bounded only).
-- Hence 364 <= cc4 <= 392 < 712 (scan savings vs FIFO's 712);
-  348 <= rk4 <= 376; R4 net = cc4 + rk4 = 712 + 2N in [712, 768].
+- rk=1: owner-1 MTFs stack reverse hit order; owner-2 hits each at
+  slot 7. cc4 = 420+N, rk4 = 404+N, rkm4 = 16.
+- rk=2: owner-1 bubbles halt at ties (slots 0..7 in hit order);
+  owner-2 hits at slots 0..7. cc4 = 392+N, rk4 = 348+N, rkm4 = 15.
+- N = non-inversion pairs between hit order and slot order,
+  0 <= N <= 28 (bounded only); the SAME N governs both modes, so
+  cc4(rk1) - cc4(rk2) = 28 exactly.
 
-Totals (predicted):
+Totals (predicted; corrected per E1):
 
 - rk=0: ccT=1132, rkT=0, NET=1132 (EXILE-PROMOTION's row).
-- rk=1: ccT = 610 + 364 + N = 974 + N (<= 1002 < 1132: total scan
+- rk=1: ccT = 610 + 420 + N = 1030 + N (<= 1058 < 1132: total scan
   still reduced, but R1 scan is INFLATED 420 -> 610);
-  rkT = 570 + 348 + N = 918 + N (in [918, 946]);
-  NET = 1892 + 2N >= 1892 > 1132.
-- rk=2: ccT = 420 + 364 + N = 784 + N (<= 812 < 1132);
+  rkT = 570 + 404 + N = 974 + N (in [974, 1002]);
+  NET = 2004 + 2N >= 2004 > 1132.
+- rk=2: ccT = 420 + 392 + N = 812 + N (<= 840 < 1132);
   rkT = 190 + 348 + N = 538 + N (in [538, 566]);
-  NET = 1322 + 2N >= 1322 > 1132.
-- rkmT: rk=1: 39 + 8 = 47; rk=2: 19 + 8 = 27; rk=0: 0.
+  NET = 1350 + 2N >= 1350 > 1132.
+- rkmT: rk=1: 39 + 16 = 55; rk=2: 19 + 15 = 34; rk=0: 0.
 
 Predicted headline: ranking DOES reduce the R4 positional scan
-cost (cc4 712 -> at most 392), but maintenance cost more than
-offsets it: NET never beats FIFO (1892+/1322+ vs 1132). Pure
+cost (cc4 712 -> 420+N / 392+N), but maintenance cost more than
+offsets it: NET never beats FIFO (2004+ / 1350+ vs 1132). Pure
 recency (rk=1) additionally INFLATES the R1 promotion-pass scan
 (420 -> 610) because move-to-front fights the promotion's slot-0
-refill; importance (rk=2) moves entries only on evidence
-(rc strictly exceeding the predecessor) and leaves R1 scan at 420.
+refill, and its reverse-stacking costs an exact +28 vs tie-stacking
+in R4. Importance (rk=2) moves entries only on evidence (rc
+strictly exceeding the predecessor) and leaves R1 scan at 420.
 Order-independent lower bounds (sanity): cc1(rk=1) >= 420,
 rk1(rk=1) >= 380.
 
@@ -146,8 +181,9 @@ Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
   Any drift means the substrate was not carried over unchanged:
   FAIL.
 - K2 SCAN-SAVINGS: cc4(rk=1) < 712 and cc4(rk=2) < 712;
-  cc4(rk=1) == cc4(rk=2) (R4 scan identical across rank modes);
-  ccT(rk=1) < 1132 and ccT(rk=2) < 1132;
+  cc4(rk=1) == cc4(rk=2) + 28 (MTF reverse-stacking vs bubble
+  tie-stacking; same N, exact gap per E1); 420 <= cc4(rk=1) <= 448;
+  392 <= cc4(rk=2) <= 420; ccT(rk=1) < 1132 and ccT(rk=2) < 1132;
   cc1(rk=1) == 610 (MTF inflates the promotion-pass scan vs FIFO's
   420: the rank move fights the promotion's slot-0 refill);
   cc1(rk=2) == 420 (importance ranking leaves R1 scan unchanged).
@@ -156,7 +192,7 @@ Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
 - K3 OFFSET (the honest bar): NET(rk=1) = ccT+rkT > 1132 and
   NET(rk=2) > 1132 (maintenance more than offsets the savings;
   ranking is not a net win); rkT(rk=1) > rkT(rk=2) > 0 (importance
-  cheaper to maintain than pure recency); 918 <= rkT(rk=1) <= 946;
+  cheaper to maintain than pure recency); 974 <= rkT(rk=1) <= 1002;
   538 <= rkT(rk=2) <= 566. If either NET beats FIFO, the prereg's
   honest prediction is falsified (report as FAIL of the prediction,
   with the measured numbers).
@@ -168,8 +204,9 @@ Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
 - K5 LEDGER: exile == ev + drop + promote for rk=0,1,2;
   cdrop=0 in all three rows. (Ranking must not disturb the priced
   accounting.)
-- K6 RANK-ACCOUNTING: rkmT(rk=1)==47, rkmT(rk=2)==27,
-  rkmT(rk=0)==0. (Exact move counts from the derivation.)
+- K6 RANK-ACCOUNTING: rkmT(rk=1)==55, rkmT(rk=2)==34,
+  rkmT(rk=0)==0. (Exact move counts from the corrected derivation:
+  rk=1: 19+20 R1, 8+8 R4; rk=2: 0+19 R1, 8+7 R4.)
 - K7 DETERMINISM: 3/3 byte-identical runs (external sha256
   comparison). VOID-grade.
 
