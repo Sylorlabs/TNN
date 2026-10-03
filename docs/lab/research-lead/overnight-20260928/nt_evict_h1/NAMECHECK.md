@@ -41,3 +41,35 @@ implementation commit; verified via git log before the implementation
 commit lands. Shared-workspace discipline per AGENTS.md: explicit
 pathspecs on every commit; no `git reset`; on index.lock contention
 retry with backoff, never remove the lock.
+
+## Build record (completed 2026-10-03)
+
+- [x] nt_h1_full.zag transcribed from ../nt_capacity/nt2_full.zag;
+      diff-verified: ONLY the eviction comparator changed
+      (`sk(L,s,2)-sk(L,s,3)` -> `sk(L,s,2)+sk(L,s,3)`), fn renamed
+      nt_evict_lowest -> nt_evict_total, call site updated, comments
+      updated. All learner rules, oracles, protocol, histogram,
+      kill-bar literals, output labels verbatim.
+- [x] audit grep for protect/freeze/don't-forget/task-label/importance
+      logic: clean; eviction uses entry-local counters only
+- [x] negated-conjunction while-check: clean; no `as *i32`+slice; no
+      `_zag_print` for dynamic content; no `[]u8 as *u8`; if-nesting
+      at most 3 deep (flag-let style in kill bars, transcribed)
+- [x] pinned znc build: `znc nt_h1_full.zag -o h1_bin` (exit 0; one
+      benign zagd-unavailable warning, foreground compilation)
+- [x] 3/3 runs byte-identical (cmp); digests: runs
+      `2337eb2a9d3614ea7ba58af12dd01be7709fcd0b76e5aa667915a5495ebf9a3e`,
+      h1_bin
+      `9ffc61c639299f66ad3b63c6de6162d7b0cd752065966f327cada1f24bd6cbf7`,
+      nt_h1_full.zag
+      `3886f6a127153a3d4c4121236f525af810b4da75cc5fcfbc44b1ec1c4247effd`
+- [x] results vs frozen numeric predictions: CONTROL-A/B, ABLATION,
+      nc, u matched; SEQ differed (nevict 40 vs 60, c_vb 5/6 vs 0/6,
+      forget 1 vs 6, histogram differs) -- prereg trace missed the
+      revolving-door effect; corrected mechanism derived from frozen
+      rules matches binary bin-for-bin (see REPORT.md). Directional
+      verdict FAIL unchanged; no amendment needed (bars/rules/mapping
+      untouched).
+- [x] K1-K5 evaluated against frozen bars: 1/0/1/0/1 (K4 fails on
+      forget=1 despite c_vb=5 meeting the >=5/6 literal); REPORT.md
+      with frozen verdict mapping: FAIL
