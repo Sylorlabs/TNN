@@ -59,6 +59,45 @@ Non-ledger task; nothing minted.
 - Implementation (bp2_learner.zag, bp2_driver.zag) comes in a
   LATER commit, strictly after this one.
 
-## Step 2: implementation (pending)
+## Step 2: implementation (done, commit follows prereg commit 5912fb0eb)
 
-## Step 3: runs + REPORT.md (pending)
+- Files: bp2_learner.zag (249 lines: belief table, R1/R2/R3/
+  R4/R5/R6/R7, eff(), b_retire with kind-3 reason edges,
+  lg() liveness-gating baseline, bp2_kill_one_prov,
+  bp2_census, bp2_bar_after), bp2_driver.zag (314 lines:
+  bp2_build world replay + W2 FP2 arm + W3 FP3 arm +
+  in-driver bars PC/K-FP2/K-FP3).
+- Built: `cat ../xhier_countmap_fix/xf_block.zag
+  bp2_learner.zag bp2_driver.zag > bp2_full.zag`; pinned
+  znc by absolute path, build exit 0 -> bp2_bin (372750
+  bytes; log: bp2_compile.txt; 199 A0102 warnings, all the
+  benign ignored-return-value pattern pervasive in the
+  frozen block itself).
+- xf_block.zag SHA-256 re-verified before AND after the
+  build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged; the patched XHIER-COUNTMAP-FIX block).
+- No Python/C/JS/Rust invoked at any point. Safebin PATH
+  held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any lane file (byte-verified with
+  grep).
+- 0 new edge types (1/14/3 only), 0 new node types,
+  0 modes, 0 bridges, 0 handlers (one-system accounting).
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  9318027e43ecdabf4eb4ce11e87f27bcb475b50324c3ae8c544a63f1096c65a8
+  for bp2_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 7/7 preconditions PASS; FP2: G1/G2/G3
+  (75,37,9 graded), D1 (kind-3 reason-2 on MAP_V3 and
+  MAP_Z2), D2 (persist -3,-3,-3), D3 (lg=299 vs R7=-3),
+  C1 (EXEC 4,4,4,-2 vs R7 Z2,Z2,-3,-3,-3) all PASS;
+  FP3: S1 (120/100, R7=Z2), F1 (flip to Z3 at first
+  tombstone), F2 (census 5/5, no k3 on Z2), F3
+  (lg=Z2 vs R7=Z3) all PASS. BP2-SUMMARY 18/18.
+- REPORT.md written with verdict BP-2-PASS.
+- Committed with explicit pathspecs, local only, never
+  pushed.
+- Ledger: non-ledger task, nothing minted; ledger file
+  untouched.
