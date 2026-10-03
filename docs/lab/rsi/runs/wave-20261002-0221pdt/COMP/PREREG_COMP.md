@@ -5,6 +5,18 @@ Frozen: 2026-10-02 (this commit contains ONLY this file).
 Status: FROZEN. Implementation must follow this spec exactly. Any design
 change requires transparent amendment and re-freeze, never silent edit.
 
+## Amendment A1 (pre-implementation, 2026-10-02)
+
+D's candidate ordering changed from MAP-id order to longest-applicable-
+prefix first (k0 from 4 down to 1; ties by MAP id; then gather order),
+with full backtracking. Rationale: maximal-reuse bias is the general
+principle (fewer segments = simpler composites); C already validates it
+(cc_candidates orders by decreasing relseq length); without it D cannot
+subsume C's composite-reuse behavior, which would make the subsumption
+test unfair to the collapse thesis. D remains: no compose stage, no
+compose flag, no rebind stage. Kill bars unchanged. Predictions updated:
+D REUSE PASS via (MAP_Z, Y).
+
 ## 0. Question
 
 Owner decision 2026-10-02: composition is a core TNN frontier. Three
@@ -44,7 +56,7 @@ Binaries (each = frozen TNN-2 substrate + one mechanism + shared driver):
 - bin C0: bin C with exactly one line changed: compose_on() returns 0.
   Mode-flag control: proves whether C's composition depends on the
   flagged compose_try stage.
-- bin D (NEW, this wave): frozen substrate lines 1-1676 of cmp_full_c
+- bin D (NEW, this wave): frozen substrate lines 1-1677 of cmp_full_c
   (base SHA 0e2cafe2e61952f3a715732adb2a8bdfdf5c3a2a9f4d331d576df8a24acb0ccd
   + shared rebind base) + new patch_d implementing ONE general operation
   `satisfy`, plus driver. NO compose_try, NO compose flag, NO rebind_try
@@ -62,6 +74,8 @@ in D's ev_query: activate -> satisfy -> trial(mp_run) -> bootstrap.
 - Selection: for each live MAP (id order), k from full length down to 1,
   every grounding. First success in DFS order wins; full backtracking
   across MAPs, prefix lengths, and groundings.
+  (A1: longest-applicable-prefix first: k0 from 4 down to 1 outer loop,
+  then MAP id order, then grounding order; full backtracking.)
 - Supervised (expected >= 0): apply grounding, terminal vt; if vt ==
   expected, record segment; else recurse satisfy(vt) with visited-set
   cycle guard; on unwind assemble segments (t2_asm_chain per segment,
