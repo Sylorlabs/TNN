@@ -1,0 +1,712 @@
+// ff_patch_D3.zag -- SCALING-FALLBACKFIX design D3: mechanism-maintained
+// fragment summary (write-through, verify-and-repair, session
+// persistent). Drop-in replacement for ff_patch.zag (same public
+// names and signatures, plus compose_try_s/s3_sum_alloc/s3_rescans
+// for the session test). The repaired logic (gated fallback, bounded
+// branching, type-15 dedup) is unchanged.
+//
+// The composition mechanism maintains its own summary of its
+// experience as learner state in driver-allocated buffers (never in
+// the world store):
+//   Mark inventory (64 entries @16, 180 bytes each: m,st,ln,
+//     mark_edge,ex, then 8 steps of guard,set,fact,rel,seqedge):
+//     written at mark time by s3_mark_s, completed by a
+//     once-per-compose_try reconcile pass (one 4096 scan) that picks
+//     up marks written outside the summary path, sorted by
+//     mark-edge id so candidate visitation order exactly matches the
+//     baseline scan order. cl_candidates iterates the inventory.
+//   Per-fragment extraction: verify-and-repair reads re-check every
+//     predicate the scan path checks (mark edge from/type/aux,
+//     entry linkage, per-step guard tag 102, guard to set linkage,
+//     set tag 101, seq-edge linkage, fact tag 1 and live, rel
+//     equality), all O(len) node reads, zero scans. Mismatch falls
+//     back to the scan path and refreshes the entry (self-repair).
+//   Co-use presence/targets (128 slots @11536, 44 bytes each):
+//     lazy-filled by one scan per MAP on first need, write-through
+//     maintained by cb_couse_link_s. Overflow (more than 8 targets)
+//     falls back to the scan path, preserving exactness generally.
+// Session persistence: the driver allocates one summary and threads
+// it through compose_try_s for back-to-back queries with no world
+// mutation between them. Plain compose_try allocates a fresh
+// per-call summary (same per-call benefit). ev_query is unchanged.
+// Exactness holds because no edge writes or deletes occur on the
+// read path within a summary lifetime (decay touches only type-9;
+// t2_kill_edge only via ev_observe; the only type-15 writers in base
+// plus patch are the cl_mark/cb_couse_link variants, all tracked),
+// and node recycling is caught by the verify predicates.
+// Zero new edge types, tags, modes, semantic cases.
+fn compose_on()i32 { return 1; }
+fn cl_pk(s:i32,l:i32)i32 { return (s<<16)|l; }
+fn cl_ps(a:i32)i32 { return a>>16; }
+fn cl_pl(a:i32)i32 { return a&65535; }
+// ---- D3 summary ----
+fn s3_sum_alloc()[]u8 { return z_alloc(17168); }
+fn s3_rescans(S:[]u8)i32 { return get32(S,0); }
+// Inventory find: entry index with (m,st,ln), or -1.
+fn s3_inv_find(S:[]u8,m:i32,st:i32,ln0:i32)i32 {
+  let n:i32=get32(S,4); let i:i32=0;
+  while(i<n){
+    let b:i32=16+i*180;
+    if(get32(S,b)==m && get32(S,b+4)==st && get32(S,b+8)==ln0){return i;}
+    i=i+1;
+  }
+  return -1;
+}
+// First type-12 edge id from cell c, or -1 (fill time only).
+fn s3_seqedge(W:[]u8,c:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==c && eg(W,e,4)==12){return e;}
+    e=e+1;
+  }
+  return -1;
+}
+// First mark edge id (m,15,aux=pk(st,ln)), or -1 (rare paths only).
+fn s3_markedge_find(W:[]u8,m:i32,st:i32,ln0:i32)i32 {
+  let want:i32=(st<<16)|ln0;
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && eg(W,e,12)==want){return e;}
+    e=e+1;
+  }
+  return -1;
+}
+// (Re)build the summary entry for (m,st,ln) from mark edge e via the
+// scan path. Runs once per mark per summary lifetime.
+fn s3_fill_entry(S:[]u8,W:[]u8,m:i32,st:i32,ln0:i32,e:i32)void {
+  let ei:i32=s3_inv_find(S,m,st,ln0);
+  if(ei<0){
+    if(get32(S,4)>=64){return;}
+    ei=get32(S,4);
+    set32(S,4,ei+1);
+    let b0:i32=16+ei*180;
+    set32(S,b0,m); set32(S,b0+4,st); set32(S,b0+8,ln0);
+  }
+  let base:i32=16+ei*180;
+  set32(S,base+12,e);
+  let ex:i32=-1;
+  if(ln0>=1 && ln0<=8){
+    let cell:i32=eg(W,e,8); let i:i32=0; let ok:i32=1;
+    while(i<ln0 && ok==1){
+      let bad:i32=0;
+      if(ng(W,cell,0)!=102){bad=1;}
+      let gcell:i32=cell;
+      let scell:i32=ng(W,cell,12);
+      if(ng(W,scell,0)!=101){bad=1;}
+      let f:i32=dep_fact(W,scell);
+      if(f<0){bad=1;}
+      if(bad==0){
+        if(ng(W,f,0)!=1){bad=1;}
+        if(ng(W,f,36)!=1){bad=1;}
+      }
+      let se:i32=-1;
+      if(bad==0){se=s3_seqedge(W,scell);}
+      if(bad==1){ok=0;}
+      else {
+        set32(S,base+20+i*20,gcell);
+        set32(S,base+20+i*20+4,scell);
+        set32(S,base+20+i*20+8,f);
+        set32(S,base+20+i*20+12,ng(W,f,24));
+        set32(S,base+20+i*20+16,se);
+        cell=seq_nx(W,scell);
+      }
+      i=i+1;
+    }
+    if(ok==1){ex=ln0;}
+  }
+  set32(S,base+16,ex);
+  return;
+}
+// Verify an entry against the live store. 1 = the scan path would
+// return identical rels; 0 = stale, caller rescans and repairs.
+fn s3_verify(S:[]u8,W:[]u8,ei:i32,m:i32,st:i32,ln0:i32)i32 {
+  let base:i32=16+ei*180;
+  let me:i32=get32(S,base+12);
+  let pk:i32=(st<<16)|ln0;
+  if(eg(W,me,0)!=m){return 0;}
+  if(eg(W,me,4)!=15){return 0;}
+  if(eg(W,me,12)!=pk){return 0;}
+  if(eg(W,me,8)!=get32(S,base+20)){return 0;}
+  let i:i32=0; let ok:i32=1;
+  while(i<ln0 && ok==1){
+    let g:i32=get32(S,base+20+i*20);
+    let s2:i32=get32(S,base+20+i*20+4);
+    let f:i32=get32(S,base+20+i*20+8);
+    let rl:i32=get32(S,base+20+i*20+12);
+    let bad:i32=0;
+    if(ng(W,g,0)!=102){bad=1;}
+    if(ng(W,g,12)!=s2){bad=1;}
+    if(ng(W,s2,0)!=101){bad=1;}
+    if(ng(W,f,0)!=1){bad=1;}
+    if(ng(W,f,36)!=1){bad=1;}
+    if(ng(W,f,24)!=rl){bad=1;}
+    if(i<ln0-1){
+      let se:i32=get32(S,base+20+i*20+16);
+      if(eg(W,se,0)!=s2){bad=1;}
+      if(eg(W,se,4)!=12){bad=1;}
+      if(eg(W,se,8)!=get32(S,base+20+(i+1)*20)){bad=1;}
+    }
+    if(bad==1){ok=0;}
+    i=i+1;
+  }
+  return ok;
+}
+// Swap two inventory entries (sort helper).
+fn s3_swap(S:[]u8,b0:i32,b1:i32)void {
+  let k:i32=0;
+  while(k<45){
+    let t:i32=get32(S,b0+k*4);
+    set32(S,b0+k*4,get32(S,b1+k*4));
+    set32(S,b1+k*4,t);
+    k=k+1;
+  }
+  return;
+}
+// Once-per-compose_try reconcile: pick up marks written outside the
+// summary path, then sort the inventory by mark-edge id (ascending),
+// which is exactly the baseline scan visitation order.
+fn s3_reconcile(S:[]u8,W:[]u8)void {
+  let e:i32=0;
+  while(e<4096){
+    let a:i32=eg(W,e,12);
+    if(eg(W,e,0)>=0 && eg(W,e,4)==15 && a!=0){
+      let m:i32=eg(W,e,0);
+      if(s3_inv_find(S,m,cl_ps(a),cl_pl(a))<0){
+        s3_fill_entry(S,W,m,cl_ps(a),cl_pl(a),e);
+      }
+    }
+    e=e+1;
+  }
+  let n:i32=get32(S,4); let i:i32=1;
+  while(i<n){
+    let j:i32=i;
+    while(j>0){
+      let b1:i32=16+j*180; let b0:i32=16+(j-1)*180;
+      if(get32(S,b1+12)<get32(S,b0+12)){s3_swap(S,b0,b1); j=j-1;}
+      else {j=0;}
+    }
+    i=i+1;
+  }
+  return;
+}
+// Summary-aware mark write: summary fast path on intact marks,
+// otherwise the baseline write path plus entry fill.
+fn s3_mark_s(S:[]u8,W:[]u8,m:i32,start:i32,len:i32)i32 {
+  if(start<0 || len<1){return -1;}
+  let L:i32=cl_chain_len(W,m);
+  if(L<0 || start+len>L){return -1;}
+  let ei:i32=s3_inv_find(S,m,start,len);
+  if(ei>=0){
+    let me:i32=get32(S,16+ei*180+12);
+    if(eg(W,me,0)==m && eg(W,me,4)==15 && eg(W,me,12)==((start<<16)|len)){return me;}
+  }
+  let e:i32=cl_mark(W,m,start,len);
+  if(e>=0){s3_fill_entry(S,W,m,start,len,e);}
+  return e;
+}
+// Summary extraction with verify-and-repair.
+fn s3_extract(S:[]u8,W:[]u8,m:i32,st:i32,ln0:i32,rels:[]u8)i32 {
+  let ei:i32=s3_inv_find(S,m,st,ln0);
+  if(ei<0){
+    let ex:i32=cl_extract(W,m,st,ln0,rels);
+    let me2:i32=s3_markedge_find(W,m,st,ln0);
+    if(me2>=0){s3_fill_entry(S,W,m,st,ln0,me2);}
+    return ex;
+  }
+  let base:i32=16+ei*180;
+  let exs:i32=get32(S,base+16);
+  if(exs<1){return -1;}
+  if(s3_verify(S,W,ei,m,st,ln0)==1){
+    let j:i32=0;
+    while(j<ln0){set32(rels,j*4,get32(S,base+20+j*20+12)); j=j+1;}
+    return ln0;
+  }
+  set32(S,0,get32(S,0)+1);
+  let ex2:i32=cl_extract(W,m,st,ln0,rels);
+  let me3:i32=s3_markedge_find(W,m,st,ln0);
+  if(me3>=0){s3_fill_entry(S,W,m,st,ln0,me3);}
+  return ex2;
+}
+// Co-use slot find: slot with this m, or first empty, or -1.
+fn s3_cslot(S:[]u8,m:i32)i32 {
+  let i:i32=0; let empty:i32=-1;
+  while(i<128){
+    let b:i32=11536+i*44;
+    let sm:i32=get32(S,b);
+    if(sm==m){return i;}
+    if(sm<2 && empty<0){empty=i;}
+    i=i+1;
+  }
+  return empty;
+}
+// Baseline co-use existence scan (fallback for full/overflow slots).
+fn s3_couse_scan(W:[]u8,m:i32,pm:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,4)==15 && eg(W,e,12)==0 && eg(W,e,0)==m && eg(W,e,8)==pm){return 1;}
+    e=e+1;
+  }
+  return 0;
+}
+// Ensure the co-use slot for m is filled (one scan on first need).
+fn s3_couse_ensure(S:[]u8,W:[]u8,m:i32)i32 {
+  let sl:i32=s3_cslot(S,m);
+  if(sl<0){return -1;}
+  let b:i32=11536+sl*44;
+  if(get32(S,b)==m){return sl;}
+  set32(S,b,m); set32(S,b+4,0); set32(S,b+8,0);
+  let e:i32=0; let nt:i32=0; let ov:i32=0;
+  while(e<4096 && ov==0){
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && eg(W,e,12)==0){
+      if(nt<8){set32(S,b+12+nt*4,eg(W,e,8)); nt=nt+1;}
+      else {ov=1;}
+    }
+    e=e+1;
+  }
+  set32(S,b+8,nt);
+  if(ov==1){set32(S,b+4,2);}
+  else { if(nt>0){set32(S,b+4,1);} }
+  return sl;
+}
+// 1 if a type-15 aux==0 co-use edge m -> pm exists.
+fn s3_couse_has(S:[]u8,W:[]u8,m:i32,pm:i32)i32 {
+  let sl:i32=s3_couse_ensure(S,W,m);
+  if(sl<0){return s3_couse_scan(W,m,pm);}
+  let b:i32=11536+sl*44;
+  let pr:i32=get32(S,b+4);
+  if(pr==2){return s3_couse_scan(W,m,pm);}
+  if(pr==0){return 0;}
+  let nt:i32=get32(S,b+8); let k:i32=0;
+  while(k<nt){
+    if(get32(S,b+12+k*4)==pm){return 1;}
+    k=k+1;
+  }
+  return 0;
+}
+// DEP licensing fact of a SET cell, or -1. Verbatim scan.
+fn dep_fact(W:[]u8,c:i32)i32 {
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==c && eg(W,e,4)==1){return eg(W,e,8);}
+    e=e+1;
+  }
+  return -1;
+}
+// Structural chain length of MAP m. Verbatim.
+fn cl_chain_len(W:[]u8,m:i32)i32 {
+  if(m<2 || m>=1024 || ng(W,m,36)!=1 || ng(W,m,0)!=20){return -1;}
+  let cell:i32=ng(W,m,20); let n:i32=0; let exp:i32=102; let k:i32=0;
+  while(k<200){
+    if(cell<2 || cell>=1024 || ng(W,cell,36)!=1){return -1;}
+    if(exp==102){
+      if(ng(W,cell,0)!=102){return -1;}
+      cell=ng(W,cell,12); exp=101;
+    } else {
+      if(ng(W,cell,0)!=101 || dep_fact(W,cell)<0){return -1;}
+      n=n+1;
+      if(n>7){return -1;}
+      cell=seq_nx(W,cell);
+      if(cell<0){return n;}
+      exp=102;
+    }
+    k=k+1;
+  }
+  return -1;
+}
+// Write fragment mark (m,start,len), deduplicated. Verbatim (kept
+// for external callers such as cl_driver t4b).
+fn cl_mark(W:[]u8,m:i32,start:i32,len:i32)i32 {
+  if(start<0 || len<1){return -1;}
+  let L:i32=cl_chain_len(W,m);
+  if(L<0 || start+len>L){return -1;}
+  let e:i32=0;
+  while(e<4096){
+    let a:i32=eg(W,e,12);
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && a!=0 && cl_ps(a)==start && cl_pl(a)==len){return e;}
+    e=e+1;
+  }
+  let cell:i32=ng(W,m,20); let k:i32=0;
+  while(k<start){
+    cell=seq_nx(W,ng(W,cell,12));
+    if(cell<0){return -1;}
+    k=k+1;
+  }
+  if(ng(W,cell,0)!=102){return -1;}
+  return link_edge(W,m,15,cell,cl_pk(start,len));
+}
+// Resolve mark and extract its relation sequence. Verbatim scan
+// path (used on summary miss/repair).
+fn cl_extract(W:[]u8,m:i32,start:i32,len:i32,rels:[]u8)i32 {
+  let entry:i32=-1; let e:i32=0;
+  while(e<4096 && entry<0){
+    let a:i32=eg(W,e,12);
+    if(eg(W,e,0)==m && eg(W,e,4)==15 && a!=0 && cl_ps(a)==start && cl_pl(a)==len){entry=eg(W,e,8);}
+    e=e+1;
+  }
+  if(entry<0){return -1;}
+  let cell:i32=entry; let i:i32=0;
+  while(i<len){
+    if(ng(W,cell,0)!=102){return -1;}
+    let st:i32=ng(W,cell,12);
+    if(ng(W,st,0)!=101){return -1;}
+    let f:i32=dep_fact(W,st);
+    if(f<0 || ng(W,f,0)!=1 || ng(W,f,36)!=1){return -1;}
+    set32(rels,i*4,ng(W,f,24));
+    cell=seq_nx(W,st);
+    i=i+1;
+  }
+  return len;
+}
+// Walk an extracted relation sequence. Verbatim.
+fn cl_walk(W:[]u8,cur:i32,rels:[]u8,len:i32,vals:[]u8,fids:[]u8)i32 {
+  set32(vals,0,cur);
+  let i:i32=0;
+  while(i<len){
+    let fnd:i32=t2_lu_first(W,get32(vals,i*4),get32(rels,i*4));
+    if(fnd<0){return -1;}
+    set32(vals,(i+1)*4,ng(W,fnd,28));
+    set32(fids,i*4,fnd);
+    i=i+1;
+  }
+  return len;
+}
+// Tail of a pure chain graph: the last SET cell. Verbatim.
+fn cc_chain_tail(W:[]u8,root:i32)i32 {
+  let cur:i32=root; let tail:i32=-1; let steps:i32=0;
+  while(cur>=0 && steps<64){
+    let tag:i32=ng(W,cur,0);
+    if(tag==102){cur=ng(W,cur,12);}
+    else {
+      if(tag==101){tail=cur; cur=seq_nx(W,cur);}
+      else {cur=-2;}
+    }
+    steps=steps+1;
+  }
+  return tail;
+}
+// Write co-use LINK newM -> prevM (type 15, aux 0), deduplicated.
+// Verbatim (kept for external callers: R6A probe, ev_cq).
+fn cb_couse_link(W:[]u8,newM:i32,prevM:i32)i32 {
+  if(newM<0 || prevM<0 || newM==prevM){return 0;}
+  if(ng(W,newM,0)!=20 || ng(W,prevM,0)!=20){return 0;}
+  if(ng(W,newM,36)!=1 || ng(W,prevM,36)!=1){return 0;}
+  let e:i32=0;
+  while(e<4096){
+    if(eg(W,e,0)==newM && eg(W,e,4)==15 && eg(W,e,12)==0 && eg(W,e,8)==prevM){return 0;}
+    e=e+1;
+  }
+  link_edge(W,newM,15,prevM,0);
+  return 1;
+}
+// Summary-aware co-use write: dedup via the summary, write-through
+// on insert. Used by the composition success path.
+fn cb_couse_link_s(S:[]u8,W:[]u8,newM:i32,prevM:i32)i32 {
+  if(newM<0 || prevM<0 || newM==prevM){return 0;}
+  if(ng(W,newM,0)!=20 || ng(W,prevM,0)!=20){return 0;}
+  if(ng(W,newM,36)!=1 || ng(W,prevM,36)!=1){return 0;}
+  let sl:i32=s3_couse_ensure(S,W,newM);
+  if(sl<0){return cb_couse_link(W,newM,prevM);}
+  let b:i32=11536+sl*44;
+  if(get32(S,b+4)==2){return cb_couse_link(W,newM,prevM);}
+  let nt:i32=get32(S,b+8); let k:i32=0; let dupq:i32=0;
+  while(k<nt){
+    if(get32(S,b+12+k*4)==prevM){dupq=1;}
+    k=k+1;
+  }
+  if(dupq==1){return 0;}
+  link_edge(W,newM,15,prevM,0);
+  if(nt<8){
+    set32(S,b+12+nt*4,prevM);
+    set32(S,b+8,nt+1);
+    set32(S,b+4,1);
+  } else {
+    set32(S,b+4,2);
+  }
+  return 1;
+}
+// newest live MAP id, -1 if none. Verbatim.
+fn cb_newest_map(W:[]u8)i32 {
+  let m:i32=1023;
+  while(m>=2){
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){return m;}
+    m=m-1;
+  }
+  return -1;
+}
+// Co-use history over fragment triples via the summary.
+fn cb_has_couse_s(S:[]u8,W:[]u8,m:i32,used:[]u8,nused:i32)i32 {
+  let u:i32=0;
+  while(u<nused){
+    if(s3_couse_has(S,W,m,get32(used,u*12))==1){return 1;}
+    u=u+1;
+  }
+  return 0;
+}
+// Gated fragment satisfiability via the summary. Fallback and walk
+// verbatim.
+fn cl_satisfy_s(S:[]u8,W:[]u8,m:i32,start:i32,len:i32,cur:i32,vals:[]u8,fids:[]u8,kind:[]u8)i32 {
+  let rels:[]u8=z_alloc(32);
+  let ex:i32=s3_extract(S,W,m,start,len,rels);
+  if(ex<1){
+    set32(kind,0,0);
+    let p:i32=len+1;
+    if(p<2 || p>8){return -1;}
+    let paths:[]u8=z_alloc(4608); let np:i32=t2_gather(W,cur,paths); let i:i32=0;
+    while(i<np){
+      let base:i32=i*48;
+      if(get32(paths,base)==p){
+        let j:i32=0;
+        while(j<p){set32(vals,j*4,get32(paths,base+4+j*4)); j=j+1;}
+        j=0;
+        while(j<p-1){set32(fids,j*4,get32(paths,base+24+j*4)); j=j+1;}
+        set32(kind,0,2);
+        return p-1;
+      }
+      i=i+1;
+    }
+    return -1;
+  }
+  let wl:i32=cl_walk(W,cur,rels,len,vals,fids);
+  if(wl<1){set32(kind,0,0); return -1;}
+  set32(kind,0,1);
+  return wl;
+}
+// Candidate enumeration over the summary inventory (sorted by
+// mark-edge id: exactly the baseline scan visitation order).
+// Ordering logic verbatim.
+fn cl_candidates_s(S:[]u8,W:[]u8,cur:i32,used:[]u8,nused:i32,cm:[]u8,csb:[]u8,clb:[]u8,cob:[]u8,ckb:[]u8,base:i32)i32 {
+  let n:i32=0; let nfb:i32=0;
+  let ninv:i32=get32(S,4); let ii:i32=0;
+  while(ii<ninv && n<32){
+    let eb:i32=16+ii*180;
+    let m:i32=get32(S,eb); let st:i32=get32(S,eb+4); let ln0:i32=get32(S,eb+8);
+    let u:i32=0; let isused:i32=0;
+    while(u<nused){
+      if(get32(used,u*12)==m && get32(used,u*12+4)==st && get32(used,u*12+8)==ln0){isused=1;}
+      u=u+1;
+    }
+    if(isused==0){
+      let vb:[]u8=z_alloc(36); let fb:[]u8=z_alloc(32); let kb:[]u8=z_alloc(4);
+      let ln:i32=cl_satisfy_s(S,W,m,st,ln0,cur,vb,fb,kb);
+      let kd:i32=get32(kb,0);
+      if(ln>=1 && (kd!=2 || nfb<4)){
+        if(kd==2){nfb=nfb+1;}
+        let co:i32=cb_has_couse_s(S,W,m,used,nused);
+        let pos:i32=0; let found:i32=0;
+        while(pos<n && found==0){
+          let plo:i32=get32(clb,(base+pos)*4); let pco:i32=get32(cob,(base+pos)*4);
+          let pki:i32=get32(ckb,(base+pos)*4);
+          if(co>pco){found=1;}
+          else {
+            if(co==pco && kd<pki){found=1;}
+            else {
+              if(co==pco && kd==pki && ln>plo){found=1;}
+              else {pos=pos+1;}
+            }
+          }
+        }
+        let s:i32=n;
+        while(s>pos){
+          set32(cm,(base+s)*4,get32(cm,(base+s-1)*4));
+          set32(csb,(base+s)*4,get32(csb,(base+s-1)*4));
+          set32(clb,(base+s)*4,get32(clb,(base+s-1)*4));
+          set32(cob,(base+s)*4,get32(cob,(base+s-1)*4));
+          set32(ckb,(base+s)*4,get32(ckb,(base+s-1)*4));
+          s=s-1;
+        }
+        set32(cm,(base+pos)*4,m);
+        set32(csb,(base+pos)*4,st);
+        set32(clb,(base+pos)*4,ln);
+        set32(cob,(base+pos)*4,co);
+        set32(ckb,(base+pos)*4,kd);
+        n=n+1;
+      }
+    }
+    ii=ii+1;
+  }
+  return n;
+}
+// Depth-first search over FRAG marks via the summary. Verbatim
+// control flow.
+fn cl_dfs_s(S:[]u8,W:[]u8,s:i32,expected:i32,oseg:[]u8,ovals:[]u8,ofids:[]u8,olen:[]u8)i32 {
+  let cm:[]u8=z_alloc(1024); let csb:[]u8=z_alloc(1024);
+  let clb:[]u8=z_alloc(1024); let cob:[]u8=z_alloc(1024); let ckb:[]u8=z_alloc(1024);
+  let ncand:[]u8=z_alloc(32); let candi:[]u8=z_alloc(32); let curval:[]u8=z_alloc(32);
+  set32(curval,0,s);
+  set32(ncand,0,cl_candidates_s(S,W,s,oseg,0,cm,csb,clb,cob,ckb,0));
+  set32(candi,0,0);
+  let L:i32=0; let done:i32=0; let nseg:i32=-1;
+  while(L>=0 && done==0){
+    if(get32(candi,L*4)>=get32(ncand,L*4)){
+      L=L-1;
+      if(L>=0){set32(candi,L*4,get32(candi,L*4)+1);}
+    } else {
+      let ci:i32=L*32+get32(candi,L*4);
+      let m:i32=get32(cm,ci*4); let st:i32=get32(csb,ci*4); let ln0:i32=get32(clb,ci*4);
+      let vbuf:[]u8=z_alloc(36); let fbuf:[]u8=z_alloc(32); let kb:[]u8=z_alloc(4);
+      let ln:i32=cl_satisfy_s(S,W,m,st,ln0,get32(curval,L*4),vbuf,fbuf,kb);
+      if(ln<1){
+        set32(candi,L*4,get32(candi,L*4)+1);
+      } else {
+        set32(oseg,L*12,m); set32(oseg,L*12+4,st); set32(oseg,L*12+8,ln0);
+        set32(olen,L*4,ln);
+        let j:i32=0;
+        while(j<=ln){set32(ovals,(L*8+j)*4,get32(vbuf,j*4)); j=j+1;}
+        j=0;
+        while(j<ln){set32(ofids,(L*7+j)*4,get32(fbuf,j*4)); j=j+1;}
+        let nv:i32=get32(vbuf,ln*4);
+        if(nv==expected){
+          nseg=L+1;
+          done=1;
+        } else {
+          if(L+1>=8){
+            set32(candi,L*4,get32(candi,L*4)+1);
+          } else {
+            set32(curval,(L+1)*4,nv);
+            set32(ncand,(L+1)*4,cl_candidates_s(S,W,nv,oseg,L+1,cm,csb,clb,cob,ckb,(L+1)*32));
+            set32(candi,(L+1)*4,0);
+            L=L+1;
+          }
+        }
+      }
+    }
+  }
+  return nseg;
+}
+// Collapsed composition core with an explicit summary.
+fn s3_compose(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8,S:[]u8)i32 {
+  if(expected<0){return -2;}
+  let am:i32=2;
+  while(am<1024){
+    if(ng(W,am,36)==1 && ng(W,am,0)==20){
+      let al:i32=cl_chain_len(W,am);
+      if(al>=1){s3_mark_s(S,W,am,0,al);}
+    }
+    am=am+1;
+  }
+  s3_reconcile(S,W);
+  let oseg:[]u8=z_alloc(96); let ovals:[]u8=z_alloc(256);
+  let ofids:[]u8=z_alloc(224); let olen:[]u8=z_alloc(32);
+  let nseg:i32=cl_dfs_s(S,W,s,expected,oseg,ovals,ofids,olen);
+  if(nseg<1){
+    emit("COMP-FAIL\n");
+    return -2;
+  }
+  let roots:[]u8=z_alloc(32); let g:i32=0; let ok:i32=1;
+  while(g<nseg && ok==1){
+    let ln:i32=get32(olen,g*4);
+    let vb:[]u8=z_alloc((ln+1)*4); let fb:[]u8=z_alloc(ln*4);
+    let j:i32=0;
+    while(j<=ln){set32(vb,j*4,get32(ovals,(g*8+j)*4)); j=j+1;}
+    j=0;
+    while(j<ln){set32(fb,j*4,get32(ofids,(g*7+j)*4)); j=j+1;}
+    let rt:i32=t2_asm_chain(W,vb,ln+1,fb);
+    if(rt<0){ok=0;} else {set32(roots,g*4,rt);}
+    g=g+1;
+  }
+  if(ok==0){return -2;}
+  let full:i32=get32(roots,0);
+  g=1;
+  while(g<nseg){
+    let tail:i32=cc_chain_tail(W,full);
+    if(tail<0){return -2;}
+    seq_link(W,tail,get32(roots,g*4));
+    g=g+1;
+  }
+  let cst:[]u8=z_alloc(8);
+  set32(cst,0,0); set32(cst,4,0);
+  let v2:i32=t2_try_verify(W,full,s,expected,masked,cst);
+  set32(st,0,get32(st,0)+get32(cst,0));
+  set32(st,4,get32(st,4)+get32(cst,4));
+  if(v2==-2){return -2;}
+  let allf:[]u8=z_alloc(288); let nf:i32=0;
+  g=0;
+  while(g<nseg){
+    let ln2:i32=get32(olen,g*4);
+    let j2:i32=0;
+    while(j2<ln2){
+      set32(allf,nf*4,get32(ofids,(g*7+j2)*4));
+      nf=nf+1; j2=j2+1;
+    }
+    g=g+1;
+  }
+  let zm:i32=promote_graph(W,full,s,r,v2,allf,nf);
+  if(zm>=0){
+    g=0;
+    while(g<nseg){
+      link_edge(W,zm,14,get32(oseg,g*12),0);
+      g=g+1;
+    }
+    g=1;
+    while(g<nseg){
+      cb_couse_link_s(S,W,get32(oseg,g*12),get32(oseg,(g-1)*12));
+      g=g+1;
+    }
+  }
+  emit("COMP-SEGS n="); e64(nseg);
+  g=0;
+  while(g<nseg){emit(" "); e64(get32(oseg,g*12)); g=g+1;}
+  emit("\n");
+  return v2;
+}
+// Per-call summary entry point (used by ev_query).
+fn compose_try(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8)i32 {
+  let S:[]u8=s3_sum_alloc();
+  return s3_compose(W,s,r,expected,masked,st,S);
+}
+// Session summary entry point (used by the session test).
+fn compose_try_s(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8,S:[]u8)i32 {
+  return s3_compose(W,s,r,expected,masked,st,S);
+}
+// ev_query with collapsed composition between rebind_try and trial.
+// Verbatim pipeline.
+fn ev_query(W:[]u8,s:i32,r:i32,expected:i32,flags:i32)i32 {
+  hs(W,0,hg(W,0)+1); decay(W); ctx_push(W,s);
+  let n:i32=activate(W,s,r);
+  if(n>=0){
+    link_edge(W,n,6,n,0); ref_prot(W,n);
+    log_ev(W,2,s,r,ng(W,n,28),1,0,0); return ng(W,n,28);
+  }
+  let rbs:[]u8=z_alloc(8); set32(rbs,0,0); set32(rbs,4,0);
+  let masked:i32=flags&1;
+  let ra:i32=rebind_try(W,s,r,expected,masked,rbs);
+  emit("RB-STAT tried="); e64(get32(rbs,0)); emit(" rejected="); e64(get32(rbs,4)); emit("\n");
+  if(ra!=-2){
+    hs(W,16,get32(rbs,0)*1024+get32(rbs,4));
+    log_ev(W,2,s,r,ra,1,0,0); return ra;
+  }
+  if(compose_on()==1){
+    let ca:i32=compose_try(W,s,r,expected,masked,rbs);
+    emit("COMP-STAT tried="); e64(get32(rbs,0)); emit(" rejected="); e64(get32(rbs,4)); emit("\n");
+    if(ca!=-2){
+      hs(W,16,get32(rbs,0)*1024+get32(rbs,4));
+      log_ev(W,2,s,r,ca,1,0,0); return ca;
+    }
+  }
+  let recent:i32=-1; let mm:i32=2;
+  while(mm<1024){
+    if(ng(W,mm,36)==1 && mm>=2 && ng(W,mm,0)==1){recent=mm;}
+    mm=mm+1;
+  }
+  if(recent>=0){link_edge(W,recent,8,recent,0);}
+  let ans:i32=mp_run(W,s,r,expected,flags);
+  if(ans!=-2){log_ev(W,2,s,r,ans,1,0,0); return ans;}
+  let bv:i32=bootstrap_miss(W,s,r);
+  if(bv!=-2){log_ev(W,2,s,r,bv,1,0,0); return bv;}
+  log_ev(W,2,s,r,-2,0,0,0);
+  miss_inquire(W,s,r);
+  return -2;
+}
+// Chained query for co-use episodes. Verbatim.
+fn ev_cq(W:[]u8,s:i32,r:i32,expected:i32,flags:i32,chain:i32)i32 {
+  let m0:i32=cb_newest_map(W); let ans:i32=ev_query(W,s,r,expected,flags);
+  if(ans==-2){return -2;}
+  let m1:i32=cb_newest_map(W);
+  if(m1<0 || m1==m0){return ans;}
+  if(chain==1){
+    let prev:i32=hg(W,56);
+    cb_couse_link(W,m1,prev);
+  }
+  hs(W,56,m1);
+  return ans;
+}

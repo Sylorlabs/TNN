@@ -2,22 +2,23 @@
 
 ## Step 0: Toolchain Guard (mandatory)
 
-Executed at worker startup, before any other work, via the mandated
-setup script:
+Implementation worker startup record (2026-10-02; the text below
+describes the prereg commit only and is kept for the record). Executed
+before any other work, via the mandated inline setup:
 
 ```
-bash docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh
+mkdir -p $HOME/safebin
+for t in git znc sh bash ls cp mv rm mkdir cat grep sed awk wc cmp sha256sum git-receive-pack git-upload-pack; do
+  p=$(which $t 2>/dev/null); [ -n "$p" ] && ln -sf "$p" $HOME/safebin/$t 2>/dev/null
+done
 export PATH="$HOME/safebin"
-which python3; which python
 ```
 
-Result: the setup script printed
-`SAFEBIN-READY: /home/hatch/safebin (36 tools, no python)` and its own
-verify lines confirmed python3 and python absent from the safebin
-PATH. Afterwards `which python3` returned NOTHING (rc=1) and
-`which python` returned NOTHING (rc=1). All subsequent work runs with
-PATH=$HOME/safebin. znc resolves to the safebin pinned build
-(src/tools/toolchain/znc_linux_x86_64_abed8aa1 lineage).
+Result: afterwards `which python3` returned NOTHING (rc=1) and
+`which python` returned NOTHING (rc=1); the safebin PATH contains only
+the allowed tools. All subsequent work runs with PATH=$HOME/safebin.
+znc resolves to the pinned build via the safebin symlink
+($HOME/safebin/znc -> src/tools/toolchain/znc_linux_x86_64_abed8aa1).
 
 No forbidden executable invoked at any point. Pure Zag via the pinned
 znc for all research logic. Shell used only for: safebin setup, file
@@ -26,11 +27,17 @@ and git ops.
 
 Compiler lessons applied (from AGENTS.md): u8-backed cells with
 get32/set32 little-endian helpers, never `as *i32` slice construction
-in functions; single preallocated output buffer with one
-_zag_raw_syscall flush, never _zag_print for dynamic output, stdout
-bytes verified; no reliance on .len of cast slices; if-nesting at
-most 3 with hoisted sub-conditions; no `!(.. && ..)` in while
-conditions (De Morgan rewrites only, grep checked).
+in functions (grep clean); single preallocated output buffer with one
+_zag_raw_syscall flush, never _zag_print for dynamic output (grep
+clean), stdout bytes verified; no reliance on .len of cast slices;
+flat if-nesting with hoisted flags; no `!(.. && ..)` in while
+conditions (grep clean).
+
+Prereg worker note (from the frozen prereg commit, kept verbatim):
+the prereg worker ran
+bash docs/lab/research-lead/overnight-20260928/safebin_setup/setup_safebin.sh,
+exported PATH=$HOME/safebin, and confirmed python3 and python absent
+(SAFEBIN-READY, 36 tools, no python).
 
 ## Step 1: Task identity
 
@@ -72,9 +79,26 @@ semantic cases. Standalone simulation; TNN core untouched.
 - No em/en dashes in loop docs (check_no_dash.sh before doc commits).
 - This adopts the guard into the experimental mechanism only;
   promotion to any frozen base is out of scope (banked for Micah).
-- Redteam prereg commit: <to be recorded>.
-- Redteam implementation commit: <to be recorded>.
-- DCE-V2 prereg commit: <to be recorded after commit>.
-- DCE-V2 implementation commit: <to be recorded after commit>.
+- Redteam prereg commit: 7c1629e97.
+- Redteam implementation commit: f58e3eabd.
+- DCE-V2 prereg commit: e5e350bb0 (PREREG.md + NAMECHECK.md only;
+  verified via git show --stat: 2 files, 357 insertions).
+- DCE-V2 implementation commit: recorded below (NAMECHECK record
+  commit, explicit pathspec, DCE-V2 message).
+- Implementation files (src/delayed_consequence_v2.zag, REPORT.md,
+  bin/, runs/, NAMECHECK.md Steps 0-3) were staged by this worker
+  with an explicit pathspec and were swept into c64fb6d96 by another
+  worker's bare `git commit` (SCALING-FALLBACKFIX implementation,
+  2026-10-02) before this worker's own commit could land; this
+  worker's two commit attempts failed first on a pathspec/-m order
+  error, then on a HEAD race (cannot lock ref). The swept files were
+  verified byte-identical to the working tree via sha256
+  (.zag 12b34cf692017a042df94d2b149eb834602dad68dad362d5efdeaf3ef18b38d1,
+  REPORT.md e0942bb6456161c11a8f17132b51aad2a0ac664c09531b048f0d5404eab6c7b2).
+- COMMIT-ORDER self-check: prereg e5e350bb0 is an ancestor of
+  c64fb6d96 (git merge-base --is-ancestor) and of this record
+  commit; the prereg commit (PREREG.md + NAMECHECK.md only, verified
+  via git show --stat: 2 files, 357 insertions) strictly precedes
+  the implementation in git log order. COMMIT-ORDER: PASS.
 - REPORT.md: per-bar verdicts against the frozen bars, guard-identity
   diff evidence, per-arm verdicts, cognition lines added.

@@ -73,5 +73,42 @@
 
 ## Step 5: Verification session (filled after runs)
 
-- Determinism: integ2_bin 3/3 byte-identical, sha256 recorded.
-- Dash audit, grep audits, frozen sha256 audits: recorded here.
+- Resumed parked implementation 2026-10-02 ~16:00 PDT. The parked
+  worker's sources were consistent with the frozen prereg
+  (rebuilt binary byte-identical to the parked binary), but its
+  integ2_revise_one had a slot-recycling defect: in the readable
+  case it retired the stale trial BEFORE kind-dispatch, so
+  alloc_node recycled the trial's node id for the new trial's own
+  chain cells (observed: ng(a,36) live again as a 902 frame node,
+  type-16 "revises" edge pointing at a recycled cell). In the
+  unreadable case the deferred retire was still recycled, by the
+  next MAP's execution-probe frame allocation mid-scan. Fix (in
+  integ2_patch.zag only, 145/150 lines): mask the trial's node
+  type during dispatch (frozen duplicate checks scan live type-20
+  MAPs; cc_relseq never reads the MAP's own field 0, so the
+  specialize length limit is safe), then restore the type and
+  defer all retirements past the scan loop via a transient local
+  list (no new fields, no new header slots, no learner state).
+  This restores the prereg's dispatch-then-retire order.
+- Determinism: integ2_bin 3/3 byte-identical runs.
+  sha256(integ2_run1.txt) = sha256(integ2_run2.txt) =
+  sha256(integ2_run3.txt) =
+  857b59e042553ba952ad9626762a146a3fb1d5e4a805c44d0cf27f03335b94ed
+- Dash audit: zero em/en dashes (byte check U+2014/U+2013) in
+  PREREG.md, PREREG_AMENDMENT1.md, NAMECHECK.md, integ2_patch.zag,
+  integ2_driver.zag, integ2_build.sh, REPORT.md.
+- Grep audits: token `expected` absent from integ2_patch.zag
+  (count 0); no `while.*!(` negated-conjunction loops; no
+  `as *i32` casts in new sources.
+- Frozen sha256 audits: all 7 guarded/pristine copies match the
+  Step 3 values exactly (full 64-char compare). Origin lanes
+  integ_break_redteam and composition_integration: git diff empty.
+- Commit-order self-check: 2bb9cf9be holds PREREG.md + NAMECHECK.md
+  only; e6595aa89 holds PREREG_AMENDMENT1.md only; both precede
+  all implementation artifacts. PASS.
+- Observation (non-gating): in the I3 kill case the execution
+  probe does not return INTEG-EXEC-STALE (execstale=0); the
+  satisfiability disjunct carries the stale verdict (satstale=1).
+  The veto fires in the S1 supersede case (execstale=1), which is
+  the routing's designed added value. No bar depends on which
+  disjunct fires.

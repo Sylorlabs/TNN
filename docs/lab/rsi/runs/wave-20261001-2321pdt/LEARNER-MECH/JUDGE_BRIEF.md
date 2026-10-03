@@ -79,7 +79,7 @@ the battery was disclosed-in-prereg, not a sealed adversarial world.
 - Frozen core: `docs/lab/research-lead/overnight-20260928/tnn2_build/tnn2.zag`
   (commit f4de7ff46; blob `b226b223cb3ee0be742af673653fb8ea8605f281`
   re-verified this lane; SHA-256
-  `a29972ca8183b2857c0c7b262d004fce6e4547c12ff8c05f9ebd9152dddca9efeb2a3b44064ec9d`)
+  `a29972ca8183b2857c0c7b262d004fce6e4547c02a971a7aef035b44aa76a8bd`)
 - Consumed inputs (read-only):
   `docs/lab/rsi/runs/wave-20261001-2321pdt/CONTLEARN-OWNED/VERDICT_OWNED.md`,
   `.../JUDGE_BRIEF.md`, `.../PREREG_OWNED.md`

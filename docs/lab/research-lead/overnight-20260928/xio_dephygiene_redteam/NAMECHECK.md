@@ -40,6 +40,16 @@ content. No `as *i32` plus slice construction in functions. The
 If-nesting kept at 3 or fewer in new code. All four compiler-defect
 workarounds honored.
 
+## Step 0 (resume, 2026-10-02, replacement worker)
+
+Safebin rebuilt at session start (mkdir/ln loop over the 36 allowed
+tools, PATH=$HOME/safebin). Verification before any work:
+`which python3` and `which python` both return nothing. Pinned znc
+resolves via $HOME/safebin/znc. Guard re-verified clean. All research
+logic pure Zag; shell only for znc invocation, binary execution, git
+ops, file moves, hashing, and text comparison. No forbidden
+executable invoked.
+
 Target files are COPIES. The C308 committed files
 (docs/lab/research-lead/overnight-20260928/xio_dephygiene/*) are never
 modified; needed sources are copied into this lane and their hashes
