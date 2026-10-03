@@ -36,6 +36,14 @@
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (this file with it).
-- [ ] Step 2: implementation (xs3_patch.zag, drivers, binaries).
-- [ ] Step 3: 3/3 runs, REPORT.md, commit with explicit pathspecs.
+- [x] Step 1: PREREG.md frozen, committed ALONE (commit ea6f894df).
+- [x] Step 2: implementation (xs3_patch.zag, drivers, binaries).
+  One pre-report fix: A8 driver query corrected 106 -> 107 to match
+  the frozen battery; rebuilt and re-ran 3/3 (disclosed in
+  REPORT.md). No frozen bar changed.
+- [x] Step 3: 3/3 runs, REPORT.md. Verdict XP-SELECT-3-PASS
+  (K1-K13). Run shas: main
+  52a63054a86eaf9ce571a6d51d3f2dce0a7d7a924280a68eef05d45bbdc6ef11,
+  noadapt
+  08d7a7a7caf184422e53ae9859a289c6f667e0eae000a089ea7413f4f9b8c896.
+- [x] Scratch ~/workspace/_scratch_xs3 deleted after the run.
