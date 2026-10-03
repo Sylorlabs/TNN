@@ -61,25 +61,35 @@ from EXILE-PROMOTION, threshold T=2).
 
 ## Frozen derivations (M2C2)
 
-R1: cold holds 28 entries at slots 0..27; the 20 owner-1 A keys sit
-at slots 0..19 in test order (EXILE-PROMOTION's cc1=420 = 2x210
-derivation). Each A key is hit twice: owner-1 check (rc 0->1, stays
+Assumption A1 (stated, falsifiable): the 20 owner-1 A keys sit at
+cold slots 0..19 in test order (i=1..10, hop 1 then hop 2).
+EXILE-PROMOTION's cc1=420 = 2x210 is consistent with this; the run
+below tests it. If A1 is wrong, the R1 rk=1 numbers below are
+wrong and the erratum process applies.
+
+R1: cold holds 28 entries at slots 0..27; the 20 A keys at slots
+0..19 (A1). Each A key is hit twice: owner-1 check (rc 0->1, stays
 cold), owner-2 check (rc 1->2, promotes). Owner-4/8 checks are hot.
 
 - rk=1: owner-1 pass hits slots 0..19 in order: cc 210, rank cost
-  0+1+...+19 = 190, 19 advancing moves; entries end reversed.
-  owner-2 pass hits slots 0..19 in order: cc 210, rank cost 190, 19
-  moves; 20 promotions; pool victims exiled to first-free slots.
-  R1: cc1=420, rk1=380, rkm1=38.
+  0+1+...+19 = 190, 19 advancing moves; entries end reversed
+  [K_20..K_1]. owner-2 pass: each hit finds its key at slot 19
+  (the previous promotion's victim refills slot 0): cc 20x20 =
+  400, rank cost 20x19 = 380, 20 moves; 20 promotions.
+  R1: cc1=610, rk1=570, rkm1=39.
+  NOTE: MTF INFLATES the promotion-pass scan (610 > 420): the
+  rank move fights the promotion's slot-0 refill.
 - rk=2: owner-1 pass: every hit sets rc=1; all predecessors rc=1,
   strict > fails, zero moves; cc 210, rk 0. owner-2 pass: rc->2,
-  each entry bubbles past the rc=0 pool victims ahead of it:
+  each entry bubbles past only the rc=0 pool victims ahead of it
+  (predecessors are exactly the victims under A1):
   0+1+...+19 = 190, 19 moves; cc 210. R1: cc1=420, rk1=190,
   rkm1=19.
 - Post-R1 cold layout is IDENTICAL for rk=0,1,2 (slots 0..19 = 20
   exiled pool victims in promotion order; slots 20..27 = 8
   never-hit entries), because every moved A entry is promoted out
-  in the same pass and victims always land at first-free slots.
+  in the same pass in the same key order and victims always land
+  at first-free slots.
 
 R2/R3: no cold hits (rec=0 in EXILE-PROMOTION); no moves; layout
 unchanged. Second churn: no cold hits; 28 exiles install at slots
@@ -100,20 +110,24 @@ bubble-to-front = move-to-front):
 Totals (predicted):
 
 - rk=0: ccT=1132, rkT=0, NET=1132 (EXILE-PROMOTION's row).
-- rk=1: ccT = 420 + 364 + N = 784 + N (<= 812 < 1132);
-  rkT = 380 + 348 + N = 728 + N (in [728, 756]);
-  NET = 1512 + 2N >= 1512 > 1132.
-- rk=2: ccT = 784 + N (<= 812 < 1132);
+- rk=1: ccT = 610 + 364 + N = 974 + N (<= 1002 < 1132: total scan
+  still reduced, but R1 scan is INFLATED 420 -> 610);
+  rkT = 570 + 348 + N = 918 + N (in [918, 946]);
+  NET = 1892 + 2N >= 1892 > 1132.
+- rk=2: ccT = 420 + 364 + N = 784 + N (<= 812 < 1132);
   rkT = 190 + 348 + N = 538 + N (in [538, 566]);
   NET = 1322 + 2N >= 1322 > 1132.
-- rkmT: rk=1: 38 + 8 = 46; rk=2: 19 + 8 = 27; rk=0: 0.
+- rkmT: rk=1: 39 + 8 = 47; rk=2: 19 + 8 = 27; rk=0: 0.
 
-Predicted headline: ranking DOES reduce the positional scan cost
-(cc4 712 -> at most 392), but maintenance cost offsets it: NET
-never beats FIFO (1512+/1322+ vs 1132). Importance (rk=2) is
-cheaper to maintain than pure recency (rk=1) for identical scan
-savings, because it moves entries only on evidence (rc strictly
-exceeding the predecessor).
+Predicted headline: ranking DOES reduce the R4 positional scan
+cost (cc4 712 -> at most 392), but maintenance cost more than
+offsets it: NET never beats FIFO (1892+/1322+ vs 1132). Pure
+recency (rk=1) additionally INFLATES the R1 promotion-pass scan
+(420 -> 610) because move-to-front fights the promotion's slot-0
+refill; importance (rk=2) moves entries only on evidence
+(rc strictly exceeding the predecessor) and leaves R1 scan at 420.
+Order-independent lower bounds (sanity): cc1(rk=1) >= 420,
+rk1(rk=1) >= 380.
 
 ## Frozen kill bars
 
@@ -132,14 +146,17 @@ Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
   Any drift means the substrate was not carried over unchanged:
   FAIL.
 - K2 SCAN-SAVINGS: cc4(rk=1) < 712 and cc4(rk=2) < 712;
+  cc4(rk=1) == cc4(rk=2) (R4 scan identical across rank modes);
   ccT(rk=1) < 1132 and ccT(rk=2) < 1132;
-  cc4(rk=1) == cc4(rk=2) (R4 scan identical across rank modes).
-  If ranking does not reduce the positional scan cost, its stated
-  purpose fails: FAIL.
+  cc1(rk=1) == 610 (MTF inflates the promotion-pass scan vs FIFO's
+  420: the rank move fights the promotion's slot-0 refill);
+  cc1(rk=2) == 420 (importance ranking leaves R1 scan unchanged).
+  If ranking does not reduce the R4 positional scan cost, its
+  stated purpose fails: FAIL.
 - K3 OFFSET (the honest bar): NET(rk=1) = ccT+rkT > 1132 and
-  NET(rk=2) > 1132 (maintenance offsets the savings; ranking is not
-  a net win); rkT(rk=1) > rkT(rk=2) > 0 (importance cheaper to
-  maintain than pure recency); 728 <= rkT(rk=1) <= 756;
+  NET(rk=2) > 1132 (maintenance more than offsets the savings;
+  ranking is not a net win); rkT(rk=1) > rkT(rk=2) > 0 (importance
+  cheaper to maintain than pure recency); 918 <= rkT(rk=1) <= 946;
   538 <= rkT(rk=2) <= 566. If either NET beats FIFO, the prereg's
   honest prediction is falsified (report as FAIL of the prediction,
   with the measured numbers).
@@ -151,7 +168,7 @@ Row layout (144 bytes): 0 pre, 4 post, 8 bacc, 12 raw, 16 cf,
 - K5 LEDGER: exile == ev + drop + promote for rk=0,1,2;
   cdrop=0 in all three rows. (Ranking must not disturb the priced
   accounting.)
-- K6 RANK-ACCOUNTING: rkmT(rk=1)==46, rkmT(rk=2)==27,
+- K6 RANK-ACCOUNTING: rkmT(rk=1)==47, rkmT(rk=2)==27,
   rkmT(rk=0)==0. (Exact move counts from the derivation.)
 - K7 DETERMINISM: 3/3 byte-identical runs (external sha256
   comparison). VOID-grade.
