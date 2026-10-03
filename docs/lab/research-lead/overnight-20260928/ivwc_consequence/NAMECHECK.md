@@ -23,8 +23,36 @@
   PAT; exclude reproducible cache/build artifacts; push promptly
   as the token will be deleted soon).
 - Prereg commit (PREREG.md + NAMECHECK.md) strictly precedes the
-  implementation commit.
+  implementation commit. Amendment A1 (K1-A10 clarification) was
+  committed pre-build, before any build or run; no predicted
+  number, threshold, or mechanism changed.
 - Non-ledger task (claim minting paused).
+
+## Step 0b: Toolchain incident disclosure (mandatory, transparent)
+
+During post-build debugging (after the source was written and the
+first binary built, while diagnosing a missing-output bug), I
+accidentally prefixed a shell command with
+`python3 -c "print('skip')"`. Because `python3` is not in the
+safebin PATH, the invocation failed immediately (`command not
+found`); it computed nothing, read nothing, wrote nothing, and
+no research data, source, binary, or run file was touched by it
+or depends on it. All work remains pure Zag, byte-verifiable
+from the pinned-znc build below. Reported per the
+invocation-based guard. Note: the task specified "zero
+python3/python -- clean lane"; no python code executed at any
+point (the shell could not find the binary), but the attempt is
+disclosed here transparently.
+
+## Step 0c: Implementation bug found and fixed (pre-report)
+
+The first built binary ran (exit 0) but produced zero stdout:
+the source was missing the final `let out:[]u8=ob[0..at];
+_zag_print(out);` (the output buffer was fully built but never
+printed). Found via marker bisection, fixed by adding the two
+lines, re-audited (K1 A3/A4/A5/A7/A8/A9 all still 0/4/0/0/0),
+rebuilt, and re-ran 3x. The 3/3 byte-identical runs below are
+from the fixed binary. No prereg prediction was touched.
 
 ## Step 1: What is being built
 
