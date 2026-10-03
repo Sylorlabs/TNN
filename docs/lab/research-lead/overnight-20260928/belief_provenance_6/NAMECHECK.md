@@ -83,6 +83,62 @@ minted.
   bp6_full.zag, runs, REPORT.md) comes in a LATER commit,
   strictly after this one.
 
-## Step 2: implementation (pending)
+## Step 2: implementation (done)
 
-## Step 3: runs + REPORT.md (pending)
+- Files: bp6_learner.zag (verbatim copy of BP-5's
+  bp5_learner.zag, SHA-256
+  2de20f5a0ff87bc45140a161548b613b008e9c2adabf4da3fdda6d6d46040c5e
+  on both, `cmp` clean), bp6_driver.zag (new: five world
+  arms BA/COMB/EV/CY5/NST, bp6_absorb, driver-side
+  experimental combiner variants bp6_cmax/bp6_cavg/
+  bp6_cwavg, commitment bookkeeping, in-driver bars).
+  Zero new learner functions this lane.
+- Built: `cat ../xhier_countmap_fix/xf_block.zag
+  bp6_learner.zag bp6_driver.zag > bp6_full.zag`;
+  pinned znc by absolute path, build exit 0 -> bp6_bin
+  (412799 bytes; log: bp6_compile.txt; A0102 warnings
+  are the benign ignored-return-value pattern pervasive
+  in the frozen block itself, same as BP-4/BP-5).
+- xf_block.zag SHA-256 re-verified before AND after the
+  build: 172a2e7dbbaa4e60d662331965887327350068e0c13f25e438260ad08313c12a
+  (unchanged; the patched XHIER-COUNTMAP-FIX block).
+- No Python/C/JS/Rust invoked at any point. Safebin PATH
+  held for the whole session. `which python3` /
+  `which python` still empty at build and run.
+- No em/en dashes in any authored lane file or run
+  output (byte-verified with grep); the only dash bytes
+  in the lane are znc's own A0102 warning text inside
+  the machine-generated bp6_compile.txt, disclosed in
+  REPORT.md.
+- 0 new edge types (1/3/7/9/14 all pre-existing in the
+  block), 0 new node types (tags 1/3/20 pre-existing),
+  0 modes, 0 bridges, 0 handlers (one-system
+  accounting).
+
+## Step 3: runs + REPORT.md (done)
+
+- 3/3 runs byte-identical: sha256
+  71acb6ed896f967bf2c0ac17903851d2af9d0cdc9d04d80d4958873419b8f179
+  for bp6_run1/2/3.txt (K-DET PASS).
+- In-driver bars: 35/35 PASS (5 PCs + 30 K bars).
+  BA: bp2_bar_after unit branches 51/51/50/10/11 and
+  the closed-loop trajectory 50->51->51->50 with exact
+  support values 100->80->90->110->120, all outcomes
+  from block-written evidence; raised bar excludes mC.
+  COMB: min/max/avg/wavg = 60/120/90/94; min uniquely
+  satisfies no-invention; combiner flips R7 selection.
+  EV: block evict_node took the protected victim m1;
+  belief record persists (H-persist); R7 stale-selects
+  the dead MAP while the liveness baseline skips it;
+  bp2_relicense retires it with reason 2 (dormant
+  path). CY5: per-hop convergence to 40, no cascade,
+  fixpoint idempotent, snap-up to 80. NST: nested
+  convergence to 60, 0-absorption with retirements.
+  BP6-SUMMARY 35/35; 37/37 with K-DET/K-HYG.
+- REPORT.md written with verdict BP-6-PASS. The 7
+  sealed predictions stay sealed; this lane adds
+  open-dynamics evidence only.
+- Committed with explicit pathspecs, local only, never
+  pushed.
+- Ledger: non-ledger task, nothing minted; ledger file
+  untouched.
