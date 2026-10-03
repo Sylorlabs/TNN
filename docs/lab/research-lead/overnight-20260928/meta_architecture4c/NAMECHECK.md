@@ -151,3 +151,31 @@ Two design flaws found in the totals form, both requiring revision:
 The revised design (xerr+xcnt, guard, age, means, K=3) is preregistered
 in PREREG_DIAG2.md and measured in diagnostic stage 2 before any frozen
 implementation.
+
+## Frozen implementation build record (ma4c.zag)
+
+- Frozen PREREG.md committed as 3432ee8f1 BEFORE any implementation
+  file was written (explicit pathspec, dedicated commit).
+- `ma4c.zag` built from `ma4c_diag2.zag`: header/arena/banner updated;
+  `redun` renamed `redun_old` (kept ONLY for write-only shadow);
+  new `redun2a` (tally-driven, K=3) drives victim rule (b) and the
+  redundancy logging (`rv`, `rv2`); new write-only `shadow_eval`;
+  DIAG2 capture/printing replaced by PROXYC + SHADOWPAIR/SHADOWADV.
+- B7 audit: 29-word grep empty in ma4c.zag (reworded "learner-driven"
+  to "tally-driven", "learner-measured" to "self-measured", and the
+  lane-path comment to avoid "meta"; verified clean before build).
+- B6 audit: `redun_old(` called only from `shadow_eval` (1 call site);
+  `redun2a(` drives rule (b), logging, and PROXYC. No block labels
+  reach cells; no mean distance in redun2a.
+- `znc ma4c.zag -o ma4c_bin`: clean build (only the pre-existing
+  A0101 analyzer warning in `etc_ep`, inherited from MA4b).
+- 3/3 runs byte-identical: sha256
+  `3cf22a2b42b86cb71eb7da16d8e26133385e63d27db145cfa3cc49b04417a971`.
+- X/Y/Z byte-identical to MA4b run1.txt (cmp). W identical through
+  the E795 trigger evaluation; first divergence at SNAPWB5 (cell 2
+  stays B4-model instead of becoming B5-model), exactly as predicted.
+- All frozen predictions confirmed (see REPORT.md). No post-E795
+  trigger occurred.
+- Toolchain: safebin-only PATH for every command; zero forbidden
+  executable invocations; git writes via /usr/bin/git with explicit
+  pathspecs.
