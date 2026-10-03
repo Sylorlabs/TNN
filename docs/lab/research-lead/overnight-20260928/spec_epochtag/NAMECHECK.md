@@ -21,3 +21,15 @@
   da_learn.zag is 13296, telemetry cells).
 
 ## Steps 1..n: reserved for build/run verification records
+
+## Step 1: build/run verification (2026-10-03)
+
+- `./et_build.sh` run from the lane directory under safebin PATH.
+- Pinned znc built `et_bin` with no errors; exit 0 on all 3 runs; stderr
+  empty on all 3 runs (K3).
+- 3/3 byte-identical stdout: sha256
+  e478df9869eb41224b8fedc2efe2db94de014aee0db42e9c26a89516a82e03a4
+  across et_run1/2/3.txt (K7).
+- All frozen kill bars K1..K10 PASS (see REPORT.md adjudication table).
+  Verdict: BUILD-PASS (10/10).
+- `da_learn.zag` byte-unmodified; DA battery untouched (separate lane).
