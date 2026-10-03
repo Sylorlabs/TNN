@@ -1,0 +1,13 @@
+s/\b936\b/r_tries(A)/g
+s/\b940\b/r_found(A)/g
+s/\b944\b/r_ans(A)/g
+s/\b1024\b/r_vp(A)/g
+s/\b1280\b/r_kp(A)/g
+s/\b1536\b/r_pv(A)/g
+s/\b2304\b/r_t1(A)/g
+s/\b3328\b/r_t2c(A)/g
+s/\b3332\b/r_t2e(A)/g
+s/\b3588\b/r_nv(A)/g
+s/\b3592\b/r_wid(A)/g
+s/\b3596\b/r_vs(A)/g
+s/\b3660\b/r_dn(A)/g
