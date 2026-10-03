@@ -65,10 +65,24 @@ pushed, explicit pathspecs.
 ## Steps
 
 - [x] Step 0: toolchain guard (above).
-- [ ] Step 1: PREREG.md frozen, committed ALONE (this file +
-      PREREG.md) before any implementation exists.
-- [ ] Step 2: implementation (extend learner.zag +
-      world.zag + driver.zag, concatenated to mx_full.zag),
-      compiled with pinned znc.
-- [ ] Step 3: 3/3 runs byte-identical, K7 audit, driver
-      audit, REPORT.md with verdict.
+- [x] Step 1: PREREG.md frozen, committed ALONE (this file +
+      PREREG.md) at 89b3bbaf9, before any implementation existed.
+- [x] Step 2: implementation (extended learner.zag +
+      world.zag + driver.zag, concatenated to mx_full.zag,
+      2455 lines), compiled with pinned znc (`znc
+      mx_full.zag -o mx_bin`, rc=0, only A0102
+      ignored-return-value warnings, same class as the
+      parent lane).
+- [x] Step 3: 3/3 runs byte-identical (sha256
+      f981bf081530ebcf2bd32f44f2474703556154c94fa523819c9c1080be5e8e38
+      x3), K7 audit clean (no standalone world/answer
+      literals in learner.zag), driver audit 8/8 zero
+      hits, REPORT.md with verdict
+      L2-METAREUSE-EXTEND-PASS (K1-K8 all PASS, 0
+      falsifiers, F-COUNT silent at 333/335/324/1193/
+      1242/1102). One pre-verdict transparent amendment
+      (PREREG_AMENDMENT1.md): QT-AS 368->324
+      (hallucinated fact removed from derivation) and
+      QV-AS 1142->1193 (foldwalk discovery-order
+      correction), plus mechanical driver stat-offset
+      fixes; no counting-rule or learner-code change.
