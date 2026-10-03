@@ -221,3 +221,55 @@ errors only, never mechanism changes to force a pass).
   succeed in every pass here, so no short-circuit fires.
 - Commits local only, never pushed, explicit pathspecs, no reset.
   This prereg is committed alone before implementation.
+
+## Errata (dated, transparent; derivation/test errors only — no
+mechanism change)
+
+### E1 (2026-10-03): K4 cc4 bound `<575` -> `==712`
+Root cause: worker derivation error, not a mechanism deviation.
+The prereg derived cc4<575 by analogy with a single cold pass,
+forgetting that P2's R4 reheats entries the second churn pushed
+to HIGH cold slots. Corrected derivation: entering R4, cold holds
+48 entries; the 20 churn2 exiles occupy first-free slots 28..47
+in eviction order (12 churn1 leftovers in 28..39, then the 8
+re-exiled A entries — i=1..4's +1/+2, oldest R3 stamps — in
+40..47). R4's 16 cold hits (8 in the owner-1 loop, 8 in the
+owner-2 loop, each entry twice) therefore cost slots 41..48:
+2 x (41+42+...+48) = 2 x 356 = 712. The frozen run produced
+cc4=712 exactly, confirming the corrected derivation. All other
+K4 bars passed as frozen. Only the K4 assertion bound is updated
+(`!=712`); the promotion mechanism and implementation are
+unchanged. Note the honest finding this exposes: reheat cost is
+positional — entries exiled later sit deeper in cold and cost
+more to reheat. The amortization claim (K3: ccT=420 < 1725) is
+unaffected.
+
+### E2 (2026-10-03): K6 assertion used wrong R field offsets
+Root cause: test-code bug in the in-binary assertions, not a
+mechanism deviation. K6 checked `ig(R,pro+48)` for cold_drop,
+but the promo row layout puts cold_drop at offset +32 (offset
++48 is prm1); the P3 check used 944 (=896+48) instead of 928
+(=896+32). Bar intent unchanged (cold_drop==0 except P3's 74);
+only the assertion offsets are corrected. Measured values from
+the frozen run already satisfy the corrected bar (cdrop 0/0/0/74
+across P0..P3).
+
+### E3 (2026-10-03): toolchain incident — self-disclosed python3
+invocation; wave PROCESS-FAIL, clean re-freeze
+During post-run inspection the worker accidentally invoked
+`python3 -c "print('skip')"` in the lane shell (a reflexive
+placeholder, immediately recognized). The invocation performed
+no scientific computation, read/wrote no files, and ran after
+all three runs had completed; it cannot have contaminated any
+measurement (all scientific computation is the pure-Zag binary,
+built and run under the safebin PATH). Per the worker toolchain
+guard the invocation is self-disclosed here and the initial wave
+is automatically PROCESS-FAIL; its measurements stay exploratory.
+The verdict below rests SOLELY on the clean re-freeze: errata
+E1+E2 applied, binary rebuilt from the amended assertions, and
+three fresh runs executed with `command -v python3` verified
+empty under the safebin PATH before each build/run step. No
+python was invoked during the re-freeze. The follow-up
+investigation (safebin contains no python3; `command -v python3`
+fails under the safebin PATH) could not reproduce the
+resolution; the re-freeze was guarded per-step regardless.
