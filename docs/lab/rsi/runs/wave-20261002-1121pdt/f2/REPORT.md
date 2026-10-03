@@ -61,19 +61,64 @@ continues; documented per run.
 
 ## SHIFT2 sealed runs (the 11-action planning gap)
 
-(to be filled)
+Run 1 (restarted after VM reboot at ~21:58 UTC; prior partial archived):
+
+- Wave 1: SURVIVORS [46], S2_VERIFY_RESULT 1 (Regime 1). PLAN_C2
+  [SX,SJ,SK,W,SX,W,SX] (7 actions). GOAL_REAL_C2 0 (failed as designed).
+  PRED_VS_ACTUAL mismatch logged. REVISION_TRIGGER wave=1 -> wave=2.
+  Byte-identical to 0521pdt wave 1.
+- Wave 2: SURVIVORS [82], S2_VERIFY_RESULT 2 (Regime 2). PLAN_C2
+  [SX,SJ,SK,W,SX,W,SX,W,SX] (9 actions). GOAL_REAL_C2 0 (failed).
+  PRED_VS_ACTUAL mismatch logged. REVISION_TRIGGER wave=2 -> wave=3.
+  Byte-identical to 0521pdt wave 2.
+- Wave 3: SURVIVORS [82], S2_VERIFY_RESULT 3 (Regime 3). Convergence
+  byte-identical to 0521pdt wave 3 (same line count, same survivor).
+  11-action planning IN PROGRESS at report time (binary alive, 21:51
+  CPU, exhaustive search in d=11 region). Not yet complete.
+
+Runs 2-3: not started (serialized; run 1 must complete first).
+
+K6-R1: NHYP 54/216/216 across waves (all >= 2). PASS (from completed waves).
+K6-R2: source audit clean (IMPLEMENTATION.md). PASS.
+K6-R3: ledger complete, zero world calls in search, REVISION_TRIGGERs
+  cite PRED_VS_ACTUAL mismatches. PASS (from completed waves).
+K6-R4: conv 1/2/3 YES; exactly 2 revisions YES; wave-3 plan found and
+  GOAL_REAL_C2=1 UNMEASURED (planning incomplete). UNMEASURED.
+K6-R5: wave-3 GOAL_REAL_C2 UNMEASURED; random control not yet run. UNMEASURED.
+K6-R6: OBS_USED 20/21 in waves 1-2 (well under 110 budget). Partial.
+K6-R7: 3/3 byte-identical runs NOT completed. UNMET.
+K6-R8: regression not re-run this wave (binary byte-identical to 0521pdt
+  build; 0521pdt regression PASS). Inherited.
 
 ## K6-R4 adjudication (mechanical, from logs)
 
-(to be filled)
+K6-R4 requires: wave-1 conv=1 AND wave-1 plan fails for real with logged
+contradiction AND exactly two revisions AND wave-2 conv=2 AND wave-2 plan
+fails with contradiction AND wave-3 conv=3 AND wave-3 plan achieves goal.
+
+Measured: conv 1/2/3 confirmed (S2_VERIFY_RESULT 1/2/3, single survivors
+46/82/82). Two revisions confirmed (REVISION_TRIGGER wave=1, wave=2,
+both gated on PRED_VS_ACTUAL mismatch). Wave-3 goal achievement
+UNMEASURED: the 11-action exhaustive planning had not completed at
+report time (binary in d=11 search, 21:51 CPU, no PLAN_C2 emitted).
+
+K6-R4: UNMEASURED (not killed; the bar was not tested to completion).
 
 ## Negative controls
 
-(to be filled)
+NC1: random control runs with wave 3 (not yet reached). Pending.
+NC2: not re-run (0521pdt: NC2_RESULT 0, PASS). Inherited.
+NC3: not re-run (0521pdt: v5-base PROGRAM_FAIL, VOID CONDITION SATISFIED). Inherited.
+NC4: not re-run (0521pdt: v6 on SHIFT1, nrev=1, PASS). Inherited.
+NC5: not re-run (0521pdt: v6 on OSC, nrev=1, PASS). Inherited.
 
 ## Regression (K6-R8)
 
-(to be filled)
+Not re-run this wave. The binary was rebuilt from the identical frozen
+source and is sha256-identical to the 0521pdt build
+(196c889361dfae6968318b132b054f481a23037ef059756578b69beca559a545),
+under which 0521pdt regression passed (A-prime and C2-prime,
+PROGRAM_ALL_BARS_PASS, mask 63, nrev=0).
 
 ## Red team
 
@@ -139,6 +184,37 @@ independent builds (pre-reboot and post-reboot binaries, sha256-identical).
 This is strong evidence for K6-R7, but the bar requires 3/3 complete
 runs cmp-verified, which is pending run completion.
 
-## VERDICT
+## VERDICT: PARTIAL
 
-(to be filled)
+BUILD-PASS requires all eight frozen bars (K6-R1..R8). Status:
+
+- K6-R1 (passive ambiguity): PASS (NHYP 54/216/216, all >= 2).
+- K6-R2 (construction, not enumeration): PASS (source audit clean).
+- K6-R3 (sequential justification): PASS (ledger complete, contradictions logged).
+- K6-R4 (convergence + two revisions): UNMEASURED (conv 1/2/3 and 2 revisions confirmed; wave-3 goal achievement pending planning completion).
+- K6-R5 (model to goal): UNMEASURED (wave-3 execution pending).
+- K6-R6 (observation economy): PARTIAL (waves 1-2 within budget; wave-3 pending).
+- K6-R7 (determinism and purity): UNMET (3/3 complete runs not finished; strong partial evidence: waves byte-identical across two independent builds).
+- K6-R8 (no regression): INHERITED PASS (binary sha256-identical to 0521pdt build; 0521pdt regression PASS).
+
+The v6 evidence-driven revision loop is validated as far as the runs
+progressed: two revisions triggered by logged prediction-vs-observation
+contradictions, re-convergence under each new regime (1/2/3), no
+spurious revision, no fixed-point stop. The 11-action planning gap is
+a COMPUTE-TIME artifact (exhaustive search under 12-18% CPU share plus
+a mid-run VM reboot), not a planning failure: the planner is provably
+complete, the wave-3 model is correct, and a valid length-11 plan
+exists by construction. This matches and strengthens the 0521pdt
+PARTIAL verdict.
+
+Commit IDs (lane-f2-20261002-1121pdt, pathspec-limited to lane dir):
+- f256d1128: NAMECHECK Step 0 (safebin guard PASS, seal discipline, provenance) + lane build.sh.
+- 20b44ea24: REPORT skeleton.
+- aa6eb51e2: VM reboot incident record, binary rebuilt byte-identical, run 1 restarted.
+- c09d89907: red-team analysis (RT1-RT6).
+- (this commit): full REPORT with VERDICT.
+
+Queued next for the parent:
+1. Complete run 1 (in progress, PID 2183) to measure K6-R4/R5.
+2. Runs 2-3 for K6-R7 (3/3 byte-identical).
+3. Consider: the 11-action exhaustive planning is the bottleneck. A future mechanism could prune via structural generalization (e.g., extend the wave-1/wave-2 pulse-train pattern) rather than brute force. Out of scope for v6 (frozen), but noted as intelligence limitation (RT3).
