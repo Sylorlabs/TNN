@@ -156,10 +156,18 @@ mechanism; no number moves after seeing results.
   the token "oracle" (case-insensitive) appears zero times. A9
   (the no-oracle bar): the token `Tpred` appears zero times --
   no transductive label threshold is computed anywhere, not even
-  fenced. A10 (correction-independence): the BARS section
-  contains zero reads of adjucb/d1adj/d2adj -- both new bars are
-  computed from preff, C, bucb_frozen-aggregates, and K only
-  (audited by source inspection of the BARS block).
+  fenced. A10 (correction-independence): the V_HKC and V_WK
+  bars are computed without reading any sealed bias-adjusted
+  score -- ThyHKC = max(ThyA, K) from preff (bias-free), C
+  (train-fixed), and K (world constant); the V_WK bar is the
+  constant K. The BARS block retains exactly one verbatim
+  adjucb read (the totucb accumulation feeding TVucb/ThyB, the
+  lineage baseline bars re-verified by K3); no new verdict uses
+  TVucb/ThyB, and the fenced +40 probes cannot move any bar
+  (they touch d1adj/d2adj, never preff). Audited by source
+  inspection of the BARS block: ThyHKC's dataflow is
+  preff -> totp -> ThyA -> max(ThyA, K); the WK bar has no
+  dataflow at all.
 - **K2 (determinism): PASS required.** 3/3 runs byte-identical
   stdout.
 - **K3 (verbatim machinery): PASS required.** BARS lines:
@@ -194,6 +202,23 @@ mechanism; no number moves after seeing results.
   profit-relevant information beyond the stakes on this problem.
 
 **BUILD-PASS requires K1..K10.**
+
+## Amendment A1 (pre-build, transparent)
+
+During the pre-build source audit (after PREREG.md was committed
+as `25ad7c1c5`, before any build or run), the A10 audit clause
+"the BARS section contains zero reads of adjucb/d1adj/d2adj"
+was found to be literally false: the BARS block contains one
+verbatim `adjucb` read (the `totucb` accumulation feeding
+TVucb/ThyB, retained for the K3 verbatim-machinery check).
+A10 is therefore CLARIFIED (not weakened): the
+correction-independence property governs the NEW bars (V_HKC,
+V_WK), which are computed without reading any sealed
+bias-adjusted score; the single verbatim read feeds only the
+lineage baseline bars that no new verdict uses. No predicted
+number, no threshold, and no mechanism changed. This amendment
+was committed before any build or run; the original prereg
+commit strictly precedes the implementation.
 
 ## Preregistered answers to the task's key questions
 
