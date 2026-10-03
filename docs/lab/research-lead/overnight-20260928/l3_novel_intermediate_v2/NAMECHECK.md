@@ -104,3 +104,42 @@ Near-miss disclosure: During debugging a command fragment containing
 `python3 -c "print('skip')"` was typed. With safebin PATH active, python3
 does not resolve; the invocation failed (command not found). No forbidden
 computation occurred. Disclosed per governance ruling.
+
+## Step 0 (Wave 3 search-fix worker, 2026-10-02)
+
+Safebin activated before any execution in this task:
+
+- Ran the mandatory setup: mkdir -p $HOME/safebin; symlinks created for
+  git, znc (pinned src/tools/toolchain/znc_linux_x86_64_abed8aa1), sh,
+  bash, ls, cp, mv, rm, mkdir, cat, grep, sed, awk, wc, cmp, sha256sum,
+  git-receive-pack, git-upload-pack. export PATH="$HOME/safebin".
+- Verified under the safebin PATH: `which python3` returns nothing,
+  `which python` returns nothing.
+- All scientific computation is pure Zag compiled with the pinned znc.
+  Shell is used only for: invoking znc, running compiled binaries, git
+  operations, file moves, sha256sum digests, FIFO plumbing in the battery
+  supervisor, and the no-dash documentation check. No python3, python, or
+  any other forbidden interpreter is invoked at any point.
+
+Per Micah's 2026-09-30 governance ruling: any forbidden executable
+invocation would make this wave PROCESS-FAIL.
+
+## Step 1 (Wave 3): Scope check
+
+- Solve the wave-2 search-adequacy failure: T1 DEFERs on DEV-S1 because
+  the beam prunes the crucial score-1 prefix before extension.
+- Diagnose first (in PREREG_WAVE3.md, frozen before implementation),
+  then design CALR (Consequence-Anchored Lookahead Retention), then
+  implement in pure Zag, run, and report honestly.
+- Do NOT weaken K1 through K12 or KC0A through KC0D. Do NOT widen the
+  5-op ISA. Do NOT redesign the task. Do NOT inspect sealed-world
+  contents (DEV fixtures are unsealed smoke-test fixtures and are the
+  only worlds touched).
+- Freeze PREREG_WAVE3.md plus this Step 0 update in a commit containing
+  those two files ALONE, before any wave-3 .zag source, binary, or run
+  log exists.
+- Commits stay LOCAL on branch tnn-native-lab, explicit pathspecs, never
+  pushed, never amend shared history, never git reset. Do not touch
+  TNN_RESEARCH_PAPER_20260929.md or other workers' files.
+- No em/en dashes in loop documentation (verified with
+  worker_snippets/check_no_dash.sh before commit).
