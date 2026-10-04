@@ -154,3 +154,13 @@ We therefore do NOT claim the frozen policy core learns; we claim a
 driver-level acquired capability over the frozen generic procedures
 (ret_gen/vfy_gen/cnt_gen from c15_base semantics), which is the narrowest
 honest locus. Report must say this explicitly in BOUNDARIES.
+
+## 8. ERRATA ERR-1 (issued before implementation)
+
+Fact-table fixture numbers adjusted: N=141 facts over R=16 relations with
+per-relation row counts r3=20, r7=20, r11=20 (hot set {3,7,11}), and
+r1=16, r2=14, r4=12, r5=10, r6=8, r8=7, r9=6, r10=4, r12=2, r13=1,
+r14=0, r15=0, r16=1. This keeps the hot set MEDIUM-sized (20 rows) so no
+size-only heuristic (largest or smallest) recovers it, while a column on a
+hot relation is still ~7x cheaper than the generic full scan (20 vs 141).
+Budget counter N in section 0 now means N=141.
