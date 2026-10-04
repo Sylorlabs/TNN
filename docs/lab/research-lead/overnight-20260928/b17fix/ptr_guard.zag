@@ -1,0 +1,428 @@
+// PTR_GUARD -- standing detector for the B17 defect class.
+//
+// A `[]u8 as *u8` cast yields an address that is NOT the slice's data pointer.
+// Reads through it return unrelated memory (measured: a literal 7 read back as
+// 8) and writes through it damage the ORIGINAL arena (measured: 7 -> 0, which
+// is neither the old nor the new value, so no aliasing semantics explains it).
+// See VERIFY_B17.md / C500.
+//
+// The scanner is pure Zag. It classifies every `as *u8` site in a manifest of
+// .zag files as SAFE / SUSPECT / CORRUPT and refuses when a CORRUPT site is
+// present, so the defect cannot silently reappear.
+//
+// WHY COMMENT-AWARENESS IS LOAD-BEARING: the largest single source of false
+// positives for this pattern in this corpus is PROSE. Lanes write headers like
+// "never `[]u8 as *u8` casts" and "Alloc pattern: _zag_malloc as *u8 then
+// [0..n]". A naive text grep counts those as violations and reports hundreds
+// of phantom hits. Comment stripping is the difference between a guard that is
+// obeyed and a guard that is switched off.
+//
+// Two legitimate `*u8` sources exist and both are SAFE:
+//   _zag_malloc(n) as *u8    -- canonical allocator idiom (brief 3.1)
+//   null as *u8              -- canonical null-check idiom (brief 5)
+// The address of an existing slice is obtained with _zag_slice_ptr(b), never
+// by casting the slice.
+//
+// LANGUAGE NOTES (Zag has no `continue` and no `break`; control flow is
+// restructured with an action flag and flat `if`s instead).
+//
+// USAGE (ptr_guard.sh enumerates files and drives this binary):
+//   ./ptr_guard <manifest> [allowlist]
+// manifest  : newline-separated list of .zag paths
+// allowlist : newline-separated "path<TAB>lineno" pins for reviewed integer-
+//             reconstruction sites (e.g. gen_cogops_unify's (lo|(hi<<32))
+//             idiom, which is fed by _zag_slice_ptr and is sound)
+// EXIT: 0 = clean, 1 = CORRUPT site(s) found, 2 = usage/IO error
+//
+// NOTE: heap addresses are never printed. macOS ASLR makes them differ every
+// run, which would look like a determinism bug.
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){ return ""; }
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){ return ""; }
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){ b[i]=0; i=i+1; }
+  return b;
+}
+
+// ---- byte helpers -------------------------------------------------------
+
+fn is_space(c:i32)i32 {
+  if(c==32){ return 1; }
+  if(c==9){ return 1; }
+  return 0;
+}
+fn is_id0(c:i32)i32 {
+  if((c>=65)&&(c<=90)){ return 1; }
+  if((c>=97)&&(c<=122)){ return 1; }
+  if(c==95){ return 1; }
+  return 0;
+}
+fn is_id(c:i32)i32 {
+  if(is_id0(c)==1){ return 1; }
+  if((c>=48)&&(c<=57)){ return 1; }
+  return 0;
+}
+fn eqn(s:[]u8,t:[]u8,n:i32)i32 {
+  if(n==0){ return 1; }
+  if(s.len<n){ return 0; }
+  if(t.len<n){ return 0; }
+  let i:i32=0;
+  while(i<n){
+    if(s[i]!=t[i]){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+fn eq(s:[]u8,t:[]u8)i32 { return eqn(s,t,t.len); }
+
+// find needle in hay at or after `from`; -1 if absent
+fn find(h:[]u8,n:[]u8,from:i32)i32 {
+  if(n.len==0){ return from; }
+  let lim:i32=h.len-n.len;
+  let i:i32=from;
+  while(i<=lim){
+    let j:i32=0;
+    let ok:i32=1;
+    while(j<n.len){
+      if(h[i+j]!=n[j]){ ok=0; j=n.len; } else { j=j+1; }
+    }
+    if(ok==1){ return i; }
+    i=i+1;
+  }
+  return -1;
+}
+
+// ---- line geometry ------------------------------------------------------
+
+fn line_start(s:[]u8,pos:i32)i32 {
+  let i:i32=pos;
+  while(i>0){
+    if(s[i-1]==10){ return i; }
+    i=i-1;
+  }
+  return 0;
+}
+fn line_end(s:[]u8,pos:i32)i32 {
+  let i:i32=pos;
+  while(i<s.len){
+    if(s[i]==10){ return i; }
+    i=i+1;
+  }
+  return s.len;
+}
+
+// ---- classification -----------------------------------------------------
+
+// Characters that can appear inside a cast operand. Deliberately EXCLUDES
+// '=' ':' '{' '}' ';' '"' and whitespace, which is what separates the operand
+// from its surrounding statement. Without this exclusion `let p:*u8=X` and
+// `if(p==null` would both merge declaration and operand into one token.
+fn is_opnd(c:i32)i32 {
+  if(is_id(c)==1){ return 1; }
+  if(c==46){ return 1; }  // '.'
+  if(c==40){ return 1; }  // '('
+  if(c==41){ return 1; }  // ')'
+  if(c==124){ return 1; } // '|'
+  if(c==60){ return 1; }  // '<'
+  if(c==62){ return 1; }  // '>'
+  if(c==42){ return 1; }  // '*'
+  if(c==43){ return 1; }  // '+'
+  if(c==45){ return 1; }  // '-'
+  if(c==38){ return 1; }  // '&'
+  if(c==126){ return 1; } // '~'
+  return 0;
+}
+fn is_pure_ident(s:[]u8)i32 {
+  if(s.len==0){ return 0; }
+  if(is_id0(s[0])==0){ return 0; }
+  let i:i32=1;
+  while(i<s.len){
+    if(is_id(s[i])==0){ return 0; }
+    i=i+1;
+  }
+  return 1;
+}
+
+// True if s begins with the literal `pre`.
+fn starts_with(s:[]u8,pre:[]u8)i32 { return eqn(s,pre,pre.len); }
+
+// Classify the operand of an `as *u8` cast whose token begins at `nk`.
+// The operand is the expression immediately left of `as`.
+//   0 = SAFE     (_zag_malloc(...) or null)
+//   1 = CORRUPT  (bare slice identifier -> a dereferencing cast)
+//   2 = SUSPECT  (any other operand: integer reconstruction, etc.)
+// Zag has no `break`, so the backward walk uses an explicit stop flag.
+// Count `"` bytes in s[a..b]. An ODD count means the offset a+k sits inside a
+// string literal, where the text `b as *u8` is a LABEL, not a cast.
+fn quotes_between(s:[]u8,a:i32,b:i32)i32 {
+  let n:i32=0;
+  let i:i32=a;
+  while(i<b){
+    if(s[i]==34){ n=n+1; }
+    i=i+1;
+  }
+  return n;
+}
+
+fn classify(s:[]u8,ls:i32,nk:i32)i32 {
+  // t is already the index of the `a` in `as *u8` (where find stopped).
+  // First skip the separating whitespace, then walk back over operand chars.
+  let e:i32=nk-1;
+  let sp:i32=0;
+  while((e>=ls)&&(sp==0)){
+    if(is_space(s[e])==1){ e=e-1; } else { sp=1; }
+  }
+  if(e<ls){ return 2; }   // nothing left but whitespace
+  let q:i32=e;
+  let stopped:i32=0;
+  while((q>=ls)&&(stopped==0)){
+    if(is_opnd(s[q])==1){ q=q-1; } else { stopped=1; }
+  }
+  let a:i32=q+1;
+  if(a>e){ return 2; }    // no operand at all
+  let tok:[]u8=s[a..e+1];
+  if(tok.len==0){ return 2; }
+  // SAFE: the two canonical *u8 sources
+  if(eq(tok,"null")==1){ return 0; }
+  if(starts_with(tok,"_zag_malloc")==1){ return 0; }
+  // CORRUPT: a bare slice identifier, e.g. `b as *u8`
+  if(is_pure_ident(tok)==1){ return 1; }
+  // SUSPECT: integer-expression reconstruction, e.g. (lo|(hi<<32)) as *u8
+  return 2;
+}
+
+// Name bound by `let NAME:*u8 = <operand> as *u8` on this line, or "".
+fn bound_name(s:[]u8,ls:i32,nk:i32)[]u8 {
+  let head:[]u8=s[ls..nk];
+  let li:i32=find(head,"let ",0);
+  if(li<0){ return ""; }
+  let a:i32=li+4;
+  let b:i32=a;
+  let ok:i32=0;
+  while((b<head.len)&&(ok==0)){
+    if(head[b]==58){ ok=1; } else { b=b+1; }
+  }
+  if(ok==0){ return ""; }
+  if(b<=a){ return ""; }
+  return head[a..b];
+}
+
+// Is pointer `nm` used as NAME[ (a load or store) anywhere at/after `from`?
+fn dereferenced(s:[]u8,from:i32,nm:[]u8)i32 {
+  if(nm.len==0){ return 0; }
+  let i:i32=from;
+  while(i<s.len){
+    let k:i32=find(s,nm,i);
+    if(k<0){ return 0; }
+    let ok:i32=1;
+    if(k>0){ if(is_id(s[k-1])==1){ ok=0; } }
+    let e:i32=k+nm.len;
+    if(e<s.len){ if(is_id(s[e])==1){ ok=0; } }
+    if(ok==1){
+      if(e<s.len){ if(s[e]==91){ return 1; } }
+    }
+    i=k+nm.len;
+  }
+  return 0;
+}
+
+// ---- output -------------------------------------------------------------
+
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let neg:i32=0; let x:i64=v;
+  if(x<0){ neg=1; x=0-x; }
+  let n:i32=1; let t:i64=x;
+  while(t>=10){ t=t/10; n=n+1; }
+  let e:i32=c+neg+n; let p:i32=e-1; let y:i64=x;
+  if(y==0){ b[p]=48; }
+  while(y>0){ b[p]=(48+(y-(y/10)*10)) as u8; y=y/10; p=p-1; }
+  if(neg==1){ b[c]=45; }
+  return e;
+}
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0; while(i<s.len){ b[c+i]=s[i]; i=i+1; } return c+s.len;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+fn o_flush(b:[]u8,c:i32)void { _zag_print(b[0..c]); return; }
+
+// ---- allowlist lookup ---------------------------------------------------
+
+// 1 if "fp<TAB>ln" matches an allowlist line.
+//
+// The pin's path is matched as a SUFFIX of the scanned path, so a committed
+// allowlist written with repo-relative paths works from any worktree without
+// embedding machine-specific absolute prefixes.
+fn is_pinned(allow:[]u8,fp:[]u8,ln:i32,lnbuf:[]u8)i32 {
+  if(allow.len==0){ return 0; }
+  let lnlen:i32=o_i64(lnbuf,0,ln as i64);
+  let mp:i32=0;
+  while(mp<allow.len){
+    let me:i32=line_end(allow,mp);
+    let raw:[]u8=allow[mp..me];
+    mp=me+1;
+    // trim trailing CR/space
+    let l:i32=raw.len;
+    let done:i32=0;
+    while((l>0)&&(done==0)){
+      let ch:i32=raw[l-1];
+      if((ch==13)||(ch==32)){ l=l-1; } else { done=1; }
+    }
+    let line:[]u8=raw[0..l];
+    // split at the tab; `ok` means "this line is a well-formed pin"
+    let ok:i32=0;
+    let tab:i32=0;
+    let ti:i32=0;
+    while(ti<line.len){
+      if(line[ti]==9){ tab=ti; ok=1; ti=line.len; } else { ti=ti+1; }
+    }
+    if(ok==0){ tab=0; }
+    let p:[]u8=line[0..tab];
+    let n:[]u8=line[tab+1..line.len];
+    if(ok==1){
+      if(p.len>0){
+        if(p.len<=fp.len){
+          let off:i32=fp.len-p.len;
+          if(eqn(fp[off..fp.len],p,p.len)==1){
+            if(n.len==lnlen){
+              if(eqn(n,lnbuf,lnlen)==1){ return 1; }
+            }
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+// ---- main ---------------------------------------------------------------
+
+fn main()i32 {
+  let argc:i32=_zag_argc();
+  if(argc<2){
+    _zag_println("PTR_GUARD: usage: ptr_guard <manifest> [allowlist]");
+    return 2;
+  }
+  let man:[]u8=_zag_read_file(_zag_arg(1));
+  let allow:[]u8="";
+  if(argc>2){ allow=_zag_read_file(_zag_arg(2)); }
+
+  let out:[]u8=z_alloc(262144);
+  let lnbuf:[]u8=z_alloc(32);
+  let oc:i32=0;
+  let nfile:i32=0;
+  let nSAFE:i32=0;
+  let nSUS:i32=0;
+  let nCOR:i32=0;
+  let nPIN:i32=0;
+
+  let NEEDLE:[]u8="as *u8";
+  let MLEN:i32=NEEDLE.len;
+
+  let mp:i32=0;
+  while(mp<man.len){
+    let me:i32=line_end(man,mp);
+    let raw:[]u8=man[mp..me];
+    mp=me+1;
+    let pl:i32=raw.len;
+    // Zag has no `break`; trim trailing CR/space with an explicit done flag.
+    let trimmed:i32=0;
+    while((pl>0)&&(trimmed==0)){
+      let ch:i32=raw[pl-1];
+      if((ch==13)||(ch==32)||(ch==10)){ pl=pl-1; } else { trimmed=1; }
+    }
+    let fp:[]u8=raw[0..pl];
+    let doScan:i32=0;
+    if(fp.len>0){ if(_zag_file_exists(fp)){ doScan=1; } }
+    if(doScan==1){
+      let s:[]u8=_zag_read_file(fp);
+      nfile=nfile+1;
+      let pos:i32=0;
+      while(pos<s.len){
+        let k:i32=find(s,NEEDLE,pos);
+        if(k<0){
+          pos=s.len+1;
+        } else {
+          pos=k+MLEN;
+          let ls:i32=line_start(s,k);
+          let com:i32=find(s[ls..k],"//",0);
+          let inComment:i32=0;
+          if(com>=0){ inComment=1; }
+          // Occurrences inside a string literal are label text, not casts.
+          // Without this, every `ck("... (b as *u8) ...", ...)` assertion
+          // label in the corpus is reported as a violation.
+          if(quotes_between(s,ls,k)%2==1){ inComment=1; }
+          // cls: 9 skip (comment), 0 SAFE, 1 slice-cast (CORRUPT if
+          // dereferenced), 2 non-canonical operand, 3 slice-cast w/o deref
+          let cls:i32=9;
+          if(inComment==0){ cls=classify(s,ls,k); }
+          let ln:i32=1;
+          if(cls!=9){
+            let i:i32=0;
+            while(i<ls){ if(s[i]==10){ ln=ln+1; } i=i+1; }
+          }
+          let pin:i32=0;
+          if((cls==1)||(cls==2)){ pin=is_pinned(allow,fp,ln,lnbuf); }
+          let nm:[]u8="";
+          if(cls==1){
+            nm=bound_name(s,ls,k);
+            if(dereferenced(s,k+MLEN,nm)==0){ cls=3; }
+            if(pin==1){ pin=is_pinned(allow,fp,ln,lnbuf); }
+          }
+          if(cls==0){ nSAFE=nSAFE+1; }
+          if((cls==1)&&(pin==1)){ nPIN=nPIN+1; }
+          if(cls==1){
+            if(pin==0){ nCOR=nCOR+1; }
+            oc=o_app(out,oc,"PTR_GUARD CORRUPT ");
+            oc=o_app(out,oc,fp);
+            oc=o_nl(out,oc);
+            oc=o_app(out,oc,"  line ");
+            oc=o_i64(out,oc,ln as i64);
+            oc=o_app(out,oc,"  `");
+            oc=o_app(out,oc,nm);
+            oc=o_app(out,oc,"` is a slice cast to *u8 and IS dereferenced");
+            if(pin==1){
+              oc=o_app(out,oc," -- INTENTIONAL, allowlisted (defect reproducer)");
+            } else {
+              oc=o_app(out,oc," -- silent memory corruption");
+            }
+            oc=o_nl(out,oc);
+          }
+          if((cls==2)||(cls==3)){
+            if(pin==0){
+              nSUS=nSUS+1;
+              oc=o_app(out,oc,"PTR_GUARD SUSPECT ");
+              oc=o_app(out,oc,fp);
+              oc=o_nl(out,oc);
+              oc=o_app(out,oc,"  line ");
+              oc=o_i64(out,oc,ln as i64);
+              if(cls==3){
+                oc=o_app(out,oc,"  slice cast to *u8, no deref found on this pass");
+              } else {
+                oc=o_app(out,oc,"  pointer cast with non-canonical operand, NOT allowlisted");
+              }
+              oc=o_nl(out,oc);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  oc=o_app(out,oc,"PTR_GUARD SUMMARY\n");
+  oc=o_app(out,oc,"  files_scanned   "); oc=o_i64(out,oc,nfile as i64); oc=o_nl(out,oc);
+  oc=o_app(out,oc,"  SAFE            "); oc=o_i64(out,oc,nSAFE as i64); oc=o_nl(out,oc);
+  oc=o_app(out,oc,"  SUSPECT         "); oc=o_i64(out,oc,nSUS as i64); oc=o_nl(out,oc);
+  oc=o_app(out,oc,"  CORRUPT         "); oc=o_i64(out,oc,nCOR as i64); oc=o_nl(out,oc);
+  oc=o_app(out,oc,"  pinned-reviewed "); oc=o_i64(out,oc,nPIN as i64); oc=o_nl(out,oc);
+  o_flush(out,oc);
+
+  if(nCOR>0){
+    _zag_println("PTR_GUARD: REFUSED (CORRUPT slice-as-pointer cast present)");
+    return 1;
+  }
+  _zag_println("PTR_GUARD: PASS (no CORRUPT slice-as-pointer cast)");
+  return 0;
+}
