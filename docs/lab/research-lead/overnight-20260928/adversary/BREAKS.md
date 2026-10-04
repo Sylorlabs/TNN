@@ -222,3 +222,109 @@ distinguishable log entry.
 ### Determinism
 3/3 byte-identical, rc=0, non-empty output.
 sha256 `d1aee85aac526f9792c653870e868045a244c6891b7482dfb1706be29bb6ecb0`.
+
+## C506 AW-06 eviction -- BLOCKER B7 CONFIRMED, THRESHOLD LOCATED
+
+`evict_node` `tnn2_frozen_ref.zag:254` picks the strictly minimal `bid` and
+breaks ties by first-in-scan from `hg(W,8)`. `is_prot` `:221` needs an ET_USE
+edge with clk>0; `decay` `:153` drains those clocks.
+
+`adversary/aw06.zag`: pad with N facts on relation 77, then teach 6 new facts
+on relation 10, then query each. Fresh workspace per row.
+
+| padding facts | live before | of 6 new facts correct | LOST |
+|---|---|---|---|
+| 1000 .. 1016 | 1000..1016 | **6** | 0 |
+| 1017 | 1017 | 5 | 1 |
+| 1018 | 1018 | 4 | 2 |
+| 1019 | 1019 | 3 | 3 |
+| 1020 | 1020 | 2 | 4 |
+| 1021 | 1021 | 1 | 5 |
+| 1022 | 1022 (arena full) | **0** | **6** |
+
+Loss is exactly linear: one fact lost per live node beyond 1016. At full
+capacity the learner **accepts six new facts and retains none of them**, and
+every one of the six queries returns the wrong value. No error, no counter.
+B7 is confirmed and its threshold is 1017 live nodes, not 6 sequential facts
+in the abstract.
+
+### Determinism
+3/3 byte-identical, rc=0.
+sha256 `b9a21eeca792935961aad7157f80609ece38237501acb773fb8c073a563aff5d`.
+
+## C507 AW-07 opacity / rename metamorphic -- NEGATIVE CONTROL PASSES, NO LEAKAGE
+
+Charter 109/164. Two COGOPS worlds, structurally identical, with every
+entity id, relation id, goal tag and need tag permuted, and different world
+LABEL strings ("ALPHA" vs "ZZQQ").
+
+| | goal tag | need tag | compose_rc | answer |
+|---|---|---|---|---|
+| ALPHA | 7000 | 21 | 2 | `[3, 1, 2, 3]` |
+| ZZQQ | 5555 | 88 | 2 | `[3, 901, 902, 903]` |
+
+`answers_correspond_under_f = 1`. **No leakage of human-readable vocabulary
+found**, exactly as preregistered. Reported as a negative control, not a
+break.
+
+**Boundaries of this negative result, stated because a bare pass would
+mislead:** the frozen cores contain no string literals and read no string
+input, so this only shows the integer machinery is name-blind. It says nothing
+about the harness, which is full of literal ids and hand-written goals, and it
+does not touch C501/C502, which are defects of id-SENSITIVE identity, not of
+vocabulary.
+
+### Determinism
+3/3 byte-identical, rc=0.
+sha256 `660eb07650163ae6bc05e1238649a7958b6481ea99e9792a5df662e7e453b0b2`.
+
+## C508 AW-08 isomorphism BROKEN -- answer depends on insertion order alone
+
+Charter 110. Same 7-fact set, only the teaching order differs:
+`(1,10,7)(2,10,7)(3,10,7)(5,10,7)(6,10,7)(7,10,7)(4,10,9)`.
+Query `ev_query(999,10)`, subject never taught.
+
+| variant | order | answer | facts persisted about 999 |
+|---|---|---|---|
+| O1 | dissenter `(4,10,9)` taught FIRST | **7** | 1 |
+| O2 | dissenter `(4,10,9)` taught LAST | **-2** | 0 |
+| O3 | O1 plus 8 distractors on unused relations | 7 | -- |
+
+**Same fact set, different answer, by order alone.** O3 confirms the effect
+is specifically recency and not a count effect: irrelevant distractors change
+nothing.
+
+Mechanism: `bootstrap_miss` `:764` scans node ids 1023 **downward**, so the
+at-most-6 objects it compares are the six most recently *allocated* nodes.
+"The most recent r-facts agree" is an artefact of insertion order, and the
+system then encodes that as a fact (O1 persists one).
+
+### Determinism
+3/3 byte-identical, rc=0.
+sha256 `a4982756f3bbc62b9ef8340f9c2e63876110bbb6a5fa9459d21dcebe10ffab68`.
+
+## C509 AW-09 non-isomorphic transfer -- single-valued answer TYPE erasure
+
+Charter 111. `activate` `:140` scans tag-1 nodes matching `(s,r)`, keeps the
+max-`bid` one, and returns `ng(W,n,28)`: **one i32**. `ev_query` returns one
+i32. A question whose answer is a SET has no representation.
+
+| world | true objects for (2,10) | answer | discarded |
+|---|---|---|---|
+| W-MULTI star `(2,10,3)(2,10,4)(2,10,5)(2,10,6)` | 4 | **3** | **3** |
+| W-MULTI same facts, order reversed | 4 | **6** | 3 |
+| W-SINGLE chain `(2,10,3)(3,10,4)(4,10,5)(5,10,6)` | 1 | 3 | 0 (correct) |
+
+Two independent failures in one table:
+1. **Type erasure.** The 4-object question returns one member, chosen by the
+   `bid` tie-break, with no refusal and no signal that a set was needed. The
+   chain is answered correctly *only because* its answer happens to fit the
+   single-i32 type. So the chain "works" and the tree does not for a reason
+   that has nothing to do with structure.
+2. **Order sensitivity.** Reversing only the insertion order of the same four
+   facts changes the answer from 3 to 6. The value returned for a 4-valued
+   question is decided by node allocation order, not by the world.
+
+### Determinism
+3/3 byte-identical, rc=0.
+sha256 `e0fc55a144a614b7de38e2a5a0890240696679522b406e6c81efbad54f7b9e86`.
