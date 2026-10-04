@@ -12,7 +12,7 @@ justified only for byte-identical duplicates.**
 | item | result |
 |---|---|
 | Prereg (C502) | committed alone before any UGEN code |
-| Recon (C500) | 35 files / 15 lanes / **10** distinct bodies, not 26 / 26 |
+| Recon (C500) | 41 files / 15 lanes / **10** distinct bodies, not 26 / 26 |
 | Toolchain (C501) | `_zag_raw_syscall` inert; B13 **false** for this family |
 | UGEN built (C503) | yes, pure Zag, **0 modes**, determinism 3/3 |
 | Ablation (C504) | yes — **fails to move any learner-owned metric** |
@@ -90,9 +90,12 @@ ABLATE  (C504)   agree=1 plans=8 loaded=4 trials=6 dec=0 prior=2    30    15    
 ```
 
 * **B2 (match or beat the best incumbent)**: on the *declared* capability
-  score, UGEN **ties** (everything ties). On the only metric with variance —
-  comparisons spent — UGEN **loses**: 90 vs the grid optimum 84. **B2 FAILS.**
-* **B3 (no regression of the worst)**: UGEN 90 > every incumbent (84–86).
+  score, UGEN **ties** (everything ties). On the metrics with variance UGEN
+  **loses both**: 90 vs the grid optimum 84 on total comparisons, and 56 vs
+  54 on the learner-driven stages — i.e. UGEN sits in the *penalised* 89-cell
+  minority. **B2 FAILS.**
+* **B3 (no regression of the worst)**: UGEN 90 > every incumbent (84–86) on
+  total cost, and 56 > c15/c16's 54 on the learner-driven split.
   **B3 FAILS.**
 * **B1 determinism**: `ugen`, `abl`, `v15`, `v16`, `v17` all **3/3
   byte-identical**. PASS.
@@ -109,22 +112,34 @@ base / world / main / 1331-line prefix.
 
 | metric | distinct values over 324 cells |
 |---|---|
-| **capability score** (`agree`,`plans_built`,`plans_loaded`,`trials`,`declines`,`prior`) | **1** |
+| **capability score** (`agree`,`plans_built`,`plans_loaded`,`trials`,`declines`,`prior`) | **1** — all 324 cells identical |
 | **wins** | **1** (15) |
+| **comparisons spent on LEARNED stages S1–S11** | **2** (54 in 235 cells, 56 in 89 cells) |
+| comparisons spent on LESIONED stages S12–S14 | **7** (9,11,13,15,16,17,18) — a 2× range |
 | turns | 2 (29, 30) |
 | comparisons spent, total | 7 (84,86,88,90,91,92,93) |
-| **comparisons spent on LEARNED stages S1–S11** | **1 (54)** |
-| comparisons spent on LESIONED stages S12–S14 | 9 values (9…17) |
 
 **The capability score is a constant of the apparatus.** Every arithmetically
 distinct decision policy scores identically. There is no gradient, therefore
 no estimation procedure over learner state can identify `P`, `Q` or `D` —
 they are not *parameters of a learnable family*, they are free choices.
 
-The 34 grid cells that reach the optimum (cost 84) span `P ∈ {0,…,8}` with
-`Q`, `D` arbitrary, and **every optimum cell appears in a hedge-on/hedge-off
-pair with identical cost**. The hedge — the sole feature the c17/c19 lane
-was created to ablate — has **zero** effect on any metric.
+The 34 grid cells that reach the optimum (total cost 84) span `P ∈ {0,…,8}`
+with `Q`, `D` arbitrary, and **every optimum cell appears in a
+hedge-on/hedge-off pair at identical cost**.
+
+**Where the family's behaviour IS observable.** Only on the 8 learner-driven
+stages, and only through the comparison count, where the entire dynamic range
+is **2 comparisons out of 54 (3.7%)**:
+
+* hedge `on`: **all 162 cells cost 54** — the policy is completely invisible.
+* hedge `off`: 162 cells split 73 at 54 and 89 at 56.
+* At S8 alone the range is 6 (hedge on) vs 6-or-8 (hedge off).
+
+So **the only learner-owned thing the 324-cell family actually changes is
+whether the researcher-authored tie-to-ALT hedge fires at stage S8.** The
+`P`/`Q`/`D` constants — the entire nominal content of the ten "cognitive
+policies" — move nothing there.
 
 ### 3.5 M3 — the contradiction witness (H0-a, PROVEN)
 
@@ -213,10 +228,10 @@ been shown to be a family — the apparatus cannot tell its members apart.**
 ## 5. THE COMPRESSION THAT IS ACTUALLY AVAILABLE
 
 `26 → 1` in the recon's framing is not a real number. The real numbers are
-**35 files → 10 bodies → 1 template**, and the reductions split cleanly:
+**41 files → 10 bodies → 1 template**, and the reductions split cleanly:
 
 **UNCONDITIONAL (provable, zero capability cost):**
-* 35 files → 15 lanes → **10 distinct bodies**. Four duplicate groups
+* 41 files → 15 lanes → **10 distinct bodies**. Four duplicate groups
   (`26e13db4f42b`, `5d69516f1563`, `87ac71009638`, `679faae0565b`) can be
   deleted outright; they are the same bytes in a different directory.
 * The 10 additive sections share a ~460-line driver tail. What differs
@@ -230,17 +245,20 @@ been shown to be a family — the apparatus cannot tell its members apart.**
   free — and equally meaningless. Under the only metric with variance
   (comparisons spent) the 10 bodies span 84…93, **11%**, and the ordering is
   set by constants no amount of learning can recover from this apparatus.
-* Killing the hedge costs 2 comparisons on S8 and nothing else. That is the
-  one real, small, defensible win in the whole exercise, and it comes from
+* Killing the hedge costs **2 comparisons on S8 (6 → 8) and nothing else** —
+  it is the *only* learner-owned effect any member of the family has. That is
+  a real, small, defensible win in the whole exercise, and it comes from
   **deleting a mode**, not from unifying ten.
 
 **THE REAL DEBT, WHICH IS NOT IN `strat_sel` AT ALL:**
 * Stages **S12, S13, S14** do not exercise `strat_sel`. `main.zag` calls
   `strat_lesion_s12/s13/s14`, which hand-write the (uses,wins,cost) table
-  with 11–12 literal `set32` calls before the query. Those three stages
-  produce **100% of the measurable difference between all 10 policies** and
-  **100% of UGEN's deficit against c15 on the lesioned split**. Every policy
-  scores identically on the 8 stages the learner actually drives.
+  with 11–12 literal `set32` calls before the query. Those three stages carry
+  the **dominant** share of the measurable difference between all 10 policies
+  (dynamic range 9…18 comparisons, 2×) and **100% of UGEN's deficit against
+  c15 on the lesioned split** (15 vs 9). On the 8 stages the learner
+  actually drives, the entire dynamic range is 2 comparisons out of 54, and
+  it is attributable solely to the hedge.
 * `main.zag`'s comment on S14 asserts `"WHOLE untried is the STRICT
   expected-cost argmin (1.0 < 8/5 < 2.0 < 10/4)"` — the numbers it lists are
   the **c14** form `(c+2)/(u+2)` evaluated on the S14 table, and they do not
@@ -269,13 +287,19 @@ been shown to be a family — the apparatus cannot tell its members apart.**
    re-run under the frozen world because their mains do not link.
 4. **S13's contradictory state is a lesion.** H0-a would be a much stronger
    result if the witness lay on a learner-generated table. It does not.
-   Where the learner generates the table (S1–S11), **all 10 bodies are
-   extensionally equal** — 54 comparisons each, identical `wins`.
-5. **`o_flush` was substituted** (§C501). Provenance of that substitution is
+   On the 8 learner-driven stages the family's entire dynamic range is
+   **2 comparisons out of 54**, all of it attributable to the hedge; the
+   capability score and the win count are single-valued there.
+5. **The learner-driven range is small but not zero.** I am not claiming the
+   policies are *extensionally equal* on S1–S11 — 89 of 324 grid cells do pay
+   2 more comparisons there. I am claiming the range is 3.7%, is produced
+   entirely by one researcher-authored tie-break, and is dwarfed 2× by the
+   range inside the hand-written fixtures.
+6. **`o_flush` was substituted** (§C501). Provenance of that substitution is
    the byte-identity of the c15 rebuild against the checked-in Linux output.
    If a future toolchain restores `_zag_raw_syscall`, the substitution should
    be reverted and the results re-run.
-6. **Single seed, single world.** `mk.sh` uses one world and one main. No
+7. **Single seed, single world.** `mk.sh` uses one world and one main. No
    cross-validation.
 
 ---
@@ -289,12 +313,16 @@ that question is closed, and it was never the interesting one. It is:
 > strategy tables are never written by hand?**
 > Delete `strat_lesion_s12/s13/s14` from a copy of `main.zag` and rerun the
 > 324-cell grid. Registered prediction: the capability score stays at 1 value
-> (it already does) **and the learned-stage comparison count stays at 54 for
-> all 324 cells** — because it already does for all 10 bodies. If it does,
-> the entire COGOPS strategy-selection apparatus is *inert* on this battery,
-> and the correct next claim is not about scoring functions at all.
-> Kill bar: if learned-stage cost varies over the grid once the lesions are
-> gone, my §5 conclusion is wrong and I will say so.
+> (it already does) **and the learner-stage comparison count collapses from
+> {54,56} to a single value** — because S12/S13/S14 are where the 2× range
+> lives. If it does, the COGOPS strategy-selection apparatus is *inert* on
+> everything the learner drives, and the correct next claim is not about
+> scoring functions at all.
+> Kill bar: if learner-stage cost still varies over the grid once the lesions
+> are gone, my §5 conclusion is wrong and I will say so.
+> Secondary prediction: with the lesions gone, deleting the hedge (the only
+> learner-owned effect found, worth 2 comparisons at S8) becomes the *entire*
+> remaining dynamic range.
 
 > **N2. Give the choice a consequence.** Until the cost of a strategy choice
 > is visible in a metric the researcher did not enumerate, no policy — unified

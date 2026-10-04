@@ -15,12 +15,16 @@ are CORRECTED below.
 
 ## 1. Claim 1 — "26 source files differ only in `strat_sel`" — PARTLY WRONG
 
-`rg -l 'fn strat_sel'` over `overnight-20260928` returns **35 files**, not 26.
-They decompose as:
+`rg -l 'fn strat_sel'` over `overnight-20260928` (excluding this lane) returns
+**41 files**, not 26. They decompose as:
 
 * **14** `*_learn.zag` (the lane's assembled learner = 1331-line prefix + additive)
-* **12** `*_strat_additive.zag` (the additive section alone)
-* **9** `*_full.zag` (base + world + [world_add] + learn + main, the linked TU)
+* **13** `*_strat_additive.zag` (the additive section alone)
+* **14** `*_full.zag` (base + world + [world_add] + learn + main, the linked TU)
+
+14 + 13 + 14 = **41**, across **12** directories. `c19pos` exists only as a
+`_full.zag`; `cogops_transition_predict` holds only `c21h_learn.zag` (no
+additive and no `_full` committed).
 
 The `*_full.zag` and `*_strat_additive.zag` files are *not* independent lanes;
 they are the same lane's build products. The independent lane count is
