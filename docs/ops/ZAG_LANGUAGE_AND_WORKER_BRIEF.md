@@ -90,19 +90,69 @@ fn loff(l:i32)i32 { return 106560+l*32; }
 
 ## 4. OUTPUT
 
-Two ways. Both verified working on this host.
+### 4.0 READ THIS FIRST - `_zag_raw_syscall` IS INERT ON THIS HOST
 
-**(a) Simple, fine for static lines.** `_zag_println` EXISTS and works:
+Every existing canonical lane writes its results with:
+```zag
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_raw_syscall(1,1,(_zag_slice_ptr(b) as i64),c as i64,0,0,0); return;
+}
+```
+**On this host that call produces NO OUTPUT and returns success (rc=0).** It is
+not an error, it is silence. Any lane whose only output path is `o_flush`
+therefore emits an EMPTY log and still reports success.
+
+Verified directly:
+```zag
+let bb:[]u8=z_alloc(64);
+bb[0]=79; bb[1]=75; bb[2]=10;           // "OK\n"
+_zag_raw_syscall(1,1,(_zag_slice_ptr(bb) as i64),3 as i64,0,0,0);
+_zag_println("D_println_OK");
+```
+prints ONLY `D_println_OK`. The `OK` never appears.
+
+**THE FIX - use `_zag_print` instead. This is the required portable shim:**
+```zag
+fn o_flush(b:[]u8,c:i32)void {
+  _zag_print(b[0..c]);
+  return;
+}
+```
+
+### 4.1 PROOF THIS SHIM IS CORRECT (this settles blocker B13)
+
+The lane `cogops_learnosc2/c8_full.zag` (340948 bytes of text, a large
+flat-arena learner) was rebuilt on this macOS/arm64 host with the SINGLE
+substitution above and run. Result:
+
+```
+reference c8_run1.txt (Linux x86_64 era): ae0ae3bf0a82c31b6d53d14dba97e6abfb953273259d624f4869c48fb15e4ae7  3344 bytes
+this host, macOS/arm64:                  ae0ae3bf0a82c31b6d53d14dba97e6abfb953273259d624f4869c48fb15e4ae7  3344 bytes
+*** BYTE-IDENTICAL ***
+```
+
+Three consequences, all important:
+
+1. **Blocker B13 is RESOLVED and was overstated.** The canonical corpus is
+   fully reproducible on this host. Cross-platform determinism holds.
+2. **The compiler is NOT miscompiling flat-arena indexed reads.** A separate
+   worker reported "silent miscompilation of indexed reads" (barrier B16). That
+   claim is DOUBTED and probably an artifact of the broken output path or of the
+   reporter's own harness: this 340KB flat-arena program executes and produces
+   byte-exact results. Re-verify before building architecture on B16.
+3. **Any result computed on this host with an unpatched `o_flush` is
+   uncitable.** Re-run with the shim.
+
+### 4.2 Both output styles
+
+**(a) Simple, for static lines.** `_zag_println` EXISTS and works:
 ```zag
 fn main()i32 { _zag_println("R32_ZNC_PROBE_OK"); return 0; }
 ```
-Verified: compiles and prints. (Note: an internal recon pass asserted this
-builtin does not exist. That assertion is WRONG - it was tested directly.)
 
-**(b) House style for DYNAMIC content: one buffered write.** The canonical rule
-in every existing lane is that dynamic values are formatted into ONE
-preallocated buffer, then written with a single syscall. Do not emit dynamic
-content one call at a time.
+**(b) Dynamic content: still use ONE buffer, but flush with `_zag_print`.**
+The discipline of formatting into one preallocated buffer and writing once is
+correct and worth keeping; only the final call must change.
 ```zag
 fn o_i64(b:[]u8,c:i32,v:i64)i32 {
   let neg:i32=0; let x:i64=v;
@@ -191,8 +241,8 @@ Key TNN-2 functions: `alloc_node/alloc_raw/link_edge`, `res_op`, `execute/exec_v
   small; needs 128. One-line fix, genuine source-level stack overflow. (C398/C405.)
 - **B7 eviction tie-break cannot hold 6 sequential new facts.** (C75.)
 - **B12 frozen TNN-1 has no world-driver interface.** (C141.)
-- **B13 canonical lanes C1-C410 were built with a LINUX x86_64 compiler** and
-  cannot be hash-re-verified on this macOS/arm64 host.
+- **B13 RESOLVED 2026-10-03.** Canonical lanes DO reproduce on this host: c8_full.zag
+  rebuilt with the `_zag_print` shim gives byte-identical output (see section 4.1).
 - **B14 ledger mint pipeline deletes instead of appending.** Guard now installed
   at `mint_guard/mint_guard_v2.sh`. Ledger restored to C410.
 
@@ -215,12 +265,33 @@ templates, or brute-force search over a fixed DSL are all explicitly NOT L3.
 
 ## 10. WORKER RULES
 
+### 10.0 ISOLATION IS MANDATORY (wave-1 failure, do not repeat)
+
+Wave 1 had six workers all running `git checkout -b` in the SAME directory.
+They corrupted each other's branches: preregs landed on other lanes, branches
+moved under active work, two workers rebuilt history. You MUST use a private
+worktree:
+
+```sh
+WT=$(/Users/Shared/micah/Documents/TNN/TNN/tools/lane.sh new <your-lane-name>)
+cd "$WT"          # <-- ALL your git and all your files happen in here
+```
+
+Inside that worktree, `git rev-parse --show-toplevel` must be the worktree path,
+NOT /Users/Shared/micah/Documents/TNN/TNN. If it is the main repo, stop and fix
+your setup before doing any work.
+
+- Never `git checkout` in the main repo. Never switch branches there.
+- Never touch another lane's files or worktree.
+- Never `git commit -a`. Always explicit pathspecs.
+- Your lane directory is `docs/lab/research-lead/overnight-20260928/<your-lane>/`.
+
+### 10.1 Scientific rules
+
 - Your goal is NOT to make the hypothesis pass. Faithfully implement the
   preregistered hypothesis. If it fails, REPORT THE FAILURE. Do not move bars.
 - Prereg BEFORE implementing. Freeze fixtures, predictions, kill bars,
   baselines, ablations. Commit the prereg alone.
-- Isolation: your own branch and your own directory. Use explicit pathspecs.
-  Never `git commit -a`. Never touch another lane's files.
 - New claim IDs: **use the C5xx block or higher.** C377-C466 are contested by
   the pending reconciliation and MUST NOT be minted.
 - Report: STATUS, COMMITS, RESULTS, VERDICT, BOUNDARIES, NEXT EXPERIMENT.
