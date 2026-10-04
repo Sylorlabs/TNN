@@ -17,4 +17,5 @@ cat "$D/ref/base.zag" "$D/ref/world.zag" "$D/ref/frozen_prefix.zag" \
 /Users/Shared/micah/Documents/TNN/TNN/tools/zbuild.sh "$SRC" > "$D/out/$TAG.buildlog" 2>&1 \
   || { echo "$TAG BUILD-FAIL"; tail -5 "$D/out/$TAG.buildlog"; exit 1; }
 ./tu/U_$TAG > "$D/out/$TAG.txt" 2>"$D/out/$TAG.err"
+[ -s "$D/out/$TAG.txt" ] || { echo "$TAG EMPTY-OUTPUT K3-FAIL"; exit 1; }
 echo "$TAG: $(wc -l < "$D/out/$TAG.txt" | tr -d ' ') lines $(wc -c < "$D/out/$TAG.txt" | tr -d ' ') bytes $(shasum -a 256 "$D/out/$TAG.txt" | cut -c1-16)"
