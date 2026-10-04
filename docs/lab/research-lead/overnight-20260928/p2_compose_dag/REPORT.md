@@ -414,3 +414,26 @@ ENOSYS-affected lanes with the `_zag_print` writer substitution. Section 2
 implies every pre-existing lane's single-write evidence is currently
 unreproducible on this host, and one substitution restores it. That is a
 repository-wide reproducibility fact, not a COMPOSE-DAG result.
+## 13. Commit record and shared-checkout disclosure (added post-commit)
+
+- Prereg (frozen, alone): `89828ca62`.
+- Implementation: `86e700f8b`. `89828ca62` is a strict ancestor — bar C1
+  verified with `git merge-base --is-ancestor`.
+- Lane-named ref: `p2/compose-dag-v2` → `86e700f8b`.
+
+**Disclosure.** The repository is a single shared working tree. During
+this lane another party checked out `redteam/suf-audit` and separately
+moved the `p2/compose-dag` branch pointer. Two consequences:
+
+1. The prereg commit `89828ca62` is reachable only from
+   `redteam/suf-audit`, not from `p2/compose-dag`. It was created while
+   HEAD was that branch.
+2. The implementation commit `86e700f8b` was therefore made on the
+   current HEAD, whose ancestry does include the prereg, rather than on
+   the branch named in the brief. `p2/compose-dag` was **not** moved and
+   **not** overwritten; `p2/compose-dag-v2` points at this lane's work.
+
+No file outside `docs/lab/research-lead/overnight-20260928/p2_compose_dag/`
+was modified, staged or committed by this lane at any point. A reviewer
+should read this lane's two commits as a pair by content, not by branch
+name. The same hazard is disclosed independently by the SUF-AUDIT lane.
