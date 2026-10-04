@@ -55,7 +55,7 @@ binaries, one per source.**
 
 | source | stdout sha256 | stdout bytes |
 |---|---|---|
-| S1 | `a1f2b997…` | 27 |
+| S1 | `a1f2b9977b018d71f11bf79f7767216bb33815c13e4548526c6cb64fe030cf6c` | 27 |
 | S2 | `ae0ae3bf0a82c31b6d53d14dba97e6abfb953273259d624f4869c48fb15e4ae7` | 3 344 |
 | S3 | `37c7b552fe56c9b03b93aadb8108dfbd1d8031c056dd0e2cdcb6a1fb88cd3911` | 1 358 |
 
@@ -412,7 +412,18 @@ docs/lab/research-lead/overnight-20260928/buildstab/
   driver.log           full wave output (162 builds)
   cfprobe.log          plan-order probe output
   SUMMARY.txt          one summary line per (arm, source, probe)
+  build_ledger.txt     all 90 matrix builds: arm, source, binary sha256
+  builds_sha256.txt    sha256 of all 18 per-cell builds.tsv result tables
+  sample_builds.tsv    one cell's per-build table (build, bytes, bin sha, out sha)
 ```
+
+**One known cosmetic defect in the artifacts, flagged so nobody misreads them.**
+`cfprobe.log` line `Q1_RESULT ... distinct_bin_shas=5` is a bug in the
+*reporting* line of `cf_probe.sh` at the time it was run (it counted loop
+iterations, not distinct hashes). The five per-build `bin_sha=` lines directly
+above it are all `8599500d13aab0c5`, and the real distinct count is **1**.
+`cf_probe.sh` has been fixed to compute `DISTINCT_BIN_SHA` properly; the fix
+changes only that echoed number, no measurement.
 
 Run order: `bt_run_all.sh` (≈20 min, serial), then `cf_probe.sh` (≈2 min).
 Both source `.env/pure-zag.sh`, call only `znc`, and put **every** binary
