@@ -21,7 +21,7 @@
 set -eu
 REPO=/Users/Shared/micah/Documents/TNN/TNN
 WTROOT=/Users/Shared/micah/Documents/TNN/.worktrees
-BASE=${TNN_BASE_REF:-504641745}
+BASE=${TNN_BASE_REF:-87a822426}
 
 mkdir -p "$WTROOT"
 
