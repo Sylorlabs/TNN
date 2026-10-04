@@ -45,3 +45,66 @@ moves. `compose` reports success (rc=1).
 ### Determinism
 `zbuild --rep 3`: 3/3 byte-identical, rc=0,
 sha256 `ac4caed49267f77886d0a66e2182de054ac320c36d928f69d9473b79257327b9`.
+
+## C502 AW-02 arity cliff -- PREREG PARTLY WRONG, WORSE BREAK FOUND
+
+**PREREG said** nneeds=5 would crash or contaminate answers. **That did not
+happen.** All five needs answered correctly. Reported honestly: that specific
+prediction was wrong, and the cause is malloc slack -- `z_alloc(16)` gets a
+32-byte-rounded block from the OS allocator, so the 5th need's writes land in
+slack. That is an accident of the allocator, not a guarantee of the design.
+Extended to a sweep, which found three real breaks.
+
+### Break A -- plan-record stride overflow corrupts the plan table (nneeds 5..8)
+`plan_new` (`c8_learn.zag:590-592`) writes step `p` at `13000+pi*56+8+p*12`.
+Stride 56 fits `p<=3`. Measured corruption of slot 1 (`L+13056`), fresh L per
+arity:
+
+| nneeds | slot1.gtag after | slot1.nneeds after |
+|---|---|---|
+| 4 | 0 (clean) | 0 |
+| 5 | 0 | 21 |
+| 6 | 1 | 22 |
+| 7 | 2 | 23 |
+| 8 | 3 | 24 |
+
+The value written is the **LOWEST need index**, because `topo` (`:362-370`)
+has no `break` in its scan and therefore emits the LAST ready node first.
+So a single 5-need goal deterministically plants a phantom plan.
+
+### Break B -- phantom plan for goal tag 0 (the "no plan" sentinel)
+After one 5-need goal:
+- `plan_find(L,0)` returns **1**, not -1.
+- A subsequent legitimate **1-need** goal with `goal_tag=0` gets
+  `compose_rc=1` ("plan loaded") and a **73-integer answer**:
+
+```
+31233123312331233123312331233123312331233123312331231003123113123312331233123
+```
+
+That contains `1000` and `1131`. The world contains only entities 1,2,3,5 and
+relations 10,11. `execute_plan` read `nn=21` out of `slot1.nneeds`, ran 21
+plan steps, and pulled operands out of the binding table. Reported as SUCCESS.
+
+### Break C -- 5th distinct goal tag reports success with no plan
+`plan_new` has 4 slots and returns -1 when full. `compose` (`:776-778`) does
+**not** check the -1 and calls `execute_plan(pi=-1)`, which indexes `L` at
+negative offsets, then returns 2 ("plan built").
+
+| goal tag | compose_rc | plan_find | answer ints |
+|---|---|---|---|
+| 7300 | 2 | 0 | 4 |
+| 7303 | 2 | 3 | 4 |
+| 7304 | **2 (SUCCESS)** | **-1** | **0** |
+| 7305 | 2 | -1 | 0 |
+
+### Break D -- decline does not invalidate the answer buffer
+At nneeds>=9 with distinct need tags, `compose` returns 0 (decline, 8-slot
+bind table exhausted) but leaves `ans` holding the PREVIOUS goal's answer. A
+caller that checks the return code is safe; a caller that does not silently
+reads a stale answer. `ans_total_ints=32` in the n=9..12 rows is arity 8's
+answer, not an answer to those goals.
+
+### Determinism
+3/3 byte-identical, rc=0, non-empty output.
+sha256 `c7837f0459e6414bfba86d073be5f923f04444a0dfa654b45ae4fbcd4aee3748`.
