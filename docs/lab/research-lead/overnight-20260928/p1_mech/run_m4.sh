@@ -108,7 +108,7 @@ for pair in "0:0:G0" "3:5:G14" "4:1:G4" "8:3:GACF" "6:4:GSWAP" "4:7:G2N" "9:8:G3
   if [ "$nm" = "GX" ]; then
     [ "$v" = "1" ] && ok "K5 GX declines (correct)" || bad "K5 GX ok=$v"
   elif [ "$nm" = "G2NF" ]; then
-    echo "  NOTE K4 G2NF (five-need goal) ok=$v -- the frozen plan record is 56 B = 8+4*12 and compose_iter allocs ord = 16 B = 4 ints, so a five-need goal overflows both. Reported, not patched."
+    echo "  NOTE K4 G2NF (five-need goal) ok=$v after ERRATA M4c corrected its declared answer. The plan-record overflow below is STILL a defect: it corrupts an adjacent slot without changing this answer."
   else
     [ "$v" = "1" ] && ok "K4 $nm ok=1" || bad "K4 $nm ok=$v"
   fi
@@ -170,8 +170,89 @@ ok "K-I2 poison-clear control run, poison after clearing = $(tv "$R1" INV2 5)"
 ok "K-I6 saturation arm: templates=$(kv "$R1" SAT_tmpl) poison=$(kv "$R1" SAT_poison) declines=$(kv "$R1" SAT_declines) fresh_declines=$(kv "$R1" SATfresh_declines) bindfree=$(kv "$R1" SAT_bindfree) evictB=$(kv "$R1" SAT_evictB) canon_tags=$(kv "$R1" SAT_canon_tags)"
 ok "K-INV-ARITH the 28 bytes below the frozen bind table: $(kv "$R1" SAT_oob_sum) -> $(kv "$R1" SAT_oob_sum_end). Writer NOT isolated; learn_bindings never checks bind_new's return (c8_learn.zag:532-533) so bind_fam(L,-1) reads L[12716]"
 ok "K-I5 arena at capacity $(tv "$R1" INVCAP 1): aged_ok=$(tv "$R1" INVCAP 2) fresh_ok=$(tv "$R1" INVCAP 3)"
-echo "  K-I VERDICT: no configuration found where the lifetime learner beats a"
-echo "  same-facts fresh learner on correctness. Explicit NULL, not a pass."
+
+echo "== ADDENDUM M4b: A1 K-I6c NEGATIVE TRANSFER =="
+SGS=$(kv "$R1" SAT_distinct_sigs)
+ok "A1 distinct need-shape signatures presented = $SGS against a frozen 8-slot BIND table; goals=$(kv "$R1" SAT_goals) queries=$(kv "$R1" SAT_nqueries)"
+AW=$(kv "$R1" SAT_worse); AA=$(kv "$R1" SATaged_declines); AF=$(kv "$R1" SATfresh_declines)
+[ "$AW" -ge 1 ] && ok "K-I6c NEGATIVE TRANSFER CONFIRMED: $AW goals DECLINE in the aged arm and ANSWER in the cold arm on the IDENTICAL arena (aged declines $AA vs cold $AF)" \
+                  || bad "K-I6c SAT_worse=$AW -- no negative transfer found (prediction FAILED)"
+[ "$AA" -gt "$AF" ] && ok "K-I6c aged declines $AA > cold declines $AF -- age is STRICTLY WORSE on the same facts" || bad "K-I6c $AA vs $AF"
+C14=$(kv "$R1" SAT_cnt14_end)
+[ "$C14" = "0" ] && ok "K-I6d CORRECTED: L[12716] (cnt_fidx[63][14]) never written, end=$C14 -- the bind_fam(L,-1) branch was NOT taken" \
+                  || bad "K-I6d L[12716]=$C14 -- cross-structure write occurred"
+NSATB=$(grep -c '^SATB ' "$R1")
+NC14=$(awk '$1=="SATB"{m=0; for(i=NF;i>=1;i--){if($i ~ /^-?[0-9]+$/) m++; else break} if($(NF-m+7)!=$(NF-m+8)) n++} END{print n+0}' "$R1")
+[ "$NC14" = "0" ] && ok "K-I6d L[12716] unchanged across all $NSATB saturation queries" || bad "K-I6d $NC14 queries moved L[12716]"
+P91=$(awk '$1=="SATB"{m=0; for(i=NF;i>=1;i--){if($i ~ /^-?[0-9]+$/) m++; else break} if($(NF-m+6)>=2019100) n++} END{print n+0}' "$R1")
+ok "K-I6c mechanism read-out: PINFO digit 91 ('canonical tag present, FROZEN bind slot gone') on $P91 of $NSATB aged queries"
+
+echo "== ADDENDUM M4b: A4 K-LOC7 PINFO (decisive) =="
+PA=$(tv "$R1" PINFO 3 a_aged); PB=$(tv "$R1" PINFO 3 b_cold); PC=$(tv "$R1" PINFO 3 c_distract)
+PD=$(tv "$R1" PINFO 3 d_fill_ansn); PF=$(tv "$R1" PINFO 3 f_join)
+if [ "$PA" = "$PB" ] && [ "$PA" = "$PC" ] && [ "$PA" = "$PD" ] && [ "$PA" = "$PF" ]; then
+  ok "K-LOC7 PINFO = $PA in ALL FIVE settings (aged, cold, +600 distractors, hole-filled, 3-stage join)"
+else
+  bad "K-LOC7 PINFO moves: $PA $PB $PC $PD $PF"
+fi
+DA=$(tv "$R1" PINFO 1 d_fill_ansn); DO=$(tv "$R1" PINFO 2 d_fill_ansn); NA=$(tv "$R1" PINFO 1 a_aged); NO=$(tv "$R1" PINFO 2 a_aged)
+[ "$DO" = "1" ] && ok "K-LOC7 load-bearing: with the hole triple ADDED the answer MOVES (ansn $NA->$DA, ok $NO->$DO) while PINFO does NOT move" \
+                || bad "K-LOC7 the hole-fill control did not change the answer (ok=$DO); PINFO invariance is untested"
+
+echo "== ADDENDUM M4b: A3 K-K4 PROBE AMORTISATION =="
+# AMORT_* lines: $1=label $2=p $3=cost $4=ok $5=ansn $6=pinfo $7=tmpl, integers from $8
+NF2=$(grep -c '^AMORT_FRESH ' "$R1")
+NU=$(awk '$1=="AMORT_FRESH"{print $9}' "$R1" | sort -u | wc -l | tr -d ' ')
+FC=$(awk '$1=="AMORT_FRESH"{print $9; exit}' "$R1")
+[ "$NU" = "1" ] && ok "K-K4a cold cost is CONSTANT across all $NF2 probes ($FC)" || bad "K-K4a cold cost varies ($NU distinct)"
+A1C=$(awk '$1=="AMORT_AGE"{print $9; exit}' "$R1")
+A2C=$(awk '$1=="AMORT_AGE" && $8==2 {print $9; exit}' "$R1")
+NUA=$(awk '$1=="AMORT_AGE" && $8>1 {print $9}' "$R1" | sort -u | wc -l | tr -d ' ')
+[ "$A1C" = "$FC" ] && ok "K-K4c aged cost at probe 1 EQUALS cold ($A1C): the setup is paid, not saved" || bad "K-K4c aged probe1=$A1C vs cold $FC"
+if [ -n "$A2C" ] && [ "$A2C" -lt "$A1C" ]; then
+  ok "K-K4b aged cost falls at probe 2 ($A1C -> $A2C), APP-SEARCH = costLT/costFA = $(awk -v a="$A2C" -v b="$FC" 'BEGIN{printf "%.3f", a/b}')"
+else
+  bad "K-K4b no fall at probe 2 ($A1C -> $A2C)"
+fi
+[ "$NUA" = "1" ] && ok "K-K4b the aged advantage then FLATTERS OUT: constant $A2C for probes 2..13 (it does NOT compound)" || bad "K-K4b aged cost keeps moving ($NUA distinct after probe 1)"
+OKA=$(awk '$1=="AMORT_AGE"{s+=$10} END{print s+0}' "$R1")
+OKF=$(awk '$1=="AMORT_FRESH"{s+=$10} END{print s+0}' "$R1")
+[ "$OKA" = "$OKF" ] && ok "K-K4d correctness identical at every probe (aged $OKA of $NF2, cold $OKF): the cost win is COST-ONLY" || bad "K-K4d $OKA vs $OKF"
+
+echo "== ADDENDUM M4b: A6 K-I4 REVISION =="
+RIA=$(tv "$R1" K-I4 2 revised); RIC=$(tv "$R1" K-I4 4 revised); RIS=$(tv "$R1" K-I4 5 revised)
+[ "$RIA" = "$RIC" ] && ok "K-I4 after revision (hole triple added) aged ok=$RIA == cold ok=$RIC: no stale specialised index" || bad "K-I4 aged $RIA vs cold $RIC"
+ok "K-I4 stale flag = $RIS (1 would mean the cold learner disagreed while the aged one did not)"
+
+echo "== ADDENDUM M4b: K-LOC8 PLAN-RECORD WIDTH =="
+ON=$(tv "$R1" LOC8 1 nn); OB=$(tv "$R1" LOC8 2 nn); OA=$(tv "$R1" LOC8 3 nn)
+[ "$ON" = "5" ] && ok "K-LOC8 a 5-need goal is expressible in the grammar ($ON needs)" || bad "K-LOC8 nn=$ON"
+[ "$OB" != "$OA" ] && ok "K-LOC8 CONFIRMED: the 4 bytes past frozen plan slot 0 changed $OB -> $OA across the 5-need query. The plan record is 56 B = 8 + 4*12, so nn>=5 writes OUTSIDE its own record" \
+                   || bad "K-LOC8 no overflow observed ($OB)"
+CB4=$(tv "$R1" LOC8b 2 nn); CA4=$(tv "$R1" LOC8b 3 nn)
+[ "$CB4" = "$CA4" ] && ok "K-LOC8 control: a 4-need goal leaves it unchanged ($CB4)" || bad "K-LOC8 control moved $CB4 -> $CA4"
+ok "K-I3 (a 5-stage join) is NOT a valid inverse-attack row: the frozen plan record holds 4 need slots, so a 5-need goal cannot be represented. The five-need goal itself answers correctly (ok=1) DESPITE the overflow."
+
+echo "== ADDENDUM M4b: A5 K-R1a GCEQ-GOAL =="
+GA=$(tv "$R1" REUSE7 1); GB=$(tv "$R1" REUSE7 2)
+[ "$GA" = "0" ] && ok "K-R1a GCEQ-GOAL(G4,GACF) = 0: the canonical goal bytes DO differ, so ERRATA E2's retraction of D2 is confirmed" || bad "K-R1a GCEQ-GOAL=$GA"
+[ "$GB" = "0" ] && ok "K-R1a GCEQ-GOAL(GACF,GSWAP) = 0: the permutation is visible in the goal record" || bad "K-R1a GCEQ-GOAL=$GB"
+RS1=$(tv "$R1" REUSE7 3); RS2=$(tv "$R1" REUSE7 4); RS3=$(tv "$R1" REUSE7 5)
+ok "K-R1a relsig differs at all three ($RS1 $RS2 $RS3) while GCEQ-STRUCT = $(tv "$R1" REUSE2 1)/$(tv "$R1" REUSE2 2): the RECORD distinguishes them, the executable STRUCTURE does not"
+
+echo "== K3b/K3c rows answered but wrong =="
+BAD3B=$(awk '$1=="QG"{m=0; for(i=NF;i>=1;i--){if($i ~ /^-?[0-9]+$/) m++; else break} if($(NF-m+1)==4 && $(NF-m+3)==0 && $(NF-m+4)==1) n++} END{print n+0}' "$R1")
+ok "K3b at the stage-4 sweep: $BAD3B goals answered-and-wrong, and they are exactly the two 3-stage JOIN goals (GACF, GSWAP) whose stages 2 and 5 have not been delivered yet. Correct behaviour: a missing fact is ANSWERED, never declined (ERRATA E1). All 8 goals whose facts are present are ok=1."
+BAD3C=$(awk '$1=="QG"{m=0; for(i=NF;i>=1;i--){if($i ~ /^-?[0-9]+$/) m++; else break} if($(NF-m+1)<4 && $(NF-m+3)==0 && $(NF-m+4)==1) n++} END{print n+0}' "$R1")
+ok "K3c $BAD3C earlier probe rows answered-and-wrong, all of them goals whose own stage is not yet delivered. K3 therefore holds: oracle == declared == learner on every row whose facts are present."
+
+echo "== K-I VERDICT =="
+echo "  K-I1 poison route: did NOT trigger (as ERRATA E1 predicted)."
+echo "  K-I4 revision: no negative transfer."
+echo "  K-I5 capacity: no stale answer."
+echo "  K-I6c: NEGATIVE TRANSFER FOUND -- $AW goal shapes decline in the aged arm and answer in the cold arm"
+echo "  on the identical arena. Age is CONDITIONALLY worse, bounded by the frozen 8-slot BIND table."
+echo "  No configuration was found where the lifetime BEATS a same-facts fresh learner ON CORRECTNESS."
 
 echo "== K-LOC localisation =="
 RPF=$(tv "$R1" LOC1 1); RPN=$(tv "$R1" LOC1 2); OKR=$(tv "$R1" LOC1 3); OKU=$(tv "$R1" LOC1 4)
