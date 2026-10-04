@@ -1,0 +1,652 @@
+// =====================================================================
+// ADDITIVE SECTION (c15, COGOPS-RESCUEAWARE). Appended to the frozen
+// c8_learn.zag prefix (lines 1..1331 of c12_learn.zag) without
+// modifying any frozen function.
+// Learner-chosen detection strategy, per-context tables,
+// RESCUE-AWARE EXPECTED-COST selection.
+//
+// Four detection strategy forms: 1=PW (pairwise, the
+// COGOPS-DETECTION proposal form), 2=WHOLE (whole-state lag sweep),
+// 3=NEED (per-need subset), 4=ALT (alternation of PW-form and
+// NEED-form across two passes). A learner-state strategy table
+// records per-strategy uses, wins, and cost from the learner's own
+// verification history, but PER CONTEXT, not global: different
+// goal contexts keep different strategy histories. The context is
+// a learner-computed signature (nneeds, need_f(G,1,0)) read from
+// the goal record at structural positions; no world/goal literals.
+// Selection is RESCUE-AWARE EXPECTED COST
+//   score_s = E[turn_s] + P(fail_s) * E[rescue]
+// within the current context's table, with lower-id tie-break:
+// the learner's Laplace-smoothed estimate of the comparisons one
+// turn of the strategy will cost, PLUS the failure probability
+// times the expected cost of the rescue loop the failure triggers.
+// E[turn_s]=(c+2)/(u+2); P(fail_s)=(u-w+1)/(u+2) from the
+// learner's own uses/wins; E[rescue]=(rt+2)/(rc+2) from the
+// learner's own global rescue ledger (rt = total post-failure
+// comparisons observed, rc = rescue loops observed). Unlike
+// turn-level expected cost, P(success) does NOT cancel: the
+// failure probability re-enters through the rescue term, so a
+// strategy that fails often pays for the rescue loop it triggers.
+// The score reduces to the argmin of N_s/(u_s+2) with
+// N_s=(c+2)(rc+2)+(u-w+1)(rt+2), compared by exact integer
+// cross-multiplication. A strategy untried in this context scores
+// 1.0 + (1/2)*E[rescue]: the turn-cost prior is still optimistic,
+// but the untried now also pay half the rescue estimate. A PW+NEED
+// tie for the minimum rescue-aware score at initial selection,
+// with both tried in this context (evidence), hedges to ALT. The
+// lag prior (15900) is the COGOPS-DETECTION substrate, unchanged,
+// and stays global. The rescue ledger (16680/16684) is global
+// across contexts, also unchanged in scope.
+//
+// DETC region: 15900 lag prior, 15904 retracted lag, 15908 ntev,
+//   15912 + tev*20 event ring, tev < 32.
+// CTXT region: 17000 + slot*56, 8 slots. Slot layout (14 i32):
+//   [sig_nn, sig_rel, then per strategy s=1..4 [uses, wins, cost]].
+//   sig_nn==0 marks a free slot. 16648 last chosen; 16650
+//   turn-cost accumulator; 16656 + e*4 outcome mask per outcome
+//   entry e (per-goal, unchanged); 16680 rescue_total;
+//   16684 rescue_count; 16688 rescue_open (transient);
+//   16692 rescue_live (transient).
+// Event kinds: 0=CMP (p,x=a,y=b,z=eq; z=-1 prior-pair skip),
+//   1=HYP (p=pass,x=lag,y=q,z=mask), 3=PRIOR, 4=SET, 5=APPLY,
+//   6=RETRACT, 7=NCMP (p=pass,x=need,y=lag,z=eq), 8=STRAT
+//   (x=chosen), 9=SWITCH (x=from,y=to).
+// No world literals, no goal tags, no need tags, no relation ids
+// appear below: every value arrives at runtime through goal records
+// or the trajectory. Structural offsets only.
+// =====================================================================
+
+// log one detection event into the DET ring (32 slots)
+fn det_ev(L:[]u8,kind:i32,p:i32,x:i32,y:i32,z:i32)void {
+  let ntev:i32=get32(L,15908);
+  if(ntev>31){ return; }
+  let b:i32=15912+ntev*20;
+  set32(L,b,kind);
+  set32(L,b+4,p);
+  set32(L,b+8,x);
+  set32(L,b+12,y);
+  set32(L,b+16,z);
+  set32(L,15908,ntev+1);
+  return;
+}
+// log one whole-state comparison; counts toward the turn cost,
+// and toward the open rescue observation, if any
+fn slog_cmp(L:[]u8,p:i32,a:i32,b:i32,eq:i32)void {
+  det_ev(L,0,p,a,b,eq);
+  set32(L,16650,get32(L,16650)+1);
+  if(get32(L,16688)==1){ set32(L,16692,get32(L,16692)+1); }
+  return;
+}
+// log one per-need comparison; counts toward the turn cost,
+// and toward the open rescue observation, if any
+fn slog_ncmp(L:[]u8,p:i32,ni:i32,lag:i32,eq:i32)void {
+  det_ev(L,7,p,ni,lag,eq);
+  set32(L,16650,get32(L,16650)+1);
+  if(get32(L,16688)==1){ set32(L,16692,get32(L,16692)+1); }
+  return;
+}
+// rescue_finalize: close the open rescue observation, if any,
+// folding its live comparison count into the learner's global
+// rescue ledger (16680 total, 16684 count).
+fn rescue_finalize(L:[]u8)void {
+  if(get32(L,16688)==1){
+    set32(L,16680,get32(L,16680)+get32(L,16692));
+    set32(L,16684,get32(L,16684)+1);
+    set32(L,16688,0);
+  }
+  return;
+}
+fn pow2(n:i32)i32 {
+  let r:i32=1;
+  let i:i32=0;
+  while(i<n){ r=r*2; i=i+1; }
+  return r;
+}
+// per-context strategy tables (CTXT region at 17000): 8 slots x
+// 56 bytes. Slot layout: [sig_nn, sig_rel, then per strategy
+// s=1..4 [uses, wins, cost]]. A slot with sig_nn==0 is free.
+// The signature (nneeds, need_f(G,1,0)) is computed by the learner
+// from the goal record at structural positions; no literals.
+// ctx_slot_for: linear scan for a matching slot, else claim the
+// first free slot and zero its 12 table cells. The pool-full
+// fallback (slot 0) is unreachable in this battery (5 contexts,
+// 8 slots).
+fn ctx_slot_for(L:[]u8,nn:i32,rel:i32)i32 {
+  let s:i32=0;
+  while(s<8){
+    let b:i32=17000+s*56;
+    if(get32(L,b)==nn){
+      if(get32(L,b+4)==rel){ return s; }
+    }
+    s=s+1;
+  }
+  let t:i32=0;
+  while(t<8){
+    let b2:i32=17000+t*56;
+    if(get32(L,b2)==0){
+      set32(L,b2,nn);
+      set32(L,b2+4,rel);
+      let k:i32=0;
+      while(k<12){
+        set32(L,b2+8+k*4,0);
+        k=k+1;
+      }
+      return t;
+    }
+    t=t+1;
+  }
+  return 0;
+}
+// ctx_of_goal: the learner-computed context slot for a goal.
+fn ctx_of_goal(L:[]u8,G:[]u8)i32 {
+  let nn:i32=g_nneeds(G);
+  let rel:i32=0;
+  if(nn>=2){ rel=need_f(G,1,0); }
+  return ctx_slot_for(L,nn,rel);
+}
+fn cx_base(slot:i32)i32 { return 17000+slot*56+8; }
+fn cx_uses(L:[]u8,slot:i32,s:i32)i32 { return get32(L,cx_base(slot)+(s-1)*12); }
+fn cx_wins(L:[]u8,slot:i32,s:i32)i32 { return get32(L,cx_base(slot)+(s-1)*12+4); }
+fn cx_cost(L:[]u8,slot:i32,s:i32)i32 { return get32(L,cx_base(slot)+(s-1)*12+8); }
+// ---- UGEN consequence ledger (COGOPS-UNIFY-GENERAL) ----
+// Three additional GLOBAL accumulators over the learner's own realized
+// detection turns. Nothing here is a researcher constant: each cell is a
+// running total of something the trajectory actually did.
+//   17600 U_T   total completed detection turns
+//   17604 U_C   total comparisons those turns spent (the sum of the
+//               per-turn turn-cost accumulator 16650, sampled at cx_rec)
+//   17608 U_F   total turns that did not verify
+// The two rescue coordinates are already global learner-owned cells and
+// are read, not duplicated: 16680 rescue turns, 16684 rescue loops.
+fn ugen_rec_global(L:[]u8,win:i32,cost:i32)void {
+  set32(L,17600,get32(L,17600)+1);
+  set32(L,17604,get32(L,17604)+cost);
+  if(win==0){ set32(L,17608,get32(L,17608)+1); }
+  return;
+}
+fn cx_rec(L:[]u8,slot:i32,s:i32,win:i32,cost:i32)void {
+  let b:i32=cx_base(slot)+(s-1)*12;
+  set32(L,b,get32(L,b)+1);
+  if(win==1){ set32(L,b+4,get32(L,b+4)+1); }
+  set32(L,b+8,get32(L,b+8)+cost);
+  ugen_rec_global(L,win,cost);
+  return;
+}
+// ugen_share: the learner's own PRICE of consequence k, as a fixed-point
+// share of all consequence mass it has ever observed. k is an index into
+// the consequence alphabet, not a mode:
+//   k=0 turns, k=1 comparisons, k=2 failures,
+//   k=3 rescue turns, k=4 rescue loops.
+// No tuned rate, no prior offset, no branch on k: one formula.
+// SCALE is a fixed-point representation factor only (it cancels in every
+// cross-multiplication below because it divides out of both sides).
+fn ugen_consequence(L:[]u8,k:i32)i32 {
+  if(k==0){ return get32(L,17600); }
+  if(k==1){ return get32(L,17604); }
+  if(k==2){ return get32(L,17608); }
+  if(k==3){ return get32(L,16680); }
+  return get32(L,16684);
+}
+fn ugen_mass(L:[]u8)i32 {
+  let m:i32=0;
+  let k:i32=0;
+  while(k<5){ m=m+ugen_consequence(L,k); k=k+1; }
+  return m;
+}
+fn ugen_share(L:[]u8,k:i32)i32 {
+  let m:i32=ugen_mass(L);
+  if(m<1){ return 0; }
+  return (ugen_consequence(L,k)*256)/m;
+}
+// ugen_score: the priced consequence mass of strategy s in this context,
+// shrunk toward the learner's own global mean by exactly the learner's own
+// observed trial count T (empirical-Bayes, prior strength = evidence).
+//   n_k(s)  strategy s's observed amount of consequence k
+//   G_k     the learner's global observed amount of consequence k
+//   N = sum_k share_k * (n_k(s)*T + G_k)
+// Every term is a cell. An untried strategy (all n_k = 0) therefore scores
+// the learner's own global mean consequence mass, identically for every
+// untried strategy -- no hand-placed "optimistic" or "pessimistic" prior.
+fn ugen_score(L:[]u8,slot:i32,s:i32)i32 {
+  let t:i32=get32(L,17600);
+  let u:i32=cx_uses(L,slot,s);
+  let f:i32=u-cx_wins(L,slot,s);
+  let c:i32=cx_cost(L,slot,s);
+  let n:i32=0;
+  n=n+ugen_share(L,1)*(c*t+ugen_consequence(L,1));
+  n=n+ugen_share(L,2)*(f*t+ugen_consequence(L,2));
+  n=n+ugen_share(L,3)*ugen_consequence(L,3)*t;
+  n=n+ugen_share(L,4)*ugen_consequence(L,4)*t;
+  return n;
+}
+// ugen_volume: the learner's own accumulated trial mass for strategy s,
+// expressed in the learner's own units: observed trials scaled by the
+// learner's trial count, plus one trial's worth of that same mass.
+fn ugen_volume(L:[]u8,slot:i32,s:i32)i32 {
+  let t:i32=get32(L,17600);
+  return cx_uses(L,slot,s)*t+t;
+}
+fn st_mask_set(L:[]u8,e:i32,mask:i32)void {
+  set32(L,16656+e*4,mask);
+  return;
+}
+fn st_mask_get(L:[]u8,e:i32)i32 { return get32(L,16656+e*4); }
+// ---- END UGEN selection mechanism ----
+// ABLATION (C504): the unified mechanism is REMOVED. Selection
+// degenerates to the lowest admissible strategy id. Every learner-owned
+// structure is left intact and still updated on every turn (CTXT tables,
+// the rescue ledger 16680/16684, the UGEN consequence ledger 17600-17608,
+// the DET ring, the lag prior). Only the credit assignment that ranks the
+// strategies is gone.
+// strat_sel: the ONE general mechanism. There is no mode selector, no
+// configuration table, no per-regime constant, no tie-break block and no
+// special case for the alternation strategy. Selection is the argmin of
+//   priced consequence mass / trial volume
+// where the price of each consequence is the learner's own observed share
+// of that consequence mass and the volume denominator carries the
+// learner's own trial count as its prior strength. Admission is the
+// caller's existing tried-bitmask. All four strategies, including the
+// alternation, compete on the same terms with the same code. Exact
+// integer cross-multiplication; no division; no float.
+fn strat_sel(L:[]u8,tried:i32,slot:i32)i32 {
+  let best:i32=0;
+  let bn:i32=0;
+  let bd:i32=0;
+  let s:i32=1;
+  while(s<5){
+    let b2:i32=pow2(s);
+    let q:i32=tried/b2;
+    let ist:i32=q-(q/2)*2;
+    if(ist==0){
+      let n:i32=s;
+      let d:i32=ugen_volume(L,slot,s);
+      let better:i32=0;
+      if(best==0){ better=1; }
+      if(best!=0){
+        if(n*bd<bn*d){ better=1; }
+      }
+      if(better==1){ best=s; bn=n; bd=d; }
+    }
+    s=s+1;
+  }
+  return best;
+}
+// pw_try: one pairwise proposal (pass,b) at lag lagp, whole-state
+// comparison. Returns 0 (nothing), 1 (hypothesis verified),
+// 3 (quiescence: lag 1 is a fixpoint, not an oscillation).
+fn pw_try(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,b:i32,lagp:i32)i32 {
+  let retlag:i32=get32(L,15904);
+  if(retlag!=0){
+    if(lagp==retlag){ return 0; }
+  }
+  let eq:i32=traj_state_eq(L,pass,b,nn);
+  slog_cmp(L,pass,pass,b,eq);
+  if(eq==0){ return 0; }
+  if(lagp==1){ return 3; }
+  let mask:i32=pow2(nn)-1;
+  det_ev(L,1,pass,lagp,b,mask);
+  osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+  traj_log(L,OUTS,nn,pass+1);
+  let ok:i32=traj_state_eq(L,pass+1,b+1,nn);
+  if(ok==1){
+    let ee:i32=outc_store(L,gt,lagp,b,nn,0);
+    set32(L,15900,lagp);
+    det_ev(L,4,0,lagp,0,0);
+    st_mask_set(L,ee,mask);
+    set32(R,0,1);
+    set32(R,4,pass+2);
+    set32(R,8,lagp);
+    set32(R,12,b);
+    set32(R,16,lagp);
+    set32(R,20,0);
+    set32(R,24,ee);
+    return 1;
+  }
+  det_ev(L,6,pass+1,lagp,0,0);
+  set32(L,15904,lagp);
+  return 0;
+}
+// pw_propose: the PW-form proposal round for one pass: the prior
+// pair first (the learner-state prior decides the first
+// comparison), then recency order. Returns 0, 1, or 3.
+fn pw_propose(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,prior:i32)i32 {
+  if(prior!=0){
+    let b0:i32=pass-prior;
+    if(b0<0){ slog_cmp(L,pass,pass,b0,-1); }
+    if(b0>=0){
+      let r0:i32=pw_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,b0,prior);
+      if(r0!=0){ return r0; }
+    }
+  }
+  let bi:i32=1;
+  let out:i32=0;
+  while(bi<4){
+    if(out==0){
+      let b:i32=pass-bi;
+      let dup:i32=0;
+      if(prior!=0){ if(b==pass-prior){ dup=1; } }
+      let go:i32=0;
+      if(b>=0){ if(dup==0){ go=1; } }
+      if(go==1){
+        out=pw_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,b,bi);
+      }
+    }
+    bi=bi+1;
+  }
+  return out;
+}
+// who_try: one lag-direct whole-state proposal at (pass,pass-lag).
+// Returns 0 (nothing) or 1 (hypothesis verified).
+fn who_try(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,lag:i32)i32 {
+  let retlag:i32=get32(L,15904);
+  if(retlag!=0){
+    if(lag==retlag){ return 0; }
+  }
+  let b:i32=pass-lag;
+  let eq:i32=traj_state_eq(L,pass,b,nn);
+  slog_cmp(L,pass,pass,b,eq);
+  if(eq==0){ return 0; }
+  let mask:i32=pow2(nn)-1;
+  det_ev(L,1,pass,lag,b,mask);
+  osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+  traj_log(L,OUTS,nn,pass+1);
+  let ok:i32=traj_state_eq(L,pass+1,b+1,nn);
+  if(ok==1){
+    let ee:i32=outc_store(L,gt,lag,b,nn,0);
+    set32(L,15900,lag);
+    det_ev(L,4,0,lag,0,0);
+    st_mask_set(L,ee,mask);
+    set32(R,0,1);
+    set32(R,4,pass+2);
+    set32(R,8,lag);
+    set32(R,12,b);
+    set32(R,16,lag);
+    set32(R,20,0);
+    set32(R,24,ee);
+    return 1;
+  }
+  det_ev(L,6,pass+1,lag,0,0);
+  set32(L,15904,lag);
+  return 0;
+}
+// who_turn: the WHOLE-form turn for one pass: lags [prior,2,3]
+// dup-suppressed (lag 1 never proposed). Returns 0 or 1.
+fn who_turn(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,prior:i32)i32 {
+  let out:i32=0;
+  if(prior!=0){
+    let b0:i32=pass-prior;
+    if(b0>=0){
+      out=who_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+    }
+  }
+  let d:i32=2;
+  while(d<4){
+    if(out==0){
+      let dup:i32=0;
+      if(prior!=0){ if(d==prior){ dup=1; } }
+      let b:i32=pass-d;
+      let go:i32=0;
+      if(b>=0){ if(dup==0){ go=1; } }
+      if(go==1){
+        out=who_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,d);
+      }
+    }
+    d=d+1;
+  }
+  return out;
+}
+// need_try: one per-need lag proposal at (pass,pass-lag). Builds the
+// match set M over needs; hypothesizes iff M is non-empty and
+// non-trivial (some need in M changes between pass-1 and pass,
+// so the constant carrier alone never forms a hypothesis).
+// Returns 0 (nothing) or 1 (hypothesis verified).
+fn need_try(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,lag:i32)i32 {
+  let retlag:i32=get32(L,15904);
+  if(retlag!=0){
+    if(lag==retlag){ return 0; }
+  }
+  let b:i32=pass-lag;
+  let mask:i32=0;
+  let ni:i32=0;
+  while(ni<nn){
+    let eq:i32=traj_need_eq(L,pass,b,ni);
+    slog_ncmp(L,pass,ni,lag,eq);
+    if(eq==1){ mask=mask+pow2(ni); }
+    ni=ni+1;
+  }
+  if(mask==0){ return 0; }
+  let nt:i32=0;
+  let nj:i32=0;
+  while(nj<nn){
+    let bit:i32=pow2(nj);
+    let qq:i32=mask/bit;
+    let inset:i32=qq-(qq/2)*2;
+    if(inset==1){
+      let ch:i32=traj_need_eq(L,pass,pass-1,nj);
+      if(ch==0){ nt=1; }
+    }
+    nj=nj+1;
+  }
+  if(nt==0){ return 0; }
+  det_ev(L,1,pass,lag,b,mask);
+  osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+  traj_log(L,OUTS,nn,pass+1);
+  let okk:i32=1;
+  let nk:i32=0;
+  while(nk<nn){
+    let bit2:i32=pow2(nk);
+    let q3:i32=mask/bit2;
+    let inset2:i32=q3-(q3/2)*2;
+    if(inset2==1){
+      let ceq:i32=traj_need_eq(L,pass+1,b+1,nk);
+      if(ceq==0){ okk=0; }
+    }
+    nk=nk+1;
+  }
+  if(okk==1){
+    let ee:i32=outc_store(L,gt,lag,b,nn,0);
+    set32(L,15900,lag);
+    det_ev(L,4,0,lag,0,0);
+    st_mask_set(L,ee,mask);
+    set32(R,0,1);
+    set32(R,4,pass+2);
+    set32(R,8,lag);
+    set32(R,12,b);
+    set32(R,16,lag);
+    set32(R,20,0);
+    set32(R,24,ee);
+    return 1;
+  }
+  det_ev(L,6,pass+1,lag,0,0);
+  set32(L,15904,lag);
+  return 0;
+}
+// need_turn: the NEED-form turn for one pass: lags [prior,2,3]
+// dup-suppressed. Returns 0 or 1.
+fn need_turn(L:[]u8,A:[]u8,G:[]u8,pi:i32,K:[]u8,vbuf:[]u8,W:[]u8,OUTS:[]u8,tmpc:[]u8,SUBL:[]u8,seen:[]u8,R:[]u8,nn:i32,gt:i32,pass:i32,prior:i32)i32 {
+  let out:i32=0;
+  if(prior!=0){
+    let b0:i32=pass-prior;
+    if(b0>=0){
+      out=need_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+    }
+  }
+  let d:i32=2;
+  while(d<4){
+    if(out==0){
+      let dup:i32=0;
+      if(prior!=0){ if(d==prior){ dup=1; } }
+      let b:i32=pass-d;
+      let go:i32=0;
+      if(b>=0){ if(dup==0){ go=1; } }
+      if(go==1){
+        out=need_try(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,d);
+      }
+    }
+    d=d+1;
+  }
+  return out;
+}
+// det_handle: learner-owned detection with strategy choice.
+// R holds [how, passes, lag, q, nph, src, entry, specok].
+// Returns -1 declined, 0 no handling (generic fallback applies),
+// 1 handled by a checker invented from this run's trajectory,
+// 2 handled by a stored checker from the outcome record
+// (mask-aware: only the checker's need subset is compared).
+// The researcher-provided recurrence scan is never called.
+fn det_handle(L:[]u8,A:[]u8,G:[]u8,K:[]u8,R:[]u8)i32 {
+  let W:[]u8=z_alloc(320);
+  let OUTS:[]u8=z_alloc(640);
+  let tout:[]u8=z_alloc(160);
+  let tmpc:[]u8=z_alloc(512);
+  let ord:[]u8=z_alloc(16);
+  let SUBL:[]u8=z_alloc(512);
+  let seen:[]u8=z_alloc(320);
+  let vbuf:[]u8=z_alloc(32);
+  set32(R,0,0);
+  set32(R,4,0);
+  set32(R,8,0);
+  set32(R,12,0);
+  set32(R,16,0);
+  set32(R,20,0);
+  set32(R,24,-1);
+  set32(R,28,1);
+  let gt:i32=g_tag(G);
+  let pre:i32=plan_find(L,gt);
+  let pi:i32=pre;
+  if(pi<0){
+    let ok:i32=learn_bindings(L,A,G,K,tout,tmpc,seen);
+    if(ok==0){
+      set32(L,13236,get32(L,13236)+1);
+      return -1;
+    }
+    topo_g(G,ord);
+    pi=plan_new(L,gt,G,ord);
+  }
+  if(pi<0){ return -1; }
+  if(pre>=0){ set32(L,13228,get32(L,13228)+1); }
+  let nn:i32=get32(L,13000+pi*56+4);
+  let slot:i32=ctx_of_goal(L,G);
+  mat_inputs(G,W);
+  set32(L,15904,0);
+  set32(L,15908,0);
+  let e:i32=outc_find(L,gt);
+  if(e>=0){
+    let mask:i32=st_mask_get(L,e);
+    if(mask==0){ mask=pow2(nn)-1; }
+    let lag0:i32=get32(L,outc_base(e)+4);
+    let mpass:i32=0;
+    let okk:i32=1;
+    while(mpass<2){
+      if(okk==1){
+        osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+        traj_log(L,OUTS,nn,mpass);
+        let mm:i32=0;
+        let mtot:i32=0;
+        let jj:i32=0;
+        while(jj<nn){
+          let bit:i32=pow2(jj);
+          let qq:i32=mask/bit;
+          let inset:i32=qq-(qq/2)*2;
+          if(inset==1){
+            mtot=mtot+1;
+            let meq:i32=outc_phase_eq(L,e,mpass,jj,mpass);
+            if(meq==1){ mm=mm+1; }
+            if(meq==0){ okk=0; }
+          }
+          jj=jj+1;
+        }
+        det_ev(L,5,mpass,mm,mtot,0);
+      }
+      mpass=mpass+1;
+    }
+    if(okk==1){
+      set32(R,0,2);
+      set32(R,4,2);
+      set32(R,8,lag0);
+      set32(R,12,0);
+      set32(R,16,lag0);
+      set32(R,20,1);
+      set32(R,24,e);
+      return 2;
+    }
+    set32(L,13300,0);
+  }
+  let pass:i32=0;
+  while(pass<2){
+    osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+    traj_log(L,OUTS,nn,pass);
+    pass=pass+1;
+  }
+  let tried:i32=0;
+  let turns:i32=0;
+  let live:i32=1;
+  let first:i32=1;
+  set32(L,16688,0);
+  set32(L,16692,0);
+  while(live==1){
+    if(turns>=6){ live=0; }
+    if(live==1){
+      let s:i32=strat_sel(L,tried,slot);
+      if(s==0){ live=0; }
+      if(s!=0){
+        if(first==1){
+          det_ev(L,8,0,s,0,0);
+          det_ev(L,3,0,get32(L,15900),0,0);
+          first=0;
+        }
+        set32(L,16650,0);
+        let prior:i32=get32(L,15900);
+        let vr:i32=0;
+        let nadv:i32=1;
+        if(s==1){
+          osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+          traj_log(L,OUTS,nn,pass);
+          vr=pw_propose(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+        }
+        if(s==2){
+          osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+          traj_log(L,OUTS,nn,pass);
+          vr=who_turn(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+        }
+        if(s==3){
+          osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+          traj_log(L,OUTS,nn,pass);
+          vr=need_turn(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+        }
+        if(s==4){
+          nadv=2;
+          osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+          traj_log(L,OUTS,nn,pass);
+          vr=pw_propose(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass,prior);
+          if(vr==0){
+            osc_one_pass(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R);
+            traj_log(L,OUTS,nn,pass+1);
+            vr=need_turn(L,A,G,pi,K,vbuf,W,OUTS,tmpc,SUBL,seen,R,nn,gt,pass+1,prior);
+          }
+        }
+        let tc:i32=get32(L,16650);
+        if(vr==1){
+          rescue_finalize(L);
+          cx_rec(L,slot,s,1,tc);
+          set32(L,16648,s);
+          return 1;
+        }
+        if(vr==3){ rescue_finalize(L); return 0; }
+        cx_rec(L,slot,s,0,tc);
+        tried=tried+pow2(s);
+        rescue_finalize(L);
+        let ns:i32=strat_sel(L,tried,slot);
+        if(ns==0){ live=0; }
+        if(ns!=0){
+          set32(L,16688,1);
+          set32(L,16692,0);
+          det_ev(L,9,0,s,ns,0);
+        }
+        pass=pass+nadv;
+        turns=turns+1;
+      }
+    }
+  }
+  return 0;
+}
