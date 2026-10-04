@@ -1,5 +1,12 @@
 # ZAG LANGUAGE REFERENCE + WORKER BRIEF
-**Verified empirically on this host 2026-10-03. Read before writing any Zag.**
+**Verified empirically on this host 2026-10-03; sections 2-5 re-adjudicated
+2026-10-04 against the pinned compiler. Read before writing any Zag.**
+
+> **COMPILER-DEFECT DEFERRAL:** if you are about to report a compiler bug, read
+> **§5.3** and **`docs/ops/ZAG_TOOLCHAIN_DEFECTS.md`** first. Four lanes have now
+> reported "suspected compiler defects"; exactly **one** claim in this program's
+> history was a real compiler defect, and it was found by adjudicating those four
+> reports, not by any of them. Three were bugs in the reporters' own oracles.
 
 ## 0. HARD RULE: PURE ZAG
 
@@ -52,6 +59,18 @@ cross-multiplication for rational comparison. Example of exact rational compare:
 **No arrays, no structs, no enums, no maps/dicts, no generics, no closures, no
 `[][]u8`.** Every "record" is a byte-offset convention over a flat arena.
 
+**`i32` arithmetic facts (verified 2026-10-04, `tcdefects/C5a` §10):**
+division truncates toward zero (`(0-7)/2 == -3`); `v>>24` on a negative `v`
+yields `-1`, so `((0-1)>>24) as u8 == 255` -- exactly what `set32` needs to
+store a high byte. `x as u8` truncates: `256 as u8 == 0`, `(0-1) as u8 == 255`.
+
+**`*u8` has exactly two correct sources:** `_zag_malloc(n) as *u8` and
+`_zag_slice_ptr(b)`. Any other cast onto `*u8` is either a compile error or the
+memory-corrupting defect in **§5.1**. Note `_zag_malloc` returns `*u8`, **not**
+`[]u8`, so `let A:[]u8=_zag_malloc(n) as *u8;` is
+`error[E0203]: expected []u8, found *u8`. Use §3.1's two-step form. This one
+error is the likely root cause of two separate false "compiler defect" reports.
+
 ## 3. THE THREE IDIOMS YOU WILL USE CONSTANTLY
 
 ### 3.1 Allocation
@@ -68,6 +87,16 @@ fn z_alloc(n:i32)[]u8 {
 ```
 
 ### 3.2 Little-endian i32 cell access
+
+**`off` IS A BYTE OFFSET. NOT A CELL INDEX. READ THIS TWICE.**
+
+Verified 2026-10-04 by adjudication (`docs/ops/ZAG_TOOLCHAIN_DEFECTS.md` §1,
+reproducer `tcdefects/C1_get32_semantics.zag`). `get32(b,4)` reads the i32 at
+**byte** 4, which is **cell 1**. Calling `get32(C,4+j)` for j=0..5 is a BYTE
+sweep at offsets 4..9, not a cell sweep, and returns shift-shaped garbage
+(`11, 1761607680, 6881280, 26880, 105, ...` -- this was long mis-reported as
+compiler blocker B16). It is not a compiler bug; it is this API contract.
+
 ```zag
 fn get32(b:[]u8,off:i32)i32 {
   return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
@@ -77,6 +106,51 @@ fn set32(b:[]u8,off:i32,v:i32)void {
   return;
 }
 ```
+
+Facts established by measurement, not assumption:
+* `get32(off)` is **exactly** the 4-byte window `[off,off+3)`: 0 mismatches
+  against a hand-assembled window over 25 consecutive offsets and 9 unaligned
+  offsets. There is no hidden cell arithmetic anywhere.
+* **Unaligned offsets are legal and exact.** They simply straddle cells.
+* There is **NO bounds checking**. `set32(D,30,...)` on a 32-byte arena writes
+  bytes 30..33 and survives silently; reading `b[1000]` on a 64-byte arena
+  returns 0 with no trap. Bounds discipline is entirely on you.
+
+**PREFER THE GUARDED CELL-INDEXED WRAPPERS.** These make the mistake
+impossible to express, because the caller supplies a *cell*:
+
+```zag
+fn getc32(b:[]u8,cell:i32)i32 {
+  if(cell<0){ return 0; }
+  let off:i32=cell*4;
+  if((off+4)>b.len){ return 0; }
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn setc32(b:[]u8,cell:i32,v:i32)void {
+  if(cell<0){ return; }
+  let off:i32=cell*4;
+  if((off+4)>b.len){ return; }
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+```
+Verified: 256 cells written with `set32` at `i*4` and read back two ways
+(`k*4` and a `+4` byte sweep) against a memory-free oracle, 0 mismatches both
+ways (`tcdefects/C3_accessor_in_loop.zag` §7).
+
+**SAFE / CORRUPTING CALL PATTERNS**
+* SAFE: any multiple of 4 derived from the arena base; forward sweeps stepping
+  the offset by 4 (`o=0; while(o<1024){ ...; o=o+4; }`).
+* SILENTLY CORRUPTING: passing a **cell index**. Writes overlap and destroy
+  every cell they touch -- after `set32(B,j,v)` for cell j=0..5 the arena holds
+  `11,22,33,44,55,66,0,0,0` and none of the six cells is recoverable.
+* `get32(C,0)` and `get32(C,4)` *appear* to work. That is what lets this trap
+  survive a smoke test. Always sweep the whole range before trusting it.
+
+Triage for existing code: `get32(<arena>,<var>)` where `<var>` is an offset is
+the dominant idiom (~30 600 sites) and is correct. Only 16 call sites use a
+bare index-like name; all 16 were inspected and all are correct. See
+`ZAG_TOOLCHAIN_DEFECTS.md` §1 for the audit and the lanes to re-check.
 
 ### 3.3 Arena layout convention (this IS TNN's memory model)
 ```zag
@@ -137,9 +211,19 @@ Three consequences, all important:
    fully reproducible on this host. Cross-platform determinism holds.
 2. **The compiler is NOT miscompiling flat-arena indexed reads.** A separate
    worker reported "silent miscompilation of indexed reads" (barrier B16). That
-   claim is DOUBTED and probably an artifact of the broken output path or of the
-   reporter's own harness: this 340KB flat-arena program executes and produces
+   claim is DOUBTED and probably an artifact of the broken output path or of
+   the reporter's own harness: this 340KB flat-arena program executes and produces
    byte-exact results. Re-verify before building architecture on B16.
+
+   **RESOLVED 2026-10-04 (`docs/ops/ZAG_TOOLCHAIN_DEFECTS.md` §1). B16 was NOT a
+   compiler bug. It was the `get32`/`set32` byte-offset API trap of §3.2.** The
+   reported symptom -- `get32(C,4+j)` for j=0..5 returning
+   `11, 1761607680, 6881280, 26880, 105, ...` -- is exactly what a **byte sweep
+   at offsets 4..9** produces over cells holding 11,22,33,44,55,66. Proven: a
+   hand-assembled 4-byte window (multiplicative form, no `get32`) agrees with
+   `get32(off)` at **0 mismatches over 25 consecutive offsets** and **9 unaligned
+   offsets**, i.e. `get32` is exactly the window `[off,off+3)`. **B16 is CLOSED
+   as an API-semantics trap. Do not cite it as a compiler defect.**
 3. **Any result computed on this host with an unpatched `o_flush` is
    uncitable.** Re-run with the shim.
 
@@ -180,19 +264,128 @@ Other builtins: `_zag_malloc(n)`, `_zag_slice_ptr(b)`, `_zag_raw_syscall(nr,a1..
 `_zag_read_file(path)`, `_zag_write_file(path,b)`, `_zag_file_exists(path)`,
 `_zag_strlen(s)`, `_zag_arg(i)`, `_zag_argc()`.
 
-## 5. CONTROL FLOW GOTCHAS (these are pinned-compiler workarounds)
+## 5. CONTROL FLOW AND CASTS
 
-- **NO `for` loop.** Only `while(cond){ ... }`.
-- **NO `!(A&&B)` in while conditions.** Use De Morgan: `(!A || !B)`.
-- **if-nesting <= 3.** Hoist call results into a `let` first.
-- `&&` and `||` do exist in `if` conditions.
-- **No `!` on compound expressions in `while`.**
+**Every item below was re-verified 2026-10-04 by the `tcdefects` adjudication.
+Full evidence, minimal reproducers and memory-free oracles:
+`docs/ops/ZAG_TOOLCHAIN_DEFECTS.md`. Reproducers:
+`docs/lab/research-lead/overnight-20260928/tcdefects/` (`./run_all.sh`).**
+
+Most of the old "gotchas" in this section were **cargo cult**. They are kept
+below only where they are real, with the evidence stated.
+
+### 5.0 WHAT IS ACTUALLY TRUE
+
+- **NO `for` loop.** This is the ONLY genuine control-flow limitation. Use
+  `while(cond){ ... }`. `for(i=0;i<5;i=i+1)` fails to compile with a
+  **misleading diagnostic** -- `arm64: unknown field: len` ... `znc: build
+  aborted — unsupported constructs`. Do not go hunting for a `len` field; the
+  parser is mis-parsing `for` as a field access. (`tcdefects/C5b_for_loop.zag`)
+- **`&&` and `||` WORK.** Correct at arity 1..8, in `if` conditions *and* in
+  `while` conditions, for all four two-operand combinations, with the true or
+  false operand in any position. 28 assertions, 0 failures. The old warning
+  about five-term `&&` was a **reporter's oracle bug** (`ZAG_TOOLCHAIN_DEFECTS.md`
+  §2). There is no arity threshold.
+- **`!(A&&B)` WORKS, including in `while` conditions.** The old prohibition was
+  cargo cult. So do `!(A||B)`, bare `!A`, and De Morgan `(!A || !B)`.
+- **if-nesting is fine to at least depth 10**, with and without `else` chains,
+  and with accessor calls in the innermost body. The old "if-nesting <= 3" limit
+  was **false**. (`NEST_2..NEST_10.zag`, `T6_acc_depth8.zag`, `C5a` §6-7.)
+- **`break` and `continue` both work**, including at if-nesting depth 4.
+- **Accessor functions in loops are fine** -- constants, parameters,
+  non-constant returns, two calls in one condition, nested loops, `get32`/`set32`
+  sweeps over 256 cells. The "accessor in a loop is mis-compiled" report was an
+  **off-by-one in the reporter's harness** (`ZAG_TOOLCHAIN_DEFECTS.md` §3).
+- **Duplicate `let` bindings compile and run.** Same scope, triple
+  redeclaration, nested-block shadowing: all correct, 3/3 deterministic, no
+  segfault. Last binding wins. (`C4a`, `C4b`, `C4c`, `C4e`.) The "duplicate let
+  segfaults" report was a **caller bug**: the reporter almost certainly wrote
+  `let A:[]u8=_zag_malloc(n) as *u8;`, which is `error[E0203]: expected []u8,
+  found *u8`. Use the two-step form in §3.1.
+- **`A[i]=v as u8` works** and truncates as integer truncation (256 -> 0,
+  -1 -> 255). The "u8 store unusable" report was the same E0203 caller bug.
+  (`C4d_u8_store.zag`.)
+
+### 5.1 `[]u8 as *u8` ACTIVELY CORRUPTS MEMORY - REAL COMPILER DEFECT
+
+**This is the only real compiler defect found by the adjudication, and it is
+not on any lane's list.** A previous worker noted the construct "compiles" and
+filed it as harmless. It compiles. It is also broken.
+
+```zag
+let p:*u8=_zag_malloc(64) as *u8;
+let b:[]u8=p[0..64];
+b[0]=7;
+let cp:*u8=b as *u8;          // <-- NOT the slice's data pointer
+let viaCast:[]u8=cp[0..64];
+print b[0], viaCast[0];       // 7, then 8   (8 is WRONG)
+```
+
+* **Reads return the wrong value.** `viaCast[0]` gives **8** where the literal
+  7 was written. Deterministic, 3/3.
+* **Writes corrupt the ORIGINAL arena.** After `viaCast[0]=42`, the original
+  `b[0]` becomes **0** -- neither the old value (7) nor the new value (42), so
+  no consistent aliasing semantics can explain it. Deterministic, 3/3.
+* **Nondeterministic.** A second byte read back as **64, 192, 64** across three
+  runs. This is the only reproducer in the set that fails the 3/3
+  byte-identical bar, and it fails because of this.
+* `_zag_slice_ptr(b) != (b as *u8)`, yet the cast pointer is non-null. The cast
+  appears to yield the address of the slice *descriptor*, not of its bytes.
+
+**RULE: the only correct sources of a `*u8` are `_zag_malloc(n) as *u8` and
+`_zag_slice_ptr(b)`. `let q:*u8 = <slicevar> as *u8;` is always a bug.**
+
+Triage: 320 of 1064 `.zag` files contain a `<identifier> as *u8` cast and need
+their operand checked. Highest-count lanes: `l3_suf_scaling` (19 files),
+`l2_metareuse_compose2` (11), `ns_invariant` (9), `l2_metareuse_adversary` (8),
+`sum_detector_fix` (7), `l3_inr_impl` (7), `formal_compose_rerank` (7),
+`formal_compose_e2e` (7), `l3_rx_k10` (6), `xhier_countmap_fix` (5), `l3_rx`
+(5), `subsumption_p0` (4), `p2_compose_dag` (4), `l3_suf_adversary` (4).
+
+### 5.2 STILL TRUE, STILL REQUIRED
+
 - `return;` written explicitly even in `void` functions.
 - Casts: `v as i32`, `p as *u8`, `null as *u8`.
-- **`[]u8 as *u8` is forbidden** - use `_zag_slice_ptr`.
+- **No bounds checking on slice indexing** (§3.2). Range-check in your wrappers.
 - Recursion works and is used in the frozen core.
 - Strings are NOT null-terminated `[]u8`. For syscalls convert with `z_cstr`.
 - Exactly one `fn main(` per translation unit.
+- **Do not print a pointer's numeric value** (`p as i64`). It is a heap address,
+  so macOS ASLR makes it differ every run and it will look like a determinism
+  bug. Null-test instead.
+
+### 5.3 ORACLE CONSTRUCTION - WHY 3 OF 4 "DEFECT" REPORTS WERE FALSE
+
+Four lanes reported SUSPECTED compiler defects. **Exactly one claim in this
+program's history has ever been a real compiler defect** (`[]u8 as *u8`, above,
+found by this adjudication). The other three were bugs in the *reporters'
+oracles*. The same failure mode produced three harness bugs in an earlier wave.
+**Read this before you file or believe any compiler-defect report.**
+
+> A reproducer whose oracle is written from the same intuition as the code under
+> test proves nothing.
+
+The three specific traps, all of which I fell into myself:
+
+1. **"Obviously true" operands that are false.** To build "the single true
+   operand at position k of a 5-term `||`", the natural move is `k==k` for
+   k=2..5, i.e. `1==2`, `1==3`, `1==4`, `1==5`. **All of those are false.** The
+   chain had no true operand anywhere and the compiler's `false` was correct.
+   *Use `k<k+1` for true and `k>k` for false -- checkable by construction, not
+   by intuition.*
+2. **Branch encodings that cannot distinguish the branches.** Accumulating an
+   outcome as `c=c*10+1` (then) and `c=c*10+0` (else) starting from `c=0` gives
+   **0 either way**. *Use then=+1 / else=+9.*
+3. **Counters incremented before the guard.** A cap written
+   `c=c+1; if(n>=500){break;}` stops on the **501st** visit, not the 500th. And
+   `n>=LIM(n)` is *always true*, so such a guard fires on the first visit.
+   *Derive loop-exit counts by hand and print the iteration trace.*
+
+Corollaries that also cost time:
+* **"It compiles" is not "it works."** `[]u8 as *u8` compiles.
+* **A test whose first operand already decides the answer cannot detect a
+  first-operand-only bug.** That is why the earlier `&&`/`||` probes all passed.
+* **Never print a heap address** when asserting determinism (see §5.2).
 
 ## 6. FILE IO (if you need it)
 ```zag
@@ -245,6 +438,21 @@ Key TNN-2 functions: `alloc_node/alloc_raw/link_edge`, `res_op`, `execute/exec_v
   rebuilt with the `_zag_print` shim gives byte-identical output (see section 4.1).
 - **B14 ledger mint pipeline deletes instead of appending.** Guard now installed
   at `mint_guard/mint_guard_v2.sh`. Ledger restored to C410.
+- **B16 CLOSED 2026-10-04 — NOT a compiler defect.** The "silent miscompilation
+  of indexed reads" was the `get32`/`set32` **byte-offset API trap**. See §3.2
+  and §4.1(2). Cite `docs/ops/ZAG_TOOLCHAIN_DEFECTS.md` §1, not B16.
+- **B17 (new, 2026-10-04) REAL COMPILER DEFECT: `[]u8 as *u8` corrupts memory.**
+  Reads through the cast pointer return wrong values; writes through it corrupt
+  the original arena (7 -> 0, neither old nor new value); one read was
+  nondeterministic. Use `_zag_slice_ptr`. See §5.1.
+- **NOT BLOCKERS — the following were reported as compiler defects and are all
+  false.** Do not re-investigate: five-term `&&`/`||`; accessor calls in loops;
+  duplicate `let` bindings; `A[i]=v as u8`; `[]u8 as *u8` "just compiles";
+  if-nesting beyond 3; `!(A&&B)` in `while`. Each was a bug in the reporter's
+  harness, except `[]u8 as *u8` which is B17 above. Adjudication with
+  reproducers and memory-free oracles:
+  `docs/ops/ZAG_TOOLCHAIN_DEFECTS.md`. **Read §5.3 of this brief before filing
+  any new compiler-defect claim.**
 
 ## 9. THE CENTRAL NEGATIVE RESULT (context for L3 work)
 
