@@ -286,7 +286,47 @@ your setup before doing any work.
 - Never `git commit -a`. Always explicit pathspecs.
 - Your lane directory is `docs/lab/research-lead/overnight-20260928/<your-lane>/`.
 
-### 10.1 Scientific rules
+### 10.1 MANDATORY EXPERIMENT TIMEOUTS (wave-2 lesson)
+
+Wave 2 aborted mid-experiment and left two Zag binaries running as orphans
+(`./p5` for 2h28m, `./t2` for 2h13m, ~90% CPU each, ppid=1). Nobody would ever
+collect them. On a 10-core box that is ~1.8 cores burned for 4+ hours, and later
+workers could not get CPU as a result.
+
+**Every experiment run MUST go through the watchdog, which enforces a hard
+wall-clock limit and kills the whole process group:**
+
+```sh
+W=/Users/Shared/micah/Documents/TNN/TNN/tools/tnnwatch.sh
+$W reg myexp 600 ./my_binary        # 600s limit; TIMEOUT -> rc=124, killed
+$W status                            # load, live runs, orphans
+$W reap                              # kill orphans past the grace period
+```
+
+Rules:
+- Pick the limit from your prereg and DO NOT extend it after seeing a miss.
+  A timeout is recorded as FAIL/TIMEOUT exactly as the prereg specified.
+- If the watchdog reports `status=EMPTY`, you produced zero bytes. That is NOT a
+  result. Fix the output path (see 4.0) before interpreting anything.
+- If your binary prints nothing and returns 0, you have the silent-empty-output
+  defect, not a passing experiment.
+
+### 10.2 THE MACHINE IS SHARED - plan for contention
+
+This host is NOT dedicated to TNN. Measured concurrent foreign load includes a
+colima/qemu Linux VM at 170-380% CPU running an unrelated build, 5+ opencode
+sessions, Codex, Brave renderers, and vite/tauri dev servers. Load average has
+been observed at 14-25 on 10 cores.
+
+Consequences:
+- Assume you get a fraction of a core at times. Do not launch 40 parallel jobs.
+- Prefer many SHORT experiments over a few long ones, and always behind a timeout.
+- Re-measure rather than trusting the earlier "40 concurrent compiles" figure -
+  that was measured on an idle machine and does not hold under contention.
+- If your work is blocked, it is more likely resource starvation than a logic
+  bug. Check `$W status` before you spend time debugging your own code.
+
+
 
 - Your goal is NOT to make the hypothesis pass. Faithfully implement the
   preregistered hypothesis. If it fails, REPORT THE FAILURE. Do not move bars.
