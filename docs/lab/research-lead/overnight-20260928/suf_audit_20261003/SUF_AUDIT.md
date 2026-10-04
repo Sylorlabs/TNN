@@ -461,7 +461,17 @@ a verdict, which is the thing the ledger exists for.
 
 C5xx block, per PREREG section 9. C377-C466 not touched.
 
-- **C500 -- SUF-AUDIT-VERDICT.** Independent source-first audit of all
+> **ID-COLLISION DISCLOSURE (post-hoc, disclosed not hidden).** My first results
+> commit (`5f287376e`) minted **C500/C501**. Concurrent lanes
+> `ns_invariant/PREREG.md` (C500-C509) and `cogops_unify_general/`
+> (C500-C506) independently occupy the same block, so C500/C501 were **not
+> free**. Re-minted to **C590/C591** by follow-up commit; the earlier commit is
+> left standing rather than amended. This is a live hazard in the current
+> mint regime: with the ledger restored to C410, every worker is minting into
+> C5xx from scratch and there is no allocator. Recommend the mint guard assign
+> disjoint blocks rather than leaving workers to self-select.
+
+- **C590 -- SUF-AUDIT-VERDICT.** Independent source-first audit of all
   L3-adjacent claims. **"L3 achieved anywhere: zero" is CONFIRMED and
   strengthened.** No audited lane reaches L2+. Classification ladder applied:
   C281/C284 **L1** (from "L3 VALIDATED"), C335 **L1** (from "INVENTED"),
@@ -469,7 +479,7 @@ C5xx block, per PREREG section 9. C377-C466 not touched.
   L3-INR **L2**, L3-RX **L2**, L3-SUF-1 **L2** (from "REDTEAM-SURVIVES").
   Charter section 7 answer is YES for every lane with recoverable source.
   Evidence: `suf_audit_decide281.zag` 3/3 identical sha256 `75c6f100...`.
-- **C501 -- SUF-K10-CORRECTION.** `l3_suf_redteam`'s `REDTEAM-SURVIVES` is
+- **C591 -- SUF-K10-CORRECTION.** `l3_suf_redteam`'s `REDTEAM-SURVIVES` is
   **overturned**. `l_escalate` (`learner2.zag:491-550`) is a hardcoded 4-rung
   ladder with literal tags and a source-comment naming the frozen order; F is
   enumerable in four lines; RT-K3 is anti-correlated with the section 7 test;
