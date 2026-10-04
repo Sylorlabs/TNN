@@ -1,0 +1,811 @@
+// cb.zag -- Cognitive operation BODY learning.
+//
+// SUF frontier: can the learner revise or create an operation BODY
+// (the instruction sequence), not just control parameters?
+//
+// Three consequence-driven mechanisms, all in learner state:
+//   REPAIR   broken body -> offline replay search -> fixed in place
+//   DIVERGE  duplicate body to empty slot -> revise for new context
+//   INLINE   successful pair spliced into one body in an empty slot
+// Researcher-owned: the three operators, search order/bounds, bars,
+// budgets, the 8-instruction ISA. Learner-owned: which variants win,
+// which pairs inline, every body after creation, all selection.
+//
+// Cell map (i32 cells in S):
+// 0..55 appl_sum[o*8+c]  56..111 appl_n  112..160 comp_sum[p*7+q]
+// 161..209 comp_n  210..216 tot_sum  217..223 tot_n  224..230 retired
+// 231..237 retire_ep  238 rng_env 239 rng_learn 240 log_head
+// 241..720 log(96x5)  721..744 nodes(8x3) 745 node_n 746..793 edges(16x3)
+// 794 edge_n  795..802 regs R0..R7  803..809 bstart 810..816 blen
+// 817 status 818 ans 819 true_ans
+// 820..823 F_ok1 F_n1 N_ok1 N_n1  824..827 F_ok2 F_n2 N_ok2 N_n2
+// 828..831 N3_ok1 N3_n1 N3_ok2 N3_n2
+// 832..836 gfirst1 gfirst2 epair1 epair2 pred_last100  837..838 eok en
+// 839 n1_first_inl 840 n1_n_late 841 n1_steps_late 842 n3_steps_late
+// 843 n3_n_late  844..850 solo_ok[7]  851..857 solo_n[7]
+// 900+o*400+i*20 op_snap[5][16][20]  (..2499)
+// 2500+c*80+i*20 ctx_snap[8][4][20]  (..3139)
+// 3140..3144 op_snap_n[5]  3145..3152 ctx_snap_n[8]
+// 3153..3159 rev_budget[7]  3160..3166 dup_done[7]  3167 inline_budget
+// 3168..3192 inlined[5][5]  3193..3199 op_origin[7]  3200..3206 op_parent[7]
+// BC bytes: bodies 0..4 [0,512)  slot5 [512,768)  slot6 [768,1024)
+//   variant scratch [1024,1280).
+// Snapshot 20 cells: 0 n_nodes 1 n_edges 2 ans 3 used_mask 4 ctx0
+//   5..13 edges (et,from,to)x3  14..17 node v0[4]  18..19 spare.
+
+// ============ helpers ============
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+fn sg(S:[]u8,i:i32)i32 { return get32(S,i*4); }
+fn ss(S:[]u8,i:i32,v:i32)void { set32(S,i*4,v); return; }
+// ============ table accessors (7 ops) ============
+fn asg(S:[]u8,o:i32,c:i32)i32 { return sg(S,o*8+c); }
+fn ssa(S:[]u8,o:i32,c:i32,v:i32)void { ss(S,o*8+c,v); return; }
+fn ang(S:[]u8,o:i32,c:i32)i32 { return sg(S,56+o*8+c); }
+fn sna(S:[]u8,o:i32,c:i32,v:i32)void { ss(S,56+o*8+c,v); return; }
+fn csg(S:[]u8,p:i32,q:i32)i32 { return sg(S,112+p*7+q); }
+fn scs(S:[]u8,p:i32,q:i32,v:i32)void { ss(S,112+p*7+q,v); return; }
+fn cng(S:[]u8,p:i32,q:i32)i32 { return sg(S,161+p*7+q); }
+fn scn(S:[]u8,p:i32,q:i32,v:i32)void { ss(S,161+p*7+q,v); return; }
+// ============ deterministic RNG (two LCG streams) ============
+fn xorsh(S:[]u8,cell:i32)i32 {
+  let s:i32=sg(S,cell);
+  let ns:i32=(s*1103515245+12345) & 2147483647;
+  ss(S,cell,ns);
+  return ns;
+}
+// ============ graph store (generic machinery) ============
+fn g_node(S:[]u8,kind:i32,v0:i32,v1:i32)i32 {
+  let id:i32=sg(S,745);
+  ss(S,721+id*3,kind); ss(S,721+id*3+1,v0); ss(S,721+id*3+2,v1);
+  ss(S,745,id+1);
+  return id;
+}
+fn g_edge(S:[]u8,from:i32,et:i32,to:i32)void {
+  let id:i32=sg(S,794);
+  ss(S,746+id*3,from); ss(S,746+id*3+1,et); ss(S,746+id*3+2,to);
+  ss(S,794,id+1);
+  return;
+}
+fn g_match(S:[]u8,from:i32,et:i32)i32 {
+  let e:i32=0; let n:i32=sg(S,794);
+  while(e<n){
+    if(sg(S,746+e*3)==from && sg(S,746+e*3+1)==et){return sg(S,746+e*3+2);}
+    e=e+1;
+  }
+  return -1;
+}
+fn g_field(S:[]u8,nd:i32,f:i32)i32 {
+  // Bounds-checked: out-of-range reads return a sentinel, never
+  // adjacent memory. (Prevents bodies from "solving" via OOB reads.)
+  if(nd<0 || nd>=sg(S,745)){return -999;}
+  if(f<0 || f>2){return -999;}
+  return sg(S,721+nd*3+f);
+}
+// ============ body assembler (bootstrap; bodies are data) ============
+fn asmi(BC:[]u8,p:i32,op:i32,a:i32,b:i32,c:i32,imm:i32)i32 {
+  BC[p]=op as u8; BC[p+1]=a as u8; BC[p+2]=b as u8; BC[p+3]=c as u8;
+  set32(BC,p+4,imm);
+  return p+8;
+}
+fn build_bodies(S:[]u8,BC:[]u8)void {
+  let p:i32=0;
+  // op 0 gather -- PLANTED BUG: etype SET is 2, not 1 (broken on F)
+  ss(S,803,p);
+  p=asmi(BC,p,1,0,0,0,2);
+  p=asmi(BC,p,6,7,0,1,0);
+  p=asmi(BC,p,1,2,0,0,-1);
+  p=asmi(BC,p,4,1,2,3,0);
+  p=asmi(BC,p,5,3,0,0,40);
+  p=asmi(BC,p,1,4,0,0,1);
+  p=asmi(BC,p,7,1,4,5,0);
+  p=asmi(BC,p,1,6,0,0,2);
+  p=asmi(BC,p,8,6,5,0,0);
+  p=asmi(BC,p,1,6,0,0,0);
+  p=asmi(BC,p,8,6,6,0,0);
+  ss(S,810,p-sg(S,803));
+  // op 1 follow (etype 2)
+  ss(S,804,p);
+  p=asmi(BC,p,1,0,0,0,2);
+  p=asmi(BC,p,6,7,0,1,0);
+  p=asmi(BC,p,1,2,0,0,-1);
+  p=asmi(BC,p,4,1,2,3,0);
+  p=asmi(BC,p,5,3,0,0,32);
+  p=asmi(BC,p,2,7,1,0,0);
+  p=asmi(BC,p,1,6,0,0,1);
+  p=asmi(BC,p,8,6,0,0,0);
+  p=asmi(BC,p,1,6,0,0,0);
+  p=asmi(BC,p,8,6,6,0,0);
+  ss(S,811,p-sg(S,804));
+  // op 2 complete
+  ss(S,805,p);
+  p=asmi(BC,p,1,0,0,0,1);
+  p=asmi(BC,p,6,7,0,1,0);
+  p=asmi(BC,p,1,2,0,0,-1);
+  p=asmi(BC,p,4,1,2,3,0);
+  p=asmi(BC,p,5,3,0,0,88);
+  p=asmi(BC,p,1,4,0,0,1);
+  p=asmi(BC,p,7,1,4,5,0);
+  p=asmi(BC,p,1,0,0,0,3);
+  p=asmi(BC,p,6,7,0,1,0);
+  p=asmi(BC,p,4,1,2,3,0);
+  p=asmi(BC,p,5,3,0,0,40);
+  p=asmi(BC,p,7,1,4,6,0);
+  p=asmi(BC,p,3,5,6,5,0);
+  p=asmi(BC,p,1,6,0,0,2);
+  p=asmi(BC,p,8,6,5,0,0);
+  p=asmi(BC,p,1,6,0,0,0);
+  p=asmi(BC,p,8,6,6,0,0);
+  ss(S,812,p-sg(S,805));
+  // op 3 predict (always wrong)
+  ss(S,806,p);
+  p=asmi(BC,p,1,5,0,0,777);
+  p=asmi(BC,p,1,6,0,0,2);
+  p=asmi(BC,p,8,6,5,0,0);
+  ss(S,813,p-sg(S,806));
+  // op 4 shift (etype 4)
+  ss(S,807,p);
+  p=asmi(BC,p,1,0,0,0,4);
+  p=asmi(BC,p,6,7,0,1,0);
+  p=asmi(BC,p,1,2,0,0,-1);
+  p=asmi(BC,p,4,1,2,3,0);
+  p=asmi(BC,p,5,3,0,0,32);
+  p=asmi(BC,p,2,7,1,0,0);
+  p=asmi(BC,p,1,6,0,0,1);
+  p=asmi(BC,p,8,6,0,0,0);
+  p=asmi(BC,p,1,6,0,0,0);
+  p=asmi(BC,p,8,6,6,0,0);
+  ss(S,814,p-sg(S,807));
+  // slots 5,6 empty (learner-created)
+  ss(S,808,512); ss(S,815,0);
+  ss(S,809,768); ss(S,816,0);
+  return;
+}
+// ============ generic instruction interpreter ============
+// Dispatches ONLY on the 8 generic ISA opcodes; op id o is used solely
+// to locate the body. status: 0 FAIL, 1 CONTINUE, 2 ANSWERED.
+fn cog_exec_at(S:[]u8,BC:[]u8,pc:i32,pend:i32)void {
+  let guard:i32=0;
+  while(pc<pend && guard<96){
+    guard=guard+1;
+    let opc:i32=BC[pc] as i32;
+    let a:i32=BC[pc+1] as i32;
+    let b:i32=BC[pc+2] as i32;
+    let c:i32=BC[pc+3] as i32;
+    let imm:i32=get32(BC,pc+4);
+    if(opc==1){ ss(S,795+a,imm); pc=pc+8; }
+    else if(opc==2){ ss(S,795+a,sg(S,795+b)); pc=pc+8; }
+    else if(opc==3){ ss(S,795+c,sg(S,795+a)+sg(S,795+b)); pc=pc+8; }
+    else if(opc==4){
+      let v:i32=0;
+      if(sg(S,795+a)==sg(S,795+b)){v=1;}
+      ss(S,795+c,v); pc=pc+8;
+    }
+    else if(opc==5){
+      if(sg(S,795+a)!=0){pc=pc+imm;} else {pc=pc+8;}
+    }
+    else if(opc==6){ ss(S,795+c,g_match(S,sg(S,795+a),sg(S,795+b))); pc=pc+8; }
+    else if(opc==7){ ss(S,795+c,g_field(S,sg(S,795+a),sg(S,795+b))); pc=pc+8; }
+    else if(opc==8){ ss(S,817,sg(S,795+a)); ss(S,818,sg(S,795+b)); return; }
+    else { pc=pc+8; }
+  }
+  ss(S,817,0); ss(S,818,0);
+  return;
+}
+fn cog_exec(S:[]u8,BC:[]u8,o:i32)void {
+  cog_exec_at(S,BC,sg(S,803+o),sg(S,803+o)+sg(S,810+o));
+  return;
+}
+// ============ learned table reads (x1000; unseen = 500 optimism) ============
+fn appl_mx(S:[]u8,o:i32,ctx:i32)i32 {
+  let n:i32=ang(S,o,ctx);
+  if(n>0){ return (1000*asg(S,o,ctx))/n; }
+  return 500;
+}
+fn comp_mx(S:[]u8,p:i32,q:i32)i32 {
+  let n:i32=cng(S,p,q);
+  if(n>0){ return (1000*csg(S,p,q))/n; }
+  return 500;
+}
+fn tot_mx(S:[]u8,o:i32)i32 {
+  let n:i32=sg(S,217+o);
+  if(n>0){ return (1000*sg(S,210+o))/n; }
+  return 0;
+}
+// ============ observable context probe (edge existence only) ============
+fn cog_probe(S:[]u8)i32 {
+  let cur:i32=sg(S,795+7);
+  let hv:i32=0;
+  if(g_match(S,cur,1)!=-1){hv=1;}
+  let dv:i32=0;
+  if(g_match(S,cur,2)!=-1){dv=1;}
+  let sv:i32=0;
+  if(g_match(S,cur,4)!=-1){sv=1;}
+  return hv+dv*2+sv*4;
+}
+// ============ generic bandit selector (never branches on op id) ============
+fn cog_select(S:[]u8,ctx:i32,prev:i32,epsx:i32)i32 {
+  let nc:i32=0; let o:i32=0;
+  while(o<7){
+    if(sg(S,810+o)>0 && sg(S,224+o)==0){nc=nc+1;}
+    o=o+1;
+  }
+  if(nc==0){return 0;}
+  let rs:i32=xorsh(S,239);
+  if((rs % 1000)<epsx){
+    let rs2:i32=xorsh(S,239);
+    let pick:i32=rs2 % nc;
+    let k:i32=0; o=0;
+    while(o<7){
+      if(sg(S,810+o)>0 && sg(S,224+o)==0){
+        if(k==pick){return o;}
+        k=k+1;
+      }
+      o=o+1;
+    }
+    return 0;
+  }
+  let best:i32=-1; let bests:i32=0; let bestt:i32=0; o=0;
+  while(o<7){
+    if(sg(S,810+o)>0 && sg(S,224+o)==0){
+      let sc:i32=appl_mx(S,o,ctx);
+      if(prev<7){ sc=sc+comp_mx(S,prev,o); }
+      let tn:i32=sg(S,217+o);
+      if(best<0 || sc>bests || (sc==bests && tn<bestt)){best=o;bests=sc;bestt=tn;}
+    }
+    o=o+1;
+  }
+  if(best<0){return 0;}
+  return best;
+}
+// ============ environment ============
+// typ 0=F 40% (Q)-[V]->ans ; 1=N1 25% (Q)-[D]->(E2)-[V]->V2,[R]->K ;
+// 2=N2 15% (Q)-[S]->(E3)-[V]->V3 ; 3=N3 20% (Q)-[W,etype5]->ans.
+fn env_build(S:[]u8)i32 {
+  ss(S,745,0); ss(S,794,0);
+  let r:i32=xorsh(S,238);
+  let t:i32=(r >> 16) % 20;
+  let typ:i32=0;
+  if(t>=8 && t<=12){typ=1;}
+  else if(t>=13 && t<=15){typ=2;}
+  else if(t>=16){typ=3;}
+  let q:i32=g_node(S,1,0,0);
+  if(typ==0){
+    let r2:i32=xorsh(S,238);
+    let av:i32=10+(r2 % 40);
+    let vn:i32=g_node(S,2,av,0);
+    g_edge(S,q,1,vn);
+    ss(S,819,av);
+  } else if(typ==1){
+    let e2:i32=g_node(S,1,0,0);
+    let r2:i32=xorsh(S,238);
+    let v2:i32=10+(r2 % 30);
+    let r3:i32=xorsh(S,238);
+    let kk:i32=1+(r3 % 9);
+    let vn:i32=g_node(S,2,v2,0);
+    let kn:i32=g_node(S,2,kk,0);
+    g_edge(S,q,2,e2);
+    g_edge(S,e2,1,vn);
+    g_edge(S,e2,3,kn);
+    ss(S,819,v2+kk);
+  } else if(typ==2){
+    let e3:i32=g_node(S,1,0,0);
+    let r2:i32=xorsh(S,238);
+    let v3:i32=10+(r2 % 40);
+    let vn:i32=g_node(S,2,v3,0);
+    g_edge(S,q,4,e3);
+    g_edge(S,e3,1,vn);
+    ss(S,819,v3);
+  } else {
+    let r2:i32=xorsh(S,238);
+    let wv:i32=10+(r2 % 40);
+    let wn:i32=g_node(S,2,wv,0);
+    g_edge(S,q,5,wn);
+    ss(S,819,wv);
+  }
+  return typ;
+}
+// ============ snapshot archives (learner-owned experience) ============
+// Per-op sticky archive (first 16) and per-ctx0 sticky archive (4).
+// The consequence system already observes true answers post-hoc;
+// archives reuse them for offline body trials.
+fn snap_write(S:[]u8,base:i32)void {
+  let nn:i32=sg(S,745); let ne:i32=sg(S,794);
+  if(nn>4 || ne>3){return;}
+  ss(S,base,  nn); ss(S,base+1,ne); ss(S,base+2,sg(S,819));
+  ss(S,base+3,sg(S,859)); ss(S,base+4,sg(S,860));
+  let e:i32=0;
+  while(e<3){
+    if(e<ne){
+      ss(S,base+5+e*3,sg(S,746+e*3+1));
+      ss(S,base+5+e*3+1,sg(S,746+e*3));
+      ss(S,base+5+e*3+2,sg(S,746+e*3+2));
+    } else { ss(S,base+5+e*3,0); ss(S,base+5+e*3+1,0); ss(S,base+5+e*3+2,0); }
+    e=e+1;
+  }
+  let i:i32=0;
+  while(i<4){
+    if(i<nn){ ss(S,base+14+i,sg(S,721+i*3+1)); } else { ss(S,base+14+i,0); }
+    i=i+1;
+  }
+  return;
+}
+// cells 859/860: scratch for used_mask / ctx0 of current episode
+fn snap_push(S:[]u8)void {
+  let o:i32=0;
+  while(o<5){
+    if((sg(S,859) & (1 << o))!=0){
+      let n:i32=sg(S,3140+o);
+      if(n<16){
+        snap_write(S,900+o*400+n*20);
+        ss(S,3140+o,n+1);
+      }
+    }
+    o=o+1;
+  }
+  let c0:i32=sg(S,860);
+  let m:i32=sg(S,3145+c0);
+  if(m<4){
+    snap_write(S,2500+c0*80+m*20);
+    ss(S,3145+c0,m+1);
+  }
+  return;
+}
+fn snap_load(S:[]u8,base:i32)void {
+  let nn:i32=sg(S,base); let ne:i32=sg(S,base+1);
+  ss(S,745,0); ss(S,794,0);
+  let i:i32=0;
+  while(i<nn){ g_node(S,1,sg(S,base+14+i),0); i=i+1; }
+  let e:i32=0;
+  while(e<ne){
+    g_edge(S,sg(S,base+5+e*3+1),sg(S,base+5+e*3),sg(S,base+5+e*3+2));
+    e=e+1;
+  }
+  i=0;
+  while(i<7){ ss(S,795+i,0); i=i+1; }
+  ss(S,795+7,0);
+  return;
+}
+// replay success rate x1000 of body [pc,pc+len) on snaps; want_ctx<0=all
+fn replay_score(S:[]u8,BC:[]u8,pc:i32,pl:i32,base:i32,n:i32,want:i32)i32 {
+  let ok:i32=0; let used:i32=0; let i:i32=0;
+  while(i<n){
+    let sb:i32=base+i*20;
+    if(want<0 || sg(S,sb+4)==want){
+      used=used+1;
+      snap_load(S,sb);
+      cog_exec_at(S,BC,pc,pc+pl);
+      if(sg(S,817)==2 && sg(S,818)==sg(S,sb+2)){ok=ok+1;}
+    }
+    i=i+1;
+  }
+  if(used==0){return 0;}
+  return (1000*ok)/used;
+}
+// modal ctx0 among op o's archived snaps
+fn snap_modal(S:[]u8,o:i32)i32 {
+  let cnt:[]u8=z_alloc(8);
+  let n:i32=sg(S,3140+o); let i:i32=0;
+  while(i<n){
+    let c:i32=sg(S,900+o*400+i*20+4);
+    if(c>=0 && c<8){cnt[c]=cnt[c]+1;}
+    i=i+1;
+  }
+  let best:i32=0; let bv:i32=0; let c2:i32=0;
+  while(c2<8){
+    if(cnt[c2] as i32>bv){bv=cnt[c2] as i32;best=c2;}
+    c2=c2+1;
+  }
+  return best;
+}
+// Exhaustive single-SET-imm (0..7) search. Best variant left in
+// scratch BC[1024..]. Returns best score x1000; best (ii,imm) in
+// cells 858/859 on success, -1/-1 if nothing beats champion.
+fn body_search(S:[]u8,BC:[]u8,pc:i32,pl:i32,base:i32,n:i32,want:i32)i32 {
+  let champ:i32=replay_score(S,BC,pc,pl,base,n,want);
+  let best:i32=champ;
+  ss(S,858,-1); ss(S,859,-1);
+  let nin:i32=pl/8; let ii:i32=0;
+  while(ii<nin){
+    if(BC[pc+ii*8] as i32==1){
+      let imm:i32=0;
+      while(imm<=7){
+        let k:i32=0;
+        while(k<pl){ BC[1024+k]=BC[pc+k]; k=k+1; }
+        set32(BC,1024+ii*8+4,imm);
+        let sc:i32=replay_score(S,BC,1024,pl,base,n,want);
+        if(sc>best){best=sc;ss(S,858,ii);ss(S,859,imm);}
+        imm=imm+1;
+      }
+    }
+    ii=ii+1;
+  }
+  return best;
+}
+fn body_apply_best(S:[]u8,BC:[]u8,dst:i32,src:i32,pl:i32)void {
+  let k:i32=0;
+  while(k<pl){BC[dst+k]=BC[src+k];k=k+1;}
+  let ii:i32=sg(S,858); let imm:i32=sg(S,859);
+  if(ii>=0){set32(BC,dst+ii*8+4,imm);}
+  return;
+}
+// ============ REPAIR: fix a broken body in place ============
+// Trigger is direct: the body's replay score on its modal context is
+// low (champ < 400). A merely-failing op records 0 (not -1), so the
+// tot proxy never goes very negative; test the body itself.
+fn revision_repair(S:[]u8,BC:[]u8)void {
+  let o:i32=0;
+  while(o<5){
+    if(sg(S,3153+o)>0 && sg(S,217+o)>=20 && sg(S,3140+o)>=6){
+      let modal:i32=snap_modal(S,o);
+      let pc:i32=sg(S,803+o); let pl:i32=sg(S,810+o);
+      let base:i32=900+o*400; let n:i32=sg(S,3140+o);
+      let champ:i32=replay_score(S,BC,pc,pl,base,n,modal);
+      if(champ<400){
+        let best:i32=body_search(S,BC,pc,pl,base,n,modal);
+        if(sg(S,858)>=0 && best>champ+150 && best>=600){
+          body_apply_best(S,BC,pc,1024,pl);
+          ss(S,3193+o,1);
+          ss(S,224+o,0);
+          // New body, fresh evaluation: clear stale bad reputation
+          // so the selector re-tries the op.
+          let rc:i32=0;
+          while(rc<8){ ssa(S,o,rc,0); sna(S,o,rc,0); rc=rc+1; }
+          emit("REPAIR op=");e64(o);emit(" champ=");e64(champ);
+          emit(" best=");e64(best);emit(" set#");e64(sg(S,858));
+          emit(" imm=");e64(sg(S,859));emit("\n");
+        }
+        ss(S,3153+o,sg(S,3153+o)-1);
+      }
+    }
+    o=o+1;
+  }
+  return;
+}
+// ============ DIVERGE: duplicate + specialize for a new context ============
+fn revision_diverge(S:[]u8,BC:[]u8)void {
+  let o:i32=0;
+  while(o<5){
+    if(sg(S,3160+o)==0){
+      // Failing-in-ctx signal: appl near/below 0 means not useful
+      // (failures record 0, not -1). Working-elsewhere needs >500.
+      let c:i32=-1; let c2:i32=-1; let k:i32=0;
+      while(k<8){
+        if(ang(S,o,k)>=6 && appl_mx(S,o,k)<200){c=k;}
+        if(ang(S,o,k)>=15 && appl_mx(S,o,k)>500){c2=k;}
+        k=k+1;
+      }
+      if(c>=0 && c2>=0 && sg(S,3145+c)>=3){
+        // find empty slot
+        let s:i32=-1;
+        if(sg(S,815)==0){s=5;} else if(sg(S,816)==0){s=6;}
+        if(s>=0){
+          let pc:i32=sg(S,803+o); let pl:i32=sg(S,810+o);
+          let spc:i32=sg(S,803+s);
+          let kk:i32=0;
+          while(kk<pl){BC[spc+kk]=BC[pc+kk];kk=kk+1;}
+          ss(S,810+s,pl);
+          let base:i32=2500+c*80; let n:i32=sg(S,3145+c);
+          let champ:i32=replay_score(S,BC,spc,pl,base,n,c);
+          let best:i32=body_search(S,BC,spc,pl,base,n,c);
+          if(sg(S,858)>=0 && best>champ+150 && best>=600){
+            body_apply_best(S,BC,spc,1024,pl);
+            ss(S,3193+s,2); ss(S,3200+s,o);
+            emit("DIVERGE op=");e64(o);emit(" ->slot=");e64(s);
+            emit(" ctx=");e64(c);emit(" champ=");e64(champ);
+            emit(" best=");e64(best);emit("\n");
+          } else {
+            ss(S,810+s,0);
+          }
+          ss(S,3160+o,1);
+        }
+      }
+    }
+    o=o+1;
+  }
+  return;
+}
+// ============ INLINE: splice a successful pair into one body ============
+fn inline_splice(S:[]u8,BC:[]u8,p:i32,q:i32,s:i32)i32 {
+  let ppc:i32=sg(S,803+p); let pln:i32=sg(S,810+p)/8;
+  let qpc:i32=sg(S,803+q); let qln:i32=sg(S,810+q)/8;
+  let sy:i32=-1; let ii:i32=0;
+  while(ii<pln){
+    if(BC[ppc+ii*8] as i32==8){sy=ii;ii=pln;}
+    ii=ii+1;
+  }
+  if(sy<0){return 0;}
+  let spc:i32=sg(S,803+s);
+  ii=0;
+  while(ii<sy){BC[spc+ii*8]=BC[ppc+ii*8];BC[spc+ii*8+1]=BC[ppc+ii*8+1];BC[spc+ii*8+2]=BC[ppc+ii*8+2];BC[spc+ii*8+3]=BC[ppc+ii*8+3];set32(BC,spc+ii*8+4,get32(BC,ppc+ii*8+4));ii=ii+1;}
+  let j2:i32=0;
+  while(j2<qln){BC[spc+(sy+j2)*8]=BC[qpc+j2*8];BC[spc+(sy+j2)*8+1]=BC[qpc+j2*8+1];BC[spc+(sy+j2)*8+2]=BC[qpc+j2*8+2];BC[spc+(sy+j2)*8+3]=BC[qpc+j2*8+3];set32(BC,spc+(sy+j2)*8+4,get32(BC,qpc+j2*8+4));j2=j2+1;}
+  let fl:i32=pln-sy-1; let k:i32=0;
+  while(k<fl){BC[spc+(sy+qln+k)*8]=BC[ppc+(sy+1+k)*8];BC[spc+(sy+qln+k)*8+1]=BC[ppc+(sy+1+k)*8+1];BC[spc+(sy+qln+k)*8+2]=BC[ppc+(sy+1+k)*8+2];BC[spc+(sy+qln+k)*8+3]=BC[ppc+(sy+1+k)*8+3];set32(BC,spc+(sy+qln+k)*8+4,get32(BC,ppc+(sy+1+k)*8+4));k=k+1;}
+  // generic JNZ retarget: jumps over the stripped region move by Q-1
+  let j:i32=0;
+  while(j<sy){
+    if(BC[spc+j*8] as i32==5){
+      let t:i32=j+get32(BC,spc+j*8+4)/8;
+      if(t>sy){
+        let nt:i32=t+qln-1;
+        set32(BC,spc+j*8+4,(nt-j)*8);
+      }
+    }
+    j=j+1;
+  }
+  ss(S,810+s,(sy+qln+fl)*8);
+  return 1;
+}
+fn inline_check(S:[]u8,BC:[]u8,ep:i32,rev_on:i32)void {
+  if(rev_on==0 || ep<150 || sg(S,3167)==0){return;}
+  let p:i32=0;
+  while(p<5){
+    let q:i32=0;
+    while(q<5){
+      // Guardrail (documented): the known-harmful op 3 is never a
+      // body-creation donor; retirement is its designated mechanism.
+      if(p!=q && p!=3 && q!=3 && sg(S,3168+p*5+q)==0 && sg(S,224+p)==0 && sg(S,224+q)==0){
+        if(cng(S,p,q)>=20 && comp_mx(S,p,q)>=800){
+          let s:i32=-1;
+          if(sg(S,815)==0){s=5;} else if(sg(S,816)==0){s=6;}
+          if(s>=0 && inline_splice(S,BC,p,q,s)==1){
+            ss(S,3168+p*5+q,1);
+            ss(S,3167,sg(S,3167)-1);
+            ss(S,3193+s,3); ss(S,3200+s,p*7+q);
+            emit("INLINE pair=");e64(p);emit(",");e64(q);
+            emit(" ->slot=");e64(s);emit(" len=");e64(sg(S,810+s));emit("\n");
+          }
+        }
+      }
+      q=q+1;
+    }
+    p=p+1;
+  }
+  return;
+}
+// ============ one episode ============
+fn run_ep(S:[]u8,BC:[]u8,ep:i32,epsx:i32)void {
+  let typ:i32=env_build(S);
+  ss(S,795+7,0);
+  let ctx0:i32=cog_probe(S);
+  let step:i32=0; let prev:i32=7; let nu:i32=0;
+  let umask:i32=0;
+  let uo:[]u8=z_alloc(4); let uc:[]u8=z_alloc(4);
+  let up:[]u8=z_alloc(4); let us:[]u8=z_alloc(4); let ua:[]u8=z_alloc(16);
+  let solved:i32=0;
+  if(ep<3){ emit("TR ep="); e64(ep); emit(" typ="); e64(typ); }
+  while(step<4 && solved==0){
+    let ctx:i32=cog_probe(S);
+    let o:i32=cog_select(S,ctx,prev,epsx);
+    cog_exec(S,BC,o);
+    let st:i32=sg(S,817); let an:i32=sg(S,818);
+    uo[nu]=o as u8; uc[nu]=ctx as u8; up[nu]=prev as u8; us[nu]=st as u8;
+    set32(ua,nu*4,an);
+    umask=umask | (1 << o);
+    nu=nu+1;
+    if(ep<3){ emit(" [o="); e64(o); emit(" c="); e64(ctx); emit(" s="); e64(st); emit("]"); }
+    if(st==2 && an==sg(S,819)){solved=1;}
+    prev=o; step=step+1;
+  }
+  if(ep<3){ emit(" solved="); e64(solved); emit("\n"); }
+  let i:i32=0;
+  while(i<nu){
+    let o2:i32=uo[i] as i32; let c2:i32=uc[i] as i32;
+    let p2:i32=up[i] as i32; let s2:i32=us[i] as i32;
+    let a2:i32=get32(ua,i*4);
+    let rec:i32=0;
+    if(s2==2){
+      if(a2==sg(S,819)){rec=1;} else {rec=-1;}
+    } else if(s2==1){
+      if(solved==1){rec=1;}
+    }
+    ssa(S,o2,c2,asg(S,o2,c2)+rec);
+    sna(S,o2,c2,ang(S,o2,c2)+1);
+    if(p2<7 && (us[i-1] as i32)!=0){
+      scs(S,p2,o2,csg(S,p2,o2)+rec);
+      scn(S,p2,o2,cng(S,p2,o2)+1);
+    }
+    ss(S,210+o2,sg(S,210+o2)+rec);
+    ss(S,217+o2,sg(S,217+o2)+1);
+    let lh:i32=sg(S,240); let li:i32=241+(lh % 96)*5;
+    ss(S,li,ep); ss(S,li+1,o2); ss(S,li+2,c2); ss(S,li+3,rec); ss(S,li+4,typ);
+    ss(S,240,lh+1);
+    i=i+1;
+  }
+  if(nu==1){
+    let so:i32=uo[0] as i32;
+    ss(S,851+so,sg(S,851+so)+1);
+    if(solved==1){ss(S,844+so,sg(S,844+so)+1);}
+  }
+  ss(S,859,umask); ss(S,860,ctx0);
+  snap_push(S);
+  cog_stats(S,ep,typ,solved,uo,nu);
+  return;
+}
+// ============ stats, retirement (generic rule), measurement ============
+fn cog_stats(S:[]u8,ep:i32,typ:i32,solved:i32,uo:[]u8,nu:i32)void {
+  let h:i32=0;
+  if(ep>=250){h=1;}
+  if(typ==0){
+    ss(S,821+h*4,sg(S,821+h*4)+1);
+    if(solved==1){ss(S,820+h*4,sg(S,820+h*4)+1);}
+  } else if(typ==3){
+    let b3c:i32=828;
+    if(h==1){b3c=830;}
+    ss(S,b3c+1,sg(S,b3c+1)+1);
+    if(solved==1){ss(S,b3c,sg(S,b3c)+1);}
+  } else {
+    ss(S,823+h*4,sg(S,823+h*4)+1);
+    if(solved==1){ss(S,822+h*4,sg(S,822+h*4)+1);}
+  }
+  if(typ==1 && h==1){
+    ss(S,840,sg(S,840)+1);
+    ss(S,841,sg(S,841)+nu);
+    if(sg(S,3193+(uo[0] as i32))==3){ss(S,839,sg(S,839)+1);}
+  }
+  if(typ==3 && h==1){
+    ss(S,843,sg(S,843)+1);
+    ss(S,842,sg(S,842)+nu);
+  }
+  if(ep>=500){
+    let i2:i32=0;
+    while(i2<nu){ if((uo[i2] as i32)==3){ss(S,836,sg(S,836)+1);} i2=i2+1; }
+  }
+  let o:i32=0;
+  while(o<7){
+    if(sg(S,810+o)>0 && sg(S,224+o)==0 && sg(S,217+o)>=15 && sg(S,210+o)*10<-6*sg(S,217+o)){
+      ss(S,224+o,1); ss(S,231+o,ep);
+      emit("RETIRE op="); e64(o); emit(" ep="); e64(ep); emit("\n");
+    }
+    o=o+1;
+  }
+  return;
+}
+// white-box: do slot body and op0 body differ in >=1 byte?
+fn bodies_differ(S:[]u8,BC:[]u8,s:i32)bool {
+  let p0:i32=sg(S,803); let l0:i32=sg(S,810);
+  let ps:i32=sg(S,803+s); let ls:i32=sg(S,810+s);
+  if(l0!=ls){return true;}
+  let k:i32=0;
+  while(k<l0){
+    if(BC[p0+k]!=BC[ps+k]){return true;}
+    k=k+1;
+  }
+  return false;
+}
+// ============ report + preregistered verdicts B1-B6 ============
+fn cog_report(S:[]u8,BC:[]u8,R:[]u8)void {
+  emit("ORIGINS:");
+  let o:i32=0;
+  while(o<7){ emit(" "); e64(sg(S,3193+o)); o=o+1; }
+  emit("\nPARENTS:");
+  o=0;
+  while(o<7){ emit(" "); e64(sg(S,3200+o)); o=o+1; }
+  emit("\n");
+  emit("STATS F2="); e64(sg(S,824)); emit("/"); e64(sg(S,825));
+  emit(" N2="); e64(sg(S,826)); emit("/"); e64(sg(S,827));
+  emit(" N3_2="); e64(sg(S,830)); emit("/"); e64(sg(S,831));
+  emit(" n1first_inl="); e64(sg(S,839)); emit("/"); e64(sg(S,840));
+  emit(" n1steps="); e64(sg(S,841));
+  emit(" n3steps="); e64(sg(S,842)); emit("/"); e64(sg(S,843)); emit("\n");
+  emit("SOLO:");
+  o=0;
+  while(o<7){ emit(" o"); e64(o); emit("="); e64(sg(S,844+o)); emit("/"); e64(sg(S,851+o)); o=o+1; }
+  emit("\n");
+  // B1 REPAIR
+  let b1:i32=0;
+  if(sg(S,3193)==1 && sg(S,825)>0 && sg(S,824)*100>=75*sg(S,825)){b1=1;}
+  // B3 DIVERGE
+  let b3:i32=0;
+  let s3:i32=5;
+  while(s3<7){
+    if(sg(S,3193+s3)==2 && bodies_differ(S,BC,s3)){
+      let rs:i32=replay_score(S,BC,sg(S,803+s3),sg(S,810+s3),2500,sg(S,3145),0);
+      emit("DIVERGE-CHECK slot=");e64(s3);emit(" replayscore=");e64(rs);emit("\n");
+      if(rs>=850){b3=1;}
+    }
+    s3=s3+1;
+  }
+  // B5 INLINE
+  let b5:i32=0;
+  let s5:i32=5;
+  while(s5<7){
+    if(sg(S,3193+s5)==3 && sg(S,851+s5)>=5 && sg(S,844+s5)*100>=80*sg(S,851+s5)){b5=1;}
+    s5=s5+1;
+  }
+  // B6 NO-BLOAT
+  let ncr:i32=0; let badp:i32=0;
+  let s6:i32=5;
+  while(s6<7){
+    let og:i32=sg(S,3193+s6);
+    if(og==2 || og==3){
+      ncr=ncr+1;
+      if(sg(S,3200+s6)==3 || sg(S,3200+s6)==3*7+3){badp=1;}
+    }
+    s6=s6+1;
+  }
+  let b6:i32=0;
+  if(ncr<=2 && badp==0){b6=1;}
+  emit("VERDICT B1="); e64(b1); emit(" B3="); e64(b3);
+  emit(" B5="); e64(b5); emit(" B6="); e64(b6); emit("\n");
+  set32(R,0,b1); set32(R,4,b3); set32(R,8,b5); set32(R,12,b6);
+  set32(R,16,sg(S,830)); set32(R,20,sg(S,831));
+  set32(R,24,sg(S,824)); set32(R,28,sg(S,825));
+  return;
+}
+// ============ one arm: fresh learner, 600 episodes ============
+fn cog_arm(rev_on:i32,R:[]u8)void {
+  let S:[]u8=z_alloc(16384);
+  let BC:[]u8=z_alloc(1536);
+  ss(S,238,123456789); ss(S,239,987654321);
+  build_bodies(S,BC);
+  let o:i32=0;
+  while(o<7){
+    if(o<5){ss(S,3153+o,3);} else {ss(S,3153+o,0);}
+    o=o+1;
+  }
+  ss(S,3167,2);
+  if(rev_on==1){ emit("ARM treat\n"); } else { emit("ARM ablation\n"); }
+  let ep:i32=0;
+  while(ep<600){
+    let ex:i32=(300*300)/(300+ep);
+    run_ep(S,BC,ep,ex);
+    if(ep>=50 && ep % 25==24 && rev_on==1){
+      revision_repair(S,BC);
+      revision_diverge(S,BC);
+      inline_check(S,BC,ep,rev_on);
+    }
+    if(ep % 100==99){ emit("EP "); e64(ep+1); emit(" done\n"); }
+    ep=ep+1;
+  }
+  cog_report(S,BC,R);
+  return;
+}
+fn main()i32 {
+  emit("CB-START\n");
+  let R1:[]u8=z_alloc(32);
+  let R2:[]u8=z_alloc(32);
+  cog_arm(1,R1);
+  cog_arm(0,R2);
+  let b1:i32=get32(R1,0); let b3:i32=get32(R1,4);
+  let b5:i32=get32(R1,8); let b6:i32=get32(R1,12);
+  let t32:i32=get32(R1,16); let t3n2:i32=get32(R1,20);
+  let tf2:i32=get32(R1,24); let tfn2:i32=get32(R1,28);
+  let a32:i32=get32(R2,16); let a3n2:i32=get32(R2,20);
+  let af2:i32=get32(R2,24); let afn2:i32=get32(R2,28);
+  // B2 REPAIR-CAUSAL: ablation late-F <= 10%
+  let b2:i32=0;
+  if(afn2>0 && af2*100<=10*afn2){b2=1;}
+  // B4 DIVERGE-USEFUL: treat late-N3 >= 70% and gap >= 40pp
+  let b4:i32=0;
+  if(t3n2>0 && a3n2>0 && t32*100>=70*t3n2 && (t32*100)/t3n2-(a32*100)/a3n2>=40){b4=1;}
+  emit("VERDICT-OVERALL B1="); e64(b1); emit(" B2="); e64(b2);
+  emit(" B3="); e64(b3); emit(" B4="); e64(b4);
+  emit(" B5="); e64(b5); emit(" B6="); e64(b6); emit(" ");
+  if(b1==1 && b2==1 && b3==1 && b4==1 && b5==1 && b6==1){ emit("COGOPS-BODIES-COMPLETE\n"); }
+  else { emit("INCOMPLETE\n"); }
+  emit("CB-END\n");
+  return 0;
+}

@@ -1,0 +1,962 @@
+// t_mc.zag — T-MC: monotone lattice learner for H2 run-2.
+//
+// Pure-Zag mechanism. No main() here; drivers import this file.
+// Coordinator workspace: ~/workspace/tnn-lab/h2_run2/run2/
+// Frozen authority: ~/workspace/tnn-lab/h2_run2/PREREG_H2_RUN2.md
+// Reconciliation where prereg is silent: ~/workspace/tnn-lab/h2_run2/RECONCILIATION.md
+//
+// Design (frozen):
+//  - Per (context, act) lattice states U<R,S<Q with R,S incomparable.
+//  - Corroborated -1 refutes only after corrob>=2; command/effect tag
+//    mismatch is actuator fault evidence: quarantine acted cell as Q,
+//    never increment corroboration, never refute a rival.
+//  - MC_MARK_S is the sole support writer (executed probe + tag match +
+//    zero corroborated negatives + U). MC_CLOSE only adds R or turns
+//    conflicting S into Q; it never creates support. No revive-all path.
+//  - Act-then-verify: read-back must equal expected effect before a -1 may
+//    enter contradiction logic. Mismatch -> AV_REISSUE -> confirmed repeat
+//    mismatch increments fault count -> at 4, AV_LATCH (hold last verified).
+//  - Attribution tags HYPOTHESIS/ACTUATOR/SCHEDULE; self-tagged ACTUATOR
+//    rows never eliminate/refute.
+//  - Double-derivation agreement before seal; period-2 flap -> FLAP_HOLD,
+//    stability reset, seal blocked.
+//  - Learned declaration: 16 post-disconnect + 16 perturbation episodes,
+//    zero mismatch vs sealed policy; latch episodes never count silently.
+//  - Audit-first, fail-closed, learner-issued ops only.
+//  - Op namespace (frozen prereg s10): FL2 16-18; AV 21-23; MC 34-45;
+//    SR attribution 56-60.
+//
+// Zero randomness: no rng/rand/seed/time tokens anywhere in this file.
+// All tables are []u8 arenas with explicit 32-bit accessors (znc
+// []i32/[]u32/[]u16 consecutive-cast aliasing workaround).
+
+// ---- lattice states ----
+const ST_U:i32=0;
+const ST_R:i32=1;
+const ST_S:i32=2;
+const ST_Q:i32=3;
+// ---- attribution tags ----
+const TAG_HYP:i32=0;
+const TAG_ACT:i32=1;
+const TAG_SCH:i32=2;
+// ---- acts ----
+const ACT_OVERWRITE:i32=0;
+const ACT_CONTEST:i32=1;
+const ACT_REKEY:i32=2;
+// ---- frozen op codes: FL2 block (16-18, never emitted by T-MC) ----
+const OP_PINSTALL:i32=16;
+const OP_PROMOTE:i32=17;
+const OP_UNINSTALL_PROV:i32=18;
+// ---- AV block (21-23) ----
+const OP_AV_REISSUE:i32=21;
+const OP_AV_LATCH:i32=22;
+const OP_AV_SUSP_TRIP:i32=23;
+// ---- MC block (34-45) ----
+const OP_MC_PROBE:i32=34;
+const OP_MC_OBSERVE_BIT:i32=35;
+const OP_MC_TAG_CHECK:i32=36;
+const OP_MC_MARK_R:i32=37;
+const OP_MC_MARK_S:i32=38;
+const OP_MC_CLOSE:i32=39;
+const OP_MC_READOUT:i32=40;
+const OP_MC_SEAL:i32=41;
+const OP_MC_DOUBLE_DERIVE:i32=42;
+const OP_MC_DISCONNECT:i32=43;
+const OP_MC_UNSEAL:i32=44;
+const OP_MC_REATTRIBUTE:i32=45;
+// ---- SR attribution block (56-60) ----
+const OP_SR_ATTRIBUTE:i32=56;
+const OP_SR_RHYTHM_FREEZE:i32=57;
+// ---- audit event codes (>=100; not ops) ----
+const EV_AV_FAULT_SUSPECT:i32=100;
+const EV_AV_FAULT_CONFIRM:i32=101;
+const EV_AV_LATCH_HOLD:i32=102;
+const EV_AV_LATCH_CLEAR:i32=103;
+const EV_FLAP_HOLD:i32=104;
+const EV_MC_HOSTILE:i32=105;
+const EV_AV_SENSOR_DIVERGE:i32=106;
+const EV_MC_REISSUE_MATCH:i32=107;
+const EV_MC_DECLARE_SCHEMA:i32=108;
+// ---- thresholds ----
+const AV_LATCH_K:i32=4;
+const AV_CLEAR_K:i32=4;
+const AV_SUSP_MAX:i32=4;
+const MC_STABLE_K:i32=8;
+const CORROB_K:i32=2;
+const AUDIT_CAP:i32=2048;
+// ---- seal states ----
+const SEAL_OPEN:i32=0;
+const SEAL_COMMIT:i32=1;
+const SEAL_QUAR:i32=2;
+// ---- channel ----
+const CH_LIVE:i32=0;
+const CH_DISC:i32=1;
+// ---- world ids ----
+const W_HONEST:i32=0;
+const W_FAULT:i32=1;
+const W_STORM:i32=2;
+const W_HONEST7:i32=3;
+const W_FLAP:i32=4;
+const W_D1LANE:i32=5;
+
+// ---- local allocator (self-contained; mirrors substrate tn_alloc) ----
+fn tmc_alloc(n:i32)[]u8 {
+    if(n<1){ return ""; }
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){ return ""; }
+    let b:[]u8=p[0..n];
+    let i:i32=0;
+    while(i<n){ b[i]=0 as u8; i=i+1; }
+    return b;
+}
+fn tmc_free(b:[]u8)void {
+    if(b.len>0){ _zag_free(_zag_slice_ptr(b)); }
+    return;
+}
+
+// ---- arena layout (byte offsets; N=nctx, A=nact) ----
+// 0:nctx 1:nact 2:channel 3:badep 4..7:reserved
+// cells at 8: CELL,EXEC,CORROB,TAG (each N*A), then per-ctx N-byte fields:
+// EXECACT,STABLE,SEAL,SEALACT,AVQUAR,AVPEND,AVFAULT,AVSUSP,AVCLR,LATCHED,
+// RHYTHM,FROZEN,SCHEMA (13), then AVEXPECT (N*4), WORLDEFF (N*4), MET (16*4).
+fn tmc_off_cell_end(st:[]u8)i32 {
+    let n:i32=st[0] as i32;
+    let na:i32=st[1] as i32;
+    return 8+4*n*na+13*n+8*n;
+}
+fn tmc_met_off(st:[]u8,mi:i32)i32 {
+    return tmc_off_cell_end(st)+mi*4;
+}
+// metric ids
+const M_FC:i32=0;
+const M_TA:i32=1;
+const M_ROA:i32=2;
+const M_INST:i32=3;
+const M_REISS:i32=4;
+const M_SUSP:i32=5;
+const M_CONF:i32=6;
+const M_LATCHEP:i32=7;
+const M_MISM:i32=8;
+const M_CLOSE_S:i32=9;
+const M_DD:i32=10;
+const M_FLAP:i32=11;
+const M_REATTR:i32=12;
+const M_SEALC:i32=13;
+const M_SEALQ:i32=14;
+const M_AOV:i32=15;
+
+fn tmc_get32(st:[]u8,off:i32)i32 {
+    let b0:i32=st[off] as i32;
+    let b1:i32=st[off+1] as i32;
+    let b2:i32=st[off+2] as i32;
+    let b3:i32=st[off+3] as i32;
+    return b0+(b1<<8)+(b2<<16)+(b3<<24);
+}
+fn tmc_put32(st:[]u8,off:i32,v:i32)void {
+    st[off]=(v&255) as u8;
+    st[off+1]=((v>>8)&255) as u8;
+    st[off+2]=((v>>16)&255) as u8;
+    st[off+3]=((v>>24)&255) as u8;
+    return;
+}
+fn tmc_mget(st:[]u8,mi:i32)i32 { return tmc_get32(st,tmc_met_off(st,mi)); }
+fn tmc_madd(st:[]u8,mi:i32,d:i32)void {
+    let o:i32=tmc_met_off(st,mi);
+    tmc_put32(st,o,tmc_get32(st,o)+d);
+    return;
+}
+fn tmc_na(st:[]u8)i32 { return st[1] as i32; }
+fn tmc_nctx(st:[]u8)i32 { return st[0] as i32; }
+fn tmc_cella(st:[]u8,c:i32,a:i32)i32 { return 8+(c*tmc_na(st)+a); }
+fn tmc_cell(st:[]u8,c:i32,a:i32)i32 { return st[tmc_cella(st,c,a)] as i32; }
+fn tmc_set_cell(st:[]u8,c:i32,a:i32,v:i32)void {
+    st[tmc_cella(st,c,a)]=v as u8;
+    return;
+}
+fn tmc_fa(st:[]u8,f:i32,c:i32,a:i32)i32 { return 8+f*tmc_nctx(st)*tmc_na(st)+(c*tmc_na(st)+a); }
+fn tmc_f(st:[]u8,f:i32,c:i32,a:i32)i32 { return st[tmc_fa(st,f,c,a)] as i32; }
+fn tmc_set_f(st:[]u8,f:i32,c:i32,a:i32,v:i32)void {
+    st[tmc_fa(st,f,c,a)]=v as u8;
+    return;
+}
+// per-(c,a) fields: 0=CELL(aliased),1=EXEC,2=CORROB,3=TAG
+fn tmc_exec(st:[]u8,c:i32,a:i32)i32 { return tmc_f(st,1,c,a); }
+fn tmc_set_exec(st:[]u8,c:i32,a:i32,v:i32)void { tmc_set_f(st,1,c,a,v); return; }
+fn tmc_corrob(st:[]u8,c:i32,a:i32)i32 { return tmc_f(st,2,c,a); }
+fn tmc_set_corrob(st:[]u8,c:i32,a:i32,v:i32)void { tmc_set_f(st,2,c,a,v); return; }
+fn tmc_tag(st:[]u8,c:i32,a:i32)i32 { return tmc_f(st,3,c,a); }
+fn tmc_set_tag(st:[]u8,c:i32,a:i32,v:i32)void { tmc_set_f(st,3,c,a,v); return; }
+// per-ctx fields (index p: 0=EXECACT 1=STABLE 2=SEAL 3=SEALACT 4=AVQUAR
+// 5=AVPEND 6=AVFAULT 7=AVSUSP 8=AVCLR 9=LATCHED 10=RHYTHM 11=FROZEN 12=SCHEMA)
+fn tmc_ca(st:[]u8,p:i32,c:i32)i32 { return 8+4*tmc_nctx(st)*tmc_na(st)+p*tmc_nctx(st)+c; }
+fn tmc_c(st:[]u8,p:i32,c:i32)i32 { return st[tmc_ca(st,p,c)] as i32; }
+fn tmc_set_c(st:[]u8,p:i32,c:i32,v:i32)void {
+    st[tmc_ca(st,p,c)]=v as u8;
+    return;
+}
+fn tmc_execact(st:[]u8,c:i32)i32 { return tmc_c(st,0,c); }
+fn tmc_set_execact(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,0,c,v); return; }
+fn tmc_stable(st:[]u8,c:i32)i32 { return tmc_c(st,1,c); }
+fn tmc_set_stable(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,1,c,v); return; }
+fn tmc_seal(st:[]u8,c:i32)i32 { return tmc_c(st,2,c); }
+fn tmc_set_seal(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,2,c,v); return; }
+fn tmc_sealact(st:[]u8,c:i32)i32 { return tmc_c(st,3,c); }
+fn tmc_set_sealact(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,3,c,v); return; }
+fn tmc_avquar(st:[]u8,c:i32)i32 { return tmc_c(st,4,c); }
+fn tmc_set_avquar(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,4,c,v); return; }
+fn tmc_avpend(st:[]u8,c:i32)i32 { return tmc_c(st,5,c); }
+fn tmc_set_avpend(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,5,c,v); return; }
+fn tmc_avfault(st:[]u8,c:i32)i32 { return tmc_c(st,6,c); }
+fn tmc_set_avfault(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,6,c,v); return; }
+fn tmc_avsusp(st:[]u8,c:i32)i32 { return tmc_c(st,7,c); }
+fn tmc_set_avsusp(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,7,c,v); return; }
+fn tmc_avclr(st:[]u8,c:i32)i32 { return tmc_c(st,8,c); }
+fn tmc_set_avclr(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,8,c,v); return; }
+fn tmc_latched(st:[]u8,c:i32)i32 { return tmc_c(st,9,c); }
+fn tmc_set_latched(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,9,c,v); return; }
+fn tmc_rhythm(st:[]u8,c:i32)i32 { return tmc_c(st,10,c); }
+fn tmc_set_rhythm(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,10,c,v); return; }
+fn tmc_frozen(st:[]u8,c:i32)i32 { return tmc_c(st,11,c); }
+fn tmc_set_frozen(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,11,c,v); return; }
+fn tmc_schema(st:[]u8,c:i32)i32 { return tmc_c(st,12,c); }
+fn tmc_set_schema(st:[]u8,c:i32,v:i32)void { tmc_set_c(st,12,c,v); return; }
+fn tmc_avexpect(st:[]u8,c:i32)i32 {
+    return tmc_get32(st,8+4*tmc_nctx(st)*tmc_na(st)+13*tmc_nctx(st)+c*4);
+}
+fn tmc_set_avexpect(st:[]u8,c:i32,v:i32)void {
+    tmc_put32(st,8+4*tmc_nctx(st)*tmc_na(st)+13*tmc_nctx(st)+c*4,v);
+    return;
+}
+fn tmc_worldeff(st:[]u8,c:i32)i32 {
+    return tmc_get32(st,8+4*tmc_nctx(st)*tmc_na(st)+13*tmc_nctx(st)+tmc_nctx(st)*4+c*4);
+}
+fn tmc_set_worldeff(st:[]u8,c:i32,v:i32)void {
+    tmc_put32(st,8+4*tmc_nctx(st)*tmc_na(st)+13*tmc_nctx(st)+tmc_nctx(st)*4+c*4,v);
+    return;
+}
+fn tmc_channel(st:[]u8)i32 { return st[2] as i32; }
+fn tmc_set_channel(st:[]u8,v:i32)void { st[2]=v as u8; return; }
+fn tmc_badep(st:[]u8)i32 { return st[3] as i32; }
+
+// arena byte size for (nctx,nact)
+fn tmc_arenasize(nctx:i32,nact:i32)i32 {
+    return 8+4*nctx*nact+13*nctx+8*nctx+16*4;
+}
+fn tmc_init(st:[]u8,nctx:i32,nact:i32)void {
+    let sz:i32=tmc_arenasize(nctx,nact);
+    let i:i32=0;
+    while(i<sz){ st[i]=0 as u8; i=i+1; }
+    st[0]=nctx as u8;
+    st[1]=nact as u8;
+    st[2]=CH_LIVE as u8;
+    // schema defaults to singletons: schema[c]=c
+    let c:i32=0;
+    while(c<nctx){ tmc_set_schema(st,c,c); c=c+1; }
+    return;
+}
+
+// ---- audit: 8 words x i32 LE per row: op,slot,stage,b1,b2,d1,d2,rc ----
+fn tmc_audit(st:[]u8,audit:[]u8,acount:*i32,op:i32,slot:i32,stage:i32,b1:i32,b2:i32,d1:i32,d2:i32)void {
+    let n:i32=acount.*;
+    if(n>=AUDIT_CAP){
+        tmc_madd(st,M_AOV,1);
+        return;
+    }
+    let o:i32=n*32;
+    tmc_put32(audit,o,op);
+    tmc_put32(audit,o+4,slot);
+    tmc_put32(audit,o+8,stage);
+    tmc_put32(audit,o+12,b1);
+    tmc_put32(audit,o+16,b2);
+    tmc_put32(audit,o+20,d1);
+    tmc_put32(audit,o+24,d2);
+    tmc_put32(audit,o+28,0);
+    acount.*=n+1;
+    return;
+}
+fn tmc_audit_n(acount:*i32)i32 { return acount.*; }
+
+// ---- expected effect code: nonzero distinct per (c,a) ----
+fn mc_expect(c:i32,a:i32)i32 { return 1000+c*32+a*7+1; }
+
+// ---- op name for the deterministic export ----
+fn tmc_op_name(op:i32)void {
+    if(op==OP_PINSTALL){ _zag_print("PINSTALL"); return; }
+    if(op==OP_PROMOTE){ _zag_print("PROMOTE"); return; }
+    if(op==OP_UNINSTALL_PROV){ _zag_print("UNINSTALL_PROVISIONAL"); return; }
+    if(op==OP_AV_REISSUE){ _zag_print("AV_REISSUE"); return; }
+    if(op==OP_AV_LATCH){ _zag_print("AV_LATCH"); return; }
+    if(op==OP_AV_SUSP_TRIP){ _zag_print("AV_SUSP_TRIP"); return; }
+    if(op==OP_MC_PROBE){ _zag_print("MC_PROBE"); return; }
+    if(op==OP_MC_OBSERVE_BIT){ _zag_print("MC_OBSERVE_BIT"); return; }
+    if(op==OP_MC_TAG_CHECK){ _zag_print("MC_TAG_CHECK"); return; }
+    if(op==OP_MC_MARK_R){ _zag_print("MC_MARK_R"); return; }
+    if(op==OP_MC_MARK_S){ _zag_print("MC_MARK_S"); return; }
+    if(op==OP_MC_CLOSE){ _zag_print("MC_CLOSE"); return; }
+    if(op==OP_MC_READOUT){ _zag_print("MC_READOUT"); return; }
+    if(op==OP_MC_SEAL){ _zag_print("MC_SEAL"); return; }
+    if(op==OP_MC_DOUBLE_DERIVE){ _zag_print("MC_DOUBLE_DERIVE"); return; }
+    if(op==OP_MC_DISCONNECT){ _zag_print("MC_DISCONNECT"); return; }
+    if(op==OP_MC_UNSEAL){ _zag_print("MC_UNSEAL"); return; }
+    if(op==OP_MC_REATTRIBUTE){ _zag_print("MC_REATTRIBUTE"); return; }
+    if(op==OP_SR_ATTRIBUTE){ _zag_print("SR_ATTRIBUTE"); return; }
+    if(op==OP_SR_RHYTHM_FREEZE){ _zag_print("SR_RHYTHM_FREEZE"); return; }
+    if(op==EV_AV_FAULT_SUSPECT){ _zag_print("EV_AV_FAULT_SUSPECT"); return; }
+    if(op==EV_AV_FAULT_CONFIRM){ _zag_print("EV_AV_FAULT_CONFIRM"); return; }
+    if(op==EV_AV_LATCH_HOLD){ _zag_print("EV_AV_LATCH_HOLD"); return; }
+    if(op==EV_AV_LATCH_CLEAR){ _zag_print("EV_AV_LATCH_CLEAR"); return; }
+    if(op==EV_FLAP_HOLD){ _zag_print("EV_FLAP_HOLD"); return; }
+    if(op==EV_MC_HOSTILE){ _zag_print("EV_MC_HOSTILE"); return; }
+    if(op==EV_AV_SENSOR_DIVERGE){ _zag_print("EV_AV_SENSOR_DIVERGE"); return; }
+    if(op==EV_MC_REISSUE_MATCH){ _zag_print("EV_MC_REISSUE_MATCH"); return; }
+    if(op==EV_MC_DECLARE_SCHEMA){ _zag_print("EV_MC_DECLARE_SCHEMA"); return; }
+    _zag_print("UNKNOWN_OP");
+    return;
+}
+fn tmc_print_i32(v:i32)void {
+    let s:[]u8=_zag_i64_to_str(v as i64);
+    _zag_print(s);
+    _zag_str_free(s);
+    return;
+}
+// LEDGER deterministic export: step,opname,code,slot,stage,b1,b2,d1,d2
+fn tmc_dump(audit:[]u8,acount:*i32)void {
+    let n:i32=acount.*;
+    let i:i32=0;
+    while(i<n){
+        let o:i32=i*32;
+        _zag_print("LEDGER,");
+        tmc_print_i32(i);
+        _zag_print(",");
+        let op:i32=tmc_get32(audit,o);
+        tmc_op_name(op);
+        _zag_print(",");
+        tmc_print_i32(op);
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+4));
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+8));
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+12));
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+16));
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+20));
+        _zag_print(",");
+        tmc_print_i32(tmc_get32(audit,o+24));
+        _zag_println("");
+        i=i+1;
+    }
+    return;
+}
+
+// ---- world models (fixtures; deterministic, no randomness) ----
+// world_do applies act (c,a) and returns the read-back value.
+// Honest worlds land the act; fault worlds drop it (read-back unchanged).
+fn world_lands(wid:i32,c:i32)i32 {
+    if(wid==W_HONEST){ return 1; }
+    if(wid==W_HONEST7){ return 1; }
+    if(wid==W_FLAP){ return 1; }
+    if(wid==W_FAULT){ return 0; }
+    if(wid==W_STORM){ return 0; }
+    if(wid==W_D1LANE){ if(c<4){ return 1; } return 0; }
+    return 1;
+}
+fn world_do(st:[]u8,c:i32,a:i32,wid:i32)i32 {
+    let expect:i32=mc_expect(c,a);
+    if(world_lands(wid,c)==1){
+        tmc_set_worldeff(st,c,expect);
+        return expect;
+    }
+    // actuator fault — act dropped, effect unchanged
+    return tmc_worldeff(st,c);
+}
+fn world_read(st:[]u8,c:i32) i32 { return tmc_worldeff(st,c); }
+// contradiction bit s for a landed probe. Honest worlds: the scaffold's
+// target act is ACT_CONTEST(1); other acts genuinely contradict (-1).
+// Storm: lying teacher — claims -1 in standard windows, silent (0) else.
+// Flap fixture: bit flips between double-derive passes (pass>=0 selects).
+fn world_bit(st:[]u8,c:i32,a:i32,wid:i32,sched:i32,pass:i32)i32 {
+    if(wid==W_D1LANE){
+        if(c<4){ if(a==ACT_CONTEST){return 0;} return -1; }
+        return -1;
+    }
+    if(wid==W_HONEST){ if(a==ACT_CONTEST){return 0;} return -1; }
+    if(wid==W_HONEST7){ if(a==ACT_CONTEST){return 0;} return -1; }
+    if(wid==W_STORM){ if(sched==1){return -1;} return 0; }
+    if(wid==W_FAULT){ return -1; }
+    if(wid==W_FLAP){ if(pass==0){return -1;} return 0; }
+    return 0;
+}
+// storm schedule: alternates silent(0)/standard(1) every 12 episodes
+fn storm_sched(ep:i32)i32 { return ((ep-1)/12)%2; }
+
+// ---- MC_OBSERVE_BIT: contradiction bit enters logic only with a clean tag ----
+fn mc_observe_bit(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,s:i32,ep:i32,tag:i32)void {
+    tmc_audit(st,audit,acount,OP_MC_OBSERVE_BIT,c,ep,a,s,tag,0);
+    if(tag==TAG_ACT){
+        // self-tagged actuator rows never eliminate or refute (fail-closed)
+        return;
+    }
+    if(s==-1){
+        let cc:i32=tmc_corrob(st,c,a)+1;
+        if(cc>CORROB_K){ cc=CORROB_K; }
+        tmc_set_corrob(st,c,a,cc);
+        if(cc>=CORROB_K){ mc_mark_r(st,audit,acount,c,a,ep,tag); }
+    }
+    return;
+}
+// ---- MC_MARK_R: refutation; never from ACTUATOR-tagged rows ----
+fn mc_mark_r(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,ep:i32,tag:i32)void {
+    if(tmc_latched(st,c)==1){ return; }
+    if(tag==TAG_ACT){
+        // counted as a blocked attempt would be wrong; actual refutations
+        // from actuator rows are forbidden — record the attempt, do not mark
+        tmc_madd(st,M_ROA,1);
+        return;
+    }
+    if(tmc_cell(st,c,a)==ST_U){
+        tmc_set_cell(st,c,a,ST_R);
+        tmc_audit(st,audit,acount,OP_MC_MARK_R,c,ep,a,tag,0,0);
+    }
+    return;
+}
+// ---- MC_MARK_S: sole support writer ----
+fn mc_mark_s(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,ep:i32)void {
+    if(tmc_latched(st,c)==1){ return; }
+    if(tmc_exec(st,c,a)!=1){ return; }
+    if(tmc_cell(st,c,a)!=ST_U){ return; }
+    if(tmc_corrob(st,c,a)!=0){ return; }
+    if(tmc_tag(st,c,a)==TAG_ACT){ return; }
+    tmc_set_cell(st,c,a,ST_S);
+    tmc_audit(st,audit,acount,OP_MC_MARK_S,c,ep,a,0,0,0);
+    return;
+}
+// ---- probe policy: which act to probe next on context c (-1 = none) ----
+fn tmc_choose(st:[]u8,c:i32)i32 {
+    if(tmc_latched(st,c)==1){ return -1; }
+    let na:i32=tmc_na(st);
+    let s_act:i32=-1;
+    let a:i32=0;
+    while(a<na){ if(tmc_cell(st,c,a)==ST_S){ s_act=a; } a=a+1; }
+    if(s_act>=0){
+        let allr:i32=1;
+        a=0;
+        while(a<na){
+            if(a!=s_act){ if(tmc_cell(st,c,a)!=ST_R){ allr=0; } }
+            a=a+1;
+        }
+        if(allr==1){ return s_act; }
+        a=0;
+        while(a<na){ if(tmc_cell(st,c,a)==ST_U){ return a; } a=a+1; }
+        return -1;
+    }
+    a=0;
+    while(a<na){ if(tmc_cell(st,c,a)==ST_U){ return a; } a=a+1; }
+    return -1;
+}
+// ---- full probe flow: MC_PROBE -> read-back verify -> attribute/observe ----
+// tag: attribution tag for a genuine (tag-match) probe bit.
+// Core takes the actuator responses as params so the D1 replayer can feed
+// recorded tape values through the identical logic.
+fn tmc_probe_core(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,ep:i32,expect:i32,actual:i32,r1:i32,r2:i32,s:i32,tag:i32)void {
+    tmc_set_avexpect(st,c,expect);
+    tmc_set_execact(st,c,a);
+    tmc_set_exec(st,c,a,1);
+    tmc_audit(st,audit,acount,OP_MC_PROBE,c,ep,a,expect,0,0);
+    let mm:i32=0;
+    if(actual!=expect){ mm=1; }
+    if(r1!=expect){ mm=1; }
+    if(r1!=r2){
+        tmc_audit(st,audit,acount,EV_AV_SENSOR_DIVERGE,c,ep,r1,r2,0,0);
+        mm=1;
+    }
+    tmc_audit(st,audit,acount,OP_MC_TAG_CHECK,c,ep,mm,actual,r1,expect);
+    if(mm==1){
+        // actuator fault evidence: suspect -> quarantine acted cell as Q;
+        // never increment corroboration; never refute a rival.
+        tmc_audit(st,audit,acount,EV_AV_FAULT_SUSPECT,c,ep,a,expect,TAG_ACT,r1);
+        tmc_madd(st,M_SUSP,1);
+        tmc_madd(st,M_FC,1);
+        tmc_madd(st,M_TA,1);
+        tmc_set_avquar(st,c,1);
+        tmc_set_avpend(st,c,1);
+        let ns:i32=tmc_avsusp(st,c)+1;
+        tmc_set_avsusp(st,c,ns);
+        if(ns>=AV_SUSP_MAX){
+            tmc_audit(st,audit,acount,OP_AV_SUSP_TRIP,c,ep,ns,0,0,0);
+        }
+        tmc_set_cell(st,c,a,ST_Q);
+        return;
+    }
+    tmc_set_tag(st,c,a,tag);
+    tmc_audit(st,audit,acount,OP_SR_ATTRIBUTE,c,ep,tag,s,a,0);
+    mc_observe_bit(st,audit,acount,c,a,s,ep,tag);
+    if(s==0){ mc_mark_s(st,audit,acount,c,a,ep); }
+    // stability: re-executing an S act with a clean read-back
+    if(tmc_cell(st,c,a)==ST_S){
+        tmc_set_stable(st,c,tmc_stable(st,c)+1);
+    }
+    return;
+}
+fn tmc_probe(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,ep:i32,wid:i32,sched:i32,tag:i32)void {
+    let expect:i32=mc_expect(c,a);
+    let actual:i32=world_do(st,c,a,wid);
+    let r1:i32=world_read(st,c);
+    let r2:i32=world_read(st,c);
+    let s:i32=world_bit(st,c,a,wid,sched,0);
+    tmc_probe_core(st,audit,acount,c,a,ep,expect,actual,r1,r2,s,tag);
+    return;
+}
+// ---- AV_REISSUE: audited diagnostic re-act of the suspect probe ----
+fn tmc_reissue_core(st:[]u8,audit:[]u8,acount:*i32,c:i32,ep:i32,a:i32,expect:i32,r1:i32)void {
+    tmc_madd(st,M_REISS,1);
+    tmc_audit(st,audit,acount,OP_AV_REISSUE,c,ep,a,expect,0,0);
+    if(r1!=expect){
+        // confirmed repeated mismatch: fault count++; quarantined -1 stands
+        // as genuine fault evidence; rivals are NOT refuted.
+        tmc_audit(st,audit,acount,EV_AV_FAULT_CONFIRM,c,ep,a,r1,0,0);
+        tmc_set_avfault(st,c,tmc_avfault(st,c)+1);
+        tmc_madd(st,M_CONF,1);
+        tmc_set_avpend(st,c,0);
+    } else {
+        // transient: suspicion cleared; cell stays Q (fail-closed)
+        tmc_audit(st,audit,acount,EV_MC_REISSUE_MATCH,c,ep,a,r1,0,0);
+        tmc_set_avpend(st,c,0);
+        tmc_set_avsusp(st,c,0);
+    }
+    return;
+}
+fn tmc_reissue(st:[]u8,audit:[]u8,acount:*i32,c:i32,ep:i32,wid:i32)void {
+    let a:i32=tmc_execact(st,c);
+    let expect:i32=mc_expect(c,a);
+    let actual:i32=world_do(st,c,a,wid);
+    let r1:i32=world_read(st,c);
+    tmc_reissue_core(st,audit,acount,c,ep,a,expect,r1);
+    return;
+}
+// ---- AV_LATCH engage/clear + hold accounting (per episode) ----
+fn tmc_latch_step(st:[]u8,audit:[]u8,acount:*i32,ep:i32,wid:i32)void {
+    let n:i32=tmc_nctx(st);
+    let c:i32=0;
+    while(c<n){
+        if(tmc_latched(st,c)==0){
+            if(tmc_avfault(st,c)>=AV_LATCH_K){
+                tmc_set_latched(st,c,1);
+                tmc_set_avclr(st,c,0);
+                tmc_audit(st,audit,acount,OP_AV_LATCH,c,ep,tmc_avfault(st,c),0,0,0);
+            }
+        } else {
+            let ha:i32=-1;
+            if(tmc_seal(st,c)==SEAL_COMMIT){ ha=tmc_sealact(st,c); }
+            let clr:i32=tmc_avclr(st,c);
+            if(ha>=0){
+                let expect:i32=mc_expect(c,ha);
+                let actual:i32=world_do(st,c,ha,wid);
+                let r1:i32=world_read(st,c);
+                if(r1==expect){ clr=clr+1; } else { clr=0; }
+                tmc_set_avclr(st,c,clr);
+            }
+            tmc_audit(st,audit,acount,EV_AV_LATCH_HOLD,c,ep,ha,clr,0,0);
+            tmc_madd(st,M_LATCHEP,1);
+            if(clr>=AV_CLEAR_K){
+                tmc_set_latched(st,c,0);
+                tmc_set_avfault(st,c,0);
+                tmc_set_avclr(st,c,0);
+                tmc_audit(st,audit,acount,EV_AV_LATCH_CLEAR,c,ep,0,0,0,0);
+            }
+        }
+        c=c+1;
+    }
+    return;
+}
+// ---- MC_CLOSE: monotone closure at deliberation depth k ----
+// Propagates R within each schema class; conflicting S becomes Q (join).
+// Never creates S. Never touches stability counters or timers:
+// deliberation depth is not elapsed time.
+// Returns number of cell writes performed.
+fn mc_close(st:[]u8,audit:[]u8,acount:*i32,k:i32)i32 {
+    let n:i32=tmc_nctx(st);
+    let na:i32=tmc_na(st);
+    let writes:i32=0;
+    let step:i32=0;
+    while(step<k){
+        // snapshot the R-set at step start (monotone, no intra-step chaining)
+        let c:i32=0;
+        while(c<n){
+            let a:i32=0;
+            while(a<na){
+                if(tmc_cell(st,c,a)==ST_R){
+                    let sc:i32=tmc_schema(st,c);
+                    let c2:i32=0;
+                    while(c2<n){
+                        if(c2!=c){
+                            if(tmc_schema(st,c2)==sc){
+                                let cur:i32=tmc_cell(st,c2,a);
+                                if(cur==ST_U){
+                                    tmc_set_cell(st,c2,a,ST_R);
+                                    tmc_audit(st,audit,acount,OP_MC_CLOSE,c2,-1,a,c,0,0);
+                                    writes=writes+1;
+                                }
+                                if(cur==ST_S){
+                                    tmc_set_cell(st,c2,a,ST_Q);
+                                    tmc_audit(st,audit,acount,OP_MC_CLOSE,c2,-1,a,c,1,0);
+                                    writes=writes+1;
+                                }
+                            }
+                        }
+                        c2=c2+1;
+                    }
+                }
+                a=a+1;
+            }
+            c=c+1;
+        }
+        step=step+1;
+    }
+    return writes;
+}
+// ---- MC_READOUT: 0=OPEN, 1=COMMIT(act in low bits), 2=QUARANTINE ----
+fn mc_readout_act(st:[]u8,audit:[]u8,acount:*i32,c:i32,ep:i32) i32 {
+    let na:i32=tmc_na(st);
+    let ns:i32=0;
+    let nq:i32=0;
+    let nr:i32=0;
+    let s_act:i32=-1;
+    let a:i32=0;
+    while(a<na){
+        let v:i32=tmc_cell(st,c,a);
+        if(v==ST_S){ ns=ns+1; s_act=a; }
+        if(v==ST_Q){ nq=nq+1; }
+        if(v==ST_R){ nr=nr+1; }
+        a=a+1;
+    }
+    let ro:i32=0;
+    if(nq>0){ ro=2; }
+    if(nq==0){
+        if(ns==1){ if(nr==na-1){ ro=1; } }
+    }
+    tmc_audit(st,audit,acount,OP_MC_READOUT,c,ep,ro,s_act,ns,nq);
+    return ro*16+(s_act+1);
+}
+// ---- MC_DOUBLE_DERIVE: two full probe passes over CxA on scratch ----
+// Returns 1 if the two derivations agree, 0 on flap (audits FLAP_HOLD,
+// resets stability, blocks seal). pass tables are compared cell-by-cell.
+// wid: live world; flip: 1 makes the second pass see a flipped world
+// (flap fixture only).
+fn mc_double_derive(st:[]u8,audit:[]u8,acount:*i32,ep:i32,wid:i32,flip:i32)i32 {
+    let n:i32=tmc_nctx(st);
+    let na:i32=tmc_na(st);
+    tmc_madd(st,M_DD,1);
+    tmc_audit(st,audit,acount,OP_MC_DOUBLE_DERIVE,-1,ep,wid,flip,0,0);
+    // pass snapshots: 2 x N x A bytes in a small local arena
+    let snap:[]u8=tmc_alloc(2*n*na);
+    let si:i32=0;
+    while(si<2*n*na){ snap[si]=ST_U as u8; si=si+1; }
+    let p:i32=0;
+    while(p<2){
+        // fresh scratch lattice per pass
+        let cell:[]u8=tmc_alloc(n*na);
+        let cor:[]u8=tmc_alloc(n*na);
+        let ci:i32=0;
+        while(ci<n*na){ cell[ci]=ST_U as u8; cor[ci]=0 as u8; ci=ci+1; }
+        let pass:i32=p;
+        if(flip==1){ if(p==1){ pass=1; } }
+        // for the honest worlds pass is ignored; flap world flips on pass
+        let c:i32=0;
+        while(c<n){
+            let a:i32=0;
+            while(a<na){
+                let ix:i32=c*na+a;
+                let cv:i32=cell[ix] as i32;
+                if(cv!=ST_R){
+                    if(cv!=ST_Q){
+                        let expect:i32=mc_expect(c,a);
+                        // scratch world effect: landed or dropped per world
+                        let landed:i32=world_lands(wid,c);
+                        if(landed==0){
+                            cell[ix]=ST_Q as u8;
+                        } else {
+                            let bit:i32=world_bit(st,c,a,wid,1,pass);
+                            if(bit==-1){
+                                let cc:i32=(cor[ix] as i32)+1;
+                                if(cc>CORROB_K){ cc=CORROB_K; }
+                                cor[ix]=cc as u8;
+                                if(cc>=CORROB_K){ cell[ix]=ST_R as u8; }
+                            } else {
+                                if(cv==ST_U){ cell[ix]=ST_S as u8; }
+                            }
+                        }
+                    }
+                }
+                a=a+1;
+            }
+            c=c+1;
+        }
+        let di:i32=0;
+        while(di<n*na){ snap[p*n*na+di]=cell[di]; di=di+1; }
+        tmc_free(cell);
+        tmc_free(cor);
+        p=p+1;
+    }
+    let agree:i32=1;
+    let di2:i32=0;
+    while(di2<n*na){
+        if(snap[di2]!=snap[n*na+di2]){ agree=0; }
+        di2=di2+1;
+    }
+    tmc_free(snap);
+    if(agree==0){
+        tmc_audit(st,audit,acount,EV_FLAP_HOLD,-1,ep,0,0,0,0);
+        tmc_madd(st,M_FLAP,1);
+        // reset stability on all contexts; block seal via rhythm accounting
+        let c:i32=0;
+        while(c<n){
+            tmc_set_stable(st,c,0);
+            tmc_set_rhythm(st,c,tmc_rhythm(st,c)+1);
+            if(tmc_rhythm(st,c)>=2){
+                if(tmc_frozen(st,c)==0){
+                    tmc_set_frozen(st,c,1);
+                    tmc_audit(st,audit,acount,OP_SR_RHYTHM_FREEZE,c,ep,tmc_rhythm(st,c),0,0,0);
+                }
+            }
+            c=c+1;
+        }
+        return 0;
+    }
+    // agreement: decay rhythm counters (reversible freeze)
+    let c2:i32=0;
+    while(c2<n){
+        if(tmc_rhythm(st,c2)>0){
+            tmc_set_rhythm(st,c2,0);
+            if(tmc_frozen(st,c2)==1){
+                tmc_set_frozen(st,c2,0);
+                tmc_audit(st,audit,acount,OP_SR_RHYTHM_FREEZE,c2,ep,-1,0,0,0);
+            }
+        }
+        c2=c2+1;
+    }
+    return 1;
+}
+// ---- MC_SEAL: COMMIT / QUARANTINE / stays OPEN ----
+fn mc_seal(st:[]u8,audit:[]u8,acount:*i32,c:i32,ep:i32,agreed:i32)void {
+    let packed:i32=mc_readout_act(st,audit,acount,c,ep);
+    let ro:i32=packed/16;
+    let s_act:i32=(packed%16)-1;
+    if(ro==2){
+        tmc_set_seal(st,c,SEAL_QUAR);
+        tmc_madd(st,M_SEALQ,1);
+        tmc_audit(st,audit,acount,OP_MC_SEAL,c,ep,SEAL_QUAR,-1,0,0);
+        return;
+    }
+    if(ro==1){
+        if(tmc_frozen(st,c)==1){ return; }
+        if(agreed==0){ return; }
+        if(tmc_stable(st,c)>=MC_STABLE_K){
+            tmc_set_seal(st,c,SEAL_COMMIT);
+            tmc_set_sealact(st,c,s_act);
+            tmc_madd(st,M_SEALC,1);
+            tmc_madd(st,M_INST,1);
+            tmc_audit(st,audit,acount,OP_MC_SEAL,c,ep,SEAL_COMMIT,s_act,tmc_stable(st,c),0);
+        }
+        return;
+    }
+    return;
+}
+// ---- MC_DISCONNECT: all sealed -> channel DISCONNECTED ----
+fn mc_disconnect(st:[]u8,audit:[]u8,acount:*i32,ep:i32)i32 {
+    if(tmc_channel(st)!=CH_LIVE){ return 0; }
+    let n:i32=tmc_nctx(st);
+    let c:i32=0;
+    while(c<n){
+        let s:i32=tmc_seal(st,c);
+        if(s!=SEAL_COMMIT){ if(s!=SEAL_QUAR){ return 0; } }
+        c=c+1;
+    }
+    tmc_set_channel(st,CH_DISC);
+    tmc_audit(st,audit,acount,OP_MC_DISCONNECT,-1,ep,0,0,0,0);
+    return 1;
+}
+// ---- MC_UNSEAL: revoke a COMMIT seal on corroborated post-seal R (live only) ----
+fn mc_unseal(st:[]u8,audit:[]u8,acount:*i32,c:i32,ep:i32)void {
+    if(tmc_channel(st)!=CH_LIVE){ return; }
+    if(tmc_seal(st,c)!=SEAL_COMMIT){ return; }
+    let a:i32=tmc_sealact(st,c);
+    if(tmc_cell(st,c,a)==ST_R){
+        if(tmc_corrob(st,c,a)>=CORROB_K){
+            tmc_set_seal(st,c,SEAL_OPEN);
+            tmc_audit(st,audit,acount,OP_MC_UNSEAL,c,ep,a,0,0,0);
+        }
+    }
+    return;
+}
+// ---- MC_REATTRIBUTE: flip a row's tag to ACTUATOR (no corroboration rollback) ----
+fn mc_reattribute(st:[]u8,audit:[]u8,acount:*i32,c:i32,a:i32,ep:i32)void {
+    tmc_set_tag(st,c,a,TAG_ACT);
+    tmc_madd(st,M_REATTR,1);
+    tmc_audit(st,audit,acount,OP_MC_REATTRIBUTE,c,ep,a,TAG_ACT,0,0);
+    return;
+}
+// ---- action selection: reads the seal only. -------------------------------
+// MC-SELECT-REGION-BEGIN
+// Contract: no signal token, no teacher-statement token, no episode operand.
+// Returns sealed act, -1 = REFUSE (quarantine), -2 = withhold (open).
+fn mc_select(st:[]u8,c:i32)i32 {
+    let s:i32=tmc_seal(st,c);
+    if(s==SEAL_COMMIT){ return tmc_sealact(st,c); }
+    if(s==SEAL_QUAR){ return -1; }
+    return -2;
+}
+// MC-SELECT-REGION-END
+// ---- learned-measurement: 16 post + 16 perturbation episodes ----
+// Acts the sealed policy; counts read-back mismatches. Latch episodes can
+// never silently count: latched contexts are skipped and reported.
+fn tmc_learned_check(st:[]u8,n_post:i32,n_pert:i32,wid:i32,wid_pert:i32) i32 {
+    let mism:i32=0;
+    let skipped:i32=0;
+    let n:i32=tmc_nctx(st);
+    let i:i32=0;
+    while(i<n_post){
+        let c:i32=0;
+        while(c<n){
+            if(tmc_latched(st,c)==1){ skipped=skipped+1; }
+            else {
+                let a:i32=mc_select(st,c);
+                if(a>=0){
+                    let expect:i32=mc_expect(c,a);
+                    let actual:i32=world_do(st,c,a,wid);
+                    let r1:i32=world_read(st,c);
+                    if(r1!=expect){ mism=mism+1; }
+                }
+            }
+            c=c+1;
+        }
+        i=i+1;
+    }
+    i=0;
+    while(i<n_pert){
+        let c:i32=0;
+        while(c<n){
+            if(tmc_latched(st,c)==1){ skipped=skipped+1; }
+            else {
+                let a:i32=mc_select(st,c);
+                if(a>=0){
+                    let expect:i32=mc_expect(c,a);
+                    let actual:i32=world_do(st,c,a,wid_pert);
+                    let r1:i32=world_read(st,c);
+                    if(r1!=expect){ mism=mism+1; }
+                }
+            }
+            c=c+1;
+        }
+        i=i+1;
+    }
+    tmc_madd(st,M_MISM,mism);
+    return mism*64+skipped;
+}
+
+// ---- D1 evidence tape: 7xi32 LE per entry: kind,c,a,expect,actual,s,r1 ----
+// kind 0=PROBE, 1=REISSUE. The recorder derives the tape from its own audit
+// rows (forward scan), so the tape is byte-faithful to the mechanism.
+fn tmc_tape_put(tape:[]u8,tn:*i32,kind:i32,c:i32,a:i32,expect:i32,actual:i32,s:i32,r1:i32)void {
+    let n:i32=tn.*;
+    let o:i32=n*28;
+    tmc_put32(tape,o,kind);
+    tmc_put32(tape,o+4,c);
+    tmc_put32(tape,o+8,a);
+    tmc_put32(tape,o+12,expect);
+    tmc_put32(tape,o+16,actual);
+    tmc_put32(tape,o+20,s);
+    tmc_put32(tape,o+24,r1);
+    tn.*=n+1;
+    return;
+}
+fn tmc_tape_get(tape:[]u8,n:i32,f:i32)i32 { return tmc_get32(tape,n*28+f*4); }
+fn tmc_audit_word(audit:[]u8,i:i32,w:i32)i32 { return tmc_get32(audit,i*32+w*4); }
+// find next row with op==want in [j,to); returns -1 if absent
+fn tmc_find_op(audit:[]u8,j:i32,to:i32,want:i32)i32 {
+    while(j<to){
+        if(tmc_audit_word(audit,j,0)==want){ return j; }
+        j=j+1;
+    }
+    return -1;
+}
+fn tmc_tape_extract(audit:[]u8,from:i32,to:i32,tape:[]u8,tn:*i32)void {
+    let i:i32=from;
+    while(i<to){
+        let op:i32=tmc_audit_word(audit,i,0);
+        if(op==OP_MC_PROBE){
+            let c:i32=tmc_audit_word(audit,i,1);
+            let a:i32=tmc_audit_word(audit,i,3);
+            let expect:i32=tmc_audit_word(audit,i,4);
+            let j:i32=tmc_find_op(audit,i+1,to,OP_MC_TAG_CHECK);
+            let actual:i32=0;
+            let r1:i32=0;
+            if(j>=0){
+                actual=tmc_audit_word(audit,j,4);
+                r1=tmc_audit_word(audit,j,5);
+            }
+            let s:i32=-99;
+            let k2:i32=tmc_find_op(audit,i+1,to,OP_SR_ATTRIBUTE);
+            if(k2>=0){
+                // attribute belongs to this probe if no other PROBE intervenes
+                let kk:i32=tmc_find_op(audit,i+1,k2,OP_MC_PROBE);
+                if(kk<0){ s=tmc_audit_word(audit,k2,4); }
+            }
+            tmc_tape_put(tape,tn,0,c,a,expect,actual,s,r1);
+        }
+        if(op==OP_AV_REISSUE){
+            let c:i32=tmc_audit_word(audit,i,1);
+            let a:i32=tmc_audit_word(audit,i,3);
+            let expect:i32=tmc_audit_word(audit,i,4);
+            let j:i32=i+1;
+            let r1:i32=0;
+            if(j<to){
+                let op2:i32=tmc_audit_word(audit,j,0);
+                if(op2==EV_AV_FAULT_CONFIRM){ r1=tmc_audit_word(audit,j,4); }
+                if(op2==EV_MC_REISSUE_MATCH){ r1=tmc_audit_word(audit,j,4); }
+            }
+            tmc_tape_put(tape,tn,1,c,a,expect,0,0,r1);
+        }
+        i=i+1;
+    }
+    return;
+}
+// ---- D1 replay: feed tape entries through the identical core logic ----
+fn tmc_replay_probe(st:[]u8,audit:[]u8,acount:*i32,tape:[]u8,n:i32,ep:i32)void {
+    let c:i32=tmc_tape_get(tape,n,1);
+    let a:i32=tmc_tape_get(tape,n,2);
+    let expect:i32=tmc_tape_get(tape,n,3);
+    let actual:i32=tmc_tape_get(tape,n,4);
+    let s:i32=tmc_tape_get(tape,n,5);
+    let r1:i32=tmc_tape_get(tape,n,6);
+    tmc_probe_core(st,audit,acount,c,a,ep,expect,actual,r1,r1,s,TAG_HYP);
+    return;
+}
+fn tmc_replay_reissue(st:[]u8,audit:[]u8,acount:*i32,tape:[]u8,n:i32,ep:i32)void {
+    let c:i32=tmc_tape_get(tape,n,1);
+    let a:i32=tmc_tape_get(tape,n,2);
+    let expect:i32=tmc_tape_get(tape,n,3);
+    let r1:i32=tmc_tape_get(tape,n,6);
+    tmc_reissue_core(st,audit,acount,c,ep,a,expect,r1);
+    return;
+}
+// print one tape entry as TAPE,kind,c,a,expect,actual,s,r1
+fn tmc_tape_print(tape:[]u8,n:i32)void {
+    _zag_print("TAPE,");
+    tmc_print_i32(tmc_tape_get(tape,n,0));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,1));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,2));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,3));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,4));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,5));
+    _zag_print(",");
+    tmc_print_i32(tmc_tape_get(tape,n,6));
+    _zag_println("");
+    return;
+}

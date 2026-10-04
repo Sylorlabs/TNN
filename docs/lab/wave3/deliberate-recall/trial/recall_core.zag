@@ -1,0 +1,353 @@
+// Deliberate recall core — native Zag.
+// Retrieval as deliberate choice: NEED_DECLARE (audited hypothesis) then
+// RECALL (fixed logical predicates over symbolic trace descriptors).
+// Built on the MA1 memory op set (memory_core.zag): recall reads slots the
+// learner deliberately manages; it never mutates them.
+// NO RNG anywhere in this file. No scores on the deliberate path.
+@import("../../../wave2/memoryagency/trial/memory_core.zag")
+
+const RC_NEED_CAP:i32=64;
+const RC_AUDIT_CAP:i32=2048;
+const RC_AUDIT_WORDS:i32=6; // kind,a,b,c,d,e
+
+const RC_KIND_ATTACH:i32=1;
+const RC_KIND_NEED:i32=2;
+const RC_KIND_SCAN:i32=3;
+const RC_KIND_ACT:i32=4;
+
+const RC_OK:i32=0;
+const RC_REFUSED_POLICY:i32=201;
+const RC_REFUSED_FULL:i32=202;
+const RC_REFUSED_BADNEED:i32=203;
+const RC_REFUSED_BADSLOT:i32=204;
+const RC_REFUSED_AUDITFULL:i32=205;
+
+const RC_PROV_ANY:i32=0;
+const RC_PROV_VERIFIED:i32=1;
+const RC_JUST_SAFETY:i32=1;
+const RC_JUST_ROUTINE:i32=2;
+
+// predicate bitmask bits
+const RC_P1:i32=1;
+const RC_P2:i32=2;
+const RC_P3:i32=4;
+const RC_P4:i32=8;
+const RC_SEL:i32=16;
+const RC_PALL:i32=15;
+
+struct RcState {
+    need_qid: []u8,
+    need_reqent: []u8,
+    need_reqops: []u8,
+    need_flags: []u8,   // prov | max_age<<8 | compose<<24
+    need_just: []u8,
+    needs_n: i32,
+    d_ent: []u8,        // MA_CAP * 4
+    d_ops: []u8,
+    d_srcver: []u8,     // src | ver<<16
+    d_act: []u8,
+    d_attached: []u8,   // MA_CAP
+    audit: []u8,
+    audit_n: i32
+}
+
+fn rc_init()RcState {
+    let rs:RcState= RcState{
+        .need_qid=nio_alloc(RC_NEED_CAP*4),
+        .need_reqent=nio_alloc(RC_NEED_CAP*4),
+        .need_reqops=nio_alloc(RC_NEED_CAP*4),
+        .need_flags=nio_alloc(RC_NEED_CAP*4),
+        .need_just=nio_alloc(RC_NEED_CAP*4),
+        .needs_n=0,
+        .d_ent=nio_alloc(MA_CAP*4),
+        .d_ops=nio_alloc(MA_CAP*4),
+        .d_srcver=nio_alloc(MA_CAP*4),
+        .d_act=nio_alloc(MA_CAP*4),
+        .d_attached=nio_alloc(MA_CAP),
+        .audit=nio_alloc(RC_AUDIT_CAP*RC_AUDIT_WORDS*4),
+        .audit_n=0};
+    // nio_alloc is NOT zeroed — zero by hand (playbook §12).
+    let i:i32=0;
+    while(i<RC_NEED_CAP*4){ma_i32_set(rs.need_qid,i,0);ma_i32_set(rs.need_reqent,i,0);ma_i32_set(rs.need_reqops,i,0);ma_i32_set(rs.need_flags,i,0);ma_i32_set(rs.need_just,i,0);i=i+4;}
+    i=0;while(i<MA_CAP*4){ma_i32_set(rs.d_ent,i,0);ma_i32_set(rs.d_ops,i,0);ma_i32_set(rs.d_srcver,i,0);ma_i32_set(rs.d_act,i,0);i=i+4;}
+    i=0;while(i<MA_CAP){rs.d_attached[i]=0;i=i+1;}
+    i=0;while(i<RC_AUDIT_CAP*RC_AUDIT_WORDS*4){rs.audit[i]=0;i=i+1;}
+    return rs;
+}
+
+fn rc_audit_append(rs:*RcState,k:i32,a:i32,b:i32,c:i32,d:i32,e:i32)i32 {
+    if(rs==null as *RcState){return cl_bad();}
+    if(rs.*.audit_n>=RC_AUDIT_CAP){return RC_REFUSED_AUDITFULL;}
+    let at:i32=rs.*.audit_n*RC_AUDIT_WORDS*4;
+    ma_i32_set(rs.*.audit,at+0,k);ma_i32_set(rs.*.audit,at+4,a);ma_i32_set(rs.*.audit,at+8,b);
+    ma_i32_set(rs.*.audit,at+12,c);ma_i32_set(rs.*.audit,at+16,d);ma_i32_set(rs.*.audit,at+20,e);
+    rs.*.audit_n=rs.*.audit_n+1;
+    return RC_OK;
+}
+fn rc_prov(flags:i32)i32 {return flags&255;}
+fn rc_maxage(flags:i32)i32 {return (flags>>8)&65535;}
+fn rc_compose(flags:i32)i32 {return (flags>>24)&1;}
+
+// Attach a symbolic descriptor to a live slot (write-once). Audited.
+fn rc_attach(rs:*RcState,s:*MaStore,slot:i32,ent:i32,ops:i32,src:i32,ver:i32,act:i32)i32 {
+    if(rs==null as *RcState || ma_badslot(s,slot)==1){return cl_bad();}
+    if(s.*.live[slot]==0){return RC_REFUSED_BADSLOT;}
+    if(rs.*.d_attached[slot]==1){return RC_REFUSED_BADSLOT;}
+    ma_i32_set(rs.*.d_ent,slot*4,ent);ma_i32_set(rs.*.d_ops,slot*4,ops);
+    ma_i32_set(rs.*.d_srcver,slot*4,src|(ver<<16));ma_i32_set(rs.*.d_act,slot*4,act);
+    rs.*.d_attached[slot]=1;
+    return rc_audit_append(rs,RC_KIND_ATTACH,slot,ent,ops,src|(ver<<16),act);
+}
+
+// Declare an information need. Policy rule: a SAFETY_CRITICAL need with
+// provenance ANY is refused — the declaration itself is logic-checked.
+fn rc_need_declare(rs:*RcState,qid:i32,req_ent:i32,req_ops:i32,prov:i32,max_age:i32,compose:i32,just:i32,out_id:*i32)i32 {
+    if(rs==null as *RcState || out_id==null as *i32){return cl_bad();}
+    let flags:i32=(prov&255)|((max_age&65535)<<8)|((compose&1)<<24);
+    if(just==RC_JUST_SAFETY && prov==RC_PROV_ANY){
+        out_id.*=-1;
+        rc_audit_append(rs,RC_KIND_NEED,-1,qid,req_ent,req_ops,flags);
+        return RC_REFUSED_POLICY;
+    }
+    if(rs.*.needs_n>=RC_NEED_CAP){out_id.*=-1;return RC_REFUSED_FULL;}
+    let id:i32=rs.*.needs_n;
+    ma_i32_set(rs.*.need_qid,id*4,qid);ma_i32_set(rs.*.need_reqent,id*4,req_ent);
+    ma_i32_set(rs.*.need_reqops,id*4,req_ops);ma_i32_set(rs.*.need_flags,id*4,flags);
+    ma_i32_set(rs.*.need_just,id*4,just);
+    rs.*.needs_n=rs.*.needs_n+1;out_id.*=id;
+    return rc_audit_append(rs,RC_KIND_NEED,id,qid,req_ent,req_ops,flags);
+}
+
+// The logical predicates. Returns the bitmask of satisfied predicates.
+// No score is computed here — Boolean functions of symbolic attributes.
+fn rc_predmask(rs:*RcState,s:*MaStore,need_id:i32,slot:i32,now:i32)i32 {
+    let reqent:i32=ma_i32_get(rs.*.need_reqent,need_id*4);
+    let reqops:i32=ma_i32_get(rs.*.need_reqops,need_id*4);
+    let flags:i32=ma_i32_get(rs.*.need_flags,need_id*4);
+    let ent:i32=ma_i32_get(rs.*.d_ent,slot*4);
+    let ops:i32=ma_i32_get(rs.*.d_ops,slot*4);
+    let srcver:i32=ma_i32_get(rs.*.d_srcver,slot*4);
+    let ver:i32=(srcver>>16)&1;
+    let step:i32=ma_i32_get(s.*.step,slot*4);
+    let pm:i32=0;
+    if((ent&reqent)!=0){pm=pm|RC_P1;}
+    if((ops&reqops)==reqops){pm=pm|RC_P2;}
+    if(rc_prov(flags)==RC_PROV_ANY || ver==1){pm=pm|RC_P3;}
+    if((now-step)<=rc_maxage(flags)){pm=pm|RC_P4;}
+    return pm;
+}
+
+// Deliberate recall. Scans live attached slots in index order; every
+// per-trace decision is audited with its predicate bitmask. Fills out
+// (cap*4 bytes) with selected slot ids in index order; returns count.
+// Read-only on the ma store; append-only on the recall ledger.
+fn rc_recall(rs:*RcState,s:*MaStore,need_id:i32,out:[]u8,cap:i32)i32 {
+    if(rs==null as *RcState || s==null as *MaStore || out.len<cap*4 || cap<1){return cl_bad();}
+    if(need_id<0 || need_id>=rs.*.needs_n){return RC_REFUSED_BADNEED;}
+    let compose:i32=rc_compose(ma_i32_get(rs.*.need_flags,need_id*4));
+    let reqops:i32=ma_i32_get(rs.*.need_reqops,need_id*4);
+    let now:i32=s.*.clock;
+    let uncovered:i32=reqops;
+    let n:i32=0;
+    let slot:i32=0;
+    while(slot<MA_CAP){
+        if(s.*.live[slot]==1 && rs.*.d_attached[slot]==1){
+            let pm:i32=rc_predmask(rs,s,need_id,slot,now);
+            let sel:i32=0;
+            if(compose==0){
+                if((pm&RC_PALL)==RC_PALL){sel=1;}
+            } else {
+                // compose mode: marginal symbolic contribution to the
+                // still-uncovered requirement (still pure logic, no score)
+                let ops:i32=ma_i32_get(rs.*.d_ops,slot*4);
+                let ent:i32=ma_i32_get(rs.*.d_ent,slot*4);
+                let reqent:i32=ma_i32_get(rs.*.need_reqent,need_id*4);
+                let flags:i32=ma_i32_get(rs.*.need_flags,need_id*4);
+                let ver:i32=(ma_i32_get(rs.*.d_srcver,slot*4)>>16)&1;
+                let step:i32=ma_i32_get(s.*.step,slot*4);
+                pm=0;
+                if((ent&reqent)!=0){pm=pm|RC_P1;}
+                if((ops&uncovered)!=0){pm=pm|RC_P2;}
+                if(rc_prov(flags)==RC_PROV_ANY || ver==1){pm=pm|RC_P3;}
+                if((now-step)<=rc_maxage(flags)){pm=pm|RC_P4;}
+                if((pm&RC_PALL)==RC_PALL && uncovered!=0){sel=1;}
+            }
+            let arc:i32=rc_audit_append(rs,RC_KIND_SCAN,need_id,slot,pm,sel,now);
+            if(arc!=RC_OK){return arc;}
+            if(sel==1 && n<cap){
+                ma_i32_set(out,n*4,slot);n=n+1;
+                if(compose==1){
+                    let ops:i32=ma_i32_get(rs.*.d_ops,slot*4);
+                    uncovered=uncovered-(uncovered&ops);
+                }
+            }
+        }
+        slot=slot+1;
+    }
+    return n;
+}
+
+// Act on a recalled set. Satisfied iff the union of selected ops covers
+// the requirement and all selected traces agree on the action code.
+// Otherwise deliberate ABSTAIN (-1). Audited.
+fn rc_act(rs:*RcState,s:*MaStore,need_id:i32,ep:i32,sel:[]u8,n:i32)i32 {
+    if(rs==null as *RcState || s==null as *MaStore){return cl_bad();}
+    if(need_id<0 || need_id>=rs.*.needs_n){return RC_REFUSED_BADNEED;}
+    let action:i32=-1;
+    let satisfied:i32=0;
+    if(n>0){
+        let reqops:i32=ma_i32_get(rs.*.need_reqops,need_id*4);
+        let union:i32=0;
+        let agree:i32=1;
+        let first:i32=ma_i32_get(rs.*.d_act,ma_i32_get(sel,0)*4);
+        let i:i32=0;
+        while(i<n){
+            let sl:i32=ma_i32_get(sel,i*4);
+            union=union|ma_i32_get(rs.*.d_ops,sl*4);
+            if(ma_i32_get(rs.*.d_act,sl*4)!=first){agree=0;}
+            i=i+1;
+        }
+        if((union&reqops)==reqops && agree==1){satisfied=1;action=first;}
+    }
+    rc_audit_append(rs,RC_KIND_ACT,need_id,ep,action,satisfied,n);
+    return action;
+}
+
+// Replay: rebuild needs + descriptors from the recall ledger and verify
+// every scan decision recomputes. Returns RC_OK or a nonzero error id.
+fn rc_replay_check(rs:*RcState,s:*MaStore)i32 {
+    if(rs==null as *RcState || s==null as *MaStore){return cl_bad();}
+    // Phase 1: rebuild.
+    let sh:RcState=rc_init();
+    let i:i32=0;
+    while(i<rs.*.audit_n){
+        let e:i32=i*RC_AUDIT_WORDS*4;
+        let k:i32=ma_i32_get(rs.*.audit,e+0);
+        if(k==RC_KIND_ATTACH){
+            let slot:i32=ma_i32_get(rs.*.audit,e+4);
+            ma_i32_set(sh.d_ent,slot*4,ma_i32_get(rs.*.audit,e+8));
+            ma_i32_set(sh.d_ops,slot*4,ma_i32_get(rs.*.audit,e+12));
+            ma_i32_set(sh.d_srcver,slot*4,ma_i32_get(rs.*.audit,e+16));
+            ma_i32_set(sh.d_act,slot*4,ma_i32_get(rs.*.audit,e+20));
+            sh.d_attached[slot]=1;
+        }
+        if(k==RC_KIND_NEED){
+            let id:i32=ma_i32_get(rs.*.audit,e+4);
+            if(id>=0){
+                if(id!=sh.needs_n){return 301;}
+                ma_i32_set(sh.need_qid,id*4,ma_i32_get(rs.*.audit,e+8));
+                ma_i32_set(sh.need_reqent,id*4,ma_i32_get(rs.*.audit,e+12));
+                ma_i32_set(sh.need_reqops,id*4,ma_i32_get(rs.*.audit,e+16));
+                ma_i32_set(sh.need_flags,id*4,ma_i32_get(rs.*.audit,e+20));
+                // just is not stored in the NEED entry words (a..e hold
+                // id,qid,reqent,reqops,flags); check flags/qid/reqent/reqops.
+                sh.needs_n=sh.needs_n+1;
+            }
+        }
+        i=i+1;
+    }
+    // Phase 1b: compare rebuilt vs live (needs_n, need fields, descriptors).
+    if(sh.needs_n!=rs.*.needs_n){return 302;}
+    i=0;
+    while(i<rs.*.needs_n){
+        if(ma_i32_get(sh.need_qid,i*4)!=ma_i32_get(rs.*.need_qid,i*4)){return 303;}
+        if(ma_i32_get(sh.need_reqent,i*4)!=ma_i32_get(rs.*.need_reqent,i*4)){return 304;}
+        if(ma_i32_get(sh.need_reqops,i*4)!=ma_i32_get(rs.*.need_reqops,i*4)){return 305;}
+        if(ma_i32_get(sh.need_flags,i*4)!=ma_i32_get(rs.*.need_flags,i*4)){return 306;}
+        i=i+1;
+    }
+    i=0;
+    while(i<MA_CAP){
+        if(sh.d_attached[i]!=rs.*.d_attached[i]){return 307;}
+        if(sh.d_attached[i]==1){
+            if(ma_i32_get(sh.d_ent,i*4)!=ma_i32_get(rs.*.d_ent,i*4)){return 308;}
+            if(ma_i32_get(sh.d_ops,i*4)!=ma_i32_get(rs.*.d_ops,i*4)){return 309;}
+            if(ma_i32_get(sh.d_srcver,i*4)!=ma_i32_get(rs.*.d_srcver,i*4)){return 310;}
+            if(ma_i32_get(sh.d_act,i*4)!=ma_i32_get(rs.*.d_act,i*4)){return 311;}
+        }
+        i=i+1;
+    }
+    // Phase 2: every SCAN recomputes; coverage = every attached slot
+    // scanned exactly once per need, in index order.
+    let nid:i32=0;
+    while(nid<rs.*.needs_n){
+        let compose:i32=rc_compose(ma_i32_get(rs.*.need_flags,nid*4));
+        let reqops:i32=ma_i32_get(rs.*.need_reqops,nid*4);
+        let uncovered:i32=reqops;
+        let lastslot:i32=-1;
+        let seencount:i32=0;
+        i=0;
+        while(i<rs.*.audit_n){
+            let e:i32=i*RC_AUDIT_WORDS*4;
+            if(ma_i32_get(rs.*.audit,e+0)==RC_KIND_SCAN && ma_i32_get(rs.*.audit,e+4)==nid){
+                let slot:i32=ma_i32_get(rs.*.audit,e+8);
+                let pm:i32=ma_i32_get(rs.*.audit,e+12);
+                let sel:i32=ma_i32_get(rs.*.audit,e+16);
+                let now:i32=ma_i32_get(rs.*.audit,e+20);
+                if(slot<=lastslot){return 312;}
+                lastslot=slot;seencount=seencount+1;
+                if(rs.*.d_attached[slot]==0){return 313;}
+                // recompute expected predmask with the same compose logic
+                let exp:i32=0;
+                let ent:i32=ma_i32_get(rs.*.d_ent,slot*4);
+                let ops:i32=ma_i32_get(rs.*.d_ops,slot*4);
+                let reqent:i32=ma_i32_get(rs.*.need_reqent,nid*4);
+                let flags:i32=ma_i32_get(rs.*.need_flags,nid*4);
+                let ver:i32=(ma_i32_get(rs.*.d_srcver,slot*4)>>16)&1;
+                let step:i32=ma_i32_get(s.*.step,slot*4);
+                if((ent&reqent)!=0){exp=exp|RC_P1;}
+                if(compose==0){
+                    if((ops&reqops)==reqops){exp=exp|RC_P2;}
+                } else {
+                    if((ops&uncovered)!=0){exp=exp|RC_P2;}
+                }
+                if(rc_prov(flags)==RC_PROV_ANY || ver==1){exp=exp|RC_P3;}
+                if((now-step)<=rc_maxage(flags)){exp=exp|RC_P4;}
+                if(pm!=exp){return 314;}
+                let expsel:i32=0;
+                if((exp&RC_PALL)==RC_PALL){
+                    if(compose==0){expsel=1;}
+                    else{if(uncovered!=0){expsel=1;}}
+                }
+                if(sel!=expsel){return 315;}
+                if(expsel==1 && compose==1){uncovered=uncovered-(uncovered&ops);}
+            }
+            i=i+1;
+        }
+        // coverage: attached count must equal scanned count
+        let att:i32=0;
+        i=0;while(i<MA_CAP){if(rs.*.d_attached[i]==1){att=att+1;}i=i+1;}
+        if(seencount!=att){return 316;}
+        nid=nid+1;
+    }
+    // Phase 3: ACT entries recompute from the need's scan selections.
+    i=0;
+    while(i<rs.*.audit_n){
+        let e:i32=i*RC_AUDIT_WORDS*4;
+        if(ma_i32_get(rs.*.audit,e+0)==RC_KIND_ACT){
+            let aneed:i32=ma_i32_get(rs.*.audit,e+4);
+            let aact:i32=ma_i32_get(rs.*.audit,e+12);
+            let asat:i32=ma_i32_get(rs.*.audit,e+16);
+            if(aneed<0 || aneed>=rs.*.needs_n){return 317;}
+            let reqops:i32=ma_i32_get(rs.*.need_reqops,aneed*4);
+            let union:i32=0;let agree:i32=1;let first:i32=-2;let cnt:i32=0;
+            let j:i32=0;
+            while(j<rs.*.audit_n){
+                let f:i32=j*RC_AUDIT_WORDS*4;
+                if(ma_i32_get(rs.*.audit,f+0)==RC_KIND_SCAN && ma_i32_get(rs.*.audit,f+4)==aneed && ma_i32_get(rs.*.audit,f+16)==1){
+                    let slot:i32=ma_i32_get(rs.*.audit,f+8);
+                    union=union|ma_i32_get(rs.*.d_ops,slot*4);
+                    if(first==-2){first=ma_i32_get(rs.*.d_act,slot*4);}
+                    else{if(ma_i32_get(rs.*.d_act,slot*4)!=first){agree=0;}}
+                    cnt=cnt+1;
+                }
+                j=j+1;
+            }
+            let expact:i32=-1;let expsat:i32=0;
+            if(cnt>0 && (union&reqops)==reqops && agree==1){expsat=1;expact=first;}
+            if(aact!=expact || asat!=expsat){return 318;}
+        }
+        i=i+1;
+    }
+    return RC_OK;
+}

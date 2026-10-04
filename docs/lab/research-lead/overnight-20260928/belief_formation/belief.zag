@@ -1,0 +1,406 @@
+// belief.zag -- Rational belief formation from evidence (Micah Priority 9).
+// Three-phase world: weak evidence -> provisional H1; contrary evidence ->
+// uncertainty; strong independent evidence -> revision to H2.
+// Pure Zag. Unfrozen variant. 0 modes, 0 bridges, 0 handlers, 0 semantic cases.
+//
+// Mechanism (all learner-owned, no hardcoded authority hierarchy):
+//   - Evidence records persist in learner state: (qid, hyp, weight, src,
+//     phase, contribution). Nothing is ever deleted.
+//   - Source reliability is LEARNED from verification outcomes only.
+//     All sources start neutral (1000 per-mille); a source is trusted only
+//     after observed correct verifications, distrusted only after observed
+//     errors. No researcher-written ranking of sources exists.
+//   - Evidence strength (weak=1, moderate=2, strong=3) is a property of the
+//     observation event recorded at observation time, not a source rank.
+//   - Independence discount: the k-th claim by the same source for the same
+//     hypothesis within one evidence episode contributes half the previous
+//     one (1000, 500, 250, ... per-mille). Repetition is not independence.
+//   - Belief score B = sum of contributions per hypothesis (milli-units).
+//     Status from |B| against learner-experienced bands:
+//       U (uncertainty band) = max single contribution ever observed.
+//       T (certainty bar)    = 2 * U.
+//     Certainty requires support no single observation could have supplied.
+//   - Statuses: 0 NONE, 1 PROVISIONAL, 2 UNCERTAIN, 3 CONFIDENT.
+//     UNCERTAIN when both hypotheses have support and |B| <= U.
+//     With one-sided evidence the learner is PROVISIONAL, never UNCERTAIN.
+//
+// Researcher scaffold (honest): table layout, band rule U=wmax/T=2U,
+// discount halving, status cutoffs. Learner-owned: all reliability values,
+// all support totals, wmax, every belief status, all provenance answers.
+
+// ============ helpers ============
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn i64s(v:i64)[]u8 {
+  let r:[]u8=_zag_i64_to_str(v);
+  if(r.len>0 && r[r.len-1]==10){return r[0..r.len-1];}
+  return r;
+}
+fn e64(v:i32)void { emit(i64s(v as i64)); return; }
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+
+// ============ state block: 296 i32 cells ============
+fn cg(B:[]u8,c:i32)i32 { return get32(B,c*4); }
+fn cs(B:[]u8,c:i32,v:i32)void { set32(B,c*4,v); return; }
+// header cells
+// 0 nev, 1 nsrc, 2 wmax, 3 seq_first_contrary, 4 seq_revision,
+// 5 s1, 6 s2, 7 truth, 8 abl_rel, 9 abl_ind
+fn EVB()i32 { return 16; }    // evidence base cell
+fn EVN()i32 { return 32; }   // max evidence records
+fn EVW()i32 { return 6; }    // cells per record: qid,hyp,w,src,phase,contrib
+fn SRB()i32 { return 208; }  // source base cell
+fn SRN()i32 { return 8; }    // max sources
+fn SRW()i32 { return 3; }    // cells per source: correct,total,extid
+fn DCB()i32 { return 232; }  // discount base cell
+fn DCN()i32 { return 16; }   // max (src,hyp,phase) entries
+fn DCW()i32 { return 4; }    // cells per entry: src,hyp,phase,count
+
+fn ST_NONE()i32 { return 0; }
+fn ST_PROV()i32 { return 1; }
+fn ST_UNC()i32 { return 2; }
+fn ST_CONF()i32 { return 3; }
+
+fn st_init(B:[]u8,abl_rel:i32,abl_ind:i32)void {
+  let i:i32=0;
+  while(i<296){ cs(B,i,0); i=i+1; }
+  cs(B,8,abl_rel); cs(B,9,abl_ind);
+  return;
+}
+
+// ---- sources ----
+fn src_idx(B:[]u8,ext:i32)i32 {
+  let i:i32=0;
+  while(i<SRN()){
+    let id:i32=cg(B,SRB()+i*SRW()+2);
+    if(id==ext+1){ return i; }
+    i=i+1;
+  }
+  i=0;
+  while(i<SRN()){
+    if(cg(B,SRB()+i*SRW()+2)==0){
+      cs(B,SRB()+i*SRW()+2,ext+1);
+      cs(B,1,cg(B,1)+1);
+      return i;
+    }
+    i=i+1;
+  }
+  return -1;
+}
+// reliability per-mille, learned from verification outcomes only.
+// neutral 1000 until at least 2 verifications observed.
+fn src_rel(B:[]u8,si:i32)i32 {
+  if(cg(B,8)==1){ return 1000; } // ablation: reliability learning off
+  let correct:i32=cg(B,SRB()+si*SRW()+0);
+  let total:i32=cg(B,SRB()+si*SRW()+1);
+  if(total<2){ return 1000; }
+  return 1000*correct/total;
+}
+
+// ---- independence discount: k-th claim by (src,hyp) in a phase ----
+fn disc_for(B:[]u8,si:i32,hyp:i32,phase:i32)i32 {
+  let i:i32=0;
+  while(i<DCN()){
+    if(cg(B,DCB()+i*DCW()+0)==si+1 && cg(B,DCB()+i*DCW()+1)==hyp && cg(B,DCB()+i*DCW()+2)==phase){
+      let k:i32=cg(B,DCB()+i*DCW()+3);
+      cs(B,DCB()+i*DCW()+3,k+1);
+      if(cg(B,9)==1){ return 1000; } // ablation: discount off
+      let d:i32=1000; let j:i32=0;
+      while(j<k){ d=d/2; j=j+1; }
+      return d;
+    }
+    i=i+1;
+  }
+  i=0;
+  while(i<DCN()){
+    if(cg(B,DCB()+i*DCW()+0)==0){
+      cs(B,DCB()+i*DCW()+0,si+1);
+      cs(B,DCB()+i*DCW()+1,hyp);
+      cs(B,DCB()+i*DCW()+2,phase);
+      cs(B,DCB()+i*DCW()+3,1);
+      if(cg(B,9)==1){ return 1000; }
+      return 1000;
+    }
+    i=i+1;
+  }
+  return 1000;
+}
+
+// ---- evidence record ----
+fn ev_record(B:[]u8,qid:i32,hyp:i32,w:i32,src:i32,phase:i32,contrib:i32)i32 {
+  let n:i32=cg(B,0);
+  if(n>=EVN()){ return -1; }
+  let o:i32=EVB()+n*EVW();
+  cs(B,o+0,qid); cs(B,o+1,hyp); cs(B,o+2,w);
+  cs(B,o+3,src); cs(B,o+4,phase); cs(B,o+5,contrib);
+  cs(B,0,n+1);
+  return n+1; // 1-based seq
+}
+fn note_wmax(B:[]u8,contrib:i32)void {
+  if(contrib>cg(B,2)){ cs(B,2,contrib); }
+  return;
+}
+
+// ---- calibration: claim on a verifiable fact; outcome observed ----
+// updates source reliability only; does not touch the H1/H2 belief score.
+fn ev_calibrate(B:[]u8,src:i32,hyp:i32,w:i32,truth:i32)void {
+  let si:i32=src_idx(B,src);
+  let r:i32=src_rel(B,si); // neutral at this point for fresh sources
+  let contrib:i32=w*r*1000/1000;
+  ev_record(B,0,hyp,w,src,0,contrib);
+  note_wmax(B,contrib);
+  cs(B,SRB()+si*SRW()+1,cg(B,SRB()+si*SRW()+1)+1);
+  if(hyp==truth){ cs(B,SRB()+si*SRW()+0,cg(B,SRB()+si*SRW()+0)+1); }
+  return;
+}
+
+// ---- observation on the H1/H2 question ----
+fn ev_observe(B:[]u8,src:i32,hyp:i32,w:i32,phase:i32)i32 {
+  let si:i32=src_idx(B,src);
+  let r:i32=src_rel(B,si);
+  let d:i32=disc_for(B,si,hyp,phase);
+  let contrib:i32=w*r*d/1000; // milli-units
+  let seq:i32=ev_record(B,1,hyp,w,src,phase,contrib);
+  note_wmax(B,contrib);
+  if(hyp==1){ cs(B,5,cg(B,5)+contrib); }
+  else { cs(B,6,cg(B,6)+contrib); }
+  if(phase>=1 && hyp==2 && cg(B,3)==0){ cs(B,3,seq); }
+  let st:i32=st_compute(B);
+  if(st==23 && cg(B,4)==0){ cs(B,4,seq); } // 23 = leader 2, CONFIDENT
+  return seq;
+}
+
+// ---- belief status: leader*10 + code ----
+fn st_compute(B:[]u8)i32 {
+  let s1:i32=cg(B,5); let s2:i32=cg(B,6);
+  let wm:i32=cg(B,2);
+  if(s1==0 && s2==0){ return 0; }
+  let d:i32=s1-s2;
+  if(d==0){ return 2; } // UNCERTAIN, no leader
+  let leader:i32=1;
+  if(d<0){ leader=2; }
+  let ad:i32=d; if(ad<0){ ad=-ad; }
+  let both:i32=0;
+  if(s1>0 && s2>0){ both=1; }
+  let U:i32=wm; let T:i32=wm*2;
+  if(both==1 && ad<=U){ return leader*10+ST_UNC(); }
+  if(ad>=T){ return leader*10+ST_CONF(); }
+  return leader*10+ST_PROV();
+}
+fn st_name(code:i32)[]u8 {
+  if(code==0){ return "NONE"; }
+  if(code==1){ return "PROVISIONAL"; }
+  if(code==2){ return "UNCERTAIN"; }
+  return "CONFIDENT";
+}
+
+// ---- verification: world reveals truth; reliabilities update ----
+fn ev_verify(B:[]u8,truth:i32)void {
+  cs(B,7,truth);
+  let i:i32=0;
+  while(i<cg(B,0)){
+    let o:i32=EVB()+i*EVW();
+    if(cg(B,o+0)==1){
+      let si:i32=src_idx(B,cg(B,o+3));
+      cs(B,SRB()+si*SRW()+1,cg(B,SRB()+si*SRW()+1)+1);
+      if(cg(B,o+1)==truth){ cs(B,SRB()+si*SRW()+0,cg(B,SRB()+si*SRW()+0)+1); }
+    }
+    i=i+1;
+  }
+  return;
+}
+
+// ---- provenance: why does the learner believe hyp? ----
+fn belief_why(B:[]u8,hyp:i32)i32 {
+  let n:i32=0;
+  let i:i32=0;
+  while(i<cg(B,0)){
+    let o:i32=EVB()+i*EVW();
+    if(cg(B,o+0)==1 && cg(B,o+1)==hyp){
+      emit("  seq="); e64(i+1);
+      emit(" phase="); e64(cg(B,o+4));
+      emit(" src="); e64(cg(B,o+3));
+      emit(" w="); e64(cg(B,o+2));
+      emit(" contrib="); e64(cg(B,o+5));
+      emit("\n");
+      n=n+1;
+    }
+    i=i+1;
+  }
+  return n;
+}
+fn print_reliabilities(B:[]u8)void {
+  let i:i32=0;
+  while(i<SRN()){
+    let id:i32=cg(B,SRB()+i*SRW()+2);
+    if(id>0){
+      emit("  src="); e64(id-1);
+      emit(" correct="); e64(cg(B,SRB()+i*SRW()+0));
+      emit(" total="); e64(cg(B,SRB()+i*SRW()+1));
+      emit(" rel="); e64(src_rel(B,i));
+      emit("\n");
+    }
+    i=i+1;
+  }
+  return;
+}
+fn print_belief(B:[]u8,tag:[]u8)void {
+  let st:i32=st_compute(B);
+  let leader:i32=st/10; let code:i32=st%10;
+  emit(tag); emit(" leader="); e64(leader);
+  emit(" status="); emit(st_name(code));
+  emit(" s1="); e64(cg(B,5));
+  emit(" s2="); e64(cg(B,6));
+  emit(" conf="); e64(cg(B,5)-cg(B,6));
+  emit(" U="); e64(cg(B,2));
+  emit(" T="); e64(cg(B,2)*2);
+  emit("\n");
+  return;
+}
+fn contrary_count(B:[]u8)i32 {
+  let f:i32=cg(B,3); let r:i32=cg(B,4);
+  let n:i32=0; let i:i32=0;
+  while(i<cg(B,0)){
+    let o:i32=EVB()+i*EVW();
+    let seq:i32=i+1;
+    if(cg(B,o+0)==1 && cg(B,o+1)==2 && seq>=f && (r==0 || seq<=r)){ n=n+1; }
+    i=i+1;
+  }
+  return n;
+}
+
+// ============ world scripts ============
+// sources: 1=Sa, 2=Sb, 3=Sc, 4=Sd, 5=Se, 6=Sx
+// weights: 1 weak, 2 moderate, 3 strong
+fn run_calibration(B:[]u8)void {
+  ev_calibrate(B,1,1,1,1); // Sa claims H1 weak, truth H1: correct
+  ev_calibrate(B,1,2,1,1); // Sa claims H2 weak, truth H1: wrong
+  ev_calibrate(B,2,2,1,2); // Sb claims H2 weak, truth H2: correct
+  ev_calibrate(B,2,2,2,2); // Sb claims H2 moderate, truth H2: correct
+  return;
+}
+fn run_main_world(B:[]u8)void {
+  // Phase 1: only weak evidence for H1, from Sa (track record 1/2)
+  ev_observe(B,1,1,1,1);
+  ev_observe(B,1,1,1,1);
+  // Phase 2: credible contrary evidence (Sb, moderate, track record 2/2)
+  // plus Sa doubling down with 3 moderate H1 claims
+  ev_observe(B,2,2,2,2);
+  ev_observe(B,1,1,2,2);
+  ev_observe(B,1,1,2,2);
+  ev_observe(B,1,1,2,2);
+  // Phase 3: strong independent evidence for H2 from 3 fresh sources
+  ev_observe(B,3,2,3,3);
+  ev_observe(B,4,2,3,3);
+  ev_observe(B,5,2,3,3);
+  return;
+}
+fn run_probeR(B:[]u8)void {
+  // repetition attack: one neutral source repeats a weak H1 claim 6 times
+  let i:i32=0;
+  while(i<6){ ev_observe(B,6,1,1,1); i=i+1; }
+  return;
+}
+
+fn main()i32 {
+  let fails:i32=0;
+
+  // ===== Arm MAIN: full mechanism =====
+  let M:[]u8=z_alloc(1184); st_init(M,0,0);
+  run_calibration(M);
+  emit("MAIN reliabilities after calibration (expect Sa 1/2 rel 500, Sb 2/2 rel 1000):\n");
+  print_reliabilities(M);
+  // no hardcoded hierarchy: every source starts neutral
+  if(!(src_rel(M,src_idx(M,1))==500)){ emit("FAIL cal Sa rel\n"); fails=fails+1; }
+  if(!(src_rel(M,src_idx(M,2))==1000)){ emit("FAIL cal Sb rel\n"); fails=fails+1; }
+  // fresh source neutral before any verification
+  if(!(src_rel(M,src_idx(M,3))==1000)){ emit("FAIL fresh src not neutral\n"); fails=fails+1; }
+
+  ev_observe(M,1,1,1,1); ev_observe(M,1,1,1,1);
+  print_belief(M,"MAIN P1:");
+  let st1:i32=st_compute(M);
+  if(!(st1==11)){ emit("FAIL P1 expect PROVISIONAL H1 (11)\n"); fails=fails+1; }
+
+  ev_observe(M,2,2,2,2);
+  ev_observe(M,1,1,2,2); ev_observe(M,1,1,2,2); ev_observe(M,1,1,2,2);
+  print_belief(M,"MAIN P2:");
+  let st2:i32=st_compute(M);
+  if(!(st2%10==2)){ emit("FAIL P2 expect UNCERTAIN\n"); fails=fails+1; }
+
+  ev_observe(M,3,2,3,3); ev_observe(M,4,2,3,3); ev_observe(M,5,2,3,3);
+  print_belief(M,"MAIN P3:");
+  let st3:i32=st_compute(M);
+  if(!(st3==23)){ emit("FAIL P3 expect CONFIDENT H2 (23)\n"); fails=fails+1; }
+
+  emit("MAIN why-H2 provenance:\n");
+  let wn:i32=belief_why(M,2);
+  if(!(wn==4)){ emit("FAIL why-H2 expect 4 records\n"); fails=fails+1; }
+  emit("MAIN why-H1 provenance (old belief still explainable):\n");
+  let wn1:i32=belief_why(M,1);
+  if(!(wn1==5)){ emit("FAIL why-H1 expect 5 records\n"); fails=fails+1; }
+
+  // retention: 4 cal + 2 P1 + 4 P2 + 3 P3 = 13 records, none deleted
+  emit("MAIN evidence records retained: "); e64(cg(M,0)); emit(" (expect 13)\n");
+  if(!(cg(M,0)==13)){ emit("FAIL retention\n"); fails=fails+1; }
+
+  // revision dynamics
+  emit("MAIN first contrary seq="); e64(cg(M,3)); emit(" (expect 7)\n");
+  emit("MAIN revision seq="); e64(cg(M,4)); emit(" (expect 13)\n");
+  emit("MAIN contrary pieces to confident revision="); e64(contrary_count(M)); emit(" (expect 4)\n");
+  if(!(cg(M,3)==7)){ emit("FAIL first contrary\n"); fails=fails+1; }
+  if(!(cg(M,4)==13)){ emit("FAIL revision seq\n"); fails=fails+1; }
+  if(!(contrary_count(M)==4)){ emit("FAIL contrary count\n"); fails=fails+1; }
+
+  // verification: world reveals H2; reliabilities update from the outcome
+  ev_verify(M,2);
+  emit("MAIN reliabilities after verification (truth H2):\n");
+  print_reliabilities(M);
+  if(!(src_rel(M,src_idx(M,1))==1000*1/7)){ emit("FAIL Sa rel after verify\n"); fails=fails+1; }
+  if(!(src_rel(M,src_idx(M,2))==1000)){ emit("FAIL Sb rel after verify\n"); fails=fails+1; }
+
+  // ===== Arm ABL-REL: reliability learning off =====
+  let R:[]u8=z_alloc(1184); st_init(R,1,0);
+  run_calibration(R);
+  run_main_world(R);
+  // phase-2 checkpoint needs its own run to observe mid-state
+  let R2:[]u8=z_alloc(1184); st_init(R2,1,0);
+  run_calibration(R2);
+  ev_observe(R2,1,1,1,1); ev_observe(R2,1,1,1,1);
+  ev_observe(R2,2,2,2,2);
+  ev_observe(R2,1,1,2,2); ev_observe(R2,1,1,2,2); ev_observe(R2,1,1,2,2);
+  print_belief(R2,"ABL-REL P2:");
+  let rst2:i32=st_compute(R2);
+  if(!(rst2==11)){ emit("FAIL ABL-REL P2 expect stubborn PROVISIONAL H1 (11)\n"); fails=fails+1; }
+  print_belief(R,"ABL-REL P3:");
+  let rst3:i32=st_compute(R);
+  if(!(rst3==23)){ emit("FAIL ABL-REL P3 expect CONFIDENT H2 (23)\n"); fails=fails+1; }
+
+  // ===== Probe R: repetition attack, MAIN mechanism =====
+  let P:[]u8=z_alloc(1184); st_init(P,0,0);
+  run_probeR(P);
+  print_belief(P,"PROBE-R main-mech:");
+  if(!(st_compute(P)==11)){ emit("FAIL PROBE-R main expect PROVISIONAL (11)\n"); fails=fails+1; }
+
+  // ===== Probe R: repetition attack, discount ablation =====
+  let Q:[]u8=z_alloc(1184); st_init(Q,0,1);
+  run_probeR(Q);
+  print_belief(Q,"PROBE-R no-discount:");
+  if(!(st_compute(Q)==13)){ emit("FAIL PROBE-R abl-ind expect CONFIDENT (13)\n"); fails=fails+1; }
+
+  if(fails==0){ emit("ALL PASS\n"); return 0; }
+  emit("FAILURES: "); e64(fails); emit("\n");
+  return 1;
+}

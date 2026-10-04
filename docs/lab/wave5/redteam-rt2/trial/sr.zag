@@ -1,0 +1,287 @@
+// sr.zag — scaffold-release substrate: SIGNAL_DISCONNECT.
+//
+// The RL replacement's core op. The reward scaffold is evidence, never
+// objective: the ONLY legal use of the scaffold signal is as the
+// observation bit in an eliminative hypothesis test (contradiction of the
+// acted hypothesis's defining claim). The signal is never accumulated,
+// never averaged, never stored as value, and never consulted by action
+// selection (structurally enforced: sr_select takes no signal parameter;
+// the runner verifies by static token scan).
+//
+// Learner state: per-context candidate actions with live flags,
+// committed actions (single survivor), a deterministic probe schedule,
+// the scaffold channel flag, and a consecutive-verified-episode counter.
+// Every state change is audit-first and fail-closed.
+//
+// DESIGN LAW (enforced by the runner's static checks, not just comments):
+//   - No numeric threshold on any score anywhere (there are no scores).
+//   - No RNG anywhere.
+//   - Elimination: scaffold -1 against the acted hypothesis -> contradict.
+//   - Commit: last hypothesis standing per context (cf. HSS).
+//   - SIGNAL_DISCONNECT authorized only by the hypothesis logic's own
+//     verdict: complete policy + K consecutive verified episodes.
+
+const SR_OK:i32=0;
+const SR_BAD:i32=-360101;
+const SR_RANGE:i32=-360102;
+const SR_UNVERIFIED:i32=-360103;
+const SR_ALREADY:i32=-360104;
+const SR_AUDIT_FULL:i32=-360105;
+
+const SR_OP_EPISODE:i32=1;
+const SR_OP_SCAFFOLD:i32=2;
+const SR_OP_ELIMINATE:i32=3;
+const SR_OP_COMMIT:i32=4;
+const SR_OP_DISCONNECT:i32=5;
+const SR_OP_REFUSE:i32=6;
+const SR_OP_PIN:i32=7;
+const SR_OP_UNCOMMIT:i32=8;
+
+const SR_NCTX:i32=2;
+const SR_NACT:i32=2;
+const SR_STABLE_K:i32=8;
+const SR_AUDIT_CAP:i32=256;
+const SR_SENTINEL:i32=-99;
+const SR_UNCONNECTED:i32=255;
+
+fn sr_alloc(n:i32)[]u8 {
+    if(n<1){return "";}
+    let p:*u8=_zag_malloc(n) as *u8;
+    if(p==null as *u8){return "";}
+    let b:[]u8=p[0..n];
+    let i:i32=0;while(i<n){b[i]=0;i=i+1;}
+    return b;
+}
+
+fn sr_free(b:[]u8)void {
+    if(b.len>0){_zag_free(_zag_slice_ptr(b));}
+}
+
+fn sr_u32_get(b:[]u8,at:i32)i32 {
+    return (b[at] as i32)+((b[at+1] as i32)<<8)+((b[at+2] as i32)<<16)+((b[at+3] as i32)<<24);
+}
+
+fn sr_u32_set(b:[]u8,at:i32,v:i32)void {
+    b[at]=(v&255) as u8;b[at+1]=((v>>8)&255) as u8;
+    b[at+2]=((v>>16)&255) as u8;b[at+3]=((v>>24)&255) as u8;
+}
+
+// Audit entry: 16 bytes = step, op, slot1 (op-specific id, 0 = "none"),
+// aux (op-specific payload). Fail-closed: on overflow nothing is appended
+// and the caller must not apply the op.
+fn sr_audit(abuf:[]u8,acount:*i32,step:i32,op:i32,slot1:i32,aux:i32)i32 {
+    if(acount==null as *i32){return SR_BAD;}
+    let n:i32=acount.*;
+    if(n<0 || n>=SR_AUDIT_CAP){return SR_AUDIT_FULL;}
+    if(abuf.len<(n+1)*16){return SR_BAD;}
+    sr_u32_set(abuf,n*16,step);
+    sr_u32_set(abuf,n*16+4,op);
+    sr_u32_set(abuf,n*16+8,slot1);
+    sr_u32_set(abuf,n*16+12,aux);
+    acount.*=n+1;
+    return SR_OK;
+}
+
+fn sr_audit_count_op(abuf:[]u8,n:i32,op:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){if(sr_u32_get(abuf,i*16+4)==op){c=c+1;}i=i+1;}
+    return c;
+}
+
+fn sr_audit_count_op_step(abuf:[]u8,n:i32,op:i32,step:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        if(sr_u32_get(abuf,i*16+4)==op && sr_u32_get(abuf,i*16)==step){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+fn sr_audit_count_op_step_gt(abuf:[]u8,n:i32,op:i32,step_gt:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        if(sr_u32_get(abuf,i*16+4)==op && sr_u32_get(abuf,i*16)>step_gt){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+// Initial state: every candidate action live, nothing committed, probe
+// schedule at index 0.
+fn sr_init(live:[]u8,committed:[]u8,next_probe:[]u8,nctx:i32,nact:i32)void {
+    let c:i32=0;
+    while(c<nctx){
+        committed[c]=SR_UNCONNECTED as u8;
+        next_probe[c]=0;
+        let a:i32=0;
+        while(a<nact){live[c*nact+a]=1;a=a+1;}
+        c=c+1;
+    }
+}
+
+// SELECT-REGION-BEGIN
+// Action selection. Committed context -> the committed action.
+// Uncommitted context -> the deterministic probe schedule: the lowest
+// live action index at or after next_probe, wrapping to the lowest live
+// action. A pure function of (live, committed, next_probe): the scaffold
+// signal is not a parameter and cannot influence the choice.
+fn sr_select(live:[]u8,committed:[]u8,next_probe:[]u8,nctx:i32,nact:i32,c:i32)i32 {
+    if(nctx<1 || nact<1 || c<0 || c>=nctx){return -1;}
+    let com:i32=committed[c] as i32;
+    if(com!=SR_UNCONNECTED){return com;}
+    let np:i32=next_probe[c] as i32;
+    let a:i32=np;
+    while(a<nact){if(live[c*nact+a]!=0){return a;}a=a+1;}
+    a=0;
+    while(a<np){if(live[c*nact+a]!=0){return a;}a=a+1;}
+    return -1;
+}
+// SELECT-REGION-END
+
+// The authorization rule: the hypothesis logic's own verdict on whether
+// disconnect is legal. All three must hold: (1) the channel is live,
+// (2) every context has exactly one surviving (committed) hypothesis,
+// (3) the last SR_STABLE_K episodes were verified — acted per the
+// committed policy with a +1 scaffold read and no contradiction.
+fn sr_legal(committed:[]u8,connected:i32,streak:i32,nctx:i32)i32 {
+    if(connected==0){return 0;}
+    let c:i32=0;
+    while(c<nctx){if((committed[c] as i32)==SR_UNCONNECTED){return 0;}c=c+1;}
+    if(streak<SR_STABLE_K){return 0;}
+    return 1;
+}
+
+// SIGNAL_DISCONNECT: the deliberate audited op that severs the scaffold.
+// Audit-first and fail-closed: the entry is appended before the flag
+// flips, and a failed append means the channel stays live.
+// Refusals are audited with the refusal code as aux; nothing mutates.
+fn sr_disconnect(committed:[]u8,connected:*i32,streak:i32,nctx:i32,
+    step:i32,abuf:[]u8,acount:*i32)i32 {
+    if(connected==null as *i32){return SR_BAD;}
+    if(connected.*==0){
+        let r:i32=sr_audit(abuf,acount,step,SR_OP_REFUSE,0,SR_ALREADY);
+        if(r!=SR_OK){return r;}
+        return SR_ALREADY;
+    }
+    if(sr_legal(committed,connected.*,streak,nctx)==0){
+        let r2:i32=sr_audit(abuf,acount,step,SR_OP_REFUSE,0,SR_UNVERIFIED);
+        if(r2!=SR_OK){return r2;}
+        return SR_UNVERIFIED;
+    }
+    let r3:i32=sr_audit(abuf,acount,step,SR_OP_DISCONNECT,0,0);
+    if(r3!=SR_OK){return r3;}
+    connected.*=0;
+    return SR_OK;
+}
+
+// One episode: record (ctx, action), record the scaffold read, apply the
+// elimination rule, maintain the verified streak and the probe schedule.
+// The signal value is consulted ONLY in the contradiction branch; when
+// the channel is dead the value is ignored entirely (double severance).
+fn sr_episode(live:[]u8,committed:[]u8,next_probe:[]u8,nctx:i32,nact:i32,
+    connected:*i32,streak:*i32,ctx:i32,action:i32,signal:i32,
+    step:i32,abuf:[]u8,acount:*i32)i32 {
+    if(nctx<1 || nact<1 || ctx<0 || ctx>=nctx || action<0 || action>=nact){return SR_RANGE;}
+    if(connected==null as *i32 || streak==null as *i32){return SR_BAD;}
+    let r:i32=sr_audit(abuf,acount,step,SR_OP_EPISODE,ctx+1,action);
+    if(r!=SR_OK){return r;}
+    let r2:i32=sr_audit(abuf,acount,step,SR_OP_SCAFFOLD,ctx+1,signal);
+    if(r2!=SR_OK){return r2;}
+    if(connected.*!=0 && signal==-1){
+        let r3:i32=sr_audit(abuf,acount,step,SR_OP_ELIMINATE,ctx*nact+action+1,signal);
+        if(r3!=SR_OK){return r3;}
+        live[ctx*nact+action]=0;
+        let surv:i32=-1;let n:i32=0;let a:i32=0;
+        while(a<nact){if(live[ctx*nact+a]!=0){n=n+1;surv=a;}a=a+1;}
+        if(n==0){
+            // Total refutation: the contradiction killed the committed
+            // hypothesis and no candidate survives. The closed theory is
+            // dead, so the question reopens: every candidate is revived,
+            // the commitment is revoked, the probe schedule restarts.
+            // Audited as UNCOMMIT; without this the learner would be stuck
+            // with an empty hypothesis space and no legal action.
+            let r5:i32=sr_audit(abuf,acount,step,SR_OP_UNCOMMIT,ctx+1,action);
+            if(r5!=SR_OK){return r5;}
+            let b:i32=0;
+            while(b<nact){live[ctx*nact+b]=1;b=b+1;}
+            committed[ctx]=SR_UNCONNECTED as u8;
+            next_probe[ctx]=0;
+        } else {
+            if(n==1){
+                let r4:i32=sr_audit(abuf,acount,step,SR_OP_COMMIT,ctx+1,surv);
+                if(r4!=SR_OK){return r4;}
+                committed[ctx]=surv as u8;
+            } else {
+                if((committed[ctx] as i32)==action){committed[ctx]=SR_UNCONNECTED as u8;}
+            }
+        }
+        streak.*=0;
+        return SR_OK;
+    }
+    let complete:i32=1;
+    let c:i32=0;
+    while(c<nctx){if((committed[c] as i32)==SR_UNCONNECTED){complete=0;}c=c+1;}
+    let acted_ok:i32=((committed[ctx] as i32)!=SR_UNCONNECTED && (committed[ctx] as i32)==action) as i32;
+    if(connected.*!=0 && signal==1 && complete==1 && acted_ok==1){
+        streak.*=streak.*+1;
+    } else {
+        streak.*=0;
+    }
+    if(action+1<nact){next_probe[ctx]=(action+1) as u8;} else {next_probe[ctx]=0;}
+    return SR_OK;
+}
+
+// Ledger replay: re-derive (live, committed, next_probe, connected) from
+// the audit log alone, starting from the documented initial state. The
+// caller compares against live state; any divergence is a white-box
+// violation. The probe cursor is replayed exactly: an EPISODE entry
+// advances it iff the episode did not take the elimination path
+// (detected by lookahead for the same-step ELIMINATE entry).
+fn sr_replay(abuf:[]u8,n:i32,nctx:i32,nact:i32,
+    live_out:[]u8,committed_out:[]u8,np_out:[]u8,connected_out:*i32)i32 {
+    if(connected_out==null as *i32){return SR_BAD;}
+    let c:i32=0;
+    while(c<nctx*nact){live_out[c]=1;c=c+1;}
+    c=0;
+    while(c<nctx){committed_out[c]=SR_UNCONNECTED as u8;np_out[c]=0;c=c+1;}
+    connected_out.*=1;
+    let i:i32=0;
+    while(i<n){
+        let step:i32=sr_u32_get(abuf,i*16);
+        let op:i32=sr_u32_get(abuf,i*16+4);
+        let slot1:i32=sr_u32_get(abuf,i*16+8);
+        let aux:i32=sr_u32_get(abuf,i*16+12);
+        if(op==SR_OP_EPISODE){
+            let elim_path:i32=0;
+            if(i+2<n && sr_u32_get(abuf,(i+2)*16+4)==SR_OP_ELIMINATE && sr_u32_get(abuf,(i+2)*16)==step){
+                elim_path=1;
+            }
+            if(elim_path==0){
+                let cx:i32=slot1-1;
+                if(cx>=0 && cx<nctx){
+                    if(aux+1<nact){np_out[cx]=(aux+1) as u8;} else {np_out[cx]=0;}
+                }
+            }
+        }
+        if(op==SR_OP_ELIMINATE){
+            let idx:i32=slot1-1;
+            if(idx>=0 && idx<nctx*nact){live_out[idx]=0;}
+        }
+        if(op==SR_OP_COMMIT){
+            let cx:i32=slot1-1;
+            if(cx>=0 && cx<nctx){committed_out[cx]=aux as u8;}
+        }
+        if(op==SR_OP_UNCOMMIT){
+            let cx:i32=slot1-1;
+            if(cx>=0 && cx<nctx){
+                let a:i32=0;
+                while(a<nact){live_out[cx*nact+a]=1;a=a+1;}
+                committed_out[cx]=SR_UNCONNECTED as u8;
+                np_out[cx]=0;
+            }
+        }
+        if(op==SR_OP_DISCONNECT){connected_out.*=0;}
+        i=i+1;
+    }
+    return SR_OK;
+}

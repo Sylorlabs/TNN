@@ -1,0 +1,1 @@
+Implementation note: E51G must reuse the E51E sequential-state generator and terminal utilities exactly. Any nonlinear basis is generic and development-selected; evaluator-side desired action is used only as a training/evaluation consequence label and is never exposed as an input feature. This file is not evidence of execution.

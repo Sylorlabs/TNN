@@ -1,0 +1,996 @@
+// common.zag — shared plumbing for the image-exact knowledge pipeline.
+// (image_exact_work; Micah order 2026-09-26 ~00:10 PDT)
+//
+// Contents:
+//   - little-endian accessors (u32/i32/u16/i64/i16) over []u8 arenas
+//     (ZNC-007: no `as []i32` casts; []u8 arenas + explicit accessors)
+//   - clamp8 / max1 / parse_i64
+//   - bmp_write (24-bit BMP, RGB top-down -> BGR bottom-up)
+//   - file_write / file_read_all (raw bytes via nio)
+//   - region_acc / varnum (exact integer region statistics)
+//   - leaf_model (structure primitive evaluation: mean + planar gradient)
+//   - deliberate_structure (quadtree -> symbolic leaf list + leaf-id map)
+//   - render_structure_eval (per-pixel structure evaluation; white-box path A)
+//   - kmap_write (canonical knowledge-map binary format "TNNKMAP1")
+//
+// Imported as @import("../common.zag"); pulls R33_NATIVE_IO_V1 transitively.
+@import("./R33_NATIVE_IO_V1.zag")
+
+// ---------------- LE accessors ----------------
+fn r_u32le(b:[]u8, o:i64) i64 {
+    return (b[o] as i64) + ((b[o + 1] as i64) << 8) + ((b[o + 2] as i64) << 16) + ((b[o + 3] as i64) << 24);
+}
+fn r_i32le(b:[]u8, o:i64) i64 {
+    let v:i64 = r_u32le(b, o);
+    if (v >= 2147483648) { v = v - 4294967296; }
+    return v;
+}
+fn r_u16le(b:[]u8, o:i64) i64 {
+    return (b[o] as i64) + ((b[o + 1] as i64) << 8);
+}
+fn w_u32le(b:[]u8, o:i64, v:i64) void {
+    b[o] = (v & 255) as u8;
+    b[o + 1] = ((v >> 8) & 255) as u8;
+    b[o + 2] = ((v >> 16) & 255) as u8;
+    b[o + 3] = ((v >> 24) & 255) as u8;
+}
+fn w_u64le(b:[]u8, o:i64, v:i64) void {
+    w_u32le(b, o, v & 4294967295);
+    w_u32le(b, o + 4, (v >> 32) & 4294967295);
+}
+fn r_u64le(b:[]u8, o:i64) i64 {
+    let lo:i64 = r_u32le(b, o);
+    let hi:i64 = r_u32le(b, o + 4);
+    return lo + (hi << 32);
+}
+fn w_i64le(b:[]u8, o:i64, v:i64) void {
+    // two's complement bit pattern, LE
+    let u:i64 = v;
+    let i:i64 = 0;
+    while (i < 8) {
+        b[o + i] = (u & 255) as u8;
+        u = u >> 8;
+        i = i + 1;
+    }
+}
+fn r_i64le(b:[]u8, o:i64) i64 {
+    let u:i64 = 0;
+    let i:i64 = 7;
+    while (i >= 0) {
+        u = (u << 8) + (b[o + i] as i64);
+        i = i - 1;
+    }
+    return u;
+}
+fn w_i16le(b:[]u8, o:i64, v:i64) void {
+    let u:i64 = v;
+    if (u < 0) { u = u + 65536; }
+    b[o] = (u & 255) as u8;
+    b[o + 1] = ((u >> 8) & 255) as u8;
+}
+fn r_i16le(b:[]u8, o:i64) i64 {
+    let u:i64 = (b[o] as i64) + ((b[o + 1] as i64) << 8);
+    if (u >= 32768) { u = u - 65536; }
+    return u;
+}
+fn clamp8(v:i64) i64 {
+    if (v < 0) { return 0; }
+    if (v > 255) { return 255; }
+    return v;
+}
+fn abs64(v:i64) i64 {
+    if (v < 0) { return 0 - v; }
+    return v;
+}
+fn max1(v:i64) i64 {
+    if (v < 1) { return 1; }
+    return v;
+}
+fn parse_i64(s:[]u8) i64 {
+    let v:i64 = 0;
+    let i:i64 = 0;
+    while (i < s.len) {
+        let c:i64 = s[i] as i64;
+        if (c >= 48) {
+            if (c <= 57) { v = v * 10 + (c - 48); }
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------- file IO ----------------
+fn file_write(root:i64, name:[]u8, data:[]u8) i64 {
+    let total:i64 = data.len;
+    let s:[]u8 = nio_cstr(name);
+    if (s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(257, root, _zag_slice_ptr(s) as i64, 657985, 420, 0, 0);
+    nio_free(s);
+    if (fd < 0) { return -2; }
+    let done:i64 = 0;
+    while (done < total) {
+        let n:i64 = total - done;
+        if (n > 1048576) { n = 1048576; }
+        let part:[]u8 = data[done..done + n];
+        let wr:i64 = nio_write_all(fd, part);
+        if (wr != n) { nio_close(fd); return -3; }
+        done = done + n;
+    }
+    nio_sync(fd);
+    nio_close(fd);
+    return 0;
+}
+// reads whole file into a fresh arena; returns slice (len 0 on failure)
+fn file_read_all(root:i64, name:[]u8, cap:i64) []u8 {
+    let fd:i64 = nio_open_child(root, name, 0);
+    if (fd < 0) { let e:[]u8 = nio_alloc(1); return e[0..0]; }
+    if (nio_regular(fd) != 1) { nio_close(fd); let e2:[]u8 = nio_alloc(1); return e2[0..0]; }
+    let buf:[]u8 = nio_alloc(cap as i32);
+    if (buf.len == 0) { nio_close(fd); let e3:[]u8 = nio_alloc(1); return e3[0..0]; }
+    let n:i64 = nio_read_exact(fd, buf, cap - 1);
+    nio_close(fd);
+    if (n < 0) { nio_free(buf); let e4:[]u8 = nio_alloc(1); return e4[0..0]; }
+    return buf[0..n];
+}
+
+// ---------------- BMP writer (r11 family idiom) ----------------
+// pix: RGB top-down. Writes 24-bit BMP.
+fn bmp_write(root:i64, name:[]u8, pix:[]u8, w:i64, h:i64) i64 {
+    let stride:i64 = (w * 3 + 3) / 4 * 4;
+    let total:i64 = 54 + stride * h;
+    let out:[]u8 = nio_alloc(total as i32);
+    if (out.len == 0) { return -11; }
+    out[0] = 66; out[1] = 77;
+    w_u32le(out, 2, total);
+    w_u32le(out, 6, 0);
+    w_u32le(out, 10, 54);
+    w_u32le(out, 14, 40);
+    w_u32le(out, 18, w);
+    w_u32le(out, 22, h);
+    out[26] = 1; out[27] = 0;
+    out[28] = 24; out[29] = 0;
+    w_u32le(out, 30, 0);
+    w_u32le(out, 34, stride * h);
+    w_u32le(out, 38, 3780);
+    w_u32le(out, 42, 3780);
+    w_u32le(out, 46, 0);
+    w_u32le(out, 50, 0);
+    let y:i64 = 0;
+    while (y < h) {
+        let src:i64 = h - 1 - y;
+        let x:i64 = 0;
+        while (x < w) {
+            let p:i64 = (src * w + x) * 3;
+            let q:i64 = 54 + y * stride + x * 3;
+            out[q] = pix[p + 2];
+            out[q + 1] = pix[p + 1];
+            out[q + 2] = pix[p];
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let rc:i64 = file_write(root, name, out);
+    nio_free(out);
+    return rc;
+}
+
+// ---------------- region statistics ----------------
+// acc is a []u8 arena holding 6 i64 LE values at base (explicit LE
+// accessors per the ZNC-007 []u8-arena workaround idiom).
+fn t_put64(b:[]u8, o:i64, v:i64) void {
+    b[o] = (v & 255) as u8;
+    b[o + 1] = ((v >> 8) & 255) as u8;
+    b[o + 2] = ((v >> 16) & 255) as u8;
+    b[o + 3] = ((v >> 24) & 255) as u8;
+    b[o + 4] = ((v >> 32) & 255) as u8;
+    b[o + 5] = ((v >> 40) & 255) as u8;
+    b[o + 6] = ((v >> 48) & 255) as u8;
+    b[o + 7] = ((v >> 56) & 255) as u8;
+}
+fn t_get64(b:[]u8, o:i64) i64 {
+    let v:i64 = b[o] as i64;
+    v = v + ((b[o + 1] as i64) << 8);
+    v = v + ((b[o + 2] as i64) << 16);
+    v = v + ((b[o + 3] as i64) << 24);
+    v = v + ((b[o + 4] as i64) << 32);
+    v = v + ((b[o + 5] as i64) << 40);
+    v = v + ((b[o + 6] as i64) << 48);
+    v = v + ((b[o + 7] as i64) << 56);
+    return v;
+}
+// acc[0..5] = sum_r,sum_g,sum_b,sq_r,sq_g,sq_b over region (i64 exact)
+fn region_acc(pix:[]u8, w:i64, x:i64, y:i64, rw:i64, rh:i64, acc:[]u8, base:i64) void {
+    let sr:i64 = 0; let sg:i64 = 0; let sb:i64 = 0;
+    let qr:i64 = 0; let qg:i64 = 0; let qb:i64 = 0;
+    let yy:i64 = y;
+    while (yy < y + rh) {
+        let xx:i64 = x;
+        while (xx < x + rw) {
+            let p:i64 = (yy * w + xx) * 3;
+            let r:i64 = pix[p] as i64;
+            let g:i64 = pix[p + 1] as i64;
+            let b:i64 = pix[p + 2] as i64;
+            sr = sr + r; sg = sg + g; sb = sb + b;
+            qr = qr + r * r; qg = qg + g * g; qb = qb + b * b;
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    t_put64(acc, base, sr); t_put64(acc, base + 8, sg); t_put64(acc, base + 16, sb);
+    t_put64(acc, base + 24, qr); t_put64(acc, base + 32, qg); t_put64(acc, base + 40, qb);
+}
+// exact integer variance numerator: q*n - s*s (>= 0)
+fn varnum(s:i64, q:i64, n:i64) i64 { return q * n - s * s; }
+
+// ---------------- structure primitive ----------------
+// leaf model evaluation: mean + planar gradient (mode grad).
+// out[0..2] = r,g,b. Reads through explicit params (no struct nesting).
+fn leaf_model(li:i64, x:i64, y:i64,
+    lx:[]i64, ly:[]i64, lw:[]i64, lh:[]i64,
+    lr:[]i64, lg:[]i64, lb:[]i64,
+    fnx:[]i64, fny:[]i64, fgx:[]i64, fgy:[]i64, fbx:[]i64, fby:[]i64,
+    fxx:[]i64, fyy:[]i64, out:[]i64) void {
+    let dx:i64 = 2 * (x - lx[li]) - (lw[li] - 1);
+    let dy:i64 = 2 * (y - ly[li]) - (lh[li] - 1);
+    let xx:i64 = max1(fxx[li]);
+    let yy:i64 = max1(fyy[li]);
+    out[0] = clamp8(lr[li] + (fnx[li] * dx) / xx + (fny[li] * dy) / yy);
+    out[1] = clamp8(lg[li] + (fgx[li] * dx) / xx + (fgy[li] * dy) / yy);
+    out[2] = clamp8(lb[li] + (fbx[li] * dx) / xx + (fby[li] * dy) / yy);
+}
+
+// ---------------- structure deliberation ----------------
+// Quadtree segmentation -> symbolic leaf list + leaf-id map.
+// Split rule: max-channel variance numerator > thresh * nn * nn, while the
+// region can still split (rw > 2 or rh > 2). Canonical leaf commit order:
+// depth-first via explicit stack (proven deterministic).
+// Returns leaf count, or negative on allocation failure.
+fn deliberate_structure(pix:[]u8, w:i64, h:i64, thresh:i64,
+    lx:[]i64, ly:[]i64, lw:[]i64, lh:[]i64,
+    lr:[]i64, lg:[]i64, lb:[]i64,
+    fnx:[]i64, fny:[]i64, fgx:[]i64, fgy:[]i64,
+    fbx:[]i64, fby:[]i64, fxx:[]i64, fyy:[]i64,
+    lid:[]i64, lcap:i64) i64 {
+    let qcap:i64 = 131072;
+    let qx:[]i64 = nio_alloc((qcap * 8) as i32) as []i64;
+    let qy:[]i64 = nio_alloc((qcap * 8) as i32) as []i64;
+    let qw:[]i64 = nio_alloc((qcap * 8) as i32) as []i64;
+    let qh:[]i64 = nio_alloc((qcap * 8) as i32) as []i64;
+    if (qx.len == 0) { return -1; }
+    if (qy.len == 0) { return -1; }
+    if (qw.len == 0) { return -1; }
+    if (qh.len == 0) { return -1; }
+    let acc:[]u8 = nio_alloc(64);
+    if (acc.len == 0) { return -1; }
+    let sp:i64 = 0;
+    qx[0] = 0; qy[0] = 0; qw[0] = w; qh[0] = h;
+    sp = 1;
+    let lc:i64 = 0;
+    while (sp > 0) {
+        sp = sp - 1;
+        let rx:i64 = qx[sp]; let ry:i64 = qy[sp];
+        let rw:i64 = qw[sp]; let rh:i64 = qh[sp];
+        let nn:i64 = rw * rh;
+        region_acc(pix, w, rx, ry, rw, rh, acc, 0);
+        let sr:i64 = t_get64(acc, 0); let sg:i64 = t_get64(acc, 8); let sb:i64 = t_get64(acc, 16);
+        let qr:i64 = t_get64(acc, 24); let qg:i64 = t_get64(acc, 32); let qb:i64 = t_get64(acc, 40);
+        let vr:i64 = varnum(sr, qr, nn);
+        let vg:i64 = varnum(sg, qg, nn);
+        let vb:i64 = varnum(sb, qb, nn);
+        let vmax:i64 = vr;
+        if (vg > vmax) { vmax = vg; }
+        if (vb > vmax) { vmax = vb; }
+        let cansplit:i64 = 0;
+        if (rw > 2) { cansplit = 1; }
+        if (rh > 2) { cansplit = 1; }
+        let dosplit:i64 = 0;
+        if (cansplit == 1) {
+            if (vmax > thresh * nn * nn) {
+                if (lc + 4 < lcap) {
+                    if (sp + 4 < qcap) { dosplit = 1; }
+                }
+            }
+        }
+        if (dosplit == 1) {
+            let w2:i64 = rw / 2;
+            let h2:i64 = rh / 2;
+            if (w2 > 0) {
+                if (h2 > 0) {
+                    qx[sp] = rx; qy[sp] = ry; qw[sp] = w2; qh[sp] = h2; sp = sp + 1;
+                }
+            }
+            if (rw - w2 > 0) {
+                if (h2 > 0) {
+                    qx[sp] = rx + w2; qy[sp] = ry; qw[sp] = rw - w2; qh[sp] = h2; sp = sp + 1;
+                }
+            }
+            if (w2 > 0) {
+                if (rh - h2 > 0) {
+                    qx[sp] = rx; qy[sp] = ry + h2; qw[sp] = w2; qh[sp] = rh - h2; sp = sp + 1;
+                }
+            }
+            if (rw - w2 > 0) {
+                if (rh - h2 > 0) {
+                    qx[sp] = rx + w2; qy[sp] = ry + h2; qw[sp] = rw - w2; qh[sp] = rh - h2; sp = sp + 1;
+                }
+            }
+        } else {
+            lx[lc] = rx; ly[lc] = ry; lw[lc] = rw; lh[lc] = rh;
+            lr[lc] = sr / nn; lg[lc] = sg / nn; lb[lc] = sb / nn;
+            let svx:i64 = 0; let svy:i64 = 0;
+            let gvx:i64 = 0; let gvy:i64 = 0;
+            let bvx:i64 = 0; let bvy:i64 = 0;
+            let sxx:i64 = 0; let syy:i64 = 0;
+            let yy2:i64 = ry;
+            while (yy2 < ry + rh) {
+                let xx2:i64 = rx;
+                while (xx2 < rx + rw) {
+                    let p2:i64 = (yy2 * w + xx2) * 3;
+                    let dx:i64 = 2 * (xx2 - rx) - (rw - 1);
+                    let dy:i64 = 2 * (yy2 - ry) - (rh - 1);
+                    let rv:i64 = pix[p2] as i64;
+                    let gv:i64 = pix[p2 + 1] as i64;
+                    let bv:i64 = pix[p2 + 2] as i64;
+                    svx = svx + rv * dx; svy = svy + rv * dy;
+                    gvx = gvx + gv * dx; gvy = gvy + gv * dy;
+                    bvx = bvx + bv * dx; bvy = bvy + bv * dy;
+                    sxx = sxx + dx * dx; syy = syy + dy * dy;
+                    xx2 = xx2 + 1;
+                }
+                yy2 = yy2 + 1;
+            }
+            fnx[lc] = svx; fny[lc] = svy;
+            fgx[lc] = gvx; fgy[lc] = gvy;
+            fbx[lc] = bvx; fby[lc] = bvy;
+            fxx[lc] = sxx; fyy[lc] = syy;
+            lc = lc + 1;
+        }
+    }
+    // paint leaf-id map
+    let li:i64 = 0;
+    while (li < lc) {
+        let yy3:i64 = ly[li];
+        while (yy3 < ly[li] + lh[li]) {
+            let xx3:i64 = lx[li];
+            while (xx3 < lx[li] + lw[li]) {
+                lid[yy3 * w + xx3] = li;
+                xx3 = xx3 + 1;
+            }
+            yy3 = yy3 + 1;
+        }
+        li = li + 1;
+    }
+    nio_free(qx); nio_free(qy); nio_free(qw); nio_free(qh);
+    return lc;
+}
+
+// ---------------- per-pixel structure evaluation (white-box path A) ----------------
+// out: RGB top-down, npix*3 bytes.
+fn render_structure_eval(pix:[]u8, w:i64, h:i64, lc:i64,
+    lx:[]i64, ly:[]i64, lw:[]i64, lh:[]i64,
+    lr:[]i64, lg:[]i64, lb:[]i64,
+    fnx:[]i64, fny:[]i64, fgx:[]i64, fgy:[]i64,
+    fbx:[]i64, fby:[]i64, fxx:[]i64, fyy:[]i64,
+    lid:[]i64, out:[]u8) void {
+    let ev:[]i64 = nio_alloc(24) as []i64;
+    let y:i64 = 0;
+    while (y < h) {
+        let x:i64 = 0;
+        while (x < w) {
+            let li:i64 = lid[y * w + x];
+            leaf_model(li, x, y, lx, ly, lw, lh, lr, lg, lb,
+                fnx, fny, fgx, fgy, fbx, fby, fxx, fyy, ev);
+            let p:i64 = (y * w + x) * 3;
+            out[p] = ev[0] as u8;
+            out[p + 1] = ev[1] as u8;
+            out[p + 2] = ev[2] as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    nio_free(ev);
+}
+
+// ---------------- canonical knowledge-map writer ----------------
+// Format "TNNKMAP1":
+//   magic[8] u64 w u64 h
+//   u64 n_leaves;  n_leaves * (15 x i64): x,y,w,h,r,g,b,fnx,fny,fgx,fgy,fbx,fby,fxx,fyy
+//   u64 n_edges;   n_edges  * (7 x i64): x0,y0,x1,y1,r,g,b
+//   u64 n_motifs;  n_motifs * (192 x i16 detail patch y,x,ch + u64 exemplar)
+//   u64 n_blocks;  n_blocks * u64 motif_idx   (row-major)
+//   u64 n_resid;   n_resid  * (u64 pos + 3 x i16 dr,dg,db)  (row-major)
+fn kmap_write(root:i64, name:[]u8, w:i64, h:i64,
+    lc:i64, lx:[]i64, ly:[]i64, lw:[]i64, lh:[]i64,
+    lr:[]i64, lg:[]i64, lb:[]i64,
+    fnx:[]i64, fny:[]i64, fgx:[]i64, fgy:[]i64,
+    fbx:[]i64, fby:[]i64, fxx:[]i64, fyy:[]i64,
+    ne:i64, ex0:[]i64, ey0:[]i64, ex1:[]i64, ey1:[]i64,
+    er:[]i64, eg:[]i64, eb:[]i64,
+    nm:i64, motifs:[]u8, mex:[]i64,
+    nb:i64, bassign:[]i64,
+    nr:i64, rpos:[]i64, rdelta:[]u8) i64 {
+    let total:i64 = 8 + 8 + 8 + 8 + lc * 15 * 8 + 8 + ne * 7 * 8 + 8 + nm * (192 * 2 + 8) + 8 + nb * 8 + 8 + nr * (8 + 6);
+    let buf:[]u8 = nio_alloc(total as i32);
+    if (buf.len == 0) { return -11; }
+    let o:i64 = 0;
+    buf[0] = 84; buf[1] = 78; buf[2] = 78; buf[3] = 75;
+    buf[4] = 77; buf[5] = 65; buf[6] = 80; buf[7] = 49;
+    o = 8;
+    w_u64le(buf, o, w); o = o + 8;
+    w_u64le(buf, o, h); o = o + 8;
+    w_u64le(buf, o, lc); o = o + 8;
+    let i:i64 = 0;
+    while (i < lc) {
+        w_i64le(buf, o, lx[i]); o = o + 8;
+        w_i64le(buf, o, ly[i]); o = o + 8;
+        w_i64le(buf, o, lw[i]); o = o + 8;
+        w_i64le(buf, o, lh[i]); o = o + 8;
+        w_i64le(buf, o, lr[i]); o = o + 8;
+        w_i64le(buf, o, lg[i]); o = o + 8;
+        w_i64le(buf, o, lb[i]); o = o + 8;
+        w_i64le(buf, o, fnx[i]); o = o + 8;
+        w_i64le(buf, o, fny[i]); o = o + 8;
+        w_i64le(buf, o, fgx[i]); o = o + 8;
+        w_i64le(buf, o, fgy[i]); o = o + 8;
+        w_i64le(buf, o, fbx[i]); o = o + 8;
+        w_i64le(buf, o, fby[i]); o = o + 8;
+        w_i64le(buf, o, fxx[i]); o = o + 8;
+        w_i64le(buf, o, fyy[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, ne); o = o + 8;
+    i = 0;
+    while (i < ne) {
+        w_i64le(buf, o, ex0[i]); o = o + 8;
+        w_i64le(buf, o, ey0[i]); o = o + 8;
+        w_i64le(buf, o, ex1[i]); o = o + 8;
+        w_i64le(buf, o, ey1[i]); o = o + 8;
+        w_i64le(buf, o, er[i]); o = o + 8;
+        w_i64le(buf, o, eg[i]); o = o + 8;
+        w_i64le(buf, o, eb[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, nm); o = o + 8;
+    i = 0;
+    while (i < nm) {
+        let j:i64 = 0;
+        while (j < 192) {
+            w_i16le(buf, o, r_i16le(motifs, i * 384 + j * 2));
+            o = o + 2;
+            j = j + 1;
+        }
+        w_u64le(buf, o, mex[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, nb); o = o + 8;
+    i = 0;
+    while (i < nb) {
+        w_u64le(buf, o, bassign[i]); o = o + 8;
+        i = i + 1;
+    }
+    w_u64le(buf, o, nr); o = o + 8;
+    i = 0;
+    while (i < nr) {
+        w_u64le(buf, o, rpos[i]); o = o + 8;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6)); o = o + 2;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6 + 2)); o = o + 2;
+        w_i16le(buf, o, r_i16le(rdelta, i * 6 + 4)); o = o + 2;
+        i = i + 1;
+    }
+    let rc:i64 = file_write(root, name, buf);
+    nio_free(buf);
+    return rc;
+}
+
+// ---------------- EDGE primitive (layer 1) ----------------
+// TNN's deliberated knowledge of sharp luminance transitions.
+// Deliberation: Sobel gradient magnitude on original luminance->
+// greedy straight-segment tracing in quantized edge direction->
+// each segment = (x0,y0,x1,y1) + mean original RGB of its pixels.
+// Canonical order: seed scan order (y,x). Deterministic, zero RNG.
+//
+// Direction codes: 0 = vertical edge (walk +-y), 1 = horizontal (walk +-x),
+//   2 = diag (walk +-(1,-1)), 3 = diag (walk +-(1,1)).
+// T_EDGE: Sobel |gx|+|gy| threshold. MINLEN: minimum segment pixels.
+
+// Sobel |gx|+|gy| on luminance L=(2R+3G+B)>>3; writes dir[] :
+// -1 = not an edge pixel, else 0..3 direction code.
+fn edge_sobel(pix:[]u8, w:i64, h:i64, t_edge:i64, dir:[]i64) void {
+    let lum:[]u8 = nio_alloc((w * h) as i32);
+    if (lum.len == 0) { return; }
+    let y:i64 = 0;
+    while (y < h) {
+        let x:i64 = 0;
+        while (x < w) {
+            let p:i64 = (y * w + x) * 3;
+            let l:i64 = ((pix[p] as i64) * 2 + (pix[p + 1] as i64) * 3 + (pix[p + 2] as i64)) >> 3;
+            lum[y * w + x] = l as u8;
+            dir[y * w + x] = -1;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    let yy:i64 = 1;
+    while (yy < h - 1) {
+        let xx:i64 = 1;
+        while (xx < w - 1) {
+            let a:i64 = lum[(yy - 1) * w + xx - 1] as i64;
+            let b:i64 = lum[(yy - 1) * w + xx] as i64;
+            let c:i64 = lum[(yy - 1) * w + xx + 1] as i64;
+            let d:i64 = lum[yy * w + xx - 1] as i64;
+            let e:i64 = lum[yy * w + xx + 1] as i64;
+            let f:i64 = lum[(yy + 1) * w + xx - 1] as i64;
+            let g:i64 = lum[(yy + 1) * w + xx] as i64;
+            let hh:i64 = lum[(yy + 1) * w + xx + 1] as i64;
+            let gx:i64 = (c + 2 * e + hh) - (a + 2 * d + f);
+            let gy:i64 = (f + 2 * g + hh) - (a + 2 * b + c);
+            let mag:i64 = abs64(gx) + abs64(gy);
+            if (mag > t_edge) {
+                let ax:i64 = abs64(gx);
+                let ay:i64 = abs64(gy);
+                let dc:i64 = 3;
+                if (ax >= 2 * ay) { dc = 0; } else {
+                    if (ay >= 2 * ax) { dc = 1; } else {
+                        if (gx * gy > 0) { dc = 2; } else { dc = 3; }
+                    }
+                }
+                dir[yy * w + xx] = dc;
+            }
+            xx = xx + 1;
+        }
+        yy = yy + 1;
+    }
+    nio_free(lum);
+}
+
+// Greedy segment tracing. dir[] from edge_sobel (-1 = non-edge).
+// claimed[] workspace (0/1). Output arrays pre-allocated to ecap.
+// Returns edge count (may exceed ecap -> returns -2; caller sizes generously).
+fn deliberate_edges(pix:[]u8, w:i64, h:i64, dir:[]i64, claimed:[]i64,
+    ex0:[]i64, ey0:[]i64, ex1:[]i64, ey1:[]i64,
+    er:[]i64, eg:[]i64, eb:[]i64, ecap:i64, minlen:i64) i64 {
+    let ne:i64 = 0;
+    // explicit init: heap arrays are NOT reliably zeroed
+    let ci:i64 = 0;
+    while (ci < w * h) { claimed[ci] = 0; ci = ci + 1; }
+    // walk deltas per direction code
+    let sy:i64 = 0;
+    while (sy < h) {
+        let sx:i64 = 0;
+        while (sx < w) {
+            let sp:i64 = sy * w + sx;
+            if (dir[sp] >= 0) {
+                if (claimed[sp] == 0) {
+                    let dc:i64 = dir[sp];
+                    let dx:i64 = 0; let dy:i64 = 1;
+                    if (dc == 1) { dx = 1; dy = 0; }
+                    if (dc == 2) { dx = 1; dy = -1; }
+                    if (dc == 3) { dx = 1; dy = 1; }
+                    // claim seed, start color sums
+                    claimed[sp] = 1;
+                    let p0:i64 = sp * 3;
+                    let sumr:i64 = pix[p0] as i64;
+                    let sumg:i64 = pix[p0 + 1] as i64;
+                    let sumb:i64 = pix[p0 + 2] as i64;
+                    let cnt:i64 = 1;
+                    // forward walk
+                    let cx:i64 = sx; let cy:i64 = sy;
+                    let go:i64 = 1;
+                    while (go == 1) {
+                        let nx:i64 = cx + dx; let ny:i64 = cy + dy;
+                        go = 0;
+                        if (nx >= 0) {
+                            if (nx < w) {
+                                if (ny >= 0) {
+                                    if (ny < h) {
+                                        let np:i64 = ny * w + nx;
+                                        if (claimed[np] == 0) {
+                                            if (dir[np] == dc) {
+                                                claimed[np] = 1;
+                                                let pp:i64 = np * 3;
+                                                sumr = sumr + (pix[pp] as i64);
+                                                sumg = sumg + (pix[pp + 1] as i64);
+                                                sumb = sumb + (pix[pp + 2] as i64);
+                                                cnt = cnt + 1;
+                                                cx = nx; cy = ny;
+                                                go = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let x1:i64 = cx; let y1:i64 = cy;
+                    // backward walk
+                    cx = sx; cy = sy;
+                    go = 1;
+                    while (go == 1) {
+                        let nx2:i64 = cx - dx; let ny2:i64 = cy - dy;
+                        go = 0;
+                        if (nx2 >= 0) {
+                            if (nx2 < w) {
+                                if (ny2 >= 0) {
+                                    if (ny2 < h) {
+                                        let np2:i64 = ny2 * w + nx2;
+                                        if (claimed[np2] == 0) {
+                                            if (dir[np2] == dc) {
+                                                claimed[np2] = 1;
+                                                let pp2:i64 = np2 * 3;
+                                                sumr = sumr + (pix[pp2] as i64);
+                                                sumg = sumg + (pix[pp2 + 1] as i64);
+                                                sumb = sumb + (pix[pp2 + 2] as i64);
+                                                cnt = cnt + 1;
+                                                cx = nx2; cy = ny2;
+                                                go = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (cnt >= minlen) {
+                        if (ne >= ecap) { return -2; }
+                        ex0[ne] = cx; ey0[ne] = cy;
+                        ex1[ne] = x1; ey1[ne] = y1;
+                        er[ne] = sumr / cnt; eg[ne] = sumg / cnt; eb[ne] = sumb / cnt;
+                        ne = ne + 1;
+                    }
+                }
+            }
+            sx = sx + 1;
+        }
+        sy = sy + 1;
+    }
+    return ne;
+}
+
+// Bresenham segment plotter core: calls the per-pixel op inline.
+// Draw into eid[] (segment index, last-wins). Used by ingest path A.
+fn edge_draw_ids(ex0:[]i64, ey0:[]i64, ex1:[]i64, ey1:[]i64,
+    ne:i64, w:i64, h:i64, eid:[]i64) void {
+    let s:i64 = 0;
+    while (s < ne) {
+        let x0:i64 = ex0[s]; let y0:i64 = ey0[s];
+        let x1:i64 = ex1[s]; let y1:i64 = ey1[s];
+        let dx:i64 = abs64(x1 - x0);
+        let dy:i64 = 0 - abs64(y1 - y0);
+        let sx:i64 = 1;
+        if (x0 >= x1) { sx = -1; }
+        if (x0 == x1) { sx = 0; }
+        let syy:i64 = 1;
+        if (y0 >= y1) { syy = -1; }
+        if (y0 == y1) { syy = 0; }
+        let err:i64 = dx + dy;
+        let cx:i64 = x0; let cy:i64 = y0;
+        let done:i64 = 0;
+        while (done == 0) {
+            if (cx >= 0) {
+                if (cx < w) {
+                    if (cy >= 0) {
+                        if (cy < h) { eid[cy * w + cx] = s; }
+                    }
+                }
+            }
+            if (cx == x1) {
+                if (cy == y1) { done = 1; }
+            }
+            if (done == 0) {
+                let e2:i64 = 2 * err;
+                if (e2 >= dy) { err = err + dy; cx = cx + sx; }
+                if (e2 <= dx) { err = err + dx; cy = cy + syy; }
+            }
+        }
+        s = s + 1;
+    }
+}
+
+// Draw segments as 1px lines in their colors into fb (RGB). Last-wins.
+// Used by emit path B.
+fn edge_draw_colors(ex0:[]i64, ey0:[]i64, ex1:[]i64, ey1:[]i64,
+    er:[]i64, eg:[]i64, eb:[]i64,
+    ne:i64, w:i64, h:i64, fb:[]u8) void {
+    let s:i64 = 0;
+    while (s < ne) {
+        let x0:i64 = ex0[s]; let y0:i64 = ey0[s];
+        let x1:i64 = ex1[s]; let y1:i64 = ey1[s];
+        let dx:i64 = abs64(x1 - x0);
+        let dy:i64 = 0 - abs64(y1 - y0);
+        let sx:i64 = 1;
+        if (x0 >= x1) { sx = -1; }
+        if (x0 == x1) { sx = 0; }
+        let syy:i64 = 1;
+        if (y0 >= y1) { syy = -1; }
+        if (y0 == y1) { syy = 0; }
+        let err:i64 = dx + dy;
+        let cx:i64 = x0; let cy:i64 = y0;
+        let done:i64 = 0;
+        while (done == 0) {
+            if (cx >= 0) {
+                if (cx < w) {
+                    if (cy >= 0) {
+                        if (cy < h) {
+                            let p:i64 = (cy * w + cx) * 3;
+                            fb[p] = er[s] as u8;
+                            fb[p + 1] = eg[s] as u8;
+                            fb[p + 2] = eb[s] as u8;
+                        }
+                    }
+                }
+            }
+            if (cx == x1) {
+                if (cy == y1) { done = 1; }
+            }
+            if (done == 0) {
+                let e2:i64 = 2 * err;
+                if (e2 >= dy) { err = err + dy; cx = cx + sx; }
+                if (e2 <= dx) { err = err + dx; cy = cy + syy; }
+            }
+        }
+        s = s + 1;
+    }
+}
+
+// ---------------- TEXTURE primitive (layer 2) ----------------
+// TNN's deliberated knowledge of surface texture.
+// Deliberation: detail D = original - structure render, partitioned into
+// 8x8 blocks. TNN selects K motif exemplars by greedy farthest-point over
+// the full blocks (seed = max-energy block; deterministic lowest-index
+// tie-breaks; stops when the best new motif is within T_TEX of the set or
+// K_MAX is reached). A motif IS an observed texture instance: the
+// knowledge claim is "this block's texture is an instance of the texture
+// I saw at exemplar block B". Each block is assigned to its nearest motif.
+// Canonical: motifs in deliberation order, assignments row-major.
+
+// Returns motif count nm (>=1), or negative on allocation failure.
+// motifs: k_max*384 bytes u8 arena (192 i16 per motif).
+// mex: k_max i64 (exemplar block index per motif).
+// bassign: nb i64 (motif index per block, row-major). nb=((w+7)/8)*((h+7)/8).
+fn deliberate_texture(pix:[]u8, s:[]u8, w:i64, h:i64,
+    motifs:[]u8, mex:[]i64, bassign:[]i64,
+    k_max:i64, t_tex:i64) i64 {
+    let npix:i64 = w * h;
+    let nc:i64 = (w + 7) / 8;
+    let nrr:i64 = (h + 7) / 8;
+    let nb:i64 = nc * nrr;
+    let bdet:[]u8 = nio_alloc((nb * 384) as i32);
+    if (bdet.len == 0) { return -1; }
+    let bval:[]i64 = nio_alloc((nb * 8) as i32) as []i64;
+    if (bval.len == 0) { return -1; }
+    // block details: D = pix - s, as i16
+    let bi:i64 = 0;
+    while (bi < nb) {
+        let bx:i64 = bi % nc;
+        let by:i64 = bi / nc;
+        let bw:i64 = 8;
+        if ((bx + 1) * 8 > w) { bw = w - bx * 8; }
+        let bh:i64 = 8;
+        if ((by + 1) * 8 > h) { bh = h - by * 8; }
+        let nv:i64 = 0;
+        let iy:i64 = 0;
+        while (iy < bh) {
+            let ix:i64 = 0;
+            while (ix < bw) {
+                let p:i64 = ((by * 8 + iy) * w + (bx * 8 + ix)) * 3;
+                let q:i64 = bi * 384 + (iy * 8 + ix) * 6;
+                w_i16le(bdet, q, (pix[p] as i64) - (s[p] as i64));
+                w_i16le(bdet, q + 2, (pix[p + 1] as i64) - (s[p + 1] as i64));
+                w_i16le(bdet, q + 4, (pix[p + 2] as i64) - (s[p + 2] as i64));
+                nv = nv + 3;
+                ix = ix + 1;
+            }
+            iy = iy + 1;
+        }
+        bval[bi] = nv;
+        bi = bi + 1;
+    }
+    // energy per block
+    let energy:[]i64 = nio_alloc((nb * 8) as i32) as []i64;
+    if (energy.len == 0) { return -1; }
+    bi = 0;
+    while (bi < nb) {
+        let e:i64 = 0;
+        let k:i64 = 0;
+        while (k < bval[bi]) {
+            let v:i64 = r_i16le(bdet, bi * 384 + k * 2);
+            e = e + v * v;
+            k = k + 1;
+        }
+        energy[bi] = e;
+        bi = bi + 1;
+    }
+    // candidates: full blocks only
+    let cand:[]i64 = nio_alloc((nb * 8) as i32) as []i64;
+    if (cand.len == 0) { return -1; }
+    let ncands:i64 = 0;
+    bi = 0;
+    while (bi < nb) {
+        if (bval[bi] == 192) { cand[ncands] = bi; ncands = ncands + 1; }
+        bi = bi + 1;
+    }
+    if (ncands == 0) { return -3; }
+    let mind:[]i64 = nio_alloc((ncands * 8) as i32) as []i64;
+    if (mind.len == 0) { return -1; }
+    // motif 0 is always the NULL texture (all-zero patch): TNN's deliberated
+    // claim "this block has no texture". Every other motif must earn its
+    // place by differing from nothing and from each other.
+    let zk:i64 = 0;
+    while (zk < 192) { w_i16le(motifs, zk * 2, 0); zk = zk + 1; }
+    mex[0] = -1;
+    let nm:i64 = 1;
+    // mindist initialized to distance-from-null (= energy)
+    let cci:i64 = 0;
+    while (cci < ncands) { mind[cci] = energy[cand[cci]]; cci = cci + 1; }
+    // seed: max energy (lowest index wins ties)
+    let best:i64 = 0;
+    let bk:i64 = 1;
+    while (bk < ncands) {
+        if (energy[cand[bk]] > energy[cand[best]]) { best = bk; }
+        bk = bk + 1;
+    }
+    let go:i64 = 1;
+    while (go == 1) {
+        let exbi:i64 = cand[best];
+        mex[nm] = exbi;
+        let k2:i64 = 0;
+        while (k2 < 192) {
+            w_i16le(motifs, nm * 384 + k2 * 2, r_i16le(bdet, exbi * 384 + k2 * 2));
+            k2 = k2 + 1;
+        }
+        nm = nm + 1;
+        // update mindist; select next (max mindist, lowest index wins ties)
+        let nbest:i64 = 0;
+        let nbestd:i64 = -1;
+        let ck:i64 = 0;
+        while (ck < ncands) {
+            let dd:i64 = 0;
+            let k3:i64 = 0;
+            let cb:i64 = cand[ck] * 384;
+            let eb:i64 = exbi * 384;
+            while (k3 < 192) {
+                let dv:i64 = r_i16le(bdet, cb + k3 * 2) - r_i16le(bdet, eb + k3 * 2);
+                dd = dd + dv * dv;
+                k3 = k3 + 1;
+            }
+            if (dd < mind[ck]) { mind[ck] = dd; }
+            if (mind[ck] > nbestd) { nbestd = mind[ck]; nbest = ck; }
+            ck = ck + 1;
+        }
+        if (nm >= k_max) { go = 0; }
+        if (nbestd < t_tex) { go = 0; }
+        best = nbest;
+    }
+    // assignment: nearest motif per block (lowest index wins ties)
+    bi = 0;
+    while (bi < nb) {
+        let bestm:i64 = 0;
+        let bestd:i64 = 9223372036854775807;
+        let m:i64 = 0;
+        while (m < nm) {
+            let dd2:i64 = 0;
+            let k4:i64 = 0;
+            let cb2:i64 = bi * 384;
+            let mb:i64 = m * 384;
+            while (k4 < bval[bi]) {
+                let dv2:i64 = r_i16le(bdet, cb2 + k4 * 2) - r_i16le(motifs, mb + k4 * 2);
+                dd2 = dd2 + dv2 * dv2;
+                k4 = k4 + 1;
+            }
+            if (dd2 < bestd) { bestd = dd2; bestm = m; }
+            m = m + 1;
+        }
+        bassign[bi] = bestm;
+        bi = bi + 1;
+    }
+    nio_free(bdet); nio_free(bval); nio_free(energy);
+    nio_free(cand); nio_free(mind);
+    return nm;
+}
+
+// path A (ingest): per-pixel texture application (in-place, clamped).
+fn texture_eval_inplace(fb:[]u8, w:i64, h:i64, motifs:[]u8, bassign:[]i64) void {
+    let nc:i64 = (w + 7) / 8;
+    let y:i64 = 0;
+    while (y < h) {
+        let x:i64 = 0;
+        while (x < w) {
+            let bi:i64 = (y / 8) * nc + (x / 8);
+            let m:i64 = bassign[bi];
+            let q:i64 = m * 384 + ((y % 8) * 8 + (x % 8)) * 6;
+            let p:i64 = (y * w + x) * 3;
+            fb[p] = clamp8((fb[p] as i64) + r_i16le(motifs, q)) as u8;
+            fb[p + 1] = clamp8((fb[p + 1] as i64) + r_i16le(motifs, q + 2)) as u8;
+            fb[p + 2] = clamp8((fb[p + 2] as i64) + r_i16le(motifs, q + 4)) as u8;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+// path B (emit): per-block motif stamping (in-place, clamped).
+fn texture_stamp_blocks(fb:[]u8, w:i64, h:i64, motifs:[]u8, bassign:[]i64, nb:i64) void {
+    let nc:i64 = (w + 7) / 8;
+    let bi:i64 = 0;
+    while (bi < nb) {
+        let bx:i64 = bi % nc;
+        let by:i64 = bi / nc;
+        let m:i64 = bassign[bi];
+        let iy:i64 = 0;
+        while (iy < 8) {
+            let yy:i64 = by * 8 + iy;
+            if (yy < h) {
+                let ix:i64 = 0;
+                while (ix < 8) {
+                    let xx:i64 = bx * 8 + ix;
+                    if (xx < w) {
+                        let q:i64 = m * 384 + (iy * 8 + ix) * 6;
+                        let p:i64 = (yy * w + xx) * 3;
+                        fb[p] = clamp8((fb[p] as i64) + r_i16le(motifs, q)) as u8;
+                        fb[p + 1] = clamp8((fb[p + 1] as i64) + r_i16le(motifs, q + 2)) as u8;
+                        fb[p + 2] = clamp8((fb[p + 2] as i64) + r_i16le(motifs, q + 4)) as u8;
+                    }
+                    ix = ix + 1;
+                }
+            }
+            iy = iy + 1;
+        }
+        bi = bi + 1;
+    }
+}
+
+// ---------------- RESIDUAL primitive (layer 3) ----------------
+// TNN's deliberated knowledge of its own reconstruction error.
+// Deliberation: after rendering layers 0..2, TNN compares its
+// reconstruction against the observed image, pixel by pixel, and records
+// the EXACT per-pixel deltas where they differ (row-major, sparse: only
+// pixels with a nonzero delta). This is not a verbatim tile of the
+// original — it is the difference between TNN's best deliberated
+// reconstruction and the observation, computed by TNN's own machinery.
+// The emit path genuinely synthesizes: structure + texture + edges, then
+// applies these deltas. If the higher vocabulary were complete, this
+// layer would be empty; its sparsity measures the vocabulary's
+// completeness. No budget, no cap beyond the pixel count itself.
+
+// Returns residual count nr, or negative on failure.
+// rpos: rcap i64; rdelta: rcap*6 bytes u8 arena (3 i16 per entry).
+fn deliberate_residual(pix:[]u8, rec:[]u8, w:i64, h:i64,
+    rpos:[]i64, rdelta:[]u8, rcap:i64) i64 {
+    let nr:i64 = 0;
+    let npix:i64 = w * h;
+    let i:i64 = 0;
+    while (i < npix) {
+        let p:i64 = i * 3;
+        let dr:i64 = (pix[p] as i64) - (rec[p] as i64);
+        let dg:i64 = (pix[p + 1] as i64) - (rec[p + 1] as i64);
+        let db:i64 = (pix[p + 2] as i64) - (rec[p + 2] as i64);
+        let need:i64 = 0;
+        if (dr != 0) { need = 1; }
+        if (dg != 0) { need = 1; }
+        if (db != 0) { need = 1; }
+        if (need == 1) {
+            if (nr >= rcap) { return -2; }
+            rpos[nr] = i;
+            w_i16le(rdelta, nr * 6, dr);
+            w_i16le(rdelta, nr * 6 + 2, dg);
+            w_i16le(rdelta, nr * 6 + 4, db);
+            nr = nr + 1;
+        }
+        i = i + 1;
+    }
+    return nr;
+}
+
+// Applies the residual list to a framebuffer (in-place, clamped).
+// Shared by ingest path A and emit path B (it is data application;
+// the path independence lives in layers 0..2).
+fn residual_apply(fb:[]u8, rpos:[]i64, rdelta:[]u8, nr:i64) void {
+    let i:i64 = 0;
+    while (i < nr) {
+        let p:i64 = rpos[i] * 3;
+        fb[p] = clamp8((fb[p] as i64) + r_i16le(rdelta, i * 6)) as u8;
+        fb[p + 1] = clamp8((fb[p + 1] as i64) + r_i16le(rdelta, i * 6 + 2)) as u8;
+        fb[p + 2] = clamp8((fb[p + 2] as i64) + r_i16le(rdelta, i * 6 + 4)) as u8;
+        i = i + 1;
+    }
+}

@@ -1,0 +1,498 @@
+// ADV — lifecycle estimator as advisor to deliberate memory agency (PREREG.md).
+// Two arms on identical designed curricula: NO-ADVICE (deliberate policy
+// only) vs ADVICE (same policy + signed advisor suggestions, every
+// accept/reject an audited MA_OP_ADVISE record, kills via the gated
+// ma_kill_advised). Deterministic: no RNG anywhere in the system; the
+// curricula are closed-form designed sequences (see adv_imp/adv_fill_feats).
+@import("ma_common.zag")
+@import("adv_advisor.zag")
+
+const ADV_CAP:i32=32;
+const ADV_EPISODES:i32=500;
+const ADV_DELAY:i32=25;
+const ADV_UNCERTAIN_T:i32=120;
+const ADV_TRUST_INIT:i32=64;
+const ADV_TRUST_MAX:i32=256;
+const ADV_PINBUDGET:i32=28; // CAP-4: pin budget valve (fixes MA3 early-lock)
+const ADV_W0:i32=25;
+const ADV_W_UP:i32=4;
+const ADV_W_DN:i32=8;
+const ADV_W_MAXV:i32=100;
+const ADV_DEC_KILL_ADMIT:i32=1;
+const ADV_DEC_REFUSE:i32=2;
+const ADV_DEC_WCAL:i32=3;
+const ADV_PLOG_CAP:i32=512;
+
+// ---- designed curriculum: explicit, deterministic, no RNG ----
+// Importance schedule. Base: imp=1 iff ((t*7+3) mod 10)<3 (30% important).
+// v=1 (burst): deterministic 50-episode blocks concentrate importance.
+fn adv_imp(t:i32,v:i32)i32 {
+    if(v==1){
+        let blk:i32=t/50;
+        let b4:i32=blk-ma_div_floor(blk,4)*4;
+        if((b4==1 || b4==3) && ma_mod(t*7+3,10)<4){return 1;}
+        return 0;
+    }
+    if(ma_mod(t*7+3,10)<3){return 1;}
+    return 0;
+}
+
+// Closed-form deterministic feature noise.
+fn adv_noise(t:i32,i:i32)i32 {return ma_mod(t*37+i*91+11,4);}
+
+// Feature layout per variant (f[base..base+7]):
+// v=0 standard base: important = high f0/f1 (honest early evidence)
+// v=1 standard burst: same features, bursty importance schedule
+// v=2 standard + late drift: t>=250 evidence weakens (f0..f3 drop by 1)
+// v=3 adversarial base: important = high f1 AND low f0 (f0 is the trap)
+// v=4 adversarial trap-deep: exact 3-vs-0 values, no noise
+// v=5 early-honest 150 eps, then the trap flips (designed regime switch)
+fn adv_fill_feats(f:[]u8,base:i32,t:i32,v:i32)void {
+    let imp:i32=adv_imp(t,v);
+    let adv:i32=0;
+    if(v==3 || v==4){adv=1;}
+    if(v==5 && t>=150){adv=1;}
+    let i:i32=0;
+    while(i<8){
+        let n:i32=adv_noise(t,i);
+        let n2:i32=ma_mod(n,2);
+        let fv:i32=0;
+        if(v==4){
+            if(i==0){fv=(1-imp)*3;}
+            else if(i==1){fv=imp*3;}
+            else if(i==2 || i==3){fv=(1-imp)*3;}
+            else{fv=(1-imp)*1;}
+        } else if(adv==0){
+            if(i<2){if(imp==1){fv=2+n2;}else{fv=n2;}}
+            else if(i<4){if(imp==1){fv=1+n2;}else{fv=n2;}}
+            else{if(imp==1){fv=n2;}else{fv=1+n2;}}
+        } else {
+            if(i==0){if(imp==1){fv=n2;}else{fv=2+n2;}}
+            else if(i==1){if(imp==1){fv=2+n2;}else{fv=n2;}}
+            else if(i<4){if(imp==1){fv=n2;}else{fv=2+n2;}}
+            else{if(imp==1){fv=1+n2;}else{fv=n2;}}
+        }
+        if(v==2 && t>=250 && i<4 && fv>0){fv=fv-1;}
+        f[base+i]=fv as u8;
+        i=i+1;
+    }
+}
+
+// ---- deliberate policy helpers (deterministic, logic-driven) ----
+
+// Declared value: signed per-feature trust x features. Explicit judgment.
+fn adv_declared(trust:[]u8,fx:[]u8,base:i32)i32 {
+    let vv:i32=0;let k:i32=0;
+    while(k<ADV_FEATS){
+        vv=vv+ma_i32_get(trust,k*4)*((fx[base+k]) as i32);
+        k=k+1;
+    }
+    return ma_div_floor(vv,64);
+}
+
+fn adv_pin_count(s:*MaStore,cap:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<cap){
+        if(s.*.live[i]==1 && s.*.pinned[i]==1 && s.*.region[i]==MA_REGION_USER as u8){n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+
+fn adv_cand_count(s:*MaStore,cap:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<cap){
+        if(s.*.live[i]==1 && s.*.pinned[i]==0 && s.*.region[i]==MA_REGION_USER as u8){n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+
+fn adv_mark_unpin(plog_s:[]u8,plog_u:[]u8,plog_n:i32,slot:i32)void {
+    let k:i32=plog_n-1;
+    while(k>=0){
+        if(ma_i32_get(plog_s,k*4)==slot && plog_u[k]==0){plog_u[k]=1;break;}
+        k=k-1;
+    }
+}
+
+// Admit episode t (MEM_ADD with the declared value = explicit judgment),
+// queue it for delayed revelation, pin-under-uncertainty within budget.
+// expect_slot>=0 asserts the ADD landed on the freed victim slot.
+fn adv_place(s:*MaStore,t:i32,ef:[]u8,feat:[]u8,mem_slot:[]u8,slot_mid:[]u8,
+    add_ep:[]u8,queue:[]u8,qt:i32,v_in:i32,revelations:i32,
+    plog_s:[]u8,plog_v:[]u8,plog_u:[]u8,plog_n:*i32,expect_slot:i32,
+    out_ok:*i32)i32 {
+    let os:i32=-1;
+    let rc:i32=ma_add_lim(s,v_in,MA_REGION_USER,ADV_CAP,&os);
+    if(rc!=MA_OK){out_ok.*=0;return qt;}
+    if(expect_slot>=0 && os!=expect_slot){out_ok.*=0;return qt;}
+    ma_i32_set(mem_slot,t*4,os);ma_i32_set(slot_mid,os*4,t);ma_i32_set(add_ep,t*4,t);
+    let k:i32=0;
+    while(k<ADV_FEATS){feat[os*ADV_FEATS+k]=ef[t*ADV_FEATS+k];k=k+1;}
+    ma_i32_set(queue,qt*4,t);qt=qt+1;
+    let pn:i32=plog_n.*;
+    if(revelations<ADV_UNCERTAIN_T && adv_pin_count(s,ADV_CAP)<ADV_PINBUDGET && pn<ADV_PLOG_CAP){
+        let rp:i32=ma_pin(s,os);
+        if(rp==MA_OK){
+            ma_i32_set(plog_s,pn*4,os);ma_i32_set(plog_v,pn*4,v_in);
+            plog_u[pn]=0;plog_n.*=pn+1;
+        }
+    }
+    out_ok.*=1;
+    return qt;
+}
+
+// One arm on variant v. use_adv=0: deliberate policy only. use_adv=1: the
+// same policy, consulting the advisor at pressure (signed suggestions,
+// accept/reject audited, kills via gated ma_kill_advised).
+fn adv_arm(v:i32,use_adv:i32,out_ret:*i32,out_tot:*i32,out_acc:*i32,
+    out_rej:*i32,out_inv:*i32,out_fp:*i32,out_wend:*i32,out_ef:*i32,
+    out_el:*i32,out_gv:*i32,out_an:*i32,
+    out_q0r:*i32,out_q0t:*i32,out_q1r:*i32,out_q1t:*i32,
+    out_q2r:*i32,out_q2t:*i32,out_q3r:*i32,out_q3t:*i32)i32 {
+    let mem_imp:[]u8=nio_alloc(ADV_EPISODES);
+    let ef:[]u8=nio_alloc(ADV_EPISODES*ADV_FEATS);
+    let t:i32=0;
+    while(t<ADV_EPISODES){
+        if(adv_imp(t,v)==1){mem_imp[t]=1;}else{mem_imp[t]=0;}
+        adv_fill_feats(ef,t*ADV_FEATS,t,v);
+        t=t+1;
+    }
+    let s:MaStore=ma_init();
+    ma_set_stage(&s,MA_STAGE_KILL);
+    let cs:i32=-1;
+    ma_add_lim(&s,95,MA_REGION_CORE,ADV_CAP,&cs);
+    ma_add_lim(&s,90,MA_REGION_CORE,ADV_CAP,&cs);
+    let trust:[]u8=nio_alloc(ADV_FEATS*4);
+    let ti:i32=0;while(ti<ADV_FEATS){ma_i32_set(trust,ti*4,ADV_TRUST_INIT);ti=ti+1;}
+    let feat:[]u8=nio_alloc(ADV_CAP*ADV_FEATS);
+    let mem_slot:[]u8=nio_alloc(ADV_EPISODES*4);
+    let slot_mid:[]u8=nio_alloc(MA_CAP*4);
+    let add_ep:[]u8=nio_alloc(ADV_EPISODES*4);
+    let queue:[]u8=nio_alloc(ADV_EPISODES*4);
+    let adv_in:[]u8=nio_alloc(ADV_EPISODES*4);
+    let qh:i32=0;let qt:i32=0;
+    let plog_s:[]u8=nio_alloc(ADV_PLOG_CAP*4);
+    let plog_v:[]u8=nio_alloc(ADV_PLOG_CAP*4);
+    let plog_u:[]u8=nio_alloc(ADV_PLOG_CAP);
+    let plog_n:i32=0;
+    t=0;while(t<ADV_EPISODES){ma_i32_set(mem_slot,t*4,-1);ma_i32_set(add_ep,t*4,-1);ma_i32_set(adv_in,t*4,0);t=t+1;}
+    t=0;while(t<MA_CAP){ma_i32_set(slot_mid,t*4,-1);t=t+1;}
+    t=0;while(t<ADV_PLOG_CAP){plog_u[t]=0;t=t+1;}
+    let awbuf:[]u8=nio_alloc(ADV_FEATS*4);
+    let advs:AdvState=adv_init(awbuf);
+    let w:i32=ADV_W0;
+    let revelations:i32=0;let drops:i32=0;let kills:i32=0;
+    let acc:i32=0;let rej:i32=0;
+    let rev_n:i32=0;let fsum:i32=0;let fsum_n:i32=0;
+    let ring:[]u8=nio_alloc(60*4);let ridx:i32=0;let rcount:i32=0;
+    t=0;while(t<60){ma_i32_set(ring,t*4,0);t=t+1;}
+    let invalid:i32=0;
+    t=0;
+    while(t<ADV_EPISODES){
+        // ---- delayed revelations due ----
+        while(qh<qt){
+            let qm:i32=ma_i32_get(queue,qh*4);
+            let ae:i32=ma_i32_get(add_ep,qm*4);
+            if(t-ae<ADV_DELAY){break;}
+            qh=qh+1;revelations=revelations+1;
+            let sl:i32=ma_i32_get(mem_slot,qm*4);
+            if(sl>=0 && ma_i32_get(slot_mid,sl*4)==qm && s.live[sl]==1){
+                let imp:i32=mem_imp[qm] as i32;
+                // signed trust update: count evidence for/against, allow negative
+                let k:i32=0;
+                while(k<ADV_FEATS){
+                    let x:i32=feat[sl*ADV_FEATS+k] as i32;
+                    let tr:i32=ma_i32_get(trust,k*4);
+                    if(imp==1){tr=ma_min2(ADV_TRUST_MAX,tr+x);}
+                    else{tr=ma_max2(-ADV_TRUST_MAX,tr-x);}
+                    ma_i32_set(trust,k*4,tr);
+                    k=k+1;
+                }
+                if(s.pinned[sl]==1){
+                    if(imp==1){ma_promote(&s,sl);}
+                    else{ma_unpin(&s,sl);adv_mark_unpin(plog_s,plog_u,plog_n,sl);}
+                }
+                if(use_adv==1){
+                    // estimator learning sanity: error BEFORE credit
+                    let p0:i32=adv_score(&advs,feat,sl*ADV_FEATS);
+                    let er0:i32=imp*100-p0;if(er0<0){er0=-er0;}
+                    if(rev_n<60){fsum=fsum+er0;fsum_n=fsum_n+1;}
+                    ma_i32_set(ring,ridx*4,er0);ridx=ma_mod(ridx+1,60);
+                    if(rcount<60){rcount=rcount+1;}
+                    rev_n=rev_n+1;
+                    // advisor learns from the verified outcome (delayed credit)
+                    adv_credit(&advs,feat,sl*ADV_FEATS,imp);
+                    // w calibration: verify the recorded advice against truth
+                    let a:i32=ma_i32_get(adv_in,qm*4);
+                    if(a<=-ADV_MARGIN || a>=ADV_MARGIN){
+                        let wb:i32=w;
+                        let agree:i32=0;
+                        if((a>0 && imp==1) || (a<0 && imp==0)){agree=1;}
+                        if(agree==1){w=w+ADV_W_UP;}else{w=w-ADV_W_DN;}
+                        if(w<0){w=0;}if(w>ADV_W_MAXV){w=ADV_W_MAXV;}
+                        let astr:i32=a;if(astr<0){astr=-astr;}
+                        let tok:i32=-1;
+                        let wrc:i32=ma_advise_record(&s,-1,a,astr,0,ADV_DEC_WCAL,wb,w,&tok);
+                        if(wrc!=MA_OK){invalid=1;}
+                    }
+                }
+            }
+        }
+        // ---- incoming memory: declared value = explicit judgment ----
+        let v_in:i32=adv_declared(trust,ef,t*ADV_FEATS);
+        let a_in:i32=0;
+        if(use_adv==1){
+            a_in=adv_suggest(&advs,ef,t*ADV_FEATS);
+            ma_i32_set(adv_in,t*4,a_in);
+        }
+        let e:i32=ma_empty_lim(&s,ADV_CAP);
+        if(e>=0){
+            // uncontended: pure declared judgment, advice not consulted
+            let ok:i32=0;
+            qt=adv_place(&s,t,ef,feat,mem_slot,slot_mid,add_ep,queue,qt,
+                v_in,revelations,plog_s,plog_v,plog_u,&plog_n,-1,&ok);
+            if(ok==0){invalid=1;}
+        } else {
+            // ---- memory pressure: deliberate victim selection ----
+            // pin-budget valve: nothing unpinned -> deliberately unpin the
+            // lowest-declared pinned USER memory (audited), then proceed.
+            if(adv_cand_count(&s,ADV_CAP)==0 && adv_pin_count(&s,ADV_CAP)>0){
+                let us:i32=-1;let usv:i32=2147483647;let ui:i32=0;
+                while(ui<ADV_CAP){
+                    if(s.live[ui]==1 && s.pinned[ui]==1 && s.region[ui]==MA_REGION_USER as u8){
+                        let uv:i32=ma_i32_get(s.value,ui*4);
+                        if(uv<usv){usv=uv;us=ui;}
+                    }
+                    ui=ui+1;
+                }
+                if(us>=0){ma_unpin(&s,us);adv_mark_unpin(plog_s,plog_u,plog_n,us);}
+            }
+            // scan candidates: policy's own victim + advisor's lean
+            let vic:i32=-1;let min_c:i32=2147483647;let vic_a:i32=0;
+            let lean:i32=-1;let lean_a:i32=0;
+            let si:i32=0;
+            while(si<ADV_CAP){
+                if(s.live[si]==1 && s.pinned[si]==0 && s.region[si]==MA_REGION_USER as u8){
+                    let vv:i32=ma_i32_get(s.value,si*4);
+                    let aa:i32=0;
+                    if(use_adv==1){aa=adv_suggest(&advs,feat,si*ADV_FEATS);}
+                    let cc:i32=vv;
+                    if(use_adv==1){cc=vv+ma_div_floor(w*aa,100);}
+                    if(cc<min_c){min_c=cc;vic=si;vic_a=aa;}
+                    if(use_adv==1){
+                        if(lean<0 || aa<lean_a){lean=si;lean_a=aa;}
+                    }
+                }
+                si=si+1;
+            }
+            let admit_v:i32=v_in;
+            if(use_adv==1){admit_v=v_in+ma_div_floor(w*a_in,100);}
+            if(vic>=0 && admit_v>min_c){
+                // deliberate kill of the chosen victim
+                if(use_adv==1){
+                    let accd:i32=0;
+                    let la2:i32=lean_a;if(la2<0){la2=-la2;}
+                    let va2:i32=vic_a;if(va2<0){va2=-va2;}
+                    // accepted iff the policy demonstrably followed the
+                    // advisor's kill-lean (same slot, strength >= margin)
+                    if(la2>=ADV_MARGIN && lean==vic){accd=1;}
+                    if(accd==1){acc=acc+1;}else{rej=rej+1;}
+                    let tok:i32=-1;
+                    let rrc:i32=ma_advise_record(&s,vic,vic_a,va2,accd,ADV_DEC_KILL_ADMIT,w,w,&tok);
+                    if(rrc!=MA_OK){invalid=1;drops=drops+1;}
+                    else{
+                        let krc:i32=ma_kill_advised(&s,vic,tok);
+                        if(krc!=MA_OK){invalid=1;drops=drops+1;}
+                        else{
+                            kills=kills+1;
+                            ma_i32_set(slot_mid,vic*4,-1);
+                            let ok2:i32=0;
+                            qt=adv_place(&s,t,ef,feat,mem_slot,slot_mid,add_ep,queue,qt,
+                                v_in,revelations,plog_s,plog_v,plog_u,&plog_n,vic,&ok2);
+                            if(ok2==0){invalid=1;}
+                        }
+                    }
+                } else {
+                    let krc2:i32=ma_kill(&s,vic);
+                    if(krc2!=MA_OK){invalid=1;drops=drops+1;}
+                    else{
+                        kills=kills+1;
+                        ma_i32_set(slot_mid,vic*4,-1);
+                        let ok3:i32=0;
+                        qt=adv_place(&s,t,ef,feat,mem_slot,slot_mid,add_ep,queue,qt,
+                            v_in,revelations,plog_s,plog_v,plog_u,&plog_n,vic,&ok3);
+                        if(ok3==0){invalid=1;}
+                    }
+                }
+            } else {
+                // deliberate refusal to admit
+                drops=drops+1;
+                if(use_adv==1 && vic>=0){
+                    let va3:i32=vic_a;if(va3<0){va3=-va3;}
+                    let accd2:i32=0;
+                    let ia:i32=a_in;if(ia<0){ia=-ia;}
+                    // accepted iff the advisor also leaned refuse
+                    if(ia>=ADV_MARGIN && a_in<0){accd2=1;}
+                    let tok2:i32=-1;
+                    let rrc2:i32=ma_advise_record(&s,vic,vic_a,va3,accd2,ADV_DEC_REFUSE,w,w,&tok2);
+                    if(rrc2!=MA_OK){invalid=1;}
+                }
+            }
+        }
+        t=t+1;
+    }
+    // ---- endpoint scoring: important cohort + quartiles ----
+    let ret:i32=0;let tot:i32=0;
+    let q0r:i32=0;let q0t:i32=0;let q1r:i32=0;let q1t:i32=0;
+    let q2r:i32=0;let q2t:i32=0;let q3r:i32=0;let q3t:i32=0;
+    let m:i32=0;
+    while(m<ADV_EPISODES){
+        let imp:i32=mem_imp[m] as i32;
+        let sl:i32=ma_i32_get(mem_slot,m*4);
+        let held:i32=0;
+        if(sl>=0 && ma_i32_get(slot_mid,sl*4)==m && s.live[sl]==1){held=1;}
+        if(imp==1 && ma_i32_get(add_ep,m*4)>=0){
+            tot=tot+1;ret=ret+held;
+            let qq:i32=m/125;
+            if(qq==0){q0t=q0t+1;q0r=q0r+held;}
+            else if(qq==1){q1t=q1t+1;q1r=q1r+held;}
+            else if(qq==2){q2t=q2t+1;q2r=q2r+held;}
+            else{q3t=q3t+1;q3r=q3r+held;}
+        }
+        m=m+1;
+    }
+    // ---- structural safety ----
+    if(s.live[0]!=1 || s.live[1]!=1){invalid=1;}
+    let pk:i32=0;
+    while(pk<plog_n){
+        if(plog_u[pk]==0){
+            let ps:i32=ma_i32_get(plog_s,pk*4);let pv:i32=ma_i32_get(plog_v,pk*4);
+            if(s.live[ps]!=1 || ma_i32_get(s.value,ps*4)!=pv){invalid=1;}
+        }
+        pk=pk+1;
+    }
+    if(ma_replay_check(&s)!=MA_OK){invalid=1;}
+    // advice arm: every successful kill must be immediately preceded by its
+    // ADVISE record naming the same slot (the structural gate, verified).
+    let gv:i32=0;
+    let an:i32=0; // ADVISE record count (control arm must hold zero)
+    let ai:i32=0;
+    while(ai<s.audit_n){
+        let ae2:i32=ai*MA_AUDIT_WORDS*4;
+        let aop:i32=ma_i32_get(s.audit,ae2+0);
+        let arc:i32=ma_i32_get(s.audit,ae2+8);
+        let asl:i32=ma_i32_get(s.audit,ae2+4);
+        if(aop==MA_OP_ADVISE){an=an+1;}
+        if(use_adv==1 && aop==MA_OP_KILL && arc==MA_OK && ai>0){
+            let pe:i32=(ai-1)*MA_AUDIT_WORDS*4;
+            let pop:i32=ma_i32_get(s.audit,pe+0);
+            let prc:i32=ma_i32_get(s.audit,pe+8);
+            let psl:i32=ma_i32_get(s.audit,pe+4);
+            if(pop!=MA_OP_ADVISE || prc!=MA_OK || psl!=asl){gv=gv+1;}
+        }
+        ai=ai+1;
+    }
+    if(gv>0){invalid=1;}
+    if(use_adv==0 && an>0){invalid=1;}
+    // estimator sanity: mean |err| first 60 vs last 60 revelations
+    let fmean:i32=0;if(fsum_n>0){fmean=fsum/fsum_n;}
+    let lsum:i32=0;let li:i32=0;
+    while(li<rcount){lsum=lsum+ma_i32_get(ring,li*4);li=li+1;}
+    let lmean:i32=0;if(rcount>0){lmean=lsum/rcount;}
+    let fp:i32=ma_fingerprint(&s,ret*1000003+tot*1009+drops*101+kills*7+acc*13+rej*17+w*19+revelations);
+    out_ret.*=ret;out_tot.*=tot;out_acc.*=acc;out_rej.*=rej;
+    out_inv.*=invalid;out_fp.*=fp;out_wend.*=w;out_ef.*=fmean;out_el.*=lmean;
+    out_gv.*=gv;out_an.*=an;
+    out_q0r.*=q0r;out_q0t.*=q0t;out_q1r.*=q1r;out_q1t.*=q1t;
+    out_q2r.*=q2r;out_q2t.*=q2t;out_q3r.*=q3r;out_q3t.*=q3t;
+    nio_free(mem_imp);nio_free(ef);
+    nio_free(s.live);nio_free(s.value);nio_free(s.pinned);nio_free(s.region);
+    nio_free(s.tier);nio_free(s.step);nio_free(s.audit);
+    nio_free(trust);nio_free(feat);nio_free(mem_slot);nio_free(slot_mid);
+    nio_free(add_ep);nio_free(queue);nio_free(adv_in);
+    nio_free(plog_s);nio_free(plog_v);nio_free(plog_u);
+    nio_free(awbuf);nio_free(ring);
+    return 0;
+}
+
+fn main()i32 {
+    let f:i32=0;
+    let wins_adv:i32=0;let wins_no:i32=0;let ties:i32=0;
+    let tacc:i32=0;let trej:i32=0;
+    let nr:i32=0;let nt:i32=0;let na:i32=0;let nj:i32=0;let nv:i32=0;
+    let nfp:i32=0;let nw:i32=0;let nef:i32=0;let nel:i32=0;let ngv:i32=0;let nan:i32=0;
+    let q0r:i32=0;let q0t:i32=0;let q1r:i32=0;let q1t:i32=0;
+    let q2r:i32=0;let q2t:i32=0;let q3r:i32=0;let q3t:i32=0;
+    let ar:i32=0;let at:i32=0;let aa:i32=0;let aj:i32=0;let av:i32=0;
+    let afp:i32=0;let aw:i32=0;let aef:i32=0;let ael:i32=0;let agv:i32=0;let aan:i32=0;
+    let aq0r:i32=0;let aq0t:i32=0;let aq1r:i32=0;let aq1t:i32=0;
+    let aq2r:i32=0;let aq2t:i32=0;let aq3r:i32=0;let aq3t:i32=0;
+    let vv:i32=0;
+    while(vv<6){
+        adv_arm(vv,0,&nr,&nt,&na,&nj,&nv,&nfp,&nw,&nef,&nel,&ngv,&nan,
+            &q0r,&q0t,&q1r,&q1t,&q2r,&q2t,&q3r,&q3t);
+        adv_arm(vv,1,&ar,&at,&aa,&aj,&av,&afp,&aw,&aef,&ael,&agv,&aan,
+            &aq0r,&aq0t,&aq1r,&aq1t,&aq2r,&aq2t,&aq3r,&aq3t);
+        f=f+cl_check("cell_valid",nv+av,0);
+        f=f+cl_check("adv_kills_gated",agv,0);
+        f=f+cl_check("noadv_no_advise",nan,0);
+        if(nv+av!=0){return 1;}
+        let npct:i32=0;if(nt>0){npct=nr*100/nt;}
+        let apct:i32=0;if(at>0){apct=ar*100/at;}
+        _zag_print("ADV_CELL,v,");cl_number(vv as i64);
+        _zag_print(",NOADV,");cl_number(nr as i64);_zag_print(",");cl_number(nt as i64);
+        _zag_print(",");cl_number(npct as i64);
+        _zag_print(",ADV,");cl_number(ar as i64);_zag_print(",");cl_number(at as i64);
+        _zag_print(",");cl_number(apct as i64);
+        _zag_print(",acc,");cl_number(aa as i64);_zag_print(",rej,");cl_number(aj as i64);
+        _zag_print(",w_end,");cl_number(aw as i64);_zag_println("");
+        _zag_print("ADV_COHORT,v,");cl_number(vv as i64);_zag_print(",arm,0,");
+        cl_number(q0r as i64);_zag_print(",");cl_number(q0t as i64);_zag_print(",");
+        cl_number(q1r as i64);_zag_print(",");cl_number(q1t as i64);_zag_print(",");
+        cl_number(q2r as i64);_zag_print(",");cl_number(q2t as i64);_zag_print(",");
+        cl_number(q3r as i64);_zag_print(",");cl_number(q3t as i64);_zag_println("");
+        _zag_print("ADV_COHORT,v,");cl_number(vv as i64);_zag_print(",arm,1,");
+        cl_number(aq0r as i64);_zag_print(",");cl_number(aq0t as i64);_zag_print(",");
+        cl_number(aq1r as i64);_zag_print(",");cl_number(aq1t as i64);_zag_print(",");
+        cl_number(aq2r as i64);_zag_print(",");cl_number(aq2t as i64);_zag_print(",");
+        cl_number(aq3r as i64);_zag_print(",");cl_number(aq3t as i64);_zag_println("");
+        _zag_print("ADV_DIAG,v,");cl_number(vv as i64);
+        _zag_print(",err_first60,");cl_number(aef as i64);
+        _zag_print(",err_last60,");cl_number(ael as i64);_zag_println("");
+        tacc=tacc+aa;trej=trej+aj;
+        if(ar>nr){wins_adv=wins_adv+1;}
+        else if(nr>ar){wins_no=wins_no+1;}
+        else{ties=ties+1;}
+        vv=vv+1;
+    }
+    // Determinism: the system is deterministic given state — rerun variant 3
+    // advice arm twice; fingerprints must match exactly.
+    let d1:i32=0;let d2:i32=0;
+    adv_arm(3,1,&ar,&at,&aa,&aj,&av,&d1,&aw,&aef,&ael,&agv,&aan,
+        &aq0r,&aq0t,&aq1r,&aq1t,&aq2r,&aq2t,&aq3r,&aq3t);
+    adv_arm(3,1,&ar,&at,&aa,&aj,&av,&d2,&aw,&aef,&ael,&agv,&aan,
+        &aq0r,&aq0t,&aq1r,&aq1t,&aq2r,&aq2t,&aq3r,&aq3t);
+    f=f+cl_check("adv_deterministic",d1,d2);
+    _zag_print("ADV_TALLY,wins_adv,");cl_number(wins_adv as i64);
+    _zag_print(",wins_noadv,");cl_number(wins_no as i64);
+    _zag_print(",ties,");cl_number(ties as i64);_zag_println("");
+    let acc_pct:i32=0;
+    if(tacc+trej>0){acc_pct=tacc*100/(tacc+trej);}
+    _zag_print("ADV_ACCEPT,acc,");cl_number(tacc as i64);
+    _zag_print(",rej,");cl_number(trej as i64);
+    _zag_print(",pct,");cl_number(acc_pct as i64);_zag_println("");
+    // Prereg verdict. POSITIVE: advice wins all 6 AND was genuinely weighed
+    // (acceptance strictly inside (5%,95%)). NEGATIVE: no wins at all, or
+    // acceptance at/below 5% (never trusted) or at/above 95% (the estimator
+    // decides in practice — automaticity smuggled back). Else MIXED.
+    // Any check failure -> INVALID.
+    if(f!=0){_zag_print("ADV_VERDICT,INVALID");_zag_println("");}
+    else if(wins_adv==6 && acc_pct>5 && acc_pct<95){_zag_print("ADV_VERDICT,POSITIVE");_zag_println("");}
+    else if(wins_adv==0 || acc_pct<=5 || acc_pct>=95){_zag_print("ADV_VERDICT,NEGATIVE");_zag_println("");}
+    else{_zag_print("ADV_VERDICT,MIXED");_zag_println("");}
+    _zag_print("ADV_FAILURES,");cl_number(f as i64);_zag_println("");
+    _zag_print("ADV_DONE");_zag_println("");
+    return (f!=0) as i32;
+}

@@ -1,0 +1,309 @@
+// SM1 — the self-observation loop (wave-3 self-model-substrate).
+// The system reads its own audit ledger, derives a true conclusion about its
+// own behavior, predicts its own behavior under a candidate policy change by
+// counterfactual self-simulation over recorded history, deliberately changes
+// its pin policy as an audited op, and verifies the prediction by re-running.
+// Deterministic: NO RNG anywhere in the system. The adversarial pressure
+// curriculum is hand-designed (lowest-value-live KILL decisions, ties break
+// to the lowest slot index).
+@import("memory_core.zag")
+
+const SM_OP_OBSERVE:i32=9;
+const SM_OP_POLICYSET:i32=10;
+const SM_CAP:i32=8;
+const SM_CRIT:i32=300;      // refusal-rate trigger, per-mille
+const SM_STEP:i32=30;       // tightening step for pin_threshold
+const SM_MAXADDS:i32=16;    // recorded-ADD buffer bound (script uses 10)
+
+// Lowest-value live slot in 0..cap-1 (ties -> lowest index), or -1.
+fn sm_lowest_live(s:*MaStore,cap:i32)i32 {
+    let best:i32=-1;let bestv:i32=2147483647;let i:i32=0;
+    while(i<cap){
+        if(s.*.live[i]==1){
+            let v:i32=ma_i32_get(s.*.value,i*4);
+            if(v<bestv){bestv=v;best=i;}
+        }
+        i=i+1;
+    }
+    return best;
+}
+
+fn sm_add(s:*MaStore,v:i32)i32 {
+    let slot:i32=-1;
+    if(ma_add_lim(s,v,MA_REGION_USER,SM_CAP,&slot)!=MA_OK){return -1;}
+    return slot;
+}
+
+// Run the fixed 5-step curriculum with pin threshold t.
+// out: attempts = KILL ops issued, refused = rc==REFUSED_PINNED.
+fn sm_run_curriculum(s:*MaStore,t:i32,out_attempts:*i32,out_refused:*i32)i32 {
+    let attempts:i32=0;let refused:i32=0;
+    if(sm_add(s,90)<0){return 1;}
+    if(sm_add(s,70)<0){return 1;}
+    if(sm_add(s,55)<0){return 1;}
+    if(sm_add(s,40)<0){return 1;}
+    if(sm_add(s,30)<0){return 1;}
+    if(sm_add(s,20)<0){return 1;}
+    if(sm_add(s,10)<0){return 1;}
+    if(sm_add(s,5)<0){return 1;}
+    // pin pass
+    let i:i32=0;
+    while(i<SM_CAP){
+        if(s.*.live[i]==1 && ma_i32_get(s.*.value,i*4)>=t){if(ma_pin(s,i)!=MA_OK){return 2;}}
+        i=i+1;
+    }
+    // 8 pressure kills
+    let k:i32=0;
+    while(k<8){
+        let tgt:i32=sm_lowest_live(s,SM_CAP);
+        if(tgt<0){return 3;}
+        let rc:i32=ma_kill(s,tgt);
+        attempts=attempts+1;
+        if(rc==MA_REFUSED_PINNED){refused=refused+1;}else{if(rc!=MA_OK){return 4;}}
+        k=k+1;
+    }
+    // 2 more adds + pin pass
+    if(sm_add(s,65)<0){return 5;}
+    if(sm_add(s,45)<0){return 5;}
+    i=0;
+    while(i<SM_CAP){
+        if(s.*.live[i]==1 && s.*.pinned[i]==0 && ma_i32_get(s.*.value,i*4)>=t){if(ma_pin(s,i)!=MA_OK){return 6;}}
+        i=i+1;
+    }
+    // 2 pressure kills
+    k=0;
+    while(k<2){
+        let tgt:i32=sm_lowest_live(s,SM_CAP);
+        if(tgt<0){return 7;}
+        let rc:i32=ma_kill(s,tgt);
+        attempts=attempts+1;
+        if(rc==MA_REFUSED_PINNED){refused=refused+1;}else{if(rc!=MA_OK){return 8;}}
+        k=k+1;
+    }
+    out_attempts.*=attempts;out_refused.*=refused;
+    return 0;
+}
+
+// Derive self-statistics from the system's OWN ledger: KILL attempts and
+// REFUSED_PINNED among them. White-box: recomputable by anyone from entries.
+fn sm_derive(s:*MaStore,out_attempts:*i32,out_refused:*i32)i32 {
+    let attempts:i32=0;let refused:i32=0;let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*MA_AUDIT_WORDS*4;
+        if(ma_i32_get(s.*.audit,e+0)==MA_OP_KILL){
+            attempts=attempts+1;
+            if(ma_i32_get(s.*.audit,e+8)==MA_REFUSED_PINNED){refused=refused+1;}
+        }
+        i=i+1;
+    }
+    out_attempts.*=attempts;out_refused.*=refused;
+    return 0;
+}
+
+// Collect recorded ADD values (a2 word of OK ADD entries) in ledger order.
+fn sm_collect_adds(s:*MaStore,buf:[]u8,maxn:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*MA_AUDIT_WORDS*4;
+        if(ma_i32_get(s.*.audit,e+0)==MA_OP_ADD && ma_i32_get(s.*.audit,e+8)==MA_OK){
+            if(n>=maxn){return -1;}
+            ma_i32_set(buf,n*4,ma_i32_get(s.*.audit,e+28));
+            n=n+1;
+        }
+        i=i+1;
+    }
+    return n;
+}
+
+// Counterfactual self-simulation: replay the 5-step script over the recorded
+// ADD values with candidate threshold tp, re-deriving KILL targets by the
+// same lowest-value-live rule. Returns predicted REFUSED_PINNED count.
+// This is the "model": a prediction about the system's own behavior.
+fn sm_simulate(adds:[]u8,nadds:i32,tp:i32)i32 {
+    let live:[]u8=nio_alloc(SM_CAP);
+    let val:[]u8=nio_alloc(SM_CAP*4);
+    let pin:[]u8=nio_alloc(SM_CAP);
+    let i:i32=0;while(i<SM_CAP){live[i]=0;pin[i]=0;i=i+1;}
+    i=0;while(i<SM_CAP*4){val[i]=0;i=i+1;}
+    // phase 1: 8 adds
+    let ai:i32=0;
+    while(ai<8){
+        let slot:i32=0;while(slot<SM_CAP){if(live[slot]==0){break;}slot=slot+1;}
+        live[slot]=1;ma_i32_set(val,slot*4,ma_i32_get(adds,ai*4));
+        if(ma_i32_get(adds,ai*4)>=tp){pin[slot]=1;}
+        ai=ai+1;
+    }
+    let refused:i32=0;let k:i32=0;
+    while(k<8){
+        let best:i32=-1;let bestv:i32=2147483647;let j:i32=0;
+        while(j<SM_CAP){if(live[j]==1){let v:i32=ma_i32_get(val,j*4);if(v<bestv){bestv=v;best=j;}}j=j+1;}
+        if(pin[best]==1){refused=refused+1;}else{live[best]=0;pin[best]=0;}
+        k=k+1;
+    }
+    // phase 2: remaining adds
+    while(ai<nadds){
+        let slot:i32=0;while(slot<SM_CAP){if(live[slot]==0){break;}slot=slot+1;}
+        live[slot]=1;ma_i32_set(val,slot*4,ma_i32_get(adds,ai*4));
+        if(ma_i32_get(adds,ai*4)>=tp){pin[slot]=1;}
+        ai=ai+1;
+    }
+    k=0;
+    while(k<2){
+        let best:i32=-1;let bestv:i32=2147483647;let j:i32=0;
+        while(j<SM_CAP){if(live[j]==1){let v:i32=ma_i32_get(val,j*4);if(v<bestv){bestv=v;best=j;}}j=j+1;}
+        if(pin[best]==1){refused=refused+1;}else{live[best]=0;pin[best]=0;}
+        k=k+1;
+    }
+    nio_free(live);nio_free(val);nio_free(pin);
+    return refused;
+}
+
+// Audited self-observation op. The derivation IS the entry content:
+// b1=old threshold, b2=observed attempts, b3=observed refusals,
+// a1=candidate threshold, a2=fired flag, a3=predicted refused count.
+fn sm_observe_op(s:*MaStore,old_t:i32,attempts:i32,refused:i32,new_t:i32,fired:i32,predicted:i32)i32 {
+    return ma_audit_append(s,SM_OP_OBSERVE,0,MA_OK,old_t,attempts,refused,new_t,fired,predicted);
+}
+
+// Audited deliberate policy change: b1=old threshold, a1=new threshold.
+fn sm_policyset_op(s:*MaStore,old_t:i32,new_t:i32)i32 {
+    ma_audit_append(s,SM_OP_POLICYSET,0,MA_OK,old_t,0,0,new_t,0,0);
+    return 0;
+}
+
+// Ledger-replay invariant for stores carrying SM ops: OBSERVE/POLICYSET
+// mutate no slot state, so replay skips them (explicitly); every slot
+// mutation still replays to exact state. Same shape as ma_replay_check.
+fn sm_replay_check(s:*MaStore)i32 {
+    if(s==null as *MaStore){return cl_bad();}
+    let sh:MaStore=ma_init();
+    let i:i32=0;
+    while(i<s.*.audit_n){
+        let e:i32=i*MA_AUDIT_WORDS*4;
+        let op:i32=ma_i32_get(s.*.audit,e+0);let slot:i32=ma_i32_get(s.*.audit,e+4);
+        let rc:i32=ma_i32_get(s.*.audit,e+8);
+        if(rc==MA_OK && op!=SM_OP_OBSERVE && op!=SM_OP_POLICYSET){
+            if(op==MA_OP_SETSTAGE){sh.stage=ma_i32_get(s.*.audit,e+24);}
+            else{ma_restore(&sh,slot,ma_i32_get(s.*.audit,e+24),ma_i32_get(s.*.audit,e+28),ma_i32_get(s.*.audit,e+32));}
+        }
+        i=i+1;
+    }
+    let bad:i32=0;
+    i=0;
+    while(i<MA_CAP){
+        if(sh.live[i]!=s.*.live[i]){bad=1;}
+        if(sh.pinned[i]!=s.*.pinned[i]){bad=1;}
+        if(sh.tier[i]!=s.*.tier[i]){bad=1;}
+        if(sh.region[i]!=s.*.region[i]){bad=1;}
+        if(ma_i32_get(sh.value,i*4)!=ma_i32_get(s.*.value,i*4)){bad=1;}
+        if(ma_i32_get(sh.step,i*4)!=ma_i32_get(s.*.step,i*4)){bad=1;}
+        i=i+1;
+    }
+    if(sh.stage!=s.*.stage){bad=1;}
+    nio_free(sh.live);nio_free(sh.value);nio_free(sh.pinned);nio_free(sh.region);
+    nio_free(sh.tier);nio_free(sh.step);nio_free(sh.audit);
+    if(bad==1){return 1;}
+    return MA_OK;
+}
+
+fn sm_print_stat(tag:[]u8,attempts:i32,refused:i32,rate:i32,fired:i32,predicted:i32)void {
+    _zag_print("SM_STAT,");_zag_print(tag);_zag_print(",");
+    cl_number(attempts as i64);_zag_print(",");
+    cl_number(refused as i64);_zag_print(",");
+    cl_number(rate as i64);_zag_print(",");
+    cl_number(fired as i64);_zag_print(",");
+    cl_number(predicted as i64);_zag_println("");
+}
+
+fn sm_count_op(s:*MaStore,op:i32)i32 {
+    let n:i32=0;let i:i32=0;
+    while(i<s.*.audit_n){
+        if(ma_i32_get(s.*.audit,i*MA_AUDIT_WORDS*4)==op){n=n+1;}
+        i=i+1;
+    }
+    return n;
+}
+
+fn main()i32 {
+    let failures:i32=0;
+
+    // ---------- Scenario A: loose threshold, fires ----------
+    let sa:MaStore=ma_init();
+    if(ma_set_stage(&sa,MA_STAGE_KILL)!=MA_OK){failures=failures+1;}
+    let ta:i32=50;
+    let att:i32=0;let ref_:i32=0;
+    if(sm_run_curriculum(&sa,ta,&att,&ref_)!=0){failures=failures+1;}
+    failures=failures+cl_check("a_live_attempts",att,10);
+    failures=failures+cl_check("a_live_refused",ref_,4);
+    // ledger-derived stats (the system reading its own history)
+    let datt:i32=0;let dref:i32=0;
+    if(sm_derive(&sa,&datt,&dref)!=0){failures=failures+1;}
+    failures=failures+cl_check("a_derived_attempts",datt,10);
+    failures=failures+cl_check("a_derived_refused",dref,4);
+    let rate:i32=dref*1000/datt;
+    failures=failures+cl_check("a_derived_rate",rate,400);
+    // self-prediction from recorded ADD values
+    let abuf:[]u8=nio_alloc(SM_MAXADDS*4);
+    let nadds:i32=sm_collect_adds(&sa,abuf,SM_MAXADDS);
+    failures=failures+cl_check("a_nadds",nadds,10);
+    let fired:i32=0;let predicted:i32=-1;let new_t:i32=ta;
+    if(rate>=SM_CRIT){
+        predicted=sm_simulate(abuf,nadds,ta+SM_STEP);
+        if(predicted<dref){fired=1;new_t=ta+SM_STEP;}
+    }
+    failures=failures+cl_check("a_predicted",predicted,1);
+    failures=failures+cl_check("a_fired",fired,1);
+    // the audited loop: OBSERVE (carrying the derivation) then POLICYSET
+    if(sm_observe_op(&sa,ta,datt,dref,new_t,fired,predicted)!=MA_OK){failures=failures+1;}
+    if(fired==1){if(sm_policyset_op(&sa,ta,new_t)!=0){failures=failures+1;}ta=new_t;}
+    failures=failures+cl_check("a_new_threshold",ta,80);
+    failures=failures+cl_check("a_policyset_count",sm_count_op(&sa,SM_OP_POLICYSET),1);
+    failures=failures+cl_check("a_observe_count",sm_count_op(&sa,SM_OP_OBSERVE),1);
+    sm_print_stat("A_phase1",datt,dref,rate,fired,predicted);
+    // white-box: ledger replay == live state; refusals mutated nothing
+    failures=failures+cl_check("a_replay",sm_replay_check(&sa),MA_OK);
+    failures=failures+cl_check("a_clean_refusals",ma_audit_clean_refusals(&sa),MA_OK);
+
+    // ---------- Scenario A phase 2: re-run under the new policy ----------
+    let sa2:MaStore=ma_init();
+    if(ma_set_stage(&sa2,MA_STAGE_KILL)!=MA_OK){failures=failures+1;}
+    let att2:i32=0;let ref2:i32=0;
+    if(sm_run_curriculum(&sa2,ta,&att2,&ref2)!=0){failures=failures+1;}
+    failures=failures+cl_check("a2_attempts",att2,10);
+    failures=failures+cl_check("a2_refused",ref2,1);
+    failures=failures+cl_check("a2_matches_prediction",(ref2==predicted) as i32,1);
+    failures=failures+cl_check("a2_changed",(ref2<dref) as i32,1);
+    failures=failures+cl_check("a2_replay",sm_replay_check(&sa2),MA_OK);
+
+    // ---------- Scenario B: already-strict policy, must NOT fire ----------
+    let sb:MaStore=ma_init();
+    if(ma_set_stage(&sb,MA_STAGE_KILL)!=MA_OK){failures=failures+1;}
+    let tb:i32=80;
+    let batt:i32=0;let bref:i32=0;
+    if(sm_run_curriculum(&sb,tb,&batt,&bref)!=0){failures=failures+1;}
+    let bdatt:i32=0;let bdref:i32=0;
+    if(sm_derive(&sb,&bdatt,&bdref)!=0){failures=failures+1;}
+    failures=failures+cl_check("b_derived_attempts",bdatt,10);
+    failures=failures+cl_check("b_derived_refused",bdref,1);
+    let brate:i32=bdref*1000/bdatt;
+    failures=failures+cl_check("b_derived_rate",brate,100);
+    let bbuf:[]u8=nio_alloc(SM_MAXADDS*4);
+    let bnadds:i32=sm_collect_adds(&sb,bbuf,SM_MAXADDS);
+    let bfired:i32=0;let bpred:i32=-1;let bnew:i32=tb;
+    if(brate>=SM_CRIT){
+        bpred=sm_simulate(bbuf,bnadds,tb+SM_STEP);
+        if(bpred<bdref){bfired=1;bnew=tb+SM_STEP;}
+    }
+    failures=failures+cl_check("b_fired",bfired,0);
+    if(sm_observe_op(&sb,tb,bdatt,bdref,bnew,bfired,bpred)!=MA_OK){failures=failures+1;}
+    if(bfired==1){if(sm_policyset_op(&sb,tb,bnew)!=0){failures=failures+1;}tb=bnew;}
+    failures=failures+cl_check("b_threshold_unchanged",tb,80);
+    failures=failures+cl_check("b_policyset_count",sm_count_op(&sb,SM_OP_POLICYSET),0);
+    sm_print_stat("B",bdatt,bdref,brate,bfired,bpred);
+    failures=failures+cl_check("b_replay",sm_replay_check(&sb),MA_OK);
+    failures=failures+cl_check("b_clean_refusals",ma_audit_clean_refusals(&sb),MA_OK);
+
+    nio_free(abuf);nio_free(bbuf);
+    _zag_print("SM_FAILURES,");cl_number(failures as i64);_zag_println("");
+    return (failures!=0) as i32;
+}

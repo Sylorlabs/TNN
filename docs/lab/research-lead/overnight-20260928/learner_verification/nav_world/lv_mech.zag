@@ -1,0 +1,245 @@
+// lv_mech.zag -- H-LVNAV-1 mechanism: MAP arena, world, learner ops.
+// Standalone pure-Zag. K3: harness-key tokens never appear in this file.
+// Learner functions never receive expected values.
+//
+// Learner state L (10 i32 cells):
+//   0 cX.dx  1 cX.dy  2 cY.dx  3 cY.dy  4 cXb.dx  5 cXb.dy
+//   6 commit_map  7 commit_pred  8 commit_status (0 none,1 PENDING,2 RESOLVED)
+//   9 last_verdict (1 PASS, 0 FAIL)
+// World state E:
+//   0 x  4 y  8 burned  12 steps  16 variant (0 OPEN, 1 LAVA)  20 tracelen
+//   trace i32 cells at 24+4*i, max 14.
+// MAP arena A: 8 bytes per node: [0]=opcode u8 (0=E,1=N), [4]=next i32.
+// MAP table MT: id -> (head i32, count i32) at id*8; bump cursor at byte 64.
+
+// ---------- output helpers (one buffer, cursor-returning) ----------
+// Per toolchain lesson: no _zag_print for dynamic content.
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn e1str(b:[]u8,c:i32,s:[]u8)i32 {
+  let i:i32=0;
+  while(i<s.len){b[c]=s[i];c=c+1;i=i+1;}
+  return c;
+}
+// Count digits, fill from the end. No second allocation, no reverse copy.
+fn e1i64(b:[]u8,c:i32,v:i64)i32 {
+  if(v==0){b[c]=48;return c+1;}
+  let neg:i32=0;
+  let u:i64=v;
+  if(v<0){neg=1;u=0-v;}
+  let nd:i32=0;
+  let t:i64=u;
+  while(t>0){nd=nd+1;t=t/10;}
+  if(neg==1){b[c]=45;c=c+1;}
+  let e:i32=c+nd;
+  let p:i32=e-1;
+  while(p>=c){
+    let d:i64=u-(u/10)*10;
+    b[p]=(48+d) as u8;
+    u=u/10;
+    p=p-1;
+  }
+  return e;
+}
+fn e1verdict(b:[]u8,c:i32,v:i32)i32 {
+  if(v==1){return e1str(b,c,"PASS");}
+  return e1str(b,c,"FAIL");
+}
+
+// ---------- state cells (u8-backed, little-endian) ----------
+fn get32(b:[]u8,off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8,off:i32,v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+
+// ---------- MAP arena ----------
+fn node_op(A:[]u8,n:i32)i32 { return A[n*8] as i32; }
+fn node_next(A:[]u8,n:i32)i32 { return get32(A,n*8+4); }
+fn node_set(A:[]u8,n:i32,op:i32,nx:i32)void {
+  A[n*8]=op as u8;
+  set32(A,n*8+4,nx);
+  return;
+}
+fn map_head(MT:[]u8,id:i32)i32 { return get32(MT,id*8); }
+fn map_build(A:[]u8,MT:[]u8,id:i32,base:i32,op:i32,n:i32)void {
+  let i:i32=0;
+  while(i<n){
+    let nx:i32=-1;
+    if(i<n-1){nx=base+i+1;}
+    node_set(A,base+i,op,nx);
+    i=i+1;
+  }
+  set32(MT,id*8,base);
+  set32(MT,id*8+4,n);
+  return;
+}
+// Composition (learner operation): copy both node lists into a fresh arena
+// region and link them. Returns a NEW MAP descriptor id. The composed chain
+// is a new persistent structure that did not exist before this call.
+fn map_compose_copy(A:[]u8,MT:[]u8,a:i32,b:i32,id:i32)i32 {
+  let cur:i32=get32(MT,64);
+  let nh:i32=cur;
+  let prev:i32=-1;
+  let cnt:i32=0;
+  let t:i32=map_head(MT,a);
+  while(t!=-1){
+    node_set(A,cur,node_op(A,t),-1);
+    if(prev!=-1){node_set(A,prev,node_op(A,prev),cur);}
+    prev=cur;
+    cur=cur+1;
+    cnt=cnt+1;
+    t=node_next(A,t);
+  }
+  t=map_head(MT,b);
+  while(t!=-1){
+    node_set(A,cur,node_op(A,t),-1);
+    if(prev!=-1){node_set(A,prev,node_op(A,prev),cur);}
+    prev=cur;
+    cur=cur+1;
+    cnt=cnt+1;
+    t=node_next(A,t);
+  }
+  set32(MT,64,cur);
+  set32(MT,id*8,nh);
+  set32(MT,id*8+4,cnt);
+  return id;
+}
+
+// ---------- world ----------
+// Fixed law: E step x=min(x+1,7); N step y=min(y+1,7). Entering a lava
+// cell (variant LAVA only) sets burned=1; the agent keeps moving.
+fn is_lava(x:i32,y:i32)i32 {
+  if(y==0){
+    if(x==3){return 1;}
+    if(x==4){return 1;}
+    if(x==5){return 1;}
+  }
+  return 0;
+}
+fn world_reset(E:[]u8,variant:i32)void {
+  set32(E,0,0);
+  set32(E,4,0);
+  set32(E,8,0);
+  set32(E,12,0);
+  set32(E,16,variant);
+  set32(E,20,0);
+  return;
+}
+fn world_place(E:[]u8,sx:i32,sy:i32)void {
+  set32(E,0,sx);
+  set32(E,4,sy);
+  return;
+}
+fn world_step(E:[]u8,op:i32)void {
+  let x:i32=get32(E,0);
+  let y:i32=get32(E,4);
+  if(op==0){
+    if(x<7){x=x+1;}
+  }else{
+    if(y<7){y=y+1;}
+  }
+  set32(E,0,x);
+  set32(E,4,y);
+  if(get32(E,16)==1){
+    if(is_lava(x,y)==1){set32(E,8,1);}
+  }
+  let tl:i32=get32(E,20);
+  if(tl<14){
+    set32(E,24+tl*4,y*8+x);
+    set32(E,20,tl+1);
+  }
+  set32(E,12,get32(E,12)+1);
+  return;
+}
+fn world_execute(A:[]u8,MT:[]u8,E:[]u8,map:i32)void {
+  let t:i32=map_head(MT,map);
+  while(t!=-1){
+    world_step(E,node_op(A,t));
+    t=node_next(A,t);
+  }
+  return;
+}
+
+// ---------- contract induction (learner operation, general rule) ----------
+// Probe a MAP twice via the world movement law (OPEN variant). Contract =
+// displacement of probe 1; UNKNOWN (-999) if probe 2 disagrees.
+fn probe(A:[]u8,MT:[]u8,E:[]u8,map:i32,sx:i32,sy:i32,P:[]u8)void {
+  world_reset(E,0);
+  world_place(E,sx,sy);
+  world_execute(A,MT,E,map);
+  set32(P,0,get32(E,0)-sx);
+  set32(P,4,get32(E,4)-sy);
+  return;
+}
+fn learner_induce(A:[]u8,MT:[]u8,E:[]u8,map:i32,sx1:i32,sy1:i32,sx2:i32,sy2:i32,P:[]u8,L:[]u8,base:i32)i32 {
+  probe(A,MT,E,map,sx1,sy1,P);
+  let dx1:i32=get32(P,0);
+  let dy1:i32=get32(P,4);
+  probe(A,MT,E,map,sx2,sy2,P);
+  let dx2:i32=get32(P,0);
+  let dy2:i32=get32(P,4);
+  if(dx1==dx2){
+    if(dy1==dy2){
+      set32(L,base*4,dx1);
+      set32(L,base*4+4,dy1);
+      return 1;
+    }
+  }
+  set32(L,base*4,-999);
+  set32(L,base*4+4,-999);
+  return 0;
+}
+
+// ---------- learner prediction / commit / verdict (learner-owned) ----------
+// Prediction from induced contracts only: start + (dx1+dx2, dy1+dy2).
+fn learner_predict(L:[]u8,sx:i32,sy:i32,ca:i32,cb:i32)i32 {
+  let dx:i32=get32(L,ca*4)+get32(L,cb*4);
+  let dy:i32=get32(L,ca*4+4)+get32(L,cb*4+4);
+  let fx:i32=sx+dx;
+  let fy:i32=sy+dy;
+  if(fx<0){fx=0;}
+  if(fx>7){fx=7;}
+  if(fy<0){fy=0;}
+  if(fy>7){fy=7;}
+  return fy*8+fx;
+}
+// Commit BEFORE execution: stores the composed MAP id, the predicted final
+// cell, and status=PENDING in learner state.
+fn learner_commit(L:[]u8,map:i32,pred:i32)void {
+  set32(L,24,map);
+  set32(L,28,pred);
+  set32(L,32,1);
+  return;
+}
+// Verdict from world-state observation only (final cell, burned flag) plus
+// the learner's own commitment (predicted cell). Never consults any
+// harness expected value. Frozen rule: PASS iff final==goal AND
+// burned==0 AND final==predicted.
+fn learner_verdict(L:[]u8,E:[]u8,goal:i32)i32 {
+  let fx:i32=get32(E,0);
+  let fy:i32=get32(E,4);
+  let final:i32=fy*8+fx;
+  let burned:i32=get32(E,8);
+  let pred:i32=get32(L,28);
+  set32(L,32,2);
+  if(final==goal){
+    if(burned==0){
+      if(final==pred){
+        set32(L,36,1);
+        return 1;
+      }
+    }
+  }
+  set32(L,36,0);
+  return 0;
+}

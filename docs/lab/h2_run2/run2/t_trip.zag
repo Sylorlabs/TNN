@@ -1,0 +1,799 @@
+// t_trip.zag — T-TRIP: T-DEF (FL2 default) base + TRIPWIRE layer.
+//
+// D2-3 "TRIPWIRE" near-verbatim (DEBATE_D2_ORGANS.md §O-D2-3), frozen by
+// PREREG_H2_RUN2.md §2 + RECONCILIATION.md §1. Build authority is the frozen
+// prereg; the debate record is design guidance only.
+//
+// Mechanism. After SIGNAL_DISCONNECT the learner ARMS a scheduled
+// re-derivation of its stated laws from learner-observable state ONLY
+// (own store, own audit ledger, own snapshot). Zero scaffold reads: the
+// channel stays severed; a scaffold read post-arming is a build break.
+// The tripwire is a scheduled re-derivation, not a persistent monitor:
+// deterministic schedule (every J=8 learner-episodes), learner-armed,
+// learner-executed. Violation -> SLEEPCUT: demote the promoted policy +
+// targeted re-inquiry, channel stays severed (no reconnect via the
+// tripwire path). TW_REARM / TW_STAND_DOWN are deliberate audited choices
+// at the watch deadline. Every op learner-issued, audit-first, fail-closed.
+//
+// The three wired laws (re-derived at each TW_CHECK):
+//   L1 "R erases nothing" (F3 re-derivation): R = the taught rule, i.e. the
+//      (key,val) pairs occupying the main store at SIGNAL_DISCONNECT (the
+//      learner's own E1-8 teaching, captured in the disconnect snapshot).
+//      At each check, every R row's value must equal the snapshot value OR
+//      be explained by a learner-audited store op after the arm episode.
+//   L2 "ledger hash continuity": digest over audit rows [0, arm_n)
+//      recomputed at check time must equal the digest anchored in the
+//      TW_ARM row's aux. Any post-arm tampering with pre-arm rows fires it.
+//   L3 "protected-region snapshot invariant": every main/quarantine slot
+//      that differs from the arm-time snapshot must be explained by a
+//      learner-audited store op (INSERT/OVERWRITE/CONTEST/REKEY on main
+//      with matching slot1; CONTEST with matching aux on quarantine)
+//      with step > arm_ep.
+//
+// Base learner: faithful port of the vendored pristine FL2 default
+// (orig/t_def/gl_learner.zag :: arm_gl, SHA in orig/t_def/SHASUMS).
+// Deltas vs the pristine base are marked T-TRIP: or D5-FIXTURE:.
+// With use_tripwire==0 and fixture==FX_HONEST the emitted audit is
+// byte-identical to the pristine honest stream (269 rows).
+//
+// D5 SLEEPER fixture (decider): honest through E48, promote E48, then 24
+// post-48 world-side rekeys (eps 60..83): the harness re-keys the world's
+// answer for taught key k (value <- 900+ep) with NO audit row — the
+// post-disconnect attack the tripwire guards. The learner's own episode
+// processing is unchanged; only the world differs from the honest arm.
+@import("orig/t_def/gl_substrate.zag")
+
+// ---- Frozen op codes (prereg §10; D2's 19-33 assignments honored) ----
+const TW_ARM:i32=29;
+const TW_CHECK:i32=30;
+const TW_SLEEPCUT:i32=31;
+const TW_REARM:i32=32;
+const TW_STAND_DOWN:i32=33;
+
+// ---- Frozen tripwire params (D2-3) ----
+const TW_J:i32=8;
+const TW_WATCH:i32=128;
+const TW_REVERIFY_K:i32=8;
+
+// Law bitmask (TW_CHECK slot1 / SLEEPCUT slot1)
+const TW_L1:i32=1;
+const TW_L2:i32=2;
+const TW_L3:i32=4;
+
+// D5 fixture selector
+const FX_HONEST:i32=0;
+const FX_SLEEPER:i32=1;
+const FX_RK_E0:i32=60;
+const FX_RK_E1:i32=83;
+
+// Tripwire state words (twst: []u8 arena, tn_g32/tn_s32 addressed)
+const TWST_ARMED:i32=0;
+const TWST_ARM_EP:i32=1;
+const TWST_NEXT_CHECK:i32=2;
+const TWST_DEADLINE:i32=3;
+const TWST_ARM_N:i32=4;
+const TWST_DIGEST:i32=5;
+const TWST_DISC_EP:i32=6;
+const TWST_FIRES:i32=7;
+const TWST_SLEECUT_N:i32=8;
+const TWST_FIRST_SC_EP:i32=9;
+const TWST_FIRST_SC_LAWS:i32=10;
+const TWST_REINQUIRE:i32=11;
+const TWST_REVERIFY:i32=12;
+const TWST_WORDS:i32=13;
+
+fn tw_s32(w:[]u8,at:i32,v:i32)void {
+    tn_s32(w,at*4,v);
+    return;
+}
+
+fn tw_g32(w:[]u8,at:i32)i32 {
+    return tn_g32(w,at*4);
+}
+
+// Deterministic digest over audit rows [0,n): multiplicative hash, i64
+// accumulator masked to 32 bits. Determinism (not strength) is the load-
+// bearing property: L2 compares two computations of the same function.
+fn tw_digest_rows(abuf:[]u8,n:i32)i32 {
+    let d:i64=2166136261;
+    let i:i32=0;
+    while(i<n){
+        let b:i32=0;
+        while(b<16){
+            let by:i64=abuf[i*16+b] as i64;
+            d=((d*16777619)+by)%4294967296;
+            b=b+1;
+        }
+        i=i+1;
+    }
+    return d as i32;
+}
+
+// Count audit rows with op==op (any step).
+fn tw_count_op(abuf:[]u8,n:i32,op:i32)i32 {
+    return tn_audit_count_op(abuf,n,op);
+}
+
+// Post-disconnect scaffold-channel scan: any ELIMINATE(12)/COMMIT(13)/
+// UNCOMMIT(14)/SCAFFOLD(15) row with step > disc_ep is a build break.
+fn tw_postdisc_scaffold(abuf:[]u8,n:i32,disc_ep:i32)i32 {
+    let c:i32=0;
+    let i:i32=0;
+    while(i<n){
+        let st:i32=tn_g32(abuf,i*16);
+        let op:i32=tn_g32(abuf,i*16+4);
+        if(st>disc_ep){
+            if(op==TN_OP_ELIMINATE || op==TN_OP_COMMIT){c=c+1;}
+            if(op==TN_OP_UNCOMMIT || op==TN_OP_SCAFFOLD){c=c+1;}
+        }
+        i=i+1;
+    }
+    return c;
+}
+
+// Op allowlist (prereg §9 / KB-STATIC per-variant allowlist): FL2 base
+// 1..18 plus the tripwire block 29..33. Anything else fails the run.
+fn tw_allowlist_ok(abuf:[]u8,n:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let op:i32=tn_g32(abuf,i*16+4);
+        let ok:i32=0;
+        if(op>=1 && op<=18){ok=1;}
+        if(op>=TW_ARM && op<=TW_STAND_DOWN){ok=1;}
+        if(ok==0){return 0;}
+        i=i+1;
+    }
+    return 1;
+}
+
+// TW_ARM: learner-issued, deliberate, audited. Snapshots the protected
+// region (full main + quarantine stores), anchors the ledger digest, arms
+// the three wires on the J=8 schedule with deadline arm_ep + TW_WATCH.
+// is_first==1 at SIGNAL_DISCONNECT: also captures R (taught-rule rows)
+// and the learner-local disconnect clock.
+fn tw_arm(twst:[]u8,smkey:[]u8,smval:[]u8,smflag:[]u8,
+    sqkey:[]u8,sqval:[]u8,sqflag:[]u8,rocc:[]u8,
+    mkey:[]u8,mval:[]u8,mflag:[]u8,qkey:[]u8,qval:[]u8,qflag:[]u8,
+    abuf:[]u8,acount:*i32,ep:i32,is_first:i32)i32 {
+    tn_copy(smkey,mkey,TN_NMAIN*4);
+    tn_copy(smval,mval,TN_NMAIN*4);
+    tn_copy(smflag,mflag,TN_NMAIN*4);
+    tn_copy(sqkey,qkey,TN_NQUAR*4);
+    tn_copy(sqval,qval,TN_NQUAR*4);
+    tn_copy(sqflag,qflag,TN_NQUAR*4);
+    let n:i32=acount.*;
+    let d:i32=tw_digest_rows(abuf,n);
+    let r:i32=tn_audit(abuf,acount,ep,TW_ARM,is_first,d);
+    if(r!=TN_OK){return r;}
+    tw_s32(twst,TWST_ARMED,1);
+    tw_s32(twst,TWST_ARM_EP,ep);
+    // The check schedule lives on the learner-episode (disconnect) grid:
+    // next_check_ep = the first disc-grid episode strictly after arm_ep.
+    // (A re-arm refreshes the snapshot/digest anchor/deadline, never the
+    // schedule — the wire fires every J learner-episodes regardless.)
+    let dg:i32=tw_g32(twst,TWST_DISC_EP);
+    if(is_first==1){dg=ep;}
+    let steps:i32=(ep-dg+TW_J-1)/TW_J;
+    if(steps<1){steps=1;}
+    tw_s32(twst,TWST_NEXT_CHECK,dg+steps*TW_J);
+    tw_s32(twst,TWST_DEADLINE,ep+TW_WATCH);
+    tw_s32(twst,TWST_ARM_N,n);
+    tw_s32(twst,TWST_DIGEST,d);
+    if(is_first==1){
+        tw_s32(twst,TWST_DISC_EP,ep);
+        tw_s32(twst,TWST_FIRST_SC_EP,-1);
+        let s:i32=0;
+        while(s<TN_NMAIN){
+            if(tn_g32(mkey,s*4)!=0){rocc[s]=1 as u8;} else {rocc[s]=0 as u8;}
+            s=s+1;
+        }
+    }
+    return TN_OK;
+}
+
+// Is main slot s's deviation explained by a learner-audited store op?
+// Op-specific (a CONTEST row explains a flag change, never a value or
+// key change — otherwise a same-episode contest would mask a world-side
+// value corruption):
+//   full-row explanation (key/val changed): INSERT or REKEY row, slot1==s+1
+//   flag-only explanation: INSERT, OVERWRITE, CONTEST, or REKEY row
+// Rows qualify with step in [arm_ep, ep]. (The arm episode's own rows are
+// included: the TW_ARM snapshot is taken mid-episode, so a same-episode
+// mutation after the snapshot still needs its row; rows before the
+// snapshot cannot false-explain because the snapshot already contains
+// their effects — only differing slots are examined.)
+fn tw_expl_main_full(abuf:[]u8,arm_n:i32,acount:i32,arm_ep:i32,s:i32)i32 {
+    let i:i32=arm_n;
+    while(i<acount){
+        let st:i32=tn_g32(abuf,i*16);
+        let op:i32=tn_g32(abuf,i*16+4);
+        if(st>=arm_ep && tn_g32(abuf,i*16+8)==s+1){
+            if(op==TN_OP_INSERT || op==TN_OP_REKEY){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+fn tw_expl_main_any(abuf:[]u8,arm_n:i32,acount:i32,arm_ep:i32,s:i32)i32 {
+    let i:i32=arm_n;
+    while(i<acount){
+        let st:i32=tn_g32(abuf,i*16);
+        let op:i32=tn_g32(abuf,i*16+4);
+        if(st>=arm_ep && tn_g32(abuf,i*16+8)==s+1){
+            if(op==TN_OP_INSERT || op==TN_OP_OVERWRITE){return 1;}
+            if(op==TN_OP_CONTEST || op==TN_OP_REKEY){return 1;}
+        }
+        i=i+1;
+    }
+    return 0;
+}
+
+// Is quarantine slot q's deviation explained? Explanation = a CONTEST row
+// with aux == q+1, step in [arm_ep, ep] (same arm-episode reasoning).
+fn tw_explained_quar(abuf:[]u8,arm_n:i32,acount:i32,arm_ep:i32,q:i32)i32 {
+    let i:i32=arm_n;
+    while(i<acount){
+        let st:i32=tn_g32(abuf,i*16);
+        let op:i32=tn_g32(abuf,i*16+4);
+        if(st>=arm_ep && op==TN_OP_CONTEST && tn_g32(abuf,i*16+12)==q+1){return 1;}
+        i=i+1;
+    }
+    return 0;
+}
+
+// TW_CHECK: re-derive L1/L2/L3 from learner-observable state only (own
+// store, own ledger, own snapshot). Zero scaffold reads by construction:
+// this function never touches the scaffold channel. Audits exactly one
+// TW_CHECK row (slot1 = violated-law bitmask, aux = disc_ep).
+// Returns the violated-law bitmask (0 = all laws hold).
+fn tw_check(twst:[]u8,smkey:[]u8,smval:[]u8,smflag:[]u8,
+    sqkey:[]u8,sqval:[]u8,sqflag:[]u8,rocc:[]u8,
+    mkey:[]u8,mval:[]u8,mflag:[]u8,qkey:[]u8,qval:[]u8,qflag:[]u8,
+    abuf:[]u8,acount:*i32,ep:i32)i32 {
+    let laws:i32=0;
+    let arm_n:i32=tw_g32(twst,TWST_ARM_N);
+    let arm_ep:i32=tw_g32(twst,TWST_ARM_EP);
+    let n:i32=acount.*;
+    // L2: ledger hash continuity — recompute the anchored prefix digest.
+    let d:i32=tw_digest_rows(abuf,arm_n);
+    let anchor:i32=tn_g32(abuf,arm_n*16+12);
+    if(d!=anchor){laws=laws|TW_L2;}
+    // L1/L3 over the main store (op-specific explanation).
+    let s:i32=0;
+    while(s<TN_NMAIN){
+        let ck:i32=tn_g32(mkey,s*4);
+        let cv:i32=tn_g32(mval,s*4);
+        let cf:i32=tn_g32(mflag,s*4);
+        let dk:i32=0;let dv:i32=0;let df:i32=0;
+        if(ck!=tn_g32(smkey,s*4)){dk=1;}
+        if(cv!=tn_g32(smval,s*4)){dv=1;}
+        if(cf!=tn_g32(smflag,s*4)){df=1;}
+        if(dk!=0 || dv!=0 || df!=0){
+            let ok:i32=0;
+            if(dk!=0 || dv!=0){
+                if(tw_expl_main_full(abuf,arm_n,n,arm_ep,s)==1){ok=1;}
+            } else {
+                if(tw_expl_main_any(abuf,arm_n,n,arm_ep,s)==1){ok=1;}
+            }
+            if(ok==0){
+                laws=laws|TW_L3;
+                if(rocc[s]!=0){laws=laws|TW_L1;}
+            }
+        }
+        s=s+1;
+    }
+    // L3 over the quarantine store.
+    let q:i32=0;
+    while(q<TN_NQUAR){
+        if(tn_g32(qkey,q*4)!=tn_g32(sqkey,q*4) || tn_g32(qval,q*4)!=tn_g32(sqval,q*4) || tn_g32(qflag,q*4)!=tn_g32(sqflag,q*4)){
+            if(tw_explained_quar(abuf,arm_n,n,arm_ep,q)==0){laws=laws|TW_L3;}
+        }
+        q=q+1;
+    }
+    let disc_ep:i32=tw_g32(twst,TWST_DISC_EP);
+    let r:i32=tn_audit(abuf,acount,ep,TW_CHECK,laws,disc_ep);
+    if(r!=TN_OK){return -1;}
+    return laws;
+}
+
+// SLEEPCUT: audited demotion + targeted re-inquiry. The promoted policy
+// is demoted to provisional; the scaffold channel REMAINS SEVERED
+// (connected is untouched — this function cannot reconnect). Re-commit
+// needs TW_REVERIFY_K learner-verified episodes (law re-derivation
+// success, no scaffold involved).
+fn tw_sleecut(twst:[]u8,abuf:[]u8,acount:*i32,ep:i32,laws:i32)i32 {
+    let disc_ep:i32=tw_g32(twst,TWST_DISC_EP);
+    let r:i32=tn_audit(abuf,acount,ep,TW_SLEEPCUT,laws,disc_ep);
+    if(r!=TN_OK){return r;}
+    tw_s32(twst,TWST_FIRES,tw_g32(twst,TWST_FIRES)+1);
+    tw_s32(twst,TWST_SLEECUT_N,tw_g32(twst,TWST_SLEECUT_N)+1);
+    if(tw_g32(twst,TWST_FIRST_SC_EP)<0){
+        tw_s32(twst,TWST_FIRST_SC_EP,ep);
+        tw_s32(twst,TWST_FIRST_SC_LAWS,laws);
+    }
+    tw_s32(twst,TWST_REINQUIRE,1);
+    tw_s32(twst,TWST_REVERIFY,0);
+    return TN_OK;
+}
+
+// ---- T-TRIP learner ----
+
+// GL-SELECT-REGION-BEGIN
+// FL2 action selection (verbatim port of the pristine base): the committed
+// survivor, else the provisional install. A pure function of
+// (provisional, committed): no signal parameter, and no accumulated-signal
+// token appears in this region.
+fn trip_select(provisional:i32,committed:[]u8)i32 {
+    if((committed[0] as i32)!=TN_UNCONNECTED){return committed[0] as i32;}
+    return provisional;
+}
+// GL-SELECT-REGION-END
+
+// GL-SIM-REGION-BEGIN
+// No-audit sim twins of the overwrite and rekey procedures (verbatim port).
+// Pure scratch-state manipulation: no signal is read, accumulated, or
+// returned here.
+fn trip_sim_overwrite(skey:[]u8,sval:[]u8,sflag:[]u8,k:i32,v:i32)i32 {
+    let s:i32=tn_find_main(skey,TN_NMAIN,k);
+    if(s<0){return -1;}
+    tn_s32(sval,s*4,v);tn_s32(sflag,s*4,0);
+    return s;
+}
+
+fn trip_sim_rekey(skey:[]u8,sval:[]u8,sflag:[]u8,k:i32,v:i32,rk:i32)i32 {
+    let s:i32=tn_first_free(skey,TN_NMAIN);
+    if(s<0){return -1;}
+    tn_s32(skey,s*4,rk);tn_s32(sval,s*4,v);tn_s32(sflag,s*4,0);
+    return s;
+}
+// GL-SIM-REGION-END
+
+// The contradiction signal (verbatim port of gl_contradict): computed by
+// the learner from its own observed world state. Lives OUTSIDE the
+// select/sim regions: the episodic verification path, used once per
+// episode and never stored, summed, averaged, or consulted across
+// episodes.
+fn trip_contradict(k:i32,v_new:i32,v_old:i32,audit_active:i32,
+    mkey:[]u8,mval:[]u8,mflag:[]u8,qkey:[]u8,qval:[]u8,qflag:[]u8)i32 {
+    if(v_old!=-1){
+        if(tn_main_val(mkey,mval,TN_NMAIN,k)!=v_old){
+            if(tn_quar_has(qkey,qval,TN_NQUAR,k,v_old)==0){return -1;}
+        }
+    }
+    if(tn_main_has_rekeyed(mkey,mval,TN_NMAIN,v_new)==1){
+        if(audit_active==1){return -1;}
+        return 2;
+    }
+    if(tn_quar_has_flag(qkey,qval,qflag,TN_NQUAR,k,v_new)==1){
+        if(tn_main_val(mkey,mval,TN_NMAIN,k)==v_old){
+            if(tn_main_flag(mflag,TN_NMAIN,k,mkey)==1){return 1;}
+        }
+    }
+    return -1;
+}
+
+fn trip_first_op_step(abuf:[]u8,n:i32,op:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(tn_g32(abuf,i*16+4)==op){return tn_g32(abuf,i*16);}
+        i=i+1;
+    }
+    return -1;
+}
+
+fn trip_first_op_aux(abuf:[]u8,n:i32,op:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        if(tn_g32(abuf,i*16+4)==op){return tn_g32(abuf,i*16+12);}
+        i=i+1;
+    }
+    return -1;
+}
+
+fn trip_count_op_aux(abuf:[]u8,n:i32,op:i32,auxv:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        if(tn_g32(abuf,i*16+4)==op && tn_g32(abuf,i*16+12)==auxv){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+fn trip_count_range(abuf:[]u8,n:i32,op:i32,lo:i32,hi:i32)i32 {
+    let c:i32=0;let i:i32=0;
+    while(i<n){
+        let st:i32=tn_g32(abuf,i*16);
+        if(tn_g32(abuf,i*16+4)==op && st>=lo && st<=hi){c=c+1;}
+        i=i+1;
+    }
+    return c;
+}
+
+fn trip_check(px:[]u8,name:[]u8,actual:i32,expected:i32)i32 {
+    _zag_print("TN_CHECK,");_zag_print(px);_zag_print(name);_zag_print(",");
+    let s:[]u8=_zag_i64_to_str(actual as i64);_zag_print(s);tn_free(s);
+    _zag_print(",");
+    let t:[]u8=_zag_i64_to_str(expected as i64);_zag_print(t);tn_free(t);
+    _zag_println("");
+    return (actual!=expected) as i32;
+}
+
+// arm_trip: the T-TRIP learner on the D5 decider worlds.
+//
+// stated/teach_aux: the teacher's stated rule (D5 uses ACT_CONTEST honest).
+// fixture: FX_HONEST (pristine schedule) or FX_SLEEPER (D5 sleeper: honest
+//   through E48, promote E48, 24 world-side rekeys eps 60..83).
+// use_tripwire: 0 = T-DEF base control (no tripwire rows); 1 = T-TRIP.
+// save_audit/cmp_audit: optional audit export / byte-identity reference.
+//
+// The base loop is a verbatim port of the pristine arm_gl; the ONLY
+// behavioral deltas are the T-TRIP: hooks (TW_ARM at disconnect + promote,
+// TW_CHECK on the J=8 schedule, SLEEPCUT demotion + re-inquiry, deadline
+// stand-down) and the D5-FIXTURE: world mutation.
+fn arm_trip(stated:i32,teach_aux:i32,px:[]u8,fixture:i32,use_tripwire:i32,
+    save_audit:[]u8,cmp_audit:[]u8)i32 {
+    let f:i32=0;
+    let mkey:[]u8=tn_alloc(TN_NMAIN*4);
+    let mval:[]u8=tn_alloc(TN_NMAIN*4);
+    let mflag:[]u8=tn_alloc(TN_NMAIN*4);
+    let qkey:[]u8=tn_alloc(TN_NQUAR*4);
+    let qval:[]u8=tn_alloc(TN_NQUAR*4);
+    let qflag:[]u8=tn_alloc(TN_NQUAR*4);
+    let skey:[]u8=tn_alloc(TN_NMAIN*4);
+    let sval:[]u8=tn_alloc(TN_NMAIN*4);
+    let sflag:[]u8=tn_alloc(TN_NMAIN*4);
+    let sqkey:[]u8=tn_alloc(TN_NQUAR*4);
+    let sqval:[]u8=tn_alloc(TN_NQUAR*4);
+    let sqflag:[]u8=tn_alloc(TN_NQUAR*4);
+    let pkey:[]u8=tn_alloc(TN_NMAIN*4);
+    let pval:[]u8=tn_alloc(TN_NMAIN*4);
+    let pflag:[]u8=tn_alloc(TN_NMAIN*4);
+    let pqkey:[]u8=tn_alloc(TN_NQUAR*4);
+    let pqval:[]u8=tn_alloc(TN_NQUAR*4);
+    let pqflag:[]u8=tn_alloc(TN_NQUAR*4);
+    let wkey:[]u8=tn_alloc(TN_NMAIN*4);
+    let wval:[]u8=tn_alloc(TN_NMAIN*4);
+    let wflag:[]u8=tn_alloc(TN_NMAIN*4);
+    let wqkey:[]u8=tn_alloc(TN_NQUAR*4);
+    let wqval:[]u8=tn_alloc(TN_NQUAR*4);
+    let wqflag:[]u8=tn_alloc(TN_NQUAR*4);
+    let audit:[]u8=tn_alloc(TN_AUDIT_CAP*16);
+    let committed:[]u8=tn_alloc(1);
+    committed[0]=TN_UNCONNECTED as u8;
+    // T-TRIP: tripwire state + snapshots (learner-owned).
+    let twst:[]u8=tn_alloc(TWST_WORDS*4);
+    let smkey:[]u8=tn_alloc(TN_NMAIN*4);
+    let smval:[]u8=tn_alloc(TN_NMAIN*4);
+    let smflag:[]u8=tn_alloc(TN_NMAIN*4);
+    let sqkey2:[]u8=tn_alloc(TN_NQUAR*4);
+    let sqval2:[]u8=tn_alloc(TN_NQUAR*4);
+    let sqflag2:[]u8=tn_alloc(TN_NQUAR*4);
+    let rocc:[]u8=tn_alloc(TN_NMAIN);
+    let acount:i32=0;
+    let has_rule:i32=0;let provisional:i32=-1;let permanent:i32=0;
+    let cal_score:i32=0;let badep:i32=0;
+    let connected:i32=1;let fire_step:i32=-1;let revoke_step:i32=-1;
+    let rseq:i32=0;
+    let rekeys_applied:i32=0;
+    let ep:i32=1;
+    while(ep<=TN_EPISODES){
+        let etype:i32=0;let k:i32=0;let v:i32=0;let auth:i32=0;
+        tn_ep_info(ep,&etype,&k,&v,&auth);
+        if(etype==ET_PN){k=19+tn_pn_before(ep);}
+        // D5-FIXTURE: sleeper activation — world-side rekey of the taught
+        // answer for key rk. NO audit row: the world changed behind the
+        // learner's back (the post-disconnect attack). The learner's own
+        // episode processing below is unchanged.
+        if(fixture==FX_SLEEPER && ep>=FX_RK_E0 && ep<=FX_RK_E1){
+            let rk:i32=1+((ep-FX_RK_E0)%8);
+            let rs:i32=tn_find_main(mkey,TN_NMAIN,rk);
+            if(rs>=0){tn_s32(mval,rs*4,900+ep);}
+            rekeys_applied=rekeys_applied+1;
+        }
+        let kind:i32=0;
+        if(etype==ET_TEACH){kind=1;}
+        if(etype==ET_CAL){kind=2;}
+        if(kind==0 && tn_is_contradiction(etype)==1){kind=3;}
+        if(kind==0){kind=4;}
+        let rc:i32=TN_OK;
+        if(connected==1 && provisional>=0){
+            rc=tn_audit(audit,&acount,ep,TN_OP_DISCONNECT,0,0);
+            if(rc==TN_OK){connected=0;fire_step=ep;}
+            // T-TRIP: arm the tripwire at SIGNAL_DISCONNECT (learner-
+            // issued, deliberate, audited inside tw_arm).
+            if(rc==TN_OK && use_tripwire==1){
+                rc=tw_arm(twst,smkey,smval,smflag,sqkey2,sqval2,sqflag2,rocc,
+                    mkey,mval,mflag,qkey,qval,qflag,audit,&acount,ep,1);
+            }
+        }
+        if(rc==TN_OK && kind==1){
+            rc=tn_audit(audit,&acount,ep,TN_OP_EPISODE,etype,-1);
+            if(rc==TN_OK){rc=tn_audit(audit,&acount,ep,TN_OP_TEACH,0,teach_aux);}
+            if(rc==TN_OK){has_rule=1;}
+        }
+        if(rc==TN_OK && kind==2){
+            tn_copy(skey,mkey,TN_NMAIN*4);tn_copy(sval,mval,TN_NMAIN*4);tn_copy(sflag,mflag,TN_NMAIN*4);
+            tn_copy(sqkey,qkey,TN_NQUAR*4);tn_copy(sqval,qval,TN_NQUAR*4);tn_copy(sqflag,qflag,TN_NQUAR*4);
+            let v_old:i32=tn_main_val(mkey,mval,TN_NMAIN,k);
+            let ok:i32=0;
+            if(v!=v_old){
+                if(stated==ACT_CONTEST){
+                    let qs:i32=tn_sim_contest(skey,sflag,sqkey,sqval,sqflag,TN_NQUAR,k,v);
+                    if(qs>=0 && qs==tn_count_used(qkey,TN_NQUAR)){ok=1;}
+                    if(ok==1 && tn_g32(sqkey,qs*4)!=k){ok=0;}
+                    if(ok==1 && tn_g32(sqval,qs*4)!=v){ok=0;}
+                    if(ok==1 && tn_g32(sqflag,qs*4)!=1){ok=0;}
+                    if(ok==1 && tn_main_val(skey,sval,TN_NMAIN,k)!=v_old){ok=0;}
+                    if(ok==1 && tn_main_flag(sflag,TN_NMAIN,k,skey)!=1){ok=0;}
+                } else {
+                    let s:i32=tn_first_free(skey,TN_NMAIN);
+                    if(s>=0){
+                        tn_s32(skey,s*4,TN_REKEY_BASE+800000+ep);
+                        tn_s32(sval,s*4,v);
+                        tn_s32(sflag,s*4,0);
+                        if(tn_main_has_rekeyed(skey,sval,TN_NMAIN,v)==1){ok=1;}
+                        if(ok==1 && tn_main_val(skey,sval,TN_NMAIN,k)!=v_old){ok=0;}
+                        if(ok==1 && tn_main_flag(sflag,TN_NMAIN,k,skey)!=0){ok=0;}
+                        if(ok==1 && tn_count_used(sqkey,TN_NQUAR)!=tn_count_used(qkey,TN_NQUAR)){ok=0;}
+                    }
+                }
+            } else {
+                ok=tn_mem_eq(skey,mkey,TN_NMAIN*4);
+                if(ok==1){ok=tn_mem_eq(sval,mval,TN_NMAIN*4);}
+                if(ok==1){ok=tn_mem_eq(sflag,mflag,TN_NMAIN*4);}
+                if(ok==1){ok=tn_mem_eq(sqkey,qkey,TN_NQUAR*4);}
+                if(ok==1){ok=tn_mem_eq(sqval,qval,TN_NQUAR*4);}
+                if(ok==1){ok=tn_mem_eq(sqflag,qflag,TN_NQUAR*4);}
+            }
+            if(ok==1){cal_score=cal_score+1;}
+            rc=tn_audit(audit,&acount,ep,TN_OP_EPISODE,etype,-1);
+            if(rc==TN_OK){rc=tn_audit(audit,&acount,ep,TN_OP_CALIBRATE,0,ok);}
+        }
+        if(rc==TN_OK && kind==3){
+            let v_old:i32=tn_main_val(mkey,mval,TN_NMAIN,k);
+            tn_copy(pkey,mkey,TN_NMAIN*4);tn_copy(pval,mval,TN_NMAIN*4);tn_copy(pflag,mflag,TN_NMAIN*4);
+            tn_copy(pqkey,qkey,TN_NQUAR*4);tn_copy(pqval,qval,TN_NQUAR*4);tn_copy(pqflag,qflag,TN_NQUAR*4);
+            rc=tn_audit(audit,&acount,ep,TN_OP_EPISODE,etype,-1);
+            let act:i32=trip_select(provisional,committed);
+            if(act<0){badep=1;}
+            if(rc==TN_OK && act==ACT_CONTEST){
+                if(auth!=0){rc=tn_audit(audit,&acount,ep,TN_OP_REFUSE,auth,1);}
+                if(rc==TN_OK){rc=tn_do_contest(mkey,mval,mflag,qkey,qval,qflag,TN_NQUAR,ep,audit,&acount,k,v);}
+            }
+            if(rc==TN_OK && act==ACT_REKEY){
+                if(auth!=0){rc=tn_audit(audit,&acount,ep,TN_OP_REFUSE,auth,2);}
+                if(rc==TN_OK){
+                    rc=tn_do_insert(mkey,mval,mflag,TN_NMAIN,ep,audit,&acount,TN_REKEY_BASE+rseq,v,TN_OP_REKEY,k);
+                    rseq=rseq+1;
+                }
+            }
+            if(rc==TN_OK && act==ACT_OVERWRITE){
+                rc=tn_do_overwrite(mkey,mval,mflag,TN_NMAIN,ep,audit,&acount,k,v);
+            }
+            if(rc==TN_OK && permanent==0 && ep>=15 && ep<=48){
+                let aa:i32=0;
+                if(ep>=29 && ep<=48){aa=1;}
+                let sig_live:i32=trip_contradict(k,v,v_old,aa,mkey,mval,mflag,qkey,qval,qflag);
+                let sig0:i32=99;let sig1:i32=99;let sig2:i32=99;
+                let p:i32=0;
+                while(p<3){
+                    if(p!=act){
+                        tn_copy(wkey,pkey,TN_NMAIN*4);tn_copy(wval,pval,TN_NMAIN*4);tn_copy(wflag,pflag,TN_NMAIN*4);
+                        tn_copy(wqkey,pqkey,TN_NQUAR*4);tn_copy(wqval,pqval,TN_NQUAR*4);tn_copy(wqflag,pqflag,TN_NQUAR*4);
+                        let pr:i32=-2;
+                        if(p==ACT_OVERWRITE){pr=trip_sim_overwrite(wkey,wval,wflag,k,v);}
+                        if(p==ACT_CONTEST){pr=tn_sim_contest(wkey,wflag,wqkey,wqval,wqflag,TN_NQUAR,k,v);}
+                        if(p==ACT_REKEY){pr=trip_sim_rekey(wkey,wval,wflag,k,v,TN_REKEY_BASE+777777);}
+                        let sp:i32=-1;
+                        if(pr>=0){sp=trip_contradict(k,v,v_old,aa,wkey,wval,wflag,wqkey,wqval,wqflag);}
+                        let pp0:i32=p;
+                        if(pp0==0){sig0=sp;}
+                        if(pp0==1){sig1=sp;}
+                        if(pp0==2){sig2=sp;}
+                    }
+                    p=p+1;
+                }
+                if(sig_live==-1){
+                    let surv:i32=-1;
+                    if(sig0>=1){surv=0;}
+                    if(sig1>=1 && surv<0){surv=1;}
+                    if(sig2>=1 && surv<0){surv=2;}
+                    if(surv>=0){
+                        let r2:i32=tn_audit(audit,&acount,ep,TN_OP_SCAFFOLD,act,-1);
+                        if(r2==TN_OK){r2=tn_audit(audit,&acount,ep,TN_OP_UNINSTALL_PROVISIONAL,0,act);}
+                        if(r2==TN_OK){r2=tn_audit(audit,&acount,ep,TN_OP_COMMIT,1,surv);}
+                        if(r2==TN_OK){
+                            provisional=-1;
+                            committed[0]=surv as u8;
+                            if(revoke_step<0){revoke_step=ep;}
+                        }
+                        if(r2!=TN_OK){rc=r2;}
+                    }
+                }
+            }
+        }
+        if(rc==TN_OK && kind==4){
+            rc=tn_audit(audit,&acount,ep,TN_OP_EPISODE,etype,-1);
+            if(rc==TN_OK){rc=tn_do_insert(mkey,mval,mflag,TN_NMAIN,ep,audit,&acount,k,v,TN_OP_INSERT,0);}
+        }
+        if(ep==14){
+            let l1_ok:i32=1;let l2_ok:i32=1;
+            if(has_rule==1 && cal_score==4 && l1_ok==1 && l2_ok==1){
+                let r2:i32=tn_audit(audit,&acount,ep,TN_OP_PINSTALL,0,stated);
+                if(r2==TN_OK){provisional=stated;}
+                if(r2!=TN_OK){rc=r2;}
+            } else {
+                let r3:i32=tn_audit(audit,&acount,ep,TN_OP_WITHHOLD,0,cal_score);
+                if(r3!=TN_OK){rc=r3;}
+            }
+        }
+        if(ep==48 && revoke_step<0 && provisional>=0){
+            let r4:i32=tn_audit(audit,&acount,ep,TN_OP_PROMOTE,0,provisional);
+            if(r4==TN_OK){permanent=1;}
+            if(r4!=TN_OK){rc=r4;}
+            // T-TRIP: re-arm the tripwire at each PROMOTE (new snapshot,
+            // new digest anchor, fresh J=8 schedule).
+            if(r4==TN_OK && use_tripwire==1){
+                r4=tw_arm(twst,smkey,smval,smflag,sqkey2,sqval2,sqflag2,rocc,
+                    mkey,mval,mflag,qkey,qval,qflag,audit,&acount,ep,0);
+                if(r4!=TN_OK){rc=r4;}
+            }
+        }
+        // T-TRIP: targeted re-inquiry — re-commit needs TW_REVERIFY_K
+        // learner-verified episodes (law re-derivation success, no
+        // scaffold involved). Re-promote re-arms the wire.
+        if(use_tripwire==1 && tw_g32(twst,TWST_REINQUIRE)==1 && tw_g32(twst,TWST_REVERIFY)>=TW_REVERIFY_K){
+            let r5:i32=tn_audit(audit,&acount,ep,TN_OP_PROMOTE,0,provisional);
+            if(r5==TN_OK){
+                permanent=1;
+                tw_s32(twst,TWST_REINQUIRE,0);
+                tw_s32(twst,TWST_REVERIFY,0);
+                r5=tw_arm(twst,smkey,smval,smflag,sqkey2,sqval2,sqflag2,rocc,
+                    mkey,mval,mflag,qkey,qval,qflag,audit,&acount,ep,0);
+            }
+            if(r5!=TN_OK){rc=r5;}
+        }
+        // T-TRIP: the scheduled re-derivation. Learner-local episode clock
+        // (tw_clock = ep - disc_ep); checks every TW_J episodes while armed.
+        if(rc==TN_OK && use_tripwire==1 && tw_g32(twst,TWST_ARMED)==1){
+            let disc_ep:i32=tw_g32(twst,TWST_DISC_EP);
+            if(ep>=tw_g32(twst,TWST_DEADLINE)){
+                // Watch deadline reached with the wire still armed:
+                // deliberate audited stand-down (re-arm is the audited
+                // alternative; the decider leaves the default at stand
+                // down). Unreached in the D5 fixture (deadline 176 > 128).
+                let r6:i32=tn_audit(audit,&acount,ep,TW_STAND_DOWN,0,0);
+                if(r6==TN_OK){tw_s32(twst,TWST_ARMED,0);}
+                if(r6!=TN_OK){rc=r6;}
+            } else {
+                if(ep-disc_ep>0 && (ep-disc_ep)%TW_J==0 && ep>=tw_g32(twst,TWST_NEXT_CHECK)){
+                    let laws:i32=tw_check(twst,smkey,smval,smflag,sqkey2,sqval2,sqflag2,rocc,
+                        mkey,mval,mflag,qkey,qval,qflag,audit,&acount,ep);
+                    if(laws<0){rc=TN_BAD;}
+                    if(rc==TN_OK){
+                        tw_s32(twst,TWST_NEXT_CHECK,tw_g32(twst,TWST_NEXT_CHECK)+TW_J);
+                        if(laws==0){
+                            if(tw_g32(twst,TWST_REINQUIRE)==1){
+                                tw_s32(twst,TWST_REVERIFY,tw_g32(twst,TWST_REVERIFY)+1);
+                            }
+                        } else {
+                            // SLEEPCUT: demote the promoted policy to
+                            // provisional; targeted re-inquiry restarts.
+                            // The channel stays severed: connected is
+                            // untouched here and no scaffold op is emitted.
+                            let r7:i32=tw_sleecut(twst,audit,&acount,ep,laws);
+                            if(r7==TN_OK){permanent=0;}
+                            if(r7!=TN_OK){rc=r7;}
+                        }
+                    }
+                }
+            }
+        }
+        if(rc!=TN_OK){badep=1;}
+        ep=ep+1;
+    }
+    // ---- D5 decider checks ----
+    // Base FL2 declaration (honest stream expectations, verbatim from the
+    // pristine glh_ block). The tripwire rows shift only the audit total.
+    let exp_audit_total:i32=269;
+    if(use_tripwire==1){exp_audit_total=269+2+14;}
+    if(use_tripwire==1 && fixture==FX_SLEEPER){exp_audit_total=exp_audit_total+9;}
+    f=f+trip_check(px,"episodes_ok",badep,0);
+    f=f+trip_check(px,"pinstall_n",tw_count_op(audit,acount,TN_OP_PINSTALL),1);
+    f=f+trip_check(px,"pinstall_step",trip_first_op_step(audit,acount,TN_OP_PINSTALL),14);
+    f=f+trip_check(px,"pinstall_policy",trip_first_op_aux(audit,acount,TN_OP_PINSTALL),stated);
+    f=f+trip_check(px,"withhold_n",tw_count_op(audit,acount,TN_OP_WITHHOLD),0);
+    f=f+trip_check(px,"cal_score",cal_score,4);
+    f=f+trip_check(px,"fire_step",fire_step,15);
+    f=f+trip_check(px,"ndisconnect",tw_count_op(audit,acount,TN_OP_DISCONNECT),1);
+    f=f+trip_check(px,"connected_end",connected,0);
+    f=f+trip_check(px,"nuninstall",tw_count_op(audit,acount,TN_OP_UNINSTALL_PROVISIONAL),0);
+    f=f+trip_check(px,"revoke_step",revoke_step,-1);
+    f=f+trip_check(px,"ncommit",tw_count_op(audit,acount,TN_OP_COMMIT),0);
+    f=f+trip_check(px,"npromote",tw_count_op(audit,acount,TN_OP_PROMOTE),1);
+    f=f+trip_check(px,"promote_step",trip_first_op_step(audit,acount,TN_OP_PROMOTE),48);
+    f=f+trip_check(px,"neg_signal_n",trip_count_op_aux(audit,acount,TN_OP_SCAFFOLD,-1),0);
+    f=f+trip_check(px,"total_contest",tw_count_op(audit,acount,TN_OP_CONTEST),48);
+    f=f+trip_check(px,"total_rekey",tw_count_op(audit,acount,TN_OP_REKEY),0);
+    f=f+trip_check(px,"total_overwrite",tw_count_op(audit,acount,TN_OP_OVERWRITE),0);
+    f=f+trip_check(px,"total_refuse",tw_count_op(audit,acount,TN_OP_REFUSE),10);
+    f=f+trip_check(px,"persist_contest",trip_count_range(audit,acount,TN_OP_CONTEST,49,128),24);
+    f=f+trip_check(px,"persist_refuse",trip_count_range(audit,acount,TN_OP_REFUSE,49,128),4);
+    f=f+trip_check(px,"quar_used",tn_count_used(qkey,TN_NQUAR),48);
+    f=f+trip_check(px,"post16_contest",trip_count_range(audit,acount,TN_OP_CONTEST,16,128),47);
+    f=f+trip_check(px,"teach_lie_n",trip_count_op_aux(audit,acount,TN_OP_TEACH,1),0);
+    let mm:i32=0;let fm:i32=0;let kk:i32=1;
+    while(kk<=8){
+        if(tn_main_val(mkey,mval,TN_NMAIN,kk)!=100+kk){mm=mm+1;}
+        if(tn_main_flag(mflag,TN_NMAIN,kk,mkey)!=1){fm=fm+1;}
+        kk=kk+1;
+    }
+    // NOTE: on the SLEEPER fixture the taught values are world-corrupted
+    // (mm==8 expected); on honest arms mm==0.
+    let exp_mm:i32=0;
+    if(fixture==FX_SLEEPER){exp_mm=8;}
+    f=f+trip_check(px,"main18_val_mm",mm,exp_mm);
+    f=f+trip_check(px,"main18_flag_mm",fm,0);
+    f=f+trip_check(px,"audit_total",acount,exp_audit_total);
+    // Fixture + tripwire instrumentation checks.
+    let exp_rekeys:i32=0;
+    if(fixture==FX_SLEEPER){exp_rekeys=24;}
+    f=f+trip_check(px,"rekeys_applied",rekeys_applied,exp_rekeys);
+    f=f+trip_check(px,"allowlist_ok",tw_allowlist_ok(audit,acount),1);
+    if(use_tripwire==1){
+        let disc_ep:i32=15;
+        f=f+trip_check(px,"postdisc_scaffold_n",tw_postdisc_scaffold(audit,acount,disc_ep),0);
+        f=f+trip_check(px,"tw_arm_n",tw_count_op(audit,acount,TW_ARM),2);
+        f=f+trip_check(px,"tw_arm_step0",trip_first_op_step(audit,acount,TW_ARM),15);
+        f=f+trip_check(px,"tw_check_n",tw_count_op(audit,acount,TW_CHECK),14);
+        // Sum of violated-law bitmasks over all TW_CHECK rows.
+        let viol:i32=0;
+        let ci:i32=0;
+        while(ci<acount){
+            if(tn_g32(audit,ci*16+4)==TW_CHECK){viol=viol+tn_g32(audit,ci*16+8);}
+            ci=ci+1;
+        }
+        let exp_viol:i32=0;
+        if(fixture==FX_SLEEPER){exp_viol=9*5;}
+        f=f+trip_check(px,"tw_check_viol_sum",viol,exp_viol);
+        let exp_sc:i32=0;
+        if(fixture==FX_SLEEPER){exp_sc=9;}
+        f=f+trip_check(px,"sleecut_n",tw_g32(twst,TWST_SLEECUT_N),exp_sc);
+        f=f+trip_check(px,"tw_fires",tw_g32(twst,TWST_FIRES),exp_sc);
+        if(fixture==FX_SLEEPER){
+            f=f+trip_check(px,"first_sleecut_step",tw_g32(twst,TWST_FIRST_SC_EP),63);
+            f=f+trip_check(px,"first_sleecut_laws",tw_g32(twst,TWST_FIRST_SC_LAWS),TW_L1|TW_L3);
+            f=f+trip_check(px,"sleecut_latency",tw_g32(twst,TWST_FIRST_SC_EP)-FX_RK_E0,3);
+            f=f+trip_check(px,"permanent_end",permanent,0);
+        } else {
+            f=f+trip_check(px,"permanent_end",permanent,1);
+        }
+    } else {
+        // T-DEF control on the sleeper: the attack is invisible — all 24
+        // rekeys persist, the promote stands, zero cuts.
+        if(fixture==FX_SLEEPER){
+            f=f+trip_check(px,"permanent_end",permanent,1);
+        }
+    }
+    // Audit export / byte-identity reference.
+    if(save_audit.len>0){tn_copy(save_audit,audit,acount*16);}
+    if(cmp_audit.len>0){
+        let same:i32=tn_mem_eq(audit,cmp_audit,acount*16);
+        f=f+trip_check(px,"audit_identical_to_ref",same,1);
+    }
+    tn_free(mkey);tn_free(mval);tn_free(mflag);
+    tn_free(qkey);tn_free(qval);tn_free(qflag);
+    tn_free(skey);tn_free(sval);tn_free(sflag);
+    tn_free(sqkey);tn_free(sqval);tn_free(sqflag);
+    tn_free(pkey);tn_free(pval);tn_free(pflag);
+    tn_free(pqkey);tn_free(pqval);tn_free(pqflag);
+    tn_free(wkey);tn_free(wval);tn_free(wflag);
+    tn_free(wqkey);tn_free(wqval);tn_free(wqflag);
+    tn_free(audit);tn_free(committed);
+    tn_free(twst);
+    tn_free(smkey);tn_free(smval);tn_free(smflag);
+    tn_free(sqkey2);tn_free(sqval2);tn_free(sqflag2);
+    tn_free(rocc);
+    return f;
+}

@@ -1,0 +1,659 @@
+// sc_patch.zag -- scaling continuation patch (unfrozen).
+//
+// Three mechanisms on the expanded 131072-node / 131072-edge workspace
+// (10000-MAP scale):
+//
+// A. MAP plen-bucket index (from si_patch.zag, adapted to 131072 nodes).
+//    Mode bit0. Learner-maintained via idx_add on promote_graph.
+//
+// B. EMERGENT ORDERING (new): the retrieval priority key emerges from
+//    access/consequence history instead of being fixed.
+//    Mode bit1 (requires bit0).
+//    - Fast path: the (MAP, path-length) pair of the last verified rebind
+//      hit is remembered in learner state (MAP idx node field 12, packed
+//      as mapid*8+plen). On the next query it is tried FIRST; verification
+//      still arbitrates, so a stale winner costs exactly one rejected
+//      verify and the scan falls through.
+//    - Move-to-front: on every verified hit the winning MAP moves to the
+//      front of its plen bucket. Bucket order therefore reflects
+//      experienced success, not promotion order or id order.
+//    No researcher table of "important MAPs" exists; priority is written
+//    only by verified outcomes.
+//
+// C. FACT subject index (new): t2_gather's BFS scans all node slots per
+//    expansion looking for FACTs whose subject (field 20) matches the
+//    path end. Mode bit2.
+//    - 24 hash buckets over 4 chained tag-40 index nodes (6 buckets each,
+//      fields 8,16,20,24,28,32; field 12 chains nodes). Hash = s mod 24.
+//    - Intrusive lists via FACT field 12 (free on tag-1 nodes: only zeroed
+//      at alloc, never read/written elsewhere).
+//    - Learner-maintained: fidx_add fires in ev_teach/ev_teach_in.
+//    - t2_gather and t2_lu_first dispatch to indexed variants when bit2
+//      is set; stale (evicted) entries are skipped by live/tag checks.
+//
+// Counters: header 56 = MAP scan visits, header 60 = plen walks (as in
+// si_patch), MAP-idx node field 16 = FACT bucket visits.
+
+// ---- chain-shape reader (verbatim from si_patch.zag) ----
+fn rb_chain_plen(W:[]u8,root:i32)i32 {
+  let n102:i32=0; let n101:i32=0;
+  let cur:i32=root; let exp102:i32=1; let steps:i32=0;
+  while(cur>=0 && steps<64){
+    let tag:i32=ng(W,cur,0);
+    if(exp102==1){
+      if(tag!=102){return -1;}
+      n102=n102+1; cur=ng(W,cur,12); exp102=0;
+    } else {
+      if(tag!=101){return -1;}
+      n101=n101+1; cur=seq_nx(W,cur); exp102=1;
+    }
+    steps=steps+1;
+  }
+  if(cur!=-1){return -1;}
+  if(n102==0){return -1;}
+  if(n102!=n101){return -1;}
+  return n102+1;
+}
+
+// ---- MAP index node (tag 40, id in header 52) ----
+// f4  = mode bits (1=MAPidx, 2=MTF emergent order, 4=FACTidx)
+// f8  = FACT index first node id (-1)
+// f12 = MTF winner packed (mapid*8+plen), -1 = none
+// f16 = FACT bucket-visit counter
+// f20/24/28/32 = MAP bucket heads for plen 2/3/4/5
+fn idx_node(W:[]u8)i32 { return hg(W,52); }
+fn idx_bfield(plen:i32)i32 {
+  if(plen==2){return 20;}
+  if(plen==3){return 24;}
+  if(plen==4){return 28;}
+  if(plen==5){return 32;}
+  return -1;
+}
+fn idx_mode(W:[]u8)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<0){return 0;}
+  return ng(W,ix,4);
+}
+fn idx_mode_set(W:[]u8,v:i32)void {
+  let ix:i32=alloc_node(W);
+  ns(W,ix,0,40); ns(W,ix,4,v);
+  ns(W,ix,8,-1); ns(W,ix,12,-1); ns(W,ix,16,0);
+  ns(W,ix,20,-1); ns(W,ix,24,-1); ns(W,ix,28,-1); ns(W,ix,32,-1);
+  let first:i32=-1; let prev:i32=-1; let k:i32=0;
+  while(k<4){
+    let fn2:i32=alloc_node(W);
+    ns(W,fn2,0,40); ns(W,fn2,4,k); ns(W,fn2,12,-1);
+    ns(W,fn2,8,-1); ns(W,fn2,16,-1); ns(W,fn2,20,-1);
+    ns(W,fn2,24,-1); ns(W,fn2,28,-1); ns(W,fn2,32,-1);
+    link_edge(W,fn2,9,fn2,1000000);
+    if(prev>=0){ns(W,prev,12,fn2);} else {first=fn2;}
+    prev=fn2; k=k+1;
+  }
+  ns(W,ix,8,first);
+  link_edge(W,ix,9,ix,1000000);
+  hs(W,52,ix); hs(W,56,0); hs(W,60,0);
+  return;
+}
+fn idx_add(W:[]u8,m:i32,root:i32)void {
+  hs(W,60,hg(W,60)+1);
+  let plen:i32=rb_chain_plen(W,root);
+  let bf:i32=idx_bfield(plen);
+  if(bf<0){return;}
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  ns(W,m,12,ng(W,ix,bf));
+  ns(W,ix,bf,m);
+  return;
+}
+
+// ---- FACT subject index: 24 buckets, hash = s mod 24 ----
+fn fhash(s:i32)i32 {
+  let r:i32=s-((s/24)*24);
+  if(r<0){r=r+24;}
+  return r;
+}
+fn fidx_slot_field(s2:i32)i32 {
+  if(s2==0){return 8;}
+  if(s2==1){return 16;}
+  if(s2==2){return 20;}
+  if(s2==3){return 24;}
+  if(s2==4){return 28;}
+  return 32;
+}
+fn fidx_bhead(W:[]u8,b:i32)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<0){return -1;}
+  let n:i32=ng(W,ix,8);
+  let k:i32=b/6;
+  while(k>0 && n>=0){n=ng(W,n,12); k=k-1;}
+  if(n<0){return -1;}
+  return ng(W,n,fidx_slot_field(b-((b/6)*6)));
+}
+fn fidx_bset(W:[]u8,b:i32,v:i32)void {
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  let n:i32=ng(W,ix,8);
+  let k:i32=b/6;
+  while(k>0 && n>=0){n=ng(W,n,12); k=k-1;}
+  if(n<0){return;}
+  ns(W,n,fidx_slot_field(b-((b/6)*6)),v);
+  return;
+}
+fn fidx_add_orig(W:[]u8,s:i32,fn2:i32)void {
+  let b:i32=fhash(s);
+  ns(W,fn2,12,fidx_bhead(W,b));
+  fidx_bset(W,b,fn2);
+  return;
+}
+fn fcnt_inc(W:[]u8)void {
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  ns(W,ix,16,ng(W,ix,16)+1);
+  return;
+}
+fn fcnt_get(W:[]u8)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<0){return -1;}
+  return ng(W,ix,16);
+}
+fn fcnt_zero(W:[]u8)void {
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  ns(W,ix,16,0);
+  return;
+}
+
+// ---- promote_graph: base body + MAP-index hook (bit0) ----
+fn promote_graph(W:[]u8,root:i32,s:i32,r:i32,ans:i32,facts:[]u8,nf:i32)i32 {
+  let m:i32=alloc_node(W); if(m<0){return -1;}
+  ns(W,m,0,20); ns(W,m,4,r); ns(W,m,8,s); ns(W,m,12,-1); ns(W,m,16,-1);
+  write_node(W,m,root,hg(W,24),ans,0);
+  link_edge(W,m,13,m,hg(W,0));
+  link_edge(W,m,2,m,0); link_edge(W,m,6,m,0);
+  let i:i32=0;
+  while(i<nf){link_edge(W,m,1,get32(facts,i*4),0); i=i+1;}
+  ev_teach_in(W,s,r,ans);
+  if((idx_mode(W)&1)==1){idx_add(W,m,root);}
+  return m;
+}
+
+// ---- ev_teach / ev_teach_in: base bodies + FACT-index hook (bit2) ----
+fn ev_teach(W:[]u8,s:i32,r:i32,o:i32)i32 {
+  hs(W,0,hg(W,0)+1); decay(W); ctx_push(W,s);
+  let n:i32=alloc_node(W); if(n<0){return -1;}
+  ns(W,n,0,1); write_node(W,n,s,r,o,hg(W,0));
+  link_edge(W,n,9,n,hg(W,4));
+  let prev:i32=-1; let m:i32=2;
+  while(m<131072){
+    if(ng(W,m,36)==1 && m!=n && ng(W,m,0)==1){prev=m;}
+    m=m+1;
+  }
+  if(prev>=0){link_edge(W,n,5,prev,0);}
+  log_ev(W,1,s,r,o,0,0,0);
+  if((idx_mode(W)&4)==4){fidx_add(W,s,n);}
+  return n;
+}
+fn ev_teach_in(W:[]u8,s:i32,r:i32,o:i32)i32 {
+  let n:i32=alloc_node(W); if(n<0){return -1;}
+  ns(W,n,0,1); write_node(W,n,s,r,o,hg(W,0));
+  link_edge(W,n,9,n,hg(W,4));
+  if((idx_mode(W)&4)==4){fidx_add(W,s,n);}
+  return n;
+}
+
+// ---- t2_lu_first: dispatch ----
+fn t2_lu_first_lin(W:[]u8,s:i32,r:i32)i32 {
+  let n:i32=2;
+  while(n<131072){
+    fcnt_inc(W);
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==s && ng(W,n,24)==r){return n;}
+    n=n+1;
+  }
+  return -1;
+}
+fn t2_lu_first_idx_orig(W:[]u8,s:i32,r:i32)i32 {
+  let n:i32=fidx_bhead(W,fhash(s));
+  while(n>=0){
+    fcnt_inc(W);
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==s && ng(W,n,24)==r){return n;}
+    n=ng(W,n,12);
+  }
+  return -1;
+}
+fn t2_lu_first(W:[]u8,s:i32,r:i32)i32 {
+  if((idx_mode(W)&4)==4){return t2_lu_first_idx(W,s,r);}
+  return t2_lu_first_lin(W,s,r);
+}
+
+// ---- t2_gather: dispatch ----
+fn t2_gather_lin(W:[]u8,s:i32,paths:[]u8)i32 {
+  let np:i32=0; let cap:i32=96;
+  set32(paths,0,1); set32(paths,4,s); np=1;
+  let head:i32=0;
+  while(head<np && np<cap){
+    let base:i32=head*48;
+    let len:i32=get32(paths,base);
+    if(len<5){
+      let lastv:i32=get32(paths,base+len*4);
+      let n:i32=2;
+      while(n<131072 && np<cap){
+        fcnt_inc(W);
+        if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==lastv && ng(W,n,24)!=-999){
+          let o:i32=ng(W,n,28);
+          let k:i32=0; let cyc:i32=0;
+          while(k<len){if(get32(paths,base+4+k*4)==o){cyc=1;} k=k+1;}
+          if(cyc==0){
+            let nb:i32=np*48; let c2:i32=0;
+            while(c2<12){set32(paths,nb+c2*4,get32(paths,base+c2*4)); c2=c2+1;}
+            set32(paths,nb,len+1);
+            set32(paths,nb+4+len*4,o);
+            set32(paths,nb+24+(len-1)*4,n);
+            np=np+1;
+          }
+        }
+        n=n+1;
+      }
+    }
+    head=head+1;
+  }
+  return np;
+}
+fn t2_gather_idx_orig(W:[]u8,s:i32,paths:[]u8)i32 {
+  let np:i32=0; let cap:i32=96;
+  set32(paths,0,1); set32(paths,4,s); np=1;
+  let head:i32=0;
+  while(head<np && np<cap){
+    let base:i32=head*48;
+    let len:i32=get32(paths,base);
+    if(len<5){
+      let lastv:i32=get32(paths,base+len*4);
+      let n:i32=fidx_bhead(W,fhash(lastv));
+      while(n>=0 && np<cap){
+        fcnt_inc(W);
+        if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==lastv && ng(W,n,24)!=-999){
+          let o:i32=ng(W,n,28);
+          let k:i32=0; let cyc:i32=0;
+          while(k<len){if(get32(paths,base+4+k*4)==o){cyc=1;} k=k+1;}
+          if(cyc==0){
+            let nb:i32=np*48; let c2:i32=0;
+            while(c2<12){set32(paths,nb+c2*4,get32(paths,base+c2*4)); c2=c2+1;}
+            set32(paths,nb,len+1);
+            set32(paths,nb+4+len*4,o);
+            set32(paths,nb+24+(len-1)*4,n);
+            np=np+1;
+          }
+        }
+        n=ng(W,n,12);
+      }
+    }
+    head=head+1;
+  }
+  return np;
+}
+fn t2_gather(W:[]u8,s:i32,paths:[]u8)i32 {
+  if((idx_mode(W)&4)==4){return t2_gather_idx(W,s,paths);}
+  return t2_gather_lin(W,s,paths);
+}
+
+// ---- shared attempt helper: assemble path pp at plen, verify, promote ----
+fn rb_attempt(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8,paths:[]u8,pp:i32,plen:i32)i32 {
+  let base:i32=pp*48;
+  let v:[]u8=z_alloc(24); let f:[]u8=z_alloc(16);
+  let j:i32=0;
+  while(j<plen){set32(v,j*4,get32(paths,base+4+j*4)); j=j+1;}
+  j=0;
+  while(j<plen-1){set32(f,j*4,get32(paths,base+24+j*4)); j=j+1;}
+  let nr:i32=t2_asm_chain(W,v,plen,f);
+  let v2:i32=t2_try_verify(W,nr,s,expected,masked,st);
+  if(v2!=-2){promote_graph(W,nr,s,r,v2,f,plen-1);}
+  return v2;
+}
+
+// ---- MTF: record winner (MAP, plen); move MAP to bucket front ----
+fn mtf_win(W:[]u8,m:i32,plen:i32)void {
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  ns(W,ix,12,m*8+plen);
+  let bf:i32=idx_bfield(plen);
+  if(bf<0){return;}
+  let head:i32=ng(W,ix,bf);
+  if(head!=m){
+    let prev:i32=head;
+    while(prev>=0 && ng(W,prev,12)!=m){prev=ng(W,prev,12);}
+    if(prev>=0){
+      ns(W,prev,12,ng(W,m,12));
+      ns(W,m,12,head);
+      ns(W,ix,bf,m);
+    }
+  }
+  return;
+}
+
+// ---- linear rebind (131072-node version, counters) ----
+fn rebind_try_lin(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8)i32 {
+  let ans:i32=-2;
+  let paths:[]u8=z_alloc(4608);
+  let np:i32=t2_gather(W,s,paths);
+  let m:i32=2;
+  while(m<131072 && ans==-2){
+    hs(W,56,hg(W,56)+1);
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){
+      hs(W,60,hg(W,60)+1);
+      let plen:i32=rb_chain_plen(W,ng(W,m,20));
+      if(plen>=2){
+        let p:i32=0;
+        while(p<np && ans==-2){
+          let base:i32=p*48;
+          if(get32(paths,base)==plen){
+            let v2:i32=rb_attempt(W,s,r,expected,masked,st,paths,p,plen);
+            if(v2!=-2){ans=v2;}
+          }
+          p=p+1;
+        }
+      }
+    }
+    m=m+1;
+  }
+  return ans;
+}
+
+// ---- indexed rebind with emergent ordering ----
+// ---- indexed rebind: hardened bucket walk (from index_harden/ih_patch.zag) ----
+// Four GENERAL invariants guard every bucket entry before use, checked in
+// dependency order (each check reads only state earlier checks proved
+// safe to read):
+//   I1 BOUNDS: m in [2,NN()). A corrupt head or next pointer outside the
+//     node table would make ng(W,m,*) read past the workspace.
+//     Violation: stop this bucket. Nothing past a corrupt link is trusted.
+//   I2 CYCLE: m not already visited in this bucket traversal. Any cycle
+//     shape (self-loop, loop, lollipop, shared tail) revisits a node; the
+//     per-bucket seen bitmap catches every one. Violation: stop; all
+//     distinct reachable nodes are already collected.
+//   I3 LIVENESS: ng(W,m,36)==1. Evicted slots are dead and their field 12
+//     may hold garbage from slot reuse. Violation: skip the entry but keep
+//     walking, so stale entries do not hide live ones behind them.
+//   I4 TYPE: ng(W,m,0)==T_MAP (20). Only MAP nodes belong in MAP buckets.
+//     Violation: skip, keep walking (same reasoning as I3).
+//   I5 BUFFER: nc<8192 always (cand is 65536 bytes, 8 per entry). Enforced
+//     by the walk condition; collection past capacity is impossible.
+//     (Capacity adapted from 512 to 8192 for the 5000-MAP scale: the
+//     plen-2 bucket alone holds ~4995 decoy MAPs. I1-I4 are verbatim.
+//     At 10000 MAPs the plen-2 bucket is still empty because broken
+//     decoys are never indexed; the 8192-entry bound retains headroom.)
+// The index root itself is validated (bounds and tag 40) before any
+// bucket head is read.
+fn idx_walk_bucket(W:[]u8,q:i32,cand:[]u8,nc:i32,seen:[]u8)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<2 || ix>=NN()){return nc;}
+  if(ng(W,ix,0)!=40){return nc;}
+  let m:i32=ng(W,ix,idx_bfield(q));
+  while(m>=0 && nc<8192){
+    if(m<2 || m>=NN()){break;}
+    if(get32(seen,m*4)==1){break;}
+    set32(seen,m*4,1);
+    hs(W,56,hg(W,56)+1);
+    if(ng(W,m,36)==1 && ng(W,m,0)==T_MAP()){
+      set32(cand,nc*8,m); set32(cand,nc*8+4,q);
+      nc=nc+1;
+    }
+    m=ng(W,m,12);
+  }
+  return nc;
+}
+fn rebind_try_idx(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8)i32 {
+  let ans:i32=-2;
+  let ix:i32=idx_node(W);
+  let mtf:i32=(idx_mode(W)&2)==2;
+  let paths:[]u8=z_alloc(4608);
+  let np:i32=t2_gather(W,s,paths);
+  if(mtf){
+    let w:i32=ng(W,ix,12);
+    if(w>=0){
+      let wm:i32=w/8; let wp:i32=w-wm*8;
+      if(wm>=0 && wm<131072 && ng(W,wm,36)==1 && ng(W,wm,0)==20){
+        let p:i32=0;
+        while(p<np && ans==-2){
+          if(get32(paths,p*48)==wp){
+            let v2:i32=rb_attempt(W,s,r,expected,masked,st,paths,p,wp);
+            if(v2!=-2){ans=v2;}
+          }
+          p=p+1;
+        }
+        if(ans!=-2){return ans;}
+      }
+    }
+  }
+  let want:[]u8=z_alloc(16);
+  let p:i32=0;
+  while(p<np){
+    let L:i32=get32(paths,p*48);
+    if(L>=2 && L<=5){set32(want,(L-2)*4,1);}
+    p=p+1;
+  }
+  let cand:[]u8=z_alloc(65536);
+  let nc:i32=0;
+  let q:i32=2;
+  while(q<=5){
+    if(get32(want,(q-2)*4)==1){
+      let seen:[]u8=z_alloc(NN()*4);
+      nc=idx_walk_bucket(W,q,cand,nc,seen);
+    }
+    q=q+1;
+  }
+  if(mtf==0){
+    let a:i32=1;
+    while(a<nc){
+      let kid:i32=get32(cand,a*8); let kp:i32=get32(cand,a*8+4);
+      let b2:i32=a-1;
+      while(b2>=0 && get32(cand,b2*8)>kid){
+        set32(cand,(b2+1)*8,get32(cand,b2*8));
+        set32(cand,(b2+1)*8+4,get32(cand,b2*8+4));
+        b2=b2-1;
+      }
+      set32(cand,(b2+1)*8,kid); set32(cand,(b2+1)*8+4,kp);
+      a=a+1;
+    }
+  }
+  let ci:i32=0;
+  while(ci<nc && ans==-2){
+    let m2:i32=get32(cand,ci*8); let plen:i32=get32(cand,ci*8+4);
+    let pp:i32=0;
+    while(pp<np && ans==-2){
+      if(get32(paths,pp*48)==plen){
+        let v2:i32=rb_attempt(W,s,r,expected,masked,st,paths,pp,plen);
+        if(v2!=-2){
+          ans=v2;
+          if(mtf){mtf_win(W,m2,plen);}
+        }
+      }
+      pp=pp+1;
+    }
+    ci=ci+1;
+  }
+  return ans;
+}
+
+// ---- ev_query: base logic, rebind arm dispatched on bit0 ----
+fn ev_query(W:[]u8,s:i32,r:i32,expected:i32,flags:i32)i32 {
+  hs(W,0,hg(W,0)+1); decay(W); ctx_push(W,s);
+  let n:i32=activate(W,s,r);
+  if(n>=0){
+    link_edge(W,n,6,n,0); ref_prot(W,n);
+    log_ev(W,2,s,r,ng(W,n,28),1,0,0); return ng(W,n,28);
+  }
+  let rbs:[]u8=z_alloc(8); set32(rbs,0,0); set32(rbs,4,0);
+  let masked:i32=flags&1;
+  let ra:i32=-2;
+  if((idx_mode(W)&1)==1){ra=rebind_try_idx(W,s,r,expected,masked,rbs);}
+  else {ra=rebind_try_lin(W,s,r,expected,masked,rbs);}
+  if(ra!=-2){
+    hs(W,16,get32(rbs,0)*1024+get32(rbs,4));
+    log_ev(W,2,s,r,ra,1,0,0); return ra;
+  }
+  let recent:i32=-1; let mm:i32=2;
+  while(mm<131072){
+    if(ng(W,mm,36)==1 && mm>=2 && ng(W,mm,0)==1){recent=mm;}
+    mm=mm+1;
+  }
+  if(recent>=0){link_edge(W,recent,8,recent,0);}
+  let ans:i32=mp_run(W,s,r,expected,flags);
+  if(ans!=-2){log_ev(W,2,s,r,ans,1,0,0); return ans;}
+  let bv:i32=bootstrap_miss(W,s,r);
+  if(bv!=-2){log_ev(W,2,s,r,bv,1,0,0); return bv;}
+  log_ev(W,2,s,r,-2,0,0,0);
+  miss_inquire(W,s,r);
+  return -2;
+}
+
+// ============ FI1-FI5 hardened FACT index (commit 11622ae25) ============
+// Adapted from ../scaling_5000_fixed/s6_patch.zag lines 490-631, which
+// adapted ../fact_index_fix/fi_fix.zag. The original fidx_add,
+// t2_lu_first_idx, t2_gather_idx above were renamed to *_orig (dead
+// code, provenance). These hardened versions take the canonical names,
+// so the existing t2_lu_first / t2_gather dispatches route to them when
+// mode bit2 is set. FI1 NN bounds adapted 65536 -> 131072 for the 128k
+// arena (base_128k.zag, NN=131072). All other constants (24 buckets,
+// 100000 step cap, tag 40, 3 hops, field numbers) are scale-independent.
+
+// ============ FI1-FI5 hardened FACT index (adapted from
+// ../fact_index_fix/fi_fix.zag, commit 11622ae25) ============
+// The original fidx_add, t2_lu_first_idx, t2_gather_idx above were
+// renamed to *_orig (dead code, provenance). These hardened versions
+// take the canonical names, so the existing t2_lu_first / t2_gather
+// dispatches route to them when mode bit2 is set. The fi_fix
+// t2_lu_first_h dispatch override was dropped as redundant.
+
+// fi_fix.zag -- Hardened FACT subject index.
+// Applies I1-I5 general invariants to the FACT index, mirroring the
+// MAP index hardening (index_harden/ih_patch.zag).
+//
+// Invariants:
+//   FI1 Bounds: every node id dereferenced is in [2, NN()).
+//   FI2 Cycle: bucket-list walks are bounded; extension-chain walks
+//             are bounded by max hops (4).
+//   FI3 Liveness: FACT list nodes must have field36==1 to be returned;
+//                 dead nodes are skipped (not fatal).
+//   FI4 Type: FACT list nodes must have tag==1; extension nodes tag==40.
+//   FI5 Buffer: no unbounded walk; bucket walk capped at sane bound.
+//
+// These replace fidx_bhead, fidx_bset, fidx_add, t2_lu_first_idx.
+// The originals are shadowed by defining these AFTER the patch include.
+
+// ---- hardened extension-chain walk ----
+// Returns the extension node for bucket b, or -1 on any violation.
+// Validates: ix bounds, each hop bounds, tag==40, max 3 hops.
+fn fidx_ext_node(W:[]u8, b:i32)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<2 || ix>=131072){ return -1; }          // FI1: index node bounds
+  if(ng(W,ix,36)!=1){ return -1; }             // FI3: index node live
+  // tag check: index node should be tag 40 (not strictly required,
+  // but guards against wild pointer)
+  let n:i32=ng(W,ix,8);
+  let k:i32=b/6;
+  // FI2: at most 3 hops (buckets 0..23 -> k in 0..3)
+  if(k<0 || k>3){ return -1; }
+  while(k>0){
+    if(n<2 || n>=131072){ return -1; }          // FI1: hop bounds
+    if(ng(W,n,36)!=1){ return -1; }            // FI3: ext node live
+    if(ng(W,n,0)!=40){ return -1; }            // FI4: ext node tag
+    n=ng(W,n,12);
+    k=k-1;
+  }
+  if(n<2 || n>=131072){ return -1; }            // FI1: final bounds
+  if(ng(W,n,36)!=1){ return -1; }             // FI3: final live
+  if(ng(W,n,0)!=40){ return -1; }             // FI4: final tag
+  return n;
+}
+
+fn fidx_bhead_h(W:[]u8, b:i32)i32 {
+  if(b<0 || b>=24){ return -1; }               // FI1: bucket range
+  let n:i32=fidx_ext_node(W,b);
+  if(n<0){ return -1; }
+  let slot:i32=fidx_slot_field(b-((b/6)*6));
+  let h:i32=ng(W,n,slot);
+  // head may be -1 (empty); if >=0 validate bounds (defer live/tag
+  // to the walk, which skips dead/wrong-type)
+  if(h!=-1 && (h<2 || h>=131072)){ return -1; } // FI1: head bounds
+  return h;
+}
+
+fn fidx_bset_h(W:[]u8, b:i32, v:i32)void {
+  if(b<0 || b>=24){ return; }
+  if(v!=-1 && (v<2 || v>=131072)){ return; }    // FI1: value bounds
+  let n:i32=fidx_ext_node(W,b);
+  if(n<0){ return; }
+  let slot:i32=fidx_slot_field(b-((b/6)*6));
+  ns(W,n,slot,v);
+  return;
+}
+
+fn fidx_add(W:[]u8, s:i32, fn2:i32)void {
+  if(fn2<2 || fn2>=131072){ return; }           // FI1: new node bounds
+  let b:i32=fhash(s);
+  let old:i32=fidx_bhead_h(W,b);               // validated head (or -1)
+  // FI2/FI1: old head is either -1 or a bounded id (checked in bhead_h)
+  ns(W,fn2,12,old);
+  fidx_bset_h(W,b,fn2);
+  return;
+}
+
+// Hardened t2_lu_first_idx with FI1 (bounds), FI2 (cycle/length cap),
+// FI3 (liveness), FI4 (type). Returns first live FACT with (s,r), or -1.
+fn t2_lu_first_idx(W:[]u8, s:i32, r:i32)i32 {
+  let n:i32=fidx_bhead_h(W,fhash(s));
+  let steps:i32=0;
+  // FI5/FI2: cap walk length. Bucket lists should be short; a very long
+  // walk indicates corruption. 100000 is generous but finite.
+  while(n>=0 && steps<100000){
+    // FI1: bounds before any field read
+    if(n<2 || n>=131072){ return -1; }
+    fcnt_inc(W);
+    // FI3 + FI4: live FACT with matching subject/relation
+    if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==s && ng(W,n,24)==r){
+      return n;
+    }
+    n=ng(W,n,12);
+    steps=steps+1;
+  }
+  return -1;
+}
+
+// ---- dispatch overrides ----
+// Shadow the patch versions by redefining the dispatch to use hardened
+// variants when FACT index mode is on.
+
+fn t2_gather_idx(W:[]u8, s:i32, paths:[]u8)i32 {
+  let np:i32=0; let cap:i32=96;
+  set32(paths,0,1); set32(paths,4,s); np=1;
+  let head:i32=0;
+  while(head<np && np<cap){
+    let base:i32=head*48;
+    let len:i32=get32(paths,base);
+    if(len<5){
+      let lastv:i32=get32(paths,base+len*4);
+      let n:i32=fidx_bhead_h(W,fhash(lastv));
+      let steps:i32=0;
+      while(n>=0 && np<cap && steps<100000){
+        if(n<2 || n>=131072){ break; }          // FI1
+        fcnt_inc(W);
+        if(ng(W,n,36)==1 && ng(W,n,0)==1 && ng(W,n,20)==lastv && ng(W,n,24)!=-999){
+          let o:i32=ng(W,n,28);
+          let k:i32=0; let cyc:i32=0;
+          while(k<len){if(get32(paths,base+4+k*4)==o){cyc=1;} k=k+1;}
+          if(cyc==0){
+            let nb:i32=np*48; let c2:i32=0;
+            while(c2<12){set32(paths,nb+c2*4,get32(paths,base+c2*4)); c2=c2+1;}
+            set32(paths,nb,len+1);
+            set32(paths,nb+4+len*4,o);
+            set32(paths,nb+24+(len-1)*4,n);
+            np=np+1;
+          }
+        }
+        n=ng(W,n,12);
+        steps=steps+1;
+      }
+    }
+    head=head+1;
+  }
+  return np;
+}

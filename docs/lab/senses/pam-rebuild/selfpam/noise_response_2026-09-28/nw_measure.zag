@@ -1,0 +1,287 @@
+// nw_measure.zag — NW-1 noisy-legitimate withhold measurement driver.
+// Frozen prereg: ~/workspace/memory_next_test/PREREG_NW1.md
+//
+// CLI: nw_measure <pairs_dir> <manifest_txt> <out_path>
+// For each pair: parse header (task@4, f_len@20, g_len@24, F@64, G@64+f_len),
+// build deterministic noisy variants of F in-memory (zero RNG):
+//   N1: 1 byte +1 (wrapping) at L/2
+//   N2: 3 bytes +1 at L/4, L/2, 3L/4
+//   N3: 8 bytes +1 at L*k/8, k=0..7
+//   N4: 1 byte +1 at position 3
+// For gate ids 2,3,4 (sp_gate_judge): withhold iff judge(F) != judge(candidate).
+// Per-pair line: <name> <calib>
+//   <wh2G> <wh2N1> <wh2N2> <wh2N3> <wh2N4>
+//   <wh3G> <wh3N1> <wh3N2> <wh3N3> <wh3N4>
+//   <wh4G> <wh4N1> <wh4N2> <wh4N3> <wh4N4>
+// Summary counts to stdout. Deterministic, zero RNG, no wall clock.
+
+@import("R33_NATIVE_IO_V1.zag")
+@import("g1_candidate.zag")
+
+fn z_cstr(s:[]u8) []u8 {
+    if(s.len < 1 || s.len > 8191) { return ""; }
+    let b:[]u8 = nio_alloc(s.len + 1);
+    if(b.len == 0) { return b; }
+    let i:i32 = 0;
+    while(i < s.len) { b[i] = s[i]; i = i + 1; }
+    b[s.len] = 0;
+    return b;
+}
+fn z_read(path:[]u8, out:[]u8, max:i32) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 0, 0, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_read_exact(fd, out, max);
+    nio_close(fd);
+    return n;
+}
+fn z_write_new(path:[]u8, data:[]u8) i64 {
+    let s:[]u8 = z_cstr(path);
+    if(s.len == 0) { return -7401; }
+    let fd:i64 = _zag_raw_syscall(2, _zag_slice_ptr(s) as i64, 577, 420, 0, 0, 0);
+    nio_free(s);
+    if(fd < 0) { return -7402; }
+    let n:i64 = nio_write_all(fd, data);
+    nio_close(fd);
+    return n;
+}
+fn ob_add(ob:[]u8, pos:i32, s:[]u8) i32 {
+    let i:i32 = 0;
+    while(i < s.len) {
+        if(pos >= ob.len) { return pos; }
+        ob[pos] = s[i];
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+fn ob_num(ob:[]u8, pos:i32, v:i64) i32 {
+    pos = ob_add(ob, pos, _zag_i64_to_str(v));
+    return pos;
+}
+fn fail(msg:[]u8) i32 {
+    let ob:[]u8 = nio_alloc(256);
+    let pos:i32 = 0;
+    pos = ob_add(ob, pos, "error=");
+    pos = ob_add(ob, pos, msg);
+    pos = ob_add(ob, pos, "\n");
+    nio_write_all(1, ob[0..pos]);
+    return 1;
+}
+// 1 if name contains "calib"
+fn is_calib(name:[]u8) i32 {
+    let i:i32 = 0;
+    while(i + 5 <= name.len) {
+        if(name[i] == 99 && name[i+1] == 97 && name[i+2] == 108
+            && name[i+3] == 105 && name[i+4] == 98) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+// u16 LE helpers for the position list (avoids []i32 casts)
+fn pl_put(pl:[]u8, k:i32, v:i32) void {
+    pl[2*k] = (v & 255) as u8;
+    pl[2*k+1] = ((v >> 8) & 255) as u8;
+}
+fn pl_get(pl:[]u8, k:i32) i32 {
+    return (pl[2*k] as i32) | ((pl[2*k+1] as i32) << 8);
+}
+// copy src into dst, then +1 (wrapping) at pl[0..npc)
+fn noisy_copy(dst:[]u8, src:[]u8, pl:[]u8, npc:i32) []u8 {
+    let i:i32 = 0;
+    while(i < src.len) { dst[i] = src[i]; i = i + 1; }
+    let k:i32 = 0;
+    while(k < npc) {
+        let p:i32 = pl_get(pl, k);
+        if(p >= 0 && p < src.len) {
+            dst[p] = (((dst[p] as i32) + 1) % 256) as u8;
+        }
+        k = k + 1;
+    }
+    return dst[0..src.len];
+}
+// i32 LE counter arena helpers
+fn c_add(cnt:[]u8, idx:i32, v:i32) void {
+    let o:i32 = idx * 4;
+    let cur:i32 = (cnt[o] as i32) | ((cnt[o+1] as i32) << 8)
+        | ((cnt[o+2] as i32) << 16) | ((cnt[o+3] as i32) << 24);
+    cur = cur + v;
+    cnt[o] = (cur & 255) as u8;
+    cnt[o+1] = ((cur >> 8) & 255) as u8;
+    cnt[o+2] = ((cur >> 16) & 255) as u8;
+    cnt[o+3] = ((cur >> 24) & 255) as u8;
+}
+fn c_get(cnt:[]u8, idx:i32) i64 {
+    let o:i32 = idx * 4;
+    let cur:i32 = (cnt[o] as i32) | ((cnt[o+1] as i32) << 8)
+        | ((cnt[o+2] as i32) << 16) | ((cnt[o+3] as i32) << 24);
+    return cur as i64;
+}
+
+fn main() i32 {
+    let a1:[]u8 = _zag_arg(1);
+    let a2:[]u8 = _zag_arg(2);
+    let a3:[]u8 = _zag_arg(3);
+    if(a1.len == 0 || a2.len == 0 || a3.len == 0) {
+        return fail("usage: nw_measure <pairs_dir> <manifest_txt> <out_path>");
+    }
+    let mbuf:[]u8 = nio_alloc(65536);
+    let mn:i64 = z_read(a2, mbuf, 65536);
+    if(mn < 1) { return fail("manifest-read-failed"); }
+    let pairbuf:[]u8 = nio_alloc(2000000);
+    let nzbuf:[]u8 = nio_alloc(65536);
+    let ob:[]u8 = nio_alloc(262144);
+    let pos:i32 = 0;
+    // counters: per id(3) x slot(6): 0=whG_calib 1=whG_adv 2..5=whN1..N4
+    let cnt:[]u8 = nio_alloc(3 * 6 * 4);
+    let zi:i32 = 0;
+    while(zi < 3 * 6 * 4) { cnt[zi] = 0; zi = zi + 1; }
+    let npairs:i64 = 0;
+    let nerr:i64 = 0;
+    let ls:i32 = 0;
+    let le:i32 = 0;
+    while(le <= mn as i32) {
+        let eol:i32 = 0;
+        if(le == mn as i32 || mbuf[le] == 10) { eol = 1; }
+        if(eol == 1) {
+            if(le > ls) {
+                let name:[]u8 = mbuf[ls..le];
+                if(name.len > 0 && name[name.len - 1] == 13) {
+                    name = name[0..(name.len - 1)];
+                }
+                let pathbuf:[]u8 = nio_alloc(8192);
+                let pp:i32 = 0;
+                pp = ob_add(pathbuf, pp, a1);
+                pp = ob_add(pathbuf, pp, "/");
+                pp = ob_add(pathbuf, pp, name);
+                let n:i64 = z_read(pathbuf[0..pp], pairbuf, 2000000);
+                nio_free(pathbuf);
+                if(n < 64) {
+                    pos = ob_add(ob, pos, name);
+                    pos = ob_add(ob, pos, " ERR short-read\n");
+                    nerr = nerr + 1;
+                } else {
+                    let p_task:i32 = (pairbuf[4] as i32) | ((pairbuf[5] as i32) << 8)
+                        | ((pairbuf[6] as i32) << 16) | ((pairbuf[7] as i32) << 24);
+                    let f_len:i32 = (pairbuf[20] as i32) | ((pairbuf[21] as i32) << 8)
+                        | ((pairbuf[22] as i32) << 16) | ((pairbuf[23] as i32) << 24);
+                    let g_len:i32 = (pairbuf[24] as i32) | ((pairbuf[25] as i32) << 8)
+                        | ((pairbuf[26] as i32) << 16) | ((pairbuf[27] as i32) << 24);
+                    if(f_len < 8 || g_len < 0 || 64 + f_len + g_len > n as i32
+                        || f_len > 65536) {
+                        pos = ob_add(ob, pos, name);
+                        pos = ob_add(ob, pos, " ERR bad-header\n");
+                        nerr = nerr + 1;
+                    } else {
+                        let f_blob:[]u8 = pairbuf[64..(64 + f_len)];
+                        let g_blob:[]u8 = pairbuf[(64 + f_len)..(64 + f_len + g_len)];
+                        let calib:i32 = is_calib(name);
+                        let pl:[]u8 = nio_alloc(16);
+                        pl_put(pl, 0, f_len / 2);
+                        pl_put(pl, 1, f_len / 4);
+                        pl_put(pl, 2, f_len / 2);
+                        pl_put(pl, 3, (3 * f_len) / 4);
+                        pl_put(pl, 4, 3);
+                        // N3 positions need 8 slots; store k=0..7 at pl3
+                        let pl3:[]u8 = nio_alloc(16);
+                        let k3:i32 = 0;
+                        while(k3 < 8) { pl_put(pl3, k3, (f_len * k3) / 8); k3 = k3 + 1; }
+                        pos = ob_add(ob, pos, name);
+                        pos = ob_add(ob, pos, " ");
+                        pos = ob_num(ob, pos, calib as i64);
+                        let id:i32 = 2;
+                        while(id <= 4) {
+                            let ii:i32 = id - 2;
+                            let base:i32 = ii * 6;
+                            let jf:i32 = sp_gate_judge(id, p_task, f_blob);
+                            let jg:i32 = sp_gate_judge(id, p_task, g_blob);
+                            let whg:i32 = 0;
+                            if(jf != jg) { whg = 1; }
+                            if(calib == 1) { c_add(cnt, base + 0, whg); }
+                            else { c_add(cnt, base + 1, whg); }
+                            let whs:[]u8 = nio_alloc(4);
+                            // N1: pl[0],1 pos
+                            let n1:[]u8 = noisy_copy(nzbuf, f_blob, pl, 1);
+                            let w1:i32 = 0;
+                            if(jf != sp_gate_judge(id, p_task, n1)) { w1 = 1; }
+                            whs[0] = w1 as u8;
+                            // N2: pl[1..3], 3 pos
+                            let pl2:[]u8 = nio_alloc(6);
+                            pl_put(pl2, 0, pl_get(pl, 1));
+                            pl_put(pl2, 1, pl_get(pl, 2));
+                            pl_put(pl2, 2, pl_get(pl, 3));
+                            let n2:[]u8 = noisy_copy(nzbuf, f_blob, pl2, 3);
+                            let w2:i32 = 0;
+                            if(jf != sp_gate_judge(id, p_task, n2)) { w2 = 1; }
+                            whs[1] = w2 as u8;
+                            // N3: pl3, 8 pos
+                            let n3:[]u8 = noisy_copy(nzbuf, f_blob, pl3, 8);
+                            let w3:i32 = 0;
+                            if(jf != sp_gate_judge(id, p_task, n3)) { w3 = 1; }
+                            whs[2] = w3 as u8;
+                            // N4: pl[4], 1 pos
+                            let pl4:[]u8 = nio_alloc(2);
+                            pl_put(pl4, 0, pl_get(pl, 4));
+                            let n4:[]u8 = noisy_copy(nzbuf, f_blob, pl4, 1);
+                            let w4:i32 = 0;
+                            if(jf != sp_gate_judge(id, p_task, n4)) { w4 = 1; }
+                            whs[3] = w4 as u8;
+                            let s4:i32 = 0;
+                            while(s4 < 4) {
+                                c_add(cnt, base + 2 + s4, whs[s4] as i32);
+                                s4 = s4 + 1;
+                            }
+                            pos = ob_add(ob, pos, " ");
+                            pos = ob_num(ob, pos, whg as i64);
+                            let q:i32 = 0;
+                            while(q < 4) {
+                                pos = ob_add(ob, pos, " ");
+                                pos = ob_num(ob, pos, whs[q] as i64);
+                                q = q + 1;
+                            }
+                            id = id + 1;
+                        }
+                        pos = ob_add(ob, pos, "\n");
+                        npairs = npairs + 1;
+                    }
+                }
+                ls = le + 1;
+            }
+        }
+        le = le + 1;
+    }
+    let wn:i64 = z_write_new(a3, ob[0..pos]);
+    if(wn != pos as i64) { return fail("output-write-failed"); }
+    let sb:[]u8 = nio_alloc(1024);
+    let sp:i32 = 0;
+    let id2:i32 = 2;
+    while(id2 <= 4) {
+        let ii:i32 = id2 - 2;
+        let base:i32 = ii * 6;
+        sp = ob_add(sb, sp, "id=");
+        sp = ob_num(sb, sp, id2 as i64);
+        sp = ob_add(sb, sp, " whG_calib=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 0));
+        sp = ob_add(sb, sp, " whG_adv=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 1));
+        sp = ob_add(sb, sp, " whN1=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 2));
+        sp = ob_add(sb, sp, " whN2=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 3));
+        sp = ob_add(sb, sp, " whN3=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 4));
+        sp = ob_add(sb, sp, " whN4=");
+        sp = ob_num(sb, sp, c_get(cnt, base + 5));
+        sp = ob_add(sb, sp, "\n");
+        id2 = id2 + 1;
+    }
+    sp = ob_add(sb, sp, "pairs=");
+    sp = ob_num(sb, sp, npairs);
+    sp = ob_add(sb, sp, " errors=");
+    sp = ob_num(sb, sp, nerr);
+    sp = ob_add(sb, sp, "\n");
+    nio_write_all(1, sb[0..sp]);
+    return 0;
+}

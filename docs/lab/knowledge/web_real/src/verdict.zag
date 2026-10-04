@@ -1,0 +1,385 @@
+// verdict.zag — M5 source-judgment core (Zag-native, deterministic).
+// Input: batch manifest file, one line per fetched page:
+//   pageid|domain|parsepath|fwpath
+//   domain = small int (1,2,...); parsepath = html_parse output; fwpath = fw_scan output.
+// Rules (frozen FIRST-CRAWL):
+//   - A page whose firewall verdict is INJECTED is quarantined: its claims
+//     are ledgered QUARANTINE and never enter candidacy.
+//   - Every other extracted claim (B|li| text only) enters as SUSPECT.
+//   - Claims are matched by exact byte equality of parsed text.
+//   - INSTALL iff the claim text appears on >=2 DISTINCT domains.
+//   - Otherwise WITHHOLD with reason SINGLE_SOURCE.
+//   - A claim seen only on quarantined pages is never installed.
+// Output ledger (deterministic, first-seen order):
+//   C|SUSPECT|<claim>|<pageid>|<domain>
+//   C|QUARANTINE|<claim>|<pageid>
+//   C|INSTALL|<claim>|<ndomains>
+//   C|WITHHOLD|<claim>|SINGLE_SOURCE
+//   DONE|installed=<n>|withheld=<n>|quarantined_pages=<n>
+// Exit 0 = decided; 2 = usage; 4 = write failure.
+@import("R33_NATIVE_IO_V1.zag")
+
+// ---------- file I/O (sanctioned pattern) ----------
+fn split_dir_base(path:[]u8, dir:[]u8, base:[]u8)void {
+    let n:i32=path.len;
+    let cut:i32=-1;
+    let i:i32=0;
+    while(i<n){
+        if((path[i] as i32)==47){ cut=i; }
+        i=i+1;
+    }
+    if(cut<0){
+        dir[0]=46;
+        let j:i32=0;
+        while(j<n){ base[j]=path[j]; j=j+1; }
+        return;
+    }
+    if(cut==0){
+        dir[0]=47;
+        let j2:i32=1;
+        let k:i32=0;
+        while(j2<n){ base[k]=path[j2]; k=k+1; j2=j2+1; }
+        return;
+    }
+    let j3:i32=0;
+    while(j3<cut){ dir[j3]=path[j3]; j3=j3+1; }
+    let j4:i32=cut+1;
+    let k2:i32=0;
+    while(j4<n){ base[k2]=path[j4]; k2=k2+1; j4=j4+1; }
+    return;
+}
+
+fn cstr_len(s:[]u8)i32 {
+    let i:i32=0;
+    while(i<s.len){ if((s[i] as i32)==0){ return i; } i=i+1; }
+    return s.len;
+}
+
+const FILECAP:i32=1048576;
+
+fn read_into(path:[]u8, buf:[]u8)i32 {
+    // Reads path into caller-owned buf. Frees all scratch before return,
+    // so per-row use in a loop cannot exhaust the large-allocation registry.
+    // Returns bytes read, or -1 on any failure.
+    let dir:[]u8=nio_alloc(4096);
+    let base:[]u8=nio_alloc(4096);
+    if(dir.len==0 || base.len==0){
+        if(dir.len>0){ nio_free(dir); }
+        if(base.len>0){ nio_free(base); }
+        return -1;
+    }
+    let zi:i32=0;
+    while(zi<4096){ dir[zi]=0; base[zi]=0; zi=zi+1; }
+    split_dir_base(path,dir,base);
+    let dl:i32=cstr_len(dir);
+    let bl:i32=cstr_len(base);
+    let root:i64=nio_open_root(dir[0..dl]);
+    if(root<0){ nio_free(dir); nio_free(base); return -1; }
+    let fd:i64=nio_open_child(root,base[0..bl],0);
+    nio_close(root);
+    nio_free(dir);
+    nio_free(base);
+    if(fd<0){ return -1; }
+    let n:i64=nio_read_exact(fd,buf,FILECAP);
+    nio_close(fd);
+    if(n<=0){ return -1; }
+    return n as i32;
+}
+
+fn write_all(path:[]u8, data:[]u8)i32 {
+    let dir:[]u8=nio_alloc(4096);
+    let base:[]u8=nio_alloc(4096);
+    if(dir.len==0 || base.len==0){
+        if(dir.len>0){ nio_free(dir); }
+        if(base.len>0){ nio_free(base); }
+        return 0;
+    }
+    let zi:i32=0;
+    while(zi<4096){ dir[zi]=0; base[zi]=0; zi=zi+1; }
+    split_dir_base(path,dir,base);
+    let dl:i32=cstr_len(dir);
+    let bl:i32=cstr_len(base);
+    let root:i64=nio_open_root(dir[0..dl]);
+    if(root<0){ nio_free(dir); nio_free(base); return 0; }
+    let fd:i64=nio_open_child(root,base[0..bl],1);
+    nio_close(root);
+    nio_free(dir);
+    nio_free(base);
+    if(fd<0){ return 0; }
+    let w:i64=nio_write_all(fd,data);
+    nio_close(fd);
+    if(w<0){ return 0; }
+    return 1;
+}
+
+// ---------- arena helpers (ZNC-007: no []i32 casts for tables) ----------
+fn a_get32(a:[]u8, idx:i32)i32 {
+    let o:i32=idx*4;
+    let b0:i32=a[o] as i32;
+    let b1:i32=a[o+1] as i32;
+    let b2:i32=a[o+2] as i32;
+    let b3:i32=a[o+3] as i32;
+    return b0+b1*256+b2*65536+b3*16777216;
+}
+
+fn a_put32(a:[]u8, idx:i32, v:i32)void {
+    let o:i32=idx*4;
+    a[o]=(v-(v/256)*256) as u8;
+    let x1:i32=v/256;
+    a[o+1]=(x1-(x1/256)*256) as u8;
+    let x2:i32=x1/256;
+    a[o+2]=(x2-(x2/256)*256) as u8;
+    a[o+3]=(x2/256) as u8;
+    return;
+}
+
+fn has_sub(h:[]u8, hn:i32, p:[]u8, pn:i32)i32 {
+    if(pn==0){ return 1; }
+    if(hn<pn){ return 0; }
+    let i:i32=0;
+    while(i+pn<=hn){
+        let k:i32=0;
+        while(k<pn){
+            if((h[i+k] as i32)!=(p[k] as i32)){ break; }
+            k=k+1;
+        }
+        if(k==pn){ return 1; }
+        i=i+1;
+    }
+    return 0;
+}
+
+fn emit_raw(out:[]u8, pos:i32, s:[]u8, sn:i32)i32 {
+    let i:i32=0;
+    while(i<sn){ out[pos]=s[i]; pos=pos+1; i=i+1; }
+    return pos;
+}
+
+fn emit_lit(out:[]u8, pos:i32, s:[]u8)i32 {
+    return emit_raw(out,pos,s,s.len);
+}
+
+fn emit_i32(out:[]u8, pos:i32, v:i32)i32 {
+    let d:[]u8=nio_alloc(16);
+    let nd:i32=0;
+    if(v==0){ nd=1; d[0]=48; } else {
+        let x:i32=v;
+        while(x>0){ d[nd]=(x-(x/10)*10+48) as u8; nd=nd+1; x=x/10; }
+    }
+    while(nd>0){ nd=nd-1; out[pos]=d[nd]; pos=pos+1; }
+    return pos;
+}
+
+fn parse_i32(s:[]u8, sn:i32)i32 {
+    let v:i32=0;
+    let i:i32=0;
+    while(i<sn){
+        let c:i32=s[i] as i32;
+        if(c>=48 && c<=57){ v=v*10+(c-48); }
+        i=i+1;
+    }
+    return v;
+}
+
+// claim table (parallel arenas; ZNC-005/009: no large structs)
+const MAXC:i32=512;
+const CTLEN:i32=2048;
+
+fn claim_find(ctext:[]u8, clen:[]u8, n:i32, t:[]u8, tn:i32)i32 {
+    let i:i32=0;
+    while(i<n){
+        let l:i32=a_get32(clen,i);
+        if(l==tn){
+            let base:i32=i*CTLEN;
+            let k:i32=0;
+            let same:i32=1;
+            while(k<tn){
+                if((ctext[base+k] as i32)!=(t[k] as i32)){ same=0; break; }
+                k=k+1;
+            }
+            if(same==1){ return i; }
+        }
+        i=i+1;
+    }
+    return -1;
+}
+
+fn main()i32 {
+    let manpath:[]u8=_zag_arg(1);
+    let outpath:[]u8=_zag_arg(2);
+    if(manpath.len==0){ return 2; }
+    if(outpath.len==0){ return 2; }
+    let manbuf:[]u8=nio_alloc(FILECAP);
+    if(manbuf.len==0){ return 4; }
+    let mn:i32=read_into(manpath,manbuf);
+    if(mn<=0){ return 2; }
+    let man:[]u8=manbuf[0..mn];
+
+    let ctext:[]u8=nio_alloc(MAXC*CTLEN);
+    let clen:[]u8=nio_alloc(MAXC*4);
+    let cmask:[]u8=nio_alloc(MAXC*4);
+    let cver:[]u8=nio_alloc(MAXC*4); // 0 undecided,1 install,2 withhold
+    if(ctext.len==0 || clen.len==0 || cmask.len==0 || cver.len==0){ return 4; }
+    let zi:i32=0;
+    while(zi<MAXC*4){ clen[zi]=0; cmask[zi]=0; cver[zi]=0; zi=zi+1; }
+    let nclaims:i32=0;
+
+    let out:[]u8=nio_alloc(1048576);
+    let scratch:[]u8=nio_alloc(FILECAP);
+    if(out.len==0 || scratch.len==0){ return 4; }
+    let pos:i32=0;
+    let ninst:i32=0;
+    let nwith:i32=0;
+    let nquar_pages:i32=0;
+    let ndropped:i32=0;
+
+    // ---- pass 1: walk manifest, extract claims ----
+    let i:i32=0;
+    while(i<mn){
+        let ls:i32=i;
+        while(i<mn && (man[i] as i32)!=10){ i=i+1; }
+        let le:i32=i;
+        if(i<mn){ i=i+1; }
+        if(le>ls && (man[le-1] as i32)==13){ le=le-1; }
+        if(le<=ls){ continue; }
+        // split pageid|domain|parsepath|fwpath
+        let f0:i32=ls; let f1:i32=-1; let f2:i32=-1; let f3:i32=-1;
+        let k:i32=ls;
+        while(k<le){
+            if((man[k] as i32)==124){
+                if(f1<0){ f1=k; } else {
+                if(f2<0){ f2=k; } else {
+                if(f3<0){ f3=k; break; } } }
+            }
+            k=k+1;
+        }
+        if(f1<0 || f2<0 || f3<0){ continue; }
+        let domain:i32=parse_i32(man[f1+1..f2],f2-f1-1);
+        let ppath:[]u8=man[f2+1..f3];
+        let wpath:[]u8=man[f3+1..le];
+        // firewall verdict (reuses scratch buffer; freed at end of run)
+        let fwn:i32=read_into(wpath,scratch);
+        let quar:i32=0;
+        if(fwn>0){ quar=has_sub(scratch[0..fwn],fwn,"INJECTED",8); }
+        if(quar==1){ nquar_pages=nquar_pages+1; }
+        // parse file: extract B|li| claims (reuses same scratch buffer)
+        let pfn:i32=read_into(ppath,scratch);
+        let pf:[]u8=scratch;
+        let pn:i32=0;
+        if(pfn>0){ pn=pfn; }
+        let j:i32=0;
+        while(j<pn){
+            let js:i32=j;
+            while(j<pn && (pf[j] as i32)!=10){ j=j+1; }
+            let je:i32=j;
+            if(j<pn){ j=j+1; }
+            if(je>js && (pf[je-1] as i32)==13){ je=je-1; }
+            // B|li|
+            if(je-js>=5 && (pf[js] as i32)==66 && (pf[js+1] as i32)==124
+               && (pf[js+2] as i32)==108 && (pf[js+3] as i32)==105
+               && (pf[js+4] as i32)==124){
+                let ts:i32=js+5;
+                let tn:i32=je-ts;
+                if(tn<=0){
+                    // degenerate empty claim: skip silently
+                } else if(quar==1){
+                    pos=emit_lit(out,pos,"C|QUARANTINE|");
+                    pos=emit_raw(out,pos,pf[ts..je],tn);
+                    pos=emit_lit(out,pos,"|");
+                    pos=emit_raw(out,pos,man[f0..f1],f1-f0);
+                    pos=emit_lit(out,pos,"\n");
+                } else if(tn>=CTLEN){
+                    // over-long claim: ledger it, never decide it
+                    pos=emit_lit(out,pos,"C|DROP|TOO_LONG|");
+                    pos=emit_i32(out,pos,tn);
+                    pos=emit_lit(out,pos,"|");
+                    pos=emit_raw(out,pos,man[f0..f1],f1-f0);
+                    pos=emit_lit(out,pos,"\n");
+                    ndropped=ndropped+1;
+                } else {
+                    let ci:i32=claim_find(ctext,clen,nclaims,pf[ts..je],tn);
+                    if(ci<0 && nclaims>=MAXC){
+                        // claim-cap exhausted: ledger it, never decide it
+                        pos=emit_lit(out,pos,"C|DROP|OVER_CAP|");
+                        pos=emit_raw(out,pos,pf[ts..je],tn);
+                        pos=emit_lit(out,pos,"|");
+                        pos=emit_raw(out,pos,man[f0..f1],f1-f0);
+                        pos=emit_lit(out,pos,"\n");
+                        ndropped=ndropped+1;
+                    } else {
+                        if(ci<0){
+                            ci=nclaims;
+                            nclaims=nclaims+1;
+                            let base:i32=ci*CTLEN;
+                            let q:i32=0;
+                            while(q<tn){ ctext[base+q]=pf[ts+q]; q=q+1; }
+                            a_put32(clen,ci,tn);
+                            a_put32(cmask,ci,0);
+                            a_put32(cver,ci,0);
+                        }
+                        let m:i32=a_get32(cmask,ci);
+                        let bit:i32=1;
+                        let b:i32=1;
+                        while(b<domain){ bit=bit*2; b=b+1; }
+                        // hoisted shift-equivalent (ZNC-008): bit=1<<b via loop
+                        m=m | bit;
+                        a_put32(cmask,ci,m);
+                        pos=emit_lit(out,pos,"C|SUSPECT|");
+                        pos=emit_raw(out,pos,pf[ts..je],tn);
+                        pos=emit_lit(out,pos,"|");
+                        pos=emit_raw(out,pos,man[f0..f1],f1-f0);
+                        pos=emit_lit(out,pos,"|");
+                        pos=emit_i32(out,pos,domain);
+                        pos=emit_lit(out,pos,"\n");
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- pass 2: decide in first-seen order ----
+    let c:i32=0;
+    while(c<nclaims){
+        let tn2:i32=a_get32(clen,c);
+        let m2:i32=a_get32(cmask,c);
+        // count distinct domains
+        let nd:i32=0;
+        let b2:i32=0;
+        while(b2<16){
+            let bit2:i32=1;
+            let q2:i32=0;
+            while(q2<b2){ bit2=bit2*2; q2=q2+1; }
+            if((m2 & bit2)!=0){ nd=nd+1; }
+            b2=b2+1;
+        }
+        let base2:i32=c*CTLEN;
+        if(nd>=2){
+            a_put32(cver,c,1);
+            ninst=ninst+1;
+            pos=emit_lit(out,pos,"C|INSTALL|");
+            pos=emit_raw(out,pos,ctext[base2..base2+tn2],tn2);
+            pos=emit_lit(out,pos,"|");
+            pos=emit_i32(out,pos,nd);
+            pos=emit_lit(out,pos,"\n");
+        } else {
+            a_put32(cver,c,2);
+            nwith=nwith+1;
+            pos=emit_lit(out,pos,"C|WITHHOLD|");
+            pos=emit_raw(out,pos,ctext[base2..base2+tn2],tn2);
+            pos=emit_lit(out,pos,"|SINGLE_SOURCE\n");
+        }
+        c=c+1;
+    }
+    pos=emit_lit(out,pos,"DONE|installed=");
+    pos=emit_i32(out,pos,ninst);
+    pos=emit_lit(out,pos,"|withheld=");
+    pos=emit_i32(out,pos,nwith);
+    pos=emit_lit(out,pos,"|quarantined_pages=");
+    pos=emit_i32(out,pos,nquar_pages);
+    pos=emit_lit(out,pos,"|dropped=");
+    pos=emit_i32(out,pos,ndropped);
+    pos=emit_lit(out,pos,"\n");
+
+    if(write_all(outpath,out[0..pos])!=1){ return 4; }
+    return 0;
+}

@@ -1,0 +1,648 @@
+// s10.zag: S10 string pool GC (mark-compact with content dedup).
+// Substrate core + S9 carried over from substrate_scale/s9.zag.
+// S10 adds: header str_limit (88) and gc_count (92), s9_strgc,
+// overflow-checked sub_str (T1 trigger), explicit s9_strgc (T2).
+// Pure Zag. No Python.
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0;
+  while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn emit(s:[]u8)void { _zag_print(s); return; }
+fn i32s(v:i32)[]u8 { return _zag_i64_to_str(v as i64); }
+fn i64s(v:i64)[]u8 { return _zag_i64_to_str(v); }
+fn get32(b:[]u8, off:i32)i32 {
+  return (b[off] as i32)|((b[off+1] as i32)<<8)|((b[off+2] as i32)<<16)|((b[off+3] as i32)<<24);
+}
+fn set32(b:[]u8, off:i32, v:i32)void {
+  b[off]=v as u8; b[off+1]=(v>>8) as u8; b[off+2]=(v>>16) as u8; b[off+3]=(v>>24) as u8;
+  return;
+}
+
+// ============ header ============
+// 0 magic, 4 nvar, 8 ep_stride, 12 ent_stride, 16 ep_base,
+// 20 ent_base, 24 fact_base, 28 str_base, 32 str_cursor,
+// 36 ep_count, 40 ent_count, 44 fact_count, 48 seq,
+// 52 max_ep, 56 max_ent, 60 max_fact, 64 fact_conflicts, 68 ep_processed,
+// 72 evict_count, 76 compact_count, 80 learn_ok, 84 learn_dropped,
+// 88 str_limit (S10), 92 gc_count (S10)
+fn h_epstride(W:[]u8)i32 { return get32(W,8); }
+fn h_entstride(W:[]u8)i32 { return get32(W,12); }
+fn h_factbase(W:[]u8)i32 { return get32(W,24); }
+fn h_strbase(W:[]u8)i32 { return get32(W,28); }
+fn h_strcur(W:[]u8)i32 { return get32(W,32); }
+fn h_strcur_set(W:[]u8, v:i32)void { set32(W,32,v); return; }
+fn h_factcount(W:[]u8)i32 { return get32(W,44); }
+fn h_factcount_set(W:[]u8, v:i32)void { set32(W,44,v); return; }
+fn h_seq(W:[]u8)i32 { return get32(W,48); }
+fn h_seq_set(W:[]u8, v:i32)void { set32(W,48,v); return; }
+fn h_maxfact(W:[]u8)i32 { return get32(W,60); }
+fn h_conflicts(W:[]u8)i32 { return get32(W,64); }
+fn h_conflicts_set(W:[]u8, v:i32)void { set32(W,64,v); return; }
+fn h_evict(W:[]u8)i32 { return get32(W,72); }
+fn h_evict_set(W:[]u8, v:i32)void { set32(W,72,v); return; }
+fn h_compactc(W:[]u8)i32 { return get32(W,76); }
+fn h_compactc_set(W:[]u8, v:i32)void { set32(W,76,v); return; }
+fn h_learnok(W:[]u8)i32 { return get32(W,80); }
+fn h_learnok_set(W:[]u8, v:i32)void { set32(W,80,v); return; }
+fn h_learndrop(W:[]u8)i32 { return get32(W,84); }
+fn h_learndrop_set(W:[]u8, v:i32)void { set32(W,84,v); return; }
+fn h_strlimit(W:[]u8)i32 { return get32(W,88); }
+fn h_gccount(W:[]u8)i32 { return get32(W,92); }
+fn h_gccount_set(W:[]u8, v:i32)void { set32(W,92,v); return; }
+
+// meta region: one u32 per fact slot, right after the triples.
+// bit31 pin, bits16..30 last-hit tick, bits0..15 hit count.
+fn h_metabase(W:[]u8)i32 { return h_factbase(W)+h_maxfact(W)*12; }
+fn m_get(W:[]u8, s:i32)i32 { return get32(W, h_metabase(W)+s*4); }
+fn m_set(W:[]u8, s:i32, v:i32)void { set32(W, h_metabase(W)+s*4, v); return; }
+fn m_use(v:i32)i32 { return v & 65535; }
+fn m_tick(v:i32)i32 { return (v>>16) & 32767; }
+fn m_pin(v:i32)i32 { return (v>>31) & 1; }
+fn m_make(pin:i32, tick:i32, use:i32)i32 {
+  return (pin<<31)|((tick & 32767)<<16)|(use & 65535);
+}
+
+fn sub_init9(W:[]u8, nvar:i32, maxf:i32, wsize:i32)i32 {
+  if(nvar<1 || nvar>8){ emit("substrate: nvar out of range\n"); return 0; }
+  if(maxf<16 || maxf>4096){ emit("substrate: maxf out of range\n"); return 0; }
+  let ep_stride:i32=((5+2*nvar+3)/4)*4;
+  let ent_stride:i32=((56+9*nvar+3)/4)*4;
+  let ep_base:i32=128;
+  let ent_base:i32=ep_base+64*ep_stride;
+  let fact_base:i32=ent_base+64*ent_stride;
+  let meta_base:i32=fact_base+maxf*12;
+  let str_base:i32=meta_base+maxf*4;
+  if(str_base+4096>wsize){
+    emit("substrate: workspace too small\n");
+    return 0;
+  }
+  set32(W,0,1397057875);
+  set32(W,4,nvar);
+  set32(W,8,ep_stride);
+  set32(W,12,ent_stride);
+  set32(W,16,ep_base);
+  set32(W,20,ent_base);
+  set32(W,24,fact_base);
+  set32(W,28,str_base);
+  set32(W,32,str_base);
+  set32(W,36,0);
+  set32(W,40,0);
+  set32(W,44,0);
+  set32(W,48,0);
+  set32(W,52,64);
+  set32(W,56,64);
+  set32(W,60,maxf);
+  set32(W,64,0);
+  set32(W,68,0);
+  set32(W,72,0);
+  set32(W,76,0);
+  set32(W,80,0);
+  set32(W,84,0);
+  set32(W,88,wsize);
+  set32(W,92,0);
+  return 1;
+}
+
+// ============ S10 string GC ============
+// Mark-compact with content dedup. Roots are the 3 offsets of every
+// live fact slot. Returns 1 on success, -1 on fatal internal error.
+fn s9_strgc(W:[]u8)i32 {
+  let sb:i32=h_strbase(W);
+  let sc:i32=h_strcur(W);
+  let fc:i32=h_factcount(W);
+  // mark: root array of u32 offsets
+  let roots:[]u8=z_alloc(fc*12+4);
+  let nr:i32=0;
+  let s:i32=0;
+  while(s<fc){
+    let o:i32=h_factbase(W)+s*12;
+    set32(roots,nr*4,get32(W,o)); nr=nr+1;
+    set32(roots,nr*4,get32(W,o+4)); nr=nr+1;
+    set32(roots,nr*4,get32(W,o+8)); nr=nr+1;
+    s=s+1;
+  }
+  // map: (old,new) u32 pairs
+  let map:[]u8=z_alloc(nr*8+4);
+  let nm:i32=0;
+  let ncur:i32=sb;
+  let p:i32=sb;
+  while(p<sc){
+    let l:i32=get32(W,p);
+    let rooted:i32=0;
+    let r:i32=0;
+    while(r<nr){
+      if(get32(roots,r*4)==p){rooted=1;}
+      r=r+1;
+    }
+    if(rooted==0){
+      p=p+4+l;
+    } else {
+      // dedup: search new pool [sb,ncur) for identical content
+      let q:i32=sb;
+      let found:i32=-1;
+      while(q<ncur){
+        let lq:i32=get32(W,q);
+        if(lq==l){
+          let k:i32=0;
+          let same:i32=1;
+          while(k<l){
+            if(W[q+4+k]!=W[p+4+k]){same=0;}
+            k=k+1;
+          }
+          if(same==1){found=q;}
+        }
+        q=q+4+lq;
+      }
+      if(found>=0){
+        set32(map,nm*8,p); set32(map,nm*8+4,found); nm=nm+1;
+        p=p+4+l;
+      } else {
+        // forward copy; ncur <= p always, ascending copy is safe
+        set32(W,ncur,l);
+        let k:i32=0;
+        while(k<l){ W[ncur+4+k]=W[p+4+k]; k=k+1; }
+        set32(map,nm*8,p); set32(map,nm*8+4,ncur); nm=nm+1;
+        ncur=ncur+4+l;
+        p=p+4+l;
+      }
+    }
+  }
+  // rewrite: every live slot offset through the map
+  s=0;
+  while(s<fc){
+    let o:i32=h_factbase(W)+s*12;
+    let f:i32=0;
+    while(f<3){
+      let old:i32=get32(W,o+f*4);
+      let m:i32=0;
+      let newoff:i32=-1;
+      while(m<nm){
+        if(get32(map,m*8)==old){newoff=get32(map,m*8+4);}
+        m=m+1;
+      }
+      if(newoff<0){
+        emit("S10 FATAL: missing map entry\n");
+        return -1;
+      }
+      set32(W,o+f*4,newoff);
+      f=f+1;
+    }
+    s=s+1;
+  }
+  h_strcur_set(W,ncur);
+  h_gccount_set(W,h_gccount(W)+1);
+  return 1;
+}
+
+// ============ strings (overflow-checked) ============
+fn sub_str(W:[]u8, s:[]u8)i32 {
+  let p:i32=h_strcur(W);
+  let need:i32=p+4+s.len;
+  if(need>h_strlimit(W)){
+    // T1: overflow-triggered GC, then retry once
+    let g:i32=s9_strgc(W);
+    if(g<0){return -1;}
+    p=h_strcur(W);
+    need=p+4+s.len;
+    if(need>h_strlimit(W)){return -1;}
+  }
+  set32(W,p,s.len);
+  let i:i32=0;
+  while(i<s.len){ W[p+4+i]=s[i]; i=i+1; }
+  h_strcur_set(W,p+4+s.len);
+  return p;
+}
+fn sub_streq(W:[]u8, o1:i32, o2:i32)i32 {
+  let l1:i32=get32(W,o1);
+  let l2:i32=get32(W,o2);
+  if(l1!=l2){return 0;}
+  let i:i32=0;
+  while(i<l1){
+    if(W[o1+4+i]!=W[o2+4+i]){return 0;}
+    i=i+1;
+  }
+  return 1;
+}
+
+// ============ S9 (unchanged semantics, overflow-safe) ============
+fn s9_keyeq(W:[]u8, i:i32, j:i32)i32 {
+  let fb:i32=h_factbase(W);
+  let oi:i32=fb+i*12;
+  let oj:i32=fb+j*12;
+  if(sub_streq(W,get32(W,oi),get32(W,oj))==0){return 0;}
+  if(sub_streq(W,get32(W,oi+4),get32(W,oj+4))==0){return 0;}
+  return 1;
+}
+fn s9_shift_out(W:[]u8, k:i32)void {
+  let fb:i32=h_factbase(W);
+  let fc:i32=h_factcount(W);
+  let t:i32=k;
+  while(t<fc-1){
+    let o1:i32=fb+t*12;
+    let o2:i32=fb+(t+1)*12;
+    set32(W,o1,get32(W,o2));
+    set32(W,o1+4,get32(W,o2+4));
+    set32(W,o1+8,get32(W,o2+8));
+    m_set(W,t,m_get(W,t+1));
+    t=t+1;
+  }
+  h_factcount_set(W,fc-1);
+  return;
+}
+fn s9_compact(W:[]u8)i32 {
+  let removed:i32=0;
+  let i:i32=0;
+  while(i<h_factcount(W)){
+    let j:i32=i+1;
+    let sup:i32=0;
+    while(j<h_factcount(W) && sup==0){
+      if(s9_keyeq(W,i,j)==1){sup=1;}
+      j=j+1;
+    }
+    if(sup==1){
+      s9_shift_out(W,i);
+      removed=removed+1;
+    } else {
+      i=i+1;
+    }
+  }
+  h_compactc_set(W,h_compactc(W)+removed);
+  return removed;
+}
+fn s9_evict_one(W:[]u8)i32 {
+  let fc:i32=h_factcount(W);
+  let best:i32=-1;
+  let bu:i32=2147483647;
+  let bt:i32=2147483647;
+  let s:i32=0;
+  while(s<fc){
+    let mv:i32=m_get(W,s);
+    if(m_pin(mv)==0){
+      let u:i32=m_use(mv);
+      let t:i32=m_tick(mv);
+      if(u<bu || (u==bu && t<bt)){
+        best=s; bu=u; bt=t;
+      }
+    }
+    s=s+1;
+  }
+  if(best<0){return -1;}
+  s9_shift_out(W,best);
+  h_evict_set(W,h_evict(W)+1);
+  return best;
+}
+fn s9_tick(W:[]u8)i32 {
+  let s:i32=h_seq(W)+1;
+  h_seq_set(W,s);
+  return s & 32767;
+}
+fn s9_learn(W:[]u8, e:[]u8, a:[]u8, v:[]u8, pin:i32)i32 {
+  let tk:i32=s9_tick(W);
+  let fc:i32=h_factcount(W);
+  if(fc>=h_maxfact(W)){
+    let cr:i32=s9_compact(W);
+    fc=h_factcount(W);
+    if(fc>=h_maxfact(W)){
+      let r:i32=s9_evict_one(W);
+      if(r<0){
+        h_learndrop_set(W,h_learndrop(W)+1);
+        return -2;
+      }
+      fc=h_factcount(W);
+    }
+  }
+  let eo:i32=sub_str(W,e);
+  let ao:i32=sub_str(W,a);
+  let vo:i32=sub_str(W,v);
+  if(eo<0 || ao<0 || vo<0){
+    h_learndrop_set(W,h_learndrop(W)+1);
+    return -2;
+  }
+  let i:i32=0;
+  while(i<fc){
+    let o:i32=h_factbase(W)+i*12;
+    if(sub_streq(W,get32(W,o),eo)==1 && sub_streq(W,get32(W,o+4),ao)==1){
+      if(sub_streq(W,get32(W,o+8),vo)==0){
+        h_conflicts_set(W,h_conflicts(W)+1);
+      }
+    }
+    i=i+1;
+  }
+  let o2:i32=h_factbase(W)+fc*12;
+  set32(W,o2,eo); set32(W,o2+4,ao); set32(W,o2+8,vo);
+  let pp:i32=0;
+  if(pin!=0){pp=1;}
+  m_set(W,fc,m_make(pp,tk,0));
+  h_factcount_set(W,fc+1);
+  h_learnok_set(W,h_learnok(W)+1);
+  return fc;
+}
+fn s9_query(W:[]u8, e:[]u8, a:[]u8, out:[]u8)i32 {
+  let tk:i32=s9_tick(W);
+  let eo:i32=sub_str(W,e);
+  let ao:i32=sub_str(W,a);
+  if(eo<0 || ao<0){return -1;}
+  let i:i32=h_factcount(W)-1;
+  while(i>=0){
+    let o:i32=h_factbase(W)+i*12;
+    if(sub_streq(W,get32(W,o),eo)==1 && sub_streq(W,get32(W,o+4),ao)==1){
+      let mv:i32=m_get(W,i);
+      let u:i32=m_use(mv)+1;
+      if(u>65535){u=65535;}
+      m_set(W,i,m_make(m_pin(mv),h_seq(W) & 32767,u));
+      let vo:i32=get32(W,o+8);
+      let l:i32=get32(W,vo);
+      let k:i32=0;
+      while(k<l){ out[k]=W[vo+4+k]; k=k+1; }
+      return l;
+    }
+    i=i-1;
+  }
+  return -1;
+}
+fn s9_pin(W:[]u8, e:[]u8, a:[]u8)i32 {
+  let eo:i32=sub_str(W,e);
+  let ao:i32=sub_str(W,a);
+  if(eo<0 || ao<0){return 0;}
+  let i:i32=h_factcount(W)-1;
+  while(i>=0){
+    let o:i32=h_factbase(W)+i*12;
+    if(sub_streq(W,get32(W,o),eo)==1 && sub_streq(W,get32(W,o+4),ao)==1){
+      let mv:i32=m_get(W,i);
+      m_set(W,i,m_make(1,m_tick(mv),m_use(mv)));
+      return 1;
+    }
+    i=i-1;
+  }
+  return 0;
+}
+
+// ============ test helpers ============
+fn beq(a:[]u8, al:i32, b:[]u8, bl:i32)i32 {
+  if(al!=bl){return 0;}
+  let i:i32=0;
+  while(i<al){
+    if(a[i]!=b[i]){return 0;}
+    i=i+1;
+  }
+  return 1;
+}
+fn ename(prefix:[]u8, i:i32)[]u8 {
+  let digits:[]u8=z_alloc(12);
+  let nd:i32=0;
+  let r:i32=i;
+  if(r==0){ digits[0]=48; nd=1; }
+  while(r>0){
+    digits[nd]=(48+(r-((r/10)*10))) as u8;
+    nd=nd+1;
+    r=r/10;
+  }
+  let b:[]u8=z_alloc(prefix.len+nd);
+  let k:i32=0;
+  while(k<prefix.len){ b[k]=prefix[k]; k=k+1; }
+  let d:i32=0;
+  while(d<nd){ b[prefix.len+d]=digits[nd-1-d]; d=d+1; }
+  return b;
+}
+// FNV-1a over all slot-referenced string contents, slot order
+fn content_hash(W:[]u8)i64 {
+  let h:i64=1469598103934665603;
+  let s:i32=0;
+  while(s<h_factcount(W)){
+    let o:i32=h_factbase(W)+s*12;
+    let f:i32=0;
+    while(f<3){
+      let so:i32=get32(W,o+f*4);
+      let l:i32=get32(W,so);
+      h=h ^ (l as i64);
+      h=h*1099511628211;
+      let k:i32=0;
+      while(k<l){
+        h=h ^ (W[so+4+k] as i64);
+        h=h*1099511628211;
+        k=k+1;
+      }
+      f=f+1;
+    }
+    s=s+1;
+  }
+  return h;
+}
+// query suite: 20 hits + 5 misses; res is i32 array of 45
+fn qsuite(W:[]u8, res:[]u8)void {
+  let i:i32=0;
+  while(i<20){
+    let qb:[]u8=z_alloc(32);
+    let l:i32=s9_query(W,ename("e",i),"attr",qb);
+    set32(res,i*4,l);
+    let cs:i32=-1;
+    if(l>0){cs=qb[0] as i32;}
+    set32(res,80+i*4,cs);
+    i=i+1;
+  }
+  i=0;
+  while(i<5){
+    let qb:[]u8=z_alloc(32);
+    let l:i32=s9_query(W,ename("nope",i),"attr",qb);
+    set32(res,160+i*4,l);
+    i=i+1;
+  }
+  return;
+}
+fn reseq(a:[]u8, b:[]u8)i32 {
+  let i:i32=0;
+  while(i<45){
+    if(get32(a,i*4)!=get32(b,i*4)){return 0;}
+    i=i+1;
+  }
+  return 1;
+}
+
+// ============ F1/F2/F3 world ============
+fn f123_world(W:[]u8, fails:[]u8)void {
+  let r:i32=sub_init9(W,1,256,65536);
+  if(r==0){ emit("CHECK FAIL F123 init\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let i:i32=0;
+  while(i<60){
+    let pn:i32=0;
+    if(i<5){pn=1;}
+    let lr:i32=s9_learn(W,ename("e",i),"attr",ename("val",i),pn);
+    i=i+1;
+  }
+  i=0;
+  while(i<20){
+    let lr:i32=s9_learn(W,ename("e",i),"attr",ename("other",i),0);
+    i=i+1;
+  }
+  let res1:[]u8=z_alloc(184);
+  qsuite(W,res1);
+  let c1:i32=h_conflicts(W);
+  let e1:i32=h_evict(W);
+  let k1:i32=h_compactc(W);
+  let g1:i32=h_gccount(W);
+  let cur1:i32=h_strcur(W);
+  let h1:i64=content_hash(W);
+  emit("F123 BEFORE conflicts=");
+  emit(i32s(c1));
+  emit(" evict=");
+  emit(i32s(e1));
+  emit(" compact=");
+  emit(i32s(k1));
+  emit(" gcc=");
+  emit(i32s(g1));
+  emit(" strcur=");
+  emit(i32s(cur1));
+  emit(" hash=");
+  emit(i64s(h1));
+  emit("\n");
+  // T2: explicit GC
+  let gr:i32=s9_strgc(W);
+  if(gr<0){ emit("CHECK FAIL F123 gc fatal\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let res2:[]u8=z_alloc(184);
+  qsuite(W,res2);
+  let c2:i32=h_conflicts(W);
+  let e2:i32=h_evict(W);
+  let k2:i32=h_compactc(W);
+  let g2:i32=h_gccount(W);
+  let cur2:i32=h_strcur(W);
+  let h2:i64=content_hash(W);
+  emit("F123 AFTER conflicts=");
+  emit(i32s(c2));
+  emit(" evict=");
+  emit(i32s(e2));
+  emit(" compact=");
+  emit(i32s(k2));
+  emit(" gcc=");
+  emit(i32s(g2));
+  emit(" strcur=");
+  emit(i32s(cur2));
+  emit(" hash=");
+  emit(i64s(h2));
+  emit("\n");
+  // F1: identical behavior except gc_count +1
+  if(reseq(res1,res2)==0){ emit("CHECK FAIL F1 query results differ\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F1 query-identical PASS\n"); }
+  if(c1!=c2 || e1!=e2 || k1!=k2){ emit("CHECK FAIL F1 counters differ\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F1 counters-identical PASS\n"); }
+  if(g2!=g1+1){ emit("CHECK FAIL F1 gccount\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F1 gccount-plus-one PASS\n"); }
+  // F2: content hash identical
+  if(h1!=h2){ emit("CHECK FAIL F2 content hash differs\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F2 content-hash-identical PASS\n"); }
+  // F3: str_cur non-increasing
+  if(cur2>cur1){ emit("CHECK FAIL F3 strcur increased\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F3 strcur-nonincreasing PASS\n"); }
+  return;
+}
+
+// ============ F4 world: duplicate collapse ============
+fn f4_world(W:[]u8, fails:[]u8)void {
+  let r:i32=sub_init9(W,1,512,65536);
+  if(r==0){ emit("CHECK FAIL F4 init\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let i:i32=0;
+  while(i<500){
+    let lr:i32=s9_learn(W,"eee","aaa","vvv",0);
+    i=i+1;
+  }
+  let gr:i32=s9_strgc(W);
+  if(gr<0){ emit("CHECK FAIL F4 gc fatal\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let cnt:i32=0;
+  let tot:i32=0;
+  let p:i32=h_strbase(W);
+  while(p<h_strcur(W)){
+    let l:i32=get32(W,p);
+    cnt=cnt+1;
+    tot=tot+4+l;
+    p=p+4+l;
+  }
+  emit("F4 strings=");
+  emit(i32s(cnt));
+  emit(" bytes=");
+  emit(i32s(tot));
+  emit("\n");
+  if(cnt!=3){ emit("CHECK FAIL F4 string count\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F4 count-3 PASS\n"); }
+  if(tot!=21){ emit("CHECK FAIL F4 byte total\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F4 bytes-21 PASS\n"); }
+  return;
+}
+
+// ============ F5 world: query temps reclaimed ============
+fn f5_world(W:[]u8, fails:[]u8)void {
+  let r:i32=sub_init9(W,1,256,65536);
+  if(r==0){ emit("CHECK FAIL F5 init\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let c0:i32=h_strcur(W)-h_strbase(W);
+  let i:i32=0;
+  while(i<1000){
+    let qb:[]u8=z_alloc(32);
+    let l:i32=s9_query(W,ename("q",i),"k",qb);
+    i=i+1;
+  }
+  let gr:i32=s9_strgc(W);
+  if(gr<0){ emit("CHECK FAIL F5 gc fatal\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let c1:i32=h_strcur(W)-h_strbase(W);
+  emit("F5 pre-query-bytes=");
+  emit(i32s(c0));
+  emit(" post-gc-bytes=");
+  emit(i32s(c1));
+  emit("\n");
+  if(c1!=c0){ emit("CHECK FAIL F5 temp strings not reclaimed\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F5 temps-reclaimed PASS\n"); }
+  return;
+}
+
+// ============ F6 world: overflow workload ============
+fn f6_world(W:[]u8, fails:[]u8)void {
+  let r:i32=sub_init9(W,1,64,16384);
+  if(r==0){ emit("CHECK FAIL F6 init\n"); set32(fails,0,get32(fails,0)+1); return; }
+  let i:i32=0;
+  while(i<500){
+    let lr:i32=s9_learn(W,ename("overflow-entity-",i),"k",ename("value-",i),0);
+    i=i+1;
+  }
+  let g:i32=h_gccount(W);
+  let cur:i32=h_strcur(W);
+  let lim:i32=h_strlimit(W);
+  emit("F6 gccount=");
+  emit(i32s(g));
+  emit(" strcur=");
+  emit(i32s(cur));
+  emit(" strlimit=");
+  emit(i32s(lim));
+  emit(" dropped=");
+  emit(i32s(h_learndrop(W)));
+  emit("\n");
+  if(g<1){ emit("CHECK FAIL F6 T1 never fired\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F6 t1-fired PASS\n"); }
+  if(cur>lim){ emit("CHECK FAIL F6 wrote past str_limit\n"); set32(fails,0,get32(fails,0)+1); }
+  else { emit("F6 no-overflow-write PASS\n"); }
+  return;
+}
+
+fn main()i32 {
+  let fails:[]u8=z_alloc(4);
+  set32(fails,0,0);
+  let w1:[]u8=z_alloc(65536);
+  f123_world(w1,fails);
+  let w2:[]u8=z_alloc(65536);
+  f4_world(w2,fails);
+  let w3:[]u8=z_alloc(65536);
+  f5_world(w3,fails);
+  let w4:[]u8=z_alloc(16384);
+  f6_world(w4,fails);
+  let n:i32=get32(fails,0);
+  if(n==0){
+    emit("S10 ALL-PASS\n");
+  } else {
+    emit("S10 FAILS=");
+    emit(i32s(n));
+    emit("\n");
+  }
+  return n;
+}

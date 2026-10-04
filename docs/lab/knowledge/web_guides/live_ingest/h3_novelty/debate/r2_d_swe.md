@@ -1,0 +1,11 @@
+**Objection to Rival A**
+Rival A relies on semantic matching to identify "non-novelty," yet the prompt explicitly states "semantic-similarity thresholds proven gameable." By re-introducing semantic processing—even if downstream—Position (a) resurrects the A2 sockpuppet vulnerability. If the semantic matcher determines non-novelty, an attacker can engineer phrasing to bypass the matcher to force "novelty" status (or vice versa), creating a new attack surface in a system that relies on byte-identity for safety. It sacrifices determinism for fuzzy matching, compromising the integrity boundary.
+
+**Objection to Rival B**
+Position (b) equates novelty with the G4 withhold condition. In the LI-1 pilot, 0 out of 9 inputs were installed. Under (b), this implies a 100% novelty rate. This definition lacks signal granularity; it cannot distinguish between a patent falsehood, a paraphrase of a known fact, and a genuinely new but uncorroborated truth. It turns "novelty" into a synonym for "failed to install," rendering the term epistemically useless for diagnosing *why* learning failed or filtering noise from signal.
+
+**Objection to Rival C**
+Position (c) relies on model-relative entailment ($M \not\vdash c$). However, in a real-world TNN, the deductive closure $Cl(S)$ is vast and rarely fully computed. If the inference engine is incomplete or the model lacks specific bridge axioms, a true fact fails to be entailed and is falsely labeled "novel." This conflates "unknown" with "unproven by current inference." It makes novelty a measure of inference depth/completeness rather than information content, leading to false positives on known facts due to resource constraints.
+
+**Objection to My Position (d)**
+The hardest objection to (d) is that "deterministic uncertainty" is operationally incoherent. In a zero-RNG substrate, the system is always in a specific state; there is no internal "degree of belief." Attempting to implement "undecided status" requires either suspending computation (which isn't uncertainty, just latency) or adding arbitrary heuristics that mimic probability. Without randomness, "uncertainty" collapses into "not yet computed," which risks becoming indistinguishable from Rival B's "failed to install" or simply a flag for "computationally expensive."
