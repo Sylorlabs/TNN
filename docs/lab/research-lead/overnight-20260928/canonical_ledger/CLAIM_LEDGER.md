@@ -7663,3 +7663,263 @@ No em dashes were used in this entry (verified).
 - C410 (COGNITIVE-OPS-COMPOSE; lane cognitive_ops_compose/, prereg db7d396a3 (committed alone first), impl a86309cea (implementation after), 2026-10-03): COMPOSITION DEMONSTRATED. Verdict: COMPOSITION DEMONSTRATED (K1–K8 PASS, no errata). Two learner-owned specialized cognitive procedures were composed by the learner. Every frozen prediction matched exactly; no bars weakened, no errata. Mechanism tested (and confirmed): generate-and-test composition search. The learner owns specialized VERIFY (P2, from seed P0) and specialized COLLECT (P3, from seed P1), sharing one learner-built inverted index. It ran all 1800 candidates of a researcher-defined candidate space (64 one-stage [vfy], 8 one-stage [gth], 1728 two-stage [gth,vfy] with generated binding descriptors) on its episode queries using seed procedures, compared each against a trusted signal (entity enumeration + seed VERIFY), kept full-agreement candidates, minimized total generic-procedure cost, and recorded the winner as a learner-owned composition record (stage ids mapped seed→specialized via the learner's procedure registry, bindings as data, provenance). A generic executor interprets the record uniformly; selection is coverage-gated with fallback to the generic composition. Headline result: the identical search code discovered the forward wiring on world A (winner 267: gather rel=Q[1]/subject, verify (projO,Q[2],Q[3]), cost 192) and the backward wiring on world B (winner 1594: gather rel=Q[2]/object, verify (Q[0],Q[1],projS), cost 192) — the record content is experience-derived, not hardcoded. All 72 degenerate one-stage candidates were genuinely rejected by failed agreement. Kill bars: K1 correctness 8/8 agree (vspec==vgen==trust); K2 exact winner ids/wirings/revs; K3a zero relation literals in learner/main files (grep-verified), K3b wirings differ across worlds, K3c distractors excluded; K4 fallback 5/5 correct; K5 efficiency 64<192 and 56<168 checks (3x via shared index); K6 3/3 byte-identical stdout (sha256 cdfd16ea…), stderr empty; K7 safebin, zero python; K8 dash-byte clean. Honest limits (in REPORT): the 1800-candidate vocabulary and slot/projection descriptors are researcher machinery — the choice is the learner's; no retirement of seed procedures; no from-scratch creation; chains only; small scale. Governance: prereg committed alone first (db7d396a3), implementation after (a86309cea); explicit pathspecs; /usr/bin/git; cognitive_ops_learner/ untouched; nothing pushed; pure Zag throughout. Follow-up assigned: weaker-seed creation (invent binding forms, toward L3). Pure Zag, pinned znc. Status: COMPLETE (COMPOSITION DEMONSTRATED verdict).
 
 No em dashes were used in this entry (verified).
+
+- C800 (ADVERSARIAL-9-BREAKS; lane adversary/, branch lane/adversary, tip fd780fd67, 2026-10-04): 9 sealed adversarial worlds against frozen COGOPS and TNN-2. Verdict: 9/9 breaks reproduced by the frozen cores; the C501-C509 defect family is real and executable. Level: these are correctness defects of the frozen implementation, not learner-acquired capability. Verdict for ledger: defects confirmed executable against the frozen cores. Boundaries: the adversary lane tested frozen artifacts, it did not modify them. Follow-up: the invfix invariant layer (C811) is the disposition. Old lane IDs C500 to C509. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C801 (B16-B17-SECTION5-VERDICT; lane b16verify/, branch lane/b16verify, tip c5ef83fdd, 2026-10-04): pinned znc on darwin/arm64 settles B16, B17 and brief section 5. Verdict: B16 is an API trap, `get32` and `set32` take byte offsets; B17 is a real destructive compiler defect whose repro threshold is exactly 5 bytes (1 to 4 corrupt, 5+ SEGFAULT rc 139); five of the six section-5 constraints are cargo cult, only `no for` is real. Level: implementation and specification hygiene, not learner capability. Surviving claim: the compiler is usable but the two banned constructs must stay banned. Killed claim: silent-compiler-miscompilation of indexed reads. Boundaries: zero B17 sites in the research corpus. Follow-up: keep the prohibition headers. Old lane IDs C500 to C509. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C802 (B17-CONFIRMATION-BLAST-RADIUS; lane b17fix/, branch lane/b17fix, tip d12bebb21, 2026-10-04): B17 independently confirmed, ptr_guard proposed, blast radius enumerated. Verdict: 0 CORRUPT sites in the research corpus; the earlier 320-file figure counted safe `_zag_malloc as *u8` and `null as *u8` forms plus prohibition comments and is inverted. Level: compiler defect adjudication. Surviving claim: `[]u8 as *u8` remains a real defect with zero research-corpus impact, so no published result is invalidated. Killed claim: mass corpus invalidation. Boundaries: SUSPECT class is 8 sites, all integer reconstructions fed by `_zag_slice_ptr`. Follow-up: pin ptr_guard into future lanes. Old lane IDs C500, C501, C502. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C803 (B6-DERIVED-BOUND; lane blockerfix/, branch lane/blockerfix, tip 74d269dcb, 2026-10-04): interpreter scratch overflow at program length 7. Verdict: the bound is exactly 12L minus 8 bytes for VALID programs, verified to the byte over all 5^L strings for L=1..10; size 12L-8 gives 0 corruption, 12L-9 gives exactly 1. The documented 128 fix is REJECTED: 128 is magic and silently corrupts 8 bytes at L=12. `z_alloc(64)` was the L=6 bound frozen as a literal, not a typo. Level: implementation correctness. The real fix is `z_alloc(12*qlen-8)`. On this host B6 is silent heap corruption, not a panic, because this compiler emits no slice bounds checks. Old lane IDs C570 to C576. Status: COMPLETE (bound CLOSED, fix proposal rejected).
+
+No em dashes were used in this entry (verified).
+
+- C804 (B1-NAMESPACE-INVARIANT; lane blockerfix/, branch lane/blockerfix, tip 74d269dcb, 2026-10-04): node-id/frame-slot namespace collision. Verdict: B1 is now an invariant backed across the constant space; identical `op<0` mapping to slot minus op minus 1 on both independent fixes; a 24-combination sweep gives 0 collisions for disjoint encoding against 21 for legacy; 8/8 malformed injections return a defined error code. The C267 9-phase battery is byte identical at NN=65536 and NN=131072. FRAME_BASE is no longer a parameter. Level: correctness. Boundaries: the legacy encoding remains reachable in old commits; 5k correctness was an accident of FRAME_BASE=100000 and NN=65536 and is not asserted anywhere. Old lane IDs C577 to C585. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C805 (BUILD-STABILITY-162; lane buildstab/, branch lane/buildstab, tip 85be7381e, 2026-10-04): build-to-build determinism matrix, 90 matrix builds over 3 sources, 162 builds total. Verdict: exactly 3 distinct binary sha256, one per source, 30 each; 90 of 90 runs 3 of 3 byte identical; 0 empty outputs; 0 stray .zag-cache dirs; zagd genuinely disabled. The stale-binary trap (a failed compile leaves the previous binary in place) was found and fixed in tools/zbuild.sh. Level: toolchain determinism. Old lane IDs C530 to C533. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C806 (CAUSAL-PARTIAL; lane causal/, branch lane/causal, tip 58f851fc5, 2026-10-04): causal structure learning from world data. Verdict: partial and negative; TNN-2 has NO do-operator, `ev_act` takes no arguments and never touches a world, a search over 1591 lines returns zero hits for intervention/counterfactual/mutilation; the orientation learner returns 0 for every pair including a perfectly separated 20-vs-20 pair, so the reported zero false positives is vacuous. Level: architectural capability absent; world measurements only. Old lane IDs C500 to C505. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C807 (COGOPS-STRATSEL-FAMILY; lane cogopslesion/, branch lane/cogopslesion, tip 3bfa5f997, 2026-10-04): the COGOPS strat_sel family is not unifiable. Verdict: mechanical proof, a state probe found two policies receiving byte identical input yet returning 2 and 1; 199 LOC of form bodies plus 26 of dispatch against 53 for the selector; the form space is 2x2x7x2x2 = 112 enumerable, 4 occupied, and every shape decision is an integer literal; the preregistered kill bar fired. Level: negative result for form-choice under learner control. Old lane IDs C510 to C516. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C808 (CORE-FREEZE-1-BASELINE-REMOVES-COMPETENCE; lane corefreeze/, branch lane/corefreeze, tip 82bfa0ae1, 2026-10-04): CORE-FREEZE-1. Verdict: the frozen core runs unchanged, 3/3 deterministic, and the baseline removes competence. The TNN verdict is narrow: in the frozen core tested, prior experience gave no correctness advantage and some learned indexes were liabilities. Level: boundary on one frozen core, NOT a permanence verdict on TNN. Boundary: `how=1` fires with zero learner state, so the first version's Tier-A evidence dies; TIER-A equals 0. Old lane IDs C500, C501. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C809 (CORE-FREEZE-2-ORACLE; lane corefreeze2/, branch lane/corefreeze2, tip 69a262d4a, 2026-10-04): CORE-FREEZE-2 with an independent oracle. Verdict: NOEP COLD arm scored 25 of 25, EXP full experience 23 of 25, NOEP WARM A 22 of 25, NOEP WARM B 9 of 25. A true novice arm is impossible because `compose_iter` has no read-only path and L is all zero before the first goal. A TRUE NOVICE ARM IS IMPOSSIBLE. Level: the correct phrasing is "in the tested frozen core the learned index was a correctness liability". Old lane IDs C502, C503. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C810 (SUBLINEAR-EVICTION; lane eviction/, branch lane/eviction, tip ec0f54aca, 2026-10-04): sublinear structural reclamation. Verdict: sublinear selection achieved, 262144 probes reduced to 2.05 probes per eviction, victim sequence element-identical to the linear selector over 2000 evictions, mismatches 0; foundational answer facts improve 0 of 6 to 6 of 6. K9a FAILED: the recency control also scores 6 of 6, so which policy is better stays INCONCLUSIVE. A caveat invalidates naive comparisons: `promote_graph` ownership omitted the MAP's own answer fact, now fixed with 20006 MAPs and 0 wrong owners. Old lane IDs C540 to C562. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C811 (TNN2-INVARIANT-LAYER; lane invfix/, branch lane/invfix, tip 15c118f18, 2026-10-04): the representation invariant layer for TNN-2. Verdict: 8 of 9 breaks eliminated (C501, C502, C503, C504, C505, C508, C509), C506 unchanged and honestly a bookkeeping defect; invariants installed include content-keyed plans, variable-length records with recorded capacity, reported equals stored, inference never writes PROV_OBSERVED, disjoint tagged bands, order-invariant inference, set query with a scalar refusal code. The lane found and fixed TWO FALSE INVARIANTS OF ITS OWN. Level: implementation correctness. Old lane IDs C501 to C509, C510, C511, C512, C515. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C812 (L3-STANDING-GATE-V1; lane l3gate/, branch lane/l3gate, tip c5922d61d, 2026-10-04): the L3 standing gate, first version. Verdict: gate artifacts 3/3 deterministic on 8 artifacts, all non-empty; the gate exists and runs, and it assigned no L3. Level: instrumentation. Old lane IDs C600, C602, C603, C610 to C615. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C813 (L3-GATE-V2-NONCIRCULAR; lane l3gate2/, branch lane/l3gate2, tip bf7ad485f, 2026-10-04): L3 gate 2 with enforced non-circular G1. Verdict: G1 non-circular and enforced, n=6, the l3macro claim is REFUTED not under-powered; vacuity rate 0 of 6 with exact Clopper-Pearson interval [0.000, 0.460). Level: instrumentation. Boundaries: the gate measures criterion shape, not truth. Old lane IDs C660 to C669. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C814 (MACRO-UNKNOWN-DEPTH-KILLED; lane l3macro/, branch lane/l3macro, tip 04c5be4d8, 2026-10-04): MACRO-OF-UNKNOWN-DEPTH killed at its own gate. Verdict: the loop exists with the exit sealed shut, F_exit is 4 hardcoded literals, the 16-argument signature of `execute_plan_iter` has NO exit slot, the learner's macro adopted R0 EQ 0 with ADD R0,R0 iterating to i32 overflow; source underdetermination NO. Chain links 4 of 9, mitigation V1: the internal criterion is maximised by a do-nothing macro, 3349 of 11640 candidates. Level: L3 NOT achieved; classified L2. Old lane IDs C600 to C603. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C815 (MISS-PATH-PREMISE-REFUTED; lane misspath/, branch lane/misspath, tip eeefbc263, 2026-10-04): the miss path, which was claimed to bind. Verdict: the premise is FALSE, mp_q_hit equals 1, mp_q_miss equals 0, answer 7000; the "binding limit is the miss path" claim is WITHDRAWN. A real miss costs 524284 unconditional O(NN) probes, reduced to 1 probe with a live tag histogram, attempts/rejects/accepts/allocations bit identical. Every REJECTED candidate LEAKS its graph, 33 nodes and 14 edges, zero released; at D=20k one miss ate 82001 nodes, 31 percent of the arena. Old lane IDs C563 to C568, C572. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C816 (P1-CRUX-FALSIFIER; lane p1falsifier/, branch lane/p1falsifier, tip 9e3be84fa, 2026-10-04): the decisive falsifier for smarter-with-age. Verdict: on the empty arena the order-free fidelity metric gives 4 of 4 while EXACT gives 0, NO abstention; 8 versus 8 correct, identical trials, cost ratio 1.032x, ZERO correctness difference from a stale-index cell answering a DIFFERENT WRONG vector at one tenth the cost, and no staleness guard. K7 and K8 FAIL, the reproducing effect is CAPACITY loss crossing the 8-slot BIND table, 0 wrong at 4 and 7 signatures, 1 at 9, 4 at 10, victims chosen by acquisition order. Cause list: (a) flat arena excluded, (b) famv=0112 in all 7 arms including empty, (c) confirmed, (d) C501 REFUTED, the plan is keyed on canonical shape tag, (e) confirmed, (f) age independent. Verdict for the crux: no configuration where age improves correctness, scoped to a value-indexed store, frozen templates, at most 1200 triples and at most 4 needs. The word "architectural" remains OVERCLAIMED. Old lane IDs C660 to C674, C675 to C699, C700 to C704, C705. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C817 (FREEZE-ARENA-1; lane p1freeze/, branch lane/p1freeze, tip 93817f97f, 2026-10-04): FREEZE-ARENA-1 and the third lifetime run. Verdict: leak control PASS, LK1=0 and LK2=0 at all 10 stage entries, LK7 midpoint 534 equals the sum of floors, suffix memory 0, LK4 and LK5 1 at all checkpoints. Correctness BIT IDENTICAL in freeze and no-freeze arms; the freeze changed only schedule and cost. Cost advantage decays 62x, then 5.8x, then 1.11x. LT3 (FREEZE-ARENA-2): 20363 bytes, all kill bars K20 to K32 pass, 3/3 byte identical 555792382303bb090403ce7152f77eba9388c1e9d088b3e7b64757d7ce76e4c9. Old lane IDs C526 to C531, C540 to C596. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C818 (LIFETIME-AB-1-RERUN; lane p1lifetime2/, branch lane/p1lifetime2, tip 368318d3a, 2026-10-04): LIFETIME-AB-1 rerun with 4 defects fixed. Verdict: LIFETIME at stage F yes with 0 trials, FRESH0 12 trials, FRESH1 12, RECENCY 16 NO, ablation snapshot NO, ablation structure NO. Lifetime 10 of 10 correct, cost advantage 62x, never better than fresh on correctness, TTC 0 at every stage. Spontaneous unprompted reuse observed: an A-era template fires at D, the F-assembled template fires at G on disjoint relations, then twice more at H. Prereg erratum E6 disclosed. Level: cost-only advantage; correctness is inherited from fresh. Old lane IDs C526 to C528, C531. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C819 (P1-MECHANISM; lane p1mech/, branch lane/p1mech, tip 8cfd585f5, 2026-10-04): the mechanism behind "smarter with age". Verdict: the word is NO. Core freeze second version: NOEP COLD 25 of 25, EXP 23 of 25, NOEP WARM A 22 of 25, NOEP WARM B 9 of 25; MR of 27 of 27 was arm AGREEMENT not correctness; a contaminated arm was the same code path with a different trigger and could not fail; `L` with L zeroed scores 25 of 25 against 9 of 25 inherited, recorded as prereg deviation D2; curriculum ABC/BCA/CAB/interleaved each 1 of 3; `how=1` fires with ZERO learner state so TIER-A is 0. Interpreter, not a learner. The specialized index is a CORRECTNESS LIABILITY. Boundaries: frozen core, value-indexed store, at most 1200 triples, at most 4 needs; this is a boundary on that core, not a verdict on TNN. Old lane IDs C526 to C651. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C820 (P2-OPERAND-SET; lane p2operand/, branch lane/p2operand, tip 18fda6776, 2026-10-04): P2 OPERAND-SET arms A and B. Verdict: Arm A PASSES and is honestly L2 (researcher writes the combining operator); Arm B also L2, the reduction functions are a switch on five researcher-chosen integers. The real result is hypothesis-class free: the largest indistinguishable WORLD class shrinks 4 to 2 to 1 as evidence grows, a bound on the evidence not on the learner. Missing invariants found: capacity (7 hardcoded 4-need strides), produced value, operand set as union over ALL incoming set links, link admission refusal, canonical emission, plan identity including shape signature. Ablation: removing every learned index leaves answers BIT IDENTICAL with cost up 7.7x, so specialisation is cost-causal, not correctness-causal. Old lane IDs C600. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C821 (P5-META-BLOCKED; lane p5meta/, branch lane/p5meta, tip e37b101ce, 2026-10-04): meta-learning transfer. Verdict: BLOCKED on its own apparatus, no claim made. The episode runner returns an internally inconsistent record identical across 5 probes; SA reads 1 where it must be in the hundreds; RR, RA, NS read values unreachable for a fresh empty plan; the plain stores land correctly since 64 rounds ran. No ablation, no negative transfer figure exists. Two silent hangs found and fixed (binomial table row stride, unrank computing a coefficient once). Old lane IDs: none minted. Status: BLOCKED, honestly.
+
+No em dashes were used in this entry (verified).
+
+- C822 (P6-PUSHDOWN-VOID; lane p6pushdown/, branch lane/p6pushdown, tip 30d3aad8e, 2026-10-04): pushdown induction. Verdict: NO CLAIM, PREREG VOID, primary objective not met. The fixture's delimiter search finds 0 delimiter pairs in all 14 corpora because the generator segfaults at stage 3 and the deduplicator saturates VALID with flat programs; stage 6 has FEWER tokens than stage 5. The alphabet partition induction is reported separately. Zero-diff wiring NOT established. Old lane IDs C520, C539. Status: COMPLETE (no claim).
+
+No em dashes were used in this entry (verified).
+
+- C823 (P6-UNBLOCK-V3; lane p6unblock/, branch lane/p6unblock, tip 145ac335e, 2026-10-04): formal induction unblock, prereg v3. Verdict: v1 prereg declared VOID, re-preregistered against FL7-v2 fixture with acceptance tests A1/A2/A3 and an ADMISSIBLE EVIDENCE COUNT rule, because v1 lost 112 of 130 VALIDs to an over-strict filter and reported a VACUOUS clean pass. Old lane IDs C520, C539, C540 to C559. Status: PREREGISTERED, no result yet.
+
+No em dashes were used in this entry (verified).
+
+- C824 (P7-BASELINE; lane p7baseline/, branch lane/p7baseline, tip 226fc9096, 2026-10-04): a 10-member baseline family to beat. Verdict: frozen prereg only, 67-world schedule, 3 grids, NR/TR/DP/PD/TC arms. Level: instrumentation for charter 79. Old lane IDs C700 to C706. Status: PREREGISTERED.
+
+No em dashes were used in this entry (verified).
+
+- C825 (P7-BELIEF-PASS; lane p7belief/, branch lane/p7belief, tip 8d35e2ce4, 2026-10-04): belief and inquiry, 41 of 42 frozen bars. Verdict: case routing KNOWN/DERIVABLE/FORMAL/UNCERTAIN/MISSING/INADEQUATE realized expectation 6 of 6 with wasted 0; upc_realized equals 0 exactly on cases 1,2,3,6; K-DET 3/3 byte identical; FP-M9 reported failed. The learner TIES the non-adaptive fixed query on information gain. Level: L2-ish empirical Bayes. Honest bound: do not make an intelligence claim if the simple baseline is not beaten. Old lane IDs: none minted. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C826 (P7-FOLLOWON-PREREG; lane p7follow/, branch lane/p7follow, tip b64c84043, 2026-10-04): 10 attacks on the belief lane. Verdict: frozen prereg only, 38 kill bars K-F01 to K-F38. Old lane IDs C510 to C518. Status: PREREGISTERED.
+
+No em dashes were used in this entry (verified).
+
+- C827 (PREDICT-OPTIONALITY; lane predopt/, branch lane/predopt, tip 3ac8f121e, 2026-10-04): PREDICT-OPTIONALITY. Verdict: faithful re-implementation of the frozen selection principle in a CLEAN arena, per-case routing realized 6 of 6, always-retrieve/always-derive/always-predict each score 1 of 6 while the learner scores 6 of 6; K-ISOMORPH FAIL reported. Level: faithful re-implementation, NOT the frozen ref itself because C501/C504/C505/C508/C509 live in the paths the claim would rest on. Old lane IDs C520 to C525, C529. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C828 (PROPERTY-ZAG-7-VIOLATIONS; lane propertyzag/, branch lane/propertyzag, tip 77e2d8869, 2026-10-04): property-zag battery. Verdict: 7 real violations in 3 frozen cores, including THREE frozen battery expectations that encoded the defects they should have caught; C11 asserted the C504 fabrication and was GREEN, C6 used the untagged C505 encoding, P-ACT6A encoded the rotation order bug; 52 of 52 derived battery assertions pass. Level: methodological finding. Old lane IDs C500 to C502. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C829 (REDTEAM-W4; lane redteaw4/, branch lane/redteaw4, tip 8e1dae788, 2026-10-04): REDTEAM-W4 adjudication of wave-4 claims. Verdict: gate results recorded, three instruments G1 decide from literals, G2 do-nothing macro at tau=NTRIV/NSAT, G3 removal marker plus held-out score; the macro gate's high-vacuity-rate reading is NOT supported because 0.642 excludes 0.80. Old lane IDs C620 to C647. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C830 (EVIDENCE-AUDIT; lane reaudit/, branch lane/reaudit, tip 20be87e98, 2026-10-04): evidence audit of all 393 blocks. Verdict: 252 permanently unciteable citations, CALR ISA verified by execution, 0 of 252 citations rescued by 33 unreachable refs, EVIDENCE INTACT 279 of 393 after restore, 113 SHA-UNRESOLVABLE, 1 NO-CITATION. Old lane IDs C640 to C648, C650 to C659. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C831 (RECOVERY-CHARACTERISE-WIPE; lane recovery/, branch lane/recovery, tip 9b2c4db6e, 2026-10-04): the wipe and its restore. Verdict: commit b3b3ee00a touched 160517 paths, deleted 44104446 lines, lost ZERO content, all 160515 deleted paths exist in parent 4e7eb30b1; restore brought back 165804 tracked paths, pre-wipe 165288, tip is a strict superset by 516; 33 fsck-unreachable commits re-referenced, 0 rescue a citation; two sibling wipes caught only socially. Old lane IDs C600 to C602, C640, C649. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C832 (RESTORES; lane restores/, branch lane/restores, tip d64053cbe, 2026-10-04): independent restore verification and 393-claim re-audit. Verdict: agreed DOWNGRADES recorded, nothing minted by this lane; the CALR bundling error was caught and split into the two axes adopted in C840 and C841. Old lane IDs C640 to C648, C650 to C659. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C833 (SCALING-P8-P10; lane scalingp8/, branch lane/scalingp8, tip 310a8a2d6, 2026-10-04): profiling, learner indices, disjoint namespaces. Verdict: the frozen profile at 5000 MAPs spent 6.57e8 edge visits for ONE query because `activate` calls `is_superseded` O(NE) per live fact, per-query cost O(N_facts x NE) not the O(NN) that C375 reported; engineered indices give 5000 MAPs in 0.54s with 203544 visits, 10900x fewer, byte-identical answers, 10000 MAPs 1.48s, 20000 MAPs incomplete at 5m53s before the namespace fix. The disjoint-namespace fix (node ref >= 0, frame ref < 0) plus NN=262144 gives 20000 MAPs in 4s, scan 5 of 6, answer 6205 of 6405, 3/3 deterministic. Level: scaling result. Old lane IDs C526 to C534. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C834 (BATTERY-SENSITIVITY; lane sensitivity/, branch lane/sensitivity, tip 3afb442e2, 2026-10-04): battery sensitivity by mutation testing. Verdict: the standing battery detects 0 of 8 defects, sensitivity 0 of 8, exact Clopper-Pearson 95 percent interval [0.00, 0.3694]; 28 of 43 site lines are specification-derived, 13 tautological copy-from-output, 2 simulation-class, 0 encode a defect in the naive count; the new 13-site specification-derived battery scores 8 of 8 mutants, 13 of 13 clean, 0 false positives, with 3 of its sites failing the clean engine first and themselves wrong. NON-ADDITIVE verdict over defects: each defect alone is detected, all eight together zero. Level: methodological. The green evidence is trustworthy as "unchanged", not as correctness evidence. Old lane IDs C560 to C566. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C835 (TC-DEFECTS-ADJUDICATED; lane tcdefects/, branch lane/tcdefects, tip 2de2eb2cd, 2026-10-04): four suspected compiler defects adjudicated. Verdict: 1 real (B17), 3 harness bugs; five of the six section-5 constraints are cargo cult. Old lane IDs: none minted. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C836 (TRIALLEAK; lane trialleak/, branch lane/trialleak, tip 705f55f8e, 2026-10-04): SCALING-TRIALLEAK transactional trial release. Verdict: blocked claim: every REJECTED candidate leaks its graph, 33 nodes and 14 edges per the frozen-ref era figure; the P2 correction: the published 33 nodes and 14 edges is the AVERAGE 165/5 over 5 candidates of different shapes, per-candidate costs are 5,9,13,17,22,7 nodes with site sums matching closed forms; the leak is now the sole binding term at D=20k where one miss ate 82001 nodes, 31 percent of the arena. The new stress battery scores 8 of 8 GREEN with overlap 0, lost 0, dbl_free 0. Old lane IDs C700 to C704. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C837 (FAMILY-RULE-PREREG; lane familyrule/, branch lane/familyrule, tip 20a369bf2, 2026-10-04): FAMILY-RULE prereg and implementation, NO RESULT yet. Verdict: prereg v2 frozen with one disclosed ERRATA issued before any run. Old lane IDs C730 to C759. Status: PREREGISTERED.
+
+No em dashes were used in this entry (verified).
+
+- C838 (STRATSEL-UNIFY-NEGATIVE; branch arch/cogops-unify, tip 1356c6434, 2026-10-04): the original strat_sel unification negative. Verdict: NOT unifiable, proof is mechanical via byte-identical input returning 2 and 1. Old lane IDs C500 to C504, C506. Status: COMPLETE.
+
+No em dashes were used in this entry (verified).
+
+- C839 (P5-META-2-PREREG-VOID; lane p5meta2/, branch lane/p5meta2, tip b996d83b1, 2026-10-04): meta-learning apparatus repair. Verdict: prereg 24c133b42 declared VOID as a test with the unmodified run's bars recorded un-reinterpreted; three defects preregistered with fixes. Old lane IDs: none minted. Status: PREREGISTERED v3.
+
+No em dashes were used in this entry (verified).
+
+- C840 (CALR-L1-DOWNGRADE; lane restores/, 2026-10-04): the 14 CALR mechanism claims are downgraded L2+ to L1, VERIFIED BY EXECUTION, not by reading a comment. The accepted opcode set is exactly {0,1,2,3,4}, CPY=5, ADD=12, MUL=35, SET1=1, INC=8, values minus 1, 5 and 200 rejected, Rd=4 and Rs=4 rejected, semantics identical to the committed `glm_learner.zag::m_exec`, 3 of 3 byte identical. Brief section 9 classes fixed-DSL brute-force search as explicitly not L3. The 14: C294, C312, C324, C334, C348, C350, C358, C364, C367, C368, C378, C383, C391, C401. Surviving claim: the mechanism executes as documented. Killed claim: L2+ learner novelty. Level: L1. Boundaries: 8 CALR lanes and one red-team implementation are genuinely lost; their citations are permanently unciteable on this host. Status: COMPLETE (CLOSED).
+
+No em dashes were used in this entry (verified).
+
+- C841 (CALR-EVIDENTIARY-STATUS-UNVERIFIED; lane restores/, 2026-10-04): 9 CALR claims reclassified from COMPLETE to UNVERIFIED, in two sub-classes. 2a: cited lane never existed in any repository on this host (8 claims: C358, C364, C367, C368, C378, C383, C391, C401). 2b: citations resolve but the result is self-declared uncommitted (C350: "Status: COMPLETE (implementation commit pending)"). The 9 are uncitable as executed evidence. Level: not a claim about truth, a claim about availability. Status: COMPLETE (CLOSED).
+
+No em dashes were used in this entry (verified).
+
+- C842 (C281-C284-L1-DOWNGRADE; lane reaudit/, 2026-10-04): C281 and C284 claimed L3 VALIDATED; they are L1. Evidence: a standalone Zag program reproduces score 2 and bytes (4,0,0) with no learner; the reported win 4,0,0 is a 4-way tie on one bit because INC ignores its source field; it was argmax over an 80-form menu scored against a 22-entry label table hand typed into the driver. Surviving claim: the pipeline executes. Killed claim: L3 novelty. Level: L1. Status: COMPLETE (CLOSED).
+
+No em dashes were used in this entry (verified).
+
+- C843 (L3-ACHIEVED-ANYWHERE-ZERO; standing verdict, 2026-10-04): L3 achieved anywhere is ZERO. Three independent red teams survived. The L3-adjacent claims all carry explicit researcher-bounding admissions; the canon: "TNN is an interpreter, not a learner" is NOT a permanent architecture conclusion, it is a boundary on the tested frozen core. Level: standing verdict. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C844 (C459-C453-C603-ABSENT; ledger audit, 2026-10-04): C459, C453 and C603 are NOT present in the 393-block canonical ledger. They appear only as citations inside preregistrations and gate input lists on lane branches. The ledger contains no entry for them. Level: record hygiene. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C845 (B13-RESOLVED; brief section 8, 2026-10-04): B13 is RESOLVED and was overstated. Evidence: c8_full.zag (340948 bytes of text) rebuilt with the `_zag_print` shim produces byte-identical output to the Linux x86_64 era reference, sha256 ae0ae3bf0a82c31b6d53d14dba97e6abfb953273259d624f4869c48fb15e4ae7, 3344 bytes. The canonical corpus is reproducible on this host. Status: CLOSED.
+
+No em dashes were used in this entry (verified).
+
+- C846 (B16-CLOSED-API-TRAP; brief section 8, 2026-10-04): B16 is CLOSED as an API trap. `get32` and `set32` take BYTE offsets, not cell indices; passing a cell index makes all six cells unrecoverable. The suspected indexed-read miscompilation is an artifact of the broken output path or the reporter's harness. Status: CLOSED.
+
+No em dashes were used in this entry (verified).
+
+- C847 (B17-REAL-ZERO-CORPUS-BLAST; brief section 8, 2026-10-04): B17 is REAL: `[]u8 as *u8` is a destructive compiler defect, threshold exactly 5 bytes (1 to 4 corrupt, 5 or more SEGFAULT rc 139). Blast radius ZERO in the research corpus: 736 SAFE, 8 SUSPECT, 5 CORRUPT sites in 4 files, all of them the defect reproducers. No claim needs downgrade or re-run. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C848 (B6-CLOSED-DERIVED-BOUND; brief section 8, 2026-10-04): B6 is CLOSED as a derived bound: scratch is 12L minus 8 bytes, tight to the byte, cost zero, no ceiling. The documented one-line fix `z_alloc(128)` is REJECTED because 128 is magic and wrong, capping L at 11 and corrupting 8 bytes at L=12. On this host B6 is silent heap corruption, not a panic. Status: CLOSED with the correct fix mandated.
+
+No em dashes were used in this entry (verified).
+
+- C849 (B1-CLOSED-INVARIANT; brief section 8, 2026-10-04): B1 is CLOSED: the namespace collision is now an invariant backed across the constant space, eviction is a strict superset, FRAME_BASE is not a parameter, byte-identical controlled batteries at NN=65536 and NN=131072. Status: CLOSED.
+
+No em dashes were used in this entry (verified).
+
+- C850 (WIPE-CHARACTERISED; commit b3b3ee00a, 2026-10-04): the 44 million line wipe. 160517 paths touched, 234 insertions, 44104446 deletions, ZERO data lost, all 160515 deleted paths exist in parent 4e7eb30b1; tracked paths 165288 before, 5276 after, 165804 after restore; detection was social not mechanical; three sibling wipes caught only because a later subject named the sha. Status: CHARACTERISED, content lost zero.
+
+No em dashes were used in this entry (verified).
+
+- C851 (MASS-DELETE-GUARD-INSTALLED; git common dir hooks, 2026-10-04): a mass-deletion pre-commit guard is installed in the git common dir, covers all worktrees, and fails closed; live test 1200 refused, 1000 allowed, 1001 refused. The mint guard v2 enforces pure append, G5 non-empty, G2 zero deletions, G3 byte prefix, G1 TIP atomicity, G6 no unstaged surprises, and it REFUSED the historical wipe while ACCEPTING the legitimate restore (136 insertions, 0 deletions). Status: INSTALLED.
+
+No em dashes were used in this entry (verified).
+
+- C852 (B2-LIVE; brief section 8, 2026-10-04): B2 is LIVE. Global O(N) scans dominate; N=28 takes 75 to 92 seconds against a 0.3 second prediction; N=100 incomplete after 7 minutes; superlinear O(N^2) MAP attempts times O(NE) scans. The later disjoint-namespace plus index fix measured 20000 MAPs; the historical bound remains the design defect. Status: LIVE.
+
+No em dashes were used in this entry (verified).
+
+- C853 (B3-LIVE-SUPERSEDED; brief section 8, 2026-10-04): B3 is LIVE: the old GEN arena is hard-dimensioned for 4 MAPs, nm=5..7 silently wrong, nm=8 panic; superseded by GEN-REDIM (C429/C434), adoption unverified. Status: LIVE, superseded.
+
+No em dashes were used in this entry (verified).
+
+- C854 (B7-LIVE; brief section 8, 2026-10-04): B7 is LIVE: the eviction tie-break cannot hold 6 sequential new facts. Status: LIVE.
+
+No em dashes were used in this entry (verified).
+
+- C855 (B12-LIVE; brief section 8, 2026-10-04): B12 is LIVE: frozen TNN-1 has no world-driver interface. Status: LIVE.
+
+No em dashes were used in this entry (verified).
+
+- C856 (TNN2-NO-DO-OPERATOR; research section 13, 2026-10-04): TNN-2 has NO do-operator; `ev_act` takes no arguments and never touches a world; zero hits for intervention/counterfactual/mutilation across 1591 lines; the observation and intervention entry points are COSMETIC. The orientation learner returns 0 for every pair, K1 and K2 NOT MET. Status: STRUCTURAL ABSENCE.
+
+No em dashes were used in this entry (verified).
+
+- C857 (CALR-PROVENANCE-LOST; 2026-10-04): 8 CALR lanes and one red-team implementation are genuinely lost; nobody cited from them. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C858 (252-UNCITEABLE; 2026-10-04): 252 citations resolve to no object in any repository searched on this host, including all 132987 objects, 128 sibling repos, reflogs, a bundle, and two never-fetched origin branches; the single cross-repo hit abed8aa1 is a 32-bit abbreviation collision in an unrelated repository and stays refused. Zero rescue of 252. Permanently unciteable. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C859 (INVFIX-TWO-FALSE-INVARIANTS; 2026-10-04): the invariant layer's own battery found and fixed two false invariants: an `iv_check` requiring two live NODE endpoints while the frozen ISA uses relation 1 with VALUE endpoints, and a live-count comparison that turned 5 of 6 into 0 of 6. Institutionalised lesson: report an ADMISSIBLE EVIDENCE COUNT for every constraint. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C860 (LEVEL-FIELD-CENSUS; lane ledgerint, 2026-10-04): a pure-Zag census of the canonical ledger: 393 blocks total, 118 asserting a level, 275 asserting none (699 permille), and an independent awk cross-check disagrees on level presence (150 vs 118), which is itself the finding. The ledger has NO machine-readable level field; a numeric L0-L3 distribution is NOT computable and is not published. PROPOSAL only: add a `level:` field to new entries, do not back-fill by regex. Status: RECORDED, proposal open.
+
+No em dashes were used in this entry (verified).
+
+- C861 (MINE-INVENTORY; lane ledgerint, 2026-10-04): full inventory of IDs minted since the restore, 168 distinct IDs at C500 and above over 33 lane branches, 40 distinct experiments, 121 IDs claimed by 2 or more experiments, zero minted inside C377 to C466. See `docs/lab/research-lead/overnight-20260928/ledgerint/INVENTORY.md`. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C862 (COLLISION-ALLOCATION; lane ledgerint, 2026-10-04): allocation of C800 to C899, science C800 to C839, downgrades C840 to C859, governance C860 to C869, reserved C870 to C899. Both entries stand, history is never rewritten, mapping old-to-new published in `ledgerint/COLLISION_ALLOCATION.md`; the proposed allocator (`claim_alloc.sh` plus CLAIM_ALLOC.tsv, interval-aware, fail-closed, common-dir hooks) is proposed, not installed. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C863 (BATTERY-SENSITIVITY-0-OF-8; 2026-10-04): the standing battery detects 0 of 8 injected defects, sensitivity 0 of 8, exact interval [0.00, 0.3694]; three expectations ENCODED the defects they should have caught; non-additive over defects. A new 13-site specification-derived battery scores 8 of 8 mutants, 13 of 13 clean. This is another reason the ledger cannot rely on prose green checks. Cross-reference C834. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
+
+- C864 (GOVERNANCE-INCIDENT-NONE; 2026-10-04): no lane minted into the contested C377 to C466 block. Zero. Verified by scanning every branch. The adjacent failure mode, 33 lanes independently choosing overlapping regions of C5xx, is real and is what C861 measures. Status: RECORDED.
+
+No em dashes were used in this entry (verified).
