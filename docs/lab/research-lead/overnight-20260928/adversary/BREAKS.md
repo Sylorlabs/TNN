@@ -149,3 +149,76 @@ so the observable break is the wrong answer, not the overflow.
 ### Determinism
 3/3 byte-identical, rc=0, non-empty output.
 sha256 `b0c278e0af88297ae13ad34c2482d392f819576001f14d6dadd07ed4e0342895`.
+
+## C504 AW-04 subject-blind inversion -- BREAK CONFIRMED, AS PREREGISTERED
+
+`bootstrap_miss` `tnn2_frozen_ref.zag:764` scans node ids 1023 downward for
+facts whose **relation** is `r` and **never compares the subject**.
+
+### Minimal reproducer
+`adversary/aw04.zag`. Teach `(1,10,7) (2,10,7) (3,10,7) (4,10,7) (5,10,7)
+(6,10,7)`. Then `ev_query(W, 999, 10, -2, 0)`. Subject 999 was never taught.
+
+### Exact failure
+```
+fact_nodes_about_999_before = 0
+ev_query_answer            = 7          <- PREREG PREDICTED
+fact_nodes_about_999_after  = 1
+ev_query_answer_2nd        = 7          <- now served by activate()
+```
+TNN-2 answers a question about a subject it has **no evidence for**, using
+only facts about six *different* subjects, and then **persists the
+hallucination as a fact node**. From the second query on, the fabricated fact
+is served by the ordinary exact-hit path and is indistinguishable from a
+taught fact. No provenance edge distinguishes it.
+
+Controls both PASS (they must refuse, and do):
+- relation 11 with mixed objects 7,7,7,8,8,8 -> `-2`
+- relation 12 with a single fact (below the `k`=3 threshold) -> `-2`
+
+So the defect is exactly "N recent r-facts agree" with no subject check, and
+it fires at the documented threshold.
+
+### Determinism
+3/3 byte-identical, rc=0, non-empty output.
+sha256 `b14e22a264acfa3b92663f68e847af57adbf36103eec40544c58fc3c45f3b8f8`.
+
+## C505 AW-05 node-id / frame-slot collision -- BREAK CONFIRMED, AS PREREGISTERED
+
+### Mechanism, isolated from any learner policy
+`res_op` `:179`: `if(op>=1000) return fr_get(f,op-1000);` else
+`if(op>=0) return ng(op,20);`. `alloc_node` `:87` hands out ids `2..1023`.
+
+`adversary/aw05.zag` direct probe, one frame, two literals:
+
+| literal | node id | stored value | `res_op` returns |
+|---|---|---|---|
+| low | 2 | 4242 | **4242 correct** |
+| high | 1013 | 7777 | **0 WRONG** |
+
+`fr_get(fr, 13)` walks `cur=ng(cur,4)` until `ss<4`, landing on node 0
+(POLICY_ROOT) and reading its fields. A literal at id >= 1000 is never read
+as a node.
+
+### End-to-end: identical structure, only inert padding differs
+Query `(1,10)`, absent. World chain `(1,11,2) (2,10,3)`; answer is 3.
+
+| variant | padding facts | max live node id | answer | MAPs promoted | trials accepted |
+|---|---|---|---|---|---|
+| E_small | 0 | 0 | **3 correct** | **1** | 1 |
+| E_large | 996 | 997 | **-2** | **0** | 0 |
+| E_large | 1000 | 1001 | **-2** | **0** | 0 |
+
+`trialstat` (tried*1024 + rejected) goes 1024 -> 3075: the candidates were
+built and **all rejected**, because every GUARD compared the subject against
+POLICY_ROOT's fields instead of the literal. So `t2_guard` `:346` stores a
+literal NODE ID in field 8 and `execute` `:202` reads it through `res_op`.
+
+The learner acquires procedures normally until node ids reach ~1000, then
+**silently stops acquiring procedures**, and returns `-2`, which is the same
+value an honest ignorance returns. No error, no distinct counter, no
+distinguishable log entry.
+
+### Determinism
+3/3 byte-identical, rc=0, non-empty output.
+sha256 `d1aee85aac526f9792c653870e868045a244c6891b7482dfb1706be29bb6ecb0`.
