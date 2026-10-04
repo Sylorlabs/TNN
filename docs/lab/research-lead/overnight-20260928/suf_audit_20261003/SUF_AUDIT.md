@@ -457,6 +457,26 @@ in the lane commit `8c6af9c4f`, unledgered. The brief's citation of the
 None of this changes a verdict. All of it changes whether a reader can *check*
 a verdict, which is the thing the ledger exists for.
 
+**P4 -- Shared-checkout branch thrash nearly cost this audit its own prereg.**
+`PREREG.md` was committed at `0f7409c6c` on `redteam/suf-audit` (alone, 171
+lines, verified). A concurrent worker switched the shared checkout to another
+branch between that commit and my results commits, so my later commits landed on
+a different lineage and `0f7409c6c` was orphaned onto `p1/lifetime-ab`. The
+prereg was recovered onto `redteam/suf-audit` by cherry-pick as `0de063299`;
+the file is byte-identical in both commits (sha256
+`5082c34c2c3a0622c2fc9835b650fc1233c16ef5392dccecb3906aab30b88257`). The
+freeze ordering is preserved by commit timestamp: prereg `19:06:00`, verifier
+`19:11:39`, results `19:14:04`, proposal `19:15:24`. **Disclosed rather than
+hidden:** the prereg-first invariant is evidenced by timestamp and by the
+surviving orphan commit, not by linear ancestry on this branch. This is the
+third distinct tree-surgery incident in this repo's recent history (after P1's
+`b3b3ee00a` and the `WATCHDOG` deletion/restore cycles already in the ledger).
+The shared checkout cannot support per-worker branch isolation; the audit
+survived it, but by luck of timing.
+
+**P5 -- Claim-ID allocator is absent.** See section 8. Three lanes independently
+minted into C500-C506.
+
 ## 8. Claim IDs minted by this audit
 
 C5xx block, per PREREG section 9. C377-C466 not touched.
