@@ -298,15 +298,6 @@ sums five edge-type in-degrees, each at most NE); verified in the log as
 regardless -- so **no measurement in this report is affected**; only the
 derivation is now true. Byte-identity re-verified after the change.
 
-`LB_W` is set from `bid_max()+1` at setup, and `bid_max()` reads
-`VBH()+32776`, which `bidx()` maintains as the largest bid **bucketed so far**.
-At setup that is 2, so **`LB_W=3`**, while the foundational MAPs reach bid 6,224.
-The claim "LB_W dominates bid" is therefore **false as built** and the printed
-`LB_W=3` says so. `sel_key`'s behaviour does not depend on the weight (it walks
-ownerless-first regardless), so the runs above are unaffected -- but the
-derivation must become `6*NE+1` for the dominance argument to hold, and that is
-listed as the first item of the next experiment rather than done silently.
-
 ---
 
 ## 6. C566 -- `live_nodes > NN` RESOLVED
