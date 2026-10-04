@@ -1,0 +1,272 @@
+// si_patch.zag -- learner-maintained sublinear MAP index (unfrozen).
+//
+// Problem: rebind_try scans all 1024 node slots and walks every promoted
+// MAP's graph on every query: O(slots + MAPs * plen). At 15 MAPs this cost
+// 21 verifies vs 4 for fresh trial (rebind-hardening, 0509fd116); a
+// 100-MAP fixture could not even be built.
+//
+// Mechanism: plen-bucket index. Four buckets live in a dedicated index
+// node (tag 40, allocated by idx_mode_set; id kept in header 52).
+// Index node fields 20/24/28/32 are bucket heads for plen 2/3/4/5
+// (-1 = empty). Each bucket is an intrusive linked list of promoted MAP
+// ids via MAP field 12 (next; -1/unused on tag-20 nodes in the base).
+// Only plens 2..5 are indexed: t2_gather paths are at most length 5, so
+// no other plen can ever match a query. (Header 32/36/40/44 are the
+// base's context ring buffer and must not be repurposed.)
+//
+// Maintenance is learner-side: idx_add fires inside promote_graph (mode
+// gated, header 52), so every promotion (trial, rebound, taught) updates
+// the index. No researcher-authored MAP table exists.
+//
+// Query (rebind_try_idx): gather paths, walk only buckets whose plen
+// matches a gathered path length, collect candidate ids, insertion-sort
+// ascending, then run the identical (MAP,path) trial nest as the linear
+// scan. Trial order is therefore byte-identical to the linear scan; only
+// scan work differs, so verify counts must match exactly.
+//
+// Counters (honest cost accounting):
+//   header 56: scan visits (linear: slot visits; indexed: bucket visits)
+//   header 60: plen-walk calls (linear: at query; indexed: at promotion)
+//
+// Note on keys: literal-based keys do not transfer. Rebinding deliberately
+// discards the helper MAP's literals and re-instantiates the chain shape on
+// the query subject's own literals (the trust boundary: B executes on B's
+// data). The structural parameter (plen) is therefore the correct index
+// key; it is also the only parameter the mechanism reads from the helper.
+
+// ---- chain-shape reader (verbatim from hard_patch.zag) ----
+fn rb_chain_plen(W:[]u8,root:i32)i32 {
+  let n102:i32=0; let n101:i32=0;
+  let cur:i32=root; let exp102:i32=1; let steps:i32=0;
+  while(cur>=0 && steps<64){
+    let tag:i32=ng(W,cur,0);
+    if(exp102==1){
+      if(tag!=102){return -1;}
+      n102=n102+1; cur=ng(W,cur,12); exp102=0;
+    } else {
+      if(tag!=101){return -1;}
+      n101=n101+1; cur=seq_nx(W,cur); exp102=1;
+    }
+    steps=steps+1;
+  }
+  if(cur!=-1){return -1;}
+  if(n102==0){return -1;}
+  if(n102!=n101){return -1;}
+  return n102+1;
+}
+
+// ---- index (v2): dedicated index node, tag 40 ----
+// Header 52 holds the index node id (-1 until idx_mode_set runs).
+// Index node layout: field 4 = mode (0 linear, 1 indexed),
+// fields 20/24/28/32 = bucket heads for plen 2/3/4/5 (-1 = empty).
+// Buckets are intrusive lists via MAP field 12 (next).
+// (Header 32/36/40/44 are the base's context ring buffer; not usable.)
+fn idx_node(W:[]u8)i32 { return hg(W,52); }
+fn idx_bfield(plen:i32)i32 {
+  if(plen==2){return 20;}
+  if(plen==3){return 24;}
+  if(plen==4){return 28;}
+  if(plen==5){return 32;}
+  return -1;
+}
+fn idx_mode(W:[]u8)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<0){return 0;}
+  return ng(W,ix,4);
+}
+fn idx_mode_set(W:[]u8,v:i32)void {
+  let ix:i32=alloc_node(W);
+  ns(W,ix,0,40); ns(W,ix,4,v);
+  ns(W,ix,20,-1); ns(W,ix,24,-1); ns(W,ix,28,-1); ns(W,ix,32,-1);
+  hs(W,52,ix); hs(W,56,0); hs(W,60,0);
+  return;
+}
+fn idx_add(W:[]u8,m:i32,root:i32)void {
+  hs(W,60,hg(W,60)+1);
+  let plen:i32=rb_chain_plen(W,root);
+  let bf:i32=idx_bfield(plen);
+  if(bf<0){return;}
+  let ix:i32=idx_node(W);
+  if(ix<0){return;}
+  ns(W,m,12,ng(W,ix,bf));
+  ns(W,ix,bf,m);
+  return;
+}
+
+// ---- promote_graph: verbatim base body (lines 533-543) + index hook ----
+fn promote_graph(W:[]u8,root:i32,s:i32,r:i32,ans:i32,facts:[]u8,nf:i32)i32 {
+  let m:i32=alloc_node(W); if(m<0){return -1;}
+  ns(W,m,0,20); ns(W,m,4,r); ns(W,m,8,s); ns(W,m,12,-1); ns(W,m,16,-1);
+  write_node(W,m,root,hg(W,24),ans,0);
+  link_edge(W,m,13,m,hg(W,0));
+  link_edge(W,m,2,m,0); link_edge(W,m,6,m,0);
+  let i:i32=0;
+  while(i<nf){link_edge(W,m,1,get32(facts,i*4),0); i=i+1;}
+  ev_teach_in(W,s,r,ans);
+  if(idx_mode(W)==1){idx_add(W,m,root);}
+  return m;
+}
+
+// ---- linear rebind: hard_patch.zag logic verbatim + counters ----
+fn rebind_try_lin(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8)i32 {
+  let ans:i32=-2;
+  let paths:[]u8=z_alloc(4608);
+  let np:i32=t2_gather(W,s,paths);
+  let m:i32=2;
+  while(m<1024 && ans==-2){
+    hs(W,56,hg(W,56)+1);
+    if(ng(W,m,36)==1 && ng(W,m,0)==20){
+      hs(W,60,hg(W,60)+1);
+      let plen:i32=rb_chain_plen(W,ng(W,m,20));
+      if(plen>=2){
+        let p:i32=0;
+        while(p<np && ans==-2){
+          let base:i32=p*48;
+          if(get32(paths,base)==plen){
+            let v:[]u8=z_alloc(24); let f:[]u8=z_alloc(16);
+            let j:i32=0;
+            while(j<plen){set32(v,j*4,get32(paths,base+4+j*4)); j=j+1;}
+            j=0;
+            while(j<plen-1){set32(f,j*4,get32(paths,base+24+j*4)); j=j+1;}
+            let nr:i32=t2_asm_chain(W,v,plen,f);
+            let v2:i32=t2_try_verify(W,nr,s,expected,masked,st);
+            if(v2!=-2){promote_graph(W,nr,s,r,v2,f,plen-1); ans=v2;}
+          }
+          p=p+1;
+        }
+      }
+    }
+    m=m+1;
+  }
+  return ans;
+}
+
+// ---- indexed rebind: buckets only, same trial order ----
+// Hardened bucket walk (index_harden). The redteam broke the unhardened
+// walk with a bucket cycle (panic: slice out of bounds) and the candidate
+// buffer bound was wrong (nc<1024 into a 512-entry buffer). Four GENERAL
+// invariants now guard every bucket entry before use, checked in
+// dependency order (each check reads only state earlier checks proved
+// safe to read):
+//   I1 BOUNDS: m in [2,NN()). A corrupt head or next pointer outside the
+//     node table would make ng(W,m,*) read past the workspace.
+//     Violation: stop this bucket. Nothing past a corrupt link is trusted.
+//   I2 CYCLE: m not already visited in this bucket traversal. Any cycle
+//     shape (self-loop, loop, lollipop, shared tail) revisits a node; the
+//     per-bucket seen bitmap catches every one. Violation: stop; all
+//     distinct reachable nodes are already collected.
+//   I3 LIVENESS: ng(W,m,36)==1. Evicted slots are dead and their field 12
+//     may hold garbage from slot reuse. Violation: skip the entry but keep
+//     walking, so stale entries do not hide live ones behind them.
+//   I4 TYPE: ng(W,m,0)==T_MAP (20). Only MAP nodes belong in MAP buckets.
+//     Violation: skip, keep walking (same reasoning as I3).
+//   I5 BUFFER: nc<512 always (cand is 4096 bytes, 8 per entry). Enforced
+//     by the walk condition; collection past capacity is impossible.
+// The index root itself is validated (bounds and tag 40) before any
+// bucket head is read.
+fn idx_walk_bucket(W:[]u8,q:i32,cand:[]u8,nc:i32,seen:[]u8)i32 {
+  let ix:i32=idx_node(W);
+  if(ix<2 || ix>=NN()){return nc;}
+  if(ng(W,ix,0)!=40){return nc;}
+  let m:i32=ng(W,ix,idx_bfield(q));
+  while(m>=0 && nc<512){
+    if(m<2 || m>=NN()){break;}
+    if(get32(seen,m*4)==1){break;}
+    set32(seen,m*4,1);
+    hs(W,56,hg(W,56)+1);
+    if(ng(W,m,36)==1 && ng(W,m,0)==T_MAP()){
+      set32(cand,nc*8,m); set32(cand,nc*8+4,q);
+      nc=nc+1;
+    }
+    m=ng(W,m,12);
+  }
+  return nc;
+}
+fn rebind_try_idx(W:[]u8,s:i32,r:i32,expected:i32,masked:i32,st:[]u8)i32 {
+  let ans:i32=-2;
+  let paths:[]u8=z_alloc(4608);
+  let np:i32=t2_gather(W,s,paths);
+  let want:[]u8=z_alloc(16);
+  let p:i32=0;
+  while(p<np){
+    let L:i32=get32(paths,p*48);
+    if(L>=2 && L<=5){set32(want,(L-2)*4,1);}
+    p=p+1;
+  }
+  let cand:[]u8=z_alloc(4096);
+  let nc:i32=0;
+  let q:i32=2;
+  while(q<=5){
+    if(get32(want,(q-2)*4)==1){
+      let seen:[]u8=z_alloc(NN()*4);
+      nc=idx_walk_bucket(W,q,cand,nc,seen);
+    }
+    q=q+1;
+  }
+  let a:i32=1;
+  while(a<nc){
+    let kid:i32=get32(cand,a*8); let kp:i32=get32(cand,a*8+4);
+    let b2:i32=a-1;
+    while(b2>=0 && get32(cand,b2*8)>kid){
+      set32(cand,(b2+1)*8,get32(cand,b2*8));
+      set32(cand,(b2+1)*8+4,get32(cand,b2*8+4));
+      b2=b2-1;
+    }
+    set32(cand,(b2+1)*8,kid); set32(cand,(b2+1)*8+4,kp);
+    a=a+1;
+  }
+  let ci:i32=0;
+  while(ci<nc && ans==-2){
+    let m2:i32=get32(cand,ci*8); let plen:i32=get32(cand,ci*8+4);
+    let pp:i32=0;
+    while(pp<np && ans==-2){
+      let base:i32=pp*48;
+      if(get32(paths,base)==plen){
+        let v:[]u8=z_alloc(24); let f:[]u8=z_alloc(16);
+        let j:i32=0;
+        while(j<plen){set32(v,j*4,get32(paths,base+4+j*4)); j=j+1;}
+        j=0;
+        while(j<plen-1){set32(f,j*4,get32(paths,base+24+j*4)); j=j+1;}
+        let nr:i32=t2_asm_chain(W,v,plen,f);
+        let v2:i32=t2_try_verify(W,nr,s,expected,masked,st);
+        if(v2!=-2){promote_graph(W,nr,s,r,v2,f,plen-1); ans=v2;}
+      }
+      pp=pp+1;
+    }
+    ci=ci+1;
+  }
+  return ans;
+}
+
+// ---- ev_query: base logic, rebind arm dispatched on mode ----
+fn ev_query(W:[]u8,s:i32,r:i32,expected:i32,flags:i32)i32 {
+  hs(W,0,hg(W,0)+1); decay(W); ctx_push(W,s);
+  let n:i32=activate(W,s,r);
+  if(n>=0){
+    link_edge(W,n,6,n,0); ref_prot(W,n);
+    log_ev(W,2,s,r,ng(W,n,28),1,0,0); return ng(W,n,28);
+  }
+  let rbs:[]u8=z_alloc(8); set32(rbs,0,0); set32(rbs,4,0);
+  let masked:i32=flags&1;
+  let ra:i32=-2;
+  if(idx_mode(W)==1){ra=rebind_try_idx(W,s,r,expected,masked,rbs);}
+  else {ra=rebind_try_lin(W,s,r,expected,masked,rbs);}
+  emit("RB-STAT tried="); e64(get32(rbs,0)); emit(" rejected="); e64(get32(rbs,4)); emit("\n");
+  if(ra!=-2){
+    hs(W,16,get32(rbs,0)*1024+get32(rbs,4));
+    log_ev(W,2,s,r,ra,1,0,0); return ra;
+  }
+  let recent:i32=-1; let mm:i32=2;
+  while(mm<1024){
+    if(ng(W,mm,36)==1 && mm>=2 && ng(W,mm,0)==1){recent=mm;}
+    mm=mm+1;
+  }
+  if(recent>=0){link_edge(W,recent,8,recent,0);}
+  let ans:i32=mp_run(W,s,r,expected,flags);
+  if(ans!=-2){log_ev(W,2,s,r,ans,1,0,0); return ans;}
+  let bv:i32=bootstrap_miss(W,s,r);
+  if(bv!=-2){log_ev(W,2,s,r,bv,1,0,0); return bv;}
+  log_ev(W,2,s,r,-2,0,0,0);
+  miss_inquire(W,s,r);
+  return -2;
+}
