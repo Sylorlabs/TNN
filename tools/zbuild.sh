@@ -26,11 +26,18 @@ BASE="${SRC%.zag}"
 BIN="$BASE"
 
 if [ "$MODE" != "--nobuild" ]; then
+  # STALE-BINARY TRAP (found 2026-10-03, verified):
+  # a FAILED compile leaves the PREVIOUS binary in place. Running it then silently
+  # reports the OLD result with rc=0. One lane produced a false "plan order is
+  # nondeterministic" finding this way. Build-to-build determinism was subsequently
+  # verified byte-stable over 162 builds, so the nondeterminism was this bug.
+  # Therefore: delete the output first, and treat any compile failure as fatal.
+  rm -f "$BIN" 2>/dev/null
   OUT=$("$ZNC" $FLAGS "$SRC" 2>&1)
   RC=$?
   echo "$OUT" | sed 's/^/[znc] /'
   if [ $RC -ne 0 ]; then
-    echo "[zbuild] COMPILE-FAIL rc=$RC"
+    echo "[zbuild] COMPILE-FAIL rc=$RC (old binary already removed; no stale result possible)"
     exit 1
   fi
   # Guard against the silent-ELF failure mode even if flags were lost.
@@ -39,6 +46,7 @@ if [ "$MODE" != "--nobuild" ]; then
       *ELF*) echo "[zbuild] INFRA-FAIL: produced ELF binary on darwin; --target lost"; exit 2 ;;
     esac
   fi
+  [ -x "$BIN" ] || { echo "[zbuild] INFRA-FAIL: compile reported success but no binary at $BIN"; exit 2; }
 fi
 
 [ -x "$BIN" ] || { chmod +x "$BIN" 2>/dev/null; }
