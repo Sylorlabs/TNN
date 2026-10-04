@@ -108,3 +108,44 @@ answer, not an answer to those goals.
 ### Determinism
 3/3 byte-identical, rc=0, non-empty output.
 sha256 `c7837f0459e6414bfba86d073be5f923f04444a0dfa654b45ae4fbcd4aee3748`.
+
+## C503 AW-03 truncated RETRIEVE invents entities -- COUNT answers 2 instead of 1
+
+### Mechanism (read in source, both defects confirmed)
+- **W7** `ret_gen` `c15_base.zag:94` stores subjects only `if(n<32)` but line
+  100 writes the **unclamped** `n` into `out[0]`. Consumers then read `n`
+  values from a record holding 32.
+- **W8** `apply_kind3` `c8_learn.zag:441` accumulates `tot` across ALL
+  incoming kind-3 links with no bound, writing `SUBL[ni*128+4+tot*4]`.
+
+### Minimal reproducer
+`adversary/aw03.zag`. World (81 facts):
+`(1..40,20,9) (101..140,21,9) (0,20,77)`.
+Goal 7501: need0 = RETRIEVE(rel20,obj9); need1 = RETRIEVE(rel21,obj9);
+need2 = COUNT(rel20, ag1, _) with two incoming kind-3 links from need0 and
+need1.
+
+### Exact failure
+Probe T (single RETRIEVE, isolates W7):
+- reported length **40**
+- 32 entries are real world subjects
+- **8 entries are `0`** -- the zero-filled tail of the 160-byte output record.
+  Those are *invented entities*, and 0 is a syntactically valid id.
+
+Probe F (the diamond, W7 + W8 combined):
+- `compose_rc=2` (success)
+- **count_REPORTED = 2, ground truth = 1**
+- emitted records:
+  `[40, 101..132, 0x8] [40, 1..32, 0x8] [1, 2]`
+
+The 16 phantom zeros (8 per source) enter the subject set. Subject 0 is a
+real subject with a real fact `(0,20,77)`, so the phantom subject contributes
+object 77 and the distinct-object count goes from `{9}` to `{9,77}` = 2.
+
+Note the fan-in total is 80 subjects written into a 128-byte-per-need `SUBL`
+region (512 bytes total). That write did not crash -- malloc slack again --
+so the observable break is the wrong answer, not the overflow.
+
+### Determinism
+3/3 byte-identical, rc=0, non-empty output.
+sha256 `b0c278e0af88297ae13ad34c2482d392f819576001f14d6dadd07ed4e0342895`.
