@@ -41,8 +41,9 @@ contract/aligned = 12  contract/neutral = 12
 
 Permutation-invariant, facts-only-resistant, 9/10 bars pass.
 
-**R-B. Selection among applicable structures is solvable by the learner
-from consequences alone, and the solution transfers.** (`REPORT_45.md`)
+**R-B. Selection among applicable structures responds to consequences,
+and the response transfers.** (`REPORT_45.md`) **DOWNGRADED** by
+`REPORT_49.md` -- see the retraction below.
 
 C1541 produced a counterexample that contracts provably cannot fix. A
 consequence-weighted selection fixes it in **one trial**, transfers to a
@@ -54,6 +55,10 @@ first_correct = 1 wrong = 1 of 12
 PHASE4 TRANSFER q=(20,111) -> 22, same chain, no source change
 FO (support erased) -> 11 (the counterexample returns)
 ```
+
+**Retraction (C1681):** in that scenario a fixed length-2 preference
+also succeeds from zero experience, so the result is a working
+mechanism but **not evidence of learning**.
 
 **R-C. Two structurally different invalidation mechanisms exist and
 must never be conflated.** Gate invalidation (the structure stops being
@@ -83,6 +88,21 @@ structure whose output is class-valid but wrong is recruited and
 accepted. Its output really is subject-only, so *nothing available to
 the mechanism could reject it*. Confirmed shared by both the router and
 contract arms, so it is not a bridge-removal regression.
+
+**KILL-2b. Learned selection has never beaten a trivial heuristic.**
+The most important negative of the session, found by auditing my own
+work rather than legacy work.
+
+* Two selectors with **zero experience and no scoring at all** --
+  "prefer the shortest chain" and "take the first eligible chain" --
+  tie the consequence-weighted learner exactly (`0 wrong`).
+* In a world built so fixed preferences *cannot* win (two queries
+  needing different chain lengths, restrictive selectors), the
+  learner scores **1 of 2**, identical to every fixed selector.
+  Per the prereg's own stopping rule this is **VOID**.
+* **One exception, one control:** credit scoped by a query-derived key
+  scores **2 of 2**. That is the only selection result in the session
+  that has beaten a trivial heuristic.
 
 **KILL-3. Additive support over chain elements is unsound.** It rewards
 self-composition: `(s,s)` scores `2*s` and outscores `(s)`, so the
@@ -227,7 +247,11 @@ across a supersession boundary.
 1. **The scoring rule** turning consequence history into preference.
    Owner of the `SUM`/`MAX`/`NONSELF`/`DAMPED` choice. KILL-3 shows the
    choice is not cosmetic.
-2. **Value classes themselves** are derived by a rule I wrote. Closer to
+2. **The credit scope key.** `class(arg0)`/`class(arg1)` was chosen by me
+   *after seeing which properties differed between the two queries*. The
+   pooling mechanism is domain-blind; the key is partly researcher
+   knowledge. This is now the narrowest identified ownership joint.
+3. **Value classes themselves** are derived by a rule I wrote. Closer to
    plumbing than cognition, but it is a rule, not learned.
 3. **The consequence oracle.** The world supplies a scalar reward. The
    mechanism cannot invert it to the answer, but in a 3-candidate world
@@ -264,17 +288,24 @@ No promotion is claimed.
 
 Ranked by information gain, not by effort.
 
-**1. Discriminate the surviving scoring rules.** MAX, NONSELF and DAMPED
-all produced identical results because every viable chain here has
-length <= 2. The experiment that separates them is a world where the
-correct answer **requires self-composition** -- the one case NONSELF
-forbids. Cheap, and it converts a 3-way tie into a decision.
+**DONE. The scoring rules are discriminated.** A world where the only
+viable chain is `(s,s)` killed NONSELF; a mixed-chain world killed MAX
+(and SUM). DAMPED is the sole survivor of two probes -- a survivor on
+two worlds is weak evidence, not validation.
 
-**2. `H-SC`: provenance-scoped credit.** Every rule tested shares one
-global scalar per structure. Scoping credit to the regime that earned
-it should make REV-A fast *and* stable, where these rules only make it
-stable. This is the most promising untested idea and it attacks the
-actual remaining ownership gap.
+**DONE, with a retraction attached.** Scoping to a *regime* makes
+revision immediate when the regime change is observable and does nothing
+when it is not. But the regime key was chosen by me, and a fixed
+heuristic tied the result -- so it is not evidence of learning.
+
+**1 (NEW, HIGHEST). Can the learner choose its own credit scope?**
+Query-scoping by a derived key is the only mechanism that beat fixed
+heuristics (2 of 2). The key itself was picked after seeing the answer,
+which is the remaining researcher contribution. Give several candidate
+keys, let experience select among them, and hold out queries whose
+answers require an unused key. If a learner-chosen scope transfers to a
+key it has never used, that is real ownership movement -- and it is a
+clean, cheap, falsifiable experiment.
 
 **3. PHASE 10: BR-4 by making MAPs retain provenance.** The audit
 proved the information is absent, so the experiment is well-posed:
@@ -283,13 +314,11 @@ becomes unnecessary, and measure whether a generic executor can then
 instantiate a numeric MAP. This is the only bridge in the list whose
 blocker is *representation*, and representation is learner state.
 
-**4. PHASE 11: H16v4 against the new mechanisms.** The consequence-
-weighted selector and the contract learner are the first mechanisms in
-this program that were built *after* H16v3 existed. They need adversarial
-audit: can facts-only plus a cheap search reproduce selection? Can a
-researcher-written scoring rule masquerade as a learned one? The
-`DAMPED` rule in particular is three characters of researcher code, and
-that is exactly the shape H16 exists to kill.
+**DONE -- and it retracted two of my own results.** See KILL-2b. The
+positive control also fired: the substrate was over-killing
+arbitrary-length programs because `exec` shared a step limit with the
+structure-search depth. Audit your own new work, not only legacy work;
+the detector is most useful against your own results.
 
 **5. PHASE 6: other-architecture principles.** Not started. Note the
 audit already supplies the best single example of "steal the principle,
