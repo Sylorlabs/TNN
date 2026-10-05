@@ -95,8 +95,22 @@ frequencies are deliberately diluted so that counting is *unable* to
 rank, and a learned mechanism is not. PHASE 15 tried to build this at
 5 structures and the world collapsed again.
 
-**Verdict: NARROW.** The claim survives as "in five small worlds,
-counting was not beaten." It does **not** survive as a general law.
+**RESOLVED by PHASE 16** (`count16/`). At N=36 with 144 queries, a
+query-conditional arm scored **12 of 36** against COUNT's **1 of 36**,
+hitting the exact ceiling the coarse feature permits. So A1 was right
+in its core: the small-N tests were underpowered. But the resolution
+also **reframes** the finding -- COUNT is not a strong baseline that was
+outsmarted, it is the *ceiling of all query-blind selection*, and 1/36
+is what any query-blind rule scores. The five earlier ties are
+explained by those mechanisms being query-blind, without appealing to
+their quality.
+
+The original narrowing stands for the record: "in five small worlds,
+counting was not beaten," and not as a general law.
+
+Mutation-tested: destroying the routing feature drops 12 -> 1;
+coarsening it drops 12 -> 2; collapsing the world trips the validity
+gate. The bar tracks the mechanism.
 
 ### A2. "TYPES ARE INFORMATION-THEORETICALLY INSUFFICIENT" -- OVERSTATED
 
@@ -241,6 +255,7 @@ After all of the above, these stand:
 | "theory found a bug every time" | **WITHDRAWN** -- no denominator |
 | "types are information-theoretically insufficient" | **WITHDRAWN** -- n=2 |
 | "five mechanisms lost to counting" | **NARROWED** to four, plus one compromised lane |
+| "counting beats learners" | **RESOLVED** by PHASE 16: query-blind ceiling, not a strong baseline |
 
 ## PART 4 -- THE ATTACK I COULD NOT MOUNT
 

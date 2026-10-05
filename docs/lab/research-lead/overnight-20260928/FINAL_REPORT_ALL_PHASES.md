@@ -58,6 +58,7 @@ experiment here measured TNN itself.**
 | 12 instrument hardening | **done** | two lints, both validated on fixtures |
 | 13 existing open fronts | **surveyed only** | concrete items named, not worked |
 | red team | **done** | 3 claims withdrawn, 3 narrowed, 2 instrument defects found |
+| 16 large-N counting test | **done** | C1634 resolved: query-conditional arm 12/36 vs COUNT 1/36 |
 | 14 bridge retirement | **done as a queue** | 0 deletions; blockers recorded |
 | 15 long lifetime recruitment | **done, negative** | precondition held, mechanism still lost |
 
