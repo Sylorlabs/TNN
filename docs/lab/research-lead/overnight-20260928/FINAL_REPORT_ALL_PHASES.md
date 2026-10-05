@@ -32,6 +32,11 @@ A second regularity is methodological, and it cost me the most:
 **L3 = 0 throughout.** No architecture was changed. Zero bridges
 deleted. Zero promotions claimed.
 
+**Subject to `RED_TEAM.md`, which withdraws two of the claims above
+("types are information-theoretically insufficient", "theory found a
+bug every time"), narrows two others, and establishes that no
+experiment here measured TNN itself.**
+
 ---
 
 ## 1. PHASE STATUS
@@ -52,8 +57,9 @@ deleted. Zero promotions claimed.
 | 11 H16v4 | **done** | positive control fired, 2 results retracted |
 | 12 instrument hardening | **done** | two lints, both validated on fixtures |
 | 13 existing open fronts | **surveyed only** | concrete items named, not worked |
+| red team | **done** | 3 claims withdrawn, 3 narrowed, 2 instrument defects found |
 | 14 bridge retirement | **done as a queue** | 0 deletions; blockers recorded |
-| 15 long lifetime recruitment | **not started** | superseded by Phase 9's finding |
+| 15 long lifetime recruitment | **done, negative** | precondition held, mechanism still lost |
 
 ---
 
