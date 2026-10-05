@@ -64,7 +64,7 @@ scan() {
 
   # ---- Pattern B: verdict-named variable assigned only bare literals ----
   local names
-  names=$(grep -oE "[A-Za-z_][A-Za-z0-9_]*${VERDICT_RE}[A-Za-z0-9_]*" "$f" 2>/dev/null | sort -u)
+  names=$(grep -oE "(${VERDICT_RE}[A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*${VERDICT_RE}[A-Za-z0-9_]*)" "$f" 2>/dev/null | sort -u)
   [ -z "$names" ] && return 0
 
   while IFS= read -r name; do
