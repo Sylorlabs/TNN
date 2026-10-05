@@ -25,8 +25,9 @@ per-lane decisions.
 
 ## 2. STRONGEST SURVESTING RESULTS
 
-**R-A. Applicability can be moved to learner state, and the router it
-replaces was surface-bound pure loss.** (`REPORT_23.md`, C1541)
+**R-A. Syntax-based routing can be replaced by derived contracts, and
+the surface dependence it introduced was pure loss.** (`REPORT_23.md`,
+C1541) **Scope narrowed by C1721** -- see KILL-6.
 
 The audited router decides which cognition runs by parsing the *shape*
 of the input. On a semantically identical input whose punctuation
@@ -39,7 +40,8 @@ router/aligned = 12    router/neutral = FAIL
 contract/aligned = 12  contract/neutral = 12
 ```
 
-Permutation-invariant, facts-only-resistant, 9/10 bars pass.
+Permutation-invariant, facts-only-resistant, 9/10 bars pass -- *where
+the derived signatures separate the situations.* They need not.
 
 **R-B. Selection among applicable structures responds to consequences,
 and the response transfers.** (`REPORT_45.md`) **DOWNGRADED** by
@@ -112,6 +114,51 @@ chain length restores stability to 27/28.
 **KILL-4. Name-based bridge auditing is invalid for this codebase.**
 Every `_TO_` and `_MODE` occurrence is a comment *asserting absence*.
 All four real bridges are implicit. Retired as a method.
+
+**KILL-6. Type signatures cannot do routing.** (`borrow6/REPORT.md`,
+C1721) The most consequential finding of the session, and it narrows
+two of my own results.
+
+In a world with two **mirror-image** queries -- same structures, both
+chain lengths contract-eligible, correctness swapped -- the derived
+signature is *identical*:
+
+```
+Q_C=(10,121) answer 11  key 14
+Q_A=(20,111) answer 22  key 14     DERIVED SIGNATURE keys differ = 0
+```
+
+Two situations demanding opposite actions, indistinguishable by type.
+Signature-keyed scoping scores **0 of 2**, worse than unscoped credit.
+
+```
+routing from TYPES   ->  insufficient; signatures collide
+routing from VALUES  ->  sufficient; and it is memorisation (2 of 2)
+```
+
+This is the structural reason BR-1, BR-2 and BR-3 exist. A
+signature-based router cannot do the job, so the researcher reaches for
+something value-specific: `route_line` reaches for punctuation, a
+memorisation table reaches for the input. **The bridge is not laziness;
+it is what happens when the available abstraction is too coarse and
+something has to give.**
+
+Consequences:
+* C1541's replacement is valid for *syntax*-based routing, not routing
+  in general. My original wording was too strong.
+* Deleting BR-1 without a general substitute removes the only thing
+  making the bridge necessary and leaves the capability unimplemented.
+
+**KILL-7. Three borrowed architectural principles, all falsified.**
+(`borrow6/REPORT.md`, C1721) Local co-use plasticity (Hebbian),
+attractor settling, and mismatch-driven records (predictive coding) each
+scored **1 of 2** -- identical to `LEN1`, `LEN2` and `TIES`. Not one
+produced a correct answer a fixed preference would have missed.
+
+All three *collapse* trivially into existing substrate (read/write a
+weight, bounded iterate, append a record): cheap in machinery, worth
+nothing in capability. A mechanism that collapses easily and does not
+help is a null with extra steps.
 
 **KILL-5. Additive support is not self-composition-safe under revision**
 -- see KILL-3; the two are the same defect seen from selection and from
@@ -250,7 +297,11 @@ across a supersession boundary.
 2. **The credit scope key.** `class(arg0)`/`class(arg1)` was chosen by me
    *after seeing which properties differed between the two queries*. The
    pooling mechanism is domain-blind; the key is partly researcher
-   knowledge. This is now the narrowest identified ownership joint.
+   knowledge. Worse, KILL-6 shows this joint cannot be closed by choosing
+   a *better* type-derived key: types are too coarse, full stop.
+2b. **Something between a type and a raw value.** No such abstraction
+   exists in the substrate, and no borrowed principle in PHASE 6
+   produced one. This is the deepest identified gap.
 3. **Value classes themselves** are derived by a rule I wrote. Closer to
    plumbing than cognition, but it is a rule, not learned.
 3. **The consequence oracle.** The world supplies a scalar reward. The
@@ -286,7 +337,19 @@ No promotion is claimed.
 
 ## 12. HIGHEST-VALUE NEXT FRONTIER
 
-Ranked by information gain, not by effort.
+Revised by PHASE 6. The previous top item -- "can the learner choose its
+own credit scope?" -- is **no longer sufficient**, because scope choice
+cannot rescue an abstraction that is too coarse (KILL-6).
+
+**0 (NEW, HIGHEST). Can the learner induce a grouping of situations
+coarser than raw values and finer than types, from experience alone?**
+So that a situation it has never seen can still be placed correctly.
+Three borrowed principles have now been shown not to answer this.
+Content addressing is the obvious remaining candidate, but PHASE 6 showed
+that "content" instantiated as a *type signature* fails; a content
+address over the *full derived situation* is untested.
+
+Ranked after that, by information gain:
 
 **DONE. The scoring rules are discriminated.** A world where the only
 viable chain is `(s,s)` killed NONSELF; a mixed-chain world killed MAX
