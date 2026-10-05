@@ -1,7 +1,14 @@
 # REPORT -- PHASE 6 BORROWED PRINCIPLES HEAD TO HEAD C1721-C1750
 
+> **AMENDED** by `INDEPENDENCE_AUDIT.md` IA-7: the two always-true
+> bars `B7_named_modes=0` and `B8_L3=0` were removed from the source.
+> They were bare assertions, not measurements (B8 even passed a literal
+> `0` as an argument). The measurement rows below are unchanged; only
+> the sha changed. The superseded sha was
+> `7129e4bf89448642b396e7267ae062a48d6f95a9bd2800c2454130253c0aa93e`.
+
 Prereg `borrow6/PREREG.md`. 3/3 sha256
-`7129e4bf89448642b396e7267ae062a48d6f95a9bd2800c2454130253c0aa93e`
+`cc6903bdf249cd2bfb810f5233eb7013665ee9f1b5e90aa80f5b0a9ccd6a926b`
 loop lint CLEAN.
 
 ## HARNESS
