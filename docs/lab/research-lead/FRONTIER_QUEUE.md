@@ -22,7 +22,7 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P5-meta5d` | **DYNAMICS REPAIR.** Clone-dominant selection erases the prior within one trial, so no learning-to-learn question is falsifiable on this harness. Clone into a MINORITY of slots (4 of 24) so independent lineages persist | relevant prior must survive to be able to help; then beat fresh under partial observation | RUNNING |
+| `P5-meta5e` | **RETENTION INSTEAD OF CONVERGENCE.** p5meta5d produced the line's first VALID NEGATIVE: prior experience is actively HARMFUL (mean 25.00 vs fresh 17.67) because the prior phase converges the population and destroys the diversity the next phase needs. Insert the acquired program ALONGSIDE the incumbent population instead of cloning over it | if diversity preservation flips the sign, the negative is a property of replacement dynamics, not of prior experience | RUNNING |
 | `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
@@ -114,11 +114,13 @@ BLOCKED items do **not** gate anything above.
 | `mode-risk` | P1–P5 selected by arm index = mildest form of the forbidden mode pattern | phase10 |
 | `arm-identity` | arm↔state mismatches are systemic, not isolated | trust in every result |
 | `arm-divergence-check` | 4 of 5 p5meta5a defects were visible ONLY by comparing arms that should differ | (now permanent infra) |
-| `intervention-persistence` | the apparatus must let an intervention survive long enough to matter, or no causal claim is testable | (now the named blocker for P5-meta) |
+| `intervention-persistence` | RESOLVED in 5d (clone minority restores it) | — |
+| `no-op-detector-coverage` | detector reports INCOMPARABLE on 5 legacy table formats (bounded_pin, count16, lifetime15, noisy, selforg9) — formats it cannot parse are formats it cannot protect | QUEUED: extend parser |
 | `assoc-no-mapping` | the meta substrate has no representation of a rule independent of stored facts | any substrate with programs/structure | lookup+scaffold cannot express "learned rule"; `MACH` deletable with no loss |
 | `clone-only-harness` | an evolutionary loop with cloning but no mutation operator | search procedures with any variation operator | fitness-improving search is impossible when the population can only converge to its current leader; distinct population collapsed 24 -> 4 |
 | `full-info-acquisition` | a prior cannot accelerate a learner that already holds the full target answer set | meta-learning measured under PARTIAL observation | OBS was a complete copy of the answer set, so relevant==irrelevant==misleading exactly; substituting OBS for want() changed nothing |
 | `clone-dominance` | a prior cannot help when cloning fills the majority of slots each generation | dynamics that preserve independent lineages | 24 slots, 12 cloned per trial, 1 mutated: the prior is overwritten on trial 1, so any "prior changes acquisition" hypothesis is unfalsifiable here |
+| `converge-vs-retain` | p5meta5d: a prior that CONVERGES the population makes the NEXT learning phase worse (17.67 fresh vs 25.00 prior) | priors that RETAIN diversity and add structure alongside | relevant==irrelevant==misleading==oracle exactly, so the harm is from population convergence, not information content; population-reset control reproduces fresh exactly |
 
 ---
 
