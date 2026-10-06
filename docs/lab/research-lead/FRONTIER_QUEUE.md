@@ -22,7 +22,8 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P5-meta5c` | **partial-observation acquisition.** p5meta5a showed a prior CANNOT help when acquisition starts with the full training-band answer set. Reveal target answers ONE PER TRIAL so a prior supplying machinery can actually reduce acquisition cost | relevant prior must beat fresh under partial observation; irrelevant neutral; misleading harmful or revised | RUNNING |
+| `P5-meta5d` | **DYNAMICS REPAIR.** Clone-dominant selection erases the prior within one trial, so no learning-to-learn question is falsifiable on this harness. Clone into a MINORITY of slots (4 of 24) so independent lineages persist | relevant prior must survive to be able to help; then beat fresh under partial observation | RUNNING |
+| `noop-detector-rollout` | apply `tools/lab/noop_change_detector.py` to every prior experiment's raw tables to find earlier undetected no-op edits | flags any substantive edit with identical output | QUEUED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
 | `P7-inquiry` | learned inquiry vs strong baselines (fixed/greedy-info/uncertainty/random/oracle) | inquiry must beat greedy-info because evidence changes beliefs | QUEUED |
@@ -112,10 +113,12 @@ BLOCKED items do **not** gate anything above.
 | `no-position-context` | rewrites need context; handcoding `if pos==p` is forbidden | phase10-context |
 | `mode-risk` | P1–P5 selected by arm index = mildest form of the forbidden mode pattern | phase10 |
 | `arm-identity` | arm↔state mismatches are systemic, not isolated | trust in every result |
-| `arm-divergence-check` | 4 of 5 p5meta5a defects were visible ONLY by comparing arms that should differ | (this is now permanent infra, not debt) |
+| `arm-divergence-check` | 4 of 5 p5meta5a defects were visible ONLY by comparing arms that should differ | (now permanent infra) |
+| `intervention-persistence` | the apparatus must let an intervention survive long enough to matter, or no causal claim is testable | (now the named blocker for P5-meta) |
 | `assoc-no-mapping` | the meta substrate has no representation of a rule independent of stored facts | any substrate with programs/structure | lookup+scaffold cannot express "learned rule"; `MACH` deletable with no loss |
 | `clone-only-harness` | an evolutionary loop with cloning but no mutation operator | search procedures with any variation operator | fitness-improving search is impossible when the population can only converge to its current leader; distinct population collapsed 24 -> 4 |
 | `full-info-acquisition` | a prior cannot accelerate a learner that already holds the full target answer set | meta-learning measured under PARTIAL observation | OBS was a complete copy of the answer set, so relevant==irrelevant==misleading exactly; substituting OBS for want() changed nothing |
+| `clone-dominance` | a prior cannot help when cloning fills the majority of slots each generation | dynamics that preserve independent lineages | 24 slots, 12 cloned per trial, 1 mutated: the prior is overwritten on trial 1, so any "prior changes acquisition" hypothesis is unfalsifiable here |
 
 ---
 
