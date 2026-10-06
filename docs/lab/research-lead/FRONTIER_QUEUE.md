@@ -21,23 +21,23 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 ## CURRENT
 
 > **NOTE ON P5-meta**: CLOSED as *not established in this substrate*, not
-> refuted. Nine defects, all one shape -- the intended intervention never
-> reached the mechanism under test. Two permanent instruments were built
-> because of it (`arm_audit.py`, `noop_change_detector.py`), and both
-> earned their place within one phase. Reopening requires the
-> `substrate-spec` preconditions, not another experiment on this
-> substrate.
+> refuted. Ten defects (was nine; the tenth is the dead generator `m5g.zag`
+> itself). Re-derivation: the closing conclusion SURVIVES because it never
+> rested on `m5g` numbers. Reopening requires `substrate-spec`.
 
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P6-struct` | **PROMOTED (was queued).** Structural induction in the production representation class, so forward generation and backward membership read ONE table. Substrate precondition passed in pure Zag: `A0->A1 4 \| A1->3 3 \| A2->A0 5` serves both directions (forward lens 3/2/4; exactly 3 of 340 strings derivable), checked against hand-derived arithmetic. Precondition establishes the representation CAN express a solution; whether an inducer can FIND one is the experiment | induced grammar must serve both directions from one table, and must survive symbol renaming; must NOT be reachable by the degenerate always-consult-everything policy (`ZD2-PASS-DEGENERATE-POLICY`) | RUNNING |
+| `P6-rich` | Attacked. Rename survived; uniqueness KILLED (6/6 NT-role tables cover the 22 strings); depth KILLED (train L1+L2 installs no A2, held-out 0/16). Live residue: menu-select a table that generalizes a first-symbol cut at the trained depth. L2, weaker than induced=truth | — | ATTACKED |
+| `P6-uniq` | uniqueness+depth cannot be jointly satisfied in this encoding (NT=3, NRULE=2, any-NT-as-start, greedy-strict). Unique 1-rule family has n_pos<=1 so n_test>=8 is impossible. VOID, not a construction failure | — | VOID |
+| `P7-inq` | baselines run. greedy-info 64inq/100%/pay128; oracle 0/100%/320; learner-Q 21/43%/77. Learner did not beat greedy-info. Ownership weak (researcher slots, learned Q) | learner must beat greedy-info because evidence changes beliefs | RUNNING — learner slot empty of ownership |
+| `P6-struct` | 3-string fixture too small: n_test=1 and held-out was a prefix-extension. Inducer recovered A0->[3 3] A1->[A0 4] not truth. Precondition still holds as L1 representational viability (and enum-audit: numeric bars satisfied by ~256 grammars) | — | SUPERSEDED by P6-rich |
 | `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | QUEUED |
 | `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta. **Condition (a) now has a working, pure-Zag implementation** (`p6struct/precond.zag`); condition (b) still unmet | — | PARTIAL |
 | `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
-| `P7-inquiry` | learned inquiry vs strong baselines (fixed/greedy-info/uncertainty/random/oracle) | inquiry must beat greedy-info because evidence changes beliefs | QUEUED |
+| `P7-inquiry` | baselines exist on lane/p7inq. Learner-Q lost to greedy-info. Next: a learner that owns the inquiry *choice* without a researcher slot menu | inquiry must beat greedy-info because evidence changes beliefs | QUEUED — needs different mechanism |
 | `phase10-context` | generic rewrite applicability from **learner-owned** context, NOT `if pos==p` | position-blind rewrites were destructive; successor must acquire context itself | QUEUED |
 
 **Standing hazard for every CURRENT item:** an arm that does not execute the
@@ -59,6 +59,7 @@ compile failed; a stale build once had me analysing a program that did not exist
 
 | id | item |
 |---|---|
+| `compose-noncommutative` | composition where the join does NOT commute, so random-merge cannot tie the upper bound |
 | `causal-intervention` | intervention-capable vs observational-only learner; latent alternatives observation cannot separate |
 | `trial-graph-leak` | do transient trial structures enter persistent state? clean / contaminated / reconstruction / persistence / permutation |
 | `bridge-BR2` | conditional bridge at `unified_learn.zag:423,445` → generic replacement, rerun correctness+transfer+revision |
@@ -94,7 +95,11 @@ BLOCKED items do **not** gate anything above.
 | `bigram-revision` | bigram state recovering after invalidation | state with an active rebuild/replenishment path | decrements with no replenishment (reinforcement only on success) |
 | `proposal-ranking` | scaling N to defeat counting (phase16/17) | anything about state changing *generation* | target either observable (→search) or hidden (→no signal) |
 | `fact-cache-metalearn` | p5meta3: "learning-to-learn" as acquisition speedup with a retained-fact lookup available | learning-to-learn where facts CANNOT be retained | retention dominates when learning speed is measured on queries already stored |
-| `all-prior-carriers` | **P5-meta CLOSED as NOT-ESTABLISHED.** fact store, population, retained population, and non-population weight table all failed to reduce acquisition cost; 37x horizon range neutral; population-borne prior actively harmful. Void where the harness could not reach provably-existing solutions | meta-learning in a substrate meeting the `substrate-spec` preconditions | prior experience never reached the mechanism: 9 defects on this line, all the same shape |
+| `all-prior-carriers` | **P5-meta CLOSED as NOT-ESTABLISHED.** fact store, population, retained population, and non-population weight table all failed to reduce acquisition cost; 37x horizon range neutral; population-borne prior actively harmful. Void where the harness could not reach provably-existing solutions | meta-learning in a substrate meeting the `substrate-spec` preconditions | prior experience never reached the mechanism: 10 defects, all the same shape. `m5g.zag` is dead (bare block); "fix did not fix" is NOT REPRODUCIBLE |
+| `H-GRAPH` | graph topology as a causal cognitive substrate (graphq1) | graphs as a storage layout | GRAPH tied FLAT/SEQ/TABLE/BAG at LOOSE; beat RANDTOPO on content not topology |
+| `H-LEARNED-TOPO` | learner-created/deleted/rewired edges as a causal carrier (graphq2) | facts-only reconstruction | CREATE grew 0->12 edges matching truth; FACTS stored the same 12 facts with 0 edges and the same answers. Topology changed; topology did not cause the gain |
+| `H-IDENT` | node IDs as a hidden carrier (graphq3) | genuine structure | consistent perm held on GRAPH/FLAT/FACTS; broken two-map dropped 100->66. Q16 ablation UNSEEN/DEEP 0/0 confirms topology decorative |
+| `H-COMPOSE-HINTLESS` | spontaneous X+Y composition without a combine command (compose) | source-authored join | XY=Xabl=Yabl=fresh=irrel=4/8 chance; join=rmerge=8/8. XOR commutes so random merge tied the upper bound. Researcher owns every policy |
 | `generic-machine-scaffold` | first-observation machine bootstrap in `observe` | seeded machines that are not content-independent | any prior at all scaffolds a partial fit, so irrelevant prior "helped" 40% |
 | `assoc-substrate-metalearn` | p5meta4: asking learning-to-learn of a lookup+scaffold substrate | meta-learning on any substrate that can REPRESENT a mapping | acquisition was measured on queries the fact store could answer; on never-seen queries the prior went 3.00 -> 60.00 (never) |
 | `router-selection` | `count16` SIG_B bucket router | query-conditional mechanisms generally | feature WAS the answer; researcher-authored router |
@@ -108,7 +113,8 @@ BLOCKED items do **not** gate anything above.
 |---|---|---|
 | `gen-bias-L2` | learner state changes **proposal generation**; experienced cost 8 vs fresh >4000; distilled state beats re-deriving from identical facts | **bounded L2.** Not transfer, not revision, not method ownership. State is n-gram statistics over a fixed alphabet. |
 | `gen-bias-perm` | that result survives identifier permutation | A=8 vs H=6; broken-perm control correctly detected |
-| `audit-bound` | across 1,025 audited sources, **0/137** structural writers read learner state | static analysis, type-aware; cannot see aliasing/global effects |
+| `audit-bound` | **0/576** structural writers read learner state (cold clone; was 574 on an older tree) | static analysis, type-aware; cannot see aliasing/global effects |
+| `p6-rich-L2` | induced productions = truth grammar on 22-string language; held-out 8/8 vs mem 0/8; recursion necessary | **L2.** Production space enumerated in source (NPROD=294). Not method ownership. Not yet attacked by rename or depth-shift |
 | `counting-ceiling` | query-blind arms are capped at `ceil(H/N)`; in affine-composition families the dilemma holds | bounded to that family; assumption A1 **untested** |
 | `p1-p4-reweight` | local-plasticity / content-addressed / attractor arms make generation cheaper | **bounded L2 reweighting**; no structural expansion |
 | `inherited-b5d-criterion` | `lifetime_metalearn` B5D compared errors across DIFFERENT families | within-family acquisition criteria (which p5meta3 adopted) | cross-family comparison measured task difficulty, not learning |
