@@ -3,6 +3,49 @@
 Branch `ownership`. Prereg `phase6/PREREG.md`. 3/3 sha256
 `88c5fcb3dcfbd12a72d5...` (72 rows). `score67.py` recomputes all verdicts.
 
+## PERMUTATION CLOSURE -- THE POSITIVE SURVIVES (added after initial report)
+
+The earlier report flagged a missing permutation control. It is now
+repaired, run, and **the positive holds**.
+
+| regime | A experienced | H permuted | ratio | equivalent |
+|---|---|---|---|---|
+| primary(prior) | 8 | 6 | 1.33 | YES |
+| related_transfer | -1 | -1 | -- | YES |
+| unrelated | -1 | -1 | -- | YES |
+| short_control | 2 | 1 | 2.00 | YES |
+
+**Broken-permutation positive control: DETECTED.** An arm that relabels
+the state but not the target scores -1 where A scores 8. So the test can
+actually detect identity dependence -- it is not vacuous.
+
+**Isomorphism verified.** `permute(x) = 3x mod 10`, `gcd(3,10)=1`, a
+genuine bijection; targets relabel consistently (`1->3, 2->6, 7->1,
+6->8`) and printed in the raw output.
+
+**Verdict: learner-owned generative bias demonstrated, bounded L2. No
+transfer, no revision, no method ownership.**
+
+### The segfault root cause, and two more bugs
+
+1. **`continue` is not valid Zag** (0 uses in 1,025 audited sources).
+   My bounds guard used it, so the loop counter never advanced on that
+   path and the permutation loop ran past the buffer -> SIGSEGV. That was
+   the segfault. Repaired with `if/else`, not by disabling the arm.
+2. **`armBuild` had no case for arms 6 and 7**, so both fell through to
+   `return 0` (fresh state). The "shuffled" arm was literally running the
+   fresh learner -- which is why it first reported -1 and looked like
+   permutation had killed the result.
+3. **The permutation relabelled only the column, not the row.** Verified
+   analytically: after relabelling, the learner reads `row P(a)` where it
+   needs `row a`, so the world is non-isomorphic. Fixed to relabel row,
+   column, and the START row together.
+
+Bug 2 is the same class as the Phase 4 defect where a "shuffled" arm was
+silently a duplicate of A. **This is the second time an arm did not run
+the state it claimed to.** Every arm-state mapping is now checked by
+`armBuild` coverage rather than by reading the table.
+
 ## VERDICT
 
 **The primary generation claim holds. Transfer fails. Revision is
