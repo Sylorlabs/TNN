@@ -1,0 +1,449 @@
+// ARM AUDIT (Zag port of tools/lab/arm_audit.py) -- charter section 4 compliant.
+//
+// The recurring defect in this lane was an arm that does not execute the state
+// its label claims. Generators emit FP fingerprint rows:
+//
+//   FP exp=E regime=R seed=S arm=A state=H1 cfg=H2 space=H3 perm=H4
+//
+// and this auditor verifies EXECUTION IDENTITY from those hashes, never from
+// names. Invariants:
+//   I1 no duplicate (exp,regime,arm,seed)
+//   I2 no missing arms in any (exp,regime,seed) cell
+//   I3 arms declared IDENTICAL really have equal fingerprints
+//   I4 arms declared DIFFERENT really have different fingerprints
+//   I5 a permuted arm's fingerprint != the arm it copies
+//   I6 an ERASED arm == the FRESH arm where intended
+//   I7 every fingerprint row is well-formed
+//
+// The spec is passed as a second argument so no path string is hardcoded:
+//   arm_audit.zag <raw-file> <spec-file>
+//
+// spec-file format, one directive per line:
+//   EXPECT <n> <a0> <a1> ...        arms that must appear in every cell
+//   DIFF  <a> <b>                   these must have DIFFERENT fingerprints
+//   SAME  <a> <b>                   these must have EQUAL fingerprints
+//   PERM  <a> <b>                   a is a permutation of b, so must DIFFER
+//
+// Pure Zag: reads files with _zag_read_file, prints with _zag_print.
+
+fn z_alloc(n:i32)[]u8 {
+  if(n<1){return "";}
+  let p:*u8=_zag_malloc(n) as *u8;
+  if(p==null as *u8){return "";}
+  let b:[]u8=p[0..n];
+  let i:i32=0; while(i<n){b[i]=0;i=i+1;}
+  return b;
+}
+fn get32(b:[]u8,o:i32)i32 {
+  return (b[o] as i32)|((b[o+1] as i32)<<8)|((b[o+2] as i32)<<16)|((b[o+3] as i32)<<24);
+}
+fn set32(b:[]u8,o:i32,v:i32)void {
+  b[o]=v as u8;b[o+1]=(v>>8) as u8;b[o+2]=(v>>16) as u8;b[o+3]=(v>>24) as u8;return;
+}
+fn o_app(b:[]u8,c:i32,s:[]u8)i32 { let i:i32=0; while(i<s.len){b[c+i]=s[i];i=i+1;} return c+s.len; }
+fn o_i64(b:[]u8,c:i32,v:i64)i32 {
+  let ng:i32=0; let x:i64=v; if(x<0){ng=1;x=0-x;}
+  let n:i32=1; let t:i64=x; while(t>=10){t=t/10;n=n+1;}
+  let e:i32=c+ng+n; let p:i32=e-1; let y:i64=x;
+  if(y==0){b[p]=48;}
+  while(y>0){b[p]=(48+(y-(y/10)*10)) as u8; y=y/10; p=p-1;}
+  if(ng==1){b[c]=45;} return e;
+}
+fn o_nl(b:[]u8,c:i32)i32 { b[c]=10; return c+1; }
+
+fn MAXR()i32 { return 4000; }   // max fingerprint rows
+fn MAXC()i32 { return 400; }    // max distinct cells
+fn MAXS()i32 { return 64; }     // max spec directives
+
+// ---- read "key=<value>" out of a line. Values may be digits or a single
+// letter (arm=A). Letters map to 100+('A'..'Z') so they never collide with ints.
+// Returns -1 if the key is absent or the value is unparseable.
+fn tokval(ch:i32)i32 {
+  if(ch>='0' && ch<='9'){ return ch-'0'; }
+  if(ch>='A' && ch<='Z'){ return 100+(ch-'A'); }
+  if(ch>='a' && ch<='z'){ return 200+(ch-'a'); }
+  return -1;
+}
+
+// does the line begin with `word` followed by a space?
+fn keq(line:[]u8,word:[]u8,pad:i32)i32 {
+  let wl:i32=word.len;
+  if(wl+1>line.len){ return 0; }
+  let i:i32=0;
+  while(i<wl){ if(line[i]!=word[i]){ return 0; } i=i+1; }
+  if(line[wl]!=' '){ return 0; }
+  return 1;
+}
+
+// rolling hash of the nth whitespace-separated token of a line (0-based)
+fn argtok(line:[]u8,which:i32)i32 {
+  let p:i32=0;
+  let w:i32=0;
+  while(p<line.len && w<=which){
+    while(p<line.len && line[p]==' '){ p=p+1; }
+    if(p>=line.len){ break; }
+    let st:i32=p;
+    while(p<line.len && line[p]!=' '){ p=p+1; }
+    if(w==which){
+      let h:i32=7;
+      let q:i32=st;
+      while(q<p){ h=(h*31+line[q])&0x3fffffff; q=q+1; }
+      return h;
+    }
+    w=w+1;
+  }
+  return -1;
+}
+
+// rolling hash of the VALUE text after "key=" -- identity by name, not by number
+fn nametok(line:[]u8,key:[]u8)i32 {
+  let kl:i32=key.len;
+  let i:i32=0;
+  while(i+kl<line.len){
+    let hit:i32=1;
+    let j:i32=0;
+    while(j<kl){ if(line[i+j]!=key[j]){ hit=0; } j=j+1; }
+    if(hit==1 && line[i+kl]=='='){
+      let p:i32=i+kl+1;
+      let h:i32=7;
+      while(p<line.len){
+        let c2:i32=line[p];
+        if(c2==' '){ break; }
+        h=(h*31+c2)&0x3fffffff;
+        p=p+1;
+      }
+      return h;
+    }
+    i=i+1;
+  }
+  return -1;
+}
+
+fn numtok(line:[]u8,key:[]u8)i32 {
+  let kl:i32=key.len;
+  let i:i32=0;
+  while(i+kl<line.len){
+    let hit:i32=1;
+    let j:i32=0;
+    while(j<kl){ if(line[i+j]!=key[j]){ hit=0; } j=j+1; }
+    if(hit==1 && line[i+kl]=='='){
+      // multi-digit numbers parse numerically; single tokens use tokval
+      let p:i32=i+kl+1;
+      let v:i32=0;
+      let nd:i32=0;
+      let neg:i32=0;
+      if(p<line.len && line[p]=='-'){ neg=1; p=p+1; }
+      while(p<line.len){
+        let c2:i32=line[p];
+        if(c2>='0' && c2<='9'){ v=v*10+(c2-'0'); nd=nd+1; p=p+1; }
+        else { break; }
+      }
+      if(nd>1){ if(neg==1){ v=0-v; } return v; }
+      if(nd==1){ if(neg==1){ v=0-v; } return v; }
+      if(nd==0 && p<line.len){
+        let tv:i32=tokval(line[p]);
+        if(tv>=0){ return tv; }
+      }
+      return -1;
+    }
+    i=i+1;
+  }
+  return -1;
+}
+
+// ---------- FP row store ----------
+// ROWS[f*MAXR + r] = field f of row r. Field order: exp reg seed arm st cfg sp pr.
+// We store only the five numeric identity fields plus the four hashes as text.
+
+fn RG_EXP()i32 { return 0; }
+fn RG_REG()i32 { return 1; }
+fn RG_SEED()i32 { return 2; }
+fn RG_ARM()i32 { return 3; }
+fn RG_ST()i32 { return 4; }
+fn RG_CFG()i32 { return 5; }
+fn RG_SP()i32 { return 6; }
+fn RG_PR()i32 { return 7; }
+fn RG_N()i32 { return 8; }
+
+
+
+// ---------- spec store ----------
+fn SP_KIND()i32 { return 0; }   // 1 EXPECT 2 DIFF 3 SAME 4 PERM
+fn SP_A()i32 { return 1; }
+fn SP_B()i32 { return 2; }
+fn SP_N()i32 { return 3; }
+// EXPECT arm list: EXP_A[slot] = arm-name hash, EXP_N = count
+fn EXP_N()i32 { return 64; }
+
+fn main()i32 {
+  let ob:[]u8=z_alloc(1<<20);
+  let c:i32=0;
+
+  if(_zag_argc()<3){
+    c=o_app(ob,c,"usage: arm_audit <raw-file> <spec-file>"); c=o_nl(ob,c);
+    _zag_print(ob[0..c]);
+    return 1;
+  }
+  let rawp:[]u8=_zag_arg(1);
+  let spath:[]u8=_zag_arg(2);
+
+  let raw:[]u8="";
+  if(_zag_file_exists(rawp)==1){ raw=_zag_read_file(rawp); }
+  if(raw.len<1){
+    c=o_app(ob,c,"RESULT=FAIL cannot read raw file"); c=o_nl(ob,c);
+    _zag_print(ob[0..c]);
+    return 1;
+  }
+
+  // ---------- parse spec ----------
+  // one directive per line: KEYWORD <a> <b>
+  let SP:[]u8=z_alloc(MAXS()*SP_N()*4);
+  let EXP:[]u8=z_alloc(EXP_N()*4);
+  let nexp:i32=0;
+  let nsp:i32=0;
+  let spec:[]u8="";
+  if(_zag_file_exists(spath)==1){ spec=_zag_read_file(spath); }
+  let specn:i32=spec.len;
+  if(specn>0){
+    let li:i32=0;
+    while(li<specn){
+      let nl:i32=li;
+      while(nl<specn){ if(spec[nl]==10){ break; } nl=nl+1; }
+      let line:[]u8=spec[li..nl];
+      li=nl+1;
+      // token 0 = keyword, token 1 = a, token 2 = b
+      let k0:i32=-1;
+      let kind:i32=-1;
+      if(keq(line,"DIFF",0)==1){ kind=1; }
+      if(keq(line,"SAME",0)==1){ kind=2; }
+      if(keq(line,"PERM",0)==1){ kind=3; }
+      if(keq(line,"ERASED",0)==1){ kind=4; }
+      if(keq(line,"EXPECT",0)==1){ kind=5; }
+      if(kind>0){
+        // find the two argument tokens by position after the keyword
+        let p:i32=0;
+        let word:i32=0;
+        let a1:i32=-1;
+        let b1:i32=-1;
+        while(p<line.len && word<3){
+          while(p<line.len && line[p]==' '){ p=p+1; }
+          if(p>=line.len){ break; }
+          let st:i32=p;
+          while(p<line.len && line[p]!=' '){ p=p+1; }
+          if(word==1){ a1=nametok(line,""); }   // placeholder, replaced below
+          if(word==2){ b1=a1; }
+          word=word+1;
+        }
+        // simpler and correct: take the two tokens textually
+        a1=argtok(line,1);
+        b1=argtok(line,2);
+        if(nsp<MAXS()){
+          set32(SP,nsp*SP_N()*4+SP_KIND()*4,kind);
+          set32(SP,nsp*SP_N()*4+SP_A()*4,a1);
+          set32(SP,nsp*SP_N()*4+SP_B()*4,b1);
+          nsp=nsp+1;
+        }
+        if(kind==5){
+          // variadic: every token after the keyword is an expected arm
+          let wq:i32=0;
+          while(wq<EXP_N()){
+            let hv:i32=argtok(line,wq+1);
+            if(hv<0){ break; }
+            set32(EXP,nexp*4,hv);
+            nexp=nexp+1;
+            wq=wq+1;
+          }
+        }
+      }
+    }
+  }
+  c=o_app(ob,c,"spec directives="); c=o_i64(ob,c,nsp as i64); c=o_nl(ob,c);
+
+  // ---------- parse FP rows ----------
+  let RW:[]u8=z_alloc(MAXR()*RG_N()*4);
+  let nrow:i32=0;
+  let bad7:i32=0;
+  let ri:i32=0;
+  while(ri<=raw.len){
+    let rl:i32=ri;
+    while(rl<raw.len){ if(raw[rl]==10){ break; } rl=rl+1; }
+    let line:[]u8=raw[ri..rl];
+    ri=rl+1;
+    if(line.len>3){
+      if(line[0]=='F' && line[1]=='P' && line[2]==' '){
+        let e:i32=numtok(line,"exp");
+        let rg:i32=numtok(line,"regime");
+        let sd:i32=numtok(line,"seed");
+        let ar:i32=nametok(line,"arm");
+        let st:i32=numtok(line,"state");
+        let cf:i32=numtok(line,"cfg");
+        let sp:i32=numtok(line,"space");
+        let pm:i32=numtok(line,"perm");
+        if(ar<0 || st<0 || cf<0 || sp<0 || pm<0 || rg<0){
+          bad7=bad7+1;
+        } else {
+          if(nrow<MAXR()){
+            set32(RW,nrow*RG_N()*4+RG_EXP()*4,e);
+            set32(RW,nrow*RG_N()*4+RG_REG()*4,rg);
+            set32(RW,nrow*RG_N()*4+RG_SEED()*4,sd);
+            set32(RW,nrow*RG_N()*4+RG_ARM()*4,ar);
+            set32(RW,nrow*RG_N()*4+RG_ST()*4,st);
+            set32(RW,nrow*RG_N()*4+RG_CFG()*4,cf);
+            set32(RW,nrow*RG_N()*4+RG_SP()*4,sp);
+            set32(RW,nrow*RG_N()*4+RG_PR()*4,pm);
+            nrow=nrow+1;
+          }
+        }
+      }
+    }
+    if(ri>raw.len){ break; }
+  }
+
+  c=o_app(ob,c,"FP rows="); c=o_i64(ob,c,nrow as i64); c=o_nl(ob,c);
+  c=o_app(ob,c,"I7 malformed="); c=o_i64(ob,c,bad7 as i64); c=o_nl(ob,c);
+  if(nrow<1){
+    c=o_app(ob,c,"RESULT=FAIL (no FP rows found)"); c=o_nl(ob,c);
+    _zag_print(ob[0..c]);
+    return 1;
+  }
+
+  // ---------- I1: duplicate (exp,regime,seed,arm) ----------
+  let i1:i32=0;
+  let a:i32=0;
+  while(a<nrow){
+    let b:i32=a+1;
+    while(b<nrow){
+      if(get32(RW,a*RG_N()*4+RG_EXP()*4)==get32(RW,b*RG_N()*4+RG_EXP()*4)){
+        if(get32(RW,a*RG_N()*4+RG_REG()*4)==get32(RW,b*RG_N()*4+RG_REG()*4)){
+          if(get32(RW,a*RG_N()*4+RG_SEED()*4)==get32(RW,b*RG_N()*4+RG_SEED()*4)){
+            if(get32(RW,a*RG_N()*4+RG_ARM()*4)==get32(RW,b*RG_N()*4+RG_ARM()*4)){
+              i1=i1+1;
+            }
+          }
+        }
+      }
+      b=b+1;
+    }
+    a=a+1;
+  }
+  c=o_app(ob,c,"I1 duplicate_rows="); c=o_i64(ob,c,i1 as i64); c=o_nl(ob,c);
+
+  // fingerprint identity = the 4 hash fields; used by I3/I4/I5/I6
+  let nviol:i32=0;
+  let i3v:i32=0; let i4v:i32=0; let i5v:i32=0; let i6v:i32=0;
+
+  let d:i32=0;
+  while(d<nsp){
+    let kind:i32=get32(SP,d*SP_N()*4+SP_KIND()*4);
+    let A1:i32=get32(SP,d*SP_N()*4+SP_A()*4);
+    let B1:i32=get32(SP,d*SP_N()*4+SP_B()*4);
+    // scan every row pair for this directive
+    let r1:i32=0;
+    while(r1<nrow){
+      if(get32(RW,r1*RG_N()*4+RG_ARM()*4)==A1){
+        let r2:i32=0;
+        while(r2<nrow){
+          if(get32(RW,r2*RG_N()*4+RG_ARM()*4)==B1){
+            // same cell?
+            if(get32(RW,r1*RG_N()*4+RG_EXP()*4)==get32(RW,r2*RG_N()*4+RG_EXP()*4)){
+              if(get32(RW,r1*RG_N()*4+RG_REG()*4)==get32(RW,r2*RG_N()*4+RG_REG()*4)){
+                if(get32(RW,r1*RG_N()*4+RG_SEED()*4)==get32(RW,r2*RG_N()*4+RG_SEED()*4)){
+                  let same:i32=1;
+                  if(get32(RW,r1*RG_N()*4+RG_ST()*4)!=get32(RW,r2*RG_N()*4+RG_ST()*4)){ same=0; }
+                  if(get32(RW,r1*RG_N()*4+RG_CFG()*4)!=get32(RW,r2*RG_N()*4+RG_CFG()*4)){ same=0; }
+                  if(get32(RW,r1*RG_N()*4+RG_SP()*4)!=get32(RW,r2*RG_N()*4+RG_SP()*4)){ same=0; }
+                  if(get32(RW,r1*RG_N()*4+RG_PR()*4)!=get32(RW,r2*RG_N()*4+RG_PR()*4)){ same=0; }
+                  // kind 1 DIFF -> must differ ; 2 SAME -> must match ;
+                  // 3 PERM -> must differ ; 4 ERASEDSAME -> must match
+                  if(kind==1){
+                    if(same==1){ i4v=i4v+1; }
+                  }
+                  if(kind==2){
+                    if(same==0){ i3v=i3v+1; }
+                  }
+                  if(kind==3){
+                    if(same==1){ i5v=i5v+1; }
+                  }
+                  if(kind==4){
+                    if(same==0){ i6v=i6v+1; }
+                  }
+                }
+              }
+            }
+          }
+          r2=r2+1;
+        }
+      }
+      r1=r1+1;
+    }
+    d=d+1;
+  }
+  // ---------- I2: missing arms ----------
+  // For each cell, every arm seen anywhere must be present in that cell.
+  let i2:i32=0;
+  let rc:i32=0;
+  while(rc<nrow){
+    let rgx:i32=get32(RW,rc*RG_N()*4+RG_REG()*4);
+    let sdx:i32=get32(RW,rc*RG_N()*4+RG_SEED()*4);
+    let epx:i32=get32(RW,rc*RG_N()*4+RG_EXP()*4);
+    // (a) every arm present anywhere in this experiment
+    let q:i32=0;
+    while(q<nrow){
+      if(get32(RW,q*RG_N()*4+RG_EXP()*4)==epx){
+        let wantArm:i32=get32(RW,q*RG_N()*4+RG_ARM()*4);
+        let found:i32=0;
+        let r:i32=0;
+        while(r<nrow){
+          if(get32(RW,r*RG_N()*4+RG_EXP()*4)==epx){
+            if(get32(RW,r*RG_N()*4+RG_REG()*4)==rgx){
+              if(get32(RW,r*RG_N()*4+RG_SEED()*4)==sdx){
+                if(get32(RW,r*RG_N()*4+RG_ARM()*4)==wantArm){ found=1; }
+              }
+            }
+          }
+          r=r+1;
+        }
+        if(found==0){ i2=i2+1; }
+      }
+      q=q+1;
+    }
+    // (b) every arm named by an EXPECT directive
+    if(nexp>0){
+      let x:i32=0;
+      while(x<nexp){
+        let wantArm2:i32=get32(EXP,x*4);
+        let fnd:i32=0;
+        let r2:i32=0;
+        while(r2<nrow){
+          if(get32(RW,r2*RG_N()*4+RG_EXP()*4)==epx){
+            if(get32(RW,r2*RG_N()*4+RG_REG()*4)==rgx){
+              if(get32(RW,r2*RG_N()*4+RG_SEED()*4)==sdx){
+                if(get32(RW,r2*RG_N()*4+RG_ARM()*4)==wantArm2){ fnd=1; }
+              }
+            }
+          }
+          r2=r2+1;
+        }
+        if(fnd==0){ i2=i2+1; }
+        x=x+1;
+      }
+    }
+    rc=rc+1;
+  }
+  c=o_app(ob,c,"I2 missing_arms="); c=o_i64(ob,c,i2 as i64); c=o_nl(ob,c);
+
+  c=o_app(ob,c,"I3 same_declared_differ="); c=o_i64(ob,c,i3v as i64); c=o_nl(ob,c);
+  c=o_app(ob,c,"I4 diff_declared_same="); c=o_i64(ob,c,i4v as i64); c=o_nl(ob,c);
+  c=o_app(ob,c,"I5 perm_eq_source="); c=o_i64(ob,c,i5v as i64); c=o_nl(ob,c);
+  c=o_app(ob,c,"I6 erased_ne_fresh="); c=o_i64(ob,c,i6v as i64); c=o_nl(ob,c);
+
+  nviol=i1+i2+i3v+i4v+i5v+i6v+bad7;
+  if(nviol==0){
+    c=o_app(ob,c,"RESULT=PASS all arm-execution invariants hold"); c=o_nl(ob,c);
+    _zag_print(ob[0..c]);
+    return 0;
+  }
+  c=o_app(ob,c,"RESULT=FAIL violations="); c=o_i64(ob,c,nviol as i64); c=o_nl(ob,c);
+  _zag_print(ob[0..c]);
+  return 1;
+}
