@@ -22,7 +22,8 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P5-meta4` | **successor to p5meta3.** Make fact-replay USELESS: measure acquisition on queries never observed, so a cache cannot win. Only a real mapping predicts unseen queries | MACH ablation must now cost trials once facts cannot be replayed; if not, delete MACH permanently | RUNNING |
+| `P5-meta5a` | **structural substrate.** Blocker found: the associative substrate CANNOT represent a mapping, so learning-to-learn was unaskable. Build candidates that ARE programs with learnable coefficients | a learned program must beat fresh at generalising to never-seen queries | RUNNING |
+| `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
 | `P7-inquiry` | learned inquiry vs strong baselines (fixed/greedy-info/uncertainty/random/oracle) | inquiry must beat greedy-info because evidence changes beliefs | QUEUED |
 | `phase10-context` | generic rewrite applicability from **learner-owned** context, NOT `if pos==p` | position-blind rewrites were destructive; successor must acquire context itself | QUEUED |
@@ -73,6 +74,7 @@ BLOCKED items do **not** gate anything above.
 | `proposal-ranking` | scaling N to defeat counting (phase16/17) | anything about state changing *generation* | target either observable (→search) or hidden (→no signal) |
 | `fact-cache-metalearn` | p5meta3: "learning-to-learn" as acquisition speedup with a retained-fact lookup available | learning-to-learn where facts CANNOT be retained | retention dominates when learning speed is measured on queries already stored |
 | `generic-machine-scaffold` | first-observation machine bootstrap in `observe` | seeded machines that are not content-independent | any prior at all scaffolds a partial fit, so irrelevant prior "helped" 40% |
+| `assoc-substrate-metalearn` | p5meta4: asking learning-to-learn of a lookup+scaffold substrate | meta-learning on any substrate that can REPRESENT a mapping | acquisition was measured on queries the fact store could answer; on never-seen queries the prior went 3.00 -> 60.00 (never) |
 | `router-selection` | `count16` SIG_B bucket router | query-conditional mechanisms generally | feature WAS the answer; researcher-authored router |
 | `stochastic-outcome-additive` | additive support over chain elements | non-additive support | self-composition `(s,s)` scores `2s` |
 
@@ -110,6 +112,7 @@ BLOCKED items do **not** gate anything above.
 | `no-position-context` | rewrites need context; handcoding `if pos==p` is forbidden | phase10-context |
 | `mode-risk` | P1–P5 selected by arm index = mildest form of the forbidden mode pattern | phase10 |
 | `arm-identity` | arm↔state mismatches are systemic, not isolated | trust in every result |
+| `assoc-no-mapping` | the meta substrate has no representation of a rule independent of stored facts | any substrate with programs/structure | lookup+scaffold cannot express "learned rule"; `MACH` deletable with no loss |
 
 ---
 
