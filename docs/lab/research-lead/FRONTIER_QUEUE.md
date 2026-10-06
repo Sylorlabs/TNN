@@ -20,10 +20,20 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 ## CURRENT
 
+> **NOTE ON P5-meta**: CLOSED as *not established in this substrate*, not
+> refuted. Nine defects, all one shape -- the intended intervention never
+> reached the mechanism under test. Two permanent instruments were built
+> because of it (`arm_audit.py`, `noop_change_detector.py`), and both
+> earned their place within one phase. Reopening requires the
+> `substrate-spec` preconditions, not another experiment on this
+> substrate.
+
+
 | id | item | falsifier | status |
 |---|---|---|---|
 | `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | RUNNING |
-| `P5-meta5g` | **NON-POPULATION CARRIER — LAST OPTION ON THIS LINE.** 5d/5e/5f show the population is the prior's only channel and it is overwritten (harmful), ignored (neutral), or saturated (all horizons). Give the prior accumulated state that biases SAMPLING and cannot be overwritten. If this also shows no effect, close P5-meta with that finding rather than continuing | prior must reduce acquisition cost through a channel acquisition cannot overwrite | RUNNING |
+| `P6-formal` | **PROMOTED (was queued).** Resolve `ZD2-PASS-DEGENERATE-POLICY`. Does learned formal structure constrain generation, reject invalid unseen structures, and support valid unseen generation? Survive symbol renaming; fail under structure ablation | learned grammar must reject invalid AND accept valid unseen structures | RUNNING |
+| `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta | — | QUEUED |
 | `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
@@ -75,6 +85,7 @@ BLOCKED items do **not** gate anything above.
 | `bigram-revision` | bigram state recovering after invalidation | state with an active rebuild/replenishment path | decrements with no replenishment (reinforcement only on success) |
 | `proposal-ranking` | scaling N to defeat counting (phase16/17) | anything about state changing *generation* | target either observable (→search) or hidden (→no signal) |
 | `fact-cache-metalearn` | p5meta3: "learning-to-learn" as acquisition speedup with a retained-fact lookup available | learning-to-learn where facts CANNOT be retained | retention dominates when learning speed is measured on queries already stored |
+| `all-prior-carriers` | **P5-meta CLOSED as NOT-ESTABLISHED.** fact store, population, retained population, and non-population weight table all failed to reduce acquisition cost; 37x horizon range neutral; population-borne prior actively harmful. Void where the harness could not reach provably-existing solutions | meta-learning in a substrate meeting the `substrate-spec` preconditions | prior experience never reached the mechanism: 9 defects on this line, all the same shape |
 | `generic-machine-scaffold` | first-observation machine bootstrap in `observe` | seeded machines that are not content-independent | any prior at all scaffolds a partial fit, so irrelevant prior "helped" 40% |
 | `assoc-substrate-metalearn` | p5meta4: asking learning-to-learn of a lookup+scaffold substrate | meta-learning on any substrate that can REPRESENT a mapping | acquisition was measured on queries the fact store could answer; on never-seen queries the prior went 3.00 -> 60.00 (never) |
 | `router-selection` | `count16` SIG_B bucket router | query-conditional mechanisms generally | feature WAS the answer; researcher-authored router |
