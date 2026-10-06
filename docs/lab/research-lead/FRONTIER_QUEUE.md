@@ -31,9 +31,9 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | RUNNING |
-| `P6-formal` | **PROMOTED (was queued).** Resolve `ZD2-PASS-DEGENERATE-POLICY`. Does learned formal structure constrain generation, reject invalid unseen structures, and support valid unseen generation? Survive symbol renaming; fail under structure ablation | learned grammar must reject invalid AND accept valid unseen structures | RUNNING |
-| `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta | — | QUEUED |
+| `P6-struct` | **PROMOTED (was queued).** Structural induction in the production representation class, so forward generation and backward membership read ONE table. Substrate precondition passed in pure Zag: `A0->A1 4 \| A1->3 3 \| A2->A0 5` serves both directions (forward lens 3/2/4; exactly 3 of 340 strings derivable), checked against hand-derived arithmetic. Precondition establishes the representation CAN express a solution; whether an inducer can FIND one is the experiment | induced grammar must serve both directions from one table, and must survive symbol renaming; must NOT be reachable by the degenerate always-consult-everything policy (`ZD2-PASS-DEGENERATE-POLICY`) | RUNNING |
+| `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | QUEUED |
+| `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta. **Condition (a) now has a working, pure-Zag implementation** (`p6struct/precond.zag`); condition (b) still unmet | — | PARTIAL |
 | `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
@@ -41,8 +41,17 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 | `phase10-context` | generic rewrite applicability from **learner-owned** context, NOT `if pos==p` | position-blind rewrites were destructive; successor must acquire context itself | QUEUED |
 
 **Standing hazard for every CURRENT item:** an arm that does not execute the
-state its label claims. Happened 4+ times. `tools/lab/arm_audit.py` exists to
+state its label claims. Happened 4+ times. `tools/lab/arm_audit.zag` exists to
 catch it; generators MUST emit `FP` fingerprint rows.
+
+**Standing rule on evidence (adopted after four instrument failures):** a verdict is
+not admissible until it has been reproduced against something INDEPENDENT of the code
+that produced it — a hand derivation, a self-comparison, or an analytic ceiling. Four
+instruments in this lane shipped with bugs that made them pass on mis-indexed data
+(`score17`, `noop_detect`, `arm_audit`, `p6struct/precond`). All four were caught only by
+such an external check. **An instrument validated only against itself is worse than no
+instrument, because it manufactures confidence.** Corollary: never run a binary whose
+compile failed; a stale build once had me analysing a program that did not exist.
 
 ---
 
