@@ -22,7 +22,7 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P5-meta5a` | **structural substrate.** Blocker found: the associative substrate CANNOT represent a mapping, so learning-to-learn was unaskable. Build candidates that ARE programs with learnable coefficients | a learned program must beat fresh at generalising to never-seen queries | RUNNING |
+| `P5-meta5a-fix` | **HARNESS REPAIR, not a new experiment.** p5meta5a was VOID: solutions provably exist and generalise to unseen probes (5/5, 5/5, 6/6), but the clone-only loop has NO mutation operator so it cannot find them. Add one generic point-mutation op, re-run otherwise unchanged | solutions must become findable; then the arm comparison becomes meaningful | RUNNING |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
 | `P7-inquiry` | learned inquiry vs strong baselines (fixed/greedy-info/uncertainty/random/oracle) | inquiry must beat greedy-info because evidence changes beliefs | QUEUED |
@@ -113,6 +113,7 @@ BLOCKED items do **not** gate anything above.
 | `mode-risk` | P1–P5 selected by arm index = mildest form of the forbidden mode pattern | phase10 |
 | `arm-identity` | arm↔state mismatches are systemic, not isolated | trust in every result |
 | `assoc-no-mapping` | the meta substrate has no representation of a rule independent of stored facts | any substrate with programs/structure | lookup+scaffold cannot express "learned rule"; `MACH` deletable with no loss |
+| `clone-only-harness` | an evolutionary loop with cloning but no mutation operator | search procedures with any variation operator | fitness-improving search is impossible when the population can only converge to its current leader; distinct population collapsed 24 -> 4 |
 
 ---
 
