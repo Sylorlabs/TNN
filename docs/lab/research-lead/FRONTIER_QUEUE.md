@@ -23,7 +23,7 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 | id | item | falsifier | status |
 |---|---|---|---|
 | `P5-meta5d` | **DYNAMICS REPAIR.** Clone-dominant selection erases the prior within one trial, so no learning-to-learn question is falsifiable on this harness. Clone into a MINORITY of slots (4 of 24) so independent lineages persist | relevant prior must survive to be able to help; then beat fresh under partial observation | RUNNING |
-| `noop-detector-rollout` | apply `tools/lab/noop_change_detector.py` to every prior experiment's raw tables to find earlier undetected no-op edits | flags any substantive edit with identical output | QUEUED |
+| `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
 | `P7-inquiry` | learned inquiry vs strong baselines (fixed/greedy-info/uncertainty/random/oracle) | inquiry must beat greedy-info because evidence changes beliefs | QUEUED |
