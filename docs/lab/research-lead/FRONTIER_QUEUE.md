@@ -136,7 +136,7 @@ BLOCKED items do **not** gate anything above.
 | `arm-identity` | arm↔state mismatches are systemic, not isolated | trust in every result |
 | `arm-divergence-check` | 4 of 5 p5meta5a defects were visible ONLY by comparing arms that should differ | (now permanent infra) |
 | `intervention-persistence` | RESOLVED in 5d (clone minority restores it) | — |
-| `no-op-detector-coverage` | detector reports INCOMPARABLE on 5 legacy table formats (bounded_pin, count16, lifetime15, noisy, selforg9) — formats it cannot parse are formats it cannot protect | QUEUED: extend parser |
+| `no-op-detector-coverage` | **CLOSED.** the Zag detector handles FP/T/R rows; the 5 legacy formats were variants it never parsed. All 5 transitions verified and pinned in `tools/lab/fixtures/noop_fixtures.txt`. | — |
 | `age-never-read` | AGE buffer incremented and never read in the 5a-5e line — "retain the fittest" was decorative | — | fixed in 5e |
 | `prior-mutation-dominates` | prior phase applied 75 mutations before acquisition started (vs 6 per acquisition trial), swamping any inheritance rule | priors that do not mutate | fixed in 5e; caught by no-op detector |
 | `assoc-no-mapping` | the meta substrate has no representation of a rule independent of stored facts | any substrate with programs/structure | lookup+scaffold cannot express "learned rule"; `MACH` deletable with no loss |
@@ -147,6 +147,58 @@ BLOCKED items do **not** gate anything above.
 | `acq-insensitivity` | p5meta5e: acquisition ignores its starting population entirely over 300 trials | superseded by 5f (horizon also ruled out) | replacing the prior hurts, preserving it does nothing -- both mean the initial condition is irrelevant |
 | `horizon-explanation` | p5meta5f: the inertness is not a search-horizon artifact (neutral at 8..300, a 37x range) | carriers other than population | measurement is SATURATED at both ends: long horizon washes out the start, short horizon makes the task too easy to distinguish starts |
 | `noop-first-run-coverage` | no-op detector catches no-op EDITS, not wrong FIRST runs -- the 5f horizon bug masked the short end undetected because there was no prior table | pre-run assertion that sweep parameters reach the output | fallback used TRIALS() instead of the swept horizon; horizons 8 and 15 reported 300 |
+
+### REPO HYGIENE — 332 committed binaries (FLAGGED, deliberately not fixed)
+
+`git ls-files` shows 332 tracked files with **no extension** (`*_bin`, `bp_bin`, `c5_bin`,
+...). Mach-O build artifacts committed alongside their `.zag` sources, an established
+convention on this lane that predates the current work.
+
+**Why it matters:** a committed binary cannot be rebuilt on another platform and silently
+shadows the source beside it. That is not hypothetical — a failed compile followed by
+running the stale binary had me analysing a program that did not exist
+(`p6struct/REPORT.md` §7). Any verdict produced from a committed binary is not
+reproducible from the tree alone.
+
+**Why unfixed:** removing 332 files is a large mechanical change to committed history
+nobody requested, and some may be load-bearing frozen executables for older reports. The
+4 binaries this lane's recent work introduced are now untracked and `.gitignore`d.
+
+**Decide explicitly:** purge-and-rebuild-all, or adopt a documented "frozen binary" rule
+with a `FROZEN.md` per phase. Do not leave it undecided.
+
+### TOOLCHAIN — resolved 2026-10-05: lane is pure-Zag
+
+This lane ran 13 Python files whose verdicts gated ~1,260 raw tables, invoked via
+`/usr/bin/python3` specifically to bypass the PURE-ZAG guard. Charter section 4 violation;
+every established lane on this repo has zero python with a NAMECHECK asserting it.
+
+**Now zero.** All 13 ported to Zag and validated against real data:
+
+| tool | validates |
+|---|---|
+| `tools/lab/arm_audit.zag` | I1–I7 arm-execution invariants; clean PASS, 6/6 defect fixtures FAIL |
+| `tools/lab/noop_detect.zag` | 5 transitions incl. self-test; caught 2 real bugs in its own port |
+| `tools/lab/namecheck.zag` | mechanical charter-4 audit; `RESULT=PASS -- lane is pure-Zag` |
+| `phase1/audit_struct.zag` | 0 levers across **574** structural writers (was 137 under a narrower grammar) |
+| `phase6/score67.zag` | every phase6/7 bar incl. permutation closure |
+| `phase4/score4.zag` | every phase4/5 bar incl. the disqualifying Condition 3 |
+| `count17/score17.zag` | all count17 verdicts over 42,120 rows |
+| `count17/dilemma17.zag` | 780/1170/1560/1950 pairs, zero ambiguous |
+| `count17/rootcause17.zag` | arm metric identically zero at every N |
+| `p5meta3/score53.zag`, `p5meta4/score54.zag` | all five P5-meta bars, both phases |
+| `p6struct/precond.zag` | substrate precondition, checked against hand-derived arithmetic |
+
+**Four instruments shipped with bugs that made them PASS on wrong data** — `score17`
+(block indexing + a 20k row cap on a 42k table), `noop_detect` (key omitted `budget`;
+episode rows carry no `rg`/`arm`), `arm_audit`, and `p6struct/precond` (six bugs, plus
+one stale-binary run). All were caught only by a check that does **not** consult the
+implementation's own output. Hence the standing evidence rule in CURRENT.
+
+**Independence is unchanged and not improved by any of this.** Same author wrote the
+experiments, wrote the ports and wrote the checks. The ports make every verdict
+*re-derivable in pure Zag*; they do not make it *independently confirmed*.
+`external-red-team` stays BLOCKED.
 
 ---
 
