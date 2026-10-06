@@ -79,13 +79,47 @@ statistics capture *what followed what* in the prior world. They do not
 capture a structural relationship that would let the learner generate a
 *different* world's structures.
 
-## PHASE 7 -- REVISION NOT TESTED
+## PHASE 7 -- REVISION: RECOVERY FAILS
 
-Not tested. Revision requires the world to change so a previously useful
-bias becomes wrong, then measuring recovery. The mechanism is implemented
-(generic consequence: emitted pairs on a failed attempt are decremented,
-no `RESET` function) but the run reports per-arm costs without a
-before/after world change, so no revision verdict is possible.
+Tested. The world flips from regime 0 to regime 1 at episode 20. Cost to
+generate the current world's target, per episode:
+
+```
+ep 0..19  world=0   hit=8,8,3,3,10,8,1,8,5,5,1,1,3,8,8,2,16,5,7,6   (all found)
+ep 20..39 world=1   hit=-1 x20                                          (NONE found)
+```
+
+So two of the four required steps hold and two fail:
+
+| requirement | result |
+|---|---|
+| old generative behaviour fails after the change | **HOLDS** -- 20/20 episodes at -1 |
+| consequences expose the failure | **HOLDS** -- the per-episode decrement fires every episode |
+| learner structural state changes | **HOLDS** -- targeted decrements applied, no RESET |
+| **recovery** | **FAILS** -- 0 of 20 post-flip episodes ever succeed |
+
+**Verdict: no recovery.** The learner detects the change, and the state
+does change, but it cannot rebuild a generative bias for the new world.
+This is consistent with Phase 6's transfer failure: the same mechanism
+that cannot reach a *related unseen* target here also cannot rebuild one
+after its prior is invalidated.
+
+The state is also monotonically decaying -- decrements with no
+replenishment path, since reinforcement only fires on success, which never
+happens. So it is a one-way ratchet, not a revising belief.
+
+### Two defects on the way to this verdict
+
+**Per-proposal consequences annihilated the state.** The first version
+applied a -1 penalty on every failed proposal. With 400 proposals per
+episode against ~25 accumulated counts, the state was destroyed within a
+single episode and *every* arm scored 0 -- including world 0, where the
+same state reaches cost 8 in the main sweep. Fixed by applying one
+consequence per episode, from the final proposal only, penalising just the
+first wrong pair.
+
+**Zag has no bare `{ }` block.** The first fix used one; `znc` rejected it
+with `unexpected token at top level`. Converted to plain statements.
 
 ## DEFECTS FOUND AND FIXED
 
