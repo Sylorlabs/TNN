@@ -10,6 +10,22 @@ Working branch: fast/method-identifiability. Not merged into ownership.
 TNN aims toward one persistent adaptive substrate, not a manager of permanently
 specialized cognitive modules. Generic machine primitives are permitted.
 
+**User goal clarification (2026-10-06): prediction is a tool, not TNN's core.**
+The aspirational target is the breadth of human intelligent competence: acquiring
+knowledge and practical know-how, language use, reasoning, invention, choosing and
+carrying out actions, and adapting how it learns/thinks without task-specific human
+rescue. This does not assert present human-level ability or require literal biological
+brain equivalence. Predictions, answers, and benchmark scores are evidence probes,
+not substitutes for that goal. A known fact, fluent practiced skill, uncertain guess,
+and newly constructed method are distinct functional cases; terminology alone does
+not establish which mechanism supplies them.
+
+Useful operational names: **procedural knowledge / knowing-how** for acquired skill;
+**declarative knowledge / knowing-that** for facts; **self-directed adaptation** for
+experience-driven changes to learning/action policy. Uncertainty-aware inference
+remains useful, but competence must also be tested through consequential action,
+communication, transfer, revision, and self-chosen information acquisition.
+
 - G1 Experience-owned competence: new task competence comes from experience,
   not a task-specific source edit, router, named mode, or supplied final method.
 - G2 Method ownership: persistent learned structure causes behavior on inputs
@@ -145,7 +161,29 @@ If a test fails, stop the associated claim, not the whole architecture. A repair
 implementation needs a new prereg or clearly declared repair protocol and full
 rerun. Unexpected findings do not license silently changing bars. Preserve failures.
 
-## 6. Doc-reading and handoff rules
+## 6. General competence probes beyond answer prediction
+
+- **Act rather than guess:** acquire and execute methods on uncached world states;
+  record real intermediate/final effects, not only predicted outcomes. Separate
+  evaluator knowledge of desired effects from learner access to sealed answers.
+- **Communicate rather than complete text:** learn a small compositional signaling
+  protocol from interactions; a listener must accomplish unseen referent goals.
+  Rename symbols, swap speakers/listeners, withhold novel combinations, measure
+  pragmatic success versus phrase lookup. A synthetic language is not human fluency.
+- **Reason rather than repeat:** reuse acquired relations to derive unseen consequences,
+  with underdetermination/abstention controls. Test counterexamples and method erasure.
+- **Think for itself rather than follow source curriculum:** learner chooses which
+  observation/action to take under budget; compare strong information/cost heuristics.
+  Researcher-authored exploration algorithms are generic bias, not earned meta-policy.
+- **Know when to revise:** preserve useful practice but challenge it under contradictory
+  effects; neither reflexive guessing nor immutable lookup meets the full goal.
+- **Human breadth is an aspiration:** passing one toy action/language fixture does not
+  imply human-like cognition, consciousness, or biological brain equivalence.
+
+These complement T05..T20, not permanent specialist modules. They require concrete
+preregistrations and qualified worlds before execution.
+
+## 7. Doc-reading and handoff rules
 
 - Historical REPORT/PREREG files remain unchanged. Corrections to their current
   interpretation live in CURRENT_EVIDENCE_NOTES.md, linked from FRONTIER_QUEUE.

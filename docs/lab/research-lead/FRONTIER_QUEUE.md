@@ -4,7 +4,10 @@ Autonomous control loop. **This file, not the conversation, is the state.**
 
 **Fast adversarial addendum (2026-10-06, isolated branch; not a completed main-lane
 repair):** see [current interpretation corrections](CURRENT_EVIDENCE_NOTES.md)
-and [goals and hypothesis/test plan](RESEARCH_GOALS_AND_TESTS.md). Historical
+and [goals and hypothesis/test plan](RESEARCH_GOALS_AND_TESTS.md).
+[Fast-loop checkpoint](FAST_RESEARCH_LOOP.md) now includes isolated qualified
+scorer/control forks, action/protocol probes, and a direct frozen TNN-2 reference
+information-flow audit. These are not promoted to latest production capability. Historical
 reports and frozen preregs are preserved. P6's original fixture reproduces, but
 its matcher fails rule-order invariance on overlapping alternatives; general
 induction verdicts require scorer qualification first.

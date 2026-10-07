@@ -67,6 +67,24 @@ positive scenarios also reproduced byte-for-byte after an output-only host shim.
 These findings are narrow; no actual TNN safety violation or broad impossibility
 of contract learning is established.
 
+## Subsequent executed fast-loop evidence
+
+See [FAST_RESEARCH_LOOP.md](FAST_RESEARCH_LOOP.md). The endpoint-set scorer fork
+matches independent oracles over8160 bounded queries, but is not a production repair.
+Known-reject growth and isolated-history forks are generic engineering controls,
+not learner-created policy; the growth guard fails on an unseen forbidden intermediate.
+Method, action and protocol positives tie simpler same-information rivals. They are
+microlearners, not capabilities measured on current TNN.
+
+The unchanged frozen TNN-2 reference was also executed directly:
+[core information-flow audit](overnight-20260928/fast_core_20261006/REPORT.md).
+Identical observations return31 or32 depending on expected input. The source comment
+post-hoc-only must be read as supervised trial feedback, not post-return-only feedback.
+With no expected answer the unmasked query abstains; masked mode accepts first route.
+The query relation is deliberately underdetermined, so this is an information-flow
+result, not a failure to infer knowable semantics. Latest production equivalence is
+unestablished. Historical source/report comments remain intact; this is a dated correction.
+
 ## General evidence ceiling
 
 Latest queue still lists measure-tnn and human external-red-team as blocked. Harness
