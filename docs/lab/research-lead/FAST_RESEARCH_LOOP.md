@@ -33,16 +33,21 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
    curriculum, generic frame-bound proposal and actual executable method indexing.
    Compare facts-retained/method-erased and flat statistic at equal information.
    Do not expect an unidentifiable query label to magically acquire semantics.
-2. **Outside-convention trap:** heldout third-token condition changes order beyond
+2. **Rejected-trial lifecycle:** PERSISTENCE_REPORT.md shows four direct misses
+   retain80 instruction+88902 nodes, noMAP. Query wrapper also adds inquiryFACTs.
+   Next compare generic allocation rollback under equal memory budget, preserving
+   licensing facts/establishedmethods/edge integrity; measure subsequent acquisition.
+   No unbounded leak/causal use claim from counts alone.
+3. **Outside-convention trap:** heldout third-token condition changes order beyond
    {LTR,RTL}. Preregister expected inability, candidate representability and abstention;
    don't patch source and call it experience-only. Then decide generic form expansion.
-3. **Self-directed information:** choose interaction which separates live hypotheses
+4. **Self-directed information:** choose interaction which separates live hypotheses
    with cost. Strong greedy-info and random controls mandatory; selection improvement
    cannot come from hidden target labels. Same persistent state across new laws.
-4. **Actual-effect guard adversary:** concurrent revocation, aliases of alias, replay
+5. **Actual-effect guard adversary:** concurrent revocation, aliases of alias, replay
    through separate executor path, partial commit versus atomic rollback. Qualified
    path inventory first. Hard authority generic, learned applicability separate.
-5. **Integrated persistence:** only after direct core ownership survives, A->B->changedA
+6. **Integrated persistence:** only after direct core ownership survives, A->B->changedA
    under memory pressure; no task reset/router. Revision history must be local or
    explicitly globally coordinated, not accidental shared counters.
 
