@@ -1,6 +1,6 @@
 # Fast research loop - durable checkpoint
 
-Date2026-10-06. Worktree .worktrees/fast-method-identifiability.
+Date2026-10-07. Worktree .worktrees/fast-method-identifiability.
 Branch fast/method-identifiability. Ownership source snapshot91b2acc29.
 This file is a continuation state, NOT a claim a background AI worker is running.
 
@@ -35,9 +35,13 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
    Do not expect an unidentifiable query label to magically acquire semantics.
 2. **Rejected-trial lifecycle:** PERSISTENCE_REPORT.md shows four direct misses
    retain80 instruction+88902 nodes, noMAP. Query wrapper also adds inquiryFACTs.
-   Next compare generic allocation rollback under equal memory budget, preserving
-   licensing facts/establishedmethods/edge integrity; measure subsequent acquisition.
-   No unbounded leak/causal use claim from counts alone.
+   ROLLBACK_REPORT.md EXECUTED: full-workspace generic transactions, equal persistent
+   commit budgets48/64/80/96, two renames. Under four misses retention acquisition6/8,
+   rollback8/8; advantage only80, ties48/64/96. Prior executable/cache intact in32
+   conditions, no dangling edges;32 rollback misses byte-identical. Scratch exceeds
+   commit budget, so no peak-memory or timing claim. Next attack successful-search
+   debris with preregistered generic root/reference classification and revision tests.
+   No unbounded leak/production equivalence claim.
 3. **Outside-convention trap:** heldout third-token condition changes order beyond
    {LTR,RTL}. Preregister expected inability, candidate representability and abstention;
    don't patch source and call it experience-only. Then decide generic form expansion.
