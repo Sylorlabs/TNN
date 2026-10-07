@@ -68,6 +68,17 @@ N2 and causal constructor leverage only in bounded prototype; NOT experience-own
 search/organization policy, core integration, nested-space necessity or L3 invention.
 Next test must confront those gaps, not advertise macro reuse as the full goal.
 
+## Conflict / ambiguity round (2026-10-07)
+
+CONFLICT_REPORT.md: attractive wrong token never promoted (correctness preserved),
+library pollution taxes acquisition linearly (tests=2K+5) and effects superlinearly,
+and all-fit enumeration detects genuine underdetermination and abstains (6 distinct
+behaviors at one observation) then answers uniquely8/8 once evidence disambiguates.
+Cost of honesty: full enumeration126 candidates vs5 first-fit. These are bounded
+generic mechanisms, not learned applicability. Next: consequence-sensitive proposal
+ordering and retention to cut pollution cost at equal coverage, measured against
+ranked flat library under equal total work.
+
 Acceptance for this wave: prereg-only commit before driver, pure-Zag science, fresh
 compile-gated repeat3, raw outputs and hashes, facts/reference integrity diagnostics,
 clear negative/tie reporting and frozen source unchanged. Local private worktree only;

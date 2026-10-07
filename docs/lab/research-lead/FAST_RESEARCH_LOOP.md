@@ -38,9 +38,13 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
    Revised8/8, stale0, unrelatedD8/8; two encodings. Irrelevant prior hurts742tests;
    prereg 'misleading' prior actually useful110tests, genuine conflict untested.
    Affine rival ties accuracy; source enumeration/form grammar still researcher-owned.
-   Next consequence-sensitive proposal organization with matched flat cost/frequency
-   controls, true conflicting prior, nonaffine laws and self-chosen applicability.
-   No researcher folder modes; no L3 or autonomous organization claim.
+   CONFLICT_REPORT.md then EXECUTED: wrong short token rejected (8/8, tests5->7, flat
+   ties), pollution linear tests=2K+5 and effects superlinear to1164 at K=32, and
+   all-fit enumeration abstains on1-point underdetermination (6 distinct) then answers
+   8/8 with2+ points. Honesty costs126 vs5 candidates (~25x). Next consequence-
+   sensitive proposal ordering/retention to cut pollution at equal coverage, versus
+   ranked flat library at equal total work; then nonaffine laws and self-chosen
+   applicability. No researcher folder modes; no L3 or autonomous organization claim.
 1. **Frozen core identifiable acquisition and executable readout:** ownership and
    reachability controls EXECUTED (OWNERSHIP_REPORT.md, REACHABILITY_REPORT.md).
    ISA transfers handbuilt INC methods; learned chain is literal, and API misses new

@@ -67,3 +67,21 @@ workspace" target.
 
 No TNN/LLM comparison is established here; the pasted GitHub scaling figures were
 not freshly replicated in this wave.
+
+## Conflict round outcome (CONFLICT_REPORT.md, 2026-10-07)
+
+1. **True negative transfer is safe but taxed.** Wrong short token [add1,double]=
+   2x+2 is enumerated then rejected; target 2x+1 still 8/8; candidate tests5->7.
+   Flat execution ties7, so no nesting claim. The wrong token is never promoted.
+2. **Pollution cost is predictable.** Candidate tests =2K+5 (linear in number of
+   distractor composites); primitive effects grow superlinearly12->1164 at K=32.
+   Correctness never lost. A polluted library taxes every later acquisition.
+3. **The constructor can know when it does not know.** One training point yields6
+   distinct fitting behaviors; it abstains. Two or more points yield a unique fit,
+   8/8 heldout. Distinguishing witness resolves the ambiguity.
+4. **Honesty is expensive here.** Full enumeration for ambiguity detection is126
+   candidates vs5 for first-fit, about25x. A cheaper uncertainty estimate is an
+   untested hypothesis, not a free improvement.
+
+Still researcher-owned: enumeration order, composition grammar, verifier, probe set.
+No self-chosen applicability or learned proposal policy yet.
