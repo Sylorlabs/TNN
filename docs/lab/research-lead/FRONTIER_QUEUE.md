@@ -35,6 +35,8 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 | `method` | BASE 8/8, SUBTRACT 0/8 test, FACTS 0/8 test, ANSWERS_DISJOINT=1. LEARN VOID (no fake learner). Researcher owns finder/method. L0 | LEARN must beat FACTS on held-out and die under ablation | VOID LEARN — world clean |
 | `causal2` | chain vs fork observationally identical; only do(B) splits. Oracle 80 > informed 72 > random 42 > obs 40. Learner slot empty. No CAUSAL_MODE | observational-only must not solve it; learner must beat random intervention | VOID learner-causal-ownership — world clean |
 | `lifetime` | persist = fresh on D (0/4, cost 4). Store grew 4->8 and JOIN_D=4 (parts existed) but lookup never used them. All three kills fired. AGE does not improve future learning | persist must beat fresh on D; A-shifted must not be pure interference | KILLED — persistence without retrieval is not lifetime learning |
+| `lifejoin` | persist+join 4/4 cost 0 vs persist-no-join/fresh/facts-only 0/4 cost 4. Researcher wrote ST[x-8]+ST[x-4] | persist+join must beat fresh and facts-only on held-out D; join must not leak D answers | KILLED as lifetime learning. Lookup is live (wrong-join/shuffle/empty-A/B all 0/4) but formula+train derives every D answer 4/4. Scoring the join against D is scoring a definition against itself. Ceiling L1 |
+| `repown` | SEQ-REP wins SEQ 8/8 loses PAIR; PAIR-REP wins PAIR loses SEQ; AGREE=7 BOTH_WIN=0. No REPRESENTATION_MODE. Dual-win body would be a source switch (a kill), so LEARNER_EMPTY | a hidden if-task-class-then-rep is not ownership; both fixed reps solving both families means the world is too easy | VOID LEARN — researcher owns representation |
 | `prov` | recency 14, oracle 16, ignore=fixed=8. Flip detected. Copies != two sources. Deletion removes the gain. Learner slot empty | ignore-source must not match the best arm; flip must be detected | VOID-LEARNER-PROVENANCE — world clean, researcher owns trust |
 | `P6-struct` | 3-string fixture too small: n_test=1 and held-out was a prefix-extension. Inducer recovered A0->[3 3] A1->[A0 4] not truth. Precondition still holds as L1 representational viability (and enum-audit: numeric bars satisfied by ~256 grammars) | — | SUPERSEDED by P6-rich |
 | `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | QUEUED |
@@ -130,7 +132,7 @@ BLOCKED items do **not** gate anything above.
 
 | id | why |
 |---|---|
-| `gen-bias-L2` | single author; 3 defects found in own code during the phase |
+| `gen-bias-L2` | **REPRODUCED from committed source** (lane/g67rep bb4f270f4): A=8 vs B never, C never, no transfer, revision 0/20, iso H=6, broken-perm fires, generator byte-identical. REPORT cycle text says x+3; code is 3x mod 10 -- does not kill | still single author; next: facts-only reconstruction and alphabet-extension |
 | `phase10-perm` | 8× ratio vs 1.5× tolerance — **not** a clean pass (draw hash not permuted) |
 | `internal-adversary` | blind scorer / mutation adversary / cold-checkout reproduction — **not yet run** on phase 6 or 10 |
 
