@@ -56,6 +56,18 @@ reconstruction under equal TOTAL compute; no "cannot cheaply reconstruct" claim
 without a measured budget. Source audit of all generators and region operations
 comes before L3 language. Prototype evidence stays separate from core integration.
 
+## Executed bounded successor (2026-10-07)
+
+OBJECT_REPORT.md records an isolated prototype: experience-created executable
+compositions become tokens read by later constructor search. Two methods and revision
+pass heldout/erase/facts retention diagnostics; learned library97 total candidate
+checks vs fresh155. Flat expanded executable library ties exactly97. Affine rival
+matches correctness; irrelevant prior harms search; prereg 'misleading' prior is
+actually useful and therefore does not establish true negative-transfer recovery.
+N2 and causal constructor leverage only in bounded prototype; NOT experience-owned
+search/organization policy, core integration, nested-space necessity or L3 invention.
+Next test must confront those gaps, not advertise macro reuse as the full goal.
+
 Acceptance for this wave: prereg-only commit before driver, pure-Zag science, fresh
 compile-gated repeat3, raw outputs and hashes, facts/reference integrity diagnostics,
 clear negative/tie reporting and frozen source unchanged. Local private worktree only;

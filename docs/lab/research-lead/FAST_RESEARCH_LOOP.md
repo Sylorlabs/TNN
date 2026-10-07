@@ -32,9 +32,15 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
    candidate paths and work; licensing-fact removal changes results. Existing frozen
    proposal scans facts, not region structure. N0 representation only; no learned
    organization or invention. Next prereg experience-written organization read by a
-   generic constructor, two distinct acquired methods with same source, equal-total-
-   compute flat/enumerative rivals, causal region/method ablations, irrelevant and
-   misleading prior, drift and unrelated retention. No researcher folder modes.
+   generic constructor: OBJECT_REPORT.md now EXECUTED bounded prototype, NOT core.
+   Two methods acquired same source,192/192 heldout; causal prior-object reuse97
+   candidate tests including training vs fresh155, erased165; FLAT exact tie97.
+   Revised8/8, stale0, unrelatedD8/8; two encodings. Irrelevant prior hurts742tests;
+   prereg 'misleading' prior actually useful110tests, genuine conflict untested.
+   Affine rival ties accuracy; source enumeration/form grammar still researcher-owned.
+   Next consequence-sensitive proposal organization with matched flat cost/frequency
+   controls, true conflicting prior, nonaffine laws and self-chosen applicability.
+   No researcher folder modes; no L3 or autonomous organization claim.
 1. **Frozen core identifiable acquisition and executable readout:** ownership and
    reachability controls EXECUTED (OWNERSHIP_REPORT.md, REACHABILITY_REPORT.md).
    ISA transfers handbuilt INC methods; learned chain is literal, and API misses new
