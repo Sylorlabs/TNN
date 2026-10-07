@@ -80,6 +80,33 @@ compile failed; a stale build once had me analysing a program that did not exist
 | `rewrite-of-rewrite` | 2nd-order structural transforms (H10, never built) |
 | `metagen` | generative state that changes the *generator's* own parameters |
 
+### NEXT-WAVE (ranked, 2026-10-06) — do not rank by expected positivity
+
+Rank = info gain × ownership relevance × falsifiability ÷ cost. One line each. Existing rows above are unchanged.
+
+| rank | id | tests | cheap falsifier | why not a killed mechanism in new clothes |
+|---|---|---|---|---|
+| 1 | `gate-possibility` | whether any learner-updated cell appears in a predicate that *excludes* candidates (changes the reachable set, not cost) | candidate-set(gated)==candidate-set(ungated) on a world with ≥1 illegal continuation | `corpus-no-gating` is open debt. Pair-cache only cheapens SEEN bigrams; H-GRAPH/H-LEARNED-TOPO changed layout not possibility; lifejoin scored a definition |
+| 2 | `count-rule-own` | whether any learner-updated state that is *not* a pair table can cheapen a count/parity continuation (g67nb successor) | EXP=FRE never at 200 on the g67nb world for every non-pair carrier | pair-cache-nonlocal killed *n-gram* cheapening of a count rule, not every carrier. Not Cond 3 (not claiming facts==distilled). Not method-menu (no finder slot) |
+| 3 | `join-underdet` | join of stored A,B where ≥2 source formulas fit train and disagree on held-out D (D not algebraically fixed) | LEARN equals any named formula on held-out, or LEARN≤fresh | lifejoin-definition scored ST[x-8]+ST[x-4] against itself. H-COMPOSE-HINTLESS was hintless XOR (commutes). Here a combine step exists; who owns *which* combine |
+| 4 | `holdout-uncacheable` | LEARN>FACTS on held-out items FACTS cannot store by construction | LEARN≤FACTS or wipe-store leaves LEARN intact | Cond 3 asked distilled==facts on the *same* queries. fact-cache-metalearn measured speedup with the answers already stored. This world forbids the cache hit |
+| 5 | `query-construct` | learner emits a bit-string the world answers; no ASK_0..ASK_N menu | emitted strings ⊆ a researcher list of size ≤8 AND policy ≤ greedy-info on that list | P7-inq VOID'd a slot menu that contained the optimum. This requires a constructed query the world interprets |
+| 6 | `rule-no-store` | acquired mapping applied to x' never stored, store wiped at test | wiped==fresh or wiped==facts-restored | fact-cache-metalearn and assoc-substrate kept a lookup. P5-meta5b is a competing fork; this is the wipe-at-test cut, not a new prior carrier |
+| 7 | `alpha-extend` | learner mints a symbol absent from the source op set and uses it in a held-out win | \|Σ\| unchanged after training, or new symbol never appears in a win | pair-cache reweights existing symbols. H-LEARNED-TOPO grew edges that duplicated stored facts, not new symbols. fixed-alphabet is open debt |
+| 8 | `space-writer` | whether any structural writer can read learner state (attack the 0/576 bound) without becoming a mode switch | re-audit still 0/N, or the read is a compile-time constant | audit-bound is a static fact, not a killed cognitive mechanism. Not PLAN/CAUSAL/REPRESENTATION_MODE — the probe is a data dependence, not a labeled arm |
+| 9 | `open-prod-reject` | induced constraint rejects illegal unseen *and* accepts legal unseen when the production space is *not* source-enumerated | illegal-accept ≥ legal-accept, or rename collapses the split | P6-uniq killed uniqueness+depth in a 3-NT/2-rule encoding. P6-rich residue is menu-select over NPROD=294. This bans the enumerated menu |
+| 10 | `depth-gen` | same productions, train max-depth 2, test depth 3; no uniqueness demand | depth3=0/N and a depth2-memorizer matches LEARN | P6-uniq said uniqueness+depth cannot hold *jointly*. This tests depth generalization of the surviving first-symbol-cut residue only |
+| 11 | `program-lossy` | acquired object P is runnable; delete P kills held-out; delete facts does not | del-P==full or del-facts < del-P | assoc-no-mapping: MACH was deletable with no loss because the world was a fact store. This world must be inexpressible as lookup |
+| 12 | `pred-gate` | executable predicate P(context) must hold to apply a rewrite (gate, not rank) | ablate-P==full, or P ≡ (pos==p) | pos-blind-rewrite keyed on op-pair only. Queued `learned-predicate` is a ranking context source. This is exclusion, same cut as `gate-possibility` on rewrites |
+| 13 | `do-choose` | learner picks which variable to intervene; must beat random-do and observational-only | chosen var ~ uniform, or LEARN==obs | causal2 world is clean, slot empty. H-GRAPH killed topology-as-substrate not intervention choice. No CAUSAL_MODE label |
+| 14 | `trust-transfer` | contradiction revises a source weight that then applies to a *third* unseen source | third-source weight == recency or == ignore | prov VOID'd researcher-owned trust arms. Not H-IDENT (not node IDs). Transfer to an unseen source is the ownership cut |
+| 15 | `rep-dual` | learner-built R wins both SEQ and PAIR; body has no family-id branch | BOTH_WIN=0 or body branches on family-id | repown VOID'd *source-chosen* fixed reps (SEQ-REP vs PAIR-REP). Dual-win by a hidden switch was already named a kill; this forbids the switch |
+| 16 | `rebuild-remain` | after 50% pair invalidation, remaining evidence restores the cheap path | post == decrement-only baseline | bigram-revision killed decrement-with-no-replenish. The unfalsified complement is an active rebuild, not a bigger n-gram |
+| 17 | `partial-obs-prior` | meta-prior under OBS ⊊ answer-set so relevant ≠ irrelevant ≠ misleading | three priors tie on examples-to-criterion | all-prior-carriers closed P5 in a full-info substrate (OBS copied the answers). full-info-acquisition is the named debt. Not a new population carrier |
+| 18 | `hidden-signal` | target hidden; learner gets a parity-of-misses bit, not the answer | LEARN==chance | proposal-ranking killed scaling-N when the target was observable (→search) or fully hidden (→no signal). Partial non-answer signal is the untested middle |
+| 19 | `lineage-prior` | cap clones/gen to 1 so independent lineages survive; structured prior vs noise prior | still prior==fresh | clone-dominance made "prior changes acquisition" unfalsifiable (12/24 cloned). Changing the dynamics is not rerunning 5e. Not all-prior-carriers without that change |
+| 20 | `alias-write` | aliasing/global path lets a structural writer depend on learner memory (audit's declared blind spot) | runtime answers invariant to scrambling the aliased cell | audit-bound cannot see aliasing. Not H-IDENT, not a topology carrier — it is a dependence probe on the 0/576 claim |
+
 ---
 
 ## BLOCKED
@@ -111,6 +138,8 @@ BLOCKED items do **not** gate anything above.
 | `assoc-substrate-metalearn` | p5meta4: asking learning-to-learn of a lookup+scaffold substrate | meta-learning on any substrate that can REPRESENT a mapping | acquisition was measured on queries the fact store could answer; on never-seen queries the prior went 3.00 -> 60.00 (never) |
 | `router-selection` | `count16` SIG_B bucket router | query-conditional mechanisms generally | feature WAS the answer; researcher-authored router |
 | `stochastic-outcome-additive` | additive support over chain elements | non-additive support | self-composition `(s,s)` scores `2s` |
+| `pair-cache-nonlocal` (g67nb) | n-gram / pair-count state cheapening a count or parity continuation | other carriers that are not pair tables; cheapening of *seen adjacent* bigrams (`gen-bias-L2` residue) | pair table cannot store a non-adjacent count; EXP=FAC=FRE never at 200, oracle cost 1 |
+| `lifejoin-definition` (lifejoinatk) | scoring ST[x-8]+ST[x-4] against D as lifetime/join learning | a join whose D answers are not algebraically fixed by the stored parts + a source formula | formula+train derives every D answer 4/4; lookup is live but the score is a definition against itself. Ceiling L1 |
 
 ---
 
@@ -118,7 +147,7 @@ BLOCKED items do **not** gate anything above.
 
 | id | claim | boundary |
 |---|---|---|
-| `gen-bias-L2` | learner state changes **proposal generation**; experienced cost 8 vs fresh never | **bounded L2 n-gram reweight.** Not transfer, not revision, not method, not Cond 3 distillation. g67atk: facts-only table == A (cost 8) so "distilled object" is a fact cache of pair counts. Alphabet+1 survived (A=3, B never at 200). Ablate tables -> uniform never. Source menu is 110 researcher slots |
+| `gen-bias-L2` | experienced makes a *seen* sequence cheap vs fresh-uniform | **L2 pair-count cache, near-tautological.** Cond 3 dead (facts-only == A). g67nb: a cheap continuation that is a COUNT rule (not an adjacent pair) yields EXP=FAC=FRE never at 200; oracle cost 1. Pair cache cannot cheapen what it cannot store. Not transfer, not revision, not method, not distillation, not non-local structure |
 | `gen-bias-perm` | that result survives identifier permutation | A=8 vs H=6; broken-perm control correctly detected |
 | `audit-bound` | **0/576** structural writers read learner state (cold clone; was 574 on an older tree) | static analysis, type-aware; cannot see aliasing/global effects |
 | `p6-rich-L2` | induced productions = truth grammar on 22-string language; held-out 8/8 vs mem 0/8; recursion necessary | **L2.** Production space enumerated in source (NPROD=294). Not method ownership. Not yet attacked by rename or depth-shift |
@@ -132,7 +161,7 @@ BLOCKED items do **not** gate anything above.
 
 | id | why |
 |---|---|
-| `gen-bias-L2` | **REPRODUCED** then **NARROWED** (g67rep + g67atk): A=8 vs B never stands; Cond 3 (C never / distilled != facts) **KILLED** -- F1 table == A. Alphabet+1 and seed/order survived. Still single author | next: does the pair-count cache survive a world whose cheap sequence is not a stored bigram |
+| `gen-bias-L2` | **REPRODUCED then NARROWED then BOUNDED.** A=8 vs B never stands for *seen bigram sequences*. Cond 3 killed. g67nb: count-rule world, EXP=FAC=FRE never, oracle 1. The residue is "counting (prev,next) makes regenerating that pair cheaper than uniform" | still single author; residue is near-tautological |
 | `phase10-perm` | 8× ratio vs 1.5× tolerance — **not** a clean pass (draw hash not permuted) |
 | `internal-adversary` | blind scorer / mutation adversary / cold-checkout reproduction — **not yet run** on phase 6 or 10 |
 
