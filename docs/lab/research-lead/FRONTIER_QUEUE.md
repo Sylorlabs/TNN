@@ -118,7 +118,7 @@ BLOCKED items do **not** gate anything above.
 
 | id | claim | boundary |
 |---|---|---|
-| `gen-bias-L2` | learner state changes **proposal generation**; experienced cost 8 vs fresh >4000; distilled state beats re-deriving from identical facts | **bounded L2.** Not transfer, not revision, not method ownership. State is n-gram statistics over a fixed alphabet. |
+| `gen-bias-L2` | learner state changes **proposal generation**; experienced cost 8 vs fresh never | **bounded L2 n-gram reweight.** Not transfer, not revision, not method, not Cond 3 distillation. g67atk: facts-only table == A (cost 8) so "distilled object" is a fact cache of pair counts. Alphabet+1 survived (A=3, B never at 200). Ablate tables -> uniform never. Source menu is 110 researcher slots |
 | `gen-bias-perm` | that result survives identifier permutation | A=8 vs H=6; broken-perm control correctly detected |
 | `audit-bound` | **0/576** structural writers read learner state (cold clone; was 574 on an older tree) | static analysis, type-aware; cannot see aliasing/global effects |
 | `p6-rich-L2` | induced productions = truth grammar on 22-string language; held-out 8/8 vs mem 0/8; recursion necessary | **L2.** Production space enumerated in source (NPROD=294). Not method ownership. Not yet attacked by rename or depth-shift |
@@ -132,7 +132,7 @@ BLOCKED items do **not** gate anything above.
 
 | id | why |
 |---|---|
-| `gen-bias-L2` | **REPRODUCED from committed source** (lane/g67rep bb4f270f4): A=8 vs B never, C never, no transfer, revision 0/20, iso H=6, broken-perm fires, generator byte-identical. REPORT cycle text says x+3; code is 3x mod 10 -- does not kill | still single author; next: facts-only reconstruction and alphabet-extension |
+| `gen-bias-L2` | **REPRODUCED** then **NARROWED** (g67rep + g67atk): A=8 vs B never stands; Cond 3 (C never / distilled != facts) **KILLED** -- F1 table == A. Alphabet+1 and seed/order survived. Still single author | next: does the pair-count cache survive a world whose cheap sequence is not a stored bigram |
 | `phase10-perm` | 8× ratio vs 1.5× tolerance — **not** a clean pass (draw hash not permuted) |
 | `internal-adversary` | blind scorer / mutation adversary / cold-checkout reproduction — **not yet run** on phase 6 or 10 |
 
