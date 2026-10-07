@@ -26,11 +26,12 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
 
 ## Next forks ranked by architectural information
 
-1. **Frozen core transferable-method reachability:** initial ownership ablations are
-   EXECUTED (OWNERSHIP_REPORT.md). Cached readout is fact-carried; chain programs
-   are literalized. Next prove generic frame-bound methods reachable by source
-   proposal machinery, then use distinguishing evidence to identify a relation law.
-   Compare intact, facts-retained/method-erased and flat join at equal information.
+1. **Frozen core identifiable acquisition and executable readout:** ownership and
+   reachability controls EXECUTED (OWNERSHIP_REPORT.md, REACHABILITY_REPORT.md).
+   ISA transfers handbuilt INC methods; learned chain is literal, and API misses new
+   input even with hand-promoted generic graph. Next prereg an identifiable two-law
+   curriculum, generic frame-bound proposal and actual executable method indexing.
+   Compare facts-retained/method-erased and flat statistic at equal information.
    Do not expect an unidentifiable query label to magically acquire semantics.
 2. **Outside-convention trap:** heldout third-token condition changes order beyond
    {LTR,RTL}. Preregister expected inability, candidate representability and abstention;
