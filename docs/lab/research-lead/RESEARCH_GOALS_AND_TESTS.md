@@ -51,6 +51,20 @@ applicability contracts are not automatically immutable human safety boundaries.
 No percentage toward AGI; no transformer superiority without matched comparison.
 L3 is a project criterion, not an AGI certificate.
 
+## 1a. Nested adaptive workspace clarification (2026-10-07)
+
+The user proposes nested, overlapping organizations with porous boundaries: a
+persistent computational world, not intelligence trapped in a fixed graph traversal
+or cognitive module pipeline. This is a hypothesis to test, not a required ontology.
+See [scope and claim gates](NESTED_WORKSPACE_SCOPE.md): representability, causal use,
+experience acquisition, generative leverage, lifetime revision and human control.
+Hand-built folders and retained-state engineering do not count as learned cognition.
+Complete-form menus must be distinguished from small generic computational syntax;
+fixed primitives alone neither prove nor disprove invention. No TNN/LLM parity or
+inability claim without matched evidence. The first direct baseline is
+[region assay](overnight-20260928/fast_core_20261006/REGION_REPORT.md); existing
+GROUP/MEM nesting is inert to tested proposal construction, not a hypothesis refutation.
+
 ## 2. Current evidence and uncertainty
 
 | Goal | Evidence status | Principal gap |

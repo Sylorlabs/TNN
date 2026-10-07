@@ -26,6 +26,15 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
 
 ## Next forks ranked by architectural information
 
+0. **User-directed nested adaptive workspace:** [scope gates](NESTED_WORKSPACE_SCOPE.md).
+   REGION_REPORT.md EXECUTED42 trials, two renames, seven organization arms, three
+   feedback modes. Nested/flat/overlap/rewired/erased/irrelevant topology: identical
+   candidate paths and work; licensing-fact removal changes results. Existing frozen
+   proposal scans facts, not region structure. N0 representation only; no learned
+   organization or invention. Next prereg experience-written organization read by a
+   generic constructor, two distinct acquired methods with same source, equal-total-
+   compute flat/enumerative rivals, causal region/method ablations, irrelevant and
+   misleading prior, drift and unrelated retention. No researcher folder modes.
 1. **Frozen core identifiable acquisition and executable readout:** ownership and
    reachability controls EXECUTED (OWNERSHIP_REPORT.md, REACHABILITY_REPORT.md).
    ISA transfers handbuilt INC methods; learned chain is literal, and API misses new
