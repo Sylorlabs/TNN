@@ -18,7 +18,7 @@ assumption; generic primitives permitted. No AGI/L3 promotion from toy success.
 |fast_iteration_20261006|Chart scorer0 mismatches/8160 queries. Isolated histories work. Known-reject guard blocks useful growth and fails on unknown forbidden6. Method microlearner120/120, affine rival ties; source156 complete forms enumerable.|
 |fast_action_20261006|Actual learned actuation8/8, prediction+search ties. Endpoint-only allows illegal intermediate6; step guard blocks. Revocation guarded on4 paths x2 renames; capacity-limited recovery correctly abstains.|
 |fast_protocol_20261006|Learned meanings162/162, flat rival ties. Supplied composition90/162 under alternate convention. Evidence-selected order972/972 novel triples, simple rival ties; fixed two-convention menu.|
-|fast_core_20261006|Unchanged frozen TNN-2 engine's expected input causally selects first answer31/32. No-feedback unmasked abstains; masked picks first route. Unknown relation underdetermined, not an autonomous-competence verdict.|
+|fast_core_20261006|Unchanged frozen TNN-2 engine's expected input causally selects first answer31/32. Ownership successor: cached response survives MAP+instruction deletion, fails when answerfact erased; stored literal graph rejects new subject, masked search reconstructs. Unknown relation underdetermined, not an autonomous-competence verdict.|
 
 All final scripts compile gates execution, check output nonempty and repeat3; source
 hashes and raw logs saved. Original learner sources and historical reports unchanged.
@@ -26,11 +26,12 @@ See per-directory REPORT.md for scope, prereg commit and exact metrics.
 
 ## Next forks ranked by architectural information
 
-1. **Frozen core ownership precondition:** inspect MAP representation and frame binding;
-   construct an identifiable relation where one acquired graph executes on uncached
-   inputs with expected-2. Compare intact, facts-retained/MAP-erased, fact-only,
-   equal-search and flat relation composition. If graph stores original input identity,
-   report that limit before modifying core. No claim novel query labels mean answers.
+1. **Frozen core transferable-method reachability:** initial ownership ablations are
+   EXECUTED (OWNERSHIP_REPORT.md). Cached readout is fact-carried; chain programs
+   are literalized. Next prove generic frame-bound methods reachable by source
+   proposal machinery, then use distinguishing evidence to identify a relation law.
+   Compare intact, facts-retained/method-erased and flat join at equal information.
+   Do not expect an unidentifiable query label to magically acquire semantics.
 2. **Outside-convention trap:** heldout third-token condition changes order beyond
    {LTR,RTL}. Preregister expected inability, candidate representability and abstention;
    don't patch source and call it experience-only. Then decide generic form expansion.

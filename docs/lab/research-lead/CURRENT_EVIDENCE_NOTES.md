@@ -85,6 +85,13 @@ The query relation is deliberately underdetermined, so this is an information-fl
 result, not a failure to infer knowable semantics. Latest production equivalence is
 unestablished. Historical source/report comments remain intact; this is a dated correction.
 
+[Core ownership ablations](overnight-20260928/fast_core_20261006/OWNERSHIP_REPORT.md)
+now show cached response31 survives deleting MAP and all executable cells, while
+answerfact deletion produces an unmasked miss despite graph retention. Direct stored
+chain execution rejects a new subject due to literal guards. These are causal results
+for the frozen reference fixture, not a universal graph or current-production verdict.
+Masked heldout search reconstructs a new graph; do not call it method transfer.
+
 ## General evidence ceiling
 
 Latest queue still lists measure-tnn and human external-red-team as blocked. Harness
