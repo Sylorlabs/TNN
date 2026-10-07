@@ -3,7 +3,8 @@
 Date2026-10-07. Prereg6220d44f0. Generic object arena prototype (add1/double
 primitives, binary composition, shortest-first enumeration,4096 cap). NOT frozen-core
 integration. Two renames (primitive codes swapped, arena IDs shifted) give identical
-numbers; all bars passed, instrumentation_unexpected0.
+test/effect/correctness counts; node IDs differ by design. All bars passed,
+instrumentation_unexpected0.
 
 ## T-A True negative transfer (order conflict)
 

@@ -20,7 +20,8 @@ unestablished, so no production-equivalence claim anywhere in this wave.
    claim. Snapshot isolation is not an undo journal or production repair.
 
 3. **Hand-built nesting is representable but inert** (REGION_REPORT.md).
-   42 trials x seven GROUP/MEM topologies: identical candidate paths and work.
+   42 trials total (2 renames x 7 topologies x 3 feedback modes) over seven
+   GROUP/MEM topologies: identical candidate paths and work.
    Licensing-fact lesion changes results, so the assay is sensitive. The existing
    frozen proposal path scans FACTs, not region structure. N0 capacity only;
    N1 causal region use is absent in this fixture.
