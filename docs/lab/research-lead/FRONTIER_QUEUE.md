@@ -2,6 +2,13 @@
 
 Autonomous control loop. **This file, not the conversation, is the state.**
 
+**Fast adversarial addendum (2026-10-06, isolated branch; not a completed main-lane
+repair):** see [current interpretation corrections](CURRENT_EVIDENCE_NOTES.md)
+and [goals and hypothesis/test plan](RESEARCH_GOALS_AND_TESTS.md). Historical
+reports and frozen preregs are preserved. P6's original fixture reproduces, but
+its matcher fails rule-order invariance on overlapping alternatives; general
+induction verdicts require scorer qualification first.
+
 ```
 experiment -> commit -> update this file -> pop next CURRENT -> experiment
 ```
@@ -23,7 +30,7 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 > **NOTE ON P5-meta**: CLOSED as *not established in this substrate*, not
 > refuted. Nine defects, all one shape -- the intended intervention never
 > reached the mechanism under test. Two permanent instruments were built
-> because of it (`arm_audit.py`, `noop_change_detector.py`), and both
+> because of it (now `tools/lab/arm_audit.zag` and `tools/lab/noop_detect.zag`), and both
 > earned their place within one phase. Reopening requires the
 > `substrate-spec` preconditions, not another experiment on this
 > substrate.
@@ -31,9 +38,10 @@ Ranking = ARCHITECTURAL INFORMATION GAIN × POSSIBILITY OF FALSIFICATION
 
 | id | item | falsifier | status |
 |---|---|---|---|
-| `P6-struct` | **PROMOTED (was queued).** Structural induction in the production representation class, so forward generation and backward membership read ONE table. Substrate precondition passed in pure Zag: `A0->A1 4 \| A1->3 3 \| A2->A0 5` serves both directions (forward lens 3/2/4; exactly 3 of 340 strings derivable), checked against hand-derived arithmetic. Precondition establishes the representation CAN express a solution; whether an inducer can FIND one is the experiment | induced grammar must serve both directions from one table, and must survive symbol renaming; must NOT be reachable by the degenerate always-consult-everything policy (`ZD2-PASS-DEGENERATE-POLICY`) | RUNNING |
-| `P5-meta5f` | **SHORT ACQUISITION.** 5e showed acquisition is INSENSITIVE to its starting population over 300 trials. Cut trials to ~15 so the initial condition still matters. If the prior is inert at 300 and active at 15, the blocker is search horizon, not meta-learning | prior must be inert at 300 AND active at short horizon | QUEUED |
-| `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta. **Condition (a) now has a working, pure-Zag implementation** (`p6struct/precond.zag`); condition (b) still unmet | — | PARTIAL |
+| `P6-scorer-qualification` | **FAST AUDIT: REPAIR NEEDED.** Existing matcher rejects valid strings and changes any-NT acceptance under alternative ordering. Preserve original fixture; add designated-root, overlapping-alternative, rename and true-recursion tests. See `fast_membership_order/REPORT.md` and current notes | root accepts exactly 2 and any-NT exactly 3 for the adversarial fixture, independent of order; independent bounded recursive oracle | OPEN (blocks general scorer claims) |
+| `P6-struct` | **PROMOTED (was queued); original-fixture precondition only, general matcher qualification OPEN.** Structural induction in the production representation class, so forward generation and backward membership read ONE table. Substrate precondition passed in pure Zag: `A0->A1 4 \| A1->3 3 \| A2->A0 5` serves both directions (forward lens 3/2/4; exactly 3 of 340 strings derivable), checked against hand-derived arithmetic. Precondition establishes the representation CAN express a solution; whether an inducer can FIND one is the experiment | induced grammar must serve both directions from one table, and must survive symbol renaming; must NOT be reachable by the degenerate always-consult-everything policy (`ZD2-PASS-DEGENERATE-POLICY`) | RUNNING |
+| `P5-meta5f` | **ALREADY INVESTIGATED, not an unrun queue item.** The debt section records neutrality over 8..300 plus short-horizon saturation and an initial parameter-propagation bug. No meta-learning established. A successor needs a non-saturated identifiable world and verified prior carrier | frozen paired acquisition experiment with actual horizon and state fingerprints | CLOSED HERE; successor requires new prereg |
+| `substrate-spec` | not an experiment: a SPEC for a substrate where (a) a harness assertion proves solutions are reachable BEFORE any result is read, and (b) the prior's carrier provably survives acquisition. Both are preconditions, not tuning. This is what would reopen P5-meta. **Condition (a) has a reproduced narrow fixture** (`p6struct/precond.zag`), not a qualified general grammar scorer; see fast audit. Condition (b) still unmet | — | PARTIAL |
 | `noop-detector-rollout` | **DONE.** swept every run.txt on this lane. Self-comparisons all NO-OP (detector correct). `bounded_pin` run{1,2,3}v2 byte-identical to originals -- INVESTIGATED AND CORRECT: PREREG_V2 re-executes the same frozen binary against corrected bars, so identical output is the expected result, not a no-op regression. No genuine regressions found. | — | CLOSED |
 | `P5-meta5b` | (competing fork, parallel branch) require the learner to apply a learned RULE to never-stored inputs; the rule is the acquired object | rule must beat fresh on unseen inputs without any fact store | QUEUED → separate branch |
 | `P6-formal` | resolve `ZD2-PASS-DEGENERATE-POLICY`; does learned formal structure constrain generation? | learned grammar must reject invalid unseen structures AND accept valid unseen ones; survive symbol renaming | QUEUED (next) |
